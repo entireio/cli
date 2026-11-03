@@ -105,6 +105,9 @@ func newTrailCIPullRequestCmd(mode *trailMode) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if selected.Host == nativeCloneForge {
+				return fmt.Errorf("ci-pr only applies to GitHub-backed trails; %s is on an Entire-native repository", selected.description())
+			}
 			var out api.TrailCIPullRequestResponse
 			if err := postTrailChangeAction(cmd.Context(), selected, "/ci-pr", "create CI pull request", &out); err != nil {
 				return err
@@ -137,7 +140,8 @@ func newTrailRerunReviewCmd(mode *trailMode) *cobra.Command {
 		Long: "Review a trail's current head again: the project's review agents start as a push starts them, and " +
 			"the repository's own configured reviewers re-run. Runs that already cover the head are kept rather than " +
 			"repeated. --agent <id> runs one project agent instead ('entire project agent list' names them). " +
-			"Runs spend the project's agent budget. Follow the results with 'entire trail finding'.\n\n" +
+			"Runs spend the project's agent budget. Follow the results with 'entire trail finding'. " +
+			"--json prints {\"launched\": n} for a review, or the started run with --agent.\n\n" +
 			trailWorkingSelectorHelp(mode, "reviews"),
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {

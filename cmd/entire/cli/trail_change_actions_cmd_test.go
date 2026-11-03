@@ -233,3 +233,14 @@ func TestTrailChangeAction_LegacyContextCarriesTheRepoID(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{"POST /ci-pr"}, requests)
 }
+
+func TestTrailCIPullRequest_RefusesAnEntireNativeRepoWithoutCallingTheServer(t *testing.T) {
+	// Serial: replaces global clients.
+	requests, _, err := runTrailChangeAction(t, false, "et/acme/widget", []string{"ci-pr", "{trail}"}, api.TrailResource{},
+		func(w http.ResponseWriter, r *http.Request) {
+			t.Errorf("unexpected action request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		})
+	require.ErrorContains(t, err, "ci-pr only applies to GitHub-backed trails")
+	assert.Empty(t, requests)
+}

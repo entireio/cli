@@ -17,7 +17,7 @@ import (
 // does not, so the change's detail is read for them. The agents are a view
 // beside the findings: a failed read warns and leaves them out.
 func fetchTrailChangeAgents(ctx context.Context, errW io.Writer, client *api.Client, work api.TrailResource) json.RawMessage {
-	if !trailAgentsAbsent(work.Agents) {
+	if !api.RawJSONAbsent(work.Agents) {
 		return work.Agents
 	}
 	if work.ID == "" {
@@ -36,15 +36,10 @@ func fetchTrailChangeAgents(ctx context.Context, errW io.Writer, client *api.Cli
 		fmt.Fprintf(errW, "Warning: could not read the change's agents: %s\n", tuiutil.SanitizeTerminalText(err.Error()))
 		return nil
 	}
-	if trailAgentsAbsent(detail.Agents) {
+	if api.RawJSONAbsent(detail.Agents) {
 		return nil
 	}
 	return detail.Agents
-}
-
-// trailAgentsAbsent reports agents a read did not carry: missing or null.
-func trailAgentsAbsent(raw json.RawMessage) bool {
-	return len(raw) == 0 || string(raw) == "null"
 }
 
 // trailAgentWaiting says why an agent has not run on the change yet.
@@ -58,7 +53,7 @@ var trailAgentWaiting = map[string]string{
 // reading and run, or what it waits for. Nothing is printed when the read did
 // not carry them.
 func printTrailChangeAgents(w io.Writer, raw json.RawMessage) error {
-	if trailAgentsAbsent(raw) {
+	if api.RawJSONAbsent(raw) {
 		return nil
 	}
 	agents, err := (&api.TrailResource{Agents: raw}).DecodeAgents()

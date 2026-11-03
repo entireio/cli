@@ -45,7 +45,7 @@ type TrailAgentRun struct {
 // DecodeAgents decodes the detail resource's agents; nil when the read did
 // not carry them.
 func (r *TrailResource) DecodeAgents() ([]TrailAgent, error) {
-	if rawJSONAbsent(r.Agents) {
+	if RawJSONAbsent(r.Agents) {
 		return nil, nil
 	}
 	var out []TrailAgent

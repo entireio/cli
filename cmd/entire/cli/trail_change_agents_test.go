@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -115,4 +117,22 @@ func TestTrailFindingDashboard_NoAgents(t *testing.T) {
 		require.NoError(t, err, "agents %q", agents)
 		assert.NotContains(t, out, `"agents"`, "agents %q", agents)
 	}
+}
+
+func TestTrailFindingDashboard_AgentsFailuresKeepTheFindings(t *testing.T) {
+	t.Parallel()
+	// A failed detail read warns and leaves the agents out.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"error":"boom"}`, http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	var errOut bytes.Buffer
+	agents := fetchTrailChangeAgents(t.Context(), &errOut, api.NewClientWithBaseURL("token", srv.URL), api.TrailResource{ID: projectTrailTestChange})
+	assert.Nil(t, agents)
+	assert.Contains(t, errOut.String(), "Warning: could not read the change's agents")
+
+	// Agents that are not a list say so instead of failing the dashboard.
+	var out bytes.Buffer
+	require.NoError(t, printTrailChangeAgents(&out, json.RawMessage(`{"not":"a list"}`)))
+	assert.Contains(t, out.String(), "Agents: unreadable")
 }

@@ -75,7 +75,7 @@ type TrailBodyDocument struct {
 // DecodeMergeability decodes the detail resource's mergeability snapshot. It
 // returns nil, nil when the snapshot is absent or null.
 func (r *TrailResource) DecodeMergeability() (*TrailMergeability, error) {
-	if rawJSONAbsent(r.Mergeability) {
+	if RawJSONAbsent(r.Mergeability) {
 		return nil, nil //nolint:nilnil // nil, nil means "no snapshot served"
 	}
 	var m TrailMergeability
@@ -85,9 +85,9 @@ func (r *TrailResource) DecodeMergeability() (*TrailMergeability, error) {
 	return &m, nil
 }
 
-// rawJSONAbsent reports a detail-only field the read did not carry: missing
+// RawJSONAbsent reports a detail-only field the read did not carry: missing
 // or null.
-func rawJSONAbsent(raw json.RawMessage) bool {
+func RawJSONAbsent(raw json.RawMessage) bool {
 	return len(raw) == 0 || string(raw) == "null"
 }
 
@@ -205,7 +205,7 @@ func (a *TrailApproval) UnmarshalJSON(data []byte) error {
 	if wire.Body != nil {
 		a.Body = *wire.Body
 	}
-	if rawJSONAbsent(wire.Author) {
+	if RawJSONAbsent(wire.Author) {
 		return nil
 	}
 	if err := json.Unmarshal(wire.Author, &a.Author); err == nil {
