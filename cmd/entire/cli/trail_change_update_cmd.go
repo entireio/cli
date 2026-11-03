@@ -49,6 +49,8 @@ not every repository on the trail. The branch work must be open.`),
 				return nil
 			case ready && !*updated.ReadyForReview:
 				return errTrailNotMarkedReady
+			case !ready && *updated.ReadyForReview:
+				return fmt.Errorf("the server accepted the request but %s is still ready for review", selected.description())
 			case ready:
 				fmt.Fprintf(cmd.OutOrStdout(), "Marked %s ready for review\n", selected.description())
 			default:

@@ -89,6 +89,14 @@ func TestTrailReady_FailsWhenTheServerDoesNotRecordReadiness(t *testing.T) {
 	_, out, err := runTrailChangeUpdate(t, true, []string{"ready"}, notTracked)
 	require.ErrorIs(t, err, errTrailNotMarkedReady)
 	assert.Empty(t, out, "must not claim success")
+
+	stillReady := func(map[string]any) api.TrailResource {
+		ready := true
+		return api.TrailResource{Number: 7, Branch: "feature/work", ReadyForReview: &ready}
+	}
+	_, out, err = runTrailChangeUpdate(t, true, []string{"ready", "--undo"}, stillReady)
+	require.ErrorContains(t, err, "is still ready for review")
+	assert.Empty(t, out, "must not claim a return to draft")
 }
 
 func TestTrailReady_DoesNotClaimSuccessWhenTheServerOmitsReadiness(t *testing.T) {
