@@ -20,12 +20,12 @@ import (
 
 const trailAttachmentTestID = "01ARZ3NDEKTSV4RRFFQ69G5ATT"
 
-// writeTestPNG writes a w×h PNG named name into a temp dir and returns its path.
-func writeTestPNG(t *testing.T, name string, w, h int) string {
+// writeTestPNG writes a 3×2 PNG named shot.png into a temp dir and returns its path.
+func writeTestPNG(t *testing.T) string {
 	t.Helper()
 	var buf bytes.Buffer
-	require.NoError(t, png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, w, h))))
-	path := filepath.Join(t.TempDir(), name)
+	require.NoError(t, png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 3, 2))))
+	path := filepath.Join(t.TempDir(), "shot.png")
 	require.NoError(t, os.WriteFile(path, buf.Bytes(), 0o600))
 	return path
 }
@@ -109,7 +109,7 @@ func trailAttachmentArgs(args ...string) []string {
 func TestTrailAttachmentAdd_UploadsAndPrintsTheReference(t *testing.T) {
 	// Serial: replaces global clients.
 	s := serveTrailAttachments(t, nil)
-	path := writeTestPNG(t, "shot.png", 3, 2)
+	path := writeTestPNG(t)
 	want, err := os.ReadFile(path)
 	require.NoError(t, err)
 
@@ -201,7 +201,7 @@ func TestTrailAttachmentRemove(t *testing.T) {
 
 func TestTrailAttachmentAdd_RemovesTheRegisteredAttachmentWhenTheUploadFails(t *testing.T) {
 	// Serial: replaces global clients.
-	path := writeTestPNG(t, "shot.png", 3, 2)
+	path := writeTestPNG(t)
 	for name, setup := range map[string]func(*trailAttachmentTestServer){
 		"storage refuses": func(s *trailAttachmentTestServer) { s.storageStatus = http.StatusForbidden },
 	} {
@@ -219,14 +219,14 @@ func TestTrailAttachmentAdd_LeavesTheUploadURLExpiryToStorage(t *testing.T) {
 	// clock is still tried: the clock may run ahead of the server's.
 	s := serveTrailAttachments(t, nil)
 	s.expiresAt = "2020-01-01T00:00:00Z"
-	_, _, err := executeProjectTrailTest(t, trailAttachmentArgs("add", writeTestPNG(t, "shot.png", 3, 2))...)
+	_, _, err := executeProjectTrailTest(t, trailAttachmentArgs("add", writeTestPNG(t))...)
 	require.NoError(t, err)
 	assert.Contains(t, s.requests, "storage PUT")
 }
 
 func TestTrailAttachmentAdd_AFailedCompletionNeverDeletesAFinishedImage(t *testing.T) {
 	// Serial: replaces global clients.
-	path := writeTestPNG(t, "shot.png", 3, 2)
+	path := writeTestPNG(t)
 	ready := map[string]any{"id": trailAttachmentTestID, "filename": "shot.png", "content_type": "image/png", "is_ready": true}
 	notReady := map[string]any{"id": trailAttachmentTestID, "filename": "shot.png", "content_type": "image/png", "is_ready": false}
 
