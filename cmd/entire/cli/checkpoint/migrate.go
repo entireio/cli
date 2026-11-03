@@ -72,12 +72,11 @@ func migrateBranchToRefs(
 	}
 
 	refsStore := newGitRefsStore(repo)
-	authorName, authorEmail := GetGitAuthorFromRepo(repo)
 	queue, err := PushQueueForRepo(ctx, repo)
 	if err != nil {
 		return result, fmt.Errorf("resolve push queue: %w", err)
 	}
-	deleted, err := loadDeletedForRepo(repo)
+	deleted, err := LoadDeletedForRepo(repo)
 	if err != nil {
 		return result, err
 	}
@@ -94,84 +93,30 @@ func migrateBranchToRefs(
 		}
 		result.Total++
 
-		migratedTree, err := migratedCheckpointTree(ctx, repo, cid, cpTreeHash, !dryRun)
-		if err != nil {
-			return fmt.Errorf("normalize checkpoint %s: %w", cid, err)
-		}
-
 		refName, err := RefName(cid)
 		if err != nil {
 			return fmt.Errorf("ref name for checkpoint %s: %w", cid, err)
 		}
 
-		parent, _, err := refsStore.refBase(cid)
-		switch {
-		case err == nil:
-			// parent is the ref tip, or zero when the ref is absent.
-		case errors.Is(err, plumbing.ErrObjectNotFound):
-			parent = plumbing.ZeroHash
-		default:
-			return fmt.Errorf("resolve existing ref for checkpoint %s: %w", cid, err)
-		}
-		alreadyImported := treeInRefHistory(repo, parent, migratedTree)
-
 		if dryRun {
 			// Report only what a real run would newly write; an already-imported
 			// checkpoint is a skip, not a would-migrate. No refs or objects are
 			// enqueued or written on this path.
-			if alreadyImported {
+			_, imported, err := importedTree(ctx, repo, refsStore, cid, cpTreeHash, false)
+			if err != nil {
+				return err
+			}
+			if imported {
 				result.Skipped++
 			} else {
 				result.Migrated = append(result.Migrated, cid)
 			}
 			return nil
 		}
-		if alreadyImported {
-			if err := queue.EnqueueRef(repo, refName); err != nil {
-				return fmt.Errorf("enqueue checkpoint %s for push: %w", cid, err)
-			}
-			result.Skipped++
-			return nil
-		}
 
-		migrated := false
-		if err := updateRef(ctx, repo, refName, func() (plumbing.Hash, plumbing.Hash, error) {
-			// Re-read the parent and idempotency state on every CAS retry so a
-			// migration commit never overwrites a concurrently advanced ref.
-			parent, _, baseErr := refsStore.refBase(cid)
-			expected := parent
-			switch {
-			case baseErr == nil:
-				// parent is the ref tip, or zero when the ref is absent.
-			case errors.Is(baseErr, plumbing.ErrObjectNotFound):
-				// Repair an unreadable ref with an orphan commit, but still CAS
-				// against the actual ref hash so a concurrent repair wins cleanly.
-				ref, refErr := repo.Reference(refName, true)
-				if refErr != nil {
-					return plumbing.ZeroHash, plumbing.ZeroHash,
-						fmt.Errorf("resolve unreadable ref %s: %w", refName, refErr)
-				}
-				expected = ref.Hash()
-				parent = plumbing.ZeroHash
-			default:
-				return plumbing.ZeroHash, plumbing.ZeroHash,
-					fmt.Errorf("resolve existing ref for checkpoint %s: %w", cid, baseErr)
-			}
-			if treeInRefHistory(repo, parent, migratedTree) {
-				migrated = false
-				return parent, expected, nil
-			}
-
-			msg := fmt.Sprintf("Import checkpoint %s (migrated from git-branch)", cid)
-			commitHash, commitErr := CreateCommit(ctx, repo, migratedTree, parent, msg, authorName, authorEmail)
-			if commitErr != nil {
-				return plumbing.ZeroHash, plumbing.ZeroHash,
-					fmt.Errorf("commit checkpoint %s: %w", cid, commitErr)
-			}
-			migrated = true
-			return commitHash, expected, nil
-		}); err != nil {
-			return fmt.Errorf("set ref for checkpoint %s: %w", cid, err)
+		migrated, err := importBranchCheckpoint(ctx, repo, refsStore, cid, cpTreeHash, updateRef, importAdvancingRef)
+		if err != nil {
+			return err
 		}
 
 		// The migration's queued-for-push contract is guaranteed for both new
@@ -190,6 +135,125 @@ func migrateBranchToRefs(
 		return result, fmt.Errorf("walk v1 checkpoints: %w", walkErr)
 	}
 	return result, nil
+}
+
+// importMode says what importBranchCheckpoint does with a ref that already
+// exists when it commits.
+type importMode int
+
+const (
+	// importAdvancingRef commits v1's tree on top of an existing ref. Migration
+	// runs while git-branch is primary, so v1 is the checkpoint's current state.
+	importAdvancingRef importMode = iota
+	// importOnlyIntoAbsentRef leaves an existing ref alone. After the switch the
+	// ref is the checkpoint's current state: one that appears while a copy
+	// runs (another process fetched a teammate's copy, say) can hold sessions
+	// v1 lacks, and laying v1's tree over it would drop them from the tip.
+	importOnlyIntoAbsentRef
+)
+
+// importBranchCheckpoint writes the checkpoint subtree cpTreeHash, taken from
+// the v1 branch, into cid's own ref in the refs layout (see
+// migratedCheckpointTree). An existing ref is never replaced: mode says whether
+// it is advanced or left alone. A ref whose history already holds that tree is
+// left alone too. migrated reports whether an import commit was written. It
+// does not enqueue the ref for push.
+func importBranchCheckpoint(
+	ctx context.Context,
+	repo *git.Repository,
+	refsStore *gitRefsStore,
+	cid id.CheckpointID,
+	cpTreeHash plumbing.Hash,
+	updateRef persistentRefUpdater,
+	mode importMode,
+) (migrated bool, err error) {
+	migratedTree, imported, err := importedTree(ctx, repo, refsStore, cid, cpTreeHash, true)
+	if err != nil {
+		return false, err
+	}
+	if imported {
+		return false, nil
+	}
+	refName, err := RefName(cid)
+	if err != nil {
+		return false, fmt.Errorf("ref name for checkpoint %s: %w", cid, err)
+	}
+
+	authorName, authorEmail := GetGitAuthorFromRepo(repo)
+	if err := updateRef(ctx, repo, refName, func() (plumbing.Hash, plumbing.Hash, error) {
+		// Re-read the parent and idempotency state on every CAS retry so an
+		// import commit never overwrites a concurrently advanced ref.
+		parent, expected, err := importBase(repo, refsStore, cid)
+		if err != nil {
+			return plumbing.ZeroHash, plumbing.ZeroHash, err
+		}
+		if mode == importOnlyIntoAbsentRef && !expected.IsZero() {
+			migrated = false
+			return expected, expected, nil
+		}
+		if treeInRefHistory(repo, parent, migratedTree) {
+			migrated = false
+			return parent, expected, nil
+		}
+
+		msg := fmt.Sprintf("Import checkpoint %s (migrated from git-branch)", cid)
+		commitHash, commitErr := CreateCommit(ctx, repo, migratedTree, parent, msg, authorName, authorEmail)
+		if commitErr != nil {
+			return plumbing.ZeroHash, plumbing.ZeroHash,
+				fmt.Errorf("commit checkpoint %s: %w", cid, commitErr)
+		}
+		migrated = true
+		return commitHash, expected, nil
+	}); err != nil {
+		return false, fmt.Errorf("set ref for checkpoint %s: %w", cid, err)
+	}
+	return migrated, nil
+}
+
+// importedTree normalizes cid's v1 subtree cpTreeHash as an import writes it
+// (persisting the normalized objects when persist is set) and reports whether
+// the ref's history already holds that tree.
+func importedTree(
+	ctx context.Context,
+	repo *git.Repository,
+	refsStore *gitRefsStore,
+	cid id.CheckpointID,
+	cpTreeHash plumbing.Hash,
+	persist bool,
+) (tree plumbing.Hash, imported bool, err error) {
+	tree, err = migratedCheckpointTree(ctx, repo, cid, cpTreeHash, persist)
+	if err != nil {
+		return plumbing.ZeroHash, false, fmt.Errorf("normalize checkpoint %s: %w", cid, err)
+	}
+	parent, _, err := importBase(repo, refsStore, cid)
+	if err != nil {
+		return plumbing.ZeroHash, false, err
+	}
+	return tree, treeInRefHistory(repo, parent, tree), nil
+}
+
+// importBase returns what an import of cid builds on. parent is the ref's tip,
+// or zero when the ref is absent or its commit is unreadable, which an import
+// repairs with an orphan commit. expected is the ref's current hash, which the
+// import's compare-and-swap checks, so a concurrent repair wins cleanly.
+func importBase(repo *git.Repository, refsStore *gitRefsStore, cid id.CheckpointID) (parent, expected plumbing.Hash, err error) {
+	parent, _, err = refsStore.refBase(cid)
+	switch {
+	case err == nil:
+		return parent, parent, nil
+	case errors.Is(err, plumbing.ErrObjectNotFound):
+		refName, nameErr := RefName(cid)
+		if nameErr != nil {
+			return plumbing.ZeroHash, plumbing.ZeroHash, fmt.Errorf("ref name for checkpoint %s: %w", cid, nameErr)
+		}
+		ref, refErr := repo.Reference(refName, true)
+		if refErr != nil {
+			return plumbing.ZeroHash, plumbing.ZeroHash, fmt.Errorf("resolve unreadable ref %s: %w", refName, refErr)
+		}
+		return plumbing.ZeroHash, ref.Hash(), nil
+	default:
+		return plumbing.ZeroHash, plumbing.ZeroHash, fmt.Errorf("resolve existing ref for checkpoint %s: %w", cid, err)
+	}
 }
 
 // treeInRefHistory reports whether any commit on the first-parent chain

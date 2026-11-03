@@ -1780,7 +1780,7 @@ func TestPrePushHookLine_UnwritableTMPDIRFallsBack(t *testing.T) {
 			require.Equal(t, entireExit, exit, "the script's status must be Entire's")
 			env, readErr := os.ReadFile(filepath.Join(dir, "entire.env"))
 			require.NoError(t, readErr, "Entire must still run")
-			require.NotContains(t, string(env), PrePushStdinRefsEnv+"=1", "without a saved list Entire runs as an old hook")
+			require.Contains(t, string(env), PrePushStdinRefsEnv+"=0", "Entire is told the list could not be saved, unlike an old hook")
 			after, afterErr := os.ReadFile(filepath.Join(dir, "after.stdin"))
 			if entireExit == 0 {
 				require.NoError(t, afterErr)

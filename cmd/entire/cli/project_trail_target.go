@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/internal/coreapi"
 )
 
@@ -43,8 +45,12 @@ type projectTrailTarget struct {
 // projectTrailCurrentChange identifies the change a trail was reached through.
 // Repo is the repository name the CLI resolved it in, which stands in when
 // the trail's change summary has none (display metadata not yet synced).
+// Access is the repository client it was found through, so reads of the
+// change (show's merge gates) reuse it instead of resolving the repository
+// again.
 type projectTrailCurrentChange struct {
 	ID, Repo string
+	Access   trailRepoAccess
 }
 
 func projectTrailBasePath(host, project string) string {
@@ -159,10 +165,68 @@ func resolveProjectTrailCollectionFor(ctx context.Context, host, project string,
 	return target, nil
 }
 
+// Core answers 404 both for a missing project and for a GitHub namespace the
+// caller cannot see, so errProjectTrailProjectNotFound covers both; 403 is a
+// project the login may not inspect.
+var (
+	errProjectTrailProjectNotFound  = errors.New("project not found")
+	errProjectTrailProjectForbidden = errors.New("project access denied")
+)
+
+// projectResolveError is Core refusing a project reference, rendered as one
+// line rather than the generated client's error dump. It matches its sentinel
+// (if any) and unwraps to the client error for callers that inspect it.
+type projectResolveError struct {
+	msg      string
+	sentinel error
+	cause    error
+}
+
+func (e *projectResolveError) Error() string { return e.msg }
+
+func (e *projectResolveError) Unwrap() []error {
+	if e.sentinel == nil {
+		return []error{e.cause}
+	}
+	return []error{e.sentinel, e.cause}
+}
+
+// describeProjectResolveError turns a Core API error for a project reference
+// into one actionable line. 401 and non-API failures (network, timeouts) keep
+// their existing handling.
+func describeProjectResolveError(ctx context.Context, host, project string, err error) error {
+	ref := host + "/" + project
+	status := coreapi.APIErrorStatus(err)
+	if status == 0 || status == http.StatusUnauthorized {
+		return fmt.Errorf("resolve project %s: %w", ref, err)
+	}
+	detail := coreapi.APIError(err)
+	logging.Debug(logging.WithComponent(ctx, "trail"), "core refused project resolution",
+		slog.String("project", ref), slog.Int("status", status), slog.String("detail", detail))
+	switch status {
+	case http.StatusNotFound:
+		hint := "check that 'entire auth status' shows the account that can open this project's trails on the web"
+		if host == mirrorCloneForge {
+			hint += ", and that the GitHub owner is connected to Entire"
+		}
+		return &projectResolveError{
+			msg:      fmt.Sprintf("project %s does not exist or is not visible to your login; %s", ref, hint),
+			sentinel: errProjectTrailProjectNotFound, cause: err,
+		}
+	case http.StatusForbidden:
+		return &projectResolveError{
+			msg:      "your login does not have access to project " + ref,
+			sentinel: errProjectTrailProjectForbidden, cause: err,
+		}
+	default:
+		return &projectResolveError{msg: fmt.Sprintf("resolve project %s: %s (HTTP %d)", ref, detail, status), cause: err}
+	}
+}
+
 func resolveProjectTrailRoute(ctx context.Context, core projectTrailCoreClient, host, project string) (*projectTrailTarget, *auth.CellTarget, error) {
 	resolved, err := core.ResolveProject(ctx, coreapi.ResolveProjectParams{Host: coreapi.ResolveProjectHost(host), Project: project})
 	if err != nil {
-		return nil, nil, fmt.Errorf("resolve project: %w", err)
+		return nil, nil, describeProjectResolveError(ctx, host, project, err)
 	}
 	if string(resolved.Reference.Host) != host || !strings.EqualFold(resolved.Reference.Project, project) {
 		return nil, nil, errors.New("core returned a different project reference")
@@ -261,7 +325,8 @@ func resolveProjectTrail(cmd *cobra.Command, selector string) (*projectTrailTarg
 		}
 		// A trail selector resolves the target directly, so the branch's change
 		// is known only from the working context.
-		selected.Target.Change = &projectTrailCurrentChange{ID: selected.Work.ID, Repo: selected.Repo}
+		selected.Target.Change = &projectTrailCurrentChange{ID: selected.Work.ID, Repo: selected.Repo,
+			Access: trailRepoAccess{Client: selected.Client, BasePath: selected.BasePath, RepoID: selected.RepoID}}
 		return selected.Target, nil
 	}
 }
@@ -273,7 +338,7 @@ func resolveProjectTrailChangeParent(cmd *cobra.Command, sel projectTrailChangeS
 	if err != nil {
 		return nil, err
 	}
-	return openTrailParentTarget(cmd, change.Work, change.Repo, "change "+sel.String())
+	return openTrailParentTarget(cmd, change.Work, change.Repo, change.access(), "change "+sel.String())
 }
 
 func resolveProjectTrailBySelector(cmd *cobra.Command, selector string) (*projectTrailTarget, error) {
@@ -346,15 +411,15 @@ func resolveBranchProjectTrail(cmd *cobra.Command, branch string) (_ *projectTra
 	if err != nil {
 		return nil, err
 	}
-	return openTrailParentTarget(cmd, change, repo, fmt.Sprintf("branch %q", branch))
+	return openTrailParentTarget(cmd, change, repo, trailRepoAccess{Client: client, BasePath: base, RepoID: repoID}, fmt.Sprintf("branch %q", branch))
 }
 
 // openTrailParentTarget routes to the project parent a branch's Change points
 // at. An absent parent may be inaccessible or unresolved, so this never falls
 // back to a repo-scoped read; --project, when given, must name that parent.
 // subject names the work in errors, e.g. `branch "feature/x"` or `change cli/7`;
-// repo is the repository the work was found in.
-func openTrailParentTarget(cmd *cobra.Command, change *api.TrailResource, repo, subject string) (*projectTrailTarget, error) {
+// repo is the repository the work was found in, and access its client.
+func openTrailParentTarget(cmd *cobra.Command, change *api.TrailResource, repo string, access trailRepoAccess, subject string) (*projectTrailTarget, error) {
 	if change == nil || change.Parent == nil || !looksLikeULID(change.Parent.ID) {
 		return nil, fmt.Errorf("%s has no discoverable project trail; pass a project trail ID with --project (a missing parent may be inaccessible or unresolved)", subject)
 	}
@@ -378,7 +443,7 @@ func openTrailParentTarget(cmd *cobra.Command, change *api.TrailResource, repo, 
 	if err != nil {
 		return nil, renderDataAPIAuthError(cmd.Context(), cmd.ErrOrStderr(), "", err)
 	}
-	target.Change = &projectTrailCurrentChange{ID: change.ID, Repo: repo}
+	target.Change = &projectTrailCurrentChange{ID: change.ID, Repo: repo, Access: access}
 	return target, nil
 }
 

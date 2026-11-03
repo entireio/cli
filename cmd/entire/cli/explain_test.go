@@ -2119,10 +2119,17 @@ func TestRunExplainAuto_GeneratePersistsHexOnBranchUnderRefsPrimary(t *testing.T
 	require.NotContains(t, errBuf.String(), "no checkpoint or commit found",
 		"the resolved checkpoint must not be misreported as missing")
 
-	// The summary must be readable back from the v1 branch copy.
-	meta, err := branchStore.ReadSessionMetadata(ctx, cpID, 0)
+	// git-refs pre-push never sends v1, so the backfill copies the checkpoint
+	// into its own ref and the summary lands there.
+	refName, err := checkpoint.RefName(cpID)
 	require.NoError(t, err)
-	require.NotNil(t, meta.Summary, "the generated summary must persist on the v1 branch")
+	_, err = repo.Reference(refName, true)
+	require.NoError(t, err, "the checkpoint must now have its own ref")
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
+	require.NoError(t, err)
+	meta, err := stores.Persistent.ReadSessionMetadata(ctx, cpID, 0)
+	require.NoError(t, err)
+	require.NotNil(t, meta.Summary, "the generated summary must persist on the checkpoint's ref")
 	require.Equal(t, "backfilled intent", meta.Summary.Intent)
 }
 
