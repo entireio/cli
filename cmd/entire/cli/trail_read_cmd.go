@@ -126,6 +126,13 @@ func newTrailTimelineCmd(mode *trailMode) *cobra.Command {
 	return cmd
 }
 
+// timelineLooseString is a field of an unreadable timeline item, if it is a
+// string.
+func timelineLooseString(v any) string {
+	s, _ := v.(string) //nolint:errcheck // a non-string prints blank
+	return s
+}
+
 func printTrailTimeline(w io.Writer, selected *trailWorkingContext, out trailTimelineResponse) error {
 	// An empty page is only this page's: a page that could not be loaded in
 	// full, or that has a next page, says so below.
@@ -135,7 +142,17 @@ func printTrailTimeline(w io.Writer, selected *trailWorkingContext, out trailTim
 	for _, raw := range out.Items {
 		var item trailTimelineItem
 		if err := json.Unmarshal(raw, &item); err != nil {
-			return fmt.Errorf("decode timeline item: %w", err)
+			// One item the CLI cannot read must not hide the rest: print what
+			// can be read of it and point at --json for the whole item.
+			var head struct {
+				OccurredAt any `json:"occurredAt"`
+				Kind       any `json:"kind"`
+			}
+			_ = json.Unmarshal(raw, &head) //nolint:errcheck // best effort; a non-object prints blanks
+			line := fmt.Sprintf("%s  %-18s  %-16s  %s", tuiutil.SanitizeTerminalLabel(timelineLooseString(head.OccurredAt)),
+				tuiutil.SanitizeTerminalLabel(timelineLooseString(head.Kind)), "", "(unreadable item; see --json)")
+			fmt.Fprintln(w, strings.TrimRight(line, " "))
+			continue
 		}
 		line := fmt.Sprintf("%s  %-18s  %-16s  %s", tuiutil.SanitizeTerminalLabel(item.OccurredAt), tuiutil.SanitizeTerminalLabel(item.Kind),
 			tuiutil.SanitizeTerminalLabel(trailTimelineActor(item)), trailTimelineSummary(item))

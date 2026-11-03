@@ -167,3 +167,16 @@ func TestTrailStack_JSONPassesTheServersResponseThrough(t *testing.T) {
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"stack":null}`, out)
 }
+
+func TestTrailTimeline_AnUnreadableItemDoesNotHideTheRest(t *testing.T) {
+	// Serial: replaces global clients.
+	body := json.RawMessage(`{"items":[
+		{"kind":"pr.opened","occurredAt":"2026-10-29T12:00:00.000Z","title":42},
+		{"kind":"comment","occurredAt":"2026-10-29T13:00:00.000Z"}
+	]}`)
+	_, out, err := readTrailChange(t, "timeline", body)
+	require.NoError(t, err)
+	assert.Contains(t, out, "2026-10-29T12:00:00.000Z  pr.opened")
+	assert.Contains(t, out, "(unreadable item; see --json)")
+	assert.Contains(t, out, "2026-10-29T13:00:00.000Z  comment", "the next item still prints")
+}
