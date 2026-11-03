@@ -31,7 +31,7 @@ import (
 // checkpoint.GenerateCheckpointID). ReservedSession writes keep a ULID in refs
 // under a git-branch primary. Under a git-refs primary, writes to a hex
 // checkpoint that is still only on the v1 branch first copy it into its own ref
-// (see legacyCopier.copy), because git-refs pre-push never sends v1. Backfills
+// (see legacyCopier.copyToRef), because git-refs pre-push never sends v1. Backfills
 // update an existing checkpoint, so they follow the same store order as reads,
 // though only ErrCheckpointNotFound falls through (stricter than reads) — see
 // Write.
@@ -57,7 +57,7 @@ type legacyCopier struct {
 // newKindRoutingStore wraps the write fanout plus the two git read stores. It
 // preserves the optional AuthorReader capability (explain relies on it) when both
 // read stores provide it — the built-in git backends always do. legacyRefFetcher
-// is the remote probe a copy from v1 runs first (see legacyCopier.copy).
+// is the remote probe a copy from v1 runs first (see legacyCopier.copyToRef).
 func newKindRoutingStore(writer, branch, refs PersistentStore, primaryType string, legacyRefFetcher RefFetchFunc) PersistentStore {
 	s := &kindRoutingStore{writer: writer, branch: branch, refs: refs, primaryType: primaryType}
 	if b, ok := branch.(*GitStore); ok {
@@ -348,7 +348,7 @@ func (s *kindRoutingStore) writeReservedLegacyUnderRefs(ctx context.Context, req
 		// A checkpoint deleted from this clone must not come back as a ref.
 		return s.writeReservedToOriginalBackend(ctx, req, s.branch, BackendTypeGitBranch)
 	}
-	if _, err := s.legacy.copy(ctx, checkpointID); err != nil {
+	if _, err := s.legacy.copyToRef(ctx, checkpointID); err != nil {
 		return err
 	}
 	return s.writer.Write(ctx, req) //nolint:wrapcheck // primary error is the operation's error, surfaced verbatim
@@ -375,7 +375,7 @@ func (s *kindRoutingStore) isLegacyUnderRefs(checkpointID id.CheckpointID) bool 
 	return s.primaryType == BackendTypeGitRefs && checkpointID.Kind() != id.KindULID
 }
 
-// copyLegacyUnlessDeleted runs legacyCopier.copy for a checkpoint this clone
+// copyLegacyUnlessDeleted runs legacyCopier.copyToRef for a checkpoint this clone
 // has not deleted. It reports false when the stores cannot copy.
 func (s *kindRoutingStore) copyLegacyUnlessDeleted(ctx context.Context, checkpointID id.CheckpointID) (bool, error) {
 	if s.legacy == nil {
@@ -388,10 +388,10 @@ func (s *kindRoutingStore) copyLegacyUnlessDeleted(ctx context.Context, checkpoi
 	if deleted {
 		return false, nil
 	}
-	return s.legacy.copy(ctx, checkpointID)
+	return s.legacy.copyToRef(ctx, checkpointID)
 }
 
-// copy copies checkpointID from the v1 branch into its own ref, as migration
+// copyToRef copies checkpointID from the v1 branch into its own ref, as migration
 // would, so later writes advance that ref and pre-push sends it. The write that
 // follows queues the ref. Callers check the deleted list first.
 //
@@ -407,7 +407,7 @@ func (s *kindRoutingStore) copyLegacyUnlessDeleted(ctx context.Context, checkpoi
 // it (or finding a concurrent copy) or by fetching it, so the caller should
 // retry its write there. It is false when v1 lacks the checkpoint or the ref
 // already existed locally.
-func (c *legacyCopier) copy(ctx context.Context, checkpointID id.CheckpointID) (onRef bool, err error) {
+func (c *legacyCopier) copyToRef(ctx context.Context, checkpointID id.CheckpointID) (onRef bool, err error) {
 	refName, err := RefName(checkpointID)
 	if err != nil {
 		return false, err

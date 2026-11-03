@@ -1162,6 +1162,38 @@ func TestCondenseAndMarkFullyCondensed_HexCheckpointStaysPendingWhenTheRemoteCan
 	assert.Equal(t, cid, state.PendingCondensationID(), "the session must stay pending so it is retried")
 }
 
+// With checkpoint_push_remote naming a remote other than origin, origin cannot
+// prove a ref is absent. The copy's remote check must ask the elected remote,
+// or the condensation never finishes and the session stays pending forever.
+// Not parallel: changes the working directory and ENTIRE_CHECKPOINTS_PRIMARY.
+func TestCondenseAndMarkFullyCondensed_HexCheckpointCopiesWhenTheElectedPushRemoteIsNotOrigin(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	dir := setupGitRepo(t)
+	for _, name := range []string{"origin", "private"} {
+		bare := filepath.Join(root, name+".git")
+		testutil.RunGit(t, root, "init", "--bare", "-q", bare)
+		testutil.RunGit(t, dir, "remote", "add", name, bare)
+		testutil.RunGit(t, dir, "push", "-q", name, "HEAD:refs/heads/main")
+	}
+	writeSettingsJSON(t, dir, `{"enabled": true, "strategy_options": {"checkpoint_push_remote": "private"}}`)
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	s := &ManualCommitStrategy{}
+	sessionID := "private-push-remote"
+	cid := reserveHexAndWriteToV1(t, s, dir, sessionID)
+
+	t.Setenv("ENTIRE_CHECKPOINTS_PRIMARY", checkpoint.BackendTypeGitRefs)
+	require.NoError(t, s.CondenseAndMarkFullyCondensed(ctx, sessionID))
+
+	state, err := s.loadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	assert.True(t, state.FullyCondensed, "the elected remote can prove the ref is absent, so the copy must go ahead")
+	onRef, err := CheckpointRefExists(ctx, cid)
+	require.NoError(t, err)
+	assert.True(t, onRef, "checkpoint %s must have its own ref", cid)
+}
+
 func TestPrepareCommitMsg_ReusesReservedAttemptAfterSessionResume(t *testing.T) {
 	dir := setupGitRepo(t)
 	t.Chdir(dir)

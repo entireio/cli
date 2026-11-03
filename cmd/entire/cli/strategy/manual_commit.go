@@ -57,12 +57,18 @@ func (s *ManualCommitStrategy) getStateStore(_ context.Context) (*session.StateS
 
 // getCheckpointStores opens the strategy's checkpoint stores. Condensation
 // writes through them without fetching the checkpoint's ref first, so a copy of
-// a pre-switch checkpoint from v1 asks the remote with the hook probe.
+// a pre-switch checkpoint from v1 asks the remote first, through the elected
+// chain so the elected remote can prove the ref absent.
 func (s *ManualCommitStrategy) getCheckpointStores(ctx context.Context, repo *git.Repository) (*checkpoint.Stores, error) {
+	resolution := CheckpointReadRemotesWithElection(ctx)
+	legacyCopyRefFetcher := s.checkpointRefFetcher
+	if legacyCopyRefFetcher == nil {
+		legacyCopyRefFetcher = remote.HookCheckpointRefFetcherFrom(resolution.Candidates, resolution.ElectionErr)
+	}
 	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{
 		BlobFetcher:          s.blobFetcher,
-		ReadRemotes:          CheckpointReadRemotes(ctx),
-		LegacyCopyRefFetcher: s.hookRefFetcher(),
+		ReadRemotes:          resolution.Candidates,
+		LegacyCopyRefFetcher: legacyCopyRefFetcher,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint store: %w", err)

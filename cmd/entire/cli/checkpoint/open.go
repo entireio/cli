@@ -30,7 +30,9 @@ type OpenOptions struct {
 	// would fork its history. Like RefFetcher, it reports a ref the remote does
 	// not have with an error wrapping plumbing.ErrReferenceNotFound. nil skips
 	// the question; set it on paths that write to existing checkpoints without
-	// fetching their ref first.
+	// fetching their ref first. A backfill through a store with RefFetcher
+	// already fetches the ref before it reports the checkpoint missing
+	// (refBaseForBackfill), so this matters most for reserved writes.
 	LegacyCopyRefFetcher RefFetchFunc
 
 	// MetadataBranchFetcher is the CLI-level v1-metadata-branch fetcher, used by

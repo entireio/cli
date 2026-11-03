@@ -77,7 +77,13 @@ func (opts attachOptions) committedRefs(ctx context.Context) cpkg.PersistentRefs
 // refs with the read chain for ordinary reads (an existing checkpoint's
 // summary may live on the elected sync remote rather than origin).
 func openAttachStore(ctx context.Context, repo *git.Repository, refs cpkg.PersistentRefs) (cpkg.PersistentStore, error) {
-	stores, err := cpkg.Open(ctx, repo, cpkg.OpenOptions{Refs: &refs, ReadRemotes: strategy.CheckpointReadRemotes(ctx)})
+	// fetchLegacyCheckpointRef already fetched a pre-switch checkpoint's ref;
+	// the copy's own remote check keeps the write from forking it regardless.
+	stores, err := cpkg.Open(ctx, repo, cpkg.OpenOptions{
+		Refs:                 &refs,
+		ReadRemotes:          strategy.CheckpointReadRemotes(ctx),
+		LegacyCopyRefFetcher: FetchCheckpointRef,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}
@@ -1322,8 +1328,12 @@ func fetchLegacyCheckpointRef(ctx context.Context, repo *git.Repository, checkpo
 	if err != nil {
 		return repo, fmt.Errorf("resolve checkpoint ref for %s: %w", checkpointID, err)
 	}
-	if _, err := repo.Reference(refName, true); err == nil {
+	_, err = repo.Reference(refName, true)
+	switch {
+	case err == nil:
 		return repo, nil
+	case !errors.Is(err, plumbing.ErrReferenceNotFound):
+		return repo, fmt.Errorf("resolve checkpoint ref %s: %w", refName, err)
 	}
 	freshRepo, err := refreshCheckpoint(ctx, checkpointID, true)
 	switch {

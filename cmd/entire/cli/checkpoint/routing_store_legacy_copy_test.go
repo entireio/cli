@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
 	git "github.com/go-git/go-git/v6"
@@ -369,6 +371,10 @@ func TestKindRoutingStore_ReservedHexCheckpointAbsentFromV1DoesNotAskTheRemote(t
 	})
 
 	require.NoError(t, router.Write(context.Background(), afterSwitchSession(cid)))
+
+	summary, err := refs.Read(context.Background(), cid)
+	require.NoError(t, err)
+	require.NotNil(t, summary, "the reserved write must still land in the checkpoint's ref")
 }
 
 func TestKindRoutingStore_BackfillDoesNotResurrectDeletedCheckpoint(t *testing.T) {
@@ -380,5 +386,24 @@ func TestKindRoutingStore_BackfillDoesNotResurrectDeletedCheckpoint(t *testing.T
 	err := f.router.Write(ctx, SessionSummary{CheckpointID: f.cid, Summary: &Summary{Intent: "deleted"}})
 	require.NoError(t, err)
 
+	f.requireNoRef(t)
+	session, err := f.branch.ReadSessionMetadata(ctx, f.cid, 0)
+	require.NoError(t, err)
+	require.NotNil(t, session.Summary)
+	assert.Equal(t, "deleted", session.Summary.Intent, "the backfill must land on v1, as before the switch")
+}
+
+// The deleted list keeps a deleted checkpoint from coming back as a ref, so a
+// list that cannot be read stops the write instead of being treated as empty.
+func TestKindRoutingStore_WriteFailsClosedOnAnUnreadableDeletedList(t *testing.T) {
+	t.Parallel()
+	f := newLegacyCopyFixture(t)
+	list, err := DeletedCheckpointsForRepo(f.repo)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(list.dir, deletedCheckpointsFileName), []byte("{not json"), 0o600))
+
+	err = f.router.Write(context.Background(), afterSwitchSession(f.cid))
+
+	require.ErrorContains(t, err, "read deleted checkpoints")
 	f.requireNoRef(t)
 }

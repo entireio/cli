@@ -3,6 +3,7 @@ package checkpoint
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -12,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
@@ -61,30 +63,26 @@ func TestOpen_DefaultIsGitPrimaryNoMirrors(t *testing.T) {
 func TestOpen_RefsPrimaryRouterCopiesLegacyCheckpoints(t *testing.T) {
 	dir, repo, _ := newTestRepo(t)
 	t.Chdir(dir)
+	ctx := context.Background()
+	cid := id.MustCheckpointID(legacyCopyID)
+	writeRoutingCheckpoint(t, NewGitStore(repo, DefaultV1Refs()), cid, "before-switch")
 	writeRawSettings(t, dir, `{"enabled": true, "checkpoints": {"primary": {"type": "`+BackendTypeGitRefs+`"}}}`)
-	probed := false
+	var probed []plumbing.ReferenceName
 
-	stores, err := Open(context.Background(), repo, OpenOptions{
-		LegacyCopyRefFetcher: func(context.Context, plumbing.ReferenceName) error {
-			probed = true
-			return nil
+	stores, err := Open(ctx, repo, OpenOptions{
+		LegacyCopyRefFetcher: func(_ context.Context, ref plumbing.ReferenceName) error {
+			probed = append(probed, ref)
+			return fmt.Errorf("probe remote: %w", plumbing.ErrReferenceNotFound)
 		},
 	})
 	require.NoError(t, err)
+	require.NoError(t, stores.Persistent.Write(ctx, afterSwitchSession(cid)))
 
-	var router *kindRoutingStore
-	switch s := stores.Persistent.(type) {
-	case *kindRoutingStore:
-		router = s
-	case *kindRoutingStoreWithAuthor:
-		router = s.kindRoutingStore
-	default:
-		t.Fatalf("persistent store is %T, want the kind-routing store", stores.Persistent)
-	}
-	require.NotNil(t, router.legacy, "the router must be able to copy a v1-only checkpoint into its ref")
-	require.NotNil(t, router.legacy.refFetcher, "the copy must ask the remote with the caller's probe")
-	require.NoError(t, router.legacy.refFetcher(context.Background(), "refs/entire/checkpoints/a1/b2c3d4e5f6"))
-	assert.True(t, probed)
+	refName, err := RefName(cid)
+	require.NoError(t, err)
+	assert.Equal(t, []plumbing.ReferenceName{refName}, probed, "the copy must ask the remote with the caller's probe")
+	_, err = repo.Reference(refName, true)
+	require.NoError(t, err, "the write must copy the v1-only checkpoint into its own ref")
 }
 
 func TestOpen_RejectsNonGitBackedPrimary(t *testing.T) {
