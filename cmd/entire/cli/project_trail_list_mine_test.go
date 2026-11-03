@@ -182,14 +182,14 @@ func TestTrailListMine_JSONItemsMatchThePlainListShape(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
 	require.Len(t, got.Items, 1)
 	item := got.Items[0]
-	for _, key := range []string{"id", "projectId", "number", "title", "status", "createdAt", "updatedAt", "repoIds", "authorAccountId", "assigneeAccountIds", "project", "changes", "lastActivityAt", "phase"} {
+	for _, key := range []string{"id", "projectId", "number", "title", "status", "createdAt", "repoIds", "authorAccountId", "assigneeAccountIds", "project", "changes", "lastActivityAt", "phase"} {
 		assert.Contains(t, item, key)
 	}
 	for _, key := range []string{"created_at", "last_activity_at", "repository_ids"} {
 		assert.NotContains(t, item, key, "no cell snake_case keys")
 	}
 	assert.Equal(t, "proj-1", item["projectId"])
-	assert.Equal(t, "2026-09-02T12:00:00Z", item["updatedAt"], "the feed's metadata_updated_at")
+	assert.NotContains(t, item, "updatedAt", "the plain list has no updatedAt")
 	changes, ok := item["changes"].([]any)
 	require.True(t, ok, "changes is a list")
 	require.Len(t, changes, 1)
@@ -350,7 +350,7 @@ func TestTrailListMine_LeavesOutItemsOutsideTheRequestedStatus(t *testing.T) {
 	assert.Contains(t, errOut, "did not match status open")
 }
 
-func TestTrailListMine_UpdatedAtFallsBackToActivity(t *testing.T) {
+func TestTrailListMine_JSONMatchesThePlainList(t *testing.T) {
 	// Serial: replaces the core client and cell builder seams.
 	item := myTrailTestItem("us-1", 1, "2026-10-29T12:00:00Z")
 	delete(item, "metadata_updated_at")
@@ -360,6 +360,12 @@ func TestTrailListMine_UpdatedAtFallsBackToActivity(t *testing.T) {
 
 	out, _, err := runTrailListMine(t, "--json")
 	require.NoError(t, err)
-	assert.NotContains(t, out, "0001-01-01")
-	assert.Contains(t, out, `"updatedAt": "2026-10-29T12:00:00Z"`)
+	assert.NotContains(t, out, "0001-01-01", "no zero times")
+	var got struct {
+		Items []map[string]any `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
+	require.Len(t, got.Items, 1)
+	assert.Equal(t, "2026-10-29T12:00:00Z", got.Items[0]["lastActivityAt"], "the plain list's activity field")
+	assert.NotContains(t, got.Items[0], "updatedAt", "the plain list has no updatedAt")
 }
