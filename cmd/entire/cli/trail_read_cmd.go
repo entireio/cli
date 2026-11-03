@@ -8,7 +8,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 
@@ -190,53 +189,46 @@ func trailTimelineSummary(item trailTimelineItem) string {
 	return strings.Join(parts, " ")
 }
 
-// trailSessionsResponse keeps sessions raw for --json; the text view decodes
-// only what it lists.
+// trailSessionsResponse is the text view's reading of the sessions; --json
+// prints the server's response unchanged, as timeline and stack do.
 type trailSessionsResponse struct {
-	Sessions []json.RawMessage `json:"sessions"`
+	Sessions []trailSessionItem `json:"sessions"`
 }
 
+// trailSessionItem keeps startedAt as the server's string, as the timeline
+// keeps occurredAt, so both print times the same way.
 type trailSessionItem struct {
-	SessionID       string     `json:"sessionId"`
-	DisplayName     *string    `json:"displayName"`
-	Agent           *string    `json:"agent"`
-	Model           *string    `json:"model"`
-	StartedAt       *time.Time `json:"startedAt"`
-	CheckpointCount int        `json:"checkpointCount"`
+	SessionID       string  `json:"sessionId"`
+	DisplayName     *string `json:"displayName"`
+	Agent           *string `json:"agent"`
+	Model           *string `json:"model"`
+	StartedAt       *string `json:"startedAt"`
+	CheckpointCount int     `json:"checkpointCount"`
 }
 
 func newTrailSessionsCmd(mode *trailMode) *cobra.Command {
 	return newTrailWorkingReadCmd(mode, "sessions", "List the agent sessions behind a trail's commits",
 		"List the agent sessions whose checkpoints are on a trail's branch. 'entire trail resume' restores one.",
 		func(cmd *cobra.Command, selected *trailWorkingContext, jsonOut bool) error {
-			var out trailSessionsResponse
-			if err := getTrailRepoIDResource(cmd.Context(), selected, "/sessions", "sessions", &out); err != nil {
+			var raw json.RawMessage
+			if err := getTrailRepoIDResource(cmd.Context(), selected, "/sessions", "sessions", &raw); err != nil {
 				return err
 			}
-			if out.Sessions == nil {
-				out.Sessions = []json.RawMessage{}
-			}
 			if jsonOut {
-				return printJSON(cmd.OutOrStdout(), out.Sessions)
+				return printJSON(cmd.OutOrStdout(), raw)
+			}
+			var out trailSessionsResponse
+			if err := json.Unmarshal(raw, &out); err != nil {
+				return fmt.Errorf("decode trail sessions: %w", err)
 			}
 			if len(out.Sessions) == 0 {
 				fmt.Fprintf(cmd.OutOrStdout(), "No sessions on %s\n", selected.description())
 				return nil
 			}
-			items := make([]trailSessionItem, len(out.Sessions))
-			for i, raw := range out.Sessions {
-				if err := json.Unmarshal(raw, &items[i]); err != nil {
-					return fmt.Errorf("decode trail session: %w", err)
-				}
-			}
-			return printTable(cmd.OutOrStdout(), []string{"SESSION", "AGENT", colHeaderModel, "STARTED", "CHECKPOINTS", "NAME"}, items, func(s trailSessionItem) []string {
-				started := ""
-				if s.StartedAt != nil {
-					started = s.StartedAt.Format(time.RFC3339)
-				}
+			return printTable(cmd.OutOrStdout(), []string{"SESSION", "AGENT", colHeaderModel, "STARTED", "CHECKPOINTS", "NAME"}, out.Sessions, func(s trailSessionItem) []string {
 				return []string{tuiutil.SanitizeTerminalLabel(s.SessionID), tuiutil.SanitizeTerminalLabel(stringPtrValue(s.Agent)),
-					tuiutil.SanitizeTerminalLabel(stringPtrValue(s.Model)), started, strconv.Itoa(s.CheckpointCount),
-					tuiutil.SanitizeTerminalLabel(stringPtrValue(s.DisplayName))}
+					tuiutil.SanitizeTerminalLabel(stringPtrValue(s.Model)), tuiutil.SanitizeTerminalLabel(stringPtrValue(s.StartedAt)),
+					strconv.Itoa(s.CheckpointCount), tuiutil.SanitizeTerminalLabel(stringPtrValue(s.DisplayName))}
 			})
 		})
 }

@@ -118,18 +118,24 @@ func TestTrailTimeline_EmptyPageStillReportsIncompletenessAndTheNextPage(t *test
 
 func TestTrailSessions_ListsSessions(t *testing.T) {
 	// Serial: replaces global clients.
-	body := json.RawMessage(`{"sessions":[{"sessionId":"session-1","displayName":"Keys","agent":"Claude Code","model":"claude-opus-5-5","startedAt":"2026-10-29T12:37:22Z","checkpointCount":2,"prompt":"secret prompt"}]}`)
+	body := json.RawMessage(`{"sessions":[{"sessionId":"session-1","displayName":"Keys","agent":"Claude Code","model":"claude-opus-5-5","startedAt":"2026-10-29T12:37:22.000Z","checkpointCount":2,"prompt":"secret prompt"}],"nextPage":"later"}`)
 	_, out, err := readTrailChange(t, "sessions", body)
 	require.NoError(t, err)
-	assert.Regexp(t, `session-1\s+Claude Code\s+claude-opus-5-5\s+2026-10-29T12:37:22Z\s+2\s+Keys`, out)
+	assert.Regexp(t, `session-1\s+Claude Code\s+claude-opus-5-5\s+2026-10-29T12:37:22\.000Z\s+2\s+Keys`, out, "startedAt prints as the server sent it")
 	assert.NotContains(t, out, "secret prompt", "the table does not print prompts")
 
+	// --json prints the server's response object, like timeline and stack,
+	// so top-level fields the CLI does not model survive.
 	_, out, err = readTrailChange(t, "sessions", body, "--json")
 	require.NoError(t, err)
-	var sessions []map[string]any
-	require.NoError(t, json.Unmarshal([]byte(out), &sessions), out)
-	require.Len(t, sessions, 1)
-	assert.Equal(t, "session-1", sessions[0]["sessionId"])
+	var got struct {
+		Sessions []map[string]any `json:"sessions"`
+		NextPage string           `json:"nextPage"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
+	require.Len(t, got.Sessions, 1)
+	assert.Equal(t, "session-1", got.Sessions[0]["sessionId"])
+	assert.Equal(t, "later", got.NextPage)
 }
 
 func TestTrailStack_RendersTheStackOrItsAbsence(t *testing.T) {
