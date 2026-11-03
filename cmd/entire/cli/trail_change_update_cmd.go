@@ -39,8 +39,13 @@ not every repository on the trail. The branch work must be open.`),
 				if ready {
 					requested = "ready for review"
 				}
-				fmt.Fprintf(cmd.OutOrStdout(), "Requested %s for %s, but the server did not report its readiness; check it with 'entire trail show'\n",
-					requested, selected.description())
+				// `trail show` does not display readiness, so point at the
+				// change's page rather than a command that cannot confirm it.
+				fmt.Fprintf(cmd.OutOrStdout(), "Requested %s for %s, but the server did not report its readiness", requested, selected.description())
+				if page := strings.TrimSpace(updated.URL); page != "" {
+					fmt.Fprintf(cmd.OutOrStdout(), "; check it at %s", tuiutil.SanitizeTerminalText(page))
+				}
+				fmt.Fprintln(cmd.OutOrStdout())
 				return nil
 			case ready && !*updated.ReadyForReview:
 				return errTrailNotMarkedReady

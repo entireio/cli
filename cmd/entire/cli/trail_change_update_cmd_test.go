@@ -94,12 +94,13 @@ func TestTrailReady_FailsWhenTheServerDoesNotRecordReadiness(t *testing.T) {
 func TestTrailReady_DoesNotClaimSuccessWhenTheServerOmitsReadiness(t *testing.T) {
 	// Serial: replaces global clients.
 	omitted := func(map[string]any) api.TrailResource {
-		return api.TrailResource{Number: 7, Branch: "feature/work"}
+		return api.TrailResource{Number: 7, Branch: "feature/work", URL: "https://entire.example/gh/acme/-/trails/42/changes/widget/7"}
 	}
 	for _, args := range [][]string{{"ready"}, {"ready", "--undo"}} {
 		_, out, err := runTrailChangeUpdate(t, true, args, omitted)
 		require.NoError(t, err, "args %v", args)
-		assert.Contains(t, out, "did not report its readiness")
+		assert.Contains(t, out, "did not report its readiness; check it at https://entire.example/gh/acme/-/trails/42/changes/widget/7")
+		assert.NotContains(t, out, "trail show", "trail show cannot confirm readiness")
 		assert.NotContains(t, out, "Marked")
 		assert.NotContains(t, out, "Returned")
 	}

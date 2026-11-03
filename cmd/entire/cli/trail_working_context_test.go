@@ -236,6 +236,15 @@ func TestWorkingTrailWriteListsChangesInsteadOfGuessing(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "trail #42 has 2 open changes; choose one:\n  widget/7 - Widget work (approved by alice)\n  api/9 - API work (no reviews yet)")
 	require.Contains(t, err.Error(), "Run, for example: trail approve api/9")
+
+	// ready and retarget change the change they select too, so they ask the
+	// same way.
+	for _, args := range [][]string{{"ready", "42"}, {"retarget", "42", "--base", "main"}} {
+		_, _, err := executeProjectTrailTest(t, args...)
+		require.Error(t, err, args[0])
+		require.Contains(t, err.Error(), "trail #42 has 2 open changes; choose one:", args[0])
+		require.Contains(t, err.Error(), "Run, for example: trail "+args[0]+" ", args[0])
+	}
 }
 
 // A trail whose only open change lives in another repository acts on that
