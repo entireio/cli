@@ -65,7 +65,7 @@ Outputs: `report.md` (human summary), `features.csv` / `areas.csv` /
 
 ### What blocks
 
-The `complexity-gate` job in `.github/workflows/ci.yml` runs on every pull request and fails it when a function is over cognitive complexity 30 **and** is new or worse than at the merge base. A function that is over the threshold and did not move does not fail: the tree has 127 of those, and a gate that fired on all of them would be switched off within a week. The three failing shapes are a function absent from the base tree (so a moved or renamed file counts as entirely new — the identity is file plus function name, since the CSVs carry no stable symbol ID), a function whose base complexity was within the threshold, and a function that grew.
+The `complexity-gate` job in `.github/workflows/ci.yml` runs on every pull request and fails it when a function is over cognitive complexity 30 **and** is new or worse than at the merge base. A function that is over the threshold and did not move does not fail: the tree has 127 of those, and a gate that fired on all of them would be switched off within a week. The three failing shapes are a function absent from the base tree, a function whose base complexity was within the threshold, and a function that grew. Identity is file plus function name (the CSVs carry no stable symbol ID), softened by a by-name fallback: a function whose name is unique in both trees keeps its history when it moves to another file, so splitting a large file — the gate's own advice — does not fire the gate; only a move of an ambiguously named function counts as new.
 
 Locally, the same comparison:
 

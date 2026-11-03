@@ -69,11 +69,40 @@ func TestFindOffenders(t *testing.T) {
 			limit: 30,
 		},
 		{
-			name:  "same name in another file is a different function",
+			// Splitting a big file is the gate's own advice, so a move must
+			// not fire it: a name unique in both trees matches across files.
+			name:  "a unique function moved to another file keeps its exemption",
 			base:  []FuncMetric{fn("a.go", "F", 10, 80)},
 			head:  []FuncMetric{fn("b.go", "F", 10, 80)},
 			limit: 30,
+		},
+		{
+			name:  "a moved function that grew fails against its old value",
+			base:  []FuncMetric{fn("a.go", "F", 10, 50)},
+			head:  []FuncMetric{fn("b.go", "F", 10, 55)},
+			limit: 30,
+			want:  []string{"b.go:F=55/50"},
+		},
+		{
+			name:  "a moved function pushed over the limit fails",
+			base:  []FuncMetric{fn("a.go", "F", 10, 29)},
+			head:  []FuncMetric{fn("b.go", "F", 10, 31)},
+			limit: 30,
+			want:  []string{"b.go:F=31/29"},
+		},
+		{
+			name:  "a name that is not unique at base counts as new",
+			base:  []FuncMetric{fn("a.go", "F", 10, 80), fn("c.go", "F", 10, 10)},
+			head:  []FuncMetric{fn("b.go", "F", 10, 80)},
+			limit: 30,
 			want:  []string{"b.go:F=80/new"},
+		},
+		{
+			name:  "a copy next to the surviving original does not borrow its exemption",
+			base:  []FuncMetric{fn("a.go", "F", 10, 80)},
+			head:  []FuncMetric{fn("a.go", "F", 10, 80), fn("b.go", "F", 10, 35)},
+			limit: 30,
+			want:  []string{"b.go:F=35/new"},
 		},
 		{
 			name:  "methods are distinguished by receiver",

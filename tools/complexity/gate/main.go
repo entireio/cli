@@ -81,9 +81,10 @@ Complexity diff (exits 1 on a finding):
 
     Each <dir> is a cxtool output directory; only functions.csv is read. A
     function fails the gate when its head cognitive complexity is above
-    -cognit-warn AND it is new (no function of that name in that file at base,
-    so a moved or renamed file counts as entirely new), or its base complexity
-    was within the threshold, or it grew. Pre-existing violations that did not
+    -cognit-warn AND it is new, or its base complexity was within the
+    threshold, or it grew. Identity is file plus function name; a function
+    whose name is unique in both trees is matched by name alone, so moving it
+    to another file keeps its history. Pre-existing violations that did not
     move do not fail.
 
 Coverage advisory (always exits 0):
@@ -111,10 +112,12 @@ type FuncMetric struct {
 
 // key identifies a function across two trees. File plus name is the whole
 // identity available in the CSVs: there are no stable symbol IDs, and line
-// numbers move for reasons that have nothing to do with complexity. The cost
-// is that renaming a file re-reports every over-threshold function in it as
-// new, which is the safe direction for a gate to be wrong in. A key is not
-// necessarily unique within one tree; findOffenders pairs the occurrences.
+// numbers move for reasons that have nothing to do with complexity.
+// findOffenders softens the file half with a by-name fallback for names that
+// are unique in both trees, so renaming a file re-reports an over-threshold
+// function as new only when its name is ambiguous — the safe direction for a
+// gate to be wrong in. A key is not necessarily unique within one tree;
+// findOffenders pairs the occurrences.
 func (f FuncMetric) key() string { return f.File + "\x00" + f.Name }
 
 // Offender is a function the diff gate refuses.
@@ -137,19 +140,31 @@ type Offender struct {
 // judged against the base value it pairs with — the lenient reading of an
 // ambiguity the CSVs cannot resolve.
 //
+// A key with no base entries falls back to matching by bare name when that
+// name occurs exactly once in each tree: that is a function moved to another
+// file, and it keeps its base history instead of counting as new — moving a
+// function out of a large file is this gate's own advice, so the gate must
+// not fire on it. A copy next to a surviving original is not unique in head,
+// and init and _ are never unique anywhere, so the fallback cannot revive
+// the duplicate-key leak above.
+//
 // Sorted worst-first, then by file and line, so the annotation order is
 // stable across runs and platforms.
 func findOffenders(base, head []FuncMetric, limit int) []Offender {
 	prev := make(map[string][]int, len(base))
+	baseNames := make(map[string][]int, len(base))
 	for _, f := range base {
 		prev[f.key()] = append(prev[f.key()], f.Cognit)
+		baseNames[f.Name] = append(baseNames[f.Name], f.Cognit)
 	}
 	for _, c := range prev {
 		sort.Sort(sort.Reverse(sort.IntSlice(c)))
 	}
 	byKey := make(map[string][]FuncMetric, len(head))
+	headNames := make(map[string]int, len(head))
 	for _, f := range head {
 		byKey[f.key()] = append(byKey[f.key()], f)
+		headNames[f.Name]++
 	}
 	var out []Offender
 	for k, fs := range byKey {
@@ -160,6 +175,11 @@ func findOffenders(base, head []FuncMetric, limit int) []Offender {
 			return fs[i].Start < fs[j].Start
 		})
 		was := prev[k]
+		if len(was) == 0 && headNames[fs[0].Name] == 1 {
+			if b := baseNames[fs[0].Name]; len(b) == 1 {
+				was = b // moved, not new: judge it against its old value
+			}
+		}
 		for i, f := range fs {
 			if f.Cognit <= limit {
 				// Descending order: every later occurrence is within the
