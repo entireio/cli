@@ -140,7 +140,7 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	// Each acts on shared state or spends the repository's agent budget.
 	"trail update-branch": {agentHelpAudienceUserOwned, false},
 	"trail ci-pr":         {agentHelpAudienceUserOwned, false},
-	"trail runner":        {agentHelpAudienceUserOwned, false},
+	"trail rerun-review":  {agentHelpAudienceUserOwned, false},
 
 	// ---- Unlisted: real commands, just not the default view. ---------------
 	"activity": {agentHelpAudienceReadOnly, false},

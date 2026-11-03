@@ -147,7 +147,10 @@ func resolveProjectTrailWorkingContext(cmd *cobra.Command, selector, branch stri
 // trailChangeWriteCommands act on the selected change itself, so a trail with
 // several changes must be disambiguated explicitly rather than by whichever
 // branch happens to be checked out.
-var trailChangeWriteCommands = map[string]bool{"approve": true, "unlink": true, "merge": true}
+var trailChangeWriteCommands = map[string]bool{
+	"approve": true, "unlink": true, "merge": true,
+	"update-branch": true, "ci-pr": true, "rerun-review": true,
+}
 
 // finishForeignTrailWorkingContext opens the repository a sole change in
 // another repository belongs to. Repository is the server's basename in the

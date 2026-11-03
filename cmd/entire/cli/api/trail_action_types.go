@@ -3,68 +3,85 @@ package api
 import (
 	"encoding/json"
 	"fmt"
-	"time"
 )
 
-// TrailRunnerState is one configured runner's state on a trail detail read
-// (TrailResource.Runners).
-type TrailRunnerState struct {
-	RunnerID       string     `json:"runner_id"`
-	State          string     `json:"state"`
-	Outcome        *string    `json:"outcome"`
-	RunID          *string    `json:"run_id"`
-	EvaluatedAtSHA *string    `json:"evaluated_at_sha"`
-	StartedAt      *time.Time `json:"started_at"`
-	StaleReason    *string    `json:"stale_reason"`
+// TrailAgent is one project agent on a change, as the change detail projects
+// it (TrailResource.Agents): the agent, its latest reading and run, or what it
+// waits for before its first run. Only the fields the CLI renders are
+// modeled; --json passes the server's items through.
+type TrailAgent struct {
+	Agent struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	} `json:"agent"`
+	Reading    *TrailAgentReading `json:"reading"`
+	TrendDelta *int               `json:"trend_delta"`
+	LatestRun  *TrailAgentRun     `json:"latest_run"`
+	WaitingFor *string            `json:"waiting_for"`
 }
 
-// DecodeRunners decodes the detail resource's runner states; nil when the
-// read did not carry them.
-func (r *TrailResource) DecodeRunners() ([]TrailRunnerState, error) {
-	if rawJSONAbsent(r.Runners) {
+// TrailAgentReading is a finished review's reading; the field value_type
+// names is the one set.
+type TrailAgentReading struct {
+	PercentValue *int    `json:"percent_value"`
+	SizeValue    *string `json:"size_value"`
+	BooleanValue *bool   `json:"boolean_value"`
+	Summary      *string `json:"summary"`
+	RunID        string  `json:"run_id"`
+	HeadSHA      *string `json:"head_sha"`
+}
+
+// TrailAgentRun is an agent's latest run on a change.
+type TrailAgentRun struct {
+	ID        string  `json:"id"`
+	Status    string  `json:"status"`
+	HeadSHA   *string `json:"head_sha"`
+	CreatedAt string  `json:"created_at"`
+	Error     *struct {
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+// DecodeAgents decodes the detail resource's agents; nil when the read did
+// not carry them.
+func (r *TrailResource) DecodeAgents() ([]TrailAgent, error) {
+	if rawJSONAbsent(r.Agents) {
 		return nil, nil
 	}
-	var out []TrailRunnerState
-	if err := json.Unmarshal(r.Runners, &out); err != nil {
-		return nil, fmt.Errorf("decode trail runners: %w", err)
+	var out []TrailAgent
+	if err := json.Unmarshal(r.Agents, &out); err != nil {
+		return nil, fmt.Errorf("decode trail agents: %w", err)
 	}
 	return out, nil
 }
 
-// TrailRunnerRun is a runner's latest run on a trail.
-type TrailRunnerRun struct {
-	ID           string  `json:"id"`
-	Status       string  `json:"status"`
-	CreatedAt    string  `json:"createdAt"`
-	UpdatedAt    string  `json:"updatedAt"`
-	ErrorMessage *string `json:"errorMessage"`
-	PromptStatus *string `json:"promptStatus"`
-	HeadSHA      *string `json:"headSha"`
+// AgentRunRequest is POST /{host}/{project}/agents/{id}/runs: one run of the
+// agent on one change of a project trail.
+type AgentRunRequest struct {
+	Target AgentRunTarget `json:"target"`
 }
 
-// TrailRunnerResult is the structured output a run reported.
-type TrailRunnerResult struct {
-	Type    string          `json:"type"`
-	Adapter string          `json:"adapter"`
-	Data    json.RawMessage `json:"data"`
+// AgentRunTarget names the change a run reviews; the change's repository is
+// the run's.
+type AgentRunTarget struct {
+	TrailID  string `json:"trail_id"`
+	ChangeID string `json:"change_id"`
 }
 
-// TrailRunnerLatestResponse is GET /repos/{repo_id}/trails/{number}/runs/{runnerId}.
-// Run is nil when the runner never ran on this trail.
-type TrailRunnerLatestResponse struct {
-	Run    *TrailRunnerRun    `json:"run"`
-	Result *TrailRunnerResult `json:"result"`
-}
-
-// TrailRunnerLaunchResponse is POST /repos/{repo_id}/trails/{number}/runs/{runnerId}.
-// Outcome distinguishes a new launch from already_in_progress and
-// already_complete, which start nothing.
-type TrailRunnerLaunchResponse struct {
-	RunID   string `json:"runId"`
-	Outcome string `json:"outcome"`
+// AgentRun is the run an agent run request started, as far as the CLI reports
+// it.
+type AgentRun struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+	Agent  struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	} `json:"agent"`
 }
 
 // TrailReviewRerunResponse is POST /repos/{repo_id}/trails/{number}/review-rerun.
+// Launched counts only the repository-configured reviewers it started; the
+// project's agents are started the way a push starts them and are not counted.
 type TrailReviewRerunResponse struct {
 	Launched int `json:"launched"`
 }

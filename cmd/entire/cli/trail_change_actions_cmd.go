@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 
@@ -47,6 +46,7 @@ parent. --repo and --branch select a working context; only that branch is affect
 
 func newTrailUpdateBranchCmd(mode *trailMode) *cobra.Command {
 	var branch string
+	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "update-branch [<trail>]",
 		Short: "Merge the base branch into a trail's branch",
@@ -68,6 +68,9 @@ func newTrailUpdateBranchCmd(mode *trailMode) *cobra.Command {
 			if err := postTrailChangeAction(cmd.Context(), selected, "/update-branch", "update trail branch", &out); err != nil {
 				return err
 			}
+			if jsonOut {
+				return printJSON(cmd.OutOrStdout(), out)
+			}
 			if out.MergeCommitSHA == "" {
 				fmt.Fprintf(cmd.OutOrStdout(), "%s is already up to date with its base\n", selected.description())
 				return nil
@@ -77,6 +80,7 @@ func newTrailUpdateBranchCmd(mode *trailMode) *cobra.Command {
 		},
 	}
 	addTrailWorkingBranchFlag(cmd, mode, &branch)
+	addTrailActionJSONFlag(cmd, &jsonOut)
 	return cmd
 }
 
@@ -89,6 +93,7 @@ func trailBaseOrDefault(base string) string {
 
 func newTrailCIPullRequestCmd(mode *trailMode) *cobra.Command {
 	var branch string
+	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "ci-pr [<trail>]",
 		Short: "Create or link the GitHub pull request that runs CI",
@@ -104,223 +109,87 @@ func newTrailCIPullRequestCmd(mode *trailMode) *cobra.Command {
 			if err := postTrailChangeAction(cmd.Context(), selected, "/ci-pr", "create CI pull request", &out); err != nil {
 				return err
 			}
+			if jsonOut {
+				return printJSON(cmd.OutOrStdout(), out)
+			}
 			fmt.Fprintf(cmd.OutOrStdout(), "%s is backed by pull request #%d\n", selected.description(), out.PRNumber)
 			return nil
 		},
 	}
 	addTrailWorkingBranchFlag(cmd, mode, &branch)
+	addTrailActionJSONFlag(cmd, &jsonOut)
 	return cmd
 }
 
-func newTrailRunnerCmd(mode *trailMode) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "runner",
-		Short: "Inspect and start a trail's configured runners",
-		Long:  "Inspect and start the runners the repository configures for trails (reviews, monitors, and other agents).",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			return cmd.Help()
-		},
-	}
-	cmd.AddCommand(newTrailRunnerListCmd(mode), newTrailRunnerShowCmd(mode), newTrailRunnerStartCmd(mode), newTrailRunnerRerunReviewCmd(mode))
-	return cmd
-}
-
-func newTrailRunnerListCmd(mode *trailMode) *cobra.Command {
-	var branch string
+// newTrailRerunReviewCmd re-reviews the selected change: every reviewer at
+// once through the change's review-rerun, or one project agent with --agent.
+func newTrailRerunReviewCmd(mode *trailMode) *cobra.Command {
+	var branch, agentID string
 	var jsonOut bool
-	cmd := &cobra.Command{
-		Use:   "list [<trail>]",
-		Short: "List a trail's runners and their latest state",
-		Long:  "List the runners configured for a trail with each one's latest state and outcome.\n\n" + trailWorkingSelectorHelp(mode, "lists"),
-		Args:  cobra.MaximumNArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			selected, err := mode.workingContext(cmd, selectorFromArgs(args), branch, false)
-			if err != nil {
-				return err
-			}
-			detail, err := fetchTrailDetailAtPath(cmd.Context(), selected.Client, selected.BasePath, selected.Work.Number)
-			if err != nil {
-				return err
-			}
-			runners, err := detail.DecodeRunners()
-			if err != nil {
-				return fmt.Errorf("read trail runners: %w", err)
-			}
-			if jsonOut {
-				if runners == nil {
-					runners = []api.TrailRunnerState{}
-				}
-				return printJSON(cmd.OutOrStdout(), runners)
-			}
-			if len(runners) == 0 {
-				fmt.Fprintf(cmd.OutOrStdout(), "No runners on %s\n", selected.description())
-				return nil
-			}
-			return printTable(cmd.OutOrStdout(), []string{"RUNNER", "STATE", "OUTCOME", "HEAD", "STARTED"}, runners, func(r api.TrailRunnerState) []string {
-				started := ""
-				if r.StartedAt != nil {
-					started = r.StartedAt.Format(time.RFC3339)
-				}
-				return []string{tuiutil.SanitizeTerminalLabel(r.RunnerID), tuiutil.SanitizeTerminalLabel(r.State),
-					tuiutil.SanitizeTerminalLabel(stringPtrValue(r.Outcome)), shortSHA(tuiutil.SanitizeTerminalLabel(stringPtrValue(r.EvaluatedAtSHA))), started}
-			})
-		},
-	}
-	addTrailWorkingBranchFlag(cmd, mode, &branch)
-	addTrailRunnerJSONFlag(cmd, &jsonOut)
-	return cmd
-}
-
-func addTrailRunnerJSONFlag(cmd *cobra.Command, jsonOut *bool) {
-	cmd.Flags().BoolVar(jsonOut, "json", false, "Output as JSON")
-}
-
-// trailRunnerArgs splits [<trail>] <runner-id>.
-func trailRunnerArgs(args []string) (selector, runnerID string, err error) {
-	runnerID = strings.TrimSpace(args[len(args)-1])
-	if runnerID == "" {
-		return "", "", errors.New("runner ID must not be empty")
-	}
-	return selectorFromArgs(args[:len(args)-1]), runnerID, nil
-}
-
-func newTrailRunnerShowCmd(mode *trailMode) *cobra.Command {
-	var branch string
-	var jsonOut bool
-	cmd := &cobra.Command{
-		Use:   "show [<trail>] <runner-id>",
-		Short: "Show a runner's latest run and result",
-		Long:  "Show a runner's latest run on a trail and the result it reported. 'entire trail runner list' names the runners.\n\n" + trailWorkingSelectorHelp(mode, "shows"),
-		Args:  cobra.RangeArgs(1, 2),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			selector, runnerID, err := trailRunnerArgs(args)
-			if err != nil {
-				return err
-			}
-			selected, err := mode.workingContext(cmd, selector, branch, false)
-			if err != nil {
-				return err
-			}
-			path, err := trailRepoIDPath(selected, "/runs/"+url.PathEscape(runnerID))
-			if err != nil {
-				return err
-			}
-			resp, err := selected.Client.Get(cmd.Context(), path)
-			if err != nil {
-				return fmt.Errorf("read runner result: %w", err)
-			}
-			defer resp.Body.Close()
-			if err := checkTrailResponse(resp); err != nil {
-				return err
-			}
-			var out api.TrailRunnerLatestResponse
-			if err := api.DecodeJSON(resp, &out); err != nil {
-				return fmt.Errorf("decode runner result: %w", err)
-			}
-			if jsonOut {
-				return printJSON(cmd.OutOrStdout(), out)
-			}
-			printTrailRunnerLatest(cmd, runnerID, selected, out)
-			return nil
-		},
-	}
-	addTrailWorkingBranchFlag(cmd, mode, &branch)
-	addTrailRunnerJSONFlag(cmd, &jsonOut)
-	return cmd
-}
-
-func printTrailRunnerLatest(cmd *cobra.Command, runnerID string, selected *trailWorkingContext, out api.TrailRunnerLatestResponse) {
-	w := cmd.OutOrStdout()
-	name := tuiutil.SanitizeTerminalLabel(runnerID)
-	if out.Run == nil {
-		fmt.Fprintf(w, "Runner %s has not run on %s\n", name, selected.description())
-		return
-	}
-	run := out.Run
-	fmt.Fprintf(w, "Runner:  %s\n", name)
-	fmt.Fprintf(w, "Run:     %s\n", tuiutil.SanitizeTerminalLabel(run.ID))
-	fmt.Fprintf(w, "Status:  %s\n", tuiutil.SanitizeTerminalLabel(run.Status))
-	if sha := stringPtrValue(run.HeadSHA); sha != "" {
-		fmt.Fprintf(w, "Head:    %s\n", tuiutil.SanitizeTerminalLabel(sha))
-	}
-	fmt.Fprintf(w, "Updated: %s\n", tuiutil.SanitizeTerminalLabel(run.UpdatedAt))
-	if msg := stringPtrValue(run.ErrorMessage); msg != "" {
-		fmt.Fprintf(w, "Error:   %s\n", tuiutil.SanitizeTerminalText(msg))
-	}
-	if out.Result != nil {
-		fmt.Fprintf(w, "Result:  %s (%s); pass --json for its data\n", tuiutil.SanitizeTerminalLabel(out.Result.Type), tuiutil.SanitizeTerminalLabel(out.Result.Adapter))
-	}
-}
-
-func newTrailRunnerStartCmd(mode *trailMode) *cobra.Command {
-	var branch string
-	var jsonOut bool
-	cmd := &cobra.Command{
-		Use:   "start [<trail>] <runner-id>",
-		Short: "Start a configured runner on a trail's current head",
-		Long: "Start a configured runner against a trail's current head. A runner already running, or a completed " +
-			"review that already covers the head, starts nothing; the output says which. Runs use the repository's " +
-			"agent budget. 'entire trail runner list' names the runners.\n\n" + trailWorkingSelectorHelp(mode, "starts it on"),
-		Args: cobra.RangeArgs(1, 2),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			selector, runnerID, err := trailRunnerArgs(args)
-			if err != nil {
-				return err
-			}
-			selected, err := mode.workingContext(cmd, selector, branch, false)
-			if err != nil {
-				return err
-			}
-			var out api.TrailRunnerLaunchResponse
-			if err := postTrailChangeAction(cmd.Context(), selected, "/runs/"+url.PathEscape(runnerID), "start runner", &out); err != nil {
-				return err
-			}
-			if jsonOut {
-				return printJSON(cmd.OutOrStdout(), out)
-			}
-			name, run := tuiutil.SanitizeTerminalLabel(runnerID), tuiutil.SanitizeTerminalLabel(out.RunID)
-			switch out.Outcome {
-			case "already_in_progress":
-				fmt.Fprintf(cmd.OutOrStdout(), "Runner %s is already running on %s (run %s)\n", name, selected.description(), run)
-			case "already_complete":
-				fmt.Fprintf(cmd.OutOrStdout(), "Runner %s already completed for the current head of %s (run %s); nothing started\n", name, selected.description(), run)
-			default:
-				fmt.Fprintf(cmd.OutOrStdout(), "Started runner %s on %s (run %s)\n", name, selected.description(), run)
-			}
-			return nil
-		},
-	}
-	addTrailWorkingBranchFlag(cmd, mode, &branch)
-	addTrailRunnerJSONFlag(cmd, &jsonOut)
-	return cmd
-}
-
-func newTrailRunnerRerunReviewCmd(mode *trailMode) *cobra.Command {
-	var branch string
 	cmd := &cobra.Command{
 		Use:   "rerun-review [<trail>]",
-		Short: "Re-run the configured review on a trail's current head",
-		Long: "Re-run the repository's configured review runners against a trail's current head. " +
-			"Runs use the repository's agent budget.\n\n" + trailWorkingSelectorHelp(mode, "re-runs it on"),
+		Short: "Review a trail's current head again",
+		Long: "Review a trail's current head again: the project's review agents start as a push starts them, and " +
+			"the repository's own configured reviewers re-run. Runs that already cover the head are kept rather than " +
+			"repeated. --agent <id> runs one project agent instead ('entire project agent list' names them). " +
+			"Runs spend the project's agent budget. Follow the results with 'entire trail finding'.\n\n" +
+			trailWorkingSelectorHelp(mode, "reviews"),
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			agentID = strings.TrimSpace(agentID)
+			if cmd.Flags().Changed("agent") && !looksLikeULID(agentID) {
+				return fmt.Errorf("--agent must be an agent ID (see 'entire project agent list'), got %q", tuiutil.SanitizeTerminalLabel(agentID))
+			}
 			selected, err := mode.workingContext(cmd, selectorFromArgs(args), branch, false)
 			if err != nil {
 				return err
+			}
+			if agentID != "" {
+				return runTrailAgentReview(cmd, selected, agentID, jsonOut)
 			}
 			var out api.TrailReviewRerunResponse
 			if err := postTrailChangeAction(cmd.Context(), selected, "/review-rerun", "re-run review", &out); err != nil {
 				return err
 			}
-			if out.Launched == 0 {
-				fmt.Fprintf(cmd.OutOrStdout(), "No review runners started on %s\n", selected.description())
-				return nil
+			if jsonOut {
+				return printJSON(cmd.OutOrStdout(), out)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Started %d review runner(s) on %s\n", out.Launched, selected.description())
+			fmt.Fprintf(cmd.OutOrStdout(), "Requested a new review of %s; follow it with 'entire trail finding'\n", selected.description())
 			return nil
 		},
 	}
 	addTrailWorkingBranchFlag(cmd, mode, &branch)
+	cmd.Flags().StringVar(&agentID, "agent", "", "Run only this project agent (its ID from 'entire project agent list')")
+	addTrailActionJSONFlag(cmd, &jsonOut)
 	return cmd
+}
+
+// runTrailAgentReview starts one project agent on the selected change. Agents
+// belong to the project, so the run goes to the project's route, naming the
+// trail and change it reviews.
+func runTrailAgentReview(cmd *cobra.Command, selected *trailWorkingContext, agentID string, jsonOut bool) error {
+	if selected.Target == nil {
+		return errors.New("--agent needs a project trail; this trail belongs to no project")
+	}
+	t := selected.Target
+	path := "/api/v1/" + url.PathEscape(t.Host) + "/" + url.PathEscape(t.Project) + "/agents/" + url.PathEscape(agentID) + "/runs"
+	body := api.AgentRunRequest{Target: api.AgentRunTarget{TrailID: selected.Parent.ID, ChangeID: selected.Work.ID}}
+	var run api.AgentRun
+	if err := t.Client.CreateProjectConfig(cmd.Context(), path, body, &run); err != nil {
+		return fmt.Errorf("run agent %s: %w", tuiutil.SanitizeTerminalLabel(agentID), err)
+	}
+	if jsonOut {
+		return printJSON(cmd.OutOrStdout(), run)
+	}
+	name := run.Agent.Name
+	if name == "" {
+		name = agentID
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Started %s on %s (run %s, %s)\n", tuiutil.SanitizeTerminalLabel(name), selected.description(),
+		tuiutil.SanitizeTerminalLabel(run.ID), tuiutil.SanitizeTerminalLabel(run.Status))
+	return nil
+}
+
+func addTrailActionJSONFlag(cmd *cobra.Command, jsonOut *bool) {
+	cmd.Flags().BoolVar(jsonOut, "json", false, "Output as JSON")
 }

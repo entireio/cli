@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -13,21 +14,31 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const trailActionTestRepoRoute = "/api/v1/repos/repo-id/trails/7"
+const (
+	trailActionTestRepoRoute = "/api/v1/repos/repo-id/trails/7"
+	trailActionTestAgentID   = "01ARZ3NDEKTSV4RRFFQ69G5FAA"
+)
 
 // runTrailChangeAction runs a trail subcommand on change 7 of a repository;
 // "{trail}" in args stands for the mode's selector.
 // Project mode reaches gh/acme/widget through project trail 42; legacy mode
 // reaches repo (forge/owner/name) directly. actions answers every request on
-// the repository-ID route and records it.
+// the repository-ID route, and in project mode the project's agent routes,
+// and records it.
 func runTrailChangeAction(t *testing.T, project bool, repo string, args []string, detail api.TrailResource, actions http.HandlerFunc) (requests []string, stdout string, err error) {
 	t.Helper()
 	if project {
 		setupProjectTrailTest(t, func(w http.ResponseWriter, r *http.Request) {
-			if !serveWorkingProjectRead(t, w, r) {
-				t.Errorf("unexpected project request: %s %s", r.Method, r.URL.Path)
-				http.NotFound(w, r)
+			if serveWorkingProjectRead(t, w, r) {
+				return
 			}
+			if strings.HasPrefix(r.URL.Path, "/api/v1/gh/acme/agents/") {
+				requests = append(requests, r.Method+" "+r.URL.Path)
+				actions(w, r)
+				return
+			}
+			t.Errorf("unexpected project request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
 		})
 	}
 	detail.ID, detail.Number, detail.Branch = projectTrailTestChange, 7, "feature/work"
@@ -116,76 +127,97 @@ func TestTrailCIPullRequest_ReportsThePullRequest(t *testing.T) {
 	assert.Contains(t, out, "backed by pull request #314")
 }
 
-func TestTrailRunnerStart_ReportsTheLaunchOutcome(t *testing.T) {
+func TestTrailRerunReview_RequestsANewReview(t *testing.T) {
 	// Serial: replaces global clients.
-	for _, tc := range []struct {
-		outcome, says string
-	}{
-		{"launched", "Started runner trail-review"},
-		{"already_in_progress", "already running"},
-		{"already_complete", "nothing started"},
-	} {
-		t.Run(tc.outcome, func(t *testing.T) {
-			requests, out, err := runTrailChangeAction(t, true, "gh/acme/widget", []string{"runner", "start", "{trail}", "trail-review"}, api.TrailResource{},
-				answerJSON(t, api.TrailRunnerLaunchResponse{RunID: "run-1", Outcome: tc.outcome}))
-			require.NoError(t, err)
-			require.Equal(t, []string{"POST /runs/trail-review"}, requests)
-			assert.Contains(t, out, tc.says)
-			assert.Contains(t, out, "run-1")
-		})
-	}
-}
-
-func TestTrailRunnerRerunReview_ReportsLaunchedRunners(t *testing.T) {
-	// Serial: replaces global clients.
-	requests, out, err := runTrailChangeAction(t, true, "gh/acme/widget", []string{"runner", "rerun-review", "{trail}"}, api.TrailResource{},
-		answerJSON(t, api.TrailReviewRerunResponse{Launched: 2}))
+	requests, out, err := runTrailChangeAction(t, true, "gh/acme/widget", []string{"rerun-review", "{trail}"}, api.TrailResource{},
+		answerJSON(t, api.TrailReviewRerunResponse{Launched: 0}))
 	require.NoError(t, err)
 	require.Equal(t, []string{"POST /review-rerun"}, requests)
-	assert.Contains(t, out, "Started 2 review runner(s)")
+	assert.Contains(t, out, "Requested a new review of trail #42")
+	assert.NotContains(t, strings.ToLower(out), "runner")
+
+	_, out, err = runTrailChangeAction(t, true, "gh/acme/widget", []string{"rerun-review", "{trail}", "--json"}, api.TrailResource{},
+		answerJSON(t, api.TrailReviewRerunResponse{Launched: 2}))
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"launched":2}`, out)
 }
 
-func TestTrailRunnerList_ReadsRunnersFromTheDetail(t *testing.T) {
+func TestTrailRerunReview_RunsOneAgentOnTheSelectedChange(t *testing.T) {
 	// Serial: replaces global clients.
-	detail := api.TrailResource{Runners: json.RawMessage(`[{"runner_id":"trail-review","state":"evaluated","outcome":"passed","evaluated_at_sha":"4a028793e32beed49d873b90c829ec4f20887bdf","started_at":"2026-10-29T15:44:49Z"}]`)}
-	noActions := func(w http.ResponseWriter, r *http.Request) {
-		t.Errorf("unexpected action request: %s %s", r.Method, r.URL.Path)
-		http.NotFound(w, r)
-	}
-
-	_, out, err := runTrailChangeAction(t, true, "gh/acme/widget", []string{"runner", "list", "{trail}"}, detail, noActions)
+	var body map[string]any
+	var idempotencyKey string
+	requests, out, err := runTrailChangeAction(t, true, "gh/acme/widget", []string{"rerun-review", "{trail}", "--agent", trailActionTestAgentID}, api.TrailResource{},
+		func(w http.ResponseWriter, r *http.Request) {
+			idempotencyKey = r.Header.Get("Idempotency-Key")
+			assert.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+			w.WriteHeader(http.StatusAccepted)
+			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"id": "run-1", "status": "queued", "agent": map[string]any{"id": trailActionTestAgentID, "name": "Entire Review"}}))
+		})
 	require.NoError(t, err)
-	assert.Regexp(t, `trail-review\s+evaluated\s+passed\s+4a028793\s+2026-10-29T15:44:49Z`, out)
-
-	_, out, err = runTrailChangeAction(t, true, "gh/acme/widget", []string{"runner", "list", "{trail}", "--json"}, detail, noActions)
-	require.NoError(t, err)
-	var runners []api.TrailRunnerState
-	require.NoError(t, json.Unmarshal([]byte(out), &runners), out)
-	require.Len(t, runners, 1)
-	assert.Equal(t, "trail-review", runners[0].RunnerID)
-
-	_, out, err = runTrailChangeAction(t, true, "gh/acme/widget", []string{"runner", "list", "{trail}", "--json"}, api.TrailResource{}, noActions)
-	require.NoError(t, err)
-	assert.JSONEq(t, `[]`, out, "no runners is an empty list, not null")
+	require.Equal(t, []string{"POST /api/v1/gh/acme/agents/" + trailActionTestAgentID + "/runs"}, requests, "the project's agent route, not the change's review-rerun")
+	assert.NotEmpty(t, idempotencyKey)
+	assert.Equal(t, map[string]any{"target": map[string]any{"trail_id": projectTrailTestID, "change_id": projectTrailTestChange}}, body)
+	assert.Contains(t, out, "Started Entire Review on trail #42")
+	assert.Contains(t, out, "run run-1, queued")
 }
 
-func TestTrailRunnerShow_PrintsTheLatestRun(t *testing.T) {
+func TestTrailRerunReview_RefusesAnAgentThatIsNotAnID(t *testing.T) {
 	// Serial: replaces global clients.
-	sha, failure := "4a028793e32b", "sandbox timed out"
-	latest := api.TrailRunnerLatestResponse{
-		Run:    &api.TrailRunnerRun{ID: "run-1", Status: "failed", UpdatedAt: "2026-10-29T15:45:59Z", HeadSHA: &sha, ErrorMessage: &failure},
-		Result: &api.TrailRunnerResult{Type: "code_review_comments", Adapter: "last_json_line", Data: json.RawMessage(`{"comments":[]}`)},
+	for _, agent := range []string{"", " ", ".", "..", "trail-review"} {
+		requests, _, err := runTrailChangeAction(t, true, "gh/acme/widget", []string{"rerun-review", "{trail}", "--agent", agent}, api.TrailResource{},
+			func(w http.ResponseWriter, r *http.Request) {
+				t.Errorf("unexpected action request: %s %s", r.Method, r.URL.Path)
+				http.NotFound(w, r)
+			})
+		require.ErrorContains(t, err, "--agent must be an agent ID", "agent %q", agent)
+		assert.Empty(t, requests)
 	}
-	requests, out, err := runTrailChangeAction(t, true, "gh/acme/widget", []string{"runner", "show", "{trail}", "trail-review"}, api.TrailResource{}, answerJSON(t, latest))
-	require.NoError(t, err)
-	require.Equal(t, []string{"GET /runs/trail-review"}, requests)
-	for _, want := range []string{"Run:     run-1", "Status:  failed", "Head:    4a028793e32b", "Error:   sandbox timed out", "Result:  code_review_comments (last_json_line)"} {
-		assert.Contains(t, out, want)
-	}
+}
 
-	_, out, err = runTrailChangeAction(t, true, "gh/acme/widget", []string{"runner", "show", "{trail}", "trail-review"}, api.TrailResource{}, answerJSON(t, api.TrailRunnerLatestResponse{}))
+func TestTrailRerunReview_AgentNeedsAProjectTrail(t *testing.T) {
+	// Serial: replaces global clients.
+	requests, _, err := runTrailChangeAction(t, false, "gh/acme/widget", []string{"rerun-review", "{trail}", "--agent", trailActionTestAgentID}, api.TrailResource{},
+		func(w http.ResponseWriter, r *http.Request) {
+			t.Errorf("unexpected action request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		})
+	require.ErrorContains(t, err, "--agent needs a project trail")
+	assert.Empty(t, requests)
+}
+
+func TestTrailChangeActions_PrintJSON(t *testing.T) {
+	// Serial: replaces global clients.
+	_, out, err := runTrailChangeAction(t, false, "et/acme/widget", []string{"update-branch", "{trail}", "--json"}, api.TrailResource{},
+		answerJSON(t, api.TrailUpdateBranchResponse{MergeCommitSHA: "abc123"}))
 	require.NoError(t, err)
-	assert.Contains(t, out, "has not run")
+	assert.JSONEq(t, `{"mergeCommitSha":"abc123"}`, out)
+
+	_, out, err = runTrailChangeAction(t, true, "gh/acme/widget", []string{"ci-pr", "{trail}", "--json"}, api.TrailResource{},
+		answerJSON(t, api.TrailCIPullRequestResponse{PRNumber: 314}))
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"prNumber":314}`, out)
+}
+
+func TestTrailUpdateBranch_ReportsTheServersRefusal(t *testing.T) {
+	// Serial: replaces global clients.
+	for _, tc := range []struct {
+		status int
+		says   string
+	}{
+		{http.StatusConflict, "conflicts with its base"},
+		{http.StatusUnprocessableEntity, "trail is merged"},
+	} {
+		t.Run(strconv.Itoa(tc.status), func(t *testing.T) {
+			_, out, err := runTrailChangeAction(t, false, "et/acme/widget", []string{"update-branch", "{trail}"}, api.TrailResource{},
+				func(w http.ResponseWriter, _ *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(tc.status)
+					assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"error": tc.says}))
+				})
+			require.ErrorContains(t, err, tc.says)
+			assert.NotContains(t, out, "Updated")
+		})
+	}
 }
 
 func TestTrailChangeAction_LegacyContextCarriesTheRepoID(t *testing.T) {
