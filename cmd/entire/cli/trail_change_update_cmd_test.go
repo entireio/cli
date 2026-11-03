@@ -129,6 +129,22 @@ func TestTrailRetarget_SendsOnlyTheBase(t *testing.T) {
 	}
 }
 
+func TestTrailRetarget_DoesNotClaimABaseTheServerDidNotApply(t *testing.T) {
+	// Serial: replaces global clients.
+	_, out, err := runTrailChangeUpdate(t, true, []string{"retarget", "--base", "release/1.2"}, func(map[string]any) api.TrailResource {
+		return api.TrailResource{Number: 7, Branch: "feature/work", Base: "main"}
+	})
+	require.ErrorContains(t, err, "still merges into main, not release/1.2")
+	assert.NotContains(t, out, "Retargeted")
+
+	_, out, err = runTrailChangeUpdate(t, true, []string{"retarget", "--base", "release/1.2"}, func(map[string]any) api.TrailResource {
+		return api.TrailResource{Number: 7, Branch: "feature/work"}
+	})
+	require.NoError(t, err)
+	assert.Contains(t, out, "did not report its base")
+	assert.NotContains(t, out, "Retargeted")
+}
+
 func TestTrailRetarget_RequiresABase(t *testing.T) {
 	t.Parallel()
 	for _, args := range [][]string{{"retarget", "7"}, {"retarget", "7", "--base", "  "}} {

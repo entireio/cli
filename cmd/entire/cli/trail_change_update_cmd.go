@@ -82,10 +82,16 @@ not every repository on the trail.`),
 			if err != nil {
 				return err
 			}
-			if updated.Base != "" {
-				base = updated.Base
+			switch {
+			case updated.Base == "":
+				// Nothing in the response confirms the new base; do not claim it.
+				fmt.Fprintf(cmd.OutOrStdout(), "Requested %s onto %s, but the server did not report its base\n", selected.description(), tuiutil.SanitizeTerminalLabel(base))
+			case updated.Base != base:
+				return fmt.Errorf("the server accepted the request but %s still merges into %s, not %s",
+					selected.description(), tuiutil.SanitizeTerminalLabel(updated.Base), tuiutil.SanitizeTerminalLabel(base))
+			default:
+				fmt.Fprintf(cmd.OutOrStdout(), "Retargeted %s onto %s\n", selected.description(), tuiutil.SanitizeTerminalLabel(base))
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Retargeted %s onto %s\n", selected.description(), tuiutil.SanitizeTerminalLabel(base))
 			return nil
 		},
 	}
