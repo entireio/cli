@@ -333,6 +333,7 @@ func (c *enableCheckpointRemoteChoice) report(ctx context.Context, w io.Writer, 
 		fmt.Fprintln(w, checkpointRedactionNotice)
 		return
 	}
+	policy := enableCheckpointPushPolicy(ctx)
 	resolved, err := strategy.ResolveCheckpointSyncRemote(ctx)
 	if err != nil {
 		dedicated := false
@@ -349,7 +350,7 @@ func (c *enableCheckpointRemoteChoice) report(ctx context.Context, w io.Writer, 
 		if dedicated {
 			c.reportUnchangedDestination(w)
 			fmt.Fprintf(w, "Cannot resolve checkpoint remote selection: %v. Dedicated checkpoint uploads can still proceed.\n", err)
-			printCheckpointPrivacyNotice(w, false)
+			printCheckpointPrivacyNotice(w, false, policy)
 			return
 		}
 		fmt.Fprintf(w, "Checkpoint sync remains disabled: %v\n", err)
@@ -359,8 +360,12 @@ func (c *enableCheckpointRemoteChoice) report(ctx context.Context, w io.Writer, 
 	}
 	if resolved.Name == "" {
 		c.reportUnchangedDestination(w)
-		fmt.Fprintln(w, "No Git remotes configured. Once you add one, checkpoints will be uploaded when you push to it.")
-		printCheckpointPrivacyNotice(w, true)
+		if policy == settings.CheckpointPushPolicyManual {
+			fmt.Fprintln(w, "No Git remotes configured. Once you add one, `entire checkpoint push` will upload checkpoints to it.")
+		} else {
+			fmt.Fprintln(w, "No Git remotes configured. Once you add one, checkpoints will be uploaded when you push to it.")
+		}
+		printCheckpointPrivacyNotice(w, true, policy)
 		return
 	}
 	// Resolve a possible local claim before computing the destination summary.
@@ -418,12 +423,29 @@ func (c *enableCheckpointRemoteChoice) report(ctx context.Context, w io.Writer, 
 			}
 		}
 	}
-	if dedicated {
+	switch {
+	case dedicated:
 		fmt.Fprintf(w, "Checkpoint uploads use the dedicated destination: %s.\n", destination)
-	} else {
+	case policy == settings.CheckpointPushPolicyManual:
+		fmt.Fprintf(w, "Checkpoints will be uploaded to %s when you run `entire checkpoint push`.\n", resolved.Name)
+	default:
 		fmt.Fprintf(w, "Checkpoints will be uploaded when you push to %s.\n", resolved.Name)
 	}
-	printCheckpointPrivacyNotice(w, !dedicated)
+	printCheckpointPrivacyNotice(w, !dedicated, policy)
+}
+
+// enableCheckpointPushPolicy is the clone's checkpoint push policy where it
+// applies, the git-refs backend; empty when it does not apply or cannot be read.
+func enableCheckpointPushPolicy(ctx context.Context) settings.CheckpointPushPolicy {
+	refs, err := primaryBackendIsRefsAfter(ctx, "")
+	if err != nil || !refs {
+		return ""
+	}
+	policy, err := settings.LoadCheckpointPushPolicy(ctx)
+	if err != nil {
+		return ""
+	}
+	return policy
 }
 
 // reportUnchangedDestination announces the absence of a change only when one
@@ -439,13 +461,17 @@ const checkpointRedactionNotice = "  Secret redaction is best effort, not bullet
 // printCheckpointPrivacyNotice must directly follow the line saying where
 // checkpoints go, which its first line refers back to.
 // offerPrivateRepo is false when checkpoints already go to a dedicated repo.
-func printCheckpointPrivacyNotice(w io.Writer, offerPrivateRepo bool) {
+// policy is the clone's checkpoint push policy, empty where it does not apply.
+func printCheckpointPrivacyNotice(w io.Writer, offerPrivateRepo bool, policy settings.CheckpointPushPolicy) {
 	fmt.Fprintln(w, "  They contain your agent transcripts. If that repo is public, anyone can read them.")
 	fmt.Fprintln(w, checkpointRedactionNotice)
 	// Clone-local, because the project file can lose: a local push_sessions
 	// overrides it, and a checkpoint_remote there owned by someone other than
 	// origin's owner is ignored, leaving uploads on the public remote.
 	fmt.Fprintf(w, "  To stop uploads: `entire configure --local --%s`\n", flagSkipPushSessions)
+	if policy == settings.CheckpointPushPolicyAutomatic {
+		fmt.Fprintf(w, "  To upload only the checkpoints you choose: `entire configure --%s %s`\n", flagCheckpointPushPolicy, settings.CheckpointPushPolicyManual)
+	}
 	if offerPrivateRepo {
 		fmt.Fprintf(w, "  To use a separate private repo: `entire configure --local --%s github:<owner>/<repo>`\n", flagCheckpointRemote)
 	}
