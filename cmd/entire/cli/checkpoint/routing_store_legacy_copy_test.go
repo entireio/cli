@@ -2,6 +2,8 @@ package checkpoint
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 
 	git "github.com/go-git/go-git/v6"
@@ -44,10 +46,33 @@ func newLegacyCopyFixture(t *testing.T) legacyCopyFixture {
 		repo:   repo,
 		branch: branch,
 		refs:   refs,
-		router: newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs),
+		router: newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs, nil),
 		cid:    cid,
 		v1Tree: normalizedV1Subtree(t, repo, cid),
 	}
+}
+
+// withLegacyRefFetcher returns f with a router that asks fetch for the
+// checkpoint's ref before copying it from v1.
+func (f legacyCopyFixture) withLegacyRefFetcher(fetch RefFetchFunc) legacyCopyFixture {
+	f.router = newKindRoutingStore(f.refs, f.branch, f.refs, BackendTypeGitRefs, fetch)
+	return f
+}
+
+// remoteCopy simulates another clone that already copied the checkpoint and
+// pushed its ref: it returns the copy's commit and leaves no local ref.
+func (f legacyCopyFixture) remoteCopy(t *testing.T) plumbing.Hash {
+	t.Helper()
+	ctx := context.Background()
+	subtree, err := f.branch.checkpointSubtreeHash(ctx, f.cid)
+	require.NoError(t, err)
+	_, err = importBranchCheckpoint(ctx, f.repo, f.refs, f.cid, subtree, updatePersistentRef)
+	require.NoError(t, err)
+	tip := f.refTip(t)
+	refName, err := RefName(f.cid)
+	require.NoError(t, err)
+	require.NoError(t, f.repo.Storer.RemoveReference(refName))
+	return tip
 }
 
 func normalizedV1Subtree(t *testing.T, repo *git.Repository, cid id.CheckpointID) plumbing.Hash {
@@ -163,7 +188,7 @@ func TestKindRoutingStore_ReservedHexCheckpointAbsentEverywhereLandsInItsRef(t *
 	cid := id.MustCheckpointID(legacyCopyID)
 	branch := NewGitStore(repo, DefaultV1Refs())
 	refs := newGitRefsStore(repo)
-	router := newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs)
+	router := newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs, nil)
 
 	require.NoError(t, router.Write(ctx, afterSwitchSession(cid)))
 
@@ -236,6 +261,114 @@ func TestKindRoutingStore_BackfillCopiesLegacyCheckpointIntoItsRef(t *testing.T)
 			f.requireQueued(t)
 		})
 	}
+}
+
+// A clone that copies a checkpoint another clone already copied and pushed
+// creates an unrelated history for the same ref, and push recovery replays it
+// over the other clone's sessions. So the copy first asks the remote for the
+// ref and builds on it when it is there.
+func TestKindRoutingStore_ReservedSessionBuildsOnTheRemoteRefInsteadOfCopying(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newLegacyCopyFixture(t)
+	remoteTip := f.remoteCopy(t)
+	fetches := 0
+	f = f.withLegacyRefFetcher(func(_ context.Context, ref plumbing.ReferenceName) error {
+		fetches++
+		return f.repo.Storer.SetReference(plumbing.NewHashReference(ref, remoteTip))
+	})
+
+	require.NoError(t, f.router.Write(ctx, afterSwitchSession(f.cid)))
+
+	commit, err := f.repo.CommitObject(f.refTip(t))
+	require.NoError(t, err)
+	require.Equal(t, []plumbing.Hash{remoteTip}, commit.ParentHashes,
+		"the write must advance the remote's ref, not start a second copy")
+	assert.Equal(t, 1, fetches)
+	f.requireQueued(t)
+}
+
+// A backfill whose primary store has no fetcher of its own reaches the copy
+// through ErrCheckpointNotFound. When the copy's probe brings in the remote's
+// ref, the backfill must land there, not fall through to v1.
+func TestKindRoutingStore_BackfillBuildsOnTheRemoteRefInsteadOfCopying(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newLegacyCopyFixture(t)
+	remoteTip := f.remoteCopy(t)
+	f = f.withLegacyRefFetcher(func(_ context.Context, ref plumbing.ReferenceName) error {
+		return f.repo.Storer.SetReference(plumbing.NewHashReference(ref, remoteTip))
+	})
+	v1Before, err := f.repo.Reference(DefaultV1Refs().Primary, true)
+	require.NoError(t, err)
+
+	require.NoError(t, f.router.Write(ctx, SessionSummary{CheckpointID: f.cid, Summary: &Summary{Intent: "on the remote ref"}}))
+
+	commit, err := f.repo.CommitObject(f.refTip(t))
+	require.NoError(t, err)
+	require.Equal(t, []plumbing.Hash{remoteTip}, commit.ParentHashes, "the backfill must advance the remote's ref")
+	v1After, err := f.repo.Reference(DefaultV1Refs().Primary, true)
+	require.NoError(t, err)
+	assert.Equal(t, v1Before.Hash(), v1After.Hash(), "the backfill must not land on v1")
+}
+
+func TestKindRoutingStore_ReservedSessionCopiesWhenTheRemoteHasNoRef(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newLegacyCopyFixture(t).withLegacyRefFetcher(func(context.Context, plumbing.ReferenceName) error {
+		return fmt.Errorf("probe remote: %w", plumbing.ErrReferenceNotFound)
+	})
+
+	require.NoError(t, f.router.Write(ctx, afterSwitchSession(f.cid)))
+
+	assert.True(t, treeInRefHistory(f.repo, f.refTip(t), f.v1Tree),
+		"the ref's history must start from the checkpoint as it was on v1")
+	f.requireQueued(t)
+}
+
+// Without an answer from the remote, copying could fork another clone's ref,
+// so the write fails and nothing is written. The caller retries it later.
+func TestKindRoutingStore_WriteFailsWithoutCopyingWhenTheRemoteCannotBeAsked(t *testing.T) {
+	t.Parallel()
+	errUnreachable := errors.New("ssh: connect to host example.com port 22: Operation timed out")
+	tests := []struct {
+		name  string
+		write func(cid id.CheckpointID) WriteRequest
+	}{
+		{name: "reserved session", write: func(cid id.CheckpointID) WriteRequest { return afterSwitchSession(cid) }},
+		{name: "summary backfill", write: func(cid id.CheckpointID) WriteRequest {
+			return SessionSummary{CheckpointID: cid, Summary: &Summary{Intent: "offline"}}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newLegacyCopyFixture(t).withLegacyRefFetcher(func(context.Context, plumbing.ReferenceName) error {
+				return errUnreachable
+			})
+
+			err := f.router.Write(context.Background(), tt.write(f.cid))
+
+			require.ErrorIs(t, err, errUnreachable)
+			f.requireNoRef(t)
+		})
+	}
+}
+
+// Asking the remote costs a network round trip inside git hooks, so it happens
+// only for a checkpoint that v1 actually holds.
+func TestKindRoutingStore_ReservedHexCheckpointAbsentFromV1DoesNotAskTheRemote(t *testing.T) {
+	t.Parallel()
+	_, repo, _ := newTestRepo(t)
+	cid := id.MustCheckpointID(legacyCopyID)
+	branch := NewGitStore(repo, DefaultV1Refs())
+	refs := newGitRefsStore(repo)
+	router := newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs, func(context.Context, plumbing.ReferenceName) error {
+		t.Error("the remote must not be asked about a checkpoint v1 does not hold")
+		return nil
+	})
+
+	require.NoError(t, router.Write(context.Background(), afterSwitchSession(cid)))
 }
 
 func TestKindRoutingStore_BackfillDoesNotResurrectDeletedCheckpoint(t *testing.T) {

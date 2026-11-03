@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -50,6 +51,40 @@ func TestOpen_DefaultIsGitPrimaryNoMirrors(t *testing.T) {
 	assert.True(t, isRouting, "default persistent store should be the kind-routing store")
 	_, isAuthor := stores.Persistent.(AuthorReader)
 	assert.True(t, isAuthor, "routing store should preserve the git primary's AuthorReader")
+}
+
+// Under a git-refs primary, a write to a hex checkpoint still on v1 copies it
+// into its own ref. The copy needs the router to hold the built-in git stores
+// and the caller's remote probe; without them those writes silently go back to
+// v1, which git-refs never pushes.
+// Not parallel: uses t.Chdir so settings resolve to the test repo.
+func TestOpen_RefsPrimaryRouterCopiesLegacyCheckpoints(t *testing.T) {
+	dir, repo, _ := newTestRepo(t)
+	t.Chdir(dir)
+	writeRawSettings(t, dir, `{"enabled": true, "checkpoints": {"primary": {"type": "`+BackendTypeGitRefs+`"}}}`)
+	probed := false
+
+	stores, err := Open(context.Background(), repo, OpenOptions{
+		LegacyCopyRefFetcher: func(context.Context, plumbing.ReferenceName) error {
+			probed = true
+			return nil
+		},
+	})
+	require.NoError(t, err)
+
+	var router *kindRoutingStore
+	switch s := stores.Persistent.(type) {
+	case *kindRoutingStore:
+		router = s
+	case *kindRoutingStoreWithAuthor:
+		router = s.kindRoutingStore
+	default:
+		t.Fatalf("persistent store is %T, want the kind-routing store", stores.Persistent)
+	}
+	require.NotNil(t, router.legacy, "the router must be able to copy a v1-only checkpoint into its ref")
+	require.NotNil(t, router.legacy.refFetcher, "the copy must ask the remote with the caller's probe")
+	require.NoError(t, router.legacy.refFetcher(context.Background(), "refs/entire/checkpoints/a1/b2c3d4e5f6"))
+	assert.True(t, probed)
 }
 
 func TestOpen_RejectsNonGitBackedPrimary(t *testing.T) {

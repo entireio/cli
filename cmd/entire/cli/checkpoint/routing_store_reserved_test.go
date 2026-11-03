@@ -53,7 +53,7 @@ func TestKindRoutingStore_ReservedSessionFallsBackToWriterForUnknownPrimary(t *t
 	refs := newGitRefsStore(repo)
 	writer := &countingStore{PersistentStore: branch}
 
-	router := newKindRoutingStore(writer, branch, refs, "some-future-git-backend")
+	router := newKindRoutingStore(writer, branch, refs, "some-future-git-backend", nil)
 	require.NoError(t, router.Write(ctx, reservedRoutingRequest(checkpointID)))
 
 	assert.Len(t, writer.requests, 1,
@@ -74,7 +74,7 @@ func TestKindRoutingStore_FreshSessionWriteIsNotKindRouted(t *testing.T) {
 	refs := newGitRefsStore(repo)
 	writer := &countingStore{PersistentStore: refs}
 
-	router := newKindRoutingStore(writer, branch, refs, BackendTypeGitRefs)
+	router := newKindRoutingStore(writer, branch, refs, BackendTypeGitRefs, nil)
 	writeRoutingCheckpoint(t, router, checkpointID, "fresh-hex-under-refs-primary")
 
 	require.Len(t, writer.requests, 1, "a fresh create must go through the configured primary")

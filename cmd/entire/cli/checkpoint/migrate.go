@@ -76,7 +76,7 @@ func migrateBranchToRefs(
 	if err != nil {
 		return result, fmt.Errorf("resolve push queue: %w", err)
 	}
-	deleted, err := loadDeletedForRepo(repo)
+	deleted, err := LoadDeletedForRepo(repo)
 	if err != nil {
 		return result, err
 	}

@@ -31,7 +31,7 @@ import (
 // checkpoint.GenerateCheckpointID). ReservedSession writes keep a ULID in refs
 // under a git-branch primary. Under a git-refs primary, writes to a hex
 // checkpoint that is still only on the v1 branch first copy it into its own ref
-// (see copyLegacyCheckpoint), because git-refs pre-push never sends v1. Backfills
+// (see legacyCopier.copy), because git-refs pre-push never sends v1. Backfills
 // update an existing checkpoint, so they follow the same store order as reads,
 // though only ErrCheckpointNotFound falls through (stricter than reads) — see
 // Write.
@@ -49,16 +49,20 @@ type kindRoutingStore struct {
 type legacyCopier struct {
 	branch *GitStore
 	refs   *gitRefsStore
+	// refFetcher asks the remote for a checkpoint's ref before a copy. nil
+	// skips the question, so a copy only checks for a local ref.
+	refFetcher RefFetchFunc
 }
 
 // newKindRoutingStore wraps the write fanout plus the two git read stores. It
 // preserves the optional AuthorReader capability (explain relies on it) when both
-// read stores provide it — the built-in git backends always do.
-func newKindRoutingStore(writer, branch, refs PersistentStore, primaryType string) PersistentStore {
+// read stores provide it — the built-in git backends always do. legacyRefFetcher
+// is the remote probe a copy from v1 runs first (see legacyCopier.copy).
+func newKindRoutingStore(writer, branch, refs PersistentStore, primaryType string, legacyRefFetcher RefFetchFunc) PersistentStore {
 	s := &kindRoutingStore{writer: writer, branch: branch, refs: refs, primaryType: primaryType}
 	if b, ok := branch.(*GitStore); ok {
 		if r, ok := refs.(*gitRefsStore); ok {
-			s.legacy = &legacyCopier{branch: b, refs: r}
+			s.legacy = &legacyCopier{branch: b, refs: r, refFetcher: legacyRefFetcher}
 		}
 	}
 	if _, ok := branch.(AuthorReader); ok {
@@ -254,9 +258,10 @@ func (s *kindRoutingStore) ReadTaskTranscript(ctx context.Context, checkpointID 
 // checkpoint still on the v1 branch under a git-refs primary), so they follow
 // the read order, falling through to the next store on ErrCheckpointNotFound.
 // Under a git-refs primary, a hex checkpoint the refs store does not have is
-// first copied from v1 into its own ref and the backfill retried there, so it
-// is pushed; only a checkpoint that cannot be copied (absent from v1, or
-// deleted from this clone) falls through to the branch.
+// first copied from v1 into its own ref, or its ref fetched from the remote,
+// and the backfill retried there, so it is pushed; only a checkpoint that
+// cannot be copied (absent from v1, or deleted from this clone) falls through
+// to the branch.
 //
 // The fallthrough is deliberately stricter than read routing's firstResolved
 // (which falls through on absent OR any error): only the not-found sentinel
@@ -279,11 +284,11 @@ func (s *kindRoutingStore) Write(ctx context.Context, req WriteRequest) error {
 	for i, st := range stores {
 		err = st.Write(ctx, req)
 		if i == 0 && errors.Is(err, ErrCheckpointNotFound) && s.isLegacyUnderRefs(checkpointID) {
-			copied, copyErr := s.copyLegacyCheckpoint(ctx, checkpointID)
+			onRef, copyErr := s.copyLegacyUnlessDeleted(ctx, checkpointID)
 			if copyErr != nil {
 				return copyErr
 			}
-			if copied {
+			if onRef {
 				return st.Write(ctx, req) //nolint:wrapcheck // primary error is the operation's error, surfaced verbatim
 			}
 		}
@@ -343,12 +348,16 @@ func (s *kindRoutingStore) writeReservedLegacyUnderRefs(ctx context.Context, req
 		// A checkpoint deleted from this clone must not come back as a ref.
 		return s.writeReservedToOriginalBackend(ctx, req, s.branch, BackendTypeGitBranch)
 	}
-	if _, err := s.copyLegacyCheckpoint(ctx, checkpointID); err != nil {
+	if _, err := s.legacy.copy(ctx, checkpointID); err != nil {
 		return err
 	}
 	return s.writer.Write(ctx, req) //nolint:wrapcheck // primary error is the operation's error, surfaced verbatim
 }
 
+// writeReservedToOriginalBackend writes req to target, bypassing the primary:
+// a ULID reserved under a git-branch primary goes to refs, and a hex
+// checkpoint deleted from this clone goes to the branch so it does not come
+// back as a ref.
 func (s *kindRoutingStore) writeReservedToOriginalBackend(ctx context.Context, req ReservedSession, target PersistentStore, targetType string) error {
 	if err := target.Write(ctx, req); err != nil {
 		return err //nolint:wrapcheck // target error is the operation's error, surfaced verbatim
@@ -366,46 +375,65 @@ func (s *kindRoutingStore) isLegacyUnderRefs(checkpointID id.CheckpointID) bool 
 	return s.primaryType == BackendTypeGitRefs && checkpointID.Kind() != id.KindULID
 }
 
-// copyLegacyCheckpoint copies checkpointID from the v1 branch into its own ref
-// when the ref does not exist locally yet, as migration would, so later writes
-// advance that ref and pre-push sends it. The write that follows queues the ref.
-// copied reports whether this call wrote the ref; it is false when the ref
-// already exists, the checkpoint is deleted from this clone or absent from v1,
-// or the stores cannot copy. An existing ref is never touched: it may already
-// be ahead of v1.
-//
-// The ref check is local. A clone that copies a checkpoint another clone has
-// already copied and pushed creates an unrelated history for the same ref, and
-// pre-push's recovery replays this clone's commits over the remote's, last
-// writer wins per file. Callers that can reach the remote fetch the ref first.
-func (s *kindRoutingStore) copyLegacyCheckpoint(ctx context.Context, checkpointID id.CheckpointID) (bool, error) {
+// copyLegacyUnlessDeleted runs legacyCopier.copy for a checkpoint this clone
+// has not deleted. It reports false when the stores cannot copy.
+func (s *kindRoutingStore) copyLegacyUnlessDeleted(ctx context.Context, checkpointID id.CheckpointID) (bool, error) {
 	if s.legacy == nil {
 		return false, nil
 	}
 	deleted, err := s.legacy.deleted(checkpointID)
-	if err != nil || deleted {
+	if err != nil {
 		return false, err
 	}
+	if deleted {
+		return false, nil
+	}
+	return s.legacy.copy(ctx, checkpointID)
+}
+
+// copy copies checkpointID from the v1 branch into its own ref, as migration
+// would, so later writes advance that ref and pre-push sends it. The write that
+// follows queues the ref. Callers check the deleted list first.
+//
+// It copies only when v1 holds the checkpoint and no ref for it exists, locally
+// or, when refFetcher is set, on the remote. An existing local ref may already
+// be ahead of v1, and a ref another clone pushed holds that clone's sessions:
+// copying anyway would start an unrelated history for it, and pre-push's
+// recovery would replay this clone's copy over theirs, last writer wins per
+// file. When the remote cannot be asked, copy returns that error and writes
+// nothing, so the write fails and is retried later.
+//
+// onRef reports whether this call gave the checkpoint its own ref, by copying
+// it (or finding a concurrent copy) or by fetching it, so the caller should
+// retry its write there. It is false when v1 lacks the checkpoint or the ref
+// already existed locally.
+func (c *legacyCopier) copy(ctx context.Context, checkpointID id.CheckpointID) (onRef bool, err error) {
 	refName, err := RefName(checkpointID)
 	if err != nil {
 		return false, err
 	}
-	repo := s.legacy.refs.repo
-	_, err = repo.Reference(refName, true)
-	switch {
-	case err == nil:
-		return false, nil
-	case !errors.Is(err, plumbing.ErrReferenceNotFound):
-		return false, fmt.Errorf("resolve checkpoint ref %s: %w", refName, err)
+	exists, err := c.localRefExists(refName)
+	if err != nil {
+		return false, err
 	}
-	subtree, err := s.legacy.branch.checkpointSubtreeHash(ctx, checkpointID)
+	if exists {
+		return false, nil
+	}
+	subtree, err := c.branch.checkpointSubtreeHash(ctx, checkpointID)
 	if errors.Is(err, ErrCheckpointNotFound) || errors.Is(err, plumbing.ErrReferenceNotFound) {
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("read checkpoint %s from %s: %w", checkpointID, s.legacy.branch.refs.Primary, err)
+		return false, fmt.Errorf("read checkpoint %s from %s: %w", checkpointID, c.branch.refs.Primary, err)
 	}
-	if _, err := importBranchCheckpoint(ctx, repo, s.legacy.refs, checkpointID, subtree, updatePersistentRef); err != nil {
+	fetched, err := c.fetchRemoteRef(ctx, refName)
+	if err != nil {
+		return false, err
+	}
+	if fetched {
+		return true, nil
+	}
+	if _, err := importBranchCheckpoint(ctx, c.refs.repo, c.refs, checkpointID, subtree, updatePersistentRef); err != nil {
 		return false, err
 	}
 	logging.Info(ctx, "checkpoint: copied legacy checkpoint from the v1 branch into its own ref",
@@ -413,10 +441,38 @@ func (s *kindRoutingStore) copyLegacyCheckpoint(ctx context.Context, checkpointI
 	return true, nil
 }
 
-func (c *legacyCopier) deleted(checkpointID id.CheckpointID) (bool, error) {
-	deleted, err := loadDeletedForRepo(c.refs.repo)
+func (c *legacyCopier) localRefExists(refName plumbing.ReferenceName) (bool, error) {
+	_, err := c.refs.repo.Reference(refName, true)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, plumbing.ErrReferenceNotFound):
+		return false, nil
+	default:
+		return false, fmt.Errorf("resolve checkpoint ref %s: %w", refName, err)
+	}
+}
+
+// fetchRemoteRef asks the remote for refName and reports whether the ref now
+// exists locally. Without a refFetcher it reports false.
+func (c *legacyCopier) fetchRemoteRef(ctx context.Context, refName plumbing.ReferenceName) (bool, error) {
+	if c.refFetcher == nil {
+		return false, nil
+	}
+	err := c.refFetcher(ctx, refName)
+	if errors.Is(err, plumbing.ErrReferenceNotFound) {
+		return false, nil
+	}
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("ask the remote for checkpoint ref %s before copying it from %s: %w", refName, c.branch.refs.Primary, err)
+	}
+	return c.localRefExists(refName)
+}
+
+func (c *legacyCopier) deleted(checkpointID id.CheckpointID) (bool, error) {
+	deleted, err := LoadDeletedForRepo(c.refs.repo)
+	if err != nil {
+		return false, fmt.Errorf("read deleted checkpoints: %w", err)
 	}
 	return deleted.Contains(checkpointID), nil
 }

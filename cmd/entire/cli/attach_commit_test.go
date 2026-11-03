@@ -508,9 +508,6 @@ func TestAttachCommit_LegacyCheckpointUnderManualWaits(t *testing.T) {
 	}
 }
 
-// Two clones that each attach a session to the same legacy checkpoint both
-// deliver, and neither session is lost: the second clone builds on the ref the
-// first one pushed instead of copying v1 again.
 // A checkpoint on this clone's deleted list can still be visible, through a
 // remote the delete could not reach or a copy another clone pushed back.
 // Attaching to it would write it again: to v1, which the next push sends on
@@ -551,6 +548,9 @@ func TestAttachCommit_RefusesACheckpointDeletedFromThisClone(t *testing.T) {
 	}
 }
 
+// Two clones that each attach a session to the same legacy checkpoint both
+// deliver, and neither session is lost: the second clone builds on the ref the
+// first one pushed instead of copying v1 again.
 func TestAttachCommit_LegacyCheckpointFromTwoClonesKeepsBothSessions(t *testing.T) {
 	target, cpID, remote := attachLegacyCheckpoint(t)
 

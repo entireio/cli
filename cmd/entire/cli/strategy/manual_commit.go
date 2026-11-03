@@ -55,8 +55,15 @@ func (s *ManualCommitStrategy) getStateStore(_ context.Context) (*session.StateS
 	return s.stateStore, s.stateStoreErr
 }
 
+// getCheckpointStores opens the strategy's checkpoint stores. Condensation
+// writes through them without fetching the checkpoint's ref first, so a copy of
+// a pre-switch checkpoint from v1 asks the remote with the hook probe.
 func (s *ManualCommitStrategy) getCheckpointStores(ctx context.Context, repo *git.Repository) (*checkpoint.Stores, error) {
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: s.blobFetcher, ReadRemotes: CheckpointReadRemotes(ctx)})
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{
+		BlobFetcher:          s.blobFetcher,
+		ReadRemotes:          CheckpointReadRemotes(ctx),
+		LegacyCopyRefFetcher: s.hookRefFetcher(),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}
@@ -86,6 +93,15 @@ func (s *ManualCommitStrategy) SetBlobFetcher(f checkpoint.BlobFetchFunc) {
 	s.blobFetcher = f
 }
 
+// hookRefFetcher returns the bounded, non-interactive checkpoint-ref probe for
+// git hooks, or the test override.
+func (s *ManualCommitStrategy) hookRefFetcher() checkpoint.RefFetchFunc {
+	if s.checkpointRefFetcher != nil {
+		return s.checkpointRefFetcher
+	}
+	return remote.HookCheckpointRefFetcher()
+}
+
 // hookCheckpointStoreOptions is the store envelope for a git-hook read: the
 // bounded ref probe, the bounded blob fetch, and the read-candidate chain. The
 // two bounds live together because a hook that has one and not the other still
@@ -93,12 +109,8 @@ func (s *ManualCommitStrategy) SetBlobFetcher(f checkpoint.BlobFetchFunc) {
 // then reads its filtered-out metadata.json as absent, reporting a checkpoint
 // that exists as missing.
 func (s *ManualCommitStrategy) hookCheckpointStoreOptions(ctx context.Context) checkpoint.OpenOptions {
-	refFetcher := s.checkpointRefFetcher
-	if refFetcher == nil {
-		refFetcher = remote.HookCheckpointRefFetcher()
-	}
 	return checkpoint.OpenOptions{
-		RefFetcher:  refFetcher,
+		RefFetcher:  s.hookRefFetcher(),
 		BlobFetcher: s.hookBlobFetcher(),
 		ReadRemotes: CheckpointReadRemotes(ctx),
 	}

@@ -1263,11 +1263,7 @@ func ensureCheckpointAvailable(ctx, logCtx context.Context, repo *git.Repository
 	// A deleted checkpoint can still be visible here (a remote the delete could
 	// not reach, or a copy another clone pushed back). Writing to it would bring
 	// it back, and on git-branch the next push would undo the delete.
-	deleted, err := cpkg.DeletedCheckpointsForRepo(repo)
-	if err != nil {
-		return repo, fmt.Errorf("read deleted checkpoints: %w", err)
-	}
-	deletedSet, err := deleted.Load()
+	deletedSet, err := cpkg.LoadDeletedForRepo(repo)
 	if err != nil {
 		return repo, fmt.Errorf("read deleted checkpoints: %w", err)
 	}

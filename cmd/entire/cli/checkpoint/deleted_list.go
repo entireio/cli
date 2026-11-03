@@ -77,7 +77,10 @@ func LoadDeletedCheckpoints(ctx context.Context) (DeletedCheckpointSet, error) {
 	return NewDeletedCheckpoints(dir).Load()
 }
 
-func loadDeletedForRepo(repo *git.Repository) (DeletedCheckpointSet, error) {
+// LoadDeletedForRepo returns repo's deleted-checkpoints list. Unlike
+// LoadDeletedCheckpoints it is meant for callers that must fail closed: an
+// error means the list could not be read, not that nothing was deleted.
+func LoadDeletedForRepo(repo *git.Repository) (DeletedCheckpointSet, error) {
 	list, err := DeletedCheckpointsForRepo(repo)
 	if err != nil {
 		return nil, err

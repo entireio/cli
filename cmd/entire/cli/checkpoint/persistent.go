@@ -2183,7 +2183,7 @@ func (s *GitStore) checkpointSubtreeHash(ctx context.Context, checkpointID id.Ch
 	if err != nil {
 		return plumbing.ZeroHash, err
 	}
-	return tree.inner.Hash, nil
+	return tree.Hash(), nil
 }
 
 // getSessionsBranchTree returns the first available committed metadata tree. See

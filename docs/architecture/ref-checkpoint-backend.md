@@ -182,7 +182,11 @@ also recorded in the git common dir's deleted-checkpoints list
 (`entire-deleted-checkpoints.json`), which `prepare-commit-msg` uses to drop the
 ID's trailer on an amend, which migration and the copy on write skip, and
 which makes `entire session attach` refuse to add a session to the checkpoint. Other clones still holding
-the ref can push it back; remote tombstones are deferred.
+the ref can push it back; remote tombstones are deferred. So can a clone
+whose local `v1` still holds a pre-switch checkpoint deleted elsewhere: the
+delete reaches only remotes' `v1`, and a write there copies the stale copy into
+its own ref (see [Migration and coexistence](#migration-and-coexistence)),
+which the next push uploads.
 
 A checkpoint on the `v1` branch is deleted per remote by fetching that
 remote's branch tip into a temporary ref, committing the subtree's removal on
@@ -289,7 +293,7 @@ When checkpoints *are* actively migrated from the branch into refs (`entire doct
 
 After the switch, a checkpoint that stayed on `v1` is migrated one at a time, the first time something writes to it: an attach to a pre-switch commit, a condensation of a session that reserved its ID before the switch, or a backfill. The write copies the checkpoint's `v1` subtree into its own hex-named ref, normalized exactly as migration writes it (`importBranchCheckpoint`), and then writes through the primary, which queues the ref for push. Without the copy the write would land on `v1`, which git-refs pre-push never sends. The copy skips checkpoints on this clone's deleted list and never touches a ref that already exists locally, since that ref may be ahead of `v1`. A checkpoint nothing writes to stays on `v1` and keeps resolving through the branch fallback.
 
-The copy checks for an existing ref locally. Attach fetches the checkpoint's ref first and refuses to copy when it cannot ask the remote, so a second clone builds on the ref the first one pushed. Condensation and backfills without a ref fetcher do not, so two clones that both copy the same checkpoint before either pushes produce refs with unrelated histories. Push recovery then replays one clone's commits over the other's, path by path with the last writer winning (`cherryPickOnto`), and a session written to the same index on both sides is lost.
+Before copying, the write asks the remote whether the checkpoint already has a ref, so a second clone builds on the ref the first one pushed. Attach fetches the ref itself first. Condensation's store asks with the bounded, non-interactive hook probe (`OpenOptions.LegacyCopyRefFetcher`), and a backfill on a store with a ref fetcher probes the ref before reporting it missing. When the remote cannot be asked, nothing is copied and the write fails: attach says so, and condensation leaves the session pending for a later commit, session stop or `entire doctor`. Two clones that both copy the same checkpoint before either pushes still produce refs with unrelated histories. Push recovery then replays one clone's commits over the other's, path by path with the last writer winning (`cherryPickOnto`), and a session written to the same index on both sides is lost.
 
 ## Key files
 

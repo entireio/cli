@@ -43,7 +43,7 @@ func TestKindRoutingStore_Read(t *testing.T) {
 		writeRoutingCheckpoint(t, branch, hexID, "hex-on-branch")
 		writeRoutingCheckpoint(t, refs, ulidID, "ulid-in-refs")
 
-		router := newKindRoutingStore(branch, branch, refs, BackendTypeGitBranch)
+		router := newKindRoutingStore(branch, branch, refs, BackendTypeGitBranch, nil)
 
 		got, err := router.Read(ctx, hexID)
 		require.NoError(t, err)
@@ -62,7 +62,7 @@ func TestKindRoutingStore_Read(t *testing.T) {
 		writeRoutingCheckpoint(t, branch, hexID, "hex-on-branch")
 		writeRoutingCheckpoint(t, refs, ulidID, "ulid-in-refs")
 
-		router := newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs)
+		router := newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs, nil)
 
 		got, err := router.Read(ctx, ulidID)
 		require.NoError(t, err)
@@ -81,7 +81,7 @@ func TestKindRoutingStore_Read(t *testing.T) {
 		migratedHex := id.MustCheckpointID("ffffffffeeee")
 		writeRoutingCheckpoint(t, refs, migratedHex, "hex-migrated-to-refs")
 
-		router := newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs)
+		router := newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs, nil)
 
 		got, err := router.Read(ctx, migratedHex)
 		require.NoError(t, err)
@@ -101,7 +101,7 @@ func TestKindRoutingStore_Read(t *testing.T) {
 		})
 		writeRoutingCheckpoint(t, branch, hexID, "hex-on-branch")
 
-		router := newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs)
+		router := newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs, nil)
 
 		got, err := router.Read(ctx, hexID)
 		require.NoError(t, err, "a refs fetch error must not block the branch fallback")
@@ -118,7 +118,7 @@ func TestKindRoutingStore_Read(t *testing.T) {
 		// consulted for a ULID.
 		writeRoutingCheckpoint(t, branch, ulidID, "stray-ulid-on-branch")
 
-		router := newKindRoutingStore(branch, branch, refs, BackendTypeGitBranch)
+		router := newKindRoutingStore(branch, branch, refs, BackendTypeGitBranch, nil)
 
 		got, err := router.Read(ctx, ulidID)
 		require.NoError(t, err)
@@ -136,7 +136,7 @@ func TestKindRoutingStore_SessionReadRoutes(t *testing.T) {
 	ulidID := id.MustCheckpointID(routingSampleULID)
 	writeRoutingCheckpoint(t, refs, ulidID, "ulid-in-refs")
 
-	router := newKindRoutingStore(branch, branch, refs, BackendTypeGitBranch)
+	router := newKindRoutingStore(branch, branch, refs, BackendTypeGitBranch, nil)
 
 	meta, err := router.ReadSessionMetadata(ctx, ulidID, 0)
 	require.NoError(t, err)
@@ -180,7 +180,7 @@ func TestKindRoutingStore_ReservedSessionUsesOriginalBackendAfterConfigChange(t 
 			if tt.primaryType == BackendTypeGitRefs {
 				writer = refs
 			}
-			router := newKindRoutingStore(writer, branch, refs, tt.primaryType)
+			router := newKindRoutingStore(writer, branch, refs, tt.primaryType, nil)
 
 			req := ReservedSession(WriteOptions{
 				CheckpointID: tt.checkpoint,
@@ -221,7 +221,7 @@ func TestKindRoutingStore_ReservedSessionRetryUpdatesBothBackendsOnce(t *testing
 	branchBefore, _, err := branch.getSessionsBranchRef()
 	require.NoError(t, err)
 	writer := newFanoutStore(refs, []Writer{branch})
-	router := newKindRoutingStore(writer, branch, refs, BackendTypeGitRefs)
+	router := newKindRoutingStore(writer, branch, refs, BackendTypeGitRefs, nil)
 	require.NoError(t, router.Write(ctx, ReservedSession(WriteOptions{
 		CheckpointID: checkpointID,
 		SessionID:    "reserved-session",
@@ -260,7 +260,7 @@ func TestKindRoutingStore_ListUnionsBothBackends(t *testing.T) {
 	writeRoutingCheckpoint(t, branch, hexID, "hex")
 	writeRoutingCheckpoint(t, refs, ulidID, "ulid")
 
-	router := newKindRoutingStore(branch, branch, refs, BackendTypeGitBranch)
+	router := newKindRoutingStore(branch, branch, refs, BackendTypeGitBranch, nil)
 
 	infos, err := router.List(ctx)
 	require.NoError(t, err)
@@ -285,7 +285,7 @@ func TestKindRoutingStore_ListDedupesAcrossBackends(t *testing.T) {
 	writeRoutingCheckpoint(t, branch, dupID, "on-branch")
 	writeRoutingCheckpoint(t, refs, dupID, "in-refs")
 
-	router := newKindRoutingStore(branch, branch, refs, BackendTypeGitRefs)
+	router := newKindRoutingStore(branch, branch, refs, BackendTypeGitRefs, nil)
 
 	infos, err := router.List(ctx)
 	require.NoError(t, err)
@@ -312,7 +312,7 @@ func TestKindRoutingStore_SummaryBackfillReachesLegacyCheckpoint(t *testing.T) {
 	refs := newGitRefsStore(repo)
 	writeRoutingCheckpoint(t, branch, hexID, "hex-on-branch")
 
-	router := newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs)
+	router := newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs, nil)
 
 	err := router.Write(ctx, SessionSummary{
 		CheckpointID: hexID,
@@ -336,7 +336,7 @@ func TestKindRoutingStore_TranscriptAndAttributionBackfillsReachLegacyCheckpoint
 	refs := newGitRefsStore(repo)
 	writeRoutingCheckpoint(t, branch, hexID, "hex-on-branch")
 
-	router := newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs)
+	router := newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs, nil)
 
 	err := router.Write(ctx, SessionTranscript{
 		CheckpointID: hexID,
@@ -356,7 +356,7 @@ func TestKindRoutingStore_TasksBackfillReachesLegacyCheckpoint(t *testing.T) {
 	refs := newGitRefsStore(repo)
 	writeRoutingCheckpoint(t, branch, hexID, "hex-on-branch")
 
-	router := newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs)
+	router := newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs, nil)
 
 	err := router.Write(ctx, Tasks{
 		CheckpointID: hexID,
@@ -383,7 +383,7 @@ func TestKindRoutingStore_TasksBackfillULIDLandsInRefs(t *testing.T) {
 	refs := newGitRefsStore(repo)
 	writeRoutingCheckpoint(t, refs, ulidID, "ulid-in-refs")
 
-	router := newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs)
+	router := newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs, nil)
 
 	require.NoError(t, router.Write(ctx, Tasks{
 		CheckpointID: ulidID,
@@ -414,7 +414,7 @@ func TestKindRoutingStore_BackfillULIDRoutesToRefs(t *testing.T) {
 	refs := newGitRefsStore(repo)
 	writeRoutingCheckpoint(t, refs, ulidID, "ulid-in-refs")
 
-	router := newKindRoutingStore(branch, branch, refs, BackendTypeGitBranch)
+	router := newKindRoutingStore(branch, branch, refs, BackendTypeGitBranch, nil)
 
 	err := router.Write(ctx, SessionSummary{
 		CheckpointID: ulidID,
@@ -436,7 +436,7 @@ func TestKindRoutingStore_BackfillMissingEverywhereReturnsNotFound(t *testing.T)
 	branch := NewGitStore(repo, DefaultV1Refs())
 	refs := newGitRefsStore(repo)
 
-	router := newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs)
+	router := newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs, nil)
 
 	err := router.Write(ctx, SessionSummary{
 		CheckpointID: id.MustCheckpointID("a1b2c3d4e5f6"),
@@ -469,7 +469,7 @@ func TestKindRoutingStore_BackfillMirrorFanout(t *testing.T) {
 
 		mirror := &fakeMirror{}
 		writer := newFanoutStore(refs, []Writer{mirror})
-		router := newKindRoutingStore(writer, branch, refs, BackendTypeGitRefs)
+		router := newKindRoutingStore(writer, branch, refs, BackendTypeGitRefs, nil)
 
 		req := SessionSummary{CheckpointID: hexID, Summary: &Summary{Intent: "mirrored"}}
 		require.NoError(t, router.Write(ctx, req))
@@ -490,7 +490,7 @@ func TestKindRoutingStore_BackfillMirrorFanout(t *testing.T) {
 
 		mirror := &fakeMirror{}
 		writer := newFanoutStore(refs, []Writer{mirror})
-		router := newKindRoutingStore(writer, branch, refs, BackendTypeGitRefs)
+		router := newKindRoutingStore(writer, branch, refs, BackendTypeGitRefs, nil)
 
 		req := SessionSummary{CheckpointID: hexID, Summary: &Summary{Intent: "not mirrored"}}
 		require.NoError(t, router.Write(ctx, req))
@@ -510,7 +510,7 @@ func TestKindRoutingStore_BackfillDoesNotCreateSessionsBranchOnMiss(t *testing.T
 	branch := NewGitStore(repo, DefaultV1Refs())
 	refs := newGitRefsStore(repo)
 
-	router := newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs)
+	router := newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs, nil)
 
 	err := router.Write(ctx, SessionSummary{
 		CheckpointID: id.MustCheckpointID("a1b2c3d4e5f6"),
@@ -538,7 +538,7 @@ func TestKindRoutingStore_BackfillHardErrorAbortsFallthrough(t *testing.T) {
 	writeRoutingCheckpoint(t, branch, hexID, "hex-on-branch")
 
 	failing := &fakePrimary{writeErr: errors.New("refs backend io error")}
-	router := newKindRoutingStore(failing, branch, failing, BackendTypeGitRefs)
+	router := newKindRoutingStore(failing, branch, failing, BackendTypeGitRefs, nil)
 
 	err := router.Write(ctx, SessionSummary{
 		CheckpointID: hexID,
@@ -565,7 +565,7 @@ func TestKindRoutingStore_BackfillPrefersRefsWhenInBothBackends(t *testing.T) {
 	writeRoutingCheckpoint(t, branch, hexID, "hex-on-branch")
 	writeRoutingCheckpoint(t, refs, hexID, "hex-migrated-to-refs")
 
-	router := newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs)
+	router := newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs, nil)
 
 	require.NoError(t, router.Write(ctx, SessionSummary{
 		CheckpointID: hexID,
@@ -601,7 +601,7 @@ func TestKindRoutingStore_ListSurfacesRemoteDiscovery(t *testing.T) {
 		return []plumbing.ReferenceName{mustRefName(t, remoteOnly)}, nil
 	})
 
-	router := newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs)
+	router := newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs, nil)
 
 	infos, err := router.List(WithRemoteListDiscovery(context.Background()))
 	require.NoError(t, err)
@@ -623,7 +623,7 @@ func TestKindRoutingStore_GetCheckpointAuthorRoutes(t *testing.T) {
 	ulidID := id.MustCheckpointID(routingSampleULID)
 	writeRoutingCheckpoint(t, refs, ulidID, "ulid-in-refs")
 
-	router := newKindRoutingStore(branch, branch, refs, BackendTypeGitBranch)
+	router := newKindRoutingStore(branch, branch, refs, BackendTypeGitBranch, nil)
 	author, ok := router.(AuthorReader)
 	require.True(t, ok, "routing store over git backends should expose AuthorReader")
 

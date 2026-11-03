@@ -24,6 +24,15 @@ type OpenOptions struct {
 	// reads local-only; ignored by the git-branch backend.
 	RefFetcher RefFetchFunc
 
+	// LegacyCopyRefFetcher asks the remote for a pre-switch hex checkpoint's ref
+	// before a write under a git-refs primary copies that checkpoint from the v1
+	// branch into its own ref: copying when another clone already pushed the ref
+	// would fork its history. Like RefFetcher, it reports a ref the remote does
+	// not have with an error wrapping plumbing.ErrReferenceNotFound. nil skips
+	// the question; set it on paths that write to existing checkpoints without
+	// fetching their ref first.
+	LegacyCopyRefFetcher RefFetchFunc
+
 	// MetadataBranchFetcher is the CLI-level v1-metadata-branch fetcher, used by
 	// the git-branch backend to resolve a metadata branch missing both locally
 	// and on origin (the shape a fresh clone with a dedicated checkpoint_remote
@@ -123,7 +132,7 @@ func Open(ctx context.Context, repo *git.Repository, opts OpenOptions) (*Stores,
 	}
 
 	return &Stores{
-		Persistent:    newKindRoutingStore(writer, branchStore, refsStore, primaryType),
+		Persistent:    newKindRoutingStore(writer, branchStore, refsStore, primaryType, opts.LegacyCopyRefFetcher),
 		refs:          refs,
 		primaryIsRefs: primaryType == BackendTypeGitRefs,
 	}, nil
