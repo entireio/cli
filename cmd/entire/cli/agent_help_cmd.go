@@ -138,6 +138,8 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"trail resume":    {agentHelpAudienceTaskDriven, false},
 	"trail link":      {agentHelpAudienceUserOwned, false},
 	"trail unlink":    {agentHelpAudienceUserOwned, false},
+	// Attachments are images for the description, which trail update edits.
+	"trail attachment": {agentHelpAudienceTaskDriven, false},
 
 	// ---- Unlisted: real commands, just not the default view. ---------------
 	"activity": {agentHelpAudienceReadOnly, false},
@@ -244,6 +246,12 @@ var agentHelpGuidance = map[string]string{
 		"reply to, edit, delete, or resolve one. Use `entire trail finding` for agent\n" +
 		"review findings, questions, and follow-ups, including when asked to\n" +
 		"\"comment\" on a trail. Comment writes refuse in agent sessions.",
+
+	"trail attachment": "To show an image in a trail's description, upload it with\n" +
+		"`entire trail attachment add <file>` and put the printed\n" +
+		"`![image](attachment:<id>)` line on a line of its own in the body. Edit the\n" +
+		"body read from `entire trail show --json`: existing images appear there as\n" +
+		"the same lines and must be kept when writing it back with `trail update --body`.",
 
 	"checkpoint delete": "Destructive and irreversible on the remote. Never run this unless the user\n" +
 		"explicitly asks to delete that checkpoint; do not pass --force on your own.",
