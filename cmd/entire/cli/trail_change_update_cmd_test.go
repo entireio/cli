@@ -132,3 +132,25 @@ func TestTrailRetarget_RequiresABase(t *testing.T) {
 		require.ErrorContains(t, cmd.Execute(), "--base is required", "args %v", args)
 	}
 }
+
+func TestTrailReadyAndRetarget_RefuseClosedWork(t *testing.T) {
+	// Serial: replaces global clients.
+	for _, status := range []string{"merged", "closed"} {
+		setupWorkingRepoClient(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				t.Errorf("must not update %s work: %s %s", status, r.Method, r.URL.Path)
+				http.NotFound(w, r)
+				return
+			}
+			assert.NoError(t, json.NewEncoder(w).Encode(api.TrailResource{ID: projectTrailTestChange, Number: 7, Branch: "feature/work", Status: status}))
+		})
+		for _, args := range [][]string{{"ready", "7"}, {"retarget", "7", "--base", "main"}} {
+			cmd := newTrailCmdForMode(false)
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetErr(&bytes.Buffer{})
+			cmd.SilenceUsage = true
+			cmd.SetArgs(append(args, "--repo", "gh/acme/widget"))
+			require.ErrorContains(t, cmd.Execute(), "is "+status+"; only open trail work can be changed", "%s %v", status, args)
+		}
+	}
+}

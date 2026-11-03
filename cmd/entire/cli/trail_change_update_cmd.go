@@ -99,6 +99,11 @@ func patchWorkingTrailChange(cmd *cobra.Command, mode *trailMode, selector, bran
 	if err != nil {
 		return nil, nil, err
 	}
+	// The current branch's change is found without the open-only filter a
+	// selector goes through, so a merged or closed one must be refused here.
+	if status := strings.ToLower(strings.TrimSpace(selected.Work.Status)); status == "merged" || status == "closed" {
+		return nil, nil, fmt.Errorf("%s is %s; only open trail work can be changed", selected.description(), status)
+	}
 	resp, err := selected.Client.Patch(cmd.Context(), trailNumberPathForBase(selected.BasePath, selected.Work.Number), request)
 	if err != nil {
 		return nil, nil, fmt.Errorf("update trail: %w", err)
