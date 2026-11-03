@@ -185,12 +185,36 @@ func uploadTrailAttachment(ctx context.Context, target *projectTrailTarget, file
 	}
 	var done api.ProjectTrailAttachmentComplete
 	if _, err := target.Client.ProjectTrailRequest(ctx, http.MethodPost, collection+"/"+url.PathEscape(intent.ID)+"/complete", nil, nil, &done); err != nil {
-		return fail(fmt.Errorf("complete attachment %s: %w", intent.ID, err))
+		err = fmt.Errorf("complete attachment %s: %w", intent.ID, err)
+		// The server may have completed it before the response was lost; a
+		// finished image may already be referenced, so it is never deleted.
+		ready, found, readErr := trailAttachmentReady(context.WithoutCancel(ctx), target, collection, intent.ID)
+		switch {
+		case readErr != nil:
+			return api.ProjectTrailAttachment{}, fmt.Errorf("%w (attachment %s was left in place: its state could not be read: %w)", err, intent.ID, readErr)
+		case found && ready.IsReady:
+			return ready, nil
+		}
+		return fail(err)
 	}
 	if done.Attachment.ID == "" {
 		done.Attachment.ID = intent.ID
 	}
 	return done.Attachment, nil
+}
+
+// trailAttachmentReady reads one attachment from the trail's list.
+func trailAttachmentReady(ctx context.Context, target *projectTrailTarget, collection, id string) (api.ProjectTrailAttachment, bool, error) {
+	var list api.ProjectTrailAttachmentList
+	if _, err := target.Client.ProjectTrailRequest(ctx, http.MethodGet, collection, nil, nil, &list); err != nil {
+		return api.ProjectTrailAttachment{}, false, err //nolint:wrapcheck // the caller names the attachment
+	}
+	for _, a := range list.Attachments {
+		if a.ID == id {
+			return a, true, nil
+		}
+	}
+	return api.ProjectTrailAttachment{}, false, nil
 }
 
 // putTrailAttachmentBytes uploads to the presigned URL with the declared

@@ -35,12 +35,14 @@ type trailAttachmentTestServer struct {
 	// upload URL's expiry.
 	storageStatus int
 	expiresAt     string
-	requests      []string
-	intent        map[string]any
-	idemKey       string
-	uploaded      []byte
-	uploadType    string
-	uploadAuth    string
+	// completeStatus fails /complete when set; listing then answers it.
+	completeStatus int
+	requests       []string
+	intent         map[string]any
+	idemKey        string
+	uploaded       []byte
+	uploadType     string
+	uploadAuth     string
 }
 
 // serveTrailAttachments fakes the cell's attachment routes on project trail 42
@@ -83,6 +85,8 @@ func serveTrailAttachments(t *testing.T, listing []map[string]any) *trailAttachm
 			w.WriteHeader(http.StatusCreated)
 			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"id": trailAttachmentTestID,
 				"upload": map[string]any{"url": storage.URL + "/put?sig=x", "expires_at": expires, "max_bytes": 10485760}}))
+		case r.Method == http.MethodPost && r.URL.Path == collection+"/"+trailAttachmentTestID+"/complete" && s.completeStatus != 0:
+			http.Error(w, `{"error":"gateway timeout"}`, s.completeStatus)
 		case r.Method == http.MethodPost && r.URL.Path == collection+"/"+trailAttachmentTestID+"/complete":
 			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"attachment": map[string]any{"id": trailAttachmentTestID, "filename": "shot.png",
 				"content_type": "image/png", "size_bytes": len(s.uploaded), "is_ready": true}}))
@@ -218,4 +222,26 @@ func TestTrailAttachmentAdd_LeavesTheUploadURLExpiryToStorage(t *testing.T) {
 	_, _, err := executeProjectTrailTest(t, trailAttachmentArgs("add", writeTestPNG(t, "shot.png", 3, 2))...)
 	require.NoError(t, err)
 	assert.Contains(t, s.requests, "storage PUT")
+}
+
+func TestTrailAttachmentAdd_AFailedCompletionNeverDeletesAFinishedImage(t *testing.T) {
+	// Serial: replaces global clients.
+	path := writeTestPNG(t, "shot.png", 3, 2)
+	ready := map[string]any{"id": trailAttachmentTestID, "filename": "shot.png", "content_type": "image/png", "is_ready": true}
+	notReady := map[string]any{"id": trailAttachmentTestID, "filename": "shot.png", "content_type": "image/png", "is_ready": false}
+
+	// The server finished it before the response was lost: success, kept.
+	s := serveTrailAttachments(t, []map[string]any{ready})
+	s.completeStatus = http.StatusGatewayTimeout
+	out, _, err := executeProjectTrailTest(t, trailAttachmentArgs("add", path)...)
+	require.NoError(t, err)
+	assert.Contains(t, out, "![image](attachment:"+trailAttachmentTestID+")")
+	assert.NotContains(t, s.requests, "DELETE /attachments/"+trailAttachmentTestID)
+
+	// Still unfinished: removed, and the failure reported.
+	s = serveTrailAttachments(t, []map[string]any{notReady})
+	s.completeStatus = http.StatusGatewayTimeout
+	_, _, err = executeProjectTrailTest(t, trailAttachmentArgs("add", path)...)
+	require.ErrorContains(t, err, "complete attachment")
+	assert.Equal(t, "DELETE /attachments/"+trailAttachmentTestID, s.requests[len(s.requests)-1])
 }
