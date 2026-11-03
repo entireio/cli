@@ -16,7 +16,7 @@ import (
 
 func myTrailTestItem(id string, number int, activity string) map[string]any {
 	return map[string]any{"id": id, "number": number, "title": "Trail " + id, "status": "open", "phase": "building",
-		"last_activity_at": activity, "created_at": "2026-09-01T12:00:00Z", "updated_at": activity,
+		"last_activity_at": activity, "created_at": "2026-09-01T12:00:00Z", "metadata_updated_at": "2026-09-02T12:00:00Z",
 		"assignee_account_ids": []string{"acct-1"}, "repository_ids": []string{"repo-1"}, "author_account_id": "acct-1",
 		"project": map[string]any{"id": "proj-1", "name": "acme", "provider": "github", "jurisdiction": "us",
 			"reference": map[string]any{"forge": "gh", "project": "acme"}, "can_manage_trails": true},
@@ -186,6 +186,7 @@ func TestTrailListMine_JSONItemsMatchThePlainListShape(t *testing.T) {
 		assert.NotContains(t, item, key, "no cell snake_case keys")
 	}
 	assert.Equal(t, "proj-1", item["projectId"])
+	assert.Equal(t, "2026-09-02T12:00:00Z", item["updatedAt"], "the feed's metadata_updated_at")
 	changes, ok := item["changes"].([]any)
 	require.True(t, ok, "changes is a list")
 	require.Len(t, changes, 1)

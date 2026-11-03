@@ -52,12 +52,13 @@ type myProjectTrailCellItem struct {
 	RepositoryIDs      []string       `json:"repository_ids"`
 	AuthorAccountID    string         `json:"author_account_id"`
 	CreatedAt          time.Time      `json:"created_at"`
-	UpdatedAt          time.Time      `json:"updated_at"`
 	ClosedAt           *time.Time     `json:"closed_at"`
 	LastActivityAt     time.Time      `json:"last_activity_at"`
-	MetadataUpdatedAt  *time.Time     `json:"metadata_updated_at"`
-	IsPossiblyPartial  bool           `json:"is_possibly_partial"`
-	Project            *struct {
+	// MetadataUpdatedAt is the trail's own last update, the plain list's
+	// updatedAt; the personal feed sends no updated_at.
+	MetadataUpdatedAt time.Time `json:"metadata_updated_at"`
+	IsPossiblyPartial bool      `json:"is_possibly_partial"`
+	Project           *struct {
 		ID           string `json:"id"`
 		Name         string `json:"name"`
 		Provider     string `json:"provider"`
@@ -90,9 +91,6 @@ type myProjectTrail struct {
 
 	Phase          string    `json:"phase,omitempty"`
 	LastActivityAt time.Time `json:"lastActivityAt"`
-
-	// metadataUpdatedAt breaks activity ties between copies of one trail.
-	metadataUpdatedAt time.Time
 }
 
 // toMyProjectTrail maps a cell item onto the plain list's shape.
@@ -102,13 +100,10 @@ func (c myProjectTrailCellItem) toMyProjectTrail() myProjectTrail {
 			ID: c.ID, Number: c.Number, URL: c.URL, Title: c.Title, Body: c.Body, Status: c.Status,
 			Metadata: c.Metadata, Type: c.Type, Priority: c.Priority, Assignees: c.Assignees,
 			AssigneeAccountIDs: c.AssigneeAccountIDs, RepositoryIDs: c.RepositoryIDs, AuthorAccountID: c.AuthorAccountID,
-			CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt, ClosedAt: c.ClosedAt, IsPossiblyPartial: c.IsPossiblyPartial,
+			CreatedAt: c.CreatedAt, UpdatedAt: c.MetadataUpdatedAt, ClosedAt: c.ClosedAt, IsPossiblyPartial: c.IsPossiblyPartial,
 		},
 		Phase:          c.Phase,
 		LastActivityAt: c.LastActivityAt,
-	}
-	if c.MetadataUpdatedAt != nil {
-		t.metadataUpdatedAt = *c.MetadataUpdatedAt
 	}
 	if p := c.Project; p != nil {
 		project := &api.TrailProject{ID: p.ID, Name: p.Name, Provider: p.Provider, Jurisdiction: p.Jurisdiction}
@@ -302,7 +297,7 @@ func newerMyProjectTrail(a, b myProjectTrail) bool {
 	if c := a.LastActivityAt.Compare(b.LastActivityAt); c != 0 {
 		return c > 0
 	}
-	return a.metadataUpdatedAt.After(b.metadataUpdatedAt)
+	return a.UpdatedAt.After(b.UpdatedAt)
 }
 
 // printMyProjectTrailsWarnings reports an incomplete list on stderr, with or
