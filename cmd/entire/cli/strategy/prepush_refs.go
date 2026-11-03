@@ -29,21 +29,26 @@ type PrePushRef struct {
 	Truncated bool
 }
 
+// sends reports whether the line sends content: not a deletion, and not a ref
+// the remote already has at that commit.
+func (r PrePushRef) sends() bool {
+	local := plumbing.NewHash(r.LocalSHA)
+	return !local.IsZero() && local != plumbing.NewHash(r.RemoteSHA)
+}
+
 // maxPrePushFieldLen bounds how much of one field of a ref line is kept. Only a
 // ref name can be longer, and its first bytes already decide whether it is a
 // checkpoint ref: longer than the v1 name, or under the per-checkpoint prefix.
 const maxPrePushFieldLen = 4096
 
 // ParsePrePushRefs reads the "<local ref> <local sha> <remote ref> <remote sha>"
-// lines git passes to a pre-push hook and keeps the ones that touch checkpoint
-// refs, the only ones Entire needs. It reads to the end with no size cap: a
-// `--mirror` of a repository with many tags can be large, and a truncated list
-// could hide a checkpoint ref line. For the same reason an oversized ref name
-// is cut short, and its line marked Truncated, rather than failing the whole
-// list. Memory stays bounded because
-// other lines are dropped as they are read and each field keeps at most
-// maxPrePushFieldLen bytes. Malformed lines are skipped; only a failed read is
-// an error.
+// lines git passes to a pre-push hook. Every line is kept: any ref, branch or
+// tag the push sends can point at a waiting checkpoint's commit. It reads to
+// the end with no size cap: a `--mirror` of a repository with many tags can be
+// large, and a truncated list could hide such a line. For the same reason an
+// oversized ref name is cut short, and its line marked Truncated, rather than
+// failing the whole list. Each field keeps at most maxPrePushFieldLen bytes.
+// Malformed lines are skipped; only a failed read is an error.
 func ParsePrePushRefs(r io.Reader) ([]PrePushRef, error) {
 	refs := []PrePushRef{}
 	br := bufio.NewReader(r)
@@ -67,9 +72,7 @@ func ParsePrePushRefs(r io.Reader) ([]PrePushRef, error) {
 		endField()
 		if nfields == len(fields) {
 			ref := PrePushRef{LocalRef: fields[0], LocalSHA: fields[1], RemoteRef: fields[2], RemoteSHA: fields[3], Truncated: truncated}
-			if isCheckpointRefName(ref.LocalRef) || isCheckpointRefName(ref.RemoteRef) {
-				refs = append(refs, ref)
-			}
+			refs = append(refs, ref)
 		}
 		nfields = 0
 		truncated = false
@@ -101,6 +104,53 @@ func ParsePrePushRefs(r io.Reader) ([]PrePushRef, error) {
 
 type prePushRefsKey struct{}
 
+type prePushRefsUnsavedKey struct{}
+
+// WithPrePushRefsUnsaved records that the hook line could not save git's ref
+// list for this push, so what it sends cannot be checked.
+func WithPrePushRefsUnsaved(ctx context.Context) context.Context {
+	return context.WithValue(ctx, prePushRefsUnsavedKey{}, true)
+}
+
+func prePushRefsUnsaved(ctx context.Context) bool {
+	unsaved, _ := ctx.Value(prePushRefsUnsavedKey{}).(bool) //nolint:errcheck // absent means saved or an old hook
+	return unsaved
+}
+
+// prePushRefsKnown reports whether the hook passed the ref list, which an old
+// hook script or an old hook-manager line does not.
+func prePushRefsKnown(ctx context.Context) bool {
+	_, ok := ctx.Value(prePushRefsKey{}).([]PrePushRef)
+	return ok
+}
+
+// warnPrePushRefsUnknown tells a user whose pre-push line predates the ref list
+// that a push sending checkpoint refs itself cannot be checked. Callers warn
+// only when checkpoints are being held back, the one moment it matters.
+func warnPrePushRefsUnknown(ctx context.Context, w io.Writer) {
+	if prePushRefsKnown(ctx) || prePushRefsUnsaved(ctx) {
+		return
+	}
+	fmt.Fprintln(w, "[entire] Warning: this pre-push hook does not pass the refs being pushed, so a push that "+
+		"includes Entire's checkpoint refs itself (e.g. `git push --mirror`) cannot be checked. If you use a hook "+
+		"manager such as Husky, replace its Entire pre-push line with the one `entire enable` prints; otherwise run "+
+		"`entire enable` to update the hook.")
+}
+
+// checkpointRefName is whichever side of the line names a checkpoint ref.
+func (r PrePushRef) checkpointRefName() string {
+	if isCheckpointRefName(r.LocalRef) {
+		return r.LocalRef
+	}
+	return r.RemoteRef
+}
+
+// sendsTag reports whether the line pushes a tag, the one kind of ref that can
+// name an annotated tag object.
+func (r PrePushRef) sendsTag() bool {
+	return strings.HasPrefix(r.LocalRef, "refs/tags/") || strings.HasPrefix(r.RemoteRef, "refs/tags/")
+}
+
 // WithPrePushRefsFrom parses git's pre-push ref list from r and records it. A
 // list that cannot be read leaves the refs unknown, as with an old hook, and
 // the user's push is not blocked over it.
@@ -122,6 +172,19 @@ func WithPrePushRefs(ctx context.Context, refs []PrePushRef) context.Context {
 		refs = []PrePushRef{} // known to be empty, unlike absent
 	}
 	return context.WithValue(ctx, prePushRefsKey{}, refs)
+}
+
+// outerPushSendingLines returns the lines of the user's own push that send
+// content, as far as the hook passed them.
+func outerPushSendingLines(ctx context.Context) []PrePushRef {
+	refs, _ := ctx.Value(prePushRefsKey{}).([]PrePushRef) //nolint:errcheck // absent means "not known"
+	var lines []PrePushRef
+	for _, r := range refs {
+		if r.sends() {
+			lines = append(lines, r)
+		}
+	}
+	return lines
 }
 
 // isCheckpointRefName reports whether name holds checkpoint content: the v1
