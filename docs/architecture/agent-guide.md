@@ -386,6 +386,15 @@ var (
 
 ### Step 8: Implement Hook Installation (if `HookSupport`)
 
+Claude Code's generated hooks require version 2.1.78 or later because they use
+`StopFailure`. Earlier versions can ignore the entire project hook configuration
+when that event is present. Before installing hooks, the CLI checks the installed
+Claude version and refuses incompatible or unreadable versions without rewriting
+the hook settings. `entire doctor` reports the same requirement for existing hooks.
+A missing Claude executable permits repository preparation before installation;
+the subsequently installed Claude must satisfy this minimum. This check does not
+upgrade Claude or remove user hooks. Do not bypass it with `--force`.
+
 If your agent uses a JSON config file for hooks (like Claude Code's `.claude/settings.json`, Cursor's `.cursor/hooks.json`, Factory AI Droid's `.factory/settings.json`, or Copilot CLI's `.github/hooks/entire.json`), implement `HookSupport`:
 
 ```go

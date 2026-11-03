@@ -1952,6 +1952,9 @@ func setupAgentHooks(ctx context.Context, ag agent.Agent, forceHooks bool) (int,
 // Every enable path reports it, so a rewritten config is never called "already
 // installed" or left unmentioned.
 func installAgentHooks(ctx context.Context, ag agent.Agent, forceHooks bool) (installed int, prunedStale bool, err error) {
+	if err := checkClaudeHookVersion(ctx, ag.Name()); err != nil {
+		return 0, false, err
+	}
 	if reporter, ok := agent.AsStaleHookReporter(ag); ok {
 		prunedStale = reporter.HasStaleManagedHooks(ctx)
 	}

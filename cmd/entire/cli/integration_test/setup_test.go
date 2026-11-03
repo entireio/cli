@@ -132,6 +132,13 @@ func TestMain(m *testing.M) {
 	}
 
 	moduleRoot := findModuleRoot()
+	// Hook setup probes Claude's version. Use a deterministic executable so
+	// integration tests never execute the developer's installed agent.
+	if err := installClaudeVersionStub(tmpDir); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to isolate Claude version probe: %v\n", err)
+		os.RemoveAll(tmpDir)
+		os.Exit(1)
+	}
 	buildCmd := exec.CommandContext(context.Background(), "go", "build", "-o", testBinaryPath, ".")
 	buildCmd.Dir = filepath.Join(moduleRoot, "cmd", "entire")
 
@@ -169,4 +176,33 @@ func TestMain(m *testing.M) {
 	// Cleanup
 	os.RemoveAll(tmpDir)
 	os.Exit(code)
+}
+
+func installClaudeVersionStub(dir string) error {
+	const source = `package main
+import ("fmt"; "os")
+func main() {
+	if len(os.Args) != 2 || os.Args[1] != "--version" { os.Exit(1) }
+	if os.Getenv("TEST_CLAUDE_VERSION_FAIL") == "1" { os.Exit(1) }
+	version := os.Getenv("TEST_CLAUDE_VERSION_OUTPUT")
+	if version == "" { version = "2.1.78 (Claude Code)" }
+	fmt.Println(version)
+}
+`
+	sourcePath := filepath.Join(dir, "claude-version.go")
+	if err := os.WriteFile(sourcePath, []byte(source), 0o600); err != nil {
+		return fmt.Errorf("write version stub: %w", err)
+	}
+	name := "claude"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	cmd := execx.NonInteractive(context.Background(), "go", "build", "-o", filepath.Join(dir, name), sourcePath)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("build version stub: %w: %s", err, output)
+	}
+	if err := os.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH")); err != nil {
+		return fmt.Errorf("set version stub path: %w", err)
+	}
+	return nil
 }
