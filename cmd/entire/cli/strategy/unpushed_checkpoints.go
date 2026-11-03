@@ -89,10 +89,8 @@ func ListOutgoingCheckpoints(ctx context.Context) (OutgoingCheckpoints, error) {
 	for _, ref := range existing {
 		cid, _ := checkpoint.ParseRef(ref)
 		outgoing := OutgoingCheckpoint{CheckpointID: cid, Ref: ref}
-		if hash, ok := listed[ref]; ok {
-			outgoing.Commit = hash
-		} else if tip, err := repo.Reference(ref, true); err == nil {
-			outgoing.Commit = tip.Hash()
+		if tip, err := localTip(repo, listed, ref); err == nil {
+			outgoing.Commit = tip
 		}
 		out.Checkpoints = append(out.Checkpoints, outgoing)
 	}

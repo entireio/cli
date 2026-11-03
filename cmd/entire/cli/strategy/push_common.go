@@ -47,37 +47,50 @@ func (p checkpointRefPush) refSpec() string {
 // those that don't (stale queue entries — e.g. a checkpoint ref deleted by
 // cleanup). Stale refs can never push, so callers drop them from the queue
 // rather than retrying them forever. listed holds the tip of every ref found by
-// listing the checkpoint namespace; a ref missing from it has no known tip.
-//
-// One listing answers most refs, where a per-ref lookup costs a packed-refs
-// scan each. Refs the listing omits still get that lookup, because
-// for-each-ref silently skips broken ref files and reports the on-disk shard
-// case, while a case-insensitive filesystem still resolves the queued name.
+// listing the checkpoint namespace; it is nil when the namespace was not
+// listed, and a ref missing from it has no known tip.
 func partitionLocalRefs(
 	ctx context.Context,
 	repo *git.Repository,
 	refs []plumbing.ReferenceName,
 ) (existing, stale []plumbing.ReferenceName, listed map[plumbing.ReferenceName]plumbing.Hash) {
+	return partitionLocalRefsUsing(ctx, repo, refs, len(refs) >= checkpointRefListingMinQueue)
+}
+
+// checkpointRefListingMinQueue is the queue length from which one listing of
+// the checkpoint namespace beats a lookup per queued ref. The listing's cost
+// follows every ref it reads, so a short queue is cheaper to look up ref by ref.
+const checkpointRefListingMinQueue = 16
+
+// partitionLocalRefsUsing is partitionLocalRefs with the choice of listing made
+// by the caller. One listing answers most refs, where a per-ref lookup costs a
+// packed-refs scan each. Refs the listing omits still get that lookup, because
+// the listings skip broken refs, the go-git one skips symbolic refs, and both
+// report the on-disk shard case, while a case-insensitive filesystem still
+// resolves the queued name.
+func partitionLocalRefsUsing(
+	ctx context.Context,
+	repo *git.Repository,
+	refs []plumbing.ReferenceName,
+	useListing bool,
+) (existing, stale []plumbing.ReferenceName, listed map[plumbing.ReferenceName]plumbing.Hash) {
 	if len(refs) == 0 {
 		return nil, nil, nil
 	}
-	listed, err := listLocalCheckpointRefs(ctx, repo)
-	if err != nil {
-		logging.Debug(ctx, "checkpoint refs: listing failed, looking up each queued ref",
-			slog.String("error", err.Error()))
+	var present map[plumbing.ReferenceName]plumbing.Hash
+	if useListing {
+		var tipsMatchLookup bool
+		var err error
+		present, tipsMatchLookup, err = listLocalCheckpointRefs(ctx, repo)
+		if err != nil {
+			logging.Debug(ctx, "checkpoint refs: listing failed, looking up each queued ref", listErrorAttrs(err)...)
+		}
+		if tipsMatchLookup {
+			listed = present
+		}
 	}
-	looked := make(map[plumbing.ReferenceName]bool)
 	for _, ref := range refs {
-		if _, ok := listed[ref]; ok {
-			existing = append(existing, ref)
-			continue
-		}
-		present, seen := looked[ref]
-		if !seen {
-			present = localRefMayExist(repo, ref)
-			looked[ref] = present
-		}
-		if present {
+		if _, ok := present[ref]; ok || localRefMayExist(repo, ref) {
 			existing = append(existing, ref)
 		} else {
 			stale = append(stale, ref)
@@ -86,17 +99,79 @@ func partitionLocalRefs(
 	return existing, stale, listed
 }
 
+// localRefMayExist reports whether ref may still be present locally. Only a
+// ref that is genuinely gone (e.g. deleted by cleanup) is stale; a transient/IO
+// lookup error keeps the ref pushable so a real entry isn't dropped from the
+// queue forever over a flaky read.
 func localRefMayExist(repo *git.Repository, ref plumbing.ReferenceName) bool {
 	_, err := repo.Reference(ref, false)
-	// Only a ref that is genuinely gone (e.g. deleted by cleanup) is stale. A
-	// transient/IO lookup error keeps the ref pushable so a real entry isn't
-	// dropped from the queue forever over a flaky read.
 	return !errors.Is(err, plumbing.ErrReferenceNotFound)
 }
 
-// listLocalCheckpointRefs maps every ref under the checkpoint namespace in
-// repo's common dir, where checkpoint refs live for all worktrees, to its tip.
-func listLocalCheckpointRefs(ctx context.Context, repo *git.Repository) (map[plumbing.ReferenceName]plumbing.Hash, error) {
+// localTip is ref's commit: the listed tip when partitionLocalRefs listed it,
+// otherwise a resolving lookup. listed may be nil.
+func localTip(repo *git.Repository, listed map[plumbing.ReferenceName]plumbing.Hash, ref plumbing.ReferenceName) (plumbing.Hash, error) {
+	if hash, ok := listed[ref]; ok {
+		return hash, nil
+	}
+	r, err := repo.Reference(ref, true)
+	if err != nil {
+		return plumbing.ZeroHash, err //nolint:wrapcheck // callers branch on plumbing.ErrReferenceNotFound
+	}
+	return r.Hash(), nil
+}
+
+// listLocalCheckpointRefs maps every ref under the checkpoint namespace to its
+// tip. It reads through go-git, which needs no subprocess, and falls back to git
+// for-each-ref when go-git's walk fails: one empty or unreadable loose ref, or a
+// malformed packed-refs line, anywhere under refs/ aborts it. tipsMatchLookup
+// reports whether the tips are the ones repo.Reference returns; git's are not
+// for a ref file with trailing data, which go-git reads as the zero hash, so
+// those only show which refs exist.
+func listLocalCheckpointRefs(
+	ctx context.Context,
+	repo *git.Repository,
+) (listed map[plumbing.ReferenceName]plumbing.Hash, tipsMatchLookup bool, err error) {
+	listed, err = listCheckpointRefsWithGoGit(ctx, repo)
+	if err == nil {
+		return listed, true, nil
+	}
+	logging.Debug(ctx, "checkpoint refs: go-git listing failed, listing with git for-each-ref",
+		slog.String("error", err.Error()))
+	listed, err = listCheckpointRefsWithGit(ctx, repo)
+	return listed, false, err
+}
+
+// listCheckpointRefsWithGoGit lists the checkpoint namespace through repo's
+// storer. Only refs with a non-zero hash are listed: a symbolic ref carries no
+// hash here and an unparsable one reads as the zero hash, so both are left to
+// the per-ref lookup, which resolves the first and reports the second.
+func listCheckpointRefsWithGoGit(ctx context.Context, repo *git.Repository) (map[plumbing.ReferenceName]plumbing.Hash, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err //nolint:wrapcheck // Propagating context cancellation
+	}
+	iter, err := repo.References()
+	if err != nil {
+		return nil, fmt.Errorf("list refs: %w", err)
+	}
+	defer iter.Close()
+	listed := make(map[plumbing.ReferenceName]plumbing.Hash)
+	err = iter.ForEach(func(ref *plumbing.Reference) error {
+		if !ref.Hash().IsZero() && strings.HasPrefix(ref.Name().String(), checkpoint.CheckpointRefPrefix) {
+			listed[ref.Name()] = ref.Hash()
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("iterate refs: %w", err)
+	}
+	return listed, nil
+}
+
+// listCheckpointRefsWithGit lists the checkpoint namespace with git
+// for-each-ref in repo's common dir, where checkpoint refs live for all
+// worktrees.
+func listCheckpointRefsWithGit(ctx context.Context, repo *git.Repository) (map[plumbing.ReferenceName]plumbing.Hash, error) {
 	commonDir, err := checkpoint.RepositoryCommonDir(repo)
 	if err != nil {
 		return nil, fmt.Errorf("resolve git common dir: %w", err)
@@ -121,6 +196,16 @@ func listLocalCheckpointRefs(ctx context.Context, repo *git.Repository) (map[plu
 		}
 	}
 	return listed, nil
+}
+
+// listErrorAttrs describes a failed listing, with git's stderr when it ran.
+func listErrorAttrs(err error) []any {
+	attrs := []any{slog.String("error", err.Error())}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		attrs = append(attrs, slog.String("stderr", strings.TrimSpace(string(exitErr.Stderr))))
+	}
+	return attrs
 }
 
 // batchPushCheckpointRefs pushes each ref at its pinned hash to target in a

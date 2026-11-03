@@ -180,10 +180,8 @@ func checkOuterPushOfHeldCommits(ctx context.Context, lines []PrePushRef, why st
 	}
 	tips := make(map[plumbing.Hash]plumbing.ReferenceName, len(waiting))
 	for ref := range waiting {
-		if hash, ok := listed[ref]; ok {
+		if hash, err := localTip(repo, listed, ref); err == nil {
 			tips[hash] = ref
-		} else if r, err := repo.Reference(ref, true); err == nil {
-			tips[r.Hash()] = ref
 		}
 	}
 	if len(tips) == 0 {
@@ -455,8 +453,9 @@ func PushCheckpoints(ctx context.Context, targets []CheckpointPushRequest) (Chec
 	return report, nil
 }
 
-// waitingCheckpointRefs is the set of queued refs present locally, with the
-// tips partitionLocalRefs listed.
+// waitingCheckpointRefs is the set of queued refs present locally. listed maps
+// waiting refs to their tips when the namespace was listed; it may be nil or
+// omit a waiting ref, so read tips through localTip.
 func waitingCheckpointRefs(
 	ctx context.Context,
 	repo *git.Repository,
