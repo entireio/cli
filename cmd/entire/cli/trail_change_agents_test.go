@@ -105,8 +105,14 @@ func TestTrailFindingDashboard_NoAgents(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, out, "Agents: no project agent is on this change")
 
-	// A server that sends no agents leaves the section out.
-	out, err = runTrailFindingDashboard(t, true, "")
-	require.NoError(t, err)
-	assert.NotContains(t, out, "Agents")
+	// A server that sends no agents, or null, leaves the section out of the
+	// text and the JSON; null falls back to the change's detail read.
+	for _, agents := range []string{"", "null"} {
+		out, err = runTrailFindingDashboard(t, true, agents)
+		require.NoError(t, err, "agents %q", agents)
+		assert.NotContains(t, out, "Agents", "agents %q", agents)
+		out, err = runTrailFindingDashboard(t, true, agents, "--json")
+		require.NoError(t, err, "agents %q", agents)
+		assert.NotContains(t, out, `"agents"`, "agents %q", agents)
+	}
 }
