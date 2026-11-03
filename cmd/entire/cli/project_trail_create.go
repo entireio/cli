@@ -54,7 +54,7 @@ func createRepositoryScopedProjectTrail(cmd *cobra.Command, request api.ProjectT
 			return fmt.Errorf("trail %s was created and branch linked, but reading the result failed: %w; do not rerun trail create", target.TrailID, err)
 		}
 	}
-	return printProjectTrail(cmd, out, nil)
+	return printProjectTrail(cmd, out, nil, nil)
 }
 
 // Repository access supplies placement and ownership without project inspection.

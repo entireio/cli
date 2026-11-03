@@ -77,7 +77,13 @@ func (opts attachOptions) committedRefs(ctx context.Context) cpkg.PersistentRefs
 // refs with the read chain for ordinary reads (an existing checkpoint's
 // summary may live on the elected sync remote rather than origin).
 func openAttachStore(ctx context.Context, repo *git.Repository, refs cpkg.PersistentRefs) (cpkg.PersistentStore, error) {
-	stores, err := cpkg.Open(ctx, repo, cpkg.OpenOptions{Refs: &refs, ReadRemotes: strategy.CheckpointReadRemotes(ctx)})
+	// fetchLegacyCheckpointRef already fetched a pre-switch checkpoint's ref;
+	// the copy's own remote check keeps the write from forking it regardless.
+	stores, err := cpkg.Open(ctx, repo, cpkg.OpenOptions{
+		Refs:                 &refs,
+		ReadRemotes:          strategy.CheckpointReadRemotes(ctx),
+		LegacyCopyRefFetcher: FetchCheckpointRef,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}
@@ -107,7 +113,8 @@ already have a checkpoint, and is it pushed — the same for HEAD and --commit:
   - It already has a checkpoint: the session is added to it. Git history is
     not changed.
   - It is already pushed: the commit is left unchanged and the link is
-    recorded in a new checkpoint, which is pushed right away. The link counts
+    recorded in a new checkpoint, which is pushed right away (under the manual
+    checkpoint push policy it waits for 'entire checkpoint push'). The link counts
     once the commit's author attaches it, and names that exact commit: after
     a rebase or amend, attach the session to the new commit.
   - It isn't pushed: the Entire-Checkpoint trailer is added to it, which
@@ -276,6 +283,7 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 	if err != nil {
 		return err
 	}
+	plan.heldForManualPush, plan.policyErr = strategy.CheckpointsHeldForManualPush(ctx)
 	target := plan.target
 
 	// Resolve agent and transcript path.
@@ -321,6 +329,11 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 		// other attach, since that sends the transcript.
 		if plan.remote == "" || checkpointOnRemote(ctx, plan.remote, cp.id) {
 			return nil
+		}
+		// Under manual nothing is sent, so there is nothing to confirm; an
+		// unreadable policy sends nothing either, and delivery reports why.
+		if plan.heldForManualPush || plan.policyErr != nil {
+			return redeliverAttachedCheckpoint(ctx, w, errW, plan, cp.id)
 		}
 		warning := []string{
 			fmt.Sprintf("Checkpoint %s, which holds session %s, isn't on %s yet.", cp.id, sessionID, plan.remote),
@@ -580,9 +593,13 @@ func attachWarning(ctx context.Context, plan attachLinkPlan, sessionID string, c
 		lines = append(lines, rewriteWarning(ctx, plan.rewrite, plan.checkedRemotes)...)
 		lines = append(lines, fmt.Sprintf("Session %s goes into a new checkpoint linked by that trailer.", sessionID))
 	}
-	if plan.remote != "" {
+	// An unreadable policy uploads nothing either, so it must not promise to.
+	switch {
+	case plan.heldForManualPush || plan.policyErr != nil:
+		lines = append(lines, "The checkpoint, including the session transcript, stays on this machine until you upload it with 'entire checkpoint push'.")
+	case plan.remote != "":
 		lines = append(lines, "Pending checkpoints, including this one with the session transcript, are pushed to "+plan.remote+" now.")
-	} else {
+	default:
 		lines = append(lines, "The checkpoint, including the session transcript, is pushed with your next git push.")
 	}
 	if window.start > 0 {
@@ -627,7 +644,7 @@ func redeliverAttachedCheckpoint(ctx context.Context, w, errW io.Writer, plan at
 	if plan.remote == "" {
 		return nil
 	}
-	err := pushAttachedCheckpoint(ctx, w, plan.remote, checkpointID)
+	err := pushAttachedCheckpoint(ctx, w, plan, checkpointID)
 	if err != nil && plan.mode != attachRecordLink {
 		fmt.Fprintf(errW, "warning: %v\n", err)
 		return nil
@@ -675,6 +692,11 @@ type attachLinkPlan struct {
 	rewrite []*object.Commit
 	// checkedRemotes are the remotes asked whether they hold target.
 	checkedRemotes []string
+	// heldForManualPush and policyErr are the checkpoint push policy read
+	// once, so delivery does what the confirmation said even if another
+	// worktree changes the policy in between.
+	heldForManualPush bool
+	policyErr         error
 }
 
 // planAttachLink resolves the target (HEAD unless --commit names another) and
@@ -1012,7 +1034,7 @@ func reportLinkedCommit(ctx context.Context, w, errW io.Writer, plan attachLinkP
 		fmt.Fprintf(errW, "Note: commit %s was authored by %s. A link recorded in the checkpoint counts only when the commit's author attaches it.\n",
 			plan.target.Hash.String()[:12], plan.target.Author.Email)
 	}
-	return pushAttachedCheckpoint(ctx, w, plan.remote, checkpointID)
+	return pushAttachedCheckpoint(ctx, w, plan, checkpointID)
 }
 
 // attachLinkRepo names the code repository for a link as
@@ -1034,11 +1056,19 @@ func attachLinkRepo(ctx context.Context, remote string) string {
 // and no later git push of that commit will carry it, so an undelivered push is
 // an error rather than a note. Uses the pre-push path, which honors
 // push_sessions, checkpoint_remote and the privacy filter; that path is
-// fail-soft, so delivery is checked against the remote afterwards.
-func pushAttachedCheckpoint(ctx context.Context, w io.Writer, remote string, checkpointID id.CheckpointID) error {
+// fail-soft, so delivery is checked against the remote afterwards. Under the
+// manual checkpoint push policy the checkpoint waits like any other.
+func pushAttachedCheckpoint(ctx context.Context, w io.Writer, plan attachLinkPlan, checkpointID id.CheckpointID) error {
+	remote := plan.remote
 	target, disabled := strategy.CheckpointPushTarget(ctx, remote)
 	if disabled {
 		return fmt.Errorf("checkpoint %s was written locally but not pushed: push_sessions is turned off in settings, so the link stays invisible to others until the checkpoint is pushed", checkpointID)
+	}
+	if plan.policyErr != nil {
+		return fmt.Errorf("checkpoint %s was written locally but not pushed: %w", checkpointID, plan.policyErr)
+	}
+	if plan.heldForManualPush {
+		return reportHeldAttachedCheckpoint(ctx, w, checkpointID)
 	}
 	if err := strategy.NewManualCommitStrategy().PrePush(ctx, remote); err != nil {
 		return fmt.Errorf("checkpoint %s was written locally but could not be pushed to %s: %w", checkpointID, remote, err)
@@ -1047,6 +1077,30 @@ func pushAttachedCheckpoint(ctx context.Context, w io.Writer, remote string, che
 		return fmt.Errorf("checkpoint %s was written locally but did not reach %s: %w", checkpointID, remote, err)
 	}
 	fmt.Fprintf(w, "  Pushed checkpoint metadata to %s\n", remote)
+	return nil
+}
+
+// reportHeldAttachedCheckpoint tells the user how to upload a checkpoint that
+// manual held back. A checkpoint on its own ref that is not queued (its
+// enqueue failed) would not be sent, so that is an error. Manual needs the
+// git-refs backend, which writes every checkpoint, including one from before
+// the switch, to its own ref.
+func reportHeldAttachedCheckpoint(ctx context.Context, w io.Writer, checkpointID id.CheckpointID) error {
+	waiting, err := strategy.CheckpointWaiting(ctx, checkpointID)
+	if err != nil {
+		return fmt.Errorf("checkpoint %s was written locally but not pushed: %w", checkpointID, err)
+	}
+	if !waiting {
+		onRef, err := strategy.CheckpointRefExists(ctx, checkpointID)
+		if err != nil {
+			return fmt.Errorf("checkpoint %s was written locally but not pushed: %w", checkpointID, err)
+		}
+		if onRef {
+			return fmt.Errorf("checkpoint %s was written locally but not queued for upload, so 'entire checkpoint push' can't send it yet; run 'entire session attach' again to queue it", checkpointID)
+		}
+		return fmt.Errorf("checkpoint %s was not found after it was written; run 'entire session attach' again", checkpointID)
+	}
+	fmt.Fprintf(w, "  Checkpoint %s is waiting; upload it with: entire checkpoint push %s\n", checkpointID, checkpointID)
 	return nil
 }
 
@@ -1212,12 +1266,27 @@ func ensureCheckpointAvailable(ctx, logCtx context.Context, repo *git.Repository
 	if !isExistingCheckpoint {
 		return repo, nil
 	}
+	// A deleted checkpoint can still be visible here (a remote the delete could
+	// not reach, or a copy another clone pushed back). Writing to it would bring
+	// it back, and on git-branch the next push would undo the delete.
+	deletedSet, err := cpkg.LoadDeletedForRepo(repo)
+	if err != nil {
+		return repo, fmt.Errorf("read deleted checkpoints: %w", err)
+	}
+	if deletedSet.Contains(checkpointID) {
+		return repo, fmt.Errorf("checkpoint %s was deleted from this clone, so attach won't add a session to it; nothing was changed", checkpointID)
+	}
 
 	cfg, err := settings.LoadCheckpointsConfig(ctx)
 	if err != nil {
 		return repo, fmt.Errorf("resolve checkpoints config: %w", err)
 	}
 	storedInRef := isCheckpointRef(checkpointStorageRefsFor(cfg, checkpointID)[0])
+	if storedInRef && checkpointID.Kind() != id.KindULID {
+		if repo, err = fetchLegacyCheckpointRef(ctx, repo, checkpointID); err != nil {
+			return repo, err
+		}
+	}
 
 	present, readErr := checkpointPresentLocally(ctx, repo, refs, checkpointID, storedInRef)
 	if readErr != nil {
@@ -1244,6 +1313,37 @@ func ensureCheckpointAvailable(ctx, logCtx context.Context, repo *git.Repository
 	}
 
 	return repo, missingCheckpointError(logCtx, checkpointID)
+}
+
+// fetchLegacyCheckpointRef fetches the ref of a pre-switch hex checkpoint
+// before attach writes to it. Without a local ref, the write copies the
+// checkpoint from v1 into a new ref; if another clone already did that and
+// pushed, the two refs share no history and the push recovery replays this
+// clone's copy over the remote's, losing that clone's sessions. A local v1 copy
+// counts as present, so the fetch in ensureCheckpointAvailable would not run.
+// A remote without the ref is fine; failing to ask is not, since attach would
+// then copy blind.
+func fetchLegacyCheckpointRef(ctx context.Context, repo *git.Repository, checkpointID id.CheckpointID) (*git.Repository, error) {
+	refName, err := cpkg.RefName(checkpointID)
+	if err != nil {
+		return repo, fmt.Errorf("resolve checkpoint ref for %s: %w", checkpointID, err)
+	}
+	_, err = repo.Reference(refName, true)
+	switch {
+	case err == nil:
+		return repo, nil
+	case !errors.Is(err, plumbing.ErrReferenceNotFound):
+		return repo, fmt.Errorf("resolve checkpoint ref %s: %w", refName, err)
+	}
+	freshRepo, err := refreshCheckpoint(ctx, checkpointID, true)
+	switch {
+	case err == nil:
+		return freshRepo, nil
+	case errors.Is(err, plumbing.ErrReferenceNotFound):
+		return repo, nil
+	default:
+		return repo, fmt.Errorf("couldn't check whether checkpoint %s already has its own ref on the remote, so attach won't copy it from the %s branch; nothing was changed: %w", checkpointID, paths.MetadataBranchName, err)
+	}
 }
 
 // refreshCheckpoint fetches the checkpoint referenced by the target commit from the remote and
