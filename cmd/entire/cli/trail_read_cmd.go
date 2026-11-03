@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -99,9 +98,6 @@ func newTrailTimelineCmd(mode *trailMode) *cobra.Command {
 		"Show the activity on a trail's branch, newest first: commits, reviews, finding resolutions, approvals, and lifecycle events. "+
 			"Use --page-token with the printed token to continue.",
 		func(cmd *cobra.Command, selected *trailWorkingContext, jsonOut bool) error {
-			if pageSize < 1 || pageSize > trailListServerMaxLimit {
-				return errors.New("--limit must be between 1 and 100")
-			}
 			query := url.Values{"pageSize": {strconv.Itoa(pageSize)}}
 			if pageToken != "" {
 				query.Set("pageToken", pageToken)
@@ -118,15 +114,24 @@ func newTrailTimelineCmd(mode *trailMode) *cobra.Command {
 			}
 			return printTrailTimeline(cmd.OutOrStdout(), selected, out)
 		})
-	cmd.Flags().IntVar(&pageSize, "limit", 50, "Page size (1-100)")
+	// The page size is checked before the trail is resolved, so a bad value
+	// fails without authenticating or reading anything.
+	cmd.PreRunE = func(*cobra.Command, []string) error {
+		if pageSize < 1 || pageSize > trailListServerMaxLimit {
+			return fmt.Errorf("--limit must be between 1 and %d", trailListServerMaxLimit)
+		}
+		return nil
+	}
+	cmd.Flags().IntVar(&pageSize, "limit", 50, fmt.Sprintf("Page size (1-%d)", trailListServerMaxLimit))
 	cmd.Flags().StringVar(&pageToken, "page-token", "", "Continue from a previous page's token")
 	return cmd
 }
 
 func printTrailTimeline(w io.Writer, selected *trailWorkingContext, out trailTimelineResponse) error {
+	// An empty page is only this page's: a page that could not be loaded in
+	// full, or that has a next page, says so below.
 	if len(out.Items) == 0 {
-		fmt.Fprintf(w, "No activity on %s\n", selected.description())
-		return nil
+		fmt.Fprintf(w, "No activity on this page of %s\n", selected.description())
 	}
 	for _, raw := range out.Items {
 		var item trailTimelineItem
@@ -236,6 +241,8 @@ func newTrailSessionsCmd(mode *trailMode) *cobra.Command {
 		})
 }
 
+// trailStackResponse is the text view's reading of the stack; --json prints
+// the server's response unchanged, so fields the CLI does not model survive.
 type trailStackResponse struct {
 	Stack *trailStack `json:"stack"`
 }
@@ -260,12 +267,16 @@ func newTrailStackCmd(mode *trailMode) *cobra.Command {
 		"Show the stack of pull requests a trail's pull request belongs to, bottom (closest to the base) first. "+
 			"Only GitHub-backed trails in a stack have one.",
 		func(cmd *cobra.Command, selected *trailWorkingContext, jsonOut bool) error {
-			var out trailStackResponse
-			if err := getTrailRepoIDResource(cmd.Context(), selected, "/stack", "stack", &out); err != nil {
+			var raw json.RawMessage
+			if err := getTrailRepoIDResource(cmd.Context(), selected, "/stack", "stack", &raw); err != nil {
 				return err
 			}
 			if jsonOut {
-				return printJSON(cmd.OutOrStdout(), out)
+				return printJSON(cmd.OutOrStdout(), raw)
+			}
+			var out trailStackResponse
+			if err := json.Unmarshal(raw, &out); err != nil {
+				return fmt.Errorf("decode trail stack: %w", err)
 			}
 			w := cmd.OutOrStdout()
 			if out.Stack == nil {

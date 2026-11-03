@@ -3,10 +3,11 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strconv"
 	"testing"
 
-	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -87,10 +88,32 @@ func TestTrailTimeline_JSONPassesItemsThrough(t *testing.T) {
 	assert.JSONEq(t, `{"items":[],"commitCount":0,"incomplete":false}`, out)
 }
 
-func TestTrailTimeline_RejectsAnOutOfRangeLimit(t *testing.T) {
+func TestTrailTimeline_RejectsAnOutOfRangeLimitBeforeAnyRequest(t *testing.T) {
 	// Serial: replaces global clients.
-	_, _, err := readTrailChange(t, "timeline", nil, "--limit", "0")
-	require.ErrorContains(t, err, "--limit must be between 1 and 100")
+	noRequest := func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		http.NotFound(w, r)
+	}
+	setupProjectTrailTest(t, noRequest)
+	setupWorkingRepoClient(t, noRequest)
+	for _, limit := range []string{"0", strconv.Itoa(trailListServerMaxLimit + 1)} {
+		cmd := newTrailCmdForMode(true)
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetErr(&bytes.Buffer{})
+		cmd.SilenceUsage = true
+		cmd.SilenceErrors = true
+		cmd.SetArgs([]string{"timeline", "42", "--repo", "gh/acme/widget", "--limit", limit})
+		require.ErrorContains(t, cmd.Execute(), fmt.Sprintf("--limit must be between 1 and %d", trailListServerMaxLimit), "limit %s", limit)
+	}
+}
+
+func TestTrailTimeline_EmptyPageStillReportsIncompletenessAndTheNextPage(t *testing.T) {
+	// Serial: replaces global clients.
+	_, out, err := readTrailChange(t, "timeline", json.RawMessage(`{"items":[],"commitCount":0,"incomplete":true,"nextPageToken":"next-page"}`))
+	require.NoError(t, err)
+	assert.Contains(t, out, "No activity on this page of trail #42")
+	assert.Contains(t, out, "(incomplete: some activity could not be loaded)\n")
+	assert.Contains(t, out, "Next page: --page-token next-page\n")
 }
 
 func TestTrailSessions_ListsSessions(t *testing.T) {
@@ -122,7 +145,19 @@ func TestTrailStack_RendersTheStackOrItsAbsence(t *testing.T) {
 	assert.Regexp(t, `(?m)^  #10\s+open\s+-\s*$`, out)
 	assert.Regexp(t, `(?m)^> #11\s+open\s+widget/7\s+Add keys$`, out)
 
-	_, out, err = readTrailChange(t, "stack", api.TrailResource{})
+	_, out, err = readTrailChange(t, "stack", json.RawMessage(`{"stack":null}`))
 	require.NoError(t, err)
 	assert.Contains(t, out, "is not in a pull request stack")
+}
+
+func TestTrailStack_JSONPassesTheServersResponseThrough(t *testing.T) {
+	// Serial: replaces global clients.
+	body := `{"stack":{"position":1,"size":2,"base":"main","newField":"kept","pull_requests":[{"pr_number":10,"trail_number":null,"title":"Base","status":"open","current":true,"author":"alice"}]}}`
+	_, out, err := readTrailChange(t, "stack", json.RawMessage(body), "--json")
+	require.NoError(t, err)
+	assert.JSONEq(t, body, out)
+
+	_, out, err = readTrailChange(t, "stack", json.RawMessage(`{"stack":null}`), "--json")
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"stack":null}`, out)
 }
