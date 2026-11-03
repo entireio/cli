@@ -174,6 +174,30 @@ func TestTrailFindingShow_PrintsRepliesWithTheirIDs(t *testing.T) {
 	assert.Contains(t, out, "    ↳ reply-one  bob  2026-10-29T12:00:00Z\n    Fixed\n")
 }
 
+func TestTrailFindingReply_SanitizesServerIDs(t *testing.T) {
+	// Not parallel: replaces client constructors.
+	const evil = "evil\x1b]0;pwned\a"
+	created := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+	setupFindingReplyTest(t, findingReplyTestDiscussion, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"message": map[string]any{"id": evil}}))
+			return
+		}
+		assert.NoError(t, json.NewEncoder(w).Encode(api.TrailDiscussionDetailResponse{Messages: []api.TrailDiscussionMessage{
+			{ID: evil, Author: "alice", CreatedAt: created, Body: "x",
+				Replies: []api.TrailDiscussionReply{{ID: evil, Author: "bob", CreatedAt: created, Body: "y"}}},
+		}}))
+	})
+	for _, args := range [][]string{
+		{"finding", "show", "widget/7", findingReplyTestFinding, "--project", "gh/acme"},
+		{"finding", "reply", "widget/7", findingReplyTestFinding, "-m", "hi", "--project", "gh/acme"},
+	} {
+		out, _, err := executeProjectTrailTest(t, args...)
+		require.NoError(t, err, args[1])
+		assert.NotContains(t, out, "\x1b", "%s must not print a raw escape", args[1])
+	}
+}
+
 func TestTrailFindingShow_WarnsButSucceedsWhenRepliesFail(t *testing.T) {
 	// Not parallel: replaces client constructors.
 	setupFindingReplyTest(t, findingReplyTestDiscussion, func(w http.ResponseWriter, _ *http.Request) {
