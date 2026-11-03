@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/internal/coreapi"
@@ -15,12 +16,25 @@ import (
 
 func myTrailTestItem(id string, number int, activity string) map[string]any {
 	return map[string]any{"id": id, "number": number, "title": "Trail " + id, "status": "open", "phase": "building",
-		"last_activity_at": activity, "project": map[string]any{"reference": map[string]any{"forge": "gh", "project": "acme"}}}
+		"last_activity_at": activity, "created_at": "2026-09-01T12:00:00Z", "updated_at": activity,
+		"assignee_account_ids": []string{"acct-1"}, "repository_ids": []string{"repo-1"}, "author_account_id": "acct-1",
+		"project": map[string]any{"id": "proj-1", "name": "acme", "provider": "github", "jurisdiction": "us",
+			"reference": map[string]any{"forge": "gh", "project": "acme"}, "can_manage_trails": true},
+		"changes": []any{map[string]any{"id": "chg-1", "repository_id": "repo-1", "repository": "widget", "branch": "feature/x",
+			"number": 7, "title": "Widget", "status": "open", "has_code_changes": true,
+			"created_at": "2026-09-01T12:00:00Z", "updated_at": activity, "last_activity_at": activity}}}
 }
 
 // serveMyTrailsRegion answers /me/project-trails with items, or with status
 // when it is not 200, and records each query it was sent.
 func serveMyTrailsRegion(t *testing.T, status int, queries *[]string, items ...map[string]any) string {
+	t.Helper()
+	return serveMyTrailsRegionPage(t, status, queries, nil, items...)
+}
+
+// serveMyTrailsRegionPage is serveMyTrailsRegion with the cell's own
+// meta.partial reasons.
+func serveMyTrailsRegionPage(t *testing.T, status int, queries *[]string, partial []string, items ...map[string]any) string {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/me/project-trails" {
@@ -36,7 +50,7 @@ func serveMyTrailsRegion(t *testing.T, status int, queries *[]string, items ...m
 		if items == nil {
 			items = []map[string]any{}
 		}
-		assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"items": items, "meta": map[string]any{}}))
+		assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"items": items, "meta": map[string]any{"partial": partial}}))
 	}))
 	t.Cleanup(srv.Close)
 	return srv.URL
@@ -44,9 +58,7 @@ func serveMyTrailsRegion(t *testing.T, status int, queries *[]string, items ...m
 
 func withMyTrailsClusters(t *testing.T, clusters ...coreapi.Cluster) {
 	t.Helper()
-	old := newCellCoreClient
-	newCellCoreClient = func() (cellCoreClient, error) { return &fakeCellCore{clusters: clusters}, nil }
-	t.Cleanup(func() { newCellCoreClient = old })
+	withFakeCellCore(t, &fakeCellCore{clusters: clusters})
 	withFakeCellClientBuilder(t, &fakeCellClientBuilder{})
 }
 
@@ -121,14 +133,14 @@ func TestTrailListMine_ReportsAFailedRegion(t *testing.T) {
 	out, errOut, err := runTrailListMine(t)
 	require.NoError(t, err)
 	assert.Regexp(t, `gh/acme\s+3\s+open\s+building\s+2026-10-29T12:00:00Z\s+Trail eu-new`, out)
-	assert.Contains(t, errOut, "Warning: list may be incomplete: region us:")
+	assert.Contains(t, errOut, "Warning: list may be incomplete: region us: status 502")
 
-	out, _, err = runTrailListMine(t, "--json")
+	out, errOut, err = runTrailListMine(t, "--json")
 	require.NoError(t, err)
+	assert.Contains(t, errOut, "Warning: list may be incomplete: region us: status 502", "warned with --json too")
 	var got myProjectTrailsJSON
 	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
-	require.Len(t, got.Partial, 1)
-	assert.Contains(t, got.Partial[0], "region us:")
+	assert.Equal(t, []string{"region us: status 502"}, got.Partial)
 }
 
 func TestTrailListMine_FailsWhenEveryRegionFails(t *testing.T) {
@@ -151,4 +163,132 @@ func TestTrailListMine_RefusesProjectScopedFlags(t *testing.T) {
 		_, _, err := runTrailListMine(t, args...)
 		require.ErrorContains(t, err, "cannot be combined", "args %v", args)
 	}
+}
+
+func TestTrailListMine_JSONItemsMatchThePlainListShape(t *testing.T) {
+	// Serial: replaces the core client and cell builder seams.
+	var queries []string
+	us := serveMyTrailsRegion(t, http.StatusOK, &queries, myTrailTestItem("us-1", 4, "2026-10-29T12:00:00Z"))
+	withMyTrailsClusters(t, myTrailsCluster("us", "us", us, true))
+
+	out, _, err := runTrailListMine(t, "--json")
+	require.NoError(t, err)
+	var got struct {
+		Items []map[string]any `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
+	require.Len(t, got.Items, 1)
+	item := got.Items[0]
+	for _, key := range []string{"id", "projectId", "number", "title", "status", "createdAt", "updatedAt", "repoIds", "authorAccountId", "assigneeAccountIds", "project", "changes", "lastActivityAt", "phase"} {
+		assert.Contains(t, item, key)
+	}
+	for _, key := range []string{"created_at", "last_activity_at", "repository_ids"} {
+		assert.NotContains(t, item, key, "no cell snake_case keys")
+	}
+	assert.Equal(t, "proj-1", item["projectId"])
+	changes, ok := item["changes"].([]any)
+	require.True(t, ok, "changes is a list")
+	require.Len(t, changes, 1)
+	change, ok := changes[0].(map[string]any)
+	require.True(t, ok, "a change is an object")
+	assert.Equal(t, "repo-1", change["repositoryId"])
+}
+
+func TestTrailListMine_KeepsTheNewestCopyOfATrail(t *testing.T) {
+	// Serial: replaces the core client and cell builder seams.
+	var euQueries, usQueries []string
+	old := myTrailTestItem("same", 1, "2026-10-01T12:00:00Z")
+	old["title"] = "stale copy"
+	eu := serveMyTrailsRegion(t, http.StatusOK, &euQueries, old, myTrailTestItem("mid", 2, "2026-10-15T12:00:00Z"))
+	us := serveMyTrailsRegion(t, http.StatusOK, &usQueries, myTrailTestItem("same", 1, "2026-10-29T12:00:00Z"))
+	withMyTrailsClusters(t, myTrailsCluster("eu", "eu", eu, true), myTrailsCluster("us", "us", us, true))
+
+	out, _, err := runTrailListMine(t, "--limit", "1", "--json")
+	require.NoError(t, err)
+	var got myProjectTrailsJSON
+	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
+	require.Len(t, got.Items, 1)
+	assert.Equal(t, "same", got.Items[0].ID, "the newer copy sorts first, not the region-order one")
+	assert.Equal(t, "Trail same", got.Items[0].Title)
+}
+
+func TestTrailListMine_PassesTheCellsPartialReasonsThrough(t *testing.T) {
+	// Serial: replaces the core client and cell builder seams.
+	var queries []string
+	us := serveMyTrailsRegionPage(t, http.StatusOK, &queries, []string{"readiness unavailable"}, myTrailTestItem("us-1", 1, "2026-10-29T12:00:00Z"))
+	withMyTrailsClusters(t, myTrailsCluster("us", "us", us, true))
+
+	out, errOut, err := runTrailListMine(t, "--json")
+	require.NoError(t, err)
+	var got myProjectTrailsJSON
+	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
+	assert.Equal(t, []string{"region us: readiness unavailable"}, got.Partial)
+	assert.Contains(t, errOut, "region us: readiness unavailable")
+}
+
+func TestTrailListMine_AnUnreadableItemMakesItsRegionPartial(t *testing.T) {
+	// Serial: replaces the core client and cell builder seams.
+	var queries []string
+	noActivity := myTrailTestItem("bad-1", 2, "")
+	wrongType := myTrailTestItem("bad-2", 3, "2026-10-29T12:00:00Z")
+	wrongType["number"] = "three"
+	noID := myTrailTestItem("", 4, "2026-10-29T12:00:00Z")
+	us := serveMyTrailsRegion(t, http.StatusOK, &queries, myTrailTestItem("good", 1, "2026-10-29T12:00:00Z"), noActivity, wrongType, noID)
+	withMyTrailsClusters(t, myTrailsCluster("us", "us", us, true))
+
+	out, _, err := runTrailListMine(t, "--json")
+	require.NoError(t, err)
+	var got myProjectTrailsJSON
+	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
+	require.Len(t, got.Items, 1, "the readable item stays; an item without an id is left out")
+	assert.Equal(t, "good", got.Items[0].ID)
+	assert.Equal(t, []string{"region us: 2 trail(s) could not be read"}, got.Partial)
+}
+
+func TestTrailListMine_ARejectedLoginFailsTheList(t *testing.T) {
+	// Serial: replaces the core client and cell builder seams.
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		var euQueries, usQueries []string
+		eu := serveMyTrailsRegion(t, http.StatusOK, &euQueries, myTrailTestItem("eu-1", 1, "2026-10-29T12:00:00Z"))
+		us := serveMyTrailsRegion(t, status, &usQueries)
+		withMyTrailsClusters(t, myTrailsCluster("eu", "eu", eu, true), myTrailsCluster("us", "us", us, true))
+
+		out, _, err := runTrailListMine(t, "--json")
+		require.ErrorContains(t, err, "region us rejected your login", "status %d", status)
+		assert.Empty(t, out)
+	}
+}
+
+func TestTrailListMine_RegionFailuresCarryNoResponseBody(t *testing.T) {
+	// Serial: replaces the core client and cell builder seams.
+	html := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusBadGateway)
+		_, err := w.Write([]byte("<html><body>" + strings.Repeat("cloudflare ", 300) + "</body></html>"))
+		assert.NoError(t, err)
+	}))
+	t.Cleanup(html.Close)
+	var queries []string
+	us := serveMyTrailsRegion(t, http.StatusOK, &queries, myTrailTestItem("us-1", 1, "2026-10-29T12:00:00Z"))
+	withMyTrailsClusters(t, myTrailsCluster("eu", "eu", html.URL, true), myTrailsCluster("us", "us", us, true))
+
+	out, errOut, err := runTrailListMine(t, "--json")
+	require.NoError(t, err)
+	assert.NotContains(t, out, "cloudflare")
+	assert.NotContains(t, errOut, "cloudflare")
+	assert.Contains(t, out, `"region eu: status 502"`)
+}
+
+func TestTrailListMine_EmptyCatalogAndEmptyList(t *testing.T) {
+	// Serial: replaces the core client and cell builder seams.
+	withMyTrailsClusters(t)
+	_, _, err := runTrailListMine(t)
+	require.ErrorContains(t, err, "names no region with an API URL")
+
+	var queries []string
+	us := serveMyTrailsRegion(t, http.StatusOK, &queries)
+	withMyTrailsClusters(t, myTrailsCluster("us", "us", us, true))
+	out, _, err := runTrailListMine(t)
+	require.NoError(t, err)
+	assert.Contains(t, out, "No trails authored by or assigned to you.")
 }

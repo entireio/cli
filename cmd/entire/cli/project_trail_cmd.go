@@ -230,10 +230,11 @@ func newProjectTrailListCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
+				printMyProjectTrailsWarnings(cmd.ErrOrStderr(), out)
 				if jsonRequested(cmd) {
 					return printJSON(cmd.OutOrStdout(), out)
 				}
-				return printMyProjectTrails(cmd.OutOrStdout(), cmd.ErrOrStderr(), out)
+				return printMyProjectTrails(cmd.OutOrStdout(), out)
 			}
 			page, err := listProjectTrails(cmd, status, pageSize, cursor)
 			if err != nil {
