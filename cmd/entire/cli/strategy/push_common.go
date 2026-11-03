@@ -46,23 +46,81 @@ func (p checkpointRefPush) refSpec() string {
 // partitionLocalRefs splits refs into those that exist locally (pushable) and
 // those that don't (stale queue entries — e.g. a checkpoint ref deleted by
 // cleanup). Stale refs can never push, so callers drop them from the queue
-// rather than retrying them forever.
-func partitionLocalRefs(repo *git.Repository, refs []plumbing.ReferenceName) (existing, stale []plumbing.ReferenceName) {
+// rather than retrying them forever. listed holds the tip of every ref found by
+// listing the checkpoint namespace; a ref missing from it has no known tip.
+//
+// One listing answers most refs, where a per-ref lookup costs a packed-refs
+// scan each. Refs the listing omits still get that lookup, because
+// for-each-ref silently skips broken ref files and reports the on-disk shard
+// case, while a case-insensitive filesystem still resolves the queued name.
+func partitionLocalRefs(
+	ctx context.Context,
+	repo *git.Repository,
+	refs []plumbing.ReferenceName,
+) (existing, stale []plumbing.ReferenceName, listed map[plumbing.ReferenceName]plumbing.Hash) {
+	if len(refs) == 0 {
+		return nil, nil, nil
+	}
+	listed, err := listLocalCheckpointRefs(ctx, repo)
+	if err != nil {
+		logging.Debug(ctx, "checkpoint refs: listing failed, looking up each queued ref",
+			slog.String("error", err.Error()))
+	}
+	looked := make(map[plumbing.ReferenceName]bool)
 	for _, ref := range refs {
-		_, err := repo.Reference(ref, false)
-		switch {
-		case err == nil:
+		if _, ok := listed[ref]; ok {
 			existing = append(existing, ref)
-		case errors.Is(err, plumbing.ErrReferenceNotFound):
-			// Genuinely gone (e.g. deleted by cleanup) — never pushable, drop it.
+			continue
+		}
+		present, seen := looked[ref]
+		if !seen {
+			present = localRefMayExist(repo, ref)
+			looked[ref] = present
+		}
+		if present {
+			existing = append(existing, ref)
+		} else {
 			stale = append(stale, ref)
-		default:
-			// A transient/IO lookup error: keep the ref as pushable so a real
-			// entry isn't dropped from the queue forever over a flaky read.
-			existing = append(existing, ref)
 		}
 	}
-	return existing, stale
+	return existing, stale, listed
+}
+
+func localRefMayExist(repo *git.Repository, ref plumbing.ReferenceName) bool {
+	_, err := repo.Reference(ref, false)
+	// Only a ref that is genuinely gone (e.g. deleted by cleanup) is stale. A
+	// transient/IO lookup error keeps the ref pushable so a real entry isn't
+	// dropped from the queue forever over a flaky read.
+	return !errors.Is(err, plumbing.ErrReferenceNotFound)
+}
+
+// listLocalCheckpointRefs maps every ref under the checkpoint namespace in
+// repo's common dir, where checkpoint refs live for all worktrees, to its tip.
+func listLocalCheckpointRefs(ctx context.Context, repo *git.Repository) (map[plumbing.ReferenceName]plumbing.Hash, error) {
+	commonDir, err := checkpoint.RepositoryCommonDir(repo)
+	if err != nil {
+		return nil, fmt.Errorf("resolve git common dir: %w", err)
+	}
+	cmd := exec.CommandContext(ctx, "git", "--git-dir="+commonDir,
+		"for-each-ref", "--format=%(objectname) %(refname)", "--end-of-options", checkpoint.CheckpointRefPrefix)
+	cmd.Dir = commonDir
+	cmd.Env = gitrepo.EnvWithoutRepoOverrides()
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("list checkpoint refs: %w", err)
+	}
+	listed := make(map[plumbing.ReferenceName]plumbing.Hash)
+	for line := range strings.SplitSeq(string(out), "\n") {
+		oid, name, ok := strings.Cut(line, " ")
+		if !ok {
+			continue
+		}
+		// An unparsable line leaves its ref to the per-ref lookup.
+		if hash, ok := plumbing.FromHex(oid); ok {
+			listed[plumbing.ReferenceName(name)] = hash
+		}
+	}
+	return listed, nil
 }
 
 // batchPushCheckpointRefs pushes each ref at its pinned hash to target in a

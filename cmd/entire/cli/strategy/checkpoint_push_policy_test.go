@@ -2,10 +2,18 @@ package strategy
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/stretchr/testify/require"
+
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 func TestCheckpointPushOutcomes(t *testing.T) {
@@ -93,4 +101,137 @@ func TestWaitingTargetSelection_RefusesTwoCommitsForOneRef(t *testing.T) {
 		{Ref: ref, Commit: plumbing.NewHash("2222222222222222222222222222222222222222")},
 	}, map[plumbing.ReferenceName]struct{}{ref: {}})
 	require.Error(t, err)
+}
+
+// pushOfCommit is a pre-push line sending commit under a new branch name.
+func pushOfCommit(commit string) []PrePushRef {
+	return []PrePushRef{{LocalRef: commit, LocalSHA: commit, RemoteRef: "refs/heads/copy", RemoteSHA: plumbing.ZeroHash.String()}}
+}
+
+func revParse(t *testing.T, dir, rev string) string {
+	t.Helper()
+	return strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", rev))
+}
+
+func enqueueInRepoAt(t *testing.T, dir string, refs ...plumbing.ReferenceName) {
+	t.Helper()
+	repo, err := gitrepo.OpenPath(dir)
+	require.NoError(t, err)
+	defer repo.Close()
+	enqueueRefs(t, repo, refs)
+}
+
+func TestCheckOuterPushOfHeldCommits_RefusesCurrentVersionOnly(t *testing.T) {
+	workDir, _, refs := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	enqueueInRepoAt(t, workDir, refs[0])
+	older := revParse(t, workDir, refs[0].String())
+	testutil.RunGit(t, workDir, "commit", "--allow-empty", "-m", "newer checkpoint version")
+	current := revParse(t, workDir, "HEAD")
+	testutil.RunGit(t, workDir, "update-ref", refs[0].String(), current)
+
+	err := checkOuterPushOfHeldCommits(t.Context(), pushOfCommit(current), "test holds it")
+	require.ErrorIs(t, err, ErrOuterPushCarriesHeldCheckpoints, "the current version is held")
+
+	require.NoError(t, checkOuterPushOfHeldCommits(t.Context(), pushOfCommit(older), "test holds it"),
+		"an older version is not matched")
+}
+
+func TestCheckOuterPushOfHeldCommits_PackedRefs(t *testing.T) {
+	workDir, _, refs := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	enqueueInRepoAt(t, workDir, refs...)
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+
+	err := checkOuterPushOfHeldCommits(t.Context(), pushOfCommit(revParse(t, workDir, refs[1].String())), "test holds it")
+	require.ErrorIs(t, err, ErrOuterPushCarriesHeldCheckpoints)
+}
+
+// The queued name resolves only through a case-insensitive filesystem, so the
+// push is refused exactly when that name reaches the ref.
+func TestCheckOuterPushOfHeldCommits_CaseFoldedShard(t *testing.T) {
+	workDir, _, _ := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	testutil.RunGit(t, workDir, "commit", "--allow-empty", "-m", "folded checkpoint")
+	tip := revParse(t, workDir, "HEAD")
+	stored := checkpoint.CheckpointRefPrefix + "AB/0000000000ab"
+	testutil.RunGit(t, workDir, "update-ref", stored, tip)
+	queued := mustRefName(t, id.MustCheckpointID("0000000000ab"))
+	enqueueInRepoAt(t, workDir, queued)
+	_, statErr := os.Stat(filepath.Join(workDir, ".git", filepath.FromSlash(queued.String())))
+
+	err := checkOuterPushOfHeldCommits(t.Context(), pushOfCommit(tip), "test holds it")
+
+	if statErr == nil {
+		require.ErrorIs(t, err, ErrOuterPushCarriesHeldCheckpoints)
+	} else {
+		require.NoError(t, err)
+	}
+}
+
+func TestCheckOuterPushOfHeldCommits_SHA256Repository(t *testing.T) {
+	workDir := t.TempDir()
+	testutil.RunGit(t, workDir, "init", "--object-format=sha256")
+	testutil.RunGit(t, workDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "init")
+	tip := revParse(t, workDir, "HEAD")
+	require.Len(t, tip, 64)
+	ref := mustRefName(t, id.MustCheckpointID("000000000001"))
+	testutil.RunGit(t, workDir, "update-ref", ref.String(), tip)
+	t.Chdir(workDir)
+	enqueueInRepoAt(t, workDir, ref)
+
+	err := checkOuterPushOfHeldCommits(t.Context(), pushOfCommit(tip), "test holds it")
+	require.ErrorIs(t, err, ErrOuterPushCarriesHeldCheckpoints)
+}
+
+func TestListOutgoingCheckpoints_ReportsEachTip(t *testing.T) {
+	for _, packed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "loose", true: "packed"}[packed], func(t *testing.T) {
+			workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+			prepareGitRefsPrePush(t, workDir, bareDir)
+			testutil.RunGit(t, workDir, "commit", "--allow-empty", "-m", "newer checkpoint version")
+			moved := revParse(t, workDir, "HEAD")
+			testutil.RunGit(t, workDir, "update-ref", refs[1].String(), moved)
+			stale := mustRefName(t, id.MustCheckpointID("ffffffffffff"))
+			enqueueInRepoAt(t, workDir, refs[0], stale, refs[1])
+			if packed {
+				testutil.RunGit(t, workDir, "pack-refs", "--all")
+			}
+
+			out, err := ListOutgoingCheckpoints(t.Context())
+			require.NoError(t, err)
+
+			require.Equal(t, []OutgoingCheckpoint{
+				{CheckpointID: id.MustCheckpointID("000000000000"), Ref: refs[0], Commit: plumbing.NewHash(revParse(t, workDir, "HEAD~1"))},
+				{CheckpointID: id.MustCheckpointID("000000000001"), Ref: refs[1], Commit: plumbing.NewHash(moved)},
+			}, out.Checkpoints)
+			require.Equal(t, 1, out.StaleQueueEntries)
+		})
+	}
+}
+
+// Refs the listing omits keep today's tip lookup: a case-folded shard resolves
+// on a case-insensitive filesystem, and an unparsable ref stays outgoing with
+// no known tip.
+func TestListOutgoingCheckpoints_UnlistedRefs(t *testing.T) {
+	workDir, bareDir, _ := setupRepoWithCheckpointRefs(t)
+	prepareGitRefsPrePush(t, workDir, bareDir)
+	tip := revParse(t, workDir, "HEAD")
+	testutil.RunGit(t, workDir, "update-ref", checkpoint.CheckpointRefPrefix+"AB/0000000000ab", tip)
+	folded := mustRefName(t, id.MustCheckpointID("0000000000ab"))
+	garbage := mustRefName(t, id.MustCheckpointID("eeeeeeeeeee2"))
+	garbagePath := filepath.Join(workDir, ".git", filepath.FromSlash(garbage.String()))
+	require.NoError(t, os.MkdirAll(filepath.Dir(garbagePath), 0o755))
+	require.NoError(t, os.WriteFile(garbagePath, []byte("not a hash\n"), 0o600))
+	enqueueInRepoAt(t, workDir, folded, garbage)
+	_, statErr := os.Stat(filepath.Join(workDir, ".git", filepath.FromSlash(folded.String())))
+
+	out, err := ListOutgoingCheckpoints(t.Context())
+	require.NoError(t, err)
+
+	want := []OutgoingCheckpoint{{CheckpointID: id.MustCheckpointID("eeeeeeeeeee2"), Ref: garbage}}
+	if statErr == nil {
+		want = append([]OutgoingCheckpoint{{CheckpointID: id.MustCheckpointID("0000000000ab"), Ref: folded, Commit: plumbing.NewHash(tip)}}, want...)
+	}
+	require.Equal(t, want, out.Checkpoints)
 }

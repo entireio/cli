@@ -45,10 +45,89 @@ func TestPartitionLocalRefs(t *testing.T) {
 	require.NoError(t, err)
 
 	stale := mustRefName(t, id.MustCheckpointID("ffffffffffff"))
-	existing, missing := partitionLocalRefs(repo, append([]plumbing.ReferenceName{stale}, refs...))
+	existing, missing, _ := partitionLocalRefs(t.Context(), repo, append([]plumbing.ReferenceName{stale}, refs...))
 
 	assert.ElementsMatch(t, refs, existing, "local refs are pushable")
 	assert.Equal(t, []plumbing.ReferenceName{stale}, missing, "absent ref is stale")
+}
+
+func TestPartitionLocalRefs_KeepsQueueOrderAndDuplicates(t *testing.T) {
+	t.Parallel()
+	workDir, _, refs := setupRepoWithCheckpointRefs(t)
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+
+	stale := mustRefName(t, id.MustCheckpointID("ffffffffffff"))
+	queued := []plumbing.ReferenceName{refs[1], stale, refs[0], refs[1], stale}
+	existing, missing, _ := partitionLocalRefs(t.Context(), repo, queued)
+
+	assert.Equal(t, []plumbing.ReferenceName{refs[1], refs[0], refs[1]}, existing)
+	assert.Equal(t, []plumbing.ReferenceName{stale, stale}, missing)
+}
+
+func TestPartitionLocalRefs_PackedRefs(t *testing.T) {
+	t.Parallel()
+	workDir, _, refs := setupRepoWithCheckpointRefs(t)
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+
+	stale := mustRefName(t, id.MustCheckpointID("ffffffffffff"))
+	existing, missing, _ := partitionLocalRefs(t.Context(), repo, append([]plumbing.ReferenceName{stale}, refs...))
+
+	assert.Equal(t, refs, existing, "packed refs are pushable")
+	assert.Equal(t, []plumbing.ReferenceName{stale}, missing)
+}
+
+// git for-each-ref skips both broken files, so the split must come from the
+// per-ref lookup: go-git reads an empty ref file as absent and an unparsable
+// one as an error, which keeps it queued.
+func TestPartitionLocalRefs_BrokenRefFiles(t *testing.T) {
+	t.Parallel()
+	workDir, _, refs := setupRepoWithCheckpointRefs(t)
+	empty := mustRefName(t, id.MustCheckpointID("eeeeeeeeeee1"))
+	garbage := mustRefName(t, id.MustCheckpointID("eeeeeeeeeee2"))
+	for ref, content := range map[plumbing.ReferenceName]string{empty: "", garbage: "not a hash\n"} {
+		path := filepath.Join(workDir, ".git", filepath.FromSlash(ref.String()))
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+	}
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+
+	existing, missing, _ := partitionLocalRefs(t.Context(), repo, append([]plumbing.ReferenceName{empty, garbage}, refs...))
+
+	assert.Equal(t, append([]plumbing.ReferenceName{garbage}, refs...), existing)
+	assert.Equal(t, []plumbing.ReferenceName{empty}, missing)
+}
+
+// On a case-insensitive filesystem a ref stored under a differently-cased
+// shard directory still resolves by its queued name, so it is not stale.
+func TestPartitionLocalRefs_CaseFoldedShard(t *testing.T) {
+	t.Parallel()
+	workDir, _, _ := setupRepoWithCheckpointRefs(t)
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	head, err := repo.Head()
+	require.NoError(t, err)
+
+	stored := plumbing.ReferenceName(checkpoint.CheckpointRefPrefix + "AB/0000000000ab")
+	queued := mustRefName(t, id.MustCheckpointID("0000000000ab"))
+	require.NotEqual(t, stored, queued)
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(stored, head.Hash())))
+
+	_, statErr := os.Stat(filepath.Join(workDir, ".git", filepath.FromSlash(queued.String())))
+	caseInsensitive := statErr == nil
+
+	existing, missing, _ := partitionLocalRefs(t.Context(), repo, []plumbing.ReferenceName{queued})
+
+	if caseInsensitive {
+		assert.Equal(t, []plumbing.ReferenceName{queued}, existing)
+		assert.Empty(t, missing)
+	} else {
+		assert.Empty(t, existing)
+		assert.Equal(t, []plumbing.ReferenceName{queued}, missing)
+	}
 }
 
 func TestBatchPushCheckpointRefs(t *testing.T) {

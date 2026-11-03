@@ -173,14 +173,16 @@ func checkOuterPushOfHeldCommits(ctx context.Context, lines []PrePushRef, why st
 		return nil
 	}
 	defer repo.Close()
-	waiting, err := waitingCheckpointRefs(ctx, repo)
+	waiting, listed, err := waitingCheckpointRefs(ctx, repo)
 	if err != nil {
 		logging.Warn(ctx, "pre-push: cannot read the checkpoint queue to check pushed commits", slog.String("error", err.Error()))
 		return nil
 	}
 	tips := make(map[plumbing.Hash]plumbing.ReferenceName, len(waiting))
 	for ref := range waiting {
-		if r, err := repo.Reference(ref, true); err == nil {
+		if hash, ok := listed[ref]; ok {
+			tips[hash] = ref
+		} else if r, err := repo.Reference(ref, true); err == nil {
 			tips[r.Hash()] = ref
 		}
 	}
@@ -305,7 +307,7 @@ func CheckpointWaiting(ctx context.Context, checkpointID id.CheckpointID) (bool,
 		return false, fmt.Errorf("open repository: %w", err)
 	}
 	defer repo.Close()
-	waiting, err := waitingCheckpointRefs(ctx, repo)
+	waiting, _, err := waitingCheckpointRefs(ctx, repo)
 	if err != nil {
 		return false, err
 	}
@@ -337,7 +339,7 @@ func announceCheckpointPushPolicy(ctx context.Context, repo *git.Repository) boo
 // `entire checkpoint list --outgoing` lists. A queue that cannot be read
 // counts as zero: the line it feeds is a reminder, not a report.
 func waitingCheckpointCount(ctx context.Context, repo *git.Repository) int {
-	waiting, err := waitingCheckpointRefs(ctx, repo)
+	waiting, _, err := waitingCheckpointRefs(ctx, repo)
 	if err != nil {
 		return 0
 	}
@@ -426,7 +428,7 @@ func PushCheckpoints(ctx context.Context, targets []CheckpointPushRequest) (Chec
 	}
 	defer repo.Close()
 
-	waiting, err := waitingCheckpointRefs(ctx, repo)
+	waiting, _, err := waitingCheckpointRefs(ctx, repo)
 	if err != nil {
 		return CheckpointPushReport{}, err
 	}
@@ -453,18 +455,22 @@ func PushCheckpoints(ctx context.Context, targets []CheckpointPushRequest) (Chec
 	return report, nil
 }
 
-// waitingCheckpointRefs is the set of queued refs present locally.
-func waitingCheckpointRefs(ctx context.Context, repo *git.Repository) (map[plumbing.ReferenceName]struct{}, error) {
+// waitingCheckpointRefs is the set of queued refs present locally, with the
+// tips partitionLocalRefs listed.
+func waitingCheckpointRefs(
+	ctx context.Context,
+	repo *git.Repository,
+) (waiting map[plumbing.ReferenceName]struct{}, listed map[plumbing.ReferenceName]plumbing.Hash, err error) {
 	queued, err := peekCheckpointQueue(ctx, repo)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	existing, _ := partitionLocalRefs(repo, queued)
-	set := make(map[plumbing.ReferenceName]struct{}, len(existing))
+	existing, _, listed := partitionLocalRefs(ctx, repo, queued)
+	waiting = make(map[plumbing.ReferenceName]struct{}, len(existing))
 	for _, ref := range existing {
-		set[ref] = struct{}{}
+		waiting[ref] = struct{}{}
 	}
-	return set, nil
+	return waiting, listed, nil
 }
 
 // waitingTargetSelection selects the named refs that were waiting when the

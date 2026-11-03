@@ -81,7 +81,7 @@ func ListOutgoingCheckpoints(ctx context.Context) (OutgoingCheckpoints, error) {
 	if err != nil {
 		return OutgoingCheckpoints{}, err
 	}
-	existing, stale := partitionLocalRefs(repo, queued)
+	existing, stale, listed := partitionLocalRefs(ctx, repo, queued)
 	out := OutgoingCheckpoints{
 		Checkpoints:       make([]OutgoingCheckpoint, 0, len(existing)),
 		StaleQueueEntries: len(stale),
@@ -89,7 +89,9 @@ func ListOutgoingCheckpoints(ctx context.Context) (OutgoingCheckpoints, error) {
 	for _, ref := range existing {
 		cid, _ := checkpoint.ParseRef(ref)
 		outgoing := OutgoingCheckpoint{CheckpointID: cid, Ref: ref}
-		if tip, err := repo.Reference(ref, true); err == nil {
+		if hash, ok := listed[ref]; ok {
+			outgoing.Commit = hash
+		} else if tip, err := repo.Reference(ref, true); err == nil {
 			outgoing.Commit = tip.Hash()
 		}
 		out.Checkpoints = append(out.Checkpoints, outgoing)
