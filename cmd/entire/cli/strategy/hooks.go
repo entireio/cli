@@ -1223,7 +1223,8 @@ trap 'rm -f "$_entire_stdin"' EXIT
 }
 
 // PrePushStdinRefsEnv, set to 1, tells `entire hooks git pre-push` to read the
-// refs being pushed from stdin. It is an environment variable rather than a
+// refs being pushed from stdin. Set to 0, it says the hook line could not save
+// them, which is not the same as an old hook that never passes them. It is an environment variable rather than a
 // flag so that an older entire binary run by a newer script (a downgrade, or a
 // second install earlier on PATH) ignores it instead of failing every push.
 // prePushHookLine sets it. Entire's own script from before it is outdated (see
@@ -1244,7 +1245,7 @@ const prePushRefsNotSavedMessage = "[entire] could not save git's pre-push ref l
 // command's exit status must not decide the push and lose an abort from Entire.
 //
 // When the temp file cannot be created, nothing has read git's stdin yet, so
-// Entire runs without the list, as an old hook would. When writing it fails,
+// Entire runs without the list and is told why (PrePushStdinRefsEnv=0). When writing it fails,
 // cat has already consumed stdin, so the commands after Entire would get an
 // empty list (for `git lfs pre-push`, a push without its objects); the push
 // stops instead.
@@ -1254,7 +1255,7 @@ const prePushRefsNotSavedMessage = "[entire] could not save git's pre-push ref l
 // script's. A leftover copy holds only ref names and commit IDs.
 func prePushHookLine(cmdPrefix string) string {
 	withRefs := fmt.Sprintf(`%s=1 %s hooks git pre-push "$1" < "$_entire_refs"`, PrePushStdinRefsEnv, cmdPrefix)
-	withoutRefs := cmdPrefix + ` hooks git pre-push "$1" < /dev/null`
+	withoutRefs := fmt.Sprintf(`%s=0 %s hooks git pre-push "$1" < /dev/null`, PrePushStdinRefsEnv, cmdPrefix)
 	// Without Entire installed the line does nothing, stdin included.
 	return fmt.Sprintf(`if %s; then `, gitHookCommandAvailableTest(cmdPrefix)) +
 		`if _entire_refs="$(mktemp "${TMPDIR:-/tmp}/entire-pre-push.XXXXXX" 2>/dev/null)"; then ` +

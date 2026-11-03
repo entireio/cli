@@ -21,9 +21,9 @@ func resolveProjectTrailCreateBranch(cmd *cobra.Command, title, branch, base str
 		return "", "", fmt.Errorf("open local repository (or use --no-branch for intent only): %w", err)
 	}
 	defer repo.Close()
-	base = resolveTrailCreateBase(repo, base)
+	base, namingBase := resolveTrailCreateBase(cmd.Context(), repo, base)
 	current := strategy.GetCurrentBranchName(repo)
-	branch = resolveCreateBranch(branch, current, base, title, true)
+	branch = resolveCreateBranch(branch, current, namingBase, title, true)
 	return branch, base, ValidateBranchName(cmd.Context(), branch)
 }
 

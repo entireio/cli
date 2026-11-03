@@ -1,6 +1,7 @@
 package transcript
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -21,9 +22,14 @@ import (
 // active branch (root → most-recent message) so abandoned tool calls don't
 // pollute the compact transcript.
 //
-// Parsing primitives (Entry/Message/ContentItem types, ResolveActiveBranch,
-// SkipLines, NewScanner) are shared with the pi agent package via
-// internal/transcript/pijsonl so a fix applied here also lands there.
+// Parsing primitives (Entry/Message/ContentItem types, NewScanner) are shared
+// with the pi agent package via internal/transcript/pijsonl so a fix applied
+// here also lands there. Compaction folds a PiAdapter's records
+// (pi_records.go), which resolves the active branch as
+// pijsonl.ResolveActiveBranch does, one line at a time.
+
+// piContentTypeToolCall is the content-block type value of Pi tool calls.
+const piContentTypeToolCall = "toolCall"
 
 // piToolNameMap normalises Pi's lowercase tool names to the title-cased names
 // used elsewhere in Entire's compact format (matching Claude's "Read"/"Write"/"Edit").
@@ -79,89 +85,57 @@ type piCompactToolResult struct {
 	Status string `json:"status"`
 }
 
-// compactPi converts a Pi JSONL transcript into the Entire compact format.
+// compactPi converts a Pi JSONL transcript into the Entire compact format by
+// folding a PiAdapter's records, so checkpoints and live streams share one
+// path.
 //
-// opts.StartLine is treated as a JSONL line offset.
-//
-// IMPORTANT: active-branch resolution and tool-result collection BOTH run on
-// the original (untruncated) content. A truncated buffer breaks parentId
-// chains and toolCallId references, which would let abandoned-branch entries
-// and orphaned tool results leak into the compact output.
+// opts.StartLine is a JSONL line offset: the result is the lines of the
+// messages read from that line on. Active-branch resolution and tool-result
+// splicing still run over the whole transcript, so abandoned-branch entries
+// and orphaned tool results cannot leak into the slice.
 func compactPi(content []byte, opts Options) ([]byte, error) {
-	active := pijsonl.ResolveActiveBranch(content)
-	results, err := piCollectToolResults(content, active)
-	if err != nil {
+	if err := piCheckLineLengths(content); err != nil {
 		return nil, err
 	}
-
-	emit := content
-	if opts.StartLine > 0 {
-		emit = pijsonl.SkipLines(content, opts.StartLine)
-		if emit == nil {
-			return []byte{}, nil
-		}
+	a := NewPiAdapter()
+	records := a.Feed(content)
+	records = append(records, a.Flush()...)
+	f := NewFolder(opts)
+	if _, err := f.Apply(records); err != nil {
+		return nil, fmt.Errorf("folding pi transcript records: %w", err)
 	}
-
-	base := newTranscriptLine(opts)
+	if opts.StartLine <= 0 {
+		return f.Lines(), nil
+	}
 	var out []byte
-
-	scanner := pijsonl.NewScanner(emit)
-	for scanner.Scan() {
-		var entry pijsonl.Entry
-		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+	for _, id := range a.messages {
+		if a.entries[id].line <= opts.StartLine {
 			continue
 		}
-		if entry.Type != pijsonl.EntryTypeMessage {
-			continue
+		if line, ok := f.Line(id); ok {
+			out = append(out, line...)
+			out = append(out, '\n')
 		}
-		if active != nil && !active[entry.ID] {
-			continue
-		}
-
-		switch entry.Message.Role {
-		case pijsonl.RoleUser:
-			blocks := piEmitUserContent(entry.Message.Content)
-			if len(blocks) == 0 {
-				continue
-			}
-			contentJSON, err := json.Marshal(blocks)
-			if err != nil {
-				return nil, fmt.Errorf("marshal pi user content: %w", err)
-			}
-			line := base
-			line.Type = pijsonl.RoleUser
-			line.TS = piTimestampJSON(entry.Timestamp)
-			line.Content = contentJSON
-			appendLine(&out, line)
-
-		case pijsonl.RoleAssistant:
-			blocks := piEmitAssistantContent(entry.Message.Content, results)
-			usage := piCallUsage(entry.Message)
-			if len(blocks) == 0 {
-				if !piUsageHasCounts(usage) {
-					continue
-				}
-				blocks = []any{}
-			}
-			contentJSON, err := json.Marshal(blocks)
-			if err != nil {
-				return nil, fmt.Errorf("marshal pi assistant content: %w", err)
-			}
-			line := base
-			line.Type = pijsonl.RoleAssistant
-			line.TS = piTimestampJSON(entry.Timestamp)
-			line.ID = entry.ID
-			line.Content = contentJSON
-			if usage != nil {
-				applyCallUsage(&line, usage)
-			}
-			appendLine(&out, line)
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("scan pi transcript: %w", err)
 	}
 	return out, nil
+}
+
+// piCheckLineLengths keeps Convert failing where it always has: Pi
+// transcripts were compacted with pijsonl's scanner, which fails on a line of
+// pijsonl.MaxScannerLine bytes or more (newline excluded). PiAdapter itself
+// has no line limit.
+func piCheckLineLengths(content []byte) error {
+	for rest := content; len(rest) > 0; {
+		n := bytes.IndexByte(rest, '\n')
+		if n < 0 {
+			n = len(rest)
+		}
+		if n >= pijsonl.MaxScannerLine {
+			return fmt.Errorf("scan pi transcript: %w", bufio.ErrTooLong)
+		}
+		rest = rest[min(n+1, len(rest)):]
+	}
+	return nil
 }
 
 // piCallUsage returns the per-call usage of a Pi assistant message, or nil
@@ -244,7 +218,7 @@ func piEmitAssistantContent(raw json.RawMessage, results map[string]piCompactToo
 					Text: item.Text,
 				})
 			}
-		case "toolCall":
+		case piContentTypeToolCall:
 			block := piCompactToolUseBlock{
 				Type:  "tool_use",
 				ID:    item.ID,
@@ -258,37 +232,6 @@ func piEmitAssistantContent(raw json.RawMessage, results map[string]piCompactToo
 		}
 	}
 	return blocks
-}
-
-// piCollectToolResults walks the transcript and returns a map of tool-call id
-// to spliceable result. Branch-aware. Pass FULL transcript bytes — splicing
-// requires resolving toolCallIds across the whole tree.
-func piCollectToolResults(data []byte, active map[string]bool) (map[string]piCompactToolResult, error) {
-	results := map[string]piCompactToolResult{}
-	scanner := pijsonl.NewScanner(data)
-	for scanner.Scan() {
-		var entry pijsonl.Entry
-		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
-			continue
-		}
-		if entry.Type != pijsonl.EntryTypeMessage || entry.Message.Role != pijsonl.RoleToolResult {
-			continue
-		}
-		if active != nil && !active[entry.ID] {
-			continue
-		}
-		if entry.Message.ToolCallID == "" {
-			continue
-		}
-		results[entry.Message.ToolCallID] = piCompactToolResult{
-			Output: piDecodeResultOutput(entry.Message.Content),
-			Status: piResultStatus(entry.Message.IsError),
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("scan pi tool results: %w", err)
-	}
-	return results, nil
 }
 
 func piNormalizeToolName(name string) string {
