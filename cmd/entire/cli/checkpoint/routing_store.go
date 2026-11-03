@@ -427,15 +427,21 @@ func (c *legacyCopier) copyToRef(ctx context.Context, checkpointID id.Checkpoint
 	if errors.Is(err, ErrCheckpointNotFound) || errors.Is(err, plumbing.ErrReferenceNotFound) {
 		return false, nil
 	}
-	if err != nil {
+	// Diverged v1 copies block only a copy from v1: a ref the remote already
+	// holds supersedes both.
+	diverged := errors.Is(err, ErrLegacyCheckpointDiverged)
+	if err != nil && !diverged {
 		return false, fmt.Errorf("read checkpoint %s from %s: %w", checkpointID, c.branch.refs.Primary, err)
 	}
-	fetched, err := c.fetchRemoteRef(ctx, refName)
-	if err != nil {
-		return false, err
+	fetched, fetchErr := c.fetchRemoteRef(ctx, refName)
+	if fetchErr != nil {
+		return false, fetchErr
 	}
 	if fetched {
 		return true, nil
+	}
+	if diverged {
+		return false, fmt.Errorf("read checkpoint %s from %s: %w", checkpointID, c.branch.refs.Primary, err)
 	}
 	if _, err := importBranchCheckpoint(ctx, c.refs.repo, c.refs, checkpointID, subtree, updatePersistentRef, importOnlyIntoAbsentRef); err != nil {
 		return false, err
