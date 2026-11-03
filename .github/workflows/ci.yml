@@ -172,6 +172,10 @@ jobs:
           # have to be present.
           fetch-depth: 0
       - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
+      - name: Test the gate itself
+        # The nested module is invisible to the root test jobs, so this job is
+        # the only thing that keeps the gate's own tests honest.
+        run: cd tools/complexity && go test ./...
       - name: Complexity gate
         env:
           BASE_REF: ${{ github.event.pull_request.base.sha }}
