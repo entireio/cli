@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -30,12 +31,16 @@ func writeTestPNG(t *testing.T, name string, w, h int) string {
 }
 
 type trailAttachmentTestServer struct {
-	requests   []string
-	intent     map[string]any
-	idemKey    string
-	uploaded   []byte
-	uploadType string
-	uploadAuth string
+	// storageStatus answers the PUT when set; expiresAt overrides the
+	// upload URL's expiry.
+	storageStatus int
+	expiresAt     string
+	requests      []string
+	intent        map[string]any
+	idemKey       string
+	uploaded      []byte
+	uploadType    string
+	uploadAuth    string
 }
 
 // serveTrailAttachments fakes the cell's attachment routes on project trail 42
@@ -43,12 +48,15 @@ type trailAttachmentTestServer struct {
 func serveTrailAttachments(t *testing.T, listing []map[string]any) *trailAttachmentTestServer {
 	t.Helper()
 	s := &trailAttachmentTestServer{}
-	storage := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+	storage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.requests = append(s.requests, "storage "+r.Method)
 		s.uploadType, s.uploadAuth = r.Header.Get("Content-Type"), r.Header.Get("Authorization")
 		var err error
 		s.uploaded, err = io.ReadAll(r.Body)
 		assert.NoError(t, err)
+		if s.storageStatus != 0 {
+			w.WriteHeader(s.storageStatus)
+		}
 	}))
 	t.Cleanup(storage.Close)
 	collection := projectTrailTestPath + "/attachments"
@@ -68,9 +76,13 @@ func serveTrailAttachments(t *testing.T, listing []map[string]any) *trailAttachm
 		case r.Method == http.MethodPost && r.URL.Path == collection:
 			s.idemKey = r.Header.Get("Idempotency-Key")
 			assert.NoError(t, json.NewDecoder(r.Body).Decode(&s.intent))
+			expires := s.expiresAt
+			if expires == "" {
+				expires = time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+			}
 			w.WriteHeader(http.StatusCreated)
 			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"id": trailAttachmentTestID,
-				"upload": map[string]any{"url": storage.URL + "/put?sig=x", "expires_at": "2026-11-03T12:00:00Z", "max_bytes": 10485760}}))
+				"upload": map[string]any{"url": storage.URL + "/put?sig=x", "expires_at": expires, "max_bytes": 10485760}}))
 		case r.Method == http.MethodPost && r.URL.Path == collection+"/"+trailAttachmentTestID+"/complete":
 			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"attachment": map[string]any{"id": trailAttachmentTestID, "filename": "shot.png",
 				"content_type": "image/png", "size_bytes": len(s.uploaded), "is_ready": true}}))
@@ -181,4 +193,20 @@ func TestTrailAttachmentRemove(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"DELETE /attachments/" + trailAttachmentTestID}, s.requests)
 	assert.Contains(t, out, "Deleted attachment "+trailAttachmentTestID)
+}
+
+func TestTrailAttachmentAdd_RemovesTheRegisteredAttachmentWhenTheUploadFails(t *testing.T) {
+	// Serial: replaces global clients.
+	path := writeTestPNG(t, "shot.png", 3, 2)
+	for name, setup := range map[string]func(*trailAttachmentTestServer){
+		"storage refuses": func(s *trailAttachmentTestServer) { s.storageStatus = http.StatusForbidden },
+		"URL expired":     func(s *trailAttachmentTestServer) { s.expiresAt = "2020-01-01T00:00:00Z" },
+	} {
+		s := serveTrailAttachments(t, nil)
+		setup(s)
+		_, _, err := executeProjectTrailTest(t, trailAttachmentArgs("add", path)...)
+		require.Error(t, err, name)
+		assert.Equal(t, "DELETE /attachments/"+trailAttachmentTestID, s.requests[len(s.requests)-1], "%s: the unfinished attachment is removed", name)
+		assert.NotContains(t, s.requests, "POST /attachments/"+trailAttachmentTestID+"/complete", name)
+	}
 }

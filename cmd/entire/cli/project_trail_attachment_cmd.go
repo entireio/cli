@@ -167,15 +167,26 @@ func uploadTrailAttachment(ctx context.Context, target *projectTrailTarget, file
 	if !looksLikeULID(intent.ID) {
 		return api.ProjectTrailAttachment{}, errors.New("register attachment: the server returned no attachment ID")
 	}
+	// From here a failure would leave a registered attachment that never
+	// completes, so delete it before reporting the failure.
+	fail := func(err error) (api.ProjectTrailAttachment, error) {
+		if _, delErr := target.Client.ProjectTrailRequest(context.WithoutCancel(ctx), http.MethodDelete, collection+"/"+url.PathEscape(intent.ID), nil, nil, nil); delErr != nil {
+			return api.ProjectTrailAttachment{}, fmt.Errorf("%w (the unfinished attachment %s could not be removed: %w)", err, intent.ID, delErr)
+		}
+		return api.ProjectTrailAttachment{}, err
+	}
 	if intent.Upload.MaxBytes > 0 && int64(len(file.data)) > intent.Upload.MaxBytes {
-		return api.ProjectTrailAttachment{}, fmt.Errorf("%s is larger than the server's %d-byte limit", file.name, intent.Upload.MaxBytes)
+		return fail(fmt.Errorf("%s is larger than the server's %d-byte limit", file.name, intent.Upload.MaxBytes))
+	}
+	if !intent.Upload.ExpiresAt.IsZero() && !time.Now().Before(intent.Upload.ExpiresAt) {
+		return fail(errors.New("upload attachment: the upload URL had already expired"))
 	}
 	if err := putTrailAttachmentBytes(ctx, intent.Upload.URL, file); err != nil {
-		return api.ProjectTrailAttachment{}, err
+		return fail(err)
 	}
 	var done api.ProjectTrailAttachmentComplete
 	if _, err := target.Client.ProjectTrailRequest(ctx, http.MethodPost, collection+"/"+url.PathEscape(intent.ID)+"/complete", nil, nil, &done); err != nil {
-		return api.ProjectTrailAttachment{}, fmt.Errorf("complete attachment %s: %w", intent.ID, err)
+		return fail(fmt.Errorf("complete attachment %s: %w", intent.ID, err))
 	}
 	if done.Attachment.ID == "" {
 		done.Attachment.ID = intent.ID
