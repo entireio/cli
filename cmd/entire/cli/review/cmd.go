@@ -1373,7 +1373,10 @@ func runSingleAgentPath(
 		// Non-cancellation error: surface to caller.
 		return fmt.Errorf("review run: %w", waitErr)
 	}
-	return manifestErr
+	if manifestErr != nil {
+		return wrapReviewSilentError(deps.NewSilentError, manifestErr)
+	}
+	return nil
 }
 
 // detectScope computes the scope base ref for the current repo and prints
@@ -1573,7 +1576,10 @@ func runMultiAgentPath(
 		cmd.SilenceUsage = true
 		return judgeFailureError(masterLabel, synthErr)
 	}
-	return manifestErr
+	if manifestErr != nil {
+		return wrapReviewSilentError(deps.NewSilentError, manifestErr)
+	}
+	return nil
 }
 
 // judgeFailureError reports a judge (synthesis) failure as the command's error
