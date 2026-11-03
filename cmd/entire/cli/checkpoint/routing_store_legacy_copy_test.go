@@ -221,6 +221,30 @@ func TestKindRoutingStore_ReservedSessionDoesNotResurrectDeletedCheckpoint(t *te
 	assert.Equal(t, "after-switch", added.SessionID)
 }
 
+// A backfill's own remote check can find nothing while a plain git fetch from
+// another process installs the ref. The backfill must land on that ref: on v1
+// it would be hidden behind the ref and never pushed.
+func TestKindRoutingStore_BackfillLandsOnARefThatAppearsDuringItsRemoteCheck(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newLegacyCopyFixture(t)
+	fetched := f.remoteCopy(t)
+	f.refs.SetRefFetcher(func(_ context.Context, ref plumbing.ReferenceName) error {
+		require.NoError(t, f.repo.Storer.SetReference(plumbing.NewHashReference(ref, fetched)))
+		return fmt.Errorf("remote had no %s when asked: %w", ref, plumbing.ErrReferenceNotFound)
+	})
+
+	require.NoError(t, f.router.Write(ctx, SessionSummary{CheckpointID: f.cid, Summary: &Summary{Intent: "backfilled"}}))
+
+	onRef, err := f.refs.ReadSessionMetadata(ctx, f.cid, 0)
+	require.NoError(t, err)
+	require.NotNil(t, onRef.Summary, "the backfill must land on the ref that appeared")
+	assert.Equal(t, "backfilled", onRef.Summary.Intent)
+	onBranch, err := f.branch.ReadSessionMetadata(ctx, f.cid, 0)
+	require.NoError(t, err)
+	assert.Nil(t, onBranch.Summary, "v1 must not take a backfill the ref now serves")
+}
+
 // A ref that appears while the copy asks the remote, such as a teammate's copy
 // another process here fetched, holds sessions this clone's v1 lacks. The copy
 // must build on it, not lay v1's tree over it: that would drop those sessions

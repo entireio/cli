@@ -289,7 +289,9 @@ func (s *kindRoutingStore) Write(ctx context.Context, req WriteRequest) error {
 				return copyErr
 			}
 			if onRef {
-				return st.Write(ctx, req) //nolint:wrapcheck // primary error is the operation's error, surfaced verbatim
+				// A retry that still finds nothing (a ref without the
+				// checkpoint's metadata) falls through like any other miss.
+				err = st.Write(ctx, req)
 			}
 		}
 		if !errors.Is(err, ErrCheckpointNotFound) {
@@ -405,10 +407,10 @@ func (s *kindRoutingStore) copyLegacyUnlessDeleted(ctx context.Context, checkpoi
 // asked, copyToRef returns that error and writes nothing, so the write fails
 // and is retried later.
 //
-// onRef reports whether this call gave the checkpoint its own ref, by copying
-// it (or finding a ref that appeared meanwhile) or by fetching it, so the
-// caller should retry its write there. It is false when v1 lacks the checkpoint or the ref
-// already existed locally.
+// onRef reports whether the checkpoint now has its own local ref, so the caller
+// should retry its write there: this call copied or fetched it, or it appeared
+// after the caller's write missed it (a plain git fetch takes no ref lock). It
+// is false only when v1 lacks the checkpoint.
 func (c *legacyCopier) copyToRef(ctx context.Context, checkpointID id.CheckpointID) (onRef bool, err error) {
 	refName, err := RefName(checkpointID)
 	if err != nil {
@@ -419,7 +421,7 @@ func (c *legacyCopier) copyToRef(ctx context.Context, checkpointID id.Checkpoint
 		return false, err
 	}
 	if exists {
-		return false, nil
+		return true, nil
 	}
 	subtree, err := c.branch.checkpointSubtreeHash(ctx, checkpointID)
 	if errors.Is(err, ErrCheckpointNotFound) || errors.Is(err, plumbing.ErrReferenceNotFound) {
