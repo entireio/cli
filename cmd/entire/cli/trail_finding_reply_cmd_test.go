@@ -201,7 +201,7 @@ func TestTrailFindingReply_SanitizesServerIDs(t *testing.T) {
 func TestTrailFindingShow_WarnsButSucceedsWhenRepliesFail(t *testing.T) {
 	// Not parallel: replaces client constructors.
 	setupFindingReplyTest(t, findingReplyTestDiscussion, func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "boom", http.StatusInternalServerError)
+		http.Error(w, "boom \x1b]0;pwned\a", http.StatusInternalServerError)
 	})
 
 	out, errOut, err := executeProjectTrailTest(t, "finding", "show", "widget/7", findingReplyTestFinding, "--project", "gh/acme")
@@ -209,6 +209,7 @@ func TestTrailFindingShow_WarnsButSucceedsWhenRepliesFail(t *testing.T) {
 	assert.Contains(t, out, "Finding body")
 	assert.NotContains(t, out, "Replies:")
 	assert.Contains(t, errOut, "could not load replies")
+	assert.NotContains(t, errOut, "\x1b", "the server's error body is sanitized")
 }
 
 func TestTrailFindingShow_DoesNotReadAThreadIDThatIsNotOnePathSegment(t *testing.T) {
