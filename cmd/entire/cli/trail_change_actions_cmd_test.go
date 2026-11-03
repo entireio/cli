@@ -125,6 +125,11 @@ func TestTrailCIPullRequest_ReportsThePullRequest(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{"POST /ci-pr"}, requests)
 	assert.Contains(t, out, "backed by pull request #314")
+
+	_, out, err = runTrailChangeAction(t, true, "gh/acme/widget", []string{"ci-pr", "{trail}"}, api.TrailResource{}, answerJSON(t, map[string]any{}))
+	require.NoError(t, err)
+	assert.Contains(t, out, "did not report its number")
+	assert.NotContains(t, out, "#0")
 }
 
 func TestTrailRerunReview_RequestsANewReview(t *testing.T) {

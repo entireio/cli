@@ -112,6 +112,11 @@ func newTrailCIPullRequestCmd(mode *trailMode) *cobra.Command {
 			if jsonOut {
 				return printJSON(cmd.OutOrStdout(), out)
 			}
+			if out.PRNumber <= 0 {
+				// A 2xx without a number confirms nothing about which PR backs it.
+				fmt.Fprintf(cmd.OutOrStdout(), "Requested a CI pull request for %s; the server did not report its number\n", selected.description())
+				return nil
+			}
 			fmt.Fprintf(cmd.OutOrStdout(), "%s is backed by pull request #%d\n", selected.description(), out.PRNumber)
 			return nil
 		},
