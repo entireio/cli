@@ -240,7 +240,11 @@ func replayOntoRemote(
 		return plumbing.ZeroHash, 0, fmt.Errorf("load shallow boundaries: %w", shallowErr)
 	}
 	if errors.Is(err, errNoMergeBase) {
-		return replayDisconnectedOnto(ctx, repo, localHash, remoteHash, shallow, io.Discard)
+		tip, replayed, err := replayDisconnectedOnto(ctx, repo, localHash, remoteHash, shallow, io.Discard)
+		if err != nil {
+			return plumbing.ZeroHash, 0, fmt.Errorf("replay disconnected checkpoint commits: %w", err)
+		}
+		return tip, replayed, nil
 	}
 	if err != nil {
 		return plumbing.ZeroHash, 0, fmt.Errorf("find checkpoint merge base: %w", err)
@@ -767,8 +771,7 @@ func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.Re
 	// The fetch above updated the remote-tracking ref, so reconciliation
 	// can compare fresh local vs remote. If disconnected (empty-orphan bug),
 	// this cherry-picks local commits onto remote tip, updating the local ref.
-	// If reconciliation fails, abort — proceeding to rebase on disconnected
-	// refs would silently combine unrelated histories.
+	// If reconciliation fails, abort so the caller sees its error.
 	if reconcileErr := ReconcileDisconnectedMetadataRef(ctx, repo, ref, fetchedRefName, os.Stderr); reconcileErr != nil {
 		return fmt.Errorf("metadata reconciliation failed: %w", reconcileErr)
 	}
