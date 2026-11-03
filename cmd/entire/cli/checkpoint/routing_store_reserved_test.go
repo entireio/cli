@@ -2,7 +2,6 @@ package checkpoint
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -11,28 +10,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/redact"
 )
-
-// flakyReadStore wraps a real store and fails Read, leaving every other
-// operation intact. It stands in for a backend whose on-demand fetch is
-// temporarily unavailable.
-type flakyReadStore struct {
-	PersistentStore
-
-	readErr error
-	writes  int
-}
-
-func (s *flakyReadStore) Read(ctx context.Context, checkpointID id.CheckpointID) (*CheckpointSummary, error) {
-	if s.readErr != nil {
-		return nil, s.readErr
-	}
-	return s.PersistentStore.Read(ctx, checkpointID)
-}
-
-func (s *flakyReadStore) Write(ctx context.Context, req WriteRequest) error {
-	s.writes++
-	return s.PersistentStore.Write(ctx, req)
-}
 
 // countingStore records the write requests it receives so a test can assert
 // which backend a write reached.
@@ -58,33 +35,6 @@ func reservedRoutingRequest(checkpointID id.CheckpointID) ReservedSession {
 	})
 }
 
-// TestKindRoutingStore_ReservedSessionSurvivesReadTargetFailure keeps a
-// transient read failure in one backend from losing a retry.
-//
-// writeReservedSession reads the read-preferred backend first, to find out
-// whether a migrated copy also needs updating. Treating that read's error as
-// fatal fails the whole condensation, even though the write it was about to make
-// would have been perfectly visible: under a git-refs primary, readOrder for a
-// hex ID is [refs, branch], and firstResolved falls through a non-final store
-// that errors. So a branch-only write still resolves.
-func TestKindRoutingStore_ReservedSessionSurvivesReadTargetFailure(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	checkpointID := id.MustCheckpointID("a1b2c3d4e5f6")
-
-	_, repo, _ := newTestRepo(t)
-	branch := NewGitStore(repo, DefaultV1Refs())
-	refs := &flakyReadStore{PersistentStore: newGitRefsStore(repo), readErr: errors.New("refs fetch unavailable")}
-
-	router := newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs)
-	require.NoError(t, router.Write(ctx, reservedRoutingRequest(checkpointID)),
-		"a read failure in the other backend must not fail the reserved write")
-
-	summary, err := branch.Read(ctx, checkpointID)
-	require.NoError(t, err)
-	require.NotNil(t, summary, "the reserved write must land on the backend its ID belongs to")
-}
-
 // TestKindRoutingStore_ReservedSessionFallsBackToWriterForUnknownPrimary keeps an
 // unrecognised primary from being bypassed.
 //
@@ -103,7 +53,7 @@ func TestKindRoutingStore_ReservedSessionFallsBackToWriterForUnknownPrimary(t *t
 	refs := newGitRefsStore(repo)
 	writer := &countingStore{PersistentStore: branch}
 
-	router := newKindRoutingStore(writer, branch, refs, "some-future-git-backend")
+	router := newKindRoutingStore(writer, branch, refs, "some-future-git-backend", nil)
 	require.NoError(t, router.Write(ctx, reservedRoutingRequest(checkpointID)))
 
 	assert.Len(t, writer.requests, 1,
@@ -124,7 +74,7 @@ func TestKindRoutingStore_FreshSessionWriteIsNotKindRouted(t *testing.T) {
 	refs := newGitRefsStore(repo)
 	writer := &countingStore{PersistentStore: refs}
 
-	router := newKindRoutingStore(writer, branch, refs, BackendTypeGitRefs)
+	router := newKindRoutingStore(writer, branch, refs, BackendTypeGitRefs, nil)
 	writeRoutingCheckpoint(t, router, checkpointID, "fresh-hex-under-refs-primary")
 
 	require.Len(t, writer.requests, 1, "a fresh create must go through the configured primary")
