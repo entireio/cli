@@ -64,8 +64,9 @@ func newTrailWorkingReadCmd(mode *trailMode, use, short, long string, run func(c
 	return cmd
 }
 
-// trailTimelineResponse keeps items raw: --json passes them through, and the
-// text view reads only the fields it shows, so a new kind never breaks either.
+// trailTimelineResponse is the text view's reading of a page: --json prints the
+// server's response unchanged, and the text view reads each item on its own,
+// so a new kind or field never breaks either.
 type trailTimelineResponse struct {
 	Items         []json.RawMessage `json:"items"`
 	CommitCount   int               `json:"commitCount"`
@@ -101,15 +102,17 @@ func newTrailTimelineCmd(mode *trailMode) *cobra.Command {
 			if pageToken != "" {
 				query.Set("pageToken", pageToken)
 			}
-			var out trailTimelineResponse
-			if err := getTrailRepoIDResource(cmd.Context(), selected, "/timeline?"+query.Encode(), "timeline", &out); err != nil {
+			var raw json.RawMessage
+			if err := getTrailRepoIDResource(cmd.Context(), selected, "/timeline?"+query.Encode(), "timeline", &raw); err != nil {
 				return err
 			}
-			if out.Items == nil {
-				out.Items = []json.RawMessage{}
-			}
 			if jsonOut {
-				return printJSON(cmd.OutOrStdout(), out)
+				// The server's response unchanged, as sessions and stack print it.
+				return printJSON(cmd.OutOrStdout(), raw)
+			}
+			var out trailTimelineResponse
+			if err := json.Unmarshal(raw, &out); err != nil {
+				return fmt.Errorf("decode trail timeline: %w", err)
 			}
 			return printTrailTimeline(cmd.OutOrStdout(), selected, out)
 		})

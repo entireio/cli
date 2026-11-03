@@ -83,9 +83,11 @@ func TestTrailTimeline_JSONPassesItemsThrough(t *testing.T) {
 	assert.Equal(t, true, got.Items[5]["newField"], "unknown fields survive")
 	assert.Equal(t, "next-page", got.NextPageToken)
 
-	_, out, err = readTrailChange(t, "timeline", map[string]any{"items": nil}, "--json")
+	// The whole response passes through, top-level fields the CLI does not
+	// model included.
+	_, out, err = readTrailChange(t, "timeline", json.RawMessage(`{"items":[],"incomplete":false,"cursorExpiresAt":"later"}`), "--json")
 	require.NoError(t, err)
-	assert.JSONEq(t, `{"items":[],"commitCount":0,"incomplete":false}`, out)
+	assert.JSONEq(t, `{"items":[],"incomplete":false,"cursorExpiresAt":"later"}`, out)
 }
 
 func TestTrailTimeline_RejectsAnOutOfRangeLimitBeforeAnyRequest(t *testing.T) {
