@@ -394,6 +394,9 @@ the hook settings. `entire doctor` reports the same requirement for existing hoo
 A missing Claude executable permits repository preparation before installation;
 the subsequently installed Claude must satisfy this minimum. This check does not
 upgrade Claude or remove user hooks. Do not bypass it with `--force`.
+For multi-agent setup, check the complete install selection before adding,
+reinstalling, or removing any agent hooks. Do not repeat version probes after
+hook changes begin.
 
 If your agent uses a JSON config file for hooks (like Claude Code's `.claude/settings.json`, Cursor's `.cursor/hooks.json`, Factory AI Droid's `.factory/settings.json`, or Copilot CLI's `.github/hooks/entire.json`), implement `HookSupport`:
 

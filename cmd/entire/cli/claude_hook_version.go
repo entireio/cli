@@ -24,6 +24,15 @@ const minimumClaudeHookVersion = "v2.1.78"
 // callers can update Claude or change PATH between setup and diagnosis.
 var installedClaudeHookVersion = probeClaudeHookVersion
 
+func checkAgentHookVersions(ctx context.Context, agents []agent.Agent) error {
+	for _, ag := range agents {
+		if err := checkClaudeHookVersion(ctx, ag.Name()); err != nil {
+			return fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err)
+		}
+	}
+	return nil
+}
+
 func probeClaudeHookVersion(ctx context.Context) (string, error) {
 	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()

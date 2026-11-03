@@ -743,6 +743,12 @@ func applyAgentChanges(ctx context.Context, w io.Writer, selectedAgentNames []st
 		removedAgents = append(removedAgents, ag)
 	}
 
+	// Validate the complete install set before either group changes hooks or
+	// deselected agents are removed. A known version failure is not a partial success.
+	if err := checkAgentHookVersions(ctx, append(addedAgents, reinstalledAgents...)); err != nil {
+		return err
+	}
+
 	if len(addedAgents) == 0 && len(reinstalledAgents) == 0 && len(removedAgents) == 0 && len(errs) == 0 && !opts.SearchSkill && !opts.AgentHelpSkill {
 		targetFile, _ := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
 		changed, err := maybePromptVercelDeploymentDisable(ctx, w, targetFile, nil)
@@ -754,9 +760,9 @@ func applyAgentChanges(ctx context.Context, w io.Writer, selectedAgentNames []st
 		}
 		return nil
 	}
-	successfullyAddedAgents, setupErrs := setupAgentHookSet(ctx, w, addedAgents, opts.ForceHooks)
+	successfullyAddedAgents, setupErrs := setupAgentHookSetAfterPreflight(ctx, w, addedAgents, opts.ForceHooks)
 	errs = append(errs, setupErrs...)
-	successfullyReinstalledAgents, setupErrs := setupAgentHookSet(ctx, w, reinstalledAgents, opts.ForceHooks)
+	successfullyReinstalledAgents, setupErrs := setupAgentHookSetAfterPreflight(ctx, w, reinstalledAgents, opts.ForceHooks)
 	errs = append(errs, setupErrs...)
 
 	var uninstalledAgents []agent.Agent
@@ -1430,6 +1436,9 @@ func scopeExplicitlyDisabled(ctx context.Context, useProject bool) bool {
 // runEnableInteractive runs the interactive enable flow.
 // agents must be provided by the caller (via detectOrSelectAgent).
 func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent, opts EnableOptions) error {
+	if err := checkAgentHookVersions(ctx, agents); err != nil {
+		return err
+	}
 	// Agents have been chosen, but no setup settings or hooks have been changed.
 	if err := opts.checkpointRemoteChoice.selectAfterAgents(ctx, opts, nil); err != nil {
 		return err
@@ -1446,7 +1455,7 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 
 	// Setup agent hooks for all selected agents
 	for _, ag := range agents {
-		_, pruned, err := installAgentHooks(ctx, ag, opts.ForceHooks)
+		_, pruned, err := installAgentHooksAfterPreflight(ctx, ag, opts.ForceHooks)
 		if err != nil {
 			return fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err)
 		}
@@ -1955,6 +1964,13 @@ func installAgentHooks(ctx context.Context, ag agent.Agent, forceHooks bool) (in
 	if err := checkClaudeHookVersion(ctx, ag.Name()); err != nil {
 		return 0, false, err
 	}
+	return installAgentHooksAfterPreflight(ctx, ag, forceHooks)
+}
+
+// installAgentHooksAfterPreflight is used after the caller validates every
+// selected agent, before changing any hooks. Do not repeat executable probes
+// midway through a batch: a later probe failure would leave partial changes.
+func installAgentHooksAfterPreflight(ctx context.Context, ag agent.Agent, forceHooks bool) (installed int, prunedStale bool, err error) {
 	if reporter, ok := agent.AsStaleHookReporter(ag); ok {
 		prunedStale = reporter.HasStaleManagedHooks(ctx)
 	}
@@ -1972,10 +1988,19 @@ func reportPrunedStaleHooks(w io.Writer, ag agent.Agent) {
 }
 
 func setupAgentHookSet(ctx context.Context, w io.Writer, agents []agent.Agent, forceHooks bool) ([]agent.Agent, []error) {
+	if err := checkAgentHookVersions(ctx, agents); err != nil {
+		return nil, []error{err}
+	}
+	return setupAgentHookSetAfterPreflight(ctx, w, agents, forceHooks)
+}
+
+// setupAgentHookSetAfterPreflight preserves normal partial-success reporting
+// for install errors after the caller has checked the complete selection.
+func setupAgentHookSetAfterPreflight(ctx context.Context, w io.Writer, agents []agent.Agent, forceHooks bool) ([]agent.Agent, []error) {
 	var successful []agent.Agent
 	var errs []error
 	for _, ag := range agents {
-		_, pruned, err := installAgentHooks(ctx, ag, forceHooks)
+		_, pruned, err := installAgentHooksAfterPreflight(ctx, ag, forceHooks)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err))
 			continue

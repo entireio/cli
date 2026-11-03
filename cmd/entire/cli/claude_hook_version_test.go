@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/stretchr/testify/require"
 )
 
@@ -17,6 +19,112 @@ func setClaudeHookVersion(t *testing.T, version string, err error) {
 	previous := installedClaudeHookVersion
 	installedClaudeHookVersion = func(context.Context) (string, error) { return version, err }
 	t.Cleanup(func() { installedClaudeHookVersion = previous })
+}
+
+// These flows change CWD and the executable probe, so they cannot run in parallel.
+func TestClaudeHookVersionBatchRefusesBeforeAnyHookChanges(t *testing.T) {
+	for _, mode := range []string{"enable_add", "enable_remove", "manage_add", "manage_remove", "manage_reinstall", "hook_set", "hook_set_force"} {
+		t.Run(mode, func(t *testing.T) {
+			dir := setupTestRepo(t)
+			ctx := context.Background()
+			claude, err := agent.Get(agent.AgentNameClaudeCode)
+			require.NoError(t, err)
+			cursor, err := agent.Get(agent.AgentNameCursor)
+			require.NoError(t, err)
+			selected := []agent.Agent{cursor, claude}
+			var installed []types.AgentName
+			originals := map[string][]byte{}
+			if mode == "enable_remove" || mode == "manage_remove" {
+				_, err = setupAgentHooks(ctx, cursor, false)
+				require.NoError(t, err)
+				selected = []agent.Agent{claude}
+				installed = []types.AgentName{cursor.Name()}
+			}
+			if mode == "manage_reinstall" {
+				_, err = setupAgentHooks(ctx, claude, false)
+				require.NoError(t, err)
+				installed = []types.AgentName{claude.Name()}
+			}
+			for _, path := range []string{".cursor/hooks.json", ".claude/settings.json"} {
+				data, readErr := os.ReadFile(filepath.Join(dir, path))
+				if readErr == nil {
+					originals[path] = data
+				} else {
+					require.ErrorIs(t, readErr, os.ErrNotExist)
+				}
+			}
+			setClaudeHookVersion(t, "v2.1.72", nil)
+			var out bytes.Buffer
+			opts := EnableOptions{Yes: true, ForceHooks: mode == "manage_reinstall" || mode == "hook_set_force"}
+			switch mode {
+			case "enable_add", "enable_remove":
+				err = runEnableInteractive(ctx, &out, selected, opts)
+			case "hook_set", "hook_set_force":
+				added, errs := setupAgentHookSet(ctx, &out, selected, opts.ForceHooks)
+				require.Empty(t, added)
+				err = errors.Join(errs...)
+			default:
+				names := make([]string, 0, len(selected))
+				for _, ag := range selected {
+					names = append(names, string(ag.Name()))
+				}
+				err = applyAgentChanges(ctx, &out, names, installed, opts)
+			}
+			require.ErrorContains(t, err, "2.1.78 or later")
+			for _, path := range []string{".cursor/hooks.json", ".claude/settings.json"} {
+				if original, exists := originals[path]; exists {
+					actual, readErr := os.ReadFile(filepath.Join(dir, path))
+					require.NoError(t, readErr)
+					require.Equal(t, original, actual)
+				} else {
+					require.NoFileExists(t, filepath.Join(dir, path))
+				}
+			}
+			require.NoFileExists(t, filepath.Join(dir, EntireSettingsFile))
+		})
+	}
+}
+
+func TestClaudeHookVersionBatchProbesOnce(t *testing.T) {
+	for _, mode := range []string{"enable", "manage", "hook_set"} {
+		t.Run(mode, func(t *testing.T) {
+			setupTestRepo(t)
+			ctx := context.Background()
+			claude, err := agent.Get(agent.AgentNameClaudeCode)
+			require.NoError(t, err)
+			cursor, err := agent.Get(agent.AgentNameCursor)
+			require.NoError(t, err)
+			if mode == "manage" {
+				_, err = setupAgentHooks(ctx, claude, false)
+				require.NoError(t, err)
+			}
+			previous := installedClaudeHookVersion
+			calls := 0
+			installedClaudeHookVersion = func(context.Context) (string, error) {
+				calls++
+				if calls > 1 {
+					return "", errors.New("version probe repeated after mutations began")
+				}
+				return minimumClaudeHookVersion, nil
+			}
+			t.Cleanup(func() { installedClaudeHookVersion = previous })
+			var out bytes.Buffer
+			selected := []agent.Agent{cursor, claude}
+			switch mode {
+			case "enable":
+				err = runEnableInteractive(ctx, &out, selected, EnableOptions{Yes: true})
+			case "manage":
+				err = applyAgentChanges(ctx, &out, []string{string(cursor.Name()), string(claude.Name())},
+					[]types.AgentName{claude.Name()}, EnableOptions{Yes: true, ForceHooks: true})
+			default:
+				added, errs := setupAgentHookSet(ctx, &out, selected, false)
+				require.Len(t, added, 2)
+				err = errors.Join(errs...)
+			}
+			require.NoError(t, err, out.String())
+			require.Equal(t, 1, calls)
+		})
+	}
 }
 
 func TestParseClaudeHookVersion(t *testing.T) {
