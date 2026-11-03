@@ -105,6 +105,11 @@ func (c myProjectTrailCellItem) toMyProjectTrail() myProjectTrail {
 		Phase:          c.Phase,
 		LastActivityAt: c.LastActivityAt,
 	}
+	if t.UpdatedAt.IsZero() {
+		// An item without its own update time was last touched no later than
+		// its latest activity; the zero time would read as real data.
+		t.UpdatedAt = c.LastActivityAt
+	}
 	if p := c.Project; p != nil {
 		project := &api.TrailProject{ID: p.ID, Name: p.Name, Provider: p.Provider, Jurisdiction: p.Jurisdiction}
 		project.Reference.Forge, project.Reference.Project = p.Reference.Forge, p.Reference.Project
@@ -170,7 +175,7 @@ func listMyProjectTrails(cmd *cobra.Command, status string, limit int) (myProjec
 		query.Set("status", status)
 	}
 	results, err := fanOutCells(ctx, trailInsecureHTTP(cmd), myProjectTrailsCellTimeout, regions, func(ctx context.Context, g cellGroup, client *api.Client) (myProjectTrailsRegion, error) {
-		return readMyProjectTrailsRegion(ctx, g, client, "/api/v1/me/project-trails?"+query.Encode())
+		return readMyProjectTrailsRegion(ctx, g, client, "/api/v1/me/project-trails?"+query.Encode(), status)
 	})
 	if err != nil {
 		if errors.Is(err, auth.ErrNotLoggedIn) {
@@ -182,9 +187,10 @@ func listMyProjectTrails(cmd *cobra.Command, status string, limit int) (myProjec
 }
 
 // readMyProjectTrailsRegion reads one region's page. An item it cannot read,
-// or one without an ID, is left out and reported as partial rather than
-// failing the region or the list.
-func readMyProjectTrailsRegion(ctx context.Context, g cellGroup, client *api.Client, path string) (myProjectTrailsRegion, error) {
+// one without an ID or activity time, or one outside the requested status
+// (which the plain list also refuses) is left out and reported as partial
+// rather than failing the region or the list.
+func readMyProjectTrailsRegion(ctx context.Context, g cellGroup, client *api.Client, path, status string) (myProjectTrailsRegion, error) {
 	var region myProjectTrailsRegion
 	resp, err := client.Get(ctx, path)
 	if err != nil {
@@ -204,18 +210,34 @@ func readMyProjectTrailsRegion(ctx context.Context, g cellGroup, client *api.Cli
 		return region, fmt.Errorf("decode: %w", err)
 	}
 	region.partial = append(region.partial, page.Meta.Partial...)
-	unreadable := 0
+	unreadable, mismatched := 0, 0
 	for _, raw := range page.Items {
 		var item myProjectTrailCellItem
-		if err := json.Unmarshal(raw, &item); err != nil || item.ID == "" || item.LastActivityAt.IsZero() {
+		var reason string
+		switch err := json.Unmarshal(raw, &item); {
+		case err != nil:
+			reason = "decode: " + err.Error()
+		case item.ID == "":
+			reason = "missing id"
+		case item.LastActivityAt.IsZero():
+			reason = "missing last_activity_at"
+		case status != "" && item.Status != status:
+			mismatched++
+			logging.Debug(ctx, "trail list --mine: item outside the requested status", "region", g.label(), "requested", status, "status", item.Status)
+			continue
+		}
+		if reason != "" {
 			unreadable++
-			logging.Debug(ctx, "trail list --mine: unreadable item", "region", g.label(), "error", fmt.Sprint(err))
+			logging.Debug(ctx, "trail list --mine: unreadable item", "region", g.label(), "reason", reason)
 			continue
 		}
 		region.items = append(region.items, item.toMyProjectTrail())
 	}
 	if unreadable > 0 {
 		region.partial = append(region.partial, fmt.Sprintf("%d trail(s) could not be read", unreadable))
+	}
+	if mismatched > 0 {
+		region.partial = append(region.partial, fmt.Sprintf("%d trail(s) did not match status %s", mismatched, status))
 	}
 	return region, nil
 }
@@ -229,10 +251,10 @@ func myProjectTrailsRegionFailure(err error) string {
 	case errors.As(err, &he):
 		parts := []string{"status " + strconv.Itoa(he.StatusCode)}
 		if he.Code != "" {
-			parts = append(parts, "code "+he.Code)
+			parts = append(parts, "code "+tuiutil.SanitizeTerminalLabel(he.Code))
 		}
 		if he.RequestID != "" {
-			parts = append(parts, "request "+he.RequestID)
+			parts = append(parts, "request "+tuiutil.SanitizeTerminalLabel(he.RequestID))
 		}
 		return strings.Join(parts, ", ")
 	case errors.Is(err, context.DeadlineExceeded):
@@ -248,6 +270,21 @@ func isAuthFailure(err error) bool {
 		errors.Is(err, auth.ErrNotLoggedIn) || errors.Is(err, auth.ErrReauthRequired)
 }
 
+// myProjectTrailsLoginError is a region rejecting the caller's login. Its
+// message names only the region and the failure's status, code, and request
+// ID; the response body, which can be an HTML error page, is reachable through
+// Unwrap for errors.Is and errors.As but never printed.
+type myProjectTrailsLoginError struct {
+	region string
+	err    error
+}
+
+func (e *myProjectTrailsLoginError) Error() string {
+	return fmt.Sprintf("list your trails: %s rejected your login (%s)", e.region, myProjectTrailsRegionFailure(e.err))
+}
+
+func (e *myProjectTrailsLoginError) Unwrap() error { return e.err }
+
 // mergeMyProjectTrails keeps the newest copy of each trail, orders them by
 // latest activity, and caps the page. A failed region is reported in Partial;
 // a rejected login (401/403) from any region fails the list, since every
@@ -259,12 +296,12 @@ func mergeMyProjectTrails(ctx context.Context, results []cellCallResult[myProjec
 	for _, r := range results {
 		label := "region " + r.group.label()
 		if r.err != nil {
-			logging.Debug(ctx, "trail list --mine: region failed", "region", r.group.label(), "error", r.err.Error())
+			logging.Debug(ctx, "trail list --mine: region failed", "region", r.group.label(), "failure", myProjectTrailsRegionFailure(r.err))
 			if isAuthFailure(r.err) {
 				if errors.Is(r.err, auth.ErrNotLoggedIn) {
 					return myProjectTrailsJSON{}, loginHintErr(r.err)
 				}
-				return myProjectTrailsJSON{}, fmt.Errorf("list your trails: %s rejected your login (%s): %w", label, myProjectTrailsRegionFailure(r.err), r.err)
+				return myProjectTrailsJSON{}, &myProjectTrailsLoginError{region: label, err: r.err}
 			}
 			failed++
 			out.Partial = append(out.Partial, label+": "+myProjectTrailsRegionFailure(r.err))
@@ -280,7 +317,7 @@ func mergeMyProjectTrails(ctx context.Context, results []cellCallResult[myProjec
 		}
 	}
 	if failed > 0 && failed == len(results) {
-		return myProjectTrailsJSON{}, fmt.Errorf("list your trails: every region failed (%s)", strings.Join(out.Partial, "; "))
+		return myProjectTrailsJSON{}, fmt.Errorf("list your trails: every region failed (%s)", tuiutil.SanitizeTerminalText(strings.Join(out.Partial, "; ")))
 	}
 	for _, item := range byID {
 		out.Items = append(out.Items, item)

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/internal/coreapi"
 	"github.com/stretchr/testify/assert"
@@ -304,4 +305,61 @@ func TestMergeMyProjectTrails_ALoginFailureForOneRegionFailsTheList(t *testing.T
 		_, err := mergeMyProjectTrails(t.Context(), []cellCallResult[myProjectTrailsRegion]{ok, failed}, 10)
 		require.ErrorIs(t, err, authErr)
 	}
+}
+
+func TestTrailListMine_ARejectedLoginPrintsNoResponseBody(t *testing.T) {
+	// Serial: replaces the core client and cell builder seams.
+	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusForbidden)
+		_, err := w.Write([]byte("<html>\x1b]0;pwned\a" + strings.Repeat("cloudflare ", 300) + "</html>"))
+		assert.NoError(t, err)
+	}))
+	t.Cleanup(page.Close)
+	withMyTrailsClusters(t, myTrailsCluster("us", "us", page.URL, true))
+
+	_, _, err := runTrailListMine(t)
+	require.ErrorContains(t, err, "region us rejected your login (status 403)")
+	assert.NotContains(t, err.Error(), "cloudflare")
+	assert.NotContains(t, err.Error(), "\x1b")
+	var he *api.HTTPError
+	require.ErrorAs(t, err, &he, "the HTTP error stays reachable for callers")
+	assert.Equal(t, http.StatusForbidden, he.StatusCode)
+}
+
+func TestTrailListMine_LeavesOutItemsOutsideTheRequestedStatus(t *testing.T) {
+	// Serial: replaces the core client and cell builder seams.
+	closed := myTrailTestItem("closed", 2, "2026-10-30T12:00:00Z")
+	closed["status"] = "closed"
+	var queries []string
+	us := serveMyTrailsRegion(t, http.StatusOK, &queries, myTrailTestItem("open", 1, "2026-10-29T12:00:00Z"), closed)
+	withMyTrailsClusters(t, myTrailsCluster("us", "us", us, true))
+
+	out, errOut, err := runTrailListMine(t, "--status", "open", "--json")
+	require.NoError(t, err)
+	var got struct {
+		Items []struct {
+			ID string `json:"id"`
+		} `json:"items"`
+		Partial []string `json:"partial"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
+	require.Len(t, got.Items, 1)
+	assert.Equal(t, "open", got.Items[0].ID)
+	assert.Equal(t, []string{"region us: 1 trail(s) did not match status open"}, got.Partial)
+	assert.Contains(t, errOut, "did not match status open")
+}
+
+func TestTrailListMine_UpdatedAtFallsBackToActivity(t *testing.T) {
+	// Serial: replaces the core client and cell builder seams.
+	item := myTrailTestItem("us-1", 1, "2026-10-29T12:00:00Z")
+	delete(item, "metadata_updated_at")
+	var queries []string
+	us := serveMyTrailsRegion(t, http.StatusOK, &queries, item)
+	withMyTrailsClusters(t, myTrailsCluster("us", "us", us, true))
+
+	out, _, err := runTrailListMine(t, "--json")
+	require.NoError(t, err)
+	assert.NotContains(t, out, "0001-01-01")
+	assert.Contains(t, out, `"updatedAt": "2026-10-29T12:00:00Z"`)
 }

@@ -353,12 +353,12 @@ func (g cellGroup) cellTarget() *auth.CellTarget {
 	}
 }
 
-// label names the group in errors and logs: cell, else jurisdiction, else home.
 // defaultClusterByJurisdiction picks one cluster per lowercased jurisdiction:
-// its default cluster, else the first one seen, matching the auth layer's
-// resolution when routing by jurisdiction alone. usable, when set, leaves out
-// clusters a caller cannot route to, so a jurisdiction falls back to another of
-// its clusters rather than to one it cannot use.
+// its default cluster, else the first one seen. With usable nil this matches
+// the auth layer's resolution when routing by jurisdiction alone. usable, when
+// set, leaves out clusters a caller cannot route to, so a jurisdiction falls
+// back to another of its clusters rather than to one it cannot use; the auth
+// layer would not make that choice.
 func defaultClusterByJurisdiction(clusters []coreapi.Cluster, usable func(coreapi.Cluster) bool) map[string]coreapi.Cluster {
 	out := make(map[string]coreapi.Cluster, len(clusters))
 	for _, cl := range clusters {
@@ -373,6 +373,7 @@ func defaultClusterByJurisdiction(clusters []coreapi.Cluster, usable func(coreap
 	return out
 }
 
+// label names the group in errors and logs: cell, else jurisdiction, else home.
 func (g cellGroup) label() string {
 	switch {
 	case g.cell != "":
