@@ -23,16 +23,27 @@ const (
 // requests under the finding's discussion; it records what it was sent.
 func setupFindingReplyTest(t *testing.T, discussionID string, thread http.HandlerFunc) {
 	t.Helper()
+	setupFindingReplyTestListing(t, discussionID, discussionID, thread)
+}
+
+// setupFindingReplyTestListing is setupFindingReplyTest with the finding's
+// discussion as the findings list reports it (listed) and as the full finding
+// read through its review reports it (full).
+func setupFindingReplyTestListing(t *testing.T, listed, full string, thread http.HandlerFunc) {
+	t.Helper()
 	setupProjectTrailTest(t, func(w http.ResponseWriter, r *http.Request) {
 		if !serveWorkingProjectRead(t, w, r) {
 			t.Errorf("unexpected project request: %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
 		}
 	})
-	finding := map[string]any{"id": findingReplyTestFinding, "review_id": "review-one", "status": "open", "body": "Finding body",
-		"location": map[string]any{"granularity": "whole_change"}}
-	if discussionID != "" {
-		finding["discussion_id"] = discussionID
+	finding := func(discussionID string) map[string]any {
+		f := map[string]any{"id": findingReplyTestFinding, "review_id": "review-one", "status": "open", "body": "Finding body",
+			"location": map[string]any{"granularity": "whole_change"}}
+		if discussionID != "" {
+			f["discussion_id"] = discussionID
+		}
+		return f
 	}
 	setupWorkingRepoClient(t, func(w http.ResponseWriter, r *http.Request) {
 		switch path := r.URL.Path; {
@@ -41,9 +52,9 @@ func setupFindingReplyTest(t *testing.T, discussionID string, thread http.Handle
 				Parent: &api.TrailParentReference{ID: projectTrailTestID, Number: 42, ProjectID: projectTrailTestProject,
 					Host: "gh", Project: "acme", Path: projectTrailTestPath, Jurisdiction: "eu", PrimaryProcessingCell: "project-cell"}}))
 		case r.Method == http.MethodGet && path == "/api/v1/trails/gh/acme/widget/7/reviews/comments":
-			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"comments": []any{finding}}))
+			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"comments": []any{finding(listed)}}))
 		case r.Method == http.MethodGet && path == "/api/v1/trails/gh/acme/widget/7/reviews/review-one":
-			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"comments": []any{finding}}))
+			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"comments": []any{finding(full)}}))
 		case strings.HasPrefix(path, findingReplyTestThreadPath):
 			thread(w, r)
 		default:
@@ -139,6 +150,19 @@ func TestTrailFindingReply_RefusesAFindingWithoutAThread(t *testing.T) {
 
 	_, _, err := executeProjectTrailTest(t, "finding", "reply", "widget/7", findingReplyTestFinding, "-m", "hello", "--project", "gh/acme")
 	require.ErrorContains(t, err, "has no reply thread")
+}
+
+func TestTrailFindingReply_ReadsTheFullFindingWhenTheListOmitsItsThread(t *testing.T) {
+	// Not parallel: replaces client constructors.
+	var sent []string
+	setupFindingReplyTestListing(t, "", findingReplyTestDiscussion, func(w http.ResponseWriter, r *http.Request) {
+		sent = append(sent, r.Method+" "+r.URL.Path)
+		assert.NoError(t, json.NewEncoder(w).Encode(api.TrailDiscussionMessageResponse{Message: api.TrailDiscussionMessage{ID: "message-one"}}))
+	})
+
+	_, _, err := executeProjectTrailTest(t, "finding", "reply", "widget/7", findingReplyTestFinding, "-m", "hello", "--project", "gh/acme")
+	require.NoError(t, err)
+	require.Equal(t, []string{"POST " + findingReplyTestThreadPath + "/messages"}, sent)
 }
 
 func TestTrailFindingReply_RequiresABody(t *testing.T) {

@@ -78,6 +78,13 @@ func resolveTrailFindingThread(cmd *cobra.Command, targetOpts *trailReviewTarget
 	if err != nil {
 		return nil, "", api.TrailReviewComment{}, "", err
 	}
+	if strings.TrimSpace(stringPtrValue(comment.DiscussionID)) == "" {
+		// The list may leave out detail fields; read the finding in full, as
+		// 'finding show' does, before deciding it has no thread.
+		if comment, _, err = hydrateTrailReviewCommentWithState(cmd.Context(), client, target.Trail.ID, comment); err != nil {
+			return nil, "", api.TrailReviewComment{}, "", err
+		}
+	}
 	discussionID, err := trailFindingDiscussionID(comment)
 	if err != nil {
 		return nil, "", api.TrailReviewComment{}, "", err
