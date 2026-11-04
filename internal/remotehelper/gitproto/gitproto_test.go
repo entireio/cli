@@ -311,7 +311,7 @@ func TestReadReceivePackRequest_DeleteOnly(t *testing.T) {
 		t.Fatalf("ReadReceivePackRequest failed: %v", err)
 	}
 
-	got := string(result)
+	got := bodyString(t, result)
 	if !strings.Contains(got, oldSHA) {
 		t.Errorf("result missing old SHA")
 	}
@@ -374,7 +374,7 @@ func TestReadReceivePackRequest_DeleteOnlySHA256(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadReceivePackRequest failed: %v", err)
 	}
-	got := string(result)
+	got := bodyString(t, result)
 	if strings.Contains(got, "PACK") {
 		t.Errorf("delete-only SHA-256 push must not read pack data, got %q", got)
 	}
@@ -401,7 +401,7 @@ func TestReadReceivePackRequest_WithPackDataSHA256(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadReceivePackRequest failed: %v", err)
 	}
-	got := string(result)
+	got := bodyString(t, result)
 	if !strings.Contains(got, packData) {
 		t.Errorf("result missing pack data, got: %q", got)
 	}
@@ -426,7 +426,7 @@ func TestReadReceivePackRequest_WithPackData(t *testing.T) {
 		t.Fatalf("ReadReceivePackRequest failed: %v", err)
 	}
 
-	got := string(result)
+	got := bodyString(t, result)
 	if !strings.Contains(got, newSHA) {
 		t.Errorf("result missing new SHA")
 	}
@@ -472,14 +472,14 @@ func TestReadSendPackRequest_IncludesPackData(t *testing.T) {
 	input.WriteString(trailingStatus)
 
 	reader := bufio.NewReader(&input)
-	var got bytes.Buffer
-	if err := ReadSendPackRequest(reader, &got); err != nil {
+	var body RequestBody
+	if err := ReadSendPackRequest(reader, &body); err != nil {
 		t.Fatalf("ReadSendPackRequest failed: %v", err)
 	}
 
 	want := commandSection + pushOptions + packData
-	if got.String() != want {
-		t.Fatalf("request body = %q, want %q", got.String(), want)
+	if got := bodyString(t, &body); got != want {
+		t.Fatalf("request body = %q, want %q", got, want)
 	}
 	remaining, err := io.ReadAll(reader)
 	if err != nil {
@@ -506,13 +506,13 @@ func TestReadSendPackRequest_DeleteOnly(t *testing.T) {
 	input.WriteString(trailingStatus)
 
 	reader := bufio.NewReader(&input)
-	var got bytes.Buffer
-	if err := ReadSendPackRequest(reader, &got); err != nil {
+	var body RequestBody
+	if err := ReadSendPackRequest(reader, &body); err != nil {
 		t.Fatalf("ReadSendPackRequest failed: %v", err)
 	}
 
-	if got.String() != commandSection {
-		t.Fatalf("request body = %q, want %q", got.String(), commandSection)
+	if got := bodyString(t, &body); got != commandSection {
+		t.Fatalf("request body = %q, want %q", got, commandSection)
 	}
 	remaining, err := io.ReadAll(reader)
 	if err != nil {
@@ -529,7 +529,7 @@ func TestReadSendPackRequest_TruncatedFails(t *testing.T) {
 	t.Run("truncated length prefix", func(t *testing.T) {
 		t.Parallel()
 		r := bufio.NewReader(strings.NewReader("00"))
-		if err := ReadSendPackRequest(r, &bytes.Buffer{}); err == nil {
+		if err := ReadSendPackRequest(r, &RequestBody{}); err == nil {
 			t.Fatal("expected error on truncated length")
 		}
 	})
@@ -539,7 +539,7 @@ func TestReadSendPackRequest_TruncatedFails(t *testing.T) {
 		// One inner payload followed by EOF instead of the outer flush.
 		body := pktLine("0000ok refs/heads/main\n")
 		r := bufio.NewReader(strings.NewReader(body))
-		if err := ReadSendPackRequest(r, &bytes.Buffer{}); err == nil {
+		if err := ReadSendPackRequest(r, &RequestBody{}); err == nil {
 			t.Fatal("expected error on missing trailing flush")
 		}
 	})
@@ -548,7 +548,7 @@ func TestReadSendPackRequest_TruncatedFails(t *testing.T) {
 		t.Parallel()
 		// Length claims 100 bytes of payload but only 10 follow.
 		r := bufio.NewReader(strings.NewReader("0064short"))
-		if err := ReadSendPackRequest(r, &bytes.Buffer{}); err == nil {
+		if err := ReadSendPackRequest(r, &RequestBody{}); err == nil {
 			t.Fatal("expected error on short payload")
 		}
 	})

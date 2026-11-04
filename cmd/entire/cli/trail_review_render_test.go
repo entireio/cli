@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -92,7 +93,7 @@ func TestPrintTrailReviewDashboard_PlainGolden(t *testing.T) {
 	t.Parallel()
 	target, comments := trailReviewRenderFixture()
 	var out strings.Builder
-	printTrailReviewDashboard(&out, target, comments, "next-1", defaultTrailReviewListOptions(), countTrailReviewComments(comments))
+	printTrailReviewDashboard(&out, target, comments, "next-1", defaultTrailReviewListOptions(), countTrailReviewComments(comments), nil)
 	assertTrailReviewGolden(t, out.String(), trailReviewDashboardPlainGolden)
 }
 
@@ -135,7 +136,7 @@ func TestPrintTrailReview_PlainStripsTerminalEscapes(t *testing.T) {
 	detail.SuggestedChanges[0].Instruction = trailReviewStrPtr("do \x1b[5mthis")
 
 	var out strings.Builder
-	printTrailReviewDashboard(&out, target, comments, "", defaultTrailReviewListOptions(), countTrailReviewComments(comments))
+	printTrailReviewDashboard(&out, target, comments, "", defaultTrailReviewListOptions(), countTrailReviewComments(comments), nil)
 	printTrailReviewComments(&out, comments, "")
 	printTrailReviewCommentDetail(&out, detail)
 	printTrailReviewCommentCreated(&out, target, comments[0])
@@ -226,7 +227,7 @@ func renderStyledDashboard(t *testing.T, width int, comments []api.TrailReviewCo
 	t.Helper()
 	target, _ := trailReviewRenderFixture()
 	var out strings.Builder
-	renderTrailReviewDashboardStyled(&out, colorTrailReviewStyles(), width, target, comments, nextCursor, opts, counts)
+	renderTrailReviewDashboardStyled(&out, colorTrailReviewStyles(), width, target, comments, nextCursor, opts, counts, nil)
 	if !strings.Contains(out.String(), "\x1b[") {
 		t.Fatalf("styled dashboard has no color codes:\n%s", out.String())
 	}
@@ -472,7 +473,7 @@ func TestRenderTrailReviewStyled_StripsTerminalEscapes(t *testing.T) {
 
 	var out strings.Builder
 	s := colorTrailReviewStyles()
-	renderTrailReviewDashboardStyled(&out, s, 100, target, comments, "", anyStatusOptions(), countTrailReviewComments(comments))
+	renderTrailReviewDashboardStyled(&out, s, 100, target, comments, "", anyStatusOptions(), countTrailReviewComments(comments), nil)
 	renderTrailReviewCommentDetailStyled(&out, s, 100, detail)
 	renderTrailReviewCommentCreatedStyled(&out, s, target, comments[0])
 	for _, bad := range []string{"\x1b]", "\x07", "\x1b[2J", "\x1b[5m"} {
@@ -492,5 +493,27 @@ func TestTrailReviewFirstParagraph_SkipsLeadingLocationParagraph(t *testing.T) {
 		if got := trailReviewFirstParagraph(api.TrailReviewComment{Body: trailReviewStrPtr(body)}); got != want {
 			t.Errorf("trailReviewFirstParagraph(%q) = %q, want %q", body, got, want)
 		}
+	}
+}
+
+// The change's project agents (main #2969) show in the styled dashboard too.
+func TestRenderTrailReviewDashboardStyled_ShowsProjectAgents(t *testing.T) {
+	t.Parallel()
+	target, comments := trailReviewRenderFixture()
+	agents := json.RawMessage(`[{"agent":{"id":"01M5TA124RRH3JVWJP0B75G16Z","name":"Slop","preset":{"id":"slop","version":3}},` +
+		`"signal":{"value_type":"size","polarity":"lower_is_better"},"reading":{"size_value":"small"},` +
+		`"latest_run":{"id":"01M66YSQN8151AHGC5WCEQTTMP","status":"succeeded","head_sha":"71e662cdc07ed6c2a30f98b20ad1b7726334ba83"}}]`)
+	var out strings.Builder
+	if err := renderTrailReviewDashboardStyled(&out, colorTrailReviewStyles(), 100, target, comments, "", anyStatusOptions(), countTrailReviewComments(comments), agents); err != nil {
+		t.Fatal(err)
+	}
+	text := tuiutil.StripANSI(out.String())
+	for _, want := range []string{"Agents:", "Slop", "small", "succeeded", "── Needs attention (2) "} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("styled dashboard missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Index(text, "Agents:") > strings.Index(text, "Needs attention") {
+		t.Fatalf("agents should follow the totals, before the findings:\n%s", text)
 	}
 }

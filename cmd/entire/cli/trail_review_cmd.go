@@ -111,6 +111,7 @@ branch, not the whole trail. Use 'entire trail list' to discover trails.`),
 	cmd.AddCommand(newTrailReviewShowCmd(&targetOpts))
 	cmd.AddCommand(newTrailReviewUpdateCmd(&targetOpts))
 	cmd.AddCommand(newTrailReviewApplyCmd(&targetOpts))
+	cmd.AddCommand(newTrailFindingReplyCmd(&targetOpts), newTrailFindingEditReplyCmd(&targetOpts), newTrailFindingDeleteReplyCmd(&targetOpts))
 	cmd.AddCommand(newTrailReviewStatusCmd(&targetOpts, "resolve", trailReviewStatusResolved, "Resolve a finding"))
 	cmd.AddCommand(newTrailReviewStatusCmd(&targetOpts, "dismiss", trailReviewStatusDismissed, "Dismiss a finding"))
 	cmd.AddCommand(newTrailReviewStatusCmd(&targetOpts, "reopen", trailReviewStatusOpen, "Reopen a finding"))
@@ -329,11 +330,11 @@ func runTrailReviewDashboard(cmd *cobra.Command, mode *trailMode, selector strin
 		return err
 	}
 	counts := countTrailReviewComments(summaryComments)
+	agents := fetchTrailChangeAgents(cmd.Context(), cmd.ErrOrStderr(), client, target.Trail)
 	if opts.JSON {
-		return encodeTrailReviewJSON(cmd.OutOrStdout(), target, comments, nextCursor, counts)
+		return encodeTrailReviewJSON(cmd.OutOrStdout(), target, comments, nextCursor, counts, agents)
 	}
-	printTrailReviewDashboard(cmd.OutOrStdout(), target, comments, nextCursor, opts, counts)
-	return nil
+	return printTrailReviewDashboard(cmd.OutOrStdout(), target, comments, nextCursor, opts, counts, agents)
 }
 
 func runTrailReviewComments(cmd *cobra.Command, mode *trailMode, selector string, opts trailReviewListOptions) error {
@@ -351,7 +352,7 @@ func runTrailReviewComments(cmd *cobra.Command, mode *trailMode, selector string
 		return err
 	}
 	if opts.JSON {
-		return encodeTrailReviewJSON(cmd.OutOrStdout(), target, comments, nextCursor, countTrailReviewComments(comments))
+		return encodeTrailReviewJSON(cmd.OutOrStdout(), target, comments, nextCursor, countTrailReviewComments(comments), nil)
 	}
 	printTrailReviewComments(cmd.OutOrStdout(), comments, nextCursor)
 	return nil
@@ -410,6 +411,12 @@ func runTrailReviewShow(cmd *cobra.Command, mode *trailMode, selector string, co
 		comment = hydrated
 	}
 	printTrailReviewCommentDetail(cmd.OutOrStdout(), comment)
+	replies, err := fetchTrailFindingReplies(cmd.Context(), client, target.Trail.ID, comment)
+	if err != nil {
+		// The error can carry the server's response body.
+		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not load replies: %s\n", tuiutil.SanitizeTerminalText(err.Error()))
+	}
+	printTrailFindingReplies(cmd.OutOrStdout(), replies)
 	return nil
 }
 
@@ -1452,14 +1459,18 @@ func resolveGitRev(ctx context.Context, ref string) (string, error) {
 	return sha, nil
 }
 
-func encodeTrailReviewJSON(w io.Writer, target trailReviewTarget, comments []api.TrailReviewComment, nextCursor string, counts trailReviewCommentCounts) error {
+// encodeTrailReviewJSON prints findings as JSON. agents, the change's project
+// agents as the server sent them, is included when the dashboard read them.
+func encodeTrailReviewJSON(w io.Writer, target trailReviewTarget, comments []api.TrailReviewComment, nextCursor string, counts trailReviewCommentCounts, agents json.RawMessage) error {
 	return printJSON(w, struct {
+		Agents     json.RawMessage          `json:"agents,omitempty"`
 		Counts     trailReviewCommentCounts `json:"counts"`
 		Findings   []trailReviewCommentJSON `json:"findings"`
 		HasMore    bool                     `json:"has_more"`
 		NextCursor string                   `json:"next_cursor,omitempty"`
 		Trail      trailResourceJSON        `json:"trail"`
 	}{
+		Agents:     agents,
 		Counts:     counts,
 		Findings:   toTrailReviewCommentsJSON(comments),
 		HasMore:    nextCursor != "",
@@ -1468,10 +1479,9 @@ func encodeTrailReviewJSON(w io.Writer, target trailReviewTarget, comments []api
 	})
 }
 
-func printTrailReviewDashboard(w io.Writer, target trailReviewTarget, comments []api.TrailReviewComment, nextCursor string, opts trailReviewListOptions, counts trailReviewCommentCounts) {
+func printTrailReviewDashboard(w io.Writer, target trailReviewTarget, comments []api.TrailReviewComment, nextCursor string, opts trailReviewListOptions, counts trailReviewCommentCounts, agents json.RawMessage) error {
 	if s := newStatusStyles(w); s.colorEnabled {
-		renderTrailReviewDashboardStyled(w, newTrailReviewStyles(s), trailReviewWidth(w), target, comments, nextCursor, opts, counts)
-		return
+		return renderTrailReviewDashboardStyled(w, newTrailReviewStyles(s), trailReviewWidth(w), target, comments, nextCursor, opts, counts, agents)
 	}
 	trail := trailForDisplay(target.Trail)
 	clean := tuiutil.SanitizeDisplayText
@@ -1489,10 +1499,13 @@ func printTrailReviewDashboard(w io.Writer, target trailReviewTarget, comments [
 		fmt.Fprintf(w, "  Showing up to %d findings; next page: --cursor %q\n", opts.Limit, nextCursor)
 	}
 	fmt.Fprintln(w)
+	if err := printTrailChangeAgents(w, agents); err != nil {
+		return err
+	}
 
 	if len(comments) == 0 {
 		fmt.Fprintln(w, "No findings match the current filters.")
-		return
+		return nil
 	}
 	printTrailReviewCommentsTable(w, comments)
 
@@ -1505,6 +1518,7 @@ func printTrailReviewDashboard(w io.Writer, target trailReviewTarget, comments [
 	fmt.Fprintln(w, "  entire trail finding resolve <finding-id> -m \"fixed in <sha>\"")
 	fmt.Fprintln(w, "  entire trail finding dismiss <finding-id> -m \"not applicable\"")
 	fmt.Fprintln(w, "  entire trail watch")
+	return nil
 }
 
 func printTrailReviewComments(w io.Writer, comments []api.TrailReviewComment, nextCursor string) {

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"regexp"
@@ -173,7 +174,7 @@ func trailReviewStatusFilterIncludes(filter, status string) bool {
 	return false
 }
 
-func renderTrailReviewDashboardStyled(w io.Writer, s trailReviewStyles, width int, target trailReviewTarget, comments []api.TrailReviewComment, nextCursor string, opts trailReviewListOptions, counts trailReviewCommentCounts) {
+func renderTrailReviewDashboardStyled(w io.Writer, s trailReviewStyles, width int, target trailReviewTarget, comments []api.TrailReviewComment, nextCursor string, opts trailReviewListOptions, counts trailReviewCommentCounts, agents json.RawMessage) error {
 	trail := trailForDisplay(target.Trail)
 	var b strings.Builder
 
@@ -194,6 +195,13 @@ func renderTrailReviewDashboardStyled(w io.Writer, s trailReviewStyles, width in
 	fmt.Fprintf(&b, "  %s\n\n", s.render(s.dim, tuiutil.TruncateDisplayWidth(fmt.Sprintf(
 		"%d open (%d high · %d medium · %d low) · %d stale · %d resolved · %d dismissed",
 		counts.Open, counts.OpenHigh, counts.OpenMedium, counts.OpenLow, counts.Stale, counts.Resolved, counts.Dismissed), width-2)))
+	// The change's project agents render as the plain view does; printTable
+	// colors its own header on a terminal.
+	fmt.Fprint(w, b.String())
+	b.Reset()
+	if err := printTrailChangeAgents(w, agents); err != nil {
+		return err
+	}
 
 	groups := groupTrailReviewComments(comments)
 	if trailReviewStatusFilterIncludes(opts.Status, trailReviewStatusOpen) {
@@ -225,6 +233,7 @@ func renderTrailReviewDashboardStyled(w io.Writer, s trailReviewStyles, width in
 	}
 	fmt.Fprintf(&b, "  %s\n", s.render(s.dim, "entire trail finding --help for every action"))
 	fmt.Fprint(w, b.String())
+	return nil
 }
 
 // trailReviewFooterActions are the commands people run most from the
