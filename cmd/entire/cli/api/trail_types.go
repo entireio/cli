@@ -29,6 +29,7 @@ type TrailResource struct {
 	Title              string                `json:"title"`
 	Body               string                `json:"body,omitempty"`
 	Status             string                `json:"status"`
+	ReadyForReview     *bool                 `json:"ready_for_review,omitempty"` // nil when the server omits it
 	Phase              string                `json:"phase,omitempty"`
 	Author             *trail.Author         `json:"author"`
 	Assignees          []string              `json:"assignees"`
@@ -149,6 +150,12 @@ type TrailUpdateRequest struct {
 	RequestedReviewers *[]string `json:"requested_reviewers,omitempty"`
 	Type               *string   `json:"type,omitempty"`
 	Priority           *string   `json:"priority,omitempty"`
+	// ReadyForReview marks the change ready (true) or back to draft (false).
+	// The server keeps it false on a repository without an approval gate, but
+	// still applies the matching draft state to a backing pull request.
+	ReadyForReview *bool `json:"ready_for_review,omitempty"`
+	// Base retargets the change onto another base branch.
+	Base *string `json:"base,omitempty"`
 }
 
 type TrailUpdateResponse struct {
