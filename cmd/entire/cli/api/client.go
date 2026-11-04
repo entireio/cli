@@ -35,6 +35,11 @@ type Client struct {
 	authSessionsPath string
 }
 
+// BaseURL returns the origin the client sends requests to.
+func (c *Client) BaseURL() string {
+	return c.baseURL
+}
+
 // WithAuthSessionsPath sets the base path used by ListAuthSessions,
 // RevokeCurrentAuthSession, and RevokeAuthSession. Returns the receiver for chaining
 // at construction:

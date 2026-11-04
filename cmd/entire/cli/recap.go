@@ -18,6 +18,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/recap"
 )
@@ -127,7 +128,7 @@ func runRecap(ctx context.Context, w, errW io.Writer, f *recapFlags) error {
 	// scope value is a repo_id ULID when routed to a cell (echoed back verbatim
 	// by the response), which is meaningless to show a user. Both are empty when
 	// no repo query is sent, so an unscoped recap isn't mislabelled.
-	client, repoScope, repoName, err := newRecapClient(ctx, f.insecureHTTP)
+	source, repoName, err := newRecapSource(ctx, f.insecureHTTP)
 	if err != nil {
 		if errors.Is(err, api.ErrInsecureHTTP) {
 			// Name the variable and the host it points at: the generic error says
@@ -145,17 +146,16 @@ func runRecap(ctx context.Context, w, errW io.Writer, f *recapFlags) error {
 	}
 	rangeKey := f.rangeKey()
 	if f.useTUI(interactive.IsTerminalWriter(w), interactive.CanPromptInteractively(), IsAccessibleMode()) {
-		return runRecapTUI(ctx, client, recapTUIOptions{
+		return runRecapTUI(ctx, source, recapTUIOptions{
 			Range:    rangeKey,
 			View:     mode,
 			Agent:    f.agentName(),
-			Repo:     repoScope,
 			RepoName: repoName,
 			Color:    color,
 		})
 	}
 	start, end := rangeKey.Bounds(time.Now())
-	resp, err := recap.FetchMeRecap(ctx, client, start, end, repoScope, 0)
+	resp, err := source.fetch(ctx, start, end)
 	if err != nil {
 		return handleRecapFetchError(errW, err)
 	}
@@ -171,23 +171,38 @@ func runRecap(ctx context.Context, w, errW io.Writer, f *recapFlags) error {
 	return nil
 }
 
-// newRecapClient returns a client for the caller's home entire-api cell, the
-// value to pass as /me/recap's ?repo= (the current repo's ULID, its
-// team/contributors scope), and the repo's owner/repo display name. Both are
-// empty when the current repo can't be resolved; recap then shows the personal
-// side only.
+// newRecapSource returns the recap source for the current repo and the repo's
+// owner/repo display name. Its home client is the caller's home entire-api
+// cell; /me/recap's ?repo= is the current repo's processing placement id (its
+// team/contributors scope). When that placement lives on another cell, the
+// source also reads the team side there. The repo fields are empty when the
+// current repo can't be resolved; recap then shows the personal side only.
 //
 // There is no data-API fallback: the BFF answers /me/recap by proxying to that
 // same home cell, so a caller the cell path cannot serve gets nothing better
 // there. Client-construction errors (not logged in, no cell for the home
 // jurisdiction, refresh rejected) are returned for runRecap to render.
-func newRecapClient(ctx context.Context, insecureHTTP bool) (client *api.Client, repoScope, repoName string, err error) {
-	client, err = auth.NewEntireAPICellClient(ctx, insecureHTTP, nil)
+func newRecapSource(ctx context.Context, insecureHTTP bool) (recapSource, string, error) {
+	// One factory for both cells: it resolves and refreshes the login once.
+	factory, err := auth.NewEntireAPICellClientFactory(ctx, insecureHTTP)
 	if err != nil {
-		return nil, "", "", err //nolint:wrapcheck // auth returns contextual, user-facing errors
+		return recapSource{}, "", err //nolint:wrapcheck // auth returns contextual, user-facing errors
 	}
-	repoID, repoSlug := currentRepoRef(ctx)
-	return client, repoID, repoSlug, nil
+	home, err := factory.ClientFor(ctx, nil)
+	if err != nil {
+		return recapSource{}, "", err //nolint:wrapcheck // auth returns contextual, user-facing errors
+	}
+	repoID, repoSlug, repoCell := currentRepoRef(ctx)
+	source := recapSource{home: home, repo: repoID, teamTimeout: recapTeamTimeout}
+	if cell := recapTeamCell(home.BaseURL(), repoCell, auth.BaseURLOverridePinsCell()); cell != nil && repoID != "" {
+		team, err := factory.ClientFor(ctx, cell)
+		if err != nil {
+			logging.Debug(ctx, "recap cannot reach the repo's cell; showing the personal side only", "error", err.Error())
+		} else {
+			source.team = team
+		}
+	}
+	return source, repoSlug, nil
 }
 
 func handleRecapFetchError(w io.Writer, err error) error {

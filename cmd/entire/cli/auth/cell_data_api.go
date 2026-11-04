@@ -443,6 +443,16 @@ func isLoopbackOrigin(origin string) bool {
 	return isLoopbackHost(strings.ToLower(u.Hostname()))
 }
 
+// BaseURLOverridePinsCell reports whether ENTIRE_API_BASE_URL names the one
+// cell to talk to: a direct entire-api cell or a loopback dev host, which cell
+// clients dial verbatim. An unset override, or one naming a BFF/apex such as
+// the staging apex, still resolves cells from the catalog, so callers may
+// route to another cell as they would without it.
+func BaseURLOverridePinsCell() bool {
+	dataURL, overridden := api.BaseURLOverride()
+	return overridden && !isBFFOrigin(api.OriginOnly(dataURL))
+}
+
 // isBFFOrigin reports whether origin is a BFF / apex host that fronts multiple
 // cells (so the actual cell must be resolved from the cluster catalog), as
 // opposed to a direct entire-api cell (host contains ".api.") or a loopback

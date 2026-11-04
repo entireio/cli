@@ -1,50 +1,43 @@
 package cli
 
 import (
+	"errors"
 	"testing"
 
-	"github.com/entireio/cli/internal/coreapi"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
-func TestForgeToMirrorProvider(t *testing.T) {
-	t.Parallel()
+// setupRecapRepo chdirs into a fresh repo whose origin is originURL.
+func setupRecapRepo(t *testing.T, originURL string) {
+	t.Helper()
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.AddRemote(t, dir, "origin", originURL)
+	t.Chdir(dir)
+}
 
-	for _, forge := range []string{"gh", "github", "GitHub", " gh "} {
-		if p, ok := forgeToMirrorProvider(forge); !ok || p != mirrorCloneProviderGitHub {
-			t.Errorf("forgeToMirrorProvider(%q) = (%q, %v), want (%q, true)", forge, p, ok, mirrorCloneProviderGitHub)
-		}
-	}
-	if _, ok := forgeToMirrorProvider("gitlab"); ok {
-		t.Error("forgeToMirrorProvider(gitlab) = ok, want not ok")
+// Not parallel: chdirs and swaps the package-level core client seam.
+func TestCurrentRepoRef_UsesProcessingPlacement(t *testing.T) {
+	setupRecapRepo(t, "https://github.com/entirehq/entire.io.git")
+	// The processing placement is not the first one listed, which is the one
+	// the old first-active-mirror lookup returned.
+	withFakeCellCore(t, &fakeCellCore{
+		repos:    reposOutput(fourRegionFixtureProcessingInMiddle()),
+		clusters: clustersWithSlugs(),
+	})
+
+	repoID, slug, _ := currentRepoRef(t.Context())
+	if repoID != "mirror-us" || slug != "entirehq/entire.io" {
+		t.Errorf("currentRepoRef = (%q, %q), want (mirror-us, entirehq/entire.io)", repoID, slug)
 	}
 }
 
-func TestFirstActiveRepoID(t *testing.T) {
-	t.Parallel()
+// Not parallel: chdirs and swaps the package-level core client seam.
+func TestCurrentRepoRef_LookupFailureIsBestEffort(t *testing.T) {
+	setupRecapRepo(t, "https://github.com/entirehq/entire.io.git")
+	withFakeCellCore(t, &fakeCellCore{reposErr: errors.New("control plane down")})
 
-	archived := coreapi.Mirror{MirrorId: "archived", IsArchived: coreapi.NewOptBool(true)}
-	failed := coreapi.Mirror{MirrorId: "failed", Status: coreapi.NewOptMirrorStatus(coreapi.MirrorStatusFailed)}
-	suspended := coreapi.Mirror{MirrorId: "suspended", Status: coreapi.NewOptMirrorStatus(coreapi.MirrorStatusSuspended)}
-	ready := coreapi.Mirror{MirrorId: "ready-ulid", Status: coreapi.NewOptMirrorStatus(coreapi.MirrorStatusReady)}
-	unset := coreapi.Mirror{MirrorId: "unset-status-ulid"} // no status → treated as active
-
-	tests := []struct {
-		name    string
-		mirrors []coreapi.Mirror
-		want    string
-	}{
-		{"none", nil, ""},
-		{"single ready", []coreapi.Mirror{ready}, "ready-ulid"},
-		{"unset status counts as active", []coreapi.Mirror{unset}, "unset-status-ulid"},
-		{"skips archived and unhealthy", []coreapi.Mirror{archived, failed, suspended, ready}, "ready-ulid"},
-		{"all inactive", []coreapi.Mirror{archived, failed, suspended}, ""},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			if got := firstActiveRepoID(tt.mirrors); got != tt.want {
-				t.Fatalf("firstActiveRepoID = %q, want %q", got, tt.want)
-			}
-		})
+	if repoID, slug, _ := currentRepoRef(t.Context()); repoID != "" || slug != "" {
+		t.Errorf("currentRepoRef = (%q, %q), want empty so recap shows the personal side only", repoID, slug)
 	}
 }
