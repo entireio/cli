@@ -247,7 +247,7 @@ type chunkPushResult struct {
 	unreachable string
 }
 
-// pushRefChunks batch-pushes refs a chunk at a time (see
+// pushRefChunks batch-pushes refs size at a time (see
 // checkpointRefPushChunkSize), calling onLanded with each chunk that lands so
 // the caller can dequeue it before a later chunk is cut. A failed chunk does not
 // stop the phase — a rejection fails only its own chunk — but an SSH auth
@@ -255,10 +255,10 @@ type chunkPushResult struct {
 // row does, and so does an unreachable remote before any chunk landed: per-ref
 // retries cannot reach it either, and each would wait out its own connect
 // timeout. The first chunk is always attempted, matching the per-ref fallback.
-func pushRefChunks(ctx context.Context, target string, refs []checkpointRefPush, onLanded func([]checkpointRefPush)) chunkPushResult {
+func pushRefChunks(ctx context.Context, target string, refs []checkpointRefPush, size int, onLanded func([]checkpointRefPush)) chunkPushResult {
 	var res chunkPushResult
 	consecutive := 0
-	for start := 0; start < len(refs); start += checkpointRefPushChunkSize {
+	for start := 0; start < len(refs); start += size {
 		if start > 0 {
 			if reason := chunkStopReason(ctx, consecutive); reason != "" {
 				res.untried = refs[start:]
@@ -268,7 +268,7 @@ func pushRefChunks(ctx context.Context, target string, refs []checkpointRefPush,
 				return res
 			}
 		}
-		chunk := refs[start:min(start+checkpointRefPushChunkSize, len(refs))]
+		chunk := refs[start:min(start+size, len(refs))]
 		err := batchPushCheckpointRefs(ctx, target, chunk)
 		if err == nil {
 			consecutive = 0
@@ -632,7 +632,11 @@ var checkpointFlushBudget = 2 * time.Minute
 // Chunks are also what make the flush budget bound progress rather than discard
 // it: each chunk that lands leaves the queue at once, so a backlog too large for
 // one budget drains over several pushes instead of being cut at the same point
-// by every one of them. Declared as a var so tests can shrink it.
+// by every one of them. A link too slow to land one chunk within the budget
+// would still never move the head of the queue, so the size actually used
+// adapts (see PushQueue.ChunkSizeHint and adaptChunkSize): a chunk the budget
+// cuts before anything landed quarters it, down to one ref, and a flush that
+// lands everything doubles it back. Declared as a var so tests can shrink it.
 var checkpointRefPushChunkSize = 200
 
 // maxConsecutiveChunkPushFailures stops the batch phase once this many chunks in

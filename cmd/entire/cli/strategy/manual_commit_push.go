@@ -474,22 +474,24 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 		return nil
 	}
 
-	if flushed, err := flushCheckpointRefsQueue(ctx, repo, ps, batchWithinFlushBudget); err == nil {
-		// Delivered, and only if something actually was: an empty queue pushed
-		// nothing, so it must not move the election or announce that it had.
-		if pendingCapture != "" && flushed > 0 {
-			commitCapturedSyncRemote(ctx, pendingCapture)
-		}
-		// An empty queue carried no checkpoints, so there is nothing to warn
-		// was misdirected — see warnIgnoredCheckpointRemote.
-		if flushed > 0 {
-			warnIgnoredCheckpointRemote(ctx, ps)
-		}
-	} else {
+	flushed, err := flushCheckpointRefsQueue(ctx, repo, ps, batchWithinFlushBudget)
+	if err != nil {
 		// Fail-soft: a checkpoint-ref push failure must never block the user's
 		// git push. The refs stay queued for the next pre-push.
 		logging.Warn(ctx, "git-refs pre-push: checkpoint ref push failed; refs left queued",
 			slog.String("error", err.Error()))
+	}
+	// Delivered, and only if something actually was — counted, not inferred
+	// from the error: a chunked flush can land chunks and still fail later
+	// ones, and those checkpoints reached the remote all the same. An empty
+	// queue pushed nothing, so it must not move the election or announce that
+	// it had, nor warn that checkpoints were misdirected (see
+	// warnIgnoredCheckpointRemote).
+	if flushed > 0 {
+		if pendingCapture != "" {
+			commitCapturedSyncRemote(ctx, pendingCapture)
+		}
+		warnIgnoredCheckpointRemote(ctx, ps)
 	}
 	return nil
 }
@@ -757,13 +759,26 @@ func flushCheckpointRefsWith(
 	}
 
 	// Fast path: push the refs a chunk per round-trip (fast-forward-only).
-	batch := pushRefChunks(batchCtx, dest.target, existing, func(landed []checkpointRefPush) {
+	chunkSize := queue.ChunkSizeHint(checkpointRefPushChunkSize)
+	batch := pushRefChunks(batchCtx, dest.target, existing, chunkSize, func(landed []checkpointRefPush) {
 		result.pushed = append(result.pushed, landed...)
 		if removeErr := queue.RemoveEntries(checkpointRefPushTokens(landed)); removeErr != nil {
 			logging.Warn(ctx, "git-refs push: clear pushed refs from queue failed",
 				slog.String("error", removeErr.Error()))
 		}
 	})
+	// The budget, not an interruption, cut the batch.
+	budgetCut := bound == batchWithinFlushBudget &&
+		errors.Is(flushCtx.Err(), context.DeadlineExceeded) && pushCtx.Err() == nil
+	adaptChunkSize(ctx, queue, chunkSize, batch, budgetCut)
+	if budgetCut && len(batch.failed) > 0 && !batch.sshAuthFailed && batch.unreachable == "" {
+		// The budget ran out mid-chunk: the per-ref fallback would only fail
+		// its one guaranteed attempt on the spent budget. Stop as if between
+		// chunks, and send the cut chunk to the back of the queue.
+		stopOnBudgetCut(ctx, flushCtx, queue, batch, len(existing), stop)
+		result.markUnsettled(existing, fmt.Errorf("not attempted: %s", flushAbortReason(flushCtx, 0)))
+		return result, nil
+	}
 	if bound == batchUnbounded {
 		var cancelFallback context.CancelFunc
 		flushCtx, cancelFallback = context.WithTimeout(pushCtx, checkpointFlushBudget)
@@ -791,6 +806,52 @@ func flushCheckpointRefsWith(
 	stop = startProgressDots(os.Stderr)
 	retry := retryRefsIndividually(ctx, flushCtx, repo, dest.target, batch.failed, len(existing))
 	return finishIndividualRetry(ctx, pushCtx, queue, existing, batch, retry, stop, result)
+}
+
+// stopOnBudgetCut reports and settles a batch the flush budget cut mid-chunk.
+func stopOnBudgetCut(ctx, flushCtx context.Context, queue *checkpoint.PushQueue, batch chunkPushResult, queued int, stop func(string)) {
+	stop(fmt.Sprintf(" pushed %d of %d", batch.landed, queued))
+	fmt.Fprintf(os.Stderr, "[entire] Stopped pushing: %s; %d checkpoint ref(s) stay queued for the next push.\n",
+		flushAbortReason(flushCtx, 0), queued-batch.landed)
+	logging.Warn(ctx, "git-refs push: batch push cut by the flush budget; remaining refs stay queued",
+		slog.Int("pushed", batch.landed), slog.Int("queued", queued))
+	// An earlier chunk may have been refused outright before the clock ran
+	// out. The fallback that would show why does not run on a spent budget,
+	// so show the remote's reason here: a ref blocked for its content would
+	// otherwise ride along with every budget cut without ever saying so.
+	if reason := checkpointRefRejectionReason(batch.firstErr); reason != "" {
+		fmt.Fprintf(os.Stderr, "[entire] Warning: the remote declined a checkpoint ref batch (showing one rejection):\n%s\n", reason)
+	}
+	// Fair scheduling, as after a fallback abort: a slow remote cuts the
+	// budget at the same place every push, so the cut chunk goes to the
+	// back rather than holding the head of the queue.
+	if err := queue.Rotate(checkpointRefPushTokens(batch.failed)); err != nil {
+		logging.Warn(ctx, "git-refs push: rotate cut chunk to queue back failed",
+			slog.String("error", err.Error()))
+	}
+}
+
+// adaptChunkSize updates the remembered chunk size after a batch. It is
+// quartered when the budget cut a chunk in flight and nothing landed — a link
+// too slow to land one chunk per budget would otherwise never move the head of
+// the queue, and each such cut costs a whole budget, hence the steep step. A
+// cut after chunks landed is a backlog draining as intended, not a chunk too
+// large, so the size is kept. It doubles back toward checkpointRefPushChunkSize
+// after a batch that landed everything.
+func adaptChunkSize(ctx context.Context, queue *checkpoint.PushQueue, size int, batch chunkPushResult, budgetCut bool) {
+	next := size
+	switch {
+	case batch.landed == 0 && budgetCut && len(batch.failed) > 0:
+		next = max(1, size/4)
+	case len(batch.failed) == 0 && len(batch.untried) == 0:
+		next = min(checkpointRefPushChunkSize, size*2)
+	}
+	if next == size {
+		return
+	}
+	if err := queue.SetChunkSizeHint(next); err != nil {
+		logging.Debug(ctx, "git-refs push: remember chunk size failed", slog.String("error", err.Error()))
+	}
 }
 
 // settleBatchOnly finishes a flush whose batch phase decided its outcome on its
