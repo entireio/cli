@@ -46,10 +46,18 @@ func serveWidgetChangeDetail(t *testing.T) http.HandlerFunc {
 // A change selector reaches its parent project trail, whose fields every
 // change shares; the update says so before writing.
 func TestProjectTrailUpdateThroughChangeNamesTheParent(t *testing.T) {
-	for _, args := range [][]string{
-		{"update", "widget/7", "--project", "gh/acme", "--title", "New intent"},
-		{"update", "widget/7", "--project", "gh/acme", "--status", "closed"},
+	for _, tt := range []struct {
+		args []string
+		want string
+	}{
+		// A new title replaces the current one, so the notice names the
+		// trail by number only.
+		{[]string{"update", "widget/7", "--project", "gh/acme", "--title", "New intent"},
+			`Updating trail #42 (parent of widget/7); these fields apply to the whole trail, not just this change.`},
+		{[]string{"update", "widget/7", "--project", "gh/acme", "--status", "closed"},
+			`Updating trail #42 "Project intent" (parent of widget/7); these fields apply to the whole trail, not just this change.`},
 	} {
+		args := tt.args
 		t.Run(args[4], func(t *testing.T) {
 			var patched bool
 			setupProjectTrailTest(t, serveProjectTrailUpdate(t, &patched))
@@ -59,7 +67,7 @@ func TestProjectTrailUpdateThroughChangeNamesTheParent(t *testing.T) {
 
 			require.NoError(t, err)
 			require.True(t, patched)
-			require.Contains(t, errOut, `Updating trail #42 "Project intent" (parent of widget/7); these fields apply to the whole trail, not just this change.`)
+			require.Contains(t, errOut, tt.want)
 			require.NotContains(t, out, "Updating trail", "the notice stays off stdout")
 		})
 	}
@@ -153,7 +161,7 @@ func TestProjectTrailUpdateNoticePrecedesPatch(t *testing.T) {
 	cmd.SetArgs([]string{"update", "widget/7", "--project", "gh/acme", "--title", "New intent"})
 
 	require.NoError(t, cmd.Execute())
-	require.Contains(t, stderrAtPatch, `Updating trail #42 "Project intent" (parent of widget/7)`)
+	require.Contains(t, stderrAtPatch, `Updating trail #42 (parent of widget/7)`)
 }
 
 // Naming the project trail itself is already explicit: no notice, even when
@@ -183,12 +191,12 @@ func TestProjectTrailParentUpdateNotice(t *testing.T) {
 	trail := api.ProjectTrail{ID: projectTrailTestID, Number: 42, Title: "Intent\x1b]0;x\x07",
 		Changes: []api.ChangeSummary{{ID: projectTrailTestChange, Number: 7}}}
 	require.Equal(t, `Updating trail #42 "Intent" (parent of widget/7); these fields apply to the whole trail, not just this change.`,
-		projectTrailParentUpdateNotice(trail, change, ""), "repository falls back to the resolved name; title sanitized")
+		projectTrailParentUpdateNotice(trail, change, "", false), "repository falls back to the resolved name; title sanitized")
 
 	forged := trail
 	forged.Title = "Intent\nUpdated trail #1 \u202Eevil"
 	forged.Changes = []api.ChangeSummary{{ID: projectTrailTestChange, Branch: "feat\t\u2066x\n"}}
-	got := projectTrailParentUpdateNotice(forged, change, "")
+	got := projectTrailParentUpdateNotice(forged, change, "", false)
 	require.NotContains(t, got, "\n", "server text cannot forge a further stderr line")
 	require.NotContains(t, got, "\u202E", "bidi controls cannot reorder the notice")
 	require.NotContains(t, got, "\u2066")
@@ -196,11 +204,11 @@ func TestProjectTrailParentUpdateNotice(t *testing.T) {
 
 	trail.Number = 0
 	trail.Changes = []api.ChangeSummary{{ID: projectTrailTestChange, Branch: "feature/work"}}
-	require.Contains(t, projectTrailParentUpdateNotice(trail, change, ""), "Updating trail "+projectTrailTestID+` "Intent" (parent of feature/work)`)
+	require.Contains(t, projectTrailParentUpdateNotice(trail, change, "", false), "Updating trail "+projectTrailTestID+` "Intent" (parent of feature/work)`)
 
 	trail.Changes = nil
-	require.Contains(t, projectTrailParentUpdateNotice(trail, change, ""), "(parent of the selected change)")
-	require.Contains(t, projectTrailParentUpdateNotice(trail, change, "widget/7"), "(parent of widget/7)", "a change selector names the change as given")
+	require.Contains(t, projectTrailParentUpdateNotice(trail, change, "", false), "(parent of the selected change)")
+	require.Contains(t, projectTrailParentUpdateNotice(trail, change, "widget/7", false), "(parent of widget/7)", "a change selector names the change as given")
 }
 
 func TestIsProjectTrailSelector(t *testing.T) {
@@ -221,4 +229,11 @@ func TestProjectTrailPaginationLimitShorthand(t *testing.T) {
 		require.NotNil(t, flag, name)
 		require.Equal(t, "n", flag.Shorthand, name)
 	}
+}
+
+func TestProjectTrailParentUpdateNoticeOmitsTitleBeingReplaced(t *testing.T) {
+	t.Parallel()
+	trail := api.ProjectTrail{ID: projectTrailTestID, Number: 42, Title: "Old title"}
+	got := projectTrailParentUpdateNotice(trail, &projectTrailCurrentChange{ID: projectTrailTestChange}, "widget/7", true)
+	require.Equal(t, "Updating trail #42 (parent of widget/7); these fields apply to the whole trail, not just this change.", got)
 }

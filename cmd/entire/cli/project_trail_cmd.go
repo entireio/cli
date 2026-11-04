@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"charm.land/lipgloss/v2"
 	"github.com/google/uuid"
@@ -424,7 +423,7 @@ func newProjectTrailUpdateCmd() *cobra.Command {
 			}
 			// Announce only once nothing local can stop the write.
 			if target.Change != nil && !isProjectTrailSelector(selector) {
-				fmt.Fprintln(cmd.ErrOrStderr(), projectTrailParentUpdateNotice(current, target.Change, selector))
+				fmt.Fprintln(cmd.ErrOrStderr(), projectTrailParentUpdateNotice(current, target.Change, selector, cmd.Flags().Changed("title")))
 			}
 			var out api.ProjectTrail
 			if _, err := target.Client.ProjectTrailRequest(cmd.Context(), http.MethodPatch, target.path(), patch, http.Header{"If-Match": {etag}}, &out); err != nil {
@@ -499,25 +498,19 @@ func isProjectTrailSelector(selector string) bool {
 // change (no selector, --branch, or <repo>/<number>) writes to. Every update
 // field belongs to the project trail and is shared by all of its changes,
 // which a change selector or branch does not make obvious.
-func projectTrailParentUpdateNotice(trail api.ProjectTrail, change *projectTrailCurrentChange, selector string) string {
+// When the update sets a new title, the current one is about to go away, so
+// the notice names the trail by number only.
+func projectTrailParentUpdateNotice(trail api.ProjectTrail, change *projectTrailCurrentChange, selector string, retitling bool) string {
 	name := "trail " + trail.ID
 	if trail.Number > 0 {
 		name = fmt.Sprintf("trail #%d", trail.Number)
 	}
-	return fmt.Sprintf("Updating %s \"%s\" (parent of %s); these fields apply to the whole trail, not just this change.",
-		sanitizeNoticeLabel(name), sanitizeNoticeLabel(trail.Title),
-		sanitizeNoticeLabel(projectTrailChangeLabel(trail, change, selector)))
-}
-
-// sanitizeNoticeLabel keeps server text on one line and in logical order, so
-// a title cannot forge a further stderr line or visually reorder the notice.
-func sanitizeNoticeLabel(s string) string {
-	return strings.Map(func(r rune) rune {
-		if unicode.Is(unicode.Bidi_Control, r) {
-			return -1
-		}
-		return r
-	}, tuiutil.SanitizeDisplayText(s))
+	name = tuiutil.SanitizeDisplayLine(name)
+	if !retitling {
+		name += " \"" + tuiutil.SanitizeDisplayLine(trail.Title) + "\""
+	}
+	return fmt.Sprintf("Updating %s (parent of %s); these fields apply to the whole trail, not just this change.",
+		name, tuiutil.SanitizeDisplayLine(projectTrailChangeLabel(trail, change, selector)))
 }
 
 // projectTrailChangeLabel names the change an update reached: a
