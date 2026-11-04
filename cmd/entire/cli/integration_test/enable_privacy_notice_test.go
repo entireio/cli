@@ -137,13 +137,13 @@ func setupDedicatedCheckpointStore(t *testing.T, env *TestEnv, extraOptions stri
 	return origin, dedicated
 }
 
-// Pre-push uploads nothing while the checkpoint push policy cannot be read,
+// git push uploads nothing while the checkpoint push policy cannot be read,
 // to any destination, so enable must not promise uploads there. It still names
 // the destination, and offers the command that replaces the policy.
 func TestEnable_UnreadablePushPolicyPromisesNoUploads(t *testing.T) {
 	t.Parallel()
 	const (
-		waits  = "none will upload until the checkpoint push policy can be read: "
+		waits  = "git push uploads none of them until the checkpoint push policy can be read: "
 		reason = `checkpoint push policy "stricter" is not one of "automatic", "manual"`
 		notice = "  They contain your agent transcripts. If that repo is public, anyone can read them.\n" +
 			"  Secret redaction is best effort, not bulletproof. Review with `entire checkpoint explain`.\n" +

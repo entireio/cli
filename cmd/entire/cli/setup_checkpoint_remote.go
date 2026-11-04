@@ -453,13 +453,14 @@ func enableCheckpointPushPolicy(ctx context.Context) (settings.CheckpointPushPol
 }
 
 // uploadPromise is promise unless the checkpoint push policy cannot be read.
-// Pre-push then uploads nothing, to any destination, so the line names where
-// checkpoints go (destination) and why none will upload.
+// git push then uploads nothing, to any destination, so the line names where
+// checkpoints go (destination) and why git push sends none. An explicit
+// `entire checkpoint push` does not read the policy and still uploads.
 func uploadPromise(policyErr error, promise, destination string) string {
 	if policyErr == nil {
 		return promise
 	}
-	return destination + ", but none will upload until the checkpoint push policy can be read: " +
+	return destination + ", but git push uploads none of them until the checkpoint push policy can be read: " +
 		tuiutil.SanitizeDisplayText(policyErr.Error())
 }
 
