@@ -16,7 +16,7 @@ const (
 	saResourceProject = "project"
 )
 
-// saTarget is the repo or project a grant names.
+// saTarget is a grant's repo or project.
 type saTarget struct {
 	kind  string
 	id    string
@@ -31,7 +31,7 @@ func addSATargetFlags(cmd *cobra.Command, repo, project *string) {
 	cmd.MarkFlagsMutuallyExclusive("repo", "project")
 }
 
-// resolveSATarget turns --repo or --project into an ID.
+// resolveSATarget resolves --repo or --project.
 func resolveSATarget(ctx context.Context, c *coreapi.Client, sa saRef, repo, project string) (saTarget, error) {
 	if project != "" {
 		p, err := resolveProjectRefResolved(ctx, c, project)
@@ -45,7 +45,7 @@ func resolveSATarget(ctx context.Context, c *coreapi.Client, sa saRef, repo, pro
 	if strings.Contains(repo, "/") {
 		r, err = resolveRepoPathResolved(ctx, c, repo)
 	} else {
-		// A bare name lives in the account's project.
+		// Bare names live in the account's project.
 		var projectID string
 		if projectID, err = saProjectID(ctx, c, sa); err == nil {
 			r, err = resolveRepoInProject(ctx, c, repo, projectID)

@@ -65,7 +65,7 @@ func TestSAGrant(t *testing.T) {
 }
 
 // Not parallel: swaps the package-level activeCoreClient seam.
-func TestSARevokeAndGrants(t *testing.T) {
+func TestSARevoke(t *testing.T) {
 	route := "DELETE " + saBase + "/" + saTestID + "/grants/repo/" + saTestRepoID
 
 	t.Run("revokes a repo grant", func(t *testing.T) {

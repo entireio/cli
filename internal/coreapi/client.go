@@ -265,7 +265,7 @@ func APIErrorStatus(err error) int {
 	return statusErr.StatusCode
 }
 
-// APIErrorType returns the error's RFC 9457 problem type.
+// APIErrorType returns an error's problem type.
 func APIErrorType(err error) string {
 	var statusErr *ErrorModelStatusCode
 	if !errors.As(err, &statusErr) {

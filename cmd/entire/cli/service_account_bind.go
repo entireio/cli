@@ -53,7 +53,7 @@ func newSABindCmd() *cobra.Command {
 				b, err := c.CreateBinding(ctx, &coreapi.CreateBindingInputBody{ProviderId: providerID, AttributeFilter: filter},
 					coreapi.CreateBindingParams{AccountId: sa.ID})
 				if err != nil {
-					// The route's only 409 is an existing binding.
+					// This route's only 409: binding exists.
 					if coreapi.APIErrorStatus(err) == http.StatusConflict {
 						return fmt.Errorf("%s already has a GitHub Actions binding; unbind it first", sa.label())
 					}

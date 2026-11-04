@@ -54,10 +54,10 @@ func saListRow(sa coreapi.ServiceAccountWithGrants) []string {
 	return []string{sa.AccountId, sa.Name, sa.Status}
 }
 
-// saRef is a service account a command acts on.
+// saRef names a resolved service account.
 type saRef struct {
 	ID string
-	// Name is <project>/<name>, empty for a typed ID.
+	// Name is <project>/<name>; empty for IDs.
 	Name string
 	// ProjectID is empty for a typed ID.
 	ProjectID string
@@ -169,7 +169,7 @@ func saCreateErr(err error, project, name string) error {
 	case saProblemQuota:
 		return fmt.Errorf("owner of project %s reached its service account limit", project)
 	}
-	// Core also answers 403 for a missing project.
+	// Core answers 403 for missing projects.
 	if coreapi.APIErrorStatus(err) == http.StatusForbidden {
 		return fmt.Errorf("you need manage access to project %s", project)
 	}
