@@ -142,6 +142,10 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"trail resume":               {agentHelpAudienceTaskDriven, false},
 	"trail link":                 {agentHelpAudienceUserOwned, false},
 	"trail unlink":               {agentHelpAudienceUserOwned, false},
+	// Each acts on shared state or spends the repository's agent budget.
+	"trail update-branch": {agentHelpAudienceUserOwned, false},
+	"trail ci-pr":         {agentHelpAudienceUserOwned, false},
+	"trail rerun-review":  {agentHelpAudienceUserOwned, false},
 
 	// ---- Unlisted: real commands, just not the default view. ---------------
 	"activity": {agentHelpAudienceReadOnly, false},

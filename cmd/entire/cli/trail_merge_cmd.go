@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -649,14 +648,6 @@ func trailMergeConflictError(t *api.TrailResource, ref trailMergeRef) error {
 		base = "its base branch " + base
 	}
 	return fmt.Errorf("%s conflicts with %s; resolve the conflicts and push before merging (--force cannot bypass a merge conflict)", ref.Label, base)
-}
-
-func trailRepoIDNumberPath(repoID string, number int) (string, error) {
-	repoID = strings.TrimSpace(repoID)
-	if repoID == "" {
-		return "", errors.New("cannot merge a trail without the repo's ID")
-	}
-	return trailNumberPathForBase("/api/v1/repos/"+url.PathEscape(repoID)+"/trails", number), nil
 }
 
 // fetchTrailMergeDetail reads the trail detail for its mergeability snapshot
