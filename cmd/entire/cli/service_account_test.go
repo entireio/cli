@@ -39,15 +39,69 @@ type saFakeCore struct {
 	bodies   map[string]string
 	replies  map[string]saReply
 	accounts []coreapi.ServiceAccountWithGrants
-	noGitHub bool
+	// providers is what /oidc-providers lists.
+	providers []coreapi.OIDCProvider
+}
+
+const saTestBuildkiteID = "wip_01HGHA00000000000BUILDK1TE"
+
+// saDescribedProviders mirrors core's descriptors.
+func saDescribedProviders() []coreapi.OIDCProvider {
+	attr := func(name string, required, exact bool, pattern string) coreapi.OIDCProviderAttribute {
+		a := coreapi.OIDCProviderAttribute{Name: name, Label: name, Required: required, Exact: exact}
+		if pattern != "" {
+			a.Pattern = coreapi.NewOptString(pattern)
+		}
+		return a
+	}
+	return []coreapi.OIDCProvider{
+		{
+			ID: saTestProviderID, Issuer: "https://token.actions.githubusercontent.com",
+			Name:  coreapi.NewOptString("github-actions"),
+			Label: coreapi.NewOptString("GitHub Actions"), DocsURL: coreapi.NewOptString("https://docs.github.com/oidc"),
+			SelfServe: coreapi.NewOptBool(true),
+			Attributes: []coreapi.OIDCProviderAttribute{
+				attr("repository", true, true, `^[^/*]+/[^/*]+$`), attr("ref", false, false, ""),
+			},
+		},
+		{
+			ID: saTestBuildkiteID, Issuer: "https://agent.buildkite.com",
+			Name: coreapi.NewOptString("buildkite"), Label: coreapi.NewOptString("Buildkite"),
+			DocsURL: coreapi.NewOptString("https://buildkite.com/docs/agent/v3/cli-oidc"), SelfServe: coreapi.NewOptBool(true),
+			Attributes: []coreapi.OIDCProviderAttribute{
+				attr("organization", true, true, ""), attr("pipeline", true, false, ""), attr("branch", false, false, ""),
+			},
+		},
+		{
+			ID: "wip_cfaccess", Issuer: "https://acme.cloudflareaccess.com",
+			Name: coreapi.NewOptString("cloudflare-access"), Label: coreapi.NewOptString("Cloudflare Access"),
+			SelfServe:  coreapi.NewOptBool(false),
+			Attributes: []coreapi.OIDCProviderAttribute{attr("common_name", false, false, "")},
+		},
+	}
+}
+
+// withDisplayName sets the slug old cores send.
+func withDisplayName(p coreapi.OIDCProvider, name string) coreapi.OIDCProvider {
+	p.DisplayName = coreapi.NewOptString(name) //nolint:staticcheck // old cores send only displayName
+	return p
+}
+
+// saOldCoreProviders is a core without descriptors.
+func saOldCoreProviders() []coreapi.OIDCProvider {
+	return []coreapi.OIDCProvider{
+		withDisplayName(coreapi.OIDCProvider{ID: saTestProviderID, Issuer: "https://token.actions.githubusercontent.com"}, "github-actions"),
+		withDisplayName(coreapi.OIDCProvider{ID: "wip_cfaccess", Issuer: "https://acme.cloudflareaccess.com"}, "cloudflare-access"),
+	}
 }
 
 func newSAFakeCore(t *testing.T) (*saFakeCore, *httptest.Server) {
 	t.Helper()
 	f := &saFakeCore{
-		t:       t,
-		bodies:  map[string]string{},
-		replies: map[string]saReply{},
+		t:         t,
+		bodies:    map[string]string{},
+		replies:   map[string]saReply{},
+		providers: saDescribedProviders(),
 		accounts: []coreapi.ServiceAccountWithGrants{{
 			AccountId: saTestID, Name: "ci", Status: "active",
 			ProjectID: coreapi.NewOptString(saTestProjectID), Grants: []string{},
@@ -111,11 +165,7 @@ func (f *saFakeCore) serve(w http.ResponseWriter, r *http.Request) {
 			ResourceType: "repo", ResourceId: saTestRepoID, ResourceName: coreapi.NewOptString("web"), Role: "writer",
 		}}})
 	case "GET /api/v1/oidc-providers":
-		providers := []coreapi.OIDCProvider{{ID: "wip_other", Issuer: "https://example.com"}}
-		if !f.noGitHub {
-			providers = append(providers, coreapi.OIDCProvider{ID: saTestProviderID, Issuer: "https://token.actions.githubusercontent.com"})
-		}
-		writeJSONResponse(t, w, http.StatusOK, &coreapi.ListOIDCProvidersOutputBody{Providers: providers})
+		writeJSONResponse(t, w, http.StatusOK, &coreapi.ListOIDCProvidersOutputBody{Providers: f.providers})
 	case "POST " + saBase + "/" + saTestID + "/bindings":
 		writeJSONResponse(t, w, http.StatusCreated, &binding)
 	case "GET " + saBase + "/" + saTestID + "/bindings":

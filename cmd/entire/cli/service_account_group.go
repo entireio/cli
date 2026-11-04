@@ -28,15 +28,16 @@ func newServiceAccountCmd() *cobra.Command {
 		Aliases: []string{"sa"},
 		Short:   "Manage project service accounts",
 		Long: "A service account is a non-human account owned by a project. " +
-			"Grant it access to the project or its repos, then bind a GitHub " +
-			"repository so its Actions workflows act as the account without a stored secret.\n\n" +
+			"Grant it access to the project or its repos, then bind a CI provider, " +
+			"such as GitHub Actions or Buildkite, so its jobs act as the account " +
+			"without a stored secret.\n\n" +
 			"Commands address a service account by its svc_ ID or as <project>/<name>.",
 	}
 	addControlPlaneFlags(cmd)
 	cmd.AddCommand(
 		newSACreateCmd(), newSAListCmd(), newSAGetCmd(), newSADeleteCmd(),
 		newSAGrantCmd(), newSARevokeCmd(), newSAGrantsCmd(),
-		newSABindCmd(), newSABindingsCmd(), newSAUnbindCmd(),
+		newSAProvidersCmd(), newSABindCmd(), newSABindingsCmd(), newSAUnbindCmd(),
 	)
 	return requireSubcommand(cmd)
 }
