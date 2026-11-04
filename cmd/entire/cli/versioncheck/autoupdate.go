@@ -24,7 +24,7 @@ func AutoUpdateDisabled() bool {
 		return true
 	}
 	cfg, err := userconfig.Load()
-	// Bad config already fails loudly elsewhere.
+	// Stay quiet; doctor reports bad config.
 	if err != nil {
 		return true
 	}
