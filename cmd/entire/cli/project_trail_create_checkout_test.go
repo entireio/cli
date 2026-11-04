@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -181,4 +182,14 @@ func TestProjectTrailCreateHelpHidesAddAssignee(t *testing.T) {
 	require.NotContains(t, out, "--add-assignee")
 	require.Contains(t, out, "--checkout")
 	require.Contains(t, out, "unless --checkout")
+}
+
+func TestGitSwitchCommandQuotesShellMetacharacters(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("POSIX quoting")
+	}
+	require.Equal(t, "git switch feature/x-1.2_y", gitSwitchCommand("feature/x-1.2_y"))
+	require.Equal(t, `git switch 'feat/$(rm -rf ~);x'`, gitSwitchCommand("feat/$(rm -rf ~);x"))
+	require.Equal(t, `git switch 'it'\''s'`, gitSwitchCommand("it's"))
 }

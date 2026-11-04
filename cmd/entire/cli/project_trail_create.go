@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -73,16 +74,30 @@ func finishLocalTrailBranch(cmd *cobra.Command, created api.ProjectTrail, branch
 	if branch == "" || branch == previous {
 		return nil
 	}
-	display := tuiutil.SanitizeTerminalText(branch)
 	if !checkout {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Next: git switch %s\n", display)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Next: %s\n", gitSwitchCommand(branch))
 		return nil
 	}
 	if err := CheckoutBranch(cmd.Context(), branch); err != nil {
-		return fmt.Errorf("trail #%d was created; %w; run `git switch %s`", created.Number, err, display)
+		return fmt.Errorf("trail #%d was created; %w; run `%s`", created.Number, err, gitSwitchCommand(branch))
 	}
-	fmt.Fprintf(cmd.ErrOrStderr(), "Switched to branch %s\n", display)
+	fmt.Fprintf(cmd.ErrOrStderr(), "Switched to branch %s\n", tuiutil.SanitizeTerminalText(branch))
 	return nil
+}
+
+// gitSwitchCommand is the copy-paste command that switches to branch. Git
+// allows shell metacharacters in branch names, so anything beyond a plain name
+// is quoted for the user's shell, as the link retry hint does.
+func gitSwitchCommand(branch string) string {
+	branch = tuiutil.SanitizeTerminalText(branch)
+	if strings.Trim(branch, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/-") != "" {
+		if runtime.GOOS == windowsGOOS {
+			branch = powerShellQuote(branch)
+		} else {
+			branch = shellQuote(branch)
+		}
+	}
+	return "git switch " + branch
 }
 
 // Repository access supplies placement and ownership without project inspection.

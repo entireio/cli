@@ -501,31 +501,9 @@ func newProjectTrailCreateCmd() *cobra.Command {
 			}
 			if !noBranch || trailRepoFlag(cmd) != "" || projectTrailProjectFlag(cmd) == "" {
 				change := projectTrailChangeRequest(fields.Status, "", branch, base, action)
-				created, err := createRepositoryScopedProjectTrail(cmd, request, change, key)
-				if err != nil {
-					return err
-				}
-				if err := printProjectTrail(cmd, created, nil, nil); err != nil {
-					return err
-				}
-				if !publishesLocalBranch(cmd, change) {
-					return nil
-				}
-				return finishLocalTrailBranch(cmd, created, branch, current, checkout)
+				return createAndPrintRepositoryScopedProjectTrail(cmd, request, change, key, current, checkout)
 			}
-			target, err := resolveProjectTrailCollection(cmd)
-			if err != nil {
-				return err
-			}
-			key = projectTrailIdempotencyKey(cmd.ErrOrStderr(), key)
-			var out api.ProjectTrail
-			if _, err := target.Client.ProjectTrailRequest(cmd.Context(), http.MethodPost, target.BasePath, request, http.Header{"Idempotency-Key": {key}}, &out); err != nil {
-				return fmt.Errorf("create project trail (retry with --idempotency-key %s and the same fields): %w", key, err)
-			}
-			if err := target.validateResponse(out); err != nil {
-				return err
-			}
-			return printProjectTrail(cmd, out, nil, nil)
+			return createUnscopedProjectTrail(cmd, request, key)
 		},
 	}
 	fields.flags(cmd)
@@ -539,6 +517,41 @@ func newProjectTrailCreateCmd() *cobra.Command {
 	addProjectTrailCreationFlags(cmd, &branch, &base, &action, &key)
 	addJSONFlag(cmd)
 	return cmd
+}
+
+// createAndPrintRepositoryScopedProjectTrail creates the trail, prints it, then
+// switches to or names the published branch (see finishLocalTrailBranch).
+// current is the branch checked out before publishing.
+func createAndPrintRepositoryScopedProjectTrail(cmd *cobra.Command, request api.ProjectTrailCreateRequest, change api.ChangeCreateRequest, key, current string, checkout bool) error {
+	created, err := createRepositoryScopedProjectTrail(cmd, request, change, key)
+	if err != nil {
+		return err
+	}
+	if err := printProjectTrail(cmd, created, nil, nil); err != nil {
+		return err
+	}
+	if !publishesLocalBranch(cmd, change) {
+		return nil
+	}
+	return finishLocalTrailBranch(cmd, created, change.BranchName, current, checkout)
+}
+
+// createUnscopedProjectTrail creates intent with no repository scope, which
+// requires project management.
+func createUnscopedProjectTrail(cmd *cobra.Command, request api.ProjectTrailCreateRequest, key string) error {
+	target, err := resolveProjectTrailCollection(cmd)
+	if err != nil {
+		return err
+	}
+	key = projectTrailIdempotencyKey(cmd.ErrOrStderr(), key)
+	var out api.ProjectTrail
+	if _, err := target.Client.ProjectTrailRequest(cmd.Context(), http.MethodPost, target.BasePath, request, http.Header{"Idempotency-Key": {key}}, &out); err != nil {
+		return fmt.Errorf("create project trail (retry with --idempotency-key %s and the same fields): %w", key, err)
+	}
+	if err := target.validateResponse(out); err != nil {
+		return err
+	}
+	return printProjectTrail(cmd, out, nil, nil)
 }
 
 // --checkout needs a branch published from this clone; these modes leave the
