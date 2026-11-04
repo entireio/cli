@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -505,6 +506,51 @@ func TestCheckAndNotify_SkipsPseudoVersion(t *testing.T) {
 
 	if buf.Len() != 0 {
 		t.Errorf("expected no output for pseudo-version build, got %q", buf.String())
+	}
+}
+
+func TestCheckAndNotify_SkipsNixStoreBinary(t *testing.T) {
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		//nolint:errcheck // test helper
+		json.NewEncoder(w).Encode(GitHubRelease{TagName: "v9.9.9"})
+	}))
+	t.Cleanup(server.Close)
+	cmd, buf := setupCheckAndNotifyTest(t, server.URL)
+	f := newAutoUpdateFixture(t)
+	setExecutablePath(t, "/nix/store/abc123-entire-1.0.0/bin/entire")
+
+	CheckAndNotify(context.Background(), cmd.OutOrStdout(), "1.0.0")
+
+	if buf.Len() != 0 {
+		t.Errorf("expected no output for a Nix store binary, got %q", buf.String())
+	}
+	if n := hits.Load(); n != 0 {
+		t.Errorf("version server hit %d times, want 0", n)
+	}
+	if f.installCalls != 0 {
+		t.Errorf("installer called %d times, want 0", f.installCalls)
+	}
+}
+
+func TestIsNixStoreBinary(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{"/nix/store/abc123-entire-1.0.0/bin/entire", true},
+		{"/usr/local/bin/entire", false},
+		{"/home/user/nix/store/entire", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			setExecutablePath(t, tt.path)
+			if got := isNixStoreBinary(); got != tt.want {
+				t.Errorf("isNixStoreBinary() for %q = %v, want %v", tt.path, got, tt.want)
+			}
+		})
 	}
 }
 

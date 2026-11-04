@@ -31,6 +31,11 @@ func CheckAndNotify(ctx context.Context, w io.Writer, currentVersion string) {
 		return
 	}
 
+	// Nix owns store binaries; never nag.
+	if isNixStoreBinary() {
+		return
+	}
+
 	// Ensure the global config directory exists
 	if err := ensureGlobalConfigDir(); err != nil {
 		// Silent failure - don't block CLI operations
@@ -508,6 +513,18 @@ func normalizePath(p string) string {
 		resolved = p
 	}
 	return foldPathCase(strings.ReplaceAll(filepath.ToSlash(resolved), "\\", "/"))
+}
+
+// nixStorePrefix holds read-only, Nix-managed installs.
+const nixStorePrefix = "/nix/store/"
+
+// isNixStoreBinary reports whether Nix installed us.
+func isNixStoreBinary() bool {
+	execPath, err := executablePath()
+	if err != nil {
+		return false
+	}
+	return strings.HasPrefix(normalizePath(execPath), nixStorePrefix)
 }
 
 // downloadsURL is the GitHub releases page, used for release-notes links.
