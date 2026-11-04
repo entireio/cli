@@ -134,18 +134,18 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"trail checkout":  {agentHelpAudienceTaskDriven, false},
 	"trail comment":   {agentHelpAudienceTaskDriven, false},
 	"trail finding":   {agentHelpAudienceTaskDriven, false},
-	// A finding's reply thread is the agent's channel too, like the finding.
-	"trail finding reply":        {agentHelpAudienceTaskDriven, false},
-	"trail finding edit-reply":   {agentHelpAudienceTaskDriven, false},
-	"trail finding delete-reply": {agentHelpAudienceTaskDriven, false},
-	"trail merge":                {agentHelpAudienceUserOwned, false},
-	"trail resume":               {agentHelpAudienceTaskDriven, false},
-	"trail link":                 {agentHelpAudienceUserOwned, false},
-	"trail unlink":               {agentHelpAudienceUserOwned, false},
+	"trail merge":     {agentHelpAudienceUserOwned, false},
+	"trail resume":    {agentHelpAudienceTaskDriven, false},
+	"trail link":      {agentHelpAudienceUserOwned, false},
+	"trail unlink":    {agentHelpAudienceUserOwned, false},
 	// Each acts on shared state or spends the repository's agent budget.
 	"trail update-branch": {agentHelpAudienceUserOwned, false},
 	"trail ci-pr":         {agentHelpAudienceUserOwned, false},
 	"trail rerun-review":  {agentHelpAudienceUserOwned, false},
+	// A finding's reply thread is the agent's channel too, like the finding.
+	"trail finding reply":        {agentHelpAudienceTaskDriven, false},
+	"trail finding edit-reply":   {agentHelpAudienceTaskDriven, false},
+	"trail finding delete-reply": {agentHelpAudienceTaskDriven, false},
 
 	// ---- Unlisted: real commands, just not the default view. ---------------
 	"activity": {agentHelpAudienceReadOnly, false},
