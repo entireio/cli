@@ -399,19 +399,7 @@ func newProjectTrailUpdateCmd() *cobra.Command {
 			if err := fields.validate(cmd, false); err != nil {
 				return err
 			}
-			var patch api.ProjectTrailUpdateRequest
-			for _, field := range []struct {
-				name  string
-				value *string
-				dest  **string
-			}{
-				{"title", &fields.Title, &patch.Title}, {"body", &fields.Body, &patch.Body},
-				{"status", &fields.Status, &patch.Status}, {"type", &fields.Type, &patch.Type}, {"priority", &fields.Priority, &patch.Priority},
-			} {
-				if cmd.Flags().Changed(field.name) {
-					*field.dest = field.value
-				}
-			}
+			patch := projectTrailUpdatePatch(cmd, &fields)
 			assigning := cmd.Flags().Changed("assignee") || cmd.Flags().Changed("add-assignee") || cmd.Flags().Changed("remove-assignee")
 			if patch == (api.ProjectTrailUpdateRequest{}) && !assigning {
 				return errors.New("provide at least one field to update")
@@ -432,20 +420,9 @@ func newProjectTrailUpdateCmd() *cobra.Command {
 				fmt.Fprintln(cmd.ErrOrStderr(), projectTrailParentUpdateNotice(current, target.Change, selector))
 			}
 			if assigning {
-				assignees := current.Assignees
-				if cmd.Flags().Changed("assignee") {
-					assignees = fields.Assignees
+				if patch.Assignees, err = projectTrailUpdateAssignees(cmd, current, fields.Assignees, add, remove); err != nil {
+					return err
 				}
-				if len(add) > 0 || len(remove) > 0 {
-					assignees, err = mergeProjectTrailAssignees(cmd.Context(), current, add, remove)
-					if err != nil {
-						return err
-					}
-				}
-				if assignees == nil {
-					assignees = []string{}
-				}
-				patch.Assignees = &assignees
 			}
 			var out api.ProjectTrail
 			if _, err := target.Client.ProjectTrailRequest(cmd.Context(), http.MethodPatch, target.path(), patch, http.Header{"If-Match": {etag}}, &out); err != nil {
@@ -465,6 +442,45 @@ func newProjectTrailUpdateCmd() *cobra.Command {
 	addProjectTrailSelectorFlags(cmd)
 	addJSONFlag(cmd)
 	return cmd
+}
+
+// projectTrailUpdatePatch carries only the intent fields given on the command
+// line, so an omitted flag leaves that field as it is.
+func projectTrailUpdatePatch(cmd *cobra.Command, fields *projectTrailFields) api.ProjectTrailUpdateRequest {
+	var patch api.ProjectTrailUpdateRequest
+	for _, field := range []struct {
+		name  string
+		value *string
+		dest  **string
+	}{
+		{"title", &fields.Title, &patch.Title}, {"body", &fields.Body, &patch.Body},
+		{"status", &fields.Status, &patch.Status}, {"type", &fields.Type, &patch.Type}, {"priority", &fields.Priority, &patch.Priority},
+	} {
+		if cmd.Flags().Changed(field.name) {
+			*field.dest = field.value
+		}
+	}
+	return patch
+}
+
+// projectTrailUpdateAssignees is the complete assignee list to send: --assignee
+// replaces it, --add-assignee/--remove-assignee edit the current one, and an
+// empty result is sent as [] to clear it.
+func projectTrailUpdateAssignees(cmd *cobra.Command, current api.ProjectTrail, replace, add, remove []string) (*[]string, error) {
+	assignees := current.Assignees
+	if cmd.Flags().Changed("assignee") {
+		assignees = replace
+	}
+	if len(add) > 0 || len(remove) > 0 {
+		var err error
+		if assignees, err = mergeProjectTrailAssignees(cmd.Context(), current, add, remove); err != nil {
+			return nil, err
+		}
+	}
+	if assignees == nil {
+		assignees = []string{}
+	}
+	return &assignees, nil
 }
 
 // isProjectTrailSelector reports whether selector names the project trail

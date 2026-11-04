@@ -60,6 +60,33 @@ func TestProjectTrailUpdateThroughChangeNamesTheParent(t *testing.T) {
 	}
 }
 
+// With no selector, update follows the branch's parent: the case agents hit
+// most, since the injected guidance says to run `entire trail update`.
+func TestProjectTrailUpdateFollowingBranchNamesTheParent(t *testing.T) {
+	var patched bool
+	setupProjectTrailTest(t, serveProjectTrailUpdate(t, &patched))
+	parent := &api.TrailParentReference{ID: projectTrailTestID, Number: 42, ProjectID: projectTrailTestProject,
+		Host: "gh", Project: "acme", Path: projectTrailTestPath, Jurisdiction: "eu", PrimaryProcessingCell: "project-cell"}
+	setupWorkingRepoClient(t, func(w http.ResponseWriter, r *http.Request) {
+		change := api.TrailResource{ID: projectTrailTestChange, Number: 7, Status: "open", Branch: "feature/work", Parent: parent}
+		switch r.URL.Path {
+		case "/api/v1/trails/gh/acme/widget":
+			assert.NoError(t, json.NewEncoder(w).Encode(api.TrailListResponse{Trails: []api.TrailResource{change}, Total: 1}))
+		case "/api/v1/trails/gh/acme/widget/7":
+			assert.NoError(t, json.NewEncoder(w).Encode(change))
+		default:
+			t.Errorf("unexpected repo request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	})
+
+	_, errOut, err := executeProjectTrailTest(t, "update", "--repo", "gh/acme/widget", "--branch", "feature/work", "--body", "New description")
+
+	require.NoError(t, err)
+	require.True(t, patched)
+	require.Contains(t, errOut, `Updating trail #42 "Project intent" (parent of feature/work)`)
+}
+
 // Naming the project trail itself is already explicit: no notice, even when
 // --branch picks the working change.
 func TestProjectTrailUpdateByProjectSelectorHasNoNotice(t *testing.T) {
