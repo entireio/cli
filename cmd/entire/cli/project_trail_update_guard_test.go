@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -50,13 +53,21 @@ func serveBranchWork(t *testing.T, work *api.TrailResource, lookupErr error) {
 		}
 		return
 	}
-	setupWorkingRepoClient(t, func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "/api/v1/trails/gh/acme/widget", r.URL.Path)
+	serveBranchLookup(t, func(w http.ResponseWriter, _ *http.Request) {
 		list := api.TrailListResponse{}
 		if work != nil {
 			list.Trails, list.Total = []api.TrailResource{*work}, 1
 		}
 		assert.NoError(t, json.NewEncoder(w).Encode(list))
+	})
+}
+
+// serveBranchLookup answers the branch lookup in gh/acme/widget with handler.
+func serveBranchLookup(t *testing.T, handler http.HandlerFunc) {
+	t.Helper()
+	setupWorkingRepoClient(t, func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/v1/trails/gh/acme/widget", r.URL.Path)
+		handler(w, r)
 	})
 }
 
@@ -81,8 +92,8 @@ func TestProjectTrailUpdateBareNumberRefusesAnotherTrail(t *testing.T) {
 	require.Zero(t, patched, "no PATCH may reach the other trail")
 	for _, want := range []string{
 		`refusing to update trail #42 "Project intent": branch "feature/mine" is work on trail #43, not on #42`,
-		"To update this branch's trail: entire trail update (no selector).",
-		"To update #42 anyway: entire trail update " + projectTrailTestID + " --project gh/acme",
+		"To update this branch's trail, rerun without 42, keeping your other flags.",
+		"To update #42 anyway, rerun with " + projectTrailTestID + " --project gh/acme in place of 42, keeping your other flags.",
 	} {
 		require.Contains(t, err.Error(), want)
 	}
@@ -96,27 +107,23 @@ func TestProjectTrailUpdateBareNumberNamesTheChangeItLooksLike(t *testing.T) {
 
 	_, _, err := executeProjectTrailTest(t, "update", "42", "--title", "x")
 
-	require.ErrorContains(t, err, "42 is this branch's change number, and a bare number names a project trail. For the change, run: entire trail update widget/42")
+	require.ErrorContains(t, err, "42 is this branch's change number, and a bare number names a project trail. For the change, rerun with widget/42 in place of 42")
 	require.Zero(t, patched)
 }
 
 func TestProjectTrailUpdateBareNumberPassesWhenItCannotMisfire(t *testing.T) {
 	for _, tt := range []struct {
-		name      string
-		args      []string
-		work      *api.TrailResource
-		lookupErr error
-		stderr    string
+		name string
+		args []string
+		work *api.TrailResource
 	}{
 		{name: "branch work is on this trail", args: []string{"update", "42", "--body", "x"},
 			work: branchWorkOn(42, 7, projectTrailTestID)},
 		{name: "branch has no trail", args: []string{"update", "42", "--body", "x"}},
-		{name: "branch work has no project trail", args: []string{"update", "42", "--body", "x"},
-			work: &api.TrailResource{ID: "01ARZ3NDEKTSV4RRFFQ69G5FBB", Number: 7, Branch: "feature/mine", Status: "open"}},
-		{name: "lookup fails", args: []string{"update", "42", "--body", "x"},
-			lookupErr: errors.New("repository not onboarded"), stderr: "Warning: could not check which trail branch \"feature/mine\" belongs to"},
 		{name: "ULID names the trail exactly", args: []string{"update", projectTrailTestID, "--project", "gh/acme", "--body", "x"},
 			work: branchWorkOn(43, 7, "01ARZ3NDEKTSV4RRFFQ69G5FCC")},
+		{name: "--repo names this clone's repository, work on this trail", args: []string{"update", "42", "--repo", "gh/acme/widget", "--body", "x"},
+			work: branchWorkOn(42, 7, projectTrailTestID)},
 		{name: "another project", args: []string{"update", "42", "--project", "gh/other", "--body", "x"},
 			work: branchWorkOn(43, 7, "01ARZ3NDEKTSV4RRFFQ69G5FCC")},
 	} {
@@ -124,15 +131,144 @@ func TestProjectTrailUpdateBareNumberPassesWhenItCannotMisfire(t *testing.T) {
 			setupGuardRepo(t)
 			var patched int
 			serveGuardProject(t, &patched)
-			serveBranchWork(t, tt.work, tt.lookupErr)
+			serveBranchWork(t, tt.work, nil)
 
-			_, errOut, err := executeProjectTrailTest(t, tt.args...)
+			_, _, err := executeProjectTrailTest(t, tt.args...)
 
 			require.NoError(t, err)
 			require.Equal(t, 1, patched)
-			if tt.stderr != "" {
-				require.Contains(t, errOut, tt.stderr)
+		})
+	}
+}
+
+// The guard fails closed: when it cannot establish which trail the branch's
+// work is on, a bare number could still name someone else's trail, so the
+// update refuses and names the ULID rerun.
+func TestProjectTrailUpdateBareNumberRefusesWhenItCannotCheck(t *testing.T) {
+	anyway := "To update #42 anyway, rerun with " + projectTrailTestID + " --project gh/acme in place of 42, keeping your other flags."
+	for _, tt := range []struct {
+		name  string
+		setup func(t *testing.T)
+		want  []string
+	}{
+		{name: "lookup fails", setup: func(t *testing.T) {
+			t.Helper()
+			serveBranchWork(t, nil, errors.New("repository not onboarded"))
+		}, want: []string{`branch "feature/mine" could not check which trail it belongs to (repository not onboarded)`}},
+		{name: "lookup error text is sanitized to one line", setup: func(t *testing.T) {
+			t.Helper()
+			serveBranchWork(t, nil, errors.New("boom\x1b]0;title\x07\x1b[2J\nsecond\tline"))
+		}, want: []string{"(boom second line)"}},
+		{name: "work has no project parent", setup: func(t *testing.T) {
+			t.Helper()
+			serveBranchWork(t, &api.TrailResource{ID: "01ARZ3NDEKTSV4RRFFQ69G5FBB", Number: 7, Branch: "feature/mine", Status: "open"}, nil)
+		}, want: []string{`branch "feature/mine" has trail work whose project trail the API did not return`}},
+		{name: "scan stops before the last page", setup: func(t *testing.T) {
+			t.Helper()
+			var page int
+			serveBranchLookup(t, func(w http.ResponseWriter, _ *http.Request) {
+				page++
+				next := fmt.Sprintf("cursor-%d", page)
+				assert.NoError(t, json.NewEncoder(w).Encode(api.TrailListResponse{NextCursor: &next}))
+			})
+		}, want: []string{fmt.Sprintf("stopped after %d pages of trails without reaching the last", trailFindMaxPages)}},
+		{name: "lookup times out", setup: func(t *testing.T) {
+			t.Helper()
+			old := projectTrailUpdateGuardTimeout
+			projectTrailUpdateGuardTimeout = 50 * time.Millisecond
+			t.Cleanup(func() { projectTrailUpdateGuardTimeout = old })
+			serveBranchLookup(t, func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() })
+		}, want: []string{"could not check which trail it belongs to", "deadline exceeded"}},
+		{name: "detached HEAD", setup: func(t *testing.T) {
+			t.Helper()
+			testutil.RunGit(t, ".", "checkout", "--detach")
+			serveBranchLookup(t, func(http.ResponseWriter, *http.Request) { t.Error("detached HEAD must not look up branch work") })
+		}, want: []string{"HEAD is not on a branch", "rerun with --branch <branch> added"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			setupGuardRepo(t)
+			var patched int
+			serveGuardProject(t, &patched)
+			tt.setup(t)
+
+			_, _, err := executeProjectTrailTest(t, "update", "42", "--body", "x")
+
+			require.Error(t, err)
+			require.Zero(t, patched, "no PATCH may reach a trail the guard could not clear")
+			msg := err.Error()
+			require.Contains(t, msg, `refusing to update trail #42 "Project intent"`)
+			require.Contains(t, msg, anyway)
+			require.NotContains(t, msg, "rerun without 42", "the no-selector rerun depends on the same unknown")
+			require.NotContains(t, msg, "\x1b")
+			require.NotContains(t, msg, "\x07")
+			for _, want := range tt.want {
+				require.Contains(t, msg, want)
 			}
+		})
+	}
+}
+
+// --repo naming this clone's repository still targets #42 by bare number, so
+// the guard runs: --repo does not switch it off.
+func TestProjectTrailUpdateBareNumberWithThisRepoKeepsTheGuard(t *testing.T) {
+	setupGuardRepo(t)
+	var patched int
+	serveGuardProject(t, &patched)
+	serveBranchWork(t, branchWorkOn(43, 7, "01ARZ3NDEKTSV4RRFFQ69G5FCC"), nil)
+
+	_, _, err := executeProjectTrailTest(t, "update", "42", "--repo", "gh/acme/widget", "--body", "x")
+
+	require.ErrorContains(t, err, `branch "feature/mine" is work on trail #43, not on #42`)
+	require.Zero(t, patched)
+}
+
+// --repo naming another repository addresses work unrelated to this clone's
+// branch, so the branch is not consulted.
+func TestProjectTrailUpdateBareNumberWithAnotherRepoSkipsTheGuard(t *testing.T) {
+	setupGuardRepo(t)
+	var patched int
+	serveGuardProject(t, &patched)
+	serveBranchLookup(t, func(http.ResponseWriter, *http.Request) {
+		t.Error("--repo for another repository must not look up this branch")
+	})
+
+	_, _, err := executeProjectTrailTest(t, "update", "42", "--repo", "gh/acme/other", "--body", "x")
+
+	require.NoError(t, err)
+	require.Equal(t, 1, patched)
+}
+
+func TestScanTrailPagesReportsTruncation(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name         string
+		pages        int
+		wantComplete bool
+	}{
+		{name: "last page reached", pages: 2, wantComplete: true},
+		{name: "stopped at the page budget", pages: trailFindMaxPages + 5, wantComplete: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var page int
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				page++
+				resp := api.TrailListResponse{Trails: []api.TrailResource{{ID: fmt.Sprintf("t%d", page), Branch: "other"}}}
+				if page < tt.pages {
+					next := fmt.Sprintf("cursor-%d", page)
+					resp.NextCursor = &next
+				}
+				assert.NoError(t, json.NewEncoder(w).Encode(resp))
+			}))
+			t.Cleanup(server.Close)
+			client := api.NewClientWithBaseURL("token", server.URL)
+
+			found, complete, err := scanTrailPages(t.Context(), client, trailsBasePath("gh", "acme", "repo"),
+				func(tr api.TrailResource) bool { return tr.Branch == "target" })
+
+			require.NoError(t, err)
+			require.Nil(t, found)
+			require.Equal(t, tt.wantComplete, complete)
 		})
 	}
 }
@@ -140,8 +276,8 @@ func TestProjectTrailUpdateBareNumberPassesWhenItCannotMisfire(t *testing.T) {
 func TestProjectTrailNumberMismatchSanitizesServerText(t *testing.T) {
 	t.Parallel()
 	current := api.ProjectTrail{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAV\x1b]0;x\x07", Title: "T\x1b[2J"}
-	msg := projectTrailNumberMismatch(42, current, &projectTrailTarget{Host: "gh", Project: "acme"}, "feature/mine", "widget",
-		branchWorkOn(43, 7, "01ARZ3NDEKTSV4RRFFQ69G5FCC"))
+	g := projectTrailNumberGuard{number: 42, current: current, target: &projectTrailTarget{Host: "gh", Project: "acme"}, repo: "widget", branch: "feature/mine"}
+	msg := g.mismatch(branchWorkOn(43, 7, "01ARZ3NDEKTSV4RRFFQ69G5FCC"))
 	require.NotContains(t, msg, "\x1b")
 	require.NotContains(t, msg, "\x07")
 }
