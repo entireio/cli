@@ -485,10 +485,11 @@ func newProjectTrailUpdateCmd() *cobra.Command {
 func newProjectTrailCreateCmd() *cobra.Command {
 	var fields projectTrailFields
 	var branch, base, action, key string
-	var noBranch bool
+	var noBranch, checkout bool
+	var addAssignees []string
 	cmd := &cobra.Command{
 		Use: cmdCreate, Short: "Create a trail and publish its branch",
-		Long: "Create a repository-scoped project trail, then link its branch. In the current repository, publish the local branch first; no separate commit or push is required. Uses the current feature branch, or derives a new branch from the title when on the base branch. Use --branch to choose a branch, or --no-branch for intent only. With --no-branch, the current or --repo repository becomes the Trail scope and requires repository write access; --project without --repo creates unscoped intent instead. Repository writers can create scoped trails and link branches. Unscoped creation requires project management. With a branch, --idempotency-key applies only to linking; if linking fails, retry with trail link rather than creating another trail. With --repo, no local branch is published: link existing remote work or use --branch-action create to create it on the server from --base. This command does not commit changes or change the local checkout. Branches are preserved if creation fails.",
+		Long: "Create a repository-scoped project trail, then link its branch. In the current repository, publish the local branch first; no separate commit or push is required. Uses the current feature branch, or derives a new branch from the title when on the base branch. Use --branch to choose a branch, or --no-branch for intent only. With --no-branch, the current or --repo repository becomes the Trail scope and requires repository write access; --project without --repo creates unscoped intent instead. Repository writers can create scoped trails and link branches. Unscoped creation requires project management. With a branch, --idempotency-key applies only to linking; if linking fails, retry with trail link rather than creating another trail. With --repo, no local branch is published: link existing remote work or use --branch-action create to create it on the server from --base. This command does not commit changes, and does not change the local checkout unless --checkout switches to the published branch afterwards; otherwise it prints the git switch command when the linked branch is not the current one. Branches are preserved if creation fails.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := fields.validate(cmd, true); err != nil {
@@ -497,13 +498,17 @@ func newProjectTrailCreateCmd() *cobra.Command {
 			if noBranch && (cmd.Flags().Changed("branch") || cmd.Flags().Changed("base") || cmd.Flags().Changed("branch-action")) {
 				return errors.New("--no-branch cannot be combined with --branch, --base, or --branch-action")
 			}
+			if err := validateProjectTrailCreateCheckout(cmd, checkout, noBranch, action); err != nil {
+				return err
+			}
 			request := api.ProjectTrailCreateRequest{
 				Title: fields.Title, Body: fields.Body, Status: fields.Status,
-				Type: fields.Type, Priority: fields.Priority, Assignees: fields.Assignees,
+				Type: fields.Type, Priority: fields.Priority, Assignees: unionAssignees(fields.Assignees, addAssignees),
 			}
+			var current string
 			if !noBranch {
 				var err error
-				branch, base, err = resolveProjectTrailCreateBranch(cmd, fields.Title, branch, base)
+				branch, base, current, err = resolveProjectTrailCreateBranch(cmd, fields.Title, branch, base)
 				if err != nil {
 					return err
 				}
@@ -513,28 +518,93 @@ func newProjectTrailCreateCmd() *cobra.Command {
 			}
 			if !noBranch || trailRepoFlag(cmd) != "" || projectTrailProjectFlag(cmd) == "" {
 				change := projectTrailChangeRequest(fields.Status, "", branch, base, action)
-				return createRepositoryScopedProjectTrail(cmd, request, change, key)
+				return createAndPrintRepositoryScopedProjectTrail(cmd, request, change, key, current, checkout)
 			}
-			target, err := resolveProjectTrailCollection(cmd)
-			if err != nil {
-				return err
-			}
-			key = projectTrailIdempotencyKey(cmd.ErrOrStderr(), key)
-			var out api.ProjectTrail
-			if _, err := target.Client.ProjectTrailRequest(cmd.Context(), http.MethodPost, target.BasePath, request, http.Header{"Idempotency-Key": {key}}, &out); err != nil {
-				return fmt.Errorf("create project trail (retry with --idempotency-key %s and the same fields): %w", key, err)
-			}
-			if err := target.validateResponse(out); err != nil {
-				return err
-			}
-			return printProjectTrail(cmd, out, nil, nil)
+			return createUnscopedProjectTrail(cmd, request, key)
 		},
 	}
 	fields.flags(cmd)
 	cmd.Flags().BoolVar(&noBranch, "no-branch", false, "Create intent scoped to the current or --repo repository; --project alone creates unscoped intent")
+	cmd.Flags().BoolVar(&checkout, "checkout", false, "Switch to the published branch after creating the trail")
+	// Accepted for scripts written against the legacy create command.
+	cmd.Flags().StringSliceVar(&addAssignees, "add-assignee", nil, "Assignee logins (alias of --assignee)")
+	if err := cmd.Flags().MarkHidden("add-assignee"); err != nil {
+		panic(fmt.Sprintf("hide add-assignee flag: %v", err))
+	}
 	addProjectTrailCreationFlags(cmd, &branch, &base, &action, &key)
 	addJSONFlag(cmd)
 	return cmd
+}
+
+// createAndPrintRepositoryScopedProjectTrail creates the trail, prints it, then
+// switches to or names the published branch (see finishLocalTrailBranch).
+// current is the branch checked out before publishing.
+func createAndPrintRepositoryScopedProjectTrail(cmd *cobra.Command, request api.ProjectTrailCreateRequest, change api.ChangeCreateRequest, key, current string, checkout bool) error {
+	if checkout && publishesLocalBranch(cmd, change) && change.BranchName != current {
+		if err := refuseCheckoutHeldElsewhere(cmd.Context(), change.BranchName); err != nil {
+			return err
+		}
+	}
+	created, err := createRepositoryScopedProjectTrail(cmd, request, change, key)
+	if err != nil {
+		return err
+	}
+	if err := printProjectTrail(cmd, created, nil, nil); err != nil {
+		return fmt.Errorf("trail #%d (%s) was created, but printing it failed: %w; do not rerun trail create", created.Number, created.ID, err)
+	}
+	if !publishesLocalBranch(cmd, change) {
+		return nil
+	}
+	return finishLocalTrailBranch(cmd, created, change.BranchName, current, checkout)
+}
+
+// createUnscopedProjectTrail creates intent with no repository scope, which
+// requires project management.
+func createUnscopedProjectTrail(cmd *cobra.Command, request api.ProjectTrailCreateRequest, key string) error {
+	target, err := resolveProjectTrailCollection(cmd)
+	if err != nil {
+		return err
+	}
+	key = projectTrailIdempotencyKey(cmd.ErrOrStderr(), key)
+	var out api.ProjectTrail
+	if _, err := target.Client.ProjectTrailRequest(cmd.Context(), http.MethodPost, target.BasePath, request, http.Header{"Idempotency-Key": {key}}, &out); err != nil {
+		return fmt.Errorf("create project trail (retry with --idempotency-key %s and the same fields): %w", key, err)
+	}
+	if err := target.validateResponse(out); err != nil {
+		return err
+	}
+	return printProjectTrail(cmd, out, nil, nil)
+}
+
+// --checkout needs a branch published from this clone; these modes leave the
+// clone alone, so there is nothing local to switch to.
+func validateProjectTrailCreateCheckout(cmd *cobra.Command, checkout, noBranch bool, action string) error {
+	switch {
+	case !checkout:
+		return nil
+	case noBranch:
+		return errors.New("cannot combine --no-branch with --checkout")
+	case trailRepoFlag(cmd) != "":
+		return errors.New("cannot combine --repo with --checkout: --repo creates the trail remotely and leaves the local clone alone")
+	case action == cmdCreate:
+		return errors.New("cannot combine --branch-action create with --checkout: the server creates that branch, so there is nothing local to check out")
+	}
+	return nil
+}
+
+// unionAssignees merges --assignee and --add-assignee, keeping first-seen order.
+func unionAssignees(lists ...[]string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, list := range lists {
+		for _, login := range list {
+			if !seen[login] {
+				seen[login] = true
+				out = append(out, login)
+			}
+		}
+	}
+	return out
 }
 
 func addProjectTrailCreationFlags(cmd *cobra.Command, branch, base, action, key *string) {
