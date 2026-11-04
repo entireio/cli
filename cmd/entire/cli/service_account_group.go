@@ -36,6 +36,7 @@ func newServiceAccountCmd() *cobra.Command {
 	cmd.AddCommand(
 		newSACreateCmd(), newSAListCmd(), newSAGetCmd(), newSADeleteCmd(),
 		newSAGrantCmd(), newSARevokeCmd(), newSAGrantsCmd(),
+		newSABindCmd(), newSABindingsCmd(), newSAUnbindCmd(),
 	)
 	return requireSubcommand(cmd)
 }
