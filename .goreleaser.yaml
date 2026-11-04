@@ -84,7 +84,11 @@ notarize:
         wait: true # do not let an unusable binary slip into the wild
 
 archives:
-  - formats:
+  - id: entire
+    ids:
+      - entire
+      - git-remote-entire
+    formats:
       - tar.gz
     format_overrides:
       - goos: windows
@@ -103,6 +107,23 @@ archives:
           group: root
           mtime: "{{ .CommitDate }}"
       - src: README.md
+        info:
+          owner: root
+          group: root
+          mtime: "{{ .CommitDate }}"
+
+  - id: git-remote-entire
+    ids:
+      - git-remote-entire
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    name_template: "git-remote-entire_{{ .Os }}_{{ .Arch }}"
+    files:
+      - src: LICENSE
         info:
           owner: root
           group: root
@@ -168,6 +189,8 @@ scoops:
       owner: entireio
       name: scoop-bucket
       token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    ids:
+      - entire
     homepage: "https://github.com/entireio/cli"
     description: "CLI for Entire"
     license: MIT
@@ -203,6 +226,8 @@ scoops:
       owner: entireio
       name: scoop-bucket
       token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    ids:
+      - entire
     homepage: "https://github.com/entireio/cli"
     description: "CLI for Entire (renamed to 'entire' — install that instead)"
     license: MIT
@@ -217,6 +242,8 @@ homebrew_casks:
       owner: entireio
       name: homebrew-tap
       token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    ids:
+      - entire
     directory: Casks
     homepage: "https://github.com/entireio/cli"
     description: "CLI for Entire"
@@ -239,6 +266,8 @@ homebrew_casks:
       owner: entireio
       name: homebrew-tap
       token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    ids:
+      - entire
     directory: Casks
     homepage: "https://github.com/entireio/cli"
     description: "CLI for Entire (nightly build)"
