@@ -761,3 +761,26 @@ func TestTrailReviewPatchAlteredNoteKeepsShellTextOut(t *testing.T) {
 		t.Fatalf("hostile ID command = %q", cmd)
 	}
 }
+
+// Styled patches keep tabs and CRLF line ends on colored lines, so a copied
+// tab-indented patch still applies.
+func TestRenderPatchKeepsTabsAndCarriageReturns(t *testing.T) {
+	t.Parallel()
+	got := tuiutil.StripANSI(colorTrailReviewStyles().renderPatch("@@ -1,2 +1,2 @@\n \tkeep\n-\told\r\n+\tnew"))
+	if want := "@@ -1,2 +1,2 @@\n \tkeep\n-\told\r\n+\tnew\n"; got != want {
+		t.Fatalf("renderPatch = %q, want %q", got, want)
+	}
+}
+
+func TestTrailReviewHiddenOpenNoteNamesEveryActiveFilter(t *testing.T) {
+	t.Parallel()
+	opts := defaultTrailReviewListOptions()
+	opts.Severity = "high"
+	if got := trailReviewHiddenOpenNote(2, opts); !strings.HasSuffix(got, "— add --freshness any or drop --severity") {
+		t.Fatalf("hint = %q", got)
+	}
+	opts.Freshness = trailReviewFreshnessAny
+	if got := trailReviewHiddenOpenNote(2, opts); !strings.HasSuffix(got, "— drop --severity") {
+		t.Fatalf("severity-only hint = %q", got)
+	}
+}

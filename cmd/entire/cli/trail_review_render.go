@@ -291,14 +291,19 @@ func trailReviewHiddenOpenNote(hidden int, opts trailReviewListOptions) string {
 		noun += "s"
 	}
 	note := fmt.Sprintf("+%d %s not shown by the current filters", hidden, noun)
-	switch {
-	case opts.Freshness == trailReviewFreshnessCurrent:
-		return note + " — add --freshness any"
-	case opts.Severity != "":
-		return note + " — drop --severity"
-	default:
+	// Either filter can hide open findings, and the counts do not say which,
+	// so name every one that is in effect.
+	var fixes []string
+	if opts.Freshness == trailReviewFreshnessCurrent {
+		fixes = append(fixes, "add --freshness any")
+	}
+	if opts.Severity != "" {
+		fixes = append(fixes, "drop --severity")
+	}
+	if len(fixes) == 0 {
 		return note
 	}
+	return note + " — " + strings.Join(fixes, " or ")
 }
 
 func renderTrailReviewCommentsStyled(w io.Writer, s trailReviewStyles, width int, comments []api.TrailReviewComment, nextCursor string) {
@@ -545,11 +550,24 @@ func (s trailReviewStyles) renderPatch(patch string) string {
 			style, styled = s.red, true
 		}
 		if styled {
-			line = s.render(style, line)
+			line = s.renderPatchLine(style, line)
 		}
 		b.WriteString(line + "\n")
 	}
 	return b.String()
+}
+
+// renderPatchLine colors one patch line without changing its bytes: lipgloss
+// converts tabs to spaces by default, which breaks tab-indented patches, and
+// a CRLF line's carriage return is kept outside the styled text so it
+// survives.
+func (s trailReviewStyles) renderPatchLine(style lipgloss.Style, line string) string {
+	body, cr := strings.CutSuffix(line, "\r")
+	out := s.render(style.TabWidth(lipgloss.NoTabConversion), body)
+	if cr {
+		out += "\r"
+	}
+	return out
 }
 
 func renderTrailReviewCommentCreatedStyled(w io.Writer, s trailReviewStyles, width int, target trailReviewTarget, comment api.TrailReviewComment) {
