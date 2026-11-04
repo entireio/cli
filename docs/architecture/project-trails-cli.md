@@ -35,6 +35,7 @@ Shared command bodies do not check the mode. Retiring legacy means deleting
 ```sh
 entire trail list --project gh/entireio --json
 entire trail list --project gh/entireio --limit 50 --page-token '<nextPageToken>'
+entire trail list --mine --status open   # yours, across every project and region
 entire trail show 42 --project gh/entireio
 entire trail create --title 'Cross-repository work'
 entire trail create --title 'Repository-scoped plan' --no-branch
@@ -112,5 +113,15 @@ Selectors are project-local numbers or trail ULIDs, or `<repo>/<number>` for one
 - Local create publishes the branch but never commits, force-pushes, or deletes
   it on failure. `--repo`, `--no-branch`, and `--branch-action create` skip local
   publication. Unlink preserves the branch and its work.
+- Create leaves the checkout alone by default. When the linked branch is not
+  the one checked out before publishing, it prints `Next: git switch <branch>`
+  on stderr. `--checkout` instead switches to it after the
+  trail is printed, including an existing branch named with `--branch` (the 0.9
+  command switched only to a branch it had just created). Git carries
+  uncommitted work over when it can; if Git refuses, the command fails, says
+  the trail was created and not to rerun create, and names the `git switch`
+  command. `--checkout` is rejected with `--no-branch`,
+  `--repo` and `--branch-action create`. The hidden `--add-assignee` alias is
+  merged with `--assignee` for legacy scripts.
 
 Project-wide streaming and batch multi-repository creation are not supported.
