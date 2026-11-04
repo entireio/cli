@@ -445,6 +445,49 @@ func resolveWorktreeCandidates(ctx context.Context, worktreePath string, candida
 	return nil, true
 }
 
+// withoutIdleSessions drops, from the fallback's matches of a commit with no
+// session homed in its worktree, the sessions idle beyond recentSessionWindow:
+// they are no more likely to be this commit's than they are when the
+// candidates span several worktrees. When all candidates came from one
+// worktree, resolveWorktreeCandidates links them without that check, and
+// post-commit would condense a session idle for days into every commit made
+// here. Only commit linking applies this; amend and post-rewrite still find
+// the sessions they keep the existing links of.
+func withoutIdleSessions(ctx context.Context, worktreePath string, states []*SessionState) []*SessionState {
+	now := time.Now()
+	var kept []*SessionState
+	for _, state := range states {
+		if idleBeyondRecentWindow(state, now) {
+			logging.Debug(logging.WithComponent(ctx, "checkpoint"),
+				"session matching: fallback session idle beyond the recent window; not linked",
+				slog.String("commit_worktree", worktreePath),
+				slog.String("session_id", state.SessionID),
+				slog.String("session_worktree", state.WorktreePath))
+			continue
+		}
+		kept = append(kept, state)
+	}
+	return kept
+}
+
+// idleBeyondRecentWindow reports whether state last interacted before
+// recentSessionWindow and shows no other sign of still working. A session with
+// no recorded interaction is not: how long it has been idle is unknown.
+// LastInteractionTime only moves at turn boundaries, so a session mid-turn
+// (within activeSessionInteractionThreshold) or with a background subagent in
+// flight (hasFreshLiveTaskRecord) is not either: either may be making this
+// commit.
+func idleBeyondRecentWindow(state *SessionState, now time.Time) bool {
+	last := state.LastInteractionTime
+	if last == nil || last.After(now.Add(-recentSessionWindow)) {
+		return false
+	}
+	if state.Phase.IsActive() && isRecentInteraction(last) {
+		return false
+	}
+	return !hasFreshLiveTaskRecord(state, now)
+}
+
 // warnAmbiguousWorktreeSessions surfaces refused fallback matches: live
 // sessions exist in other worktrees of this repo, but they span multiple
 // worktrees so no automatic match is safe. Without this warning, commits made
