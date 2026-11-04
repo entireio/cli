@@ -573,3 +573,32 @@ func TestRunCheckpointUploadWorker_BudgetEndsPassAsStop(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, refs, remaining)
 }
+
+// TestRunCheckpointUploadPass_OPFGateRunsAfterPushWait: the wait for the user's
+// pushes can last minutes, and checkpoints queued meanwhile must still pass the
+// privacy filter, so the gate runs after it, right before the queue is drained.
+func TestRunCheckpointUploadPass_OPFGateRunsAfterPushWait(t *testing.T) {
+	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 1)
+	prepareGitRefsPrePush(t, workDir, bareDir)
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	enqueueRefs(t, repo, refs)
+	coord := uploadCoordinator(t, repo)
+
+	var steps []string
+	restoreWait, restoreGate := uploadPassWait, uploadPassOPFGate
+	t.Cleanup(func() { uploadPassWait, uploadPassOPFGate = restoreWait, restoreGate })
+	uploadPassWait = func(context.Context, *checkpoint.UploadCoordinator) { steps = append(steps, "wait") }
+	uploadPassOPFGate = func(ctx context.Context, repo *git.Repository) error {
+		steps = append(steps, "gate")
+		return restoreGate(ctx, repo)
+	}
+
+	restore := captureStderr(t)
+	runCheckpointUploadPass(t.Context(), repo, coord, checkpoint.UploadRequest{Remote: "origin"})
+	restore()
+
+	require.GreaterOrEqual(t, len(steps), 2)
+	assert.Equal(t, []string{"wait", "gate"}, steps[:2])
+}

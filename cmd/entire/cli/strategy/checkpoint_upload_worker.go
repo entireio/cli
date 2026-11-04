@@ -397,6 +397,13 @@ func DiscardRequestedCheckpointUpload(ctx context.Context, remote string, pushSt
 	}
 }
 
+// uploadPassWait and uploadPassOPFGate are runCheckpointUploadPass's wait for
+// the user's pushes and its OPF gate; vars so a test can check their order.
+var (
+	uploadPassWait    = waitForUserPushes
+	uploadPassOPFGate = opfGateForCheckpointRefs
+)
+
 // runCheckpointUploadPass uploads the queue for req and records the outcome.
 func runCheckpointUploadPass(ctx context.Context, repo *git.Repository, coord *checkpoint.UploadCoordinator, req checkpoint.UploadRequest) {
 	result := checkpoint.UploadResult{StartedAt: time.Now()}
@@ -434,13 +441,18 @@ func runCheckpointUploadPass(ctx context.Context, repo *git.Repository, coord *c
 		finish("the privacy filter could not run here, so nothing was uploaded")
 		return
 	}
-	if opfErr := opfGateForCheckpointRefs(ctx, repo); opfErr != nil {
+	uploadPassWait(ctx, coord)
+
+	// After the wait, not before: the wait can run for minutes, and a commit
+	// made meanwhile queues checkpoints the filter has not seen. The flush
+	// below drains and pins the queue straight after this, so it sends only
+	// what the gate just rewrote; refs queued during its between-chunk waits
+	// are not in this drain.
+	if opfErr := uploadPassOPFGate(ctx, repo); opfErr != nil {
 		logging.Warn(ctx, "background checkpoint upload withheld", slog.String("error", opfErr.Error()))
 		finish("withheld before upload (see .entire/logs)")
 		return
 	}
-
-	waitForUserPushes(ctx, coord)
 
 	// The budget bounds the batch too, so running out reads as a budget stop
 	// (stalled refs rotated, no per-ref retries on a dead context). A push made
