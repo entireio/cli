@@ -56,7 +56,8 @@ func newProjectAgentRunListCmd() *cobra.Command {
 		Use:   cmdList,
 		Short: "List the project's agent runs, newest first",
 		Long: `List the project's agent runs, newest first, in repositories you can read.
-One page per call: pass the printed --cursor for the next.`,
+One page per call: the next page's command is printed, with --cursor and the
+same --agent and --status, which a cursor needs repeated.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cmd.SilenceUsage = true
@@ -76,11 +77,10 @@ One page per call: pass the printed --cursor for the next.`,
 			if limit < 1 || limit > 100 {
 				return errors.New("--limit must be between 1 and 100")
 			}
+			// A cursor is bound to the filters of the listing it came from, which
+			// must be sent with it again; per_page is read on every page.
+			next := projectAgentRunFilterFlags(agentID, status)
 			if cursor = strings.TrimSpace(cursor); cursor != "" {
-				// The cursor restores the page's filters; repeating them is refused.
-				if len(q) > 0 {
-					return errors.New("--cursor continues the listing it came from; pass it without --agent or --status")
-				}
 				q.Set("cursor", cursor)
 			}
 			q.Set("per_page", strconv.Itoa(limit))
@@ -98,7 +98,7 @@ One page per call: pass the printed --cursor for the next.`,
 			if jsonRequested(cmd) {
 				return printJSON(cmd.OutOrStdout(), page)
 			}
-			return printProjectAgentRuns(cmd.OutOrStdout(), t, page)
+			return printProjectAgentRuns(cmd.OutOrStdout(), t, page, next)
 		},
 	}
 	cmd.Flags().StringVar(&agentID, "agent", "", "Only this agent's runs (its ID from 'entire project agent list')")
@@ -109,7 +109,21 @@ One page per call: pass the printed --cursor for the next.`,
 	return cmd
 }
 
-func printProjectAgentRuns(w io.Writer, t *projectAgentTarget, page api.ProjectAgentRunPage) error {
+// projectAgentRunFilterFlags are the filter flags a next-page hint repeats.
+func projectAgentRunFilterFlags(agentID, status string) string {
+	var out string
+	if agentID != "" {
+		out += " --agent " + agentID
+	}
+	if status != "" {
+		out += " --status " + status
+	}
+	return out
+}
+
+// printProjectAgentRuns prints one page; filters are the flags its next page
+// repeats with the cursor.
+func printProjectAgentRuns(w io.Writer, t *projectAgentTarget, page api.ProjectAgentRunPage, filters string) error {
 	runs := make([]api.ProjectAgentRun, len(page.Items))
 	for i, raw := range page.Items {
 		if err := json.Unmarshal(raw, &runs[i]); err != nil {
@@ -125,7 +139,7 @@ func printProjectAgentRuns(w io.Writer, t *projectAgentTarget, page api.ProjectA
 		return err
 	}
 	if page.NextCursor != nil && *page.NextCursor != "" {
-		fmt.Fprintf(w, "More runs: --cursor %s\n", tuiutil.SanitizeTerminalLabel(*page.NextCursor))
+		fmt.Fprintf(w, "More runs: --cursor %s%s\n", tuiutil.SanitizeTerminalLabel(*page.NextCursor), filters)
 	}
 	return nil
 }

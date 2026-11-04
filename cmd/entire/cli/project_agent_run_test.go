@@ -63,11 +63,17 @@ func TestProjectAgentRunList_ShowsOnePageWithItsCursor(t *testing.T) {
 	assert.Equal(t, agentTestBase+"/runs", (*requests)[0].Path)
 	assert.Equal(t, "agent_id="+agentRunTestAgentID+"&per_page=5&status=succeeded", (*requests)[0].Query)
 	assert.Regexp(t, agentRunTestID+`\s+Entire Review\s+succeeded\s+push\s+feature/work\s+2026-11-03T10:00:00Z`, out)
-	assert.Contains(t, out, "More runs: --cursor c2")
+	assert.Contains(t, out, "More runs: --cursor c2 --agent "+agentRunTestAgentID+" --status succeeded\n",
+		"the hint repeats the filters, which the cursor is bound to")
+
+	// The server refuses a cursor without the filters it was issued for.
+	_, _, err = executeProjectAgent(t, "run", "list", "--cursor", "c2", "--agent", agentRunTestAgentID, "--status", "succeeded", "--limit", "5")
+	require.NoError(t, err)
+	assert.Equal(t, "agent_id="+agentRunTestAgentID+"&cursor=c2&per_page=5&status=succeeded", (*requests)[1].Query)
 
 	out, _, err = executeProjectAgent(t, "run", "list", "--cursor", "c2", "--json")
 	require.NoError(t, err)
-	assert.Equal(t, "cursor=c2&per_page=20", (*requests)[1].Query)
+	assert.Equal(t, "cursor=c2&per_page=20", (*requests)[2].Query)
 	var page struct {
 		Items      []map[string]any `json:"items"`
 		NextCursor string           `json:"next_cursor"`
@@ -91,7 +97,6 @@ func TestProjectAgentRunList_RefusesBadFiltersBeforeAnyRequest(t *testing.T) {
 		{[]string{"--status", "done"}, "--status must be one of"},
 		{[]string{"--limit", "0"}, "--limit must be between 1 and 100"},
 		{[]string{"--limit", "101"}, "--limit must be between 1 and 100"},
-		{[]string{"--cursor", "c2", "--status", "failed"}, "pass it without --agent or --status"},
 	} {
 		_, _, err := executeProjectAgent(t, append([]string{"run", "list"}, tc.args...)...)
 		require.ErrorContains(t, err, tc.says, "args %v", tc.args)
