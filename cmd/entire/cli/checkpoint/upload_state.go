@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/proclive"
 )
 
 // Background checkpoint upload coordination, kept in the git common dir next to
@@ -81,13 +82,12 @@ func (r *UploadResult) Running(now time.Time, maxRun time.Duration) bool {
 // upload was on. The worker waits for each to exit before it pushes: GitHub
 // rejects a push whose pack lands within about a second of another push to the
 // same repository finishing, and the one rejected is the later of the two.
-// PID is 0 when the hook could not find its git process. Start is that
-// process's start time in a platform-specific unit, 0 when unknown: a PID
-// whose start time has changed was reused by another process.
+// Process carries the start-time fingerprint, so a PID reused by another
+// process is not mistaken for the push.
 type UserPush struct {
-	PID   int       `json:"pid,omitempty"`
-	Start int64     `json:"start,omitempty"`
-	At    time.Time `json:"at"`
+	// Process is the push's git process; zero when the hook could not find it.
+	Process proclive.Identity `json:"process,omitzero"`
+	At      time.Time         `json:"at"`
 }
 
 // userPushMarkTTL drops marks no worker consumed (no upload followed them).

@@ -336,7 +336,7 @@ func warnOPFCheckpointRefsWithheld(ctx context.Context, err error) {
 	logging.Warn(ctx, "checkpoint ref push withheld; refs left queued",
 		slog.String("error", err.Error()),
 	)
-	fmt.Fprintf(stderrWriter,
+	fmt.Fprintf(noticeWriter(ctx),
 		"[entire] Your checkpoint refs were not pushed and stay queued for the next push: %v\n", err)
 }
 

@@ -277,93 +277,33 @@ func firstCmdlineWord(cmdline string) (string, bool) {
 	return word.String(), true
 }
 
-// shellQuoteSSHProgram single-quotes a GIT_SSH program path for use as
-// GIT_SSH_COMMAND, which git runs through sh: GIT_SSH is a bare path, so one
-// containing spaces ("C:\Program Files\PuTTY\plink.exe") must stay one word.
-func shellQuoteSSHProgram(path string) string {
-	return "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
-}
-
-// envLookup returns the value of the last occurrence of key in env (matching
-// exec.Cmd's last-wins semantics for duplicate entries) and whether it was
-// found.
-func envLookup(env []string, key string) (string, bool) {
-	prefix := key + "="
-	for i := len(env) - 1; i >= 0; i-- {
-		if v, ok := strings.CutPrefix(env[i], prefix); ok {
-			return v, true
-		}
-	}
-	return "", false
-}
-
-// gitConfigSSH looks up core.sshCommand and ssh.variant in one `git config`
-// call, run with env so the lookup honors any HOME/GIT_CONFIG_* overrides
-// present in env (e.g. in tests). Unset values are "". ok is false when the
-// lookup itself failed, as opposed to finding nothing (git's exit status 1):
-// the caller must not then guess at the command git will run.
-func gitConfigSSH(ctx context.Context, env []string) (sshCommand, variant string, hasVariant, ok bool) {
-	cmd := exec.CommandContext(ctx, "git", "config", "--get-regexp", `^(core\.sshcommand|ssh\.variant)$`)
-	cmd.Env = env
-	out, err := cmd.Output()
-	if err != nil {
-		var exitErr *exec.ExitError
-		return "", "", false, errors.As(err, &exitErr) && exitErr.ExitCode() == 1
-	}
-	// Last value wins, as for git's own single-valued lookups.
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		key, value, _ := strings.Cut(line, " ")
-		switch key {
-		case "core.sshcommand":
-			sshCommand = strings.TrimSpace(value)
-		case "ssh.variant":
-			variant, hasVariant = value, true
-		}
-	}
-	return sshCommand, variant, hasVariant, true
-}
-
 // resolvedSSH is the ssh client git itself would run for a remote operation.
 type resolvedSSH struct {
-	command string // shell command line (or bare program path when !cmdline)
-	cmdline bool   // false when command came from GIT_SSH, a bare program path
+	command string // shell command line, ready to set as GIT_SSH_COMMAND
 	variant sshVariant
 }
 
-// resolveSSH resolves the ssh invocation git itself would use, in git's own
-// precedence order: the GIT_SSH_COMMAND environment variable, then the
-// core.sshCommand git config value, then the GIT_SSH environment variable,
-// falling back to plain "ssh" when none are set. The variant comes from
-// GIT_SSH_VARIANT or ssh.variant when set, else from the program's name. ok is
-// false when the command would come from git config that could not be read:
-// the caller then cannot know what git will run, and must not replace it.
+// resolveSSH resolves the ssh invocation git itself would use
+// (gitremote.ResolveSSH) and its variant: GIT_SSH_VARIANT or ssh.variant when
+// set, else from the program's name. ok is false when the command would come
+// from git config that could not be read: the caller then cannot know what git
+// will run, and must not replace it.
 func resolveSSH(ctx context.Context, env []string) (resolvedSSH, bool) {
-	configCmd, configVariant, hasConfigVariant, configOK := gitConfigSSH(ctx, env)
-	res := resolvedSSH{command: "ssh", cmdline: true}
-	if v, ok := envLookup(env, "GIT_SSH_COMMAND"); ok && strings.TrimSpace(v) != "" {
-		res.command = strings.TrimSpace(v)
-	} else if !configOK {
-		return res, false
-	} else if configCmd != "" {
-		res.command = configCmd
-	} else if v, ok := envLookup(env, "GIT_SSH"); ok && strings.TrimSpace(v) != "" {
-		res.command, res.cmdline = strings.TrimSpace(v), false
+	inv, ok := gitremote.ResolveSSH(ctx, "", env)
+	if !ok {
+		return resolvedSSH{}, false
 	}
-
+	res := resolvedSSH{command: inv.Command}
 	// An explicit variant decides, except "auto", which (as in git) means
 	// detect from the program name below.
-	if v, ok := envLookup(env, "GIT_SSH_VARIANT"); ok {
-		if res.variant = overrideSSHVariant(v); res.variant != sshVariantAuto {
-			return res, true
-		}
-	} else if hasConfigVariant {
-		if res.variant = overrideSSHVariant(configVariant); res.variant != sshVariantAuto {
+	if inv.HasVariant {
+		if res.variant = overrideSSHVariant(inv.Variant); res.variant != sshVariantAuto {
 			return res, true
 		}
 	}
-	prog := res.command
-	if res.cmdline {
-		word, ok := firstCmdlineWord(res.command)
+	prog := inv.Program
+	if prog == "" {
+		word, ok := firstCmdlineWord(inv.Command)
 		if !ok {
 			return res, true // sshVariantAuto
 		}
@@ -411,9 +351,6 @@ func withBatchModeSSH(ctx context.Context, env []string) []string {
 		return env
 	}
 	base := ssh.command
-	if !ssh.cmdline {
-		base = shellQuoteSSHProgram(base)
-	}
 	out := make([]string, 0, len(env)+1)
 	for _, e := range env {
 		if strings.HasPrefix(e, key) {

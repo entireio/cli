@@ -1172,7 +1172,7 @@ func TestWithBatchModeSSH(t *testing.T) {
 			in: func(t *testing.T) []string {
 				return isolatedSSHEnv(t, "GIT_SSH=/usr/local/bin/custom-ssh")
 			},
-			want: "'/usr/local/bin/custom-ssh' -o BatchMode=yes",
+			want: "/usr/local/bin/custom-ssh -o BatchMode=yes",
 		},
 		{
 			name: "GIT_SSH path is quoted for the shell git runs GIT_SSH_COMMAND through",

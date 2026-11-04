@@ -420,9 +420,7 @@ func runCheckpointUploadPass(ctx context.Context, repo *git.Repository, coord *c
 	// ignored-checkpoint_remote warning) have no terminal here: collect them
 	// for the next push to show.
 	var printed bytes.Buffer
-	restore := stderrWriter
-	stderrWriter = &printed
-	defer func() { stderrWriter = restore }()
+	ctx = withNoticeWriter(ctx, &printed)
 
 	ctx = withCarriedOPFDecision(ctx, req.OPFDecision)
 	ps := resolvePushSettings(ctx, req.Remote)

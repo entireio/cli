@@ -21,6 +21,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
+	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
@@ -34,7 +35,8 @@ func TestHelperPrintPushingGitPID(t *testing.T) {
 	if os.Getenv(pushingGitPIDProbeEnv) != "1" {
 		t.Skip("helper process only")
 	}
-	fmt.Printf("PUSHING_GIT_PID=%d\n", pushingGitPID())
+	id, _ := pushingGit()
+	fmt.Printf("PUSHING_GIT_PID=%d\n", id.PID)
 }
 
 func TestPushingGitPID_FindsGitAncestor(t *testing.T) {
@@ -77,6 +79,16 @@ func startGitProcess(t *testing.T) (pid int, stop func()) {
 	return cmd.Process.Pid, stop
 }
 
+// gitIdentity fingerprints a git process the test started.
+func gitIdentity(t *testing.T, pid int) proclive.Identity {
+	t.Helper()
+	id, ok := gitProcessIdentity(pid)
+	if !ok {
+		t.Skip("cannot fingerprint processes on this platform")
+	}
+	return id
+}
+
 // shortenUserPushWaits makes the settle delays test-sized. Not parallel-safe.
 func shortenUserPushWaits(t *testing.T, settle, unknown time.Duration) {
 	t.Helper()
@@ -89,8 +101,9 @@ func TestWaitForUserPushes_WaitsForGitToExit(t *testing.T) {
 	shortenUserPushWaits(t, 10*time.Millisecond, 10*time.Millisecond)
 	coord := checkpoint.NewUploadCoordinator(t.TempDir())
 	pid, stop := startGitProcess(t)
-	require.True(t, isLiveGitProcess(pid, 0))
-	require.NoError(t, coord.NoteUserPush(checkpoint.UserPush{PID: pid, At: time.Now()}))
+	id := gitIdentity(t, pid)
+	require.True(t, isLiveGitProcess(id))
+	require.NoError(t, coord.NoteUserPush(checkpoint.UserPush{Process: id, At: time.Now()}))
 
 	go func() { time.Sleep(300 * time.Millisecond); stop() }()
 	start := time.Now()
@@ -109,13 +122,14 @@ func TestWaitForUserPushes_WaitsForPushRecordedMeanwhile(t *testing.T) {
 	coord := checkpoint.NewUploadCoordinator(t.TempDir())
 	first, stopFirst := startGitProcess(t)
 	second, stopSecond := startGitProcess(t)
-	require.NoError(t, coord.NoteUserPush(checkpoint.UserPush{PID: first, At: time.Now()}))
+	secondID := gitIdentity(t, second)
+	require.NoError(t, coord.NoteUserPush(checkpoint.UserPush{Process: gitIdentity(t, first), At: time.Now()}))
 
 	go func() {
 		time.Sleep(100 * time.Millisecond)
 		stopFirst()
 		time.Sleep(50 * time.Millisecond) // inside the settle after the first exits
-		assert.NoError(t, coord.NoteUserPush(checkpoint.UserPush{PID: second, At: time.Now()}))
+		assert.NoError(t, coord.NoteUserPush(checkpoint.UserPush{Process: secondID, At: time.Now()}))
 		time.Sleep(400 * time.Millisecond)
 		stopSecond()
 	}()
@@ -123,7 +137,7 @@ func TestWaitForUserPushes_WaitsForPushRecordedMeanwhile(t *testing.T) {
 	waitForUserPushes(t.Context(), coord)
 
 	assert.GreaterOrEqual(t, time.Since(start), 550*time.Millisecond)
-	assert.False(t, isLiveGitProcess(second, 0))
+	assert.False(t, isLiveGitProcess(secondID))
 }
 
 // A push whose git process the hook could not find gets a fixed delay.
@@ -249,7 +263,7 @@ func TestWaitForUserPushes_LivePushOutlastsRoundLimit(t *testing.T) {
 	t.Cleanup(func() { userPushWaitLimit = restore })
 	coord := checkpoint.NewUploadCoordinator(t.TempDir())
 	pid, stop := startGitProcess(t)
-	require.NoError(t, coord.NoteUserPush(checkpoint.UserPush{PID: pid, At: time.Now()}))
+	require.NoError(t, coord.NoteUserPush(checkpoint.UserPush{Process: gitIdentity(t, pid), At: time.Now()}))
 
 	go func() { time.Sleep(400 * time.Millisecond); stop() }()
 	start := time.Now()
@@ -264,11 +278,13 @@ func TestWaitForUserPushes_ReusedPIDIsNotWaitedFor(t *testing.T) {
 	shortenUserPushWaits(t, 10*time.Millisecond, 10*time.Millisecond)
 	coord := checkpoint.NewUploadCoordinator(t.TempDir())
 	pid, _ := startGitProcess(t)
-	started := processStartTime(pid)
-	if started == 0 {
+	id := gitIdentity(t, pid)
+	if id.Start == "" {
 		t.Skip("no process start time on this platform")
 	}
-	require.NoError(t, coord.NoteUserPush(checkpoint.UserPush{PID: pid, Start: started + 1, At: time.Now()}))
+	reused := id
+	reused.Start += "-earlier"
+	require.NoError(t, coord.NoteUserPush(checkpoint.UserPush{Process: reused, At: time.Now()}))
 
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
@@ -276,7 +292,7 @@ func TestWaitForUserPushes_ReusedPIDIsNotWaitedFor(t *testing.T) {
 	waitForUserPushes(ctx, coord)
 
 	assert.Less(t, time.Since(start), 2*time.Second)
-	assert.True(t, isLiveGitProcess(pid, started), "the process itself is still running")
+	assert.True(t, isLiveGitProcess(id), "the process itself is still running")
 }
 
 // An exited git its parent has not reaped yet is a zombie, not a live push.
@@ -288,39 +304,14 @@ func TestIsLiveGitProcess_ZombieIsNotLive(t *testing.T) {
 	cmd := exec.CommandContext(t.Context(), "git", "--version")
 	require.NoError(t, cmd.Start())
 	t.Cleanup(func() { _ = cmd.Wait() }) //nolint:errcheck // reaping only
-	pid := cmd.Process.Pid
+	id := proclive.Identity{PID: cmd.Process.Pid, Name: "git"}
+	if got, ok := gitProcessIdentity(cmd.Process.Pid); ok {
+		id = got
+	}
 
 	deadline := time.Now().Add(10 * time.Second)
-	for isLiveGitProcess(pid, 0) && time.Now().Before(deadline) {
+	for isLiveGitProcess(id) && time.Now().Before(deadline) {
 		time.Sleep(25 * time.Millisecond)
 	}
-	assert.False(t, isLiveGitProcess(pid, 0), "the exited, unreaped git still reads as live")
-}
-
-func TestParseProcStat(t *testing.T) {
-	t.Parallel()
-	// pgrp session tty_nr tpgid flags minflt cminflt majflt cmajflt utime stime
-	// cutime cstime priority nice num_threads itrealvalue starttime vsize rss
-	const tail = " 1 1 0 -1 4194560 100 0 0 0 0 0 0 0 20 0 1 0 98765 1000 100"
-	for _, tc := range []struct {
-		name, stat string
-		ok         bool
-		ppid       int
-		comm       string
-		start      int64
-	}{
-		{"running", "4242 (git) S 4200" + tail, true, 4200, "git", 98765},
-		{"comm with spaces and parens", "4242 (a (b) c) R 7" + tail, true, 7, "a (b) c", 98765},
-		{"zombie", "4242 (git) Z 4200" + tail, false, 0, "", 0},
-		{"dead", "4242 (git) X 4200" + tail, false, 0, "", 0},
-		{"truncated", "4242 (git) S", false, 0, "", 0},
-	} {
-		ppid, comm, start, ok := parseProcStat(tc.stat)
-		assert.Equal(t, tc.ok, ok, tc.name)
-		if tc.ok {
-			assert.Equal(t, tc.ppid, ppid, tc.name)
-			assert.Equal(t, tc.comm, comm, tc.name)
-			assert.Equal(t, tc.start, start, tc.name)
-		}
-	}
+	assert.False(t, isLiveGitProcess(id), "the exited, unreaped git still reads as live")
 }

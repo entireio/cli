@@ -1324,6 +1324,24 @@ const (
 // output without mutating the process-global os.Stderr.
 var stderrWriter io.Writer = os.Stderr
 
+type noticeWriterKey struct{}
+
+// withNoticeWriter routes the user-facing notices written through
+// noticeWriter(ctx) to w — the background upload worker, whose stderr is the
+// null device, keeps them for the next push to show — without redirecting
+// stderrWriter for anything else running in the process.
+func withNoticeWriter(ctx context.Context, w io.Writer) context.Context {
+	return context.WithValue(ctx, noticeWriterKey{}, w)
+}
+
+// noticeWriter is the writer withNoticeWriter set on ctx, else stderrWriter.
+func noticeWriter(ctx context.Context) io.Writer {
+	if w, ok := ctx.Value(noticeWriterKey{}).(io.Writer); ok {
+		return w
+	}
+	return stderrWriter
+}
+
 // warnStaleEndedSessions emits a rate-limited warning to stderr when too many
 // non-FullyCondensed ENDED sessions are accumulating.
 func warnStaleEndedSessions(ctx context.Context, count int) {
