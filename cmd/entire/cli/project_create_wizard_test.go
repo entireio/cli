@@ -257,6 +257,7 @@ func (f *fakeProjectCore) handler(t *testing.T) http.HandlerFunc {
 			}
 			reply(`{"id":"01HZX7QPR0JECT000000000000","name":"` + body.Name + `","ownerId":"` + body.OwnerId + `",` +
 				ownerField + `"ownerType":"` + string(body.OwnerType) + `","region":"` + body.Region.Or("us") +
+				`","primaryProcessingCell":"` + body.Cell.Or("") +
 				`","createdAt":"2026-01-01T00:00:00Z"}`)
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
@@ -361,6 +362,7 @@ func TestProjectCreate_FlagsNeverSeedTheWizard(t *testing.T) {
 		{"--owner-type", "account", "--region", "us"},
 		{"--owner", ""},
 		{"widgets", "--region", ""},
+		{"widgets", "--cell", "aws-us-east-2"},
 	} {
 		_, err := execProjectCreate(t, args...)
 		require.ErrorContains(t, err, "required:\n  entire project create <name> --owner <org>", args)
@@ -817,4 +819,23 @@ func TestProjectCreateState_WizardLowercasesTypedNames(t *testing.T) {
 	for _, id := range []string{testWizardAcmeULID, strings.ToLower(testWizardAcmeULID)} {
 		require.EqualError(t, s.validateName(id), projectNameNotID, id)
 	}
+}
+
+// --cell is sent as given and the server's chosen cell is echoed back.
+func TestProjectCreate_CellFlagIsSent(t *testing.T) {
+	fake := newProjectCoreFixture(t)
+	out, err := execProjectCreate(t, "widgets", "--owner", "acme", "--region", "us", "--cell", "aws-us-east-2")
+	require.NoError(t, err)
+	require.NotNil(t, fake.created)
+	assert.Equal(t, "aws-us-east-2", fake.created.Cell.Or(""))
+	assert.Equal(t, "✓ Created project widgets in us, cell aws-us-east-2\n", out)
+}
+
+// An omitted --cell stays omitted so the server picks the default cell.
+func TestProjectCreate_NoCellFlagOmitsCell(t *testing.T) {
+	fake := newProjectCoreFixture(t)
+	_, err := execProjectCreate(t, "widgets", "--owner", "acme")
+	require.NoError(t, err)
+	require.NotNil(t, fake.created)
+	assert.False(t, fake.created.Cell.IsSet(), "the server picks the cell")
 }
