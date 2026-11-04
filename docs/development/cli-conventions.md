@@ -284,6 +284,18 @@ always runnable in every build.
   all under `ENTIRE_TOKEN`. An owner with no `--owner` spelling but its ULID
   (an account with no handle, an org sharing its name) gets no command in the
   summary, which says why
+- `service-account` (alias: `sa`): a project's service accounts — `create`,
+  `list`, `get`, `delete`, `grant`, `revoke`, `grants`, `bind`, `bindings`,
+  `unbind`. A service account is addressed by its `svc_` ID or as
+  `<project>/<name>`. Names are unique per project only, so the name form lists
+  the project's accounts and matches exactly. Errors branch on core's RFC 9457
+  `type`, never on its prose (`coreapi.APIErrorType`). `grant` and `revoke`
+  take `--repo` or `--project`. A bare repo name resolves inside the account's
+  own project, because core refuses a grant outside it with 422. `bind` finds
+  the GitHub Actions provider by issuer, not by ID. It sends one exact
+  `repository` pin plus any `--attribute` pins, and core validates the filter.
+  `revoke` and `unbind` take an explicit target, so they do not prompt, as a
+  typed `grant remove` does not. `delete` confirms like `project delete`
 - `repo`: control-plane repository lifecycle — `create`, `list --project`,
   `view`, `edit`, `delete`, `clone`, `default-branch`, plus the `mirror`, `remote`,
   `visibility`, `protection` and `grant` subtrees (`repo grant` mirrors
