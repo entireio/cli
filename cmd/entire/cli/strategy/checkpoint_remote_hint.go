@@ -17,7 +17,7 @@ import (
 // the checkpoints stay queued locally and go out once the setting is fixed.
 func warnWithheldCheckpointRemote(ps pushSettings) {
 	fmt.Fprintf(stderrWriter,
-		"[entire] Checkpoints were not pushed and stay local: %s. Fix checkpoint_remote in .entire/settings.json or .entire/settings.local.json.\n",
+		"[entire] Checkpoints were not pushed and stay local: %s.\n",
 		tuiutil.SanitizeDisplayText(ps.withheld.Error()))
 }
 

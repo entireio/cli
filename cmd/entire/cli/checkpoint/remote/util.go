@@ -460,9 +460,15 @@ func PushURL(ctx context.Context, pushRemoteName string) (string, bool, error) {
 	if err != nil {
 		// A push remote that is no URL at all (a bare filesystem path) only
 		// passes the ownership vote from settings.local.json, so the store is
-		// this developer's explicit choice: route it like an unmappable
+		// this developer's explicit choice. It has no transport to derive
+		// from; origin's is the next best, which keeps a self-hosted origin's
+		// store on its own host. Without one, route it like an unmappable
 		// protocol below instead of handing checkpoints to origin.
-		return routeToProvider(ctx, config, err)
+		originInfo, originErr := ParseURL(originURL)
+		if originErr != nil {
+			return routeToProvider(ctx, config, err)
+		}
+		pushInfo = originInfo
 	}
 	withToken := strings.TrimSpace(os.Getenv(CheckpointTokenEnvVar)) != ""
 	if withToken && isDirectGitTransport(pushInfo.Protocol) {
@@ -513,11 +519,20 @@ func PushURL(ctx context.Context, pushRemoteName string) (string, bool, error) {
 // passed the ownership vote, so it is this developer's explicit destination,
 // and sending checkpoints to the push remote instead would publish them
 // somewhere they chose not to, possibly a public code repository.
+//
+// The cause stays in the log: it can quote a remote URL verbatim, and the
+// returned error is shown as-is by status, enable and attach.
 func routeToProvider(ctx context.Context, config *settings.CheckpointRemoteConfig, cause error) (string, bool, error) {
 	if providerURL, ok := resolveProviderCheckpointURL(ctx, config, ""); ok {
 		return providerURL, true, nil
 	}
-	return "", true, fmt.Errorf("%w: provider %q: %w", ErrCheckpointRemoteUnroutable, config.Provider, cause)
+	logging.Warn(ctx, "checkpoint-remote: no URL for the configured checkpoint_remote; withholding checkpoints",
+		slog.String("provider", config.Provider),
+		slog.String("cause", cause.Error()),
+	)
+	return "", true, fmt.Errorf("%w: provider %q has no host to push to from this repository's remotes; "+
+		"set checkpoint_remote to a github or gitlab repository, or remove it, in .entire/settings.json or .entire/settings.local.json",
+		ErrCheckpointRemoteUnroutable, config.Provider)
 }
 
 // Configured reports whether a structured checkpoint_remote is configured.
