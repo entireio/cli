@@ -552,3 +552,21 @@ func TestTrailReviewPatchTextShowsLoneCarriageReturn(t *testing.T) {
 		t.Fatalf("trailReviewPatchText = %q, want %q", got, want)
 	}
 }
+
+// The last page reached with --cursor has no next cursor but is still a
+// partial view, so it must not blame the filters for the other pages.
+func TestRenderTrailReviewDashboardStyled_LastPageIsStillPaged(t *testing.T) {
+	t.Parallel()
+	_, comments := trailReviewRenderFixture()
+	counts := countTrailReviewComments(comments)
+	counts.Open = 37
+	opts := defaultTrailReviewListOptions()
+	opts.Cursor = "page-3"
+	text := renderStyledDashboard(t, 100, comments[:2], "", opts, counts)
+	if !strings.Contains(text, "── Needs attention (2 shown of 37 open) ") {
+		t.Fatalf("last page should say it is partial:\n%s", text)
+	}
+	if strings.Contains(text, "not shown by the current filters") {
+		t.Fatalf("a later page must not claim findings are filtered out:\n%s", text)
+	}
+}

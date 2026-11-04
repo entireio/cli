@@ -205,8 +205,11 @@ func renderTrailReviewDashboardStyled(w io.Writer, s trailReviewStyles, width in
 
 	groups := groupTrailReviewComments(comments)
 	if trailReviewStatusFilterIncludes(opts.Status, trailReviewStatusOpen) {
+		// Any paged view, including the last page reached with --cursor, shows
+		// only part of the open findings the summary counts.
+		paged := nextCursor != "" || opts.Cursor != ""
 		title := fmt.Sprintf("Needs attention (%d)", len(groups.open))
-		if nextCursor != "" {
+		if paged {
 			title = fmt.Sprintf("Needs attention (%d shown of %d open)", len(groups.open), counts.Open)
 		}
 		b.WriteString(s.sectionRule(title, width) + "\n")
@@ -214,7 +217,7 @@ func renderTrailReviewDashboardStyled(w io.Writer, s trailReviewStyles, width in
 			fmt.Fprintf(&b, "  %s\n", s.render(s.dim, "No open findings match the current filters."))
 		}
 		b.WriteString(s.renderCards(width, groups.open))
-		if hidden := counts.Open - len(groups.open); nextCursor == "" && hidden > 0 {
+		if hidden := counts.Open - len(groups.open); !paged && hidden > 0 {
 			fmt.Fprintf(&b, "  %s\n", s.render(s.yellow, trailReviewHiddenOpenNote(hidden, opts)))
 		}
 		b.WriteString("\n")
