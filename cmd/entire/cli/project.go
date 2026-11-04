@@ -158,8 +158,30 @@ func createProjectDirect(cmd *cobra.Command, in projectCreateInput, ot coreapi.C
 			return err
 		}
 		project := &created.Response
-		return printProjectCreated(cmd, project)
+		if err := printProjectCreated(cmd, project); err != nil {
+			return err
+		}
+		return checkCreatedCell(in.cell, project)
 	})
+}
+
+// checkCreatedCell fails a --cell create that landed elsewhere. A core that
+// predates the cell field ignores it and assigns the default cell, so the
+// project exists but not where the caller asked.
+func checkCreatedCell(want string, project *coreapi.CreatedProject) error {
+	if want == "" {
+		return nil
+	}
+	got := project.PrimaryProcessingCell.Or("")
+	if got == want {
+		return nil
+	}
+	if got == "" {
+		got = "no cell"
+	} else {
+		got = "cell " + got
+	}
+	return fmt.Errorf("project %s was created in %s, not %s; the server ignored --cell", project.Name, got, want)
 }
 
 // printProjectCreated renders a created project the way runCoreMutation renders

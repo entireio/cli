@@ -213,6 +213,8 @@ type fakeProjectCore struct {
 	created  *coreapi.CreateProjectInputBody
 	// omitOwnerName leaves the optional ownerName out of the create response.
 	omitOwnerName bool
+	// ignoreCell answers like a core that predates the cell field.
+	ignoreCell bool
 }
 
 func (f *fakeProjectCore) handler(t *testing.T) http.HandlerFunc {
@@ -257,7 +259,7 @@ func (f *fakeProjectCore) handler(t *testing.T) http.HandlerFunc {
 			}
 			reply(`{"id":"01HZX7QPR0JECT000000000000","name":"` + body.Name + `","ownerId":"` + body.OwnerId + `",` +
 				ownerField + `"ownerType":"` + string(body.OwnerType) + `","region":"` + body.Region.Or("us") +
-				`","primaryProcessingCell":"` + body.Cell.Or("") +
+				`","primaryProcessingCell":"` + f.respondedCell(body) +
 				`","createdAt":"2026-01-01T00:00:00Z"}`)
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
@@ -838,4 +840,27 @@ func TestProjectCreate_NoCellFlagOmitsCell(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, fake.created)
 	assert.False(t, fake.created.Cell.IsSet(), "the server picks the cell")
+}
+
+func (f *fakeProjectCore) respondedCell(body coreapi.CreateProjectInputBody) string {
+	if f.ignoreCell {
+		return ""
+	}
+	return body.Cell.Or("")
+}
+
+// A core that ignores --cell still creates the project, so the command
+// reports the project and then fails, under --json too.
+func TestProjectCreate_IgnoredCellFails(t *testing.T) {
+	for _, asJSON := range []bool{false, true} {
+		fake := newProjectCoreFixture(t)
+		fake.ignoreCell = true
+		args := []string{"widgets", "--owner", "acme", "--cell", "aws-us-east-2"}
+		if asJSON {
+			args = append(args, "--json")
+		}
+		out, err := execProjectCreate(t, args...)
+		require.ErrorContains(t, err, "project widgets was created in no cell, not aws-us-east-2; the server ignored --cell")
+		assert.Contains(t, out, "widgets", "the created project is still reported")
+	}
 }
