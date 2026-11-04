@@ -31,9 +31,10 @@ var projectTrailUpdateGuardTimeout = 10 * time.Second
 // #N anyway. A branch with no trail, or one whose work is on #N, passes.
 //
 // The guard fails closed: overwriting another owner's trail is the worst
-// outcome, so a detached HEAD, a failed or timed-out lookup, a scan stopped
-// before the last page, or work whose project parent the API did not return
-// all refuse, naming the ULID rerun.
+// outcome, so a detached HEAD, a failed or timed-out lookup, or work whose
+// project parent the API did not return all refuse, naming the ULID rerun. A
+// scan that reaches its page budget without the branch passes with a warning
+// (see lookupBranchTrailWork).
 func guardProjectTrailNumberUpdate(cmd *cobra.Command, selector string, target *projectTrailTarget, current api.ProjectTrail) error {
 	number, ok := parseTrailNumberSelector(selector)
 	if !ok || trailBranchFlag(cmd) != "" {
