@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -40,11 +41,11 @@ func createRepositoryScopedProjectTrail(cmd *cobra.Command, request api.ProjectT
 	var out api.ProjectTrail
 	etag, err := target.Client.ProjectTrailRequest(cmd.Context(), http.MethodPost, path, request, headers, &out)
 	if err != nil {
-		if trailCreateRefused(err) {
-			return fmt.Errorf("create repository-scoped trail: %w; no trail was created", err)
-		}
 		if headers != nil {
 			return fmt.Errorf("create repository-scoped trail (retry with --idempotency-key %s and the same fields): %w", key, err)
+		}
+		if trailCreateRefused(err) {
+			return fmt.Errorf("create repository-scoped trail: %w; no trail was created", err)
 		}
 		return fmt.Errorf("create repository-scoped trail (inspect trails before retrying; creation may have succeeded): %w", err)
 	}
@@ -107,37 +108,45 @@ func resolveRepositoryProjectTrailTarget(cmd *cobra.Command) (*projectTrailTarge
 	return target, repoID, nil
 }
 
+// trailCreateSettingsTimeout bounds the Trails-setting read before create.
+// The read is advisory, so a slow cell falls through to the create itself.
+const trailCreateSettingsTimeout = 5 * time.Second
+
 // requireTrailsEnabledForCreate refuses a create for a repository whose Trails
-// setting is off, naming the setting. The repository read is best effort: when
-// it fails, the create goes ahead and the server gives its own answer.
+// setting is off, naming the setting, and records the answer in the
+// enablement cache. The read is best effort: when it fails or reports no
+// setting, the create goes ahead and the server gives its own answer.
+// repoRef is the repository as <forge>/<owner>/<repo>.
 func requireTrailsEnabledForCreate(ctx context.Context, client *api.Client, repoID, repoRef string) error {
-	resp, err := client.Get(ctx, "/api/v1/repos/"+url.PathEscape(repoID))
+	readCtx, cancel := context.WithTimeout(ctx, trailCreateSettingsTimeout)
+	defer cancel()
+	enabled, known, err := client.RepoTrailsEnabled(readCtx, repoID)
 	if err != nil {
 		logging.Debug(ctx, "trail create: repository settings read failed", "error", err.Error())
 		return nil
 	}
-	defer resp.Body.Close()
-	var repo struct {
-		TrailsEnabled *bool `json:"trails_enabled"`
-	}
-	if err := api.CheckResponse(resp); err != nil {
-		logging.Debug(ctx, "trail create: repository settings read failed", "error", err.Error())
+	if !known || enabled {
 		return nil
 	}
-	if err := api.DecodeJSON(resp, &repo); err != nil || repo.TrailsEnabled == nil || *repo.TrailsEnabled {
-		return nil
+	if parts := strings.SplitN(repoRef, "/", 3); len(parts) == 3 {
+		saveTrailsEnabledForRemoteBestEffort(ctx, parts[0], parts[1], parts[2], false)
 	}
 	return fmt.Errorf("trails are not enabled for %s; an admin can turn them on in the repository's Settings > Trails on entire.com. Nothing was created or pushed", repoRef)
 }
 
 // trailCreateRefused reports a create the server rejected outright, so
-// nothing was created: a client error other than a timeout or rate limit,
-// which may still have been applied or be worth retrying.
+// nothing was created. Excluded are a timeout or rate limit, which may still
+// have been applied or be worth retrying, and a conflict, which an
+// idempotency-key replay can return while the first request created a trail.
 func trailCreateRefused(err error) bool {
 	var httpErr *api.HTTPError
 	if !errors.As(err, &httpErr) {
 		return false
 	}
-	code := httpErr.StatusCode
-	return code >= 400 && code < 500 && code != http.StatusRequestTimeout && code != http.StatusTooManyRequests
+	switch code := httpErr.StatusCode; code {
+	case http.StatusRequestTimeout, http.StatusConflict, http.StatusTooManyRequests:
+		return false
+	default:
+		return code >= 400 && code < 500
+	}
 }
