@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/internal/coreapi"
 )
 
@@ -21,6 +22,11 @@ func createRepositoryScopedProjectTrail(cmd *cobra.Command, request api.ProjectT
 	}
 	request.RepositoryIDs = []string{repoID}
 	change.RepositoryID = repoID
+	// Before publishing a branch for it: the server refuses a trail for a
+	// repository with Trails off, and the branch would be left behind.
+	if err := requireTrailsEnabledForCreate(cmd.Context(), target.Client, repoID, target.RepoRef); err != nil {
+		return err
+	}
 	if change.BranchName != "" && change.BranchAction == trailBranchActionLink && trailRepoFlag(cmd) == "" {
 		if err := publishProjectTrailBranch(cmd, change.BranchName); err != nil {
 			return err
@@ -34,6 +40,9 @@ func createRepositoryScopedProjectTrail(cmd *cobra.Command, request api.ProjectT
 	var out api.ProjectTrail
 	etag, err := target.Client.ProjectTrailRequest(cmd.Context(), http.MethodPost, path, request, headers, &out)
 	if err != nil {
+		if trailCreateRefused(err) {
+			return fmt.Errorf("create repository-scoped trail: %w; no trail was created", err)
+		}
 		if headers != nil {
 			return fmt.Errorf("create repository-scoped trail (retry with --idempotency-key %s and the same fields): %w", key, err)
 		}
@@ -96,4 +105,39 @@ func resolveRepositoryProjectTrailTarget(cmd *cobra.Command) (*projectTrailTarge
 	target.Client = client
 	target.RepoRef = forge + "/" + owner + "/" + repo
 	return target, repoID, nil
+}
+
+// requireTrailsEnabledForCreate refuses a create for a repository whose Trails
+// setting is off, naming the setting. The repository read is best effort: when
+// it fails, the create goes ahead and the server gives its own answer.
+func requireTrailsEnabledForCreate(ctx context.Context, client *api.Client, repoID, repoRef string) error {
+	resp, err := client.Get(ctx, "/api/v1/repos/"+url.PathEscape(repoID))
+	if err != nil {
+		logging.Debug(ctx, "trail create: repository settings read failed", "error", err.Error())
+		return nil
+	}
+	defer resp.Body.Close()
+	var repo struct {
+		TrailsEnabled *bool `json:"trails_enabled"`
+	}
+	if err := api.CheckResponse(resp); err != nil {
+		logging.Debug(ctx, "trail create: repository settings read failed", "error", err.Error())
+		return nil
+	}
+	if err := api.DecodeJSON(resp, &repo); err != nil || repo.TrailsEnabled == nil || *repo.TrailsEnabled {
+		return nil
+	}
+	return fmt.Errorf("trails are not enabled for %s; an admin can turn them on in the repository's Settings > Trails on entire.com. Nothing was created or pushed", repoRef)
+}
+
+// trailCreateRefused reports a create the server rejected outright, so
+// nothing was created: a client error other than a timeout or rate limit,
+// which may still have been applied or be worth retrying.
+func trailCreateRefused(err error) bool {
+	var httpErr *api.HTTPError
+	if !errors.As(err, &httpErr) {
+		return false
+	}
+	code := httpErr.StatusCode
+	return code >= 400 && code < 500 && code != http.StatusRequestTimeout && code != http.StatusTooManyRequests
 }
