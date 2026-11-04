@@ -275,7 +275,9 @@ func ReconcileDisconnectedMetadataRef(
 // when the two share no merge base, and returns the resulting tip without
 // writing a ref. Empty-tree commits (the empty-orphan bug's root) carry no
 // checkpoint data and are dropped; when nothing else remains the remote tip is
-// returned with replayed == 0. Progress is written to w.
+// returned with replayed == 0. Progress is written to w. It refuses with
+// errShallowHidesMergeBase when either tip reaches a shallow boundary, because
+// the missing merge base may only be hidden behind it.
 func replayDisconnectedOnto(
 	ctx context.Context,
 	repo *git.Repository,
@@ -283,6 +285,20 @@ func replayDisconnectedOnto(
 	shallow map[plumbing.Hash]bool,
 	w io.Writer,
 ) (tip plumbing.Hash, replayed int, err error) {
+	if len(shallow) > 0 {
+		repoPath, pathErr := getRepoPath(repo)
+		if pathErr != nil {
+			return plumbing.ZeroHash, 0, fmt.Errorf("get repository path: %w", pathErr)
+		}
+		hidden, shallowErr := hasReachableShallowBoundary(ctx, repo, repoPath, localHash.String(), remoteHash.String())
+		if shallowErr != nil {
+			return plumbing.ZeroHash, 0, fmt.Errorf("check shallow history: %w", shallowErr)
+		}
+		if hidden {
+			return plumbing.ZeroHash, 0, fmt.Errorf("no merge base: %w", errShallowHidesMergeBase)
+		}
+	}
+
 	// Collect local commits oldest-first
 	localCommits, err := collectCommitChain(repo, localHash, shallow)
 	if err != nil {

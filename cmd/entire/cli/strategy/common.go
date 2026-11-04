@@ -57,6 +57,11 @@ var errStop = errors.New("stop iteration")
 
 var errNoMergeBase = errors.New("no merge base")
 
+// errShallowHidesMergeBase means git found no merge base, but a shallow
+// boundary is reachable from one of the tips: the shared history may simply
+// not be present, so the refs cannot be treated as disconnected.
+var errShallowHidesMergeBase = errors.New("reachable shallow history prevents proving refs are disconnected; run 'entire doctor' or 'git fetch --unshallow' and try again")
+
 // checkpointRemoteBootstrapContextKey gates whether EnsurePrimaryRef is
 // allowed to perform a network fetch against a configured checkpoint_remote
 // (see bootstrapPrimaryFromCheckpointRemote). Unset/false in ctx means "no".
@@ -184,7 +189,7 @@ func SafelyAdvanceLocalRef(ctx context.Context, repo *git.Repository, localRefNa
 			return fmt.Errorf("failed to check shallow history for %s: %w", localRefName, shallowErr)
 		}
 		if shallow {
-			return fmt.Errorf("no merge base for %s, and reachable shallow history prevents proving refs are disconnected; run 'entire doctor' or 'git fetch --unshallow' and try again", localRefName)
+			return fmt.Errorf("no merge base for %s: %w", localRefName, errShallowHidesMergeBase)
 		}
 		return replayDisconnectedLocalRef(ctx, repo, repoPath, localRefName, localHash, targetHash)
 	}
