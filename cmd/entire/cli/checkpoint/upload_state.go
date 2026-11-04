@@ -62,6 +62,10 @@ type UploadResult struct {
 	// Error is a one-line account of why refs stayed queued, already
 	// redacted for display; "" when the run left nothing behind.
 	Error string `json:"error,omitempty"`
+	// Detail is the actionable text behind Error — the remote's rejection
+	// reason (a push-protection unblock URL, say) or an SSH hint — shown with
+	// it by the next push. Replaced by every run, never accumulated.
+	Detail string `json:"detail,omitempty"`
 	// Announcement is a user-facing line the worker could not print itself
 	// (its stdio is the null device), shown by the next push and status.
 	Announcement string `json:"announcement,omitempty"`
@@ -152,6 +156,10 @@ func (c *UploadCoordinator) LockWorker(ctx context.Context) (func(), error) {
 // the latest push's destination wins, and so does a decision to run OPF. The
 // queue holds the earlier push's refs too, so a later push that resolved skip
 // or nothing must not let them upload unscanned.
+//
+// A merged request keeps the earliest RequestedAt: it stands for that push as
+// well, so a later push that fails must not discard it as its own (see
+// strategy.DiscardRequestedCheckpointUpload).
 func (c *UploadCoordinator) Request(req UploadRequest) error {
 	return c.update(func(st *UploadState) {
 		if st.Request != nil && st.Request.OPFDecision == UploadOPFRun {
@@ -159,6 +167,10 @@ func (c *UploadCoordinator) Request(req UploadRequest) error {
 		}
 		if req.PendingCapture == "" && st.Request != nil && st.Request.Remote == req.Remote {
 			req.PendingCapture = st.Request.PendingCapture
+		}
+		if st.Request != nil && !st.Request.RequestedAt.IsZero() &&
+			(req.RequestedAt.IsZero() || st.Request.RequestedAt.Before(req.RequestedAt)) {
+			req.RequestedAt = st.Request.RequestedAt
 		}
 		st.Request = &req
 	})
@@ -215,6 +227,7 @@ func (c *UploadCoordinator) ClearReported(startedAt time.Time) error {
 	return c.update(func(st *UploadState) {
 		if st.Last != nil && st.Last.StartedAt.Equal(startedAt) {
 			st.Last.Error = ""
+			st.Last.Detail = ""
 			st.Last.Announcement = ""
 		}
 	})

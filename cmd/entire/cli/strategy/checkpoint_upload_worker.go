@@ -186,6 +186,9 @@ func reportBackgroundUpload(ctx context.Context, coord *checkpoint.UploadCoordin
 	}
 	if st.Last.Error != "" {
 		fmt.Fprintf(stderrWriter, "[entire] Last background checkpoint upload stopped: %s.\n", st.Last.Error)
+		if st.Last.Detail != "" {
+			fmt.Fprintln(stderrWriter, st.Last.Detail)
+		}
 	}
 	if clearErr := coord.ClearReported(st.Last.StartedAt); clearErr != nil {
 		logging.Debug(ctx, "clear checkpoint upload result failed", slog.String("error", clearErr.Error()))
@@ -456,6 +459,11 @@ func runCheckpointUploadPass(ctx context.Context, repo *git.Repository, coord *c
 		warnIgnoredCheckpointRemote(ctx, ps)
 	}
 	result.Pushed, result.Remaining = res.pushed, res.remaining
+	if res.remaining > 0 || err != nil {
+		// Printed to the worker's null stderr; kept so the next push can
+		// show why, not only that, refs stayed queued.
+		result.Detail = res.detail
+	}
 	result.Announcement = strings.TrimSpace(printed.String())
 	finish(res.failureLine(err))
 }

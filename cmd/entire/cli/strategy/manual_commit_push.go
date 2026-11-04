@@ -1032,6 +1032,10 @@ func finishIndividualRetry(
 	if retry.rejectionWarning != "" {
 		fmt.Fprintln(os.Stderr, retry.rejectionWarning)
 	}
+	result.bounds.detail = retry.rejectionWarning
+	if retry.sshAuthFailed {
+		result.bounds.detail = strings.TrimSpace(result.bounds.detail + "\n" + nonInteractiveSSHAuthHint)
+	}
 	if err := queue.RemoveEntries(checkpointRefPushTokens(retry.pushed)); err != nil {
 		logging.Warn(ctx, "git-refs push: clear pushed refs from queue failed",
 			slog.String("error", err.Error()))
@@ -1103,17 +1107,17 @@ func settleBatchOnly(ctx, flushCtx context.Context, queue *checkpoint.PushQueue,
 	// chunks. A destination that refused the key or the connection keeps its
 	// hint below instead.
 	if budgetExhausted && !batch.sshAuthFailed && batch.unreachable == "" {
-		stopOnBudgetCut(ctx, flushCtx, queue, batch, queued, stop)
+		detail := stopOnBudgetCut(ctx, flushCtx, queue, batch, queued, stop)
 		return flushResult{pushed: batch.landed, remaining: queued - batch.landed,
-			budgetExhausted: true, stopReason: flushAbortReason(flushCtx, 0)}, true, nil
+			budgetExhausted: true, stopReason: flushAbortReason(flushCtx, 0), detail: detail}, true, nil
 	}
 	if batch.unreachable != "" {
 		stop(" failed")
 	} else {
 		stop("")
 	}
-	if reportUnpushableDestination(dest, batch, queued) {
-		res := flushResult{pushed: batch.landed, remaining: queued - batch.landed}
+	if detail, unpushable := reportUnpushableDestination(dest, batch, queued); unpushable {
+		res := flushResult{pushed: batch.landed, remaining: queued - batch.landed, detail: detail}
 		if batch.sshAuthFailed {
 			res.stopReason = "SSH authentication failed"
 		} else {
@@ -1147,6 +1151,10 @@ type flushResult struct {
 	budgetExhausted bool
 	stopReason      string // bare phrase, as printed; "" when nothing stopped it
 	unreachable     string // "couldn't reach <dest>: <git line>" when git could not connect
+	// detail is the actionable text printed with the stop — the remote's
+	// rejection reason, or the SSH or checkpoint-remote hint — for a caller
+	// that could not show it live (the background worker).
+	detail string
 }
 
 // failureLine is a one-line account of a flush that left refs queued, or "".
@@ -1164,8 +1172,13 @@ func (r flushResult) failureLine(err error) string {
 
 // reportUnpushableDestination prints the hint for a batch that failed because
 // the destination refused the SSH key or could not be reached, and reports
-// whether it was one of those: the per-ref fallback cannot fix either.
-func reportUnpushableDestination(dest refsPushDestination, batch chunkPushResult, queued int) bool {
+// whether it was one of those: the per-ref fallback cannot fix either. detail
+// is the hint, for a caller that could not show it live.
+func reportUnpushableDestination(dest refsPushDestination, batch chunkPushResult, queued int) (detail string, unpushable bool) {
+	remoteHint := ""
+	if dest.checkpointRemote {
+		remoteHint = checkpointRemoteHint(dest.target)
+	}
 	// Non-interactive SSH auth failures cannot be fixed by per-ref
 	// fetch+replay. Surface the same actionable hint as the v1 doPushRef path
 	// (issue #1523) instead of only logging to .entire/logs/.
@@ -1176,10 +1189,10 @@ func reportUnpushableDestination(dest refsPushDestination, batch chunkPushResult
 	if batch.sshAuthFailed {
 		fmt.Fprintln(os.Stderr, "[entire] Warning: couldn't push checkpoint refs (SSH authentication failed).")
 		printNonInteractiveSSHAuthHint()
-		if dest.checkpointRemote {
-			printCheckpointRemoteHint(dest.target)
+		if remoteHint != "" {
+			fmt.Fprintln(os.Stderr, remoteHint)
 		}
-		return true
+		return strings.TrimSpace(nonInteractiveSSHAuthHint + "\n" + remoteHint), true
 	}
 
 	// Nothing landed and git could not even connect: the per-ref fallback would
@@ -1190,16 +1203,17 @@ func reportUnpushableDestination(dest refsPushDestination, batch chunkPushResult
 	if batch.unreachable != "" {
 		fmt.Fprintf(os.Stderr, "[entire] Couldn't reach %s: %s\n", dest.display(), batch.unreachable)
 		fmt.Fprintf(os.Stderr, "[entire] %d checkpoint ref(s) stay queued for the next push.\n", queued)
-		if dest.checkpointRemote {
-			printCheckpointRemoteHint(dest.target)
+		if remoteHint != "" {
+			fmt.Fprintln(os.Stderr, remoteHint)
 		}
-		return true
+		return remoteHint, true
 	}
-	return false
+	return "", false
 }
 
 // stopOnBudgetCut reports and settles a batch the flush budget cut mid-chunk.
-func stopOnBudgetCut(ctx, flushCtx context.Context, queue *checkpoint.PushQueue, batch chunkPushResult, queued int, stop func(string)) {
+// It returns the remote's rejection warning it printed, if any.
+func stopOnBudgetCut(ctx, flushCtx context.Context, queue *checkpoint.PushQueue, batch chunkPushResult, queued int, stop func(string)) (detail string) {
 	stop(fmt.Sprintf(" pushed %d of %d", batch.landed, queued))
 	fmt.Fprintf(os.Stderr, "[entire] Stopped pushing: %s; %d checkpoint ref(s) stay queued for the next push.\n",
 		flushAbortReason(flushCtx, 0), queued-batch.landed)
@@ -1210,7 +1224,8 @@ func stopOnBudgetCut(ctx, flushCtx context.Context, queue *checkpoint.PushQueue,
 	// so show the remote's reason here: a ref blocked for its content would
 	// otherwise ride along with every budget cut without ever saying so.
 	if reason := checkpointRefRejectionReason(batch.firstErr); reason != "" {
-		fmt.Fprintf(os.Stderr, "[entire] Warning: the remote declined a checkpoint ref batch (showing one rejection):\n%s\n", reason)
+		detail = "[entire] Warning: the remote declined a checkpoint ref batch (showing one rejection):\n" + reason
+		fmt.Fprintln(os.Stderr, detail)
 	}
 	// Fair scheduling, as after a fallback abort: a slow remote cuts the
 	// budget at the same place every push, so the cut chunk goes to the
@@ -1219,6 +1234,7 @@ func stopOnBudgetCut(ctx, flushCtx context.Context, queue *checkpoint.PushQueue,
 		logging.Warn(ctx, "git-refs push: rotate cut chunk to queue back failed",
 			slog.String("error", err.Error()))
 	}
+	return detail
 }
 
 // adaptChunkSize updates the remembered chunk size after a batch. It is
@@ -1260,6 +1276,7 @@ type refRetryResult struct {
 	firstErr         error
 	abortReason      string
 	rejectionWarning string
+	sshAuthFailed    bool
 }
 
 // retryRefsIndividually pushes refs one at a time with fetch+replay recovery
@@ -1310,6 +1327,7 @@ func (res *refRetryResult) recordFailure(ctx, flushCtx context.Context, ref chec
 	logging.Warn(ctx, "git-refs push: checkpoint ref push/sync failed; left queued, not overwritten",
 		slog.String("ref", ref.name.String()), slog.String("error", err.Error()))
 	if nonInteractiveSSHAuthFailure(flushCtx, err) {
+		res.sshAuthFailed = true
 		printNonInteractiveSSHAuthHint()
 	}
 	if res.rejectionWarning == "" {

@@ -912,27 +912,37 @@ func nonInteractiveSSHAuthFailure(ctx context.Context, err error) bool {
 	return err != nil && remote.IsNonInteractiveSSH(ctx) && remote.LooksLikeSSHAuthFailure(err.Error())
 }
 
-// printCheckpointRemoteHint prints a hint when a push to a checkpoint URL fails.
-// Only prints when the target is a URL (not the user's default remote).
-func printCheckpointRemoteHint(target string) {
+// checkpointRemoteHint is the hint for a failed push to a checkpoint URL, or
+// "" when target is not a URL (the user's default remote).
+func checkpointRemoteHint(target string) string {
 	if !remote.IsURL(target) {
-		return
+		return ""
 	}
-	fmt.Fprintln(os.Stderr, "[entire] A checkpoint remote is configured in Entire settings (.entire/settings.json or .entire/settings.local.json) but could not be reached.")
-	fmt.Fprintln(os.Stderr, "[entire] Checkpoints are saved locally but not synced. Ensure you have access to the checkpoint remote.")
+	return "[entire] A checkpoint remote is configured in Entire settings (.entire/settings.json or .entire/settings.local.json) but could not be reached.\n" +
+		"[entire] Checkpoints are saved locally but not synced. Ensure you have access to the checkpoint remote."
+}
+
+// printCheckpointRemoteHint prints checkpointRemoteHint, if any.
+func printCheckpointRemoteHint(target string) {
+	if hint := checkpointRemoteHint(target); hint != "" {
+		fmt.Fprintln(os.Stderr, hint)
+	}
 }
 
 // sshAuthHintOnce ensures the ssh-agent hint prints at most once per process
 // (pre-push can push multiple refs).
 var sshAuthHintOnce sync.Once
 
-// printNonInteractiveSSHAuthHint tells the user how to unblock checkpoint pushes
+// nonInteractiveSSHAuthHint tells the user how to unblock checkpoint pushes
 // that failed because SSH needed interactive auth under BatchMode (issue #1523).
+const nonInteractiveSSHAuthHint = "[entire] Checkpoint push skipped: SSH needs interactive auth (passphrase/PIN) and cannot prompt during git hooks.\n" +
+	"[entire] Load your key into ssh-agent (`ssh-add`), then push again. Checkpoints are saved locally until then.\n" +
+	"[entire] PIN-protected security keys: unlock/add them to the agent first. To allow prompts in this path, set GIT_SSH_COMMAND (or core.sshCommand) with an explicit BatchMode=no."
+
+// printNonInteractiveSSHAuthHint prints nonInteractiveSSHAuthHint once.
 func printNonInteractiveSSHAuthHint() {
 	sshAuthHintOnce.Do(func() {
-		fmt.Fprintln(os.Stderr, "[entire] Checkpoint push skipped: SSH needs interactive auth (passphrase/PIN) and cannot prompt during git hooks.")
-		fmt.Fprintln(os.Stderr, "[entire] Load your key into ssh-agent (`ssh-add`), then push again. Checkpoints are saved locally until then.")
-		fmt.Fprintln(os.Stderr, "[entire] PIN-protected security keys: unlock/add them to the agent first. To allow prompts in this path, set GIT_SSH_COMMAND (or core.sshCommand) with an explicit BatchMode=no.")
+		fmt.Fprintln(os.Stderr, nonInteractiveSSHAuthHint)
 	})
 }
 

@@ -204,6 +204,7 @@ func TestRunCheckpointUploadWorker_FailureReachesNextPush(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, st.Last)
 	assert.NotEmpty(t, st.Last.Error)
+	assert.Contains(t, st.Last.Detail, checkpointUnblockURL, "the remote's reason survives the worker's null stderr")
 	running, lastErr := CheckpointUploadStatus(t.Context())
 	assert.False(t, running)
 	assert.Equal(t, st.Last.Error, lastErr)
@@ -213,10 +214,12 @@ func TestRunCheckpointUploadWorker_FailureReachesNextPush(t *testing.T) {
 	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
 	restore()
 	assert.Contains(t, buf.String(), "Last background checkpoint upload stopped: "+st.Last.Error)
+	assert.Contains(t, buf.String(), checkpointUnblockURL, "the next push shows why, not only that")
 
 	st, err = coord.State()
 	require.NoError(t, err)
 	assert.Empty(t, st.Last.Error, "reported once")
+	assert.Empty(t, st.Last.Detail, "reported once")
 }
 
 // TestRunCheckpointUploadWorker_ExitsWhenLockHeld: one worker per repository.
@@ -521,9 +524,21 @@ func TestDiscardRequestedCheckpointUpload(t *testing.T) {
 	DiscardRequestedCheckpointUpload(t.Context(), "origin", pushStart)
 	assert.True(t, coord.HasRequest(), "another remote's")
 
+	_, err = coord.TakeRequest()
+	require.NoError(t, err)
 	require.NoError(t, coord.Request(checkpoint.UploadRequest{Remote: "origin", RequestedAt: pushStart.Add(time.Second)}))
 	DiscardRequestedCheckpointUpload(t.Context(), "origin", pushStart)
 	assert.False(t, coord.HasRequest())
+
+	// A failed push whose request merged into one an earlier push left pending
+	// must not discard the earlier push's upload with its own.
+	require.NoError(t, coord.Request(checkpoint.UploadRequest{Remote: "origin", RequestedAt: pushStart.Add(-time.Second), PendingCapture: "origin"}))
+	require.NoError(t, coord.Request(checkpoint.UploadRequest{Remote: "origin", RequestedAt: pushStart.Add(time.Second)}))
+	DiscardRequestedCheckpointUpload(t.Context(), "origin", pushStart)
+	require.True(t, coord.HasRequest(), "the earlier push's request survives")
+	req, err := coord.TakeRequest()
+	require.NoError(t, err)
+	assert.Equal(t, "origin", req.PendingCapture)
 }
 
 // TestRunCheckpointUploadWorker_BudgetEndsPassAsStop: the pass budget bounds
