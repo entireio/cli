@@ -46,7 +46,7 @@ already runs each. Add one with ` + "`entire project agent add <preset>`" + `.`,
 	return cmd
 }
 
-var projectAgentColumns = []string{"ID", colHeaderName, "PRESET", "HARNESS", "MODEL", "ENABLED", "REPOS"}
+var projectAgentColumns = []string{"ID", colHeaderName, "PRESET", "HARNESS", colHeaderModel, "ENABLED", "REPOS"}
 
 func printProjectAgents(cmd *cobra.Command, t *projectAgentTarget, agents []api.ProjectAgent) error {
 	w := cmd.OutOrStdout()
@@ -87,7 +87,7 @@ func printProjectAgentPresets(cmd *cobra.Command, catalog []api.ProjectAgentPres
 		fmt.Fprintln(w, "No agent presets are available.")
 		return nil
 	}
-	return printTable(w, []string{"PRESET", colHeaderName, "HARNESS", "MODEL", "ADDED", "DESCRIPTION"}, rows, func(p projectAgentPresetJSON) []string {
+	return printTable(w, []string{"PRESET", colHeaderName, "HARNESS", colHeaderModel, "ADDED", "DESCRIPTION"}, rows, func(p projectAgentPresetJSON) []string {
 		return []string{p.ID, p.Name, p.Agent.Harness, derefOr(p.Agent.Model, "default"), strconv.FormatBool(p.Added), tuiutil.SanitizeDisplayText(p.Description)}
 	})
 }

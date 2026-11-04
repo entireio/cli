@@ -101,6 +101,7 @@ func newTrailCmdForMode(project bool) *cobra.Command {
 		cmd.AddCommand(newTrailShowCmd(), newTrailListCmd(), newTrailCreateCmd(), newTrailUpdateCmd(), newTrailDeleteCmd(), newTrailCommentCmd())
 	}
 	cmd.AddCommand(newTrailCheckoutCmd(mode), newTrailResumeCmd(mode), newTrailFindingCmd(mode), newTrailWatchCmd(mode))
+	cmd.AddCommand(newTrailTimelineCmd(mode), newTrailSessionsCmd(mode), newTrailStackCmd(mode))
 	cmd.AddCommand(newTrailApproveCmd(mode), newTrailRequestChangesCmd(), newTrailApprovalsCmd(mode), newTrailMergeCmd(mode))
 	cmd.AddCommand(newTrailReadyCmd(mode), newTrailRetargetCmd(mode))
 	cmd.AddCommand(newTrailUpdateBranchCmd(mode), newTrailCIPullRequestCmd(mode), newTrailRerunReviewCmd(mode))
