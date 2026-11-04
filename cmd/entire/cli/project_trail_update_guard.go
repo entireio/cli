@@ -24,7 +24,7 @@ import (
 // passes: the guard must not block updates it cannot judge.
 func guardProjectTrailNumberUpdate(cmd *cobra.Command, selector string, target *projectTrailTarget, current api.ProjectTrail) error {
 	number, ok := parseTrailNumberSelector(selector)
-	if !ok || trailRepoFlag(cmd) != "" || projectTrailBranchFlag(cmd) != "" {
+	if !ok || trailRepoFlag(cmd) != "" || trailBranchFlag(cmd) != "" {
 		return nil
 	}
 	ctx := cmd.Context()
@@ -43,7 +43,9 @@ func guardProjectTrailNumberUpdate(cmd *cobra.Command, selector string, target *
 		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not check which trail branch %q belongs to: %v\n", tuiutil.SanitizeTerminalLabel(branch), err)
 		return nil
 	}
-	if work == nil || (work.Parent != nil && work.Parent.ID == current.ID) {
+	// Work with no project parent is not on any project trail, so #N cannot
+	// be mistaken for it.
+	if work == nil || work.Parent == nil || work.Parent.ID == current.ID {
 		return nil
 	}
 	return errors.New(projectTrailNumberMismatch(number, current, target, branch, repo, work))
@@ -82,27 +84,19 @@ func lookupBranchTrailWork(cmd *cobra.Command, forge, owner, repo, branch string
 // commands. When N is the branch's own change number, the likely intent was
 // the change, so it says so.
 func projectTrailNumberMismatch(number int, current api.ProjectTrail, target *projectTrailTarget, branch, repo string, work *api.TrailResource) string {
-	own := "a repository trail with no project trail"
-	if work.Parent != nil && work.Parent.Number > 0 {
+	own := "another trail (" + tuiutil.SanitizeTerminalLabel(work.Parent.ID) + ")"
+	if work.Parent.Number > 0 {
 		own = fmt.Sprintf("trail #%d", work.Parent.Number)
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "refusing to update trail #%d %q: branch %q is work on %s, not on #%d",
 		number, tuiutil.SanitizeTerminalLabel(current.Title), tuiutil.SanitizeTerminalLabel(branch), own, number)
 	if work.Number == number {
-		fmt.Fprintf(&b, "; %d is this branch's change number (%s/%d), and a bare number names a project trail",
+		fmt.Fprintf(&b, "; %d is this branch's change number, and a bare number names a project trail. For the change, run: entire trail update %s/%d",
 			number, tuiutil.SanitizeTerminalLabel(repo), number)
 	}
 	b.WriteString(".\nTo update this branch's trail: entire trail update (no selector).")
 	fmt.Fprintf(&b, "\nTo update #%d anyway: entire trail update %s --project %s/%s",
-		number, current.ID, tuiutil.SanitizeTerminalLabel(target.Host), tuiutil.SanitizeTerminalLabel(target.Project))
+		number, tuiutil.SanitizeTerminalLabel(current.ID), tuiutil.SanitizeTerminalLabel(target.Host), tuiutil.SanitizeTerminalLabel(target.Project))
 	return b.String()
-}
-
-func projectTrailBranchFlag(cmd *cobra.Command) string {
-	flag := cmd.Flags().Lookup("branch")
-	if flag == nil {
-		return ""
-	}
-	return strings.TrimSpace(flag.Value.String())
 }

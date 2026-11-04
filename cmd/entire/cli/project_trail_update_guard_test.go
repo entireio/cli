@@ -96,7 +96,7 @@ func TestProjectTrailUpdateBareNumberNamesTheChangeItLooksLike(t *testing.T) {
 
 	_, _, err := executeProjectTrailTest(t, "update", "42", "--title", "x")
 
-	require.ErrorContains(t, err, "42 is this branch's change number (widget/42), and a bare number names a project trail")
+	require.ErrorContains(t, err, "42 is this branch's change number, and a bare number names a project trail. For the change, run: entire trail update widget/42")
 	require.Zero(t, patched)
 }
 
@@ -111,6 +111,8 @@ func TestProjectTrailUpdateBareNumberPassesWhenItCannotMisfire(t *testing.T) {
 		{name: "branch work is on this trail", args: []string{"update", "42", "--body", "x"},
 			work: branchWorkOn(42, 7, projectTrailTestID)},
 		{name: "branch has no trail", args: []string{"update", "42", "--body", "x"}},
+		{name: "branch work has no project trail", args: []string{"update", "42", "--body", "x"},
+			work: &api.TrailResource{ID: "01ARZ3NDEKTSV4RRFFQ69G5FBB", Number: 7, Branch: "feature/mine", Status: "open"}},
 		{name: "lookup fails", args: []string{"update", "42", "--body", "x"},
 			lookupErr: errors.New("repository not onboarded"), stderr: "Warning: could not check which trail branch \"feature/mine\" belongs to"},
 		{name: "ULID names the trail exactly", args: []string{"update", projectTrailTestID, "--project", "gh/acme", "--body", "x"},
@@ -133,4 +135,13 @@ func TestProjectTrailUpdateBareNumberPassesWhenItCannotMisfire(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestProjectTrailNumberMismatchSanitizesServerText(t *testing.T) {
+	t.Parallel()
+	current := api.ProjectTrail{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAV\x1b]0;x\x07", Title: "T\x1b[2J"}
+	msg := projectTrailNumberMismatch(42, current, &projectTrailTarget{Host: "gh", Project: "acme"}, "feature/mine", "widget",
+		branchWorkOn(43, 7, "01ARZ3NDEKTSV4RRFFQ69G5FCC"))
+	require.NotContains(t, msg, "\x1b")
+	require.NotContains(t, msg, "\x07")
 }
