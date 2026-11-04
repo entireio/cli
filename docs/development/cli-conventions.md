@@ -285,16 +285,24 @@ always runnable in every build.
   (an account with no handle, an org sharing its name) gets no command in the
   summary, which says why
 - `service-account` (alias: `sa`): a project's service accounts — `create`,
-  `list`, `get`, `delete`, `grant`, `revoke`, `grants`, `bind`, `bindings`,
-  `unbind`. A service account is addressed by its `svc_` ID or as
+  `list`, `get`, `delete`, `grant`, `revoke`, `grants`, `providers`, `bind`,
+  `bindings`, `unbind`. A service account is addressed by its `svc_` ID or as
   `<project>/<name>`. Names are unique per project only, so the name form lists
   the project's accounts and matches exactly. Errors branch on core's RFC 9457
   `type`, never on its prose (`coreapi.APIErrorType`). `grant` and `revoke`
   take `--repo` or `--project`. A bare repo name resolves inside the account's
-  own project, because core refuses a grant outside it with 422. `bind` finds
-  the GitHub Actions provider by issuer, not by ID. It sends one exact
-  `repository` pin plus any `--attribute` pins, and core validates the filter.
-  `revoke` and `unbind` take an explicit target, so they do not prompt, as a
+  own project, because core refuses a grant outside it with 422.
+  Nothing here is provider-specific: `providers` and `bind --provider <name>`
+  render core's provider descriptors from `GET /oidc-providers`. A provider is
+  matched by `name`, then by the deprecated `displayName` an older core sends.
+  Only `self_serve` providers are listed or bound. A provider without
+  `self_serve` counts as self-serve when it is `github-actions`; otherwise core
+  decides. `bind` checks each `--pin` against the descriptor's attributes
+  (unknown name, a `*` in an exact attribute, a pattern mismatch, a missing
+  required pin) before it calls core. Core stays the authority, so a provider
+  without attributes gets no client checks. A terminal asks for missing
+  required pins. The `github-actions` success output adds a setup-entire
+  workflow snippet. `revoke` and `unbind` take an explicit target, so they do not prompt, as a
   typed `grant remove` does not. `delete` confirms like `project delete`
 - `repo`: control-plane repository lifecycle — `create`, `list --project`,
   `view`, `edit`, `delete`, `clone`, `default-branch`, plus the `mirror`, `remote`,
