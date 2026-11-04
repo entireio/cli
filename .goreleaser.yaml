@@ -121,7 +121,7 @@ archives:
       - goos: windows
         formats:
           - zip
-    name_template: "git-remote-entire_{{ .Os }}_{{ .Arch }}"
+    name_template: "git-remote-entire-{{ .Os }}-{{ .Arch }}"
     files:
       - src: LICENSE
         info:
