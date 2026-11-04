@@ -412,6 +412,7 @@ func setupCheckAndNotifyTest(t *testing.T, serverURL string) (*cobra.Command, *b
 	t.Helper()
 
 	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	t.Setenv(envKillSwitch, "")
 
 	// These tests exercise the GitHub origin specifically. Without this the
 	// chain would try the real install.entire.com first, putting a live network call
@@ -509,30 +510,121 @@ func TestCheckAndNotify_SkipsPseudoVersion(t *testing.T) {
 	}
 }
 
-func TestCheckAndNotify_SkipsNixStoreBinary(t *testing.T) {
+// newCountingServer serves version and counts requests.
+func newCountingServer(t *testing.T, version string) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
 	var hits atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hits.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		//nolint:errcheck // test helper
-		json.NewEncoder(w).Encode(GitHubRelease{TagName: "v9.9.9"})
+		json.NewEncoder(w).Encode(GitHubRelease{TagName: version})
 	}))
 	t.Cleanup(server.Close)
+	return server, &hits
+}
+
+func TestCheckAndNotify_NixStoreBinaryTellsOncePerVersion(t *testing.T) {
+	server, hits := newCountingServer(t, "v9.9.9")
 	cmd, buf := setupCheckAndNotifyTest(t, server.URL)
 	f := newAutoUpdateFixture(t)
 	setExecutablePath(t, "/nix/store/abc123-entire-1.0.0/bin/entire")
 
 	CheckAndNotify(context.Background(), cmd.OutOrStdout(), "1.0.0")
 
+	out := buf.String()
+	for _, want := range []string{"v9.9.9", "Nix manages this install"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output %q missing %q", out, want)
+		}
+	}
+	if strings.Contains(out, "To update, run") || strings.Contains(out, "curl") {
+		t.Errorf("output %q names a non-Nix upgrade command", out)
+	}
+	if f.installCalls != 0 || f.chooseCalls != 0 {
+		t.Errorf("installer calls = %d, prompts = %d, want 0 and 0", f.installCalls, f.chooseCalls)
+	}
+
+	// The next daily check stays quiet.
+	seedVersionCache(t, &VersionCache{
+		LastCheckTime:  time.Now().Add(-checkInterval - time.Minute),
+		SkippedVersion: mustLoadCache(t).SkippedVersion,
+	})
+	buf.Reset()
+	CheckAndNotify(context.Background(), cmd.OutOrStdout(), "1.0.0")
 	if buf.Len() != 0 {
-		t.Errorf("expected no output for a Nix store binary, got %q", buf.String())
+		t.Errorf("second check printed %q, want nothing", buf.String())
 	}
-	if n := hits.Load(); n != 0 {
-		t.Errorf("version server hit %d times, want 0", n)
+	if n := hits.Load(); n != 2 {
+		t.Errorf("version server hit %d times, want 2", n)
 	}
-	if f.installCalls != 0 {
-		t.Errorf("installer called %d times, want 0", f.installCalls)
+}
+
+func TestCheckAndNotify_OffSwitch(t *testing.T) {
+	for _, tc := range []struct {
+		name, env, config string
+	}{
+		{name: "env", env: "1"},
+		{name: "config", config: `{"no_auto_update": true}`},
+		{name: "bad config", config: `{"no_auto_update": "yes"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server, hits := newCountingServer(t, "v9.9.9")
+			cmd, buf := setupCheckAndNotifyTest(t, server.URL)
+			f := newAutoUpdateFixture(t)
+			setExecutablePath(t, brewCaskPath)
+			t.Setenv(envKillSwitch, tc.env)
+			if tc.config != "" {
+				writeUserConfig(t, tc.config)
+			}
+
+			CheckAndNotify(context.Background(), cmd.OutOrStdout(), "1.0.0")
+
+			if buf.Len() != 0 {
+				t.Errorf("expected no output, got %q", buf.String())
+			}
+			if n := hits.Load(); n != 0 {
+				t.Errorf("version server hit %d times, want 0", n)
+			}
+			if f.installCalls != 0 || f.chooseCalls != 0 {
+				t.Errorf("installer calls = %d, prompts = %d, want 0 and 0", f.installCalls, f.chooseCalls)
+			}
+		})
 	}
+}
+
+func TestCheckAndNotify_ConfigFalseStillChecks(t *testing.T) {
+	server, hits := newCountingServer(t, "v9.9.9")
+	cmd, buf := setupCheckAndNotifyTest(t, server.URL)
+	writeUserConfig(t, `{"no_auto_update": false}`)
+
+	CheckAndNotify(context.Background(), cmd.OutOrStdout(), "1.0.0")
+
+	if !strings.Contains(buf.String(), "v9.9.9") {
+		t.Errorf("expected a notice, got %q", buf.String())
+	}
+	if n := hits.Load(); n != 1 {
+		t.Errorf("version server hit %d times, want 1", n)
+	}
+}
+
+// writeUserConfig writes config.json into ENTIRE_CONFIG_DIR.
+func writeUserConfig(t *testing.T, config string) {
+	t.Helper()
+	path := filepath.Join(os.Getenv("ENTIRE_CONFIG_DIR"), "config.json")
+	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// mustLoadCache reads the version cache.
+func mustLoadCache(t *testing.T) *VersionCache {
+	t.Helper()
+	cache, err := loadCache()
+	if err != nil {
+		t.Fatalf("loadCache() error = %v", err)
+	}
+	return cache
 }
 
 func TestIsNixStoreBinary(t *testing.T) {

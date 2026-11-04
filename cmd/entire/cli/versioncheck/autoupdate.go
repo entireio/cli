@@ -12,10 +12,24 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/uiform"
+	"github.com/entireio/cli/internal/entireclient/userconfig"
 )
 
-// envKillSwitch disables the interactive update prompt regardless of TTY.
+// envKillSwitch turns off all update checks.
 const envKillSwitch = "ENTIRE_NO_AUTO_UPDATE"
+
+// AutoUpdateDisabled reports the env or config switch.
+func AutoUpdateDisabled() bool {
+	if os.Getenv(envKillSwitch) != "" {
+		return true
+	}
+	cfg, err := userconfig.Load()
+	// Bad config already fails loudly elsewhere.
+	if err != nil {
+		return true
+	}
+	return cfg.NoAutoUpdate
+}
 
 // AutoUpdateAction describes the result of an update prompt.
 type AutoUpdateAction string
@@ -52,8 +66,8 @@ var (
 // invocation while an upstream issue (network, auth, repo outage) is
 // still in place.
 //
-// When the prompt cannot be shown (kill switch set, or non-interactive
-// environment like CI / agent subprocess / no TTY) the installer
+// When the prompt cannot be shown (non-interactive environment like
+// CI / agent subprocess / no TTY) the installer
 // command is printed so the user still learns what to run manually.
 //
 // On Windows the installer is never auto-run (a running entire.exe cannot
@@ -79,7 +93,7 @@ func maybeAutoUpdate(ctx context.Context, w io.Writer, currentVersion, latestVer
 		return autoUpdateActionSkip
 	}
 
-	if os.Getenv(envKillSwitch) != "" || !interactive.CanPromptInteractively() || !isTerminalOut(w) {
+	if !interactive.CanPromptInteractively() || !isTerminalOut(w) {
 		printNotification(w, currentVersion, latestVersion)
 		fmt.Fprintf(w, "To update, run:\n  %s\n", cmdStr)
 		return autoUpdateActionSkip

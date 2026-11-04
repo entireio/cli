@@ -31,8 +31,8 @@ func CheckAndNotify(ctx context.Context, w io.Writer, currentVersion string) {
 		return
 	}
 
-	// Nix owns store binaries; never nag.
-	if isNixStoreBinary() {
+	// The off switch: no fetch, no output.
+	if AutoUpdateDisabled() {
 		return
 	}
 
@@ -76,6 +76,17 @@ func CheckAndNotify(ctx context.Context, w io.Writer, currentVersion string) {
 	// Show notification and offer an interactive upgrade when outdated
 	if isOutdated(currentVersion, latestVersion) {
 		if cache.SkippedVersion == versionCacheKey(latestVersion) {
+			return
+		}
+
+		// Nix upgrades it; tell once per version.
+		if isNixStoreBinary() {
+			printNixNotice(w, currentVersion, latestVersion)
+			cache.SkippedVersion = versionCacheKey(latestVersion)
+			if saveErr := saveCache(cache); saveErr != nil {
+				logging.Debug(ctx, "version check: failed to save skipped version",
+					"error", saveErr.Error())
+			}
 			return
 		}
 
@@ -525,6 +536,13 @@ func isNixStoreBinary() bool {
 		return false
 	}
 	return strings.HasPrefix(normalizePath(execPath), nixStorePrefix)
+}
+
+// printNixNotice says Nix, not entire, upgrades.
+func printNixNotice(w io.Writer, current, latest string) {
+	printNotification(w, current, latest)
+	fmt.Fprintln(w, "Nix manages this install. Update it through your Nix configuration.")
+	fmt.Fprintln(w, "New releases can take days to reach nixpkgs.")
 }
 
 // downloadsURL is the GitHub releases page, used for release-notes links.
