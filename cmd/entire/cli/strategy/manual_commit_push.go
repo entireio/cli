@@ -88,11 +88,7 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	ps := resolvePushSettings(resolveCtx, remote)
 	resolveSpan.End()
 
-	if ps.pushDisabled {
-		return nil
-	}
-	if ps.withheld != nil {
-		warnWithheldCheckpointRemote(ps)
+	if skipsCheckpointPush(ps) {
 		return nil
 	}
 

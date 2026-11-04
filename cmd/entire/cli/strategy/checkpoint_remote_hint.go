@@ -11,6 +11,20 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 )
 
+// skipsCheckpointPush reports whether pre-push sends no checkpoints at all:
+// push_sessions is off, or the checkpoint_remote is withheld, which it warns
+// about here so every push repeats it until the setting is fixed.
+func skipsCheckpointPush(ps pushSettings) bool {
+	if ps.pushDisabled {
+		return true
+	}
+	if ps.withheld != nil {
+		warnWithheldCheckpointRemote(ps)
+		return true
+	}
+	return false
+}
+
 // warnWithheldCheckpointRemote tells the user that this push carried no
 // checkpoints because their checkpoint_remote cannot be routed. Unlike an
 // ignored (inherited) store, nothing falls back to the push remote here, so
