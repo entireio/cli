@@ -121,6 +121,11 @@ archives:
       - goos: windows
         formats:
           - zip
+    # Hyphens, not underscores: install.sh before addfc6952 finds the bundle's
+    # checksum with a suffix-only regex, so git-remote-entire_<os>_<arch> would
+    # also match entire_<os>_<arch> and fail every install. Those copies live
+    # on (the mirrored installers are republished only on stable releases, and
+    # people vendor the script), so the name must never end in the bundle's.
     name_template: "git-remote-entire-{{ .Os }}-{{ .Arch }}"
     files:
       - src: LICENSE
