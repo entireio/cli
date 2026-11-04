@@ -433,16 +433,14 @@ func newProjectTrailUpdateCmd() *cobra.Command {
 			if patch == (api.ProjectTrailUpdateRequest{}) && !assigning {
 				return errors.New("provide at least one field to update")
 			}
-			target, err := resolveProjectTrail(cmd, projectTrailSelector(args))
+			selector := projectTrailSelector(args)
+			target, err := resolveProjectTrail(cmd, selector)
 			if err != nil {
 				return err
 			}
-			current, etag, err := target.read(cmd.Context())
+			current, etag, err := readProjectTrailForUpdate(cmd, selector, target)
 			if err != nil {
 				return err
-			}
-			if etag == "" {
-				return errors.New("project trail read returned no ETag; refusing an unprotected update")
 			}
 			if assigning {
 				assignees := current.Assignees
