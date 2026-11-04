@@ -348,7 +348,7 @@ func newProjectTrailListCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&status, "status", "", "Filter by status before pagination (open, closed)")
-	cmd.Flags().IntVar(&pageSize, "limit", 50, "Page size (1-100)")
+	cmd.Flags().IntVarP(&pageSize, "limit", "n", 50, "Page size (1-100)")
 	cmd.Flags().StringVar(&cursor, "page-token", "", "Continue from nextPageToken")
 	addJSONFlag(cmd)
 	return cmd
@@ -416,7 +416,8 @@ func newProjectTrailUpdateCmd() *cobra.Command {
 			if patch == (api.ProjectTrailUpdateRequest{}) && !assigning {
 				return errors.New("provide at least one field to update")
 			}
-			target, err := resolveProjectTrail(cmd, projectTrailSelector(args))
+			selector := projectTrailSelector(args)
+			target, err := resolveProjectTrail(cmd, selector)
 			if err != nil {
 				return err
 			}
@@ -426,6 +427,9 @@ func newProjectTrailUpdateCmd() *cobra.Command {
 			}
 			if etag == "" {
 				return errors.New("project trail read returned no ETag; refusing an unprotected update")
+			}
+			if target.Change != nil && !isProjectTrailSelector(selector) {
+				fmt.Fprintln(cmd.ErrOrStderr(), projectTrailParentUpdateNotice(current, target.Change, selector))
 			}
 			if assigning {
 				assignees := current.Assignees
@@ -461,6 +465,55 @@ func newProjectTrailUpdateCmd() *cobra.Command {
 	addProjectTrailSelectorFlags(cmd)
 	addJSONFlag(cmd)
 	return cmd
+}
+
+// isProjectTrailSelector reports whether selector names the project trail
+// itself (a number or ULID) rather than one of its changes.
+func isProjectTrailSelector(selector string) bool {
+	if selector == "" {
+		return false
+	}
+	_, isChange := parseProjectTrailChangeSelector(selector)
+	return !isChange
+}
+
+// projectTrailParentUpdateNotice names the trail an update reached through a
+// change (no selector, --branch, or <repo>/<number>) writes to. Every update
+// field belongs to the project trail and is shared by all of its changes,
+// which a change selector or branch does not make obvious.
+func projectTrailParentUpdateNotice(trail api.ProjectTrail, change *projectTrailCurrentChange, selector string) string {
+	name := "trail " + trail.ID
+	if trail.Number > 0 {
+		name = fmt.Sprintf("trail #%d", trail.Number)
+	}
+	return fmt.Sprintf("Updating %s \"%s\" (parent of %s); these fields apply to the whole trail, not just this change.",
+		tuiutil.SanitizeTerminalLabel(name), tuiutil.SanitizeTerminalLabel(trail.Title),
+		tuiutil.SanitizeTerminalLabel(projectTrailChangeLabel(trail, change, selector)))
+}
+
+// projectTrailChangeLabel names the change an update reached: a
+// <repo>/<number> selector as given, else the trail's summary of that change
+// as <repo>/<number> or its branch.
+func projectTrailChangeLabel(trail api.ProjectTrail, change *projectTrailCurrentChange, selector string) string {
+	if _, ok := parseProjectTrailChangeSelector(selector); ok {
+		return selector
+	}
+	for _, c := range trail.Changes {
+		if c.ID != change.ID {
+			continue
+		}
+		repo := c.Repository
+		if repo == "" {
+			repo = change.Repo
+		}
+		if repo != "" && c.Number > 0 {
+			return fmt.Sprintf("%s/%d", repo, c.Number)
+		}
+		if c.Branch != "" {
+			return c.Branch
+		}
+	}
+	return "the selected change"
 }
 
 // Local creation publishes the branch, then links it atomically with intent.

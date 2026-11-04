@@ -1,0 +1,119 @@
+package cli
+
+import (
+	"encoding/json"
+	"net/http"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/entireio/cli/cmd/entire/cli/api"
+)
+
+// serveProjectTrailUpdate answers the working project reads and the PATCH,
+// recording whether the PATCH was sent.
+func serveProjectTrailUpdate(t *testing.T, patched *bool) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch && r.URL.Path == projectTrailTestPath {
+			*patched = true
+			assert.NoError(t, json.NewEncoder(w).Encode(workingProjectTestResource()))
+			return
+		}
+		if !serveWorkingProjectRead(t, w, r) {
+			t.Errorf("unexpected project request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}
+}
+
+func serveWidgetChangeDetail(t *testing.T) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/v1/trails/gh/acme/widget/7", r.URL.Path)
+		assert.NoError(t, json.NewEncoder(w).Encode(api.TrailResource{ID: projectTrailTestChange, Number: 7, Status: "open",
+			Parent: &api.TrailParentReference{ID: projectTrailTestID, Number: 42, ProjectID: projectTrailTestProject,
+				Host: "gh", Project: "acme", Path: projectTrailTestPath, Jurisdiction: "eu", PrimaryProcessingCell: "project-cell"}}))
+	}
+}
+
+// A change selector reaches its parent project trail, whose fields every
+// change shares; the update says so before writing.
+func TestProjectTrailUpdateThroughChangeNamesTheParent(t *testing.T) {
+	for _, args := range [][]string{
+		{"update", "widget/7", "--project", "gh/acme", "--title", "New intent"},
+		{"update", "widget/7", "--project", "gh/acme", "--status", "closed"},
+	} {
+		t.Run(args[4], func(t *testing.T) {
+			var patched bool
+			setupProjectTrailTest(t, serveProjectTrailUpdate(t, &patched))
+			setupWorkingRepoClient(t, serveWidgetChangeDetail(t))
+
+			out, errOut, err := executeProjectTrailTest(t, args...)
+
+			require.NoError(t, err)
+			require.True(t, patched)
+			require.Contains(t, errOut, `Updating trail #42 "Project intent" (parent of widget/7); these fields apply to the whole trail, not just this change.`)
+			require.NotContains(t, out, "Updating trail", "the notice stays off stdout")
+		})
+	}
+}
+
+// Naming the project trail itself is already explicit: no notice, even when
+// --branch picks the working change.
+func TestProjectTrailUpdateByProjectSelectorHasNoNotice(t *testing.T) {
+	for _, args := range [][]string{
+		{"update", "42", "--project", "gh/acme", "--title", "New intent"},
+		{"update", "42", "--project", "gh/acme", "--repo", "gh/acme/widget", "--branch", "feature/work", "--title", "New intent"},
+	} {
+		t.Run(args[len(args)-3], func(t *testing.T) {
+			var patched bool
+			setupProjectTrailTest(t, serveProjectTrailUpdate(t, &patched))
+			setupWorkingRepoClient(t, serveWidgetChangeDetail(t))
+
+			_, errOut, err := executeProjectTrailTest(t, args...)
+
+			require.NoError(t, err)
+			require.True(t, patched)
+			require.NotContains(t, errOut, "Updating trail")
+		})
+	}
+}
+
+func TestProjectTrailParentUpdateNotice(t *testing.T) {
+	t.Parallel()
+	change := &projectTrailCurrentChange{ID: projectTrailTestChange, Repo: "widget"}
+	trail := api.ProjectTrail{ID: projectTrailTestID, Number: 42, Title: "Intent\x1b]0;x\x07",
+		Changes: []api.ChangeSummary{{ID: projectTrailTestChange, Number: 7}}}
+	require.Equal(t, `Updating trail #42 "Intent" (parent of widget/7); these fields apply to the whole trail, not just this change.`,
+		projectTrailParentUpdateNotice(trail, change, ""), "repository falls back to the resolved name; title sanitized")
+
+	trail.Number = 0
+	trail.Changes = []api.ChangeSummary{{ID: projectTrailTestChange, Branch: "feature/work"}}
+	require.Contains(t, projectTrailParentUpdateNotice(trail, change, ""), "Updating trail "+projectTrailTestID+` "Intent" (parent of feature/work)`)
+
+	trail.Changes = nil
+	require.Contains(t, projectTrailParentUpdateNotice(trail, change, ""), "(parent of the selected change)")
+	require.Contains(t, projectTrailParentUpdateNotice(trail, change, "widget/7"), "(parent of widget/7)", "a change selector names the change as given")
+}
+
+func TestIsProjectTrailSelector(t *testing.T) {
+	t.Parallel()
+	for selector, want := range map[string]bool{"": false, "widget/7": false, "42": true, projectTrailTestID: true} {
+		require.Equal(t, want, isProjectTrailSelector(selector), selector)
+	}
+}
+
+// trail list and timeline take -n like trail finding does.
+func TestProjectTrailPaginationLimitShorthand(t *testing.T) {
+	t.Parallel()
+	root := newTrailCmdForMode(true)
+	for _, name := range []string{"list", "timeline"} {
+		cmd, _, err := root.Find([]string{name})
+		require.NoError(t, err)
+		flag := cmd.Flags().Lookup("limit")
+		require.NotNil(t, flag, name)
+		require.Equal(t, "n", flag.Shorthand, name)
+	}
+}
