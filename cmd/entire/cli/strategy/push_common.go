@@ -608,11 +608,11 @@ var checkpointPushBudget = 2 * time.Minute
 // context.WithTimeout keeps the earlier of parent and child deadlines, so the
 // per-ref checkpointPushBudget automatically shrinks to whatever is left.
 //
-// Shared, so a batch that spends the budget leaves the fallback none: its one
-// guaranteed attempt then fails at once, and the refs stay queued for the next
-// push. The explicit pushes (PushQueuedCheckpointRefs, `entire checkpoint
-// push`) leave the batch unbounded; the user asked for that upload and is
-// waiting on it.
+// Shared, so a batch the budget cuts ends the flush there: the per-ref fallback
+// does not run on a spent budget, a chunk cut mid-push rotates to the back of
+// the queue, and the refs stay queued for the next push. The explicit pushes
+// (PushQueuedCheckpointRefs, `entire checkpoint push`) leave the batch
+// unbounded; the user asked for that upload and is waiting on it.
 //
 // Declared as a var so tests can shrink it.
 var checkpointFlushBudget = 2 * time.Minute
