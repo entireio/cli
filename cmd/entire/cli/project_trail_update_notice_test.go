@@ -2,7 +2,9 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"sync"
 	"testing"
@@ -11,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/internal/coreapi"
 )
 
 // serveProjectTrailUpdate answers the working project reads and the PATCH,
@@ -89,12 +92,17 @@ func TestProjectTrailUpdateFollowingBranchNamesTheParent(t *testing.T) {
 	require.Contains(t, errOut, `Updating trail #42 "Project intent" (parent of feature/work)`)
 }
 
-// A local preflight failure (here assignee resolution without a login)
-// means no write happens, so the notice must not claim one is under way.
+// A local preflight failure (here assignee resolution) means no write
+// happens, so the notice must not claim one is under way.
 func TestProjectTrailUpdateAssigneeFailurePrintsNoNotice(t *testing.T) {
 	var patched bool
 	setupProjectTrailTest(t, serveProjectTrailUpdate(t, &patched))
 	setupWorkingRepoClient(t, serveWidgetChangeDetail(t))
+	// Stub the control plane so the failure never depends on a real login or
+	// ENTIRE_TOKEN in the environment.
+	old := activeCoreClient
+	activeCoreClient = func(context.Context) (*coreapi.Client, error) { return nil, errors.New("control plane unavailable") }
+	t.Cleanup(func() { activeCoreClient = old })
 
 	_, errOut, err := executeProjectTrailTest(t, "update", "widget/7", "--project", "gh/acme", "--add-assignee", "@bob")
 
