@@ -663,3 +663,16 @@ func TestFlushCheckpointRefs_BudgetCutStillShowsEarlierRejection(t *testing.T) {
 	require.Contains(t, output, "Stopped pushing", "precondition: the budget cut the flush")
 	assert.Contains(t, output, checkpointRejectReason, "the earlier refusal is still shown")
 }
+
+// TestAdaptChunkSize_GrowsAfterProgressWithRefsLeft: a draining backlog may
+// never empty the queue in one flush, so a batch whose attempted chunks all
+// landed grows the size back even though the budget left some untried.
+func TestAdaptChunkSize_GrowsAfterProgressWithRefsLeft(t *testing.T) {
+	t.Parallel()
+	queue := checkpoint.NewPushQueue(t.TempDir())
+	require.NoError(t, queue.SetChunkSizeHint(3))
+
+	adaptChunkSize(t.Context(), queue, 3, chunkPushResult{landed: 6, untried: make([]checkpointRefPush, 4)}, true)
+
+	assert.Equal(t, 6, queue.ChunkSizeHint(checkpointRefPushChunkSize))
+}
