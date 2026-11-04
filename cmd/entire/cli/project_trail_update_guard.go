@@ -102,8 +102,11 @@ func readProjectTrailForUpdate(cmd *cobra.Command, selector string, target *proj
 }
 
 // lookupBranchTrailWork finds the branch's work within the guard's time
-// budget. A scan that stops before the last page is an error, not "no work":
-// the work could be on a page it never read.
+// budget. A scan that reaches its page budget without finding the branch
+// counts as "no work", with a warning: the list is ordered by recent
+// activity, so a branch being worked on shows up early, and refusing here
+// would block every bare-number update from a branch with no trail (main)
+// once a repository passes the budget.
 func lookupBranchTrailWork(cmd *cobra.Command, forge, owner, repo, branch string) (*api.TrailResource, error) {
 	ctx, cancel := context.WithTimeout(cmd.Context(), projectTrailUpdateGuardTimeout)
 	defer cancel()
@@ -120,7 +123,8 @@ func lookupBranchTrailWork(cmd *cobra.Command, forge, owner, repo, branch string
 		return nil, err
 	}
 	if work == nil && !complete {
-		return nil, fmt.Errorf("stopped after %d pages of trails without reaching the last", trailFindMaxPages)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: branch %q is not among the %d most recently active trails in %s/%s; treating it as having no trail\n",
+			tuiutil.SanitizeTerminalLabel(branch), trailFindMaxPages*trailListServerMaxLimit, tuiutil.SanitizeTerminalLabel(owner), tuiutil.SanitizeTerminalLabel(repo))
 	}
 	return work, nil
 }

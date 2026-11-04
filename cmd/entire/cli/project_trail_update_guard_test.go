@@ -163,15 +163,6 @@ func TestProjectTrailUpdateBareNumberRefusesWhenItCannotCheck(t *testing.T) {
 			t.Helper()
 			serveBranchWork(t, &api.TrailResource{ID: "01ARZ3NDEKTSV4RRFFQ69G5FBB", Number: 7, Branch: "feature/mine", Status: "open"}, nil)
 		}, want: []string{`branch "feature/mine" has trail work whose project trail the API did not return`}},
-		{name: "scan stops before the last page", setup: func(t *testing.T) {
-			t.Helper()
-			var page int
-			serveBranchLookup(t, func(w http.ResponseWriter, _ *http.Request) {
-				page++
-				next := fmt.Sprintf("cursor-%d", page)
-				assert.NoError(t, json.NewEncoder(w).Encode(api.TrailListResponse{NextCursor: &next}))
-			})
-		}, want: []string{fmt.Sprintf("stopped after %d pages of trails without reaching the last", trailFindMaxPages)}},
 		{name: "lookup times out", setup: func(t *testing.T) {
 			t.Helper()
 			old := projectTrailUpdateGuardTimeout
@@ -280,4 +271,26 @@ func TestProjectTrailNumberMismatchSanitizesServerText(t *testing.T) {
 	msg := g.mismatch(branchWorkOn(43, 7, "01ARZ3NDEKTSV4RRFFQ69G5FCC"))
 	require.NotContains(t, msg, "\x1b")
 	require.NotContains(t, msg, "\x07")
+}
+
+// A branch with no trail is never found, so on a repository with more trails
+// than the scan budget it reaches the budget without a match. That must pass
+// (with a warning), or every bare-number update from main would be refused.
+func TestProjectTrailUpdateBareNumberPassesWhenScanReachesBudget(t *testing.T) {
+	setupGuardRepo(t)
+	var patched int
+	serveGuardProject(t, &patched)
+	var page int
+	serveBranchLookup(t, func(w http.ResponseWriter, _ *http.Request) {
+		page++
+		next := fmt.Sprintf("cursor-%d", page)
+		assert.NoError(t, json.NewEncoder(w).Encode(api.TrailListResponse{NextCursor: &next}))
+	})
+
+	_, errOut, err := executeProjectTrailTest(t, "update", "42", "--body", "x")
+
+	require.NoError(t, err)
+	require.Equal(t, 1, patched)
+	require.Equal(t, trailFindMaxPages, page)
+	require.Contains(t, errOut, `Warning: branch "feature/mine" is not among the 2000 most recently active trails in acme/widget`)
 }
