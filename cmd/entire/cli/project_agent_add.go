@@ -342,7 +342,7 @@ func resolveProjectAgentEnvironment(ctx context.Context, errW io.Writer, t *proj
 	}
 	switch len(envs) {
 	case 0:
-		env, err := t.createEnvironment(ctx, api.ProjectEnvironmentInput{Name: projectAgentDefaultEnvironment, Description: "Created by entire project agent add"})
+		env, err := t.createEnvironment(ctx, api.ProjectEnvironmentInput{Name: projectAgentDefaultEnvironment, Description: "Created by the Entire CLI"})
 		if err != nil {
 			return "", fmt.Errorf("create environment %q: %w", projectAgentDefaultEnvironment, err)
 		}
