@@ -254,6 +254,15 @@ func TestWorkingTrailWriteListsChangesInsteadOfGuessing(t *testing.T) {
 	require.Contains(t, err.Error(), "Run, for example: trail approve api/9")
 	assert.Equal(t, 1, openers)
 	assert.Equal(t, []string{"api"}, shared, "this clone's repository reuses its client; only api is opened")
+
+	// Every other command that changes the change it selects, or spends its
+	// agent budget, asks the same way.
+	for _, name := range []string{"update-branch", "ci-pr", "rerun-review"} {
+		_, _, err := executeProjectTrailTest(t, name, "42")
+		require.Error(t, err, name)
+		require.Contains(t, err.Error(), "trail #42 has 2 open changes; choose one:", name)
+		require.Contains(t, err.Error(), "Run, for example: trail "+name+" ", name)
+	}
 }
 
 // A trail whose only open change lives in another repository acts on that
