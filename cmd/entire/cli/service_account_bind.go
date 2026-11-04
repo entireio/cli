@@ -110,13 +110,24 @@ func parsePins(args []string) (map[string]string, error) {
 	return pins, nil
 }
 
+// errNoPins mirrors core: an empty filter matches everything.
+var errNoPins = errors.New("pass at least one --pin name=value")
+
 // completePins checks pins and asks for missing ones.
 func completePins(cmd *cobra.Command, p saProvider, pins map[string]string) error {
+	if err := describedPins(cmd, p, pins); err != nil {
+		return err
+	}
+	if len(pins) == 0 {
+		return errNoPins
+	}
+	return nil
+}
+
+// describedPins applies the descriptor's rules.
+func describedPins(cmd *cobra.Command, p saProvider, pins map[string]string) error {
 	// An old core describes nothing; core decides.
 	if !p.described() {
-		if len(pins) == 0 {
-			return errors.New("pass at least one --pin name=value")
-		}
 		return nil
 	}
 	if err := checkPins(p, pins); err != nil {

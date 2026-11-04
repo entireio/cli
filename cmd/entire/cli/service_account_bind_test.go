@@ -64,6 +64,18 @@ func TestSABind(t *testing.T) {
 		})
 	}
 
+	t.Run("no pins for a provider with none required", func(t *testing.T) {
+		f, srv := newSAFakeCore(t)
+		f.providers = append(f.providers, coreapi.OIDCProvider{
+			ID: "wip_optional", Issuer: "https://ci.example.com",
+			Name: coreapi.NewOptString("optional-ci"), SelfServe: coreapi.NewOptBool(true),
+			Attributes: []coreapi.OIDCProviderAttribute{{Name: "subject", Label: "Subject"}},
+		})
+		_, err := runSA(t, srv.URL, "bind", saTestID, "--provider", "optional-ci")
+		require.EqualError(t, err, "pass at least one --pin name=value")
+		require.NotContains(t, f.callList(), saBindRoute)
+	})
+
 	t.Run("a bad pin flag sends nothing", func(t *testing.T) {
 		f, srv := newSAFakeCore(t)
 		_, err := runSA(t, srv.URL, "bind", saTestID, "--provider", "buildkite", "--pin", "organization")
