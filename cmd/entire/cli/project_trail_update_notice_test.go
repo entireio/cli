@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -87,6 +89,65 @@ func TestProjectTrailUpdateFollowingBranchNamesTheParent(t *testing.T) {
 	require.Contains(t, errOut, `Updating trail #42 "Project intent" (parent of feature/work)`)
 }
 
+// A local preflight failure (here assignee resolution without a login)
+// means no write happens, so the notice must not claim one is under way.
+func TestProjectTrailUpdateAssigneeFailurePrintsNoNotice(t *testing.T) {
+	var patched bool
+	setupProjectTrailTest(t, serveProjectTrailUpdate(t, &patched))
+	setupWorkingRepoClient(t, serveWidgetChangeDetail(t))
+
+	_, errOut, err := executeProjectTrailTest(t, "update", "widget/7", "--project", "gh/acme", "--add-assignee", "@bob")
+
+	require.ErrorContains(t, err, "resolve assignee")
+	require.False(t, patched)
+	require.NotContains(t, errOut, "Updating trail")
+}
+
+// syncBuffer lets the test server read what the command has written so far.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// The notice is a warning before the write, not a report after it: it must
+// already be on stderr when the PATCH reaches the server.
+func TestProjectTrailUpdateNoticePrecedesPatch(t *testing.T) {
+	var errOut syncBuffer
+	var stderrAtPatch string
+	setupProjectTrailTest(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch && r.URL.Path == projectTrailTestPath {
+			stderrAtPatch = errOut.String()
+			assert.NoError(t, json.NewEncoder(w).Encode(workingProjectTestResource()))
+			return
+		}
+		if !serveWorkingProjectRead(t, w, r) {
+			t.Errorf("unexpected project request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	})
+	setupWorkingRepoClient(t, serveWidgetChangeDetail(t))
+	cmd := newTrailCmdForMode(true)
+	cmd.SilenceUsage, cmd.SilenceErrors = true, true
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&errOut)
+	cmd.SetArgs([]string{"update", "widget/7", "--project", "gh/acme", "--title", "New intent"})
+
+	require.NoError(t, cmd.Execute())
+	require.Contains(t, stderrAtPatch, `Updating trail #42 "Project intent" (parent of widget/7)`)
+}
+
 // Naming the project trail itself is already explicit: no notice, even when
 // --branch picks the working change.
 func TestProjectTrailUpdateByProjectSelectorHasNoNotice(t *testing.T) {
@@ -115,6 +176,15 @@ func TestProjectTrailParentUpdateNotice(t *testing.T) {
 		Changes: []api.ChangeSummary{{ID: projectTrailTestChange, Number: 7}}}
 	require.Equal(t, `Updating trail #42 "Intent" (parent of widget/7); these fields apply to the whole trail, not just this change.`,
 		projectTrailParentUpdateNotice(trail, change, ""), "repository falls back to the resolved name; title sanitized")
+
+	forged := trail
+	forged.Title = "Intent\nUpdated trail #1 \u202Eevil"
+	forged.Changes = []api.ChangeSummary{{ID: projectTrailTestChange, Branch: "feat\t\u2066x\n"}}
+	got := projectTrailParentUpdateNotice(forged, change, "")
+	require.NotContains(t, got, "\n", "server text cannot forge a further stderr line")
+	require.NotContains(t, got, "\u202E", "bidi controls cannot reorder the notice")
+	require.NotContains(t, got, "\u2066")
+	require.Contains(t, got, `"Intent Updated trail #1 evil" (parent of feat x )`)
 
 	trail.Number = 0
 	trail.Changes = []api.ChangeSummary{{ID: projectTrailTestChange, Branch: "feature/work"}}

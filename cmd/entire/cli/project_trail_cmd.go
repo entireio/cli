@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"charm.land/lipgloss/v2"
 	"github.com/google/uuid"
@@ -416,13 +417,14 @@ func newProjectTrailUpdateCmd() *cobra.Command {
 			if etag == "" {
 				return errors.New("project trail read returned no ETag; refusing an unprotected update")
 			}
-			if target.Change != nil && !isProjectTrailSelector(selector) {
-				fmt.Fprintln(cmd.ErrOrStderr(), projectTrailParentUpdateNotice(current, target.Change, selector))
-			}
 			if assigning {
 				if patch.Assignees, err = projectTrailUpdateAssignees(cmd, current, fields.Assignees, add, remove); err != nil {
 					return err
 				}
+			}
+			// Announce only once nothing local can stop the write.
+			if target.Change != nil && !isProjectTrailSelector(selector) {
+				fmt.Fprintln(cmd.ErrOrStderr(), projectTrailParentUpdateNotice(current, target.Change, selector))
 			}
 			var out api.ProjectTrail
 			if _, err := target.Client.ProjectTrailRequest(cmd.Context(), http.MethodPatch, target.path(), patch, http.Header{"If-Match": {etag}}, &out); err != nil {
@@ -503,8 +505,19 @@ func projectTrailParentUpdateNotice(trail api.ProjectTrail, change *projectTrail
 		name = fmt.Sprintf("trail #%d", trail.Number)
 	}
 	return fmt.Sprintf("Updating %s \"%s\" (parent of %s); these fields apply to the whole trail, not just this change.",
-		tuiutil.SanitizeTerminalLabel(name), tuiutil.SanitizeTerminalLabel(trail.Title),
-		tuiutil.SanitizeTerminalLabel(projectTrailChangeLabel(trail, change, selector)))
+		sanitizeNoticeLabel(name), sanitizeNoticeLabel(trail.Title),
+		sanitizeNoticeLabel(projectTrailChangeLabel(trail, change, selector)))
+}
+
+// sanitizeNoticeLabel keeps server text on one line and in logical order, so
+// a title cannot forge a further stderr line or visually reorder the notice.
+func sanitizeNoticeLabel(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Bidi_Control, r) {
+			return -1
+		}
+		return r
+	}, tuiutil.SanitizeDisplayText(s))
 }
 
 // projectTrailChangeLabel names the change an update reached: a
