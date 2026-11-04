@@ -20,6 +20,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 
 	"github.com/google/uuid"
@@ -110,6 +111,7 @@ branch, not the whole trail. Use 'entire trail list' to discover trails.`),
 	cmd.AddCommand(newTrailReviewShowCmd(&targetOpts))
 	cmd.AddCommand(newTrailReviewUpdateCmd(&targetOpts))
 	cmd.AddCommand(newTrailReviewApplyCmd(&targetOpts))
+	cmd.AddCommand(newTrailFindingReplyCmd(&targetOpts), newTrailFindingEditReplyCmd(&targetOpts), newTrailFindingDeleteReplyCmd(&targetOpts))
 	cmd.AddCommand(newTrailReviewStatusCmd(&targetOpts, "resolve", trailReviewStatusResolved, "Resolve a finding"))
 	cmd.AddCommand(newTrailReviewStatusCmd(&targetOpts, "dismiss", trailReviewStatusDismissed, "Dismiss a finding"))
 	cmd.AddCommand(newTrailReviewStatusCmd(&targetOpts, "reopen", trailReviewStatusOpen, "Reopen a finding"))
@@ -409,6 +411,12 @@ func runTrailReviewShow(cmd *cobra.Command, mode *trailMode, selector string, co
 		comment = hydrated
 	}
 	printTrailReviewCommentDetail(cmd.OutOrStdout(), comment)
+	replies, err := fetchTrailFindingReplies(cmd.Context(), client, target.Trail.ID, comment)
+	if err != nil {
+		// The error can carry the server's response body.
+		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not load replies: %s\n", tuiutil.SanitizeTerminalText(err.Error()))
+	}
+	printTrailFindingReplies(cmd.OutOrStdout(), replies)
 	return nil
 }
 

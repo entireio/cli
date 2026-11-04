@@ -147,6 +147,10 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"trail update-branch": {agentHelpAudienceUserOwned, false},
 	"trail ci-pr":         {agentHelpAudienceUserOwned, false},
 	"trail rerun-review":  {agentHelpAudienceUserOwned, false},
+	// A finding's reply thread is the agent's channel too, like the finding.
+	"trail finding reply":        {agentHelpAudienceTaskDriven, false},
+	"trail finding edit-reply":   {agentHelpAudienceTaskDriven, false},
+	"trail finding delete-reply": {agentHelpAudienceTaskDriven, false},
 
 	// ---- Unlisted: real commands, just not the default view. ---------------
 	"activity": {agentHelpAudienceReadOnly, false},
@@ -253,6 +257,11 @@ var agentHelpGuidance = map[string]string{
 		"reply to, edit, delete, or resolve one. Use `entire trail finding` for agent\n" +
 		"review findings, questions, and follow-ups, including when asked to\n" +
 		"\"comment\" on a trail. Comment writes refuse in agent sessions.",
+
+	"trail finding": "Reply to a finding with `entire trail finding reply` to answer or question\n" +
+		"it. Edit or delete only replies you wrote; a reply by anyone else stays as\n" +
+		"it is. `delete-reply` asks for confirmation; pass --force only when the user\n" +
+		"asked you to delete that reply.",
 
 	"checkpoint delete": "Destructive and irreversible on the remote. Never run this unless the user\n" +
 		"explicitly asks to delete that checkpoint; do not pass --force on your own.",
