@@ -30,7 +30,7 @@ func TestProjectAgentCreate_SendsACustomAgent(t *testing.T) {
 	out, errOut, err := executeProjectAgent(t, projectAgentCreateArgs(
 		"--description", "Migrations that could lock or lose data",
 		"--polarity", "lower_is_better", "--model", "claude-opus-5-5", "--reasoning-effort", "HIGH",
-		"--timeout", "15m", "--when", "always", "--branch", "main", "--branch", "release/*", "--path", "db/**")...)
+		"--timeout", "15m", "--when", "always", "--branch", "main", "--branch", " release/* ", "--path", "db/**")...)
 	require.NoError(t, err)
 	assert.Contains(t, out, "created Migration Risk (")
 	assert.Contains(t, out, "reviewing gh/acme/widget")
@@ -151,6 +151,11 @@ func TestProjectAgentCreate_RefusesBadFlagsBeforeAnyRequest(t *testing.T) {
 		{projectAgentCreateArgs("--reasoning-effort", "extreme"), "--reasoning-effort must be one of"},
 		{projectAgentCreateArgs("--when", "never"), "--when must be one of"},
 		{projectAgentCreateArgs("--when", "manual", "--path", "db/**"), "--when manual has none"},
+		{projectAgentCreateArgs("--branch", ""), "--branch needs a non-empty pattern"},
+		{projectAgentCreateArgs("--path", "  "), "--path needs a non-empty pattern"},
+		{projectAgentCreateArgs("--path", "/db/**"), "must not start or end with /"},
+		{projectAgentCreateArgs("--branch", "release/"), "must not start or end with /"},
+		{projectAgentCreateArgs("--path", strings.Repeat("a", 257)), "limited to 256 bytes"},
 		{projectAgentCreateArgs("--timeout", "31m"), "--timeout must be between 1s and 30m0s"},
 		{projectAgentCreateArgs("--timeout", "0s"), "--timeout must be between"},
 		{[]string{"create", "--name", "A", "--harness", "claude", "--signal", "percent"}, "pass one of --instructions or --instructions-file"},

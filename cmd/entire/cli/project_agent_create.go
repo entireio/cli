@@ -23,6 +23,8 @@ const (
 	projectAgentMaxDescription  = 1024
 	projectAgentMaxInstructions = 16384
 	projectAgentMaxTimeout      = 30 * time.Minute
+	projectAgentMaxGlobs        = 32
+	projectAgentMaxGlobBytes    = 256
 	projectAgentDefaultTimeout  = 10 * time.Minute
 	// projectAgentWhenManual is --when's value for an agent with no trigger,
 	// which runs only when asked to.
@@ -158,6 +160,13 @@ func (o *projectAgentCreateOptions) validate(stdin io.Reader) error {
 	if err := checkProjectAgentChoice("--when", o.when, projectAgentWhens, true); err != nil {
 		return err
 	}
+	var err error
+	if o.branches, err = checkProjectAgentGlobs("--branch", o.branches); err != nil {
+		return err
+	}
+	if o.paths, err = checkProjectAgentGlobs("--path", o.paths); err != nil {
+		return err
+	}
 	if o.when == projectAgentWhenManual && (len(o.branches) > 0 || len(o.paths) > 0) {
 		return errors.New("--branch and --path filter push runs; --when manual has none")
 	}
@@ -202,6 +211,29 @@ func (o *projectAgentCreateOptions) loadInstructions(stdin io.Reader) error {
 		return fmt.Errorf("the instructions are limited to %d characters", projectAgentMaxInstructions)
 	}
 	return nil
+}
+
+// checkProjectAgentGlobs trims each glob and refuses what the API would: an
+// empty one, more than it accepts, or one anchored with a slash. The API checks
+// the rest of the glob syntax.
+func checkProjectAgentGlobs(flag string, globs []string) ([]string, error) {
+	if len(globs) > projectAgentMaxGlobs {
+		return nil, fmt.Errorf("%s is limited to %d patterns", flag, projectAgentMaxGlobs)
+	}
+	out := make([]string, 0, len(globs))
+	for _, g := range globs {
+		g = strings.TrimSpace(g)
+		switch {
+		case g == "":
+			return nil, fmt.Errorf("%s needs a non-empty pattern", flag)
+		case len(g) > projectAgentMaxGlobBytes:
+			return nil, fmt.Errorf("%s patterns are limited to %d bytes", flag, projectAgentMaxGlobBytes)
+		case strings.HasPrefix(g, "/") || strings.HasSuffix(g, "/"):
+			return nil, fmt.Errorf("%s %q must not start or end with /", flag, g)
+		}
+		out = append(out, g)
+	}
+	return out, nil
 }
 
 // checkProjectAgentChoice refuses a value outside allowed; an empty one only
