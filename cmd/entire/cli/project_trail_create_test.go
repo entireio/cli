@@ -17,7 +17,25 @@ import (
 // These fixtures replace routing constructors; their callers cannot run in parallel.
 func setupRepositoryTrailCreation(t *testing.T, forge string, handler http.HandlerFunc) (*fakeCellCore, *fakeProjectTrailCore) {
 	t.Helper()
-	project, server := setupProjectTrailTest(t, handler)
+	return setupRepositoryTrailCreationWithRepo(t, forge, `{"trails_enabled":true}`, handler)
+}
+
+// setupRepositoryTrailCreationWithRepo answers create's repository settings
+// read with repoJSON ("" for a 404) and passes every other request to handler.
+func setupRepositoryTrailCreationWithRepo(t *testing.T, forge, repoJSON string, handler http.HandlerFunc) (*fakeCellCore, *fakeProjectTrailCore) {
+	t.Helper()
+	project, server := setupProjectTrailTest(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/"+projectTrailTestChange {
+			if repoJSON == "" {
+				http.NotFound(w, r)
+				return
+			}
+			_, err := w.Write([]byte(repoJSON))
+			assert.NoError(t, err)
+			return
+		}
+		handler(w, r)
+	})
 	core := &fakeCellCore{repo: &coreapi.Repo{ID: projectTrailTestChange, OwningProjectId: projectTrailTestProject}}
 	oldCore, oldTrail := newCellCoreClient, newTrailAPIClient
 	newCellCoreClient = func() (cellCoreClient, error) { return core, nil }

@@ -7,10 +7,12 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 	"github.com/entireio/cli/internal/coreapi"
 )
@@ -28,10 +30,19 @@ func createRepositoryScopedProjectTrail(cmd *cobra.Command, request api.ProjectT
 	}
 	request.RepositoryIDs = []string{repoID}
 	change.RepositoryID = repoID
+	// Before publishing a branch for it: the server refuses a trail for a
+	// repository with Trails off, and the branch would be left behind.
+	// The enablement cache has one slot, for the current checkout, so only a
+	// create in it records the answer.
+	if err := requireTrailsEnabledForCreate(cmd.Context(), target.Client, repoID, target.RepoRef, trailRepoFlag(cmd) == ""); err != nil {
+		return api.ProjectTrail{}, err
+	}
+	published := ""
 	if publishesLocalBranch(cmd, change) {
 		if err := publishProjectTrailBranch(cmd, change.BranchName); err != nil {
 			return api.ProjectTrail{}, err
 		}
+		published = change.BranchName
 	}
 	path := target.BasePath + "?" + url.Values{"project_id": {target.ProjectID}}.Encode()
 	var headers http.Header
@@ -43,6 +54,12 @@ func createRepositoryScopedProjectTrail(cmd *cobra.Command, request api.ProjectT
 	if err != nil {
 		if headers != nil {
 			return api.ProjectTrail{}, fmt.Errorf("create repository-scoped trail (retry with --idempotency-key %s and the same fields): %w", key, err)
+		}
+		if trailCreateRefused(err) {
+			if published != "" {
+				return api.ProjectTrail{}, fmt.Errorf("create repository-scoped trail: %w; no trail was created, but branch %s was already published and is kept", err, published)
+			}
+			return api.ProjectTrail{}, fmt.Errorf("create repository-scoped trail: %w; no trail was created", err)
 		}
 		return api.ProjectTrail{}, fmt.Errorf("create repository-scoped trail (inspect trails before retrying; creation may have succeeded): %w", err)
 	}
@@ -181,4 +198,48 @@ func resolveRepositoryProjectTrailTarget(cmd *cobra.Command) (*projectTrailTarge
 	target.Client = client
 	target.RepoRef = forge + "/" + owner + "/" + repo
 	return target, repoID, nil
+}
+
+// trailCreateSettingsTimeout bounds the Trails-setting read before create.
+// The read is advisory, so a slow cell falls through to the create itself.
+const trailCreateSettingsTimeout = 5 * time.Second
+
+// requireTrailsEnabledForCreate refuses a create for a repository whose Trails
+// setting is off, naming the setting, and records the answer in the
+// current checkout's enablement cache when it is that repository's. The read is best effort: when it fails or reports no
+// setting, the create goes ahead and the server gives its own answer.
+// repoRef is the repository as <forge>/<owner>/<repo>; cacheLocal says it is
+// the current checkout's repository, whose cache slot may take the answer.
+func requireTrailsEnabledForCreate(ctx context.Context, client *api.Client, repoID, repoRef string, cacheLocal bool) error {
+	readCtx, cancel := context.WithTimeout(ctx, trailCreateSettingsTimeout)
+	defer cancel()
+	enabled, known, err := client.RepoTrailsEnabled(readCtx, repoID)
+	if err != nil {
+		logging.Debug(ctx, "trail create: repository settings read failed", "error", err.Error())
+		return nil
+	}
+	if !known || enabled {
+		return nil
+	}
+	if cacheLocal {
+		saveTrailsEnabledForRepoBestEffort(ctx, false)
+	}
+	return fmt.Errorf("trails are not enabled for %s; an admin can turn them on in the repository's Settings > Trails on entire.com. Nothing was created or pushed", repoRef)
+}
+
+// trailCreateRefused reports a create the server rejected outright, so
+// nothing was created. Excluded are a timeout or rate limit, which may still
+// have been applied or be worth retrying, and a conflict, which an
+// idempotency-key replay can return while the first request created a trail.
+func trailCreateRefused(err error) bool {
+	var httpErr *api.HTTPError
+	if !errors.As(err, &httpErr) {
+		return false
+	}
+	switch code := httpErr.StatusCode; code {
+	case http.StatusRequestTimeout, http.StatusConflict, http.StatusTooManyRequests:
+		return false
+	default:
+		return code >= 400 && code < 500
+	}
 }
