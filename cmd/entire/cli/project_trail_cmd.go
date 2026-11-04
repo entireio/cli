@@ -364,7 +364,7 @@ func newProjectTrailListCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&status, "status", "", "Filter by status before pagination (open, closed)")
-	cmd.Flags().IntVar(&pageSize, "limit", 50, "Page size (1-100)")
+	cmd.Flags().IntVarP(&pageSize, "limit", "n", 50, "Page size (1-100)")
 	cmd.Flags().StringVar(&cursor, "page-token", "", "Continue from nextPageToken")
 	cmd.Flags().BoolVar(&mine, "mine", false, "List trails you authored or are assigned, across every project and region")
 	addJSONFlag(cmd)
@@ -416,24 +416,13 @@ func newProjectTrailUpdateCmd() *cobra.Command {
 			if err := fields.validate(cmd, false); err != nil {
 				return err
 			}
-			var patch api.ProjectTrailUpdateRequest
-			for _, field := range []struct {
-				name  string
-				value *string
-				dest  **string
-			}{
-				{"title", &fields.Title, &patch.Title}, {"body", &fields.Body, &patch.Body},
-				{"status", &fields.Status, &patch.Status}, {"type", &fields.Type, &patch.Type}, {"priority", &fields.Priority, &patch.Priority},
-			} {
-				if cmd.Flags().Changed(field.name) {
-					*field.dest = field.value
-				}
-			}
+			patch := projectTrailUpdatePatch(cmd, &fields)
 			assigning := cmd.Flags().Changed("assignee") || cmd.Flags().Changed("add-assignee") || cmd.Flags().Changed("remove-assignee")
 			if patch == (api.ProjectTrailUpdateRequest{}) && !assigning {
 				return errors.New("provide at least one field to update")
 			}
-			target, err := resolveProjectTrail(cmd, projectTrailSelector(args))
+			selector := projectTrailSelector(args)
+			target, err := resolveProjectTrail(cmd, selector)
 			if err != nil {
 				return err
 			}
@@ -445,20 +434,13 @@ func newProjectTrailUpdateCmd() *cobra.Command {
 				return errors.New("project trail read returned no ETag; refusing an unprotected update")
 			}
 			if assigning {
-				assignees := current.Assignees
-				if cmd.Flags().Changed("assignee") {
-					assignees = fields.Assignees
+				if patch.Assignees, err = projectTrailUpdateAssignees(cmd, current, fields.Assignees, add, remove); err != nil {
+					return err
 				}
-				if len(add) > 0 || len(remove) > 0 {
-					assignees, err = mergeProjectTrailAssignees(cmd.Context(), current, add, remove)
-					if err != nil {
-						return err
-					}
-				}
-				if assignees == nil {
-					assignees = []string{}
-				}
-				patch.Assignees = &assignees
+			}
+			// Announce only once nothing local can stop the write.
+			if target.Change != nil && !isProjectTrailSelector(selector) {
+				fmt.Fprintln(cmd.ErrOrStderr(), projectTrailParentUpdateNotice(current, target.Change, selector, cmd.Flags().Changed("title")))
 			}
 			var out api.ProjectTrail
 			if _, err := target.Client.ProjectTrailRequest(cmd.Context(), http.MethodPatch, target.path(), patch, http.Header{"If-Match": {etag}}, &out); err != nil {
@@ -478,6 +460,99 @@ func newProjectTrailUpdateCmd() *cobra.Command {
 	addProjectTrailSelectorFlags(cmd)
 	addJSONFlag(cmd)
 	return cmd
+}
+
+// projectTrailUpdatePatch carries only the intent fields given on the command
+// line, so an omitted flag leaves that field as it is.
+func projectTrailUpdatePatch(cmd *cobra.Command, fields *projectTrailFields) api.ProjectTrailUpdateRequest {
+	var patch api.ProjectTrailUpdateRequest
+	for _, field := range []struct {
+		name  string
+		value *string
+		dest  **string
+	}{
+		{"title", &fields.Title, &patch.Title}, {"body", &fields.Body, &patch.Body},
+		{"status", &fields.Status, &patch.Status}, {"type", &fields.Type, &patch.Type}, {"priority", &fields.Priority, &patch.Priority},
+	} {
+		if cmd.Flags().Changed(field.name) {
+			*field.dest = field.value
+		}
+	}
+	return patch
+}
+
+// projectTrailUpdateAssignees is the complete assignee list to send: --assignee
+// replaces it, --add-assignee/--remove-assignee edit the current one, and an
+// empty result is sent as [] to clear it.
+func projectTrailUpdateAssignees(cmd *cobra.Command, current api.ProjectTrail, replace, add, remove []string) (*[]string, error) {
+	assignees := current.Assignees
+	if cmd.Flags().Changed("assignee") {
+		assignees = replace
+	}
+	if len(add) > 0 || len(remove) > 0 {
+		var err error
+		if assignees, err = mergeProjectTrailAssignees(cmd.Context(), current, add, remove); err != nil {
+			return nil, err
+		}
+	}
+	if assignees == nil {
+		assignees = []string{}
+	}
+	return &assignees, nil
+}
+
+// isProjectTrailSelector reports whether selector names the project trail
+// itself (a number or ULID) rather than one of its changes.
+func isProjectTrailSelector(selector string) bool {
+	if selector == "" {
+		return false
+	}
+	_, isChange := parseProjectTrailChangeSelector(selector)
+	return !isChange
+}
+
+// projectTrailParentUpdateNotice names the trail an update reached through a
+// change (no selector, --branch, or <repo>/<number>) writes to. Every update
+// field belongs to the project trail and is shared by all of its changes,
+// which a change selector or branch does not make obvious.
+// When the update sets a new title, the current one is about to go away, so
+// the notice names the trail by number only.
+func projectTrailParentUpdateNotice(trail api.ProjectTrail, change *projectTrailCurrentChange, selector string, retitling bool) string {
+	name := "trail " + trail.ID
+	if trail.Number > 0 {
+		name = fmt.Sprintf("trail #%d", trail.Number)
+	}
+	name = tuiutil.SanitizeDisplayLine(name)
+	if !retitling {
+		name += " \"" + tuiutil.SanitizeDisplayLine(trail.Title) + "\""
+	}
+	return fmt.Sprintf("Updating %s (parent of %s); these fields apply to the whole trail, not just this change.",
+		name, tuiutil.SanitizeDisplayLine(projectTrailChangeLabel(trail, change, selector)))
+}
+
+// projectTrailChangeLabel names the change an update reached: a
+// <repo>/<number> selector as given, else the trail's summary of that change
+// as <repo>/<number> or its branch.
+func projectTrailChangeLabel(trail api.ProjectTrail, change *projectTrailCurrentChange, selector string) string {
+	if _, ok := parseProjectTrailChangeSelector(selector); ok {
+		return selector
+	}
+	for _, c := range trail.Changes {
+		if c.ID != change.ID {
+			continue
+		}
+		repo := c.Repository
+		if repo == "" {
+			repo = change.Repo
+		}
+		if repo != "" && c.Number > 0 {
+			return fmt.Sprintf("%s/%d", repo, c.Number)
+		}
+		if c.Branch != "" {
+			return c.Branch
+		}
+	}
+	return "the selected change"
 }
 
 // Local creation publishes the branch, then links it atomically with intent.
