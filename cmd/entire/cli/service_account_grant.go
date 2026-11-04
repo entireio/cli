@@ -46,31 +46,15 @@ func resolveSATarget(ctx context.Context, c *coreapi.Client, sa saRef, repo, pro
 		r, err = resolveRepoPathResolved(ctx, c, repo)
 	} else {
 		// Bare names live in the account's project.
-		var projectID string
-		if projectID, err = saProjectID(ctx, c, sa); err == nil {
-			r, err = resolveRepoInProject(ctx, c, repo, projectID)
+		if sa.ProjectID == "" {
+			return saTarget{}, fmt.Errorf("service account %s names no project", sa.ID)
 		}
+		r, err = resolveRepoInProject(ctx, c, repo, sa.ProjectID)
 	}
 	if err != nil {
 		return saTarget{}, err
 	}
 	return saTarget{kind: saResourceRepo, id: r.ID, label: "repo " + resolvedRefLabel(repo, r)}, nil
-}
-
-// saProjectID returns the owning project's ID.
-func saProjectID(ctx context.Context, c *coreapi.Client, r saRef) (string, error) {
-	if r.ProjectID != "" {
-		return r.ProjectID, nil
-	}
-	sa, err := c.GetServiceAccount(ctx, coreapi.GetServiceAccountParams{AccountId: r.ID})
-	if err != nil {
-		return "", err
-	}
-	id := sa.ProjectID.Or("")
-	if id == "" {
-		return "", fmt.Errorf("service account %s names no project", r.ID)
-	}
-	return id, nil
 }
 
 func newSAGrantCmd() *cobra.Command {

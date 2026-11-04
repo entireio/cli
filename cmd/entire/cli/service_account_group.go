@@ -59,20 +59,29 @@ func saListRow(sa coreapi.ServiceAccountWithGrants) []string {
 type saRef struct {
 	ID string
 	// Name is <project>/<name>; empty for IDs.
-	Name string
-	// ProjectID is empty for a typed ID.
+	Name      string
 	ProjectID string
+	// record is set for a typed ID.
+	record *coreapi.ServiceAccount
 }
 
 func (r saRef) label() string {
 	return resolvedRefLabel(r.ID, resolvedRef{ID: r.ID, Name: r.Name})
 }
 
-// resolveSARef reads svc_<id> or <project>/<name>.
+// resolveSARef finds svc_<id> or <project>/<name>.
+// Both forms confirm the account exists.
 func resolveSARef(ctx context.Context, c *coreapi.Client, ref string) (saRef, error) {
 	ref = strings.TrimSpace(ref)
 	if id, ok := strings.CutPrefix(ref, saIDPrefix); ok && looksLikeULID(id) {
-		return saRef{ID: ref}, nil
+		sa, err := c.GetServiceAccount(ctx, coreapi.GetServiceAccountParams{AccountId: ref})
+		if err != nil {
+			if isCoreNotFound(err) {
+				return saRef{}, fmt.Errorf("no service account %s", ref)
+			}
+			return saRef{}, err
+		}
+		return saRef{ID: sa.AccountId, ProjectID: sa.ProjectID.Or(""), record: sa}, nil
 	}
 	project, name, err := parseSAPath(ref)
 	if err != nil {
@@ -207,6 +216,9 @@ func newSAGetCmd() *cobra.Command {
 				r, err := resolveSARef(ctx, c, args[0])
 				if err != nil {
 					return nil, err
+				}
+				if r.record != nil {
+					return r.record, nil
 				}
 				return c.GetServiceAccount(ctx, coreapi.GetServiceAccountParams{AccountId: r.ID})
 			})

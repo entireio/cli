@@ -298,19 +298,50 @@ func TestSAListGetDelete(t *testing.T) {
 		f, srv := newSAFakeCore(t)
 		_, err := runSA(t, srv.URL, "delete", saTestID)
 		require.ErrorContains(t, err, "refusing to delete")
-		require.Empty(t, f.callList())
+		require.NotContains(t, f.callList(), "DELETE "+saBase+"/"+saTestID)
 	})
+}
+
+// A missing typed ID is an error.
+//
+// Not parallel: swaps the package-level activeCoreClient seam.
+func TestSAMissingAccount(t *testing.T) {
+	cases := []struct {
+		name     string
+		args     []string
+		mutation string
+	}{
+		{"revoke", []string{"revoke", saTestID, "--repo", "web"}, "DELETE " + saBase + "/" + saTestID + "/grants/repo/" + saTestRepoID},
+		{"unbind", []string{"unbind", saTestID, saTestBindingID}, "DELETE " + saBase + "/" + saTestID + "/bindings/" + saTestBindingID},
+		{"delete", []string{"delete", saTestID, "--force"}, "DELETE " + saBase + "/" + saTestID},
+		{"grant", []string{"grant", saTestID, "--repo", "web", "--role", "reader"}, "POST " + saBase + "/" + saTestID + "/grants"},
+		{"bind", []string{"bind", saTestID, "--provider", "github-actions", "--pin", "repository=acme/web"}, saBindRoute},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f, srv := newSAFakeCore(t)
+			f.fail("GET "+saBase+"/"+saTestID, http.StatusNotFound, "service account not found", "")
+			_, err := runSA(t, srv.URL, tc.args...)
+			require.EqualError(t, err, "no service account "+saTestID)
+			require.NotContains(t, f.callList(), tc.mutation)
+		})
+	}
 }
 
 func TestResolveSARef_Grammar(t *testing.T) {
 	t.Parallel()
 
-	t.Run("a typed ID needs no lookup", func(t *testing.T) {
+	t.Run("a typed ID is looked up", func(t *testing.T) {
 		t.Parallel()
-		got, err := resolveSARef(t.Context(), nil, " "+saTestID+" ")
+		f, srv := newSAFakeCore(t)
+		c, err := coreapi.NewWithBearer(srv.URL, "tok")
 		require.NoError(t, err)
-		require.Equal(t, saRef{ID: saTestID}, got)
+		got, err := resolveSARef(t.Context(), c, " "+saTestID+" ")
+		require.NoError(t, err)
+		require.Equal(t, saTestID, got.ID)
+		require.Equal(t, saTestProjectID, got.ProjectID)
 		require.Equal(t, saTestID, got.label())
+		require.Equal(t, []string{"GET " + saBase + "/" + saTestID}, f.callList())
 	})
 
 	for _, ref := range []string{"ci", "acme/", "/ci", "svc_nope"} {
