@@ -255,9 +255,12 @@ func TestWorkingTrailWriteListsChangesInsteadOfGuessing(t *testing.T) {
 	assert.Equal(t, 1, openers)
 	assert.Equal(t, []string{"api"}, shared, "this clone's repository reuses its client; only api is opened")
 
-	// ready and retarget change the change they select too, so they ask the
-	// same way.
-	for _, args := range [][]string{{"ready", "42"}, {"retarget", "42", "--base", "main"}} {
+	// Every other command that changes the change it selects, or spends its
+	// agent budget, asks the same way.
+	for _, args := range [][]string{
+		{"ready", "42"}, {"retarget", "42", "--base", "main"},
+		{"update-branch", "42"}, {"ci-pr", "42"}, {"rerun-review", "42"},
+	} {
 		_, _, err := executeProjectTrailTest(t, args...)
 		require.Error(t, err, args[0])
 		require.Contains(t, err.Error(), "trail #42 has 2 open changes; choose one:", args[0])

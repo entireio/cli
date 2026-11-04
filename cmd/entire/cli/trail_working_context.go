@@ -150,6 +150,7 @@ func resolveProjectTrailWorkingContext(cmd *cobra.Command, selector, branch stri
 var trailChangeWriteCommands = map[string]bool{
 	"approve": true, "unlink": true, "merge": true,
 	"ready": true, "retarget": true,
+	"update-branch": true, "ci-pr": true, "rerun-review": true,
 }
 
 // finishForeignTrailWorkingContext opens the repository a sole change in
