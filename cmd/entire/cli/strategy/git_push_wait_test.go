@@ -146,6 +146,11 @@ func TestIsPushRaceRejection(t *testing.T) {
 		{"To https://github.com/o/r.git\n ! [remote rejected] main -> main (failed)\nerror: failed to push some refs", true},
 		{" ! [remote rejected] main -> main (missing necessary objects)\n", true},
 		{"remote: fatal error in commit_refs\n ! [remote rejected] x -> x (failure)", true},
+		// The checkpoint push's own --porcelain form.
+		{"To https://github.com/o/r.git\n!\trefs/entire/checkpoints/ab/c:refs/entire/checkpoints/ab/c\t[remote rejected] (failed)\nDone\n", true},
+		{"!\trefs/entire/x:refs/entire/x\t[remote rejected] (missing necessary objects)\n", true},
+		{"!\trefs/entire/x:refs/entire/x\t[remote rejected] (pre-receive hook declined)\n", false},
+		{"!\trefs/entire/x:refs/entire/x\t[rejected] (fetch first)\n", false},
 		{" ! [remote rejected] main -> main (pre-receive hook declined)\n", false},
 		{" ! [rejected]        main -> main (fetch first)\n", false},
 		{"fatal: unable to access 'https://github.com/o/r.git/': Could not resolve host", false},
@@ -167,7 +172,7 @@ func TestBatchPushCheckpointRefs_RetriesPushRaceRejection(t *testing.T) {
 	swapCheckpointRefsPush(t, func(context.Context, remote.PushOptions) (remote.PushResult, error) {
 		calls++
 		if calls == 1 {
-			return remote.PushResult{Output: " ! [remote rejected] refs/entire/x -> refs/entire/x (failed)\n"}, errors.New("git push: exit status 1")
+			return remote.PushResult{Output: "!\trefs/entire/x:refs/entire/x\t[remote rejected] (failed)\n"}, errors.New("git push: exit status 1")
 		}
 		return remote.PushResult{}, nil
 	})

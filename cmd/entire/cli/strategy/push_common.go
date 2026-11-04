@@ -255,8 +255,11 @@ var pushRaceRetryDelays = []time.Duration{time.Second, 2 * time.Second}
 
 // pushRaceRejection matches git's report of GitHub refusing a pack that arrived
 // within about a second of another push finishing: the refs are fine and the
-// same push lands when retried.
-var pushRaceRejection = regexp.MustCompile(`(?m)^ ! \[remote rejected\] .+ \((failed|missing necessary objects)\)$|fatal error in commit_refs`)
+// same push lands when retried. The checkpoint push runs with --porcelain
+// (tab-separated "!\t<src>:<dst>\t[remote rejected] (<reason>)"); the
+// human-readable form is matched too.
+var pushRaceRejection = regexp.MustCompile(`(?m)^!\t[^\t]*\t\[remote rejected\] \((failed|missing necessary objects)\)$` +
+	`|^ ! \[remote rejected\] .+ \((failed|missing necessary objects)\)$|fatal error in commit_refs`)
 
 func isPushRaceRejection(output string) bool {
 	return pushRaceRejection.MatchString(output)
