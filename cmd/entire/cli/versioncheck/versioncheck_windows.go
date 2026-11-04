@@ -18,7 +18,7 @@ func foldPathCase(p string) string { return strings.ToLower(p) }
 // auto-run. windowsInstallCmd is the bare stable form; arguments go through
 // windowsInstallWithArgs, the iex "& {...}" form that can bind them.
 const (
-	windowsInstallURL      = "https://entire.io/install.ps1"
+	windowsInstallURL      = "https://entire.com/install.ps1"
 	windowsInstallCmd      = "irm " + windowsInstallURL + " | iex"
 	windowsInstallWithArgs = `iex "& {$(irm ` + windowsInstallURL + `)} %s"`
 )

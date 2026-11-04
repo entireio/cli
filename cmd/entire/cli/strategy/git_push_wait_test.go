@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -163,7 +162,7 @@ func swapCheckpointRefsPush(t *testing.T, push func(context.Context, remote.Push
 	t.Cleanup(func() { pushCheckpointRefs, pushRaceRetryDelays = restorePush, restoreDelays })
 }
 
-func TestBatchPushRefs_RetriesPushRaceRejection(t *testing.T) {
+func TestBatchPushCheckpointRefs_RetriesPushRaceRejection(t *testing.T) {
 	calls := 0
 	swapCheckpointRefsPush(t, func(context.Context, remote.PushOptions) (remote.PushResult, error) {
 		calls++
@@ -172,17 +171,17 @@ func TestBatchPushRefs_RetriesPushRaceRejection(t *testing.T) {
 		}
 		return remote.PushResult{}, nil
 	})
-	require.NoError(t, batchPushRefs(t.Context(), "origin", []plumbing.ReferenceName{"refs/entire/x"}))
+	require.NoError(t, batchPushCheckpointRefs(t.Context(), "origin", []checkpointRefPush{{name: "refs/entire/x"}}))
 	assert.Equal(t, 2, calls)
 }
 
-func TestBatchPushRefs_DoesNotRetryOtherFailures(t *testing.T) {
+func TestBatchPushCheckpointRefs_DoesNotRetryOtherFailures(t *testing.T) {
 	calls := 0
 	swapCheckpointRefsPush(t, func(context.Context, remote.PushOptions) (remote.PushResult, error) {
 		calls++
 		return remote.PushResult{Output: " ! [rejected] refs/entire/x -> refs/entire/x (fetch first)\n"}, errors.New("git push: exit status 1")
 	})
-	require.Error(t, batchPushRefs(t.Context(), "origin", []plumbing.ReferenceName{"refs/entire/x"}))
+	require.Error(t, batchPushCheckpointRefs(t.Context(), "origin", []checkpointRefPush{{name: "refs/entire/x"}}))
 	assert.Equal(t, 1, calls)
 }
 

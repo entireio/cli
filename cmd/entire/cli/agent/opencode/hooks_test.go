@@ -31,7 +31,7 @@ func TestInstallHooks_FreshInstall(t *testing.T) {
 	}
 
 	// Verify plugin file was created
-	pluginPath := filepath.Join(dir, ".opencode", "plugins", "entire.ts")
+	pluginPath := filepath.Join(dir, ".opencode", "plugin", "entire.ts")
 	data, err := os.ReadFile(pluginPath)
 	if err != nil {
 		t.Fatalf("plugin file not created: %v", err)
@@ -45,8 +45,11 @@ func TestInstallHooks_FreshInstall(t *testing.T) {
 	if !strings.Contains(content, "hooks opencode") {
 		t.Error("plugin file does not contain 'hooks opencode'")
 	}
-	if !strings.Contains(content, "EntirePlugin") {
-		t.Error("plugin file does not contain 'EntirePlugin' export")
+	if !strings.Contains(content, `export default process.env.OPENCODE === "1" ? EntirePlugin : { id: "entire", server: EntirePlugin, setup: entireSetup }`) {
+		t.Error("plugin file does not export the OpenCode 1 and 2 entry points")
+	}
+	if strings.Contains(content, "export const") {
+		t.Error("plugin file has a named export; OpenCode 1 before v1.3 calls every export")
 	}
 	// Should use production command
 	if strings.Contains(content, "go run") {
@@ -87,7 +90,7 @@ func TestInstallHooks_SessionStartIsGuardedBySessionSwitch(t *testing.T) {
 		t.Fatalf("install failed: %v", err)
 	}
 
-	pluginPath := filepath.Join(dir, ".opencode", "plugins", "entire.ts")
+	pluginPath := filepath.Join(dir, ".opencode", "plugin", "entire.ts")
 	data, err := os.ReadFile(pluginPath)
 	if err != nil {
 		t.Fatalf("plugin file not created: %v", err)
@@ -130,7 +133,7 @@ func TestInstallHooks_TurnStartUsesSyncHook(t *testing.T) {
 		t.Fatalf("install failed: %v", err)
 	}
 
-	pluginPath := filepath.Join(dir, ".opencode", "plugins", "entire.ts")
+	pluginPath := filepath.Join(dir, ".opencode", "plugin", "entire.ts")
 	data, err := os.ReadFile(pluginPath)
 	if err != nil {
 		t.Fatalf("plugin file not created: %v", err)
@@ -163,7 +166,7 @@ func TestInstallHooks_AppliesContextInjection(t *testing.T) {
 		t.Fatalf("install failed: %v", err)
 	}
 
-	pluginPath := filepath.Join(dir, ".opencode", "plugins", "entire.ts")
+	pluginPath := filepath.Join(dir, ".opencode", "plugin", "entire.ts")
 	data, err := os.ReadFile(pluginPath)
 	if err != nil {
 		t.Fatalf("plugin file not created: %v", err)
@@ -209,7 +212,7 @@ func TestInstallHooks_MessageUpdatedFallsBackToSessionStart(t *testing.T) {
 		t.Fatalf("install failed: %v", err)
 	}
 
-	pluginPath := filepath.Join(dir, ".opencode", "plugins", "entire.ts")
+	pluginPath := filepath.Join(dir, ".opencode", "plugin", "entire.ts")
 	data, err := os.ReadFile(pluginPath)
 	if err != nil {
 		t.Fatalf("plugin file not created: %v", err)
@@ -236,7 +239,7 @@ func TestInstallHooks_MessageUpdatedFallsBackToTurnStart(t *testing.T) {
 		t.Fatalf("install failed: %v", err)
 	}
 
-	pluginPath := filepath.Join(dir, ".opencode", "plugins", "entire.ts")
+	pluginPath := filepath.Join(dir, ".opencode", "plugin", "entire.ts")
 	data, err := os.ReadFile(pluginPath)
 	if err != nil {
 		t.Fatalf("plugin file not created: %v", err)
@@ -286,7 +289,7 @@ func TestInstallHooks_RewritesWhenContentDiffers(t *testing.T) {
 
 	// Seed the render the removed local-dev mode used to write: a plugin that
 	// shells out to a script inside the working tree.
-	pluginPath := filepath.Join(dir, ".opencode", "plugins", "entire.ts")
+	pluginPath := filepath.Join(dir, ".opencode", "plugin", "entire.ts")
 	legacy := legacyLocalDevRender()
 	if err := os.WriteFile(pluginPath, []byte(legacy), 0o644); err != nil {
 		t.Fatal(err)
@@ -333,7 +336,7 @@ func TestUninstallHooks(t *testing.T) {
 		t.Fatalf("uninstall failed: %v", err)
 	}
 
-	pluginPath := filepath.Join(dir, ".opencode", "plugins", "entire.ts")
+	pluginPath := filepath.Join(dir, ".opencode", "plugin", "entire.ts")
 	if _, err := os.Stat(pluginPath); !os.IsNotExist(err) {
 		t.Error("plugin file still exists after uninstall")
 	}
@@ -377,7 +380,7 @@ func TestAreHooksInstalled(t *testing.T) {
 }
 
 // TestCheckHookConfig covers the drift states for the generated plugin file.
-// Same exposure as Pi's extension: .opencode/plugins/entire.ts is a generated
+// Same exposure as Pi's extension: .opencode/plugin/entire.ts is a generated
 // file repos commit so every clone is covered, and a committed copy goes stale
 // as the template evolves while AreHooksInstalled keeps returning true.
 func TestCheckHookConfig(t *testing.T) {
@@ -432,11 +435,115 @@ func TestCheckHookConfig(t *testing.T) {
 	}
 }
 
+func TestInstallHooks_ChildSessionsNeverFireLifecycleHooks(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	ag := &OpenCodeAgent{}
+	if _, err := ag.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("install failed: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, ".opencode", "plugin", "entire.ts"))
+	if err != nil {
+		t.Fatalf("plugin file not created: %v", err)
+	}
+	content := string(data)
+
+	// The child set is learned from parentID and consulted before the event switch.
+	learn := `if (event.type.startsWith("session.") && info?.parentID && info?.id) trackChild(info.id, info.parentID)`
+	guard := "if (eventSessionID && childSessions.has(eventSessionID)) return"
+	sw := "switch (event.type) {"
+	learnIdx, guardIdx, swIdx := strings.Index(content, learn), strings.Index(content, guard), strings.Index(content, sw)
+	if learnIdx == -1 || guardIdx == -1 || swIdx == -1 {
+		t.Fatalf("plugin missing child-session learn/guard/switch: %d %d %d", learnIdx, guardIdx, swIdx)
+	}
+	if learnIdx >= guardIdx || guardIdx >= swIdx {
+		t.Fatalf("child guard must run before the event switch: learn=%d guard=%d switch=%d", learnIdx, guardIdx, swIdx)
+	}
+	// A nested subagent's task part arrives on a child session, so it must be
+	// announced before the guard drops the child's events.
+	if announceIdx := strings.Index(content, "announceTask(props?.part)"); announceIdx == -1 || announceIdx >= guardIdx {
+		t.Fatalf("task parts must be announced before the child guard: announce=%d guard=%d", announceIdx, guardIdx)
+	}
+	// A background child's idle is a child event too.
+	if finishIdx := strings.Index(content, "finishBackgroundTask(props.sessionID)"); finishIdx == -1 || finishIdx >= guardIdx {
+		t.Fatalf("background completion must be checked before the child guard: finish=%d guard=%d", finishIdx, guardIdx)
+	}
+	// The one-time context injection is for the user's session only.
+	if !strings.Contains(content, "if (input?.sessionID && childSessions.has(input.sessionID)) return") {
+		t.Fatal("system.transform must not spend the parent's injection on a child session")
+	}
+}
+
+func TestInstallHooks_SubagentHooksFireFromParentTaskSignals(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	ag := &OpenCodeAgent{}
+	if _, err := ag.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("install failed: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, ".opencode", "plugin", "entire.ts"))
+	if err != nil {
+		t.Fatalf("plugin file not created: %v", err)
+	}
+	content := string(data)
+	for _, want := range []string{
+		// start: a task part, running, with the child ID bound, once per call key
+		`part?.type === "tool" && part.tool === "task"`,
+		`part.state?.status === "running"`,
+		`part.state?.metadata?.sessionId`,
+		`announcedTasks.has(key)`,
+		`const key = callKey(sessionID, part.callID)`,
+		// the child is learned here too, so a subagent-start we never saw
+		// session.created for is still suppressed
+		`trackChild(part.state.metadata.sessionId, sessionID)`,
+		`callHookSync("subagent-start", payload)`,
+		// nested: task parts in child sessions are announced before the child
+		// guard, and every task is reported on the top-level session
+		`announceTask(props?.part)`,
+		// an aborted or failed task never reaches tool.execute.after
+		`stopFailedTask(props?.part)`,
+		`session_id: topLevelSession(sessionID)`,
+		`session_id: topLevelSession(input.sessionID)`,
+		// stop: tool.execute.after for the task tool, synchronous
+		`"tool.execute.after": async (input, output) => {`,
+		`if (input.tool !== "task") return`,
+		`callHookSync("subagent-stop", payload)`,
+		// background: the stop is held until the child's own session goes idle
+		`if (output?.metadata?.background === true) {`,
+		`backgroundTasks.set(childID, [...(backgroundTasks.get(childID) ?? []), payload])`,
+		`else if (busySessions.delete(props.sessionID)) {`,
+		`else finishBackgroundTask(props.sessionID)`,
+		`finishBackgroundTask(props.sessionID)`,
+		`subagent_id: childID`,
+		`tool_use_id: input.callID`,
+		`trackChild(childID, input.sessionID)`,
+		// call start: recorded before the child exists, sent on both hooks so a
+		// resumed child's export can be cut to this call
+		`"tool.execute.before": async (input) => {`,
+		`const key = callKey(input.sessionID, input.callID)`,
+		`taskStartedAt.set(key, Date.now())`,
+		`taskStartedAt.get(key) ?? taskStartedAt.get(partKey) ?? part.state?.time?.start ?? 0`,
+		`started_at: startedAt`,
+		// a background result injected as a synthetic user part is not a prompt
+		`prompt: part.synthetic === true ? "" : (part.text ?? "")`,
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("plugin missing %q", want)
+		}
+	}
+	if strings.Contains(content, `callHook("subagent-start"`) {
+		t.Error("subagent-start must be synchronous: opencode run can exit before an async hook completes")
+	}
+	if strings.Contains(content, `callHook("subagent-stop"`) {
+		t.Error("subagent-stop must be synchronous: opencode run exits on the parent's idle right after")
+	}
+}
+
 // TestCommittedDogfoodPluginIsCurrent guards the copy of this plugin that the
 // repo commits for its own use against drifting from the template.
 func TestCommittedDogfoodPluginIsCurrent(t *testing.T) {
 	t.Parallel()
-	testutil.AssertCommittedDogfoodFile(t, ".opencode/plugins/entire.ts", renderPlugin())
+	testutil.AssertCommittedDogfoodFile(t, ".opencode/plugin/entire.ts", renderPlugin())
 }
 
 // TestPlugin_SpawnsHooksUnderNode is the #2014 canary: load the installed plugin
@@ -458,7 +565,7 @@ func TestPlugin_SpawnsHooksUnderNode(t *testing.T) {
 		t.Fatalf("install failed: %v", err)
 	}
 
-	pluginPath, err := filepath.Abs(filepath.Join(dir, ".opencode", "plugins", "entire.ts"))
+	pluginPath, err := filepath.Abs(filepath.Join(dir, ".opencode", "plugin", "entire.ts"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -481,7 +588,9 @@ func TestPlugin_SpawnsHooksUnderNode(t *testing.T) {
 import { pathToFileURL } from "node:url"
 
 const pluginPath = process.argv[2]
-const { EntirePlugin } = await import(pathToFileURL(pluginPath).href)
+// OPENCODE=1 is set as OpenCode 1 sets it, so the default export is the
+// OpenCode 1 plugin.
+const { default: EntirePlugin } = await import(pathToFileURL(pluginPath).href)
 const handlers = await EntirePlugin({ directory: process.cwd() })
 await handlers.event({
   event: {
@@ -502,7 +611,7 @@ await handlers.event({
 
 	cmd := exec.CommandContext(t.Context(), "node", "--experimental-strip-types", driverPath, pluginPath)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"), "OPENCODE=1")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("node canary failed: %v\n%s", err, out)
@@ -545,4 +654,163 @@ func hooksInstalledNow(t *testing.T, ag interface {
 		t.Fatalf("AreHooksInstalled() error = %v", err)
 	}
 	return installed
+}
+
+// writeLegacyPlugin puts a plugin where earlier CLIs installed it.
+func writeLegacyPlugin(t *testing.T, dir, content string) string {
+	t.Helper()
+	legacyDir := filepath.Join(dir, ".opencode", legacyPluginDirName)
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(legacyDir, pluginFileName)
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// An install moves an earlier CLI's plugin out of .opencode/plugins: newer
+// OpenCode loads both directories, and OpenCode 0.15 and 1.0.0 refuse to
+// start while .opencode/plugins exists at all.
+func TestInstallHooks_MovesLegacyPlugin(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	legacy := writeLegacyPlugin(t, dir, "// "+entireMarker+"\nold render\n")
+	ag := &OpenCodeAgent{}
+
+	if state := ag.CheckHookConfig(context.Background()); state != agent.HooksOutdated {
+		t.Errorf("state with only a legacy plugin = %v, want outdated", state)
+	}
+	if installed, err := ag.AreHooksInstalled(context.Background()); err != nil || !installed {
+		t.Errorf("legacy install not reported installed: %v, %v", installed, err)
+	}
+
+	n, err := ag.InstallHooks(context.Background(), false)
+	if err != nil || n != 1 {
+		t.Fatalf("install = %d, %v", n, err)
+	}
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Error("legacy plugin left in .opencode/plugins")
+	}
+	if _, err := os.Stat(filepath.Dir(legacy)); !os.IsNotExist(err) {
+		t.Error("empty .opencode/plugins left behind; OpenCode 0.15 and 1.0.0 refuse to start with it")
+	}
+	if state := ag.CheckHookConfig(context.Background()); state != agent.HooksCurrent {
+		t.Errorf("state after install = %v, want current", state)
+	}
+}
+
+// Only Entire's own file leaves .opencode/plugins: the user's plugins, and a
+// file there without Entire's marker, stay.
+func TestInstallHooks_LeavesUsersLegacyPlugins(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	ours := writeLegacyPlugin(t, dir, "// "+entireMarker+"\n")
+	theirs := filepath.Join(filepath.Dir(ours), "mine.ts")
+	if err := os.WriteFile(theirs, []byte("export const Mine = async () => ({})\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&OpenCodeAgent{}).InstallHooks(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(ours); !os.IsNotExist(err) {
+		t.Error("Entire's legacy plugin was not removed")
+	}
+	if _, err := os.Stat(theirs); err != nil {
+		t.Errorf("user's own plugin removed: %v", err)
+	}
+
+	dir2 := t.TempDir()
+	t.Chdir(dir2)
+	notOurs := writeLegacyPlugin(t, dir2, "// someone else's entire.ts\n")
+	if _, err := (&OpenCodeAgent{}).InstallHooks(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(notOurs); err != nil {
+		t.Errorf("an entire.ts without Entire's marker was removed: %v", err)
+	}
+}
+
+func TestUninstallHooks_RemovesLegacyPlugin(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	legacy := writeLegacyPlugin(t, dir, "// "+entireMarker+"\n")
+	if err := (&OpenCodeAgent{}).UninstallHooks(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Error("legacy plugin left after uninstall")
+	}
+}
+
+// On OpenCode 1, which loads .opencode/plugin and .opencode/plugins, the
+// plugin stands down while an older CLI's copy sits in .opencode/plugins, so
+// hooks do not fire twice. OpenCode finds .opencode by searching up from the
+// directory it was started in, so that also holds when it is started in a
+// subdirectory.
+func TestPlugin_StandsDownBesideLegacyCopy(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not installed")
+	}
+	for _, tt := range []struct {
+		name   string
+		legacy bool
+		subdir string
+		want   string
+	}{
+		{"alone", false, "", "hooks"},
+		{"beside a legacy copy", true, "", "none"},
+		{"started in a subdirectory", false, "cmd", "hooks"},
+		{"beside a legacy copy, started in a subdirectory", true, "cmd", "none"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			pluginDir := filepath.Join(dir, ".opencode", pluginDirName)
+			if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			pluginPath := filepath.Join(pluginDir, pluginFileName)
+			if err := os.WriteFile(pluginPath, []byte(renderPlugin()), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if tt.legacy {
+				writeLegacyPlugin(t, dir, "// "+entireMarker+"\n")
+			}
+			driver := `
+import { pathToFileURL } from "node:url"
+const { default: plugin } = await import(pathToFileURL(process.argv[2]).href)
+const handlers = await plugin({ directory: process.argv[3] })
+console.log(Object.keys(handlers).length > 0 ? "hooks" : "none")
+`
+			driverPath := filepath.Join(dir, "driver.mjs")
+			if err := os.WriteFile(driverPath, []byte(driver), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			directory := filepath.Join(dir, tt.subdir)
+			if err := os.MkdirAll(directory, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.CommandContext(t.Context(), "node", "--experimental-strip-types", driverPath, pluginPath, directory)
+			cmd.Env = append(os.Environ(), "OPENCODE=1")
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("node driver failed: %v", err)
+			}
+			if got := strings.TrimSpace(string(out)); got != tt.want {
+				t.Errorf("plugin = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+// OpenCode children are sessions of their own, so their usage is credited to
+// the parent at completion, including by the SessionEnd sweep.
+func TestOpenCodeIsChildSessionSubagents(t *testing.T) {
+	t.Parallel()
+	if _, ok := agent.AsChildSessionSubagents(NewOpenCodeAgent()); !ok {
+		t.Fatal("OpenCode must be agent.ChildSessionSubagents")
+	}
 }

@@ -23,20 +23,25 @@ type TrailParentReference struct {
 	Path                  string `json:"path"`
 	Jurisdiction          string `json:"jurisdiction"`
 	PrimaryProcessingCell string `json:"primary_processing_cell"`
+	URL                   string `json:"url,omitempty"`
 }
 
 // ProjectTrail is project intent, separate from branch-backed TrailResource.
 // Changes is absent from list responses. A detail is potentially access-filtered;
 // neither its changes nor its repoIds are an authoritative complete inventory.
 type ProjectTrail struct {
-	Project            *TrailProject   `json:"project,omitempty"`
-	GroupKey           string          `json:"groupKey,omitempty"`
-	ID                 string          `json:"id"`
-	ProjectID          string          `json:"projectId"`
-	Number             int             `json:"number"`
-	Title              string          `json:"title"`
-	Body               string          `json:"body"`
-	Status             string          `json:"status"`
+	Project   *TrailProject `json:"project,omitempty"`
+	GroupKey  string        `json:"groupKey,omitempty"`
+	ID        string        `json:"id"`
+	ProjectID string        `json:"projectId"`
+	Number    int           `json:"number"`
+	URL       string        `json:"url,omitempty"`
+	Title     string        `json:"title"`
+	Body      string        `json:"body"`
+	Status    string        `json:"status"`
+	// Phase is derived by the server on read (planning, building, complete,
+	// closed); it complements Status rather than replacing it.
+	Phase              string          `json:"phase,omitempty"`
 	Metadata           map[string]any  `json:"metadata"`
 	Type               string          `json:"type"`
 	Priority           string          `json:"priority"`
@@ -45,7 +50,7 @@ type ProjectTrail struct {
 	RepositoryIDs      []string        `json:"repoIds"`
 	AuthorAccountID    string          `json:"authorAccountId"`
 	CreatedAt          time.Time       `json:"createdAt"`
-	UpdatedAt          time.Time       `json:"updatedAt"`
+	LastActivityAt     time.Time       `json:"lastActivityAt,omitzero"`
 	ClosedAt           *time.Time      `json:"closedAt"`
 	Changes            []ChangeSummary `json:"changes,omitempty"`
 	IsPossiblyPartial  bool            `json:"isPossiblyPartial,omitempty"`
@@ -116,17 +121,15 @@ type ProjectTrailCreateRequest struct {
 	Changes       []ChangeCreateRequest `json:"changes,omitempty"`
 }
 
+// ChangeCreateRequest places a branch: its title is the branch name, and the
+// description, type, priority, and assignees belong to the project trail.
 type ChangeCreateRequest struct {
-	RepositoryID string   `json:"repositoryId"`
-	Title        string   `json:"title"`
-	Body         string   `json:"body,omitempty"`
-	BranchName   string   `json:"branchName,omitempty"`
-	BranchAction string   `json:"branchAction,omitempty"`
-	Base         string   `json:"base,omitempty"`
-	Status       string   `json:"status,omitempty"`
-	Assignees    []string `json:"assignees,omitempty"`
-	Priority     string   `json:"priority,omitempty"`
-	Type         string   `json:"type,omitempty"`
+	RepositoryID string `json:"repositoryId"`
+	Title        string `json:"title"`
+	BranchName   string `json:"branchName,omitempty"`
+	BranchAction string `json:"branchAction,omitempty"`
+	Base         string `json:"base,omitempty"`
+	Status       string `json:"status,omitempty"`
 }
 
 type ChangeCreateResponse struct {

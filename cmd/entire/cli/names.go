@@ -29,17 +29,20 @@ const (
 // same columns.
 const (
 	colHeaderBranch   = "BRANCH"
+	colHeaderChange   = "CHANGE"
 	colHeaderCloneURL = "CLONE URL"
 	colHeaderCluster  = "CLUSTER"
 	colHeaderGrantee  = "GRANTEE"
 	colHeaderName     = "NAME"
 	colHeaderProject  = "PROJECT"
 	colHeaderRegion   = "REGION"
+	colHeaderModel    = "MODEL"
 	colHeaderRepo     = "REPO"
 	colHeaderRole     = "ROLE"
 	colHeaderSource   = "SOURCE"
 	colHeaderStatus   = "STATUS"
 	colHeaderTitle    = "TITLE"
+	colHeaderURL      = "URL"
 	colHeaderType     = "TYPE"
 )
 

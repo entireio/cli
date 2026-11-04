@@ -539,7 +539,7 @@ func TestMigrateBranchToRefs_ReenqueuesAlreadyImportedRef(t *testing.T) {
 	first := refHash(t, repo, cid)
 
 	// Simulate a prior run that wrote the ref but lost its push-queue entry
-	// (a failed enqueue, or a crash between setRef and Enqueue): the ref exists
+	// (a failed enqueue, or a crash between setRef and EnqueueRef): the ref exists
 	// but nothing is queued for it.
 	refName, err := RefName(cid)
 	require.NoError(t, err)

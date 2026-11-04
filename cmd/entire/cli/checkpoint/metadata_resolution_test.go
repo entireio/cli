@@ -61,7 +61,7 @@ func TestPushQueueForRepoUsesLinkedWorktreeCommonDir(t *testing.T) {
 	queue, err := PushQueueForRepo(context.Background(), repo)
 	require.NoError(t, err)
 	ref := plumbing.NewBranchReferenceName("entire/linked-worktree")
-	require.NoError(t, queue.Enqueue(ref))
+	require.NoError(t, queue.EnqueueEntry(PushQueueEntry{Ref: ref}))
 
 	refs, err := NewPushQueue(filepath.Join(mainRoot, ".git")).Drain()
 	require.NoError(t, err)

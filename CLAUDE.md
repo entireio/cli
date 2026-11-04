@@ -40,7 +40,9 @@ at session start. Follow its related links when the task crosses those boundarie
 | External commands or agents | [External commands](docs/architecture/external-commands.md), [agent protocol](docs/architecture/external-agent-protocol.md) |
 | Security, privacy, scanners | [Security and privacy](docs/security-and-privacy.md), [implementation contracts](docs/development/checkpoint-implementation.md) |
 | Review command | [Review architecture](docs/architecture/review-command.md) |
+| Release artifacts, install scripts, version-check origins | [Release origins](docs/architecture/release-origins.md) |
 | E2E tests | [E2E guide](e2e/README.md) |
+| Complexity/coverage measurement and the CI complexity gate | [Complexity tooling](tools/complexity/README.md) |
 
 ## Verification
 
@@ -53,8 +55,9 @@ at session start. Follow its related links when the task crosses those boundarie
 | Format and lint | `mise run fmt && mise run lint` |
 | Before every commit | **`mise run check`** (format, lint, all CI tests) |
 | Before any push or remote code update | **`mise run lint` on the current tree**, after the latest formatting pass |
-| After every push to an open PR | **check the trail's findings** (`entire trail finding list cli/<n> --freshness any` with `ENTIRE_PROJECT_TRAILS=1`, else `entire trail finding list <n> --freshness any`; `<n>` is the PR branch's cli trail number, not the PR number); fix real ones, resolve with `-m`, and re-check after the fix lands. Not done until findings are clear |
+| After every push to an open PR | **check the trail's findings** (`entire trail finding list cli/<n> --freshness any`; `<n>` is the PR branch's cli trail number, not the PR number); fix real ones, resolve with `-m`, and re-check after the fix lands. Not done until findings are clear |
 | Duplication checks | `mise run dup` or `mise run dup:staged`; normal lint also checks duplication |
+| Complexity gate | `mise run complexity:gate`; CI fails a PR on functions over cognitive complexity 30 that are new or worsened against the merge base. The threshold is a gate flag (`COGNIT_WARN`), not a `.golangci.yaml` setting |
 | Windows installer | `mise run test:ps1`; see testing reference for prerequisites |
 
 **Do not run real-agent E2E tests unless the user explicitly requests them.** They
@@ -141,9 +144,13 @@ I/O beneath it.** Read the filesystem reference before adding or changing I/O.
   ignored/untracked directories. This is an implementation rule, not permission
   to run destructive git commands.
 - Git-relative paths resolve against `paths.WorktreeRoot`, never process CWD.
-- A git subprocess running inside a hook and targeting a repo via `Dir` or `-C`
-  must use `gitrepo.EnvWithoutRepoOverrides()`. User-invoked CWD commands instead
-  honor intentionally exported repo selectors.
+- A git subprocess targeting a repository independently of the current hook must
+  use `gitrepo.EnvWithoutRepoOverrides()`; `Dir` or `-C` alone does not override
+  inherited selectors. Queries inspecting the commit Git is preparing must retain
+  the hook environment, including its temporary `GIT_INDEX_FILE`. Hook queries
+  reading only the hook's own refs or reflog may strip selectors and resolve from
+  `paths.WorktreeRoot`. User-invoked CWD commands also honor intentionally
+  exported repo selectors.
 - PATH scanners use `execx.PathScanDirs()`; external-agent execution requires
   absolute binary paths. User-directory overrides use the checked `userdirs`
   resolvers before any I/O.

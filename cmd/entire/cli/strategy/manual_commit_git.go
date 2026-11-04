@@ -11,6 +11,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -46,9 +47,19 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 
 	// Hash the step's files before taking the session lock: it is a git
 	// subprocess, and the lock serializes every hook of this session.
-	worktreeRoot, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get worktree root: %w", err)
+	worktreeRoot := step.WorktreeRoot
+	if worktreeRoot == "" {
+		if worktreeRoot, err = paths.WorktreeRoot(ctx); err != nil {
+			return fmt.Errorf("failed to get worktree root: %w", err)
+		}
+	} else {
+		// The base comes from that worktree's HEAD, not the hook's.
+		stepRepo, openErr := gitrepo.OpenPath(worktreeRoot)
+		if openErr != nil {
+			return fmt.Errorf("failed to open the step's worktree: %w", openErr)
+		}
+		defer stepRepo.Close()
+		repo = stepRepo
 	}
 	changedFiles := make([]string, 0, len(step.ModifiedFiles)+len(step.NewFiles))
 	changedFiles = append(changedFiles, step.ModifiedFiles...)
@@ -65,6 +76,16 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 	recordedDeletions := withoutPaths(step.DeletedFiles, stagedOnlyDeletions(ctx, worktreeRoot, step.DeletedFiles))
 
 	mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+		// A step in a worktree other than the session's home records into
+		// that worktree's entry (see enterWorktreeView), never the home's.
+		if leave, inView := enterStepWorktree(ctx, state, worktreeRoot); inView {
+			defer leave()
+			if state.BaseCommit == "" {
+				if head, headErr := repo.Head(); headErr == nil {
+					state.BaseCommit = head.Hash().String()
+				}
+			}
+		}
 		invalidateStaleSubagentSnapshot(&step, state)
 		if err := syncBaseCommitToHead(ctx, repo, state); err != nil {
 			return err
@@ -89,7 +110,9 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 		// LastCheckpointID is intentionally NOT cleared here. It is set during
 		// condensation and used by handleAmendCommitMsg to restore checkpoint
 		// trailers on amend operations.
-		state.StepCount++
+		if !step.SameTurn {
+			state.StepCount++
+		}
 		state.FilesTouched = mergeFilesTouched(state.FilesTouched, step.ModifiedFiles, step.NewFiles, step.DeletedFiles)
 		applyTouchedFileHashes(state, changedFiles, stepFileHashes, recordedDeletions)
 		recordUntrackedDeletions(worktreeRoot, state, untrackedGone)
@@ -302,6 +325,30 @@ func applyTaskRecordCompletion(state *SessionState, rec session.TaskRecord) erro
 // their record. Returns false without error when a racing Final event already
 // completed the record, or when no session state exists.
 func CompleteTaskRecord(ctx context.Context, sessionID string, rec session.TaskRecord) (bool, error) {
+	return completeTaskRecord(ctx, sessionID, rec, nil)
+}
+
+// CompleteChildSessionTaskRecord is CompleteTaskRecord for a subagent that
+// runs as a session of its own, whose usage the parent's transcript never
+// carries (OpenCode child sessions). The completion that claims the record
+// also credits rec.TokenUsage to the session's ChildSessionTokens, unless an
+// earlier stop for the same call already did (State.CreditedChildCalls): a
+// stop repeated after condensation removed the record claims a fresh record,
+// but its usage is not counted twice. callStartedAt is the call start the
+// agent reported, zero when unknown.
+// The credit lands in the checkpoint that stores the child's task record,
+// except after an attach (see ConsumeAttachTokenWindow).
+func CompleteChildSessionTaskRecord(ctx context.Context, sessionID string, rec session.TaskRecord, callStartedAt time.Time) (bool, error) {
+	call := &session.CreditedChildCall{ToolUseID: rec.ToolUseID, AgentID: rec.AgentID}
+	if !callStartedAt.IsZero() {
+		call.StartedAtMs = callStartedAt.UnixMilli()
+	}
+	return completeTaskRecord(ctx, sessionID, rec, call)
+}
+
+// completeTaskRecord claims and completes rec's record. A non-nil credit
+// also credits rec.TokenUsage as a child session's usage, once per call.
+func completeTaskRecord(ctx context.Context, sessionID string, rec session.TaskRecord, credit *session.CreditedChildCall) (bool, error) {
 	completed := false
 	mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
 		if state.FindTaskRecord(rec.ToolUseID) == nil {
@@ -312,6 +359,9 @@ func CompleteTaskRecord(ctx context.Context, sessionID string, rec session.TaskR
 		}
 		if err := applyTaskRecordCompletion(state, rec); err != nil {
 			return err
+		}
+		if credit != nil && state.ClaimChildCallCredit(*credit) {
+			state.AddChildSessionTokens(rec.TokenUsage)
 		}
 		completed = true
 		return nil
@@ -332,7 +382,9 @@ func UpsertCompletedTaskRecord(ctx context.Context, sessionID string, rec sessio
 
 // UpsertCompletedTaskRecordTurn is UpsertCompletedTaskRecord for a producer
 // that reports usage per turn (Factory Droid Workers): rec.TokenUsage is this
-// turn's delta and is added to the record's usage rather than replacing it.
+// turn's delta and is added to the record's usage rather than replacing it,
+// and to the session's ChildSessionTokens. The caller's turn-end transition
+// claim makes each turn arrive here once.
 // Condensation removes a completed record once stored, so a later turn starts
 // a fresh record holding only usage no checkpoint has yet.
 func UpsertCompletedTaskRecordTurn(ctx context.Context, sessionID string, rec session.TaskRecord) error {
@@ -340,17 +392,24 @@ func UpsertCompletedTaskRecordTurn(ctx context.Context, sessionID string, rec se
 }
 
 func upsertCompletedTaskRecord(ctx context.Context, sessionID string, rec session.TaskRecord, addUsage bool) error {
+	turnUsage := rec.TokenUsage
 	return MutateSessionState(ctx, sessionID, func(state *SessionState) error {
 		if existing := state.FindTaskRecord(rec.ToolUseID); existing != nil {
 			rec.Files = mergeFilesTouched(existing.Files, rec.Files)
 			if addUsage && rec.TokenUsage != nil {
-				rec.TokenUsage = types.AddTokenUsage(existing.TokenUsage, rec.TokenUsage)
+				rec.TokenUsage = types.AddTokenUsage(existing.TokenUsage, turnUsage)
 			}
 		} else {
 			state.AddTaskRecord(launchStubTaskRecord(rec))
 		}
 		state.CompleteTaskRecord(rec.ToolUseID, time.Now())
-		return applyTaskRecordCompletion(state, rec)
+		if err := applyTaskRecordCompletion(state, rec); err != nil {
+			return err
+		}
+		if addUsage {
+			state.AddChildSessionTokens(turnUsage)
+		}
+		return nil
 	})
 }
 

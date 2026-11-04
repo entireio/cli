@@ -208,8 +208,8 @@ func emitGeminiAssistant(result *[]byte, base transcriptLine, msg geminiMessage,
 	line.ID = msg.ID
 	line.Content = contentJSON
 	if msg.Tokens != nil {
-		line.InputTokens = msg.Tokens.Input
-		line.OutputTokens = msg.Tokens.Output
+		line.InputTokens = int64(msg.Tokens.Input)
+		line.OutputTokens = int64(msg.Tokens.Output)
 	}
 	appendLine(result, line)
 }
@@ -248,7 +248,7 @@ func geminiToolResultCompact(tc geminiToolCall) json.RawMessage {
 		output = tc.Result[0].FunctionResponse.Response.Output
 	}
 
-	r := toolResultJSON{
+	r := ToolResult{
 		Output: output,
 		Status: ToolStatusSuccess,
 	}

@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/entireio/cli/redact"
 )
 
 // skillSlashCommandPattern matches a leading "/<command>" token up to the first
@@ -25,7 +27,9 @@ var filesystemRoots = map[string]struct{}{
 // SkillEventFromPromptSlashCommand returns a skill event for a prompt beginning
 // with a "/<command>" slash command. A recorded prompt only contains a slash
 // command that was submitted as a turn, so runtime/UI-only commands (/mcp,
-// /model, ...) are naturally absent; pasted filesystem paths are rejected.
+// /model, ...) are naturally absent. Pasted filesystem paths are rejected, and
+// so is a token redaction would change: the token becomes the event's name,
+// ID, command and label, which checkpoint metadata stores unredacted.
 //
 // Only the command token is stored, never the prompt body. Tool-call skills
 // (e.g. Claude Code's Skill tool) are captured separately by SkillEventExtractors
@@ -38,7 +42,7 @@ func SkillEventFromPromptSlashCommand(agentName, prompt string, timestamp time.T
 	}
 
 	token := strings.Trim(match[1], "/")
-	if token == "" || isFilesystemPath(match[1]) {
+	if token == "" || isFilesystemPath(match[1]) || redact.String(token) != token {
 		return SkillEvent{}, false
 	}
 

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -126,6 +127,20 @@ type State struct {
 	// Derived from .git/worktrees/<name>/, stable across git worktree move
 	WorktreeID string `json:"worktree_id,omitempty"`
 
+	// WorktreeIncarnation is the marker (strategy's worktreeIncarnation) of
+	// the linked worktree the session is homed in: "" for the main worktree,
+	// and for a session homed before markers were kept until its next turn
+	// starts at home. Git keeps the marker through `git worktree move` and
+	// reuses a removed worktree's ID and path, so the worktree holding it is
+	// the home wherever it now is, and one at the home's path without it is
+	// not.
+	WorktreeIncarnation string `json:"worktree_incarnation,omitempty"`
+
+	// RehomedAt is when a turn started in a worktree git had added at the
+	// session's home path after removing the home, making it the new home.
+	// Background task records launched before then ran in the removed one.
+	RehomedAt *time.Time `json:"rehomed_at,omitempty"`
+
 	// AdoptedIntoWorktreePath marks a source-side tombstone left behind after
 	// `entire session adopt` moves this session into another repository/worktree.
 	// Hook TurnStart must not reactivate tombstoned source records, otherwise the
@@ -205,10 +220,9 @@ type State struct {
 	LastInteractionTime *time.Time `json:"last_interaction_time,omitempty"`
 
 	// CaptureDegradedAt records when the session's most recent turn degraded
-	// capture because a worktree status scan breached its budget (new-file
-	// detection skipped, or the checkpoint itself skipped). Set at turn end,
-	// cleared by the next turn whose scans stay within budget. Surfaced as a
-	// warning by `entire status`.
+	// capture: a bounded capture operation exceeded its budget, or turn-end
+	// finalize left checkpoints with their provisional transcripts. Set at turn
+	// end, cleared by the next healthy turn, and surfaced by `entire status`.
 	CaptureDegradedAt *time.Time `json:"capture_degraded_at,omitempty"`
 
 	// StepCount is the number of checkpoints/steps created in this session.
@@ -273,6 +287,37 @@ type State struct {
 	// read, and records no content.
 	TouchedFileHashes map[string]string `json:"touched_file_hashes,omitempty"`
 
+	// OtherWorktrees records the session's edits in worktrees of the
+	// repository other than its home (WorktreePath), keyed by WorktreeKey of
+	// each worktree's git ID. FilesTouched and TouchedFileHashes above are the
+	// home's; a commit in another worktree matches and clears only that
+	// worktree's entry, so work in two worktrees never mixes. An agent
+	// launched in one worktree that edits another by absolute path records
+	// here. An older CLI that rewrites this state drops the map (those edits
+	// then simply aren't linked).
+	OtherWorktrees map[string]*WorktreeWork `json:"other_worktrees,omitempty"`
+
+	// LinkedByWorktreeEntry is set in memory, never stored, on a session that
+	// a commit's linking set holds only because it has an OtherWorktrees entry
+	// for the committing worktree: it links only a commit containing that
+	// entry's files.
+	LinkedByWorktreeEntry bool `json:"-"`
+
+	// InWorktreeView is set in memory, never stored, while the home fields
+	// (FilesTouched, TouchedFileHashes, BaseCommit, WorktreePath) hold another
+	// worktree's entry instead of the home's, for a commit in that worktree.
+	InWorktreeView bool `json:"-"`
+
+	// ViewHomePath is the home's WorktreePath while InWorktreeView, in memory
+	// only: the stored transcript and prompt copy stays in the home's .entire.
+	ViewHomePath string `json:"-"`
+
+	// HomeNotHere is set in memory, never stored, while a commit is processed
+	// in a worktree at the session's recorded home path that its home marker
+	// shows is not its home (git removed the home and added another there):
+	// the commit is handled as a guest's, leaving the home's base and files.
+	HomeNotHere bool `json:"-"`
+
 	// LastCheckpointID is the checkpoint ID from the most recent condensation.
 	// Used to restore the Entire-Checkpoint trailer on amend and to identify
 	// sessions that have been condensed at least once. Cleared on new prompt.
@@ -298,14 +343,18 @@ type State struct {
 	// normal agent execution.
 	AttachedManually bool `json:"attached_manually,omitempty"`
 
-	// ContextInjectionDecided records that the once-per-session model-context
-	// injection (e.g. the `entire trail` pointer) has been handled for this
-	// session, so the dispatcher does not re-inject on later turns. Set on the
-	// first normal turn regardless of whether anything was injected: the prompt
-	// path reads only clone-local cached trail enablement, and a missing/stale
-	// false cache fails closed (miss the hint) rather than retrying/spamming.
-	// Review/investigate sessions leave this false because they skip injection.
+	// ContextInjectionDecided records that the trails part of the
+	// once-per-session model-context injection has been decided for this
+	// session (injected when trails are enabled, skipped when they are not), so
+	// the dispatcher does not re-decide on later turns. An unknown trails cache
+	// leaves it false so a later turn can decide. Review/investigate sessions
+	// leave this false because they skip injection.
 	ContextInjectionDecided bool `json:"context_injection_decided,omitempty"`
+
+	// ContextInjectionBaseDone records that the base model-context injection
+	// (the `entire agent-help` pointer and standing rules) has been sent. It
+	// goes out on the first normal turn whether or not trails are decided yet.
+	ContextInjectionBaseDone bool `json:"context_injection_base_done,omitempty"`
 
 	// AgentType identifies the agent that created this session (e.g., "Claude Code", "Codex", "Cursor")
 	AgentType types.AgentType `json:"agent_type,omitempty"`
@@ -349,6 +398,24 @@ type State struct {
 
 	// SubagentTokensBaselineComplete records whether the baseline is exact.
 	SubagentTokensBaselineComplete *bool `json:"subagent_tokens_baseline_complete,omitempty"`
+
+	// ChildSessionTokens is the usage of subagents that run as sessions of
+	// their own (OpenCode child sessions, Factory AI Droid Workers), credited
+	// once per completion. The parent's transcript never carries it, so unlike
+	// TokenUsage.SubagentTokens it is summed rather than replaced by each
+	// turn's snapshot. TotalTokenUsage folds it into the subagent total.
+	ChildSessionTokens *agent.TokenUsage `json:"child_session_tokens,omitempty"`
+
+	// ChildSessionTokensBaseline is ChildSessionTokens at the last checkpoint
+	// window reset (RebaselineSubagentTokens); the difference is the share the
+	// next checkpoint stores (PendingChildSessionTokens).
+	ChildSessionTokensBaseline *agent.TokenUsage `json:"child_session_tokens_baseline,omitempty"`
+
+	// CreditedChildCalls lists the child task calls whose usage is already in
+	// ChildSessionTokens. It outlives the task records condensation removes,
+	// so a stop repeated after condensation is not credited again. Bounded to
+	// the most recent MaxCreditedChildCalls entries.
+	CreditedChildCalls []CreditedChildCall `json:"credited_child_calls,omitempty"`
 
 	// SkillEvents records explicit native skill signals observed during this session.
 	// Stored as sidecar metadata so consumers can collapse skill-related transcript events
@@ -450,6 +517,13 @@ type State struct {
 	// pointer ledger for subagent work. See TaskRecord.
 	TaskRecords []TaskRecord `json:"task_records,omitempty"`
 
+	// PendingTaskAttachments are completed task records whose write into an
+	// existing checkpoint failed at post-task (a foreground subagent that
+	// committed its own work). Each turn end retries them. They are not pending
+	// work: condensing one into another commit's checkpoint would misattribute
+	// it, so it is never materialized anywhere but its own checkpoint.
+	PendingTaskAttachments []TaskAttachment `json:"pending_task_attachments,omitempty"`
+
 	// SubagentInventory retains Codex child identities independently of task
 	// records so follow-up turns remain discoverable after materialization.
 	SubagentInventory []SubagentInventoryEntry `json:"subagent_inventory,omitempty"`
@@ -457,6 +531,14 @@ type State struct {
 	SubagentLedgerVersion uint64 `json:"subagent_ledger_version,omitempty"`
 	// SubagentInventoryComplete distinguishes exact empty from legacy unknown.
 	SubagentInventoryComplete *bool `json:"subagent_inventory_complete,omitempty"`
+}
+
+// TaskAttachment is a completed task record bound for an existing checkpoint.
+type TaskAttachment struct {
+	CheckpointID string     `json:"checkpoint_id"`
+	Record       TaskRecord `json:"record"`
+	// FailedRetries counts the turn ends whose write also failed.
+	FailedRetries int `json:"failed_retries,omitempty"`
 }
 
 type SubagentInventoryEntry struct {
@@ -794,7 +876,72 @@ func (s *State) HasTaskContent() bool {
 // ENDED classification, the zombie sweep, IsCondensableEndedSession — check
 // FullyCondensed themselves, as they always have.
 func (s *State) HasPendingWork() bool {
-	return s.StepCount > 0 || len(s.FilesTouched) > 0 || s.HasTaskContent()
+	return s.StepCount > 0 || s.HasPendingFiles() || s.HasTaskContent()
+}
+
+// HasPendingFiles reports whether files await a commit in any worktree: the
+// home's FilesTouched or any OtherWorktrees entry's.
+func (s *State) HasPendingFiles() bool {
+	if len(s.FilesTouched) > 0 {
+		return true
+	}
+	for _, work := range s.OtherWorktrees {
+		if work != nil && len(work.FilesTouched) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// PendingFileCount is the number of files awaiting a commit across every
+// worktree: len(PendingFiles()).
+func (s *State) PendingFileCount() int {
+	return len(s.PendingFiles())
+}
+
+// PendingFiles is the repository paths awaiting a commit across every
+// worktree (see HasPendingFiles), sorted. A path pending in two worktrees is
+// listed once: a checkpoint records the paths it touched, as a set of
+// repository paths, not per worktree.
+func (s *State) PendingFiles() []string {
+	files := slices.Clone(s.FilesTouched)
+	for _, work := range s.OtherWorktrees {
+		if work != nil {
+			files = append(files, work.FilesTouched...)
+		}
+	}
+	slices.Sort(files)
+	return slices.Compact(files)
+}
+
+// WorktreeWork is a session's record of edits in one worktree other than its
+// home: the same pair the home keeps in FilesTouched and TouchedFileHashes,
+// plus that worktree's HEAD when they were recorded, which stands in for the
+// home's BaseCommit.
+type WorktreeWork struct {
+	// Path is the worktree's root as git reports it from inside the worktree
+	// (rev-parse --show-toplevel), for logs and display; the map key is
+	// authoritative because it survives `git worktree move`.
+	Path              string            `json:"path,omitempty"`
+	BaseCommit        string            `json:"base_commit,omitempty"`
+	FilesTouched      []string          `json:"files_touched,omitempty"`
+	TouchedFileHashes map[string]string `json:"touched_file_hashes,omitempty"`
+	// Incarnation is the marker of the worktree the edits were made in
+	// (strategy's worktreeIncarnation): git reuses a removed worktree's ID, and
+	// a record whose marker no longer matches belongs to the removed one. Empty
+	// for the main worktree.
+	Incarnation string `json:"incarnation,omitempty"`
+}
+
+// WorktreeKey is the OtherWorktrees key for the worktree with git ID
+// worktreeID (paths.GetWorktreeID): the ID itself for a linked worktree, and
+// "/" — which no worktree ID can contain — for the main worktree, whose ID is
+// empty.
+func WorktreeKey(worktreeID string) string {
+	if worktreeID == "" {
+		return "/"
+	}
+	return worktreeID
 }
 
 // LiveTaskRecords returns the records not yet completed (CompletedAt zero) —
@@ -962,6 +1109,7 @@ func (s *State) AdvanceDisplayWindow(pos int) {
 // helper (resetCheckpointWindow) and attach. Session adoption deliberately does
 // not: it continues the source's token window.
 func (s *State) RebaselineSubagentTokens() {
+	s.ChildSessionTokensBaseline = s.ChildSessionTokens
 	// Legacy agents without a snapshot retain their existing window baseline.
 	if s.TokenUsage == nil && s.AgentType != agent.AgentTypeCodex {
 		return
@@ -978,6 +1126,101 @@ func (s *State) RebaselineSubagentTokens() {
 	complete := true
 	s.SubagentTokensBaseline = s.TokenUsage.SubagentTokens
 	s.SubagentTokensBaselineComplete = &complete
+}
+
+// MaxCreditedChildCalls bounds State.CreditedChildCalls. A repeated stop
+// arrives within moments of the first, so only recent calls need remembering.
+const MaxCreditedChildCalls = 256
+
+// CreditedChildCall identifies a child task call whose usage was credited to
+// ChildSessionTokens. ToolUseID is the task record key: the call ID, or a key
+// minted from it ("<callID>-...") when a provider reused the call ID.
+// StartedAtMs is the call's start in Unix milliseconds, 0 when unknown.
+type CreditedChildCall struct {
+	ToolUseID   string `json:"tool_use_id"`
+	AgentID     string `json:"agent_id,omitempty"`
+	StartedAtMs int64  `json:"started_at_ms,omitempty"`
+}
+
+// matches reports whether a stop for call repeats this credited call. It
+// mirrors the CLI's completion-record keying: the same child under the same
+// call ID (or a key minted from it), with the same start. An unknown start on
+// either side cannot tell a repeat from a new call on the child, so it
+// matches, as completion-record keying skips it rather than double count.
+func (c CreditedChildCall) matches(call CreditedChildCall) bool {
+	if c.AgentID != call.AgentID || !sameCallKey(c.ToolUseID, call.ToolUseID) {
+		return false
+	}
+	return c.StartedAtMs == 0 || call.StartedAtMs == 0 || c.StartedAtMs == call.StartedAtMs
+}
+
+func sameCallKey(a, b string) bool {
+	return a == b || strings.HasPrefix(a, b+"-") || strings.HasPrefix(b, a+"-")
+}
+
+// ClaimChildCallCredit records call as credited and reports true, or reports
+// false when an earlier stop already credited it. Callers check and credit in
+// the same session-state mutation.
+func (s *State) ClaimChildCallCredit(call CreditedChildCall) bool {
+	for _, credited := range s.CreditedChildCalls {
+		if credited.matches(call) {
+			return false
+		}
+	}
+	s.CreditedChildCalls = append(s.CreditedChildCalls, call)
+	if excess := len(s.CreditedChildCalls) - MaxCreditedChildCalls; excess > 0 {
+		s.CreditedChildCalls = slices.Clone(s.CreditedChildCalls[excess:])
+	}
+	return true
+}
+
+// AddChildSessionTokens adds a child session's usage to ChildSessionTokens.
+func (s *State) AddChildSessionTokens(usage *agent.TokenUsage) {
+	if !usageHasTokens(usage) {
+		return
+	}
+	s.ChildSessionTokens = types.AddTokenUsage(s.ChildSessionTokens, usage)
+}
+
+// PendingChildSessionTokens is the child-session usage no checkpoint has
+// stored yet: ChildSessionTokens since the last window reset. nil when none.
+func (s *State) PendingChildSessionTokens() *agent.TokenUsage {
+	pending := types.SubtractTokenUsage(s.ChildSessionTokens, s.ChildSessionTokensBaseline)
+	if !usageHasTokens(pending) {
+		return nil
+	}
+	return pending
+}
+
+// TotalTokenUsage is the session's token total for display: TokenUsage with
+// ChildSessionTokens folded into its subagent total.
+func (s *State) TotalTokenUsage() *agent.TokenUsage {
+	return WithChildSessionTokens(s.TokenUsage, s.ChildSessionTokens)
+}
+
+// WithChildSessionTokens returns usage with child added to its subagent
+// total, leaving usage itself untouched. usage is returned as is when child
+// holds no tokens.
+func WithChildSessionTokens(usage, child *agent.TokenUsage) *agent.TokenUsage {
+	if !usageHasTokens(child) {
+		return usage
+	}
+	var combined agent.TokenUsage
+	if usage != nil {
+		combined = *usage
+	}
+	combined.SubagentTokens = types.AddTokenUsage(combined.SubagentTokens, child)
+	return &combined
+}
+
+func usageHasTokens(usage *agent.TokenUsage) bool {
+	if usage == nil {
+		return false
+	}
+	if usage.InputTokens > 0 || usage.CacheCreationTokens > 0 || usage.CacheReadTokens > 0 || usage.OutputTokens > 0 || usage.APICallCount > 0 {
+		return true
+	}
+	return usageHasTokens(usage.SubagentTokens)
 }
 
 // IsStale returns true when a session hasn't seen interaction for longer than

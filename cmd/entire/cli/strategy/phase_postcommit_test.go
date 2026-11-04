@@ -704,7 +704,7 @@ func TestTurnEnd_Active_NoActions(t *testing.T) {
 	require.NoError(t, err)
 
 	// Call HandleTurnEnd — should be a no-op (no TurnCheckpointIDs)
-	err = s.HandleTurnEnd(context.Background(), state)
+	err = s.HandleTurnEnd(context.Background(), state, time.Time{})
 	require.NoError(t, err)
 
 	// Verify state is unchanged
@@ -1041,6 +1041,7 @@ func TestPostCommit_ActiveSession_CarryForward_PartialCommit(t *testing.T) {
 	require.NoError(t, err)
 
 	cpID := "cf1cf2cf3cf4"
+	recordStampedTrailer(context.Background(), id.MustCheckpointID(cpID))
 	commitMsg := "commit A and B\n\n" + trailers.CheckpointTrailerKey + ": " + cpID + "\n"
 	_, err = wt.Commit(commitMsg, &git.CommitOptions{
 		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
@@ -1139,6 +1140,7 @@ func TestPostCommit_UpgradedSession_CarryForwardWithoutRecordedHashes(t *testing
 	// The second half of half.txt stays in the worktree only.
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "half.txt"), []byte("first half\nsecond half\n"), 0o644))
 
+	recordStampedTrailer(context.Background(), id.MustCheckpointID("ab12cd34ef56"))
 	commitMsg := "partial commit\n\n" + trailers.CheckpointTrailerKey + ": " + "ab12cd34ef56" + "\n"
 	_, err = wt.Commit(commitMsg, &git.CommitOptions{
 		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
@@ -1191,6 +1193,7 @@ func TestPostCommit_HashedFileDeletedByCommit_NotCarriedForward(t *testing.T) {
 	require.NoError(t, s.saveSessionState(context.Background(), state))
 
 	testutil.RunGit(t, dir, "rm", "-q", "-f", "--", "doomed.txt")
+	recordStampedTrailer(context.Background(), id.MustCheckpointID("cd34ef56ab12"))
 	testutil.GitCommit(t, dir, "delete doomed.txt\n\n"+trailers.CheckpointTrailerKey+": "+"cd34ef56ab12")
 
 	require.NoError(t, s.PostCommit(context.Background()))
@@ -1257,6 +1260,7 @@ func TestPostCommit_ActiveSession_CarryForward_AllCommitted(t *testing.T) {
 	require.NoError(t, err)
 
 	cpID := "cf5cf6cf7cf8"
+	recordStampedTrailer(context.Background(), id.MustCheckpointID(cpID))
 	commitMsg := "commit A and B\n\n" + trailers.CheckpointTrailerKey + ": " + cpID + "\n"
 	_, err = wt.Commit(commitMsg, &git.CommitOptions{
 		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
@@ -1424,13 +1428,14 @@ func TestHandleTurnEnd_PartialFailure(t *testing.T) {
 	require.NoError(t, s.saveSessionState(context.Background(), state))
 
 	// Call HandleTurnEnd — should NOT return error (best-effort)
-	err = s.HandleTurnEnd(context.Background(), state)
+	err = s.HandleTurnEnd(context.Background(), state, time.Time{})
 	require.NoError(t, err,
 		"HandleTurnEnd should return nil even with partial failures (best-effort)")
 
-	// TurnCheckpointIDs should be cleared regardless of partial failure
-	assert.Empty(t, state.TurnCheckpointIDs,
-		"TurnCheckpointIDs should be cleared after HandleTurnEnd, even with errors")
+	assert.Equal(t, []string{"ffffffffffff"}, state.TurnCheckpointIDs,
+		"only the checkpoint that failed to write is kept for a repeated Stop")
+	assert.NotNil(t, state.CaptureDegradedAt,
+		"a checkpoint that failed to write keeps its provisional transcript, so capture degraded")
 
 	// Verify the 2 valid checkpoints were finalized with the full transcript
 	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
@@ -1447,8 +1452,9 @@ func TestHandleTurnEnd_PartialFailure(t *testing.T) {
 // TestFinalizeAllTurnCheckpoints_ScannerDegraded verifies that a degraded sole
 // scanner skips the finalize rewrite entirely: the provisional checkpoint's
 // transcript stays intact (no empty-transcript finalize), the call counts as
-// an error, and TurnCheckpointIDs is preserved so the next turn's fresh hook
-// process retries instead of orphaning the provisional checkpoints.
+// an error, and TurnCheckpointIDs is preserved so a repeated Stop process can
+// retry instead of orphaning the provisional checkpoints. The degraded exit
+// returns before the network phase, so a live deadline never comes into play.
 func TestFinalizeAllTurnCheckpoints_ScannerDegraded(t *testing.T) {
 	// No t.Parallel: t.Chdir plus redact's process-global scanner state.
 	workDir := setupGitRepo(t)
@@ -1486,10 +1492,11 @@ func TestFinalizeAllTurnCheckpoints_ScannerDegraded(t *testing.T) {
 
 	redact.WithScannerDegradedSole(t)
 
-	errCount := NewManualCommitStrategy().finalizeAllTurnCheckpoints(context.Background(), state)
+	errCount := NewManualCommitStrategy().finalizeAllTurnCheckpoints(context.Background(), state, time.Now().Add(time.Minute))
 	require.Equal(t, 1, errCount)
 	require.Equal(t, []string{testTrailerCheckpointID.String()}, state.TurnCheckpointIDs,
-		"TurnCheckpointIDs must survive a degraded finalize so a later process retries")
+		"TurnCheckpointIDs must survive a degraded finalize so a repeated Stop process can retry")
+	require.NotNil(t, state.CaptureDegradedAt, "a skipped finalize leaves the checkpoint provisional")
 
 	content, err := store.ReadSessionContent(context.Background(), testTrailerCheckpointID, 0)
 	require.NoError(t, err)
@@ -1569,7 +1576,7 @@ func setupSessionWithCheckpointAndFile(t *testing.T, s *ManualCommitStrategy, di
 // CheckpointTranscriptSize is compared in.
 func mustStoredTranscriptSize(t *testing.T, sessionID string) int64 {
 	t.Helper()
-	size, ok := storedTranscriptSize(context.Background(), sessionID)
+	size, ok := storedTranscriptSize(context.Background(), &SessionState{SessionID: sessionID})
 	require.True(t, ok, "stored transcript missing for %s", sessionID)
 	return size
 }
@@ -1625,6 +1632,7 @@ func commitFilesWithTrailer(t *testing.T, repo *git.Repository, dir, checkpointI
 		},
 	})
 	require.NoError(t, err, "commit with checkpoint trailer should succeed")
+	recordStampedTrailer(context.Background(), cpID)
 }
 
 // TestPostCommit_OldIdleSession_BaseCommitNotUpdated verifies that when an IDLE
@@ -1878,6 +1886,7 @@ func TestPostCommit_StaleActiveSession_NotCondensed(t *testing.T) {
 	require.NoError(t, err)
 
 	cpID := "de1de2de3de4"
+	recordStampedTrailer(context.Background(), id.MustCheckpointID(cpID))
 	commitMsg := "add new feature\n\n" + trailers.CheckpointTrailerKey + ": " + cpID + "\n"
 	_, err = wt.Commit(commitMsg, &git.CommitOptions{
 		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
@@ -1967,6 +1976,7 @@ func TestPostCommit_IdleSessionEmptyFilesTouched_NotCondensed(t *testing.T) {
 	require.NoError(t, err)
 
 	cpID := "f1f2f3f4f5f6"
+	recordStampedTrailer(context.Background(), id.MustCheckpointID(cpID))
 	commitMsg := "other work\n\n" + trailers.CheckpointTrailerKey + ": " + cpID + "\n"
 	_, err = wt.Commit(commitMsg, &git.CommitOptions{
 		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
@@ -2035,6 +2045,7 @@ func TestPostCommit_IdleSession_NoTranscriptFallbackForCarryForward(t *testing.T
 	require.NoError(t, err)
 
 	cpID := "a1a2a3a4a5a6"
+	recordStampedTrailer(context.Background(), id.MustCheckpointID(cpID))
 	commitMsg := "commit test.txt\n\n" + trailers.CheckpointTrailerKey + ": " + cpID + "\n"
 	_, err = wt.Commit(commitMsg, &git.CommitOptions{
 		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
@@ -2220,6 +2231,7 @@ func TestPostCommit_FullyCondensedEndedSession_SkippedOnNextCommit(t *testing.T)
 	require.NoError(t, err)
 	_, err = wt.Add("other.txt")
 	require.NoError(t, err)
+	recordStampedTrailer(context.Background(), id.MustCheckpointID("fc03fc03fc03"))
 	commitMsg := "second commit\n\n" + trailers.CheckpointTrailerKey + ": fc03fc03fc03\n"
 	_, err = wt.Commit(commitMsg, &git.CommitOptions{
 		Author: &object.Signature{
@@ -2353,6 +2365,7 @@ func TestPostCommit_ActiveSession_DifferentFilesThanCommit_ShouldCondense(t *tes
 	require.NoError(t, err)
 
 	cpID := "d1d2d3d4d5d6"
+	recordStampedTrailer(context.Background(), id.MustCheckpointID(cpID))
 	commitMsg := "Add git stats tools\n\n" + trailers.CheckpointTrailerKey + ": " + cpID + "\n"
 	_, err = wt.Commit(commitMsg, &git.CommitOptions{
 		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
@@ -2641,6 +2654,7 @@ func runEndedLingeringRecordNotCondensed(t *testing.T, s *ManualCommitStrategy, 
 	_, err = wt.Add("other-work.txt")
 	require.NoError(t, err)
 	cpID := id.MustCheckpointID("c1c1c1c1c1c1")
+	recordStampedTrailer(context.Background(), cpID)
 	commitMsg := "unrelated human commit\n\n" + trailers.CheckpointTrailerKey + ": " + cpID.String() + "\n"
 	_, err = wt.Commit(commitMsg, &git.CommitOptions{
 		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},

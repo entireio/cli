@@ -32,6 +32,9 @@ func TestFindingWritesUseCellContract(t *testing.T) {
 				w.Header().Set("Content-Type", "application/json")
 				switch r.Method + " " + r.URL.Path {
 				case "POST " + base + "/reviews":
+					if key := r.Header.Get("Idempotency-Key"); key != "review-retry-key" {
+						t.Errorf("Idempotency-Key = %q, want review-retry-key", key)
+					}
 					w.WriteHeader(http.StatusCreated)
 					_, _ = fmt.Fprint(w, `{"review_id":"review-example","repo_id":"repo_example","limits":{"max_comments_per_batch":10}}`)
 				case "POST " + base + "/reviews/review-example/comments":
@@ -46,7 +49,7 @@ func TestFindingWritesUseCellContract(t *testing.T) {
 			defer srv.Close()
 			client := api.NewClientWithBaseURL("tok", srv.URL)
 			client.SetTrailRoute("trail-example", base)
-			review, err := startTrailReview(t.Context(), client, "trail-example")
+			review, err := startTrailReview(t.Context(), client, "trail-example", "review-retry-key")
 			require.NoError(t, err)
 			file, line := "example.go", 2
 			comments, err := postTrailReviewFindingBatch(t.Context(), client, "trail-example", review.ReviewID, []api.TrailReviewCommentInput{{ClientID: "client-example", Location: api.TrailReviewLocationCreateRequest{Granularity: "line", FilePath: &file, StartLine: &line}}})
@@ -99,7 +102,7 @@ func TestFindingJSONPreservesKeysAndReturnsNextCursor(t *testing.T) {
 		t.Run(cursor, func(t *testing.T) {
 			t.Parallel()
 			var out bytes.Buffer
-			require.NoError(t, encodeTrailReviewJSON(&out, target, []api.TrailReviewComment{comment}, cursor, trailReviewCommentCounts{}))
+			require.NoError(t, encodeTrailReviewJSON(&out, target, []api.TrailReviewComment{comment}, cursor, trailReviewCommentCounts{}, nil))
 			var got map[string]json.RawMessage
 			require.NoError(t, json.Unmarshal(out.Bytes(), &got))
 			if cursor != "" {

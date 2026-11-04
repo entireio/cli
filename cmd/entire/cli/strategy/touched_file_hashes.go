@@ -295,11 +295,22 @@ func dropPhantomFilesTouched(worktreeRoot string, state *SessionState, stepPaths
 // its hash.
 //
 // Paths the current step names (changed or deleted) are left to the step.
+// A worktree other than the session's home is probed against the session's
+// record of that worktree, never the home's.
 // Reads session state without the lock; recordUntrackedDeletions re-checks
 // under it. Any error yields no candidates.
 func (s *ManualCommitStrategy) untrackedDeletionCandidates(ctx context.Context, worktreeRoot, sessionID string, stepChanged, stepDeleted []string) []string {
 	state, err := s.loadSessionState(ctx, sessionID)
-	if err != nil || state == nil || len(state.TouchedFileHashes) == 0 {
+	if err != nil || state == nil {
+		return nil
+	}
+	if !homedAt(state, worktreeRoot) {
+		// Probe that worktree against what the session recorded there.
+		if _, inView := enterWorktreeView(ctx, state, worktreeRoot); !inView {
+			return nil
+		}
+	}
+	if len(state.TouchedFileHashes) == 0 {
 		return nil
 	}
 	root, err := worktreedir.OpenAt(worktreeRoot)
@@ -371,6 +382,9 @@ func (s *ManualCommitStrategy) RecordVanishedUntrackedFiles(ctx context.Context,
 		return nil
 	}
 	err = MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+		if leave, inView := enterWorktreeView(ctx, state, worktreeRoot); inView {
+			defer leave()
+		}
 		before := maps.Clone(state.TouchedFileHashes)
 		recordUntrackedDeletions(worktreeRoot, state, candidates)
 		if maps.Equal(before, state.TouchedFileHashes) {
@@ -389,7 +403,7 @@ func (s *ManualCommitStrategy) RecordVanishedUntrackedFiles(ctx context.Context,
 // session lock that it still has a recorded content hash and is still absent
 // from the worktree.
 func recordUntrackedDeletions(worktreeRoot string, state *SessionState, candidates []string) {
-	if len(candidates) == 0 || len(state.TouchedFileHashes) == 0 {
+	if len(candidates) == 0 || len(state.TouchedFileHashes) == 0 || !homedAt(state, worktreeRoot) {
 		return
 	}
 	root, err := worktreedir.OpenAt(worktreeRoot)

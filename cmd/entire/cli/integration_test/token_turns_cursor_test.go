@@ -32,6 +32,8 @@ func tokenFields(u *agent.TokenUsage) [4]int {
 	return [4]int{u.InputTokens, u.OutputTokens, u.CacheReadTokens, u.CacheCreationTokens}
 }
 
+// addFields sums only the four fields these tests compare. Production code
+// sums token usage with types.AddTokenUsage, which also carries subagent totals.
 func addFields(a *agent.TokenUsage, b agent.TokenUsage) {
 	a.InputTokens += b.InputTokens
 	a.OutputTokens += b.OutputTokens

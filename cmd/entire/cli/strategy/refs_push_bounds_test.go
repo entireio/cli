@@ -659,7 +659,7 @@ func TestAdaptChunkSize_StallAfterProgressKeepsSize(t *testing.T) {
 	queue := checkpoint.NewPushQueue(t.TempDir())
 	require.NoError(t, queue.SetChunkSizeHint(50))
 
-	batch := chunkPushResult{landed: 100, stalled: []plumbing.ReferenceName{"refs/entire/checkpoints/aa/x"}}
+	batch := chunkPushResult{landed: 100, stalled: []checkpointRefPush{{name: "refs/entire/checkpoints/aa/x"}}}
 	adaptChunkSize(t.Context(), queue, 50, batch, false)
 
 	assert.Equal(t, 50, queue.ChunkSizeHint(checkpointRefPushChunkSize))

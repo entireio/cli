@@ -181,6 +181,12 @@ func FindMostRecentSessionInCurrentWorktree(ctx context.Context) string {
 	return mostRecentSessionID(sessionStatesForCurrentWorktree(ctx, states))
 }
 
+// sessionStatesForCurrentWorktree returns the sessions recorded as homed in
+// the current worktree, by path alone: it names a session rather than acting
+// on one, so it doesn't consult home markers (homeAt). A session whose home
+// was moved shows here once its next turn starts and follows the move, and
+// one whose home was removed and re-added at the same path still shows here
+// until its agent resumes in it or it ages out.
 func sessionStatesForCurrentWorktree(ctx context.Context, states []*SessionState) []*SessionState {
 	worktreePath, err := paths.WorktreeRoot(ctx)
 	if err != nil || worktreePath == "" {

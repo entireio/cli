@@ -13,6 +13,7 @@ type HooksFile = map[string]HookConfig
 // stale Entire entries that still carry them.
 type HookConfig struct {
 	Enabled        *bool           `json:"enabled,omitempty"`
+	SessionStart   []SimpleHandler `json:"SessionStart,omitempty"`
 	PreToolUse     []ToolHandler   `json:"PreToolUse,omitempty"`
 	PostToolUse    []ToolHandler   `json:"PostToolUse,omitempty"`
 	PreInvocation  []SimpleHandler `json:"PreInvocation,omitempty"`
@@ -30,7 +31,8 @@ type ToolHandler struct {
 // for the global title slot: a shell command.
 const hookTypeCommand = "command"
 
-// SimpleHandler is a direct handler entry used for PreInvocation, PostInvocation, and Stop.
+// SimpleHandler is a direct handler entry used for SessionStart, PreInvocation,
+// PostInvocation, and Stop.
 type SimpleHandler struct {
 	Type    string `json:"type,omitempty"`
 	Command string `json:"command"`
@@ -60,6 +62,15 @@ type CommonPayload struct {
 type ToolCall struct {
 	Name string          `json:"name"`
 	Args json.RawMessage `json:"args"`
+}
+
+// SessionStartPayload is the stdin payload for the SessionStart hook (agy
+// 1.1.1+). It carries only the common fields; modelName is the model the new
+// conversation starts on.
+type SessionStartPayload struct {
+	CommonPayload
+
+	ModelName string `json:"modelName"`
 }
 
 // PreToolUsePayload is the stdin payload for the PreToolUse hook.

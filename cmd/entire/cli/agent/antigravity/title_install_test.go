@@ -534,8 +534,8 @@ func TestInstallTitle_SerialisesOnTheSettingsLock(t *testing.T) {
 	go func() { done <- InstallTitleTee() }()
 
 	select {
-	case <-done:
-		t.Fatal("InstallTitleTee completed while another process held the settings lock")
+	case err := <-done:
+		t.Fatalf("InstallTitleTee completed while another process held the settings lock (err=%v)", err)
 	case <-time.After(200 * time.Millisecond):
 	}
 	release()

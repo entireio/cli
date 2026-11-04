@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +23,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
+	"github.com/entireio/cli/redact"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -982,6 +984,216 @@ func TestCondenseAndMarkFullyCondensed_ReusesReservedAttemptAfterInterruptedWrit
 	assert.True(t, state.FullyCondensed)
 }
 
+// A session that reserves a hex checkpoint ID under git-branch and condenses
+// after the primary switches to git-refs must end up on the checkpoint's own
+// ref, queued for push: git-refs pre-push never sends the v1 branch. In the
+// interrupted case, the first write already reached v1 before the switch.
+// Not parallel: sets ENTIRE_CHECKPOINTS_PRIMARY.
+func TestCondenseAndMarkFullyCondensed_HexReservedBeforeSwitchToRefsLandsOnItsRef(t *testing.T) {
+	for _, interrupted := range []bool{false, true} {
+		name := "reserved only"
+		if interrupted {
+			name = "first write reached v1"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir := setupGitRepo(t)
+			t.Chdir(dir)
+			t.Setenv("ENTIRE_CHECKPOINTS_PRIMARY", checkpoint.BackendTypeGitBranch)
+			ctx := context.Background()
+
+			repo, err := OpenRepository(ctx)
+			require.NoError(t, err)
+			defer repo.Close()
+
+			s := &ManualCommitStrategy{}
+			sessionID := "reserved-across-switch"
+			setupEndedSessionWithoutFiles(t, s, repo, dir, sessionID)
+
+			var reservedID id.CheckpointID
+			require.NoError(t, MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+				var err error
+				reservedID, _, err = ensureCondensationAttemptID(ctx, state)
+				return err
+			}))
+			require.NotEqual(t, id.KindULID, reservedID.Kind(), "a git-branch primary reserves a hex ID")
+			if interrupted {
+				staleState, err := s.loadSessionState(ctx, sessionID)
+				require.NoError(t, err)
+				_, err = s.CondenseSession(ctx, repo, reservedID, staleState, nil)
+				require.NoError(t, err)
+			}
+
+			t.Setenv("ENTIRE_CHECKPOINTS_PRIMARY", checkpoint.BackendTypeGitRefs)
+			require.NoError(t, s.CondenseAndMarkFullyCondensed(ctx, sessionID))
+
+			onRef, err := CheckpointRefExists(ctx, reservedID)
+			require.NoError(t, err)
+			require.True(t, onRef, "checkpoint %s must have its own ref after condensing under git-refs", reservedID)
+			waiting, err := CheckpointWaiting(ctx, reservedID)
+			require.NoError(t, err)
+			require.True(t, waiting, "checkpoint %s must be queued for push", reservedID)
+
+			stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
+			require.NoError(t, err)
+			summary, err := stores.Persistent.Read(ctx, reservedID)
+			require.NoError(t, err)
+			require.NotNil(t, summary)
+			require.Len(t, summary.Sessions, 1, "a retried condensation must not duplicate the session")
+		})
+	}
+}
+
+// reserveHexAndWriteToV1 reserves a hex checkpoint ID for a new ended session
+// under a git-branch primary and runs its first condensation write, which
+// reaches v1, without marking the session condensed: the interrupted case that
+// a later condensation retries.
+func reserveHexAndWriteToV1(t *testing.T, s *ManualCommitStrategy, dir, sessionID string) id.CheckpointID {
+	t.Helper()
+	ctx := context.Background()
+	t.Setenv("ENTIRE_CHECKPOINTS_PRIMARY", checkpoint.BackendTypeGitBranch)
+	repo, err := OpenRepository(ctx)
+	require.NoError(t, err)
+	defer repo.Close()
+	setupEndedSessionWithoutFiles(t, s, repo, dir, sessionID)
+	var reservedID id.CheckpointID
+	require.NoError(t, MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+		var err error
+		reservedID, _, err = ensureCondensationAttemptID(ctx, state)
+		return err
+	}))
+	require.NotEqual(t, id.KindULID, reservedID.Kind(), "a git-branch primary reserves a hex ID")
+	staleState, err := s.loadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	_, err = s.CondenseSession(ctx, repo, reservedID, staleState, nil)
+	require.NoError(t, err)
+	return reservedID
+}
+
+// Two clones can write to the same pre-switch checkpoint: this clone's
+// interrupted condensation, and a teammate who attached to the commit after the
+// switch and pushed the checkpoint's ref. Copying v1 again here would start an
+// unrelated history for that ref, and push recovery would then replay it over
+// the teammate's session. The retry must build on the teammate's ref instead.
+// Not parallel: changes the working directory and ENTIRE_CHECKPOINTS_PRIMARY.
+func TestCondenseAndMarkFullyCondensed_HexCheckpointATeammateCopiedBuildsOnTheirRef(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	bare := filepath.Join(root, "remote.git")
+	testutil.RunGit(t, root, "init", "--bare", "-q", bare)
+
+	dir := setupGitRepo(t)
+	testutil.RunGit(t, dir, "remote", "add", "origin", bare)
+	testutil.RunGit(t, dir, "push", "-q", "origin", "HEAD:refs/heads/main")
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	s := &ManualCommitStrategy{}
+	sessionID := "this-clone"
+	cid := reserveHexAndWriteToV1(t, s, dir, sessionID)
+	testutil.RunGit(t, dir, "push", "-q", "origin", paths.MetadataBranchName)
+	refName, err := checkpoint.RefName(cid)
+	require.NoError(t, err)
+
+	teammate := filepath.Join(root, "teammate")
+	testutil.RunGit(t, root, "clone", "-q", bare, teammate)
+	testutil.RunGit(t, teammate, "fetch", "-q", "origin",
+		"+refs/heads/"+paths.MetadataBranchName+":refs/heads/"+paths.MetadataBranchName)
+	t.Setenv("ENTIRE_CHECKPOINTS_PRIMARY", checkpoint.BackendTypeGitRefs)
+	t.Chdir(teammate)
+	paths.ClearWorktreeRootCache()
+	teammateRepo, err := gitrepo.OpenPath(teammate)
+	require.NoError(t, err)
+	teammateStores, err := checkpoint.Open(ctx, teammateRepo, checkpoint.OpenOptions{})
+	require.NoError(t, err)
+	require.NoError(t, teammateStores.Persistent.Write(ctx, checkpoint.ReservedSession(checkpoint.WriteOptions{
+		CheckpointID: cid,
+		SessionID:    "teammate",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte("teammate transcript")),
+		AuthorName:   "Teammate",
+		AuthorEmail:  "teammate@example.com",
+	})))
+	teammateRepo.Close()
+	testutil.RunGit(t, teammate, "push", "-q", "origin", refName.String())
+	teammateTip := testutil.RunGit(t, bare, "rev-parse", refName.String())
+
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	require.NoError(t, s.CondenseAndMarkFullyCondensed(ctx, sessionID))
+
+	localTip := testutil.RunGit(t, dir, "rev-parse", refName.String())
+	isAncestor := exec.CommandContext(ctx, "git", "merge-base", "--is-ancestor", strings.TrimSpace(teammateTip), strings.TrimSpace(localTip))
+	isAncestor.Dir = dir
+	isAncestor.Env = gitrepo.EnvWithoutRepoOverrides()
+	require.NoError(t, isAncestor.Run(), "the retried condensation must build on the teammate's ref")
+	repo, err := OpenRepository(ctx)
+	require.NoError(t, err)
+	defer repo.Close()
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
+	require.NoError(t, err)
+	summary, err := stores.Persistent.Read(ctx, cid)
+	require.NoError(t, err)
+	require.NotNil(t, summary)
+	require.Len(t, summary.Sessions, 2, "the checkpoint must keep the teammate's session and this clone's")
+}
+
+// When the remote cannot be asked whether the checkpoint already has a ref,
+// condensation leaves the session pending rather than copy blind, so a later
+// commit, session stop, or 'entire doctor' retries it.
+// Not parallel: changes the working directory and ENTIRE_CHECKPOINTS_PRIMARY.
+func TestCondenseAndMarkFullyCondensed_HexCheckpointStaysPendingWhenTheRemoteCannotBeAsked(t *testing.T) {
+	ctx := context.Background()
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	s := &ManualCommitStrategy{checkpointRefFetcher: func(context.Context, plumbing.ReferenceName) error {
+		return errors.New("ssh: connect to host example.com port 22: Operation timed out")
+	}}
+	sessionID := "offline"
+	cid := reserveHexAndWriteToV1(t, s, dir, sessionID)
+
+	t.Setenv("ENTIRE_CHECKPOINTS_PRIMARY", checkpoint.BackendTypeGitRefs)
+	require.NoError(t, s.CondenseAndMarkFullyCondensed(ctx, sessionID))
+
+	onRef, err := CheckpointRefExists(ctx, cid)
+	require.NoError(t, err)
+	assert.False(t, onRef, "no ref may be copied without asking the remote")
+	state, err := s.loadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	assert.False(t, state.FullyCondensed)
+	assert.Equal(t, cid, state.PendingCondensationID(), "the session must stay pending so it is retried")
+}
+
+// With checkpoint_push_remote naming a remote other than origin, origin cannot
+// prove a ref is absent. The copy's remote check must ask the elected remote,
+// or the condensation never finishes and the session stays pending forever.
+// Not parallel: changes the working directory and ENTIRE_CHECKPOINTS_PRIMARY.
+func TestCondenseAndMarkFullyCondensed_HexCheckpointCopiesWhenTheElectedPushRemoteIsNotOrigin(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	dir := setupGitRepo(t)
+	for _, name := range []string{"origin", "private"} {
+		bare := filepath.Join(root, name+".git")
+		testutil.RunGit(t, root, "init", "--bare", "-q", bare)
+		testutil.RunGit(t, dir, "remote", "add", name, bare)
+		testutil.RunGit(t, dir, "push", "-q", name, "HEAD:refs/heads/main")
+	}
+	writeSettingsJSON(t, dir, `{"enabled": true, "strategy_options": {"checkpoint_push_remote": "private"}}`)
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	s := &ManualCommitStrategy{}
+	sessionID := "private-push-remote"
+	cid := reserveHexAndWriteToV1(t, s, dir, sessionID)
+
+	t.Setenv("ENTIRE_CHECKPOINTS_PRIMARY", checkpoint.BackendTypeGitRefs)
+	require.NoError(t, s.CondenseAndMarkFullyCondensed(ctx, sessionID))
+
+	state, err := s.loadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	assert.True(t, state.FullyCondensed, "the elected remote can prove the ref is absent, so the copy must go ahead")
+	onRef, err := CheckpointRefExists(ctx, cid)
+	require.NoError(t, err)
+	assert.True(t, onRef, "checkpoint %s must have its own ref", cid)
+}
+
 func TestPrepareCommitMsg_ReusesReservedAttemptAfterSessionResume(t *testing.T) {
 	dir := setupGitRepo(t)
 	t.Chdir(dir)
@@ -1798,4 +2010,50 @@ func TestResolveTaskTranscriptPath_FindsWorkflowRunTranscript(t *testing.T) {
 
 	assert.Equal(t, want, resolveTaskTranscriptPath(state, "ae3d7b8f2930c8787"))
 	assert.Empty(t, resolveTaskTranscriptPath(state, "other"))
+}
+
+// A commit-less condense clears the files pending in other worktrees too, so
+// its checkpoint, the last record of them, must list them.
+func TestCondenseSessionByID_RecordsOtherWorktreesFiles(t *testing.T) { //nolint:paralleltest // uses t.Chdir
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "commitless-condense-other-worktree"
+	metadataDir := paths.SessionMetadataDirFromSessionID(sessionID)
+	testutil.WriteFile(t, dir, filepath.Join(metadataDir, paths.TranscriptFileName), testTranscriptPromptResponse)
+	testutil.WriteFile(t, dir, "test.txt", "agent content")
+	require.NoError(t, s.SaveStep(t.Context(), StepContext{
+		SessionID:     sessionID,
+		ModifiedFiles: []string{"test.txt"},
+		MetadataDir:   metadataDir,
+		CommitMessage: "Checkpoint 1",
+		AuthorName:    "Test",
+		AuthorEmail:   "test@test.com",
+		AgentType:     agent.AgentTypeClaudeCode,
+	}))
+	// A worktree git still lists: the salvage prunes records of removed ones.
+	elsewhere := filepath.Join(t.TempDir(), "elsewhere")
+	testutil.RunGit(t, dir, "worktree", "add", elsewhere, "-b", "elsewhere")
+	require.NoError(t, MutateSessionState(t.Context(), sessionID, func(state *SessionState) error {
+		state.OtherWorktrees = map[string]*session.WorktreeWork{
+			linkedKey(t, elsewhere): {Path: elsewhere, FilesTouched: []string{"elsewhere.go"}, Incarnation: mark(t, elsewhere)},
+		}
+		return nil
+	}))
+
+	require.NoError(t, s.CondenseSessionByID(t.Context(), sessionID))
+
+	state, err := s.loadSessionState(t.Context(), sessionID)
+	require.NoError(t, err)
+	require.Empty(t, state.OtherWorktrees)
+	require.False(t, state.HasPendingWork())
+	repo, err := OpenRepository(t.Context())
+	require.NoError(t, err)
+	defer repo.Close()
+	content, err := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()).ReadSessionContent(t.Context(), state.LastCheckpointID, 0)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"test.txt", "elsewhere.go"}, content.Metadata.FilesTouched)
 }

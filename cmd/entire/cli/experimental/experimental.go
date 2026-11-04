@@ -2,23 +2,34 @@
 //
 // Experimental commands stay fully runnable in every build; this package only
 // controls whether they appear in `entire help`. Developer builds (go build,
-// go run, mise) show them, grouped under an "Experimental commands:" help
-// section. Release builds (GoReleaser) hide them.
+// go run, mise) and nightlies show them, grouped under an "Experimental
+// commands:" help section. Stable release builds hide them.
 package experimental
 
-import "github.com/spf13/cobra"
+import (
+	"strings"
 
-// Visible controls whether experimental commands are shown in help. It is
-// stamped by GoReleaser via ldflags
-// (-X github.com/entireio/cli/cmd/entire/cli/experimental.Visible=false)
-// to hide them in shipped binaries. It defaults to "true", so every
-// non-release build (go build, go run, mise) shows them. The commands remain
-// experimental and fully runnable regardless of this flag — it only toggles
-// visibility.
-var Visible = "true"
+	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
+	"github.com/spf13/cobra"
+	"golang.org/x/mod/semver"
+)
 
 // IsVisible reports whether experimental commands are shown in help.
-func IsVisible() bool { return Visible != "false" }
+//
+// Visibility follows the build's resolved version rather than a separate
+// stamp, so every packager that stamps versioninfo.Version (GoReleaser,
+// nixpkgs, `go install @<tag>`) gets release behavior for free. Only a stable
+// release hides them; "dev", nightlies, and commit-stamped builds show them.
+// Call after versioninfo.Load() so the version is resolved.
+func IsVisible() bool { return !isStableRelease(versioninfo.Version) }
+
+// isStableRelease reports whether version is a canonical X.Y.Z release:
+// no prerelease segment (-nightly.*) and no build metadata (+<commit>).
+// Anything else, including a short "0.12" form, counts as a dev build.
+func isStableRelease(version string) bool {
+	tag := "v" + strings.TrimPrefix(version, "v")
+	return semver.IsValid(tag) && semver.Canonical(tag) == tag && semver.Prerelease(tag) == ""
+}
 
 // GroupID is the cobra group experimental commands are filed under.
 const GroupID = "experimental"

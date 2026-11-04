@@ -516,8 +516,15 @@ func isStaleLease(output string) bool {
 // unpushed (for example not yet OPF-redacted) checkpoint data stays local.
 func deleteFromRemoteV1(ctx context.Context, root string, cid id.CheckpointID, target CheckpointDeleteTarget) (DeleteOutcome, string, plumbing.Hash) {
 	tmpRef := plumbing.ReferenceName(FetchTmpRefPrefix + "checkpoint-delete/" + cid.String())
-	if err := fetchURLIntoTmpRef(ctx, root, target.URL, v1BranchRef.String(), tmpRef.String(), "checkpoint branch", true, checkpointRemoteForegroundFetchTimeout); err != nil {
+	// The tmp ref is this delete's own, so the lock need only cover the transfer.
+	fetchCtx, release, err := startForegroundFetch(ctx, root)
+	if err != nil {
 		return DeleteOutcomeFailed, err.Error(), plumbing.ZeroHash
+	}
+	fetchErr := fetchURLIntoTmpRef(fetchCtx, root, target.URL, v1BranchRef.String(), tmpRef.String(), "checkpoint branch", true, foregroundFetch)
+	release()
+	if fetchErr != nil {
+		return DeleteOutcomeFailed, fetchErr.Error(), plumbing.ZeroHash
 	}
 	repo, err := OpenRepository(ctx)
 	if err != nil {

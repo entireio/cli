@@ -3,8 +3,12 @@ package auth
 import (
 	"encoding/base64"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/entireio/cli/internal/entireclient/tokenstore"
+	"github.com/entireio/cli/internal/entireclient/userdirs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -161,4 +165,17 @@ func TestParseEnvToken(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), EnvTokenVar)
 	})
+}
+
+// ENTIRE_TOKEN skips the config.json check.
+func TestCheckTokenStoreConfig(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(userdirs.EnvConfigDir, dir)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"tokenstore": "file"}`), 0o600))
+
+	t.Setenv(EnvTokenVar, "")
+	require.NoError(t, CheckTokenStoreConfig())
+
+	require.NoError(t, os.Unsetenv(EnvTokenVar))
+	require.ErrorIs(t, CheckTokenStoreConfig(), tokenstore.ErrBadConfig)
 }

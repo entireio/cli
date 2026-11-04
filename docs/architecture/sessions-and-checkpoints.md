@@ -59,7 +59,7 @@ A checkpoint is only ever written in one form: the persistent record on `entire/
 | Pending (between commits) | `.git/entire-sessions/<id>.json` and `.entire/metadata/<id>/` | Step count, touched files and their blob hashes, task records; sanitized transcript copy and prompts |
 | Persistent (after commit) | `entire/checkpoints/v1` or `refs/entire/checkpoints/...` | Metadata, redacted transcripts, commit reference |
 
-Most persistent checkpoints are written when a commit condenses a session, but some have no commit: eager condensation at session end, `entire doctor` and the session sweeper, and snapshots from the hidden `entire checkpoint create`. Snapshots exist for sessions that change no files (research, planning, review), which no other path checkpoints; see [implementation contracts](../development/checkpoint-implementation.md).
+Most persistent checkpoints are written when a commit condenses a session, but some have no commit: eager condensation at session end, `entire doctor` and the session sweeper, and snapshots from the hidden `entire checkpoint create`. Doctor and sweep's ID-based salvage records the session's stored branch, refreshed at turn end only in its recorded home worktree (otherwise retaining the last recorded value), using its recorded worktree's repository when still registered and sharing the caller's resolved Git common directory; a removed or replaced worktree falls back to the caller's repository without borrowing its branch. Commit-driven condensation continues to record the committing worktree's HEAD branch. Snapshots exist for sessions that change no files (research, planning, review), which no other path checkpoints; see [implementation contracts](../development/checkpoint-implementation.md).
 
 ## Interface
 
@@ -202,25 +202,186 @@ identity matching or the pre-existing single-worktree fallback below: it
 condenses and links, but never mutates worktree-coupled state (`BaseCommit`)
 — that follows only the session's own worktree HEAD.
 
+**Edits are recorded per worktree** (`State.OtherWorktrees`). An agent
+launched in one worktree fires its hooks there even when it edits another by
+absolute path. At turn end the files the main transcript says the agent
+edited are grouped by the registered worktree they are in
+(`SplitEditsByWorktree`; the deepest for nested ones; edits outside every
+worktree, in `.git`/`.entire`, or already matching that worktree's HEAD don't
+count). The hook's own worktree records as it always has; every other
+worktree's files go to that worktree's entry (files, hashes, and its HEAD as
+the entry's base), keyed by git worktree ID so `git worktree move` keeps it.
+Git reuses a removed worktree's ID for the next one of the same name, so each
+entry also carries the marker Entire keeps in that worktree's git admin
+directory (`<common>/worktrees/<id>/entire-incarnation`), which move keeps
+and remove deletes. An entry whose marker no longer matches belongs to the
+removed worktree: it links nothing, the next edit there starts a fresh one,
+and turn-end pruning drops it.
+A worktree other than the home records only transcript-named files, never
+the rest of its status, so someone else's uncommitted work there is never
+claimed. One turn is one step and carries its tokens once, however many
+worktrees it touched.
+
+At commit time a session is judged by its record of the committing worktree
+(`enterWorktreeView`): that entry stands in for the home's files, hashes and
+base while prepare-commit-msg and post-commit run. A session that edited the
+worktree from elsewhere joins its linking set, but links only a commit that
+contains those files, on the no-TTY fast path too, unless process ancestry
+identifies it as the committer. A commit clears only the committing
+worktree's files (carry-forward stays within it); files still waiting in any
+worktree keep the session pending and the next checkpoint self-contained
+(`carryForwardRemainingFiles`), and the stored transcript is released only
+when nothing is pending anywhere. Entries for worktrees git no longer lists
+are pruned at turn end, at session end, and before a commit-less salvage
+(`CondenseSessionByID`), so a worktree removed after the last turn doesn't
+keep an ended session pending or fold its files into the salvage. Known effects: when one window is split across
+commits in two worktrees, the second checkpoint repeats the transcript (and
+transcript-derived tokens) from the start, as split commits always have, and
+hook-reported tokens go to the first; files written only through shell
+commands never appear in the transcript and aren't recorded for another
+worktree; an older CLI that rewrites the state drops the entries.
+
+**A linked home is known by its marker** (`State.WorktreeIncarnation`, the
+same `entire-incarnation` marker; "" for the main worktree). It is stamped
+when the session starts, adopts into a linked worktree, or, for a session
+homed before markers were kept, at its next turn at home. Hooks judge a
+worktree against it (`homeAt`) rather than by path alone: the worktree
+holding the marker is the home even after `git worktree move` — provided
+git's own record of it (`<admin>/gitdir`) names that worktree, so a copy
+isn't, and the recorded path is no longer a worktree — and one git added at
+the home's path after removing it is not. A moved home is followed: commit
+linking matches it as the home in memory, and post-commit and turn start
+store the new path under the session's lock, keeping `WorktreeID`. A
+re-added worktree's commits don't match the old session by path or as a
+sibling; identity can still link it, as a guest (`State.HomeNotHere`). When
+the session's own turn starts there (its agent resumed in it), it is
+re-homed: the removed worktree's pending files and hashes are dropped, the
+checkpoint window advances to the current transcript end with no steps
+pending, the marker and base are the new worktree's, and background tasks
+launched before then (`RehomedAt`) claim nothing there; tokens are kept.
+Adopting from a re-added source home drops the removed one's files. When
+the marker can't be checked (a git or filesystem failure) the path rule
+applies, so a transient error never stops the home linking; only a marker
+that differs, or a missing one in the worktree's admin directory, counts as
+proof for re-homing or dropping files. Turn-end recording (`homedAt`),
+caller resolution's worktree tier, and status/review counts stay path-based:
+they rely on turn start having followed or re-homed first. A sibling
+worktree's hook that runs between a move and the moved home's next hook
+still reads the stored transcript copy from the hook's own worktree.
+
+**Only the final trailer block links a saved commit** (`LinkedCheckpoints` in
+post-commit, attach and `explain --generate`). The message's last paragraph,
+after trailing blank and comment lines, links the commit when git's trailer
+grammar reads it as a trailer block (`trailers.ParseAllCheckpointsFromFinalTrailerBlock`):
+every line is a trailer (`Key: value`, with optional spaces before the colon),
+an indented continuation of one, or a comment line; a block holding a line git
+generates (`Signed-off-by: `, `(cherry picked from commit `) may also hold
+other lines, as long as trailers make up at least a quarter of it. The subject
+paragraph never counts, and only a line that is exactly an
+`Entire-Checkpoint:` trailer names a checkpoint. An ID anywhere else (pasted,
+quoted, indented, or mentioned in prose) is not the commit's link. The reader
+is Go, not `git interpret-trailers`, so a listing pays no subprocess per
+commit.
+
+- **Git config.** All of git's comment config is read by one function
+  (`gitCommentConfig`): `core.commentChar`, `core.commentString` (aliases; the
+  last one set wins), `commit.cleanup` and `commit.status` in one
+  `git config` call, plus `git --version` only under
+  `core.commentChar=auto`, whose rule changed in git 2.51. Only the
+  configured values count; the hooks cannot see `git commit --cleanup=<mode>`.
+  A saved commit is read first without a comment prefix, and with the
+  configured one (`#` under `auto`, as git's trailer grammar reads it) only
+  when that finds nothing and the message names a checkpoint. Prepare-commit-msg
+  reads the config once and reuses it in each step that needs it (squash,
+  redo, amend, stamping), as `git commit` itself reads its config once; it
+  and post-commit likewise ask for the git dir once. A failed read is not
+  kept, so the next step asks again. Each hook is its own process, so
+  prepare-commit-msg and post-commit each read for themselves.
+- **Read-only views.** `explain <commit>`, `explain --commit`, the branch
+  listing, the export and the review re-run guard read with `#` and no git
+  config (`CommitCheckpoint`): the final trailer block's last ID, or the
+  first ID anywhere when that block names none, since a squash commit can
+  carry its squashed commits' trailers in the body. `explain --checkpoint`
+  lists a commit under every ID that view reads from it (`CommitCheckpoints`).
+  Other read-only lookups (resume, status, attribution, review context,
+  dispatch, pending-checkpoint listings) still scan the whole message on
+  purpose: a squash merge made on a forge lists every squashed commit's
+  trailer in its body, and these lookups must find all of them. They never
+  write, so a body mention can make them show a checkpoint but cannot
+  redirect a commit's work into one; code that writes resolves through
+  `LinkedCheckpoints`.
+- **Stamp.** Prepare-commit-msg reads the draft as git will record it
+  (`preparedFinalTrailers`): git opens the editor unless the hooks run with
+  `GIT_EDITOR=:`, the comment prefix is the configured one or, under `auto`,
+  the one git picks for this message (read back from git's comment block when
+  `commit.status` lets git write one), everything from git's scissors line
+  down is cut, and comment lines are dropped only when git's cleanup drops
+  them. An ID in that draft's final trailer block counts as already stamped
+  (`stampedTrailer`) only when prepare recorded stamping it: each ID it stamps
+  (one it generates, or a session's reserved one) goes into
+  `entire-stamped-trailers.json` in the per-worktree git dir until the next
+  post-commit, which consumes it. The trailer an amend restores names an
+  existing checkpoint and is not recorded: post-commit condenses into it for
+  its owner without a stamp, and a record a cancelled amend left would let a
+  later commit naming it skip its own trailer. Prepare writes a trailer only once
+  its stamp is recorded (`recordStampedTrailer`). A draft that already names
+  another ID (pasted into `-m`, `-F` or a template) gets prepare's own trailer
+  after it.
+- **Placement.** Every trailer prepare writes (stamped, restored on amend,
+  inherited) goes above git's comment block in an editor message, so
+  `commit -v` cannot cut it off with the diff: the run of comment lines that
+  ends the message below a blank line, or the scissors line
+  (`addCheckpointTrailerAboveComments`). When that block would stay in the
+  commit below the trailer where git's trailer grammar does not skip it
+  (`auto` picked another prefix and the cleanup mode keeps comment lines), the
+  trailer goes below the block instead. A message git does not open in the
+  editor keeps its comment lines as written, so the trailer is appended.
+- **Explanation.** Below the stamped trailer prepare writes a comment saying
+  how to unlink the commit, only when git opens the editor and its cleanup
+  drops comment lines; otherwise git would record it. It never quotes the
+  session's prompt: the hooks cannot see `git commit --cleanup=<mode>`, so a
+  mode given there records the comment.
+- **Empty message.** Commit-msg removes Entire's trailer when the message
+  holds nothing else git will record (`hasUserContent`), so git aborts the
+  commit: comment lines count as git's cleanup treats them, everything from the
+  scissors line down never counts, and neither do `Signed-off-by:` lines,
+  which git's empty check skips.
+- **Condensation target.** Post-commit condenses into the last stamped ID the
+  commit links (`pickCondensationTarget`). A stamped ID that a paragraph added
+  below it (an editor, a `commit-msg` hook) moved out of the final trailer
+  block still counts: the stamp record, not its position, makes it the commit's.
+  Without one (an amend that kept or restored its trailer, a sequence
+  operation) it condenses only into the last linked ID
+  whose checkpoint exists, and only for the session that owns it
+  (`stampedByAnotherCommit`). It never creates a checkpoint prepare did not
+  stamp, so a teammate's checkpoint this clone has not fetched is never
+  created with local work. A message reused from another commit (`-C`, `-c`,
+  `--amend`) keeps its trailer and gets no stamp, so reusing a foreign one
+  leaves the commit unlinked; `entire attach` can link it.
+
 **Squashes inherit their trailers** (`inheritSquashedCheckpointTrailers`). A
 commit made while `git merge --squash` is in progress (SQUASH_MSG present in
-the per-worktree git dir) contains the squashed commits' work, so every
-`Entire-Checkpoint` trailer in SQUASH_MSG is carried into the message when
-missing when a staged path is one a commit Git recorded there changed; a file
-touched up before committing still counts. An abandoned squash can leave
+the per-worktree git dir) contains the squashed commits' work, so the
+checkpoints the squashed commits link are carried into the message's final
+trailer block when that block, read as git will record the message, lacks them
+(a copy indented in the body, as git seeds an editor squash message, does not count) when a staged path is one a squashed commit
+changed; a file touched up before committing still counts. The squashed commits
+are the ones SQUASH_MSG's unindented `commit <sha>` headers name (git indents
+their messages, so a body line naming a commit is not one), and each one's
+checkpoints are read from the recorded commit as `LinkedCheckpoints` reads it,
+so a checkpoint its body only mentions is not inherited. An abandoned squash can leave
 SQUASH_MSG behind; staged work on other paths therefore inherits nothing, and inherited trailers in Git's seeded message are
 removed. git only reports source `squash` when its seeded message is accepted;
 a squash committed with `-m` reports `message`, which used to run ordinary
 matching and either refuse or mint a fresh, empty checkpoint. Inherited
 trailers are links to checkpoints that already exist. Matching still runs, so
-work a session holds at squash time is stamped as its own trailer after the
-inherited ones, and post-commit condenses only into the trailer that has no
-checkpoint yet (`pickCondensationTarget`) among those prepare stamped: prepare
-records the inherited IDs in the per-worktree git dir, tied to the commit's
-parent (`recordInheritedTrailers`), so an inherited trailer whose checkpoint
-simply is not in this clone's store yet is never mistaken for a fresh one, rechecks whether that target appeared
-between selection and condensation, and never writes into an inherited one; a
-write into a checkpoint the session did not stamp for this commit is refused
+work a session holds at squash time is stamped as its own trailer, joined to
+the inherited ones so they stay in the final trailer block, and post-commit condenses only into the trailer prepare
+stamped (`pickCondensationTarget`). Prepare also records the inherited IDs in
+the per-worktree git dir, tied to the commit's parent
+(`recordInheritedTrailers`), so post-commit never writes into an inherited
+one, even when its checkpoint is not in this clone's store yet; a write into
+a checkpoint the session did not stamp for this commit is refused
 (`stampedByAnotherCommit`). Merge commits stay unlinked by design; the
 merged commits keep their own trailers.
 
@@ -232,8 +393,11 @@ last real reset left is where the dropped work starts. Dropped means only that
 tip reaches it: commits HEAD, a remote or another branch still reach (merged-in
 main, a teammate's commit an undone rebase brought in) are never inherited,
 while a backup branch pointing at the tip itself does not count. A dropped
-commit's trailers are carried into the new message when every staged file it
-changed has exactly the content it had at that tip, so an agent's ten commits
+commit's checkpoints, read as `LinkedCheckpoints` reads them, are carried into
+the new message's final trailer block when every staged file it
+changed has exactly the content it had at that tip (read from the index git is
+preparing the commit in, so `git commit -a` and path-limited commits compare
+what they commit), so an agent's ten commits
 redone as three logical ones keep every checkpoint, each on the commit that now
 holds its files, while one coincidentally identical file (a lockfile, an empty
 `__init__.py`, the same deletion) among rewritten ones inherits nothing. Commits
@@ -241,7 +405,27 @@ made since the reset keep the redo open only while each of them redid some of
 the dropped work; any other ref operation (checkout, merge, rebase, pull) ends
 it. Folding with `git reset --soft HEAD~1 && git commit --amend` inherits the
 folded commit's trailers too. Inherited trailers are links, exactly as for a
-squash, and are recorded so post-commit never condenses into one.
+squash, and are recorded so post-commit never condenses into one. Unlike a
+squash, the staged files a redo inherited for are no evidence of new session
+work: the reset put them back in the worktree and the next turn end records
+them as touched again, though the session did nothing new to them. A staged
+path counts as held only when the newest dropped commit that changed it
+carries a checkpoint this clone has (a trailer whose capture failed still
+links, but holds nothing) and the staged mode matches too. Session matching
+ignores held paths, so a commit that only redoes linked work gets no fresh
+trailer, and one that also stages other session work gets one for that work.
+Session matching reads the same rename-free staged paths the redo compared.
+Prepare records the held paths beside the inherited IDs. After a redo that
+stamps nothing and so condenses nothing, post-commit drops them from
+the touched files of this worktree's sessions when the commit holds the
+recorded content, as carry-forward would; other touched files, steps and
+transcript growth stay pending. When a fresh trailer is stamped, post-commit
+judges overlap without the redo, so a session that only redid work may fold
+into it: that keeps every stamped trailer resolvable (a stale ACTIVE or a
+read-only session can depend on it). The mid-turn agent fast path likewise
+still stamps on a partial redo: transcripts miss edits made through shell
+commands, so it cannot rule new work out. In both, a redundant checkpoint is
+preferred to a lost or dangling link.
 
 **Worktree matching** (always computed; the sole mechanism for commits with
 no recorded agent in their ancestry — human commits, detached runners): exact
@@ -367,7 +551,7 @@ commit has already condensed and removed the record is not captured.
 - **Workflow agent launch** (subagent-start, non-final): agents a Claude Code Workflow launches have no Agent call of their own — the Workflow's PostToolUse reports a run ID, not agents — so Claude Code's `SubagentStart` hook (installed with matcher `workflow-subagent`; other agent types are ignored at parse time too) records each one's in-flight record, keyed by its `agent_id` as both `ToolUseID` and `AgentID`. The launch is `SubagentLaunchIdempotent`: an existing record for that key is kept rather than replaced, so a repeated `SubagentStart` cannot reset the record while it is still in session state; once condensation has materialized and removed a completed record, a late repeat would start a new live one. Their transcripts live in `subagents/workflows/<runId>/agent-<id>.jsonl`. The stop's `agent_transcript_path` is used only when it is exactly that file for this session and agent inside the parent's session directory, with no link below it; otherwise it is dropped and the layout lookup applies. That file's run becomes the event's `SubagentRunID`: a resumed run reuses its agents' IDs, so its launch can find the earlier run's completed record and add none, and the stop then completes a record of its own (keyed `<agent_id>`, or `<agent_id>-<runId>` while that key is taken) unless a record already holds the same run's transcript, which makes it a repeated stop. The transcript resolvers (`paths.ResolveSubagentTranscriptPath`) probe every run for an agent ID; the session's `subagent_tokens` total counts only the runs the transcript (or, at import, the turn's transcript prefix) launched, named by the Workflow launch's structured `toolUseResult.runId` (`taskType: local_workflow`) or, as a fallback, its result's `Run ID:` lines (`paths.WorkflowRunAgentTranscripts`). A Workflow launched from inside a subagent names its run in that subagent's transcript, not the parent's, so its agents get task records but are not counted in the parent session's `subagent_tokens` — the same limit nested `Agent` subagents have.
 - **Forked skill launch** (post-task, non-final): a Claude Code skill with `context: fork` runs in an agent that Claude Code reports only in the Skill call's PostToolUse result (`status: "forked"`, `agentId`). Entire installs `PostToolUse[Skill]` → `post-task`, which records the launch under the Skill call's `tool_use_id` with that agent ID; the agent's `SubagentStop` completes it by agent ID. A result with `background: false` completes the record at once with files from the transcript only (`SubagentFilesFromTranscript`: no pre-task baseline exists for a Skill call); a missing `background` is treated as running. The agent can stop again when a background child wakes it; only the first stop updates the record.
 - **Foreground completion** (post-task, non-final): PostToolUse fires at true completion, so the record is created-and-completed in one step, files and transcript path attached. Claude Code's foreground `SubagentStop` arrives just *before* this PostToolUse, when no record exists yet, and is a no-op.
-- **SubagentStop (final, authoritative)**: the real completion signal for background tasks. Claude Code's payload carries `agent_id` but no `tool_use_id`, so `handleSubagentStopFinal` finds the record by `AgentID` (`FindTaskRecordByAgentID`, a live record before a completed one) and adopts its `ToolUseID`, which keys exactly-once completion and the checkpoint's `tasks/<tool_use_id>/` tree. It then completes the live record, bypassing any "no changes, skip" instinct: a read-only subagent (reviewer, search agent) still produced a transcript worth materializing. File attribution comes from the subagent's own transcript, never from a whole-worktree diff that would sweep in the parent's concurrent edits. Untracked files are the exception (`unrecordedNewFilesSinceLaunch`): a file created since launch (absent from the pre-task baseline) that no session in the worktree has recorded is claimed too, so a file a shell command created is not lost. Once the parent's next prompt starts it sits in that prompt's untracked baseline, and no later turn end would claim it. The accepted trade is that a file the user created while the parent was idle is claimed as well, which only adds a session link to the commit that carries it; files the parent's own turns or another session recorded are excluded. The claim is skipped when another background task in the worktree (`TaskRecord.Background`, set at a background launch and by every background stop, including one that creates its record) ran during this one, still live or completed after this task's launch: a new file could then be either task's, and the first to stop would take both. Shell-side modifications of tracked files and deletions are still under-captured here; the parent's next turn end picks up modified tracked files through git status. A record already completed (duplicate/racing Final event) is skipped. Known gap: a subagent continued with `SendMessage` gets a second `SubagentStart`/`SubagentStop` under the same `agent_id` but no new Agent call, so its stop finds the completed record and the resumed run's edits are not attributed to the task.
+- **SubagentStop (final, authoritative)**: the real completion signal for background tasks. Claude Code's payload carries `agent_id` but no `tool_use_id`, so `handleSubagentStopFinal` finds the record by `AgentID` (`FindTaskRecordByAgentID`, a live record before a completed one) and adopts its `ToolUseID`, which keys exactly-once completion and the checkpoint's `tasks/<tool_use_id>/` tree. It then completes the live record, bypassing any "no changes, skip" instinct: a read-only subagent (reviewer, search agent) still produced a transcript worth materializing. File attribution comes from the subagent's own transcript, never from a whole-worktree diff that would sweep in the parent's concurrent edits. Untracked files are the exception (`unrecordedNewFilesSinceLaunch`): a file created since launch (absent from the pre-task baseline) that no session in the worktree has recorded is claimed too, so a file a shell command created is not lost. Once the parent's next prompt starts it sits in that prompt's untracked baseline, and no later turn end would claim it. The accepted trade is that a file the user created while the parent was idle is claimed as well, which only adds a session link to the commit that carries it; files the parent's own turns or another session recorded are excluded. The claim is skipped when another background task in the worktree (`TaskRecord.Background`, set at every in-flight launch, which includes OpenCode's deferred launches, and by every background stop, including one that creates its record) ran during this one, still live or completed after this task's launch: a new file could then be either task's, and the first to stop would take both. Shell-side modifications of tracked files and deletions are still under-captured here; the parent's next turn end picks up modified tracked files through git status. A record already completed (duplicate/racing Final event) is skipped. Known gap: a subagent continued with `SendMessage` gets a second `SubagentStart`/`SubagentStop` under the same `agent_id` but no new Agent call, so its stop finds the completed record and the resumed run's edits are not attributed to the task.
 - **SessionEnd sweep** (`completeLiveTaskRecords`): a session closing with
   tasks still in flight completes every remaining live record, strictly
   **before** `endSessionNow` marks `PhaseEnded` and eagerly condenses, so the
@@ -375,6 +559,30 @@ commit has already condensed and removed the record is not captured.
 - **Factory Droid Workers** upsert (`UpsertCompletedTaskRecord`): a worker
   spans multiple turns, so repeat completions merge files into the same record
   instead of claiming exactly-once.
+- **OpenCode task tool**: `subagent-start` (parent task part bound to the child
+  session) records the in-flight marker via `DeferredCompletion`;
+  `subagent-stop` (`tool.execute.after`) completes the record through the
+  Final path with `CompletionWithoutLaunch`, so a start the plugin never saw
+  still completes. It declares no transcript: the capture exports the child
+  through `agent.SubagentTranscriptFetcher` (`opencode export`) after its skip
+  checks, declares it, and takes exact tokens from it — one export per stop. Child sessions fire no
+  lifecycle hooks of their own. A child resumed through the task tool's
+  `task_id` backs one record per call: the plugin's call start
+  (`Event.SubagentStartedAt`, which becomes the record's `StartedAt`) cuts the
+  declared export to that call's messages, so earlier calls' files and tokens
+  are not attributed twice. A background task (`background: true`) fires its
+  `subagent-stop` from the child's own idle rather than from the tool hook,
+  which returns at launch; nested calls (`subagent_depth > 1`) are recorded on
+  the top-level session. The SessionEnd sweep's capture of a task still in
+  flight fetches the same way, so that record keeps its files and tokens; a
+  failed fetch completes it transcript-unavailable and condensation tries
+  again. The record key is the task part's `callID`, mapped to a path-safe
+  key when it is not one. Some providers number calls per conversation, so a
+  later call can reuse a `callID` whose start the plugin then deduplicates:
+  its stop is matched to the records under that `callID` by child and call
+  start (`completionRecordKey`), and a new call gets a key of its own,
+  `<callID>-<child>[-<started_at ms>]`, rather than being skipped as a
+  duplicate (see the OpenCode `AGENT.md`).
 
 **Exactly-once completion.** Completion goes through
 `strategy.CompleteTaskRecord`: one `MutateSessionState` closure marks
@@ -394,7 +602,11 @@ still reaches a permanent checkpoint.
 
 **Materialization (condensation).** `materializeTaskRecords`
 (`manual_commit_condensation.go`) resolves each record's transcript — declared
-path first, agent-layout fallback — runs the same sanitize → externalize →
+path first, agent-layout fallback, and last an agent re-export through
+`agent.SubagentTranscriptFetcher` for agents whose subagents are fetchable
+sessions (OpenCode: a completed task whose stop hook's export failed; live
+records are not re-exported, and all re-exports share one budget) —
+runs the same sanitize → externalize →
 redact pipeline the session transcript gets
 (`prepareTaskTranscriptForStorage`), and writes
 `tasks/<tool-use-id>/{agent-<agent-id>.jsonl, task.json}` inside the parent
@@ -440,7 +652,18 @@ commits. The same predicate feeds `shouldCondenseWithOverlapCheck`'s
 overlap-check bypass, so the trigger and the condensation trust share one
 rule. The trailer's content guarantee is the materializer itself: the
 commit's condensation stores each record's transcript-so-far under the
-checkpoint's `tasks/` subtree, so no separate commit-time capture is needed.
+checkpoint's `tasks/` subtree (where one is on disk; an agent whose live
+transcript needs a re-export, OpenCode, gets it once the task completes), so
+no separate commit-time capture is needed. When another session also claims
+the committed files and the session (IDLE, or ACTIVE while its background
+subagent runs) has none of its own, it condenses only if a live record
+modified a committed file (`liveTaskFilesInCommit`):
+per the transcript on disk, or, for an agent with none yet, its own report
+(`agent.LiveSubagentFileReporter`) within 10s for all of a commit's
+sessions together (condensation's re-exports keep their own 30s per
+session). The check reads the whole running call, so while it
+runs, a later commit of the same file by another session credits the session
+again even when the subagent added nothing since.
 Ordinary idle commits with no task records are unaffected — they stay exactly
 as before.
 
@@ -505,10 +728,17 @@ same as keeping the current destination. An explicit remote flag is still
 honored without prompting and does not enable disabled pushing. Destination
 selection does not migrate, publish, or delete existing remote checkpoint data.
 Alternatives that still resolve to dedicated storage are not offered as
-ordinary named destinations. The closing destination report is printed only
-when the destination was touched (explicit flag, picker shown, or
-`--checkpoint-remote`) or is unusable; a healthy destination nobody asked about
-ends at `Ready.`, and the multi-remote ambiguity note covers the rest.
+ordinary named destinations. The closing destination report runs after every
+successful enable, with or without a terminal. It names the destination and
+follows it with a privacy notice: checkpoints contain the agent transcripts, a
+public destination makes them public, redaction is best effort, and how to stop
+uploads or move them to a private repository. An unusable destination is
+reported instead of the notice, unless pushes still upload to a dedicated
+`checkpoint_remote`, which the remote election does not gate; the notice then
+follows the report. How the destination was chosen, fan-out, and
+alternatives are reported only when the destination was touched (explicit flag,
+picker shown, or `--checkpoint-remote`); the multi-remote ambiguity note covers
+the rest.
 
 The pre-push hook carries checkpoint data only when the push targets the
 elected remote; pushes to any other remote or to a raw URL sync nothing, on
@@ -600,7 +830,10 @@ The marker rounds toward inclusion when a streaming message straddles the
 boundary (compaction merges same-ID fragments into one line that cannot be
 split), so the slice never drops this checkpoint's content but its head may
 repeat at most one merged line from the previous checkpoint — segmenters must
-tolerate that bounded overlap. A nil/absent `compact_transcript_start` marks a
+tolerate that bounded overlap. For an external agent that compacts its own
+format, the marker is the number of leading lines its compaction of the raw
+prefix shares byte-for-byte with the full compaction, which keeps the same
+inclusion rule when the plugin merges lines across the boundary. A nil/absent `compact_transcript_start` marks a
 legacy checkpoint whose `transcript.jsonl` holds only its own delta (pre-change
 CLI versions); read it as-is from line 0.
 
@@ -657,9 +890,17 @@ the compact transcript is regenerable from it.
   "branch": "main",
   "checkpoints_count": 3,
   "save_step_count": 3,
-  "files_touched": ["file1.txt", "file2.txt"]
+  "files_touched": ["file1.txt", "file2.txt"],
+  "redaction": {
+    "replacements": 3,
+    "layers": {"entropy": 2, "betterleaks": 1, "custom": 1, "pii": 0},
+    "custom_rules_active": 2,
+    "pii": {"EMAIL": 0}
+  }
 }
 ```
+
+`redaction` records what redaction replaced in the session's `full.jsonl`: placeholders written and matches per detection layer, never the values or custom rule names (see [Redaction counts in checkpoint metadata](../security-and-privacy.md#redaction-counts-in-checkpoint-metadata)). `full.jsonl` holds the whole session up to this checkpoint, so the counts grow across a session's checkpoints; take each session's latest checkpoint instead of adding them up. The example is abbreviated: every layer that ran is listed, with 0 when it found nothing. It is absent on checkpoints from older CLIs. The root `CheckpointSummary` carries the sum over its sessions under the same key, omitted when any session stored a transcript without counts.
 
 In session metadata, `checkpoints_count` is the displayed prompt-window count for that session. `save_step_count` records the session's turn-end steps (`StepCount`) and is the conservative "real checkpoint work happened" signal; it is omitted when zero (for example, commit-only/fallback sessions). `save_step_count` is not aggregated into the root `CheckpointSummary`.
 
@@ -879,7 +1120,7 @@ What it means for the domain model:
   none of a long session's content: any remaining checkpoint of that session
   can rebuild it. The command lists other local checkpoints of the same
   sessions (a local, capped scan) and deletes none of them; the session stays
-  visible on entire.io while any remain.
+  visible on entire.com while any remain.
 - **Token totals.** Each session entry stores the token delta since the previous
   condensation, so removing a checkpoint subtracts its delta from server-side
   session sums. Local `SessionState` token offsets, usage and baselines are

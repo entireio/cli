@@ -353,6 +353,36 @@ func TestDataBaseURL_FollowsEnvToken(t *testing.T) {
 	}
 }
 
+// Browser links go to the web app's origin, which is entire.com for an
+// entire.io API; API calls keep using DataBaseURL.
+func TestWebBaseURL(t *testing.T) {
+	cases := []struct {
+		name    string
+		apiBase string
+		webBase string
+		want    string
+	}{
+		{name: "entire.io apex", apiBase: "https://entire.io", want: "https://entire.com"},
+		{name: "entire.io cell", apiBase: "https://aws-us-east-2.api.entire.io", want: "https://entire.com"},
+		{name: "staging", apiBase: "https://partial.to", want: "https://partial.to"},
+		{name: "custom host used as-is", apiBase: "https://entire.example.com/", want: "https://entire.example.com"},
+		{name: "override wins", apiBase: "https://entire.io", webBase: "http://localhost:5173/", want: "http://localhost:5173"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("ENTIRE_API_BASE_URL", c.apiBase)
+			t.Setenv("ENTIRE_WEB_BASE_URL", c.webBase)
+			got, err := WebBaseURL()
+			if err != nil {
+				t.Fatalf("WebBaseURL: %v", err)
+			}
+			if got != c.want {
+				t.Fatalf("WebBaseURL = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
 func TestResolveDataAPI_SingleLoginIsSilent(t *testing.T) {
 	configDir := isolateCellClientEnv(t, "")
 	svc := tokenstore.CoreKeyringService(prodCoreURL)

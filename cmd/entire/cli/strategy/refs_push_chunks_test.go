@@ -17,10 +17,10 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 )
 
-func fakeRefNames(n int) []plumbing.ReferenceName {
-	refs := make([]plumbing.ReferenceName, 0, n)
+func fakeRefNames(n int) []checkpointRefPush {
+	refs := make([]checkpointRefPush, 0, n)
 	for i := range n {
-		refs = append(refs, plumbing.ReferenceName(fmt.Sprintf("refs/entire/checkpoints/%02x/x", i)))
+		refs = append(refs, checkpointRefPush{name: plumbing.ReferenceName(fmt.Sprintf("refs/entire/checkpoints/%02x/x", i))})
 	}
 	return refs
 }
@@ -36,7 +36,7 @@ func stallingPush(t *testing.T, stallRef plumbing.ReferenceName) *[]int {
 		sizes = append(sizes, len(opts.RefSpecs))
 		mu.Unlock()
 		for _, spec := range opts.RefSpecs {
-			if strings.HasPrefix(spec, stallRef.String()+":") {
+			if strings.HasSuffix(spec, ":"+stallRef.String()) {
 				<-ctx.Done()
 				return remote.PushResult{}, ctx.Err()
 			}
@@ -48,7 +48,7 @@ func stallingPush(t *testing.T, stallRef plumbing.ReferenceName) *[]int {
 
 // assertEveryRefAccounted: a chunked pass may land, stall or leave a ref
 // untried, but never drop one.
-func assertEveryRefAccounted(t *testing.T, refs, landed []plumbing.ReferenceName, res chunkPushResult) {
+func assertEveryRefAccounted(t *testing.T, refs, landed []checkpointRefPush, res chunkPushResult) {
 	t.Helper()
 	got := slices.Concat(landed, res.stalled, res.untried, res.failed)
 	assert.ElementsMatch(t, refs, got)
@@ -58,11 +58,11 @@ func assertEveryRefAccounted(t *testing.T, refs, landed []plumbing.ReferenceName
 // slow for one chunk should not stall every chunk behind it at the same size.
 func TestPushRefChunks_StallShrinksLaterChunks(t *testing.T) {
 	refs := fakeRefNames(14)
-	sizes := stallingPush(t, refs[0])
-	var landed []plumbing.ReferenceName
+	sizes := stallingPush(t, refs[0].name)
+	var landed []checkpointRefPush
 
 	res := pushRefChunks(t.Context(), "origin", refs, 8, 50*time.Millisecond, nil,
-		func(chunk []plumbing.ReferenceName) { landed = append(landed, chunk...) })
+		func(chunk []checkpointRefPush) { landed = append(landed, chunk...) })
 
 	assert.Equal(t, []int{8, 2, 2, 2}, *sizes)
 	assert.Equal(t, refs[:8], res.stalled)
@@ -72,11 +72,11 @@ func TestPushRefChunks_StallShrinksLaterChunks(t *testing.T) {
 
 func TestPushRefChunks_StallMidListDropsNoRef(t *testing.T) {
 	refs := fakeRefNames(13)
-	sizes := stallingPush(t, refs[4])
-	var landed []plumbing.ReferenceName
+	sizes := stallingPush(t, refs[4].name)
+	var landed []checkpointRefPush
 
 	res := pushRefChunks(t.Context(), "origin", refs, 4, 50*time.Millisecond, nil,
-		func(chunk []plumbing.ReferenceName) { landed = append(landed, chunk...) })
+		func(chunk []checkpointRefPush) { landed = append(landed, chunk...) })
 
 	assert.Equal(t, []int{4, 4, 2, 2, 1}, *sizes)
 	assert.Equal(t, refs[4:8], res.stalled)
@@ -96,7 +96,7 @@ func TestPushRefChunks_BeforeChunkRunsBetweenChunks(t *testing.T) {
 
 	pushRefChunks(t.Context(), "origin", refs, 2, 0,
 		func(context.Context) { events = append(events, "wait") },
-		func([]plumbing.ReferenceName) {})
+		func([]checkpointRefPush) {})
 
 	assert.Equal(t, []string{"push", "wait", "push", "wait", "push"}, events)
 }
@@ -111,7 +111,7 @@ func TestPushRefChunks_BeforeChunkPastBudgetStopsCleanly(t *testing.T) {
 
 	res := pushRefChunks(ctx, "origin", refs, 2, 0,
 		func(ctx context.Context) { <-ctx.Done() },
-		func([]plumbing.ReferenceName) {})
+		func([]checkpointRefPush) {})
 
 	assert.Equal(t, 2, res.landed)
 	assert.Empty(t, res.failed)

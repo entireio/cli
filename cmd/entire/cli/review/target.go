@@ -20,6 +20,12 @@ import (
 
 const envReviewFindingsWorktree = "ENTIRE_REVIEW_FINDINGS_WORKTREE"
 
+// envReviewTargetPrompt carries --prompt from a --target parent to its child
+// review. argv is readable by other local users through the process table;
+// the environment is readable only by the same user. The child honors it only
+// alongside envReviewFindingsWorktree, which marks a target child.
+const envReviewTargetPrompt = "ENTIRE_REVIEW_TARGET_PROMPT"
+
 // TargetWorktree describes the checkout prepared for a targeted review.
 // Created is false when the branch was already checked out and that existing
 // worktree is being reused.
@@ -74,18 +80,18 @@ func runTargetReview(ctx context.Context, cmd *cobra.Command, req targetReviewRe
 	if len(req.Positional) == 1 {
 		profileName = req.Positional[0]
 	}
-	var agents []string
+	var agents []TrustAgent
 	forwardProfile := ""
 	if req.ShowConfig {
 		agents = showConfigAgents(ctx, profileName, req.Gate.AgentOverride)
 	} else {
 		// Resolve the profile in the user's checkout, never the branch's worktree;
 		// the gate also needs its agents.
-		selection, selErr := resolveReviewProfile(ctx, cmd, profileName, deps)
+		selection, selErr := resolveReviewProfile(ctx, cmd, profileName, req.Gate.AgentOverride, deps)
 		if selErr != nil || selection.done {
 			return selErr
 		}
-		agents = profileAgentNames(selection.profile, req.Gate.AgentOverride)
+		agents = profileTrustAgents(selection.profile, req.Gate.AgentOverride)
 		if profileName == "" {
 			forwardProfile = selection.name
 		}
@@ -143,7 +149,7 @@ func runTargetReview(ctx context.Context, cmd *cobra.Command, req targetReviewRe
 		return wrapReviewSilentError(deps.NewSilentError, errors.New("review target moved"))
 	}
 
-	env := []string{envReviewFindingsWorktree + "=" + callerWorktree}
+	env := reviewTargetChildEnv(cmd, callerWorktree)
 	childArgs := reviewTargetChildArgs(cmd, req.Positional, resolved.HeadSHA, forwardProfile)
 	if err := runReviewInWorktree(ctx, deps.RunInWorktree, prepared.Path, childArgs, env, cmd.InOrStdin(), cmd.OutOrStdout(), errOut); err != nil {
 		return wrapReviewSilentError(deps.NewSilentError, err)
@@ -151,8 +157,33 @@ func runTargetReview(ctx context.Context, cmd *cobra.Command, req targetReviewRe
 	return finishTargetReview(ctx, cmd, prepared, req.CleanupWorktree, deps.RemoveTarget)
 }
 
-// reviewTargetChildFlagsDropped are handled by the parent only.
-var reviewTargetChildFlagsDropped = []string{"target", "cleanup-worktree", "show-config", "json", "trust-target"}
+// reviewTargetChildFlagsDropped are handled by the parent only, except
+// prompt, which reaches the child through envReviewTargetPrompt.
+var reviewTargetChildFlagsDropped = []string{"target", "cleanup-worktree", "show-config", "json", "trust-target", "prompt"}
+
+// reviewTargetChildEnv is the environment added for the child review.
+func reviewTargetChildEnv(cmd *cobra.Command, callerWorktree string) []string {
+	env := []string{envReviewFindingsWorktree + "=" + callerWorktree}
+	if flag := cmd.Flags().Lookup("prompt"); flag != nil && flag.Changed {
+		env = append(env, envReviewTargetPrompt+"="+flag.Value.String())
+	}
+	return env
+}
+
+// takeTargetChildPrompt returns the --prompt a --target parent passed through
+// envReviewTargetPrompt, and unsets it so reviewer agents don't inherit it.
+// Outside a target child the variable is ignored.
+func takeTargetChildPrompt() string {
+	prompt, ok := os.LookupEnv(envReviewTargetPrompt)
+	if !ok {
+		return ""
+	}
+	_ = os.Unsetenv(envReviewTargetPrompt)
+	if os.Getenv(envReviewFindingsWorktree) == "" {
+		return ""
+	}
+	return prompt
+}
 
 // reviewTargetChildArgs builds the re-run's arguments, forwarding the pinned
 // head as --trust-target and the chosen profile so the child never prompts.

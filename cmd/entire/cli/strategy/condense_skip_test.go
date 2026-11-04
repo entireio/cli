@@ -606,3 +606,20 @@ func getHeadHash(t *testing.T, repo *git.Repository) string {
 	require.NoError(t, err)
 	return head.Hash().String()
 }
+
+// A commit in another worktree that shares nothing with the session's record
+// of that worktree (its agent committed a shell edit, linked by ancestry)
+// falls back to the committed files as an empty record would; at home a
+// non-overlapping record still narrows to nothing.
+func TestFilterFilesTouched_WorktreeRecordWithoutOverlapFallsBack(t *testing.T) {
+	t.Parallel()
+	committed := map[string]struct{}{"g.txt": {}}
+
+	inView := &ExtractedSessionData{Transcript: []byte("x\n"), FilesTouched: []string{"f.txt"}}
+	filterFilesTouched(inView, committed, &SessionState{SessionID: "view", InWorktreeView: true})
+	require.Equal(t, []string{"g.txt"}, inView.FilesTouched)
+
+	atHome := &ExtractedSessionData{Transcript: []byte("x\n"), FilesTouched: []string{"f.txt"}}
+	filterFilesTouched(atHome, committed, &SessionState{SessionID: "home"})
+	require.Empty(t, atHome.FilesTouched)
+}

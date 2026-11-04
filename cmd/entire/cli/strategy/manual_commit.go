@@ -35,6 +35,10 @@ type ManualCommitStrategy struct {
 	// t.Parallel() makes a data race (CLAUDE.md: "Tests that modify
 	// process-global state cannot be parallelized").
 	blobFetchBudget time.Duration
+
+	// checkpointRefFetcher overrides the hook ref fetcher in tests. Production
+	// uses remote.HookCheckpointRefFetcher.
+	checkpointRefFetcher checkpoint.RefFetchFunc
 }
 
 // getStateStore returns the session state store, initializing it lazily if needed.
@@ -51,8 +55,21 @@ func (s *ManualCommitStrategy) getStateStore(_ context.Context) (*session.StateS
 	return s.stateStore, s.stateStoreErr
 }
 
+// getCheckpointStores opens the strategy's checkpoint stores. Condensation
+// writes through them without fetching the checkpoint's ref first, so a copy of
+// a pre-switch checkpoint from v1 asks the remote first, through the elected
+// chain so the elected remote can prove the ref absent.
 func (s *ManualCommitStrategy) getCheckpointStores(ctx context.Context, repo *git.Repository) (*checkpoint.Stores, error) {
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: s.blobFetcher, ReadRemotes: CheckpointReadRemotes(ctx)})
+	resolution := CheckpointReadRemotesWithElection(ctx)
+	legacyCopyRefFetcher := s.checkpointRefFetcher
+	if legacyCopyRefFetcher == nil {
+		legacyCopyRefFetcher = remote.HookCheckpointRefFetcherFrom(resolution.Candidates, resolution.ElectionErr)
+	}
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{
+		BlobFetcher:          s.blobFetcher,
+		ReadRemotes:          resolution.Candidates,
+		LegacyCopyRefFetcher: legacyCopyRefFetcher,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}
@@ -82,6 +99,15 @@ func (s *ManualCommitStrategy) SetBlobFetcher(f checkpoint.BlobFetchFunc) {
 	s.blobFetcher = f
 }
 
+// hookRefFetcher returns the bounded, non-interactive checkpoint-ref probe for
+// git hooks, or the test override.
+func (s *ManualCommitStrategy) hookRefFetcher() checkpoint.RefFetchFunc {
+	if s.checkpointRefFetcher != nil {
+		return s.checkpointRefFetcher
+	}
+	return remote.HookCheckpointRefFetcher()
+}
+
 // hookCheckpointStoreOptions is the store envelope for a git-hook read: the
 // bounded ref probe, the bounded blob fetch, and the read-candidate chain. The
 // two bounds live together because a hook that has one and not the other still
@@ -90,7 +116,7 @@ func (s *ManualCommitStrategy) SetBlobFetcher(f checkpoint.BlobFetchFunc) {
 // that exists as missing.
 func (s *ManualCommitStrategy) hookCheckpointStoreOptions(ctx context.Context) checkpoint.OpenOptions {
 	return checkpoint.OpenOptions{
-		RefFetcher:  remote.HookCheckpointRefFetcher(),
+		RefFetcher:  s.hookRefFetcher(),
 		BlobFetcher: s.hookBlobFetcher(),
 		ReadRemotes: CheckpointReadRemotes(ctx),
 	}

@@ -913,3 +913,19 @@ func TestStripSystemReminders(t *testing.T) {
 // Compile-time interface checks are in transcript.go.
 // Verify the unused import guard by referencing the agent package.
 var _ = agent.AgentNameOpenCode
+
+// TestExtractAllUserPrompts_SkipsInjectedBackgroundResult: OpenCode delivers a
+// background task's result as a user message made only of synthetic text. It
+// is not a prompt. A real prompt whose attachment text is synthetic stays.
+func TestExtractAllUserPrompts_SkipsInjectedBackgroundResult(t *testing.T) {
+	t.Parallel()
+
+	data := []byte(`{"info":{"id":"ses_parent"},"messages":[` +
+		`{"info":{"id":"m1","role":"user"},"parts":[{"type":"text","text":"Create red.md in the background"}]},` +
+		`{"info":{"id":"m2","role":"user"},"parts":[{"type":"text","synthetic":true,"text":"<task id=\"ses_child\" state=\"completed\">done</task>"}]},` +
+		`{"info":{"id":"m3","role":"user"},"parts":[{"type":"text","text":"Review @notes.md"},{"type":"text","synthetic":true,"text":"Called the Read tool"}]}]}`)
+
+	prompts, err := ExtractAllUserPrompts(data)
+	require.NoError(t, err)
+	require.Equal(t, []string{"Create red.md in the background", "Review @notes.md\nCalled the Read tool"}, prompts)
+}

@@ -143,6 +143,38 @@ func DataBaseURL() (string, error) {
 	return dataBaseURLForCore(c.CoreURL)
 }
 
+// WebBaseURL is the browser origin for links into the Entire web app for the
+// acting login. It is not the API origin: production serves the web app from
+// entire.com while the API stays on entire.io. ENTIRE_WEB_BASE_URL wins;
+// otherwise the data host's site picks the web origin, and a data host outside
+// a known site is used as-is.
+func WebBaseURL() (string, error) {
+	if webURL, ok := api.WebBaseURLOverride(); ok {
+		return webURL, nil
+	}
+	base, err := DataBaseURL()
+	if err != nil {
+		return "", err
+	}
+	if web := WebOrigin(base); web != "" {
+		return web, nil
+	}
+	return strings.TrimRight(base, "/"), nil
+}
+
+// WebOrigin maps a data host to its site's web app origin, or "" for loopback
+// and custom hosts.
+func WebOrigin(dataBaseURL string) string {
+	switch EntireSite(dataBaseURL) {
+	case siteEntire:
+		return api.DefaultWebBaseURL
+	case sitePartial:
+		return "https://" + sitePartial
+	default:
+		return ""
+	}
+}
+
 // dataBaseURLForCore maps a login server to the site it serves: the apex for
 // entire.io and partial.to. A loopback core has no site — local dev runs the
 // web app on its own port, and a core is not a cell either (see

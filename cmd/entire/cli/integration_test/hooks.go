@@ -1146,6 +1146,39 @@ func (r *OpenCodeHookRunner) SimulateOpenCodeSessionEnd(sessionID, _ string) err
 	return r.runOpenCodeHookWithInput("session-end", input)
 }
 
+// SimulateOpenCodeSubagentStart simulates the subagent-start hook: the parent's
+// task part bound callID to the child session. startedAtMs is the plugin's
+// tool.execute.before clock for the call; 0 means the plugin did not see it.
+func (r *OpenCodeHookRunner) SimulateOpenCodeSubagentStart(parentID, toolUseID, childID, subagentType, description string, startedAtMs int64) error {
+	r.T.Helper()
+	return r.runOpenCodeHookWithInput("subagent-start", map[string]any{
+		"session_id":       parentID,
+		"tool_use_id":      toolUseID,
+		"subagent_id":      childID,
+		"subagent_type":    subagentType,
+		"task_description": description,
+		"started_at":       startedAtMs,
+	})
+}
+
+// SimulateOpenCodeSubagentStop simulates the subagent-stop hook. The Go handler
+// exports the child with `opencode export`; under ENTIRE_TEST_OPENCODE_MOCK_EXPORT
+// it reads .entire/tmp/<childID>.json instead, so callers copy the child's
+// transcript there first with env.CopyTranscriptToEntireTmp (the same helper
+// mid-turn tests use for the parent). Omitting that copy exercises the
+// export-failure path.
+func (r *OpenCodeHookRunner) SimulateOpenCodeSubagentStop(parentID, toolUseID, childID, subagentType, description string, startedAtMs int64) error {
+	r.T.Helper()
+	return r.runOpenCodeHookWithInput("subagent-stop", map[string]any{
+		"session_id":       parentID,
+		"tool_use_id":      toolUseID,
+		"subagent_id":      childID,
+		"subagent_type":    subagentType,
+		"task_description": description,
+		"started_at":       startedAtMs,
+	})
+}
+
 // OpenCodeSession represents a simulated OpenCode session.
 type OpenCodeSession struct {
 	ID             string // Raw session ID (e.g., "opencode-session-1")
@@ -1155,6 +1188,10 @@ type OpenCodeSession struct {
 	// messages accumulates all messages across turns, matching real `opencode export`
 	// behavior where each export returns the full session history.
 	messages []map[string]interface{}
+	// TimeBase is the message clock in Unix ms (default 1708300000); message
+	// n is created at TimeBase+n. Set it to now for a record whose freshness
+	// is judged against the wall clock.
+	TimeBase int64
 }
 
 // NewOpenCodeSession creates a new simulated OpenCode session.
@@ -1176,13 +1213,17 @@ func (env *TestEnv) NewOpenCodeSession() *OpenCodeSession {
 // Each call appends new messages to the accumulated session history, matching real
 // `opencode export` behavior where each export returns the full session history.
 func (s *OpenCodeSession) CreateOpenCodeTranscript(prompt string, changes []FileChange) string {
+	base := s.TimeBase
+	if base == 0 {
+		base = 1708300000
+	}
 	// User message
 	s.msgCounter++
 	s.messages = append(s.messages, map[string]interface{}{
 		"info": map[string]interface{}{
 			"id":   fmt.Sprintf("msg-%d", s.msgCounter),
 			"role": roleUser,
-			"time": map[string]interface{}{"created": 1708300000 + s.msgCounter},
+			"time": map[string]interface{}{"created": base + int64(s.msgCounter)},
 		},
 		"parts": []map[string]interface{}{
 			{"type": blockTypeText, "text": prompt},
@@ -1218,8 +1259,8 @@ func (s *OpenCodeSession) CreateOpenCodeTranscript(prompt string, changes []File
 			"id":   fmt.Sprintf("msg-%d", s.msgCounter),
 			"role": roleAssistant,
 			"time": map[string]interface{}{
-				"created":   1708300000 + s.msgCounter,
-				"completed": 1708300000 + s.msgCounter + 5,
+				"created":   base + int64(s.msgCounter),
+				"completed": base + int64(s.msgCounter) + 5,
 			},
 			"tokens": map[string]interface{}{
 				"input":     150,
@@ -1283,6 +1324,36 @@ func (env *TestEnv) SimulateOpenCodeSessionEnd(sessionID, transcriptPath string)
 	env.T.Helper()
 	runner := NewOpenCodeHookRunner(env.RepoDir, env.OpenCodeProjectDir, env.T)
 	return runner.SimulateOpenCodeSessionEnd(sessionID, transcriptPath)
+}
+
+// SimulateOpenCodeSubagentStart is a convenience method on TestEnv, for a
+// call whose start the plugin did not report.
+func (env *TestEnv) SimulateOpenCodeSubagentStart(parentID, toolUseID, childID, subagentType, description string) error {
+	env.T.Helper()
+	return env.SimulateOpenCodeSubagentStartAt(parentID, toolUseID, childID, subagentType, description, 0)
+}
+
+// SimulateOpenCodeSubagentStartAt is SimulateOpenCodeSubagentStart with the
+// plugin's call start, in Unix ms.
+func (env *TestEnv) SimulateOpenCodeSubagentStartAt(parentID, toolUseID, childID, subagentType, description string, startedAtMs int64) error {
+	env.T.Helper()
+	runner := NewOpenCodeHookRunner(env.RepoDir, env.OpenCodeProjectDir, env.T)
+	return runner.SimulateOpenCodeSubagentStart(parentID, toolUseID, childID, subagentType, description, startedAtMs)
+}
+
+// SimulateOpenCodeSubagentStop is a convenience method on TestEnv, for a call
+// whose start the plugin did not report.
+func (env *TestEnv) SimulateOpenCodeSubagentStop(parentID, toolUseID, childID, subagentType, description string) error {
+	env.T.Helper()
+	return env.SimulateOpenCodeSubagentStopAt(parentID, toolUseID, childID, subagentType, description, 0)
+}
+
+// SimulateOpenCodeSubagentStopAt is SimulateOpenCodeSubagentStop with the
+// plugin's call start, in Unix ms.
+func (env *TestEnv) SimulateOpenCodeSubagentStopAt(parentID, toolUseID, childID, subagentType, description string, startedAtMs int64) error {
+	env.T.Helper()
+	runner := NewOpenCodeHookRunner(env.RepoDir, env.OpenCodeProjectDir, env.T)
+	return runner.SimulateOpenCodeSubagentStop(parentID, toolUseID, childID, subagentType, description, startedAtMs)
 }
 
 // CopyTranscriptToEntireTmp copies an OpenCode transcript to .entire/tmp/<sessionID>.json.
