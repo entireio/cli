@@ -114,10 +114,12 @@ Selectors are project-local numbers or trail ULIDs, or `<repo>/<number>` for one
   publication. Unlink preserves the branch and its work.
 - Create leaves the checkout alone by default. When the linked branch is not
   the one checked out before publishing, it prints `Next: git switch <branch>`
-  on stderr. `--checkout` instead switches to it with `git checkout` after the
-  trail is printed (derived branches start at HEAD, so uncommitted work carries
-  over); if Git refuses, the command fails, says the trail was created and names
-  the `git switch` command. `--checkout` is rejected with `--no-branch`,
+  on stderr. `--checkout` instead switches to it after the
+  trail is printed, including an existing branch named with `--branch` (the 0.9
+  command switched only to a branch it had just created). Git carries
+  uncommitted work over when it can; if Git refuses, the command fails, says
+  the trail was created and not to rerun create, and names the `git switch`
+  command. `--checkout` is rejected with `--no-branch`,
   `--repo` and `--branch-action create`. The hidden `--add-assignee` alias is
   merged with `--assignee` for legacy scripts.
 

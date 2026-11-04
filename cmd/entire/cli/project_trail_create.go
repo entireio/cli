@@ -83,9 +83,9 @@ func finishLocalTrailBranch(cmd *cobra.Command, created api.ProjectTrail, branch
 		// A failing post-checkout hook makes git exit non-zero after HEAD moved;
 		// telling the user to switch again would be wrong.
 		if now, headErr := GetCurrentBranch(ctx); headErr == nil && now == branch {
-			return fmt.Errorf("trail #%d was created and switched to %s, but git reported an error: %w", created.Number, shown, err)
+			return fmt.Errorf("trail #%d was created and switched to %s, but git reported an error: %w; do not rerun trail create", created.Number, shown, err)
 		}
-		return fmt.Errorf("trail #%d was created; %w; %s", created.Number, err, gitSwitchInstruction(branch))
+		return fmt.Errorf("trail #%d was created; %w; %s; do not rerun trail create", created.Number, err, gitSwitchInstruction(branch))
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "Switched to branch %s\n", shown)
 	return nil
