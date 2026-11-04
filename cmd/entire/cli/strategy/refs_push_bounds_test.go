@@ -443,10 +443,42 @@ func TestPushQueuedCheckpointRefs_BatchNotBudgeted(t *testing.T) {
 	queue := enqueueRefs(t, repo, refs)
 
 	restore := captureStderr(t)
-	pushed, err := flushCheckpointRefsQueue(t.Context(), repo, pushSettings{remote: bareDir}, false)
+	pushed, err := flushCheckpointRefsQueue(t.Context(), repo, pushSettings{remote: bareDir}, batchUnbounded)
 	restore()
 	require.NoError(t, err)
 	assert.Equal(t, len(refs), pushed)
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.Empty(t, remaining)
+}
+
+// TestPushQueuedCheckpointRefs_FallbackGetsBudgetAfterSlowBatch: an unbounded
+// batch may outlast checkpointFlushBudget, so the per-ref fallback's budget
+// starts after it. Otherwise a slow batch that failed would leave the fallback
+// an expired deadline and its refs would never be retried.
+func TestPushQueuedCheckpointRefs_FallbackGetsBudgetAfterSlowBatch(t *testing.T) {
+	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 3)
+	prepareGitRefsPrePush(t, workDir, bareDir)
+	// Multi-ref pushes are slow and refused; single-ref pushes land.
+	hook := "#!/bin/sh\nn=0\nwhile read -r old new ref; do n=$((n+1)); done\n" +
+		"if [ \"$n\" -gt 1 ]; then sleep 2; echo 'batch refused' >&2; exit 1; fi\nexit 0\n"
+	require.NoError(t, os.WriteFile(filepath.Join(bareDir, "hooks", "pre-receive"), []byte(hook), 0o755))
+
+	restoreBudget := checkpointFlushBudget
+	checkpointFlushBudget = 1500 * time.Millisecond
+	t.Cleanup(func() { checkpointFlushBudget = restoreBudget })
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	queue := enqueueRefs(t, repo, refs)
+
+	restore := captureStderr(t)
+	pushed, err := flushCheckpointRefsQueue(t.Context(), repo, pushSettings{remote: bareDir}, batchUnbounded)
+	output := restore()
+	require.NoError(t, err, output)
+	assert.Equal(t, len(refs), pushed, "the fallback lands every ref of the slow failed batch")
+	assert.NotContains(t, output, "exhausted")
 	remaining, err := queue.Drain()
 	require.NoError(t, err)
 	assert.Empty(t, remaining)

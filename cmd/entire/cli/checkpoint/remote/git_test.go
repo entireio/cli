@@ -1744,3 +1744,34 @@ func TestFetch_AbortStalledRequestsProgress(t *testing.T) {
 		}
 	}
 }
+
+func TestIsOpenSSHCommand(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		cmd  string
+		prog string // firstCmdlineWord's result; "" when !ok
+		ok   bool
+		want bool
+	}{
+		{cmd: "ssh", prog: "ssh", ok: true, want: true},
+		{cmd: "  ssh -i key", prog: "ssh", ok: true, want: true},
+		{cmd: "/usr/bin/ssh -o BatchMode=yes", prog: "/usr/bin/ssh", ok: true, want: true},
+		// Unquoted backslashes are escapes, as in git's split_cmdline.
+		{cmd: `C:\OpenSSH\SSH.EXE -v`, prog: `C:OpenSSHSSH.EXE`, ok: true, want: false},
+		{cmd: `'C:\Windows\System32\OpenSSH\SSH.EXE' -v`, prog: `C:\Windows\System32\OpenSSH\SSH.EXE`, ok: true, want: true},
+		{cmd: `'C:\Program Files\it'\''s\ssh.exe' -v`, prog: `C:\Program Files\it's\ssh.exe`, ok: true, want: true},
+		{cmd: `"/opt/my dir/ssh" -v`, prog: "/opt/my dir/ssh", ok: true, want: true},
+		{cmd: `/opt/my\ dir/ssh -v`, prog: "/opt/my dir/ssh", ok: true, want: true},
+		{cmd: "plink -batch", prog: "plink", ok: true, want: false},
+		{cmd: "ssh-wrapper", prog: "ssh-wrapper", ok: true, want: false},
+		{cmd: "'ssh", ok: false, want: false},
+		{cmd: `ssh\`, ok: false, want: false},
+		{cmd: "", ok: false, want: false},
+		{cmd: "   ", ok: false, want: false},
+	} {
+		prog, ok := firstCmdlineWord(tc.cmd)
+		assert.Equal(t, tc.ok, ok, "firstCmdlineWord ok for %q", tc.cmd)
+		assert.Equal(t, tc.prog, prog, "firstCmdlineWord for %q", tc.cmd)
+		assert.Equal(t, tc.want, isOpenSSHCommand(tc.cmd), "isOpenSSHCommand(%q)", tc.cmd)
+	}
+}

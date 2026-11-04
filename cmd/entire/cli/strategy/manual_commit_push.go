@@ -474,7 +474,7 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 		return nil
 	}
 
-	if flushed, err := flushCheckpointRefsQueue(ctx, repo, ps, true); err == nil {
+	if flushed, err := flushCheckpointRefsQueue(ctx, repo, ps, batchWithinFlushBudget); err == nil {
 		// Delivered, and only if something actually was: an empty queue pushed
 		// nothing, so it must not move the election or announce that it had.
 		if pendingCapture != "" && flushed > 0 {
@@ -524,7 +524,7 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 		// wrong problem. The wrapped error says which it was.
 		return 0, false, fmt.Errorf("checkpoint refs stay queued: %w", opfErr)
 	}
-	pushed, err = flushCheckpointRefsQueue(ctx, repo, ps, false)
+	pushed, err = flushCheckpointRefsQueue(ctx, repo, ps, batchUnbounded)
 	return pushed, false, err
 }
 
@@ -615,15 +615,15 @@ func checkpointRefPushTokens(refs []checkpointRefPush) []checkpoint.PushQueueEnt
 //
 // Shared by the git-refs pre-push path (which logs and ignores the error to
 // never block the user's push) and the migration command's opt-in push (which
-// surfaces it). boundBatch puts the batch push under checkpointFlushBudget too;
-// the pre-push path sets it, the explicit migration push does not. Stale
+// surfaces it). bound says whether the batch push runs under
+// checkpointFlushBudget too (see checkpointBatchBound). Stale
 // entries — refs no longer present locally — are pruned so they don't block the
 // queue forever.
 //
 // This is automatic delivery, so it sends nothing unless the clone's policy is
 // automatic. The callers check first to skip OPF; the check is repeated here so
 // a new caller cannot upload under manual by forgetting it.
-func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps pushSettings, boundBatch bool) (int, error) {
+func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps pushSettings, bound checkpointBatchBound) (int, error) {
 	automatic, err := automaticCheckpointDelivery(repo)
 	if err != nil {
 		return 0, err
@@ -631,9 +631,23 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 	if !automatic {
 		return 0, nil
 	}
-	result, err := flushCheckpointRefsWith(ctx, repo, ps, checkpointRefSelection{}, boundBatch)
+	result, err := flushCheckpointRefsWith(ctx, repo, ps, checkpointRefSelection{}, bound)
 	return len(result.pushed), err
 }
+
+// checkpointBatchBound says whether a flush's batch push shares
+// checkpointFlushBudget with its per-ref fallback.
+type checkpointBatchBound bool
+
+const (
+	// batchWithinFlushBudget is the pre-push path: the whole flush, batch
+	// included, must not hold the user's git push past the budget.
+	batchWithinFlushBudget checkpointBatchBound = true
+	// batchUnbounded is the explicit pushes (migration, `entire checkpoint
+	// push`): the user asked for the upload and is waiting on it, so the batch
+	// runs to the end and the per-ref fallback gets a full budget after it.
+	batchUnbounded checkpointBatchBound = false
+)
 
 // checkpointFlushResult reports what one flush did with the refs it selected.
 type checkpointFlushResult struct {
@@ -667,17 +681,17 @@ func (r *checkpointFlushResult) markUnsettled(existing []checkpointRefPush, caus
 // selection is the user naming what to send. The batch is unbounded: the user
 // asked for this upload and is waiting on it.
 func flushCheckpointRefs(ctx context.Context, repo *git.Repository, ps pushSettings, selection checkpointRefSelection) (checkpointFlushResult, error) {
-	return flushCheckpointRefsWith(ctx, repo, ps, selection, false)
+	return flushCheckpointRefsWith(ctx, repo, ps, selection, batchUnbounded)
 }
 
-// flushCheckpointRefsWith is flushCheckpointRefs with the batch push under
-// checkpointFlushBudget when boundBatch is set.
+// flushCheckpointRefsWith is flushCheckpointRefs with the batch push bounded
+// as bound says.
 func flushCheckpointRefsWith(
 	ctx context.Context,
 	repo *git.Repository,
 	ps pushSettings,
 	selection checkpointRefSelection,
-	boundBatch bool,
+	bound checkpointBatchBound,
 ) (checkpointFlushResult, error) {
 	// Callers check first; repeated so a new caller cannot hand a withheld
 	// store's checkpoints to the push remote.
@@ -732,11 +746,13 @@ func flushCheckpointRefsWith(
 
 	// One budget for the whole flush, opened before the batch: a backlog upload
 	// is as able to hang the user's push as a walk of per-ref retries. Bounded;
-	// see checkpointFlushBudget and maxConsecutiveRefPushFailures.
+	// see checkpointFlushBudget and maxConsecutiveRefPushFailures. An unbounded
+	// batch opens it after the batch instead, so its per-ref fallback is not left
+	// with a budget the batch already spent.
 	flushCtx, cancelFlush := context.WithTimeout(pushCtx, checkpointFlushBudget)
 	defer cancelFlush()
 	batchCtx := flushCtx
-	if !boundBatch {
+	if bound == batchUnbounded {
 		batchCtx = pushCtx
 	}
 
@@ -748,6 +764,11 @@ func flushCheckpointRefsWith(
 				slog.String("error", removeErr.Error()))
 		}
 	})
+	if bound == batchUnbounded {
+		var cancelFallback context.CancelFunc
+		flushCtx, cancelFallback = context.WithTimeout(pushCtx, checkpointFlushBudget)
+		defer cancelFallback()
+	}
 	if done, err := settleBatchOnly(ctx, batch, len(existing), dest, stop); done {
 		cause := err
 		if cause == nil {
