@@ -4273,10 +4273,23 @@
       "OIDCProvider": {
         "additionalProperties": true,
         "properties": {
+          "attributes": {
+            "description": "Attributes a binding filter can pin.",
+            "items": {
+              "$ref": "#/components/schemas/OIDCProviderAttribute"
+            },
+            "type": "array"
+          },
           "description": {
             "type": "string"
           },
           "displayName": {
+            "deprecated": true,
+            "description": "Deprecated: use name for the slug and label for the human label. Removal after 2027-05-01.",
+            "type": "string"
+          },
+          "docs_url": {
+            "description": "The provider's OIDC setup guide.",
             "type": "string"
           },
           "id": {
@@ -4284,11 +4297,57 @@
           },
           "issuer": {
             "type": "string"
+          },
+          "label": {
+            "description": "Human label, such as GitHub Actions.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Stable slug, such as github-actions.",
+            "type": "string"
+          },
+          "self_serve": {
+            "description": "True when a project manager can bind this provider.",
+            "type": "boolean"
           }
         },
         "required": [
           "id",
           "issuer"
+        ],
+        "type": "object"
+      },
+      "OIDCProviderAttribute": {
+        "additionalProperties": true,
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "exact": {
+            "description": "The value must not contain '*'.",
+            "type": "boolean"
+          },
+          "label": {
+            "type": "string"
+          },
+          "name": {
+            "description": "The attributeFilter key.",
+            "type": "string"
+          },
+          "pattern": {
+            "description": "RE2 expression the pinned value must match.",
+            "type": "string"
+          },
+          "required": {
+            "description": "Every filter must pin this attribute.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "label",
+          "required",
+          "exact"
         ],
         "type": "object"
       },
