@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 )
 
 // resolveProjectTrailCreateBranch also returns the branch checked out now
@@ -60,6 +61,6 @@ func publishProjectTrailBranch(cmd *cobra.Command, branch string) error {
 	if err := pushBranchToRemote(ctx, cmd.ErrOrStderr(), cmd.ErrOrStderr(), remote, branch); err != nil {
 		return fmt.Errorf("publish branch %q to %q: %w; trail creation was not sent (see push/hook output above)", branch, remote, err)
 	}
-	fmt.Fprintf(cmd.ErrOrStderr(), "Published branch %s to %s\n", branch, remote)
+	fmt.Fprintf(cmd.ErrOrStderr(), "Published branch %s to %s\n", tuiutil.SanitizeTerminalText(branch), tuiutil.SanitizeTerminalText(remote))
 	return nil
 }
