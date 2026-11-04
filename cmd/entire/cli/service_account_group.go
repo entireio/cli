@@ -35,6 +35,7 @@ func newServiceAccountCmd() *cobra.Command {
 	addControlPlaneFlags(cmd)
 	cmd.AddCommand(
 		newSACreateCmd(), newSAListCmd(), newSAGetCmd(), newSADeleteCmd(),
+		newSAGrantCmd(), newSARevokeCmd(), newSAGrantsCmd(),
 	)
 	return requireSubcommand(cmd)
 }
