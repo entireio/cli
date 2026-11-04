@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
 
 // A repository with Trails off is refused before its branch is published or
@@ -32,6 +34,36 @@ func TestProjectTrailCreateRefusesTrailsOffBeforePush(t *testing.T) {
 	require.NotContains(t, errOut, "unexpected-push", "the branch is not published")
 	_, statErr := os.Stat(filepath.Join(remote, "refs", "heads", "start-work"))
 	require.ErrorIs(t, statErr, os.ErrNotExist)
+	prefs, err := settings.LoadClonePreferences(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, prefs.TrailsEnabled, "the checkout's enablement cache records the answer")
+	require.False(t, *prefs.TrailsEnabled)
+}
+
+// With --repo the answer is about another repository, so the current
+// checkout's single cache slot is left alone.
+func TestProjectTrailCreateTrailsOffWithRepoLeavesCache(t *testing.T) {
+	setupProjectTrailPublication(t)
+	setupRepositoryTrailCreationWithRepo(t, "gh", `{"trails_enabled":false}`, func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("no trail request when Trails is off: %s %s", r.Method, r.URL.Path)
+		http.Error(w, "unexpected request", http.StatusInternalServerError)
+	})
+	_, _, err := executeProjectTrailTest(t, "create", "--no-branch", "--title", "Intent", "--repo", "gh/acme/widget")
+	require.ErrorContains(t, err, "trails are not enabled")
+	prefs, err := settings.LoadClonePreferences(context.Background())
+	require.NoError(t, err)
+	require.Nil(t, prefs.TrailsEnabled)
+}
+
+// When the settings read fails and the server then refuses, the error says
+// the branch published for the trail is still there.
+func TestProjectTrailCreateRefusalNamesPublishedBranch(t *testing.T) {
+	setupProjectTrailPublication(t)
+	setupRepositoryTrailCreationWithRepo(t, "gh", "", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"detail":"repoIds must contain repositories owned by the project with Trails enabled"}`, http.StatusUnprocessableEntity)
+	})
+	_, _, err := executeProjectTrailTest(t, "create", "--title", "Start work")
+	require.ErrorContains(t, err, "no trail was created, but branch start-work was already published and is kept")
 }
 
 // The settings read is best effort: when it fails, the create goes ahead.

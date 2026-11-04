@@ -25,13 +25,18 @@ func createRepositoryScopedProjectTrail(cmd *cobra.Command, request api.ProjectT
 	change.RepositoryID = repoID
 	// Before publishing a branch for it: the server refuses a trail for a
 	// repository with Trails off, and the branch would be left behind.
-	if err := requireTrailsEnabledForCreate(cmd.Context(), target.Client, repoID, target.RepoRef); err != nil {
+	// The enablement cache has one slot, for the current checkout, so only a
+	// create in it records the answer.
+	localRepo := trailRepoFlag(cmd) == ""
+	if err := requireTrailsEnabledForCreate(cmd.Context(), target.Client, repoID, target.RepoRef, localRepo); err != nil {
 		return err
 	}
-	if change.BranchName != "" && change.BranchAction == trailBranchActionLink && trailRepoFlag(cmd) == "" {
+	published := ""
+	if change.BranchName != "" && change.BranchAction == trailBranchActionLink && localRepo {
 		if err := publishProjectTrailBranch(cmd, change.BranchName); err != nil {
 			return err
 		}
+		published = change.BranchName
 	}
 	path := target.BasePath + "?" + url.Values{"project_id": {target.ProjectID}}.Encode()
 	var headers http.Header
@@ -45,6 +50,9 @@ func createRepositoryScopedProjectTrail(cmd *cobra.Command, request api.ProjectT
 			return fmt.Errorf("create repository-scoped trail (retry with --idempotency-key %s and the same fields): %w", key, err)
 		}
 		if trailCreateRefused(err) {
+			if published != "" {
+				return fmt.Errorf("create repository-scoped trail: %w; no trail was created, but branch %s was already published and is kept", err, published)
+			}
 			return fmt.Errorf("create repository-scoped trail: %w; no trail was created", err)
 		}
 		return fmt.Errorf("create repository-scoped trail (inspect trails before retrying; creation may have succeeded): %w", err)
@@ -114,10 +122,11 @@ const trailCreateSettingsTimeout = 5 * time.Second
 
 // requireTrailsEnabledForCreate refuses a create for a repository whose Trails
 // setting is off, naming the setting, and records the answer in the
-// enablement cache. The read is best effort: when it fails or reports no
+// current checkout's enablement cache when it is that repository's. The read is best effort: when it fails or reports no
 // setting, the create goes ahead and the server gives its own answer.
-// repoRef is the repository as <forge>/<owner>/<repo>.
-func requireTrailsEnabledForCreate(ctx context.Context, client *api.Client, repoID, repoRef string) error {
+// repoRef is the repository as <forge>/<owner>/<repo>; cacheLocal says it is
+// the current checkout's repository, whose cache slot may take the answer.
+func requireTrailsEnabledForCreate(ctx context.Context, client *api.Client, repoID, repoRef string, cacheLocal bool) error {
 	readCtx, cancel := context.WithTimeout(ctx, trailCreateSettingsTimeout)
 	defer cancel()
 	enabled, known, err := client.RepoTrailsEnabled(readCtx, repoID)
@@ -128,8 +137,8 @@ func requireTrailsEnabledForCreate(ctx context.Context, client *api.Client, repo
 	if !known || enabled {
 		return nil
 	}
-	if parts := strings.SplitN(repoRef, "/", 3); len(parts) == 3 {
-		saveTrailsEnabledForRemoteBestEffort(ctx, parts[0], parts[1], parts[2], false)
+	if cacheLocal {
+		saveTrailsEnabledForRepoBestEffort(ctx, false)
 	}
 	return fmt.Errorf("trails are not enabled for %s; an admin can turn them on in the repository's Settings > Trails on entire.com. Nothing was created or pushed", repoRef)
 }
