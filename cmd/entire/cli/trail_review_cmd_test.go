@@ -879,14 +879,16 @@ func TestPrintTrailReviewDashboard(t *testing.T) {
 		},
 	}
 	var out strings.Builder
-	printTrailReviewDashboard(&out, trailReviewTarget{Trail: api.TrailResource{
+	if err := printTrailReviewDashboard(&out, trailReviewTarget{Trail: api.TrailResource{
 		ID:     "trl_1",
 		Number: 42,
 		Title:  "Add token refresh",
 		Status: "open",
 		Branch: "feat/token-refresh",
 		Base:   "main",
-	}}, comments, "", defaultTrailReviewListOptions(), countTrailReviewComments(comments))
+	}}, comments, "", defaultTrailReviewListOptions(), countTrailReviewComments(comments), nil); err != nil {
+		t.Fatal(err)
+	}
 	text := out.String()
 	for _, want := range []string{
 		"Trail #42  Add token refresh",
@@ -911,14 +913,16 @@ func TestPrintTrailReviewDashboard_UsesSeparateCountsWhenFilteredCommentsEmpty(t
 		{ID: "resolved-1", Status: trailReviewStatusResolved},
 		{ID: "dismissed-1", Status: trailReviewStatusDismissed, StaleOutcome: "stale"},
 	})
-	printTrailReviewDashboard(&out, trailReviewTarget{Trail: api.TrailResource{
+	if err := printTrailReviewDashboard(&out, trailReviewTarget{Trail: api.TrailResource{
 		ID:     "trl_1",
 		Number: 42,
 		Title:  "Add token refresh",
 		Status: "open",
 		Branch: "feat/token-refresh",
 		Base:   "main",
-	}}, nil, "", defaultTrailReviewListOptions(), counts)
+	}}, nil, "", defaultTrailReviewListOptions(), counts, nil); err != nil {
+		t.Fatal(err)
+	}
 	text := out.String()
 	for _, want := range []string{
 		"Open findings: 0  high 0  medium 0  low 0",

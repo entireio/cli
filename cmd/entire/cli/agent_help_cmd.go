@@ -130,6 +130,9 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"trail update":    {agentHelpAudienceTaskDriven, false},
 	"trail approvals": {agentHelpAudienceReadOnly, false},
 	"trail watch":     {agentHelpAudienceReadOnly, false},
+	"trail timeline":  {agentHelpAudienceReadOnly, false},
+	"trail sessions":  {agentHelpAudienceReadOnly, false},
+	"trail stack":     {agentHelpAudienceReadOnly, false},
 	"trail approve":   {agentHelpAudienceTaskDriven, false},
 	"trail checkout":  {agentHelpAudienceTaskDriven, false},
 	"trail comment":   {agentHelpAudienceTaskDriven, false},
@@ -138,6 +141,16 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"trail resume":    {agentHelpAudienceTaskDriven, false},
 	"trail link":      {agentHelpAudienceUserOwned, false},
 	"trail unlink":    {agentHelpAudienceUserOwned, false},
+	"trail ready":     {agentHelpAudienceUserOwned, false},
+	"trail retarget":  {agentHelpAudienceUserOwned, false},
+	// Each acts on shared state or spends the repository's agent budget.
+	"trail update-branch": {agentHelpAudienceUserOwned, false},
+	"trail ci-pr":         {agentHelpAudienceUserOwned, false},
+	"trail rerun-review":  {agentHelpAudienceUserOwned, false},
+	// A finding's reply thread is the agent's channel too, like the finding.
+	"trail finding reply":        {agentHelpAudienceTaskDriven, false},
+	"trail finding edit-reply":   {agentHelpAudienceTaskDriven, false},
+	"trail finding delete-reply": {agentHelpAudienceTaskDriven, false},
 	// Attachments are images for the description, which trail update edits.
 	"trail attachment":        {agentHelpAudienceTaskDriven, false},
 	"trail attachment list":   {agentHelpAudienceReadOnly, false},
@@ -249,6 +262,11 @@ var agentHelpGuidance = map[string]string{
 		"reply to, edit, delete, or resolve one. Use `entire trail finding` for agent\n" +
 		"review findings, questions, and follow-ups, including when asked to\n" +
 		"\"comment\" on a trail. Comment writes refuse in agent sessions.",
+
+	"trail finding": "Reply to a finding with `entire trail finding reply` to answer or question\n" +
+		"it. Edit or delete only replies you wrote; a reply by anyone else stays as\n" +
+		"it is. `delete-reply` asks for confirmation; pass --force only when the user\n" +
+		"asked you to delete that reply.",
 
 	"trail attachment": "To show an image in a trail's description, upload it with\n" +
 		"`entire trail attachment add <file>` and put the printed\n" +
