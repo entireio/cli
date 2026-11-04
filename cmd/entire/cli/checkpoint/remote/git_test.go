@@ -1179,7 +1179,7 @@ func TestWithBatchModeSSH(t *testing.T) {
 			in: func(t *testing.T) []string {
 				return isolatedSSHEnv(t, `GIT_SSH=C:\Program Files\it's\ssh.exe`)
 			},
-			want: `'C:\Program Files\it'\''s\ssh.exe' -o BatchMode=yes`,
+			want: `'C:\Program Files\it'\''s\ssh.exe' -o BatchMode=yes -o ConnectTimeout=60`,
 		},
 		{
 			name: "unrelated substring containing BatchMode-like text does not count as explicit",

@@ -1291,6 +1291,27 @@ type sessionBriefJSON struct {
 	CaptureDegraded bool `json:"capture_degraded,omitempty"`
 }
 
+// setCheckpointSync copies the checkpoint sync state into the JSON result.
+func (r *statusJSON) setCheckpointSync(syncInfo checkpointSyncInfo) {
+	r.CheckpointPushDisabled = syncInfo.PushDisabled
+	r.CheckpointSyncRemote = syncInfo.Remote
+	r.CheckpointSyncRemoteSource = syncInfo.Source
+	r.CheckpointSyncError = syncInfo.Err
+	r.CheckpointReadFallback = syncInfo.ReadFallback
+	r.CheckpointReadSourceUnknown = syncInfo.ReadSourceUnknown
+	r.UnpushedCheckpoints = syncInfo.Unpushed
+	r.CheckpointUploadRunning = syncInfo.UploadRunning
+	if syncInfo.Unpushed > 0 {
+		r.CheckpointUploadLastError = syncInfo.UploadLastError
+	}
+	r.CheckpointPushPolicy = string(syncInfo.PushPolicy)
+	r.CheckpointPushPolicyError = syncInfo.PushPolicyErr
+	r.CheckpointRemoteIgnored = syncInfo.IgnoredRemote
+	r.CheckpointRemoteIgnoredReason = syncInfo.IgnoredReason
+	r.CheckpointRemoteIgnoredRemedy = syncInfo.IgnoredRemedy
+	r.CheckpointRemoteIgnoredVerdict = syncInfo.IgnoredVerdict()
+}
+
 func runStatusJSON(ctx context.Context, w io.Writer) error {
 	writeJSON := func(v statusJSON) error {
 		return json.NewEncoder(w).Encode(v)
@@ -1339,24 +1360,7 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 
 		// Same computation as the text path (writeCheckpointSyncLines);
 		// empty fields drop out via omitempty when nothing resolved.
-		syncInfo := computeCheckpointSyncInfo(ctx, s)
-		result.CheckpointPushDisabled = syncInfo.PushDisabled
-		result.CheckpointSyncRemote = syncInfo.Remote
-		result.CheckpointSyncRemoteSource = syncInfo.Source
-		result.CheckpointSyncError = syncInfo.Err
-		result.CheckpointReadFallback = syncInfo.ReadFallback
-		result.CheckpointReadSourceUnknown = syncInfo.ReadSourceUnknown
-		result.UnpushedCheckpoints = syncInfo.Unpushed
-		result.CheckpointUploadRunning = syncInfo.UploadRunning
-		if syncInfo.Unpushed > 0 {
-			result.CheckpointUploadLastError = syncInfo.UploadLastError
-		}
-		result.CheckpointPushPolicy = string(syncInfo.PushPolicy)
-		result.CheckpointPushPolicyError = syncInfo.PushPolicyErr
-		result.CheckpointRemoteIgnored = syncInfo.IgnoredRemote
-		result.CheckpointRemoteIgnoredReason = syncInfo.IgnoredReason
-		result.CheckpointRemoteIgnoredRemedy = syncInfo.IgnoredRemedy
-		result.CheckpointRemoteIgnoredVerdict = syncInfo.IgnoredVerdict()
+		result.setCheckpointSync(computeCheckpointSyncInfo(ctx, s))
 
 		if store, err := session.NewStateStore(ctx); err == nil {
 			// Read-only, and one entry per session. Collapsing by agent hid a

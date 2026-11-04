@@ -817,7 +817,7 @@ type checkpointFlushResult struct {
 }
 
 // summary is the flushResult view of r.
-func (r checkpointFlushResult) summary() flushResult {
+func (r *checkpointFlushResult) summary() flushResult {
 	s := r.bounds
 	s.pushed = len(r.pushed)
 	return s
