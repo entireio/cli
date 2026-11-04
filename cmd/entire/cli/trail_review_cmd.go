@@ -1485,7 +1485,7 @@ func printTrailReviewDashboard(w io.Writer, target trailReviewTarget, comments [
 		return renderTrailReviewDashboardStyled(w, newTrailReviewStyles(s), trailReviewWidth(w), target, comments, nextCursor, opts, counts, agents)
 	}
 	trail := trailForDisplay(target.Trail)
-	clean := tuiutil.SanitizeDisplayText
+	clean := trailReviewCleanLine
 	if trail.Number > 0 {
 		fmt.Fprintf(w, "  Trail #%d  %s\n", trail.Number, clean(trail.Title))
 	} else {
@@ -1543,10 +1543,10 @@ func printTrailReviewCommentsTable(w io.Writer, comments []api.TrailReviewCommen
 	fmt.Fprintln(tw, "ID\tSEV\tSTATUS\tFRESHNESS\tLOCATION\tSUMMARY")
 	for _, comment := range comments {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			abbreviate12(tuiutil.SanitizeDisplayText(comment.ID)),
-			tuiutil.SanitizeDisplayText(severityTableDisplay(comment.Severity)),
-			tuiutil.SanitizeDisplayText(comment.Status),
-			tuiutil.SanitizeDisplayText(trailReviewFreshnessDisplay(comment)),
+			abbreviate12(trailReviewCleanLine(comment.ID)),
+			trailReviewCleanLine(severityTableDisplay(comment.Severity)),
+			trailReviewCleanLine(comment.Status),
+			trailReviewCleanLine(trailReviewFreshnessDisplay(comment)),
 			trailReviewLocationDisplay(comment.Location),
 			trailReviewCommentSummary(comment),
 		)
@@ -1563,10 +1563,10 @@ func printIndentedBlock(w io.Writer, block, indent string) {
 
 func printTrailReviewCommentCreated(w io.Writer, target trailReviewTarget, comment api.TrailReviewComment) {
 	if s := newStatusStyles(w); s.colorEnabled {
-		renderTrailReviewCommentCreatedStyled(w, newTrailReviewStyles(s), target, comment)
+		renderTrailReviewCommentCreatedStyled(w, newTrailReviewStyles(s), trailReviewWidth(w), target, comment)
 		return
 	}
-	clean := tuiutil.SanitizeDisplayText
+	clean := trailReviewCleanLine
 	fmt.Fprintf(w, "Created finding %s on %s\n", clean(comment.ID), clean(trailReviewTargetDisplay(target)))
 	fmt.Fprintf(w, "Status:   %s\n", clean(comment.Status))
 	fmt.Fprintf(w, "Severity: %s\n", clean(severityDisplay(comment.Severity)))
@@ -1578,7 +1578,7 @@ func printTrailReviewCommentDetail(w io.Writer, comment api.TrailReviewComment) 
 		renderTrailReviewCommentDetailStyled(w, newTrailReviewStyles(s), trailReviewWidth(w), comment)
 		return
 	}
-	clean := tuiutil.SanitizeDisplayText
+	clean := trailReviewCleanLine
 	fmt.Fprintf(w, "Finding:   %s\n", clean(comment.ID))
 	if title := strings.TrimSpace(clean(stringPtrValue(comment.Title))); title != "" {
 		fmt.Fprintf(w, "Title:     %s\n", title)
@@ -1590,8 +1590,10 @@ func printTrailReviewCommentDetail(w io.Writer, comment api.TrailReviewComment) 
 		fmt.Fprintf(w, "Confidence: %.2f\n", *comment.Confidence)
 	}
 	fmt.Fprintf(w, "Location: %s\n", trailReviewLocationDisplay(comment.Location))
-	if body := strings.TrimSpace(tuiutil.SanitizeTerminalText(stringPtrValue(comment.Body))); body != "" {
-		fmt.Fprintf(w, "\n%s\n", body)
+	// As before sanitizing: a non-empty body prints, trimmed, even when it is
+	// only whitespace.
+	if body := tuiutil.SanitizeTerminalText(stringPtrValue(comment.Body)); body != "" {
+		fmt.Fprintf(w, "\n%s\n", strings.TrimSpace(body))
 	}
 	if len(comment.SuggestedChanges) > 0 {
 		fmt.Fprintln(w, "\nSuggested changes:")
@@ -1600,8 +1602,12 @@ func printTrailReviewCommentDetail(w io.Writer, comment api.TrailReviewComment) 
 			if path := clean(stringPtrValue(change.ExpectedFilePath)); path != "" {
 				fmt.Fprintf(w, "  file: %s\n", path)
 			}
-			if patch := trailReviewPatchText(change.Patch); patch != "" {
+			if patch, altered := trailReviewPatchText(change.Patch); patch != "" {
 				fmt.Fprintf(w, "  patch:\n%s\n", patch)
+				if altered {
+					note, command := trailReviewPatchAlteredNote(comment.ID)
+					fmt.Fprintf(w, "  %s\n    %s\n", note, command)
+				}
 			}
 			if instruction := tuiutil.SanitizeTerminalText(stringPtrValue(change.Instruction)); instruction != "" {
 				fmt.Fprintf(w, "  instruction: %s\n", instruction)
@@ -1659,16 +1665,20 @@ func countTrailReviewComments(comments []api.TrailReviewComment) trailReviewComm
 	return counts
 }
 
-// trailReviewPatchText returns a suggested change's patch for display. ANSI
-// sequences, control characters, and bidi controls are stripped, since they
-// could drive or spoof the terminal. Tabs, line feeds, a carriage return that
-// ends a CRLF line, and every printable or space rune (NBSP, U+3000) are kept
-// so the printed patch still applies. A lone carriage return would let one
-// line's text hide another's on screen, so it shows as a visible ^M. Only
-// surrounding blank lines are trimmed: a leading space is a context line's
-// prefix and part of the patch.
-func trailReviewPatchText(patch *string) string {
-	runes := []rune(tuiutil.StripANSI(stringPtrValue(patch)))
+// trailReviewPatchText returns a suggested change's patch for display, and
+// whether display sanitizing changed any character of it. ANSI sequences,
+// control characters, and bidi controls are stripped, since they could drive
+// or spoof the terminal. Tabs, line feeds, a carriage return that ends a CRLF
+// line, and every printable or space rune (NBSP, U+3000) are kept so the
+// printed patch still applies. A lone carriage return would let one line's
+// text hide another's on screen, so it shows as a visible ^M. Only surrounding
+// blank lines are trimmed, and that does not count as a change: a leading
+// space is a context line's prefix and part of the patch.
+func trailReviewPatchText(patch *string) (string, bool) {
+	raw := stringPtrValue(patch)
+	stripped := tuiutil.StripANSI(raw)
+	altered := stripped != raw
+	runes := []rune(stripped)
 	var b strings.Builder
 	b.Grow(len(runes))
 	for i, r := range runes {
@@ -1677,20 +1687,44 @@ func trailReviewPatchText(patch *string) string {
 			b.WriteRune(r)
 		case r == '\r':
 			b.WriteString("^M")
+			altered = true
 		case r == '\t' || r == '\n':
 			b.WriteRune(r)
 		case unicode.IsControl(r), unicode.Is(unicode.Bidi_Control, r):
+			altered = true
 		default:
 			b.WriteRune(r)
 		}
 	}
-	return strings.Trim(b.String(), "\r\n")
+	return strings.Trim(b.String(), "\r\n"), altered
+}
+
+// trailReviewPatchAlteredNote tells the reader that a displayed patch is not
+// the exact patch, then gives the command that prints the exact bytes on a
+// line of its own so it can be copied whole.
+func trailReviewPatchAlteredNote(findingID string) (note, command string) {
+	id := trailReviewCleanLine(findingID)
+	return "note: this patch has characters not shown here; the exact patch (also what apply uses):",
+		fmt.Sprintf("entire trail finding show %s --json", id)
+}
+
+// trailReviewCleanLine sanitizes a single-line server field (title, ID,
+// status, severity, branch, location, summary) for the finding views.
+// tuiutil.SanitizeDisplayText drops ANSI and control runes, but bidi controls
+// are format runes it keeps, and they could visually reorder the line.
+func trailReviewCleanLine(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Bidi_Control, r) {
+			return -1
+		}
+		return r
+	}, tuiutil.SanitizeDisplayText(s))
 }
 
 func trailReviewLocationDisplay(loc api.TrailReviewLocation) string {
-	file := tuiutil.SanitizeDisplayText(stringPtrValue(loc.FilePath))
+	file := trailReviewCleanLine(stringPtrValue(loc.FilePath))
 	if file == "" {
-		return tuiutil.SanitizeDisplayText(loc.Granularity)
+		return trailReviewCleanLine(loc.Granularity)
 	}
 	if loc.StartLine == nil {
 		return file
@@ -1702,7 +1736,7 @@ func trailReviewLocationDisplay(loc api.TrailReviewLocation) string {
 }
 
 func trailReviewCommentSummary(comment api.TrailReviewComment) string {
-	body := strings.TrimSpace(tuiutil.SanitizeDisplayText(stringPtrValue(comment.Body)))
+	body := strings.TrimSpace(trailReviewCleanLine(stringPtrValue(comment.Body)))
 	if body == "" {
 		return "(empty finding)"
 	}
