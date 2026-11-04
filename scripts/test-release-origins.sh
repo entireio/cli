@@ -85,7 +85,8 @@ build_origin() {
     printf '#!/bin/sh\necho helper\n' > "$dir/.stage/git-remote-entire"
     chmod +x "$dir/.stage/entire" "$dir/.stage/git-remote-entire"
     tar -czf "$dir/v$version/$arch" -C "$dir/.stage" entire git-remote-entire
-    ( cd "$dir/v$version" && sha256_of "$arch" > checksums.txt )
+    tar -czf "$dir/v$version/git-remote-entire_$arch" -C "$dir/.stage" git-remote-entire
+    ( cd "$dir/v$version" && { sha256_of "$arch"; sha256_of "git-remote-entire_$arch"; } > checksums.txt )
     printf '{"channel":"stable","tag":"v%s","version":"%s"}\n' "$version" "$version" \
         > "$dir/channels/stable.json"
 }
