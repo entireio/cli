@@ -154,6 +154,11 @@ func readTrailAttachmentFile(path string) (trailAttachmentFile, error) {
 	return file, nil
 }
 
+// trailAttachmentCleanupTimeout bounds the requests that clean up after a
+// failed or canceled upload. They outlive the command's cancellation, so
+// without a bound an unresponsive cell would hang the command.
+const trailAttachmentCleanupTimeout = 30 * time.Second
+
 // uploadTrailAttachment registers the upload, PUTs the bytes to the presigned
 // URL, and completes it.
 func uploadTrailAttachment(ctx context.Context, target *projectTrailTarget, file trailAttachmentFile) (api.ProjectTrailAttachment, error) {
@@ -170,7 +175,9 @@ func uploadTrailAttachment(ctx context.Context, target *projectTrailTarget, file
 	// From here a failure would leave a registered attachment that never
 	// completes, so delete it before reporting the failure.
 	fail := func(err error) (api.ProjectTrailAttachment, error) {
-		if _, delErr := target.Client.ProjectTrailRequest(context.WithoutCancel(ctx), http.MethodDelete, collection+"/"+url.PathEscape(intent.ID), nil, nil, nil); delErr != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), trailAttachmentCleanupTimeout)
+		defer cancel()
+		if _, delErr := target.Client.ProjectTrailRequest(cleanupCtx, http.MethodDelete, collection+"/"+url.PathEscape(intent.ID), nil, nil, nil); delErr != nil {
 			return api.ProjectTrailAttachment{}, fmt.Errorf("%w (the unfinished attachment %s could not be removed: %w)", err, intent.ID, delErr)
 		}
 		return api.ProjectTrailAttachment{}, err
@@ -188,7 +195,9 @@ func uploadTrailAttachment(ctx context.Context, target *projectTrailTarget, file
 		err = fmt.Errorf("complete attachment %s: %w", intent.ID, err)
 		// The server may have completed it before the response was lost; a
 		// finished image may already be referenced, so it is never deleted.
-		ready, found, readErr := trailAttachmentReady(context.WithoutCancel(ctx), target, collection, intent.ID)
+		readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), trailAttachmentCleanupTimeout)
+		ready, found, readErr := trailAttachmentReady(readCtx, target, collection, intent.ID)
+		cancel()
 		switch {
 		case readErr != nil:
 			return api.ProjectTrailAttachment{}, fmt.Errorf("%w (attachment %s was left in place: its state could not be read: %w)", err, intent.ID, readErr)

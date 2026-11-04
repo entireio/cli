@@ -148,15 +148,18 @@ func TestTrailAttachmentAdd_RefusesFilesBeforeAnyRequest(t *testing.T) {
 	require.NoError(t, os.WriteFile(big, make([]byte, trailAttachmentMaxBytes+1), 0o600))
 
 	for path, says := range map[string]string{
-		svg:                           "only PNG, JPEG, GIF, and WebP images",
-		empty:                         "is empty",
-		big:                           "limited to",
-		dir:                           "not a regular file",
-		filepath.Join(dir, "missing"): "no such file",
+		svg:   "only PNG, JPEG, GIF, and WebP images",
+		empty: "is empty",
+		big:   "limited to",
+		dir:   "not a regular file",
 	} {
 		_, _, err := executeProjectTrailTest(t, trailAttachmentArgs("add", path)...)
 		require.ErrorContains(t, err, says, path)
 	}
+	// The OS's wording for a missing file differs (Windows: "cannot find the
+	// file specified"), so match the error, not its text.
+	_, _, err := executeProjectTrailTest(t, trailAttachmentArgs("add", filepath.Join(dir, "missing"))...)
+	require.ErrorIs(t, err, os.ErrNotExist)
 	assert.Empty(t, s.requests, "a refused file registers nothing")
 }
 
