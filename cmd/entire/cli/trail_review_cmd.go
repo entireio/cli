@@ -1661,21 +1661,30 @@ func countTrailReviewComments(comments []api.TrailReviewComment) trailReviewComm
 
 // trailReviewPatchText returns a suggested change's patch for display. ANSI
 // sequences, control characters, and bidi controls are stripped, since they
-// could drive or spoof the terminal; carriage returns, tabs, and every
-// printable or space rune (NBSP, U+3000) are kept so the printed patch still
-// applies. Only surrounding blank lines are trimmed: a leading space is a
-// context line's prefix and part of the patch.
+// could drive or spoof the terminal. Tabs, line feeds, a carriage return that
+// ends a CRLF line, and every printable or space rune (NBSP, U+3000) are kept
+// so the printed patch still applies. A lone carriage return would let one
+// line's text hide another's on screen, so it shows as a visible ^M. Only
+// surrounding blank lines are trimmed: a leading space is a context line's
+// prefix and part of the patch.
 func trailReviewPatchText(patch *string) string {
-	clean := strings.Map(func(r rune) rune {
+	runes := []rune(tuiutil.StripANSI(stringPtrValue(patch)))
+	var b strings.Builder
+	b.Grow(len(runes))
+	for i, r := range runes {
 		switch {
-		case r == '\t' || r == '\n' || r == '\r':
-			return r
+		case r == '\r' && i+1 < len(runes) && runes[i+1] == '\n':
+			b.WriteRune(r)
+		case r == '\r':
+			b.WriteString("^M")
+		case r == '\t' || r == '\n':
+			b.WriteRune(r)
 		case unicode.IsControl(r), unicode.Is(unicode.Bidi_Control, r):
-			return -1
+		default:
+			b.WriteRune(r)
 		}
-		return r
-	}, tuiutil.StripANSI(stringPtrValue(patch)))
-	return strings.Trim(clean, "\r\n")
+	}
+	return strings.Trim(b.String(), "\r\n")
 }
 
 func trailReviewLocationDisplay(loc api.TrailReviewLocation) string {

