@@ -9,22 +9,25 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
-func resolveProjectTrailCreateBranch(cmd *cobra.Command, title, branch, base string) (string, string, error) {
+// resolveProjectTrailCreateBranch also returns the branch checked out now
+// (before publishing; "" when detached or with --repo), so create can tell
+// whether the linked branch differs from the user's checkout.
+func resolveProjectTrailCreateBranch(cmd *cobra.Command, title, branch, base string) (resolved, resolvedBase, current string, err error) {
 	if trailRepoFlag(cmd) != "" {
 		if err := ensureTrailRepoHasTarget(cmd, strings.TrimSpace(branch) != "", "pass --branch"); err != nil {
-			return "", "", err
+			return "", "", "", err
 		}
-		return branch, base, ValidateBranchName(cmd.Context(), branch)
+		return branch, base, "", ValidateBranchName(cmd.Context(), branch)
 	}
 	repo, err := strategy.OpenRepository(cmd.Context())
 	if err != nil {
-		return "", "", fmt.Errorf("open local repository (or use --no-branch for intent only): %w", err)
+		return "", "", "", fmt.Errorf("open local repository (or use --no-branch for intent only): %w", err)
 	}
 	defer repo.Close()
 	base, namingBase := resolveTrailCreateBase(cmd.Context(), repo, base)
-	current := strategy.GetCurrentBranchName(repo)
+	current = strategy.GetCurrentBranchName(repo)
 	branch = resolveCreateBranch(branch, current, namingBase, title, true)
-	return branch, base, ValidateBranchName(cmd.Context(), branch)
+	return branch, base, current, ValidateBranchName(cmd.Context(), branch)
 }
 
 // Publish the local tip before asking the server to link it. A new feature

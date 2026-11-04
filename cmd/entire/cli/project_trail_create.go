@@ -11,19 +11,26 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 	"github.com/entireio/cli/internal/coreapi"
 )
 
-func createRepositoryScopedProjectTrail(cmd *cobra.Command, request api.ProjectTrailCreateRequest, change api.ChangeCreateRequest, key string) error {
+// publishesLocalBranch reports whether create pushes a branch from this clone,
+// the only case where there is a local branch to check out afterwards.
+func publishesLocalBranch(cmd *cobra.Command, change api.ChangeCreateRequest) bool {
+	return change.BranchName != "" && change.BranchAction == trailBranchActionLink && trailRepoFlag(cmd) == ""
+}
+
+func createRepositoryScopedProjectTrail(cmd *cobra.Command, request api.ProjectTrailCreateRequest, change api.ChangeCreateRequest, key string) (api.ProjectTrail, error) {
 	target, repoID, err := resolveRepositoryProjectTrailTarget(cmd)
 	if err != nil {
-		return err
+		return api.ProjectTrail{}, err
 	}
 	request.RepositoryIDs = []string{repoID}
 	change.RepositoryID = repoID
-	if change.BranchName != "" && change.BranchAction == trailBranchActionLink && trailRepoFlag(cmd) == "" {
+	if publishesLocalBranch(cmd, change) {
 		if err := publishProjectTrailBranch(cmd, change.BranchName); err != nil {
-			return err
+			return api.ProjectTrail{}, err
 		}
 	}
 	path := target.BasePath + "?" + url.Values{"project_id": {target.ProjectID}}.Encode()
@@ -35,26 +42,47 @@ func createRepositoryScopedProjectTrail(cmd *cobra.Command, request api.ProjectT
 	etag, err := target.Client.ProjectTrailRequest(cmd.Context(), http.MethodPost, path, request, headers, &out)
 	if err != nil {
 		if headers != nil {
-			return fmt.Errorf("create repository-scoped trail (retry with --idempotency-key %s and the same fields): %w", key, err)
+			return api.ProjectTrail{}, fmt.Errorf("create repository-scoped trail (retry with --idempotency-key %s and the same fields): %w", key, err)
 		}
-		return fmt.Errorf("create repository-scoped trail (inspect trails before retrying; creation may have succeeded): %w", err)
+		return api.ProjectTrail{}, fmt.Errorf("create repository-scoped trail (inspect trails before retrying; creation may have succeeded): %w", err)
 	}
 	if err := target.validateResponse(out); err != nil {
-		return err
+		return api.ProjectTrail{}, err
 	}
 	if change.BranchName != "" {
 		target.TrailID, target.Number = out.ID, out.Number
 		fmt.Fprintf(cmd.ErrOrStderr(), "Created trail #%d (%s); linking branch\n", out.Number, out.ID)
 		key = projectTrailIdempotencyKey(cmd.ErrOrStderr(), key)
 		if _, err := linkProjectTrailChange(cmd.Context(), target, change, etag, key); err != nil {
-			return fmt.Errorf("trail %s was created but branch linking did not complete: %w; do not rerun trail create\n%s", out.ID, err, projectTrailLinkRetry(cmd, target, change, key))
+			return api.ProjectTrail{}, fmt.Errorf("trail %s was created but branch linking did not complete: %w; do not rerun trail create\n%s", out.ID, err, projectTrailLinkRetry(cmd, target, change, key))
 		}
 		out, _, err = target.read(cmd.Context())
 		if err != nil {
-			return fmt.Errorf("trail %s was created and branch linked, but reading the result failed: %w; do not rerun trail create", target.TrailID, err)
+			return api.ProjectTrail{}, fmt.Errorf("trail %s was created and branch linked, but reading the result failed: %w; do not rerun trail create", target.TrailID, err)
 		}
 	}
-	return printProjectTrail(cmd, out, nil, nil)
+	return out, nil
+}
+
+// finishLocalTrailBranch runs after the created trail is printed. It switches to
+// the published branch with --checkout, or names the switch command otherwise.
+// previous is the branch checked out before publishing ("" when detached).
+// Git itself refuses a switch that would overwrite local changes; the trail
+// already exists then, so the error says so instead of suggesting a rerun.
+func finishLocalTrailBranch(cmd *cobra.Command, created api.ProjectTrail, branch, previous string, checkout bool) error {
+	if branch == "" || branch == previous {
+		return nil
+	}
+	display := tuiutil.SanitizeTerminalText(branch)
+	if !checkout {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Next: git switch %s\n", display)
+		return nil
+	}
+	if err := CheckoutBranch(cmd.Context(), branch); err != nil {
+		return fmt.Errorf("trail #%d was created; %w; run `git switch %s`", created.Number, err, display)
+	}
+	fmt.Fprintf(cmd.ErrOrStderr(), "Switched to branch %s\n", display)
+	return nil
 }
 
 // Repository access supplies placement and ownership without project inspection.
