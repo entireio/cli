@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -90,12 +89,9 @@ func finishLocalTrailBranch(cmd *cobra.Command, created api.ProjectTrail, branch
 // is quoted for the user's shell, as the link retry hint does.
 func gitSwitchCommand(branch string) string {
 	branch = tuiutil.SanitizeTerminalText(branch)
+	// A plain name stays unquoted so the common hint reads naturally.
 	if strings.Trim(branch, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/-") != "" {
-		if runtime.GOOS == windowsGOOS {
-			branch = powerShellQuote(branch)
-		} else {
-			branch = shellQuote(branch)
-		}
+		branch = quoteForUserShell(branch)
 	}
 	return "git switch " + branch
 }
