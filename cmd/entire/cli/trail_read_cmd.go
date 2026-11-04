@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -142,6 +144,16 @@ func looseJSONLabel(v any) string {
 	}
 }
 
+// decodeTrailReadItem reads one list entry into out. An entry that is not a
+// JSON object (null included, which Unmarshal accepts as a no-op) is as
+// unreadable as one with a field of the wrong type.
+func decodeTrailReadItem(raw json.RawMessage, out any) error {
+	if trimmed := bytes.TrimSpace(raw); len(trimmed) == 0 || trimmed[0] != '{' {
+		return errors.New("not a JSON object")
+	}
+	return json.Unmarshal(raw, out) //nolint:wrapcheck // callers only test for failure
+}
+
 // trailUnreadableNote marks a row the CLI could not read; --json has it whole.
 const trailUnreadableNote = "(unreadable item; see --json)"
 
@@ -153,7 +165,7 @@ func printTrailTimeline(w io.Writer, selected *trailWorkingContext, out trailTim
 	}
 	for _, raw := range out.Items {
 		var item trailTimelineItem
-		if err := json.Unmarshal(raw, &item); err != nil {
+		if err := decodeTrailReadItem(raw, &item); err != nil {
 			// One item the CLI cannot read must not hide the rest: print what
 			// can be read of it and point at --json for the whole item.
 			var head struct {
@@ -262,7 +274,7 @@ func newTrailSessionsCmd(mode *trailMode) *cobra.Command {
 
 func trailSessionRow(raw json.RawMessage) []string {
 	var s trailSessionItem
-	if err := json.Unmarshal(raw, &s); err != nil {
+	if err := decodeTrailReadItem(raw, &s); err != nil {
 		var head struct {
 			SessionID any `json:"sessionId"`
 		}
@@ -338,7 +350,7 @@ func printTrailStack(w io.Writer, selected *trailWorkingContext, stack *trailSta
 	fmt.Fprintf(w, "Position %s of %s%s:\n", tuiutil.SanitizeTerminalLabel(position), tuiutil.SanitizeTerminalLabel(size), base)
 	for _, raw := range stack.PullRequests {
 		var pr trailStackPullRequest
-		if err := json.Unmarshal(raw, &pr); err != nil {
+		if err := decodeTrailReadItem(raw, &pr); err != nil {
 			fmt.Fprintf(w, "  %s\n", trailUnreadableNote)
 			continue
 		}

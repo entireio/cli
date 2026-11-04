@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -173,6 +174,7 @@ func TestTrailTimeline_AnUnreadableItemDoesNotHideTheRest(t *testing.T) {
 	// Serial: replaces global clients.
 	body := json.RawMessage(`{"items":[
 		{"kind":"pr.opened","occurredAt":"2026-10-29T12:00:00.000Z","title":42},
+		null,
 		{"kind":"comment","occurredAt":"2026-10-29T13:00:00.000Z"}
 	]}`)
 	_, out, err := readTrailChange(t, "timeline", body)
@@ -180,24 +182,28 @@ func TestTrailTimeline_AnUnreadableItemDoesNotHideTheRest(t *testing.T) {
 	assert.Contains(t, out, "2026-10-29T12:00:00.000Z  pr.opened")
 	assert.Contains(t, out, "(unreadable item; see --json)")
 	assert.Contains(t, out, "2026-10-29T13:00:00.000Z  comment", "the next item still prints")
+	assert.Equal(t, 2, strings.Count(out, trailUnreadableNote), "a null item is unreadable too")
 }
 
 func TestTrailSessions_AnUnreadableSessionDoesNotHideTheRest(t *testing.T) {
 	// Serial: replaces global clients.
 	body := json.RawMessage(`{"sessions":[
 		{"sessionId":"session-1","checkpointCount":"two"},
+		null,
 		{"sessionId":"session-2","agent":"Codex","checkpointCount":1}
 	]}`)
 	_, out, err := readTrailChange(t, "sessions", body)
 	require.NoError(t, err)
 	assert.Regexp(t, `session-1\s+\(unreadable item; see --json\)`, out)
 	assert.Regexp(t, `session-2\s+Codex\s+1`, out, "the next session still prints")
+	assert.Equal(t, 2, strings.Count(out, trailUnreadableNote), "a null session is unreadable too")
 }
 
 func TestTrailStack_AnUnreadableFieldOrEntryDoesNotHideTheRest(t *testing.T) {
 	// Serial: replaces global clients.
 	body := json.RawMessage(`{"stack":{"position":"2","size":{"n":2},"pull_requests":[
 		{"pr_number":"ten"},
+		null,
 		{"pr_number":11,"status":"open","current":true}
 	]}}`)
 	_, out, err := readTrailChange(t, "stack", body)
@@ -205,4 +211,6 @@ func TestTrailStack_AnUnreadableFieldOrEntryDoesNotHideTheRest(t *testing.T) {
 	assert.Contains(t, out, "Position 2 of ?:\n")
 	assert.Contains(t, out, "  (unreadable item; see --json)\n")
 	assert.Regexp(t, `(?m)^> #11\s+open`, out, "the next entry still prints")
+	assert.Equal(t, 2, strings.Count(out, trailUnreadableNote), "a null entry is unreadable too")
+	assert.NotContains(t, out, "#0")
 }
