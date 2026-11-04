@@ -593,18 +593,31 @@ func TestCheckAndNotify_OffSwitch(t *testing.T) {
 	}
 }
 
-func TestCheckAndNotify_ConfigFalseStillChecks(t *testing.T) {
-	server, hits := newCountingServer(t, "v9.9.9")
-	cmd, buf := setupCheckAndNotifyTest(t, server.URL)
-	writeUserConfig(t, `{"no_auto_update": false}`)
+func TestCheckAndNotify_OffValuesStillCheck(t *testing.T) {
+	for _, tc := range []struct {
+		name, env, config string
+	}{
+		{name: "config false", config: `{"no_auto_update": false}`},
+		{name: "env 0", env: "0"},
+		{name: "env false", env: "false"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server, hits := newCountingServer(t, "v9.9.9")
+			cmd, buf := setupCheckAndNotifyTest(t, server.URL)
+			t.Setenv(envKillSwitch, tc.env)
+			if tc.config != "" {
+				writeUserConfig(t, tc.config)
+			}
 
-	CheckAndNotify(context.Background(), cmd.OutOrStdout(), "1.0.0")
+			CheckAndNotify(context.Background(), cmd.OutOrStdout(), "1.0.0")
 
-	if !strings.Contains(buf.String(), "v9.9.9") {
-		t.Errorf("expected a notice, got %q", buf.String())
-	}
-	if n := hits.Load(); n != 1 {
-		t.Errorf("version server hit %d times, want 1", n)
+			if !strings.Contains(buf.String(), "v9.9.9") {
+				t.Errorf("expected a notice, got %q", buf.String())
+			}
+			if n := hits.Load(); n != 1 {
+				t.Errorf("version server hit %d times, want 1", n)
+			}
+		})
 	}
 }
 

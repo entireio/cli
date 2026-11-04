@@ -5,10 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 
 	"charm.land/huh/v2"
 
+	"github.com/entireio/cli/cmd/entire/cli/envflag"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/uiform"
@@ -20,7 +20,7 @@ const envKillSwitch = "ENTIRE_NO_AUTO_UPDATE"
 
 // AutoUpdateDisabled reports the env or config switch.
 func AutoUpdateDisabled() bool {
-	if os.Getenv(envKillSwitch) != "" {
+	if envflag.Enabled(envKillSwitch) {
 		return true
 	}
 	cfg, err := userconfig.Load()
