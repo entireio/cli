@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
+	"unicode"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -1658,11 +1659,23 @@ func countTrailReviewComments(comments []api.TrailReviewComment) trailReviewComm
 	return counts
 }
 
-// trailReviewPatchText returns a suggested change's patch for display:
-// terminal escapes stripped and only surrounding blank lines trimmed, since a
-// leading space is a context line's prefix and part of the patch.
+// trailReviewPatchText returns a suggested change's patch for display. ANSI
+// sequences, control characters, and bidi controls are stripped, since they
+// could drive or spoof the terminal; carriage returns, tabs, and every
+// printable or space rune (NBSP, U+3000) are kept so the printed patch still
+// applies. Only surrounding blank lines are trimmed: a leading space is a
+// context line's prefix and part of the patch.
 func trailReviewPatchText(patch *string) string {
-	return strings.Trim(tuiutil.SanitizeTerminalText(stringPtrValue(patch)), "\r\n")
+	clean := strings.Map(func(r rune) rune {
+		switch {
+		case r == '\t' || r == '\n' || r == '\r':
+			return r
+		case unicode.IsControl(r), unicode.Is(unicode.Bidi_Control, r):
+			return -1
+		}
+		return r
+	}, tuiutil.StripANSI(stringPtrValue(patch)))
+	return strings.Trim(clean, "\r\n")
 }
 
 func trailReviewLocationDisplay(loc api.TrailReviewLocation) string {

@@ -93,7 +93,9 @@ func TestPrintTrailReviewDashboard_PlainGolden(t *testing.T) {
 	t.Parallel()
 	target, comments := trailReviewRenderFixture()
 	var out strings.Builder
-	printTrailReviewDashboard(&out, target, comments, "next-1", defaultTrailReviewListOptions(), countTrailReviewComments(comments), nil)
+	if err := printTrailReviewDashboard(&out, target, comments, "next-1", defaultTrailReviewListOptions(), countTrailReviewComments(comments), nil); err != nil {
+		t.Fatal(err)
+	}
 	assertTrailReviewGolden(t, out.String(), trailReviewDashboardPlainGolden)
 }
 
@@ -136,7 +138,9 @@ func TestPrintTrailReview_PlainStripsTerminalEscapes(t *testing.T) {
 	detail.SuggestedChanges[0].Instruction = trailReviewStrPtr("do \x1b[5mthis")
 
 	var out strings.Builder
-	printTrailReviewDashboard(&out, target, comments, "", defaultTrailReviewListOptions(), countTrailReviewComments(comments), nil)
+	if err := printTrailReviewDashboard(&out, target, comments, "", defaultTrailReviewListOptions(), countTrailReviewComments(comments), nil); err != nil {
+		t.Fatal(err)
+	}
 	printTrailReviewComments(&out, comments, "")
 	printTrailReviewCommentDetail(&out, detail)
 	printTrailReviewCommentCreated(&out, target, comments[0])
@@ -227,7 +231,9 @@ func renderStyledDashboard(t *testing.T, width int, comments []api.TrailReviewCo
 	t.Helper()
 	target, _ := trailReviewRenderFixture()
 	var out strings.Builder
-	renderTrailReviewDashboardStyled(&out, colorTrailReviewStyles(), width, target, comments, nextCursor, opts, counts, nil)
+	if err := renderTrailReviewDashboardStyled(&out, colorTrailReviewStyles(), width, target, comments, nextCursor, opts, counts, nil); err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(out.String(), "\x1b[") {
 		t.Fatalf("styled dashboard has no color codes:\n%s", out.String())
 	}
@@ -377,8 +383,14 @@ func TestRenderTrailReviewCommentsStyled_UnknownStatusAndSeverityStillRender(t *
 			t.Fatalf("styled list missing %q:\n%s", want, text)
 		}
 	}
-	if strings.Contains(text, "resolved ·") || strings.Contains(text, "dismissed ·") && !strings.Contains(text, "── Done (2) ") {
-		t.Fatalf("done findings misgrouped:\n%s", text)
+	for _, want := range []string{
+		"── Done (2) ",
+		"  ✓ 01M63Q20JXB9  Log line includes the refresh token\n",
+		"  – 01M63Q1YSXPG  dismissed · Rename for clarity\n",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("resolved and dismissed findings belong under Done, resolved without a status prefix; missing %q:\n%s", want, text)
+		}
 	}
 }
 
@@ -473,7 +485,9 @@ func TestRenderTrailReviewStyled_StripsTerminalEscapes(t *testing.T) {
 
 	var out strings.Builder
 	s := colorTrailReviewStyles()
-	renderTrailReviewDashboardStyled(&out, s, 100, target, comments, "", anyStatusOptions(), countTrailReviewComments(comments), nil)
+	if err := renderTrailReviewDashboardStyled(&out, s, 100, target, comments, "", anyStatusOptions(), countTrailReviewComments(comments), nil); err != nil {
+		t.Fatal(err)
+	}
 	renderTrailReviewCommentDetailStyled(&out, s, 100, detail)
 	renderTrailReviewCommentCreatedStyled(&out, s, target, comments[0])
 	for _, bad := range []string{"\x1b]", "\x07", "\x1b[2J", "\x1b[5m"} {
@@ -515,5 +529,16 @@ func TestRenderTrailReviewDashboardStyled_ShowsProjectAgents(t *testing.T) {
 	}
 	if strings.Index(text, "Agents:") > strings.Index(text, "Needs attention") {
 		t.Fatalf("agents should follow the totals, before the findings:\n%s", text)
+	}
+}
+
+// A printed patch must still apply: carriage returns and non-ASCII spaces
+// stay, while escapes and bidi controls that could drive or spoof the
+// terminal go.
+func TestTrailReviewPatchTextKeepsPatchBytes(t *testing.T) {
+	t.Parallel()
+	patch := "\n-a\u00a0b\r\n+a\u3000b\x1b[2J\u202e\r\n\n"
+	if got, want := trailReviewPatchText(&patch), "-a\u00a0b\r\n+a\u3000b"; got != want {
+		t.Fatalf("trailReviewPatchText = %q, want %q", got, want)
 	}
 }
