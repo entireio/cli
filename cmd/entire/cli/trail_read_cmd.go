@@ -129,12 +129,21 @@ func newTrailTimelineCmd(mode *trailMode) *cobra.Command {
 	return cmd
 }
 
-// timelineLooseString is a field of an unreadable timeline item, if it is a
-// string.
-func timelineLooseString(v any) string {
-	s, _ := v.(string) //nolint:errcheck // a non-string prints blank
-	return s
+// looseJSONLabel prints a field the CLI could not read into its usual type: a
+// string or number as itself, anything else blank.
+func looseJSONLabel(v any) string {
+	switch v := v.(type) {
+	case string:
+		return v
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	default:
+		return ""
+	}
 }
+
+// trailUnreadableNote marks a row the CLI could not read; --json has it whole.
+const trailUnreadableNote = "(unreadable item; see --json)"
 
 func printTrailTimeline(w io.Writer, selected *trailWorkingContext, out trailTimelineResponse) error {
 	// An empty page is only this page's: a page that could not be loaded in
@@ -152,8 +161,8 @@ func printTrailTimeline(w io.Writer, selected *trailWorkingContext, out trailTim
 				Kind       any `json:"kind"`
 			}
 			_ = json.Unmarshal(raw, &head) //nolint:errcheck // best effort; a non-object prints blanks
-			line := fmt.Sprintf("%s  %-18s  %-16s  %s", tuiutil.SanitizeTerminalLabel(timelineLooseString(head.OccurredAt)),
-				tuiutil.SanitizeTerminalLabel(timelineLooseString(head.Kind)), "", "(unreadable item; see --json)")
+			line := fmt.Sprintf("%s  %-18s  %-16s  %s", tuiutil.SanitizeTerminalLabel(looseJSONLabel(head.OccurredAt)),
+				tuiutil.SanitizeTerminalLabel(looseJSONLabel(head.Kind)), "", trailUnreadableNote)
 			fmt.Fprintln(w, strings.TrimRight(line, " "))
 			continue
 		}
@@ -212,7 +221,9 @@ func trailTimelineSummary(item trailTimelineItem) string {
 // trailSessionsResponse is the text view's reading of the sessions; --json
 // prints the server's response unchanged, as timeline and stack do.
 type trailSessionsResponse struct {
-	Sessions []trailSessionItem `json:"sessions"`
+	// Each session is read on its own, so one the CLI cannot read does not
+	// hide the rest.
+	Sessions []json.RawMessage `json:"sessions"`
 }
 
 // trailSessionItem keeps startedAt as the server's string, as the timeline
@@ -245,12 +256,22 @@ func newTrailSessionsCmd(mode *trailMode) *cobra.Command {
 				fmt.Fprintf(cmd.OutOrStdout(), "No sessions on %s\n", selected.description())
 				return nil
 			}
-			return printTable(cmd.OutOrStdout(), []string{"SESSION", "AGENT", colHeaderModel, "STARTED", "CHECKPOINTS", "NAME"}, out.Sessions, func(s trailSessionItem) []string {
-				return []string{tuiutil.SanitizeTerminalLabel(s.SessionID), tuiutil.SanitizeTerminalLabel(stringPtrValue(s.Agent)),
-					tuiutil.SanitizeTerminalLabel(stringPtrValue(s.Model)), tuiutil.SanitizeTerminalLabel(stringPtrValue(s.StartedAt)),
-					strconv.Itoa(s.CheckpointCount), tuiutil.SanitizeTerminalLabel(stringPtrValue(s.DisplayName))}
-			})
+			return printTable(cmd.OutOrStdout(), []string{"SESSION", "AGENT", colHeaderModel, "STARTED", "CHECKPOINTS", "NAME"}, out.Sessions, trailSessionRow)
 		})
+}
+
+func trailSessionRow(raw json.RawMessage) []string {
+	var s trailSessionItem
+	if err := json.Unmarshal(raw, &s); err != nil {
+		var head struct {
+			SessionID any `json:"sessionId"`
+		}
+		_ = json.Unmarshal(raw, &head) //nolint:errcheck // best effort; a non-object prints blank
+		return []string{tuiutil.SanitizeTerminalLabel(looseJSONLabel(head.SessionID)), "", "", "", "", trailUnreadableNote}
+	}
+	return []string{tuiutil.SanitizeTerminalLabel(s.SessionID), tuiutil.SanitizeTerminalLabel(stringPtrValue(s.Agent)),
+		tuiutil.SanitizeTerminalLabel(stringPtrValue(s.Model)), tuiutil.SanitizeTerminalLabel(stringPtrValue(s.StartedAt)),
+		strconv.Itoa(s.CheckpointCount), tuiutil.SanitizeTerminalLabel(stringPtrValue(s.DisplayName))}
 }
 
 // trailStackResponse is the text view's reading of the stack; --json prints
@@ -259,11 +280,13 @@ type trailStackResponse struct {
 	Stack *trailStack `json:"stack"`
 }
 
+// trailStack reads position, size, and base loosely and each pull request on
+// its own, so one field or entry the CLI cannot read does not hide the rest.
 type trailStack struct {
-	Position     int                     `json:"position"`
-	Size         int                     `json:"size"`
-	Base         string                  `json:"base,omitempty"`
-	PullRequests []trailStackPullRequest `json:"pull_requests"`
+	Position     any               `json:"position"`
+	Size         any               `json:"size"`
+	Base         any               `json:"base,omitempty"`
+	PullRequests []json.RawMessage `json:"pull_requests"`
 }
 
 type trailStackPullRequest struct {
@@ -295,23 +318,39 @@ func newTrailStackCmd(mode *trailMode) *cobra.Command {
 				fmt.Fprintf(w, "%s is not in a pull request stack\n", selected.description())
 				return nil
 			}
-			base := ""
-			if out.Stack.Base != "" {
-				base = " onto " + tuiutil.SanitizeTerminalLabel(out.Stack.Base)
-			}
-			fmt.Fprintf(w, "Position %d of %d%s:\n", out.Stack.Position, out.Stack.Size, base)
-			for _, pr := range out.Stack.PullRequests {
-				marker := "  "
-				if pr.Current {
-					marker = "> "
-				}
-				trailRef := "-"
-				if pr.TrailNumber != nil {
-					trailRef = selected.Repo + "/" + strconv.Itoa(*pr.TrailNumber)
-				}
-				fmt.Fprintf(w, "%s#%-6d %-10s %-20s %s\n", marker, pr.PRNumber, tuiutil.SanitizeTerminalLabel(stringPtrValue(pr.Status)),
-					tuiutil.SanitizeTerminalLabel(trailRef), tuiutil.SanitizeTerminalLabel(stringPtrValue(pr.Title)))
-			}
+			printTrailStack(w, selected, out.Stack)
 			return nil
 		})
+}
+
+func printTrailStack(w io.Writer, selected *trailWorkingContext, stack *trailStack) {
+	base := ""
+	if b := looseJSONLabel(stack.Base); b != "" {
+		base = " onto " + tuiutil.SanitizeTerminalLabel(b)
+	}
+	position, size := looseJSONLabel(stack.Position), looseJSONLabel(stack.Size)
+	if position == "" {
+		position = "?"
+	}
+	if size == "" {
+		size = "?"
+	}
+	fmt.Fprintf(w, "Position %s of %s%s:\n", tuiutil.SanitizeTerminalLabel(position), tuiutil.SanitizeTerminalLabel(size), base)
+	for _, raw := range stack.PullRequests {
+		var pr trailStackPullRequest
+		if err := json.Unmarshal(raw, &pr); err != nil {
+			fmt.Fprintf(w, "  %s\n", trailUnreadableNote)
+			continue
+		}
+		marker := "  "
+		if pr.Current {
+			marker = "> "
+		}
+		trailRef := "-"
+		if pr.TrailNumber != nil {
+			trailRef = selected.Repo + "/" + strconv.Itoa(*pr.TrailNumber)
+		}
+		fmt.Fprintf(w, "%s#%-6d %-10s %-20s %s\n", marker, pr.PRNumber, tuiutil.SanitizeTerminalLabel(stringPtrValue(pr.Status)),
+			tuiutil.SanitizeTerminalLabel(trailRef), tuiutil.SanitizeTerminalLabel(stringPtrValue(pr.Title)))
+	}
 }

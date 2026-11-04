@@ -142,11 +142,10 @@ func TestTrailSessions_ListsSessions(t *testing.T) {
 
 func TestTrailStack_RendersTheStackOrItsAbsence(t *testing.T) {
 	// Serial: replaces global clients.
-	seven, title, open := 7, "Add keys", "open"
-	stack := trailStackResponse{Stack: &trailStack{Position: 2, Size: 2, Base: "main", PullRequests: []trailStackPullRequest{
-		{PRNumber: 10, Status: &open},
-		{PRNumber: 11, TrailNumber: &seven, Title: &title, Status: &open, Current: true},
-	}}}
+	stack := json.RawMessage(`{"stack":{"position":2,"size":2,"base":"main","pull_requests":[
+		{"pr_number":10,"status":"open"},
+		{"pr_number":11,"trail_number":7,"title":"Add keys","status":"open","current":true}
+	]}}`)
 	_, out, err := readTrailChange(t, "stack", stack)
 	require.NoError(t, err)
 	assert.Contains(t, out, "Position 2 of 2 onto main:\n")
@@ -181,4 +180,29 @@ func TestTrailTimeline_AnUnreadableItemDoesNotHideTheRest(t *testing.T) {
 	assert.Contains(t, out, "2026-10-29T12:00:00.000Z  pr.opened")
 	assert.Contains(t, out, "(unreadable item; see --json)")
 	assert.Contains(t, out, "2026-10-29T13:00:00.000Z  comment", "the next item still prints")
+}
+
+func TestTrailSessions_AnUnreadableSessionDoesNotHideTheRest(t *testing.T) {
+	// Serial: replaces global clients.
+	body := json.RawMessage(`{"sessions":[
+		{"sessionId":"session-1","checkpointCount":"two"},
+		{"sessionId":"session-2","agent":"Codex","checkpointCount":1}
+	]}`)
+	_, out, err := readTrailChange(t, "sessions", body)
+	require.NoError(t, err)
+	assert.Regexp(t, `session-1\s+\(unreadable item; see --json\)`, out)
+	assert.Regexp(t, `session-2\s+Codex\s+1`, out, "the next session still prints")
+}
+
+func TestTrailStack_AnUnreadableFieldOrEntryDoesNotHideTheRest(t *testing.T) {
+	// Serial: replaces global clients.
+	body := json.RawMessage(`{"stack":{"position":"2","size":{"n":2},"pull_requests":[
+		{"pr_number":"ten"},
+		{"pr_number":11,"status":"open","current":true}
+	]}}`)
+	_, out, err := readTrailChange(t, "stack", body)
+	require.NoError(t, err)
+	assert.Contains(t, out, "Position 2 of ?:\n")
+	assert.Contains(t, out, "  (unreadable item; see --json)\n")
+	assert.Regexp(t, `(?m)^> #11\s+open`, out, "the next entry still prints")
 }
