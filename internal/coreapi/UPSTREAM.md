@@ -165,6 +165,11 @@ The next full refresh carries them on its own, and this entry goes.
 (`SetDefaultBranchInputBody`, `SetDefaultBranchOutputBody`) are spliced the
 same way, verbatim from the published spec (entiredb#5136).
 
+`CreateProjectInputBody.cell` is spliced from the entiredb change in
+https://entire.com/gh/entirehq/-/trails/23479. A core without it ignores the
+field and assigns the default cell, so `project create` prints the cell the
+server chose.
+
 **Workaround:** none in `normalize.go` beyond the `ResyncMirrorOutputBody.status`
 enum loosening. entiredb#4961 is on main and in prod, so any refresh from a
 current core keeps the three schemas and the route.

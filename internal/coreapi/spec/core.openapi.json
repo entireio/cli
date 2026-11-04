@@ -1373,6 +1373,10 @@
             "readOnly": true,
             "type": "string"
           },
+          "cell": {
+            "description": "Processing cell ID, not a cluster slug, e.g. aws-us-east-2. A visible cluster in region must serve it. Defaults to the region's default cell.",
+            "type": "string"
+          },
           "name": {
             "maxLength": 100,
             "minLength": 1,
