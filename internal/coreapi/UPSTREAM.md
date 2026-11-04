@@ -165,6 +165,11 @@ The next full refresh carries them on its own, and this entry goes.
 (`SetDefaultBranchInputBody`, `SetDefaultBranchOutputBody`) are spliced the
 same way, verbatim from the published spec (entiredb#5136).
 
+`CreateServiceAccountInputBody`, `ServiceAccount`, `ServiceAccountWithGrants`
+and `GET /service-accounts` are spliced verbatim from the published spec. They
+carry `project_id`: service accounts belong to a project, and `orgId` is
+deprecated and optional.
+
 `CreateProjectInputBody.cell` is spliced from the entiredb change in
 https://entire.com/gh/entirehq/-/trails/23479. A core without it ignores the
 field and assigns the default cell, so `project create` prints the cell the

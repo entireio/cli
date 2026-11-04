@@ -4588,9 +4588,12 @@ func (s *CreateRepoInputBodyObjectFormat) UnmarshalText(data []byte) error {
 // Ref: #/components/schemas/CreateServiceAccountInputBody
 type CreateServiceAccountInputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI `json:"$schema"`
-	Name            string `json:"name"`
-	OrgId           string `json:"orgId"`
+	Schema OptURI `json:"$schema"`
+	Name   string `json:"name"`
+	// Optional. Must match the project's owning org.
+	OrgId OptString `json:"orgId"`
+	// Owning project. An org or an account owns it.
+	ProjectID       string `json:"project_id"`
 	AdditionalProps CreateServiceAccountInputBodyAdditional
 }
 
@@ -4605,8 +4608,13 @@ func (s *CreateServiceAccountInputBody) GetName() string {
 }
 
 // GetOrgId returns the value of OrgId.
-func (s *CreateServiceAccountInputBody) GetOrgId() string {
+func (s *CreateServiceAccountInputBody) GetOrgId() OptString {
 	return s.OrgId
+}
+
+// GetProjectID returns the value of ProjectID.
+func (s *CreateServiceAccountInputBody) GetProjectID() string {
+	return s.ProjectID
 }
 
 // GetAdditionalProps returns the value of AdditionalProps.
@@ -4625,8 +4633,13 @@ func (s *CreateServiceAccountInputBody) SetName(val string) {
 }
 
 // SetOrgId sets the value of OrgId.
-func (s *CreateServiceAccountInputBody) SetOrgId(val string) {
+func (s *CreateServiceAccountInputBody) SetOrgId(val OptString) {
 	s.OrgId = val
+}
+
+// SetProjectID sets the value of ProjectID.
+func (s *CreateServiceAccountInputBody) SetProjectID(val string) {
+	s.ProjectID = val
 }
 
 // SetAdditionalProps sets the value of AdditionalProps.
@@ -22016,11 +22029,16 @@ func (s *RevokeServiceAccountAccessResourceType) UnmarshalText(data []byte) erro
 // Ref: #/components/schemas/ServiceAccount
 type ServiceAccount struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI    `json:"$schema"`
-	AccountId       string    `json:"accountId"`
-	CreatedAt       time.Time `json:"createdAt"`
-	Name            string    `json:"name"`
-	OrgId           string    `json:"orgId"`
+	Schema    OptURI    `json:"$schema"`
+	AccountId string    `json:"accountId"`
+	CreatedAt time.Time `json:"createdAt"`
+	Name      string    `json:"name"`
+	// Deprecated: use the project's owner. Removal after 2027-05-01.
+	//
+	// Deprecated: schema marks this property as deprecated.
+	OrgId OptString `json:"orgId"`
+	// Owning project.
+	ProjectID       OptString `json:"project_id"`
 	Status          string    `json:"status"`
 	SystemManaged   bool      `json:"systemManaged"`
 	AdditionalProps ServiceAccountAdditional
@@ -22047,8 +22065,13 @@ func (s *ServiceAccount) GetName() string {
 }
 
 // GetOrgId returns the value of OrgId.
-func (s *ServiceAccount) GetOrgId() string {
+func (s *ServiceAccount) GetOrgId() OptString {
 	return s.OrgId
+}
+
+// GetProjectID returns the value of ProjectID.
+func (s *ServiceAccount) GetProjectID() OptString {
+	return s.ProjectID
 }
 
 // GetStatus returns the value of Status.
@@ -22087,8 +22110,13 @@ func (s *ServiceAccount) SetName(val string) {
 }
 
 // SetOrgId sets the value of OrgId.
-func (s *ServiceAccount) SetOrgId(val string) {
+func (s *ServiceAccount) SetOrgId(val OptString) {
 	s.OrgId = val
+}
+
+// SetProjectID sets the value of ProjectID.
+func (s *ServiceAccount) SetProjectID(val OptString) {
+	s.ProjectID = val
 }
 
 // SetStatus sets the value of Status.
@@ -22189,11 +22217,16 @@ func (s *ServiceAccountGrantAdditional) init() ServiceAccountGrantAdditional {
 
 // Ref: #/components/schemas/ServiceAccountWithGrants
 type ServiceAccountWithGrants struct {
-	AccountId       string    `json:"accountId"`
-	CreatedAt       time.Time `json:"createdAt"`
-	Grants          []string  `json:"grants"`
-	Name            string    `json:"name"`
-	OrgId           string    `json:"orgId"`
+	AccountId string    `json:"accountId"`
+	CreatedAt time.Time `json:"createdAt"`
+	Grants    []string  `json:"grants"`
+	Name      string    `json:"name"`
+	// Deprecated: use the project's owner. Removal after 2027-05-01.
+	//
+	// Deprecated: schema marks this property as deprecated.
+	OrgId OptString `json:"orgId"`
+	// Owning project.
+	ProjectID       OptString `json:"project_id"`
 	Status          string    `json:"status"`
 	SystemManaged   bool      `json:"systemManaged"`
 	AdditionalProps ServiceAccountWithGrantsAdditional
@@ -22220,8 +22253,13 @@ func (s *ServiceAccountWithGrants) GetName() string {
 }
 
 // GetOrgId returns the value of OrgId.
-func (s *ServiceAccountWithGrants) GetOrgId() string {
+func (s *ServiceAccountWithGrants) GetOrgId() OptString {
 	return s.OrgId
+}
+
+// GetProjectID returns the value of ProjectID.
+func (s *ServiceAccountWithGrants) GetProjectID() OptString {
+	return s.ProjectID
 }
 
 // GetStatus returns the value of Status.
@@ -22260,8 +22298,13 @@ func (s *ServiceAccountWithGrants) SetName(val string) {
 }
 
 // SetOrgId sets the value of OrgId.
-func (s *ServiceAccountWithGrants) SetOrgId(val string) {
+func (s *ServiceAccountWithGrants) SetOrgId(val OptString) {
 	s.OrgId = val
+}
+
+// SetProjectID sets the value of ProjectID.
+func (s *ServiceAccountWithGrants) SetProjectID(val OptString) {
+	s.ProjectID = val
 }
 
 // SetStatus sets the value of Status.

@@ -1643,12 +1643,18 @@
             "type": "string"
           },
           "orgId": {
+            "description": "Optional. Must match the project's owning org.",
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          },
+          "project_id": {
+            "description": "Owning project. An org or an account owns it.",
             "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
             "type": "string"
           }
         },
         "required": [
-          "orgId",
+          "project_id",
           "name"
         ],
         "type": "object"
@@ -6113,6 +6119,12 @@
             "type": "string"
           },
           "orgId": {
+            "deprecated": true,
+            "description": "Deprecated: use the project's owner. Removal after 2027-05-01.",
+            "type": "string"
+          },
+          "project_id": {
+            "description": "Owning project.",
             "type": "string"
           },
           "status": {
@@ -6125,7 +6137,6 @@
         "required": [
           "accountId",
           "name",
-          "orgId",
           "status",
           "systemManaged",
           "createdAt"
@@ -6175,6 +6186,12 @@
             "type": "string"
           },
           "orgId": {
+            "deprecated": true,
+            "description": "Deprecated: use the project's owner. Removal after 2027-05-01.",
+            "type": "string"
+          },
+          "project_id": {
+            "description": "Owning project.",
             "type": "string"
           },
           "status": {
@@ -6188,7 +6205,6 @@
           "grants",
           "accountId",
           "name",
-          "orgId",
           "status",
           "systemManaged",
           "createdAt"
@@ -20344,11 +20360,23 @@
             }
           },
           {
+            "description": "List the org's service accounts.",
             "explode": false,
             "in": "query",
             "name": "orgId",
-            "required": true,
             "schema": {
+              "description": "List the org's service accounts.",
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "List the project's service accounts.",
+            "explode": false,
+            "in": "query",
+            "name": "project_id",
+            "schema": {
+              "description": "List the project's service accounts.",
               "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
               "type": "string"
             }
@@ -20450,7 +20478,7 @@
             "sessionAuth": []
           }
         ],
-        "summary": "List service accounts in an org",
+        "summary": "List service accounts in an org or project",
         "tags": [
           "service-accounts"
         ]

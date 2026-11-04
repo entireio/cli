@@ -11616,8 +11616,14 @@ func (s *CreateServiceAccountInputBody) encodeFields(e *jx.Encoder) {
 		e.Str(s.Name)
 	}
 	{
-		e.FieldStart("orgId")
-		e.Str(s.OrgId)
+		if s.OrgId.Set {
+			e.FieldStart("orgId")
+			s.OrgId.Encode(e)
+		}
+	}
+	{
+		e.FieldStart("project_id")
+		e.Str(s.ProjectID)
 	}
 	for k, elem := range s.AdditionalProps {
 		e.FieldStart(k)
@@ -11628,10 +11634,11 @@ func (s *CreateServiceAccountInputBody) encodeFields(e *jx.Encoder) {
 	}
 }
 
-var jsonFieldsNameOfCreateServiceAccountInputBody = [3]string{
+var jsonFieldsNameOfCreateServiceAccountInputBody = [4]string{
 	0: "$schema",
 	1: "name",
 	2: "orgId",
+	3: "project_id",
 }
 
 // Decode decodes CreateServiceAccountInputBody from json.
@@ -11667,16 +11674,26 @@ func (s *CreateServiceAccountInputBody) Decode(d *jx.Decoder) error {
 				return errors.Wrap(err, "decode field \"name\"")
 			}
 		case "orgId":
-			requiredBitSet[0] |= 1 << 2
 			if err := func() error {
-				v, err := d.Str()
-				s.OrgId = string(v)
-				if err != nil {
+				s.OrgId.Reset()
+				if err := s.OrgId.Decode(d); err != nil {
 					return err
 				}
 				return nil
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"orgId\"")
+			}
+		case "project_id":
+			requiredBitSet[0] |= 1 << 3
+			if err := func() error {
+				v, err := d.Str()
+				s.ProjectID = string(v)
+				if err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"project_id\"")
 			}
 		default:
 			var elem jx.Raw
@@ -11699,7 +11716,7 @@ func (s *CreateServiceAccountInputBody) Decode(d *jx.Decoder) error {
 	// Validate required fields.
 	var failures []validate.FieldError
 	for i, mask := range [1]uint8{
-		0b00000110,
+		0b00001010,
 	} {
 		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
 			// Mask only required fields and check equality to mask using XOR.
@@ -46283,8 +46300,16 @@ func (s *ServiceAccount) encodeFields(e *jx.Encoder) {
 		e.Str(s.Name)
 	}
 	{
-		e.FieldStart("orgId")
-		e.Str(s.OrgId)
+		if s.OrgId.Set {
+			e.FieldStart("orgId")
+			s.OrgId.Encode(e)
+		}
+	}
+	{
+		if s.ProjectID.Set {
+			e.FieldStart("project_id")
+			s.ProjectID.Encode(e)
+		}
 	}
 	{
 		e.FieldStart("status")
@@ -46303,14 +46328,15 @@ func (s *ServiceAccount) encodeFields(e *jx.Encoder) {
 	}
 }
 
-var jsonFieldsNameOfServiceAccount = [7]string{
+var jsonFieldsNameOfServiceAccount = [8]string{
 	0: "$schema",
 	1: "accountId",
 	2: "createdAt",
 	3: "name",
 	4: "orgId",
-	5: "status",
-	6: "systemManaged",
+	5: "project_id",
+	6: "status",
+	7: "systemManaged",
 }
 
 // Decode decodes ServiceAccount from json.
@@ -46370,19 +46396,27 @@ func (s *ServiceAccount) Decode(d *jx.Decoder) error {
 				return errors.Wrap(err, "decode field \"name\"")
 			}
 		case "orgId":
-			requiredBitSet[0] |= 1 << 4
 			if err := func() error {
-				v, err := d.Str()
-				s.OrgId = string(v)
-				if err != nil {
+				s.OrgId.Reset()
+				if err := s.OrgId.Decode(d); err != nil {
 					return err
 				}
 				return nil
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"orgId\"")
 			}
+		case "project_id":
+			if err := func() error {
+				s.ProjectID.Reset()
+				if err := s.ProjectID.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"project_id\"")
+			}
 		case "status":
-			requiredBitSet[0] |= 1 << 5
+			requiredBitSet[0] |= 1 << 6
 			if err := func() error {
 				v, err := d.Str()
 				s.Status = string(v)
@@ -46394,7 +46428,7 @@ func (s *ServiceAccount) Decode(d *jx.Decoder) error {
 				return errors.Wrap(err, "decode field \"status\"")
 			}
 		case "systemManaged":
-			requiredBitSet[0] |= 1 << 6
+			requiredBitSet[0] |= 1 << 7
 			if err := func() error {
 				v, err := d.Bool()
 				s.SystemManaged = bool(v)
@@ -46426,7 +46460,7 @@ func (s *ServiceAccount) Decode(d *jx.Decoder) error {
 	// Validate required fields.
 	var failures []validate.FieldError
 	for i, mask := range [1]uint8{
-		0b01111110,
+		0b11001110,
 	} {
 		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
 			// Mask only required fields and check equality to mask using XOR.
@@ -46784,8 +46818,16 @@ func (s *ServiceAccountWithGrants) encodeFields(e *jx.Encoder) {
 		e.Str(s.Name)
 	}
 	{
-		e.FieldStart("orgId")
-		e.Str(s.OrgId)
+		if s.OrgId.Set {
+			e.FieldStart("orgId")
+			s.OrgId.Encode(e)
+		}
+	}
+	{
+		if s.ProjectID.Set {
+			e.FieldStart("project_id")
+			s.ProjectID.Encode(e)
+		}
 	}
 	{
 		e.FieldStart("status")
@@ -46804,14 +46846,15 @@ func (s *ServiceAccountWithGrants) encodeFields(e *jx.Encoder) {
 	}
 }
 
-var jsonFieldsNameOfServiceAccountWithGrants = [7]string{
+var jsonFieldsNameOfServiceAccountWithGrants = [8]string{
 	0: "accountId",
 	1: "createdAt",
 	2: "grants",
 	3: "name",
 	4: "orgId",
-	5: "status",
-	6: "systemManaged",
+	5: "project_id",
+	6: "status",
+	7: "systemManaged",
 }
 
 // Decode decodes ServiceAccountWithGrants from json.
@@ -46881,19 +46924,27 @@ func (s *ServiceAccountWithGrants) Decode(d *jx.Decoder) error {
 				return errors.Wrap(err, "decode field \"name\"")
 			}
 		case "orgId":
-			requiredBitSet[0] |= 1 << 4
 			if err := func() error {
-				v, err := d.Str()
-				s.OrgId = string(v)
-				if err != nil {
+				s.OrgId.Reset()
+				if err := s.OrgId.Decode(d); err != nil {
 					return err
 				}
 				return nil
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"orgId\"")
 			}
+		case "project_id":
+			if err := func() error {
+				s.ProjectID.Reset()
+				if err := s.ProjectID.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"project_id\"")
+			}
 		case "status":
-			requiredBitSet[0] |= 1 << 5
+			requiredBitSet[0] |= 1 << 6
 			if err := func() error {
 				v, err := d.Str()
 				s.Status = string(v)
@@ -46905,7 +46956,7 @@ func (s *ServiceAccountWithGrants) Decode(d *jx.Decoder) error {
 				return errors.Wrap(err, "decode field \"status\"")
 			}
 		case "systemManaged":
-			requiredBitSet[0] |= 1 << 6
+			requiredBitSet[0] |= 1 << 7
 			if err := func() error {
 				v, err := d.Bool()
 				s.SystemManaged = bool(v)
@@ -46937,7 +46988,7 @@ func (s *ServiceAccountWithGrants) Decode(d *jx.Decoder) error {
 	// Validate required fields.
 	var failures []validate.FieldError
 	for i, mask := range [1]uint8{
-		0b01111111,
+		0b11001111,
 	} {
 		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
 			// Mask only required fields and check equality to mask using XOR.
