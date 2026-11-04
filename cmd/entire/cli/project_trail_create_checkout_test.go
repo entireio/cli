@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -66,6 +68,7 @@ func TestProjectTrailCreateCheckoutRefusalKeepsTrail(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorContains(t, err, "trail #42 was created; checkout failed:")
 	require.ErrorContains(t, err, "run `git switch feature/diverged`")
+	require.NotContains(t, err.Error(), "switched to")
 	require.NotContains(t, err.Error(), "checkout failed: checkout failed")
 	require.JSONEq(t, mustProjectTrailJSON(t), out, "the created trail is still printed: %s", errOut)
 	require.Equal(t, "main", currentTestBranch(t, dir))
@@ -189,7 +192,112 @@ func TestGitSwitchCommandQuotesShellMetacharacters(t *testing.T) {
 	if runtime.GOOS == windowsGOOS {
 		t.Skip("POSIX quoting")
 	}
-	require.Equal(t, "git switch feature/x-1.2_y", gitSwitchCommand("feature/x-1.2_y"))
-	require.Equal(t, `git switch 'feat/$(rm -rf ~);x'`, gitSwitchCommand("feat/$(rm -rf ~);x"))
-	require.Equal(t, `git switch 'it'\''s'`, gitSwitchCommand("it's"))
+	for branch, want := range map[string]string{
+		"feature/x-1.2_y":    "git switch feature/x-1.2_y",
+		"feat/$(rm -rf ~);x": `git switch 'feat/$(rm -rf ~);x'`,
+		"it's":               `git switch 'it'\''s'`,
+	} {
+		got, ok := gitSwitchCommand(branch)
+		require.True(t, ok, branch)
+		require.Equal(t, want, got)
+	}
+}
+
+func TestGitSwitchCommandRefusesNamesAlteredForDisplay(t *testing.T) {
+	t.Parallel()
+	for _, branch := range []string{"feat/\u202eabc", "feat/\x1b[31mred", "feat/\u200bzero"} {
+		_, ok := gitSwitchCommand(branch)
+		require.False(t, ok, "%q", branch)
+		require.Equal(t, hiddenBranchSwitchHint, gitSwitchInstruction(branch))
+	}
+}
+
+func TestProjectTrailCreateHidesSwitchCommandForUnshownBranchName(t *testing.T) {
+	dir, remote := setupProjectTrailPublication(t)
+	branch := "feat/\u202eabc"
+	testutil.RunGit(t, dir, "branch", branch)
+	setupRepositoryTrailCreation(t, "gh", repositoryTrailCreationHandler(t, "gh", func(change api.ChangeCreateRequest) {
+		assert.Equal(t, branch, change.BranchName)
+	}))
+
+	_, errOut, err := executeProjectTrailTest(t, "create", "--title", "Bidi", "--branch", branch, "--json")
+	require.NoError(t, err, errOut)
+	require.Contains(t, errOut, "Next: "+hiddenBranchSwitchHint+"\n")
+	require.NotContains(t, errOut, "git switch feat")
+	require.Contains(t, testutil.RunGit(t, remote, "for-each-ref", "--format=%(refname)"), "refs/heads/"+branch)
+}
+
+// failingTrailWriter fails every write, like a closed stdout pipe.
+type failingTrailWriter struct{}
+
+func (failingTrailWriter) Write([]byte) (int, error) { return 0, errors.New("broken pipe") }
+
+func TestProjectTrailCreatePrintFailureNamesCreatedTrail(t *testing.T) {
+	setupProjectTrailPublication(t)
+	setupRepositoryTrailCreation(t, "gh", repositoryTrailCreationHandler(t, "gh", nil))
+	cmd := newTrailCmdForMode(true)
+	cmd.SilenceUsage, cmd.SilenceErrors = true, true
+	cmd.SetOut(failingTrailWriter{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"create", "--title", "Start work", "--json"})
+
+	err := cmd.Execute()
+	require.ErrorContains(t, err, "trail #42 ("+projectTrailTestID+") was created, but printing it failed")
+	require.ErrorContains(t, err, "broken pipe")
+	require.ErrorContains(t, err, "do not rerun trail create")
+}
+
+func TestProjectTrailCreateCheckoutReportsSwitchDespiteHookFailure(t *testing.T) {
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("shell hook")
+	}
+	dir, _ := setupProjectTrailPublication(t)
+	hooksDir := filepath.Join(dir, ".git", "hooks")
+	require.NoError(t, os.MkdirAll(hooksDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(hooksDir, "post-checkout"), []byte("#!/bin/sh\necho hook-failed >&2\nexit 1\n"), 0o755))
+	setupRepositoryTrailCreation(t, "gh", repositoryTrailCreationHandler(t, "gh", nil))
+
+	_, errOut, err := executeProjectTrailTest(t, "create", "--title", "Start work", "--checkout", "--json")
+	require.ErrorContains(t, err, "trail #42 was created and switched to start-work, but git reported an error:")
+	require.ErrorContains(t, err, "hook-failed")
+	require.NotContains(t, err.Error(), "git switch", errOut)
+	require.Equal(t, "start-work", currentTestBranch(t, dir))
+}
+
+// addHeldWorktree checks branch out in a second worktree of dir.
+func addHeldWorktree(t *testing.T, dir, branch string) string {
+	t.Helper()
+	other := filepath.Join(t.TempDir(), "held-worktree")
+	testutil.RunGit(t, dir, "worktree", "add", "-b", branch, other)
+	return other
+}
+
+func TestProjectTrailCreatePointsToWorktreeHoldingBranch(t *testing.T) {
+	dir, _ := setupProjectTrailPublication(t)
+	other := addHeldWorktree(t, dir, "feature/held")
+	setupRepositoryTrailCreation(t, "gh", repositoryTrailCreationHandler(t, "gh", nil))
+
+	_, errOut, err := executeProjectTrailTest(t, "create", "--title", "Held", "--branch", "feature/held", "--json")
+	require.NoError(t, err, errOut)
+	require.Contains(t, errOut, "Next: continue in worktree ")
+	require.Contains(t, errOut, filepath.Base(other)+", where feature/held is checked out\n")
+	require.NotContains(t, errOut, "git switch")
+	require.Equal(t, "main", currentTestBranch(t, dir))
+}
+
+func TestProjectTrailCreateCheckoutRefusesBranchHeldElsewhereBeforeCreating(t *testing.T) {
+	dir, remote := setupProjectTrailPublication(t)
+	other := addHeldWorktree(t, dir, "feature/held")
+	setupRepositoryTrailCreation(t, "gh", func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("no request expected, got %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	out, _, err := executeProjectTrailTest(t, "create", "--title", "Held", "--branch", "feature/held", "--checkout")
+	require.ErrorContains(t, err, "cannot --checkout feature/held: it is checked out in worktree ")
+	require.ErrorContains(t, err, filepath.Base(other))
+	require.ErrorContains(t, err, "nothing was created")
+	require.Empty(t, out)
+	require.Equal(t, "main", currentTestBranch(t, dir))
+	require.NotContains(t, testutil.RunGit(t, remote, "for-each-ref", "--format=%(refname)"), "feature/held")
 }

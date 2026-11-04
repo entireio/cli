@@ -65,7 +65,7 @@ func createRepositoryScopedProjectTrail(cmd *cobra.Command, request api.ProjectT
 }
 
 // finishLocalTrailBranch runs after the created trail is printed. It switches to
-// the published branch with --checkout, or names the switch command otherwise.
+// the published branch with --checkout, or names how to reach it otherwise.
 // previous is the branch checked out before publishing ("" when detached).
 // Git itself refuses a switch that would overwrite local changes; the trail
 // already exists then, so the error says so instead of suggesting a rerun.
@@ -73,27 +73,73 @@ func finishLocalTrailBranch(cmd *cobra.Command, created api.ProjectTrail, branch
 	if branch == "" || branch == previous {
 		return nil
 	}
+	ctx := cmd.Context()
 	if !checkout {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Next: %s\n", gitSwitchCommand(branch))
+		fmt.Fprintf(cmd.ErrOrStderr(), "Next: %s\n", trailBranchNextStep(ctx, branch))
 		return nil
 	}
-	if err := CheckoutBranch(cmd.Context(), branch); err != nil {
-		return fmt.Errorf("trail #%d was created; %w; run `%s`", created.Number, err, gitSwitchCommand(branch))
+	shown := tuiutil.SanitizeTerminalText(branch)
+	if err := CheckoutBranch(ctx, branch); err != nil {
+		// A failing post-checkout hook makes git exit non-zero after HEAD moved;
+		// telling the user to switch again would be wrong.
+		if now, headErr := GetCurrentBranch(ctx); headErr == nil && now == branch {
+			return fmt.Errorf("trail #%d was created and switched to %s, but git reported an error: %w", created.Number, shown, err)
+		}
+		return fmt.Errorf("trail #%d was created; %w; %s", created.Number, err, gitSwitchInstruction(branch))
 	}
-	fmt.Fprintf(cmd.ErrOrStderr(), "Switched to branch %s\n", tuiutil.SanitizeTerminalText(branch))
+	fmt.Fprintf(cmd.ErrOrStderr(), "Switched to branch %s\n", shown)
 	return nil
+}
+
+// refuseCheckoutHeldElsewhere stops --checkout before anything is created:
+// git refuses to check out a branch another worktree holds.
+func refuseCheckoutHeldElsewhere(ctx context.Context, branch string) error {
+	path, ok := branchCheckedOutElsewhere(ctx, branch)
+	if !ok {
+		return nil
+	}
+	return fmt.Errorf("cannot --checkout %s: it is checked out in worktree %s; nothing was created. Rerun without --checkout and continue in that worktree",
+		tuiutil.SanitizeTerminalText(branch), tuiutil.SanitizeTerminalText(path))
+}
+
+// trailBranchNextStep names how to reach branch: the worktree that already has
+// it checked out (git switch would refuse), or the switch command.
+func trailBranchNextStep(ctx context.Context, branch string) string {
+	if path, ok := branchCheckedOutElsewhere(ctx, branch); ok {
+		return fmt.Sprintf("continue in worktree %s, where %s is checked out", tuiutil.SanitizeTerminalText(path), tuiutil.SanitizeTerminalText(branch))
+	}
+	if command, ok := gitSwitchCommand(branch); ok {
+		return command
+	}
+	return hiddenBranchSwitchHint
+}
+
+// hiddenBranchSwitchHint replaces a switch command whose branch name would not
+// survive display sanitizing: a command built from the sanitized name would
+// target a different branch, or one that does not exist.
+const hiddenBranchSwitchHint = "switch to the new branch with git switch; its name contains characters that are not shown"
+
+// gitSwitchInstruction is the sentence an error ends with to send the user to branch.
+func gitSwitchInstruction(branch string) string {
+	if command, ok := gitSwitchCommand(branch); ok {
+		return "run `" + command + "`"
+	}
+	return hiddenBranchSwitchHint
 }
 
 // gitSwitchCommand is the copy-paste command that switches to branch. Git
 // allows shell metacharacters in branch names, so anything beyond a plain name
-// is quoted for the user's shell, as the link retry hint does.
-func gitSwitchCommand(branch string) string {
-	branch = tuiutil.SanitizeTerminalText(branch)
+// is quoted for the user's shell, as the link retry hint does. It reports false
+// when display sanitizing would change the name, so no command is runnable.
+func gitSwitchCommand(branch string) (string, bool) {
+	if tuiutil.SanitizeTerminalText(branch) != branch {
+		return "", false
+	}
 	// A plain name stays unquoted so the common hint reads naturally.
 	if strings.Trim(branch, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/-") != "" {
 		branch = quoteForUserShell(branch)
 	}
-	return "git switch " + branch
+	return "git switch " + branch, true
 }
 
 // Repository access supplies placement and ownership without project inspection.

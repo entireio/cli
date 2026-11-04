@@ -523,12 +523,17 @@ func newProjectTrailCreateCmd() *cobra.Command {
 // switches to or names the published branch (see finishLocalTrailBranch).
 // current is the branch checked out before publishing.
 func createAndPrintRepositoryScopedProjectTrail(cmd *cobra.Command, request api.ProjectTrailCreateRequest, change api.ChangeCreateRequest, key, current string, checkout bool) error {
+	if checkout && publishesLocalBranch(cmd, change) && change.BranchName != current {
+		if err := refuseCheckoutHeldElsewhere(cmd.Context(), change.BranchName); err != nil {
+			return err
+		}
+	}
 	created, err := createRepositoryScopedProjectTrail(cmd, request, change, key)
 	if err != nil {
 		return err
 	}
 	if err := printProjectTrail(cmd, created, nil, nil); err != nil {
-		return err
+		return fmt.Errorf("trail #%d (%s) was created, but printing it failed: %w; do not rerun trail create", created.Number, created.ID, err)
 	}
 	if !publishesLocalBranch(cmd, change) {
 		return nil
