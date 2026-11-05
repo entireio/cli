@@ -248,7 +248,12 @@ always runnable in every build.
   project's existing agent of that preset to it (one agent per preset per
   project), refusing `--disabled`/`--environment` an existing agent cannot
   honor. Creates send a fresh `Idempotency-Key` and replaces the agent's
-  `If-Match` etag, as entire-api requires. Also
+  `If-Match` etag, as entire-api requires. `agent run`
+  (`list`/`show`/`cancel`/`retry`) reads and acts on the agents' runs through
+  `/{host}/{project}/runs`; `list` prints one page with its cursor, run IDs
+  must be ULIDs before any request, `retry` sends an `Idempotency-Key`, and
+  `--json` passes the server's runs through. What the agents did on one trail
+  change is `trail finding`, and `trail rerun-review` starts them. Also
   `grant` (`add`/`list`/`remove`): project access for a `provider:handle`
   grantee, roles reader/writer/admin; both `add` and `remove` take the grantee
   optionally (see the grant-subtree notes below). `create <name> --owner <ref>`
