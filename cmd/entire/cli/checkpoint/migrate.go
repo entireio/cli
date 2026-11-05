@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	git "github.com/go-git/go-git/v6"
@@ -25,16 +26,84 @@ type MigrateResult struct {
 	Migrated []id.CheckpointID
 	// Skipped counts checkpoints already up to date (idempotent no-ops).
 	Skipped int
+	// Diverged lists checkpoints left without a ref because two v1 copies
+	// both changed them and nobody chose which copy to keep.
+	Diverged []DivergedLegacyCheckpoint
+}
+
+// MigrateOptions controls MigrateBranchToRefs and
+// ResolveDivergedLegacyCheckpoints.
+type MigrateOptions struct {
+	// DryRun reports what would change without writing or enqueuing anything.
+	// It never asks Choose.
+	DryRun bool
+	// Choose picks the copy of a diverged checkpoint to keep. When nil, every
+	// diverged checkpoint is left without a ref and listed in
+	// MigrateResult.Diverged.
+	Choose LegacyCopyChooser
+}
+
+// LegacyCopyChooser returns the Ref of the copy to keep, or "" to leave the
+// checkpoint without a ref. Keeping one copy hides the other copy's changes
+// from the checkpoint; they stay only in that v1 branch's history.
+type LegacyCopyChooser func(context.Context, DivergedLegacyCheckpoint) (plumbing.ReferenceName, error)
+
+// DivergedLegacyCheckpoint is a checkpoint that two v1 copies (normally this
+// clone's and a remote-tracking one) both changed since they split.
+type DivergedLegacyCheckpoint struct {
+	ID id.CheckpointID
+	// Local is the copy first in read precedence, which is this clone's v1
+	// whenever it holds the checkpoint. Remote is the other.
+	Local, Remote LegacyCheckpointCopy
+}
+
+// RemoteName returns the remote whose tracking ref holds this copy, or "" for
+// this clone's own v1 branch.
+func (c LegacyCheckpointCopy) RemoteName() string {
+	rest, ok := strings.CutPrefix(c.Ref.String(), "refs/remotes/")
+	if !ok {
+		return ""
+	}
+	name, _, _ := strings.Cut(rest, "/"+DefaultV1Refs().Primary.Short())
+	return name
+}
+
+// LegacyCheckpointCopy is one v1 branch's copy of a checkpoint.
+type LegacyCheckpointCopy struct {
+	Ref plumbing.ReferenceName
+	// SessionIDs lists the copy's sessions in index order. It is empty when
+	// the copy's session metadata is not available locally.
+	SessionIDs []string
+	subtree    plumbing.Hash
+	// sessionTrees maps each session ID to its folder's tree in this copy.
+	sessionTrees map[string]plumbing.Hash
+}
+
+// DifferingSessions returns the sessions both copies hold with different
+// content, in Local's order. Keeping either copy hides the other's version
+// of these, which a session ID present in both would otherwise not show.
+func (d DivergedLegacyCheckpoint) DifferingSessions() []string {
+	var differing []string
+	for _, sessionID := range d.Local.SessionIDs {
+		remote, ok := d.Remote.sessionTrees[sessionID]
+		if ok && remote != d.Local.sessionTrees[sessionID] {
+			differing = append(differing, sessionID)
+		}
+	}
+	return differing
 }
 
 // MigrateBranchToRefs converts every checkpoint stored on the git-branch v1
 // branch (entire/checkpoints/v1) into a per-checkpoint ref under
 // refs/entire/checkpoints/<shard>/<id> — the layout the git-refs store uses.
 //
-// Each checkpoint's current subtree from the v1 branch tip is wrapped in a
-// fresh commit, byte-identical except for the root metadata.json, which is
-// normalized for the refs layout (see normalizeMigratedMetadata). Existing
-// branch commits are not remapped.
+// Each checkpoint's current subtree is wrapped in a fresh commit,
+// byte-identical except for the root metadata.json, which is normalized for
+// the refs layout (see normalizeMigratedMetadata). Existing branch commits are
+// not remapped. The subtree is taken from whichever v1 copy, local or
+// remote-tracking, changed the checkpoint last (see pickCheckpointCopy). When
+// both changed it, opts.Choose decides; without a choice the checkpoint gets
+// no ref and is listed in MigrateResult.Diverged.
 //
 // It is idempotent: a ref whose history already contains the normalized tree
 // is skipped (even when refs-store writes have advanced the tip past it), and
@@ -45,10 +114,9 @@ type MigrateResult struct {
 // including already-imported refs, so a ref left unqueued by a partial earlier
 // run still gets pushed. Checkpoints on this clone's deleted-checkpoints list
 // (see DeletedCheckpoints) are skipped and not counted. This function does not
-// push. When dryRun is true it
-// reports what would change without writing or enqueuing anything.
-func MigrateBranchToRefs(ctx context.Context, repo *git.Repository, dryRun bool) (MigrateResult, error) {
-	return migrateBranchToRefs(ctx, repo, dryRun, updatePersistentRef)
+// push.
+func MigrateBranchToRefs(ctx context.Context, repo *git.Repository, opts MigrateOptions) (MigrateResult, error) {
+	return migrateBranchToRefs(ctx, repo, opts, updatePersistentRef)
 }
 
 type persistentRefUpdater func(context.Context, *git.Repository, plumbing.ReferenceName, persistentRefBuilder) error
@@ -56,19 +124,14 @@ type persistentRefUpdater func(context.Context, *git.Repository, plumbing.Refere
 func migrateBranchToRefs(
 	ctx context.Context,
 	repo *git.Repository,
-	dryRun bool,
+	opts MigrateOptions,
 	updateRef persistentRefUpdater,
 ) (MigrateResult, error) {
 	var result MigrateResult
 
-	branch := NewGitStore(repo, DefaultV1Refs())
-	tree, err := branch.getSessionsBranchTree(ctx)
-	if err != nil {
-		if errors.Is(err, plumbing.ErrReferenceNotFound) {
-			// No v1 branch locally or on origin → nothing to migrate.
-			return result, nil
-		}
-		return result, fmt.Errorf("read v1 checkpoint branch: %w", err)
+	v1, ok, err := openLegacyV1(ctx, repo)
+	if err != nil || !ok {
+		return result, err
 	}
 
 	refsStore := newGitRefsStore(repo)
@@ -76,21 +139,8 @@ func migrateBranchToRefs(
 	if err != nil {
 		return result, fmt.Errorf("resolve push queue: %w", err)
 	}
-	deleted, err := LoadDeletedForRepo(repo)
-	if err != nil {
-		return result, err
-	}
 
-	walkErr := WalkCheckpointShards(ctx, repo, tree, func(cid id.CheckpointID, cpTreeHash plumbing.Hash) error {
-		if err := ctx.Err(); err != nil {
-			return err //nolint:wrapcheck // propagate context cancellation
-		}
-		if deleted.Contains(cid) {
-			// Deleted from this clone: a v1 copy still visible here (a stale
-			// tracking ref, a remote the delete could not reach) must not
-			// bring it back as a ref.
-			return nil
-		}
+	walkErr := v1.walk(ctx, func(cid id.CheckpointID) error {
 		result.Total++
 
 		refName, err := RefName(cid)
@@ -98,7 +148,16 @@ func migrateBranchToRefs(
 			return fmt.Errorf("ref name for checkpoint %s: %w", cid, err)
 		}
 
-		if dryRun {
+		cpTreeHash, unresolved, err := v1.subtreeToKeep(ctx, cid, opts)
+		if err != nil {
+			return err
+		}
+		if unresolved != nil {
+			result.Diverged = append(result.Diverged, *unresolved)
+			return nil
+		}
+
+		if opts.DryRun {
 			// Report only what a real run would newly write; an already-imported
 			// checkpoint is a skip, not a would-migrate. No refs or objects are
 			// enqueued or written on this path.
@@ -135,6 +194,202 @@ func migrateBranchToRefs(
 		return result, fmt.Errorf("walk v1 checkpoints: %w", walkErr)
 	}
 	return result, nil
+}
+
+// ResolveDivergedLegacyCheckpoints gives a ref to each v1 checkpoint that the
+// write path refuses to copy after the switch to git-refs: one without a ref
+// whose v1 copies both changed it (see ErrLegacyCheckpointDiverged). Every
+// other checkpoint is left to that write path, which copies it when it is next
+// written, and a checkpoint that already has a ref is never touched: after the
+// switch the ref is the checkpoint's current state.
+//
+// fetch, when set, first asks the remote for the checkpoint's ref, since a ref
+// another clone already pushed supersedes both v1 copies. Otherwise
+// opts.Choose decides which copy becomes the ref; it is written only while
+// the ref is still absent (importOnlyIntoAbsentRef) and enqueued for push.
+// Without a choice the checkpoint is listed in MigrateResult.Diverged.
+func ResolveDivergedLegacyCheckpoints(ctx context.Context, repo *git.Repository, opts MigrateOptions, fetch RefFetchFunc) (MigrateResult, error) {
+	var result MigrateResult
+
+	v1, ok, err := openLegacyV1(ctx, repo)
+	if err != nil || !ok {
+		return result, err
+	}
+
+	refsStore := newGitRefsStore(repo)
+	queue, err := PushQueueForRepo(ctx, repo)
+	if err != nil {
+		return result, fmt.Errorf("resolve push queue: %w", err)
+	}
+
+	walkErr := v1.walk(ctx, func(cid id.CheckpointID) error {
+		result.Total++
+		refName, err := RefName(cid)
+		if err != nil {
+			return fmt.Errorf("ref name for checkpoint %s: %w", cid, err)
+		}
+		stuck, err := v1.refusedByWritePath(ctx, cid, refName, fetch)
+		if err != nil || !stuck {
+			return err
+		}
+		cpTreeHash, unresolved, err := v1.subtreeToKeep(ctx, cid, opts)
+		if err != nil {
+			return err
+		}
+		if unresolved != nil {
+			result.Diverged = append(result.Diverged, *unresolved)
+			return nil
+		}
+		migrated, err := importBranchCheckpoint(ctx, repo, refsStore, cid, cpTreeHash, updatePersistentRef, importOnlyIntoAbsentRef)
+		if err != nil {
+			return err
+		}
+		if !migrated {
+			// A ref appeared while the person chose; it is the checkpoint's
+			// current state now.
+			result.Skipped++
+			return nil
+		}
+		if err := queue.EnqueueRef(repo, refName); err != nil {
+			return fmt.Errorf("enqueue checkpoint %s for push: %w", cid, err)
+		}
+		result.Migrated = append(result.Migrated, cid)
+		return nil
+	})
+	if walkErr != nil {
+		return result, fmt.Errorf("walk v1 checkpoints: %w", walkErr)
+	}
+	return result, nil
+}
+
+// refusedByWritePath reports whether cid is one the write path refuses to copy
+// after the switch: it has no ref, locally or (when fetch is set) on the
+// remote, and its v1 copies diverged. A ref the remote holds is fetched, which
+// resolves the checkpoint. The write path copies every other checkpoint when
+// it is next written.
+func (v *legacyV1) refusedByWritePath(ctx context.Context, cid id.CheckpointID, refName plumbing.ReferenceName, fetch RefFetchFunc) (bool, error) {
+	if exists, err := refExists(v.repo, refName); err != nil || exists {
+		return false, err
+	}
+	_, _, err := v.branch.pickCheckpointCopy(ctx, v.trees, cid)
+	if err == nil {
+		return false, nil
+	}
+	if !errors.Is(err, ErrLegacyCheckpointDiverged) {
+		return false, fmt.Errorf("read checkpoint %s from %s: %w", cid, DefaultV1Refs().Primary, err)
+	}
+	if fetch == nil {
+		return true, nil
+	}
+	if err := fetch(ctx, refName); err != nil && !errors.Is(err, plumbing.ErrReferenceNotFound) {
+		return false, fmt.Errorf("ask the remote for checkpoint ref %s: %w", refName, err)
+	}
+	exists, err := refExists(v.repo, refName)
+	return !exists && err == nil, err
+}
+
+// legacyV1 is the v1 branch as both migration paths read it: every tier in
+// read precedence, walked through the first one, as reads list checkpoints.
+type legacyV1 struct {
+	repo    *git.Repository
+	branch  *GitStore
+	trees   []metadataTree
+	deleted DeletedCheckpointSet
+}
+
+// openLegacyV1 resolves the v1 tiers. ok is false when there is no v1 branch
+// locally or on a remote, so there is nothing to migrate.
+func openLegacyV1(ctx context.Context, repo *git.Repository) (v1 *legacyV1, ok bool, err error) {
+	branch := NewGitStore(repo, DefaultV1Refs())
+	trees, err := branch.getSessionsBranchTrees(ctx)
+	if errors.Is(err, plumbing.ErrReferenceNotFound) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("read v1 checkpoint branch: %w", err)
+	}
+	deleted, err := LoadDeletedForRepo(repo)
+	if err != nil {
+		return nil, false, err
+	}
+	return &legacyV1{repo: repo, branch: branch, trees: trees, deleted: deleted}, true, nil
+}
+
+// walk calls fn for each checkpoint on the first tier that this clone has not
+// deleted. A checkpoint deleted here must not come back as a ref, even when a
+// stale tracking ref or a remote the delete could not reach still holds it.
+func (v *legacyV1) walk(ctx context.Context, fn func(id.CheckpointID) error) error {
+	return WalkCheckpointShards(ctx, v.repo, v.trees[0].tree, func(cid id.CheckpointID, _ plumbing.Hash) error {
+		if err := ctx.Err(); err != nil {
+			return err //nolint:wrapcheck // propagate context cancellation
+		}
+		if v.deleted.Contains(cid) {
+			return nil
+		}
+		return fn(cid)
+	})
+}
+
+// subtreeToKeep returns the v1 subtree that becomes cid's ref: the copy that
+// changed it last, or, when two copies both changed it, the one opts.Choose
+// picks. When no copy is kept, because nobody can choose (a dry run or no
+// chooser) or the choice was to skip, it returns the unresolved divergence.
+func (v *legacyV1) subtreeToKeep(ctx context.Context, cid id.CheckpointID, opts MigrateOptions) (plumbing.Hash, *DivergedLegacyCheckpoint, error) {
+	picked, diverged, err := v.branch.pickCheckpointCopy(ctx, v.trees, cid)
+	if err == nil {
+		return picked.subtree, nil, nil
+	}
+	if !errors.Is(err, ErrLegacyCheckpointDiverged) {
+		return plumbing.ZeroHash, nil, fmt.Errorf("read checkpoint %s from %s: %w", cid, DefaultV1Refs().Primary, err)
+	}
+	question := DivergedLegacyCheckpoint{
+		ID:     cid,
+		Local:  v.describeCopy(diverged[0]),
+		Remote: v.describeCopy(diverged[1]),
+	}
+	if opts.DryRun || opts.Choose == nil {
+		return plumbing.ZeroHash, &question, nil
+	}
+	keep, err := opts.Choose(ctx, question)
+	if err != nil {
+		return plumbing.ZeroHash, nil, err
+	}
+	for _, c := range []LegacyCheckpointCopy{question.Local, question.Remote} {
+		if keep != "" && keep == c.Ref {
+			return c.subtree, nil, nil
+		}
+	}
+	return plumbing.ZeroHash, &question, nil
+}
+
+func (v *legacyV1) describeCopy(c *checkpointCopy) LegacyCheckpointCopy {
+	described := LegacyCheckpointCopy{Ref: c.ref, subtree: c.subtree, sessionTrees: map[string]plumbing.Hash{}}
+	tree, err := v.repo.TreeObject(c.subtree)
+	if err != nil {
+		return described
+	}
+	for i := 0; ; i++ {
+		meta, ok := readCommittedMetadataFromCheckpointTree(tree, i)
+		if !ok {
+			return described
+		}
+		described.SessionIDs = append(described.SessionIDs, meta.SessionID)
+		if entry, err := tree.FindEntry(strconv.Itoa(i)); err == nil {
+			described.sessionTrees[meta.SessionID] = entry.Hash
+		}
+	}
+}
+
+func refExists(repo *git.Repository, refName plumbing.ReferenceName) (bool, error) {
+	_, err := repo.Reference(refName, true)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, plumbing.ErrReferenceNotFound):
+		return false, nil
+	default:
+		return false, fmt.Errorf("resolve checkpoint ref %s: %w", refName, err)
+	}
 }
 
 // importMode says what importBranchCheckpoint does with a ref that already

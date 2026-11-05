@@ -211,7 +211,9 @@ always runnable in every build.
   its own deadline (`logoutLoginTimeout`); a cancelled context stops the sweep
   with the unreached logins intact, and a failed local removal or an interrupt
   fails the command
-- `doctor`: bare runs the scan-and-fix flow, plus `trace`, `logs`, `bundle`
+- `doctor`: bare runs the scan-and-fix flow, plus `trace`, `logs`, `bundle` and
+  `migrate-checkpoints`, which is also where every message about a legacy
+  checkpoint whose `v1` copies diverged points
 - `cluster`: the control plane's data-plane cluster catalog — `list` only, since
   clusters are provisioned by Entire rather than by users. It renders `GET
   /clusters` (`coreapi.ListClusters`, the same call the mirror wizard and

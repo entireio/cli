@@ -1,0 +1,275 @@
+package checkpoint
+
+import (
+	"context"
+	"testing"
+
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/redact"
+)
+
+// When this clone's v1 and a remote-tracking v1 both changed a checkpoint,
+// neither copy can become its ref without hiding the other's sessions. Only a
+// person may choose which copy to keep; migration must never pick one silently.
+
+// divergedV1 returns a history where local v1 and origin's v1 each added a
+// session to the fixture's checkpoint since they split.
+func divergedV1(t *testing.T) v1History {
+	t.Helper()
+	h := newV1History(t)
+	remote := h.commitOnTop(t, h.base, h.f.cid, "teammate-on-v1")
+	local := h.commitOnTop(t, h.base, h.f.cid, "unpushed-on-v1")
+	h.place(t, local, remote)
+	return h
+}
+
+var (
+	localV1  = DefaultV1Refs().Primary
+	originV1 = plumbing.NewRemoteReferenceName("origin", DefaultV1Refs().Primary.Short())
+)
+
+// chooser records what it was asked and answers with keep (empty skips).
+type chooser struct {
+	keep  plumbing.ReferenceName
+	asked []DivergedLegacyCheckpoint
+}
+
+func (c *chooser) choose(_ context.Context, d DivergedLegacyCheckpoint) (plumbing.ReferenceName, error) {
+	c.asked = append(c.asked, d)
+	return c.keep, nil
+}
+
+func TestMigrateBranchToRefs_TakesTheNewerV1Copy(t *testing.T) {
+	t.Parallel()
+	h := newV1History(t)
+	ahead := h.commitOnTop(t, h.base, h.f.cid, "teammate-on-v1")
+	h.place(t, h.base, ahead)
+
+	result, err := MigrateBranchToRefs(t.Context(), h.f.repo, MigrateOptions{})
+
+	require.NoError(t, err)
+	assert.Equal(t, []id.CheckpointID{h.f.cid}, result.Migrated)
+	assert.Equal(t, []string{"before-switch", "teammate-on-v1"}, h.f.refSessionIDs(t),
+		"local v1 is behind, so the ref must hold origin's copy")
+}
+
+func TestMigrateBranchToRefs_ListsADivergedCheckpointWithoutAChooser(t *testing.T) {
+	t.Parallel()
+	h := divergedV1(t)
+	other := id.MustCheckpointID("0123456789ab")
+	writeRoutingCheckpoint(t, h.f.branch, other, "untouched")
+	h.place(t, h.f.v1Tip(t), h.trackingTip(t))
+
+	result, err := MigrateBranchToRefs(t.Context(), h.f.repo, MigrateOptions{})
+
+	require.NoError(t, err)
+	assert.Equal(t, []id.CheckpointID{h.f.cid}, divergedIDs(result))
+	assert.Equal(t, []id.CheckpointID{other}, result.Migrated, "other checkpoints still migrate")
+	h.f.requireNoRef(t)
+}
+
+func TestMigrateBranchToRefs_KeepsTheChosenCopy(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		keep plumbing.ReferenceName
+		want string
+	}{
+		{keep: localV1, want: "unpushed-on-v1"},
+		{keep: originV1, want: "teammate-on-v1"},
+	} {
+		t.Run(tc.keep.String(), func(t *testing.T) {
+			t.Parallel()
+			h := divergedV1(t)
+			c := &chooser{keep: tc.keep}
+
+			result, err := MigrateBranchToRefs(t.Context(), h.f.repo, MigrateOptions{Choose: c.choose})
+
+			require.NoError(t, err)
+			assert.Equal(t, []id.CheckpointID{h.f.cid}, result.Migrated)
+			assert.Empty(t, result.Diverged)
+			assert.Equal(t, []string{"before-switch", tc.want}, h.f.refSessionIDs(t))
+			h.f.requireQueued(t)
+		})
+	}
+}
+
+func TestMigrateBranchToRefs_ShowsBothCopiesWhenAsking(t *testing.T) {
+	t.Parallel()
+	h := divergedV1(t)
+	c := &chooser{}
+
+	_, err := MigrateBranchToRefs(t.Context(), h.f.repo, MigrateOptions{Choose: c.choose})
+
+	require.NoError(t, err)
+	require.Len(t, c.asked, 1)
+	asked := c.asked[0]
+	assert.Equal(t, h.f.cid, asked.ID)
+	assert.Equal(t, localV1, asked.Local.Ref)
+	assert.Equal(t, []string{"before-switch", "unpushed-on-v1"}, asked.Local.SessionIDs)
+	assert.Equal(t, originV1, asked.Remote.Ref)
+	assert.Equal(t, []string{"before-switch", "teammate-on-v1"}, asked.Remote.SessionIDs)
+	assert.Empty(t, asked.DifferingSessions(), "the shared session is unchanged on both sides")
+}
+
+// A session both copies hold can still differ, when each clone saved more of
+// it. That must show, or a copy that looks like a superset hides newer work.
+func TestMigrateBranchToRefs_ShowsASessionBothCopiesChanged(t *testing.T) {
+	t.Parallel()
+	h := newV1History(t)
+	remote := h.commitOnTop(t, h.base, h.f.cid, "teammate-on-v1")
+	h.f.setV1(t, h.base)
+	require.NoError(t, h.f.branch.Write(t.Context(), Session{
+		CheckpointID: h.f.cid,
+		SessionID:    "before-switch",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte("more of before-switch, saved only on this clone")),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@example.com",
+	}))
+	h.place(t, h.f.v1Tip(t), remote)
+	c := &chooser{}
+
+	_, err := MigrateBranchToRefs(t.Context(), h.f.repo, MigrateOptions{Choose: c.choose})
+
+	require.NoError(t, err)
+	require.Len(t, c.asked, 1)
+	assert.Equal(t, []string{"before-switch"}, c.asked[0].Local.SessionIDs)
+	assert.Equal(t, []string{"before-switch"}, c.asked[0].DifferingSessions())
+}
+
+func TestMigrateBranchToRefs_SkipWritesNothing(t *testing.T) {
+	t.Parallel()
+	h := divergedV1(t)
+	c := &chooser{}
+
+	result, err := MigrateBranchToRefs(t.Context(), h.f.repo, MigrateOptions{Choose: c.choose})
+
+	require.NoError(t, err)
+	assert.Equal(t, []id.CheckpointID{h.f.cid}, divergedIDs(result))
+	h.f.requireNoRef(t)
+}
+
+func TestMigrateBranchToRefs_DryRunDoesNotAsk(t *testing.T) {
+	t.Parallel()
+	h := divergedV1(t)
+	c := &chooser{keep: localV1}
+
+	result, err := MigrateBranchToRefs(t.Context(), h.f.repo, MigrateOptions{DryRun: true, Choose: c.choose})
+
+	require.NoError(t, err)
+	assert.Empty(t, c.asked)
+	assert.Equal(t, []id.CheckpointID{h.f.cid}, divergedIDs(result))
+	h.f.requireNoRef(t)
+}
+
+func TestResolveDivergedLegacyCheckpoints_WritesTheChosenCopyIntoAnAbsentRef(t *testing.T) {
+	t.Parallel()
+	h := divergedV1(t)
+	c := &chooser{keep: originV1}
+
+	result, err := ResolveDivergedLegacyCheckpoints(t.Context(), h.f.repo, MigrateOptions{Choose: c.choose}, nil)
+
+	require.NoError(t, err)
+	assert.Equal(t, []id.CheckpointID{h.f.cid}, result.Migrated)
+	assert.Equal(t, []string{"before-switch", "teammate-on-v1"}, h.f.refSessionIDs(t))
+	h.f.requireQueued(t)
+}
+
+// After the switch a checkpoint's ref is its current state and may hold
+// sessions neither v1 copy has, so it is never revisited.
+func TestResolveDivergedLegacyCheckpoints_LeavesAnExistingRefAlone(t *testing.T) {
+	t.Parallel()
+	h := divergedV1(t)
+	writeRoutingCheckpoint(t, h.f.refs, h.f.cid, "written-after-switch")
+	before := h.f.refTip(t)
+	c := &chooser{keep: localV1}
+
+	result, err := ResolveDivergedLegacyCheckpoints(t.Context(), h.f.repo, MigrateOptions{Choose: c.choose}, nil)
+
+	require.NoError(t, err)
+	assert.Empty(t, c.asked)
+	assert.Empty(t, result.Migrated)
+	assert.Equal(t, before, h.f.refTip(t))
+}
+
+// A checkpoint whose copies agree, or where one is newer, is copied by the
+// write path when it is next written; resolving after the switch is only for
+// the ones that path refuses.
+func TestResolveDivergedLegacyCheckpoints_IgnoresCheckpointsThatDoNotDiverge(t *testing.T) {
+	t.Parallel()
+	h := newV1History(t)
+	ahead := h.commitOnTop(t, h.base, h.f.cid, "teammate-on-v1")
+	h.place(t, h.base, ahead)
+	c := &chooser{keep: localV1}
+
+	result, err := ResolveDivergedLegacyCheckpoints(t.Context(), h.f.repo, MigrateOptions{Choose: c.choose}, nil)
+
+	require.NoError(t, err)
+	assert.Empty(t, c.asked)
+	assert.Empty(t, result.Migrated)
+	assert.Empty(t, result.Diverged)
+	h.f.requireNoRef(t)
+}
+
+// A ref another clone already pushed supersedes both v1 copies.
+func TestResolveDivergedLegacyCheckpoints_TakesARefTheRemoteAlreadyHas(t *testing.T) {
+	t.Parallel()
+	h := newV1History(t)
+	pushed := h.f.remoteCopy(t)
+	remote := h.commitOnTop(t, h.base, h.f.cid, "teammate-on-v1")
+	local := h.commitOnTop(t, h.base, h.f.cid, "unpushed-on-v1")
+	h.place(t, local, remote)
+	refName, err := RefName(h.f.cid)
+	require.NoError(t, err)
+	fetch := func(_ context.Context, ref plumbing.ReferenceName) error {
+		require.Equal(t, refName, ref)
+		return h.f.repo.Storer.SetReference(plumbing.NewHashReference(ref, pushed))
+	}
+	c := &chooser{keep: localV1}
+
+	result, err := ResolveDivergedLegacyCheckpoints(t.Context(), h.f.repo, MigrateOptions{Choose: c.choose}, fetch)
+
+	require.NoError(t, err)
+	assert.Empty(t, c.asked)
+	assert.Empty(t, result.Diverged)
+	assert.Equal(t, pushed, h.f.refTip(t))
+}
+
+func TestResolveDivergedLegacyCheckpoints_SkipsADeletedCheckpoint(t *testing.T) {
+	t.Parallel()
+	h := divergedV1(t)
+	h.f.markDeleted(t)
+	c := &chooser{keep: localV1}
+
+	result, err := ResolveDivergedLegacyCheckpoints(t.Context(), h.f.repo, MigrateOptions{Choose: c.choose}, nil)
+
+	require.NoError(t, err)
+	assert.Empty(t, c.asked)
+	assert.Empty(t, result.Diverged)
+	h.f.requireNoRef(t)
+}
+
+func (h v1History) trackingTip(t *testing.T) plumbing.Hash {
+	t.Helper()
+	ref, err := h.f.repo.Reference(originV1, true)
+	require.NoError(t, err)
+	return ref.Hash()
+}
+
+func divergedIDs(result MigrateResult) []id.CheckpointID {
+	ids := make([]id.CheckpointID, 0, len(result.Diverged))
+	for _, d := range result.Diverged {
+		ids = append(ids, d.ID)
+	}
+	return ids
+}
+
+func TestLegacyCheckpointCopy_RemoteName(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, "origin", LegacyCheckpointCopy{Ref: originV1}.RemoteName())
+	assert.Empty(t, LegacyCheckpointCopy{Ref: localV1}.RemoteName())
+}

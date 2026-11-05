@@ -1324,6 +1324,22 @@ const (
 // output without mutating the process-global os.Stderr.
 var stderrWriter io.Writer = os.Stderr
 
+// noticeTerminal writes a one-line notice where the person who ran git sees
+// it. The installed post-commit hook discards stderr (see buildHookSpecs), so
+// with a person at a terminal the notice goes to that terminal, as
+// askConfirmTTY's prompt does. Under test, or with nobody to read it, it goes
+// to stderrWriter instead.
+func noticeTerminal(line string) {
+	if !interactive.UnderTest() && interactive.CanPromptInteractively() {
+		if tty, err := interactive.OpenPromptTTY(); err == nil {
+			defer tty.Close()
+			fmt.Fprintln(tty, line)
+			return
+		}
+	}
+	fmt.Fprintln(stderrWriter, line)
+}
+
 // warnStaleEndedSessions emits a rate-limited warning to stderr when too many
 // non-FullyCondensed ENDED sessions are accumulating.
 func warnStaleEndedSessions(ctx context.Context, count int) {
@@ -2082,6 +2098,12 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 			slog.String("session_id", state.SessionID),
 			slog.String("error", err.Error()),
 		)
+		if errors.Is(err, checkpoint.ErrLegacyCheckpointDiverged) {
+			// The work stays pending, so the next commit's checkpoint takes
+			// it; this commit keeps a trailer for a checkpoint without it.
+			noticeTerminal(fmt.Sprintf("[entire] Checkpoint %s was not saved, this commit's session work will be saved "+
+				"with your next commit instead. Run 'entire doctor migrate-checkpoints' to fix it.", checkpointID))
+		}
 		return false, nil, nil
 	}
 
