@@ -155,7 +155,6 @@ func applyNonInteractiveSSH(ctx context.Context, cmd *exec.Cmd) {
 	cmd.Env = withBatchModeSSH(ctx, cmd.Env)
 }
 
-// FetchOptions configures a git fetch operation.
 // FullRefDepth is the absolute --depth that fully fetches one ref's history,
 // healing a prior --depth=1 shallow boundary on it. It is far above any
 // realistic checkpoint history length, while staying below math.MaxInt32
@@ -163,6 +162,7 @@ func applyNonInteractiveSSH(ctx context.Context, cmd *exec.Cmd) {
 // deepen an unrelated shallow source tree.
 const FullRefDepth = 1_000_000_000
 
+// FetchOptions configures a git fetch operation.
 type FetchOptions struct {
 	Remote   string   // remote name or URL (required)
 	RefSpecs []string // one or more refspecs / object hashes

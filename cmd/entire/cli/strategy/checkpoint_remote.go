@@ -213,8 +213,10 @@ func fetchMetadataBranchWithin(ctx context.Context, remoteURL string, mode check
 	if err := fetchURLIntoTmpRef(fetchCtx, "", remoteURL, srcRef, tmpRef, "metadata branch", true, mode); err != nil {
 		return err
 	}
+	// The fetch above has no depth, so a shallow boundary on this ref can
+	// remain; the ref-scoped deep fetch in the hint heals it.
 	if err := PromoteTmpRefSafely(ctx, plumbing.ReferenceName(tmpRef), refs.Primary, branchName); err != nil {
-		return err
+		return WithShallowFetchHint(err, remoteURL, refs.Primary)
 	}
 
 	return nil
