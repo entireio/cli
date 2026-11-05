@@ -63,17 +63,22 @@ func TestProjectAgentRunList_ShowsOnePageWithItsCursor(t *testing.T) {
 	assert.Equal(t, agentTestBase+"/runs", (*requests)[0].Path)
 	assert.Equal(t, "agent_id="+agentRunTestAgentID+"&per_page=5&status=succeeded", (*requests)[0].Query)
 	assert.Regexp(t, agentRunTestID+`\s+Entire Review\s+succeeded\s+push\s+feature/work\s+2026-11-03T10:00:00Z`, out)
-	assert.Contains(t, out, "More runs: --cursor c2 --agent "+agentRunTestAgentID+" --status succeeded\n",
-		"the hint repeats the filters, which the cursor is bound to")
+	assert.Contains(t, out, "More runs: entire project agent run list --cursor c2 --agent "+agentRunTestAgentID+" --status succeeded --limit 5\n",
+		"the hint repeats the filters, which the cursor is bound to, and the page size")
 
 	// The server refuses a cursor without the filters it was issued for.
 	_, _, err = executeProjectAgent(t, "run", "list", "--cursor", "c2", "--agent", agentRunTestAgentID, "--status", "succeeded", "--limit", "5")
 	require.NoError(t, err)
 	assert.Equal(t, "agent_id="+agentRunTestAgentID+"&cursor=c2&per_page=5&status=succeeded", (*requests)[1].Query)
 
+	// The cursor is bound to the project too, so a named one is repeated.
+	out, _, err = executeProjectAgent(t, "run", "list", "--project", "et/other")
+	require.NoError(t, err)
+	assert.Contains(t, out, "More runs: entire project agent run list --cursor c2 --project et/other\n")
+
 	out, _, err = executeProjectAgent(t, "run", "list", "--cursor", "c2", "--json")
 	require.NoError(t, err)
-	assert.Equal(t, "cursor=c2&per_page=20", (*requests)[2].Query)
+	assert.Equal(t, "cursor=c2&per_page=20", (*requests)[3].Query)
 	var page struct {
 		Items      []map[string]any `json:"items"`
 		NextCursor string           `json:"next_cursor"`

@@ -22,6 +22,9 @@ import (
 // projectAgentRunStatuses are the statuses GET .../runs filters by.
 var projectAgentRunStatuses = strings.Fields("queued running succeeded failed timed_out canceled")
 
+// projectAgentRunDefaultLimit is run list's page size without --limit.
+const projectAgentRunDefaultLimit = 20
+
 // newProjectAgentRunCmd is `entire project agent run`: the runs of the
 // project's agents, across trails. A trail's own view of its agents is
 // `entire trail finding`, and `entire trail rerun-review` starts them.
@@ -57,7 +60,7 @@ func newProjectAgentRunListCmd() *cobra.Command {
 		Short: "List the project's agent runs, newest first",
 		Long: `List the project's agent runs, newest first, in repositories you can read.
 One page per call: the next page's command is printed, with --cursor and the
-same --agent and --status, which a cursor needs repeated.`,
+same --project, --agent, --status, and --limit, which a cursor needs repeated.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cmd.SilenceUsage = true
@@ -79,7 +82,8 @@ same --agent and --status, which a cursor needs repeated.`,
 			}
 			// A cursor is bound to the filters of the listing it came from, which
 			// must be sent with it again; per_page is read on every page.
-			next := projectAgentRunFilterFlags(agentID, status)
+			project, _ := cmd.Flags().GetString("project") //nolint:errcheck // an inherited flag of the agent group
+			next := projectAgentRunNextFlags(strings.TrimSpace(project), agentID, status, limit)
 			if cursor = strings.TrimSpace(cursor); cursor != "" {
 				q.Set("cursor", cursor)
 			}
@@ -103,27 +107,35 @@ same --agent and --status, which a cursor needs repeated.`,
 	}
 	cmd.Flags().StringVar(&agentID, "agent", "", "Only this agent's runs (its ID from 'entire project agent list')")
 	cmd.Flags().StringVar(&status, "status", "", "Only runs in this status: "+strings.Join(projectAgentRunStatuses, ", "))
-	cmd.Flags().IntVar(&limit, "limit", 20, "Runs per page (1-100)")
+	cmd.Flags().IntVar(&limit, "limit", projectAgentRunDefaultLimit, "Runs per page (1-100)")
 	cmd.Flags().StringVar(&cursor, "cursor", "", "Continue a listing from its printed cursor")
 	addJSONFlag(cmd)
 	return cmd
 }
 
-// projectAgentRunFilterFlags are the filter flags a next-page hint repeats.
-func projectAgentRunFilterFlags(agentID, status string) string {
+// projectAgentRunNextFlags are the flags a next-page command repeats: the
+// cursor is bound to the project and the filters, and the page size is not
+// remembered.
+func projectAgentRunNextFlags(project, agentID, status string, limit int) string {
 	var out string
+	if project != "" {
+		out += " --project " + tuiutil.SanitizeTerminalLabel(project)
+	}
 	if agentID != "" {
 		out += " --agent " + agentID
 	}
 	if status != "" {
 		out += " --status " + status
 	}
+	if limit != projectAgentRunDefaultLimit {
+		out += " --limit " + strconv.Itoa(limit)
+	}
 	return out
 }
 
-// printProjectAgentRuns prints one page; filters are the flags its next page
+// printProjectAgentRuns prints one page; next is the flags its next page
 // repeats with the cursor.
-func printProjectAgentRuns(w io.Writer, t *projectAgentTarget, page api.ProjectAgentRunPage, filters string) error {
+func printProjectAgentRuns(w io.Writer, t *projectAgentTarget, page api.ProjectAgentRunPage, next string) error {
 	runs := make([]api.ProjectAgentRun, len(page.Items))
 	for i, raw := range page.Items {
 		if err := json.Unmarshal(raw, &runs[i]); err != nil {
@@ -139,7 +151,7 @@ func printProjectAgentRuns(w io.Writer, t *projectAgentTarget, page api.ProjectA
 		return err
 	}
 	if page.NextCursor != nil && *page.NextCursor != "" {
-		fmt.Fprintf(w, "More runs: --cursor %s%s\n", tuiutil.SanitizeTerminalLabel(*page.NextCursor), filters)
+		fmt.Fprintf(w, "More runs: entire project agent run list --cursor %s%s\n", tuiutil.SanitizeTerminalLabel(*page.NextCursor), next)
 	}
 	return nil
 }
@@ -206,7 +218,9 @@ func newProjectAgentRunCancelCmd() *cobra.Command {
 		Short: "Cancel a queued or running agent run",
 		Long: `Cancel a queued or running agent run; a finished run is left as it ended.
 Canceling a run someone else or a push started needs permission to manage the
-project's agents. 'entire project agent run retry' starts it again.`,
+project's agents, and canceling any run needs project membership: a repository
+collaborator outside the project gets "Project not found". 'entire project
+agent run retry' starts it again.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return projectAgentRunAction(cmd, args, func(ctx context.Context, t *projectAgentTarget, id string, out *json.RawMessage) error {
@@ -232,7 +246,9 @@ func newProjectAgentRunRetryCmd() *cobra.Command {
 		Use:   "retry <run-id>",
 		Short: "Start a failed, timed-out, or canceled run again",
 		Long: `Start the next attempt of a failed, timed-out, or canceled run, from the same
-agent version and change it ran on. It spends the project's agent budget.`,
+agent version and change it ran on. It spends the project's agent budget.
+Retrying needs project membership: a repository collaborator outside the
+project gets "Project not found".`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return projectAgentRunAction(cmd, args, func(ctx context.Context, t *projectAgentTarget, id string, out *json.RawMessage) error {
