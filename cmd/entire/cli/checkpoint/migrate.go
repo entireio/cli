@@ -200,13 +200,13 @@ func migrateBranchToRefs(
 
 // countDryRun records what a real run would do with cid without writing or
 // enqueuing anything: an already-imported checkpoint is a skip, not a
-// would-migrate, unless a person's choice would move the ref to it.
+// would-migrate. A dry run never asks, so keep carries no new choice.
 func countDryRun(ctx context.Context, repo *git.Repository, refsStore *gitRefsStore, cid id.CheckpointID, keep keptCopy, result *MigrateResult) error {
 	_, imported, err := importedTree(ctx, repo, refsStore, cid, keep.subtree, false)
 	if err != nil {
 		return err
 	}
-	if imported && keep.choice == nil {
+	if imported {
 		result.Skipped++
 	} else {
 		result.Migrated = append(result.Migrated, cid)
@@ -262,6 +262,11 @@ func ResolveDivergedLegacyCheckpoints(ctx context.Context, repo *git.Repository,
 		}
 		if keep.unresolved != nil {
 			result.Diverged = append(result.Diverged, *keep.unresolved)
+			return nil
+		}
+		if opts.DryRun {
+			// A recorded choice settles it, and a real run would write the ref.
+			result.Migrated = append(result.Migrated, cid)
 			return nil
 		}
 		migrated, err := importBranchCheckpoint(ctx, repo, refsStore, cid, keep.subtree, updatePersistentRef, importOnlyIntoAbsentRef)
@@ -399,8 +404,8 @@ func (v *legacyV1) pick(ctx context.Context, cid id.CheckpointID) copyPick {
 }
 
 // keptCopy is what becomes a checkpoint's ref. choice is set when a person
-// chose it over a diverged copy, now or in an earlier run; unresolved is set
-// instead of subtree when no copy is kept.
+// chose it over a diverged copy in this run, to apply and record; unresolved
+// is set instead of subtree when no copy is kept.
 type keptCopy struct {
 	subtree    plumbing.Hash
 	choice     *legacyChoice
@@ -424,7 +429,9 @@ func (v *legacyV1) copyToKeep(ctx context.Context, cid id.CheckpointID, opts Mig
 	if earlier, ok := v.chosen[cid]; ok {
 		for _, c := range []legacyChoice{{Kept: local.subtree, Over: remote.subtree}, {Kept: remote.subtree, Over: local.subtree}} {
 			if earlier == c {
-				return keptCopy{subtree: c.Kept, choice: &c}, nil
+				// Already applied and recorded: it only selects the copy, so
+				// a ref that moved on since is not moved back.
+				return keptCopy{subtree: c.Kept}, nil
 			}
 		}
 	}

@@ -524,3 +524,52 @@ func (h v1History) subtreeAt(t *testing.T, commit plumbing.Hash) plumbing.Hash {
 	require.NoError(t, err)
 	return sub.Hash
 }
+
+// A dry run never writes, even when a recorded choice already settles a
+// checkpoint whose ref is missing.
+func TestResolveDivergedLegacyCheckpoints_DryRunWithARecordedChoiceWritesNothing(t *testing.T) {
+	t.Parallel()
+	h := divergedV1(t)
+	_, err := ResolveDivergedLegacyCheckpoints(t.Context(), h.f.repo, MigrateOptions{Choose: (&chooser{keep: localV1}).choose}, nil)
+	require.NoError(t, err)
+	refName, err := RefName(h.f.cid)
+	require.NoError(t, err)
+	require.NoError(t, h.f.repo.Storer.RemoveReference(refName))
+
+	result, err := ResolveDivergedLegacyCheckpoints(t.Context(), h.f.repo, MigrateOptions{DryRun: true}, nil)
+
+	require.NoError(t, err)
+	assert.Equal(t, []id.CheckpointID{h.f.cid}, result.Migrated, "reported as would-migrate")
+	h.f.requireNoRef(t)
+}
+
+// A choice from an earlier run only selects the copy. A ref that moved on
+// since then is not moved back to it.
+func TestMigrateBranchToRefs_EarlierChoiceDoesNotMoveAnAdvancedRefBack(t *testing.T) {
+	t.Parallel()
+	h := divergedV1(t)
+	_, err := MigrateBranchToRefs(t.Context(), h.f.repo, MigrateOptions{Choose: (&chooser{keep: localV1}).choose})
+	require.NoError(t, err)
+	writeRoutingCheckpoint(t, h.f.refs, h.f.cid, "written-later")
+	advanced := h.f.refTip(t)
+
+	result, err := MigrateBranchToRefs(t.Context(), h.f.repo, MigrateOptions{})
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Skipped)
+	assert.Equal(t, advanced, h.f.refTip(t))
+}
+
+// After a choice was applied, a dry run agrees with what a real run would do.
+func TestMigrateBranchToRefs_DryRunAfterAnAppliedChoiceReportsUpToDate(t *testing.T) {
+	t.Parallel()
+	h := divergedV1(t)
+	_, err := MigrateBranchToRefs(t.Context(), h.f.repo, MigrateOptions{Choose: (&chooser{keep: localV1}).choose})
+	require.NoError(t, err)
+
+	result, err := MigrateBranchToRefs(t.Context(), h.f.repo, MigrateOptions{DryRun: true})
+
+	require.NoError(t, err)
+	assert.Empty(t, result.Migrated)
+	assert.Equal(t, 1, result.Skipped)
+}
