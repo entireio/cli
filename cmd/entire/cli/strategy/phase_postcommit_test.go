@@ -2514,14 +2514,19 @@ func TestWarnStaleEndedSessions_RateLimit(t *testing.T) {
 	t.Chdir(dir)
 	ctx := context.Background()
 
-	// First call: no sentinel file → should write to stderr
 	var buf bytes.Buffer
-	warnStaleEndedSessionsTo(ctx, 5, &buf)
+	seen := func(line string) bool {
+		buf.WriteString(line)
+		return true
+	}
+
+	// First call: no sentinel file → the warning is shown
+	warnStaleEndedSessionsTo(ctx, 5, seen)
 	assert.Contains(t, buf.String(), "entire doctor")
 
 	// Sentinel file now exists with current mtime → second call suppressed
 	buf.Reset()
-	warnStaleEndedSessionsTo(ctx, 5, &buf)
+	warnStaleEndedSessionsTo(ctx, 5, seen)
 	assert.Empty(t, buf.String(), "second call within window must be suppressed")
 
 	// Backdate sentinel file by 25h → call should warn again
@@ -2532,7 +2537,26 @@ func TestWarnStaleEndedSessions_RateLimit(t *testing.T) {
 	require.NoError(t, os.Chtimes(warnFile, past, past))
 
 	buf.Reset()
-	warnStaleEndedSessionsTo(ctx, 5, &buf)
+	warnStaleEndedSessionsTo(ctx, 5, seen)
+	assert.Contains(t, buf.String(), "entire doctor")
+}
+
+// A warning nobody saw (an agent's commit, where git discards hook output)
+// must not start the 24h window, or it silences the warning for the person
+// who commits next.
+// Uses t.Chdir — do NOT add t.Parallel().
+func TestWarnStaleEndedSessions_UnseenWarningDoesNotStartTheWindow(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	ctx := context.Background()
+
+	warnStaleEndedSessionsTo(ctx, 5, func(string) bool { return false })
+
+	var buf bytes.Buffer
+	warnStaleEndedSessionsTo(ctx, 5, func(line string) bool {
+		buf.WriteString(line)
+		return true
+	})
 	assert.Contains(t, buf.String(), "entire doctor")
 }
 

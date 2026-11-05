@@ -1324,29 +1324,30 @@ const (
 // output without mutating the process-global os.Stderr.
 var stderrWriter io.Writer = os.Stderr
 
-// noticeTerminal writes a one-line notice where the person who ran git sees
-// it. The installed post-commit hook discards stderr (see buildHookSpecs), so
-// with a person at a terminal the notice goes to that terminal, as
-// askConfirmTTY's prompt does. Under test, or with nobody to read it, it goes
-// to stderrWriter instead.
-func noticeTerminal(line string) {
+// noticeTerminal writes a notice where the person who ran git sees it and
+// reports whether it reached one. The installed post-commit hook discards
+// stderr (see buildHookSpecs), so with a person at a terminal the notice goes
+// to that terminal, as askConfirmTTY's prompt does. Under test, or with nobody
+// to read it, it goes to stderrWriter instead and reports false.
+func noticeTerminal(line string) bool {
 	if !interactive.UnderTest() && interactive.CanPromptInteractively() {
 		if tty, err := interactive.OpenPromptTTY(); err == nil {
 			defer tty.Close()
 			fmt.Fprintln(tty, line)
-			return
+			return true
 		}
 	}
 	fmt.Fprintln(stderrWriter, line)
+	return false
 }
 
-// warnStaleEndedSessions emits a rate-limited warning to stderr when too many
-// non-FullyCondensed ENDED sessions are accumulating.
+// warnStaleEndedSessions emits a rate-limited warning to the terminal when too
+// many non-FullyCondensed ENDED sessions are accumulating.
 func warnStaleEndedSessions(ctx context.Context, count int) {
-	warnStaleEndedSessionsTo(ctx, count, stderrWriter)
+	warnStaleEndedSessionsTo(ctx, count, noticeTerminal)
 }
 
-func warnStaleEndedSessionsTo(ctx context.Context, count int, w io.Writer) {
+func warnStaleEndedSessionsTo(ctx context.Context, count int, show func(string) bool) {
 	root, err := gitdir.Open(ctx)
 	if err != nil {
 		return // fail-open
@@ -1357,15 +1358,19 @@ func warnStaleEndedSessionsTo(ctx context.Context, count int, w io.Writer) {
 			return // rate-limited
 		}
 	}
+	seen := show(fmt.Sprintf(
+		"\nentire: %d ended session(s) are accumulating and slowing down commits.\n"+
+			"Run 'entire doctor' to condense them and restore commit performance.\n",
+		count,
+	))
+	if !seen {
+		// Nobody saw it, so the window stays open for the next commit.
+		return
+	}
 	//nolint:errcheck // Best-effort warning — fail-open if file ops fail
 	_ = osroot.MkdirAllNoSymlink(root, session.SessionStateDirName, 0o750)
 	//nolint:errcheck // Best-effort sentinel file write
 	_ = jsonutil.WriteFileAtomicIn(root, warnFile, []byte{}, 0o644)
-	fmt.Fprintf(w,
-		"\nentire: %d ended session(s) are accumulating and slowing down commits.\n"+
-			"Run 'entire doctor' to condense them and restore commit performance.\n\n",
-		count,
-	)
 }
 
 // activeSessionInteractionThreshold is the maximum age of LastInteractionTime
