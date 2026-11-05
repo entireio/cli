@@ -223,6 +223,34 @@ func (t remoteTopology) syncAffected() bool {
 	return len(t.destinations) == 0 || len(t.unpinnedNames()) > 0
 }
 
+func (t remoteTopology) hasDestination(name string) bool {
+	for _, destination := range t.destinations {
+		if destination.name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// isPasteableRemoteName reports whether name can be printed inside a shell
+// command for the user to copy: a conservative subset of what git accepts as a
+// remote name, with no shell metacharacters, whitespace, or control runes, and
+// no leading '-' that git would read as an option.
+func isPasteableRemoteName(name string) bool {
+	if name == "" || strings.HasPrefix(name, "-") {
+		return false
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case strings.ContainsRune("._-/@+", r):
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func (t remoteTopology) hasPinnedDestination() bool {
 	for _, destination := range t.destinations {
 		if destination.pinned {
@@ -279,8 +307,23 @@ func (t remoteTopology) describeSyncDisabled(w io.Writer, header string) {
 		return
 	}
 	fmt.Fprintln(w, "  Fix: remove strategy_options.checkpoint_push_remote to let Entire elect one,")
-	fmt.Fprintln(w, "  point it at a remote that has a fetch URL, or give that remote one with")
-	fmt.Fprintf(w, "  `git remote set-url %s <url>`.\n", misconfigured.Remote)
+	// The git command is offered only for a name it can be pasted with: the
+	// setting may come from the committed settings file, so an arbitrary
+	// string printed inside a command would be a different command (or carry
+	// terminal escapes). git rejects such names as remotes anyway.
+	// A remote `git remote -v` lists exists with only a push URL, so it needs
+	// set-url; any other name does not exist, and set-url would fail with
+	// "No such remote".
+	switch {
+	case !isPasteableRemoteName(misconfigured.Remote):
+		fmt.Fprintln(w, "  or point it at a remote that has a fetch URL.")
+	case t.hasDestination(misconfigured.Remote):
+		fmt.Fprintln(w, "  point it at a remote that has a fetch URL, or give that remote one with")
+		fmt.Fprintf(w, "  `git remote set-url %s <url>`.\n", misconfigured.Remote)
+	default:
+		fmt.Fprintln(w, "  point it at a remote that has a fetch URL, or add that remote with")
+		fmt.Fprintf(w, "  `git remote add %s <url>`.\n", misconfigured.Remote)
+	}
 	fmt.Fprintln(w, "  A remote name is a per-clone fact: prefer .entire/settings.local.json, since a")
 	fmt.Fprintln(w, "  committed one disables checkpoint sync in every clone that lacks that name.")
 }

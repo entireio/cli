@@ -425,8 +425,11 @@ func TestCheckpointNote_UnfetchableWordingCoversBothShapes(t *testing.T) {
 	t.Parallel()
 
 	topo := remoteTopology{
-		destinations: []remoteDestination{{name: "origin", pushURLs: []string{"https://example.com/a.git"}}},
-		electionErr:  &strategy.CheckpointPushRemoteNotFetchableError{Remote: "pushonly"},
+		destinations: []remoteDestination{
+			{name: "origin", pushURLs: []string{"https://example.com/a.git"}},
+			{name: "pushonly", pushURLs: []string{"https://example.com/b.git"}},
+		},
+		electionErr: &strategy.CheckpointPushRemoteNotFetchableError{Remote: "pushonly"},
 	}
 
 	out := describeTopology(t, topo)
@@ -437,5 +440,65 @@ func TestCheckpointNote_UnfetchableWordingCoversBothShapes(t *testing.T) {
 	}
 	if strings.Contains(out, "not one of this repo's remotes") {
 		t.Errorf("a pushurl-only remote IS one of this repo's remotes:\n%s", out)
+	}
+}
+
+// TestCheckpointNote_MissingRemoteGetsAddNotSetURL covers trail finding
+// 01M6NKJHYASBP6SAC4Q3NTCX8B: `git remote set-url` fails with "No such remote"
+// for a name this clone does not have, which is the common shape of this
+// failure (a committed setting naming another clone's remote).
+func TestCheckpointNote_MissingRemoteGetsAddNotSetURL(t *testing.T) {
+	t.Parallel()
+
+	topo := remoteTopology{
+		destinations: []remoteDestination{{name: "origin", pushURLs: []string{"https://example.com/a.git"}}},
+		electionErr:  &strategy.CheckpointPushRemoteNotFetchableError{Remote: "upstream"},
+	}
+
+	out := describeTopology(t, topo)
+	if !strings.Contains(out, "`git remote add upstream <url>`") {
+		t.Errorf("a missing remote should be added, got:\n%s", out)
+	}
+	if strings.Contains(out, "set-url") {
+		t.Errorf("set-url fails for a remote that does not exist:\n%s", out)
+	}
+}
+
+// TestCheckpointNote_UnpasteableNameGetsNoCommand covers trail finding
+// 01M6NKJK5S4HJ3K32PGBTJGSXG: the name can come from the committed settings
+// file, so one that is not a plain remote name must not be printed inside a
+// command the user copies; where it is named, %q keeps control runes escaped.
+func TestCheckpointNote_UnpasteableNameGetsNoCommand(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{"x; rm -rf ~", "evil\x1b]0;title\x07", "-c", "two words"} {
+		topo := remoteTopology{
+			destinations: []remoteDestination{{name: "origin", pushURLs: []string{"https://example.com/a.git"}}},
+			electionErr:  &strategy.CheckpointPushRemoteNotFetchableError{Remote: name},
+		}
+
+		out := describeTopology(t, topo)
+		if strings.Contains(out, "git remote") {
+			t.Errorf("name %q must not be offered as a command, got:\n%s", name, out)
+		}
+		if strings.ContainsAny(out, "\x1b\x07") {
+			t.Errorf("name %q reached the terminal with raw control characters, got:\n%q", name, out)
+		}
+		if !strings.Contains(out, "point it at a remote that has a fetch URL") {
+			t.Errorf("the remedy without a command should still be given, got:\n%s", out)
+		}
+	}
+}
+
+func TestIsPasteableRemoteName(t *testing.T) {
+	t.Parallel()
+
+	for name, want := range map[string]bool{
+		"origin": true, "my-fork": true, "team/upstream": true, "v1.2_x+y@z": true,
+		"": false, "-c": false, "a b": false, "a;b": false, "a$b": false, "a`b": false, "a\x1bb": false,
+	} {
+		if got := isPasteableRemoteName(name); got != want {
+			t.Errorf("isPasteableRemoteName(%q) = %v, want %v", name, got, want)
+		}
 	}
 }
