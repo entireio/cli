@@ -187,7 +187,11 @@ func SafelyAdvanceLocalRef(ctx context.Context, repo *git.Repository, localRefNa
 
 	mergeBase, err := getMergeBase(ctx, repoPath, localHash.String(), targetHash.String())
 	if errors.Is(err, errNoMergeBase) {
-		shallow, shallowErr := hasReachableShallowBoundary(ctx, repo, repoPath, localHash, targetHash)
+		shallowSet, loadErr := loadShallowHashes(ctx, repoPath)
+		if loadErr != nil {
+			return fmt.Errorf("failed to load shallow boundaries for %s: %w", localRefName, loadErr)
+		}
+		shallow, shallowErr := reachesShallowBoundary(ctx, repoPath, shallowSet, localHash, targetHash)
 		if shallowErr != nil {
 			return fmt.Errorf("failed to check shallow history for %s: %w", localRefName, shallowErr)
 		}
@@ -264,18 +268,6 @@ func replayLocalCommits(ctx context.Context, repo *git.Repository, reason string
 	}
 
 	return setRefHash(repo, localRefName, newTip)
-}
-
-func hasReachableShallowBoundary(ctx context.Context, repo *git.Repository, repoPath string, hashes ...plumbing.Hash) (bool, error) {
-	shallowHashes, err := repo.Storer.Shallow()
-	if err != nil {
-		return false, fmt.Errorf("read shallow commits: %w", err)
-	}
-	shallow := make(map[plumbing.Hash]bool, len(shallowHashes))
-	for _, hash := range shallowHashes {
-		shallow[hash] = true
-	}
-	return reachesShallowBoundary(ctx, repoPath, shallow, hashes...)
 }
 
 // reachesShallowBoundary reports whether the history of any of hashes
