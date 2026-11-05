@@ -12,6 +12,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -198,4 +199,60 @@ func TestCheckpointRefRejectionReason_QuietWithoutRemoteRejection(t *testing.T) 
 			}))
 		})
 	}
+}
+
+// Push recovery refusing over shallow history is quiet by default: a diverged
+// ref is a non-fast-forward, not a remote rejection. The user still has to be
+// told how to unblock the ref, or it fails silently on every push.
+//
+// Not parallel: t.Chdir, t.Setenv and process-global stderr.
+func TestPrePushCheckpointRefs_ShallowRefusalTellsTheUserHowToUnblock(t *testing.T) {
+	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+	t.Setenv("ENTIRE_CHECKPOINTS_PRIMARY", "git-refs")
+	testutil.RunGit(t, workDir, "remote", "add", "origin", bareDir)
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	ref := refs[0]
+	require.NoError(t, pushCheckpointRefsAtTips(t, repo, bareDir, []plumbing.ReferenceName{ref}))
+	base := strings.TrimSpace(testutil.RunGit(t, workDir, "rev-parse", ref.String()))
+
+	// A teammate advances the ref twice. This clone saw the first update only
+	// through a --depth=1 fetch, as an older CLI read did, so that commit is
+	// grafted and hides base from the remote's history.
+	teammateDir, teammate := cloneWithConfig(t, bareDir)
+	teammate("fetch", "origin", ref.String()+":"+ref.String())
+	advance := func(message string) {
+		parent := strings.TrimSpace(testutil.RunGit(t, teammateDir, "rev-parse", ref.String()))
+		next := strings.TrimSpace(testutil.RunGit(t, teammateDir, "commit-tree", parent+"^{tree}", "-p", parent, "-m", message))
+		teammate("push", "origin", next+":"+ref.String())
+		teammate("update-ref", ref.String(), next)
+	}
+	advance("teammate checkpoint 1")
+	testutil.RunGit(t, workDir, "fetch", "--depth=1", bareDir, "+"+ref.String()+":refs/entire-depth-probe/tip")
+	testutil.RunGit(t, workDir, "update-ref", "-d", "refs/entire-depth-probe/tip")
+	advance("teammate checkpoint 2")
+	remoteTip := remoteRefHash(t, bareDir, ref)
+
+	localTip := strings.TrimSpace(testutil.RunGit(t, workDir, "commit-tree", base+"^{tree}", "-p", base, "-m", "local checkpoint"))
+	testutil.RunGit(t, workDir, "update-ref", ref.String(), localTip)
+	queue := enqueueRefs(t, repo, []plumbing.ReferenceName{ref})
+
+	restore := captureStderr(t)
+	err = NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin")
+	output := restore()
+
+	require.NoError(t, err, "a refused checkpoint ref must never block git push")
+	assert.Contains(t, output, ref.String())
+	assert.Contains(t, output, "git fetch --unshallow")
+	assert.NotContains(t, output, "entire doctor")
+	localRef, err := repo.Reference(ref, true)
+	require.NoError(t, err)
+	assert.Equal(t, localTip, localRef.Hash().String(), "refusal must not rewrite the local ref")
+	assert.Equal(t, remoteTip, remoteRefHash(t, bareDir, ref), "refusal must not touch the remote")
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.Equal(t, []plumbing.ReferenceName{ref}, remaining, "the refused ref stays queued")
 }

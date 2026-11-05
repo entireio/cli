@@ -60,7 +60,10 @@ var errNoMergeBase = errors.New("no merge base")
 // errShallowHidesMergeBase means git found no merge base, but a shallow
 // boundary is reachable from one of the tips: the shared history may simply
 // not be present, so the refs cannot be treated as disconnected.
-var errShallowHidesMergeBase = errors.New("reachable shallow history prevents proving refs are disconnected; run 'entire doctor' or 'git fetch --unshallow' and try again")
+//
+// The remedy names only git fetch --unshallow: entire doctor repairs
+// disconnected metadata through the same replay, so it refuses too.
+var errShallowHidesMergeBase = errors.New("reachable shallow history prevents proving refs are disconnected; run 'git fetch --unshallow' and try again")
 
 // checkpointRemoteBootstrapContextKey gates whether EnsurePrimaryRef is
 // allowed to perform a network fetch against a configured checkpoint_remote
@@ -184,7 +187,7 @@ func SafelyAdvanceLocalRef(ctx context.Context, repo *git.Repository, localRefNa
 
 	mergeBase, err := getMergeBase(ctx, repoPath, localHash.String(), targetHash.String())
 	if errors.Is(err, errNoMergeBase) {
-		shallow, shallowErr := hasReachableShallowBoundary(ctx, repo, repoPath, localHash.String(), targetHash.String())
+		shallow, shallowErr := hasReachableShallowBoundary(ctx, repo, repoPath, localHash, targetHash)
 		if shallowErr != nil {
 			return fmt.Errorf("failed to check shallow history for %s: %w", localRefName, shallowErr)
 		}
@@ -263,24 +266,29 @@ func replayLocalCommits(ctx context.Context, repo *git.Repository, reason string
 	return setRefHash(repo, localRefName, newTip)
 }
 
-func hasReachableShallowBoundary(ctx context.Context, repo *git.Repository, repoPath string, hashes ...string) (bool, error) {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
+func hasReachableShallowBoundary(ctx context.Context, repo *git.Repository, repoPath string, hashes ...plumbing.Hash) (bool, error) {
 	shallowHashes, err := repo.Storer.Shallow()
 	if err != nil {
 		return false, fmt.Errorf("read shallow commits: %w", err)
 	}
-	if len(shallowHashes) == 0 {
+	shallow := make(map[plumbing.Hash]bool, len(shallowHashes))
+	for _, hash := range shallowHashes {
+		shallow[hash] = true
+	}
+	return reachesShallowBoundary(ctx, repoPath, shallow, hashes...)
+}
+
+// reachesShallowBoundary reports whether the history of any of hashes
+// contains a commit in shallow, the clone's .git/shallow set.
+func reachesShallowBoundary(ctx context.Context, repoPath string, shallow map[plumbing.Hash]bool, hashes ...plumbing.Hash) (bool, error) {
+	if len(shallow) == 0 {
 		return false, nil
 	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
 
-	shallowCommits := make(map[string]struct{}, len(shallowHashes))
-	for _, hash := range shallowHashes {
-		shallowCommits[hash.String()] = struct{}{}
-	}
 	for _, hash := range hashes {
-		reachesBoundary, err := historyReachesShallowBoundary(ctx, repoPath, hash, shallowCommits)
+		reachesBoundary, err := historyReachesShallowBoundary(ctx, repoPath, hash, shallow)
 		if err != nil {
 			return false, err
 		}
@@ -291,15 +299,15 @@ func hasReachableShallowBoundary(ctx context.Context, repo *git.Repository, repo
 	return false, nil
 }
 
-func historyReachesShallowBoundary(ctx context.Context, repoPath, hash string, shallowCommits map[string]struct{}) (bool, error) {
-	cmd := exec.CommandContext(ctx, "git", "rev-list", hash)
+func historyReachesShallowBoundary(ctx context.Context, repoPath string, hash plumbing.Hash, shallow map[plumbing.Hash]bool) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "rev-list", hash.String())
 	cmd.Dir = repoPath
 	output, err := cmd.Output()
 	if err != nil {
 		return false, fmt.Errorf("git rev-list %s failed: %w", hash, err)
 	}
 	for _, commitHash := range strings.Fields(string(output)) {
-		if _, ok := shallowCommits[commitHash]; ok {
+		if shallow[plumbing.NewHash(commitHash)] {
 			return true, nil
 		}
 	}

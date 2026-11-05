@@ -383,7 +383,7 @@ func replayOntoRemote(
 		return plumbing.ZeroHash, 0, fmt.Errorf("load shallow boundaries: %w", shallowErr)
 	}
 	if errors.Is(err, errNoMergeBase) {
-		tip, replayed, err := replayDisconnectedOnto(ctx, repo, localHash, remoteHash, shallow, io.Discard)
+		tip, replayed, err := replayDisconnectedOnto(ctx, repo, repoPath, localHash, remoteHash, shallow, io.Discard)
 		if err != nil {
 			return plumbing.ZeroHash, 0, fmt.Errorf("replay disconnected checkpoint commits: %w", err)
 		}

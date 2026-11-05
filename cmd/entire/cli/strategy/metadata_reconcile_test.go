@@ -1,6 +1,7 @@
 package strategy
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"os"
@@ -955,9 +956,10 @@ func cloneWithShallowHiddenMergeBase(t *testing.T) string {
 
 func requireShallowRefusal(t *testing.T, err error) {
 	t.Helper()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "reachable shallow history")
+	require.ErrorIs(t, err, errShallowHidesMergeBase)
 	assert.Contains(t, err.Error(), "git fetch --unshallow")
+	// entire doctor runs this same reconcile, so pointing at it would loop.
+	assert.NotContains(t, err.Error(), "entire doctor")
 }
 
 func TestReplayOntoRemote_RefusesWhenShallowHistoryHidesTheMergeBase(t *testing.T) {
@@ -986,13 +988,74 @@ func TestReconcileDisconnected_RefusesWhenShallowHistoryHidesTheMergeBase(t *tes
 	require.NoError(t, err)
 	localBefore, err := repo.Reference(metadataLocalRef(), true)
 	require.NoError(t, err)
+	var progress bytes.Buffer
 
-	err = ReconcileDisconnectedMetadataRef(context.Background(), repo, metadataLocalRef(), metadataOriginRemoteRef(), io.Discard)
+	err = ReconcileDisconnectedMetadataRef(context.Background(), repo, metadataLocalRef(), metadataOriginRemoteRef(), &progress)
 
 	requireShallowRefusal(t, err)
+	assert.NotContains(t, progress.String(), "Detected disconnected", "a refusal must not first claim the refs are disconnected")
 	localAfter, err := repo.Reference(metadataLocalRef(), true)
 	require.NoError(t, err)
 	assert.Equal(t, localBefore.Hash(), localAfter.Hash())
+}
+
+func TestReplayOntoRemote_RefusesWhenTheLocalTipReachesTheShallowBoundary(t *testing.T) {
+	t.Parallel()
+
+	// Local holds a --depth=1 copy of a teammate's commit M2; the remote moved
+	// on from M1 to R. M1 is the real merge base, hidden behind M2's graft.
+	bareDir := initBareWithMetadataBranch(t)
+	teammateDir, teammate := cloneWithConfig(t, bareDir)
+	teammate("checkout", paths.MetadataBranchName)
+	require.NoError(t, os.WriteFile(filepath.Join(teammateDir, "side.json"), []byte(`{"side":true}`), 0o644))
+	teammate("add", "side.json")
+	teammate("commit", "-m", "Checkpoint: side")
+	teammate("push", "origin", "HEAD:refs/heads/side")
+	teammate("reset", "--hard", "origin/"+paths.MetadataBranchName)
+	require.NoError(t, os.WriteFile(filepath.Join(teammateDir, "remote.json"), []byte(`{"remote":true}`), 0o644))
+	teammate("add", "remote.json")
+	teammate("commit", "-m", "Checkpoint: remote")
+	teammate("push", "origin", paths.MetadataBranchName)
+
+	cloneDir, run := cloneWithConfig(t, bareDir)
+	run("fetch", "--depth=1", "origin", "+refs/heads/side:"+metadataLocalRef().String())
+
+	repo, err := git.PlainOpen(cloneDir)
+	require.NoError(t, err)
+	localRef, err := repo.Reference(metadataLocalRef(), true)
+	require.NoError(t, err)
+	remoteRef, err := repo.Reference(metadataOriginRemoteRef(), true)
+	require.NoError(t, err)
+	_, mergeBaseErr := getMergeBase(context.Background(), cloneDir, localRef.Hash().String(), remoteRef.Hash().String())
+	require.ErrorIs(t, mergeBaseErr, errNoMergeBase, "setup must hide the merge base behind the local graft")
+
+	tip, replayed, err := replayOntoRemote(context.Background(), repo, localRef.Hash(), remoteRef.Hash())
+
+	requireShallowRefusal(t, err)
+	assert.Equal(t, plumbing.ZeroHash, tip)
+	assert.Zero(t, replayed)
+}
+
+// A local branch holding only empty-tree commits carries no checkpoint data,
+// so resetting it to the remote is safe even when shallow history hides the
+// merge base.
+func TestReconcileDisconnected_ShallowRemoteStillResetsAnEmptyOrphan(t *testing.T) {
+	t.Parallel()
+
+	cloneDir := cloneWithShallowHiddenMergeBase(t)
+	emptyTree := strings.TrimSpace(testutil.RunGit(t, cloneDir, "hash-object", "-t", "tree", "-w", "--stdin"))
+	emptyOrphan := strings.TrimSpace(testutil.RunGit(t, cloneDir, "commit-tree", emptyTree, "-m", "empty orphan"))
+	testutil.RunGit(t, cloneDir, "update-ref", metadataLocalRef().String(), emptyOrphan)
+	repo, err := git.PlainOpen(cloneDir)
+	require.NoError(t, err)
+	remoteRef, err := repo.Reference(metadataOriginRemoteRef(), true)
+	require.NoError(t, err)
+
+	require.NoError(t, ReconcileDisconnectedMetadataRef(context.Background(), repo, metadataLocalRef(), metadataOriginRemoteRef(), io.Discard))
+
+	localAfter, err := repo.Reference(metadataLocalRef(), true)
+	require.NoError(t, err)
+	assert.Equal(t, remoteRef.Hash(), localAfter.Hash())
 }
 
 // A shallow source tree must not block repairing metadata histories that are
@@ -1005,12 +1068,7 @@ func TestReconcileDisconnected_ShallowCloneStillReplaysCompleteDisconnectedHisto
 	upstream("commit", "--allow-empty", "-m", "second main commit")
 	upstream("push", "origin", "main")
 
-	cloneDir := filepath.Join(t.TempDir(), "clone")
-	testutil.RunGit(t, filepath.Dir(cloneDir), "clone", "--depth=1", "file://"+bareDir, cloneDir)
-	run := func(args ...string) { testutil.RunGit(t, cloneDir, args...) }
-	run("config", "user.email", "test@test.com")
-	run("config", "user.name", "Test User")
-	run("config", "commit.gpgsign", "false")
+	cloneDir, run := shallowCloneWithConfig(t, bareDir)
 	run("fetch", "origin", "+refs/heads/"+paths.MetadataBranchName+":refs/remotes/origin/"+paths.MetadataBranchName)
 
 	run("checkout", "--orphan", "temp-orphan")
