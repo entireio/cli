@@ -20,7 +20,7 @@ func newTrailLinkCmd() *cobra.Command {
 	var status, branch, base, action, key string
 	cmd := &cobra.Command{
 		Use: "link <trail>", Short: "Link a repository branch to a trail",
-		Long: "Link an existing remote branch to a project trail. --branch defaults to the current branch. Use --branch-action create to create remote branch work from --base. Existing work and reviews are preserved; a branch belonging to another trail is rejected.",
+		Long: "Link an existing remote branch to a project trail. --branch defaults to the current branch. --base sets the branch the change merges into, for linked and created branches alike; trail show lists each change's base, and trail retarget changes it later. Use --branch-action create to create remote branch work from --base. Existing work and reviews are preserved; a branch belonging to another trail is rejected.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := validateProjectTrailStatusFlag(cmd, status); err != nil {

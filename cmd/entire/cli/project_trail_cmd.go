@@ -251,7 +251,8 @@ func printProjectTrailDetails(w io.Writer, item api.ProjectTrail, changes []proj
 	}
 	if len(changes) > 0 {
 		fmt.Fprintf(w, "  %s\n", label("Changes:"))
-		headers := []string{colHeaderChange, colHeaderBranch, colHeaderStatus, colHeaderURL}
+		headers := []string{colHeaderChange, colHeaderBranch, colHeaderBase, colHeaderStatus, colHeaderURL}
+		const statusCol = 3
 		rows := make([][]string, len(changes))
 		for i, c := range changes {
 			// Without a valid repository name there is no selector to show;
@@ -263,7 +264,7 @@ func printProjectTrailDetails(w io.Writer, item api.ProjectTrail, changes []proj
 			if c.Current {
 				change += " (current)"
 			}
-			rows[i] = []string{change, tuiutil.SanitizeTerminalLabel(c.Branch), tuiutil.SanitizeTerminalLabel(c.Status), tuiutil.SanitizeTerminalText(c.URL)}
+			rows[i] = []string{change, tuiutil.SanitizeTerminalLabel(c.Branch), tuiutil.SanitizeTerminalLabel(c.Base), tuiutil.SanitizeTerminalLabel(c.Status), tuiutil.SanitizeTerminalText(c.URL)}
 		}
 		// Pad on the plain text, then style, so color codes do not skew alignment.
 		widths := columnWidths(headers, rows)
@@ -282,7 +283,7 @@ func printProjectTrailDetails(w io.Writer, item api.ProjectTrail, changes []proj
 		writeRow(headers, func(_ int, cell string) string { return label(cell) })
 		for _, r := range rows {
 			writeRow(r, func(col int, cell string) string {
-				if col == 2 {
+				if col == statusCol {
 					return strings.Replace(cell, strings.TrimSpace(cell), status(strings.TrimSpace(cell)), 1)
 				}
 				return cell
@@ -684,7 +685,7 @@ func unionAssignees(lists ...[]string) []string {
 
 func addProjectTrailCreationFlags(cmd *cobra.Command, branch, base, action, key *string) {
 	cmd.Flags().StringVar(branch, "branch", "", "Branch to use (defaults to the current feature branch; create derives one from the title on the base branch)")
-	cmd.Flags().StringVar(base, "base", "", "Base branch for new code work")
+	cmd.Flags().StringVar(base, "base", "", "Base branch the change merges into; with --branch-action create, the new branch also starts from it")
 	cmd.Flags().StringVar(action, "branch-action", trailBranchActionLink, "Branch action: link existing remote work, or create a new branch")
 	cmd.Flags().StringVar(key, "idempotency-key", "", "Retry key for linking a branch; with intent-only creation, requires project management")
 }
