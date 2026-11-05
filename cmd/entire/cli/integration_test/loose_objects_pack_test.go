@@ -4,14 +4,11 @@ package integration
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
-	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/stretchr/testify/require"
 )
@@ -78,23 +75,4 @@ func TestLooseObjectsMaintenancePack_FilesTouchedStayAccurate(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(summaryContent), &summary))
 	require.Equal(t, []string{"NOTES.md"}, summary.FilesTouched)
 	env.AssertCheckpointExcludesSession(t, summary, readOnly.ID)
-}
-
-func runGit(t *testing.T, dir string, args ...string) string {
-	t.Helper()
-	cmd := execx.NonInteractive(t.Context(), "git", args...)
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	require.NoError(t, err, "git %s: %s", strings.Join(args, " "), out)
-	return strings.TrimSpace(string(out))
-}
-
-func gitVersionAtLeast(t *testing.T, wantMajor, wantMinor int) bool {
-	t.Helper()
-	out, err := execx.NonInteractive(t.Context(), "git", "--version").Output()
-	require.NoError(t, err)
-	var major, minor int
-	_, err = fmt.Sscanf(string(out), "git version %d.%d", &major, &minor)
-	require.NoError(t, err, "git --version: %q", out)
-	return major > wantMajor || major == wantMajor && minor >= wantMinor
 }
