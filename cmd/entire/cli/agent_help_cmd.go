@@ -151,6 +151,11 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"trail finding reply":        {agentHelpAudienceTaskDriven, false},
 	"trail finding edit-reply":   {agentHelpAudienceTaskDriven, false},
 	"trail finding delete-reply": {agentHelpAudienceTaskDriven, false},
+	// Attachments are images for the description, which trail update edits.
+	"trail attachment":        {agentHelpAudienceTaskDriven, false},
+	"trail attachment list":   {agentHelpAudienceReadOnly, false},
+	"trail attachment add":    {agentHelpAudienceTaskDriven, false},
+	"trail attachment remove": {agentHelpAudienceTaskDriven, false},
 
 	// ---- Unlisted: real commands, just not the default view. ---------------
 	"activity": {agentHelpAudienceReadOnly, false},
@@ -262,6 +267,15 @@ var agentHelpGuidance = map[string]string{
 		"it. Edit or delete only replies you wrote; a reply by anyone else stays as\n" +
 		"it is. `delete-reply` asks for confirmation; pass --force only when the user\n" +
 		"asked you to delete that reply.",
+
+	"trail attachment": "To show an image in a trail's description, upload it with\n" +
+		"`entire trail attachment add <file>` and put the printed\n" +
+		"`![image](attachment:<id>)` line on a line of its own in the body. Edit the\n" +
+		"body read from `entire trail show --json`: existing images appear there as\n" +
+		"the same lines and must be kept when writing it back with `trail update --body`.\n" +
+		"Never run `trail attachment remove` unless the user asks for that attachment\n" +
+		"to be deleted: it cannot be undone, and the image disappears from every\n" +
+		"description that shows it. Do not pass --force on your own.",
 
 	"checkpoint delete": "Destructive and irreversible on the remote. Never run this unless the user\n" +
 		"explicitly asks to delete that checkpoint; do not pass --force on your own.",
