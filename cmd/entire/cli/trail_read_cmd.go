@@ -126,7 +126,7 @@ func newTrailTimelineCmd(mode *trailMode) *cobra.Command {
 		}
 		return nil
 	}
-	cmd.Flags().IntVar(&pageSize, "limit", 50, fmt.Sprintf("Page size (1-%d)", trailListServerMaxLimit))
+	cmd.Flags().IntVarP(&pageSize, "limit", "n", 50, fmt.Sprintf("Page size (1-%d)", trailListServerMaxLimit))
 	cmd.Flags().StringVar(&pageToken, "page-token", "", "Continue from a previous page's token")
 	return cmd
 }
