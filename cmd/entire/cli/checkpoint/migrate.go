@@ -309,11 +309,14 @@ func (v *legacyV1) refusedByWritePath(ctx context.Context, cid id.CheckpointID, 
 	if pick.err == nil {
 		return pick, false, nil
 	}
-	if !errors.Is(pick.err, ErrLegacyCheckpointDiverged) {
-		return pick, false, fmt.Errorf("read checkpoint %s from %s: %w", cid, DefaultV1Refs().Primary, pick.err)
-	}
+	// A checkpoint with its own ref is not this function's to resolve, so it
+	// is skipped whatever its v1 copies say, including when they cannot be
+	// read (a shallow or partial clone).
 	if exists, err := refExists(v.repo, refName); err != nil || exists {
 		return pick, false, err
+	}
+	if !errors.Is(pick.err, ErrLegacyCheckpointDiverged) {
+		return pick, false, fmt.Errorf("read checkpoint %s from %s: %w", cid, DefaultV1Refs().Primary, pick.err)
 	}
 	if fetch == nil {
 		return pick, true, nil

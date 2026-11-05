@@ -573,3 +573,51 @@ func TestMigrateBranchToRefs_DryRunAfterAnAppliedChoiceReportsUpToDate(t *testin
 	assert.Empty(t, result.Migrated)
 	assert.Equal(t, 1, result.Skipped)
 }
+
+// A checkpoint that already has its ref is not migration's to resolve, so a
+// v1 history that cannot be read for it (a partial clone missing the merge
+// base's tree) must not stop the walk.
+func TestResolveDivergedLegacyCheckpoints_SkipsAnUnreadableCheckpointThatHasItsRef(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	h := newV1History(t)
+	local := h.commitOnTop(t, h.base, h.f.cid, "unpushed-on-v1")
+	remote := h.commitOnTop(t, h.base, h.f.cid, "teammate-on-v1")
+	missingTree := plumbing.NewHash("2222222222222222222222222222222222222222")
+	unreadableBase, err := CreateCommit(ctx, h.f.repo, missingTree, plumbing.ZeroHash, "base", "T", "t@example.com")
+	require.NoError(t, err)
+	onUnreadableBase := func(tip plumbing.Hash) plumbing.Hash {
+		c, err := h.f.repo.CommitObject(tip)
+		require.NoError(t, err)
+		rebased, err := CreateCommit(ctx, h.f.repo, c.TreeHash, unreadableBase, "on base", "T", "t@example.com")
+		require.NoError(t, err)
+		return rebased
+	}
+	h.place(t, onUnreadableBase(local), onUnreadableBase(remote))
+	v1, ok, err := openLegacyV1(ctx, h.f.repo, nil)
+	require.NoError(t, err)
+	require.True(t, ok)
+	pickErr := v1.pick(ctx, h.f.cid).err
+	require.Error(t, pickErr, "the copies must fail to compare, or this test checks nothing")
+	require.NotErrorIs(t, pickErr, ErrLegacyCheckpointDiverged)
+	writeRoutingCheckpoint(t, h.f.refs, h.f.cid, "already-has-a-ref")
+
+	result, err := ResolveDivergedLegacyCheckpoints(ctx, h.f.repo, MigrateOptions{DryRun: true}, nil)
+
+	require.NoError(t, err)
+	assert.Empty(t, result.Diverged)
+}
+
+// With one v1 copy nothing can diverge, so no checkpoint is visited.
+func TestResolveDivergedLegacyCheckpoints_SkipsTheWalkWithOneCopy(t *testing.T) {
+	t.Parallel()
+	h := newV1History(t)
+	h.place(t, h.base, h.base)
+	c := &chooser{keep: localV1}
+
+	result, err := ResolveDivergedLegacyCheckpoints(t.Context(), h.f.repo, MigrateOptions{Choose: c.choose}, nil)
+
+	require.NoError(t, err)
+	assert.Zero(t, result.Total)
+	assert.Empty(t, c.asked)
+}
