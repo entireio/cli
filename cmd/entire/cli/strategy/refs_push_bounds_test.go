@@ -676,3 +676,31 @@ func TestAdaptChunkSize_GrowsAfterProgressWithRefsLeft(t *testing.T) {
 
 	assert.Equal(t, 6, queue.ChunkSizeHint(checkpointRefPushChunkSize))
 }
+
+// TestFlushCheckpointRefs_UnboundedIgnoresChunkSizeHint: the remembered size
+// fits chunks to the pre-push budget. An explicit push has no budget, so a
+// hint shrunk by a slow pre-push must not split it into one push per ref.
+func TestFlushCheckpointRefs_UnboundedIgnoresChunkSizeHint(t *testing.T) {
+	shrinkRefPushChunkSize(t, 3)
+	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 6)
+	countFile := filepath.Join(t.TempDir(), "pushes")
+	prepareGitRefsPrePush(t, workDir, bareDir)
+	hook := "#!/bin/sh\ncat >/dev/null\necho push >> '" + countFile + "'\nexit 0\n"
+	require.NoError(t, os.WriteFile(filepath.Join(bareDir, "hooks", "pre-receive"), []byte(hook), 0o755))
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	queue := enqueueRefs(t, repo, refs)
+	require.NoError(t, queue.SetChunkSizeHint(1))
+
+	restore := captureStderr(t)
+	pushed, err := flushCheckpointRefsQueue(t.Context(), repo, pushSettings{remote: bareDir}, batchUnbounded)
+	restore()
+	require.NoError(t, err)
+	assert.Equal(t, 6, pushed)
+	data, err := os.ReadFile(countFile)
+	require.NoError(t, err)
+	assert.Equal(t, 2, strings.Count(string(data), "push"), "full-size chunks, not one push per ref")
+	assert.Equal(t, 1, queue.ChunkSizeHint(checkpointRefPushChunkSize), "the pre-push hint is left alone")
+}

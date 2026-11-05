@@ -759,7 +759,12 @@ func flushCheckpointRefsWith(
 	}
 
 	// Fast path: push the refs a chunk per round-trip (fast-forward-only).
-	chunkSize := queue.ChunkSizeHint(checkpointRefPushChunkSize)
+	// The remembered size only fits a chunk to the flush budget, so an
+	// unbounded batch uses the full size and leaves the hint alone.
+	chunkSize := checkpointRefPushChunkSize
+	if bound == batchWithinFlushBudget {
+		chunkSize = queue.ChunkSizeHint(checkpointRefPushChunkSize)
+	}
 	batch := pushRefChunks(batchCtx, dest.target, existing, chunkSize, func(landed []checkpointRefPush) {
 		result.pushed = append(result.pushed, landed...)
 		if removeErr := queue.RemoveEntries(checkpointRefPushTokens(landed)); removeErr != nil {
@@ -770,7 +775,9 @@ func flushCheckpointRefsWith(
 	// The budget, not an interruption, cut the batch.
 	budgetCut := bound == batchWithinFlushBudget &&
 		errors.Is(flushCtx.Err(), context.DeadlineExceeded) && pushCtx.Err() == nil
-	adaptChunkSize(ctx, queue, chunkSize, batch, budgetCut)
+	if bound == batchWithinFlushBudget {
+		adaptChunkSize(ctx, queue, chunkSize, batch, budgetCut)
+	}
 	if budgetCut && len(batch.failed) > 0 && !batch.sshAuthFailed && batch.unreachable == "" {
 		// The budget ran out mid-chunk: the per-ref fallback would only fail
 		// its one guaranteed attempt on the spent budget. Stop as if between
