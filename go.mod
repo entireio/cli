@@ -26,8 +26,12 @@ require (
 	// never gc again; the same commits
 	// also fix RepackObjects/Prune failing with "object not found" on any
 	// partial clone, including one made by the git binary.
-	// Move to a plain tag once alpha.6 ships.
-	github.com/go-git/go-git/v6 v6.0.0-beta.1
+	// go-git#2553 reads the loose-<hash> packs that git maintenance's
+	// loose-objects task writes; before it, objects stored only there were
+	// "not found" and Status reported every file under their trees as
+	// modified. go-git#2556 makes an unreadable subtree an error instead of a
+	// silently short walk. Move to a plain tag once one includes both.
+	github.com/go-git/go-git/v6 v6.0.0-beta.1.0.20261105090440-f07160f87eaa
 	github.com/go-git/x/plugin/objectsigner/auto v0.1.1-0.20260624122410-382b2905c041
 	github.com/go-git/x/plugin/objectsigner/program v0.0.0-20260624122410-382b2905c041
 	github.com/gofrs/flock v0.13.1
@@ -58,7 +62,7 @@ require (
 require (
 	dario.cat/mergo v1.0.2 // indirect
 	github.com/Masterminds/semver/v3 v3.4.0 // indirect
-	github.com/Microsoft/go-winio v0.6.2 // indirect
+	github.com/Microsoft/go-winio v0.6.4 // indirect
 	github.com/ProtonMail/go-crypto v1.5.2 // indirect
 	github.com/STARRY-S/zip v0.2.3 // indirect
 	github.com/alecthomas/chroma/v2 v2.14.0 // indirect
