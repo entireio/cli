@@ -25,7 +25,7 @@ const projectAgentPresetsPath = "/api/v1/agents/presets"
 func newProjectAgentCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "agent",
-		Short: "List and add the project's review agents",
+		Short: "List, add, and create the project's review agents",
 		Long: `Manage the review agents an Entire project runs on pushes.
 
 Agents are configured per project in Entire, not in repository files. Each
@@ -46,6 +46,7 @@ The project is the current repository's (gh/<owner> or et/<project>) unless
 	cmd.PersistentFlags().String("project", "", "Project to manage: gh/<owner> or et/<project> (default: the current repository's)")
 	cmd.AddCommand(newProjectAgentListCmd())
 	cmd.AddCommand(newProjectAgentAddCmd())
+	cmd.AddCommand(newProjectAgentCreateCmd())
 	return cmd
 }
 
@@ -188,12 +189,6 @@ func (t *projectAgentTarget) replaceAgent(ctx context.Context, id, etag string, 
 	var out api.ProjectAgent
 	err := t.client.ReplaceProjectConfig(ctx, t.agentPath(id), etag, body, &out)
 	return out, err //nolint:wrapcheck // callers name the agent
-}
-
-func (t *projectAgentTarget) createEnvironment(ctx context.Context, body api.ProjectEnvironmentInput) (api.ProjectEnvironment, error) {
-	var out api.ProjectEnvironment
-	err := t.client.CreateProjectConfig(ctx, t.environmentsPath(), body, &out)
-	return out, err //nolint:wrapcheck // callers name the environment
 }
 
 // liveRepositoryIDs is an agent's selection without the repositories the

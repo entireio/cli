@@ -111,17 +111,15 @@ func runProjectAgentAdd(cmd *cobra.Command, opts projectAgentAddOptions) error {
 			return fmt.Errorf("--disabled cannot apply to %s: the project already runs it, enabled, and it is shared with the repositories it reviews; drop --disabled, or disable the agent itself", a.Name)
 		}
 	}
-	var envID string
+	var env projectAgentEnv
 	if needEnv {
-		// With --environment this only reads; without it, it may create the
-		// default environment, which happens after every refusal above.
-		if envID, err = resolveProjectAgentEnvironment(ctx, errW, t, opts.environment); err != nil || envID == "" {
-			return err // an empty id without an error is a cancelled picker
+		if env, err = resolveProjectAgentEnvironment(ctx, errW, t, opts.environment, projectAgentEnvPromptAdd); err != nil || !env.chosen() {
+			return err // nothing chosen without an error is a cancelled picker
 		}
 	}
 	if opts.environment != "" {
 		for _, a := range touched {
-			if a.EnvironmentID != envID {
+			if a.EnvironmentID != env.id {
 				return fmt.Errorf("--environment %s cannot apply to %s: the project already runs it in environment %s; drop --environment", opts.environment, a.Name, a.EnvironmentID)
 			}
 		}
@@ -129,7 +127,7 @@ func runProjectAgentAdd(cmd *cobra.Command, opts projectAgentAddOptions) error {
 
 	saved := []api.ProjectAgent{}
 	for _, p := range selected {
-		a, err := addOrExtendPresetAgent(cmd, t, p, byPreset, repoID, repoLabel, envID, opts.disabled)
+		a, err := addOrExtendPresetAgent(cmd, t, p, byPreset, repoID, repoLabel, &env, opts.disabled)
 		if err != nil {
 			return err
 		}
@@ -151,21 +149,25 @@ func runProjectAgentAdd(cmd *cobra.Command, opts projectAgentAddOptions) error {
 // agent with this repository added to its selection. The API allows one
 // agent per preset per project, so the second repository of a preset is
 // always an extension, never a second agent.
-func addOrExtendPresetAgent(cmd *cobra.Command, t *projectAgentTarget, p api.ProjectAgentPreset, byPreset map[string]api.ProjectAgent, repoID, repoLabel, envID string, disabled bool) (api.ProjectAgent, error) {
+func addOrExtendPresetAgent(cmd *cobra.Command, t *projectAgentTarget, p api.ProjectAgentPreset, byPreset map[string]api.ProjectAgent, repoID, repoLabel string, env *projectAgentEnv, disabled bool) (api.ProjectAgent, error) {
 	ctx, w := cmd.Context(), cmd.OutOrStdout()
 	text := !jsonRequested(cmd)
 
 	a, ok := byPreset[strings.ToLower(p.ID)]
 	if !ok {
-		created, err := t.createAgent(ctx, api.ProjectAgentWrite{
+		body := api.ProjectAgentWrite{
 			Preset:        p.ID,
 			IsEnabled:     !disabled,
 			RepositoryIDs: []string{repoID},
 			Triggers:      []api.ProjectAgentTrigger{{Kind: "push"}},
-			EnvironmentID: envID,
-		})
+		}
+		env.apply(&body)
+		created, err := t.createAgent(ctx, body)
 		if err != nil {
 			return api.ProjectAgent{}, fmt.Errorf("add %s: %w", p.ID, err)
+		}
+		if err := env.saved(cmd.ErrOrStderr(), created); err != nil {
+			return api.ProjectAgent{}, fmt.Errorf("added %s (%s), but %w", created.Name, created.ID, err)
 		}
 		if text {
 			state := ""
@@ -324,35 +326,76 @@ func presetIDs(presets []api.ProjectAgentPreset) []string {
 	return ids
 }
 
+// projectAgentEnv is the environment new agents run in: an existing one by
+// id, or a new "Default" saved inline with the first agent created, so a
+// refused create leaves no environment behind.
+type projectAgentEnv struct {
+	id            string
+	createDefault bool
+}
+
+// chosen is false only for a cancelled picker.
+func (e *projectAgentEnv) chosen() bool { return e.id != "" || e.createDefault }
+
+// apply sets the create body's environment.
+func (e *projectAgentEnv) apply(body *api.ProjectAgentWrite) {
+	if e.createDefault {
+		body.Environment = &api.ProjectEnvironmentInput{Name: projectAgentDefaultEnvironment, Description: "Created by the Entire CLI"}
+		return
+	}
+	body.EnvironmentID = e.id
+}
+
+// saved records the agent the server created: once the default environment
+// exists, later agents reuse it by id. An agent saved without one means the
+// server ignored the inline environment, so later agents could not use it.
+func (e *projectAgentEnv) saved(errW io.Writer, created api.ProjectAgent) error {
+	if !e.createDefault {
+		return nil
+	}
+	if created.EnvironmentID == "" {
+		return fmt.Errorf("the server saved no %s environment with it; create an environment in the project and pass --environment", projectAgentDefaultEnvironment)
+	}
+	fmt.Fprintf(errW, "created environment %s (%s)\n", projectAgentDefaultEnvironment, tuiutil.SanitizeTerminalLabel(created.EnvironmentID))
+	*e = projectAgentEnv{id: created.EnvironmentID}
+	return nil
+}
+
+// projectAgentEnvPrompt words the environment picker for the command asking.
+type projectAgentEnvPrompt struct {
+	action string // the status label a cancelled picker prints
+	agents string // what runs in the environment
+}
+
+var (
+	projectAgentEnvPromptAdd    = projectAgentEnvPrompt{action: "Adding agents", agents: "the agents"}
+	projectAgentEnvPromptCreate = projectAgentEnvPrompt{action: "Creating the agent", agents: "the agent"}
+)
+
 // resolveProjectAgentEnvironment picks the environment new agents run in:
 // the one named, the project's only one, or a new "Default" when it has none.
 // Several and none named is a question for a terminal, or an error naming them.
-func resolveProjectAgentEnvironment(ctx context.Context, errW io.Writer, t *projectAgentTarget, want string) (string, error) {
+func resolveProjectAgentEnvironment(ctx context.Context, errW io.Writer, t *projectAgentTarget, want string, prompt projectAgentEnvPrompt) (projectAgentEnv, error) {
 	envs, err := t.listEnvironments(ctx)
 	if err != nil {
-		return "", err
+		return projectAgentEnv{}, err
 	}
 	if want = strings.TrimSpace(want); want != "" {
 		for _, e := range envs {
 			if e.ID == want || strings.EqualFold(e.Name, want) {
-				return e.ID, nil
+				return projectAgentEnv{id: e.ID}, nil
 			}
 		}
-		return "", fmt.Errorf("no environment %q in %s (have: %s)", want, t.label(), environmentNames(envs))
+		return projectAgentEnv{}, fmt.Errorf("no environment %q in %s (have: %s)", want, t.label(), environmentNames(envs))
 	}
 	switch len(envs) {
 	case 0:
-		env, err := t.createEnvironment(ctx, api.ProjectEnvironmentInput{Name: projectAgentDefaultEnvironment, Description: "Created by entire project agent add"})
-		if err != nil {
-			return "", fmt.Errorf("create environment %q: %w", projectAgentDefaultEnvironment, err)
-		}
-		fmt.Fprintf(errW, "created environment %s (%s)\n", env.Name, env.ID)
-		return env.ID, nil
+		return projectAgentEnv{createDefault: true}, nil
 	case 1:
-		return envs[0].ID, nil
+		return projectAgentEnv{id: envs[0].ID}, nil
 	}
 	if !interactive.CanPromptInteractively() {
-		return "", fmt.Errorf("%s has several environments; pass --environment with one of: %s", t.label(), environmentNames(envs))
+		return projectAgentEnv{}, fmt.Errorf("%s has several environments; pass --environment with one of: %s", t.label(), environmentNames(envs))
 	}
 	options := make([]huh.Option[string], 0, len(envs))
 	for _, e := range envs {
@@ -360,12 +403,12 @@ func resolveProjectAgentEnvironment(ctx context.Context, errW io.Writer, t *proj
 	}
 	var id string
 	form := NewAccessibleForm(huh.NewGroup(
-		huh.NewSelect[string]().Title("Which environment should the agents run in?").Options(options...).Value(&id),
+		huh.NewSelect[string]().Title("Which environment should " + prompt.agents + " run in?").Options(options...).Value(&id),
 	))
-	if cancelled, err := runProjectAgentPrompt(ctx, errW, "Adding agents", form); err != nil || cancelled {
-		return "", err
+	if cancelled, err := runProjectAgentPrompt(ctx, errW, prompt.action, form); err != nil || cancelled {
+		return projectAgentEnv{}, err
 	}
-	return id, nil
+	return projectAgentEnv{id: id}, nil
 }
 
 func environmentNames(envs []api.ProjectEnvironment) string {
