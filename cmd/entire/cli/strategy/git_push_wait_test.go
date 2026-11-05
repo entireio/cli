@@ -21,6 +21,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
@@ -367,7 +368,12 @@ func TestIsPushRaceRejection_RealPorcelainOutput(t *testing.T) {
 // right on the user's push, which GitHub rejects.
 func TestUserPushWait_WindowsAndUnix(t *testing.T) {
 	shortenUserPushWaits(t, 10*time.Millisecond, 10*time.Millisecond)
-	coord := checkpoint.NewUploadCoordinator(t.TempDir())
+	dir := t.TempDir()
+	// The coordinator's directory handle is cached process-wide; Windows cannot
+	// delete a directory with an open handle, so release it before TempDir's
+	// cleanup (cleanups run last-registered first).
+	t.Cleanup(func() { osroot.Forget(dir) })
+	coord := checkpoint.NewUploadCoordinator(dir)
 	pid, stop := startGitProcess(t)
 
 	id, ok := gitProcessIdentity(pid)
