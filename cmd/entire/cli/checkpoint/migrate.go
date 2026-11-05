@@ -236,7 +236,10 @@ func ResolveDivergedLegacyCheckpoints(ctx context.Context, repo *git.Repository,
 	}
 
 	v1, ok, err := openLegacyV1(ctx, repo, opts.ReadRemotes)
-	if err != nil || !ok {
+	// With one v1 copy (none on a remote, or this clone's is an ancestor of the
+	// remote's, which collapses them) nothing can diverge, so the walk, and its
+	// ref lookup per checkpoint, is skipped.
+	if err != nil || !ok || len(v1.trees) < 2 {
 		return result, err
 	}
 
@@ -300,15 +303,17 @@ func ResolveDivergedLegacyCheckpoints(ctx context.Context, repo *git.Repository,
 // holds is fetched, which settles the checkpoint. The write path copies every
 // other checkpoint when it is next written.
 func (v *legacyV1) refusedByWritePath(ctx context.Context, cid id.CheckpointID, refName plumbing.ReferenceName, fetch RefFetchFunc) (copyPick, bool, error) {
-	if exists, err := refExists(v.repo, refName); err != nil || exists {
-		return copyPick{}, false, err
-	}
+	// Compare the copies first: most checkpoints have not diverged, and a ref
+	// lookup per checkpoint is the slow part on a clone with many packed refs.
 	pick := v.pick(ctx, cid)
 	if pick.err == nil {
 		return pick, false, nil
 	}
 	if !errors.Is(pick.err, ErrLegacyCheckpointDiverged) {
 		return pick, false, fmt.Errorf("read checkpoint %s from %s: %w", cid, DefaultV1Refs().Primary, pick.err)
+	}
+	if exists, err := refExists(v.repo, refName); err != nil || exists {
+		return pick, false, err
 	}
 	if fetch == nil {
 		return pick, true, nil
@@ -333,6 +338,7 @@ type legacyV1 struct {
 	deleted DeletedCheckpointSet
 	choices *legacyChoices
 	chosen  map[id.CheckpointID]legacyChoice
+	bases   map[[2]plumbing.Hash][]*object.Commit
 }
 
 // openLegacyV1 resolves the v1 copies through readRemotes, as the write path
@@ -360,7 +366,8 @@ func openLegacyV1(ctx context.Context, repo *git.Repository, readRemotes []strin
 	if err != nil {
 		return nil, false, err
 	}
-	return &legacyV1{repo: repo, branch: branch, trees: trees, deleted: deleted, choices: choices, chosen: chosen}, true, nil
+	return &legacyV1{repo: repo, branch: branch, trees: trees, deleted: deleted, choices: choices, chosen: chosen,
+		bases: make(map[[2]plumbing.Hash][]*object.Commit)}, true, nil
 }
 
 // walk calls fn once for each checkpoint this clone has not deleted, on the
@@ -399,8 +406,23 @@ type copyPick struct {
 }
 
 func (v *legacyV1) pick(ctx context.Context, cid id.CheckpointID) copyPick {
-	picked, diverged, err := v.branch.pickCheckpointCopy(ctx, v.trees, cid)
+	picked, diverged, err := v.branch.pickCheckpointCopy(ctx, v.trees, cid, v.mergeBase)
 	return copyPick{picked: picked, diverged: diverged, err: err}
+}
+
+// mergeBase is mergeBases cached per pair of tips: every checkpoint whose
+// copies differ compares the same v1 tips.
+func (v *legacyV1) mergeBase(a, b *object.Commit) ([]*object.Commit, error) {
+	key := [2]plumbing.Hash{a.Hash, b.Hash}
+	if cached, ok := v.bases[key]; ok {
+		return cached, nil
+	}
+	bases, err := mergeBases(a, b)
+	if err != nil {
+		return nil, err
+	}
+	v.bases[key] = bases
+	return bases, nil
 }
 
 // keptCopy is what becomes a checkpoint's ref. choice is set when a person

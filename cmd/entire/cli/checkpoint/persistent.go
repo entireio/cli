@@ -2211,7 +2211,7 @@ func (s *GitStore) checkpointSubtreeHash(ctx context.Context, checkpointID id.Ch
 	if err != nil {
 		return plumbing.ZeroHash, err
 	}
-	picked, _, err := s.pickCheckpointCopy(ctx, trees, checkpointID)
+	picked, _, err := s.pickCheckpointCopy(ctx, trees, checkpointID, mergeBases)
 	if err != nil {
 		return plumbing.ZeroHash, err
 	}
@@ -2222,7 +2222,7 @@ func (s *GitStore) checkpointSubtreeHash(ctx context.Context, checkpointID id.Ch
 // caller visiting many checkpoints resolves the tiers once. When two tiers both
 // changed the checkpoint it returns ErrLegacyCheckpointDiverged together with
 // those two copies, in read precedence.
-func (s *GitStore) pickCheckpointCopy(ctx context.Context, trees []metadataTree, checkpointID id.CheckpointID) (picked *checkpointCopy, diverged [2]*checkpointCopy, err error) {
+func (s *GitStore) pickCheckpointCopy(ctx context.Context, trees []metadataTree, checkpointID id.CheckpointID, bases mergeBaseFunc) (picked *checkpointCopy, diverged [2]*checkpointCopy, err error) {
 	for _, entry := range trees {
 		subtree, ok := s.subtreeIn(ctx, entry.tree, checkpointID)
 		if !ok {
@@ -2236,7 +2236,7 @@ func (s *GitStore) pickCheckpointCopy(ctx context.Context, trees []metadataTree,
 		if picked.subtree == candidate.subtree {
 			continue
 		}
-		later, err := s.laterCheckpointCopy(ctx, checkpointID, picked, candidate)
+		later, err := s.laterCheckpointCopy(ctx, checkpointID, picked, candidate, bases)
 		if errors.Is(err, ErrLegacyCheckpointDiverged) {
 			return nil, [2]*checkpointCopy{picked, candidate}, err
 		}
@@ -2251,6 +2251,15 @@ func (s *GitStore) pickCheckpointCopy(ctx context.Context, trees []metadataTree,
 	return picked, diverged, nil
 }
 
+// mergeBaseFunc returns the merge bases of two v1 tips. A caller comparing
+// many checkpoints passes a cached one, since every checkpoint compares the
+// same tips.
+type mergeBaseFunc func(a, b *object.Commit) ([]*object.Commit, error)
+
+func mergeBases(a, b *object.Commit) ([]*object.Commit, error) {
+	return a.MergeBase(b) //nolint:wrapcheck // the caller wraps it with both refs
+}
+
 // checkpointCopy is one v1 tier's copy of a checkpoint.
 type checkpointCopy struct {
 	ref     plumbing.ReferenceName
@@ -2262,8 +2271,8 @@ type checkpointCopy struct {
 // changed: the other must still hold it as it was at every merge base of the
 // two commits. Otherwise both changed it, and it returns
 // ErrLegacyCheckpointDiverged.
-func (s *GitStore) laterCheckpointCopy(ctx context.Context, checkpointID id.CheckpointID, a, b *checkpointCopy) (*checkpointCopy, error) {
-	bases, err := a.commit.MergeBase(b.commit)
+func (s *GitStore) laterCheckpointCopy(ctx context.Context, checkpointID id.CheckpointID, a, b *checkpointCopy, mergeBase mergeBaseFunc) (*checkpointCopy, error) {
+	bases, err := mergeBase(a.commit, b.commit)
 	if err != nil {
 		return nil, fmt.Errorf("merge base of %s and %s: %w", a.ref, b.ref, err)
 	}
