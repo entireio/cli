@@ -805,7 +805,7 @@ func retryCheckpointRefsIndividually(
 				} else if errors.Is(pushErr, errShallowHidesMergeBase) {
 					// Divergence alone stays quiet, but this one never clears
 					// on its own: every push would fetch and refuse again.
-					rejectionWarning = fmt.Sprintf("[entire] Warning: checkpoint ref %s remains queued: %v", ref.name, errShallowHidesMergeBase)
+					rejectionWarning = fmt.Sprintf("[entire] Warning: checkpoint ref %s remains queued: %v", ref.name, WithShallowFetchHint(errShallowHidesMergeBase, dest.target, ref.name))
 				}
 			}
 			if firstErr == nil {

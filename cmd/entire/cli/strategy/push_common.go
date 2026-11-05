@@ -888,8 +888,9 @@ func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.Re
 	// shared monorepo), --unshallow downloads the whole repository because
 	// git treats shallow as a global property of the clone, not per-ref.
 	// The downstream reconcile/rebase paths walk only commits visible past
-	// .git/shallow (collectCommitChain / collectCommitsSince), so the
-	// missing pre-shallow history isn't needed to produce a correct rebase.
+	// .git/shallow (collectCommitChain / collectCommitsSince). When a boundary
+	// hides the merge base they refuse with errShallowHidesMergeBase instead of
+	// replaying, and the error names a fetch scoped to this ref.
 	// Span the fetch separately so a slow sync can be attributed to the network
 	// fetch versus the local reconcile/rebase that follows it.
 	_, fetchSpan := perf.Start(ctx, "git_fetch")
@@ -916,7 +917,7 @@ func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.Re
 	// this cherry-picks local commits onto remote tip, updating the local ref.
 	// If reconciliation fails, abort so the caller sees its error.
 	if reconcileErr := ReconcileDisconnectedMetadataRef(ctx, repo, ref, fetchedRefName, os.Stderr); reconcileErr != nil {
-		return fmt.Errorf("metadata reconciliation failed: %w", reconcileErr)
+		return fmt.Errorf("metadata reconciliation failed: %w", WithShallowFetchHint(reconcileErr, target, ref))
 	}
 
 	// Get local ref (re-read after potential reconciliation update)
@@ -943,7 +944,7 @@ func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.Re
 
 	newTip, _, err := replayOntoRemote(ctx, repo, localRef.Hash(), remoteRef.Hash())
 	if err != nil {
-		return fmt.Errorf("failed to rebase local commits onto remote: %w", err)
+		return fmt.Errorf("failed to rebase local commits onto remote: %w", WithShallowFetchHint(err, target, ref))
 	}
 	return advance(newTip)
 }

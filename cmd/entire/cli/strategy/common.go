@@ -61,9 +61,31 @@ var errNoMergeBase = errors.New("no merge base")
 // boundary is reachable from one of the tips: the shared history may simply
 // not be present, so the refs cannot be treated as disconnected.
 //
-// The remedy names only git fetch --unshallow: entire doctor repairs
-// disconnected metadata through the same replay, so it refuses too.
-var errShallowHidesMergeBase = errors.New("reachable shallow history prevents proving refs are disconnected; run 'git fetch --unshallow' and try again")
+// The remedy is fetching that ref's full history, not entire doctor (which
+// repairs through the same replay and refuses too) and not git fetch
+// --unshallow (which deepens the whole clone, downloading all of a shallow
+// monorepo). Callers that know the remote add the command with
+// WithShallowFetchHint.
+var errShallowHidesMergeBase = errors.New("reachable shallow history prevents proving refs are disconnected; fetch the ref's full history and try again")
+
+// WithShallowFetchHint adds the command that heals errShallowHidesMergeBase for
+// ref on target, and returns any other error unchanged.
+func WithShallowFetchHint(err error, target string, ref plumbing.ReferenceName) error {
+	if !errors.Is(err, errShallowHidesMergeBase) {
+		return err
+	}
+	return fmt.Errorf("%w: run '%s'", err, shallowFetchCommand(target, ref))
+}
+
+// shallowFetchCommand deepens only ref's history, the same ref-scoped fetch
+// the metadata read path uses to heal a shallow boundary. It writes no local
+// ref, only FETCH_HEAD, and leaves a shallow source tree as it is.
+func shallowFetchCommand(target string, ref plumbing.ReferenceName) string {
+	if remote.IsURL(target) {
+		target = remote.RedactURL(target)
+	}
+	return fmt.Sprintf("git fetch --depth=%d %s %s", remote.FullRefDepth, target, ref)
+}
 
 // checkpointRemoteBootstrapContextKey gates whether EnsurePrimaryRef is
 // allowed to perform a network fetch against a configured checkpoint_remote

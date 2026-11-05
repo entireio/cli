@@ -586,7 +586,7 @@ func checkDisconnectedMetadata(cmd *cobra.Command, force bool) error {
 	}
 
 	if fixErr := strategy.ReconcileDisconnectedMetadataRef(ctx, repo, refs.Primary, remoteRefName, cmd.ErrOrStderr()); fixErr != nil {
-		return fmt.Errorf("failed to reconcile metadata branches: %w", fixErr)
+		return fmt.Errorf("failed to reconcile metadata branches: %w", strategy.WithShallowFetchHint(fixErr, remoteName, refs.Primary))
 	}
 
 	fmt.Fprintln(w, "  ✓ Fixed: metadata branches reconciled")

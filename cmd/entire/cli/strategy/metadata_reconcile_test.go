@@ -957,7 +957,9 @@ func cloneWithShallowHiddenMergeBase(t *testing.T) string {
 func requireShallowRefusal(t *testing.T, err error) {
 	t.Helper()
 	require.ErrorIs(t, err, errShallowHidesMergeBase)
-	assert.Contains(t, err.Error(), "git fetch --unshallow")
+	assert.Contains(t, err.Error(), "full history")
+	// --unshallow deepens the whole clone; a shallow monorepo would download everything.
+	assert.NotContains(t, err.Error(), "--unshallow")
 	// entire doctor runs this same reconcile, so pointing at it would loop.
 	assert.NotContains(t, err.Error(), "entire doctor")
 }

@@ -1642,3 +1642,25 @@ func TestNonInteractiveSSHAuthFailure(t *testing.T) {
 	assert.False(t, nonInteractiveSSHAuthFailure(ctx, errors.New("non-fast-forward")))
 	assert.False(t, nonInteractiveSSHAuthFailure(ctx, nil))
 }
+
+// Not parallel: uses t.Chdir() (required for OpenRepository in fetchAndRebaseRefCommon).
+func TestFetchAndRebaseRefCommon_ShallowRefusalNamesAFetchThatUnblocksIt(t *testing.T) {
+	cloneDir := cloneWithShallowHiddenMergeBase(t)
+	t.Chdir(cloneDir)
+	paths.ClearWorktreeRootCache()
+	ref := metadataLocalRef()
+
+	err := fetchAndRebaseRefCommon(t.Context(), "origin", ref)
+
+	require.ErrorIs(t, err, errShallowHidesMergeBase)
+	fetchCommand := shallowFetchCommand("origin", ref)
+	assert.Contains(t, err.Error(), fetchCommand)
+	assert.NotContains(t, err.Error(), "--unshallow")
+
+	testutil.RunGit(t, cloneDir, strings.Fields(strings.TrimPrefix(fetchCommand, "git "))...)
+	require.NoError(t, fetchAndRebaseRefCommon(t.Context(), "origin", ref))
+	assert.Equal(t,
+		strings.TrimSpace(testutil.RunGit(t, cloneDir, "rev-parse", metadataOriginRemoteRef().String())),
+		strings.TrimSpace(testutil.RunGit(t, cloneDir, "rev-parse", ref.String())),
+		"once the history is whole, the local ref fast-forwards to the teammate's update")
+}
