@@ -17,6 +17,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -45,10 +46,345 @@ func TestPartitionLocalRefs(t *testing.T) {
 	require.NoError(t, err)
 
 	stale := mustRefName(t, id.MustCheckpointID("ffffffffffff"))
-	existing, missing := partitionLocalRefs(repo, append([]plumbing.ReferenceName{stale}, refs...))
+	existing, missing, _ := partitionLocalRefs(t.Context(), repo, append([]plumbing.ReferenceName{stale}, refs...))
 
 	assert.ElementsMatch(t, refs, existing, "local refs are pushable")
 	assert.Equal(t, []plumbing.ReferenceName{stale}, missing, "absent ref is stale")
+}
+
+// partitionScenario is a repository and a queue to split. listed names every
+// ref the namespace listing must report, by its on-disk name. tips maps refs to
+// the revision localTip must resolve them to.
+type partitionScenario struct {
+	workDir                         string
+	queued, existing, stale, listed []plumbing.ReferenceName
+	tips                            map[plumbing.ReferenceName]string
+	// gitFallback marks a repo whose go-git walk fails, so the listing only
+	// decides existence and exposes no tips.
+	gitFallback bool
+}
+
+// writeRefFile writes content as ref's loose file, bypassing git's checks.
+func writeRefFile(t *testing.T, workDir string, ref plumbing.ReferenceName, content string) {
+	t.Helper()
+	path := filepath.Join(workDir, ".git", filepath.FromSlash(ref.String()))
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+}
+
+// refPathFoldsCase reports whether ref's loose file resolves although it is
+// stored under a differently-cased shard. macOS's default filesystem is
+// case-insensitive, so a macOS run covers the folded branch.
+func refPathFoldsCase(t *testing.T, workDir string, ref plumbing.ReferenceName) bool {
+	t.Helper()
+	_, err := os.Stat(filepath.Join(workDir, ".git", filepath.FromSlash(ref.String())))
+	t.Logf("case-insensitive filesystem: %v", err == nil)
+	return err == nil
+}
+
+func TestPartitionLocalRefsUsing(t *testing.T) {
+	t.Parallel()
+	stale := mustRefName(t, id.MustCheckpointID("ffffffffffff"))
+	scenarios := []struct {
+		name  string
+		build func(t *testing.T) partitionScenario
+	}{
+		{"keeps queue order", func(t *testing.T) partitionScenario {
+			t.Helper()
+			workDir, _, refs := setupRepoWithCheckpointRefs(t)
+			return partitionScenario{
+				workDir:  workDir,
+				queued:   []plumbing.ReferenceName{refs[1], stale, refs[0]},
+				existing: []plumbing.ReferenceName{refs[1], refs[0]},
+				stale:    []plumbing.ReferenceName{stale},
+				listed:   refs,
+			}
+		}},
+		{"packed refs", func(t *testing.T) partitionScenario {
+			t.Helper()
+			workDir, _, refs := setupRepoWithCheckpointRefs(t)
+			testutil.RunGit(t, workDir, "pack-refs", "--all")
+			return partitionScenario{
+				workDir:  workDir,
+				queued:   append([]plumbing.ReferenceName{stale}, refs...),
+				existing: refs,
+				stale:    []plumbing.ReferenceName{stale},
+				listed:   refs,
+			}
+		}},
+		// The empty file aborts the go-git walk, and git for-each-ref skips both
+		// broken files. go-git reads an empty ref file as absent and an
+		// unparsable one as an error, which keeps it queued.
+		{"broken ref files", func(t *testing.T) partitionScenario {
+			t.Helper()
+			workDir, _, refs := setupRepoWithCheckpointRefs(t)
+			empty := mustRefName(t, id.MustCheckpointID("eeeeeeeeeee1"))
+			garbage := mustRefName(t, id.MustCheckpointID("eeeeeeeeeee2"))
+			writeRefFile(t, workDir, empty, "")
+			writeRefFile(t, workDir, garbage, "not a hash\n")
+			return partitionScenario{
+				workDir:     workDir,
+				queued:      append([]plumbing.ReferenceName{empty, garbage}, refs...),
+				existing:    append([]plumbing.ReferenceName{garbage}, refs...),
+				stale:       []plumbing.ReferenceName{empty},
+				gitFallback: true,
+			}
+		}},
+		// The listing reports the on-disk shard case, while a case-insensitive
+		// filesystem still resolves the queued name.
+		{"case-folded shard", func(t *testing.T) partitionScenario {
+			t.Helper()
+			workDir, _, refs := setupRepoWithCheckpointRefs(t)
+			stored := plumbing.ReferenceName(checkpoint.CheckpointRefPrefix + "AB/0000000000ab")
+			queued := mustRefName(t, id.MustCheckpointID("0000000000ab"))
+			require.NotEqual(t, stored, queued)
+			testutil.RunGit(t, workDir, "update-ref", stored.String(), "HEAD")
+			s := partitionScenario{
+				workDir: workDir,
+				queued:  []plumbing.ReferenceName{queued},
+				listed:  append([]plumbing.ReferenceName{stored}, refs...),
+			}
+			if refPathFoldsCase(t, workDir, queued) {
+				s.existing = []plumbing.ReferenceName{queued}
+			} else {
+				s.stale = []plumbing.ReferenceName{queued}
+			}
+			return s
+		}},
+		// The go-git listing leaves a symbolic ref to the resolving lookup.
+		{"symbolic ref", func(t *testing.T) partitionScenario {
+			t.Helper()
+			workDir, _, refs := setupRepoWithCheckpointRefs(t)
+			symbolic := mustRefName(t, id.MustCheckpointID("0000000000aa"))
+			testutil.RunGit(t, workDir, "commit", "--allow-empty", "-m", "symbolic target")
+			testutil.RunGit(t, workDir, "update-ref", "refs/heads/target", "HEAD")
+			testutil.RunGit(t, workDir, "symbolic-ref", symbolic.String(), "refs/heads/target")
+			return partitionScenario{
+				workDir:  workDir,
+				queued:   []plumbing.ReferenceName{symbolic, refs[0]},
+				existing: []plumbing.ReferenceName{symbolic, refs[0]},
+				listed:   refs,
+				tips:     map[plumbing.ReferenceName]string{symbolic: "refs/heads/target", refs[0]: refs[0].String()},
+			}
+		}},
+		{"SHA-256 repository", func(t *testing.T) partitionScenario {
+			t.Helper()
+			workDir := t.TempDir()
+			testutil.RunGit(t, workDir, "init", "--object-format=sha256")
+			testutil.RunGit(t, workDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "init")
+			ref := mustRefName(t, id.MustCheckpointID("000000000001"))
+			testutil.RunGit(t, workDir, "update-ref", ref.String(), "HEAD")
+			return partitionScenario{
+				workDir:  workDir,
+				queued:   []plumbing.ReferenceName{stale, ref},
+				existing: []plumbing.ReferenceName{ref},
+				stale:    []plumbing.ReferenceName{stale},
+				listed:   []plumbing.ReferenceName{ref},
+			}
+		}},
+	}
+	paths := []struct {
+		name       string
+		useListing bool
+	}{
+		{"per-ref lookups", false},
+		{"namespace listing", true},
+	}
+	for _, sc := range scenarios {
+		t.Run(sc.name, func(t *testing.T) {
+			t.Parallel()
+			s := sc.build(t)
+			wantListed := make(map[plumbing.ReferenceName]plumbing.Hash, len(s.listed))
+			for _, ref := range s.listed {
+				wantListed[ref] = plumbing.NewHash(revParse(t, s.workDir, ref.String()))
+			}
+			for _, p := range paths {
+				t.Run(p.name, func(t *testing.T) {
+					t.Parallel()
+					repo, err := gitrepo.OpenPath(s.workDir)
+					require.NoError(t, err)
+					defer repo.Close()
+
+					existing, missing, listed := partitionLocalRefsUsing(t.Context(), repo, s.queued, p.useListing)
+
+					assert.Equal(t, s.existing, existing, "pushable refs, in queue order")
+					assert.Equal(t, s.stale, missing, "stale refs, in queue order")
+					if p.useListing && !s.gitFallback {
+						assert.Equal(t, wantListed, listed, "every listed ref maps to its tip")
+					} else {
+						assert.Nil(t, listed)
+					}
+					for ref, rev := range s.tips {
+						tip, err := localTip(repo, listed, ref)
+						require.NoError(t, err)
+						assert.Equal(t, revParse(t, s.workDir, rev), tip.String(), "tip of %s", ref)
+					}
+				})
+			}
+		})
+	}
+}
+
+// revParsedTips maps each ref to its tip as git resolves it.
+func revParsedTips(t *testing.T, workDir string, refs []plumbing.ReferenceName) map[plumbing.ReferenceName]plumbing.Hash {
+	t.Helper()
+	tips := make(map[plumbing.ReferenceName]plumbing.Hash, len(refs))
+	for _, ref := range refs {
+		tips[ref] = plumbing.NewHash(revParse(t, workDir, ref.String()))
+	}
+	return tips
+}
+
+// Both listers must agree with git on every storage shape, including a loose
+// ref that shadows a stale packed entry for the same name.
+func TestCheckpointRefListers(t *testing.T) {
+	t.Parallel()
+	scenarios := []struct {
+		name  string
+		build func(t *testing.T) (string, []plumbing.ReferenceName)
+	}{
+		{"loose", func(t *testing.T) (string, []plumbing.ReferenceName) {
+			t.Helper()
+			workDir, _, refs := setupRepoWithCheckpointRefs(t)
+			return workDir, refs
+		}},
+		{"packed", func(t *testing.T) (string, []plumbing.ReferenceName) {
+			t.Helper()
+			workDir, _, refs := setupRepoWithCheckpointRefs(t)
+			testutil.RunGit(t, workDir, "pack-refs", "--all")
+			return workDir, refs
+		}},
+		{"loose over packed", func(t *testing.T) (string, []plumbing.ReferenceName) {
+			t.Helper()
+			workDir, _, refs := setupRepoWithCheckpointRefs(t)
+			testutil.RunGit(t, workDir, "pack-refs", "--all")
+			testutil.RunGit(t, workDir, "commit", "--allow-empty", "-m", "newer checkpoint version")
+			testutil.RunGit(t, workDir, "update-ref", refs[1].String(), "HEAD")
+			return workDir, refs
+		}},
+		{"SHA-256 repository", func(t *testing.T) (string, []plumbing.ReferenceName) {
+			t.Helper()
+			workDir := t.TempDir()
+			testutil.RunGit(t, workDir, "init", "--object-format=sha256")
+			testutil.RunGit(t, workDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "init")
+			ref := mustRefName(t, id.MustCheckpointID("000000000001"))
+			testutil.RunGit(t, workDir, "update-ref", ref.String(), "HEAD")
+			return workDir, []plumbing.ReferenceName{ref}
+		}},
+	}
+	listers := []struct {
+		name string
+		list func(context.Context, *git.Repository) (map[plumbing.ReferenceName]plumbing.Hash, error)
+	}{
+		{"go-git", listCheckpointRefsWithGoGit},
+		{"git for-each-ref", listCheckpointRefsWithGit},
+	}
+	for _, sc := range scenarios {
+		t.Run(sc.name, func(t *testing.T) {
+			t.Parallel()
+			workDir, refs := sc.build(t)
+			want := revParsedTips(t, workDir, refs)
+			for _, l := range listers {
+				t.Run(l.name, func(t *testing.T) {
+					t.Parallel()
+					repo, err := gitrepo.OpenPath(workDir)
+					require.NoError(t, err)
+					defer repo.Close()
+
+					listed, err := l.list(t.Context(), repo)
+
+					require.NoError(t, err)
+					assert.Equal(t, want, listed)
+				})
+			}
+		})
+	}
+}
+
+// One empty loose ref anywhere under refs/ aborts go-git's walk; git
+// for-each-ref skips it, so the namespace is still listed in full.
+func TestListLocalCheckpointRefs_FallsBackToGit(t *testing.T) {
+	t.Parallel()
+	workDir, _, refs := setupRepoWithCheckpointRefs(t)
+	writeRefFile(t, workDir, "refs/heads/broken", "")
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+
+	_, goGitErr := listCheckpointRefsWithGoGit(t.Context(), repo)
+	listed, tipsMatchLookup, err := listLocalCheckpointRefs(t.Context(), repo)
+
+	require.Error(t, goGitErr, "go-git aborts on the empty ref file")
+	require.NoError(t, err)
+	assert.False(t, tipsMatchLookup, "git's tips only show which refs exist")
+	assert.Equal(t, revParsedTips(t, workDir, refs), listed)
+}
+
+// git for-each-ref reads a ref file with trailing data as its hash, where
+// go-git reads it as the zero hash. Tips must stay the go-git ones whichever
+// listing ran, so the fallback listing only decides existence.
+func TestPartitionLocalRefsUsing_TrailingDataTipMatchesLookup(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name            string
+		breakGoGitWalk  bool
+		wantListedNames bool
+	}{
+		{name: "go-git listing", wantListedNames: true},
+		{name: "for-each-ref fallback", breakGoGitWalk: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			workDir, _, refs := setupRepoWithCheckpointRefs(t)
+			junk := mustRefName(t, id.MustCheckpointID("aaaaaaaaaaa3"))
+			writeRefFile(t, workDir, junk, revParse(t, workDir, "HEAD")+" junk\n")
+			if tc.breakGoGitWalk {
+				writeRefFile(t, workDir, "refs/heads/broken", "")
+			}
+			repo, err := gitrepo.OpenPath(workDir)
+			require.NoError(t, err)
+			defer repo.Close()
+			lookup, err := repo.Reference(junk, true)
+			require.NoError(t, err)
+
+			queued := append([]plumbing.ReferenceName{junk}, refs...)
+			existing, missing, listed := partitionLocalRefsUsing(t.Context(), repo, queued, true)
+			tip, err := localTip(repo, listed, junk)
+
+			assert.Equal(t, queued, existing)
+			assert.Empty(t, missing)
+			require.NoError(t, err)
+			assert.Equal(t, lookup.Hash(), tip)
+			if tc.wantListedNames {
+				assert.Equal(t, revParsedTips(t, workDir, refs), listed)
+			} else {
+				assert.Nil(t, listed)
+			}
+		})
+	}
+}
+
+// With both listings failing, the split is the per-ref one and nothing is listed.
+func TestPartitionLocalRefsUsing_NoListing(t *testing.T) {
+	t.Parallel()
+	workDir, _, refs := setupRepoWithCheckpointRefs(t)
+	writeRefFile(t, workDir, "refs/heads/broken", "")
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	stale := mustRefName(t, id.MustCheckpointID("ffffffffffff"))
+	queued := []plumbing.ReferenceName{refs[1], stale, refs[0]}
+	wantExisting, wantStale, _ := partitionLocalRefsUsing(t.Context(), repo, queued, false)
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	_, _, listErr := listLocalCheckpointRefs(cancelled, repo)
+	existing, missing, listed := partitionLocalRefsUsing(cancelled, repo, queued, true)
+
+	require.Error(t, listErr, "both listings fail")
+	assert.Equal(t, wantExisting, existing)
+	assert.Equal(t, wantStale, missing)
+	assert.Nil(t, listed)
 }
 
 func TestBatchPushCheckpointRefs(t *testing.T) {

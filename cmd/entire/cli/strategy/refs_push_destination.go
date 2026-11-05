@@ -37,7 +37,7 @@ type refsPushDestination struct {
 //
 // So when a remote carries more than one push URL we target its first push URL
 // directly (the one git itself would push to first) and ignore the rest. The
-// recovery fetch in fetchAndRebaseRefCommon uses the same target, so — unlike the
+// recovery fetch in recoverCheckpointRef uses the same target, so — unlike the
 // fan-out path, which reconciled the remote's FETCH url while pushing to its
 // pushurls — the URL we reconcile is finally the URL we push to.
 //

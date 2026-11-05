@@ -30,7 +30,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
-	"github.com/entireio/cli/internal/entireclient/tokenstore"
+	"github.com/entireio/cli/internal/entireclient/userconfig"
 
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/spf13/cobra"
@@ -150,7 +150,7 @@ type stuckSession struct {
 // checkUserConfig reports an unusable config.json.
 // Doctor skips the root guard, so it reports here, whatever ENTIRE_TOKEN says.
 func checkUserConfig(cmd *cobra.Command) error {
-	err := tokenstore.CheckConfig()
+	err := userconfig.Check()
 	if err == nil {
 		return nil
 	}

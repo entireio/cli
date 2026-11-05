@@ -10014,6 +10014,12 @@ func (s *CreateProjectInputBody) encodeFields(e *jx.Encoder) {
 		}
 	}
 	{
+		if s.Cell.Set {
+			e.FieldStart("cell")
+			s.Cell.Encode(e)
+		}
+	}
+	{
 		e.FieldStart("name")
 		e.Str(s.Name)
 	}
@@ -10040,12 +10046,13 @@ func (s *CreateProjectInputBody) encodeFields(e *jx.Encoder) {
 	}
 }
 
-var jsonFieldsNameOfCreateProjectInputBody = [5]string{
+var jsonFieldsNameOfCreateProjectInputBody = [6]string{
 	0: "$schema",
-	1: "name",
-	2: "ownerId",
-	3: "ownerType",
-	4: "region",
+	1: "cell",
+	2: "name",
+	3: "ownerId",
+	4: "ownerType",
+	5: "region",
 }
 
 // Decode decodes CreateProjectInputBody from json.
@@ -10068,8 +10075,18 @@ func (s *CreateProjectInputBody) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"$schema\"")
 			}
+		case "cell":
+			if err := func() error {
+				s.Cell.Reset()
+				if err := s.Cell.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"cell\"")
+			}
 		case "name":
-			requiredBitSet[0] |= 1 << 1
+			requiredBitSet[0] |= 1 << 2
 			if err := func() error {
 				v, err := d.Str()
 				s.Name = string(v)
@@ -10081,7 +10098,7 @@ func (s *CreateProjectInputBody) Decode(d *jx.Decoder) error {
 				return errors.Wrap(err, "decode field \"name\"")
 			}
 		case "ownerId":
-			requiredBitSet[0] |= 1 << 2
+			requiredBitSet[0] |= 1 << 3
 			if err := func() error {
 				v, err := d.Str()
 				s.OwnerId = string(v)
@@ -10093,7 +10110,7 @@ func (s *CreateProjectInputBody) Decode(d *jx.Decoder) error {
 				return errors.Wrap(err, "decode field \"ownerId\"")
 			}
 		case "ownerType":
-			requiredBitSet[0] |= 1 << 3
+			requiredBitSet[0] |= 1 << 4
 			if err := func() error {
 				if err := s.OwnerType.Decode(d); err != nil {
 					return err
@@ -10133,7 +10150,7 @@ func (s *CreateProjectInputBody) Decode(d *jx.Decoder) error {
 	// Validate required fields.
 	var failures []validate.FieldError
 	for i, mask := range [1]uint8{
-		0b00001110,
+		0b00011100,
 	} {
 		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
 			// Mask only required fields and check equality to mask using XOR.

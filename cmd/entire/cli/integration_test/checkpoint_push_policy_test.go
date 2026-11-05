@@ -1061,9 +1061,15 @@ func TestConfigure_ManualPolicyNeedsGitRefs(t *testing.T) {
 	env := NewFeatureBranchEnv(t)
 	env.SetupBareRemote()
 
-	_, err := env.RunCLIWithError("configure", "--checkpoint-push-policy", "manual")
+	output, err := env.RunCLIWithError("configure", "--checkpoint-push-policy", "manual")
 	require.Error(t, err)
 	require.NoFileExists(t, gitCommonDirFile(t, env, settings.CheckpointPushPolicyFile), "a refused policy saves nothing")
+	// migrate-checkpoints refuses once git-refs is primary, so the refusal
+	// must name it before the switch.
+	migrate := strings.Index(output, "entire doctor migrate-checkpoints")
+	switchBackend := strings.Index(output, "--checkpoint-backend git-refs")
+	require.True(t, migrate >= 0 && switchBackend > migrate,
+		"the refusal must say to migrate before switching, got:\n%s", output)
 
 	env.RunCLI("configure", "--checkpoint-push-policy", "automatic")
 
