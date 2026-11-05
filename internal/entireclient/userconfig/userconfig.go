@@ -28,9 +28,15 @@ const (
 
 var knownKeys = []string{noAutoUpdateKey, tokenStoreKey}
 
+// token_store values config.json accepts.
+const (
+	TokenStoreFile    = "file"
+	TokenStoreKeyring = "keyring"
+)
+
 // Config is config.json's parsed contents.
 type Config struct {
-	// TokenStore is "", "file", or "keyring".
+	// TokenStore is "" or a TokenStore value.
 	TokenStore string
 	// NoAutoUpdate turns off update checks.
 	NoAutoUpdate bool
@@ -83,9 +89,9 @@ func parse(data []byte) (Config, error) {
 		}
 	}
 	switch cfg.TokenStore {
-	case "", "file", "keyring":
+	case "", TokenStoreFile, TokenStoreKeyring:
 	default:
-		return Config{}, badConfig(fmt.Errorf(`%s is %q, want "file" or "keyring"`, tokenStoreKey, cfg.TokenStore))
+		return Config{}, badConfig(fmt.Errorf("%s is %q, want %q or %q", tokenStoreKey, cfg.TokenStore, TokenStoreFile, TokenStoreKeyring))
 	}
 	if raw, ok := keys[noAutoUpdateKey]; ok {
 		if err := json.Unmarshal(raw, &cfg.NoAutoUpdate); err != nil {

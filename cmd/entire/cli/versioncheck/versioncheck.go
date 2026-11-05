@@ -542,7 +542,7 @@ func isNixStoreBinary() bool {
 func printNixNotice(w io.Writer, current, latest string) {
 	printNotification(w, current, latest)
 	fmt.Fprintln(w, "Nix manages this install. Update it through your Nix configuration.")
-	fmt.Fprintln(w, "New releases can take days to reach nixpkgs.")
+	fmt.Fprintln(w, "New releases can take time to reach your Nix channel.")
 }
 
 // downloadsURL is the GitHub releases page, used for release-notes links.
