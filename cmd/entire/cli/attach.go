@@ -631,8 +631,8 @@ func finishAttachLink(ctx context.Context, w, errW io.Writer, plan attachLinkPla
 // checkpointID as written locally. Anything it can't confirm reads as not
 // there.
 func checkpointOnRemote(ctx context.Context, remote string, checkpointID id.CheckpointID) bool {
-	target, disabled := strategy.CheckpointPushTarget(ctx, remote)
-	return !disabled && confirmCheckpointDelivered(ctx, target, checkpointID) == nil
+	target, disabled, err := strategy.CheckpointPushTarget(ctx, remote)
+	return err == nil && !disabled && confirmCheckpointDelivered(ctx, target, checkpointID) == nil
 }
 
 // redeliverAttachedCheckpoint pushes an existing checkpoint now when its
@@ -1060,9 +1060,12 @@ func attachLinkRepo(ctx context.Context, remote string) string {
 // manual checkpoint push policy the checkpoint waits like any other.
 func pushAttachedCheckpoint(ctx context.Context, w io.Writer, plan attachLinkPlan, checkpointID id.CheckpointID) error {
 	remote := plan.remote
-	target, disabled := strategy.CheckpointPushTarget(ctx, remote)
+	target, disabled, err := strategy.CheckpointPushTarget(ctx, remote)
 	if disabled {
 		return fmt.Errorf("checkpoint %s was written locally but not pushed: push_sessions is turned off in settings, so the link stays invisible to others until the checkpoint is pushed", checkpointID)
+	}
+	if err != nil {
+		return fmt.Errorf("checkpoint %s was written locally but not pushed: %w", checkpointID, err)
 	}
 	if plan.policyErr != nil {
 		return fmt.Errorf("checkpoint %s was written locally but not pushed: %w", checkpointID, plan.policyErr)
