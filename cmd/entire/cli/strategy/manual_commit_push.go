@@ -88,7 +88,7 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	ps := resolvePushSettings(resolveCtx, remote)
 	resolveSpan.End()
 
-	if ps.pushDisabled {
+	if skipsCheckpointPush(ps) {
 		return nil
 	}
 
@@ -513,6 +513,9 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 	} else if !automatic {
 		return 0, false, ErrCheckpointPushHeldByPolicy
 	}
+	if ps.withheld != nil {
+		return 0, false, fmt.Errorf("checkpoint refs stay queued: %w", ps.withheld)
+	}
 	if opfErr := opfGateForCheckpointRefs(ctx, repo); opfErr != nil {
 		// Names no cause, matching flushCheckpointRefsQueue's retry message
 		// below: the gate fails on an unresolvable decision or a failed scan,
@@ -641,6 +644,11 @@ type checkpointFlushResult struct {
 // the outcome of every selected ref. It does not read the policy: an explicit
 // selection is the user naming what to send.
 func flushCheckpointRefs(ctx context.Context, repo *git.Repository, ps pushSettings, selection checkpointRefSelection) (checkpointFlushResult, error) {
+	// Callers check first; repeated so a new caller cannot hand a withheld
+	// store's checkpoints to the push remote.
+	if ps.withheld != nil {
+		return checkpointFlushResult{}, ps.withheld
+	}
 	result := checkpointFlushResult{failed: make(map[plumbing.ReferenceName]error)}
 	queue, err := checkpoint.PushQueueForRepo(ctx, repo)
 	if err != nil {
