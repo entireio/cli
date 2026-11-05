@@ -232,14 +232,18 @@ func checkProjectAgentGlobs(flag string, globs []string) ([]string, error) {
 	return out, nil
 }
 
-// checkProjectAgentChoice refuses a value outside allowed; an empty one only
-// when it is required.
-// projectAgentDurationLabel writes a whole-minute duration the way the help
-// does: 30m, not 30m0s.
+// projectAgentDurationLabel writes a duration the way the help does: 30m,
+// not 30m0s. Other durations keep Go's form.
 func projectAgentDurationLabel(d time.Duration) string {
-	return strings.TrimSuffix(d.String(), "0s")
+	s := d.String()
+	if strings.HasSuffix(s, "m0s") {
+		return strings.TrimSuffix(s, "0s")
+	}
+	return s
 }
 
+// checkProjectAgentChoice refuses a value outside allowed; an empty one only
+// when it is required.
 func checkProjectAgentChoice(flag, value string, allowed []string, required bool) error {
 	if value == "" {
 		if required {

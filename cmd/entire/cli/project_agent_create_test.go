@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
@@ -188,6 +189,13 @@ func TestProjectAgentCreate_JSONIsTheSavedAgent(t *testing.T) {
 }
 
 // Not parallel: replaces the package-level API resolvers.
+func TestProjectAgentDurationLabel(t *testing.T) {
+	t.Parallel()
+	for d, want := range map[time.Duration]string{30 * time.Minute: "30m", 90 * time.Minute: "1h30m", 30 * time.Second: "30s", 90 * time.Second: "1m30s"} {
+		assert.Equal(t, want, projectAgentDurationLabel(d), d)
+	}
+}
+
 func TestProjectAgentCreate_RefusesBadFlagsBeforeAnyRequest(t *testing.T) {
 	old := resolveProjectAgentTarget
 	t.Cleanup(func() { resolveProjectAgentTarget = old })
