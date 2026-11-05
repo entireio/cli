@@ -50,6 +50,16 @@ const (
 // secretExchangeTransport is the test seam for the exchange round trip.
 var secretExchangeTransport http.RoundTripper
 
+// UseSecretExchangeTransportForTesting routes service account secret
+// exchanges through rt and returns the restore function. Tests outside this
+// package, such as git-remote-entire's, use it; it changes process state, so
+// such tests are not parallel.
+func UseSecretExchangeTransportForTesting(rt http.RoundTripper) func() {
+	prev := secretExchangeTransport
+	secretExchangeTransport = rt
+	return func() { secretExchangeTransport = prev }
+}
+
 // secretNow is the test seam for the cache clock.
 var secretNow = time.Now
 
@@ -58,10 +68,17 @@ func IsServiceAccountSecret(token string) bool {
 	return strings.HasPrefix(token, ServiceAccountSecretPrefix)
 }
 
-// ResolveEnvToken trims an ENTIRE_TOKEN value and fails closed on a blank one.
-// A service account secret becomes a service account access token, from the
-// per-user cache when one is still fresh. Any other value is returned as is.
+// ResolveEnvToken is ResolveEnvTokenContext for callers with no context, such
+// as ParseEnvToken. The exchange still has secretExchangeTimeout.
 func ResolveEnvToken(raw string) (string, error) {
+	return ResolveEnvTokenContext(context.Background(), raw)
+}
+
+// ResolveEnvTokenContext trims an ENTIRE_TOKEN value and fails closed on a
+// blank one. A service account secret becomes a service account access
+// token, from the per-user cache when one is still fresh; ctx cancels the
+// exchange. Any other value is returned as is.
+func ResolveEnvTokenContext(ctx context.Context, raw string) (string, error) {
 	token := strings.TrimSpace(raw)
 	if token == "" {
 		return "", fmt.Errorf("%s is set but blank", EnvTokenVar)
@@ -69,9 +86,24 @@ func ResolveEnvToken(raw string) (string, error) {
 	if !IsServiceAccountSecret(token) {
 		return token, nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), secretExchangeTimeout)
+	ctx, cancel := context.WithTimeout(ctx, secretExchangeTimeout)
 	defer cancel()
 	return exchangeServiceAccountSecret(ctx, token)
+}
+
+// serviceAccountSecretCacheKey is LocalIdentityCacheKey for a secret: the
+// exchange Core and the service account, neither of them secret. It needs no
+// exchange, so a cache lookup never goes over the network.
+func serviceAccountSecretCacheKey(secret string) (string, error) {
+	accountID, err := serviceAccountFromSecret(secret)
+	if err != nil {
+		return "", err
+	}
+	core, err := secretCoreURL()
+	if err != nil {
+		return "", err
+	}
+	return strings.Join([]string{"env-sa", core, accountID}, "|"), nil
 }
 
 // serviceAccountFromSecret returns the svc_ account a secret names. The

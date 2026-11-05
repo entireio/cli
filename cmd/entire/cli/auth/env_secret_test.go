@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -24,6 +25,10 @@ type fakeSecretCore struct {
 }
 
 func (f *fakeSecretCore) RoundTrip(r *http.Request) (*http.Response, error) {
+	// A real transport honours the request context; so does the fake.
+	if err := r.Context().Err(); err != nil {
+		return nil, err
+	}
 	f.exchanges.Add(1)
 	if r.URL.Path != "/oauth/token" || r.Method != http.MethodPost {
 		f.t.Errorf("unexpected request %s %s", r.Method, r.URL)
@@ -62,9 +67,7 @@ func useFakeSecretCore(t *testing.T, core *fakeSecretCore) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CACHE_HOME", home)
 	t.Setenv(SecretCoreURLVar, "https://core.example.com")
-	prev := secretExchangeTransport
-	secretExchangeTransport = core
-	t.Cleanup(func() { secretExchangeTransport = prev })
+	t.Cleanup(UseSecretExchangeTransportForTesting(core))
 }
 
 // Not parallel: sets process-wide environment.
@@ -175,5 +178,40 @@ func TestSecretCoreURLValidation(t *testing.T) {
 	}
 	if n := core.exchanges.Load(); n != 0 {
 		t.Errorf("exchanges = %d, want 0", n)
+	}
+}
+
+// The cache key for a secret names the Core and the service account, never
+// the secret, and computing it makes no exchange.
+// Not parallel: sets process-wide environment.
+func TestLocalIdentityCacheKeyForSecret(t *testing.T) {
+	core := &fakeSecretCore{t: t}
+	useFakeSecretCore(t, core)
+	t.Setenv(EnvTokenVar, testServiceAccountSecret)
+
+	got, err := LocalIdentityCacheKey()
+	if err != nil {
+		t.Fatalf("LocalIdentityCacheKey: %v", err)
+	}
+	if want := "env-sa|https://core.example.com|svc_01JABCDEFGHJKMNPQRSTVWXYZ0"; got != want {
+		t.Errorf("key = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "abcdefghijklmnop") {
+		t.Error("the key contains the secret")
+	}
+	if n := core.exchanges.Load(); n != 0 {
+		t.Errorf("exchanges = %d, want 0", n)
+	}
+}
+
+// ctx cancels an exchange in flight.
+// Not parallel: sets process-wide environment.
+func TestResolveEnvTokenContextHonorsCancel(t *testing.T) {
+	core := &fakeSecretCore{t: t, jwt: "jwt", expiresIn: 600}
+	useFakeSecretCore(t, core)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := ResolveEnvTokenContext(ctx, testServiceAccountSecret); err == nil {
+		t.Error("a cancelled context must stop the exchange")
 	}
 }

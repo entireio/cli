@@ -33,8 +33,12 @@ name a core the request never touches (this was a real bug in the `mirror list`
 banner; see `repo_mirror.go` and `coreapi.Client.CoreOrigin`).
 
 A service account secret (`ENTIRE_TOKEN=ent_svc_…`) has no `aud`. Every reader
-of `ENTIRE_TOKEN` goes through `auth.ResolveEnvToken` (via `auth.ParseEnvToken`,
-or directly in `git-remote-entire`), which exchanges the secret at
+that needs the bearer or its claims goes through `auth.ResolveEnvToken` (via
+`auth.ParseEnvToken`, or `ResolveEnvTokenContext` in `git-remote-entire`).
+`auth.LocalIdentityCacheKey` is the one exception: it keys a secret on the
+exchange Core and the service account ID, so a cache lookup needs no network.
+Readers that only test whether `ENTIRE_TOKEN` is set need nothing. The
+exchange sends the secret to
 `ENTIRE_CORE_URL` (default `https://us.auth.entire.io`) and returns the
 service account JWT. That JWT's `aud` then drives the precedence above. The
 exchanged token is cached under the user cache root, keyed by a hash of the
