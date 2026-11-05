@@ -47,3 +47,12 @@ func TestWithLegacyDivergedFix(t *testing.T) {
 		assert.Same(t, other, withLegacyDivergedFix(other))
 	})
 }
+
+// Session IDs in a remote's copy are not trusted, so escape sequences in them
+// must not reach the terminal and redraw the prompt.
+func TestLegacySessionList_StripsControlCharacters(t *testing.T) {
+	t.Parallel()
+	listed := legacySessionList([]string{"ok", "evil\x1b]0;title\x07\x1b[2K\u202e"}, []string{"ok"})
+
+	assert.Equal(t, "ok (changed), evil]0;title[2K", listed)
+}

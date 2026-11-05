@@ -7,6 +7,7 @@ import (
 	"io"
 	"slices"
 	"strings"
+	"unicode"
 
 	"charm.land/huh/v2"
 	git "github.com/go-git/go-git/v6"
@@ -201,14 +202,21 @@ func chooseLegacyCopy(ctx context.Context, out io.Writer, d checkpoint.DivergedL
 	return plumbing.ReferenceName(choice), nil
 }
 
-// legacySessionList joins sessionIDs, marking those in differing.
+// legacySessionList joins sessionIDs, marking those in differing. The IDs come
+// from a remote's copy of the checkpoint, so control and format characters
+// are dropped: an escape sequence must not redraw the prompt below them.
 func legacySessionList(sessionIDs, differing []string) string {
 	if len(sessionIDs) == 0 {
 		return "(sessions not available locally)"
 	}
 	listed := make([]string, len(sessionIDs))
 	for i, sessionID := range sessionIDs {
-		listed[i] = sessionID
+		listed[i] = strings.Map(func(r rune) rune {
+			if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+				return -1
+			}
+			return r
+		}, sessionID)
 		if slices.Contains(differing, sessionID) {
 			listed[i] += " (changed)"
 		}

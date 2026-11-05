@@ -273,3 +273,41 @@ func TestLegacyCheckpointCopy_RemoteName(t *testing.T) {
 	assert.Equal(t, "origin", LegacyCheckpointCopy{Ref: originV1}.RemoteName())
 	assert.Empty(t, LegacyCheckpointCopy{Ref: localV1}.RemoteName())
 }
+
+// A checkpoint already given a ref by an earlier choice stays diverged on v1,
+// but a re-run must not ask again or report it as unresolved.
+func TestMigrateBranchToRefs_DoesNotAskAgainAfterAChoice(t *testing.T) {
+	t.Parallel()
+	h := divergedV1(t)
+	_, err := MigrateBranchToRefs(t.Context(), h.f.repo, MigrateOptions{Choose: (&chooser{keep: localV1}).choose})
+	require.NoError(t, err)
+	chosen := h.f.refTip(t)
+
+	again := &chooser{keep: originV1}
+	result, err := MigrateBranchToRefs(t.Context(), h.f.repo, MigrateOptions{Choose: again.choose})
+	require.NoError(t, err)
+	assert.Empty(t, again.asked)
+	assert.Empty(t, result.Diverged)
+	assert.Equal(t, 1, result.Skipped)
+	assert.Equal(t, chosen, h.f.refTip(t), "the earlier choice stands")
+
+	result, err = MigrateBranchToRefs(t.Context(), h.f.repo, MigrateOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, result.Diverged, "without a terminal the resolved checkpoint is not listed again")
+}
+
+// A dry run writes nothing, so it must not fetch a ref from the remote either.
+func TestResolveDivergedLegacyCheckpoints_DryRunDoesNotFetch(t *testing.T) {
+	t.Parallel()
+	h := divergedV1(t)
+	fetch := func(context.Context, plumbing.ReferenceName) error {
+		t.Error("a dry run must not fetch")
+		return nil
+	}
+
+	result, err := ResolveDivergedLegacyCheckpoints(t.Context(), h.f.repo, MigrateOptions{DryRun: true}, fetch)
+
+	require.NoError(t, err)
+	assert.Equal(t, []id.CheckpointID{h.f.cid}, divergedIDs(result))
+	h.f.requireNoRef(t)
+}

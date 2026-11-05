@@ -210,6 +210,10 @@ func migrateBranchToRefs(
 // Without a choice the checkpoint is listed in MigrateResult.Diverged.
 func ResolveDivergedLegacyCheckpoints(ctx context.Context, repo *git.Repository, opts MigrateOptions, fetch RefFetchFunc) (MigrateResult, error) {
 	var result MigrateResult
+	if opts.DryRun {
+		// A fetched ref is written locally, and a dry run writes nothing.
+		fetch = nil
+	}
 
 	v1, ok, err := openLegacyV1(ctx, repo)
 	if err != nil || !ok {
@@ -292,6 +296,7 @@ func (v *legacyV1) refusedByWritePath(ctx context.Context, cid id.CheckpointID, 
 // read precedence, walked through the first one, as reads list checkpoints.
 type legacyV1 struct {
 	repo    *git.Repository
+	refs    *gitRefsStore
 	branch  *GitStore
 	trees   []metadataTree
 	deleted DeletedCheckpointSet
@@ -312,7 +317,7 @@ func openLegacyV1(ctx context.Context, repo *git.Repository) (v1 *legacyV1, ok b
 	if err != nil {
 		return nil, false, err
 	}
-	return &legacyV1{repo: repo, branch: branch, trees: trees, deleted: deleted}, true, nil
+	return &legacyV1{repo: repo, refs: newGitRefsStore(repo), branch: branch, trees: trees, deleted: deleted}, true, nil
 }
 
 // walk calls fn for each checkpoint on the first tier that this clone has not
@@ -341,6 +346,17 @@ func (v *legacyV1) subtreeToKeep(ctx context.Context, cid id.CheckpointID, opts 
 	}
 	if !errors.Is(err, ErrLegacyCheckpointDiverged) {
 		return plumbing.ZeroHash, nil, fmt.Errorf("read checkpoint %s from %s: %w", cid, DefaultV1Refs().Primary, err)
+	}
+	// The copies stay diverged on v1 after a choice, so a ref already holding
+	// one of them means an earlier run chose it; asking again could undo that.
+	for _, c := range diverged {
+		_, chosen, err := importedTree(ctx, v.repo, v.refs, cid, c.subtree, false)
+		if err != nil {
+			return plumbing.ZeroHash, nil, err
+		}
+		if chosen {
+			return c.subtree, nil, nil
+		}
 	}
 	question := DivergedLegacyCheckpoint{
 		ID:     cid,
