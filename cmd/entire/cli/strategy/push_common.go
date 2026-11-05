@@ -295,42 +295,31 @@ func recoverCheckpointRef(
 		"refs/entire-fetch-tmp/" + strings.TrimPrefix(candidate.name.String(), "refs/"),
 	)
 	refSpec := fmt.Sprintf("+%s:%s", candidate.name, fetchedRefName)
-	_, fetchSpan := perf.Start(ctx, "git_fetch")
-	_, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
-		Remote:   fetchTarget,
-		RefSpecs: []string{refSpec},
-		NoTags:   true,
-	})
-	fetchSpan.RecordError(fetchErr)
-	fetchSpan.End()
-	if fetchErr != nil {
-		return checkpointRefPush{}, fmt.Errorf("fetch failed: %w", fetchErr)
+	if err := fetchCheckpointRef(ctx, fetchTarget, refSpec, 0); err != nil {
+		return checkpointRefPush{}, err
 	}
 	defer func() {
 		_ = repo.Storer.RemoveReference(fetchedRefName) //nolint:errcheck // cleanup is best-effort
 	}()
 
-	// go-git loads a handle's pack index once and never reloads it, so objects
-	// the fetch wrote into a new pack are invisible to a handle that has already
-	// read objects. Replay from a freshly opened repository.
 	repoPath, err := getRepoPath(repo)
 	if err != nil {
 		return checkpointRefPush{}, fmt.Errorf("get repository path: %w", err)
 	}
-	fetched, err := gitrepo.OpenPath(repoPath)
-	if err != nil {
-		return checkpointRefPush{}, fmt.Errorf("reopen repository after fetch: %w", err)
-	}
-	defer fetched.Close()
-
-	remoteRef, err := fetched.Reference(fetchedRefName, true)
-	if err != nil {
-		return checkpointRefPush{}, fmt.Errorf("resolve fetched checkpoint ref: %w", err)
-	}
-	newTip, replayed, err := replayOntoRemote(ctx, fetched, candidate.hash, remoteRef.Hash())
+	var replay fetchedReplay
+	err = RetryAfterDeepFetch(
+		func() (replayErr error) {
+			replay, replayErr = replayFetchedCheckpointRef(ctx, repoPath, fetchedRefName, candidate.hash)
+			return replayErr
+		},
+		func() error { return fetchCheckpointRef(ctx, fetchTarget, refSpec, remote.FullRefDepth) },
+	)
 	if err != nil {
 		return checkpointRefPush{}, err
 	}
+	fetched := replay.repo
+	defer fetched.Close()
+	newTip, replayed := replay.tip, replay.replayed
 	if err := checkpointRefRecoveryCAS(ctx, fetched, candidate.name, newTip, candidate.hash); err != nil {
 		// newTip has no unique writer data: it is derived entirely from the
 		// immutable candidate plus the fetched remote. On a CAS conflict the
@@ -349,11 +338,60 @@ func recoverCheckpointRef(
 		logging.Info(ctx, "replayed checkpoint ref onto fetched remote tip; local ref rewritten",
 			slog.String("ref", candidate.name.String()),
 			slog.String("local_tip", candidate.hash.String()),
-			slog.String("remote_tip", remoteRef.Hash().String()),
+			slog.String("remote_tip", replay.remoteTip.String()),
 			slog.Int("commits_replayed", replayed))
 	}
 	candidate.hash = newTip
 	return candidate, nil
+}
+
+// fetchCheckpointRef fetches refSpec from fetchTarget; a non-zero depth fetches
+// that ref's history to that absolute depth.
+func fetchCheckpointRef(ctx context.Context, fetchTarget, refSpec string, depth int) error {
+	_, fetchSpan := perf.Start(ctx, "git_fetch")
+	_, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
+		Remote:   fetchTarget,
+		RefSpecs: []string{refSpec},
+		NoTags:   true,
+		Depth:    depth,
+	})
+	fetchSpan.RecordError(fetchErr)
+	fetchSpan.End()
+	if fetchErr != nil {
+		return fmt.Errorf("fetch failed: %w", fetchErr)
+	}
+	return nil
+}
+
+// fetchedReplay is a replay computed from a freshly opened repository, which
+// the caller closes.
+type fetchedReplay struct {
+	repo      *git.Repository
+	remoteTip plumbing.Hash
+	tip       plumbing.Hash
+	replayed  int
+}
+
+// replayFetchedCheckpointRef replays localHash onto the ref a fetch just wrote.
+// go-git loads a handle's pack index once and never reloads it, so objects the
+// fetch wrote into a new pack are invisible to a handle that has already read
+// objects; each call therefore opens the repository afresh.
+func replayFetchedCheckpointRef(ctx context.Context, repoPath string, fetchedRefName plumbing.ReferenceName, localHash plumbing.Hash) (fetchedReplay, error) {
+	fetched, err := gitrepo.OpenPath(repoPath)
+	if err != nil {
+		return fetchedReplay{}, fmt.Errorf("reopen repository after fetch: %w", err)
+	}
+	remoteRef, err := fetched.Reference(fetchedRefName, true)
+	if err != nil {
+		_ = fetched.Close()
+		return fetchedReplay{}, fmt.Errorf("resolve fetched checkpoint ref: %w", err)
+	}
+	tip, replayed, err := replayOntoRemote(ctx, fetched, localHash, remoteRef.Hash())
+	if err != nil {
+		_ = fetched.Close()
+		return fetchedReplay{}, err
+	}
+	return fetchedReplay{repo: fetched, remoteTip: remoteRef.Hash(), tip: tip, replayed: replayed}, nil
 }
 
 // replayOntoRemote returns the tip that results from replaying the commits
@@ -889,22 +927,23 @@ func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.Re
 	// git treats shallow as a global property of the clone, not per-ref.
 	// The downstream reconcile/rebase paths walk only commits visible past
 	// .git/shallow (collectCommitChain / collectCommitsSince). When a boundary
-	// hides the merge base they refuse with errShallowHidesMergeBase instead of
-	// replaying, and the error names a fetch scoped to this ref.
+	// hides the merge base they refuse with errShallowHidesMergeBase, and the
+	// retry below deepens only this ref before trying once more.
 	// Span the fetch separately so a slow sync can be attributed to the network
 	// fetch versus the local reconcile/rebase that follows it.
-	_, fetchSpan := perf.Start(ctx, "git_fetch")
-	_, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
-		Remote:   fetchTarget,
-		RefSpecs: []string{refSpec},
-		NoTags:   true,
-	})
-	fetchSpan.RecordError(fetchErr)
-	fetchSpan.End()
-	if fetchErr != nil {
-		return fmt.Errorf("fetch failed: %w", fetchErr)
+	if err := fetchCheckpointRef(ctx, fetchTarget, refSpec, 0); err != nil {
+		return err
 	}
+	return RetryAfterDeepFetch(
+		func() error { return syncFetchedRef(ctx, ref, fetchedRefName, usedTempRef) },
+		func() error { return fetchCheckpointRef(ctx, fetchTarget, refSpec, remote.FullRefDepth) },
+	)
+}
 
+// syncFetchedRef reconciles and rebases the local ref onto fetchedRefName, the
+// ref a fetch just wrote. It opens the repository itself so objects from that
+// fetch are visible.
+func syncFetchedRef(ctx context.Context, ref, fetchedRefName plumbing.ReferenceName, usedTempRef bool) error {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to open git repository: %w", err)
@@ -912,12 +951,12 @@ func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.Re
 	defer repo.Close()
 
 	// Reconcile disconnected metadata branches before rebasing.
-	// The fetch above updated the remote-tracking ref, so reconciliation
+	// The fetch updated the remote-tracking ref, so reconciliation
 	// can compare fresh local vs remote. If disconnected (empty-orphan bug),
 	// this cherry-picks local commits onto remote tip, updating the local ref.
 	// If reconciliation fails, abort so the caller sees its error.
 	if reconcileErr := ReconcileDisconnectedMetadataRef(ctx, repo, ref, fetchedRefName, os.Stderr); reconcileErr != nil {
-		return fmt.Errorf("metadata reconciliation failed: %w", WithShallowFetchHint(reconcileErr, target, ref))
+		return fmt.Errorf("metadata reconciliation failed: %w", reconcileErr)
 	}
 
 	// Get local ref (re-read after potential reconciliation update)
@@ -926,27 +965,23 @@ func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.Re
 		return fmt.Errorf("failed to get local ref: %w", err)
 	}
 
-	// Get fetched ref (remote-tracking or temp ref, updated by the fetch above)
+	// Get fetched ref (remote-tracking or temp ref, updated by the fetch)
 	remoteRef, err := repo.Reference(fetchedRefName, true)
 	if err != nil {
 		return fmt.Errorf("failed to get remote ref: %w", err)
 	}
 
-	advance := func(hash plumbing.Hash) error {
-		if err := setRefHash(repo, ref, hash); err != nil {
-			return err
-		}
-		if usedTempRef {
-			_ = repo.Storer.RemoveReference(fetchedRefName) //nolint:errcheck // cleanup is best-effort
-		}
-		return nil
-	}
-
 	newTip, _, err := replayOntoRemote(ctx, repo, localRef.Hash(), remoteRef.Hash())
 	if err != nil {
-		return fmt.Errorf("failed to rebase local commits onto remote: %w", WithShallowFetchHint(err, target, ref))
+		return fmt.Errorf("failed to rebase local commits onto remote: %w", err)
 	}
-	return advance(newTip)
+	if err := setRefHash(repo, ref, newTip); err != nil {
+		return err
+	}
+	if usedTempRef {
+		_ = repo.Storer.RemoveReference(fetchedRefName) //nolint:errcheck // cleanup is best-effort
+	}
+	return nil
 }
 
 // getMergeBase returns the merge base hash of two commits, or an error if they

@@ -756,7 +756,7 @@ func queuedRefWarning(pushErr error, target string, ref plumbing.ReferenceName) 
 	if errors.Is(pushErr, errShallowHidesMergeBase) {
 		// Divergence alone stays quiet, but this one never clears on its own:
 		// every push would fetch and refuse again.
-		return fmt.Sprintf("[entire] Warning: checkpoint ref %s remains queued: %v", ref, WithShallowFetchHint(errShallowHidesMergeBase, target, ref))
+		return fmt.Sprintf("[entire] Warning: checkpoint ref %s remains queued: %v (from %s)", ref, errShallowHidesMergeBase, displayPushTarget(target))
 	}
 	return ""
 }

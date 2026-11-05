@@ -61,30 +61,28 @@ var errNoMergeBase = errors.New("no merge base")
 // boundary is reachable from one of the tips: the shared history may simply
 // not be present, so the refs cannot be treated as disconnected.
 //
-// The remedy is fetching that ref's full history, not entire doctor (which
-// repairs through the same replay and refuses too) and not git fetch
-// --unshallow (which deepens the whole clone, downloading all of a shallow
-// monorepo). Callers that know the remote add the command with
-// WithShallowFetchHint.
+// Callers that own the fetch heal it with RetryAfterDeepFetch. The message
+// names no command: a hand-run git fetch skips Entire's checkpoint token header
+// and SSH handling, and git fetch --unshallow deepens the whole clone,
+// downloading all of a shallow monorepo. Nor does it suggest entire doctor,
+// which repairs through the same replay and refuses too.
 var errShallowHidesMergeBase = errors.New("reachable shallow history prevents proving refs are disconnected; fetch the ref's full history and try again")
 
-// WithShallowFetchHint adds the command that heals errShallowHidesMergeBase for
-// ref on target, and returns any other error unchanged.
-func WithShallowFetchHint(err error, target string, ref plumbing.ReferenceName) error {
+// RetryAfterDeepFetch runs attempt, and when it refuses with
+// errShallowHidesMergeBase runs deepen, a fetch of that one ref at
+// remote.FullRefDepth, then attempts once more. The deep fetch is the same
+// ref-scoped heal the metadata read path uses: it removes a boundary on the
+// fetched history without deepening a shallow source tree. A boundary only the
+// local history reaches survives it, so the second refusal is returned as is.
+func RetryAfterDeepFetch(attempt, deepen func() error) error {
+	err := attempt()
 	if !errors.Is(err, errShallowHidesMergeBase) {
 		return err
 	}
-	return fmt.Errorf("%w: run '%s'", err, shallowFetchCommand(target, ref))
-}
-
-// shallowFetchCommand deepens only ref's history, the same ref-scoped fetch
-// the metadata read path uses to heal a shallow boundary. It writes no local
-// ref, only FETCH_HEAD, and leaves a shallow source tree as it is.
-func shallowFetchCommand(target string, ref plumbing.ReferenceName) string {
-	if remote.IsURL(target) {
-		target = remote.RedactURL(target)
+	if fetchErr := deepen(); fetchErr != nil {
+		return fmt.Errorf("%w; fetching the ref's full history failed: %w", err, fetchErr)
 	}
-	return fmt.Sprintf("git fetch --depth=%d %s %s", remote.FullRefDepth, target, ref)
+	return attempt()
 }
 
 // checkpointRemoteBootstrapContextKey gates whether EnsurePrimaryRef is
@@ -1019,7 +1017,7 @@ func bootstrapPrimaryFromCheckpointRemote(ctx context.Context, repo *git.Reposit
 	fetchCtx, release, err := startForegroundFetch(ctx, worktreeRoot)
 	if err == nil {
 		defer release()
-		err = fetchURLIntoTmpRef(fetchCtx, worktreeRoot, url, primary.String(), tmpRefName.String(), "metadata branch", true, foregroundFetch)
+		err = fetchURLIntoTmpRef(fetchCtx, worktreeRoot, url, primary.String(), tmpRefName.String(), "metadata branch", true, foregroundFetch, 0)
 	}
 	if err != nil {
 		// Warn, not Debug: `entire enable` is an explicit user action, and this
@@ -1148,7 +1146,7 @@ func healEmptyOrphanFromCheckpointRemote(ctx context.Context, repo *git.Reposito
 	// Unfiltered, for the same reason as the bootstrap fetch above: this heal
 	// replaces a data-free orphan with the real branch, which readers then treat
 	// as the checkpoint store.
-	if err := fetchURLIntoTmpRef(fetchCtx, worktreeRoot, url, primary.String(), tmpRefName.String(), "metadata branch", true, foregroundFetch); err != nil {
+	if err := fetchURLIntoTmpRef(fetchCtx, worktreeRoot, url, primary.String(), tmpRefName.String(), "metadata branch", true, foregroundFetch, 0); err != nil {
 		// Warn for the same reason as the bootstrap fetch: this only runs from an
 		// explicit setup flow, and failing leaves the repo on a data-free orphan.
 		logging.Warn(ctx, "checkpoint-remote: empty-orphan heal fetch failed; keeping local orphan",

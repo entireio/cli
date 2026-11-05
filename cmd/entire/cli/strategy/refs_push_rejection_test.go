@@ -206,7 +206,7 @@ func TestCheckpointRefRejectionReason_QuietWithoutRemoteRejection(t *testing.T) 
 // told how to unblock the ref, or it fails silently on every push.
 //
 // Not parallel: t.Chdir, t.Setenv and process-global stderr.
-func TestPrePushCheckpointRefs_ShallowRefusalTellsTheUserHowToUnblock(t *testing.T) {
+func TestPrePushCheckpointRefs_ShallowHistoryHealsWithoutUserAction(t *testing.T) {
 	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
 	t.Chdir(workDir)
 	paths.ClearWorktreeRootCache()
@@ -239,34 +239,9 @@ func TestPrePushCheckpointRefs_ShallowRefusalTellsTheUserHowToUnblock(t *testing
 	localTip := strings.TrimSpace(testutil.RunGit(t, workDir, "commit-tree", base+"^{tree}", "-p", base, "-m", "local checkpoint"))
 	testutil.RunGit(t, workDir, "update-ref", ref.String(), localTip)
 	queue := enqueueRefs(t, repo, []plumbing.ReferenceName{ref})
-	pendingRefs := func() []plumbing.ReferenceName {
-		pending, peekErr := queue.Peek()
-		require.NoError(t, peekErr)
-		return pending
-	}
-
 	restore := captureStderr(t)
 	err = NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin")
 	output := restore()
-
-	require.NoError(t, err, "a refused checkpoint ref must never block git push")
-	fetchCommand := shallowFetchCommand("origin", ref)
-	assert.Contains(t, output, ref.String())
-	assert.Contains(t, output, fetchCommand)
-	// --unshallow deepens the whole clone; a shallow monorepo would download everything.
-	assert.NotContains(t, output, "--unshallow")
-	assert.NotContains(t, output, "entire doctor")
-	localRef, err := repo.Reference(ref, true)
-	require.NoError(t, err)
-	assert.Equal(t, localTip, localRef.Hash().String(), "refusal must not rewrite the local ref")
-	assert.Equal(t, remoteTip, remoteRefHash(t, bareDir, ref), "refusal must not touch the remote")
-	assert.Equal(t, []plumbing.ReferenceName{ref}, pendingRefs(), "the refused ref stays queued")
-
-	// The printed command must actually unblock the next push.
-	testutil.RunGit(t, workDir, strings.Fields(strings.TrimPrefix(fetchCommand, "git "))...)
-	restore = captureStderr(t)
-	err = NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin")
-	output = restore()
 
 	require.NoError(t, err)
 	assert.NotContains(t, output, "remains queued")
@@ -274,5 +249,7 @@ func TestPrePushCheckpointRefs_ShallowRefusalTellsTheUserHowToUnblock(t *testing
 	testutil.RunGit(t, workDir, "merge-base", "--is-ancestor", remoteTip, landed)
 	assert.Equal(t, landed, strings.TrimSpace(testutil.RunGit(t, workDir, "rev-parse", ref.String())),
 		"the local ref now matches the remote, with the teammate's commits kept")
-	assert.Empty(t, pendingRefs(), "the recovered ref leaves the queue")
+	pending, err := queue.Peek()
+	require.NoError(t, err)
+	assert.Empty(t, pending, "the recovered ref leaves the queue")
 }

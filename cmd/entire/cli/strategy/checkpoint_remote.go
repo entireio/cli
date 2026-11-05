@@ -218,16 +218,19 @@ func fetchMetadataBranchWithin(ctx context.Context, remoteURL string, mode check
 		}
 		defer release()
 	}
-	if err := fetchURLIntoTmpRef(fetchCtx, "", remoteURL, srcRef, tmpRef, "metadata branch", true, mode); err != nil {
+	if err := fetchURLIntoTmpRef(fetchCtx, "", remoteURL, srcRef, tmpRef, "metadata branch", true, mode, 0); err != nil {
 		return err
 	}
-	// The fetch above has no depth, so a shallow boundary on this ref can
-	// remain; the ref-scoped deep fetch in the hint heals it.
-	if err := PromoteTmpRefSafely(ctx, plumbing.ReferenceName(tmpRef), refs.Primary, branchName); err != nil {
-		return WithShallowFetchHint(err, remoteURL, refs.Primary)
-	}
-
-	return nil
+	// PromoteTmpRefSafely removes the tmp ref on every return, so the deep
+	// fetch lands it again before the second promotion.
+	return RetryAfterDeepFetch(
+		func() error {
+			return PromoteTmpRefSafely(ctx, plumbing.ReferenceName(tmpRef), refs.Primary, branchName)
+		},
+		func() error {
+			return fetchURLIntoTmpRef(fetchCtx, "", remoteURL, srcRef, tmpRef, "metadata branch", true, mode, remote.FullRefDepth)
+		},
+	)
 }
 
 // fetchURLIntoTmpRef runs `git fetch <remoteURL> +<srcRef>:<tmpRef>` via the
@@ -255,12 +258,13 @@ func fetchMetadataBranchWithin(ctx context.Context, remoteURL string, mode check
 // each call site.
 // mode bounds the fetch: hotPathFetch on the push hot path, foregroundFetch from
 // user-initiated commands.
-func fetchURLIntoTmpRef(ctx context.Context, dir, remoteURL, srcRef, tmpRef, label string, noFilter bool, mode checkpointFetchMode) error { //nolint:unparam // every caller needs blob content today; see the doc above for why the filtered variant is unsafe here
+func fetchURLIntoTmpRef(ctx context.Context, dir, remoteURL, srcRef, tmpRef, label string, noFilter bool, mode checkpointFetchMode, depth int) error { //nolint:unparam // every caller needs blob content today; see the doc above for why the filtered variant is unsafe here
 	opts := remote.FetchOptions{
 		Remote:   remoteURL,
 		RefSpecs: []string{fmt.Sprintf("+%s:%s", srcRef, tmpRef)},
 		NoTags:   true,
 		NoFilter: noFilter,
+		Depth:    depth,
 		Dir:      dir,
 	}
 	fetchCtx, cancel := boundFetch(ctx, mode, &opts)

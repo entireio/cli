@@ -2068,23 +2068,17 @@ func setupEmptyOrphanHeal(t *testing.T) (localDir, remoteTip string) {
 }
 
 // Not parallel: uses t.Chdir()
-func TestFetchMetadataBranch_ShallowRefusalNamesAFetchThatUnblocksIt(t *testing.T) {
+func TestFetchMetadataBranch_DeepFetchesWhenShallowHistoryHidesTheMergeBase(t *testing.T) {
 	cloneDir := cloneWithShallowHiddenMergeBase(t)
 	bareDir := strings.TrimSpace(testutil.RunGit(t, cloneDir, "remote", "get-url", "origin"))
 	t.Chdir(cloneDir)
 	paths.ClearWorktreeRootCache()
 	ref := metadataLocalRef()
 
-	err := FetchMetadataBranch(t.Context(), bareDir)
-
-	require.ErrorIs(t, err, errShallowHidesMergeBase)
-	fetchCommand := shallowFetchCommand(bareDir, ref)
-	assert.Contains(t, err.Error(), fetchCommand)
-
-	testutil.RunGit(t, cloneDir, strings.Fields(strings.TrimPrefix(fetchCommand, "git "))...)
 	require.NoError(t, FetchMetadataBranch(t.Context(), bareDir))
+
 	assert.Equal(t,
 		strings.TrimSpace(testutil.RunGit(t, cloneDir, "rev-parse", metadataOriginRemoteRef().String())),
 		strings.TrimSpace(testutil.RunGit(t, cloneDir, "rev-parse", ref.String())),
-		"once the history is whole, the local ref fast-forwards to the teammate's update")
+		"the deep fetch reveals the merge base, so the local ref fast-forwards to the teammate's update")
 }

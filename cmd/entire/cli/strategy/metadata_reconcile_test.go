@@ -1004,9 +1004,28 @@ func TestReconcileDisconnected_RefusesWhenShallowHistoryHidesTheMergeBase(t *tes
 func TestReplayOntoRemote_RefusesWhenTheLocalTipReachesTheShallowBoundary(t *testing.T) {
 	t.Parallel()
 
-	// Local holds a --depth=1 copy of a teammate's commit M2; the remote moved
-	// on from M1 to R. M1 is the real merge base, hidden behind M2's graft.
-	bareDir := initBareWithMetadataBranch(t)
+	cloneDir, _ := cloneWithLocalTipShallowBoundary(t)
+	repo, err := git.PlainOpen(cloneDir)
+	require.NoError(t, err)
+	localRef, err := repo.Reference(metadataLocalRef(), true)
+	require.NoError(t, err)
+	remoteRef, err := repo.Reference(metadataOriginRemoteRef(), true)
+	require.NoError(t, err)
+
+	tip, replayed, err := replayOntoRemote(context.Background(), repo, localRef.Hash(), remoteRef.Hash())
+
+	requireShallowRefusal(t, err)
+	assert.Equal(t, plumbing.ZeroHash, tip)
+	assert.Zero(t, replayed)
+}
+
+// cloneWithLocalTipShallowBoundary returns a clone whose local metadata ref is
+// a --depth=1 copy of a teammate's commit M2 on another branch, while the
+// remote metadata branch moved on from M1 to R. M1 is the real merge base,
+// hidden behind M2's graft, and no fetch of the metadata branch can reveal it.
+func cloneWithLocalTipShallowBoundary(t *testing.T) (cloneDir, bareDir string) {
+	t.Helper()
+	bareDir = initBareWithMetadataBranch(t)
 	teammateDir, teammate := cloneWithConfig(t, bareDir)
 	teammate("checkout", paths.MetadataBranchName)
 	require.NoError(t, os.WriteFile(filepath.Join(teammateDir, "side.json"), []byte(`{"side":true}`), 0o644))
@@ -1022,20 +1041,11 @@ func TestReplayOntoRemote_RefusesWhenTheLocalTipReachesTheShallowBoundary(t *tes
 	cloneDir, run := cloneWithConfig(t, bareDir)
 	run("fetch", "--depth=1", "origin", "+refs/heads/side:"+metadataLocalRef().String())
 
-	repo, err := git.PlainOpen(cloneDir)
-	require.NoError(t, err)
-	localRef, err := repo.Reference(metadataLocalRef(), true)
-	require.NoError(t, err)
-	remoteRef, err := repo.Reference(metadataOriginRemoteRef(), true)
-	require.NoError(t, err)
-	_, mergeBaseErr := getMergeBase(context.Background(), cloneDir, localRef.Hash().String(), remoteRef.Hash().String())
+	localHash := strings.TrimSpace(testutil.RunGit(t, cloneDir, "rev-parse", metadataLocalRef().String()))
+	remoteHash := strings.TrimSpace(testutil.RunGit(t, cloneDir, "rev-parse", metadataOriginRemoteRef().String()))
+	_, mergeBaseErr := getMergeBase(context.Background(), cloneDir, localHash, remoteHash)
 	require.ErrorIs(t, mergeBaseErr, errNoMergeBase, "setup must hide the merge base behind the local graft")
-
-	tip, replayed, err := replayOntoRemote(context.Background(), repo, localRef.Hash(), remoteRef.Hash())
-
-	requireShallowRefusal(t, err)
-	assert.Equal(t, plumbing.ZeroHash, tip)
-	assert.Zero(t, replayed)
+	return cloneDir, bareDir
 }
 
 // A local branch holding only empty-tree commits carries no checkpoint data,
