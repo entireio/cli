@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/internal/entireclient/httpclient"
@@ -25,13 +26,10 @@ import (
 // short-lived service account access token, and that token is the bearer.
 const ServiceAccountSecretPrefix = "ent_svc_" //nolint:gosec // G101: a prefix, not a credential
 
-// SecretCoreURLVar names the Core that exchanges a service account secret.
-// A secret carries no audience, so the CLI cannot derive one from it.
+// SecretCoreURLVar overrides the Core that exchanges a service account
+// secret, for local development and staging. Unset, the Core is derived
+// from the jurisdiction the secret names.
 const SecretCoreURLVar = "ENTIRE_CORE_URL" //nolint:gosec // G101: a variable name, not a credential
-
-// defaultSecretCoreURL exchanges a secret when SecretCoreURLVar is unset. Any
-// regional Core can verify a secret: secrets live in the global database.
-const defaultSecretCoreURL = "https://us.auth.entire.io" //nolint:gosec // G101: a URL, not a credential
 
 const (
 	// secretClientID is the public OAuth client the exchange names.
@@ -99,33 +97,37 @@ func ResolveEnvTokenContext(ctx context.Context, raw string) (string, error) {
 // exchange Core and the service account, neither of them secret. It needs no
 // exchange, so a cache lookup never goes over the network.
 func serviceAccountSecretCacheKey(secret string) (string, error) {
-	accountID, err := serviceAccountFromSecret(secret)
-	if err != nil {
-		return "", err
-	}
-	core, err := secretCoreURL()
+	core, accountID, err := secretExchangeTarget(secret)
 	if err != nil {
 		return "", err
 	}
 	return strings.Join([]string{"env-sa", core, accountID}, "|"), nil
 }
 
-// serviceAccountFromSecret returns the svc_ account a secret names. The
-// format is ent_svc_<account ULID>_<secret ULID>_<random>.
-func serviceAccountFromSecret(secret string) (string, error) {
-	parts := strings.Split(strings.TrimPrefix(secret, ServiceAccountSecretPrefix), "_")
-	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
-		return "", fmt.Errorf("%s holds a malformed service account secret", EnvTokenVar)
+// secretExchangeTarget parses secret and returns the Core that exchanges it
+// and the svc_ account it names. The exchange, the cache keys and
+// ForgetServiceAccountSecretToken all derive the Core here, so they agree.
+func secretExchangeTarget(secret string) (core, accountID string, err error) {
+	parsed, err := parseServiceAccountSecret(secret)
+	if err != nil {
+		return "", "", err
 	}
-	return "svc_" + parts[0], nil
+	core, err = secretCoreURL(parsed.jurisdiction)
+	if err != nil {
+		return "", "", err
+	}
+	return core, parsed.accountID, nil
 }
 
-// secretCoreURL returns the Core origin for the exchange. The secret goes to
-// it, so it must be a bare https origin.
-func secretCoreURL() (string, error) {
+// secretCoreURL returns the Core origin for the exchange: SecretCoreURLVar
+// when set, otherwise the regional Core of jurisdiction, which holds the
+// secret. The secret goes to it, so an override must be a bare https origin.
+// An override is not checked against jurisdiction: Core refuses a secret from
+// another jurisdiction with an error that names the right Core.
+func secretCoreURL(jurisdiction string) (string, error) {
 	raw := strings.TrimSpace(os.Getenv(SecretCoreURLVar))
 	if raw == "" {
-		return defaultSecretCoreURL, nil
+		return jurisdictionCoreURL(jurisdiction), nil
 	}
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" || u.User != nil {
@@ -137,12 +139,14 @@ func secretCoreURL() (string, error) {
 	return u.Scheme + "://" + u.Host, nil
 }
 
+// jurisdictionCoreURL returns https://<jurisdiction>.<default login host>,
+// for example https://eu.auth.entire.io.
+func jurisdictionCoreURL(jurisdiction string) string {
+	return httpclient.SchemeHTTPS + "://" + jurisdiction + "." + strings.TrimPrefix(api.DefaultAuthBaseURL, httpclient.SchemeHTTPS+"://")
+}
+
 func exchangeServiceAccountSecret(ctx context.Context, secret string) (string, error) {
-	accountID, err := serviceAccountFromSecret(secret)
-	if err != nil {
-		return "", err
-	}
-	core, err := secretCoreURL()
+	core, accountID, err := secretExchangeTarget(secret)
 	if err != nil {
 		return "", err
 	}
@@ -268,7 +272,7 @@ func ForgetServiceAccountSecretToken(secret string) {
 	if !IsServiceAccountSecret(secret) {
 		return
 	}
-	core, err := secretCoreURL()
+	core, _, err := secretExchangeTarget(secret)
 	if err != nil {
 		return
 	}

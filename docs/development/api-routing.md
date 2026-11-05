@@ -37,13 +37,20 @@ that needs the bearer or its claims goes through `auth.ResolveEnvToken` (via
 `auth.ParseEnvToken`, or `ResolveEnvTokenContext` in `git-remote-entire`).
 `auth.LocalIdentityCacheKey` is the one exception: it keys a secret on the
 exchange Core and the service account ID, so a cache lookup needs no network.
-Readers that only test whether `ENTIRE_TOKEN` is set need nothing. The
-exchange sends the secret to
-`ENTIRE_CORE_URL` (default `https://us.auth.entire.io`) and returns the
-service account JWT. That JWT's `aud` then drives the precedence above. The
+Readers that only test whether `ENTIRE_TOKEN` is set need nothing. A v1
+secret is `ent_svc_<juri>_<account ULID>_<secret ULID>_<random><check>` and is
+validated offline, checksum included, before anything is sent
+(`parseServiceAccountSecret`). The secret lives in the regional database of
+its jurisdiction, so the exchange sends it to `https://<juri>.auth.entire.io`,
+or to `ENTIRE_CORE_URL` when set (local development and staging; not checked
+against the jurisdiction). The exchange, the identity cache key and
+`ForgetServiceAccountSecretToken` derive that origin in one place
+(`secretExchangeTarget`). It returns the service account JWT, which lives at
+most 10 minutes; that JWT's `aud` then drives the precedence above. The
 exchanged token is cached under the user cache root, keyed by a hash of the
-Core and the secret, so repeated commands do not each exchange. Never send the
-secret itself as a bearer, and never name it in an error.
+Core and the secret, and reused until 2 minutes before it expires, so
+repeated commands do not each exchange. Never send the secret itself as a
+bearer, and never name it in an error.
 
 When a command resolves auth *outside* a `coreapi.Client` (e.g. `entire auth
 status`, which builds its own `/me` client), it must apply the same

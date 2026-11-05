@@ -12,7 +12,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 )
 
-const testSASecret = "ent_svc_01JABCDEFGHJKMNPQRSTVWXYZ0_01JABCDEFGHJKMNPQRSTVWXYZ1_abcdefghijklmnop"
+// testSASecret is Core's v1 test vector; see cmd/entire/cli/auth/env_secret_test.go.
+const testSASecret = "ent_svc_us_01JABCDEFGHJKMNPQRSTVWXYZ0_01JZYXWVTSRQPNMKJHGFEDCBA9_aaaqeayeaudaocajbifqydiob4ibceqtcqkrmfyydenbwha5dypq3MriFT"
 
 // secretExchangeFunc answers /oauth/token for the secret exchange.
 type secretExchangeFunc func(*http.Request) (*http.Response, error)
