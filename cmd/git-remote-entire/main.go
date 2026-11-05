@@ -561,7 +561,7 @@ func resolveEnvTokenCreds(ctx context.Context, envToken, clusterHost, cacheDir s
 // goes to that same Core.
 func secretCreds(raw string, onUnauthorized func()) (credentialProvider, func(), error) {
 	provider := func(ctx context.Context) (string, error) {
-		return auth.ResolveEnvTokenContext(ctx, raw) //nolint:wrapcheck // ResolveEnvToken names ENTIRE_TOKEN
+		return auth.ResolveEnvTokenContext(ctx, raw)
 	}
 	evict := func() {
 		auth.ForgetServiceAccountSecretToken(raw)

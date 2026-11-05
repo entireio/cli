@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -91,7 +92,7 @@ func TestResolveCreds_ServiceAccountSecretReexchangesAfter401(t *testing.T) {
 	exchanges := 0
 	useSecretEnv(t, core, secretExchangeFunc(func(*http.Request) (*http.Response, error) {
 		exchanges++
-		jwt := makeTestJWT(t, core) + fmt.Sprint(exchanges)
+		jwt := makeTestJWT(t, core) + strconv.Itoa(exchanges)
 		return secretReply(http.StatusOK, fmt.Sprintf(`{"access_token":%q,"expires_in":3600}`, jwt)), nil
 	}))
 	client, clusterHost := wellKnownServer(t, []string{core}, "", "")
