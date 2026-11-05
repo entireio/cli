@@ -191,12 +191,6 @@ func (t *projectAgentTarget) replaceAgent(ctx context.Context, id, etag string, 
 	return out, err //nolint:wrapcheck // callers name the agent
 }
 
-func (t *projectAgentTarget) createEnvironment(ctx context.Context, body api.ProjectEnvironmentInput) (api.ProjectEnvironment, error) {
-	var out api.ProjectEnvironment
-	err := t.client.CreateProjectConfig(ctx, t.environmentsPath(), body, &out)
-	return out, err //nolint:wrapcheck // callers name the environment
-}
-
 // liveRepositoryIDs is an agent's selection without the repositories the
 // project no longer owns: the API refuses a write that keeps one.
 func liveRepositoryIDs(a api.ProjectAgent) []string {

@@ -75,6 +75,23 @@ func TestProjectAgentCreate_DefaultsLeaveTheServerToChoose(t *testing.T) {
 }
 
 // Not parallel: replaces the package-level API resolvers.
+func TestProjectAgentCreate_SavesANewDefaultEnvironmentWithTheAgent(t *testing.T) {
+	fake := &fakeAgentsAPI{}
+	stubProjectAgentAPI(t, fake)
+
+	_, errOut, err := executeProjectAgent(t, projectAgentCreateArgs()...)
+	require.NoError(t, err)
+	assert.Contains(t, errOut, "created environment Default (01JENV0000000000000000000)")
+	// One request: an environment saved apart from the agent would outlive a
+	// refused create.
+	posts := fake.writesTo(http.MethodPost)
+	require.Len(t, posts, 1)
+	assert.Equal(t, agentTestBase+"/agents", posts[0].Path)
+	assert.Equal(t, map[string]any{"name": "Default", "description": "Created by the Entire CLI"}, posts[0].Body["environment"])
+	assert.NotContains(t, posts[0].Body, "environment_id")
+}
+
+// Not parallel: replaces the package-level API resolvers.
 func TestProjectAgentCreate_ManualAndDisabled(t *testing.T) {
 	fake := &fakeAgentsAPI{envs: []api.ProjectEnvironment{{ID: "01JENV0000000000000000000", Name: "Default"}}}
 	stubProjectAgentAPI(t, fake)
@@ -136,6 +153,11 @@ func TestProjectAgentCreate_RefusesBadFlagsBeforeAnyRequest(t *testing.T) {
 	}
 	missing := filepath.Join(t.TempDir(), "missing.md")
 	long := strings.Repeat("x", projectAgentMaxInstructions+1)
+	// The API counts bytes: these are under the limits in characters but
+	// over them in bytes.
+	wideInstructions := strings.Repeat("é", projectAgentMaxInstructions/2+1)
+	wideFile := filepath.Join(t.TempDir(), "wide.md")
+	require.NoError(t, os.WriteFile(wideFile, []byte(wideInstructions), 0o600))
 
 	for _, tc := range []struct {
 		args []string
@@ -161,7 +183,11 @@ func TestProjectAgentCreate_RefusesBadFlagsBeforeAnyRequest(t *testing.T) {
 		{[]string{"create", "--name", "A", "--harness", "claude", "--signal", "percent"}, "pass one of --instructions or --instructions-file"},
 		{projectAgentCreateArgs("--instructions-file", "x.md"), "pass one of --instructions or --instructions-file"},
 		{[]string{"create", "--name", "A", "--harness", "claude", "--signal", "percent", "--instructions", "  "}, "the instructions are empty"},
-		{[]string{"create", "--name", "A", "--harness", "claude", "--signal", "percent", "--instructions", long}, "limited to 16384 characters"},
+		{[]string{"create", "--name", "A", "--harness", "claude", "--signal", "percent", "--instructions", long}, "limited to 16384 bytes"},
+		{[]string{"create", "--name", "A", "--harness", "claude", "--signal", "percent", "--instructions", wideInstructions}, "the instructions are limited to 16384 bytes"},
+		{[]string{"create", "--name", "A", "--harness", "claude", "--signal", "percent", "--instructions-file", wideFile}, "the instructions are limited to 16384 bytes"},
+		{projectAgentCreateArgs("--name", strings.Repeat("é", projectAgentMaxName/2+1)), "--name is limited to 128 bytes"},
+		{projectAgentCreateArgs("--description", strings.Repeat("é", projectAgentMaxDescription/2+1)), "--description is limited to 1024 bytes"},
 		{[]string{"create", "--name", "A", "--harness", "claude", "--signal", "percent", "--instructions-file", missing}, "read --instructions-file"},
 	} {
 		_, _, err := executeProjectAgent(t, tc.args...)

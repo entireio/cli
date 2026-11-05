@@ -140,10 +140,10 @@ func (o *projectAgentCreateOptions) validate(stdin io.Reader) error {
 	switch {
 	case o.name == "":
 		return errors.New("--name is required")
-	case utf8.RuneCountInString(o.name) > projectAgentMaxName:
-		return fmt.Errorf("--name is limited to %d characters", projectAgentMaxName)
-	case utf8.RuneCountInString(o.description) > projectAgentMaxDescription:
-		return fmt.Errorf("--description is limited to %d characters", projectAgentMaxDescription)
+	case len(o.name) > projectAgentMaxName:
+		return fmt.Errorf("--name is limited to %d bytes", projectAgentMaxName)
+	case len(o.description) > projectAgentMaxDescription:
+		return fmt.Errorf("--description is limited to %d bytes", projectAgentMaxDescription)
 	}
 	if err := checkProjectAgentChoice("--harness", o.harness, projectAgentHarnesses, true); err != nil {
 		return err
@@ -181,9 +181,9 @@ func (o *projectAgentCreateOptions) loadInstructions(stdin io.Reader) error {
 		return errors.New("pass one of --instructions or --instructions-file")
 	}
 	if o.instructionsFile != "" {
-		// A UTF-8 character is at most four bytes, so this bound admits every
-		// file the character limit below admits.
-		const limit = 4 * projectAgentMaxInstructions
+		// The limit below applies after trimming, so the read leaves room for
+		// surrounding whitespace.
+		const limit = projectAgentMaxInstructions + 4096
 		var raw []byte
 		var err error
 		if o.instructionsFile == "-" {
@@ -207,8 +207,8 @@ func (o *projectAgentCreateOptions) loadInstructions(stdin io.Reader) error {
 		return errors.New("the instructions are empty")
 	case !utf8.ValidString(o.instructions):
 		return errors.New("the instructions are not valid UTF-8")
-	case utf8.RuneCountInString(o.instructions) > projectAgentMaxInstructions:
-		return fmt.Errorf("the instructions are limited to %d characters", projectAgentMaxInstructions)
+	case len(o.instructions) > projectAgentMaxInstructions:
+		return fmt.Errorf("the instructions are limited to %d bytes", projectAgentMaxInstructions)
 	}
 	return nil
 }
@@ -251,8 +251,8 @@ func checkProjectAgentChoice(flag, value string, allowed []string, required bool
 	return nil
 }
 
-// write is the create body for a custom agent reviewing repoID in envID.
-func (o *projectAgentCreateOptions) write(repoID, envID string) api.ProjectAgentWrite {
+// write is the create body for a custom agent reviewing repoID in env.
+func (o *projectAgentCreateOptions) write(repoID string, env projectAgentEnv) api.ProjectAgentWrite {
 	body := api.ProjectAgentWrite{
 		Name:          o.name,
 		Description:   o.description,
@@ -262,8 +262,8 @@ func (o *projectAgentCreateOptions) write(repoID, envID string) api.ProjectAgent
 		Instructions:  o.instructions,
 		Signal:        &api.ProjectAgentSignal{ValueType: o.signal, Polarity: o.polarity},
 		RepositoryIDs: []string{repoID},
-		EnvironmentID: envID,
 	}
+	env.apply(&body)
 	if o.model != "" {
 		body.Model = &o.model
 	}
@@ -288,14 +288,15 @@ func runProjectAgentCreate(cmd *cobra.Command, opts projectAgentCreateOptions) e
 	if err != nil {
 		return err
 	}
-	envID, err := resolveProjectAgentEnvironment(ctx, errW, t, opts.environment)
-	if err != nil || envID == "" {
-		return err // an empty id without an error is a cancelled picker
+	env, err := resolveProjectAgentEnvironment(ctx, errW, t, opts.environment)
+	if err != nil || !env.chosen() {
+		return err // nothing chosen without an error is a cancelled picker
 	}
-	created, err := t.createAgent(ctx, opts.write(repoID, envID))
+	created, err := t.createAgent(ctx, opts.write(repoID, env))
 	if err != nil {
 		return fmt.Errorf("create agent %q in %s: %w", opts.name, t.label(), err)
 	}
+	env.saved(errW, created)
 	if jsonRequested(cmd) {
 		return printJSON(w, created)
 	}

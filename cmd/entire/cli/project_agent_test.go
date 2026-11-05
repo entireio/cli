@@ -159,7 +159,7 @@ func (f *fakeAgentsAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// create saves one agent or environment; ServeHTTP has checked its key.
+// create saves one agent, with its inline environment; ServeHTTP has checked its key.
 func (f *fakeAgentsAPI) create(w http.ResponseWriter, path string, body map[string]any) {
 	write := func(v any) {
 		if err := json.NewEncoder(w).Encode(v); err != nil {
@@ -176,13 +176,16 @@ func (f *fakeAgentsAPI) create(w http.ResponseWriter, path string, body map[stri
 		if n, ok := body["name"].(string); ok {
 			a.Name = n
 		}
-		a.IsEnabled, _ = body["is_enabled"].(bool) //nolint:errcheck // absent means false
+		a.IsEnabled, _ = body["is_enabled"].(bool)           //nolint:errcheck // absent means false
+		a.EnvironmentID, _ = body["environment_id"].(string) //nolint:errcheck // absent with an inline environment
+		// An inline environment is saved with the agent, as the API does.
+		if inline, ok := body["environment"].(map[string]any); ok {
+			env := api.ProjectEnvironment{ID: "01JENV0000000000000000000", Name: fmt.Sprint(inline["name"])}
+			f.envs = append(f.envs, env)
+			a.EnvironmentID = env.ID
+		}
 		f.agents = append(f.agents, a)
 		write(a)
-	case agentTestBase + "/environments":
-		env := api.ProjectEnvironment{ID: "01JENV0000000000000000000", Name: fmt.Sprint(body["name"])}
-		f.envs = append(f.envs, env)
-		write(env)
 	default:
 		f.t.Errorf("unexpected create %s", path)
 		w.WriteHeader(http.StatusNotFound)
@@ -300,20 +303,26 @@ func TestProjectAgentAdd_CreatesPresetInANewDefaultEnvironment(t *testing.T) {
 	fake := &fakeAgentsAPI{presets: []api.ProjectAgentPreset{samplePreset("risk"), samplePreset("security-review")}}
 	stubProjectAgentAPI(t, fake)
 
-	out, _, err := executeProjectAgent(t, "add", "security-review")
+	out, errOut, err := executeProjectAgent(t, "add", "security-review", "risk")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "added security-review") {
-		t.Errorf("output = %q", out)
+	if !strings.Contains(out, "added security-review") || !strings.Contains(errOut, "created environment Default (01JENV0000000000000000000)") {
+		t.Errorf("stdout = %q, stderr = %q", out, errOut)
 	}
+	// The environment is saved inline with the first agent, so a refused
+	// create leaves none behind; the next agent reuses it by id.
 	posts := fake.writesTo(http.MethodPost)
-	if len(posts) != 2 || posts[0].Path != agentTestBase+"/environments" || posts[1].Path != agentTestBase+"/agents" {
-		t.Fatalf("writes = %+v, want an environment then an agent", posts)
+	if len(posts) != 2 || posts[0].Path != agentTestBase+"/agents" || posts[1].Path != agentTestBase+"/agents" {
+		t.Fatalf("writes = %+v, want two agents and no separate environment", posts)
 	}
-	body := posts[1].Body
-	if body["preset"] != "security-review" || body["environment_id"] != "01JENV0000000000000000000" || body["is_enabled"] != true {
+	body := posts[0].Body
+	inline, _ := body["environment"].(map[string]any) //nolint:errcheck // asserted
+	if body["preset"] != "security-review" || inline["name"] != "Default" || body["environment_id"] != nil || body["is_enabled"] != true {
 		t.Errorf("agent body = %v", body)
+	}
+	if second := posts[1].Body; second["environment_id"] != "01JENV0000000000000000000" || second["environment"] != nil {
+		t.Errorf("second agent body = %v, want the new environment by id", second)
 	}
 	if repos, _ := body["repository_ids"].([]any); len(repos) != 1 || repos[0] != agentTestRepoID { //nolint:errcheck // asserted
 		t.Errorf("repository_ids = %v, want the current repo", body["repository_ids"])

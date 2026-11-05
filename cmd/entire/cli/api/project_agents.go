@@ -116,6 +116,9 @@ type ProjectAgentWrite struct {
 	RepositoryIDs   []string              `json:"repository_ids"`
 	Triggers        []ProjectAgentTrigger `json:"triggers,omitempty"`
 	EnvironmentID   string                `json:"environment_id,omitempty"`
+	// Environment is a new environment saved with a created agent, in the
+	// same transaction; send it or EnvironmentID, not both.
+	Environment *ProjectEnvironmentInput `json:"environment,omitempty"`
 }
 
 // ProjectConfigPage is one page of a project configuration list.
