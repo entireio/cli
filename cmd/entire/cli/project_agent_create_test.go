@@ -188,7 +188,6 @@ func TestProjectAgentCreate_JSONIsTheSavedAgent(t *testing.T) {
 	assert.NotEmpty(t, got.ID)
 }
 
-// Not parallel: replaces the package-level API resolvers.
 func TestProjectAgentDurationLabel(t *testing.T) {
 	t.Parallel()
 	for d, want := range map[time.Duration]string{30 * time.Minute: "30m", 90 * time.Minute: "1h30m", 30 * time.Second: "30s", 90 * time.Second: "1m30s"} {
@@ -196,6 +195,7 @@ func TestProjectAgentDurationLabel(t *testing.T) {
 	}
 }
 
+// Not parallel: replaces the package-level API resolvers.
 func TestProjectAgentCreate_RefusesBadFlagsBeforeAnyRequest(t *testing.T) {
 	old := resolveProjectAgentTarget
 	t.Cleanup(func() { resolveProjectAgentTarget = old })
