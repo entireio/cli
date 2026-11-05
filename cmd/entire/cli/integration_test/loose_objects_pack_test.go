@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -30,12 +32,12 @@ func TestLooseObjectsMaintenancePack_FilesTouchedStayAccurate(t *testing.T) {
 	env.WriteFile("src/nested/c.go", "package nested\n\nfunc C() {}\n")
 	env.GitAdd("src/a.go", "src/b.go", "src/nested/c.go")
 	env.GitCommit("Add src")
-	srcTree := runGit(t, env.RepoDir, "rev-parse", "HEAD:src")
+	srcTree := strings.TrimSpace(testutil.RunGit(t, env.RepoDir, "rev-parse", "HEAD:src"))
 
 	// The first run packs the loose objects but keeps them; the second deletes
 	// the loose copies that are now in a pack.
-	runGit(t, env.RepoDir, "maintenance", "run", "--task=loose-objects")
-	runGit(t, env.RepoDir, "maintenance", "run", "--task=loose-objects")
+	testutil.RunGit(t, env.RepoDir, "maintenance", "run", "--task=loose-objects")
+	testutil.RunGit(t, env.RepoDir, "maintenance", "run", "--task=loose-objects")
 	looseCopy := filepath.Join(env.RepoDir, ".git", "objects", srcTree[:2], srcTree[2:])
 	_, err := os.Stat(looseCopy)
 	require.ErrorIs(t, err, os.ErrNotExist, "src tree %s must exist only in a pack", srcTree)
@@ -47,8 +49,8 @@ func TestLooseObjectsMaintenancePack_FilesTouchedStayAccurate(t *testing.T) {
 	// The git CLI makes it, as the user's git would; go-git staging is the
 	// code under test.
 	env.WriteFile("README.md", "# Test Repository\n\nUpdated.\n")
-	runGit(t, env.RepoDir, "add", "README.md")
-	runGit(t, env.RepoDir, "commit", "-m", "Update README")
+	testutil.RunGit(t, env.RepoDir, "add", "README.md")
+	testutil.RunGit(t, env.RepoDir, "commit", "-m", "Update README")
 
 	readOnly := env.NewSession()
 	require.NoError(t, env.SimulateUserPromptSubmit(readOnly.ID))
