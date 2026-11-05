@@ -56,12 +56,12 @@ func (c *Client) WithAuthSessionsPath(path string) *Client {
 // caller reintroduce that silently, sending a staging login's bearer to
 // entire.io, so the base URL is a required argument and every caller has to say
 // where it got it.
-// BaseURL is the API origin requests are sent to.
-func (c *Client) BaseURL() string { return c.baseURL }
-
 func NewClientWithBaseURL(token, baseURL string) *Client {
 	return NewClientWithTransport(token, baseURL, nil)
 }
+
+// BaseURL is the API origin requests are sent to.
+func (c *Client) BaseURL() string { return c.baseURL }
 
 // NewClientWithTransport creates an API client using an injected network
 // transport, retaining the standard bearer and redirect policies. A nil
