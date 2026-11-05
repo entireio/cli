@@ -113,7 +113,7 @@ func runProjectAgentAdd(cmd *cobra.Command, opts projectAgentAddOptions) error {
 	}
 	var env projectAgentEnv
 	if needEnv {
-		if env, err = resolveProjectAgentEnvironment(ctx, errW, t, opts.environment); err != nil || !env.chosen() {
+		if env, err = resolveProjectAgentEnvironment(ctx, errW, t, opts.environment, projectAgentEnvPromptAdd); err != nil || !env.chosen() {
 			return err // nothing chosen without an error is a cancelled picker
 		}
 	}
@@ -166,7 +166,9 @@ func addOrExtendPresetAgent(cmd *cobra.Command, t *projectAgentTarget, p api.Pro
 		if err != nil {
 			return api.ProjectAgent{}, fmt.Errorf("add %s: %w", p.ID, err)
 		}
-		env.saved(cmd.ErrOrStderr(), created)
+		if err := env.saved(cmd.ErrOrStderr(), created); err != nil {
+			return api.ProjectAgent{}, fmt.Errorf("added %s (%s), but %w", created.Name, created.ID, err)
+		}
 		if text {
 			state := ""
 			if disabled {
@@ -345,19 +347,35 @@ func (e *projectAgentEnv) apply(body *api.ProjectAgentWrite) {
 }
 
 // saved records the agent the server created: once the default environment
-// exists, later agents reuse it by id.
-func (e *projectAgentEnv) saved(errW io.Writer, created api.ProjectAgent) {
+// exists, later agents reuse it by id. An agent saved without one means the
+// server ignored the inline environment, so later agents could not use it.
+func (e *projectAgentEnv) saved(errW io.Writer, created api.ProjectAgent) error {
 	if !e.createDefault {
-		return
+		return nil
 	}
-	fmt.Fprintf(errW, "created environment %s (%s)\n", projectAgentDefaultEnvironment, created.EnvironmentID)
+	if created.EnvironmentID == "" {
+		return fmt.Errorf("the server saved no %s environment with it; create an environment in the project and pass --environment", projectAgentDefaultEnvironment)
+	}
+	fmt.Fprintf(errW, "created environment %s (%s)\n", projectAgentDefaultEnvironment, tuiutil.SanitizeTerminalLabel(created.EnvironmentID))
 	*e = projectAgentEnv{id: created.EnvironmentID}
+	return nil
 }
+
+// projectAgentEnvPrompt words the environment picker for the command asking.
+type projectAgentEnvPrompt struct {
+	action string // the status label a cancelled picker prints
+	agents string // what runs in the environment
+}
+
+var (
+	projectAgentEnvPromptAdd    = projectAgentEnvPrompt{action: "Adding agents", agents: "the agents"}
+	projectAgentEnvPromptCreate = projectAgentEnvPrompt{action: "Creating the agent", agents: "the agent"}
+)
 
 // resolveProjectAgentEnvironment picks the environment new agents run in:
 // the one named, the project's only one, or a new "Default" when it has none.
 // Several and none named is a question for a terminal, or an error naming them.
-func resolveProjectAgentEnvironment(ctx context.Context, errW io.Writer, t *projectAgentTarget, want string) (projectAgentEnv, error) {
+func resolveProjectAgentEnvironment(ctx context.Context, errW io.Writer, t *projectAgentTarget, want string, prompt projectAgentEnvPrompt) (projectAgentEnv, error) {
 	envs, err := t.listEnvironments(ctx)
 	if err != nil {
 		return projectAgentEnv{}, err
@@ -385,9 +403,9 @@ func resolveProjectAgentEnvironment(ctx context.Context, errW io.Writer, t *proj
 	}
 	var id string
 	form := NewAccessibleForm(huh.NewGroup(
-		huh.NewSelect[string]().Title("Which environment should the agents run in?").Options(options...).Value(&id),
+		huh.NewSelect[string]().Title("Which environment should " + prompt.agents + " run in?").Options(options...).Value(&id),
 	))
-	if cancelled, err := runProjectAgentPrompt(ctx, errW, "Adding agents", form); err != nil || cancelled {
+	if cancelled, err := runProjectAgentPrompt(ctx, errW, prompt.action, form); err != nil || cancelled {
 		return projectAgentEnv{}, err
 	}
 	return projectAgentEnv{id: id}, nil

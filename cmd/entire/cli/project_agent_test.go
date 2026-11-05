@@ -41,6 +41,10 @@ type fakeAgentsAPI struct {
 	url string
 	// created replays creates by Idempotency-Key, as the API does.
 	created map[string]fakeCreate
+	// refuseCreate answers every agent create with this status when set.
+	refuseCreate int
+	// ignoreInlineEnv drops an inline environment, as an API without them would.
+	ignoreInlineEnv bool
 }
 
 type fakeAgentWrite struct {
@@ -168,6 +172,10 @@ func (f *fakeAgentsAPI) create(w http.ResponseWriter, path string, body map[stri
 	}
 	switch path {
 	case agentTestBase + "/agents":
+		if f.refuseCreate != 0 {
+			http.Error(w, `{"title":"an agent with this name already exists"}`, f.refuseCreate)
+			return
+		}
 		a := api.ProjectAgent{ID: fmt.Sprintf("01JNEW%020d", len(f.agents)), ETag: `"1"`}
 		if p, ok := body["preset"].(string); ok {
 			a.Preset = &api.ProjectAgentPresetRef{ID: p, Version: 1}
@@ -179,7 +187,7 @@ func (f *fakeAgentsAPI) create(w http.ResponseWriter, path string, body map[stri
 		a.IsEnabled, _ = body["is_enabled"].(bool)           //nolint:errcheck // absent means false
 		a.EnvironmentID, _ = body["environment_id"].(string) //nolint:errcheck // absent with an inline environment
 		// An inline environment is saved with the agent, as the API does.
-		if inline, ok := body["environment"].(map[string]any); ok {
+		if inline, ok := body["environment"].(map[string]any); ok && !f.ignoreInlineEnv {
 			env := api.ProjectEnvironment{ID: "01JENV0000000000000000000", Name: fmt.Sprint(inline["name"])}
 			f.envs = append(f.envs, env)
 			a.EnvironmentID = env.ID
@@ -295,6 +303,23 @@ func TestProjectAgentList(t *testing.T) {
 	}
 	if len(rows) != 2 || !rows[0].Added || rows[1].Added {
 		t.Errorf("presets = %+v, want risk added and security-review not", rows)
+	}
+}
+
+// Not parallel: replaces the package-level API resolvers.
+func TestProjectAgentAdd_StopsWhenTheServerSavesNoEnvironment(t *testing.T) {
+	fake := &fakeAgentsAPI{presets: []api.ProjectAgentPreset{samplePreset("risk"), samplePreset("security-review")}, ignoreInlineEnv: true}
+	stubProjectAgentAPI(t, fake)
+
+	_, errOut, err := executeProjectAgent(t, "add", "security-review", "risk")
+	if err == nil || !strings.Contains(err.Error(), "added security-review (") || !strings.Contains(err.Error(), "saved no Default environment") {
+		t.Fatalf("err = %v, want the created agent and the missing environment named", err)
+	}
+	if strings.Contains(errOut, "created environment") {
+		t.Errorf("stderr = %q, want no environment reported", errOut)
+	}
+	if posts := fake.writesTo(http.MethodPost); len(posts) != 1 {
+		t.Errorf("writes = %+v, want no second agent without an environment", posts)
 	}
 }
 

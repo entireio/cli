@@ -92,6 +92,50 @@ func TestProjectAgentCreate_SavesANewDefaultEnvironmentWithTheAgent(t *testing.T
 }
 
 // Not parallel: replaces the package-level API resolvers.
+func TestProjectAgentCreate_RunsInTheNamedEnvironment(t *testing.T) {
+	envs := []api.ProjectEnvironment{{ID: "01JENV0000000000000000000", Name: "Default"}, {ID: "01JENV0000000000000000001", Name: "Staging"}}
+	for _, want := range []string{"staging", "01JENV0000000000000000001"} {
+		fake := &fakeAgentsAPI{envs: envs}
+		stubProjectAgentAPI(t, fake)
+		_, _, err := executeProjectAgent(t, projectAgentCreateArgs("--environment", want)...)
+		require.NoError(t, err, want)
+		assert.Equal(t, "01JENV0000000000000000001", fake.writesTo(http.MethodPost)[0].Body["environment_id"], want)
+	}
+
+	fake := &fakeAgentsAPI{envs: envs}
+	stubProjectAgentAPI(t, fake)
+	_, _, err := executeProjectAgent(t, projectAgentCreateArgs("--environment", "prod")...)
+	require.ErrorContains(t, err, `no environment "prod"`)
+	require.ErrorContains(t, err, "Default, Staging")
+	// Several environments and none named, without a terminal to ask.
+	_, _, err = executeProjectAgent(t, projectAgentCreateArgs()...)
+	require.ErrorContains(t, err, "pass --environment with one of: Default, Staging")
+	assert.Empty(t, fake.writesTo(http.MethodPost), "no agent without an environment")
+}
+
+// Not parallel: replaces the package-level API resolvers.
+func TestProjectAgentCreate_ReportsARefusedCreate(t *testing.T) {
+	fake := &fakeAgentsAPI{envs: []api.ProjectEnvironment{{ID: "01JENV0000000000000000000", Name: "Default"}}, refuseCreate: http.StatusConflict}
+	stubProjectAgentAPI(t, fake)
+
+	out, _, err := executeProjectAgent(t, projectAgentCreateArgs()...)
+	require.ErrorContains(t, err, `create agent "Migration Risk" in gh/acme`)
+	require.ErrorContains(t, err, "already exists")
+	assert.NotContains(t, out, "created")
+}
+
+// Not parallel: replaces the package-level API resolvers.
+func TestProjectAgentCreate_StopsWhenTheServerSavesNoEnvironment(t *testing.T) {
+	fake := &fakeAgentsAPI{ignoreInlineEnv: true}
+	stubProjectAgentAPI(t, fake)
+
+	_, errOut, err := executeProjectAgent(t, projectAgentCreateArgs()...)
+	require.ErrorContains(t, err, "created Migration Risk (")
+	require.ErrorContains(t, err, "saved no Default environment")
+	assert.NotContains(t, errOut, "created environment", "an empty id is never reported as an environment")
+}
+
+// Not parallel: replaces the package-level API resolvers.
 func TestProjectAgentCreate_ManualAndDisabled(t *testing.T) {
 	fake := &fakeAgentsAPI{envs: []api.ProjectEnvironment{{ID: "01JENV0000000000000000000", Name: "Default"}}}
 	stubProjectAgentAPI(t, fake)
@@ -170,7 +214,6 @@ func TestProjectAgentCreate_RefusesBadFlagsBeforeAnyRequest(t *testing.T) {
 		{[]string{"create", "--name", "A", "--harness", "claude", "--instructions", "x"}, "--signal is required"},
 		{[]string{"create", "--name", "A", "--harness", "claude", "--signal", "score", "--instructions", "x"}, "--signal must be one of"},
 		{projectAgentCreateArgs("--polarity", "up"), "--polarity must be one of"},
-		{projectAgentCreateArgs("--reasoning-effort", "extreme"), "--reasoning-effort must be one of"},
 		{projectAgentCreateArgs("--when", "never"), "--when must be one of"},
 		{projectAgentCreateArgs("--when", "manual", "--path", "db/**"), "--when manual has none"},
 		{projectAgentCreateArgs("--branch", ""), "--branch needs a non-empty pattern"},
@@ -178,7 +221,7 @@ func TestProjectAgentCreate_RefusesBadFlagsBeforeAnyRequest(t *testing.T) {
 		{projectAgentCreateArgs("--path", "/db/**"), "must not start or end with /"},
 		{projectAgentCreateArgs("--branch", "release/"), "must not start or end with /"},
 		{projectAgentCreateArgs("--path", strings.Repeat("a", 257)), "limited to 256 bytes"},
-		{projectAgentCreateArgs("--timeout", "31m"), "--timeout must be between 1s and 30m0s"},
+		{projectAgentCreateArgs("--timeout", "31m"), "--timeout must be between 1s and 30m"},
 		{projectAgentCreateArgs("--timeout", "0s"), "--timeout must be between"},
 		{[]string{"create", "--name", "A", "--harness", "claude", "--signal", "percent"}, "pass one of --instructions or --instructions-file"},
 		{projectAgentCreateArgs("--instructions-file", "x.md"), "pass one of --instructions or --instructions-file"},
@@ -193,4 +236,6 @@ func TestProjectAgentCreate_RefusesBadFlagsBeforeAnyRequest(t *testing.T) {
 		_, _, err := executeProjectAgent(t, tc.args...)
 		require.ErrorContains(t, err, tc.want, "args %q", tc.args)
 	}
+	_, _, err := executeProjectAgent(t, projectAgentCreateArgs("--timeout", "31m")...)
+	require.NotContains(t, err.Error(), "30m0s", "the bound reads as the help writes it")
 }

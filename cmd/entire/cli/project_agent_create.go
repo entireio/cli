@@ -35,11 +35,10 @@ const (
 )
 
 var (
-	projectAgentHarnesses        = []string{"claude", "codex"}
-	projectAgentSignalTypes      = []string{"boolean", "percent", "size"}
-	projectAgentPolarities       = []string{"higher_is_better", "lower_is_better", projectAgentPolarityNeutral}
-	projectAgentReasoningEfforts = []string{"low", "medium", "high", "xhigh", "max", "ultra"}
-	projectAgentWhens            = []string{"ready", "always", "not_ready", projectAgentWhenManual}
+	projectAgentHarnesses   = []string{"claude", "codex"}
+	projectAgentSignalTypes = []string{"boolean", "percent", "size"}
+	projectAgentPolarities  = []string{"higher_is_better", "lower_is_better", projectAgentPolarityNeutral}
+	projectAgentWhens       = []string{"ready", "always", "not_ready", projectAgentWhenManual}
 )
 
 type projectAgentCreateOptions struct {
@@ -87,9 +86,9 @@ push. --branch and --path limit push runs to matching branches and changed
 paths (globs such as release/* or frontend/**); manual runs ignore them.
 --disabled saves the agent without running it on pushes.
 
---model and --reasoning-effort take the values the API lists for the harness;
-without them the harness's defaults apply. Agents run in a project environment,
-chosen as for ` + "`entire project agent add`" + `.`,
+--model and --reasoning-effort are checked by the API against what the harness
+and model take; without them the harness's defaults apply. Agents run in a
+project environment, chosen as for ` + "`entire project agent add`" + `.`,
 		Example: "  entire project agent create --name \"Migration Risk\" --harness claude \\\n" +
 			"    --signal percent --polarity lower_is_better --instructions-file review.md\n" +
 			"  entire project agent create --name Docs --harness codex --signal boolean \\\n" +
@@ -110,8 +109,8 @@ chosen as for ` + "`entire project agent add`" + `.`,
 	f.StringVar(&opts.description, "description", "", "What the agent reviews")
 	f.StringVar(&opts.harness, "harness", "", "Agent CLI that runs the instructions: "+strings.Join(projectAgentHarnesses, ", ")+" (required)")
 	f.StringVar(&opts.model, "model", "", "Model for the harness (default: the harness's default)")
-	f.StringVar(&opts.reasoningEffort, "reasoning-effort", "", "Reasoning effort: "+strings.Join(projectAgentReasoningEfforts, ", ")+" (default: the model's default)")
-	f.DurationVar(&opts.timeout, "timeout", projectAgentDefaultTimeout, "Time limit for one review, at most 30m")
+	f.StringVar(&opts.reasoningEffort, "reasoning-effort", "", "Reasoning effort the model takes, such as low or high (default: the model's default)")
+	f.DurationVar(&opts.timeout, "timeout", projectAgentDefaultTimeout, "Time limit for one review, at most "+projectAgentDurationLabel(projectAgentMaxTimeout))
 	f.StringVar(&opts.instructions, "instructions", "", "What to review and how to score it")
 	f.StringVar(&opts.instructionsFile, "instructions-file", "", "Read the instructions from a file, or - for standard input")
 	f.StringVar(&opts.signal, "signal", "", "Reading each review reports: "+strings.Join(projectAgentSignalTypes, ", ")+" (required)")
@@ -154,9 +153,6 @@ func (o *projectAgentCreateOptions) validate(stdin io.Reader) error {
 	if err := checkProjectAgentChoice("--polarity", o.polarity, projectAgentPolarities, false); err != nil {
 		return err
 	}
-	if err := checkProjectAgentChoice("--reasoning-effort", o.reasoningEffort, projectAgentReasoningEfforts, false); err != nil {
-		return err
-	}
 	if err := checkProjectAgentChoice("--when", o.when, projectAgentWhens, true); err != nil {
 		return err
 	}
@@ -171,7 +167,7 @@ func (o *projectAgentCreateOptions) validate(stdin io.Reader) error {
 		return errors.New("--branch and --path filter push runs; --when manual has none")
 	}
 	if o.timeout < time.Second || o.timeout > projectAgentMaxTimeout {
-		return fmt.Errorf("--timeout must be between 1s and %s", projectAgentMaxTimeout)
+		return fmt.Errorf("--timeout must be between 1s and %s", projectAgentDurationLabel(projectAgentMaxTimeout))
 	}
 	return o.loadInstructions(stdin)
 }
@@ -238,6 +234,12 @@ func checkProjectAgentGlobs(flag string, globs []string) ([]string, error) {
 
 // checkProjectAgentChoice refuses a value outside allowed; an empty one only
 // when it is required.
+// projectAgentDurationLabel writes a whole-minute duration the way the help
+// does: 30m, not 30m0s.
+func projectAgentDurationLabel(d time.Duration) string {
+	return strings.TrimSuffix(d.String(), "0s")
+}
+
 func checkProjectAgentChoice(flag, value string, allowed []string, required bool) error {
 	if value == "" {
 		if required {
@@ -288,7 +290,7 @@ func runProjectAgentCreate(cmd *cobra.Command, opts projectAgentCreateOptions) e
 	if err != nil {
 		return err
 	}
-	env, err := resolveProjectAgentEnvironment(ctx, errW, t, opts.environment)
+	env, err := resolveProjectAgentEnvironment(ctx, errW, t, opts.environment, projectAgentEnvPromptCreate)
 	if err != nil || !env.chosen() {
 		return err // nothing chosen without an error is a cancelled picker
 	}
@@ -296,7 +298,9 @@ func runProjectAgentCreate(cmd *cobra.Command, opts projectAgentCreateOptions) e
 	if err != nil {
 		return fmt.Errorf("create agent %q in %s: %w", opts.name, t.label(), err)
 	}
-	env.saved(errW, created)
+	if err := env.saved(errW, created); err != nil {
+		return fmt.Errorf("created %s (%s), but %w", tuiutil.SanitizeTerminalLabel(created.Name), created.ID, err)
+	}
 	if jsonRequested(cmd) {
 		return printJSON(w, created)
 	}
