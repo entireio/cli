@@ -124,3 +124,46 @@ func TestCodexRolloutAdapterCountsEmptyLines(t *testing.T) {
 		t.Errorf("usage-only key = %q, want %s", id, wantID)
 	}
 }
+
+// A finished rollout whose last line has no newline: Feed holds that line,
+// and Flush releases it, so the fold still equals Convert's.
+func TestCodexRolloutAdapterFlush(t *testing.T) {
+	t.Parallel()
+	lines := strings.SplitAfter(codexAdapterRollout, "\n")
+	// End on the m4 item line, without its newline (dropping the lines
+	// after it and the empty tail).
+	content := []byte(strings.TrimSuffix(strings.Join(lines[:len(lines)-3], ""), "\n"))
+	want, err := Convert(content, codexItemsOpts)
+	if err != nil {
+		t.Fatalf("Convert: %v", err)
+	}
+	if !strings.Contains(string(want), `"id":"m4"`) {
+		t.Fatalf("Convert's output lacks m4:\n%s", want)
+	}
+	wantLines := len(lines) - 3
+	for _, size := range []int{1, 7, 64, len(content)} {
+		a := NewCodexRolloutAdapter()
+		var records []Record
+		for rest := content; len(rest) > 0; {
+			n := min(size, len(rest))
+			records = append(records, a.Feed(rest[:n])...)
+			rest = rest[n:]
+		}
+		if got := a.Lines(); got != wantLines-1 {
+			t.Errorf("chunks of %d: Lines before Flush = %d, want %d", size, got, wantLines-1)
+		}
+		flushed := a.Flush()
+		if len(flushed) == 0 {
+			t.Errorf("chunks of %d: Flush gave no records for the last line", size)
+		}
+		if got := a.Lines(); got != wantLines {
+			t.Errorf("chunks of %d: Lines after Flush = %d, want %d", size, got, wantLines)
+		}
+		if again := a.Flush(); again != nil {
+			t.Errorf("chunks of %d: second Flush gave %+v, want nil", size, again)
+		}
+		if got := foldCodex(t, append(records, flushed...)); !bytes.Equal(got, want) {
+			t.Errorf("chunks of %d: fold differs from Convert\n got %s\nwant %s", size, got, want)
+		}
+	}
+}
