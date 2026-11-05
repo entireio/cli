@@ -35,11 +35,12 @@ type trailAttachmentTestServer struct {
 	// upload URL's expiry.
 	storageStatus int
 	expiresAt     string
-	// completeStatus fails /complete when set; listing then answers it.
+	// completeStatus fails /complete when set; listing then answers it,
+	// unless listStatus fails the listing too.
 	completeStatus int
+	listStatus     int
 	requests       []string
 	intent         map[string]any
-	idemKey        string
 	uploaded       []byte
 	uploadType     string
 	uploadAuth     string
@@ -76,7 +77,6 @@ func serveTrailAttachments(t *testing.T, listing []map[string]any) *trailAttachm
 		}
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == collection:
-			s.idemKey = r.Header.Get("Idempotency-Key")
 			assert.NoError(t, json.NewDecoder(r.Body).Decode(&s.intent))
 			expires := s.expiresAt
 			if expires == "" {
@@ -90,6 +90,8 @@ func serveTrailAttachments(t *testing.T, listing []map[string]any) *trailAttachm
 		case r.Method == http.MethodPost && r.URL.Path == collection+"/"+trailAttachmentTestID+"/complete":
 			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"attachment": map[string]any{"id": trailAttachmentTestID, "filename": "shot.png",
 				"content_type": "image/png", "size_bytes": len(s.uploaded), "is_ready": true}}))
+		case r.Method == http.MethodGet && r.URL.Path == collection && s.listStatus != 0:
+			http.Error(w, `{"error":"unavailable"}`, s.listStatus)
 		case r.Method == http.MethodGet && r.URL.Path == collection:
 			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"attachments": listing}))
 		case r.Method == http.MethodDelete && r.URL.Path == collection+"/"+trailAttachmentTestID:
@@ -117,7 +119,6 @@ func TestTrailAttachmentAdd_UploadsAndPrintsTheReference(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"POST /attachments", "storage PUT", "POST /attachments/" + trailAttachmentTestID + "/complete"}, s.requests)
 	assert.Equal(t, map[string]any{"filename": "shot.png", "content_type": "image/png", "width": float64(3), "height": float64(2)}, s.intent)
-	assert.NotEmpty(t, s.idemKey)
 	assert.Equal(t, want, s.uploaded)
 	assert.Equal(t, "image/png", s.uploadType, "the declared type")
 	assert.Empty(t, s.uploadAuth, "the presigned URL never gets the caller's token")
@@ -247,4 +248,15 @@ func TestTrailAttachmentAdd_AFailedCompletionNeverDeletesAFinishedImage(t *testi
 	_, _, err = executeProjectTrailTest(t, trailAttachmentArgs("add", path)...)
 	require.ErrorContains(t, err, "complete attachment")
 	assert.Equal(t, "DELETE /attachments/"+trailAttachmentTestID, s.requests[len(s.requests)-1])
+
+	// Its state cannot be read: it may be finished, so it is left in place,
+	// and the error says so.
+	s = serveTrailAttachments(t, []map[string]any{ready})
+	s.completeStatus = http.StatusGatewayTimeout
+	s.listStatus = http.StatusServiceUnavailable
+	_, _, err = executeProjectTrailTest(t, trailAttachmentArgs("add", path)...)
+	require.ErrorContains(t, err, "complete attachment")
+	require.ErrorContains(t, err, "was left in place: its state could not be read")
+	assert.Equal(t, "GET /attachments", s.requests[len(s.requests)-1])
+	assert.NotContains(t, s.requests, "DELETE /attachments/"+trailAttachmentTestID)
 }

@@ -80,11 +80,11 @@ Selectors are project-local numbers or trail ULIDs, or `<repo>/<number>` for one
   `/{host}/{project}/trails/{trail}/attachments`. `add` reads the type from the
   file's bytes and accepts only PNG, JPEG, GIF, and WebP up to 10 MiB, since
   the cell trusts the declared type and only those render inline. It
-  registers the upload with an `Idempotency-Key`, PUTs the bytes to the
-  presigned URL without the caller's token (HTTPS only, except loopback), and
-  completes it, then prints `![image](attachment:<id>)`: the line a Markdown
-  body uses to show the image, and the form `show` returns it in, so a body
-  read and written back keeps its images. `remove` requires `--force`.
+  registers the upload, PUTs the bytes to the presigned URL without the
+  caller's token (HTTPS only, except loopback), and completes it, then
+  prints `![image](attachment:<id>)`: the line a Markdown body uses to show
+  the image, and the form `show` returns it in, so a body read and written
+  back keeps its images. `remove` requires `--force`.
 - Project intent has only `open` and `closed` lifecycle states. `draft` is
   rejected locally by project create/update/link/list; legacy branch-work
   lifecycle values are unchanged.

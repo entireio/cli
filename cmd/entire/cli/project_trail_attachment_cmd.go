@@ -18,7 +18,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
@@ -164,9 +163,8 @@ const trailAttachmentCleanupTimeout = 30 * time.Second
 func uploadTrailAttachment(ctx context.Context, target *projectTrailTarget, file trailAttachmentFile) (api.ProjectTrailAttachment, error) {
 	collection := target.path() + "/attachments"
 	var intent api.ProjectTrailAttachmentUpload
-	headers := http.Header{"Idempotency-Key": []string{uuid.NewString()}}
 	body := api.ProjectTrailAttachmentIntent{Filename: file.name, ContentType: file.contentType, Width: file.width, Height: file.height}
-	if _, err := target.Client.ProjectTrailRequest(ctx, http.MethodPost, collection, body, headers, &intent); err != nil {
+	if _, err := target.Client.ProjectTrailRequest(ctx, http.MethodPost, collection, body, nil, &intent); err != nil {
 		return api.ProjectTrailAttachment{}, fmt.Errorf("register attachment: %w", err)
 	}
 	if !looksLikeULID(intent.ID) {

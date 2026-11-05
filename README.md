@@ -116,7 +116,7 @@ entire trail finding reply <id> -m "intentional: the cache is per process"
 entire trail comment add -m "Should this cover the admin API too?"
 entire trail ready                      # mark this branch's change ready for review (--undo: back to draft)
 entire trail retarget --base release/2  # change the base branch it merges into
-entire trail attachment add shot.png     # upload an image; prints the line that shows it in the description
+entire trail attachment add shot.png    # upload an image; prints the line that shows it in the description
 entire trail approve
 entire trail rerun-review               # review the current head again (--agent <id> for one agent)
 entire trail update-branch              # merge the base into the branch on the server (Entire-native repos)
