@@ -636,3 +636,31 @@ func TestForgetServiceAccountSecretTokenTakesLock(t *testing.T) {
 		t.Error("the entry survived Forget")
 	}
 }
+
+// A lock that cannot be taken for a reason other than cancellation costs
+// sharing, not auth: the exchange still runs, and nothing is cached.
+// Not parallel: sets process-wide environment.
+func TestSecretExchangeFallsBackWhenLockFails(t *testing.T) {
+	fake := &fakeSecretCore{t: t, expiresIn: 600}
+	useFakeSecretCore(t, fake)
+	subj, err := secretExchangeSubject(testServiceAccountSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, ok := secretCacheRoot()
+	if !ok {
+		t.Fatal("no cache root")
+	}
+	// A directory where the lock file belongs makes opening it fail.
+	if err := root.Mkdir(secretCacheFile(subj)+".lock", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if _, err := ResolveEnvToken(testServiceAccountSecret); err != nil {
+			t.Fatalf("ResolveEnvToken with a broken lock: %v", err)
+		}
+	}
+	if n := fake.exchanges.Load(); n != 2 {
+		t.Errorf("exchanges = %d, want 2 (unshared, uncached)", n)
+	}
+}

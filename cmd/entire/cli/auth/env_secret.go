@@ -223,7 +223,13 @@ func exchangeSubjectToken(ctx context.Context, subj exchangeSubject) (string, er
 	}
 	release, err := lockSecretCache(ctx, root, subj)
 	if err != nil {
-		return "", err
+		if ctx.Err() != nil {
+			return "", err
+		}
+		// The cache is best effort: a lock that cannot be taken (a file
+		// system without lock support, say) costs sharing, not auth.
+		token, _, err := postSecretExchange(ctx, subj)
+		return token, err
 	}
 	defer release()
 	if token, ok := readCachedSecretToken(subj); ok {
