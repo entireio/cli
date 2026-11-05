@@ -931,6 +931,20 @@ func reportUnpushableDestination(dest refsPushDestination, batch chunkPushResult
 	return false
 }
 
+// queuedRefWarning returns the line to print for a ref that stays queued, or ""
+// when the failure needs no warning.
+func queuedRefWarning(pushErr error, target string, ref plumbing.ReferenceName) string {
+	if reason := checkpointRefRejectionReason(pushErr); reason != "" {
+		return fmt.Sprintf("[entire] Warning: checkpoint ref %s remains queued (showing one rejection):\n%s", ref, reason)
+	}
+	if errors.Is(pushErr, errShallowHidesMergeBase) {
+		// Divergence alone stays quiet, but this one never clears on its own:
+		// every push would fetch and refuse again.
+		return fmt.Sprintf("[entire] Warning: checkpoint ref %s remains queued: %v (from %s)", ref, errShallowHidesMergeBase, displayPushTarget(target))
+	}
+	return ""
+}
+
 // finishIndividualRetry reports and settles a flush after its per-ref fallback.
 func finishIndividualRetry(
 	ctx, pushCtx context.Context,
@@ -1061,22 +1075,20 @@ func retryRefsIndividually(ctx, flushCtx context.Context, repo *git.Repository, 
 			continue
 		}
 		consecutiveFailures++
-		res.recordFailure(ctx, flushCtx, ref, err)
+		res.recordFailure(ctx, flushCtx, target, ref, err)
 	}
 	return res
 }
 
 // recordFailure notes one ref the fallback could not push.
-func (res *refRetryResult) recordFailure(ctx, flushCtx context.Context, ref checkpointRefPush, err error) {
+func (res *refRetryResult) recordFailure(ctx, flushCtx context.Context, target string, ref checkpointRefPush, err error) {
 	logging.Warn(ctx, "git-refs push: checkpoint ref push/sync failed; left queued, not overwritten",
 		slog.String("ref", ref.name.String()), slog.String("error", err.Error()))
 	if nonInteractiveSSHAuthFailure(flushCtx, err) {
 		printNonInteractiveSSHAuthHint()
 	}
 	if res.rejectionWarning == "" {
-		if reason := checkpointRefRejectionReason(err); reason != "" {
-			res.rejectionWarning = fmt.Sprintf("[entire] Warning: checkpoint ref %s remains queued (showing one rejection):\n%s", ref.name, reason)
-		}
+		res.rejectionWarning = queuedRefWarning(err, target, ref.name)
 	}
 	if res.firstErr == nil {
 		res.firstErr = err

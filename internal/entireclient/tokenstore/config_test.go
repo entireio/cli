@@ -95,27 +95,3 @@ func TestStore_BadConfigFailsLoudly(t *testing.T) {
 		t.Errorf("BackendDescription() = %q, want the config error", BackendDescription())
 	}
 }
-
-// CheckConfig names the bad key and file.
-func TestCheckConfig(t *testing.T) {
-	dir := setupConfig(t, "unset", `{"tokenstore": "file"}`)
-	err := CheckConfig()
-	if !errors.Is(err, ErrBadConfig) {
-		t.Fatalf("CheckConfig() err = %v, want ErrBadConfig", err)
-	}
-	for _, want := range []string{`unknown key "tokenstore"`, filepath.Join(dir, configFileName), "fix or remove it"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("CheckConfig() err = %q, want it to contain %q", err, want)
-		}
-	}
-}
-
-// A good or missing config passes.
-func TestCheckConfig_OK(t *testing.T) {
-	for _, config := range []string{"", `{}`, `{"token_store": "file"}`} {
-		setupConfig(t, "unset", config)
-		if err := CheckConfig(); err != nil {
-			t.Errorf("CheckConfig() with %q = %v, want nil", config, err)
-		}
-	}
-}

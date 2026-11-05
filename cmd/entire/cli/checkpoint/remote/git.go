@@ -281,6 +281,13 @@ func applyNonInteractiveSSH(ctx context.Context, cmd *exec.Cmd) {
 	cmd.Env = withBatchModeSSH(ctx, cmd.Env)
 }
 
+// FullRefDepth is the absolute --depth that fully fetches one ref's history,
+// healing a prior --depth=1 shallow boundary on it. It is far above any
+// realistic checkpoint history length, while staying below math.MaxInt32
+// (2147483647), which git special-cases as a global unshallow that would also
+// deepen an unrelated shallow source tree.
+const FullRefDepth = 1_000_000_000
+
 // FetchOptions configures a git fetch operation.
 type FetchOptions struct {
 	Remote   string   // remote name or URL (required)
@@ -306,7 +313,7 @@ type FetchOptions struct {
 	// not introduce shallowness on a full repo when the value exceeds the
 	// branch's length. Use a value above the branch's realistic length but below
 	// math.MaxInt32 (2147483647), which git special-cases as a global unshallow.
-	// Ignored when zero or when Shallow is set.
+	// Ignored when zero or when Shallow is set. FullRefDepth is the value to use.
 	Depth     int
 	Dir       string   // working directory (empty = CWD)
 	ExtraArgs []string // additional flags before remote (e.g., "--no-write-fetch-head")

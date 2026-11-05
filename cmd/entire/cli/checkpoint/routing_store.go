@@ -452,15 +452,7 @@ func (c *legacyCopier) copyToRef(ctx context.Context, checkpointID id.Checkpoint
 }
 
 func (c *legacyCopier) localRefExists(refName plumbing.ReferenceName) (bool, error) {
-	_, err := c.refs.repo.Reference(refName, true)
-	switch {
-	case err == nil:
-		return true, nil
-	case errors.Is(err, plumbing.ErrReferenceNotFound):
-		return false, nil
-	default:
-		return false, fmt.Errorf("resolve checkpoint ref %s: %w", refName, err)
-	}
+	return refExists(c.refs.repo, refName)
 }
 
 // fetchRemoteRef asks the remote for refName and reports whether the ref now
