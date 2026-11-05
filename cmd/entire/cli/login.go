@@ -179,7 +179,8 @@ func newLoginCmd() *cobra.Command {
 		"login server to authenticate against (rarely needed; the default serves all standard accounts)")
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
 	cmd.Flags().BoolVar(&useDevice, "device", false, "Use the device-code flow (enter a code in your browser) instead of the default browser redirect")
-	return cmd
+	// In the constructor: root and auth both register it.
+	return alwaysCheckConfig(cmd)
 }
 
 func runLoginCommand(ctx context.Context, outW, errW io.Writer, server string, insecureHTTPAuth, useDevice bool) error {
@@ -525,7 +526,9 @@ func loginCompleteLine(token, dialled string) string {
 // the raw store error gives those users no way forward (#1036). The hint is
 // skipped when the file store is already selected, by env or config.json
 // (suggesting it again would be nonsense), on a bad config.json, and for
-// failures the file store wouldn't help with.
+// failures the file store wouldn't help with. The root guard checks
+// config.json before login starts, but the user can break it during the
+// browser or device wait.
 func withHeadlessStoreHint(err error) error {
 	if !errors.Is(err, auth.ErrCredentialStoreWrite) || errors.Is(err, tokenstore.ErrBadConfig) || tokenstore.FileBackendSelected() {
 		return err

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -104,7 +105,9 @@ func inspectRemoteTopology(ctx context.Context) remoteTopology {
 
 	for _, name := range names {
 		dest := remoteDestination{name: name, pushURLs: pushURLs[name]}
-		if _, enabled, err := remote.PushURL(ctx, name); err == nil {
+		// An unroutable store still pins: pre-push withholds checkpoints for
+		// this remote instead of handing them to the sync-remote election.
+		if _, enabled, err := remote.PushURL(ctx, name); err == nil || errors.Is(err, remote.ErrCheckpointRemoteUnroutable) {
 			dest.pinned = enabled
 		}
 		t.destinations = append(t.destinations, dest)

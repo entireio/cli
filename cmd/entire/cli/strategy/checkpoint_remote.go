@@ -87,6 +87,10 @@ type pushSettings struct {
 	// either "none configured" or "configured and refused", and only the second
 	// is worth telling the user about.
 	checkpointRemoteConfigured bool
+	// withheld is set when the configured checkpoint_remote is this
+	// developer's but no URL can be built for it. Checkpoints must then stay
+	// local: the push remote is not where they asked for them to go.
+	withheld error
 	// primaryIsRefs records whether the git-refs backend is the configured
 	// primary, resolved once here so the pre-push path does not re-read the
 	// checkpoints config (LoadCheckpointsConfig is uncached: two whole-file
@@ -137,6 +141,10 @@ func resolvePushSettings(ctx context.Context, pushRemoteName string) pushSetting
 	}
 	ps.checkpointRemoteConfigured = true
 	checkpointURL, enabled, err := remote.PushURL(ctx, pushRemoteName)
+	if errors.Is(err, remote.ErrCheckpointRemoteUnroutable) {
+		ps.withheld = err
+		return ps
+	}
 	if err != nil {
 		logging.Warn(ctx, "checkpoint-remote: could not derive URL from push remote",
 			slog.String("remote", pushRemoteName),
@@ -612,10 +620,16 @@ func urlTargetsCheckpointRepo(url string, config *settings.CheckpointRemoteConfi
 // pushRemoteName — the checkpoint_remote URL when one is configured, otherwise
 // the remote itself — and whether push_sessions turns pushing off. Callers use
 // it to confirm delivery after a push, since PrePush is deliberately fail-soft.
-func CheckpointPushTarget(ctx context.Context, pushRemoteName string) (target string, disabled bool) {
+// It errors when PrePush withholds checkpoints because the configured
+// checkpoint_remote has no URL: there is no target to confirm against, and the
+// push remote may hold a stale copy from before the store was configured.
+func CheckpointPushTarget(ctx context.Context, pushRemoteName string) (target string, disabled bool, err error) {
 	ps := resolvePushSettings(ctx, pushRemoteName)
-	if ps.checkpointURL != "" {
-		return ps.checkpointURL, ps.pushDisabled
+	if ps.withheld != nil {
+		return "", ps.pushDisabled, ps.withheld
 	}
-	return ps.remote, ps.pushDisabled
+	if ps.checkpointURL != "" {
+		return ps.checkpointURL, ps.pushDisabled, nil
+	}
+	return ps.remote, ps.pushDisabled, nil
 }

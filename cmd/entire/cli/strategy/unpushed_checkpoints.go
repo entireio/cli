@@ -45,6 +45,9 @@ type OutgoingCheckpoint struct {
 	// name a checkpoint. The push sends it anyway.
 	CheckpointID id.CheckpointID
 	Ref          plumbing.ReferenceName
+	// Commit is the ref's tip: the version a push sends now, and the commit
+	// `entire checkpoint push <id>@<commit>` pins.
+	Commit plumbing.Hash
 }
 
 // OutgoingCheckpoints is what the next push to the checkpoint sync remote
@@ -61,7 +64,11 @@ type OutgoingCheckpoints struct {
 // ref is sent whether or not its name parses. It reads local state only, and
 // returns ErrOutgoingNeedsGitRefs on the git-branch backend.
 func ListOutgoingCheckpoints(ctx context.Context) (OutgoingCheckpoints, error) {
-	if !primaryIsGitRefs(ctx) {
+	isRefs, err := primaryBackendIsGitRefs(ctx)
+	if err != nil {
+		return OutgoingCheckpoints{}, err
+	}
+	if !isRefs {
 		return OutgoingCheckpoints{}, ErrOutgoingNeedsGitRefs
 	}
 	repo, err := OpenRepository(ctx)
@@ -74,14 +81,18 @@ func ListOutgoingCheckpoints(ctx context.Context) (OutgoingCheckpoints, error) {
 	if err != nil {
 		return OutgoingCheckpoints{}, err
 	}
-	existing, stale := partitionLocalRefs(repo, queued)
+	existing, stale, listed := partitionLocalRefs(ctx, repo, queued)
 	out := OutgoingCheckpoints{
 		Checkpoints:       make([]OutgoingCheckpoint, 0, len(existing)),
 		StaleQueueEntries: len(stale),
 	}
 	for _, ref := range existing {
 		cid, _ := checkpoint.ParseRef(ref)
-		out.Checkpoints = append(out.Checkpoints, OutgoingCheckpoint{CheckpointID: cid, Ref: ref})
+		outgoing := OutgoingCheckpoint{CheckpointID: cid, Ref: ref}
+		if tip, err := localTip(repo, listed, ref); err == nil {
+			outgoing.Commit = tip
+		}
+		out.Checkpoints = append(out.Checkpoints, outgoing)
 	}
 	return out, nil
 }

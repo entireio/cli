@@ -3838,7 +3838,10 @@ func (s *CreatePluginInstallationInputBodyRepositorySelection) UnmarshalText(dat
 // Ref: #/components/schemas/CreateProjectInputBody
 type CreateProjectInputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI                          `json:"$schema"`
+	Schema OptURI `json:"$schema"`
+	// Processing cell ID, not a cluster slug, e.g. aws-us-east-2. A visible cluster in region must serve
+	// it. Defaults to the region's default cell.
+	Cell            OptString                       `json:"cell"`
 	Name            string                          `json:"name"`
 	OwnerId         string                          `json:"ownerId"`
 	OwnerType       CreateProjectInputBodyOwnerType `json:"ownerType"`
@@ -3849,6 +3852,11 @@ type CreateProjectInputBody struct {
 // GetSchema returns the value of Schema.
 func (s *CreateProjectInputBody) GetSchema() OptURI {
 	return s.Schema
+}
+
+// GetCell returns the value of Cell.
+func (s *CreateProjectInputBody) GetCell() OptString {
+	return s.Cell
 }
 
 // GetName returns the value of Name.
@@ -3879,6 +3887,11 @@ func (s *CreateProjectInputBody) GetAdditionalProps() CreateProjectInputBodyAddi
 // SetSchema sets the value of Schema.
 func (s *CreateProjectInputBody) SetSchema(val OptURI) {
 	s.Schema = val
+}
+
+// SetCell sets the value of Cell.
+func (s *CreateProjectInputBody) SetCell(val OptString) {
+	s.Cell = val
 }
 
 // SetName sets the value of Name.

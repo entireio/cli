@@ -984,6 +984,7 @@ func (env *TestEnv) gitCommitWithHooks(message string, simulateTTY bool, files .
 	// Run prepare-commit-msg hook using the shared binary.
 	// Pass source="message" to match real `git commit -m` behavior.
 	prepCmd := env.prepareCommitMsgCmd(simulateTTY, msgFile, "message")
+	prepCmd.Env = append(prepCmd.Env, gitNoEditorEnv)
 	if output, err := prepCmd.CombinedOutput(); err != nil {
 		env.T.Logf("prepare-commit-msg output: %s", output)
 		// Don't fail - hook may silently succeed
@@ -1033,6 +1034,9 @@ func (env *TestEnv) gitHookEnv(extra ...string) []string {
 	envVars := append(testutil.GitIsolatedEnv(),
 		"ENTIRE_TEST_OPENCODE_PROJECT_DIR="+env.OpenCodeProjectDir,
 		"ENTIRE_TEST_OPENCODE_MOCK_EXPORT=1",
+		// As for a commit that opens the editor, whatever the developer's
+		// shell exports; see gitNoEditorEnv.
+		"GIT_EDITOR=true",
 	)
 	// Propagate per-test overrides (e.g. agent project/store dirs) to hook
 	// subprocesses. Empty for tests that don't set ExtraEnv.
@@ -1040,6 +1044,10 @@ func (env *TestEnv) gitHookEnv(extra ...string) []string {
 	envVars = append(envVars, env.checkpointStoreEnv()...)
 	return append(envVars, extra...)
 }
+
+// gitNoEditorEnv is what git sets for its commit hooks when it does not open
+// the editor (-m/-F, --no-edit, -C); appended after gitHookEnv, it wins.
+const gitNoEditorEnv = "GIT_EDITOR=:"
 
 // GitCommitAmendWithHooks amends the last commit with Entire's git hooks.
 // This simulates `git commit --amend` with the prepare-commit-msg and post-commit hooks.
@@ -1244,6 +1252,7 @@ func (env *TestEnv) gitCommitStagedWithHooks(message string, simulateTTY bool) {
 
 	// Run prepare-commit-msg hook using the shared binary.
 	prepCmd := env.prepareCommitMsgCmd(simulateTTY, msgFile, "message")
+	prepCmd.Env = append(prepCmd.Env, gitNoEditorEnv)
 	if output, err := prepCmd.CombinedOutput(); err != nil {
 		env.T.Logf("prepare-commit-msg output: %s", output)
 	}

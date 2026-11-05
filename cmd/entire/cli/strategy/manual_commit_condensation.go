@@ -860,6 +860,9 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	if o.recordedBranch != nil {
 		writeOpts.Branch = *o.recordedBranch
 	}
+	if commitSHA, ok := recordedCommitLink(ctx); ok {
+		writeOpts.LinkedCommits = []cpkg.LinkedCommit{{SHA: commitSHA}}
+	}
 
 	writeV1Start := time.Now()
 	writeCtx, writeCommittedSpan := perf.Start(ctx, "write_committed_v1")

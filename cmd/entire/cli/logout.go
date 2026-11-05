@@ -72,7 +72,8 @@ func newLogoutCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&everywhere, "everywhere", false, "Also end browser and web sessions")
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
-	return cmd
+	// In the constructor: root and auth both register it.
+	return alwaysCheckConfig(cmd)
 }
 
 // errContextFlagOnLogout rejects `entire logout --context <name>`.

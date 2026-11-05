@@ -30,6 +30,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
+	"github.com/entireio/cli/internal/entireclient/tokenstore"
 
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/spf13/cobra"
@@ -44,38 +45,41 @@ func newDoctorCmd() *cobra.Command {
 		Long: `Scan for session issues and offer to fix them.
 
 Checks performed:
-  1. Disconnected metadata branches: detects when local and remote
+  1. Per-user config: report an invalid config.json, which makes most
+     commands refuse to run. Doctor exits non-zero until it is fixed or
+     removed.
+
+  2. Disconnected metadata branches: detects when local and remote
      entire/checkpoints/v1 branches share no common ancestor (caused by a
      previous bug). Fixes by cherry-picking local checkpoints onto remote tip.
 
-  2. Operational logs: warn when .entire/logs cannot be written. Every other
+  3. Operational logs: warn when .entire/logs cannot be written. Every other
      diagnostic is delivered by writing there, and that write is silent about
      its own failure, so an unwritable log directory looks exactly like a repo
      where nothing ran.
 
   When Codex hooks are installed:
-  3. Codex hook trust: warn when hooks declared in .codex/hooks.json
+  4. Codex hook trust: warn when hooks declared in .codex/hooks.json
      lack a trusted_hash entry in the user's Codex config (i.e. /hooks
      review hasn't run yet on this machine, or a newer entire release
      added a hook the user hasn't approved yet).
 
   For each installed agent that reports hook-config drift:
-  4. Hook config: warn when the installed hooks no longer match what this
+  5. Hook config: warn when the installed hooks no longer match what this
      CLI writes (e.g. an older release wrote Claude Code tool matchers that
      no longer fire, or a committed Pi/OpenCode extension has gone stale).
      Fix by running 'entire agent add <agent>' (add --force if that does
      not fix it).
 
-  5. Retired Gemini CLI hooks: remove Entire hook entries left in
+  6. Retired Gemini CLI hooks: remove Entire hook entries left in
      .gemini/settings.json. Gemini CLI support was removed; the entries now do
      nothing but run a no-op on every Gemini event.
 
-  6. Summary provider: warn when summary_generation.provider names a registered
+  7. Summary provider: warn when summary_generation.provider names a registered
      agent that cannot generate text (e.g. factoryai-droid), which makes
-     'entire checkpoint explain --generate', 'entire dispatch' and
-     'entire runner setup' fail. Reports the file to change; does not rewrite it.
+     'entire checkpoint explain --generate' and 'entire dispatch' fail. Reports the file to change; does not rewrite it.
 
-  7. Legacy shadow branches: report entire/<commit>-<worktree> branches older
+  8. Legacy shadow branches: report entire/<commit>-<worktree> branches older
      versions wrote at every turn. They hold full snapshots of the working
      tree and nothing reads them anymore. Fix with 'entire doctor --force',
      which deletes only the branches; a later 'git gc' frees the space once
@@ -85,7 +89,7 @@ Checks performed:
      checked out in a worktree is left alone. Bare entire/<commit> branches
      are only pointed at ('entire clean --all --dry-run'), never deleted.
 
-  8. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
+  9. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
 
 A session is considered stuck if:
   - It is in ACTIVE phase with no interaction for over 1 hour
@@ -143,10 +147,30 @@ type stuckSession struct {
 	FilesTouchedCount int
 }
 
+// checkUserConfig reports an unusable config.json.
+// Doctor skips the root guard, so it reports here, whatever ENTIRE_TOKEN says.
+func checkUserConfig(cmd *cobra.Command) error {
+	err := tokenstore.CheckConfig()
+	if err == nil {
+		return nil
+	}
+	w := cmd.OutOrStdout()
+	fmt.Fprintln(w, "Per-user config: INVALID")
+	fmt.Fprintf(w, "  %v\n", err)
+	fmt.Fprintln(w, "  Most entire commands refuse to run until it is fixed.")
+	fmt.Fprintln(w)
+	return err //nolint:wrapcheck // already names the file
+}
+
 func runSessionsFix(cmd *cobra.Command, force bool) error {
 	var finalErr error
 
-	// Check 1: Disconnected metadata branches
+	// First: other commands refuse to run.
+	if err := checkUserConfig(cmd); err != nil {
+		finalErr = NewSilentError(err)
+	}
+
+	// Check 2: Disconnected metadata branches
 	metadataErr := checkDisconnectedMetadata(cmd, force)
 	if metadataErr != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Error: metadata check failed: %v\n", metadataErr)
@@ -1500,7 +1524,7 @@ func checkRetiredGeminiHooks(cmd *cobra.Command) {
 // Worth a check of its own because nothing else says a word about it: the
 // settings loader validates only model-without-provider, `entire status` never
 // mentions summary generation, and the resolver's error surfaces at
-// `checkpoint explain --generate` / `dispatch` / `runner setup` — commands a
+// `checkpoint explain --generate` / `dispatch` — commands a
 // user may not run for weeks after the edit, by which time the cause is not in
 // view. Read-only; the remedy is the user's choice of provider, and the value
 // may live in a committed settings.json where a rewrite changes everyone's.
@@ -1542,8 +1566,8 @@ func checkSummaryProvider(cmd *cobra.Command) {
 	} else {
 		fmt.Fprintf(w, "  summary_generation.provider is %q in %s, which cannot generate text.\n", name, sourceFile)
 	}
-	fmt.Fprintln(w, "  `entire checkpoint explain --generate`, `entire dispatch`, and")
-	fmt.Fprintln(w, "  `entire runner setup` all fail while it is set.")
+	fmt.Fprintln(w, "  `entire checkpoint explain --generate` and `entire dispatch`")
+	fmt.Fprintln(w, "  both fail while it is set.")
 	// The command names an INSTALLED provider, not merely a capable one.
 	// summaryCapableProviderNames is deliberately unfiltered by $PATH — it
 	// answers "what does this field accept" — but a command built from its
