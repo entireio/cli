@@ -38,7 +38,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
 	"github.com/entireio/cli/internal/entireclient/httpclient"
-	"github.com/entireio/cli/internal/entireclient/tokenstore"
+	"github.com/entireio/cli/internal/entireclient/userconfig"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 	"github.com/entireio/cli/internal/remotehelper"
 	"github.com/entireio/cli/internal/remotehelper/debuglog"
@@ -470,7 +470,7 @@ func parseProtocolVersion(raw string) int {
 //     and use its refreshed login JWT.
 func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpClient *http.Client) (credentialProvider, func(), error) {
 	// Fail before any network call.
-	if err := tokenstore.CheckConfig(); err != nil {
+	if err := userconfig.Check(); err != nil {
 		return nil, nil, err //nolint:wrapcheck // already names the file
 	}
 	// Presence of ENTIRE_TOKEN is the signal: if it's set at all (LookupEnv,

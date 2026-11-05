@@ -45,6 +45,11 @@ func TestLoad(t *testing.T) {
 				if !errors.Is(err, ErrBadConfig) || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("Load() err = %v, want ErrBadConfig naming %q", err, tc.wantErr)
 				}
+				for _, want := range []string{filepath.Join(dir, FileName), "fix or remove it"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("Load() err = %q, want it to contain %q", err, want)
+					}
+				}
 				return
 			}
 			if err != nil {

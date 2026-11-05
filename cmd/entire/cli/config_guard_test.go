@@ -10,6 +10,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/internal/entireclient/tokenstore"
+	"github.com/entireio/cli/internal/entireclient/userconfig"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 
 	"github.com/spf13/cobra"
@@ -142,7 +143,7 @@ func TestCheckConfigBeforeRun_EveryCommand(t *testing.T) {
 			mode := configCheckMode(cmd)
 			wantErr := mode != configCheckSkip
 			err := checkConfigBeforeRun(cmd)
-			if gotErr := errors.Is(err, tokenstore.ErrBadConfig); gotErr != wantErr {
+			if gotErr := errors.Is(err, userconfig.ErrBadConfig); gotErr != wantErr {
 				t.Errorf("%q (ENTIRE_TOKEN set: %v): err = %v, want ErrBadConfig %v", cmd.CommandPath(), envToken, err, wantErr)
 			}
 		}
@@ -179,7 +180,7 @@ func TestRoot_BadConfigFailsEarly(t *testing.T) {
 	for _, args := range [][]string{{"auth", "status"}, {"login", "--device"}, {"status"}} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			out, err := executeRoot(t, args...)
-			if !errors.Is(err, tokenstore.ErrBadConfig) {
+			if !errors.Is(err, userconfig.ErrBadConfig) {
 				t.Fatalf("err = %v, want ErrBadConfig", err)
 			}
 			if out != "" {
@@ -198,7 +199,7 @@ func TestRoot_EnvTokenStillChecksConfig(t *testing.T) {
 	for _, args := range [][]string{{"status"}, {"login", "--device"}, {"auth", "login", "--device"}, {"logout"}, {"auth", "logout"}} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			out, err := executeRoot(t, args...)
-			if !errors.Is(err, tokenstore.ErrBadConfig) {
+			if !errors.Is(err, userconfig.ErrBadConfig) {
 				t.Fatalf("err = %v, want ErrBadConfig", err)
 			}
 			if out != "" {
@@ -230,7 +231,7 @@ func TestDoctor_ReportsBadConfig(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetOut(&out)
 	err := checkUserConfig(cmd)
-	if !errors.Is(err, tokenstore.ErrBadConfig) {
+	if !errors.Is(err, userconfig.ErrBadConfig) {
 		t.Fatalf("err = %v, want ErrBadConfig", err)
 	}
 	for _, want := range []string{"Per-user config: INVALID", `unknown key "tokenstore"`} {

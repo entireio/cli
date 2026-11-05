@@ -48,6 +48,12 @@ func FilePath() string {
 	return filepath.Join(dir, FileName)
 }
 
+// Check reports an unusable config.json.
+func Check() error {
+	_, err := Load()
+	return err
+}
+
 // Load reads config.json; missing means zero.
 func Load() (Config, error) {
 	// Bad override: its consumers report it.

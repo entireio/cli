@@ -18,7 +18,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/testutil/gitenv"
 	"github.com/entireio/cli/internal/entireclient/httpclient"
-	"github.com/entireio/cli/internal/entireclient/tokenstore"
+	"github.com/entireio/cli/internal/entireclient/userconfig"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 	"github.com/entireio/cli/internal/remotehelper/transport"
 )
@@ -547,13 +547,13 @@ func TestResolveCreds_BadConfigFailsEarly(t *testing.T) {
 	// A nil client panics if discovery runs.
 	dummyURL := &url.URL{Scheme: "entire", Host: "cluster.example.com"}
 	_, _, err := resolveCreds(t.Context(), dummyURL, false, nil)
-	if !errors.Is(err, tokenstore.ErrBadConfig) {
+	if !errors.Is(err, userconfig.ErrBadConfig) {
 		t.Fatalf("err = %v, want ErrBadConfig", err)
 	}
 	// ENTIRE_TOKEN doesn't skip the check.
 	t.Setenv(auth.EnvTokenVar, "x")
 	_, _, err = resolveCreds(t.Context(), dummyURL, false, nil)
-	if !errors.Is(err, tokenstore.ErrBadConfig) {
+	if !errors.Is(err, userconfig.ErrBadConfig) {
 		t.Fatalf("with %s: err = %v, want ErrBadConfig", auth.EnvTokenVar, err)
 	}
 }

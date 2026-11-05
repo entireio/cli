@@ -1,7 +1,7 @@
 package cli
 
 import (
-	"github.com/entireio/cli/internal/entireclient/tokenstore"
+	"github.com/entireio/cli/internal/entireclient/userconfig"
 
 	"github.com/spf13/cobra"
 )
@@ -44,5 +44,5 @@ func checkConfigBeforeRun(cmd *cobra.Command) error {
 	if configCheckMode(cmd) == configCheckSkip {
 		return nil
 	}
-	return tokenstore.CheckConfig() //nolint:wrapcheck // already names the file
+	return userconfig.Check() //nolint:wrapcheck // already names the file
 }
