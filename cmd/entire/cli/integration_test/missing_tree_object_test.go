@@ -11,7 +11,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
-	"github.com/entireio/cli/cmd/entire/cli/testutil/gitenv"
 	"github.com/stretchr/testify/require"
 )
 
@@ -35,7 +34,7 @@ func TestMissingSubtreeObject_HooksDoNotBlockCommit(t *testing.T) {
 			"src tree %s must be a loose object to delete", srcTree)
 		check := execx.NonInteractive(t.Context(), "git", "cat-file", "-e", srcTree)
 		check.Dir = env.RepoDir
-		check.Env = gitenv.Isolated()
+		check.Env = testutil.GitIsolatedEnv()
 		require.Error(t, check.Run(), "src tree %s must be absent", srcTree)
 	}
 	deleteLooseObject()
@@ -56,15 +55,19 @@ func TestMissingSubtreeObject_HooksDoNotBlockCommit(t *testing.T) {
 	coding.CreateTranscript("Add notes", []FileChange{{Path: "NOTES.md", Content: "notes\n"}})
 	require.NoError(t, env.SimulateStop(coding.ID, coding.TranscriptPath), "stop hook on a coding turn")
 
+	// Run the hooks directly: the GitCommit*WithHooks helpers log hook
+	// failures instead of failing the test.
 	testutil.RunGit(t, env.RepoDir, "add", "NOTES.md")
 	msgFile := env.commitMsgFile()
 	require.NoError(t, os.WriteFile(msgFile, []byte("Add notes"), 0o600))
-	prep := env.prepareCommitMsgCmd(false, msgFile, "message")
+	prep := env.prepareCommitMsgCmd(true, msgFile, "message")
 	prep.Env = append(prep.Env, gitNoEditorEnv)
 	requireHookSucceeds(t, prep, "prepare-commit-msg")
 
-	// git rebuilds the src tree from the index while committing; delete it
-	// again so post-commit sees the same gap in both HEAD and its parent.
+	// git writes the missing src tree again while committing; delete it
+	// again so post-commit sees the same gap in both HEAD and its parent. If
+	// a future git stops rewriting it, the delete fails rather than passing
+	// vacuously.
 	testutil.RunGit(t, env.RepoDir, "commit", "--no-verify", "--no-gpg-sign", "-F", msgFile)
 	deleteLooseObject()
 	post := execx.NonInteractive(t.Context(), getTestBinary(), "hooks", "git", "post-commit")

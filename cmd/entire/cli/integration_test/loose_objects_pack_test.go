@@ -45,9 +45,9 @@ func TestLooseObjectsMaintenancePack_FilesTouchedStayAccurate(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, looseNamedPacks, "git maintenance should write a loose-<hash>.pack")
 
-	// A root-only commit leaves HEAD's root tree loose while src stays packed.
-	// The git CLI makes it, as the user's git would; go-git staging is the
-	// code under test.
+	// Commit with the git CLI, which writes only the changed root tree, so the
+	// src tree stays in the loose-<hash> pack alone. Staging through go-git
+	// would read that pack itself and fail before any hook runs.
 	env.WriteFile("README.md", "# Test Repository\n\nUpdated.\n")
 	testutil.RunGit(t, env.RepoDir, "add", "README.md")
 	testutil.RunGit(t, env.RepoDir, "commit", "-m", "Update README")

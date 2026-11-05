@@ -30,7 +30,7 @@ require (
 	// loose-objects task writes; before it, objects stored only there were
 	// "not found" and Status reported every file under their trees as
 	// modified. go-git#2556 makes an unreadable subtree an error instead of a
-	// silently short walk. Move to a plain tag once one includes both.
+	// silently short walk. Move to a plain tag once one includes f07160f8.
 	github.com/go-git/go-git/v6 v6.0.0-beta.1.0.20261105090440-f07160f87eaa
 	github.com/go-git/x/plugin/objectsigner/auto v0.1.1-0.20260624122410-382b2905c041
 	github.com/go-git/x/plugin/objectsigner/program v0.0.0-20260624122410-382b2905c041
