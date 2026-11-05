@@ -126,7 +126,7 @@ func newTrailTimelineCmd(mode *trailMode) *cobra.Command {
 		}
 		return nil
 	}
-	cmd.Flags().IntVar(&pageSize, "limit", 50, fmt.Sprintf("Page size (1-%d)", trailListServerMaxLimit))
+	cmd.Flags().IntVarP(&pageSize, "limit", "n", 50, fmt.Sprintf("Page size (1-%d)", trailListServerMaxLimit))
 	cmd.Flags().StringVar(&pageToken, "page-token", "", "Continue from a previous page's token")
 	return cmd
 }
@@ -268,7 +268,7 @@ func newTrailSessionsCmd(mode *trailMode) *cobra.Command {
 				fmt.Fprintf(cmd.OutOrStdout(), "No sessions on %s\n", selected.description())
 				return nil
 			}
-			return printTable(cmd.OutOrStdout(), []string{"SESSION", "AGENT", colHeaderModel, "STARTED", "CHECKPOINTS", "NAME"}, out.Sessions, trailSessionRow)
+			return printTable(cmd.OutOrStdout(), []string{"SESSION", colHeaderAgent, colHeaderModel, "STARTED", "CHECKPOINTS", "NAME"}, out.Sessions, trailSessionRow)
 		})
 }
 

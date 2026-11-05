@@ -67,7 +67,7 @@ func printTrailChangeAgents(w io.Writer, raw json.RawMessage) error {
 		return nil
 	}
 	fmt.Fprintln(w, "  Agents:")
-	err = printTable(w, []string{"AGENT", "READING", "TREND", "STATUS", "HEAD", "RUN"}, agents, func(a api.TrailAgent) []string {
+	err = printTable(w, []string{colHeaderAgent, "READING", "TREND", "STATUS", "HEAD", "RUN"}, agents, func(a api.TrailAgent) []string {
 		status, head, run := "", "", ""
 		if a.LatestRun != nil {
 			status = a.LatestRun.Status

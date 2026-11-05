@@ -211,7 +211,9 @@ always runnable in every build.
   its own deadline (`logoutLoginTimeout`); a cancelled context stops the sweep
   with the unreached logins intact, and a failed local removal or an interrupt
   fails the command
-- `doctor`: bare runs the scan-and-fix flow, plus `trace`, `logs`, `bundle`
+- `doctor`: bare runs the scan-and-fix flow, plus `trace`, `logs`, `bundle` and
+  `migrate-checkpoints`, which is also where every message about a legacy
+  checkpoint whose `v1` copies diverged points
 - `cluster`: the control plane's data-plane cluster catalog — `list` only, since
   clusters are provisioned by Entire rather than by users. It renders `GET
   /clusters` (`coreapi.ListClusters`, the same call the mirror wizard and
@@ -246,7 +248,12 @@ always runnable in every build.
   project's existing agent of that preset to it (one agent per preset per
   project), refusing `--disabled`/`--environment` an existing agent cannot
   honor. Creates send a fresh `Idempotency-Key` and replaces the agent's
-  `If-Match` etag, as entire-api requires. Also
+  `If-Match` etag, as entire-api requires. `agent run`
+  (`list`/`show`/`cancel`/`retry`) reads and acts on the agents' runs through
+  `/{host}/{project}/runs`; `list` prints one page with its cursor, run IDs
+  must be ULIDs before any request, `retry` sends an `Idempotency-Key`, and
+  `--json` passes the server's runs through. What the agents did on one trail
+  change is `trail finding`, and `trail rerun-review` starts them. Also
   `grant` (`add`/`list`/`remove`): project access for a `provider:handle`
   grantee, roles reader/writer/admin; both `add` and `remove` take the grantee
   optionally (see the grant-subtree notes below). `create <name> --owner <ref>`
