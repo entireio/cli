@@ -2,9 +2,11 @@ package checkpoint
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -349,4 +351,176 @@ func TestMigrateBranchToRefs_AsksAgainWhenThePassedOverCopyChanges(t *testing.T)
 
 	require.NoError(t, err)
 	assert.Len(t, c.asked, 1)
+}
+
+var upstreamV1 = plumbing.NewRemoteReferenceName("upstream", DefaultV1Refs().Primary.Short())
+
+// placeUpstream points the elected checkpoint remote's tracking v1 at commit
+// and origin's at the shared base, so only upstream's copy changed remotely.
+func (h v1History) placeUpstream(t *testing.T, local, upstream plumbing.Hash) {
+	t.Helper()
+	h.f.setV1(t, local)
+	require.NoError(t, h.f.repo.Storer.SetReference(plumbing.NewHashReference(upstreamV1, upstream)))
+	require.NoError(t, h.f.repo.Storer.SetReference(plumbing.NewHashReference(originV1, h.base)))
+}
+
+// The write path reads the elected checkpoint remote's copy first, so the
+// command it points to must read the same copies, or it finds nothing to do.
+func TestResolveDivergedLegacyCheckpoints_ReadsTheElectedCheckpointRemote(t *testing.T) {
+	t.Parallel()
+	h := newV1History(t)
+	upstream := h.commitOnTop(t, h.base, h.f.cid, "teammate-on-upstream")
+	local := h.commitOnTop(t, h.base, h.f.cid, "unpushed-on-v1")
+	h.placeUpstream(t, local, upstream)
+	c := &chooser{keep: upstreamV1}
+
+	result, err := ResolveDivergedLegacyCheckpoints(t.Context(), h.f.repo,
+		MigrateOptions{Choose: c.choose, ReadRemotes: []string{"upstream", "origin"}}, nil)
+
+	require.NoError(t, err)
+	require.Len(t, c.asked, 1)
+	assert.Equal(t, upstreamV1, c.asked[0].Remote.Ref)
+	assert.Equal(t, []id.CheckpointID{h.f.cid}, result.Migrated)
+	assert.Equal(t, []string{"before-switch", "teammate-on-upstream"}, h.f.refSessionIDs(t))
+}
+
+// A checkpoint this clone's v1 does not hold can still diverge between two
+// remote copies, and the write path refuses it all the same.
+func TestResolveDivergedLegacyCheckpoints_VisitsACheckpointMissingFromLocalV1(t *testing.T) {
+	t.Parallel()
+	h := newV1History(t)
+	upstream := h.commitOnTop(t, h.base, h.f.cid, "teammate-on-upstream")
+	origin := h.commitOnTop(t, h.base, h.f.cid, "teammate-on-origin")
+	empty := &plumbing.MemoryObject{}
+	require.NoError(t, (&object.Tree{}).Encode(empty))
+	emptyTree, err := h.f.repo.Storer.SetEncodedObject(empty)
+	require.NoError(t, err)
+	localWithout, err := CreateCommit(t.Context(), h.f.repo, emptyTree, plumbing.ZeroHash, "init", "T", "t@example.com")
+	require.NoError(t, err)
+	h.f.setV1(t, localWithout)
+	require.NoError(t, h.f.repo.Storer.SetReference(plumbing.NewHashReference(upstreamV1, upstream)))
+	require.NoError(t, h.f.repo.Storer.SetReference(plumbing.NewHashReference(originV1, origin)))
+	c := &chooser{}
+
+	_, err = ResolveDivergedLegacyCheckpoints(t.Context(), h.f.repo,
+		MigrateOptions{Choose: c.choose, ReadRemotes: []string{"upstream", "origin"}}, nil)
+
+	require.NoError(t, err)
+	require.Len(t, c.asked, 1)
+	assert.Equal(t, h.f.cid, c.asked[0].ID)
+}
+
+// Keeping the copy an earlier automatic import already wrote is still a
+// choice: later runs must not ask again or list it.
+func TestMigrateBranchToRefs_RemembersChoosingTheCopyTheRefAlreadyHolds(t *testing.T) {
+	t.Parallel()
+	h := newV1History(t)
+	local := h.commitOnTop(t, h.base, h.f.cid, "unpushed-on-v1")
+	h.place(t, local, h.base)
+	_, err := MigrateBranchToRefs(t.Context(), h.f.repo, MigrateOptions{})
+	require.NoError(t, err)
+	remote := h.commitOnTop(t, h.base, h.f.cid, "teammate-on-v1")
+	h.place(t, local, remote)
+	_, err = MigrateBranchToRefs(t.Context(), h.f.repo, MigrateOptions{Choose: (&chooser{keep: localV1}).choose})
+	require.NoError(t, err)
+
+	again := &chooser{keep: originV1}
+	_, err = MigrateBranchToRefs(t.Context(), h.f.repo, MigrateOptions{Choose: again.choose})
+	require.NoError(t, err)
+	unattended, err := MigrateBranchToRefs(t.Context(), h.f.repo, MigrateOptions{})
+	require.NoError(t, err)
+
+	assert.Empty(t, again.asked)
+	assert.Empty(t, unattended.Diverged)
+	assert.Equal(t, []string{"before-switch", "unpushed-on-v1"}, h.f.refSessionIDs(t))
+}
+
+// Keeping a copy older in the ref's history moves the ref back to it rather
+// than reporting it as already up to date.
+func TestMigrateBranchToRefs_KeepingAnEarlierCopyMovesTheRefToIt(t *testing.T) {
+	t.Parallel()
+	h := newV1History(t)
+	local := h.commitOnTop(t, h.base, h.f.cid, "unpushed-on-v1")
+	h.place(t, local, h.base)
+	_, err := MigrateBranchToRefs(t.Context(), h.f.repo, MigrateOptions{})
+	require.NoError(t, err)
+	remote := h.commitOnTop(t, h.base, h.f.cid, "teammate-on-v1")
+	h.place(t, local, remote)
+	_, err = MigrateBranchToRefs(t.Context(), h.f.repo, MigrateOptions{Choose: (&chooser{keep: originV1}).choose})
+	require.NoError(t, err)
+	remoteAgain := h.commitOnTop(t, remote, h.f.cid, "teammate-again")
+	h.place(t, local, remoteAgain)
+
+	result, err := MigrateBranchToRefs(t.Context(), h.f.repo, MigrateOptions{Choose: (&chooser{keep: localV1}).choose})
+
+	require.NoError(t, err)
+	assert.Equal(t, []id.CheckpointID{h.f.cid}, result.Migrated)
+	assert.Equal(t, []string{"before-switch", "unpushed-on-v1"}, h.f.refSessionIDs(t))
+}
+
+// Choices are this clone's own record; nothing in a checkpoint ref's history,
+// which a remote can write, stands in for one.
+func TestMigrateBranchToRefs_RefHistoryCannotRecordAChoice(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	h := divergedV1(t)
+	remoteTree, err := migratedCheckpointTree(ctx, h.f.repo, h.f.cid, h.subtreeAt(t, h.trackingTip(t)), true)
+	require.NoError(t, err)
+	planted, err := CreateCommit(ctx, h.f.repo, remoteTree, plumbing.ZeroHash,
+		"Import\n\nEntire-Chosen-Over: "+h.subtreeAt(t, h.f.v1Tip(t)).String()+"\n", "M", "m@example.com")
+	require.NoError(t, err)
+	refName, err := RefName(h.f.cid)
+	require.NoError(t, err)
+	require.NoError(t, h.f.repo.Storer.SetReference(plumbing.NewHashReference(refName, planted)))
+	c := &chooser{}
+
+	_, err = MigrateBranchToRefs(ctx, h.f.repo, MigrateOptions{Choose: c.choose})
+
+	require.NoError(t, err)
+	assert.Len(t, c.asked, 1)
+}
+
+func TestResolveDivergedLegacyCheckpoints_NamesAnUnreachableRemote(t *testing.T) {
+	t.Parallel()
+	h := divergedV1(t)
+	fetch := func(context.Context, plumbing.ReferenceName) error { return errors.New("network is unreachable") }
+
+	_, err := ResolveDivergedLegacyCheckpoints(t.Context(), h.f.repo, MigrateOptions{Choose: (&chooser{keep: localV1}).choose}, fetch)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "couldn't reach the remote to check checkpoint "+h.f.cid.String())
+	assert.Contains(t, err.Error(), "nothing was changed")
+	h.f.requireNoRef(t)
+}
+
+// A ref that appears while the person chooses wins, and the result says so
+// instead of reading as nothing to do.
+func TestResolveDivergedLegacyCheckpoints_ReportsARefThatAppearedWhileChoosing(t *testing.T) {
+	t.Parallel()
+	h := divergedV1(t)
+	refName, err := RefName(h.f.cid)
+	require.NoError(t, err)
+	choose := func(context.Context, DivergedLegacyCheckpoint) (plumbing.ReferenceName, error) {
+		writeRoutingCheckpoint(t, h.f.refs, h.f.cid, "fetched-meanwhile")
+		return localV1, nil
+	}
+
+	result, err := ResolveDivergedLegacyCheckpoints(t.Context(), h.f.repo, MigrateOptions{Choose: choose}, nil)
+
+	require.NoError(t, err)
+	assert.Empty(t, result.Migrated)
+	assert.Equal(t, []id.CheckpointID{h.f.cid}, result.Superseded)
+	_, err = h.f.repo.Reference(refName, true)
+	require.NoError(t, err)
+}
+
+func (h v1History) subtreeAt(t *testing.T, commit plumbing.Hash) plumbing.Hash {
+	t.Helper()
+	c, err := h.f.repo.CommitObject(commit)
+	require.NoError(t, err)
+	root, err := c.Tree()
+	require.NoError(t, err)
+	sub, err := root.Tree(h.f.cid.Path())
+	require.NoError(t, err)
+	return sub.Hash
 }

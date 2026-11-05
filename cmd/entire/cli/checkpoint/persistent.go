@@ -2197,17 +2197,6 @@ func (e *LegacyCheckpointDivergedError) Error() string {
 
 func (e *LegacyCheckpointDivergedError) Unwrap() error { return ErrLegacyCheckpointDiverged }
 
-// RemoteName returns the remote of the first remote-tracking ref among Refs,
-// or "" when neither is one.
-func (e *LegacyCheckpointDivergedError) RemoteName() string {
-	for _, ref := range e.Refs {
-		if name := (LegacyCheckpointCopy{Ref: ref}).RemoteName(); name != "" {
-			return name
-		}
-	}
-	return ""
-}
-
 // checkpointSubtreeHash returns the hash of checkpointID's subtree as a copy
 // from v1 into its own ref takes it. It considers the same tiers as reads (see
 // getSessionsBranchTrees), but where reads stop at the first tier holding the

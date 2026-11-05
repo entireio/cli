@@ -1341,6 +1341,26 @@ func noticeTerminal(line string) bool {
 	return false
 }
 
+type legacyDivergedNoticeKey struct{}
+
+// withLegacyDivergedNotice scopes noticeLegacyDiverged to one commit.
+func withLegacyDivergedNotice(ctx context.Context) context.Context {
+	return context.WithValue(ctx, legacyDivergedNoticeKey{}, &sync.Once{})
+}
+
+// noticeLegacyDiverged tells the person that checkpointID was refused because
+// its v1 copies diverged. Every session that owns the checkpoint fails on it
+// in the same commit, so within a commit's context it prints once.
+func noticeLegacyDiverged(ctx context.Context, checkpointID id.CheckpointID) {
+	text := fmt.Sprintf("[entire] Checkpoint %s was not saved. This commit's session work will be saved with your next "+
+		"commit instead. Run 'entire doctor migrate-checkpoints' to fix it.", checkpointID)
+	if once, ok := ctx.Value(legacyDivergedNoticeKey{}).(*sync.Once); ok {
+		once.Do(func() { noticeTerminal(text) })
+		return
+	}
+	noticeTerminal(text)
+}
+
 // warnStaleEndedSessions emits a rate-limited warning to the terminal when too
 // many non-FullyCondensed ENDED sessions are accumulating.
 func warnStaleEndedSessions(ctx context.Context, count int) {
@@ -1459,7 +1479,7 @@ func SetBeforeCondense(fn func(ctx context.Context, sessions []*SessionState) bo
 }
 
 func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
-	ctx = withGitDir(withCommitAncestry(ctx))
+	ctx = withLegacyDivergedNotice(withGitDir(withCommitAncestry(ctx)))
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 
 	_, openRepoSpan := perf.Start(ctx, "open_repository_and_head")
@@ -2106,8 +2126,7 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 		if errors.Is(err, checkpoint.ErrLegacyCheckpointDiverged) {
 			// The work stays pending, so the next commit's checkpoint takes
 			// it; this commit keeps a trailer for a checkpoint without it.
-			noticeTerminal(fmt.Sprintf("[entire] Checkpoint %s was not saved, this commit's session work will be saved "+
-				"with your next commit instead. Run 'entire doctor migrate-checkpoints' to fix it.", checkpointID))
+			noticeLegacyDiverged(ctx, checkpointID)
 		}
 		return false, nil, nil
 	}

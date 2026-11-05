@@ -56,7 +56,7 @@ func TestLegacyCheckpointDiverged_RefusedSaveIsReportedAndMigrateWontPickACopy(t
 	sameTurn(t, laptop, sess, "after-switch.go", "refused-work-marker")
 	refused := amend(laptop, "after-switch.go")
 	assert.Contains(t, refused, fmt.Sprintf(
-		"[entire] Checkpoint %s was not saved, this commit's session work will be saved with your next commit instead. "+
+		"[entire] Checkpoint %s was not saved. This commit's session work will be saved with your next commit instead. "+
 			"Run 'entire doctor migrate-checkpoints' to fix it.", checkpointID))
 
 	agentTurn(t, laptop, sess, "next.go", "next prompt")
@@ -66,6 +66,16 @@ func TestLegacyCheckpointDiverged_RefusedSaveIsReportedAndMigrateWontPickACopy(t
 	require.NotEqual(t, checkpointID, next)
 	assert.Contains(t, checkpointRefsHolding(t, laptop, "refused-work-marker"), next,
 		"the refused turn's work is saved with the next commit")
+
+	// An agent's commit has no terminal for the notice, so doctor's scan names
+	// the stuck checkpoint too.
+	// Doctor's exit code reflects its other checks (the refused session is
+	// still pending), so only the output is asserted.
+	scan, scanErr := laptop.RunCLIWithError("doctor")
+	t.Logf("doctor exit: %v", scanErr)
+	assert.Contains(t, scan, "Legacy checkpoints: 1 needs a copy chosen")
+	assert.Contains(t, scan, checkpointID+" differs between this clone and origin.")
+	assert.Contains(t, scan, "Fix: run 'entire doctor migrate-checkpoints' to choose which copy to keep.")
 
 	// After the switch, migrate-checkpoints resolves only checkpoints the write
 	// path refused. Without a terminal it cannot ask which copy to keep, so it

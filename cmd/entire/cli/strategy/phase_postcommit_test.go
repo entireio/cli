@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -2737,4 +2738,23 @@ func TestPostCommit_BeforeCondenseSeesTheCondensedSessions(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, s.PostCommit(context.Background()))
 	require.Len(t, seen, 1, "a commit without a trailer condenses nothing, so the hook must not run")
+}
+
+// Every session that owns a refused checkpoint fails on it in the same commit;
+// the person needs the notice once per commit, not once per session.
+// Swaps stderrWriter — do NOT add t.Parallel().
+func TestNoticeLegacyDiverged_OncePerCommit(t *testing.T) {
+	var buf bytes.Buffer
+	oldWriter := stderrWriter
+	stderrWriter = &buf
+	defer func() { stderrWriter = oldWriter }()
+	cid := id.MustCheckpointID("a1b2c3d4e5f6")
+
+	commit := withLegacyDivergedNotice(context.Background())
+	noticeLegacyDiverged(commit, cid)
+	noticeLegacyDiverged(commit, cid)
+	assert.Equal(t, 1, strings.Count(buf.String(), "[entire] Checkpoint a1b2c3d4e5f6 was not saved."))
+
+	noticeLegacyDiverged(withLegacyDivergedNotice(context.Background()), cid)
+	assert.Equal(t, 2, strings.Count(buf.String(), "[entire] Checkpoint a1b2c3d4e5f6 was not saved."), "the next commit says it again")
 }

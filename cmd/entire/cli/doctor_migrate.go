@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"charm.land/huh/v2"
 	git "github.com/go-git/go-git/v6"
@@ -19,6 +20,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
 func newDoctorMigrateCheckpointsCmd() *cobra.Command {
@@ -71,7 +73,9 @@ func runMigrateCheckpoints(ctx context.Context, out io.Writer, dryRun bool, remo
 	defer repo.Close()
 
 	canAsk := interactive.CanPromptInteractively()
-	opts := checkpoint.MigrateOptions{DryRun: dryRun}
+	// The same read-remote chain the write path uses, so this compares the
+	// copies that path refused on and names the same remotes.
+	opts := checkpoint.MigrateOptions{DryRun: dryRun, ReadRemotes: strategy.CheckpointReadRemotes(ctx)}
 	if canAsk {
 		opts.Choose = func(ctx context.Context, d checkpoint.DivergedLegacyCheckpoint) (plumbing.ReferenceName, error) {
 			return chooseLegacyCopy(ctx, out, d)
@@ -81,10 +85,8 @@ func runMigrateCheckpoints(ctx context.Context, out io.Writer, dryRun bool, remo
 	// Once git-refs is the primary store the refs are authoritative and the v1
 	// branch may lag behind them; re-importing its snapshots could only regress
 	// refs. What is left is the checkpoints the write path refuses to copy.
-	afterSwitch := false
-	if cpCfg, _ := settings.LoadCheckpointsConfig(ctx); checkpoint.PrimaryIsRefs(cpCfg) { //nolint:errcheck // fail-soft: a bad checkpoints block already surfaces via Open; default to allowing migration
-		afterSwitch = true
-	}
+	cpCfg, _ := settings.LoadCheckpointsConfig(ctx) //nolint:errcheck // fail-soft: a bad checkpoints block already surfaces via Open; default to allowing migration
+	afterSwitch := checkpoint.PrimaryIsRefs(cpCfg)
 	var result checkpoint.MigrateResult
 	if afterSwitch {
 		result, err = checkpoint.ResolveDivergedLegacyCheckpoints(ctx, repo, opts, FetchCheckpointRef)
@@ -113,14 +115,17 @@ func runMigrateCheckpoints(ctx context.Context, out io.Writer, dryRun bool, remo
 
 func reportMigrateResult(out io.Writer, result checkpoint.MigrateResult, dryRun, afterSwitch bool) {
 	switch {
-	case afterSwitch && len(result.Migrated) == 0 && len(result.Diverged) == 0:
-		fmt.Fprintln(out, "The git-refs store is already the primary checkpoint store — nothing to migrate.")
+	case afterSwitch && len(result.Migrated) == 0 && len(result.Diverged) == 0 && len(result.Superseded) == 0:
+		fmt.Fprintln(out, "The git-refs store is already the primary checkpoint store, so there is nothing to migrate.")
 	case afterSwitch:
 		if len(result.Migrated) > 0 {
 			fmt.Fprintf(out, "Wrote the chosen copy of %d checkpoint(s) to refs.\n", len(result.Migrated))
 		}
+		for _, cid := range result.Superseded {
+			fmt.Fprintf(out, "Checkpoint %s got its own ref from another clone while you chose, so that ref is kept and your choice was not written.\n", cid)
+		}
 	case result.Total == 0:
-		fmt.Fprintln(out, "No checkpoints found on the v1 branch — nothing to migrate.")
+		fmt.Fprintln(out, "No checkpoints found on the v1 branch, so there is nothing to migrate.")
 	default:
 		verb := "Migrated"
 		if dryRun {
@@ -173,10 +178,10 @@ func divergedCopiesLabel(diverged []checkpoint.DivergedLegacyCheckpoint) string 
 // chooseLegacyCopy shows both copies of a diverged checkpoint and asks which
 // one becomes its ref. It returns "" to skip the checkpoint.
 func chooseLegacyCopy(ctx context.Context, out io.Writer, d checkpoint.DivergedLegacyCheckpoint) (plumbing.ReferenceName, error) {
-	local, remote := legacyCopyLabel(d.Local), legacyCopyLabel(d.Remote)
+	local, remote := legacyCopyOption(d.Local.Ref), legacyCopyOption(d.Remote.Ref)
 	width := max(len(local), len(remote)) + 1
 	differing := d.DifferingSessions()
-	fmt.Fprintf(out, "Checkpoint %s differs between %s and %s.\n", d.ID, strings.ToLower(local[:1])+local[1:], remote)
+	fmt.Fprintf(out, "Checkpoint %s differs between %s and %s.\n", d.ID, legacyCopyName(d.Local.Ref), legacyCopyName(d.Remote.Ref))
 	fmt.Fprintf(out, "  %-*s %s\n", width, local+":", legacySessionList(d.Local.SessionIDs, differing))
 	fmt.Fprintf(out, "  %-*s %s\n", width, remote+":", legacySessionList(d.Remote.SessionIDs, differing))
 	if len(differing) > 0 {
@@ -202,21 +207,14 @@ func chooseLegacyCopy(ctx context.Context, out io.Writer, d checkpoint.DivergedL
 	return plumbing.ReferenceName(choice), nil
 }
 
-// legacySessionList joins sessionIDs, marking those in differing. The IDs come
-// from a remote's copy of the checkpoint, so control and format characters
-// are dropped: an escape sequence must not redraw the prompt below them.
+// legacySessionList joins sessionIDs, marking those in differing.
 func legacySessionList(sessionIDs, differing []string) string {
 	if len(sessionIDs) == 0 {
 		return "(sessions not available locally)"
 	}
 	listed := make([]string, len(sessionIDs))
 	for i, sessionID := range sessionIDs {
-		listed[i] = strings.Map(func(r rune) rune {
-			if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
-				return -1
-			}
-			return r
-		}, sessionID)
+		listed[i] = shownSessionID(sessionID)
 		if slices.Contains(differing, sessionID) {
 			listed[i] += " (changed)"
 		}
@@ -224,8 +222,38 @@ func legacySessionList(sessionIDs, differing []string) string {
 	return strings.Join(listed, ", ")
 }
 
-func legacyCopyLabel(c checkpoint.LegacyCheckpointCopy) string {
-	if name := c.RemoteName(); name != "" {
+// maxShownSessionIDRunes caps a session ID shown in the copy prompt. Real IDs
+// are UUIDs or short agent IDs.
+const maxShownSessionIDRunes = 64
+
+// shownSessionID returns sessionID for the copy prompt, or a placeholder when
+// it is not a plain session ID. The IDs come from a remote's copy of the
+// checkpoint: an escape sequence could redraw the prompt, and spaces, commas or
+// parentheses could fake list entries or "(changed)" marks.
+func shownSessionID(sessionID string) string {
+	plain := utf8.RuneCountInString(sessionID) <= maxShownSessionIDRunes &&
+		validation.ValidateSessionID(sessionID) == nil &&
+		!strings.ContainsFunc(sessionID, func(r rune) bool {
+			return unicode.IsSpace(r) || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || strings.ContainsRune(",()", r)
+		})
+	if !plain {
+		return "(invalid session id)"
+	}
+	return sessionID
+}
+
+// legacyCopyName names the v1 copy at ref in a sentence: the remote whose
+// tracking ref it is, or "this clone".
+func legacyCopyName(ref plumbing.ReferenceName) string {
+	if name := (checkpoint.LegacyCheckpointCopy{Ref: ref}).RemoteName(); name != "" {
+		return name
+	}
+	return "this clone"
+}
+
+// legacyCopyOption names the v1 copy at ref as a prompt option.
+func legacyCopyOption(ref plumbing.ReferenceName) string {
+	if name := (checkpoint.LegacyCheckpointCopy{Ref: ref}).RemoteName(); name != "" {
 		return name
 	}
 	return "This clone"
@@ -330,13 +358,10 @@ func withLegacyDivergedFix(err error) error {
 	if !errors.As(err, &diverged) {
 		return err
 	}
-	remote := diverged.RemoteName()
-	if remote == "" {
-		remote = "a remote"
-	}
 	return &legacyDivergedFixError{
-		msg: fmt.Sprintf("checkpoint %s has different copies on this clone and %s. "+
-			"Run 'entire doctor migrate-checkpoints' to choose one.", diverged.CheckpointID, remote),
+		msg: fmt.Sprintf("checkpoint %s has different copies on %s and %s. "+
+			"Run 'entire doctor migrate-checkpoints' to choose one.",
+			diverged.CheckpointID, legacyCopyName(diverged.Refs[0]), legacyCopyName(diverged.Refs[1])),
 		err: err,
 	}
 }
@@ -350,3 +375,52 @@ type legacyDivergedFixError struct {
 
 func (e *legacyDivergedFixError) Error() string { return e.msg }
 func (e *legacyDivergedFixError) Unwrap() error { return e.err }
+
+// checkDivergedLegacyCheckpoints reports the checkpoints from before the switch
+// to git-refs that saves keep refusing because their v1 copies diverged. The
+// post-commit notice reaches only a person at a terminal, so this is how a
+// refusal during an agent's commit surfaces. It runs only under git-refs,
+// reads local copies only (a dry run fetches nothing) and changes nothing. It
+// reports its own failure, like doctor's other report-only checks.
+func checkDivergedLegacyCheckpoints(cmd *cobra.Command) {
+	ctx := cmd.Context()
+	w := cmd.OutOrStdout()
+	cpCfg, _ := settings.LoadCheckpointsConfig(ctx) //nolint:errcheck // fail-soft: a bad checkpoints block already surfaces via Open
+	if !checkpoint.PrimaryIsRefs(cpCfg) {
+		return
+	}
+	result, err := findDivergedLegacyCheckpoints(ctx)
+	if err != nil {
+		fmt.Fprintf(w, "Legacy checkpoints: could not check: %v\n", err)
+		return
+	}
+	if len(result.Diverged) == 0 {
+		fmt.Fprintln(w, "✓ Legacy checkpoints: OK")
+		return
+	}
+	if len(result.Diverged) == 1 {
+		fmt.Fprintln(w, "Legacy checkpoints: 1 needs a copy chosen")
+	} else {
+		fmt.Fprintf(w, "Legacy checkpoints: %d need a copy chosen\n", len(result.Diverged))
+	}
+	lines := make([]string, len(result.Diverged))
+	for i, d := range result.Diverged {
+		lines[i] = fmt.Sprintf("%s differs between %s and %s.", d.ID, legacyCopyName(d.Local.Ref), legacyCopyName(d.Remote.Ref))
+	}
+	printCappedList(w, lines, func(line string) string { return line })
+	fmt.Fprintln(w, "  Fix: run 'entire doctor migrate-checkpoints' to choose which copy to keep.")
+}
+
+func findDivergedLegacyCheckpoints(ctx context.Context) (checkpoint.MigrateResult, error) {
+	repo, err := strategy.OpenRepository(ctx)
+	if err != nil {
+		return checkpoint.MigrateResult{}, fmt.Errorf("open repository: %w", err)
+	}
+	defer repo.Close()
+	result, err := checkpoint.ResolveDivergedLegacyCheckpoints(ctx, repo,
+		checkpoint.MigrateOptions{DryRun: true, ReadRemotes: strategy.CheckpointReadRemotes(ctx)}, nil)
+	if err != nil {
+		return result, fmt.Errorf("find diverged legacy checkpoints: %w", err)
+	}
+	return result, nil
+}
