@@ -56,6 +56,9 @@ func (c *Client) WithAuthSessionsPath(path string) *Client {
 // caller reintroduce that silently, sending a staging login's bearer to
 // entire.io, so the base URL is a required argument and every caller has to say
 // where it got it.
+// BaseURL is the API origin requests are sent to.
+func (c *Client) BaseURL() string { return c.baseURL }
+
 func NewClientWithBaseURL(token, baseURL string) *Client {
 	return NewClientWithTransport(token, baseURL, nil)
 }
@@ -306,6 +309,9 @@ type ErrorResponse struct {
 	Title     string `json:"title"`
 	Code      string `json:"code"`
 	RequestID string `json:"request_id"`
+	// ChangeNumber is the trail_branch_mismatch extension: the number of the
+	// Change holding the caller's branch.
+	ChangeNumber int `json:"change_number"`
 }
 
 // ErrorCode extracts the stable machine-readable code, if the server sent one.
@@ -356,6 +362,9 @@ type HTTPError struct {
 	Code string
 	// RequestID is the RFC 9457 request_id extension when the server sent one.
 	RequestID string
+	// ChangeNumber is set on a trail_branch_mismatch refusal: the number of
+	// the Change that holds the caller's branch.
+	ChangeNumber int
 }
 
 func (e *HTTPError) Error() string {
@@ -396,6 +405,7 @@ func CheckResponse(resp *http.Response) error {
 	if err := json.Unmarshal(body, &parsed); err == nil {
 		apiError.RequestID = strings.TrimSpace(parsed.RequestID)
 		apiError.Code = parsed.ErrorCode()
+		apiError.ChangeNumber = parsed.ChangeNumber
 		if message := parsed.Message(); message != "" {
 			apiError.Message = message
 			return apiError

@@ -162,31 +162,41 @@ type ProjectTrailUpdateRequest struct {
 // the HTTP ETag (timestamp text in the body loses precision). It never retries
 // writes or downgrades a failed conditional write to an unconditional one.
 func (c *Client) ProjectTrailRequest(ctx context.Context, method, path string, body any, headers http.Header, out any) (string, error) {
+	respHeaders, err := c.ProjectTrailRequestHeaders(ctx, method, path, body, headers, out)
+	if err != nil {
+		return "", err
+	}
+	return respHeaders.Get("ETag"), nil
+}
+
+// ProjectTrailRequestHeaders is ProjectTrailRequest for callers that read
+// response headers beyond the ETag.
+func (c *Client) ProjectTrailRequestHeaders(ctx context.Context, method, path string, body any, headers http.Header, out any) (http.Header, error) {
 	// A nil reader, not an empty one: the client declares a JSON Content-Type
 	// for any non-nil body, which a bodyless GET or DELETE must not carry.
 	var reader io.Reader
 	if body != nil {
 		encoded, err := json.Marshal(body)
 		if err != nil {
-			return "", fmt.Errorf("encode project trail request: %w", err)
+			return nil, fmt.Errorf("encode project trail request: %w", err)
 		}
 		reader = bytes.NewReader(encoded)
 	}
 	resp, err := c.Request(ctx, method, path, headers, reader)
 	if err != nil {
-		return "", fmt.Errorf("project trail request: %w", err)
+		return nil, fmt.Errorf("project trail request: %w", err)
 	}
 	defer resp.Body.Close()
 	if err := CheckResponse(resp); err != nil {
 		if IsHTTPErrorStatus(err, http.StatusPreconditionFailed) {
-			return "", errors.New("project trail changed since it was read; read it again before retrying")
+			return nil, errors.New("project trail changed since it was read; read it again before retrying")
 		}
-		return "", fmt.Errorf("project trail request: %w", err)
+		return nil, fmt.Errorf("project trail request: %w", err)
 	}
 	if out != nil {
 		if err := DecodeJSON(resp, out); err != nil {
-			return "", fmt.Errorf("decode project trail: %w", err)
+			return nil, fmt.Errorf("decode project trail: %w", err)
 		}
 	}
-	return resp.Header.Get("ETag"), nil
+	return resp.Header, nil
 }

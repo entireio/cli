@@ -438,7 +438,7 @@ func newProjectTrailUpdateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			current, etag, err := readProjectTrailForUpdate(cmd, selector, target)
+			current, etag, guard, err := readProjectTrailForUpdate(cmd, selector, target)
 			if err != nil {
 				return err
 			}
@@ -459,12 +459,14 @@ func newProjectTrailUpdateCmd() *cobra.Command {
 				patch.Assignees = &assignees
 			}
 			var out api.ProjectTrail
-			if _, err := target.Client.ProjectTrailRequest(cmd.Context(), http.MethodPatch, target.path(), patch, http.Header{"If-Match": {etag}}, &out); err != nil {
-				return fmt.Errorf("update project trail: %w", err)
+			headers, err := target.Client.ProjectTrailRequestHeaders(cmd.Context(), http.MethodPatch, guard.updatePath(target.path()), patch, http.Header{"If-Match": {etag}}, &out)
+			if err != nil {
+				return guard.serverRefusal(fmt.Errorf("update project trail: %w", err))
 			}
 			if err := target.validateResponse(out); err != nil {
 				return err
 			}
+			guard.checkedNote(cmd, headers)
 			return printProjectTrail(cmd, out, target.Change, nil)
 		},
 	}

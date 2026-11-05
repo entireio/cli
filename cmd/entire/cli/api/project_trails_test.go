@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -80,4 +81,34 @@ func TestProjectTrailRequestSendsBodyOnlyWhenGiven(t *testing.T) {
 	require.Equal(t, seen{}, got[http.MethodGet])
 	require.Equal(t, seen{}, got[http.MethodDelete])
 	require.Equal(t, seen{contentType: "application/json", length: 2}, got[http.MethodPatch])
+}
+
+func TestProjectTrailRequestHeadersAndBranchRefusal(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("from_branch") == "" {
+			w.Header().Set("Entire-Branch-Check", "checked")
+			if _, err := w.Write([]byte(`{}`)); err != nil {
+				t.Error(err)
+			}
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		if _, err := w.Write([]byte(`{"error":"refused","code":"trail_branch_mismatch","change_number":7}`)); err != nil {
+			t.Error(err)
+		}
+	}))
+	t.Cleanup(server.Close)
+	client := NewClientWithBaseURL("token", server.URL)
+
+	headers, err := client.ProjectTrailRequestHeaders(t.Context(), http.MethodPatch, "/t", map[string]string{}, nil, nil)
+	if err != nil || headers.Get("Entire-Branch-Check") != "checked" {
+		t.Fatalf("headers: %v %v", headers, err)
+	}
+	_, err = client.ProjectTrailRequestHeaders(t.Context(), http.MethodPatch, "/t?from_branch=b", map[string]string{}, nil, nil)
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) || httpErr.Code != "trail_branch_mismatch" || httpErr.ChangeNumber != 7 {
+		t.Fatalf("refusal: %#v", err)
+	}
 }

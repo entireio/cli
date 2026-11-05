@@ -2061,22 +2061,14 @@ func findTrailByNumberAtPath(ctx context.Context, client *api.Client, basePath s
 }
 
 func findTrailAtPath(ctx context.Context, client *api.Client, basePath string, match func(api.TrailResource) bool) (*api.TrailResource, error) {
-	found, _, err := scanTrailPages(ctx, client, basePath, match)
-	return found, err
-}
-
-// scanTrailPages walks bounded opaque-cursor pages so selector lookups do not
-// silently miss trails beyond the first entire-api page. complete reports
-// whether a miss covered every page: it is false when the scan stopped at
-// trailFindMaxPages with a next cursor still to follow. A repeated cursor ends
-// the scan as complete, since following it would only revisit pages.
-func scanTrailPages(ctx context.Context, client *api.Client, basePath string, match func(api.TrailResource) bool) (found *api.TrailResource, complete bool, err error) {
+	// Walk bounded opaque-cursor pages so selector lookups do not silently miss
+	// trails beyond the first entire-api page.
 	cursor := ""
 	seenTokens := map[string]bool{}
 	for range trailFindMaxPages {
 		resp, err := client.Get(ctx, basePath+trailListPageQuery(nil, trailListServerMaxLimit, cursor))
 		if err != nil {
-			return nil, false, fmt.Errorf("list trails: %w", err)
+			return nil, fmt.Errorf("list trails: %w", err)
 		}
 
 		var listResp api.TrailListResponse
@@ -2091,24 +2083,24 @@ func scanTrailPages(ctx context.Context, client *api.Client, basePath string, ma
 			return nil
 		}()
 		if decodeErr != nil {
-			return nil, false, decodeErr
+			return nil, decodeErr
 		}
 
 		for i := range listResp.Trails {
 			if match(listResp.Trails[i]) {
-				return &listResp.Trails[i], true, nil
+				return &listResp.Trails[i], nil
 			}
 		}
 		if listResp.NextCursor == nil || strings.TrimSpace(*listResp.NextCursor) == "" {
-			return nil, true, nil
+			break
 		}
 		cursor = strings.TrimSpace(*listResp.NextCursor)
 		if seenTokens[cursor] {
-			return nil, true, nil
+			break
 		}
 		seenTokens[cursor] = true
 	}
-	return nil, false, nil
+	return nil, nil //nolint:nilnil // nil, nil means "not found" — callers check both
 }
 
 // trailsBasePath returns the API path prefix for trails endpoints
