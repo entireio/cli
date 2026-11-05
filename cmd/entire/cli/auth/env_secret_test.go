@@ -6,10 +6,13 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 )
 
 // testServiceAccountSecret is Core's v1 test vector (TestSecretFormatVector
@@ -22,7 +25,9 @@ const testServiceAccountSecret = "ent_svc_us_01JABCDEFGHJKMNPQRSTVWXYZ0_01JZYXWV
 // computed independently with Python's zlib.crc32.
 const testServiceAccountSecretEU = "ent_svc_eu_01JABCDEFGHJKMNPQRSTVWXYZ0_01JZYXWVTSRQPNMKJHGFEDCBA9_aaaqeayeaudaocajbifqydiob4ibceqtcqkrmfyydenbwha5dypq3BaGLv"
 
-// fakeSecretCore answers /oauth/token like a Core and counts exchanges.
+// fakeSecretCore answers /oauth/token like a Core and counts exchanges. With
+// jwt unset it mints a token for the requested account and audience that
+// expires after expiresIn on the secretNow clock.
 type fakeSecretCore struct {
 	t         *testing.T
 	exchanges atomic.Int32
@@ -30,6 +35,13 @@ type fakeSecretCore struct {
 	jwt       string
 	expiresIn int
 	lastForm  url.Values
+	// during runs inside the exchange, while the exchange lock is held.
+	during func()
+}
+
+func secretTokenJWT(t *testing.T, sub, aud string, exp time.Time) string {
+	t.Helper()
+	return makeJWT(t, fmt.Sprintf(`{"sub":%q,"aud":%q,"exp":%d}`, sub, aud, exp.Unix()))
 }
 
 func (f *fakeSecretCore) RoundTrip(r *http.Request) (*http.Response, error) {
@@ -51,11 +63,19 @@ func (f *fakeSecretCore) RoundTrip(r *http.Request) (*http.Response, error) {
 	if f.lastForm, err = url.ParseQuery(string(body)); err != nil {
 		return nil, err
 	}
+	if f.during != nil {
+		f.during()
+	}
 	status := f.status
 	if status == 0 {
 		status = http.StatusOK
 	}
-	payload := fmt.Sprintf(`{"access_token":%q,"token_type":"Bearer","expires_in":%d}`, f.jwt, f.expiresIn)
+	jwt := f.jwt
+	if jwt == "" {
+		exp := secretNow().Add(time.Duration(f.expiresIn) * time.Second)
+		jwt = secretTokenJWT(f.t, f.lastForm.Get("resource"), f.lastForm.Get("audience"), exp)
+	}
+	payload := fmt.Sprintf(`{"access_token":%q,"token_type":"Bearer","expires_in":%d}`, jwt, f.expiresIn)
 	if status != http.StatusOK {
 		payload = `{"error":"invalid_grant","error_description":"secret refused"}`
 	}
@@ -97,7 +117,7 @@ func TestResolveEnvTokenPassesThroughNonSecrets(t *testing.T) {
 
 // Not parallel: sets process-wide environment.
 func TestParseEnvTokenExchangesSecret(t *testing.T) {
-	jwt := makeJWT(t, `{"iss":"https://core.example.com","aud":"https://core.example.com","sub":"svc_01JABCDEFGHJKMNPQRSTVWXYZ0"}`)
+	jwt := makeJWT(t, fmt.Sprintf(`{"iss":"https://core.example.com","aud":"https://core.example.com","sub":"svc_01JABCDEFGHJKMNPQRSTVWXYZ0","exp":%d}`, time.Now().Add(10*time.Minute).Unix()))
 	core := &fakeSecretCore{t: t, jwt: jwt, expiresIn: 600}
 	useFakeSecretCore(t, core)
 
@@ -134,7 +154,7 @@ func TestParseEnvTokenExchangesSecret(t *testing.T) {
 // reused until secretTokenMargin before it expires, then exchanged again.
 // Not parallel: sets process-wide environment and the clock seam.
 func TestSecretTokenCacheReusesTenMinuteTokenUntilMargin(t *testing.T) {
-	core := &fakeSecretCore{t: t, jwt: "jwt", expiresIn: 600}
+	core := &fakeSecretCore{t: t, expiresIn: 600}
 	useFakeSecretCore(t, core)
 	start := time.Now()
 	now := start
@@ -226,7 +246,7 @@ func TestLocalIdentityCacheKeyForSecret(t *testing.T) {
 // ctx cancels an exchange in flight.
 // Not parallel: sets process-wide environment.
 func TestResolveEnvTokenContextHonorsCancel(t *testing.T) {
-	core := &fakeSecretCore{t: t, jwt: "jwt", expiresIn: 600}
+	core := &fakeSecretCore{t: t, expiresIn: 600}
 	useFakeSecretCore(t, core)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -239,7 +259,7 @@ func TestResolveEnvTokenContextHonorsCancel(t *testing.T) {
 // Core invalidates early is not reused for its whole lifetime.
 // Not parallel: sets process-wide environment and the clock seam.
 func TestSecretTokenCacheMaxAge(t *testing.T) {
-	core := &fakeSecretCore{t: t, jwt: "jwt", expiresIn: 3600}
+	core := &fakeSecretCore{t: t, expiresIn: 3600}
 	useFakeSecretCore(t, core)
 	now := time.Now()
 	prev := secretNow
@@ -268,7 +288,7 @@ func TestSecretTokenCacheMaxAge(t *testing.T) {
 // Forgetting a secret's token forces the next resolve to exchange.
 // Not parallel: sets process-wide environment.
 func TestForgetServiceAccountSecretToken(t *testing.T) {
-	core := &fakeSecretCore{t: t, jwt: "jwt", expiresIn: 600}
+	core := &fakeSecretCore{t: t, expiresIn: 600}
 	useFakeSecretCore(t, core)
 	for range 2 {
 		if _, err := ResolveEnvToken(testServiceAccountSecret); err != nil {
@@ -364,7 +384,7 @@ func TestSecretCoreDerivedFromJurisdiction(t *testing.T) {
 		{testServiceAccountSecretEU, "https://eu.auth.entire.io"},
 	} {
 		t.Run(tc.core, func(t *testing.T) {
-			core := &fakeSecretCore{t: t, jwt: "jwt", expiresIn: 600}
+			core := &fakeSecretCore{t: t, expiresIn: 600}
 			useFakeSecretCore(t, core)
 			t.Setenv(SecretCoreURLVar, "")
 			t.Setenv(EnvTokenVar, tc.secret)
@@ -398,7 +418,7 @@ func TestSecretCoreDerivedFromJurisdiction(t *testing.T) {
 // ENTIRE_CORE_URL wins over the jurisdiction, and is not checked against it.
 // Not parallel: sets process-wide environment.
 func TestSecretCoreOverrideWins(t *testing.T) {
-	core := &fakeSecretCore{t: t, jwt: "jwt", expiresIn: 600}
+	core := &fakeSecretCore{t: t, expiresIn: 600}
 	useFakeSecretCore(t, core)
 	t.Setenv(SecretCoreURLVar, "https://core.staging.example.com/ignored/path")
 
@@ -407,5 +427,212 @@ func TestSecretCoreOverrideWins(t *testing.T) {
 	}
 	if got := core.lastForm.Get("audience"); got != "https://core.staging.example.com" {
 		t.Errorf("audience = %q, want the override origin", got)
+	}
+}
+
+// An exchanged token that is not for this account at this Core, or carries no
+// usable exp, is refused and never cached.
+// Not parallel: sets process-wide environment.
+func TestSecretExchangeRejectsUnusableToken(t *testing.T) {
+	const (
+		account = "svc_01JABCDEFGHJKMNPQRSTVWXYZ0"
+		core    = "https://core.example.com"
+	)
+	exp := time.Now().Add(10 * time.Minute)
+	for _, tc := range []struct{ name, jwt string }{
+		{"not a JWT", "opaque-token"},
+		{"other account", secretTokenJWT(t, "svc_01JZYXWVTSRQPNMKJHGFEDCBA9", core, exp)},
+		{"other origin", secretTokenJWT(t, account, "https://evil.example.com", exp)},
+		{"two origins", makeJWT(t, fmt.Sprintf(`{"sub":%q,"aud":[%q,"https://evil.example.com"],"exp":%d}`, account, core, exp.Unix()))},
+		{"no exp", makeJWT(t, fmt.Sprintf(`{"sub":%q,"aud":%q}`, account, core))},
+		{"expired", secretTokenJWT(t, account, core, time.Now().Add(-time.Minute))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeSecretCore{t: t, jwt: tc.jwt, expiresIn: 600}
+			useFakeSecretCore(t, fake)
+			for range 2 {
+				_, err := ResolveEnvToken(testServiceAccountSecret)
+				if err == nil || !strings.Contains(err.Error(), "unusable service account token") {
+					t.Fatalf("err = %v, want an unusable-token refusal", err)
+				}
+			}
+			if n := fake.exchanges.Load(); n != 2 {
+				t.Errorf("exchanges = %d, want 2 (nothing cached)", n)
+			}
+		})
+	}
+}
+
+// The token's own exp bounds reuse when it is earlier than expires_in.
+// Not parallel: sets process-wide environment and the clock seam.
+func TestSecretTokenCacheUsesEarlierJWTExp(t *testing.T) {
+	start := time.Now()
+	now := start
+	prev := secretNow
+	secretNow = func() time.Time { return now }
+	t.Cleanup(func() { secretNow = prev })
+	fake := &fakeSecretCore{t: t, expiresIn: 600,
+		jwt: secretTokenJWT(t, "svc_01JABCDEFGHJKMNPQRSTVWXYZ0", "https://core.example.com", start.Add(5*time.Minute))}
+	useFakeSecretCore(t, fake)
+
+	if _, err := ResolveEnvToken(testServiceAccountSecret); err != nil {
+		t.Fatal(err)
+	}
+	// Within expires_in's window, but past the JWT's exp minus the margin.
+	now = start.Add(5*time.Minute - secretTokenMargin + time.Second)
+	fake.jwt = ""
+	if _, err := ResolveEnvToken(testServiceAccountSecret); err != nil {
+		t.Fatal(err)
+	}
+	if n := fake.exchanges.Load(); n != 2 {
+		t.Errorf("exchanges = %d, want 2 (the JWT's exp ends reuse)", n)
+	}
+}
+
+// A cache entry whose token fails the claim checks is a miss.
+// Not parallel: sets process-wide environment.
+func TestSecretTokenCacheRechecksClaims(t *testing.T) {
+	fake := &fakeSecretCore{t: t, expiresIn: 600}
+	useFakeSecretCore(t, fake)
+	if _, err := ResolveEnvToken(testServiceAccountSecret); err != nil {
+		t.Fatal(err)
+	}
+	subj, err := secretExchangeSubject(testServiceAccountSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, ok := secretCacheRoot()
+	if !ok {
+		t.Fatal("no cache root")
+	}
+	planted := secretTokenJWT(t, "svc_01JZYXWVTSRQPNMKJHGFEDCBA9", subj.core, time.Now().Add(10*time.Minute))
+	writeCachedSecretToken(root, subj, planted, time.Now().Add(10*time.Minute))
+
+	got, err := ResolveEnvToken(testServiceAccountSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == planted || fake.exchanges.Load() != 2 {
+		t.Errorf("exchanges = %d, reused planted token = %v; want a fresh exchange", fake.exchanges.Load(), got == planted)
+	}
+}
+
+// The exchange never follows a redirect: a 307/308 would resend the body,
+// which holds the secret, to the new host.
+// Not parallel: sets process-wide environment.
+func TestSecretExchangeDoesNotFollowRedirects(t *testing.T) {
+	for _, status := range []int{http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_CACHE_HOME", home)
+			t.Setenv(SecretCoreURLVar, "https://core.example.com")
+			var other atomic.Int32
+			t.Cleanup(UseSecretExchangeTransportForTesting(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				if r.URL.Host != "core.example.com" {
+					other.Add(1)
+					body, _ := io.ReadAll(r.Body) //nolint:errcheck // only inspected for the secret
+					if strings.Contains(string(body), "ent_svc_") {
+						t.Error("the redirect target received the secret")
+					}
+				}
+				return &http.Response{
+					StatusCode: status,
+					Header:     http.Header{"Location": {"https://other.example.com/oauth/token"}},
+					Body:       io.NopCloser(strings.NewReader("")),
+					Request:    r,
+				}, nil
+			})))
+
+			_, err := ResolveEnvToken(testServiceAccountSecret)
+			if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("HTTP %d", status)) {
+				t.Errorf("err = %v, want the %d reported as a refusal", err, status)
+			}
+			if n := other.Load(); n != 0 {
+				t.Errorf("the redirect target saw %d requests, want 0", n)
+			}
+		})
+	}
+}
+
+// tryLockSecretCache reports whether the subject's exchange lock is free now.
+func tryLockSecretCache(t *testing.T, subj exchangeSubject) bool {
+	t.Helper()
+	root, ok := secretCacheRoot()
+	if !ok {
+		t.Fatal("no cache root")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	release, err := lockSecretCache(ctx, root, subj)
+	if err != nil {
+		return false
+	}
+	release()
+	return true
+}
+
+// The exchange runs under the per-subject lock, so a parallel process on a
+// cold cache waits for it and then reads its result.
+// Not parallel: sets process-wide environment.
+func TestSecretExchangeHoldsLock(t *testing.T) {
+	var subj exchangeSubject
+	fake := &fakeSecretCore{t: t, expiresIn: 600}
+	fake.during = func() {
+		if tryLockSecretCache(t, subj) {
+			t.Error("the exchange lock was free during the exchange")
+		}
+	}
+	useFakeSecretCore(t, fake)
+	subj, err := secretExchangeSubject(testServiceAccountSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ResolveEnvToken(testServiceAccountSecret); err != nil {
+		t.Fatal(err)
+	}
+	if !tryLockSecretCache(t, subj) {
+		t.Error("the exchange lock is still held after the exchange")
+	}
+}
+
+// Forget waits for the exchange lock, so it cannot interleave with another
+// process's exchange and write-back.
+// Not parallel: sets process-wide environment.
+func TestForgetServiceAccountSecretTokenTakesLock(t *testing.T) {
+	fake := &fakeSecretCore{t: t, expiresIn: 600}
+	useFakeSecretCore(t, fake)
+	if _, err := ResolveEnvToken(testServiceAccountSecret); err != nil {
+		t.Fatal(err)
+	}
+	subj, err := secretExchangeSubject(testServiceAccountSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, ok := secretCacheRoot()
+	if !ok {
+		t.Fatal("no cache root")
+	}
+	release, err := lockSecretCache(context.Background(), root, subj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		ForgetServiceAccountSecretToken(testServiceAccountSecret)
+		close(done)
+	}()
+	select {
+	case <-done:
+		t.Fatal("Forget returned while another holder had the lock")
+	case <-time.After(200 * time.Millisecond):
+	}
+	if _, err := osroot.ReadFileNoFollow(root, secretCacheFile(subj)); err != nil {
+		t.Errorf("Forget removed the entry without the lock: %v", err)
+	}
+	release()
+	<-done
+	if _, err := osroot.ReadFileNoFollow(root, secretCacheFile(subj)); err == nil {
+		t.Error("the entry survived Forget")
 	}
 }

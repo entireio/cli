@@ -14,7 +14,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/auth-go/tokens"
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/internal/entireclient/httpclient"
@@ -34,6 +36,8 @@ const SecretCoreURLVar = "ENTIRE_CORE_URL" //nolint:gosec // G101: a variable na
 const (
 	// secretClientID is the public OAuth client the exchange names.
 	secretClientID = "entire-cli"
+	// secretSubjectTokenType is the RFC 8693 subject_token_type for a secret.
+	secretSubjectTokenType = "urn:ietf:params:oauth:token-type:access_token" //nolint:gosec // G101: a URN, not a credential
 	// secretTokenMargin discards a cached token this long before it expires,
 	// so a long command never starts with a token about to lapse.
 	secretTokenMargin = 2 * time.Minute
@@ -64,6 +68,26 @@ func UseSecretExchangeTransportForTesting(rt http.RoundTripper) func() {
 
 // secretNow is the test seam for the cache clock.
 var secretNow = time.Now
+
+// CredentialSource names which credential a process authenticates with, for
+// status output and scripts.
+type CredentialSource string
+
+const (
+	CredentialFromContext  CredentialSource = "context"
+	CredentialFromEnvToken CredentialSource = "env_token"
+	// CredentialFromServiceAccountSecret is a secret in ENTIRE_TOKEN, sent
+	// only to the exchange; the bearer is the token it was exchanged for.
+	CredentialFromServiceAccountSecret CredentialSource = "sa_secret"
+)
+
+// EnvTokenCredential names the credential an ENTIRE_TOKEN value supplies.
+func EnvTokenCredential(raw string) CredentialSource {
+	if IsServiceAccountSecret(strings.TrimSpace(raw)) {
+		return CredentialFromServiceAccountSecret
+	}
+	return CredentialFromEnvToken
+}
 
 // IsServiceAccountSecret reports whether token is a service account secret.
 func IsServiceAccountSecret(token string) bool {
@@ -97,26 +121,52 @@ func ResolveEnvTokenContext(ctx context.Context, raw string) (string, error) {
 // exchange Core and the service account, neither of them secret. It needs no
 // exchange, so a cache lookup never goes over the network.
 func serviceAccountSecretCacheKey(secret string) (string, error) {
-	core, accountID, err := secretExchangeTarget(secret)
+	subj, err := secretExchangeSubject(secret)
 	if err != nil {
 		return "", err
 	}
-	return strings.Join([]string{"env-sa", core, accountID}, "|"), nil
+	return strings.Join([]string{"env-sa", subj.core, subj.accountID}, "|"), nil
 }
 
-// secretExchangeTarget parses secret and returns the Core that exchanges it
-// and the svc_ account it names. The exchange, the cache keys and
-// ForgetServiceAccountSecretToken all derive the Core here, so they agree.
-func secretExchangeTarget(secret string) (core, accountID string, err error) {
+// exchangeSubject is everything one service account token exchange needs. A
+// secret is one kind of subject; another credential (such as a key-signed
+// assertion) can build its own and reuse the exchange, the token checks and
+// the locked cache.
+type exchangeSubject struct {
+	// token and tokenType are the RFC 8693 subject_token and its type.
+	token     string
+	tokenType string
+	// accountID is the svc_ account the exchanged token must be for.
+	accountID string
+	// core is the origin that exchanges the subject, and the token's only
+	// URL audience.
+	core string
+	// cacheName names the cache entry and its lock, without holding the
+	// subject token.
+	cacheName string
+}
+
+// secretExchangeSubject parses secret and returns its exchange subject. The
+// exchange, the cache keys and ForgetServiceAccountSecretToken all derive the
+// Core here, so they agree.
+func secretExchangeSubject(secret string) (exchangeSubject, error) {
 	parsed, err := parseServiceAccountSecret(secret)
 	if err != nil {
-		return "", "", err
+		return exchangeSubject{}, err
 	}
-	core, err = secretCoreURL(parsed.jurisdiction)
+	core, err := secretCoreURL(parsed.jurisdiction)
 	if err != nil {
-		return "", "", err
+		return exchangeSubject{}, err
 	}
-	return core, parsed.accountID, nil
+	// The cache name covers the Core too: a token from one Core is not
+	// reused after the variable points at another.
+	return exchangeSubject{
+		token:     secret,
+		tokenType: secretSubjectTokenType,
+		accountID: parsed.accountID,
+		core:      core,
+		cacheName: secretCacheKey(core, secret),
+	}, nil
 }
 
 // secretCoreURL returns the Core origin for the exchange: SecretCoreURLVar
@@ -146,48 +196,76 @@ func jurisdictionCoreURL(jurisdiction string) string {
 }
 
 func exchangeServiceAccountSecret(ctx context.Context, secret string) (string, error) {
-	core, accountID, err := secretExchangeTarget(secret)
+	subj, err := secretExchangeSubject(secret)
 	if err != nil {
 		return "", err
 	}
-	// The key covers the Core too: a token from one Core is not reused
-	// after the variable points at another.
-	key := secretCacheKey(core, secret)
-	if token, ok := readCachedSecretToken(key); ok {
+	return exchangeSubjectToken(ctx, subj)
+}
+
+// exchangeSubjectToken returns a fresh token for subj from the cache, or
+// exchanges it. Concurrent processes share one exchange: on a miss the first
+// takes a per-subject lock and the rest find its result in the cache, so N
+// parallel commands do not each spend Core's per-secret rate limit.
+func exchangeSubjectToken(ctx context.Context, subj exchangeSubject) (string, error) {
+	if token, ok := readCachedSecretToken(subj); ok {
 		return token, nil
 	}
-	token, ttl, err := postSecretExchange(ctx, core, accountID, secret)
+	root, ok := secretCacheRoot()
+	if !ok {
+		// No cache directory: still authenticate, just without sharing.
+		token, _, err := postSecretExchange(ctx, subj)
+		return token, err
+	}
+	release, err := lockSecretCache(ctx, root, subj)
 	if err != nil {
 		return "", err
 	}
-	writeCachedSecretToken(key, token, ttl)
+	defer release()
+	if token, ok := readCachedSecretToken(subj); ok {
+		return token, nil
+	}
+	token, expires, err := postSecretExchange(ctx, subj)
+	if err != nil {
+		return "", err
+	}
+	writeCachedSecretToken(root, subj, token, expires)
 	return token, nil
 }
 
-func postSecretExchange(ctx context.Context, core, accountID, secret string) (string, time.Duration, error) {
+// postSecretExchange exchanges subj at its Core and returns the checked
+// token and when it expires.
+func postSecretExchange(ctx context.Context, subj exchangeSubject) (string, time.Time, error) {
 	form := url.Values{
 		"grant_type":         {"urn:ietf:params:oauth:grant-type:token-exchange"},
-		"subject_token_type": {"urn:ietf:params:oauth:token-type:access_token"},
-		"subject_token":      {secret},
-		"audience":           {core},
-		"resource":           {accountID},
+		"subject_token_type": {subj.tokenType},
+		"subject_token":      {subj.token},
+		"audience":           {subj.core},
+		"resource":           {subj.accountID},
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, core+"/oauth/token", strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, subj.core+"/oauth/token", strings.NewReader(form.Encode()))
 	if err != nil {
-		return "", 0, fmt.Errorf("build %s exchange: %w", EnvTokenVar, err)
+		return "", time.Time{}, fmt.Errorf("build %s exchange: %w", EnvTokenVar, err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 	req.SetBasicAuth(secretClientID, "")
-	client := httpclient.New(httpclient.Options{Transport: secretExchangeTransport, Timeout: secretExchangeTimeout})
+	client := httpclient.New(httpclient.Options{
+		Transport: secretExchangeTransport,
+		Timeout:   secretExchangeTimeout,
+		// The body holds the secret. Go drops Authorization on a cross-host
+		// redirect but a 307/308 resends the body, so never follow one: the
+		// 3xx is reported as a refusal below.
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	})
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", 0, fmt.Errorf("exchange %s service account secret at %s: %w", EnvTokenVar, core, err)
+		return "", time.Time{}, fmt.Errorf("exchange %s service account secret at %s: %w", EnvTokenVar, subj.core, err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxExchangeBody))
 	if err != nil {
-		return "", 0, fmt.Errorf("read %s exchange response: %w", EnvTokenVar, err)
+		return "", time.Time{}, fmt.Errorf("read %s exchange response: %w", EnvTokenVar, err)
 	}
 	var out struct {
 		AccessToken      string `json:"access_token"`
@@ -199,14 +277,51 @@ func postSecretExchange(ctx context.Context, core, accountID, secret string) (st
 	if resp.StatusCode != http.StatusOK {
 		// The request holds the secret, so the error names only the reply.
 		if out.Error != "" {
-			return "", 0, fmt.Errorf("%s service account secret refused by %s: %s: %s", EnvTokenVar, core, out.Error, out.ErrorDescription)
+			return "", time.Time{}, fmt.Errorf("%s service account secret refused by %s: %s: %s", EnvTokenVar, subj.core, out.Error, out.ErrorDescription)
 		}
-		return "", 0, fmt.Errorf("%s service account secret refused by %s: HTTP %d", EnvTokenVar, core, resp.StatusCode)
+		return "", time.Time{}, fmt.Errorf("%s service account secret refused by %s: HTTP %d", EnvTokenVar, subj.core, resp.StatusCode)
 	}
 	if out.AccessToken == "" {
-		return "", 0, errors.New("service account token exchange returned no access token")
+		return "", time.Time{}, errors.New("service account token exchange returned no access token")
 	}
-	return out.AccessToken, time.Duration(out.ExpiresIn) * time.Second, nil
+	now := secretNow()
+	expires, err := checkExchangedToken(subj, out.AccessToken, now)
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("%s returned an unusable service account token: %w", subj.core, err)
+	}
+	if byExpiresIn := now.Add(time.Duration(out.ExpiresIn) * time.Second); byExpiresIn.Before(expires) {
+		expires = byExpiresIn
+	}
+	return out.AccessToken, expires, nil
+}
+
+// checkExchangedToken checks an exchanged token's unverified claims before it
+// is cached or sent anywhere, and returns its exp. It must be for subj's
+// account, name subj's Core as its only URL audience, and not have expired.
+// Core verifies the signature; this only stops a confused or malicious reply
+// from being cached as this account or carried to another origin, since
+// routing (CoreURLFromEnvToken) follows the token's first URL audience.
+func checkExchangedToken(subj exchangeSubject, token string, now time.Time) (time.Time, error) {
+	claims, err := tokens.ParseClaims(token)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parse claims: %w", err)
+	}
+	if claims.Subject != subj.accountID {
+		return time.Time{}, fmt.Errorf("sub is %q, want %s", claims.Subject, subj.accountID)
+	}
+	var urlAuds []string
+	for _, aud := range claims.Audience {
+		if u, err := url.Parse(aud); err == nil && u.Scheme != "" {
+			urlAuds = append(urlAuds, aud)
+		}
+	}
+	if len(urlAuds) != 1 || strings.TrimRight(urlAuds[0], "/") != subj.core {
+		return time.Time{}, fmt.Errorf("aud %v must name exactly one origin, %s", claims.Audience, subj.core)
+	}
+	if claims.ExpiresAt.IsZero() || !claims.ExpiresAt.After(now) {
+		return time.Time{}, errors.New("token has no exp or has expired")
+	}
+	return claims.ExpiresAt, nil
 }
 
 // secretCacheKey names a cache file without storing the secret.
@@ -215,19 +330,46 @@ func secretCacheKey(core, secret string) string {
 	return hex.EncodeToString(sum[:16])
 }
 
+func secretCacheFile(subj exchangeSubject) string {
+	return secretCacheDir + "/" + subj.cacheName + ".json"
+}
+
+// secretCacheRoot returns the user cache root with secretCacheDir in it.
+func secretCacheRoot() (*os.Root, bool) {
+	root, err := userdirs.CacheRoot()
+	if err != nil {
+		return nil, false
+	}
+	if osroot.MkdirAllNoSymlink(root, secretCacheDir, 0o700) != nil {
+		return nil, false
+	}
+	return root, true
+}
+
+// lockSecretCache takes the per-subject lock that serialises the exchange,
+// the cache write and ForgetServiceAccountSecretToken across processes.
+func lockSecretCache(ctx context.Context, root *os.Root, subj exchangeSubject) (func(), error) {
+	release, err := flock.AcquireContextIn(ctx, root, secretCacheFile(subj)+".lock")
+	if err != nil {
+		return nil, fmt.Errorf("lock service account token cache: %w", err)
+	}
+	return release, nil
+}
+
 type cachedSecretToken struct {
 	Token   string    `json:"token"`
 	Expires time.Time `json:"expires"`
 }
 
-// readCachedSecretToken returns a cached token that is still fresh. Every
-// failure is a miss: the caller exchanges again.
-func readCachedSecretToken(key string) (string, bool) {
+// readCachedSecretToken returns a cached token that is still fresh and still
+// passes the checks a fresh one does. Every failure is a miss: the caller
+// exchanges again.
+func readCachedSecretToken(subj exchangeSubject) (string, bool) {
 	root, err := userdirs.CacheRoot()
 	if err != nil {
 		return "", false
 	}
-	data, err := osroot.ReadFileNoFollow(root, secretCacheDir+"/"+key+".json")
+	data, err := osroot.ReadFileNoFollow(root, secretCacheFile(subj))
 	if err != nil {
 		return "", false
 	}
@@ -235,7 +377,15 @@ func readCachedSecretToken(key string) (string, bool) {
 	if json.Unmarshal(data, &c) != nil || c.Token == "" {
 		return "", false
 	}
-	if !secretNow().Add(secretTokenMargin).Before(c.Expires) {
+	now := secretNow()
+	exp, err := checkExchangedToken(subj, c.Token, now)
+	if err != nil {
+		return "", false
+	}
+	if exp.Before(c.Expires) {
+		c.Expires = exp
+	}
+	if !now.Add(secretTokenMargin).Before(c.Expires) {
 		return "", false
 	}
 	return c.Token, true
@@ -243,42 +393,44 @@ func readCachedSecretToken(key string) (string, bool) {
 
 // writeCachedSecretToken stores a token for later commands. A failed write
 // only costs the next command an exchange.
-func writeCachedSecretToken(key, token string, ttl time.Duration) {
-	if ttl <= secretTokenMargin {
+func writeCachedSecretToken(root *os.Root, subj exchangeSubject, token string, expires time.Time) {
+	now := secretNow()
+	if !now.Add(secretTokenMargin).Before(expires) {
 		return
 	}
-	root, err := userdirs.CacheRoot()
+	if limit := now.Add(secretCacheMaxAge + secretTokenMargin); expires.After(limit) {
+		expires = limit
+	}
+	data, err := json.Marshal(cachedSecretToken{Token: token, Expires: expires})
 	if err != nil {
 		return
 	}
-	if osroot.MkdirAllNoSymlink(root, secretCacheDir, 0o700) != nil {
-		return
-	}
-	if ttl > secretCacheMaxAge+secretTokenMargin {
-		ttl = secretCacheMaxAge + secretTokenMargin
-	}
-	data, err := json.Marshal(cachedSecretToken{Token: token, Expires: secretNow().Add(ttl)})
-	if err != nil {
-		return
-	}
-	_ = jsonutil.WriteFileAtomicIn(root, secretCacheDir+"/"+key+".json", data, 0o600) //nolint:errcheck // best effort; see doc
+	_ = jsonutil.WriteFileAtomicIn(root, secretCacheFile(subj), data, 0o600) //nolint:errcheck // best effort; see doc
 }
 
 // ForgetServiceAccountSecretToken drops the cached token for secret, so the
 // next ResolveEnvTokenContext exchanges again. Call it when a server rejects
-// the exchanged token. A failure is ignored: the entry still expires.
+// the exchanged token. It takes the exchange lock, so it cannot race another
+// process writing a token back. A failure is ignored: the entry still expires.
 func ForgetServiceAccountSecretToken(secret string) {
 	secret = strings.TrimSpace(secret)
 	if !IsServiceAccountSecret(secret) {
 		return
 	}
-	core, _, err := secretExchangeTarget(secret)
+	subj, err := secretExchangeSubject(secret)
 	if err != nil {
 		return
 	}
-	root, err := userdirs.CacheRoot()
+	root, ok := secretCacheRoot()
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), secretExchangeTimeout)
+	defer cancel()
+	release, err := lockSecretCache(ctx, root, subj)
 	if err != nil {
 		return
 	}
-	_ = root.Remove(secretCacheDir + "/" + secretCacheKey(core, secret) + ".json") //nolint:errcheck // best effort; see doc
+	defer release()
+	_ = root.Remove(secretCacheFile(subj)) //nolint:errcheck // best effort; see doc
 }

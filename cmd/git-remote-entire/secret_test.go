@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
@@ -8,12 +9,24 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 )
 
 // testSASecret is Core's v1 test vector; see cmd/entire/cli/auth/env_secret_test.go.
 const testSASecret = "ent_svc_us_01JABCDEFGHJKMNPQRSTVWXYZ0_01JZYXWVTSRQPNMKJHGFEDCBA9_aaaqeayeaudaocajbifqydiob4ibceqtcqkrmfyydenbwha5dypq3MriFT"
+
+// makeSecretJWT is a service account token as Core issues it for testSASecret:
+// for its account, with core as its only audience, expiring in 10 minutes.
+// suffix varies the signature so successive tokens differ.
+func makeSecretJWT(t *testing.T, core, suffix string) string {
+	t.Helper()
+	enc := base64.RawURLEncoding
+	header := enc.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+	payload := enc.EncodeToString(fmt.Appendf(nil, `{"sub":"svc_01JABCDEFGHJKMNPQRSTVWXYZ0","aud":%q,"exp":%d}`, core, time.Now().Add(10*time.Minute).Unix()))
+	return header + "." + payload + "." + enc.EncodeToString([]byte("sig"+suffix))
+}
 
 // secretExchangeFunc answers /oauth/token for the secret exchange.
 type secretExchangeFunc func(*http.Request) (*http.Response, error)
@@ -44,7 +57,7 @@ func useSecretEnv(t *testing.T, core string, rt http.RoundTripper) {
 // data plane, never the secret. Not parallel: sets process-wide environment.
 func TestResolveCreds_ServiceAccountSecretUsesExchangedJWT(t *testing.T) {
 	const core = "https://core.us.entire.io"
-	jwt := makeTestJWT(t, core)
+	jwt := makeSecretJWT(t, core, "")
 	useSecretEnv(t, core, secretExchangeFunc(func(r *http.Request) (*http.Response, error) {
 		if r.URL.String() != core+"/oauth/token" {
 			t.Errorf("exchange went to %s", r.URL)
@@ -93,7 +106,7 @@ func TestResolveCreds_ServiceAccountSecretReexchangesAfter401(t *testing.T) {
 	exchanges := 0
 	useSecretEnv(t, core, secretExchangeFunc(func(*http.Request) (*http.Response, error) {
 		exchanges++
-		jwt := makeTestJWT(t, core) + strconv.Itoa(exchanges)
+		jwt := makeSecretJWT(t, core, strconv.Itoa(exchanges))
 		return secretReply(http.StatusOK, fmt.Sprintf(`{"access_token":%q,"expires_in":3600}`, jwt)), nil
 	}))
 	client, clusterHost := wellKnownServer(t, []string{core}, "", "")

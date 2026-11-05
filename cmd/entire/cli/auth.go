@@ -334,6 +334,21 @@ type statusTarget struct {
 	// separates one login from another.
 	distinctServers int
 	envToken        bool
+	// credential says which credential supplied an envToken target: a raw
+	// ENTIRE_TOKEN bearer or an exchanged service account secret.
+	credential auth.CredentialSource
+}
+
+// credentialSource is the credential_source status reports for t.
+func (t statusTarget) credentialSource() auth.CredentialSource {
+	switch {
+	case !t.envToken:
+		return auth.CredentialFromContext
+	case t.credential == "":
+		return auth.CredentialFromEnvToken
+	default:
+		return t.credential
+	}
 }
 
 // resolveAuthStatusTarget picks the target for `entire auth status`, honouring
@@ -358,7 +373,7 @@ func resolveEnvTokenStatusTarget(raw string) (statusTarget, error) {
 	if err != nil {
 		return statusTarget{}, err //nolint:wrapcheck // auth.ParseEnvToken already prefixes with EnvTokenVar
 	}
-	return statusTarget{coreURL: coreURL, token: token, envToken: true}, nil
+	return statusTarget{coreURL: coreURL, token: token, envToken: true, credential: auth.EnvTokenCredential(raw)}, nil
 }
 
 // resolveStatusTarget picks the core + token for `entire auth status` from
@@ -787,10 +802,14 @@ type authStatusJSON struct {
 	DisplayName   string `json:"display_name,omitempty"`
 	Jurisdiction  string `json:"jurisdiction,omitempty"`
 	ForeignRegion bool   `json:"foreign_region,omitempty"`
-	// TokenSource is the same description the text view prints; EnvToken is the
-	// field to branch on, since an env bearer has no revocable session.
-	TokenSource string `json:"token_source,omitempty"`
-	EnvToken    bool   `json:"env_token,omitempty"`
+	// TokenSource is the same description the text view prints; EnvToken
+	// says ENTIRE_TOKEN supplied the credential, which has no revocable
+	// session. CredentialSource tells the credentials apart: context,
+	// env_token (a raw bearer) or sa_secret (an exchanged service account
+	// secret).
+	TokenSource      string `json:"token_source,omitempty"`
+	EnvToken         bool   `json:"env_token,omitempty"`
+	CredentialSource string `json:"credential_source,omitempty"`
 	// CurrentSessionID and ExpiresAt are present only when the caller's own
 	// session was identified; absent means unidentified, never "no expiry".
 	CurrentSessionID string `json:"current_session_id,omitempty"`
@@ -850,6 +869,7 @@ func buildAuthStatusJSON(d authStatusData, opts authStatusOptions) authStatusJSO
 	// Gated on a bearer actually existing: with no token there is no source to
 	// name, and naming the keychain would assert a token is filed there.
 	if t.token != "" {
+		out.CredentialSource = string(t.credentialSource())
 		if t.envToken {
 			out.EnvToken = true
 			out.TokenSource = auth.EnvTokenVar + " environment variable"
