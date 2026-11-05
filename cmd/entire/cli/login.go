@@ -179,8 +179,7 @@ func newLoginCmd() *cobra.Command {
 		"login server to authenticate against (rarely needed; the default serves all standard accounts)")
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
 	cmd.Flags().BoolVar(&useDevice, "device", false, "Use the device-code flow (enter a code in your browser) instead of the default browser redirect")
-	// In the constructor: root and auth both register it.
-	return alwaysCheckConfig(cmd)
+	return cmd
 }
 
 func runLoginCommand(ctx context.Context, outW, errW io.Writer, server string, insecureHTTPAuth, useDevice bool) error {

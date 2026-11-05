@@ -27,6 +27,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/envflag"
 	"github.com/entireio/cli/cmd/entire/cli/gitexec"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
@@ -372,7 +373,7 @@ func reviewInteractivityHardDisabled(testTTY, ci string, underTest bool) bool {
 	if testTTY != "" {
 		return testTTY != "1"
 	}
-	return underTest || (ci != "" && ci != "false")
+	return underTest || envflag.Truthy(ci)
 }
 
 func reviewTTYIsInteractive(stdinTTY, stdoutTTY, canPrompt, hardDisabled bool) bool {
