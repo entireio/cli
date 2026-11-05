@@ -211,7 +211,9 @@ always runnable in every build.
   its own deadline (`logoutLoginTimeout`); a cancelled context stops the sweep
   with the unreached logins intact, and a failed local removal or an interrupt
   fails the command
-- `doctor`: bare runs the scan-and-fix flow, plus `trace`, `logs`, `bundle`
+- `doctor`: bare runs the scan-and-fix flow, plus `trace`, `logs`, `bundle` and
+  `migrate-checkpoints`, which is also where every message about a legacy
+  checkpoint whose `v1` copies diverged points
 - `cluster`: the control plane's data-plane cluster catalog — `list` only, since
   clusters are provisioned by Entire rather than by users. It renders `GET
   /clusters` (`coreapi.ListClusters`, the same call the mirror wizard and
@@ -240,7 +242,19 @@ always runnable in every build.
   plus `grant` (`add`/`list`/`remove`): org membership for a `provider:handle`
   grantee, roles owner/admin/member (default member)
 - `project`: control-plane project management — `create`, `list`, `get`, `delete`,
-  plus `grant` (`add`/`list`/`remove`): project access for a `provider:handle`
+  plus `agent` (`list`/`add`): the project's review agents, configured in
+  entire-api rather than repository files (they replaced the trail runners).
+  `add` creates a preset agent for the current repository, or extends the
+  project's existing agent of that preset to it (one agent per preset per
+  project), refusing `--disabled`/`--environment` an existing agent cannot
+  honor. Creates send a fresh `Idempotency-Key` and replaces the agent's
+  `If-Match` etag, as entire-api requires. `agent run`
+  (`list`/`show`/`cancel`/`retry`) reads and acts on the agents' runs through
+  `/{host}/{project}/runs`; `list` prints one page with its cursor, run IDs
+  must be ULIDs before any request, `retry` sends an `Idempotency-Key`, and
+  `--json` passes the server's runs through. What the agents did on one trail
+  change is `trail finding`, and `trail rerun-review` starts them. Also
+  `grant` (`add`/`list`/`remove`): project access for a `provider:handle`
   grantee, roles reader/writer/admin; both `add` and `remove` take the grantee
   optionally (see the grant-subtree notes below). `create <name> --owner <ref>`
   creates without prompting even in a terminal, leaving an omitted `--region`
@@ -816,7 +830,7 @@ and inferred from the origin remote — and the inferred one is the common path.
 Experimental commands (gated by the build version as described above — visible
 and grouped under "Experimental commands:" in developer/nightly builds, hidden
 in stable releases, always runnable): `tokens`, `import`, `review`,
-`blame`, `why`, `experts`, and `runner`.
+`blame`, `why`, and `experts`.
 `tokens` is also advertised through `entire labs`.
 
 Top-level lifecycle and standalone commands: `enable`, `disable`, `status`,

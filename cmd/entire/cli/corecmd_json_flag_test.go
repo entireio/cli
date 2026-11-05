@@ -33,6 +33,14 @@ func TestControlPlaneJSONFlag_OnlyOnHonoringCommands(t *testing.T) {
 		"project list":   true,
 		"project get":    true,
 		"project delete": false,
+		// list and add render the agents.
+		"project agent list": true,
+		"project agent add":  true,
+		// each prints the run the server returns, or a page of runs.
+		"project agent run list":   true,
+		"project agent run show":   true,
+		"project agent run cancel": true,
+		"project agent run retry":  true,
 		// repo
 		"repo create":        true,
 		"repo list":          true,

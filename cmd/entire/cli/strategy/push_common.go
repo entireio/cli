@@ -46,23 +46,166 @@ func (p checkpointRefPush) refSpec() string {
 // partitionLocalRefs splits refs into those that exist locally (pushable) and
 // those that don't (stale queue entries — e.g. a checkpoint ref deleted by
 // cleanup). Stale refs can never push, so callers drop them from the queue
-// rather than retrying them forever.
-func partitionLocalRefs(repo *git.Repository, refs []plumbing.ReferenceName) (existing, stale []plumbing.ReferenceName) {
-	for _, ref := range refs {
-		_, err := repo.Reference(ref, false)
-		switch {
-		case err == nil:
-			existing = append(existing, ref)
-		case errors.Is(err, plumbing.ErrReferenceNotFound):
-			// Genuinely gone (e.g. deleted by cleanup) — never pushable, drop it.
-			stale = append(stale, ref)
-		default:
-			// A transient/IO lookup error: keep the ref as pushable so a real
-			// entry isn't dropped from the queue forever over a flaky read.
-			existing = append(existing, ref)
+// rather than retrying them forever. listed holds the tip of every ref found by
+// listing the checkpoint namespace; it is nil when the namespace was not
+// listed, and a ref missing from it has no known tip.
+func partitionLocalRefs(
+	ctx context.Context,
+	repo *git.Repository,
+	refs []plumbing.ReferenceName,
+) (existing, stale []plumbing.ReferenceName, listed map[plumbing.ReferenceName]plumbing.Hash) {
+	return partitionLocalRefsUsing(ctx, repo, refs, len(refs) >= checkpointRefListingMinQueue)
+}
+
+// checkpointRefListingMinQueue is the queue length from which one listing of
+// the checkpoint namespace beats a lookup per queued ref. The listing's cost
+// follows every ref it reads, so a short queue is cheaper to look up ref by ref.
+const checkpointRefListingMinQueue = 16
+
+// partitionLocalRefsUsing is partitionLocalRefs with the choice of listing made
+// by the caller. One listing answers most refs, where a per-ref lookup costs a
+// packed-refs scan each. Refs the listing omits still get that lookup, because
+// the listings skip broken refs, the go-git one skips symbolic refs, and both
+// report the on-disk shard case, while a case-insensitive filesystem still
+// resolves the queued name.
+func partitionLocalRefsUsing(
+	ctx context.Context,
+	repo *git.Repository,
+	refs []plumbing.ReferenceName,
+	useListing bool,
+) (existing, stale []plumbing.ReferenceName, listed map[plumbing.ReferenceName]plumbing.Hash) {
+	if len(refs) == 0 {
+		return nil, nil, nil
+	}
+	var present map[plumbing.ReferenceName]plumbing.Hash
+	if useListing {
+		var tipsMatchLookup bool
+		var err error
+		present, tipsMatchLookup, err = listLocalCheckpointRefs(ctx, repo)
+		if err != nil {
+			logging.Debug(ctx, "checkpoint refs: listing failed, looking up each queued ref", listErrorAttrs(err)...)
+		}
+		if tipsMatchLookup {
+			listed = present
 		}
 	}
-	return existing, stale
+	for _, ref := range refs {
+		if _, ok := present[ref]; ok || localRefMayExist(repo, ref) {
+			existing = append(existing, ref)
+		} else {
+			stale = append(stale, ref)
+		}
+	}
+	return existing, stale, listed
+}
+
+// localRefMayExist reports whether ref may still be present locally. Only a
+// ref that is genuinely gone (e.g. deleted by cleanup) is stale; a transient/IO
+// lookup error keeps the ref pushable so a real entry isn't dropped from the
+// queue forever over a flaky read.
+func localRefMayExist(repo *git.Repository, ref plumbing.ReferenceName) bool {
+	_, err := repo.Reference(ref, false)
+	return !errors.Is(err, plumbing.ErrReferenceNotFound)
+}
+
+// localTip is ref's commit: the listed tip when partitionLocalRefs listed it,
+// otherwise a resolving lookup. listed may be nil.
+func localTip(repo *git.Repository, listed map[plumbing.ReferenceName]plumbing.Hash, ref plumbing.ReferenceName) (plumbing.Hash, error) {
+	if hash, ok := listed[ref]; ok {
+		return hash, nil
+	}
+	r, err := repo.Reference(ref, true)
+	if err != nil {
+		return plumbing.ZeroHash, err //nolint:wrapcheck // callers branch on plumbing.ErrReferenceNotFound
+	}
+	return r.Hash(), nil
+}
+
+// listLocalCheckpointRefs maps every ref under the checkpoint namespace to its
+// tip. It reads through go-git, which needs no subprocess, and falls back to git
+// for-each-ref when go-git's walk fails: one empty or unreadable loose ref, or a
+// malformed packed-refs line, anywhere under refs/ aborts it. tipsMatchLookup
+// reports whether the tips are the ones repo.Reference returns; git's are not
+// for a ref file with trailing data, which go-git reads as the zero hash, so
+// those only show which refs exist.
+func listLocalCheckpointRefs(
+	ctx context.Context,
+	repo *git.Repository,
+) (listed map[plumbing.ReferenceName]plumbing.Hash, tipsMatchLookup bool, err error) {
+	listed, err = listCheckpointRefsWithGoGit(ctx, repo)
+	if err == nil {
+		return listed, true, nil
+	}
+	logging.Debug(ctx, "checkpoint refs: go-git listing failed, listing with git for-each-ref",
+		slog.String("error", err.Error()))
+	listed, err = listCheckpointRefsWithGit(ctx, repo)
+	return listed, false, err
+}
+
+// listCheckpointRefsWithGoGit lists the checkpoint namespace through repo's
+// storer. Only refs with a non-zero hash are listed: a symbolic ref carries no
+// hash here and an unparsable one reads as the zero hash, so both are left to
+// the per-ref lookup, which resolves the first and reports the second.
+func listCheckpointRefsWithGoGit(ctx context.Context, repo *git.Repository) (map[plumbing.ReferenceName]plumbing.Hash, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err //nolint:wrapcheck // Propagating context cancellation
+	}
+	iter, err := repo.References()
+	if err != nil {
+		return nil, fmt.Errorf("list refs: %w", err)
+	}
+	defer iter.Close()
+	listed := make(map[plumbing.ReferenceName]plumbing.Hash)
+	err = iter.ForEach(func(ref *plumbing.Reference) error {
+		if !ref.Hash().IsZero() && strings.HasPrefix(ref.Name().String(), checkpoint.CheckpointRefPrefix) {
+			listed[ref.Name()] = ref.Hash()
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("iterate refs: %w", err)
+	}
+	return listed, nil
+}
+
+// listCheckpointRefsWithGit lists the checkpoint namespace with git
+// for-each-ref in repo's common dir, where checkpoint refs live for all
+// worktrees.
+func listCheckpointRefsWithGit(ctx context.Context, repo *git.Repository) (map[plumbing.ReferenceName]plumbing.Hash, error) {
+	commonDir, err := checkpoint.RepositoryCommonDir(repo)
+	if err != nil {
+		return nil, fmt.Errorf("resolve git common dir: %w", err)
+	}
+	cmd := exec.CommandContext(ctx, "git", "--git-dir="+commonDir,
+		"for-each-ref", "--format=%(objectname) %(refname)", "--end-of-options", checkpoint.CheckpointRefPrefix)
+	cmd.Dir = commonDir
+	cmd.Env = gitrepo.EnvWithoutRepoOverrides()
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("list checkpoint refs: %w", err)
+	}
+	listed := make(map[plumbing.ReferenceName]plumbing.Hash)
+	for line := range strings.SplitSeq(string(out), "\n") {
+		oid, name, ok := strings.Cut(line, " ")
+		if !ok {
+			continue
+		}
+		// An unparsable line leaves its ref to the per-ref lookup.
+		if hash, ok := plumbing.FromHex(oid); ok {
+			listed[plumbing.ReferenceName(name)] = hash
+		}
+	}
+	return listed, nil
+}
+
+// listErrorAttrs describes a failed listing, with git's stderr when it ran.
+func listErrorAttrs(err error) []any {
+	attrs := []any{slog.String("error", err.Error())}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		attrs = append(attrs, slog.String("stderr", strings.TrimSpace(string(exitErr.Stderr))))
+	}
+	return attrs
 }
 
 // batchPushCheckpointRefs pushes each ref at its pinned hash to target in a
@@ -152,42 +295,31 @@ func recoverCheckpointRef(
 		"refs/entire-fetch-tmp/" + strings.TrimPrefix(candidate.name.String(), "refs/"),
 	)
 	refSpec := fmt.Sprintf("+%s:%s", candidate.name, fetchedRefName)
-	_, fetchSpan := perf.Start(ctx, "git_fetch")
-	_, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
-		Remote:   fetchTarget,
-		RefSpecs: []string{refSpec},
-		NoTags:   true,
-	})
-	fetchSpan.RecordError(fetchErr)
-	fetchSpan.End()
-	if fetchErr != nil {
-		return checkpointRefPush{}, fmt.Errorf("fetch failed: %w", fetchErr)
+	if err := fetchCheckpointRef(ctx, fetchTarget, refSpec, 0); err != nil {
+		return checkpointRefPush{}, err
 	}
 	defer func() {
 		_ = repo.Storer.RemoveReference(fetchedRefName) //nolint:errcheck // cleanup is best-effort
 	}()
 
-	// go-git loads a handle's pack index once and never reloads it, so objects
-	// the fetch wrote into a new pack are invisible to a handle that has already
-	// read objects. Replay from a freshly opened repository.
 	repoPath, err := getRepoPath(repo)
 	if err != nil {
 		return checkpointRefPush{}, fmt.Errorf("get repository path: %w", err)
 	}
-	fetched, err := gitrepo.OpenPath(repoPath)
-	if err != nil {
-		return checkpointRefPush{}, fmt.Errorf("reopen repository after fetch: %w", err)
-	}
-	defer fetched.Close()
-
-	remoteRef, err := fetched.Reference(fetchedRefName, true)
-	if err != nil {
-		return checkpointRefPush{}, fmt.Errorf("resolve fetched checkpoint ref: %w", err)
-	}
-	newTip, err := replayCheckpointCandidate(ctx, fetched, candidate.hash, remoteRef.Hash())
+	var replay fetchedReplay
+	err = RetryAfterDeepFetch(
+		func() (replayErr error) {
+			replay, replayErr = replayFetchedCheckpointRef(ctx, repoPath, fetchedRefName, candidate.hash)
+			return replayErr
+		},
+		func() error { return fetchCheckpointRef(ctx, fetchTarget, refSpec, remote.FullRefDepth) },
+	)
 	if err != nil {
 		return checkpointRefPush{}, err
 	}
+	fetched := replay.repo
+	defer fetched.Close()
+	newTip, replayed := replay.tip, replay.replayed
 	if err := checkpointRefRecoveryCAS(ctx, fetched, candidate.name, newTip, candidate.hash); err != nil {
 		// newTip has no unique writer data: it is derived entirely from the
 		// immutable candidate plus the fetched remote. On a CAS conflict the
@@ -200,71 +332,117 @@ func recoverCheckpointRef(
 		}
 		return checkpointRefPush{}, fmt.Errorf("install recovered checkpoint ref %s: %w", candidate.name, err)
 	}
+	if replayed > 0 {
+		// Recovery prints nothing on success, so the rewrite of local commits
+		// must still leave a trace in the log. Metadata only.
+		logging.Info(ctx, "replayed checkpoint ref onto fetched remote tip; local ref rewritten",
+			slog.String("ref", candidate.name.String()),
+			slog.String("local_tip", candidate.hash.String()),
+			slog.String("remote_tip", replay.remoteTip.String()),
+			slog.Int("commits_replayed", replayed))
+	}
 	candidate.hash = newTip
 	return candidate, nil
 }
 
-func replayCheckpointCandidate(
+// fetchCheckpointRef fetches refSpec from fetchTarget; a non-zero depth fetches
+// that ref's history to that absolute depth.
+func fetchCheckpointRef(ctx context.Context, fetchTarget, refSpec string, depth int) error {
+	_, fetchSpan := perf.Start(ctx, "git_fetch")
+	_, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
+		Remote:   fetchTarget,
+		RefSpecs: []string{refSpec},
+		NoTags:   true,
+		Depth:    depth,
+	})
+	fetchSpan.RecordError(fetchErr)
+	fetchSpan.End()
+	if fetchErr != nil {
+		return fmt.Errorf("fetch failed: %w", fetchErr)
+	}
+	return nil
+}
+
+// fetchedReplay is a replay computed from a freshly opened repository, which
+// the caller closes.
+type fetchedReplay struct {
+	repo      *git.Repository
+	remoteTip plumbing.Hash
+	tip       plumbing.Hash
+	replayed  int
+}
+
+// replayFetchedCheckpointRef replays localHash onto the ref a fetch just wrote.
+// go-git loads a handle's pack index once and never reloads it, so objects the
+// fetch wrote into a new pack are invisible to a handle that has already read
+// objects; each call therefore opens the repository afresh.
+func replayFetchedCheckpointRef(ctx context.Context, repoPath string, fetchedRefName plumbing.ReferenceName, localHash plumbing.Hash) (fetchedReplay, error) {
+	fetched, err := gitrepo.OpenPath(repoPath)
+	if err != nil {
+		return fetchedReplay{}, fmt.Errorf("reopen repository after fetch: %w", err)
+	}
+	remoteRef, err := fetched.Reference(fetchedRefName, true)
+	if err != nil {
+		_ = fetched.Close()
+		return fetchedReplay{}, fmt.Errorf("resolve fetched checkpoint ref: %w", err)
+	}
+	tip, replayed, err := replayOntoRemote(ctx, fetched, localHash, remoteRef.Hash())
+	if err != nil {
+		_ = fetched.Close()
+		return fetchedReplay{}, err
+	}
+	return fetchedReplay{repo: fetched, remoteTip: remoteRef.Hash(), tip: tip, replayed: replayed}, nil
+}
+
+// replayOntoRemote returns the tip that results from replaying the commits
+// only localHash reaches onto remoteHash. It never writes a ref; each caller
+// installs the tip under its own update rule. Disconnected history (no merge
+// base) is replayed with replayDisconnectedOnto. replayed counts the local
+// commits handed to the cherry-pick, zero when the remote tip is returned as is.
+func replayOntoRemote(
 	ctx context.Context,
 	repo *git.Repository,
 	localHash, remoteHash plumbing.Hash,
-) (plumbing.Hash, error) {
+) (tip plumbing.Hash, replayed int, err error) {
 	if localHash.Equal(remoteHash) {
-		return remoteHash, nil
+		return remoteHash, 0, nil
 	}
 	repoPath, err := getRepoPath(repo)
 	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("get repository path: %w", err)
+		return plumbing.ZeroHash, 0, fmt.Errorf("get repository path: %w", err)
 	}
 	mergeBase, err := getMergeBase(ctx, repoPath, localHash.String(), remoteHash.String())
 	if err == nil && mergeBase.Equal(localHash) {
-		return remoteHash, nil
+		return remoteHash, 0, nil
 	}
 
 	shallow, shallowErr := loadShallowHashes(ctx, repoPath)
 	if shallowErr != nil {
-		return plumbing.ZeroHash, fmt.Errorf("load shallow boundaries: %w", shallowErr)
+		return plumbing.ZeroHash, 0, fmt.Errorf("load shallow boundaries: %w", shallowErr)
 	}
 	if errors.Is(err, errNoMergeBase) {
-		commits, collectErr := collectCommitChain(repo, localHash, shallow)
-		if collectErr != nil {
-			return plumbing.ZeroHash, fmt.Errorf("collect disconnected checkpoint commits: %w", collectErr)
+		tip, replayed, err := replayDisconnectedOnto(ctx, repo, repoPath, localHash, remoteHash, shallow, io.Discard)
+		if err != nil {
+			return plumbing.ZeroHash, 0, fmt.Errorf("replay disconnected checkpoint commits: %w", err)
 		}
-		dataCommits := make([]*object.Commit, 0, len(commits))
-		for _, commit := range commits {
-			tree, treeErr := commit.Tree()
-			if treeErr != nil {
-				return plumbing.ZeroHash, fmt.Errorf("read tree for commit %s: %w", commit.Hash.String()[:7], treeErr)
-			}
-			if len(tree.Entries) > 0 {
-				dataCommits = append(dataCommits, commit)
-			}
-		}
-		if len(dataCommits) == 0 {
-			return remoteHash, nil
-		}
-		newTip, pickErr := cherryPickOnto(ctx, repo, remoteHash, dataCommits, shallow)
-		if pickErr != nil {
-			return plumbing.ZeroHash, fmt.Errorf("replay disconnected checkpoint commits: %w", pickErr)
-		}
-		return newTip, nil
+		return tip, replayed, nil
 	}
 	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("find checkpoint merge base: %w", err)
+		return plumbing.ZeroHash, 0, fmt.Errorf("find checkpoint merge base: %w", err)
 	}
 
 	commits, err := collectCommitsSince(ctx, repo, repoPath, localHash, remoteHash)
 	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("collect local checkpoint commits: %w", err)
+		return plumbing.ZeroHash, 0, fmt.Errorf("collect local checkpoint commits: %w", err)
 	}
 	if len(commits) == 0 {
-		return remoteHash, nil
+		return remoteHash, 0, nil
 	}
 	newTip, err := cherryPickOnto(ctx, repo, remoteHash, commits, shallow)
 	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("replay checkpoint commits: %w", err)
+		return plumbing.ZeroHash, 0, fmt.Errorf("replay checkpoint commits: %w", err)
 	}
-	return newTip, nil
+	return newTip, len(commits), nil
 }
 
 // checkpointRefRecoveryError keeps both failures inspectable, while allowing the
@@ -748,22 +926,24 @@ func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.Re
 	// shared monorepo), --unshallow downloads the whole repository because
 	// git treats shallow as a global property of the clone, not per-ref.
 	// The downstream reconcile/rebase paths walk only commits visible past
-	// .git/shallow (collectCommitChain / collectCommitsSince), so the
-	// missing pre-shallow history isn't needed to produce a correct rebase.
+	// .git/shallow (collectCommitChain / collectCommitsSince). When a boundary
+	// hides the merge base they refuse with errShallowHidesMergeBase, and the
+	// retry below deepens only this ref before trying once more.
 	// Span the fetch separately so a slow sync can be attributed to the network
 	// fetch versus the local reconcile/rebase that follows it.
-	_, fetchSpan := perf.Start(ctx, "git_fetch")
-	_, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
-		Remote:   fetchTarget,
-		RefSpecs: []string{refSpec},
-		NoTags:   true,
-	})
-	fetchSpan.RecordError(fetchErr)
-	fetchSpan.End()
-	if fetchErr != nil {
-		return fmt.Errorf("fetch failed: %w", fetchErr)
+	if err := fetchCheckpointRef(ctx, fetchTarget, refSpec, 0); err != nil {
+		return err
 	}
+	return RetryAfterDeepFetch(
+		func() error { return syncFetchedRef(ctx, ref, fetchedRefName, usedTempRef) },
+		func() error { return fetchCheckpointRef(ctx, fetchTarget, refSpec, remote.FullRefDepth) },
+	)
+}
 
+// syncFetchedRef reconciles and rebases the local ref onto fetchedRefName, the
+// ref a fetch just wrote. It opens the repository itself so objects from that
+// fetch are visible.
+func syncFetchedRef(ctx context.Context, ref, fetchedRefName plumbing.ReferenceName, usedTempRef bool) error {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to open git repository: %w", err)
@@ -771,11 +951,10 @@ func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.Re
 	defer repo.Close()
 
 	// Reconcile disconnected metadata branches before rebasing.
-	// The fetch above updated the remote-tracking ref, so reconciliation
+	// The fetch updated the remote-tracking ref, so reconciliation
 	// can compare fresh local vs remote. If disconnected (empty-orphan bug),
 	// this cherry-picks local commits onto remote tip, updating the local ref.
-	// If reconciliation fails, abort — proceeding to rebase on disconnected
-	// refs would silently combine unrelated histories.
+	// If reconciliation fails, abort so the caller sees its error.
 	if reconcileErr := ReconcileDisconnectedMetadataRef(ctx, repo, ref, fetchedRefName, os.Stderr); reconcileErr != nil {
 		return fmt.Errorf("metadata reconciliation failed: %w", reconcileErr)
 	}
@@ -786,70 +965,23 @@ func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.Re
 		return fmt.Errorf("failed to get local ref: %w", err)
 	}
 
-	// Get fetched ref (remote-tracking or temp ref, updated by the fetch above)
+	// Get fetched ref (remote-tracking or temp ref, updated by the fetch)
 	remoteRef, err := repo.Reference(fetchedRefName, true)
 	if err != nil {
 		return fmt.Errorf("failed to get remote ref: %w", err)
 	}
 
-	advance := func(hash plumbing.Hash) error {
-		if err := setRefHash(repo, ref, hash); err != nil {
-			return err
-		}
-		if usedTempRef {
-			_ = repo.Storer.RemoveReference(fetchedRefName) //nolint:errcheck // cleanup is best-effort
-		}
-		return nil
-	}
-
-	// If local is already at or behind remote, fast-forward
-	if localRef.Hash().Equal(remoteRef.Hash()) {
-		return advance(remoteRef.Hash())
-	}
-
-	// Find merge base
-	repoPath, err := getRepoPath(repo)
-	if err != nil {
-		return fmt.Errorf("failed to get repo path: %w", err)
-	}
-	mergeBase, err := getMergeBase(ctx, repoPath, localRef.Hash().String(), remoteRef.Hash().String())
-	if err != nil {
-		return fmt.Errorf("failed to find merge base: %w", err)
-	}
-
-	// If local is ancestor of remote (merge base == local), fast-forward to remote
-	if mergeBase.Equal(localRef.Hash()) {
-		if err := advance(remoteRef.Hash()); err != nil {
-			return fmt.Errorf("failed to fast-forward ref: %w", err)
-		}
-		return nil
-	}
-
-	// Collect commits reachable from local but not from remote and cherry-pick
-	// them onto the remote tip. This preserves local-only commits even when the
-	// local metadata branch already contains old merge commits, while avoiding
-	// replaying shared ancestors older than the true merge-base.
-	localCommits, err := collectCommitsSince(ctx, repo, repoPath, localRef.Hash(), remoteRef.Hash())
-	if err != nil {
-		return fmt.Errorf("failed to collect local commits: %w", err)
-	}
-
-	if len(localCommits) == 0 {
-		// No local-only commits — just point to remote
-		return advance(remoteRef.Hash())
-	}
-
-	shallow, err := loadShallowHashes(ctx, repoPath)
-	if err != nil {
-		return fmt.Errorf("failed to load shallow boundaries: %w", err)
-	}
-
-	newTip, err := cherryPickOnto(ctx, repo, remoteRef.Hash(), localCommits, shallow)
+	newTip, _, err := replayOntoRemote(ctx, repo, localRef.Hash(), remoteRef.Hash())
 	if err != nil {
 		return fmt.Errorf("failed to rebase local commits onto remote: %w", err)
 	}
-
-	return advance(newTip)
+	if err := setRefHash(repo, ref, newTip); err != nil {
+		return err
+	}
+	if usedTempRef {
+		_ = repo.Storer.RemoveReference(fetchedRefName) //nolint:errcheck // cleanup is best-effort
+	}
+	return nil
 }
 
 // getMergeBase returns the merge base hash of two commits, or an error if they

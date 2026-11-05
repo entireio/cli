@@ -102,6 +102,18 @@ uses the following routing shapes, mirroring the entire.io BFF:
   fallback (`runAuthenticatedActivityAPI` in `entireapi_client.go`,
   `newRecapClient` in `recap.go`): the BFF serves `/me/*` by proxying to the
   same home cell, so it cannot answer a caller the cell path cannot.
+  One exception: `/me/project-trails` (`trail list --mine`,
+  `project_trail_list_mine.go`). A project trail lives in its project's cell,
+  so each cell knows only the caller's trails homed there. Like the web
+  sidebar (`me-project-trails.ts`), the CLI asks every jurisdiction's default
+  cluster from the catalog through `fanOutCells`, keeps the newest copy of
+  each trail, and merges by latest activity into one bounded page (per-region
+  cursors cannot continue a merged order). Unlike the sidebar, which fails
+  the whole request when any region fails, the CLI lists what the other
+  regions returned and reports the failed region as partial (status, code,
+  and request ID only). A 401 from any region still fails the command, since
+  every region is sent the same credentials; a 403 can mean only that the
+  caller has no access in that region, so it leaves that region partial.
 - **Cloud dispatch → one jurisdiction's cell**: `entire dispatch` builds one
   `CellClientFactory` (`newDispatchCellClient` in `dispatch/mode_cloud.go`)
   and dials the `--jurisdiction` cell, else the home cell. It posts to

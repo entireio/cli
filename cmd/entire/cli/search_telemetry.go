@@ -21,11 +21,9 @@ import (
 // class.
 func classifySearchError(err error) string {
 	switch {
-	case errors.Is(err, auth.ErrNotLoggedIn), errors.Is(err, tokenstore.ErrKeyringUnavailable),
-		errors.Is(err, tokenstore.ErrBadConfig):
+	case errors.Is(err, auth.ErrNotLoggedIn), errors.Is(err, tokenstore.ErrKeyringUnavailable):
 		// An unreadable keyring was reported as not-logged-in before it had
 		// its own error; keep it in the auth class so the series is continuous.
-		// A bad config.json also leaves the login unreadable.
 		return telemetry.SearchErrClassAuth
 	case errors.Is(err, auth.ErrNoCellForJurisdiction):
 		return telemetry.SearchErrClassCellSkip

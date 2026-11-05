@@ -45,7 +45,7 @@ Converters fill only what the native transcript reports per call. Claude Code, C
 
 ### Per-call usage
 
-An assistant line can carry usage with empty content (`"content":[]`, for example an aborted or thinking-only call): readers that render transcripts should skip it, and readers that count usage must keep it.
+An assistant line can carry usage with empty content (`"content":[]` or `"content":null`, for example an aborted or thinking-only call): readers that render transcripts should skip it, and readers that count usage must keep it.
 
 Claude Code (`Options.Agent` `claude-code`, and `NewClaudeAdapter`; Cursor and Droid keep legacy counts): streaming fragments of one message ID become one line carrying the whole usage row with the strictly highest `output_tokens` (earlier wins ties) and the model of the first fragment that reports one, skipping Claude Code's `<synthetic>` placeholder; `ts` is the last fragment's. The 5m/1h cache-write split is emitted only when both durations are reported. A message with no usage object on any fragment has no model or usage fields. User entries holding only tool results between fragments of one ID do not split the call: the later fragments become separate lines without usage, and the best row stays on the call's first line (the first with visible content, since a thinking-only message has no line), so a call's usage is counted once. Read per-call usage from the full converted transcript: in a checkpoint slice (`ConvertWithBoundary`), a usage row that arrives after a tool result goes to the call's first line, which can sit before the slice boundary.
 
@@ -53,7 +53,7 @@ Codex, `response_item` path (rollouts from Codex versions that do not record ite
 
 Codex, item path (current rollouts; see Blocks): one line per item, not per call. A call is the items up to the `token_count` that closes it, and its usage is computed exactly as on the `response_item` path: the same snapshot differences, fresh input, cached reads and reasoning, the model from `turn_context`, repeated snapshots ignored, and a counter decrease stopping usage. The usage goes on the call's last assistant line, so the call's earlier lines carry none. A call with usage but no assistant line (reasoning only) gets a usage-only line with `"content":null` and no `id`, whose `ts` is the closing snapshot's; other lines keep their item's `ts`. A user message ends the open call. With `StartLine`, the skipped lines seed the usage baseline, and the last line before the boundary is part of the slice when its call's closing snapshot arrives after it (a one-line head overlap).
 
-Pi, one native message per call (no fragments to merge): `model` is `message.model`, and Pi's `input` is used as `input_tokens` unchanged, since the backends that report cached tokens already exclude them from it (a backend that folds cache reads into `input` cannot be told apart per call). `cache_write_1h_tokens` is Pi's `cacheWrite1h` and `cache_write_5m_tokens` the rest of `cacheWrite` (clamped at 0 if 1h exceeds it), only when Pi reports `cacheWrite1h`. `reasoning_tokens` is Pi's `reasoning` when reported. An assistant message with no visible content but non-zero usage (thinking-only, aborted) gets a line with `"content":[]`, so per-line usage sums to the session totals; one with zero usage gets none. Abandoned branches are excluded. Read per-call usage from the full converted transcript. Pi user `image` items pass through verbatim in Pi's native shape (`data`, `mimeType`) and in source order, so an image-only user message still has a line; `data` is the inline base64, or an `entire-asset:assets/…` placeholder when image externalization (`redaction.externalize_images`) moved the image to the checkpoint's assets.
+Pi, one native message per call (no fragments to merge): `model` is `message.model`, and Pi's `input` is used as `input_tokens` unchanged, since the backends that report cached tokens already exclude them from it (a backend that folds cache reads into `input` cannot be told apart per call). `cache_write_1h_tokens` is Pi's `cacheWrite1h` and `cache_write_5m_tokens` the rest of `cacheWrite` (clamped at 0 if 1h exceeds it), only when Pi reports `cacheWrite1h`. `reasoning_tokens` is Pi's `reasoning` when reported. An assistant message with no visible content but non-zero usage (thinking-only, aborted) gets a line with `"content":null` (`"content":[]` before Pi went through the fold), so per-line usage sums to the session totals; one with zero usage gets none. Abandoned branches are excluded. Read per-call usage from the full converted transcript. Pi user `image` items pass through verbatim in Pi's native shape (`data`, `mimeType`) and in source order, so an image-only user message still has a line; `data` is the inline base64, or an `entire-asset:assets/…` placeholder when image externalization (`redaction.externalize_images`) moved the image to the checkpoint's assets.
 
 ### Blocks
 
@@ -191,19 +191,31 @@ applies records in order and returns the transcript lines.
 
 In this repository the fold is used by `Convert`: for Claude Code, Cursor and
 Droid, it runs a `JSONLAdapter` that turns the native transcript into records
-and then folds them. The other converters still write lines directly. The fold
+and then folds them, and for Pi a `PiAdapter`. The other converters still write
+lines directly. The fold
 is meant to be shared with a backend that folds the same records to show a live
 session, so that a live view and a checkpoint's `transcript.jsonl` match byte
 for byte.
 
 A live producer uses the same adapter (`NewClaudeAdapter`, `NewCursorAdapter`,
-`NewDroidAdapter`). `Feed` accepts the transcript in chunks split anywhere and
+`NewDroidAdapter`, `NewPiAdapter`). `Feed` accepts the transcript in chunks split anywhere and
 returns the records for the lines it completed; `Flush` consumes a trailing
 partial line and is called only once the transcript is final. Fold keys are
 stable only when the adapter is fed from the transcript's first line, so a
 producer that restarts replays from line 1. `Lines` reports how many source
 lines have been consumed. Records carry the transcript's bytes as fed: redact
 before feeding.
+
+The Pi adapter keys each message by its Pi entry ID and sends it whole as a
+`message` record, with its tool results spliced in; it sends the message again
+when a result it shows changes, and `drop`s it when it leaves the active
+branch (a `message` record restores it in place if the branch comes back). A
+line that only grows the active branch is read without walking the tree, so a
+session that only grows reads in linear time. Like the JSONL adapters, it has
+no line size limit: a long line is held until its newline arrives and read
+whole. `Convert` still fails on a Pi line of 10 MiB or more (newline
+excluded), as it always has, so the fold matches `Convert` wherever `Convert`
+succeeds.
 
 ### Record wire format v1
 

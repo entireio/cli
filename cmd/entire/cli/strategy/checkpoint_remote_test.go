@@ -1806,20 +1806,26 @@ func TestFetchMetadataBranch_BudgetBoundsTheFetch(t *testing.T) {
 //
 // Not parallel: uses t.Chdir() and t.Setenv()
 func TestFetchMetadataBranch_FailsFastAfterSlowFailure(t *testing.T) {
-	t.Setenv(foregroundFetchBudgetEnvVar, "1s")
+	// Long enough for git to start and connect on a loaded machine; a shorter
+	// budget can run out first, and then the remote is never contacted at all.
+	const budget = 5 * time.Second
+	t.Setenv(foregroundFetchBudgetEnvVar, budget.String())
 	t.Setenv(remote.CheckpointTokenEnvVar, "")
 	_, localDir := setupCheckpointFetchRepos(t)
 	t.Chdir(localDir)
 	url, conns := silentHTTPRemote(t)
 
 	require.ErrorIs(t, FetchMetadataBranch(context.Background(), url), errForegroundFetchBudget)
+	// The server counts a connection in its own goroutine, possibly after the
+	// fetch has already returned.
+	require.Eventually(t, func() bool { return conns.Load() > 0 }, 5*time.Second, 10*time.Millisecond,
+		"the first fetch must reach the remote")
 	dialed := conns.Load()
-	require.Positive(t, dialed)
 
 	start := time.Now()
 	err := FetchMetadataBranch(context.Background(), url)
 	require.ErrorIs(t, err, errRecentSlowFetchFailure)
-	assert.Less(t, time.Since(start), 500*time.Millisecond)
+	assert.Less(t, time.Since(start), budget, "a fail-fast fetch must not wait out the budget")
 	assert.Equal(t, dialed, conns.Load(), "a fail-fast fetch must not contact the remote")
 }
 
@@ -2059,4 +2065,20 @@ func setupEmptyOrphanHeal(t *testing.T) (localDir, remoteTip string) {
 	t.Chdir(localDir)
 	paths.ClearWorktreeRootCache()
 	return localDir, remoteTip
+}
+
+// Not parallel: uses t.Chdir()
+func TestFetchMetadataBranch_DeepFetchesWhenShallowHistoryHidesTheMergeBase(t *testing.T) {
+	cloneDir := cloneWithShallowHiddenMergeBase(t)
+	bareDir := strings.TrimSpace(testutil.RunGit(t, cloneDir, "remote", "get-url", "origin"))
+	t.Chdir(cloneDir)
+	paths.ClearWorktreeRootCache()
+	ref := metadataLocalRef()
+
+	require.NoError(t, FetchMetadataBranch(t.Context(), bareDir))
+
+	assert.Equal(t,
+		strings.TrimSpace(testutil.RunGit(t, cloneDir, "rev-parse", metadataOriginRemoteRef().String())),
+		strings.TrimSpace(testutil.RunGit(t, cloneDir, "rev-parse", ref.String())),
+		"the deep fetch reveals the merge base, so the local ref fast-forwards to the teammate's update")
 }

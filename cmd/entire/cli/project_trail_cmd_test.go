@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -30,10 +31,14 @@ type fakeProjectTrailCore struct {
 	apiURL         string
 	resolutionJSON string
 	clusters       []coreapi.Cluster
+	resolveErr     error
 }
 
 func (f *fakeProjectTrailCore) ResolveProject(_ context.Context, params coreapi.ResolveProjectParams) (*coreapi.ResolveProjectOutputBody, error) {
 	f.resolveCalls++
+	if f.resolveErr != nil {
+		return nil, f.resolveErr
+	}
 	resolved := struct {
 		Project *struct {
 			ID                    string `json:"id"`
@@ -85,7 +90,24 @@ func setupProjectTrailTest(t *testing.T, handler http.HandlerFunc) (*fakeProject
 		require.Equal(t, server.URL, target.BaseURL)
 		return api.NewClientWithBaseURL("project-token", target.BaseURL), nil
 	}
-	t.Cleanup(func() { newProjectTrailCoreClient, newProjectTrailCellClient = oldCore, oldCell })
+	// Repository reads (show's merge gates) fail unless a test stubs them, so
+	// no test reaches the real control plane.
+	oldTrail := newTrailAPIClient
+	newTrailAPIClient = func(context.Context, bool, string, string, string) (*api.Client, string, error) {
+		return nil, "", errors.New("repository client not stubbed")
+	}
+	// The shared-login opener routes through newTrailAPIClient, so a test
+	// stubs one seam for both.
+	oldOpener := newTrailRepoClientOpener
+	newTrailRepoClientOpener = func(insecure bool) trailRepoClientOpener {
+		return func(ctx context.Context, forge, owner, repo string) (*api.Client, string, error) {
+			return newTrailAPIClient(ctx, insecure, forge, owner, repo)
+		}
+	}
+	t.Cleanup(func() {
+		newProjectTrailCoreClient, newProjectTrailCellClient, newTrailAPIClient = oldCore, oldCell, oldTrail
+		newTrailRepoClientOpener = oldOpener
+	})
 	return core, server
 }
 
@@ -115,6 +137,7 @@ func TestProjectTrailShowFollowsParentAcrossCells(t *testing.T) {
 		item := projectTrailTestResource()
 		item.URL = "https://entire.io/gh/acme/-/trails/42/"
 		item.Changes[0].Repository = "widget"
+		item.Changes[0].Base = "release/1.2"
 		item.Changes = append(item.Changes,
 			api.ChangeSummary{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAY", Repository: "api", Number: 3, Branch: "feature/a"},
 			api.ChangeSummary{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAZ", RepositoryID: "repo-hidden", Number: 9},
@@ -146,6 +169,8 @@ func TestProjectTrailShowFollowsParentAcrossCells(t *testing.T) {
 	require.Len(t, item.Changes, 4)
 	require.Equal(t, "https://entire.io/gh/acme/-/trails/42/changes/widget/7", item.Changes[0].URL)
 	require.True(t, item.Changes[0].Current, "the branch's own change is current")
+	require.Equal(t, "release/1.2", item.Changes[0].Base, "a change's base is the branch it merges into")
+	require.Empty(t, item.Changes[1].Base)
 	require.Equal(t, "https://entire.io/gh/acme/-/trails/42/changes/api/3", item.Changes[1].URL)
 	require.False(t, item.Changes[1].Current, "a same-named branch in another repository is not current")
 	require.Empty(t, item.Changes[2].URL, "a change without a repository name has no URL")
@@ -157,8 +182,8 @@ func TestProjectTrailShowFollowsParentAcrossCells(t *testing.T) {
 	require.NoError(t, err)
 	require.Regexp(t, `(?s)^Trail #42: Project intent\n  ID:        `+projectTrailTestID+`\n.*`+
 		`  URL:       https://entire\.io/gh/acme/-/trails/42/\n  Assignees: alice\n  Changes:\n`+
-		`    CHANGE +BRANCH +STATUS +URL\n`+
-		`    widget/7 \(current\) +feature/a +https://entire\.io/gh/acme/-/trails/42/changes/widget/7\n`+
+		`    CHANGE +BRANCH +BASE +STATUS +URL\n`+
+		`    widget/7 \(current\) +feature/a +release/1\.2 +https://entire\.io/gh/acme/-/trails/42/changes/widget/7\n`+
 		`    api/3 +feature/a +https://entire\.io/gh/acme/-/trails/42/changes/api/3\n`+
 		`    -\n`+
 		`    - +feature/dots\n`+
@@ -282,6 +307,60 @@ func TestProjectTrailShowOmitsURLWithoutOne(t *testing.T) {
 			require.NotContains(t, out, "URL:")
 		})
 	}
+}
+
+// projectTrailWireJSON is a project trail as the server sends it: a derived
+// phase next to the lifecycle status, lastActivityAt, and no updatedAt key.
+func projectTrailWireJSON(phase string) string {
+	phaseField := ""
+	if phase != "" {
+		phaseField = fmt.Sprintf(`"phase":%q,`, phase)
+	}
+	return fmt.Sprintf(`{"id":%q,"projectId":%q,"number":42,"title":"Project intent","body":"","status":"open",%s`+
+		`"createdAt":"2026-10-28T09:00:00Z","lastActivityAt":"2026-10-29T17:52:10Z","metadataUpdatedAt":"2026-10-29T15:04:06Z","closedAt":null,`+
+		`"changes":[{"id":%q,"number":7,"branch":"feature/a","repositoryId":"repo-a","status":"merged",`+
+		`"createdAt":"2026-10-28T09:05:00Z","updatedAt":"2026-10-29T17:53:20Z"}]}`,
+		projectTrailTestID, projectTrailTestProject, phaseField, projectTrailTestChange)
+}
+
+func TestProjectTrailShowPhaseAndLastActivity(t *testing.T) {
+	setupProjectTrailTest(t, func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, projectTrailWireJSON("complete"))
+	})
+	out, _, err := executeProjectTrailTest(t, "show", "42", "--project", "gh/acme")
+	require.NoError(t, err)
+	require.Regexp(t, `(?m)^  Status:\s+open\n  Phase:\s+complete$`, out, "phase follows the lifecycle status it does not replace")
+	require.Regexp(t, `(?m)^  Last activity:\s+2026-10-29T17:52:10Z$`, out)
+	require.NotContains(t, out, "0001-01-01")
+	require.NotContains(t, out, "Updated:")
+
+	js, _, err := executeProjectTrailTest(t, "show", "42", "--project", "gh/acme", "--json")
+	require.NoError(t, err)
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal([]byte(js), &raw))
+	require.Equal(t, "open", raw["status"])
+	require.Equal(t, "complete", raw["phase"])
+	require.Equal(t, "2026-10-29T17:52:10Z", raw["lastActivityAt"])
+	require.NotContains(t, raw, "updatedAt")
+	require.NotContains(t, js, "0001-01-01")
+}
+
+func TestProjectTrailShowWithoutPhaseOrActivity(t *testing.T) {
+	setupProjectTrailTest(t, func(w http.ResponseWriter, _ *http.Request) {
+		item := projectTrailTestResource()
+		assert.NoError(t, json.NewEncoder(w).Encode(item))
+	})
+	out, _, err := executeProjectTrailTest(t, "show", "42", "--project", "gh/acme")
+	require.NoError(t, err)
+	require.NotContains(t, out, "Phase:")
+	require.NotContains(t, out, "Last activity:")
+
+	js, _, err := executeProjectTrailTest(t, "show", "42", "--project", "gh/acme", "--json")
+	require.NoError(t, err)
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal([]byte(js), &raw))
+	require.NotContains(t, raw, "phase")
+	require.NotContains(t, raw, "lastActivityAt", "an unknown activity time is omitted, not printed as the zero time")
 }
 
 func TestProjectTrailUpdateAtomicConditionalPatch(t *testing.T) {
@@ -426,4 +505,72 @@ func TestProjectTrailValidationBeforeIO(t *testing.T) {
 			require.Error(t, err)
 		})
 	}
+}
+
+// Core answers 404 for a missing project and for a GitHub namespace the login
+// cannot see, and 403 for a native project it may not inspect. Both must read
+// as one line naming the project, never the generated client's error dump.
+func TestProjectTrailProjectResolveErrorsAreReadable(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		status       int
+		args         []string
+		sentinel     error
+		want         []string
+		noGitHubHint bool
+	}{
+		{
+			name: "missing GitHub namespace on list", status: http.StatusNotFound,
+			args: []string{"list", "--project", "gh/acme"}, sentinel: errProjectTrailProjectNotFound,
+			want: []string{"project gh/acme does not exist or is not visible to your login", "entire auth status", "GitHub owner is connected to Entire"},
+		},
+		{
+			name: "missing native project on show", status: http.StatusNotFound,
+			args: []string{"show", "42", "--project", "et/widgets"}, sentinel: errProjectTrailProjectNotFound,
+			want:         []string{"project et/widgets does not exist or is not visible to your login", "entire auth status"},
+			noGitHubHint: true,
+		},
+		{
+			name: "forbidden native project", status: http.StatusForbidden,
+			args: []string{"show", "42", "--project", "et/widgets"}, sentinel: errProjectTrailProjectForbidden,
+			want:         []string{"your login does not have access to project et/widgets"},
+			noGitHubHint: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			core, _ := setupProjectTrailTest(t, func(http.ResponseWriter, *http.Request) {
+				t.Error("no data-plane request expected after a refused project resolution")
+			})
+			cause := &coreapi.ErrorModelStatusCode{StatusCode: tc.status, Response: coreapi.ErrorModel{
+				Detail: coreapi.NewOptString("project not found"),
+				Title:  coreapi.NewOptString(http.StatusText(tc.status)),
+			}}
+			core.resolveErr = cause
+			_, _, err := executeProjectTrailTest(t, tc.args...)
+			require.ErrorIs(t, err, tc.sentinel)
+			require.ErrorIs(t, err, cause, "callers can still inspect the client error")
+			for _, want := range tc.want {
+				assert.Contains(t, err.Error(), want)
+			}
+			assert.NotContains(t, err.Error(), "Schema:", "the generated client's error dump must not reach the user")
+			assert.NotContains(t, err.Error(), "project not found:", "the sentinel text must not prefix the message")
+			if tc.noGitHubHint {
+				assert.NotContains(t, err.Error(), "GitHub owner", "native projects get no GitHub hint")
+			}
+		})
+	}
+}
+
+// Other Core API errors name the project, the server's detail and the status,
+// still without the dump, and keep the underlying error for diagnosis.
+func TestProjectTrailProjectResolveOtherErrorsKeepCause(t *testing.T) {
+	core, _ := setupProjectTrailTest(t, func(http.ResponseWriter, *http.Request) {})
+	cause := &coreapi.ErrorModelStatusCode{StatusCode: http.StatusInternalServerError, Response: coreapi.ErrorModel{
+		Detail: coreapi.NewOptString("boom detail"),
+	}}
+	core.resolveErr = cause
+	_, _, err := executeProjectTrailTest(t, "list", "--project", "gh/acme")
+	require.ErrorIs(t, err, cause)
+	require.NotErrorIs(t, err, errProjectTrailProjectNotFound)
+	assert.Equal(t, "resolve project gh/acme: boom detail (HTTP 500)", err.Error())
 }
