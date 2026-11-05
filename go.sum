@@ -14,8 +14,8 @@ github.com/MakeNowJust/heredoc v1.0.0 h1:cXCdzVdstXyiTqTvfqk9SDHpKNjxuom+DOlyEeQ
 github.com/MakeNowJust/heredoc v1.0.0/go.mod h1:mG5amYoWBHf8vpLOuehzbGGw0EHxpZZ6lCpQ4fNJ8LE=
 github.com/Masterminds/semver/v3 v3.4.0 h1:Zog+i5UMtVoCU8oKka5P7i9q9HgrJeGzI9SA1Xbatp0=
 github.com/Masterminds/semver/v3 v3.4.0/go.mod h1:4V+yj/TJE1HU9XfppCwVMZq3I84lprf4nC11bSS5beM=
-github.com/Microsoft/go-winio v0.6.2 h1:F2VQgta7ecxGYO8k3ZZz3RS8fVIXVxONVUPlNERoyfY=
-github.com/Microsoft/go-winio v0.6.2/go.mod h1:yd8OoFMLzJbo9gZq8j5qaps8bJ9aShtEA8Ipt1oGCvU=
+github.com/Microsoft/go-winio v0.6.4 h1:kJF2pamtYCWXf0xAT8sAkwKC0pMl2HYBrRPHAqyUc+g=
+github.com/Microsoft/go-winio v0.6.4/go.mod h1:1xl5JXG4ze/m74GH6Dc4Mwxfc3VL5siRVQjIAlHH07U=
 github.com/ProtonMail/go-crypto v1.5.2 h1:cucYnvqcY7UOXVD//mSyjeaPY0SSN3v5cDkYPxumINk=
 github.com/ProtonMail/go-crypto v1.5.2/go.mod h1:/RaSu30DaKO4RY+XdV/ACcCcZkGr7AhUIduq5sjzzCo=
 github.com/STARRY-S/zip v0.2.3 h1:luE4dMvRPDOWQdeDdUxUoZkzUIpTccdKdhHHsQJ1fm4=
@@ -133,8 +133,8 @@ github.com/go-git/go-billy/v6 v6.0.0-beta.1 h1:OJ4r207zcEbeq/DJNajQUOMd+pph3r9A7
 github.com/go-git/go-billy/v6 v6.0.0-beta.1/go.mod h1:QGOWN4CzmtRfpFeCw5paG3RJyKdTwsfGASkxBVkIaAU=
 github.com/go-git/go-git-fixtures/v6 v6.0.0-alpha.1 h1:gmqi2jvsreu0s8JMLylYDFq4sbjHwwlhktMw0DUg3mA=
 github.com/go-git/go-git-fixtures/v6 v6.0.0-alpha.1/go.mod h1:ECf1MqJlBdYpKggBrOXjo/0EnvRZx6D++I86UYjPgAQ=
-github.com/go-git/go-git/v6 v6.0.0-beta.1 h1:1t+vJYGDBN6f9GRWskgWx5UjXPFUa7wfffZZZ2C5GtA=
-github.com/go-git/go-git/v6 v6.0.0-beta.1/go.mod h1:ugDlr38Wwc+fOw85J+Oluh5TNXQtJgYMcriOljg3l4s=
+github.com/go-git/go-git/v6 v6.0.0-beta.1.0.20261105090440-f07160f87eaa h1:umIAGk1I1yS5AAJQrUfOGhkxhW/fAP/O1r5QvD8GyD0=
+github.com/go-git/go-git/v6 v6.0.0-beta.1.0.20261105090440-f07160f87eaa/go.mod h1:8X4uwqGVALZWvQEeJMVZrmD8TDDVsRqypnBZFXnXbaQ=
 github.com/go-git/x/plugin/objectsigner/auto v0.1.1-0.20260624122410-382b2905c041 h1:ATVPaVKC1wbuQdvGKfKXotuwXYeGfigyHERl7lmNG+I=
 github.com/go-git/x/plugin/objectsigner/auto v0.1.1-0.20260624122410-382b2905c041/go.mod h1:Cpmdf+1Pmw6nPWTpfBMsPmWju2Tb+qjwccWR5AvOBC4=
 github.com/go-git/x/plugin/objectsigner/gpg v0.2.1-0.20260624122410-382b2905c041 h1:Tni6GTpv/Nx4HAub64YmnxGWe99za33jfzy3GesditQ=
