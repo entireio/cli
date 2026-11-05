@@ -57,10 +57,13 @@ type ProjectTrail struct {
 }
 
 type ChangeSummary struct {
-	ID             string    `json:"id"`
-	RepositoryID   string    `json:"repositoryId"`
-	Repository     string    `json:"repository"`
-	Branch         string    `json:"branch"`
+	ID           string `json:"id"`
+	RepositoryID string `json:"repositoryId"`
+	Repository   string `json:"repository"`
+	Branch       string `json:"branch"`
+	// Base is the branch the change merges into; empty from a server that
+	// does not report it.
+	Base           string    `json:"base,omitempty"`
 	Number         int       `json:"number"`
 	Title          string    `json:"title"`
 	Status         string    `json:"status"`
