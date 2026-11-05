@@ -190,7 +190,11 @@ func secretCoreURL(jurisdiction string) (string, error) {
 }
 
 // jurisdictionCoreURL returns https://<jurisdiction>.<default login host>,
-// for example https://eu.auth.entire.io.
+// for example https://eu.auth.entire.io. Core guarantees this layout: the v1
+// secret contract defines the exchange Core as https://<juri>.auth.<domain>,
+// and the SDK derives it the same way. It cannot use the cluster topology
+// (defaultClusterByJurisdiction), which needs an authenticated Core call
+// before the secret has been exchanged.
 func jurisdictionCoreURL(jurisdiction string) string {
 	return httpclient.SchemeHTTPS + "://" + jurisdiction + "." + strings.TrimPrefix(api.DefaultAuthBaseURL, httpclient.SchemeHTTPS+"://")
 }
