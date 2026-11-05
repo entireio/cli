@@ -747,6 +747,20 @@ func flushCheckpointRefs(ctx context.Context, repo *git.Repository, ps pushSetti
 	return retryCheckpointRefsIndividually(ctx, pushCtx, repo, queue, dest, existing, batchErr, result)
 }
 
+// queuedRefWarning returns the line to print for a ref that stays queued, or ""
+// when the failure needs no warning.
+func queuedRefWarning(pushErr error, target string, ref plumbing.ReferenceName) string {
+	if reason := checkpointRefRejectionReason(pushErr); reason != "" {
+		return fmt.Sprintf("[entire] Warning: checkpoint ref %s remains queued (showing one rejection):\n%s", ref, reason)
+	}
+	if errors.Is(pushErr, errShallowHidesMergeBase) {
+		// Divergence alone stays quiet, but this one never clears on its own:
+		// every push would fetch and refuse again.
+		return fmt.Sprintf("[entire] Warning: checkpoint ref %s remains queued: %v", ref, WithShallowFetchHint(errShallowHidesMergeBase, target, ref))
+	}
+	return ""
+}
+
 // retryCheckpointRefsIndividually is flushCheckpointRefs after the batch push
 // failed: it retries each ref with recovery, within checkpointFlushBudget.
 func retryCheckpointRefsIndividually(
@@ -808,13 +822,7 @@ func retryCheckpointRefsIndividually(
 				printNonInteractiveSSHAuthHint()
 			}
 			if rejectionWarning == "" {
-				if reason := checkpointRefRejectionReason(pushErr); reason != "" {
-					rejectionWarning = fmt.Sprintf("[entire] Warning: checkpoint ref %s remains queued (showing one rejection):\n%s", ref.name, reason)
-				} else if errors.Is(pushErr, errShallowHidesMergeBase) {
-					// Divergence alone stays quiet, but this one never clears
-					// on its own: every push would fetch and refuse again.
-					rejectionWarning = fmt.Sprintf("[entire] Warning: checkpoint ref %s remains queued: %v", ref.name, WithShallowFetchHint(errShallowHidesMergeBase, dest.target, ref.name))
-				}
+				rejectionWarning = queuedRefWarning(pushErr, dest.target, ref.name)
 			}
 			if firstErr == nil {
 				firstErr = pushErr
