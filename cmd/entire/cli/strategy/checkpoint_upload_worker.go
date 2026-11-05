@@ -21,6 +21,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -374,6 +375,29 @@ func UploadRequestedCheckpoints(ctx context.Context, w io.Writer) int {
 		logging.Debug(ctx, "clear reported checkpoint upload failed", slog.String("error", err.Error()))
 	}
 	return last.Pushed
+}
+
+// RunPushThenUploadCheckpoints runs cmd, a `git push` to remote, with the
+// pre-push hook told to record the checkpoint upload rather than start it
+// (CheckpointUploadAfterPushEnv), then runs that upload in-process once the
+// push has returned, so the push's success also means its checkpoints went —
+// and they never land just before the branch, which GitHub would reject as the
+// later of two back-to-back pushes. A failed push uploads nothing: its request
+// is discarded and the refs stay queued for the next push. cmd.Env, when nil,
+// defaults to the process environment.
+func RunPushThenUploadCheckpoints(ctx context.Context, cmd *exec.Cmd, remote string, w io.Writer) error {
+	if cmd.Env == nil {
+		cmd.Env = os.Environ()
+	}
+	cmd.Env = append(cmd.Env, CheckpointUploadAfterPushEnv+"=1")
+	pushStart := time.Now()
+	if err := cmd.Run(); err != nil {
+		// Not under ctx: a push that timed out has spent it.
+		DiscardRequestedCheckpointUpload(context.WithoutCancel(ctx), remote, pushStart)
+		return fmt.Errorf("git push: %w", err)
+	}
+	UploadRequestedCheckpoints(ctx, w)
+	return nil
 }
 
 // DiscardRequestedCheckpointUpload drops the request a pre-push hook recorded

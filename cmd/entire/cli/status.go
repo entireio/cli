@@ -735,6 +735,12 @@ func writeCheckpointSyncLines(ctx context.Context, b *strings.Builder, s *Entire
 		b.WriteString("\n")
 		b.WriteString(sty.render(sty.yellow, "  ! git push uploads no checkpoints until the checkpoint push policy can be read: "+info.PushPolicyErr))
 	}
+	writeUploadStoppedLine(b, info, sty)
+}
+
+// writeUploadStoppedLine warns why the last background upload stopped, while
+// refs it left are still queued: once they are gone the reason is history.
+func writeUploadStoppedLine(b *strings.Builder, info checkpointSyncInfo, sty statusStyles) {
 	if info.Unpushed > 0 && info.UploadLastError != "" {
 		b.WriteString("\n")
 		b.WriteString(sty.render(sty.yellow, "  ! Last background checkpoint upload stopped: "+info.UploadLastError))

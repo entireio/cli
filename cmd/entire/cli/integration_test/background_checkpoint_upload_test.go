@@ -11,6 +11,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/execx"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
@@ -91,5 +92,63 @@ func TestGitPushWithHooks_CheckpointsLandAfterUserPush(t *testing.T) {
 	lines := strings.Fields(string(order))
 	if len(lines) < 2 || !strings.HasPrefix(lines[0], "refs/heads/") || !strings.HasPrefix(lines[len(lines)-1], "refs/entire/") {
 		t.Fatalf("the user's branch must reach the remote before the checkpoint refs; received:\n%s", order)
+	}
+}
+
+// TestRunPushThenUploadCheckpoints drives `entire trail create`'s push protocol
+// through a real git push and the real pre-push hook: the hook only records the
+// upload, the checkpoints go up in-process once the push returns, and a failed
+// push discards its request with the refs left queued for the next push.
+// Not parallel: the in-process upload resolves the repository from the CWD.
+func TestRunPushThenUploadCheckpoints(t *testing.T) {
+	env := NewFeatureBranchEnv(t)
+	env.CheckpointStore = StoreGitRefs
+	bareDir := env.SetupBareRemote()
+	checkpointID := createCheckpointedCommit(t, env, "Add auth module", "auth.go", "package auth", "Add auth module")
+	if checkpointID == "" {
+		t.Fatal("should have a checkpoint ID after condensation")
+	}
+	env.InstallRealPrePushHook()
+	for _, kv := range env.cliEnv() {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			t.Setenv(k, v)
+		}
+	}
+	t.Chdir(env.RepoDir)
+	paths.ClearWorktreeRootCache()
+	coord := checkpoint.NewUploadCoordinator(filepath.Join(env.RepoDir, ".git"))
+
+	// A push the remote refuses uploads nothing and leaves no request behind.
+	reject := filepath.Join(bareDir, "hooks", "pre-receive")
+	if err := os.WriteFile(reject, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	push := execx.NonInteractive(t.Context(), "git", "push", "origin", "HEAD")
+	push.Env = os.Environ()
+	if err := strategy.RunPushThenUploadCheckpoints(t.Context(), push, "origin", &out); err == nil {
+		t.Fatal("the refused push should fail")
+	}
+	if coord.HasRequest() {
+		t.Fatal("a failed push must discard the upload request it recorded")
+	}
+	if env.CheckpointExistsOnRemote(bareDir, checkpointID) {
+		t.Fatal("nothing uploads for a failed push")
+	}
+
+	// The same push accepted: the checkpoint is on the remote when it returns.
+	if err := os.Remove(reject); err != nil {
+		t.Fatal(err)
+	}
+	push = execx.NonInteractive(t.Context(), "git", "push", "origin", "HEAD")
+	push.Env = os.Environ()
+	if err := strategy.RunPushThenUploadCheckpoints(t.Context(), push, "origin", &out); err != nil {
+		t.Fatalf("push failed: %v\n%s", err, out.String())
+	}
+	if !env.CheckpointExistsOnRemote(bareDir, checkpointID) {
+		t.Fatalf("checkpoint %s should be on the remote once the push returns\n%s", checkpointID, out.String())
+	}
+	if coord.HasRequest() {
+		t.Fatal("the request was consumed by the in-process upload")
 	}
 }

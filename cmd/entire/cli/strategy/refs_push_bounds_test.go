@@ -588,6 +588,32 @@ func TestFlushCheckpointRefs_PartialDeliveryStillCountsAsDelivered(t *testing.T)
 	require.Error(t, err)
 	assert.Equal(t, 2, pushed, "the first chunk landed before the auth failure and is reported as pushed")
 	assert.Contains(t, output, "SSH authentication failed")
+	assert.Contains(t, res.detail, "ssh-add", "the background worker keeps the SSH hint for the next push")
+}
+
+// TestFlushCheckpointRefs_UnreachableCheckpointRemoteKeepsHint: an unreachable
+// checkpoint_remote URL's hint is kept as the flush's detail, so a background
+// upload can still show it on the next push.
+func TestFlushCheckpointRefs_UnreachableCheckpointRemoteKeepsHint(t *testing.T) {
+	workDir, _, refs := setupRepoWithNCheckpointRefs(t, 2)
+	prepareGitRefsPrePush(t, workDir, t.TempDir())
+	fakeSSH := filepath.Join(t.TempDir(), "ssh")
+	script := "#!/bin/sh\necho 'ssh: connect to host example.invalid port 22: Connection refused' >&2\nexit 255\n"
+	require.NoError(t, os.WriteFile(fakeSSH, []byte(script), 0o755))
+	t.Setenv("GIT_SSH_COMMAND", fakeSSH)
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	enqueueRefs(t, repo, refs)
+
+	restore := captureStderr(t)
+	res, err := flushCheckpointRefsQueue(t.Context(), repo,
+		pushSettings{remote: "origin", checkpointURL: "ssh://git@example.invalid/checkpoints.git"}, flushOptions{boundBatch: true})
+	restore()
+	require.Error(t, err)
+	assert.Contains(t, res.unreachable, "Connection refused")
+	assert.Contains(t, res.detail, "A checkpoint remote is configured")
 }
 
 // TestFlushCheckpointRefs_RejectionProvesRemoteReachable: once the remote has

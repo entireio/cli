@@ -15,6 +15,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 // enableBackgroundUpload opts this test into the hand-off, which in-process
@@ -348,7 +350,7 @@ func TestRunCheckpointUploadWorker_StalledChunkDoesNotHoldTheRest(t *testing.T) 
 	shrinkRefPushChunkSize(t, 2)
 	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 6)
 	prepareGitRefsPrePush(t, workDir, bareDir)
-	hook := "#!/bin/sh\ngrep -q '" + refs[0].String() + "' && sleep 30\nexit 0\n"
+	hook := "#!/bin/sh\ngrep -q '" + refs[0].String() + "' && sleep 300\nexit 0\n"
 	require.NoError(t, os.WriteFile(filepath.Join(bareDir, "hooks", "pre-receive"), []byte(hook), 0o755))
 	restoreTimeout := checkpointUploadChunkTimeout
 	checkpointUploadChunkTimeout = 2 * time.Second
@@ -363,7 +365,9 @@ func TestRunCheckpointUploadWorker_StalledChunkDoesNotHoldTheRest(t *testing.T) 
 
 	start := time.Now()
 	RunCheckpointUploadWorker(t.Context())
-	assert.Less(t, time.Since(start), 20*time.Second, "the stalled chunk is cut, not waited out")
+	// The chunk timeout is 2s and the stall 300s, so this bound tells the two
+	// apart however loaded the machine is.
+	assert.Less(t, time.Since(start), 2*time.Minute, "the stalled chunk is cut, not waited out")
 
 	for _, ref := range refs[2:] {
 		assert.Equal(t, refHashOf(t, repo, ref), remoteRefHash(t, bareDir, ref), "chunks behind the stall still land")
@@ -601,4 +605,54 @@ func TestRunCheckpointUploadPass_OPFGateRunsAfterPushWait(t *testing.T) {
 
 	require.GreaterOrEqual(t, len(steps), 2)
 	assert.Equal(t, []string{"wait", "gate"}, steps[:2])
+}
+
+// TestBackgroundCheckpointUploadEnabled_SettingOptsOut: the documented escape
+// hatch for environments the CI detection misses, read from settings.json.
+func TestBackgroundCheckpointUploadEnabled_SettingOptsOut(t *testing.T) {
+	enableBackgroundUpload(t)
+	tmp := t.TempDir()
+	testutil.InitRepo(t, tmp)
+	t.Chdir(tmp)
+	paths.ClearWorktreeRootCache()
+
+	writeSettingsJSON(t, tmp, `{"enabled":true,"strategy_options":{"background_checkpoint_upload":true}}`)
+	assert.True(t, backgroundCheckpointUploadEnabled(t.Context()), "precondition: on when nothing opts out")
+
+	writeSettingsJSON(t, tmp, `{"enabled":true,"strategy_options":{"background_checkpoint_upload":false}}`)
+	assert.False(t, backgroundCheckpointUploadEnabled(t.Context()))
+}
+
+// TestRunCheckpointUploadWorker_KeepsNoticesForNextPush: the worker's stderr is
+// the null device, so a notice the pass writes (here, that a multi-URL remote's
+// other push URLs get no checkpoints) is recorded and shown by the next push,
+// while the process-wide stderrWriter is left alone.
+func TestRunCheckpointUploadWorker_KeepsNoticesForNextPush(t *testing.T) {
+	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 2)
+	prepareGitRefsPrePush(t, workDir, bareDir)
+	testutil.RunGit(t, workDir, "remote", "set-url", "--add", "--push", "origin", bareDir)
+	testutil.RunGit(t, workDir, "remote", "set-url", "--add", "--push", "origin", t.TempDir())
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	enqueueRefs(t, repo, refs)
+	coord := uploadCoordinator(t, repo)
+	require.NoError(t, coord.Request(checkpoint.UploadRequest{Remote: "origin"}))
+
+	processWide := captureStderrWriter(t)
+	restore := captureStderr(t)
+	RunCheckpointUploadWorker(t.Context())
+	restore()
+
+	assert.Empty(t, processWide.String(), "the pass does not write to the process-wide writer")
+	st, err := coord.State()
+	require.NoError(t, err)
+	require.NotNil(t, st.Last)
+	assert.Contains(t, st.Last.Announcement, "Checkpoints go to one repository")
+
+	restore = captureStderr(t)
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
+	restore()
+	assert.Contains(t, processWide.String(), "Checkpoints go to one repository", "the next push shows it")
 }
