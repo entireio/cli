@@ -82,3 +82,42 @@ func TestResolveCreds_RefusedServiceAccountSecretFailsClosed(t *testing.T) {
 		t.Errorf("error = %v, want the OAuth error", err)
 	}
 }
+
+// A 401 drops the cached token, so the transport's retry exchanges the secret
+// again instead of resending the rejected token. Without a 401, requests reuse
+// the cached token. Not parallel: sets process-wide environment.
+func TestResolveCreds_ServiceAccountSecretReexchangesAfter401(t *testing.T) {
+	const core = "https://core.us.entire.io"
+	exchanges := 0
+	useSecretEnv(t, core, secretExchangeFunc(func(*http.Request) (*http.Response, error) {
+		exchanges++
+		jwt := makeTestJWT(t, core) + fmt.Sprint(exchanges)
+		return secretReply(http.StatusOK, fmt.Sprintf(`{"access_token":%q,"expires_in":3600}`, jwt)), nil
+	}))
+	client, clusterHost := wellKnownServer(t, []string{core}, "", "")
+
+	creds, onUnauthorized, err := resolveCreds(t.Context(), &url.URL{Scheme: "entire", Host: clusterHost}, false, client)
+	if err != nil {
+		t.Fatalf("resolveCreds: %v", err)
+	}
+	first, err := creds(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := creds(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again != first || exchanges != 1 {
+		t.Fatalf("second request: token changed or %d exchanges; want the cached token", exchanges)
+	}
+
+	onUnauthorized()
+	retried, err := creds(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried == first || exchanges != 2 {
+		t.Errorf("after a 401: %d exchanges, token unchanged=%v; want a fresh exchange", exchanges, retried == first)
+	}
+}

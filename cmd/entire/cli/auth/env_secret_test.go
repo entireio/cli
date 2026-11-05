@@ -215,3 +215,52 @@ func TestResolveEnvTokenContextHonorsCancel(t *testing.T) {
 		t.Error("a cancelled context must stop the exchange")
 	}
 }
+
+// A long-lived token is still reused for at most secretCacheMaxAge, so a token
+// Core invalidates early is not reused for its whole lifetime.
+// Not parallel: sets process-wide environment and the clock seam.
+func TestSecretTokenCacheMaxAge(t *testing.T) {
+	core := &fakeSecretCore{t: t, jwt: "jwt", expiresIn: 3600}
+	useFakeSecretCore(t, core)
+	now := time.Now()
+	prev := secretNow
+	secretNow = func() time.Time { return now }
+	t.Cleanup(func() { secretNow = prev })
+
+	if _, err := ResolveEnvToken(testServiceAccountSecret); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(secretCacheMaxAge - time.Second)
+	if _, err := ResolveEnvToken(testServiceAccountSecret); err != nil {
+		t.Fatal(err)
+	}
+	if n := core.exchanges.Load(); n != 1 {
+		t.Fatalf("exchanges = %d inside the window, want 1", n)
+	}
+	now = now.Add(2 * time.Second)
+	if _, err := ResolveEnvToken(testServiceAccountSecret); err != nil {
+		t.Fatal(err)
+	}
+	if n := core.exchanges.Load(); n != 2 {
+		t.Errorf("exchanges = %d after the window, want 2", n)
+	}
+}
+
+// Forgetting a secret's token forces the next resolve to exchange.
+// Not parallel: sets process-wide environment.
+func TestForgetServiceAccountSecretToken(t *testing.T) {
+	core := &fakeSecretCore{t: t, jwt: "jwt", expiresIn: 600}
+	useFakeSecretCore(t, core)
+	for range 2 {
+		if _, err := ResolveEnvToken(testServiceAccountSecret); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ForgetServiceAccountSecretToken(testServiceAccountSecret)
+	if _, err := ResolveEnvToken(testServiceAccountSecret); err != nil {
+		t.Fatal(err)
+	}
+	if n := core.exchanges.Load(); n != 2 {
+		t.Errorf("exchanges = %d, want 2 (one cached reuse, one after forget)", n)
+	}
+}

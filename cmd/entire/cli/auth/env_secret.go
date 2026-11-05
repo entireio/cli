@@ -42,6 +42,10 @@ const (
 	// secretExchangeTimeout bounds the exchange; ParseEnvToken has no caller
 	// context.
 	secretExchangeTimeout = 30 * time.Second
+	// secretCacheMaxAge bounds how long a cached token is reused, whatever
+	// its lifetime. A token Core invalidates early stops being reused
+	// within this window, even by a command with no 401 hook.
+	secretCacheMaxAge = 10 * time.Minute
 	// secretCacheDir holds exchanged tokens under the user cache root.
 	secretCacheDir  = "sa-tokens"
 	maxExchangeBody = 1 << 20
@@ -246,9 +250,31 @@ func writeCachedSecretToken(key, token string, ttl time.Duration) {
 	if osroot.MkdirAllNoSymlink(root, secretCacheDir, 0o700) != nil {
 		return
 	}
+	if ttl > secretCacheMaxAge+secretTokenMargin {
+		ttl = secretCacheMaxAge + secretTokenMargin
+	}
 	data, err := json.Marshal(cachedSecretToken{Token: token, Expires: secretNow().Add(ttl)})
 	if err != nil {
 		return
 	}
 	_ = jsonutil.WriteFileAtomicIn(root, secretCacheDir+"/"+key+".json", data, 0o600) //nolint:errcheck // best effort; see doc
+}
+
+// ForgetServiceAccountSecretToken drops the cached token for secret, so the
+// next ResolveEnvTokenContext exchanges again. Call it when a server rejects
+// the exchanged token. A failure is ignored: the entry still expires.
+func ForgetServiceAccountSecretToken(secret string) {
+	secret = strings.TrimSpace(secret)
+	if !IsServiceAccountSecret(secret) {
+		return
+	}
+	core, err := secretCoreURL()
+	if err != nil {
+		return
+	}
+	root, err := userdirs.CacheRoot()
+	if err != nil {
+		return
+	}
+	_ = root.Remove(secretCacheDir + "/" + secretCacheKey(core, secret) + ".json") //nolint:errcheck // best effort; see doc
 }

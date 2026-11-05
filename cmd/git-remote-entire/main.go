@@ -485,7 +485,11 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpCli
 		if err != nil {
 			return nil, nil, err //nolint:wrapcheck // ResolveEnvToken names ENTIRE_TOKEN
 		}
-		return resolveEnvTokenCreds(ctx, envToken, parsedURL.Host, userdirs.Cache(), httpClient)
+		provider, onUnauthorized, err := resolveEnvTokenCreds(ctx, envToken, parsedURL.Host, userdirs.Cache(), httpClient)
+		if err != nil || !auth.IsServiceAccountSecret(strings.TrimSpace(raw)) {
+			return provider, onUnauthorized, err
+		}
+		return secretCreds(raw, onUnauthorized)
 	}
 
 	// Resolve which login context authenticates this cluster: the cluster's
@@ -547,6 +551,23 @@ func resolveEnvTokenCreds(ctx context.Context, envToken, clusterHost, cacheDir s
 		debuglog.Printf("data plane rejected static %s bearer; transport will retry once with the configured token", auth.EnvTokenVar)
 	}
 	return provider, onUnauthorized, nil
+}
+
+// secretCreds re-resolves a service account secret on every request, so a long
+// clone or push renews its token from the cache or a fresh exchange instead
+// of holding one token for the whole session. A 401 drops the cached token,
+// so the transport's one retry exchanges the secret again. The trust gate in
+// resolveEnvTokenCreds already checked the exchange Core, and every re-exchange
+// goes to that same Core.
+func secretCreds(raw string, onUnauthorized func()) (credentialProvider, func(), error) {
+	provider := func(ctx context.Context) (string, error) {
+		return auth.ResolveEnvTokenContext(ctx, raw) //nolint:wrapcheck // ResolveEnvToken names ENTIRE_TOKEN
+	}
+	evict := func() {
+		auth.ForgetServiceAccountSecretToken(raw)
+		onUnauthorized()
+	}
+	return provider, evict, nil
 }
 
 // coreTrusted reports whether coreURL is in the cluster's advertised core
