@@ -15,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/review"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 	"github.com/spf13/cobra"
 )
 
@@ -405,24 +406,8 @@ func newTrailCommentDeleteCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			discussionID, messageID := args[0], args[1]
-			if !force && !interactive.CanPromptInteractively() {
-				return fmt.Errorf("refusing to delete message %s without confirmation; pass --force", messageID)
-			}
-			if !force {
-				confirmed := false
-				form := NewAccessibleForm(
-					huh.NewGroup(huh.NewConfirm().Title(fmt.Sprintf("Delete message %s?", messageID)).Value(&confirmed)),
-				)
-				if err := form.RunWithContext(cmd.Context()); err != nil {
-					if errors.Is(err, huh.ErrUserAborted) || errors.Is(err, context.Canceled) {
-						return nil
-					}
-					return fmt.Errorf("message deletion prompt: %w", err)
-				}
-				if !confirmed {
-					fmt.Fprintln(cmd.OutOrStdout(), "Deletion cancelled.")
-					return nil
-				}
+			if proceed, err := confirmTrailMessageDelete(cmd, messageID, force); !proceed {
+				return err
 			}
 			return withNumberedTrail(cmd, func(ctx context.Context, client *api.Client, found *api.TrailResource, basePath string) error {
 				resp, err := client.Delete(ctx, trailDiscussionMessagePath(basePath, found.Number, discussionID, messageID))
@@ -468,4 +453,31 @@ func newTrailCommentResolveCmd(use string, resolved bool, shortVerb, successVerb
 			})
 		},
 	}
+}
+
+// confirmTrailMessageDelete gates a message delete: --force skips it, a
+// terminal prompts, and without one the delete is refused. It reports whether
+// to proceed; a declined or aborted prompt proceeds no further without error.
+func confirmTrailMessageDelete(cmd *cobra.Command, messageID string, force bool) (bool, error) {
+	if force {
+		return true, nil
+	}
+	label := tuiutil.SanitizeTerminalLabel(messageID)
+	if !interactive.CanPromptInteractively() {
+		return false, fmt.Errorf("refusing to delete message %s without confirmation; pass --force", label)
+	}
+	confirmed := false
+	form := NewAccessibleForm(
+		huh.NewGroup(huh.NewConfirm().Title(fmt.Sprintf("Delete message %s?", label)).Value(&confirmed)),
+	)
+	if err := form.RunWithContext(cmd.Context()); err != nil {
+		if errors.Is(err, huh.ErrUserAborted) || errors.Is(err, context.Canceled) {
+			return false, nil
+		}
+		return false, fmt.Errorf("message deletion prompt: %w", err)
+	}
+	if !confirmed {
+		fmt.Fprintln(cmd.OutOrStdout(), "Deletion cancelled.")
+	}
+	return confirmed, nil
 }

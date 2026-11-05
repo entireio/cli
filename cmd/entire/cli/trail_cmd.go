@@ -101,7 +101,9 @@ func newTrailCmdForMode(project bool) *cobra.Command {
 		cmd.AddCommand(newTrailShowCmd(), newTrailListCmd(), newTrailCreateCmd(), newTrailUpdateCmd(), newTrailDeleteCmd(), newTrailCommentCmd())
 	}
 	cmd.AddCommand(newTrailCheckoutCmd(mode), newTrailResumeCmd(mode), newTrailFindingCmd(mode), newTrailWatchCmd(mode))
+	cmd.AddCommand(newTrailTimelineCmd(mode), newTrailSessionsCmd(mode), newTrailStackCmd(mode))
 	cmd.AddCommand(newTrailApproveCmd(mode), newTrailRequestChangesCmd(), newTrailApprovalsCmd(mode), newTrailMergeCmd(mode))
+	cmd.AddCommand(newTrailReadyCmd(mode), newTrailRetargetCmd(mode))
 	cmd.AddCommand(newTrailUpdateBranchCmd(mode), newTrailCIPullRequestCmd(mode), newTrailRerunReviewCmd(mode))
 
 	return cmd
@@ -1528,7 +1530,7 @@ func runTrailUpdateWithClientAtPath(ctx context.Context, w, errW io.Writer, clie
 		return nil
 	}
 	if hasMeta {
-		if err := sendTrailPatch(ctx, client, path, updateReq); err != nil {
+		if _, err := sendTrailPatch(ctx, client, path, updateReq); err != nil {
 			return err
 		}
 	}
@@ -1695,20 +1697,22 @@ func trailUpdateRequestHasFields(req api.TrailUpdateRequest) bool {
 
 // sendTrailPatch issues a single trail metadata PATCH and validates the
 // response. The description is not sent here — see sendTrailBody.
-func sendTrailPatch(ctx context.Context, client *api.Client, path string, req api.TrailUpdateRequest) error {
+// sendTrailPatch sends a metadata update and returns the trail as the server
+// saved it.
+func sendTrailPatch(ctx context.Context, client *api.Client, path string, req api.TrailUpdateRequest) (*api.TrailResource, error) {
 	resp, err := client.Patch(ctx, path, req)
 	if err != nil {
-		return fmt.Errorf("failed to update trail: %w", err)
+		return nil, fmt.Errorf("failed to update trail: %w", err)
 	}
 	defer resp.Body.Close()
 	if err := checkTrailResponse(resp); err != nil {
-		return err
+		return nil, err
 	}
 	var updateResp api.TrailUpdateResponse
 	if err := api.DecodeJSON(resp, &updateResp); err != nil {
-		return fmt.Errorf("failed to decode update response: %w", err)
+		return nil, fmt.Errorf("failed to decode update response: %w", err)
 	}
-	return nil
+	return &updateResp.Trail, nil
 }
 
 // sendTrailBody writes a trail's description through the body route, the only

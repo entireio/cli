@@ -149,6 +149,7 @@ func resolveProjectTrailWorkingContext(cmd *cobra.Command, selector, branch stri
 // branch happens to be checked out.
 var trailChangeWriteCommands = map[string]bool{
 	"approve": true, "unlink": true, "merge": true,
+	"ready": true, "retarget": true,
 	"update-branch": true, "ci-pr": true, "rerun-review": true,
 }
 

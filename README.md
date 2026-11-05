@@ -111,8 +111,11 @@ entire trail watch                      # stream reviews, findings, and agent ru
 entire trail finding                    # findings and each review agent's latest reading for this branch
 entire trail finding apply <id>         # apply a finding's suggested fix
 entire trail finding resolve <id> -m "fixed in abc123"
+entire trail finding reply <id> -m "intentional: the cache is per process"
 
 entire trail comment add -m "Should this cover the admin API too?"
+entire trail ready                      # mark this branch's change ready for review (--undo: back to draft)
+entire trail retarget --base release/2  # change the base branch it merges into
 entire trail approve
 entire trail rerun-review               # review the current head again (--agent <id> for one agent)
 entire trail update-branch              # merge the base into the branch on the server (Entire-native repos)
