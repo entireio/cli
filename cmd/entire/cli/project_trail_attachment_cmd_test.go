@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"image"
+	"image/gif"
+	"image/jpeg"
 	"image/png"
 	"io"
 	"net/http"
@@ -39,11 +41,15 @@ type trailAttachmentTestServer struct {
 	// unless listStatus fails the listing too.
 	completeStatus int
 	listStatus     int
-	requests       []string
-	intent         map[string]any
-	uploaded       []byte
-	uploadType     string
-	uploadAuth     string
+	// maxBytes overrides the upload's server limit; deleteStatus fails
+	// the DELETE when set.
+	maxBytes     int
+	deleteStatus int
+	requests     []string
+	intent       map[string]any
+	uploaded     []byte
+	uploadType   string
+	uploadAuth   string
 }
 
 // serveTrailAttachments fakes the cell's attachment routes on project trail 42
@@ -82,9 +88,13 @@ func serveTrailAttachments(t *testing.T, listing []map[string]any) *trailAttachm
 			if expires == "" {
 				expires = time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
 			}
+			maxBytes := s.maxBytes
+			if maxBytes == 0 {
+				maxBytes = trailAttachmentMaxBytes
+			}
 			w.WriteHeader(http.StatusCreated)
 			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"id": trailAttachmentTestID,
-				"upload": map[string]any{"url": storage.URL + "/put?sig=x", "expires_at": expires, "max_bytes": 10485760}}))
+				"upload": map[string]any{"url": storage.URL + "/put?sig=x", "expires_at": expires, "max_bytes": maxBytes}}))
 		case r.Method == http.MethodPost && r.URL.Path == collection+"/"+trailAttachmentTestID+"/complete" && s.completeStatus != 0:
 			http.Error(w, `{"error":"gateway timeout"}`, s.completeStatus)
 		case r.Method == http.MethodPost && r.URL.Path == collection+"/"+trailAttachmentTestID+"/complete":
@@ -94,6 +104,8 @@ func serveTrailAttachments(t *testing.T, listing []map[string]any) *trailAttachm
 			http.Error(w, `{"error":"unavailable"}`, s.listStatus)
 		case r.Method == http.MethodGet && r.URL.Path == collection:
 			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"attachments": listing}))
+		case r.Method == http.MethodDelete && r.URL.Path == collection+"/"+trailAttachmentTestID && s.deleteStatus != 0:
+			http.Error(w, `{"error":"unavailable"}`, s.deleteStatus)
 		case r.Method == http.MethodDelete && r.URL.Path == collection+"/"+trailAttachmentTestID:
 			w.WriteHeader(http.StatusNoContent)
 		default:
@@ -164,6 +176,36 @@ func TestTrailAttachmentAdd_RefusesFilesBeforeAnyRequest(t *testing.T) {
 	assert.Empty(t, s.requests, "a refused file registers nothing")
 }
 
+func TestReadTrailAttachmentFile_AcceptsEachInlineType(t *testing.T) {
+	t.Parallel()
+	frame := image.NewRGBA(image.Rect(0, 0, 3, 2))
+	encode := func(enc func(io.Writer) error) []byte {
+		var buf bytes.Buffer
+		require.NoError(t, enc(&buf))
+		return buf.Bytes()
+	}
+	// The standard library has no WebP decoder: the type comes from the
+	// RIFF/WEBP header alone, and the dimensions stay unset.
+	webp := append([]byte("RIFF\x1a\x00\x00\x00WEBPVP8L\x0d\x00\x00\x00"), make([]byte, 13)...)
+	for _, tc := range []struct {
+		name, contentType string
+		data              []byte
+		width, height     int
+	}{
+		{"shot.png", "image/png", encode(func(w io.Writer) error { return png.Encode(w, frame) }), 3, 2},
+		{"shot.jpg", "image/jpeg", encode(func(w io.Writer) error { return jpeg.Encode(w, frame, nil) }), 3, 2},
+		{"shot.gif", "image/gif", encode(func(w io.Writer) error { return gif.Encode(w, frame, nil) }), 3, 2},
+		{"shot.webp", "image/webp", webp, 0, 0},
+	} {
+		path := filepath.Join(t.TempDir(), tc.name)
+		require.NoError(t, os.WriteFile(path, tc.data, 0o600))
+		file, err := readTrailAttachmentFile(path)
+		require.NoError(t, err, tc.name)
+		assert.Equal(t, tc.contentType, file.contentType, tc.name)
+		assert.Equal(t, [2]int{tc.width, tc.height}, [2]int{file.width, file.height}, tc.name)
+	}
+}
+
 func TestTrailAttachmentAdd_RefusesAPlaintextUploadURL(t *testing.T) {
 	t.Parallel()
 	err := putTrailAttachmentBytes(t.Context(), "http://storage.example/put", trailAttachmentFile{data: []byte("x"), contentType: "image/png"})
@@ -206,15 +248,37 @@ func TestTrailAttachmentRemove(t *testing.T) {
 func TestTrailAttachmentAdd_RemovesTheRegisteredAttachmentWhenTheUploadFails(t *testing.T) {
 	// Serial: replaces global clients.
 	path := writeTestPNG(t)
-	for name, setup := range map[string]func(*trailAttachmentTestServer){
-		"storage refuses": func(s *trailAttachmentTestServer) { s.storageStatus = http.StatusForbidden },
+	for name, tc := range map[string]struct {
+		setup func(*trailAttachmentTestServer)
+		says  []string
+	}{
+		"storage refuses": {
+			setup: func(s *trailAttachmentTestServer) { s.storageStatus = http.StatusForbidden },
+			says:  []string{"storage answered 403"},
+		},
+		"over the server's limit": {
+			setup: func(s *trailAttachmentTestServer) { s.maxBytes = 1 },
+			says:  []string{"larger than the server's 1-byte limit"},
+		},
+		"cleanup fails too": {
+			setup: func(s *trailAttachmentTestServer) {
+				s.storageStatus = http.StatusForbidden
+				s.deleteStatus = http.StatusServiceUnavailable
+			},
+			says: []string{"storage answered 403", "the unfinished attachment " + trailAttachmentTestID + " could not be removed"},
+		},
 	} {
 		s := serveTrailAttachments(t, nil)
-		setup(s)
+		tc.setup(s)
 		_, _, err := executeProjectTrailTest(t, trailAttachmentArgs("add", path)...)
-		require.Error(t, err, name)
+		for _, says := range tc.says {
+			require.ErrorContains(t, err, says, name)
+		}
 		assert.Equal(t, "DELETE /attachments/"+trailAttachmentTestID, s.requests[len(s.requests)-1], "%s: the unfinished attachment is removed", name)
 		assert.NotContains(t, s.requests, "POST /attachments/"+trailAttachmentTestID+"/complete", name)
+		if s.maxBytes != 0 {
+			assert.NotContains(t, s.requests, "storage PUT", "%s: nothing is uploaded", name)
+		}
 	}
 }
 

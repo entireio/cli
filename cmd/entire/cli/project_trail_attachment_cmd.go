@@ -36,7 +36,7 @@ var trailAttachmentInlineTypes = map[string]bool{"image/png": true, "image/jpeg"
 
 // trailAttachmentUploadClient PUTs the bytes to the presigned URL. It is not
 // the API client: the URL is pre-authorized and must not receive the
-// caller's token. A test replaces it.
+// caller's token.
 var trailAttachmentUploadClient = httpclient.New(httpclient.Options{Timeout: 5 * time.Minute})
 
 // trailAttachmentMarkdown is the description reference for an attachment, in
