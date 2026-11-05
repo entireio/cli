@@ -311,3 +311,42 @@ func TestResolveDivergedLegacyCheckpoints_DryRunDoesNotFetch(t *testing.T) {
 	assert.Equal(t, []id.CheckpointID{h.f.cid}, divergedIDs(result))
 	h.f.requireNoRef(t)
 }
+
+// An earlier automatic import of one copy is not a choice: when the other copy
+// changes afterwards, the checkpoint diverges and a person must decide.
+func TestMigrateBranchToRefs_AsksWhenTheOtherCopyChangesAfterAnAutomaticImport(t *testing.T) {
+	t.Parallel()
+	h := newV1History(t)
+	local := h.commitOnTop(t, h.base, h.f.cid, "unpushed-on-v1")
+	h.place(t, local, h.base)
+	_, err := MigrateBranchToRefs(t.Context(), h.f.repo, MigrateOptions{})
+	require.NoError(t, err)
+	remote := h.commitOnTop(t, h.base, h.f.cid, "teammate-on-v1")
+	h.place(t, local, remote)
+	c := &chooser{keep: originV1}
+
+	result, err := MigrateBranchToRefs(t.Context(), h.f.repo, MigrateOptions{Choose: c.choose})
+
+	require.NoError(t, err)
+	assert.Len(t, c.asked, 1)
+	assert.Equal(t, []id.CheckpointID{h.f.cid}, result.Migrated)
+	assert.Equal(t, []string{"before-switch", "teammate-on-v1"}, h.f.refSessionIDs(t))
+}
+
+// A choice covers the copies as they were when it was made. When the copy
+// that was passed over changes again, a person must decide again.
+func TestMigrateBranchToRefs_AsksAgainWhenThePassedOverCopyChanges(t *testing.T) {
+	t.Parallel()
+	h := divergedV1(t)
+	_, err := MigrateBranchToRefs(t.Context(), h.f.repo, MigrateOptions{Choose: (&chooser{keep: localV1}).choose})
+	require.NoError(t, err)
+	local := h.f.v1Tip(t)
+	remoteAgain := h.commitOnTop(t, h.trackingTip(t), h.f.cid, "teammate-again")
+	h.place(t, local, remoteAgain)
+	c := &chooser{keep: localV1}
+
+	_, err = MigrateBranchToRefs(t.Context(), h.f.repo, MigrateOptions{Choose: c.choose})
+
+	require.NoError(t, err)
+	assert.Len(t, c.asked, 1)
+}

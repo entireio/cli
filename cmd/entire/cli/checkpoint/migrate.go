@@ -148,7 +148,7 @@ func migrateBranchToRefs(
 			return fmt.Errorf("ref name for checkpoint %s: %w", cid, err)
 		}
 
-		cpTreeHash, unresolved, err := v1.subtreeToKeep(ctx, cid, opts)
+		cpTreeHash, chosenOver, unresolved, err := v1.subtreeToKeep(ctx, cid, opts)
 		if err != nil {
 			return err
 		}
@@ -173,7 +173,7 @@ func migrateBranchToRefs(
 			return nil
 		}
 
-		migrated, err := importBranchCheckpoint(ctx, repo, refsStore, cid, cpTreeHash, updateRef, importAdvancingRef)
+		migrated, err := importBranchCheckpoint(ctx, repo, refsStore, cid, cpTreeHash, updateRef, importAdvancingRef, chosenOver)
 		if err != nil {
 			return err
 		}
@@ -236,7 +236,7 @@ func ResolveDivergedLegacyCheckpoints(ctx context.Context, repo *git.Repository,
 		if err != nil || !stuck {
 			return err
 		}
-		cpTreeHash, unresolved, err := v1.subtreeToKeep(ctx, cid, opts)
+		cpTreeHash, chosenOver, unresolved, err := v1.subtreeToKeep(ctx, cid, opts)
 		if err != nil {
 			return err
 		}
@@ -244,7 +244,7 @@ func ResolveDivergedLegacyCheckpoints(ctx context.Context, repo *git.Repository,
 			result.Diverged = append(result.Diverged, *unresolved)
 			return nil
 		}
-		migrated, err := importBranchCheckpoint(ctx, repo, refsStore, cid, cpTreeHash, updatePersistentRef, importOnlyIntoAbsentRef)
+		migrated, err := importBranchCheckpoint(ctx, repo, refsStore, cid, cpTreeHash, updatePersistentRef, importOnlyIntoAbsentRef, chosenOver)
 		if err != nil {
 			return err
 		}
@@ -337,25 +337,28 @@ func (v *legacyV1) walk(ctx context.Context, fn func(id.CheckpointID) error) err
 
 // subtreeToKeep returns the v1 subtree that becomes cid's ref: the copy that
 // changed it last, or, when two copies both changed it, the one opts.Choose
-// picks. When no copy is kept, because nobody can choose (a dry run or no
-// chooser) or the choice was to skip, it returns the unresolved divergence.
-func (v *legacyV1) subtreeToKeep(ctx context.Context, cid id.CheckpointID, opts MigrateOptions) (plumbing.Hash, *DivergedLegacyCheckpoint, error) {
+// picks. For a picked copy, chosenOver is the subtree of the copy passed over,
+// to record with the import. When no copy is kept, because nobody can choose
+// (a dry run or no chooser) or the choice was to skip, it returns the
+// unresolved divergence.
+func (v *legacyV1) subtreeToKeep(ctx context.Context, cid id.CheckpointID, opts MigrateOptions) (subtree, chosenOver plumbing.Hash, unresolved *DivergedLegacyCheckpoint, err error) {
 	picked, diverged, err := v.branch.pickCheckpointCopy(ctx, v.trees, cid)
 	if err == nil {
-		return picked.subtree, nil, nil
+		return picked.subtree, plumbing.ZeroHash, nil, nil
 	}
 	if !errors.Is(err, ErrLegacyCheckpointDiverged) {
-		return plumbing.ZeroHash, nil, fmt.Errorf("read checkpoint %s from %s: %w", cid, DefaultV1Refs().Primary, err)
+		return plumbing.ZeroHash, plumbing.ZeroHash, nil, fmt.Errorf("read checkpoint %s from %s: %w", cid, DefaultV1Refs().Primary, err)
 	}
-	// The copies stay diverged on v1 after a choice, so a ref already holding
-	// one of them means an earlier run chose it; asking again could undo that.
-	for _, c := range diverged {
-		_, chosen, err := importedTree(ctx, v.repo, v.refs, cid, c.subtree, false)
+	// The copies stay diverged on v1 after a choice, so a recorded choice
+	// between these exact copies settles it; asking again could undo it.
+	for i, keep := range diverged {
+		other := diverged[1-i]
+		chosen, err := v.chosenEarlier(ctx, cid, keep, other)
 		if err != nil {
-			return plumbing.ZeroHash, nil, err
+			return plumbing.ZeroHash, plumbing.ZeroHash, nil, err
 		}
 		if chosen {
-			return c.subtree, nil, nil
+			return keep.subtree, other.subtree, nil, nil
 		}
 	}
 	question := DivergedLegacyCheckpoint{
@@ -364,18 +367,53 @@ func (v *legacyV1) subtreeToKeep(ctx context.Context, cid id.CheckpointID, opts 
 		Remote: v.describeCopy(diverged[1]),
 	}
 	if opts.DryRun || opts.Choose == nil {
-		return plumbing.ZeroHash, &question, nil
+		return plumbing.ZeroHash, plumbing.ZeroHash, &question, nil
 	}
 	keep, err := opts.Choose(ctx, question)
 	if err != nil {
-		return plumbing.ZeroHash, nil, err
+		return plumbing.ZeroHash, plumbing.ZeroHash, nil, err
 	}
-	for _, c := range []LegacyCheckpointCopy{question.Local, question.Remote} {
-		if keep != "" && keep == c.Ref {
-			return c.subtree, nil, nil
+	if keep == question.Local.Ref {
+		return question.Local.subtree, question.Remote.subtree, nil, nil
+	}
+	if keep == question.Remote.Ref {
+		return question.Remote.subtree, question.Local.subtree, nil, nil
+	}
+	return plumbing.ZeroHash, plumbing.ZeroHash, &question, nil
+}
+
+// chosenOverTrailer marks an import commit written because a person kept its
+// copy over another; the trailer's value is the passed-over copy's subtree.
+const chosenOverTrailer = "Entire-Chosen-Over: "
+
+// chosenEarlier reports whether cid's ref records a person keeping keep over
+// other as other is now. A copy the ref holds without that record came from
+// an automatic import, and a record naming an older version of other predates
+// its later changes; neither is a choice between these copies.
+func (v *legacyV1) chosenEarlier(ctx context.Context, cid id.CheckpointID, keep, other *checkpointCopy) (bool, error) {
+	tree, err := migratedCheckpointTree(ctx, v.repo, cid, keep.subtree, false)
+	if err != nil {
+		return false, fmt.Errorf("normalize checkpoint %s: %w", cid, err)
+	}
+	tip, _, err := importBase(v.repo, v.refs, cid)
+	if err != nil {
+		return false, err
+	}
+	record := chosenOverTrailer + other.subtree.String()
+	for h := tip; !h.IsZero(); {
+		commit, err := v.repo.CommitObject(h)
+		if err != nil {
+			return false, nil //nolint:nilerr // an unreadable history holds no readable choice
 		}
+		if commit.TreeHash == tree && strings.Contains(commit.Message, record) {
+			return true, nil
+		}
+		if len(commit.ParentHashes) == 0 {
+			return false, nil
+		}
+		h = commit.ParentHashes[0]
 	}
-	return plumbing.ZeroHash, &question, nil
+	return false, nil
 }
 
 func (v *legacyV1) describeCopy(c *checkpointCopy) LegacyCheckpointCopy {
@@ -425,7 +463,8 @@ const (
 
 // importBranchCheckpoint writes the checkpoint subtree cpTreeHash, taken from
 // the v1 branch, into cid's own ref in the refs layout (see
-// migratedCheckpointTree). An existing ref is never replaced: mode says whether
+// migratedCheckpointTree). A non-zero chosenOver records that a person kept
+// this copy over the copy with that subtree (see legacyV1.chosenEarlier). An existing ref is never replaced: mode says whether
 // it is advanced or left alone. A ref whose history already holds that tree is
 // left alone too. migrated reports whether an import commit was written. It
 // does not enqueue the ref for push.
@@ -437,6 +476,7 @@ func importBranchCheckpoint(
 	cpTreeHash plumbing.Hash,
 	updateRef persistentRefUpdater,
 	mode importMode,
+	chosenOver plumbing.Hash,
 ) (migrated bool, err error) {
 	migratedTree, imported, err := importedTree(ctx, repo, refsStore, cid, cpTreeHash, true)
 	if err != nil {
@@ -468,6 +508,9 @@ func importBranchCheckpoint(
 		}
 
 		msg := fmt.Sprintf("Import checkpoint %s (migrated from git-branch)", cid)
+		if !chosenOver.IsZero() {
+			msg += "\n\n" + chosenOverTrailer + chosenOver.String() + "\n"
+		}
 		commitHash, commitErr := CreateCommit(ctx, repo, migratedTree, parent, msg, authorName, authorEmail)
 		if commitErr != nil {
 			return plumbing.ZeroHash, plumbing.ZeroHash,

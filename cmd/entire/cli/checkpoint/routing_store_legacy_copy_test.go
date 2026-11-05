@@ -68,7 +68,7 @@ func (f legacyCopyFixture) remoteCopy(t *testing.T) plumbing.Hash {
 	ctx := context.Background()
 	subtree, err := f.branch.checkpointSubtreeHash(ctx, f.cid)
 	require.NoError(t, err)
-	_, err = importBranchCheckpoint(ctx, f.repo, f.refs, f.cid, subtree, updatePersistentRef, importOnlyIntoAbsentRef)
+	_, err = importBranchCheckpoint(ctx, f.repo, f.refs, f.cid, subtree, updatePersistentRef, importOnlyIntoAbsentRef, plumbing.ZeroHash)
 	require.NoError(t, err)
 	tip := f.refTip(t)
 	refName, err := RefName(f.cid)

@@ -443,7 +443,7 @@ func (c *legacyCopier) copyToRef(ctx context.Context, checkpointID id.Checkpoint
 	if diverged {
 		return false, fmt.Errorf("read checkpoint %s from %s: %w", checkpointID, c.branch.refs.Primary, err)
 	}
-	if _, err := importBranchCheckpoint(ctx, c.refs.repo, c.refs, checkpointID, subtree, updatePersistentRef, importOnlyIntoAbsentRef); err != nil {
+	if _, err := importBranchCheckpoint(ctx, c.refs.repo, c.refs, checkpointID, subtree, updatePersistentRef, importOnlyIntoAbsentRef, plumbing.ZeroHash); err != nil {
 		return false, err
 	}
 	logging.Info(ctx, "checkpoint: copied legacy checkpoint from the v1 branch into its own ref",
