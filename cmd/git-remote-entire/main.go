@@ -481,9 +481,9 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpCli
 	// cleaned value; a trailing newline from $(cat token) is common. An empty
 	// or whitespace-only value fails closed.
 	if raw, ok := os.LookupEnv(auth.EnvTokenVar); ok {
-		envToken := strings.TrimSpace(raw)
-		if envToken == "" {
-			return nil, nil, fmt.Errorf("%s is set but blank", auth.EnvTokenVar)
+		envToken, err := auth.ResolveEnvToken(raw)
+		if err != nil {
+			return nil, nil, err //nolint:wrapcheck // ResolveEnvToken names ENTIRE_TOKEN
 		}
 		return resolveEnvTokenCreds(ctx, envToken, parsedURL.Host, userdirs.Cache(), httpClient)
 	}

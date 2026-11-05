@@ -32,6 +32,15 @@ context and silently ignores both `ENTIRE_TOKEN` and the cluster case, so it can
 name a core the request never touches (this was a real bug in the `mirror list`
 banner; see `repo_mirror.go` and `coreapi.Client.CoreOrigin`).
 
+A service account secret (`ENTIRE_TOKEN=ent_svc_…`) has no `aud`. Every reader
+of `ENTIRE_TOKEN` goes through `auth.ResolveEnvToken` (via `auth.ParseEnvToken`,
+or directly in `git-remote-entire`), which exchanges the secret at
+`ENTIRE_CORE_URL` (default `https://us.auth.entire.io`) and returns the
+service account JWT. That JWT's `aud` then drives the precedence above. The
+exchanged token is cached under the user cache root, keyed by a hash of the
+Core and the secret, so repeated commands do not each exchange. Never send the
+secret itself as a bearer, and never name it in an error.
+
 When a command resolves auth *outside* a `coreapi.Client` (e.g. `entire auth
 status`, which builds its own `/me` client), it must apply the same
 env-token-first precedence itself — see `resolveAuthStatusTarget` /

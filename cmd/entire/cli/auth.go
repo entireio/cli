@@ -167,6 +167,8 @@ func newAuthTokenCmd() *cobra.Command {
 			"authenticate without plumbing auth themselves.\n\n" +
 			"It prints the same bearer the API client uses (ENTIRE_TOKEN verbatim when\n" +
 			"set, otherwise the active context's login JWT, refreshed if near expiry).\n" +
+			"A service account secret in ENTIRE_TOKEN (ent_svc_...) is exchanged first,\n" +
+			"and the service account's short-lived token is printed instead.\n" +
 			"The token works against the control-plane API (orgs, repos, clusters, /me)\n" +
 			"and against every entire-api cell (e.g.\n" +
 			"https://aws-us-east-2.api.entire.io/api/v1).\n\n" +
