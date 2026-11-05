@@ -44,6 +44,34 @@ type CheckpointSyncRemote struct {
 	Source CheckpointSyncRemoteSource
 }
 
+// CheckpointPushRemoteNotFetchableError is one of the ways election fails
+// closed: strategy_options.checkpoint_push_remote names a remote that is not in
+// the fetchable set, so nothing is elected and no push carries checkpoint data
+// until the setting is fixed. The other ways — unreadable settings, unreadable
+// git remotes — stay opaque wrapped errors.
+//
+// "Not fetchable" rather than "not configured": `git remote get-url` accepts a
+// pushurl-only entry that reads and reconciliation cannot use, so a named
+// remote can exist and still fail this check. Naming it for the missing fetch
+// URL is what makes the remedy actionable.
+//
+// A distinct type (match it with errors.As) because the two want different
+// remedies, and a caller that cannot tell them apart must offer neither — the
+// same rule the .entire directory errors follow. The message is what
+// `entire status` prints verbatim, so it states the consequence as well as the
+// cause.
+type CheckpointPushRemoteNotFetchableError struct {
+	// Remote is the name the setting gave, kept so a caller can name it
+	// without re-reading settings.
+	Remote string
+}
+
+func (e *CheckpointPushRemoteNotFetchableError) Error() string {
+	return fmt.Sprintf(
+		"checkpoint_push_remote %q has no configured fetch URL; checkpoint sync disabled until fixed",
+		e.Remote)
+}
+
 // ResolveCheckpointSyncRemote elects the one configured git remote that
 // checkpoint data syncs to. Pure local lookup — no network. Precedence:
 // checkpoint_push_remote setting (fail-closed if the named remote has no
@@ -91,8 +119,7 @@ func ResolveCheckpointSyncRemote(ctx context.Context) (CheckpointSyncRemote, err
 	}
 	if name := s.GetCheckpointPushRemote(); name != "" {
 		if !slices.Contains(fetchRemotes, name) {
-			return CheckpointSyncRemote{}, fmt.Errorf(
-				"checkpoint_push_remote %q has no configured fetch URL; checkpoint sync disabled until fixed", name)
+			return CheckpointSyncRemote{}, &CheckpointPushRemoteNotFetchableError{Remote: name}
 		}
 		return CheckpointSyncRemote{Name: name, Source: SyncRemoteSourceConfig}, nil
 	}

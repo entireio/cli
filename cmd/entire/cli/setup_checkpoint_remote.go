@@ -315,29 +315,15 @@ func (c *enableCheckpointRemoteChoice) report(ctx context.Context, w io.Writer, 
 		return
 	}
 	if s.IsPushSessionsDisabled() {
-		// Reads still resolve through the elected remote, so a store they do
-		// not use is reported here as `entire status` reports it. A failed or
-		// empty election has no read candidate to judge against; status stays
-		// silent about the store there too.
-		if elected, electErr := strategy.ResolveCheckpointSyncRemote(ctx); electErr == nil && elected.Name != "" &&
-			reportIgnoredCheckpointRemote(ctx, w, s, elected.Name, !c.suppressClaim) {
-			c.changed = true
-			touched = true
-		}
-		if touched {
-			c.reportUnchangedDestination(w)
-			fmt.Fprintln(w, "Checkpoint pushing remains disabled.")
-		} else {
-			fmt.Fprintln(w, "Checkpoint uploads are off (push_sessions: false). Checkpoints stay in this clone.")
-		}
-		fmt.Fprintln(w, checkpointRedactionNotice)
+		c.reportPushDisabled(ctx, w, s, touched)
 		return
 	}
 	policy, policyErr := enableCheckpointPushPolicy(ctx)
 	resolved, err := strategy.ResolveCheckpointSyncRemote(ctx)
 	if err != nil {
 		dedicated := false
-		for _, d := range inspectRemoteTopology(ctx).destinations {
+		topology := inspectRemoteTopology(ctx)
+		for _, d := range topology.destinations {
 			if !d.pinned {
 				continue
 			}
@@ -352,6 +338,13 @@ func (c *enableCheckpointRemoteChoice) report(ctx context.Context, w io.Writer, 
 			fmt.Fprintln(w, uploadPromise(policyErr,
 				fmt.Sprintf("Cannot resolve checkpoint remote selection: %v. Dedicated checkpoint uploads can still proceed.", err),
 				fmt.Sprintf("Cannot resolve checkpoint remote selection: %v. Checkpoints go to the dedicated destination", err)))
+			// "Can still proceed" is true only of the pinned remotes. Any
+			// remote left unpinned goes through the election that just failed,
+			// so its pushes now carry nothing — the partial state doctor
+			// reports, which would otherwise read here as business as usual.
+			if names := topology.unpinnedNames(); len(names) > 0 {
+				fmt.Fprintf(w, "Pushes to %s carry no checkpoints until it is fixed.\n", strings.Join(names, ", "))
+			}
 			printCheckpointPrivacyNotice(w, false, policy, policyErr)
 			return
 		}
@@ -442,6 +435,62 @@ func (c *enableCheckpointRemoteChoice) report(ctx context.Context, w io.Writer, 
 	printCheckpointPrivacyNotice(w, !dedicated, policy, policyErr)
 }
 
+// reportPushDisabled is report's push_sessions=false arm. Nothing uploads, so
+// the destination is not the headline — but two things still are: a dedicated
+// store the read side declined, and a fail-closed election.
+//
+// The election is reported here because nowhere else can.
+// printSetupCheckpointDestinationNote hands every failed election to report, so
+// an arm of report that returns without naming one leaves `entire enable`
+// silent about a broken checkpoint_push_remote (finding 01M6E80ZCE95). The
+// setting outlives push_sessions: re-enabling pushing runs straight into it,
+// and a committed one travels to clones that do push.
+func (c *enableCheckpointRemoteChoice) reportPushDisabled(ctx context.Context, w io.Writer, s *settings.EntireSettings, touched bool) {
+	// Reads still resolve through the elected remote, so a store they do not
+	// use is reported here as `entire status` reports it. A failed or empty
+	// election has no read candidate to judge against; status stays silent
+	// about the store there too.
+	elected, electErr := strategy.ResolveCheckpointSyncRemote(ctx)
+	if electErr == nil && elected.Name != "" &&
+		reportIgnoredCheckpointRemote(ctx, w, s, elected.Name, !c.suppressClaim) {
+		c.changed = true
+		touched = true
+	}
+	if touched {
+		c.reportUnchangedDestination(w)
+		fmt.Fprintln(w, "Checkpoint pushing remains disabled.")
+	} else {
+		fmt.Fprintln(w, "Checkpoint uploads are off (push_sessions: false). Checkpoints stay in this clone.")
+	}
+	if electErr != nil {
+		reportDisabledElectionFailure(w, electErr, inspectRemoteTopology(ctx).syncAffected())
+	}
+	fmt.Fprintln(w, checkpointRedactionNotice)
+}
+
+// reportDisabledElectionFailure states a fail-closed election to a clone whose
+// pushing is off. Both gates are describeSyncDisabled's, for its reasons.
+//
+// affected (its syncAffected()) because a repo whose every remote is pinned to a
+// dedicated checkpoint_remote bypasses the election, so a broken selection costs
+// it nothing and "re-enabling pushing would run into that" would be false.
+//
+// The remedy is gated on errors.As because the resolver also fails closed on
+// settings or git remotes it could not read, and advice about naming a remote
+// answers neither. An unrecognized cause gets the fact and no remedy — the same
+// rule the .entire directory errors follow.
+func reportDisabledElectionFailure(w io.Writer, electErr error, affected bool) {
+	if electErr == nil || !affected {
+		return
+	}
+	fmt.Fprintf(w, "The checkpoint destination is also misconfigured: %v\n", electErr)
+	fmt.Fprintln(w, "Re-enabling pushing would run into that.")
+	var misconfigured *strategy.CheckpointPushRemoteNotFetchableError
+	if errors.As(electErr, &misconfigured) {
+		fmt.Fprintf(w, "Choose a configured remote with `entire enable --%s <name>`.\n", flagCheckpointPushRemote)
+	}
+}
+
 // enableCheckpointPushPolicy is the clone's checkpoint push policy where it
 // applies, the git-refs backend; empty when it does not apply. The error says
 // why a policy that applies cannot be read.
@@ -507,7 +556,19 @@ func printSetupCheckpointDestinationNote(ctx context.Context, w io.Writer) {
 	if c, ok := ctx.Value(enableCheckpointRemoteKey{}).(*enableCheckpointRemoteChoice); ok && c != nil && c.offered {
 		return
 	}
-	printCheckpointDestinationNote(ctx, w, "\nNote: this repo's remotes make the checkpoint destination ambiguous.")
+	topology := inspectRemoteTopology(ctx)
+	// Only the ambiguity half here. enableCheckpointRemoteChoice.report owns
+	// every failed election for enable — it names the error, covers the
+	// dedicated-destination and push-disabled cases, and offers `entire enable
+	// --checkpoint-push-remote <name>` — so printing doctor's report too would
+	// state the condition twice with two different fixes. That makes report the
+	// only place enable can say it: a branch of it that returns without naming
+	// a failed election makes enable silent about one, which is what finding
+	// 01M6E80ZCE95 caught on the push-disabled path.
+	if topology.syncAffected() {
+		return
+	}
+	topology.describeCheckpointDestination(w, enableCheckpointNoteHeaders)
 }
 
 // ignoredCheckpointRemoteSentence is the one wording `entire status` and

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 
@@ -53,7 +54,7 @@ func TestDescribeCheckpointDestination_PushDisabledCaveat(t *testing.T) {
 			topology := topology
 			topology.pushDisabled = tc.pushDisabled
 			var b strings.Builder
-			topology.describeCheckpointDestination(&b, "Checkpoint destination: REVIEW")
+			topology.describeCheckpointDestination(&b, doctorCheckpointNoteHeaders)
 			for _, want := range tc.want {
 				if !strings.Contains(b.String(), want) {
 					t.Errorf("missing %q:\n%s", want, b.String())
@@ -80,10 +81,15 @@ func TestCheckpointDestinationNote_ExplicitSelection(t *testing.T) {
 		observed     bool
 		pinned       bool
 		wantChoice   bool
+		wantDisabled bool
 	}{
 		{name: "explicit fork", selected: forkRemote},
 		{name: "default still offers choice", wantChoice: true},
-		{name: "missing selection is not resolved", selected: "gone", wantChoice: true},
+		// Was wantChoice: the ambiguity note used to print here. A missing
+		// selection fails the election closed, so no push carries checkpoints
+		// at all and the note's "any OTHER remote" framing is false — the
+		// disabled report replaces it.
+		{name: "missing selection is not resolved", selected: "gone", wantDisabled: true},
 		{name: "explicit fork retains multiple URL warning", selected: forkRemote, multipleURLs: true},
 		{name: "explicit fork ignores origin fanout", selected: forkRemote, otherURLs: true},
 		{name: "explicit fork only describes its own fanout", selected: forkRemote, multipleURLs: true, otherURLs: true},
@@ -166,13 +172,16 @@ func TestCheckpointDestinationNote_ExplicitSelection(t *testing.T) {
 			}
 
 			var out bytes.Buffer
-			printCheckpointDestinationNote(t.Context(), &out, "Checkpoint destination: REVIEW")
+			printCheckpointDestinationNote(t.Context(), &out, doctorCheckpointNoteHeaders)
 			got := out.String()
 			if tt.otherURLs && strings.Contains(got, `Remote "origin"`) {
 				t.Errorf("unselected origin must not be described as carrying checkpoints:\n%s", got)
 			}
 			if choice := strings.Contains(got, "This repo has 2 remotes"); choice != tt.wantChoice {
 				t.Errorf("multi-remote choice warning = %v, want %v; output:\n%s", choice, tt.wantChoice, got)
+			}
+			if disabled := strings.Contains(got, "Checkpoint sync: DISABLED"); disabled != tt.wantDisabled {
+				t.Errorf("disabled-sync report = %v, want %v; output:\n%s", disabled, tt.wantDisabled, got)
 			}
 			switch {
 			case tt.pinned:
@@ -183,12 +192,314 @@ func TestCheckpointDestinationNote_ExplicitSelection(t *testing.T) {
 				if !strings.Contains(got, `Remote "fork" pushes to 2 URLs`) {
 					t.Errorf("missing multiple-push-URL warning:\n%s", got)
 				}
-			case !tt.wantChoice:
+			case !tt.wantChoice && !tt.wantDisabled:
 				if got != "" {
 					t.Errorf("valid explicit single-URL selection should need no destination note:\n%s", got)
 				}
 			}
 		})
+	}
+}
+
+// describeTopology renders a topology under the headings `entire doctor` really
+// passes, so these tests assert on the text a user actually sees.
+func describeTopology(t *testing.T, topo remoteTopology) string {
+	t.Helper()
+	var b strings.Builder
+	topo.describeCheckpointDestination(&b, doctorCheckpointNoteHeaders)
+	return b.String()
+}
+
+// TestCheckpointNote_FailedElectionReplacesTheDestinationClaim is the reported
+// bug (see remoteTopology.electionErr). Asserts the false claims are gone, not
+// merely that the new text is present.
+func TestCheckpointNote_FailedElectionReplacesTheDestinationClaim(t *testing.T) {
+	t.Parallel()
+
+	topo := remoteTopology{
+		destinations: []remoteDestination{
+			{name: "origin", pushURLs: []string{"https://example.com/a.git"}},
+			{name: "publish", pushURLs: []string{"https://example.com/b.git"}},
+		},
+		electionErr: &strategy.CheckpointPushRemoteNotFetchableError{Remote: "gone"},
+	}
+
+	out := describeTopology(t, topo)
+
+	for _, want := range []string{
+		"Checkpoint sync: DISABLED",
+		`checkpoint_push_remote names "gone"`,
+		"origin, publish",
+		"no session history",
+		"settings.local.json",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("disabled note should contain %q, got:\n%s", want, out)
+		}
+	}
+	for _, absent := range []string{
+		"single elected remote",
+		"entire status",
+		"Checkpoint destination: REVIEW",
+	} {
+		if strings.Contains(out, absent) {
+			t.Errorf("disabled note must not claim %q, got:\n%s", absent, out)
+		}
+	}
+}
+
+// TestCheckpointNote_FailedElectionReportsASingleRemoteRepo covers the other
+// half of the same bug: the note only ever spoke up about ambiguity, so a
+// one-remote repo whose sync was switched off by the same typo got no report
+// at all.
+func TestCheckpointNote_FailedElectionReportsASingleRemoteRepo(t *testing.T) {
+	t.Parallel()
+
+	topo := remoteTopology{
+		destinations: []remoteDestination{{name: "origin", pushURLs: []string{"https://example.com/a.git"}}},
+		electionErr:  &strategy.CheckpointPushRemoteNotFetchableError{Remote: "gone"},
+	}
+	if topo.ambiguous() {
+		t.Fatal("setup: a single-remote repo must not be ambiguous, or this asserts nothing")
+	}
+
+	out := describeTopology(t, topo)
+	if !strings.Contains(out, "Checkpoint sync: DISABLED") {
+		t.Errorf("an unambiguous repo whose sync is off should still be reported, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Affected remotes: origin") {
+		t.Errorf("the report should name the remote that now carries nothing, got:\n%s", out)
+	}
+}
+
+// TestCheckpointNote_UnrecognizedElectionErrorGetsNoRemedy pins the matched-cause
+// rule documented on CheckpointPushRemoteNotFetchableError: an unreadable
+// settings file is fail-closed too, and "name a real remote" is not its fix.
+func TestCheckpointNote_UnrecognizedElectionErrorGetsNoRemedy(t *testing.T) {
+	t.Parallel()
+
+	topo := remoteTopology{
+		destinations: []remoteDestination{{name: "origin", pushURLs: []string{"https://example.com/a.git"}}},
+		electionErr:  errors.New("cannot read settings to resolve the checkpoint sync remote: boom"),
+	}
+
+	out := describeTopology(t, topo)
+	if !strings.Contains(out, "cannot read settings") {
+		t.Errorf("the unmatched error should still be reported, got:\n%s", out)
+	}
+	if strings.Contains(out, "Fix:") {
+		t.Errorf("an unmatched error must get no remedy, got:\n%s", out)
+	}
+}
+
+// TestCheckpointNote_PinnedRemoteKeepsSyncingThroughAFailedElection guards the
+// exemption the pre-push gate applies before consulting the election: a
+// dedicated checkpoint_remote URL is addressed directly, not elected, so its
+// checkpoints still ship and the user must not be told sync is off.
+func TestCheckpointNote_PinnedRemoteKeepsSyncingThroughAFailedElection(t *testing.T) {
+	t.Parallel()
+
+	topo := remoteTopology{
+		destinations: []remoteDestination{
+			{name: "origin", pushURLs: []string{"https://example.com/a.git"}, pinned: true},
+		},
+		electionErr: &strategy.CheckpointPushRemoteNotFetchableError{Remote: "gone"},
+	}
+
+	if out := describeTopology(t, topo); out != "" {
+		t.Errorf("a repo whose every remote is pinned still syncs; got:\n%s", out)
+	}
+}
+
+func TestCheckpointNote_MixedDedicatedDestinationsReportPartialSync(t *testing.T) {
+	t.Parallel()
+
+	topo := remoteTopology{
+		destinations: []remoteDestination{
+			{name: "origin", pushURLs: []string{"https://example.com/a.git"}, pinned: true},
+			{name: "publish", pushURLs: []string{"https://example.com/b.git"}},
+		},
+		electionErr: &strategy.CheckpointPushRemoteNotFetchableError{Remote: "gone"},
+	}
+
+	out := describeTopology(t, topo)
+	if !strings.Contains(out, "Checkpoint sync: PARTIAL") || !strings.Contains(out, "Affected remotes: publish") {
+		t.Errorf("only the unpinned remote should be reported as affected, got:\n%s", out)
+	}
+	if strings.Contains(out, "Checkpoint sync: DISABLED") || strings.Contains(out, "Affected remotes: origin") {
+		t.Errorf("the dedicated destination still syncs and must not be called disabled, got:\n%s", out)
+	}
+}
+
+// TestCheckpointNote_FailedElectionWithNoRemotes covers syncDisabled's other
+// disjunct: a repo with no remotes syncs nowhere regardless, but the broken
+// setting travels with the settings file to clones that do have remotes, so it
+// is still reported — without an affected-remotes list it cannot populate.
+func TestCheckpointNote_FailedElectionWithNoRemotes(t *testing.T) {
+	t.Parallel()
+
+	topo := remoteTopology{electionErr: &strategy.CheckpointPushRemoteNotFetchableError{Remote: "gone"}}
+
+	out := describeTopology(t, topo)
+	if !strings.Contains(out, "Checkpoint sync: DISABLED") || !strings.Contains(out, "Fix:") {
+		t.Errorf("a remoteless repo should still get the report and its remedy, got:\n%s", out)
+	}
+	if strings.Contains(out, "Affected remotes") {
+		t.Errorf("there are no remotes to affect, got:\n%s", out)
+	}
+}
+
+// TestCheckpointNote_SuccessfulElectionKeepsTheAmbiguityNote checks the fix did
+// not cost the note its original job.
+func TestCheckpointNote_SuccessfulElectionKeepsTheAmbiguityNote(t *testing.T) {
+	t.Parallel()
+
+	topo := remoteTopology{
+		destinations: []remoteDestination{
+			{name: "origin", pushURLs: []string{"https://example.com/a.git"}},
+			{name: "publish", pushURLs: []string{"https://example.com/b.git"}},
+		},
+	}
+
+	out := describeTopology(t, topo)
+	if !strings.Contains(out, "Checkpoint destination: REVIEW") ||
+		!strings.Contains(out, "single elected remote") {
+		t.Errorf("an elected repo with several remotes should still get the note, got:\n%s", out)
+	}
+	if strings.Contains(out, "DISABLED") {
+		t.Errorf("nothing is disabled here, got:\n%s", out)
+	}
+}
+
+// TestCheckpointNote_PushDisabledDoesNotBlameTheElection covers trail finding
+// 01M51C5T8M01: with push_sessions off nothing is pushed anywhere regardless, so
+// "pushes carry no session history" named the wrong setting as the cause.
+func TestCheckpointNote_PushDisabledDoesNotBlameTheElection(t *testing.T) {
+	t.Parallel()
+
+	topo := remoteTopology{
+		destinations: []remoteDestination{{name: "origin", pushURLs: []string{"https://example.com/a.git"}}},
+		electionErr:  &strategy.CheckpointPushRemoteNotFetchableError{Remote: "gone"},
+		pushDisabled: true,
+	}
+
+	out := describeTopology(t, topo)
+	if !strings.Contains(out, "push_sessions=false") {
+		t.Errorf("the note should say pushing is off at all, got:\n%s", out)
+	}
+	if strings.Contains(out, "carry your code but no session history") {
+		t.Errorf("nothing is pushed either way, so that sentence blames the wrong setting:\n%s", out)
+	}
+}
+
+// TestCheckpointNote_ManualPolicyNamesTheUploadItCosts covers the state main's
+// `entire checkpoint push` added: under a manual policy a git push was never
+// carrying checkpoints, so "pushes carry no session history" blames the policy
+// rather than the broken election. The failure is still real — PushCheckpoints
+// elects the same remote — so the note must still print, naming that upload.
+func TestCheckpointNote_ManualPolicyNamesTheUploadItCosts(t *testing.T) {
+	t.Parallel()
+
+	topo := remoteTopology{
+		destinations: []remoteDestination{{name: "origin", pushURLs: []string{"https://example.com/a.git"}}},
+		electionErr:  &strategy.CheckpointPushRemoteNotFetchableError{Remote: "gone"},
+		manualPush:   true,
+	}
+
+	out := describeTopology(t, topo)
+	if !strings.Contains(out, "entire checkpoint push") {
+		t.Errorf("the note should name the upload this costs, got:\n%s", out)
+	}
+	if strings.Contains(out, "carry your code but no session history") {
+		t.Errorf("a git push never carried checkpoints here, so that sentence blames the policy:\n%s", out)
+	}
+	if !strings.Contains(out, "checkpoint_push_remote names") {
+		t.Errorf("the broken setting is still the cause and must still be reported:\n%s", out)
+	}
+}
+
+// TestCheckpointNote_UnfetchableWordingCoversBothShapes covers trail finding
+// 01M51C5N89PT: after the fetch-URL narrowing, "is not one of this repo's
+// remotes" was false for a pushurl-only remote, which `git remote` does list.
+func TestCheckpointNote_UnfetchableWordingCoversBothShapes(t *testing.T) {
+	t.Parallel()
+
+	topo := remoteTopology{
+		destinations: []remoteDestination{
+			{name: "origin", pushURLs: []string{"https://example.com/a.git"}},
+			{name: "pushonly", pushURLs: []string{"https://example.com/b.git"}},
+		},
+		electionErr: &strategy.CheckpointPushRemoteNotFetchableError{Remote: "pushonly"},
+	}
+
+	out := describeTopology(t, topo)
+	for _, want := range []string{"missing or has no fetch URL", "git remote set-url pushonly"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("note should contain %q, got:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "not one of this repo's remotes") {
+		t.Errorf("a pushurl-only remote IS one of this repo's remotes:\n%s", out)
+	}
+}
+
+// TestCheckpointNote_MissingRemoteGetsAddNotSetURL covers trail finding
+// 01M6NKJHYASBP6SAC4Q3NTCX8B: `git remote set-url` fails with "No such remote"
+// for a name this clone does not have, which is the common shape of this
+// failure (a committed setting naming another clone's remote).
+func TestCheckpointNote_MissingRemoteGetsAddNotSetURL(t *testing.T) {
+	t.Parallel()
+
+	topo := remoteTopology{
+		destinations: []remoteDestination{{name: "origin", pushURLs: []string{"https://example.com/a.git"}}},
+		electionErr:  &strategy.CheckpointPushRemoteNotFetchableError{Remote: "upstream"},
+	}
+
+	out := describeTopology(t, topo)
+	if !strings.Contains(out, "`git remote add upstream <url>`") {
+		t.Errorf("a missing remote should be added, got:\n%s", out)
+	}
+	if strings.Contains(out, "set-url") {
+		t.Errorf("set-url fails for a remote that does not exist:\n%s", out)
+	}
+}
+
+// TestCheckpointNote_UnpasteableNameGetsNoCommand covers trail finding
+// 01M6NKJK5S4HJ3K32PGBTJGSXG: the name can come from the committed settings
+// file, so one that is not a plain remote name must not be printed inside a
+// command the user copies; where it is named, %q keeps control runes escaped.
+func TestCheckpointNote_UnpasteableNameGetsNoCommand(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{"x; rm -rf ~", "evil\x1b]0;title\x07", "-c", "two words"} {
+		topo := remoteTopology{
+			destinations: []remoteDestination{{name: "origin", pushURLs: []string{"https://example.com/a.git"}}},
+			electionErr:  &strategy.CheckpointPushRemoteNotFetchableError{Remote: name},
+		}
+
+		out := describeTopology(t, topo)
+		if strings.Contains(out, "git remote") {
+			t.Errorf("name %q must not be offered as a command, got:\n%s", name, out)
+		}
+		if strings.ContainsAny(out, "\x1b\x07") {
+			t.Errorf("name %q reached the terminal with raw control characters, got:\n%q", name, out)
+		}
+		if !strings.Contains(out, "point it at a remote that has a fetch URL") {
+			t.Errorf("the remedy without a command should still be given, got:\n%s", out)
+		}
+	}
+}
+
+func TestIsPasteableRemoteName(t *testing.T) {
+	t.Parallel()
+
+	for name, want := range map[string]bool{
+		"origin": true, "my-fork": true, "team/upstream": true, "v1.2_x+y@z": true,
+		"": false, "-c": false, "a b": false, "a;b": false, "a$b": false, "a`b": false, "a\x1bb": false,
+	} {
+		if got := isPasteableRemoteName(name); got != want {
+			t.Errorf("isPasteableRemoteName(%q) = %v, want %v", name, got, want)
+		}
 	}
 }
 

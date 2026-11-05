@@ -13,6 +13,7 @@ import (
 	"charm.land/huh/v2"
 
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/require"
 )
@@ -174,18 +175,27 @@ func TestEnableCheckpointPushRemote_RejectedLocalLayerSkipsPicker(t *testing.T) 
 // actually been asked.
 func TestEnableCheckpointPushRemote_AmbiguityNoteFollowsThePicker(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		choice   *enableCheckpointRemoteChoice
-		wantNote bool
+		name       string
+		choice     *enableCheckpointRemoteChoice
+		pushRemote string
+		wantNote   bool
 	}{
 		{name: "no prepare step", wantNote: true},
 		{name: "prepared but never offered", choice: &enableCheckpointRemoteChoice{}, wantNote: true},
 		{name: "offered", choice: &enableCheckpointRemoteChoice{offered: true}},
+		// Trail finding 01M51C5QZX42: a failed election is reported by
+		// enableCheckpointRemoteChoice.report, which offers `entire enable
+		// --checkpoint-push-remote`. Printing doctor's report here too stated
+		// the condition twice with two different fixes.
+		{name: "failed election is enable's own report", pushRemote: "gone"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := setupTestRepo(t)
 			testutil.RunGit(t, dir, "remote", "add", "origin", "https://github.com/org/repo.git")
 			testutil.RunGit(t, dir, "remote", "add", "fork", "https://github.com/me/repo.git")
+			if tc.pushRemote != "" {
+				testutil.WriteCheckpointPushRemoteSetting(t, dir, tc.pushRemote)
+			}
 			ctx := t.Context()
 			if tc.choice != nil {
 				ctx = context.WithValue(ctx, enableCheckpointRemoteKey{}, tc.choice)
@@ -419,6 +429,84 @@ func TestEnableCheckpointPushRemote_Report(t *testing.T) {
 	}
 }
 
+// TestEnableCheckpointRemote_PushDisabledStillNamesABrokenSelection covers
+// trail finding 01M6E80ZCE95. printSetupCheckpointDestinationNote defers every
+// failed election to report, so a branch of report that returns without naming
+// one leaves enable silent about a broken checkpoint_push_remote — and the
+// push_sessions=false branch returned before it ever looked at the election.
+func TestEnableCheckpointRemote_PushDisabledStillNamesABrokenSelection(t *testing.T) {
+	dir := setupTestRepo(t)
+	testutil.RunGit(t, dir, "remote", "add", "origin", "https://github.com/org/repo.git")
+	writeSettings(t, `{"enabled":true,"strategy_options":{"push_sessions":false,"checkpoint_push_remote":"missing"}}`)
+
+	var output bytes.Buffer
+	(&enableCheckpointRemoteChoice{}).report(t.Context(), &output, nil)
+
+	require.Contains(t, output.String(), "push_sessions: false",
+		"pushing being off is still the first fact")
+	require.Contains(t, output.String(), `checkpoint_push_remote "missing" has no configured fetch URL`,
+		"the broken selection outlives push_sessions and must be named:\n%s", output.String())
+	require.Contains(t, output.String(), "entire enable --checkpoint-push-remote",
+		"naming the fault without its remedy leaves the user nowhere")
+}
+
+// TestReportDisabledElectionFailure_Gates covers trail finding 01M6E98RBJH1.
+// The push-disabled arm reported every failed election with the
+// `--checkpoint-push-remote` remedy attached, although describeSyncDisabled
+// gates both halves — and for reasons that apply here unchanged.
+func TestReportDisabledElectionFailure_Gates(t *testing.T) {
+	t.Parallel()
+
+	const remedy = "entire enable --checkpoint-push-remote"
+	unfetchable := &strategy.CheckpointPushRemoteNotFetchableError{Remote: "gone"}
+	unreadable := errors.New("read git remotes: permission denied")
+
+	for _, tc := range []struct {
+		name              string
+		err               error
+		affected          bool
+		wantFact, wantFix bool
+	}{
+		{name: "unfetchable selection gets the fact and the fix", err: unfetchable, affected: true, wantFact: true, wantFix: true},
+		// Naming a remote cannot fix remotes we could not read in the first place.
+		{name: "unrecognized cause gets the fact alone", err: unreadable, affected: true, wantFact: true},
+		// Every remote pinned: the election is bypassed, so nothing is lost and
+		// re-enabling pushing would not run into this.
+		{name: "pinned repo is told nothing", err: unfetchable, affected: false},
+		{name: "a successful election says nothing", err: nil, affected: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var output bytes.Buffer
+			reportDisabledElectionFailure(&output, tc.err, tc.affected)
+			require.Equal(t, tc.wantFact, strings.Contains(output.String(), "also misconfigured"),
+				"fact; got:\n%s", output.String())
+			require.Equal(t, tc.wantFix, strings.Contains(output.String(), remedy),
+				"remedy; got:\n%s", output.String())
+		})
+	}
+}
+
+// TestEnableCheckpointRemote_PartialSyncNamesTheRemotesCarryingNothing: with a
+// dedicated store pinning some remotes, "dedicated checkpoint uploads can still
+// proceed" is true only of those. Any remote left unpinned goes through the
+// election that just failed, so its pushes carry nothing — the state doctor
+// reports as PARTIAL, which read here as business as usual.
+func TestEnableCheckpointRemote_PartialSyncNamesTheRemotesCarryingNothing(t *testing.T) {
+	dir := setupTestRepo(t)
+	testutil.RunGit(t, dir, "remote", "add", "origin", "https://github.com/org/repo.git")
+	testutil.RunGit(t, dir, "remote", "add", "fork", "https://github.com/me/repo.git")
+	writeSettings(t, `{"enabled":true,"strategy_options":{"checkpoint_push_remote":"missing","checkpoint_remote":{"provider":"github","repo":"org/checkpoints"}}}`)
+
+	var output bytes.Buffer
+	(&enableCheckpointRemoteChoice{}).report(t.Context(), &output, nil)
+
+	require.Contains(t, output.String(), "Dedicated checkpoint uploads can still proceed",
+		"the pinned half does still sync:\n%s", output.String())
+	require.Contains(t, output.String(), "Pushes to fork carry no checkpoints",
+		"the unpinned remote carries nothing and must be named:\n%s", output.String())
+}
+
 // A configured repo never opens the picker on a bare re-enable, even on a
 // terminal: "Keep current destination" writes nothing, so it would come back
 // every run. Under ENTIRE_TEST_TTY=1 a picker would fail opening the TTY, so
@@ -456,7 +544,7 @@ func TestEnableCheckpointPushRemote_FanoutRendering(t *testing.T) {
 	t.Parallel()
 	topology := remoteTopology{primaryIsRefs: true, destinations: []remoteDestination{{name: "fork", pushURLs: []string{"https://github.com/me/repo.git", "https://github.com/me/other.git"}}}}
 	var output bytes.Buffer
-	topology.describeCheckpointDestination(&output, "Destinations:")
+	topology.describeCheckpointDestination(&output, checkpointNoteHeaders{ambiguous: "Destinations:"})
 	require.Equal(t, "Destinations:\n  Remote \"fork\" pushes to 2 URLs:\n    → https://github.com/me/repo.git\n      https://github.com/me/other.git\n    Checkpoints go to the first URL only; the others receive your code but\n    no session history. Clone that first repository to resume elsewhere.\n  To pin one repository for checkpoints, set checkpoint_remote in\n  .entire/settings.json (or .entire/settings.local.json to keep it to this clone).\n", output.String())
 }
 

@@ -89,6 +89,12 @@ func TestResolveCheckpointSyncRemote_ConfigSettingInvalidRemote_FailsClosed(t *t
 			assert.Contains(t, err.Error(), tt.remote)
 			assert.Contains(t, err.Error(), "fetch URL")
 			assert.Empty(t, got.Name)
+			// Typed, so the doctor/enable note can attach a remedy to this
+			// cause and to no other: an unreadable settings file reaches the
+			// same fail-closed path and must get none.
+			var unfetchable *CheckpointPushRemoteNotFetchableError
+			require.ErrorAs(t, err, &unfetchable)
+			assert.Equal(t, tt.remote, unfetchable.Remote)
 		})
 	}
 }

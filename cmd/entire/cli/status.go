@@ -527,10 +527,32 @@ func computeCheckpointSyncInfoCounting(ctx context.Context, s *EntireSettings, c
 		// Fail-closed: election could not confirm a usable checkpoint sync
 		// remote. The pre-push gate is silently skipping checkpoint sync, so
 		// status is the user's signal.
-		// Accepted divergence: if a structured checkpoint_remote is also
-		// configured, the gate's dedicated exemption may still sync checkpoint
-		// data even while this fail-closed warning is shown, since there is no
-		// elected remote left to probe PushURL against here.
+		//
+		// With pushing enabled, a dedicated checkpoint_remote bypasses election
+		// per push remote, so probe every configured remote before calling the
+		// whole sync path disabled: one eligible dedicated destination means
+		// checkpoints do still ship, and reporting otherwise would contradict
+		// the delivery path (doctor reports any unpinned remotes as partially
+		// affected instead). That probe is what retired the accepted divergence
+		// this branch used to carry — it needs no elected remote, so "there is
+		// nothing left to probe PushURL against here" no longer holds.
+		//
+		// Pushing disabled is a different question, and the probe must not
+		// answer it: nothing ships either way, so the broken setting is still
+		// worth reporting, and the store below is reported as a READ source.
+		// Short-circuiting here instead would drop Err and count a push queue
+		// that is going nowhere.
+		if !info.PushDisabled {
+			// `!syncAffected()` rather than `hasPinnedDestination()`: the claim
+			// "checkpoints sync to the dedicated store" is only true when NO
+			// remote is left unpinned. With origin pinned and a fork that is
+			// not, pushes to the fork carry nothing, and keying on "any remote
+			// is pinned" dropped the error here while doctor reported PARTIAL —
+			// the two commands disagreeing about whether sync works.
+			if cr := s.GetCheckpointRemote(); cr != nil && !inspectRemoteTopology(ctx).syncAffected() {
+				return newDedicatedCheckpointSyncInfo(ctx, cr, info, countUnpushed)
+			}
+		}
 		info.Err = err.Error()
 		// Reads fail OPEN where the election failed closed (see
 		// strategy.CheckpointReadRemotes), so something is probably still
@@ -573,17 +595,7 @@ func computeCheckpointSyncInfoCounting(ctx context.Context, s *EntireSettings, c
 			return info
 		}
 		if dedicated {
-			info.Remote = cr.Repo
-			info.Source = checkpointSyncSourceDedicated
-			// The unpushed counter is meaningful here only on the git-refs
-			// backend (push-queue length is local and accurate). The
-			// git-branch comparison is omitted: pushes to a raw URL update
-			// no remote-tracking ref, so it would permanently read "all
-			// unpushed".
-			if cpCfg, cfgErr := settings.LoadCheckpointsConfig(ctx); cfgErr == nil && checkpoint.PrimaryIsRefs(cpCfg) {
-				info.Unpushed = countUnpushed(ctx, "")
-			}
-			return info
+			return newDedicatedCheckpointSyncInfo(ctx, cr, info, countUnpushed)
 		}
 	}
 
@@ -607,6 +619,23 @@ func computeCheckpointSyncInfoCounting(ctx context.Context, s *EntireSettings, c
 		info.IgnoredDisproved = r.Verdict == checkpointremote.OwnershipDisproved
 		info.IgnoredReasonIsReadSide = r.ReadSide
 		info.IgnoredRemedy = r.Remedy
+	}
+	return info
+}
+
+// newDedicatedCheckpointSyncInfo reports the dedicated store as the sync
+// destination. countUnpushed is the caller's counter, not the package-level
+// one: `checkpoint list --outgoing` supplies its own so the queue it already
+// listed is not walked a second time.
+func newDedicatedCheckpointSyncInfo(ctx context.Context, cr *settings.CheckpointRemoteConfig, info checkpointSyncInfo, countUnpushed func(ctx context.Context, remoteName string) int) checkpointSyncInfo {
+	info.Remote = cr.Repo
+	info.Source = checkpointSyncSourceDedicated
+	// The unpushed counter is meaningful here only on the git-refs backend
+	// (push-queue length is local and accurate). The git-branch comparison is
+	// omitted: pushes to a raw URL update no remote-tracking ref, so it would
+	// permanently read "all unpushed".
+	if cpCfg, err := settings.LoadCheckpointsConfig(ctx); err == nil && checkpoint.PrimaryIsRefs(cpCfg) {
+		info.Unpushed = countUnpushed(ctx, "")
 	}
 	return info
 }
