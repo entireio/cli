@@ -243,6 +243,10 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 		finalErr = NewSilentError(fmt.Errorf("legacy shadow branch check failed: %w", legacyErr))
 	}
 
+	// Ahead of stuck sessions: a session refused on one of these can show as
+	// stuck below, and this names the cause and the fix.
+	checkDivergedLegacyCheckpoints(cmd)
+
 	// Stuck sessions
 	// Load all session states
 	states, err := strategy.ListSessionStates(ctx)
