@@ -38,20 +38,6 @@ func encodeAddOrgMemberRequest(
 	return nil
 }
 
-func encodeConnectOrgCIBuildkiteCredentialRequest(
-	req *ConnectOrgCIBuildkiteCredentialInputBody,
-	r *http.Request,
-) error {
-	const contentType = "application/json"
-	e := new(jx.Encoder)
-	{
-		req.Encode(e)
-	}
-	encoded := e.Bytes()
-	ht.SetBody(r, bytes.NewReader(encoded), contentType)
-	return nil
-}
-
 func encodeConnectOrgCIDepotOrganizationRequest(
 	req *ConnectOrgCIDepotOrganizationInputBody,
 	r *http.Request,
@@ -178,20 +164,6 @@ func encodeCreateRepoRequest(
 	return nil
 }
 
-func encodeCreateRepoCIWebhookRequest(
-	req *CreateRepoCIWebhookInputBody,
-	r *http.Request,
-) error {
-	const contentType = "application/json"
-	e := new(jx.Encoder)
-	{
-		req.Encode(e)
-	}
-	encoded := e.Bytes()
-	ht.SetBody(r, bytes.NewReader(encoded), contentType)
-	return nil
-}
-
 func encodeCreateServiceAccountRequest(
 	req *CreateServiceAccountInputBody,
 	r *http.Request,
@@ -306,20 +278,6 @@ func encodePatchRepoCIWebhookRequest(
 
 func encodePreviewInvitationRequest(
 	req *PreviewInvitationInputBody,
-	r *http.Request,
-) error {
-	const contentType = "application/json"
-	e := new(jx.Encoder)
-	{
-		req.Encode(e)
-	}
-	encoded := e.Bytes()
-	ht.SetBody(r, bytes.NewReader(encoded), contentType)
-	return nil
-}
-
-func encodeRegisterOrgCIBuildkiteClusterRequest(
-	req *RegisterOrgCIBuildkiteClusterInputBody,
 	r *http.Request,
 ) error {
 	const contentType = "application/json"
