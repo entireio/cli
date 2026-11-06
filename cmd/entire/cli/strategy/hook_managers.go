@@ -34,7 +34,7 @@ func detectHookManagers(repoRoot string) []hookManager {
 		for _, variant := range []string{"", "-local"} {
 			for _, ext := range []string{"yml", "yaml", "json", "toml"} {
 				name := prefix + "lefthook" + variant + "." + ext
-				checks = append(checks, hookManager{"Lefthook", name, false})
+				checks = append(checks, hookManager{"Lefthook", name, true})
 			}
 		}
 	}
@@ -78,6 +78,10 @@ func hookManagerWarning(managers []hookManager, cmdPrefix string) string {
 			fmt.Fprintf(&b, "Warning: %s detected (%s)\n", m.Name, m.ConfigPath)
 			fmt.Fprintf(&b, "\n")
 			fmt.Fprintf(&b, "  %s may overwrite hooks installed by Entire on npm install.\n", m.Name)
+			if m.Name == "Lefthook" {
+				writeLefthookWarning(&b, specs, m.ConfigPath)
+				continue
+			}
 			fmt.Fprintf(&b, "  To make Entire hooks permanent, add these lines to your %s hook files:\n", m.Name)
 			fmt.Fprintf(&b, "\n")
 
@@ -103,6 +107,37 @@ func hookManagerWarning(managers []hookManager, cmdPrefix string) string {
 	}
 
 	return b.String()
+}
+
+func writeLefthookWarning(b *strings.Builder, specs []hookSpec, configPath string) {
+	fmt.Fprintln(b, "  To make Entire hooks permanent, add each command as a Lefthook script:")
+	fmt.Fprintln(b, "  scripts receive Git's hook arguments; do not use Lefthook commands for these entries.")
+	fmt.Fprintln(b, "  The paths below use Lefthook's default source_dir (.lefthook/); use your configured source_dir if different.")
+	fmt.Fprintln(b)
+
+	for _, spec := range specs {
+		cmdLine := extractCommandLine(spec.content)
+		if cmdLine == "" {
+			continue
+		}
+		if spec.name == "pre-push" {
+			cmdLine = strings.Replace(cmdLine, `pre-push "$1"`, `pre-push "$@"`, 1)
+		}
+		fmt.Fprintf(b, "    <source_dir>/%s/entire.sh:\n", spec.name)
+		fmt.Fprintf(b, "      %s\n\n", cmdLine)
+	}
+
+	fmt.Fprintf(b, "  Wire each script in %s (YAML shape shown; use the equivalent syntax for JSON/TOML):\n", configPath)
+	fmt.Fprintln(b)
+	for _, spec := range specs {
+		fmt.Fprintf(b, "    %s:\n      scripts:\n        \"entire.sh\":\n          runner: bash\n", spec.name)
+		if spec.name == "pre-push" {
+			fmt.Fprintln(b, "          use_stdin: true")
+		}
+		fmt.Fprintln(b)
+	}
+	fmt.Fprintln(b, "  Keep these script files and config entries committed so npm install or lefthook install -f does not remove Entire's hooks.")
+	fmt.Fprintln(b)
 }
 
 // extractCommandLine returns the first non-shebang, non-comment, non-empty line
