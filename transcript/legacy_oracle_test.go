@@ -1,9 +1,9 @@
 package transcript
 
-// This file preserves the two-pass JSONL compactor that compactJSONLWith used
+// This file preserves the two-pass JSONL compactor that the JSONL converter used
 // before it became "records adapter, then fold". It is the byte-for-byte
 // oracle for the equivalence tests in jsonl_records_test.go. Do not edit it to match
-// new behavior; the one intentional divergence is marked below.
+// new behavior; the intentional divergences are marked below.
 
 import (
 	"bufio"
@@ -22,8 +22,22 @@ func legacyCompactJSONLWith(content []byte, opts Options, preprocess linePreproc
 		return nil, err
 	}
 
-	// Pass 2: merge and emit.
-	var result []byte
+	// Pass 2: merge, then attach tool results, then emit.
+	//
+	// Intentional divergence: the original inlined only the results in the
+	// user entry immediately after an assistant. That dropped the results of
+	// parallel tool calls, which Claude Code writes one user entry each, so
+	// results now attach by tool_use_id to the last assistant holding that
+	// tool_use, wherever they fall; a result without one attaches to the
+	// last assistant until the next user entry with text or images. Output
+	// is collected first because a result can land after a later assistant.
+	type legacyOut struct {
+		entry     parsedEntry
+		assistant bool
+	}
+	var outs []legacyOut
+	owners := make(map[string]int) // tool_use ID → index in outs of the last assistant holding it
+	last := -1                     // index of the last assistant in outs, since the last user line
 	for i := 0; i < len(entries); i++ {
 		e := entries[i]
 
@@ -35,46 +49,64 @@ func legacyCompactJSONLWith(content []byte, opts Options, preprocess linePreproc
 				i++
 				merged = mergeAssistantEntries(merged, entries[i])
 			}
-
-			// Look ahead for user tool_result entries to inline.
-			if i+1 < len(entries) && entries[i+1].kind == TypeUser && legacyHasToolResults(entries[i+1]) {
-				userEntry := entries[i+1]
-				merged = legacyInlineToolResults(merged, userEntry)
-				i++ // consume the user tool_result entry
-
-				// If the consumed user entry also had text or image content, emit it
-				// as a separate user line after the assistant.
-				if userEntry.userText != "" || len(userEntry.userImages) > 0 {
-					// Intentional divergence: the original emitted this assistant
-					// even when its content was `[]`. The fold skips empty
-					// assistant messages unconditionally, so the oracle does too.
-					if !legacyIsEmptyContentArray(merged.content) {
-						legacyEmitAssistant(&result, base, merged)
-					}
-					legacyEmitUser(&result, base, userEntry)
-					continue
-				}
+			outs = append(outs, legacyOut{entry: merged, assistant: true})
+			last = len(outs) - 1
+			for _, id := range legacyToolUseIDs(merged.content) {
+				owners[id] = last
 			}
-
-			if legacyIsEmptyContentArray(merged.content) {
-				continue
-			}
-
-			legacyEmitAssistant(&result, base, merged)
 
 		case TypeUser:
-			// User entries that are purely tool results were already consumed
-			// by the assistant look-ahead above. If we reach one here it was
-			// not preceded by an assistant with a matching tool_use, so emit
-			// it only if it has text or image content.
+			for _, tr := range e.toolResults {
+				idx := last
+				if tr.toolUseID != "" {
+					var ok bool
+					if idx, ok = owners[tr.toolUseID]; !ok {
+						continue
+					}
+				}
+				if idx < 0 {
+					continue
+				}
+				outs[idx].entry = legacyInlineToolResults(outs[idx].entry, parsedEntry{toolResults: []toolResultEntry{tr}})
+			}
+			// A user entry that is purely tool results has no line.
 			if legacyHasToolResults(e) && e.userText == "" && len(e.userImages) == 0 {
 				continue
 			}
-			legacyEmitUser(&result, base, e)
+			outs = append(outs, legacyOut{entry: e})
+			last = -1
+		}
+	}
+
+	var result []byte
+	for _, out := range outs {
+		switch {
+		case !out.assistant:
+			legacyEmitUser(&result, base, out.entry)
+		// Intentional divergence: the original emitted an assistant whose
+		// content was `[]` when a user entry with text followed its results.
+		// The fold skips empty assistant messages unconditionally.
+		case !legacyIsEmptyContentArray(out.entry.content):
+			legacyEmitAssistant(&result, base, out.entry)
 		}
 	}
 
 	return result, nil
+}
+
+// legacyToolUseIDs returns the IDs of the tool_use blocks in content.
+func legacyToolUseIDs(content json.RawMessage) []string {
+	var blocks []map[string]json.RawMessage
+	if json.Unmarshal(content, &blocks) != nil {
+		return nil
+	}
+	var ids []string
+	for _, b := range blocks {
+		if unquote(b["type"]) == ContentTypeToolUse && unquote(b["id"]) != "" {
+			ids = append(ids, unquote(b["id"]))
+		}
+	}
+	return ids
 }
 
 func legacyEmitAssistant(result *[]byte, base transcriptLine, e parsedEntry) {
@@ -82,8 +114,8 @@ func legacyEmitAssistant(result *[]byte, base transcriptLine, e parsedEntry) {
 	line.Type = TypeAssistant
 	line.TS = e.ts
 	line.ID = e.id
-	line.InputTokens = e.inputTokens
-	line.OutputTokens = e.outputTokens
+	line.InputTokens = int64(e.inputTokens)
+	line.OutputTokens = int64(e.outputTokens)
 	line.Content = e.content
 	appendLine(result, line)
 }

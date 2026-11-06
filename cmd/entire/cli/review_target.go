@@ -187,7 +187,7 @@ func normalizeReviewTargetSelector(raw, forge, owner, repo string) (string, bool
 		return "", true, fmt.Errorf("unsupported review target URL scheme %q", u.Scheme)
 	}
 	host := strings.ToLower(u.Hostname())
-	if host != "entire.io" && !strings.HasSuffix(host, ".entire.io") {
+	if !isEntireWebHost(host) {
 		return "", true, errors.New("review target URL must be an Entire trail URL")
 	}
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
@@ -198,4 +198,15 @@ func normalizeReviewTargetSelector(raw, forge, owner, repo string) (string, bool
 		return "", true, fmt.Errorf("trail URL targets %s/%s/%s, but this clone is %s/%s/%s", parts[0], parts[1], parts[2], forge, owner, repo)
 	}
 	return parts[4], true, nil
+}
+
+// isEntireWebHost reports whether host serves Entire trail pages: the
+// entire.com web app, or entire.io links from before the web app moved.
+func isEntireWebHost(host string) bool {
+	for _, site := range []string{"entire.com", "entire.io"} {
+		if host == site || strings.HasSuffix(host, "."+site) {
+			return true
+		}
+	}
+	return false
 }

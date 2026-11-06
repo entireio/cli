@@ -116,6 +116,10 @@ func TestRepoView_JSONCoordinates(t *testing.T) {
 				case "/api/v1/repos/" + testDeleteULID + "/native-mirrors":
 					w.Header().Set("Content-Type", "application/json")
 					fmt.Fprint(w, `{"nativeMirrors":[]}`)
+				case "/api/v1/mirrors/" + entry.ID:
+					// The sync-block read, by the entry's canonical placement
+					// ID; an unblocked record keeps this test about coordinates.
+					writeJSONResponse(t, w, http.StatusOK, &coreapi.Mirror{MirrorId: entry.ID, Owner: "acme", Repo: "web", Provider: "github", ClusterHost: "us.entire.io"})
 				default:
 					t.Errorf("unexpected request: %s %s", r.Method, r.URL)
 					http.NotFound(w, r)

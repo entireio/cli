@@ -168,7 +168,9 @@ func runTrailMergeTestArgs(t *testing.T, stub *trailMergeStub, args ...string) (
 	}
 	t.Cleanup(func() { trailMergeCanPrompt, trailMergeBypassPrompt = previousCanPrompt, previousPrompt })
 
-	cmd := newTrailCmd()
+	// The repository-scoped tree keeps its own selector semantics; project
+	// mode is covered in trail_merge_project_test.go.
+	cmd := newTrailCmdForMode(false)
 	cmd.SetContext(t.Context())
 	cmd.SetArgs(args)
 	cmd.SilenceUsage = true // as the root command does
@@ -903,7 +905,7 @@ func TestConfirmTrailMergeBypassCancelledContextIsAnError(t *testing.T) {
 	rationale := "main is red: acme/app build #1 failed"
 	gates := []api.TrailGate{{GateType: "base_checks", Status: "failed", Rationale: &rationale}}
 
-	ok, err := confirmTrailMergeBypass(ctx, &out, &api.TrailResource{Number: 7, Base: "main"}, gates, false, true)
+	ok, err := confirmTrailMergeBypass(ctx, &out, &api.TrailResource{Number: 7, Base: "main"}, legacyTrailMergeRef(7), gates, false, true)
 	require.ErrorIs(t, err, context.Canceled)
 	require.False(t, ok)
 	require.NotContains(t, out.String(), "Trail merge cancelled.", "an interruption is not reported as a decline")

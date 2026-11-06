@@ -56,7 +56,7 @@ func TestProjectTrailCreateRetriesOnlyChangeWithLink(t *testing.T) {
 		name   string
 		fields []string
 	}{
-		{"all fields", []string{"--repo", "gh/acme/widget", "--branch-action", "create", "--base", "main", "--body", "Plan", "--status", "draft", "--type", "feature", "--priority", "high", "--assignee", "alice,bob"}},
+		{"all fields", []string{"--repo", "gh/acme/widget", "--branch-action", "create", "--base", "main", "--body", "Plan", "--status", "open", "--type", "feature", "--priority", "high", "--assignee", "alice,bob"}},
 		{"defaults", []string{"--repo", "gh/acme/widget"}},
 		{"implicit repository", nil},
 		{"shell and CSV quoting", []string{"--repo", "gh/acme/widget", "--body", "--leading flag\nquotes: 'single' \"double\"; $(printf expanded) `printf expanded` $HOME \\ path ☃\n", "--assignee", `"alice,team","bob""quoted"`}},

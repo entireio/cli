@@ -1,24 +1,21 @@
 package cli
 
 import (
-	"os"
-
 	"github.com/spf13/cobra"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 )
 
-// projectTrailsEnv opts into project-scoped trails. Read it only through
-// projectTrailsEnabled, at the two places that choose a model: building the
-// trail command tree and rendering the first-turn context injection.
-const projectTrailsEnv = "ENTIRE_PROJECT_TRAILS"
-
 // projectTrailsAnnotation marks a project-model trail tree so agent-help
 // describes the tree that was actually built, not the current environment.
 const projectTrailsAnnotation = "entire_project_trails"
 
+// projectTrailsEnabled chooses the model where it matters: building the trail
+// command tree. The first-turn context injection describes project trails only.
+// Project trails are the only model offered; the legacy tree is still built by
+// newTrailCmdForMode(false) until it is deleted.
 func projectTrailsEnabled() bool {
-	return os.Getenv(projectTrailsEnv) == "1"
+	return true
 }
 
 // trailMode is the only seam between the repository-scoped (legacy) and the

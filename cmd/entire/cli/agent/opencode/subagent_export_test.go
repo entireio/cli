@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 // resumedChildExportFixture is a child resumed through `task_id`: its first
@@ -240,4 +241,49 @@ func TestFetchSubagentTranscript_NeverPromptedCallDeclaresNothing(t *testing.T) 
 	files, _, err := ag.ExtractModifiedFilesFromOffset(context.Background(), path, 0)
 	require.NoError(t, err)
 	assert.Empty(t, files, "the other calls' files must not be attributed to the dropped call")
+}
+
+// TestLiveSubagentModifiedFiles_WritesNothingACaptureReads pins that the
+// co-authorship probe of a running child reports the running call's files
+// without writing the shared export cache or the call's declared file: the
+// call can stop while the probe runs, and a late probe must not replace the
+// stop's complete transcript.
+func TestLiveSubagentModifiedFiles_WritesNothingACaptureReads(t *testing.T) {
+	// Not parallel: t.Chdir and stubExport.
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+	stubExport(t, func(_ context.Context, root *os.Root, _, outputName string) error {
+		return root.WriteFile(outputName, []byte(resumedChildExportFixture), 0o600)
+	})
+
+	files, err := (&OpenCodeAgent{}).LiveSubagentModifiedFiles(context.Background(), "ses_child", "call_blue", time.Time{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"/repo/docs/blue.md"}, files, "only the running (last) call's files")
+
+	entries, err := os.ReadDir(paths.EntireTmpDir)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "the probe must leave nothing under .entire/tmp")
+}
+
+func TestCompletedToolParts_DropsUnfinishedEdits(t *testing.T) {
+	t.Parallel()
+	write := func(status, file string) Part {
+		return Part{Type: "tool", Tool: "write", State: &ToolState{Status: status, Input: map[string]any{"filePath": file}}}
+	}
+	msgs := []ExportMessage{{
+		Info: MessageInfo{ID: "m1", Role: roleAssistant},
+		Parts: []Part{
+			{Type: "text", Text: "editing"},
+			write("pending", "/repo/pending.md"),
+			write("running", "/repo/running.md"),
+			write("error", "/repo/error.md"),
+			write("completed", "/repo/done.md"),
+		},
+	}}
+
+	assert.Equal(t, []string{"/repo/done.md"}, modifiedFilesFromMessages(completedToolParts(msgs), 0))
+	assert.Len(t, msgs[0].Parts, 5, "the caller's messages are left as they were")
 }

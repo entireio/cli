@@ -797,6 +797,27 @@ func TestPrepareTrailReviewCommentInputsForCreateDowngradesUnselectableLine(t *t
 	}
 }
 
+// selected_text is shown as the code the finding quotes, so it must be the
+// worktree's text at the anchored lines, never a caller-supplied string.
+func TestPrepareTrailReviewCommentInputsForCreateReplacesSuppliedSelectedText(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	testutil.WriteFile(t, tmp, "src/app.go", "package main\nfunc main() {}\n")
+
+	filePath := "src/app.go"
+	line := 2
+	supplied := "os.Setenv(\"TOKEN\", leaked)"
+	got := prepareTrailReviewCommentInputsForCreate(tmp, []api.TrailReviewCommentInput{{
+		ClientID: "c1",
+		Body:     trailReviewStrPtr("body"),
+		Location: api.TrailReviewLocationCreateRequest{Granularity: reviewTrailGranularityLine, FilePath: &filePath, StartLine: &line, SelectedText: &supplied},
+	}})
+	loc := got[0].Location
+	if loc.Granularity != reviewTrailGranularityLine || loc.SelectedText == nil || *loc.SelectedText != "func main() {}" {
+		t.Fatalf("location = %+v, want the worktree text at line 2", loc)
+	}
+}
+
 func TestCreateTrailReviewFindingSurfacesBatchError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -858,14 +879,16 @@ func TestPrintTrailReviewDashboard(t *testing.T) {
 		},
 	}
 	var out strings.Builder
-	printTrailReviewDashboard(&out, trailReviewTarget{Trail: api.TrailResource{
+	if err := printTrailReviewDashboard(&out, trailReviewTarget{Trail: api.TrailResource{
 		ID:     "trl_1",
 		Number: 42,
 		Title:  "Add token refresh",
 		Status: "open",
 		Branch: "feat/token-refresh",
 		Base:   "main",
-	}}, comments, "", defaultTrailReviewListOptions(), countTrailReviewComments(comments))
+	}}, comments, "", defaultTrailReviewListOptions(), countTrailReviewComments(comments), nil); err != nil {
+		t.Fatal(err)
+	}
 	text := out.String()
 	for _, want := range []string{
 		"Trail #42  Add token refresh",
@@ -890,14 +913,16 @@ func TestPrintTrailReviewDashboard_UsesSeparateCountsWhenFilteredCommentsEmpty(t
 		{ID: "resolved-1", Status: trailReviewStatusResolved},
 		{ID: "dismissed-1", Status: trailReviewStatusDismissed, StaleOutcome: "stale"},
 	})
-	printTrailReviewDashboard(&out, trailReviewTarget{Trail: api.TrailResource{
+	if err := printTrailReviewDashboard(&out, trailReviewTarget{Trail: api.TrailResource{
 		ID:     "trl_1",
 		Number: 42,
 		Title:  "Add token refresh",
 		Status: "open",
 		Branch: "feat/token-refresh",
 		Base:   "main",
-	}}, nil, "", defaultTrailReviewListOptions(), counts)
+	}}, nil, "", defaultTrailReviewListOptions(), counts, nil); err != nil {
+		t.Fatal(err)
+	}
 	text := out.String()
 	for _, want := range []string{
 		"Open findings: 0  high 0  medium 0  low 0",

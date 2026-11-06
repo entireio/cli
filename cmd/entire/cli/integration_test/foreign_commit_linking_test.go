@@ -284,3 +284,13 @@ func TestForeignCommit_CarryForwardCheckpointedEditDoesNotLink(t *testing.T) {
 
 	require.Empty(t, headCheckpointID(t, env), "an edit already in an earlier checkpoint is no evidence for a later commit")
 }
+
+func TestForeignCommit_RunningOpenCodeSubagentLinksActiveForeignParent(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+	// The commit comes from outside the parent's OpenCode while the parent is
+	// still in its turn and its background child has written the file.
+	openCodeActiveParentCoauthorsCommit(t, env, func(parentID string) {
+		makeOwnerForeign(t, env, parentID)
+	})
+}

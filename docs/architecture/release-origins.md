@@ -68,6 +68,16 @@ on every release and get `max-age=60`.
   `ENTIRE_INSTALL_BASE_URL` replaces the origin list with one entry, because
   someone pinning a mirror wants that mirror, not a silent fall back that hides
   whether it worked.
+- **`scripts/install.ps1`** — the direct-install path uses the same origin
+  order, metadata validation, and same-origin archive/checksum pairing as Unix.
+  `-Version X.Y.Z` skips discovery and Scoop; if `-Channel` is also explicit,
+  the pin must belong to it. `ENTIRE_INSTALL_BASE_URL` selects one authoritative
+  mirror and the direct-install path, with no fallback to GitHub or Scoop.
+  Metadata requests have a 60-second timeout. Downloads keep the existing
+  host-specific stall handling (`Save-RemoteFile`); PowerShell 7.4+ has an
+  explicit stall timeout, while older hosts retain their network defaults.
+  Ordinary stable installs still use Scoop when available; `-InstallDir`,
+  `-Version`, or an explicit mirror selects direct installation instead.
 - **`cmd/entire/cli/versioncheck`** — `versionOrigins` is the ordered chain,
   `fetchLatestForChannel` walks it. `httpTimeout` (2s) bounds the *whole* chain,
   so adding an origin costs no extra worst-case latency on a path that runs
@@ -102,7 +112,7 @@ CLI reports no update at all while `install.sh` fetches a version that does not
 exist. Both sides require the canonical `vX.Y.Z` form — `semver.IsValid` alone
 accepts `v1.2`, which resolves to an artifact prefix that was never published.
 
-`install.sh` also never mixes origins within one install: the archive and the
+Neither installer mixes origins within one install: the archive and the
 `checksums.txt` that vouches for it always come from the same place. A healthy
 origin's checksums vouching for another origin's bytes would be a weaker
 guarantee than either origin offers alone.
@@ -125,13 +135,14 @@ closes that race for workflow runs and manual ones alike.
 
 The channel a tag belongs to is decided the same way everywhere: the literal
 `-nightly.` prerelease segment goes to nightly, no prerelease to stable, and any
-other prerelease is **refused at publish time**. Four places answer this
-question — the publisher, `install.sh`, `isNightly`, and the GitHub release scan
-— and they have to use the same test. A looser one in any of them routes a tag
+other prerelease is **refused at publish time**. The publisher, both installers,
+`isNightly`, and the GitHub release scans all answer this question, and they have
+to use the same test. A looser one in any of them routes a tag
 like `v0.5.4-nightly` or `v0.5.4-prenightly` to the channel, where the readers
 disagree about it: the CLI announces an update that `install.sh` then refuses to
-install, which is worse than either accepting or rejecting it consistently. Both readers also prefer
-`tag` over `version` and check the manifest's declared `channel`.
+install, which is worse than either accepting or rejecting it consistently.
+All readers prefer `tag` over `version` and check the manifest's declared
+`channel`.
 
 **Publishing inverts rule 1 on purpose.** `publish-channel-manifest.sh` fails
 *closed*: if it cannot read the current pointer it refuses to publish. The two
@@ -251,8 +262,8 @@ supported at all.
 
 ## Installing while GitHub is down
 
-`install.sh` handles this automatically once the origin is live. The manual
-paths, for when it does not:
+`install.sh` and the direct-install path in `install.ps1` handle this
+automatically once the origin is live. The manual paths, for when they do not:
 
 ```bash
 # Straight from our origin, no version lookup
@@ -272,19 +283,11 @@ The `go install` route works today, with no infrastructure at all:
 `proxy.golang.org` serves module content from its own cache and
 `versioninfo.Resolve` recovers the real version from build info. Pin an explicit
 version — `@latest` re-resolves against GitHub. The caveats are real but small:
-no PostHog key is stamped in, so telemetry is off, and `experimental.Visible`
-keeps its default, so experimental commands are visible.
+no PostHog key is stamped in, so telemetry is off. Experimental commands follow
+the resolved version, so a pinned stable tag hides them as a release does.
 
 ## Remaining work
 
-- **`install.ps1` is still GitHub-dependent.** It is mirrored to `installers/`
-  so it can be *fetched* during an outage, but it resolves versions through
-  `api.github.com` and downloads archives from GitHub releases. Porting the
-  two-origin loop is tractable — it already has `Save-RemoteFile` and
-  `Assert-Checksum`, structurally parallel to `install.sh` — but it would add a
-  fourth reader of the channel manifest, so it should land with the same
-  validation and the same shared test cases rather than its own interpretation
-  of the contract.
 - **Set the repository variables and watch a release.** Nothing has assumed the
   upload role from GitHub yet. If `configure-aws-credentials` fails the release
   job fails *before* GoReleaser runs, so do this on a release someone is
@@ -336,3 +339,10 @@ checksum mismatch aborting rather than falling back, `--version` pinning, the
 all-origins-down error, and the channel pointer's routing, monotonicity and
 idempotence. It is hermetic and refuses to run an installer still aimed at a
 public origin.
+
+`mise run test:ps1` runs the PowerShell origin tests under `scripts/test/`,
+including metadata rejection/fallback, literal nightly routing, pinned-version
+validation, authoritative mirror selection, same-origin checksum pairing, and
+fatal checksum mismatches. Network calls in unit tests are mocked; local HTTP
+fixtures exercise the real JSON decoder and download functions. CI runs the
+suite on both Windows PowerShell 5.1 and pwsh.

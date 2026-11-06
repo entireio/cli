@@ -1373,6 +1373,10 @@
             "readOnly": true,
             "type": "string"
           },
+          "cell": {
+            "description": "Processing cell ID, not a cluster slug, e.g. aws-us-east-2. A visible cluster in region must serve it. Defaults to the region's default cell.",
+            "type": "string"
+          },
           "name": {
             "maxLength": 100,
             "minLength": 1,
@@ -1639,12 +1643,18 @@
             "type": "string"
           },
           "orgId": {
+            "description": "Optional. Must match the project's owning org.",
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          },
+          "project_id": {
+            "description": "Owning project. An org or an account owns it.",
             "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
             "type": "string"
           }
         },
         "required": [
-          "orgId",
+          "project_id",
           "name"
         ],
         "type": "object"
@@ -3987,6 +3997,10 @@
           "suspendedAt": {
             "format": "date-time",
             "type": "string"
+          },
+          "syncBlock": {
+            "$ref": "#/components/schemas/MirrorSyncBlock",
+            "description": "Present while GitHub blocks the upstream's GitHub App installation, so the mirror cannot sync. The block is per installation: every placement of the upstream carries the same value."
           }
         },
         "required": [
@@ -4100,6 +4114,25 @@
         ],
         "type": "object"
       },
+      "MirrorSyncBlock": {
+        "additionalProperties": true,
+        "properties": {
+          "observedAt": {
+            "description": "When Core last observed the block. The periodic re-probe and a customer resync both refresh it.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Why GitHub refused the mint: org_ip_allowlist or installation_suspended. Other values may be added.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason",
+          "observedAt"
+        ],
+        "type": "object"
+      },
       "NativeMirrorPlacement": {
         "additionalProperties": true,
         "properties": {
@@ -4186,10 +4219,23 @@
       "OIDCProvider": {
         "additionalProperties": true,
         "properties": {
+          "attributes": {
+            "description": "Attributes a binding filter can pin.",
+            "items": {
+              "$ref": "#/components/schemas/OIDCProviderAttribute"
+            },
+            "type": "array"
+          },
           "description": {
             "type": "string"
           },
           "displayName": {
+            "deprecated": true,
+            "description": "Deprecated: use name for the slug and label for the human label. Removal after 2027-05-01.",
+            "type": "string"
+          },
+          "docs_url": {
+            "description": "The provider's OIDC setup guide.",
             "type": "string"
           },
           "id": {
@@ -4197,11 +4243,57 @@
           },
           "issuer": {
             "type": "string"
+          },
+          "label": {
+            "description": "Human label, such as GitHub Actions.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Stable slug, such as github-actions.",
+            "type": "string"
+          },
+          "self_serve": {
+            "description": "True when a project manager can bind this provider.",
+            "type": "boolean"
           }
         },
         "required": [
           "id",
           "issuer"
+        ],
+        "type": "object"
+      },
+      "OIDCProviderAttribute": {
+        "additionalProperties": true,
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "exact": {
+            "description": "The value must not contain '*'.",
+            "type": "boolean"
+          },
+          "label": {
+            "type": "string"
+          },
+          "name": {
+            "description": "The attributeFilter key.",
+            "type": "string"
+          },
+          "pattern": {
+            "description": "RE2 expression the pinned value must match.",
+            "type": "string"
+          },
+          "required": {
+            "description": "Every filter must pin this attribute.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "label",
+          "required",
+          "exact"
         ],
         "type": "object"
       },
@@ -5955,6 +6047,66 @@
         ],
         "type": "object"
       },
+      "ResyncMirrorInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ResyncMirrorInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "owner": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "provider": {
+            "enum": [
+              "github"
+            ],
+            "type": "string"
+          },
+          "repo": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "owner",
+          "repo"
+        ],
+        "type": "object"
+      },
+      "ResyncMirrorOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ResyncMirrorOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "mirrorId": {
+            "description": "The placement the resync was published for.",
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "mirrorId",
+          "status"
+        ],
+        "type": "object"
+      },
       "ServiceAccount": {
         "additionalProperties": true,
         "properties": {
@@ -5978,6 +6130,12 @@
             "type": "string"
           },
           "orgId": {
+            "deprecated": true,
+            "description": "Deprecated: use the project's owner. Removal after 2027-05-01.",
+            "type": "string"
+          },
+          "project_id": {
+            "description": "Owning project.",
             "type": "string"
           },
           "status": {
@@ -5990,7 +6148,6 @@
         "required": [
           "accountId",
           "name",
-          "orgId",
           "status",
           "systemManaged",
           "createdAt"
@@ -6040,6 +6197,12 @@
             "type": "string"
           },
           "orgId": {
+            "deprecated": true,
+            "description": "Deprecated: use the project's owner. Removal after 2027-05-01.",
+            "type": "string"
+          },
+          "project_id": {
+            "description": "Owning project.",
             "type": "string"
           },
           "status": {
@@ -6053,10 +6216,64 @@
           "grants",
           "accountId",
           "name",
-          "orgId",
           "status",
           "systemManaged",
           "createdAt"
+        ],
+        "type": "object"
+      },
+      "SetDefaultBranchInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/SetDefaultBranchInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "branch": {
+            "description": "An existing branch: a short name (main) or a full ref (refs/heads/main).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "branch"
+        ],
+        "type": "object"
+      },
+      "SetDefaultBranchOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/SetDefaultBranchOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "branch": {
+            "type": "string"
+          },
+          "changed": {
+            "type": "boolean"
+          },
+          "previous": {
+            "type": "string"
+          },
+          "repo_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_id",
+          "branch",
+          "previous",
+          "changed"
         ],
         "type": "object"
       },
@@ -7552,6 +7769,55 @@
           }
         ],
         "summary": "Resolve the pullable cluster placements of a mirrored upstream (clone discovery)",
+        "tags": [
+          "mirrors"
+        ]
+      }
+    },
+    "/mirrors/resync": {
+      "post": {
+        "operationId": "resyncMirror",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResyncMirrorInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResyncMirrorOutputBody"
+                }
+              }
+            },
+            "description": "Accepted"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Resync every placement of a mirrored upstream (live GitHub write-access gated)",
         "tags": [
           "mirrors"
         ]
@@ -12507,6 +12773,66 @@
         ]
       }
     },
+    "/repos/{repoId}/default-branch": {
+      "put": {
+        "operationId": "setDefaultBranch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetDefaultBranchInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetDefaultBranchOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Set repository default branch",
+        "tags": [
+          "repos"
+        ]
+      }
+    },
     "/repos/{repoId}/detach": {
       "get": {
         "description": "Reports whether a detach of the repository is recorded, in progress, stalled, or complete, and its last finished step. Poll it after a detach answers in_progress or stalled: in_progress turns into complete when step 9 finishes. A stalled detach with resumable true reads in_progress again once the core's sweep resumes it. The sweep skips one with resumable false; a call to the detach from an admin of the repo's project or a platform admin resumes it. A requester who cannot see the repository gets 404. No other permission is needed.",
@@ -13306,11 +13632,23 @@
             }
           },
           {
+            "description": "List the org's service accounts.",
             "explode": false,
             "in": "query",
             "name": "orgId",
-            "required": true,
             "schema": {
+              "description": "List the org's service accounts.",
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "List the project's service accounts.",
+            "explode": false,
+            "in": "query",
+            "name": "project_id",
+            "schema": {
+              "description": "List the project's service accounts.",
               "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
               "type": "string"
             }
@@ -13346,7 +13684,7 @@
             "sessionAuth": []
           }
         ],
-        "summary": "List service accounts in an org",
+        "summary": "List service accounts in an org or project",
         "tags": [
           "service-accounts"
         ]

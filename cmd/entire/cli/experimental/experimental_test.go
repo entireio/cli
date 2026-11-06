@@ -3,41 +3,52 @@ package experimental
 import (
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/spf13/cobra"
 )
 
-// setVisible sets the package-global Visible for the duration of the test and
+// Version strings standing in for the build kinds that matter here.
+const (
+	devVersion    = "dev"
+	stableVersion = "0.12.0"
+)
+
+// setVersion stamps versioninfo.Version for the duration of the test and
 // restores it afterward. Mutating a global means these tests cannot run in
 // parallel.
-func setVisible(t *testing.T, v string) {
+func setVersion(t *testing.T, v string) {
 	t.Helper()
-	prev := Visible
-	Visible = v
-	t.Cleanup(func() { Visible = prev })
+	prev := versioninfo.Version
+	versioninfo.Version = v
+	t.Cleanup(func() { versioninfo.Version = prev })
 }
 
 func TestIsVisible(t *testing.T) {
 	tests := []struct {
-		value string
-		want  bool
+		version string
+		want    bool
 	}{
-		{"true", true},
-		{"false", false},
-		{"", true},         // only the literal "false" hides
-		{"anything", true}, // any non-"false" stamp is treated as visible
+		{devVersion, true},           // unstamped local build
+		{"", true},                   // defensive: never hide on an empty stamp
+		{stableVersion, false},       // GoReleaser / nixpkgs stable
+		{"v" + stableVersion, false}, // tag-shaped stamp still counts as stable
+		{"0.12.1-nightly.202610211647.29f996951b", true}, // nightly channel
+		{"0.0.0+29f996951b", true},                       // nonprod commit build
+		{"0.12.0+dirty", true},                           // build metadata is never a release
+		{"0.12", true},                                   // not a semver, so not a release
 	}
 	for _, tt := range tests {
-		t.Run(tt.value, func(t *testing.T) {
-			setVisible(t, tt.value)
+		t.Run(tt.version, func(t *testing.T) {
+			setVersion(t, tt.version)
 			if got := IsVisible(); got != tt.want {
-				t.Fatalf("IsVisible() with Visible=%q = %v, want %v", tt.value, got, tt.want)
+				t.Fatalf("IsVisible() with Version=%q = %v, want %v", tt.version, got, tt.want)
 			}
 		})
 	}
 }
 
 func TestRegister_Visible(t *testing.T) {
-	setVisible(t, "true")
+	setVersion(t, devVersion)
 
 	parent := &cobra.Command{Use: "parent"}
 	child := &cobra.Command{Use: "child", Hidden: true} // constructor-set Hidden must be overridden
@@ -58,7 +69,7 @@ func TestRegister_Visible(t *testing.T) {
 }
 
 func TestRegister_Hidden(t *testing.T) {
-	setVisible(t, "false")
+	setVersion(t, stableVersion)
 
 	parent := &cobra.Command{Use: "parent"}
 	child := &cobra.Command{Use: "child"}
@@ -81,7 +92,7 @@ func TestRegister_Hidden(t *testing.T) {
 // TestRegister_MultipleShareOneGroup verifies the group is registered once even
 // when several experimental commands are registered under the same parent.
 func TestRegister_MultipleShareOneGroup(t *testing.T) {
-	setVisible(t, "true")
+	setVersion(t, devVersion)
 
 	parent := &cobra.Command{Use: "parent"}
 	Register(parent, &cobra.Command{Use: "a"})

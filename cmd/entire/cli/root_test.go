@@ -274,11 +274,14 @@ func TestRoot_VisibleCommandsAreGrouped(t *testing.T) {
 		"login":      groupAccount,
 		"logout":     groupAccount,
 		"auth":       groupAccount,
+		"trail":      groupTrails,
 		"cluster":    groupControlPlane,
 		"org":        groupControlPlane,
 		"project":    groupControlPlane,
 		"repo":       groupControlPlane,
 		"api":        groupControlPlane,
+
+		"service-account": groupControlPlane,
 	}
 
 	root := NewRootCmd()
@@ -348,6 +351,7 @@ func TestCommandGroupsRejectUnknownSubcommands(t *testing.T) {
 		"repo protection": newRepoProtectionCmd,
 		"repo remote":     newRepoRemoteCmd,
 		"repo visibility": newRepoVisibilityCmd,
+		"service-account": newServiceAccountCmd,
 	}
 	for name, newCmd := range groups {
 		t.Run(name, func(t *testing.T) {

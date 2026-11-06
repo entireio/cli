@@ -3,9 +3,12 @@
 package integration
 
 import (
+	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/stretchr/testify/require"
 )
@@ -356,6 +359,234 @@ func TestOpenCodeSubagentReusedCallIDRecordsEachCall(t *testing.T) {
 			require.True(t, ok, "the reused callID's second call must be materialized as its own task")
 			require.Contains(t, storedSecond, "docs/blue.md")
 			require.NotContains(t, storedSecond, "docs/red.md")
+		})
+	}
+}
+
+// TestOpenCodeChildTokensCountOnceInParentTotal covers child-session usage,
+// which the parent's own export never carries: a foreground child in turn 1,
+// whose stop repeats after turn 1 is condensed, then a background child that
+// finishes after turn 2 has ended and been committed. Each child must count
+// once in the parent's total, in the checkpoint that stores its transcript.
+// Every assistant message in these exports is 150 input tokens (see
+// CreateOpenCodeTranscript).
+func TestOpenCodeChildTokensCountOnceInParentTotal(t *testing.T) {
+	t.Parallel()
+
+	env := NewFeatureBranchEnv(t)
+	env.InitEntireWithAgent(agent.AgentNameOpenCode)
+	parent := env.NewOpenCodeSession()
+	require.NoError(t, env.SimulateOpenCodeSessionStart(parent.ID, parent.TranscriptPath))
+
+	turn := func(prompt, file string) {
+		t.Helper()
+		env.WriteFile(file, prompt+"\n")
+		parent.CreateOpenCodeTranscript(prompt, []FileChange{{Path: file, Content: prompt + "\n"}})
+		require.NoError(t, env.SimulateOpenCodeTurnEnd(parent.ID, parent.TranscriptPath))
+		env.GitCommitWithHooks(prompt, file)
+	}
+	checkpointSubagentInput := func() int {
+		t.Helper()
+		usage := readCommittedTokenUsage(t, env, env.TryGetLatestCheckpointID())
+		require.NotNil(t, usage)
+		require.Equal(t, 150, usage.InputTokens, "the parent's own turn")
+		if usage.SubagentTokens == nil {
+			return 0
+		}
+		return usage.SubagentTokens.InputTokens
+	}
+
+	// Turn 1: a foreground child completes inside the turn.
+	require.NoError(t, env.SimulateOpenCodeTurnStart(parent.ID, parent.TranscriptPath, "red"))
+	foreground := env.NewOpenCodeSession()
+	require.NoError(t, env.SimulateOpenCodeSubagentStart(parent.ID, "call_fg", foreground.ID, "general", "Look"))
+	env.CopyTranscriptToEntireTmp(foreground.ID, foreground.CreateOpenCodeTranscript("Look", nil))
+	require.NoError(t, env.SimulateOpenCodeSubagentStop(parent.ID, "call_fg", foreground.ID, "general", "Look"))
+	turn("red", "docs/red.md")
+	require.Equal(t, 150, checkpointSubagentInput(), "checkpoint 1 holds the foreground child")
+
+	// The same stop again, after condensation removed the child's record.
+	require.NoError(t, env.SimulateOpenCodeSubagentStop(parent.ID, "call_fg", foreground.ID, "general", "Look"))
+
+	// Turn 2: a background child is still running when the turn ends and commits.
+	require.NoError(t, env.SimulateOpenCodeTurnStart(parent.ID, parent.TranscriptPath, "blue"))
+	background := env.NewOpenCodeSession()
+	require.NoError(t, env.SimulateOpenCodeSubagentStart(parent.ID, "call_bg", background.ID, "general", "Review"))
+	turn("blue", "docs/blue.md")
+	require.Zero(t, checkpointSubagentInput(), "checkpoint 2 has no new child; turn 1's repeated stop is not counted again")
+
+	// The background child goes idle after the parent's turn.
+	env.CopyTranscriptToEntireTmp(background.ID, background.CreateOpenCodeTranscript("Review", nil))
+	require.NoError(t, env.SimulateOpenCodeSubagentStop(parent.ID, "call_bg", background.ID, "general", "Review"))
+	require.NoError(t, env.SimulateOpenCodeSubagentStop(parent.ID, "call_bg", background.ID, "general", "Review"))
+
+	// Turn 3: the next checkpoint stores the late child, and only it.
+	require.NoError(t, env.SimulateOpenCodeTurnStart(parent.ID, parent.TranscriptPath, "green"))
+	turn("green", "docs/green.md")
+	require.Equal(t, 150, checkpointSubagentInput(), "checkpoint 3 holds the late child once")
+	_, ok := env.ReadFileFromBranch(paths.MetadataBranchName, CheckpointTaskFilePath(env.TryGetLatestCheckpointID(), "call_bg", "task.json"))
+	require.True(t, ok, "the late child's task is stored with the checkpoint that counts its tokens")
+
+	state, err := env.GetSessionState(parent.ID)
+	require.NoError(t, err)
+	total := state.TotalTokenUsage()
+	require.NotNil(t, total)
+	require.Equal(t, 450, total.InputTokens, "the parent's three turns")
+	require.NotNil(t, total.SubagentTokens)
+	require.Equal(t, 300, total.SubagentTokens.InputTokens, "each child once")
+	require.Equal(t, 2, total.SubagentTokens.APICallCount)
+}
+
+// TestOpenCodeSubagentRunningChildCoauthorsCommit covers an IDLE OpenCode
+// parent whose background child, still running, wrote a file another session
+// also claims. The parent has no files of its own yet (the child's reach it at
+// completion), so only the child's live export shows it co-authored the
+// commit; without it the parent is skipped as read-only.
+func TestOpenCodeSubagentRunningChildCoauthorsCommit(t *testing.T) {
+	t.Parallel()
+
+	env := NewFeatureBranchEnv(t)
+	env.InitEntireWithAgent(agent.AgentNameOpenCode)
+	const shared = "docs/shared.md"
+
+	coder := env.NewOpenCodeSession()
+	require.NoError(t, env.SimulateOpenCodeSessionStart(coder.ID, coder.TranscriptPath))
+	require.NoError(t, env.SimulateOpenCodeTurnStart(coder.ID, coder.TranscriptPath, "create docs/shared.md"))
+	env.WriteFile(shared, "first draft\n")
+	coder.CreateOpenCodeTranscript("create docs/shared.md", []FileChange{{Path: shared, Content: "first draft\n"}})
+	require.NoError(t, env.SimulateOpenCodeTurnEnd(coder.ID, coder.TranscriptPath))
+
+	parent := env.NewOpenCodeSession()
+	child := env.NewOpenCodeSession()
+	// A live record counts only while fresh, so the call starts now.
+	child.TimeBase = time.Now().UnixMilli()
+	require.NoError(t, env.SimulateOpenCodeSessionStart(parent.ID, parent.TranscriptPath))
+	require.NoError(t, env.SimulateOpenCodeTurnStart(parent.ID, parent.TranscriptPath, "polish docs/shared.md in the background"))
+	require.NoError(t, env.SimulateOpenCodeSubagentStartAt(parent.ID, "call_polish", child.ID, "general", "Polish docs/shared.md", child.TimeBase))
+	parent.CreateOpenCodeTranscript("polish docs/shared.md in the background", nil)
+	require.NoError(t, env.SimulateOpenCodeTurnEnd(parent.ID, parent.TranscriptPath))
+
+	// The child, still running, edits the shared file; its export names it.
+	env.WriteFile(shared, "polished\n")
+	env.CopyTranscriptToEntireTmp(child.ID, child.CreateOpenCodeTranscript("Polish docs/shared.md", []FileChange{{Path: shared, Content: "polished\n"}}))
+
+	state, err := env.GetSessionState(parent.ID)
+	require.NoError(t, err)
+	require.Empty(t, state.FilesTouched, "the parent has no files of its own before the child completes")
+
+	env.GitCommitWithHooks("Polish shared doc", shared)
+	cpID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
+	require.NotEmpty(t, cpID)
+	summaryContent, found := env.ReadFileFromBranch(paths.MetadataBranchName, CheckpointSummaryPath(cpID))
+	require.True(t, found)
+	var summary checkpoint.CheckpointSummary
+	require.NoError(t, json.Unmarshal([]byte(summaryContent), &summary))
+	require.Len(t, summary.Sessions, 2, "the parent co-authored the commit through its running child")
+}
+
+// The parent is still in its turn (ACTIVE) when the commit lands, as it is
+// while it keeps working after launching the background child.
+func TestOpenCodeSubagentRunningChildCoauthorsCommit_ActiveParent(t *testing.T) {
+	t.Parallel()
+	openCodeActiveParentCoauthorsCommit(t, NewFeatureBranchEnv(t), nil)
+}
+
+// openCodeActiveParentCoauthorsCommit runs the ACTIVE-parent scenario;
+// beforeCommit, when set, adjusts the parent just before the commit.
+func openCodeActiveParentCoauthorsCommit(t *testing.T, env *TestEnv, beforeCommit func(parentID string)) {
+	t.Helper()
+	env.InitEntireWithAgent(agent.AgentNameOpenCode)
+	const shared = "docs/shared.md"
+
+	coder := env.NewOpenCodeSession()
+	require.NoError(t, env.SimulateOpenCodeSessionStart(coder.ID, coder.TranscriptPath))
+	require.NoError(t, env.SimulateOpenCodeTurnStart(coder.ID, coder.TranscriptPath, "create docs/shared.md"))
+	env.WriteFile(shared, "first draft\n")
+	coder.CreateOpenCodeTranscript("create docs/shared.md", []FileChange{{Path: shared, Content: "first draft\n"}})
+	require.NoError(t, env.SimulateOpenCodeTurnEnd(coder.ID, coder.TranscriptPath))
+
+	parent := env.NewOpenCodeSession()
+	child := env.NewOpenCodeSession()
+	// A live record counts only while fresh, so the call starts now.
+	child.TimeBase = time.Now().UnixMilli()
+	require.NoError(t, env.SimulateOpenCodeSessionStart(parent.ID, parent.TranscriptPath))
+	require.NoError(t, env.SimulateOpenCodeTurnStart(parent.ID, parent.TranscriptPath, "polish docs/shared.md in the background"))
+	require.NoError(t, env.SimulateOpenCodeSubagentStartAt(parent.ID, "call_polish", child.ID, "general", "Polish docs/shared.md", child.TimeBase))
+	// Mid-turn: no TurnEnd, so the parent's live export is what OpenCode would
+	// return at commit time.
+	env.CopyTranscriptToEntireTmp(parent.ID, parent.CreateOpenCodeTranscript("polish docs/shared.md in the background", nil))
+
+	// The child, still running, edits the shared file; its export names it.
+	env.WriteFile(shared, "polished\n")
+	env.CopyTranscriptToEntireTmp(child.ID, child.CreateOpenCodeTranscript("Polish docs/shared.md", []FileChange{{Path: shared, Content: "polished\n"}}))
+
+	state, err := env.GetSessionState(parent.ID)
+	require.NoError(t, err)
+	require.Empty(t, state.FilesTouched, "the parent has no files of its own before the child completes")
+
+	if beforeCommit != nil {
+		beforeCommit(parent.ID)
+	}
+	env.GitCommitWithHooks("Polish shared doc", shared)
+	cpID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
+	require.NotEmpty(t, cpID)
+	summaryContent, found := env.ReadFileFromBranch(paths.MetadataBranchName, CheckpointSummaryPath(cpID))
+	require.True(t, found)
+	var summary checkpoint.CheckpointSummary
+	require.NoError(t, json.Unmarshal([]byte(summaryContent), &summary))
+	require.Len(t, summary.Sessions, 2, "the parent co-authored the commit through its running child")
+}
+
+// TestOpenCodeSessionEndCreditsRunningChildOnce covers a background child
+// still running when its parent session ends. The SessionEnd sweep completes
+// its task and credits the usage its export holds by then (a child that keeps
+// working afterwards is undercounted, never counted twice). A later stop for
+// the same call, carrying the agent's start, must not credit it again, even
+// when the launch had no start and the sweep used the hook's own clock.
+func TestOpenCodeSessionEndCreditsRunningChildOnce(t *testing.T) {
+	t.Parallel()
+
+	for _, launchHasStart := range []bool{true, false} {
+		t.Run(map[bool]string{true: "launch with start", false: "launch without start"}[launchHasStart], func(t *testing.T) {
+			t.Parallel()
+
+			env := NewFeatureBranchEnv(t)
+			env.InitEntireWithAgent(agent.AgentNameOpenCode)
+			parent := env.NewOpenCodeSession()
+			child := env.NewOpenCodeSession()
+			child.TimeBase = time.Now().UnixMilli()
+			launchStart := int64(0)
+			if launchHasStart {
+				launchStart = child.TimeBase
+			}
+
+			require.NoError(t, env.SimulateOpenCodeSessionStart(parent.ID, parent.TranscriptPath))
+			require.NoError(t, env.SimulateOpenCodeTurnStart(parent.ID, parent.TranscriptPath, "review in the background"))
+			require.NoError(t, env.SimulateOpenCodeSubagentStartAt(parent.ID, "call_bg", child.ID, "general", "Review", launchStart))
+			if !launchHasStart {
+				// The record's start is the hook's clock; the child works after it.
+				child.TimeBase = time.Now().UnixMilli() + 1
+			}
+			parent.CreateOpenCodeTranscript("review in the background", nil)
+			require.NoError(t, env.SimulateOpenCodeTurnEnd(parent.ID, parent.TranscriptPath))
+			env.CopyTranscriptToEntireTmp(child.ID, child.CreateOpenCodeTranscript("Review", nil))
+
+			childInput := func() int {
+				t.Helper()
+				state, err := env.GetSessionState(parent.ID)
+				require.NoError(t, err)
+				total := state.TotalTokenUsage()
+				if total == nil || total.SubagentTokens == nil {
+					return 0
+				}
+				return total.SubagentTokens.InputTokens
+			}
+
+			require.NoError(t, env.SimulateOpenCodeSessionEnd(parent.ID, parent.TranscriptPath))
+			require.Equal(t, 150, childInput(), "the sweep credits the running child")
+
+			require.NoError(t, env.SimulateOpenCodeSubagentStopAt(parent.ID, "call_bg", child.ID, "general", "Review", child.TimeBase))
+			require.Equal(t, 150, childInput(), "the late stop is not credited again")
 		})
 	}
 }

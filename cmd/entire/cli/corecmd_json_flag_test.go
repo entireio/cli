@@ -33,6 +33,14 @@ func TestControlPlaneJSONFlag_OnlyOnHonoringCommands(t *testing.T) {
 		"project list":   true,
 		"project get":    true,
 		"project delete": false,
+		// list and add render the agents.
+		"project agent list": true,
+		"project agent add":  true,
+		// each prints the run the server returns, or a page of runs.
+		"project agent run list":   true,
+		"project agent run show":   true,
+		"project agent run cancel": true,
+		"project agent run retry":  true,
 		// repo
 		"repo create":        true,
 		"repo list":          true,
@@ -43,6 +51,7 @@ func TestControlPlaneJSONFlag_OnlyOnHonoringCommands(t *testing.T) {
 		"repo mirror add":    false,
 		"repo mirror list":   true,
 		"repo mirror remove": false,
+		"repo mirror resync": true,
 		// detach renders the server's plan (dry run) or result.
 		"repo mirror detach": true,
 		// `remote add` writes local git config and reports what it changed;
@@ -54,6 +63,7 @@ func TestControlPlaneJSONFlag_OnlyOnHonoringCommands(t *testing.T) {
 		"repo protection list":   true,
 		"repo protection add":    true,
 		"repo protection remove": true,
+		"repo default-branch":    true,
 		// grant subtrees: add/list render a payload, remove only reports
 		"org grant add":    true,
 		"org grant list":   true,

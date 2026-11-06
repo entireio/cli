@@ -11,7 +11,6 @@ import "slices"
 //nolint:gochecknoglobals // package-level allowlist; mutated by tests via snapshot/restore.
 var officialPlugins = []string{
 	// Add Entire-shipped plugin names here as they're released.
-	"ci", // entire-ci: customer-facing CI-integration management (entireio/entire-ci)
 }
 
 func IsOfficialPlugin(name string) bool {

@@ -140,9 +140,9 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 		}
 
 		// Skip and clean up orphaned sessions: ended, never condensed, and
-		// holding no pending work. Keep non-ended sessions (including legacy
-		// empty phases normalized to IDLE) and sessions with LastCheckpointID
-		// (needed for checkpoint ID reuse on subsequent commits).
+		// holding no pending work or tokens. Keep non-ended sessions (including
+		// legacy empty phases normalized to IDLE) and sessions with
+		// LastCheckpointID (needed for checkpoint ID reuse on subsequent commits).
 		if isOrphanedSessionState(state) {
 			logging.Debug(logging.WithComponent(ctx, "session"), "removing orphaned session state with no pending work",
 				slog.String("session_id", state.SessionID),
@@ -162,7 +162,24 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 // pending work (State.HasPendingWork). IDLE states — including legacy empty
 // phases, which normalize to IDLE — are live sessions between turns or belong
 // to the exited-owner finalizer, so they age out through StaleSessionThreshold.
+//
+// A state that holds uncommitted tokens, or transcript offsets or a subagent
+// baseline from an earlier checkpoint, is kept until it is stale too. A
+// headless agent ends its session after every prompt, and a turn that changes
+// no files clears LastCheckpointID without adding pending work. Deleting that
+// state would lose the turn's tokens and restart the offsets at 0, so the next
+// checkpoint would store the earlier turns a second time.
 func isOrphanedSessionState(state *SessionState) bool {
+	return isEndedWithoutContent(state) &&
+		!HasTokenUsageData(state.CheckpointTokenUsage) && !HasTokenUsageData(state.SubagentTokensBaseline) &&
+		state.TokenStart() == 0 && state.CheckpointTranscriptStart == 0
+}
+
+// isEndedWithoutContent reports a finalized session that was never condensed
+// and holds nothing a commit could carry. isOrphanedSessionState keeps some of
+// these for their tokens and offsets; they still never count as candidates for
+// another worktree's commit, where they could only make it look ambiguous.
+func isEndedWithoutContent(state *SessionState) bool {
 	return state.IsEnded() && state.LastCheckpointID.IsEmpty() && !state.HasPendingWork()
 }
 
@@ -327,7 +344,7 @@ func (s *ManualCommitStrategy) findSessionsForWorktree(ctx context.Context, work
 	if err != nil {
 		return nil, err
 	}
-	matches, _ := s.findSessionsForWorktreeFromStates(ctx, allStates, worktreePath)
+	matches, _, _ := s.findSessionsForWorktreeFromStates(ctx, allStates, worktreePath)
 	return matches, nil
 }
 
@@ -335,11 +352,13 @@ func (s *ManualCommitStrategy) findSessionsForWorktree(ctx context.Context, work
 // already-loaded state list. The second result reports a multi-worktree
 // ambiguity decline — candidates existed but spanned several worktrees, so
 // nothing was linked; findSessionsForCommitLinking surfaces it to the user
-// only when identity matching cannot rescue the commit either.
-func (s *ManualCommitStrategy) findSessionsForWorktreeFromStates(ctx context.Context, allStates []*SessionState, worktreePath string) ([]*SessionState, bool) {
+// only when identity matching cannot rescue the commit either. The third
+// reports that no session is homed in worktreePath, so the matches (if any)
+// are sessions of other worktrees from the fallback.
+func (s *ManualCommitStrategy) findSessionsForWorktreeFromStates(ctx context.Context, allStates []*SessionState, worktreePath string) (matches []*SessionState, ambiguous, fromFallback bool) {
 	exact, notHome := matchWorktreeHomes(ctx, allStates, worktreePath)
 	if len(exact) > 0 {
-		return exact, false
+		return exact, false, false
 	}
 
 	worktreeCommonDir, err := gitCommonDirForWorktree(ctx, worktreePath)
@@ -347,7 +366,7 @@ func (s *ManualCommitStrategy) findSessionsForWorktreeFromStates(ctx context.Con
 		logging.Debug(logging.WithComponent(ctx, "checkpoint"),
 			"session matching: cannot resolve common dir for fallback matching",
 			slog.String("error", err.Error()))
-		return nil, false
+		return nil, false, true
 	}
 
 	var parentWorktreeMatches []*SessionState
@@ -356,7 +375,7 @@ func (s *ManualCommitStrategy) findSessionsForWorktreeFromStates(ctx context.Con
 	for _, state := range allStates {
 		// A session whose home this worktree is known not to be can't be
 		// matched as a sibling of it either.
-		if state.WorktreePath == "" || state.Kind.IsImported() || notHome[state.SessionID] {
+		if state.WorktreePath == "" || state.Kind.IsImported() || notHome[state.SessionID] || isEndedWithoutContent(state) {
 			continue
 		}
 
@@ -377,10 +396,12 @@ func (s *ManualCommitStrategy) findSessionsForWorktreeFromStates(ctx context.Con
 		commonDirMatches = append(commonDirMatches, state)
 	}
 
+	candidates := commonDirMatches
 	if len(parentWorktreeMatches) > 0 {
-		return resolveWorktreeCandidates(ctx, worktreePath, parentWorktreeMatches)
+		candidates = parentWorktreeMatches
 	}
-	return resolveWorktreeCandidates(ctx, worktreePath, commonDirMatches)
+	matches, ambiguous = resolveWorktreeCandidates(ctx, worktreePath, candidates)
+	return matches, ambiguous, true
 }
 
 // recentSessionWindow bounds the liveness filter below: a session that

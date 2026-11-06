@@ -672,14 +672,12 @@ func buildTrailResumeCommands(ctx trailResumeContext) []string {
 	if branch := strings.TrimSpace(ctx.Trail.Branch); branch != "" {
 		arg += " --branch " + shellArg(branch)
 	}
-	prefix := ""
 	if ctx.Trail.Project != "" {
-		prefix = projectTrailsEnv + "=1 "
 		findingArg = arg
 	}
-	resumeCommand := prefix + "entire trail resume " + arg
+	resumeCommand := "entire trail resume " + arg
 	commands := []string{
-		prefix + "entire trail finding " + findingArg + " --json",
+		"entire trail finding " + findingArg + " --json",
 		resumeCommand,
 	}
 	if ctx.DefaultResume != nil && ctx.DefaultResume.CheckpointID != "" {

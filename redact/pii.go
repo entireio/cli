@@ -3,6 +3,7 @@ package redact
 import (
 	"log/slog"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -14,6 +15,7 @@ const (
 	PIIEmail   PIICategory = "email"
 	PIIPhone   PIICategory = "phone"
 	PIIAddress PIICategory = "address"
+	PIIIP      PIICategory = "ip"
 )
 
 // Label constants used in replacement tokens and pattern matching.
@@ -21,6 +23,7 @@ const (
 	labelEmail   = "EMAIL"
 	labelPhone   = "PHONE"
 	labelAddress = "ADDRESS"
+	labelIP      = "IP"
 )
 
 // PIIConfig controls which PII categories are detected and redacted.
@@ -53,7 +56,7 @@ type PIIConfig struct {
 // piiPattern is a compiled regex with its replacement token label.
 type piiPattern struct {
 	regex *regexp.Regexp
-	label string // e.g., "EMAIL", "PHONE", "ADDRESS"
+	label string // e.g., "EMAIL", "PHONE", "ADDRESS", "IP"
 }
 
 var (
@@ -113,7 +116,16 @@ var emailAllowPatterns = []string{
 	"actions@",                  // GitHub Actions bot
 	"@users.noreply.github.com", // GitHub user noreply
 	"@noreply.github.com",       // GitHub noreply
-	"git@",                      // SSH user of git hosts (git@github.com:org/repo.git)
+}
+
+// gitSSHHosts are public git hosts whose SSH login is git@<host>, so the
+// address names the login even without remote syntax (ssh -T git@github.com).
+var gitSSHHosts = []string{
+	"github.com", "ssh.github.com",
+	"gitlab.com", "altssh.gitlab.com",
+	"bitbucket.org", "altssh.bitbucket.org",
+	"codeberg.org",
+	"ssh.dev.azure.com",
 }
 
 // isAllowlistedEmail returns true if the email matches a known non-sensitive pattern.
@@ -139,6 +151,34 @@ func isAllowlistedEmail(email string) bool {
 	return false
 }
 
+// isGitSSHUser reports whether the email-shaped match s[start:end] is the git
+// SSH login of a remote rather than a mailbox: URL userinfo (ssh://git@host),
+// an scp-style remote (git@host:path), or a known git host.
+func isGitSSHUser(s string, start, end int) bool {
+	user, host, _ := strings.Cut(s[start:end], "@")
+	if !strings.EqualFold(user, "git") {
+		return false
+	}
+	if strings.HasSuffix(s[:start], "://") {
+		return true
+	}
+	if end < len(s) && s[end] == ':' && isSCPRemotePath(s[end+1:]) {
+		return true
+	}
+	return slices.Contains(gitSSHHosts, strings.ToLower(host))
+}
+
+// isSCPRemotePath reports whether rest, the text after git@host:, starts with
+// a repository path: one containing '/' or ending in .git. A word or a port
+// after the colon ("git@host: thanks", "git@host:8080") is not a remote.
+func isSCPRemotePath(rest string) bool {
+	if end := strings.IndexAny(rest, " \t\r\n\"'`\\"); end >= 0 {
+		rest = rest[:end]
+	}
+	path := strings.TrimRight(rest, ".,;:!?)]}>")
+	return strings.Contains(path, "/") || strings.HasSuffix(path, ".git")
+}
+
 // builtinPIIPattern associates a compiled regex with a category and label.
 type builtinPIIPattern struct {
 	category PIICategory
@@ -151,6 +191,8 @@ var builtinPIIPatterns = []builtinPIIPattern{
 	{PIIEmail, labelEmail, emailRegex},
 	{PIIPhone, labelPhone, phoneRegex},
 	{PIIAddress, labelAddress, addressRegex},
+	{PIIIP, labelIP, ipv4CandidateRegex},
+	{PIIIP, labelIP, ipv6CandidateRegex},
 }
 
 // detectPII returns tagged regions for PII matches in s.
@@ -166,22 +208,41 @@ func detectPII(cfg *PIIConfig, s string) []taggedRegion {
 	}
 	var regions []taggedRegion
 	for _, p := range patterns {
+		// Most strings hold no address-shaped text; a byte scan rules that
+		// out before running the IP regexes over the whole string.
+		if (p.regex == ipv4CandidateRegex && !mayContainIPv4(s)) ||
+			(p.regex == ipv6CandidateRegex && !mayContainIPv6(s)) {
+			continue
+		}
+		builtinIP := p.regex == ipv4CandidateRegex || p.regex == ipv6CandidateRegex
 		for _, loc := range p.regex.FindAllStringIndex(s, -1) {
-			// Skip allowlisted email addresses (noreply, bot accounts, etc.).
-			if p.label == labelEmail && isAllowlistedEmail(s[loc[0]:loc[1]]) {
+			// Skip allowlisted email addresses (noreply, bot accounts, etc.)
+			// and the git login of a remote.
+			if p.label == labelEmail && (isAllowlistedEmail(s[loc[0]:loc[1]]) || isGitSSHUser(s, loc[0], loc[1])) {
 				continue
 			}
 			// Skip phone-shaped digits that run on into a longer number.
 			if p.label == labelPhone && loc[1] < len(s) && s[loc[1]] >= '0' && s[loc[1]] <= '9' {
 				continue
 			}
+			// The built-in IP candidates are only shapes; redactableIP
+			// validates them and may trim the match. Matched by regex, not
+			// label, so a custom pattern named "ip" is left as written.
+			if builtinIP {
+				start, end, ok := redactableIP(s, loc[0], loc[1])
+				if !ok {
+					continue
+				}
+				loc[0], loc[1] = start, end
+			}
 			regions = append(regions, taggedRegion{
-				region: region{loc[0], loc[1]},
-				label:  p.label,
+				region:    region{loc[0], loc[1]},
+				label:     p.label,
+				builtinIP: builtinIP,
 			})
 		}
 	}
-	return regions
+	return dropNestedIPRegions(regions)
 }
 
 // compilePIIPatterns builds the pattern list from config.

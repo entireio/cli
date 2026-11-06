@@ -1188,6 +1188,10 @@ type OpenCodeSession struct {
 	// messages accumulates all messages across turns, matching real `opencode export`
 	// behavior where each export returns the full session history.
 	messages []map[string]interface{}
+	// TimeBase is the message clock in Unix ms (default 1708300000); message
+	// n is created at TimeBase+n. Set it to now for a record whose freshness
+	// is judged against the wall clock.
+	TimeBase int64
 }
 
 // NewOpenCodeSession creates a new simulated OpenCode session.
@@ -1209,13 +1213,17 @@ func (env *TestEnv) NewOpenCodeSession() *OpenCodeSession {
 // Each call appends new messages to the accumulated session history, matching real
 // `opencode export` behavior where each export returns the full session history.
 func (s *OpenCodeSession) CreateOpenCodeTranscript(prompt string, changes []FileChange) string {
+	base := s.TimeBase
+	if base == 0 {
+		base = 1708300000
+	}
 	// User message
 	s.msgCounter++
 	s.messages = append(s.messages, map[string]interface{}{
 		"info": map[string]interface{}{
 			"id":   fmt.Sprintf("msg-%d", s.msgCounter),
 			"role": roleUser,
-			"time": map[string]interface{}{"created": 1708300000 + s.msgCounter},
+			"time": map[string]interface{}{"created": base + int64(s.msgCounter)},
 		},
 		"parts": []map[string]interface{}{
 			{"type": blockTypeText, "text": prompt},
@@ -1251,8 +1259,8 @@ func (s *OpenCodeSession) CreateOpenCodeTranscript(prompt string, changes []File
 			"id":   fmt.Sprintf("msg-%d", s.msgCounter),
 			"role": roleAssistant,
 			"time": map[string]interface{}{
-				"created":   1708300000 + s.msgCounter,
-				"completed": 1708300000 + s.msgCounter + 5,
+				"created":   base + int64(s.msgCounter),
+				"completed": base + int64(s.msgCounter) + 5,
 			},
 			"tokens": map[string]interface{}{
 				"input":     150,

@@ -116,7 +116,7 @@ jobs:
       # code change. See docs/architecture/release-origins.md.
       - name: Configure AWS credentials for the release mirror
         if: vars.ENTIRE_RELEASE_BUCKET != ''
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ vars.ENTIRE_RELEASE_UPLOAD_ROLE }}
           aws-region: ${{ vars.ENTIRE_RELEASE_REGION || 'us-east-2' }}
