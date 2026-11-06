@@ -174,7 +174,8 @@ func endIntlPhone(s string, ccEnd, end int) (int, bool) {
 }
 
 // isPhoneExtension reports whether s[i:] starts with an extension that ends
-// the word: x123, ext123 or ext.123.
+// the word: x123, ext123 or ext.123, with or without a space before the
+// digits (ext 123).
 func isPhoneExtension(s string, i int) bool {
 	switch {
 	case s[i]|0x20 == 'x':
@@ -186,6 +187,9 @@ func isPhoneExtension(s string, i int) bool {
 		}
 	default:
 		return false
+	}
+	if i < len(s) && s[i] == ' ' {
+		i++
 	}
 	j := i
 	for j < len(s) && isDigit(s[j]) {
