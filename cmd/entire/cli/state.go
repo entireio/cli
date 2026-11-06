@@ -306,6 +306,11 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 		return err
 	}
 
+	// Take the time before the status walk: turn end treats another session
+	// that interacted after it as overlapping, so a session whose turn ends
+	// during the walk must not fall before it.
+	capturedAt := time.Now().UTC()
+
 	// Get list of untracked files (excluding .entire directory itself).
 	// Fail open on error: hooks must never break the agent, and the rest of
 	// the snapshot (transcript position) is still worth capturing. The
@@ -327,7 +332,7 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 	// Create state file using os.Root for traversal-resistant write
 	state := PrePromptState{
 		SessionID:             sessionID,
-		Timestamp:             time.Now().UTC().Format(time.RFC3339Nano),
+		Timestamp:             capturedAt.Format(time.RFC3339Nano),
 		UntrackedFiles:        untrackedFiles,
 		UntrackedScanSkipped:  scanSkipped,
 		UntrackedFileStats:    statUntrackedFiles(ctx, untrackedFiles),
@@ -839,6 +844,9 @@ func CapturePreTaskState(ctx context.Context, sessionID, toolUseID string) error
 		return err
 	}
 
+	// Taken before the status walk, as in CapturePrePromptState.
+	capturedAt := time.Now().UTC()
+
 	// Get list of untracked files (excluding .entire directory itself).
 	// Fail open on error, same as CapturePrePromptState.
 	untrackedFiles, dirtyTrackedFiles, scanSkipped := statusFilesOrSkip(ctx)
@@ -846,7 +854,7 @@ func CapturePreTaskState(ctx context.Context, sessionID, toolUseID string) error
 	// Create state file using os.Root for traversal-resistant write
 	state := PreTaskState{
 		ToolUseID:             toolUseID,
-		Timestamp:             time.Now().UTC().Format(time.RFC3339Nano),
+		Timestamp:             capturedAt.Format(time.RFC3339Nano),
 		UntrackedFiles:        untrackedFiles,
 		UntrackedScanSkipped:  scanSkipped,
 		DirtyTrackedFileStats: statDirtyTrackedFiles(ctx, dirtyTrackedFiles),
