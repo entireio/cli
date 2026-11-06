@@ -13,59 +13,54 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 )
 
-// guardProjectTrailNumberUpdate prepares `trail update <N>` so the server can
-// refuse it when the checked-out branch's work belongs to a different project
-// trail than #N.
+// projectTrailUpdatePath adds the checked-out branch to `trail update <N>`
+// so the trail's cell can refuse it, writing nothing, when that branch's work
+// belongs to another trail. Project trail, change, and pull request numbers
+// look alike, so `trail update 1744` meant for change cli/1744 would otherwise
+// replace fields of unrelated trail #1744. The server's refusal names the safe
+// reruns and is shown as is.
 //
-// Project trail numbers, change numbers, and pull request numbers look alike,
-// so `trail update 1744` meant for change cli/1744 or PR #1744 reaches
-// unrelated project trail #1744 and replaces fields its owner wrote. The guard
-// applies only to a bare number, without --branch, from a clone of a repository
-// in the trail's project (with --repo, only when it names that clone's
-// repository). A ULID names the trail unambiguously and is the way to update
-// #N anyway.
-//
-// The decision is the server's: the update carries the branch and repository
-// with branch_check=required, and the trail's cell refuses atomically when the
-// branch's work is on another trail, or when it cannot compare. The CLI
-// refuses locally only where nothing could be sent: a detached HEAD or a
-// repository that does not resolve. A repository not onboarded to Entire has
-// no trail work, so the update proceeds unguarded.
-func guardProjectTrailNumberUpdate(cmd *cobra.Command, selector string, target *projectTrailTarget, current api.ProjectTrail) (*projectTrailNumberGuard, error) {
+// Only a bare number without --branch, from a clone of a repository in the
+// trail's project (with --repo, only when it names that clone's repository),
+// carries the branch. A detached HEAD has no branch to send, so it refuses
+// locally. A repository not onboarded to Entire has no trail work.
+func projectTrailUpdatePath(cmd *cobra.Command, selector string, target *projectTrailTarget, current api.ProjectTrail) (string, error) {
+	path := target.path()
 	number, ok := parseTrailNumberSelector(selector)
 	if !ok || trailBranchFlag(cmd) != "" {
-		return nil, nil //nolint:nilnil // a nil guard sends nothing; its methods are nil-safe
+		return path, nil
 	}
 	ctx := cmd.Context()
 	forge, owner, repo, local, err := guardedLocalRepo(ctx, cmd, target)
 	if err != nil || !local {
-		return nil, err
+		return path, err
 	}
-	g := &projectTrailNumberGuard{number: number, current: current, target: target, repo: repo}
 	branch, err := GetCurrentBranch(ctx)
 	if err != nil || branch == "" {
-		return nil, errors.New(g.detachedHead())
+		return "", fmt.Errorf("refusing to update trail #%d %q: HEAD is not on a branch, so the server cannot check that this work belongs to #%d; rerun with --branch <branch> added, or with %s --project %s/%s in place of %d",
+			number, tuiutil.SanitizeTerminalLabel(current.Title), number, tuiutil.SanitizeTerminalLabel(current.ID),
+			tuiutil.SanitizeTerminalLabel(target.Host), tuiutil.SanitizeTerminalLabel(target.Project), number)
 	}
-	g.branch = branch
 	placement, err := resolveTrailUpdatePlacement(ctx, forge, owner, repo)
-	switch {
-	case errors.Is(err, errRepoNotOnboarded):
-		return nil, nil //nolint:nilnil // no trail work can exist; the update proceeds unguarded
-	case err != nil:
-		return nil, errors.New(g.indeterminate("could not be checked: its repository did not resolve (" + singleLineTerminalText(err.Error()) + ")"))
+	if errors.Is(err, errRepoNotOnboarded) {
+		return path, nil
 	}
-	g.repoID = placement.RepoID
-	return g, nil
+	if err != nil {
+		return "", fmt.Errorf("resolve %s for the trail's branch check: %w", repo, err)
+	}
+	query := url.Values{"from_repo_id": {placement.RepoID}, "from_branch": {branch}, "branch_check": {"required"}}
+	return path + "?" + query.Encode(), nil
 }
 
 // resolveTrailUpdatePlacement resolves the clone's repository to the id the
 // server knows it by; swapped in tests.
 var resolveTrailUpdatePlacement = resolveForgeRepoCellPlacement
 
-// guardedLocalRepo returns the clone's origin repository when the guard
-// applies to it: origin is in the trail's project, and --repo, if given, names
-// that same repository. Outside such a clone, or with --repo naming another
-// repository, there is no local branch work to confuse with the trail.
+// guardedLocalRepo returns the clone's origin repository when the branch
+// applies to the update: origin is in the trail's project, and --repo, if
+// given, names that same repository. Outside such a clone, or with --repo
+// naming another repository, there is no local branch work to confuse with
+// the trail.
 func guardedLocalRepo(ctx context.Context, cmd *cobra.Command, target *projectTrailTarget) (forge, owner, repo string, local bool, err error) {
 	forge, owner, repo, err = resolveTrailRemote(ctx)
 	if err != nil || !strings.EqualFold(forge, target.Host) || !strings.EqualFold(owner, target.Project) {
@@ -81,104 +76,4 @@ func guardedLocalRepo(ctx context.Context, cmd *cobra.Command, target *projectTr
 		}
 	}
 	return forge, owner, repo, true, nil
-}
-
-// readProjectTrailForUpdate reads the trail and its ETag, then prepares the
-// bare-number guard before any write.
-func readProjectTrailForUpdate(cmd *cobra.Command, selector string, target *projectTrailTarget) (api.ProjectTrail, string, *projectTrailNumberGuard, error) {
-	current, etag, err := target.read(cmd.Context())
-	if err != nil {
-		return api.ProjectTrail{}, "", nil, err
-	}
-	if etag == "" {
-		return api.ProjectTrail{}, "", nil, errors.New("project trail read returned no ETag; refusing an unprotected update")
-	}
-	guard, err := guardProjectTrailNumberUpdate(cmd, selector, target, current)
-	if err != nil {
-		return api.ProjectTrail{}, "", nil, err
-	}
-	return current, etag, guard, nil
-}
-
-// updatePath adds the branch the update comes from and requires the server to
-// compare it. A nil guard leaves the path unchanged.
-func (g *projectTrailNumberGuard) updatePath(path string) string {
-	if g == nil {
-		return path
-	}
-	query := url.Values{"from_repo_id": {g.repoID}, "from_branch": {g.branch}, "branch_check": {"required"}}
-	return path + "?" + query.Encode()
-}
-
-// serverRefusal words the server's branch-check refusals; other errors pass
-// through unchanged. Neither refusal names the other trail: the server does
-// not return it.
-func (g *projectTrailNumberGuard) serverRefusal(err error) error {
-	var httpErr *api.HTTPError
-	if g == nil || !errors.As(err, &httpErr) {
-		return err
-	}
-	switch httpErr.Code {
-	case "trail_branch_mismatch":
-		return errors.New(g.mismatch(httpErr.ChangeNumber))
-	case "trail_branch_unchecked":
-		return errors.New(g.indeterminate("could not be checked by the server; nothing was updated"))
-	}
-	return err
-}
-
-// singleLineTerminalText sanitizes server- or transport-supplied text for a
-// one-line terminal message.
-func singleLineTerminalText(s string) string {
-	return strings.Join(strings.Fields(tuiutil.SanitizeTerminalText(s)), " ")
-}
-
-// projectTrailNumberGuard words the guard's refusals. Every suggested rerun
-// changes only the selector, so the user's update flags carry over.
-type projectTrailNumberGuard struct {
-	number  int
-	current api.ProjectTrail
-	target  *projectTrailTarget
-	repo    string
-	branch  string
-	repoID  string
-}
-
-func (g *projectTrailNumberGuard) refusal() string {
-	return fmt.Sprintf("refusing to update trail #%d %q", g.number, tuiutil.SanitizeTerminalLabel(g.current.Title))
-}
-
-// anyway names the ULID rerun that updates #N regardless of the branch.
-func (g *projectTrailNumberGuard) anyway() string {
-	return fmt.Sprintf("\nTo update #%d anyway, rerun with %s --project %s/%s in place of %d, keeping your other flags.",
-		g.number, tuiutil.SanitizeTerminalLabel(g.current.ID), tuiutil.SanitizeTerminalLabel(g.target.Host),
-		tuiutil.SanitizeTerminalLabel(g.target.Project), g.number)
-}
-
-func (g *projectTrailNumberGuard) detachedHead() string {
-	return g.refusal() + ": HEAD is not on a branch, so the guard cannot check whether this work belongs to another trail, and a bare number names a project trail." +
-		fmt.Sprintf("\nTo update #%d as a branch's trail, rerun with --branch <branch> added; that branch's work must be on #%d.", g.number, g.number) +
-		g.anyway()
-}
-
-// indeterminate refuses when the branch's trail cannot be established. It
-// does not suggest the no-selector rerun, which depends on that same unknown.
-func (g *projectTrailNumberGuard) indeterminate(reason string) string {
-	return fmt.Sprintf("%s: branch %q %s, and a bare number can name another trail.", g.refusal(), tuiutil.SanitizeTerminalLabel(g.branch), reason) +
-		g.anyway()
-}
-
-// mismatch explains the server's refusal and names both safe reruns. When N is
-// the branch's own change number, the likely intent was the change, so it says
-// so.
-func (g *projectTrailNumberGuard) mismatch(changeNumber int) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "%s: branch %q is work on another trail, not on #%d; nothing was updated", g.refusal(), tuiutil.SanitizeTerminalLabel(g.branch), g.number)
-	if changeNumber == g.number {
-		fmt.Fprintf(&b, ". %d is this branch's change number, and a bare number names a project trail. For the change, rerun with %s/%d in place of %d",
-			g.number, tuiutil.SanitizeTerminalLabel(g.repo), g.number, g.number)
-	}
-	fmt.Fprintf(&b, ".\nTo update this branch's trail, rerun without %d, keeping your other flags.", g.number)
-	b.WriteString(g.anyway())
-	return b.String()
 }

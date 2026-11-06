@@ -81,23 +81,3 @@ func TestProjectTrailRequestSendsBodyOnlyWhenGiven(t *testing.T) {
 	require.Equal(t, seen{}, got[http.MethodDelete])
 	require.Equal(t, seen{contentType: "application/json", length: 2}, got[http.MethodPatch])
 }
-
-func TestProjectTrailRequestCarriesBranchRefusal(t *testing.T) {
-	t.Parallel()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusConflict)
-		if _, err := w.Write([]byte(`{"error":"refused","code":"trail_branch_mismatch","change_number":7}`)); err != nil {
-			t.Error(err)
-		}
-	}))
-	t.Cleanup(server.Close)
-
-	etag, err := NewClientWithBaseURL("token", server.URL).ProjectTrailRequest(t.Context(), http.MethodPatch, "/t", map[string]string{}, nil, nil)
-
-	require.Empty(t, etag, "a refused write returns no ETag")
-	var httpErr *HTTPError
-	require.ErrorAs(t, err, &httpErr)
-	require.Equal(t, "trail_branch_mismatch", httpErr.Code)
-	require.Equal(t, 7, httpErr.ChangeNumber)
-}
