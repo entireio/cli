@@ -114,6 +114,8 @@ func TestString_CommandLinePasswords(t *testing.T) {
 		{name: "escaped quote and semicolon in an earlier argument", input: `openssl enc -out "abc\";x" -pass pass:` + p, want: `openssl enc -out "abc\";x" -pass pass:REDACTED`},
 		{name: "line continuation inside the password", input: "openssl enc -pass pass:Summer\\\n" + p + " -in f", want: "openssl enc -pass pass:REDACTED -in f"},
 		{name: "line continuation after the password", input: "mysql -p" + p + "\\\n  -h db app", want: "mysql -pREDACTED\\\n  -h db app"},
+		{name: "quoted program path with a blank in a directory", input: `"/opt/mysql tools/bin/mysql" -u root -p` + p + ` app`, want: `"/opt/mysql tools/bin/mysql" -u root -pREDACTED app`},
+		{name: "line continuation inside a quoted password", input: "openssl enc -pass \"pass:Summer\\\n2026Release\" -in f", want: "openssl enc -pass \"pass:REDACTED\" -in f"},
 	})
 }
 
@@ -163,6 +165,7 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		"docker exec mysql sh -c 'sudo apt install mysql -pDebug'",
 		"docker exec mysql sh -c 'sudo -n echo mysql -pDebug'",
 		"sh -c 'mysql --version'; ssh -p2222 'user@host'",
+		`"/opt/mysql tools/bin/psql" -p5432`,
 		`mysql -e \"; printf hello\" -phunter2`,
 		`netrc := "machine h login me password " + password + "\n"`,
 		`cmd := "mongosh --password " + password + " db"`,
