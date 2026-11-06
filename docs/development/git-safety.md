@@ -236,6 +236,14 @@ relPath := paths.ToRelativePath("/repo/api/file.ts", repoRoot)  // returns "api/
 
 Test case in `state_test.go`: `TestFilterAndNormalizePaths_SiblingDirectories` documents this bug pattern.
 
+#### Setup commits and pagers
+
+`gitrepo.CommitPaths` runs the repository's hooks and signing configuration, but
+disables Git pagers for the operation with `GIT_PAGER=cat`. Nested Git commands
+in hooks inherit this setting. Output goes directly to the supplied writer. The
+existing process group cancellation remains in place; this is not terminal handoff for arbitrary
+interactive hooks.
+
 #### Executable Resolution - Absolute Paths Only
 
 Two rules, each with exactly one implementation, because Go's own protections
