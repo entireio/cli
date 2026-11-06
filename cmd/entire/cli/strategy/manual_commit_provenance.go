@@ -125,15 +125,16 @@ func stampedByAnotherCommit(ctx context.Context, checkpointID id.CheckpointID, s
 // An amend keeps that trailer without stamping it, so post-commit condenses
 // into the existing checkpoint for the session that owns it
 // (withAmendedCheckpoint). A message reused with `commit -C` keeps a trailer
-// the same way but advances HEAD: it makes a new link. Empty when the reflog
-// cannot tell.
+// the same way but advances HEAD: it makes a new link. With no reflog to tell
+// them apart (core.logAllRefUpdates=false), it is taken as an amend, so the
+// owner keeps condensing into its checkpoint as it did before the idle check.
 func amendedCheckpoint(ctx context.Context, repo *git.Repository, commit *object.Commit, checkpointID id.CheckpointID, preexisting bool) id.CheckpointID {
 	if !preexisting {
 		return id.EmptyCheckpointID
 	}
 	entries := headReflog(ctx)
 	if len(entries) == 0 {
-		return id.EmptyCheckpointID
+		return checkpointID
 	}
 	last := entries[0]
 	if last.newHash != commit.Hash || last.oldHash.IsZero() || slices.Contains(commit.ParentHashes, last.oldHash) {

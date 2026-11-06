@@ -260,14 +260,18 @@ func TestPostRewrite_StillRemapsAnIdleSiblingSession(t *testing.T) {
 // dropped and its work never reached the checkpoint. A message reused with
 // `commit -C` keeps the trailer the same way, but makes a new commit: there
 // the idle owner is still dropped, and the old checkpoint is left as it was.
+// Without a reflog to tell the two apart, the owner is kept, as it was before
+// the idle check.
 func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
 	for _, tt := range []struct {
 		name       string
 		commitArgs []string
+		noReflog   bool
 		condensed  bool
 	}{
 		{name: "amend", commitArgs: []string{"--amend"}, condensed: true},
 		{name: "message reused with commit -C", condensed: false},
+		{name: "amend without a reflog", commitArgs: []string{"--amend"}, noReflog: true, condensed: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -326,7 +330,17 @@ func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
 			kept, err := os.ReadFile(msgFile)
 			require.NoError(t, err)
 			require.Equal(t, cps, checkpointIDs(string(kept)), "prepare keeps the trailer")
+			if tt.noReflog {
+				testutil.RunGit(t, siblingDir, "config", "core.logAllRefUpdates", "false")
+				for _, dirFlag := range []string{"--absolute-git-dir", "--git-common-dir"} {
+					gitDir := strings.TrimSpace(testutil.RunGit(t, siblingDir, "rev-parse", "--path-format=absolute", dirFlag))
+					require.NoError(t, os.RemoveAll(filepath.Join(gitDir, "logs")))
+				}
+			}
 			testutil.RunGit(t, siblingDir, append([]string{"commit", "-q", "-F", msgFile}, tt.commitArgs...)...)
+			if tt.noReflog {
+				require.Empty(t, headReflog(ctx), "sanity: the amend left no reflog")
+			}
 			require.NoError(t, NewManualCommitStrategy().PostCommit(ctx))
 
 			repo, err := OpenRepository(ctx)
