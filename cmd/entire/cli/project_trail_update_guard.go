@@ -17,8 +17,8 @@ import (
 // so the trail's cell can refuse it, writing nothing, when that branch's work
 // belongs to another trail. Project trail, change, and pull request numbers
 // look alike, so `trail update 1744` meant for change cli/1744 would otherwise
-// replace fields of unrelated trail #1744. The server's refusal names the safe
-// reruns and is shown as is, sanitized for the terminal.
+// replace fields of unrelated trail #1744. The server's refusal explains what
+// happened; the CLI shows it sanitized, followed by its own reruns.
 //
 // Only a bare number without --branch, from a clone of a repository in the
 // trail's project (with --repo, only when it names that clone's repository),
@@ -57,14 +57,18 @@ func projectTrailUpdatePath(cmd *cobra.Command, selector string, target *project
 }
 
 // trailBranchRefusal shows the server's branch-check refusal on its own,
-// sanitized to one line: it echoes the branch, and the server's text is not
-// trusted for the terminal. Other errors pass through unchanged.
-func trailBranchRefusal(err error) error {
+// sanitized to one line (it echoes the branch, and the server's text is not
+// trusted for the terminal), then the CLI's reruns. Every rerun changes only
+// the selector, so the user's other flags carry over. Other errors pass
+// through unchanged.
+func trailBranchRefusal(err error, selector string, target *projectTrailTarget, current api.ProjectTrail) error {
 	var httpErr *api.HTTPError
-	if errors.As(err, &httpErr) && strings.HasPrefix(httpErr.Code, "trail_branch_") {
-		return errors.New(singleLineTerminalText(httpErr.Message))
+	if !errors.As(err, &httpErr) || !strings.HasPrefix(httpErr.Code, "trail_branch_") {
+		return err
 	}
-	return err
+	return fmt.Errorf("%s\nTo update this branch's trail, rerun without %s. To update #%d anyway, rerun with %s --project %s/%s in place of %s.",
+		singleLineTerminalText(httpErr.Message), selector, current.Number, tuiutil.SanitizeTerminalLabel(current.ID),
+		tuiutil.SanitizeTerminalLabel(target.Host), tuiutil.SanitizeTerminalLabel(target.Project), selector)
 }
 
 // singleLineTerminalText sanitizes untrusted text for a one-line terminal

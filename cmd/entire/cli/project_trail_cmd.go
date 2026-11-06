@@ -449,7 +449,7 @@ func newProjectTrailUpdateCmd() *cobra.Command {
 			}
 			var out api.ProjectTrail
 			if _, err := target.Client.ProjectTrailRequest(cmd.Context(), http.MethodPatch, path, patch, http.Header{"If-Match": {etag}}, &out); err != nil {
-				return trailBranchRefusal(fmt.Errorf("update project trail: %w", err))
+				return trailBranchRefusal(fmt.Errorf("update project trail: %w", err), selector, target, current)
 			}
 			if err := target.validateResponse(out); err != nil {
 				return err

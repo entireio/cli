@@ -72,8 +72,8 @@ func TestProjectTrailUpdateBareNumberSendsTheBranch(t *testing.T) {
 	require.Equal(t, []url.Values{{"from_repo_id": {guardRepoID}, "from_branch": {"feature/mine"}, "branch_check": {"required"}}}, *patches)
 }
 
-// The server's refusal carries the safe reruns; the CLI shows it on its own,
-// sanitized to one line, since it echoes the branch name.
+// The server's refusal is shown on its own, sanitized to one line since it
+// echoes the branch name, followed by the CLI's reruns.
 func TestProjectTrailUpdateBareNumberShowsTheServerRefusal(t *testing.T) {
 	setupGuardRepo(t)
 	refusal := "Branch \"feature/mine\x1b]0;x\x07\" has work on another Trail, not on #42, so nothing was updated.\nTo update this branch's own Trail, leave out the number."
@@ -90,6 +90,7 @@ func TestProjectTrailUpdateBareNumberShowsTheServerRefusal(t *testing.T) {
 	require.NotContains(t, err.Error(), "\x1b")
 	require.NotContains(t, err.Error(), "\x07")
 	require.NotContains(t, err.Error(), "API error", "the refusal stands on its own")
+	require.Contains(t, err.Error(), "\nTo update this branch's trail, rerun without 42. To update #42 anyway, rerun with "+projectTrailTestID+" --project gh/acme in place of 42.")
 }
 
 // Another 409 keeps its usual error.
