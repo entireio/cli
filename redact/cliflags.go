@@ -22,9 +22,15 @@ const cliFlagValue = `"(?:[^"\r\n]|\\\r?\n)*"|'[^'\r\n]*'|[^\s'"` + "`" + `|;&()
 // a line break, a shell operator or a backtick (which starts a command
 // substitution, or ends Markdown code), so a flag is only read as belonging
 // to the command that precedes it in the same pipeline segment.
-const cliSameCommandChar = `\\\r?\n|\\[^\r\n]|"(?:[^"\\\r\n]|\\\r?\n|\\[^\r\n])*"|'[^'\r\n]*'|\$\([^()\r\n]*\)|[^\r\n|;&` + "`" + `]`
+const cliSameCommandChar = `\\\r?\n|\\[^\r\n]|"(?:[^"\\\r\n]|\\\r?\n|\\[^\r\n])*"|'[^'\r\n]*'|` + cliSubstitutionPattern + `|[^\r\n|;&` + "`" + `]`
 
 const cliSameCommand = `(?:` + cliSameCommandChar + `)`
+
+// cliSubstitutionPattern is a command substitution without nested
+// parentheses, and cliSubstitution one at the start of a string.
+const cliSubstitutionPattern = `\$\([^()\r\n]*\)`
+
+var cliSubstitution = regexp.MustCompile(`^` + cliSubstitutionPattern)
 
 // cliBlank separates a flag from its value or from the next flag, possibly
 // across an escaped line break.
@@ -198,15 +204,16 @@ func appendLongPasswordFlags(regions []taggedRegion, s string) []taggedRegion {
 }
 
 // appendPasswords adds the value of every password flag in the segment of
-// each command f defines. A command inside a quoted argument of an earlier
-// one (docker exec db sh -c 'mysql -pX') runs on its own, so its segment ends
-// with that argument; any other command in an earlier segment was read with
-// it.
+// each command f defines. A command inside a quoted argument or a command
+// substitution of an earlier one (docker exec db sh -c 'mysql -pX',
+// mysql -h $(cat h; mysql -pX)) runs on its own, so its segment ends with
+// that argument; any other command in an earlier segment was read with it.
 func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string) []taggedRegion {
 	if !slices.ContainsFunc(f.needles, func(n string) bool { return strings.Contains(s, n) }) {
 		return regions
 	}
 	lines := quoteScan{s: s, prose: true}
+	substitutions := substitutionScan{s: s}
 	var segment quoteScan
 	segmentEnd, nestedEnd := 0, 0
 	for _, cmd := range f.command.FindAllStringIndex(s, -1) {
@@ -228,17 +235,64 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string) []tag
 			// again for every name (which took quadratic time).
 			rest = s[cmd[1]:max(segmentEnd, cmd[1])]
 		default:
-			argEnd, nested := segment.stringAt(cmd[0])
-			if !nested || cmd[0] < nestedEnd || !startsCommand(s[segment.inner():cmd[0]]) {
+			var nested bool
+			if rest, nested = nestedRest(s, &segment, &substitutions, cmd, closeAt); !nested || cmd[0] < nestedEnd {
 				continue
 			}
-			rest = segmentRestPattern(s, closeAt).FindString(s[cmd[1]:max(argEnd-1, cmd[1])])
 			nestedEnd = cmd[1] + len(rest)
 		}
 		quotes := quoteScan{s: s[:cmd[1]+len(rest)], i: cmd[1], skip: closeAt, skipEnd: stringEnd}
 		regions = f.appendFlags(regions, s, &quotes, rest, stringEnd)
 	}
 	return regions
+}
+
+// nestedRest returns the rest of a command at cmd, inside the segment that
+// segment scans, that runs on its own in an argument of the segment's
+// command: a quoted one (sh -c 'mysql -pX') or a command substitution
+// (mysql -h $(cat h; mysql -pX)). The rest ends with that argument. It is
+// false when the name is in no such argument or does not start a command in
+// it. closeAt is where the string the command is quoted in closes, or -1.
+func nestedRest(s string, segment *quoteScan, substitutions *substitutionScan, cmd []int, closeAt int) (string, bool) {
+	if argEnd, quoted := segment.stringAt(cmd[0]); quoted {
+		if !startsCommand(s[segment.inner():cmd[0]]) {
+			return "", false
+		}
+		return segmentRestPattern(s, closeAt).FindString(s[cmd[1]:max(argEnd-1, cmd[1])]), true
+	}
+	start, end, ok := substitutions.at(cmd[0])
+	if !ok || !startsCommand(s[start+2:cmd[0]]) {
+		return "", false
+	}
+	return cliSegmentRest.FindString(s[cmd[1]:max(end-1, cmd[1])]), true
+}
+
+// substitutionScan finds the command substitutions of s for queries at
+// increasing positions, reading s once.
+type substitutionScan struct {
+	s string
+	// i is where the search goes on; start and end bound the last
+	// substitution found.
+	i, start, end int
+}
+
+// at returns where the command substitution that p is inside starts and
+// ends, and false when p is in none. p is never before an earlier query's.
+func (q *substitutionScan) at(p int) (start, end int, ok bool) {
+	for q.end <= p {
+		k := strings.Index(q.s[q.i:max(p, q.i)], "$(")
+		if k < 0 {
+			q.i = max(q.i, p)
+			return 0, 0, false
+		}
+		k += q.i
+		if n := len(cliSubstitution.FindString(q.s[k:])); n > 0 {
+			q.start, q.end, q.i = k, k+n, k+n
+		} else {
+			q.i = k + 2
+		}
+	}
+	return q.start, q.end, q.start < p
 }
 
 // segmentRest returns the rest of the pipeline segment of a command whose
@@ -375,11 +429,17 @@ func isShellName(s string) bool {
 // appendFlags adds the value of every password flag in rest, the segment
 // after a command, so a second flag (openssl -passin pass:a -passout pass:b)
 // is read too. quotes scans rest from its start; a flag inside a quoted
-// argument (the SQL of mysql -e 'select -p1') is text, not a flag. stringEnd
-// is where the quoted string holding the command ends, or -1.
+// argument (the SQL of mysql -e 'select -p1') is text, not a flag, and one
+// inside a command substitution (mysql -e $(true; ssh -p2222 h)) belongs to
+// another command, read on its own if f defines it. stringEnd is where the
+// quoted string holding the command ends, or -1.
 func (f cliPasswordFlag) appendFlags(regions []taggedRegion, s string, quotes *quoteScan, rest string, stringEnd int) []taggedRegion {
 	base := quotes.i
+	substitutions := substitutionScan{s: rest}
 	for _, loc := range f.flag.FindAllStringSubmatchIndex(rest, -1) {
+		if _, _, inner := substitutions.at(loc[0]); inner {
+			continue
+		}
 		if _, quoted := quotes.stringAt(base + loc[0]); quoted {
 			continue
 		}
