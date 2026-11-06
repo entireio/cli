@@ -123,10 +123,10 @@ func TestCommitLinking_FallbackKeepsTheSessionsPrepareLinked(t *testing.T) {
 	assert.Equal(t, []string{"linked"}, linkedSessionIDs(sessions))
 }
 
-// The owner of the existing checkpoint a commit's trailer names (an amend's
-// kept trailer) is kept by the idle check however idle it is; the other
-// fallback sessions are still judged.
-func TestCommitLinking_FallbackKeepsTheOwnerOfAnExistingTarget(t *testing.T) {
+// On an amend, the owner of the checkpoint the amended commit links is kept by
+// the idle check however idle it is; the other fallback sessions are still
+// judged.
+func TestCommitLinking_FallbackKeepsTheOwnerOfAnAmendedCheckpoint(t *testing.T) {
 	mainDir, linkedDir := twoWorktrees(t)
 	ctx := context.Background()
 	s := &ManualCommitStrategy{}
@@ -141,7 +141,7 @@ func TestCommitLinking_FallbackKeepsTheOwnerOfAnExistingTarget(t *testing.T) {
 
 	t.Chdir(linkedDir)
 	clearSessionMatchCaches()
-	sessions, err := s.findSessionsForCommitLinking(withPreexistingTarget(ctx, target), linkedDir)
+	sessions, err := s.findSessionsForCommitLinking(withAmendedCheckpoint(ctx, target), linkedDir)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"owner"}, linkedSessionIDs(sessions))
 }
@@ -257,73 +257,91 @@ func TestPostRewrite_StillRemapsAnIdleSiblingSession(t *testing.T) {
 // the session that owns it. From a worktree with no session of its own, the
 // owner is kept however idle it has become: the trailer already links it, and
 // the idle check only narrows new links. Judged as a new link, the owner was
-// dropped and its work never reached the checkpoint.
+// dropped and its work never reached the checkpoint. A message reused with
+// `commit -C` keeps the trailer the same way, but makes a new commit: there
+// the idle owner is still dropped, and the old checkpoint is left as it was.
 func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
-	ctx := context.Background()
-	homeDir, err := filepath.EvalSymlinks(setupGitRepo(t))
-	require.NoError(t, err, "the recorded home must match git's worktree list")
-	t.Chdir(homeDir)
-	s := NewManualCommitStrategy()
-	setupSessionWithCheckpointAndFile(t, s, homeDir, "sess-sibling", "notes.txt")
-	setLastInteraction := func(last time.Time) {
-		t.Helper()
-		state, err := s.loadSessionState(ctx, "sess-sibling")
-		require.NoError(t, err)
-		state.WorktreePath = homeDir
-		state.Phase = session.PhaseIdle
-		state.LastInteractionTime = &last
-		require.NoError(t, s.saveSessionState(ctx, state))
+	for _, tt := range []struct {
+		name       string
+		commitArgs []string
+		condensed  bool
+	}{
+		{name: "amend", commitArgs: []string{"--amend"}, condensed: true},
+		{name: "message reused with commit -C", condensed: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			homeDir, err := filepath.EvalSymlinks(setupGitRepo(t))
+			require.NoError(t, err, "the recorded home must match git's worktree list")
+			t.Chdir(homeDir)
+			s := NewManualCommitStrategy()
+			setupSessionWithCheckpointAndFile(t, s, homeDir, "sess-sibling", "notes.txt")
+			setLastInteraction := func(last time.Time) {
+				t.Helper()
+				state, err := s.loadSessionState(ctx, "sess-sibling")
+				require.NoError(t, err)
+				state.WorktreePath = homeDir
+				state.Phase = session.PhaseIdle
+				state.LastInteractionTime = &last
+				require.NoError(t, s.saveSessionState(ctx, state))
+			}
+			setLastInteraction(time.Now().Add(-time.Minute))
+
+			siblingDir := addSiblingWorktree(t, homeDir, "commit-wt")
+			t.Chdir(siblingDir)
+			testutil.WriteFile(t, siblingDir, "notes.txt", "agent content for notes.txt")
+			testutil.GitAdd(t, siblingDir, "notes.txt")
+			msg := prepareMessage(t, "add notes\n")
+			cps := checkpointIDs(msg)
+			require.Len(t, cps, 1, "prepare links the recent sibling session: %q", msg)
+			testutil.GitCommit(t, siblingDir, msg)
+			require.NoError(t, NewManualCommitStrategy().PostCommit(ctx))
+			state, err := s.loadSessionState(ctx, "sess-sibling")
+			require.NoError(t, err)
+			require.Equal(t, cps[0], state.LastCheckpointID.String(), "sanity: the session owns the commit's checkpoint")
+
+			// The agent's next turn adds more.txt; then the session sits idle
+			// for a day before a commit naming the checkpoint takes it in.
+			t.Chdir(homeDir)
+			metadataDir := paths.EntireMetadataDir + "/sess-sibling"
+			testutil.WriteFile(t, homeDir, "more.txt", "agent content for more.txt")
+			testutil.WriteFile(t, homeDir, filepath.Join(metadataDir, paths.TranscriptFileName),
+				testTranscriptPromptResponse+`{"type":"human","message":{"content":"add more"}}`+"\n")
+			require.NoError(t, s.SaveStep(ctx, StepContext{
+				SessionID:     "sess-sibling",
+				NewFiles:      []string{"more.txt"},
+				MetadataDir:   metadataDir,
+				CommitMessage: "Checkpoint 2",
+				AuthorName:    "Test",
+				AuthorEmail:   "test@test.com",
+			}))
+			setLastInteraction(time.Now().Add(-24 * time.Hour))
+			t.Chdir(siblingDir)
+			testutil.WriteFile(t, siblingDir, "more.txt", "agent content for more.txt")
+			testutil.GitAdd(t, siblingDir, "more.txt")
+			// git reports source "commit" for both `--amend` and `-C <rev>`.
+			msgFile := filepath.Join(t.TempDir(), "COMMIT_EDITMSG")
+			require.NoError(t, os.WriteFile(msgFile, []byte(msg), 0o600))
+			require.NoError(t, NewManualCommitStrategy().PrepareCommitMsg(ctx, msgFile, "commit"))
+			kept, err := os.ReadFile(msgFile)
+			require.NoError(t, err)
+			require.Equal(t, cps, checkpointIDs(string(kept)), "prepare keeps the trailer")
+			testutil.RunGit(t, siblingDir, append([]string{"commit", "-q", "-F", msgFile}, tt.commitArgs...)...)
+			require.NoError(t, NewManualCommitStrategy().PostCommit(ctx))
+
+			repo, err := OpenRepository(ctx)
+			require.NoError(t, err)
+			defer repo.Close()
+			store, err := s.getPersistentStore(ctx, repo)
+			require.NoError(t, err)
+			summary, err := store.Read(ctx, id.MustCheckpointID(cps[0]))
+			require.NoError(t, err)
+			require.NotNil(t, summary)
+			if tt.condensed {
+				assert.Contains(t, summary.FilesTouched, "more.txt", "the amend's agent work reaches the existing checkpoint")
+			} else {
+				assert.NotContains(t, summary.FilesTouched, "more.txt", "a new commit does not fold the idle session's work into the old checkpoint")
+			}
+		})
 	}
-	setLastInteraction(time.Now().Add(-time.Minute))
-
-	siblingDir := addSiblingWorktree(t, homeDir, "commit-wt")
-	t.Chdir(siblingDir)
-	testutil.WriteFile(t, siblingDir, "notes.txt", "agent content for notes.txt")
-	testutil.GitAdd(t, siblingDir, "notes.txt")
-	msg := prepareMessage(t, "add notes\n")
-	cps := checkpointIDs(msg)
-	require.Len(t, cps, 1, "prepare links the recent sibling session: %q", msg)
-	testutil.GitCommit(t, siblingDir, msg)
-	require.NoError(t, NewManualCommitStrategy().PostCommit(ctx))
-	state, err := s.loadSessionState(ctx, "sess-sibling")
-	require.NoError(t, err)
-	require.Equal(t, cps[0], state.LastCheckpointID.String(), "sanity: the session owns the commit's checkpoint")
-
-	// The agent's next turn adds more.txt; then the session sits idle for a
-	// day before the amend takes that work in.
-	t.Chdir(homeDir)
-	metadataDir := paths.EntireMetadataDir + "/sess-sibling"
-	testutil.WriteFile(t, homeDir, "more.txt", "agent content for more.txt")
-	testutil.WriteFile(t, homeDir, filepath.Join(metadataDir, paths.TranscriptFileName),
-		testTranscriptPromptResponse+`{"type":"human","message":{"content":"add more"}}`+"\n")
-	require.NoError(t, s.SaveStep(ctx, StepContext{
-		SessionID:     "sess-sibling",
-		NewFiles:      []string{"more.txt"},
-		MetadataDir:   metadataDir,
-		CommitMessage: "Checkpoint 2",
-		AuthorName:    "Test",
-		AuthorEmail:   "test@test.com",
-	}))
-	setLastInteraction(time.Now().Add(-24 * time.Hour))
-	t.Chdir(siblingDir)
-	testutil.WriteFile(t, siblingDir, "more.txt", "agent content for more.txt")
-	testutil.GitAdd(t, siblingDir, "more.txt")
-	msgFile := filepath.Join(t.TempDir(), "COMMIT_EDITMSG")
-	require.NoError(t, os.WriteFile(msgFile, []byte(msg), 0o600))
-	require.NoError(t, NewManualCommitStrategy().PrepareCommitMsg(ctx, msgFile, "commit"))
-	amended, err := os.ReadFile(msgFile)
-	require.NoError(t, err)
-	require.Equal(t, cps, checkpointIDs(string(amended)), "amend keeps the trailer")
-	testutil.RunGit(t, siblingDir, "commit", "-q", "--amend", "-F", msgFile)
-	require.NoError(t, NewManualCommitStrategy().PostCommit(ctx))
-
-	repo, err := OpenRepository(ctx)
-	require.NoError(t, err)
-	defer repo.Close()
-	store, err := s.getPersistentStore(ctx, repo)
-	require.NoError(t, err)
-	summary, err := store.Read(ctx, id.MustCheckpointID(cps[0]))
-	require.NoError(t, err)
-	require.NotNil(t, summary)
-	assert.Contains(t, summary.FilesTouched, "more.txt", "the amend's agent work reaches the existing checkpoint")
 }

@@ -102,16 +102,10 @@ func (s *ManualCommitStrategy) condensationTarget(ctx context.Context, repo *git
 
 type preexistingTargetKey struct{}
 
-// withPreexistingTarget marks a post-commit whose condensation target,
-// checkpointID, already had a checkpoint when the hook began.
-func withPreexistingTarget(ctx context.Context, checkpointID id.CheckpointID) context.Context {
-	return context.WithValue(ctx, preexistingTargetKey{}, checkpointID)
-}
-
-// preexistingTarget returns the target withPreexistingTarget marked.
-func preexistingTarget(ctx context.Context) (id.CheckpointID, bool) {
-	checkpointID, ok := ctx.Value(preexistingTargetKey{}).(id.CheckpointID)
-	return checkpointID, ok
+// withPreexistingTarget marks a post-commit whose condensation target already
+// had a checkpoint when the hook began.
+func withPreexistingTarget(ctx context.Context) context.Context {
+	return context.WithValue(ctx, preexistingTargetKey{}, true)
 }
 
 // stampedByAnotherCommit reports whether checkpointID is a preexisting
@@ -119,18 +113,37 @@ func preexistingTarget(ctx context.Context) (id.CheckpointID, bool) {
 // amending (LastCheckpointID) nor its pending reservation. Writing there would
 // fold new work into another commit's record.
 func stampedByAnotherCommit(ctx context.Context, checkpointID id.CheckpointID, state *SessionState) bool {
-	if _, ok := preexistingTarget(ctx); !ok {
+	if ctx.Value(preexistingTargetKey{}) != true {
 		return false
 	}
 	return checkpointID != state.LastCheckpointID && checkpointID != state.PendingCondensationID()
 }
 
-// ownsPreexistingTarget reports whether state may condense into the existing
-// checkpoint this post-commit's trailer names, as the session an amend's kept
-// trailer belongs to does: the commit links state by that trailer already.
-func ownsPreexistingTarget(ctx context.Context, state *SessionState) bool {
-	target, ok := preexistingTarget(ctx)
-	return ok && !stampedByAnotherCommit(ctx, target, state)
+// amendedCheckpoint returns checkpointID, a preexisting target, when this
+// commit amends the commit that links it: HEAD's newest reflog entry replaced
+// HEAD instead of advancing it, and the commit it replaced names checkpointID.
+// An amend keeps that trailer without stamping it, so post-commit condenses
+// into the existing checkpoint for the session that owns it
+// (withAmendedCheckpoint). A message reused with `commit -C` keeps a trailer
+// the same way but advances HEAD: it makes a new link. Empty when the reflog
+// cannot tell.
+func amendedCheckpoint(ctx context.Context, repo *git.Repository, commit *object.Commit, checkpointID id.CheckpointID, preexisting bool) id.CheckpointID {
+	if !preexisting {
+		return id.EmptyCheckpointID
+	}
+	entries := headReflog(ctx)
+	if len(entries) == 0 {
+		return id.EmptyCheckpointID
+	}
+	last := entries[0]
+	if last.newHash != commit.Hash || last.oldHash.IsZero() || slices.Contains(commit.ParentHashes, last.oldHash) {
+		return id.EmptyCheckpointID
+	}
+	replaced, err := repo.CommitObject(last.oldHash)
+	if err != nil || !slices.Contains(LinkedCheckpoints(ctx, replaced.Message), checkpointID) {
+		return id.EmptyCheckpointID
+	}
+	return checkpointID
 }
 
 func checkpointExists(ctx context.Context, store checkpoint.PersistentStore, checkpointID id.CheckpointID) bool {

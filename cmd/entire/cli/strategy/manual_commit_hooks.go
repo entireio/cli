@@ -1487,7 +1487,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 		return nil
 	}
 	if targetPreexisting {
-		ctx = withPreexistingTarget(ctx, checkpointID)
+		ctx = withPreexistingTarget(ctx)
 	}
 	if slices.Contains(moved, checkpointID) {
 		ctx = withRecordedCommitLink(ctx, head.Hash().String())
@@ -1504,8 +1504,10 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	// Union of worktree and identity matching — must resolve the same way
 	// PrepareCommitMsg did, or the stamped trailer and the condensed session
 	// diverge (a dangling trailer). So it keeps the sessions prepare recorded
-	// for this trailer, however long the prompt or editor took in between.
+	// for this trailer, however long the prompt or editor took in between, and
+	// on an amend the owner of the checkpoint the amended commit links.
 	ctx = withLinkedSessions(ctx, linkedByStamp[checkpointID])
+	ctx = withAmendedCheckpoint(ctx, amendedCheckpoint(ctx, repo, commit, checkpointID, targetPreexisting))
 	sessions, err := s.findSessionsForCommitLinking(ctx, worktreePath)
 	findSessionsSpan.RecordError(err)
 	findSessionsSpan.End()
