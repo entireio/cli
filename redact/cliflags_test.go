@@ -119,6 +119,16 @@ func TestString_CommandLinePasswords(t *testing.T) {
 		{name: "line continuation inside a quoted password", input: "openssl enc -pass \"pass:Summer\\\n2026Release\" -in f", want: "openssl enc -pass \"pass:REDACTED\" -in f"},
 		{name: "semicolon in a command substitution in an earlier argument", input: "openssl enc -in $(printf /dev/null; true) -pass pass:" + p, want: "openssl enc -in $(printf /dev/null; true) -pass pass:REDACTED"},
 		{name: "client run in a command substitution of the same client", input: "mysql -h $(cat host; mysql -p" + p + " -e 'select 1') app", want: "mysql -h $(cat host; mysql -pREDACTED -e 'select 1') app"},
+		{name: "substitution opener inside a quoted SQL string", input: `mysql -e 'SELECT "$(' -p` + p + ` -e 'SELECT ")"'`, want: `mysql -e 'SELECT "$(' -pREDACTED -e 'SELECT ")"'`},
+		{name: "parenthesis in a quoted string of a substitution", input: "mysql -e $(printf ')') -p" + p + " app", want: "mysql -e $(printf ')') -pREDACTED app"},
+		{name: "client in a substitution inside a nested command", input: `mysql -h "$(mysql -h $(mysql -p` + p + `))"`, want: `mysql -h "$(mysql -h $(mysql -pREDACTED))"`},
+		{name: "client in a quoted argument of a substitution", input: "mysql -e $(sh -c 'mysql -p" + p + "') app", want: "mysql -e $(sh -c 'mysql -pREDACTED') app"},
+		{name: "client in a quoted argument of a quoted substitution", input: `mysql -e "$(sh -c 'mysql -p` + p + `')" app`, want: `mysql -e "$(sh -c 'mysql -pREDACTED')" app`},
+		{name: "client run through ssh in a substitution", input: "mysql -e $(ssh db mysql -p" + p + ") app", want: "mysql -e $(ssh db mysql -pREDACTED) app"},
+		{name: "client name as an argument in a substitution", input: "mysql -e $(mysql -h mysql -p" + p + ") app", want: "mysql -e $(mysql -h mysql -pREDACTED) app"},
+		{name: "client in a substitution in a quoted argument of a substitution", input: `mysql -e $(sh -c 'mysql -h "$(mysql -p` + p + `)"') app`, want: `mysql -e $(sh -c 'mysql -h "$(mysql -pREDACTED)"') app`},
+		{name: "many substitutions in one quoted argument", input: "mysql -e '" + strings.Repeat("$(mysql)", 4000) + "' -p" + p, want: "mysql -e '" + strings.Repeat("$(mysql)", 4000) + "' -pREDACTED"},
+		{name: "many client names in one substitution", input: "mysql -e $(echo " + strings.Repeat("mysql ", 4000) + ") -p" + p, want: "mysql -e $(echo " + strings.Repeat("mysql ", 4000) + ") -pREDACTED"},
 	})
 }
 
@@ -170,6 +180,8 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		"sh -c 'mysql --version'; ssh -p2222 'user@host'",
 		`"/opt/mysql tools/bin/psql" -p5432`,
 		"sh -c 'mysql --execute=/bin/mysql' -p2222",
+		"sh -c 'mysql /bin/mysql' -p2222",
+		"sh -c 'mysql ./mysql' -p2222",
 		`Run "mysql --socket=/run/mysql" through ssh -p2222 host`,
 		"mysql -e $(true; ssh -p2222 host) app",
 		"mysql -e $(printf x; echo -pDebug) app",
