@@ -111,9 +111,11 @@ Phone and address matches must stand on their own: digits that are part of a lon
 
 Besides the US shape (`123 Main St`), `address` matches European street lines built on a fixed list of street types, with a house number:
 
-- Italian and Spanish: the street type, a title-case name, then the number (`Via Roma 12`, `Piazza del Duomo 1`, `Calle de Alcalá, 42`, `C/ Mayor 5`). Types: `Via`, `Viale`, `Piazza`, `Piazzale`, `Corso`, `Largo`, `Vicolo`, `Strada`, `Calle`, `C/`, `Avenida`, `Avda.`, `Plaza`, `Paseo`, `Camino`, `Ronda`, `Rambla`.
-- French: the number, the street type, then the name (`12 rue de la Paix`, `8 bis boulevard Saint-Germain`). Types: `rue`, `avenue`, `boulevard`, `place`, `chemin`, `allée`, `impasse`, `quai`, lowercase or capitalized.
-- German: a street word ending in `straße`, `strasse`, `str.`, `weg`, `platz`, `allee` or `gasse`, or one of those as its own word after another (`Hauptstraße 12`, `Karl-Marx-Straße 5`, `Berliner Str. 5`), then the number.
+- Italian and Spanish: the street type, a title-case name, then the number (`Via Roma 12`, `Piazza del Duomo 1`, `Calle de Alcalá, 42`, `C/ Mayor 5`, `Calle Mayor n.º 1`). Types: `Via`, `Viale`, `Piazza`, `Piazzale`, `Corso`, `Largo`, `Vicolo`, `Strada`, `Calle`, `C/`, `Avenida`, `Avda.`, `Plaza`, `Paseo`, `Camino`, `Ronda`, `Rambla`.
+- French: the number, the street type, then the name (`12 rue de la Paix`, `8 bis boulevard Saint-Germain`, `12 B rue de la Paix`). Types: `rue`, `avenue`, `boulevard`, `place`, `chemin`, `allée`, `impasse`, `quai`, lowercase or capitalized.
+- German: a street word ending in `straße`, `strasse`, `str.`, `weg`, `platz`, `allee` or `gasse`, or one of those as its own word after another (`Hauptstraße 12`, `Karl-Marx-Straße 5`, `Berliner Str. 5`), then the number. An adjective such as `Alte` or `Große` may come first (`Alte Jakobstraße 5`, `Große Hamburger Straße 7`).
+
+A name may start with a date, the day in digits or roman numerals followed by a month (`Via XX Settembre 20`, `12 rue du 8 Mai 1945`, `Avenida 9 de Julio 1000`).
 
 As with US addresses only the street line is replaced, so `Via Roma 12, 20121 Milano` becomes `[REDACTED_ADDRESS], 20121 Milano`. A name in capitals (`Via SSH 22`), a number that continues as a decimal (`Via Node 18.2`), and an Italian or Spanish street type written in lowercase (`in via Roma 12`) are not matched, so English prose such as `installed via Python 3` stays.
 

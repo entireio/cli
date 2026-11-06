@@ -30,6 +30,8 @@ func TestDetectPII_EuropeanAddresses(t *testing.T) {
 		{"Viale dell'Indipendenza 8", "[REDACTED_ADDRESS]"},
 		{"Largo Sant'Ambrogio 2", "[REDACTED_ADDRESS]"},
 		{"Via Roma n. 12", "[REDACTED_ADDRESS]"},
+		{"Via XX Settembre 20", "[REDACTED_ADDRESS]"},
+		{"Via 20 Settembre 97", "[REDACTED_ADDRESS]"},
 
 		// Spanish
 		{"Calle de Alcalá, 42", "[REDACTED_ADDRESS]"},
@@ -39,6 +41,8 @@ func TestDetectPII_EuropeanAddresses(t *testing.T) {
 		{"C/Mayor 5", "[REDACTED_ADDRESS]"},
 		{"Plaza Mayor nº 1", "[REDACTED_ADDRESS]"},
 		{"Avda. Diagonal 640", "[REDACTED_ADDRESS]"},
+		{"Calle Mayor n.º 1", "[REDACTED_ADDRESS]"},
+		{"Avenida 9 de Julio 1000", "[REDACTED_ADDRESS]"},
 
 		// French
 		{"5 avenue des Champs-Élysées", "[REDACTED_ADDRESS]"},
@@ -47,6 +51,8 @@ func TestDetectPII_EuropeanAddresses(t *testing.T) {
 		{"12, rue de l'Université", "[REDACTED_ADDRESS]"},
 		{"1 rue d'Alésia", "[REDACTED_ADDRESS]"},
 		{"12 Rue du Faubourg Saint-Honoré", "[REDACTED_ADDRESS]"},
+		{"12 B rue de la Paix", "[REDACTED_ADDRESS]"},
+		{"12 rue du 8 Mai 1945, 75000 Paris", "[REDACTED_ADDRESS], 75000 Paris"},
 
 		// German
 		{"Karl-Marx-Straße 5", "[REDACTED_ADDRESS]"},
@@ -58,6 +64,22 @@ func TestDetectPII_EuropeanAddresses(t *testing.T) {
 		{"Johann-Sebastian-Bachstraße 12", "[REDACTED_ADDRESS]"},
 		{"Konrad-Adenauer-Platz 1", "[REDACTED_ADDRESS]"},
 		{"Hauptstraße\t12", "[REDACTED_ADDRESS]"},
+		{"Alte Schönhauser Straße 7", "[REDACTED_ADDRESS]"},
+		{"Große Hamburger Straße 7", "[REDACTED_ADDRESS]"},
+		{"Alte Jakobstraße 5", "[REDACTED_ADDRESS]"},
+
+		// Decomposed accents (e followed by U+0301) stay inside the name.
+		{"12 rue de la Re\u0301publique", "[REDACTED_ADDRESS]"},
+		{"3 place de l'E\u0301glise", "[REDACTED_ADDRESS]"},
+		{"2 alle\u0301e des Roses", "[REDACTED_ADDRESS]"},
+
+		// A postal code right after a comma is not a decimal.
+		{"Via Roma 12,20121 Milano", "[REDACTED_ADDRESS],20121 Milano"},
+		{"Hauptstraße 12,10115 Berlin", "[REDACTED_ADDRESS],10115 Berlin"},
+
+		// A street type joined onto a word does not start a match, and does
+		// not hide the street line after it.
+		{"xVia Foo Via Roma 12", "xVia Foo [REDACTED_ADDRESS]"},
 
 		// A match stays on its line: the French name has no house number
 		// after it to stop it, so it must not run on into a heading.
@@ -87,6 +109,8 @@ func TestDetectPII_EuropeanAddressLookalikes(t *testing.T) {
 		"installed via Python 3",
 		// A house number that continues as a decimal or version.
 		"Via Node 18.2",
+		"Via Node 18,2",
+		"Hauptstraße 12,5 km",
 		"Heldeplatz 2.0MB",
 		// rue in identifiers.
 		"rue_de_la_paix 12",
@@ -105,6 +129,9 @@ func TestDetectPII_EuropeanAddressLookalikes(t *testing.T) {
 		"String 12",
 		"Weg 5",
 		"hauptstraße 12",
+		// A day or roman numeral only starts a name before a month.
+		"Via XX Docker 3",
+		"Via 2 Factor 3",
 	}
 	for _, input := range tests {
 		if got := redactPIIOnly(cfg, input); got != input {

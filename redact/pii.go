@@ -216,8 +216,7 @@ func detectPII(cfg *PIIConfig, s string) []taggedRegion {
 			continue
 		}
 		builtinIP := p.regex == ipv4CandidateRegex || p.regex == ipv6CandidateRegex
-		euAddress := isEuropeanAddressRegex(p.regex)
-		for _, loc := range p.regex.FindAllStringIndex(s, -1) {
+		for _, loc := range piiMatches(p.regex, s) {
 			// Skip allowlisted email addresses (noreply, bot accounts, etc.)
 			// and the git login of a remote.
 			if p.label == labelEmail && (isAllowlistedEmail(s[loc[0]:loc[1]]) || isGitSSHUser(s, loc[0], loc[1])) {
@@ -225,12 +224,6 @@ func detectPII(cfg *PIIConfig, s string) []taggedRegion {
 			}
 			// Skip phone-shaped digits that run on into a longer number.
 			if p.label == labelPhone && loc[1] < len(s) && s[loc[1]] >= '0' && s[loc[1]] <= '9' {
-				continue
-			}
-			// Skip a European street line that is part of a longer word or
-			// number. By regex, so a custom pattern named address is left
-			// as written.
-			if euAddress && !addressStandsAlone(s, loc[0], loc[1]) {
 				continue
 			}
 			// The built-in IP candidates are only shapes; redactableIP
@@ -251,6 +244,18 @@ func detectPII(cfg *PIIConfig, s string) []taggedRegion {
 		}
 	}
 	return dropNestedIPRegions(regions)
+}
+
+// piiMatches returns the [start, end) pairs of re's matches in s. The
+// built-in European address patterns match a left edge before each street
+// line and check its right end in code, so they go through
+// europeanAddressMatches. By regex, not label, so a custom pattern named
+// "address" is left as written.
+func piiMatches(re *regexp.Regexp, s string) [][]int {
+	if isEuropeanAddressRegex(re) {
+		return europeanAddressMatches(re, s)
+	}
+	return re.FindAllStringIndex(s, -1)
 }
 
 // mayMatchPII reports whether re can match s. Most strings hold no
