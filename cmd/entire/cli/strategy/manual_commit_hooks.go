@@ -1469,8 +1469,11 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	}
 
 	// Condense into the trailer prepare stamped, never into an inherited one.
-	ids, stamped, redone, moved := linkedTrailersOf(ctx, commit)
+	// The sessions prepare linked are taken before its stamps: prepare records
+	// them after the stamp, so a later commit's prepare racing this hook can
+	// lose its stamp here, as before, but never keep its stamp without them.
 	linkedByStamp := takeStampedSessions(ctx)
+	ids, stamped, redone, moved := linkedTrailersOf(ctx, commit)
 	checkpointID, targetPreexisting, found := s.condensationTarget(ctx, repo, ids, stamped)
 	openRepoSpan.End()
 
