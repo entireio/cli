@@ -325,6 +325,58 @@ func LoadBackgroundClaimContext(ctx context.Context, sessionID, toolUseID string
 	return claims, true, nil
 }
 
+// OtherSessionActiveSince reports whether a session homed in worktreePath,
+// other than sessionID and the related sessions, had a turn running at some
+// point since since: it interacted after since (a turn started or ended, or
+// the session stopped), or it is mid-turn now. A session stuck ACTIVE past
+// StuckActiveThreshold, or whose agent process has exited, is not counted as
+// mid-turn. Sessions linked to sessionID as subagent and parent (a parent's
+// task record naming the other as its agent) are never counted: one runs on
+// the other's behalf. related names more such sessions, for a link not yet
+// recorded.
+//
+// git status shows every dirty file in a worktree, not which session changed
+// it, so while another session's turn overlapped this one, a file only git
+// status shows could be either session's (#3011). Not checked: sessions homed
+// in other worktrees, and other sessions' background tasks, whose own stop
+// handles overlap with other tasks (LoadBackgroundClaimContext) but not with
+// turns.
+func OtherSessionActiveSince(ctx context.Context, worktreePath, sessionID string, related []string, since time.Time) (bool, error) {
+	states, err := ListSessionStates(ctx)
+	if err != nil {
+		return false, err
+	}
+	skip := make(map[string]bool, len(related)+1)
+	skip[sessionID] = true
+	for _, id := range related {
+		skip[id] = true
+	}
+	for _, state := range states {
+		for _, rec := range state.TaskRecords {
+			switch {
+			case state.SessionID == sessionID && rec.AgentID != "":
+				skip[rec.AgentID] = true // a subagent that runs as a session of its own
+			case rec.AgentID == sessionID:
+				skip[state.SessionID] = true // sessionID is that session's subagent
+			}
+		}
+	}
+	for _, state := range exactWorktreeMatches(ctx, states, worktreePath) {
+		if !skip[state.SessionID] && sessionActiveSince(state, since) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// sessionActiveSince is OtherSessionActiveSince's test for one session.
+func sessionActiveSince(state *SessionState, since time.Time) bool {
+	if state.LastInteractionTime != nil && state.LastInteractionTime.After(since) {
+		return true
+	}
+	return state.Phase.IsActive() && !state.IsEnded() && !state.IsStuckActive() && !state.OwnerExited()
+}
+
 // launchedBeforeRehome reports whether task, one of state's, was launched
 // before the session re-homed (State.RehomedAt), in the worktree git removed.
 func launchedBeforeRehome(state *SessionState, task *session.TaskRecord) bool {

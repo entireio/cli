@@ -53,6 +53,14 @@ When multiple sessions are ACTIVE in the same directory and one session's agent 
 
 **Workaround:** Use separate git worktrees for concurrent sessions. A commit condenses the sessions with pending work in its own worktree (plus any session whose agent process made the commit), so sessions in different worktrees don't interfere.
 
+### Shell Edits During Overlapping Turns Are Not Attributed
+
+When sessions share a worktree and their turns overlap, a file that only `git status` shows as changed (an edit made through a shell command, which no transcript names) is recorded by neither session, so a commit of only that file gets no checkpoint. Files an agent changes with its file-editing tools are named in its transcript and are attributed as usual.
+
+**Why:** `git status` shows every dirty file in the worktree, not which session changed it. Taking such a file would link a session to another session's commit, and `entire checkpoint explain` would show that session's prompt and transcript as the commit's intent.
+
+**Workaround:** Use separate git worktrees for concurrent sessions, as above.
+
 ## Upgrades and Downgrades
 
 ### Downgrading Discards Pending Agent Work
