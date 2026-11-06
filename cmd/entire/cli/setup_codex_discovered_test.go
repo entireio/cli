@@ -276,7 +276,7 @@ func TestFinishCodexHooksSetup_OutdatedStorageParentIsNotReportedInstalled(t *te
 	storage := filepath.Join(tmp, "gitdirs", "main.git")
 	require.NoError(t, os.MkdirAll(filepath.Dir(storage), 0o755))
 	testutil.RunGit(t, tmp, "init", "--separate-git-dir", storage, mainRoot)
-	testutil.RunGit(t, mainRoot, "commit", "--allow-empty", "-m", "init")
+	testutil.RunGit(t, mainRoot, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "init")
 	linked := filepath.Join(tmp, "linked")
 	testutil.RunGit(t, mainRoot, "worktree", "add", "-b", "feature", linked)
 	parentHooks := filepath.Join(filepath.Dir(storage), ".codex", "hooks.json")

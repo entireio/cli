@@ -281,7 +281,7 @@ func TestResolveHookDiscovery_SeparateGitDirWorktreeHasNoCandidate(t *testing.T)
 	storageRoot := filepath.Join(tmp, "gitdirs", "main.git")
 	require.NoError(t, os.MkdirAll(filepath.Dir(storageRoot), 0o755))
 	runGitWithDir(t, tmp, "init", "--separate-git-dir", storageRoot, mainRoot)
-	runGitWithDir(t, mainRoot, "commit", "--allow-empty", "-m", "init")
+	runGitWithDir(t, mainRoot, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "init")
 	linked := filepath.Join(tmp, "linked")
 	runGitWithDir(t, mainRoot, "worktree", "add", "-b", "feature", linked)
 
