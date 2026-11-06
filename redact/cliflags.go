@@ -213,28 +213,46 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string) []tag
 		// The closing quote of a string the command is quoted in is not
 		// an opening one: "/usr/bin/mysql" -p"x" or sh -c "mysql ...".
 		closeAt, stringEnd := lines.enclosing(cmd[0])
-		end := len(s)
+		var rest string
 		switch {
 		case cmd[0] >= segmentEnd:
 			segment = quoteScan{s: s, i: cmd[1], skip: closeAt, skipEnd: stringEnd}
+			rest = segmentRest(s, cmd[1], closeAt, stringEnd)
+			segmentEnd = cmd[1] + len(rest)
 		case f.leading:
+			// Only the options right after the name are read, and they
+			// end inside the segment already found, so it is not scanned
+			// again for every name (which took quadratic time).
+			rest = s[cmd[1]:max(segmentEnd, cmd[1])]
 		default:
 			argEnd, nested := segment.stringAt(cmd[0])
 			if !nested || cmd[0] < nestedEnd || !startsCommand(s[segment.inner():cmd[0]]) {
 				continue
 			}
-			end = max(argEnd-1, cmd[1])
-		}
-		rest := segmentRestPattern(s, closeAt).FindString(s[cmd[1]:end])
-		if end == len(s) {
-			segmentEnd = max(segmentEnd, cmd[1]+len(rest))
-		} else {
+			rest = segmentRestPattern(s, closeAt).FindString(s[cmd[1]:max(argEnd-1, cmd[1])])
 			nestedEnd = cmd[1] + len(rest)
 		}
 		quotes := quoteScan{s: s[:cmd[1]+len(rest)], i: cmd[1], skip: closeAt, skipEnd: stringEnd}
 		regions = f.appendFlags(regions, s, &quotes, rest, stringEnd)
 	}
 	return regions
+}
+
+// segmentRest returns the rest of the pipeline segment of a command whose
+// name ends at i, in a quoted string that closes at closeAt and ends at
+// stringEnd (both -1 when it is in none). A command quoted with its
+// arguments (sh -c 'mysql --version'; ssh -p2222 host) ends with the string;
+// a quoted program path ("/usr/bin/mysql" -pX) goes on after it.
+func segmentRest(s string, i, closeAt, stringEnd int) string {
+	pattern := segmentRestPattern(s, closeAt)
+	switch {
+	case closeAt < i:
+		return pattern.FindString(s[i:])
+	case strings.ContainsAny(s[i:closeAt], " \t"):
+		return pattern.FindString(s[i:closeAt])
+	default:
+		return s[i : stringEnd+len(cliSegmentRest.FindString(s[stringEnd:]))]
+	}
 }
 
 // segmentRestPattern returns the pattern for the rest of the segment of a
@@ -248,8 +266,8 @@ func segmentRestPattern(s string, closeAt int) *regexp.Regexp {
 
 // startsCommand reports whether a command name after prefix, the text from
 // the start of a quoted argument, is run as a command (sh -c 'mysql -pX',
-// sh -c 'cd app && sudo mysql -pX') rather than being text in it (the SQL
-// of mysql -e 'select mysql -pX').
+// sh -c 'cd app && sudo mysql -pX', sh -c 'if x; then mysql -pX; fi') rather
+// than being text in it (the SQL of mysql -e 'select mysql -pX').
 func startsCommand(prefix string) bool {
 	if i := strings.LastIndexAny(prefix, ";|&("); i >= 0 {
 		prefix = prefix[i+1:]
@@ -259,6 +277,8 @@ func startsCommand(prefix string) bool {
 		switch {
 		case optionArg:
 			optionArg = false
+		case isShellKeyword(word):
+			wrapper = ""
 		case isCommandWrapper(word):
 			wrapper = word
 		case wrapper != "" && strings.HasPrefix(word, "-"):
@@ -279,6 +299,16 @@ func startsCommand(prefix string) bool {
 func isCommandWrapper(word string) bool {
 	switch word {
 	case "sudo", "exec", "env", "time", "nohup", "command":
+		return true
+	}
+	return false
+}
+
+// isShellKeyword reports whether word is a shell reserved word after which
+// a command starts (if true; then mysql -pX; fi).
+func isShellKeyword(word string) bool {
+	switch word {
+	case "if", "then", "elif", "else", "while", "until", "do", "!", "{":
 		return true
 	}
 	return false

@@ -1,6 +1,9 @@
 package redact
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // A human-chosen password is below entropyThreshold, so only the command-line
 // layer can catch it.
@@ -104,6 +107,9 @@ func TestString_CommandLinePasswords(t *testing.T) {
 		{name: "nested command after cd and sudo", input: "docker exec mysql sh -c 'cd /app && sudo mysql -p" + p + " app'", want: "docker exec mysql sh -c 'cd /app && sudo mysql -pREDACTED app'"},
 		{name: "nested command after sudo options", input: "docker exec mysql sh -c 'sudo -u root mysql -p" + p + "'", want: "docker exec mysql sh -c 'sudo -u root mysql -pREDACTED'"},
 		{name: "nested command after a sudo user named like the client", input: "docker exec mysql sh -c 'sudo -u mysql -E mysql -p" + p + "'", want: "docker exec mysql sh -c 'sudo -u mysql -E mysql -pREDACTED'"},
+		{name: "nested command in an if", input: "docker exec mysql sh -c 'if true; then mysql -p" + p + "; fi'", want: "docker exec mysql sh -c 'if true; then mysql -pREDACTED; fi'"},
+		{name: "nested command in a loop", input: "docker exec mysql sh -c 'while true; do mysql -p" + p + "; done'", want: "docker exec mysql sh -c 'while true; do mysql -pREDACTED; done'"},
+		{name: "sshpass after many sshpass names", input: strings.Repeat("sshpass ", 2000) + "-p " + p + " ssh host", want: strings.Repeat("sshpass ", 2000) + "-p REDACTED ssh host"},
 		{name: "nested command after env options", input: "docker exec mysql sh -c 'env -i PATH=/bin mysql -p" + p + "'", want: "docker exec mysql sh -c 'env -i PATH=/bin mysql -pREDACTED'"},
 		{name: "escaped quote and semicolon in an earlier argument", input: `openssl enc -out "abc\";x" -pass pass:` + p, want: `openssl enc -out "abc\";x" -pass pass:REDACTED`},
 		{name: "line continuation inside the password", input: "openssl enc -pass pass:Summer\\\n" + p + " -in f", want: "openssl enc -pass pass:REDACTED -in f"},
@@ -156,6 +162,7 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		"mysql -e 'SELECT mysql -pDebug FROM metrics'",
 		"docker exec mysql sh -c 'sudo apt install mysql -pDebug'",
 		"docker exec mysql sh -c 'sudo -n echo mysql -pDebug'",
+		"sh -c 'mysql --version'; ssh -p2222 'user@host'",
 		`mysql -e \"; printf hello\" -phunter2`,
 		`netrc := "machine h login me password " + password + "\n"`,
 		`cmd := "mongosh --password " + password + " db"`,
