@@ -41,14 +41,14 @@ func secretReply(status int, body string) *http.Response {
 	}
 }
 
-// useSecretEnv isolates the cache and sets ENTIRE_TOKEN to a secret.
+// useSecretEnv isolates the cache and sets ENTIRE_TOKEN to a secret. The
+// exchange goes to the secret's jurisdiction Core, https://us.auth.entire.io.
 // Not parallel-safe: it sets process-wide environment and the seam.
-func useSecretEnv(t *testing.T, core string, rt http.RoundTripper) {
+func useSecretEnv(t *testing.T, rt http.RoundTripper) {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CACHE_HOME", home)
-	t.Setenv(auth.SecretCoreURLVar, core)
 	t.Setenv(auth.EnvTokenVar, testSASecret)
 	t.Cleanup(auth.UseSecretExchangeTransportForTesting(rt))
 }
@@ -56,9 +56,9 @@ func useSecretEnv(t *testing.T, core string, rt http.RoundTripper) {
 // The helper exchanges a secret and sends the service account JWT to the
 // data plane, never the secret. Not parallel: sets process-wide environment.
 func TestResolveCreds_ServiceAccountSecretUsesExchangedJWT(t *testing.T) {
-	const core = "https://core.us.entire.io"
+	const core = "https://us.auth.entire.io"
 	jwt := makeSecretJWT(t, core, "")
-	useSecretEnv(t, core, secretExchangeFunc(func(r *http.Request) (*http.Response, error) {
+	useSecretEnv(t, secretExchangeFunc(func(r *http.Request) (*http.Response, error) {
 		if r.URL.String() != core+"/oauth/token" {
 			t.Errorf("exchange went to %s", r.URL)
 		}
@@ -82,7 +82,7 @@ func TestResolveCreds_ServiceAccountSecretUsesExchangedJWT(t *testing.T) {
 // A refused secret fails before discovery and never names the secret.
 // Not parallel: sets process-wide environment.
 func TestResolveCreds_RefusedServiceAccountSecretFailsClosed(t *testing.T) {
-	useSecretEnv(t, "https://core.us.entire.io", secretExchangeFunc(func(*http.Request) (*http.Response, error) {
+	useSecretEnv(t, secretExchangeFunc(func(*http.Request) (*http.Response, error) {
 		return secretReply(http.StatusBadRequest, `{"error":"invalid_grant","error_description":"refused"}`), nil
 	}))
 	// A nil client panics if discovery runs.
@@ -102,9 +102,9 @@ func TestResolveCreds_RefusedServiceAccountSecretFailsClosed(t *testing.T) {
 // again instead of resending the rejected token. Without a 401, requests reuse
 // the cached token. Not parallel: sets process-wide environment.
 func TestResolveCreds_ServiceAccountSecretReexchangesAfter401(t *testing.T) {
-	const core = "https://core.us.entire.io"
+	const core = "https://us.auth.entire.io"
 	exchanges := 0
-	useSecretEnv(t, core, secretExchangeFunc(func(*http.Request) (*http.Response, error) {
+	useSecretEnv(t, secretExchangeFunc(func(*http.Request) (*http.Response, error) {
 		exchanges++
 		jwt := makeSecretJWT(t, core, strconv.Itoa(exchanges))
 		return secretReply(http.StatusOK, fmt.Sprintf(`{"access_token":%q,"expires_in":3600}`, jwt)), nil

@@ -41,9 +41,10 @@ Readers that only test whether `ENTIRE_TOKEN` is set need nothing. A v1
 secret is `ent_svc_<juri>_<account ULID>_<secret ULID>_<random><check>` and is
 validated offline, checksum included, before anything is sent
 (`parseServiceAccountSecret`). The secret lives in the regional database of
-its jurisdiction, so the exchange sends it to `https://<juri>.auth.entire.io`,
-or to `ENTIRE_CORE_URL` when set (local development and staging; not checked
-against the jurisdiction). The exchange, the identity cache key and
+its jurisdiction, so the exchange sends it to `https://<juri>.auth.entire.io`
+and nowhere else: there is no override. Against a non-production Core,
+exchange the secret by hand and put the JWT in `ENTIRE_TOKEN`, which already
+works. The exchange, the identity cache key and
 `ForgetServiceAccountSecretToken` derive that origin in one place
 (`secretExchangeSubject`). It returns the service account JWT, which lives at
 most 10 minutes; that JWT's `aud` then drives the precedence above. The

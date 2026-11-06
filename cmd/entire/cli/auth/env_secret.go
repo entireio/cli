@@ -28,11 +28,6 @@ import (
 // short-lived service account access token, and that token is the bearer.
 const ServiceAccountSecretPrefix = "ent_svc_" //nolint:gosec // G101: a prefix, not a credential
 
-// SecretCoreURLVar overrides the Core that exchanges a service account
-// secret, for local development and staging. Unset, the Core is derived
-// from the jurisdiction the secret names.
-const SecretCoreURLVar = "ENTIRE_CORE_URL" //nolint:gosec // G101: a variable name, not a credential
-
 const (
 	// secretClientID is the public OAuth client the exchange names.
 	secretClientID = "entire-cli"
@@ -154,12 +149,7 @@ func secretExchangeSubject(secret string) (exchangeSubject, error) {
 	if err != nil {
 		return exchangeSubject{}, err
 	}
-	core, err := secretCoreURL(parsed.jurisdiction)
-	if err != nil {
-		return exchangeSubject{}, err
-	}
-	// The cache name covers the Core too: a token from one Core is not
-	// reused after the variable points at another.
+	core := jurisdictionCoreURL(parsed.jurisdiction)
 	return exchangeSubject{
 		token:     secret,
 		tokenType: secretSubjectTokenType,
@@ -169,32 +159,12 @@ func secretExchangeSubject(secret string) (exchangeSubject, error) {
 	}, nil
 }
 
-// secretCoreURL returns the Core origin for the exchange: SecretCoreURLVar
-// when set, otherwise the regional Core of jurisdiction, which holds the
-// secret. The secret goes to it, so an override must be a bare https origin.
-// An override is not checked against jurisdiction: Core refuses a secret from
-// another jurisdiction with an error that names the right Core.
-func secretCoreURL(jurisdiction string) (string, error) {
-	raw := strings.TrimSpace(os.Getenv(SecretCoreURLVar))
-	if raw == "" {
-		return jurisdictionCoreURL(jurisdiction), nil
-	}
-	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" || u.User != nil {
-		return "", fmt.Errorf("%s %q is not a Core URL", SecretCoreURLVar, raw)
-	}
-	if u.Scheme != httpclient.SchemeHTTPS && !insecureHTTPEnabled() {
-		return "", fmt.Errorf("%s %q must use https; the service account secret is sent to it", SecretCoreURLVar, u.Redacted())
-	}
-	return u.Scheme + "://" + u.Host, nil
-}
-
 // jurisdictionCoreURL returns https://<jurisdiction>.<default login host>,
 // for example https://eu.auth.entire.io. Core guarantees this layout: the v1
 // secret contract defines the exchange Core as https://<juri>.auth.<domain>,
-// and the SDK derives it the same way. It cannot use the cluster topology
-// (defaultClusterByJurisdiction), which needs an authenticated Core call
-// before the secret has been exchanged.
+// and the SDK derives it the same way. There is no override: the secret is
+// sent to this origin and nothing else. A non-production Core exchanges the
+// secret by hand and passes the resulting JWT in ENTIRE_TOKEN.
 func jurisdictionCoreURL(jurisdiction string) string {
 	return httpclient.SchemeHTTPS + "://" + jurisdiction + "." + strings.TrimPrefix(api.DefaultAuthBaseURL, httpclient.SchemeHTTPS+"://")
 }

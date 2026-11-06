@@ -94,7 +94,6 @@ func useFakeSecretCore(t *testing.T, core *fakeSecretCore) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CACHE_HOME", home)
-	t.Setenv(SecretCoreURLVar, "https://core.example.com")
 	t.Cleanup(UseSecretExchangeTransportForTesting(core))
 }
 
@@ -117,7 +116,7 @@ func TestResolveEnvTokenPassesThroughNonSecrets(t *testing.T) {
 
 // Not parallel: sets process-wide environment.
 func TestParseEnvTokenExchangesSecret(t *testing.T) {
-	jwt := makeJWT(t, fmt.Sprintf(`{"iss":"https://core.example.com","aud":"https://core.example.com","sub":"svc_01JABCDEFGHJKMNPQRSTVWXYZ0","exp":%d}`, time.Now().Add(10*time.Minute).Unix()))
+	jwt := makeJWT(t, fmt.Sprintf(`{"iss":"https://us.auth.entire.io","aud":"https://us.auth.entire.io","sub":"svc_01JABCDEFGHJKMNPQRSTVWXYZ0","exp":%d}`, time.Now().Add(10*time.Minute).Unix()))
 	core := &fakeSecretCore{t: t, jwt: jwt, expiresIn: 600}
 	useFakeSecretCore(t, core)
 
@@ -125,14 +124,14 @@ func TestParseEnvTokenExchangesSecret(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseEnvToken: %v", err)
 	}
-	if token != jwt || coreURL != "https://core.example.com" {
+	if token != jwt || coreURL != "https://us.auth.entire.io" {
 		t.Errorf("ParseEnvToken = %q, %q", coreURL, token)
 	}
 	want := map[string]string{
 		"grant_type":         "urn:ietf:params:oauth:grant-type:token-exchange",
 		"subject_token_type": "urn:ietf:params:oauth:token-type:access_token",
 		"subject_token":      testServiceAccountSecret,
-		"audience":           "https://core.example.com",
+		"audience":           "https://us.auth.entire.io",
 		"resource":           "svc_01JABCDEFGHJKMNPQRSTVWXYZ0",
 	}
 	for k, v := range want {
@@ -199,19 +198,10 @@ func TestSecretExchangeRefusalHidesSecret(t *testing.T) {
 }
 
 // Not parallel: sets process-wide environment.
-func TestSecretCoreURLValidation(t *testing.T) {
+func TestMalformedSecretNeverExchanged(t *testing.T) {
 	core := &fakeSecretCore{t: t}
 	useFakeSecretCore(t, core)
 
-	t.Setenv(SecretCoreURLVar, "http://core.example.com")
-	if _, err := ResolveEnvToken(testServiceAccountSecret); err == nil {
-		t.Error("an http Core must be refused: the secret would travel in cleartext")
-	}
-	t.Setenv(SecretCoreURLVar, "https://user:pw@core.example.com")
-	if _, err := ResolveEnvToken(testServiceAccountSecret); err == nil {
-		t.Error("a Core URL with userinfo must be refused")
-	}
-	t.Setenv(SecretCoreURLVar, "")
 	if _, err := ResolveEnvToken("ent_svc_malformed"); err == nil {
 		t.Error("a malformed secret must fail")
 	}
@@ -232,7 +222,7 @@ func TestLocalIdentityCacheKeyForSecret(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LocalIdentityCacheKey: %v", err)
 	}
-	if want := "env-sa|https://core.example.com|svc_01JABCDEFGHJKMNPQRSTVWXYZ0"; got != want {
+	if want := "env-sa|https://us.auth.entire.io|svc_01JABCDEFGHJKMNPQRSTVWXYZ0"; got != want {
 		t.Errorf("key = %q, want %q", got, want)
 	}
 	if strings.Contains(got, "aaaqeayeaudaocaj") {
@@ -375,7 +365,7 @@ func TestParseServiceAccountSecretRefusals(t *testing.T) {
 	}
 }
 
-// With ENTIRE_CORE_URL unset, the secret's jurisdiction picks the Core; the
+// The secret's jurisdiction picks the Core; the
 // exchange, the identity cache key and Forget all use that origin.
 // Not parallel: sets process-wide environment.
 func TestSecretCoreDerivedFromJurisdiction(t *testing.T) {
@@ -386,7 +376,6 @@ func TestSecretCoreDerivedFromJurisdiction(t *testing.T) {
 		t.Run(tc.core, func(t *testing.T) {
 			core := &fakeSecretCore{t: t, expiresIn: 600}
 			useFakeSecretCore(t, core)
-			t.Setenv(SecretCoreURLVar, "")
 			t.Setenv(EnvTokenVar, tc.secret)
 
 			key, err := LocalIdentityCacheKey()
@@ -415,28 +404,13 @@ func TestSecretCoreDerivedFromJurisdiction(t *testing.T) {
 	}
 }
 
-// ENTIRE_CORE_URL wins over the jurisdiction, and is not checked against it.
-// Not parallel: sets process-wide environment.
-func TestSecretCoreOverrideWins(t *testing.T) {
-	core := &fakeSecretCore{t: t, expiresIn: 600}
-	useFakeSecretCore(t, core)
-	t.Setenv(SecretCoreURLVar, "https://core.staging.example.com/ignored/path")
-
-	if _, err := ResolveEnvToken(testServiceAccountSecretEU); err != nil {
-		t.Fatal(err)
-	}
-	if got := core.lastForm.Get("audience"); got != "https://core.staging.example.com" {
-		t.Errorf("audience = %q, want the override origin", got)
-	}
-}
-
 // An exchanged token that is not for this account at this Core, or carries no
 // usable exp, is refused and never cached.
 // Not parallel: sets process-wide environment.
 func TestSecretExchangeRejectsUnusableToken(t *testing.T) {
 	const (
 		account = "svc_01JABCDEFGHJKMNPQRSTVWXYZ0"
-		core    = "https://core.example.com"
+		core    = "https://us.auth.entire.io"
 	)
 	exp := time.Now().Add(10 * time.Minute)
 	for _, tc := range []struct{ name, jwt string }{
@@ -472,7 +446,7 @@ func TestSecretTokenCacheUsesEarlierJWTExp(t *testing.T) {
 	secretNow = func() time.Time { return now }
 	t.Cleanup(func() { secretNow = prev })
 	fake := &fakeSecretCore{t: t, expiresIn: 600,
-		jwt: secretTokenJWT(t, "svc_01JABCDEFGHJKMNPQRSTVWXYZ0", "https://core.example.com", start.Add(5*time.Minute))}
+		jwt: secretTokenJWT(t, "svc_01JABCDEFGHJKMNPQRSTVWXYZ0", "https://us.auth.entire.io", start.Add(5*time.Minute))}
 	useFakeSecretCore(t, fake)
 
 	if _, err := ResolveEnvToken(testServiceAccountSecret); err != nil {
@@ -526,10 +500,9 @@ func TestSecretExchangeDoesNotFollowRedirects(t *testing.T) {
 			home := t.TempDir()
 			t.Setenv("HOME", home)
 			t.Setenv("XDG_CACHE_HOME", home)
-			t.Setenv(SecretCoreURLVar, "https://core.example.com")
 			var other atomic.Int32
 			t.Cleanup(UseSecretExchangeTransportForTesting(roundTripFunc(func(r *http.Request) (*http.Response, error) {
-				if r.URL.Host != "core.example.com" {
+				if r.URL.Host != "us.auth.entire.io" {
 					other.Add(1)
 					body, _ := io.ReadAll(r.Body) //nolint:errcheck // only inspected for the secret
 					if strings.Contains(string(body), "ent_svc_") {
