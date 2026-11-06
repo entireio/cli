@@ -326,10 +326,11 @@ commit.
   looks idle by then, after a long prompt or editor wait, is still condensed
   into the trailer prepare wrote. The entry also names the sessions prepare
   stamped on their shape alone, ACTIVE mid-turn or IDLE with a running
-  subagent (`trustedSessionIDs`). Post-commit condenses those without overlap
-  evidence (`trustedByPrepare`) even once the subagent has finished or the turn
-  has ended, so a session with no tracked files still writes the checkpoint
-  the trailer names. The trailer an amend restores names an
+  subagent (`trustedSessionIDs`). In a commit no session's tracked files
+  claim, post-commit condenses those without overlap evidence
+  (`trustedByPrepare`) even once the subagent has finished or the turn has
+  ended, so a session with no tracked files still writes the checkpoint the
+  trailer names. A claimed commit is the claimant's, as before. The trailer an amend restores names an
   existing checkpoint and is not recorded: post-commit condenses into it for
   its owner without a stamp, and a record a cancelled amend left would let a
   later commit naming it skip its own trailer. Prepare writes a trailer only once

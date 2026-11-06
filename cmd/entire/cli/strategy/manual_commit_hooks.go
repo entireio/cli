@@ -1123,9 +1123,10 @@ type postCommitActionHandler struct {
 	// (see commitProvenance); it condenses only on committed-file overlap.
 	foreign bool
 	// trustedByPrepare marks a session prepare-commit-msg stamped this
-	// commit's trailer for without overlap evidence (trustedSessionIDs). It
-	// keeps the overlap-check bypass once the session has settled, so the
-	// trailer prepare wrote is condensed into.
+	// commit's trailer for without overlap evidence (trustedSessionIDs), in a
+	// commit no session's tracked files claim. It keeps the overlap-check
+	// bypass once the session has settled, so the trailer prepare wrote is
+	// condensed into.
 	trustedByPrepare bool
 
 	// Cached git objects — resolved once per PostCommit invocation to avoid
@@ -1228,11 +1229,11 @@ func (h *postCommitActionHandler) HandleCondenseIfFilesTouched(state *session.St
 // into this commit. Two shapes skip the overlap check: an ACTIVE session with
 // recent interaction, and an IDLE session with a fresh in-flight task record.
 // trusted carries the second, and also a session prepare-commit-msg stamped
-// this commit's trailer for in either shape (trustedByPrepare), however it has
-// settled since. Both are still subject to the read-only gate — a session with
-// no tracked files while another session claims the committed files is
-// somebody else's commit, unless
-// a running subagent of the session wrote one of them (liveTaskEvidence; an
+// this commit's trailer for in either shape, however it has settled since,
+// when no session's tracked files claim the commit (trustedByPrepare). Both
+// are still subject to the read-only gate — a session with no tracked files
+// while another session claims the committed files is somebody else's commit,
+// unless a running subagent of the session wrote one of them (liveTaskEvidence; an
 // ACTIVE session counts too, since it keeps working while its subagent runs). Every
 // other session (a stale ACTIVE one, an IDLE one with no fresh in-flight
 // record, an ENDED one) must show file-overlap evidence between its tracked files and the
@@ -1977,10 +1978,15 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 
 	_, checkContentSpan := perf.Start(ctx, "check_session_content")
 	// Prepare stamped this trailer for the session on its shape alone (see
-	// trustedSessionIDs). Its content is taken as prepare found it, as for an
-	// ACTIVE session, even after a read-only turn has ended. An ENDED
+	// trustedSessionIDs). For a commit no session's tracked files claim, that
+	// trust is all that resolves the trailer, so the session's content is
+	// taken as prepare found it, as for an ACTIVE session, even after a
+	// read-only turn has ended. A claimed commit is the claimant's, as the
+	// read-only gate decides while a subagent still runs, and the session's
+	// own files, its subagent's among them, must overlap the commit. An ENDED
 	// session's work belongs to its own final condensation.
-	trusted := !foreign && state.Phase != session.PhaseEnded && slices.Contains(trustedSessions(ctx), state.SessionID)
+	trusted := !foreign && state.Phase != session.PhaseEnded && sessionsWithCommittedFiles == 0 &&
+		slices.Contains(trustedSessions(ctx), state.SessionID)
 	hasNew := trusted || s.postCommitHasNewContent(ctx, repo, state, committedFileSet)
 	transitionCtx.HasFilesTouched = len(state.FilesTouched) > 0
 	filesTouchedBefore := s.postCommitFilesTouchedBefore(ctx, state, foreign)

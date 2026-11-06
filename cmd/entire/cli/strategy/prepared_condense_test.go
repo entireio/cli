@@ -90,38 +90,56 @@ func TestCommitHooks_SessionStampedMidTaskCondensesAfterItSettles(t *testing.T) 
 	}
 }
 
-// Prepare's trust lifts only the overlap check. A read-only session another
-// session's tracked files outvote is still left out by the read-only gate, as
-// it would have been had post-commit run at once; the other session writes
-// the checkpoint.
-func TestCommitHooks_TrustedReadOnlySessionStillYieldsToTheSessionThatWroteTheCommit(t *testing.T) {
-	t.Setenv(interactive.EnvTestTTY, "1")
-	ctx := context.Background()
-	dir := setupGitRepo(t)
-	t.Chdir(dir)
-	s := NewManualCommitStrategy()
-	setupSessionWithCheckpointAndFile(t, s, dir, "sess-writer", "feature.txt")
-	saveReadOnlySession(t, s, dir, "sess-readonly", startReadOnlySubagent)
+// Prepare's trust stands in only for a commit no session's tracked files
+// claim. Here another session's files claim it, so the session prepare
+// trusted is judged as it would have been had post-commit run at once: left
+// out by the read-only gate when its subagent edited nothing, and held to
+// overlap when the subagent edited a file this commit does not hold, which
+// stays pending with its task record for the commit that does.
+func TestCommitHooks_TrustedSessionYieldsToTheSessionThatWroteTheCommit(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		subagentWrote []string
+	}{
+		{name: "its subagent edited nothing"},
+		{name: "its subagent edited a file not in the commit", subagentWrote: []string{"draft.txt"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(interactive.EnvTestTTY, "1")
+			ctx := context.Background()
+			dir := setupGitRepo(t)
+			t.Chdir(dir)
+			s := NewManualCommitStrategy()
+			setupSessionWithCheckpointAndFile(t, s, dir, "sess-writer", "feature.txt")
+			saveReadOnlySession(t, s, dir, "sess-trusted", startReadOnlySubagent)
 
-	testutil.GitAdd(t, dir, "feature.txt")
-	msg := prepareMessage(t, "feature\n")
-	cps := checkpointIDs(msg)
-	require.Len(t, cps, 1, "%q", msg)
+			testutil.GitAdd(t, dir, "feature.txt")
+			msg := prepareMessage(t, "feature\n")
+			cps := checkpointIDs(msg)
+			require.Len(t, cps, 1, "%q", msg)
 
-	state, err := s.loadSessionState(ctx, "sess-readonly")
-	require.NoError(t, err)
-	finishSubagent(state)
-	require.NoError(t, s.saveSessionState(ctx, state))
+			state, err := s.loadSessionState(ctx, "sess-trusted")
+			require.NoError(t, err)
+			finishSubagent(state)
+			for _, f := range tt.subagentWrote {
+				testutil.WriteFile(t, dir, f, "written by the subagent")
+			}
+			state.FilesTouched = tt.subagentWrote
+			require.NoError(t, s.saveSessionState(ctx, state))
 
-	testutil.GitCommit(t, dir, msg)
-	require.NoError(t, NewManualCommitStrategy().PostCommit(ctx))
+			testutil.GitCommit(t, dir, msg)
+			require.NoError(t, NewManualCommitStrategy().PostCommit(ctx))
 
-	writer, err := s.loadSessionState(ctx, "sess-writer")
-	require.NoError(t, err)
-	assert.Equal(t, cps[0], writer.LastCheckpointID.String(), "the session that wrote the commit condenses")
-	readOnly, err := s.loadSessionState(ctx, "sess-readonly")
-	require.NoError(t, err)
-	assert.Empty(t, readOnly.LastCheckpointID.String(), "the read-only session is not condensed into it")
+			writer, err := s.loadSessionState(ctx, "sess-writer")
+			require.NoError(t, err)
+			assert.Equal(t, cps[0], writer.LastCheckpointID.String(), "the session that wrote the commit condenses")
+			trusted, err := s.loadSessionState(ctx, "sess-trusted")
+			require.NoError(t, err)
+			assert.Empty(t, trusted.LastCheckpointID.String(), "the trusted session is not condensed into it")
+			assert.ElementsMatch(t, tt.subagentWrote, trusted.FilesTouched, "its own edits stay pending")
+			assert.Len(t, trusted.TaskRecords, 1, "its task record waits for the commit that holds its work")
+		})
+	}
 }
 
 // saveReadOnlySession saves an IDLE session homed in dir with a live
