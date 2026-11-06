@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -9,7 +10,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 // Uses t.Chdir — do NOT add t.Parallel().
@@ -100,6 +103,106 @@ func TestCommitLinking_IdleSiblingSessionThatEditedHereStillJoins(t *testing.T) 
 	linked := linkingSessions(t, linkedDir)
 	require.Contains(t, linked, "edited-here")
 	assert.True(t, linked["edited-here"].LinkedByWorktreeEntry, "held to the edits it recorded here")
+}
+
+// A session prepare-commit-msg linked is kept by the idle check however idle
+// it has become since; the other fallback sessions are still judged.
+func TestCommitLinking_FallbackKeepsTheSessionsPrepareLinked(t *testing.T) {
+	mainDir, linkedDir := twoWorktrees(t)
+	s := &ManualCommitStrategy{}
+	dayAgo := time.Now().Add(-24 * time.Hour)
+	saveSiblingSession(t, s, mainDir, "linked", session.PhaseIdle, &dayAgo)
+	saveSiblingSession(t, s, mainDir, "stale", session.PhaseIdle, &dayAgo)
+
+	t.Chdir(linkedDir)
+	clearSessionMatchCaches()
+	sessions, err := s.findSessionsForCommitLinking(withLinkedSessions(context.Background(), []string{"linked"}), linkedDir)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"linked"}, linkedSessionIDs(sessions))
+}
+
+// Prepare links a sibling worktree's session that is not idle when it runs,
+// and stamps the trailer. The commit can then wait on the TTY prompt or the
+// message editor, and by post-commit the session looks idle: past
+// recentSessionWindow, or with its background subagent finished. Post-commit
+// keeps the sessions prepare recorded for the trailer, so it still condenses
+// that session into the stamped checkpoint. Judged afresh, it dropped the
+// session and left the trailer naming a checkpoint that is never written.
+func TestCommitHooks_LinkedSiblingSessionCondensesAfterALongWait(t *testing.T) {
+	now := time.Now()
+	recent := now.Add(-recentSessionWindow + time.Minute)
+	justPast := now.Add(-recentSessionWindow - time.Minute)
+	dayAgo := now.Add(-24 * time.Hour)
+	for _, tt := range []struct {
+		name             string
+		atPrepare        func(*SessionState)
+		beforePostCommit func(*SessionState)
+	}{
+		{
+			name:             "aged past the window",
+			atPrepare:        func(st *SessionState) { st.LastInteractionTime = &recent },
+			beforePostCommit: func(st *SessionState) { st.LastInteractionTime = &justPast },
+		},
+		{
+			name: "its subagent finished",
+			atPrepare: func(st *SessionState) {
+				st.LastInteractionTime = &dayAgo
+				st.TaskRecords = []session.TaskRecord{{ToolUseID: "call_bg", AgentID: "child", StartedAt: justPast}}
+			},
+			beforePostCommit: func(st *SessionState) { st.TaskRecords[0].CompletedAt = time.Now() },
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			homeDir, err := filepath.EvalSymlinks(setupGitRepo(t))
+			require.NoError(t, err, "the recorded home must match git's worktree list")
+			t.Chdir(homeDir)
+			s := NewManualCommitStrategy()
+			setupSessionWithCheckpointAndFile(t, s, homeDir, "sess-sibling", "notes.txt")
+			updateSession := func(change func(*SessionState)) *SessionState {
+				t.Helper()
+				state, err := s.loadSessionState(ctx, "sess-sibling")
+				require.NoError(t, err)
+				state.WorktreePath = homeDir
+				state.Phase = session.PhaseIdle
+				change(state)
+				require.NoError(t, s.saveSessionState(ctx, state))
+				return state
+			}
+			updateSession(tt.atPrepare)
+
+			siblingDir := addSiblingWorktree(t, homeDir, "commit-wt")
+			t.Chdir(siblingDir)
+			testutil.WriteFile(t, siblingDir, "notes.txt", "agent content for notes.txt")
+			testutil.GitAdd(t, siblingDir, "notes.txt")
+			msg := prepareMessage(t, "add notes\n")
+			cps := checkpointIDs(msg)
+			require.Len(t, cps, 1, "prepare links the session, not idle when it runs: %q", msg)
+
+			state := updateSession(tt.beforePostCommit)
+			require.True(t, idleBeyondRecentWindow(state, time.Now()), "sanity: by post-commit the session looks idle")
+			testutil.GitCommit(t, siblingDir, msg)
+			require.NoError(t, NewManualCommitStrategy().PostCommit(ctx))
+
+			state, err = s.loadSessionState(ctx, "sess-sibling")
+			require.NoError(t, err)
+			assert.Equal(t, cps[0], state.LastCheckpointID.String(), "post-commit condenses the session prepare linked")
+		})
+	}
+}
+
+// Post-commit reads the sessions prepare recorded for the trailer it condenses
+// into, and consumes the record with the stamp record.
+func TestStampedSessions_RecordedWithTheTrailerAndTakenOnce(t *testing.T) {
+	t.Chdir(setupGitRepo(t))
+	reserved, other := id.MustCheckpointID("a1b2c3d4e5f6"), id.MustCheckpointID("b1b2c3d4e5f6")
+	require.True(t, recordStampedTrailer(withLinkedSessions(context.Background(), []string{"first"}), reserved))
+	require.True(t, recordStampedTrailer(withLinkedSessions(context.Background(), []string{"second", "third"}), reserved),
+		"a later prepare stamping the same reservation")
+	require.True(t, recordStampedTrailer(context.Background(), other), "a stamp with no linked sessions records none")
+
+	assert.Equal(t, map[id.CheckpointID][]string{reserved: {"second", "third"}}, takeStampedSessions(context.Background()))
+	assert.Empty(t, takeStampedSessions(context.Background()), "post-commit consumes the record")
 }
 
 // The idle check is for linking new commits only. Post-rewrite in the
