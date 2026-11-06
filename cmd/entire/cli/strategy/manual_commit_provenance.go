@@ -287,23 +287,27 @@ func recordStampedTrailer(ctx context.Context, cpID id.CheckpointID) bool {
 // it after the stamp and post-commit takes it before the stamps, so a
 // post-commit that finds its stamp finds the entry too, even with another
 // commit's prepare racing it. With no entry for its trailer, post-commit
-// matches afresh, as before.
+// matches afresh, as before. The entry also names the linked sessions prepare
+// stamped on their shape alone (withTrustedSessions), which post-commit
+// condenses without overlap evidence however they have settled since.
 const stampedSessionsFile = "entire-stamped-sessions.json"
 
 type stampedSessions struct {
-	CheckpointID id.CheckpointID `json:"checkpoint_id"`
-	SessionIDs   []string        `json:"session_ids"`
+	CheckpointID      id.CheckpointID `json:"checkpoint_id"`
+	SessionIDs        []string        `json:"session_ids"`
+	TrustedSessionIDs []string        `json:"trusted_session_ids,omitempty"`
 }
 
-// recordStampedSessions records the sessions ctx marks as linked for cpID,
-// replacing an earlier entry for it (a reservation stamped again by a later
-// prepare). Best effort: without the entry post-commit matches afresh.
+// recordStampedSessions records the sessions ctx marks as linked and trusted
+// for cpID, replacing an earlier entry for it (a reservation stamped again by
+// a later prepare). Best effort: without the entry post-commit matches afresh.
 func recordStampedSessions(ctx context.Context, cpID id.CheckpointID) {
 	sessionIDs := linkedSessions(ctx)
 	if len(sessionIDs) == 0 {
 		return
 	}
-	if err := writeStampedSessions(ctx, stampedSessions{CheckpointID: cpID, SessionIDs: sessionIDs}); err != nil {
+	entry := stampedSessions{CheckpointID: cpID, SessionIDs: sessionIDs, TrustedSessionIDs: trustedSessions(ctx)}
+	if err := writeStampedSessions(ctx, entry); err != nil {
 		logging.Debug(logging.WithComponent(ctx, "checkpoint"), "prepare-commit-msg: could not record the sessions linked to the trailer",
 			slog.String("checkpoint_id", cpID.String()),
 			slog.String("error", err.Error()))
@@ -325,19 +329,19 @@ func writeStampedSessions(ctx context.Context, entry stampedSessions) error {
 	return jsonutil.WriteFileAtomicIn(root, stampedSessionsFile, data, 0o600) //nolint:wrapcheck // recordStampedSessions logs it with context
 }
 
-// takeStampedSessions returns the sessions prepare-commit-msg linked to each
+// takeStampedSessions returns what prepare-commit-msg recorded with each
 // trailer it stamped since the last post-commit, by checkpoint ID, and
 // consumes the record.
-func takeStampedSessions(ctx context.Context) map[id.CheckpointID][]string {
+func takeStampedSessions(ctx context.Context) map[id.CheckpointID]stampedSessions {
 	root, err := perWorktreeGitRoot(ctx)
 	if err != nil {
 		return nil
 	}
 	entries := readStampedSessionsIn(root)
 	_ = osroot.RemoveNoSymlinks(root, stampedSessionsFile) //nolint:errcheck // absent when prepare stamped nothing
-	linked := make(map[id.CheckpointID][]string, len(entries))
+	linked := make(map[id.CheckpointID]stampedSessions, len(entries))
 	for _, e := range entries {
-		linked[e.CheckpointID] = e.SessionIDs
+		linked[e.CheckpointID] = e
 	}
 	return linked
 }

@@ -548,6 +548,9 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 		)
 		return nil
 	}
+	// Recorded with the trailer, so post-commit keeps trusting the sessions
+	// stamped on their shape alone, however they settle in between.
+	ctx = withTrustedSessions(ctx, trustedSessionIDs(provenance.withoutForeign(sessionsWithContent), time.Now()))
 
 	// Read current commit message
 	_, readCommitMessageSpan := perf.Start(ctx, "read_commit_message")
@@ -1002,10 +1005,12 @@ func (s *ManualCommitStrategy) stampFreshCheckpointForAmend(ctx context.Context,
 		return
 	}
 	ctx = withLinkedSessions(ctx, linkedSessionIDs(sessions))
-	withContent := s.filterSessionsWithNewContent(ctx, repo, sessions, redo{}, newCommitProvenance(ctx, sessions))
+	provenance := newCommitProvenance(ctx, sessions)
+	withContent := s.filterSessionsWithNewContent(ctx, repo, sessions, redo{}, provenance)
 	if len(withContent) == 0 {
 		return
 	}
+	ctx = withTrustedSessions(ctx, trustedSessionIDs(provenance.withoutForeign(withContent), time.Now()))
 	cpID, err := checkpointIDForSessions(ctx, withContent)
 	if err != nil {
 		return
@@ -1117,6 +1122,11 @@ type postCommitActionHandler struct {
 	// foreign marks a session whose agent provably did not make this commit
 	// (see commitProvenance); it condenses only on committed-file overlap.
 	foreign bool
+	// trustedByPrepare marks a session prepare-commit-msg stamped this
+	// commit's trailer for without overlap evidence (trustedSessionIDs). It
+	// keeps the overlap-check bypass once the session has settled, so the
+	// trailer prepare wrote is condensed into.
+	trustedByPrepare bool
 
 	// Cached git objects — resolved once per PostCommit invocation to avoid
 	// redundant reads across filesOverlapWithContent, filesWithRemainingAgentChanges,
@@ -1162,13 +1172,14 @@ func (h *postCommitActionHandler) HandleCondense(state *session.State) error {
 	now := time.Now()
 	hasLiveTask := idleWithLiveTaskRecord(state, now)
 	liveTaskEvidence := hasFreshLiveTaskRecord(state, now)
-	shouldCondense := h.shouldCondenseWithOverlapCheck(state.Phase.IsActive(), state.LastInteractionTime, hasLiveTask, liveTaskEvidence)
+	shouldCondense := h.shouldCondenseWithOverlapCheck(state.Phase.IsActive(), state.LastInteractionTime, hasLiveTask || h.trustedByPrepare, liveTaskEvidence)
 
 	logging.Debug(logCtx, "post-commit: HandleCondense decision",
 		slog.String("session_id", state.SessionID),
 		slog.String("phase", string(state.Phase)),
 		slog.Bool("has_new", h.hasNew),
 		slog.Bool("idle_with_live_task", hasLiveTask),
+		slog.Bool("trusted_by_prepare", h.trustedByPrepare),
 		slog.Bool("live_task_evidence", liveTaskEvidence),
 		slog.Int("task_records", len(state.TaskRecords)),
 		slog.Bool("should_condense", shouldCondense),
@@ -1216,15 +1227,18 @@ func (h *postCommitActionHandler) HandleCondenseIfFilesTouched(state *session.St
 // shouldCondenseWithOverlapCheck returns true if the session should be condensed
 // into this commit. Two shapes skip the overlap check: an ACTIVE session with
 // recent interaction, and an IDLE session with a fresh in-flight task record.
-// Both are still subject to the read-only gate — a session with no tracked files while
-// another session claims the committed files is somebody else's commit, unless
+// trusted carries the second, and also a session prepare-commit-msg stamped
+// this commit's trailer for in either shape (trustedByPrepare), however it has
+// settled since. Both are still subject to the read-only gate — a session with
+// no tracked files while another session claims the committed files is
+// somebody else's commit, unless
 // a running subagent of the session wrote one of them (liveTaskEvidence; an
 // ACTIVE session counts too, since it keeps working while its subagent runs). Every
 // other session (a stale ACTIVE one, an IDLE one with no fresh in-flight
 // record, an ENDED one) must show file-overlap evidence between its tracked files and the
 // committed files, and so must a session whose agent provably did not make the
 // commit, though for that one a running subagent's committed edit counts.
-func (h *postCommitActionHandler) shouldCondenseWithOverlapCheck(isActive bool, lastInteraction *time.Time, hasLiveTask, liveTaskEvidence bool) bool {
+func (h *postCommitActionHandler) shouldCondenseWithOverlapCheck(isActive bool, lastInteraction *time.Time, trusted, liveTaskEvidence bool) bool {
 	if !h.hasNew {
 		return false
 	}
@@ -1232,7 +1246,7 @@ func (h *postCommitActionHandler) shouldCondenseWithOverlapCheck(isActive bool, 
 	// in-flight record has no files yet, so overlap is unsatisfiable for it.
 	// LastInteractionTime keeps a stale ACTIVE session (agent killed without a
 	// Stop hook) from condensing into every subsequent commit.
-	if !h.foreign && ((isActive && isRecentInteraction(lastInteraction)) || hasLiveTask) {
+	if !h.foreign && ((isActive && isRecentInteraction(lastInteraction)) || trusted) {
 		if h.sessionsWithCommittedFiles > 0 && len(h.filesTouchedBefore) == 0 && !h.liveTaskCoauthored(liveTaskEvidence) {
 			logging.Debug(logging.WithComponent(h.ctx, "checkpoint"), "post-commit: skipping read-only session (no tracked files, other sessions claim committed files)",
 				slog.Bool("is_active", isActive),
@@ -1390,6 +1404,32 @@ func idleWithLiveTaskRecord(state *SessionState, now time.Time) bool {
 	return state.Phase == session.PhaseIdle && hasFreshLiveTaskRecord(state, now)
 }
 
+// condensesWithoutOverlap reports whether state has, at now, one of the two
+// shapes shouldCondenseWithOverlapCheck condenses without file-overlap
+// evidence: ACTIVE with recent interaction, or IDLE with a fresh in-flight
+// task record (idleWithLiveTaskRecord).
+func condensesWithoutOverlap(state *SessionState, now time.Time) bool {
+	return (state.Phase.IsActive() && isRecentInteraction(state.LastInteractionTime)) || idleWithLiveTaskRecord(state, now)
+}
+
+// trustedSessionIDs returns the IDs of the states, none foreign to the commit,
+// that prepare-commit-msg stamps a trailer for on their shape alone
+// (condensesWithoutOverlap at now). Prepare records them with the trailer
+// (withTrustedSessions), and post-commit keeps that trust for them: the commit
+// can wait on the TTY prompt or the message editor for any length of time,
+// and meanwhile a read-only subagent can finish or a read-only turn end.
+// Judged afresh, such a session has no tracked files to show overlap, and the
+// commit would keep a trailer naming a checkpoint that is never written.
+func trustedSessionIDs(states []*SessionState, now time.Time) []string {
+	var ids []string
+	for _, state := range states {
+		if condensesWithoutOverlap(state, now) {
+			ids = append(ids, state.SessionID)
+		}
+	}
+	return ids
+}
+
 // hasFreshLiveTaskRecord reports whether a session that has not ENDED has a
 // task record in flight that started within activeSessionInteractionThreshold.
 // It decides only whether a running subagent's edits are evidence for a
@@ -1504,8 +1544,10 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	// Union of worktree and identity matching — must resolve the same way
 	// PrepareCommitMsg did, or the stamped trailer and the condensed session
 	// diverge (a dangling trailer). So it keeps the sessions prepare recorded
-	// for this trailer, however long the prompt or editor took in between.
-	ctx = withLinkedSessions(ctx, linkedByStamp[checkpointID])
+	// for this trailer, however long the prompt or editor took in between,
+	// and its trust in the ones it stamped on their shape alone.
+	stamp := linkedByStamp[checkpointID]
+	ctx = withTrustedSessions(withLinkedSessions(ctx, stamp.SessionIDs), stamp.TrustedSessionIDs)
 	sessions, err := s.findSessionsForCommitLinking(ctx, worktreePath)
 	findSessionsSpan.RecordError(err)
 	findSessionsSpan.End()
@@ -1934,7 +1976,12 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 	}
 
 	_, checkContentSpan := perf.Start(ctx, "check_session_content")
-	hasNew := s.postCommitHasNewContent(ctx, repo, state, committedFileSet)
+	// Prepare stamped this trailer for the session on its shape alone (see
+	// trustedSessionIDs). Its content is taken as prepare found it, as for an
+	// ACTIVE session, even after a read-only turn has ended. An ENDED
+	// session's work belongs to its own final condensation.
+	trusted := !foreign && state.Phase != session.PhaseEnded && slices.Contains(trustedSessions(ctx), state.SessionID)
+	hasNew := trusted || s.postCommitHasNewContent(ctx, repo, state, committedFileSet)
 	transitionCtx.HasFilesTouched = len(state.FilesTouched) > 0
 	filesTouchedBefore := s.postCommitFilesTouchedBefore(ctx, state, foreign)
 	// Like FilesTouched, the recorded hashes are cleared by condensation but
@@ -1975,6 +2022,7 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 		}),
 		condensedTelemetry: condensedTelemetry,
 		foreign:            foreign,
+		trustedByPrepare:   trusted,
 	}
 
 	if err := TransitionAndLog(ctx, state, session.EventGitCommit, *transitionCtx, handler); err != nil {
@@ -2965,7 +3013,8 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 			)
 			continue
 		}
-		_ = s.addTrailerForAgentCommit(logCtx, commitMsgFile, state, source, inherited) //nolint:errcheck // always returns nil; kept for signature stability
+		stampCtx := withTrustedSessions(logCtx, trustedSessionIDs([]*SessionState{state}, now))
+		_ = s.addTrailerForAgentCommit(stampCtx, commitMsgFile, state, source, inherited) //nolint:errcheck // always returns nil; kept for signature stability
 		return true
 	}
 	// Log why fast path didn't fire — task_records spans ALL sessions so

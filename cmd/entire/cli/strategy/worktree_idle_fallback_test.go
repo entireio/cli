@@ -192,16 +192,19 @@ func TestCommitHooks_LinkedSiblingSessionCondensesAfterALongWait(t *testing.T) {
 }
 
 // Post-commit reads the sessions prepare recorded for the trailer it condenses
-// into, and consumes the record with the stamp record.
+// into, and the ones among them it trusted on their shape alone, and consumes
+// the record with the stamp record.
 func TestStampedSessions_RecordedWithTheTrailerAndTakenOnce(t *testing.T) {
 	t.Chdir(setupGitRepo(t))
 	reserved, other := id.MustCheckpointID("a1b2c3d4e5f6"), id.MustCheckpointID("b1b2c3d4e5f6")
 	require.True(t, recordStampedTrailer(withLinkedSessions(context.Background(), []string{"first"}), reserved))
-	require.True(t, recordStampedTrailer(withLinkedSessions(context.Background(), []string{"second", "third"}), reserved),
-		"a later prepare stamping the same reservation")
+	later := withTrustedSessions(withLinkedSessions(context.Background(), []string{"second", "third"}), []string{"third"})
+	require.True(t, recordStampedTrailer(later, reserved), "a later prepare stamping the same reservation")
 	require.True(t, recordStampedTrailer(context.Background(), other), "a stamp with no linked sessions records none")
 
-	assert.Equal(t, map[id.CheckpointID][]string{reserved: {"second", "third"}}, takeStampedSessions(context.Background()))
+	assert.Equal(t, map[id.CheckpointID]stampedSessions{
+		reserved: {CheckpointID: reserved, SessionIDs: []string{"second", "third"}, TrustedSessionIDs: []string{"third"}},
+	}, takeStampedSessions(context.Background()))
 	assert.Empty(t, takeStampedSessions(context.Background()), "post-commit consumes the record")
 }
 

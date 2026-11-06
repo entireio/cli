@@ -517,6 +517,28 @@ func linkedSessions(ctx context.Context) []string {
 	return nil
 }
 
+type trustedSessionsKey struct{}
+
+// withTrustedSessions marks sessionIDs as the sessions prepare-commit-msg
+// stamped the commit's trailer for without overlap evidence
+// (trustedSessionIDs). Prepare records them with the trailer it stamps, and
+// post-commit marks the ones recorded for its trailer, which it then condenses
+// without overlap evidence (postCommitActionHandler.trustedByPrepare).
+func withTrustedSessions(ctx context.Context, sessionIDs []string) context.Context {
+	if len(sessionIDs) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, trustedSessionsKey{}, slices.Clone(sessionIDs))
+}
+
+// trustedSessions returns the session IDs withTrustedSessions marked on ctx.
+func trustedSessions(ctx context.Context) []string {
+	if ids, ok := ctx.Value(trustedSessionsKey{}).([]string); ok {
+		return ids
+	}
+	return nil
+}
+
 // linkedSessionIDs returns the IDs of states, for withLinkedSessions.
 func linkedSessionIDs(states []*SessionState) []string {
 	ids := make([]string, 0, len(states))
