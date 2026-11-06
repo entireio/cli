@@ -118,6 +118,7 @@ func TestString_CommandLinePasswords(t *testing.T) {
 		{name: "relative quoted program path with a blank in a directory", input: `"mysql tools/bin/mysql" -p` + p, want: `"mysql tools/bin/mysql" -pREDACTED`},
 		{name: "line continuation inside a quoted password", input: "openssl enc -pass \"pass:Summer\\\n2026Release\" -in f", want: "openssl enc -pass \"pass:REDACTED\" -in f"},
 		{name: "semicolon in a command substitution in an earlier argument", input: "openssl enc -in $(printf /dev/null; true) -pass pass:" + p, want: "openssl enc -in $(printf /dev/null; true) -pass pass:REDACTED"},
+		{name: "client run in a command substitution of the same client", input: "mysql -h $(cat host; mysql -p" + p + " -e 'select 1') app", want: "mysql -h $(cat host; mysql -pREDACTED -e 'select 1') app"},
 	})
 }
 
@@ -170,6 +171,8 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		`"/opt/mysql tools/bin/psql" -p5432`,
 		"sh -c 'mysql --execute=/bin/mysql' -p2222",
 		`Run "mysql --socket=/run/mysql" through ssh -p2222 host`,
+		"mysql -e $(true; ssh -p2222 host) app",
+		"mysql -e $(printf x; echo -pDebug) app",
 		`mysql -e \"; printf hello\" -phunter2`,
 		`netrc := "machine h login me password " + password + "\n"`,
 		`cmd := "mongosh --password " + password + " db"`,
