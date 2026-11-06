@@ -90,7 +90,7 @@ func TestProjectTrailUpdateBareNumberShowsTheServerRefusal(t *testing.T) {
 	require.NotContains(t, err.Error(), "\x1b")
 	require.NotContains(t, err.Error(), "\x07")
 	require.NotContains(t, err.Error(), "API error", "the refusal stands on its own")
-	require.Contains(t, err.Error(), "\nTo update this branch's trail, rerun without 42. To update #42 anyway, rerun with "+projectTrailTestID+" --project gh/acme in place of 42.")
+	require.Contains(t, err.Error(), "\nTo update this branch's trail, rerun without 42. To update #42 anyway, rerun with "+projectTrailTestID+" --project gh/acme in place of 42")
 }
 
 // Another 409 keeps its usual error.

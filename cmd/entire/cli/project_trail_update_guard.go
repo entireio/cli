@@ -66,7 +66,7 @@ func trailBranchRefusal(err error, selector string, target *projectTrailTarget, 
 	if !errors.As(err, &httpErr) || !strings.HasPrefix(httpErr.Code, "trail_branch_") {
 		return err
 	}
-	return fmt.Errorf("%s\nTo update this branch's trail, rerun without %s. To update #%d anyway, rerun with %s --project %s/%s in place of %s.",
+	return fmt.Errorf("%s\nTo update this branch's trail, rerun without %s. To update #%d anyway, rerun with %s --project %s/%s in place of %s",
 		singleLineTerminalText(httpErr.Message), selector, current.Number, tuiutil.SanitizeTerminalLabel(current.ID),
 		tuiutil.SanitizeTerminalLabel(target.Host), tuiutil.SanitizeTerminalLabel(target.Project), selector)
 }
