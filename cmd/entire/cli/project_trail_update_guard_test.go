@@ -72,10 +72,11 @@ func TestProjectTrailUpdateBareNumberSendsTheBranch(t *testing.T) {
 	require.Equal(t, []url.Values{{"from_repo_id": {guardRepoID}, "from_branch": {"feature/mine"}, "branch_check": {"required"}}}, *patches)
 }
 
-// The server's refusal carries the safe reruns; the CLI shows it as is.
+// The server's refusal carries the safe reruns; the CLI shows it on its own,
+// sanitized to one line, since it echoes the branch name.
 func TestProjectTrailUpdateBareNumberShowsTheServerRefusal(t *testing.T) {
 	setupGuardRepo(t)
-	refusal := `Branch "feature/mine" has work on another Trail, not on #42, so nothing was updated. To update this branch's own Trail, leave out the number.`
+	refusal := "Branch \"feature/mine\x1b]0;x\x07\" has work on another Trail, not on #42, so nothing was updated.\nTo update this branch's own Trail, leave out the number."
 	serveGuardProject(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusConflict)
@@ -84,7 +85,25 @@ func TestProjectTrailUpdateBareNumberShowsTheServerRefusal(t *testing.T) {
 
 	_, _, err := executeProjectTrailTest(t, "update", "42", "--body", "x")
 
-	require.ErrorContains(t, err, refusal)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "has work on another Trail, not on #42, so nothing was updated. To update this branch's own Trail, leave out the number.")
+	require.NotContains(t, err.Error(), "\x1b")
+	require.NotContains(t, err.Error(), "\x07")
+	require.NotContains(t, err.Error(), "API error", "the refusal stands on its own")
+}
+
+// Another 409 keeps its usual error.
+func TestProjectTrailUpdateBareNumberPassesOtherConflictsThrough(t *testing.T) {
+	setupGuardRepo(t)
+	serveGuardProject(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"error": "refused", "code": "conflict"}))
+	})
+
+	_, _, err := executeProjectTrailTest(t, "update", "42", "--body", "x")
+
+	require.ErrorContains(t, err, "update project trail: project trail request: API error: refused (status 409)")
 }
 
 // Where the branch does not decide which trail the number means, or no trail
@@ -141,7 +160,11 @@ func TestProjectTrailUpdateBareNumberRefusesWhenNothingCanBeSent(t *testing.T) {
 		{name: "detached HEAD", setup: func(t *testing.T) {
 			t.Helper()
 			testutil.RunGit(t, ".", "checkout", "--detach")
-		}, want: `refusing to update trail #42 "Project intent": HEAD is not on a branch, so the server cannot check that this work belongs to #42; rerun with --branch <branch> added, or with ` + projectTrailTestID + " --project gh/acme in place of 42"},
+		}, want: `refusing to update trail #42 "Project intent": the checked-out branch is unknown (not on a branch (detached HEAD)), so the server cannot check that this work belongs to #42; rerun with --branch <branch> added, or with ` + projectTrailTestID + " --project gh/acme in place of 42"},
+		{name: "unborn branch", setup: func(t *testing.T) {
+			t.Helper()
+			testutil.RunGit(t, ".", "checkout", "--orphan", "fresh")
+		}, want: "the checked-out branch is unknown (failed to get HEAD:"},
 		{name: "repository does not resolve", setup: func(t *testing.T) {
 			t.Helper()
 			stubGuardPlacement(t, func(context.Context, string, string, string) (repoCellPlacement, error) {

@@ -18,7 +18,7 @@ import (
 // belongs to another trail. Project trail, change, and pull request numbers
 // look alike, so `trail update 1744` meant for change cli/1744 would otherwise
 // replace fields of unrelated trail #1744. The server's refusal names the safe
-// reruns and is shown as is.
+// reruns and is shown as is, sanitized for the terminal.
 //
 // Only a bare number without --branch, from a clone of a repository in the
 // trail's project (with --repo, only when it names that clone's repository),
@@ -37,8 +37,12 @@ func projectTrailUpdatePath(cmd *cobra.Command, selector string, target *project
 	}
 	branch, err := GetCurrentBranch(ctx)
 	if err != nil || branch == "" {
-		return "", fmt.Errorf("refusing to update trail #%d %q: HEAD is not on a branch, so the server cannot check that this work belongs to #%d; rerun with --branch <branch> added, or with %s --project %s/%s in place of %d",
-			number, tuiutil.SanitizeTerminalLabel(current.Title), number, tuiutil.SanitizeTerminalLabel(current.ID),
+		reason := "no branch is checked out"
+		if err != nil {
+			reason = singleLineTerminalText(err.Error())
+		}
+		return "", fmt.Errorf("refusing to update trail #%d %q: the checked-out branch is unknown (%s), so the server cannot check that this work belongs to #%d; rerun with --branch <branch> added, or with %s --project %s/%s in place of %d",
+			number, tuiutil.SanitizeTerminalLabel(current.Title), reason, number, tuiutil.SanitizeTerminalLabel(current.ID),
 			tuiutil.SanitizeTerminalLabel(target.Host), tuiutil.SanitizeTerminalLabel(target.Project), number)
 	}
 	placement, err := resolveTrailUpdatePlacement(ctx, forge, owner, repo)
@@ -50,6 +54,23 @@ func projectTrailUpdatePath(cmd *cobra.Command, selector string, target *project
 	}
 	query := url.Values{"from_repo_id": {placement.RepoID}, "from_branch": {branch}, "branch_check": {"required"}}
 	return path + "?" + query.Encode(), nil
+}
+
+// trailBranchRefusal shows the server's branch-check refusal on its own,
+// sanitized to one line: it echoes the branch, and the server's text is not
+// trusted for the terminal. Other errors pass through unchanged.
+func trailBranchRefusal(err error) error {
+	var httpErr *api.HTTPError
+	if errors.As(err, &httpErr) && strings.HasPrefix(httpErr.Code, "trail_branch_") {
+		return errors.New(singleLineTerminalText(httpErr.Message))
+	}
+	return err
+}
+
+// singleLineTerminalText sanitizes untrusted text for a one-line terminal
+// message.
+func singleLineTerminalText(s string) string {
+	return strings.Join(strings.Fields(tuiutil.SanitizeTerminalText(s)), " ")
 }
 
 // resolveTrailUpdatePlacement resolves the clone's repository to the id the
