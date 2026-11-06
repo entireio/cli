@@ -1487,7 +1487,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 		return nil
 	}
 	if targetPreexisting {
-		ctx = withPreexistingTarget(ctx)
+		ctx = withPreexistingTarget(ctx, checkpointID)
 	}
 	if slices.Contains(moved, checkpointID) {
 		ctx = withRecordedCommitLink(ctx, head.Hash().String())

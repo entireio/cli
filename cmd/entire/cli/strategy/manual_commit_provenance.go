@@ -102,10 +102,16 @@ func (s *ManualCommitStrategy) condensationTarget(ctx context.Context, repo *git
 
 type preexistingTargetKey struct{}
 
-// withPreexistingTarget marks a post-commit whose condensation target already
-// had a checkpoint when the hook began.
-func withPreexistingTarget(ctx context.Context) context.Context {
-	return context.WithValue(ctx, preexistingTargetKey{}, true)
+// withPreexistingTarget marks a post-commit whose condensation target,
+// checkpointID, already had a checkpoint when the hook began.
+func withPreexistingTarget(ctx context.Context, checkpointID id.CheckpointID) context.Context {
+	return context.WithValue(ctx, preexistingTargetKey{}, checkpointID)
+}
+
+// preexistingTarget returns the target withPreexistingTarget marked.
+func preexistingTarget(ctx context.Context) (id.CheckpointID, bool) {
+	checkpointID, ok := ctx.Value(preexistingTargetKey{}).(id.CheckpointID)
+	return checkpointID, ok
 }
 
 // stampedByAnotherCommit reports whether checkpointID is a preexisting
@@ -113,10 +119,18 @@ func withPreexistingTarget(ctx context.Context) context.Context {
 // amending (LastCheckpointID) nor its pending reservation. Writing there would
 // fold new work into another commit's record.
 func stampedByAnotherCommit(ctx context.Context, checkpointID id.CheckpointID, state *SessionState) bool {
-	if ctx.Value(preexistingTargetKey{}) != true {
+	if _, ok := preexistingTarget(ctx); !ok {
 		return false
 	}
 	return checkpointID != state.LastCheckpointID && checkpointID != state.PendingCondensationID()
+}
+
+// ownsPreexistingTarget reports whether state may condense into the existing
+// checkpoint this post-commit's trailer names, as the session an amend's kept
+// trailer belongs to does: the commit links state by that trailer already.
+func ownsPreexistingTarget(ctx context.Context, state *SessionState) bool {
+	target, ok := preexistingTarget(ctx)
+	return ok && !stampedByAnotherCommit(ctx, target, state)
 }
 
 func checkpointExists(ctx context.Context, store checkpoint.PersistentStore, checkpointID id.CheckpointID) bool {
