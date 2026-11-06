@@ -1643,12 +1643,18 @@
             "type": "string"
           },
           "orgId": {
+            "description": "Optional. Must match the project's owning org.",
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          },
+          "project_id": {
+            "description": "Owning project. An org or an account owns it.",
             "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
             "type": "string"
           }
         },
         "required": [
-          "orgId",
+          "project_id",
           "name"
         ],
         "type": "object"
@@ -4213,10 +4219,23 @@
       "OIDCProvider": {
         "additionalProperties": true,
         "properties": {
+          "attributes": {
+            "description": "Attributes a binding filter can pin.",
+            "items": {
+              "$ref": "#/components/schemas/OIDCProviderAttribute"
+            },
+            "type": "array"
+          },
           "description": {
             "type": "string"
           },
           "displayName": {
+            "deprecated": true,
+            "description": "Deprecated: use name for the slug and label for the human label. Removal after 2027-05-01.",
+            "type": "string"
+          },
+          "docs_url": {
+            "description": "The provider's OIDC setup guide.",
             "type": "string"
           },
           "id": {
@@ -4224,11 +4243,57 @@
           },
           "issuer": {
             "type": "string"
+          },
+          "label": {
+            "description": "Human label, such as GitHub Actions.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Stable slug, such as github-actions.",
+            "type": "string"
+          },
+          "self_serve": {
+            "description": "True when a project manager can bind this provider.",
+            "type": "boolean"
           }
         },
         "required": [
           "id",
           "issuer"
+        ],
+        "type": "object"
+      },
+      "OIDCProviderAttribute": {
+        "additionalProperties": true,
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "exact": {
+            "description": "The value must not contain '*'.",
+            "type": "boolean"
+          },
+          "label": {
+            "type": "string"
+          },
+          "name": {
+            "description": "The attributeFilter key.",
+            "type": "string"
+          },
+          "pattern": {
+            "description": "RE2 expression the pinned value must match.",
+            "type": "string"
+          },
+          "required": {
+            "description": "Every filter must pin this attribute.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "label",
+          "required",
+          "exact"
         ],
         "type": "object"
       },
@@ -6065,6 +6130,12 @@
             "type": "string"
           },
           "orgId": {
+            "deprecated": true,
+            "description": "Deprecated: use the project's owner. Removal after 2027-05-01.",
+            "type": "string"
+          },
+          "project_id": {
+            "description": "Owning project.",
             "type": "string"
           },
           "status": {
@@ -6077,7 +6148,6 @@
         "required": [
           "accountId",
           "name",
-          "orgId",
           "status",
           "systemManaged",
           "createdAt"
@@ -6127,6 +6197,12 @@
             "type": "string"
           },
           "orgId": {
+            "deprecated": true,
+            "description": "Deprecated: use the project's owner. Removal after 2027-05-01.",
+            "type": "string"
+          },
+          "project_id": {
+            "description": "Owning project.",
             "type": "string"
           },
           "status": {
@@ -6140,7 +6216,6 @@
           "grants",
           "accountId",
           "name",
-          "orgId",
           "status",
           "systemManaged",
           "createdAt"
@@ -13557,11 +13632,23 @@
             }
           },
           {
+            "description": "List the org's service accounts.",
             "explode": false,
             "in": "query",
             "name": "orgId",
-            "required": true,
             "schema": {
+              "description": "List the org's service accounts.",
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "List the project's service accounts.",
+            "explode": false,
+            "in": "query",
+            "name": "project_id",
+            "schema": {
+              "description": "List the project's service accounts.",
               "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
               "type": "string"
             }
@@ -13597,7 +13684,7 @@
             "sessionAuth": []
           }
         ],
-        "summary": "List service accounts in an org",
+        "summary": "List service accounts in an org or project",
         "tags": [
           "service-accounts"
         ]
