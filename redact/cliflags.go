@@ -260,23 +260,19 @@ func (f cliPasswordFlag) segmentRest(s string, lines *quoteScan, i, closeAt, str
 	}
 }
 
-// programPathStart matches the start of a path: from the root, the home or
-// current directory, or a drive (C:\). notProgramPath matches an option or a
-// shell operator, which a path holds none of.
-var (
-	programPathStart = regexp.MustCompile(`^(?:[A-Za-z]:)?[/\\~.]`)
-	notProgramPath   = regexp.MustCompile("[ \t]-|[;|&<>`\r\n]")
-)
+// notProgramPath matches an option or a shell operator, which a program path
+// holds none of.
+var notProgramPath = regexp.MustCompile("[ \t]-|[;|&<>`\r\n]")
 
 // isProgramPath reports whether inside, the inside of a quoted string that
 // holds a client name, is the path of a program f defines with a blank in a
-// directory ("/opt/mysql tools/bin/mysql") rather than a command with its
-// arguments (sh -c 'mysql --execute=/bin/mysql'): it starts like a path,
-// holds no option or shell operator, and its last component starts with the
-// name (mysql, mysql.exe).
+// directory ("/opt/mysql tools/bin/mysql", "mysql tools/bin/mysql") rather
+// than a command with its arguments (sh -c 'mysql --execute=/bin/mysql'): it
+// holds no option or shell operator, and its last path component starts with
+// the name (mysql, mysql.exe).
 func (f cliPasswordFlag) isProgramPath(inside string) bool {
 	sep := strings.LastIndexAny(inside, `/\`)
-	if sep < 0 || strings.ContainsAny(inside[sep:], " \t") || !programPathStart.MatchString(inside) || notProgramPath.MatchString(inside) {
+	if sep < 0 || strings.ContainsAny(inside[sep:], " \t") || notProgramPath.MatchString(inside) {
 		return false
 	}
 	loc := f.command.FindStringIndex(inside[sep+1:])
