@@ -335,7 +335,9 @@ func LoadBackgroundClaimContext(ctx context.Context, sessionID, toolUseID string
 // sessionID as subagent and parent (a parent's task record naming the other as
 // its agent, or a subagent session's transcript naming sessionID as the one
 // that launched it) are never counted: one runs on the other's behalf. related
-// names more such sessions, for a link not yet recorded.
+// names more such sessions, for a link not yet recorded. forTask says the
+// caller is one of sessionID's tasks rather than its turn: sessionID's own
+// subagent sessions then do count, since they run its other tasks.
 //
 // git status shows every dirty file in a worktree, not which session changed
 // it, so while another session's turn overlapped this one, a file only git
@@ -343,7 +345,7 @@ func LoadBackgroundClaimContext(ctx context.Context, sessionID, toolUseID string
 // in other worktrees, and other sessions' background tasks, whose own stop
 // handles overlap with other tasks (LoadBackgroundClaimContext) but not with
 // turns.
-func OtherSessionActiveSince(ctx context.Context, worktreePath, sessionID string, related []string, since time.Time) (bool, error) {
+func OtherSessionActiveSince(ctx context.Context, worktreePath, sessionID string, related []string, since time.Time, forTask bool) (bool, error) {
 	states, err := ListSessionStates(ctx)
 	if err != nil {
 		return false, err
@@ -356,7 +358,7 @@ func OtherSessionActiveSince(ctx context.Context, worktreePath, sessionID string
 	for _, state := range states {
 		for _, rec := range state.TaskRecords {
 			switch {
-			case state.SessionID == sessionID && rec.AgentID != "":
+			case state.SessionID == sessionID && rec.AgentID != "" && !forTask:
 				skip[rec.AgentID] = true // a subagent that runs as a session of its own
 			case rec.AgentID == sessionID:
 				skip[state.SessionID] = true // sessionID is that session's subagent
@@ -364,7 +366,7 @@ func OtherSessionActiveSince(ctx context.Context, worktreePath, sessionID string
 		}
 	}
 	for _, state := range exactWorktreeMatches(ctx, states, worktreePath) {
-		if !skip[state.SessionID] && sessionActiveSince(state, since) && !launchedBy(state, sessionID) {
+		if !skip[state.SessionID] && sessionActiveSince(state, since) && (forTask || !launchedBy(state, sessionID)) {
 			return true, nil
 		}
 	}

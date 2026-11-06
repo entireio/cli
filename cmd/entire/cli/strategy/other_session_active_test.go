@@ -80,7 +80,7 @@ func TestOtherSessionActiveSince(t *testing.T) {
 	// rather than as parallel subtests, each removing its session afterwards.
 	for _, tt := range tests {
 		save(tt.other)
-		got, err := OtherSessionActiveSince(ctx, worktree, "own", tt.related, since)
+		got, err := OtherSessionActiveSince(ctx, worktree, "own", tt.related, since, false)
 		if err != nil {
 			t.Fatalf("%s: OtherSessionActiveSince() error = %v", tt.name, err)
 		}
@@ -89,6 +89,25 @@ func TestOtherSessionActiveSince(t *testing.T) {
 		}
 		if err := ClearSessionState(ctx, tt.other.SessionID); err != nil {
 			t.Fatalf("ClearSessionState(%q) error = %v", tt.other.SessionID, err)
+		}
+	}
+
+	// For one of own's tasks, own's Workers run its other tasks, so they count.
+	for _, worker := range []*SessionState{
+		{SessionID: "worker", Phase: session.PhaseActive, LastInteractionTime: &after},
+		{SessionID: "own-worker", Phase: session.PhaseActive, LastInteractionTime: &after,
+			AgentType: agent.AgentTypeFactoryAIDroid, TranscriptPath: ownWorkerTranscript},
+	} {
+		save(worker)
+		got, err := OtherSessionActiveSince(ctx, worktree, "own", nil, since, true)
+		if err != nil {
+			t.Fatalf("%s for a task: OtherSessionActiveSince() error = %v", worker.SessionID, err)
+		}
+		if !got {
+			t.Errorf("%s for a task: OtherSessionActiveSince() = false, want true", worker.SessionID)
+		}
+		if err := ClearSessionState(ctx, worker.SessionID); err != nil {
+			t.Fatalf("ClearSessionState(%q) error = %v", worker.SessionID, err)
 		}
 	}
 }

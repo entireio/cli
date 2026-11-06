@@ -24,6 +24,10 @@ type statusClaim struct {
 	// the parent of a subagent that runs as a session of its own.
 	related []string
 
+	// forTask marks a foreground task's completion, for which the session's
+	// own subagent sessions are other tasks' work.
+	forTask bool
+
 	// capturedAt is when the prompt-start or task-launch baseline was
 	// captured; zero when unknown.
 	capturedAt time.Time
@@ -60,7 +64,7 @@ func (c statusClaim) narrow(ctx context.Context, modified, created, deleted []st
 		return modified, created, deleted
 	}
 	logCtx := logging.WithComponent(ctx, "lifecycle")
-	overlapped, err := strategy.OtherSessionActiveSince(ctx, c.repoRoot, c.sessionID, c.related, c.capturedAt)
+	overlapped, err := strategy.OtherSessionActiveSince(ctx, c.repoRoot, c.sessionID, c.related, c.capturedAt, c.forTask)
 	if err != nil {
 		logging.Warn(logCtx, "cannot read other sessions in the worktree; claiming only files the transcript names",
 			slog.String("error", err.Error()))
@@ -125,7 +129,9 @@ func (s *PreTaskState) statusClaim(repoRoot, sessionID string, named []string) s
 	if s == nil {
 		return statusClaim{}
 	}
-	return newStatusClaim(repoRoot, sessionID, s.Timestamp, s.DirtyTrackedFileStats, named, nil)
+	c := newStatusClaim(repoRoot, sessionID, s.Timestamp, s.DirtyTrackedFileStats, named, nil)
+	c.forTask = true
+	return c
 }
 
 func newStatusClaim(repoRoot, sessionID, timestamp string, dirtyTracked map[string]UntrackedFileStat, named, related []string) statusClaim {
