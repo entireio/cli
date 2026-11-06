@@ -582,7 +582,10 @@ func isVersionValue(key, val string) bool {
 // dropNestedPIIRegions removes a region that lies inside another one with
 // the same label, so a value counts once: both IP rules match an IPv4-mapped
 // address, the IPv4 rule only its dotted tail (::ffff:10.0.0.1), and the North
-// American phone rule matches the national part of +39 347 000 0001.
+// American phone rule matches the national part of +39 347 000 0001. A custom
+// pattern named ip is never dropped for lying inside a built-in IP match, since
+// the version-key rule can remove the built-in one later and would leave the
+// custom match's text visible ({"version":"::ffff:10.0.0.5"}).
 func dropNestedPIIRegions(regions []taggedRegion) []taggedRegion {
 	if len(regions) < 2 {
 		return regions
@@ -593,18 +596,18 @@ func dropNestedPIIRegions(regions []taggedRegion) []taggedRegion {
 		}
 		return b.end - a.end
 	})
-	// Regions are sorted by start, so a kept region of the same label that
-	// ends at or after r contains it, even when a region of another label
+	// Regions are sorted by start, so a kept region of the same kind that
+	// ends at or after r contains it, even when a region of another kind
 	// sorts between them.
-	var ends []labelEnd
+	var ends []kindEnd
 	kept := regions[:0]
 	for _, r := range regions {
-		i := slices.IndexFunc(ends, func(e labelEnd) bool { return e.label == r.label })
+		i := slices.IndexFunc(ends, func(e kindEnd) bool { return e.label == r.label && e.builtinIP == r.builtinIP })
 		if i >= 0 && r.end <= ends[i].end {
 			continue
 		}
 		if i < 0 {
-			ends = append(ends, labelEnd{r.label, r.end})
+			ends = append(ends, kindEnd{r.label, r.builtinIP, r.end})
 		} else {
 			ends[i].end = r.end
 		}
@@ -613,10 +616,12 @@ func dropNestedPIIRegions(regions []taggedRegion) []taggedRegion {
 	return kept
 }
 
-// labelEnd is the furthest end of the kept regions with one label.
-type labelEnd struct {
-	label string
-	end   int
+// kindEnd is the furthest end of the kept regions with one label, built-in
+// IP matches apart.
+type kindEnd struct {
+	label     string
+	builtinIP bool
+	end       int
 }
 
 // isNetworkKey reports whether a JSON key names an address. The key is split

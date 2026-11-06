@@ -67,7 +67,8 @@ func redactableIntlPhone(s string, start, end int) (int, int, bool) {
 	if cc > 3 && s[ccEnd] != ' ' {
 		return 0, 0, false
 	}
-	return start, end, dotsReadAsPhone(s, start, ccEnd, end)
+	end, ok = endDottedPhone(s, start, ccEnd, end)
+	return start, end, ok
 }
 
 // trimIntlPhone returns the end of the number in s[start:end] once the groups
@@ -114,6 +115,24 @@ func dotsReadAsPhone(s string, start, ccEnd, end int) bool {
 	return err != nil
 }
 
+// endDottedPhone returns the end of the number in s[start:end] once its dots,
+// if any, read as a phone number's. A space also joins a dotted number to the
+// text after it (+33 1.99.00.12.34 2026), so groups after a space are dropped
+// until they do, while 9 digits remain.
+func endDottedPhone(s string, start, ccEnd, end int) (int, bool) {
+	for !dotsReadAsPhone(s, start, ccEnd, end) {
+		i := strings.LastIndexByte(s[ccEnd+1:end], ' ')
+		if i < 0 {
+			return 0, false
+		}
+		end = ccEnd + 1 + i
+		if countDigits(s[start:end]) < intlPhoneMinDigits {
+			return 0, false
+		}
+	}
+	return end, true
+}
+
 func countDigits(s string) int {
 	n := 0
 	for i := range len(s) {
@@ -137,8 +156,9 @@ func intlPhoneStandsAlone(s string, start int) bool {
 }
 
 // endIntlPhone returns where the number ending the candidate at end stops,
-// and false when it runs on into a word. An extension attached with x stays
-// visible, as with North American numbers (+44 20 7946 0958x123). A last
+// and false when it runs on into a word. An extension attached with x or ext
+// stays visible, as with North American numbers (+44 20 7946 0958x123,
+// +33 1 99 00 12 34ext123). A last
 // group that starts a word after a space belongs to the text after the
 // number (+44 20 7946 0958 9am), so the number ends before that space.
 func endIntlPhone(s string, ccEnd, end int) (int, bool) {
@@ -152,15 +172,23 @@ func endIntlPhone(s string, ccEnd, end int) (int, bool) {
 	return ccEnd + i, true
 }
 
-// isPhoneExtension reports whether s[i:] starts with an extension such as
-// x123 that ends the word.
+// isPhoneExtension reports whether s[i:] starts with an extension that ends
+// the word: x123, ext123 or ext.123.
 func isPhoneExtension(s string, i int) bool {
-	if s[i]|0x20 != 'x' {
+	switch {
+	case s[i]|0x20 == 'x':
+		i++
+	case len(s)-i >= 3 && strings.EqualFold(s[i:i+3], "ext"):
+		i += 3
+		if i < len(s) && s[i] == '.' {
+			i++
+		}
+	default:
 		return false
 	}
-	j := i + 1
+	j := i
 	for j < len(s) && isDigit(s[j]) {
 		j++
 	}
-	return j > i+1 && (j == len(s) || !isIPWordByte(s[j]))
+	return j > i && (j == len(s) || !isIPWordByte(s[j]))
 }
