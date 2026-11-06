@@ -351,7 +351,7 @@ func (n *nestedScan) descend(s string, p int) {
 		if end, quoted := arg.scan.stringAt(p); quoted {
 			child.kind, child.quote = scriptArg, arg.scan.quoteLen()
 			child.from, child.to = arg.scan.inner(), end-child.quote
-			if arg.kind == textArg || arg.kind == scriptArg && !runsScript(s, arg.from, arg.scan.start) {
+			if !arg.runsString(s) {
 				child.kind = textArg
 			}
 		} else if start, end, ok := arg.scan.substitutionAt(p); ok {
@@ -388,6 +388,21 @@ func (a *nestedArg) runsAt(s string, p int) bool {
 	return false
 }
 
+// runsString reports whether the quoted string the argument's scan is at
+// may run commands: any in a segment or a substitution, and in a quoted
+// argument the script of a shell's -c option (sh -c 'bash -c "mysql -pX"')
+// or a string where a command starts (sh -c 'ssh db "mysql -pX"').
+func (a *nestedArg) runsString(s string) bool {
+	switch a.kind {
+	case segmentArg, substitutionArg:
+		return true
+	case scriptArg:
+		return runsScript(s, a.from, a.scan.start) || a.runsAt(s, a.scan.start)
+	case textArg:
+	}
+	return false
+}
+
 // runsScript reports whether the quoted string at start, in an argument
 // whose text starts at from, follows a shell's -c option (sh -c, bash -lc),
 // which runs it as commands.
@@ -405,8 +420,8 @@ func runsScript(s string, from, start int) bool {
 // maxScriptOption bounds the length of the -c option runsScript reads.
 const maxScriptOption = 8
 
-// scriptOption is a shell's -c option, alone or with others (-lc, -ec).
-var scriptOption = regexp.MustCompile(`^-[a-z]*c$`)
+// scriptOption is a shell's -c option, alone or with others (-lc, -ce).
+var scriptOption = regexp.MustCompile(`^-[a-z]*c[a-z]*$`)
 
 // segmentRest returns the rest of the pipeline segment of a command whose
 // name ends at i, in a quoted string that closes at closeAt and ends at
@@ -492,16 +507,21 @@ type commandStart struct {
 	// the start of a word that may not have ended yet, and j how far that
 	// word was read.
 	from, i, j int
-	// lenient reads the text of a command substitution, where every word
-	// runs a command (ssh db mysql -pX) except after one that prints its
-	// arguments (echo mysql -pX).
+	// lenient reads the text of a command substitution, where a client
+	// name after any word is run (mysql -h mysql -pX), except after the
+	// name of a command that prints its arguments (echo mysql -pX).
 	lenient bool
-	// wrapper is the command wrapper the words so far run (sudo), and
-	// optionArg is set after its option that takes the next word.
+	// wrapper is the command wrapper the words so far run (sudo), optionArg
+	// is set after its option that takes the next word, and host after the
+	// destination of ssh, which runs the words after it.
 	wrapper   string
 	optionArg bool
-	// text is set after a word that is no wrapper, option or assignment.
-	text bool
+	host      bool
+	// command is set after the name of a command, and text after a word
+	// that is no wrapper, option or assignment, or in a substitution after
+	// the name of a command that prints its arguments.
+	command bool
+	text    bool
 }
 
 // at reports whether a command name at p, in the argument of s whose text
@@ -543,14 +563,16 @@ func (c *commandStart) at(s string, from, p int) bool {
 
 // runsBefore reports whether a command name right after part, the start of
 // a word that may go on past it, is run: after the directory of a program
-// path (/usr/bin/mysql), or after a word that would let it run on its own.
-// A longer part is no command's.
+// path of any length (/usr/bin/mysql), or after a word that would let it
+// run on its own. A longer part is no command's.
 func (c *commandStart) runsBefore(part string) bool {
 	switch {
-	case c.text || len(part) > maxCommandPart:
+	case c.text:
 		return false
 	case strings.HasSuffix(part, "/"):
 		return c.runs()
+	case len(part) > maxCommandPart:
+		return false
 	}
 	next := *c
 	next.word(part)
@@ -576,18 +598,26 @@ func (c *commandStart) word(word string) {
 	case c.optionArg:
 		c.optionArg = false
 	case isShellKeyword(word):
-		c.wrapper = ""
+		c.wrapper, c.host, c.command = "", false, false
 	case isCommandWrapper(word):
-		c.wrapper = word
+		c.wrapper, c.host = word, false
 	case c.wrapper != "" && strings.HasPrefix(word, "-"):
 		// An option of the wrapper (sudo -E, env -i), some of which take
 		// the next word as their argument (sudo -u root).
 		c.optionArg = takesArgument(c.wrapper, word)
+	case c.wrapper == "ssh" && !c.host:
+		// The destination of ssh (ssh db mysql -pX), even one named like a
+		// command (ssh echo mysql -pX).
+		c.host = true
 	default:
 		if eq := strings.IndexByte(word, '='); eq > 0 && isShellName(word[:eq]) {
 			return
 		}
-		c.text = !c.lenient || isPrintCommand(word)
+		// In a substitution, a word after the name of a command is its
+		// argument, so only the name prints the rest (echo mysql -pX,
+		// not docker exec echo mysql -pX).
+		c.text = !c.lenient || !c.command && isPrintCommand(word)
+		c.command = true
 	}
 }
 
@@ -598,10 +628,10 @@ func isPrintCommand(word string) bool {
 }
 
 // isCommandWrapper reports whether word runs the command after it (and its
-// own options).
+// own options, and for ssh its destination).
 func isCommandWrapper(word string) bool {
 	switch word {
-	case "sudo", "exec", "env", "time", "nohup", "command":
+	case "sudo", "exec", "env", "time", "nohup", "command", "ssh":
 		return true
 	}
 	return false
@@ -620,7 +650,7 @@ func isShellKeyword(word string) bool {
 // wrapperArgOptions are the short options of each wrapper that take an
 // argument, and wrapperLongArgOptions the long ones.
 var (
-	wrapperArgOptions     = map[string]string{"sudo": "CDghpRrTtUu", "env": "CSu", "time": "fo", "exec": "a"}
+	wrapperArgOptions     = map[string]string{"sudo": "CDghpRrTtUu", "env": "CSu", "time": "fo", "exec": "a", "ssh": "BbcDEeFIiJLlmOoPpQRSWw"}
 	wrapperLongArgOptions = []string{"chdir", "chroot", "close-from", "command-timeout", "format", "group", "host", "other-user", "output", "prompt", "role", "split-string", "type", "unset", "user"}
 )
 
