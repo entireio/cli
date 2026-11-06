@@ -255,7 +255,7 @@ filter, and subprocess-environment incompatibilities.
   these with go-git means porting tooling to Go, not replacing a Go subprocess.
 - `.cursor/install.sh`: version/reftable feature probes must test installed Git.
   Installer/container package installation is likewise not a go-git candidate.
-- Agent extension/plugin strings and runner JSON include Git-related instructions
+- Agent extension/plugin strings include Git-related instructions
   and hook arguments; these are not additional direct Go Git subprocesses.
 
 ## Migration acceptance criteria

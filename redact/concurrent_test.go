@@ -62,8 +62,8 @@ func buildJSONLFixture(t *testing.T, targetBytes int) string {
 func TestJSONLContentSharded_MatchesSequential(t *testing.T) {
 	t.Parallel()
 
-	// Comfortably above jsonlConcurrentMinBytes so sharding actually engages.
-	content := buildJSONLFixture(t, 4<<20)
+	// Four shards, so sharding engages.
+	content := buildJSONLFixture(t, 4*jsonlShardTargetBytes)
 
 	sequential, err := jsonlContentImpl(content, regexLayers, concurrencyUnsafeRedactor)
 	require.NoError(t, err)
@@ -81,7 +81,7 @@ func TestJSONLContentSharded_MatchesSequential(t *testing.T) {
 func TestJSONLContentSharded_ShardBoundariesPreserveLines(t *testing.T) {
 	t.Parallel()
 
-	content := buildJSONLFixture(t, 3<<20)
+	content := buildJSONLFixture(t, 3*jsonlShardTargetBytes)
 	out, err := jsonlContentImpl(content, regexLayers, concurrencySafeRedactor)
 	require.NoError(t, err)
 
@@ -135,7 +135,7 @@ func TestJSONLContentSharded_EdgeShapes(t *testing.T) {
 func TestJSONLContent_ConcurrentCallsAreRaceFree(t *testing.T) {
 	t.Parallel()
 
-	content := buildJSONLFixture(t, 2<<20)
+	content := buildJSONLFixture(t, 2*jsonlShardTargetBytes)
 	want, err := jsonlContentImpl(content, regexLayers, concurrencyUnsafeRedactor)
 	require.NoError(t, err)
 
@@ -168,9 +168,14 @@ func TestJSONLContent_ConcurrentCallsAreRaceFree(t *testing.T) {
 func TestJSONLContent_SplitConcatenationEquivalence(t *testing.T) {
 	t.Parallel()
 
-	prefix := buildJSONLFixture(t, 2<<20)
+	prefix := buildJSONLFixture(t, 2*jsonlShardTargetBytes)
 	require.True(t, strings.HasSuffix(prefix, "\n"), "prefix must end on a line boundary")
-	suffix := buildJSONLFixture(t, 64<<10)
+	suffix := buildJSONLFixture(t, 3*jsonlShardTargetBytes/4)
+	// One shard, line path, all four line types.
+	require.True(t, IsLineDelimited([]byte(suffix)), "suffix must take the line path")
+	require.Len(t, shardLineBounds(strings.Split(suffix, "\n"), jsonlShardTargetBytes), 1,
+		"suffix must stay in one shard")
+	require.Contains(t, suffix, "not json at all", "suffix must include every line type")
 
 	whole, err := JSONLContent(prefix + suffix)
 	require.NoError(t, err)

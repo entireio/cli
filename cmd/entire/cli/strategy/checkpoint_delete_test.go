@@ -229,7 +229,7 @@ func TestCheckpointDelete_RefsBackend_PlanThenExecute(t *testing.T) {
 	defer repo.Close()
 	queue, err := checkpoint.PushQueueForRepo(t.Context(), repo)
 	require.NoError(t, err)
-	require.NoError(t, queue.Enqueue(ref))
+	require.NoError(t, queue.EnqueueEntry(checkpoint.PushQueueEntry{Ref: ref}))
 
 	result, err := ExecuteCheckpointDelete(t.Context(), plan, CheckpointDeleteOptions{Targets: plan.HolderTargets()})
 	require.NoError(t, err)

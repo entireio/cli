@@ -2,7 +2,9 @@ package review
 
 import (
 	"context"
+	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -517,4 +519,166 @@ func TestFallbackScopeRef_IgnoresLookalikeRefs(t *testing.T) {
 	if got := displayRef(ref); got != "origin/main" {
 		t.Errorf("displayRef = %q, want origin/main", got)
 	}
+}
+
+// changedFiles bounds which files a posted finding may quote, so it must cover
+// exactly the review's scope: branch commits since the merge base plus every
+// uncommitted change, but not upstream-only or ignored files. A deleted path
+// is left out: once untracked and ignored, a local file can sit at it.
+func TestTrailScope(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	initRepoOnMain(t, dir)
+	commitFile(t, dir, ".gitignore", "*.log\nlocal.yml\nrenamed-away.yml\n", "init")
+	commitFile(t, dir, "root.go", "package main", "root")
+	commitFile(t, dir, "old.go", "package main", "old")
+	commitFile(t, dir, "gone.go", "package main", "gone")
+	commitFile(t, dir, "unchanged.go", "package main", "unchanged")
+	testutil.WriteFile(t, dir, "untracked-on-branch.log", "API_KEY=placeholder")
+	testutil.RunGit(t, dir, "add", "-f", "untracked-on-branch.log")
+	testutil.WriteFile(t, dir, "untracked-in-index.log", "API_KEY=placeholder")
+	testutil.RunGit(t, dir, "add", "-f", "untracked-in-index.log")
+	testutil.WriteFile(t, dir, "local.yml", "DB_PASS=placeholder")
+	testutil.RunGit(t, dir, "add", "-f", "local.yml")
+	testutil.WriteFile(t, dir, "renamed-away.yml", "DB_PASS=placeholder")
+	testutil.RunGit(t, dir, "add", "-f", "renamed-away.yml")
+	testutil.RunGit(t, dir, "commit", "-q", "-m", "track placeholder secrets")
+
+	testutil.GitCheckoutNewBranch(t, dir, "feat/x")
+	commitFile(t, dir, "feat.go", "package main", "feat-only change")
+	commitFile(t, dir, "skip.go", "package main", "local settings")
+	commitFile(t, dir, "assumed.go", "package main", "local settings")
+	testutil.WriteFile(t, dir, "env.log", "TOKEN=placeholder")
+	testutil.RunGit(t, dir, "add", "-f", "env.log")
+	testutil.RunGit(t, dir, "commit", "-q", "-m", "commit a secret by mistake")
+	testutil.WriteFile(t, dir, "local.yml", "DB_PASS=v2")
+	testutil.RunGit(t, dir, "commit", "-q", "-am", "change local settings")
+	testutil.WriteFile(t, dir, "renamed-away.yml", "DB_PASS=v2")
+	testutil.RunGit(t, dir, "commit", "-q", "-am", "change settings to rename")
+	testutil.RunGit(t, dir, "rm", "-q", "--cached", "untracked-on-branch.log")
+	testutil.RunGit(t, dir, "commit", "-q", "-m", "stop tracking a secret")
+	testutil.RunGit(t, dir, "checkout", defaultBranchName)
+	commitFile(t, dir, "main-only.go", "package main", "post-branch main change")
+	testutil.RunGit(t, dir, "checkout", "feat/x")
+
+	testutil.WriteFile(t, dir, "root.go", "package main\n// modified")
+	testutil.WriteFile(t, dir, "staged.go", "package main")
+	testutil.GitAdd(t, dir, "staged.go")
+	testutil.RunGit(t, dir, "mv", "old.go", "renamed.go")
+	testutil.WriteFile(t, dir, "new/dir/with space.go", "package dir")
+	testutil.WriteFile(t, dir, "debug.log", "ignored")
+	testutil.RunGit(t, dir, "rm", "-q", "--cached", "untracked-in-index.log")
+	testutil.WriteFile(t, dir, "untracked-on-branch.log", "API_KEY=real")
+	testutil.WriteFile(t, dir, "untracked-in-index.log", "API_KEY=real")
+	if err := os.Remove(filepath.Join(dir, "gone.go")); err != nil {
+		t.Fatal(err)
+	}
+	// Untracking a file the branch changed, without committing that yet,
+	// leaves the ignored local copy at a path the branch diff still lists.
+	testutil.RunGit(t, dir, "rm", "-q", "--cached", "local.yml", "env.log")
+	testutil.WriteFile(t, dir, "local.yml", "DB_PASS=real")
+	testutil.WriteFile(t, dir, "env.log", "TOKEN=real")
+	testutil.RunGit(t, dir, "mv", "renamed-away.yml", "example.yml")
+	testutil.WriteFile(t, dir, "renamed-away.yml", "DB_PASS=real")
+	// Hidden local edits are not text the change shows.
+	testutil.RunGit(t, dir, "update-index", "--skip-worktree", "skip.go")
+	testutil.WriteFile(t, dir, "skip.go", "DB_PASS=real")
+	testutil.RunGit(t, dir, "update-index", "--assume-unchanged", "assumed.go")
+	testutil.WriteFile(t, dir, "assumed.go", "DB_PASS=real")
+
+	ctx := t.Context()
+	scope, err := trailScope(ctx, dir, defaultBranchName)
+	if err != nil {
+		t.Fatalf("trailScope: %v", err)
+	}
+	requireFileSet(t, scope.Quotable,
+		[]string{"feat.go", "root.go", "staged.go", "renamed.go", "new/dir/with space.go", "example.yml"},
+		[]string{
+			"main-only.go", "debug.log", ".gitignore", "old.go", "gone.go", "unchanged.go",
+			"untracked-on-branch.log", "untracked-in-index.log", "local.yml", "env.log", "renamed-away.yml",
+			"skip.go", "assumed.go",
+		})
+	requireFileSet(t, scope.Tracked,
+		[]string{".gitignore", "unchanged.go", "feat.go", "renamed.go", "skip.go", "assumed.go", "gone.go"},
+		[]string{"debug.log", "local.yml", "env.log", "renamed-away.yml", "untracked-in-index.log", "new/dir/with space.go"})
+
+	t.Run("without a base ref only uncommitted files are quotable", func(t *testing.T) {
+		t.Parallel()
+		scope, err := trailScope(ctx, dir, "")
+		if err != nil {
+			t.Fatalf("trailScope: %v", err)
+		}
+		requireFileSet(t, scope.Quotable,
+			[]string{"root.go", "staged.go", "renamed.go", "new/dir/with space.go"},
+			[]string{"feat.go", "old.go", "gone.go", "untracked-in-index.log", "local.yml"})
+		requireFileSet(t, scope.Tracked, []string{"feat.go", "unchanged.go"}, nil)
+	})
+
+	t.Run("an unresolvable base ref is an error", func(t *testing.T) {
+		t.Parallel()
+		scope, err := trailScope(ctx, dir, "no-such-ref")
+		if err == nil {
+			t.Fatal("trailScope succeeded on an unresolvable base ref")
+		}
+		if len(scope.Quotable) != 0 || len(scope.Tracked) != 0 {
+			t.Fatalf("scope = %+v, want empty", scope)
+		}
+	})
+}
+
+// A file may be quoted only with the contents it had when the scope was
+// fixed, so a reviewer cannot append other text to a file in the change.
+func TestTrailScopeCanQuote(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	initRepoOnMain(t, dir)
+	commitFile(t, dir, "root.go", "package main", "root")
+	testutil.WriteFile(t, dir, "wip.go", "package main")
+	testutil.WriteFile(t, dir, "edited.go", "package main")
+
+	scope, err := trailScope(t.Context(), dir, defaultBranchName)
+	if err != nil {
+		t.Fatalf("trailScope: %v", err)
+	}
+	testutil.WriteFile(t, dir, "edited.go", "package main\n// API_KEY=copied")
+
+	if !scope.CanQuote("wip.go") {
+		t.Error("CanQuote(wip.go) = false, want true for an unchanged file in the change")
+	}
+	if scope.CanQuote("edited.go") {
+		t.Error("CanQuote(edited.go) = true, want false after its contents changed")
+	}
+	if scope.CanQuote("root.go") {
+		t.Error("CanQuote(root.go) = true, want false for a file outside the change")
+	}
+	if !scope.Covers("root.go") || !scope.Covers("edited.go") || scope.Covers(".env") {
+		t.Errorf("Covers = root.go %v, edited.go %v, .env %v; want true, true, false",
+			scope.Covers("root.go"), scope.Covers("edited.go"), scope.Covers(".env"))
+	}
+	if (TrailScope{}).CanQuote("wip.go") || (TrailScope{}).Covers("wip.go") {
+		t.Error("the zero TrailScope allows a path, want none")
+	}
+}
+
+func requireFileSet[V any](t *testing.T, got map[string]V, want, notWant []string) {
+	t.Helper()
+	for _, p := range want {
+		if _, ok := got[p]; !ok {
+			t.Errorf("file set %v missing %q", keysOf(got), p)
+		}
+	}
+	for _, p := range notWant {
+		if _, ok := got[p]; ok {
+			t.Errorf("file set %v includes %q", keysOf(got), p)
+		}
+	}
+}
+
+func keysOf[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return keys
 }

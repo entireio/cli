@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/testutil/gitenv"
@@ -29,6 +30,11 @@ func TestMain(m *testing.M) {
 	// auth subpackage's TestMain.
 	keyring.MockInit()
 
+	// Trail creation asks origin for its default branch. Test repos point origin
+	// at made-up GitHub URLs, so the real lookup would reach the network; report
+	// "unknown" instead. Tests of remoteDefaultBranch call it directly.
+	trailRemoteDefaultBranch = func(context.Context, string) (string, bool) { return "", false }
+
 	// keyring.MockInit only covers in-process credential access. Several tests
 	// in this package spawn the real entire binary (or a git hook that invokes
 	// it), and testing.Testing() is false in that child — so the internal
@@ -46,6 +52,12 @@ func TestMain(m *testing.M) {
 	os.Setenv("ENTIRE_TEST_AUTH_STORE_FILE", filepath.Join(isolationDir, "auth-tokens.json"))
 	os.Setenv("ENTIRE_CONFIG_DIR", filepath.Join(isolationDir, "config"))
 	os.Setenv("XDG_CACHE_HOME", filepath.Join(isolationDir, "cache"))
+	// The post-plugin-run update check loads the invoked plugin's install
+	// manifest, so any test that drives MaybeRunPlugin to a successful exit
+	// would otherwise read the developer's real managed plugin tree — and a
+	// name that matches a real install would run a real `git ls-remote`.
+	// Tests that need a populated plugin dir override this with withPluginDir.
+	os.Setenv("ENTIRE_PLUGIN_DIR", filepath.Join(isolationDir, "plugins"))
 	// Cursor import discovery reads ~/.cursor/chats; keep it off the
 	// developer's real sessions.
 	os.Setenv("ENTIRE_TEST_CURSOR_CHATS_DIR", filepath.Join(isolationDir, "cursor-chats"))

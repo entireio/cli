@@ -129,9 +129,23 @@ func (s *Store) Write(_ context.Context, req cp.WriteRequest) error {
 		return s.backfillTranscript(cp.UpdateOptions(r))
 	case cp.SessionSummary:
 		return s.writeSessionSummary(r)
+	case cp.Tasks:
+		return s.writeCheckpointTasks(r)
 	default:
 		return fmt.Errorf("fsstore: unsupported write request %T", req)
 	}
+}
+
+func (s *Store) writeCheckpointTasks(req cp.Tasks) error {
+	sc, err := s.load(req.CheckpointID)
+	if err != nil {
+		return err
+	}
+	if sc == nil {
+		return cp.ErrCheckpointNotFound
+	}
+	sc.Tasks = upsertTasks(sc.Tasks, req.Tasks)
+	return s.save(sc)
 }
 
 func (s *Store) writeSession(opts cp.WriteOptions) error {

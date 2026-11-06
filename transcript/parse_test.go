@@ -23,6 +23,7 @@ func TestParse_NativeFixturesEqualDecodeOfConvert(t *testing.T) {
 		{"droid_full.jsonl", agentOpts("factoryai-droid")},
 		{"gemini_full.jsonl", agentOpts("gemini-cli")},
 		{"opencode_full.jsonl", agentOpts("opencode")},
+		{"pi_full.jsonl", agentOpts("pi")},
 	}
 
 	for _, f := range fixtures {

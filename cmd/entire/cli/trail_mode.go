@@ -10,8 +10,8 @@ import (
 // describes the tree that was actually built, not the current environment.
 const projectTrailsAnnotation = "entire_project_trails"
 
-// projectTrailsEnabled chooses the model at the two places that do: building
-// the trail command tree and rendering the first-turn context injection.
+// projectTrailsEnabled chooses the model where it matters: building the trail
+// command tree. The first-turn context injection describes project trails only.
 // Project trails are the only model offered; the legacy tree is still built by
 // newTrailCmdForMode(false) until it is deleted.
 func projectTrailsEnabled() bool {

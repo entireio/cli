@@ -49,3 +49,11 @@ func TestSanitizeTerminalLabel_StripsEscapeSequences(t *testing.T) {
 
 	assert.Equal(t, "ared b", SanitizeTerminalLabel("a\x1b[31mred\x1b[0m b"))
 }
+
+func TestSanitizeDisplayLine(t *testing.T) {
+	t.Parallel()
+	got := SanitizeDisplayLine("Intent\nforged \u202eevil\u2066x\x1b[31m")
+	if want := "Intent forged evilx"; got != want {
+		t.Fatalf("SanitizeDisplayLine = %q, want %q", got, want)
+	}
+}

@@ -118,6 +118,7 @@ const (
 	RevokeServiceAccountAccessOperation          OperationName = "RevokeServiceAccountAccess"
 	RotateOrgCIBuildkiteInboundSecretOperation   OperationName = "RotateOrgCIBuildkiteInboundSecret"
 	SetBranchProtectionOperation                 OperationName = "SetBranchProtection"
+	SetDefaultBranchOperation                    OperationName = "SetDefaultBranch"
 	SetPluginInstallationRepositoriesOperation   OperationName = "SetPluginInstallationRepositories"
 	SetRepoVisibilityOperation                   OperationName = "SetRepoVisibility"
 	UpdateBranchProtectionOperation              OperationName = "UpdateBranchProtection"

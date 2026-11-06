@@ -45,6 +45,20 @@ func OpenAt(worktreeRoot string) (*os.Root, error) {
 	return osroot.Shared(abs) //nolint:wrapcheck // Shared names the directory and returns a missing one unwrapped
 }
 
+// ReadFileNoFollow reads the regular file at p inside the worktree, refusing
+// a symlink in any component of p and anything that is not a regular file.
+func ReadFileNoFollow(worktreeRoot, p string) ([]byte, error) {
+	name, err := Name(worktreeRoot, p)
+	if err != nil {
+		return nil, err
+	}
+	root, err := OpenAt(worktreeRoot)
+	if err != nil {
+		return nil, err
+	}
+	return osroot.ReadFileNoFollow(root, name) //nolint:wrapcheck // callers classify the os error
+}
+
 // Name converts a path inside the worktree to a name relative to its root,
 // accepting either an absolute path or one already relative to the root.
 //

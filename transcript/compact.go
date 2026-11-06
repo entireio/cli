@@ -12,9 +12,15 @@ import (
 	"strings"
 )
 
-// Options provides metadata fields written to every output line.
+// Options provides metadata fields written to every output line, and picks
+// the conversion where the transcript's format alone does not.
 type Options struct {
-	Agent      string // e.g. "claude-code"
+	// Agent is written to every line, e.g. "claude-code". Claude Code and
+	// Cursor share a JSONL line format, so for that format Agent also selects
+	// the accounting: "claude-code" emits per-call usage (model, fresh input,
+	// cache and output tokens), and any other value converts as Cursor, with
+	// legacy per-message input and output counts.
+	Agent      string
 	CLIVersion string // e.g. "0.42.0"
 	StartLine  int    // checkpoint_transcript_start (0 = no truncation)
 }
@@ -22,15 +28,22 @@ type Options struct {
 // transcriptLine is the uniform output format for every line in transcript.jsonl.
 // Field order is guaranteed by encoding/json (struct declaration order).
 type transcriptLine struct {
-	V            int             `json:"v"`
-	Agent        string          `json:"agent"`
-	CLIVersion   string          `json:"cli_version"`
-	Type         string          `json:"type"`
-	TS           json.RawMessage `json:"ts,omitempty"`
-	ID           string          `json:"id,omitempty"`
-	InputTokens  int             `json:"input_tokens,omitempty"`
-	OutputTokens int             `json:"output_tokens,omitempty"`
-	Content      json.RawMessage `json:"content"`
+	V                int             `json:"v"`
+	Agent            string          `json:"agent"`
+	CLIVersion       string          `json:"cli_version"`
+	Type             string          `json:"type"`
+	TS               json.RawMessage `json:"ts,omitempty"`
+	ID               string          `json:"id,omitempty"`
+	Model            string          `json:"model,omitempty"`
+	InputTokens      int64           `json:"input_tokens,omitempty"`
+	OutputTokens     int64           `json:"output_tokens,omitempty"`
+	CacheReadTokens  int64           `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens int64           `json:"cache_write_tokens,omitempty"`
+	// Pointers preserve reported zero splits; nil means the split is unknown.
+	CacheWrite5mTokens *int64          `json:"cache_write_5m_tokens,omitempty"`
+	CacheWrite1hTokens *int64          `json:"cache_write_1h_tokens,omitempty"`
+	ReasoningTokens    int64           `json:"reasoning_tokens,omitempty"`
+	Content            json.RawMessage `json:"content"`
 }
 
 // newTranscriptLine returns a transcriptLine pre-filled with the shared
@@ -41,6 +54,19 @@ func newTranscriptLine(opts Options) transcriptLine {
 		Agent:      opts.Agent,
 		CLIVersion: opts.CLIVersion,
 	}
+}
+
+// applyCallUsage sets the per-call model and usage fields of an assistant line
+// from u.
+func applyCallUsage(line *transcriptLine, u *CallUsage) {
+	line.Model = u.Model
+	line.InputTokens = u.InputTokens
+	line.OutputTokens = u.OutputTokens
+	line.CacheReadTokens = u.CacheReadTokens
+	line.CacheWriteTokens = u.CacheWriteTokens
+	line.CacheWrite5mTokens = u.CacheWrite5mTokens
+	line.CacheWrite1hTokens = u.CacheWrite1hTokens
+	line.ReasoningTokens = u.ReasoningTokens
 }
 
 // userTextBlock is a text block within user message content.
@@ -60,8 +86,10 @@ func Convert(content []byte, opts Options) ([]byte, error) {
 	// Formats that need detection on raw content before line truncation:
 	// - Single-object formats (OpenCode, Gemini): SliceFromLine would cut
 	//   a JSON object mid-value. They handle StartLine as a message-index offset.
-	// - Codex: session_meta header is only on the first line. Codex handles
-	//   StartLine as a response_item index offset.
+	// - Codex: session_meta header is only on the first line, and the choice
+	//   between its item and response_item paths is made on the whole
+	//   rollout. Codex slices by physical line itself, after seeding its usage
+	//   baseline from the skipped lines.
 	if isOpenCodeFormat(content) {
 		return compactOpenCode(content, opts)
 	}
@@ -109,9 +137,8 @@ func Convert(content []byte, opts Options) ([]byte, error) {
 // boundary is derived as lineCount(full) - lineCount(delta), where delta is the
 // existing per-checkpoint sliced compaction (Convert with the original
 // StartLine). This reuses each format's existing, independently-tested slicing
-// behavior — line offsets for JSONL/Copilot/Droid/pi, message-index for
-// OpenCode/Gemini, response-item index for Codex — rather than threading source
-// indices through every emitter.
+// behavior (line offsets for JSONL/Copilot/Droid/pi/Codex, message-index for
+// OpenCode/Gemini) rather than threading source indices through every emitter.
 //
 // A single compact line can carry content from both sides of StartLine when its
 // source straddles the boundary — most notably same-ID streaming assistant
@@ -205,6 +232,8 @@ type parsedEntry struct {
 	userID       string            // prompt ID (user only, e.g. Claude's promptId)
 	inputTokens  int               // API input tokens (assistant only)
 	outputTokens int               // API output tokens (assistant only)
+	model        string            // message model (assistant only)
+	usage        *CallUsage        // per-call usage, nil when absent or malformed (assistant only)
 	content      json.RawMessage   // stripped assistant content array, or nil
 	toolUseIDs   []string          // IDs of the tool_use blocks in content
 	userText     string            // extracted user text
@@ -214,14 +243,19 @@ type parsedEntry struct {
 
 // compactJSONL converts JSONL transcripts (Claude Code, Cursor) into the
 // transcript.jsonl format.
+// Claude Code and Cursor share a line format, so opts.Agent picks the adapter.
 func compactJSONL(content []byte, opts Options) ([]byte, error) {
-	return compactJSONLWith(content, opts, nil)
+	a := NewCursorAdapter()
+	if opts.Agent == agentClaudeCode {
+		a = NewClaudeAdapter()
+	}
+	return foldJSONL(content, opts, a)
 }
 
-// compactJSONLWith runs the records adapter over the whole transcript and
-// folds the records, so checkpoints and live streams share one fold.
-func compactJSONLWith(content []byte, opts Options, preprocess linePreprocessor) ([]byte, error) {
-	a := newJSONLAdapter(preprocess)
+// foldJSONL runs a over the whole transcript and folds the records. Taking the
+// adapter from the exported constructors keeps checkpoints and live streams on
+// one adapter and one fold.
+func foldJSONL(content []byte, opts Options, a *JSONLAdapter) ([]byte, error) {
 	records := a.Feed(content)
 	records = append(records, a.Flush()...)
 	out, err := Fold(records, opts)
@@ -294,6 +328,8 @@ func parseLine(lineBytes []byte, preprocess linePreprocessor) (parsedEntry, bool
 				e.content, e.toolUseIDs = stripAssistantContent(contentRaw)
 			}
 			e.inputTokens, e.outputTokens = extractUsageTokens(msg)
+			e.model = unquote(msg["model"])
+			e.usage = extractCallUsage(msg)
 		}
 
 	case TypeUser:
@@ -389,6 +425,39 @@ func extractUsageTokens(msg map[string]json.RawMessage) (inputTokens, outputToke
 		return 0, 0
 	}
 	return usage.InputTokens, usage.OutputTokens
+}
+
+// extractCallUsage parses a Claude message's whole "usage" object. It returns
+// nil if usage is absent or malformed. The cache-write split is kept only when
+// both durations are reported.
+func extractCallUsage(msg map[string]json.RawMessage) *CallUsage {
+	usageRaw, ok := msg["usage"]
+	if !ok || string(bytes.TrimSpace(usageRaw)) == "null" {
+		return nil
+	}
+	var usage struct {
+		Input         int64 `json:"input_tokens"`
+		CacheRead     int64 `json:"cache_read_input_tokens"`
+		CacheWrite    int64 `json:"cache_creation_input_tokens"`
+		Output        int64 `json:"output_tokens"`
+		CacheCreation *struct {
+			FiveMinutes *int64 `json:"ephemeral_5m_input_tokens"`
+			OneHour     *int64 `json:"ephemeral_1h_input_tokens"`
+		} `json:"cache_creation"`
+	}
+	if json.Unmarshal(usageRaw, &usage) != nil {
+		return nil
+	}
+	u := &CallUsage{
+		InputTokens:      usage.Input,
+		OutputTokens:     usage.Output,
+		CacheReadTokens:  usage.CacheRead,
+		CacheWriteTokens: usage.CacheWrite,
+	}
+	if c := usage.CacheCreation; c != nil && c.FiveMinutes != nil && c.OneHour != nil {
+		u.CacheWrite5mTokens, u.CacheWrite1hTokens = c.FiveMinutes, c.OneHour
+	}
+	return u
 }
 
 // isEmptyContentArray returns true if raw is a JSON empty array (`[]`).

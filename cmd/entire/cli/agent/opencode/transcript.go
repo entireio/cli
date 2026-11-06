@@ -119,7 +119,7 @@ func modifiedFilesFromMessages(msgs []ExportMessage, startOffset int) []string {
 			continue
 		}
 		for _, part := range msg.Parts {
-			if part.Type != "tool" || part.State == nil {
+			if part.Type != partTypeTool || part.State == nil {
 				continue
 			}
 			if !slices.Contains(FileModificationTools, part.Tool) {

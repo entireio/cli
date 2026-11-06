@@ -403,13 +403,6 @@ func FetchAndCheckoutRemoteBranch(ctx context.Context, branchName string) error 
 	return CheckoutBranch(ctx, branchName)
 }
 
-// metadataFetchDepth is the absolute --depth used when fetching the metadata
-// branch. It is far above any realistic checkpoint-branch length, so it fully
-// fetches the branch (and heals a prior --depth=1 shallow boundary on it),
-// while staying below math.MaxInt32 (2147483647) — which git special-cases as
-// a global unshallow that would also deepen an unrelated shallow source tree.
-const metadataFetchDepth = 1_000_000_000
-
 // FetchMetadataBranch fetches the entire/checkpoints/v1 branch from the
 // checkpoint read-candidate remotes with full blob content. Used as a
 // fallback by resume/explain when the tree-only probe is insufficient (e.g.
@@ -580,7 +573,7 @@ func fetchMetadataFromRemote(ctx context.Context, remoteName string, noFilter, a
 		// removes that boundary without deepening an independently-shallow
 		// source-tree clone (unlike --unshallow), and is a no-op on a normally
 		// cloned repo.
-		Depth: metadataFetchDepth,
+		Depth: remote.FullRefDepth,
 	})
 	if fetchErr != nil {
 		if ctx.Err() == context.DeadlineExceeded {
