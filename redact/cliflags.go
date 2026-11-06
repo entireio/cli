@@ -220,7 +220,7 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string) []tag
 	var nested nestedScan
 	segmentEnd := 0
 	for _, cmd := range f.command.FindAllStringIndex(s, -1) {
-		if f.containerName && isContainerNameArgument(s, cmd[0]) {
+		if !isCommandToken(s, cmd[0], cmd[1]) || f.containerName && isContainerNameArgument(s, cmd[0]) {
 			continue
 		}
 		// The closing quote of a string the command is quoted in is not
@@ -442,8 +442,35 @@ func (f cliPasswordFlag) isProgramPath(inside string) bool {
 	if sep < 0 || strings.ContainsAny(inside[sep:], " \t") || notProgramPath.MatchString(inside) {
 		return false
 	}
-	loc := f.command.FindStringIndex(inside[sep+1:])
-	return loc != nil && loc[0] == 0
+	name := inside[sep+1:]
+	loc := f.command.FindStringIndex(name)
+	return loc != nil && loc[0] == 0 && isCommandToken(name, loc[0], loc[1])
+}
+
+// isCommandToken reports whether the client name at s[start:end] is a
+// program name, alone or at the end of a path (mysql, /usr/bin/mysql,
+// mysql.exe), rather than part of a host or file name (mysql.example.com,
+// ~/.ssh/mysql.pem, user@mysql, mysql:8, mysql-client, --name=mysql).
+func isCommandToken(s string, start, end int) bool {
+	if start > 0 && strings.IndexByte(".-@:=%+", s[start-1]) >= 0 {
+		return false
+	}
+	if end == len(s) {
+		return true
+	}
+	switch c := s[end]; {
+	case c == '.':
+		ext := end + len(".exe")
+		return ext <= len(s) && strings.EqualFold(s[end:ext], ".exe") && (ext == len(s) || !isWordByte(s[ext]))
+	case strings.IndexByte("-@:=/+", c) >= 0:
+		return false
+	}
+	return true
+}
+
+// isWordByte reports whether c is an ASCII letter, digit or underscore.
+func isWordByte(c byte) bool {
+	return c == '_' || '0' <= c && c <= '9' || 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z'
 }
 
 // segmentRestPattern returns the pattern for the rest of the segment of a
