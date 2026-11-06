@@ -195,3 +195,4 @@ Set `ENTIRE_LOG_LEVEL=debug` for debug logs, and `ACCESSIBLE=1` for screen-reade
 ## License
 
 MIT License — see [LICENSE](LICENSE).
+retry backoff capped at 5
