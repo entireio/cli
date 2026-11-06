@@ -19,11 +19,6 @@ type BeginPluginInstallationDeletionParams struct {
 	ID string
 }
 
-// ConnectOrgCIBuildkiteCredentialParams is parameters of connectOrgCIBuildkiteCredential operation.
-type ConnectOrgCIBuildkiteCredentialParams struct {
-	OrgId string
-}
-
 // ConnectOrgCIDepotOrganizationParams is parameters of connectOrgCIDepotOrganization operation.
 type ConnectOrgCIDepotOrganizationParams struct {
 	OrgId string
@@ -50,11 +45,6 @@ type CreatePluginInstallationParams struct {
 	Plugin string
 }
 
-// CreateRepoCIWebhookParams is parameters of createRepoCIWebhook operation.
-type CreateRepoCIWebhookParams struct {
-	RepoId string
-}
-
 // DeleteBindingParams is parameters of deleteBinding operation.
 type DeleteBindingParams struct {
 	AccountId string
@@ -79,19 +69,6 @@ type DeleteNativeMirrorParams struct {
 // DeleteOrgParams is parameters of deleteOrg operation.
 type DeleteOrgParams struct {
 	OrgId string
-}
-
-// DeleteOrgCIBuildkiteClusterParams is parameters of deleteOrgCIBuildkiteCluster operation.
-type DeleteOrgCIBuildkiteClusterParams struct {
-	OrgId       string
-	BkOrg       string
-	BkClusterId string
-}
-
-// DeleteOrgCIBuildkiteCredentialParams is parameters of deleteOrgCIBuildkiteCredential operation.
-type DeleteOrgCIBuildkiteCredentialParams struct {
-	OrgId string
-	BkOrg string
 }
 
 // DeletePluginInstallationParams is parameters of deletePluginInstallation operation.
@@ -301,17 +278,6 @@ type ListOIDCProvidersParams struct {
 	PageSize OptInt32 `json:",omitempty,omitzero"`
 	// Opaque cursor from a previous response's nextPageToken.
 	PageToken OptString `json:",omitempty,omitzero"`
-}
-
-// ListOrgCIBuildkiteClustersParams is parameters of listOrgCIBuildkiteClusters operation.
-type ListOrgCIBuildkiteClustersParams struct {
-	OrgId          string
-	BkOrganization OptString `json:",omitempty,omitzero"`
-}
-
-// ListOrgCIBuildkiteCredentialsParams is parameters of listOrgCIBuildkiteCredentials operation.
-type ListOrgCIBuildkiteCredentialsParams struct {
-	OrgId string
 }
 
 // ListOrgCIDepotOrganizationsParams is parameters of listOrgCIDepotOrganizations operation.
@@ -663,11 +629,6 @@ type PatchRepoCIWebhookParams struct {
 	ID     string
 }
 
-// RegisterOrgCIBuildkiteClusterParams is parameters of registerOrgCIBuildkiteCluster operation.
-type RegisterOrgCIBuildkiteClusterParams struct {
-	OrgId string
-}
-
 // RemoveOrgMemberParams is parameters of removeOrgMember operation.
 type RemoveOrgMemberParams struct {
 	OrgId          string
@@ -763,12 +724,6 @@ type RevokeServiceAccountAccessParams struct {
 	AccountId    string
 	ResourceType RevokeServiceAccountAccessResourceType
 	ResourceId   string
-}
-
-// RotateOrgCIBuildkiteInboundSecretParams is parameters of rotateOrgCIBuildkiteInboundSecret operation.
-type RotateOrgCIBuildkiteInboundSecretParams struct {
-	OrgId string
-	BkOrg string
 }
 
 // SetBranchProtectionParams is parameters of setBranchProtection operation.
