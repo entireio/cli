@@ -3,12 +3,15 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/entireio/auth-go/tokens"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
@@ -227,22 +230,102 @@ func TestDataBaseURLDoesNotExchangeSecret(t *testing.T) {
 	}
 }
 
-// The cell path renews the same way: an env-token subject built from a
-// secret carries the source its clients use.
-// Not parallel: sets process-wide environment.
-func TestCellSubjectFromSecretRenews(t *testing.T) {
+// expiryCheckingAPI answers 200 only for a bearer whose exp is still ahead of
+// the secretNow clock, like a server that verifies tokens; otherwise 401. It
+// records the bearers it saw.
+type expiryCheckingAPI struct {
+	t       *testing.T
+	mu      sync.Mutex
+	bearers []string
+	body    string
+}
+
+func (e *expiryCheckingAPI) serve(r *http.Request) int {
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	e.mu.Lock()
+	e.bearers = append(e.bearers, token)
+	e.mu.Unlock()
+	claims, err := tokens.ParseClaims(token)
+	if err != nil || !claims.ExpiresAt.After(secretNow()) {
+		return http.StatusUnauthorized
+	}
+	return http.StatusOK
+}
+
+func (e *expiryCheckingAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(e.serve(r))
+}
+
+// RoundTrip serves the cluster catalog at the secret's core.
+func (e *expiryCheckingAPI) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.URL.Host != "us.auth.entire.io" || r.URL.Path != clustersAPIPath {
+		e.t.Errorf("unexpected catalog request %s", r.URL)
+	}
+	status := e.serve(r)
+	body := e.body
+	if status != http.StatusOK {
+		body = "{}"
+	}
+	return &http.Response{
+		StatusCode: status,
+		Header:     http.Header{"Content-Type": {"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Request:    r,
+	}, nil
+}
+
+func (e *expiryCheckingAPI) seen() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.bearers...)
+}
+
+// A cell client factory built from a secret and reused past the exchanged
+// token's expiry still routes (the catalog listing) and authenticates (the
+// cell request): both ask the source for a fresh token.
+// Not parallel: sets process-wide environment, seams and the clock.
+func TestCellClientFactoryRenewsSecretToken(t *testing.T) {
 	core := &fakeSecretCore{t: t, expiresIn: 600}
 	useFakeSecretCore(t, core)
+	now := useSecretClock(t)
+	start := *now
+	cell := &expiryCheckingAPI{t: t}
+	cellServer := httptest.NewServer(cell)
+	t.Cleanup(cellServer.Close)
+	catalog := &expiryCheckingAPI{t: t, body: `{"clusters":[{"jurisdiction":"us","isDefault":true,"apiUrl":"` + cellServer.URL + `"}]}`}
+	t.Cleanup(SetCellExchangeTransportForTest(t, catalog))
+	t.Setenv(EnvTokenVar, testServiceAccountSecret)
+	t.Setenv(api.BaseURLEnvVar, "")
 
-	subject, err := resolveEnvTokenCellSubject(testServiceAccountSecret, false)
+	factory, err := NewEntireAPICellClientFactory(context.Background(), false)
 	if err != nil {
-		t.Fatalf("resolveEnvTokenCellSubject: %v", err)
+		t.Fatalf("NewEntireAPICellClientFactory: %v", err)
 	}
-	if subject.source == nil {
-		t.Error("a secret's cell subject must carry a token source")
+	target := &CellTarget{Jurisdiction: "us"}
+	for _, at := range []time.Duration{0, 20 * time.Minute} {
+		*now = start.Add(at)
+		client, err := factory.ClientFor(context.Background(), target)
+		if err != nil {
+			t.Fatalf("ClientFor at +%s: %v", at, err)
+		}
+		getOK(t, client, http.StatusOK)
 	}
+
+	for name, bearers := range map[string][]string{"catalog": catalog.seen(), "cell": cell.seen()} {
+		if len(bearers) != 2 || bearers[0] == bearers[1] {
+			t.Errorf("%s bearers = %v, want a renewed token after expiry", name, bearers)
+		}
+	}
+}
+
+// A raw bearer's cell subject keeps its fixed token.
+// Not parallel: sets process-wide environment.
+func TestCellSubjectFromRawBearerIsFixed(t *testing.T) {
+	core := &fakeSecretCore{t: t}
+	useFakeSecretCore(t, core)
+
 	jwt := secretTokenJWT(t, "svc_01JABCDEFGHJKMNPQRSTVWXYZ0", "https://us.auth.entire.io", time.Now().Add(time.Hour))
-	subject, err = resolveEnvTokenCellSubject(jwt, false)
+	subject, err := resolveEnvTokenCellSubject(jwt, false)
 	if err != nil {
 		t.Fatalf("resolveEnvTokenCellSubject: %v", err)
 	}
