@@ -371,6 +371,25 @@ settings for everyone. Entire warns on stderr and tells you to run
 `git rm --cached .entire/settings.local.json`. The load still succeeds using
 project settings, so a committed file cannot brick the repository.
 
+Linked worktrees (`git worktree add`) are created without the gitignored
+`.entire/settings.local.json`. A linked worktree that has none of its own uses
+the main worktree's file, and the untracked check runs against the **main
+worktree's** index and `HEAD`, because that is where the file lives. Writes from
+such a worktree (`entire configure --local`, `entire disable`, answering
+"always" at a prompt) go to that same file, so they change every worktree that
+has no file of its own, and the command output names the main worktree's file.
+There is one local settings file per clone unless a worktree creates its own; a
+worktree with its own file uses only that file. One setting is not inherited:
+`allow_symlinked_agent_dirs` vouches for the links in the main worktree, and a
+linked worktree's branch can ship different ones, so an inherited vouch is
+dropped and `entire status` says why. To vouch for a linked worktree's links,
+copy the main worktree's `settings.local.json` into that worktree's `.entire`
+first and set it there: a worktree with its own file stops inheriting the main
+one, so a file holding only the vouch would drop every other local setting. A bare repository has no main
+worktree to inherit from. With `--separate-git-dir` the main worktree exists but
+cannot be derived from the common directory, so inheritance is not attempted;
+in both cases a worktree uses only its own file.
+
 Rejection is a downgrade, never an error: discovery simply does not run.
 `entire status` names the setting and where it has to move, and the same reason
 is logged. The interactive setup flows (`entire enable`, `entire configure`,

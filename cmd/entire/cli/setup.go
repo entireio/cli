@@ -207,7 +207,7 @@ func updateStrategyOptions(ctx context.Context, w io.Writer, opts EnableOptions)
 		}
 	}
 
-	targetFileAbs, err := paths.AbsPath(ctx, targetFile)
+	targetFileAbs, err := settings.FilePath(ctx, targetFile)
 	if err != nil {
 		targetFileAbs = targetFile
 	}
@@ -248,7 +248,7 @@ func updateSummaryGenerationSettings(ctx context.Context, w io.Writer, provider,
 	}
 
 	targetFile, configDisplay := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
-	targetFileAbs, err := paths.AbsPath(ctx, targetFile)
+	targetFileAbs, err := settings.FilePath(ctx, targetFile)
 	if err != nil {
 		targetFileAbs = targetFile
 	}
@@ -322,7 +322,7 @@ func updateSummaryTimeoutSetting(ctx context.Context, w io.Writer, timeoutSecond
 	}
 
 	targetFile, configDisplay := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
-	targetFileAbs, err := paths.AbsPath(ctx, targetFile)
+	targetFileAbs, err := settings.FilePath(ctx, targetFile)
 	if err != nil {
 		targetFileAbs = targetFile
 	}
@@ -352,7 +352,7 @@ func updateSummaryTimeoutSetting(ctx context.Context, w io.Writer, timeoutSecond
 // Entire git hook when --force or --absolute-git-hook-path is set.
 func updateGlobalSettings(ctx context.Context, cmd *cobra.Command, w io.Writer, opts EnableOptions) error {
 	targetFile, configDisplay := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
-	targetFileAbs, err := paths.AbsPath(ctx, targetFile)
+	targetFileAbs, err := settings.FilePath(ctx, targetFile)
 	if err != nil {
 		targetFileAbs = targetFile
 	}
@@ -390,7 +390,7 @@ func updateGlobalSettings(ctx context.Context, cmd *cobra.Command, w io.Writer, 
 // local-only repos by checking for settings.local.json when settings.json is absent.
 func settingsTargetFile(ctx context.Context, useLocal, useProject bool) (string, string) {
 	if useLocal {
-		return settings.EntireSettingsLocalFile, configDisplayLocal
+		return settings.EntireSettingsLocalFile, localConfigDisplay(ctx)
 	}
 	if useProject {
 		return settings.EntireSettingsFile, configDisplayProject
@@ -402,11 +402,22 @@ func settingsTargetFile(ctx context.Context, useLocal, useProject bool) (string,
 		return settings.EntireSettingsFile, configDisplayProject
 	}
 	if settings.IsSetUpLocal(ctx) {
-		return settings.EntireSettingsLocalFile, configDisplayLocal
+		return settings.EntireSettingsLocalFile, localConfigDisplay(ctx)
 	}
 
 	// Neither exists — default to project
 	return settings.EntireSettingsFile, configDisplayProject
+}
+
+// localConfigDisplay names the local settings file a write lands in. A linked
+// worktree with no file of its own writes the main worktree's, which every
+// worktree without its own file reads, so the output says whose file it is.
+func localConfigDisplay(ctx context.Context) string {
+	path, inherited, err := settings.LocalSettingsPath(ctx)
+	if err != nil || !inherited {
+		return configDisplayLocal
+	}
+	return fmt.Sprintf("%s, inherited from the main worktree: %s", configDisplayLocal, path)
 }
 
 func saveSettingsToTarget(ctx context.Context, s *EntireSettings, targetFile string) error {
@@ -1679,7 +1690,7 @@ func runEnable(ctx context.Context, w io.Writer, useProjectSettings bool, opts E
 // symmetry with enable; for disable it is the same as the bare default.
 func runDisable(ctx context.Context, w io.Writer, useProjectSettings bool) error {
 	targetFile := settings.EntireSettingsLocalFile
-	configDisplay := configDisplayLocal
+	configDisplay := localConfigDisplay(ctx)
 	if useProjectSettings {
 		targetFile = settings.EntireSettingsFile
 		configDisplay = configDisplayProject
@@ -2249,7 +2260,7 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	// why: writing the merged struct back into a single scope leaks the other
 	// scope's fields into it).
 	targetFile, configDisplay := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
-	targetFileAbs, err := paths.AbsPath(ctx, targetFile)
+	targetFileAbs, err := settings.FilePath(ctx, targetFile)
 	if err != nil {
 		targetFileAbs = targetFile
 	}
@@ -2717,7 +2728,10 @@ func maybePromptVercelDeploymentDisable(ctx context.Context, w io.Writer, target
 			configDisplay = configDisplayLocal
 		}
 
-		targetSettingsPath := filepath.Join(repoRoot, targetFile)
+		targetSettingsPath, err := settings.FilePath(ctx, targetFile)
+		if err != nil {
+			return false, fmt.Errorf("resolve settings path: %w", err)
+		}
 		targetSettings, err := settings.LoadFromFile(targetSettingsPath)
 		if err != nil {
 			return false, fmt.Errorf("load settings: %w", err)
