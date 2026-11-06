@@ -85,6 +85,8 @@ func getPIIConfig() *PIIConfig {
 // Pre-compiled builtin PII regexes.
 var (
 	emailRegex = regexp.MustCompile(`\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b`)
+	// phoneRegex matches North American numbers; intlPhoneRegex
+	// (pii_phone.go) the rest of the world's in international format.
 	// phoneRegex uses three branches to avoid false-positives on dotted-decimal
 	// strings like version numbers (1.234.567.8901) and IPs (192.168.001.0001).
 	// Dots are only allowed as separators when preceded by +1 (unambiguous intl prefix).
@@ -190,6 +192,7 @@ type builtinPIIPattern struct {
 var builtinPIIPatterns = []builtinPIIPattern{
 	{PIIEmail, labelEmail, emailRegex},
 	{PIIPhone, labelPhone, phoneRegex},
+	{PIIPhone, labelPhone, intlPhoneRegex},
 	{PIIAddress, labelAddress, addressRegex},
 	{PIIIP, labelIP, ipv4CandidateRegex},
 	{PIIIP, labelIP, ipv6CandidateRegex},
@@ -225,11 +228,12 @@ func detectPII(cfg *PIIConfig, s string) []taggedRegion {
 			if p.label == labelPhone && loc[1] < len(s) && s[loc[1]] >= '0' && s[loc[1]] <= '9' {
 				continue
 			}
-			// The built-in IP candidates are only shapes; redactableIP
-			// validates them and may trim the match. Matched by regex, not
-			// label, so a custom pattern named "ip" is left as written.
-			if builtinIP {
-				start, end, ok := redactableIP(s, loc[0], loc[1])
+			// The built-in IP and international phone candidates are only
+			// shapes; validateCandidate checks them and may move the match's
+			// bounds. Matched by regex, not label, so a custom pattern named
+			// "ip" or "phone" is left as written.
+			if builtinIP || p.regex == intlPhoneRegex {
+				start, end, ok := validateCandidate(p.regex, s, loc[0], loc[1])
 				if !ok {
 					continue
 				}
@@ -242,7 +246,7 @@ func detectPII(cfg *PIIConfig, s string) []taggedRegion {
 			})
 		}
 	}
-	return dropNestedIPRegions(regions)
+	return dropNestedPIIRegions(regions)
 }
 
 // compilePIIPatterns builds the pattern list from config.
@@ -270,6 +274,16 @@ func compilePIIPatterns(cfg *PIIConfig) []piiPattern {
 		patterns = append(patterns, piiPattern{regex: compiled, label: strings.ToUpper(label)})
 	}
 	return patterns
+}
+
+// validateCandidate runs the validator of a built-in pattern whose regex only
+// finds a shape: redactableIntlPhone for international phone numbers,
+// redactableIP for the IP candidates.
+func validateCandidate(re *regexp.Regexp, s string, start, end int) (int, int, bool) {
+	if re == intlPhoneRegex {
+		return redactableIntlPhone(s, start, end)
+	}
+	return redactableIP(s, start, end)
 }
 
 // replacementToken returns the redaction placeholder for a given label.

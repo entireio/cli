@@ -101,13 +101,15 @@ Built-in categories (when `enabled` is `true`):
 | Category | Default | Replacement token |
 |---|---|---|
 | `email` | on | `[REDACTED_EMAIL]` |
-| `phone` (North American / NANP formats) | on | `[REDACTED_PHONE]` |
+| `phone` (North American formats, and international numbers written with `+`, see below) | on | `[REDACTED_PHONE]` |
 | `address` (US street addresses) | off (more false-positive prone) | `[REDACTED_ADDRESS]` |
 | `ip` (IPv4 and IPv6 addresses, see below) | on | `[REDACTED_IP]` |
 
 Common bot/CI email addresses are not redacted (`noreply@*`, `actions@*`, `*@users.noreply.github.com`, `*@noreply.github.com`), and neither is the `git@` login of a git remote: a remote URL (`ssh://git@host/org/repo`), an scp-style remote whose path contains `/` or ends in `.git` (`git@host:org/repo.git`), or a bare `git@` on GitHub, GitLab, Bitbucket, Codeberg, or Azure DevOps (`ssh -T git@github.com`). Any other `git@` address, such as `git@company.com` in prose or `ssh -T git@gitlab.company.com`, is redacted like any other email.
 
 Phone and address matches must stand on their own: digits that are part of a longer number (`2024-123-4567890`) are not a phone number, and a street suffix must be a whole word, so `Plan` or `Started` does not end an address.
+
+Outside North America, `phone` matches numbers in international format: a `+` and a country code other than `1`, then the national number, 9 to 15 digits in all, separated by spaces, dashes, dots or one parenthesized group (`+44 20 7946 0958`, `+54 9 11 0000-0001`, `+33.1.99.00.12.34`, `+44 (0)20 7946 0958`, `(+39) 347 000 0001`, `+442079460958`). A national number without the `+` (`020 7946 0958`) is not matched, because in code it has the shape of counts, IDs and dates. Neither is a `+` that continues a word or a version (`1.2.3+20241029`), a decimal (`+48.8566140`), a dotted IPv4 address, or a date whose first group is the year (`+2026-11-06 19:24`).
 
 IP addresses are redacted when they look like an address in use, because version numbers (`1.17.2.3`) and user agents (`Chrome/154.0.0.0`) share the dotted-quad shape. An address is redacted when any of these hold:
 
@@ -333,7 +335,7 @@ File an issue when the rule would benefit every Entire user (e.g., a major SaaS 
 - **JSONL skip rules.** Entire skips scanning the string values of fields whose name *ends in* `signature` (so `thinkingSignature` too), fields ending in `id`/`ids`, and structural-path fields (`filepath`, `file_path`, `cwd`, `root`, `directory`, `dir`, `path`) to avoid false positives. That includes strings in an array under such a field; objects nested under one are still scanned. Because the rule matches by suffix, a string directly under an unrelated name such as `valid` or `android` is skipped too. Objects whose `type` starts with `image` or equals `base64` are also skipped — and that skip is what leaves a pasted image unredacted rather than merely unflagged. It matches some agents' image shapes and not others, which is why the outcome differs per agent: see [What Entire does NOT understand: pasted images and screenshots](#what-entire-does-not-understand-pasted-images-and-screenshots) above.
 - **JSON keys are not scanned.** Only values are. A secret used as an object key, such as a token as a header name, is stored as written.
 - **A secret recognized only by its key is redacted only there.** A value such as a hex string under `api_key` is replaced where it sits. The same value elsewhere, in another field, in prose, or on another line, is redacted only if a detector flags it there on its own.
-- **Built-in PII patterns are US-centric.** `phone` matches North American (NANP) formats only — international formats, including E.164 numbers outside `+1`, are not detected. `address` matches the street line only; city, state, and ZIP/postcode are preserved. If you handle personal data from other regions, add `custom_patterns` for your locale rather than relying on the built-in categories alone.
+- **Built-in PII patterns are US-centric.** `phone` matches North American formats, and other countries' numbers only when written in international format with `+`; national formats such as `020 7946 0958` are not detected. `address` matches the street line only; city, state, and ZIP/postcode are preserved. If you handle personal data from other regions, add `custom_patterns` for your locale rather than relying on the built-in categories alone.
 - **Custom PII patterns are user-authored.** Teams own the correctness of their `custom_patterns`. An invalid regex, or one that can match the empty string, is logged and skipped, not enforced.
 - **Users are ultimately responsible** for reviewing what they commit and push. Redaction is a safety net, not a guarantee.
 

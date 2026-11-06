@@ -515,7 +515,7 @@ func redactIPsUnderNetworkKey(key, val string, t *tally) string {
 			}
 		}
 	}
-	regions = dropNestedIPRegions(regions)
+	regions = dropNestedPIIRegions(regions)
 	// The key names the value, so it is context only for addresses the value
 	// holds directly (a list, a URL, user@host), not for one inside
 	// descriptive text ({"hostname":"build 1.17.2.3"}).
@@ -579,10 +579,11 @@ func isVersionValue(key, val string) bool {
 	return k == "version" || strings.HasSuffix(k, "_version")
 }
 
-// dropNestedIPRegions removes an IP region that lies inside another one, so
-// an address counts once: both IP rules match an IPv4-mapped address, the
-// IPv4 rule only its dotted tail (::ffff:10.0.0.1).
-func dropNestedIPRegions(regions []taggedRegion) []taggedRegion {
+// dropNestedPIIRegions removes a region that lies inside another one with
+// the same label, so a value counts once: both IP rules match an IPv4-mapped
+// address, the IPv4 rule only its dotted tail (::ffff:10.0.0.1), and the North
+// American phone rule matches the national part of +39 347 000 0001.
+func dropNestedPIIRegions(regions []taggedRegion) []taggedRegion {
 	if len(regions) < 2 {
 		return regions
 	}
@@ -595,7 +596,7 @@ func dropNestedIPRegions(regions []taggedRegion) []taggedRegion {
 	kept := regions[:1]
 	for _, r := range regions[1:] {
 		last := kept[len(kept)-1]
-		if r.label == labelIP && last.label == labelIP && r.end <= last.end {
+		if r.label == last.label && r.end <= last.end {
 			continue
 		}
 		kept = append(kept, r)
