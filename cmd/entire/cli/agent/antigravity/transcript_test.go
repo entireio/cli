@@ -136,6 +136,44 @@ func TestPrepareTranscript_RefusesPathOutsideBrainDir(t *testing.T) {
 	}
 }
 
+// TestPrepareTranscript_SiblingSurfaceBrainDirs: the Antigravity IDE and the
+// 2.0 app load the same .agents/hooks.json but keep their own brain beside the
+// CLI's (~/.gemini/antigravity-ide/brain, ~/.gemini/antigravity/brain), and
+// their Stop payloads point there. The placeholder must land in those stores
+// too, or the turn end fails with "transcript file not found".
+func TestPrepareTranscript_SiblingSurfaceBrainDirs(t *testing.T) {
+	brainTranscriptPath(t)
+	geminiDir := filepath.Dir(filepath.Dir(os.Getenv(antigravityTestBrainDirEnv)))
+
+	a := &AntigravityAgent{}
+	for _, surface := range []string{"antigravity-ide", "antigravity"} {
+		path := a.ResolveSessionFile(filepath.Join(geminiDir, surface, "brain"), "conv-"+surface)
+		if err := a.PrepareTranscript(context.Background(), path); err != nil {
+			t.Fatalf("%s: PrepareTranscript: %v", surface, err)
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("%s: placeholder not created: %v", surface, err)
+		}
+	}
+}
+
+// TestPrepareTranscript_RefusesUnknownSurfaceBrainDir: only the known
+// Antigravity surfaces are accepted, not any brain directory under ~/.gemini.
+func TestPrepareTranscript_RefusesUnknownSurfaceBrainDir(t *testing.T) {
+	brainTranscriptPath(t)
+	geminiDir := filepath.Dir(filepath.Dir(os.Getenv(antigravityTestBrainDirEnv)))
+	a := &AntigravityAgent{}
+	path := a.ResolveSessionFile(filepath.Join(geminiDir, "other", "brain"), "conv")
+
+	err := a.PrepareTranscript(context.Background(), path)
+	if !errors.Is(err, agent.ErrOutsideSessionStore) {
+		t.Fatalf("PrepareTranscript() error = %v, want agent.ErrOutsideSessionStore", err)
+	}
+	if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("a placeholder must not be created outside the known stores; Lstat err = %v", statErr)
+	}
+}
+
 // TestPrepareTranscript_EmptyRefIsNoOp verifies an empty transcript path is
 // a graceful no-op (defensive — the framework probably never passes empty,
 // but agents have been bitten by empty refs in the past).

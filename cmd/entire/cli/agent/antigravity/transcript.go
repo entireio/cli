@@ -482,13 +482,23 @@ func (a *AntigravityAgent) transcriptStore(transcriptRef string) (*agent.Session
 	if !filepath.IsAbs(transcriptRef) {
 		return nil, "", fmt.Errorf("%w: %s is not absolute", agent.ErrOutsideSessionStore, transcriptRef)
 	}
-	store, err := agent.OpenSessionStore(a, "")
+	dirs, err := a.brainDirs()
 	if err != nil {
-		return nil, "", err //nolint:wrapcheck // the store already names the agent and directory
+		return nil, "", fmt.Errorf("resolve %s session directory: %w", a.Name(), err)
 	}
-	name, err := store.Name(transcriptRef)
-	if err != nil {
-		return nil, "", err //nolint:wrapcheck // preserved for errors.Is(err, agent.ErrOutsideSessionStore)
+	var firstErr error
+	for _, dir := range dirs {
+		store, err := agent.OpenSessionStoreAt(a, dir)
+		if err != nil {
+			return nil, "", err //nolint:wrapcheck // the store already names the agent and directory
+		}
+		name, err := store.Name(transcriptRef)
+		if err == nil {
+			return store, name, nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
 	}
-	return store, name, nil
+	return nil, "", firstErr
 }

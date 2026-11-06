@@ -69,6 +69,29 @@ func (a *AntigravityAgent) GetSessionDir(_ string) (string, error) {
 	return filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain"), nil
 }
 
+// siblingSurfaceDirs are the app-data directories of the other Antigravity
+// surfaces sharing agy's hooks.json: the IDE and the Antigravity 2.0 app.
+// Each keeps its own brain beside the CLI's under ~/.gemini, and their hook
+// payloads carry transcriptPath values inside it.
+var siblingSurfaceDirs = []string{"antigravity-ide", "antigravity"}
+
+// brainDirs returns every brain directory a hook-supplied transcriptPath may
+// lie in: the CLI's (GetSessionDir) first, then the sibling surfaces'. The
+// siblings are derived from GetSessionDir's own result, so the test override
+// relocates them with it.
+func (a *AntigravityAgent) brainDirs() ([]string, error) {
+	cliBrain, err := a.GetSessionDir("")
+	if err != nil {
+		return nil, err
+	}
+	geminiDir := filepath.Dir(filepath.Dir(cliBrain))
+	dirs := []string{cliBrain}
+	for _, surface := range siblingSurfaceDirs {
+		dirs = append(dirs, filepath.Join(geminiDir, surface, "brain"))
+	}
+	return dirs, nil
+}
+
 func (a *AntigravityAgent) ResolveSessionFile(sessionDir, agentSessionID string) string {
 	return filepath.Join(sessionDir, agentSessionID, ".system_generated", "logs", "transcript_full.jsonl")
 }
