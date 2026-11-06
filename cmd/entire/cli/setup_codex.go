@@ -45,7 +45,9 @@ var promptInstallCodexDiscoveredHooks = func(ctx context.Context, target codexag
 // finishCodexHooksSetup runs after Codex hooks were installed in the current
 // checkout. When Codex reads a different checkout's hooks file that lacks
 // Entire's hooks, it offers to install them there; only an explicit yes, and
-// only when mayPrompt, writes outside the current checkout.
+// only when mayPrompt, writes outside the current checkout. The offer is
+// optional, so a cancelled prompt or a failed write warns and prints the
+// remedy instead of failing the setup that called it.
 func finishCodexHooksSetup(ctx context.Context, w io.Writer, ag agent.Agent, mayPrompt bool) error {
 	if ag.Name() != agent.AgentNameCodex {
 		return nil
@@ -67,7 +69,8 @@ func finishCodexHooksSetup(ctx context.Context, w io.Writer, ag agent.Agent, may
 	if offer && mayPrompt {
 		var err error
 		if install, err = promptInstallCodexDiscoveredHooks(ctx, target); err != nil {
-			return err
+			fmt.Fprintf(w, "  Skipped installing Codex hooks in %s: %v\n", target.Path(), err)
+			install = false
 		}
 	}
 	if !install {
@@ -79,11 +82,16 @@ func finishCodexHooksSetup(ctx context.Context, w io.Writer, ag agent.Agent, may
 		}
 		return nil
 	}
-	if _, err := codexagent.InstallDiscoveredHooks(ctx, target); err != nil {
-		return fmt.Errorf("install Codex hooks in %s: %w", target.Path(), err)
+	count, err := codexagent.InstallDiscoveredHooks(ctx, target)
+	if err != nil {
+		fmt.Fprintf(w, "  Could not install Codex hooks in %s: %v\n", target.Path(), err)
+		writeCodexPrimaryCheckoutRemedy(w, target.Path(), codexNonWorktreeRoot(target))
+		return nil
 	}
-	fmt.Fprintf(w, "  Installed Entire's Codex hooks in %s. %s Open /hooks in Codex to approve them.\n",
-		target.Path(), codexDiscoveredChangeNote(target))
+	if count > 0 {
+		fmt.Fprintf(w, "  Installed Entire's Codex hooks in %s. %s Open /hooks in Codex to approve them.\n",
+			target.Path(), codexDiscoveredChangeNote(target))
+	}
 	return nil
 }
 

@@ -13,7 +13,7 @@ import (
 // current checkout and lacks Entire's current hooks. Malformed or unreadable
 // files are not offered; the user has to fix those by hand.
 func (d HookDiagnostics) DiscoveredInstallCandidate() (DiscoveredHooksPath, bool) {
-	if d.Discovery.State != HookDiscoveryResolved || !d.PathsDiffer() {
+	if d.Discovery.State != HookDiscoveryResolved || !d.PathsDiffer() || d.Discovery.DiscoveredHooks.separateGitDirParent {
 		return DiscoveredHooksPath{}, false
 	}
 	switch d.Discovered.State {

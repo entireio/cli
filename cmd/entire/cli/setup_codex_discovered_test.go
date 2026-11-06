@@ -100,14 +100,37 @@ func TestFinishCodexHooksSetup_NoConsentWritesNothing(t *testing.T) {
 	}
 }
 
-func TestFinishCodexHooksSetup_PromptErrorIsReturned(t *testing.T) {
+// The offer is optional: a cancelled prompt does not fail the setup that
+// called it, writes nothing, and prints the remedy.
+func TestFinishCodexHooksSetup_PromptErrorSkipsTheOffer(t *testing.T) {
 	primaryHooks, _ := enterLinkedWorktreeWithCodexHooks(t)
 	stubCodexDiscoveredHooksPrompt(t, true, context.Canceled)
 
 	var out bytes.Buffer
-	err := finishCodexHooksSetup(context.Background(), &out, &codex.CodexAgent{}, true)
-	require.ErrorIs(t, err, context.Canceled)
+	require.NoError(t, finishCodexHooksSetup(context.Background(), &out, &codex.CodexAgent{}, true))
 	require.NoDirExists(t, filepath.Dir(primaryHooks))
+	require.Contains(t, out.String(), "Skipped installing Codex hooks in "+primaryHooks)
+	require.Contains(t, out.String(), "re-run `entire agent add codex`")
+}
+
+// A failed write after a yes (here a .codex symlink created after the offer) warns
+// and prints the remedy instead of failing setup halfway.
+func TestFinishCodexHooksSetup_FailedWriteWarns(t *testing.T) {
+	primaryHooks, _ := enterLinkedWorktreeWithCodexHooks(t)
+	// The symlink appears while the prompt is up, after the offer was made.
+	elsewhere := t.TempDir()
+	prev := promptInstallCodexDiscoveredHooks
+	t.Cleanup(func() { promptInstallCodexDiscoveredHooks = prev })
+	promptInstallCodexDiscoveredHooks = func(context.Context, codex.DiscoveredHooksPath) (bool, error) {
+		return true, os.Symlink(elsewhere, filepath.Dir(primaryHooks))
+	}
+
+	var out bytes.Buffer
+	require.NoError(t, finishCodexHooksSetup(context.Background(), &out, &codex.CodexAgent{}, true))
+	require.NoFileExists(t, filepath.Join(elsewhere, "hooks.json"))
+	require.Contains(t, out.String(), "Could not install Codex hooks in "+primaryHooks)
+	require.Contains(t, out.String(), "re-run `entire agent add codex`")
+	require.NotContains(t, out.String(), "Installed Entire's Codex hooks")
 }
 
 func TestFinishCodexHooksSetup_OutdatedDiscoveredHooksPrompt(t *testing.T) {

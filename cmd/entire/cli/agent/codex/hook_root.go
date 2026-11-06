@@ -35,6 +35,10 @@ type DiscoveredHooksPath struct {
 	// rootIsCheckout is false for a .bare layout root or a separate Git
 	// storage parent, which are project roots but not worktrees.
 	rootIsCheckout bool
+	// separateGitDirParent marks a separate Git directory's storage parent,
+	// which can hold other repositories' storage too, so Entire never offers
+	// to write there.
+	separateGitDirParent bool
 }
 
 // Path returns the discovered hooks file's absolute path.
@@ -98,6 +102,7 @@ func resolveHookDiscovery(worktreeRoot string) HookDiscovery {
 	}
 	root := worktreeRoot
 	rootIsCheckout := true
+	separateGitDirParent := false
 	dotGitPath, err := gitrepo.ResolveDotGitPath(worktreeRoot)
 	if err != nil {
 		return unresolvedHookDiscoveryAt(worktreeRoot, "Git layout could not be resolved: "+err.Error())
@@ -126,6 +131,7 @@ func resolveHookDiscovery(worktreeRoot string) HookDiscovery {
 			// Codex nevertheless uses that parent as its project root.
 			root = candidate
 			rootIsCheckout = false
+			separateGitDirParent = true
 		}
 	}
 
@@ -133,9 +139,10 @@ func resolveHookDiscovery(worktreeRoot string) HookDiscovery {
 		return unresolvedHookDiscoveryAt(worktreeRoot, fmt.Sprintf("derived hook root %q is user-wide", root))
 	}
 	discovery.DiscoveredHooks = DiscoveredHooksPath{
-		path:           filepath.Join(root, ".codex", HooksFileName),
-		root:           root,
-		rootIsCheckout: rootIsCheckout,
+		path:                 filepath.Join(root, ".codex", HooksFileName),
+		root:                 root,
+		rootIsCheckout:       rootIsCheckout,
+		separateGitDirParent: separateGitDirParent,
 	}
 	return discovery
 }

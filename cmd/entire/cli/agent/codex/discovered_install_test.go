@@ -206,6 +206,7 @@ func TestHookDiagnostics_DiscoveredInstallCandidate(t *testing.T) {
 	worktree := WorktreeHooksPath{path: "/repo-feature/.codex/hooks.json", worktreeRoot: "/repo-feature"}
 	primary := DiscoveredHooksPath{path: "/repo-main/.codex/hooks.json", root: "/repo-main", rootIsCheckout: true}
 	same := DiscoveredHooksPath{path: worktree.path, root: worktree.worktreeRoot, rootIsCheckout: true}
+	storageParent := DiscoveredHooksPath{path: "/gitdirs/.codex/hooks.json", root: "/gitdirs", separateGitDirParent: true}
 
 	tests := []struct {
 		name       string
@@ -221,6 +222,7 @@ func TestHookDiagnostics_DiscoveredInstallCandidate(t *testing.T) {
 		{name: "malformed primary", state: HookDiscoveryResolved, discovered: primary, inspection: HookConfigInspection{State: HookFileMalformed}},
 		{name: "unavailable primary", state: HookDiscoveryResolved, discovered: primary, inspection: HookConfigInspection{State: HookFileUnavailable}},
 		{name: "same path", state: HookDiscoveryResolved, discovered: same, inspection: HookConfigInspection{State: HookFileAbsent}},
+		{name: "separate Git directory storage parent", state: HookDiscoveryResolved, discovered: storageParent, inspection: HookConfigInspection{State: HookFileAbsent}},
 		{name: "unresolved", state: HookDiscoveryUnresolved, inspection: HookConfigInspection{State: HookFileUnavailable}},
 	}
 	for _, tt := range tests {
@@ -268,4 +270,25 @@ func groupsHaveCommand(groups []MatcherGroup, command string) bool {
 		}
 	}
 	return false
+}
+
+// A linked worktree of a repository with a separate Git directory discovers
+// the storage parent, which may hold other repositories' storage: never offered.
+func TestResolveHookDiscovery_SeparateGitDirWorktreeHasNoCandidate(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	mainRoot := filepath.Join(tmp, "main")
+	storageRoot := filepath.Join(tmp, "gitdirs", "main.git")
+	require.NoError(t, os.MkdirAll(filepath.Dir(storageRoot), 0o755))
+	runGitWithDir(t, tmp, "init", "--separate-git-dir", storageRoot, mainRoot)
+	runGitWithDir(t, mainRoot, "commit", "--allow-empty", "-m", "init")
+	linked := filepath.Join(tmp, "linked")
+	runGitWithDir(t, mainRoot, "worktree", "add", "-b", "feature", linked)
+
+	worktreeHooks, err := resolveWorktreeHooksPath(linked)
+	require.NoError(t, err)
+	discovery := resolveHookDiscovery(linked)
+	diagnostics := HookDiagnostics{Discovery: discovery, WorktreeHooks: worktreeHooks, Discovered: HookConfigInspection{State: HookFileAbsent}}
+	_, ok := diagnostics.DiscoveredInstallCandidate()
+	require.False(t, ok, "discovered %s", discovery.DiscoveredHooks.Path())
 }
