@@ -7,10 +7,12 @@ import (
 )
 
 // cliFlagValue is one password argument on a command line: a quoted string
-// that stays on its line, or a bare word that ends at whitespace, a quote or a
-// shell metacharacter. Ending at a backtick or a parenthesis keeps the closing
-// delimiter of Markdown code (`mysql -pX`) and of $(...) out of the value.
-const cliFlagValue = `"[^"\r\n]*"|'[^'\r\n]*'|[^\s'"` + "`" + `|;&()<>]+`
+// that stays on its line (a double-quoted one may go on past an escaped line
+// break, which the shell removes), or a bare word that ends at whitespace, a
+// quote or a shell metacharacter. Ending at a backtick or a parenthesis keeps
+// the closing delimiter of Markdown code (`mysql -pX`) and of $(...) out of
+// the value.
+const cliFlagValue = `"(?:[^"\r\n]|\\\r?\n)*"|'[^'\r\n]*'|[^\s'"` + "`" + `|;&()<>]+`
 
 // cliSameCommandChar is one piece of the text between a command name and one
 // of its flags. It skips quoted strings (with escapes inside double quotes:
@@ -19,7 +21,7 @@ const cliFlagValue = `"[^"\r\n]*"|'[^'\r\n]*'|[^\s'"` + "`" + `|;&()<>]+`
 // break, a shell operator or a backtick (which starts a command substitution,
 // or ends Markdown code), so a flag is only read as belonging to the command
 // that precedes it in the same pipeline segment.
-const cliSameCommandChar = `\\\r?\n|\\[^\r\n]|"(?:[^"\\\r\n]|\\[^\r\n])*"|'[^'\r\n]*'|[^\r\n|;&` + "`" + `]`
+const cliSameCommandChar = `\\\r?\n|\\[^\r\n]|"(?:[^"\\\r\n]|\\\r?\n|\\[^\r\n])*"|'[^'\r\n]*'|[^\r\n|;&` + "`" + `]`
 
 const cliSameCommand = `(?:` + cliSameCommandChar + `)`
 
@@ -217,7 +219,7 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string) []tag
 		switch {
 		case cmd[0] >= segmentEnd:
 			segment = quoteScan{s: s, i: cmd[1], skip: closeAt, skipEnd: stringEnd}
-			rest = segmentRest(s, cmd[1], closeAt, stringEnd)
+			rest = f.segmentRest(s, cmd[1], closeAt, stringEnd)
 			segmentEnd = cmd[1] + len(rest)
 		case f.leading:
 			// Only the options right after the name are read, and they
@@ -242,17 +244,30 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string) []tag
 // name ends at i, in a quoted string that closes at closeAt and ends at
 // stringEnd (both -1 when it is in none). A command quoted with its
 // arguments (sh -c 'mysql --version'; ssh -p2222 host) ends with the string;
-// a quoted program path ("/usr/bin/mysql" -pX) goes on after it.
-func segmentRest(s string, i, closeAt, stringEnd int) string {
+// a quoted program path ("/usr/bin/mysql" -pX, or "/opt/mysql tools/bin/mysql"
+// -pX, where the name first matched a directory) goes on after it.
+func (f cliPasswordFlag) segmentRest(s string, i, closeAt, stringEnd int) string {
 	pattern := segmentRestPattern(s, closeAt)
 	switch {
 	case closeAt < i:
 		return pattern.FindString(s[i:])
-	case strings.ContainsAny(s[i:closeAt], " \t"):
+	case strings.ContainsAny(s[i:closeAt], " \t") && !f.endsProgramPath(s[i:closeAt]):
 		return pattern.FindString(s[i:closeAt])
 	default:
 		return s[i : stringEnd+len(cliSegmentRest.FindString(s[stringEnd:]))]
 	}
+}
+
+// endsProgramPath reports whether rest, the text of a quoted string after a
+// client name, ends with the path of a program f defines: its last path
+// component starts with the name and has no blank (/bin/mysql, \bin\mysql.exe).
+func (f cliPasswordFlag) endsProgramPath(rest string) bool {
+	sep := strings.LastIndexAny(rest, `/\`)
+	if sep < 0 || strings.ContainsAny(rest[sep:], " \t") {
+		return false
+	}
+	loc := f.command.FindStringIndex(rest[sep+1:])
+	return loc != nil && loc[0] == 0
 }
 
 // segmentRestPattern returns the pattern for the rest of the segment of a
@@ -477,7 +492,8 @@ func shellWordEnd(s string, start int) int {
 // length of its quote: 1 for ' and ", 2 for \" (a quote inside a JSON
 // string). It is 0 when no quoted string starts at i, or when the string does
 // not close on its line. A backslash escapes the next character inside double
-// quotes.
+// quotes, and an escaped line break goes on to the next line, which the shell
+// joins to the string ("pass:Summer\<newline>2026").
 func quotedPiece(s string, i int) (end, quoteLen int) {
 	switch {
 	case s[i] == '"' || s[i] == '\'':
@@ -494,7 +510,9 @@ func quotedPiece(s string, i int) (end, quoteLen int) {
 			return 0, 0
 		case strings.HasPrefix(s[j:], quote):
 			return j + quoteLen, quoteLen
-		case quote == `"` && s[j] == '\\' && j+1 < len(s) && s[j+1] != '\r' && s[j+1] != '\n':
+		case quote == `"` && strings.HasPrefix(s[j:], "\\\r\n"):
+			j += 2
+		case quote == `"` && s[j] == '\\' && j+1 < len(s):
 			j++
 		}
 	}
