@@ -30,7 +30,7 @@ const (
 
 // redactableIntlPhone reports whether the candidate s[start:end] is a phone
 // number in international format, and its bounds: a "(+39)" country code
-// starts one byte earlier.
+// starts one byte earlier, and digits past the 15th are left out.
 func redactableIntlPhone(s string, start, end int) (int, int, bool) {
 	ccEnd := start + 1
 	for ccEnd < end && isDigit(s[ccEnd]) {
@@ -38,27 +38,19 @@ func redactableIntlPhone(s string, start, end int) (int, int, bool) {
 	}
 	cc := ccEnd - start - 1
 	if ccEnd < end && s[ccEnd] == ')' {
-		// "(+39) 347 000 0001": the parentheses hold the country code only.
-		if start == 0 || s[start-1] != '(' || cc > 3 {
-			return 0, 0, false
+		if start > 0 && s[start-1] == '(' && cc <= 3 {
+			// "(+39) 347 000 0001": the parentheses hold the country code.
+			start--
+		} else {
+			// "(+442079460958)": the parenthesis closes the text around it.
+			end = ccEnd
 		}
-		start--
 	}
 	if !intlPhoneStandsAlone(s, start, end) {
 		return 0, 0, false
 	}
-	digits, dots, otherSeparator := 0, 0, false
-	for i := start; i < end; i++ {
-		switch c := s[i]; {
-		case isDigit(c):
-			digits++
-		case c == '.':
-			dots++
-		case c != '+':
-			otherSeparator = true
-		}
-	}
-	if digits < intlPhoneMinDigits || digits > intlPhoneMaxDigits {
+	end, ok := trimIntlPhone(s, start, ccEnd, end)
+	if !ok {
 		return 0, 0, false
 	}
 	if ccEnd == end {
@@ -71,24 +63,69 @@ func redactableIntlPhone(s string, start, end int) (int, int, bool) {
 	if cc > 3 && s[ccEnd] != ' ' {
 		return 0, 0, false
 	}
-	// Dots must be the only separator, at least two of them, and the digits
-	// must not form an IPv4 address: +33.1.99.00.12.34 is a number, while a
-	// decimal (+48.8566140), +233.252.18.110 and +31.12.2024 23 are not.
-	if dots > 0 {
-		if otherSeparator || dots < 2 {
-			return 0, 0, false
+	return start, end, dotsReadAsPhone(s, start, ccEnd, end)
+}
+
+// trimIntlPhone returns the end of the number in s[start:end] once the groups
+// after a space that take it past 15 digits are dropped, since a space also
+// joins a number to the text after it (+44 20 7946 0958 2026). A dash or dot
+// does not: +281475245147134.9375 is a decimal, not a number and its tail. It
+// reports false when fewer than 9 digits remain or no space allows the cut.
+func trimIntlPhone(s string, start, ccEnd, end int) (int, bool) {
+	digits := countDigits(s[start:end])
+	for digits > intlPhoneMaxDigits {
+		i := strings.LastIndexByte(s[ccEnd:end], ' ')
+		if i < 0 {
+			return 0, false
 		}
-		if _, err := netip.ParseAddr(strings.TrimPrefix(s[start:end], "+")); err == nil {
-			return 0, 0, false
+		digits -= countDigits(s[ccEnd+i : end])
+		end = ccEnd + i
+	}
+	return end, digits >= intlPhoneMinDigits
+}
+
+// dotsReadAsPhone reports whether the dots in s[start:end], if any, separate
+// a phone number. Apart from a space after the country code, dots must be the
+// only separator, at least two of them, and the digits must not form an IPv4
+// address: +33.1.99.00.12.34 and +33 1.99.00.12.34 are numbers, while a
+// decimal (+48.8566140), +233.252.18.110 and +31.12.2024 23 are not.
+func dotsReadAsPhone(s string, start, ccEnd, end int) bool {
+	dots, other := 0, false
+	for i := ccEnd; i < end; i++ {
+		switch c := s[i]; {
+		case isDigit(c), i == ccEnd && c == ' ':
+		case c == '.':
+			dots++
+		default:
+			other = true
 		}
 	}
-	return start, end, true
+	if dots == 0 {
+		return true
+	}
+	if other || dots < 2 {
+		return false
+	}
+	_, err := netip.ParseAddr(strings.TrimPrefix(s[start:end], "+"))
+	return err != nil
+}
+
+func countDigits(s string) int {
+	n := 0
+	for i := range len(s) {
+		if isDigit(s[i]) {
+			n++
+		}
+	}
+	return n
 }
 
 // intlPhoneStandsAlone reports whether s[start:end] is not part of a longer
 // token: semver build metadata (1.2.3+20241029), base64 (ab/+2345678901),
 // or an identifier on either side. A letter after a backslash belongs to an
-// escape left in the text (\n+44 20 7946 0958), not to a word.
+// escape left in the text (\n+44 20 7946 0958), not to a word. An extension
+// attached with x stays visible, as with North American numbers
+// (+44 20 7946 0958x123).
 func intlPhoneStandsAlone(s string, start, end int) bool {
 	if start > 0 {
 		prev := s[start-1]
@@ -96,5 +133,18 @@ func intlPhoneStandsAlone(s string, start, end int) bool {
 			return false
 		}
 	}
-	return end == len(s) || !isIPWordByte(s[end])
+	return end == len(s) || !isIPWordByte(s[end]) || isPhoneExtension(s, end)
+}
+
+// isPhoneExtension reports whether s[i:] starts with an extension such as
+// x123 that ends the word.
+func isPhoneExtension(s string, i int) bool {
+	if s[i]|0x20 != 'x' {
+		return false
+	}
+	j := i + 1
+	for j < len(s) && isDigit(s[j]) {
+		j++
+	}
+	return j > i+1 && (j == len(s) || !isIPWordByte(s[j]))
 }
