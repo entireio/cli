@@ -267,11 +267,13 @@ func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
 		name       string
 		commitArgs []string
 		noReflog   bool
+		resetAfter bool
 		condensed  bool
 	}{
 		{name: "amend", commitArgs: []string{"--amend"}, condensed: true},
 		{name: "message reused with commit -C", condensed: false},
 		{name: "amend without a reflog", commitArgs: []string{"--amend"}, noReflog: true, condensed: true},
+		{name: "commit -C, then a hook's git reset HEAD", resetAfter: true, condensed: false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -340,6 +342,11 @@ func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
 			testutil.RunGit(t, siblingDir, append([]string{"commit", "-q", "-F", msgFile}, tt.commitArgs...)...)
 			if tt.noReflog {
 				require.Empty(t, headReflog(ctx), "sanity: the amend left no reflog")
+			}
+			if tt.resetAfter {
+				// An earlier post-commit hook's reset records an entry that
+				// does not move HEAD.
+				testutil.RunGit(t, siblingDir, "reset", "-q", "HEAD")
 			}
 			require.NoError(t, NewManualCommitStrategy().PostCommit(ctx))
 

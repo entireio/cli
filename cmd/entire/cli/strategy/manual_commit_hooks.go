@@ -1507,7 +1507,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	// for this trailer, however long the prompt or editor took in between, and
 	// on an amend the owner of the checkpoint the amended commit links.
 	ctx = withLinkedSessions(ctx, linkedByStamp[checkpointID])
-	ctx = withAmendedCheckpoint(ctx, amendedCheckpoint(ctx, repo, commit, checkpointID, targetPreexisting))
+	ctx = withAmendedCheckpoint(ctx, amendedCheckpoint(ctx, commit, checkpointID, targetPreexisting))
 	sessions, err := s.findSessionsForCommitLinking(ctx, worktreePath)
 	findSessionsSpan.RecordError(err)
 	findSessionsSpan.End()
