@@ -134,6 +134,12 @@ func TestString_CommandLinePasswords(t *testing.T) {
 		{name: "Windows program name", input: "mysql.exe -u root -p" + p, want: "mysql.exe -u root -pREDACTED"},
 		{name: "many client names in one word", input: "mysql -e 'x," + strings.Repeat("mysql,", 4000) + "' -p" + p, want: "mysql -e 'x," + strings.Repeat("mysql,", 4000) + "' -pREDACTED"},
 		{name: "many substitutions in one quoted argument", input: "mysql -e '" + strings.Repeat("$(mysql)", 4000) + "' -p" + p, want: "mysql -e '" + strings.Repeat("$(mysql)", 4000) + "' -pREDACTED"},
+		{name: "client run through ssh in a quoted argument", input: `docker exec mysql sh -c 'ssh db "mysql -p` + p + `"'`, want: `docker exec mysql sh -c 'ssh db "mysql -pREDACTED"'`},
+		{name: "client run through ssh with options in a quoted argument", input: "docker exec mysql sh -c 'ssh -p 2222 -o BatchMode=yes db mysql -p" + p + "'", want: "docker exec mysql sh -c 'ssh -p 2222 -o BatchMode=yes db mysql -pREDACTED'"},
+		{name: "shell script with combined options in a quoted argument", input: `docker exec mysql sh -c 'bash -ce "mysql -p` + p + `"'`, want: `docker exec mysql sh -c 'bash -ce "mysql -pREDACTED"'`},
+		{name: "ssh host named like a print command", input: "mysql -e $(ssh echo mysql -p" + p + ") app", want: "mysql -e $(ssh echo mysql -pREDACTED) app"},
+		{name: "argument named like a print command in a substitution", input: "mysql -e $(docker exec echo mysql -p" + p + ") app", want: "mysql -e $(docker exec echo mysql -pREDACTED) app"},
+		{name: "long program path in a quoted argument", input: "docker exec mysql sh -c '/" + strings.Repeat("d", 80) + "/bin/mysql -p" + p + "'", want: "docker exec mysql sh -c '/" + strings.Repeat("d", 80) + "/bin/mysql -pREDACTED'"},
 		{name: "many client names in one substitution", input: "mysql -e $(echo " + strings.Repeat("mysql ", 4000) + ") -p" + p, want: "mysql -e $(echo " + strings.Repeat("mysql ", 4000) + ") -pREDACTED"},
 	})
 }
@@ -191,6 +197,8 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		`mysql -e 'select "mysql -pDebug"'`,
 		"mysql -e $(echo mysql -pDebug) app",
 		"mysql -e $(ssh db echo mysql -pDebug) app",
+		"docker exec mysql sh -c 'ssh db echo mysql -pDebug'",
+		`docker exec mysql sh -c 'mysql -e "select mysql -pDebug"'`,
 		`mysql -h "$(printf %s mysql -p3306)"`,
 		"ssh mysql.example.com -p2222",
 		"ssh -i ~/.ssh/mysql.pem -p2222 user@host",
