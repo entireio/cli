@@ -273,8 +273,83 @@ func recordStampedTrailer(ctx context.Context, cpID id.CheckpointID) bool {
 		logging.Warn(logging.WithComponent(ctx, "checkpoint"), "prepare-commit-msg: could not record the stamped trailer, leaving the commit unlinked",
 			slog.String("checkpoint_id", cpID.String()),
 			slog.String("error", err.Error()))
+		return false
 	}
-	return err == nil
+	recordStampedSessions(ctx, cpID)
+	return true
+}
+
+// stampedSessionsFile records, for each trailer prepare-commit-msg stamped,
+// the sessions it linked the commit to (withLinkedSessions). Post-commit keeps
+// those sessions in its own matching, so it condenses into the trailer the
+// sessions prepare linked. It sits beside stampedTrailersFile, not in it, so a
+// binary that reads that file as a list of IDs is unaffected; post-commit
+// takes both. With no entry for its trailer, post-commit matches afresh, as
+// before.
+const stampedSessionsFile = "entire-stamped-sessions.json"
+
+type stampedSessions struct {
+	CheckpointID id.CheckpointID `json:"checkpoint_id"`
+	SessionIDs   []string        `json:"session_ids"`
+}
+
+// recordStampedSessions records the sessions ctx marks as linked for cpID,
+// replacing an earlier entry for it (a reservation stamped again by a later
+// prepare). Best effort: without the entry post-commit matches afresh.
+func recordStampedSessions(ctx context.Context, cpID id.CheckpointID) {
+	sessionIDs := linkedSessions(ctx)
+	if len(sessionIDs) == 0 {
+		return
+	}
+	if err := writeStampedSessions(ctx, stampedSessions{CheckpointID: cpID, SessionIDs: sessionIDs}); err != nil {
+		logging.Debug(logging.WithComponent(ctx, "checkpoint"), "prepare-commit-msg: could not record the sessions linked to the trailer",
+			slog.String("checkpoint_id", cpID.String()),
+			slog.String("error", err.Error()))
+	}
+}
+
+func writeStampedSessions(ctx context.Context, entry stampedSessions) error {
+	root, err := perWorktreeGitRoot(ctx)
+	if err != nil {
+		return err
+	}
+	entries := slices.DeleteFunc(readStampedSessionsIn(root), func(e stampedSessions) bool {
+		return e.CheckpointID == entry.CheckpointID
+	})
+	data, err := json.Marshal(append(entries, entry))
+	if err != nil {
+		return fmt.Errorf("encode stamped sessions: %w", err)
+	}
+	return jsonutil.WriteFileAtomicIn(root, stampedSessionsFile, data, 0o600) //nolint:wrapcheck // recordStampedSessions logs it with context
+}
+
+// takeStampedSessions returns the sessions prepare-commit-msg linked to each
+// trailer it stamped since the last post-commit, by checkpoint ID, and
+// consumes the record.
+func takeStampedSessions(ctx context.Context) map[id.CheckpointID][]string {
+	root, err := perWorktreeGitRoot(ctx)
+	if err != nil {
+		return nil
+	}
+	entries := readStampedSessionsIn(root)
+	_ = osroot.RemoveNoSymlinks(root, stampedSessionsFile) //nolint:errcheck // absent when prepare stamped nothing
+	linked := make(map[id.CheckpointID][]string, len(entries))
+	for _, e := range entries {
+		linked[e.CheckpointID] = e.SessionIDs
+	}
+	return linked
+}
+
+func readStampedSessionsIn(root *os.Root) []stampedSessions {
+	data, err := osroot.ReadFileNoFollow(root, stampedSessionsFile)
+	if err != nil {
+		return nil
+	}
+	var entries []stampedSessions
+	if json.Unmarshal(data, &entries) != nil {
+		return nil
+	}
+	return entries
 }
 
 func writeStampedTrailer(ctx context.Context, cpID id.CheckpointID) error {

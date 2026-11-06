@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -452,12 +453,14 @@ func resolveWorktreeCandidates(ctx context.Context, worktreePath string, candida
 // worktree, resolveWorktreeCandidates links them without that check, and
 // post-commit would condense a session idle for days into every commit made
 // here. Only commit linking applies this; amend and post-rewrite still find
-// the sessions they keep the existing links of.
+// the sessions they keep the existing links of. A session prepare-commit-msg
+// already linked this commit to is kept (withLinkedSessions).
 func withoutIdleSessions(ctx context.Context, worktreePath string, states []*SessionState) []*SessionState {
 	now := time.Now()
+	linked := linkedSessions(ctx)
 	var kept []*SessionState
 	for _, state := range states {
-		if idleBeyondRecentWindow(state, now) {
+		if !slices.Contains(linked, state.SessionID) && idleBeyondRecentWindow(state, now) {
 			logging.Debug(logging.WithComponent(ctx, "checkpoint"),
 				"session matching: fallback session idle beyond the recent window; not linked",
 				slog.String("commit_worktree", worktreePath),
@@ -486,6 +489,41 @@ func idleBeyondRecentWindow(state *SessionState, now time.Time) bool {
 		return false
 	}
 	return !hasFreshLiveTaskRecord(state, now)
+}
+
+type linkedSessionsKey struct{}
+
+// withLinkedSessions marks sessionIDs as the sessions prepare-commit-msg linked
+// the commit to, which withoutIdleSessions keeps however idle they are. Prepare
+// marks the sessions it links and records them with the trailer it stamps
+// (recordStampedTrailer); post-commit marks the ones recorded for its trailer,
+// so both hooks resolve the same sessions however long the commit took in
+// between. The TTY prompt or the commit-message editor can outlast
+// recentSessionWindow, or a session's background subagent can finish: judged
+// afresh, a session prepare linked would be dropped, and the commit would keep
+// a trailer naming a checkpoint that is never written.
+func withLinkedSessions(ctx context.Context, sessionIDs []string) context.Context {
+	if len(sessionIDs) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, linkedSessionsKey{}, slices.Clone(sessionIDs))
+}
+
+// linkedSessions returns the session IDs withLinkedSessions marked on ctx.
+func linkedSessions(ctx context.Context) []string {
+	if ids, ok := ctx.Value(linkedSessionsKey{}).([]string); ok {
+		return ids
+	}
+	return nil
+}
+
+// linkedSessionIDs returns the IDs of states, for withLinkedSessions.
+func linkedSessionIDs(states []*SessionState) []string {
+	ids := make([]string, 0, len(states))
+	for _, state := range states {
+		ids = append(ids, state.SessionID)
+	}
+	return ids
 }
 
 // warnAmbiguousWorktreeSessions surfaces refused fallback matches: live

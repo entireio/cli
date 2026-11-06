@@ -523,6 +523,8 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 		return nil
 	}
 	findSessionsSpan.End()
+	// Recorded with the trailer, so post-commit keeps these sessions.
+	ctx = withLinkedSessions(ctx, linkedSessionIDs(sessions))
 
 	// Fast path: skip content detection for mid-turn agent commits. A session
 	// whose agent provably did not make this commit is left to content
@@ -999,6 +1001,7 @@ func (s *ManualCommitStrategy) stampFreshCheckpointForAmend(ctx context.Context,
 	if err != nil || len(sessions) == 0 {
 		return
 	}
+	ctx = withLinkedSessions(ctx, linkedSessionIDs(sessions))
 	withContent := s.filterSessionsWithNewContent(ctx, repo, sessions, redo{}, newCommitProvenance(ctx, sessions))
 	if len(withContent) == 0 {
 		return
@@ -1467,6 +1470,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 
 	// Condense into the trailer prepare stamped, never into an inherited one.
 	ids, stamped, redone, moved := linkedTrailersOf(ctx, commit)
+	linkedByStamp := takeStampedSessions(ctx)
 	checkpointID, targetPreexisting, found := s.condensationTarget(ctx, repo, ids, stamped)
 	openRepoSpan.End()
 
@@ -1496,7 +1500,9 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 
 	// Union of worktree and identity matching — must resolve the same way
 	// PrepareCommitMsg did, or the stamped trailer and the condensed session
-	// diverge (a dangling trailer).
+	// diverge (a dangling trailer). So it keeps the sessions prepare recorded
+	// for this trailer, however long the prompt or editor took in between.
+	ctx = withLinkedSessions(ctx, linkedByStamp[checkpointID])
 	sessions, err := s.findSessionsForCommitLinking(ctx, worktreePath)
 	findSessionsSpan.RecordError(err)
 	findSessionsSpan.End()

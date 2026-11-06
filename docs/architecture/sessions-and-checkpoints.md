@@ -320,7 +320,11 @@ commit.
   (`stampedTrailer`) only when prepare recorded stamping it: each ID it stamps
   (one it generates, or a session's reserved one) goes into
   `entire-stamped-trailers.json` in the per-worktree git dir until the next
-  post-commit, which consumes it. The trailer an amend restores names an
+  post-commit, which consumes it. Beside it, `entire-stamped-sessions.json`
+  records the sessions prepare linked for each stamped ID, and post-commit
+  keeps them when it matches sessions again (`withLinkedSessions`): one that
+  looks idle by then, after a long prompt or editor wait, is still condensed
+  into the trailer prepare wrote. The trailer an amend restores names an
   existing checkpoint and is not recorded: post-commit condenses into it for
   its owner without a stamp, and a record a cancelled amend left would let a
   later commit naming it skip its own trailer. Prepare writes a trailer only once
