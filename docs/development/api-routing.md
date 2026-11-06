@@ -32,6 +32,33 @@ context and silently ignores both `ENTIRE_TOKEN` and the cluster case, so it can
 name a core the request never touches (this was a real bug in the `mirror list`
 banner; see `repo_mirror.go` and `coreapi.Client.CoreOrigin`).
 
+A service account secret (`ENTIRE_TOKEN=ent_svc_…`) has no `aud`. Every reader
+that needs the bearer or its claims goes through `auth.ResolveEnvToken` (via
+`auth.ParseEnvToken`, or `ResolveEnvTokenContext` in `git-remote-entire`).
+`auth.LocalIdentityCacheKey` is the one exception: it keys a secret on the
+exchange Core and the service account ID, so a cache lookup needs no network.
+Readers that only test whether `ENTIRE_TOKEN` is set need nothing. A v1
+secret is `ent_svc_<juri>_<account ULID>_<secret ULID>_<random><check>` and is
+validated offline, checksum included, before anything is sent
+(`parseServiceAccountSecret`). The secret lives in the regional database of
+its jurisdiction, so the exchange sends it to `https://<juri>.auth.entire.io`,
+or to `ENTIRE_CORE_URL` when set (local development and staging; not checked
+against the jurisdiction). The exchange, the identity cache key and
+`ForgetServiceAccountSecretToken` derive that origin in one place
+(`secretExchangeSubject`). It returns the service account JWT, which lives at
+most 10 minutes; that JWT's `aud` then drives the precedence above. The
+exchanged token must name the secret's `svc_` account as `sub` and that
+Core as its only URL `aud`; its own `exp` wins over `expires_in` when earlier
+(`checkExchangedToken`, applied again to every cache read). It is cached under
+the user cache root, keyed by a hash of the Core and the secret, and reused
+until 2 minutes before it expires. On a miss the exchange and write-back run
+under a per-entry file lock, which `ForgetServiceAccountSecretToken` also
+takes, so parallel commands share one exchange; a lock that cannot be taken
+falls back to an unshared exchange rather than failing auth. The exchange never follows a
+redirect, because a 307/308 would resend the secret in the body. `entire auth
+status --json` reports `credential_source: sa_secret` for it. Never send the
+secret itself as a bearer, and never name it in an error.
+
 When a command resolves auth *outside* a `coreapi.Client` (e.g. `entire auth
 status`, which builds its own `/me` client), it must apply the same
 env-token-first precedence itself — see `resolveAuthStatusTarget` /
