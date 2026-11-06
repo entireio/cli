@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v6"
@@ -1106,6 +1108,35 @@ func TestPushURL_UnroutableErrorQuotesNoRemoteURL(t *testing.T) {
 	require.NotContains(t, err.Error(), "\x1b")
 	require.NotContains(t, err.Error(), "PWNED")
 	require.Contains(t, err.Error(), "set checkpoint_remote to a github or gitlab repository, or remove it")
+}
+
+// A raw-URL push never syncs checkpoints, so PushURL must not log a fallback
+// destination for it: users read that line as checkpoints going to origin.
+func TestPushURL_RawURLTargetLogsNoFallback(t *testing.T) {
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	runGit(t, repoDir, "remote", "add", "origin", "https://github.com/acme/app.git")
+	writeSettings(t, repoDir, `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`)
+	t.Chdir(repoDir)
+
+	l, err := logging.New(logging.Config{Root: entiredir.OpenerAt(repoDir), Dir: logging.LogsName})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = l.Close() })
+	ctx := logging.WithLogger(context.Background(), l)
+	// Proves the sink captures warn lines, so the absence below is not vacuous.
+	logging.Warn(ctx, "sentinel")
+
+	gotURL, gotEnabled, err := PushURL(ctx, "https://github.com/acme/app.git")
+	require.NoError(t, err)
+	require.Empty(t, gotURL)
+	require.False(t, gotEnabled)
+
+	require.NoError(t, l.Close())
+	content, err := os.ReadFile(filepath.Join(repoDir, ".entire", logging.LogsName, "entire.log"))
+	require.NoError(t, err)
+	require.Contains(t, string(content), "sentinel")
+	require.NotContains(t, string(content), "fallback_url")
+	require.Equal(t, 1, strings.Count(string(content), `"level":"WARN"`), "only the sentinel may warn:\n%s", content)
 }
 
 func TestPushURL_ErrorsWhenNoCheckpointRemoteAndOriginMissing(t *testing.T) {
