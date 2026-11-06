@@ -3,8 +3,6 @@
 package integration
 
 import (
-	"fmt"
-	"os"
 	"path/filepath"
 	"testing"
 
@@ -67,20 +65,14 @@ func startSession(t *testing.T, env *TestEnv, cache []string, id string, changes
 	return hooks, s
 }
 
-// installRealCommitHooks writes the commit hooks `entire enable` installs, run
-// through the test binary rather than whatever `entire` is on PATH.
+// installRealCommitHooks installs the git hooks `entire enable` installs,
+// pinned to the test binary by absolute path. With the bare `entire` launcher
+// a commit would run whichever entire the developer has on PATH; and hooks
+// Entire does not recognise as its own are moved aside on the next turn start
+// (EnsureSetup) and chained behind a freshly installed bare-launcher set.
 func installRealCommitHooks(env *TestEnv) {
 	env.T.Helper()
-	hooksDir := filepath.Join(env.RepoDir, ".git", "hooks")
-	require.NoError(env.T, os.MkdirAll(hooksDir, 0o755))
-	for name, args := range map[string]string{
-		"prepare-commit-msg": `prepare-commit-msg "$1" "$2"`,
-		"commit-msg":         `commit-msg "$1"`,
-		"post-commit":        `post-commit`,
-	} {
-		script := fmt.Sprintf("#!/bin/sh\n%q hooks git %s || true\n", getTestBinary(), args)
-		require.NoError(env.T, os.WriteFile(filepath.Join(hooksDir, name), []byte(script), 0o755))
-	}
+	env.RunCLI("enable", "--agent", agentClaudeCode, "--telemetry=false", "--absolute-git-hook-path")
 }
 
 // agentGit runs git in env's repo the way an agent's shell tool does: no
