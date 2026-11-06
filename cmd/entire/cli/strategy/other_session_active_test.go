@@ -2,9 +2,13 @@ package strategy
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 )
 
@@ -35,12 +39,24 @@ func TestOtherSessionActiveSince(t *testing.T) {
 	save(&SessionState{SessionID: "own", Phase: session.PhaseActive, LastInteractionTime: &after,
 		TaskRecords: []session.TaskRecord{{ToolUseID: "call_worker", AgentID: "worker"}}})
 
-	tests := []struct {
+	// A Droid Worker that "own" launched, whose transcript names it before
+	// any task record on "own" does.
+	ownWorkerTranscript := filepath.Join(t.TempDir(), "own-worker.jsonl")
+	writeDroidSessionStart(t, ownWorkerTranscript, "own-worker", "own")
+	otherWorkerTranscript := filepath.Join(t.TempDir(), "other-worker.jsonl")
+	writeDroidSessionStart(t, otherWorkerTranscript, "other-worker", "other")
+
+	type overlapCase struct {
 		name    string
 		other   *SessionState
 		related []string
 		want    bool
-	}{
+	}
+	tests := []overlapCase{
+		{"Worker own launched, before its first turn ends", &SessionState{SessionID: "own-worker", Phase: session.PhaseActive,
+			LastInteractionTime: &after, AgentType: agent.AgentTypeFactoryAIDroid, TranscriptPath: ownWorkerTranscript}, nil, false},
+		{"Worker another session launched", &SessionState{SessionID: "other-worker", Phase: session.PhaseActive,
+			LastInteractionTime: &after, AgentType: agent.AgentTypeFactoryAIDroid, TranscriptPath: otherWorkerTranscript}, nil, true},
 		{"idle before the prompt", &SessionState{SessionID: "other", Phase: session.PhaseIdle, LastInteractionTime: &before}, nil, false},
 		{"turn ended during the prompt", &SessionState{SessionID: "other", Phase: session.PhaseIdle, LastInteractionTime: &after}, nil, true},
 		{"mid-turn since before the prompt", &SessionState{SessionID: "other", Phase: session.PhaseActive, LastInteractionTime: &before}, nil, true},
@@ -51,6 +67,14 @@ func TestOtherSessionActiveSince(t *testing.T) {
 		{"own subagent session", &SessionState{SessionID: "worker", Phase: session.PhaseActive, LastInteractionTime: &after}, nil, false},
 		{"own parent session", &SessionState{SessionID: "other", Phase: session.PhaseActive, LastInteractionTime: &after,
 			TaskRecords: []session.TaskRecord{{ToolUseID: "call_own", AgentID: "own"}}}, nil, false},
+	}
+	if live, ok := proclive.IdentityOf(os.Getpid()); ok {
+		gone := live
+		gone.Start = "not-" + live.Start // PID reuse reads as an exited owner
+		tests = append(tests,
+			overlapCase{"long turn, owner alive", &SessionState{SessionID: "other", Phase: session.PhaseActive, LastInteractionTime: &stuck, Owner: &live}, nil, true},
+			overlapCase{"mid-turn, owner exited", &SessionState{SessionID: "other", Phase: session.PhaseActive, LastInteractionTime: &before, Owner: &gone}, nil, false},
+		)
 	}
 	// Cases share the repository's session store, so they run in sequence
 	// rather than as parallel subtests, each removing its session afterwards.
@@ -66,5 +90,16 @@ func TestOtherSessionActiveSince(t *testing.T) {
 		if err := ClearSessionState(ctx, tt.other.SessionID); err != nil {
 			t.Fatalf("ClearSessionState(%q) error = %v", tt.other.SessionID, err)
 		}
+	}
+}
+
+// writeDroidSessionStart writes the session_start line a Factory AI Droid
+// Worker's transcript opens with, naming the session that launched it.
+func writeDroidSessionStart(t *testing.T, path, sessionID, parentSessionID string) {
+	t.Helper()
+	line := `{"type":"session_start","id":"` + sessionID + `","title":"# Task Tool Invocation Subagent type: worker",` +
+		`"callingSessionId":"` + parentSessionID + `","callingToolUseId":"toolu_worker","version":2}` + "\n"
+	if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", path, err)
 	}
 }

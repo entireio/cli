@@ -16,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 
@@ -328,12 +329,13 @@ func LoadBackgroundClaimContext(ctx context.Context, sessionID, toolUseID string
 // OtherSessionActiveSince reports whether a session homed in worktreePath,
 // other than sessionID and the related sessions, had a turn running at some
 // point since since: it interacted after since (a turn started or ended, or
-// the session stopped), or it is mid-turn now. A session stuck ACTIVE past
-// StuckActiveThreshold, or whose agent process has exited, is not counted as
-// mid-turn. Sessions linked to sessionID as subagent and parent (a parent's
-// task record naming the other as its agent) are never counted: one runs on
-// the other's behalf. related names more such sessions, for a link not yet
-// recorded.
+// the session stopped), or it is mid-turn now. A session whose agent process
+// has exited is not counted as mid-turn, nor, when the process can't be
+// checked, one stuck ACTIVE past StuckActiveThreshold. Sessions linked to
+// sessionID as subagent and parent (a parent's task record naming the other as
+// its agent, or a subagent session's transcript naming sessionID as the one
+// that launched it) are never counted: one runs on the other's behalf. related
+// names more such sessions, for a link not yet recorded.
 //
 // git status shows every dirty file in a worktree, not which session changed
 // it, so while another session's turn overlapped this one, a file only git
@@ -362,7 +364,7 @@ func OtherSessionActiveSince(ctx context.Context, worktreePath, sessionID string
 		}
 	}
 	for _, state := range exactWorktreeMatches(ctx, states, worktreePath) {
-		if !skip[state.SessionID] && sessionActiveSince(state, since) {
+		if !skip[state.SessionID] && sessionActiveSince(state, since) && !launchedBy(state, sessionID) {
 			return true, nil
 		}
 	}
@@ -370,11 +372,40 @@ func OtherSessionActiveSince(ctx context.Context, worktreePath, sessionID string
 }
 
 // sessionActiveSince is OtherSessionActiveSince's test for one session.
+// Inactivity stands in for an exited agent only when the owner's liveness
+// can't be checked, since a live agent's long turn still ends in a Stop.
 func sessionActiveSince(state *SessionState, since time.Time) bool {
 	if state.LastInteractionTime != nil && state.LastInteractionTime.After(since) {
 		return true
 	}
-	return state.Phase.IsActive() && !state.IsEnded() && !state.IsStuckActive() && !state.OwnerExited()
+	if !state.Phase.IsActive() || state.IsEnded() {
+		return false
+	}
+	liveness := state.OwnerLiveness()
+	if liveness == proclive.LivenessUnknown {
+		return !state.IsStuckActive()
+	}
+	return liveness == proclive.LivenessAlive
+}
+
+// launchedBy reports whether state is a subagent session that sessionID
+// launched, as its own transcript records it. A Factory AI Droid Worker is
+// named in the parent's task record only once its first turn ends, so while
+// that turn runs this is the only link.
+func launchedBy(state *SessionState, sessionID string) bool {
+	if state.TranscriptPath == "" {
+		return false
+	}
+	ag, err := agent.GetByAgentType(state.AgentType)
+	if err != nil {
+		return false
+	}
+	resolver, ok := agent.AsSubagentSessionResolver(ag)
+	if !ok {
+		return false
+	}
+	link, ok := resolver.ResolveSubagentSession(state.TranscriptPath)
+	return ok && link.ParentSessionID == sessionID
 }
 
 // launchedBeforeRehome reports whether task, one of state's, was launched

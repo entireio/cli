@@ -284,3 +284,49 @@ func TestSharedCheckout_ForegroundTaskClaimsOnlyItsOwnChanges(t *testing.T) {
 		t.Errorf("task record files = %v, want none: b.txt changed while another session's turn ran", got)
 	}
 }
+
+// TestSharedCheckout_ParentKeepsShellEditWhileItsWorkerRuns covers a Factory AI
+// Droid Worker, which runs as a session of its own and is named in its
+// parent's task record only once its first turn ends. While that turn still
+// runs, it must not count as another session's overlapping turn for the parent
+// that launched it, or the parent's own shell edits go unclaimed.
+func TestSharedCheckout_ParentKeepsShellEditWhileItsWorkerRuns(t *testing.T) {
+	t.Parallel()
+
+	env := NewTestEnv(t)
+	env.InitRepo()
+	env.InitEntire()
+	env.WriteFile(".gitignore", ".entire/\n")
+	env.WriteFile("README.md", "# Test Repository\n")
+	env.GitAdd(".gitignore")
+	env.GitAdd("README.md")
+	env.GitCommit("Initial commit")
+
+	parent := env.NewFactoryDroidSession()
+	parent.CreateDroidTranscript("Run a Worker, then regenerate the README", nil)
+	if err := env.SimulateFactoryDroidUserPromptSubmitWithTranscript(parent.ID, parent.TranscriptPath); err != nil {
+		t.Fatalf("parent UserPromptSubmit failed: %v", err)
+	}
+
+	worker := env.NewFactoryDroidSession()
+	worker.CreateDroidTranscript("# Task Tool Invocation", nil)
+	worker.MarkAsWorkerSession(parent.ID, "toolu_worker_01", "worker: Summarize the repo")
+	if err := env.SimulateFactoryDroidUserPromptSubmitWithTranscript(worker.ID, worker.TranscriptPath); err != nil {
+		t.Fatalf("worker UserPromptSubmit failed: %v", err)
+	}
+
+	// A shell command in the parent's turn rewrites README.md; the parent's
+	// transcript doesn't name it. The Worker's turn is still running.
+	env.WriteFile("README.md", "# Test Repository\n\nRegenerated.\n")
+	if err := env.SimulateFactoryDroidStop(parent.ID, parent.TranscriptPath); err != nil {
+		t.Fatalf("parent Stop failed: %v", err)
+	}
+
+	state, err := env.GetSessionState(parent.ID)
+	if err != nil || state == nil {
+		t.Fatalf("GetSessionState(parent) failed: %v (state=%v)", err, state)
+	}
+	if !containsFile(state.FilesTouched, "README.md") {
+		t.Errorf("the parent's shell edit must stay claimed while its own Worker runs, FilesTouched = %v", state.FilesTouched)
+	}
+}
