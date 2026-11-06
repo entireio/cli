@@ -296,13 +296,15 @@ always runnable in every build.
   render core's provider descriptors from `GET /oidc-providers`. A provider is
   matched by `name`, then by the deprecated `displayName` an older core sends.
   Only `self_serve` providers are listed or bound. An older core sends no
-  `self_serve`, so the CLI lists every provider and core decides. `bind` checks each `--pin` against the descriptor's attributes
-  (unknown name, a `*` in an exact attribute, a pattern mismatch, a missing
-  required pin) before it calls core. Core stays the authority, so a provider
-  without attributes gets no client checks. A terminal asks for missing
-  required pins. The `github-actions` success output adds a setup-entire
-  workflow snippet. `revoke` and `unbind` take an explicit target, so they do not prompt, as a
-  typed `grant remove` does not. `delete` confirms like `project delete`
+  `self_serve`, so the CLI lists every provider and core decides. `bind`
+  checks each `--pin` against the descriptor's attributes (unknown name, a
+  `*` in an exact attribute, a pattern mismatch, a missing required pin)
+  before it calls core. Core stays the authority, so a provider without
+  attributes gets no client checks. A terminal asks for missing required
+  pins. The `github-actions` success output adds a setup-entire workflow
+  snippet. `revoke` and `unbind` take an explicit target, so they never
+  prompt. A typed `grant remove` does not prompt either. `delete` confirms
+  like `project delete`.
 - `repo`: control-plane repository lifecycle — `create`, `list --project`,
   `view`, `edit`, `delete`, `clone`, `default-branch`, plus the `mirror`, `remote`,
   `visibility`, `protection` and `grant` subtrees (`repo grant` mirrors
