@@ -74,6 +74,19 @@ func TestString_CommandLinePasswords(t *testing.T) {
 		{name: "quoted lowercase password after a blank", input: `mongosh --password "swordfish" db`, want: `mongosh --password "REDACTED" db`},
 		{name: "literal suffix after a substitution", input: "tool --password=$(gh auth token)" + p, want: "tool --password=REDACTED"},
 		{name: "openssl pass source joined to a bare piece", input: "openssl enc -pass 'pass:abc'" + p, want: "openssl enc -pass 'pass:REDACTED"},
+		{name: "quoted value with a leading blank", input: "docker login -u me -p ' " + p + "' ghcr.io", want: "docker login -u me -p 'REDACTED' ghcr.io"},
+		{name: "escaped shell operator", input: `mysql -pabc\;` + p + " db", want: "mysql -pREDACTED db"},
+		{name: "empty quoted prefix", input: "mysql -p''" + p + " db", want: "mysql -pREDACTED db"},
+		{name: "bare, quoted and bare pieces", input: `mysql -pabc"` + p + `"xyz db`, want: "mysql -pREDACTED db"},
+		{name: "container named like the client", input: "docker exec sshpass sshpass -p " + p + " ssh host", want: "docker exec sshpass sshpass -p REDACTED ssh host"},
+		{name: "quoted suffix after a substitution", input: "mysql -p$(cat /run/secrets/pw)'" + p + "' db", want: "mysql -pREDACTED db"},
+		{name: "nested substitution", input: "mysql -p$(printf %s $(printf x) " + p + ") db", want: "mysql -pREDACTED db"},
+		{name: "literal prefix before a substitution", input: "mysql -pabc$(printf " + p + ") db", want: "mysql -pREDACTED db"},
+		{name: "flag-like text inside a quoted argument", input: "mysql -p" + p + " -e 'SELECT -pDebug'", want: "mysql -pREDACTED -e 'SELECT -pDebug'"},
+		{name: "netrc account before login", input: "machine h account team login alice password " + p, want: "machine h account team login alice password REDACTED"},
+		{name: "netrc comment between fields", input: "machine 127.0.0.1\n login alice\n # build account\n password " + p + "\n", want: "machine 127.0.0.1\n login alice\n # build account\n password REDACTED\n"},
+		{name: "dash-leading value after equals", input: "wget --password=-" + p + " https://example.com", want: "wget --password=REDACTED https://example.com"},
+		{name: "openssl quoted source with blanks", input: "openssl enc -aes-128-cbc -pass 'pass: " + p + " '", want: "openssl enc -aes-128-cbc -pass 'pass:REDACTED'"},
 	})
 }
 
@@ -117,6 +130,9 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		`{"cmd":"mysql -uroot -p","cwd":"/app"}`,
 		`{"cmd":"mysql -uroot -p", "cwd":"/app"}`,
 		`cmd := "mysql -uroot -p" + password + " app"`,
+		`cmd := "mysql -uroot -p"+password+" app"`,
+		"mysql -u root -p$(cat /run/secrets/pw) db",
+		"mysql -u root -e 'select 1' -p",
 		"docker run --name mysql \\\n  -p 3306:3306 mysql:8",
 		"Use `mysql`, `docker login -p`, `sshpass -p` and `openssl -pass pass:` with care.",
 		// declarations
