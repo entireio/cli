@@ -191,6 +191,10 @@ var builtinPIIPatterns = []builtinPIIPattern{
 	{PIIEmail, labelEmail, emailRegex},
 	{PIIPhone, labelPhone, phoneRegex},
 	{PIIAddress, labelAddress, addressRegex},
+	{PIIAddress, labelAddress, italianAddressRegex},
+	{PIIAddress, labelAddress, spanishAddressRegex},
+	{PIIAddress, labelAddress, frenchAddressRegex},
+	{PIIAddress, labelAddress, germanAddressRegex},
 	{PIIIP, labelIP, ipv4CandidateRegex},
 	{PIIIP, labelIP, ipv6CandidateRegex},
 }
@@ -208,13 +212,11 @@ func detectPII(cfg *PIIConfig, s string) []taggedRegion {
 	}
 	var regions []taggedRegion
 	for _, p := range patterns {
-		// Most strings hold no address-shaped text; a byte scan rules that
-		// out before running the IP regexes over the whole string.
-		if (p.regex == ipv4CandidateRegex && !mayContainIPv4(s)) ||
-			(p.regex == ipv6CandidateRegex && !mayContainIPv6(s)) {
+		if !mayMatchPII(p.regex, s) {
 			continue
 		}
 		builtinIP := p.regex == ipv4CandidateRegex || p.regex == ipv6CandidateRegex
+		euAddress := isEuropeanAddressRegex(p.regex)
 		for _, loc := range p.regex.FindAllStringIndex(s, -1) {
 			// Skip allowlisted email addresses (noreply, bot accounts, etc.)
 			// and the git login of a remote.
@@ -223,6 +225,12 @@ func detectPII(cfg *PIIConfig, s string) []taggedRegion {
 			}
 			// Skip phone-shaped digits that run on into a longer number.
 			if p.label == labelPhone && loc[1] < len(s) && s[loc[1]] >= '0' && s[loc[1]] <= '9' {
+				continue
+			}
+			// Skip a European street line that is part of a longer word or
+			// number. By regex, so a custom pattern named address is left
+			// as written.
+			if euAddress && !addressStandsAlone(s, loc[0], loc[1]) {
 				continue
 			}
 			// The built-in IP candidates are only shapes; redactableIP
@@ -243,6 +251,21 @@ func detectPII(cfg *PIIConfig, s string) []taggedRegion {
 		}
 	}
 	return dropNestedIPRegions(regions)
+}
+
+// mayMatchPII reports whether re can match s. Most strings hold no
+// address-shaped text; a byte scan rules that out before running the IP and
+// European address regexes over the whole string.
+func mayMatchPII(re *regexp.Regexp, s string) bool {
+	switch {
+	case re == ipv4CandidateRegex:
+		return mayContainIPv4(s)
+	case re == ipv6CandidateRegex:
+		return mayContainIPv6(s)
+	case isEuropeanAddressRegex(re):
+		return mayContainEuropeanAddress(re, s)
+	}
+	return true
 }
 
 // compilePIIPatterns builds the pattern list from config.
