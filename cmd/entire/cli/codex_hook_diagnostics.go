@@ -29,6 +29,10 @@ type codexHookIssue struct {
 	Error            string
 	MissingHooks     []string
 	MissingApprovals []string
+	// InstallOffered reports whether setup would offer to install Entire's
+	// hooks into the discovered file, so status only recommends that prompt
+	// when it will actually appear.
+	InstallOffered bool
 }
 
 func inspectCodexHookIssue(ctx context.Context) *codexHookIssue {
@@ -47,6 +51,7 @@ func codexHookIssueFromDiagnostics(diagnostics codex.HookDiagnostics) *codexHook
 	if issue.WorktreePath != "" {
 		issue.ProjectLayerPath = filepath.Dir(issue.WorktreePath)
 	}
+	_, issue.InstallOffered = diagnostics.DiscoveredInstallCandidate()
 
 	if diagnostics.Discovery.State != codex.HookDiscoveryResolved {
 		if diagnostics.Worktree.State != codex.HookFileEntire &&
@@ -134,6 +139,9 @@ func codexStatusWarning(issue *codexHookIssue) string {
 	}
 	switch issue.State {
 	case codexHookStateInactiveWorktreePath:
+		if !issue.InstallOffered {
+			return "Codex hooks are not active in this worktree · run 'entire doctor'"
+		}
 		return "Codex hooks are not active in this worktree · re-run 'entire agent add codex' in a terminal and answer yes"
 	case codexHookStateMalformedWorktree:
 		return "Current-worktree Codex hooks are malformed · run 'entire doctor'"

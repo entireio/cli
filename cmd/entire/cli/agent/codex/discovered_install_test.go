@@ -292,3 +292,81 @@ func TestResolveHookDiscovery_SeparateGitDirWorktreeHasNoCandidate(t *testing.T)
 	_, ok := diagnostics.DiscoveredInstallCandidate()
 	require.False(t, ok, "discovered %s", discovery.DiscoveredHooks.Path())
 }
+
+// A hooks file holding JSON null is user-only and offered; installing into it
+// must not panic on the nil top-level map.
+func TestInstallDiscoveredHooks_NullHooksFile(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mainRoot, linkedRoot := setupLinkedWorktreeForInstall(t)
+	primaryPath := writeProjectHooks(t, mainRoot, "null\n")
+
+	_, err := installDiscoveredHooksFrom(ctx, linkedRoot, resolveHookDiscovery(linkedRoot).DiscoveredHooks)
+	require.NoError(t, err)
+	require.True(t, inspectHookConfigAt(ctx, primaryPath).Current)
+}
+
+// User hooks in the discovered file keep every field Entire does not model.
+func TestInstallDiscoveredHooks_PreservesUserHookFields(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mainRoot, linkedRoot := setupLinkedWorktreeForInstall(t)
+	primaryPath := writeProjectHooks(t, mainRoot, `{"hooks":{"SessionStart":[
+  {"matcher":"startup","note":"group-extra","hooks":[
+    {"type":"command","command":"./user-start.sh","timeoutSec":12,"async":true,"statusMessage":"Starting"}
+  ]}
+]}}`)
+
+	_, err := installDiscoveredHooksFrom(ctx, linkedRoot, resolveHookDiscovery(linkedRoot).DiscoveredHooks)
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(primaryPath)
+	require.NoError(t, err)
+	var file struct {
+		Hooks map[string][]map[string]json.RawMessage `json:"hooks"`
+	}
+	require.NoError(t, json.Unmarshal(data, &file))
+	var userGroup map[string]json.RawMessage
+	for _, group := range file.Hooks["SessionStart"] {
+		if string(group["matcher"]) == `"startup"` {
+			userGroup = group
+		}
+	}
+	require.NotNil(t, userGroup, "user matcher group missing: %s", data)
+	require.JSONEq(t, `"group-extra"`, string(userGroup["note"]))
+	require.JSONEq(t,
+		`[{"type":"command","command":"./user-start.sh","timeoutSec":12,"async":true,"statusMessage":"Starting"}]`,
+		string(userGroup["hooks"]))
+	require.True(t, inspectHookConfigAt(ctx, primaryPath).Current)
+}
+
+// Duplicate, otherwise-current Entire hooks are not current; the install must
+// collapse them so the file becomes current and is not offered again.
+func TestInstallDiscoveredHooks_CollapsesDuplicateEntireHooks(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mainRoot, linkedRoot := setupLinkedWorktreeForInstall(t)
+	primaryPath := filepath.Join(mainRoot, ".codex", HooksFileName)
+	target := resolveHookDiscovery(linkedRoot).DiscoveredHooks
+	_, err := installDiscoveredHooksFrom(ctx, linkedRoot, target)
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(primaryPath)
+	require.NoError(t, err)
+	var file map[string]map[string][]MatcherGroup
+	require.NoError(t, json.Unmarshal(data, &file))
+	for event, groups := range file["hooks"] {
+		file["hooks"][event] = append(groups, groups...)
+	}
+	duplicated, err := json.Marshal(file)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(primaryPath, duplicated, 0o600))
+	inspection := inspectHookConfigAt(ctx, primaryPath)
+	require.Equal(t, HookFileEntire, inspection.State)
+	require.False(t, inspection.Current)
+
+	count, err := installDiscoveredHooksFrom(ctx, linkedRoot, target)
+	require.NoError(t, err)
+	require.Positive(t, count)
+	require.True(t, inspectHookConfigAt(ctx, primaryPath).Current)
+}

@@ -17,8 +17,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/execx"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/require"
 )
@@ -203,7 +205,9 @@ func addCodexWithConsent(t *testing.T, dir, answer string) string {
 	t.Helper()
 	cmd := execx.NonInteractive(t.Context(), getTestBinary(), "agent", "add", "codex")
 	cmd.Dir = dir
-	cmd.Env = append(testutil.GitIsolatedEnv(),
+	// The offer refuses any detected agent session, so the developer's agent
+	// identity must not reach the child.
+	cmd.Env = append(withoutAgentSessionEnv(testutil.GitIsolatedEnv()),
 		"ENTIRE_TEST_TTY=1",
 		"ACCESSIBLE=1",
 		"ENTIRE_TELEMETRY_OPTOUT=1",
@@ -213,6 +217,17 @@ func addCodexWithConsent(t *testing.T, dir, answer string) string {
 	output, err := cmd.CombinedOutput()
 	require.NoError(t, err, "entire agent add codex: %s", output)
 	return string(output)
+}
+
+// withoutAgentSessionEnv drops every variable review.DetectAgentSession
+// treats as an agent session.
+func withoutAgentSessionEnv(env []string) []string {
+	names := slices.Concat(agent.CallerSessionEnvVars(), interactive.AgentSubprocessEnvVars(),
+		[]string{"CLAUDECODE", "ANTIGRAVITY_AGENT", "ANTIGRAVITY_TRAJECTORY_ID", "FACTORY_ENV", "AI_AGENT"})
+	return slices.DeleteFunc(env, func(entry string) bool {
+		name, _, _ := strings.Cut(entry, "=")
+		return slices.Contains(names, name)
+	})
 }
 
 func requireEntireHooksListedFrom(t *testing.T, result codexHooksListResponse, hooksPath string) {

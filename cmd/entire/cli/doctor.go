@@ -1695,7 +1695,7 @@ func checkCodexHookTrust(cmd *cobra.Command) {
 	case codexHookStateProjectLayerMissing:
 		writeCodexMissingProjectLayerWarning(w, filepath.Dir(worktreePath), discoveredPath)
 	case codexHookStateInactiveWorktreePath:
-		writeCodexInactiveWorktreeWarning(w, worktreePath, discoveredPath, codexNonWorktreeRoot(diagnostics.Discovery.DiscoveredHooks))
+		writeCodexInactiveWorktreeWarning(w, worktreePath, discoveredPath, codexRemedyFor(diagnostics))
 	case codexHookStateWorktreePathNotDiscovered:
 		writeCodexActiveViaRoot(w, diagnostics)
 	case codexHookStateMalformedWorktree, codexHookStateUnavailableWorktree:
@@ -1713,7 +1713,7 @@ func checkCodexHookTrust(cmd *cobra.Command) {
 			fmt.Fprintln(w, "  Entire-managed commands or timeouts there do not match this CLI.")
 		}
 		if diagnostics.PathsDiffer() {
-			writeCodexPrimaryCheckoutRemedy(w, discoveredPath, codexNonWorktreeRoot(diagnostics.Discovery.DiscoveredHooks))
+			writeCodexPrimaryCheckoutRemedy(w, discoveredPath, codexRemedyFor(diagnostics))
 		} else {
 			fmt.Fprintln(w, "  Run `entire agent add codex` from this worktree to refresh it.")
 			fmt.Fprintln(w, "  If that does not fix it, add --force.")
@@ -1917,8 +1917,12 @@ func writeCodexPrimaryCheckoutRemedy(w io.Writer, discoveredPath string, root co
 			discoveredPath)
 		return
 	}
-	fmt.Fprintf(w, "  From a terminal, re-run `entire agent add codex` in this worktree and answer yes to install Entire's Codex hooks in %s.\n",
-		discoveredPath)
+	if root.notOffered {
+		fmt.Fprintf(w, "  Setup will not install Entire's Codex hooks in %s; add them there yourself.\n", discoveredPath)
+	} else {
+		fmt.Fprintf(w, "  From a terminal, re-run `entire agent add codex` in this worktree and answer yes to install Entire's Codex hooks in %s.\n",
+			discoveredPath)
+	}
 	if root.dir == "" {
 		writeCodexTrackedHooksRemedy(w)
 		return
@@ -1929,10 +1933,13 @@ func writeCodexPrimaryCheckoutRemedy(w io.Writer, discoveredPath string, root co
 
 // codexRemedyRoot describes the discovered project root for the remedy: dir
 // is set when it is not a Git worktree (a .bare layout root), storageParent
-// when it is a separate Git directory's storage parent.
+// when it is a separate Git directory's storage parent, and notOffered when
+// setup would not offer the install for any other reason, so the remedy must
+// not tell the user to answer a prompt they will never see.
 type codexRemedyRoot struct {
 	dir           string
 	storageParent bool
+	notOffered    bool
 }
 
 func codexNonWorktreeRoot(discovered codex.DiscoveredHooksPath) codexRemedyRoot {
@@ -1940,6 +1947,15 @@ func codexNonWorktreeRoot(discovered codex.DiscoveredHooksPath) codexRemedyRoot 
 		return codexRemedyRoot{}
 	}
 	return codexRemedyRoot{dir: discovered.Root(), storageParent: discovered.SeparateGitDirParent()}
+}
+
+// codexRemedyFor is codexNonWorktreeRoot for doctor, which also has to know
+// whether setup would offer the install at all.
+func codexRemedyFor(diagnostics codex.HookDiagnostics) codexRemedyRoot {
+	root := codexNonWorktreeRoot(diagnostics.Discovery.DiscoveredHooks)
+	_, offered := diagnostics.DiscoveredInstallCandidate()
+	root.notOffered = !offered
+	return root
 }
 
 func writeCodexTrackedHooksRemedy(w io.Writer) {

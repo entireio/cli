@@ -65,11 +65,16 @@ that is absent, user-only, or carries outdated Entire hooks, setup asks
 (default No) whether to install Entire's hooks there too
 (`HookDiagnostics.DiscoveredInstallCandidate`, `InstallDiscoveredHooks`). Only
 an explicit yes writes, and only when the user can be asked: `--yes`, no TTY,
-CI, and agent subprocesses never write, and print the remedy instead. The write
+CI, agent subprocesses, and any session `review.DetectAgentSession` recognizes
+never write, and print the remedy instead. The answer is read from the
+controlling terminal, never piped stdin (`ENTIRE_TEST_TTY=1` is the explicit
+test path). The write
 target is the root `resolveHookDiscovery` recorded from Git metadata on
 `DiscoveredHooksPath`, never `filepath.Dir` of the path; discovery is re-resolved
 right before the write and must still name the consented path. It merges into an
-existing file like the current-checkout install, refuses a malformed file, a
+existing file like the current-checkout install, keeping hook fields Entire does
+not model (`timeoutSec`, `async`, `statusMessage`, ...) and collapsing duplicate
+Entire hooks, refuses a malformed file, a
 symlinked `.codex`, or a symlinked `hooks.json`, and never follows vouched
 directories (those are keyed to the current checkout). Codex trust is keyed to
 the discovered path, so the user then approves the hooks in `/hooks`. Doctor,

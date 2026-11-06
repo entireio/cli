@@ -164,6 +164,10 @@ func installHooksInto(ctx context.Context, cfg *agent.HookConfigFile, revalidate
 	if exists {
 		_ = json.Unmarshal(existingData, &topLevel) //nolint:errcheck // parsed above
 	}
+	if topLevel == nil {
+		// A file holding JSON null decodes to a nil map.
+		topLevel = make(map[string]json.RawMessage)
+	}
 	hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
 	if err != nil {
 		return 0, fmt.Errorf("failed to marshal hooks: %w", err)
@@ -703,14 +707,44 @@ func hookCommandExists(groups []MatcherGroup, command string, timeoutSec int) bo
 	return false
 }
 
-// syncHookCommand ensures groups contains exactly the requested Entire hook and
-// removes stale commands left by an older install.
+// syncHookCommand ensures groups contains exactly one copy of the requested
+// Entire hook and removes stale commands left by an older install.
 func syncHookCommand(groups []MatcherGroup, command string, timeoutSec int) ([]MatcherGroup, bool) {
 	groups, dropped := dropStaleEntireHooks(groups, command, timeoutSec)
+	groups, deduped := dropDuplicateHook(groups, command)
 	if hookCommandExists(groups, command, timeoutSec) {
-		return groups, dropped
+		return groups, dropped || deduped
 	}
 	return addHook(groups, command, timeoutSec), true
+}
+
+// dropDuplicateHook keeps the first entry running command and removes the
+// rest; managedHookIsCurrent counts duplicates as drift.
+func dropDuplicateHook(groups []MatcherGroup, command string) ([]MatcherGroup, bool) {
+	seen := false
+	dropped := false
+	result := make([]MatcherGroup, 0, len(groups))
+	for _, group := range groups {
+		kept := make([]HookEntry, 0, len(group.Hooks))
+		for _, hook := range group.Hooks {
+			if hook.Command == command {
+				if seen {
+					dropped = true
+					continue
+				}
+				seen = true
+			}
+			kept = append(kept, hook)
+		}
+		if len(kept) > 0 {
+			group.Hooks = kept
+			result = append(result, group)
+		}
+	}
+	if !dropped {
+		return groups, false
+	}
+	return result, true
 }
 
 func dropStaleEntireHooks(groups []MatcherGroup, command string, timeoutSec int) ([]MatcherGroup, bool) {

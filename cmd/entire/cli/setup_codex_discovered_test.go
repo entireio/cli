@@ -4,13 +4,16 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/stretchr/testify/require"
 )
@@ -22,7 +25,7 @@ func stubCodexDiscoveredHooksPrompt(t *testing.T, answer bool, err error) *[]str
 	prev := promptInstallCodexDiscoveredHooks
 	t.Cleanup(func() { promptInstallCodexDiscoveredHooks = prev })
 	var asked []string
-	promptInstallCodexDiscoveredHooks = func(_ context.Context, target codex.DiscoveredHooksPath) (bool, error) {
+	promptInstallCodexDiscoveredHooks = func(_ context.Context, _ io.Writer, target codex.DiscoveredHooksPath) (bool, error) {
 		asked = append(asked, target.Path())
 		return answer, err
 	}
@@ -121,8 +124,11 @@ func TestFinishCodexHooksSetup_FailedWriteWarns(t *testing.T) {
 	elsewhere := t.TempDir()
 	prev := promptInstallCodexDiscoveredHooks
 	t.Cleanup(func() { promptInstallCodexDiscoveredHooks = prev })
-	promptInstallCodexDiscoveredHooks = func(context.Context, codex.DiscoveredHooksPath) (bool, error) {
-		return true, os.Symlink(elsewhere, filepath.Dir(primaryHooks))
+	promptInstallCodexDiscoveredHooks = func(context.Context, io.Writer, codex.DiscoveredHooksPath) (bool, error) {
+		if err := os.Symlink(elsewhere, filepath.Dir(primaryHooks)); err != nil {
+			t.Skipf("cannot create directory symlink: %v", err)
+		}
+		return true, nil
 	}
 
 	var out bytes.Buffer
@@ -178,8 +184,16 @@ func TestFinishCodexHooksSetup_NormalCheckoutDoesNotPrompt(t *testing.T) {
 	requireEntireCodexHooks(t, resolvedHooksPath(t, repoRoot))
 }
 
+func stubCodexOfferAgentSession(t *testing.T, label string) {
+	t.Helper()
+	prev := detectCodexOfferAgentSession
+	t.Cleanup(func() { detectCodexOfferAgentSession = prev })
+	detectCodexOfferAgentSession = func() string { return label }
+}
+
 func TestCanOfferCodexDiscoveredInstall(t *testing.T) {
 	t.Setenv(interactive.EnvTestTTY, "1")
+	stubCodexOfferAgentSession(t, "")
 	require.True(t, canOfferCodexDiscoveredInstall(EnableOptions{}))
 	require.False(t, canOfferCodexDiscoveredInstall(EnableOptions{Yes: true}), "--yes never writes another checkout")
 
@@ -210,4 +224,45 @@ func TestFinishCodexHooksSetup_CancelledCommandReturnsError(t *testing.T) {
 	err := finishCodexHooksSetup(ctx, &out, &codex.CodexAgent{}, true)
 	require.ErrorIs(t, err, context.Canceled)
 	require.NoDirExists(t, filepath.Dir(primaryHooks))
+}
+
+// An agent child that holds a TTY can pass CanPromptInteractively; the
+// cross-checkout offer also refuses whenever an agent session is detected.
+func TestCanOfferCodexDiscoveredInstall_RefusesAgentSessions(t *testing.T) {
+	t.Setenv(interactive.EnvTestTTY, "1")
+
+	stubCodexOfferAgentSession(t, "a Claude Code session")
+	require.False(t, canOfferCodexDiscoveredInstall(EnableOptions{}))
+
+	detectCodexOfferAgentSession = review.DetectAgentSession
+	t.Setenv("AI_AGENT", "some-agent")
+	require.False(t, canOfferCodexDiscoveredInstall(EnableOptions{}))
+}
+
+// Outside the explicit ENTIRE_TEST_TTY=1 path, the answer comes from the
+// controlling terminal, never from piped stdin.
+func TestPromptInstallCodexDiscoveredHooks_ReadsTheTerminal(t *testing.T) {
+	enterLinkedWorktreeWithCodexHooks(t)
+	target, ok := codex.InspectHookDiagnostics(context.Background()).DiscoveredInstallCandidate()
+	require.True(t, ok)
+	t.Setenv("ACCESSIBLE", "1")
+	t.Setenv(interactive.EnvTestTTY, "")
+	original := openPluginPromptTerminal
+	t.Cleanup(func() { openPluginPromptTerminal = original })
+
+	openPluginPromptTerminal = func() (pluginPromptTerminal, error) {
+		return pluginPromptTerminal{in: strings.NewReader("y\n")}, nil
+	}
+	var out bytes.Buffer
+	install, err := promptInstallCodexDiscoveredHooks(context.Background(), &out, target)
+	require.NoError(t, err)
+	require.True(t, install)
+	require.Contains(t, out.String(), "Codex reads hooks from "+target.Path())
+
+	openPluginPromptTerminal = func() (pluginPromptTerminal, error) {
+		return pluginPromptTerminal{}, errors.New("no terminal")
+	}
+	install, err = promptInstallCodexDiscoveredHooks(context.Background(), &out, target)
+	require.Error(t, err)
+	require.False(t, install)
 }

@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	codexagent "github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/review"
 
 	"charm.land/huh/v2"
 )
@@ -15,27 +17,35 @@ import (
 // canOfferCodexDiscoveredInstall reports whether setup may ask to install
 // Codex hooks into another checkout. --yes, scripts, CI, and agent
 // subprocesses never get that write; they get the remedy text instead.
+//
+// An agent child that holds a TTY can pass CanPromptInteractively, so this
+// offer, which writes outside the checkout, also refuses any detected agent
+// session.
 func canOfferCodexDiscoveredInstall(opts EnableOptions) bool {
-	return !opts.Yes && interactive.CanPromptInteractively()
+	return !opts.Yes && detectCodexOfferAgentSession() == "" && interactive.CanPromptInteractively()
 }
+
+// detectCodexOfferAgentSession is a var so tests can run without inheriting
+// the developer's agent identity.
+var detectCodexOfferAgentSession = review.DetectAgentSession
 
 // promptInstallCodexDiscoveredHooks asks for consent to write the hooks file
 // Codex discovers. It is a package-level var so tests can substitute it.
-var promptInstallCodexDiscoveredHooks = func(ctx context.Context, target codexagent.DiscoveredHooksPath) (bool, error) {
-	install := false // default No: this writes outside the current checkout
-	form := NewAccessibleForm(
-		huh.NewGroup(
-			huh.NewConfirm().
-				// Everything goes in the title: accessible mode drops descriptions.
-				Title(fmt.Sprintf(
-					"Codex reads hooks from %s, not from this worktree. Install Entire's Codex hooks there too? %s",
-					target.Path(), codexDiscoveredPromptNote(target),
-				)).
-				Affirmative("Yes, install there").
-				Negative("No").
-				Value(&install),
-		),
-	)
+//
+// The answer comes from the controlling terminal, not stdin, and the question
+// renders there when w is not a terminal: piped input must not be able to
+// approve a write to another checkout, and a redirected stream must not hide
+// the question. ENTIRE_TEST_TTY=1 is the explicit test path, where
+// integration tests answer through stdin.
+var promptInstallCodexDiscoveredHooks = func(ctx context.Context, w io.Writer, target codexagent.DiscoveredHooksPath) (bool, error) {
+	// Everything goes in the title: accessible mode drops descriptions.
+	title := fmt.Sprintf("Codex reads hooks from %s, not from this worktree. Install Entire's Codex hooks there too? %s",
+		target.Path(), codexDiscoveredPromptNote(target))
+	if os.Getenv(interactive.EnvTestTTY) != "1" {
+		return runPluginConfirm(ctx, w, title, false) // default No: this writes outside the checkout
+	}
+	install := false
+	form := NewAccessibleForm(huh.NewGroup(huh.NewConfirm().Title(title).Value(&install)))
 	if err := form.RunWithContext(ctx); err != nil {
 		return false, fmt.Errorf("codex hooks prompt: %w", err)
 	}
@@ -68,7 +78,7 @@ func finishCodexHooksSetup(ctx context.Context, w io.Writer, ag agent.Agent, may
 	install := false
 	if offer && mayPrompt {
 		var err error
-		if install, err = promptInstallCodexDiscoveredHooks(ctx, target); err != nil {
+		if install, err = promptInstallCodexDiscoveredHooks(ctx, w, target); err != nil {
 			// A cancelled command stops setup; anything else about this
 			// optional prompt (an aborted or broken form) counts as No.
 			if ctxErr := ctx.Err(); ctxErr != nil {
