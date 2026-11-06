@@ -22,6 +22,7 @@ import (
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/factoryaidroid"
+	_ "github.com/entireio/cli/cmd/entire/cli/agent/orcarouter"
 )
 
 // Package-level aliases to avoid shadowing the settings package with local variables named "settings".
