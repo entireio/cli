@@ -38,6 +38,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
@@ -151,6 +152,25 @@ func OpenAt(commonDir string) (*os.Root, error) {
 // Not cached: the per-cwd cache CommonDir keeps would be wrong here, since the
 // answer varies with the argument rather than with the process.
 func CommonDirForWorktree(ctx context.Context, worktreeRoot string) (string, error) {
+	return commonDirForWorktree(ctx, worktreeRoot, nil)
+}
+
+// CommonDirForPath is CommonDirForWorktree for a directory named by
+// configuration rather than by the repository the command runs in. It ignores
+// GIT_DIR and GIT_WORK_TREE: git exports both to its hooks and they outrank
+// cmd.Dir, so an inherited environment would make it answer about the hook's
+// repository instead of the directory asked about. Callers use the result to
+// decide whether two paths are the same clone; being wrong there attributes
+// one repository's settings to another.
+//
+// CommonDirForWorktree keeps honoring those variables: its callers get their
+// root from the current repository, where a developer's exported selectors
+// (a bare dotfiles repository, say) are the intended answer.
+func CommonDirForPath(ctx context.Context, dir string) (string, error) {
+	return commonDirForWorktree(ctx, dir, gitrepo.EnvWithoutRepoOverrides())
+}
+
+func commonDirForWorktree(ctx context.Context, worktreeRoot string, env []string) (string, error) {
 	// An empty root would silently degrade to the process cwd (cmd.Dir = ""),
 	// reproducing exactly the accidental-repo leak this exists to prevent.
 	if worktreeRoot == "" {
@@ -158,6 +178,7 @@ func CommonDirForWorktree(ctx context.Context, worktreeRoot string) (string, err
 	}
 	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-common-dir")
 	cmd.Dir = worktreeRoot
+	cmd.Env = env // nil inherits the process environment
 	output, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("resolve git common dir for %s: %w", worktreeRoot, err)
