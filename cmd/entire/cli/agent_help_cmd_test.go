@@ -1093,7 +1093,7 @@ func TestAgentHelpProjectTrailGuidance_TrailWorkflow(t *testing.T) {
 		cmd  string
 		want []string
 	}{
-		{"update", []string{"keep their text", "<!-- entire-shadow-pr -->", "give a\npull request URL only when the user asks for it",
+		{"update", []string{"keep their text", shadowPRMarker, "give a\npull request URL only when the user asks for it",
 			"A bare number is a project trail number", "If trail N is not this branch's trail, do not\nchange it"}},
 		{"finding", []string{"After a push, run `entire trail finding`", "while any are open, the change is not\nready",
 			"Dismiss with -m only when the\nfinding is wrong", "Reply to a finding with `entire trail finding reply`"}},

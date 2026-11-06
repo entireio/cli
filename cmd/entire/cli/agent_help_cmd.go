@@ -319,7 +319,7 @@ var agentHelpProjectTrailGuidance = map[string]string{
 		"apply to the whole trail, which other changes and people share: edit the\n" +
 		"body read from `entire trail show --json` and keep their text. Then update\n" +
 		"the pull request body if there is one, keeping any\n" +
-		"`<!-- entire-shadow-pr -->` marker. Share the trail or change URL; give a\n" +
+		"`" + shadowPRMarker + "` marker. Share the trail or change URL; give a\n" +
 		"pull request URL only when the user asks for it.",
 	// The project tree replaces the shared entry, so it repeats the reply rules.
 	"trail finding": trailFindingReplyGuidance + "\n\n" +
@@ -357,6 +357,13 @@ var agentHelpProjectTrailGuidance = map[string]string{
 		"failed read prints a warning on stderr. Null is unknown, never\n" +
 		"mergeable.",
 }
+
+// shadowPRMarker is the hidden line entire-api writes into the draft pull
+// requests it opens to back a trail (internal/changeforge/github.go,
+// shadowPRMarker); it closes those pull requests by it, so agents editing such
+// a body must keep it. The two repositories share no module, so keep this
+// string equal to the server's by hand.
+const shadowPRMarker = "<!-- entire-shadow-pr -->"
 
 // trailFindingReplyGuidance is shared by both trail models' finding entries.
 const trailFindingReplyGuidance = "Reply to a finding with `entire trail finding reply` to answer or question\n" +
