@@ -556,16 +556,36 @@ func resolveEnvTokenCreds(ctx context.Context, envToken, clusterHost, cacheDir s
 
 // secretCreds re-resolves a service account secret on every request, so a long
 // clone or push renews its token from the cache or a fresh exchange instead
-// of holding one token for the whole session. A 401 drops the cached token,
-// so the transport's one retry exchanges the secret again. The trust gate in
-// resolveEnvTokenCreds already checked the exchange Core, and every re-exchange
-// goes to that same Core.
+// of holding one token for the whole session. A 401 drops the cached token
+// through the same token-conditional path as every other client
+// (auth.EnvTokenSource), so the transport's one retry exchanges again unless
+// another process already replaced it. The trust gate in resolveEnvTokenCreds
+// already checked the exchange Core, and every re-exchange goes to that same
+// Core.
 func secretCreds(raw string, onUnauthorized func()) (credentialProvider, func(), error) {
+	source := auth.EnvTokenSource(raw)
+	if source == nil {
+		return nil, nil, fmt.Errorf("%s does not hold a service account secret", auth.EnvTokenVar)
+	}
+	var mu sync.Mutex
+	var served string
 	provider := func(ctx context.Context) (string, error) {
-		return auth.ResolveEnvTokenContext(ctx, raw)
+		token, err := source.Token(ctx)
+		if err != nil {
+			return "", err //nolint:wrapcheck // ResolveEnvToken names ENTIRE_TOKEN
+		}
+		mu.Lock()
+		served = token
+		mu.Unlock()
+		return token, nil
 	}
 	evict := func() {
-		auth.ForgetServiceAccountSecretToken(raw)
+		mu.Lock()
+		rejected := served
+		mu.Unlock()
+		if rejected != "" {
+			source.Unauthorized(rejected)
+		}
 		onUnauthorized()
 	}
 	return provider, evict, nil

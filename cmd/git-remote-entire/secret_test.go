@@ -136,3 +136,44 @@ func TestResolveCreds_ServiceAccountSecretReexchangesAfter401(t *testing.T) {
 		t.Errorf("after a 401: %d exchanges, token unchanged=%v; want a fresh exchange", exchanges, retried == first)
 	}
 }
+
+// A 401 for a token another process already replaced keeps the replacement:
+// the retry reuses it instead of exchanging again. Not parallel: sets
+// process-wide environment.
+func TestResolveCreds_ServiceAccountSecret401KeepsReplacement(t *testing.T) {
+	const core = "https://us.auth.entire.io"
+	exchanges := 0
+	useSecretEnv(t, secretExchangeFunc(func(*http.Request) (*http.Response, error) {
+		exchanges++
+		jwt := makeSecretJWT(t, core, strconv.Itoa(exchanges))
+		return secretReply(http.StatusOK, fmt.Sprintf(`{"access_token":%q,"expires_in":3600}`, jwt)), nil
+	}))
+	client, clusterHost := wellKnownServer(t, []string{core}, "", "")
+
+	creds, onUnauthorized, err := resolveCreds(t.Context(), &url.URL{Scheme: "entire", Host: clusterHost}, false, client)
+	if err != nil {
+		t.Fatalf("resolveCreds: %v", err)
+	}
+	first, err := creds(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Another process drops the cached token and exchanges a replacement.
+	auth.ForgetServiceAccountSecretToken(testSASecret)
+	replacement, err := auth.ResolveEnvToken(testSASecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replacement == first || exchanges != 2 {
+		t.Fatalf("setup: %d exchanges, replacement unchanged=%v", exchanges, replacement == first)
+	}
+
+	onUnauthorized() // the 401 was for first, not the replacement
+	retried, err := creds(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried != replacement || exchanges != 2 {
+		t.Errorf("after a 401 for the replaced token: %d exchanges, got replacement=%v; want the replacement reused", exchanges, retried == replacement)
+	}
+}
