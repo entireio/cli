@@ -107,6 +107,13 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, force bool) (int, error) 
 	if err != nil {
 		return 0, err
 	}
+	return installHooksInto(ctx, cfg, func() error { return validateMutableHookTarget(worktreeHooks) }, force)
+}
+
+// installHooksInto merges Entire's managed hooks into cfg, preserving every
+// other hook and top-level key. revalidate re-checks the target immediately
+// before the write, after the read and merge.
+func installHooksInto(ctx context.Context, cfg *agent.HookConfigFile, revalidate func() error, force bool) (int, error) {
 	existingData, exists, err := readHooksFileForMutation(cfg)
 	if err != nil {
 		return 0, err
@@ -162,14 +169,14 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, force bool) (int, error) 
 		return 0, fmt.Errorf("failed to marshal hooks: %w", err)
 	}
 	topLevel["hooks"] = hooksJSON
-	if err := validateMutableHookTarget(worktreeHooks); err != nil {
+	if err := revalidate(); err != nil {
 		return 0, err
 	}
 	output, err := jsonutil.MarshalIndentWithNewline(topLevel, "", "  ")
 	if err != nil {
 		return 0, fmt.Errorf("failed to marshal hooks.json: %w", err)
 	}
-	// Write creates .codex with MkdirAllNoSymlink, anchored on the worktree
+	// Write creates .codex with MkdirAllNoSymlink, anchored on the project
 	// root rather than on .codex itself.
 	if err := cfg.Write(output, 0o600); err != nil {
 		return 0, err //nolint:wrapcheck // agent.HookConfigFile already names the file in its error

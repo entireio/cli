@@ -24,15 +24,33 @@ const (
 	HookDiscoveryResolved
 )
 
-// DiscoveredHooksPath identifies the read-only project hooks file Codex is
-// expected to load. It is intentionally distinct from WorktreeHooksPath.
+// DiscoveredHooksPath identifies the project hooks file Codex is expected to
+// load. It is intentionally distinct from WorktreeHooksPath: discovery alone
+// never makes it a write target (see InstallDiscoveredHooks).
 type DiscoveredHooksPath struct {
 	path string
+	// root is the project root the path was built from, set only by
+	// resolveHookDiscovery from Git metadata — never recovered from path.
+	root string
+	// rootIsCheckout is false for a .bare layout root or a separate Git
+	// storage parent, which are project roots but not worktrees.
+	rootIsCheckout bool
 }
 
 // Path returns the discovered hooks file's absolute path.
 func (p DiscoveredHooksPath) Path() string {
 	return p.path
+}
+
+// Root returns the project root Codex discovers the hooks file under.
+func (p DiscoveredHooksPath) Root() string {
+	return p.root
+}
+
+// RootIsCheckout reports whether the discovered project root is a Git
+// worktree, where the hooks file can be committed like any other change.
+func (p DiscoveredHooksPath) RootIsCheckout() bool {
+	return p.rootIsCheckout
 }
 
 // HookDiscovery describes the hooks file Codex is expected to discover. It is
@@ -79,6 +97,7 @@ func resolveHookDiscovery(worktreeRoot string) HookDiscovery {
 		worktreeRoot: worktreeRoot,
 	}
 	root := worktreeRoot
+	rootIsCheckout := true
 	dotGitPath, err := gitrepo.ResolveDotGitPath(worktreeRoot)
 	if err != nil {
 		return unresolvedHookDiscoveryAt(worktreeRoot, "Git layout could not be resolved: "+err.Error())
@@ -101,17 +120,23 @@ func resolveHookDiscovery(worktreeRoot string) HookDiscovery {
 		candidate := filepath.Dir(commonGitPath)
 		if rootOwnsGitDir(candidate, commonGitPath) {
 			root = candidate
+			rootIsCheckout = !commonGitDirIsBare(commonGitPath)
 		} else if !commonGitDirIsBare(commonGitPath) && !hasDotGitEntry(candidate) {
 			// A separate Git directory has no .git entry at the storage parent;
 			// Codex nevertheless uses that parent as its project root.
 			root = candidate
+			rootIsCheckout = false
 		}
 	}
 
 	if isUserHookRoot(root) {
 		return unresolvedHookDiscoveryAt(worktreeRoot, fmt.Sprintf("derived hook root %q is user-wide", root))
 	}
-	discovery.DiscoveredHooks = DiscoveredHooksPath{path: filepath.Join(root, ".codex", HooksFileName)}
+	discovery.DiscoveredHooks = DiscoveredHooksPath{
+		path:           filepath.Join(root, ".codex", HooksFileName),
+		root:           root,
+		rootIsCheckout: rootIsCheckout,
+	}
 	return discovery
 }
 

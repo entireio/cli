@@ -12,10 +12,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/require"
 )
@@ -81,25 +84,7 @@ func TestCodexAppServerHooksList_BareWorktreeUsesLayoutRoot(t *testing.T) {
 	t.Parallel()
 
 	codexPath := requireCodexAppServer(t)
-	tmp := t.TempDir()
-	if resolved, err := filepath.EvalSymlinks(tmp); err == nil {
-		tmp = resolved
-	}
-	seedRoot := filepath.Join(tmp, "seed")
-	layoutRoot := filepath.Join(tmp, "layout")
-	bareRoot := filepath.Join(layoutRoot, ".bare")
-	mainRoot := filepath.Join(layoutRoot, "main")
-	linkedRoot := filepath.Join(layoutRoot, "feature")
-
-	testutil.InitRepo(t, seedRoot)
-	testutil.WriteFile(t, seedRoot, "README.md", "# Test Repository")
-	testutil.GitAdd(t, seedRoot, "README.md")
-	testutil.GitCommit(t, seedRoot, "initial commit")
-	require.NoError(t, os.MkdirAll(layoutRoot, 0o750))
-	testutil.RunGit(t, tmp, "clone", "--bare", seedRoot, bareRoot)
-	require.NoError(t, os.WriteFile(filepath.Join(layoutRoot, ".git"), []byte("gitdir: ./.bare\n"), 0o600))
-	testutil.RunGit(t, tmp, "--git-dir", bareRoot, "worktree", "add", mainRoot)
-	testutil.RunGit(t, tmp, "--git-dir", bareRoot, "worktree", "add", "-b", "feature", linkedRoot)
+	layoutRoot, linkedRoot := setupBareCodexLayout(t)
 
 	const layoutMarker = "bare-layout-root-hook-marker"
 	const linkedMarker = "bare-linked-worktree-hook-marker"
@@ -124,6 +109,126 @@ func TestCodexAppServerHooksList_BareWorktreeUsesLayoutRoot(t *testing.T) {
 		}
 	}
 	require.True(t, foundLayout, "hooks/list did not return the .bare layout-root hook")
+}
+
+// TestCodexAppServerHooksList_ConsentedInstallReachesLinkedWorktree runs
+// `entire agent add codex` in a conventional linked worktree, answers yes to
+// the prompt, and checks that Codex then lists Entire's hooks from the primary
+// checkout's file.
+func TestCodexAppServerHooksList_ConsentedInstallReachesLinkedWorktree(t *testing.T) {
+	t.Parallel()
+
+	codexPath := requireCodexAppServer(t)
+	env := NewTestEnv(t)
+	env.InitRepo()
+	env.WriteFile("README.md", "# Test Repository")
+	env.GitAdd("README.md")
+	env.GitCommit("initial commit")
+
+	linkedParent := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(linkedParent); err == nil {
+		linkedParent = resolved
+	}
+	linkedDir := filepath.Join(linkedParent, "linked")
+	testutil.RunGit(t, env.RepoDir, "worktree", "add", "-b", "codex-consent-test", linkedDir)
+
+	primaryHooksPath := filepath.Join(env.RepoDir, ".codex", codex.HooksFileName)
+	output := addCodexWithConsent(t, linkedDir, "y")
+	require.Contains(t, output, "Installed Entire's Codex hooks in "+primaryHooksPath+".")
+
+	requireEntireHooksListedFrom(t, listCodexHooks(t, codexPath, linkedDir), primaryHooksPath)
+}
+
+// TestCodexAppServerHooksList_ConsentedInstallReachesBareWorktree is the
+// .bare layout counterpart: the hooks land at the layout root.
+func TestCodexAppServerHooksList_ConsentedInstallReachesBareWorktree(t *testing.T) {
+	t.Parallel()
+
+	codexPath := requireCodexAppServer(t)
+	layoutRoot, linkedRoot := setupBareCodexLayout(t)
+
+	layoutHooksPath := filepath.Join(layoutRoot, ".codex", codex.HooksFileName)
+	output := addCodexWithConsent(t, linkedRoot, "y")
+	require.Contains(t, output, "Installed Entire's Codex hooks in "+layoutHooksPath+".")
+
+	requireEntireHooksListedFrom(t, listCodexHooks(t, codexPath, linkedRoot), layoutHooksPath)
+}
+
+// TestCodexLinkedWorktree_DeclinedInstallLeavesPrimaryUntouched pins the
+// default-No answer: nothing is written outside the current worktree.
+func TestCodexLinkedWorktree_DeclinedInstallLeavesPrimaryUntouched(t *testing.T) {
+	t.Parallel()
+
+	env := NewTestEnv(t)
+	env.InitRepo()
+	env.WriteFile("README.md", "# Test Repository")
+	env.GitAdd("README.md")
+	env.GitCommit("initial commit")
+	linkedDir := filepath.Join(t.TempDir(), "linked")
+	testutil.RunGit(t, env.RepoDir, "worktree", "add", "-b", "codex-decline-test", linkedDir)
+
+	output := addCodexWithConsent(t, linkedDir, "n")
+	require.Contains(t, output, "re-run `entire agent add codex` in this worktree and answer yes")
+	require.NoDirExists(t, filepath.Join(env.RepoDir, ".codex"))
+	require.FileExists(t, filepath.Join(linkedDir, ".codex", codex.HooksFileName))
+}
+
+func setupBareCodexLayout(t *testing.T) (layoutRoot, linkedRoot string) {
+	t.Helper()
+	tmp := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(tmp); err == nil {
+		tmp = resolved
+	}
+	seedRoot := filepath.Join(tmp, "seed")
+	layoutRoot = filepath.Join(tmp, "layout")
+	bareRoot := filepath.Join(layoutRoot, ".bare")
+	linkedRoot = filepath.Join(layoutRoot, "feature")
+
+	testutil.InitRepo(t, seedRoot)
+	testutil.WriteFile(t, seedRoot, "README.md", "# Test Repository")
+	testutil.GitAdd(t, seedRoot, "README.md")
+	testutil.GitCommit(t, seedRoot, "initial commit")
+	require.NoError(t, os.MkdirAll(layoutRoot, 0o750))
+	testutil.RunGit(t, tmp, "clone", "--bare", seedRoot, bareRoot)
+	require.NoError(t, os.WriteFile(filepath.Join(layoutRoot, ".git"), []byte("gitdir: ./.bare\n"), 0o600))
+	testutil.RunGit(t, tmp, "--git-dir", bareRoot, "worktree", "add", filepath.Join(layoutRoot, "main"))
+	testutil.RunGit(t, tmp, "--git-dir", bareRoot, "worktree", "add", "-b", "feature", linkedRoot)
+	return layoutRoot, linkedRoot
+}
+
+// addCodexWithConsent runs `entire agent add codex` in dir as a terminal user
+// would, answering the discovered-hooks prompt with answer through
+// accessible mode.
+func addCodexWithConsent(t *testing.T, dir, answer string) string {
+	t.Helper()
+	cmd := execx.NonInteractive(t.Context(), getTestBinary(), "agent", "add", "codex")
+	cmd.Dir = dir
+	cmd.Env = append(testutil.GitIsolatedEnv(),
+		"ENTIRE_TEST_TTY=1",
+		"ACCESSIBLE=1",
+		"ENTIRE_TELEMETRY_OPTOUT=1",
+		"CODEX_HOME="+t.TempDir(),
+	)
+	cmd.Stdin = strings.NewReader(answer + "\n")
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "entire agent add codex: %s", output)
+	return string(output)
+}
+
+func requireEntireHooksListedFrom(t *testing.T, result codexHooksListResponse, hooksPath string) {
+	t.Helper()
+	require.Len(t, result.Data, 1)
+	entry := result.Data[0]
+	require.Empty(t, entry.Errors)
+	stopCommands := codex.EntireHookCommands()["Stop"]
+	var foundStop bool
+	for _, hook := range entry.Hooks {
+		if slices.Contains(stopCommands, hook.Command) {
+			foundStop = true
+			require.Equal(t, hooksPath, hook.SourcePath)
+		}
+	}
+	require.True(t, foundStop, "hooks/list did not return Entire's Stop hook from %s: %+v", hooksPath, result)
 }
 
 func requireCodexAppServer(t *testing.T) string {

@@ -134,7 +134,7 @@ func codexStatusWarning(issue *codexHookIssue) string {
 	}
 	switch issue.State {
 	case codexHookStateInactiveWorktreePath:
-		return "Codex hooks are not active in this worktree · run 'entire doctor'"
+		return "Codex hooks are not active in this worktree · re-run 'entire agent add codex' in a terminal and answer yes"
 	case codexHookStateMalformedWorktree:
 		return "Current-worktree Codex hooks are malformed · run 'entire doctor'"
 	case codexHookStateMalformedDiscovered:
