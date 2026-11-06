@@ -3,12 +3,15 @@ package remote
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v6"
@@ -680,11 +683,28 @@ func TestPushURL(t *testing.T) {
 			wantEnabled:  true,
 		},
 		{
-			name:         "missing push remote falls back to origin when checkpoint remote configured",
+			// Nothing pushes to the returned URL when enabled is false, so
+			// returning origin here would only mislead a caller into using it.
+			name:         "missing push remote returns no url when checkpoint remote configured",
 			originURL:    "https://github.com/acme/app.git",
 			pushRemote:   "upstream",
 			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
-			wantURL:      "https://github.com/acme/app.git",
+			wantURL:      "",
+			wantEnabled:  false,
+		},
+		{
+			name:         "raw url push target returns no url when checkpoint remote configured",
+			originURL:    "https://github.com/acme/app.git",
+			pushRemote:   "https://github.com/acme/app.git",
+			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			wantURL:      "",
+			wantEnabled:  false,
+		},
+		{
+			name:         "raw url push target returns no url when origin is missing",
+			pushRemote:   "git@github.com:acme/app.git",
+			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			wantURL:      "",
 			wantEnabled:  false,
 		},
 		{
@@ -1089,6 +1109,38 @@ func TestPushURL_UnroutableErrorQuotesNoRemoteURL(t *testing.T) {
 	require.NotContains(t, err.Error(), "\x1b")
 	require.NotContains(t, err.Error(), "PWNED")
 	require.Contains(t, err.Error(), "set checkpoint_remote to a github or gitlab repository, or remove it")
+}
+
+// A raw-URL push never syncs checkpoints, so PushURL must not log a fallback
+// destination for it: users read that line as checkpoints going to origin. The
+// target can carry credentials, so no line may contain them either.
+func TestPushURL_RawURLTargetLogsNoFallback(t *testing.T) {
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	runGit(t, repoDir, "remote", "add", "origin", "https://github.com/acme/app.git")
+	writeSettings(t, repoDir, `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`)
+	t.Chdir(repoDir)
+
+	l, err := logging.New(logging.Config{Root: entiredir.OpenerAt(repoDir), Dir: logging.LogsName, Level: slog.LevelDebug})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = l.Close() })
+	ctx := logging.WithLogger(context.Background(), l)
+	// Proves the sink captures warn lines, so the absence below is not vacuous.
+	logging.Warn(ctx, "sentinel")
+
+	gotURL, gotEnabled, err := PushURL(ctx, "https://user:s3cret@github.com/acme/app.git")
+	require.NoError(t, err)
+	require.Empty(t, gotURL)
+	require.False(t, gotEnabled)
+
+	require.NoError(t, l.Close())
+	content, err := os.ReadFile(filepath.Join(repoDir, ".entire", logging.LogsName, "entire.log"))
+	require.NoError(t, err)
+	require.Contains(t, string(content), "sentinel")
+	require.Contains(t, string(content), "checkpoint_remote not applied")
+	require.NotContains(t, string(content), "s3cret")
+	require.NotContains(t, string(content), "fallback_url")
+	require.Equal(t, 1, strings.Count(string(content), `"level":"WARN"`), "only the sentinel may warn:\n%s", content)
 }
 
 func TestPushURL_ErrorsWhenNoCheckpointRemoteAndOriginMissing(t *testing.T) {
