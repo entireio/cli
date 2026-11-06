@@ -30,9 +30,7 @@ import (
 //
 // A failure in one of these blocks drops just that block, with the reason
 // recorded for the consumer to report — a review preference must never be able
-// to switch tracking off. That is the opposite of the rule usersettings
-// applies to the block it decodes itself, where an unknown key fails the file,
-// because that block names an executable.
+// to switch tracking off.
 const (
 	userPreferencesBlock = "preferences"
 	userReposBlock       = "repos"
@@ -83,7 +81,7 @@ type userOverlay struct {
 // loadUserOverlay reads the user settings file. An unreadable or invalid file
 // yields an empty overlay rather than failing the load: a repository must keep
 // loading its own settings regardless of the state of a machine-wide file, and
-// `entire doctor` reports that file separately. A bad preference block is
+// `entire status` reports that file separately. A bad preference block is
 // dropped on its own, with the reason recorded.
 func loadUserOverlay(ctx context.Context) userOverlay {
 	var overlay userOverlay
@@ -106,14 +104,7 @@ func loadUserOverlay(ctx context.Context) userOverlay {
 		if err != nil {
 			overlay.reject(ctx, fmt.Sprintf("%s: %v", userPreferencesBlock, err))
 		} else {
-			// The machine-wide switch is `global_enable`; one in preferences
-			// is dropped on its own so the rest of the block still applies.
-			if prefs != nil && prefs.Enabled != nil {
-				overlay.reject(ctx, fmt.Sprintf("%s: enabled is not read here; run `entire enable --global` to set %s",
-					userPreferencesBlock, usersettings.GlobalEnableKey))
-				prefs.Enabled = nil
-			}
-			overlay.preferences = prefs
+			overlay.preferences = overlay.withoutPerRepoKeys(ctx, prefs)
 		}
 	}
 	if raw, ok := us.Block(userReposBlock); ok && !usersettings.IsJSONNull(raw) {
@@ -125,6 +116,28 @@ func loadUserOverlay(ctx context.Context) userOverlay {
 		}
 	}
 	return overlay
+}
+
+// withoutPerRepoKeys drops the keys `preferences` must not carry, each on its
+// own with a reported reason, so the rest of the block still applies. Whether
+// Entire is on would make every repository on the machine read as set up, and
+// a checkpoint_remote would route every repository's transcripts to one store;
+// both are per-repository facts and are read only from `repos`.
+func (o *userOverlay) withoutPerRepoKeys(ctx context.Context, prefs *UserPreferences) *UserPreferences {
+	if prefs == nil {
+		return nil
+	}
+	if prefs.Enabled != nil {
+		o.reject(ctx, fmt.Sprintf("%s: enabled is not read here; set it for one repository under %s, or run `entire enable --global` to set %s",
+			userPreferencesBlock, userReposBlock, usersettings.GlobalEnableKey))
+		prefs.Enabled = nil
+	}
+	if prefs.CheckpointRemote != nil {
+		o.reject(ctx, fmt.Sprintf("%s: checkpoint_remote is not read here; set it for one repository under %s",
+			userPreferencesBlock, userReposBlock))
+		prefs.CheckpointRemote = nil
+	}
+	return prefs
 }
 
 // reject records a dropped block for the consumers that surface it. Debug, not
@@ -328,7 +341,7 @@ func applyUserPreferences(settings *EntireSettings, prefs *UserPreferences) {
 }
 
 // UserTierSuppliesCheckpointRemote reports whether config is the
-// checkpoint_remote the matching user tier supplies. Callers check
+// checkpoint_remote this repository's `repos` entry supplied. Callers check
 // CheckpointRemoteIsLocalOnly first, so a higher-precedence local destination
 // short-circuits before this lower layer.
 //
@@ -339,22 +352,11 @@ func applyUserPreferences(settings *EntireSettings, prefs *UserPreferences) {
 // ~/.config, so a destination found there is the developer's by construction.
 // It vouches only for that destination: a later layer that overrides it with
 // a different one needs its own proof.
-func UserTierSuppliesCheckpointRemote(ctx context.Context, worktreeRoot string, config *CheckpointRemoteConfig) bool {
-	if config == nil {
+func (s *EntireSettings) UserTierSuppliesCheckpointRemote(config *CheckpointRemoteConfig) bool {
+	if s == nil || s.userCheckpointRemote == nil || config == nil {
 		return false
 	}
-	overlay := loadUserOverlay(ctx)
-	// Same order applyUserTier applies them in, so the last one wins.
-	var supplied *CheckpointRemoteConfig
-	if overlay.preferences != nil && overlay.preferences.CheckpointRemote != nil {
-		supplied = overlay.preferences.CheckpointRemote
-	}
-	for _, prefs := range overlay.repoPreferences(ctx, worktreeRoot) {
-		if prefs.CheckpointRemote != nil {
-			supplied = prefs.CheckpointRemote
-		}
-	}
-	return supplied != nil && supplied.Provider == config.Provider && supplied.Repo == config.Repo
+	return *s.userCheckpointRemote == *config
 }
 
 // UserSettingsReadError reports why the user settings file cannot be read,
@@ -365,10 +367,13 @@ func UserSettingsReadError(ctx context.Context) error {
 	return err //nolint:wrapcheck // usersettings names the file and the reason
 }
 
-// UserTierConfiguresRepo reports whether the user settings file says anything
-// about this repository — a matching `repos` entry, or `global_enable: true`.
-// A false global_enable configures nothing: it is the absence of the switch,
-// and counting it would make every repository on the machine read as set up.
+// UserTierConfiguresRepo reports whether the user settings file turns Entire on
+// or off for this repository: `global_enable: true`, or a matching `repos`
+// entry that sets `enabled`. Machine-wide preferences configure no repository
+// in particular, so they never count, and neither does an entry carrying only
+// preferences such as log_level — Enabled defaults to true, so counting it
+// would start capture in a repository the developer never enabled. A false
+// global_enable is the absence of the switch and configures nothing.
 //
 // IsSetUpAny uses this. Without it, a linked worktree of a repository enabled
 // only through this tier has no .entire directory of its own, reads as "never
@@ -379,7 +384,7 @@ func UserTierConfiguresRepo(ctx context.Context, worktreeRoot string) bool {
 	if overlay.globalEnable {
 		return true
 	}
-	return len(overlay.repoPreferences(ctx, worktreeRoot)) > 0
+	return reposSetEnabled(overlay.repoPreferences(ctx, worktreeRoot))
 }
 
 // applyUserTier applies the machine-wide preferences and then this
@@ -405,6 +410,9 @@ func applyUserTier(settings *EntireSettings, overlay userOverlay, repoPrefs []*U
 		}
 		applyUserPreferences(settings, prefs)
 		owned.note(prefs)
+		if prefs.CheckpointRemote != nil {
+			settings.userCheckpointRemote = prefs.CheckpointRemote
+		}
 	}
 
 	apply(overlay.preferences)
@@ -448,9 +456,8 @@ func (o *userPromptOwnership) ownsProfile(name string) bool {
 //
 // Consumers that would have applied a dropped block should surface these,
 // because it is the only signal that a setting the user can see in their own
-// file is not in effect. Note what is NOT here: a failure in the block
-// usersettings decodes itself fails the whole file, since that block names an
-// executable — this list is only for the fail-open preference blocks.
+// file is not in effect. A file that cannot be read at all is not here; see
+// UserSettingsReadError.
 func (s *EntireSettings) UserLayerRejections() []string {
 	if s == nil {
 		return nil

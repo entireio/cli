@@ -3,10 +3,9 @@
 //
 // It exists as a leaf package, separate from settings, for one reason: the
 // preference blocks this file carries are typed by the settings package, and
-// settings cannot import a package that imports it. The split the branch this
-// was lifted from drew is preserved — this package decodes only the blocks
-// whose contents it owns and hands every other top-level block back as raw
-// JSON through Block, which is how settings reads `preferences` and `repos`.
+// settings cannot import a package that imports it. This package decodes no
+// block itself; it hands every top-level block back as raw JSON through Block,
+// which is how settings reads `preferences` and `repos`.
 //
 // Why the file is here at all. Every other settings tier lives somewhere a
 // repository can reach: .entire/settings.json is committed, and
@@ -15,8 +14,7 @@
 // therefore has to be done at load time, by probing git — the apparatus in
 // settings/opf_command_trust.go, which has been defeated four separate ways.
 // A path under the user's config directory cannot be delivered by cloning at
-// all, so the same property holds structurally and needs no probe. That is the
-// whole reason the OPF command may be honored from here directly.
+// all, so the same property holds structurally and needs no probe.
 package usersettings
 
 import (
@@ -133,15 +131,15 @@ func (us *UserSettings) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// Load decodes user-global settings with per-block strictness. A missing file
-// is an unconfigured tier, not an error; malformed JSON, or an unknown key
-// inside a decoded block, returns an error so callers can fail closed.
+// Load reads the user-global settings file. A missing file is an unconfigured
+// tier, not an error; an unreadable file or one that is not a single JSON
+// object returns an error. The blocks themselves are validated by their owner
+// when it reads them through Block.
 //
 // Note what this does NOT need: a git repository, or `git` on $PATH. Every
 // other settings path in the CLI resolves through paths.WorktreeRoot, which
 // shells out to `git rev-parse --show-toplevel`. The machine-wide tier is
-// readable when none of that is available, which is why the OPF command is
-// more reliably found here than in the file it is moving from.
+// readable when none of that is available.
 func Load(_ context.Context) (*UserSettings, error) {
 	data, err := readFile()
 	if err != nil {

@@ -1384,14 +1384,14 @@ func TestCheckpointRemoteIsInherited_CrossForgeNormalizesProvider(t *testing.T) 
 	t.Chdir(repoDir)
 
 	config := &settings.CheckpointRemoteConfig{Provider: " github ", Repo: "alice/checkpoints"}
-	verdict, reason := checkpointRemoteIsInherited(context.Background(), config,
+	verdict, reason := checkpointRemoteIsInherited(context.Background(), nil, config,
 		"https://github.com/alice/app.git", nil)
 	if verdict != OwnershipOurs {
 		t.Fatalf("verdict = %v (%q), want OwnershipOurs: a padded provider is still github", verdict, reason)
 	}
 
 	esc := &settings.CheckpointRemoteConfig{Provider: "gitlab\x1b[31m", Repo: "alice/checkpoints"}
-	verdict, reason = checkpointRemoteIsInherited(context.Background(), esc,
+	verdict, reason = checkpointRemoteIsInherited(context.Background(), nil, esc,
 		"https://github.com/alice/app.git", nil)
 	if verdict != OwnershipUnprovable {
 		t.Fatalf("verdict = %v, want OwnershipUnprovable", verdict)
@@ -1424,7 +1424,7 @@ func TestCheckpointRemoteIsInherited_CrossForgeOwnerProvesNothing(t *testing.T) 
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			config := &settings.CheckpointRemoteConfig{Provider: tc.provider, Repo: "alice/checkpoints"}
-			verdict, reason := checkpointRemoteIsInherited(context.Background(), config, tc.origin, nil)
+			verdict, reason := checkpointRemoteIsInherited(context.Background(), nil, config, tc.origin, nil)
 			if verdict != tc.want {
 				t.Fatalf("verdict = %v (%q), want %v", verdict, reason, tc.want)
 			}
@@ -1449,7 +1449,7 @@ func TestCheckpointRemoteIsInherited_NoReadableOwnerIsUnprovable(t *testing.T) {
 		{"push_remotes_only", "", []string{"git@selfhosted.example:app.git", "https://selfhosted.example/app.git"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			verdict, reason := checkpointRemoteIsInherited(context.Background(), config, tc.origin, tc.push)
+			verdict, reason := checkpointRemoteIsInherited(context.Background(), nil, config, tc.origin, tc.push)
 			if verdict != OwnershipUnprovable {
 				t.Fatalf("verdict = %v (%q), want OwnershipUnprovable", verdict, reason)
 			}
