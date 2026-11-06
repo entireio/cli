@@ -393,6 +393,14 @@ func writeCachedSecretToken(root *os.Root, subj exchangeSubject, token string, e
 // the exchanged token. It takes the exchange lock, so it cannot race another
 // process writing a token back. A failure is ignored: the entry still expires.
 func ForgetServiceAccountSecretToken(secret string) {
+	forgetSecretToken(secret, "")
+}
+
+// forgetSecretToken is ForgetServiceAccountSecretToken. With a non-empty
+// rejected token it drops the cache entry only while it still holds that
+// token, so a 401 for a token another process already replaced does not
+// discard the replacement.
+func forgetSecretToken(secret, rejected string) {
 	secret = strings.TrimSpace(secret)
 	if !IsServiceAccountSecret(secret) {
 		return
@@ -412,5 +420,58 @@ func ForgetServiceAccountSecretToken(secret string) {
 		return
 	}
 	defer release()
+	if rejected != "" {
+		data, err := osroot.ReadFileNoFollow(root, secretCacheFile(subj))
+		if err != nil {
+			return
+		}
+		var c cachedSecretToken
+		if json.Unmarshal(data, &c) == nil && c.Token != rejected {
+			return
+		}
+	}
 	_ = root.Remove(secretCacheFile(subj)) //nolint:errcheck // best effort; see doc
+}
+
+// EnvTokenSource returns the per-request bearer source for an ENTIRE_TOKEN
+// value holding a service account secret, or nil for any other value, whose
+// bearer is fixed. The exchanged token lives minutes, so a client built once
+// and used for longer (a reconnecting stream, a long fan-out) must ask the
+// source for every request: it answers from the shared cache and exchanges
+// again as the token nears expiry. A 401 drops the cached token, so the next
+// request exchanges instead of reusing a token the server refused.
+func EnvTokenSource(raw string) api.TokenSource {
+	secret := strings.TrimSpace(raw)
+	if !IsServiceAccountSecret(secret) {
+		return nil
+	}
+	return envSecretSource{secret: secret}
+}
+
+type envSecretSource struct{ secret string }
+
+func (s envSecretSource) Token(ctx context.Context) (string, error) {
+	return ResolveEnvTokenContext(ctx, s.secret)
+}
+
+func (s envSecretSource) Unauthorized(token string) {
+	forgetSecretToken(s.secret, token)
+}
+
+// EnvTokenCoreURL returns the control-plane core an ENTIRE_TOKEN value
+// authenticates against, without exchanging a service account secret: a
+// secret names its jurisdiction, and the exchanged token must name the same
+// core as its audience (checkExchangedToken). Any other value goes through
+// ParseEnvToken. Use it where only the origin is needed.
+func EnvTokenCoreURL(raw string) (string, error) {
+	secret := strings.TrimSpace(raw)
+	if !IsServiceAccountSecret(secret) {
+		core, _, err := ParseEnvToken(raw)
+		return core, err
+	}
+	subj, err := secretExchangeSubject(secret)
+	if err != nil {
+		return "", err
+	}
+	return subj.core, nil
 }

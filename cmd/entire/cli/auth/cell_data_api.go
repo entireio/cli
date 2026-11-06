@@ -132,6 +132,9 @@ func (f *CellClientFactory) ClientFor(ctx context.Context, target *CellTarget) (
 	if err != nil {
 		return nil, err
 	}
+	if f.subject.source != nil {
+		return api.NewClientWithTokenSource(f.subject.source, cellBaseURL), nil
+	}
 	return api.NewClientWithBaseURL(f.subject.loginJWT, cellBaseURL), nil
 }
 
@@ -175,6 +178,9 @@ type cellSubject struct {
 	// it fronts.
 	dataHost   string
 	httpClient *http.Client
+	// source, when set, renews the cell bearer per request (EnvTokenSource);
+	// loginJWT is then its value at resolution time, which routing reads.
+	source api.TokenSource
 }
 
 // resolveActiveContextCellSubject builds the subject from the selected stored
@@ -333,6 +339,7 @@ func resolveEnvTokenCellSubject(raw string, insecureHTTP bool) (cellSubject, err
 		loginJWT:       token,
 		discoveredCore: core,
 		httpClient:     cellExchangeHTTPClient(core),
+		source:         EnvTokenSource(raw),
 	}, nil
 }
 

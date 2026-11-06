@@ -66,15 +66,37 @@ func NewClientWithBaseURL(token, baseURL string) *Client {
 // request URL: the redirect policy only sees the URL it was given, so a
 // scheme rewrite beneath it would hide a downgrade.
 func NewClientWithTransport(token, baseURL string, transport http.RoundTripper) *Client {
+	return newClient(&bearerTransport{token: token}, baseURL, transport)
+}
+
+// TokenSource supplies the bearer for each request of a client built by
+// NewClientWithTokenSource. Use it for a credential whose bearer is
+// short-lived and renewable, so a long-running command (a reconnecting
+// stream, say) never sends a token that expired after the client was built.
+type TokenSource interface {
+	// Token returns the bearer for a request; an error fails the request
+	// before anything is sent.
+	Token(ctx context.Context) (string, error)
+	// Unauthorized is called after a request using token was answered 401,
+	// so the source can drop a cached bearer the server no longer accepts.
+	// The request is not retried; the next one asks Token again.
+	Unauthorized(token string)
+}
+
+// NewClientWithTokenSource is NewClientWithBaseURL with a bearer resolved per
+// request from source instead of fixed at construction.
+func NewClientWithTokenSource(source TokenSource, baseURL string) *Client {
+	return newClient(&bearerTransport{source: source}, baseURL, nil)
+}
+
+func newClient(bearer *bearerTransport, baseURL string, transport http.RoundTripper) *Client {
 	if transport == nil {
 		transport = http.DefaultTransport
 	}
+	bearer.base = netcause.Transport(transport)
 	return &Client{
 		httpClient: httpclient.New(httpclient.Options{
-			Transport: &bearerTransport{
-				token: token,
-				base:  netcause.Transport(transport),
-			},
+			Transport: bearer,
 			// A cross-host redirect must never carry the Entire bearer to
 			// another origin; refuse it rather than follow it. Same-origin
 			// requests are guaranteed by the base-host check in do().
@@ -128,16 +150,30 @@ func requireSameOrigin(baseURL, endpoint string) error {
 // server so it can return a typed 401 — callers that want a local fast-fail
 // for missing auth should check ErrNotLoggedIn at construction time, not
 // rely on the transport.
+//
+// With a source, the token comes from source.Token for every request instead
+// of the fixed token field, and a 401 is reported back to the source.
 type bearerTransport struct {
-	token string
-	base  http.RoundTripper
+	token  string
+	source TokenSource
+	base   http.RoundTripper
 }
 
 func (t *bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	token := t.token
+	if t.source != nil {
+		var err error
+		if token, err = t.source.Token(req.Context()); err != nil {
+			if req.Body != nil {
+				_ = req.Body.Close() // RoundTrip must close the body on every path
+			}
+			return nil, fmt.Errorf("resolve bearer: %w", err)
+		}
+	}
 	// Clone the request to avoid mutating the caller's request.
 	r := req.Clone(req.Context())
-	if t.token != "" {
-		r.Header.Set("Authorization", "Bearer "+t.token)
+	if token != "" {
+		r.Header.Set("Authorization", "Bearer "+token)
 	}
 	r.Header.Set("User-Agent", versioninfo.UserAgent())
 	if r.Header.Get("Accept") == "" {
@@ -146,6 +182,9 @@ func (t *bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	resp, err := t.base.RoundTrip(r)
 	if err != nil {
 		return nil, fmt.Errorf("round trip: %w", err)
+	}
+	if t.source != nil && token != "" && resp.StatusCode == http.StatusUnauthorized {
+		t.source.Unauthorized(token)
 	}
 	return resp, nil
 }

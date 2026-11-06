@@ -56,7 +56,15 @@ until 2 minutes before it expires. On a miss the exchange and write-back run
 under a per-entry file lock, which `ForgetServiceAccountSecretToken` also
 takes, so parallel commands share one exchange; a lock that cannot be taken
 falls back to an unshared exchange rather than failing auth. The exchange never follows a
-redirect, because a 307/308 would resend the secret in the body. `entire auth
+redirect, because a 307/308 would resend the secret in the body. Because that
+token lives minutes, a client built once must not hold it: `coreapi`, the data
+API client (`auth.DataAPI.Client`) and cell clients take `auth.EnvTokenSource`,
+which asks the cache for every request (renewing near expiry) and drops the
+cached token on a 401 that names it, so a long-running command such as `entire
+trail watch` keeps working and a refused token is not reused.
+`git-remote-entire` does the same through `secretCreds`. Readers that need only
+the origin use `auth.EnvTokenCoreURL`, which derives a secret's core offline
+instead of exchanging it. `entire auth
 status --json` reports `credential_source: sa_secret` for it. Never send the
 secret itself as a bearer, and never name it in an error.
 
