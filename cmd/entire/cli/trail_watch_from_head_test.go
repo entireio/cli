@@ -120,7 +120,7 @@ func TestTrailWatchStartLine(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			var errOut bytes.Buffer
-			noteReadyStart(&errOut, tc.ready, "")
+			noteReadyStart(&errOut, sseEventReady, tc.ready, "")
 			require.Equal(t, tc.want, errOut.String())
 		})
 	}
@@ -146,8 +146,11 @@ func TestTrailWatchStartLineKeepsJSONStdout(t *testing.T) {
 func TestNoteReadyStartKeepsSeenCursor(t *testing.T) {
 	t.Parallel()
 	var errOut bytes.Buffer
-	require.Equal(t, "42", noteReadyStart(&errOut, `{"cursor":136}`, "42"))
-	require.Equal(t, "136", noteReadyStart(&errOut, `{"cursor":136}`, ""))
-	require.Empty(t, noteReadyStart(&errOut, `{"cursor":0}`, ""))
-	require.Empty(t, noteReadyStart(&errOut, `not json`, ""))
+	require.Equal(t, "42", noteReadyStart(&errOut, sseEventReady, `{"cursor":136}`, "42"))
+	require.Equal(t, "136", noteReadyStart(&errOut, sseEventReady, `{"cursor":136}`, ""))
+	require.Empty(t, noteReadyStart(&errOut, sseEventReady, `{"cursor":0}`, ""), "an older server's ready at 0 needs no cursor")
+	require.Equal(t, "0", noteReadyStart(&errOut, sseEventReady, `{"cursor":0,"start":"tail"}`, ""),
+		"an empty trail's from=head ready keeps 0, so a reconnect does not re-resolve the head")
+	require.Empty(t, noteReadyStart(&errOut, sseEventReady, `not json`, ""))
+	require.Empty(t, noteReadyStart(&errOut, "review.started", `{"cursor":136}`, ""), "only ready frames seed the cursor")
 }

@@ -299,9 +299,7 @@ func streamOnce(
 		}
 		data := strings.Join(dataLines, "\n")
 		printSSEEvent(w, errW, eventName, data, jsonOutput)
-		if eventName == sseEventReady {
-			lastSeenID = noteReadyStart(errW, data, lastSeenID)
-		}
+		lastSeenID = noteReadyStart(errW, eventName, data, lastSeenID)
 
 		if eventID != "" {
 			lastSeenID = eventID
@@ -427,17 +425,23 @@ type reviewReadyPayload struct {
 	HeadSHA string `json:"head_sha"`
 }
 
-// noteReadyStart handles a ready frame in both output modes. It returns the
-// resume cursor: lastSeenID, or the frame's cursor when no event id has been
-// seen, so a reconnect after an idle connection resumes where it started
-// instead of replaying the whole history. It also prints where a from=head
-// stream began, on stderr so --json stdout stays the server's frames.
-func noteReadyStart(errW io.Writer, data, lastSeenID string) string {
+// noteReadyStart handles a ready frame (any other event passes through) in
+// both output modes. It returns the resume cursor: lastSeenID, or the frame's
+// cursor when no event id has been seen, so a reconnect after an idle
+// connection resumes where it started instead of replaying the whole history
+// or re-resolving the head. A from=head frame (it reports start) keeps even a
+// cursor of 0: an empty trail must resume from its start, not jump to a later
+// push. It also prints where a from=head stream began, on stderr so --json
+// stdout stays the server's frames.
+func noteReadyStart(errW io.Writer, eventName, data, lastSeenID string) string {
+	if eventName != sseEventReady {
+		return lastSeenID
+	}
 	var p reviewReadyPayload
 	if err := json.Unmarshal([]byte(data), &p); err != nil {
 		return lastSeenID
 	}
-	if lastSeenID == "" && p.Cursor > 0 {
+	if lastSeenID == "" && (p.Cursor > 0 || p.Start != "") {
 		lastSeenID = strconv.FormatInt(p.Cursor, 10)
 	}
 	head := ""
