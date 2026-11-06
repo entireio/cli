@@ -1546,9 +1546,11 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	// PrepareCommitMsg did, or the stamped trailer and the condensed session
 	// diverge (a dangling trailer). So it keeps the sessions prepare recorded
 	// for this trailer, however long the prompt or editor took in between,
-	// and its trust in the ones it stamped on their shape alone.
+	// its trust in the ones it stamped on their shape alone, and on an amend
+	// the owner of the checkpoint the amended commit links.
 	stamp := linkedByStamp[checkpointID]
 	ctx = withTrustedSessions(withLinkedSessions(ctx, stamp.SessionIDs), stamp.TrustedSessionIDs)
+	ctx = withAmendedCheckpoint(ctx, s.amendedCheckpoint(ctx, repo, commit, checkpointID, targetPreexisting))
 	sessions, err := s.findSessionsForCommitLinking(ctx, worktreePath)
 	findSessionsSpan.RecordError(err)
 	findSessionsSpan.End()

@@ -10,6 +10,7 @@ import (
 	"slices"
 
 	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
@@ -117,6 +118,57 @@ func stampedByAnotherCommit(ctx context.Context, checkpointID id.CheckpointID, s
 		return false
 	}
 	return checkpointID != state.LastCheckpointID && checkpointID != state.PendingCondensationID()
+}
+
+// amendedCheckpoint returns the link to checkpointID, a preexisting target,
+// when this commit is an amend: the newest entry in HEAD's reflog that moved
+// HEAD replaced it with this commit instead of advancing to it. An amend keeps
+// the amended commit's trailer, or restores its session's
+// (handleAmendCommitMsg), without stamping it, so post-commit condenses into
+// the existing checkpoint for the session that owns it (withAmendedCheckpoint).
+// A checkpoint the replaced commit does not link, by trailer or by the
+// checkpoint's record of it (LinkedCommits, for a stamped trailer moved out of
+// the final block), is kept only for an owner prepare would have restored it
+// for: `commit --amend -C <other>` keeps another commit's trailer, and its
+// owner was never linked to this one. A message
+// reused with `commit -C` keeps a trailer the same way but advances HEAD: it
+// makes a new link. With no reflog to tell them apart
+// (core.logAllRefUpdates=false), it is taken as an amend, so the owner keeps
+// condensing into its checkpoint as it did before the idle check.
+func (s *ManualCommitStrategy) amendedCheckpoint(ctx context.Context, repo *git.Repository, commit *object.Commit, checkpointID id.CheckpointID, preexisting bool) amendedLink {
+	if !preexisting {
+		return amendedLink{}
+	}
+	for _, e := range headReflog(ctx) {
+		if e.oldHash == e.newHash {
+			continue // HEAD did not move, as with another hook's `git reset HEAD`
+		}
+		if e.newHash != commit.Hash || e.oldHash.IsZero() || slices.Contains(commit.ParentHashes, e.oldHash) {
+			return amendedLink{}
+		}
+		link := amendedLink{checkpointID: checkpointID}
+		if !s.commitLinksCheckpoint(ctx, repo, e.oldHash, checkpointID) {
+			link.ownerBase = e.oldHash.String()
+		}
+		return link
+	}
+	return amendedLink{checkpointID: checkpointID}
+}
+
+// commitLinksCheckpoint reports whether the commit at hash links checkpointID:
+// its final trailer block names it, or the checkpoint records the commit.
+func (s *ManualCommitStrategy) commitLinksCheckpoint(ctx context.Context, repo *git.Repository, hash plumbing.Hash, checkpointID id.CheckpointID) bool {
+	if c, err := repo.CommitObject(hash); err == nil && slices.Contains(LinkedCheckpoints(ctx, c.Message), checkpointID) {
+		return true
+	}
+	store, err := s.getPersistentStore(ctx, repo)
+	if err != nil {
+		return false
+	}
+	summary, err := store.Read(ctx, checkpointID)
+	return err == nil && summary != nil && slices.ContainsFunc(summary.LinkedCommits, func(l checkpoint.LinkedCommit) bool {
+		return l.SHA == hash.String()
+	})
 }
 
 func checkpointExists(ctx context.Context, store checkpoint.PersistentStore, checkpointID id.CheckpointID) bool {

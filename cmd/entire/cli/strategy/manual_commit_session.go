@@ -452,15 +452,16 @@ func resolveWorktreeCandidates(ctx context.Context, worktreePath string, candida
 // candidates span several worktrees. When all candidates came from one
 // worktree, resolveWorktreeCandidates links them without that check, and
 // post-commit would condense a session idle for days into every commit made
-// here. Only commit linking applies this; amend and post-rewrite still find
-// the sessions they keep the existing links of. A session prepare-commit-msg
-// already linked this commit to is kept (withLinkedSessions).
+// here. Only new links are judged: a session prepare-commit-msg already linked
+// this commit to is kept (withLinkedSessions), and so is, on an amend, the
+// owner of the checkpoint the amended commit links (withAmendedCheckpoint).
+// Post-rewrite does not apply this at all.
 func withoutIdleSessions(ctx context.Context, worktreePath string, states []*SessionState) []*SessionState {
 	now := time.Now()
 	linked := linkedSessions(ctx)
 	var kept []*SessionState
 	for _, state := range states {
-		if !slices.Contains(linked, state.SessionID) && idleBeyondRecentWindow(state, now) {
+		if !slices.Contains(linked, state.SessionID) && !ownsAmendedCheckpoint(ctx, state) && idleBeyondRecentWindow(state, now) {
 			logging.Debug(logging.WithComponent(ctx, "checkpoint"),
 				"session matching: fallback session idle beyond the recent window; not linked",
 				slog.String("commit_worktree", worktreePath),
@@ -537,6 +538,35 @@ func trustedSessions(ctx context.Context) []string {
 		return ids
 	}
 	return nil
+}
+
+type amendedCheckpointKey struct{}
+
+// amendedLink is the existing checkpoint an amend links (amendedCheckpoint).
+// When the commit it replaced does not name the checkpoint, ownerBase is that
+// commit: prepare restores a trailer only for a session based on the commit
+// being amended (handleAmendCommitMsg), so only such an owner was linked by it.
+type amendedLink struct {
+	checkpointID id.CheckpointID
+	ownerBase    string
+}
+
+// withAmendedCheckpoint marks the existing checkpoint an amend keeps or
+// restores the trailer of. The session that owns it is linked to the commit by
+// that trailer already, so withoutIdleSessions keeps it however idle it is:
+// amend records no stamp, so withLinkedSessions has nothing for it.
+func withAmendedCheckpoint(ctx context.Context, link amendedLink) context.Context {
+	if link.checkpointID.IsEmpty() {
+		return ctx
+	}
+	return context.WithValue(ctx, amendedCheckpointKey{}, link)
+}
+
+// ownsAmendedCheckpoint reports whether state owns the checkpoint
+// withAmendedCheckpoint marked on ctx.
+func ownsAmendedCheckpoint(ctx context.Context, state *SessionState) bool {
+	link, ok := ctx.Value(amendedCheckpointKey{}).(amendedLink)
+	return ok && state.LastCheckpointID == link.checkpointID && (link.ownerBase == "" || state.BaseCommit == link.ownerBase)
 }
 
 // linkedSessionIDs returns the IDs of states, for withLinkedSessions.

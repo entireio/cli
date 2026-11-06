@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
@@ -121,6 +123,29 @@ func TestCommitLinking_FallbackKeepsTheSessionsPrepareLinked(t *testing.T) {
 	assert.Equal(t, []string{"linked"}, linkedSessionIDs(sessions))
 }
 
+// On an amend, the owner of the checkpoint the amended commit links is kept by
+// the idle check however idle it is; the other fallback sessions are still
+// judged.
+func TestCommitLinking_FallbackKeepsTheOwnerOfAnAmendedCheckpoint(t *testing.T) {
+	mainDir, linkedDir := twoWorktrees(t)
+	ctx := context.Background()
+	s := &ManualCommitStrategy{}
+	dayAgo := time.Now().Add(-24 * time.Hour)
+	target := id.MustCheckpointID("a1b2c3d4e5f6")
+	saveSiblingSession(t, s, mainDir, "owner", session.PhaseIdle, &dayAgo)
+	saveSiblingSession(t, s, mainDir, "stale", session.PhaseIdle, &dayAgo)
+	owner, err := s.loadSessionState(ctx, "owner")
+	require.NoError(t, err)
+	owner.LastCheckpointID = target
+	require.NoError(t, s.saveSessionState(ctx, owner))
+
+	t.Chdir(linkedDir)
+	clearSessionMatchCaches()
+	sessions, err := s.findSessionsForCommitLinking(withAmendedCheckpoint(ctx, amendedLink{checkpointID: target}), linkedDir)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"owner"}, linkedSessionIDs(sessions))
+}
+
 // Prepare links a sibling worktree's session that is not idle when it runs,
 // and stamps the trailer. The commit can then wait on the TTY prompt or the
 // message editor, and by post-commit the session looks idle: past
@@ -228,4 +253,157 @@ func TestPostRewrite_StillRemapsAnIdleSiblingSession(t *testing.T) {
 	after, err := s.loadSessionState(ctx, "idle")
 	require.NoError(t, err)
 	assert.Equal(t, newSHA, after.BaseCommit)
+}
+
+// An amend keeps the amended commit's trailer and stamps nothing, so
+// post-commit condenses the amended-in work into that existing checkpoint for
+// the session that owns it. From a worktree with no session of its own, the
+// owner is kept however idle it has become: the trailer already links it, and
+// the idle check only narrows new links. Judged as a new link, the owner was
+// dropped and its work never reached the checkpoint. A message reused with
+// `commit -C` keeps the trailer the same way, but makes a new commit: there
+// the idle owner is still dropped, and the old checkpoint is left as it was.
+// So is it when an amend of a later commit reuses the first one's message: that
+// trailer never linked the owner to the commit being amended. A trailer prepare
+// restores for a session based on that commit does link it, as does one the
+// checkpoint records the amended commit for (moved out of its final trailer
+// block, then put back by the amend). Without a reflog
+// to tell an amend from a new commit, the owner is kept, as it was before the
+// idle check.
+func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		commitArgs []string
+		noReflog   bool
+		resetAfter bool
+		// amendOther amends a later commit with the first one's message.
+		amendOther bool
+		// restore edits the trailer out, and bases the session on the commit
+		// being amended, for prepare to restore its trailer.
+		restore bool
+		// movedTrailer commits the first commit with its trailer moved out of
+		// the final trailer block, and the amend puts it back.
+		movedTrailer bool
+		condensed    bool
+	}{
+		{name: "amend", commitArgs: []string{"--amend"}, condensed: true},
+		{name: "message reused with commit -C", condensed: false},
+		{name: "amend without a reflog", commitArgs: []string{"--amend"}, noReflog: true, condensed: true},
+		{name: "commit -C, then a hook's git reset HEAD", resetAfter: true, condensed: false},
+		{name: "amend of another commit reusing the message", commitArgs: []string{"--amend"}, amendOther: true, condensed: false},
+		{name: "amend restoring the trailer of a session based on it", commitArgs: []string{"--amend"}, amendOther: true, restore: true, condensed: true},
+		{name: "amend of a commit whose trailer was moved", commitArgs: []string{"--amend"}, movedTrailer: true, condensed: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			homeDir, err := filepath.EvalSymlinks(setupGitRepo(t))
+			require.NoError(t, err, "the recorded home must match git's worktree list")
+			t.Chdir(homeDir)
+			s := NewManualCommitStrategy()
+			setupSessionWithCheckpointAndFile(t, s, homeDir, "sess-sibling", "notes.txt")
+			setLastInteraction := func(last time.Time) {
+				t.Helper()
+				state, err := s.loadSessionState(ctx, "sess-sibling")
+				require.NoError(t, err)
+				state.WorktreePath = homeDir
+				state.Phase = session.PhaseIdle
+				state.LastInteractionTime = &last
+				require.NoError(t, s.saveSessionState(ctx, state))
+			}
+			setLastInteraction(time.Now().Add(-time.Minute))
+
+			siblingDir := addSiblingWorktree(t, homeDir, "commit-wt")
+			t.Chdir(siblingDir)
+			testutil.WriteFile(t, siblingDir, "notes.txt", "agent content for notes.txt")
+			testutil.GitAdd(t, siblingDir, "notes.txt")
+			msg := prepareMessage(t, "add notes\n")
+			cps := checkpointIDs(msg)
+			require.Len(t, cps, 1, "prepare links the recent sibling session: %q", msg)
+			committed := msg
+			if tt.movedTrailer {
+				committed = msg + "\nA note written after the trailer.\n"
+			}
+			testutil.GitCommit(t, siblingDir, committed)
+			require.NoError(t, NewManualCommitStrategy().PostCommit(ctx))
+			state, err := s.loadSessionState(ctx, "sess-sibling")
+			require.NoError(t, err)
+			require.Equal(t, cps[0], state.LastCheckpointID.String(), "sanity: the session owns the commit's checkpoint")
+			if tt.movedTrailer {
+				head := strings.TrimSpace(testutil.RunGit(t, siblingDir, "log", "-1", "--format=%B"))
+				require.Empty(t, LinkedCheckpoints(ctx, head), "sanity: the commit's final trailer block names no checkpoint")
+			}
+
+			// The agent's next turn adds more.txt; then the session sits idle
+			// for a day before a commit naming the checkpoint takes it in.
+			t.Chdir(homeDir)
+			metadataDir := paths.EntireMetadataDir + "/sess-sibling"
+			testutil.WriteFile(t, homeDir, "more.txt", "agent content for more.txt")
+			testutil.WriteFile(t, homeDir, filepath.Join(metadataDir, paths.TranscriptFileName),
+				testTranscriptPromptResponse+`{"type":"human","message":{"content":"add more"}}`+"\n")
+			require.NoError(t, s.SaveStep(ctx, StepContext{
+				SessionID:     "sess-sibling",
+				NewFiles:      []string{"more.txt"},
+				MetadataDir:   metadataDir,
+				CommitMessage: "Checkpoint 2",
+				AuthorName:    "Test",
+				AuthorEmail:   "test@test.com",
+			}))
+			setLastInteraction(time.Now().Add(-24 * time.Hour))
+			t.Chdir(siblingDir)
+			if tt.amendOther {
+				testutil.WriteFile(t, siblingDir, "other.txt", "work of no session")
+				testutil.GitAdd(t, siblingDir, "other.txt")
+				testutil.RunGit(t, siblingDir, "commit", "-q", "-m", "other work")
+				require.NoError(t, NewManualCommitStrategy().PostCommit(ctx))
+			}
+			testutil.WriteFile(t, siblingDir, "more.txt", "agent content for more.txt")
+			testutil.GitAdd(t, siblingDir, "more.txt")
+			// git reports source "commit" for both `--amend` and `-C <rev>`.
+			draft := msg
+			if tt.restore {
+				draft = "add notes\n"
+				state, err := s.loadSessionState(ctx, "sess-sibling")
+				require.NoError(t, err)
+				state.BaseCommit = strings.TrimSpace(testutil.RunGit(t, siblingDir, "rev-parse", "HEAD"))
+				require.NoError(t, s.saveSessionState(ctx, state))
+			}
+			msgFile := filepath.Join(t.TempDir(), "COMMIT_EDITMSG")
+			require.NoError(t, os.WriteFile(msgFile, []byte(draft), 0o600))
+			require.NoError(t, NewManualCommitStrategy().PrepareCommitMsg(ctx, msgFile, "commit"))
+			kept, err := os.ReadFile(msgFile)
+			require.NoError(t, err)
+			require.Equal(t, cps, checkpointIDs(string(kept)), "prepare keeps or restores the trailer")
+			if tt.noReflog {
+				testutil.RunGit(t, siblingDir, "config", "core.logAllRefUpdates", "false")
+				for _, dirFlag := range []string{"--absolute-git-dir", "--git-common-dir"} {
+					gitDir := strings.TrimSpace(testutil.RunGit(t, siblingDir, "rev-parse", "--path-format=absolute", dirFlag))
+					require.NoError(t, os.RemoveAll(filepath.Join(gitDir, "logs")))
+				}
+			}
+			testutil.RunGit(t, siblingDir, append([]string{"commit", "-q", "-F", msgFile}, tt.commitArgs...)...)
+			if tt.noReflog {
+				require.Empty(t, headReflog(ctx), "sanity: the amend left no reflog")
+			}
+			if tt.resetAfter {
+				// An earlier post-commit hook's reset records an entry that
+				// does not move HEAD.
+				testutil.RunGit(t, siblingDir, "reset", "-q", "HEAD")
+			}
+			require.NoError(t, NewManualCommitStrategy().PostCommit(ctx))
+
+			repo, err := OpenRepository(ctx)
+			require.NoError(t, err)
+			defer repo.Close()
+			store, err := s.getPersistentStore(ctx, repo)
+			require.NoError(t, err)
+			summary, err := store.Read(ctx, id.MustCheckpointID(cps[0]))
+			require.NoError(t, err)
+			require.NotNil(t, summary)
+			if tt.condensed {
+				assert.Contains(t, summary.FilesTouched, "more.txt", "the amend's agent work reaches the existing checkpoint")
+			} else {
+				assert.NotContains(t, summary.FilesTouched, "more.txt", "a new commit does not fold the idle session's work into the old checkpoint")
+			}
+		})
+	}
 }
