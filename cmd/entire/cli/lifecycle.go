@@ -506,7 +506,10 @@ func normalizeToolUsePaths(files []string, eventCWD, repoRoot string) []string {
 // sometimes-appropriate query as an always-do step. Which commands suit a given
 // task is agent-help's job, where it is pulled on demand and grouped by who
 // should initiate the command (see agentHelpAudience); this string carries only
-// invariants that hold on every turn of every session.
+// invariants that hold on every turn of every session. The one workflow it does
+// state is the trail being the work's record: agents otherwise edit only the
+// pull request and share its URL, and they rarely open agent-help at that
+// moment (guidance evals, November 2026).
 func entireContextInjection(scope trailEnablementScope, base, trails bool) string {
 	var b strings.Builder
 	if base {
@@ -516,7 +519,8 @@ func entireContextInjection(scope trailEnablementScope, base, trails bool) strin
 	if trails {
 		b.WriteString("A Trail is a project-level work item that can contain multiple changes from different repositories and branches. ")
 		b.WriteString("Inside a checkout, `entire trail` infers the repository. Outside one, pass `--project <forge>/<owner>`, plus `--repo` and `--branch` when needed. ")
-		b.WriteString("If it's unclear whether work belongs on an existing trail or a new one, ask the user. Keep a trail's description current with `entire trail update`. ")
+		b.WriteString("If it's unclear whether work belongs on an existing trail or a new one, ask the user. ")
+		b.WriteString("If this branch has a trail, it is the record of the work, not the pull request: when the work changes, edit its description with `entire trail update` (read the current body first and keep others' text), and lead with the trail or change URL when you share it. ")
 		b.WriteString("When referencing a trail or change, include its full URL. ")
 		b.WriteString("Post feedback on a trail as findings (`entire trail finding`), never as trail comments; comments are for people. ")
 	}

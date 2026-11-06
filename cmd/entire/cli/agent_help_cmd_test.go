@@ -1080,3 +1080,48 @@ func TestAgentHelpGuidance_InheritedByLeafCommands(t *testing.T) {
 		t.Errorf("checkpoint delete guidance = %q, want only its own", got)
 	}
 }
+
+// The project-trail workflow guidance (guidance evals, November 2026) reaches
+// the commands agents open before acting, and the findings entry keeps the
+// reply rules the shared entry carries.
+func TestAgentHelpProjectTrailGuidance_TrailWorkflow(t *testing.T) {
+	t.Parallel()
+
+	root := projectTrailsHelpTestRoot()
+	trail := agentHelpFindChild(root, "trail")
+	for _, tc := range []struct {
+		cmd  string
+		want []string
+	}{
+		{"update", []string{"keep their text", shadowPRMarker, "give a\npull request URL only when the user asks for it",
+			"A bare number is a project trail number", "If trail N is not this branch's trail, do not\nchange it"}},
+		{"finding", []string{"After a push, run `entire trail finding`", "while any are open, the change is not\nready",
+			"Dismiss with -m only when the\nfinding is wrong", "Reply to a finding with `entire trail finding reply`"}},
+		{"merge", []string{"--dry-run only reports", "\"looks\ngood\" is not that", "never pass --force or --yes on your own"}},
+	} {
+		cmd := agentHelpFindChild(trail, tc.cmd)
+		if cmd == nil {
+			t.Fatalf("trail %s not found", tc.cmd)
+		}
+		got := agentHelpGuidanceFor(cmd)
+		for _, want := range tc.want {
+			if !strings.Contains(got, want) {
+				t.Errorf("trail %s guidance missing %q:\n%s", tc.cmd, want, got)
+			}
+		}
+		if strings.Contains(cmd.Long, "--dry-run only reports") || strings.Contains(cmd.Long, "keep their text") {
+			t.Errorf("trail %s workflow guidance leaked into its cobra help", tc.cmd)
+		}
+	}
+
+	legacy := &cobra.Command{Use: "entire"}
+	legacy.AddCommand(newTrailCmdForMode(false))
+	finding := agentHelpFindChild(agentHelpFindChild(legacy, "trail"), "finding")
+	if finding == nil {
+		t.Fatal("legacy trail finding not found")
+	}
+	got := agentHelpGuidanceFor(finding)
+	if !strings.Contains(got, "Reply to a finding with `entire trail finding reply`") || strings.Contains(got, "After a push") {
+		t.Errorf("legacy trail finding should keep only the shared reply rules:\n%s", got)
+	}
+}

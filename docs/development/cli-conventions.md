@@ -916,8 +916,14 @@ agents at, instead of enumerating a surface that goes stale.
 
 When trails are enabled, the first-turn injection introduces a trail as
 project-level intent across repositories and branches. It asks agents to inspect
-the current branch's trail, reuse intent where appropriate, and keep the trail's
-description current. Command details come from `entire agent-help trail`; the
+the current branch's trail, reuse intent where appropriate, and treat the trail,
+not the pull request, as the record of the work: edit its shared description
+keeping others' text, and lead with the trail or change URL. This one workflow
+is stated up front because agents otherwise edit only the pull request and
+rarely open agent-help at that moment; the per-command detail (shadow-PR
+marker, findings after a push, merge readiness) lives in `agent-help` for
+`trail update`, `trail finding`, and `trail merge`, which agents do open before
+acting. Command details come from `entire agent-help trail`; the
 injection retains auto-detected repository context without listing unrelated
 checkpoint or setup workflows.
 
