@@ -142,6 +142,23 @@ func TestJSONLBytesCounts_IP(t *testing.T) {
 	}
 }
 
+// A custom pattern named ip that matches inside a built-in IP match keeps its
+// own region, so the version-key rule can't expose it, but the address still
+// counts once.
+func TestJSONLBytesCounts_CustomIPInsideBuiltInIP(t *testing.T) {
+	ConfigurePII(PIIConfig{
+		Enabled:        true,
+		Categories:     map[PIICategory]bool{PIIIP: true},
+		CustomPatterns: map[string]string{"ip": `10\.0\.0\.1`},
+	})
+	t.Cleanup(resetPIIConfig)
+
+	got := countsOf(t, textLine(t, "peer ::ffff:10.0.0.1"))
+	require.Equal(t, 1, got.Replacements)
+	require.Equal(t, 1, got.Layers["pii"])
+	require.Equal(t, map[string]int{"IP": 1}, got.PII)
+}
+
 // A credential value replaced whole counts its placeholder, not the PII
 // matches inside it, which are not written.
 func TestJSONLBytesCounts_CredentialValueWithIP(t *testing.T) {
