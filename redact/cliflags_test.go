@@ -102,6 +102,11 @@ func TestString_CommandLinePasswords(t *testing.T) {
 		{name: "apostrophe before a quoted password with a semicolon", input: "Let's connect with mysql -p'abc;" + p + "' app", want: "Let's connect with mysql -p'REDACTED' app"},
 		{name: "escaped quotes inside sh -c", input: `sh -c "mysql -e \"a; b\" -p` + p + `"`, want: `sh -c "mysql -e \"a; b\" -pREDACTED"`},
 		{name: "nested command after cd and sudo", input: "docker exec mysql sh -c 'cd /app && sudo mysql -p" + p + " app'", want: "docker exec mysql sh -c 'cd /app && sudo mysql -pREDACTED app'"},
+		{name: "nested command after sudo options", input: "docker exec mysql sh -c 'sudo -u root mysql -p" + p + "'", want: "docker exec mysql sh -c 'sudo -u root mysql -pREDACTED'"},
+		{name: "nested command after env options", input: "docker exec mysql sh -c 'env -i PATH=/bin mysql -p" + p + "'", want: "docker exec mysql sh -c 'env -i PATH=/bin mysql -pREDACTED'"},
+		{name: "escaped quote and semicolon in an earlier argument", input: `openssl enc -out "abc\";x" -pass pass:` + p, want: `openssl enc -out "abc\";x" -pass pass:REDACTED`},
+		{name: "line continuation inside the password", input: "openssl enc -pass pass:Summer\\\n" + p + " -in f", want: "openssl enc -pass pass:REDACTED -in f"},
+		{name: "line continuation after the password", input: "mysql -p" + p + "\\\n  -h db app", want: "mysql -pREDACTED\\\n  -h db app"},
 	})
 }
 
@@ -148,6 +153,7 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		`cmd := "mysql -uroot -p"+password+" app"`,
 		`bash -c "mysql -uroot -p"; echo "done"`,
 		"mysql -e 'SELECT mysql -pDebug FROM metrics'",
+		"docker exec mysql sh -c 'sudo apt install mysql -pDebug'",
 		`mysql -e \"; printf hello\" -phunter2`,
 		`netrc := "machine h login me password " + password + "\n"`,
 		`cmd := "mongosh --password " + password + " db"`,

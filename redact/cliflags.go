@@ -13,12 +13,13 @@ import (
 const cliFlagValue = `"[^"\r\n]*"|'[^'\r\n]*'|[^\s'"` + "`" + `|;&()<>]+`
 
 // cliSameCommandChar is one piece of the text between a command name and one
-// of its flags. It skips quoted strings, escaped characters (\;) and escaped
-// line breaks (a command continued with a trailing backslash), and otherwise
-// never crosses a line break, a shell operator or a backtick (which starts a
-// command substitution, or ends Markdown code), so a flag is only read as
-// belonging to the command that precedes it in the same pipeline segment.
-const cliSameCommandChar = `\\\r?\n|\\[^\r\n]|"[^"\r\n]*"|'[^'\r\n]*'|[^\r\n|;&` + "`" + `]`
+// of its flags. It skips quoted strings (with escapes inside double quotes:
+// "abc\";x"), escaped characters (\;) and escaped line breaks (a command
+// continued with a trailing backslash), and otherwise never crosses a line
+// break, a shell operator or a backtick (which starts a command substitution,
+// or ends Markdown code), so a flag is only read as belonging to the command
+// that precedes it in the same pipeline segment.
+const cliSameCommandChar = `\\\r?\n|\\[^\r\n]|"(?:[^"\\\r\n]|\\[^\r\n])*"|'[^'\r\n]*'|[^\r\n|;&` + "`" + `]`
 
 const cliSameCommand = `(?:` + cliSameCommandChar + `)`
 
@@ -253,16 +254,34 @@ func startsCommand(prefix string) bool {
 	if i := strings.LastIndexAny(prefix, ";|&("); i >= 0 {
 		prefix = prefix[i+1:]
 	}
+	wrapped, optionArg := false, false
 	for _, word := range strings.Fields(prefix) {
-		switch word {
-		case "sudo", "exec", "env", "time", "nohup", "command":
-			continue
-		}
-		if eq := strings.IndexByte(word, '='); eq <= 0 || !isShellName(word[:eq]) {
-			return false
+		switch {
+		case isCommandWrapper(word):
+			wrapped, optionArg = true, false
+		case wrapped && strings.HasPrefix(word, "-"):
+			// An option of the wrapper (sudo -E, env -i), which may take
+			// the next word as its argument (sudo -u root).
+			optionArg = !strings.Contains(word, "=")
+		case optionArg:
+			optionArg = false
+		default:
+			if eq := strings.IndexByte(word, '='); eq <= 0 || !isShellName(word[:eq]) {
+				return false
+			}
 		}
 	}
 	return true
+}
+
+// isCommandWrapper reports whether word runs the command after it (and its
+// own options).
+func isCommandWrapper(word string) bool {
+	switch word {
+	case "sudo", "exec", "env", "time", "nohup", "command":
+		return true
+	}
+	return false
 }
 
 // isShellName reports whether s is a shell variable name (an environment
@@ -356,8 +375,8 @@ func (v cliValue) trimPrefix(s, prefix string) (cliValue, bool) {
 }
 
 // shellWordEnd returns the end of the shell word that starts at start. A
-// quoted piece is part of the word, and so are an escaped character and a
-// command substitution. Commands are often quoted inside other text, as the
+// quoted piece is part of the word, and so are an escaped character, a line
+// continuation and a command substitution. Commands are often quoted inside other text, as the
 // argument of sh -c or as a JSON string, so a bare piece ends at an escaped
 // quote (\"), and does not join a quoted piece that starts or ends with a
 // blank or holds a shell operator or JSON separator: the quote after hunter2
@@ -379,6 +398,14 @@ func shellWordEnd(s string, start int) int {
 		}
 		c := s[i]
 		switch {
+		case c == '\\' && (strings.HasPrefix(s[i+1:], "\n") || strings.HasPrefix(s[i+1:], "\r\n")):
+			// A line continuation joins the word to the next line's text
+			// (pass:Summer\<newline>2026), and ends it before a blank.
+			next := i + 1 + strings.IndexByte(s[i+1:], '\n') + 1
+			if next == len(s) || isShellWordEnd(s[next]) {
+				return i
+			}
+			i = next
 		case c == '\\' && i+1 < len(s) && s[i+1] != '\r' && s[i+1] != '\n':
 			if s[i+1] == '"' && i > start {
 				return i
