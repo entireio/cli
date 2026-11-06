@@ -1859,7 +1859,7 @@ func checkAntigravityHooksLoaded(cmd *cobra.Command) {
 	}
 }
 
-func writeCodexInactiveWorktreeWarning(w io.Writer, worktreePath, discoveredPath, nonWorktreeRoot string) {
+func writeCodexInactiveWorktreeWarning(w io.Writer, worktreePath, discoveredPath string, nonWorktreeRoot codexRemedyRoot) {
 	fmt.Fprintln(w, "Codex hooks: NOT ACTIVE IN THIS WORKTREE")
 	fmt.Fprintln(w, "  Entire hooks are configured at the current-worktree path:")
 	fmt.Fprintf(w, "    %s\n", worktreePath)
@@ -1908,25 +1908,38 @@ func writeCodexMissingProjectLayerWarning(w io.Writer, projectLayerPath, discove
 // Doctor only prints it: the write happens in setup, after an explicit yes.
 // nonWorktreeRoot is the discovered project root when it is not a worktree
 // (a .bare layout root), or empty.
-func writeCodexPrimaryCheckoutRemedy(w io.Writer, discoveredPath, nonWorktreeRoot string) {
+func writeCodexPrimaryCheckoutRemedy(w io.Writer, discoveredPath string, root codexRemedyRoot) {
 	fmt.Fprintln(w, "  Codex will read the discovered file above, not the current-worktree file above.")
+	if root.storageParent {
+		// Setup never offers this write: other repositories' storage can
+		// share that directory.
+		fmt.Fprintf(w, "  That file sits beside this repository's separate Git directory, so Entire does not write it. Add Entire's Codex hooks to %s yourself, or use a worktree whose Git directory is inside the repository.\n",
+			discoveredPath)
+		return
+	}
 	fmt.Fprintf(w, "  From a terminal, re-run `entire agent add codex` in this worktree and answer yes to install Entire's Codex hooks in %s.\n",
 		discoveredPath)
-	if nonWorktreeRoot == "" {
+	if root.dir == "" {
 		writeCodexTrackedHooksRemedy(w)
 		return
 	}
 	fmt.Fprintf(w, "  Or apply the generated .codex/hooks.json change at %s directly; that project root is not a worktree.\n",
-		nonWorktreeRoot)
+		root.dir)
 }
 
-// codexNonWorktreeRoot returns the discovered project root when it is not a
-// Git worktree, for writeCodexPrimaryCheckoutRemedy.
-func codexNonWorktreeRoot(discovered codex.DiscoveredHooksPath) string {
+// codexRemedyRoot describes the discovered project root for the remedy: dir
+// is set when it is not a Git worktree (a .bare layout root), storageParent
+// when it is a separate Git directory's storage parent.
+type codexRemedyRoot struct {
+	dir           string
+	storageParent bool
+}
+
+func codexNonWorktreeRoot(discovered codex.DiscoveredHooksPath) codexRemedyRoot {
 	if discovered.RootIsCheckout() {
-		return ""
+		return codexRemedyRoot{}
 	}
-	return discovered.Root()
+	return codexRemedyRoot{dir: discovered.Root(), storageParent: discovered.SeparateGitDirParent()}
 }
 
 func writeCodexTrackedHooksRemedy(w io.Writer) {

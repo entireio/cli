@@ -198,3 +198,16 @@ func TestSetupAgentHooksNonInteractive_YesNeverWritesDiscoveredRoot(t *testing.T
 	require.NoDirExists(t, filepath.Dir(primaryHooks))
 	require.Contains(t, out.String(), "re-run `entire agent add codex` in this worktree")
 }
+
+// A cancelled command stops setup instead of counting as No.
+func TestFinishCodexHooksSetup_CancelledCommandReturnsError(t *testing.T) {
+	primaryHooks, _ := enterLinkedWorktreeWithCodexHooks(t)
+	stubCodexDiscoveredHooksPrompt(t, false, context.Canceled)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var out bytes.Buffer
+	err := finishCodexHooksSetup(ctx, &out, &codex.CodexAgent{}, true)
+	require.ErrorIs(t, err, context.Canceled)
+	require.NoDirExists(t, filepath.Dir(primaryHooks))
+}

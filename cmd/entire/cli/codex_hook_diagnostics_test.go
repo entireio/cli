@@ -19,7 +19,7 @@ func TestDoctorCodexWarningsNamePathOwnershipAndUserRemedies(t *testing.T) {
 			&output,
 			"/repo-feature/.codex/hooks.json",
 			"/repo-main/.codex/hooks.json",
-			"",
+			codexRemedyRoot{},
 		)
 
 		out := output.String()
@@ -44,13 +44,29 @@ func TestDoctorCodexWarningsNamePathOwnershipAndUserRemedies(t *testing.T) {
 			&output,
 			"/layout/feature/.codex/hooks.json",
 			"/layout/.codex/hooks.json",
-			"/layout",
+			codexRemedyRoot{dir: "/layout"},
 		)
 
 		out := output.String()
 		require.Contains(t, out, "re-run `entire agent add codex` in this worktree and answer yes to install Entire's Codex hooks in /layout/.codex/hooks.json.")
 		require.Contains(t, out, "Or apply the generated .codex/hooks.json change at /layout directly; that project root is not a worktree.")
 		require.NotContains(t, out, "commit it and make sure the root worktree has it")
+	})
+
+	t.Run("separate git dir storage parent", func(t *testing.T) {
+		t.Parallel()
+		var output bytes.Buffer
+		writeCodexInactiveWorktreeWarning(
+			&output,
+			"/repo/linked/.codex/hooks.json",
+			"/gitdirs/.codex/hooks.json",
+			codexRemedyRoot{dir: "/gitdirs", storageParent: true},
+		)
+
+		out := output.String()
+		require.Contains(t, out, "Entire does not write it. Add Entire's Codex hooks to /gitdirs/.codex/hooks.json yourself")
+		require.NotContains(t, out, "answer yes")
+		require.NotContains(t, out, "apply the generated .codex/hooks.json change at /gitdirs")
 	})
 
 	t.Run("invalid discovered file", func(t *testing.T) {

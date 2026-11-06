@@ -46,8 +46,8 @@ var promptInstallCodexDiscoveredHooks = func(ctx context.Context, target codexag
 // checkout. When Codex reads a different checkout's hooks file that lacks
 // Entire's hooks, it offers to install them there; only an explicit yes, and
 // only when mayPrompt, writes outside the current checkout. The offer is
-// optional, so a cancelled prompt or a failed write warns and prints the
-// remedy instead of failing the setup that called it.
+// optional, so an aborted prompt or a failed write warns and prints the
+// remedy instead of failing setup; only a cancelled command returns an error.
 func finishCodexHooksSetup(ctx context.Context, w io.Writer, ag agent.Agent, mayPrompt bool) error {
 	if ag.Name() != agent.AgentNameCodex {
 		return nil
@@ -69,6 +69,11 @@ func finishCodexHooksSetup(ctx context.Context, w io.Writer, ag agent.Agent, may
 	if offer && mayPrompt {
 		var err error
 		if install, err = promptInstallCodexDiscoveredHooks(ctx, target); err != nil {
+			// A cancelled command stops setup; anything else about this
+			// optional prompt (an aborted or broken form) counts as No.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return fmt.Errorf("codex hooks prompt: %w", ctxErr)
+			}
 			fmt.Fprintf(w, "  Skipped installing Codex hooks in %s: %v\n", target.Path(), err)
 			install = false
 		}

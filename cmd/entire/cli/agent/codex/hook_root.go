@@ -57,6 +57,12 @@ func (p DiscoveredHooksPath) RootIsCheckout() bool {
 	return p.rootIsCheckout
 }
 
+// SeparateGitDirParent reports whether the root is a separate Git directory's
+// storage parent, which Entire never offers to write.
+func (p DiscoveredHooksPath) SeparateGitDirParent() bool {
+	return p.separateGitDirParent
+}
+
 // HookDiscovery describes the hooks file Codex is expected to discover. It is
 // diagnostic-only and carries no write target, migration path, or lock path.
 type HookDiscovery struct {
