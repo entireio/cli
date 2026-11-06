@@ -53,6 +53,7 @@ func TestDetectPII_EuropeanAddresses(t *testing.T) {
 		{"12 Rue du Faubourg Saint-Honoré", "[REDACTED_ADDRESS]"},
 		{"12 B rue de la Paix", "[REDACTED_ADDRESS]"},
 		{"12 rue du 8 Mai 1945, 75000 Paris", "[REDACTED_ADDRESS], 75000 Paris"},
+		{"12 rue du 8 Mai 75000 Paris", "[REDACTED_ADDRESS] 75000 Paris"},
 
 		// German
 		{"Karl-Marx-Straße 5", "[REDACTED_ADDRESS]"},
@@ -72,6 +73,8 @@ func TestDetectPII_EuropeanAddresses(t *testing.T) {
 		{"12 rue de la Re\u0301publique", "[REDACTED_ADDRESS]"},
 		{"3 place de l'E\u0301glise", "[REDACTED_ADDRESS]"},
 		{"2 alle\u0301e des Roses", "[REDACTED_ADDRESS]"},
+		{"12 rue du 8 fe\u0301vrier 1962", "[REDACTED_ADDRESS]"},
+		{"3 place du 15 Aou\u0302t", "[REDACTED_ADDRESS]"},
 
 		// A postal code right after a comma is not a decimal.
 		{"Via Roma 12,20121 Milano", "[REDACTED_ADDRESS],20121 Milano"},

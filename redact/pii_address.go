@@ -31,15 +31,17 @@ const (
 	// start a name on its own, so an acronym such as CLI after Via does not
 	// count.
 	euRomanNumeral = `[IVX]{1,5}`
-	// euMonth is a month in Italian, Spanish or French, in either case.
+	// euMonth is a month in Italian, Spanish or French, in either case. An
+	// accented French month also matches in decomposed form.
 	euMonth = `(?i:gennaio|febbraio|marzo|aprile|maggio|giugno|luglio|agosto|settembre|ottobre|novembre|dicembre` +
 		`|enero|febrero|abril|mayo|junio|julio|septiembre|setiembre|octubre|noviembre|diciembre` +
-		`|janvier|février|mars|avril|mai|juin|juillet|août|septembre|octobre|décembre)`
+		`|janvier|f(?:é|e\x{301})vrier|mars|avril|mai|juin|juillet|ao(?:û|u\x{302})t|septembre|octobre|d(?:é|e\x{301})cembre)`
 	// euDateName starts a street named after a date: Via XX Settembre, rue du
 	// 8 Mai 1945, Avenida 9 de Julio. The day, as digits or a roman numeral,
 	// counts only before a month, so a number or acronym alone still does not
-	// start a name.
-	euDateName = `(?:\d{1,2}|` + euRomanNumeral + `)` + euSpace + `(?:de` + euSpace + `)?` + euMonth + `(?:` + euSpace + `\d{4})?`
+	// start a name. The year must be a whole number, so it never takes the
+	// first digits of a postal code (rue du 8 Mai 75000 Paris).
+	euDateName = `(?:\d{1,2}|` + euRomanNumeral + `)` + euSpace + `(?:de` + euSpace + `)?` + euMonth + `(?:` + euSpace + `\d{4}\b)?`
 	// euSpace separates the parts of a street line: spaces or tabs, never a
 	// line break.
 	euSpace = `[ \t]+`
