@@ -219,7 +219,7 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string) []tag
 		switch {
 		case cmd[0] >= segmentEnd:
 			segment = quoteScan{s: s, i: cmd[1], skip: closeAt, skipEnd: stringEnd}
-			rest = f.segmentRest(s, cmd[1], closeAt, stringEnd)
+			rest = f.segmentRest(s, &lines, cmd[1], closeAt, stringEnd)
 			segmentEnd = cmd[1] + len(rest)
 		case f.leading:
 			// Only the options right after the name are read, and they
@@ -242,31 +242,43 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string) []tag
 
 // segmentRest returns the rest of the pipeline segment of a command whose
 // name ends at i, in a quoted string that closes at closeAt and ends at
-// stringEnd (both -1 when it is in none). A command quoted with its
-// arguments (sh -c 'mysql --version'; ssh -p2222 host) ends with the string;
-// a quoted program path ("/usr/bin/mysql" -pX, or "/opt/mysql tools/bin/mysql"
-// -pX, where the name first matched a directory) goes on after it.
-func (f cliPasswordFlag) segmentRest(s string, i, closeAt, stringEnd int) string {
+// stringEnd (both -1 when it is in none); lines found that string. A command
+// quoted with its arguments (sh -c 'mysql --version'; ssh -p2222 host) ends
+// with the string; a quoted program path ("/usr/bin/mysql" -pX, or
+// "/opt/mysql tools/bin/mysql" -pX, where the name first matched a
+// directory) goes on after it.
+func (f cliPasswordFlag) segmentRest(s string, lines *quoteScan, i, closeAt, stringEnd int) string {
 	pattern := segmentRestPattern(s, closeAt)
 	switch {
 	case closeAt < i:
 		return pattern.FindString(s[i:])
-	case strings.ContainsAny(s[i:closeAt], " \t") && !f.endsProgramPath(s[i:closeAt]):
+	case strings.ContainsAny(s[i:closeAt], " \t") && !f.isProgramPath(s[lines.inner():closeAt]):
 		return pattern.FindString(s[i:closeAt])
 	default:
 		return s[i : stringEnd+len(cliSegmentRest.FindString(s[stringEnd:]))]
 	}
 }
 
-// endsProgramPath reports whether rest, the text of a quoted string after a
-// client name, ends with the path of a program f defines: its last path
-// component starts with the name and has no blank (/bin/mysql, \bin\mysql.exe).
-func (f cliPasswordFlag) endsProgramPath(rest string) bool {
-	sep := strings.LastIndexAny(rest, `/\`)
-	if sep < 0 || strings.ContainsAny(rest[sep:], " \t") {
+// programPathStart matches the start of a path: from the root, the home or
+// current directory, or a drive (C:\). notProgramPath matches an option or a
+// shell operator, which a path holds none of.
+var (
+	programPathStart = regexp.MustCompile(`^(?:[A-Za-z]:)?[/\\~.]`)
+	notProgramPath   = regexp.MustCompile("[ \t]-|[;|&<>`\r\n]")
+)
+
+// isProgramPath reports whether inside, the inside of a quoted string that
+// holds a client name, is the path of a program f defines with a blank in a
+// directory ("/opt/mysql tools/bin/mysql") rather than a command with its
+// arguments (sh -c 'mysql --execute=/bin/mysql'): it starts like a path,
+// holds no option or shell operator, and its last component starts with the
+// name (mysql, mysql.exe).
+func (f cliPasswordFlag) isProgramPath(inside string) bool {
+	sep := strings.LastIndexAny(inside, `/\`)
+	if sep < 0 || strings.ContainsAny(inside[sep:], " \t") || !programPathStart.MatchString(inside) || notProgramPath.MatchString(inside) {
 		return false
 	}
-	loc := f.command.FindStringIndex(rest[sep+1:])
+	loc := f.command.FindStringIndex(inside[sep+1:])
 	return loc != nil && loc[0] == 0
 }
 

@@ -166,6 +166,7 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		"docker exec mysql sh -c 'sudo -n echo mysql -pDebug'",
 		"sh -c 'mysql --version'; ssh -p2222 'user@host'",
 		`"/opt/mysql tools/bin/psql" -p5432`,
+		"sh -c 'mysql --execute=/bin/mysql' -p2222",
 		`mysql -e \"; printf hello\" -phunter2`,
 		`netrc := "machine h login me password " + password + "\n"`,
 		`cmd := "mongosh --password " + password + " db"`,
