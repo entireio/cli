@@ -262,7 +262,9 @@ func TestPostRewrite_StillRemapsAnIdleSiblingSession(t *testing.T) {
 // the idle owner is still dropped, and the old checkpoint is left as it was.
 // So is it when an amend of a later commit reuses the first one's message: that
 // trailer never linked the owner to the commit being amended. A trailer prepare
-// restores for a session based on that commit does link it. Without a reflog
+// restores for a session based on that commit does link it, as does one the
+// checkpoint records the amended commit for (moved out of its final trailer
+// block, then put back by the amend). Without a reflog
 // to tell an amend from a new commit, the owner is kept, as it was before the
 // idle check.
 func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
@@ -275,8 +277,11 @@ func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
 		amendOther bool
 		// restore edits the trailer out, and bases the session on the commit
 		// being amended, for prepare to restore its trailer.
-		restore   bool
-		condensed bool
+		restore bool
+		// movedTrailer commits the first commit with its trailer moved out of
+		// the final trailer block, and the amend puts it back.
+		movedTrailer bool
+		condensed    bool
 	}{
 		{name: "amend", commitArgs: []string{"--amend"}, condensed: true},
 		{name: "message reused with commit -C", condensed: false},
@@ -284,6 +289,7 @@ func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
 		{name: "commit -C, then a hook's git reset HEAD", resetAfter: true, condensed: false},
 		{name: "amend of another commit reusing the message", commitArgs: []string{"--amend"}, amendOther: true, condensed: false},
 		{name: "amend restoring the trailer of a session based on it", commitArgs: []string{"--amend"}, amendOther: true, restore: true, condensed: true},
+		{name: "amend of a commit whose trailer was moved", commitArgs: []string{"--amend"}, movedTrailer: true, condensed: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -310,11 +316,19 @@ func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
 			msg := prepareMessage(t, "add notes\n")
 			cps := checkpointIDs(msg)
 			require.Len(t, cps, 1, "prepare links the recent sibling session: %q", msg)
-			testutil.GitCommit(t, siblingDir, msg)
+			committed := msg
+			if tt.movedTrailer {
+				committed = msg + "\nA note written after the trailer.\n"
+			}
+			testutil.GitCommit(t, siblingDir, committed)
 			require.NoError(t, NewManualCommitStrategy().PostCommit(ctx))
 			state, err := s.loadSessionState(ctx, "sess-sibling")
 			require.NoError(t, err)
 			require.Equal(t, cps[0], state.LastCheckpointID.String(), "sanity: the session owns the commit's checkpoint")
+			if tt.movedTrailer {
+				head := strings.TrimSpace(testutil.RunGit(t, siblingDir, "log", "-1", "--format=%B"))
+				require.Empty(t, LinkedCheckpoints(ctx, head), "sanity: the commit's final trailer block names no checkpoint")
+			}
 
 			// The agent's next turn adds more.txt; then the session sits idle
 			// for a day before a commit naming the checkpoint takes it in.
