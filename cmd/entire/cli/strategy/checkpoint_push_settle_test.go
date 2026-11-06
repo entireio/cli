@@ -65,6 +65,9 @@ func TestPushTargetIsLocal(t *testing.T) {
 	testutil.RunGit(t, dir, "remote", "add", "mirrors", bare)
 	testutil.RunGit(t, dir, "remote", "set-url", "--add", "--push", "mirrors", bare)
 	testutil.RunGit(t, dir, "remote", "set-url", "--add", "--push", "mirrors", "git@github.com:acme/app.git")
+	// A remote name can contain '@' and still be a name, not an scp-like URL.
+	testutil.RunGit(t, dir, "remote", "add", "team@mirror", "https://github.com/acme/app.git")
+	testutil.RunGit(t, dir, "remote", "add", "team@local", bare)
 	t.Chdir(dir)
 
 	ctx := context.Background()
@@ -72,6 +75,8 @@ func TestPushTargetIsLocal(t *testing.T) {
 	assert.False(t, pushTargetIsLocal(ctx, "forge"))
 	assert.False(t, pushTargetIsLocal(ctx, "split"))
 	assert.False(t, pushTargetIsLocal(ctx, "mirrors"))
+	assert.False(t, pushTargetIsLocal(ctx, "team@mirror"), "a configured remote is resolved whatever its name looks like")
+	assert.True(t, pushTargetIsLocal(ctx, "team@local"))
 	assert.True(t, pushTargetIsLocal(ctx, bare), "git push <path> pushes to that path")
 	assert.False(t, pushTargetIsLocal(ctx, "https://github.com/acme/app.git"))
 	assert.False(t, pushTargetIsLocal(ctx, "git@github.com:acme/app.git"))

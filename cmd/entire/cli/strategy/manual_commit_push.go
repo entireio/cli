@@ -223,9 +223,9 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	}
 	// Last, because git sends the user's push the moment this returns, and it
 	// must not land right on top of the one that just finished (see
-	// settleBeforeUserPush). A dedicated checkpoint_remote is another
-	// repository, so a push there does not race the user's.
-	if pushed.moved && !ps.hasCheckpointURL() {
+	// settleBeforeUserPush). A dedicated checkpoint_remote waits too: nothing
+	// stops it naming the repository the user is pushing to.
+	if pushed.moved {
 		settleBeforeUserPush(ctx, ps.remote)
 	}
 	return nil

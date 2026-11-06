@@ -1520,11 +1520,13 @@ func TestParsePushResult(t *testing.T) {
 		name     string
 		output   string
 		upToDate bool
+		updated  bool
 	}{
-		{"up to date", "To ../a.git\n=\t" + ref + "\t[up to date]\nDone\n", true},
-		{"new branch", "To ../a.git\n*\t" + ref + "\t[new branch]\nDone\n", false},
-		{"fast-forward", "To ../a.git\n \t" + ref + "\tabc1234..def5678\nDone\n", false},
-		{"forced", "To ../a.git\n+\t" + ref + "\tabc1234...def5678 (forced update)\nDone\n", false},
+		{"up to date", "To ../a.git\n=\t" + ref + "\t[up to date]\nDone\n", true, false},
+		{"new branch", "To ../a.git\n*\t" + ref + "\t[new branch]\nDone\n", false, true},
+		{"fast-forward", "To ../a.git\n \t" + ref + "\tabc1234..def5678\nDone\n", false, true},
+		{"forced", "To ../a.git\n+\t" + ref + "\tabc1234...def5678 (forced update)\nDone\n", false, true},
+		{"rejected", "To ../a.git\n!\t" + ref + "\t[rejected] (non-fast-forward)\nDone\n", false, false},
 		// Two push URLs, one already current and one new: git push prints a
 		// block per destination, and the second one took the ref.
 		{
@@ -1532,13 +1534,23 @@ func TestParsePushResult(t *testing.T) {
 			"warning: push negotiation failed; proceeding anyway with push\n" +
 				"To ../a.git\n=\t" + ref + "\t[up to date]\nDone\n" +
 				"To ../b.git\n*\t" + ref + "\t[new branch]\nDone\n",
-			false,
+			false, true,
 		},
-		{"no status line", "Everything up-to-date\n", false},
-		{"windows line endings", "To ../a.git\r\n=\t" + ref + "\t[up to date]\r\nDone\r\n", true},
+		// The first push URL took the ref and the second refused it: the
+		// push failed, but one destination has just received it.
+		{
+			"several destinations, one moved and one refused",
+			"To ../a.git\n*\t" + ref + "\t[new branch]\nDone\n" +
+				"To ../b.git\n!\t" + ref + "\t[rejected] (fetch first)\nDone\n",
+			false, true,
+		},
+		{"no status line", "Everything up-to-date\n", false, false},
+		{"windows line endings", "To ../a.git\r\n=\t" + ref + "\t[up to date]\r\nDone\r\n", true, false},
 	}
 	for _, tc := range cases {
-		assert.Equal(t, tc.upToDate, parsePushResult(tc.output).upToDate, tc.name)
+		got := parsePushResult(tc.output)
+		assert.Equal(t, tc.upToDate, got.upToDate, "%s: upToDate", tc.name)
+		assert.Equal(t, tc.updated, got.updated, "%s: updated", tc.name)
 	}
 }
 
@@ -1563,6 +1575,31 @@ func TestDoPushRef_SeveralPushURLs_OneMoved(t *testing.T) {
 	require.NoError(t, err, output)
 	assert.True(t, delivered)
 	assert.True(t, moved, "the second push URL took the ref: %s", output)
+	testutil.RunGit(t, empty, "show-ref", "--verify", "refs/heads/"+paths.MetadataBranchName)
+}
+
+// TestDoPushRef_SeveralPushURLs_PartialFailure: git pushes to a remote's push
+// URLs in turn, so a later one failing does not undo a push an earlier one
+// took. That push still moved the ref, even though delivery failed.
+//
+// Not parallel: uses t.Chdir() and os.Stderr redirection.
+func TestDoPushRef_SeveralPushURLs_PartialFailure(t *testing.T) {
+	workDir, current := setupBareRemoteWithCheckpointBranch(t)
+	empty := t.TempDir()
+	testutil.RunGit(t, empty, "init", "--bare")
+	missing := filepath.Join(t.TempDir(), "missing.git")
+	testutil.RunGit(t, workDir, "remote", "add", "origin", current)
+	testutil.RunGit(t, workDir, "remote", "set-url", "--add", "--push", "origin", empty)
+	testutil.RunGit(t, workDir, "remote", "set-url", "--add", "--push", "origin", missing)
+	t.Chdir(workDir)
+
+	restore := captureStderr(t)
+	delivered, moved, err := doPushRef(context.Background(), "origin", plumbing.NewBranchReferenceName(paths.MetadataBranchName))
+	output := restore()
+
+	require.NoError(t, err, "a failed checkpoint push never fails the user's push")
+	assert.False(t, delivered, "one push URL refused the ref: %s", output)
+	assert.True(t, moved, "the first push URL took the ref before the second failed: %s", output)
 	testutil.RunGit(t, empty, "show-ref", "--verify", "refs/heads/"+paths.MetadataBranchName)
 }
 

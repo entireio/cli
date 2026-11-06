@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/perf"
 )
 
@@ -23,10 +23,9 @@ import (
 // push, so the user's pack lands outside that window.
 
 // checkpointPushSettle is how long the pre-push hook waits, after its own
-// checkpoint push moved a ref on the user's push remote, before handing back
-// to git. Long enough to clear GitHub's window with margin; paid only by a push
-// that actually carried new checkpoints. Declared as a var so tests can shrink
-// it.
+// checkpoint push moved a ref, before handing back to git. Long enough to
+// clear GitHub's window with margin; paid only by a push that actually carried
+// new checkpoints. Declared as a var so tests can shrink it.
 var checkpointPushSettle = 1200 * time.Millisecond
 
 // settleBeforeUserPush waits checkpointPushSettle unless every destination of
@@ -54,14 +53,14 @@ var waitForSettle = func(ctx context.Context, d time.Duration) {
 
 // pushTargetIsLocal reports whether every URL a push to target reaches is a
 // repository on this machine's filesystem. target is what git passed the hook:
-// a remote name, or the URL or path pushed to directly. A name that is not a
-// configured remote is classified as a URL itself, which is how git reads it.
+// a remote name, or the URL or path pushed to directly. A configured remote is
+// resolved first, whatever its name looks like (a name may contain '@'); any
+// other target is classified as a URL itself, which is how git reads it.
 func pushTargetIsLocal(ctx context.Context, target string) bool {
 	urls := []string{target}
-	if !remote.IsURL(target) {
-		if pushURLs, err := remote.GetPushURLs(ctx, target); err == nil {
-			urls = pushURLs
-		}
+	dir, env := gitHookSafeDirEnv(ctx)
+	if pushURLs, err := gitremote.GetPushURLsInDir(ctx, dir, env, target); err == nil {
+		urls = pushURLs
 	}
 	for _, u := range urls {
 		if !gitURLIsLocal(u) {

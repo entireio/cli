@@ -725,8 +725,9 @@ func flushAbortReason(ctx context.Context, consecutiveFailures int) string {
 // separately — delivered is true only where finishPush runs, meaning the ref is
 // on the target (freshly pushed or already up-to-date). Callers that act on
 // delivery, such as latching the captured checkpoint sync remote, must read
-// delivered and not err. moved narrows delivered to the freshly pushed case:
-// git reported the ref updated rather than already up-to-date.
+// delivered and not err. moved reports that a destination took the ref rather
+// than already having it, which a failed push to several URLs can also report
+// for the ones it reached before the failure.
 func doPushRef(ctx context.Context, target string, ref plumbing.ReferenceName) (delivered, moved bool, err error) {
 	ctx, cancel := context.WithTimeout(ctx, checkpointPushBudget)
 	defer cancel()
@@ -744,12 +745,15 @@ func doPushRef(ctx context.Context, target string, ref plumbing.ReferenceName) (
 		return true, !result.upToDate, nil
 	}
 	stop("")
+	// A destination that took the ref before another refused it has still just
+	// received a push (see pushResult.updated).
+	moved = result.updated
 
 	// Protected refs cannot be fixed by syncing and retrying.
 	var protectedErr *protectedRefError
 	if errors.As(err, &protectedErr) {
 		printProtectedRefBlock(os.Stderr, refLabel, target)
-		return false, false, nil
+		return false, moved, nil
 	}
 
 	// Non-interactive SSH (pre-push BatchMode): auth failures cannot be fixed by
@@ -759,7 +763,7 @@ func doPushRef(ctx context.Context, target string, ref plumbing.ReferenceName) (
 		fmt.Fprintf(os.Stderr, "[entire] Warning: couldn't push %s: %v\n", refLabel, err)
 		printNonInteractiveSSHAuthHint()
 		printCheckpointRemoteHint(target)
-		return false, false, nil
+		return false, moved, nil
 	}
 
 	// Push failed - likely non-fast-forward. Try to fetch and rebase.
@@ -779,7 +783,7 @@ func doPushRef(ctx context.Context, target string, ref plumbing.ReferenceName) (
 			printNonInteractiveSSHAuthHint()
 		}
 		printCheckpointRemoteHint(target)
-		return false, false, nil // Don't fail the main push
+		return false, moved, nil // Don't fail the main push
 	}
 	stop(" done")
 
@@ -788,6 +792,7 @@ func doPushRef(ctx context.Context, target string, ref plumbing.ReferenceName) (
 	stop = startProgressDots(os.Stderr)
 
 	result, retryErr := tryPushRefCommon(ctx, target, ref)
+	moved = moved || result.updated
 	if retryErr != nil {
 		stop("")
 		fmt.Fprintf(os.Stderr, "[entire] Warning: failed to push %s after sync: %v\n", refLabel, retryErr)
@@ -795,10 +800,10 @@ func doPushRef(ctx context.Context, target string, ref plumbing.ReferenceName) (
 			printNonInteractiveSSHAuthHint()
 		}
 		printCheckpointRemoteHint(target)
-		return false, false, nil
+		return false, moved, nil
 	}
 	finishPush(ctx, stop, result, target)
-	return true, !result.upToDate, nil
+	return true, moved || !result.upToDate, nil
 }
 
 // refDisplayName returns a user-readable name for ref. Branch refs use the
@@ -886,6 +891,10 @@ type pushResult struct {
 	// upToDate is true when every destination already had the ref (nothing
 	// transferred anywhere).
 	upToDate bool
+	// updated is true when at least one destination took the ref. A remote
+	// with several push URLs can report it alongside a failure: git pushes to
+	// the URLs in turn and stops at the first that refuses.
+	updated bool
 }
 
 // parsePushResult checks git push --porcelain output for ref status flags.
@@ -899,8 +908,9 @@ type pushResult struct {
 // A remote with several push URLs prints one block per destination, so one can
 // report '=' while another took the ref (' ' fast-forward, '+' forced, '*' new,
 // '-' deleted). The push is up-to-date only if no destination took anything.
-// Output with no status line at all is not up-to-date.
+// Output with no status line at all is neither.
 func parsePushResult(output string) pushResult {
+	var result pushResult
 	sawUpToDate := false
 	for _, line := range strings.Split(output, "\n") {
 		if len(line) < 2 || line[1] != '\t' {
@@ -910,10 +920,11 @@ func parsePushResult(output string) pushResult {
 		case '=':
 			sawUpToDate = true
 		case ' ', '+', '*', '-':
-			return pushResult{upToDate: false}
+			result.updated = true
 		}
 	}
-	return pushResult{upToDate: sawUpToDate}
+	result.upToDate = sawUpToDate && !result.updated
+	return result
 }
 
 // finishPush stops the progress dots and prints "already up-to-date" or "done"
@@ -954,7 +965,9 @@ func tryPushRefCommon(ctx context.Context, remoteName string, ref plumbing.Refer
 
 	outputStr := result.Output
 	if err != nil {
-		return pushResult{}, classifyPushFailure(ctx, outputStr, err)
+		// Parsed anyway: a push to several URLs can land on some before one
+		// refuses (see pushResult.updated).
+		return parsePushResult(outputStr), classifyPushFailure(ctx, outputStr, err)
 	}
 
 	return parsePushResult(outputStr), nil
