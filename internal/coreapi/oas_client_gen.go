@@ -625,7 +625,7 @@ type Invoker interface {
 	ListServiceAccountGrants(ctx context.Context, params ListServiceAccountGrantsParams) (*ListServiceAccountGrantsOutputBody, error)
 	// ListServiceAccounts invokes listServiceAccounts operation.
 	//
-	// List service accounts in an org.
+	// List service accounts in an org or project.
 	//
 	// GET /service-accounts
 	ListServiceAccounts(ctx context.Context, params ListServiceAccountsParams) (*ListServiceAccountsOutputBody, error)
@@ -11614,7 +11614,7 @@ func (c *Client) sendListServiceAccountGrants(ctx context.Context, params ListSe
 
 // ListServiceAccounts invokes listServiceAccounts operation.
 //
-// List service accounts in an org.
+// List service accounts in an org or project.
 //
 // GET /service-accounts
 func (c *Client) ListServiceAccounts(ctx context.Context, params ListServiceAccountsParams) (*ListServiceAccountsOutputBody, error) {
@@ -11673,7 +11673,27 @@ func (c *Client) sendListServiceAccounts(ctx context.Context, params ListService
 		}
 
 		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
-			return e.EncodeValue(conv.StringToString(params.OrgId))
+			if val, ok := params.OrgId.Get(); ok {
+				return e.EncodeValue(conv.StringToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "project_id" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "project_id",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.ProjectID.Get(); ok {
+				return e.EncodeValue(conv.StringToString(val))
+			}
+			return nil
 		}); err != nil {
 			return res, errors.Wrap(err, "encode query")
 		}

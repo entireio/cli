@@ -209,7 +209,7 @@ func listErrorAttrs(err error) []any {
 }
 
 // batchPushCheckpointRefs pushes each ref at its pinned hash to target in a
-// single git push, fast-forward-only (NOT a force push). Batching keeps a backfill
+// single git push, fast-forward-only (NOT a force push). Batching keeps a chunk
 // of many refs to one network round-trip. Per-checkpoint refs normally advance by
 // fast-forward (each write parents on the prior tip), so the common case
 // succeeds; a non-fast-forward update — genuine divergence, e.g. the same
@@ -231,6 +231,93 @@ func batchPushCheckpointRefs(ctx context.Context, target string, refs []checkpoi
 		return fmt.Errorf("push %d checkpoint refs: %w", len(refs), err)
 	}
 	return nil
+}
+
+// chunkPushResult is what the chunked batch phase of a flush left behind.
+type chunkPushResult struct {
+	landed        int                 // refs in chunks that pushed cleanly
+	failed        []checkpointRefPush // refs of chunks that failed, for the per-ref fallback
+	untried       []checkpointRefPush // refs never attempted because the phase stopped
+	stopReason    string              // why untried is non-empty
+	firstErr      error
+	sshAuthFailed bool
+	// unreachable is the line of git output showing the remote could not be
+	// reached at all; set only when no chunk had landed. See
+	// remote.UnreachableRemoteLine.
+	unreachable string
+}
+
+// pushRefChunks batch-pushes refs size at a time (see
+// checkpointRefPushChunkSize), calling onLanded with each chunk that lands so
+// the caller can dequeue it before a later chunk is cut. A failed chunk does not
+// stop the phase — a rejection fails only its own chunk — but an SSH auth
+// failure, an expired or cancelled ctx, or maxConsecutiveChunkPushFailures in a
+// row does, and so does an unreachable remote before any chunk landed: per-ref
+// retries cannot reach it either, and each would wait out its own connect
+// timeout. The first chunk is always attempted, matching the per-ref fallback.
+func pushRefChunks(ctx context.Context, target string, refs []checkpointRefPush, size int, onLanded func([]checkpointRefPush)) chunkPushResult {
+	var res chunkPushResult
+	consecutive := 0
+	for start := 0; start < len(refs); start += size {
+		if start > 0 {
+			if reason := chunkStopReason(ctx, consecutive); reason != "" {
+				res.untried = refs[start:]
+				res.stopReason = reason
+				logging.Warn(ctx, "git-refs push: batch push stopped early",
+					slog.String("reason", reason), slog.Int("untried", len(res.untried)))
+				return res
+			}
+		}
+		chunk := refs[start:min(start+size, len(refs))]
+		err := batchPushCheckpointRefs(ctx, target, chunk)
+		if err == nil {
+			consecutive = 0
+			res.landed += len(chunk)
+			onLanded(chunk)
+			continue
+		}
+		consecutive++
+		// The only account of a wholesale failure. The per-ref retries re-derive
+		// a *rejection* reason, but a transport failure — an unreachable remote,
+		// a stalled SSH connection — matches nothing in
+		// checkpointRefRejectionReason, so without this line its cause reached
+		// neither the terminal nor .entire/logs. Logged, not printed: the
+		// caller's one actionable line is the useful part.
+		logging.Warn(ctx, "git-refs push: batch checkpoint ref push failed; retrying individually",
+			slog.Int("refs", len(chunk)), slog.String("error", err.Error()))
+		if res.firstErr == nil {
+			res.firstErr = err
+		}
+		res.failed = append(res.failed, chunk...)
+		if nonInteractiveSSHAuthFailure(ctx, err) {
+			res.sshAuthFailed = true
+			res.untried = refs[start+len(chunk):]
+			return res
+		}
+		// A remote that already answered this flush — took a chunk, or failed
+		// one any way other than a connect failure — was reachable; a later
+		// connect failure is transient, and the per-ref fallback may still land
+		// or recover those refs. Only a connect failure on the first chunk the
+		// remote saw means unreachable.
+		if line, ok := remote.UnreachableRemoteLine(err); ok && res.landed == 0 && len(res.failed) == len(chunk) {
+			res.unreachable = line
+			res.untried = refs[start+len(chunk):]
+			return res
+		}
+	}
+	return res
+}
+
+// chunkStopReason reports why the batch phase should stop before its next
+// chunk, or "" to continue. Same bare phrasing as flushAbortReason.
+func chunkStopReason(ctx context.Context, consecutiveFailures int) string {
+	if reason := flushAbortReason(ctx, 0); reason != "" {
+		return reason
+	}
+	if consecutiveFailures >= maxConsecutiveChunkPushFailures {
+		return fmt.Sprintf("%d consecutive failed batches", consecutiveFailures)
+	}
+	return ""
 }
 
 // pushCheckpointRefWithRecovery pushes a single checkpoint ref fast-forward-only;
@@ -295,42 +382,31 @@ func recoverCheckpointRef(
 		"refs/entire-fetch-tmp/" + strings.TrimPrefix(candidate.name.String(), "refs/"),
 	)
 	refSpec := fmt.Sprintf("+%s:%s", candidate.name, fetchedRefName)
-	_, fetchSpan := perf.Start(ctx, "git_fetch")
-	_, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
-		Remote:   fetchTarget,
-		RefSpecs: []string{refSpec},
-		NoTags:   true,
-	})
-	fetchSpan.RecordError(fetchErr)
-	fetchSpan.End()
-	if fetchErr != nil {
-		return checkpointRefPush{}, fmt.Errorf("fetch failed: %w", fetchErr)
+	if err := fetchCheckpointRef(ctx, fetchTarget, refSpec, 0); err != nil {
+		return checkpointRefPush{}, err
 	}
 	defer func() {
 		_ = repo.Storer.RemoveReference(fetchedRefName) //nolint:errcheck // cleanup is best-effort
 	}()
 
-	// go-git loads a handle's pack index once and never reloads it, so objects
-	// the fetch wrote into a new pack are invisible to a handle that has already
-	// read objects. Replay from a freshly opened repository.
 	repoPath, err := getRepoPath(repo)
 	if err != nil {
 		return checkpointRefPush{}, fmt.Errorf("get repository path: %w", err)
 	}
-	fetched, err := gitrepo.OpenPath(repoPath)
-	if err != nil {
-		return checkpointRefPush{}, fmt.Errorf("reopen repository after fetch: %w", err)
-	}
-	defer fetched.Close()
-
-	remoteRef, err := fetched.Reference(fetchedRefName, true)
-	if err != nil {
-		return checkpointRefPush{}, fmt.Errorf("resolve fetched checkpoint ref: %w", err)
-	}
-	newTip, replayed, err := replayOntoRemote(ctx, fetched, candidate.hash, remoteRef.Hash())
+	var replay fetchedReplay
+	err = RetryAfterDeepFetch(
+		func() (replayErr error) {
+			replay, replayErr = replayFetchedCheckpointRef(ctx, repoPath, fetchedRefName, candidate.hash)
+			return replayErr
+		},
+		func() error { return fetchCheckpointRef(ctx, fetchTarget, refSpec, remote.FullRefDepth) },
+	)
 	if err != nil {
 		return checkpointRefPush{}, err
 	}
+	fetched := replay.repo
+	defer fetched.Close()
+	newTip, replayed := replay.tip, replay.replayed
 	if err := checkpointRefRecoveryCAS(ctx, fetched, candidate.name, newTip, candidate.hash); err != nil {
 		// newTip has no unique writer data: it is derived entirely from the
 		// immutable candidate plus the fetched remote. On a CAS conflict the
@@ -349,11 +425,60 @@ func recoverCheckpointRef(
 		logging.Info(ctx, "replayed checkpoint ref onto fetched remote tip; local ref rewritten",
 			slog.String("ref", candidate.name.String()),
 			slog.String("local_tip", candidate.hash.String()),
-			slog.String("remote_tip", remoteRef.Hash().String()),
+			slog.String("remote_tip", replay.remoteTip.String()),
 			slog.Int("commits_replayed", replayed))
 	}
 	candidate.hash = newTip
 	return candidate, nil
+}
+
+// fetchCheckpointRef fetches refSpec from fetchTarget; a non-zero depth fetches
+// that ref's history to that absolute depth.
+func fetchCheckpointRef(ctx context.Context, fetchTarget, refSpec string, depth int) error {
+	_, fetchSpan := perf.Start(ctx, "git_fetch")
+	_, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
+		Remote:   fetchTarget,
+		RefSpecs: []string{refSpec},
+		NoTags:   true,
+		Depth:    depth,
+	})
+	fetchSpan.RecordError(fetchErr)
+	fetchSpan.End()
+	if fetchErr != nil {
+		return fmt.Errorf("fetch failed: %w", fetchErr)
+	}
+	return nil
+}
+
+// fetchedReplay is a replay computed from a freshly opened repository, which
+// the caller closes.
+type fetchedReplay struct {
+	repo      *git.Repository
+	remoteTip plumbing.Hash
+	tip       plumbing.Hash
+	replayed  int
+}
+
+// replayFetchedCheckpointRef replays localHash onto the ref a fetch just wrote.
+// go-git loads a handle's pack index once and never reloads it, so objects the
+// fetch wrote into a new pack are invisible to a handle that has already read
+// objects; each call therefore opens the repository afresh.
+func replayFetchedCheckpointRef(ctx context.Context, repoPath string, fetchedRefName plumbing.ReferenceName, localHash plumbing.Hash) (fetchedReplay, error) {
+	fetched, err := gitrepo.OpenPath(repoPath)
+	if err != nil {
+		return fetchedReplay{}, fmt.Errorf("reopen repository after fetch: %w", err)
+	}
+	remoteRef, err := fetched.Reference(fetchedRefName, true)
+	if err != nil {
+		_ = fetched.Close()
+		return fetchedReplay{}, fmt.Errorf("resolve fetched checkpoint ref: %w", err)
+	}
+	tip, replayed, err := replayOntoRemote(ctx, fetched, localHash, remoteRef.Hash())
+	if err != nil {
+		_ = fetched.Close()
+		return fetchedReplay{}, err
+	}
+	return fetchedReplay{repo: fetched, remoteTip: remoteRef.Hash(), tip: tip, replayed: replayed}, nil
 }
 
 // replayOntoRemote returns the tip that results from replaying the commits
@@ -383,7 +508,7 @@ func replayOntoRemote(
 		return plumbing.ZeroHash, 0, fmt.Errorf("load shallow boundaries: %w", shallowErr)
 	}
 	if errors.Is(err, errNoMergeBase) {
-		tip, replayed, err := replayDisconnectedOnto(ctx, repo, localHash, remoteHash, shallow, io.Discard)
+		tip, replayed, err := replayDisconnectedOnto(ctx, repo, repoPath, localHash, remoteHash, shallow, io.Discard)
 		if err != nil {
 			return plumbing.ZeroHash, 0, fmt.Errorf("replay disconnected checkpoint commits: %w", err)
 		}
@@ -504,11 +629,14 @@ func displayPushTarget(target string) string {
 // can shrink it.
 var checkpointPushBudget = 2 * time.Minute
 
-// checkpointFlushBudget bounds the individual-retry fallback in
-// flushCheckpointRefsQueue as a whole, which checkpointPushBudget cannot: that
-// one caps a single ref, and the fallback walks the queue serially, so a backlog
-// multiplies it. A healthy push costs roughly one SSH round-trip per ref, so a
-// few hundred queued refs is already tens of minutes of a `git push` that looks
+// checkpointFlushBudget bounds a pre-push flushCheckpointRefsQueue as a whole —
+// the chunked batch push and the individual-retry fallback share it — which
+// checkpointPushBudget cannot: that one caps a single ref, and the fallback walks
+// the queue serially, so a backlog multiplies it. The batch needs the bound too:
+// it carries the whole backlog, so a slow uplink or a stalled connection would
+// otherwise hold the user's git push for as long as the upload takes. A
+// healthy push costs roughly one SSH round-trip per ref, so a few hundred
+// queued refs is already tens of minutes of a `git push` that looks
 // hung; when the destination is unreachable every ref instead pays the full
 // per-ref budget and the same queue runs for hours. Refs that do not fit stay
 // queued and go out on the next push, so this bounds progress, never data.
@@ -518,8 +646,42 @@ var checkpointPushBudget = 2 * time.Minute
 // context.WithTimeout keeps the earlier of parent and child deadlines, so the
 // per-ref checkpointPushBudget automatically shrinks to whatever is left.
 //
+// Shared, so a batch the budget cuts ends the flush there: the per-ref fallback
+// does not run on a spent budget, a chunk cut mid-push rotates to the back of
+// the queue, and the refs stay queued for the next push. The explicit pushes
+// (PushQueuedCheckpointRefs, `entire checkpoint push`) leave the batch
+// unbounded; the user asked for that upload and is waiting on it.
+//
 // Declared as a var so tests can shrink it.
 var checkpointFlushBudget = 2 * time.Minute
+
+// checkpointRefPushChunkSize is the most queued refs one batch push carries.
+//
+// It must keep one push's command line under Windows' 32,767-character
+// CreateProcess limit: every ref is one "<40-hex>:refs/entire/checkpoints/..."
+// refspec of about 95 characters on argv, so a single push of ~340 or more refs
+// fails before git starts (#2986). 200 refs is about 19,000 characters.
+//
+// Within that bound it is large on purpose: every push pays a fixed cost — the
+// connection and the remote advertising every ref it holds — so a healthy link
+// is fastest with the fewest pushes. Against GitHub and Entire, 200 checkpoints
+// went out in 3-7s as one push and took 11-20s in chunks of 25.
+//
+// Chunks are also what make the flush budget bound progress rather than discard
+// it: each chunk that lands leaves the queue at once, so a backlog too large for
+// one budget drains over several pushes instead of being cut at the same point
+// by every one of them. A link too slow to land one chunk within the budget
+// would still never move the head of the queue, so the size actually used
+// adapts (see PushQueue.ChunkSizeHint and adaptChunkSize): a chunk the budget
+// cuts before anything landed quarters it, down to one ref, and a flush that
+// lands everything doubles it back. Declared as a var so tests can shrink it.
+var checkpointRefPushChunkSize = 200
+
+// maxConsecutiveChunkPushFailures stops the batch phase once this many chunks in
+// a row have failed. A rejection fails only its own chunk, so batching carries on
+// past one; several in a row point at the destination, and the per-ref fallback
+// already probes that with its own cap.
+const maxConsecutiveChunkPushFailures = 2
 
 // maxConsecutiveRefPushFailures stops the individual-retry fallback once this
 // many refs in a row have failed. The fallback exists to isolate the odd
@@ -888,22 +1050,24 @@ func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.Re
 	// shared monorepo), --unshallow downloads the whole repository because
 	// git treats shallow as a global property of the clone, not per-ref.
 	// The downstream reconcile/rebase paths walk only commits visible past
-	// .git/shallow (collectCommitChain / collectCommitsSince), so the
-	// missing pre-shallow history isn't needed to produce a correct rebase.
+	// .git/shallow (collectCommitChain / collectCommitsSince). When a boundary
+	// hides the merge base they refuse with errShallowHidesMergeBase, and the
+	// retry below deepens only this ref before trying once more.
 	// Span the fetch separately so a slow sync can be attributed to the network
 	// fetch versus the local reconcile/rebase that follows it.
-	_, fetchSpan := perf.Start(ctx, "git_fetch")
-	_, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
-		Remote:   fetchTarget,
-		RefSpecs: []string{refSpec},
-		NoTags:   true,
-	})
-	fetchSpan.RecordError(fetchErr)
-	fetchSpan.End()
-	if fetchErr != nil {
-		return fmt.Errorf("fetch failed: %w", fetchErr)
+	if err := fetchCheckpointRef(ctx, fetchTarget, refSpec, 0); err != nil {
+		return err
 	}
+	return RetryAfterDeepFetch(
+		func() error { return syncFetchedRef(ctx, ref, fetchedRefName, usedTempRef) },
+		func() error { return fetchCheckpointRef(ctx, fetchTarget, refSpec, remote.FullRefDepth) },
+	)
+}
 
+// syncFetchedRef reconciles and rebases the local ref onto fetchedRefName, the
+// ref a fetch just wrote. It opens the repository itself so objects from that
+// fetch are visible.
+func syncFetchedRef(ctx context.Context, ref, fetchedRefName plumbing.ReferenceName, usedTempRef bool) error {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to open git repository: %w", err)
@@ -911,7 +1075,7 @@ func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.Re
 	defer repo.Close()
 
 	// Reconcile disconnected metadata branches before rebasing.
-	// The fetch above updated the remote-tracking ref, so reconciliation
+	// The fetch updated the remote-tracking ref, so reconciliation
 	// can compare fresh local vs remote. If disconnected (empty-orphan bug),
 	// this cherry-picks local commits onto remote tip, updating the local ref.
 	// If reconciliation fails, abort so the caller sees its error.
@@ -925,27 +1089,23 @@ func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.Re
 		return fmt.Errorf("failed to get local ref: %w", err)
 	}
 
-	// Get fetched ref (remote-tracking or temp ref, updated by the fetch above)
+	// Get fetched ref (remote-tracking or temp ref, updated by the fetch)
 	remoteRef, err := repo.Reference(fetchedRefName, true)
 	if err != nil {
 		return fmt.Errorf("failed to get remote ref: %w", err)
-	}
-
-	advance := func(hash plumbing.Hash) error {
-		if err := setRefHash(repo, ref, hash); err != nil {
-			return err
-		}
-		if usedTempRef {
-			_ = repo.Storer.RemoveReference(fetchedRefName) //nolint:errcheck // cleanup is best-effort
-		}
-		return nil
 	}
 
 	newTip, _, err := replayOntoRemote(ctx, repo, localRef.Hash(), remoteRef.Hash())
 	if err != nil {
 		return fmt.Errorf("failed to rebase local commits onto remote: %w", err)
 	}
-	return advance(newTip)
+	if err := setRefHash(repo, ref, newTip); err != nil {
+		return err
+	}
+	if usedTempRef {
+		_ = repo.Storer.RemoveReference(fetchedRefName) //nolint:errcheck // cleanup is best-effort
+	}
+	return nil
 }
 
 // getMergeBase returns the merge base hash of two commits, or an error if they

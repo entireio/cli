@@ -25,7 +25,7 @@ const projectAgentPresetsPath = "/api/v1/agents/presets"
 func newProjectAgentCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "agent",
-		Short: "List and add the project's review agents",
+		Short: "List and add the project's review agents, and manage their runs",
 		Long: `Manage the review agents an Entire project runs on pushes.
 
 Agents are configured per project in Entire, not in repository files. Each
@@ -46,6 +46,7 @@ The project is the current repository's (gh/<owner> or et/<project>) unless
 	cmd.PersistentFlags().String("project", "", "Project to manage: gh/<owner> or et/<project> (default: the current repository's)")
 	cmd.AddCommand(newProjectAgentListCmd())
 	cmd.AddCommand(newProjectAgentAddCmd())
+	cmd.AddCommand(newProjectAgentRunCmd())
 	return cmd
 }
 

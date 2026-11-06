@@ -243,6 +243,10 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 		finalErr = NewSilentError(fmt.Errorf("legacy shadow branch check failed: %w", legacyErr))
 	}
 
+	// Ahead of stuck sessions: a session refused on one of these can show as
+	// stuck below, and this names the cause and the fix.
+	checkDivergedLegacyCheckpoints(cmd)
+
 	// Stuck sessions
 	// Load all session states
 	states, err := strategy.ListSessionStates(ctx)
@@ -585,11 +589,30 @@ func checkDisconnectedMetadata(cmd *cobra.Command, force bool) error {
 		}
 	}
 
-	if fixErr := strategy.ReconcileDisconnectedMetadataRef(ctx, repo, refs.Primary, remoteRefName, cmd.ErrOrStderr()); fixErr != nil {
+	// When shallow history hides the merge base, deepen only the metadata
+	// branch from the elected remote and reconcile once more. Each attempt
+	// opens the repository afresh so objects from that fetch are visible.
+	fixErr := strategy.RetryAfterDeepFetch(
+		func() error { return reconcileMetadataFromFreshRepo(cmd, refs.Primary, remoteRefName) },
+		func() error { return fetchMetadataFromRemote(ctx, remoteName, true, false) },
+	)
+	if fixErr != nil {
 		return fmt.Errorf("failed to reconcile metadata branches: %w", fixErr)
 	}
 
 	fmt.Fprintln(w, "  ✓ Fixed: metadata branches reconciled")
+	return nil
+}
+
+func reconcileMetadataFromFreshRepo(cmd *cobra.Command, primary, remoteRefName plumbing.ReferenceName) error {
+	repo, err := openRepository(cmd.Context())
+	if err != nil {
+		return fmt.Errorf("failed to open repository: %w", err)
+	}
+	defer repo.Close()
+	if err := strategy.ReconcileDisconnectedMetadataRef(cmd.Context(), repo, primary, remoteRefName, cmd.ErrOrStderr()); err != nil {
+		return fmt.Errorf("reconcile %s with %s: %w", primary, remoteRefName, err)
+	}
 	return nil
 }
 

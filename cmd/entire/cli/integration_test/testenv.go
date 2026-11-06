@@ -1052,7 +1052,8 @@ const gitNoEditorEnv = "GIT_EDITOR=:"
 // GitCommitAmendWithHooks amends the last commit with Entire's git hooks.
 // This simulates `git commit --amend` with the prepare-commit-msg and post-commit hooks.
 // The prepare-commit-msg hook is called with "commit" source to indicate an amend.
-func (env *TestEnv) GitCommitAmendWithHooks(message string, files ...string) {
+// It returns the post-commit hook's combined output.
+func (env *TestEnv) GitCommitAmendWithHooks(message string, files ...string) string {
 	env.T.Helper()
 
 	// Stage any additional files
@@ -1109,9 +1110,11 @@ func (env *TestEnv) GitCommitAmendWithHooks(message string, files ...string) {
 	postCmd := exec.CommandContext(env.T.Context(), getTestBinary(), "hooks", "git", "post-commit")
 	postCmd.Dir = env.RepoDir
 	postCmd.Env = env.gitHookEnv()
-	if output, err := postCmd.CombinedOutput(); err != nil {
+	output, err := postCmd.CombinedOutput()
+	if err != nil {
 		env.T.Logf("post-commit (amend) output: %s", output)
 	}
+	return string(output)
 }
 
 // GitPostRewriteWithHooks runs the git post-rewrite hook with the provided
