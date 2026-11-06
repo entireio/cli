@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -54,6 +55,10 @@ func resolveSATarget(ctx context.Context, c *coreapi.Client, sa saRef, repo, pro
 			return saTarget{}, fmt.Errorf("service account %s names no project", sa.ID)
 		}
 		r, err = resolveRepoInProject(ctx, c, repo, sa.ProjectID)
+		// The generic miss says "or pass a ULID", which is what they did.
+		if looksLikeULID(repo) && errors.Is(err, errNamedRefNotFound) {
+			return saTarget{}, fmt.Errorf("no repo named %q in the service account's project; --repo takes a repo name or its /%s/<project>/<repo> path, not a ULID", repo, nativeCloneForge)
+		}
 	}
 	if err != nil {
 		return saTarget{}, err

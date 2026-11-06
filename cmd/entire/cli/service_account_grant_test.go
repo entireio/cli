@@ -36,6 +36,14 @@ func TestSAGrant(t *testing.T) {
 		require.JSONEq(t, `{"resourceType":"repo","resourceId":"`+saTestRepoID+`","role":"reader"}`, f.body(route))
 	})
 
+	t.Run("a ULID-shaped miss does not suggest a ULID", func(t *testing.T) {
+		f, srv := newSAFakeCore(t)
+		f.fail("GET /api/v1/projects/"+saTestProjectID+"/repos", http.StatusNotFound, "repo not found", "")
+		_, err := runSA(t, srv.URL, "grant", "acme/ci", "--repo", "01HZX7QABCDEFGHJKMNPQRSTVW", "--role", "reader")
+		require.EqualError(t, err, `no repo named "01HZX7QABCDEFGHJKMNPQRSTVW" in the service account's project; --repo takes a repo name or its /et/<project>/<repo> path, not a ULID`)
+		require.NotContains(t, f.callList(), route)
+	})
+
 	t.Run("a forgeless path suggests the native one", func(t *testing.T) {
 		f, srv := newSAFakeCore(t)
 		_, err := runSA(t, srv.URL, "grant", "acme/ci", "--repo", "acme/web", "--role", "reader")

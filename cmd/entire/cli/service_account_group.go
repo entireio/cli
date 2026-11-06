@@ -13,6 +13,7 @@ import (
 const (
 	cmdServiceAccount = "service-account"
 	saIDPrefix        = "svc_"
+	saBindingIDPrefix = "eib_"
 
 	// Core's published problem types; never renamed.
 	saProblemNameInUse = "https://entire.com/errors/service-account/name-in-use"
@@ -71,9 +72,8 @@ func (r saRef) label() string {
 // Both forms confirm the account exists.
 func resolveSARef(ctx context.Context, c *coreapi.Client, ref string) (saRef, error) {
 	ref = strings.TrimSpace(ref)
-	if id, ok := strings.CutPrefix(ref, saIDPrefix); ok && looksLikeULID(id) {
-		// ULIDs are case-insensitive; core stores them upper-case.
-		ref = saIDPrefix + strings.ToUpper(id)
+	if canonical, ok := canonicalPrefixedULID(saIDPrefix, ref); ok {
+		ref = canonical
 		sa, err := c.GetServiceAccount(ctx, coreapi.GetServiceAccountParams{AccountId: ref})
 		if err != nil {
 			if isCoreNotFound(err) {
@@ -105,6 +105,17 @@ func resolveSARef(ctx context.Context, c *coreapi.Client, ref string) (saRef, er
 		}
 	}
 	return saRef{}, fmt.Errorf("no service account %q in project %s", name, project)
+}
+
+// canonicalPrefixedULID upper-cases the ULID in <prefix><ulid>. Core parses
+// IDs case-insensitively but matches them upper-case, so a lower-case ID
+// would miss: a 404 for an account, and a silent 204 for an unbind.
+func canonicalPrefixedULID(prefix, s string) (string, bool) {
+	id, ok := strings.CutPrefix(s, prefix)
+	if !ok || !looksLikeULID(id) {
+		return s, false
+	}
+	return prefix + strings.ToUpper(id), true
 }
 
 // parseSAPath splits <project>/<name>.

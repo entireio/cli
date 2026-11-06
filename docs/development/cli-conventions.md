@@ -303,7 +303,10 @@ always runnable in every build.
   `*` in an exact attribute, a pattern mismatch, a missing required pin, a
   value of only `*`) before it calls core. Prompted pins get the same checks
   inside the form. Core stays the authority, so a provider without
-  attributes gets no client checks. A terminal asks for missing required
+  attributes gets only the provider-independent only-`*` check. `unbind`
+  upper-cases an `eib_` ID, as lookups do for `svc_`: core answers 204 for an
+  unknown binding, so a lower-case ID would report a removal that never
+  happened. A terminal asks for missing required
   pins. The `github-actions` success output adds a setup-entire workflow
   snippet. `revoke` and `unbind` take an explicit target, so they never
   prompt. A typed `grant remove` does not prompt either. `delete` confirms

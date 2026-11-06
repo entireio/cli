@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -231,6 +232,14 @@ func TestSABindingsAndUnbind(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, out, "✓ Removed binding "+saTestBindingID+" from "+saTestID)
 	require.Contains(t, f.callList(), "DELETE "+saBase+"/"+saTestID+"/bindings/"+saTestBindingID)
+
+	// A lower-case ID must reach core upper-cased: core answers 204 for an
+	// unknown binding, so a miss would print a removal that never happened.
+	lower := saBindingIDPrefix + strings.ToLower(strings.TrimPrefix(saTestBindingID, saBindingIDPrefix))
+	out, err = runSA(t, srv.URL, "unbind", saTestID, lower)
+	require.NoError(t, err)
+	require.Contains(t, out, "✓ Removed binding "+saTestBindingID)
+	require.NotContains(t, f.callList(), "DELETE "+saBase+"/"+saTestID+"/bindings/"+lower)
 
 	f.fail("DELETE "+saBase+"/"+saTestID+"/bindings/"+saTestBindingID, http.StatusNotFound, "binding does not belong to this service account", "")
 	_, err = runSA(t, srv.URL, "unbind", saTestID, saTestBindingID)
