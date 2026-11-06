@@ -140,10 +140,10 @@ func (s *ManualCommitStrategy) amendedCheckpoint(ctx context.Context, repo *git.
 		return amendedLink{}
 	}
 	for _, e := range headReflog(ctx) {
-		if e.oldHash == e.newHash {
+		if e.oldHash.Equal(e.newHash) {
 			continue // HEAD did not move, as with another hook's `git reset HEAD`
 		}
-		if e.newHash != commit.Hash || e.oldHash.IsZero() || slices.Contains(commit.ParentHashes, e.oldHash) {
+		if !e.newHash.Equal(commit.Hash) || e.oldHash.IsZero() || slices.ContainsFunc(commit.ParentHashes, e.oldHash.Equal) {
 			return amendedLink{}
 		}
 		link := amendedLink{checkpointID: checkpointID}
