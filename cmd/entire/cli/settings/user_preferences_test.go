@@ -281,6 +281,56 @@ func TestUserTier_MachineWideEnabledIsDroppedAndTheRestApplies(t *testing.T) {
 	assert.Contains(t, s.UserLayerRejections()[0], "enabled")
 }
 
+// Only a repos entry that sets `enabled` configures the repository. Enabled
+// defaults to true, so counting an entry that carries only preferences would
+// start capture in a repository the developer never turned on.
+func TestIsSetUpAny_CountsOnlyAReposEntryThatSetsEnabled(t *testing.T) {
+	for _, tc := range []struct {
+		entry       string
+		wantSetUp   bool
+		wantEnabled bool
+	}{
+		{`{"log_level": "debug"}`, false, false},
+		{`{"enabled": false}`, true, false},
+		{`{"enabled": true}`, true, true},
+	} {
+		t.Run(tc.entry, func(t *testing.T) {
+			root := t.TempDir()
+			testutil.InitRepo(t, root)
+			testutil.RunGit(t, root, "remote", "add", "origin", "https://github.com/acme/widgets.git")
+			t.Setenv(userdirs.EnvConfigDir, t.TempDir())
+			t.Cleanup(ClearOriginKeyCache)
+			t.Chdir(root)
+
+			writeUserSettings(t, `{"repos": {"gh/acme/widgets": `+tc.entry+`}}`)
+
+			assert.Equal(t, tc.wantSetUp, IsSetUpAny(t.Context()))
+			assert.Equal(t, tc.wantEnabled, IsSetUpAndEnabled(t.Context()))
+		})
+	}
+}
+
+// A machine-wide checkpoint_remote would route every repository's transcripts
+// to one store, and the user tier vouches for its own destination's ownership,
+// so it is read only from a repos entry.
+func TestUserTier_MachineWideCheckpointRemoteIsDroppedAndTheRestApplies(t *testing.T) {
+	_, project, local := newUserTierRepo(t)
+	writeUserSettings(t, `{"preferences": {
+	  "checkpoint_remote": {"provider": "github", "repo": "mydev/my-checkpoints"},
+	  "log_level": "debug"}}`)
+
+	s, err := loadMergedSettings(t.Context(), project, "", local)
+	require.NoError(t, err)
+
+	assert.Nil(t, s.GetCheckpointRemote())
+	assert.False(t, s.UserTierSuppliesCheckpointRemote(
+		&CheckpointRemoteConfig{Provider: "github", Repo: "mydev/my-checkpoints"}),
+		"a dropped destination vouches for nothing")
+	assert.Equal(t, "debug", s.LogLevel, "the rest of the block still applies")
+	require.Len(t, s.UserLayerRejections(), 1)
+	assert.Contains(t, s.UserLayerRejections()[0], "checkpoint_remote")
+}
+
 // Instruction fields set in the user settings file must survive the agent
 // prompt gate. That gate drops any field it cannot attribute to a
 // developer-owned layer, and it knew about two: a verified settings.local.json

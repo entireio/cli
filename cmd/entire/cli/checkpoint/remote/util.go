@@ -12,7 +12,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 
 	"github.com/go-git/go-git/v6"
@@ -179,7 +178,7 @@ func fetchURLResolved(ctx context.Context, opts ...FetchURLOptions) (string, boo
 	if ownershipErr != nil {
 		inherited, reason = true, ownershipErr.Error()
 	} else {
-		verdict, r := checkpointRemoteIsInherited(ctx, config, originURL, ownershipURLs)
+		verdict, r := checkpointRemoteIsInherited(ctx, s, config, originURL, ownershipURLs)
 		inherited, reason = verdict.Refused(), r
 	}
 	if inherited {
@@ -445,7 +444,7 @@ func PushURL(ctx context.Context, pushRemoteName string) (string, bool, error) {
 	// destinations say which repos we are writing to. Any one of them owned by
 	// somebody other than the checkpoint repo's owner means inherited. See
 	// checkpointRemoteIsInherited.
-	if verdict, reason := checkpointRemoteIsInherited(ctx, config, originURL, pushRemoteURLs); verdict.Refused() {
+	if verdict, reason := checkpointRemoteIsInherited(ctx, s, config, originURL, pushRemoteURLs); verdict.Refused() {
 		fallbackURL, fallbackErr := resolvePushFallbackURL(ctx, pushRemoteName, originURL)
 		if fallbackErr != nil {
 			return "", false, fmt.Errorf("no push URL found: %w", fallbackErr)
@@ -656,7 +655,7 @@ const (
 // Refused reports whether this verdict withholds the configured store.
 func (v OwnershipVerdict) Refused() bool { return v != OwnershipOurs }
 
-func checkpointRemoteIsInherited(ctx context.Context, config *settings.CheckpointRemoteConfig, originURL string, pushRemoteURLs []string) (OwnershipVerdict, string) {
+func checkpointRemoteIsInherited(ctx context.Context, s *settings.EntireSettings, config *settings.CheckpointRemoteConfig, originURL string, pushRemoteURLs []string) (OwnershipVerdict, string) {
 	checkpointOwner := config.Owner()
 	if checkpointOwner == "" {
 		// No owner to compare (malformed repo field). Matches the predecessor,
@@ -670,8 +669,7 @@ func checkpointRemoteIsInherited(ctx context.Context, config *settings.Checkpoin
 	// probe to do it: a repository cannot deliver content to ~/.config, so the
 	// destination found there is the developer's by construction. Only that
 	// destination: one a later layer overrides it with is still checked below.
-	if root, rootErr := paths.WorktreeRoot(ctx); rootErr == nil &&
-		settings.UserTierSuppliesCheckpointRemote(ctx, root, config) {
+	if s.UserTierSuppliesCheckpointRemote(config) {
 		return OwnershipOurs, ""
 	}
 
@@ -780,7 +778,7 @@ func InheritedCheckpointRemoteVerdict(ctx context.Context, s *settings.EntireSet
 			pushURLs = urls
 		}
 	}
-	return checkpointRemoteIsInherited(ctx, config, originURL, pushURLs)
+	return checkpointRemoteIsInherited(ctx, s, config, originURL, pushURLs)
 }
 
 // voteEnv is the child environment BOTH halves of an ownership vote must use,

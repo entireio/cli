@@ -107,6 +107,12 @@ type EntireSettings struct {
 	// layers, and an unrecognised source is dropped.
 	userPromptOwnership userPromptOwnership
 
+	// userCheckpointRemote is the checkpoint_remote this repository's `repos`
+	// entry in the user settings file supplied, or nil. Recorded so the
+	// ownership check can recognise it without re-reading that file. See
+	// UserTierSuppliesCheckpointRemote.
+	userCheckpointRemote *CheckpointRemoteConfig
+
 	// userLayerRejections records preference blocks (or this repository's
 	// repos entries) dropped from the user settings file, one human-readable
 	// line each. Unexported for the same reason as its siblings: a block that
