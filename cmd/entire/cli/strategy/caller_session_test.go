@@ -2,12 +2,17 @@ package strategy
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
+	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
@@ -469,5 +474,203 @@ func TestResolveCallerSession_UnplacedClaimShadowsADistantAncestryWinner(t *test
 	}
 	if got.Resolution.IsCaller() {
 		t.Error("IsCaller() = true while an unplaced claim could be nearer")
+	}
+}
+
+// IdentifyCallerSession must run ONLY the identification tier. The worktree
+// and other-worktree tiers answer "which session is current here?", which
+// nothing acting on a session may use — and since this function is handed
+// ANOTHER repository's states, letting the weakest tier see them would let it
+// return a session from a different repository entirely.
+//
+// That is the original defect of this whole area, so it gets a test of its
+// own rather than relying on adopt's behaviour: a future simplification to
+// "ResolveCallerSession over the merged set" would reintroduce it silently.
+func TestIdentifyCallerSession_ExcludesTheWorktreeAndOtherWorktreeTiers(t *testing.T) {
+	clearCallerSessionEnv(t)
+	worktree := callerSessionRepo(t)
+
+	// A session recorded in THIS worktree with no owner and no env claim: the
+	// worktree tier would happily return it.
+	saveState(t, "local-session", worktree, time.Now())
+	foreign := &SessionState{
+		SessionID:    "foreign-repo-session",
+		BaseCommit:   "abc1234",
+		WorktreePath: "/some/other/repository",
+		Phase:        "idle",
+	}
+
+	// The plain resolver does fall back to it — that is the contrast.
+	if fallback := ResolveCallerSession(context.Background()); fallback.Resolution != ResolutionWorktree {
+		t.Fatalf("precondition: ResolveCallerSession resolution = %q, want %q",
+			fallback.Resolution, ResolutionWorktree)
+	}
+
+	resolved, ok := IdentifyCallerSession(context.Background(), []*SessionState{foreign})
+	if ok {
+		t.Errorf("IdentifyCallerSession returned %+v; identification must not fall back to a weak tier", resolved)
+	}
+	if resolved.Found() {
+		t.Errorf("IdentifyCallerSession named %q with nothing identifying the caller", resolved.SessionID)
+	}
+}
+
+func TestMergeSessionStates(t *testing.T) {
+	t.Parallel()
+
+	local := func(id string) *SessionState { return &SessionState{SessionID: id, LastPrompt: "local"} }
+	supplied := func(id string) *SessionState { return &SessionState{SessionID: id, LastPrompt: "supplied"} }
+
+	ids := func(states []*SessionState) []string {
+		out := make([]string, 0, len(states))
+		for _, state := range states {
+			out = append(out, state.SessionID)
+		}
+		return out
+	}
+	origins := func(states []*SessionState) map[string]string {
+		out := make(map[string]string, len(states))
+		for _, state := range states {
+			out[state.SessionID] = state.LastPrompt
+		}
+		return out
+	}
+
+	t.Run("no supplied states returns the listing unchanged", func(t *testing.T) {
+		t.Parallel()
+		states := []*SessionState{local("a"), local("b")}
+		got := mergeSessionStates(states, nil)
+		if !slices.Equal(ids(got), []string{"a", "b"}) {
+			t.Errorf("ids = %v, want [a b]", ids(got))
+		}
+	})
+
+	t.Run("a supplied state wins an ID collision", func(t *testing.T) {
+		t.Parallel()
+		got := mergeSessionStates([]*SessionState{local("a"), local("b")}, []*SessionState{supplied("b")})
+		if origin := origins(got)["b"]; origin != "supplied" {
+			t.Errorf("b came from %q, want the supplied copy — --force exists to replace the local one", origin)
+		}
+		if origin := origins(got)["a"]; origin != "local" {
+			t.Errorf("a came from %q, want the local copy left alone", origin)
+		}
+	})
+
+	t.Run("supplied states absent locally are added", func(t *testing.T) {
+		t.Parallel()
+		got := mergeSessionStates([]*SessionState{local("a")}, []*SessionState{supplied("z")})
+		if !slices.Equal(ids(got), []string{"a", "z"}) {
+			t.Errorf("ids = %v, want [a z]", ids(got))
+		}
+	})
+
+	// The case dedupe exists for: linked worktrees share one session store, so
+	// a same-store adoption hands over a listing identical to the local one. A
+	// session counted twice would be weighed against itself.
+	t.Run("an identical listing does not double-count", func(t *testing.T) {
+		t.Parallel()
+		states := []*SessionState{local("a"), local("b")}
+		got := mergeSessionStates(states, states)
+		if !slices.Equal(ids(got), []string{"a", "b"}) {
+			t.Errorf("ids = %v, want [a b] with no duplicates", ids(got))
+		}
+	})
+
+	t.Run("duplicates within the supplied listing collapse", func(t *testing.T) {
+		t.Parallel()
+		got := mergeSessionStates(nil, []*SessionState{supplied("a"), supplied("a")})
+		if !slices.Equal(ids(got), []string{"a"}) {
+			t.Errorf("ids = %v, want [a]", ids(got))
+		}
+	})
+
+	t.Run("nil entries are skipped from either side", func(t *testing.T) {
+		t.Parallel()
+		got := mergeSessionStates([]*SessionState{nil, local("a")}, []*SessionState{nil, supplied("z")})
+		if !slices.Equal(ids(got), []string{"a", "z"}) {
+			t.Errorf("ids = %v, want [a z]", ids(got))
+		}
+	})
+}
+
+// plantUnusableState writes a state file that will not load, so the listing
+// succeeds with one candidate missing — the shape no error channel reports.
+func plantUnusableState(t *testing.T, id string) {
+	t.Helper()
+	commonDir, err := session.GetGitCommonDir(context.Background())
+	if err != nil {
+		t.Fatalf("GetGitCommonDir() error = %v", err)
+	}
+	dir := filepath.Join(commonDir, session.SessionStateDirName)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, id+".json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A resolution computed from a set that lost a candidate says so, and still
+// answers. Both halves matter: the answer is the best available and worth
+// displaying, and the flag is the only thing that can stop a mutating caller
+// treating it as proof no nearer session exists.
+func TestIdentifyCallerSession_ReportsAnIncompleteCandidateSet(t *testing.T) {
+	repo := callerSessionRepo(t)
+	clearCallerSessionEnv(t)
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "the-caller")
+	saveState(t, "the-caller", repo, time.Now())
+	plantUnusableState(t, "unreadable-rival")
+
+	resolved, ok := IdentifyCallerSession(context.Background(), nil)
+	if !ok {
+		t.Fatal("IdentifyCallerSession() found nothing; a partial set must still answer")
+	}
+	if resolved.SessionID != "the-caller" {
+		t.Fatalf("SessionID = %q, want the-caller", resolved.SessionID)
+	}
+	if !resolved.Resolution.IsCaller() {
+		t.Fatalf("Resolution = %q, want an identifying tier", resolved.Resolution)
+	}
+	if resolved.Incomplete == nil {
+		t.Fatal("Incomplete is nil, so a mutating caller cannot tell a candidate went missing")
+	}
+	if !strings.Contains(resolved.Incomplete.Error(), "could not be read") {
+		t.Fatalf("Incomplete = %q, should say what could not be read", resolved.Incomplete)
+	}
+}
+
+// The counterpart, so the flag is evidence rather than decoration: a healthy
+// store leaves it nil, and a caller gating on it is not gating on "always".
+func TestIdentifyCallerSession_HealthyStoreIsComplete(t *testing.T) {
+	repo := callerSessionRepo(t)
+	clearCallerSessionEnv(t)
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "the-caller")
+	saveState(t, "the-caller", repo, time.Now())
+
+	resolved, ok := IdentifyCallerSession(context.Background(), nil)
+	if !ok {
+		t.Fatal("IdentifyCallerSession() found nothing")
+	}
+	if resolved.Incomplete != nil {
+		t.Fatalf("Incomplete = %v on a healthy store", resolved.Incomplete)
+	}
+}
+
+// Every tier carries it, not just the identifying ones. `session current`
+// falling back to another worktree's session over a store it could not read
+// fully is the same misreading, and the split between resolveSessionTiers and
+// the stamp is what guarantees a tier cannot answer without it.
+func TestResolveCallerSession_ReportsAnIncompleteCandidateSetOnAWeakTier(t *testing.T) {
+	repo := callerSessionRepo(t)
+	clearCallerSessionEnv(t)
+	saveState(t, "some-session", repo, time.Now())
+	plantUnusableState(t, "unreadable-rival")
+
+	resolved := ResolveCallerSession(context.Background())
+	if resolved.Resolution != ResolutionWorktree {
+		t.Fatalf("Resolution = %q, want the worktree tier", resolved.Resolution)
+	}
+	if resolved.Incomplete == nil {
+		t.Fatal("Incomplete is nil on a weak tier over an unreadable store")
 	}
 }

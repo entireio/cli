@@ -209,6 +209,9 @@ func TestSessionAdopt_DropsTaskTranscriptsOutsideTheSessionLayout(t *testing.T) 
 
 	testutil.WriteFile(t, targetRepo, "feature.txt", "agent change\n")
 	t.Chdir(targetRepo)
+	// Same as the home tests: own the session, or the guard refuses on the
+	// developer's inherited agent variable.
+	adoptAsCaller(t, sessionID)
 
 	var out bytes.Buffer
 	if err := runAdopt(context.Background(), &out, sessionID, adoptOptions{FromWorktree: sourceRepo, Force: true}); err != nil {

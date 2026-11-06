@@ -96,6 +96,12 @@ func (s adoptHomeSession) activeTranscript(t *testing.T) string {
 func (s adoptHomeSession) adopt(t *testing.T) (string, *session.State, error) {
 	t.Helper()
 
+	// Declare the session as this command's own, the way the agent that owns
+	// it would. Without this the ownership guard reads the developer's real
+	// agent variable, refuses, and these tests fail for a reason that has
+	// nothing to do with transcript homes.
+	adoptAsCaller(t, adoptHomeSessionID)
+
 	var out bytes.Buffer
 	err := runAdopt(context.Background(), &out, adoptHomeSessionID, adoptOptions{FromWorktree: s.sourceRepo, Force: true})
 	targetStore, storeErr := session.NewStateStore(context.Background())
