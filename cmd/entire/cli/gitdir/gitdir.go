@@ -38,6 +38,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
@@ -151,6 +152,24 @@ func OpenAt(commonDir string) (*os.Root, error) {
 // Not cached: the per-cwd cache CommonDir keeps would be wrong here, since the
 // answer varies with the argument rather than with the process.
 func CommonDirForWorktree(ctx context.Context, worktreeRoot string) (string, error) {
+	return commonDirForWorktree(ctx, worktreeRoot, nil)
+}
+
+// CommonDirForForeignWorktree is CommonDirForWorktree for a hook in one
+// repository that inspects another. Git exports GIT_DIR, GIT_INDEX_FILE and
+// friends to hooks, and an inherited copy would make the subprocess answer for
+// the hook's own repository instead of worktreeRoot, so the repo-selecting
+// variables are scrubbed from the child's environment.
+//
+// CommonDirForWorktree stays as-is for import/adopt, which run from a user
+// shell where such variables are an instruction rather than contamination.
+func CommonDirForForeignWorktree(ctx context.Context, worktreeRoot string) (string, error) {
+	return commonDirForWorktree(ctx, worktreeRoot, gitrepo.EnvWithoutRepoOverrides())
+}
+
+// commonDirForWorktree resolves the common dir of the repo at worktreeRoot. A
+// nil env inherits the process environment.
+func commonDirForWorktree(ctx context.Context, worktreeRoot string, env []string) (string, error) {
 	// An empty root would silently degrade to the process cwd (cmd.Dir = ""),
 	// reproducing exactly the accidental-repo leak this exists to prevent.
 	if worktreeRoot == "" {
@@ -158,6 +177,7 @@ func CommonDirForWorktree(ctx context.Context, worktreeRoot string) (string, err
 	}
 	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-common-dir")
 	cmd.Dir = worktreeRoot
+	cmd.Env = env
 	output, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("resolve git common dir for %s: %w", worktreeRoot, err)

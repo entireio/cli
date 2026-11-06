@@ -103,6 +103,10 @@ type condenseOpts struct {
 	// so it can also release the copy afterwards. nil means CondenseSession
 	// resolves it itself, once.
 	storedRoot *os.Root
+
+	// noStoredFallback makes a nil storedRoot mean "no stored copy": a session
+	// homed in another repository must never read this repository's .entire.
+	noStoredFallback bool
 }
 
 // redactSessionJSONLBytes runs the regex-only redaction pipeline (the
@@ -777,7 +781,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	extractStart := time.Now()
 	_, extractSessionDataSpan := perf.Start(ctx, "extract_session_data")
 	storedRoot := o.storedRoot
-	if storedRoot == nil {
+	if storedRoot == nil && !o.noStoredFallback {
 		storedRoot = storedSessionRootOrNil(ctx, state)
 	}
 	sessionData, extractErr := s.extractSessionDataFrom(ctx, ag, state, storedRoot)
