@@ -384,6 +384,11 @@ const (
 	// hookForeign: something that is not Entire's -- a script another tool or
 	// the user wrote, or a symlink, which Entire never installs.
 	hookForeign
+	// hookSpliced: a tracked shell hook Entire edited in place. The project's
+	// script is still in the file, after the delimited block. It is not
+	// hookOurs: uninstall strips the block instead of deleting the file,
+	// because there is no .pre-entire backup to put back.
+	hookSpliced
 )
 
 // classifyExistingHook reports what is at name inside root.
@@ -408,6 +413,12 @@ func classifyExistingHook(root *os.Root, name string) (hookClassification, error
 	data, err := osroot.ReadFileNoFollow(root, name)
 	switch {
 	case err == nil:
+		// The splice begin line contains entireHookMarker. Check it first:
+		// classifying a splice as hookOurs deletes the project's script on
+		// uninstall, and the block is the only copy of that script.
+		if isTrackedSplice(data) {
+			return hookSpliced, nil
+		}
 		if strings.Contains(string(data), entireHookMarker) {
 			return hookOurs, nil
 		}
@@ -845,7 +856,13 @@ func installGitHooks(ctx context.Context, silent, absolutePath, onlyStale bool) 
 	notDir := statErr == nil && !info.IsDir()
 	// ENOTDIR: a path component of hooksDir is itself a non-directory
 	// (e.g. core.hooksPath=/dev/null/hooks) — same misconfiguration.
-	if notDir || errors.Is(statErr, syscall.ENOTDIR) {
+	//
+	// On Windows, Stat of a path whose parent does not exist is ENOTDIR and
+	// IsNotExist together (ERROR_PATH_NOT_FOUND). A relative core.hooksPath
+	// such as .husky/_ looks like that until the directory is created below.
+	// Absent is not the disable-hooks setting. Only a path that is present and
+	// not a directory, or ENOTDIR without IsNotExist, is.
+	if notDir || (errors.Is(statErr, syscall.ENOTDIR) && !os.IsNotExist(statErr)) {
 		return 0, fmt.Errorf("git resolves the hooks directory to %s, which is not a directory — core.hooksPath is likely set to disable git hooks\n"+
 			"Entire requires git hooks to capture sessions. See where it is set with:\n"+
 			"  git config --show-origin --get-all core.hooksPath\n"+
@@ -916,6 +933,12 @@ func installHooks(ctx context.Context, lockRoot, root *os.Root, hooksDir string,
 	if err := removeLeftoverTemps(root); err != nil {
 		return 0, err
 	}
+	// Refuse a tracked hook Entire will not edit before writing any other
+	// hook. pre-push is last, so discovering it mid-loop would already have
+	// created the rest.
+	if err := rejectIndexedHooksEntireWillNotEdit(ctx, root, hooksDir, specs); err != nil {
+		return 0, err
+	}
 	installedCount := 0
 	for _, spec := range specs {
 		backupName := spec.name + backupSuffix
@@ -954,6 +977,19 @@ func installHooks(ctx context.Context, lockRoot, root *os.Root, hooksDir string,
 		class, classErr := classifyExistingHook(root, spec.name)
 		if classErr != nil {
 			return installedCount, unclassifiableHookError(hooksDir, spec.name, classErr)
+		}
+		// A hook that is in the index is edited in place, or left untouched.
+		// Falling through would move it to an untracked .pre-entire and write
+		// the wrapper at the committed path.
+		handled, wrote, err := installIndexedHook(ctx, root, hooksDir, spec)
+		if err != nil {
+			return installedCount, err
+		}
+		if handled {
+			if wrote {
+				installedCount++
+			}
+			continue
 		}
 		if class == hookForeign {
 			action, older, err := prepareHookBackup(root, spec.name, now)
@@ -1127,6 +1163,22 @@ func removeHooks(ctx context.Context, lockRoot, root *os.Root, hooksDir string, 
 			}
 		}
 
+		// A splice is the project's script with Entire's block in it. Strip
+		// the block and leave the file. Deleting it, or renaming a leftover
+		// .pre-entire over it, would drop the project's hook.
+		if class == hookSpliced {
+			if err := stripTrackedSpliceFile(root, hook); err != nil {
+				removeErrors = append(removeErrors, fmt.Sprintf("remove tracked splice from %s: %v", hook, err))
+				continue
+			}
+			res.Removed++
+			res.Restored = append(res.Restored, hook)
+			if hookFileExists(root, backupName) {
+				fmt.Fprintf(stderrWriter, "[entire] Warning: %s%s was left beside the tracked %s hook\n", hook, backupSuffix, hook)
+			}
+			continue
+		}
+
 		if hookIsOurs {
 			if err := osroot.RemoveNoSymlinks(root, hook); err != nil {
 				removeErrors = append(removeErrors, fmt.Sprintf("%s: %v", hook, err))
@@ -1207,9 +1259,6 @@ fi
 }
 
 func generatePostRewriteChainedContent(baseContent string) string {
-	const original = `hooks git post-rewrite "$1" 2>/dev/null || true`
-	const replacement = `hooks git post-rewrite "$1" < "$_entire_stdin" 2>/dev/null || true`
-
 	replayPrefix := `#!/bin/sh
 _entire_stdin="$(mktemp "${TMPDIR:-/tmp}/entire-post-rewrite.XXXXXX")"
 cat > "$_entire_stdin"
@@ -1217,7 +1266,7 @@ trap 'rm -f "$_entire_stdin"' EXIT
 `
 
 	body := strings.TrimPrefix(baseContent, "#!/bin/sh\n")
-	body = strings.Replace(body, original, replacement, 1)
+	body = strings.Replace(body, postRewriteInvocation, postRewriteInvocationWithStdin, 1)
 
 	return replayPrefix + body + "\n" + chainCall(postRewriteHook, ` < "$_entire_stdin"`)
 }
