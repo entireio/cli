@@ -29,11 +29,11 @@ func codexEventOf(line []byte) (codexEvent, bool) {
 }
 
 // hasCodexItems reports whether a Codex rollout takes the item path: whether
-// CodexItemRolloutDecided decides it does. A rollout that never decides (one
-// turn, still without a user item) keeps the response_item path. Decided on
-// the whole content, before any slicing, so Convert and ConvertWithBoundary
-// always take the same path; a rollout begun on an older Codex keeps the old
-// path.
+// CodexItemRolloutDecided decides it does. A rollout that never decides (no
+// task_started, or a first turn still running without a user item) keeps the
+// response_item path. Decided on the whole content, before any slicing, so
+// Convert and ConvertWithBoundary always take the same path; a rollout begun
+// on an older Codex keeps the old path.
 func hasCodexItems(content []byte) bool {
 	if !bytes.Contains(content, []byte(`"item_completed"`)) {
 		return false
@@ -45,13 +45,37 @@ func hasCodexItems(content []byte) bool {
 // CodexItemRolloutDecided reports whether a Codex rollout's first turn has a
 // user message item_completed event: whether the rollout was written by a
 // Codex version that records the user's prompts as items, and so converts
-// through its items. The first turn runs from the first task_started event to
-// the next task_started. decided is true once content settles it: item is
-// true as soon as the first turn holds a user message item, and false once a
-// second turn starts without one. Before that (only session_meta, or a first
-// turn still running with no user item yet) decided is false. Once true, the
-// result never flips as the rollout grows, so a live reader can trust a
-// "true" from a prefix of the file.
+// through its items. It is a CodexItemRolloutDecider fed all of content and
+// flushed; see that type for the rules. Convert takes the item path only for
+// a decided true: content that leaves it undecided converts through the
+// response_item path.
+func CodexItemRolloutDecided(content []byte) (item, decided bool) {
+	d := NewCodexItemRolloutDecider()
+	d.Feed(content)
+	return d.Flush()
+}
+
+// CodexItemRolloutDecider makes CodexItemRolloutDecided's decision as a
+// rollout grows, reading each line once, so a live reader can feed it the
+// bytes appended since its last read instead of rescanning the file.
+//
+// The first turn runs from the first task_started event to the first
+// task_complete or turn_aborted event, or to the next task_started if none
+// comes first. The decision is item true as soon as the first turn holds a
+// user message item_completed event, and item false once the first turn ends
+// without one. Before that (only session_meta, no task_started yet, or a
+// first turn still running with no user item yet) it is undecided. Once
+// decided it never changes as the rollout grows, so a decision from a prefix
+// of the file holds for the whole file, and the decider ignores what it is
+// fed after.
+//
+// A rollout that is complete but still undecided converts through the
+// response_item path, as if decided false: Convert does that. A live reader
+// that sees undecided keeps feeding new bytes; once the session has ended
+// (the rollout is final) it calls Flush, and a result still undecided means
+// false. Rollouts that stay undecided to the end come from Codex versions
+// that write no task_started, or end inside a first turn that has no user
+// item.
 //
 // Other items alone don't count. Older rollouts record a sub-agent's activity
 // and reasoning as items too, and Codex can write a prompt only as a
@@ -59,28 +83,82 @@ func hasCodexItems(content []byte) bool {
 // sub-sessions); the item path would drop those prompts. A thread_spawn
 // sub-agent's rollout has no items in its first turn and gets its task prompt
 // as a response_item, so it keeps the response_item path as well.
-func CodexItemRolloutDecided(content []byte) (item, decided bool) {
-	inFirstTurn := false
-	reader := bufio.NewReader(bytes.NewReader(content))
-	for {
-		line, err := reader.ReadBytes('\n')
-		switch {
-		case !bytes.Contains(line, []byte(`"event_msg"`)):
-		case inFirstTurn && bytes.Contains(line, []byte(`"item_completed"`)):
-			if it, ok := codexitem.DecodeRollout(line); ok && it.Kind == codexitem.KindUser {
-				return true, true
-			}
-		case bytes.Contains(line, []byte(`"task_started"`)):
-			if ev, ok := codexEventOf(line); ok && ev.Type == "task_started" {
-				if inFirstTurn {
-					return false, true
-				}
-				inFirstTurn = true
-			}
+type CodexItemRolloutDecider struct {
+	pending     []byte // bytes after the last newline fed, while undecided
+	inFirstTurn bool
+	item        bool
+	decided     bool
+}
+
+// NewCodexItemRolloutDecider returns a decider to be fed a rollout from its
+// first byte.
+func NewCodexItemRolloutDecider() *CodexItemRolloutDecider {
+	return &CodexItemRolloutDecider{}
+}
+
+// Feed consumes the next chunk of the rollout and returns the decision after
+// every line it completed. A trailing partial line is held until a later
+// chunk completes it, or until Flush.
+func (d *CodexItemRolloutDecider) Feed(chunk []byte) (item, decided bool) {
+	for !d.decided && len(chunk) > 0 {
+		i := bytes.IndexByte(chunk, '\n')
+		if i < 0 {
+			d.pending = append(d.pending, chunk...)
+			break
 		}
-		if err != nil {
-			return false, false
+		line := chunk[:i+1]
+		if len(d.pending) > 0 {
+			d.pending = append(d.pending, line...)
+			line = d.pending
 		}
+		d.line(line)
+		d.pending = d.pending[:0]
+		chunk = chunk[i+1:]
+	}
+	if d.decided {
+		d.pending = nil
+	}
+	return d.item, d.decided
+}
+
+// Flush treats a held partial line as complete and returns the decision.
+// Call it only once the rollout is final; while Codex is still writing, a
+// partial line is usually an unfinished write. Undecided after Flush means
+// the rollout takes the response_item path.
+func (d *CodexItemRolloutDecider) Flush() (item, decided bool) {
+	if !d.decided && len(d.pending) > 0 {
+		d.line(d.pending)
+	}
+	d.pending = nil
+	return d.item, d.decided
+}
+
+// line reads one complete line. The substring checks only skip lines
+// cheaply: an item's or a turn's text may contain any of these words, so the
+// event's type decides.
+func (d *CodexItemRolloutDecider) line(line []byte) {
+	if !bytes.Contains(line, []byte(`"event_msg"`)) {
+		return
+	}
+	if !bytes.Contains(line, []byte(`"task_started"`)) && (!d.inFirstTurn ||
+		!bytes.Contains(line, []byte(`"item_completed"`)) &&
+			!bytes.Contains(line, []byte(`"task_complete"`)) &&
+			!bytes.Contains(line, []byte(`"turn_aborted"`))) {
+		return
+	}
+	ev, ok := codexEventOf(line)
+	switch {
+	case !ok:
+	case ev.Type == "task_started" && !d.inFirstTurn:
+		d.inFirstTurn = true
+	case !d.inFirstTurn:
+	case ev.Type == "item_completed":
+		if it, ok := codexitem.DecodeRollout(line); ok && it.Kind == codexitem.KindUser {
+			d.item, d.decided = true, true
+		}
+	case ev.Type == "task_started", ev.Type == "task_complete", ev.Type == "turn_aborted":
+		// The first turn ended without a user item.
+		d.decided = true
 	}
 }
 

@@ -4,12 +4,14 @@ import "bytes"
 
 // CodexRolloutAdapter turns a Codex rollout that takes the item path into
 // transcript records as it grows. It uses Convert's item-path line mapping, so
-// folding every record it returns reproduces Convert's output for the same
-// complete lines, usage and model included.
+// folding every record from Feed and a final Flush reproduces Convert's
+// output for the same bytes, usage and model included.
 //
-// Use it only for a rollout CodexItemRolloutDecided accepts (decided, item
-// true); other rollouts convert through the response_item path, which it
-// doesn't implement. Usage-only lines are keyed by their line number, counted
+// Use it only for a rollout decided item true (CodexItemRolloutDecider, or
+// CodexItemRolloutDecided on the whole file). A rollout decided false, or
+// still undecided once final, converts through the response_item path,
+// which it doesn't implement; while undecided, wait for the decision.
+// Usage-only lines are keyed by their line number, counted
 // from 1 over every line fed, empty ones included, so a consumer that
 // resumes replays from line 1 with a fresh adapter: there is no StartLine and
 // no head overlap. A final line without a newline is held until it completes,

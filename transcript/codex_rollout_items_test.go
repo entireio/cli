@@ -27,9 +27,9 @@ const codexItemsRollout = `{"timestamp":"2030-01-01T00:00:00.000Z","type":"sessi
 `
 
 // CodexItemRolloutDecided decides as soon as the first turn holds a user item
-// or a second turn starts without one, and stays undecided before that. A
-// prefix's "true" holds for the whole file, and hasCodexItems is the decided
-// "true" of the whole file.
+// or ends (task_complete, turn_aborted, a second task_started) without one,
+// and stays undecided before that. A prefix's "true" holds for the whole
+// file, and hasCodexItems is the decided "true" of the whole file.
 func TestCodexItemRolloutDecided(t *testing.T) {
 	t.Parallel()
 	full, err := os.ReadFile(filepath.Join("testdata", "codex_full.jsonl"))
@@ -42,6 +42,8 @@ func TestCodexItemRolloutDecided(t *testing.T) {
 	started := `{"timestamp":"t","type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}` + "\n"
 	subagent := `{"timestamp":"t","type":"event_msg","payload":{"type":"item_completed","item":{"type":"SubAgentActivity","id":"call_1","kind":"started","agent_thread_id":"th2","agent_path":"/root/a"}}}` + "\n"
 	old := `{"timestamp":"t","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}}` + "\n"
+	complete := `{"timestamp":"t","type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"\"item_completed\""}}` + "\n"
+	aborted := `{"timestamp":"t","type":"event_msg","payload":{"type":"turn_aborted","turn_id":"t1","reason":"interrupted"}}` + "\n"
 	cases := []struct {
 		name          string
 		content       []byte
@@ -58,6 +60,11 @@ func TestCodexItemRolloutDecided(t *testing.T) {
 		{"first turn running, no user item yet", []byte(meta + started + old + agent), false, false},
 		{"first turn's user item", []byte(meta + started + item), true, true},
 		{"user item in a partial last line", []byte(meta + started + strings.TrimSuffix(item, "\n")), true, true},
+		{"one turn completed without a user item", []byte(meta + started + old + complete), false, true},
+		{"one turn aborted without a user item", []byte(meta + started + old + aborted), false, true},
+		{"user item after the first turn completed", []byte(started + old + complete + item), false, true},
+		{"one turn completed with a user item", []byte(meta + started + item + old + complete), true, true},
+		{"turn end before any task_started", []byte(meta + complete + item), false, false},
 	}
 	for _, c := range cases {
 		gotItem, gotDecided := CodexItemRolloutDecided(c.content)
@@ -244,5 +251,53 @@ func TestConvertCodexSubAgentRollout(t *testing.T) {
 	}
 	if n := strings.Count(string(out), `"type":"user"`); n != 1 || !strings.Contains(string(out), `"text":"check the tests"`) {
 		t.Errorf("want the one task prompt as a user line, got %d user lines:\n%s", n, out)
+	}
+}
+
+// A decider fed a rollout in chunks decides, after each chunk, what
+// CodexItemRolloutDecided decides on the complete lines fed so far; once
+// decided it never changes; and Flush at the end gives the whole content's
+// decision.
+func TestCodexItemRolloutDeciderMatchesWholeContent(t *testing.T) {
+	t.Parallel()
+	full, err := os.ReadFile(filepath.Join("testdata", "codex_full.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := `{"timestamp":"t","type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}` + "\n"
+	complete := `{"timestamp":"t","type":"event_msg","payload":{"type":"task_complete","turn_id":"t1"}}` + "\n"
+	agent := `{"timestamp":"t","type":"event_msg","payload":{"type":"item_completed","turn_id":"t1","item":{"type":"AgentMessage","id":"m1","content":[{"type":"Text","text":"hi"}]}}}` + "\n"
+	rollouts := map[string][]byte{
+		"current rollout":        []byte(codexItemsRollout),
+		"two-turn rollout":       []byte(codexAdapterRollout),
+		"older rollout":          full,
+		"no user item, no end":   []byte(strings.TrimSuffix(started+agent, "\n")),
+		"no user item, one turn": []byte(started + agent + complete),
+	}
+	for name, content := range rollouts {
+		wantItem, wantDecided := CodexItemRolloutDecided(content)
+		for _, size := range []int{1, 7, 64, len(content)} {
+			d := NewCodexItemRolloutDecider()
+			var firstItem, firstDecided bool
+			for fed := 0; fed < len(content); {
+				n := min(size, len(content)-fed)
+				item, decided := d.Feed(content[fed : fed+n])
+				fed += n
+				complete := content[:bytes.LastIndexByte(content[:fed], '\n')+1]
+				if wi, wd := CodexItemRolloutDecided(complete); item != wi || decided != wd {
+					t.Fatalf("%s, chunks of %d, %d bytes fed: Feed = (%v, %v), whole content of its lines = (%v, %v)",
+						name, size, fed, item, decided, wi, wd)
+				}
+				if firstDecided && (item != firstItem || !decided) {
+					t.Fatalf("%s, chunks of %d: decision flipped from %v to (%v, %v)", name, size, firstItem, item, decided)
+				}
+				if decided && !firstDecided {
+					firstItem, firstDecided = item, true
+				}
+			}
+			if item, decided := d.Flush(); item != wantItem || decided != wantDecided {
+				t.Errorf("%s, chunks of %d: Flush = (%v, %v), want (%v, %v)", name, size, item, decided, wantItem, wantDecided)
+			}
+		}
 	}
 }
