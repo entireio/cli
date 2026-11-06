@@ -593,15 +593,30 @@ func dropNestedPIIRegions(regions []taggedRegion) []taggedRegion {
 		}
 		return b.end - a.end
 	})
-	kept := regions[:1]
-	for _, r := range regions[1:] {
-		last := kept[len(kept)-1]
-		if r.label == last.label && r.end <= last.end {
+	// Regions are sorted by start, so a kept region of the same label that
+	// ends at or after r contains it, even when a region of another label
+	// sorts between them.
+	var ends []labelEnd
+	kept := regions[:0]
+	for _, r := range regions {
+		i := slices.IndexFunc(ends, func(e labelEnd) bool { return e.label == r.label })
+		if i >= 0 && r.end <= ends[i].end {
 			continue
+		}
+		if i < 0 {
+			ends = append(ends, labelEnd{r.label, r.end})
+		} else {
+			ends[i].end = r.end
 		}
 		kept = append(kept, r)
 	}
 	return kept
+}
+
+// labelEnd is the furthest end of the kept regions with one label.
+type labelEnd struct {
+	label string
+	end   int
 }
 
 // isNetworkKey reports whether a JSON key names an address. The key is split

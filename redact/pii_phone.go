@@ -46,10 +46,14 @@ func redactableIntlPhone(s string, start, end int) (int, int, bool) {
 			end = ccEnd
 		}
 	}
-	if !intlPhoneStandsAlone(s, start, end) {
+	if !intlPhoneStandsAlone(s, start) {
 		return 0, 0, false
 	}
-	end, ok := trimIntlPhone(s, start, ccEnd, end)
+	end, ok := endIntlPhone(s, ccEnd, end)
+	if !ok {
+		return 0, 0, false
+	}
+	end, ok = trimIntlPhone(s, start, ccEnd, end)
 	if !ok {
 		return 0, 0, false
 	}
@@ -120,20 +124,32 @@ func countDigits(s string) int {
 	return n
 }
 
-// intlPhoneStandsAlone reports whether s[start:end] is not part of a longer
-// token: semver build metadata (1.2.3+20241029), base64 (ab/+2345678901),
-// or an identifier on either side. A letter after a backslash belongs to an
-// escape left in the text (\n+44 20 7946 0958), not to a word. An extension
-// attached with x stays visible, as with North American numbers
-// (+44 20 7946 0958x123).
-func intlPhoneStandsAlone(s string, start, end int) bool {
-	if start > 0 {
-		prev := s[start-1]
-		if (isIPWordByte(prev) && !followsEscape(s, start)) || prev == '.' || prev == '/' {
-			return false
-		}
+// intlPhoneStandsAlone reports whether the number starting at s[start] does
+// not continue a longer token: semver build metadata (1.2.3+20241029),
+// base64 (ab/+2345678901), or an identifier. A letter after a backslash
+// belongs to an escape left in the text (\n+44 20 7946 0958), not to a word.
+func intlPhoneStandsAlone(s string, start int) bool {
+	if start == 0 {
+		return true
 	}
-	return end == len(s) || !isIPWordByte(s[end]) || isPhoneExtension(s, end)
+	prev := s[start-1]
+	return (!isIPWordByte(prev) || followsEscape(s, start)) && prev != '.' && prev != '/'
+}
+
+// endIntlPhone returns where the number ending the candidate at end stops,
+// and false when it runs on into a word. An extension attached with x stays
+// visible, as with North American numbers (+44 20 7946 0958x123). A last
+// group that starts a word after a space belongs to the text after the
+// number (+44 20 7946 0958 9am), so the number ends before that space.
+func endIntlPhone(s string, ccEnd, end int) (int, bool) {
+	if end == len(s) || !isIPWordByte(s[end]) || isPhoneExtension(s, end) {
+		return end, true
+	}
+	i := strings.LastIndexByte(s[ccEnd:end], ' ')
+	if i < 0 {
+		return 0, false
+	}
+	return ccEnd + i, true
 }
 
 // isPhoneExtension reports whether s[i:] starts with an extension such as

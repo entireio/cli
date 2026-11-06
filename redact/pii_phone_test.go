@@ -35,6 +35,7 @@ func TestDetectPII_InternationalPhones(t *testing.T) {
 		{"closing parenthesis of the text around it", "(tel +442079460958) ok", "(tel [REDACTED_PHONE]) ok"},
 		{"attached extension", "+44 20 7946 0958x123", "[REDACTED_PHONE]x123"},
 		{"number after a separator", "+44 20 7946 0958 2026 edition", "[REDACTED_PHONE] 2026 edition"},
+		{"word starting with digits after a space", "call +44 20 7946 0958 9am tomorrow", "call [REDACTED_PHONE] 9am tomorrow"},
 		{"in JSON", `{"phone":"+44 20 7946 0958"}`, `{"phone":"[REDACTED_PHONE]"}`},
 		{"after an escape left in the text", `first\n+44 20 7946 0958`, `first\n[REDACTED_PHONE]`},
 		{"two numbers", "+44 20 7946 0958, +39 347 000 0001", "[REDACTED_PHONE], [REDACTED_PHONE]"},
@@ -98,5 +99,26 @@ func TestDetectPII_InternationalPhoneCountsOnce(t *testing.T) {
 	}
 	if r := regions[0]; r.start != 0 || r.end != len("+39 347 000 0001") || r.label != labelPhone {
 		t.Errorf("detectPII() = %+v, want the whole number as PHONE", r)
+	}
+}
+
+// TestDetectPII_InternationalPhoneCountsOnceAcrossLabels checks that a region
+// of another label sorting between the two phone matches does not keep the
+// nested one.
+func TestDetectPII_InternationalPhoneCountsOnceAcrossLabels(t *testing.T) {
+	t.Parallel()
+	cfg := &PIIConfig{
+		Enabled:        true,
+		Categories:     map[PIICategory]bool{PIIPhone: true},
+		CustomPatterns: map[string]string{"country": `39`},
+	}
+	var phones int
+	for _, r := range detectPII(cfg, "+39 347 000 0001") {
+		if r.label == labelPhone {
+			phones++
+		}
+	}
+	if phones != 1 {
+		t.Errorf("detectPII() found %d PHONE regions, want 1", phones)
 	}
 }
