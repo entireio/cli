@@ -16,12 +16,13 @@ const cliFlagValue = `"(?:[^"\r\n]|\\\r?\n)*"|'[^'\r\n]*'|[^\s'"` + "`" + `|;&()
 
 // cliSameCommandChar is one piece of the text between a command name and one
 // of its flags. It skips quoted strings (with escapes inside double quotes:
-// "abc\";x"), escaped characters (\;) and escaped line breaks (a command
-// continued with a trailing backslash), and otherwise never crosses a line
-// break, a shell operator or a backtick (which starts a command substitution,
-// or ends Markdown code), so a flag is only read as belonging to the command
-// that precedes it in the same pipeline segment.
-const cliSameCommandChar = `\\\r?\n|\\[^\r\n]|"(?:[^"\\\r\n]|\\\r?\n|\\[^\r\n])*"|'[^'\r\n]*'|[^\r\n|;&` + "`" + `]`
+// "abc\";x"), command substitutions without nested parentheses
+// ($(printf x; true)), escaped characters (\;) and escaped line breaks (a
+// command continued with a trailing backslash), and otherwise never crosses
+// a line break, a shell operator or a backtick (which starts a command
+// substitution, or ends Markdown code), so a flag is only read as belonging
+// to the command that precedes it in the same pipeline segment.
+const cliSameCommandChar = `\\\r?\n|\\[^\r\n]|"(?:[^"\\\r\n]|\\\r?\n|\\[^\r\n])*"|'[^'\r\n]*'|\$\([^()\r\n]*\)|[^\r\n|;&` + "`" + `]`
 
 const cliSameCommand = `(?:` + cliSameCommandChar + `)`
 
