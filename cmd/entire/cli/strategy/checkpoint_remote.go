@@ -96,6 +96,9 @@ type pushSettings struct {
 	// checkpoints config (LoadCheckpointsConfig is uncached: two whole-file
 	// reads and JSON parses per call).
 	primaryIsRefs bool
+	// enabledOnlyByGlobal records that the repository is on only through
+	// global enable, for noticeGlobalEnablePush.
+	enabledOnlyByGlobal bool
 }
 
 // pushTarget returns the target to use for git push/fetch commands for checkpoint branches.
@@ -130,9 +133,10 @@ func resolvePushSettings(ctx context.Context, pushRemoteName string) pushSetting
 	}
 
 	ps := pushSettings{
-		remote:        pushRemoteName,
-		pushDisabled:  s.IsPushSessionsDisabled(),
-		primaryIsRefs: primaryIsGitRefs(ctx),
+		remote:              pushRemoteName,
+		pushDisabled:        s.IsPushSessionsDisabled(),
+		primaryIsRefs:       primaryIsGitRefs(ctx),
+		enabledOnlyByGlobal: s.EnabledOnlyByGlobal(),
 	}
 
 	config := s.GetCheckpointRemote()

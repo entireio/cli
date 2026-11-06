@@ -113,9 +113,10 @@ func NewRootCmd() *cobra.Command {
 		// stop the command. Everything below that check reads or writes through
 		// `.entire` — IsSetUpAny stats .entire/settings.json and ensureLogger
 		// opens .entire/logs/entire.log — so it has to precede them. Only
-		// checkConfigBeforeRun and validateContextFlag are allowed above it,
-		// because they touch nothing under `.entire`: they read config.json,
-		// the flag, and the saved logins in the user's config dir.
+		// checkConfigBeforeRun, validateContextFlag and ensureGlobalEnableHooks
+		// are allowed above it, because they touch nothing under `.entire`: they
+		// read config.json, the flag, and the saved logins in the user's config
+		// dir, and the last one writes the Claude config dir.
 		// cobra.EnableTraverseRunHooks (set in init) runs parent hooks before
 		// child ones, so this fires ahead of the group pre-runs and every RunE.
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
@@ -128,6 +129,7 @@ func NewRootCmd() *cobra.Command {
 			if err := validateContextFlag(cmd); err != nil {
 				return err
 			}
+			ensureGlobalEnableHooks(cmd)
 			safe, err := checkEntireDirBeforeRun(cmd)
 			if err != nil {
 				return err

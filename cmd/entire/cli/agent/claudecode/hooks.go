@@ -82,7 +82,18 @@ func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, force bool) (int, er
 	if err != nil {
 		return 0, err
 	}
+	return installHooksIn(cfg, force)
+}
 
+// claudeSettingsFile is the read/write surface installHooksIn needs, so the
+// same merge serves the project file and the user-level one.
+type claudeSettingsFile interface {
+	Read() ([]byte, error)
+	Write(data []byte, perm os.FileMode) error
+	Path() string
+}
+
+func installHooksIn(cfg claudeSettingsFile, force bool) (int, error) {
 	rawSettings, rawHooks, rawPermissions, err := loadRawClaudeSettingsForInstall(cfg)
 	if err != nil {
 		return 0, err
@@ -164,7 +175,7 @@ func resolveInstallRepoRoot(ctx context.Context) (string, error) {
 // its top-level fields as raw JSON maps, ready for InstallHooks to mutate.
 // rawHooks and rawPermissions are always non-nil (empty maps when absent) so
 // callers never need a nil check before indexing them.
-func loadRawClaudeSettingsForInstall(cfg *agent.HookConfigFile) (rawSettings, rawHooks, rawPermissions map[string]json.RawMessage, err error) {
+func loadRawClaudeSettingsForInstall(cfg claudeSettingsFile) (rawSettings, rawHooks, rawPermissions map[string]json.RawMessage, err error) {
 	existingData, readErr := cfg.Read()
 	if readErr == nil {
 		if err := json.Unmarshal(existingData, &rawSettings); err != nil {
@@ -457,7 +468,7 @@ func installHookEntries(rawHooks map[string]json.RawMessage, force bool) (count 
 // writeClaudeSettingsFile marshals rawHooks and rawPermissions into
 // rawSettings and writes the result through cfg, creating the parent .claude
 // directory if needed.
-func writeClaudeSettingsFile(cfg *agent.HookConfigFile, rawSettings, rawHooks, rawPermissions map[string]json.RawMessage) error {
+func writeClaudeSettingsFile(cfg claudeSettingsFile, rawSettings, rawHooks, rawPermissions map[string]json.RawMessage) error {
 	hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
 	if err != nil {
 		return fmt.Errorf("failed to marshal hooks: %w", err)
