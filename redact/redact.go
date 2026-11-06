@@ -3,6 +3,7 @@ package redact
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2067,6 +2068,9 @@ func isSingleJSONValue(dec *json.Decoder) bool {
 // leaf's own key, but empty inside arrays and at the root, because
 // replaceKeyedJSONValue only finds a value written directly after its key.
 //
+// A string that is exactly an inline image data URI is preserved wherever it
+// appears; see isInlineImageDataURI.
+//
 // A skip key preserves its own string values, including the strings in its
 // arrays, but objects beneath it are walked with their own keys. The id rule
 // matches any key ending in "id", so {"android":{"apiKey":...}} is not an
@@ -2120,7 +2124,7 @@ func walkRedactableStrings(v any, transform func(key, spliceKey string, credenti
 			}
 			return out, true
 		case string:
-			if skipStrings {
+			if skipStrings || isInlineImageDataURI(val) {
 				return v, false
 			}
 			redacted := transform(key, spliceKey, credentialContext, val)
@@ -2535,6 +2539,46 @@ func shouldSkipJSONLField(key string) bool {
 func shouldSkipJSONLObject(obj map[string]any) bool {
 	t, ok := obj["type"].(string)
 	return ok && (strings.HasPrefix(t, "image") || t == "base64")
+}
+
+// isInlineImageDataURI reports whether s is, in its entirety, a base64 image
+// data URI (data:image/<subtype>;base64,<data>) whose data decodes to the image
+// format the subtype names. Codex writes every inline image this way: in
+// input_image image_url values, in tool call output, and as bare metadata
+// strings such as a browser-use screenshot URL. None of those match
+// shouldSkipJSONLObject, and the entropy layer would otherwise splice
+// placeholders into the base64 and leave an undecodable image.
+//
+// The check is per string rather than per object, so it hides no sibling
+// field. Checking the decoded magic bytes keeps a data URI that is not
+// actually an image (base64 text under an image/ label, or SVG markup, which is
+// text and can carry secrets) on the scanned path. A data URI embedded inside a
+// longer string is still scanned.
+func isInlineImageDataURI(s string) bool {
+	rest, ok := strings.CutPrefix(s, "data:image/")
+	if !ok {
+		return false
+	}
+	subtype, data, ok := strings.Cut(rest, ";base64,")
+	if !ok || data == "" {
+		return false
+	}
+	raw, err := base64.StdEncoding.Strict().DecodeString(data)
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(subtype) {
+	case "png":
+		return bytes.HasPrefix(raw, []byte("\x89PNG\r\n\x1a\n"))
+	case "jpeg", "jpg":
+		return bytes.HasPrefix(raw, []byte{0xFF, 0xD8, 0xFF})
+	case "gif":
+		return bytes.HasPrefix(raw, []byte("GIF87a")) || bytes.HasPrefix(raw, []byte("GIF89a"))
+	case "webp":
+		return len(raw) >= 12 && bytes.HasPrefix(raw, []byte("RIFF")) && bytes.Equal(raw[8:12], []byte("WEBP"))
+	default:
+		return false
+	}
 }
 
 func shannonEntropy(s string) float64 {
