@@ -15,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -265,4 +266,35 @@ func TestPromptInstallCodexDiscoveredHooks_ReadsTheTerminal(t *testing.T) {
 	install, err = promptInstallCodexDiscoveredHooks(context.Background(), &out, target)
 	require.Error(t, err)
 	require.False(t, install)
+}
+
+// Outdated Entire hooks at a separate Git directory's storage parent are never
+// offered, and are not reported as installed either.
+func TestFinishCodexHooksSetup_OutdatedStorageParentIsNotReportedInstalled(t *testing.T) {
+	tmp := t.TempDir()
+	mainRoot := filepath.Join(tmp, "main")
+	storage := filepath.Join(tmp, "gitdirs", "main.git")
+	require.NoError(t, os.MkdirAll(filepath.Dir(storage), 0o755))
+	testutil.RunGit(t, tmp, "init", "--separate-git-dir", storage, mainRoot)
+	testutil.RunGit(t, mainRoot, "commit", "--allow-empty", "-m", "init")
+	linked := filepath.Join(tmp, "linked")
+	testutil.RunGit(t, mainRoot, "worktree", "add", "-b", "feature", linked)
+	parentHooks := filepath.Join(filepath.Dir(storage), ".codex", "hooks.json")
+	require.NoError(t, os.MkdirAll(filepath.Dir(parentHooks), 0o755))
+	require.NoError(t, os.WriteFile(parentHooks,
+		[]byte(`{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"entire hooks codex stop","timeout":1}]}]}}`), 0o644))
+
+	t.Chdir(linked)
+	paths.ClearWorktreeRootCache()
+	session.ClearGitCommonDirCache()
+	t.Setenv("CODEX_HOME", filepath.Join(tmp, "codex-home"))
+	_, err := (&codex.CodexAgent{}).InstallHooks(context.Background(), false)
+	require.NoError(t, err)
+	asked := stubCodexDiscoveredHooksPrompt(t, true, nil)
+
+	var out bytes.Buffer
+	require.NoError(t, finishCodexHooksSetup(context.Background(), &out, &codex.CodexAgent{}, true))
+	require.Empty(t, *asked, "a storage parent is never offered")
+	require.NotContains(t, out.String(), "already installed there")
+	require.Contains(t, out.String(), "will not run here")
 }

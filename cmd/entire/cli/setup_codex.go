@@ -71,7 +71,7 @@ func finishCodexHooksSetup(ctx context.Context, w io.Writer, ag agent.Agent, may
 	fmt.Fprintf(w, "  Entire configured this worktree at: %s\n", diagnostics.WorktreeHooks.Path())
 
 	target, offer := diagnostics.DiscoveredInstallCandidate()
-	if !offer && diagnostics.Discovered.State == codexagent.HookFileEntire {
+	if !offer && diagnostics.Discovered.State == codexagent.HookFileEntire && diagnostics.Discovered.Current {
 		fmt.Fprintln(w, "  Entire's Codex hooks are already installed there.")
 		return nil
 	}
