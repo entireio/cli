@@ -67,8 +67,7 @@ func redactableIntlPhone(s string, start, end int) (int, int, bool) {
 	if cc > 3 && s[ccEnd] != ' ' {
 		return 0, 0, false
 	}
-	end, ok = endDottedPhone(s, start, ccEnd, end)
-	return start, end, ok
+	return start, end, dottedReadsAsPhone(s, start, ccEnd, end)
 }
 
 // trimIntlPhone returns the end of the number in s[start:end] once the groups
@@ -115,22 +114,24 @@ func dotsReadAsPhone(s string, start, ccEnd, end int) bool {
 	return err != nil
 }
 
-// endDottedPhone returns the end of the number in s[start:end] once its dots,
-// if any, read as a phone number's. A space also joins a dotted number to the
-// text after it (+33 1.99.00.12.34 2026), so groups after a space are dropped
-// until they do, while 9 digits remain.
-func endDottedPhone(s string, start, ccEnd, end int) (int, bool) {
-	for !dotsReadAsPhone(s, start, ccEnd, end) {
-		i := strings.LastIndexByte(s[ccEnd+1:end], ' ')
+// dottedReadsAsPhone reports whether the dots in s[start:end], if any,
+// separate a phone number. A space also joins a number to the text after it,
+// so when only groups after a space break the rules, the number before them
+// decides (+33 1.99.00.12.34 2026). The groups stay in the match, as they do
+// in a number without dots (+44 20 7946 0958 202): one may belong to the
+// number (+49 30123456 78.90), and trimIntlPhone has capped the digits.
+func dottedReadsAsPhone(s string, start, ccEnd, end int) bool {
+	for cut := end; !dotsReadAsPhone(s, start, ccEnd, cut); {
+		i := strings.LastIndexByte(s[ccEnd+1:cut], ' ')
 		if i < 0 {
-			return 0, false
+			return false
 		}
-		end = ccEnd + 1 + i
-		if countDigits(s[start:end]) < intlPhoneMinDigits {
-			return 0, false
+		cut = ccEnd + 1 + i
+		if countDigits(s[start:cut]) < intlPhoneMinDigits {
+			return false
 		}
 	}
-	return end, true
+	return true
 }
 
 func countDigits(s string) int {
