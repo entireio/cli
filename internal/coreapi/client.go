@@ -264,3 +264,16 @@ func APIErrorStatus(err error) int {
 	}
 	return statusErr.StatusCode
 }
+
+// APIErrorType returns an error's problem type.
+func APIErrorType(err error) string {
+	var statusErr *ErrorModelStatusCode
+	if !errors.As(err, &statusErr) {
+		return ""
+	}
+	t, ok := statusErr.Response.Type.Get()
+	if !ok {
+		return ""
+	}
+	return t.String()
+}

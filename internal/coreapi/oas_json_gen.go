@@ -11616,8 +11616,14 @@ func (s *CreateServiceAccountInputBody) encodeFields(e *jx.Encoder) {
 		e.Str(s.Name)
 	}
 	{
-		e.FieldStart("orgId")
-		e.Str(s.OrgId)
+		if s.OrgId.Set {
+			e.FieldStart("orgId")
+			s.OrgId.Encode(e)
+		}
+	}
+	{
+		e.FieldStart("project_id")
+		e.Str(s.ProjectID)
 	}
 	for k, elem := range s.AdditionalProps {
 		e.FieldStart(k)
@@ -11628,10 +11634,11 @@ func (s *CreateServiceAccountInputBody) encodeFields(e *jx.Encoder) {
 	}
 }
 
-var jsonFieldsNameOfCreateServiceAccountInputBody = [3]string{
+var jsonFieldsNameOfCreateServiceAccountInputBody = [4]string{
 	0: "$schema",
 	1: "name",
 	2: "orgId",
+	3: "project_id",
 }
 
 // Decode decodes CreateServiceAccountInputBody from json.
@@ -11667,16 +11674,26 @@ func (s *CreateServiceAccountInputBody) Decode(d *jx.Decoder) error {
 				return errors.Wrap(err, "decode field \"name\"")
 			}
 		case "orgId":
-			requiredBitSet[0] |= 1 << 2
 			if err := func() error {
-				v, err := d.Str()
-				s.OrgId = string(v)
-				if err != nil {
+				s.OrgId.Reset()
+				if err := s.OrgId.Decode(d); err != nil {
 					return err
 				}
 				return nil
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"orgId\"")
+			}
+		case "project_id":
+			requiredBitSet[0] |= 1 << 3
+			if err := func() error {
+				v, err := d.Str()
+				s.ProjectID = string(v)
+				if err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"project_id\"")
 			}
 		default:
 			var elem jx.Raw
@@ -11699,7 +11716,7 @@ func (s *CreateServiceAccountInputBody) Decode(d *jx.Decoder) error {
 	// Validate required fields.
 	var failures []validate.FieldError
 	for i, mask := range [1]uint8{
-		0b00000110,
+		0b00001010,
 	} {
 		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
 			// Mask only required fields and check equality to mask using XOR.
@@ -30924,6 +30941,16 @@ func (s *OIDCProvider) Encode(e *jx.Encoder) {
 // encodeFields encodes fields.
 func (s *OIDCProvider) encodeFields(e *jx.Encoder) {
 	{
+		if s.Attributes != nil {
+			e.FieldStart("attributes")
+			e.ArrStart()
+			for _, elem := range s.Attributes {
+				elem.Encode(e)
+			}
+			e.ArrEnd()
+		}
+	}
+	{
 		if s.Description.Set {
 			e.FieldStart("description")
 			s.Description.Encode(e)
@@ -30936,12 +30963,36 @@ func (s *OIDCProvider) encodeFields(e *jx.Encoder) {
 		}
 	}
 	{
+		if s.DocsURL.Set {
+			e.FieldStart("docs_url")
+			s.DocsURL.Encode(e)
+		}
+	}
+	{
 		e.FieldStart("id")
 		e.Str(s.ID)
 	}
 	{
 		e.FieldStart("issuer")
 		e.Str(s.Issuer)
+	}
+	{
+		if s.Label.Set {
+			e.FieldStart("label")
+			s.Label.Encode(e)
+		}
+	}
+	{
+		if s.Name.Set {
+			e.FieldStart("name")
+			s.Name.Encode(e)
+		}
+	}
+	{
+		if s.SelfServe.Set {
+			e.FieldStart("self_serve")
+			s.SelfServe.Encode(e)
+		}
 	}
 	for k, elem := range s.AdditionalProps {
 		e.FieldStart(k)
@@ -30952,11 +31003,16 @@ func (s *OIDCProvider) encodeFields(e *jx.Encoder) {
 	}
 }
 
-var jsonFieldsNameOfOIDCProvider = [4]string{
-	0: "description",
-	1: "displayName",
-	2: "id",
-	3: "issuer",
+var jsonFieldsNameOfOIDCProvider = [9]string{
+	0: "attributes",
+	1: "description",
+	2: "displayName",
+	3: "docs_url",
+	4: "id",
+	5: "issuer",
+	6: "label",
+	7: "name",
+	8: "self_serve",
 }
 
 // Decode decodes OIDCProvider from json.
@@ -30964,11 +31020,28 @@ func (s *OIDCProvider) Decode(d *jx.Decoder) error {
 	if s == nil {
 		return errors.New("invalid: unable to decode OIDCProvider to nil")
 	}
-	var requiredBitSet [1]uint8
+	var requiredBitSet [2]uint8
 	s.AdditionalProps = map[string]jx.Raw{}
 
 	if err := d.ObjBytes(func(d *jx.Decoder, k []byte) error {
 		switch string(k) {
+		case "attributes":
+			if err := func() error {
+				s.Attributes = make([]OIDCProviderAttribute, 0)
+				if err := d.Arr(func(d *jx.Decoder) error {
+					var elem OIDCProviderAttribute
+					if err := elem.Decode(d); err != nil {
+						return err
+					}
+					s.Attributes = append(s.Attributes, elem)
+					return nil
+				}); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"attributes\"")
+			}
 		case "description":
 			if err := func() error {
 				s.Description.Reset()
@@ -30989,8 +31062,18 @@ func (s *OIDCProvider) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"displayName\"")
 			}
+		case "docs_url":
+			if err := func() error {
+				s.DocsURL.Reset()
+				if err := s.DocsURL.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"docs_url\"")
+			}
 		case "id":
-			requiredBitSet[0] |= 1 << 2
+			requiredBitSet[0] |= 1 << 4
 			if err := func() error {
 				v, err := d.Str()
 				s.ID = string(v)
@@ -31002,7 +31085,7 @@ func (s *OIDCProvider) Decode(d *jx.Decoder) error {
 				return errors.Wrap(err, "decode field \"id\"")
 			}
 		case "issuer":
-			requiredBitSet[0] |= 1 << 3
+			requiredBitSet[0] |= 1 << 5
 			if err := func() error {
 				v, err := d.Str()
 				s.Issuer = string(v)
@@ -31012,6 +31095,36 @@ func (s *OIDCProvider) Decode(d *jx.Decoder) error {
 				return nil
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"issuer\"")
+			}
+		case "label":
+			if err := func() error {
+				s.Label.Reset()
+				if err := s.Label.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"label\"")
+			}
+		case "name":
+			if err := func() error {
+				s.Name.Reset()
+				if err := s.Name.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"name\"")
+			}
+		case "self_serve":
+			if err := func() error {
+				s.SelfServe.Reset()
+				if err := s.SelfServe.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"self_serve\"")
 			}
 		default:
 			var elem jx.Raw
@@ -31033,8 +31146,9 @@ func (s *OIDCProvider) Decode(d *jx.Decoder) error {
 	}
 	// Validate required fields.
 	var failures []validate.FieldError
-	for i, mask := range [1]uint8{
-		0b00001100,
+	for i, mask := range [2]uint8{
+		0b00110000,
+		0b00000000,
 	} {
 		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
 			// Mask only required fields and check equality to mask using XOR.
@@ -31134,6 +31248,264 @@ func (s OIDCProviderAdditional) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON implements stdjson.Unmarshaler.
 func (s *OIDCProviderAdditional) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
+// Encode implements json.Marshaler.
+func (s *OIDCProviderAttribute) Encode(e *jx.Encoder) {
+	e.ObjStart()
+	s.encodeFields(e)
+	e.ObjEnd()
+}
+
+// encodeFields encodes fields.
+func (s *OIDCProviderAttribute) encodeFields(e *jx.Encoder) {
+	{
+		if s.Description.Set {
+			e.FieldStart("description")
+			s.Description.Encode(e)
+		}
+	}
+	{
+		e.FieldStart("exact")
+		e.Bool(s.Exact)
+	}
+	{
+		e.FieldStart("label")
+		e.Str(s.Label)
+	}
+	{
+		e.FieldStart("name")
+		e.Str(s.Name)
+	}
+	{
+		if s.Pattern.Set {
+			e.FieldStart("pattern")
+			s.Pattern.Encode(e)
+		}
+	}
+	{
+		e.FieldStart("required")
+		e.Bool(s.Required)
+	}
+	for k, elem := range s.AdditionalProps {
+		e.FieldStart(k)
+
+		if len(elem) != 0 {
+			e.Raw(elem)
+		}
+	}
+}
+
+var jsonFieldsNameOfOIDCProviderAttribute = [6]string{
+	0: "description",
+	1: "exact",
+	2: "label",
+	3: "name",
+	4: "pattern",
+	5: "required",
+}
+
+// Decode decodes OIDCProviderAttribute from json.
+func (s *OIDCProviderAttribute) Decode(d *jx.Decoder) error {
+	if s == nil {
+		return errors.New("invalid: unable to decode OIDCProviderAttribute to nil")
+	}
+	var requiredBitSet [1]uint8
+	s.AdditionalProps = map[string]jx.Raw{}
+
+	if err := d.ObjBytes(func(d *jx.Decoder, k []byte) error {
+		switch string(k) {
+		case "description":
+			if err := func() error {
+				s.Description.Reset()
+				if err := s.Description.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"description\"")
+			}
+		case "exact":
+			requiredBitSet[0] |= 1 << 1
+			if err := func() error {
+				v, err := d.Bool()
+				s.Exact = bool(v)
+				if err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"exact\"")
+			}
+		case "label":
+			requiredBitSet[0] |= 1 << 2
+			if err := func() error {
+				v, err := d.Str()
+				s.Label = string(v)
+				if err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"label\"")
+			}
+		case "name":
+			requiredBitSet[0] |= 1 << 3
+			if err := func() error {
+				v, err := d.Str()
+				s.Name = string(v)
+				if err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"name\"")
+			}
+		case "pattern":
+			if err := func() error {
+				s.Pattern.Reset()
+				if err := s.Pattern.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"pattern\"")
+			}
+		case "required":
+			requiredBitSet[0] |= 1 << 5
+			if err := func() error {
+				v, err := d.Bool()
+				s.Required = bool(v)
+				if err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"required\"")
+			}
+		default:
+			var elem jx.Raw
+			if err := func() error {
+				v, err := d.RawAppend(nil)
+				elem = jx.Raw(v)
+				if err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrapf(err, "decode field %q", k)
+			}
+			s.AdditionalProps[string(k)] = elem
+		}
+		return nil
+	}); err != nil {
+		return errors.Wrap(err, "decode OIDCProviderAttribute")
+	}
+	// Validate required fields.
+	var failures []validate.FieldError
+	for i, mask := range [1]uint8{
+		0b00101110,
+	} {
+		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
+			// Mask only required fields and check equality to mask using XOR.
+			//
+			// If XOR result is not zero, result is not equal to expected, so some fields are missed.
+			// Bits of fields which would be set are actually bits of missed fields.
+			missed := bits.OnesCount8(result)
+			for bitN := 0; bitN < missed; bitN++ {
+				bitIdx := bits.TrailingZeros8(result)
+				fieldIdx := i*8 + bitIdx
+				var name string
+				if fieldIdx < len(jsonFieldsNameOfOIDCProviderAttribute) {
+					name = jsonFieldsNameOfOIDCProviderAttribute[fieldIdx]
+				} else {
+					name = strconv.Itoa(fieldIdx)
+				}
+				failures = append(failures, validate.FieldError{
+					Name:  name,
+					Error: validate.ErrFieldRequired,
+				})
+				// Reset bit.
+				result &^= 1 << bitIdx
+			}
+		}
+	}
+	if len(failures) > 0 {
+		return &validate.Error{Fields: failures}
+	}
+
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s *OIDCProviderAttribute) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *OIDCProviderAttribute) UnmarshalJSON(data []byte) error {
+	d := jx.DecodeBytes(data)
+	return s.Decode(d)
+}
+
+// Encode implements json.Marshaler.
+func (s OIDCProviderAttributeAdditional) Encode(e *jx.Encoder) {
+	e.ObjStart()
+	s.encodeFields(e)
+	e.ObjEnd()
+}
+
+// encodeFields implements json.Marshaler.
+func (s OIDCProviderAttributeAdditional) encodeFields(e *jx.Encoder) {
+	for k, elem := range s {
+		e.FieldStart(k)
+
+		if len(elem) != 0 {
+			e.Raw(elem)
+		}
+	}
+}
+
+// Decode decodes OIDCProviderAttributeAdditional from json.
+func (s *OIDCProviderAttributeAdditional) Decode(d *jx.Decoder) error {
+	if s == nil {
+		return errors.New("invalid: unable to decode OIDCProviderAttributeAdditional to nil")
+	}
+	m := s.init()
+	if err := d.ObjBytes(func(d *jx.Decoder, k []byte) error {
+		var elem jx.Raw
+		if err := func() error {
+			v, err := d.RawAppend(nil)
+			elem = jx.Raw(v)
+			if err != nil {
+				return err
+			}
+			return nil
+		}(); err != nil {
+			return errors.Wrapf(err, "decode field %q", k)
+		}
+		m[string(k)] = elem
+		return nil
+	}); err != nil {
+		return errors.Wrap(err, "decode OIDCProviderAttributeAdditional")
+	}
+
+	return nil
+}
+
+// MarshalJSON implements stdjson.Marshaler.
+func (s OIDCProviderAttributeAdditional) MarshalJSON() ([]byte, error) {
+	e := jx.Encoder{}
+	s.Encode(&e)
+	return e.Bytes(), nil
+}
+
+// UnmarshalJSON implements stdjson.Unmarshaler.
+func (s *OIDCProviderAttributeAdditional) UnmarshalJSON(data []byte) error {
 	d := jx.DecodeBytes(data)
 	return s.Decode(d)
 }
@@ -46283,8 +46655,16 @@ func (s *ServiceAccount) encodeFields(e *jx.Encoder) {
 		e.Str(s.Name)
 	}
 	{
-		e.FieldStart("orgId")
-		e.Str(s.OrgId)
+		if s.OrgId.Set {
+			e.FieldStart("orgId")
+			s.OrgId.Encode(e)
+		}
+	}
+	{
+		if s.ProjectID.Set {
+			e.FieldStart("project_id")
+			s.ProjectID.Encode(e)
+		}
 	}
 	{
 		e.FieldStart("status")
@@ -46303,14 +46683,15 @@ func (s *ServiceAccount) encodeFields(e *jx.Encoder) {
 	}
 }
 
-var jsonFieldsNameOfServiceAccount = [7]string{
+var jsonFieldsNameOfServiceAccount = [8]string{
 	0: "$schema",
 	1: "accountId",
 	2: "createdAt",
 	3: "name",
 	4: "orgId",
-	5: "status",
-	6: "systemManaged",
+	5: "project_id",
+	6: "status",
+	7: "systemManaged",
 }
 
 // Decode decodes ServiceAccount from json.
@@ -46370,19 +46751,27 @@ func (s *ServiceAccount) Decode(d *jx.Decoder) error {
 				return errors.Wrap(err, "decode field \"name\"")
 			}
 		case "orgId":
-			requiredBitSet[0] |= 1 << 4
 			if err := func() error {
-				v, err := d.Str()
-				s.OrgId = string(v)
-				if err != nil {
+				s.OrgId.Reset()
+				if err := s.OrgId.Decode(d); err != nil {
 					return err
 				}
 				return nil
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"orgId\"")
 			}
+		case "project_id":
+			if err := func() error {
+				s.ProjectID.Reset()
+				if err := s.ProjectID.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"project_id\"")
+			}
 		case "status":
-			requiredBitSet[0] |= 1 << 5
+			requiredBitSet[0] |= 1 << 6
 			if err := func() error {
 				v, err := d.Str()
 				s.Status = string(v)
@@ -46394,7 +46783,7 @@ func (s *ServiceAccount) Decode(d *jx.Decoder) error {
 				return errors.Wrap(err, "decode field \"status\"")
 			}
 		case "systemManaged":
-			requiredBitSet[0] |= 1 << 6
+			requiredBitSet[0] |= 1 << 7
 			if err := func() error {
 				v, err := d.Bool()
 				s.SystemManaged = bool(v)
@@ -46426,7 +46815,7 @@ func (s *ServiceAccount) Decode(d *jx.Decoder) error {
 	// Validate required fields.
 	var failures []validate.FieldError
 	for i, mask := range [1]uint8{
-		0b01111110,
+		0b11001110,
 	} {
 		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
 			// Mask only required fields and check equality to mask using XOR.
@@ -46784,8 +47173,16 @@ func (s *ServiceAccountWithGrants) encodeFields(e *jx.Encoder) {
 		e.Str(s.Name)
 	}
 	{
-		e.FieldStart("orgId")
-		e.Str(s.OrgId)
+		if s.OrgId.Set {
+			e.FieldStart("orgId")
+			s.OrgId.Encode(e)
+		}
+	}
+	{
+		if s.ProjectID.Set {
+			e.FieldStart("project_id")
+			s.ProjectID.Encode(e)
+		}
 	}
 	{
 		e.FieldStart("status")
@@ -46804,14 +47201,15 @@ func (s *ServiceAccountWithGrants) encodeFields(e *jx.Encoder) {
 	}
 }
 
-var jsonFieldsNameOfServiceAccountWithGrants = [7]string{
+var jsonFieldsNameOfServiceAccountWithGrants = [8]string{
 	0: "accountId",
 	1: "createdAt",
 	2: "grants",
 	3: "name",
 	4: "orgId",
-	5: "status",
-	6: "systemManaged",
+	5: "project_id",
+	6: "status",
+	7: "systemManaged",
 }
 
 // Decode decodes ServiceAccountWithGrants from json.
@@ -46881,19 +47279,27 @@ func (s *ServiceAccountWithGrants) Decode(d *jx.Decoder) error {
 				return errors.Wrap(err, "decode field \"name\"")
 			}
 		case "orgId":
-			requiredBitSet[0] |= 1 << 4
 			if err := func() error {
-				v, err := d.Str()
-				s.OrgId = string(v)
-				if err != nil {
+				s.OrgId.Reset()
+				if err := s.OrgId.Decode(d); err != nil {
 					return err
 				}
 				return nil
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"orgId\"")
 			}
+		case "project_id":
+			if err := func() error {
+				s.ProjectID.Reset()
+				if err := s.ProjectID.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"project_id\"")
+			}
 		case "status":
-			requiredBitSet[0] |= 1 << 5
+			requiredBitSet[0] |= 1 << 6
 			if err := func() error {
 				v, err := d.Str()
 				s.Status = string(v)
@@ -46905,7 +47311,7 @@ func (s *ServiceAccountWithGrants) Decode(d *jx.Decoder) error {
 				return errors.Wrap(err, "decode field \"status\"")
 			}
 		case "systemManaged":
-			requiredBitSet[0] |= 1 << 6
+			requiredBitSet[0] |= 1 << 7
 			if err := func() error {
 				v, err := d.Bool()
 				s.SystemManaged = bool(v)
@@ -46937,7 +47343,7 @@ func (s *ServiceAccountWithGrants) Decode(d *jx.Decoder) error {
 	// Validate required fields.
 	var failures []validate.FieldError
 	for i, mask := range [1]uint8{
-		0b01111111,
+		0b11001111,
 	} {
 		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
 			// Mask only required fields and check equality to mask using XOR.

@@ -390,9 +390,10 @@ var ErrCheckpointRemoteUnroutable = errors.New("no URL can be derived for the co
 //
 // The boolean return value reports whether a dedicated checkpoint_remote is
 // configured and should be used for push. When false, the returned URL is the
-// repository's origin URL as a fallback. A configured, owned checkpoint_remote
-// whose provider yields no URL returns ErrCheckpointRemoteUnroutable rather
-// than a fallback.
+// repository's origin URL as a fallback, except when pushRemoteName is not a
+// configured remote (such as a raw URL), which returns no URL. A configured,
+// owned checkpoint_remote whose provider yields no URL returns
+// ErrCheckpointRemoteUnroutable rather than a fallback.
 func PushURL(ctx context.Context, pushRemoteName string) (string, bool, error) {
 	originURL := ""
 	if resolvedOriginURL, err := GetRemoteURL(ctx, originRemote); err == nil {
@@ -426,14 +427,14 @@ func PushURL(ctx context.Context, pushRemoteName string) (string, bool, error) {
 	// resolveRefsPushDestination sends checkpoint refs to.
 	pushRemoteURLs, err := GetPushURLs(ctx, pushRemoteName)
 	if err != nil {
-		fallbackURL, fallbackErr := resolvePushFallbackURL(ctx, pushRemoteName, originURL)
-		if fallbackErr == nil {
-			logFallback(ctx, "push", fallbackURL, "get push remote URL", err,
-				slog.String("push_remote", pushRemoteName),
-			)
-			return fallbackURL, false, nil
-		}
-		return "", true, fmt.Errorf("no push URL found: %w", err)
+		// A push to a raw URL or an unknown remote never syncs checkpoints (the
+		// pre-push gate skips it), so there is no destination to fall back to.
+		logging.Debug(ctx, "checkpoint_remote not applied: push target is not a configured remote",
+			slog.String("push_remote", RedactURLOrPath(pushRemoteName)),
+			// git's error quotes the raw target, which may carry credentials.
+			slog.String("error", strings.ReplaceAll(err.Error(), pushRemoteName, RedactURLOrPath(pushRemoteName))),
+		)
+		return "", false, nil
 	}
 	pushRemoteURL := pushRemoteURLs[0]
 
