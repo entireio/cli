@@ -149,7 +149,7 @@ func (d *Droid) RunPrompt(ctx context.Context, dir string, prompt string, opts .
 		model = defaultDroidModel
 	}
 
-	ctx, cancel, err := boundPrompt(ctx, 0, cfg)
+	ctx, cancel, err := boundPrompt(ctx, d, 0, cfg)
 	if err != nil {
 		return Output{}, err
 	}

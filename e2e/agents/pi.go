@@ -116,7 +116,7 @@ func (p *Pi) RunPrompt(ctx context.Context, dir string, prompt string, opts ...O
 		o(cfg)
 	}
 
-	ctx, cancel, err := boundPrompt(ctx, 0, cfg)
+	ctx, cancel, err := boundPrompt(ctx, p, 0, cfg)
 	if err != nil {
 		return Output{}, err
 	}
