@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -343,6 +344,18 @@ func TestResolveSARef_Grammar(t *testing.T) {
 		require.Equal(t, saTestID, got.ID)
 		require.Equal(t, saTestProjectID, got.ProjectID)
 		require.Equal(t, saTestID, got.label())
+		require.Equal(t, []string{"GET " + saBase + "/" + saTestID}, f.callList())
+	})
+
+	t.Run("a lower-case typed ID is upper-cased", func(t *testing.T) {
+		t.Parallel()
+		f, srv := newSAFakeCore(t)
+		c, err := coreapi.NewWithBearer(srv.URL, "tok")
+		require.NoError(t, err)
+		lower := saIDPrefix + strings.ToLower(strings.TrimPrefix(saTestID, saIDPrefix))
+		got, err := resolveSARef(t.Context(), c, lower)
+		require.NoError(t, err)
+		require.Equal(t, saTestID, got.ID)
 		require.Equal(t, []string{"GET " + saBase + "/" + saTestID}, f.callList())
 	})
 

@@ -72,6 +72,8 @@ func (r saRef) label() string {
 func resolveSARef(ctx context.Context, c *coreapi.Client, ref string) (saRef, error) {
 	ref = strings.TrimSpace(ref)
 	if id, ok := strings.CutPrefix(ref, saIDPrefix); ok && looksLikeULID(id) {
+		// ULIDs are case-insensitive; core stores them upper-case.
+		ref = saIDPrefix + strings.ToUpper(id)
 		sa, err := c.GetServiceAccount(ctx, coreapi.GetServiceAccountParams{AccountId: ref})
 		if err != nil {
 			if isCoreNotFound(err) {

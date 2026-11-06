@@ -28,6 +28,22 @@ func TestSAGrant(t *testing.T) {
 		require.JSONEq(t, `{"resourceType":"repo","resourceId":"`+saTestRepoID+`","role":"reader"}`, f.body(route))
 	})
 
+	t.Run("a repo ULID needs no lookup", func(t *testing.T) {
+		f, srv := newSAFakeCore(t)
+		out, err := runSA(t, srv.URL, "grant", "acme/ci", "--repo", saTestRepoID, "--role", "reader")
+		require.NoError(t, err)
+		require.Contains(t, out, "✓ Granted reader on repo "+saTestRepoID)
+		require.JSONEq(t, `{"resourceType":"repo","resourceId":"`+saTestRepoID+`","role":"reader"}`, f.body(route))
+		require.NotContains(t, f.callList(), "GET /api/v1/projects/"+saTestProjectID+"/repos")
+	})
+
+	t.Run("a forgeless path suggests the native one", func(t *testing.T) {
+		f, srv := newSAFakeCore(t)
+		_, err := runSA(t, srv.URL, "grant", "acme/ci", "--repo", "acme/web", "--role", "reader")
+		require.EqualError(t, err, `repo ref "acme/web" must name its forge — did you mean /et/acme/web?`)
+		require.NotContains(t, f.callList(), route)
+	})
+
 	t.Run("project grant", func(t *testing.T) {
 		f, srv := newSAFakeCore(t)
 		out, err := runSA(t, srv.URL, "grant", "acme/ci", "--project", "acme", "--role", "admin")

@@ -101,12 +101,24 @@ func parsePins(args []string) (map[string]string, error) {
 		if !ok || key == "" || value == "" {
 			return nil, fmt.Errorf("--pin %q must be name=value", a)
 		}
+		if err := checkPinValue(key, value); err != nil {
+			return nil, err
+		}
 		if _, dup := pins[key]; dup {
 			return nil, fmt.Errorf("--pin %s is given twice", key)
 		}
 		pins[key] = value
 	}
 	return pins, nil
+}
+
+// checkPinValue mirrors core's provider-independent refusal: a value of only
+// '*' matches every token, including one without the claim.
+func checkPinValue(key, value string) error {
+	if strings.Trim(value, "*") == "" {
+		return fmt.Errorf("pin %s=%q matches every value; pin a value, or a glob with a literal prefix", key, value)
+	}
+	return nil
 }
 
 // errNoPins mirrors core: an empty filter matches everything.
@@ -159,14 +171,19 @@ func checkPins(p saProvider, pins map[string]string) error {
 		if !ok {
 			return fmt.Errorf("%s has no pin %q; see entire sa providers %s", p.name, key, p.name)
 		}
-		if a.Exact && strings.Contains(value, "*") {
-			return fmt.Errorf("pin %s must be exact, not a glob", key)
-		}
-		if err := matchPattern(a, value); err != nil {
+		if err := checkPin(a, value); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// checkPin applies one attribute's descriptor rules to a value.
+func checkPin(a coreapi.OIDCProviderAttribute, value string) error {
+	if a.Exact && strings.Contains(value, "*") {
+		return fmt.Errorf("pin %s must be exact, not a glob", a.Name)
+	}
+	return matchPattern(a, value)
 }
 
 func matchPattern(a coreapi.OIDCProviderAttribute, value string) error {
@@ -209,12 +226,7 @@ var askPins = func(cmd *cobra.Command, p saProvider, missing []coreapi.OIDCProvi
 	fields := make([]huh.Field, 0, len(missing))
 	for i, a := range missing {
 		in := huh.NewInput().Title(a.Label + " (" + a.Name + ")").Value(&values[i]).
-			Validate(func(s string) error {
-				if strings.TrimSpace(s) == "" {
-					return errors.New("enter a value")
-				}
-				return nil
-			})
+			Validate(validatePromptedPin(a))
 		if d := a.Description.Or(""); d != "" {
 			in = in.Description(d)
 		}
@@ -228,6 +240,21 @@ var askPins = func(cmd *cobra.Command, p saProvider, missing []coreapi.OIDCProvi
 		out[a.Name] = strings.TrimSpace(values[i])
 	}
 	return out, nil
+}
+
+// validatePromptedPin checks a typed value in the form, so a bad one is
+// re-asked instead of failing the bind after the form closes.
+func validatePromptedPin(a coreapi.OIDCProviderAttribute) func(string) error {
+	return func(s string) error {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return errors.New("enter a value")
+		}
+		if err := checkPinValue(a.Name, s); err != nil {
+			return err
+		}
+		return checkPin(a, s)
+	}
 }
 
 // printBindNext names the token exchange inputs.
