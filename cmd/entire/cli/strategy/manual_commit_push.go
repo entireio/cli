@@ -193,32 +193,11 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 		return nil
 	}
 
-	// Thread the span's context into the push so the network push and any
-	// fetch+rebase recovery nest beneath it as child steps in the perf trace.
-	pushCtx, pushCheckpointsSpan := perf.Start(ctx, "push_checkpoint_refs")
-	// Capture needs checkpoint data CONFIRMED on this remote, so count what
-	// landed rather than trusting the absence of an error: every ref that was due
-	// has to deliver, and at least one has to actually do so. Delivery must come
-	// from pushRefIfNeeded's delivered return and NOT from err, which is
-	// fail-soft and nil even when the remote refused the ref.
-	var deliveredRefs []plumbing.ReferenceName
-	anyFailed := false
-	refs := checkpoint.ResolveRefs(ctx)
-	for _, ref := range refs.Push {
-		delivered, err := pushRefIfNeeded(pushCtx, ps.pushTarget(), ref)
-		if err != nil {
-			pushCheckpointsSpan.RecordError(err)
-			pushCheckpointsSpan.End()
-			return err
-		}
-		if delivered {
-			deliveredRefs = append(deliveredRefs, ref)
-		} else {
-			anyFailed = true
-		}
+	pushed, err := pushCheckpointBranchRefs(ctx, ps)
+	if err != nil {
+		return err
 	}
-	pushCheckpointsSpan.End()
-	deliveredCount := len(deliveredRefs)
+	deliveredCount := len(pushed.delivered)
 
 	// Delivered: the election may now follow the push that carried it. A push that
 	// carried nothing — an empty ref set, or a v1 ref that does not exist locally
@@ -226,13 +205,13 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	// when there was nothing to strand), but capturing would announce a move that
 	// moved no data, which is the class of claim this whole path exists to stop
 	// making. The next push that carries a checkpoint captures instead.
-	if pendingCapture != "" && deliveredCount > 0 && !anyFailed {
+	if pendingCapture != "" && deliveredCount > 0 && !pushed.anyFailed {
 		commitCapturedSyncRemote(ctx, pendingCapture)
 	}
 	// After capture, so the election this compares against is final. A dedicated
 	// checkpoint_remote URL is not a remote name and has no tracking refs.
 	if !ps.hasCheckpointURL() {
-		for _, ref := range deliveredRefs {
+		for _, ref := range pushed.delivered {
 			advanceSyncRemoteTrackingRef(ctx, ps.remote, ref)
 		}
 	}
@@ -242,7 +221,55 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	if deliveredCount > 0 {
 		warnIgnoredCheckpointRemote(ctx, ps)
 	}
+	// Last, because git sends the user's push the moment this returns, and it
+	// must not land right on top of the one that just finished (see
+	// settleBeforeUserPush). A dedicated checkpoint_remote waits too: nothing
+	// stops it naming the repository the user is pushing to.
+	if pushed.moved {
+		settleBeforeUserPush(ctx, ps.remote)
+	}
 	return nil
+}
+
+// checkpointBranchPush is what pushCheckpointBranchRefs left behind.
+type checkpointBranchPush struct {
+	// delivered lists the refs now on the target.
+	delivered []plumbing.ReferenceName
+	// anyFailed reports a ref that was due and did not deliver.
+	anyFailed bool
+	// moved reports that a push moved a ref on the target rather than finding
+	// it there already.
+	moved bool
+}
+
+// pushCheckpointBranchRefs pushes the git-branch backend's checkpoint refs to
+// ps.pushTarget().
+//
+// Capture needs checkpoint data CONFIRMED on this remote, so it counts what
+// landed rather than trusting the absence of an error: every ref that was due
+// has to deliver, and at least one has to actually do so. Delivery must come
+// from pushRefIfNeeded's delivered return and NOT from err, which is fail-soft
+// and nil even when the remote refused the ref.
+func pushCheckpointBranchRefs(ctx context.Context, ps pushSettings) (checkpointBranchPush, error) {
+	// Thread the span's context into the push so the network push and any
+	// fetch+rebase recovery nest beneath it as child steps in the perf trace.
+	pushCtx, span := perf.Start(ctx, "push_checkpoint_refs")
+	defer span.End()
+	var result checkpointBranchPush
+	for _, ref := range checkpoint.ResolveRefs(ctx).Push {
+		delivered, moved, err := pushRefIfNeeded(pushCtx, ps.pushTarget(), ref)
+		if err != nil {
+			span.RecordError(err)
+			return result, err
+		}
+		if delivered {
+			result.delivered = append(result.delivered, ref)
+		} else {
+			result.anyFailed = true
+		}
+		result.moved = result.moved || moved
+	}
+	return result, nil
 }
 
 // opfPrePushDecision resolves the user's OPF decision for this push (env >

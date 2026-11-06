@@ -119,9 +119,10 @@ func TestDoPushRef_UnreachableTarget_ReturnsNil(t *testing.T) {
 	// 2. Try to fetch+rebase (fails — can't fetch from non-existent path)
 	// 3. Log warning and return nil (graceful degradation)
 	nonExistentPath := filepath.Join(t.TempDir(), "does-not-exist")
-	delivered, err := doPushRef(ctx, nonExistentPath, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
+	delivered, moved, err := doPushRef(ctx, nonExistentPath, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
 	require.NoError(t, err, "doPushRef should return nil when target is unreachable (graceful degradation)")
 	assert.False(t, delivered, "an unreachable target delivered nothing, which err cannot express")
+	assert.False(t, moved, "nothing moved on an unreachable target")
 }
 
 // TestPushRefIfNeeded_UnreachableTarget_ReturnsNil exercises the full push path
@@ -143,9 +144,10 @@ func TestPushRefIfNeeded_UnreachableTarget_ReturnsNil(t *testing.T) {
 	//    which finds no remote tracking ref -> returns true (has unpushed)
 	// 4. Call doPushRef which fails gracefully
 	nonExistentPath := filepath.Join(t.TempDir(), "does-not-exist")
-	delivered, err := pushRefIfNeeded(ctx, nonExistentPath, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
+	delivered, moved, err := pushRefIfNeeded(ctx, nonExistentPath, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
 	require.NoError(t, err, "pushRefIfNeeded should return nil when target is unreachable")
 	assert.False(t, delivered, "an unreachable target delivered nothing, which err cannot express")
+	assert.False(t, moved, "nothing moved on an unreachable target")
 }
 
 // TestPushRefIfNeeded_NonBranchRef verifies that pushRefIfNeeded accepts
@@ -172,7 +174,7 @@ func TestPushRefIfNeeded_NonBranchRef(t *testing.T) {
 
 	t.Chdir(tmpDir)
 
-	delivered, err := pushRefIfNeeded(ctx, bareDir, customRef)
+	delivered, _, err := pushRefIfNeeded(ctx, bareDir, customRef)
 	require.NoError(t, err, "pushRefIfNeeded should accept a non-branch ref")
 	require.True(t, delivered, "the ref reached the bare remote")
 
@@ -203,9 +205,10 @@ func TestPushRefIfNeeded_LocalBareRepo_PushesSuccessfully(t *testing.T) {
 	t.Chdir(tmpDir)
 
 	// Push using pushRefIfNeeded with the bare repo path as target.
-	delivered, err := pushRefIfNeeded(ctx, bareDir, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
+	delivered, moved, err := pushRefIfNeeded(ctx, bareDir, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
 	require.NoError(t, err, "pushRefIfNeeded should succeed with a local bare repo target")
 	require.True(t, delivered, "a successful push reports delivery")
+	assert.True(t, moved, "the ref was new on the bare remote, so the push moved it")
 
 	// Verify the ref arrived on the bare repo.
 	verifyCmd := exec.CommandContext(ctx, "git", "show-ref", "--verify", "--quiet", "refs/heads/"+paths.MetadataBranchName)
@@ -1475,11 +1478,12 @@ func TestDoPushRef_AlreadyUpToDate(t *testing.T) {
 	t.Chdir(workDir)
 
 	restore := captureStderr(t)
-	delivered, err := doPushRef(context.Background(), bareDir, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
+	delivered, moved, err := doPushRef(context.Background(), bareDir, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
 	output := restore()
 
 	require.NoError(t, err)
 	assert.True(t, delivered, "already up-to-date is delivered: the ref is on the target")
+	assert.False(t, moved, "an up-to-date push moved nothing, so there is no push for the user's to race")
 	assert.Contains(t, output, "already up-to-date", "should indicate nothing was pushed")
 	assert.NotContains(t, output, " done", "should not say 'done' when nothing was pushed")
 }
@@ -1498,13 +1502,105 @@ func TestDoPushRef_NewContent_SaysDone(t *testing.T) {
 	t.Chdir(workDir)
 
 	restore := captureStderr(t)
-	delivered, err := doPushRef(context.Background(), bareDir, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
+	delivered, moved, err := doPushRef(context.Background(), bareDir, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
 	output := restore()
 
 	require.NoError(t, err)
 	assert.True(t, delivered, "a fresh push reports delivery")
+	assert.True(t, moved, "a fresh push moved the ref")
 	assert.Contains(t, output, " done", "should say 'done' when new content was pushed")
 	assert.NotContains(t, output, "already up-to-date", "should not say 'already up-to-date' when content was pushed")
+}
+
+func TestParsePushResult(t *testing.T) {
+	t.Parallel()
+
+	const ref = "refs/heads/entire/checkpoints/v1:refs/heads/entire/checkpoints/v1"
+	cases := []struct {
+		name     string
+		output   string
+		upToDate bool
+		updated  bool
+	}{
+		{"up to date", "To ../a.git\n=\t" + ref + "\t[up to date]\nDone\n", true, false},
+		{"new branch", "To ../a.git\n*\t" + ref + "\t[new branch]\nDone\n", false, true},
+		{"fast-forward", "To ../a.git\n \t" + ref + "\tabc1234..def5678\nDone\n", false, true},
+		{"forced", "To ../a.git\n+\t" + ref + "\tabc1234...def5678 (forced update)\nDone\n", false, true},
+		{"rejected", "To ../a.git\n!\t" + ref + "\t[rejected] (non-fast-forward)\nDone\n", false, false},
+		// Two push URLs, one already current and one new: git push prints a
+		// block per destination, and the second one took the ref.
+		{
+			"several destinations, one moved",
+			"warning: push negotiation failed; proceeding anyway with push\n" +
+				"To ../a.git\n=\t" + ref + "\t[up to date]\nDone\n" +
+				"To ../b.git\n*\t" + ref + "\t[new branch]\nDone\n",
+			false, true,
+		},
+		// The first push URL took the ref and the second refused it: the
+		// push failed, but one destination has just received it.
+		{
+			"several destinations, one moved and one refused",
+			"To ../a.git\n*\t" + ref + "\t[new branch]\nDone\n" +
+				"To ../b.git\n!\t" + ref + "\t[rejected] (fetch first)\nDone\n",
+			false, true,
+		},
+		{"no status line", "Everything up-to-date\n", false, false},
+		{"windows line endings", "To ../a.git\r\n=\t" + ref + "\t[up to date]\r\nDone\r\n", true, false},
+	}
+	for _, tc := range cases {
+		got := parsePushResult(tc.output)
+		assert.Equal(t, tc.upToDate, got.upToDate, "%s: upToDate", tc.name)
+		assert.Equal(t, tc.updated, got.updated, "%s: updated", tc.name)
+	}
+}
+
+// TestDoPushRef_SeveralPushURLs_OneMoved: a remote with several push URLs
+// pushes to each, and a ref that was new on any of them moved, even when the
+// first one reports it up to date.
+//
+// Not parallel: uses t.Chdir() and os.Stderr redirection.
+func TestDoPushRef_SeveralPushURLs_OneMoved(t *testing.T) {
+	workDir, current := setupBareRemoteWithCheckpointBranch(t)
+	empty := t.TempDir()
+	testutil.RunGit(t, empty, "init", "--bare")
+	testutil.RunGit(t, workDir, "remote", "add", "origin", current)
+	testutil.RunGit(t, workDir, "remote", "set-url", "--add", "--push", "origin", current)
+	testutil.RunGit(t, workDir, "remote", "set-url", "--add", "--push", "origin", empty)
+	t.Chdir(workDir)
+
+	restore := captureStderr(t)
+	delivered, moved, err := doPushRef(context.Background(), "origin", plumbing.NewBranchReferenceName(paths.MetadataBranchName))
+	output := restore()
+
+	require.NoError(t, err, output)
+	assert.True(t, delivered)
+	assert.True(t, moved, "the second push URL took the ref: %s", output)
+	testutil.RunGit(t, empty, "show-ref", "--verify", "refs/heads/"+paths.MetadataBranchName)
+}
+
+// TestDoPushRef_SeveralPushURLs_PartialFailure: git pushes to a remote's push
+// URLs in turn, so a later one failing does not undo a push an earlier one
+// took. That push still moved the ref, even though delivery failed.
+//
+// Not parallel: uses t.Chdir() and os.Stderr redirection.
+func TestDoPushRef_SeveralPushURLs_PartialFailure(t *testing.T) {
+	workDir, current := setupBareRemoteWithCheckpointBranch(t)
+	empty := t.TempDir()
+	testutil.RunGit(t, empty, "init", "--bare")
+	missing := filepath.Join(t.TempDir(), "missing.git")
+	testutil.RunGit(t, workDir, "remote", "add", "origin", current)
+	testutil.RunGit(t, workDir, "remote", "set-url", "--add", "--push", "origin", empty)
+	testutil.RunGit(t, workDir, "remote", "set-url", "--add", "--push", "origin", missing)
+	t.Chdir(workDir)
+
+	restore := captureStderr(t)
+	delivered, moved, err := doPushRef(context.Background(), "origin", plumbing.NewBranchReferenceName(paths.MetadataBranchName))
+	output := restore()
+
+	require.NoError(t, err, "a failed checkpoint push never fails the user's push")
+	assert.False(t, delivered, "one push URL refused the ref: %s", output)
+	assert.True(t, moved, "the first push URL took the ref before the second failed: %s", output)
+	testutil.RunGit(t, empty, "show-ref", "--verify", "refs/heads/"+paths.MetadataBranchName)
 }
 
 func TestIsProtectedRefRejection(t *testing.T) {
