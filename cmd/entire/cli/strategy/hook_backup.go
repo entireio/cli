@@ -407,22 +407,14 @@ func reclaimFromPreCommit(root *os.Root, hook string) (bool, error) {
 			"so chaining to the link may run Entire's hook again; replace the link with the file it points to, "+
 			"or remove %s, then re-run 'entire enable'", errLinkedHookOverLegacy, hook, legacy, legacy)
 	}
-	if carriesEntireMarker(root, hook) && isPreCommitWrapper(root, backup, hook) {
-		// Entire's hook runs the wrapper, which runs Entire's hook again from
-		// .legacy: an install left by a release that did not recognize the
-		// wrapper. .legacy goes back to the user's hook, or away.
-		_, err := moveUserHookInto(root, hook, legacy, false, func() error {
-			if err := root.Remove(legacy); err != nil {
-				return fmt.Errorf("remove Entire's %s: %w", legacy, err)
-			}
-			return nil
-		})
-		return err == nil, err
-	}
-	if !isPreCommitWrapper(root, hook, hook) {
+	// Entire's hook running the wrapper, which runs Entire's hook again from
+	// .legacy, is an install left by a release that did not recognize the
+	// wrapper; .legacy goes back to the user's hook the same way.
+	repair := carriesEntireMarker(root, hook) && isPreCommitWrapper(root, backup, hook)
+	if !repair && !isPreCommitWrapper(root, hook, hook) {
 		return false, nil
 	}
-	userHookInBackup := hookFileExists(root, backup) &&
+	userHookInBackup := !repair && hookFileExists(root, backup) &&
 		!isPreCommitWrapper(root, backup, hook) && !carriesEntireMarker(root, backup)
 	_, err := moveUserHookInto(root, hook, legacy, userHookInBackup, func() error {
 		if err := root.Remove(legacy); err != nil {
