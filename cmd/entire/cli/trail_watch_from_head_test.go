@@ -154,3 +154,20 @@ func TestNoteReadyStartKeepsSeenCursor(t *testing.T) {
 	require.Empty(t, noteReadyStart(&errOut, sseEventReady, `not json`, ""))
 	require.Empty(t, noteReadyStart(&errOut, "review.started", `{"cursor":136}`, ""), "only ready frames seed the cursor")
 }
+
+// A resumed connection keeps the cursor it resumed from, even when its ready
+// frame (no start) reports a different one and the connection drops before
+// any event.
+func TestTrailWatchResumeKeepsItsCursor(t *testing.T) {
+	t.Parallel()
+	srv, seen := recordingSSEServer(t, []func(http.ResponseWriter){
+		func(w http.ResponseWriter) {
+			sseFrames(w, "event: ready\ndata: {\"cursor\":5,\"start\":\"head\"}\n\nid: 6\nevent: x.y\ndata: {}\n\nevent: reconnect\ndata: {}\n\n")
+		},
+		func(w http.ResponseWriter) {
+			sseFrames(w, "event: ready\ndata: {\"cursor\":9}\n\nevent: reconnect\ndata: {}\n\n")
+		},
+	})
+	runWatchForTest(t, srv, false, false)
+	require.Equal(t, []watchRequest{{from: "head"}, {from: "head", lastEventID: "6"}, {from: "head", lastEventID: "6"}}, seen())
+}

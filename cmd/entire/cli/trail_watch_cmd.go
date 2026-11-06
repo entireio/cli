@@ -282,10 +282,13 @@ func streamOnce(
 	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
 
 	var (
-		eventName  string
-		dataLines  []string
-		eventID    string // id of the in-progress frame (reset on flush)
-		lastSeenID string // most recent SSE id from any frame that includes one
+		eventName string
+		dataLines []string
+		eventID   string // id of the in-progress frame (reset on flush)
+		// lastSeenID is the resume cursor: the one this connection resumed
+		// from, then the most recent SSE id. Starting from lastEventID keeps a
+		// resumed connection's ready cursor from replacing it.
+		lastSeenID = lastEventID
 	)
 
 	flush := func() (streamCloseReason, bool) {
