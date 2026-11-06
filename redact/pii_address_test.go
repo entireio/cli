@@ -55,7 +55,15 @@ func TestDetectPII_EuropeanAddresses(t *testing.T) {
 		{"Lindenallee 4a", "[REDACTED_ADDRESS]"},
 		{"Bahnhofstrasse 1", "[REDACTED_ADDRESS]"},
 		{"Frankfurter Allee 11", "[REDACTED_ADDRESS]"},
+		{"Johann-Sebastian-Bachstraße 12", "[REDACTED_ADDRESS]"},
+		{"Konrad-Adenauer-Platz 1", "[REDACTED_ADDRESS]"},
 		{"Hauptstraße\t12", "[REDACTED_ADDRESS]"},
+
+		// A match stays on its line: the French name has no house number
+		// after it to stop it, so it must not run on into a heading.
+		{"12 rue de la Paix\nDeployment Status", "[REDACTED_ADDRESS]\nDeployment Status"},
+		{"Via Roma\n12 tests passed", "Via Roma\n12 tests passed"},
+		{"Hauptstraße\n12 files", "Hauptstraße\n12 files"},
 
 		// Both shapes in one string.
 		{"from Via Roma 12 to 123 Main Street", "from [REDACTED_ADDRESS] to [REDACTED_ADDRESS]"},

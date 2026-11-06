@@ -26,51 +26,57 @@ const (
 	// euRomanNumeral may follow a name word (Vittorio Emanuele II). It cannot
 	// start a name, so an acronym such as CLI after Via does not count.
 	euRomanNumeral = `[IVX]{1,5}`
+	// euSpace separates the parts of a street line: spaces or tabs, never a
+	// line break.
+	euSpace = `[ \t]+`
 	// euHouseNumber is the number that ends an Italian or Spanish street
 	// line, optionally after n., nº or n°, with an optional letter or
 	// sub-number (3/A, 12b, 7/2).
-	euHouseNumber = `(?:n(?:\.[°º]?|[°º])\s?)?\d{1,4}(?:\s?/\s?[0-9A-Za-z]{1,3}|[A-Za-z])?`
+	euHouseNumber = `(?:n(?:\.[°º]?|[°º])[ \t]?)?\d{1,4}(?:[ \t]?/[ \t]?[0-9A-Za-z]{1,3}|[A-Za-z])?`
 )
 
 // euStreetName is a street name of title-case words, with the given
-// lowercase particles allowed before and between them.
+// lowercase particles allowed before and between them. Words are separated by
+// spaces or tabs only, so a name never runs on into the next line (a French
+// name has no house number after it to stop it).
 func euStreetName(particles string) string {
-	p := `(?:(?:` + particles + `)\s+)*`
-	return p + euNameWord + `(?:\s+(?:` + p + euNameWord + `|` + euRomanNumeral + `))*`
+	p := `(?:(?:` + particles + `)` + euSpace + `)*`
+	return p + euNameWord + `(?:` + euSpace + `(?:` + p + euNameWord + `|` + euRomanNumeral + `))*`
 }
 
 var (
 	// italianAddressRegex: Via Roma 12, Piazza del Duomo 1, Via dei Mille 3/A.
 	italianAddressRegex = regexp.MustCompile(
-		`(?:Via|Viale|Piazza|Piazzale|Corso|Largo|Vicolo|Strada)\s+` +
+		`(?:Via|Viale|Piazza|Piazzale|Corso|Largo|Vicolo|Strada)` + euSpace +
 			euStreetName(`di|da|del|dello|della|delle|dei|degli|dal|dalla|al|alla|alle|e`) +
-			`,?\s+` + euHouseNumber)
+			`,?` + euSpace + euHouseNumber)
 
 	// spanishAddressRegex: Calle Mayor 5, Calle de Alcalá, 42, C/ Mayor 5.
 	spanishAddressRegex = regexp.MustCompile(
-		`(?:(?:Calle|Avenida|Avda\.|Plaza|Paseo|Camino|Ronda|Rambla)\s+|C/\s?)` +
+		`(?:(?:Calle|Avenida|Avda\.|Plaza|Paseo|Camino|Ronda|Rambla)` + euSpace + `|C/[ \t]?)` +
 			euStreetName(`de|del|la|las|los|el|y`) +
-			`,?\s+` + euHouseNumber)
+			`,?` + euSpace + euHouseNumber)
 
 	// frenchAddressRegex: 12 rue de la Paix, 8 bis boulevard Saint-Germain.
 	// The street type may be capitalized (12 Rue de la Paix).
 	frenchAddressRegex = regexp.MustCompile(
-		`\d{1,4}(?:\s?(?:bis|ter)\b|[A-Da-d]\b)?,?\s+` +
-			`(?:[Rr]ue|[Aa]venue|[Bb]oulevard|[Pp]lace|[Cc]hemin|[Aa]llée|[Ii]mpasse|[Qq]uai)\s+` +
+		`\d{1,4}(?:[ \t]?(?:bis|ter)\b|[A-Da-d]\b)?,?` + euSpace +
+			`(?:[Rr]ue|[Aa]venue|[Bb]oulevard|[Pp]lace|[Cc]hemin|[Aa]llée|[Ii]mpasse|[Qq]uai)` + euSpace +
 			euStreetName(`de|du|des|la|le|les|aux|au|sur`))
 
 	// germanAddressRegex: Hauptstraße 12, Karl-Marx-Straße 5, Berliner Str. 5,
-	// Lindenallee 4a. The type is a suffix of the street's word, the last part
-	// of a hyphenated name, or its own word after an adjective.
+	// Lindenallee 4a. The type is a suffix of the street's last word
+	// (Johann-Sebastian-Bachstraße), the last part of a hyphenated name, or
+	// its own word after an adjective.
 	germanAddressRegex = regexp.MustCompile(
-		`(?:\p{Lu}\p{L}*(?:straße|strasse|str\.|weg|platz|allee|gasse)` +
+		`(?:\p{Lu}\p{L}*(?:-\p{L}+)*(?:straße|strasse|str\.|weg|platz|allee|gasse)` +
 			`|\p{Lu}\p{L}*(?:-\p{L}+)*-(?:Straße|Strasse|Str\.|Weg|Platz|Allee|Gasse)` +
-			`|\p{Lu}\p{Ll}+\s+(?:Straße|Strasse|Str\.|Weg|Platz|Allee|Gasse))` +
-			`\s+\d{1,4}[a-zA-Z]?`)
+			`|\p{Lu}\p{Ll}+` + euSpace + `(?:Straße|Strasse|Str\.|Weg|Platz|Allee|Gasse))` +
+			euSpace + `\d{1,4}[a-zA-Z]?`)
 )
 
 // streetKeyword is a street type as a European address match uses it: a
-// whole word followed by whitespace, unless a field says otherwise.
+// whole word followed by a space or tab, unless a field says otherwise.
 type streetKeyword struct {
 	word string
 	// inWord marks a German suffix, which ends a longer word (Hauptstraße).
@@ -119,8 +125,8 @@ func mayContainEuropeanAddress(re *regexp.Regexp, s string) bool {
 }
 
 // hasStreetKeyword reports whether s holds k with nothing before it that would
-// join it to a longer word (a JSON escape such as \n does not), and with
-// whitespace after it, as every pattern needs after the street type.
+// join it to a longer word (a JSON escape such as \n does not), and with a
+// space or tab after it, as every pattern needs after the street type.
 func hasStreetKeyword(s string, k streetKeyword) bool {
 	for i := 0; ; {
 		j := strings.Index(s[i:], k.word)
@@ -134,17 +140,12 @@ func hasStreetKeyword(s string, k streetKeyword) bool {
 			prev = s[start-1]
 		}
 		before := k.inWord || (!isASCIIAlnum(prev) && prev != '_') || followsJSONEscape(s, start)
-		after := end < len(s) && (isRegexpSpace(s[end]) || k.nameFollows)
+		after := end < len(s) && (s[end] == ' ' || s[end] == '\t' || k.nameFollows)
 		if before && after {
 			return true
 		}
 		i = start + 1
 	}
-}
-
-// isRegexpSpace reports whether c is in \s, as Go regexps define it.
-func isRegexpSpace(c byte) bool {
-	return c == ' ' || c == '\t' || c == '\n' || c == '\f' || c == '\r'
 }
 
 // addressStandsAlone reports whether the European address match s[start:end],
