@@ -6,6 +6,7 @@ Repository paths in code spans are relative to the repository root unless stated
 
 ### Credential-bearing redirects and replicas
 
+- **Key-signed requests never follow redirects.** Service-account key management (`auth.postKeyAPI`) returns `http.ErrUseLastResponse` from its redirect callback and treats any 3xx as an error, since a 307/308 would resend the signed proof; the STS exchange relies on auth-go refusing cross-host redirects.
 - **Construct clients with `httpclient.New`** (`internal/entireclient/httpclient`). It limits redirect chains and refuses HTTPS → HTTP, including HTTPS → loopback and HTTP → HTTPS → HTTP. A source guard rejects bare clients, zero-value declarations and package-level HTTP helpers outside documented exceptions.
 - **Preserve stricter policies.** The API client (also used by cloud dispatch) refuses cross-host redirects and insecure absolute endpoints. The remote-helper proxy restricts bearer forwarding to its cluster. Well-known discovery refuses **all** redirects at the fetch boundary; its response is a trust root. Auth-go separately protects OAuth exchanges and 421 routing, not the outer control-plane client's ordinary HTTP redirects.
 - **Wrap injected clients with `WithSecureRedirects`.** It copies the supplied client (nil means `http.DefaultClient`). The client's own callback runs first and can only add restrictions; it must not call `CheckSecureRedirect` itself. `http.ErrUseLastResponse` is returned unchanged, so the cold replica probe can read a 3xx's headers even with an HTTP Location. Otherwise a shared-policy rejection wins over the callback's own error, so a downgrade always reports `ErrInsecureRedirect`. If the callback permits following, both the proposed and final URLs must pass validation; the callback cannot undo an HTTPS upgrade. Inject a transport via `api.NewClientWithTransport` in tests, not by replacing `http.DefaultTransport`, and never replace a constructed client's `CheckRedirect` or `Transport` (a source guard lists the audited exceptions).
@@ -18,11 +19,17 @@ Keep flow-level regression tests at client wiring boundaries. Recording transpor
 
 ### Control-Plane Core Resolution (which core am I talking to?)
 
-Control-plane commands dial one of three cores: the active context's
-(`coreapi.New`), a specific cluster's (`coreapi.NewForCluster`), or — when
-`ENTIRE_TOKEN` is set — the env token's `aud` (the bypass inside `New`/
-`NewForCluster`). This precedence lives **only** inside `coreapi`; nothing else
-re-derives it.
+Control-plane commands dial one of four cores: the active context's
+(`coreapi.New`), a specific cluster's (`coreapi.NewForCluster`), — when
+`ENTIRE_TOKEN` is set — the env token's `aud`, or — when only
+`ENTIRE_SERVICE_ACCOUNT` is set — the server of that account's active local key
+(the bypass inside `New`/`NewForCluster`; see
+[service-account keys](../architecture/service-account-keys.md)). This
+precedence lives **only** inside `coreapi`; nothing else re-derives it.
+Consumers outside a `coreapi.Client` read the env credential through
+`auth.LookupEnvToken` / `auth.ServiceAccountTarget`, never `os.LookupEnv`
+directly, and both env credentials fail closed: an error never falls back to a
+stored login.
 
 **To display which core a request uses, ask the client: `client.CoreOrigin()`.**
 It returns whatever was actually wired in, so the shown core can never diverge
@@ -34,9 +41,10 @@ banner; see `repo_mirror.go` and `coreapi.Client.CoreOrigin`).
 
 When a command resolves auth *outside* a `coreapi.Client` (e.g. `entire auth
 status`, which builds its own `/me` client), it must apply the same
-env-token-first precedence itself — see `resolveAuthStatusTarget` /
+env-credential-first precedence itself — see `resolveAuthStatusTarget` /
 `resolveEnvTokenStatusTarget` in `auth.go`, which branch on
-`auth.EnvTokenVar` before falling back to the active context. `logout` is the
+`auth.LookupEnvToken` (ENTIRE_TOKEN, then ENTIRE_SERVICE_ACCOUNT) before
+falling back to the active context. `logout` is the
 deliberate exception: it manages a *stored* login session, which an ephemeral
 env token has none of, so it stays on the active context.
 

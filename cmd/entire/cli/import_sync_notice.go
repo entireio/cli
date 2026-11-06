@@ -3,7 +3,6 @@ package cli
 import (
 	"fmt"
 	"io"
-	"os"
 
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 )
@@ -33,7 +32,7 @@ var (
 //
 // Package var so tests can force the whole outcome (see #1773 review thread).
 var importLoggedIn = func() bool {
-	if os.Getenv(auth.EnvTokenVar) != "" {
+	if auth.EnvCredentialNonEmpty() {
 		return true
 	}
 	ctxs, current, err := importListContexts()

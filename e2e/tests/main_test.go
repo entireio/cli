@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/testutil/gitenv"
 	"github.com/entireio/cli/e2e/agents"
 	"github.com/entireio/cli/e2e/entire"
@@ -65,6 +66,11 @@ func TestMain(m *testing.M) {
 	// binary's ENTIRE_CONFIG_DIR is empty, so an inherited ENTIRE_CONTEXT names
 	// a login that is not saved there and fails every child up front.
 	os.Unsetenv(contexts.EnvContextVar)
+	// And every credential selector: ENTIRE_TOKEN or ENTIRE_SERVICE_ACCOUNT
+	// would make each spawned binary act as the developer's credential.
+	for _, name := range auth.CredentialEnvVars() {
+		os.Unsetenv(name)
+	}
 
 	// Select the checkpoint storage backend for the whole suite. E2E_CHECKPOINT_STORE
 	// (e.g. "git-refs") maps to the ENTIRE_CHECKPOINTS_PRIMARY override the spawned

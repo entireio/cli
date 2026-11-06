@@ -81,7 +81,7 @@ func CoreURLFromEnvToken(rawToken string) (string, error) {
 // returns its canonical form (scheme://host, no trailing slash).
 func validateCoreAudience(u *url.URL) (string, error) {
 	switch {
-	case u.Scheme != "https":
+	case u.Scheme != schemeHTTPS:
 		return "", fmt.Errorf("%s aud %q must use https; refusing to exchange the token over %s", EnvTokenVar, u.Redacted(), u.Scheme)
 	case u.Host == "":
 		return "", fmt.Errorf("%s aud %q has no host", EnvTokenVar, u.Redacted())

@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/testutil/gitenv"
 	"github.com/entireio/cli/e2e/entire"
@@ -66,9 +67,10 @@ func TestMain(m *testing.M) {
 	os.Setenv("ENTIRE_TOKEN_STORE_PATH", filepath.Join(stateDir, "tokens.json"))
 	os.Setenv("ENTIRE_CONFIG_DIR", filepath.Join(stateDir, "entire-config"))
 	os.Setenv("XDG_CACHE_HOME", filepath.Join(stateDir, "entire-cache"))
-	// ENTIRE_TOKEN's presence alone switches the CLI to token mode, and a set
-	// ENTIRE_AUTH_BASE_URL (retired) fails every command.
-	for _, name := range []string{"ENTIRE_TOKEN", "ENTIRE_CONTEXT", "ENTIRE_AUTH_BASE_URL"} {
+	// A credential selector's presence alone (ENTIRE_TOKEN,
+	// ENTIRE_SERVICE_ACCOUNT) switches the CLI to non-interactive mode, and a
+	// set ENTIRE_AUTH_BASE_URL (retired) fails every command.
+	for _, name := range append(auth.CredentialEnvVars(), "ENTIRE_CONTEXT", "ENTIRE_AUTH_BASE_URL") {
 		os.Unsetenv(name)
 	}
 

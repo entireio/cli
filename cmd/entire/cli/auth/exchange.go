@@ -7,7 +7,10 @@ import (
 	"github.com/entireio/auth-go/tokenmanager"
 )
 
-const schemeHTTP = "http"
+const (
+	schemeHTTP  = "http"
+	schemeHTTPS = "https"
+)
 
 // ErrNotLoggedIn re-exports tokenmanager.ErrNotLoggedIn so callers in
 // the cli package can errors.Is against it without an extra import.

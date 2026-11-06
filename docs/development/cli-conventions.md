@@ -72,7 +72,10 @@ always runnable in every build.
   options, summary provider). Agent CRUD lives under `entire agent`.
 - `auth`: `login`, `logout`, `status`, `contexts`, `switch`, plus
   `token` (prints the active control-plane bearer to stdout for scripting/curl;
-  honors `ENTIRE_TOKEN`, else the refreshed active-context login JWT). That
+  honors `ENTIRE_TOKEN`, then `ENTIRE_SERVICE_ACCOUNT`, else the refreshed
+  active-context login JWT), plus the experimental `service-account` group
+  (`enroll`, `key create|activate|list|show|revoke`; see
+  [service-account keys](../architecture/service-account-keys.md)). That
   token is also accepted directly at every entire-api cell (e.g.
   `https://aws-us-east-2.api.entire.io/api/v1`), so `token --jurisdiction
   <slug>` is deprecated: the flag stays registered but hidden and fails with
@@ -157,11 +160,14 @@ always runnable in every build.
   reached the listing, as `[]` when empty, so a satisfied request stays
   distinguishable from the default where the key is absent. Paths that return
   before the listing — not logged in, env token, a failed fetch — omit it
-  along with the rest. `env_token` and `token_source` are the exception: where
-  the bearer came from is settled before `/me` is consulted, so they are emitted
-  even for a bearer `/me` rejected — a script told only `logged_in:false` could
-  not otherwise see that `ENTIRE_TOKEN` supplied the token and is still winning
-  over every stored context. Every runtime failure reachable once `--json`
+  along with the rest. `env_token`, `credential_source` and `token_source` are
+  the exception: where the bearer came from is settled before `/me` is
+  consulted, so they are emitted even for a bearer `/me` rejected — a script
+  told only `logged_in:false` could not otherwise see that `ENTIRE_TOKEN`
+  supplied the token and is still winning over every stored context.
+  `env_token` means exactly "ENTIRE_TOKEN supplied the bearer";
+  `credential_source` (`context`, `env_token`, `service_account`) is the field
+  that also distinguishes a key-minted service-account session. Every runtime failure reachable once `--json`
   is set likewise prints an envelope carrying `error`, so `--json | jq
   .logged_in` parses: a hard fetch failure (network, DNS, 5xx), an unresolvable
   target (malformed `ENTIRE_TOKEN`, unreadable `contexts.json`, unknown

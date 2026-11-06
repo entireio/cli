@@ -185,6 +185,13 @@ func LocalIdentityCacheKey() (string, error) {
 		}, "|"), nil
 	}
 
+	if target, ok, err := ServiceAccountTarget(); ok {
+		if err != nil {
+			return "", err
+		}
+		return strings.Join([]string{"service-account", target.CoreURL, os.Getenv(ServiceAccountEnvVar)}, "|"), nil
+	}
+
 	c, ok, err := ActiveContext()
 	if err != nil {
 		return "", err

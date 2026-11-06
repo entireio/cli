@@ -103,10 +103,14 @@ func TestMain(m *testing.M) {
 	// filters only GIT_CONFIG_*, so it reaches the spawned binary too — a test
 	// asserting the no-identity guidance would instead get a transport error
 	// from the host in the developer's token aud.
-	if err := os.Unsetenv(auth.EnvTokenVar); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to unset %s: %v\n", auth.EnvTokenVar, err)
-		os.RemoveAll(tmpDir)
-		os.Exit(1)
+	// ENTIRE_SERVICE_ACCOUNT outranks stored contexts the same way, so every
+	// credential selector is cleared from the one shared list.
+	for _, name := range auth.CredentialEnvVars() {
+		if err := os.Unsetenv(name); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to unset %s: %v\n", name, err)
+			os.RemoveAll(tmpDir)
+			os.Exit(1)
+		}
 	}
 
 	// Same reason for the agents' relocated homes: tests steer them through

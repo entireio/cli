@@ -224,6 +224,27 @@ func TestResolveEntireIdentityProfile(t *testing.T) {
 	profile := &authProfile{DisplayName: "Entire User", Email: "entire@example.com"}
 	ctxEntry := &contexts.Context{Name: "work", CoreURL: "https://core.example.test"}
 
+	t.Run("service account fails closed without reading stored logins", func(t *testing.T) {
+		t.Parallel()
+		deps := identityProfileDependencies{
+			lookupEnv: func(name string) (string, bool) {
+				return "svc_01HKZ3J4N5P6Q7R8S9T0V1W2X3", name == cliauth.ServiceAccountEnvVar
+			},
+			activeContext: func() (*contexts.Context, bool, error) {
+				t.Fatal("a stored human login must not stand in for a service account")
+				return nil, false, nil
+			},
+			fetchProfile: func(context.Context, string, string) (*authProfile, error) {
+				t.Fatal("no profile is fetched for a service account")
+				return nil, errors.New("unexpected profile fetch")
+			},
+		}
+		_, err := resolveEntireIdentityProfile(t.Context(), deps)
+		if !errors.Is(err, errEntireServiceAccountIdentity) {
+			t.Fatalf("error = %v, want errEntireServiceAccountIdentity", err)
+		}
+	})
+
 	t.Run("stored context", func(t *testing.T) {
 		t.Parallel()
 		deps := identityProfileDependencies{
@@ -409,6 +430,27 @@ func TestRecoverGitIdentity(t *testing.T) {
 		"ENTIRE_TOKEN overrides stored logins, so automatic sign-in cannot repair this session.\n" +
 		"Fix or unset ENTIRE_TOKEN, then rerun `entire enable`.\n" +
 		gitConfigTail
+
+	t.Run("service account gets guidance, never a login prompt", func(t *testing.T) {
+		t.Parallel()
+		deps := identityRecoveryDependencies{
+			resolve: func(context.Context) (identityProfileResult, error) {
+				return identityProfileResult{}, errEntireServiceAccountIdentity
+			},
+			login: func(context.Context, io.Writer, io.Writer, string, bool) error {
+				t.Fatal("a service-account process must not start a human login")
+				return nil
+			},
+			canPrompt: func() bool { return true },
+		}
+		_, err := recoverGitIdentity(t.Context(), io.Discard, io.Discard, false, deps)
+		want := "Git identity is missing, and ENTIRE_SERVICE_ACCOUNT is set.\n" +
+			"A service account cannot supply a git author, and it overrides stored logins.\n" +
+			gitConfigTail
+		if err == nil || err.Error() != want {
+			t.Fatalf("error = %v, want the service-account guidance", err)
+		}
+	})
 
 	t.Run("login once then retry same target", func(t *testing.T) {
 		t.Parallel()
