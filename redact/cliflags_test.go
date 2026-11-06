@@ -87,6 +87,12 @@ func TestString_CommandLinePasswords(t *testing.T) {
 		{name: "netrc comment between fields", input: "machine 127.0.0.1\n login alice\n # build account\n password " + p + "\n", want: "machine 127.0.0.1\n login alice\n # build account\n password REDACTED\n"},
 		{name: "dash-leading value after equals", input: "wget --password=-" + p + " https://example.com", want: "wget --password=REDACTED https://example.com"},
 		{name: "openssl quoted source with blanks", input: "openssl enc -aes-128-cbc -pass 'pass: " + p + " '", want: "openssl enc -aes-128-cbc -pass 'pass:REDACTED'"},
+		{name: "JSON-escaped quoted argument with a semicolon", input: `{"cmd":"mysql -e \"select 1; select 2\" -p` + p + `"}`, want: `{"cmd":"mysql -e \"select 1; select 2\" -pREDACTED"}`},
+		{name: "quoted password between plus signs", input: "mysql -p'+" + p + "+' app", want: "mysql -p'REDACTED' app"},
+		{name: "quoted password between dots", input: "mysql -p'." + p + ".' app", want: "mysql -p'REDACTED' app"},
+		{name: "client run through sh -c in a container", input: "docker exec mysql sh -c 'mysql -p" + p + " app'", want: "docker exec mysql sh -c 'mysql -pREDACTED app'"},
+		{name: "apostrophe earlier on the line", input: "Let's connect with mysql -u root -p'" + p + "' app", want: "Let's connect with mysql -u root -p'REDACTED' app"},
+		{name: "netrc escaped quote", input: `machine 127.0.0.1 login alice password "abc\"` + p + `"`, want: `machine 127.0.0.1 login alice password "REDACTED"`},
 	})
 }
 
@@ -131,6 +137,9 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		`{"cmd":"mysql -uroot -p", "cwd":"/app"}`,
 		`cmd := "mysql -uroot -p" + password + " app"`,
 		`cmd := "mysql -uroot -p"+password+" app"`,
+		`bash -c "mysql -uroot -p"; echo "done"`,
+		`netrc := "machine h login me password " + password + "\n"`,
+		`cmd := "mongosh --password " + password + " db"`,
 		"mysql -u root -p$(cat /run/secrets/pw) db",
 		"mysql -u root -e 'select 1' -p",
 		"docker run --name mysql \\\n  -p 3306:3306 mysql:8",

@@ -13,12 +13,13 @@ import (
 const cliFlagValue = `"[^"\r\n]*"|'[^'\r\n]*'|[^\s'"` + "`" + `|;&()<>]+`
 
 // cliSameCommand is the text between a command name and one of its flags. It
-// skips quoted strings, escaped characters (\;) and escaped line breaks (a
-// command continued with a trailing backslash), and otherwise never crosses a
-// line break, a shell operator or a backtick (which starts a command
-// substitution, or ends Markdown code), so a flag is only read as belonging
-// to the command that precedes it in the same pipeline segment.
-const cliSameCommand = `(?:\\\r?\n|\\[^\r\n]|"[^"\r\n]*"|'[^'\r\n]*'|[^\r\n|;&` + "`" + `])`
+// skips quoted strings (also JSON-escaped ones, \"select 1; select 2\"),
+// escaped characters (\;) and escaped line breaks (a command continued with a
+// trailing backslash), and otherwise never crosses a line break, a shell
+// operator or a backtick (which starts a command substitution, or ends
+// Markdown code), so a flag is only read as belonging to the command that
+// precedes it in the same pipeline segment.
+const cliSameCommand = `(?:\\\r?\n|\\"[^"\r\n]*?\\"|\\[^\r\n]|"[^"\r\n]*"|'[^'\r\n]*'|[^\r\n|;&` + "`" + `])`
 
 // cliBlank separates a flag from its value or from the next flag, possibly
 // across an escaped line break.
@@ -112,10 +113,11 @@ var cliPasswordFlags = []cliPasswordFlag{
 // 127.0.0.1:8080:80/tcp.
 var portMappingPattern = regexp.MustCompile(`^(?:[0-9.]+:)?[0-9]+(?:-[0-9]+)?:[0-9]+(?:-[0-9]+)?(?:/(?:tcp|udp|sctp))?$`)
 
-// netrcValue is a .netrc token. A quote or backtick ends it when whitespace or
-// a shell metacharacter follows, so the closing quote of
+// netrcValue is a .netrc token. A double-quoted one may hold escaped quotes
+// ("abc\"def", as curl reads it). Outside quotes, a quote or backtick ends it
+// when whitespace or a shell metacharacter follows, so the closing quote of
 // echo "machine h login me password p" > ~/.netrc stays outside the value.
-const netrcValue = `"[^"\r\n]*"|'[^'\r\n]*'|[^\s"'` + "`" + `]+(?:["'` + "`" + `]+[^\s"'` + "`" + `;|&()<>][^\s"'` + "`" + `]*)*`
+const netrcValue = `"(?:[^"\\\r\n]|\\[^\r\n])*"|'[^'\r\n]*'|[^\s"'` + "`" + `]+(?:["'` + "`" + `]+[^\s"'` + "`" + `;|&()<>][^\s"'` + "`" + `]*)*`
 
 // netrcEntry starts a .netrc entry. A default entry must start a line or a
 // quoted string, so "by default login with password is" is not one. Group 1
@@ -166,11 +168,13 @@ func appendLongPasswordFlags(regions []taggedRegion, s string) []taggedRegion {
 	if !strings.Contains(s, "--pass") {
 		return regions
 	}
+	lines := quoteScan{s: s}
 	for _, loc := range cliLongPasswordPattern.FindAllStringSubmatchIndex(s, -1) {
 		// After "=" a leading '-' is part of the value; after a blank it
 		// starts the next flag.
 		blank := s[loc[2]] != '='
-		if r, ok := passwordValueRegion(s, shellWordValue(s, loc[4], loc[5]), blank, blank); ok {
+		v := shellWordValue(s, loc[4], loc[5], lines.stringEnd(loc[2]-1))
+		if r, ok := passwordValueRegion(s, v, blank, blank); ok {
 			regions = append(regions, r)
 		}
 	}
@@ -178,34 +182,65 @@ func appendLongPasswordFlags(regions []taggedRegion, s string) []taggedRegion {
 }
 
 // appendPasswords adds the value of every password flag in the segment of
-// each command f defines, so a second flag (openssl -passin pass:a -passout
-// pass:b) is read too. A flag inside a quoted argument (the SQL of mysql -e
-// 'select -p1') is text, not a flag.
+// each command f defines. A command inside a quoted argument of an earlier
+// one (docker exec db sh -c 'mysql -pX') runs on its own, so its segment ends
+// with that argument; any other command in an earlier segment was read with
+// it.
 func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string) []taggedRegion {
 	if !slices.ContainsFunc(f.needles, func(n string) bool { return strings.Contains(s, n) }) {
 		return regions
 	}
-	scanned := 0
+	lines := quoteScan{s: s}
+	var segment quoteScan
+	segmentEnd, nestedEnd := 0, 0
 	for _, cmd := range f.command.FindAllStringIndex(s, -1) {
-		if cmd[0] < scanned && !f.leading || f.containerName && isContainerNameArgument(s, cmd[0]) {
+		if f.containerName && isContainerNameArgument(s, cmd[0]) {
 			continue
 		}
-		rest := cliSegmentRest.FindString(s[cmd[1]:])
-		scanned = cmd[1] + len(rest)
-		for _, loc := range f.flag.FindAllStringSubmatchIndex(rest, -1) {
-			if isQuotedAt(rest, loc[0]) {
+		stringEnd := lines.stringEnd(cmd[0])
+		end := len(s)
+		switch {
+		case cmd[0] >= segmentEnd:
+			segment = quoteScan{s: s, i: cmd[1]}
+		case f.leading:
+		default:
+			argEnd, nested := segment.stringAt(cmd[0])
+			if !nested || cmd[0] < nestedEnd {
 				continue
 			}
-			if r, ok := f.valueRegion(s, cmd[1]+loc[2], cmd[1]+loc[3]); ok {
-				regions = append(regions, r)
-			}
+			end = max(argEnd-1, cmd[1])
+		}
+		rest := cliSegmentRest.FindString(s[cmd[1]:end])
+		if end == len(s) {
+			segmentEnd = max(segmentEnd, cmd[1]+len(rest))
+		} else {
+			nestedEnd = cmd[1] + len(rest)
+		}
+		regions = f.appendFlags(regions, s, cmd[1], rest, stringEnd)
+	}
+	return regions
+}
+
+// appendFlags adds the value of every password flag in rest, the segment
+// after a command that ends at base, so a second flag (openssl -passin pass:a
+// -passout pass:b) is read too. A flag inside a quoted argument (the SQL of
+// mysql -e 'select -p1') is text, not a flag. stringEnd is where the quoted
+// string holding the command ends, or -1.
+func (f cliPasswordFlag) appendFlags(regions []taggedRegion, s string, base int, rest string, stringEnd int) []taggedRegion {
+	quotes := quoteScan{s: s[:base+len(rest)], i: base}
+	for _, loc := range f.flag.FindAllStringSubmatchIndex(rest, -1) {
+		if _, quoted := quotes.stringAt(base + loc[0]); quoted {
+			continue
+		}
+		if r, ok := f.valueRegion(s, base+loc[2], base+loc[3], stringEnd); ok {
+			regions = append(regions, r)
 		}
 	}
 	return regions
 }
 
-func (f cliPasswordFlag) valueRegion(s string, start, end int) (taggedRegion, bool) {
-	v := shellWordValue(s, start, end)
+func (f cliPasswordFlag) valueRegion(s string, start, end, stringEnd int) (taggedRegion, bool) {
+	v := shellWordValue(s, start, end, stringEnd)
 	if f.prefix != "" {
 		var ok bool
 		if v, ok = v.trimPrefix(s, f.prefix); !ok {
@@ -225,20 +260,25 @@ type cliValue struct {
 	// quoted marks a value that was one quoted string, and singleQuoted one
 	// in single quotes, where $ is literal.
 	quoted, singleQuoted bool
+	// gap marks a quoted value that is the gap between two strings in code
+	// or JSON, not a value (see isStringGap).
+	gap bool
 }
 
 // shellWordValue returns the password in the shell word that starts at start,
 // whose first piece cliFlagValue matched up to end. The shell joins quoted
 // and bare pieces into one argument ('alpha'hunter2, "abc\"def"), so the
 // value is the whole word, without its quotes when it is one quoted string.
-func shellWordValue(s string, start, end int) cliValue {
+// stringEnd is where the quoted string holding the flag ends, or -1.
+func shellWordValue(s string, start, end, stringEnd int) cliValue {
 	wordEnd := shellWordEnd(s, start)
 	if wordEnd <= start {
 		wordEnd = end
 	}
 	if pieceEnd, quoteLen := quotedPiece(s, start); quoteLen > 0 {
 		inner := cliValue{start: start + quoteLen, end: pieceEnd - quoteLen, quoted: true, singleQuoted: s[start] == '\''}
-		if pieceEnd >= wordEnd || isLiteralGap(s[inner.start:inner.end]) {
+		inner.gap = inner.start == stringEnd && isStringGap(s[inner.start:inner.end])
+		if pieceEnd >= wordEnd || inner.gap {
 			return inner
 		}
 	}
@@ -365,31 +405,63 @@ func joinsBareWord(inner string) bool {
 	return strings.TrimSpace(inner) == inner && !strings.ContainsAny(inner, ";|&<>()`,:")
 }
 
-// isQuotedAt reports whether position p of s is inside a quoted string.
-func isQuotedAt(s string, p int) bool {
-	for i := 0; i < p; i++ {
-		if end, quoteLen := quotedPiece(s, i); quoteLen > 0 {
-			if p < end {
-				return true
-			}
-			i = end - 1
-		} else if s[i] == '\\' {
-			i++
-		}
-	}
-	return false
+// quoteScan finds the quoted strings of s, from position i on, in one pass
+// for queries at increasing positions, so a line with many flags or commands
+// is read once.
+type quoteScan struct {
+	s string
+	// i is where the scan goes on; start and end bound the last quoted
+	// string it found.
+	i, start, end int
 }
 
-// isLiteralGap reports whether the inside of a quoted piece is the gap
-// between two string literals rather than a value: JSON separators
-// ({"cmd":"mysql -p","x":1}), or a concatenation in code
-// ("mysql -p" + password + " db").
-func isLiteralGap(s string) bool {
-	trimmed := strings.TrimSpace(s)
-	if trimmed == "" {
-		return s != ""
+// stringAt returns the end of the quoted string that p is inside, after its
+// opening quote, and false when p is not in one. p is never before an
+// earlier query's.
+func (q *quoteScan) stringAt(p int) (end int, ok bool) {
+	if q.start < p && p < q.end {
+		return q.end, true
 	}
-	if strings.Trim(trimmed, ",:[]{}") == "" {
+	for q.i < p {
+		if end, quoteLen := quotedPiece(q.s, q.i); quoteLen > 0 {
+			q.start, q.end, q.i = q.i, end, end
+			if p < end {
+				return end, true
+			}
+			continue
+		}
+		if q.s[q.i] == '\\' {
+			q.i++
+		}
+		q.i++
+	}
+	return 0, false
+}
+
+// stringEnd returns where the quoted string that p is inside ends, after its
+// closing quote, or -1 when p is not in one. The scan starts at a line
+// start, so this is the string of the line the command is quoted in
+// ("mysql -p" + password, {"cmd":"mysql -p"}).
+func (q *quoteScan) stringEnd(p int) int {
+	if end, ok := q.stringAt(p); ok {
+		return end
+	}
+	return -1
+}
+
+// isStringGap reports whether the inside of a quoted piece that opens with
+// the closing quote of the string holding a command is the gap before the
+// next string rather than a value: JSON separators
+// ({"cmd":"mysql -p","x":1}), a concatenation in code
+// ("mysql -p" + password + " db") or shell operators
+// (sh -c "mysql -p"; echo "ok"). A password such as '+hunter2+' outside such
+// a string is a value.
+func isStringGap(s string) bool {
+	trimmed := strings.TrimSpace(s)
+	switch {
+	case trimmed == "" || strings.Trim(trimmed, ",:[]{}") == "":
+		return true
+	case strings.ContainsAny(trimmed, ";|&<>()`"):
 		return true
 	}
 	return strings.ContainsRune("+.", rune(trimmed[0])) && strings.ContainsRune("+.", rune(trimmed[len(trimmed)-1]))
@@ -408,6 +480,7 @@ func isContainerNameArgument(s string, start int) bool {
 
 func appendNetrcPasswords(regions []taggedRegion, s string) []taggedRegion {
 	for _, p := range netrcPasswordPatterns {
+		lines := quoteScan{s: s}
 		for _, loc := range p.pattern.FindAllStringSubmatchIndex(s, -1) {
 			machine := ""
 			if loc[2] >= 0 {
@@ -420,6 +493,7 @@ func appendNetrcPasswords(regions []taggedRegion, s string) []taggedRegion {
 			}
 			valueStart, valueEnd, singleQuoted := unquoteRangeQuoted(s, start, end)
 			v := cliValue{start: valueStart, end: valueEnd, quoted: valueStart != start, singleQuoted: singleQuoted}
+			v.gap = v.quoted && valueStart == lines.stringEnd(start-1) && isStringGap(s[valueStart:valueEnd])
 			if r, ok := passwordValueRegion(s, v, false, false); ok {
 				regions = append(regions, r)
 			}
@@ -439,7 +513,7 @@ func appendNetrcPasswords(regions []taggedRegion, s string) []taggedRegion {
 func passwordValueRegion(s string, v cliValue, dashFlag, requireNonWord bool) (taggedRegion, bool) {
 	value := s[v.start:v.end]
 	switch {
-	case value == "", dashFlag && !v.quoted && value[0] == '-', v.quoted && isLiteralGap(value):
+	case value == "", dashFlag && !v.quoted && value[0] == '-', v.gap:
 		return taggedRegion{}, false
 	case v.singleQuoted:
 		if !hasNonPlaceholderQuotedPasswordValue(value, true) {
