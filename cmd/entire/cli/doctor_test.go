@@ -2241,3 +2241,38 @@ func TestCheckDisconnectedMetadata_DeepFetchesWhenShallowHistoryHidesTheMergeBas
 	assert.Contains(t, stdout.String(), "Fixed")
 	testutil.RunGit(t, dir, "merge-base", "--is-ancestor", base, trackingRef)
 }
+
+// Brain moves Entire's pre-push hook to pre-push.pre-entire-brain and puts a
+// wrapper in front that runs it. Entire's hook still runs, so doctor reports the
+// hooks as installed, and --force leaves Brain's wrapper where it is.
+func TestCheckGitHooks_BrainPrePushWrapper(t *testing.T) {
+	dir := setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	_, err := strategy.InstallGitHook(context.Background(), true, false)
+	require.NoError(t, err)
+	prePush := filepath.Join(dir, ".git", "hooks", "pre-push")
+	require.NoError(t, os.Rename(prePush, prePush+".pre-entire-brain"))
+	// What entire-brain v0.4.0 writes, but for the plugin path.
+	wrapper := `#!/bin/sh
+# entire-brain push hook
+# Tells the local entire-brain plugin that a push is transferring this
+# repo's commits, so it uploads its fact store (detached, best-effort).
+if [ -x '/home/me/.local/share/entire/plugins/pkg/brain/entire-brain' ]; then
+  '/home/me/.local/share/entire/plugins/pkg/brain/entire-brain' memory notify --event push </dev/null >/dev/null 2>&1 &
+fi
+# Chain: run the pre-existing hook with the original stdin and arguments;
+# its exit code decides the push, exactly as before.
+backup="$0.pre-entire-brain"
+if [ -x "$backup" ]; then exec "$backup" "$@"; fi
+`
+	require.NoError(t, os.WriteFile(prePush, []byte(wrapper), 0o755))
+
+	for _, force := range []bool{false, true} {
+		cmd, stdout := newTestCmd(t)
+		require.NoError(t, checkGitHooks(cmd, force))
+		require.Contains(t, stdout.String(), "✓ Git hooks: OK", "force=%v", force)
+		data, err := os.ReadFile(prePush)
+		require.NoError(t, err)
+		require.Equal(t, wrapper, string(data), "Brain's wrapper stays in place (force=%v)", force)
+	}
+}
