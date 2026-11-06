@@ -574,13 +574,18 @@ func checkpointRefRejectionReason(err error) string {
 // ref. Non-branch refs and URL targets skip the optimization and let git
 // handle the no-op case.
 // Does not check any settings — callers are responsible for gating.
-func pushRefIfNeeded(ctx context.Context, target string, ref plumbing.ReferenceName) (delivered bool, err error) {
+//
+// moved reports that this call moved the ref on the target, as opposed to
+// finding it already there. Only then did the remote just finish receiving a
+// push, which is what the pre-push hook has to let settle before git sends the
+// user's own (see settleBeforeUserPush).
+func pushRefIfNeeded(ctx context.Context, target string, ref plumbing.ReferenceName) (delivered, moved bool, err error) {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
 		logging.Debug(ctx, "push skipped: open repository failed",
 			slog.String("ref", ref.String()),
 			slog.String("error", err.Error()))
-		return false, nil
+		return false, false, nil
 	}
 	defer repo.Close()
 
@@ -589,13 +594,13 @@ func pushRefIfNeeded(ctx context.Context, target string, ref plumbing.ReferenceN
 		// Ref doesn't exist locally — nothing to push, and nothing delivered.
 		// Reporting false rather than "vacuously delivered" keeps a caller that
 		// gates on delivery from acting on a ref that never existed.
-		return false, nil
+		return false, false, nil
 	}
 
 	if ref.IsBranch() && !remote.IsURL(target) && !hasUnpushedBranchRef(repo, target, localRef.Hash(), ref.Short()) {
 		// Local matches the target's tracking ref: the data is already there,
 		// which is delivery as far as any caller can tell.
-		return true, nil
+		return true, false, nil
 	}
 
 	return doPushRef(ctx, target, ref)
@@ -720,8 +725,9 @@ func flushAbortReason(ctx context.Context, consecutiveFailures int) string {
 // separately — delivered is true only where finishPush runs, meaning the ref is
 // on the target (freshly pushed or already up-to-date). Callers that act on
 // delivery, such as latching the captured checkpoint sync remote, must read
-// delivered and not err.
-func doPushRef(ctx context.Context, target string, ref plumbing.ReferenceName) (delivered bool, err error) {
+// delivered and not err. moved narrows delivered to the freshly pushed case:
+// git reported the ref updated rather than already up-to-date.
+func doPushRef(ctx context.Context, target string, ref plumbing.ReferenceName) (delivered, moved bool, err error) {
 	ctx, cancel := context.WithTimeout(ctx, checkpointPushBudget)
 	defer cancel()
 
@@ -735,7 +741,7 @@ func doPushRef(ctx context.Context, target string, ref plumbing.ReferenceName) (
 	result, err := tryPushRefCommon(ctx, target, ref)
 	if err == nil {
 		finishPush(ctx, stop, result, target)
-		return true, nil
+		return true, !result.upToDate, nil
 	}
 	stop("")
 
@@ -743,7 +749,7 @@ func doPushRef(ctx context.Context, target string, ref plumbing.ReferenceName) (
 	var protectedErr *protectedRefError
 	if errors.As(err, &protectedErr) {
 		printProtectedRefBlock(os.Stderr, refLabel, target)
-		return false, nil
+		return false, false, nil
 	}
 
 	// Non-interactive SSH (pre-push BatchMode): auth failures cannot be fixed by
@@ -753,7 +759,7 @@ func doPushRef(ctx context.Context, target string, ref plumbing.ReferenceName) (
 		fmt.Fprintf(os.Stderr, "[entire] Warning: couldn't push %s: %v\n", refLabel, err)
 		printNonInteractiveSSHAuthHint()
 		printCheckpointRemoteHint(target)
-		return false, nil
+		return false, false, nil
 	}
 
 	// Push failed - likely non-fast-forward. Try to fetch and rebase.
@@ -773,7 +779,7 @@ func doPushRef(ctx context.Context, target string, ref plumbing.ReferenceName) (
 			printNonInteractiveSSHAuthHint()
 		}
 		printCheckpointRemoteHint(target)
-		return false, nil // Don't fail the main push
+		return false, false, nil // Don't fail the main push
 	}
 	stop(" done")
 
@@ -789,10 +795,10 @@ func doPushRef(ctx context.Context, target string, ref plumbing.ReferenceName) (
 			printNonInteractiveSSHAuthHint()
 		}
 		printCheckpointRemoteHint(target)
-		return false, nil
+		return false, false, nil
 	}
 	finishPush(ctx, stop, result, target)
-	return true, nil
+	return true, !result.upToDate, nil
 }
 
 // refDisplayName returns a user-readable name for ref. Branch refs use the
