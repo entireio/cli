@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -105,4 +106,38 @@ func TestStatus_NamesARefusedUserSettingsFile(t *testing.T) {
 	assert.Contains(t, out.String(), "ignoring user settings")
 	assert.Contains(t, out.String(), "symbolic link")
 	assert.Contains(t, out.String(), "not set up", "the refused file configures nothing")
+}
+
+// A part of the user settings file that was dropped is otherwise invisible:
+// the user can see the setting in their own file and nothing says it is not in
+// effect. Both status paths name it.
+func TestStatus_NamesDroppedUserSettings(t *testing.T) {
+	root := t.TempDir()
+	testutil.InitRepo(t, root)
+	testutil.RunGit(t, root, "remote", "add", "origin", "https://github.com/acme/widgets.git")
+
+	configDir := t.TempDir()
+	t.Setenv(userdirs.EnvConfigDir, configDir)
+	t.Cleanup(settings.ClearOriginKeyCache)
+	t.Chdir(root)
+
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, usersettings.FileName), []byte(`{
+	  "preferences": {"checkpoint_remote": {"provider": "github", "repo": "mydev/my-checkpoints"}},
+	  "repos": {"gh/acme/widgets": {"enabled": true}}
+	}`), 0o600))
+
+	var text bytes.Buffer
+	require.NoError(t, runStatus(t.Context(), &text, false, false))
+	assert.Contains(t, text.String(), "ignoring user setting: preferences: checkpoint_remote")
+
+	var detailed bytes.Buffer
+	require.NoError(t, runStatus(t.Context(), &detailed, true, false))
+	assert.Contains(t, detailed.String(), "ignoring user setting: preferences: checkpoint_remote")
+
+	var out bytes.Buffer
+	require.NoError(t, runStatus(t.Context(), &out, false, true))
+	var got statusJSON
+	require.NoError(t, json.Unmarshal(out.Bytes(), &got))
+	require.Len(t, got.UserSettingsIgnored, 1)
+	assert.Contains(t, got.UserSettingsIgnored[0], "checkpoint_remote")
 }
