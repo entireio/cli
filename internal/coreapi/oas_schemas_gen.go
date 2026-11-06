@@ -4658,6 +4658,186 @@ func (s *CreateServiceAccountInputBodyAdditional) init() CreateServiceAccountInp
 	return m
 }
 
+// Ref: #/components/schemas/CreateServiceAccountSecretBody
+type CreateServiceAccountSecretBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema OptURI `json:"$schema"`
+	// Lifetime in days. Defaults to 90.
+	ExpiresInDays   OptInt64 `json:"expires_in_days"`
+	AdditionalProps CreateServiceAccountSecretBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *CreateServiceAccountSecretBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetExpiresInDays returns the value of ExpiresInDays.
+func (s *CreateServiceAccountSecretBody) GetExpiresInDays() OptInt64 {
+	return s.ExpiresInDays
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *CreateServiceAccountSecretBody) GetAdditionalProps() CreateServiceAccountSecretBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *CreateServiceAccountSecretBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetExpiresInDays sets the value of ExpiresInDays.
+func (s *CreateServiceAccountSecretBody) SetExpiresInDays(val OptInt64) {
+	s.ExpiresInDays = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *CreateServiceAccountSecretBody) SetAdditionalProps(val CreateServiceAccountSecretBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type CreateServiceAccountSecretBodyAdditional map[string]jx.Raw
+
+func (s *CreateServiceAccountSecretBodyAdditional) init() CreateServiceAccountSecretBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/CreateServiceAccountSecretOutputBody
+type CreateServiceAccountSecretOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema    OptURI    `json:"$schema"`
+	AccountID string    `json:"account_id"`
+	CreatedAt time.Time `json:"created_at"`
+	// Empty once the creator's account is erased.
+	CreatedBy OptString `json:"created_by"`
+	ExpiresAt time.Time `json:"expires_at"`
+	ID        string    `json:"id"`
+	// Last exchange, to the minute.
+	LastUsedAt OptDateTime `json:"last_used_at"`
+	// User-Agent of the last exchange.
+	LastUsedUserAgent OptString `json:"last_used_user_agent"`
+	// The secret. Store it now: it is not shown again.
+	Secret          string `json:"secret"`
+	AdditionalProps CreateServiceAccountSecretOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *CreateServiceAccountSecretOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetAccountID returns the value of AccountID.
+func (s *CreateServiceAccountSecretOutputBody) GetAccountID() string {
+	return s.AccountID
+}
+
+// GetCreatedAt returns the value of CreatedAt.
+func (s *CreateServiceAccountSecretOutputBody) GetCreatedAt() time.Time {
+	return s.CreatedAt
+}
+
+// GetCreatedBy returns the value of CreatedBy.
+func (s *CreateServiceAccountSecretOutputBody) GetCreatedBy() OptString {
+	return s.CreatedBy
+}
+
+// GetExpiresAt returns the value of ExpiresAt.
+func (s *CreateServiceAccountSecretOutputBody) GetExpiresAt() time.Time {
+	return s.ExpiresAt
+}
+
+// GetID returns the value of ID.
+func (s *CreateServiceAccountSecretOutputBody) GetID() string {
+	return s.ID
+}
+
+// GetLastUsedAt returns the value of LastUsedAt.
+func (s *CreateServiceAccountSecretOutputBody) GetLastUsedAt() OptDateTime {
+	return s.LastUsedAt
+}
+
+// GetLastUsedUserAgent returns the value of LastUsedUserAgent.
+func (s *CreateServiceAccountSecretOutputBody) GetLastUsedUserAgent() OptString {
+	return s.LastUsedUserAgent
+}
+
+// GetSecret returns the value of Secret.
+func (s *CreateServiceAccountSecretOutputBody) GetSecret() string {
+	return s.Secret
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *CreateServiceAccountSecretOutputBody) GetAdditionalProps() CreateServiceAccountSecretOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *CreateServiceAccountSecretOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetAccountID sets the value of AccountID.
+func (s *CreateServiceAccountSecretOutputBody) SetAccountID(val string) {
+	s.AccountID = val
+}
+
+// SetCreatedAt sets the value of CreatedAt.
+func (s *CreateServiceAccountSecretOutputBody) SetCreatedAt(val time.Time) {
+	s.CreatedAt = val
+}
+
+// SetCreatedBy sets the value of CreatedBy.
+func (s *CreateServiceAccountSecretOutputBody) SetCreatedBy(val OptString) {
+	s.CreatedBy = val
+}
+
+// SetExpiresAt sets the value of ExpiresAt.
+func (s *CreateServiceAccountSecretOutputBody) SetExpiresAt(val time.Time) {
+	s.ExpiresAt = val
+}
+
+// SetID sets the value of ID.
+func (s *CreateServiceAccountSecretOutputBody) SetID(val string) {
+	s.ID = val
+}
+
+// SetLastUsedAt sets the value of LastUsedAt.
+func (s *CreateServiceAccountSecretOutputBody) SetLastUsedAt(val OptDateTime) {
+	s.LastUsedAt = val
+}
+
+// SetLastUsedUserAgent sets the value of LastUsedUserAgent.
+func (s *CreateServiceAccountSecretOutputBody) SetLastUsedUserAgent(val OptString) {
+	s.LastUsedUserAgent = val
+}
+
+// SetSecret sets the value of Secret.
+func (s *CreateServiceAccountSecretOutputBody) SetSecret(val string) {
+	s.Secret = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *CreateServiceAccountSecretOutputBody) SetAdditionalProps(val CreateServiceAccountSecretOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type CreateServiceAccountSecretOutputBodyAdditional map[string]jx.Raw
+
+func (s *CreateServiceAccountSecretOutputBodyAdditional) init() CreateServiceAccountSecretOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/CreatedOrg
 type CreatedOrg struct {
 	// A URL to the JSON Schema for this object.
@@ -5589,6 +5769,9 @@ func (*DeleteRepoNoContent) deleteRepoRes() {}
 
 // DeleteServiceAccountNoContent is response for DeleteServiceAccount operation.
 type DeleteServiceAccountNoContent struct{}
+
+// DeleteServiceAccountSecretNoContent is response for DeleteServiceAccountSecret operation.
+type DeleteServiceAccountSecretNoContent struct{}
 
 // Ref: #/components/schemas/DeletionBlocker
 type DeletionBlocker struct {
@@ -11436,6 +11619,67 @@ func (s *ListServiceAccountGrantsOutputBodyAdditional) init() ListServiceAccount
 	return m
 }
 
+// Ref: #/components/schemas/ListServiceAccountSecretsOutputBody
+type ListServiceAccountSecretsOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema OptURI `json:"$schema"`
+	// Present only when more secrets remain.
+	NextCursor      OptString              `json:"next_cursor"`
+	Secrets         []ServiceAccountSecret `json:"secrets"`
+	AdditionalProps ListServiceAccountSecretsOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *ListServiceAccountSecretsOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetNextCursor returns the value of NextCursor.
+func (s *ListServiceAccountSecretsOutputBody) GetNextCursor() OptString {
+	return s.NextCursor
+}
+
+// GetSecrets returns the value of Secrets.
+func (s *ListServiceAccountSecretsOutputBody) GetSecrets() []ServiceAccountSecret {
+	return s.Secrets
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ListServiceAccountSecretsOutputBody) GetAdditionalProps() ListServiceAccountSecretsOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *ListServiceAccountSecretsOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetNextCursor sets the value of NextCursor.
+func (s *ListServiceAccountSecretsOutputBody) SetNextCursor(val OptString) {
+	s.NextCursor = val
+}
+
+// SetSecrets sets the value of Secrets.
+func (s *ListServiceAccountSecretsOutputBody) SetSecrets(val []ServiceAccountSecret) {
+	s.Secrets = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ListServiceAccountSecretsOutputBody) SetAdditionalProps(val ListServiceAccountSecretsOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ListServiceAccountSecretsOutputBodyAdditional map[string]jx.Raw
+
+func (s *ListServiceAccountSecretsOutputBodyAdditional) init() ListServiceAccountSecretsOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/ListServiceAccountsOutputBody
 type ListServiceAccountsOutputBody struct {
 	// A URL to the JSON Schema for this object.
@@ -13989,6 +14233,52 @@ func (o OptCreateRepoInputBodyObjectFormat) Get() (v CreateRepoInputBodyObjectFo
 
 // Or returns value if set, or given parameter if does not.
 func (o OptCreateRepoInputBodyObjectFormat) Or(d CreateRepoInputBodyObjectFormat) CreateRepoInputBodyObjectFormat {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
+// NewOptCreateServiceAccountSecretBody returns new OptCreateServiceAccountSecretBody with value set to v.
+func NewOptCreateServiceAccountSecretBody(v CreateServiceAccountSecretBody) OptCreateServiceAccountSecretBody {
+	return OptCreateServiceAccountSecretBody{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptCreateServiceAccountSecretBody is optional CreateServiceAccountSecretBody.
+type OptCreateServiceAccountSecretBody struct {
+	Value CreateServiceAccountSecretBody
+	Set   bool
+}
+
+// IsSet returns true if OptCreateServiceAccountSecretBody was set.
+func (o OptCreateServiceAccountSecretBody) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptCreateServiceAccountSecretBody) Reset() {
+	var v CreateServiceAccountSecretBody
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptCreateServiceAccountSecretBody) SetTo(v CreateServiceAccountSecretBody) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptCreateServiceAccountSecretBody) Get() (v CreateServiceAccountSecretBody, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptCreateServiceAccountSecretBody) Or(d CreateServiceAccountSecretBody) CreateServiceAccountSecretBody {
 	if v, ok := o.Get(); ok {
 		return v
 	}
@@ -22366,6 +22656,112 @@ func (s *ServiceAccountGrant) SetAdditionalProps(val ServiceAccountGrantAddition
 type ServiceAccountGrantAdditional map[string]jx.Raw
 
 func (s *ServiceAccountGrantAdditional) init() ServiceAccountGrantAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/ServiceAccountSecret
+type ServiceAccountSecret struct {
+	AccountID string    `json:"account_id"`
+	CreatedAt time.Time `json:"created_at"`
+	// Empty once the creator's account is erased.
+	CreatedBy OptString `json:"created_by"`
+	ExpiresAt time.Time `json:"expires_at"`
+	ID        string    `json:"id"`
+	// Last exchange, to the minute.
+	LastUsedAt OptDateTime `json:"last_used_at"`
+	// User-Agent of the last exchange.
+	LastUsedUserAgent OptString `json:"last_used_user_agent"`
+	AdditionalProps   ServiceAccountSecretAdditional
+}
+
+// GetAccountID returns the value of AccountID.
+func (s *ServiceAccountSecret) GetAccountID() string {
+	return s.AccountID
+}
+
+// GetCreatedAt returns the value of CreatedAt.
+func (s *ServiceAccountSecret) GetCreatedAt() time.Time {
+	return s.CreatedAt
+}
+
+// GetCreatedBy returns the value of CreatedBy.
+func (s *ServiceAccountSecret) GetCreatedBy() OptString {
+	return s.CreatedBy
+}
+
+// GetExpiresAt returns the value of ExpiresAt.
+func (s *ServiceAccountSecret) GetExpiresAt() time.Time {
+	return s.ExpiresAt
+}
+
+// GetID returns the value of ID.
+func (s *ServiceAccountSecret) GetID() string {
+	return s.ID
+}
+
+// GetLastUsedAt returns the value of LastUsedAt.
+func (s *ServiceAccountSecret) GetLastUsedAt() OptDateTime {
+	return s.LastUsedAt
+}
+
+// GetLastUsedUserAgent returns the value of LastUsedUserAgent.
+func (s *ServiceAccountSecret) GetLastUsedUserAgent() OptString {
+	return s.LastUsedUserAgent
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ServiceAccountSecret) GetAdditionalProps() ServiceAccountSecretAdditional {
+	return s.AdditionalProps
+}
+
+// SetAccountID sets the value of AccountID.
+func (s *ServiceAccountSecret) SetAccountID(val string) {
+	s.AccountID = val
+}
+
+// SetCreatedAt sets the value of CreatedAt.
+func (s *ServiceAccountSecret) SetCreatedAt(val time.Time) {
+	s.CreatedAt = val
+}
+
+// SetCreatedBy sets the value of CreatedBy.
+func (s *ServiceAccountSecret) SetCreatedBy(val OptString) {
+	s.CreatedBy = val
+}
+
+// SetExpiresAt sets the value of ExpiresAt.
+func (s *ServiceAccountSecret) SetExpiresAt(val time.Time) {
+	s.ExpiresAt = val
+}
+
+// SetID sets the value of ID.
+func (s *ServiceAccountSecret) SetID(val string) {
+	s.ID = val
+}
+
+// SetLastUsedAt sets the value of LastUsedAt.
+func (s *ServiceAccountSecret) SetLastUsedAt(val OptDateTime) {
+	s.LastUsedAt = val
+}
+
+// SetLastUsedUserAgent sets the value of LastUsedUserAgent.
+func (s *ServiceAccountSecret) SetLastUsedUserAgent(val OptString) {
+	s.LastUsedUserAgent = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ServiceAccountSecret) SetAdditionalProps(val ServiceAccountSecretAdditional) {
+	s.AdditionalProps = val
+}
+
+type ServiceAccountSecretAdditional map[string]jx.Raw
+
+func (s *ServiceAccountSecretAdditional) init() ServiceAccountSecretAdditional {
 	m := *s
 	if m == nil {
 		m = map[string]jx.Raw{}
