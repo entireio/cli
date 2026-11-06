@@ -61,6 +61,18 @@ func runEnableGlobal(cmd *cobra.Command, yes bool) error {
 	return nil
 }
 
+// runEnableGlobalOr is the enable command's RunE: with --global it runs
+// runEnableGlobal instead of run, so none of run's defers fire. They report
+// the current repository as enabled, and --global does not enable it.
+func runEnableGlobalOr(global, yes *bool, run func(*cobra.Command, []string) error) func(*cobra.Command, []string) error {
+	return func(cmd *cobra.Command, args []string) error {
+		if *global {
+			return runEnableGlobal(cmd, *yes)
+		}
+		return run(cmd, args)
+	}
+}
+
 // runDisableGlobal sets `global_enable: false`. Repositories enabled with
 // `entire enable` stay enabled, and the user-level Claude hooks stay: with the
 // flag off they do nothing in a repository that was never enabled.
@@ -80,8 +92,8 @@ func runDisableGlobal(cmd *cobra.Command) error {
 
 // globalEnableDisclosure is what `entire enable --global` asks the developer
 // to agree to.
-const globalEnableDisclosure = "With global enable on, Entire records your agent sessions in every git repository you work in, " +
-	"not just ones you ran `entire enable` in. Session checkpoints are pushed alongside your normal git pushes to that " +
+const globalEnableDisclosure = "With global enable on, Entire records your Claude Code sessions in every git repository you work in, " +
+	"not just ones you ran `entire enable` in; other agents are recorded only where you ran it. Session checkpoints are pushed alongside your normal git pushes to that " +
 	"repository's remote — including public repositories and forks. Run `entire disable` in a repository to stop it " +
 	"there, or `entire disable --global` to turn this off."
 
@@ -178,16 +190,21 @@ func ensureGlobalEnableHooks(cmd *cobra.Command) {
 	}
 }
 
+// skipGlobalEnableHooksAnnotation marks a command, and everything under it,
+// that must not (re)install the user-level hooks: `entire enable`, which
+// installs hooks itself, and `entire disable`, which is removing Entire rather
+// than using it.
+const (
+	skipGlobalEnableHooksAnnotation = "entire_skip_global_enable_hooks"
+	skipGlobalEnableHooksEnabled    = "true"
+)
+
 // skipsGlobalEnableHooks reports commands that must not (re)install the
 // user-level hooks: hidden commands, including the agent and git hook
-// invocations that run on every turn; `entire enable`, which installs hooks
-// itself; and `entire disable`, which is removing Entire rather than using it.
+// invocations that run on every turn, and annotated ones.
 func skipsGlobalEnableHooks(cmd *cobra.Command) bool {
 	for c := cmd; c != nil; c = c.Parent() {
-		if c.Hidden {
-			return true
-		}
-		if c.HasParent() && !c.Parent().HasParent() && (c.Name() == "enable" || c.Name() == "disable") {
+		if c.Hidden || c.Annotations[skipGlobalEnableHooksAnnotation] == skipGlobalEnableHooksEnabled {
 			return true
 		}
 	}

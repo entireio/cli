@@ -113,6 +113,12 @@ func TestGlobalEnable_HiddenEnableAndDisableCommandsSkipInstall(t *testing.T) {
 			t.Errorf("%v skips the user-level hooks", args)
 		}
 	}
+	// The annotation decides, not the name.
+	unannotated := &cobra.Command{Use: "enable"}
+	(&cobra.Command{Use: "entire"}).AddCommand(unannotated)
+	if skipsGlobalEnableHooks(unannotated) {
+		t.Error("an unannotated command named enable skips the user-level hooks")
+	}
 }
 
 // runGlobalCmd runs `entire <args>` in a fresh git repository with isolated
@@ -178,6 +184,8 @@ func TestEnableGlobal_WritesTheFlagAndInstallsHooks(t *testing.T) {
 		t.Errorf("enable --global set up the current repository (stat err = %v)", statErr)
 	}
 	assert.Contains(t, out, "Accepted with --yes")
+	assert.Contains(t, out, "records your Claude Code sessions in every git repository")
+	assert.Contains(t, out, "other agents are recorded only where you ran it")
 	assert.Contains(t, out, "public repositories and forks")
 }
 
@@ -276,6 +284,7 @@ func TestEnableGlobal_PromptAnswers(t *testing.T) {
 			if err != nil {
 				t.Fatalf("enable --global: %v\n%s", err, out)
 			}
+			assert.Contains(t, terminal.String(), "records your Claude Code sessions")
 			assert.Contains(t, terminal.String(), "public repositories and forks")
 			if tc.want {
 				assert.JSONEq(t, `{"global_enable": true}`, readUserSettingsFile(t, entireDir))

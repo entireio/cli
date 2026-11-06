@@ -427,8 +427,10 @@ selects among profiles whose instruction content is itself gated).
 
 `entire enable --global` sets `global_enable: true` in your user settings
 file (`~/.config/entire/settings.json`) and adds Entire's hooks to Claude
-Code's user-level settings. From then on, Entire records your agent sessions in
-every git repository you work in, not only the ones you ran `entire enable` in.
+Code's user-level settings. From then on, Entire records your Claude Code
+sessions in every git repository you work in, not only the ones you ran
+`entire enable` in. Other agents are recorded only in repositories enabled with
+`entire enable`.
 The first prompt in such a repository installs Entire's git hooks there and
 gives `.entire/` a `.gitignore` that keeps its local files out of git, and
 Entire contacts entire.io from that repository the way it does from any enabled

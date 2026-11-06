@@ -974,33 +974,25 @@ Entire's hook.
 If the current directory is not a git repository, Entire can initialize one
 for you and create an initial commit. It never creates or pushes to a remote —
 publish the repository yourself when you're ready.`,
-		RunE: func(cmd *cobra.Command, _ []string) (runErr error) {
-			// First, before the defers below: they report the current
-			// repository as enabled, and --global does not enable it.
-			if enableGlobal {
-				return runEnableGlobal(cmd, opts.Yes)
-			}
+		Annotations: map[string]string{skipGlobalEnableHooksAnnotation: skipGlobalEnableHooksEnabled},
+		RunE: runEnableGlobalOr(&enableGlobal, &opts.Yes, func(cmd *cobra.Command, _ []string) (runErr error) {
 			ctx := cmd.Context()
 			// The destination report needs the choice pointer, not the answer,
 			// so it can be registered here (first, therefore run last) while
 			// the picker itself waits until every flag has been accepted.
 			opts.checkpointRemoteChoice = &enableCheckpointRemoteChoice{}
 			defer func() { opts.checkpointRemoteChoice.report(cmd.Context(), cmd.OutOrStdout(), runErr) }()
-			// Best-effort: after a successful enable, probe and cache whether
-			// trails are enabled for the repo. A freshly bootstrapped repo has no
-			// origin yet, so this does nothing until the user adds one.
+			// After a successful enable, whichever path it took: the developer
+			// has now enabled this repository themselves, so claim it from
+			// global enable. Then, best-effort, probe and cache whether trails
+			// are enabled for the repo. A freshly bootstrapped repo has no
+			// origin yet, so the probe does nothing until the user adds one.
 			defer func() {
 				if runErr != nil {
 					return
 				}
+				claimRepoFromGlobalEnable(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr())
 				cacheTrailsEnablementAfterEnable(ctx, insecureHTTPAuth)
-			}()
-			// Whichever path enable takes below, the developer has now enabled
-			// this repository themselves.
-			defer func() {
-				if runErr == nil {
-					claimRepoFromGlobalEnable(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr())
-				}
 			}()
 
 			// Validate --checkpoint-backend up front so a bad value fails before we
@@ -1109,10 +1101,10 @@ publish the repository yourself when you're ready.`,
 			needsIdentity := repoExisted || (bootstrap != nil && bootstrap.commit)
 			return continueEnableAfterAgentValidation(ctx, cmd, opts, selectedAgent, repoRoot, needsIdentity,
 				identityFactory(cmd.OutOrStdout(), cmd.ErrOrStderr(), insecureHTTPAuth))
-		},
+		}),
 	}
 
-	cmd.Flags().BoolVar(&enableGlobal, flagGlobal, false, "Enable Entire in every repository you work in (sets global_enable in ~/.config/entire/settings.json)")
+	cmd.Flags().BoolVar(&enableGlobal, flagGlobal, false, "Enable Entire for Claude Code sessions in every repository you work in (sets global_enable in ~/.config/entire/settings.json)")
 	cmd.Flags().BoolVar(&ignoreUntracked, "ignore-untracked", false, "Commit all new files without tracking pre-existing untracked files")
 	cmd.Flags().StringVar(&opts.CheckpointPushRemote, flagCheckpointPushRemote, "", "Git remote for checkpoint uploads (saved to .entire/settings.local.json, even with --project)")
 	cmd.Flags().MarkHidden("ignore-untracked") //nolint:errcheck,gosec // flag is defined above
@@ -1301,6 +1293,7 @@ An external agent's hooks live inside its plugin, so removing them means asking 
 plugin to do it. Any removal step that fails - built-in agent, external plugin, git
 hooks, or repository state - makes the uninstall exit non-zero and report that Entire
 was not fully uninstalled.`,
+		Annotations: map[string]string{skipGlobalEnableHooksAnnotation: skipGlobalEnableHooksEnabled},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Before --uninstall: --global with it is refused, not ignored.
 			if disableGlobal {

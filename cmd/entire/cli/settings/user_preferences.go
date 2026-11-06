@@ -496,8 +496,10 @@ func (s *EntireSettings) CommittedKeysIgnoredForGlobalEnable() []string {
 // keys it cleared. Summarization sends transcripts to a model provider and
 // telemetry reports usage; neither should start because a repository's
 // committed file asks for it. A committed telemetry:false is kept, since it
-// only turns something off. Redaction is never touched: it only removes data.
-// checkpoint_remote has its own ownership gate.
+// only turns something off. Redaction is kept as committed: it chooses how
+// transcripts are scrubbed, and a secret scanner stays on whatever it says
+// (validateScannerSettings), so a repository may, say, swap betterleaks for
+// goredact for speed. checkpoint_remote has its own ownership gate.
 //
 // Called with only the committed layer (and clone preferences, which set none
 // of these) applied, so the developer's own layers still apply on top.

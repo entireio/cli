@@ -383,6 +383,21 @@ func reportGlobalEnableGitHookInstall(ctx context.Context) {
 		slog.String("worktree", root))
 }
 
+// ensureTurnStartSetup runs TurnStart's strategy setup, which installs the git
+// hooks when they are missing, and reports an install that only global enable
+// asked for. A failure is logged: it must not block the prompt.
+func ensureTurnStartSetup(ctx, logCtx context.Context) {
+	installed, err := strategy.EnsureSetupReport(ctx)
+	if err != nil {
+		logging.Warn(logCtx, "failed to ensure strategy setup",
+			slog.String("error", err.Error()))
+		return
+	}
+	if installed {
+		reportGlobalEnableGitHookInstall(logCtx)
+	}
+}
+
 func sessionStartMessage(agentName types.AgentName, emptyRepo bool) string {
 	if agentName == agent.AgentNameCodex {
 		if emptyRepo {
@@ -709,12 +724,7 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 	// it before CapturePrePromptState: the snapshot should describe the tree the
 	// agent starts from, not one setup is about to change.
 	_, setupSpan := perf.Start(ctx, "ensure_setup")
-	if installed, err := strategy.EnsureSetupReport(ctx); err != nil {
-		logging.Warn(logCtx, "failed to ensure strategy setup",
-			slog.String("error", err.Error()))
-	} else if installed {
-		reportGlobalEnableGitHookInstall(logCtx)
-	}
+	ensureTurnStartSetup(ctx, logCtx)
 	setupSpan.End()
 
 	// Capture pre-prompt state (including transcript position via TranscriptAnalyzer)
