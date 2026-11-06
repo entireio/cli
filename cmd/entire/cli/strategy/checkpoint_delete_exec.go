@@ -521,7 +521,7 @@ func deleteFromRemoteV1(ctx context.Context, root string, cid id.CheckpointID, t
 	if err != nil {
 		return DeleteOutcomeFailed, err.Error(), plumbing.ZeroHash
 	}
-	fetchErr := fetchURLIntoTmpRef(fetchCtx, root, target.URL, v1BranchRef.String(), tmpRef.String(), "checkpoint branch", true, foregroundFetch)
+	fetchErr := fetchURLIntoTmpRef(fetchCtx, root, target.URL, v1BranchRef.String(), tmpRef.String(), "checkpoint branch", true, foregroundFetch, 0)
 	release()
 	if fetchErr != nil {
 		return DeleteOutcomeFailed, fetchErr.Error(), plumbing.ZeroHash

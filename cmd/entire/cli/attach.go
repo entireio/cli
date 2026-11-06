@@ -402,7 +402,7 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 	// primary must land in its ref, not on the v1 branch where reads never
 	// look for a ULID. A freshly minted ID already matches the primary.
 	if err := cp.store.Write(ctx, cpkg.ReservedSession(writeOpts)); err != nil {
-		return fmt.Errorf("failed to write checkpoint: %w", err)
+		return fmt.Errorf("failed to write checkpoint: %w", withLegacyDivergedFix(err))
 	}
 
 	fmt.Fprintf(w, "Attached session %s\n", sessionID)

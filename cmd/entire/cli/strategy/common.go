@@ -57,6 +57,34 @@ var errStop = errors.New("stop iteration")
 
 var errNoMergeBase = errors.New("no merge base")
 
+// errShallowHidesMergeBase means git found no merge base, but a shallow
+// boundary is reachable from one of the tips: the shared history may simply
+// not be present, so the refs cannot be treated as disconnected.
+//
+// Callers that own the fetch heal it with RetryAfterDeepFetch. The message
+// names no command: a hand-run git fetch skips Entire's checkpoint token header
+// and SSH handling, and git fetch --unshallow deepens the whole clone,
+// downloading all of a shallow monorepo. Nor does it suggest entire doctor,
+// which repairs through the same replay and refuses too.
+var errShallowHidesMergeBase = errors.New("reachable shallow history prevents proving refs are disconnected; fetch the ref's full history and try again")
+
+// RetryAfterDeepFetch runs attempt, and when it refuses with
+// errShallowHidesMergeBase runs deepen, a fetch of that one ref at
+// remote.FullRefDepth, then attempts once more. The deep fetch is the same
+// ref-scoped heal the metadata read path uses: it removes a boundary on the
+// fetched history without deepening a shallow source tree. A boundary only the
+// local history reaches survives it, so the second refusal is returned as is.
+func RetryAfterDeepFetch(attempt, deepen func() error) error {
+	err := attempt()
+	if !errors.Is(err, errShallowHidesMergeBase) {
+		return err
+	}
+	if fetchErr := deepen(); fetchErr != nil {
+		return fmt.Errorf("%w; fetching the ref's full history failed: %w", err, fetchErr)
+	}
+	return attempt()
+}
+
 // checkpointRemoteBootstrapContextKey gates whether EnsurePrimaryRef is
 // allowed to perform a network fetch against a configured checkpoint_remote
 // (see bootstrapPrimaryFromCheckpointRemote). Unset/false in ctx means "no".
@@ -179,12 +207,16 @@ func SafelyAdvanceLocalRef(ctx context.Context, repo *git.Repository, localRefNa
 
 	mergeBase, err := getMergeBase(ctx, repoPath, localHash.String(), targetHash.String())
 	if errors.Is(err, errNoMergeBase) {
-		shallow, shallowErr := hasReachableShallowBoundary(ctx, repo, repoPath, localHash.String(), targetHash.String())
+		shallowSet, loadErr := loadShallowHashes(ctx, repoPath)
+		if loadErr != nil {
+			return fmt.Errorf("failed to load shallow boundaries for %s: %w", localRefName, loadErr)
+		}
+		shallow, shallowErr := reachesShallowBoundary(ctx, repoPath, shallowSet, localHash, targetHash)
 		if shallowErr != nil {
 			return fmt.Errorf("failed to check shallow history for %s: %w", localRefName, shallowErr)
 		}
 		if shallow {
-			return fmt.Errorf("no merge base for %s, and reachable shallow history prevents proving refs are disconnected; run 'entire doctor' or 'git fetch --unshallow' and try again", localRefName)
+			return fmt.Errorf("no merge base for %s: %w", localRefName, errShallowHidesMergeBase)
 		}
 		return replayDisconnectedLocalRef(ctx, repo, repoPath, localRefName, localHash, targetHash)
 	}
@@ -258,24 +290,17 @@ func replayLocalCommits(ctx context.Context, repo *git.Repository, reason string
 	return setRefHash(repo, localRefName, newTip)
 }
 
-func hasReachableShallowBoundary(ctx context.Context, repo *git.Repository, repoPath string, hashes ...string) (bool, error) {
+// reachesShallowBoundary reports whether the history of any of hashes
+// contains a commit in shallow, the clone's .git/shallow set.
+func reachesShallowBoundary(ctx context.Context, repoPath string, shallow map[plumbing.Hash]bool, hashes ...plumbing.Hash) (bool, error) {
+	if len(shallow) == 0 {
+		return false, nil
+	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	shallowHashes, err := repo.Storer.Shallow()
-	if err != nil {
-		return false, fmt.Errorf("read shallow commits: %w", err)
-	}
-	if len(shallowHashes) == 0 {
-		return false, nil
-	}
-
-	shallowCommits := make(map[string]struct{}, len(shallowHashes))
-	for _, hash := range shallowHashes {
-		shallowCommits[hash.String()] = struct{}{}
-	}
 	for _, hash := range hashes {
-		reachesBoundary, err := historyReachesShallowBoundary(ctx, repoPath, hash, shallowCommits)
+		reachesBoundary, err := historyReachesShallowBoundary(ctx, repoPath, hash, shallow)
 		if err != nil {
 			return false, err
 		}
@@ -286,15 +311,15 @@ func hasReachableShallowBoundary(ctx context.Context, repo *git.Repository, repo
 	return false, nil
 }
 
-func historyReachesShallowBoundary(ctx context.Context, repoPath, hash string, shallowCommits map[string]struct{}) (bool, error) {
-	cmd := exec.CommandContext(ctx, "git", "rev-list", hash)
+func historyReachesShallowBoundary(ctx context.Context, repoPath string, hash plumbing.Hash, shallow map[plumbing.Hash]bool) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "rev-list", hash.String())
 	cmd.Dir = repoPath
 	output, err := cmd.Output()
 	if err != nil {
 		return false, fmt.Errorf("git rev-list %s failed: %w", hash, err)
 	}
 	for _, commitHash := range strings.Fields(string(output)) {
-		if _, ok := shallowCommits[commitHash]; ok {
+		if shallow[plumbing.NewHash(commitHash)] {
 			return true, nil
 		}
 	}
@@ -992,7 +1017,7 @@ func bootstrapPrimaryFromCheckpointRemote(ctx context.Context, repo *git.Reposit
 	fetchCtx, release, err := startForegroundFetch(ctx, worktreeRoot)
 	if err == nil {
 		defer release()
-		err = fetchURLIntoTmpRef(fetchCtx, worktreeRoot, url, primary.String(), tmpRefName.String(), "metadata branch", true, foregroundFetch)
+		err = fetchURLIntoTmpRef(fetchCtx, worktreeRoot, url, primary.String(), tmpRefName.String(), "metadata branch", true, foregroundFetch, 0)
 	}
 	if err != nil {
 		// Warn, not Debug: `entire enable` is an explicit user action, and this
@@ -1121,7 +1146,7 @@ func healEmptyOrphanFromCheckpointRemote(ctx context.Context, repo *git.Reposito
 	// Unfiltered, for the same reason as the bootstrap fetch above: this heal
 	// replaces a data-free orphan with the real branch, which readers then treat
 	// as the checkpoint store.
-	if err := fetchURLIntoTmpRef(fetchCtx, worktreeRoot, url, primary.String(), tmpRefName.String(), "metadata branch", true, foregroundFetch); err != nil {
+	if err := fetchURLIntoTmpRef(fetchCtx, worktreeRoot, url, primary.String(), tmpRefName.String(), "metadata branch", true, foregroundFetch, 0); err != nil {
 		// Warn for the same reason as the bootstrap fetch: this only runs from an
 		// explicit setup flow, and failing leaves the repo on a data-free orphan.
 		logging.Warn(ctx, "checkpoint-remote: empty-orphan heal fetch failed; keeping local orphan",

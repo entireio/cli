@@ -767,3 +767,85 @@ func TestAdaptChunkSize_GrowsAfterProgressWithRefsLeft(t *testing.T) {
 
 	assert.Equal(t, 6, queue.ChunkSizeHint(checkpointRefPushChunkSize))
 }
+
+// TestCheckpointRefPushChunkSize_FitsWindowsCommandLine: a full chunk is one
+// `git push` argv, which Windows caps at 32,767 characters (CreateProcess).
+// Pushing the whole queue in one command failed there before git started once
+// the queue passed ~340 refs (#2986).
+func TestCheckpointRefPushChunkSize_FitsWindowsCommandLine(t *testing.T) {
+	t.Parallel()
+	const windowsCommandLineLimit = 32767
+	// Generous for git's own path and a long remote URL.
+	length := len(`"C:\Program Files\Git\mingw64\libexec\git-core\git.exe" push --no-verify --porcelain `) +
+		len("https://github.com/some-organization-name/some-fairly-long-checkpoint-repository-name.git")
+	hash := plumbing.NewHash(strings.Repeat("ab", 20))
+	for range checkpointRefPushChunkSize {
+		cid, err := id.GenerateULID()
+		require.NoError(t, err)
+		name, err := checkpoint.RefName(cid)
+		require.NoError(t, err)
+		length += 1 + len(checkpointRefPush{name: name, hash: hash}.refSpec())
+	}
+	assert.Less(t, length, windowsCommandLineLimit,
+		"one chunk's git push command line must fit Windows' CreateProcess limit")
+}
+
+// TestFlushCheckpointRefs_UnboundedIgnoresChunkSizeHint: the remembered size
+// fits chunks to the pre-push budget. An explicit push has no budget, so a
+// hint shrunk by a slow pre-push must not split it into one push per ref.
+func TestFlushCheckpointRefs_UnboundedIgnoresChunkSizeHint(t *testing.T) {
+	shrinkRefPushChunkSize(t, 3)
+	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 6)
+	countFile := filepath.Join(t.TempDir(), "pushes")
+	prepareGitRefsPrePush(t, workDir, bareDir)
+	hook := "#!/bin/sh\ncat >/dev/null\necho push >> '" + countFile + "'\nexit 0\n"
+	require.NoError(t, os.WriteFile(filepath.Join(bareDir, "hooks", "pre-receive"), []byte(hook), 0o755))
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	queue := enqueueRefs(t, repo, refs)
+	require.NoError(t, queue.SetChunkSizeHint(1))
+
+	restore := captureStderr(t)
+	pushed, err := flushCheckpointRefsQueue(t.Context(), repo, pushSettings{remote: bareDir}, flushOptions{})
+	restore()
+	require.NoError(t, err)
+	assert.Equal(t, 6, pushed.pushed)
+	data, err := os.ReadFile(countFile)
+	require.NoError(t, err)
+	assert.Equal(t, 2, strings.Count(string(data), "push"), "full-size chunks, not one push per ref")
+	assert.Equal(t, 1, queue.ChunkSizeHint(checkpointRefPushChunkSize), "the pre-push hint is left alone")
+}
+
+// TestPushQueuedCheckpointRefs_FallbackGetsBudgetAfterSlowBatch: an unbounded
+// batch may outlast checkpointFlushBudget, so the per-ref fallback's budget
+// starts after it. Otherwise a slow batch that failed would leave the fallback
+// an expired deadline and its refs would never be retried.
+func TestPushQueuedCheckpointRefs_FallbackGetsBudgetAfterSlowBatch(t *testing.T) {
+	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 3)
+	prepareGitRefsPrePush(t, workDir, bareDir)
+	// Multi-ref pushes are slow and refused; single-ref pushes land.
+	hook := "#!/bin/sh\nn=0\nwhile read -r old new ref; do n=$((n+1)); done\n" +
+		"if [ \"$n\" -gt 1 ]; then sleep 2; echo 'batch refused' >&2; exit 1; fi\nexit 0\n"
+	require.NoError(t, os.WriteFile(filepath.Join(bareDir, "hooks", "pre-receive"), []byte(hook), 0o755))
+
+	restoreBudget := checkpointFlushBudget
+	checkpointFlushBudget = 1500 * time.Millisecond
+	t.Cleanup(func() { checkpointFlushBudget = restoreBudget })
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	queue := enqueueRefs(t, repo, refs)
+
+	restore := captureStderr(t)
+	pushed, err := flushCheckpointRefsQueue(t.Context(), repo, pushSettings{remote: bareDir}, flushOptions{})
+	output := restore()
+	require.NoError(t, err, output)
+	assert.Equal(t, len(refs), pushed.pushed, "the fallback lands every ref of the slow failed batch")
+	assert.NotContains(t, output, "exhausted")
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.Empty(t, remaining)
+}

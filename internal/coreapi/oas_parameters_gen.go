@@ -640,7 +640,10 @@ type ListServiceAccountsParams struct {
 	PageSize OptInt32 `json:",omitempty,omitzero"`
 	// Opaque cursor from a previous response's nextPageToken.
 	PageToken OptString `json:",omitempty,omitzero"`
-	OrgId     string
+	// List the org's service accounts.
+	OrgId OptString `json:",omitempty,omitzero"`
+	// List the project's service accounts.
+	ProjectID OptString `json:",omitempty,omitzero"`
 }
 
 // LookupRepoBySlugParams is parameters of lookupRepoBySlug operation.

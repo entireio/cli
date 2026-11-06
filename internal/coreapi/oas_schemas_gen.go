@@ -4588,9 +4588,12 @@ func (s *CreateRepoInputBodyObjectFormat) UnmarshalText(data []byte) error {
 // Ref: #/components/schemas/CreateServiceAccountInputBody
 type CreateServiceAccountInputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI `json:"$schema"`
-	Name            string `json:"name"`
-	OrgId           string `json:"orgId"`
+	Schema OptURI `json:"$schema"`
+	Name   string `json:"name"`
+	// Optional. Must match the project's owning org.
+	OrgId OptString `json:"orgId"`
+	// Owning project. An org or an account owns it.
+	ProjectID       string `json:"project_id"`
 	AdditionalProps CreateServiceAccountInputBodyAdditional
 }
 
@@ -4605,8 +4608,13 @@ func (s *CreateServiceAccountInputBody) GetName() string {
 }
 
 // GetOrgId returns the value of OrgId.
-func (s *CreateServiceAccountInputBody) GetOrgId() string {
+func (s *CreateServiceAccountInputBody) GetOrgId() OptString {
 	return s.OrgId
+}
+
+// GetProjectID returns the value of ProjectID.
+func (s *CreateServiceAccountInputBody) GetProjectID() string {
+	return s.ProjectID
 }
 
 // GetAdditionalProps returns the value of AdditionalProps.
@@ -4625,8 +4633,13 @@ func (s *CreateServiceAccountInputBody) SetName(val string) {
 }
 
 // SetOrgId sets the value of OrgId.
-func (s *CreateServiceAccountInputBody) SetOrgId(val string) {
+func (s *CreateServiceAccountInputBody) SetOrgId(val OptString) {
 	s.OrgId = val
+}
+
+// SetProjectID sets the value of ProjectID.
+func (s *CreateServiceAccountInputBody) SetProjectID(val string) {
+	s.ProjectID = val
 }
 
 // SetAdditionalProps sets the value of AdditionalProps.
@@ -13295,11 +13308,29 @@ func (o NilResourcePersonDirectGrant) Or(d ResourcePersonDirectGrant) ResourcePe
 
 // Ref: #/components/schemas/OIDCProvider
 type OIDCProvider struct {
-	Description     OptString `json:"description"`
-	DisplayName     OptString `json:"displayName"`
-	ID              string    `json:"id"`
-	Issuer          string    `json:"issuer"`
+	// Attributes a binding filter can pin.
+	Attributes  []OIDCProviderAttribute `json:"attributes"`
+	Description OptString               `json:"description"`
+	// Deprecated: use name for the slug and label for the human label. Removal after 2027-05-01.
+	//
+	// Deprecated: schema marks this property as deprecated.
+	DisplayName OptString `json:"displayName"`
+	// The provider's OIDC setup guide.
+	DocsURL OptString `json:"docs_url"`
+	ID      string    `json:"id"`
+	Issuer  string    `json:"issuer"`
+	// Human label, such as GitHub Actions.
+	Label OptString `json:"label"`
+	// Stable slug, such as github-actions.
+	Name OptString `json:"name"`
+	// True when a project manager can bind this provider.
+	SelfServe       OptBool `json:"self_serve"`
 	AdditionalProps OIDCProviderAdditional
+}
+
+// GetAttributes returns the value of Attributes.
+func (s *OIDCProvider) GetAttributes() []OIDCProviderAttribute {
+	return s.Attributes
 }
 
 // GetDescription returns the value of Description.
@@ -13312,6 +13343,11 @@ func (s *OIDCProvider) GetDisplayName() OptString {
 	return s.DisplayName
 }
 
+// GetDocsURL returns the value of DocsURL.
+func (s *OIDCProvider) GetDocsURL() OptString {
+	return s.DocsURL
+}
+
 // GetID returns the value of ID.
 func (s *OIDCProvider) GetID() string {
 	return s.ID
@@ -13322,9 +13358,29 @@ func (s *OIDCProvider) GetIssuer() string {
 	return s.Issuer
 }
 
+// GetLabel returns the value of Label.
+func (s *OIDCProvider) GetLabel() OptString {
+	return s.Label
+}
+
+// GetName returns the value of Name.
+func (s *OIDCProvider) GetName() OptString {
+	return s.Name
+}
+
+// GetSelfServe returns the value of SelfServe.
+func (s *OIDCProvider) GetSelfServe() OptBool {
+	return s.SelfServe
+}
+
 // GetAdditionalProps returns the value of AdditionalProps.
 func (s *OIDCProvider) GetAdditionalProps() OIDCProviderAdditional {
 	return s.AdditionalProps
+}
+
+// SetAttributes sets the value of Attributes.
+func (s *OIDCProvider) SetAttributes(val []OIDCProviderAttribute) {
+	s.Attributes = val
 }
 
 // SetDescription sets the value of Description.
@@ -13337,6 +13393,11 @@ func (s *OIDCProvider) SetDisplayName(val OptString) {
 	s.DisplayName = val
 }
 
+// SetDocsURL sets the value of DocsURL.
+func (s *OIDCProvider) SetDocsURL(val OptString) {
+	s.DocsURL = val
+}
+
 // SetID sets the value of ID.
 func (s *OIDCProvider) SetID(val string) {
 	s.ID = val
@@ -13347,6 +13408,21 @@ func (s *OIDCProvider) SetIssuer(val string) {
 	s.Issuer = val
 }
 
+// SetLabel sets the value of Label.
+func (s *OIDCProvider) SetLabel(val OptString) {
+	s.Label = val
+}
+
+// SetName sets the value of Name.
+func (s *OIDCProvider) SetName(val OptString) {
+	s.Name = val
+}
+
+// SetSelfServe sets the value of SelfServe.
+func (s *OIDCProvider) SetSelfServe(val OptBool) {
+	s.SelfServe = val
+}
+
 // SetAdditionalProps sets the value of AdditionalProps.
 func (s *OIDCProvider) SetAdditionalProps(val OIDCProviderAdditional) {
 	s.AdditionalProps = val
@@ -13355,6 +13431,102 @@ func (s *OIDCProvider) SetAdditionalProps(val OIDCProviderAdditional) {
 type OIDCProviderAdditional map[string]jx.Raw
 
 func (s *OIDCProviderAdditional) init() OIDCProviderAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/OIDCProviderAttribute
+type OIDCProviderAttribute struct {
+	Description OptString `json:"description"`
+	// The value must not contain '*'.
+	Exact bool   `json:"exact"`
+	Label string `json:"label"`
+	// The attributeFilter key.
+	Name string `json:"name"`
+	// RE2 expression the pinned value must match.
+	Pattern OptString `json:"pattern"`
+	// Every filter must pin this attribute.
+	Required        bool `json:"required"`
+	AdditionalProps OIDCProviderAttributeAdditional
+}
+
+// GetDescription returns the value of Description.
+func (s *OIDCProviderAttribute) GetDescription() OptString {
+	return s.Description
+}
+
+// GetExact returns the value of Exact.
+func (s *OIDCProviderAttribute) GetExact() bool {
+	return s.Exact
+}
+
+// GetLabel returns the value of Label.
+func (s *OIDCProviderAttribute) GetLabel() string {
+	return s.Label
+}
+
+// GetName returns the value of Name.
+func (s *OIDCProviderAttribute) GetName() string {
+	return s.Name
+}
+
+// GetPattern returns the value of Pattern.
+func (s *OIDCProviderAttribute) GetPattern() OptString {
+	return s.Pattern
+}
+
+// GetRequired returns the value of Required.
+func (s *OIDCProviderAttribute) GetRequired() bool {
+	return s.Required
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *OIDCProviderAttribute) GetAdditionalProps() OIDCProviderAttributeAdditional {
+	return s.AdditionalProps
+}
+
+// SetDescription sets the value of Description.
+func (s *OIDCProviderAttribute) SetDescription(val OptString) {
+	s.Description = val
+}
+
+// SetExact sets the value of Exact.
+func (s *OIDCProviderAttribute) SetExact(val bool) {
+	s.Exact = val
+}
+
+// SetLabel sets the value of Label.
+func (s *OIDCProviderAttribute) SetLabel(val string) {
+	s.Label = val
+}
+
+// SetName sets the value of Name.
+func (s *OIDCProviderAttribute) SetName(val string) {
+	s.Name = val
+}
+
+// SetPattern sets the value of Pattern.
+func (s *OIDCProviderAttribute) SetPattern(val OptString) {
+	s.Pattern = val
+}
+
+// SetRequired sets the value of Required.
+func (s *OIDCProviderAttribute) SetRequired(val bool) {
+	s.Required = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *OIDCProviderAttribute) SetAdditionalProps(val OIDCProviderAttributeAdditional) {
+	s.AdditionalProps = val
+}
+
+type OIDCProviderAttributeAdditional map[string]jx.Raw
+
+func (s *OIDCProviderAttributeAdditional) init() OIDCProviderAttributeAdditional {
 	m := *s
 	if m == nil {
 		m = map[string]jx.Raw{}
@@ -22016,11 +22188,16 @@ func (s *RevokeServiceAccountAccessResourceType) UnmarshalText(data []byte) erro
 // Ref: #/components/schemas/ServiceAccount
 type ServiceAccount struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI    `json:"$schema"`
-	AccountId       string    `json:"accountId"`
-	CreatedAt       time.Time `json:"createdAt"`
-	Name            string    `json:"name"`
-	OrgId           string    `json:"orgId"`
+	Schema    OptURI    `json:"$schema"`
+	AccountId string    `json:"accountId"`
+	CreatedAt time.Time `json:"createdAt"`
+	Name      string    `json:"name"`
+	// Deprecated: use the project's owner. Removal after 2027-05-01.
+	//
+	// Deprecated: schema marks this property as deprecated.
+	OrgId OptString `json:"orgId"`
+	// Owning project.
+	ProjectID       OptString `json:"project_id"`
 	Status          string    `json:"status"`
 	SystemManaged   bool      `json:"systemManaged"`
 	AdditionalProps ServiceAccountAdditional
@@ -22047,8 +22224,13 @@ func (s *ServiceAccount) GetName() string {
 }
 
 // GetOrgId returns the value of OrgId.
-func (s *ServiceAccount) GetOrgId() string {
+func (s *ServiceAccount) GetOrgId() OptString {
 	return s.OrgId
+}
+
+// GetProjectID returns the value of ProjectID.
+func (s *ServiceAccount) GetProjectID() OptString {
+	return s.ProjectID
 }
 
 // GetStatus returns the value of Status.
@@ -22087,8 +22269,13 @@ func (s *ServiceAccount) SetName(val string) {
 }
 
 // SetOrgId sets the value of OrgId.
-func (s *ServiceAccount) SetOrgId(val string) {
+func (s *ServiceAccount) SetOrgId(val OptString) {
 	s.OrgId = val
+}
+
+// SetProjectID sets the value of ProjectID.
+func (s *ServiceAccount) SetProjectID(val OptString) {
+	s.ProjectID = val
 }
 
 // SetStatus sets the value of Status.
@@ -22189,11 +22376,16 @@ func (s *ServiceAccountGrantAdditional) init() ServiceAccountGrantAdditional {
 
 // Ref: #/components/schemas/ServiceAccountWithGrants
 type ServiceAccountWithGrants struct {
-	AccountId       string    `json:"accountId"`
-	CreatedAt       time.Time `json:"createdAt"`
-	Grants          []string  `json:"grants"`
-	Name            string    `json:"name"`
-	OrgId           string    `json:"orgId"`
+	AccountId string    `json:"accountId"`
+	CreatedAt time.Time `json:"createdAt"`
+	Grants    []string  `json:"grants"`
+	Name      string    `json:"name"`
+	// Deprecated: use the project's owner. Removal after 2027-05-01.
+	//
+	// Deprecated: schema marks this property as deprecated.
+	OrgId OptString `json:"orgId"`
+	// Owning project.
+	ProjectID       OptString `json:"project_id"`
 	Status          string    `json:"status"`
 	SystemManaged   bool      `json:"systemManaged"`
 	AdditionalProps ServiceAccountWithGrantsAdditional
@@ -22220,8 +22412,13 @@ func (s *ServiceAccountWithGrants) GetName() string {
 }
 
 // GetOrgId returns the value of OrgId.
-func (s *ServiceAccountWithGrants) GetOrgId() string {
+func (s *ServiceAccountWithGrants) GetOrgId() OptString {
 	return s.OrgId
+}
+
+// GetProjectID returns the value of ProjectID.
+func (s *ServiceAccountWithGrants) GetProjectID() OptString {
+	return s.ProjectID
 }
 
 // GetStatus returns the value of Status.
@@ -22260,8 +22457,13 @@ func (s *ServiceAccountWithGrants) SetName(val string) {
 }
 
 // SetOrgId sets the value of OrgId.
-func (s *ServiceAccountWithGrants) SetOrgId(val string) {
+func (s *ServiceAccountWithGrants) SetOrgId(val OptString) {
 	s.OrgId = val
+}
+
+// SetProjectID sets the value of ProjectID.
+func (s *ServiceAccountWithGrants) SetProjectID(val OptString) {
+	s.ProjectID = val
 }
 
 // SetStatus sets the value of Status.

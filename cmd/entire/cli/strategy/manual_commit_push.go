@@ -938,14 +938,21 @@ func flushCheckpointRefsWith(
 	}
 
 	// Fast path: push the refs a chunk per round-trip (fast-forward-only).
-	chunkSize := queue.ChunkSizeHint(checkpointRefPushChunkSize)
+	// The remembered size only fits a chunk to the flush budget, so an
+	// unbounded batch uses the full size and leaves the hint alone.
+	chunkSize := checkpointRefPushChunkSize
+	if opts.boundBatch {
+		chunkSize = queue.ChunkSizeHint(checkpointRefPushChunkSize)
+	}
 	batch := pushRefChunks(batchCtx, dest.target, existing, chunkSize, opts.chunkTimeout, opts.beforeChunk, onLanded)
 	if !opts.boundBatch {
 		flushCtx, cancelFlush = context.WithTimeout(withFlushBudget(pushCtx, budget), budget)
 	}
 	defer cancelFlush()
 	budgetCut := budgetExhausted()
-	adaptChunkSize(ctx, queue, chunkSize, batch, budgetCut)
+	if opts.boundBatch {
+		adaptChunkSize(ctx, queue, chunkSize, batch, budgetCut)
+	}
 	// Stalled chunks stay queued like refs never tried, behind the rest of the
 	// queue so the next pass starts with refs that may move.
 	if len(batch.stalled) > 0 {
@@ -1319,13 +1326,27 @@ func retryRefsIndividually(ctx, flushCtx context.Context, repo *git.Repository, 
 			continue
 		}
 		consecutiveFailures++
-		res.recordFailure(ctx, flushCtx, ref, err)
+		res.recordFailure(ctx, flushCtx, target, ref, err)
 	}
 	return res
 }
 
+// queuedRefWarning returns the line to print for a ref that stays queued, or ""
+// when the failure needs no warning.
+func queuedRefWarning(pushErr error, target string, ref plumbing.ReferenceName) string {
+	if reason := checkpointRefRejectionReason(pushErr); reason != "" {
+		return fmt.Sprintf("[entire] Warning: checkpoint ref %s remains queued (showing one rejection):\n%s", ref, reason)
+	}
+	if errors.Is(pushErr, errShallowHidesMergeBase) {
+		// Divergence alone stays quiet, but this one never clears on its own:
+		// every push would fetch and refuse again.
+		return fmt.Sprintf("[entire] Warning: checkpoint ref %s remains queued: %v (from %s)", ref, errShallowHidesMergeBase, displayPushTarget(target))
+	}
+	return ""
+}
+
 // recordFailure notes one ref the fallback could not push.
-func (res *refRetryResult) recordFailure(ctx, flushCtx context.Context, ref checkpointRefPush, err error) {
+func (res *refRetryResult) recordFailure(ctx, flushCtx context.Context, target string, ref checkpointRefPush, err error) {
 	logging.Warn(ctx, "git-refs push: checkpoint ref push/sync failed; left queued, not overwritten",
 		slog.String("ref", ref.name.String()), slog.String("error", err.Error()))
 	if nonInteractiveSSHAuthFailure(flushCtx, err) {
@@ -1333,9 +1354,7 @@ func (res *refRetryResult) recordFailure(ctx, flushCtx context.Context, ref chec
 		printNonInteractiveSSHAuthHint()
 	}
 	if res.rejectionWarning == "" {
-		if reason := checkpointRefRejectionReason(err); reason != "" {
-			res.rejectionWarning = fmt.Sprintf("[entire] Warning: checkpoint ref %s remains queued (showing one rejection):\n%s", ref.name, reason)
-		}
+		res.rejectionWarning = queuedRefWarning(err, target, ref.name)
 	}
 	if res.firstErr == nil {
 		res.firstErr = err

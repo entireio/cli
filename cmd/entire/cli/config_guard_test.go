@@ -10,6 +10,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/internal/entireclient/tokenstore"
+	"github.com/entireio/cli/internal/entireclient/userconfig"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 
 	"github.com/spf13/cobra"
@@ -48,10 +49,6 @@ var configCheckLedger = map[string]configCheckEntry{
 	"entire doctor logs":                {configCheckSkip, false, "reads .entire/logs only"},
 	"entire doctor bundle":              {configCheckSkip, false, "bundles local diagnostics only"},
 	"entire doctor migrate-checkpoints": {configCheckSkip, false, "rewrites local checkpoint refs; pushes go through the checked remote helper"},
-	"entire login":                      {configCheckAlways, false, "saves to the store even with ENTIRE_TOKEN set"},
-	"entire logout":                     {configCheckAlways, false, "deletes from the store even with ENTIRE_TOKEN set"},
-	"entire auth login":                 {configCheckAlways, false, "saves to the store even with ENTIRE_TOKEN set"},
-	"entire auth logout":                {configCheckAlways, false, "deletes from the store even with ENTIRE_TOKEN set"},
 }
 
 // ledgerEntryFor finds the row covering cmd.
@@ -145,9 +142,9 @@ func TestCheckConfigBeforeRun_EveryCommand(t *testing.T) {
 	check := func(envToken bool) {
 		for _, cmd := range commands {
 			mode := configCheckMode(cmd)
-			wantErr := mode == configCheckAlways || (mode == "" && !envToken)
+			wantErr := mode != configCheckSkip
 			err := checkConfigBeforeRun(cmd)
-			if gotErr := errors.Is(err, tokenstore.ErrBadConfig); gotErr != wantErr {
+			if gotErr := errors.Is(err, userconfig.ErrBadConfig); gotErr != wantErr {
 				t.Errorf("%q (ENTIRE_TOKEN set: %v): err = %v, want ErrBadConfig %v", cmd.CommandPath(), envToken, err, wantErr)
 			}
 		}
@@ -184,7 +181,7 @@ func TestRoot_BadConfigFailsEarly(t *testing.T) {
 	for _, args := range [][]string{{"auth", "status"}, {"login", "--device"}, {"status"}} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			out, err := executeRoot(t, args...)
-			if !errors.Is(err, tokenstore.ErrBadConfig) {
+			if !errors.Is(err, userconfig.ErrBadConfig) {
 				t.Fatalf("err = %v, want ErrBadConfig", err)
 			}
 			if out != "" {
@@ -194,16 +191,16 @@ func TestRoot_BadConfigFailsEarly(t *testing.T) {
 	}
 }
 
-// login/logout check despite ENTIRE_TOKEN.
-func TestRoot_EnvTokenStillChecksLogin(t *testing.T) {
+// ENTIRE_TOKEN doesn't skip the check.
+func TestRoot_EnvTokenStillChecksConfig(t *testing.T) {
 	writeBadConfig(t)
 	t.Setenv(auth.EnvTokenVar, "x")
 	t.Chdir(t.TempDir())
 
-	for _, args := range [][]string{{"login", "--device"}, {"auth", "login", "--device"}, {"logout"}, {"auth", "logout"}} {
+	for _, args := range [][]string{{"status"}, {"login", "--device"}, {"auth", "login", "--device"}, {"logout"}, {"auth", "logout"}} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			out, err := executeRoot(t, args...)
-			if !errors.Is(err, tokenstore.ErrBadConfig) {
+			if !errors.Is(err, userconfig.ErrBadConfig) {
 				t.Fatalf("err = %v, want ErrBadConfig", err)
 			}
 			if out != "" {
@@ -235,7 +232,7 @@ func TestDoctor_ReportsBadConfig(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetOut(&out)
 	err := checkUserConfig(cmd)
-	if !errors.Is(err, tokenstore.ErrBadConfig) {
+	if !errors.Is(err, userconfig.ErrBadConfig) {
 		t.Fatalf("err = %v, want ErrBadConfig", err)
 	}
 	for _, want := range []string{"Per-user config: INVALID", `unknown key "tokenstore"`} {
