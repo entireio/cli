@@ -883,7 +883,8 @@ func isCheckpointRemoteCommitted(ctx context.Context) bool {
 
 // pushResult describes what happened during a push attempt.
 type pushResult struct {
-	// upToDate is true when the remote already had all commits (nothing transferred).
+	// upToDate is true when every destination already had the ref (nothing
+	// transferred anywhere).
 	upToDate bool
 }
 
@@ -894,13 +895,25 @@ type pushResult struct {
 //
 // where flag '=' means the ref was already up-to-date. This is locale-independent,
 // unlike the human-readable "Everything up-to-date" message.
+//
+// A remote with several push URLs prints one block per destination, so one can
+// report '=' while another took the ref (' ' fast-forward, '+' forced, '*' new,
+// '-' deleted). The push is up-to-date only if no destination took anything.
+// Output with no status line at all is not up-to-date.
 func parsePushResult(output string) pushResult {
+	sawUpToDate := false
 	for _, line := range strings.Split(output, "\n") {
-		if strings.HasPrefix(line, "=\t") {
-			return pushResult{upToDate: true}
+		if len(line) < 2 || line[1] != '\t' {
+			continue
+		}
+		switch line[0] {
+		case '=':
+			sawUpToDate = true
+		case ' ', '+', '*', '-':
+			return pushResult{upToDate: false}
 		}
 	}
-	return pushResult{upToDate: false}
+	return pushResult{upToDate: sawUpToDate}
 }
 
 // finishPush stops the progress dots and prints "already up-to-date" or "done"

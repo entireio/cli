@@ -1512,6 +1512,60 @@ func TestDoPushRef_NewContent_SaysDone(t *testing.T) {
 	assert.NotContains(t, output, "already up-to-date", "should not say 'already up-to-date' when content was pushed")
 }
 
+func TestParsePushResult(t *testing.T) {
+	t.Parallel()
+
+	const ref = "refs/heads/entire/checkpoints/v1:refs/heads/entire/checkpoints/v1"
+	cases := []struct {
+		name     string
+		output   string
+		upToDate bool
+	}{
+		{"up to date", "To ../a.git\n=\t" + ref + "\t[up to date]\nDone\n", true},
+		{"new branch", "To ../a.git\n*\t" + ref + "\t[new branch]\nDone\n", false},
+		{"fast-forward", "To ../a.git\n \t" + ref + "\tabc1234..def5678\nDone\n", false},
+		{"forced", "To ../a.git\n+\t" + ref + "\tabc1234...def5678 (forced update)\nDone\n", false},
+		// Two push URLs, one already current and one new: git push prints a
+		// block per destination, and the second one took the ref.
+		{
+			"several destinations, one moved",
+			"warning: push negotiation failed; proceeding anyway with push\n" +
+				"To ../a.git\n=\t" + ref + "\t[up to date]\nDone\n" +
+				"To ../b.git\n*\t" + ref + "\t[new branch]\nDone\n",
+			false,
+		},
+		{"no status line", "Everything up-to-date\n", false},
+		{"windows line endings", "To ../a.git\r\n=\t" + ref + "\t[up to date]\r\nDone\r\n", true},
+	}
+	for _, tc := range cases {
+		assert.Equal(t, tc.upToDate, parsePushResult(tc.output).upToDate, tc.name)
+	}
+}
+
+// TestDoPushRef_SeveralPushURLs_OneMoved: a remote with several push URLs
+// pushes to each, and a ref that was new on any of them moved, even when the
+// first one reports it up to date.
+//
+// Not parallel: uses t.Chdir() and os.Stderr redirection.
+func TestDoPushRef_SeveralPushURLs_OneMoved(t *testing.T) {
+	workDir, current := setupBareRemoteWithCheckpointBranch(t)
+	empty := t.TempDir()
+	testutil.RunGit(t, empty, "init", "--bare")
+	testutil.RunGit(t, workDir, "remote", "add", "origin", current)
+	testutil.RunGit(t, workDir, "remote", "set-url", "--add", "--push", "origin", current)
+	testutil.RunGit(t, workDir, "remote", "set-url", "--add", "--push", "origin", empty)
+	t.Chdir(workDir)
+
+	restore := captureStderr(t)
+	delivered, moved, err := doPushRef(context.Background(), "origin", plumbing.NewBranchReferenceName(paths.MetadataBranchName))
+	output := restore()
+
+	require.NoError(t, err, output)
+	assert.True(t, delivered)
+	assert.True(t, moved, "the second push URL took the ref: %s", output)
+	testutil.RunGit(t, empty, "show-ref", "--verify", "refs/heads/"+paths.MetadataBranchName)
+}
+
 func TestIsProtectedRefRejection(t *testing.T) {
 	t.Parallel()
 
