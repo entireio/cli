@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -231,6 +232,18 @@ func TestSABindingsAndUnbind(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, out, "✓ Removed binding "+saTestBindingID+" from "+saTestID)
 	require.Contains(t, f.callList(), "DELETE "+saBase+"/"+saTestID+"/bindings/"+saTestBindingID)
+
+	// A lower-case ID must reach core upper-cased: core answers 204 for an
+	// unknown binding, so a miss would print a removal that never happened.
+	lower := saBindingIDPrefix + strings.ToLower(strings.TrimPrefix(saTestBindingID, saBindingIDPrefix))
+	out, err = runSA(t, srv.URL, "unbind", saTestID, lower)
+	require.NoError(t, err)
+	require.Contains(t, out, "✓ Removed binding "+saTestBindingID)
+	require.NotContains(t, f.callList(), "DELETE "+saBase+"/"+saTestID+"/bindings/"+lower)
+
+	f.fail("DELETE "+saBase+"/"+saTestID+"/bindings/"+saTestBindingID, http.StatusNotFound, "binding does not belong to this service account", "")
+	_, err = runSA(t, srv.URL, "unbind", saTestID, saTestBindingID)
+	require.EqualError(t, err, "binding "+saTestBindingID+" is not on "+saTestID+"; run entire sa bindings "+saTestID)
 }
 
 func TestSAProviderBindable(t *testing.T) {
@@ -272,4 +285,42 @@ func TestParsePins(t *testing.T) {
 	}
 	_, err = parsePins([]string{"ref=a", "ref=b"})
 	require.EqualError(t, err, "--pin ref is given twice")
+
+	for _, v := range []string{"*", "**"} {
+		_, err := parsePins([]string{"pipeline=" + v})
+		require.EqualError(t, err, `pin pipeline="`+v+`" matches every value; pin a value, or a glob with a literal prefix`)
+	}
+	_, err = parsePins([]string{"pipeline=deploy-*"})
+	require.NoError(t, err)
+}
+
+func TestValidatePromptedPin(t *testing.T) {
+	t.Parallel()
+
+	repo := coreapi.OIDCProviderAttribute{Name: "repository", Exact: true, Pattern: coreapi.NewOptString(`^[^/*]+/[^/*]+$`)}
+	pipeline := coreapi.OIDCProviderAttribute{Name: "pipeline"}
+	cases := []struct {
+		name  string
+		attr  coreapi.OIDCProviderAttribute
+		value string
+		want  string
+	}{
+		{"blank", pipeline, "  ", "enter a value"},
+		{"only a glob", pipeline, "*", `pin pipeline="*" matches every value; pin a value, or a glob with a literal prefix`},
+		{"glob on an exact pin", repo, "acme/*", "pin repository must be exact, not a glob"},
+		{"pattern mismatch", repo, "acme", `pin repository="acme" must match ^[^/*]+/[^/*]+$`},
+		{"valid exact", repo, " acme/web ", ""},
+		{"valid glob", pipeline, "deploy-*", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := validatePromptedPin(tc.attr)(tc.value)
+			if tc.want == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.EqualError(t, err, tc.want)
+		})
+	}
 }

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -43,13 +44,21 @@ func resolveSATarget(ctx context.Context, c *coreapi.Client, sa saRef, repo, pro
 	var r resolvedRef
 	var err error
 	if strings.Contains(repo, "/") {
-		r, err = resolveRepoPathResolved(ctx, c, repo)
+		// A path names its own project. A forgeless <project>/<repo> gets the
+		// /et/ suggestion.
+		r, err = resolveRepoRefResolved(ctx, c, repo, "")
 	} else {
-		// Bare names live in the account's project.
+		// Bare values are names in the account's project, never IDs: like
+		// `repo grant`, access management does not read a ULID-shaped name as
+		// an ID.
 		if sa.ProjectID == "" {
 			return saTarget{}, fmt.Errorf("service account %s names no project", sa.ID)
 		}
 		r, err = resolveRepoInProject(ctx, c, repo, sa.ProjectID)
+		// The generic miss says "or pass a ULID", which is what they did.
+		if looksLikeULID(repo) && errors.Is(err, errNamedRefNotFound) {
+			return saTarget{}, fmt.Errorf("no repo named %q in the service account's project; --repo takes a repo name or its /%s/<project>/<repo> path, not a ULID", repo, nativeCloneForge)
+		}
 	}
 	if err != nil {
 		return saTarget{}, err

@@ -291,16 +291,22 @@ always runnable in every build.
   the project's accounts and matches exactly. Errors branch on core's RFC 9457
   `type`, never on its prose (`coreapi.APIErrorType`). `grant` and `revoke`
   take `--repo` or `--project`. A bare repo name resolves inside the account's
-  own project, because core refuses a grant outside it with 422.
+  own project, because core refuses a grant outside it with 422. Like `repo
+  grant`, a bare value is always a name, never a ULID; a slash path goes
+  through the shared resolver, which suggests `/et/` for a forgeless one.
   Nothing here is provider-specific: `providers` and `bind --provider <name>`
   render core's provider descriptors from `GET /oidc-providers`. A provider is
   matched by `name`, then by the deprecated `displayName` an older core sends.
   Only `self_serve` providers are listed or bound. An older core sends no
   `self_serve`, so the CLI lists every provider and core decides. `bind`
   checks each `--pin` against the descriptor's attributes (unknown name, a
-  `*` in an exact attribute, a pattern mismatch, a missing required pin)
-  before it calls core. Core stays the authority, so a provider without
-  attributes gets no client checks. A terminal asks for missing required
+  `*` in an exact attribute, a pattern mismatch, a missing required pin, a
+  value of only `*`) before it calls core. Prompted pins get the same checks
+  inside the form. Core stays the authority, so a provider without
+  attributes gets only the provider-independent only-`*` check. `unbind`
+  upper-cases an `eib_` ID, as lookups do for `svc_`: core answers 204 for an
+  unknown binding, so a lower-case ID would report a removal that never
+  happened. A terminal asks for missing required
   pins. The `github-actions` success output adds a setup-entire workflow
   snippet. `revoke` and `unbind` take an explicit target, so they never
   prompt. A typed `grant remove` does not prompt either. `delete` confirms

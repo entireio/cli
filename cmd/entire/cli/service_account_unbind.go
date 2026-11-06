@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -22,10 +23,17 @@ func newSAUnbindCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				if err := c.DeleteBinding(ctx, coreapi.DeleteBindingParams{AccountId: sa.ID, BindingId: args[1]}); err != nil {
+				// Core answers 204 for an unknown binding, so a lower-case ID
+				// would report success and leave the binding in place.
+				bindingID, _ := canonicalPrefixedULID(saBindingIDPrefix, strings.TrimSpace(args[1]))
+				if err := c.DeleteBinding(ctx, coreapi.DeleteBindingParams{AccountId: sa.ID, BindingId: bindingID}); err != nil {
+					// Core answers 404 for a binding on another account.
+					if isCoreNotFound(err) {
+						return fmt.Errorf("binding %s is not on %s; run entire sa bindings %s", bindingID, sa.label(), args[0])
+					}
 					return err
 				}
-				fmt.Fprintf(cmd.OutOrStdout(), "✓ Removed binding %s from %s\n", args[1], sa.label())
+				fmt.Fprintf(cmd.OutOrStdout(), "✓ Removed binding %s from %s\n", bindingID, sa.label())
 				return nil
 			})
 		},
