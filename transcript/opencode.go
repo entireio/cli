@@ -180,8 +180,8 @@ func emitOpenCodeAssistant(result *[]byte, base transcriptLine, msg openCodeMess
 	line.ID = msg.Info.ID
 	line.Content = contentJSON
 	if msg.Info.Tokens != nil {
-		line.InputTokens = msg.Info.Tokens.Input
-		line.OutputTokens = msg.Info.Tokens.Output
+		line.InputTokens = int64(msg.Info.Tokens.Input)
+		line.OutputTokens = int64(msg.Info.Tokens.Output)
 	}
 	appendLine(result, line)
 }

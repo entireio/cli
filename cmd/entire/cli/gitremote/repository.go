@@ -121,6 +121,11 @@ func resolveSSHHostname(ctx context.Context, dir string, env []string, host stri
 // the core.sshCommand git config value (read in dir when non-empty), then the
 // GIT_SSH environment variable, falling back to plain "ssh" when none are set.
 // A nil env reads the process environment.
+//
+// The result is a shell command, ready to extend and set as GIT_SSH_COMMAND.
+// git runs GIT_SSH as a bare program path but GIT_SSH_COMMAND through sh, so a
+// GIT_SSH path is shell-quoted when sh would otherwise mangle it, such as the
+// backslashes in a Windows path.
 func EffectiveSSHCommand(ctx context.Context, dir string, env []string) string {
 	if env == nil {
 		env = os.Environ()
@@ -135,10 +140,26 @@ func EffectiveSSHCommand(ctx context.Context, dir string, env []string) string {
 	}
 	if v, ok := envLookup(env, "GIT_SSH"); ok {
 		if trimmed := strings.TrimSpace(v); trimmed != "" {
-			return trimmed
+			return shellQuoteProgram(trimmed)
 		}
 	}
 	return "ssh"
+}
+
+// shellQuoteProgram single-quotes path for sh unless every rune is safe bare.
+// Unlike a display quoter, a backslash always needs quoting: git for Windows
+// also runs GIT_SSH_COMMAND through sh.
+func shellQuoteProgram(path string) string {
+	if !strings.ContainsFunc(path, func(r rune) bool {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			return false
+		}
+		return !strings.ContainsRune(`_@%+=:,./-`, r)
+	}) {
+		return path
+	}
+	return "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
 }
 
 // envLookup returns the value of the last occurrence of key in env (matching

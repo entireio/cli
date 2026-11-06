@@ -117,8 +117,17 @@ func TestPrepareCommitMsg_ForeignAgentCommit(t *testing.T) {
 		foreignCommitFixture(t, nil)
 		assert.Equal(t, "amended\n", prepareForeign(t, "amended\n", "commit"))
 	})
+	t.Run("pasted trailer gets a fresh one", func(t *testing.T) {
+		foreignCommitFixture(t, nil)
+		got := prepareForeign(t, "typed\n\nEntire-Checkpoint: aabbccdd0003\n", commitSourceMessage)
+		ids := trailers.ParseAllCheckpoints(got)
+		require.Len(t, ids, 2, "a trailer Entire did not stamp names someone else's checkpoint, so a fresh one is added")
+		assert.Equal(t, "aabbccdd0003", ids[0].String())
+	})
 	t.Run("message already stamped", func(t *testing.T) {
 		foreignCommitFixture(t, nil)
+		// Prepare ran before for this commit and recorded its trailer.
+		require.True(t, recordStampedTrailer(context.Background(), id.MustCheckpointID("aabbccdd0003")))
 		text := "typed\n\nEntire-Checkpoint: aabbccdd0003\n"
 		assert.Equal(t, text, prepareForeign(t, text, commitSourceMessage))
 	})

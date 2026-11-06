@@ -81,16 +81,16 @@ func RewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repositor
 	var rawBytesSoFar int
 	// Stale entries (refs no longer present locally) are skipped, not pruned:
 	// the queue belongs to the flush.
-	existing, _ := partitionLocalRefs(repo, queued)
+	existing, _, listed := partitionLocalRefs(ctx, repo, queued)
 	for _, refName := range existing {
-		ref, refErr := repo.Reference(refName, true)
+		tip, refErr := localTip(repo, listed, refName)
 		if refErr != nil {
 			if errors.Is(refErr, plumbing.ErrReferenceNotFound) {
 				continue
 			}
 			return fmt.Errorf("resolve checkpoint ref %s: %w", refName, refErr)
 		}
-		chain, base, walkErr := unappliedAncestry(repo, ref.Hash())
+		chain, base, walkErr := unappliedAncestry(repo, tip)
 		if walkErr != nil {
 			return fmt.Errorf("walk ancestry of %s: %w", refName, walkErr)
 		}
@@ -100,7 +100,7 @@ func RewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repositor
 		if len(chain) > bootstrapLimit {
 			return &BootstrapTooLargeError{Count: len(chain), Limit: bootstrapLimit}
 		}
-		pr := pendingRef{ref: refName, old: ref.Hash(), base: base}
+		pr := pendingRef{ref: refName, old: tip, base: base}
 		for _, c := range chain {
 			tree, treeErr := repo.TreeObject(c.TreeHash)
 			if treeErr != nil {

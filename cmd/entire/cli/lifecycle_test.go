@@ -1446,7 +1446,7 @@ func TestHandleLifecycleSubagentEnd_ScanSkippedMarkerSkipsNewFileDetection(t *te
 
 	// Process A: pre-task capture under a breached budget writes the marker.
 	gitrepo.SetStatusBudgetBreachedForTesting(true)
-	require.NoError(t, CapturePreTaskState(ctx, toolUseID))
+	require.NoError(t, CapturePreTaskState(ctx, "", toolUseID))
 	gitrepo.SetStatusBudgetBreachedForTesting(false)
 
 	preState, err := LoadPreTaskState(ctx, toolUseID)
@@ -1870,13 +1870,22 @@ func TestHandleLifecycleTurnEnd_PrefersEventTokenUsage(t *testing.T) {
 
 type mockContextInjectorAgent struct {
 	mockLifecycleAgent
+
+	injected *[]string
 }
 
 var _ agent.ContextInjector = (*mockContextInjectorAgent)(nil)
 
+func newMockContextInjectorAgent() *mockContextInjectorAgent {
+	return &mockContextInjectorAgent{mockLifecycleAgent: *newMockAgent(), injected: &[]string{}}
+}
+
 func (m *mockContextInjectorAgent) InjectionEvent() agent.EventType { return agent.TurnStart }
 
-func (m *mockContextInjectorAgent) RenderContextInjection(agent.ContextInjection) ([]byte, error) {
+// RenderContextInjection records the text and renders nothing, so the hook
+// writes no payload to the test's stdout.
+func (m *mockContextInjectorAgent) RenderContextInjection(inj agent.ContextInjection) ([]byte, error) {
+	*m.injected = append(*m.injected, inj.Text)
 	return nil, nil
 }
 
@@ -1885,8 +1894,10 @@ func addGitHubOriginForLifecycleTest(t *testing.T, repoDir string) {
 	testutil.RunGit(t, repoDir, "remote", "add", "origin", "git@github.com:acme/repo.git")
 }
 
-func TestHandleLifecycleTurnStart_ContextInjectionUnknownCacheDoesNotMarkDecided(t *testing.T) {
-	// Cannot use t.Parallel() because we use t.Chdir().
+// setupContextInjectionRepo creates a repo with a GitHub origin and chdirs into
+// it. withHint saves the session's trails scope hint, as SessionStart would.
+func setupContextInjectionRepo(t *testing.T, sessionID string, withHint bool) {
+	t.Helper()
 	tmpDir := t.TempDir()
 	testutil.InitRepo(t, tmpDir)
 	testutil.WriteFile(t, tmpDir, "init.txt", "init")
@@ -1896,45 +1907,122 @@ func TestHandleLifecycleTurnStart_ContextInjectionUnknownCacheDoesNotMarkDecided
 	t.Chdir(tmpDir)
 	paths.ClearWorktreeRootCache()
 	session.ClearGitCommonDirCache()
-
-	ag := &mockContextInjectorAgent{mockLifecycleAgent: *newMockAgent()}
-	sessionID := "test-trail-inject-unknown"
-	event := &agent.Event{Type: agent.TurnStart, SessionID: sessionID, Prompt: "hello", Timestamp: time.Now()}
-
-	require.NoError(t, handleLifecycleTurnStart(context.Background(), ag, event))
-
-	state, err := strategy.LoadSessionState(context.Background(), sessionID)
-	require.NoError(t, err)
-	require.NotNil(t, state)
-	require.False(t, state.ContextInjectionDecided, "unknown/missing cache should not permanently suppress later injection")
+	if withHint {
+		scope, err := currentTrailEnablementScope(context.Background())
+		require.NoError(t, err)
+		require.NoError(t, saveTrailEnablementScopeHint(context.Background(), sessionID, scope))
+	}
 }
 
-func TestHandleLifecycleTurnStart_ContextInjectionFreshTrueMarksDecided(t *testing.T) {
-	// Cannot use t.Parallel() because we use t.Chdir().
-	tmpDir := t.TempDir()
-	testutil.InitRepo(t, tmpDir)
-	testutil.WriteFile(t, tmpDir, "init.txt", "init")
-	testutil.GitAdd(t, tmpDir, "init.txt")
-	testutil.GitCommit(t, tmpDir, "init")
-	addGitHubOriginForLifecycleTest(t, tmpDir)
-	t.Chdir(tmpDir)
-	paths.ClearWorktreeRootCache()
-	session.ClearGitCommonDirCache()
-	require.NoError(t, saveTrailsEnabledForRepo(context.Background(), true))
-
-	ag := &mockContextInjectorAgent{mockLifecycleAgent: *newMockAgent()}
-	sessionID := "test-trail-inject-true"
-	scope, err := currentTrailEnablementScope(context.Background())
-	require.NoError(t, err)
-	require.NoError(t, saveTrailEnablementScopeHint(context.Background(), sessionID, scope))
+func runContextInjectionTurn(t *testing.T, ag *mockContextInjectorAgent, sessionID string) *strategy.SessionState {
+	t.Helper()
 	event := &agent.Event{Type: agent.TurnStart, SessionID: sessionID, Prompt: "hello", Timestamp: time.Now()}
-
 	require.NoError(t, handleLifecycleTurnStart(context.Background(), ag, event))
-
 	state, err := strategy.LoadSessionState(context.Background(), sessionID)
 	require.NoError(t, err)
 	require.NotNil(t, state)
+	return state
+}
+
+// Without a scope hint or a known trails cache, the base text still goes out on
+// the first turn; the trails decision stays open for a later turn.
+func TestHandleLifecycleTurnStart_ContextInjectionUnknownCacheInjectsBaseOnly(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir().
+	sessionID := "test-trail-inject-unknown"
+	setupContextInjectionRepo(t, sessionID, false)
+	ag := newMockContextInjectorAgent()
+
+	state := runContextInjectionTurn(t, ag, sessionID)
+
+	require.True(t, state.ContextInjectionBaseDone)
+	require.False(t, state.ContextInjectionDecided, "unknown/missing cache should not permanently suppress the trails injection")
+	require.Len(t, *ag.injected, 1)
+	require.Contains(t, (*ag.injected)[0], "entire agent-help")
+	require.NotContains(t, (*ag.injected)[0], "A Trail is")
+
+	runContextInjectionTurn(t, ag, sessionID)
+	require.Len(t, *ag.injected, 1, "the base text is injected once per session")
+}
+
+func TestHandleLifecycleTurnStart_ContextInjectionFreshTrueInjectsBoth(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir().
+	sessionID := "test-trail-inject-true"
+	setupContextInjectionRepo(t, sessionID, true)
+	require.NoError(t, saveTrailsEnabledForRepo(context.Background(), true))
+	ag := newMockContextInjectorAgent()
+
+	state := runContextInjectionTurn(t, ag, sessionID)
+
+	require.True(t, state.ContextInjectionBaseDone)
 	require.True(t, state.ContextInjectionDecided, "fresh true cache should make a final injection decision")
+	require.Len(t, *ag.injected, 1)
+	require.Contains(t, (*ag.injected)[0], "entire agent-help")
+	require.Contains(t, (*ag.injected)[0], "A Trail is")
+
+	runContextInjectionTurn(t, ag, sessionID)
+	require.Len(t, *ag.injected, 1)
+}
+
+func TestHandleLifecycleTurnStart_ContextInjectionDisabledInjectsBaseOnce(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir().
+	sessionID := "test-trail-inject-false"
+	setupContextInjectionRepo(t, sessionID, true)
+	require.NoError(t, saveTrailsEnabledForRepo(context.Background(), false))
+	ag := newMockContextInjectorAgent()
+
+	state := runContextInjectionTurn(t, ag, sessionID)
+
+	require.True(t, state.ContextInjectionDecided)
+	require.Len(t, *ag.injected, 1)
+	require.NotContains(t, (*ag.injected)[0], "A Trail is")
+
+	runContextInjectionTurn(t, ag, sessionID)
+	require.Len(t, *ag.injected, 1)
+}
+
+// The SessionStart refresh is detached, so the cache can still be cold on the
+// first prompt. The base text goes out then; the trails paragraph follows alone
+// on the turn the cache says enabled.
+func TestHandleLifecycleTurnStart_ContextInjectionTrailsFollowOnLaterTurn(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir().
+	sessionID := "test-trail-inject-later"
+	setupContextInjectionRepo(t, sessionID, true)
+	ag := newMockContextInjectorAgent()
+
+	runContextInjectionTurn(t, ag, sessionID)
+	require.Len(t, *ag.injected, 1)
+	require.NotContains(t, (*ag.injected)[0], "A Trail is")
+
+	require.NoError(t, saveTrailsEnabledForRepo(context.Background(), true))
+	state := runContextInjectionTurn(t, ag, sessionID)
+
+	require.True(t, state.ContextInjectionDecided)
+	require.Len(t, *ag.injected, 2)
+	require.Contains(t, (*ag.injected)[1], "A Trail is")
+	require.NotContains(t, (*ag.injected)[1], "entire agent-help", "the base text must not repeat")
+
+	runContextInjectionTurn(t, ag, sessionID)
+	require.Len(t, *ag.injected, 2)
+}
+
+// A session whose trails were decided by an older binary (before the base text
+// was split out) already had its one injection and gets nothing more.
+func TestHandleLifecycleTurnStart_ContextInjectionLegacyDecidedSessionGetsNothing(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir().
+	sessionID := "test-trail-inject-legacy"
+	setupContextInjectionRepo(t, sessionID, true)
+	require.NoError(t, saveTrailsEnabledForRepo(context.Background(), true))
+	ag := newMockContextInjectorAgent()
+
+	runContextInjectionTurn(t, ag, sessionID)
+	require.NoError(t, strategy.MutateSessionState(context.Background(), sessionID, func(state *strategy.SessionState) error {
+		state.ContextInjectionBaseDone = false
+		return nil
+	}))
+	*ag.injected = nil
+
+	runContextInjectionTurn(t, ag, sessionID)
+	require.Empty(t, *ag.injected)
 }
 
 func TestHandleLifecycleTurnStart_RecordsGenericSkillSlashEvent(t *testing.T) {

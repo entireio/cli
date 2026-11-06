@@ -47,12 +47,13 @@ type (
 	PersistentStore  = apicheckpoint.PersistentStore
 	Writer           = apicheckpoint.Writer
 	WriteRequest     = apicheckpoint.WriteRequest
-	// Write request union: all session-level (Session, ReservedSession,
-	// SessionTranscript, SessionSummary).
+	// Write request union: session-level (Session, ReservedSession,
+	// SessionTranscript, SessionSummary) and checkpoint-level (Tasks).
 	Session           = apicheckpoint.Session
 	ReservedSession   = apicheckpoint.ReservedSession
 	SessionTranscript = apicheckpoint.SessionTranscript
 	SessionSummary    = apicheckpoint.SessionSummary
+	Tasks             = apicheckpoint.Tasks
 )
 
 // Sentinel errors (re-exported so errors.Is keeps working across packages).

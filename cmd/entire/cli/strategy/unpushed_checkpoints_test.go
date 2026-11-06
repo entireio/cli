@@ -111,8 +111,8 @@ func TestCountUnpushedCheckpoints_GitRefs_CountsQueuedRefsThatExist(t *testing.T
 	const stale = "refs/entire/checkpoints/aa/bb0000000002"
 	testutil.GitUpdateRef(t, dir, kept, second)
 	queue := checkpoint.NewPushQueue(filepath.Join(dir, ".git"))
-	require.NoError(t, queue.Enqueue(plumbing.ReferenceName(kept)))
-	require.NoError(t, queue.Enqueue(plumbing.ReferenceName(stale)))
+	require.NoError(t, queue.EnqueueEntry(checkpoint.PushQueueEntry{Ref: plumbing.ReferenceName(kept)}))
+	require.NoError(t, queue.EnqueueEntry(checkpoint.PushQueueEntry{Ref: plumbing.ReferenceName(stale)}))
 	t.Chdir(dir)
 
 	got, err := CountUnpushedCheckpoints(context.Background(), "origin")

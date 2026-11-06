@@ -21,15 +21,21 @@ const (
 
 // Line is one decoded line of the Entire Transcript Format.
 type Line struct {
-	Version      int
-	Type         string // TypeUser, TypeAssistant, or a future additive type
-	Agent        string
-	CLIVersion   string
-	Timestamp    string
-	ID           string
-	InputTokens  int
-	OutputTokens int
-	Blocks       []Block
+	Version            int
+	Type               string // TypeUser, TypeAssistant, or a future additive type
+	Agent              string
+	CLIVersion         string
+	Timestamp          string
+	ID                 string
+	Model              string
+	InputTokens        int64 // excludes CacheReadTokens and CacheWriteTokens
+	OutputTokens       int64
+	CacheReadTokens    int64
+	CacheWriteTokens   int64
+	CacheWrite5mTokens *int64 // nil means the split is unknown
+	CacheWrite1hTokens *int64 // nil means the split is unknown
+	ReasoningTokens    int64
+	Blocks             []Block
 }
 
 // Block is one content block of a Line.

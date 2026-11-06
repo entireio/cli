@@ -237,7 +237,9 @@ func (s *ManualCommitStrategy) tryForeignAgentCommit(ctx context.Context, commit
 	if err != nil {
 		return
 	}
-	if _, found := stampedTrailer(ctx, string(content), inherited); found {
+	message := string(content)
+	rules := messageCommentRules(ctx, message)
+	if _, found := stampedTrailer(ctx, message, rules, inherited); found {
 		return
 	}
 	cpID, err := checkpoint.GenerateCheckpointID(ctx)
@@ -258,7 +260,12 @@ func (s *ManualCommitStrategy) tryForeignAgentCommit(ctx context.Context, commit
 			slog.String("error", err.Error()))
 		return
 	}
-	if err := os.WriteFile(commitMsgFile, []byte(addCheckpointTrailer(string(content), cpID)), 0o600); err != nil { //nolint:gosec // path from git hook arg
+	// Post-commit condenses only into a trailer prepare recorded as its own.
+	if !recordStampedTrailer(ctx, cpID) {
+		_ = osroot.RemoveNoSymlinks(root, foreignLinkFile) //nolint:errcheck // best-effort; a marker never matches another commit's fresh ID
+		return
+	}
+	if err := os.WriteFile(commitMsgFile, []byte(addCheckpointTrailerAboveComments(message, cpID, rules)), 0o600); err != nil { //nolint:gosec // path from git hook arg
 		_ = osroot.RemoveNoSymlinks(root, foreignLinkFile) //nolint:errcheck // best-effort; a marker never matches another commit's fresh ID
 		return
 	}
