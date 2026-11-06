@@ -86,3 +86,43 @@ func TestParseCaptureTime(t *testing.T) {
 	require.True(t, parseCaptureTime(now.Format(time.RFC3339)).Equal(now.Truncate(time.Second)), "state written before nanoseconds were recorded")
 	require.True(t, parseCaptureTime("").IsZero())
 }
+
+// TestStatusClaim_DirtyTrackedBaselineWindows is selected by CI's Windows job
+// through its name. There a file's stat is only its size and modification
+// time, so the dirty-file baseline must still read the nested paths git status
+// reports with forward slashes, leave unchanged files out, and catch a
+// same-size edit by its modification time alone.
+func TestStatusClaim_DirtyTrackedBaselineWindows(t *testing.T) {
+	// Not parallel: uses t.Chdir.
+	dir := t.TempDir()
+	t.Chdir(dir)
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "src/app/main.txt", "v1\n")
+	testutil.WriteFile(t, dir, "gone.txt", "gone\n")
+	testutil.GitAdd(t, dir, "src/app/main.txt", "gone.txt")
+	testutil.GitCommit(t, dir, "Add files")
+	testutil.WriteFile(t, dir, "src/app/main.txt", "v2\n")
+	require.NoError(t, os.Remove(filepath.Join(dir, "gone.txt")))
+
+	ctx := context.Background()
+	_, dirty, err := statusFilesForState(ctx)
+	require.NoError(t, err)
+	slices.Sort(dirty)
+	require.Equal(t, []string{"gone.txt", "src/app/main.txt"}, dirty)
+
+	claim := statusClaim{repoRoot: dir, dirtyTracked: statDirtyTrackedFiles(ctx, dirty)}
+	before, ok := claim.dirtyTracked["src/app/main.txt"]
+	require.True(t, ok, "the nested file was statted")
+	require.NotZero(t, before.ModTime)
+	modified, _, deleted := claim.narrow(ctx, []string{"src/app/main.txt"}, nil, []string{"gone.txt"})
+	require.Empty(t, modified, "src/app/main.txt is unchanged since the baseline")
+	require.Empty(t, deleted, "gone.txt is still deleted")
+
+	// The same size as before: only the modification time can tell. An agent's
+	// edit lands well after its prompt starts, so move it past any clock tick.
+	testutil.WriteFile(t, dir, "src/app/main.txt", "v3\n")
+	later := time.Unix(0, before.ModTime).Add(2 * time.Second)
+	require.NoError(t, os.Chtimes(filepath.Join(dir, "src", "app", "main.txt"), later, later))
+	modified, _, _ = claim.narrow(ctx, []string{"src/app/main.txt"}, nil, nil)
+	require.Equal(t, []string{"src/app/main.txt"}, modified)
+}
