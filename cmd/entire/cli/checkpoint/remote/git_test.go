@@ -1203,22 +1203,138 @@ func TestWithBatchModeSSH(t *testing.T) {
 			want: "/usr/bin/ssh -i key -o BatchMode=yes -o ConnectTimeout=60",
 		},
 		{
-			name: "non-OpenSSH client gets no ConnectTimeout",
+			name: "plink that already runs -batch is left untouched",
 			in: func(t *testing.T) []string {
 				return isolatedSSHEnv(t, "GIT_SSH_COMMAND=plink -batch")
 			},
-			want: "plink -batch -o BatchMode=yes",
+			want: "plink -batch",
+		},
+		{
+			name: "plink gets -batch, not -o options it rejects",
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, "GIT_SSH_COMMAND=plink.exe -i key.ppk")
+			},
+			want: "plink.exe -i key.ppk -batch",
+		},
+		{
+			name: "single-quoted plink path with spaces is recognized",
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, `GIT_SSH_COMMAND='C:\Program Files\PuTTY\plink.exe'`)
+			},
+			want: `'C:\Program Files\PuTTY\plink.exe' -batch`,
+		},
+		{
+			name: "GIT_SSH plink path with spaces is quoted as one word",
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, `GIT_SSH=C:\Program Files\PuTTY\PLINK.EXE`)
+			},
+			want: `'C:\Program Files\PuTTY\PLINK.EXE' -batch`,
+		},
+		{
+			name: "GIT_SSH TortoisePlink needs nothing: git passes -batch itself",
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, `GIT_SSH=C:\TortoiseGit\bin\TortoisePlink.exe`)
+			},
+			want: "",
+		},
+		{
+			name: "GIT_SSH_VARIANT=plink declares a wrapper as plink",
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, "GIT_SSH_COMMAND=my-wrapper", "GIT_SSH_VARIANT=plink")
+			},
+			want: "my-wrapper -batch",
+		},
+		{
+			name: "GIT_SSH_VARIANT=ssh declares a wrapper as OpenSSH",
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, "GIT_SSH_COMMAND=my-wrapper", "GIT_SSH_VARIANT=ssh")
+			},
+			want: "my-wrapper -o BatchMode=yes -o ConnectTimeout=60",
+		},
+		{
+			name: "ssh.variant=simple config takes no options",
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, "GIT_SSH_COMMAND=my-wrapper", rawGitConfigFile(t, "[ssh]\n\tvariant = simple\n"))
+			},
+			want: "my-wrapper",
+		},
+		{
+			name: "variant auto still detects plink from the program name",
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, `GIT_SSH=C:\\PuTTY\\plink.exe`, rawGitConfigFile(t, "[ssh]\n\tvariant = auto\n"))
+			},
+			want: `'C:\\PuTTY\\plink.exe' -batch`,
+		},
+		{
+			name: "GIT_SSH_VARIANT=auto still gives OpenSSH its timeout",
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, "GIT_SSH_COMMAND=ssh", "GIT_SSH_VARIANT=auto")
+			},
+			want: "ssh -o BatchMode=yes -o ConnectTimeout=60",
+		},
+		{
+			name: "unreadable git config leaves the user's ssh command alone",
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, rawGitConfigFile(t, "[core\n\tsshCommand = my-ssh\n"))
+			},
+			want: "",
+		},
+		{
+			name: "GIT_SSH_VARIANT env beats ssh.variant config",
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, "GIT_SSH_COMMAND=my-wrapper", "GIT_SSH_VARIANT=plink",
+					rawGitConfigFile(t, "[ssh]\n\tvariant = simple\n"))
+			},
+			want: "my-wrapper -batch",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			out := withBatchModeSSH(context.Background(), tt.in(t))
+			in := tt.in(t)
+			out := withBatchModeSSH(context.Background(), in)
 			got, ok := envToMap(out)["GIT_SSH_COMMAND"]
+			if tt.want == "" {
+				assert.False(t, ok, "GIT_SSH_COMMAND should not be set")
+				assert.Equal(t, in, out, "env should be returned unchanged")
+				return
+			}
 			assert.True(t, ok, "GIT_SSH_COMMAND should be set")
 			assert.Equal(t, tt.want, got)
 		})
+	}
+}
+
+// rawGitConfigFile writes content as a global gitconfig and returns the
+// GIT_CONFIG_GLOBAL env entry pointing at it.
+func rawGitConfigFile(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "gitconfig")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+	return "GIT_CONFIG_GLOBAL=" + path
+}
+
+func TestFirstCmdlineWord(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		in   string
+		want string
+		ok   bool
+	}{
+		{in: "ssh -i key", want: "ssh", ok: true},
+		{in: "  plink", want: "plink", ok: true},
+		{in: `'C:\Program Files\plink.exe' -batch`, want: `C:\Program Files\plink.exe`, ok: true},
+		// As in git's split_cmdline, a backslash escapes outside single quotes.
+		{in: `"C:\Program Files\plink.exe"`, want: `C:Program Filesplink.exe`, ok: true},
+		{in: `/opt/my\ ssh -v`, want: `/opt/my ssh`, ok: true},
+		{in: `'unterminated`, ok: false},
+		{in: "   ", ok: false},
+	}
+	for _, tt := range tests {
+		got, ok := firstCmdlineWord(tt.in)
+		assert.Equal(t, tt.ok, ok, tt.in)
+		assert.Equal(t, tt.want, got, tt.in)
 	}
 }
 
@@ -1280,6 +1396,16 @@ func TestUnreachableRemoteLine(t *testing.T) {
 		{
 			name: "non-fast-forward rejection",
 			err:  pushErr(" ! [rejected]        refs/x -> refs/x (non-fast-forward)\nerror: failed to push some refs"),
+		},
+		{
+			name: "bidi overrides are stripped from the printed line",
+			err:  pushErr("ssh: connect to host gith\u202eub.com port 22: Connection refused"),
+			want: "ssh: connect to host github.com port 22: Connection refused",
+			ok:   true,
+		},
+		{
+			name: "a helper's own connect failure is not curl's",
+			err:  pushErr("failed to connect to keyring: no such service\nfatal: Authentication failed"),
 		},
 		{name: "nil", err: nil},
 	}
@@ -1742,36 +1868,5 @@ func TestFetch_AbortStalledRequestsProgress(t *testing.T) {
 		} else {
 			assert.NotContains(t, string(out), "objects")
 		}
-	}
-}
-
-func TestIsOpenSSHCommand(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		cmd  string
-		prog string // firstCmdlineWord's result; "" when !ok
-		ok   bool
-		want bool
-	}{
-		{cmd: "ssh", prog: "ssh", ok: true, want: true},
-		{cmd: "  ssh -i key", prog: "ssh", ok: true, want: true},
-		{cmd: "/usr/bin/ssh -o BatchMode=yes", prog: "/usr/bin/ssh", ok: true, want: true},
-		// Unquoted backslashes are escapes, as in git's split_cmdline.
-		{cmd: `C:\OpenSSH\SSH.EXE -v`, prog: `C:OpenSSHSSH.EXE`, ok: true, want: false},
-		{cmd: `'C:\Windows\System32\OpenSSH\SSH.EXE' -v`, prog: `C:\Windows\System32\OpenSSH\SSH.EXE`, ok: true, want: true},
-		{cmd: `'C:\Program Files\it'\''s\ssh.exe' -v`, prog: `C:\Program Files\it's\ssh.exe`, ok: true, want: true},
-		{cmd: `"/opt/my dir/ssh" -v`, prog: "/opt/my dir/ssh", ok: true, want: true},
-		{cmd: `/opt/my\ dir/ssh -v`, prog: "/opt/my dir/ssh", ok: true, want: true},
-		{cmd: "plink -batch", prog: "plink", ok: true, want: false},
-		{cmd: "ssh-wrapper", prog: "ssh-wrapper", ok: true, want: false},
-		{cmd: "'ssh", ok: false, want: false},
-		{cmd: `ssh\`, ok: false, want: false},
-		{cmd: "", ok: false, want: false},
-		{cmd: "   ", ok: false, want: false},
-	} {
-		prog, ok := firstCmdlineWord(tc.cmd)
-		assert.Equal(t, tc.ok, ok, "firstCmdlineWord ok for %q", tc.cmd)
-		assert.Equal(t, tc.prog, prog, "firstCmdlineWord for %q", tc.cmd)
-		assert.Equal(t, tc.want, isOpenSSHCommand(tc.cmd), "isOpenSSHCommand(%q)", tc.cmd)
 	}
 }

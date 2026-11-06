@@ -411,6 +411,11 @@ type checkpointSyncInfo struct {
 	// when none, when counting failed, or when the count would be a lie
 	// (dedicated URL mode on the git-branch backend).
 	Unpushed int
+	// UploadRunning and UploadLastError report the background checkpoint
+	// upload (git-refs): one in progress now, or why the last one stopped
+	// short with refs still queued.
+	UploadRunning   bool
+	UploadLastError string
 	// PushPolicy is the clone's checkpoint push policy, empty when
 	// PushPolicyErr reports it could not be read: an unreadable policy is
 	// neither value, and git push uploads nothing while it lasts.
@@ -582,6 +587,7 @@ func computeCheckpointSyncInfoCounting(ctx context.Context, s *EntireSettings, c
 			// unpushed".
 			if cpCfg, cfgErr := settings.LoadCheckpointsConfig(ctx); cfgErr == nil && checkpoint.PrimaryIsRefs(cpCfg) {
 				info.Unpushed = countUnpushed(ctx, "")
+				info.UploadRunning, info.UploadLastError = strategy.CheckpointUploadStatus(ctx)
 			}
 			return info
 		}
@@ -590,6 +596,7 @@ func computeCheckpointSyncInfoCounting(ctx context.Context, s *EntireSettings, c
 	info.Remote = elected.Name
 	info.Source = string(elected.Source)
 	info.Unpushed = countUnpushed(ctx, elected.Name)
+	info.UploadRunning, info.UploadLastError = strategy.CheckpointUploadStatus(ctx)
 	// A configured checkpoint_remote that did not enable above is being
 	// ignored. When the ownership check is what rejected it, say so: this is
 	// the one trust-gate rejection a user otherwise experiences only as
@@ -728,6 +735,16 @@ func writeCheckpointSyncLines(ctx context.Context, b *strings.Builder, s *Entire
 		b.WriteString("\n")
 		b.WriteString(sty.render(sty.yellow, "  ! git push uploads no checkpoints until the checkpoint push policy can be read: "+info.PushPolicyErr))
 	}
+	writeUploadStoppedLine(b, info, sty)
+}
+
+// writeUploadStoppedLine warns why the last background upload stopped, while
+// refs it left are still queued: once they are gone the reason is history.
+func writeUploadStoppedLine(b *strings.Builder, info checkpointSyncInfo, sty statusStyles) {
+	if info.Unpushed > 0 && info.UploadLastError != "" {
+		b.WriteString("\n")
+		b.WriteString(sty.render(sty.yellow, "  ! Last background checkpoint upload stopped: "+info.UploadLastError))
+	}
 }
 
 // formatUnpushedCheckpointsLine phrases the unpushed counter. Dedicated URL
@@ -756,6 +773,9 @@ func formatUnpushedCheckpointsLine(info checkpointSyncInfo) string {
 			return fmt.Sprintf("%d %s not pushed to the checkpoint remote", info.Unpushed, noun)
 		}
 		return fmt.Sprintf("%d %s not on %s", info.Unpushed, noun, info.Remote)
+	}
+	if info.UploadRunning {
+		return fmt.Sprintf("%d %s uploading in the background", info.Unpushed, noun)
 	}
 	manual := info.PushPolicy == settings.CheckpointPushPolicyManual
 	const manualHint = "; upload with 'entire checkpoint push --all'"
@@ -1207,6 +1227,10 @@ type statusJSON struct {
 	// not mean reads fall open to nothing.
 	CheckpointReadFallback string `json:"checkpoint_read_fallback,omitempty"`
 	UnpushedCheckpoints    int    `json:"unpushed_checkpoints,omitempty"`
+	// CheckpointUploadRunning/-LastError mirror the text path's background
+	// upload lines (git-refs).
+	CheckpointUploadRunning   bool   `json:"checkpoint_upload_running,omitempty"`
+	CheckpointUploadLastError string `json:"checkpoint_upload_last_error,omitempty"`
 	// CheckpointPushPolicy is "automatic" or "manual"; when the policy cannot
 	// be read it is omitted and CheckpointPushPolicyError says why.
 	CheckpointPushPolicy      string `json:"checkpoint_push_policy,omitempty"`
@@ -1273,6 +1297,27 @@ type sessionBriefJSON struct {
 	CaptureDegraded bool `json:"capture_degraded,omitempty"`
 }
 
+// setCheckpointSync copies the checkpoint sync state into the JSON result.
+func (r *statusJSON) setCheckpointSync(syncInfo checkpointSyncInfo) {
+	r.CheckpointPushDisabled = syncInfo.PushDisabled
+	r.CheckpointSyncRemote = syncInfo.Remote
+	r.CheckpointSyncRemoteSource = syncInfo.Source
+	r.CheckpointSyncError = syncInfo.Err
+	r.CheckpointReadFallback = syncInfo.ReadFallback
+	r.CheckpointReadSourceUnknown = syncInfo.ReadSourceUnknown
+	r.UnpushedCheckpoints = syncInfo.Unpushed
+	r.CheckpointUploadRunning = syncInfo.UploadRunning
+	if syncInfo.Unpushed > 0 {
+		r.CheckpointUploadLastError = syncInfo.UploadLastError
+	}
+	r.CheckpointPushPolicy = string(syncInfo.PushPolicy)
+	r.CheckpointPushPolicyError = syncInfo.PushPolicyErr
+	r.CheckpointRemoteIgnored = syncInfo.IgnoredRemote
+	r.CheckpointRemoteIgnoredReason = syncInfo.IgnoredReason
+	r.CheckpointRemoteIgnoredRemedy = syncInfo.IgnoredRemedy
+	r.CheckpointRemoteIgnoredVerdict = syncInfo.IgnoredVerdict()
+}
+
 func runStatusJSON(ctx context.Context, w io.Writer) error {
 	writeJSON := func(v statusJSON) error {
 		return json.NewEncoder(w).Encode(v)
@@ -1321,20 +1366,7 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 
 		// Same computation as the text path (writeCheckpointSyncLines);
 		// empty fields drop out via omitempty when nothing resolved.
-		syncInfo := computeCheckpointSyncInfo(ctx, s)
-		result.CheckpointPushDisabled = syncInfo.PushDisabled
-		result.CheckpointSyncRemote = syncInfo.Remote
-		result.CheckpointSyncRemoteSource = syncInfo.Source
-		result.CheckpointSyncError = syncInfo.Err
-		result.CheckpointReadFallback = syncInfo.ReadFallback
-		result.CheckpointReadSourceUnknown = syncInfo.ReadSourceUnknown
-		result.UnpushedCheckpoints = syncInfo.Unpushed
-		result.CheckpointPushPolicy = string(syncInfo.PushPolicy)
-		result.CheckpointPushPolicyError = syncInfo.PushPolicyErr
-		result.CheckpointRemoteIgnored = syncInfo.IgnoredRemote
-		result.CheckpointRemoteIgnoredReason = syncInfo.IgnoredReason
-		result.CheckpointRemoteIgnoredRemedy = syncInfo.IgnoredRemedy
-		result.CheckpointRemoteIgnoredVerdict = syncInfo.IgnoredVerdict()
+		result.setCheckpointSync(computeCheckpointSyncInfo(ctx, s))
 
 		if store, err := session.NewStateStore(ctx); err == nil {
 			// Read-only, and one entry per session. Collapsing by agent hid a

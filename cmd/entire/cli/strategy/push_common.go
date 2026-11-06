@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -227,10 +228,41 @@ func batchPushCheckpointRefs(ctx context.Context, target string, refs []checkpoi
 	for _, ref := range refs {
 		refSpecs = append(refSpecs, ref.refSpec())
 	}
-	if _, err := remote.PushWithOptions(ctx, remote.PushOptions{Remote: target, RefSpecs: refSpecs}); err != nil {
-		return fmt.Errorf("push %d checkpoint refs: %w", len(refs), err)
+	for attempt := 0; ; attempt++ {
+		res, err := pushCheckpointRefs(ctx, remote.PushOptions{Remote: target, RefSpecs: refSpecs})
+		if err == nil {
+			return nil
+		}
+		if attempt >= len(pushRaceRetryDelays) || !isPushRaceRejection(res.Output) {
+			return fmt.Errorf("push %d checkpoint refs: %w", len(refs), err)
+		}
+		logging.Info(ctx, "checkpoint push rejected right after another push; retrying",
+			slog.Int("attempt", attempt+1))
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("push %d checkpoint refs: %w", len(refs), err)
+		case <-time.After(pushRaceRetryDelays[attempt]):
+		}
 	}
-	return nil
+}
+
+// pushCheckpointRefs is the batch push's seam, swapped in tests.
+var pushCheckpointRefs = remote.PushWithOptions
+
+// pushRaceRetryDelays spaces the retries of a push GitHub rejected for landing
+// right after another push to the same repository finished. Var for tests.
+var pushRaceRetryDelays = []time.Duration{time.Second, 2 * time.Second}
+
+// pushRaceRejection matches git's report of GitHub refusing a pack that arrived
+// within about a second of another push finishing: the refs are fine and the
+// same push lands when retried. The checkpoint push runs with --porcelain
+// (tab-separated "!\t<src>:<dst>\t[remote rejected] (<reason>)"); the
+// human-readable form is matched too.
+var pushRaceRejection = regexp.MustCompile(`(?m)^!\t[^\t]*\t\[remote rejected\] \((failed|missing necessary objects)\)$` +
+	`|^ ! \[remote rejected\] .+ \((failed|missing necessary objects)\)$|fatal error in commit_refs`)
+
+func isPushRaceRejection(output string) bool {
+	return pushRaceRejection.MatchString(output)
 }
 
 // chunkPushResult is what the chunked batch phase of a flush left behind.
@@ -238,7 +270,9 @@ type chunkPushResult struct {
 	landed        int                 // refs in chunks that pushed cleanly
 	failed        []checkpointRefPush // refs of chunks that failed, for the per-ref fallback
 	untried       []checkpointRefPush // refs never attempted because the phase stopped
+	stalled       []checkpointRefPush // refs of chunks cut by the per-chunk timeout
 	stopReason    string              // why untried is non-empty
+	size          int                 // chunk size at the end of the phase; a stall shrinks it
 	firstErr      error
 	sshAuthFailed bool
 	// unreachable is the line of git output showing the remote could not be
@@ -255,11 +289,26 @@ type chunkPushResult struct {
 // row does, and so does an unreachable remote before any chunk landed: per-ref
 // retries cannot reach it either, and each would wait out its own connect
 // timeout. The first chunk is always attempted, matching the per-ref fallback.
-func pushRefChunks(ctx context.Context, target string, refs []checkpointRefPush, size int, onLanded func([]checkpointRefPush)) chunkPushResult {
-	var res chunkPushResult
+//
+// chunkTimeout, when positive, bounds each chunk on its own: a chunk that
+// outlasts it is recorded as stalled and the phase moves on to the next, so one
+// stalled upload does not hold every chunk behind it. A stall is slowness, not
+// a refusal, so it does not count toward the consecutive-failure stop. It does
+// quarter the chunks after it (down to 2, which keep the timeout), since the
+// link just proved too slow for that size.
+//
+// beforeChunk, when set, runs before every chunk but the first, ahead of the
+// stop check, so time it spends counts against ctx like a chunk would.
+func pushRefChunks(ctx context.Context, target string, refs []checkpointRefPush, size int,
+	chunkTimeout time.Duration, beforeChunk func(context.Context), onLanded func([]checkpointRefPush),
+) (res chunkPushResult) {
 	consecutive := 0
-	for start := 0; start < len(refs); start += size {
+	defer func() { res.size = size }()
+	for start := 0; start < len(refs); {
 		if start > 0 {
+			if beforeChunk != nil {
+				beforeChunk(ctx)
+			}
 			if reason := chunkStopReason(ctx, consecutive); reason != "" {
 				res.untried = refs[start:]
 				res.stopReason = reason
@@ -269,7 +318,25 @@ func pushRefChunks(ctx context.Context, target string, refs []checkpointRefPush,
 			}
 		}
 		chunk := refs[start:min(start+size, len(refs))]
-		err := batchPushCheckpointRefs(ctx, target, chunk)
+		start += len(chunk)
+		chunkCtx, cancel := ctx, context.CancelFunc(func() {})
+		// A single ref is as small as a chunk gets: timing it out would only
+		// re-send the same partial upload on every pass, never landing it, so
+		// it gets the rest of the budget instead.
+		if chunkTimeout > 0 && len(chunk) > 1 {
+			chunkCtx, cancel = context.WithTimeout(ctx, chunkTimeout)
+		}
+		err := batchPushCheckpointRefs(chunkCtx, target, chunk)
+		stalled := err != nil && chunkTimeout > 0 && len(chunk) > 1 &&
+			errors.Is(chunkCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
+		cancel()
+		if stalled {
+			res.stalled = append(res.stalled, chunk...)
+			logging.Warn(ctx, "git-refs push: checkpoint ref chunk stalled; moving on",
+				slog.Int("refs", len(chunk)), slog.Duration("timeout", chunkTimeout))
+			size = max(2, size/4)
+			continue
+		}
 		if err == nil {
 			consecutive = 0
 			res.landed += len(chunk)
@@ -291,19 +358,81 @@ func pushRefChunks(ctx context.Context, target string, refs []checkpointRefPush,
 		res.failed = append(res.failed, chunk...)
 		if nonInteractiveSSHAuthFailure(ctx, err) {
 			res.sshAuthFailed = true
-			res.untried = refs[start+len(chunk):]
+			res.untried = refs[start:]
 			return res
 		}
 		// A remote that already answered this flush — took a chunk, or failed
 		// one any way other than a connect failure — was reachable; a later
-		// connect failure is transient, and the per-ref fallback may still land
-		// or recover those refs. Only a connect failure on the first chunk the
-		// remote saw means unreachable.
+		// connect failure is transient,
+		// and the per-ref fallback may still land or recover those refs. Only a
+		// connect failure on the first chunk the remote saw means unreachable.
 		if line, ok := remote.UnreachableRemoteLine(err); ok && res.landed == 0 && len(res.failed) == len(chunk) {
 			res.unreachable = line
-			res.untried = refs[start+len(chunk):]
+			res.untried = refs[start:]
 			return res
 		}
+	}
+	return res
+}
+
+// splitFloor is the smallest failed batch splitFailedChunks halves; smaller
+// ones go straight to the per-ref fallback, which retries each ref anyway.
+const splitFloor = 4
+
+// splitResult is what splitFailedChunks left for the per-ref fallback.
+type splitResult struct {
+	landed     int
+	unresolved []checkpointRefPush
+}
+
+// splitFailedChunks re-pushes each failed chunk of refs (chunkSize apart) in
+// halves, recursing into a half only while its sibling landed: a single bad
+// ref is then isolated in about 2·log2(chunk) pushes. When both halves fail
+// the cause is not one ref (several diverged, or the destination), so both go
+// to the per-ref fallback whole, as does everything once the budget is spent
+// or the destination refuses the key or the connection. onLanded is called
+// with each half that lands.
+func splitFailedChunks(ctx, flushCtx context.Context, target string, refs []checkpointRefPush, chunkSize int,
+	onLanded func([]checkpointRefPush),
+) splitResult {
+	var res splitResult
+	halt := false
+	var walk func([]checkpointRefPush)
+	walk = func(batch []checkpointRefPush) {
+		if halt || len(batch) <= splitFloor || flushCtx.Err() != nil {
+			res.unresolved = append(res.unresolved, batch...)
+			return
+		}
+		mid := len(batch) / 2
+		var failedHalves [][]checkpointRefPush
+		for _, half := range [][]checkpointRefPush{batch[:mid], batch[mid:]} {
+			if halt || flushCtx.Err() != nil {
+				failedHalves = append(failedHalves, half)
+				continue
+			}
+			err := batchPushCheckpointRefs(flushCtx, target, half)
+			if err == nil {
+				res.landed += len(half)
+				onLanded(half)
+				continue
+			}
+			if _, unreachable := remote.UnreachableRemoteLine(err); unreachable || nonInteractiveSSHAuthFailure(flushCtx, err) {
+				halt = true
+			}
+			logging.Debug(ctx, "git-refs push: split checkpoint ref batch failed",
+				slog.Int("refs", len(half)), slog.String("error", err.Error()))
+			failedHalves = append(failedHalves, half)
+		}
+		if len(failedHalves) == 1 && !halt {
+			walk(failedHalves[0])
+			return
+		}
+		for _, half := range failedHalves {
+			res.unresolved = append(res.unresolved, half...)
+		}
+	}
+	for start := 0; start < len(refs); start += chunkSize {
+		walk(refs[start:min(start+chunkSize, len(refs))])
 	}
 	return res
 }
@@ -655,6 +784,23 @@ var checkpointPushBudget = 2 * time.Minute
 // Declared as a var so tests can shrink it.
 var checkpointFlushBudget = 2 * time.Minute
 
+type flushBudgetKey struct{}
+
+// withFlushBudget records the budget a flush runs under, so its stop reason
+// names that budget rather than the pre-push default.
+func withFlushBudget(ctx context.Context, budget time.Duration) context.Context {
+	return context.WithValue(ctx, flushBudgetKey{}, budget)
+}
+
+// flushBudgetFrom returns the budget withFlushBudget recorded, or
+// checkpointFlushBudget.
+func flushBudgetFrom(ctx context.Context) time.Duration {
+	if d, ok := ctx.Value(flushBudgetKey{}).(time.Duration); ok {
+		return d
+	}
+	return checkpointFlushBudget
+}
+
 // checkpointRefPushChunkSize is the most queued refs one batch push carries.
 //
 // It must keep one push's command line under Windows' 32,767-character
@@ -702,7 +848,7 @@ const maxConsecutiveRefPushFailures = 5
 func flushAbortReason(ctx context.Context, consecutiveFailures int) string {
 	switch {
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
-		return fmt.Sprintf("budget (%s) exhausted", checkpointFlushBudget)
+		return fmt.Sprintf("budget (%s) exhausted", flushBudgetFrom(ctx))
 	case ctx.Err() != nil:
 		return "interrupted"
 	case consecutiveFailures >= maxConsecutiveRefPushFailures:
@@ -811,27 +957,37 @@ func nonInteractiveSSHAuthFailure(ctx context.Context, err error) bool {
 	return err != nil && remote.IsNonInteractiveSSH(ctx) && remote.LooksLikeSSHAuthFailure(err.Error())
 }
 
-// printCheckpointRemoteHint prints a hint when a push to a checkpoint URL fails.
-// Only prints when the target is a URL (not the user's default remote).
-func printCheckpointRemoteHint(target string) {
+// checkpointRemoteHint is the hint for a failed push to a checkpoint URL, or
+// "" when target is not a URL (the user's default remote).
+func checkpointRemoteHint(target string) string {
 	if !remote.IsURL(target) {
-		return
+		return ""
 	}
-	fmt.Fprintln(os.Stderr, "[entire] A checkpoint remote is configured in Entire settings (.entire/settings.json or .entire/settings.local.json) but could not be reached.")
-	fmt.Fprintln(os.Stderr, "[entire] Checkpoints are saved locally but not synced. Ensure you have access to the checkpoint remote.")
+	return "[entire] A checkpoint remote is configured in Entire settings (.entire/settings.json or .entire/settings.local.json) but could not be reached.\n" +
+		"[entire] Checkpoints are saved locally but not synced. Ensure you have access to the checkpoint remote."
+}
+
+// printCheckpointRemoteHint prints checkpointRemoteHint, if any.
+func printCheckpointRemoteHint(target string) {
+	if hint := checkpointRemoteHint(target); hint != "" {
+		fmt.Fprintln(os.Stderr, hint)
+	}
 }
 
 // sshAuthHintOnce ensures the ssh-agent hint prints at most once per process
 // (pre-push can push multiple refs).
 var sshAuthHintOnce sync.Once
 
-// printNonInteractiveSSHAuthHint tells the user how to unblock checkpoint pushes
+// nonInteractiveSSHAuthHint tells the user how to unblock checkpoint pushes
 // that failed because SSH needed interactive auth under BatchMode (issue #1523).
+const nonInteractiveSSHAuthHint = "[entire] Checkpoint push skipped: SSH needs interactive auth (passphrase/PIN) and cannot prompt during git hooks.\n" +
+	"[entire] Load your key into ssh-agent (`ssh-add`), then push again. Checkpoints are saved locally until then.\n" +
+	"[entire] PIN-protected security keys: unlock/add them to the agent first. To allow prompts in this path, set GIT_SSH_COMMAND (or core.sshCommand) with an explicit BatchMode=no."
+
+// printNonInteractiveSSHAuthHint prints nonInteractiveSSHAuthHint once.
 func printNonInteractiveSSHAuthHint() {
 	sshAuthHintOnce.Do(func() {
-		fmt.Fprintln(os.Stderr, "[entire] Checkpoint push skipped: SSH needs interactive auth (passphrase/PIN) and cannot prompt during git hooks.")
-		fmt.Fprintln(os.Stderr, "[entire] Load your key into ssh-agent (`ssh-add`), then push again. Checkpoints are saved locally until then.")
-		fmt.Fprintln(os.Stderr, "[entire] PIN-protected security keys: unlock/add them to the agent first. To allow prompts in this path, set GIT_SSH_COMMAND (or core.sshCommand) with an explicit BatchMode=no.")
+		fmt.Fprintln(os.Stderr, nonInteractiveSSHAuthHint)
 	})
 }
 

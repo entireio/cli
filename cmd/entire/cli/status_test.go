@@ -2525,6 +2525,10 @@ func TestFormatUnpushedCheckpointsLine(t *testing.T) {
 			"1 checkpoint not on origin"},
 		{"pushing_disabled_dedicated", checkpointSyncInfo{PushDisabled: true, Remote: "org/cp", Source: checkpointSyncSourceDedicated, Unpushed: 2},
 			"2 checkpoints not pushed to the checkpoint remote"},
+		{"uploading_in_background", checkpointSyncInfo{Remote: "origin", Source: "default", Unpushed: 3, UploadRunning: true},
+			"3 checkpoints uploading in the background"},
+		{"uploading_in_background_dedicated", checkpointSyncInfo{Remote: "org/cp", Source: checkpointSyncSourceDedicated, Unpushed: 1, UploadRunning: true},
+			"1 checkpoint uploading in the background"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -3394,5 +3398,47 @@ func TestRunStatusDetailed_ReportsRejectedExternalAgents(t *testing.T) { //nolin
 	}
 	if !strings.Contains(got, settings.EntireSettingsLocalFile) {
 		t.Errorf("status does not name where the setting must live:\n%s", got)
+	}
+}
+
+// The last background upload's stop reason is shown only while refs it left
+// are still queued, in both the text line and the JSON field.
+func TestCheckpointUploadStatusOutput(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		info     checkpointSyncInfo
+		wantLine string
+		wantJSON string
+	}{
+		{"queued", checkpointSyncInfo{Unpushed: 2, UploadLastError: "budget (10m0s) exhausted"},
+			"Last background checkpoint upload stopped: budget (10m0s) exhausted", "budget (10m0s) exhausted"},
+		{"nothing_queued", checkpointSyncInfo{Unpushed: 0, UploadLastError: "budget (10m0s) exhausted"}, "", ""},
+		{"no_error", checkpointSyncInfo{Unpushed: 2}, "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var b strings.Builder
+			writeUploadStoppedLine(&b, tc.info, newStatusStyles(&bytes.Buffer{}))
+			got := b.String()
+			if (tc.wantLine == "" && got != "") || !strings.Contains(got, tc.wantLine) {
+				t.Errorf("writeUploadStoppedLine() = %q, want containing %q", got, tc.wantLine)
+			}
+			var r statusJSON
+			r.setCheckpointSync(tc.info)
+			if r.CheckpointUploadLastError != tc.wantJSON {
+				t.Errorf("CheckpointUploadLastError = %q, want %q", r.CheckpointUploadLastError, tc.wantJSON)
+			}
+		})
+	}
+
+	var r statusJSON
+	r.setCheckpointSync(checkpointSyncInfo{Unpushed: 1, UploadRunning: true})
+	out, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("marshal status JSON: %v", err)
+	}
+	if !strings.Contains(string(out), `"checkpoint_upload_running":true`) {
+		t.Errorf("status JSON %s lacks checkpoint_upload_running", out)
 	}
 }

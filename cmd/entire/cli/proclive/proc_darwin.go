@@ -8,6 +8,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// sZomb is the kernel's p_stat for an exited process its parent has not yet
+// reaped (SZOMB in sys/proc.h).
+const sZomb = 5
+
 // procStat looks up a process via sysctl(kern.proc.pid) and returns its parent
 // PID, executable name (comm), and start time as the fingerprint. It uses the
 // typed KinfoProc decoder from golang.org/x/sys/unix rather than hand-decoding
@@ -22,6 +26,10 @@ func procStat(pid int) (ppid int, name, start string, err error) {
 			return 0, "", "", errProcessGone
 		}
 		return 0, "", "", fmt.Errorf("proclive: sysctl kern.proc.pid %d: %w", pid, err)
+	}
+	if k.Proc.P_stat == sZomb {
+		// Exited; only its parent's reap is outstanding.
+		return 0, "", "", errProcessGone
 	}
 	tv := k.Proc.P_starttime
 	return int(k.Eproc.Ppid),
