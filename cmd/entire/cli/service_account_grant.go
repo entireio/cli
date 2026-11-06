@@ -25,7 +25,7 @@ type saTarget struct {
 
 // addSATargetFlags wires --repo and --project.
 func addSATargetFlags(cmd *cobra.Command, repo, project *string) {
-	cmd.Flags().StringVar(repo, "repo", "", "Repo name in the service account's project, its /et/<project>/<repo> path, or its ULID")
+	cmd.Flags().StringVar(repo, "repo", "", "Repo name in the service account's project, or its /et/<project>/<repo> path")
 	cmd.Flags().StringVar(project, "project", "", "The service account's own project (name or ULID)")
 	cmd.MarkFlagsOneRequired("repo", "project")
 	cmd.MarkFlagsMutuallyExclusive("repo", "project")
@@ -42,11 +42,14 @@ func resolveSATarget(ctx context.Context, c *coreapi.Client, sa saRef, repo, pro
 	}
 	var r resolvedRef
 	var err error
-	if looksLikeULID(repo) || strings.Contains(repo, "/") {
-		// A ULID or /et/<project>/<repo> path names its own project.
+	if strings.Contains(repo, "/") {
+		// A path names its own project. A forgeless <project>/<repo> gets the
+		// /et/ suggestion.
 		r, err = resolveRepoRefResolved(ctx, c, repo, "")
 	} else {
-		// Bare names live in the account's project.
+		// Bare values are names in the account's project, never IDs: like
+		// `repo grant`, access management does not read a ULID-shaped name as
+		// an ID.
 		if sa.ProjectID == "" {
 			return saTarget{}, fmt.Errorf("service account %s names no project", sa.ID)
 		}

@@ -291,8 +291,9 @@ always runnable in every build.
   the project's accounts and matches exactly. Errors branch on core's RFC 9457
   `type`, never on its prose (`coreapi.APIErrorType`). `grant` and `revoke`
   take `--repo` or `--project`. A bare repo name resolves inside the account's
-  own project, because core refuses a grant outside it with 422; a repo ULID or
-  `/et/<project>/<repo>` path goes through the shared repo resolver.
+  own project, because core refuses a grant outside it with 422. Like `repo
+  grant`, a bare value is always a name, never a ULID; a slash path goes
+  through the shared resolver, which suggests `/et/` for a forgeless one.
   Nothing here is provider-specific: `providers` and `bind --provider <name>`
   render core's provider descriptors from `GET /oidc-providers`. A provider is
   matched by `name`, then by the deprecated `displayName` an older core sends.

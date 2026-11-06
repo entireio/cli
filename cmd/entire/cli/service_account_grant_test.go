@@ -28,13 +28,12 @@ func TestSAGrant(t *testing.T) {
 		require.JSONEq(t, `{"resourceType":"repo","resourceId":"`+saTestRepoID+`","role":"reader"}`, f.body(route))
 	})
 
-	t.Run("a repo ULID needs no lookup", func(t *testing.T) {
+	t.Run("a ULID-shaped value is a name in the account's project", func(t *testing.T) {
 		f, srv := newSAFakeCore(t)
-		out, err := runSA(t, srv.URL, "grant", "acme/ci", "--repo", saTestRepoID, "--role", "reader")
+		_, err := runSA(t, srv.URL, "grant", "acme/ci", "--repo", "01HZX7QABCDEFGHJKMNPQRSTVW", "--role", "reader")
 		require.NoError(t, err)
-		require.Contains(t, out, "✓ Granted reader on repo "+saTestRepoID)
+		require.Contains(t, f.callList(), "GET /api/v1/projects/"+saTestProjectID+"/repos")
 		require.JSONEq(t, `{"resourceType":"repo","resourceId":"`+saTestRepoID+`","role":"reader"}`, f.body(route))
-		require.NotContains(t, f.callList(), "GET /api/v1/projects/"+saTestProjectID+"/repos")
 	})
 
 	t.Run("a forgeless path suggests the native one", func(t *testing.T) {
