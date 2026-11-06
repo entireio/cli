@@ -40,7 +40,7 @@ func saTestSecretPage(cursor string) *coreapi.ListServiceAccountSecretsOutputBod
 				CreatedAt:         time.Now().Add(-48 * time.Hour),
 				ExpiresAt:         time.Now().Add(30 * 24 * time.Hour),
 				LastUsedAt:        coreapi.NewOptDateTime(time.Now().Add(-time.Hour)),
-				LastUsedUserAgent: coreapi.NewOptString("entire-sdk-go/0.3.1"),
+				LastUsedUserAgent: coreapi.NewOptString("entire-sdk-go/0.3.1\x1b]0;pwned\x07\u202e"),
 			}},
 		}
 	}
@@ -88,7 +88,7 @@ func TestSASecretCreate(t *testing.T) {
 		require.Equal(t, saTestSecretID, got["id"])
 	})
 
-	for _, days := range []string{"-1", "366"} {
+	for _, days := range []string{"0", "-1", "366"} {
 		t.Run("refuses lifetime "+days, func(t *testing.T) {
 			f, srv := newSAFakeCore(t)
 			_, _, err := runSAFull(t, srv.URL, "secret", "create", "acme/ci", "--expires-in-days", days)
@@ -131,7 +131,9 @@ func TestSASecretList(t *testing.T) {
 		require.Len(t, lines, 3, out)
 		require.Contains(t, lines[1], saTestSecretID)
 		require.Contains(t, lines[1], "active")
-		require.Contains(t, lines[1], "entire-sdk-go/0.3.1")
+		require.Contains(t, lines[1], "entire-sdk-go/0.3.1]0;pwned")
+		require.NotContains(t, out, "\x1b", "an escape sequence from a client's User-Agent reaches the terminal")
+		require.NotContains(t, out, "\u202e")
 		require.Contains(t, lines[2], saTestSecretID2)
 		require.Contains(t, lines[2], "expired")
 		require.Contains(t, lines[2], "never")

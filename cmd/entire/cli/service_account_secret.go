@@ -17,6 +17,8 @@ const (
 	saSecretIDPrefix = "sas_"
 	// saSecretMaxDays is core's longest secret lifetime.
 	saSecretMaxDays = 365
+	// saSecretMaxUserAgentRunes bounds the LAST USED client in the table.
+	saSecretMaxUserAgentRunes = 80
 
 	// Core's published problem type; never renamed.
 	saProblemSecretLimit = "https://entire.com/errors/service-account/secret-limit-reached" //nolint:gosec // G101: a problem type URI, not a credential
@@ -50,7 +52,8 @@ func newSASecretCreateCmd() *cobra.Command {
 			"  entire service-account secret create acme/agent --expires-in-days 30",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if days < 0 || days > saSecretMaxDays {
+			// An explicit 0 is a mistake, not a request for the default.
+			if cmd.Flags().Changed("expires-in-days") && (days < 1 || days > saSecretMaxDays) {
 				cmd.SilenceUsage = true
 				return fmt.Errorf("--expires-in-days must be between 1 and %d", saSecretMaxDays)
 			}
@@ -112,7 +115,9 @@ func saSecretRowAt(now time.Time) func(coreapi.ServiceAccountSecret) []string {
 		if t, ok := s.LastUsedAt.Get(); ok {
 			lastUsed = saSecretTime(t)
 		}
-		return []string{s.ID, status, saSecretTime(s.CreatedAt), saSecretTime(s.ExpiresAt), lastUsed, orDash(s.LastUsedUserAgent.Or(""))}
+		// The User-Agent is whatever the client that used the secret sent.
+		userAgent := terminalText(s.LastUsedUserAgent.Or(""), saSecretMaxUserAgentRunes)
+		return []string{s.ID, status, saSecretTime(s.CreatedAt), saSecretTime(s.ExpiresAt), lastUsed, orDash(userAgent)}
 	}
 }
 
