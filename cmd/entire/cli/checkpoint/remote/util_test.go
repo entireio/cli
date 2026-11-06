@@ -3,6 +3,7 @@ package remote
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1111,7 +1112,8 @@ func TestPushURL_UnroutableErrorQuotesNoRemoteURL(t *testing.T) {
 }
 
 // A raw-URL push never syncs checkpoints, so PushURL must not log a fallback
-// destination for it: users read that line as checkpoints going to origin.
+// destination for it: users read that line as checkpoints going to origin. The
+// target can carry credentials, so no line may contain them either.
 func TestPushURL_RawURLTargetLogsNoFallback(t *testing.T) {
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)
@@ -1119,14 +1121,14 @@ func TestPushURL_RawURLTargetLogsNoFallback(t *testing.T) {
 	writeSettings(t, repoDir, `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`)
 	t.Chdir(repoDir)
 
-	l, err := logging.New(logging.Config{Root: entiredir.OpenerAt(repoDir), Dir: logging.LogsName})
+	l, err := logging.New(logging.Config{Root: entiredir.OpenerAt(repoDir), Dir: logging.LogsName, Level: slog.LevelDebug})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = l.Close() })
 	ctx := logging.WithLogger(context.Background(), l)
 	// Proves the sink captures warn lines, so the absence below is not vacuous.
 	logging.Warn(ctx, "sentinel")
 
-	gotURL, gotEnabled, err := PushURL(ctx, "https://github.com/acme/app.git")
+	gotURL, gotEnabled, err := PushURL(ctx, "https://user:s3cret@github.com/acme/app.git")
 	require.NoError(t, err)
 	require.Empty(t, gotURL)
 	require.False(t, gotEnabled)
@@ -1135,6 +1137,8 @@ func TestPushURL_RawURLTargetLogsNoFallback(t *testing.T) {
 	content, err := os.ReadFile(filepath.Join(repoDir, ".entire", logging.LogsName, "entire.log"))
 	require.NoError(t, err)
 	require.Contains(t, string(content), "sentinel")
+	require.Contains(t, string(content), "checkpoint_remote not applied")
+	require.NotContains(t, string(content), "s3cret")
 	require.NotContains(t, string(content), "fallback_url")
 	require.Equal(t, 1, strings.Count(string(content), `"level":"WARN"`), "only the sentinel may warn:\n%s", content)
 }

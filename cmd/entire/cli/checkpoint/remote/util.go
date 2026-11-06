@@ -431,7 +431,8 @@ func PushURL(ctx context.Context, pushRemoteName string) (string, bool, error) {
 		// pre-push gate skips it), so there is no destination to fall back to.
 		logging.Debug(ctx, "checkpoint_remote not applied: push target is not a configured remote",
 			slog.String("push_remote", RedactURLOrPath(pushRemoteName)),
-			slog.String("error", err.Error()),
+			// git's error quotes the raw target, which may carry credentials.
+			slog.String("error", strings.ReplaceAll(err.Error(), pushRemoteName, RedactURLOrPath(pushRemoteName))),
 		)
 		return "", false, nil
 	}
