@@ -119,16 +119,20 @@ var portMappingPattern = regexp.MustCompile(`^(?:[0-9.]+:)?[0-9]+(?:-[0-9]+)?:[0
 // echo "machine h login me password p" > ~/.netrc stays outside the value.
 const netrcValue = `"(?:[^"\\\r\n]|\\[^\r\n])*"|'[^'\r\n]*'|[^\s"'` + "`" + `]+(?:["'` + "`" + `]+[^\s"'` + "`" + `;|&()<>][^\s"'` + "`" + `]*)*`
 
+// netrcName is a .netrc machine, login or account name, quoted when it
+// holds blanks (login "alice smith").
+const netrcName = `"(?:[^"\\\r\n]|\\[^\r\n])*"|\S+`
+
 // netrcEntry starts a .netrc entry. A default entry must start a line or a
 // quoted string, so "by default login with password is" is not one. Group 1
 // is the machine, absent for default.
-const netrcEntry = `(?:\bmachine[ \t\r\n]+(\S+)|(?:^|[\r\n"'])[ \t]*default)`
+const netrcEntry = `(?:\bmachine[ \t\r\n]+(` + netrcName + `)|(?:^|[\r\n"'])[ \t]*default)`
 
 const (
 	// netrcSep separates .netrc tokens: blanks, line breaks and comment
 	// lines.
 	netrcSep     = `(?:[ \t\r\n]+|[\r\n][ \t]*#[^\r\n]*)+`
-	netrcAccount = `(?:` + netrcSep + `account` + netrcSep + `\S+)?`
+	netrcAccount = `(?:` + netrcSep + `account` + netrcSep + `(?:` + netrcName + `))?`
 )
 
 // netrcPasswordPatterns match the password of a .netrc entry that also names
@@ -140,8 +144,8 @@ var netrcPasswordPatterns = []struct {
 	// login and value are the indexes of the login and password groups.
 	login, value int
 }{
-	{regexp.MustCompile(netrcEntry + netrcAccount + netrcSep + `login` + netrcSep + `(\S+)` + netrcAccount + netrcSep + `password` + netrcSep + `(` + netrcValue + `)`), 2, 3},
-	{regexp.MustCompile(netrcEntry + netrcAccount + netrcSep + `password` + netrcSep + `(` + netrcValue + `)` + netrcAccount + netrcSep + `login` + netrcSep + `(\S+)`), 3, 2},
+	{regexp.MustCompile(netrcEntry + netrcAccount + netrcSep + `login` + netrcSep + `(` + netrcName + `)` + netrcAccount + netrcSep + `password` + netrcSep + `(` + netrcValue + `)`), 2, 3},
+	{regexp.MustCompile(netrcEntry + netrcAccount + netrcSep + `password` + netrcSep + `(` + netrcValue + `)` + netrcAccount + netrcSep + `login` + netrcSep + `(` + netrcName + `)`), 3, 2},
 }
 
 // detectCommandLinePasswords returns a region for every password passed to a
@@ -197,11 +201,13 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string) []tag
 		if f.containerName && isContainerNameArgument(s, cmd[0]) {
 			continue
 		}
-		stringEnd := lines.stringEnd(cmd[0])
+		// The closing quote of a string the command is quoted in is not
+		// an opening one: "/usr/bin/mysql" -p"x" or sh -c "mysql ...".
+		closeAt, stringEnd := lines.enclosing(cmd[0])
 		end := len(s)
 		switch {
 		case cmd[0] >= segmentEnd:
-			segment = quoteScan{s: s, i: cmd[1]}
+			segment = quoteScan{s: s, i: cmd[1], skip: closeAt, skipEnd: stringEnd}
 		case f.leading:
 		default:
 			argEnd, nested := segment.stringAt(cmd[0])
@@ -216,18 +222,19 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string) []tag
 		} else {
 			nestedEnd = cmd[1] + len(rest)
 		}
-		regions = f.appendFlags(regions, s, cmd[1], rest, stringEnd)
+		quotes := quoteScan{s: s[:cmd[1]+len(rest)], i: cmd[1], skip: closeAt, skipEnd: stringEnd}
+		regions = f.appendFlags(regions, s, &quotes, rest, stringEnd)
 	}
 	return regions
 }
 
 // appendFlags adds the value of every password flag in rest, the segment
-// after a command that ends at base, so a second flag (openssl -passin pass:a
-// -passout pass:b) is read too. A flag inside a quoted argument (the SQL of
-// mysql -e 'select -p1') is text, not a flag. stringEnd is where the quoted
-// string holding the command ends, or -1.
-func (f cliPasswordFlag) appendFlags(regions []taggedRegion, s string, base int, rest string, stringEnd int) []taggedRegion {
-	quotes := quoteScan{s: s[:base+len(rest)], i: base}
+// after a command, so a second flag (openssl -passin pass:a -passout pass:b)
+// is read too. quotes scans rest from its start; a flag inside a quoted
+// argument (the SQL of mysql -e 'select -p1') is text, not a flag. stringEnd
+// is where the quoted string holding the command ends, or -1.
+func (f cliPasswordFlag) appendFlags(regions []taggedRegion, s string, quotes *quoteScan, rest string, stringEnd int) []taggedRegion {
+	base := quotes.i
 	for _, loc := range f.flag.FindAllStringSubmatchIndex(rest, -1) {
 		if _, quoted := quotes.stringAt(base + loc[0]); quoted {
 			continue
@@ -413,6 +420,10 @@ type quoteScan struct {
 	// i is where the scan goes on; start and end bound the last quoted
 	// string it found.
 	i, start, end int
+	// skip is the closing quote of a string that opened before the scan
+	// started, stepped over up to skipEnd instead of read as an opening
+	// quote.
+	skip, skipEnd int
 }
 
 // stringAt returns the end of the quoted string that p is inside, after its
@@ -423,6 +434,10 @@ func (q *quoteScan) stringAt(p int) (end int, ok bool) {
 		return q.end, true
 	}
 	for q.i < p {
+		if q.i == q.skip && q.skipEnd > q.i {
+			q.i = q.skipEnd
+			continue
+		}
 		if end, quoteLen := quotedPiece(q.s, q.i); quoteLen > 0 {
 			q.start, q.end, q.i = q.i, end, end
 			if p < end {
@@ -443,10 +458,22 @@ func (q *quoteScan) stringAt(p int) (end int, ok bool) {
 // start, so this is the string of the line the command is quoted in
 // ("mysql -p" + password, {"cmd":"mysql -p"}).
 func (q *quoteScan) stringEnd(p int) int {
-	if end, ok := q.stringAt(p); ok {
-		return end
+	_, end := q.enclosing(p)
+	return end
+}
+
+// enclosing returns where the closing quote of the quoted string that p is
+// inside starts, and where it ends, or -1 and -1 when p is not in one.
+func (q *quoteScan) enclosing(p int) (closeAt, end int) {
+	end, ok := q.stringAt(p)
+	if !ok {
+		return -1, -1
 	}
-	return -1
+	quoteLen := 1
+	if q.s[q.start] == '\\' {
+		quoteLen = 2
+	}
+	return end - quoteLen, end
 }
 
 // isStringGap reports whether the inside of a quoted piece that opens with

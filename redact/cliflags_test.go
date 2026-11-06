@@ -93,6 +93,12 @@ func TestString_CommandLinePasswords(t *testing.T) {
 		{name: "client run through sh -c in a container", input: "docker exec mysql sh -c 'mysql -p" + p + " app'", want: "docker exec mysql sh -c 'mysql -pREDACTED app'"},
 		{name: "apostrophe earlier on the line", input: "Let's connect with mysql -u root -p'" + p + "' app", want: "Let's connect with mysql -u root -p'REDACTED' app"},
 		{name: "netrc escaped quote", input: `machine 127.0.0.1 login alice password "abc\"` + p + `"`, want: `machine 127.0.0.1 login alice password "REDACTED"`},
+		{name: "netrc quoted login with a blank", input: `machine 127.0.0.1 login "alice smith" password ` + p, want: `machine 127.0.0.1 login "alice smith" password REDACTED`},
+		{name: "netrc quoted machine", input: `machine "my host" login alice password ` + p, want: `machine "my host" login alice password REDACTED`},
+		{name: "quoted openssl path", input: `"/usr/bin/openssl" enc -aes-128-cbc -pass "pass:` + p + `"`, want: `"/usr/bin/openssl" enc -aes-128-cbc -pass "pass:REDACTED"`},
+		{name: "quoted mysql path", input: `"/usr/bin/mysql" -p"` + p + `"`, want: `"/usr/bin/mysql" -p"REDACTED"`},
+		{name: "quoted Windows path", input: `"C:\Program Files\MySQL\bin\mysql.exe" -u root -p"` + p + `"`, want: `"C:\Program Files\MySQL\bin\mysql.exe" -u root -p"REDACTED"`},
+		{name: "quoted SQL inside sh -c", input: `sh -c "mysql -p` + p + ` -e 'select -p1'"`, want: `sh -c "mysql -pREDACTED -e 'select -p1'"`},
 	})
 }
 
