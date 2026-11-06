@@ -76,6 +76,7 @@ type trunkFixture struct {
 	trunkDir string
 	worktree string
 	bin      string
+	path     string // PATH for the hooks: bin, then the test's own
 	log      string
 }
 
@@ -84,8 +85,8 @@ func newTrunkFixture(t *testing.T, shared bool, trunkExit int) *trunkFixture {
 	if runtime.GOOS == "windows" {
 		t.Skip("runs POSIX shell hooks")
 	}
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("Trunk's launcher needs bash")
+	if _, err := os.Stat("/bin/bash"); err != nil {
+		t.Skip("Trunk's launcher runs /bin/bash")
 	}
 	trunkDir := t.TempDir()
 	hooksDir := filepath.Join(trunkDir, "hooks")
@@ -102,6 +103,7 @@ func newTrunkFixture(t *testing.T, shared bool, trunkExit int) *trunkFixture {
 		bin:          t.TempDir(),
 		log:          filepath.Join(t.TempDir(), "log"),
 	}
+	tf.path = tf.bin + string(os.PathListSeparator) + os.Getenv("PATH")
 	writeExec(t, filepath.Join(trunkDir, "tools", "trunk"), trunkStub(tf.log, trunkExit))
 	writeExec(t, filepath.Join(tf.bin, "entire"), "#!/bin/sh\necho \"entire $3\" >> "+tf.log+"\n")
 	launcher := filepath.Join(trunkDir, "launcher")
@@ -126,7 +128,7 @@ func (tf *trunkFixture) run(hook, stdin string, args ...string) (int, string) {
 	tf.t.Helper()
 	ctx, cancel := context.WithTimeout(tf.t.Context(), hookRunTimeout)
 	defer cancel()
-	out, err := runHookIn(ctx, tf.worktree, stdin, tf.bin, filepath.Join(tf.dir, hook), args...)
+	out, err := runHookIn(ctx, tf.worktree, stdin, tf.path, filepath.Join(tf.dir, hook), args...)
 	code := 0
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
@@ -203,6 +205,28 @@ func TestInstallHooks_ChainedTrunkLauncherFailureFailsHook(t *testing.T) {
 	msg := filepath.Join(t.TempDir(), "COMMIT_EDITMSG")
 	if code, got := tf.run("commit-msg", "", msg); code != 1 || !strings.Contains(got, "trunk commit-msg "+msg) {
 		t.Errorf("commit-msg exited %d after running:\n%s\nwant Trunk's commit-msg check to run and its exit 1", code, got)
+	}
+}
+
+// The launcher runs where its #!/bin/bash does, whether or not bash is on PATH,
+// as with a GUI git client whose PATH lacks /bin.
+func TestInstallHooks_ChainedTrunkLauncherNeedsNoBashOnPath(t *testing.T) {
+	t.Parallel()
+	tf := newTrunkFixture(t, false, 0)
+	tf.installExecutable(buildHookSpecs(bareEntireHookCmd)...)
+	// Only what the hooks and the launcher run besides bash.
+	for _, tool := range []string{"cat", "dirname", "grep", "mkdir", "mktemp", "rm"} {
+		target, err := exec.LookPath(tool)
+		if err != nil {
+			t.Skipf("hooks need %s", tool)
+		}
+		if err := os.Symlink(target, filepath.Join(tf.bin, tool)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tf.path = tf.bin
+	if code, got := tf.run("pre-push", "\n", "origin", "url"); code != 0 || !strings.Contains(got, "trunk pre-push origin url") {
+		t.Errorf("pre-push exited %d after running:\n%s\nwant Trunk's pre-push to run", code, got)
 	}
 }
 

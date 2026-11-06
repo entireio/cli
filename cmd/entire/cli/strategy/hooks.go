@@ -1204,7 +1204,7 @@ if [ -z "${%s:-}" ]; then
         fi
     elif [ -x "$_entire_hook_dir/%s" ]; then
         if grep -qxF %s "$_entire_hook_dir/%s" 2>/dev/null; then
-            bash --norc -c '_entire_saved_hook=$1; shift; . "$_entire_saved_hook"' "$_entire_hook_dir/%s" "$_entire_hook_dir/%s" "$@"%s
+            /bin/bash --norc -c '_entire_saved_hook=$1; shift; . "$_entire_saved_hook"' "$_entire_hook_dir/%s" "$_entire_hook_dir/%s" "$@"%s
         else
             "$_entire_hook_dir/%s" "$@"%s
         fi
@@ -1222,9 +1222,10 @@ fi
 // Executed as <hook>.pre-entire, it asks Trunk for a callback of that name,
 // which Trunk refuses with exit 2, aborting the commit or push. A link named
 // <hook> in another directory would fix the name but not the directory. So the
-// chain sources the launcher in bash (it is a bash script) with $0 set to the
-// hook's own path: ${0##*/} is <hook>, BASH_SOURCE still names the backup in
-// the hooks directory, and the exit status and EXIT trap stay the launcher's.
+// chain sources the launcher with $0 set to the hook's own path, in the
+// /bin/bash --norc its #! names (not bash from PATH, which a GUI git client may
+// not have): ${0##*/} is <hook>, BASH_SOURCE still names the backup in the
+// hooks directory, and the exit status and EXIT trap stay the launcher's.
 //
 // Only a backup with this exact line is sourced. Any other may be another
 // language or depend on its own path, so it is executed as before.
