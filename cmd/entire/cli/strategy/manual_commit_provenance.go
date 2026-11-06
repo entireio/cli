@@ -283,9 +283,11 @@ func recordStampedTrailer(ctx context.Context, cpID id.CheckpointID) bool {
 // the sessions it linked the commit to (withLinkedSessions). Post-commit keeps
 // those sessions in its own matching, so it condenses into the trailer the
 // sessions prepare linked. It sits beside stampedTrailersFile, not in it, so a
-// binary that reads that file as a list of IDs is unaffected; post-commit
-// takes both. With no entry for its trailer, post-commit matches afresh, as
-// before.
+// binary that reads that file as a list of IDs is unaffected. Prepare writes
+// it after the stamp and post-commit takes it before the stamps, so a
+// post-commit that finds its stamp finds the entry too, even with another
+// commit's prepare racing it. With no entry for its trailer, post-commit
+// matches afresh, as before.
 const stampedSessionsFile = "entire-stamped-sessions.json"
 
 type stampedSessions struct {
