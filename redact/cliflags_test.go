@@ -99,6 +99,9 @@ func TestString_CommandLinePasswords(t *testing.T) {
 		{name: "quoted mysql path", input: `"/usr/bin/mysql" -p"` + p + `"`, want: `"/usr/bin/mysql" -p"REDACTED"`},
 		{name: "quoted Windows path", input: `"C:\Program Files\MySQL\bin\mysql.exe" -u root -p"` + p + `"`, want: `"C:\Program Files\MySQL\bin\mysql.exe" -u root -p"REDACTED"`},
 		{name: "quoted SQL inside sh -c", input: `sh -c "mysql -p` + p + ` -e 'select -p1'"`, want: `sh -c "mysql -pREDACTED -e 'select -p1'"`},
+		{name: "apostrophe before a quoted password with a semicolon", input: "Let's connect with mysql -p'abc;" + p + "' app", want: "Let's connect with mysql -p'REDACTED' app"},
+		{name: "escaped quotes inside sh -c", input: `sh -c "mysql -e \"a; b\" -p` + p + `"`, want: `sh -c "mysql -e \"a; b\" -pREDACTED"`},
+		{name: "nested command after cd and sudo", input: "docker exec mysql sh -c 'cd /app && sudo mysql -p" + p + " app'", want: "docker exec mysql sh -c 'cd /app && sudo mysql -pREDACTED app'"},
 	})
 }
 
@@ -144,6 +147,8 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		`cmd := "mysql -uroot -p" + password + " app"`,
 		`cmd := "mysql -uroot -p"+password+" app"`,
 		`bash -c "mysql -uroot -p"; echo "done"`,
+		"mysql -e 'SELECT mysql -pDebug FROM metrics'",
+		`mysql -e \"; printf hello\" -phunter2`,
 		`netrc := "machine h login me password " + password + "\n"`,
 		`cmd := "mongosh --password " + password + " db"`,
 		"mysql -u root -p$(cat /run/secrets/pw) db",

@@ -12,21 +12,29 @@ import (
 // delimiter of Markdown code (`mysql -pX`) and of $(...) out of the value.
 const cliFlagValue = `"[^"\r\n]*"|'[^'\r\n]*'|[^\s'"` + "`" + `|;&()<>]+`
 
-// cliSameCommand is the text between a command name and one of its flags. It
-// skips quoted strings (also JSON-escaped ones, \"select 1; select 2\"),
-// escaped characters (\;) and escaped line breaks (a command continued with a
-// trailing backslash), and otherwise never crosses a line break, a shell
-// operator or a backtick (which starts a command substitution, or ends
-// Markdown code), so a flag is only read as belonging to the command that
-// precedes it in the same pipeline segment.
-const cliSameCommand = `(?:\\\r?\n|\\"[^"\r\n]*?\\"|\\[^\r\n]|"[^"\r\n]*"|'[^'\r\n]*'|[^\r\n|;&` + "`" + `])`
+// cliSameCommandChar is one piece of the text between a command name and one
+// of its flags. It skips quoted strings, escaped characters (\;) and escaped
+// line breaks (a command continued with a trailing backslash), and otherwise
+// never crosses a line break, a shell operator or a backtick (which starts a
+// command substitution, or ends Markdown code), so a flag is only read as
+// belonging to the command that precedes it in the same pipeline segment.
+const cliSameCommandChar = `\\\r?\n|\\[^\r\n]|"[^"\r\n]*"|'[^'\r\n]*'|[^\r\n|;&` + "`" + `]`
+
+const cliSameCommand = `(?:` + cliSameCommandChar + `)`
 
 // cliBlank separates a flag from its value or from the next flag, possibly
 // across an escaped line break.
 const cliBlank = `(?:[ \t]|\\\r?\n)+`
 
 // cliSegmentRest matches the rest of a pipeline segment after a command name.
-var cliSegmentRest = regexp.MustCompile(`^` + cliSameCommand + `*`)
+// cliEscapedSegmentRest also skips strings in escaped double quotes, which
+// quote for a command inside a double-quoted string
+// (sh -c "mysql -e \"select 1; select 2\" -pX", a command in a JSON string);
+// elsewhere \" is a literal quote.
+var (
+	cliSegmentRest        = regexp.MustCompile(`^` + cliSameCommand + `*`)
+	cliEscapedSegmentRest = regexp.MustCompile(`^(?:\\"[^"\r\n]*?\\"|` + cliSameCommandChar + `)*`)
+)
 
 // cliLongPasswordPattern matches a GNU-style password flag on any command line
 // (mysql --password=..., mongosh --password ..., az login --password ...).
@@ -172,7 +180,7 @@ func appendLongPasswordFlags(regions []taggedRegion, s string) []taggedRegion {
 	if !strings.Contains(s, "--pass") {
 		return regions
 	}
-	lines := quoteScan{s: s}
+	lines := quoteScan{s: s, prose: true}
 	for _, loc := range cliLongPasswordPattern.FindAllStringSubmatchIndex(s, -1) {
 		// After "=" a leading '-' is part of the value; after a blank it
 		// starts the next flag.
@@ -194,7 +202,7 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string) []tag
 	if !slices.ContainsFunc(f.needles, func(n string) bool { return strings.Contains(s, n) }) {
 		return regions
 	}
-	lines := quoteScan{s: s}
+	lines := quoteScan{s: s, prose: true}
 	var segment quoteScan
 	segmentEnd, nestedEnd := 0, 0
 	for _, cmd := range f.command.FindAllStringIndex(s, -1) {
@@ -211,12 +219,12 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string) []tag
 		case f.leading:
 		default:
 			argEnd, nested := segment.stringAt(cmd[0])
-			if !nested || cmd[0] < nestedEnd {
+			if !nested || cmd[0] < nestedEnd || !startsCommand(s[segment.inner():cmd[0]]) {
 				continue
 			}
 			end = max(argEnd-1, cmd[1])
 		}
-		rest := cliSegmentRest.FindString(s[cmd[1]:end])
+		rest := segmentRestPattern(s, closeAt).FindString(s[cmd[1]:end])
 		if end == len(s) {
 			segmentEnd = max(segmentEnd, cmd[1]+len(rest))
 		} else {
@@ -226,6 +234,47 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string) []tag
 		regions = f.appendFlags(regions, s, &quotes, rest, stringEnd)
 	}
 	return regions
+}
+
+// segmentRestPattern returns the pattern for the rest of the segment of a
+// command whose enclosing string closes at closeAt, or -1.
+func segmentRestPattern(s string, closeAt int) *regexp.Regexp {
+	if closeAt >= 0 && s[closeAt] == '"' {
+		return cliEscapedSegmentRest
+	}
+	return cliSegmentRest
+}
+
+// startsCommand reports whether a command name after prefix, the text from
+// the start of a quoted argument, is run as a command (sh -c 'mysql -pX',
+// sh -c 'cd app && sudo mysql -pX') rather than being text in it (the SQL
+// of mysql -e 'select mysql -pX').
+func startsCommand(prefix string) bool {
+	if i := strings.LastIndexAny(prefix, ";|&("); i >= 0 {
+		prefix = prefix[i+1:]
+	}
+	for _, word := range strings.Fields(prefix) {
+		switch word {
+		case "sudo", "exec", "env", "time", "nohup", "command":
+			continue
+		}
+		if eq := strings.IndexByte(word, '='); eq <= 0 || !isShellName(word[:eq]) {
+			return false
+		}
+	}
+	return true
+}
+
+// isShellName reports whether s is a shell variable name (an environment
+// assignment's NAME=).
+func isShellName(s string) bool {
+	for i := range len(s) {
+		c := s[i]
+		if c != '_' && (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (i == 0 || c < '0' || c > '9') {
+			return false
+		}
+	}
+	return s != ""
 }
 
 // appendFlags adds the value of every password flag in rest, the segment
@@ -424,6 +473,9 @@ type quoteScan struct {
 	// started, stepped over up to skipEnd instead of read as an opening
 	// quote.
 	skip, skipEnd int
+	// prose skips an apostrophe inside a word (Let's), which opens no
+	// string in the text around a command.
+	prose bool
 }
 
 // stringAt returns the end of the quoted string that p is inside, after its
@@ -436,6 +488,10 @@ func (q *quoteScan) stringAt(p int) (end int, ok bool) {
 	for q.i < p {
 		if q.i == q.skip && q.skipEnd > q.i {
 			q.i = q.skipEnd
+			continue
+		}
+		if q.prose && isApostrophe(q.s, q.i) {
+			q.i++
 			continue
 		}
 		if end, quoteLen := quotedPiece(q.s, q.i); quoteLen > 0 {
@@ -469,11 +525,26 @@ func (q *quoteScan) enclosing(p int) (closeAt, end int) {
 	if !ok {
 		return -1, -1
 	}
-	quoteLen := 1
+	return end - q.quoteLen(), end
+}
+
+// inner returns where the inside of the last quoted string found starts.
+func (q *quoteScan) inner() int {
+	return q.start + q.quoteLen()
+}
+
+// quoteLen returns the length of the quote of the last quoted string found:
+// 2 for \", 1 otherwise.
+func (q *quoteScan) quoteLen() int {
 	if q.s[q.start] == '\\' {
-		quoteLen = 2
+		return 2
 	}
-	return end - quoteLen, end
+	return 1
+}
+
+// isApostrophe reports whether s[i] is a ' between two letters.
+func isApostrophe(s string, i int) bool {
+	return s[i] == '\'' && i > 0 && i+1 < len(s) && isLetterByte(s[i-1]) && isLetterByte(s[i+1])
 }
 
 // isStringGap reports whether the inside of a quoted piece that opens with
@@ -507,7 +578,7 @@ func isContainerNameArgument(s string, start int) bool {
 
 func appendNetrcPasswords(regions []taggedRegion, s string) []taggedRegion {
 	for _, p := range netrcPasswordPatterns {
-		lines := quoteScan{s: s}
+		lines := quoteScan{s: s, prose: true}
 		for _, loc := range p.pattern.FindAllStringSubmatchIndex(s, -1) {
 			machine := ""
 			if loc[2] >= 0 {
