@@ -13,12 +13,12 @@ import (
 const cliFlagValue = `"[^"\r\n]*"|'[^'\r\n]*'|[^\s'"` + "`" + `|;&()<>]+`
 
 // cliSameCommand is the text between a command name and one of its flags. It
-// skips quoted strings and escaped line breaks (a command continued with a
-// trailing backslash), and otherwise never crosses a line break, a shell
-// operator or a backtick (which starts a command substitution, or ends
-// Markdown code), so a flag is only read as belonging to the command that
-// precedes it in the same pipeline segment.
-const cliSameCommand = `(?:\\\r?\n|"[^"\r\n]*"|'[^'\r\n]*'|[^\r\n|;&` + "`" + `])`
+// skips quoted strings, escaped characters (\;) and escaped line breaks (a
+// command continued with a trailing backslash), and otherwise never crosses a
+// line break, a shell operator or a backtick (which starts a command
+// substitution, or ends Markdown code), so a flag is only read as belonging
+// to the command that precedes it in the same pipeline segment.
+const cliSameCommand = `(?:\\\r?\n|\\[^\r\n]|"[^"\r\n]*"|'[^'\r\n]*'|[^\r\n|;&` + "`" + `])`
 
 // cliBlank separates a flag from its value or from the next flag, possibly
 // across an escaped line break.
@@ -56,6 +56,10 @@ type cliPasswordFlag struct {
 	// image name, so a port mapping after it (docker run --name mongo -p
 	// 27017:27017) is docker's -p.
 	containerName bool
+	// leading marks a flag that is only read right after the command name,
+	// so every occurrence of the name is tried (docker exec sshpass sshpass
+	// -p ...).
+	leading bool
 }
 
 var cliPasswordFlags = []cliPasswordFlag{
@@ -89,6 +93,7 @@ var cliPasswordFlags = []cliPasswordFlag{
 		needles: []string{"sshpass"},
 		command: regexp.MustCompile(`\bsshpass\b`),
 		flag:    regexp.MustCompile(`^(?:` + cliBlank + `-(?:v|P[ \t]*(?:` + cliFlagValue + `)))*` + cliBlank + `-p[ \t]*(` + cliFlagValue + `)`),
+		leading: true,
 	},
 	{
 		needles: []string{"redis-cli"},
@@ -118,7 +123,9 @@ const netrcValue = `"[^"\r\n]*"|'[^'\r\n]*'|[^\s"'` + "`" + `]+(?:["'` + "`" + `
 const netrcEntry = `(?:\bmachine[ \t\r\n]+(\S+)|(?:^|[\r\n"'])[ \t]*default)`
 
 const (
-	netrcSep     = `[ \t\r\n]+`
+	// netrcSep separates .netrc tokens: blanks, line breaks and comment
+	// lines.
+	netrcSep     = `(?:[ \t\r\n]+|[\r\n][ \t]*#[^\r\n]*)+`
 	netrcAccount = `(?:` + netrcSep + `account` + netrcSep + `\S+)?`
 )
 
@@ -131,7 +138,7 @@ var netrcPasswordPatterns = []struct {
 	// login and value are the indexes of the login and password groups.
 	login, value int
 }{
-	{regexp.MustCompile(netrcEntry + netrcSep + `login` + netrcSep + `(\S+)` + netrcAccount + netrcSep + `password` + netrcSep + `(` + netrcValue + `)`), 2, 3},
+	{regexp.MustCompile(netrcEntry + netrcAccount + netrcSep + `login` + netrcSep + `(\S+)` + netrcAccount + netrcSep + `password` + netrcSep + `(` + netrcValue + `)`), 2, 3},
 	{regexp.MustCompile(netrcEntry + netrcAccount + netrcSep + `password` + netrcSep + `(` + netrcValue + `)` + netrcAccount + netrcSep + `login` + netrcSep + `(\S+)`), 3, 2},
 }
 
@@ -160,7 +167,10 @@ func appendLongPasswordFlags(regions []taggedRegion, s string) []taggedRegion {
 		return regions
 	}
 	for _, loc := range cliLongPasswordPattern.FindAllStringSubmatchIndex(s, -1) {
-		if r, ok := passwordValueRegion(s, shellWordValue(s, loc[4], loc[5]), true, s[loc[2]] != '='); ok {
+		// After "=" a leading '-' is part of the value; after a blank it
+		// starts the next flag.
+		blank := s[loc[2]] != '='
+		if r, ok := passwordValueRegion(s, shellWordValue(s, loc[4], loc[5]), blank, blank); ok {
 			regions = append(regions, r)
 		}
 	}
@@ -169,19 +179,23 @@ func appendLongPasswordFlags(regions []taggedRegion, s string) []taggedRegion {
 
 // appendPasswords adds the value of every password flag in the segment of
 // each command f defines, so a second flag (openssl -passin pass:a -passout
-// pass:b) is read too.
+// pass:b) is read too. A flag inside a quoted argument (the SQL of mysql -e
+// 'select -p1') is text, not a flag.
 func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string) []taggedRegion {
 	if !slices.ContainsFunc(f.needles, func(n string) bool { return strings.Contains(s, n) }) {
 		return regions
 	}
 	scanned := 0
 	for _, cmd := range f.command.FindAllStringIndex(s, -1) {
-		if cmd[0] < scanned || f.containerName && isContainerNameArgument(s, cmd[0]) {
+		if cmd[0] < scanned && !f.leading || f.containerName && isContainerNameArgument(s, cmd[0]) {
 			continue
 		}
 		rest := cliSegmentRest.FindString(s[cmd[1]:])
 		scanned = cmd[1] + len(rest)
 		for _, loc := range f.flag.FindAllStringSubmatchIndex(rest, -1) {
+			if isQuotedAt(rest, loc[0]) {
+				continue
+			}
 			if r, ok := f.valueRegion(s, cmd[1]+loc[2], cmd[1]+loc[3]); ok {
 				regions = append(regions, r)
 			}
@@ -246,27 +260,30 @@ func (v cliValue) trimPrefix(s, prefix string) (cliValue, bool) {
 }
 
 // shellWordEnd returns the end of the shell word that starts at start. A
-// quoted piece is part of the word, and so is an escaped blank. Commands are
-// often quoted inside other text, as the argument of sh -c or as a JSON
-// string, so a bare piece ends at an escaped quote (\"), and joins a quoted
-// piece that follows it only when the word ends right after that piece and
-// the piece is neither a gap between string literals nor holds a shell
-// operator: the quote after hunter2 in "mysql -phunter2","x" or
-// sh -c "mysql -phunter2"; echo " ok" closes the string around the command.
+// quoted piece is part of the word, and so are an escaped character and a
+// command substitution. Commands are often quoted inside other text, as the
+// argument of sh -c or as a JSON string, so a bare piece ends at an escaped
+// quote (\"), and does not join a quoted piece that starts or ends with a
+// blank or holds a shell operator or JSON separator: the quote after hunter2
+// in "mysql -phunter2","x" or sh -c "mysql -phunter2"; echo " ok" closes the
+// string around the command.
 func shellWordEnd(s string, start int) int {
 	i, afterBare := start, false
 	for i < len(s) {
 		if pieceEnd, quoteLen := quotedPiece(s, i); quoteLen == 1 || quoteLen == 2 && i == start {
-			inner := s[i+quoteLen : pieceEnd-quoteLen]
-			if afterBare && (pieceEnd < len(s) && !isShellWordEnd(s[pieceEnd]) || isLiteralGap(inner) || strings.ContainsAny(inner, ";|&<>()`")) {
+			if afterBare && !joinsBareWord(s[i+quoteLen:pieceEnd-quoteLen]) {
 				return i
 			}
 			i, afterBare = pieceEnd, false
 			continue
 		}
+		if end, ok := substitutionEnd(s, i); ok {
+			i, afterBare = end, true
+			continue
+		}
 		c := s[i]
 		switch {
-		case c == '\\' && i+1 < len(s) && strings.IndexByte(" \t'\"", s[i+1]) >= 0:
+		case c == '\\' && i+1 < len(s) && s[i+1] != '\r' && s[i+1] != '\n':
 			if s[i+1] == '"' && i > start {
 				return i
 			}
@@ -314,12 +331,68 @@ func isShellWordEnd(c byte) bool {
 	return strings.IndexByte(" \t\r\n`|;&()<>", c) >= 0
 }
 
+// substitutionEnd returns the end of the $(...) that starts at i, after its
+// matching parenthesis, and false when none starts there or it does not
+// close.
+func substitutionEnd(s string, i int) (int, bool) {
+	if !strings.HasPrefix(s[i:], "$(") {
+		return 0, false
+	}
+	depth := 0
+	for j := i + 1; j < len(s); j++ {
+		if pieceEnd, quoteLen := quotedPiece(s, j); quoteLen == 1 {
+			j = pieceEnd - 1
+			continue
+		}
+		switch s[j] {
+		case '\\':
+			j++
+		case '(':
+			depth++
+		case ')':
+			if depth--; depth == 0 {
+				return j + 1, true
+			}
+		}
+	}
+	return 0, false
+}
+
+// joinsBareWord reports whether a quoted piece with this inside, right after
+// a bare piece, continues the word rather than closing a string around the
+// command.
+func joinsBareWord(inner string) bool {
+	return strings.TrimSpace(inner) == inner && !strings.ContainsAny(inner, ";|&<>()`,:")
+}
+
+// isQuotedAt reports whether position p of s is inside a quoted string.
+func isQuotedAt(s string, p int) bool {
+	for i := 0; i < p; i++ {
+		if end, quoteLen := quotedPiece(s, i); quoteLen > 0 {
+			if p < end {
+				return true
+			}
+			i = end - 1
+		} else if s[i] == '\\' {
+			i++
+		}
+	}
+	return false
+}
+
 // isLiteralGap reports whether the inside of a quoted piece is the gap
 // between two string literals rather than a value: JSON separators
-// ({"cmd":"mysql -p","x":1}), or code joined by blanks
+// ({"cmd":"mysql -p","x":1}), or a concatenation in code
 // ("mysql -p" + password + " db").
 func isLiteralGap(s string) bool {
-	return strings.Trim(s, ",:[]{} \t") == "" || strings.TrimSpace(s) != s
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return s != ""
+	}
+	if strings.Trim(trimmed, ",:[]{}") == "" {
+		return true
+	}
+	return strings.ContainsRune("+.", rune(trimmed[0])) && strings.ContainsRune("+.", rune(trimmed[len(trimmed)-1]))
 }
 
 // isContainerNameArgument reports whether the client name at start is the
@@ -373,14 +446,14 @@ func passwordValueRegion(s string, v cliValue, dashFlag, requireNonWord bool) (t
 			return taggedRegion{}, false
 		}
 	case strings.HasPrefix(s[v.start:], "$("):
-		substitutionEnd, recipe := commandSubstitution(s, v.start)
-		if recipe && substitutionEnd >= v.end {
-			return taggedRegion{}, false
-		}
-		v.end = max(v.end, substitutionEnd)
-		if !v.quoted {
-			// A literal suffix joined to the substitution is part of the word.
-			v.end = max(v.end, shellWordEnd(s, v.end))
+		// Only a substitution that is the whole value and fetches the
+		// password from elsewhere stays visible: $(printf hunter2) and
+		// $(cat f)suffix carry it.
+		if end, closed := substitutionEnd(s, v.start); closed {
+			if end >= v.end && isSecretRecipeCommand(s[v.start+2:end-1]) {
+				return taggedRegion{}, false
+			}
+			v.end = max(v.end, end)
 		}
 	case !hasNonPlaceholderPasswordValue(value):
 		return taggedRegion{}, false
@@ -389,19 +462,6 @@ func passwordValueRegion(s string, v cliValue, dashFlag, requireNonWord bool) (t
 		return taggedRegion{}, false
 	}
 	return taggedRegion{region: region{v.start, v.end}}, true
-}
-
-// commandSubstitution returns the end of the $(...) that starts at start, and
-// whether it is the whole word and only runs a command that fetches a secret
-// from elsewhere. $(printf hunter2) carries the password itself.
-func commandSubstitution(s string, start int) (int, bool) {
-	body, _, closed := strings.Cut(s[start+2:], ")")
-	if !closed {
-		return start + 1, false
-	}
-	end := start + 2 + len(body) + 1
-	wordEnds := end == len(s) || strings.ContainsRune(" \t\r\n\"'`|;&()<>", rune(s[end]))
-	return end, wordEnds && isSecretRecipeCommand(body)
 }
 
 // isNetrcDeclaration reports whether a .netrc match gives its machine, login
