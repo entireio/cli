@@ -233,24 +233,24 @@ func TestSABindingsAndUnbind(t *testing.T) {
 	require.Contains(t, f.callList(), "DELETE "+saBase+"/"+saTestID+"/bindings/"+saTestBindingID)
 }
 
-func TestSAProviderAccess(t *testing.T) {
+func TestSAProviderBindable(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
 		name string
 		p    coreapi.OIDCProvider
-		want saProviderAccess
+		want bool
 	}{
-		{"self-serve", coreapi.OIDCProvider{Name: coreapi.NewOptString("buildkite"), SelfServe: coreapi.NewOptBool(true)}, saProviderSelfServe},
-		{"operator-only", coreapi.OIDCProvider{Name: coreapi.NewOptString("eks"), SelfServe: coreapi.NewOptBool(false)}, saProviderOperatorOnly},
-		{"old core github-actions", withDisplayName(coreapi.OIDCProvider{}, "github-actions"), saProviderSelfServe},
-		{"old core other", withDisplayName(coreapi.OIDCProvider{}, "buildkite"), saProviderUnknown},
-		{"false beats the github-actions name", coreapi.OIDCProvider{Name: coreapi.NewOptString("github-actions"), SelfServe: coreapi.NewOptBool(false)}, saProviderOperatorOnly},
+		{"self-serve", coreapi.OIDCProvider{Name: coreapi.NewOptString("buildkite"), SelfServe: coreapi.NewOptBool(true)}, true},
+		{"operator-only", coreapi.OIDCProvider{Name: coreapi.NewOptString("eks"), SelfServe: coreapi.NewOptBool(false)}, false},
+		{"old core github-actions", withDisplayName(coreapi.OIDCProvider{}, "github-actions"), true},
+		{"old core other", withDisplayName(coreapi.OIDCProvider{}, "buildkite"), true},
+		{"false beats the github-actions name", coreapi.OIDCProvider{Name: coreapi.NewOptString("github-actions"), SelfServe: coreapi.NewOptBool(false)}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			require.Equal(t, tc.want, newSAProvider(tc.p).access)
+			require.Equal(t, tc.want, newSAProvider(tc.p).bindable())
 		})
 	}
 }

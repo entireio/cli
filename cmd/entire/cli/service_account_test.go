@@ -316,6 +316,8 @@ func TestSAMissingAccount(t *testing.T) {
 		{"delete", []string{"delete", saTestID, "--force"}, "DELETE " + saBase + "/" + saTestID},
 		{"grant", []string{"grant", saTestID, "--repo", "web", "--role", "reader"}, "POST " + saBase + "/" + saTestID + "/grants"},
 		{"bind", []string{"bind", saTestID, "--provider", "github-actions", "--pin", "repository=acme/web"}, saBindRoute},
+		// The account resolves before pins get checked.
+		{"bind missing pins", []string{"bind", saTestID, "--provider", "buildkite"}, saBindRoute},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

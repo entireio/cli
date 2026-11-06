@@ -171,11 +171,11 @@ carry `project_id`: service accounts belong to a project, and `orgId` is
 deprecated and optional.
 
 `OIDCProvider` (`name`, `label`, `docs_url`, `self_serve`, `attributes`) and
-`OIDCProviderAttribute` are NOT from a published spec. They are written by hand
-from `api/corev1/identity.go` on entiredb branch `paul/oidc-provider-descriptors`
-(https://entire.com/gh/entirehq/-/trails/23562), which is not deployed. Every
-new field is optional, so a core that predates them still decodes. Replace both
-schemas with the published ones once that core deploys.
+`OIDCProviderAttribute` are written by hand from `api/corev1/identity.go`
+(https://entire.com/gh/entirehq/-/trails/23562, entiredb#5327). That change is
+merged and prod US serves these fields. Every new field is optional, so a core
+that predates them still decodes. Replace both schemas with the published ones
+at the next spec refresh.
 
 `CreateProjectInputBody.cell` is spliced from the entiredb change in
 https://entire.com/gh/entirehq/-/trails/23479. A core without it ignores the

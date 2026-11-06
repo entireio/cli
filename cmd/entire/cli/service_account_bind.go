@@ -51,11 +51,11 @@ func newSABindCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				if err := completePins(cmd, p, pins); err != nil {
-					return err
-				}
 				sa, err := resolveSARef(ctx, c, args[0])
 				if err != nil {
+					return err
+				}
+				if err := completePins(cmd, p, pins); err != nil {
 					return err
 				}
 				filter, err := json.Marshal(pins)

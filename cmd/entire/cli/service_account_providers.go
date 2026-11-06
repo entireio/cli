@@ -13,42 +13,25 @@ import (
 // githubActionsName is core's GitHub Actions slug.
 const githubActionsName = "github-actions"
 
-// saProviderAccess says who may bind a provider.
-type saProviderAccess int
-
-const (
-	saProviderSelfServe saProviderAccess = iota
-	saProviderOperatorOnly
-	// An old core sends no self_serve; core decides.
-	saProviderUnknown
-)
-
 // saProvider is a provider as the CLI reads it.
 type saProvider struct {
-	wire   coreapi.OIDCProvider
-	name   string
-	label  string
-	access saProviderAccess
+	wire      coreapi.OIDCProvider
+	name      string
+	label     string
+	selfServe bool
 }
 
 func newSAProvider(p coreapi.OIDCProvider) saProvider {
 	// An old core sends the slug as displayName.
 	name := p.Name.Or(p.DisplayName.Or("")) //nolint:staticcheck // old cores send only displayName
 	label := p.Label.Or(name)
-	access := saProviderUnknown
-	if v, ok := p.SelfServe.Get(); ok {
-		access = saProviderOperatorOnly
-		if v {
-			access = saProviderSelfServe
-		}
-	} else if name == githubActionsName {
-		access = saProviderSelfServe
-	}
-	return saProvider{wire: p, name: name, label: label, access: access}
+	// An old core sends no self_serve; core decides.
+	selfServe := p.SelfServe.Or(true)
+	return saProvider{wire: p, name: name, label: label, selfServe: selfServe}
 }
 
 // bindable reports whether the CLI sends a bind.
-func (p saProvider) bindable() bool { return p.access != saProviderOperatorOnly }
+func (p saProvider) bindable() bool { return p.selfServe }
 
 // described reports whether core sent attribute rules.
 func (p saProvider) described() bool { return len(p.wire.Attributes) > 0 }

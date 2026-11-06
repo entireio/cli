@@ -295,9 +295,8 @@ always runnable in every build.
   Nothing here is provider-specific: `providers` and `bind --provider <name>`
   render core's provider descriptors from `GET /oidc-providers`. A provider is
   matched by `name`, then by the deprecated `displayName` an older core sends.
-  Only `self_serve` providers are listed or bound. A provider without
-  `self_serve` counts as self-serve when it is `github-actions`; otherwise core
-  decides. `bind` checks each `--pin` against the descriptor's attributes
+  Only `self_serve` providers are listed or bound. An older core sends no
+  `self_serve`, so the CLI lists every provider and core decides. `bind` checks each `--pin` against the descriptor's attributes
   (unknown name, a `*` in an exact attribute, a pattern mismatch, a missing
   required pin) before it calls core. Core stays the authority, so a provider
   without attributes gets no client checks. A terminal asks for missing
