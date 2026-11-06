@@ -680,11 +680,28 @@ func TestPushURL(t *testing.T) {
 			wantEnabled:  true,
 		},
 		{
-			name:         "missing push remote falls back to origin when checkpoint remote configured",
+			// Nothing pushes to the returned URL when enabled is false, so
+			// returning origin here would only mislead a caller into using it.
+			name:         "missing push remote returns no url when checkpoint remote configured",
 			originURL:    "https://github.com/acme/app.git",
 			pushRemote:   "upstream",
 			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
-			wantURL:      "https://github.com/acme/app.git",
+			wantURL:      "",
+			wantEnabled:  false,
+		},
+		{
+			name:         "raw url push target returns no url when checkpoint remote configured",
+			originURL:    "https://github.com/acme/app.git",
+			pushRemote:   "https://github.com/acme/app.git",
+			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			wantURL:      "",
+			wantEnabled:  false,
+		},
+		{
+			name:         "raw url push target returns no url when origin is missing",
+			pushRemote:   "git@github.com:acme/app.git",
+			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			wantURL:      "",
 			wantEnabled:  false,
 		},
 		{
