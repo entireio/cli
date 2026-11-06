@@ -254,24 +254,24 @@ func startsCommand(prefix string) bool {
 	if i := strings.LastIndexAny(prefix, ";|&("); i >= 0 {
 		prefix = prefix[i+1:]
 	}
-	wrapped, optionArg := false, false
+	wrapper, optionArg := "", false
 	for _, word := range strings.Fields(prefix) {
 		switch {
-		case isCommandWrapper(word):
-			wrapped, optionArg = true, false
-		case wrapped && strings.HasPrefix(word, "-"):
-			// An option of the wrapper (sudo -E, env -i), which may take
-			// the next word as its argument (sudo -u root).
-			optionArg = !strings.Contains(word, "=")
 		case optionArg:
 			optionArg = false
+		case isCommandWrapper(word):
+			wrapper = word
+		case wrapper != "" && strings.HasPrefix(word, "-"):
+			// An option of the wrapper (sudo -E, env -i), some of which
+			// take the next word as their argument (sudo -u root).
+			optionArg = takesArgument(wrapper, word)
 		default:
 			if eq := strings.IndexByte(word, '='); eq <= 0 || !isShellName(word[:eq]) {
 				return false
 			}
 		}
 	}
-	return true
+	return !optionArg
 }
 
 // isCommandWrapper reports whether word runs the command after it (and its
@@ -280,6 +280,28 @@ func isCommandWrapper(word string) bool {
 	switch word {
 	case "sudo", "exec", "env", "time", "nohup", "command":
 		return true
+	}
+	return false
+}
+
+// wrapperArgOptions are the short options of each wrapper that take an
+// argument, and wrapperLongArgOptions the long ones.
+var (
+	wrapperArgOptions     = map[string]string{"sudo": "CDghpRrTtUu", "env": "CSu", "time": "fo", "exec": "a"}
+	wrapperLongArgOptions = []string{"chdir", "chroot", "close-from", "command-timeout", "format", "group", "host", "other-user", "output", "prompt", "role", "split-string", "type", "unset", "user"}
+)
+
+// takesArgument reports whether option, an option of wrapper, takes the next
+// word as its argument: -u and -Eu do, -n and -uroot (its argument glued on)
+// do not.
+func takesArgument(wrapper, option string) bool {
+	if name, ok := strings.CutPrefix(option, "--"); ok {
+		return slices.Contains(wrapperLongArgOptions, name)
+	}
+	for i := 1; i < len(option); i++ {
+		if strings.IndexByte(wrapperArgOptions[wrapper], option[i]) >= 0 {
+			return i == len(option)-1
+		}
 	}
 	return false
 }
