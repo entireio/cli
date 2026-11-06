@@ -226,6 +226,7 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string) []tag
 		// The closing quote of a string the command is quoted in is not
 		// an opening one: "/usr/bin/mysql" -p"x" or sh -c "mysql ...".
 		closeAt, stringEnd := lines.enclosing(cmd[0])
+		skip, skipEnd := closeAt, stringEnd
 		var rest string
 		switch {
 		case cmd[0] >= segmentEnd:
@@ -239,11 +240,11 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string) []tag
 			rest = s[cmd[1]:max(segmentEnd, cmd[1])]
 		default:
 			var ok bool
-			if rest, ok = nested.rest(s, cmd, closeAt); !ok {
+			if rest, skip, skipEnd, ok = nested.rest(f, s, cmd, closeAt, stringEnd); !ok {
 				continue
 			}
 		}
-		quotes := quoteScan{s: s[:cmd[1]+len(rest)], i: cmd[1], skip: closeAt, skipEnd: stringEnd, substitutions: true}
+		quotes := quoteScan{s: s[:cmd[1]+len(rest)], i: cmd[1], skip: skip, skipEnd: skipEnd, substitutions: true}
 		regions = f.appendFlags(regions, s, &quotes, rest, stringEnd)
 	}
 	return regions
@@ -261,75 +262,151 @@ type nestedScan struct {
 // nestedArg is the text of a segment, a quoted string or a command
 // substitution, which a command can run in.
 type nestedArg struct {
-	// from and to bound the text, and substitution is set for that of a
-	// command substitution.
-	from, to     int
-	substitution bool
+	kind argKind
+	// from and to bound the text, and quote is the length of the quote
+	// around a quoted string's.
+	from, to, quote int
 	// scan finds the quoted strings and substitutions in it, and starts
 	// whether a name in it starts a command.
 	scan   quoteScan
 	starts commandStart
-	// readEnd is where the last command read in a substitution ends.
+	// readEnd is where the last command read in it ends.
 	readEnd int
+	// path records whether a quoted string's text is a program path:
+	// 0 when not yet known, 1 when it is, 2 when not.
+	path int
 }
+
+// argKind is what a nestedArg holds.
+type argKind int
+
+const (
+	// segmentArg is the segment of the command whose arguments are read.
+	segmentArg argKind = iota
+	// scriptArg is a quoted argument that may run commands
+	// (sh -c 'mysql -pX'), or text (mysql -e 'select 1').
+	scriptArg
+	// textArg is a quoted string inside a quoted argument, such as a
+	// string in its SQL (mysql -e 'select "x"'), except the script of a
+	// shell's -c option (sh -c 'bash -c "mysql -pX"').
+	textArg
+	// substitutionArg is a command substitution, which only runs
+	// commands.
+	substitutionArg
+)
 
 // newNestedScan returns a scan of the segment of a command whose name ends
 // at i, in a quoted string that closes at closeAt and ends at stringEnd
 // (both -1 when it is in none).
 func newNestedScan(s string, i, closeAt, stringEnd int) nestedScan {
 	return nestedScan{args: []nestedArg{{
+		kind: segmentArg,
 		from: i,
 		to:   len(s),
 		scan: quoteScan{s: s, i: i, skip: closeAt, skipEnd: stringEnd, substitutions: true},
 	}}}
 }
 
-// rest returns the rest of a command at cmd that runs on its own in an
+// rest returns the rest of a command of f at cmd that runs on its own in an
 // argument of the segment's command, at any depth: a quoted one (sh -c
 // 'mysql -pX'), a command substitution (mysql -h $(cat h; mysql -pX)), or
 // one in those (mysql -e $(sh -c 'mysql -pX')). The rest ends with that
-// argument. It is false when the name is in no such argument or does not
-// start a command in it: a quoted argument may be text (the SQL of
-// mysql -e 'select mysql -pX'), while a substitution only runs commands, so
-// a name there is one, as on the top level (mysql -e $(ssh db mysql -pX)),
-// unless it is in the rest of an earlier one. closeAt is where the string
-// the command is quoted in closes, or -1.
-func (n *nestedScan) rest(s string, cmd []int, closeAt int) (string, bool) {
+// argument. A quoted program path ('"/usr/bin/mysql" -pX') goes on after
+// its string, which closes at skip and ends at skipEnd; otherwise those are
+// closeAt and stringEnd, where the string the command is quoted in closes
+// and ends. It is false when the name is in no such argument or does not
+// start a command in it.
+func (n *nestedScan) rest(f cliPasswordFlag, s string, cmd []int, closeAt, stringEnd int) (rest string, skip, skipEnd int, ok bool) {
 	p := cmd[0]
+	n.descend(s, p)
+	pattern := segmentRestPattern(s, closeAt)
+	arg := &n.args[len(n.args)-1]
+	if arg.isProgramPath(f, s) {
+		parent := &n.args[len(n.args)-2]
+		end := arg.to + arg.quote
+		if !parent.runsAt(s, arg.from-arg.quote) {
+			return "", 0, 0, false
+		}
+		rest = s[cmd[1] : end+len(pattern.FindString(s[end:max(parent.to, end)]))]
+		parent.readEnd = cmd[1] + len(rest)
+		return rest, arg.to, end, true
+	}
+	if !arg.runsAt(s, p) {
+		return "", 0, 0, false
+	}
+	rest = pattern.FindString(s[cmd[1]:max(arg.to, cmd[1])])
+	arg.readEnd = cmd[1] + len(rest)
+	return rest, closeAt, stringEnd, true
+}
+
+// descend leaves the arguments that end before p and enters the quoted
+// strings and substitutions that p is in.
+func (n *nestedScan) descend(s string, p int) {
 	for len(n.args) > 1 && n.args[len(n.args)-1].to <= p {
 		n.args = n.args[:len(n.args)-1]
 	}
 	for {
 		arg := &n.args[len(n.args)-1]
-		var from, to int
-		substitution := false
+		child := nestedArg{}
 		if end, quoted := arg.scan.stringAt(p); quoted {
-			from, to = arg.scan.inner(), end-arg.scan.quoteLen()
+			child.kind, child.quote = scriptArg, arg.scan.quoteLen()
+			child.from, child.to = arg.scan.inner(), end-child.quote
+			if arg.kind == textArg || arg.kind == scriptArg && !runsScript(s, arg.from, arg.scan.start) {
+				child.kind = textArg
+			}
 		} else if start, end, ok := arg.scan.substitutionAt(p); ok {
-			from, to, substitution = start+2, end-1, true
+			child.kind, child.from, child.to = substitutionArg, start+2, end-1
 		} else {
-			break
+			return
 		}
-		n.args = append(n.args, nestedArg{
-			from: from, to: to, substitution: substitution,
-			scan: quoteScan{s: s[:to], i: from, substitutions: true},
-		})
+		child.scan = quoteScan{s: s[:child.to], i: child.from, substitutions: true}
+		child.starts.lenient = child.kind == substitutionArg
+		n.args = append(n.args, child)
 	}
-	arg := &n.args[len(n.args)-1]
-	switch {
-	case len(n.args) == 1:
-		return "", false
-	case arg.substitution:
-		if p < arg.readEnd {
-			return "", false
-		}
-	case !arg.starts.at(s, arg.from, p):
-		return "", false
-	}
-	rest := segmentRestPattern(s, closeAt).FindString(s[cmd[1]:max(arg.to, cmd[1])])
-	arg.readEnd = cmd[1] + len(rest)
-	return rest, true
 }
+
+// isProgramPath reports whether the argument is a quoted string whose text
+// is the path of a program f defines. It reads the text once.
+func (a *nestedArg) isProgramPath(f cliPasswordFlag, s string) bool {
+	if a.path == 0 {
+		a.path = 2
+		if (a.kind == scriptArg || a.kind == textArg) && f.isProgramPath(s[a.from:a.to]) {
+			a.path = 1
+		}
+	}
+	return a.path == 1
+}
+
+// runsAt reports whether a command name at p, directly in the argument,
+// starts a command there and is not in the rest of one read before.
+func (a *nestedArg) runsAt(s string, p int) bool {
+	switch a.kind {
+	case scriptArg, substitutionArg:
+		return p >= a.readEnd && a.starts.at(s, a.from, p)
+	case segmentArg, textArg:
+	}
+	return false
+}
+
+// runsScript reports whether the quoted string at start, in an argument
+// whose text starts at from, follows a shell's -c option (sh -c, bash -lc),
+// which runs it as commands.
+func runsScript(s string, from, start int) bool {
+	before := strings.TrimRight(s[from:start], " \t")
+	word := before[max(0, len(before)-maxScriptOption):]
+	if i := strings.LastIndexAny(word, " \t"); i >= 0 {
+		word = word[i+1:]
+	} else if len(word) < len(before) {
+		return false
+	}
+	return scriptOption.MatchString(word)
+}
+
+// maxScriptOption bounds the length of the -c option runsScript reads.
+const maxScriptOption = 8
+
+// scriptOption is a shell's -c option, alone or with others (-lc, -ec).
+var scriptOption = regexp.MustCompile(`^-[a-z]*c$`)
 
 // segmentRest returns the rest of the pipeline segment of a command whose
 // name ends at i, in a quoted string that closes at closeAt and ends at
@@ -352,7 +429,7 @@ func (f cliPasswordFlag) segmentRest(s string, lines *quoteScan, i, closeAt, str
 
 // notProgramPath matches an option, a path argument or a shell operator,
 // which a program path holds none of.
-var notProgramPath = regexp.MustCompile("[ \t][-/~.]|[;|&<>`\r\n]")
+var notProgramPath = regexp.MustCompile("[ \t](?:-|/|~/|\\.\\.?/)|[;|&<>`\r\n]")
 
 // isProgramPath reports whether inside, the inside of a quoted string that
 // holds a client name, is the path of a program f defines with a blank in a
@@ -384,9 +461,14 @@ func segmentRestPattern(s string, closeAt int) *regexp.Regexp {
 // mysql -e 'select mysql -pX'). It reads each argument once for names at
 // increasing positions in it.
 type commandStart struct {
-	// from is where the argument's text starts, and i where reading goes
-	// on: the start of a word that may not have ended yet.
-	from, i int
+	// from is where the argument's text starts, i where reading goes on:
+	// the start of a word that may not have ended yet, and j how far that
+	// word was read.
+	from, i, j int
+	// lenient reads the text of a command substitution, where every word
+	// runs a command (ssh db mysql -pX) except after one that prints its
+	// arguments (echo mysql -pX).
+	lenient bool
 	// wrapper is the command wrapper the words so far run (sudo), and
 	// optionArg is set after its option that takes the next word.
 	wrapper   string
@@ -401,37 +483,56 @@ type commandStart struct {
 // assignment.
 func (c *commandStart) at(s string, from, p int) bool {
 	if c.from != from || p < c.i {
-		*c = commandStart{from: from, i: from}
+		*c = commandStart{from: from, i: from, j: from, lenient: c.lenient}
 	}
 	for c.i < p {
-		r, size := utf8.DecodeRuneInString(s[c.i:])
-		switch {
-		case unicode.IsSpace(r):
-			c.i += size
-			continue
-		case strings.ContainsRune(commandSeparators, r):
-			*c = commandStart{from: from, i: c.i + size}
-			continue
+		if c.j == c.i {
+			r, size := utf8.DecodeRuneInString(s[c.i:])
+			switch {
+			case unicode.IsSpace(r):
+				c.i += size
+				c.j = c.i
+				continue
+			case strings.ContainsRune(commandSeparators, r):
+				*c = commandStart{from: from, i: c.i + size, j: c.i + size, lenient: c.lenient}
+				continue
+			}
 		}
-		j := c.i
-		for j < p {
-			r, size := utf8.DecodeRuneInString(s[j:])
+		for c.j < p {
+			r, size := utf8.DecodeRuneInString(s[c.j:])
 			if unicode.IsSpace(r) || strings.ContainsRune(commandSeparators, r) {
 				break
 			}
-			j += size
+			c.j += size
 		}
-		if j >= p {
-			// The word may go on past p: judge it without keeping it.
-			next := *c
-			next.word(s[c.i:p])
-			return next.runs()
+		if c.j >= p {
+			return c.runsBefore(s[c.i:p])
 		}
-		c.word(s[c.i:j])
-		c.i = j
+		c.word(s[c.i:c.j])
+		c.i = c.j
 	}
 	return c.runs()
 }
+
+// runsBefore reports whether a command name right after part, the start of
+// a word that may go on past it, is run: after the directory of a program
+// path (/usr/bin/mysql), or after a word that would let it run on its own.
+// A longer part is no command's.
+func (c *commandStart) runsBefore(part string) bool {
+	switch {
+	case c.text || len(part) > maxCommandPart:
+		return false
+	case strings.HasSuffix(part, "/"):
+		return c.runs()
+	}
+	next := *c
+	next.word(part)
+	return next.runs()
+}
+
+// maxCommandPart bounds the part of a word before a command name that
+// runsBefore reads.
+const maxCommandPart = 64
 
 // commandSeparators are the shell operators after which a command starts.
 const commandSeparators = ";|&("
@@ -456,10 +557,17 @@ func (c *commandStart) word(word string) {
 		// the next word as their argument (sudo -u root).
 		c.optionArg = takesArgument(c.wrapper, word)
 	default:
-		if eq := strings.IndexByte(word, '='); eq <= 0 || !isShellName(word[:eq]) {
-			c.text = true
+		if eq := strings.IndexByte(word, '='); eq > 0 && isShellName(word[:eq]) {
+			return
 		}
+		c.text = !c.lenient || isPrintCommand(word)
 	}
+}
+
+// isPrintCommand reports whether word prints its arguments rather than
+// running them.
+func isPrintCommand(word string) bool {
+	return word == "echo" || word == "printf"
 }
 
 // isCommandWrapper reports whether word runs the command after it (and its
