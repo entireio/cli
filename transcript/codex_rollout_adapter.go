@@ -1,7 +1,5 @@
 package transcript
 
-import "bytes"
-
 // CodexRolloutAdapter turns a Codex rollout that takes the item path into
 // transcript records as it grows. It uses Convert's item-path line mapping, so
 // folding every record from Feed and a final Flush reproduces Convert's
@@ -17,9 +15,9 @@ import "bytes"
 // no head overlap. A final line without a newline is held until it completes,
 // or until Flush.
 type CodexRolloutAdapter struct {
-	conv    codexItemsConverter
-	pending []byte // bytes after the last newline fed
-	line    int    // lines consumed so far
+	conv  codexItemsConverter
+	lines lineSplitter
+	line  int // lines consumed so far
 }
 
 // NewCodexRolloutAdapter returns an adapter for a Codex item-path rollout,
@@ -41,22 +39,11 @@ func (a *CodexRolloutAdapter) Lines() int {
 // chunk completes it, or until Flush.
 func (a *CodexRolloutAdapter) Feed(chunk []byte) []Record {
 	var out []Record
-	for len(chunk) > 0 {
-		i := bytes.IndexByte(chunk, '\n')
-		if i < 0 {
-			a.pending = append(a.pending, chunk...)
-			break
-		}
-		line := chunk[:i+1]
-		if len(a.pending) > 0 {
-			a.pending = append(a.pending, line...)
-			line = a.pending
-		}
+	a.lines.feed(chunk, func(line []byte) bool {
 		a.line++
 		out = append(out, a.conv.line(line, a.line)...)
-		a.pending = a.pending[:0]
-		chunk = chunk[i+1:]
-	}
+		return true
+	})
 	return out
 }
 
@@ -64,11 +51,10 @@ func (a *CodexRolloutAdapter) Feed(chunk []byte) []Record {
 // rollout is final; while Codex is still writing, a partial line is usually
 // an unfinished write.
 func (a *CodexRolloutAdapter) Flush() []Record {
-	if len(a.pending) == 0 {
+	line := a.lines.flush()
+	if line == nil {
 		return nil
 	}
-	line := a.pending
-	a.pending = nil
 	a.line++
 	return a.conv.line(line, a.line)
 }

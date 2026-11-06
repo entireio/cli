@@ -84,7 +84,7 @@ func CodexItemRolloutDecided(content []byte) (item, decided bool) {
 // sub-agent's rollout has no items in its first turn and gets its task prompt
 // as a response_item, so it keeps the response_item path as well.
 type CodexItemRolloutDecider struct {
-	pending     []byte // bytes after the last newline fed, while undecided
+	lines       lineSplitter // while undecided
 	inFirstTurn bool
 	item        bool
 	decided     bool
@@ -100,23 +100,11 @@ func NewCodexItemRolloutDecider() *CodexItemRolloutDecider {
 // every line it completed. A trailing partial line is held until a later
 // chunk completes it, or until Flush.
 func (d *CodexItemRolloutDecider) Feed(chunk []byte) (item, decided bool) {
-	for !d.decided && len(chunk) > 0 {
-		i := bytes.IndexByte(chunk, '\n')
-		if i < 0 {
-			d.pending = append(d.pending, chunk...)
-			break
-		}
-		line := chunk[:i+1]
-		if len(d.pending) > 0 {
-			d.pending = append(d.pending, line...)
-			line = d.pending
-		}
-		d.line(line)
-		d.pending = d.pending[:0]
-		chunk = chunk[i+1:]
-	}
-	if d.decided {
-		d.pending = nil
+	if !d.decided {
+		d.lines.feed(chunk, func(line []byte) bool {
+			d.line(line)
+			return !d.decided
+		})
 	}
 	return d.item, d.decided
 }
@@ -126,10 +114,9 @@ func (d *CodexItemRolloutDecider) Feed(chunk []byte) (item, decided bool) {
 // partial line is usually an unfinished write. Undecided after Flush means
 // the rollout takes the response_item path.
 func (d *CodexItemRolloutDecider) Flush() (item, decided bool) {
-	if !d.decided && len(d.pending) > 0 {
-		d.line(d.pending)
+	if line := d.lines.flush(); !d.decided && line != nil {
+		d.line(line)
 	}
-	d.pending = nil
 	return d.item, d.decided
 }
 
