@@ -141,7 +141,7 @@ func TestCommitLinking_FallbackKeepsTheOwnerOfAnAmendedCheckpoint(t *testing.T) 
 
 	t.Chdir(linkedDir)
 	clearSessionMatchCaches()
-	sessions, err := s.findSessionsForCommitLinking(withAmendedCheckpoint(ctx, target), linkedDir)
+	sessions, err := s.findSessionsForCommitLinking(withAmendedCheckpoint(ctx, amendedLink{checkpointID: target}), linkedDir)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"owner"}, linkedSessionIDs(sessions))
 }
@@ -260,20 +260,30 @@ func TestPostRewrite_StillRemapsAnIdleSiblingSession(t *testing.T) {
 // dropped and its work never reached the checkpoint. A message reused with
 // `commit -C` keeps the trailer the same way, but makes a new commit: there
 // the idle owner is still dropped, and the old checkpoint is left as it was.
-// Without a reflog to tell the two apart, the owner is kept, as it was before
-// the idle check.
+// So is it when an amend of a later commit reuses the first one's message: that
+// trailer never linked the owner to the commit being amended. A trailer prepare
+// restores for a session based on that commit does link it. Without a reflog
+// to tell an amend from a new commit, the owner is kept, as it was before the
+// idle check.
 func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
 	for _, tt := range []struct {
 		name       string
 		commitArgs []string
 		noReflog   bool
 		resetAfter bool
-		condensed  bool
+		// amendOther amends a later commit with the first one's message.
+		amendOther bool
+		// restore edits the trailer out, and bases the session on the commit
+		// being amended, for prepare to restore its trailer.
+		restore   bool
+		condensed bool
 	}{
 		{name: "amend", commitArgs: []string{"--amend"}, condensed: true},
 		{name: "message reused with commit -C", condensed: false},
 		{name: "amend without a reflog", commitArgs: []string{"--amend"}, noReflog: true, condensed: true},
 		{name: "commit -C, then a hook's git reset HEAD", resetAfter: true, condensed: false},
+		{name: "amend of another commit reusing the message", commitArgs: []string{"--amend"}, amendOther: true, condensed: false},
+		{name: "amend restoring the trailer of a session based on it", commitArgs: []string{"--amend"}, amendOther: true, restore: true, condensed: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -323,15 +333,29 @@ func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
 			}))
 			setLastInteraction(time.Now().Add(-24 * time.Hour))
 			t.Chdir(siblingDir)
+			if tt.amendOther {
+				testutil.WriteFile(t, siblingDir, "other.txt", "work of no session")
+				testutil.GitAdd(t, siblingDir, "other.txt")
+				testutil.RunGit(t, siblingDir, "commit", "-q", "-m", "other work")
+				require.NoError(t, NewManualCommitStrategy().PostCommit(ctx))
+			}
 			testutil.WriteFile(t, siblingDir, "more.txt", "agent content for more.txt")
 			testutil.GitAdd(t, siblingDir, "more.txt")
 			// git reports source "commit" for both `--amend` and `-C <rev>`.
+			draft := msg
+			if tt.restore {
+				draft = "add notes\n"
+				state, err := s.loadSessionState(ctx, "sess-sibling")
+				require.NoError(t, err)
+				state.BaseCommit = strings.TrimSpace(testutil.RunGit(t, siblingDir, "rev-parse", "HEAD"))
+				require.NoError(t, s.saveSessionState(ctx, state))
+			}
 			msgFile := filepath.Join(t.TempDir(), "COMMIT_EDITMSG")
-			require.NoError(t, os.WriteFile(msgFile, []byte(msg), 0o600))
+			require.NoError(t, os.WriteFile(msgFile, []byte(draft), 0o600))
 			require.NoError(t, NewManualCommitStrategy().PrepareCommitMsg(ctx, msgFile, "commit"))
 			kept, err := os.ReadFile(msgFile)
 			require.NoError(t, err)
-			require.Equal(t, cps, checkpointIDs(string(kept)), "prepare keeps the trailer")
+			require.Equal(t, cps, checkpointIDs(string(kept)), "prepare keeps or restores the trailer")
 			if tt.noReflog {
 				testutil.RunGit(t, siblingDir, "config", "core.logAllRefUpdates", "false")
 				for _, dirFlag := range []string{"--absolute-git-dir", "--git-common-dir"} {

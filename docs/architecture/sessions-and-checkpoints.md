@@ -327,10 +327,11 @@ commit.
   into the trailer prepare wrote. The trailer an amend restores names an
   existing checkpoint and is not recorded: post-commit condenses into it for
   its owner without a stamp, keeping that owner however idle it looks
-  (`withAmendedCheckpoint`: HEAD's reflog shows it replaced, not advanced; a
-  message reused with `commit -C` is a new link and gets no such pass), and a
-  record a cancelled amend left would let a
-  later commit naming it skip its own trailer. Prepare writes a trailer only once
+  (`withAmendedCheckpoint`: HEAD's reflog shows it replaced, not advanced, and
+  the replaced commit names the checkpoint or the owner is based on it; a
+  message reused with `commit -C`, or with `--amend -C` from another commit,
+  is a new link and gets no such pass), and a record a cancelled amend left
+  would let a later commit naming it skip its own trailer. Prepare writes a trailer only once
   its stamp is recorded (`recordStampedTrailer`). A draft that already names
   another ID (pasted into `-m`, `-F` or a template) gets prepare's own trailer
   after it.

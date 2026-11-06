@@ -520,23 +520,31 @@ func linkedSessions(ctx context.Context) []string {
 
 type amendedCheckpointKey struct{}
 
-// withAmendedCheckpoint marks checkpointID as the existing checkpoint an amend
-// keeps the trailer of (amendedCheckpoint). The session that owns it is linked
-// to the commit by that trailer already, so withoutIdleSessions keeps it
-// however idle it is: amend records no stamp, so withLinkedSessions has
-// nothing for it.
-func withAmendedCheckpoint(ctx context.Context, checkpointID id.CheckpointID) context.Context {
-	if checkpointID.IsEmpty() {
+// amendedLink is the existing checkpoint an amend links (amendedCheckpoint).
+// When the commit it replaced does not name the checkpoint, ownerBase is that
+// commit: prepare restores a trailer only for a session based on the commit
+// being amended (handleAmendCommitMsg), so only such an owner was linked by it.
+type amendedLink struct {
+	checkpointID id.CheckpointID
+	ownerBase    string
+}
+
+// withAmendedCheckpoint marks the existing checkpoint an amend keeps or
+// restores the trailer of. The session that owns it is linked to the commit by
+// that trailer already, so withoutIdleSessions keeps it however idle it is:
+// amend records no stamp, so withLinkedSessions has nothing for it.
+func withAmendedCheckpoint(ctx context.Context, link amendedLink) context.Context {
+	if link.checkpointID.IsEmpty() {
 		return ctx
 	}
-	return context.WithValue(ctx, amendedCheckpointKey{}, checkpointID)
+	return context.WithValue(ctx, amendedCheckpointKey{}, link)
 }
 
 // ownsAmendedCheckpoint reports whether state owns the checkpoint
 // withAmendedCheckpoint marked on ctx.
 func ownsAmendedCheckpoint(ctx context.Context, state *SessionState) bool {
-	checkpointID, ok := ctx.Value(amendedCheckpointKey{}).(id.CheckpointID)
-	return ok && state.LastCheckpointID == checkpointID
+	link, ok := ctx.Value(amendedCheckpointKey{}).(amendedLink)
+	return ok && state.LastCheckpointID == link.checkpointID && (link.ownerBase == "" || state.BaseCommit == link.ownerBase)
 }
 
 // linkedSessionIDs returns the IDs of states, for withLinkedSessions.

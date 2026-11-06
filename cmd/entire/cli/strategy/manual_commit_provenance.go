@@ -119,30 +119,37 @@ func stampedByAnotherCommit(ctx context.Context, checkpointID id.CheckpointID, s
 	return checkpointID != state.LastCheckpointID && checkpointID != state.PendingCondensationID()
 }
 
-// amendedCheckpoint returns checkpointID, a preexisting target, when this
-// commit is an amend: the newest entry in HEAD's reflog that moved HEAD
-// replaced it with this commit instead of advancing to it. An amend keeps the
-// amended commit's trailer, or restores its session's (handleAmendCommitMsg),
-// without stamping it, so post-commit condenses into the existing checkpoint
-// for the session that owns it (withAmendedCheckpoint). A message reused with
-// `commit -C` keeps a trailer the same way but advances HEAD: it makes a new
-// link. With no reflog to tell them apart (core.logAllRefUpdates=false), it is
-// taken as an amend, so the owner keeps condensing into its checkpoint as it
-// did before the idle check.
-func amendedCheckpoint(ctx context.Context, commit *object.Commit, checkpointID id.CheckpointID, preexisting bool) id.CheckpointID {
+// amendedCheckpoint returns the link to checkpointID, a preexisting target,
+// when this commit is an amend: the newest entry in HEAD's reflog that moved
+// HEAD replaced it with this commit instead of advancing to it. An amend keeps
+// the amended commit's trailer, or restores its session's
+// (handleAmendCommitMsg), without stamping it, so post-commit condenses into
+// the existing checkpoint for the session that owns it (withAmendedCheckpoint).
+// A trailer the replaced commit does not name is kept only for an owner prepare
+// would have restored it for: `commit --amend -C <other>` keeps another
+// commit's trailer, and its owner was never linked to this one. A message
+// reused with `commit -C` keeps a trailer the same way but advances HEAD: it
+// makes a new link. With no reflog to tell them apart
+// (core.logAllRefUpdates=false), it is taken as an amend, so the owner keeps
+// condensing into its checkpoint as it did before the idle check.
+func amendedCheckpoint(ctx context.Context, repo *git.Repository, commit *object.Commit, checkpointID id.CheckpointID, preexisting bool) amendedLink {
 	if !preexisting {
-		return id.EmptyCheckpointID
+		return amendedLink{}
 	}
 	for _, e := range headReflog(ctx) {
 		if e.oldHash == e.newHash {
 			continue // HEAD did not move, as with another hook's `git reset HEAD`
 		}
-		if e.newHash == commit.Hash && !e.oldHash.IsZero() && !slices.Contains(commit.ParentHashes, e.oldHash) {
-			return checkpointID
+		if e.newHash != commit.Hash || e.oldHash.IsZero() || slices.Contains(commit.ParentHashes, e.oldHash) {
+			return amendedLink{}
 		}
-		return id.EmptyCheckpointID
+		link := amendedLink{checkpointID: checkpointID}
+		if replaced, err := repo.CommitObject(e.oldHash); err != nil || !slices.Contains(LinkedCheckpoints(ctx, replaced.Message), checkpointID) {
+			link.ownerBase = e.oldHash.String()
+		}
+		return link
 	}
-	return checkpointID
+	return amendedLink{checkpointID: checkpointID}
 }
 
 func checkpointExists(ctx context.Context, store checkpoint.PersistentStore, checkpointID id.CheckpointID) bool {
