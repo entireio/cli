@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"net/url"
 	"strings"
 
@@ -29,10 +28,9 @@ import (
 // The decision is the server's: the update carries the branch and repository
 // with branch_check=required, and the trail's cell refuses atomically when the
 // branch's work is on another trail, or when it cannot compare. The CLI
-// refuses locally only where nothing could be sent: a detached HEAD, a
-// repository that does not resolve, a repository processed in another cell
-// than the trail, or values the server would reject. A repository not
-// onboarded to Entire has no trail work, so the update proceeds unguarded.
+// refuses locally only where nothing could be sent: a detached HEAD or a
+// repository that does not resolve. A repository not onboarded to Entire has
+// no trail work, so the update proceeds unguarded.
 func guardProjectTrailNumberUpdate(cmd *cobra.Command, selector string, target *projectTrailTarget, current api.ProjectTrail) (*projectTrailNumberGuard, error) {
 	number, ok := parseTrailNumberSelector(selector)
 	if !ok || trailBranchFlag(cmd) != "" {
@@ -55,32 +53,14 @@ func guardProjectTrailNumberUpdate(cmd *cobra.Command, selector string, target *
 		return nil, nil //nolint:nilnil // no trail work can exist; the update proceeds unguarded
 	case err != nil:
 		return nil, errors.New(g.indeterminate("could not be checked: its repository did not resolve (" + singleLineTerminalText(err.Error()) + ")"))
-	case placement.Target == nil || !sameAPIOrigin(placement.Target.BaseURL, target.Client.BaseURL()):
-		return nil, errors.New(g.indeterminate("could not be checked: its repository is processed in another cell than the trail"))
-	case !branchCheckSendable(placement.RepoID, branch):
-		return nil, errors.New(g.indeterminate("could not be checked: the server cannot accept this branch or repository for checking"))
 	}
 	g.repoID = placement.RepoID
 	return g, nil
 }
 
-// resolveTrailUpdatePlacement resolves the clone's repository to the id and
-// cell the server knows it by; swapped in tests.
+// resolveTrailUpdatePlacement resolves the clone's repository to the id the
+// server knows it by; swapped in tests.
 var resolveTrailUpdatePlacement = resolveForgeRepoCellPlacement
-
-// maxTrailBranchCheckBytes is the server's from_branch limit. Longer names are
-// refused locally: sending them would fail the whole update validation.
-const maxTrailBranchCheckBytes = 1024
-
-// branchCheckSendable reports whether the server's parameter validation
-// accepts the pair; a rejected pair would fail the whole update.
-func branchCheckSendable(repoID, branch string) bool {
-	return looksLikeULID(repoID) && branch != "" && len(branch) <= maxTrailBranchCheckBytes
-}
-
-func sameAPIOrigin(a, b string) bool {
-	return strings.EqualFold(strings.TrimRight(a, "/"), strings.TrimRight(b, "/"))
-}
 
 // guardedLocalRepo returns the clone's origin repository when the guard
 // applies to it: origin is in the trail's project, and --repo, if given, names
@@ -145,17 +125,6 @@ func (g *projectTrailNumberGuard) serverRefusal(err error) error {
 		return errors.New(g.indeterminate("could not be checked by the server; nothing was updated"))
 	}
 	return err
-}
-
-// checkedNote warns when a guarded update reached a server that did not
-// confirm the check (an older server, or a rollback), so the user can verify
-// what changed. It never touches stdout.
-func (g *projectTrailNumberGuard) checkedNote(cmd *cobra.Command, headers http.Header) {
-	if g == nil || headers.Get("Entire-Branch-Check") == "checked" {
-		return
-	}
-	fmt.Fprintf(cmd.ErrOrStderr(), "Note: the server did not confirm that branch %q has no work on another trail; check #%d (%s) to make sure this update was meant for it.\n",
-		tuiutil.SanitizeTerminalLabel(g.branch), g.number, tuiutil.SanitizeTerminalLabel(g.current.ID))
 }
 
 // singleLineTerminalText sanitizes server- or transport-supplied text for a

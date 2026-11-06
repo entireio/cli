@@ -2,7 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -83,16 +82,9 @@ func TestProjectTrailRequestSendsBodyOnlyWhenGiven(t *testing.T) {
 	require.Equal(t, seen{contentType: "application/json", length: 2}, got[http.MethodPatch])
 }
 
-func TestProjectTrailRequestHeadersAndBranchRefusal(t *testing.T) {
+func TestProjectTrailRequestCarriesBranchRefusal(t *testing.T) {
 	t.Parallel()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("from_branch") == "" {
-			w.Header().Set("Entire-Branch-Check", "checked")
-			if _, err := w.Write([]byte(`{}`)); err != nil {
-				t.Error(err)
-			}
-			return
-		}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusConflict)
 		if _, err := w.Write([]byte(`{"error":"refused","code":"trail_branch_mismatch","change_number":7}`)); err != nil {
@@ -100,15 +92,12 @@ func TestProjectTrailRequestHeadersAndBranchRefusal(t *testing.T) {
 		}
 	}))
 	t.Cleanup(server.Close)
-	client := NewClientWithBaseURL("token", server.URL)
 
-	headers, err := client.ProjectTrailRequestHeaders(t.Context(), http.MethodPatch, "/t", map[string]string{}, nil, nil)
-	if err != nil || headers.Get("Entire-Branch-Check") != "checked" {
-		t.Fatalf("headers: %v %v", headers, err)
-	}
-	_, err = client.ProjectTrailRequestHeaders(t.Context(), http.MethodPatch, "/t?from_branch=b", map[string]string{}, nil, nil)
+	etag, err := NewClientWithBaseURL("token", server.URL).ProjectTrailRequest(t.Context(), http.MethodPatch, "/t", map[string]string{}, nil, nil)
+
+	require.Empty(t, etag, "a refused write returns no ETag")
 	var httpErr *HTTPError
-	if !errors.As(err, &httpErr) || httpErr.Code != "trail_branch_mismatch" || httpErr.ChangeNumber != 7 {
-		t.Fatalf("refusal: %#v", err)
-	}
+	require.ErrorAs(t, err, &httpErr)
+	require.Equal(t, "trail_branch_mismatch", httpErr.Code)
+	require.Equal(t, 7, httpErr.ChangeNumber)
 }

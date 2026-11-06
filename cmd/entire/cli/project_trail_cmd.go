@@ -441,14 +441,12 @@ func newProjectTrailUpdateCmd() *cobra.Command {
 				fmt.Fprintln(cmd.ErrOrStderr(), projectTrailParentUpdateNotice(current, target.Change, selector, cmd.Flags().Changed("title")))
 			}
 			var out api.ProjectTrail
-			headers, err := target.Client.ProjectTrailRequestHeaders(cmd.Context(), http.MethodPatch, guard.updatePath(target.path()), patch, http.Header{"If-Match": {etag}}, &out)
-			if err != nil {
+			if _, err := target.Client.ProjectTrailRequest(cmd.Context(), http.MethodPatch, guard.updatePath(target.path()), patch, http.Header{"If-Match": {etag}}, &out); err != nil {
 				return guard.serverRefusal(fmt.Errorf("update project trail: %w", err))
 			}
 			if err := target.validateResponse(out); err != nil {
 				return err
 			}
-			guard.checkedNote(cmd, headers)
 			return printProjectTrail(cmd, out, target.Change, nil)
 		},
 	}

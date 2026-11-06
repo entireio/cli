@@ -4,10 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/url"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -38,13 +36,11 @@ func setupGuardRepo(t *testing.T) {
 type guardServer struct {
 	patches []url.Values
 	patch   func(w http.ResponseWriter)
-	baseURL string
 }
 
 func serveGuardProject(t *testing.T) *guardServer {
 	t.Helper()
 	g := &guardServer{patch: func(w http.ResponseWriter) {
-		w.Header().Set("Entire-Branch-Check", "checked")
 		w.Header().Set("ETag", `W/"v2"`)
 		assert.NoError(t, json.NewEncoder(w).Encode(projectTrailTestResource()))
 	}}
@@ -57,7 +53,6 @@ func serveGuardProject(t *testing.T) *guardServer {
 		w.Header().Set("ETag", `W/"v1"`)
 		assert.NoError(t, json.NewEncoder(w).Encode(projectTrailTestResource()))
 	})
-	g.baseURL = server.URL
 	stubGuardPlacement(t, func(context.Context, string, string, string) (repoCellPlacement, error) {
 		return repoCellPlacement{RepoID: guardRepoID, Target: &auth.CellTarget{BaseURL: server.URL, Jurisdiction: "eu"}}, nil
 	})
@@ -94,12 +89,11 @@ func TestProjectTrailUpdateBareNumberSendsTheBranchForTheServerToCheck(t *testin
 	setupGuardRepo(t)
 	srv := serveGuardProject(t)
 
-	_, errOut, err := executeProjectTrailTest(t, "update", "42", "--body", "x")
+	_, _, err := executeProjectTrailTest(t, "update", "42", "--body", "x")
 
 	require.NoError(t, err)
 	require.Len(t, srv.patches, 1)
 	require.Equal(t, url.Values{"from_repo_id": {guardRepoID}, "from_branch": {"feature/mine"}, "branch_check": {"required"}}, srv.patches[0])
-	require.Empty(t, errOut, "a checked update prints no note")
 }
 
 func TestProjectTrailUpdateBareNumberWordsTheServerRefusal(t *testing.T) {
@@ -149,33 +143,6 @@ func TestProjectTrailUpdateBareNumberPassesOtherConflictsThrough(t *testing.T) {
 
 	require.ErrorContains(t, err, "API error: refused (status 409)")
 	require.NotContains(t, err.Error(), "refusing to update")
-}
-
-// An older server ignores the parameters and writes without checking; the
-// write cannot be undone, but the user is told to verify it.
-func TestProjectTrailUpdateBareNumberNotesAnUnconfirmedCheck(t *testing.T) {
-	for _, jsonOut := range []bool{false, true} {
-		t.Run(fmt.Sprintf("json=%v", jsonOut), func(t *testing.T) {
-			setupGuardRepo(t)
-			srv := serveGuardProject(t)
-			args := []string{"update", "42", "--body", "x"}
-			if jsonOut {
-				args = append(args, "--json")
-			}
-			want, _, err := executeProjectTrailTest(t, args...)
-			require.NoError(t, err)
-			srv.patch = func(w http.ResponseWriter) {
-				w.Header().Set("ETag", `W/"v2"`)
-				assert.NoError(t, json.NewEncoder(w).Encode(projectTrailTestResource()))
-			}
-
-			out, errOut, err := executeProjectTrailTest(t, args...)
-
-			require.NoError(t, err)
-			require.Equal(t, want, out, "stdout must not change")
-			require.Contains(t, errOut, `Note: the server did not confirm that branch "feature/mine" has no work on another trail; check #42 (`+projectTrailTestID+")")
-		})
-	}
 }
 
 // Where the branch is not what names the trail, nothing is sent.
@@ -252,18 +219,6 @@ func TestProjectTrailUpdateBareNumberRefusesWhenNothingCanBeChecked(t *testing.T
 				return repoCellPlacement{}, errors.New("boom\x1b]0;title\x07\x1b[2J\nsecond\tline")
 			})
 		}, want: []string{`branch "feature/mine" could not be checked: its repository did not resolve (boom second line)`}},
-		{name: "repository processed in another cell", setup: func(t *testing.T, _ *guardServer) {
-			t.Helper()
-			stubGuardPlacement(t, func(context.Context, string, string, string) (repoCellPlacement, error) {
-				return repoCellPlacement{RepoID: guardRepoID, Target: &auth.CellTarget{BaseURL: "https://other-cell.example", Jurisdiction: "us"}}, nil
-			})
-		}, want: []string{"its repository is processed in another cell than the trail"}},
-		{name: "repository id the server would reject", setup: func(t *testing.T, srv *guardServer) {
-			t.Helper()
-			stubGuardPlacement(t, func(context.Context, string, string, string) (repoCellPlacement, error) {
-				return repoCellPlacement{RepoID: "not-a-ulid", Target: &auth.CellTarget{BaseURL: srv.baseURL}}, nil
-			})
-		}, want: []string{"the server cannot accept this branch or repository for checking"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			setupGuardRepo(t)
@@ -295,16 +250,4 @@ func TestProjectTrailNumberMismatchSanitizesServerText(t *testing.T) {
 		require.NotContains(t, msg, "\x1b")
 		require.NotContains(t, msg, "\x07")
 	}
-}
-
-// A pair the server's validation rejects would fail the whole update, so it is
-// never sent. Branch names over the limit cannot be created on most file
-// systems, so the length bound is tested here rather than through git.
-func TestBranchCheckSendable(t *testing.T) {
-	t.Parallel()
-	require.True(t, branchCheckSendable(guardRepoID, "feature/mine"))
-	require.True(t, branchCheckSendable(guardRepoID, strings.Repeat("x", maxTrailBranchCheckBytes)))
-	require.False(t, branchCheckSendable(guardRepoID, strings.Repeat("x", maxTrailBranchCheckBytes+1)))
-	require.False(t, branchCheckSendable("not-a-ulid", "feature/mine"))
-	require.False(t, branchCheckSendable(guardRepoID, ""))
 }

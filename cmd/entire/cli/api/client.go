@@ -60,9 +60,6 @@ func NewClientWithBaseURL(token, baseURL string) *Client {
 	return NewClientWithTransport(token, baseURL, nil)
 }
 
-// BaseURL is the API origin requests are sent to.
-func (c *Client) BaseURL() string { return c.baseURL }
-
 // NewClientWithTransport creates an API client using an injected network
 // transport, retaining the standard bearer and redirect policies. A nil
 // transport uses http.DefaultTransport. The transport must not rewrite the
