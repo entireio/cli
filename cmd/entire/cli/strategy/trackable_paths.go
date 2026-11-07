@@ -46,7 +46,18 @@ import (
 // Answers are cached per process (trackablePathCache), so the several sessions
 // one hook processes — a commit hook walks every session of the worktree — ask
 // git about each path once.
+//
+// First, each path git tracks in another case is spelled as git spells it
+// (TrackedSpellings): a transcript's readme.md for README.md would otherwise
+// stay pending in the same way.
 func FilterTrackableChanges(ctx context.Context, repoRoot string, modified, added, deleted []string) (keptModified, keptAdded, keptDeleted []string) {
+	spelled := trackedSpellingsOf(ctx, repoRoot, modified, added, deleted)
+	return filterTrackableSpelled(ctx, repoRoot, spelled[0], spelled[1], spelled[2])
+}
+
+// filterTrackableSpelled is FilterTrackableChanges for paths already spelled
+// as git spells them.
+func filterTrackableSpelled(ctx context.Context, repoRoot string, modified, added, deleted []string) (keptModified, keptAdded, keptDeleted []string) {
 	changed := make([]string, 0, len(modified)+len(added))
 	changed = append(changed, modified...)
 	changed = append(changed, added...)
@@ -265,11 +276,14 @@ func (c *trackablePathCache) store(cache *map[trackablePathKey]bool, repoRoot st
 // has left the index and `git check-ignore` reports it ignored, which would
 // drop the only path of a commit that deletes it. A path in HEAD is
 // committable by definition. The gitlink drop still applies. If HEAD cannot be
-// read, every path is ignore-checked as before.
+// read, every path is ignore-checked as before. The paths kept are spelled as
+// git spells them (TrackedSpellings).
 func filterTrackableFiles(ctx context.Context, repoRoot string, files []string) []string {
 	if len(files) == 0 {
 		return files
 	}
+	// Spelled first, so the paths below and the ones kept are git's.
+	files = TrackedSpellings(ctx, repoRoot, files)
 	inHead, err := gitrepo.PathsInHEAD(ctx, repoRoot, files)
 	if err != nil {
 		logging.Debug(logging.WithComponent(ctx, "checkpoint"), "could not check HEAD for transcript files; ignore-checking all of them",
@@ -287,7 +301,7 @@ func filterTrackableFiles(ctx context.Context, repoRoot string, files []string) 
 	}
 	// Tracked paths go through the deletion list: gitlink-checked, never
 	// ignore-checked.
-	keptUntracked, _, keptTracked := FilterTrackableChanges(ctx, repoRoot, untracked, nil, tracked)
+	keptUntracked, _, keptTracked := filterTrackableSpelled(ctx, repoRoot, untracked, nil, tracked)
 	keep := make(map[string]struct{}, len(keptUntracked)+len(keptTracked))
 	for _, path := range keptUntracked {
 		keep[path] = struct{}{}

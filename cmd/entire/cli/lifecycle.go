@@ -1051,9 +1051,13 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// filtering them against HEAD would wrongly drop deletions of files
 	// created-then-deleted within the session (absent from HEAD) from the
 	// session's record.
-	relModifiedFiles = filterToUncommittedFiles(ctx, relModifiedFiles, repoRoot)
-	// Drop paths no commit can carry (see strategy.FilterTrackableChanges).
+	//
+	// Drop paths no commit can carry first (see
+	// strategy.FilterTrackableChanges): it also respells a transcript's path
+	// as git does, so a file the agent named in another case and committed
+	// mid-turn is recognized as committed here.
 	relModifiedFiles, relNewFiles, relDeletedFiles = strategy.FilterTrackableChanges(ctx, repoRoot, relModifiedFiles, relNewFiles, relDeletedFiles)
+	relModifiedFiles = filterToUncommittedFiles(ctx, relModifiedFiles, repoRoot)
 	normalizeSpan.End()
 
 	// Codex owns an authoritative child ledger. Refresh it before the
@@ -2379,7 +2383,10 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 	// filterToUncommittedFiles is the same guard the turn-end path already applies
 	// for this exact reason; it fails open, so a git error keeps the list as-is
 	// rather than silently dropping a real checkpoint.
-	subagentFiles := FilterAndNormalizePaths(modifiedFiles, repoRoot)
+	//
+	// The transcript's paths are spelled as git spells them first, or a file
+	// the subagent named in another case would never count as committed.
+	subagentFiles := strategy.TrackedSpellings(logCtx, repoRoot, FilterAndNormalizePaths(modifiedFiles, repoRoot))
 	uncommittedSubagentFiles := filterToUncommittedFiles(logCtx, subagentFiles, repoRoot)
 	relModifiedFiles := uncommittedSubagentFiles
 	var relNewFiles, relDeletedFiles []string
