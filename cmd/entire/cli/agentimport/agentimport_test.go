@@ -341,6 +341,57 @@ func TestRun_AnchorsTurnToRecordedCommit(t *testing.T) {
 	}
 }
 
+// TestRun_AnchorsQuietCommitByCommitWindow proves a turn with no gitOperation
+// record, as Claude Code leaves for `git commit -q`, anchors to the commit made
+// while its Bash commit call ran rather than to the later tip.
+func TestRun_AnchorsQuietCommitByCommitWindow(t *testing.T) {
+	t.Parallel()
+	repo, repoDir := initRepoWithCommit(t)
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	quietSHA := writeAndCommitAt(t, wt, repoDir, "y", "agent: quiet commit", fixtureU1At.Add(30*time.Second))
+	writeAndCommit(t, wt, repoDir, "z", "human: later work")
+	tipSHA := repoHeadSHA(t, repo)
+
+	claudeDir := t.TempDir()
+	content := strings.Join([]string{
+		`{"type":"user","uuid":"u1","cwd":` + fixtureCwdJSON(t, repoDir) + `,"timestamp":"2026-06-20T00:00:00Z","message":{"role":"user","content":"first"}}`,
+		`{"type":"assistant","uuid":"a1","timestamp":"2026-06-20T00:00:29.700Z","message":{"id":"m1","model":"claude-x","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"git commit -q -am 'agent: quiet commit'"}}],"usage":{"output_tokens":5}}}`,
+		`{"type":"user","uuid":"r1","timestamp":"2026-06-20T00:00:30.400Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":""}]}}`,
+		`{"type":"user","uuid":"u2","timestamp":"2026-06-20T00:01:00Z","message":{"role":"user","content":"second"}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(claudeDir, "sess-quiet.jsonl"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Run(context.Background(), repo, claudeImporter{}, Options{
+		RepoRoot: repoDir, OverridePath: claudeDir,
+		Now:           time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
+		LinkCommitSHA: tipSHA,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.TurnsImported != 2 {
+		t.Fatalf("want 2 imported, got %+v", res)
+	}
+
+	stores, err := cp.Open(context.Background(), repo, cp.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cid := importedCheckpointID(t, stores, "sess-quiet", Turn{UUID: "u1", CreatedAt: fixtureU1At})
+	md, err := stores.Persistent.ReadSessionMetadata(context.Background(), cid, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if md.CommitSHA != quietSHA {
+		t.Fatalf("turn1 CommitSHA = %q, want quiet commit %q (tip is %q)", md.CommitSHA, quietSHA, tipSHA)
+	}
+}
+
 // TestRun_AppliesConfiguredCustomRedaction proves imported transcripts honor
 // repo/user-configured custom_redactions (loaded at the command via
 // strategy.EnsureRedactionConfigured), not just always-on secret scanning.
