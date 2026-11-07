@@ -59,8 +59,8 @@ func TestWatchCellRoutesPreserveReconnectCursor(t *testing.T) {
 			requests := 0
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				requests++
-				if r.URL.Path != base+"/events" || r.Header.Get("Accept") != "text/event-stream" {
-					t.Errorf("request = %s, Accept %s", r.URL.Path, r.Header.Get("Accept"))
+				if r.URL.Path != base+"/events" || r.Header.Get("Accept") != "text/event-stream" || r.URL.Query().Get("from") != "head" {
+					t.Errorf("request = %s?%s, Accept %s", r.URL.Path, r.URL.RawQuery, r.Header.Get("Accept"))
 				}
 				w.Header().Set("Content-Type", "text/event-stream")
 				if requests == 1 {
@@ -76,13 +76,13 @@ func TestWatchCellRoutesPreserveReconnectCursor(t *testing.T) {
 			client := api.NewClientWithBaseURL("tok", srv.URL)
 			client.SetTrailRoute("trail-example", base)
 			var out, errOut bytes.Buffer
-			reason, cursor, err := streamOnce(t.Context(), client, reviewEventsPath("trail-example"), "", false, false, &out, &errOut)
+			reason, cursor, err := streamOnce(t.Context(), client, reviewEventsPath("trail-example")+"?from=head", "", false, false, &out, &errOut)
 			require.NoError(t, err)
 			require.Equal(t, streamCloseReconnect, reason)
 			require.Equal(t, "42", cursor)
 			require.Contains(t, out.String(), "connected to trail trail-example")
 			out.Reset()
-			reason, cursor, err = streamOnce(t.Context(), client, reviewEventsPath("trail-example"), cursor, true, false, &out, &errOut)
+			reason, cursor, err = streamOnce(t.Context(), client, reviewEventsPath("trail-example")+"?from=head", cursor, true, false, &out, &errOut)
 			require.NoError(t, err)
 			require.Equal(t, streamCloseForbidden, reason)
 			require.Equal(t, "43", cursor)
