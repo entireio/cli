@@ -111,6 +111,16 @@ func DispatchLifecycleEvent(ctx context.Context, ag agent.Agent, event *agent.Ev
 			logging.Info(logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name()),
 				"dropping conditional TurnStart for active session (follow-up invocation)",
 				slog.String("session_id", event.SessionID))
+			// A subagent that never edits a file reaches no ToolUse; its
+			// follow-up calls are where it can still be marked, which keeps its
+			// waiting parent's interaction time fresh.
+			markSubagentSession(ctx, ag, event.SessionID, event.SessionRef)
+			// The session runs again (a parent resumed by its subagent's reply):
+			// its own next Stop decides whether the turn has ended.
+			if err := recordAwaitingSubagents(ctx, event.SessionID, false); err != nil {
+				logging.Warn(logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name()), "failed to clear awaiting-subagents mark",
+					slog.String("session_id", event.SessionID), slog.String("error", err.Error()))
+			}
 			return nil
 		}
 	}
@@ -121,6 +131,21 @@ func DispatchLifecycleEvent(ctx context.Context, ag agent.Agent, event *agent.Ev
 	case agent.TurnStart:
 		return handleLifecycleTurnStart(ctx, ag, event)
 	case agent.TurnEnd:
+		if event.AwaitingSubagents {
+			if err := recordAwaitingSubagents(ctx, event.SessionID, true); err != nil {
+				return err
+			}
+			// The last subagent may have finished just before this Stop, in a
+			// hook that found no pause to act on; check from this side too.
+			endParentTurnIfSubagentsDone(ctx, ag, event.SessionID)
+			return nil
+		}
+		if subagentTurnEndClaimed(ctx, event.SessionID) {
+			logging.Info(logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name()),
+				"dropping TurnEnd for a turn already ended for its subagents",
+				slog.String("session_id", event.SessionID))
+			return nil
+		}
 		return handleLifecycleTurnEnd(ctx, ag, event)
 	case agent.Compaction:
 		return handleLifecycleCompaction(ctx, ag, event)
@@ -438,6 +463,14 @@ func handleLifecycleToolUse(ctx context.Context, ag agent.Agent, event *agent.Ev
 		return nil
 	}
 
+	// Before any file filtering: a subagent's first tool call, of any kind, is
+	// the first point it can be marked, and a shell command can edit and commit
+	// without naming a file here.
+	target := event.SessionID
+	if link, isSubagent := markSubagentSession(ctx, ag, event.SessionID, event.SessionRef); isSubagent {
+		target = link.ParentSessionID
+	}
+
 	modified := normalizeToolUsePaths(event.ModifiedFiles, event.CWD, repoRoot)
 	added := normalizeToolUsePaths(event.NewFiles, event.CWD, repoRoot)
 	deleted := normalizeToolUsePaths(event.DeletedFiles, event.CWD, repoRoot)
@@ -454,9 +487,11 @@ func handleLifecycleToolUse(ctx context.Context, ag agent.Agent, event *agent.Ev
 		slog.Int("deleted", len(deleted)),
 	)
 
-	if err := strategy.RecordFilesTouched(ctx, event.SessionID, modified, added, deleted); err != nil {
+	// A subagent's own session records nothing: its changes are the parent's,
+	// recorded on the parent so a commit made while it runs links them there.
+	if err := strategy.RecordFilesTouched(ctx, target, modified, added, deleted); err != nil {
 		logging.Warn(logCtx, "tool-use: failed to record files touched",
-			slog.String("session_id", event.SessionID),
+			slog.String("session_id", target),
 			slog.String("error", err.Error()),
 		)
 	}
@@ -666,6 +701,12 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 	}
 	setupSpan.End()
 
+	// A new turn is not waiting on the previous one's subagents.
+	if err := resetSubagentPause(ctx, sessionID); err != nil {
+		logging.Warn(logCtx, "failed to clear awaiting-subagents mark",
+			slog.String("error", err.Error()))
+	}
+
 	// Capture pre-prompt state (including transcript position via TranscriptAnalyzer)
 	_, captureSpan := perf.Start(ctx, "capture_pre_prompt_state")
 	if err := CapturePrePromptState(ctx, ag, sessionID, event.SessionRef); err != nil {
@@ -760,6 +801,11 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 			slog.String("error", mutErr.Error()))
 	}
 	initSpan.End()
+
+	// A subagent whose transcript already names its parent (a Droid Worker's
+	// session_start line) is marked now, before it can do any work. agy writes
+	// a subagent's transcript only after this, so its first ToolUse marks it.
+	markSubagentSession(ctx, ag, sessionID, event.SessionRef)
 
 	// Inject Entire's model-facing context (once per session) for agents whose
 	// transport supports it at TurnStart (e.g. Pi). Extension reads stdout.
@@ -1079,7 +1125,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// parent's next checkpoint. Its usage goes on that record and the parent's
 	// subagent total, never on the Worker's own session total, so it is
 	// counted once.
-	if link, isSubagent := resolveSubagentSessionLink(ctx, ag, transcriptRef); isSubagent {
+	if link, isSubagent := markSubagentSession(ctx, ag, sessionID, transcriptRef); isSubagent {
 		return saveSubagentSessionTaskStep(ctx, subagentSessionStep{
 			link:          link,
 			sessionID:     sessionID,
@@ -1119,7 +1165,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		// resolved and accounted exactly as SaveStep would. Otherwise the
 		// session total misses the turn, and so does the next checkpoint for
 		// agents whose transcript carries no usage (Cursor's stop payload,
-		// Antigravity's out-of-band pipe). An Antigravity turn that commits ALL
+		// older Antigravity's out-of-band pipe). An Antigravity turn that commits ALL
 		// its work mid-turn (its normal flow) lands here with a clean tree.
 		// The tokens are applied by the turn-end transition itself, so a
 		// repeated or concurrent Stop for the same turn adds nothing.
@@ -1247,13 +1293,14 @@ func workerTurnTokenUsage(ctx context.Context, ag agent.Agent, event *agent.Even
 // usage fields) take precedence; otherwise fall back to Codex's child ledger,
 // then to transcript-based computation from the turn's start offset (preferring
 // SubagentAwareExtractor to include subagent tokens), and last to the
-// out-of-band source: Antigravity exposes token usage only via its
-// title/statusline pipe (captured by the title-tee shim), never in the
+// out-of-band source: older Antigravity exposes token usage only via its
+// title/statusline pipe (captured by the title-tee shim), not in the
 // transcript, so its delta is the current cumulative totals minus the
-// TurnStart baseline stored in PrePromptState. Factory AI Droid is the same
-// shape: its transcript carries no usage, and its running total lives in the
-// session's .settings.json. Only one source is used, so a turn is never
-// counted twice.
+// TurnStart baseline stored in PrePromptState. Current agy writes per-call
+// usage into the transcript, which the transcript step reads first. Factory AI
+// Droid is the same shape: its transcript carries no usage, and its running
+// total lives in the session's .settings.json. Only one source is used, so a
+// turn is never counted twice.
 func resolveTurnTokenUsage(ctx context.Context, ag agent.Agent, event *agent.Event, sessionID string, preState *PrePromptState, transcriptData []byte, subagentsDir string, codexInventoryUsage *agent.TokenUsage) *agent.TokenUsage {
 	if event.TokenUsage != nil {
 		return event.TokenUsage
@@ -2747,6 +2794,114 @@ func resolveSubagentSessionLink(
 	return link, true
 }
 
+// markSubagentSession resolves whether sessionID is a subagent's own session
+// and, when it is, records that on both sides: ParentSessionID on the
+// subagent's state, which keeps it out of commit linking and standalone
+// condensation, and a live task record on the parent, so a commit made while
+// the subagent still runs carries its transcript so far. The live record holds
+// no files: the subagent's file changes go to the parent's FilesTouched as they
+// happen, and the record's own list is filled at turn end from changes no
+// commit has taken. Best effort: a failure leaves the session top-level.
+func markSubagentSession(ctx context.Context, ag agent.Agent, sessionID, transcriptRef string) (agent.SubagentSessionLink, bool) {
+	if _, ok := agent.AsSubagentSessionResolver(ag); !ok {
+		return agent.SubagentSessionLink{}, false
+	}
+	logCtx := logging.WithComponent(ctx, "lifecycle")
+	child, _ := strategy.LoadSessionState(ctx, sessionID) //nolint:errcheck // unreadable state resolves from the transcript below
+
+	// Already marked, with its live record on the parent: rebuild the link from
+	// that record instead of re-reading both transcripts on every hook.
+	if child.IsSubagentSession() {
+		if parent, err := strategy.LoadSessionState(ctx, child.ParentSessionID); err == nil && parent != nil {
+			if rec := findTaskRecordByAgent(parent, sessionID); rec != nil {
+				// Both sides age into IsStuckActive without hooks of their own:
+				// the waiting parent fires none, and a stuck-looking child would
+				// count as done to it while still running.
+				touchInteraction(ctx, logCtx, parent)
+				touchInteraction(ctx, logCtx, child)
+				return agent.SubagentSessionLink{
+					ParentSessionID: child.ParentSessionID,
+					ToolUseID:       rec.ToolUseID,
+					SubagentType:    rec.SubagentType,
+					TaskDescription: rec.TaskDescription,
+				}, true
+			}
+		}
+	}
+
+	link, ok := resolveSubagentSessionLink(ctx, ag, transcriptRef)
+	if !ok || link.ParentSessionID == sessionID {
+		return agent.SubagentSessionLink{}, false
+	}
+	if child != nil && child.ParentSessionID != link.ParentSessionID {
+		err := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+			state.ParentSessionID = link.ParentSessionID
+			return nil
+		})
+		if err != nil && !errors.Is(err, strategy.ErrStateNotFound) {
+			logging.Warn(logCtx, "failed to mark subagent session",
+				slog.String("session_id", sessionID), slog.String("error", err.Error()))
+		}
+	}
+	if parent, err := strategy.LoadSessionState(ctx, link.ParentSessionID); err != nil || parent == nil {
+		if err := GetStrategy(ctx).EnsureSessionExists(ctx, link.ParentSessionID, ag.Type()); err != nil {
+			logging.Warn(logCtx, "failed to ensure parent session for subagent",
+				slog.String("parent_session_id", link.ParentSessionID), slog.String("error", err.Error()))
+			return link, true
+		}
+	}
+	now := time.Now()
+	if err := strategy.MutateSessionState(ctx, link.ParentSessionID, func(state *strategy.SessionState) error {
+		state.EnsureTaskRecord(session.TaskRecord{
+			ToolUseID:              link.ToolUseID,
+			AgentID:                sessionID,
+			StartedAt:              now,
+			SubagentType:           link.SubagentType,
+			TaskDescription:        link.TaskDescription,
+			DeclaredTranscriptPath: transcriptRef,
+		})
+		state.LastInteractionTime = &now
+		return nil
+	}); err != nil {
+		logging.Warn(logCtx, "failed to record live subagent task on parent",
+			slog.String("parent_session_id", link.ParentSessionID), slog.String("error", err.Error()))
+	}
+	return link, true
+}
+
+// findTaskRecordByAgent returns the parent's task record for the subagent
+// session agentID, nil if none.
+func findTaskRecordByAgent(parent *strategy.SessionState, agentID string) *session.TaskRecord {
+	for i := range parent.TaskRecords {
+		if parent.TaskRecords[i].AgentID == agentID {
+			return &parent.TaskRecords[i]
+		}
+	}
+	return nil
+}
+
+// subagentInteractionRefresh bounds how often a subagent's hooks refresh its
+// own and its parent's LastInteractionTime.
+const subagentInteractionRefresh = time.Minute
+
+// touchInteraction refreshes state's LastInteractionTime, at most once per
+// subagentInteractionRefresh. It keeps a subagent and the parent waiting on it
+// from aging into IsStuckActive while the subagent works: a stuck parent's
+// wake-up would restart its turn, and a stuck subagent counts as done.
+func touchInteraction(ctx, logCtx context.Context, state *strategy.SessionState) {
+	if state.LastInteractionTime != nil && time.Since(*state.LastInteractionTime) < subagentInteractionRefresh {
+		return
+	}
+	now := time.Now()
+	if err := strategy.MutateSessionState(ctx, state.SessionID, func(s *strategy.SessionState) error {
+		s.LastInteractionTime = &now
+		return nil
+	}); err != nil && !errors.Is(err, strategy.ErrStateNotFound) {
+		logging.Warn(logCtx, "failed to refresh session interaction time",
+			slog.String("session_id", state.SessionID), slog.String("error", err.Error()))
+	}
+}
+
 // subagentSessionStep carries the turn-end inputs needed to record a detached
 // subagent session as a task record on its parent.
 type subagentSessionStep struct {
@@ -2823,7 +2978,180 @@ func saveSubagentSessionTaskStep(ctx context.Context, step subagentSessionStep) 
 		logging.Warn(logCtx, "failed to cleanup pre-prompt state",
 			slog.String("error", cleanupErr.Error()))
 	}
+	endParentTurnIfSubagentsDone(ctx, step.ag, step.link.ParentSessionID)
 	return nil
+}
+
+// claimSubagentTurnEnd claims ending the session's current turn for its
+// subagents: it clears the pause and records the claim, and reports whether
+// this call made it, so of the hooks that can find the subagents done exactly
+// one ends the turn, and a pause reported afterwards cannot re-arm it.
+func claimSubagentTurnEnd(ctx context.Context, sessionID string) bool {
+	claimed := false
+	err := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+		if state.AwaitingSubagentsAt == nil || state.SubagentTurnEndClaimed || state.Phase != session.PhaseActive {
+			return strategy.ErrMutationSkip
+		}
+		state.AwaitingSubagentsAt = nil
+		state.SubagentTurnEndClaimed = true
+		claimed = true
+		return nil
+	})
+	return err == nil && claimed
+}
+
+// subagentTurnEndClaimed reports whether the session's current turn was
+// claimed to be ended for its subagents. A Stop the agent reports afterwards
+// belongs to that same turn, whichever phase it finds: ACTIVE means the claimed
+// turn end is still running, IDLE that it finished and saved the turn. Either
+// way a second turn end would save the turn's step and tokens again. A failed
+// claimed end releases the claim, and the next TurnStart clears it.
+func subagentTurnEndClaimed(ctx context.Context, sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	return err == nil && state != nil && state.SubagentTurnEndClaimed
+}
+
+// resetSubagentPause clears the pause and the claim at a new turn.
+func resetSubagentPause(ctx context.Context, sessionID string) error {
+	err := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+		if state.AwaitingSubagentsAt == nil && !state.SubagentTurnEndClaimed {
+			return strategy.ErrMutationSkip
+		}
+		state.AwaitingSubagentsAt = nil
+		state.SubagentTurnEndClaimed = false
+		return nil
+	})
+	if errors.Is(err, strategy.ErrStateNotFound) {
+		return nil
+	}
+	return err //nolint:wrapcheck // callers log it with the session ID
+}
+
+// recordAwaitingSubagents sets or clears AwaitingSubagentsAt. Setting applies
+// only to an ACTIVE session: a pause reported after the turn already ended
+// marks nothing.
+func recordAwaitingSubagents(ctx context.Context, sessionID string, awaiting bool) error {
+	if sessionID == "" {
+		return nil
+	}
+	err := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+		if !awaiting {
+			if state.AwaitingSubagentsAt == nil {
+				return strategy.ErrMutationSkip
+			}
+			state.AwaitingSubagentsAt = nil
+			return nil
+		}
+		if state.Phase != session.PhaseActive || state.AwaitingSubagentsAt != nil || state.SubagentTurnEndClaimed {
+			return strategy.ErrMutationSkip
+		}
+		now := time.Now()
+		state.AwaitingSubagentsAt = &now
+		return nil
+	})
+	if errors.Is(err, strategy.ErrStateNotFound) {
+		return nil
+	}
+	return err //nolint:wrapcheck // callers log it with the session ID
+}
+
+// endParentTurnIfSubagentsDone ends the parent's turn when it stopped to wait
+// for its subagents and they are done: the agent will not report the turn's
+// end itself (Antigravity sends one fullyIdle=false Stop and nothing after
+// it). Every subagent the turn involved must have stopped, and every reply it
+// sent must be in the parent's transcript: an unread reply wakes the parent,
+// so its turn is not over. A subagent whose agent died sends nothing more.
+// The turn then ends exactly as a reported one would, from the parent's own
+// transcript and turn start, so its tokens and files count once.
+//
+// agy can still wake the parent afterwards: when a subagent keeps calling tools
+// after its last reply, agy sends the parent a system notice that it has gone
+// idle. That wake starts a new turn. Nothing is counted twice or lost; the
+// parent's work is only split across two turns.
+func endParentTurnIfSubagentsDone(ctx context.Context, ag agent.Agent, parentID string) {
+	counter, ok := agent.AsSubagentReplyCounter(ag)
+	if !ok {
+		return
+	}
+	logCtx := logging.WithComponent(ctx, "lifecycle")
+	parent, err := strategy.LoadSessionState(ctx, parentID)
+	if err != nil || parent == nil || parent.Phase != session.PhaseActive ||
+		parent.AwaitingSubagentsAt == nil || parent.SubagentTurnEndClaimed || parent.TranscriptPath == "" {
+		return
+	}
+	turnStart := 0
+	if pre, preErr := LoadPrePromptState(ctx, parentID); preErr == nil && pre != nil {
+		turnStart = pre.TranscriptOffset
+	}
+	subagents, err := counter.TurnSubagents(parent.TranscriptPath, turnStart)
+	if err != nil || len(subagents) == 0 {
+		return // not waiting on subagents (a background command), or unknown
+	}
+	for id, received := range subagents {
+		if !subagentDone(ctx, counter, id, parentID, received) {
+			return
+		}
+	}
+	if !claimSubagentTurnEnd(ctx, parentID) {
+		return
+	}
+	logging.Info(logCtx, "ending turn of a session whose subagents finished after it stopped",
+		slog.String("session_id", parentID))
+	if err := handleLifecycleTurnEnd(ctx, ag, &agent.Event{
+		Type:       agent.TurnEnd,
+		SessionID:  parentID,
+		SessionRef: parent.TranscriptPath,
+		Timestamp:  time.Now(),
+	}); err != nil {
+		logging.Warn(logCtx, "failed to end the parent's turn",
+			slog.String("session_id", parentID), slog.String("error", err.Error()))
+		if rbErr := releaseSubagentTurnEndClaim(ctx, parentID); rbErr != nil {
+			logging.Warn(logCtx, "failed to release the parent's turn-end claim",
+				slog.String("session_id", parentID), slog.String("error", rbErr.Error()))
+		}
+	}
+}
+
+// releaseSubagentTurnEndClaim undoes claimSubagentTurnEnd after the turn end it
+// claimed failed, so a later hook can retry: the pause is restored and the
+// claim cleared. A turn that still reached IDLE is left alone; it ended, and a
+// retry would count it again.
+func releaseSubagentTurnEndClaim(ctx context.Context, sessionID string) error {
+	err := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+		if !state.SubagentTurnEndClaimed || state.Phase != session.PhaseActive {
+			return strategy.ErrMutationSkip
+		}
+		now := time.Now()
+		state.AwaitingSubagentsAt = &now
+		state.SubagentTurnEndClaimed = false
+		return nil
+	})
+	if errors.Is(err, strategy.ErrStateNotFound) {
+		return nil
+	}
+	return err //nolint:wrapcheck // the caller logs it with the session ID
+}
+
+// subagentDone reports whether a subagent is finished from its parent's point
+// of view: its session is not running, and either its agent died or the parent
+// has received every reply it sent. A subagent without a session yet is
+// starting, not done.
+func subagentDone(ctx context.Context, counter agent.SubagentReplyCounter, subagentID, parentID string, received int) bool {
+	state, err := strategy.LoadSessionState(ctx, subagentID)
+	if err != nil || state == nil {
+		return false
+	}
+	if state.OwnerExited() || state.IsStuckActive() {
+		return true
+	}
+	if state.Phase.IsActive() || state.TranscriptPath == "" {
+		return false
+	}
+	sent, err := counter.RepliesSent(state.TranscriptPath, parentID)
+	return err == nil && sent <= received
 }
 
 // --- Helper functions ---
@@ -3062,8 +3390,8 @@ func markSessionEnded(ctx context.Context, event *agent.Event, sessionID string,
 }
 
 // computeOutOfBandTokenUsage returns the turn's token delta for
-// OutOfBandTokenSource agents (e.g. Antigravity, whose only token surface is
-// the title/statusline pipe captured by the title-tee shim, and Factory AI
+// OutOfBandTokenSource agents (e.g. older Antigravity, whose only token surface
+// is the title/statusline pipe captured by the title-tee shim, and Factory AI
 // Droid, which keeps a running total beside its transcript): current
 // cumulative totals minus the TurnStart baseline stored in PrePromptState.
 // Returns nil for other agents, on error (logged), or when no data exists.
