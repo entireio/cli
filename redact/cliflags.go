@@ -136,9 +136,11 @@ var portMappingPattern = regexp.MustCompile(`^(?:[0-9.]+:)?[0-9]+(?:-[0-9]+)?:[0
 
 // netrcValue is a .netrc token. A double-quoted one may hold escaped quotes
 // ("abc\"def", as curl reads it). Outside quotes, a quote or backtick ends it
-// when whitespace or a shell metacharacter follows, so the closing quote of
-// echo "machine h login me password p" > ~/.netrc stays outside the value.
-const netrcValue = `"(?:[^"\\\r\n]|\\[^\r\n])*"|'[^'\r\n]*'|[^\s"'` + "`" + `]+(?:["'` + "`" + `]+[^\s"'` + "`" + `;|&()<>][^\s"'` + "`" + `]*)*`
+// when whitespace, a shell metacharacter or a separator of code follows, so
+// the closing quote of echo "machine h login me password p" > ~/.netrc and
+// of fmt.Sprintf("machine %s login %s password %s", h, u, p) stays outside
+// the value.
+const netrcValue = `"(?:[^"\\\r\n]|\\[^\r\n])*"|'[^'\r\n]*'|[^\s"'` + "`" + `]+(?:["'` + "`" + `]+[^\s"'` + "`" + `;|&()<>,\]}][^\s"'` + "`" + `]*)*`
 
 // netrcName is a .netrc machine, login or account name, quoted when it
 // holds blanks (login "alice smith").
@@ -598,18 +600,19 @@ func (c *commandStart) word(word string) {
 	case c.text:
 	case c.optionArg:
 		c.optionArg = false
-	case isShellKeyword(word):
-		c.wrapper, c.host, c.command = "", false, false
-	case !c.command && isCommandWrapper(word):
-		c.wrapper, c.host = word, false
 	case c.wrapper != "" && strings.HasPrefix(word, "-"):
 		// An option of the wrapper (sudo -E, env -i), some of which take
 		// the next word as their argument (sudo -u root).
 		c.optionArg = takesArgument(c.wrapper, word)
 	case c.wrapper == sshCommand && !c.host:
 		// The destination of ssh (ssh db mysql -pX), even one named like a
-		// command (ssh echo mysql -pX).
+		// command, a keyword or a wrapper (ssh echo mysql -pX, ssh ssh
+		// mysql -pX).
 		c.host = true
+	case isShellKeyword(word):
+		c.wrapper, c.host, c.command = "", false, false
+	case !c.command && isCommandWrapper(word):
+		c.wrapper, c.host = word, false
 	default:
 		if eq := strings.IndexByte(word, '='); eq > 0 && isShellName(word[:eq]) {
 			return
@@ -1019,17 +1022,32 @@ func isStringGap(s string) bool {
 const sshCommand = "ssh"
 
 // isSSHDestination reports whether the client name at start is the
-// destination right after an ssh command (ssh mysql -p2222, where -p2222 is
-// ssh's port), not a command. An ssh that is an argument of another command
-// (docker exec ssh mysql -pX) does not count.
+// destination of an ssh command (ssh mysql -p2222, ssh -i key mysql -p2222,
+// where -p2222 is ssh's port), not a command. It reads the words of the
+// command from its start, at most maxSSHCommand bytes back, so an ssh that
+// is an argument of another command (docker exec ssh mysql -pX) does not
+// count.
 func isSSHDestination(s string, start int) bool {
-	before := strings.TrimRight(s[:start], " \t")
-	if len(before) == start || !strings.HasSuffix(before, sshCommand) {
+	if start == 0 || s[start-1] != ' ' && s[start-1] != '\t' {
 		return false
 	}
-	head := strings.TrimRight(before[:len(before)-len(sshCommand)], " \t")
-	return head == "" || strings.IndexByte("\r\n;|&(`'\"", head[len(head)-1]) >= 0
+	from := max(0, start-maxSSHCommand)
+	if i := strings.LastIndexAny(s[from:start], "\r\n;|&(`'\""); i >= 0 {
+		from += i + 1
+	} else if from > 0 {
+		return false
+	}
+	if !strings.Contains(s[from:start], sshCommand) {
+		return false
+	}
+	var c commandStart
+	c.at(s, from, start)
+	return c.wrapper == sshCommand && !c.host && !c.optionArg && !c.text
 }
+
+// maxSSHCommand bounds how far back isSSHDestination looks for the start of
+// an ssh command.
+const maxSSHCommand = 256
 
 // isContainerNameArgument reports whether the client name at start is the
 // value of --name (docker run --name mysql -p3306 mysql:8), not a command.
@@ -1056,7 +1074,10 @@ func appendNetrcPasswords(regions []taggedRegion, s string) []taggedRegion {
 				continue
 			}
 			valueStart, valueEnd, singleQuoted := unquoteRangeQuoted(s, start, end)
-			v := cliValue{start: valueStart, end: valueEnd, quoted: valueStart != start, singleQuoted: singleQuoted}
+			// A .netrc file expands nothing, so a password that starts with
+			// $ ($ecret, $SUMMER2026) is literal, as in single quotes.
+			literal := singleQuoted || strings.HasPrefix(s[valueStart:valueEnd], "$")
+			v := cliValue{start: valueStart, end: valueEnd, quoted: valueStart != start, singleQuoted: literal}
 			v.gap = v.quoted && valueStart == lines.stringEnd(start-1) && isStringGap(s[valueStart:valueEnd])
 			if r, ok := passwordValueRegion(s, v, false, false); ok {
 				regions = append(regions, r)
