@@ -260,6 +260,11 @@ func TestResolveTargetCellBaseURL(t *testing.T) {
 	if got, err := resolveTargetCellBaseURL(ctx, &CellTarget{BaseURL: "https://eu.api.entire.io/"}, "https://entire.io", "eu", "https://eu.auth.entire.io", "login", nil); err != nil || got != "https://eu.api.entire.io" {
 		t.Fatalf("target override: got %q, %v", got, err)
 	}
+	// A loopback origin also wins over a repo-resolved target: that target's
+	// BaseURL is a real cell from the catalog, not the local one.
+	if got, err := resolveTargetCellBaseURL(ctx, &CellTarget{BaseURL: "https://eu.api.entire.io", Jurisdiction: "eu"}, "http://127.0.0.1:8099/", "eu", "http://127.0.0.1:9000", "login", nil); err != nil || got != "http://127.0.0.1:8099" {
+		t.Fatalf("loopback + repo target: got %q, %v", got, err)
+	}
 	// A loopback origin with an explicitly pinned jurisdiction stays verbatim:
 	// local dev serves a single cell with no jurisdiction catalog to consult.
 	if got, err := resolveTargetCellBaseURL(ctx, &CellTarget{Jurisdiction: "us"}, "http://127.0.0.1:8099", "us", "http://127.0.0.1:9000", "login", nil); err != nil || got != "http://127.0.0.1:8099" {

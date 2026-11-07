@@ -662,9 +662,9 @@ func hostDoesNotResolve(err error) bool {
 }
 
 // mirrorLister is the subset of the control-plane client listMirrorsForRepo
-// needs. Narrowing to an interface lets callers (e.g. resolveCurrentRepoID in
-// api_cmd.go, and entireapi_client.go's currentRepoRef) inject a fake control
-// plane in tests; *coreapi.Client satisfies it.
+// needs. Narrowing to an interface lets callers (e.g. entireapi_client.go's
+// currentRepoRef) inject a fake control plane in tests; *coreapi.Client
+// satisfies it.
 type mirrorLister interface {
 	ListMirrors(ctx context.Context, params coreapi.ListMirrorsParams) (*coreapi.ListMirrorsOutputBody, error)
 }
