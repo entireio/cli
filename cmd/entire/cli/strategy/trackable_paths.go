@@ -46,7 +46,13 @@ import (
 // Answers are cached per process (trackablePathCache), so the several sessions
 // one hook processes — a commit hook walks every session of the worktree — ask
 // git about each path once.
+//
+// First, each path git tracks in another case is spelled as git spells it
+// (TrackedSpellings): a transcript's readme.md for README.md would otherwise
+// stay pending in the same way.
 func FilterTrackableChanges(ctx context.Context, repoRoot string, modified, added, deleted []string) (keptModified, keptAdded, keptDeleted []string) {
+	spelled := trackedSpellingsOf(ctx, repoRoot, modified, added, deleted)
+	modified, added, deleted = spelled[0], spelled[1], spelled[2]
 	changed := make([]string, 0, len(modified)+len(added))
 	changed = append(changed, modified...)
 	changed = append(changed, added...)
