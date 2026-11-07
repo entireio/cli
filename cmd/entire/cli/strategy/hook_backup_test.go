@@ -1971,7 +1971,8 @@ func TestBehindBrainNotice_QuotesChmodPath(t *testing.T) {
 
 // Without hard links the moves copy, and a copy keeps its mode, so a wrapper
 // or user hook switched off with chmod -x is not switched back on where it
-// runs. Not parallel: it swaps the package's link function.
+// runs, and the older copy of a private hook already behind the wrapper is
+// not readable by everyone. Not parallel: it swaps the package's link function.
 func TestInstallHooks_RewrapCopyKeepsModes(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("needs execute bits")
@@ -1991,21 +1992,27 @@ func TestInstallHooks_RewrapCopyKeepsModes(t *testing.T) {
 	f.brainLayoutOverUserHook(spec)
 	f.chmod("pre-push", 0o644)
 	f.chmod("pre-push"+backupSuffix, 0o600)
+	// A private hook already behind the wrapper is kept as an older copy.
+	f.write(brainBehind, userHookV2)
+	f.chmod(brainBehind, 0o700)
+	older := brainBehind + "." + backupClock.Format(olderCopyStampLayout)
 
 	f.install(spec)
 
-	assertHooks(t, f, map[string]string{"pre-push" + backupSuffix: brainWrapper, brainBehind: userHookV1})
+	assertHooks(t, f, map[string]string{"pre-push" + backupSuffix: brainWrapper, brainBehind: userHookV1, older: userHookV2})
+	// Each copy's source mode: Brain's wrapper, the user's hook, the older hook.
+	modes := map[string]os.FileMode{"pre-push" + backupSuffix: 0o644, brainBehind: 0o600, older: 0o700}
 	for name, mode := range written {
-		if strings.HasSuffix(name, "pre-push"+backupSuffix) || strings.HasSuffix(name, brainBehind) {
-			if mode&^0o644 != 0 {
+		for dst, src := range modes {
+			if strings.HasSuffix(name, dst) && mode&^src != 0 {
 				t.Errorf("%s was written with mode %v, more open than its source", name, mode)
 			}
 		}
 	}
-	if len(written) == 0 {
-		t.Error("no copy was written: the link fallback was not taken")
+	if _, ok := written[older]; !ok {
+		t.Errorf("%s was not copied: the link fallback was not taken", older)
 	}
-	for name, want := range map[string]os.FileMode{"pre-push" + backupSuffix: 0o644, brainBehind: 0o600} {
+	for name, want := range modes {
 		info, err := os.Lstat(filepath.Join(f.dir, name))
 		if err != nil {
 			t.Fatal(err)

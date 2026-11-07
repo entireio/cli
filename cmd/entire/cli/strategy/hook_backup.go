@@ -225,7 +225,8 @@ func linkMayReach(root *os.Root, name, target string) bool {
 // prepareHookBackup it links or copies, so backup keeps the user's hook until
 // the caller replaces it, and a copy keeps its mode: a hook the user switched
 // off with chmod -x stays off where the wrapper would run it. A different hook
-// already in that file is kept as an older copy first, whose name it returns.
+// already in that file is kept first as an older copy with its own mode, so a
+// private hook stays private, and its name is returned.
 //
 // The wrapper's own copy of Entire's hook at <hook>.pre-entire-brain stays,
 // as on main: no wrapper runs it any more, and uninstall replaces it with the
@@ -235,7 +236,7 @@ func moveBehindBrainWrapper(root *os.Root, backup string, now time.Time) (string
 	var older string
 	if hookFileExists(root, behind) && !sameHookFile(root, behind, backup) {
 		var err error
-		if older, err = keepOlderCopy(root, behind, now); err != nil {
+		if older, err = keepOlderCopyKeepingMode(root, behind, now); err != nil {
 			return "", err
 		}
 	}
@@ -364,13 +365,24 @@ func copyHookFileWithMode(root *os.Root, src, dst string, mode fs.FileMode) erro
 // keepOlderCopy links backup to a free <backup>.<timestamp>[-N] name; the link
 // fails rather than replace a name another process took.
 func keepOlderCopy(root *os.Root, backup string, now time.Time) (string, error) {
+	return keepOlderCopyWith(root, backup, now, linkOrCopy)
+}
+
+// keepOlderCopyKeepingMode is keepOlderCopy whose copy, where hard links are
+// unavailable, keeps backup's permission bits (see linkOrCopyKeepingMode), so
+// a private hook's older copy is not readable by everyone.
+func keepOlderCopyKeepingMode(root *os.Root, backup string, now time.Time) (string, error) {
+	return keepOlderCopyWith(root, backup, now, linkOrCopyKeepingMode)
+}
+
+func keepOlderCopyWith(root *os.Root, backup string, now time.Time, create func(root *os.Root, src, dst string) error) (string, error) {
 	base := backup + "." + now.UTC().Format(olderCopyStampLayout)
 	for i := 1; i < 1000; i++ {
 		name := base
 		if i > 1 {
 			name = fmt.Sprintf("%s-%d", base, i)
 		}
-		err := linkOrCopy(root, backup, name)
+		err := create(root, backup, name)
 		if err == nil {
 			return name, nil
 		}
