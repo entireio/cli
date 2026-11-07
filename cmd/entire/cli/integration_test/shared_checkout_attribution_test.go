@@ -11,6 +11,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/trailers"
 )
 
 // These tests cover sessions that share one checkout (#3011). git status shows
@@ -53,6 +54,18 @@ func filesTouched(t *testing.T, env *TestEnv, sess *Session) []string {
 	files := slices.Clone(state.FilesTouched)
 	slices.Sort(files)
 	return files
+}
+
+// headCheckpointID returns HEAD's Entire-Checkpoint trailer, or "" when it
+// has none. It lives in a file built on every platform because
+// foreign_commit_linking_test.go, built only on linux and darwin, uses it too.
+func headCheckpointID(t *testing.T, env *TestEnv) string {
+	t.Helper()
+	cpID, found := trailers.ParseCheckpoint(env.GetHeadCommitMessage())
+	if !found {
+		return ""
+	}
+	return cpID.String()
 }
 
 func headCheckpointSummary(t *testing.T, env *TestEnv) checkpoint.CheckpointSummary {
