@@ -21,7 +21,6 @@ import (
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
-	"github.com/go-git/go-git/v6/utils/merkletrie"
 )
 
 // disconnectedOnce ensures the disconnection warning runs at most once per process.
@@ -183,8 +182,8 @@ func WarnIfMetadataDisconnected(ctx context.Context) {
 // and handled by the push path.
 //
 // Repair strategy: cherry-pick local commits onto remote tip, preserving all data.
-// Checkpoint shards use unique paths (<id[:2]>/<id[2:]>/), so cherry-picks always
-// apply cleanly.
+// Independent checkpoint paths merge; incompatible changes to the same entry
+// abort reconciliation without moving the local ref.
 //
 // Progress messages are written to w (typically os.Stderr for hooks or
 // cmd.ErrOrStderr() for commands).
@@ -433,38 +432,44 @@ func loadShallowHashes(ctx context.Context, repoPath string) (map[plumbing.Hash]
 	return set, nil
 }
 
-// cherryPickOnto applies each commit's delta onto base, building a linear chain.
-// For each commit, it computes the full diff from its parent (additions, modifications,
-// and deletions), then applies that delta onto the current tip's tree.
-//
-// Commits listed in shallow are treated as roots: their delta is computed against
-// an empty tree rather than against their (past-the-boundary) parent. Without this,
-// a shallow-boundary commit would be diffed against a stale parent tree whose
-// objects live in the local pack but no longer represent the actual checkpoint
-// history — producing nonsense changes when replayed onto the remote tip.
+// cherryPickOnto replays local commits on base without changing any refs.
+// Independent changes merge; conflicting changes return ErrReplayConflict.
 func cherryPickOnto(ctx context.Context, repo *git.Repository, base plumbing.Hash, commits []*object.Commit, shallow map[plumbing.Hash]bool) (plumbing.Hash, error) {
+	return cherryPickOntoFiltered(ctx, repo, base, commits, shallow, nil)
+}
+
+// cherryPickOntoFiltered excludes unwanted data before replaying each commit.
+func cherryPickOntoFiltered(ctx context.Context, repo *git.Repository, base plumbing.Hash, commits []*object.Commit, shallow map[plumbing.Hash]bool, filter func(plumbing.Hash) (plumbing.Hash, error)) (plumbing.Hash, error) {
 	currentTip := base
 
-	for _, commit := range commits {
-		changes, err := treeChangesForCherryPick(ctx, repo, commit, shallow)
+	for index := 0; index < len(commits); index++ {
+		commit := commits[index]
+		parentTree, localTree, err := treesForCherryPick(repo, commit, shallow, filter)
 		if err != nil {
 			return plumbing.ZeroHash, err
 		}
-		if len(changes) == 0 {
-			continue // Skip no-op commits
-		}
-
 		tipCommit, err := repo.CommitObject(currentTip)
 		if err != nil {
 			return plumbing.ZeroHash, fmt.Errorf("failed to get tip commit: %w", err)
 		}
-
-		mergedTreeHash, err := checkpoint.ApplyTreeChanges(ctx, repo, tipCommit.TreeHash, changes)
+		mergedTreeHash, err := checkpoint.ReplayTrees(ctx, repo, parentTree, localTree, tipCommit.TreeHash)
+		if errors.Is(err, checkpoint.ErrReplayConflict) {
+			applied, probeErr := appliedReplayPrefix(ctx, repo, parentTree, tipCommit.TreeHash, commits[index:], shallow, filter)
+			if probeErr != nil {
+				return plumbing.ZeroHash, probeErr
+			}
+			if applied > 0 {
+				index += applied - 1
+				continue
+			}
+		}
 		if err != nil {
-			return plumbing.ZeroHash, fmt.Errorf("failed to apply cherry-pick changes: %w", err)
+			return plumbing.ZeroHash, fmt.Errorf("replay commit %s: %w", commit.Hash, err)
+		}
+		if mergedTreeHash == tipCommit.TreeHash {
+			continue
 		}
 
-		// Create new commit on top of current tip, preserving original message/author
 		newHash, err := createCherryPickCommit(ctx, repo, mergedTreeHash, currentTip, commit)
 		if err != nil {
 			return plumbing.ZeroHash, fmt.Errorf("failed to create cherry-pick commit: %w", err)
@@ -476,63 +481,52 @@ func cherryPickOnto(ctx context.Context, repo *git.Repository, base plumbing.Has
 	return currentTip, nil
 }
 
-func treeChangesForCherryPick(ctx context.Context, repo *git.Repository, commit *object.Commit, shallow map[plumbing.Hash]bool) ([]checkpoint.TreeChange, error) {
-	commitTree, err := commit.Tree()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get tree for commit %s: %w", commit.Hash, err)
+// appliedReplayPrefix finds a sequence whose combined change is already present.
+// A final transcript may be present even when an earlier provisional one differs.
+func appliedReplayPrefix(ctx context.Context, repo *git.Repository, before, onto plumbing.Hash, commits []*object.Commit, shallow map[plumbing.Hash]bool, filter func(plumbing.Hash) (plumbing.Hash, error)) (int, error) {
+	end := 1
+	for end < len(commits) && !shallow[commits[end].Hash] && len(commits[end].ParentHashes) == 1 && commits[end].ParentHashes[0] == commits[end-1].Hash {
+		end++
 	}
-
-	var parentTree *object.Tree
-	// Shallow-boundary commits are treated as roots — see cherryPickOnto for why.
-	if len(commit.ParentHashes) > 0 && !shallow[commit.Hash] {
-		parentCommit, pErr := repo.CommitObject(commit.ParentHashes[0])
-		if pErr != nil {
-			return nil, fmt.Errorf("failed to get parent commit %s: %w", commit.ParentHashes[0], pErr)
-		}
-		parentTree, err = parentCommit.Tree()
+	for index := end - 1; index > 0; index-- {
+		_, after, err := treesForCherryPick(repo, commits[index], shallow, filter)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get parent tree for commit %s: %w", commit.ParentHashes[0], err)
+			return 0, err
+		}
+		merged, err := checkpoint.ReplayTrees(ctx, repo, before, after, onto)
+		if errors.Is(err, checkpoint.ErrReplayConflict) {
+			continue
+		}
+		if err != nil {
+			return 0, fmt.Errorf("check already replayed changes: %w", err)
+		}
+		if merged == onto {
+			return index + 1, nil
 		}
 	}
-
-	changes, err := object.DiffTreeContext(ctx, parentTree, commitTree)
-	if err != nil {
-		return nil, fmt.Errorf("failed to diff commit %s against parent: %w", commit.Hash, err)
-	}
-
-	treeChanges := make([]checkpoint.TreeChange, 0, len(changes))
-	for _, change := range changes {
-		treeChange, changeErr := changeToTreeChange(change)
-		if changeErr != nil {
-			return nil, fmt.Errorf("failed to convert change in commit %s: %w", commit.Hash, changeErr)
-		}
-		treeChanges = append(treeChanges, treeChange)
-	}
-	return treeChanges, nil
+	return 0, nil
 }
 
-func changeToTreeChange(change *object.Change) (checkpoint.TreeChange, error) {
-	action, err := change.Action()
-	if err != nil {
-		return checkpoint.TreeChange{}, fmt.Errorf("change action: %w", err)
+func treesForCherryPick(repo *git.Repository, commit *object.Commit, shallow map[plumbing.Hash]bool, filter func(plumbing.Hash) (plumbing.Hash, error)) (plumbing.Hash, plumbing.Hash, error) {
+	// Root and shallow-boundary commits have an empty parent tree.
+	before, after := plumbing.ZeroHash, commit.TreeHash
+	if len(commit.ParentHashes) > 0 && !shallow[commit.Hash] {
+		parent, err := repo.CommitObject(commit.ParentHashes[0])
+		if err != nil {
+			return plumbing.ZeroHash, plumbing.ZeroHash, fmt.Errorf("read replay parent %s: %w", commit.ParentHashes[0], err)
+		}
+		before = parent.TreeHash
 	}
-
-	switch action {
-	case merkletrie.Insert, merkletrie.Modify:
-		entry := change.To.TreeEntry
-		return checkpoint.TreeChange{
-			Path: change.To.Name,
-			Entry: &object.TreeEntry{
-				Name: entry.Name,
-				Mode: entry.Mode,
-				Hash: entry.Hash,
-			},
-		}, nil
-	case merkletrie.Delete:
-		return checkpoint.TreeChange{Path: change.From.Name}, nil
-	default:
-		return checkpoint.TreeChange{}, fmt.Errorf("unsupported action %s", action)
+	if filter != nil {
+		var err error
+		if before, err = filter(before); err != nil {
+			return plumbing.ZeroHash, plumbing.ZeroHash, err
+		}
+		if after, err = filter(after); err != nil {
+			return plumbing.ZeroHash, plumbing.ZeroHash, err
+		}
 	}
+	return before, after, nil
 }
 
 // createCherryPickCommit creates a new commit on top of parent, preserving the
