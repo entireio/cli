@@ -3,7 +3,9 @@ package strategy
 import (
 	"context"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -43,10 +45,18 @@ func TestTrackedSpellings_CaseInsensitiveFilesystemWindows(t *testing.T) {
 	}
 }
 
+// srcIgnoresCase stands in for a worktree whose src/ finds its entries
+// ignoring case and whose other directories respect case.
+type srcIgnoresCase struct{}
+
+func (srcIgnoresCase) SameEntry(file, spelling string) bool {
+	return path.Dir(file) == "src" && path.Dir(spelling) == "src" && strings.EqualFold(file, spelling)
+}
+
 // TestTrackedSpelling covers the rule itself, independent of the filesystem.
 // A hard link stands in for a case-insensitive filesystem, where both
-// spellings open one file, and a hard-linked pair of entries for a directory
-// that finds its entries ignoring case.
+// spellings open one file, and srcIgnoresCase for a directory that finds its
+// entries ignoring case (worktreedir's tests cover the probe itself).
 func TestTrackedSpelling(t *testing.T) {
 	t.Parallel()
 	dir, worktree := trackedCaseRepo(t)
@@ -73,19 +83,18 @@ func TestTrackedSpelling(t *testing.T) {
 	require.NoError(t, os.Remove(filepath.Join(dir, "README.md")))
 	require.Equal(t, "readme.md", trackedSpelling(worktree, cases, dir, "readme.md", tracked), "the root respects case")
 
-	// src/ finds its entries ignoring case, so src/app.go names git's
+	// Where src/ finds its entries ignoring case, src/app.go names git's
 	// deleted src/App.go.
-	testutil.WriteFile(t, dir, "src/A.txt", "a\n")
-	require.NoError(t, os.Link(filepath.Join(dir, "src", "A.txt"), filepath.Join(dir, "src", "a.TXT")))
 	require.NoError(t, os.Remove(filepath.Join(dir, "src", "App.go")))
-	cases = worktreedir.NewCaseProbe(dir)
 	app := []string{"src/App.go"}
-	require.Equal(t, "src/App.go", trackedSpelling(worktree, cases, dir, "src/app.go", app), "deleted under git's spelling")
-	require.Equal(t, "src/app.go", trackedSpelling(worktree, cases, dir, "src/app.go", []string{"src/App.go", "src/APP.go"}),
+	require.Equal(t, "src/app.go", trackedSpelling(worktree, cases, dir, "src/app.go", app), "src/ respects case here")
+	folding := srcIgnoresCase{}
+	require.Equal(t, "src/App.go", trackedSpelling(worktree, folding, dir, "src/app.go", app), "deleted under git's spelling")
+	require.Equal(t, "src/app.go", trackedSpelling(worktree, folding, dir, "src/app.go", []string{"src/App.go", "src/APP.go"}),
 		"ambiguous: the index has two spellings")
-	require.Equal(t, "Src/app.go", trackedSpelling(worktree, cases, dir, "Src/app.go", app), "the root respects case")
+	require.Equal(t, "Src/app.go", trackedSpelling(worktree, folding, dir, "Src/app.go", app), "the root respects case")
 	testutil.WriteFile(t, dir, "src/App.go", "back\n")
-	require.Equal(t, "src/app.go", trackedSpelling(worktree, cases, dir, "src/app.go", app),
+	require.Equal(t, "src/app.go", trackedSpelling(worktree, folding, dir, "src/app.go", app),
 		"git's spelling still opens a file, so src/app.go is another one")
 }
 

@@ -78,9 +78,14 @@ func trackedSpellingsOf(ctx context.Context, repoRoot string, lists ...[]string)
 	return spelled
 }
 
+// entryCases is what trackedSpelling asks of a worktreedir.CaseProbe.
+type entryCases interface {
+	SameEntry(file, spelling string) bool
+}
+
 // trackedSpelling returns the one of tracked (the index's spellings of file,
 // ignoring case) that file names, or file itself.
-func trackedSpelling(worktree *os.Root, cases *worktreedir.CaseProbe, repoRoot, file string, tracked []string) string {
+func trackedSpelling(worktree *os.Root, cases entryCases, repoRoot, file string, tracked []string) string {
 	if len(tracked) == 0 || slices.Contains(tracked, file) {
 		return file
 	}
