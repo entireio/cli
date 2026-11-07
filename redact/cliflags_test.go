@@ -159,7 +159,38 @@ func TestString_CommandLinePasswords(t *testing.T) {
 		{name: "helm registry login after an option", input: "helm registry --debug login registry.example -u me -p " + p, want: "helm registry --debug login registry.example -u me -p REDACTED"},
 		{name: "docker program name in capitals", input: "docker.EXE login -u me -p " + p, want: "docker.EXE login -u me -p REDACTED"},
 		{name: "client run through ssh with a quoted option argument", input: `ssh -o "ProxyJump jump" db mysql -p` + p, want: `ssh -o "ProxyJump jump" db mysql -pREDACTED`},
+		{name: "client after an ssh option argument with its name", input: "ssh -l mysql db mysql -p" + p, want: "ssh -l mysql db mysql -pREDACTED"},
+		{name: "client after a substitution that ran it", input: `ssh $(mysql -Nse 'select host') mysql -p` + p, want: `ssh $(mysql -Nse 'select host') mysql -pREDACTED`},
+		{name: "client in a subshell", input: "(cd app; mysql -p" + p + ")", want: "(cd app; mysql -pREDACTED)"},
+		{name: "client after a subshell that ran it", input: "(mysql -e x) mysql -p" + p, want: "(mysql -e x) mysql -pREDACTED"},
+		{name: "openssl single-quoted flag", input: "openssl enc -aes-128-cbc '-pass' pass:" + p, want: "openssl enc -aes-128-cbc '-pass' pass:REDACTED"},
+		{name: "openssl double-quoted flag", input: `openssl enc "-passin" pass:` + p, want: `openssl enc "-passin" pass:REDACTED`},
+		{name: "openssl ANSI-C quoted source", input: "openssl enc -pass $'pass:" + p + "'", want: "openssl enc -pass $'pass:REDACTED'"},
+		{name: "mysql ANSI-C quoted password", input: "mysql -e x -p$'" + p + "'", want: "mysql -e x -p$'REDACTED'"},
+		{name: "openssl run through env by path", input: "/usr/bin/env openssl enc -pass pass:" + p, want: "/usr/bin/env openssl enc -pass pass:REDACTED"},
+		{name: "openssl run through env by path in a script", input: "sh -c '/usr/bin/env openssl enc -pass pass:" + p + "'", want: "sh -c '/usr/bin/env openssl enc -pass pass:REDACTED'"},
+		{name: "openssl run through env by path in a nested script", input: `openssl enc -in f -out "$(bash -c '/usr/bin/env openssl enc -pass pass:` + p + `')"`, want: `openssl enc -in f -out "$(bash -c '/usr/bin/env openssl enc -pass pass:REDACTED')"`},
+		{name: "long flag after a quoted flag with no value", input: `echo "--password "; wget --password="` + p + `"`, want: `echo "--password "; wget --password="REDACTED"`},
+		{name: "long flag inside a password word", input: `wget --password=x\ --password=` + p, want: "wget --password=REDACTED"},
+		{name: "short flag inside a password word", input: `mysql -px\ -p` + p, want: "mysql -pREDACTED"},
+		{name: "netrc comment after a value", input: "machine h login me # build account\npassword " + p, want: "machine h login me # build account\npassword REDACTED"},
+		{name: "netrc password starting with a hash", input: "machine h login me password #" + p, want: "machine h login me password REDACTED"},
 	})
+}
+
+// The layer reads every flag on its own, so a flag whose value is no
+// password does not hide the next one, which other layers may not catch.
+func TestCommandLinePasswordsReadFlagAfterRejectedValue(t *testing.T) {
+	t.Parallel()
+
+	input := `echo "--password "; wget --password="` + cliTestPassword + `"`
+	start := strings.Index(input, cliTestPassword)
+	for _, r := range detectCommandLinePasswords(input) {
+		if r.start == start && r.end == start+len(cliTestPassword) {
+			return
+		}
+	}
+	t.Errorf("detectCommandLinePasswords(%q) found no region for the password", input)
 }
 
 func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
@@ -243,6 +274,12 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		"openssl enc -pass pass:",
 		`{"cmd":"openssl enc -pass pass:","x":1}`,
 		`cmd := "openssl enc -pass pass:" + pw + " -in f"`,
+		"ssh -i ~/.ssh/mysql -p2222 user@host",
+		"ssh -l mysql -p2222 db",
+		"ssh $(mysql -Nse 'SELECT hostname FROM servers LIMIT 1') -p2222",
+		"(mysql -e 'select 1') -p2222",
+		"machine h login me # password vault",
+		"machine h login me # password vault\nmachine x",
 		"Use `mysql`, `docker login -p`, `sshpass -p` and `openssl -pass pass:` with care.",
 		`fmt.Sprintf("machine %s login %s password %s", host, user, pass)`,
 		// declarations

@@ -137,7 +137,7 @@ var cliPasswordFlags = []cliPasswordFlag{
 	{
 		needles: []string{"pass:"},
 		command: regexp.MustCompile(`\bopenssl\b`),
-		flag:    regexp.MustCompile(`\s-pass(?:in|out|word)?` + cliBlank + `(` + cliFlagValue + `)`),
+		flag:    regexp.MustCompile(`\s(?:-pass(?:in|out|word)?|'-pass(?:in|out|word)?'|"-pass(?:in|out|word)?")` + cliBlank + `(` + cliFlagValue + `)`),
 		prefix:  "pass:",
 	},
 }
@@ -164,10 +164,13 @@ const netrcName = `"(?:[^"\\\r\n]|\\[^\r\n])*"|\S+`
 const netrcEntry = `(?:\bmachine[ \t\r\n]+(` + netrcName + `)|(?:^|[\r\n"'])[ \t]*default)`
 
 const (
-	// netrcSep separates .netrc tokens: blanks, line breaks and comment
-	// lines.
-	netrcSep     = `(?:[ \t\r\n]+|[\r\n][ \t]*#[^\r\n]*)+`
-	netrcAccount = `(?:` + netrcSep + `account` + netrcSep + `(?:` + netrcName + `))?`
+	// netrcSep comes before a .netrc keyword: blanks, line breaks, and
+	// comments, which run from a blank to the end of their line
+	// (login me # build account). netrcValueSep comes before a value,
+	// which may start with # (password #x).
+	netrcSep      = `(?:[ \t\r\n]+(?:#[^\r\n]*[\r\n])?)+`
+	netrcValueSep = `[ \t\r\n]+`
+	netrcAccount  = `(?:` + netrcSep + `account` + netrcValueSep + `(?:` + netrcName + `))?`
 )
 
 // netrcPasswordPatterns match the password of a .netrc entry that also names
@@ -179,8 +182,8 @@ var netrcPasswordPatterns = []struct {
 	// login and value are the indexes of the login and password groups.
 	login, value int
 }{
-	{regexp.MustCompile(netrcEntry + netrcAccount + netrcSep + `login` + netrcSep + `(` + netrcName + `)` + netrcAccount + netrcSep + `password` + netrcSep + `(` + netrcValue + `)`), 2, 3},
-	{regexp.MustCompile(netrcEntry + netrcAccount + netrcSep + `password` + netrcSep + `(` + netrcValue + `)` + netrcAccount + netrcSep + `login` + netrcSep + `(` + netrcName + `)`), 3, 2},
+	{regexp.MustCompile(netrcEntry + netrcAccount + netrcSep + `login` + netrcValueSep + `(` + netrcName + `)` + netrcAccount + netrcSep + `password` + netrcValueSep + `(` + netrcValue + `)`), 2, 3},
+	{regexp.MustCompile(netrcEntry + netrcAccount + netrcSep + `password` + netrcValueSep + `(` + netrcValue + `)` + netrcAccount + netrcSep + `login` + netrcValueSep + `(` + netrcName + `)`), 3, 2},
 }
 
 // detectCommandLinePasswords returns a region for every password passed to a
@@ -208,16 +211,30 @@ func appendLongPasswordFlags(regions []taggedRegion, s string) []taggedRegion {
 		return regions
 	}
 	lines := quoteScan{s: s, prose: true}
-	for _, loc := range cliLongPasswordPattern.FindAllStringSubmatchIndex(s, -1) {
+	for pos := 0; ; {
+		loc := cliLongPasswordPattern.FindStringSubmatchIndex(s[pos:])
+		if loc == nil {
+			return regions
+		}
+		for k := range loc {
+			loc[k] += pos
+		}
 		// After "=" a leading '-' is part of the value; after a blank it
 		// starts the next flag.
 		blank := s[loc[2]] != '='
 		v := shellWordValue(s, loc[4], loc[5], lines.stringEnd(loc[2]-1))
-		if r, ok := passwordValueRegion(s, v, blank, blank); ok {
-			regions = append(regions, r)
+		r, ok := passwordValueRegion(s, v, blank, blank)
+		if !ok {
+			// A value that is no password may hold the next flag
+			// (echo "--password "; wget --password=x).
+			pos = loc[4]
+			continue
 		}
+		regions = append(regions, r)
+		// A flag inside the password's word is part of it
+		// (--password=x\ --password=y), and is not read again.
+		pos = max(loc[1], r.end)
 	}
-	return regions
 }
 
 // appendPasswords adds the value of every password flag in the segment of
@@ -232,7 +249,11 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string) []tag
 	}
 	lines := quoteScan{s: s, prose: true}
 	var nested nestedScan
-	segmentEnd := 0
+	var paths programPathMemo
+	// A segment cut at a ")" (ssh $(mysql -Nse 'x') -p2222) goes on after
+	// it, to uncutEnd, in a string that closes at uncutAt; a command there
+	// starts a segment that ends there too, which is not found again.
+	segmentEnd, uncutEnd, uncutAt := 0, 0, 0
 	for _, cmd := range f.command.FindAllStringIndex(s, -1) {
 		if !isCommandToken(s, cmd[0], cmd[1]) || f.containerName && isContainerNameArgument(s, cmd[0]) {
 			continue
@@ -248,7 +269,10 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string) []tag
 		switch {
 		case cmd[0] >= segmentEnd:
 			nested = newNestedScan(s, cmd[1], closeAt, stringEnd)
-			rest = f.segmentRest(s, &lines, cmd[1], closeAt, stringEnd)
+			if cmd[1] >= uncutEnd || closeAt != uncutAt {
+				uncutEnd, uncutAt = cmd[1]+len(f.segmentRest(s, &lines, &paths, cmd[1], closeAt, stringEnd)), closeAt
+			}
+			rest = untilUnmatchedParen(s[cmd[1]:uncutEnd])
 			segmentEnd = cmd[1] + len(rest)
 		case f.leading:
 			// Only the options right after the name are read, and they
@@ -442,21 +466,66 @@ var scriptOption = regexp.MustCompile(`^-[a-z]*c[a-z]*$`)
 
 // segmentRest returns the rest of the pipeline segment of a command whose
 // name ends at i, in a quoted string that closes at closeAt and ends at
-// stringEnd (both -1 when it is in none); lines found that string. A command
+// stringEnd (both -1 when it is in none); lines found that string, and paths
+// records whether its text is a program path. A command
 // quoted with its arguments (sh -c 'mysql --version'; ssh -p2222 host) ends
 // with the string; a quoted program path ("/usr/bin/mysql" -pX, or
 // "/opt/mysql tools/bin/mysql" -pX, where the name first matched a
 // directory) goes on after it.
-func (f cliPasswordFlag) segmentRest(s string, lines *quoteScan, i, closeAt, stringEnd int) string {
+func (f cliPasswordFlag) segmentRest(s string, lines *quoteScan, paths *programPathMemo, i, closeAt, stringEnd int) string {
 	pattern := segmentRestPattern(s, closeAt)
 	switch {
 	case closeAt < i:
 		return pattern.FindString(s[i:])
-	case strings.ContainsAny(s[i:closeAt], " \t") && !f.isProgramPath(s[lines.inner():closeAt]):
+	case strings.ContainsAny(s[i:closeAt], " \t") && !paths.isProgramPath(f, s, lines.inner(), closeAt):
 		return pattern.FindString(s[i:closeAt])
 	default:
 		return s[i : stringEnd+len(cliSegmentRest.FindString(s[stringEnd:]))]
 	}
+}
+
+// programPathMemo records whether the text of the quoted string that a
+// segment's command was last found in is a program path, so a string with
+// many commands (sh -c "mysql -e x; mysql -e y; ...") is read once.
+type programPathMemo struct {
+	// from is one past where the text starts, 0 when nothing is recorded.
+	from int
+	path bool
+}
+
+// isProgramPath reports whether s[from:to] is the path of a program f
+// defines.
+func (m *programPathMemo) isProgramPath(f cliPasswordFlag, s string, from, to int) bool {
+	if m.from != from+1 {
+		m.from, m.path = from+1, f.isProgramPath(s[from:to])
+	}
+	return m.path
+}
+
+// untilUnmatchedParen returns rest up to its first ")" that closes nothing
+// opened in it: the end of a command substitution or subshell the command
+// is in (ssh $(mysql -Nse 'select host') -p2222, where -p2222 is ssh's
+// port).
+func untilUnmatchedParen(rest string) string {
+	depth := 0
+	for i := 0; i < len(rest); i++ {
+		if end, quoteLen := quotedPiece(rest, i); quoteLen > 0 {
+			i = end - 1
+			continue
+		}
+		switch rest[i] {
+		case '\\':
+			i++
+		case '(':
+			depth++
+		case ')':
+			if depth == 0 {
+				return rest[:i]
+			}
+			depth--
+		}
+	}
+	return rest
 }
 
 // notProgramPath matches an option, a path argument or a shell operator,
@@ -631,8 +700,8 @@ func (c *commandStart) word(word string) {
 		c.host = true
 	case isShellKeyword(word):
 		c.wrapper, c.host, c.command = "", false, false
-	case !c.command && isCommandWrapper(word):
-		c.wrapper, c.host = word, false
+	case !c.command && isCommandWrapper(programName(word)):
+		c.wrapper, c.host = programName(word), false
 	default:
 		if eq := strings.IndexByte(word, '='); eq > 0 && isShellName(word[:eq]) {
 			return
@@ -640,9 +709,15 @@ func (c *commandStart) word(word string) {
 		// In a substitution, a word after the name of a command is its
 		// argument, so only the name prints the rest (echo mysql -pX,
 		// not docker exec echo mysql -pX).
-		c.text = !c.lenient || !c.command && isPrintCommand(word)
+		c.text = !c.lenient || !c.command && isPrintCommand(programName(word))
 		c.command = true
 	}
+}
+
+// programName returns the program a word names, without its directory
+// (/usr/bin/env).
+func programName(word string) string {
+	return word[strings.LastIndexByte(word, '/')+1:]
 }
 
 // isPrintCommand reports whether word prints its arguments rather than
@@ -713,8 +788,12 @@ func isShellName(s string) bool {
 // another command, read on its own if f defines it. stringEnd is where the
 // quoted string holding the command ends, or -1.
 func (f cliPasswordFlag) appendFlags(regions []taggedRegion, s string, quotes *quoteScan, rest string, stringEnd int) []taggedRegion {
-	base := quotes.i
+	base, wordEnd := quotes.i, 0
 	for _, loc := range f.flag.FindAllStringSubmatchIndex(rest, -1) {
+		if base+loc[0] < wordEnd {
+			// Part of the last password's word (-px\ -py).
+			continue
+		}
 		if _, quoted := quotes.stringAt(base + loc[0]); quoted {
 			continue
 		}
@@ -723,6 +802,7 @@ func (f cliPasswordFlag) appendFlags(regions []taggedRegion, s string, quotes *q
 		}
 		if r, ok := f.valueRegion(s, base+loc[2], base+loc[3], stringEnd); ok {
 			regions = append(regions, r)
+			wordEnd = r.end
 		}
 	}
 	return regions
@@ -763,6 +843,12 @@ func shellWordValue(s string, start, end, stringEnd int) cliValue {
 	wordEnd := shellWordEnd(s, start)
 	if wordEnd <= start {
 		wordEnd = end
+	}
+	if strings.HasPrefix(s[start:], "$'") {
+		// An ANSI-C quoted string ($'pass:x'), where $ is literal.
+		if pieceEnd, quoteLen := quotedPiece(s, start+1); quoteLen == 1 && pieceEnd >= wordEnd {
+			return cliValue{start: start + 2, end: pieceEnd - 1, quoted: true, singleQuoted: true}
+		}
 	}
 	if pieceEnd, quoteLen := quotedPiece(s, start); quoteLen > 0 {
 		inner := cliValue{start: start + quoteLen, end: pieceEnd - quoteLen, quoted: true, singleQuoted: s[start] == '\''}
@@ -1082,9 +1168,15 @@ const sshCommand = "ssh"
 // start; when it is further back, the command starts after the last quote
 // or shell operator.
 func isSSHDestination(s string, from, start int) bool {
-	if start == 0 || s[start-1] != ' ' && s[start-1] != '\t' {
+	// The word may be a path ending in the name (ssh -i ~/.ssh/mysql).
+	word := start
+	for word > 0 && start-word < maxSSHCommand && !isShellWordEnd(s[word-1]) && s[word-1] != '"' && s[word-1] != '\'' {
+		word--
+	}
+	if word == 0 || s[word-1] != ' ' && s[word-1] != '\t' {
 		return false
 	}
+	start = word
 	if start-from <= maxSSHCommand {
 		from = commandFrom(s, from, start)
 	} else {
@@ -1100,7 +1192,8 @@ func isSSHDestination(s string, from, start int) bool {
 	}
 	var c commandStart
 	c.at(s, from, start)
-	return c.wrapper == sshCommand && !c.host && !c.optionArg && !c.text
+	// The destination, or the argument of an ssh option (ssh -i mysql).
+	return c.wrapper == sshCommand && !c.host && !c.text
 }
 
 // maxSSHCommand bounds how far back isSSHDestination looks for the start of
