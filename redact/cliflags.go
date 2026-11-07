@@ -346,6 +346,7 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string) []tag
 	var paths programPathMemo
 	scripts := commandStart{lenient: true}
 	var entrypoint entrypointArgs
+	var entrypointStarts commandStart
 	// A segment cut at a ")" (ssh $(mysql -Nse 'x') -p2222) goes on after
 	// it, to uncutEnd, in a string that closes at uncutAt; a command there
 	// starts a segment that ends there too, which is not found again.
@@ -383,7 +384,7 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string) []tag
 			}
 		}
 		from := cmd[1]
-		if isEntrypointArgument(s, cmdFrom, cmd[0]) {
+		if isEntrypointArgument(s, &entrypointStarts, cmdFrom, cmd[0]) {
 			from = entrypoint.at(s, cmd[0], cmd[1]+len(rest), stringEnd)
 		}
 		quotes := quoteScan{s: s[:cmd[1]+len(rest)], i: from, skip: skip, skipEnd: skipEnd, substitutions: true}
@@ -1344,15 +1345,13 @@ func isCodeSeparator(s string, open, i int) bool {
 	if i == len(s) || strings.IndexByte(",]}", s[i]) < 0 {
 		return false
 	}
-	return isCodeElementStart(s[max(0, open-maxCodeScan):open])
+	return isCodeElementStart(s[:open])
 }
 
-// maxCodeScan bounds how far back isCodeSeparator reads the elements before
-// a string, so the scan stays linear.
-const maxCodeScan = 1024
-
 // maxCodeElements bounds how many elements before a string isCodeSeparator
-// reads; one after that many is taken for code.
+// reads, however long they are (f("mysql", "<a long host>", "-px",db)); one
+// after that many is taken for code. Each element is read by the strings
+// at most that many elements after it, so the scan stays linear.
 const maxCodeElements = 16
 
 // isCodeElementStart reports whether an element of code starts after code:
@@ -1961,8 +1960,9 @@ func commandFrom(s string, from, start int) int {
 // mysql, --entrypoint=/usr/bin/mysql), whose own arguments come after the
 // image, rather than of another program's option of that name
 // (runner --entrypoint=mysql -pX). from is outside quoted strings, at or
-// before the command's start.
-func isEntrypointArgument(s string, from, start int) bool {
+// before the command's start; starts reads the command from there, once for
+// names at increasing positions, however long the command is.
+func isEntrypointArgument(s string, starts *commandStart, from, start int) bool {
 	window := s[max(0, start-maxEntrypointPart):start]
 	part := window[strings.LastIndexAny(window, " \t")+1:]
 	joined := strings.HasPrefix(part, "--entrypoint=")
@@ -1977,16 +1977,11 @@ func isEntrypointArgument(s string, from, start int) bool {
 		}
 	}
 	word := start - len(part)
-	from, ok := wrapperCommandFrom(s, from, word)
-	if !ok {
-		return false
-	}
-	var c commandStart
-	c.at(s, from, word)
+	starts.at(s, from, word)
 	if joined {
-		return isContainerClient(c.wrapper) && runsJoinedArgument(c.wrapper, part)
+		return isContainerClient(starts.wrapper) && runsJoinedArgument(starts.wrapper, part)
 	}
-	return isContainerClient(c.wrapper) && c.execArg
+	return isContainerClient(starts.wrapper) && starts.execArg
 }
 
 // maxEntrypointPart bounds how far before a client name isEntrypointArgument
@@ -1998,21 +1993,52 @@ const maxEntrypointPart = 256
 // (docker run --entrypoint sshpass --entrypoint sshpass ...) do not read the
 // options after each again.
 type entrypointArgs struct {
-	// start is where the entrypoint's name starts, end where its
+	// start is where the last entrypoint's name starts, end where its
 	// command's segment ends, and args where its arguments begin.
 	start, end, args int
 }
 
 // at returns where the arguments of the entrypoint whose name starts at
 // start begin (entrypointArgsStart). A later name among the options read
-// for the last one finds the same image.
+// for the last one, in the same segment and not inside a quoted string or
+// substitution opened after it, finds the same image; one inside them
+// (--env X=$(docker run --entrypoint sshpass inner -pX)) is read on its own.
 func (e *entrypointArgs) at(s string, start, end, stringEnd int) int {
-	if e.start < start && start < e.args && (e.args < e.end || end == e.end) {
-		return min(e.args, end)
+	if e.start < start && start < e.args && end == e.end && isSameLevel(s[e.start:start]) {
+		e.start = start
+		return e.args
 	}
 	e.start, e.end = start, end
 	e.args = entrypointArgsStart(s, start, end, stringEnd)
 	return e.args
+}
+
+// isSameLevel reports whether text, between two words of a command, closes
+// every quoted string and parenthesis it opens, so the second word is where
+// the first one is rather than inside a string or substitution.
+func isSameLevel(text string) bool {
+	depth, quote := 0, byte(0)
+	for i := 0; i < len(text); i++ {
+		switch c := text[i]; {
+		case quote == '\'':
+			if c == '\'' {
+				quote = 0
+			}
+		case c == '\\':
+			i++
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			}
+		case c == '\'' || c == '"' || c == '`':
+			quote = c
+		case c == '(':
+			depth++
+		case c == ')':
+			depth--
+		}
+	}
+	return depth == 0 && quote == 0
 }
 
 // entrypointArgsStart returns where the arguments of a container's
