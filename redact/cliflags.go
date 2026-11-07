@@ -39,6 +39,13 @@ var cliSubstitution = regexp.MustCompile(`^` + cliSubstitutionPattern)
 // across an escaped line break.
 const cliBlank = `(?:[ \t]|\\\r?\n)+`
 
+// cliGlobalOptions matches the options a client takes before its
+// subcommand, each with at most one value, which never starts with '-'.
+const cliGlobalOptions = `(?:` + cliBlank + `-(?:` + cliFlagValue + `)(?:` + cliBlank + `(?:` + cliOptionValue + `))?)*`
+
+// cliOptionValue is a value of a client's global option.
+const cliOptionValue = `"(?:[^"\r\n]|\\\r?\n)*"|'[^'\r\n]*'|[^\s'"` + "`" + `|;&()<>-][^\s'"` + "`" + `|;&()<>]*`
+
 // cliSegmentRest matches the rest of a pipeline segment after a command name.
 // cliEscapedSegmentRest also skips strings in escaped double quotes, which
 // quote for a command inside a double-quoted string
@@ -92,9 +99,12 @@ var cliPasswordFlags = []cliPasswordFlag{
 		flag:          regexp.MustCompile(`\s-p(` + cliFlagValue + `)`),
 		containerName: true,
 	},
+	// login must be the client's subcommand, after its global options
+	// (docker --config dir login, helm registry login), so a container
+	// named login (docker run --name login -p 8080:80) is not.
 	{
 		needles: []string{"login"},
-		command: regexp.MustCompile(`\b(?:docker|podman|nerdctl|buildah|skopeo|oras|helm)\b` + cliSameCommand + `*?\blogin\b`),
+		command: regexp.MustCompile(`\b(?:docker|podman|nerdctl|buildah|skopeo|oras|helm)\b(?:\.exe)?["']?` + cliGlobalOptions + cliBlank + `(?:registry` + cliBlank + `)?login\b`),
 		flag:    regexp.MustCompile(`\s-p(?:` + cliBlank + `)?(` + cliFlagValue + `)`),
 	},
 	{
@@ -222,12 +232,15 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string) []tag
 	var nested nestedScan
 	segmentEnd := 0
 	for _, cmd := range f.command.FindAllStringIndex(s, -1) {
-		if !isCommandToken(s, cmd[0], cmd[1]) || isSSHDestination(s, cmd[0]) || f.containerName && isContainerNameArgument(s, cmd[0]) {
+		if !isCommandToken(s, cmd[0], cmd[1]) || f.containerName && isContainerNameArgument(s, cmd[0]) {
 			continue
 		}
 		// The closing quote of a string the command is quoted in is not
 		// an opening one: "/usr/bin/mysql" -p"x" or sh -c "mysql ...".
 		closeAt, stringEnd := lines.enclosing(cmd[0])
+		if isSSHDestination(s, lines.commandFrom(closeAt), cmd[0]) {
+			continue
+		}
 		skip, skipEnd := closeAt, stringEnd
 		var rest string
 		switch {
@@ -549,6 +562,11 @@ func (c *commandStart) at(s string, from, p int) bool {
 			}
 		}
 		for c.j < p {
+			// A quoted string is part of the word (sudo -u "my user").
+			if end, quoteLen := quotedPiece(s[:p], c.j); quoteLen > 0 {
+				c.j = end
+				continue
+			}
 			r, size := utf8.DecodeRuneInString(s[c.j:])
 			if unicode.IsSpace(r) || strings.ContainsRune(commandSeparators, r) {
 				break
@@ -765,6 +783,13 @@ func (v cliValue) trimPrefix(s, prefix string) (cliValue, bool) {
 		return v, false
 	}
 	v.start += skip + len(prefix)
+	if skip == 0 && !v.quoted {
+		// The rest may be one quoted string, where single quotes make $
+		// literal (pass:'$ecret').
+		if pieceEnd, quoteLen := quotedPiece(s, v.start); quoteLen > 0 && pieceEnd >= v.end {
+			v = cliValue{start: v.start + quoteLen, end: pieceEnd - quoteLen, quoted: true, singleQuoted: s[v.start] == '\''}
+		}
+	}
 	return v, true
 }
 
@@ -904,6 +929,9 @@ type quoteScan struct {
 	// strings, and subStart and subEnd bound the last one found.
 	substitutions    bool
 	subStart, subEnd int
+	// sep is where the text after the last shell operator outside the
+	// quoted strings found starts.
+	sep int
 }
 
 // stringAt returns the end of the quoted string that p is inside, after its
@@ -932,12 +960,30 @@ func (q *quoteScan) stringAt(p int) (end int, ok bool) {
 			}
 			continue
 		}
+		if strings.IndexByte(commandEnds, q.s[q.i]) >= 0 {
+			q.sep = q.i + 1
+		}
 		if q.s[q.i] == '\\' {
 			q.i++
 		}
 		q.i++
 	}
 	return 0, false
+}
+
+// commandEnds are the characters after which a new command starts: shell
+// operators, line breaks, and a backtick, which starts a command
+// substitution or ends Markdown code.
+const commandEnds = "\r\n;|&(`"
+
+// commandFrom returns where to read the command at the position of the last
+// stringAt query from: inside the quoted string it is in, whose closing
+// quote is at closeAt, or else after the last shell operator before it.
+func (q *quoteScan) commandFrom(closeAt int) int {
+	if closeAt >= 0 {
+		return q.inner()
+	}
+	return q.sep
 }
 
 // stepSubstitution steps over the command substitution that starts where the
@@ -1022,20 +1068,26 @@ func isStringGap(s string) bool {
 const sshCommand = "ssh"
 
 // isSSHDestination reports whether the client name at start is the
-// destination of an ssh command (ssh mysql -p2222, ssh -i key mysql -p2222,
-// where -p2222 is ssh's port), not a command. It reads the words of the
-// command from its start, at most maxSSHCommand bytes back, so an ssh that
-// is an argument of another command (docker exec ssh mysql -pX) does not
-// count.
-func isSSHDestination(s string, start int) bool {
+// destination of an ssh command (ssh mysql -p2222, ssh -i "key" mysql
+// -p2222, where -p2222 is ssh's port), not a command. It reads the words of
+// the command from its start, at most maxSSHCommand bytes back, so an ssh
+// that is an argument of another command (docker exec ssh mysql -pX) does
+// not count. from is outside quoted strings, at or before the command's
+// start; when it is further back, the command starts after the last quote
+// or shell operator.
+func isSSHDestination(s string, from, start int) bool {
 	if start == 0 || s[start-1] != ' ' && s[start-1] != '\t' {
 		return false
 	}
-	from := max(0, start-maxSSHCommand)
-	if i := strings.LastIndexAny(s[from:start], "\r\n;|&(`'\""); i >= 0 {
-		from += i + 1
-	} else if from > 0 {
-		return false
+	if start-from <= maxSSHCommand {
+		from = commandFrom(s, from, start)
+	} else {
+		from = max(0, start-maxSSHCommand)
+		if i := strings.LastIndexAny(s[from:start], commandEnds+`'"`); i >= 0 {
+			from += i + 1
+		} else if from > 0 {
+			return false
+		}
 	}
 	if !strings.Contains(s[from:start], sshCommand) {
 		return false
@@ -1048,6 +1100,41 @@ func isSSHDestination(s string, start int) bool {
 // maxSSHCommand bounds how far back isSSHDestination looks for the start of
 // an ssh command.
 const maxSSHCommand = 256
+
+// commandFrom returns where the command that start is in begins, reading s
+// from from, which is outside quoted strings: after the last shell operator
+// before start, or inside the quoted string start is in. A quoted string
+// that closes before start is part of a word (ssh -i "key" mysql).
+func commandFrom(s string, from, start int) int {
+	head, b := s[:start], from
+	for i := from; i < start; {
+		if isApostrophe(s, i) {
+			i++
+			continue
+		}
+		if end, quoteLen := quotedPiece(head, i); quoteLen > 0 {
+			i = end
+			continue
+		}
+		switch {
+		case s[i] == '"' || s[i] == '\'':
+			// start is inside this string, or it never closes.
+			i++
+			b = i
+		case strings.HasPrefix(head[i:], `\"`):
+			i += 2
+			b = i
+		case strings.IndexByte(commandEnds, s[i]) >= 0:
+			i++
+			b = i
+		case s[i] == '\\':
+			i += 2
+		default:
+			i++
+		}
+	}
+	return b
+}
 
 // isContainerNameArgument reports whether the client name at start is the
 // value of --name (docker run --name mysql -p3306 mysql:8), not a command.
