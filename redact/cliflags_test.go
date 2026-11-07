@@ -330,6 +330,8 @@ func TestString_CommandLinePasswordsReviewCases(t *testing.T) {
 		{name: "client after a quoted assignment of a wrapper path", input: `env "FOO=/usr/bin/ssh" mysql -p` + p, want: `env "FOO=/usr/bin/ssh" mysql -pREDACTED`},
 		{name: "client after an assignment with a quoted wrapper path", input: `env FOO="/usr/bin/ssh" mysql -p` + p, want: `env FOO="/usr/bin/ssh" mysql -pREDACTED`},
 		{name: "client after a quoted assignment", input: `"FOO=/usr/bin/ssh" mysql -p` + p, want: `"FOO=/usr/bin/ssh" mysql -pREDACTED`},
+		{name: "client in a case arm after a printed case subject", input: "sh -c 'case $(echo a) in a) mysql -p" + p + ";; esac'", want: "sh -c 'case $(echo a) in a) mysql -pREDACTED;; esac'"},
+		{name: "client in a case arm after a fall-through", input: "sh -c 'case x in x) echo;& y) mysql -p" + p + ";; esac'", want: "sh -c 'case x in x) echo;& y) mysql -pREDACTED;; esac'"},
 	})
 }
 
@@ -501,6 +503,9 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		`sh -c 'echo hello\) mysql -p2222'`,
 		`mysql -e "$(echo hello\) mysql -p2222)"`,
 		`mysql -h "$(printf '%s' x\) mysql -p3306)"`,
+		`sh -c 'case x in x) echo $(printf hi) mysql -p2222;; esac'`,
+		`mysql -e "$(case x in x) echo $(printf hi) mysql -p2222;; esac)"`,
+		`sh -c 'case x in x) echo;; (y) echo mysql -p2222;; esac'`,
 		`sh -c 'case x in a) echo;; esac; echo x) mysql -p2222'`,
 		"openssl enc -aes-128-cbc -pass=env:PW",
 		// declarations
