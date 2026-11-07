@@ -257,12 +257,21 @@ func (c *CursorAgent) FormatResumeCommand(_ string) string {
 	return "Open this project in Cursor."
 }
 
-// SanitizePathForCursor converts a path to Cursor's project directory format.
-var nonAlphanumericRegex = regexp.MustCompile(`[^a-zA-Z0-9]`)
+var nonAlphanumericRunRegex = regexp.MustCompile(`[^a-zA-Z0-9]+`)
 
+// SanitizePathForCursor converts a workspace path to the name of Cursor's
+// project directory (~/.cursor/projects/<name>). It must match Cursor's own
+// rule exactly, or transcript paths computed here point at a directory Cursor
+// never writes to. cursor-agent's utils/dist/workspace-paths.js (2026.10.22,
+// the same function ships in the Cursor IDE) computes
+//
+//	t.replace(/[^a-zA-Z0-9]/g,"-").replace(/-+/g,"-").replace(/^-+|-+$/g,"")
+//
+// that is, every run of non-ASCII-alphanumeric characters becomes one "-" and
+// leading and trailing "-" are trimmed. Case is preserved, and non-ASCII
+// letters count as separators.
 func SanitizePathForCursor(path string) string {
-	path = strings.TrimLeft(path, "/")
-	return nonAlphanumericRegex.ReplaceAllString(path, "-")
+	return strings.Trim(nonAlphanumericRunRegex.ReplaceAllString(path, "-"), "-")
 }
 
 // ChunkTranscript splits a JSONL transcript at line boundaries.
