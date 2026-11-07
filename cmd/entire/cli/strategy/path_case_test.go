@@ -35,7 +35,7 @@ func TestTrackedSpellings_CaseInsensitiveFilesystemWindows(t *testing.T) {
 	dir, worktree := trackedCaseRepo(t)
 	files := []string{"readme.md", "SRC/app.go", "README.md", "new.txt"}
 	got := TrackedSpellings(context.Background(), dir, files)
-	if ignoresCase(worktree) {
+	if ignoresCase(worktree, dir, []string{"README.md"}) {
 		require.Equal(t, []string{"README.md", "src/App.go", "new.txt"}, got,
 			"spelled as git spells them, the duplicate dropped; an untracked name is kept")
 	} else {
@@ -49,7 +49,7 @@ func TestTrackedSpellings_CaseInsensitiveFilesystemWindows(t *testing.T) {
 func TestTrackedSpelling(t *testing.T) {
 	t.Parallel()
 	dir, worktree := trackedCaseRepo(t)
-	if ignoresCase(worktree) {
+	if ignoresCase(worktree, dir, []string{"README.md"}) {
 		t.Skip("needs a case-sensitive filesystem to tell the cases apart")
 	}
 	tracked := []string{"README.md"}
@@ -81,7 +81,7 @@ func TestTrackedSpelling(t *testing.T) {
 func TestFilterTrackableChanges_KeepsSpellingsOnCaseSensitiveFilesystem(t *testing.T) {
 	t.Parallel()
 	dir, worktree := trackedCaseRepo(t)
-	if ignoresCase(worktree) {
+	if ignoresCase(worktree, dir, []string{"README.md"}) {
 		t.Skip("TestTrackedSpellings_CaseInsensitiveFilesystemWindows covers a case-insensitive filesystem")
 	}
 	testutil.WriteFile(t, dir, "readme.md", "another file\n")
@@ -89,4 +89,30 @@ func TestFilterTrackableChanges_KeepsSpellingsOnCaseSensitiveFilesystem(t *testi
 	require.Equal(t, []string{"README.md"}, modified)
 	require.Equal(t, []string{"readme.md"}, added, "a separate file on a case-sensitive filesystem")
 	require.Empty(t, deleted)
+}
+
+// ignoresCase judges by the first file, or parent directory, that exists and
+// has a letter; with none, git is asked.
+func TestIgnoresCase(t *testing.T) {
+	t.Parallel()
+	dir, worktree := trackedCaseRepo(t)
+	insensitive := caseInsensitiveProbe(t, dir)
+	require.Equal(t, insensitive, ignoresCase(worktree, dir, []string{"README.md"}))
+	require.Equal(t, insensitive, ignoresCase(worktree, dir, []string{"src/gone.go"}), "a deleted file's directory")
+	require.Equal(t, insensitive, ignoresCase(worktree, dir, []string{"123", "gone.txt", "README.md"}), "skips what cannot tell")
+	require.True(t, ignoresCase(worktree, dir, []string{"gone.txt"}), "nothing can tell")
+	require.True(t, ignoresCase(worktree, dir, nil), "nothing can tell")
+	require.Equal(t, "rEADME.MD", swapCase("Readme.md"))
+}
+
+// caseInsensitiveProbe reports whether dir's filesystem ignores case, from a
+// probe file of its own.
+func caseInsensitiveProbe(t *testing.T, dir string) bool {
+	t.Helper()
+	testutil.WriteFile(t, dir, "CaseProbe", "probe\n")
+	defer func() { require.NoError(t, os.Remove(filepath.Join(dir, "CaseProbe"))) }()
+	probe, err := os.Lstat(filepath.Join(dir, "CaseProbe"))
+	require.NoError(t, err)
+	folded, err := os.Lstat(filepath.Join(dir, "caseprobe"))
+	return err == nil && os.SameFile(probe, folded)
 }
