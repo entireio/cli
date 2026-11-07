@@ -40,11 +40,13 @@ var cliSubstitution = regexp.MustCompile(`^` + cliSubstitutionPattern)
 const cliBlank = `(?:[ \t]|\\\r?\n)+`
 
 // cliGlobalOptions matches the options a client takes before its
-// subcommand, each with at most one value, which never starts with '-'.
-const cliGlobalOptions = `(?:` + cliBlank + `-(?:` + cliFlagValue + `)(?:` + cliBlank + `(?:` + cliOptionValue + `))?)*`
+// subcommand, each a shell word (--config="$HOME/.docker") with at most one
+// value (--config $(mktemp -d)).
+const cliGlobalOptions = `(?:` + cliBlank + `-` + cliWordPiece + `+(?:` + cliBlank + cliWordPiece + `+)?)*`
 
-// cliOptionValue is a value of a client's global option.
-const cliOptionValue = `"(?:[^"\r\n]|\\\r?\n)*"|'[^'\r\n]*'|[^\s'"` + "`" + `|;&()<>-][^\s'"` + "`" + `|;&()<>]*`
+// cliWordPiece is one piece of a shell word: a quoted string, a command
+// substitution without nested parentheses, or another character.
+const cliWordPiece = `(?:"(?:[^"\\\r\n]|\\[^\r\n])*"|'[^'\r\n]*'|` + cliSubstitutionPattern + `|[^\s'"` + "`" + `|;&()<>])`
 
 // cliSegmentRest matches the rest of a pipeline segment after a command name.
 // cliEscapedSegmentRest also skips strings in escaped double quotes, which
@@ -100,11 +102,11 @@ var cliPasswordFlags = []cliPasswordFlag{
 		containerName: true,
 	},
 	// login must be the client's subcommand, after its global options
-	// (docker --config dir login, helm registry login), so a container
-	// named login (docker run --name login -p 8080:80) is not.
+	// (docker --config dir login, helm registry --debug login), so a
+	// container named login (docker run --name login -p 8080:80) is not.
 	{
 		needles: []string{"login"},
-		command: regexp.MustCompile(`\b(?:docker|podman|nerdctl|buildah|skopeo|oras|helm)\b(?:\.exe)?["']?` + cliGlobalOptions + cliBlank + `(?:registry` + cliBlank + `)?login\b`),
+		command: regexp.MustCompile(`\b(?:docker|podman|nerdctl|buildah|skopeo|oras|helm)\b(?i:\.exe)?["']?` + cliGlobalOptions + cliBlank + `(?:registry` + cliGlobalOptions + cliBlank + `)?login\b`),
 		flag:    regexp.MustCompile(`\s-p(?:` + cliBlank + `)?(` + cliFlagValue + `)`),
 	},
 	{
@@ -730,7 +732,7 @@ func (f cliPasswordFlag) valueRegion(s string, start, end, stringEnd int) (tagge
 	v := shellWordValue(s, start, end, stringEnd)
 	if f.prefix != "" {
 		var ok bool
-		if v, ok = v.trimPrefix(s, f.prefix); !ok {
+		if v, ok = v.trimPrefix(s, f.prefix, stringEnd); !ok {
 			return taggedRegion{}, false
 		}
 	}
@@ -773,8 +775,9 @@ func shellWordValue(s string, start, end, stringEnd int) cliValue {
 }
 
 // trimPrefix drops prefix from the start of v, also when v is a word whose
-// first quoted piece starts with it ('pass:abc'def).
-func (v cliValue) trimPrefix(s, prefix string) (cliValue, bool) {
+// first quoted piece starts with it ('pass:abc'def). stringEnd is where the
+// quoted string holding the flag ends, or -1.
+func (v cliValue) trimPrefix(s, prefix string, stringEnd int) (cliValue, bool) {
 	skip := 0
 	if !v.quoted && v.start < v.end && (s[v.start] == '"' || s[v.start] == '\'') {
 		skip = 1
@@ -783,11 +786,14 @@ func (v cliValue) trimPrefix(s, prefix string) (cliValue, bool) {
 		return v, false
 	}
 	v.start += skip + len(prefix)
-	if skip == 0 && !v.quoted {
-		// The rest may be one quoted string, where single quotes make $
-		// literal (pass:'$ecret').
-		if pieceEnd, quoteLen := quotedPiece(s, v.start); quoteLen > 0 && pieceEnd >= v.end {
-			v = cliValue{start: v.start + quoteLen, end: pieceEnd - quoteLen, quoted: true, singleQuoted: s[v.start] == '\''}
+	if skip == 0 && !v.quoted && v.start < len(s) {
+		// The rest is read as a value of its own when it starts with a
+		// quote: single quotes make $ literal (pass:'$ecret'), and a
+		// string holding a substitution joins the prefix
+		// (pass:"$(printf x)"), unless it is the gap after the string the
+		// command is quoted in ("openssl enc -pass pass:" + pw).
+		if _, quoteLen := quotedPiece(s, v.start); quoteLen > 0 {
+			v = shellWordValue(s, v.start, v.start, stringEnd)
 		}
 	}
 	return v, true

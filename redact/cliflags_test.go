@@ -154,6 +154,10 @@ func TestString_CommandLinePasswords(t *testing.T) {
 		{name: "openssl source with a substitution printing a literal", input: `openssl enc -pass pass:"$(printf ` + p + `)"`, want: `openssl enc -pass pass:"REDACTED"`},
 		{name: "docker login after global options", input: `docker --config "/my dir" -D login -u me -p ` + p + " ghcr.io", want: `docker --config "/my dir" -D login -u me -p REDACTED ghcr.io`},
 		{name: "quoted docker program path", input: `"/usr/bin/docker" login -u me -p ` + p, want: `"/usr/bin/docker" login -u me -p REDACTED`},
+		{name: "docker login after a quoted global option", input: `docker --config="$HOME/.docker" login -u me -p ` + p, want: `docker --config="$HOME/.docker" login -u me -p REDACTED`},
+		{name: "docker login after a substituted global option", input: "docker --config $(mktemp -d) login -u me -p " + p, want: "docker --config $(mktemp -d) login -u me -p REDACTED"},
+		{name: "helm registry login after an option", input: "helm registry --debug login registry.example -u me -p " + p, want: "helm registry --debug login registry.example -u me -p REDACTED"},
+		{name: "docker program name in capitals", input: "docker.EXE login -u me -p " + p, want: "docker.EXE login -u me -p REDACTED"},
 		{name: "client run through ssh with a quoted option argument", input: `ssh -o "ProxyJump jump" db mysql -p` + p, want: `ssh -o "ProxyJump jump" db mysql -pREDACTED`},
 	})
 }
@@ -236,6 +240,9 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		"docker run --name mysql \\\n  -p 3306:3306 mysql:8",
 		"docker run --name login -p 8080:80 nginx",
 		`openssl enc -pass pass:"$SUMMER2026"`,
+		"openssl enc -pass pass:",
+		`{"cmd":"openssl enc -pass pass:","x":1}`,
+		`cmd := "openssl enc -pass pass:" + pw + " -in f"`,
 		"Use `mysql`, `docker login -p`, `sshpass -p` and `openssl -pass pass:` with care.",
 		`fmt.Sprintf("machine %s login %s password %s", host, user, pass)`,
 		// declarations
