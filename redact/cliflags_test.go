@@ -318,6 +318,14 @@ func TestString_CommandLinePasswordsReviewCases(t *testing.T) {
 		{name: "netrc fields equal to a type name in a subshell", input: "( echo machine string login string password string )", want: "( echo machine string login string password REDACTED )"},
 		{name: "netrc fields all equal to a type name", input: "machine string login string password string", want: "machine string login string password REDACTED"},
 		{name: "many quoted commands with no blank", input: strings.Repeat(`"mysql";`, 4000) + "mysql -p" + p, want: strings.Repeat(`"mysql";`, 4000) + "mysql -pREDACTED"},
+		{name: "client in a case arm of a nested shell script", input: `mysql -h "$(sh -c 'case x in x) mysql -p` + p + `;; esac')"`, want: `mysql -h "$(sh -c 'case x in x) mysql -pREDACTED;; esac')"`},
+		{name: "client in a case arm of a substitution", input: `mysql -e "$(case x in a|b) echo;; c) mysql -p` + p + `;; esac)"`, want: `mysql -e "$(case x in a|b) echo;; c) mysql -pREDACTED;; esac)"`},
+		{name: "flag after a substitution holding a case statement", input: "mysql -h $(case x in x) printf h;; esac) -p" + p, want: "mysql -h $(case x in x) printf h;; esac) -pREDACTED"},
+		{name: "openssl sources after an equals sign", input: "openssl enc -aes-128-cbc -pbkdf2 -in /dev/null -pass=pass:" + p + " && openssl rsa -passin=pass:" + p, want: "openssl enc -aes-128-cbc -pbkdf2 -in /dev/null -pass=pass:REDACTED && openssl rsa -passin=pass:REDACTED"},
+		{name: "quoted Windows client path below a directory named like it", input: `"C:\mysql\bin\mysql.exe" -p` + p, want: `"C:\mysql\bin\mysql.exe" -pREDACTED`},
+		{name: "long flag in escaped quotes in a double-quoted script", input: `sh -c "wget \"--password\" \"` + p + `\" https://example.com"`, want: `sh -c "wget \"--password\" \"REDACTED\" https://example.com"`},
+		{name: "flag after a parameter expansion holding an operator", input: "openssl enc -aes-128-cbc -in ${INPUT:-a&b} -pass pass:" + p + "; mysql -h ${H:-a;b} -p" + p, want: "openssl enc -aes-128-cbc -in ${INPUT:-a&b} -pass pass:REDACTED; mysql -h ${H:-a;b} -pREDACTED"},
+		{name: "client run on a host by a quoted ssh path", input: `"/usr/bin/ssh" db mysql -p` + p, want: `"/usr/bin/ssh" db mysql -pREDACTED`},
 	})
 }
 
@@ -478,6 +486,15 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		`docker run --name mysql "-p3306:3306" mysql`,
 		"Use `mysql`, `docker login -p`, `sshpass -p` and `openssl -pass pass:` with care.",
 		`fmt.Sprintf("machine %s login %s password %s", host, user, pass)`,
+		`"C:\mysql\ssh.exe" -p2222 host`,
+		`C:\mysql\ssh.exe -p2222 host`,
+		`"/usr/bin/ssh" mysql -p2222`,
+		`'/usr/bin/ssh' mysql -p2222`,
+		`sh -c "\"/usr/bin/ssh\" mysql -p2222"`,
+		`"C:\Program Files\OpenSSH\ssh.exe" mysql -p2222`,
+		`sh -c 'case x in x) echo mysql -p2222;; esac'`,
+		`mysql -e "$(case x in x) echo mysql -p2222;; esac)"`,
+		"openssl enc -aes-128-cbc -pass=env:PW",
 		// declarations
 		"type netrcLine struct {\n\tmachine  string\n\tlogin    string\n\tpassword string\n}",
 		"func connect(machine string, login string, password string) error",
