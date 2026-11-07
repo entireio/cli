@@ -18,8 +18,7 @@ const cliFlagValue = `"(?:[^"\r\n]|\\\r?\n)*"|'[^'\r\n]*'|[^\s'"` + "`" + `|;&()
 
 // cliSameCommandChar is one piece of the text between a command name and one
 // of its flags. It skips quoted strings (with escapes inside double quotes:
-// "abc\";x"), command substitutions without nested parentheses
-// ($(printf x; true)), escaped characters (\;) and escaped line breaks (a
+// "abc\";x"), command substitutions ($(printf x; true)), escaped characters (\;) and escaped line breaks (a
 // command continued with a trailing backslash), and otherwise never crosses
 // a line break, a shell operator or a backtick (which starts a command
 // substitution, or ends Markdown code), so a flag is only read as belonging
@@ -28,10 +27,21 @@ const cliSameCommandChar = `\\\r?\n|\\[^\r\n]|"(?:[^"\\\r\n]|\\\r?\n|\\[^\r\n])*
 
 const cliSameCommand = `(?:` + cliSameCommandChar + `)`
 
-// cliSubstitutionPattern is a command substitution without nested
-// parentheses, whose quoted strings may hold any character ($(printf ')')),
-// and cliSubstitution one at the start of a string.
-const cliSubstitutionPattern = `\$\((?:\\[^\r\n]|[^()'"\\\r\n]|'[^'\r\n]*'|"(?:[^"\\\r\n]|\\[^\r\n])*")*\)`
+// cliSubstitutionPattern is a command substitution whose parentheses nest
+// at most three deep ($(dirname $(pwd); true), $((1 + 2))), whose quoted
+// strings may hold any character ($(printf ')')), and cliSubstitution one
+// at the start of a string.
+const cliSubstitutionPattern = `\$` + cliParens3
+
+// cliParens1 to cliParens3 are text in parentheses that nest at most one to
+// three deep. Inside, a quoted string, an escaped character or a nested
+// $(...) or (...) is one piece.
+const (
+	cliParensPiece = `\\[^\r\n]|[^()'"\\\r\n]|'[^'\r\n]*'|"(?:[^"\\\r\n]|\\[^\r\n])*"`
+	cliParens1     = `\((?:` + cliParensPiece + `)*\)`
+	cliParens2     = `\((?:` + cliParensPiece + `|\$?` + cliParens1 + `)*\)`
+	cliParens3     = `\((?:` + cliParensPiece + `|\$?` + cliParens2 + `)*\)`
+)
 
 var cliSubstitution = regexp.MustCompile(`^` + cliSubstitutionPattern)
 
@@ -45,7 +55,7 @@ const cliBlank = `(?:[ \t]|\\\r?\n)+`
 const cliGlobalOptions = `(?:` + cliBlank + `-` + cliWordPiece + `+(?:` + cliBlank + cliWordPiece + `+)?)*`
 
 // cliWordPiece is one piece of a shell word: a quoted string, a command
-// substitution without nested parentheses, an escaped line break, which
+// substitution, an escaped line break, which
 // the shell removes (--config "/tmp/do\<newline>cker"), or another
 // character.
 const cliWordPiece = `(?:"(?:[^"\\\r\n]|\\[^\r\n]|\\\r?\n)*"|'[^'\r\n]*'|` + cliSubstitutionPattern + `|\\\r?\n|[^\s'"` + "`" + `|;&()<>])`
@@ -546,14 +556,15 @@ func untilUnmatchedParen(rest string, skip, skipEnd int) string {
 var notProgramPath = regexp.MustCompile("[ \t](?:-|/|~/|\\.\\.?/)|[;|&<>`\r\n]")
 
 // isProgramPath reports whether inside, the inside of a quoted string that
-// holds a client name, is the path of a program f defines with a blank in a
-// directory ("/opt/mysql tools/bin/mysql", "mysql tools/bin/mysql") rather
-// than a command with its arguments (sh -c 'mysql --execute=/bin/mysql'): it
-// holds no option or shell operator, and its last path component starts with
-// the name (mysql, mysql.exe).
+// holds a client name, names a program f defines ("mysql"), or is its path,
+// also with a blank in a directory ("/opt/mysql tools/bin/mysql",
+// "mysql tools/bin/mysql"), rather than a command with its arguments
+// (sh -c 'mysql --execute=/bin/mysql'): it holds no option or shell
+// operator, and its last path component starts with the name (mysql,
+// mysql.exe).
 func (f cliPasswordFlag) isProgramPath(inside string) bool {
 	sep := strings.LastIndexAny(inside, `/\`)
-	if sep < 0 || strings.ContainsAny(inside[sep:], " \t") || notProgramPath.MatchString(inside) {
+	if strings.ContainsAny(inside[sep+1:], " \t") || notProgramPath.MatchString(inside) {
 		return false
 	}
 	name := inside[sep+1:]
@@ -617,6 +628,9 @@ type commandStart struct {
 	wrapper   string
 	optionArg bool
 	host      bool
+	// redirectArg is set after a redirection operator whose target is the
+	// next word (2> /dev/null).
+	redirectArg bool
 	// command is set after the name of a command, and text after a word
 	// that is no wrapper, option or assignment, or in a substitution after
 	// the name of a command that prints its arguments.
@@ -640,7 +654,7 @@ func (c *commandStart) at(s string, from, p int) bool {
 				c.i += size
 				c.j = c.i
 				continue
-			case strings.ContainsRune(commandSeparators, r):
+			case size == 1 && isCommandSeparator(s, c.i):
 				*c = commandStart{from: from, i: c.i + size, j: c.i + size, lenient: c.lenient}
 				continue
 			}
@@ -652,7 +666,7 @@ func (c *commandStart) at(s string, from, p int) bool {
 				continue
 			}
 			r, size := utf8.DecodeRuneInString(s[c.j:])
-			if unicode.IsSpace(r) || strings.ContainsRune(commandSeparators, r) {
+			if unicode.IsSpace(r) || size == 1 && isCommandSeparator(s, c.j) {
 				break
 			}
 			c.j += size
@@ -671,6 +685,10 @@ func (c *commandStart) at(s string, from, p int) bool {
 // path of any length (/usr/bin/mysql), or after a word that would let it
 // run on its own. A longer part is no command's.
 func (c *commandStart) runsBefore(part string) bool {
+	if ok, _ := redirection(part); ok {
+		// The name is in the redirection's target (2>/var/log/mysql).
+		return false
+	}
 	switch {
 	case c.text:
 		return false
@@ -688,18 +706,61 @@ func (c *commandStart) runsBefore(part string) bool {
 // runsBefore reads.
 const maxCommandPart = 64
 
-// commandSeparators are the shell operators after which a command starts.
-const commandSeparators = ";|&("
+// isCommandSeparator reports whether s[i] is a shell operator after which a
+// command starts (;, |, &, or the ( of a subshell), and not part of a
+// redirection (2>&1, &>log, >|f).
+func isCommandSeparator(s string, i int) bool {
+	switch s[i] {
+	case ';', '(':
+		return true
+	case '&', '|':
+		return !isRedirectionOperator(s, i)
+	}
+	return false
+}
+
+// isRedirectionOperator reports whether the & or | at s[i] is part of a
+// redirection operator (>&, <&, &>, >|).
+func isRedirectionOperator(s string, i int) bool {
+	before := i > 0 && (s[i-1] == '>' || s[i-1] == '<' && s[i] == '&')
+	return before || s[i] == '&' && strings.HasPrefix(s[i+1:], ">")
+}
+
+// redirection reports whether word is a redirection (>f, 2>/dev/null, 2>&1,
+// &>log, <in), and whether it is only the operator, whose target is the next
+// word (2> /dev/null).
+func redirection(word string) (ok, operatorOnly bool) {
+	i := 0
+	for i < len(word) && '0' <= word[i] && word[i] <= '9' {
+		i++
+	}
+	if i == 0 && strings.HasPrefix(word, "&>") {
+		i = 1
+	}
+	if i == len(word) || word[i] != '<' && word[i] != '>' {
+		return false, false
+	}
+	for i < len(word) && strings.IndexByte("<>&|", word[i]) >= 0 {
+		i++
+	}
+	return true, i == len(word)
+}
 
 // runs reports whether a command name after the words read is run.
 func (c *commandStart) runs() bool {
-	return !c.text && !c.optionArg && (c.wrapper != sshCommand || c.host)
+	return !c.text && !c.optionArg && !c.redirectArg && (c.wrapper != sshCommand || c.host)
 }
 
 // word reads one word of the argument.
 func (c *commandStart) word(word string) {
 	switch {
 	case c.text:
+	case c.redirectArg:
+		c.redirectArg = false
+	case isRedirection(word):
+		// A redirection runs nothing (2>/dev/null mysql -pX), and an
+		// operator alone takes the next word as its target (> out).
+		_, c.redirectArg = redirection(word)
 	case c.optionArg:
 		c.optionArg = false
 	case c.wrapper != "" && strings.HasPrefix(word, "-"):
@@ -735,6 +796,12 @@ func programName(word string) string {
 		return word
 	}
 	return word[strings.LastIndexByte(word, '/')+1:]
+}
+
+// isRedirection reports whether word is a redirection.
+func isRedirection(word string) bool {
+	ok, _ := redirection(word)
+	return ok
 }
 
 // isPrintCommand reports whether word prints its arguments rather than
@@ -862,8 +929,14 @@ func shellWordValue(s string, start, end, stringEnd int) cliValue {
 		wordEnd = end
 	}
 	if strings.HasPrefix(s[start:], "$'") {
-		// An ANSI-C quoted string ($'pass:x'), where $ is literal.
-		if pieceEnd, quoteLen := quotedPiece(s, start+1); quoteLen == 1 && pieceEnd >= wordEnd {
+		// An ANSI-C quoted string ($'pass:x'), where $ is literal and a
+		// backslash escapes a quote ($'a\'b').
+		if pieceEnd := ansiCQuoteEnd(s, start); pieceEnd > 0 {
+			if end := ansiCWordEnd(s, pieceEnd); end > pieceEnd {
+				// The word goes on after the string ($'pass:x\\'y), so it
+				// is read from the quote, like 'pass:x'y.
+				return cliValue{start: start + 1, end: end}
+			}
 			return cliValue{start: start + 2, end: pieceEnd - 1, quoted: true, singleQuoted: true}
 		}
 	}
@@ -875,6 +948,41 @@ func shellWordValue(s string, start, end, stringEnd int) cliValue {
 		}
 	}
 	return cliValue{start: start, end: wordEnd}
+}
+
+// ansiCQuoteEnd returns the end of the ANSI-C quoted string ($'...') that
+// starts at i, after its closing quote, or 0 when it does not close on its
+// line. A backslash escapes the character after it ($'a\'b', $'a\\').
+func ansiCQuoteEnd(s string, i int) int {
+	for j := i + 2; j < len(s); j++ {
+		switch s[j] {
+		case '\r', '\n':
+			return 0
+		case '\\':
+			if j+1 < len(s) && (s[j+1] == '\r' || s[j+1] == '\n') {
+				return 0
+			}
+			j++
+		case '\'':
+			return j + 1
+		}
+	}
+	return 0
+}
+
+// ansiCWordEnd returns the end of the shell word in which an ANSI-C quoted
+// string ends at i. A quote that pairs with nothing after it, or an escaped
+// one (\"), closes the string the command is quoted in.
+func ansiCWordEnd(s string, i int) int {
+	switch {
+	case i == len(s) || isShellWordEnd(s[i]) || strings.HasPrefix(s[i:], `\"`):
+		return i
+	case s[i] == '"' || s[i] == '\'':
+		if _, quoteLen := quotedPiece(s, i); quoteLen == 0 {
+			return i
+		}
+	}
+	return shellWordEnd(s, i)
 }
 
 // trimPrefix drops prefix from the start of v, also when v is a word whose
@@ -1069,7 +1177,7 @@ func (q *quoteScan) stringAt(p int) (end int, ok bool) {
 			}
 			continue
 		}
-		if strings.IndexByte(commandEnds, q.s[q.i]) >= 0 {
+		if isCommandEnd(q.s, q.i) {
 			q.sep = q.i + 1
 		}
 		if q.s[q.i] == '\\' {
@@ -1085,11 +1193,18 @@ func (q *quoteScan) stringAt(p int) (end int, ok bool) {
 // substitution or ends Markdown code.
 const commandEnds = "\r\n;|&(`"
 
+// isCommandEnd reports whether s[i] is one of commandEnds, and not part of a
+// redirection (2>&1).
+func isCommandEnd(s string, i int) bool {
+	return strings.IndexByte(commandEnds, s[i]) >= 0 && !isRedirectionOperator(s, i)
+}
+
 // commandFrom returns where to read the command at the position of the last
 // stringAt query from: inside the quoted string it is in, whose closing
-// quote is at closeAt, or else after the last shell operator before it.
+// quote is at closeAt, unless the string is one word (ssh "mysql"), or else
+// after the last shell operator before it.
 func (q *quoteScan) commandFrom(closeAt int) int {
-	if closeAt >= 0 {
+	if closeAt >= 0 && strings.ContainsAny(q.s[q.inner():closeAt], " \t") {
 		return q.inner()
 	}
 	return q.sep
@@ -1185,10 +1300,16 @@ const sshCommand = "ssh"
 // start; when it is further back, the command starts after the last quote
 // or shell operator.
 func isSSHDestination(s string, from, start int) bool {
-	// The word may be a path ending in the name (ssh -i ~/.ssh/mysql).
+	// The word may be a path ending in the name (ssh -i ~/.ssh/mysql), and
+	// quoted (ssh "mysql").
 	word := start
 	for word > 0 && start-word < maxSSHCommand && !isShellWordEnd(s[word-1]) && s[word-1] != '"' && s[word-1] != '\'' {
 		word--
+	}
+	if word > from && (s[word-1] == '"' || s[word-1] == '\'') {
+		if end, quoteLen := quotedPiece(s, word-1); quoteLen == 1 && end > start {
+			word--
+		}
 	}
 	if word == 0 || s[word-1] != ' ' && s[word-1] != '\t' {
 		return false
@@ -1240,7 +1361,7 @@ func commandFrom(s string, from, start int) int {
 		case strings.HasPrefix(head[i:], `\"`):
 			i += 2
 			b = i
-		case strings.IndexByte(commandEnds, s[i]) >= 0:
+		case isCommandEnd(s, i):
 			i++
 			b = i
 		case s[i] == '\\':
