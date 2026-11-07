@@ -161,6 +161,46 @@ func TestSharedCheckout_TranscriptNameInAnotherCaseIsClaimed(t *testing.T) {
 	env.AssertCheckpointExcludesSession(t, summary, sessA.ID)
 }
 
+// TestSharedCheckout_DeletionNamedInAnotherCaseIsClaimed is the deletion side
+// of the case rule: B's transcript names readme.md, B deletes it, and git
+// lists README.md as deleted. With the file gone there is nothing to compare,
+// so git's core.ignorecase decides. Setting it stands in for a
+// case-insensitive filesystem, where git sets it when it creates the
+// repository, so this runs everywhere.
+func TestSharedCheckout_DeletionNamedInAnotherCaseIsClaimed(t *testing.T) {
+	t.Parallel()
+	env := newSharedCheckoutEnv(t)
+	env.WriteFile("README.md", "readme\n")
+	env.GitAdd("README.md")
+	env.GitCommit("Add README.md")
+	setRepoGitConfig(env, "core.ignorecase", "true")
+
+	sessA := env.NewSession()
+	sessB := env.NewSession()
+	startTurn(t, env, sessA)
+	startTurn(t, env, sessB)
+
+	env.WriteFile("a.txt", "a, edited by A\n")
+	sessA.CreateTranscript("edit a.txt", []FileChange{{Path: "a.txt", Content: "a, edited by A\n"}})
+	if err := os.Remove(filepath.Join(env.RepoDir, "README.md")); err != nil {
+		t.Fatalf("remove README.md: %v", err)
+	}
+	sessB.CreateTranscript("drop the readme", []FileChange{{Path: "readme.md", Content: ""}})
+
+	endTurn(t, env, sessA)
+	endTurn(t, env, sessB)
+
+	if got := filesTouched(t, env, sessB); !slices.Contains(got, "README.md") {
+		t.Fatalf("session B FilesTouched = %v, want README.md: its transcript names it as readme.md", got)
+	}
+
+	env.GitRm("README.md")
+	env.GitCommitStagedWithHooks("Remove README.md")
+	summary := headCheckpointSummary(t, env)
+	env.AssertCheckpointContainsSession(t, summary, sessB.ID)
+	env.AssertCheckpointExcludesSession(t, summary, sessA.ID)
+}
+
 // requireCaseInsensitive skips the test unless the repository's filesystem
 // ignores case, the macOS and Windows default.
 func requireCaseInsensitive(t *testing.T, env *TestEnv, file, spelling string) {

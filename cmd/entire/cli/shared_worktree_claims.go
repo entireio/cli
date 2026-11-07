@@ -2,11 +2,15 @@ package cli
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
@@ -58,7 +62,7 @@ type statusClaim struct {
 func (c statusClaim) narrow(ctx context.Context, modified, created, deleted []string) (claimedModified, claimedCreated, claimedDeleted []string) {
 	modified = c.withoutUnchangedDirty(modified)
 	deleted = c.withoutUnchangedDirty(deleted)
-	named := newNamedFiles(c.repoRoot, c.named, modified, created, deleted)
+	named := newNamedFiles(ctx, c.repoRoot, c.named, modified, created, deleted)
 	claimedModified = named.only(modified)
 	claimedCreated = named.only(created)
 	claimedDeleted = named.only(deleted)
@@ -113,17 +117,32 @@ type namedFiles struct {
 	// folded maps a lower-cased name to the transcript's spellings of it
 	// that git status does not list.
 	folded map[string][]string
+	// ignoresCase reports git's core.ignorecase for the repository, asked
+	// at most once and only for a deletion named in another case.
+	ignoresCase func() bool
 }
 
 // newNamedFiles matches named against the files git status lists.
-func newNamedFiles(repoRoot string, named []string, listed ...[]string) namedFiles {
+func newNamedFiles(ctx context.Context, repoRoot string, named []string, listed ...[]string) namedFiles {
 	inStatus := make(map[string]struct{})
 	for _, files := range listed {
 		for _, f := range files {
 			inStatus[f] = struct{}{}
 		}
 	}
-	n := namedFiles{repoRoot: repoRoot, exact: make(map[string]struct{}, len(named)), folded: make(map[string][]string)}
+	n := namedFiles{
+		repoRoot: repoRoot,
+		exact:    make(map[string]struct{}, len(named)),
+		folded:   make(map[string][]string),
+		ignoresCase: sync.OnceValue(func() bool {
+			ignores, err := gitrepo.IgnoresCase(ctx, repoRoot)
+			if err != nil {
+				logging.Debug(logging.WithComponent(ctx, "lifecycle"), "cannot read core.ignorecase; a deletion named in another case does not match",
+					slog.String("error", err.Error()))
+			}
+			return ignores
+		}),
+	}
 	for _, f := range named {
 		if _, ok := inStatus[f]; ok {
 			n.exact[f] = struct{}{}
@@ -148,19 +167,41 @@ func (n namedFiles) only(all []string) []string {
 }
 
 // namedInOtherCase reports whether the transcript names file in another
-// case, as a spelling that opens the same file. A file absent from the
-// worktree (a deletion) cannot be compared, and does not match.
+// case, as a spelling that opens the same file.
+//
+// A file absent from the worktree (a deletion) has nothing left to compare.
+// It matches when git treats paths as case-insensitive here (core.ignorecase,
+// which git sets from the filesystem when it creates the repository) and the
+// transcript's spelling is absent too: on such a filesystem the two spellings
+// go together, while on a case-sensitive one a spelling that still opens a
+// file is another file.
 func (n namedFiles) namedInOtherCase(file string) bool {
 	spellings := n.folded[strings.ToLower(file)]
 	if len(spellings) == 0 {
 		return false
 	}
 	listed, err := lstatWorktreeFile(n.repoRoot, file)
+	if errors.Is(err, fs.ErrNotExist) {
+		return n.deletedInOtherCase(spellings)
+	}
 	if err != nil {
 		return false
 	}
 	for _, spelling := range spellings {
 		if named, err := lstatWorktreeFile(n.repoRoot, spelling); err == nil && os.SameFile(listed, named) {
+			return true
+		}
+	}
+	return false
+}
+
+// deletedInOtherCase is namedInOtherCase for a file the worktree lacks.
+func (n namedFiles) deletedInOtherCase(spellings []string) bool {
+	if !n.ignoresCase() {
+		return false
+	}
+	for _, spelling := range spellings {
+		if _, err := lstatWorktreeFile(n.repoRoot, spelling); errors.Is(err, fs.ErrNotExist) {
 			return true
 		}
 	}
