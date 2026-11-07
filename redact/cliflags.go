@@ -345,6 +345,7 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string) []tag
 	var nested nestedScan
 	var paths programPathMemo
 	scripts := commandStart{lenient: true}
+	var entrypoint entrypointArgs
 	// A segment cut at a ")" (ssh $(mysql -Nse 'x') -p2222) goes on after
 	// it, to uncutEnd, in a string that closes at uncutAt; a command there
 	// starts a segment that ends there too, which is not found again.
@@ -356,7 +357,8 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string) []tag
 		// The closing quote of a string the command is quoted in is not
 		// an opening one: "/usr/bin/mysql" -p"x" or sh -c "mysql ...".
 		closeAt, stringEnd := lines.enclosing(cmd[0])
-		if isWrapperOperand(s, lines.commandFrom(closeAt), cmd[0]) || closeAt >= 0 && isPrintedInScript(s, &lines, &scripts, cmd[0]) {
+		cmdFrom := lines.commandFrom(closeAt)
+		if isWrapperOperand(s, cmdFrom, cmd[0]) || closeAt >= 0 && isPrintedInScript(s, &lines, &scripts, cmd[0]) {
 			continue
 		}
 		skip, skipEnd := closeAt, stringEnd
@@ -381,8 +383,8 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string) []tag
 			}
 		}
 		from := cmd[1]
-		if isEntrypointArgument(s, cmd[0]) {
-			from = entrypointArgsStart(s, cmd[0], cmd[1]+len(rest), stringEnd)
+		if isEntrypointArgument(s, cmdFrom, cmd[0]) {
+			from = entrypoint.at(s, cmd[0], cmd[1]+len(rest), stringEnd)
 		}
 		quotes := quoteScan{s: s[:cmd[1]+len(rest)], i: from, skip: skip, skipEnd: skipEnd, substitutions: true}
 		regions = f.appendFlags(regions, s, &quotes, s[from:cmd[1]+len(rest)], stringEnd)
@@ -962,19 +964,50 @@ func (c *commandStart) word(word string) {
 	}
 }
 
-// splitString reads line, the string env -S splits into words, as the
+// splitString reads arg, the shell word env -S splits into words, as the
 // start of the command env runs, which goes on after it
-// (env -S sudo ssh db mysql -pX, env -S 'sudo -u x' mysql -pX). Its quotes
-// are dropped.
-func (c *commandStart) splitString(line string) {
+// (env -S sudo ssh db mysql -pX, env -S 'sudo -u x' mysql -pX). The shell
+// removes the word's quotes, and env splits what is left as the shell
+// would, so a quoted string in it stays one word
+// (env -S 'env A="x ssh"' mysql -pX).
+func (c *commandStart) splitString(arg string) {
 	*c = commandStart{from: c.from, i: c.i, j: c.j, lenient: c.lenient}
-	for _, field := range strings.Fields(quoteRemover.Replace(line)) {
-		c.word(field)
-	}
+	shellWords(arg, func(line string) {
+		shellWords(line, c.word)
+	})
 }
 
-// quoteRemover drops the quotes of a string env -S splits.
-var quoteRemover = strings.NewReplacer(`'`, "", `"`, "")
+// shellWords calls f with each word of line as the shell splits it: blanks
+// outside quotes end a word, and quotes and escaping backslashes are
+// dropped (a "b c" d\ e gives a, b c and d e).
+func shellWords(line string, f func(string)) {
+	var word []byte
+	inWord, quote := false, byte(0)
+	for i := 0; i < len(line); i++ {
+		ch := line[i]
+		switch {
+		case quote != 0 && ch == quote:
+			quote = 0
+		case quote != '\'' && ch == '\\' && i+1 < len(line):
+			i++
+			word, inWord = append(word, line[i]), true
+		case quote != 0:
+			word = append(word, ch)
+		case ch == '\'' || ch == '"':
+			quote, inWord = ch, true
+		case ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r':
+			if inWord {
+				f(string(word))
+				word, inWord = word[:0], false
+			}
+		default:
+			word, inWord = append(word, ch), true
+		}
+	}
+	if inWord {
+		f(string(word))
+	}
+}
 
 // joinedSplitString returns the string joined to option, an option of
 // wrapper, when it is env's -S with its argument (--split-string=sudo,
@@ -1304,41 +1337,77 @@ func joinedWordEnd(s string, open, i, stringEnd int) int {
 }
 
 // isCodeSeparator reports whether s[i] is a comma or closing bracket after a
-// string, opened at open, that is an element of code: one after an opening
-// bracket, or after a comma or colon that follows another element
-// (["mysql", "-px"], f(db, "-px")), not a shell word (mysql -h db, "-px",y).
+// string, opened at open, that is an element of code: the first one in a
+// bracket, or one after other elements (["mysql", "-px"], f(db, "-px")),
+// not a shell word (mysql -h db, "-px",y, mysql -h 'db', "-px",y).
 func isCodeSeparator(s string, open, i int) bool {
 	if i == len(s) || strings.IndexByte(",]}", s[i]) < 0 {
 		return false
 	}
-	before := strings.TrimRight(s[:open], " \t")
-	switch {
-	case before == "":
-		return false
-	case strings.IndexByte("[({", before[len(before)-1]) >= 0:
-		return true
-	case strings.IndexByte(",:", before[len(before)-1]) >= 0:
-		return endsCodeElement(strings.TrimRight(before[:len(before)-1], " \t"))
-	}
-	return false
+	return isCodeElementStart(s[max(0, open-maxCodeScan):open])
 }
 
-// endsCodeElement reports whether code ends with an element of code: a
-// string or a bracket, or a name right after an opening bracket or a comma
-// (f(db, ...), [a, b, ...]).
-func endsCodeElement(code string) bool {
-	if code == "" {
-		return false
+// maxCodeScan bounds how far back isCodeSeparator reads the elements before
+// a string, so the scan stays linear.
+const maxCodeScan = 1024
+
+// maxCodeElements bounds how many elements before a string isCodeSeparator
+// reads; one after that many is taken for code.
+const maxCodeElements = 16
+
+// isCodeElementStart reports whether an element of code starts after code:
+// after an opening bracket, or after a comma, colon or operator that
+// follows other elements back to an opening bracket: strings ("a", 'a'),
+// closed brackets and names, joined into expressions by operators
+// (f("mysql", db, ...), {"arg": ...}, f("mysql", "db-"+suffix, ...)).
+func isCodeElementStart(code string) bool {
+	for range maxCodeElements {
+		code = strings.TrimRight(code, " \t")
+		switch {
+		case code == "":
+			return false
+		case strings.IndexByte("[({", code[len(code)-1]) >= 0:
+			return true
+		case strings.IndexByte(",:+-*/%", code[len(code)-1]) < 0:
+			return false
+		}
+		code = strings.TrimRight(code[:len(code)-1], " \t")
+		if code != "" && strings.IndexByte(")]}", code[len(code)-1]) >= 0 {
+			// A closed bracket ends an element of code (f(x), [a]).
+			return true
+		}
+		element, ok := codeElementStart(code)
+		if !ok {
+			return false
+		}
+		code = element
 	}
-	if strings.IndexByte(`"')]}`, code[len(code)-1]) >= 0 {
-		return true
+	return true
+}
+
+// codeElementStart returns the code before the string or name (db, os.Args)
+// that code ends with, or false when it ends with neither.
+func codeElementStart(code string) (string, bool) {
+	if code == "" {
+		return "", false
+	}
+	if last := code[len(code)-1]; last == '"' || last == '\'' {
+		escaped := isEscaped(code, len(code)-1)
+		for i := len(code) - 2; i >= 0; i-- {
+			if code[i] == last && isEscaped(code, i) == escaped {
+				if escaped {
+					i--
+				}
+				return code[:i], true
+			}
+		}
+		return "", false
 	}
 	n := len(code)
 	for n > 0 && (code[n-1] == '.' || isWordByte(code[n-1])) {
 		n--
 	}
-	before := strings.TrimRight(code[:n], " \t")
-	return n < len(code) && before != "" && strings.IndexByte("[({,", before[len(before)-1]) >= 0
+	return code[:n], n < len(code)
 }
 
 // ansiCQuoteEnd returns the end of the ANSI-C quoted string ($'...') that
@@ -1815,17 +1884,8 @@ func isWrapperOperand(s string, from, start int) bool {
 	}
 	part := s[word:start]
 	start = word
-	if start-from <= maxSSHCommand {
-		from = commandFrom(s, from, start)
-	} else {
-		from = max(0, start-maxSSHCommand)
-		if i := strings.LastIndexAny(s[from:start], commandEnds+`'"`); i >= 0 {
-			from += i + 1
-		} else if from > 0 {
-			return false
-		}
-	}
-	if !slices.ContainsFunc(argWrappers, func(w string) bool { return strings.Contains(s[from:start], w) }) {
+	from, ok := wrapperCommandFrom(s, from, start)
+	if !ok || !slices.ContainsFunc(argWrappers, func(w string) bool { return strings.Contains(s[from:start], w) }) {
 		return false
 	}
 	var c commandStart
@@ -1836,6 +1896,21 @@ func isWrapperOperand(s string, from, start int) bool {
 	// The destination, or the argument of an option (ssh -i mysql,
 	// sudo -u mysql), unless that option runs it (env -S mysql).
 	return !c.text && !c.execArg && (c.optionArg || hasDestination(c.wrapper) && !c.host)
+}
+
+// wrapperCommandFrom returns where the command whose word starts at start
+// begins, reading s from from, which is outside quoted strings: at most
+// maxSSHCommand bytes back, where the command starts after the last quote or
+// shell operator. It is false when the command starts further back.
+func wrapperCommandFrom(s string, from, start int) (int, bool) {
+	if start-from <= maxSSHCommand {
+		return commandFrom(s, from, start), true
+	}
+	from = max(0, start-maxSSHCommand)
+	if i := strings.LastIndexAny(s[from:start], commandEnds+`'"`); i >= 0 {
+		return from + i + 1, true
+	}
+	return from, from == 0
 }
 
 // argWrappers are the wrappers that take an argument after the command's
@@ -1882,25 +1957,63 @@ func commandFrom(s string, from, start int) int {
 }
 
 // isEntrypointArgument reports whether the client name at start is the
-// argument of a container's --entrypoint (docker run --entrypoint mysql,
-// --entrypoint=/usr/bin/mysql), whose own arguments come after the image.
-func isEntrypointArgument(s string, start int) bool {
+// argument of a container client's --entrypoint (docker run --entrypoint
+// mysql, --entrypoint=/usr/bin/mysql), whose own arguments come after the
+// image, rather than of another program's option of that name
+// (runner --entrypoint=mysql -pX). from is outside quoted strings, at or
+// before the command's start.
+func isEntrypointArgument(s string, from, start int) bool {
 	window := s[max(0, start-maxEntrypointPart):start]
 	part := window[strings.LastIndexAny(window, " \t")+1:]
-	if strings.HasPrefix(part, "--entrypoint=") {
-		return true
+	joined := strings.HasPrefix(part, "--entrypoint=")
+	if !joined {
+		if part != "" && !strings.HasSuffix(part, "/") || len(part) == len(window) {
+			return false
+		}
+		before := strings.TrimRight(window[:len(window)-len(part)], " \t")
+		option := strings.TrimSuffix(before, "--entrypoint")
+		if len(option) == len(before) || option != "" && option[len(option)-1] != ' ' && option[len(option)-1] != '\t' {
+			return false
+		}
 	}
-	if part != "" && !strings.HasSuffix(part, "/") || len(part) == len(window) {
+	word := start - len(part)
+	from, ok := wrapperCommandFrom(s, from, word)
+	if !ok {
 		return false
 	}
-	before := strings.TrimRight(window[:len(window)-len(part)], " \t")
-	option := strings.TrimSuffix(before, "--entrypoint")
-	return len(option) < len(before) && (option == "" || option[len(option)-1] == ' ' || option[len(option)-1] == '\t')
+	var c commandStart
+	c.at(s, from, word)
+	if joined {
+		return isContainerClient(c.wrapper) && runsJoinedArgument(c.wrapper, part)
+	}
+	return isContainerClient(c.wrapper) && c.execArg
 }
 
 // maxEntrypointPart bounds how far before a client name isEntrypointArgument
 // looks for --entrypoint, so a long word of names is not read again for each.
 const maxEntrypointPart = 256
+
+// entrypointArgs records where the arguments of the last container
+// entrypoint read begin, so repeated --entrypoint options
+// (docker run --entrypoint sshpass --entrypoint sshpass ...) do not read the
+// options after each again.
+type entrypointArgs struct {
+	// start is where the entrypoint's name starts, end where its
+	// command's segment ends, and args where its arguments begin.
+	start, end, args int
+}
+
+// at returns where the arguments of the entrypoint whose name starts at
+// start begin (entrypointArgsStart). A later name among the options read
+// for the last one finds the same image.
+func (e *entrypointArgs) at(s string, start, end, stringEnd int) int {
+	if e.start < start && start < e.args && (e.args < e.end || end == e.end) {
+		return min(e.args, end)
+	}
+	e.start, e.end = start, end
+	e.args = entrypointArgsStart(s, start, end, stringEnd)
+	return e.args
+}
 
 // entrypointArgsStart returns where the arguments of a container's
 // entrypoint, whose name starts at start, begin: after the container
@@ -2031,9 +2144,9 @@ func passwordValueRegion(s string, v cliValue, dashFlag, requireNonWord bool) (t
 // a grammatical word that another word follows ("--password to set it",
 // "--password" is required). A word that names what the flag takes (flag,
 // string, value) may also be the password, so another word makes it prose
-// only when that word is prose too ("the --password flag is"), the text of
-// a help line ("--password string   Password for") or one of two more words;
-// a single word after it may be an argument (mongosh --password string db).
+// only when that word is prose too ("the --password flag is") or the text
+// of a help line ("--password string   Password for"); the words after it
+// may be arguments (mongosh --password string db admin).
 func isProseValue(s string, v cliValue) bool {
 	value := s[v.start:v.end]
 	word := strings.TrimRight(value, ".,:!?")
@@ -2044,15 +2157,11 @@ func isProseValue(s string, v cliValue) bool {
 		return v.end == len(s) || unicode.IsSpace(rune(s[v.end]))
 	}
 	gap := len(s[v.end:]) - len(strings.TrimLeft(s[v.end:], " \t"))
-	first, rest := proseWord(s[v.end+gap:])
-	switch {
-	case gap == 0 || first == "":
+	first, _ := proseWord(s[v.end+gap:])
+	if gap == 0 || first == "" {
 		return false
-	case !slices.Contains(proseNouns, word), gap > 1 || s[v.end] == '\t', slices.Contains(proseWords, strings.TrimRight(first, ".,:!?")):
-		return true
 	}
-	second, _ := proseWord(strings.TrimLeft(rest, " \t"))
-	return second != "" && len(rest) > len(strings.TrimLeft(rest, " \t"))
+	return !slices.Contains(proseNouns, word) || gap > 1 || s[v.end] == '\t' || slices.Contains(proseWords, strings.TrimRight(first, ".,:!?"))
 }
 
 // proseWord returns the word of prose that text starts with, letters and
@@ -2092,10 +2201,12 @@ func isNetrcDeclaration(s string, start int, machine, login, password string) bo
 }
 
 // declarationFields matches the fields a declaration may give before the
-// .netrc-shaped ones (struct {\n\tHost string\n\t, f(ctx context.Context, ),
-// so a shell group or subshell that runs a command is no declaration
-// ({ echo 'machine string ...'; }).
-var declarationFields = regexp.MustCompile(`^\s*(?:[A-Za-z_]\w*\s+[\w.*&\[\]]+\s*[;,]?\s*)*$`)
+// .netrc-shaped ones, each ended by a separator or a line break, after a
+// struct tag or a comment (struct {\n\tHost string `json:"host"`\n\t,
+// f(ctx context.Context, ), so a shell group or subshell that runs a command
+// is no declaration ({ echo 'machine string ...'; },
+// { echo foo machine string ...; }).
+var declarationFields = regexp.MustCompile(`^\s*(?:[A-Za-z_]\w*[ \t]+[\w.*&\[\]]+(?:[ \t]+` + "`[^`\\r\\n]*`" + `)?[ \t]*(?://[^\n]*)?(?:[;,]|\r?\n)\s*)*$`)
 
 // maxDeclarationScan bounds how far back isNetrcDeclaration looks for the
 // brace or parenthesis that opens a declaration, so the scan stays linear.
