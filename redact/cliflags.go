@@ -138,12 +138,12 @@ var cliPasswordFlags = []cliPasswordFlag{
 	// (docker --config dir login, helm registry --debug login), so a
 	// container named login (docker run --name login -p 8080:80) is not.
 	{
-		needles: []string{"login"},
+		needles: []string{loginCommand},
 		command: regexp.MustCompile(`\b(?:docker|podman|nerdctl|buildah|skopeo|oras|helm)\b(?i:\.exe)?["']?` + cliGlobalOptions + cliBlank + `(?:registry` + cliGlobalOptions + cliBlank + `)?login\b`),
 		flag:    regexp.MustCompile(cliShortFlag(`\s`, "p", `(?:`+cliBlank+`)?`)),
 	},
 	{
-		needles: []string{"login"},
+		needles: []string{loginCommand},
 		command: regexp.MustCompile(`\baz[ \t]+login\b`),
 		flag:    regexp.MustCompile(cliShortFlag(`\s`, "p", `(?:`+cliBlank+`)?`)),
 	},
@@ -227,8 +227,8 @@ var netrcPasswordPatterns = []netrcPattern{
 // its line (machine h login a password x default login b password y), which
 // netrcEntry does not, so prose with "default" is not read as an entry.
 var netrcDefaultPatterns = []netrcPattern{
-	{regexp.MustCompile(`^[ \t]+default()` + netrcLoginPassword), 2, 3},
-	{regexp.MustCompile(`^[ \t]+default()` + netrcPasswordLogin), 3, 2},
+	{regexp.MustCompile(`^` + netrcAccount + `[ \t]+default()` + netrcLoginPassword), 2, 3},
+	{regexp.MustCompile(`^` + netrcAccount + `[ \t]+default()` + netrcPasswordLogin), 3, 2},
 }
 
 // netrcLoginPassword and netrcPasswordLogin are the fields of a .netrc entry
@@ -259,7 +259,7 @@ func detectCommandLinePasswords(s string) []taggedRegion {
 			regions = flag.appendPasswords(regions, s)
 		}
 	}
-	if strings.Contains(s, "password") && strings.Contains(s, "login") {
+	if strings.Contains(s, "password") && strings.Contains(s, loginCommand) {
 		regions = appendNetrcPasswords(regions, s)
 	}
 	return regions
@@ -321,7 +321,7 @@ func longFlagValue(s string, loc []int, stringEnd int) (cliValue, bool) {
 				return cliValue{}, false
 			}
 		case s[loc[4]] == '=' && closeAt > loc[6]:
-			return quotedFlagValue(s, loc[6], end, n, stringEnd), true
+			return quotedFlagValue(s, open, loc[6], end, n, stringEnd), true
 		}
 	}
 	if loc[3] > loc[2] && quoteLen == 0 {
@@ -599,8 +599,6 @@ type programPathMemo struct {
 	// to is one past where the text with its last blank at blank ends, 0
 	// when nothing is recorded.
 	to, blank int
-	// starts reads the command each string is in, up to the string.
-	starts commandStart
 }
 
 // blankAfter reports whether s[i:to] holds a blank, where s[from:to] is the
@@ -617,14 +615,14 @@ func (m *programPathMemo) blankAfter(s string, from, i, to int) bool {
 
 // isProgramPath reports whether the text of the quoted string that lines
 // last found, which closes at to, is the path of a program f defines. A path
-// with a blank ("mysql tools/bin/mysql" -pX) must be where a command starts;
-// elsewhere such a string is a script, whose command ends with it
-// (sh -c 'mysql bin/mysql' -p2222).
+// with a blank ("mysql tools/bin/mysql" -pX, nice "/opt/mysql tools/mysql"
+// -pX) is not one when the string is a shell's -c script, whose command
+// ends with it (sh -c 'mysql bin/mysql' -p2222).
 func (m *programPathMemo) isProgramPath(f cliPasswordFlag, s string, lines *quoteScan, to int) bool {
 	if from := lines.inner(); m.from != from+1 {
 		m.from, m.path = from+1, f.isProgramPath(s[from:to])
 		if m.path && strings.ContainsAny(s[from:to], " \t") {
-			m.path = lines.sep <= lines.start && m.starts.at(s, lines.sep, lines.start)
+			m.path = lines.sep > lines.start || !runsScript(s, lines.sep, lines.start)
 		}
 	}
 	return m.path
@@ -687,7 +685,7 @@ func (f cliPasswordFlag) isProgramPath(inside string) bool {
 // mysql.exe), rather than part of a host or file name (mysql.example.com,
 // ~/.ssh/mysql.pem, user@mysql, mysql:8, mysql-client, --name=mysql).
 func isCommandToken(s string, start, end int) bool {
-	if start > 0 && strings.IndexByte(".-@:=%+", s[start-1]) >= 0 {
+	if start > 0 && strings.IndexByte(".-@:=%+", s[start-1]) >= 0 && !hasExecOptionBefore(s, start) {
 		return false
 	}
 	if end == len(s) {
@@ -701,6 +699,13 @@ func isCommandToken(s string, start, end int) bool {
 		return false
 	}
 	return true
+}
+
+// hasExecOptionBefore reports whether the word before start is a long option
+// whose argument, joined to it, is the command to run
+// (docker run --entrypoint=mysql, env --split-string=mysql).
+func hasExecOptionBefore(s string, start int) bool {
+	return strings.HasSuffix(s[:start], "--entrypoint=") || strings.HasSuffix(s[:start], "--split-string=")
 }
 
 // isWordByte reports whether c is an ASCII letter, digit or underscore.
@@ -741,6 +746,9 @@ type commandStart struct {
 	optionArg bool
 	host      bool
 	sub       bool
+	// execArg is set with optionArg when that option's argument is the
+	// command to run (env -S 'mysql -pX', docker run --entrypoint mysql).
+	execArg bool
 	// redirectArg is set after a redirection operator whose target is the
 	// next word (2> /dev/null), and funcName after the function keyword,
 	// whose name is the next word.
@@ -811,6 +819,8 @@ func (c *commandStart) runsBefore(part string) bool {
 		return c.runs()
 	case len(part) > maxCommandPart:
 		return false
+	case runsJoinedArgument(c.wrapper, part):
+		return true
 	}
 	next := *c
 	next.word(part)
@@ -879,7 +889,7 @@ func (c *commandStart) fresh() bool {
 
 // runs reports whether a command name after the words read is run.
 func (c *commandStart) runs() bool {
-	return !c.text && !c.optionArg && !c.redirectArg && !c.funcName && (!hasDestination(c.wrapper) || c.host)
+	return !c.text && (c.execArg || !c.optionArg && !c.redirectArg && !c.funcName && (!hasDestination(c.wrapper) || c.host))
 }
 
 // word reads one word of the argument.
@@ -901,21 +911,23 @@ func (c *commandStart) word(word string) {
 		// operator alone takes the next word as its target (> out).
 		_, c.redirectArg = redirection(word)
 	case c.optionArg:
-		c.optionArg = false
+		c.optionArg, c.command, c.execArg = false, c.execArg, false
 	case c.wrapper != "" && strings.HasPrefix(word, "-"):
 		// An option of the wrapper (sudo -E, env -i), some of which take
-		// the next word as their argument (sudo -u root).
+		// the next word as their argument (sudo -u root), and a few the
+		// command to run (env -S mysql).
 		c.optionArg = takesArgument(c.wrapper, word)
+		c.execArg = c.optionArg && runsArgument(c.wrapper, word)
 	case isContainerClient(c.wrapper) && !c.sub:
 		// The subcommand of a container client: exec and run run a
-		// command in a container (docker exec db mysql -pX), container
-		// and compose come before them (docker compose exec), and any
-		// other runs none (docker logs mysql).
-		switch word {
-		case execCommand, "run":
+		// command in a container (docker exec db mysql -pX), and the
+		// others run none (docker logs mysql). Any other word comes
+		// before it: container, compose, or the value of a global option
+		// (kubectl --as alice exec).
+		switch {
+		case slices.Contains(containerRunSubcommands, word):
 			c.sub = true
-		case "container", "compose":
-		default:
+		case slices.Contains(containerTextSubcommands, word):
 			c.text = true
 		}
 	case hasDestination(c.wrapper) && !c.host:
@@ -985,6 +997,16 @@ func isContainerClient(word string) bool {
 	return false
 }
 
+// containerRunSubcommands are the subcommands of container clients that run
+// a command in a container, and containerTextSubcommands those that run
+// none.
+var (
+	containerRunSubcommands  = []string{execCommand, "run", "create", "debug"}
+	containerTextSubcommands = []string{
+		"annotate", "api-resources", "api-versions", "apply", "attach", "auth", "autoscale", "build", "builder", "buildx", "certificate", "cluster-info", "commit", "completion", "config", "context", "cordon", "cp", "delete", "describe", "diff", "drain", "edit", "events", "explain", "export", "expose", "get", "history", "image", "images", "import", "info", "inspect", "kill", "kustomize", "label", "load", loginCommand, "logout", "logs", "manifest", "network", "node", "patch", "pause", "plugin", "port", "port-forward", "proxy", "ps", "pull", "push", "rename", "replace", "restart", "rm", "rmi", "rollout", "save", "scale", "search", "service", "set", "stack", "start", "stats", "stop", "swarm", "system", "tag", "taint", "top", "trust", "uncordon", "unpause", "update", "version", "volume", "wait",
+	}
+)
+
 // hasDestination reports whether wrapper runs the words after a
 // destination: ssh's host, or a container client's container.
 func hasDestination(wrapper string) bool {
@@ -1011,6 +1033,7 @@ var (
 	wrapperLongArgOptions = []string{
 		"chdir", "chroot", "close-from", "command-timeout", "format", "group", "host", "other-user", "output", "prompt", "role", "split-string", "type", "unset", "user",
 		// container clients
+		"as", "as-group", "as-uid", "cache-dir", "certificate-authority", "client-certificate", "client-key", "log-dir", "log-file", "password", "profile", "profile-output", "request-timeout", "server", "tls-server-name", "tlscacert", "tlscert", "tlskey", "token", "username",
 		"add-host", "attach", "cap-add", "cap-drop", "cgroupns", "cidfile", "cluster", "config", "container", "context", "cpu-shares", "cpus", "detach-keys", "device", "dns", "entrypoint", "env", "env-file", "filename", "gpus", "hostname", "ip", "ipc", "kubeconfig", "label", "link", "log-driver", "log-level", "log-opt", "memory", "mount", "name", "namespace", "network", "network-alias", "pid", "platform", "publish", "pull", "restart", "runtime", "security-opt", "shm-size", "tmpfs", "ulimit", "volume", "volumes-from", "workdir",
 	}
 )
@@ -1033,6 +1056,23 @@ func takesArgument(wrapper, option string) bool {
 		}
 	}
 	return false
+}
+
+// runsJoinedArgument reports whether part, the start of a word, is an option
+// of wrapper whose argument, joined to it after "=", is the command to run,
+// with the directory of its path (docker run --entrypoint=/usr/bin/mysql).
+func runsJoinedArgument(wrapper, part string) bool {
+	option, dir, ok := strings.Cut(part, "=")
+	return ok && (dir == "" || strings.HasSuffix(dir, "/")) && strings.HasPrefix(option, "--") && runsArgument(wrapper, option)
+}
+
+// runsArgument reports whether option, an option of wrapper that takes an
+// argument, runs it as the command: env -S, and a container's --entrypoint.
+func runsArgument(wrapper, option string) bool {
+	if wrapper == envCommand {
+		return option == "--split-string" || !strings.HasPrefix(option, "--") && strings.HasSuffix(option, "S")
+	}
+	return isContainerClient(wrapper) && option == "--entrypoint"
 }
 
 // isShellName reports whether s is a shell variable name (an environment
@@ -1140,7 +1180,7 @@ func shortFlagValue(s string, base int, loc []int, stringEnd int) (cliValue, boo
 		// "-p" alone prompts for the password.
 		return cliValue{}, false
 	}
-	return quotedFlagValue(s, start, pieceEnd, quoteLen, stringEnd), true
+	return quotedFlagValue(s, base+loc[2], start, pieceEnd, quoteLen, stringEnd), true
 }
 
 // isConcatOperator reports whether value is an operator that joins strings
@@ -1150,12 +1190,12 @@ func isConcatOperator(value string) bool {
 }
 
 // quotedFlagValue returns the value that starts at start, inside the
-// string that opens its flag and ends at end. When the word goes on after
-// the string ("-pabc"def), the shell joins its pieces into one password,
-// whose start keeps its quoting ('-p$ecret'"" is literal).
-func quotedFlagValue(s string, start, end, quoteLen, stringEnd int) cliValue {
+// string that opens its flag at open and ends at end. When the word goes on
+// after the string ("-pabc"def), the shell joins its pieces into one
+// password, whose start keeps its quoting ('-p$ecret'"" is literal).
+func quotedFlagValue(s string, open, start, end, quoteLen, stringEnd int) cliValue {
 	closeAt := end - quoteLen
-	if wordEnd := joinedWordEnd(s, end, stringEnd); wordEnd > end {
+	if wordEnd := joinedWordEnd(s, open, end, stringEnd); wordEnd > end {
 		return cliValue{start: start, end: wordEnd, singleQuoted: s[closeAt] == '\''}
 	}
 	return cliValue{start: start, end: closeAt, quoted: true, singleQuoted: s[closeAt] == '\''}
@@ -1205,24 +1245,29 @@ func shellWordValue(s string, start, end, stringEnd int) cliValue {
 	return cliValue{start: start, end: wordEnd}
 }
 
-// joinedWordEnd returns the end of the shell word in which a quoted string
-// ends at i. A quote right after it that closes the string the command is
-// quoted in, which ends at stringEnd, ends the word
+// joinedWordEnd returns the end of the shell word in which a quoted string,
+// opened at open, ends at i. A quote right after it that closes the string
+// the command is quoted in, which ends at stringEnd, ends the word
 // (sh -c "wget '--password=x'"; echo "ok"), and so does a separator of code
-// (["mysql", "-px"], {"arg": "--password=x"}), but not one the word goes on
-// after ("-pabc",def).
-func joinedWordEnd(s string, i, stringEnd int) int {
-	if i+1 == stringEnd && (s[i] == '"' || s[i] == '\'') || isCodeSeparator(s, i) {
+// after a string that is an element of code (["mysql", "-px"],
+// exec.Command("mysql", "-px",db), {"arg": "--password=x"}), but not one
+// that a shell word goes on after (mysql "-pabc",def).
+func joinedWordEnd(s string, open, i, stringEnd int) int {
+	if i+1 == stringEnd && (s[i] == '"' || s[i] == '\'') || isCodeSeparator(s, open, i) {
 		return i
 	}
 	return ansiCWordEnd(s, i, stringEnd)
 }
 
-// isCodeSeparator reports whether s[i] is a comma or closing bracket that
-// ends a string in code: one at the end, or before a blank, another one, a
-// quote or a semicolon.
-func isCodeSeparator(s string, i int) bool {
-	return i < len(s) && strings.IndexByte(",]}", s[i]) >= 0 && (i+1 == len(s) || strings.IndexByte(" \t\r\n,]});\"'", s[i+1]) >= 0)
+// isCodeSeparator reports whether s[i] is a comma or closing bracket after a
+// string, opened at open, that is an element of code: one after an opening
+// bracket, a comma or a colon.
+func isCodeSeparator(s string, open, i int) bool {
+	if i == len(s) || strings.IndexByte(",]}", s[i]) < 0 {
+		return false
+	}
+	before := strings.TrimRight(s[:open], " \t")
+	return before != "" && strings.IndexByte("[({,:", before[len(before)-1]) >= 0
 }
 
 // ansiCQuoteEnd returns the end of the ANSI-C quoted string ($'...') that
@@ -1333,6 +1378,13 @@ func wordPieceEnd(s string, i, stringEnd int, first bool) (end int, stop bool) {
 	if inString && closesString(s, i, stringEnd) {
 		return i, true
 	}
+	if strings.HasPrefix(s[i:], "$'") && (!inString || s[stringEnd-1] == '"') {
+		// An ANSI-C quoted piece, in which a backslash escapes a quote
+		// (pass:$'abc\' def').
+		if end := ansiCQuoteEnd(s, i); end > 0 && (!inString || end < stringEnd) {
+			return end, false
+		}
+	}
 	pieceEnd, quoteLen := quotedPiece(s, i)
 	if strings.HasPrefix(s[i:], `\"`) && !first {
 		// Elsewhere than in a double-quoted string, \" is a literal
@@ -1371,13 +1423,34 @@ const maxInnerQuoteScan = 4096
 // holds a shell operator closes one.
 func closesInnerString(s string, i, stringEnd, pieceEnd, quoteLen int) bool {
 	if rest := s[i : stringEnd-1]; len(rest) <= maxInnerQuoteScan {
-		return strings.Count(rest, `\"`)%2 == 1
+		return innerQuotes(rest)%2 == 1
 	}
 	if quoteLen == 0 {
 		return true
 	}
 	inner := s[i+quoteLen : pieceEnd-quoteLen]
 	return strings.TrimSpace(inner) != inner || strings.ContainsAny(inner, ";|&<>()`,:")
+}
+
+// innerQuotes counts the quotes of the command inside a double-quoted
+// string in text: its escaped quotes (\"), unless the command escapes them in
+// turn (\\\" is a literal quote there, \\\\\" is not).
+func innerQuotes(text string) int {
+	n, escaped := 0, false
+	for j := 0; j < len(text); j++ {
+		c := text[j]
+		if c == '\\' && j+1 < len(text) && (text[j+1] == '\\' || text[j+1] == '"') {
+			// The double-quoted string turns \\ and \" into one character
+			// of the command.
+			j++
+			c = text[j]
+		}
+		if c == '"' && !escaped {
+			n++
+		}
+		escaped = c == '\\' && !escaped
+	}
+	return n
 }
 
 // closesString reports whether the quote at s[i] closes the quoted string
@@ -1637,10 +1710,12 @@ func isStringGap(s string) bool {
 const sshCommand = "ssh"
 
 // execCommand and envCommand are the command wrappers exec and env; exec is
-// also the subcommand of a container client that runs a command.
+// also the subcommand of a container client that runs a command, and
+// loginCommand the one that logs in to a registry (docker login -p).
 const (
-	execCommand = "exec"
-	envCommand  = "env"
+	execCommand  = "exec"
+	envCommand   = "env"
+	loginCommand = "login"
 )
 
 // isWrapperOperand reports whether the client name at start is the
@@ -1667,6 +1742,7 @@ func isWrapperOperand(s string, from, start int) bool {
 	if word == 0 || s[word-1] != ' ' && s[word-1] != '\t' {
 		return false
 	}
+	part := s[word:start]
 	start = word
 	if start-from <= maxSSHCommand {
 		from = commandFrom(s, from, start)
@@ -1683,9 +1759,12 @@ func isWrapperOperand(s string, from, start int) bool {
 	}
 	var c commandStart
 	c.at(s, from, start)
+	if runsJoinedArgument(c.wrapper, part) {
+		return false
+	}
 	// The destination, or the argument of an option (ssh -i mysql,
-	// sudo -u mysql).
-	return !c.text && (c.optionArg || hasDestination(c.wrapper) && !c.host)
+	// sudo -u mysql), unless that option runs it (env -S mysql).
+	return !c.text && !c.execArg && (c.optionArg || hasDestination(c.wrapper) && !c.host)
 }
 
 // argWrappers are the wrappers that take an argument after the command's
@@ -1772,7 +1851,7 @@ func (p netrcPattern) appendPassword(regions []taggedRegion, s string, lines *qu
 	}
 	login := s[loc[2*p.login]:loc[2*p.login+1]]
 	start, end := loc[2*p.value], loc[2*p.value+1]
-	if isNetrcDeclaration(machine, login, s[start:end]) {
+	if isNetrcDeclaration(s, loc[0], machine, login, s[start:end]) {
 		return regions
 	}
 	valueStart, valueEnd, singleQuoted := unquoteRangeQuoted(s, start, end)
@@ -1793,9 +1872,11 @@ func (p netrcPattern) appendPassword(regions []taggedRegion, s string, lines *qu
 // the password from elsewhere ($(cat file)); inside single quotes $ is
 // literal. When dashFlag is set, an unquoted value that starts like another
 // flag is that flag. A long flag followed by a blank instead of "=" is also
-// common in prose ("pass --password to set it"), so there (requireNonWord) an
-// unquoted value must not be a word of prose (to, flag, option); any other
-// word may be a password (mongosh --password swordfish).
+// common in prose ("pass --password to set it") and help text ("--password
+// string   Password for"), so there (requireNonWord) an unquoted word of
+// prose stays visible (see isProseValue); any other word, or a prose word
+// the command ends with or gives more arguments after, may be a password
+// (mongosh --password swordfish, mongosh --password string).
 func passwordValueRegion(s string, v cliValue, dashFlag, requireNonWord bool) (taggedRegion, bool) {
 	value := s[v.start:v.end]
 	switch {
@@ -1818,23 +1899,54 @@ func passwordValueRegion(s string, v cliValue, dashFlag, requireNonWord bool) (t
 	case !hasNonPlaceholderPasswordValue(value):
 		return taggedRegion{}, false
 	}
-	if requireNonWord && !v.quoted && slices.Contains(proseWords, s[v.start:v.end]) {
+	if requireNonWord && !v.quoted && isProseValue(s, v) {
 		return taggedRegion{}, false
 	}
 	return taggedRegion{region: region{v.start, v.end}}, true
 }
 
-// isNetrcDeclaration reports whether a .netrc match gives its machine, login
-// and password one type name, the shape of a declaration (machine string,
-// login string, password string in a Go struct) rather than of an entry,
-// which may give all three one word (machine admin login admin password
-// admin).
-func isNetrcDeclaration(machine, login, password string) bool {
-	if machine != password || login != password {
+// isProseValue reports whether v, the value after a long flag and a blank,
+// is a word of prose (to, flag, string) in a sentence: one that ends a
+// sentence or clause ("the --password flag.", "--password option, or"), or
+// that more prose follows: blanks, then a letter ("--password to set it").
+func isProseValue(s string, v cliValue) bool {
+	value := s[v.start:v.end]
+	word := strings.TrimRight(value, ".,:!?")
+	if !slices.Contains(proseWords, word) {
 		return false
 	}
-	name := strings.ToLower(strings.TrimLeft(strings.TrimRight(password, ",;"), "*&[]"))
-	return slices.Contains(declarationTypes, name)
+	if len(word) < len(value) {
+		return v.end == len(s) || unicode.IsSpace(rune(s[v.end]))
+	}
+	next := strings.TrimLeft(s[v.end:], " \t")
+	return len(next) < len(s[v.end:]) && next != "" && unicode.IsLetter(rune(next[0]))
+}
+
+// isNetrcDeclaration reports whether the .netrc match at start gives its
+// machine, login and password one type name inside an open brace or
+// parenthesis, the shape of a declaration (machine string, login string,
+// password string in a Go struct or parameter list) rather than of an entry,
+// which may give all three one word (machine admin login admin password
+// admin), even a type name (machine string login string password string).
+func isNetrcDeclaration(s string, start int, machine, login, password string) bool {
+	name := declarationType(password)
+	if declarationType(machine) != name || declarationType(login) != name || !slices.Contains(declarationTypes, name) {
+		return false
+	}
+	before := s[max(0, start-maxDeclarationScan):start]
+	opened := max(strings.LastIndexByte(before, '{'), strings.LastIndexByte(before, '('))
+	return opened > max(strings.LastIndexByte(before, '}'), strings.LastIndexByte(before, ')'))
+}
+
+// maxDeclarationScan bounds how far back isNetrcDeclaration looks for the
+// brace or parenthesis that opens a declaration, so the scan stays linear.
+const maxDeclarationScan = 4096
+
+// declarationType returns the type name a declaration's field may give,
+// without the separator after it or the pointer, slice or reference mark
+// before it ("*string," and "[]byte)" give string and byte).
+func declarationType(field string) string {
+	return strings.ToLower(strings.TrimLeft(strings.TrimRight(field, ",;)"), "*&[]"))
 }
 
 // declarationTypes are the type names of a declaration's fields, without a
