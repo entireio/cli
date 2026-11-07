@@ -325,7 +325,11 @@ func TestString_CommandLinePasswordsReviewCases(t *testing.T) {
 		{name: "quoted Windows client path below a directory named like it", input: `"C:\mysql\bin\mysql.exe" -p` + p, want: `"C:\mysql\bin\mysql.exe" -pREDACTED`},
 		{name: "long flag in escaped quotes in a double-quoted script", input: `sh -c "wget \"--password\" \"` + p + `\" https://example.com"`, want: `sh -c "wget \"--password\" \"REDACTED\" https://example.com"`},
 		{name: "flag after a parameter expansion holding an operator", input: "openssl enc -aes-128-cbc -in ${INPUT:-a&b} -pass pass:" + p + "; mysql -h ${H:-a;b} -p" + p, want: "openssl enc -aes-128-cbc -in ${INPUT:-a&b} -pass pass:REDACTED; mysql -h ${H:-a;b} -pREDACTED"},
+		{name: "client in a case arm after a shell keyword", input: "sh -c 'if true; then case $1 in a|b) echo;; (c) mysql -p" + p + ";; esac; fi'", want: "sh -c 'if true; then case $1 in a|b) echo;; (c) mysql -pREDACTED;; esac; fi'"},
 		{name: "client run on a host by a quoted ssh path", input: `"/usr/bin/ssh" db mysql -p` + p, want: `"/usr/bin/ssh" db mysql -pREDACTED`},
+		{name: "client after a quoted assignment of a wrapper path", input: `env "FOO=/usr/bin/ssh" mysql -p` + p, want: `env "FOO=/usr/bin/ssh" mysql -pREDACTED`},
+		{name: "client after an assignment with a quoted wrapper path", input: `env FOO="/usr/bin/ssh" mysql -p` + p, want: `env FOO="/usr/bin/ssh" mysql -pREDACTED`},
+		{name: "client after a quoted assignment", input: `"FOO=/usr/bin/ssh" mysql -p` + p, want: `"FOO=/usr/bin/ssh" mysql -pREDACTED`},
 	})
 }
 
@@ -494,6 +498,10 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		`"C:\Program Files\OpenSSH\ssh.exe" mysql -p2222`,
 		`sh -c 'case x in x) echo mysql -p2222;; esac'`,
 		`mysql -e "$(case x in x) echo mysql -p2222;; esac)"`,
+		`sh -c 'echo hello\) mysql -p2222'`,
+		`mysql -e "$(echo hello\) mysql -p2222)"`,
+		`mysql -h "$(printf '%s' x\) mysql -p3306)"`,
+		`sh -c 'case x in a) echo;; esac; echo x) mysql -p2222'`,
 		"openssl enc -aes-128-cbc -pass=env:PW",
 		// declarations
 		"type netrcLine struct {\n\tmachine  string\n\tlogin    string\n\tpassword string\n}",
