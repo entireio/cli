@@ -51,6 +51,14 @@ var cliSubstitution = regexp.MustCompile(`^` + cliSubstitutionPattern)
 // across an escaped line break.
 const cliBlank = `(?:[ \t]|\\\r?\n)+`
 
+// cliFlagQuote is the quote that opens a quoted short flag, as group 1: one
+// quoted with its value ("-pSummer 2026") or, before a blank, on its own
+// ("-a" x). cliFlagClose closes one quoted on its own.
+const (
+	cliFlagQuote = `(\\?["'])`
+	cliFlagClose = `(?:\\?["'])`
+)
+
 // cliGlobalOptions matches the options a client takes before its
 // subcommand, each a shell word (--config="$HOME/.docker") with at most one
 // value (--config $(mktemp -d)).
@@ -89,8 +97,9 @@ type cliPasswordFlag struct {
 	needles []string
 	// command matches the client name, up to where its arguments start.
 	command *regexp.Regexp
-	// flag matches one password flag in the rest of the segment; group 1 is
-	// the value.
+	// flag matches one password flag in the rest of the segment; its last
+	// group is the value. In a flag with two groups, group 1 is the quote
+	// that opens a quoted flag (cliFlagQuote).
 	flag *regexp.Regexp
 	// prefix starts every value and is not part of the password (openssl's
 	// pass:); a value without it names another kind of source.
@@ -113,7 +122,7 @@ var cliPasswordFlags = []cliPasswordFlag{
 	{
 		needles:       []string{"mysql", "mariadb"},
 		command:       regexp.MustCompile(`\b(?:mysql|mariadb|mysqldump|mysqladmin|mysqlimport|mysqlcheck|mysqlpump|mysqlsh)\b`),
-		flag:          regexp.MustCompile(`\s-p(` + cliFlagValue + `)`),
+		flag:          regexp.MustCompile(`\s` + cliFlagQuote + `?-p(` + cliFlagValue + `)`),
 		containerName: true,
 	},
 	// login must be the client's subcommand, after its global options
@@ -122,17 +131,17 @@ var cliPasswordFlags = []cliPasswordFlag{
 	{
 		needles: []string{"login"},
 		command: regexp.MustCompile(`\b(?:docker|podman|nerdctl|buildah|skopeo|oras|helm)\b(?i:\.exe)?["']?` + cliGlobalOptions + cliBlank + `(?:registry` + cliGlobalOptions + cliBlank + `)?login\b`),
-		flag:    regexp.MustCompile(`\s-p(?:` + cliBlank + `)?(` + cliFlagValue + `)`),
+		flag:    regexp.MustCompile(cliOptionalBlankFlag("p")),
 	},
 	{
 		needles: []string{"login"},
 		command: regexp.MustCompile(`\baz[ \t]+login\b`),
-		flag:    regexp.MustCompile(`\s-p(?:` + cliBlank + `)?(` + cliFlagValue + `)`),
+		flag:    regexp.MustCompile(cliOptionalBlankFlag("p")),
 	},
 	{
 		needles:       []string{"mongo"},
 		command:       regexp.MustCompile(`\b(?:mongosh|mongo|mongodump|mongorestore|mongoexport|mongoimport|mongostat|mongotop)\b`),
-		flag:          regexp.MustCompile(`\s-p` + cliBlank + `(` + cliFlagValue + `)`),
+		flag:          regexp.MustCompile(cliBlankFlag("p")),
 		optional:      true,
 		containerName: true,
 	},
@@ -141,13 +150,13 @@ var cliPasswordFlags = []cliPasswordFlag{
 	{
 		needles: []string{"sshpass"},
 		command: regexp.MustCompile(`\bsshpass\b`),
-		flag:    regexp.MustCompile(`^(?:` + cliBlank + `-(?:v|P[ \t]*(?:` + cliFlagValue + `)))*` + cliBlank + `-p[ \t]*(` + cliFlagValue + `)`),
+		flag:    regexp.MustCompile(`^(?:` + cliBlank + `-(?:v|P[ \t]*(?:` + cliFlagValue + `)))*` + cliBlank + `(?:` + cliFlagQuote + `-p(?:` + cliFlagClose + `?[ \t]+)?|-p[ \t]*)(` + cliFlagValue + `)`),
 		leading: true,
 	},
 	{
 		needles: []string{"redis-cli"},
 		command: regexp.MustCompile(`\bredis-cli\b`),
-		flag:    regexp.MustCompile(`\s-a` + cliBlank + `(` + cliFlagValue + `)`),
+		flag:    regexp.MustCompile(cliBlankFlag("a")),
 	},
 	{
 		needles: []string{"pass:"},
@@ -155,6 +164,19 @@ var cliPasswordFlags = []cliPasswordFlag{
 		flag:    regexp.MustCompile(`\s(?:-pass(?:in|out|word)?|'-pass(?:in|out|word)?'|"-pass(?:in|out|word)?")` + cliBlank + `(` + cliFlagValue + `)`),
 		prefix:  "pass:",
 	},
+}
+
+// cliBlankFlag matches the short flag -name after a blank, followed by a
+// blank and its value: -p x, "-p" x, or "-p x" quoted with its value.
+func cliBlankFlag(name string) string {
+	return `\s(?:` + cliFlagQuote + `-` + name + cliFlagClose + `?|-` + name + `)` + cliBlank + `(` + cliFlagValue + `)`
+}
+
+// cliOptionalBlankFlag matches the short flag -name after a blank, followed
+// by its value with or without a blank between them. A flag quoted on its
+// own must be followed by a blank: "-p"+pw in code joins strings.
+func cliOptionalBlankFlag(name string) string {
+	return `\s(?:` + cliFlagQuote + `-` + name + `(?:` + cliFlagClose + `?` + cliBlank + `)?|-` + name + `(?:` + cliBlank + `)?)(` + cliFlagValue + `)`
 }
 
 // portMappingPattern matches a container port mapping such as 27017:27017 or
@@ -281,12 +303,7 @@ func longFlagValue(s string, loc []int, stringEnd int) (cliValue, bool) {
 				return cliValue{}, false
 			}
 		case s[loc[4]] == '=' && closeAt > loc[6]:
-			if wordEnd := joinedWordEnd(s, end, stringEnd); wordEnd > end {
-				// The word goes on after the string ("--password=abc"def),
-				// and the shell joins its pieces into one password.
-				return cliValue{start: loc[6], end: wordEnd}, true
-			}
-			return cliValue{start: loc[6], end: closeAt, quoted: true, singleQuoted: s[closeAt] == '\''}, true
+			return quotedFlagValue(s, loc[6], end, n, stringEnd), true
 		}
 	}
 	if loc[3] > loc[2] && quoteLen == 0 {
@@ -969,14 +986,14 @@ func (f cliPasswordFlag) appendFlags(regions []taggedRegion, s string, quotes *q
 		r, ok := taggedRegion{}, false
 		if _, quoted := quotes.stringAt(base + loc[0]); !quoted {
 			if _, _, inner := quotes.substitutionAt(base + loc[0]); !inner {
-				r, ok = f.valueRegion(s, base+loc[2], base+loc[3], stringEnd)
+				r, ok = f.valueRegion(s, base, loc, stringEnd)
 			}
 		}
 		if !ok {
 			// A flag that is not read may have taken the next one as its
 			// value (-in 'file -pass ' -pass 'pass:x'), so the search goes
 			// on from where that value starts.
-			pos = max(loc[2], loc[0]+1)
+			pos = max(loc[len(loc)-2], loc[0]+1)
 			continue
 		}
 		regions = append(regions, r)
@@ -987,8 +1004,13 @@ func (f cliPasswordFlag) appendFlags(regions []taggedRegion, s string, quotes *q
 	return regions
 }
 
-func (f cliPasswordFlag) valueRegion(s string, start, end, stringEnd int) (taggedRegion, bool) {
-	v := shellWordValue(s, start, end, stringEnd)
+// valueRegion returns the password of the flag that loc, a match of f.flag in
+// s from base, found.
+func (f cliPasswordFlag) valueRegion(s string, base int, loc []int, stringEnd int) (taggedRegion, bool) {
+	v, ok := shortFlagValue(s, base, loc, stringEnd)
+	if !ok {
+		return taggedRegion{}, false
+	}
 	if f.prefix != "" {
 		var ok bool
 		if v, ok = v.trimPrefix(s, f.prefix, stringEnd); !ok {
@@ -999,6 +1021,48 @@ func (f cliPasswordFlag) valueRegion(s string, start, end, stringEnd int) (tagge
 		return taggedRegion{}, false
 	}
 	return passwordValueRegion(s, v, f.optional, false)
+}
+
+// shortFlagValue returns the value of the short password flag that loc, a
+// match in s from base, found. The shell passes a quoted flag as if it were
+// bare: a value in the string that opens the flag ("-pSummer 2026") runs to
+// that string's end, and a flag quoted on its own ("-p" x) must close the
+// quote that opens it.
+func shortFlagValue(s string, base int, loc []int, stringEnd int) (cliValue, bool) {
+	start, end := base+loc[len(loc)-2], base+loc[len(loc)-1]
+	if len(loc) < 6 || loc[2] < 0 {
+		return shellWordValue(s, start, end, stringEnd), true
+	}
+	pieceEnd, quoteLen := quotedPiece(s, base+loc[2])
+	closeAt := pieceEnd - quoteLen
+	switch {
+	case quoteLen == 0:
+		// A quote that closes nothing on its line.
+		return shellWordValue(s, start, end, stringEnd), true
+	case closeAt < start:
+		// A flag quoted on its own, before a blank ("-p" x). In code,
+		// "-p" + pw and "-p" . $pw join strings.
+		if strings.Trim(s[start:end], "+.") == "" {
+			return cliValue{}, false
+		}
+		return shellWordValue(s, start, end, stringEnd), true
+	case closeAt == start:
+		// "-p" alone prompts for the password.
+		return cliValue{}, false
+	}
+	return quotedFlagValue(s, start, pieceEnd, quoteLen, stringEnd), true
+}
+
+// quotedFlagValue returns the value that starts at start, inside the
+// string that opens its flag and ends at end. When the word goes on after
+// the string ("-pabc"def), the shell joins its pieces into one password,
+// whose start keeps its quoting ('-p$ecret'"" is literal).
+func quotedFlagValue(s string, start, end, quoteLen, stringEnd int) cliValue {
+	closeAt := end - quoteLen
+	if wordEnd := joinedWordEnd(s, end, stringEnd); wordEnd > end {
+		return cliValue{start: start, end: wordEnd, singleQuoted: s[closeAt] == '\''}
+	}
+	return cliValue{start: start, end: closeAt, quoted: true, singleQuoted: s[closeAt] == '\''}
 }
 
 // cliValue is a password on a command line.
@@ -1047,10 +1111,11 @@ func shellWordValue(s string, start, end, stringEnd int) cliValue {
 
 // joinedWordEnd returns the end of the shell word in which a quoted string
 // ends at i. A quote right after it that closes the string the command is
-// quoted in, which ends at stringEnd, ends the word:
-// sh -c "wget '--password=x'"; echo "ok".
+// quoted in, which ends at stringEnd, ends the word
+// (sh -c "wget '--password=x'"; echo "ok"), and so does a separator of code
+// (["mysql", "-px"], {"arg": "--password=x"}).
 func joinedWordEnd(s string, i, stringEnd int) int {
-	if i+1 == stringEnd && (s[i] == '"' || s[i] == '\'') {
+	if i+1 == stringEnd && (s[i] == '"' || s[i] == '\'') || i < len(s) && strings.IndexByte(",]}", s[i]) >= 0 {
 		return i
 	}
 	return ansiCWordEnd(s, i)
