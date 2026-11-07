@@ -300,6 +300,15 @@ func TestString_CommandLinePasswordsReviewCases(t *testing.T) {
 		{name: "quoted short flag value after a shell word ending in a comma", input: `mysql -h db, "-pabc",` + p, want: `mysql -h db, "-pREDACTED`},
 		{name: "quoted short flag value after a name in a code list", input: `run("mysql", db, "-p` + p + `",x)`, want: `run("mysql", db, "-pREDACTED",x)`},
 		{name: "client arguments after the image of its entrypoint", input: "docker run --entrypoint mysql -p3306:3306 mysql:8 -p" + p, want: "docker run --entrypoint mysql -p3306:3306 mysql:8 -pREDACTED"},
+		{name: "client after another program's joined entrypoint option", input: "runner --entrypoint=mysql -p" + p, want: "runner --entrypoint=mysql -pREDACTED"},
+		{name: "client after another program's entrypoint option", input: "runner --entrypoint mysql -p" + p, want: "runner --entrypoint mysql -pREDACTED"},
+		{name: "client run by many entrypoint options", input: "docker run " + strings.Repeat("--entrypoint sshpass ", 2000) + "img -p " + p, want: "docker run " + strings.Repeat("--entrypoint sshpass ", 2000) + "img -p REDACTED"},
+		{name: "quoted short flag value after a quoted shell word ending in a comma", input: `mysql -h 'db', "-pabc",` + p, want: `mysql -h 'db', "-pREDACTED`},
+		{name: "quoted short flag value after a quoted element in a code list", input: `run("mysql", 'db', "-p` + p + `",x)`, want: `run("mysql", 'db', "-pREDACTED",x)`},
+		{name: "long flag password spelled like a prose word before two arguments", input: "mongosh --password string db admin", want: "mongosh --password REDACTED db admin"},
+		{name: "netrc fields equal to a type name after a command in a shell group", input: "{ echo foo machine string login string password string; }", want: "{ echo foo machine string login string password REDACTED }"},
+		{name: "quoted short flag value after an expression in a code list", input: `exec.Command("mysql", "-h", "db-"+suffix, "-p` + p + `",db)`, want: `exec.Command("mysql", "-h", "db-"+suffix, "-pREDACTED",db)`},
+		{name: "client after a quoted string inside an env -S string", input: `env -S 'env GREETING="hello ssh"' mysql -p` + p, want: `env -S 'env GREETING="hello ssh"' mysql -pREDACTED`},
 		{name: "long flag password spelled like a prose word before an argument", input: "mongosh --password string db", want: "mongosh --password REDACTED db"},
 		{name: "netrc fields equal to a type name in a shell group", input: "{ echo 'machine string login string password string'; }", want: "{ echo 'machine string login string password REDACTED'; }"},
 		{name: "netrc fields equal to a type name in a subshell", input: "( echo machine string login string password string )", want: "( echo machine string login string password REDACTED )"},
@@ -469,6 +478,8 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		"func connect(machine string, login string, password string) error",
 		"func connect(ctx context.Context, machine string, login string, password string) error",
 		"type netrcLine struct {\n\tHost string\n\tmachine string\n\tlogin string\n\tpassword string\n}",
+		"type netrcLine struct {\n\tHost string `json:\"host\"`\n\tmachine string\n\tlogin string\n\tpassword string\n}",
+		"type netrcLine struct {\n\tHost string // the host\n\tmachine string\n\tlogin string\n\tpassword string\n}",
 	} {
 		t.Run(input, func(t *testing.T) {
 			t.Parallel()
