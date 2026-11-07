@@ -220,7 +220,7 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string) []tag
 	var nested nestedScan
 	segmentEnd := 0
 	for _, cmd := range f.command.FindAllStringIndex(s, -1) {
-		if !isCommandToken(s, cmd[0], cmd[1]) || f.containerName && isContainerNameArgument(s, cmd[0]) {
+		if !isCommandToken(s, cmd[0], cmd[1]) || isSSHDestination(s, cmd[0]) || f.containerName && isContainerNameArgument(s, cmd[0]) {
 			continue
 		}
 		// The closing quote of a string the command is quoted in is not
@@ -511,8 +511,9 @@ type commandStart struct {
 	// name after any word is run (mysql -h mysql -pX), except after the
 	// name of a command that prints its arguments (echo mysql -pX).
 	lenient bool
-	// wrapper is the command wrapper the words so far run (sudo), optionArg
-	// is set after its option that takes the next word, and host after the
+	// wrapper is the command wrapper the words so far run (sudo), named as
+	// a command rather than as an argument (docker exec ssh), optionArg is
+	// set after its option that takes the next word, and host after the
 	// destination of ssh, which runs the words after it.
 	wrapper   string
 	optionArg bool
@@ -588,7 +589,7 @@ const commandSeparators = ";|&("
 
 // runs reports whether a command name after the words read is run.
 func (c *commandStart) runs() bool {
-	return !c.text && !c.optionArg
+	return !c.text && !c.optionArg && (c.wrapper != sshCommand || c.host)
 }
 
 // word reads one word of the argument.
@@ -599,13 +600,13 @@ func (c *commandStart) word(word string) {
 		c.optionArg = false
 	case isShellKeyword(word):
 		c.wrapper, c.host, c.command = "", false, false
-	case isCommandWrapper(word):
+	case !c.command && isCommandWrapper(word):
 		c.wrapper, c.host = word, false
 	case c.wrapper != "" && strings.HasPrefix(word, "-"):
 		// An option of the wrapper (sudo -E, env -i), some of which take
 		// the next word as their argument (sudo -u root).
 		c.optionArg = takesArgument(c.wrapper, word)
-	case c.wrapper == "ssh" && !c.host:
+	case c.wrapper == sshCommand && !c.host:
 		// The destination of ssh (ssh db mysql -pX), even one named like a
 		// command (ssh echo mysql -pX).
 		c.host = true
@@ -631,7 +632,7 @@ func isPrintCommand(word string) bool {
 // own options, and for ssh its destination).
 func isCommandWrapper(word string) bool {
 	switch word {
-	case "sudo", "exec", "env", "time", "nohup", "command", "ssh":
+	case "sudo", "exec", "env", "time", "nohup", "command", sshCommand:
 		return true
 	}
 	return false
@@ -650,7 +651,7 @@ func isShellKeyword(word string) bool {
 // wrapperArgOptions are the short options of each wrapper that take an
 // argument, and wrapperLongArgOptions the long ones.
 var (
-	wrapperArgOptions     = map[string]string{"sudo": "CDghpRrTtUu", "env": "CSu", "time": "fo", "exec": "a", "ssh": "BbcDEeFIiJLlmOoPpQRSWw"}
+	wrapperArgOptions     = map[string]string{"sudo": "CDghpRrTtUu", "env": "CSu", "time": "fo", "exec": "a", sshCommand: "BbcDEeFIiJLlmOoPpQRSWw"}
 	wrapperLongArgOptions = []string{"chdir", "chroot", "close-from", "command-timeout", "format", "group", "host", "other-user", "output", "prompt", "role", "split-string", "type", "unset", "user"}
 )
 
@@ -1011,6 +1012,23 @@ func isStringGap(s string) bool {
 		return true
 	}
 	return strings.ContainsRune("+.", rune(trimmed[0])) && strings.ContainsRune("+.", rune(trimmed[len(trimmed)-1]))
+}
+
+// sshCommand is ssh, a command wrapper that runs the words after its
+// destination.
+const sshCommand = "ssh"
+
+// isSSHDestination reports whether the client name at start is the
+// destination right after an ssh command (ssh mysql -p2222, where -p2222 is
+// ssh's port), not a command. An ssh that is an argument of another command
+// (docker exec ssh mysql -pX) does not count.
+func isSSHDestination(s string, start int) bool {
+	before := strings.TrimRight(s[:start], " \t")
+	if len(before) == start || !strings.HasSuffix(before, sshCommand) {
+		return false
+	}
+	head := strings.TrimRight(before[:len(before)-len(sshCommand)], " \t")
+	return head == "" || strings.IndexByte("\r\n;|&(`'\"", head[len(head)-1]) >= 0
 }
 
 // isContainerNameArgument reports whether the client name at start is the
