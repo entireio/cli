@@ -28,11 +28,12 @@ const cliSameCommandChar = `\\\r?\n|\\[^\r\n]|"(?:[^"\\\r\n]|\\\r?\n|\\[^\r\n])*
 
 const cliSameCommand = `(?:` + cliSameCommandChar + `)`
 
-// cliSubstitutionPattern is a command substitution whose parentheses nest
-// at most three deep ($(dirname $(pwd); true), $((1 + 2))), whose quoted
+// cliSubstitutionPattern is a command substitution, or a process
+// substitution (<(printf x | cat), >(tee log)), whose parentheses nest at
+// most three deep ($(dirname $(pwd); true), $((1 + 2))), whose quoted
 // strings may hold any character ($(printf ')')), and cliSubstitution one
 // at the start of a string.
-const cliSubstitutionPattern = `\$` + cliParens3
+const cliSubstitutionPattern = `[$<>]` + cliParens3
 
 // cliParens1 to cliParens3 are text in parentheses that nest at most one to
 // three deep. Inside, a quoted string, an escaped character or a nested
@@ -280,6 +281,11 @@ func longFlagValue(s string, loc []int, stringEnd int) (cliValue, bool) {
 				return cliValue{}, false
 			}
 		case s[loc[4]] == '=' && closeAt > loc[6]:
+			if wordEnd := joinedWordEnd(s, end, stringEnd); wordEnd > end {
+				// The word goes on after the string ("--password=abc"def),
+				// and the shell joins its pieces into one password.
+				return cliValue{start: loc[6], end: wordEnd}, true
+			}
 			return cliValue{start: loc[6], end: closeAt, quoted: true, singleQuoted: s[closeAt] == '\''}, true
 		}
 	}
@@ -530,7 +536,7 @@ func (f cliPasswordFlag) segmentRest(s string, lines *quoteScan, paths *programP
 	switch {
 	case closeAt < i:
 		return pattern.FindString(s[i:])
-	case paths.blankAfter(s, i, closeAt) && !paths.isProgramPath(f, s, lines.inner(), closeAt):
+	case paths.blankAfter(s, lines.inner(), i, closeAt) && !paths.isProgramPath(f, s, lines.inner(), closeAt):
 		return pattern.FindString(s[i:closeAt])
 	default:
 		return s[i : stringEnd+len(cliSegmentRest.FindString(s[stringEnd:]))]
@@ -550,10 +556,14 @@ type programPathMemo struct {
 	to, blank int
 }
 
-// blankAfter reports whether s[i:to] holds a blank.
-func (m *programPathMemo) blankAfter(s string, i, to int) bool {
+// blankAfter reports whether s[i:to] holds a blank, where s[from:to] is the
+// text of the quoted string i is in; only that text is searched, once.
+func (m *programPathMemo) blankAfter(s string, from, i, to int) bool {
 	if m.to != to+1 {
-		m.to, m.blank = to+1, strings.LastIndexAny(s[:to], " \t")
+		m.to, m.blank = to+1, strings.LastIndexAny(s[from:to], " \t")
+		if m.blank >= 0 {
+			m.blank += from
+		}
 	}
 	return m.blank >= i
 }
@@ -885,10 +895,11 @@ func isPrintCommand(word string) bool {
 }
 
 // isCommandWrapper reports whether word runs the command after it (and its
-// own options, and for ssh its destination).
+// own options, and for ssh its destination), as sshpass runs ssh:
+// sshpass -e ssh mysql -p2222, where mysql is ssh's destination.
 func isCommandWrapper(word string) bool {
 	switch word {
-	case "sudo", "exec", "env", "time", "nohup", "command", sshCommand:
+	case "sudo", "exec", "env", "time", "nohup", "command", "sshpass", sshCommand:
 		return true
 	}
 	return false
@@ -907,7 +918,7 @@ func isShellKeyword(word string) bool {
 // wrapperArgOptions are the short options of each wrapper that take an
 // argument, and wrapperLongArgOptions the long ones.
 var (
-	wrapperArgOptions     = map[string]string{"sudo": "CDghpRrTtUu", "env": "CSu", "time": "fo", "exec": "a", sshCommand: "BbcDEeFIiJLlmOoPpQRSWw"}
+	wrapperArgOptions     = map[string]string{"sudo": "CDghpRrTtUu", "env": "CSu", "time": "fo", "exec": "a", "sshpass": "dfPp", sshCommand: "BbcDEeFIiJLlmOoPpQRSWw"}
 	wrapperLongArgOptions = []string{"chdir", "chroot", "close-from", "command-timeout", "format", "group", "host", "other-user", "output", "prompt", "role", "split-string", "type", "unset", "user"}
 )
 
@@ -946,22 +957,32 @@ func isShellName(s string) bool {
 // another command, read on its own if f defines it. stringEnd is where the
 // quoted string holding the command ends, or -1.
 func (f cliPasswordFlag) appendFlags(regions []taggedRegion, s string, quotes *quoteScan, rest string, stringEnd int) []taggedRegion {
-	base, wordEnd := quotes.i, 0
-	for _, loc := range f.flag.FindAllStringSubmatchIndex(rest, -1) {
-		if base+loc[0] < wordEnd {
-			// Part of the last password's word (-px\ -py).
+	base := quotes.i
+	for pos := 0; pos < len(rest); {
+		loc := f.flag.FindStringSubmatchIndex(rest[pos:])
+		if loc == nil {
+			break
+		}
+		for k := range loc {
+			loc[k] += pos
+		}
+		r, ok := taggedRegion{}, false
+		if _, quoted := quotes.stringAt(base + loc[0]); !quoted {
+			if _, _, inner := quotes.substitutionAt(base + loc[0]); !inner {
+				r, ok = f.valueRegion(s, base+loc[2], base+loc[3], stringEnd)
+			}
+		}
+		if !ok {
+			// A flag that is not read may have taken the next one as its
+			// value (-in 'file -pass ' -pass 'pass:x'), so the search goes
+			// on from where that value starts.
+			pos = max(loc[2], loc[0]+1)
 			continue
 		}
-		if _, quoted := quotes.stringAt(base + loc[0]); quoted {
-			continue
-		}
-		if _, _, inner := quotes.substitutionAt(base + loc[0]); inner {
-			continue
-		}
-		if r, ok := f.valueRegion(s, base+loc[2], base+loc[3], stringEnd); ok {
-			regions = append(regions, r)
-			wordEnd = r.end
-		}
+		regions = append(regions, r)
+		// A flag inside the password's word is part of it (-px\ -py),
+		// and is not read again.
+		pos = max(loc[1], r.end-base)
 	}
 	return regions
 }
@@ -1022,6 +1043,17 @@ func shellWordValue(s string, start, end, stringEnd int) cliValue {
 		}
 	}
 	return cliValue{start: start, end: wordEnd}
+}
+
+// joinedWordEnd returns the end of the shell word in which a quoted string
+// ends at i. A quote right after it that closes the string the command is
+// quoted in, which ends at stringEnd, ends the word:
+// sh -c "wget '--password=x'"; echo "ok".
+func joinedWordEnd(s string, i, stringEnd int) int {
+	if i+1 == stringEnd && (s[i] == '"' || s[i] == '\'') {
+		return i
+	}
+	return ansiCWordEnd(s, i)
 }
 
 // ansiCQuoteEnd returns the end of the ANSI-C quoted string ($'...') that
@@ -1298,7 +1330,7 @@ func (q *quoteScan) commandFrom(closeAt int) int {
 // stepSubstitution steps over the command substitution that starts where the
 // scan is, when the scan looks for them, and reports whether one did.
 func (q *quoteScan) stepSubstitution() bool {
-	if !q.substitutions || !strings.HasPrefix(q.s[q.i:], "$(") {
+	if !q.substitutions || !isSubstitutionStart(q.s, q.i) {
 		return false
 	}
 	n := len(cliSubstitution.FindString(q.s[q.i:]))
@@ -1307,6 +1339,12 @@ func (q *quoteScan) stepSubstitution() bool {
 	}
 	q.subStart, q.subEnd, q.i = q.i, q.i+n, q.i+n
 	return true
+}
+
+// isSubstitutionStart reports whether a command substitution ($(...)) or a
+// process substitution (<(...), >(...)) starts at s[i].
+func isSubstitutionStart(s string, i int) bool {
+	return i+1 < len(s) && s[i+1] == '(' && strings.IndexByte("$<>", s[i]) >= 0
 }
 
 // substitutionAt returns where the command substitution that p is inside
