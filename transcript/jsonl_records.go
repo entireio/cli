@@ -58,10 +58,10 @@ type JSONLAdapter struct {
 	preprocess   linePreprocessor
 	perCallUsage bool // emit per-call usage snapshots (Claude Code)
 
-	pending []byte          // bytes after the last newline fed
-	line    int             // source lines consumed so far
-	keys    map[string]bool // fold keys handed out
-	open    *openAssistant  // set while the last parsed entry is an assistant
+	lines lineSplitter
+	line  int             // source lines consumed so far
+	keys  map[string]bool // fold keys handed out
+	open  *openAssistant  // set while the last parsed entry is an assistant
 	// results is the key of the last assistant message, which a result
 	// without a tool_use_id attaches to, or "" after a user message.
 	results string
@@ -123,21 +123,10 @@ func (a *JSONLAdapter) Lines() int {
 // later chunk completes it, or until Flush.
 func (a *JSONLAdapter) Feed(chunk []byte) []Record {
 	var out []Record
-	for len(chunk) > 0 {
-		i := bytes.IndexByte(chunk, '\n')
-		if i < 0 {
-			a.pending = append(a.pending, chunk...)
-			break
-		}
-		lineBytes := chunk[:i+1]
-		if len(a.pending) > 0 {
-			a.pending = append(a.pending, lineBytes...)
-			lineBytes = a.pending
-		}
-		out = a.consumeLine(lineBytes, out)
-		a.pending = a.pending[:0]
-		chunk = chunk[i+1:]
-	}
+	a.lines.feed(chunk, func(line []byte) bool {
+		out = a.consumeLine(line, out)
+		return true
+	})
 	return out
 }
 
@@ -145,12 +134,11 @@ func (a *JSONLAdapter) Feed(chunk []byte) []Record {
 // transcript is final; while an agent is still writing, a partial line is
 // usually an unfinished write.
 func (a *JSONLAdapter) Flush() []Record {
-	if len(a.pending) == 0 {
+	line := a.lines.flush()
+	if line == nil {
 		return nil
 	}
-	lineBytes := a.pending
-	a.pending = nil
-	return a.consumeLine(lineBytes, nil)
+	return a.consumeLine(line, nil)
 }
 
 func (a *JSONLAdapter) consumeLine(lineBytes []byte, out []Record) []Record {
