@@ -49,8 +49,23 @@ func TestTrackedSpellings_CaseInsensitiveFilesystemWindows(t *testing.T) {
 // its entries ignoring case and the others respect case.
 type ignoresCaseIn string
 
+func (dir ignoresCaseIn) IgnoresCase(d string) bool {
+	return d == string(dir)
+}
+
 func (dir ignoresCaseIn) SameEntry(file, spelling string) bool {
 	return path.Dir(file) == string(dir) && path.Dir(spelling) == string(dir) && strings.EqualFold(file, spelling)
+}
+
+// TestAnyDirectoryIgnoresCase checks that each directory on a path counts,
+// not only the one holding the file: SRC/App.go in a root that ignores case
+// opens src/App.go even when src/ respects case, as Windows allows.
+func TestAnyDirectoryIgnoresCase(t *testing.T) {
+	t.Parallel()
+	require.True(t, anyDirectoryIgnoresCase(ignoresCaseIn("."), []string{"SRC/App.go"}), "the root ignores case")
+	require.True(t, anyDirectoryIgnoresCase(ignoresCaseIn("src"), []string{"README.md", "src/a/b.go"}), "an ancestor of b.go ignores case")
+	require.False(t, anyDirectoryIgnoresCase(ignoresCaseIn("src"), []string{"README.md", "docs/a.md"}), "no directory on these paths ignores case")
+	require.False(t, anyDirectoryIgnoresCase(ignoresCaseIn("."), nil))
 }
 
 // TestTrackedSpelling covers the rule itself, independent of the filesystem.

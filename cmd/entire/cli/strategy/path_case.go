@@ -31,9 +31,10 @@ import (
 // and it opens the same file as the index's spelling: in a directory that
 // respects case, two hard-linked names are two entries git tracks apart. A
 // deleted file has nothing left to open: it is rewritten when the index has
-// exactly one spelling of it and that spelling is gone too. Where no reported path's directory ignores case,
-// nothing changes and git is not asked, since readme.md and README.md are two
-// files there. If git cannot answer, the files are returned as they are.
+// exactly one spelling of it and that spelling is gone too. Where no
+// directory on a reported path ignores case, nothing changes and git is not
+// asked, since readme.md and README.md are two files there. If git cannot
+// answer, the files are returned as they are.
 func TrackedSpellings(ctx context.Context, repoRoot string, files []string) []string {
 	return trackedSpellingsOf(ctx, repoRoot, files)[0]
 }
@@ -79,8 +80,9 @@ func trackedSpellingsOf(ctx context.Context, repoRoot string, lists ...[]string)
 	return spelled
 }
 
-// entryCases is what trackedSpelling asks of a worktreedir.CaseProbe.
+// entryCases is what TrackedSpellings asks of a worktreedir.CaseProbe.
 type entryCases interface {
+	IgnoresCase(dir string) bool
 	SameEntry(file, spelling string) bool
 }
 
@@ -121,13 +123,21 @@ func lstatIn(worktree *os.Root, repoRoot, file string) (fs.FileInfo, error) {
 	return worktree.Lstat(name) //nolint:wrapcheck // callers only test for success and fs.ErrNotExist
 }
 
-// anyDirectoryIgnoresCase reports whether a directory holding one of files
-// finds its entries under a name in another case. Where none does, a
-// spelling in another case is another file, and git need not be asked.
-func anyDirectoryIgnoresCase(cases *worktreedir.CaseProbe, files []string) bool {
+// anyDirectoryIgnoresCase reports whether a directory on the path to one of
+// files, from the one holding it up to the worktree root, finds its entries
+// under a name in another case. Where none does, a spelling in another case
+// is another file, and git need not be asked. The directory holding the file
+// alone does not tell: on Windows, SRC/App.go in a root that ignores case
+// opens src/App.go even when src/ respects case.
+func anyDirectoryIgnoresCase(cases entryCases, files []string) bool {
 	for _, file := range files {
-		if cases.IgnoresCase(path.Dir(file)) {
-			return true
+		for dir := path.Dir(file); ; dir = path.Dir(dir) {
+			if cases.IgnoresCase(dir) {
+				return true
+			}
+			if dir == "." || dir == "/" {
+				break
+			}
 		}
 	}
 	return false
