@@ -69,6 +69,30 @@ type TrailGate struct {
 	CompletedAt      *time.Time          `json:"completed_at"`
 }
 
+// TrailGateTypeEval is the gate type of a gate on an agent's eval. Its
+// GateKey is the agent id.
+const TrailGateTypeEval = "eval"
+
+// TrailEvalGateValue is the part of an eval gate's Value the CLI reads: the
+// agent, its eval's type and direction, the threshold, and the head's
+// reading. Threshold and Value are a number, a size, a bool, or null,
+// depending on ValueType. ConfigurationIssue is set when the gate is skipped
+// because its setup no longer holds (the agent is paused, for example).
+type TrailEvalGateValue struct {
+	AgentName          string                    `json:"agent_name"`
+	ValueType          string                    `json:"value_type"`
+	Polarity           string                    `json:"polarity"`
+	Threshold          json.RawMessage           `json:"threshold"`
+	Value              json.RawMessage           `json:"value"`
+	ConfigurationIssue *TrailEvalGateConfigIssue `json:"configuration_issue"`
+}
+
+// TrailEvalGateConfigIssue says why an eval gate is not enforced.
+type TrailEvalGateConfigIssue struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
 // TrailGateReviewer is a reviewer's standing on an approvals gate.
 type TrailGateReviewer struct {
 	Login           string  `json:"login"`
