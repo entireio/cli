@@ -380,8 +380,12 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string) []tag
 				continue
 			}
 		}
-		quotes := quoteScan{s: s[:cmd[1]+len(rest)], i: cmd[1], skip: skip, skipEnd: skipEnd, substitutions: true}
-		regions = f.appendFlags(regions, s, &quotes, rest, stringEnd)
+		from := cmd[1]
+		if isEntrypointArgument(s, cmd[0]) {
+			from = entrypointArgsStart(s, cmd[0], cmd[1]+len(rest), stringEnd)
+		}
+		quotes := quoteScan{s: s[:cmd[1]+len(rest)], i: from, skip: skip, skipEnd: skipEnd, substitutions: true}
+		regions = f.appendFlags(regions, s, &quotes, s[from:cmd[1]+len(rest)], stringEnd)
 	}
 	return regions
 }
@@ -910,12 +914,18 @@ func (c *commandStart) word(word string) {
 		// A redirection runs nothing (2>/dev/null mysql -pX), and an
 		// operator alone takes the next word as its target (> out).
 		_, c.redirectArg = redirection(word)
+	case c.optionArg && c.execArg && c.wrapper == envCommand:
+		c.splitString(word)
 	case c.optionArg:
 		c.optionArg, c.command, c.execArg = false, c.execArg, false
 	case c.wrapper != "" && strings.HasPrefix(word, "-"):
 		// An option of the wrapper (sudo -E, env -i), some of which take
 		// the next word as their argument (sudo -u root), and a few the
-		// command to run (env -S mysql).
+		// command to run (env -S mysql, env -Ssudo).
+		if line, ok := joinedSplitString(c.wrapper, word); ok {
+			c.splitString(line)
+			return
+		}
 		c.optionArg = takesArgument(c.wrapper, word)
 		c.execArg = c.optionArg && runsArgument(c.wrapper, word)
 	case isContainerClient(c.wrapper) && !c.sub:
@@ -950,6 +960,40 @@ func (c *commandStart) word(word string) {
 		c.text = !c.lenient || !c.command && isPrintCommand(programName(word))
 		c.command = true
 	}
+}
+
+// splitString reads line, the string env -S splits into words, as the
+// start of the command env runs, which goes on after it
+// (env -S sudo ssh db mysql -pX, env -S 'sudo -u x' mysql -pX). Its quotes
+// are dropped.
+func (c *commandStart) splitString(line string) {
+	*c = commandStart{from: c.from, i: c.i, j: c.j, lenient: c.lenient}
+	for _, field := range strings.Fields(quoteRemover.Replace(line)) {
+		c.word(field)
+	}
+}
+
+// quoteRemover drops the quotes of a string env -S splits.
+var quoteRemover = strings.NewReplacer(`'`, "", `"`, "")
+
+// joinedSplitString returns the string joined to option, an option of
+// wrapper, when it is env's -S with its argument (--split-string=sudo,
+// -Ssudo, -iSsudo).
+func joinedSplitString(wrapper, option string) (string, bool) {
+	if wrapper != envCommand {
+		return "", false
+	}
+	if line, ok := strings.CutPrefix(option, "--split-string="); ok {
+		return line, true
+	}
+	if strings.HasPrefix(option, "--") {
+		return "", false
+	}
+	i := strings.IndexAny(option[1:], wrapperArgOptions[envCommand]) + 1
+	if i == 0 || option[i] != 'S' || i == len(option)-1 {
+		return "", false
+	}
+	return option[i+1:], true
 }
 
 // programName returns the program a word names, without its directory
@@ -1261,13 +1305,40 @@ func joinedWordEnd(s string, open, i, stringEnd int) int {
 
 // isCodeSeparator reports whether s[i] is a comma or closing bracket after a
 // string, opened at open, that is an element of code: one after an opening
-// bracket, a comma or a colon.
+// bracket, or after a comma or colon that follows another element
+// (["mysql", "-px"], f(db, "-px")), not a shell word (mysql -h db, "-px",y).
 func isCodeSeparator(s string, open, i int) bool {
 	if i == len(s) || strings.IndexByte(",]}", s[i]) < 0 {
 		return false
 	}
 	before := strings.TrimRight(s[:open], " \t")
-	return before != "" && strings.IndexByte("[({,:", before[len(before)-1]) >= 0
+	switch {
+	case before == "":
+		return false
+	case strings.IndexByte("[({", before[len(before)-1]) >= 0:
+		return true
+	case strings.IndexByte(",:", before[len(before)-1]) >= 0:
+		return endsCodeElement(strings.TrimRight(before[:len(before)-1], " \t"))
+	}
+	return false
+}
+
+// endsCodeElement reports whether code ends with an element of code: a
+// string or a bracket, or a name right after an opening bracket or a comma
+// (f(db, ...), [a, b, ...]).
+func endsCodeElement(code string) bool {
+	if code == "" {
+		return false
+	}
+	if strings.IndexByte(`"')]}`, code[len(code)-1]) >= 0 {
+		return true
+	}
+	n := len(code)
+	for n > 0 && (code[n-1] == '.' || isWordByte(code[n-1])) {
+		n--
+	}
+	before := strings.TrimRight(code[:n], " \t")
+	return n < len(code) && before != "" && strings.IndexByte("[({,", before[len(before)-1]) >= 0
 }
 
 // ansiCQuoteEnd returns the end of the ANSI-C quoted string ($'...') that
@@ -1810,6 +1881,55 @@ func commandFrom(s string, from, start int) int {
 	return b
 }
 
+// isEntrypointArgument reports whether the client name at start is the
+// argument of a container's --entrypoint (docker run --entrypoint mysql,
+// --entrypoint=/usr/bin/mysql), whose own arguments come after the image.
+func isEntrypointArgument(s string, start int) bool {
+	window := s[max(0, start-maxEntrypointPart):start]
+	part := window[strings.LastIndexAny(window, " \t")+1:]
+	if strings.HasPrefix(part, "--entrypoint=") {
+		return true
+	}
+	if part != "" && !strings.HasSuffix(part, "/") || len(part) == len(window) {
+		return false
+	}
+	before := strings.TrimRight(window[:len(window)-len(part)], " \t")
+	option := strings.TrimSuffix(before, "--entrypoint")
+	return len(option) < len(before) && (option == "" || option[len(option)-1] == ' ' || option[len(option)-1] == '\t')
+}
+
+// maxEntrypointPart bounds how far before a client name isEntrypointArgument
+// looks for --entrypoint, so a long word of names is not read again for each.
+const maxEntrypointPart = 256
+
+// entrypointArgsStart returns where the arguments of a container's
+// entrypoint, whose name starts at start, begin: after the container
+// client's options and the image (docker run --entrypoint mysql
+// -p3306:3306 mysql:8 -pX), or at end when no image comes before it.
+// stringEnd is where the quoted string holding the command ends, or -1.
+func entrypointArgsStart(s string, start, end, stringEnd int) int {
+	i := min(shellWordEnd(s, start, stringEnd), end)
+	optionArg := false
+	for i < end {
+		if s[i] == ' ' || s[i] == '\t' {
+			i++
+			continue
+		}
+		j := min(max(shellWordEnd(s, i, stringEnd), i+1), end)
+		word := s[i:j]
+		switch {
+		case optionArg:
+			optionArg = false
+		case strings.HasPrefix(word, "-"):
+			optionArg = takesArgument("docker", word)
+		default:
+			return j
+		}
+		i = j
+	}
+	return end
+}
+
 // isContainerNameArgument reports whether the client name at start is the
 // value of --name (docker run --name mysql -p3306 mysql:8), not a command.
 func isContainerNameArgument(s string, start int) bool {
@@ -1908,7 +2028,12 @@ func passwordValueRegion(s string, v cliValue, dashFlag, requireNonWord bool) (t
 // isProseValue reports whether v, the value after a long flag and a blank,
 // is a word of prose (to, flag, string) in a sentence: one that ends a
 // sentence or clause ("the --password flag.", "--password option, or"), or
-// that more prose follows: blanks, then a letter ("--password to set it").
+// a grammatical word that another word follows ("--password to set it",
+// "--password" is required). A word that names what the flag takes (flag,
+// string, value) may also be the password, so another word makes it prose
+// only when that word is prose too ("the --password flag is"), the text of
+// a help line ("--password string   Password for") or one of two more words;
+// a single word after it may be an argument (mongosh --password string db).
 func isProseValue(s string, v cliValue) bool {
 	value := s[v.start:v.end]
 	word := strings.TrimRight(value, ".,:!?")
@@ -1918,8 +2043,36 @@ func isProseValue(s string, v cliValue) bool {
 	if len(word) < len(value) {
 		return v.end == len(s) || unicode.IsSpace(rune(s[v.end]))
 	}
-	next := strings.TrimLeft(s[v.end:], " \t")
-	return len(next) < len(s[v.end:]) && next != "" && unicode.IsLetter(rune(next[0]))
+	gap := len(s[v.end:]) - len(strings.TrimLeft(s[v.end:], " \t"))
+	first, rest := proseWord(s[v.end+gap:])
+	switch {
+	case gap == 0 || first == "":
+		return false
+	case !slices.Contains(proseNouns, word), gap > 1 || s[v.end] == '\t', slices.Contains(proseWords, strings.TrimRight(first, ".,:!?")):
+		return true
+	}
+	second, _ := proseWord(strings.TrimLeft(rest, " \t"))
+	return second != "" && len(rest) > len(strings.TrimLeft(rest, " \t"))
+}
+
+// proseWord returns the word of prose that text starts with, letters and
+// the punctuation after them, and the text after it; the word is empty when
+// text starts with something else.
+func proseWord(text string) (word, rest string) {
+	end := 0
+	for end < len(text) && unicode.IsLetter(rune(text[end])) {
+		end++
+	}
+	if end == 0 {
+		return "", text
+	}
+	for end < len(text) && strings.IndexByte(".,:!?", text[end]) >= 0 {
+		end++
+	}
+	if end < len(text) && !unicode.IsSpace(rune(text[end])) {
+		return "", text
+	}
+	return text[:end], text[end:]
 }
 
 // isNetrcDeclaration reports whether the .netrc match at start gives its
@@ -1935,8 +2088,14 @@ func isNetrcDeclaration(s string, start int, machine, login, password string) bo
 	}
 	before := s[max(0, start-maxDeclarationScan):start]
 	opened := max(strings.LastIndexByte(before, '{'), strings.LastIndexByte(before, '('))
-	return opened > max(strings.LastIndexByte(before, '}'), strings.LastIndexByte(before, ')'))
+	return opened >= 0 && declarationFields.MatchString(before[opened+1:])
 }
+
+// declarationFields matches the fields a declaration may give before the
+// .netrc-shaped ones (struct {\n\tHost string\n\t, f(ctx context.Context, ),
+// so a shell group or subshell that runs a command is no declaration
+// ({ echo 'machine string ...'; }).
+var declarationFields = regexp.MustCompile(`^\s*(?:[A-Za-z_]\w*\s+[\w.*&\[\]]+\s*[;,]?\s*)*$`)
 
 // maxDeclarationScan bounds how far back isNetrcDeclaration looks for the
 // brace or parenthesis that opens a declaration, so the scan stays linear.
@@ -1956,8 +2115,11 @@ var declarationTypes = []string{"string", "str", "text", "varchar", "char", "byt
 // proseWords are the words that follow a long password flag and a blank in
 // prose and help text ("--password to set it", "the --password flag",
 // "--password string").
-var proseWords = []string{
+var proseWords = append([]string{
 	"a", "an", "and", "are", "as", "at", "be", "but", "by", "can", "does", "for", "from", "if", "in", "into", "is", "it", "not", "of", "on", "or", "so", "than", "that", "the", "then", "this", "to", "was", "when", "where", "which", "while", "will", "with", "you", "your",
 	"also", "instead", "only", "here", "now", "too", "via", "etc",
-	"flag", "flags", "option", "options", "argument", "arguments", "arg", "args", "parameter", "parameters", "param", "value", "values", "string", "prompt", "field",
-}
+}, proseNouns...)
+
+// proseNouns are the proseWords that name what a flag takes, which a
+// password may also be (mongosh --password string db).
+var proseNouns = []string{"flag", "flags", "option", "options", "argument", "arguments", "arg", "args", "parameter", "parameters", "param", "value", "values", "string", "prompt", "field"}
