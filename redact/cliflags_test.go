@@ -150,6 +150,11 @@ func TestString_CommandLinePasswords(t *testing.T) {
 		{name: "client in a container named ssh in a substitution", input: "mysql -e $(docker exec ssh mysql -p" + p + ") app", want: "mysql -e $(docker exec ssh mysql -pREDACTED) app"},
 		{name: "long program path in a quoted argument", input: "docker exec mysql sh -c '/" + strings.Repeat("d", 80) + "/bin/mysql -p" + p + "'", want: "docker exec mysql sh -c '/" + strings.Repeat("d", 80) + "/bin/mysql -pREDACTED'"},
 		{name: "many client names in one substitution", input: "mysql -e $(echo " + strings.Repeat("mysql ", 4000) + ") -p" + p, want: "mysql -e $(echo " + strings.Repeat("mysql ", 4000) + ") -pREDACTED"},
+		{name: "openssl source with a single-quoted password", input: "openssl enc -pass pass:'$SUMMER2026'", want: "openssl enc -pass pass:'REDACTED'"},
+		{name: "openssl source with a substitution printing a literal", input: `openssl enc -pass pass:"$(printf ` + p + `)"`, want: `openssl enc -pass pass:"REDACTED"`},
+		{name: "docker login after global options", input: `docker --config "/my dir" -D login -u me -p ` + p + " ghcr.io", want: `docker --config "/my dir" -D login -u me -p REDACTED ghcr.io`},
+		{name: "quoted docker program path", input: `"/usr/bin/docker" login -u me -p ` + p, want: `"/usr/bin/docker" login -u me -p REDACTED`},
+		{name: "client run through ssh with a quoted option argument", input: `ssh -o "ProxyJump jump" db mysql -p` + p, want: `ssh -o "ProxyJump jump" db mysql -pREDACTED`},
 	})
 }
 
@@ -213,6 +218,8 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		"sudo ssh -o BatchMode=yes -l admin mysql -p2222",
 		"docker exec mysql sh -c 'ssh mysql -p2222'",
 		"docker exec mysql sh -c 'ssh -i ~/.ssh/key mysql -p2222'",
+		`ssh -i "/tmp/key" mysql -p2222`,
+		`docker exec mysql sh -c 'ssh -o "ProxyJump jump host" mysql -p2222'`,
 		"mysql -e $(ssh mysql -p2222) app",
 		`docker exec mysql sh -c 'mysql -e "select mysql -pDebug"'`,
 		`mysql -h "$(printf %s mysql -p3306)"`,
@@ -227,6 +234,8 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		"mysql -u root -p$(cat /run/secrets/pw) db",
 		"mysql -u root -e 'select 1' -p",
 		"docker run --name mysql \\\n  -p 3306:3306 mysql:8",
+		"docker run --name login -p 8080:80 nginx",
+		`openssl enc -pass pass:"$SUMMER2026"`,
 		"Use `mysql`, `docker login -p`, `sshpass -p` and `openssl -pass pass:` with care.",
 		`fmt.Sprintf("machine %s login %s password %s", host, user, pass)`,
 		// declarations
