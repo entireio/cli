@@ -210,6 +210,9 @@ func TestString_CommandLinePasswordsReviewCases(t *testing.T) {
 		{name: "long flag quoted with its value", input: `wget "--password=Summer 2026` + p + `" https://example.com`, want: `wget "--password=REDACTED" https://example.com`},
 		{name: "long flag single-quoted with its value", input: `wget '--password=Summer 2026` + p + `' x`, want: `wget '--password=REDACTED' x`},
 		{name: "long flag quoted with its value in a JSON string", input: `{"cmd":"wget \"--password=Summer 2026` + p + `\" x"}`, want: `{"cmd":"wget \"--password=REDACTED\" x"}`},
+		{name: "long flag quoted with the first piece of its value", input: `wget "--password=changeme"` + p + ` x`, want: `wget "--password=REDACTED x`},
+		{name: "long flag quoted with its value and a quoted piece after it", input: `wget '--password=abc'"Summer 2026` + p + `" x`, want: `wget '--password=REDACTED x`},
+		{name: "long flag quoted with its value in a script before the script's quote", input: `sh -c "wget '--password=` + p + `'"; echo "ok"`, want: `sh -c "wget '--password=REDACTED'"; echo "ok"`},
 		{name: "quoted long flag before a quoted value", input: `wget "--password" "Summer 2026` + p + `" x`, want: `wget "--password" "REDACTED" x`},
 		{name: "openssl flag after a descriptor redirection", input: "openssl enc -aes-128-cbc -in /dev/null 2>&1 -pass pass:" + p, want: "openssl enc -aes-128-cbc -in /dev/null 2>&1 -pass pass:REDACTED"},
 		{name: "mysql flag after a descriptor redirection", input: "mysql 2>&1 -p" + p, want: "mysql 2>&1 -pREDACTED"},
@@ -220,6 +223,15 @@ func TestString_CommandLinePasswordsReviewCases(t *testing.T) {
 		{name: "client in a function body after the function keyword", input: "docker exec mysql sh -c 'function init_db { mysql -p" + p + "; }; init_db'", want: "docker exec mysql sh -c 'function init_db { mysql -pREDACTED; }; init_db'"},
 		{name: "many commands with no blank in a quoted script", input: "sh -c '" + strings.Repeat("mysql;", 4000) + "mysql -p" + p + "'", want: "sh -c '" + strings.Repeat("mysql;", 4000) + "mysql -pREDACTED'"},
 		{name: "client run through a wrapper path holding an equals sign", input: "docker exec mysql sh -c '/opt/build=debug/bin/env mysql -p" + p + "'", want: "docker exec mysql sh -c '/opt/build=debug/bin/env mysql -pREDACTED'"},
+		{name: "openssl flag after a quoted file name ending in the flag", input: "openssl enc -aes-128-cbc -in 'file -pass ' -pass 'pass:" + p + "'", want: "openssl enc -aes-128-cbc -in 'file -pass ' -pass 'pass:REDACTED'"},
+		{name: "mysql flag after a quoted argument ending in the flag", input: "mysql -e 'x -p' -p'" + p + "'", want: "mysql -e 'x -p' -p'REDACTED'"},
+		{name: "openssl flag after a process substitution holding a pipeline", input: "openssl enc -aes-128-cbc -in <(printf data | cat) -pass pass:" + p, want: "openssl enc -aes-128-cbc -in <(printf data | cat) -pass pass:REDACTED"},
+		{name: "client in a process substitution", input: "diff <(mysql -p" + p + " -e 'q' | sort) b", want: "diff <(mysql -pREDACTED -e 'q' | sort) b"},
+		{name: "ssh destination after sshpass with a password", input: "sshpass -p " + p + " ssh mysql -p2222", want: "sshpass -p REDACTED ssh mysql -p2222"},
+		{name: "client run through sshpass in a script", input: "sh -c 'sshpass -e mysql -p" + p + "'", want: "sh -c 'sshpass -e mysql -pREDACTED'"},
+		{name: "openssl flag after a process substitution holding a semicolon", input: "openssl enc -aes-128-cbc -pbkdf2 -P -in <(printf ''; true) -pass pass:" + p, want: "openssl enc -aes-128-cbc -pbkdf2 -P -in <(printf ''; true) -pass pass:REDACTED"},
+		{name: "long flag quoted with its value and a double-quoted piece right after it", input: `tool "--pass=abc""` + p + `"`, want: `tool "--pass=REDACTED`},
+		{name: "many quoted commands with no blank", input: strings.Repeat(`"mysql";`, 4000) + "mysql -p" + p, want: strings.Repeat(`"mysql";`, 4000) + "mysql -pREDACTED"},
 	})
 }
 
@@ -339,6 +351,10 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		"mysql -e x 2>&1 | ssh -p2222 host",
 		"mysql -e x &>/dev/null & ssh -p2222 host",
 		`mysql -e x\>& ssh -p2222 host`,
+		"mysql -e x <(ssh -p2222 h | cat)",
+		"sshpass -e ssh mysql -p2222",
+		"sshpass -f file ssh mysql -p2222",
+		"sh -c 'sshpass -e ssh mysql -p2222'",
 		"Use `mysql`, `docker login -p`, `sshpass -p` and `openssl -pass pass:` with care.",
 		`fmt.Sprintf("machine %s login %s password %s", host, user, pass)`,
 		// declarations
