@@ -18,13 +18,14 @@ const cliFlagValue = `"(?:[^"\r\n]|\\\r?\n)*"|'[^'\r\n]*'|[^\s'"` + "`" + `|;&()
 
 // cliSameCommandChar is one piece of the text between a command name and one
 // of its flags. It skips quoted strings (with escapes inside double quotes:
-// "abc\";x"), command substitutions ($(printf x; true)), escaped characters (\;) and escaped line breaks (a
-// command continued with a trailing backslash), and otherwise never crosses
-// a line break, a shell operator or a backtick (which starts a command
-// substitution, or ends Markdown code), so a flag is only read as belonging
-// to the command that precedes it in the same pipeline segment. The & and |
-// of a redirection (2>&1, &>log, >|f) are no shell operator.
-const cliSameCommandChar = `\\\r?\n|\\[^\r\n]|"(?:[^"\\\r\n]|\\\r?\n|\\[^\r\n])*"|'[^'\r\n]*'|` + cliSubstitutionPattern + `|[<>]&|&>|>\||[^\r\n|;&` + "`" + `]`
+// "abc\";x"), command substitutions ($(printf x; true)), parameter
+// expansions (${IN:-a&b}), escaped characters (\;) and escaped line breaks
+// (a command continued with a trailing backslash), and otherwise never
+// crosses a line break, a shell operator or a backtick (which starts a
+// command substitution, or ends Markdown code), so a flag is only read as
+// belonging to the command that precedes it in the same pipeline segment.
+// The & and | of a redirection (2>&1, &>log, >|f) are no shell operator.
+const cliSameCommandChar = `\\\r?\n|\\[^\r\n]|"(?:[^"\\\r\n]|\\\r?\n|\\[^\r\n])*"|'[^'\r\n]*'|` + cliSubstitutionPattern + `|\$` + cliBraces2 + `|[<>]&|&>|>\||[^\r\n|;&` + "`" + `]`
 
 const cliSameCommand = `(?:` + cliSameCommandChar + `)`
 
@@ -79,10 +80,10 @@ const (
 const cliGlobalOptions = `(?:` + cliBlank + `-` + cliWordPiece + `+(?:` + cliBlank + cliWordPiece + `+)?)*`
 
 // cliWordPiece is one piece of a shell word: a quoted string, a command
-// substitution, an escaped line break, which
-// the shell removes (--config "/tmp/do\<newline>cker"), or another
+// substitution, a parameter expansion (${D:-a b}), an escaped line break,
+// which the shell removes (--config "/tmp/do\<newline>cker"), or another
 // character.
-const cliWordPiece = `(?:"(?:[^"\\\r\n]|\\[^\r\n]|\\\r?\n)*"|'[^'\r\n]*'|` + cliSubstitutionPattern + `|\\\r?\n|[^\s'"` + "`" + `|;&()<>])`
+const cliWordPiece = `(?:"(?:[^"\\\r\n]|\\[^\r\n]|\\\r?\n)*"|'[^'\r\n]*'|` + cliSubstitutionPattern + `|\$` + cliBraces2 + `|\\\r?\n|[^\s'"` + "`" + `|;&()<>])`
 
 // cliSegmentRest matches the rest of a pipeline segment after a command name.
 // cliEscapedSegmentRest also skips strings in escaped double quotes, which
@@ -96,11 +97,12 @@ var (
 
 // cliLongPasswordPattern matches a GNU-style password flag on any command line
 // (mysql --password=..., mongosh --password ..., az login --password ...).
-// Group 1 is the quote that closes a quoted flag ("--password" x), group 2
-// "=" or the blank that separates the flag from its value, and group 3 the
-// value. --password-stdin and --password-file never match: the flag must be
-// followed by "=" or a blank.
-var cliLongPasswordPattern = regexp.MustCompile(`(?:^|[\s"'])--(?:password|passwd|pass)(["']?)(=|` + cliBlank + `)(` + cliFlagValue + `)`)
+// Group 1 is the quote that closes a quoted flag ("--password" x, or
+// \"--password\" x in a double-quoted string), group 2 "=" or the blank that
+// separates the flag from its value, and group 3 the value. --password-stdin
+// and --password-file never match: the flag must be followed by "=" or a
+// blank.
+var cliLongPasswordPattern = regexp.MustCompile(`(?:^|[\s"'])--(?:password|passwd|pass)((?:\\?["'])?)(=|` + cliBlank + `)(` + cliFlagValue + `)`)
 
 // cliPasswordFlag is the short password flag of one family of clients. A
 // short flag means different things to different programs (-p is a port to
@@ -166,10 +168,11 @@ var cliPasswordFlags = []cliPasswordFlag{
 		command: regexp.MustCompile(`\bredis-cli\b`),
 		flag:    regexp.MustCompile(cliShortFlag(`\s`, "a", cliBlank)),
 	},
+	// openssl takes a source after a blank or "=" (-pass=pass:x).
 	{
 		needles: []string{"pass:"},
 		command: regexp.MustCompile(`\bopenssl\b`),
-		flag:    regexp.MustCompile(`\s(?:-pass(?:in|out|word)?|'-pass(?:in|out|word)?'|"-pass(?:in|out|word)?")` + cliBlank + `(` + cliFlagValue + `)`),
+		flag:    regexp.MustCompile(`\s(?:-pass(?:in|out|word)?|'-pass(?:in|out|word)?'|"-pass(?:in|out|word)?")(?:=|` + cliBlank + `)(` + cliFlagValue + `)`),
 		prefix:  "pass:",
 	},
 }
@@ -317,7 +320,7 @@ func longFlagValue(s string, loc []int, stringEnd int) (cliValue, bool) {
 		switch {
 		case loc[3] > loc[2]:
 			// "--password" x: the quote after the name closes this one.
-			if closeAt != loc[2]-n+1 {
+			if closeAt != loc[3]-n {
 				return cliValue{}, false
 			}
 		case s[loc[4]] == '=' && closeAt > loc[6]:
@@ -479,14 +482,14 @@ func (n *nestedScan) rest(f cliPasswordFlag, s string, cmd []int, closeAt, strin
 		if !parent.runsAt(s, arg.from-arg.quote) {
 			return "", 0, 0, false
 		}
-		rest = s[cmd[1] : end+len(pattern.FindString(s[end:max(parent.to, end)]))]
+		rest = s[cmd[1] : end+len(segmentMatch(pattern, s[end:max(parent.to, end)]))]
 		parent.readEnd = cmd[1] + len(rest)
 		return rest, arg.to, end, true
 	}
 	if !arg.runsAt(s, p) {
 		return "", 0, 0, false
 	}
-	rest = pattern.FindString(s[cmd[1]:max(arg.to, cmd[1])])
+	rest = segmentMatch(pattern, s[cmd[1]:max(arg.to, cmd[1])])
 	arg.readEnd = cmd[1] + len(rest)
 	return rest, closeAt, stringEnd, true
 }
@@ -506,13 +509,17 @@ func (n *nestedScan) descend(s string, p int) {
 			if !arg.runsString(s) {
 				child.kind = textArg
 			}
+			// A shell's -c script is read as a substitution is, as on
+			// the top level, so a name after another command's
+			// arguments runs (sh -c 'case x in x) mysql -pX;; esac').
+			child.starts.lenient = runsScript(s, arg.from, arg.scan.start)
 		} else if start, end, ok := arg.scan.substitutionAt(p); ok {
 			child.kind, child.from, child.to = substitutionArg, start+2, end-1
+			child.starts.lenient = true
 		} else {
 			return
 		}
 		child.scan = quoteScan{s: s[:child.to], i: child.from, substitutions: true}
-		child.starts.lenient = child.kind == substitutionArg
 		n.args = append(n.args, child)
 	}
 }
@@ -587,12 +594,31 @@ func (f cliPasswordFlag) segmentRest(s string, lines *quoteScan, paths *programP
 	pattern := segmentRestPattern(s, closeAt)
 	switch {
 	case closeAt < i:
-		return pattern.FindString(s[i:])
+		return segmentMatch(pattern, s[i:])
 	case paths.blankAfter(s, lines.inner(), i, closeAt) && !paths.isProgramPath(f, s, lines, closeAt):
-		return pattern.FindString(s[i:closeAt])
+		return segmentMatch(pattern, s[i:closeAt])
 	default:
-		return s[i : stringEnd+len(cliSegmentRest.FindString(s[stringEnd:]))]
+		return s[i : stringEnd+len(segmentMatch(cliSegmentRest, s[stringEnd:]))]
 	}
+}
+
+// segmentMatch returns the rest of a pipeline segment that pattern matches
+// at the start of text, carried on past each command substitution that
+// pattern ended inside, at a ";;" of a case statement
+// ($(case x in x) printf h;; esac)).
+func segmentMatch(pattern *regexp.Regexp, text string) string {
+	n := len(pattern.FindString(text))
+	if !strings.Contains(text[:n], "case") {
+		return text[:n]
+	}
+	q := quoteScan{s: text, substitutions: true}
+	for n < len(text) {
+		if _, quoted := q.stringAt(n); quoted || n <= q.subStart || n >= q.subEnd {
+			break
+		}
+		n = q.subEnd + len(pattern.FindString(text[q.subEnd:]))
+	}
+	return text[:n]
 }
 
 // programPathMemo records whether the text of the quoted string that a
@@ -642,6 +668,7 @@ func (m *programPathMemo) isProgramPath(f cliPasswordFlag, s string, lines *quot
 // is quoted in, which opens nothing ("/usr/bin/mysql" -e "select 1)" -pX).
 func untilUnmatchedParen(rest string, skip, skipEnd int) string {
 	depth := 0
+	var cases caseMemo
 	for i := 0; i < len(rest); i++ {
 		if i == skip {
 			i = skipEnd - 1
@@ -650,6 +677,14 @@ func untilUnmatchedParen(rest string, skip, skipEnd int) string {
 		if end, quoteLen := quotedPiece(rest, i); quoteLen > 0 {
 			i = end - 1
 			continue
+		}
+		if isSubstitutionStart(rest, i) {
+			// A substitution closes what it opens, also the patterns of
+			// a case statement in it.
+			if n := cases.substitutionLen(rest, i); n > 0 {
+				i += n - 1
+				continue
+			}
 		}
 		switch rest[i] {
 		case '\\':
@@ -689,8 +724,9 @@ func (f cliPasswordFlag) isProgramPath(inside string) bool {
 
 // isCommandToken reports whether the client name at s[start:end] is a
 // program name, alone or at the end of a path (mysql, /usr/bin/mysql,
-// mysql.exe), rather than part of a host or file name (mysql.example.com,
-// ~/.ssh/mysql.pem, user@mysql, mysql:8, mysql-client, --name=mysql).
+// mysql.exe, C:\tools\mysql.exe), rather than part of a host or file name
+// or a directory (mysql.example.com, ~/.ssh/mysql.pem, user@mysql, mysql:8,
+// mysql-client, --name=mysql, /opt/mysql/bin/ssh, C:\mysql\ssh.exe).
 func isCommandToken(s string, start, end int) bool {
 	if start > 0 && strings.IndexByte(".-@:=%+", s[start-1]) >= 0 && !hasExecOptionBefore(s, start) {
 		return false
@@ -704,6 +740,9 @@ func isCommandToken(s string, start, end int) bool {
 		return ext <= len(s) && strings.EqualFold(s[end:ext], ".exe") && (ext == len(s) || !isWordByte(s[ext]))
 	case strings.IndexByte("-@:=/+", c) >= 0:
 		return false
+	case c == '\\':
+		// A directory of a Windows path (C:\mysql\ssh.exe).
+		return end+1 == len(s) || !isWordByte(s[end+1])
 	}
 	return true
 }
@@ -902,6 +941,11 @@ func (c *commandStart) runs() bool {
 // word reads one word of the argument.
 func (c *commandStart) word(word string) {
 	switch {
+	case c.lenient && strings.HasSuffix(word, ")"):
+		// In a script or a substitution, the end of a case pattern
+		// (case x in x) echo mysql -p2222;; esac), after which a command
+		// starts.
+		*c = commandStart{from: c.from, i: c.i, j: c.j, lenient: true}
 	case c.text:
 	case c.redirectArg:
 		c.redirectArg = false
@@ -1030,16 +1074,27 @@ func joinedSplitString(wrapper, option string) (string, bool) {
 	return option[i+1:], true
 }
 
-// programName returns the program a word names, without its directory
-// (/usr/bin/env, /opt/build=debug/bin/env), or the word itself when it is
-// an assignment.
+// programName returns the program a word names, without its quotes, its
+// directory or a .exe ("/usr/bin/ssh", /opt/build=debug/bin/env,
+// C:\tools\ssh.exe), or the word itself when it is an assignment.
 func programName(word string) string {
 	if eq := strings.IndexByte(word, '='); eq > 0 && isShellName(word[:eq]) {
 		// An assignment (FOO=/usr/bin/ssh), not a program.
 		return word
 	}
-	return word[strings.LastIndexByte(word, '/')+1:]
+	if strings.ContainsAny(word, `"'`) {
+		word = wordQuotes.Replace(word)
+	}
+	name := word[strings.LastIndexAny(word, `/\`)+1:]
+	if ext := len(name) - len(".exe"); ext > 0 && strings.EqualFold(name[ext:], ".exe") {
+		return name[:ext]
+	}
+	return name
 }
+
+// wordQuotes removes the quotes of a word, also escaped ones of a command in
+// a double-quoted string (sh -c "\"/usr/bin/ssh\" mysql -p2222").
+var wordQuotes = strings.NewReplacer(`\"`, "", `\'`, "", `"`, "", `'`, "")
 
 // isRedirection reports whether word is a redirection.
 func isRedirection(word string) bool {
@@ -1686,6 +1741,7 @@ type quoteScan struct {
 	// strings, and subStart and subEnd bound the last one found.
 	substitutions    bool
 	subStart, subEnd int
+	cases            caseMemo
 	// sep is where the text after the last shell operator outside the
 	// quoted strings found starts.
 	sep int
@@ -1767,7 +1823,7 @@ func (q *quoteScan) stepSubstitution() bool {
 	if !q.substitutions || !isSubstitutionStart(q.s, q.i) {
 		return false
 	}
-	n := len(cliSubstitution.FindString(q.s[q.i:]))
+	n := q.cases.substitutionLen(q.s, q.i)
 	if n == 0 {
 		return false
 	}
@@ -1779,6 +1835,145 @@ func (q *quoteScan) stepSubstitution() bool {
 // process substitution (<(...), >(...)) starts at s[i].
 func isSubstitutionStart(s string, i int) bool {
 	return i+1 < len(s) && s[i+1] == '(' && strings.IndexByte("$<>", s[i]) >= 0
+}
+
+// caseMemo finds the length of command and process substitutions at
+// increasing positions of one string. The ")" that ends a pattern of a case
+// statement in one does not close it ($(case x in x) mysql -pX;; esac)).
+type caseMemo struct {
+	// openTo is the end of the line where a case statement in a
+	// substitution did not close, 0 when none: one there is read as
+	// before, and the rest of the line is not searched again.
+	openTo int
+}
+
+// substitutionLen returns the length of the command or process substitution
+// that starts at s[i], or 0 when none does.
+func (m *caseMemo) substitutionLen(s string, i int) int {
+	rest := s[i:]
+	n := len(cliSubstitution.FindString(rest))
+	if n == 0 || i < m.openTo || !strings.Contains(rest[:n], "case") {
+		return n
+	}
+	c := caseScan{start: true}
+	from, end := 2, n
+	for c.read(rest[:end-1], from) {
+		more := len(cliParensRest.FindString(rest[end:]))
+		if more == 0 {
+			lineEnd := strings.IndexAny(rest[end:], "\r\n")
+			if lineEnd < 0 {
+				lineEnd = len(rest) - end
+			}
+			m.openTo = i + end + lineEnd
+			return n
+		}
+		from, end = end-1, end+more
+	}
+	return end
+}
+
+// cliParensRest matches text inside parentheses up to the ")" that closes
+// them.
+var cliParensRest = regexp.MustCompile(`^(?:` + cliParensPiece + `|\$?` + cliParens2 + `)*\)`)
+
+// cliParensGroup matches text in parentheses at the start of a string.
+var cliParensGroup = regexp.MustCompile(`^\$?` + cliParens2)
+
+// caseScan reads the text of a command substitution for its case
+// statements, so the ")" after a pattern is told from the one that closes
+// the substitution.
+type caseScan struct {
+	// open is the number of case statements read and not yet closed.
+	open int
+	// state is where the reading is in a case statement's head or pattern.
+	state caseState
+	// start is set where a command starts.
+	start bool
+}
+
+// caseState is a part of a case statement.
+type caseState int
+
+const (
+	// caseNone is outside the head and patterns of a case statement.
+	caseNone caseState = iota
+	// caseWord follows the case keyword, and caseSubject the word after it.
+	caseWord
+	caseSubject
+	// casePattern is in a pattern (after in, ;; or ;&), which ")" ends.
+	casePattern
+)
+
+// read reads s[from:], text inside the substitution, and reports whether
+// it ends in a pattern, so the ")" after it ends that pattern.
+func (c *caseScan) read(s string, from int) bool {
+	for i := from; i < len(s); {
+		switch ch := s[i]; {
+		case ch == ' ' || ch == '\t':
+			i++
+		case ch == ';' && c.open > 0 && i+1 < len(s) && (s[i+1] == ';' || s[i+1] == '&'):
+			// ;; ;& and ;;& end a case arm, and a pattern follows.
+			c.state, c.start = casePattern, true
+			i += 2
+		case ch == '(' && c.state == casePattern:
+			// The optional "(" before a pattern.
+			i++
+		case ch == '(':
+			i += max(1, len(cliParensGroup.FindString(s[i:])))
+			c.start = false
+		case ch == ')':
+			// Only a pattern's ")" is inside the substitution.
+			c.state, c.start = caseNone, true
+			i++
+		case strings.IndexByte("\r\n;&|", ch) >= 0:
+			// A "|" between patterns starts no command.
+			c.start = c.start || c.state != casePattern
+			i++
+		default:
+			end := caseWordEnd(s, i)
+			c.word(s[i:end])
+			i = end
+		}
+	}
+	return c.state == casePattern
+}
+
+// caseWordEnd returns the end of the word that starts at s[i], whose quoted
+// strings, escaped characters and substitutions are part of it.
+func caseWordEnd(s string, i int) int {
+	for i < len(s) && strings.IndexByte(" \t\r\n;&|()", s[i]) < 0 {
+		if end, quoteLen := quotedPiece(s, i); quoteLen == 1 {
+			i = end
+			continue
+		}
+		if s[i] == '\\' {
+			i++
+		} else if isSubstitutionStart(s, i) {
+			i += len(cliParensGroup.FindString(s[i+1:]))
+		}
+		i++
+	}
+	return min(i, len(s))
+}
+
+// word reads one word of the substitution.
+func (c *caseScan) word(w string) {
+	switch {
+	case c.state == caseWord:
+		c.state = caseSubject
+	case c.state == caseSubject && w == "in":
+		c.state = casePattern
+		c.open++
+	case c.state == caseSubject:
+		c.state = caseNone
+	case (c.start || c.state == casePattern) && w == "esac" && c.open > 0:
+		c.state = caseNone
+		c.open--
+	case c.state == casePattern:
+	case c.start && w == "case":
+		c.state = caseWord
+	}
+	c.start = isShellKeyword(w)
 }
 
 // substitutionAt returns where the command substitution that p is inside
