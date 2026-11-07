@@ -79,6 +79,22 @@ func TestStatusClaim_NoBaselineNarrowsNothing(t *testing.T) {
 	}
 }
 
+// TestNamedFiles_MatchesAnotherCase pins the case rule for transcript names
+// (#3011): a name in another case than git's matches, unless git status lists
+// a file with the name's exact spelling.
+func TestNamedFiles_MatchesAnotherCase(t *testing.T) {
+	t.Parallel()
+	modified := []string{"README.md", "src/App.go", "notes.txt"}
+	named := newNamedFiles([]string{"readme.md", "SRC/app.go"}, modified, nil, nil)
+	require.Equal(t, []string{"README.md", "src/App.go"}, named.only(modified), "kept in git's spelling")
+
+	// Both spellings listed: on a case-sensitive filesystem they are two files.
+	modified = []string{"README.md", "readme.md"}
+	named = newNamedFiles([]string{"readme.md"}, modified, nil, nil)
+	require.Equal(t, []string{"readme.md"}, named.only(modified))
+	require.Empty(t, newNamedFiles(nil, modified).only(modified))
+}
+
 func TestParseCaptureTime(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()

@@ -109,6 +109,41 @@ func TestSharedCheckout_OverlappingTurnsClaimOnlyTheirOwnFiles(t *testing.T) {
 	env.AssertCheckpointExcludesSession(t, summary, sessA.ID)
 }
 
+// TestSharedCheckout_TranscriptNameInAnotherCaseIsClaimed covers a transcript
+// that spells a path in another case than git does, as an agent on a
+// case-insensitive filesystem (macOS, Windows) can: writing readme.md there
+// changes README.md. During an overlap the turn keeps only the files its
+// transcript names, and README.md must still count as named.
+func TestSharedCheckout_TranscriptNameInAnotherCaseIsClaimed(t *testing.T) {
+	t.Parallel()
+	env := newSharedCheckoutEnv(t)
+	env.WriteFile("README.md", "readme\n")
+	env.GitAdd("README.md")
+	env.GitCommit("Add README.md")
+
+	sessA := env.NewSession()
+	sessB := env.NewSession()
+	startTurn(t, env, sessA)
+	startTurn(t, env, sessB)
+
+	env.WriteFile("a.txt", "a, edited by A\n")
+	sessA.CreateTranscript("edit a.txt", []FileChange{{Path: "a.txt", Content: "a, edited by A\n"}})
+	env.WriteFile("README.md", "readme, edited by B\n")
+	sessB.CreateTranscript("edit the readme", []FileChange{{Path: "readme.md", Content: "readme, edited by B\n"}})
+
+	endTurn(t, env, sessA)
+	endTurn(t, env, sessB)
+
+	if got := filesTouched(t, env, sessB); !slices.Contains(got, "README.md") {
+		t.Fatalf("session B FilesTouched = %v, want README.md: its transcript names it as readme.md", got)
+	}
+
+	env.GitCommitWithHooks("Commit README.md", "README.md")
+	summary := headCheckpointSummary(t, env)
+	env.AssertCheckpointContainsSession(t, summary, sessB.ID)
+	env.AssertCheckpointExcludesSession(t, summary, sessA.ID)
+}
+
 // TestSharedCheckout_StatusOnlyChangesDuringOverlapAreNotClaimed pins the
 // trade-off of the overlap rule: a file only git status shows, changed while
 // another session's turn was running, could be either session's, so neither

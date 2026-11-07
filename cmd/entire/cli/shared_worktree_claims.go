@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -56,9 +57,10 @@ type statusClaim struct {
 func (c statusClaim) narrow(ctx context.Context, modified, created, deleted []string) (claimedModified, claimedCreated, claimedDeleted []string) {
 	modified = c.withoutUnchangedDirty(modified)
 	deleted = c.withoutUnchangedDirty(deleted)
-	claimedModified = onlyFiles(modified, c.named)
-	claimedCreated = onlyFiles(created, c.named)
-	claimedDeleted = onlyFiles(deleted, c.named)
+	named := newNamedFiles(c.named, modified, created, deleted)
+	claimedModified = named.only(modified)
+	claimedCreated = named.only(created)
+	claimedDeleted = named.only(deleted)
 	unnamed := len(modified) + len(created) + len(deleted) - len(claimedModified) - len(claimedCreated) - len(claimedDeleted)
 	if unnamed == 0 || c.capturedAt.IsZero() {
 		return modified, created, deleted
@@ -96,18 +98,44 @@ func (c statusClaim) withoutUnchangedDirty(files []string) []string {
 	return kept
 }
 
-// onlyFiles returns the files of all that are also in keep, in all's order.
-func onlyFiles(all, keep []string) []string {
-	if len(all) == 0 || len(keep) == 0 {
-		return nil
+// namedFiles tells which of the files git status lists the transcript names.
+// A transcript can spell a path in another case than git does: on a
+// case-insensitive filesystem (the macOS and Windows default) an agent that
+// writes readme.md changes README.md. So a name matches a listed file of
+// another case, but only when git status lists no file with its exact
+// spelling: two listed files that differ only in case are two files.
+type namedFiles struct {
+	exact  map[string]struct{}
+	folded map[string]struct{}
+}
+
+// newNamedFiles matches named against the files git status lists.
+func newNamedFiles(named []string, listed ...[]string) namedFiles {
+	inStatus := make(map[string]struct{})
+	for _, files := range listed {
+		for _, f := range files {
+			inStatus[f] = struct{}{}
+		}
 	}
-	keepSet := make(map[string]struct{}, len(keep))
-	for _, f := range keep {
-		keepSet[f] = struct{}{}
+	n := namedFiles{exact: make(map[string]struct{}, len(named)), folded: make(map[string]struct{})}
+	for _, f := range named {
+		if _, ok := inStatus[f]; ok {
+			n.exact[f] = struct{}{}
+		} else {
+			n.folded[strings.ToLower(f)] = struct{}{}
+		}
 	}
+	return n
+}
+
+// only returns the files of all the transcript names, in all's order and
+// spelled as git spells them.
+func (n namedFiles) only(all []string) []string {
 	var kept []string
 	for _, f := range all {
-		if _, ok := keepSet[f]; ok {
+		_, exact := n.exact[f]
+		_, folded := n.folded[strings.ToLower(f)]
+		if exact || folded {
 			kept = append(kept, f)
 		}
 	}
