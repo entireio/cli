@@ -45,17 +45,17 @@ func TestTrackedSpellings_CaseInsensitiveFilesystemWindows(t *testing.T) {
 	}
 }
 
-// srcIgnoresCase stands in for a worktree whose src/ finds its entries
-// ignoring case and whose other directories respect case.
-type srcIgnoresCase struct{}
+// ignoresCaseIn stands in for a worktree where the directory it names finds
+// its entries ignoring case and the others respect case.
+type ignoresCaseIn string
 
-func (srcIgnoresCase) SameEntry(file, spelling string) bool {
-	return path.Dir(file) == "src" && path.Dir(spelling) == "src" && strings.EqualFold(file, spelling)
+func (dir ignoresCaseIn) SameEntry(file, spelling string) bool {
+	return path.Dir(file) == string(dir) && path.Dir(spelling) == string(dir) && strings.EqualFold(file, spelling)
 }
 
 // TestTrackedSpelling covers the rule itself, independent of the filesystem.
 // A hard link stands in for a case-insensitive filesystem, where both
-// spellings open one file, and srcIgnoresCase for a directory that finds its
+// spellings open one file, and ignoresCaseIn for a directory that finds its
 // entries ignoring case (worktreedir's tests cover the probe itself).
 func TestTrackedSpelling(t *testing.T) {
 	t.Parallel()
@@ -75,7 +75,10 @@ func TestTrackedSpelling(t *testing.T) {
 
 	require.NoError(t, os.Remove(filepath.Join(dir, "readme.md")))
 	require.NoError(t, os.Link(filepath.Join(dir, "README.md"), filepath.Join(dir, "readme.md")))
-	require.Equal(t, "README.md", trackedSpelling(worktree, cases, dir, "readme.md", tracked), "opens the same file")
+	require.Equal(t, "README.md", trackedSpelling(worktree, ignoresCaseIn("."), dir, "readme.md", tracked),
+		"opens the same file where the root ignores case")
+	require.Equal(t, "readme.md", trackedSpelling(worktree, cases, dir, "readme.md", tracked),
+		"where the root respects case, a hard link is another entry, which git tracks apart")
 
 	// A deletion has nothing left to open, so the directory decides. The
 	// root respects case: readme.md was another file.
@@ -88,7 +91,7 @@ func TestTrackedSpelling(t *testing.T) {
 	require.NoError(t, os.Remove(filepath.Join(dir, "src", "App.go")))
 	app := []string{"src/App.go"}
 	require.Equal(t, "src/app.go", trackedSpelling(worktree, cases, dir, "src/app.go", app), "src/ respects case here")
-	folding := srcIgnoresCase{}
+	folding := ignoresCaseIn("src")
 	require.Equal(t, "src/App.go", trackedSpelling(worktree, folding, dir, "src/app.go", app), "deleted under git's spelling")
 	require.Equal(t, "src/app.go", trackedSpelling(worktree, folding, dir, "src/app.go", []string{"src/App.go", "src/APP.go"}),
 		"ambiguous: the index has two spellings")
@@ -96,6 +99,21 @@ func TestTrackedSpelling(t *testing.T) {
 	testutil.WriteFile(t, dir, "src/App.go", "back\n")
 	require.Equal(t, "src/app.go", trackedSpelling(worktree, folding, dir, "src/app.go", app),
 		"git's spelling still opens a file, so src/app.go is another one")
+}
+
+// TestFilterTrackableFiles_KeepsGitsSpellingWindows checks the transcript
+// route a commit hook takes before the first turn end: a path respelled as
+// git spells it is kept in that spelling, not dropped for differing from the
+// transcript's. CI's Windows job runs it by its name.
+func TestFilterTrackableFiles_KeepsGitsSpellingWindows(t *testing.T) {
+	t.Parallel()
+	dir, _ := trackedCaseRepo(t)
+	got := filterTrackableFiles(context.Background(), dir, []string{"readme.md", "notes.txt"})
+	if worktreedir.NewCaseProbe(dir).IgnoresCase(".") {
+		require.Equal(t, []string{"README.md", "notes.txt"}, got)
+	} else {
+		require.Equal(t, []string{"readme.md", "notes.txt"}, got, "readme.md is another file here")
+	}
 }
 
 // On a case-sensitive filesystem FilterTrackableChanges keeps both

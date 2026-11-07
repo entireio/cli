@@ -26,11 +26,12 @@ import (
 // session keeps readme.md pending for good, and the turn end that merges git
 // status's README.md records both.
 //
-// A spelling is rewritten only when it opens the same file as the index's
-// spelling. A deleted file has nothing left to open: it is rewritten when the
-// index has exactly one spelling of it, that spelling is gone too, and each
-// directory where the two differ finds its entries ignoring case
-// (worktreedir.CaseProbe). Where no reported path's directory ignores case,
+// A spelling is rewritten only when each directory where it differs from the
+// index's spelling finds its entries ignoring case (worktreedir.CaseProbe),
+// and it opens the same file as the index's spelling: in a directory that
+// respects case, two hard-linked names are two entries git tracks apart. A
+// deleted file has nothing left to open: it is rewritten when the index has
+// exactly one spelling of it and that spelling is gone too. Where no reported path's directory ignores case,
 // nothing changes and git is not asked, since readme.md and README.md are two
 // files there. If git cannot answer, the files are returned as they are.
 func TrackedSpellings(ctx context.Context, repoRoot string, files []string) []string {
@@ -102,6 +103,9 @@ func trackedSpelling(worktree *os.Root, cases entryCases, repoRoot, file string,
 		return file
 	}
 	for _, spelling := range tracked {
+		if !cases.SameEntry(spelling, file) {
+			continue
+		}
 		if info, err := lstatIn(worktree, repoRoot, spelling); err == nil && os.SameFile(named, info) {
 			return spelling
 		}
