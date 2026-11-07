@@ -158,6 +158,16 @@ func TestString_CommandLinePasswords(t *testing.T) {
 		{name: "docker login after a substituted global option", input: "docker --config $(mktemp -d) login -u me -p " + p, want: "docker --config $(mktemp -d) login -u me -p REDACTED"},
 		{name: "helm registry login after an option", input: "helm registry --debug login registry.example -u me -p " + p, want: "helm registry --debug login registry.example -u me -p REDACTED"},
 		{name: "docker program name in capitals", input: "docker.EXE login -u me -p " + p, want: "docker.EXE login -u me -p REDACTED"},
+	})
+}
+
+// Cases found reviewing the upstream PR, kept apart so each table stays
+// readable.
+func TestString_CommandLinePasswordsReviewCases(t *testing.T) {
+	t.Parallel()
+
+	p := cliTestPassword
+	assertStringRedactionCases(t, []stringRedactionCase{
 		{name: "client run through ssh with a quoted option argument", input: `ssh -o "ProxyJump jump" db mysql -p` + p, want: `ssh -o "ProxyJump jump" db mysql -pREDACTED`},
 		{name: "client after an ssh option argument with its name", input: "ssh -l mysql db mysql -p" + p, want: "ssh -l mysql db mysql -pREDACTED"},
 		{name: "client after a substitution that ran it", input: `ssh $(mysql -Nse 'select host') mysql -p` + p, want: `ssh $(mysql -Nse 'select host') mysql -pREDACTED`},
@@ -197,6 +207,19 @@ func TestString_CommandLinePasswords(t *testing.T) {
 		{name: "client after an input redirection in a script", input: "docker exec mysql sh -c '</dev/null mysql -p" + p + "'", want: "docker exec mysql sh -c '</dev/null mysql -pREDACTED'"},
 		{name: "quoted program name in a script", input: `docker exec openssl sh -c '"openssl" enc -pass pass:` + p + `'`, want: `docker exec openssl sh -c '"openssl" enc -pass pass:REDACTED'`},
 		{name: "quoted client after an ssh destination", input: `ssh db "mysql" -p` + p, want: `ssh db "mysql" -pREDACTED`},
+		{name: "long flag quoted with its value", input: `wget "--password=Summer 2026` + p + `" https://example.com`, want: `wget "--password=REDACTED" https://example.com`},
+		{name: "long flag single-quoted with its value", input: `wget '--password=Summer 2026` + p + `' x`, want: `wget '--password=REDACTED' x`},
+		{name: "long flag quoted with its value in a JSON string", input: `{"cmd":"wget \"--password=Summer 2026` + p + `\" x"}`, want: `{"cmd":"wget \"--password=REDACTED\" x"}`},
+		{name: "quoted long flag before a quoted value", input: `wget "--password" "Summer 2026` + p + `" x`, want: `wget "--password" "REDACTED" x`},
+		{name: "openssl flag after a descriptor redirection", input: "openssl enc -aes-128-cbc -in /dev/null 2>&1 -pass pass:" + p, want: "openssl enc -aes-128-cbc -in /dev/null 2>&1 -pass pass:REDACTED"},
+		{name: "mysql flag after a descriptor redirection", input: "mysql 2>&1 -p" + p, want: "mysql 2>&1 -pREDACTED"},
+		{name: "mysql flag after redirections of both streams", input: "mysql &>/dev/null -p" + p, want: "mysql &>/dev/null -pREDACTED"},
+		{name: "mysql flag after a clobbering redirection", input: "mysql >|out -p" + p, want: "mysql >|out -pREDACTED"},
+		{name: "client after an escaped redirection character", input: `ssh -i key\>& mysql -p` + p, want: `ssh -i key\>& mysql -pREDACTED`},
+		{name: "client in a function body in a script", input: "docker exec mysql sh -c 'init_db() { mysql -p" + p + "; }; init_db'", want: "docker exec mysql sh -c 'init_db() { mysql -pREDACTED; }; init_db'"},
+		{name: "client in a function body after the function keyword", input: "docker exec mysql sh -c 'function init_db { mysql -p" + p + "; }; init_db'", want: "docker exec mysql sh -c 'function init_db { mysql -pREDACTED; }; init_db'"},
+		{name: "many commands with no blank in a quoted script", input: "sh -c '" + strings.Repeat("mysql;", 4000) + "mysql -p" + p + "'", want: "sh -c '" + strings.Repeat("mysql;", 4000) + "mysql -pREDACTED'"},
+		{name: "client run through a wrapper path holding an equals sign", input: "docker exec mysql sh -c '/opt/build=debug/bin/env mysql -p" + p + "'", want: "docker exec mysql sh -c '/opt/build=debug/bin/env mysql -pREDACTED'"},
 	})
 }
 
@@ -310,6 +333,12 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		"2>/dev/null ssh mysql -p2222",
 		"2>&1 ssh mysql -p2222",
 		"docker exec app sh -c '2>&1 ssh mysql -p2222'",
+		`wget "--password=$WGET_PASSWORD" x`,
+		`cmd := "wget --password=" + pw + " x"`,
+		`echo "--password" is required`,
+		"mysql -e x 2>&1 | ssh -p2222 host",
+		"mysql -e x &>/dev/null & ssh -p2222 host",
+		`mysql -e x\>& ssh -p2222 host`,
 		"Use `mysql`, `docker login -p`, `sshpass -p` and `openssl -pass pass:` with care.",
 		`fmt.Sprintf("machine %s login %s password %s", host, user, pass)`,
 		// declarations

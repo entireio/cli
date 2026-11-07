@@ -22,8 +22,9 @@ const cliFlagValue = `"(?:[^"\r\n]|\\\r?\n)*"|'[^'\r\n]*'|[^\s'"` + "`" + `|;&()
 // command continued with a trailing backslash), and otherwise never crosses
 // a line break, a shell operator or a backtick (which starts a command
 // substitution, or ends Markdown code), so a flag is only read as belonging
-// to the command that precedes it in the same pipeline segment.
-const cliSameCommandChar = `\\\r?\n|\\[^\r\n]|"(?:[^"\\\r\n]|\\\r?\n|\\[^\r\n])*"|'[^'\r\n]*'|` + cliSubstitutionPattern + `|[^\r\n|;&` + "`" + `]`
+// to the command that precedes it in the same pipeline segment. The & and |
+// of a redirection (2>&1, &>log, >|f) are no shell operator.
+const cliSameCommandChar = `\\\r?\n|\\[^\r\n]|"(?:[^"\\\r\n]|\\\r?\n|\\[^\r\n])*"|'[^'\r\n]*'|` + cliSubstitutionPattern + `|[<>]&|&>|>\||[^\r\n|;&` + "`" + `]`
 
 const cliSameCommand = `(?:` + cliSameCommandChar + `)`
 
@@ -72,10 +73,11 @@ var (
 
 // cliLongPasswordPattern matches a GNU-style password flag on any command line
 // (mysql --password=..., mongosh --password ..., az login --password ...).
-// Group 1 is "=" or the blank that separates the flag from its value, and
-// group 2 the value. --password-stdin and --password-file never match: the
-// flag must be followed by "=" or a blank.
-var cliLongPasswordPattern = regexp.MustCompile(`(?:^|[\s"'])--(?:password|passwd|pass)(=|` + cliBlank + `)(` + cliFlagValue + `)`)
+// Group 1 is the quote that closes a quoted flag ("--password" x), group 2
+// "=" or the blank that separates the flag from its value, and group 3 the
+// value. --password-stdin and --password-file never match: the flag must be
+// followed by "=" or a blank.
+var cliLongPasswordPattern = regexp.MustCompile(`(?:^|[\s"'])--(?:password|passwd|pass)(["']?)(=|` + cliBlank + `)(` + cliFlagValue + `)`)
 
 // cliPasswordFlag is the short password flag of one family of clients. A
 // short flag means different things to different programs (-p is a port to
@@ -239,13 +241,16 @@ func appendLongPasswordFlags(regions []taggedRegion, s string) []taggedRegion {
 		}
 		// After "=" a leading '-' is part of the value; after a blank it
 		// starts the next flag.
-		blank := s[loc[2]] != '='
-		v := shellWordValue(s, loc[4], loc[5], lines.stringEnd(loc[2]-1))
-		r, ok := passwordValueRegion(s, v, blank, blank)
+		blank := s[loc[4]] != '='
+		v, ok := longFlagValue(s, loc, lines.stringEnd(loc[2]-1))
+		var r taggedRegion
+		if ok {
+			r, ok = passwordValueRegion(s, v, blank, blank)
+		}
 		if !ok {
 			// A value that is no password may hold the next flag
 			// (echo "--password "; wget --password=x).
-			pos = loc[4]
+			pos = loc[6]
 			continue
 		}
 		regions = append(regions, r)
@@ -253,6 +258,36 @@ func appendLongPasswordFlags(regions []taggedRegion, s string) []taggedRegion {
 		// (--password=x\ --password=y), and is not read again.
 		pos = max(loc[1], r.end)
 	}
+}
+
+// longFlagValue returns the value of the long password flag that loc, a
+// cliLongPasswordPattern match, found. A flag quoted on its own
+// ("--password" x) must close the quote that opens it, and a value in the
+// string that a flag opens ("--password=Summer 2026") runs to that string's
+// end, since the shell passes the whole string as one argument.
+func longFlagValue(s string, loc []int, stringEnd int) (cliValue, bool) {
+	open, quoteLen := loc[0], 0
+	if s[open] == '"' && open > 0 && s[open-1] == '\\' {
+		open--
+	}
+	if end, n := quotedPiece(s, open); n > 0 && end > loc[2] {
+		quoteLen = n
+		closeAt := end - n
+		switch {
+		case loc[3] > loc[2]:
+			// "--password" x: the quote after the name closes this one.
+			if closeAt != loc[2]-n+1 {
+				return cliValue{}, false
+			}
+		case s[loc[4]] == '=' && closeAt > loc[6]:
+			return cliValue{start: loc[6], end: closeAt, quoted: true, singleQuoted: s[closeAt] == '\''}, true
+		}
+	}
+	if loc[3] > loc[2] && quoteLen == 0 {
+		// A quote after the name that opened nothing before it.
+		return cliValue{}, false
+	}
+	return shellWordValue(s, loc[6], loc[7], stringEnd), true
 }
 
 // appendPasswords adds the value of every password flag in the segment of
@@ -495,7 +530,7 @@ func (f cliPasswordFlag) segmentRest(s string, lines *quoteScan, paths *programP
 	switch {
 	case closeAt < i:
 		return pattern.FindString(s[i:])
-	case strings.ContainsAny(s[i:closeAt], " \t") && !paths.isProgramPath(f, s, lines.inner(), closeAt):
+	case paths.blankAfter(s, i, closeAt) && !paths.isProgramPath(f, s, lines.inner(), closeAt):
 		return pattern.FindString(s[i:closeAt])
 	default:
 		return s[i : stringEnd+len(cliSegmentRest.FindString(s[stringEnd:]))]
@@ -503,12 +538,24 @@ func (f cliPasswordFlag) segmentRest(s string, lines *quoteScan, paths *programP
 }
 
 // programPathMemo records whether the text of the quoted string that a
-// segment's command was last found in is a program path, so a string with
-// many commands (sh -c "mysql -e x; mysql -e y; ...") is read once.
+// segment's command was last found in is a program path, and where its last
+// blank is, so a string with many commands (sh -c "mysql -e x; mysql -e y;
+// ...", sh -c 'mysql;mysql;...') is read once.
 type programPathMemo struct {
 	// from is one past where the text starts, 0 when nothing is recorded.
 	from int
 	path bool
+	// to is one past where the text with its last blank at blank ends, 0
+	// when nothing is recorded.
+	to, blank int
+}
+
+// blankAfter reports whether s[i:to] holds a blank.
+func (m *programPathMemo) blankAfter(s string, i, to int) bool {
+	if m.to != to+1 {
+		m.to, m.blank = to+1, strings.LastIndexAny(s[:to], " \t")
+	}
+	return m.blank >= i
 }
 
 // isProgramPath reports whether s[from:to] is the path of a program f
@@ -629,8 +676,10 @@ type commandStart struct {
 	optionArg bool
 	host      bool
 	// redirectArg is set after a redirection operator whose target is the
-	// next word (2> /dev/null).
+	// next word (2> /dev/null), and funcName after the function keyword,
+	// whose name is the next word.
 	redirectArg bool
+	funcName    bool
 	// command is set after the name of a command, and text after a word
 	// that is no wrapper, option or assignment, or in a substitution after
 	// the name of a command that prints its arguments.
@@ -720,10 +769,21 @@ func isCommandSeparator(s string, i int) bool {
 }
 
 // isRedirectionOperator reports whether the & or | at s[i] is part of a
-// redirection operator (>&, <&, &>, >|).
+// redirection operator (>&, <&, &>, >|), where the < or > is not escaped
+// (key\>& mysql runs mysql).
 func isRedirectionOperator(s string, i int) bool {
-	before := i > 0 && (s[i-1] == '>' || s[i-1] == '<' && s[i] == '&')
+	before := i > 0 && (s[i-1] == '>' || s[i-1] == '<' && s[i] == '&') && !isEscaped(s, i-1)
 	return before || s[i] == '&' && strings.HasPrefix(s[i+1:], ">")
+}
+
+// isEscaped reports whether an odd number of backslashes comes right before
+// s[i].
+func isEscaped(s string, i int) bool {
+	n := 0
+	for i > n && s[i-n-1] == '\\' {
+		n++
+	}
+	return n%2 == 1
 }
 
 // redirection reports whether word is a redirection (>f, 2>/dev/null, 2>&1,
@@ -746,9 +806,14 @@ func redirection(word string) (ok, operatorOnly bool) {
 	return true, i == len(word)
 }
 
+// fresh reports whether no word has been read since the command could start.
+func (c *commandStart) fresh() bool {
+	return !c.text && !c.command && c.wrapper == "" && !c.optionArg && !c.redirectArg && !c.funcName
+}
+
 // runs reports whether a command name after the words read is run.
 func (c *commandStart) runs() bool {
-	return !c.text && !c.optionArg && !c.redirectArg && (c.wrapper != sshCommand || c.host)
+	return !c.text && !c.optionArg && !c.redirectArg && !c.funcName && (c.wrapper != sshCommand || c.host)
 }
 
 // word reads one word of the argument.
@@ -757,6 +822,14 @@ func (c *commandStart) word(word string) {
 	case c.text:
 	case c.redirectArg:
 		c.redirectArg = false
+	case c.funcName:
+		c.funcName = false
+	case c.fresh() && (word == ")" || word == "function"):
+		// A function definition, whose body runs commands
+		// (f() { mysql -pX; }, function f { mysql -pX; }): the ")" after
+		// the "(" that started this reading, or the keyword before the
+		// function's name.
+		c.funcName = word == "function"
 	case isRedirection(word):
 		// A redirection runs nothing (2>/dev/null mysql -pX), and an
 		// operator alone takes the next word as its target (> out).
@@ -789,9 +862,10 @@ func (c *commandStart) word(word string) {
 }
 
 // programName returns the program a word names, without its directory
-// (/usr/bin/env), or the word itself when it holds an "=".
+// (/usr/bin/env, /opt/build=debug/bin/env), or the word itself when it is
+// an assignment.
 func programName(word string) string {
-	if strings.IndexByte(word, '=') >= 0 {
+	if eq := strings.IndexByte(word, '='); eq > 0 && isShellName(word[:eq]) {
 		// An assignment (FOO=/usr/bin/ssh), not a program.
 		return word
 	}
@@ -1149,6 +1223,10 @@ type quoteScan struct {
 	// sep is where the text after the last shell operator outside the
 	// quoted strings found starts.
 	sep int
+	// blankOf is one past the start of the last quoted string commandFrom
+	// read, 0 when none, and blank whether its text holds a blank.
+	blankOf int
+	blank   bool
 }
 
 // stringAt returns the end of the quoted string that p is inside, after its
@@ -1204,7 +1282,14 @@ func isCommandEnd(s string, i int) bool {
 // quote is at closeAt, unless the string is one word (ssh "mysql"), or else
 // after the last shell operator before it.
 func (q *quoteScan) commandFrom(closeAt int) int {
-	if closeAt >= 0 && strings.ContainsAny(q.s[q.inner():closeAt], " \t") {
+	if closeAt < 0 {
+		return q.sep
+	}
+	if q.blankOf != q.start+1 {
+		// Each string is read once (sh -c 'mysql;mysql;...').
+		q.blankOf, q.blank = q.start+1, strings.ContainsAny(q.s[q.inner():closeAt], " \t")
+	}
+	if q.blank {
 		return q.inner()
 	}
 	return q.sep
