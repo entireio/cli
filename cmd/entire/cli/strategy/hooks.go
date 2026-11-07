@@ -1127,6 +1127,9 @@ func installHooks(ctx context.Context, lockRoot, root *os.Root, hooksDir string,
 			case backupBehindBrain:
 				fmt.Fprint(stderrWriter, behindBrainNotice(root, hooksDir, spec.name, older))
 				logging.Info(ctx, "git hook backup moved behind entire-brain's wrapper", slog.String("hook", spec.name), slog.String("older_copy", older))
+			case backupBrainAgain:
+				fmt.Fprint(stderrWriter, brainAgainNotice(root, hooksDir, spec.name, older))
+				logging.Info(ctx, "entire-brain's newer wrapper replaced its older one behind Entire's hook", slog.String("hook", spec.name), slog.String("older_copy", older))
 			case backupReplacedSame:
 			}
 		}
@@ -1297,17 +1300,43 @@ func behindBrainNotice(root *os.Root, hooksDir, hook, older string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[entire] Entire's %s hook could not run behind entire-brain's, so it runs first again, then entire-brain's (moved to %s), "+
 		"then your own %s hook (moved to %s, where entire-brain's hook runs it).\n", hook, wrapper, hook, behind)
-	if !isRunnableHookFile(root, backup) {
-		fmt.Fprintf(&b, "[entire] entire-brain's hook is not executable, so it is skipped, and so is the hook behind it. To run it again: chmod +x %s\n",
-			ShellQuoteForDisplay(wrapper))
-	}
-	if !isRunnableHookFile(root, backup+brainBackupSuffix) {
-		fmt.Fprintf(&b, "[entire] Your own %s hook is not executable, so it is skipped too, as it was before.\n", hook)
-	}
+	writeBrainSkipped(&b, root, hooksDir, hook)
 	if older != "" {
 		fmt.Fprintf(&b, "[entire] The hook that was already at %s was kept as %s and no longer runs.\n", behind, filepath.Join(hooksDir, older))
 	}
 	return b.String()
+}
+
+// brainAgainNotice tells the user that Entire's hook runs in front of
+// entire-brain's wrapper again after Brain installed its wrapper a second time
+// (see brainWrapperBackedUpAgain): the newer wrapper took the older one's place
+// behind Entire's hook, and the user's hook, if any, stays where it runs it.
+func brainAgainNotice(root *os.Root, hooksDir, hook, older string) string {
+	backup := hook + backupSuffix
+	var b strings.Builder
+	fmt.Fprintf(&b, "[entire] Entire's %s hook could not run behind entire-brain's, so it runs first again, then entire-brain's (moved to %s)",
+		hook, filepath.Join(hooksDir, backup))
+	if hookFileExists(root, backup+brainBackupSuffix) {
+		fmt.Fprintf(&b, ", then your own %s hook (still at %s)", hook, filepath.Join(hooksDir, backup+brainBackupSuffix))
+	}
+	fmt.Fprintf(&b, ". entire-brain's older hook was kept as %s and no longer runs.\n", filepath.Join(hooksDir, older))
+	writeBrainSkipped(&b, root, hooksDir, hook)
+	return b.String()
+}
+
+// writeBrainSkipped adds what stays skipped behind entire-brain's wrapper
+// backed up in <hook>.pre-entire: a wrapper that cannot run skips the user's
+// hook too, as it did at the hook path, so it says how to make it run; a user
+// hook that cannot run stays skipped, as it was.
+func writeBrainSkipped(b *strings.Builder, root *os.Root, hooksDir, hook string) {
+	backup := hook + backupSuffix
+	if !isRunnableHookFile(root, backup) {
+		fmt.Fprintf(b, "[entire] entire-brain's hook is not executable, so it is skipped, and so is the hook behind it. To run it again: chmod +x %s\n",
+			ShellQuoteForDisplay(filepath.Join(hooksDir, backup)))
+	}
+	if behind := backup + brainBackupSuffix; hookFileExists(root, behind) && !isRunnableHookFile(root, behind) {
+		fmt.Fprintf(b, "[entire] Your own %s hook is not executable, so it is skipped too, as it was before.\n", hook)
+	}
 }
 
 // brainCopyUnchanged reports an error when the copy Brain runs is no longer
