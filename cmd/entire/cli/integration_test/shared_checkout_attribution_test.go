@@ -130,6 +130,12 @@ func TestSharedCheckout_OverlappingTurnsClaimOnlyTheirOwnFiles(t *testing.T) {
 // changes README.md. During an overlap the turn keeps only the files its
 // transcript names, and README.md must still count as named. It runs where
 // the filesystem ignores case.
+//
+// The edit is written in place, so the file keeps git's spelling on disk. A
+// write that renames a temporary file over it, as Claude Code's Write and
+// Edit tools do, leaves readme.md on disk instead, and Entire's status, which
+// compares names exactly, then reports README.md deleted and readme.md
+// untracked. That case needs the fix for #3054 as well.
 func TestSharedCheckout_TranscriptNameInAnotherCaseIsClaimed(t *testing.T) {
 	t.Parallel()
 	env := newSharedCheckoutEnv(t)
