@@ -1,0 +1,5 @@
+{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"<USER_REQUEST>go</USER_REQUEST>"}
+{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","input_tokens":11933,"cache_read_tokens":0,"output_tokens":146,"tool_calls":[]}
+{"step_index":3,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","input_tokens":1200,"cache_read_tokens":11000,"output_tokens":101,"content":"do"}
+{"step_index":3,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","input_tokens":1200,"cache_read_tokens":11000,"output_tokens":120,"content":"done"}
+{"step_index":5,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","content":"hi"}

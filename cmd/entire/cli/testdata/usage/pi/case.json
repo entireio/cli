@@ -1,0 +1,5 @@
+{
+  "about": "every branch counts, including one the user navigated away from",
+  "transcript": "s1.jsonl",
+  "total": {"input_tokens": 130, "cache_creation_tokens": 5, "cache_read_tokens": 120, "output_tokens": 70, "api_call_count": 2}
+}

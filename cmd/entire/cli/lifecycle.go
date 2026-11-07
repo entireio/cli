@@ -1123,7 +1123,10 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		// its work mid-turn (its normal flow) lands here with a clean tree.
 		// The tokens are applied by the turn-end transition itself, so a
 		// repeated or concurrent Stop for the same turn adds nothing.
-		turnUsage := resolveTurnTokenUsage(ctx, ag, event, sessionID, preState, transcriptData, subagentsDir, codexInventoryUsage)
+		var turnUsage *agent.TokenUsage
+		if !countsTokensWithLedger(ctx, sessionID) {
+			turnUsage = resolveTurnTokenUsage(ctx, ag, event, sessionID, preState, transcriptData, subagentsDir, codexInventoryUsage)
+		}
 		transitionSessionTurnEnd(ctx, sessionID, ag.Type(), event, &checkpointlessTurnUsage{usage: turnUsage, ledgerVersion: codexLedgerVersion})
 		if cleanupErr := CleanupPrePromptState(ctx, sessionID); cleanupErr != nil {
 			logging.Warn(logCtx, "failed to cleanup pre-prompt state",
@@ -1153,7 +1156,10 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		transcriptLinesAtStart = preState.TranscriptOffset
 	}
 
-	tokenUsage := resolveTurnTokenUsage(ctx, ag, event, sessionID, preState, transcriptData, subagentsDir, codexInventoryUsage)
+	var tokenUsage *agent.TokenUsage
+	if !countsTokensWithLedger(ctx, sessionID) {
+		tokenUsage = resolveTurnTokenUsage(ctx, ag, event, sessionID, preState, transcriptData, subagentsDir, codexInventoryUsage)
+	}
 
 	// Build fully-populated step context and delegate to strategy
 	stepCtx := strategy.StepContext{
@@ -1239,6 +1245,15 @@ func workerTurnTokenUsage(ctx context.Context, ag agent.Agent, event *agent.Even
 		return usage
 	}
 	return computeOutOfBandTokenUsage(ctx, ag, event.SessionID, event.SessionRef, preState)
+}
+
+// countsTokensWithLedger reports whether the session's tokens come from its
+// token ledger, which reads the agent's running total itself: the per-turn
+// usage would be computed (Claude Code: every subagent transcript read) only
+// to be discarded.
+func countsTokensWithLedger(ctx context.Context, sessionID string) bool {
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	return err == nil && state != nil && state.TokenLedger.IsActive()
 }
 
 // resolveTurnTokenUsage returns the token usage of the turn ending now.
@@ -1500,10 +1515,7 @@ func refreshCodexInventory(ctx context.Context, ag agent.Agent, sessionID string
 	if err != nil || state == nil || state.SubagentInventoryComplete == nil {
 		return nil, nil
 	}
-	refs := make([]agent.SubagentReference, 0, len(state.SubagentInventory))
-	for _, entry := range state.SubagentInventory {
-		refs = append(refs, agent.SubagentReference{ObservedTurnIDs: entry.ObservedTurnIDs, AgentID: entry.AgentID, DeclaredTranscriptPath: entry.DeclaredTranscriptPath, ResolvedTranscriptPath: entry.ResolvedTranscriptPath})
-	}
+	refs := strategy.SubagentReferences(state)
 	version := state.SubagentLedgerVersion
 	extraction, ok := agent.ExtractWithSubagentInventory(ctx, ag, parent, fromOffset, refs, state.AgentHome)
 	if !ok {
@@ -2905,7 +2917,10 @@ func transitionSessionTurnEnd(ctx context.Context, sessionID string, agentType t
 		// session already IDLE (this closure runs under the session lock), so
 		// it adds nothing.
 		wasActive = state.Phase.IsActive()
-		if turnUsage != nil && wasActive {
+		// A ledger session records the agent's running total, so every Stop
+		// can read it: a repeated one changes nothing.
+		ledgerActive := strategy.ObserveTokenLedger(ctx, state)
+		if !ledgerActive && turnUsage != nil && wasActive {
 			strategy.ApplyTurnTokenUsage(state, turnUsage.usage, turnUsage.ledgerVersion)
 		}
 		if err := strategy.TransitionAndLog(ctx, state, session.EventTurnEnd, session.TransitionContext{}, session.NoOpActionHandler{}); err != nil {
@@ -3037,6 +3052,10 @@ func markSessionEnded(ctx context.Context, event *agent.Event, sessionID string,
 		// LastInteractionTime with now — exactly the value endedWhenLastSeen
 		// needs, so reading it afterwards always yields "now".
 		endedAt := sessionEndedAt(state, when)
+		// A last reading: an agent can write usage after its final Stop
+		// (Copilot's shutdown totals), and an ended session may never be read
+		// again.
+		strategy.ObserveTokenLedger(ctx, state)
 		if transErr := strategy.TransitionAndLog(ctx, state, session.EventSessionStop, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
 			logging.Warn(logging.WithComponent(ctx, "lifecycle"), "session stop transition failed",
 				slog.String("error", transErr.Error()))
