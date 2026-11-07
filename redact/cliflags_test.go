@@ -292,9 +292,17 @@ func TestString_CommandLinePasswordsReviewCases(t *testing.T) {
 		{name: "client run as a container entrypoint", input: "docker run --entrypoint mysql mysql:8 -p" + p, want: "docker run --entrypoint mysql mysql:8 -pREDACTED"},
 		{name: "client joined to the container entrypoint option", input: "docker run --entrypoint=/usr/bin/mysql img -p" + p, want: "docker run --entrypoint=/usr/bin/mysql img -pREDACTED"},
 		{name: "client joined to the env split-string option", input: "env --split-string=mysql -p" + p, want: "env --split-string=mysql -pREDACTED"},
+		{name: "client run by wrappers that env -S runs in a script substitution", input: `mysql -h "$(sh -c 'env -S sudo ssh db mysql -p` + p + `')"`, want: `mysql -h "$(sh -c 'env -S sudo ssh db mysql -pREDACTED')"`},
+		{name: "client run by a wrapper joined to env -S in a script substitution", input: `mysql -h "$(sh -c 'env -Ssudo ssh db mysql -p` + p + `')"`, want: `mysql -h "$(sh -c 'env -Ssudo ssh db mysql -pREDACTED')"`},
 		{name: "netrc account before a default entry on the same line", input: "machine h login a password x9 account team default login b password " + p, want: "machine h login a password REDACTED account team default login b password REDACTED"},
 		{name: "ANSI-C quoted piece after a password prefix", input: `openssl enc -pass pass:$'abc\' ` + p + `' -in f`, want: `openssl enc -pass pass:REDACTED -in f`},
 		{name: "ANSI-C quoted piece after a bare long flag value", input: `wget --password=abc$'\' ` + p + `' url`, want: `wget --password=REDACTED url`},
+		{name: "quoted short flag value after a shell word ending in a comma", input: `mysql -h db, "-pabc",` + p, want: `mysql -h db, "-pREDACTED`},
+		{name: "quoted short flag value after a name in a code list", input: `run("mysql", db, "-p` + p + `",x)`, want: `run("mysql", db, "-pREDACTED",x)`},
+		{name: "client arguments after the image of its entrypoint", input: "docker run --entrypoint mysql -p3306:3306 mysql:8 -p" + p, want: "docker run --entrypoint mysql -p3306:3306 mysql:8 -pREDACTED"},
+		{name: "long flag password spelled like a prose word before an argument", input: "mongosh --password string db", want: "mongosh --password REDACTED db"},
+		{name: "netrc fields equal to a type name in a shell group", input: "{ echo 'machine string login string password string'; }", want: "{ echo 'machine string login string password REDACTED'; }"},
+		{name: "netrc fields equal to a type name in a subshell", input: "( echo machine string login string password string )", want: "( echo machine string login string password REDACTED )"},
 		{name: "netrc fields all equal to a type name", input: "machine string login string password string", want: "machine string login string password REDACTED"},
 		{name: "many quoted commands with no blank", input: strings.Repeat(`"mysql";`, 4000) + "mysql -p" + p, want: strings.Repeat(`"mysql";`, 4000) + "mysql -pREDACTED"},
 	})
@@ -355,7 +363,13 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		"Use the --password option, or the --user option.",
 		"docker logs mysql -p",
 		"docker run --entrypoint=ssh img -p2222 host",
+		"sh -c 'env -S sudo ssh mysql -p2222'",
+		"sh -c 'env -S echo mysql -p2222'",
 		"docker run --entrypoint mysql mysql:8 -p 3306",
+		"docker run --entrypoint mysql -p3306:3306 mysql:8 -uroot",
+		"docker run --entrypoint=/usr/bin/mysql --name db -p 3306:3306 mysql:8",
+		"The --password flag is required.",
+		"  --password value   The password to use",
 		"kubectl --as alice logs mysql -p",
 		"the machine learning password policy",
 		"By default login with password is disabled.",
@@ -453,6 +467,8 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		// declarations
 		"type netrcLine struct {\n\tmachine  string\n\tlogin    string\n\tpassword string\n}",
 		"func connect(machine string, login string, password string) error",
+		"func connect(ctx context.Context, machine string, login string, password string) error",
+		"type netrcLine struct {\n\tHost string\n\tmachine string\n\tlogin string\n\tpassword string\n}",
 	} {
 		t.Run(input, func(t *testing.T) {
 			t.Parallel()
