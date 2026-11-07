@@ -20,7 +20,7 @@ import (
 // entries than the probe reads).
 func newCaseProbeTree(t *testing.T) *CaseProbe {
 	t.Helper()
-	dir := t.TempDir()
+	dir := probeTempDir(t)
 	testutil.WriteFile(t, dir, "sensitive/A.txt", "a\n")
 	if _, err := os.Lstat(filepath.Join(dir, "sensitive", "a.TXT")); err == nil {
 		t.Skip("needs a case-sensitive filesystem; TestCaseProbeWindows covers the other side")
@@ -38,6 +38,18 @@ func newCaseProbeTree(t *testing.T) *CaseProbe {
 	probe.maxEntries = 4
 	probe.lookUp = foldingLookUp
 	return probe
+}
+
+// probeTempDir returns t.TempDir() and closes the shared root a probe opens
+// on it before the directory is removed: Windows cannot remove a directory
+// while a handle to it is open. t.Cleanup runs in reverse order, so this runs
+// before the removal TempDir registered. Forgetting only this directory keeps
+// it safe for parallel tests.
+func probeTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Cleanup(func() { osroot.Forget(dir) })
+	return dir
 }
 
 // foldingLookUp is a lookup that ignores case in every directory but the
@@ -116,7 +128,7 @@ func TestCaseProbe_SameEntry(t *testing.T) {
 // Windows job runs it by its name, on a filesystem that ignores case.
 func TestCaseProbeWindows(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+	dir := probeTempDir(t)
 	testutil.WriteFile(t, dir, "sub/Probe.txt", "probe\n")
 	info, err := os.Lstat(filepath.Join(dir, "sub", "Probe.txt"))
 	if err != nil {

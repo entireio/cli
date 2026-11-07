@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 
@@ -19,6 +20,11 @@ import (
 func trackedCaseRepo(t *testing.T) (string, *os.Root) {
 	t.Helper()
 	dir := t.TempDir()
+	// Close the shared root opened on dir before it is removed: Windows
+	// cannot remove a directory while a handle to it is open. t.Cleanup runs
+	// in reverse order, so this runs before the removal TempDir registered.
+	// Forgetting only dir keeps it safe for parallel tests.
+	t.Cleanup(func() { osroot.Forget(dir) })
 	testutil.InitRepo(t, dir)
 	testutil.WriteFile(t, dir, "README.md", "readme\n")
 	testutil.WriteFile(t, dir, "src/App.go", "package src\n")
