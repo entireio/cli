@@ -164,16 +164,15 @@ func TestSharedCheckout_TranscriptNameInAnotherCaseIsClaimed(t *testing.T) {
 // TestSharedCheckout_DeletionNamedInAnotherCaseIsClaimed is the deletion side
 // of the case rule: B's transcript names readme.md, B deletes it, and git
 // lists README.md as deleted. With the file gone there is nothing to compare,
-// so git's core.ignorecase decides. Setting it stands in for a
-// case-insensitive filesystem, where git sets it when it creates the
-// repository, so this runs everywhere.
+// so the worktree root decides, by finding its other entries under another
+// case. It runs where the filesystem ignores case.
 func TestSharedCheckout_DeletionNamedInAnotherCaseIsClaimed(t *testing.T) {
 	t.Parallel()
 	env := newSharedCheckoutEnv(t)
 	env.WriteFile("README.md", "readme\n")
 	env.GitAdd("README.md")
 	env.GitCommit("Add README.md")
-	setRepoGitConfig(env, "core.ignorecase", "true")
+	requireCaseInsensitive(t, env, "README.md", "readme.md")
 
 	sessA := env.NewSession()
 	sessB := env.NewSession()

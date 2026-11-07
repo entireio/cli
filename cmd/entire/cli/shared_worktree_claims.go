@@ -7,12 +7,11 @@ import (
 	"log/slog"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 )
 
 // git status shows every dirty file in the worktree, not which session
@@ -62,7 +61,7 @@ type statusClaim struct {
 func (c statusClaim) narrow(ctx context.Context, modified, created, deleted []string) (claimedModified, claimedCreated, claimedDeleted []string) {
 	modified = c.withoutUnchangedDirty(modified)
 	deleted = c.withoutUnchangedDirty(deleted)
-	named := newNamedFiles(ctx, c.repoRoot, c.named, modified, created, deleted)
+	named := newNamedFiles(c.repoRoot, c.named, modified, created, deleted)
 	claimedModified = named.only(modified)
 	claimedCreated = named.only(created)
 	claimedDeleted = named.only(deleted)
@@ -117,13 +116,13 @@ type namedFiles struct {
 	// folded maps a lower-cased name to the transcript's spellings of it
 	// that git status does not list.
 	folded map[string][]string
-	// ignoresCase reports git's core.ignorecase for the repository, asked
-	// at most once and only for a deletion named in another case.
-	ignoresCase func() bool
+	// cases asks the worktree's directories about case, only for a
+	// deletion named in another case.
+	cases *worktreedir.CaseProbe
 }
 
 // newNamedFiles matches named against the files git status lists.
-func newNamedFiles(ctx context.Context, repoRoot string, named []string, listed ...[]string) namedFiles {
+func newNamedFiles(repoRoot string, named []string, listed ...[]string) namedFiles {
 	inStatus := make(map[string]struct{})
 	for _, files := range listed {
 		for _, f := range files {
@@ -134,14 +133,7 @@ func newNamedFiles(ctx context.Context, repoRoot string, named []string, listed 
 		repoRoot: repoRoot,
 		exact:    make(map[string]struct{}, len(named)),
 		folded:   make(map[string][]string),
-		ignoresCase: sync.OnceValue(func() bool {
-			ignores, err := gitrepo.IgnoresCase(ctx, repoRoot)
-			if err != nil {
-				logging.Debug(logging.WithComponent(ctx, "lifecycle"), "cannot read core.ignorecase; a deletion named in another case does not match",
-					slog.String("error", err.Error()))
-			}
-			return ignores
-		}),
+		cases:    worktreedir.NewCaseProbe(repoRoot),
 	}
 	for _, f := range named {
 		if _, ok := inStatus[f]; ok {
@@ -170,11 +162,11 @@ func (n namedFiles) only(all []string) []string {
 // case, as a spelling that opens the same file.
 //
 // A file absent from the worktree (a deletion) has nothing left to compare.
-// It matches when git treats paths as case-insensitive here (core.ignorecase,
-// which git sets from the filesystem when it creates the repository) and the
-// transcript's spelling is absent too: on such a filesystem the two spellings
-// go together, while on a case-sensitive one a spelling that still opens a
-// file is another file.
+// It matches a spelling that is absent too when each directory whose entry
+// the two spellings name in different cases finds its entries ignoring case
+// (worktreedir.CaseProbe): there the spellings went together, while on a
+// case-sensitive filesystem a spelling that still opens a file is another
+// file.
 func (n namedFiles) namedInOtherCase(file string) bool {
 	spellings := n.folded[strings.ToLower(file)]
 	if len(spellings) == 0 {
@@ -182,7 +174,7 @@ func (n namedFiles) namedInOtherCase(file string) bool {
 	}
 	listed, err := lstatWorktreeFile(n.repoRoot, file)
 	if errors.Is(err, fs.ErrNotExist) {
-		return n.deletedInOtherCase(spellings)
+		return n.deletedInOtherCase(file, spellings)
 	}
 	if err != nil {
 		return false
@@ -196,11 +188,11 @@ func (n namedFiles) namedInOtherCase(file string) bool {
 }
 
 // deletedInOtherCase is namedInOtherCase for a file the worktree lacks.
-func (n namedFiles) deletedInOtherCase(spellings []string) bool {
-	if !n.ignoresCase() {
-		return false
-	}
+func (n namedFiles) deletedInOtherCase(file string, spellings []string) bool {
 	for _, spelling := range spellings {
+		if !n.cases.SameEntry(file, spelling) {
+			continue
+		}
 		if _, err := lstatWorktreeFile(n.repoRoot, spelling); errors.Is(err, fs.ErrNotExist) {
 			return true
 		}

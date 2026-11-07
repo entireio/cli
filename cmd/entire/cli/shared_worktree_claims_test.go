@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 
@@ -103,7 +104,7 @@ func TestNamedFiles_OtherCaseIsTheSameFileWindows(t *testing.T) {
 	testutil.WriteFile(t, dir, "README.md", "readme\n")
 	testutil.WriteFile(t, dir, "src/App.go", "package src\n")
 	modified := []string{"README.md", "src/App.go"}
-	named := newNamedFiles(t.Context(), dir, []string{"readme.md", "SRC/app.go"}, modified)
+	named := newNamedFiles(dir, []string{"readme.md", "SRC/app.go"}, modified)
 	if caseInsensitiveDir(t, dir) {
 		require.Equal(t, modified, named.only(modified), "kept in git's spelling")
 	} else {
@@ -113,31 +114,37 @@ func TestNamedFiles_OtherCaseIsTheSameFileWindows(t *testing.T) {
 
 // TestNamedFiles_DeletedInOtherCaseWindows covers a deletion git lists as
 // README.md that the transcript names readme.md. With the file gone there is
-// nothing to compare, so git's core.ignorecase decides, which git sets from
-// the filesystem when it creates a repository. Setting it stands in for a
-// case-insensitive filesystem here. CI's Windows job runs it by its name.
+// nothing to compare, so the directory decides: one that finds its other
+// entries under another case would have found README.md as readme.md. git's
+// core.ignorecase is set to the opposite of what the filesystem does, to show
+// that the filesystem decides: a linked worktree, a moved repository or a
+// Windows directory can disagree with the repository's setting. CI's Windows
+// job runs it by its name.
 func TestNamedFiles_DeletedInOtherCaseWindows(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
-	deleted := []string{"README.md", "docs/Guide.md"}
-	transcript := []string{"readme.md", "Docs/guide.md"}
+	insensitive := caseInsensitiveDir(t, dir)
+	testutil.RunGit(t, dir, "config", "core.ignorecase", strconv.FormatBool(!insensitive))
+	testutil.WriteFile(t, dir, "docs/Other.md", "keeps docs/\n")
 
-	testutil.RunGit(t, dir, "config", "core.ignorecase", "true")
-	require.Equal(t, deleted, newNamedFiles(t.Context(), dir, transcript, deleted).only(deleted),
-		"kept in git's spelling")
-
-	testutil.RunGit(t, dir, "config", "core.ignorecase", "false")
-	require.Empty(t, newNamedFiles(t.Context(), dir, transcript, deleted).only(deleted),
-		"where git treats case as significant, readme.md is another file")
+	// docs/Guide.md is asked of docs/; Gone/File.md, whose directory went
+	// with it, of the worktree root.
+	deleted := []string{"README.md", "docs/Guide.md", "Gone/File.md"}
+	transcript := []string{"readme.md", "Docs/guide.md", "gone/file.md"}
+	got := newNamedFiles(dir, transcript, deleted).only(deleted)
+	if insensitive {
+		require.Equal(t, deleted, got, "kept in git's spelling")
+	} else {
+		require.Empty(t, got, "on a case-sensitive filesystem the transcript names other files")
+	}
 
 	// A transcript spelling that still opens a file is that file, not the
 	// deleted one, unless the filesystem says they are the same.
-	testutil.RunGit(t, dir, "config", "core.ignorecase", "true")
 	testutil.WriteFile(t, dir, "readme.md", "another file\n")
 	other := []string{"README.md"}
-	got := newNamedFiles(t.Context(), dir, []string{"readme.md"}, other).only(other)
-	if caseInsensitiveDir(t, dir) {
+	got = newNamedFiles(dir, []string{"readme.md"}, other).only(other)
+	if insensitive {
 		require.Equal(t, other, got, "README.md is present after all: it is readme.md")
 	} else {
 		require.Empty(t, got, "readme.md is another file")
@@ -158,16 +165,16 @@ func TestNamedFiles_OtherCaseIsAnotherFile(t *testing.T) {
 	testutil.WriteFile(t, dir, "readme.md", "restored\n")
 
 	both := []string{"README.md", "readme.md"}
-	require.Equal(t, []string{"readme.md"}, newNamedFiles(t.Context(), dir, []string{"readme.md"}, both).only(both))
+	require.Equal(t, []string{"readme.md"}, newNamedFiles(dir, []string{"readme.md"}, both).only(both))
 	other := []string{"README.md"}
-	require.Empty(t, newNamedFiles(t.Context(), dir, []string{"readme.md"}, other).only(other))
-	require.Empty(t, newNamedFiles(t.Context(), dir, nil, both).only(both))
+	require.Empty(t, newNamedFiles(dir, []string{"readme.md"}, other).only(other))
+	require.Empty(t, newNamedFiles(dir, nil, both).only(both))
 
 	// A spelling that opens the same file does count. A hard link stands in
 	// for a case-insensitive filesystem, where both spellings open one file.
 	require.NoError(t, os.Remove(filepath.Join(dir, "readme.md")))
 	require.NoError(t, os.Link(filepath.Join(dir, "README.md"), filepath.Join(dir, "readme.md")))
-	require.Equal(t, other, newNamedFiles(t.Context(), dir, []string{"readme.md"}, other).only(other))
+	require.Equal(t, other, newNamedFiles(dir, []string{"readme.md"}, other).only(other))
 }
 
 func TestParseCaptureTime(t *testing.T) {
