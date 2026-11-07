@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/require"
 )
@@ -19,6 +20,7 @@ import (
 func newDirtyTrackedRepo(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
+	releaseSharedRoots(t)
 	t.Chdir(dir)
 	testutil.InitRepo(t, dir)
 	for _, f := range []string{"a.txt", "b.txt", "c.txt"} {
@@ -80,6 +82,26 @@ func TestStatusClaim_NoBaselineNarrowsNothing(t *testing.T) {
 	}
 }
 
+// releaseSharedRoots closes every shared root before the test's temporary
+// directories are removed, as Windows cannot remove a directory while a
+// handle to it is open. t.Cleanup runs in reverse order, so call it after
+// t.TempDir. It closes them all, not only the test's directory, because git
+// can report the worktree under a longer spelling than t.TempDir's (a short
+// TEMP path such as C:\Users\RUNNER~1), which opens a second root on it. That
+// is only safe in a test that is not parallel.
+func releaseSharedRoots(t *testing.T) {
+	t.Helper()
+	t.Cleanup(osroot.ResetShared)
+}
+
+// forgetSharedRoot closes the shared root opened on dir, a t.TempDir, before
+// the directory is removed, for a parallel test that names the worktree only
+// by dir.
+func forgetSharedRoot(t *testing.T, dir string) {
+	t.Helper()
+	t.Cleanup(func() { osroot.Forget(dir) })
+}
+
 // caseInsensitiveDir reports whether dir's filesystem ignores case, the
 // macOS and Windows default.
 func caseInsensitiveDir(t *testing.T, dir string) bool {
@@ -101,6 +123,7 @@ func caseInsensitiveDir(t *testing.T, dir string) bool {
 func TestNamedFiles_OtherCaseIsTheSameFileWindows(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
+	forgetSharedRoot(t, dir)
 	testutil.WriteFile(t, dir, "README.md", "readme\n")
 	testutil.WriteFile(t, dir, "src/App.go", "package src\n")
 	modified := []string{"README.md", "src/App.go"}
@@ -124,6 +147,7 @@ func TestNamedFiles_OtherCaseIsTheSameFileWindows(t *testing.T) {
 func TestNamedFiles_DeletedInOtherCaseWindows(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
+	forgetSharedRoot(t, dir)
 	testutil.InitRepo(t, dir)
 	insensitive := caseInsensitiveDir(t, dir)
 	testutil.RunGit(t, dir, "config", "core.ignorecase", strconv.FormatBool(!insensitive))
@@ -164,6 +188,7 @@ func TestNamedFiles_DeletedInOtherCaseWindows(t *testing.T) {
 func TestNamedFiles_OtherCaseIsAnotherFile(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
+	forgetSharedRoot(t, dir)
 	if caseInsensitiveDir(t, dir) {
 		t.Skip("needs a case-sensitive filesystem")
 	}
@@ -199,6 +224,7 @@ func TestParseCaptureTime(t *testing.T) {
 func TestStatusClaim_DirtyTrackedBaselineWindows(t *testing.T) {
 	// Not parallel: uses t.Chdir.
 	dir := t.TempDir()
+	releaseSharedRoots(t)
 	t.Chdir(dir)
 	testutil.InitRepo(t, dir)
 	testutil.WriteFile(t, dir, "src/app/main.txt", "v1\n")

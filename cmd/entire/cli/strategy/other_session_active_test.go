@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 )
@@ -19,6 +20,10 @@ import (
 func TestOtherSessionActiveSince(t *testing.T) {
 	// Not parallel: callerSessionRepo uses t.Chdir.
 	worktree := callerSessionRepo(t)
+	// The session state store opens a shared root under .git, and Windows
+	// cannot remove a directory while a handle to it is open. This cleanup
+	// runs before the removal callerSessionRepo's t.TempDir registered.
+	t.Cleanup(osroot.ResetShared)
 	ctx := context.Background()
 	since := time.Now().Add(-10 * time.Minute)
 	before := since.Add(-time.Minute)
