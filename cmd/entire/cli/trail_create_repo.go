@@ -89,6 +89,9 @@ func runTrailCreateForRepo(cmd *cobra.Command, repoArg, title, body, base, branc
 	if err != nil {
 		return err
 	}
+	if err := trailCreateRefusal(ctx, client, repoID, forge, owner, repoName); err != nil {
+		return err
+	}
 	createResp, err := postTrailCreate(ctx, client, basePath, forge, owner, repoName, title, body, branch, base, statusStr, strings.TrimSpace(typeStr), strings.TrimSpace(priorityStr), assignees, false)
 	if err != nil {
 		return err

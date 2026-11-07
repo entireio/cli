@@ -27,14 +27,29 @@ import (
 type trailCreateRepoFixture struct {
 	gotPath   string
 	gotCreate map[string]any
-	calls     int
+	calls     int      // create requests only; the repo-meta preflight is not counted
 	checked   []string // forge/owner/repo@branch passed to the branch check
+	// meta answers the repo-meta preflight; metaStatus, when set, answers it
+	// with that error status instead.
+	meta       api.RepoMeta
+	metaStatus int
 }
 
 func newTrailCreateRepoFixture(t *testing.T, presence trailBranchPresence, checkErr error) *trailCreateRepoFixture {
 	t.Helper()
-	f := &trailCreateRepoFixture{}
+	f := &trailCreateRepoFixture{meta: api.RepoMeta{Permission: "write", TrailsEnabled: true}}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/native-repo-id" {
+			if f.metaStatus != 0 {
+				http.Error(w, `{"error":"meta"}`, f.metaStatus)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(f.meta); err != nil {
+				t.Errorf("encode repo meta: %v", err)
+			}
+			return
+		}
 		f.calls++
 		f.gotPath = r.URL.Path
 		if err := json.NewDecoder(r.Body).Decode(&f.gotCreate); err != nil {
@@ -138,6 +153,45 @@ func TestTrailCreateRepo_BranchMissingOrUnknown(t *testing.T) {
 			require.Zero(t, f.calls, "no trail may be created for an unverified branch")
 		})
 	}
+}
+
+// The trail routes answer "trails off" and "no write access" with one
+// collapsed 404, so the create reads the repo meta first and refuses with the
+// real reason before any trail request is sent.
+func TestTrailCreateRepo_RefusedBeforeCreate(t *testing.T) {
+	tests := []struct {
+		name string
+		meta api.RepoMeta
+		want string
+	}{
+		{name: "trails disabled", meta: api.RepoMeta{Permission: "admin"}, want: "trails are not enabled for gh/acme/app\nhint: a repo admin can turn them on under Settings > Trails"},
+		{name: "read only", meta: api.RepoMeta{Permission: "read", TrailsEnabled: true}, want: "you need write access to gh/acme/app to create a trail"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newTrailCreateRepoFixture(t, trailBranchPresent, nil)
+			f.meta = tt.meta
+
+			_, err := runTrailCmd(t, "create", "--repo", "gh/acme/app", "--branch", "feat", "--base", "main", "--title", "Remote")
+
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tt.want)
+			require.Zero(t, f.calls, "a refused create must not reach the trail route")
+		})
+	}
+}
+
+// A repo-meta read that fails explains nothing, so the create still goes to
+// the server for its own answer.
+func TestTrailCreateRepo_MetaUnavailableStillCreates(t *testing.T) {
+	f := newTrailCreateRepoFixture(t, trailBranchPresent, nil)
+	f.metaStatus = http.StatusNotFound
+
+	_, err := runTrailCmd(t, "create", "--repo", "gh/acme/app", "--branch", "feat", "--base", "main", "--title", "Remote")
+
+	require.NoError(t, err)
+	require.Equal(t, 1, f.calls)
+	require.Equal(t, "/api/v1/trails/gh/acme/app", f.gotPath)
 }
 
 func TestTrailCreateRepo_RequiresExplicitFields(t *testing.T) {
@@ -248,7 +302,12 @@ func TestTrailCreateRepo_LeavesLocalEnablementCacheAlone(t *testing.T) {
 	for _, status := range []int{http.StatusOK, http.StatusForbidden} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			// No t.Parallel: package-level seams and t.Chdir.
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet {
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(api.RepoMeta{Permission: "write", TrailsEnabled: true}) //nolint:errcheck // test
+					return
+				}
 				if status != http.StatusOK {
 					http.Error(w, `{"error":"forbidden"}`, status)
 					return

@@ -243,6 +243,11 @@ func TestRunTrailCreateBranchlessHappyPath(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/oauth/token":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprint(w, `{"access_token":"exchanged-token","token_type":"Bearer","expires_in":3600}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/"+trailTestRepoID:
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(api.RepoMeta{Permission: "write", TrailsEnabled: true}); err != nil {
+				t.Errorf("encode repo meta: %v", err)
+			}
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/trails/gh/acme/repo":
 			gotCreateAuth = r.Header.Get("Authorization")
 			if err := json.NewDecoder(r.Body).Decode(&gotCreate); err != nil {
