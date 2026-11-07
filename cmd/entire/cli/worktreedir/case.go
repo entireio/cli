@@ -2,6 +2,7 @@ package worktreedir
 
 import (
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path"
@@ -9,6 +10,10 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 )
+
+// maxCaseProbeEntries bounds how many entries CaseProbe reads from one
+// directory. A larger directory is not asked, and answers false.
+const maxCaseProbeEntries = 4096
 
 // CaseProbe tells, for directories in one worktree, whether they find their
 // entries under a name in another case, as the macOS and Windows defaults do.
@@ -19,6 +24,11 @@ import (
 type CaseProbe struct {
 	root *os.Root
 	dirs map[string]bool
+
+	// maxEntries is maxCaseProbeEntries, and lookUp is the directory's
+	// Lstat; tests replace them.
+	maxEntries int
+	lookUp     func(d *os.Root, dir, name string) (fs.FileInfo, error)
 }
 
 // NewCaseProbe returns a CaseProbe for the worktree at worktreeRoot. If the
@@ -28,16 +38,28 @@ func NewCaseProbe(worktreeRoot string) *CaseProbe {
 	if err != nil {
 		root = nil
 	}
-	return &CaseProbe{root: root, dirs: make(map[string]bool)}
+	return &CaseProbe{
+		root:       root,
+		dirs:       make(map[string]bool),
+		maxEntries: maxCaseProbeEntries,
+		lookUp: func(d *os.Root, _, name string) (fs.FileInfo, error) {
+			return d.Lstat(name)
+		},
+	}
 }
 
 // IgnoresCase reports whether the directory dir (slash-separated, "." for
 // the worktree root) finds its entries under a name in another case.
 //
 // An entry with an ASCII letter in its name tells: the name with its letters'
-// case swapped opens the same file only where lookups ignore case. A
-// directory that is gone, or that has no such entry, is answered by the
-// nearest ancestor that can tell, and false when none can.
+// case swapped opens the same file only where lookups ignore case, unless
+// the directory also lists the swapped name as an entry of its own (a hard
+// link), which only a directory that respects case can hold. A directory that
+// is gone, cannot be read, has no such entry, or has more than
+// maxCaseProbeEntries entries cannot tell, and answers false: not knowing is
+// no evidence that two spellings name one entry. Neither is the parent's
+// answer, since Windows lets a directory respect case inside one that
+// ignores it.
 func (p *CaseProbe) IgnoresCase(dir string) bool {
 	if p.root == nil {
 		return false
@@ -45,7 +67,7 @@ func (p *CaseProbe) IgnoresCase(dir string) bool {
 	if ignores, asked := p.dirs[dir]; asked {
 		return ignores
 	}
-	ignores := lookupIgnoresCase(p.root, dir)
+	ignores := p.entriesIgnoreCase(dir)
 	p.dirs[dir] = ignores
 	return ignores
 }
@@ -53,7 +75,7 @@ func (p *CaseProbe) IgnoresCase(dir string) bool {
 // SameEntry reports whether file and spelling, slash-separated paths that
 // differ only in case, name the same entry: each directory holding a
 // component where they differ finds its entries ignoring case. It does not
-// look at the entries themselves, so it answers for paths that are gone too.
+// look at the entries themselves, so it answers for files that are gone too.
 func (p *CaseProbe) SameEntry(file, spelling string) bool {
 	parts, others := strings.Split(file, "/"), strings.Split(spelling, "/")
 	if len(parts) != len(others) {
@@ -69,29 +91,20 @@ func (p *CaseProbe) SameEntry(file, spelling string) bool {
 	return true
 }
 
-func lookupIgnoresCase(root *os.Root, dir string) bool {
-	for {
-		if ignores, told := entriesIgnoreCase(root, dir); told {
-			return ignores
-		}
-		if dir == "." || dir == "" {
-			return false
-		}
-		dir = path.Dir(dir)
-	}
-}
-
-// entriesIgnoreCase is lookupIgnoresCase for dir alone; told is false when
-// dir cannot be read or has no entry that tells.
-func entriesIgnoreCase(root *os.Root, dir string) (ignores, told bool) {
-	d, closeDir, err := osroot.OpenDirNoSymlinks(root, dir)
+// entriesIgnoreCase is IgnoresCase without the cache.
+func (p *CaseProbe) entriesIgnoreCase(dir string) bool {
+	d, closeDir, err := osroot.OpenDirNoSymlinks(p.root, dir)
 	if err != nil {
-		return false, false
+		return false
 	}
 	defer closeDir()
-	entries, err := osroot.ReadDir(d, ".")
-	if err != nil {
-		return false, false
+	entries, ok := readEntries(d, p.maxEntries)
+	if !ok {
+		return false
+	}
+	listed := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		listed[entry.Name()] = struct{}{}
 	}
 	for _, entry := range entries {
 		name := entry.Name()
@@ -99,19 +112,37 @@ func entriesIgnoreCase(root *os.Root, dir string) (ignores, told bool) {
 		if swapped == name {
 			continue
 		}
-		info, err := d.Lstat(name)
+		if _, ownEntry := listed[swapped]; ownEntry {
+			return false
+		}
+		info, err := p.lookUp(d, dir, name)
 		if err != nil {
 			continue
 		}
-		other, err := d.Lstat(swapped)
+		other, err := p.lookUp(d, dir, swapped)
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
-			return false, true
+			return false
 		case err == nil:
-			return os.SameFile(info, other), true
+			return os.SameFile(info, other)
 		}
 	}
-	return false, false
+	return false
+}
+
+// readEntries reads d's entries, in directory order. ok is false when d
+// cannot be read or has more than limit entries.
+func readEntries(d *os.Root, limit int) (entries []os.DirEntry, ok bool) {
+	f, err := d.Open(".")
+	if err != nil {
+		return nil, false
+	}
+	defer f.Close()
+	entries, err = f.ReadDir(limit + 1)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, false
+	}
+	return entries, len(entries) <= limit
 }
 
 // SwapASCIICase swaps the case of name's ASCII letters.

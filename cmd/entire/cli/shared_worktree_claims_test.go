@@ -115,7 +115,8 @@ func TestNamedFiles_OtherCaseIsTheSameFileWindows(t *testing.T) {
 // TestNamedFiles_DeletedInOtherCaseWindows covers a deletion git lists as
 // README.md that the transcript names readme.md. With the file gone there is
 // nothing to compare, so the directory decides: one that finds its other
-// entries under another case would have found README.md as readme.md. git's
+// entries under another case would have found README.md as readme.md, and
+// one that is gone cannot tell. git's
 // core.ignorecase is set to the opposite of what the filesystem does, to show
 // that the filesystem decides: a linked worktree, a moved repository or a
 // Windows directory can disagree with the repository's setting. CI's Windows
@@ -129,15 +130,20 @@ func TestNamedFiles_DeletedInOtherCaseWindows(t *testing.T) {
 	testutil.WriteFile(t, dir, "docs/Other.md", "keeps docs/\n")
 
 	// docs/Guide.md is asked of docs/; Gone/File.md, whose directory went
-	// with it, of the worktree root.
+	// with it, of the worktree root, which holds the directory's name.
 	deleted := []string{"README.md", "docs/Guide.md", "Gone/File.md"}
-	transcript := []string{"readme.md", "Docs/guide.md", "gone/file.md"}
+	transcript := []string{"readme.md", "Docs/guide.md", "gone/File.md"}
 	got := newNamedFiles(dir, transcript, deleted).only(deleted)
 	if insensitive {
 		require.Equal(t, deleted, got, "kept in git's spelling")
 	} else {
 		require.Empty(t, got, "on a case-sensitive filesystem the transcript names other files")
 	}
+
+	// A directory that is gone cannot tell how it found its entries, so a
+	// file name spelled in another case inside it does not match.
+	lost := []string{"Lost/File.md"}
+	require.Empty(t, newNamedFiles(dir, []string{"Lost/file.md"}, lost).only(lost))
 
 	// A transcript spelling that still opens a file is that file, not the
 	// deleted one, unless the filesystem says they are the same.
