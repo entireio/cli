@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
@@ -57,7 +58,7 @@ type statusClaim struct {
 func (c statusClaim) narrow(ctx context.Context, modified, created, deleted []string) (claimedModified, claimedCreated, claimedDeleted []string) {
 	modified = c.withoutUnchangedDirty(modified)
 	deleted = c.withoutUnchangedDirty(deleted)
-	named := newNamedFiles(c.named, modified, created, deleted)
+	named := newNamedFiles(c.repoRoot, c.named, modified, created, deleted)
 	claimedModified = named.only(modified)
 	claimedCreated = named.only(created)
 	claimedDeleted = named.only(deleted)
@@ -101,28 +102,34 @@ func (c statusClaim) withoutUnchangedDirty(files []string) []string {
 // namedFiles tells which of the files git status lists the transcript names.
 // A transcript can spell a path in another case than git does: on a
 // case-insensitive filesystem (the macOS and Windows default) an agent that
-// writes readme.md changes README.md. So a name matches a listed file of
-// another case, but only when git status lists no file with its exact
-// spelling: two listed files that differ only in case are two files.
+// writes readme.md changes README.md. So a name also matches a listed file of
+// another case, when git status lists no file with the name's exact spelling
+// and both spellings open the same file in the worktree. On a case-sensitive
+// filesystem readme.md and README.md are two files, and a session that named
+// one must not take the other.
 type namedFiles struct {
-	exact  map[string]struct{}
-	folded map[string]struct{}
+	repoRoot string
+	exact    map[string]struct{}
+	// folded maps a lower-cased name to the transcript's spellings of it
+	// that git status does not list.
+	folded map[string][]string
 }
 
 // newNamedFiles matches named against the files git status lists.
-func newNamedFiles(named []string, listed ...[]string) namedFiles {
+func newNamedFiles(repoRoot string, named []string, listed ...[]string) namedFiles {
 	inStatus := make(map[string]struct{})
 	for _, files := range listed {
 		for _, f := range files {
 			inStatus[f] = struct{}{}
 		}
 	}
-	n := namedFiles{exact: make(map[string]struct{}, len(named)), folded: make(map[string]struct{})}
+	n := namedFiles{repoRoot: repoRoot, exact: make(map[string]struct{}, len(named)), folded: make(map[string][]string)}
 	for _, f := range named {
 		if _, ok := inStatus[f]; ok {
 			n.exact[f] = struct{}{}
 		} else {
-			n.folded[strings.ToLower(f)] = struct{}{}
+			key := strings.ToLower(f)
+			n.folded[key] = append(n.folded[key], f)
 		}
 	}
 	return n
@@ -133,13 +140,31 @@ func newNamedFiles(named []string, listed ...[]string) namedFiles {
 func (n namedFiles) only(all []string) []string {
 	var kept []string
 	for _, f := range all {
-		_, exact := n.exact[f]
-		_, folded := n.folded[strings.ToLower(f)]
-		if exact || folded {
+		if _, exact := n.exact[f]; exact || n.namedInOtherCase(f) {
 			kept = append(kept, f)
 		}
 	}
 	return kept
+}
+
+// namedInOtherCase reports whether the transcript names file in another
+// case, as a spelling that opens the same file. A file absent from the
+// worktree (a deletion) cannot be compared, and does not match.
+func (n namedFiles) namedInOtherCase(file string) bool {
+	spellings := n.folded[strings.ToLower(file)]
+	if len(spellings) == 0 {
+		return false
+	}
+	listed, err := lstatWorktreeFile(n.repoRoot, file)
+	if err != nil {
+		return false
+	}
+	for _, spelling := range spellings {
+		if named, err := lstatWorktreeFile(n.repoRoot, spelling); err == nil && os.SameFile(listed, named) {
+			return true
+		}
+	}
+	return false
 }
 
 // statusClaim returns the statusClaim for the turn this state began. A nil

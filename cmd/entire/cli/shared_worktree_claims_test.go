@@ -79,20 +79,63 @@ func TestStatusClaim_NoBaselineNarrowsNothing(t *testing.T) {
 	}
 }
 
-// TestNamedFiles_MatchesAnotherCase pins the case rule for transcript names
-// (#3011): a name in another case than git's matches, unless git status lists
-// a file with the name's exact spelling.
-func TestNamedFiles_MatchesAnotherCase(t *testing.T) {
-	t.Parallel()
-	modified := []string{"README.md", "src/App.go", "notes.txt"}
-	named := newNamedFiles([]string{"readme.md", "SRC/app.go"}, modified, nil, nil)
-	require.Equal(t, []string{"README.md", "src/App.go"}, named.only(modified), "kept in git's spelling")
+// caseInsensitiveDir reports whether dir's filesystem ignores case, the
+// macOS and Windows default.
+func caseInsensitiveDir(t *testing.T, dir string) bool {
+	t.Helper()
+	testutil.WriteFile(t, dir, "CaseProbe", "probe\n")
+	defer func() { require.NoError(t, os.Remove(filepath.Join(dir, "CaseProbe"))) }()
+	probe, err := os.Lstat(filepath.Join(dir, "CaseProbe"))
+	require.NoError(t, err)
+	folded, err := os.Lstat(filepath.Join(dir, "caseprobe"))
+	return err == nil && os.SameFile(probe, folded)
+}
 
-	// Both spellings listed: on a case-sensitive filesystem they are two files.
-	modified = []string{"README.md", "readme.md"}
-	named = newNamedFiles([]string{"readme.md"}, modified, nil, nil)
-	require.Equal(t, []string{"readme.md"}, named.only(modified))
-	require.Empty(t, newNamedFiles(nil, modified).only(modified))
+// TestNamedFiles_OtherCaseIsTheSameFileWindows pins the case rule for
+// transcript names (#3011) where it matters, on a case-insensitive filesystem:
+// a name in another case than git's opens the same file, so it counts as
+// naming it. CI's Windows job runs it by its name. On a case-sensitive
+// filesystem it checks that a name in another case that opens no file names
+// nothing.
+func TestNamedFiles_OtherCaseIsTheSameFileWindows(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	testutil.WriteFile(t, dir, "README.md", "readme\n")
+	testutil.WriteFile(t, dir, "src/App.go", "package src\n")
+	modified := []string{"README.md", "src/App.go", "notes.txt"}
+	named := newNamedFiles(dir, []string{"readme.md", "SRC/app.go", "Notes.txt"}, modified)
+	if caseInsensitiveDir(t, dir) {
+		require.Equal(t, []string{"README.md", "src/App.go"}, named.only(modified),
+			"kept in git's spelling; notes.txt is absent, so it cannot be compared")
+	} else {
+		require.Empty(t, named.only(modified), "readme.md and SRC/app.go are other files, absent here")
+	}
+}
+
+// TestNamedFiles_OtherCaseIsAnotherFile pins the case-sensitive side: two
+// files that differ only in case are two files, whether git status lists both
+// or only the one the transcript does not name (the session restored its own).
+// Only a spelling that opens the same file matches.
+func TestNamedFiles_OtherCaseIsAnotherFile(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if caseInsensitiveDir(t, dir) {
+		t.Skip("needs a case-sensitive filesystem")
+	}
+	testutil.WriteFile(t, dir, "README.md", "edited by another session\n")
+	testutil.WriteFile(t, dir, "readme.md", "restored\n")
+
+	both := []string{"README.md", "readme.md"}
+	require.Equal(t, []string{"readme.md"}, newNamedFiles(dir, []string{"readme.md"}, both).only(both))
+	other := []string{"README.md"}
+	require.Empty(t, newNamedFiles(dir, []string{"readme.md"}, other).only(other))
+	require.Empty(t, newNamedFiles(dir, nil, both).only(both))
+
+	// A spelling that opens the same file does count. A hard link stands in
+	// for a case-insensitive filesystem, where both spellings open one file.
+	require.NoError(t, os.Remove(filepath.Join(dir, "readme.md")))
+	require.NoError(t, os.Link(filepath.Join(dir, "README.md"), filepath.Join(dir, "readme.md")))
+	require.Equal(t, other, newNamedFiles(dir, []string{"readme.md"}, other).only(other))
 }
 
 func TestParseCaptureTime(t *testing.T) {

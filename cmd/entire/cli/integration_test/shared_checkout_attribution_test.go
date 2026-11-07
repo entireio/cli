@@ -4,6 +4,8 @@ package integration
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 
@@ -113,13 +115,15 @@ func TestSharedCheckout_OverlappingTurnsClaimOnlyTheirOwnFiles(t *testing.T) {
 // that spells a path in another case than git does, as an agent on a
 // case-insensitive filesystem (macOS, Windows) can: writing readme.md there
 // changes README.md. During an overlap the turn keeps only the files its
-// transcript names, and README.md must still count as named.
+// transcript names, and README.md must still count as named. It runs where
+// the filesystem ignores case.
 func TestSharedCheckout_TranscriptNameInAnotherCaseIsClaimed(t *testing.T) {
 	t.Parallel()
 	env := newSharedCheckoutEnv(t)
 	env.WriteFile("README.md", "readme\n")
 	env.GitAdd("README.md")
 	env.GitCommit("Add README.md")
+	requireCaseInsensitive(t, env, "README.md", "readme.md")
 
 	sessA := env.NewSession()
 	sessB := env.NewSession()
@@ -142,6 +146,19 @@ func TestSharedCheckout_TranscriptNameInAnotherCaseIsClaimed(t *testing.T) {
 	summary := headCheckpointSummary(t, env)
 	env.AssertCheckpointContainsSession(t, summary, sessB.ID)
 	env.AssertCheckpointExcludesSession(t, summary, sessA.ID)
+}
+
+// requireCaseInsensitive skips the test unless the repository's filesystem
+// ignores case, the macOS and Windows default.
+func requireCaseInsensitive(t *testing.T, env *TestEnv, file, spelling string) {
+	t.Helper()
+	a, err := os.Lstat(filepath.Join(env.RepoDir, file))
+	if err != nil {
+		t.Fatalf("lstat %s: %v", file, err)
+	}
+	if b, err := os.Lstat(filepath.Join(env.RepoDir, spelling)); err != nil || !os.SameFile(a, b) {
+		t.Skip("needs a case-insensitive filesystem; TestNamedFiles_OtherCaseIsAnotherFile covers the rule here")
+	}
 }
 
 // TestSharedCheckout_StatusOnlyChangesDuringOverlapAreNotClaimed pins the
