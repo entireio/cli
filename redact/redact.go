@@ -367,8 +367,9 @@ var connectionStringRules = []connectionStringRule{
 //  3. Provider token prefixes: deterministic prefix rules for credential
 //     formats betterleaks misses in isolation (e.g. Supabase sb_secret_)
 //  4. Credentialed URIs: URLs containing userinfo passwords
-//  5. Database connection strings: JDBC, keyword DSNs, semicolon strings, and
-//     Oracle user/password@ logins
+//  5. Database connection strings: JDBC, keyword DSNs, semicolon strings,
+//     Oracle user/password@ logins, and passwords given on a command line
+//     (--password=..., mysql -p..., docker login -p ...) or in a .netrc entry
 //  6. User-defined custom rules: configured via ConfigureCustomRules
 //  7. Shell stdin literals piped into secret-management commands
 //  8. Bounded credential key/value pairs: DB_PASSWORD=..., GITHUB_CLIENT_SECRET=..., Azure SAS sig=...
@@ -654,6 +655,7 @@ func detectOracleCredentials(s string) []taggedRegion {
 
 func detectConnectionStrings(s string) []taggedRegion {
 	regions := detectOracleCredentials(s)
+	regions = append(regions, detectCommandLinePasswords(s)...)
 	if !strings.ContainsRune(s, '=') {
 		return regions
 	}
