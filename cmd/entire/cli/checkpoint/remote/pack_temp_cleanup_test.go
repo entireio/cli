@@ -100,12 +100,14 @@ func skipWithoutPOSIXShell(t *testing.T) {
 // fetch whose transfer ends early made git leave a read-only tmp_pack_* of
 // everything received so far in .git/objects/pack, and every later attempt
 // added another.
+//
+// Not parallel: Fetch runs git with the process environment, so the test
+// isolates git config through t.Setenv.
 func TestFetch_CutOffReceiveLeavesNoTempPack(t *testing.T) {
-	t.Parallel()
 	skipWithoutPOSIXShell(t)
+	testutil.IsolateGitConfigEnv(t)
 
 	t.Run("plain git leaves the partial pack", func(t *testing.T) {
-		t.Parallel()
 		// Control: shows the setup really makes git leave a temp pack, so the
 		// cases below test the cleanup rather than a receive that never
 		// started. Git up to at least 2.53 leaves it; should a later git
@@ -126,7 +128,6 @@ func TestFetch_CutOffReceiveLeavesNoTempPack(t *testing.T) {
 	})
 
 	t.Run("early EOF from the remote", func(t *testing.T) {
-		t.Parallel()
 		bareDir, cloneDir := setupLargePackRemote(t)
 		ctx, cancel := context.WithTimeout(context.Background(), testFetchTimeout)
 		defer cancel()
@@ -143,7 +144,6 @@ func TestFetch_CutOffReceiveLeavesNoTempPack(t *testing.T) {
 	})
 
 	t.Run("killed at its deadline", func(t *testing.T) {
-		t.Parallel()
 		bareDir, cloneDir := setupLargePackRemote(t)
 		// Send part of the pack, then hold the connection open, the way a
 		// stalled remote does, so the fetch ends by its deadline's kill.
@@ -163,7 +163,6 @@ func TestFetch_CutOffReceiveLeavesNoTempPack(t *testing.T) {
 	})
 
 	t.Run("a temp pack from before the fetch stays", func(t *testing.T) {
-		t.Parallel()
 		bareDir, cloneDir := setupLargePackRemote(t)
 		// It may belong to another git process still receiving.
 		earlier := filepath.Join(cloneDir, ".git", "objects", "pack", "tmp_pack_earlier")
@@ -183,7 +182,6 @@ func TestFetch_CutOffReceiveLeavesNoTempPack(t *testing.T) {
 	})
 
 	t.Run("a successful fetch keeps its pack", func(t *testing.T) {
-		t.Parallel()
 		bareDir, cloneDir := setupLargePackRemote(t)
 		ctx, cancel := context.WithTimeout(context.Background(), testFetchTimeout)
 		defer cancel()
@@ -219,23 +217,45 @@ func TestPackTemps_RemovesOnlyNewReceiveTemps(t *testing.T) {
 	for _, name := range []string{"tmp_pack_new", "tmp_idx_new", "tmp_rev_new", "pack-new.pack", "tmp_obj_new", "other_tmp_pack_new"} {
 		write(name)
 	}
+
+	temps.removeLeftovers(context.Background())
+
+	assert.ElementsMatch(t, []string{"tmp_pack_before", "pack-new.pack", "tmp_obj_new", "other_tmp_pack_new"}, packDirNames(t, packDir),
+		"only the receive temps that appeared after the snapshot are git's leftovers")
+}
+
+func TestPackTemps_LeavesSymlinks(t *testing.T) {
+	t.Parallel()
+	testutil.SkipWithoutSymlinks(t)
+
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	packDir := filepath.Join(repoDir, ".git", "objects", "pack")
+	require.NoError(t, os.MkdirAll(packDir, 0o755))
+	temps := snapshotPackTemps(context.Background(), repoDir)
+	require.NotNil(t, temps)
+
 	outside := filepath.Join(t.TempDir(), "outside")
 	require.NoError(t, os.WriteFile(outside, []byte("keep"), 0o600))
 	require.NoError(t, os.Symlink(outside, filepath.Join(packDir, "tmp_pack_link")))
 
 	temps.removeLeftovers(context.Background())
 
-	entries, err := os.ReadDir(packDir)
-	require.NoError(t, err)
-	var left []string
-	for _, entry := range entries {
-		left = append(left, entry.Name())
-	}
-	assert.ElementsMatch(t, []string{"tmp_pack_before", "pack-new.pack", "tmp_obj_new", "other_tmp_pack_new", "tmp_pack_link"}, left,
-		"only the receive temps that appeared after the snapshot are git's leftovers")
+	assert.Equal(t, []string{"tmp_pack_link"}, packDirNames(t, packDir), "a symlink is not git's temp file")
 	data, err := os.ReadFile(outside)
 	require.NoError(t, err)
 	assert.Equal(t, "keep", string(data), "a symlink's target is never touched")
+}
+
+func packDirNames(t *testing.T, packDir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(packDir)
+	require.NoError(t, err)
+	var names []string
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	return names
 }
 
 func TestPackTemps_NilIsNoOp(t *testing.T) {
