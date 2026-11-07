@@ -1186,6 +1186,9 @@ func generateChainedContent(baseContent, hookName string) string {
 // and runs it from its own wrapper becomes the backup on the next install, so
 // without the guard Entire -> wrapper -> Entire -> ... never ends. The cost: a
 // git command run by the chained hook does not chain that same hook again.
+//
+// A backup that is Trunk's launcher is sourced rather than executed; see
+// trunkHookCallback.
 func chainCall(hookName, redirect string) string {
 	backup := hookName + backupSuffix
 	keep := hookName + keepSuffix
@@ -1200,11 +1203,33 @@ if [ -z "${%s:-}" ]; then
             "$_entire_hook_dir/%s" "$@"%s
         fi
     elif [ -x "$_entire_hook_dir/%s" ]; then
-        "$_entire_hook_dir/%s" "$@"%s
+        if grep -qxF %s "$_entire_hook_dir/%s" 2>/dev/null; then
+            /bin/bash --norc -c '_entire_saved_hook=$1; shift; . "$_entire_saved_hook"' "$_entire_hook_dir/%s" "$_entire_hook_dir/%s" "$@"%s
+        else
+            "$_entire_hook_dir/%s" "$@"%s
+        fi
     fi
 fi
-`, chainComment, guard, guard, guard, preCommitSignatures[0], backup, keep, keep, redirect, backup, backup, redirect)
+`, chainComment, guard, guard, guard, preCommitSignatures[0], backup, keep, keep, redirect,
+		backup, shellQuote(trunkHookCallback), backup, hookName, backup, redirect, backup, redirect)
 }
+
+// trunkHookCallback is the last line of the launcher Trunk writes for every git
+// hook it manages. The launcher tells Trunk which hook is running by its own
+// file name (${0##*/}), and finds Trunk's tools in the parent of the directory
+// it runs from (dirname "${BASH_SOURCE[0]}"/..).
+//
+// Executed as <hook>.pre-entire, it asks Trunk for a callback of that name,
+// which Trunk refuses with exit 2, aborting the commit or push. A link named
+// <hook> in another directory would fix the name but not the directory. So the
+// chain sources the launcher with $0 set to the hook's own path, in the
+// /bin/bash --norc its #! names (not bash from PATH, which a GUI git client may
+// not have): ${0##*/} is <hook>, BASH_SOURCE still names the backup in the
+// hooks directory, and the exit status and EXIT trap stay the launcher's.
+//
+// Only a backup with this exact line is sourced. Any other may be another
+// language or depend on its own path, so it is executed as before.
+const trunkHookCallback = `TRUNK_LAUNCHER_QUIET=true "${trunk}" git-hooks callback "${0##*/}" -- "$@"`
 
 func generatePostRewriteChainedContent(baseContent string) string {
 	const original = `hooks git post-rewrite "$1" 2>/dev/null || true`
