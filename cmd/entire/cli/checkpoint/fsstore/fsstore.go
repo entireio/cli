@@ -116,15 +116,15 @@ func (s *Store) save(sc *storedCheckpoint) error {
 }
 
 // Write dispatches on the request type, mirroring the git store's Write.
-func (s *Store) Write(_ context.Context, req cp.WriteRequest) error {
+func (s *Store) Write(ctx context.Context, req cp.WriteRequest) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	switch r := req.(type) {
 	case cp.Session:
-		return s.writeSession(cp.WriteOptions(r))
+		return s.writeSession(ctx, cp.WriteOptions(r))
 	case cp.ReservedSession:
-		return s.writeSession(cp.WriteOptions(r))
+		return s.writeSession(ctx, cp.WriteOptions(r))
 	case cp.SessionTranscript:
 		return s.backfillTranscript(cp.UpdateOptions(r))
 	case cp.SessionSummary:
@@ -148,7 +148,7 @@ func (s *Store) writeCheckpointTasks(req cp.Tasks) error {
 	return s.save(sc)
 }
 
-func (s *Store) writeSession(opts cp.WriteOptions) error {
+func (s *Store) writeSession(ctx context.Context, opts cp.WriteOptions) error {
 	sc, err := s.load(opts.CheckpointID)
 	if err != nil {
 		return err
@@ -163,7 +163,7 @@ func (s *Store) writeSession(opts cp.WriteOptions) error {
 		Transcript: opts.Transcript.Bytes(),
 		Prompts:    checkpoint.RedactedJoinedPrompts(opts.Prompts),
 	}
-	sc.Sessions = upsertSession(sc.Sessions, session)
+	sc.Sessions = upsertSession(ctx, sc.Sessions, session)
 	sc.Tasks = upsertTasks(sc.Tasks, opts.Tasks)
 
 	// Summary-level flags accumulate across sessions and survive recompute.
@@ -442,12 +442,15 @@ func metadataFromWriteOptions(opts cp.WriteOptions) cp.Metadata {
 	}
 }
 
-func upsertSession(sessions []storedSession, session storedSession) []storedSession {
+func upsertSession(ctx context.Context, sessions []storedSession, session storedSession) []storedSession {
 	if idx := sessionIndexByID(sessions, session.SessionID); idx >= 0 {
 		// Keep the opaque line attribution an older CLI recorded for this
-		// session through the overwrite, as the git store does.
+		// session through the overwrite, as the git store does — including
+		// the cap the git store applies to prompt_attributions, since an
+		// uncapped carry-forward here would diverge from the contract.
 		session.Metadata.LegacyInitialAttribution = sessions[idx].Metadata.LegacyInitialAttribution
-		session.Metadata.LegacyPromptAttributions = sessions[idx].Metadata.LegacyPromptAttributions
+		session.Metadata.LegacyPromptAttributions = checkpoint.CapLegacyPromptAttributions(
+			ctx, sessions[idx].Metadata.LegacyPromptAttributions, session.SessionID)
 		sessions[idx] = session
 		return sessions
 	}
