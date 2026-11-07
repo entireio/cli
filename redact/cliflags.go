@@ -608,7 +608,7 @@ func (f cliPasswordFlag) segmentRest(s string, lines *quoteScan, paths *programP
 // ($(case x in x) printf h;; esac)).
 func segmentMatch(pattern *regexp.Regexp, text string) string {
 	n := len(pattern.FindString(text))
-	if !strings.Contains(text[:n], "case") {
+	if !strings.Contains(text[:n], caseKeyword) {
 		return text[:n]
 	}
 	q := quoteScan{s: text, substitutions: true}
@@ -805,6 +805,9 @@ type commandStart struct {
 	// the name of a command that prints its arguments.
 	command bool
 	text    bool
+	// cases counts the case statements open in a script or a
+	// substitution, across its shell operators.
+	cases int
 }
 
 // at reports whether a command name at p, in the argument of s whose text
@@ -824,7 +827,7 @@ func (c *commandStart) at(s string, from, p int) bool {
 				c.j = c.i
 				continue
 			case size == 1 && isCommandSeparator(s, c.i):
-				*c = commandStart{from: from, i: c.i + size, j: c.i + size, lenient: c.lenient}
+				*c = commandStart{from: from, i: c.i + size, j: c.i + size, lenient: c.lenient, cases: c.cases}
 				continue
 			}
 		}
@@ -941,11 +944,18 @@ func (c *commandStart) runs() bool {
 // word reads one word of the argument.
 func (c *commandStart) word(word string) {
 	switch {
-	case c.lenient && strings.HasSuffix(word, ")"):
+	case c.lenient && c.cases > 0 && strings.HasSuffix(word, ")") && !isEscaped(word, len(word)-1):
 		// In a script or a substitution, the end of a case pattern
 		// (case x in x) echo mysql -p2222;; esac), after which a command
-		// starts.
-		*c = commandStart{from: c.from, i: c.i, j: c.j, lenient: true}
+		// starts; an escaped one is text (echo x\) mysql -p2222).
+		*c = commandStart{from: c.from, i: c.i, j: c.j, lenient: true, cases: c.cases}
+	case c.lenient && c.fresh() && (word == caseKeyword || word == esacKeyword):
+		if word == caseKeyword {
+			c.cases++
+		} else {
+			c.cases = max(0, c.cases-1)
+		}
+		c.command = word == caseKeyword
 	case c.text:
 	case c.redirectArg:
 		c.redirectArg = false
@@ -998,7 +1008,7 @@ func (c *commandStart) word(word string) {
 	case !c.command && isCommandWrapper(programName(word)):
 		c.wrapper, c.host = programName(word), false
 	default:
-		if eq := strings.IndexByte(word, '='); eq > 0 && isShellName(word[:eq]) {
+		if isAssignment(word) {
 			return
 		}
 		// In a substitution, a word after the name of a command is its
@@ -1016,7 +1026,7 @@ func (c *commandStart) word(word string) {
 // would, so a quoted string in it stays one word
 // (env -S 'env A="x ssh"' mysql -pX).
 func (c *commandStart) splitString(arg string) {
-	*c = commandStart{from: c.from, i: c.i, j: c.j, lenient: c.lenient}
+	*c = commandStart{from: c.from, i: c.i, j: c.j, lenient: c.lenient, cases: c.cases}
 	shellWords(arg, func(line string) {
 		shellWords(line, c.word)
 	})
@@ -1078,7 +1088,7 @@ func joinedSplitString(wrapper, option string) (string, bool) {
 // directory or a .exe ("/usr/bin/ssh", /opt/build=debug/bin/env,
 // C:\tools\ssh.exe), or the word itself when it is an assignment.
 func programName(word string) string {
-	if eq := strings.IndexByte(word, '='); eq > 0 && isShellName(word[:eq]) {
+	if isAssignment(word) {
 		// An assignment (FOO=/usr/bin/ssh), not a program.
 		return word
 	}
@@ -1206,6 +1216,17 @@ func runsArgument(wrapper, option string) bool {
 		return option == "--split-string" || !strings.HasPrefix(option, "--") && strings.HasSuffix(option, "S")
 	}
 	return isContainerClient(wrapper) && option == "--entrypoint"
+}
+
+// isAssignment reports whether word, without its quotes, is an
+// environment assignment, as env reads one after the shell removes them
+// (env "FOO=/usr/bin/ssh" mysql -pX).
+func isAssignment(word string) bool {
+	if strings.ContainsAny(word, `"'`) {
+		word = wordQuotes.Replace(word)
+	}
+	eq := strings.IndexByte(word, '=')
+	return eq > 0 && isShellName(word[:eq])
 }
 
 // isShellName reports whether s is a shell variable name (an environment
@@ -1852,7 +1873,7 @@ type caseMemo struct {
 func (m *caseMemo) substitutionLen(s string, i int) int {
 	rest := s[i:]
 	n := len(cliSubstitution.FindString(rest))
-	if n == 0 || i < m.openTo || !strings.Contains(rest[:n], "case") {
+	if n == 0 || i < m.openTo || !strings.Contains(rest[:n], caseKeyword) {
 		return n
 	}
 	c := caseScan{start: true}
@@ -1890,6 +1911,12 @@ type caseScan struct {
 	// start is set where a command starts.
 	start bool
 }
+
+// caseKeyword and esacKeyword open and close a case statement.
+const (
+	caseKeyword = "case"
+	esacKeyword = "esac"
+)
 
 // caseState is a part of a case statement.
 type caseState int
@@ -1966,11 +1993,11 @@ func (c *caseScan) word(w string) {
 		c.open++
 	case c.state == caseSubject:
 		c.state = caseNone
-	case (c.start || c.state == casePattern) && w == "esac" && c.open > 0:
+	case (c.start || c.state == casePattern) && w == esacKeyword && c.open > 0:
 		c.state = caseNone
 		c.open--
 	case c.state == casePattern:
-	case c.start && w == "case":
+	case c.start && w == caseKeyword:
 		c.state = caseWord
 	}
 	c.start = isShellKeyword(w)
