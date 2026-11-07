@@ -1415,6 +1415,17 @@ func (env *TestEnv) GetCheckpointIDFromCommitMessage(commitSHA string) string {
 	return cpID.String()
 }
 
+// headCheckpointID returns HEAD's Entire-Checkpoint trailer, or "" when it
+// has none.
+func headCheckpointID(t *testing.T, env *TestEnv) string {
+	t.Helper()
+	cpID, found := trailers.ParseCheckpoint(env.GetHeadCommitMessage())
+	if !found {
+		return ""
+	}
+	return cpID.String()
+}
+
 // GetLatestCheckpointIDFromHistory walks backwards from HEAD on the active branch
 // and returns the checkpoint ID from the first commit that has an Entire-Checkpoint trailer.
 // This verifies that condensation actually happened (commit has trailer) without relying
