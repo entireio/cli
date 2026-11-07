@@ -26,13 +26,13 @@ import (
 // session keeps readme.md pending for good, and the turn end that merges git
 // status's README.md records both.
 //
-// A spelling is rewritten only when the filesystem ignores case
-// (ignoresCase) and it opens the same file as the index's spelling. A
-// deleted file has nothing left to open: it is rewritten when the index has
-// exactly one spelling of it and that spelling is gone too. On a
-// case-sensitive filesystem nothing changes and git is not asked, since
-// readme.md and README.md are two files there. If git cannot answer, the
-// files are returned as they are.
+// A spelling is rewritten only when it opens the same file as the index's
+// spelling. A deleted file has nothing left to open: it is rewritten when the
+// index has exactly one spelling of it, that spelling is gone too, and each
+// directory where the two differ finds its entries ignoring case
+// (worktreedir.CaseProbe). Where no reported path's directory ignores case,
+// nothing changes and git is not asked, since readme.md and README.md are two
+// files there. If git cannot answer, the files are returned as they are.
 func TrackedSpellings(ctx context.Context, repoRoot string, files []string) []string {
 	return trackedSpellingsOf(ctx, repoRoot, files)[0]
 }
@@ -48,7 +48,11 @@ func trackedSpellingsOf(ctx context.Context, repoRoot string, lists ...[]string)
 		return lists
 	}
 	worktree, err := worktreedir.OpenAt(repoRoot)
-	if err != nil || !ignoresCase(worktree, repoRoot, all) {
+	if err != nil {
+		return lists
+	}
+	cases := worktreedir.NewCaseProbe(repoRoot)
+	if !anyDirectoryIgnoresCase(cases, all) {
 		return lists
 	}
 	tracked, err := gitrepo.IndexPathsIgnoringCase(ctx, repoRoot, all)
@@ -62,7 +66,7 @@ func trackedSpellingsOf(ctx context.Context, repoRoot string, lists ...[]string)
 		seen := make(map[string]struct{}, len(list))
 		out := make([]string, 0, len(list))
 		for _, file := range list {
-			file = trackedSpelling(worktree, repoRoot, file, tracked[strings.ToLower(file)])
+			file = trackedSpelling(worktree, cases, repoRoot, file, tracked[strings.ToLower(file)])
 			if _, dup := seen[file]; dup {
 				continue
 			}
@@ -76,13 +80,13 @@ func trackedSpellingsOf(ctx context.Context, repoRoot string, lists ...[]string)
 
 // trackedSpelling returns the one of tracked (the index's spellings of file,
 // ignoring case) that file names, or file itself.
-func trackedSpelling(worktree *os.Root, repoRoot, file string, tracked []string) string {
+func trackedSpelling(worktree *os.Root, cases *worktreedir.CaseProbe, repoRoot, file string, tracked []string) string {
 	if len(tracked) == 0 || slices.Contains(tracked, file) {
 		return file
 	}
 	named, err := lstatIn(worktree, repoRoot, file)
 	if errors.Is(err, fs.ErrNotExist) {
-		if len(tracked) == 1 {
+		if len(tracked) == 1 && cases.SameEntry(tracked[0], file) {
 			if _, err := lstatIn(worktree, repoRoot, tracked[0]); errors.Is(err, fs.ErrNotExist) {
 				return tracked[0]
 			}
@@ -108,45 +112,14 @@ func lstatIn(worktree *os.Root, repoRoot, file string) (fs.FileInfo, error) {
 	return worktree.Lstat(name) //nolint:wrapcheck // callers only test for success and fs.ErrNotExist
 }
 
-// ignoresCase reports whether the filesystem holding files ignores case,
-// judged by the first of them, or of their parent directories, that exists
-// and has a letter in its name: whether it also opens with each letter's case
-// swapped. When none can tell (every one is deleted at the top level, or has
-// no letters), it reports true: git is asked then, and trackedSpelling's own
-// checks still decide.
-func ignoresCase(worktree *os.Root, repoRoot string, files []string) bool {
+// anyDirectoryIgnoresCase reports whether a directory holding one of files
+// finds its entries under a name in another case. Where none does, a
+// spelling in another case is another file, and git need not be asked.
+func anyDirectoryIgnoresCase(cases *worktreedir.CaseProbe, files []string) bool {
 	for _, file := range files {
-		for dir := file; dir != "." && dir != "/" && dir != ""; dir = path.Dir(dir) {
-			swapped := swapCase(dir)
-			if swapped == dir {
-				break // no letters here or in any parent
-			}
-			info, err := lstatIn(worktree, repoRoot, dir)
-			if err != nil {
-				continue // deleted: ask its parent
-			}
-			other, err := lstatIn(worktree, repoRoot, swapped)
-			if errors.Is(err, fs.ErrNotExist) {
-				return false
-			}
-			if err != nil {
-				continue
-			}
-			return os.SameFile(info, other)
+		if cases.IgnoresCase(path.Dir(file)) {
+			return true
 		}
 	}
-	return true
-}
-
-// swapCase returns name with the case of each ASCII letter swapped.
-func swapCase(name string) string {
-	return strings.Map(func(r rune) rune {
-		switch {
-		case 'a' <= r && r <= 'z':
-			return r - 'a' + 'A'
-		case 'A' <= r && r <= 'Z':
-			return r - 'A' + 'a'
-		}
-		return r
-	}, name)
+	return false
 }
