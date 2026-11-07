@@ -279,6 +279,23 @@ func TestString_CommandLinePasswordsReviewCases(t *testing.T) {
 		{name: "escaped quotes around a piece inside sh -c", input: `sh -c "mysql -pabc\"x ` + p + `\""`, want: `sh -c "mysql -pREDACTED"`},
 		{name: "escaped quotes around a long flag piece inside sh -c", input: `sh -c "wget --password=x\"y ` + p + `\" u"`, want: `sh -c "wget --password=REDACTED u"`},
 		{name: "escaped quote closing sh -c inside a JSON string", input: `{"cmd": "sh -c \"mysql -p` + p + `\" && echo \"ok\""}`, want: `{"cmd": "sh -c \"mysql -pREDACTED\" && echo \"ok\""}`},
+		{name: "escaped quotes later in a sh -c script", input: `sh -c "mysql -pabc\"` + p + `\"; echo \\\""`, want: `sh -c "mysql -pREDACTED; echo \\\""`},
+		{name: "client run in a pod after a global option", input: "sh -c 'kubectl --as alice exec pod -- mysql -p" + p + "'", want: "sh -c 'kubectl --as alice exec pod -- mysql -pREDACTED'"},
+		{name: "client run in a container after a global option", input: "docker --context prod exec db mysql -p" + p, want: "docker --context prod exec db mysql -pREDACTED"},
+		{name: "quoted short flag value joined to a comma and more", input: `mysql "-pabc",'` + p + `'`, want: `mysql "-pREDACTED`},
+		{name: "quoted short flag value before a code separator", input: `exec.Command("mysql", "-p` + p + `",db)`, want: `exec.Command("mysql", "-pREDACTED",db)`},
+		{name: "quoted program path with a blank after a wrapper", input: `nice "/opt/mysql tools/bin/mysql" -p` + p, want: `nice "/opt/mysql tools/bin/mysql" -pREDACTED`},
+		{name: "long flag password spelled like a prose word", input: "mongosh --password string", want: "mongosh --password REDACTED"},
+		{name: "long flag password spelled like a prose word before an option", input: "mongosh --password value --host db", want: "mongosh --password REDACTED --host db"},
+		{name: "client run by env -S", input: "env -S mysql -p" + p, want: "env -S mysql -pREDACTED"},
+		{name: "client run by a quoted env -S string", input: "env -S 'mysql -p" + p + "'", want: "env -S 'mysql -pREDACTED'"},
+		{name: "client run as a container entrypoint", input: "docker run --entrypoint mysql mysql:8 -p" + p, want: "docker run --entrypoint mysql mysql:8 -pREDACTED"},
+		{name: "client joined to the container entrypoint option", input: "docker run --entrypoint=/usr/bin/mysql img -p" + p, want: "docker run --entrypoint=/usr/bin/mysql img -pREDACTED"},
+		{name: "client joined to the env split-string option", input: "env --split-string=mysql -p" + p, want: "env --split-string=mysql -pREDACTED"},
+		{name: "netrc account before a default entry on the same line", input: "machine h login a password x9 account team default login b password " + p, want: "machine h login a password REDACTED account team default login b password REDACTED"},
+		{name: "ANSI-C quoted piece after a password prefix", input: `openssl enc -pass pass:$'abc\' ` + p + `' -in f`, want: `openssl enc -pass pass:REDACTED -in f`},
+		{name: "ANSI-C quoted piece after a bare long flag value", input: `wget --password=abc$'\' ` + p + `' url`, want: `wget --password=REDACTED url`},
+		{name: "netrc fields all equal to a type name", input: "machine string login string password string", want: "machine string login string password REDACTED"},
 		{name: "many quoted commands with no blank", input: strings.Repeat(`"mysql";`, 4000) + "mysql -p" + p, want: strings.Repeat(`"mysql";`, 4000) + "mysql -pREDACTED"},
 	})
 }
@@ -332,6 +349,14 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		"sshpass -f ~/.pw ssh -p 2222 user@host",
 		// prose and docs
 		"Pass --password to set it, or --password-stdin to read it.",
+		"  --password string   Password for the registry",
+		"Set the --password flag when the server asks.",
+		"Set the --password flag.",
+		"Use the --password option, or the --user option.",
+		"docker logs mysql -p",
+		"docker run --entrypoint=ssh img -p2222 host",
+		"docker run --entrypoint mysql mysql:8 -p 3306",
+		"kubectl --as alice logs mysql -p",
 		"the machine learning password policy",
 		"By default login with password is disabled.",
 		`{"cmd":"mysql -uroot -p","cwd":"/app"}`,
@@ -416,7 +441,6 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		"docker exec mysql ssh -p2222 host",
 		"docker run -h mongo -p 27017:27017 mongo:7",
 		"docker run --hostname mysql -p3306:3306 mysql:8",
-		"machine string login string password string",
 		`mysql "-p$MYSQL_PWD" -h db`,
 		`exec.Command("mysql", "-p"+password)`,
 		`args := []string{"mongosh", "-p" + password}`,
@@ -428,6 +452,7 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		`fmt.Sprintf("machine %s login %s password %s", host, user, pass)`,
 		// declarations
 		"type netrcLine struct {\n\tmachine  string\n\tlogin    string\n\tpassword string\n}",
+		"func connect(machine string, login string, password string) error",
 	} {
 		t.Run(input, func(t *testing.T) {
 			t.Parallel()
