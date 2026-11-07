@@ -335,6 +335,8 @@ func TestString_CommandLinePasswordsReviewCases(t *testing.T) {
 		{name: "client in a case arm in a subshell", input: "sh -c '(case echo in x) :;; echo ) mysql -p" + p + ";; esac)'", want: "sh -c '(case echo in x) :;; echo ) mysql -pREDACTED;; esac)'"},
 		{name: "client in a case arm after env -S in the subject", input: "sh -c 'case $(env -S printf x; printf x) in xx ) mysql -p" + p + ";; esac'", want: "sh -c 'case $(env -S printf x; printf x) in xx ) mysql -pREDACTED;; esac'"},
 		{name: "client after a wrapper option given by a substitution", input: "sh -c 'sudo -u $(id -un) mysql -p" + p + "'", want: "sh -c 'sudo -u $(id -un) mysql -pREDACTED'"},
+		{name: "client in a case arm of a subshell with a printed subject", input: "sh -c '(case $(echo a) in a) mysql -p" + p + ";; esac)'", want: "sh -c '(case $(echo a) in a) mysql -pREDACTED;; esac)'"},
+		{name: "client in a case arm after a subject joined to a substitution", input: "sh -c 'case $(printf ech)o in echo ) mysql -p" + p + ";; esac'", want: "sh -c 'case $(printf ech)o in echo ) mysql -pREDACTED;; esac'"},
 	})
 }
 
@@ -513,6 +515,10 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		`sh -c 'echo $(true) mysql -p2222'`,
 		`mysql -e "$(echo $(true) mysql -p2222)"`,
 		`sh -c 'echo $(case x in x) echo a;; esac) mysql -p2222'`,
+		`sh -c 'case x in $(echo a)b) echo mysql -p2222;; esac'`,
+		`sh -c 'echo $(true)x mysql -p2222'`,
+		`sh -c 'case $(printf ech)o in echo ) echo mysql -p2222;; esac'`,
+		`sh -c 'case a$(true)x in x) printf mysql -p2222;; esac'`,
 		`sh -c 'case x in a) echo;; esac; echo x) mysql -p2222'`,
 		"openssl enc -aes-128-cbc -pass=env:PW",
 		// declarations

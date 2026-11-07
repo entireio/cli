@@ -1005,7 +1005,9 @@ func (c *commandStart) readCase(word string) bool {
 		if i >= 0 {
 			part = word[:i]
 		}
-		if c.casePart(part, i < 0) {
+		// After a substitution, the rest of the word goes on the word
+		// before it, which was read (case $(printf ech)o in echo) ...).
+		if !restored && c.casePart(part, i < 0) {
 			inCase = true
 		}
 		if i < 0 {
