@@ -806,8 +806,13 @@ type commandStart struct {
 	command bool
 	text    bool
 	// cases counts the case statements open in a script or a
-	// substitution, across its shell operators.
-	cases int
+	// substitution, across its shell operators, casePos is where the
+	// reading is in the head or a pattern of the last one, and parens
+	// counts the parentheses open in it (a substitution, a subshell), whose
+	// words are no part of a case statement's head or pattern.
+	cases   int
+	casePos caseState
+	parens  int
 }
 
 // at reports whether a command name at p, in the argument of s whose text
@@ -827,7 +832,7 @@ func (c *commandStart) at(s string, from, p int) bool {
 				c.j = c.i
 				continue
 			case size == 1 && isCommandSeparator(s, c.i):
-				*c = commandStart{from: from, i: c.i + size, j: c.i + size, lenient: c.lenient, cases: c.cases}
+				c.separate(s, from)
 				continue
 			}
 		}
@@ -931,6 +936,77 @@ func redirection(word string) (ok, operatorOnly bool) {
 	return true, i == len(word)
 }
 
+// separate starts a command after the shell operator at s[c.i], in the
+// argument whose text starts at from, keeping the case statements and the
+// parentheses open in a script or a substitution.
+func (c *commandStart) separate(s string, from int) {
+	next := commandStart{from: from, i: c.i + 1, j: c.i + 1, lenient: c.lenient, cases: c.cases, casePos: c.casePos, parens: c.parens}
+	switch op := s[c.i]; {
+	case !c.lenient:
+	case op == '(' && c.casePos == casePattern:
+		// The optional "(" before a pattern (case x in (x) mysql -pX;; esac).
+	case op == '(':
+		if !isEscaped(s, c.i) {
+			next.parens++
+		}
+	case c.parens == 0 && c.cases > 0 && c.i > from && s[c.i-1] == ';' && (op == ';' || op == '&'):
+		// ;; ;& and ;;& end a case arm, and a pattern follows.
+		next.casePos = casePattern
+	}
+	*c = next
+}
+
+// readCase reads word, in a script or a substitution, for its case
+// statements, and reports whether it is part of one's head or pattern. The
+// unescaped ")" that ends a pattern starts a command
+// (case x in x) mysql -pX;; esac), while one in an arm's body
+// (echo $(printf x) mysql -p2222) or an escaped one (echo x\) mysql -p2222)
+// is text.
+func (c *commandStart) readCase(word string) bool {
+	if c.parens > 0 {
+		c.parens = max(0, c.parens-closingParens(word))
+		return false
+	}
+	switch {
+	case c.cases == 0:
+		return false
+	case c.casePos == caseWord:
+		c.casePos = caseSubject
+	case c.casePos == caseSubject && word != "in":
+		c.casePos = caseNone
+		return false
+	case c.casePos == caseSubject:
+		c.casePos = casePattern
+	case c.casePos != casePattern:
+		return false
+	case word == esacKeyword:
+		c.cases--
+		c.casePos, c.command = caseNone, false
+	case strings.HasSuffix(word, ")") && !isEscaped(word, len(word)-1):
+		*c = commandStart{from: c.from, i: c.i, j: c.j, lenient: true, cases: c.cases}
+	}
+	return true
+}
+
+// closingParens counts the unescaped ")" of word outside its quoted
+// strings.
+func closingParens(word string) int {
+	n := 0
+	for i := 0; i < len(word); i++ {
+		if end, quoteLen := quotedPiece(word, i); quoteLen > 0 {
+			i = end - 1
+			continue
+		}
+		switch word[i] {
+		case '\\':
+			i++
+		case ')':
+			n++
+		}
+	}
+	return n
+}
+
 // fresh reports whether no word has been read since the command could start.
 func (c *commandStart) fresh() bool {
 	return !c.text && !c.command && c.wrapper == "" && !c.optionArg && !c.redirectArg && !c.funcName
@@ -944,14 +1020,11 @@ func (c *commandStart) runs() bool {
 // word reads one word of the argument.
 func (c *commandStart) word(word string) {
 	switch {
-	case c.lenient && c.cases > 0 && strings.HasSuffix(word, ")") && !isEscaped(word, len(word)-1):
-		// In a script or a substitution, the end of a case pattern
-		// (case x in x) echo mysql -p2222;; esac), after which a command
-		// starts; an escaped one is text (echo x\) mysql -p2222).
-		*c = commandStart{from: c.from, i: c.i, j: c.j, lenient: true, cases: c.cases}
-	case c.lenient && c.fresh() && (word == caseKeyword || word == esacKeyword):
+	case c.lenient && c.readCase(word):
+	case c.lenient && c.parens == 0 && c.fresh() && (word == caseKeyword || word == esacKeyword):
 		if word == caseKeyword {
 			c.cases++
+			c.casePos = caseWord
 		} else {
 			c.cases = max(0, c.cases-1)
 		}
@@ -1026,7 +1099,7 @@ func (c *commandStart) word(word string) {
 // would, so a quoted string in it stays one word
 // (env -S 'env A="x ssh"' mysql -pX).
 func (c *commandStart) splitString(arg string) {
-	*c = commandStart{from: c.from, i: c.i, j: c.j, lenient: c.lenient, cases: c.cases}
+	*c = commandStart{from: c.from, i: c.i, j: c.j, lenient: c.lenient, cases: c.cases, parens: c.parens}
 	shellWords(arg, func(line string) {
 		shellWords(line, c.word)
 	})
