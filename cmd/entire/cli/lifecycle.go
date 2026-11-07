@@ -1022,7 +1022,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// Filter and normalize all paths
 	_, normalizeSpan := perf.Start(ctx, "filter_and_normalize_paths")
 	relModifiedFiles := FilterAndNormalizePaths(modifiedFiles, repoRoot)
-	var relNewFiles, relDeletedFiles []string
+	var statusModifiedFiles, relNewFiles, relDeletedFiles []string
 	if changes != nil {
 		relNewFiles = FilterAndNormalizePaths(changes.New, repoRoot)
 		relDeletedFiles = FilterAndNormalizePaths(changes.Deleted, repoRoot)
@@ -1031,12 +1031,18 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		// Transcript parsing is the primary source for modified files, but it can miss
 		// files if the agent uses an unrecognized tool or the transcript format changes.
 		// Git status catches any tracked file with working-tree changes.
-		relModifiedFiles = mergeUnique(relModifiedFiles, FilterAndNormalizePaths(changes.Modified, repoRoot))
+		statusModifiedFiles = FilterAndNormalizePaths(changes.Modified, repoRoot)
 	}
 	// Pre-existing untracked files the turn changed: git status lists them as
 	// untracked both before and after, so neither New nor Modified carries
 	// them, and a shell edit leaves no trace in the transcript.
-	relModifiedFiles = mergeUnique(relModifiedFiles, FilterAndNormalizePaths(preState.ChangedUntrackedFiles(repoRoot), repoRoot))
+	statusModifiedFiles = mergeUnique(statusModifiedFiles, FilterAndNormalizePaths(preState.ChangedUntrackedFiles(repoRoot), repoRoot))
+	// git status lists every dirty file in the worktree, including ones the
+	// turn did not change: see statusClaim.
+	subagentLink, isSubagentSession := resolveSubagentSessionLink(ctx, ag, transcriptRef)
+	statusModifiedFiles, relNewFiles, relDeletedFiles = preState.statusClaim(repoRoot, sessionID, relModifiedFiles, subagentLink.ParentSessionID).
+		narrow(ctx, statusModifiedFiles, relNewFiles, relDeletedFiles)
+	relModifiedFiles = mergeUnique(relModifiedFiles, statusModifiedFiles)
 
 	// Filter detected changes to exclude state already committed to HEAD.
 	// When an agent commits files mid-turn, those changes are condensed by
@@ -1079,9 +1085,9 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// parent's next checkpoint. Its usage goes on that record and the parent's
 	// subagent total, never on the Worker's own session total, so it is
 	// counted once.
-	if link, isSubagent := resolveSubagentSessionLink(ctx, ag, transcriptRef); isSubagent {
+	if isSubagentSession {
 		return saveSubagentSessionTaskStep(ctx, subagentSessionStep{
-			link:          link,
+			link:          subagentLink,
 			sessionID:     sessionID,
 			event:         event,
 			transcriptRef: transcriptRef,
@@ -2387,7 +2393,10 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 		// changes come from git status, so they are uncommitted by construction.
 		relNewFiles = FilterAndNormalizePaths(changes.New, repoRoot)
 		relDeletedFiles = FilterAndNormalizePaths(changes.Deleted, repoRoot)
-		relModifiedFiles = mergeUnique(relModifiedFiles, FilterAndNormalizePaths(changes.Modified, repoRoot))
+		var statusModifiedFiles []string
+		statusModifiedFiles, relNewFiles, relDeletedFiles = preState.statusClaim(repoRoot, event.SessionID, subagentFiles).
+			narrow(logCtx, FilterAndNormalizePaths(changes.Modified, repoRoot), relNewFiles, relDeletedFiles)
+		relModifiedFiles = mergeUnique(relModifiedFiles, statusModifiedFiles)
 	}
 	if opts.analyzerFilesOnly && opts.claimUnrecordedNewFiles {
 		relNewFiles = mergeUnique(relNewFiles, unrecordedNewFilesSinceLaunch(logCtx, event, repoRoot))

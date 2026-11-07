@@ -1051,9 +1051,9 @@ func TestStatFilesWithin_StopsAtBudget(t *testing.T) {
 	missingRoot := filepath.Join(t.TempDir(), "missing")
 	files := []string{"a.txt", "b.txt"}
 
-	_, complete := statFilesWithin(missingRoot, files, -time.Second)
+	_, complete := statFilesWithin(missingRoot, files, -time.Second, statWorktreeFile)
 	require.False(t, complete)
 
-	_, complete = statFilesWithin(missingRoot, files, time.Minute)
+	_, complete = statFilesWithin(missingRoot, files, time.Minute, statWorktreeFile)
 	require.True(t, complete)
 }

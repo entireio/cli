@@ -10,7 +10,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
-	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/stretchr/testify/require"
 )
 
@@ -46,15 +45,6 @@ func makeOwnerForeign(t *testing.T, env *TestEnv, sessionID string) {
 	require.NotNil(t, state)
 	state.Owner = &owner
 	require.NoError(t, env.WriteSessionState(sessionID, state))
-}
-
-func headCheckpointID(t *testing.T, env *TestEnv) string {
-	t.Helper()
-	cpID, found := trailers.ParseCheckpoint(env.GetHeadCommitMessage())
-	if !found {
-		return ""
-	}
-	return cpID.String()
 }
 
 func TestForeignCommit_NoTTYUnrelatedFileIsNotLinked(t *testing.T) {
