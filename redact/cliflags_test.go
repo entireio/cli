@@ -184,6 +184,19 @@ func TestString_CommandLinePasswords(t *testing.T) {
 		{name: "client after an assignment of an ssh path in a script", input: "sh -c 'FOO=/usr/bin/ssh mysql -p" + p + "'", want: "sh -c 'FOO=/usr/bin/ssh mysql -pREDACTED'"},
 		{name: "quoted program path before a parenthesis in a quoted argument", input: `"/usr/bin/mysql" -e "select 1)" -p` + p, want: `"/usr/bin/mysql" -e "select 1)" -pREDACTED`},
 		{name: "escaped-quoted program path before a parenthesis in a quoted argument", input: `sh -c "\"/usr/bin/mysql\" -e 'select 1)' -p` + p + `"`, want: `sh -c "\"/usr/bin/mysql\" -e 'select 1)' -pREDACTED"`},
+		{name: "openssl after a nested substitution", input: "openssl enc -in $(printf %s $(printf /dev/null); true) -pass pass:" + p, want: "openssl enc -in $(printf %s $(printf /dev/null); true) -pass pass:REDACTED"},
+		{name: "mysql after a nested substitution", input: "mysql -h $(echo $(cat h); true) -p" + p, want: "mysql -h $(echo $(cat h); true) -pREDACTED"},
+		{name: "openssl after an arithmetic expansion in a substitution", input: "openssl enc -in $(f $((1+2)); g) -pass pass:" + p, want: "openssl enc -in $(f $((1+2)); g) -pass pass:REDACTED"},
+		{name: "ANSI-C quoted source with an escaped quote", input: `openssl enc -pass $'pass:x\'` + p + `'`, want: `openssl enc -pass $'pass:REDACTED'`},
+		{name: "ANSI-C quoted source the word goes on after", input: `openssl enc -pass $'pass:x\\'` + p, want: `openssl enc -pass $'pass:REDACTED`},
+		{name: "ANSI-C quoted password with an escaped quote", input: `mysql -e x -p$'x\'` + p + `'`, want: `mysql -e x -p$'REDACTED'`},
+		{name: "client after a leading redirection in a script", input: "docker exec openssl sh -c '> /tmp/out openssl enc -in /dev/null -pass pass:" + p + "'", want: "docker exec openssl sh -c '> /tmp/out openssl enc -in /dev/null -pass pass:REDACTED'"},
+		{name: "client after a stderr redirection in a script", input: "docker exec mysql sh -c '2>/dev/null mysql -p" + p + "'", want: "docker exec mysql sh -c '2>/dev/null mysql -pREDACTED'"},
+		{name: "client after a wrapper and a redirection in a script", input: "docker exec mysql sh -c 'sudo 2>/dev/null mysql -p" + p + "'", want: "docker exec mysql sh -c 'sudo 2>/dev/null mysql -pREDACTED'"},
+		{name: "client after a duplicating redirection in a script", input: "docker exec mysql sh -c 'cd x; 2>&1 mysql -p" + p + "'", want: "docker exec mysql sh -c 'cd x; 2>&1 mysql -pREDACTED'"},
+		{name: "client after an input redirection in a script", input: "docker exec mysql sh -c '</dev/null mysql -p" + p + "'", want: "docker exec mysql sh -c '</dev/null mysql -pREDACTED'"},
+		{name: "quoted program name in a script", input: `docker exec openssl sh -c '"openssl" enc -pass pass:` + p + `'`, want: `docker exec openssl sh -c '"openssl" enc -pass pass:REDACTED'`},
+		{name: "quoted client after an ssh destination", input: `ssh db "mysql" -p` + p, want: `ssh db "mysql" -pREDACTED`},
 	})
 }
 
@@ -290,6 +303,13 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		"machine h login me # password vault",
 		"machine h login me # password vault\nmachine x",
 		"/usr/bin/ssh mysql -p2222",
+		`ssh "mysql" -p2222`,
+		"ssh 'mysql' -p2222",
+		`ssh -i "~/.ssh/mysql" -p2222 user@host`,
+		`docker exec app sh -c 'ssh "mysql" -p2222'`,
+		"2>/dev/null ssh mysql -p2222",
+		"2>&1 ssh mysql -p2222",
+		"docker exec app sh -c '2>&1 ssh mysql -p2222'",
 		"Use `mysql`, `docker login -p`, `sshpass -p` and `openssl -pass pass:` with care.",
 		`fmt.Sprintf("machine %s login %s password %s", host, user, pass)`,
 		// declarations
