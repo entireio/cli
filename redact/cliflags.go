@@ -45,8 +45,10 @@ const cliBlank = `(?:[ \t]|\\\r?\n)+`
 const cliGlobalOptions = `(?:` + cliBlank + `-` + cliWordPiece + `+(?:` + cliBlank + cliWordPiece + `+)?)*`
 
 // cliWordPiece is one piece of a shell word: a quoted string, a command
-// substitution without nested parentheses, or another character.
-const cliWordPiece = `(?:"(?:[^"\\\r\n]|\\[^\r\n])*"|'[^'\r\n]*'|` + cliSubstitutionPattern + `|[^\s'"` + "`" + `|;&()<>])`
+// substitution without nested parentheses, an escaped line break, which
+// the shell removes (--config "/tmp/do\<newline>cker"), or another
+// character.
+const cliWordPiece = `(?:"(?:[^"\\\r\n]|\\[^\r\n]|\\\r?\n)*"|'[^'\r\n]*'|` + cliSubstitutionPattern + `|\\\r?\n|[^\s'"` + "`" + `|;&()<>])`
 
 // cliSegmentRest matches the rest of a pipeline segment after a command name.
 // cliEscapedSegmentRest also skips strings in escaped double quotes, which
@@ -166,11 +168,17 @@ const netrcEntry = `(?:\bmachine[ \t\r\n]+(` + netrcName + `)|(?:^|[\r\n"'])[ \t
 const (
 	// netrcSep comes before a .netrc keyword: blanks, line breaks, and
 	// comments, which run from a blank to the end of their line
-	// (login me # build account). netrcValueSep comes before a value,
-	// which may start with # (password #x).
+	// (login me # build account). netrcValueSep comes before a value:
+	// blanks, line breaks, comment lines, and a lone "#" or "# ..." that
+	// runs to the end of its line (password # deploy, then the value on the
+	// next line). A value may still start with # on the keyword's line
+	// (password #x), or when no line follows.
 	netrcSep      = `(?:[ \t\r\n]+(?:#[^\r\n]*[\r\n])?)+`
-	netrcValueSep = `[ \t\r\n]+`
-	netrcAccount  = `(?:` + netrcSep + `account` + netrcValueSep + `(?:` + netrcName + `))?`
+	netrcValueSep = `(?:\r?\n` + netrcCommentLines + `|[ \t]#(?:[ \t][^\r\n]*)?\r?\n` + netrcCommentLines + `|[ \t\r\n])+`
+	// netrcCommentLines are whole comment lines after a line break. A
+	// comment runs to the end of its line, so no part of it is a value.
+	netrcCommentLines = `(?:[ \t]*#[^\r\n]*\r?\n)*`
+	netrcAccount      = `(?:` + netrcSep + `account` + netrcValueSep + `(?:` + netrcName + `))?`
 )
 
 // netrcPasswordPatterns match the password of a .netrc entry that also names
@@ -272,7 +280,7 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string) []tag
 			if cmd[1] >= uncutEnd || closeAt != uncutAt {
 				uncutEnd, uncutAt = cmd[1]+len(f.segmentRest(s, &lines, &paths, cmd[1], closeAt, stringEnd)), closeAt
 			}
-			rest = untilUnmatchedParen(s[cmd[1]:uncutEnd])
+			rest = untilUnmatchedParen(s[cmd[1]:uncutEnd], closeAt-cmd[1], stringEnd-cmd[1])
 			segmentEnd = cmd[1] + len(rest)
 		case f.leading:
 			// Only the options right after the name are read, and they
@@ -505,10 +513,15 @@ func (m *programPathMemo) isProgramPath(f cliPasswordFlag, s string, from, to in
 // untilUnmatchedParen returns rest up to its first ")" that closes nothing
 // opened in it: the end of a command substitution or subshell the command
 // is in (ssh $(mysql -Nse 'select host') -p2222, where -p2222 is ssh's
-// port).
-func untilUnmatchedParen(rest string) string {
+// port). rest[skip:skipEnd] is the closing quote of the string the command
+// is quoted in, which opens nothing ("/usr/bin/mysql" -e "select 1)" -pX).
+func untilUnmatchedParen(rest string, skip, skipEnd int) string {
 	depth := 0
 	for i := 0; i < len(rest); i++ {
+		if i == skip {
+			i = skipEnd - 1
+			continue
+		}
 		if end, quoteLen := quotedPiece(rest, i); quoteLen > 0 {
 			i = end - 1
 			continue
@@ -715,8 +728,12 @@ func (c *commandStart) word(word string) {
 }
 
 // programName returns the program a word names, without its directory
-// (/usr/bin/env).
+// (/usr/bin/env), or the word itself when it holds an "=".
 func programName(word string) string {
+	if strings.IndexByte(word, '=') >= 0 {
+		// An assignment (FOO=/usr/bin/ssh), not a program.
+		return word
+	}
 	return word[strings.LastIndexByte(word, '/')+1:]
 }
 

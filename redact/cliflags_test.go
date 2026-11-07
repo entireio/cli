@@ -175,6 +175,15 @@ func TestString_CommandLinePasswords(t *testing.T) {
 		{name: "short flag inside a password word", input: `mysql -px\ -p` + p, want: "mysql -pREDACTED"},
 		{name: "netrc comment after a value", input: "machine h login me # build account\npassword " + p, want: "machine h login me # build account\npassword REDACTED"},
 		{name: "netrc password starting with a hash", input: "machine h login me password #" + p, want: "machine h login me password REDACTED"},
+		{name: "netrc comment line before a value", input: "machine h login me password\n# rotated monthly\n" + p, want: "machine h login me password\n# rotated monthly\nREDACTED"},
+		{name: "netrc comment after the password keyword", input: "machine h login me password # deploy\n  " + p, want: "machine h login me password # deploy\n  REDACTED"},
+		{name: "netrc password starting with a hash on the last line", input: "machine h login me password\n#" + p, want: "machine h login me password\nREDACTED"},
+		{name: "docker login after a continued quoted global option", input: "docker --config \"/tmp/do\\\ncker\" login -u me -p " + p, want: "docker --config \"/tmp/do\\\ncker\" login -u me -p REDACTED"},
+		{name: "docker login after a continued global option", input: "docker --config /tmp/do\\\ncker login -u me -p " + p, want: "docker --config /tmp/do\\\ncker login -u me -p REDACTED"},
+		{name: "client after an assignment of an ssh path", input: "FOO=/usr/bin/ssh mysql -p" + p, want: "FOO=/usr/bin/ssh mysql -pREDACTED"},
+		{name: "client after an assignment of an ssh path in a script", input: "sh -c 'FOO=/usr/bin/ssh mysql -p" + p + "'", want: "sh -c 'FOO=/usr/bin/ssh mysql -pREDACTED'"},
+		{name: "quoted program path before a parenthesis in a quoted argument", input: `"/usr/bin/mysql" -e "select 1)" -p` + p, want: `"/usr/bin/mysql" -e "select 1)" -pREDACTED`},
+		{name: "escaped-quoted program path before a parenthesis in a quoted argument", input: `sh -c "\"/usr/bin/mysql\" -e 'select 1)' -p` + p + `"`, want: `sh -c "\"/usr/bin/mysql\" -e 'select 1)' -pREDACTED"`},
 	})
 }
 
@@ -280,6 +289,7 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		"(mysql -e 'select 1') -p2222",
 		"machine h login me # password vault",
 		"machine h login me # password vault\nmachine x",
+		"/usr/bin/ssh mysql -p2222",
 		"Use `mysql`, `docker login -p`, `sshpass -p` and `openssl -pass pass:` with care.",
 		`fmt.Sprintf("machine %s login %s password %s", host, user, pass)`,
 		// declarations
