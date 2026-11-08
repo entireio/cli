@@ -6693,6 +6693,148 @@
           "changed"
         ],
         "type": "object"
+      },
+      "CreateServiceAccountSecretBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/CreateServiceAccountSecretBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "expires_in_days": {
+            "description": "Lifetime in days. Defaults to 90.",
+            "format": "int64",
+            "maximum": 365,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "CreateServiceAccountSecretOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/CreateServiceAccountSecretOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "account_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "created_by": {
+            "description": "Empty once the creator's account is erased.",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "last_used_at": {
+            "description": "Last exchange, to the minute.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "last_used_user_agent": {
+            "description": "User-Agent of the last exchange.",
+            "type": "string"
+          },
+          "secret": {
+            "description": "The secret. Store it now: it is not shown again.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "secret",
+          "id",
+          "account_id",
+          "created_at",
+          "expires_at"
+        ],
+        "type": "object"
+      },
+      "ListServiceAccountSecretsOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListServiceAccountSecretsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "next_cursor": {
+            "description": "Present only when more secrets remain.",
+            "type": "string"
+          },
+          "secrets": {
+            "items": {
+              "$ref": "#/components/schemas/ServiceAccountSecret"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "secrets"
+        ],
+        "type": "object"
+      },
+      "ServiceAccountSecret": {
+        "additionalProperties": true,
+        "properties": {
+          "account_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "created_by": {
+            "description": "Empty once the creator's account is erased.",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "last_used_at": {
+            "description": "Last exchange, to the minute.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "last_used_user_agent": {
+            "description": "User-Agent of the last exchange.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "account_id",
+          "created_at",
+          "expires_at"
+        ],
+        "type": "object"
       }
     },
     "securitySchemes": {
@@ -22067,6 +22209,428 @@
         "summary": "Set repository default branch",
         "tags": [
           "repos"
+        ]
+      }
+    },
+    "/service-accounts/{accountId}/secrets": {
+      "get": {
+        "operationId": "listServiceAccountSecrets",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "accountId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's next_cursor.",
+            "explode": false,
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "description": "Opaque cursor from a previous response's next_cursor.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Secrets per page.",
+            "explode": false,
+            "in": "query",
+            "name": "per_page",
+            "schema": {
+              "default": 30,
+              "description": "Secrets per page.",
+              "format": "int64",
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListServiceAccountSecretsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "421": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Misdirected Request"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "oauth2": []
+          },
+          {
+            "oidc": []
+          },
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List service account secrets",
+        "tags": [
+          "service-accounts"
+        ]
+      },
+      "post": {
+        "description": "Returns the secret once. Exchange it at /oauth/token for a short-lived service account token. Answers 421 with the home core URL outside the service account's jurisdiction.",
+        "operationId": "createServiceAccountSecret",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "accountId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateServiceAccountSecretBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateServiceAccountSecretOutputBody"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "421": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Misdirected Request"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "oauth2": []
+          },
+          {
+            "oidc": []
+          },
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Create service account secret",
+        "tags": [
+          "service-accounts"
+        ]
+      }
+    },
+    "/service-accounts/{accountId}/secrets/{secret_id}": {
+      "delete": {
+        "operationId": "deleteServiceAccountSecret",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "accountId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "secret_id",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "421": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Misdirected Request"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "oauth2": []
+          },
+          {
+            "oidc": []
+          },
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Delete service account secret",
+        "tags": [
+          "service-accounts"
         ]
       }
     }

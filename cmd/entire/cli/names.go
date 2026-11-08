@@ -34,6 +34,7 @@ const (
 	colHeaderChange   = "CHANGE"
 	colHeaderCloneURL = "CLONE URL"
 	colHeaderCluster  = "CLUSTER"
+	colHeaderCreated  = "CREATED"
 	colHeaderGrantee  = "GRANTEE"
 	colHeaderName     = "NAME"
 	colHeaderProject  = "PROJECT"
