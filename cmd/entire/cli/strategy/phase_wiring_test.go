@@ -447,7 +447,7 @@ func TestCondenseAndMarkFullyCondensed_WithDataNoFiles(t *testing.T) {
 	assert.True(t, state.FullyCondensed,
 		"session with no FilesTouched should be marked FullyCondensed after eager condense")
 	assert.Equal(t, session.PhaseEnded, state.Phase,
-		"Phase should stay ENDED (not IDLE like CondenseSessionByID)")
+		"Phase should stay ENDED")
 	assert.Equal(t, 0, state.StepCount,
 		"StepCount should be reset after condensation")
 
