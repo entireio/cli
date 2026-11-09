@@ -1,6 +1,7 @@
 package redact
 
 import (
+	"cmp"
 	"slices"
 	"sort"
 	"strings"
@@ -75,16 +76,33 @@ func argvRegionsByValue(v any) map[string][]taggedRegion {
 		}
 		// The same text in several vectors takes the regions of each, so a
 		// password one of them finds is hidden in every copy.
-		known := byValue[val]
-		for _, r := range found {
-			if !slices.Contains(known, r) {
-				known = append(known, r)
-			}
-		}
-		byValue[val] = known
+		byValue[val] = append(byValue[val], found...)
 		return val
 	})
+	// Copies in several vectors find the same regions; sorting drops the
+	// repeats in one pass, however many regions a value has.
+	for val, regions := range byValue {
+		slices.SortFunc(regions, compareTaggedRegions)
+		byValue[val] = slices.Compact(regions)
+	}
 	return byValue
+}
+
+// compareTaggedRegions orders regions by position, then by what found them.
+func compareTaggedRegions(a, b taggedRegion) int {
+	return cmp.Or(cmp.Compare(a.start, b.start), cmp.Compare(a.end, b.end), strings.Compare(a.label, b.label),
+		cmp.Compare(a.layer, b.layer), compareBools(a.builtinIP, b.builtinIP))
+}
+
+// compareBools orders false before true.
+func compareBools(a, b bool) int {
+	switch {
+	case a == b:
+		return 0
+	case a:
+		return 1
+	}
+	return -1
 }
 
 // find joins the elements into a command line and maps the command-line
@@ -187,9 +205,11 @@ func argvRegion(pos []int, start, end int) (int, int) {
 // An option joined to a value that needs quotes keeps the option bare and
 // quotes the value (--password=' x', -p' x'), as one types it, since the layer
 // reads a value that starts with a blank only in quotes of its own.
-// quoteValue quotes a bare word too. A line break is written as '_', a byte
-// that is part of a word in every quoting, so the command line stays on one
-// line, where the layer reads quoted strings.
+// quoteValue quotes a bare word too. A line break is written as '0', a digit,
+// which is part of a word in every quoting, so the command line stays on one
+// line, where the layer reads quoted strings, and which no placeholder holds,
+// so a password with a line break (secret<newline>here) never reads as one
+// (secret_here).
 func appendArgvWord(b []byte, arg string, quoteValue, positions bool) ([]byte, []int) {
 	start := len(b)
 	var pos []int
@@ -262,7 +282,7 @@ const (
 // argvWordByte is the byte appendArgvWord writes for c.
 func argvWordByte(c byte) byte {
 	if c == '\n' || c == '\r' {
-		return '_'
+		return '0'
 	}
 	return c
 }

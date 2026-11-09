@@ -47,14 +47,22 @@ func TestJSONLBytes_CommandLinePasswordsInArgvArrays(t *testing.T) {
 		// A value that starts with a blank, joined to its option.
 		{`{"command":["wget","--password= hunter"]}`, `{"command":["wget","--password=REDACTED"]}`},
 		{`{"command":["mysql","-p hunter"]}`, `{"command":["mysql","-pREDACTED"]}`},
-		// A line break in a password element.
+		// A line break in a password element, also one that would make it
+		// read as a placeholder (secret_here) if written as a blank or "_".
 		{`{"command":["mysql","-phunter2\nfoo"]}`, `{"command":["mysql","-pREDACTED"]}`},
+		{`{"command":["mysql","-psecret\nhere"]}`, `{"command":["mysql","-pREDACTED"]}`},
 		// An element after --password is its value, though it reads as prose.
 		{`{"command":["docker","login","--password","instead","registry"]}`, `{"command":["docker","login","--password","REDACTED","registry"]}`},
 		// .netrc keywords in any case.
 		{`{"command":["echo","MACHINE","host","LOGIN","alice","PASSWORD","hunter2"]}`, `{"command":["echo","MACHINE","host","LOGIN","alice","PASSWORD","REDACTED"]}`},
-		// A password that is also an object key leaves the key as it is.
+		// A password that is also an object key leaves the key as it is, and
+		// one after an escaped quote inside another string leaves that
+		// string as it is.
 		{`{"type":"x","command":["redis-cli","-a","type"]}`, `{"type":"x","command":["redis-cli","-a","REDACTED"]}`},
+		{`{"event":"hello\"type","command":["redis-cli","-a","type"]}`, `{"event":"hello\"type","command":["redis-cli","-a","REDACTED"]}`},
+		// A credential field with the same text as an argv element is
+		// hidden whole, as it is without the array.
+		{`{"host":"db","user":"u","pwd":"-pa","command":["mysql","-pa"]}`, `{"host":"db","user":"u","pwd":"REDACTED","command":["mysql","-pREDACTED"]}`},
 		// The same element in two vectors takes the regions of both, so the
 		// mysql password is hidden in the echo's copy too.
 		{`{"a":["echo","-phunter2 --password=Summer2026"],"b":["mysql","-phunter2 --password=Summer2026"]}`, `{"a":["echo","-pREDACTED"],"b":["mysql","-pREDACTED"]}`},
@@ -109,7 +117,7 @@ func TestJSONLBytes_ArgvArraysWithoutPasswordsStayVisible(t *testing.T) {
 // quoted forms map back in linear time.
 func TestJSONLBytes_LongArgvArraysStayLinear(t *testing.T) {
 	t.Parallel()
-	for _, elem := range []string{`"-phunter2"`, `"-p'x y'"`, `"it's"`, `"a\nb"`} {
+	for _, elem := range []string{`"-phunter2"`, `"-p'x y'"`, `"it's"`, `"a\nb"`, `"machine h login u password pw1 machine h login u password pw2"`} {
 		var b strings.Builder
 		b.WriteString(`{"command":["mysql"`)
 		for range 20000 {
@@ -138,7 +146,7 @@ func TestAppendArgvWord(t *testing.T) {
 		{"it's", false, `"it's"`},
 		{`it's"x"`, false, `it\'s\"x\"`},
 		{`it's "x"`, false, `'it'\''s "x"'`},
-		{"a\nb'c\\", false, `a_b\'c\\`},
+		{"a\nb'c\\", false, `a0b\'c\\`},
 		// An option keeps its name bare when its value needs quotes.
 		{"--password= hunter", false, "--password=' hunter'"},
 		{"-phunter 2", false, "-phunter' 2'"},
@@ -146,7 +154,7 @@ func TestAppendArgvWord(t *testing.T) {
 		{"--", false, "--"},
 		{"-'x'", false, `"-'x'"`},
 		{"instead", true, "'instead'"},
-		{"-x\ny", false, "-x_y"},
+		{"-x\ny", false, "-x0y"},
 	}
 	for _, tc := range cases {
 		word, pos := appendArgvWord(nil, tc.arg, tc.quoteValue, true)

@@ -2010,41 +2010,57 @@ func applyJSONReplacements(s string, repls []jsonReplacement) (result string, wr
 	return s, written, nil
 }
 
-// replaceJSONValues replaces every occurrence of origJSON that is no object
-// key, which a ':' after optional whitespace marks, and reports how many it
-// replaced.
+// replaceJSONValues replaces every occurrence of origJSON, a JSON string,
+// that is a value of the line: one that starts a token, after '[', ',' or
+// ':' and optional whitespace, rather than at an escaped quote inside
+// another string ("hello\"type"), and that is no object key, which a ':'
+// after optional whitespace marks. It reports how many it replaced.
 func replaceJSONValues(s, origJSON, replJSON string) (string, int) {
 	replaced := 0
 	var b strings.Builder
-	i := 0
+	// i is where the text not yet written starts, from where the search
+	// goes on.
+	i, from := 0, 0
 	for {
-		j := strings.Index(s[i:], origJSON)
+		j := strings.Index(s[from:], origJSON)
 		if j < 0 {
 			break
 		}
-		j += i
+		j += from
 		end := j + len(origJSON)
 		k := end
-		for k < len(s) && (s[k] == ' ' || s[k] == '\t' || s[k] == '\n' || s[k] == '\r') {
+		for k < len(s) && isJSONWhitespace(s[k]) {
 			k++
+		}
+		if !isJSONValueStart(s, j) || k < len(s) && s[k] == ':' {
+			// The search goes on inside the match, whose closing quote
+			// may open the next string.
+			from = j + 1
+			continue
 		}
 		if replaced == 0 {
 			b.Grow(len(s))
 		}
 		b.WriteString(s[i:j])
-		if k < len(s) && s[k] == ':' {
-			b.WriteString(origJSON)
-		} else {
-			b.WriteString(replJSON)
-			replaced++
-		}
-		i = end
+		b.WriteString(replJSON)
+		replaced++
+		i, from = end, end
 	}
 	if replaced == 0 {
 		return s, 0
 	}
 	b.WriteString(s[i:])
 	return b.String(), replaced
+}
+
+// isJSONValueStart reports whether the string at s[j] starts a token of a
+// JSON line as an array element or the value or key after a comma or colon,
+// which only '[', ',' or ':' and optional whitespace come before.
+func isJSONValueStart(s string, j int) bool {
+	for j > 0 && isJSONWhitespace(s[j-1]) {
+		j--
+	}
+	return j > 0 && strings.IndexByte("[,:", s[j-1]) >= 0
 }
 
 // replaceKeyedJSONValue replaces every occurrence of origJSON that follows
@@ -2207,18 +2223,21 @@ func redactLeafValue(key string, credentialContext bool, val string, argvRegions
 	}
 	version := isVersionValue(key, val)
 	regions := redactor.detect(val)
-	if len(argvRegions) > 0 {
-		regions = append(slices.Clip(regions), argvRegions...)
-	}
 	if version {
 		regions = slices.DeleteFunc(slices.Clone(regions), func(r taggedRegion) bool { return r.builtinIP })
 	}
 	// PII inside a credential value (an address or email next to the
-	// password) does not make the rest of it safe to keep.
+	// password) does not make the rest of it safe to keep. The value's own
+	// regions decide it, so a part of it that an argument vector holding
+	// the same text finds ({"pwd":"-pa"} next to ["mysql","-pa"]) does not
+	// keep the rest visible.
 	if onlyPIIRegions(regions) && isCredentialJSONSecretKey(key, credentialContext) &&
 		hasNonPlaceholderKeyValue(key, val, false) && !isNonPasswordCodeLiteral(key, val) {
 		redactor.counts.addPlaceholder(layerCredentialKey)
 		return RedactedPlaceholder
+	}
+	if len(argvRegions) > 0 {
+		regions = append(slices.Clip(regions), argvRegions...)
 	}
 	redacted := redactRegions(val, regions, redactor.counts)
 	if version {
