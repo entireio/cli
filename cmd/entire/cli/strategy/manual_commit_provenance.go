@@ -212,8 +212,8 @@ func (marker inheritedTrailers) recordedOn() string {
 // inherited, so it never condenses into one: an inherited trailer links an
 // existing checkpoint, which may simply not be in this clone's store yet.
 // With nothing inherited it clears any marker a commit that never happened
-// left, but not one HEAD's commit may still be waiting to take
-// (markerAwaitsHeadCommit).
+// left, but not one HEAD's commit, or a commit below it, may still be waiting
+// to take (markerAwaitsCommitOnHead).
 func recordInheritedTrailers(ctx context.Context, inherited []id.CheckpointID) {
 	recordInheritedMarker(ctx, inherited, nil)
 }
@@ -229,10 +229,10 @@ func recordInheritedMarker(ctx context.Context, inherited []id.CheckpointID, red
 		if _, err := osroot.LstatNoSymlinks(root, inheritedTrailersFile); err != nil {
 			return // absent is the usual case
 		}
-		candidates := commitParentCandidates(ctx)
+		chain := headFirstParents(ctx, maxCommitsInFlight)
 		release := lockStampRecords(ctx, root)
 		defer release()
-		if !markerAwaitsHeadCommit(root, candidates) {
+		if !markerAwaitsCommitOnHead(root, chain) {
 			_ = osroot.RemoveNoSymlinks(root, inheritedTrailersFile) //nolint:errcheck // absent once post-commit took it
 		}
 		return
@@ -247,18 +247,24 @@ func recordInheritedMarker(ctx context.Context, inherited []id.CheckpointID, red
 	writeInheritedTrailers(ctx, root, marker)
 }
 
-// markerAwaitsHeadCommit reports whether the inherited marker in root may be
-// the one HEAD's commit recorded, which its post-commit has not taken yet: git
-// runs post-commit after the commit is made, so the next commit's prepare can
-// run first. That is a marker for a commit on HEAD's parent, recorded by a
-// prepare that did not run on HEAD itself. candidates are HEAD and its parent
-// (commitParentCandidates). Callers hold the stamp-records lock.
-func markerAwaitsHeadCommit(root *os.Root, candidates []string) bool {
-	if len(candidates) < 2 {
+// markerAwaitsCommitOnHead reports whether the inherited marker in root may be
+// one that HEAD's commit, or a commit below it, recorded and whose post-commit
+// has not taken it yet: git runs post-commit after the commit is made, so the
+// next commit's prepare can run first. That is a marker for a commit on one of
+// HEAD's ancestors, recorded by a prepare that did not run on HEAD itself.
+// chain is HEAD and its first parents (headFirstParents). Callers hold the
+// stamp-records lock.
+func markerAwaitsCommitOnHead(root *os.Root, chain []string) bool {
+	if len(chain) < 2 {
 		return false
 	}
 	marker, ok := readInheritedMarkerIn(root)
-	return ok && marker.recordedOn() != candidates[0] && slices.Contains(marker.Parents, candidates[1])
+	if !ok || marker.recordedOn() == chain[0] {
+		return false
+	}
+	return slices.ContainsFunc(marker.Parents, func(parent string) bool {
+		return slices.Contains(chain[1:], parent)
+	})
 }
 
 func readInheritedMarkerIn(root *os.Root) (inheritedTrailers, bool) {
@@ -285,6 +291,16 @@ func writeInheritedTrailers(ctx context.Context, root *os.Root, marker inherited
 // have: HEAD, and HEAD's first parent if it is an amend. Empty before the
 // first commit.
 func commitParentCandidates(ctx context.Context) []string {
+	return headFirstParents(ctx, 2)
+}
+
+// maxCommitsInFlight bounds how many commits back from HEAD the stamp records
+// look for a commit whose post-commit has not run yet.
+const maxCommitsInFlight = 16
+
+// headFirstParents returns HEAD and its first-parent ancestors, newest first,
+// at most limit of them. Empty before the first commit.
+func headFirstParents(ctx context.Context, limit int) []string {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
 		return nil
@@ -294,9 +310,30 @@ func commitParentCandidates(ctx context.Context) []string {
 	if err != nil {
 		return nil
 	}
-	out := []string{head.Hash().String()}
-	if commit, err := repo.CommitObject(head.Hash()); err == nil && len(commit.ParentHashes) > 0 {
-		out = append(out, commit.ParentHashes[0].String())
+	hash := head.Hash()
+	out := []string{hash.String()}
+	for len(out) < limit {
+		commit, err := repo.CommitObject(hash)
+		if err != nil || len(commit.ParentHashes) == 0 {
+			break
+		}
+		hash = commit.ParentHashes[0]
+		out = append(out, hash.String())
+	}
+	return out
+}
+
+// commitsUpToHead returns commit and the commits on top of it up to HEAD,
+// along HEAD's first parents: the commits whose post-commit may not have run
+// when commit's does, since git lets the next commit start once one is made.
+// Only commit when HEAD is not within maxCommitsInFlight first parents of it.
+func commitsUpToHead(ctx context.Context, commit string) map[string]bool {
+	out := map[string]bool{commit: true}
+	chain := headFirstParents(ctx, maxCommitsInFlight)
+	if i := slices.Index(chain, commit); i > 0 {
+		for _, hash := range chain[:i] {
+			out[hash] = true
+		}
 	}
 	return out
 }
@@ -569,12 +606,13 @@ type stampRecords struct {
 // cannot split.
 //
 // It consumes only what is the commit's. git lets the next commit start once
-// this one is made, before its post-commit runs, so that commit's prepare may
-// already have stamped: a stamp the commit does not carry is kept when it was
-// stamped on top of commit, for the post-commit of the commit that carries
-// it. Any other is one a commit that never happened left, and is dropped. In
-// the same way, an inherited marker for another parent is dropped unless a
-// prepare on top of commit recorded it.
+// this one is made, before its post-commit runs, so later commits' prepares
+// may already have stamped, and those commits may have landed: a stamp the
+// commit does not carry is kept when it was stamped on commit or on a commit
+// on top of it up to HEAD (commitsUpToHead), for the post-commit of the commit
+// that carries it. Any other is one a commit that never happened left, and is
+// dropped. In the same way, an inherited marker for another parent is dropped
+// unless a prepare on one of those commits recorded it.
 func takeStampRecords(ctx context.Context, commit *object.Commit) stampRecords {
 	root, err := perWorktreeGitRoot(ctx)
 	if err != nil {
@@ -589,16 +627,19 @@ func takeStampRecords(ctx context.Context, commit *object.Commit) stampRecords {
 
 	release := lockStampRecords(ctx, root)
 	defer release()
+	// Read HEAD under the lock: a prepare whose records are here read HEAD
+	// before writing them, so the commit it stamped on has landed by now.
+	pending := commitsUpToHead(ctx, head)
 	var out stampRecords
-	out.inherited, out.redone = takeInheritedMarkerIn(ctx, root, parent, head)
-	out.stamped, out.sessions = takeStampsIn(ctx, root, carried, head)
+	out.inherited, out.redone = takeInheritedMarkerIn(ctx, root, parent, pending)
+	out.stamped, out.sessions = takeStampsIn(ctx, root, carried, pending)
 	return out
 }
 
 // takeStampsIn takes the stamps and sessions entries of the trailers carried,
-// keeps the ones stamped on top of head, and drops the rest. Callers hold the
-// stamp-records lock.
-func takeStampsIn(ctx context.Context, root *os.Root, carried map[id.CheckpointID]bool, head string) (map[id.CheckpointID]bool, map[id.CheckpointID]stampedSessions) {
+// keeps the ones stamped on a commit in pending, and drops the rest. Callers
+// hold the stamp-records lock.
+func takeStampsIn(ctx context.Context, root *os.Root, carried map[id.CheckpointID]bool, pending map[string]bool) (map[id.CheckpointID]bool, map[id.CheckpointID]stampedSessions) {
 	entries := readStampedSessionsIn(root)
 	stampedOn := make(map[id.CheckpointID]string, len(entries))
 	for _, e := range entries {
@@ -610,7 +651,7 @@ func takeStampsIn(ctx context.Context, root *os.Root, carried map[id.CheckpointI
 		switch {
 		case carried[cpID]:
 			stamped[cpID] = true
-		case stampedOn[cpID] == head:
+		case pending[stampedOn[cpID]]:
 			kept = append(kept, cpID)
 		}
 	}
@@ -637,14 +678,14 @@ func takeStampsIn(ctx context.Context, root *os.Root, carried map[id.CheckpointI
 
 // takeInheritedMarkerIn returns the trailers prepare-commit-msg recorded as
 // inherited for a commit on parent, with the recorded redone paths, and
-// consumes the marker unless a prepare on top of head recorded it. Callers
-// hold the stamp-records lock.
-func takeInheritedMarkerIn(ctx context.Context, root *os.Root, parent, head string) (map[id.CheckpointID]bool, map[string]bool) {
+// consumes the marker unless a prepare on a commit in pending recorded it.
+// Callers hold the stamp-records lock.
+func takeInheritedMarkerIn(ctx context.Context, root *os.Root, parent string, pending map[string]bool) (map[id.CheckpointID]bool, map[string]bool) {
 	if _, err := osroot.LstatNoSymlinks(root, inheritedTrailersFile); err != nil {
 		return nil, nil
 	}
 	marker, ok := readInheritedMarkerIn(root)
-	if ok && marker.recordedOn() == head {
+	if ok && pending[marker.recordedOn()] {
 		return nil, nil
 	}
 	if err := removeRecord(root, inheritedTrailersFile); err != nil {

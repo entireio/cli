@@ -93,6 +93,34 @@ func TestTakeStampRecords_KeepsTheNextCommitsStamp(t *testing.T) {
 	assert.Empty(t, readStampedSessionsIn(mustPerWorktreeGitRoot(t)))
 }
 
+// A post-commit can fall more than one commit behind: it reads its commit,
+// then later commits land and the one after them prepares before it takes the
+// records. It keeps every stamp prepared on its commit or on one landed on top
+// of it since, so each of those commits' post-commits still finds its own.
+func TestTakeStampRecords_KeepsStampsOfCommitsLandedSince(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	ctx := context.Background()
+	abandoned := id.MustCheckpointID("a0a0a0a0a0a0")
+	first, second, third := id.MustCheckpointID("a1a1a1a1a1a1"), id.MustCheckpointID("b2b2b2b2b2b2"), id.MustCheckpointID("d4d4d4d4d4d4")
+
+	require.True(t, recordStampedTrailer(ctx, abandoned), "a commit on the same parent that never happens")
+	require.True(t, recordStampedTrailer(ctx, first))
+	firstCommit := commitWith(t, dir, "first", first)
+	require.True(t, recordStampedTrailer(ctx, second))
+	secondCommit := commitWith(t, dir, "second", second)
+	require.True(t, recordStampedTrailer(ctx, third), "the third commit's prepare, on the second")
+
+	assert.Equal(t, map[id.CheckpointID]bool{first: true}, takeStampRecords(ctx, firstCommit).stamped)
+	assert.Equal(t, map[id.CheckpointID]bool{second: true, third: true}, readStampedTrailers(ctx), "the later commits' stamps are kept, the abandoned one dropped")
+
+	assert.Equal(t, map[id.CheckpointID]bool{second: true}, takeStampRecords(ctx, secondCommit).stamped)
+	thirdCommit := commitWith(t, dir, "third", third)
+	assert.Equal(t, map[id.CheckpointID]bool{third: true}, takeStampRecords(ctx, thirdCommit).stamped, "the third commit's post-commit finds its stamp")
+	assert.Empty(t, readStampedTrailers(ctx))
+	assert.Empty(t, readStampedSessionsIn(mustPerWorktreeGitRoot(t)))
+}
+
 // A stamp left on top of a commit belongs to a commit that may never happen
 // either: the post-commit after that keeps it no longer.
 func TestTakeStampRecords_DropsAKeptStampAtTheNextPostCommit(t *testing.T) {
@@ -151,6 +179,32 @@ func TestInheritedTrailersMarker_SurvivesTheNextCommitsPrepare(t *testing.T) {
 	assert.Empty(t, takeStampRecords(ctx, plainCommit).inherited, "a marker prepared on top of the commit is not its")
 	nextCommit := commitWith(t, dir, "next", nextSquashed)
 	assert.Equal(t, map[id.CheckpointID]bool{nextSquashed: true}, takeStampRecords(ctx, nextCommit).inherited, "it is the next commit's")
+}
+
+// The marker in the same ordering: a squash commit's post-commit falls behind
+// while a later commit lands and the one after it prepares. Neither prepare
+// clears the squash's marker, and the squash's post-commit leaves a marker a
+// prepare on a later commit recorded.
+func TestInheritedTrailersMarker_SurvivesCommitsLandedSince(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	ctx := context.Background()
+	squashed, nextSquashed := id.MustCheckpointID("f6f6f6f6f6f6"), id.MustCheckpointID("a7a7a7a7a7a7")
+
+	recordInheritedMarker(ctx, []id.CheckpointID{squashed}, map[string]bool{"redone.txt": true})
+	squashCommit := commitWith(t, dir, "squash", squashed)
+	recordInheritedTrailers(ctx, nil) // the next commit's prepare
+	plainCommit := commitWith(t, dir, "plain")
+	recordInheritedTrailers(ctx, nil) // the one after it, on the plain commit
+
+	records := takeStampRecords(ctx, squashCommit)
+	assert.Equal(t, map[id.CheckpointID]bool{squashed: true}, records.inherited, "the squash keeps its inherited trailers")
+	assert.Equal(t, map[string]bool{"redone.txt": true}, records.redone)
+
+	recordInheritedTrailers(ctx, []id.CheckpointID{nextSquashed}) // a squash prepared on the plain commit
+	nextCommit := commitWith(t, dir, "next", nextSquashed)
+	assert.Empty(t, takeStampRecords(ctx, plainCommit).inherited, "a marker recorded on a later commit is not this one's")
+	assert.Equal(t, map[id.CheckpointID]bool{nextSquashed: true}, takeStampRecords(ctx, nextCommit).inherited, "it is the next squash's")
 }
 
 // Prepare's read-modify-write of the records and post-commit's take hold the

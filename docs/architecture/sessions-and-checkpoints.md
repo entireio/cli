@@ -322,9 +322,9 @@ commit.
   `entire-stamped-trailers.json` in the per-worktree git dir until the
   post-commit of the commit that carries it takes it. git lets the next commit
   start before a commit's post-commit runs, so post-commit takes only the
-  stamps its commit carries, keeps the ones prepared on top of its commit for
-  their own post-commit, and drops the rest, left by commits that never
-  happened (`takeStampRecords`). Prepare writes the records and post-commit
+  stamps its commit carries, keeps the ones prepared on its commit or on a
+  commit made on top of it since (up to HEAD) for their own post-commit, and
+  drops the rest, left by commits that never happened (`takeStampRecords`). Prepare writes the records and post-commit
   takes them under `entire-stamp-records.lock` in the same dir, so hooks of
   overlapping commits in one worktree cannot lose each other's updates. Beside
   it, `entire-stamped-sessions.json` records the HEAD prepare stamped on and
