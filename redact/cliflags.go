@@ -123,27 +123,45 @@ type cliPasswordFlag struct {
 	// so every occurrence of the name is tried (docker exec sshpass sshpass
 	// -p ...).
 	leading bool
+	// requiredLong marks a client whose --password always takes a value,
+	// so a word after a blank that starts with '-' is that value
+	// (docker login --password -x). flag then also matches --password and
+	// a blank, and reads only such a value; appendLongPasswordFlags reads
+	// the others, and reads this one as the next flag, as it is for
+	// clients that take --password with no value (psql --password -h db).
+	requiredLong bool
 }
 
+// loginPasswordFlag is the name of the password flags of a registry login
+// for cliShortFlag: -p, or --password and a blank.
+const loginPasswordFlag = `(?:p|-password` + cliBlank + `)`
+
 var cliPasswordFlags = []cliPasswordFlag{
-	// mysql takes the password glued to -p; a bare -p prompts for it.
+	// mysql takes the password glued to -p; a bare -p prompts for it. Its
+	// options may be clustered, so -p may follow options that take no
+	// value (-vpX, -Bqp"X"); one that takes a value takes the rest of the
+	// word (-uphil is user phil). The MariaDB tools are named mariadb-dump
+	// and so on, which mariadb alone would leave to isCommandToken to
+	// reject.
 	{
 		needles: []string{"mysql", "mariadb"},
-		command: regexp.MustCompile(`\b(?:mysql|mariadb|mysqldump|mysqladmin|mysqlimport|mysqlcheck|mysqlpump|mysqlsh)\b`),
-		flag:    regexp.MustCompile(cliShortFlag(`\s`, "p", "")),
+		command: regexp.MustCompile(`\b(?:mariadb-(?:dump|admin|import|check|show|slap|binlog|upgrade|backup)|mysql(?:dump|admin|import|check|pump|sh|show|slap|binlog|_upgrade)?|mariadb)\b`),
+		flag:    regexp.MustCompile(cliShortFlag(`\s`, mysqlNoValueOptions+"p", "")),
 	},
 	// login must be the client's subcommand, after its global options
 	// (docker --config dir login, helm registry --debug login), so a
 	// container named login (docker run --name login -p 8080:80) is not.
 	{
-		needles: []string{loginCommand},
-		command: regexp.MustCompile(`\b(?:docker|podman|nerdctl|buildah|skopeo|oras|helm)\b(?i:\.exe)?["']?` + cliGlobalOptions + cliBlank + `(?:registry` + cliGlobalOptions + cliBlank + `)?login\b`),
-		flag:    regexp.MustCompile(cliShortFlag(`\s`, "p", `(?:`+cliBlank+`)?`)),
+		needles:      []string{loginCommand},
+		command:      regexp.MustCompile(`\b(?:docker|podman|nerdctl|buildah|skopeo|oras|helm)\b(?i:\.exe)?["']?` + cliGlobalOptions + cliBlank + `(?:registry` + cliGlobalOptions + cliBlank + `)?login\b`),
+		flag:         regexp.MustCompile(cliShortFlag(`\s`, loginPasswordFlag, `(?:`+cliBlank+`)?`)),
+		requiredLong: true,
 	},
 	{
-		needles: []string{loginCommand},
-		command: regexp.MustCompile(`\baz[ \t]+login\b`),
-		flag:    regexp.MustCompile(cliShortFlag(`\s`, "p", `(?:`+cliBlank+`)?`)),
+		needles:      []string{loginCommand},
+		command:      regexp.MustCompile(`\baz[ \t]+login\b`),
+		flag:         regexp.MustCompile(cliShortFlag(`\s`, loginPasswordFlag, `(?:`+cliBlank+`)?`)),
+		requiredLong: true,
 	},
 	{
 		needles:  []string{"mongo"},
@@ -174,6 +192,13 @@ var cliPasswordFlags = []cliPasswordFlag{
 		prefix:  "pass:",
 	},
 }
+
+// mysqlNoValueOptions matches the short options that take no value in every
+// mysql and MariaDB tool that has them (-v, -s, -B, -N, ...), which may come
+// before -p in one word. An option that takes a value in any of them (-u,
+// -h, -D, -e, -c, -i, -r, -w, mysqlslap's -q, mysqlsh's -f, mariadb-backup's
+// -H and -t, ...) is left out, since its value would be the rest of the word.
+const mysqlNoValueOptions = `[ABCENVXbnsv]*`
 
 // cliShortFlag matches the short flag -name after before, then sep and its
 // value: -px, a flag quoted with its value ("-px", "-p x"), or one quoted on
@@ -285,7 +310,8 @@ func appendLongPasswordFlags(regions []taggedRegion, s string) []taggedRegion {
 		// After "=" a leading '-' is part of the value; after a blank it
 		// starts the next flag (psql --password -h db), except after
 		// --pass, which always takes a value (curl --pass -x, redis-cli
-		// --pass -x).
+		// --pass -x). A registry login's --password always takes one too,
+		// and its client reads that (see requiredLong).
 		blank := s[loc[4]] != '='
 		dashFlag := blank && !strings.HasSuffix(s[:loc[2]], "--pass")
 		stringEnd := lines.stringEnd(loc[2] - 1)
@@ -1710,6 +1736,10 @@ func (f cliPasswordFlag) valueRegion(s string, base int, loc []int, stringEnd in
 	if f.optional && (len(loc) < 8 || loc[2] < 0) && s[base+loc[len(loc)-2]] == '-' {
 		// The next flag of a client whose value is optional, whose word
 		// is not read (see appendLongPasswordFlags).
+		return taggedRegion{}, false
+	}
+	if f.requiredLong && s[base+loc[len(loc)-2]] != '-' && strings.Contains(s[base+loc[0]:base+loc[len(loc)-2]], "--password") {
+		// appendLongPasswordFlags reads that value.
 		return taggedRegion{}, false
 	}
 	v, ok := shortFlagValue(s, base, loc, stringEnd, subs)
