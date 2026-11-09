@@ -1,6 +1,7 @@
 package remote
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -14,7 +15,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
@@ -104,6 +107,71 @@ func LooksLikeSSHAuthFailure(errText string) bool {
 	return false
 }
 
+// unreachableRemoteNeedles are connect-phase failures printed by ssh and curl
+// themselves, so they are not translated by git's locale. Deliberately absent:
+// bare strerror text ("Connection refused", "Connection timed out") — curl's
+// trailing strerror is localized, and a timeout or reset mid-upload means the
+// host was reachable — and git's own "Could not read from remote repository"
+// epilogue, which is translated and also follows auth failures.
+var unreachableRemoteNeedles = []string{
+	"ssh: connect to host ",
+	"ssh: could not resolve hostname",
+	"could not resolve host:",
+	"could not resolve proxy:",
+	"failed to connect to ",
+	"couldn't connect to server",
+	"resolving timed out",
+}
+
+// maxUnreachableLineRunes caps the cause line printed inside the user's push.
+const maxUnreachableLineRunes = 200
+
+// UnreachableRemoteLine reports whether err shows the remote could not be
+// reached at all (name resolution or TCP connect failed), and returns the line
+// that said so, credentials redacted and capped, for display. Lines relayed
+// from the remote ("remote: ...") and push porcelain are skipped: a remote that
+// printed them was reachable, even when its own hook failed to resolve a host.
+func UnreachableRemoteLine(err error) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+	text := err.Error()
+	var pushErr *PushError
+	if errors.As(err, &pushErr) {
+		text = pushErr.Output() // Line breaks preserved, unlike Error().
+	}
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "remote:") || strings.HasPrefix(line, "!") || strings.HasPrefix(line, "=") {
+			continue
+		}
+		lower := strings.ToLower(line)
+		for _, n := range unreachableRemoteNeedles {
+			if strings.Contains(lower, n) {
+				return displayGitLine(line), true
+			}
+		}
+	}
+	return "", false
+}
+
+// displayGitLine makes one line of git output safe to print: no "fatal: "
+// prefix, no URL credentials, no control bytes, at most maxUnreachableLineRunes.
+func displayGitLine(line string) string {
+	line = strings.TrimPrefix(line, "fatal: ")
+	line = gitremote.RedactCredentialsInText(line)
+	line = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, line)
+	if r := []rune(line); len(r) > maxUnreachableLineRunes {
+		line = string(r[:maxUnreachableLineRunes]) + "…"
+	}
+	return line
+}
+
 // batchModeOptionRe matches an explicit BatchMode ssh option (e.g.
 // "-o BatchMode=yes" or "BatchMode=no"), case-insensitively. Anchored with \b
 // so it doesn't false-positive on unrelated text that merely contains
@@ -117,55 +185,63 @@ func hasExplicitBatchMode(sshCmd string) bool {
 	return batchModeOptionRe.MatchString(sshCmd)
 }
 
-// envLookup returns the value of the last occurrence of key in env (matching
-// exec.Cmd's last-wins semantics for duplicate entries) and whether it was
-// found.
-func envLookup(env []string, key string) (string, bool) {
-	prefix := key + "="
-	for i := len(env) - 1; i >= 0; i-- {
-		if v, ok := strings.CutPrefix(env[i], prefix); ok {
-			return v, true
-		}
+// connectTimeoutOptionRe matches an explicit ConnectTimeout ssh option, in the
+// same forms batchModeOptionRe accepts.
+var connectTimeoutOptionRe = regexp.MustCompile(`(?i)\bConnectTimeout\s*=\s*\S+`)
+
+// nonInteractiveSSHConnectTimeout bounds the TCP connect to an unreachable host,
+// whose kernel default (~75-130s) would otherwise spend most of the pre-push
+// checkpoint budget on one attempt. Generous for any reachable host, including
+// one behind a slow-starting ProxyCommand, whose banner wait ssh's
+// ConnectTimeout also bounds.
+const nonInteractiveSSHConnectTimeout = "60"
+
+// isOpenSSHCommand reports whether sshCmd runs OpenSSH, by the basename of its
+// program — the same guess git makes for its ssh variant. Options are only
+// added for OpenSSH: other clients (plink, custom wrappers) may reject -o.
+func isOpenSSHCommand(sshCmd string) bool {
+	prog, ok := firstCmdlineWord(sshCmd)
+	if !ok {
+		return false
 	}
-	return "", false
+	base := strings.ToLower(prog[strings.LastIndexAny(prog, `/\`)+1:])
+	return base == "ssh" || base == "ssh.exe"
 }
 
-// gitConfigSSHCommand looks up core.sshCommand via `git config`, run with env
-// so the lookup honors any HOME/GIT_CONFIG_* overrides present in env (e.g. in
-// tests). Returns "" if unset or the lookup fails.
-func gitConfigSSHCommand(ctx context.Context, env []string) string {
-	cmd := exec.CommandContext(ctx, "git", "config", "--get", "core.sshCommand")
-	cmd.Env = env
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
-}
-
-// effectiveSSHCommand resolves the ssh invocation git itself would use, in
-// git's own precedence order: the GIT_SSH_COMMAND environment variable, then
-// the core.sshCommand git config value, then the GIT_SSH environment
-// variable, falling back to plain "ssh" when none are set.
-func effectiveSSHCommand(ctx context.Context, env []string) string {
-	if v, ok := envLookup(env, "GIT_SSH_COMMAND"); ok {
-		if trimmed := strings.TrimSpace(v); trimmed != "" {
-			return trimmed
+// firstCmdlineWord returns the program of a shell-style command line, unquoted
+// the way git's split_cmdline does it: single and double quotes group, and a
+// backslash outside single quotes escapes the next character. ok is false for
+// an empty or unterminated command line.
+func firstCmdlineWord(cmdline string) (string, bool) {
+	var word strings.Builder
+	var quote rune
+	started, escaped := false, false
+	for _, c := range strings.TrimLeftFunc(cmdline, unicode.IsSpace) {
+		switch {
+		case escaped:
+			word.WriteRune(c)
+			escaped = false
+		case c == '\\' && quote != '\'':
+			escaped, started = true, true
+		case quote == 0 && unicode.IsSpace(c):
+			return word.String(), true
+		case quote == 0 && (c == '\'' || c == '"'):
+			quote, started = c, true
+		case c == quote:
+			quote = 0
+		default:
+			word.WriteRune(c)
+			started = true
 		}
 	}
-	if v := gitConfigSSHCommand(ctx, env); v != "" {
-		return v
+	if quote != 0 || escaped || !started {
+		return "", false
 	}
-	if v, ok := envLookup(env, "GIT_SSH"); ok {
-		if trimmed := strings.TrimSpace(v); trimmed != "" {
-			return trimmed
-		}
-	}
-	return "ssh"
+	return word.String(), true
 }
 
 // withBatchModeSSH returns env with GIT_SSH_COMMAND set so ssh runs with
-// BatchMode=yes. The base ssh invocation is resolved via effectiveSSHCommand
+// BatchMode=yes and, for OpenSSH, a ConnectTimeout. The base ssh invocation is resolved via gitremote.EffectiveSSHCommand
 // (env GIT_SSH_COMMAND > core.sshCommand > GIT_SSH > plain "ssh") so a custom
 // ssh command configured via core.sshCommand isn't silently discarded. The
 // flag is only appended when BatchMode isn't already explicitly set — an
@@ -173,7 +249,7 @@ func effectiveSSHCommand(ctx context.Context, env []string) string {
 // so the result is idempotent.
 func withBatchModeSSH(ctx context.Context, env []string) []string {
 	const key = "GIT_SSH_COMMAND="
-	base := effectiveSSHCommand(ctx, env)
+	base := gitremote.EffectiveSSHCommand(ctx, "", env)
 	out := make([]string, 0, len(env)+1)
 	for _, e := range env {
 		if strings.HasPrefix(e, key) {
@@ -183,6 +259,11 @@ func withBatchModeSSH(ctx context.Context, env []string) []string {
 	}
 	if !hasExplicitBatchMode(base) {
 		base += " -o BatchMode=yes"
+	}
+	// Command-line -o beats ~/.ssh/config, so a ConnectTimeout set there is
+	// overridden here; one set on the command itself is left alone.
+	if isOpenSSHCommand(base) && !connectTimeoutOptionRe.MatchString(base) {
+		base += " -o ConnectTimeout=" + nonInteractiveSSHConnectTimeout
 	}
 	return append(out, key+base)
 }
@@ -199,6 +280,13 @@ func applyNonInteractiveSSH(ctx context.Context, cmd *exec.Cmd) {
 	}
 	cmd.Env = withBatchModeSSH(ctx, cmd.Env)
 }
+
+// FullRefDepth is the absolute --depth that fully fetches one ref's history,
+// healing a prior --depth=1 shallow boundary on it. It is far above any
+// realistic checkpoint history length, while staying below math.MaxInt32
+// (2147483647), which git special-cases as a global unshallow that would also
+// deepen an unrelated shallow source tree.
+const FullRefDepth = 1_000_000_000
 
 // FetchOptions configures a git fetch operation.
 type FetchOptions struct {
@@ -225,10 +313,15 @@ type FetchOptions struct {
 	// not introduce shallowness on a full repo when the value exceeds the
 	// branch's length. Use a value above the branch's realistic length but below
 	// math.MaxInt32 (2147483647), which git special-cases as a global unshallow.
-	// Ignored when zero or when Shallow is set.
+	// Ignored when zero or when Shallow is set. FullRefDepth is the value to use.
 	Depth     int
 	Dir       string   // working directory (empty = CWD)
 	ExtraArgs []string // additional flags before remote (e.g., "--no-write-fetch-head")
+	// AbortStalled kills a fetch that goes stallAbortIdle without git printing
+	// anything, for callers whose transfer can legitimately take longer than a
+	// fixed per-fetch deadline. It requests --progress so git reports the
+	// transfer while it runs.
+	AbortStalled bool
 }
 
 // Fetch runs git fetch with checkpoint token injection and optional
@@ -244,6 +337,9 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 		args = append(args, "--no-tags")
 	}
 	args = append(args, opts.ExtraArgs...)
+	if opts.AbortStalled {
+		args = append(args, "--progress")
+	}
 	switch {
 	case opts.Shallow:
 		args = append(args, "--depth=1")
@@ -279,18 +375,29 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 		existedBefore = gitRemoteSectionExists(ctx, opts.Dir, stampURL)
 	}
 
-	cmd := newCommand(ctx, args...)
+	cmdCtx, cancelCmd := context.WithCancelCause(ctx)
+	defer cancelCmd(nil)
+	cmd := newCommand(cmdCtx, args...)
 	if opts.Dir != "" {
 		cmd.Dir = opts.Dir
 	}
 	disableTerminalPrompt(cmd)
-	out, err := cmd.CombinedOutput()
+	var out []byte
+	var err error
+	if opts.AbortStalled {
+		out, err = runAbortingStalls(cmd, cancelCmd)
+	} else {
+		out, err = cmd.CombinedOutput()
+	}
 
 	if stampCandidate && !existedBefore {
 		stampNewlyCreatedRemote(ctx, opts.Dir, stampURL)
 	}
 
 	if err != nil {
+		if cause := context.Cause(cmdCtx); errors.Is(cause, ErrFetchStalled) {
+			err = cause
+		}
 		return out, errWithGitOutput(fmt.Errorf("git fetch: %w", err), out, opts.Remote)
 	}
 	return out, nil
@@ -512,11 +619,30 @@ func formatGitPushError(ctx context.Context, err error, output []byte, remote st
 // Returns "" when git produced no output — which is what a process killed by a
 // cancelled context or an exhausted budget does.
 func gitOutputDetail(output []byte, remote string) string {
-	detail := strings.TrimSpace(string(output))
+	detail := strings.TrimSpace(finalProgressText(string(output)))
 	if detail == "" || remote == "" {
 		return detail
 	}
 	return strings.ReplaceAll(detail, remote, RedactURLOrPath(remote))
+}
+
+// finalProgressText keeps, for each line, only what a terminal would end up
+// showing: git's progress meters redraw a line in place with \r, so everything
+// before a line's last \r was overwritten. A trailing \r is a CRLF line ending,
+// not a redraw.
+func finalProgressText(output string) string {
+	if !strings.Contains(output, "\r") {
+		return output
+	}
+	lines := strings.Split(output, "\n")
+	for i, line := range lines {
+		line = strings.TrimSuffix(line, "\r")
+		if j := strings.LastIndexByte(line, '\r'); j >= 0 {
+			line = line[j+1:]
+		}
+		lines[i] = line
+	}
+	return strings.Join(lines, "\n")
 }
 
 // errWithGitOutput annotates err with git's own output, or returns err unchanged
@@ -878,4 +1004,73 @@ func disableTerminalPrompt(cmd *exec.Cmd) {
 		cmd.Env = os.Environ()
 	}
 	cmd.Env = append(cmd.Env, "GIT_TERMINAL_PROMPT=0")
+}
+
+// stallAbortIdle is how long an AbortStalled fetch may print nothing before it
+// is killed. A pack that goes through index-pack redraws its receive progress
+// about once a second, but a fetch of fewer than fetch.unpackLimit objects (100
+// by default) is unpacked without progress and prints nothing until it is done.
+// The window must outlast such a fetch on a slow link; callers bound the total
+// time separately.
+var stallAbortIdle = 10 * time.Minute
+
+// ErrFetchStalled is the cause of a fetch AbortStalled killed.
+var ErrFetchStalled = errors.New("fetch stalled")
+
+// runAbortingStalls runs cmd like CombinedOutput, but calls cancel, which must
+// cancel cmd's context, once cmd has printed nothing for stallAbortIdle.
+func runAbortingStalls(cmd *exec.Cmd, cancel context.CancelCauseFunc) ([]byte, error) {
+	w := &activityWriter{last: time.Now()}
+	cmd.Stdout, cmd.Stderr = w, w
+	if err := cmd.Start(); err != nil {
+		return nil, err //nolint:wrapcheck // Fetch wraps the error
+	}
+	idle := stallAbortIdle
+	done, stopped := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(stopped)
+		ticker := time.NewTicker(idle / 10)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				if time.Since(w.lastWrite()) >= idle {
+					cancel(fmt.Errorf("%w: no progress for %s", ErrFetchStalled, idle))
+					return
+				}
+			}
+		}
+	}()
+	err := cmd.Wait()
+	close(done)
+	<-stopped
+	return w.output(), err
+}
+
+// activityWriter collects a command's output and when it last wrote.
+type activityWriter struct {
+	mu   sync.Mutex
+	buf  bytes.Buffer
+	last time.Time
+}
+
+func (w *activityWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.last = time.Now()
+	return w.buf.Write(p) //nolint:wrapcheck // bytes.Buffer never fails
+}
+
+func (w *activityWriter) lastWrite() time.Time {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.last
+}
+
+func (w *activityWriter) output() []byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Bytes()
 }

@@ -26,8 +26,8 @@ func TestRun_ReportsProgress(t *testing.T) {
 	t.Parallel()
 	repo, repoDir := initRepoWithCommit(t)
 	claudeDir := t.TempDir()
-	writeFixtureSession(t, claudeDir, "sess1.jsonl")
-	writeFixtureSession(t, claudeDir, "sess2.jsonl")
+	writeFixtureSession(t, claudeDir, "sess1.jsonl", repoDir)
+	writeFixtureSession(t, claudeDir, "sess2.jsonl", repoDir)
 
 	var sessionEvents []progressSessionEvent
 	var turnEvents []progressTurnEvent
@@ -79,24 +79,29 @@ func TestRun_ReportsProgress(t *testing.T) {
 // same turn count imported.
 func TestRun_NilProgressDoesNotPanic(t *testing.T) {
 	t.Parallel()
-	claudeDir := t.TempDir()
-	writeFixtureSession(t, claudeDir, "sess1.jsonl")
-	writeFixtureSession(t, claudeDir, "sess2.jsonl")
 	now := time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC)
 
+	// Each repo gets its own transcript dir with identical sessions recording
+	// that repo's cwd, since Discover only keeps transcripts from its repo.
 	repoNil, repoNilDir := initRepoWithCommit(t)
+	claudeDirNil := t.TempDir()
+	writeFixtureSession(t, claudeDirNil, "sess1.jsonl", repoNilDir)
+	writeFixtureSession(t, claudeDirNil, "sess2.jsonl", repoNilDir)
 	resNil, err := Run(context.Background(), repoNil, claudeImporter{}, Options{
 		LinkCommitSHA: repoHeadSHA(t, repoNil),
-		RepoRoot:      repoNilDir, OverridePath: claudeDir, Now: now,
+		RepoRoot:      repoNilDir, OverridePath: claudeDirNil, Now: now,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	repoWith, repoWithDir := initRepoWithCommit(t)
+	claudeDirWith := t.TempDir()
+	writeFixtureSession(t, claudeDirWith, "sess1.jsonl", repoWithDir)
+	writeFixtureSession(t, claudeDirWith, "sess2.jsonl", repoWithDir)
 	resWith, err := Run(context.Background(), repoWith, claudeImporter{}, Options{
 		LinkCommitSHA: repoHeadSHA(t, repoWith),
-		RepoRoot:      repoWithDir, OverridePath: claudeDir, Now: now,
+		RepoRoot:      repoWithDir, OverridePath: claudeDirWith, Now: now,
 		Progress: &Progress{
 			SessionStart: func(int, int, string, string, int) {},
 			TurnWritten:  func(int, int, int) {},
@@ -140,8 +145,8 @@ func TestRun_ReimportFiresTurnSkippedNotTurnWritten(t *testing.T) {
 	t.Parallel()
 	repo, repoDir := initRepoWithCommit(t)
 	claudeDir := t.TempDir()
-	writeFixtureSession(t, claudeDir, "sess1.jsonl")
-	writeFixtureSession(t, claudeDir, "sess2.jsonl")
+	writeFixtureSession(t, claudeDir, "sess1.jsonl", repoDir)
+	writeFixtureSession(t, claudeDir, "sess2.jsonl", repoDir)
 	opts := Options{LinkCommitSHA: repoHeadSHA(t, repo), RepoRoot: repoDir, OverridePath: claudeDir, Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC)}
 
 	// First run: no progress, just to populate the store so the second run
@@ -180,8 +185,8 @@ func TestRun_DryRunFiresTurnSkippedForEveryTurn(t *testing.T) {
 	t.Parallel()
 	repo, repoDir := initRepoWithCommit(t)
 	claudeDir := t.TempDir()
-	writeFixtureSession(t, claudeDir, "sess1.jsonl")
-	writeFixtureSession(t, claudeDir, "sess2.jsonl")
+	writeFixtureSession(t, claudeDir, "sess1.jsonl", repoDir)
+	writeFixtureSession(t, claudeDir, "sess2.jsonl", repoDir)
 
 	rec := &progressRecorder{}
 	res, err := Run(context.Background(), repo, claudeImporter{}, Options{
@@ -216,8 +221,8 @@ func TestRun_MixedSkipAndWriteSatisfiesInvariant(t *testing.T) {
 	t.Parallel()
 	repo, repoDir := initRepoWithCommit(t)
 	claudeDir := t.TempDir()
-	writeFixtureSession(t, claudeDir, "sess1.jsonl")
-	writeFixtureSession(t, claudeDir, "sess2.jsonl")
+	writeFixtureSession(t, claudeDir, "sess1.jsonl", repoDir)
+	writeFixtureSession(t, claudeDir, "sess2.jsonl", repoDir)
 	opts := Options{LinkCommitSHA: repoHeadSHA(t, repo), RepoRoot: repoDir, OverridePath: claudeDir, Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC)}
 
 	// Import sess1 and sess2 first, so a second run finds them already
@@ -225,7 +230,7 @@ func TestRun_MixedSkipAndWriteSatisfiesInvariant(t *testing.T) {
 	if _, err := Run(context.Background(), repo, claudeImporter{}, opts); err != nil {
 		t.Fatal(err)
 	}
-	writeFixtureSession(t, claudeDir, "sess3.jsonl")
+	writeFixtureSession(t, claudeDir, "sess3.jsonl", repoDir)
 
 	rec := &progressRecorder{}
 	opts.Progress = rec.progress()

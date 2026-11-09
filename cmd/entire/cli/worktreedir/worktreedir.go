@@ -6,22 +6,19 @@
 // still worth having, because the paths that reach these reads and writes are
 // not Entire's own:
 //
-//   - Checkpoint writes read working files named by `git status` output, on the
-//     hook path, to turn them into blobs.
-//   - Rewind writes working files named by git TREE ENTRIES out of a checkpoint,
-//     which may have been fetched from a remote. Its restore half already opened
-//     a root for exactly this reason; the reads beside it did not.
-//   - Diff-stat and gather read working files named from status output too.
+//   - Turn ends hash working files named by `git status` output, on the hook
+//     path, so session state records the blob each touched file would commit as.
+//   - Carry-forward reads the working files a session touched to find which
+//     of its changes a commit left behind.
+//   - Runner gather lists and reads files at the worktree root.
 //
 // A root makes "cannot leave the repository" a property of the handle rather
-// than of each caller remembering to validate. It is not a substitute for the
-// tree-path validation those callers do — normalizeRepoRelativeTreePath still
-// rejects names that are not repo-relative before they are used as git paths —
-// it is the layer underneath it.
+// than of each caller remembering to validate. It is not a substitute for path
+// validation — Name still rejects a path that does not name something inside
+// the worktree before it is used — it is the layer underneath it.
 package worktreedir
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -33,19 +30,10 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/filemode"
 )
 
-// Open returns the shared *os.Root over the current worktree root. The returned
-// root is owned by the registry and shared with every other caller; do not close
-// it.
-func Open(ctx context.Context) (*os.Root, error) {
-	root, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("resolve worktree root: %w", err)
-	}
-	return OpenAt(root)
-}
-
-// OpenAt is Open for an explicit worktree root, for callers that resolved one
-// already or that act on a worktree other than the current directory.
+// OpenAt returns the shared *os.Root over an explicit worktree root, for callers
+// that resolved one already or that act on a worktree other than the current
+// directory. The returned root is owned by the registry and shared with every
+// other caller; do not close it.
 func OpenAt(worktreeRoot string) (*os.Root, error) {
 	if worktreeRoot == "" {
 		return nil, errors.New("worktreedir: worktree root is required")
@@ -55,6 +43,20 @@ func OpenAt(worktreeRoot string) (*os.Root, error) {
 		return nil, fmt.Errorf("resolve %s: %w", worktreeRoot, err)
 	}
 	return osroot.Shared(abs) //nolint:wrapcheck // Shared names the directory and returns a missing one unwrapped
+}
+
+// ReadFileNoFollow reads the regular file at p inside the worktree, refusing
+// a symlink in any component of p and anything that is not a regular file.
+func ReadFileNoFollow(worktreeRoot, p string) ([]byte, error) {
+	name, err := Name(worktreeRoot, p)
+	if err != nil {
+		return nil, err
+	}
+	root, err := OpenAt(worktreeRoot)
+	if err != nil {
+		return nil, err
+	}
+	return osroot.ReadFileNoFollow(root, name) //nolint:wrapcheck // callers classify the os error
 }
 
 // Name converts a path inside the worktree to a name relative to its root,

@@ -113,18 +113,6 @@ func CallerSessionEnvVars() []string {
 	return slices.Clone(callerSessionEnvVars)
 }
 
-// callerSessionEnvVarsFromRegistry enumerates the variable names of the agents
-// registered in THIS binary. Only the guard test uses it — production and test
-// isolation want the complete set above, not this binary's subset.
-func callerSessionEnvVarsFromRegistry() []string {
-	agents := callerSessionAgents()
-	names := make([]string, 0, len(agents))
-	for _, a := range agents {
-		names = append(names, a.ident.CallerSessionEnvVar())
-	}
-	return names
-}
-
 // callerSessionIDFromEnv reads a session ID an agent published under name.
 //
 // The value is validated with validation.ValidateAgentSessionID, and this is

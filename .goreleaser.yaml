@@ -21,17 +21,19 @@ builds:
     goarch:
       - amd64
       - arm64
+    # Pin the binary mtime to the commit so rebuilding a tag produces identical
+    # bytes. Without it the archives carry build-time mtimes, so a retried
+    # release re-uploads different bytes — and different checksums — to
+    # v<version>/ URLs that are cached immutable for a year. An edge holding the
+    # old archive beside the new checksums.txt makes install.sh abort, because a
+    # checksum mismatch deliberately does not fall back.
+    mod_timestamp: "{{ .CommitTimestamp }}"
     ldflags:
       - -s -w
       - -X github.com/entireio/cli/cmd/entire/cli/versioninfo.Version={{.Version}}
       - -X github.com/entireio/cli/cmd/entire/cli/versioninfo.Commit={{.ShortCommit}}
       - -X github.com/entireio/cli/cmd/entire/cli/telemetry.PostHogAPIKey={{.Env.POSTHOG_API_KEY}}
       - -X github.com/entireio/cli/cmd/entire/cli/telemetry.PostHogEndpoint={{.Env.POSTHOG_ENDPOINT}}
-      # Experimental-command visibility: hide in stable releases, keep visible
-      # in nightly (prerelease) builds. .Prerelease is empty for a stable tag
-      # (vX.Y.Z) and non-empty for a nightly tag (vX.Y.Z-nightly.*). Local
-      # builds carry no stamp and use the package default ("true" = visible).
-      - -X github.com/entireio/cli/cmd/entire/cli/experimental.Visible={{ if .Prerelease }}true{{ else }}false{{ end }}
 
   # git-remote-entire is the git remote helper for entire:// URLs (see
   # cmd/git-remote-entire). A small, dedicated binary shipped alongside
@@ -49,6 +51,13 @@ builds:
     goarch:
       - amd64
       - arm64
+    # Pin the binary mtime to the commit so rebuilding a tag produces identical
+    # bytes. Without it the archives carry build-time mtimes, so a retried
+    # release re-uploads different bytes — and different checksums — to
+    # v<version>/ URLs that are cached immutable for a year. An edge holding the
+    # old archive beside the new checksums.txt makes install.sh abort, because a
+    # checksum mismatch deliberately does not fall back.
+    mod_timestamp: "{{ .CommitTimestamp }}"
     ldflags:
       - -s -w
       - -X github.com/entireio/cli/cmd/entire/cli/versioninfo.Version={{.Version}}
@@ -101,6 +110,48 @@ archives:
 
 checksum:
   name_template: "checksums.txt"
+
+# Mirror every release artifact to the release origin we own, so installing and
+# updating the CLI keep working while GitHub is down. install.sh and the CLI's
+# own update check read this origin first and fall back to GitHub, so the path
+# is exercised by every install rather than only during an incident.
+#
+# Layout is <bucket>/v<version>/<file>, deliberately the same shape as GitHub's
+# releases/download/v<version>/<file> — that symmetry is what lets install.sh
+# build both origins' URLs from one template.
+#
+# Inert until ENTIRE_RELEASE_BUCKET is set, so this config can ship before the
+# bucket exists; setting the repository variable is the only step that turns it
+# on. Until then a release publishes exactly as it does today.
+#
+# Still on GitHub after this: the download URLs inside the Homebrew cask and the
+# Scoop manifest (below). Those are only worth repointing at this origin once it
+# is live and verified — a published manifest must never name a host that isn't
+# serving yet. See docs/architecture/release-origins.md.
+blobs:
+  - provider: s3
+    # Tests non-emptiness, NOT isEnvSet alone. release.yml always exports
+    # ENTIRE_RELEASE_BUCKET, and an Actions variable that is unset exports as
+    # an empty string — so isEnvSet is true on every release. Gating on
+    # presence would enable this pipe with an empty bucket and no credentials
+    # (configure-aws-credentials is correctly skipped), failing every release
+    # instead of staying inert.
+    #
+    # The isEnvSet half is kept rather than testing emptiness alone: GoReleaser
+    # is not consistent about missing env keys — build ldflags fail with "map
+    # has no entry for key", while other templates render empty — so the guard
+    # does not rely on which engine this field uses. Verified by rendering the
+    # gate with the variable absent, present-but-empty, and set.
+    disable: '{{ if and (isEnvSet "ENTIRE_RELEASE_BUCKET") (ne .Env.ENTIRE_RELEASE_BUCKET "") }}false{{ else }}true{{ end }}'
+    bucket: '{{ if and (isEnvSet "ENTIRE_RELEASE_BUCKET") (ne .Env.ENTIRE_RELEASE_BUCKET "") }}{{ .Env.ENTIRE_RELEASE_BUCKET }}{{ else }}unset{{ end }}'
+    region: '{{ if and (isEnvSet "ENTIRE_RELEASE_REGION") (ne .Env.ENTIRE_RELEASE_REGION "") }}{{ .Env.ENTIRE_RELEASE_REGION }}{{ else }}us-east-2{{ end }}'
+    directory: "v{{ .Version }}"
+    # A file under a version prefix never changes once published, so it can be
+    # cached for as long as anything is willing to hold it. The channel
+    # pointers, which do change, are uploaded separately with a short TTL by
+    # scripts/publish-channel-manifest.sh.
+    cache_control:
+      - "public, max-age=31536000, immutable"
 
 release:
   prerelease: auto

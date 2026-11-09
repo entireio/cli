@@ -30,12 +30,6 @@ func InspectHookDiagnosticsLightweight(ctx context.Context) HookDiagnostics {
 	return finishHookDiagnostics(ctx, diagnostics, worktreeHooks, err, true)
 }
 
-func inspectHookDiagnosticsAt(ctx context.Context, worktreeRoot string) HookDiagnostics {
-	diagnostics := HookDiagnostics{Discovery: resolveHookDiscovery(worktreeRoot)}
-	worktreeHooks, err := resolveWorktreeHooksPath(worktreeRoot)
-	return finishHookDiagnostics(ctx, diagnostics, worktreeHooks, err, false)
-}
-
 func finishHookDiagnostics(
 	ctx context.Context,
 	diagnostics HookDiagnostics,

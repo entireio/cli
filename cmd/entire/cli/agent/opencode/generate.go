@@ -6,27 +6,38 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 
 	"github.com/tailscale/hujson"
+	"golang.org/x/mod/semver"
 )
 
 const openCodeBinary = "opencode"
+
+// openCodeVersionTimeout bounds the `opencode --version` probe; it makes no
+// model call, so a slow answer means something is wrong.
+const openCodeVersionTimeout = 5 * time.Second
 
 var _ agent.TextGenerator = (*OpenCodeAgent)(nil)
 
 // GenerateText runs OpenCode without repository context or tool access. An empty
 // model preserves OpenCode's own default; explicit models use provider/model IDs.
 func (a *OpenCodeAgent) GenerateText(ctx context.Context, prompt, model string) (string, error) {
-	dir, err := os.MkdirTemp("", "entire-opencode-summary-")
+	// OpenCode runs in its working directory; OpenCode 2 removed --dir.
+	dir, cleanup, err := agent.NewTextGenerationDir()
 	if err != nil {
-		return "", fmt.Errorf("creating OpenCode generation directory: %w", err)
+		return "", fmt.Errorf("opencode text generation failed: %w", err)
 	}
-	defer os.RemoveAll(dir)
+	defer cleanup()
 
 	// A unique agent name prevents merging permissions from a user's named agent.
 	name := filepath.Base(dir)
@@ -34,11 +45,19 @@ func (a *OpenCodeAgent) GenerateText(ctx context.Context, prompt, model string) 
 	if err != nil {
 		return "", err
 	}
-	args := []string{"run", "--format", "json", "--dir", dir, "--agent", name, "--title", "Entire summary generation"}
+	args := []string{"run"}
+	standalone, err := a.openCodeNeedsStandalone(ctx, dir)
+	if err != nil {
+		return "", fmt.Errorf("opencode text generation failed: %w", err)
+	}
+	if standalone {
+		args = append(args, "--standalone")
+	}
+	args = append(args, "--format", "json", "--agent", name, "--title", "Entire summary generation")
 	if model != "" {
 		args = append(args, "--model", model)
 	}
-	raw, stderr, stdoutBytes, err := agent.RunIsolatedTextGeneratorCLI(ctx, a.CommandRunner, openCodeBinary, openCodeBinary, args, prompt,
+	raw, stderr, stdoutBytes, err := agent.RunIsolatedTextGeneratorCLIIn(ctx, a.CommandRunner, dir, openCodeBinary, openCodeBinary, args, prompt,
 		"OPENCODE_CONFIG_CONTENT="+config, "OPENCODE_AUTO_SHARE=false")
 	if err == nil {
 		raw, err = parseOpenCodeGeneration(raw)
@@ -47,6 +66,55 @@ func (a *OpenCodeAgent) GenerateText(ctx context.Context, prompt, model string) 
 		return "", &agent.TextGenerationError{Err: fmt.Errorf("opencode text generation failed: %w", err), Stderr: stderr, StdoutBytes: stdoutBytes}
 	}
 	return raw, nil
+}
+
+// openCodeNeedsStandalone reports whether run needs --standalone. OpenCode 2
+// otherwise attaches to a shared background service, which ignores
+// OPENCODE_CONFIG_CONTENT (so the generation agent is missing) and, when none
+// is running, is started from this call and outlives it. OpenCode 1 rejects the
+// flag, so only a parsed 1.x version omits it.
+func (a *OpenCodeAgent) openCodeNeedsStandalone(ctx context.Context, dir string) (bool, error) {
+	probeCtx, cancel := context.WithTimeout(ctx, openCodeVersionTimeout)
+	defer cancel()
+	runner := a.CommandRunner
+	if runner == nil {
+		runner = exec.CommandContext
+	}
+	cmd := runner(probeCtx, openCodeBinary, "--version")
+	cmd.Dir = dir
+	// --version reads no config; keep inline config (which may hold credentials) out of the probe.
+	cmd.Env = slices.DeleteFunc(agent.TextGenerationEnv(dir, os.Environ()), func(kv string) bool {
+		return strings.HasPrefix(kv, "OPENCODE_CONFIG_CONTENT=")
+	})
+	// --version starts no service, so no child can hold the pipe past this.
+	cmd.WaitDelay = time.Second
+	out, err := cmd.Output()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return false, fmt.Errorf("opencode version probe: %w", ctxErr)
+	}
+	var execErr *exec.Error
+	if errors.As(err, &execErr) {
+		return false, fmt.Errorf("opencode CLI not found: %w", err)
+	}
+	version := openCodeVersion(string(out))
+	if err != nil || version == "" {
+		logging.Debug(logging.WithComponent(ctx, "opencode"), "opencode version probe inconclusive; using --standalone",
+			slog.String("version", version), slog.Any("error", err))
+		return true, nil
+	}
+	return semver.Major(version) != "v0" && semver.Major(version) != "v1", nil
+}
+
+// openCodeVersion returns the first full x.y.z token as canonical semver:
+// OpenCode 1 prints "1.18.33" and OpenCode 2 "opencode v2.1.1".
+func openCodeVersion(raw string) string {
+	for _, field := range strings.Fields(raw) {
+		v := "v" + strings.TrimPrefix(field, "v")
+		if semver.Canonical(v) == v {
+			return v
+		}
+	}
+	return ""
 }
 
 // Preserve inline provider/auth/model settings while overriding only the
@@ -101,8 +169,9 @@ func parseOpenCodeGeneration(raw string) (string, error) {
 				Text string `json:"text"`
 			} `json:"part"`
 			Error struct {
-				Name string `json:"name"`
-				Data struct {
+				Name    string `json:"name"`
+				Message string `json:"message"`
+				Data    struct {
 					Message string `json:"message"`
 				} `json:"data"`
 			} `json:"error"`
@@ -118,7 +187,11 @@ func parseOpenCodeGeneration(raw string) (string, error) {
 		case "text":
 			parts = append(parts, event.Part.Text)
 		case "error":
-			detail := event.Error.Data.Message
+			// OpenCode 2 reports error.message; OpenCode 1 error.data.message.
+			detail := event.Error.Message
+			if detail == "" {
+				detail = event.Error.Data.Message
+			}
 			if detail == "" {
 				detail = event.Error.Name
 			}

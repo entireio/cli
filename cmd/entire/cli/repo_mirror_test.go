@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -22,18 +23,6 @@ import (
 
 	"github.com/entireio/cli/internal/coreapi"
 )
-
-func TestExplainSuspendedMirror(t *testing.T) {
-	t.Parallel()
-	const id = "01KS6KFJR2XS6PZ188MVYE07AN"
-	var buf bytes.Buffer
-	explainSuspendedMirror(&buf, id)
-	out := buf.String()
-	require.Contains(t, out, id, "message must name the mirror")
-	require.Contains(t, out, "suspended")
-	require.Contains(t, out, "Contact support", "must point at support, not an internal admin command")
-	require.NotContains(t, out, "entire-core", "must not leak internal terminology")
-}
 
 // fakeMirrorGetter feeds awaitMirrorReady a scripted sequence of statuses (the
 // last entry repeats) or a fixed error, standing in for *coreapi.Client.GetMirror.
@@ -1387,6 +1376,17 @@ func TestRepoView_Routing(t *testing.T) {
 		require.Error(t, err)
 		require.ErrorContains(t, err, "no repo matching")
 	})
+
+	t.Run("a mismatched lookup cannot emit another repo's coordinates", func(t *testing.T) {
+		gotFilter := serveRepoDetail(t, []coreapi.RepoIndexEntry{
+			repoIndexFixture("other/repo", "mirror-eu", placementFixture{id: "mirror-eu", slug: euClusterSlug}),
+		}, clustersWithSlugs())
+
+		out, err := runRepoView(t, "/gh/entirehq/entiredb", "--json")
+		require.ErrorContains(t, err, `control plane returned "other/repo" for entirehq/entiredb`)
+		require.Empty(t, out, "must not emit coordinates for an unrelated repository")
+		require.Equal(t, "entirehq/entiredb", *gotFilter)
+	})
 }
 
 // TestRepoView_NativeCloneURL pins the native half of the clone-URL form: it is
@@ -2326,4 +2326,13 @@ func TestRepoView_NamesARepoOneWay(t *testing.T) {
 		require.NotContains(t, filters, "my-project/my-repo",
 			"the GitHub directory filter is not how a native repo is found")
 	})
+}
+
+func regionSlugs(regions []regionChoice) []string {
+	out := make([]string, 0, len(regions))
+	for _, r := range regions {
+		out = append(out, r.slug)
+	}
+	slices.Sort(out)
+	return out
 }

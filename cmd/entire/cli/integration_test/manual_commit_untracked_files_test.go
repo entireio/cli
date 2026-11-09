@@ -9,10 +9,10 @@ import (
 	"testing"
 )
 
-// TestShadow_GitignoredFilesExcludedFromSessionState tests that files matching
+// TestManualCommit_GitignoredFilesExcludedFromSessionState tests that files matching
 // .gitignore patterns are NOT included in UntrackedFilesAtStart, preventing
 // bloated session state from large ignored directories like node_modules/.
-func TestShadow_GitignoredFilesExcludedFromSessionState(t *testing.T) {
+func TestManualCommit_GitignoredFilesExcludedFromSessionState(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
 	defer env.Cleanup()

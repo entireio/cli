@@ -44,10 +44,6 @@ type userMessageData struct {
 	Content string `json:"content"`
 }
 
-type assistantMessageData struct {
-	Content string `json:"content"`
-}
-
 // modelChangeData is the data payload for session.model_change events.
 // Copilot CLI emits this early in the transcript with the LLM model being used.
 type modelChangeData struct {
@@ -284,12 +280,6 @@ func lastEventField[T any](events []copilotEvent, eventType string, extract func
 	}
 
 	return ""
-}
-
-// extractSummaryFromEvents returns the content of the last assistant.message event.
-func extractSummaryFromEvents(events []copilotEvent) string {
-	return lastEventField(events, eventTypeAssistantMsg,
-		func(d assistantMessageData) string { return d.Content })
 }
 
 // extractModelFromEvents returns the model from transcript events.
@@ -538,18 +528,4 @@ func (c *CopilotCLIAgent) ExtractPrompts(sessionRef string, fromOffset int) ([]s
 		return nil, fmt.Errorf("failed to parse transcript events: %w", err)
 	}
 	return extractPromptsFromEvents(events), nil
-}
-
-// ExtractSummary extracts the last assistant message as a session summary.
-func (c *CopilotCLIAgent) ExtractSummary(sessionRef string) (string, error) {
-	data, err := os.ReadFile(sessionRef) //nolint:gosec // Path comes from agent hook input
-	if err != nil {
-		return "", fmt.Errorf("failed to read transcript: %w", err)
-	}
-
-	events, err := parseEventsFromBytes(data)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse transcript events: %w", err)
-	}
-	return extractSummaryFromEvents(events), nil
 }

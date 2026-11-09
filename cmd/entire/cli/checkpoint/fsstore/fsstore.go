@@ -21,6 +21,7 @@
 package fsstore
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -128,11 +129,23 @@ func (s *Store) Write(_ context.Context, req cp.WriteRequest) error {
 		return s.backfillTranscript(cp.UpdateOptions(r))
 	case cp.SessionSummary:
 		return s.writeSessionSummary(r)
-	case cp.CheckpointAttribution:
-		return s.writeAttribution(r)
+	case cp.Tasks:
+		return s.writeCheckpointTasks(r)
 	default:
 		return fmt.Errorf("fsstore: unsupported write request %T", req)
 	}
+}
+
+func (s *Store) writeCheckpointTasks(req cp.Tasks) error {
+	sc, err := s.load(req.CheckpointID)
+	if err != nil {
+		return err
+	}
+	if sc == nil {
+		return cp.ErrCheckpointNotFound
+	}
+	sc.Tasks = upsertTasks(sc.Tasks, req.Tasks)
+	return s.save(sc)
 }
 
 func (s *Store) writeSession(opts cp.WriteOptions) error {
@@ -156,11 +169,6 @@ func (s *Store) writeSession(opts cp.WriteOptions) error {
 	// Summary-level flags accumulate across sessions and survive recompute.
 	sc.Summary.HasReview = sc.Summary.HasReview || opts.HasReview
 	sc.Summary.HasInvestigation = sc.Summary.HasInvestigation || opts.HasInvestigation
-	if opts.CombinedAttribution != nil {
-		// Migration path: an initial write may carry holistic attribution. Normal
-		// condensation sets this later via a CheckpointAttribution write instead.
-		sc.Summary.CombinedAttribution = opts.CombinedAttribution
-	}
 
 	recomputeSummary(sc)
 	return s.save(sc)
@@ -180,6 +188,9 @@ func (s *Store) backfillTranscript(opts cp.UpdateOptions) error {
 	}
 	// Replace semantics, but do not clobber sibling fields (matches the git
 	// store's stop-time transcript backfill).
+	if counts := opts.Transcript.Counts(); counts != nil || !bytes.Equal(sc.Sessions[idx].Transcript, opts.Transcript.Bytes()) {
+		sc.Sessions[idx].Metadata.Redaction = counts
+	}
 	sc.Sessions[idx].Transcript = opts.Transcript.Bytes()
 	sc.Sessions[idx].Prompts = checkpoint.RedactedJoinedPrompts(opts.Prompts)
 	if len(opts.SkillEvents) > 0 {
@@ -197,18 +208,6 @@ func (s *Store) writeSessionSummary(r cp.SessionSummary) error {
 		return fmt.Errorf("fsstore: cannot set summary for unknown checkpoint %s", r.CheckpointID)
 	}
 	sc.Sessions[len(sc.Sessions)-1].Metadata.Summary = checkpoint.RedactSummary(r.Summary)
-	return s.save(sc)
-}
-
-func (s *Store) writeAttribution(r cp.CheckpointAttribution) error {
-	sc, err := s.load(r.CheckpointID)
-	if err != nil {
-		return err
-	}
-	if sc == nil {
-		return fmt.Errorf("fsstore: cannot set attribution for unknown checkpoint %s", r.CheckpointID)
-	}
-	sc.Summary.CombinedAttribution = r.Attribution
 	return s.save(sc)
 }
 
@@ -411,6 +410,10 @@ func metadataFromWriteOptions(opts cp.WriteOptions) cp.Metadata {
 		// Contract: a zero CreatedAt means "use the current time".
 		createdAt = time.Now()
 	}
+	var redaction *redact.Counts
+	if opts.Transcript.Len() > 0 {
+		redaction = opts.Transcript.Counts()
+	}
 	return cp.Metadata{
 		CheckpointID:                opts.CheckpointID,
 		SessionID:                   opts.SessionID,
@@ -427,11 +430,10 @@ func metadataFromWriteOptions(opts cp.WriteOptions) cp.Metadata {
 		CheckpointTranscriptStart:   opts.CheckpointTranscriptStart,
 		TranscriptLinesAtStart:      opts.CheckpointTranscriptStart, //nolint:staticcheck // deliberate: git writes both so older CLIs can still read the metadata
 		TokenUsage:                  opts.TokenUsage,
+		Redaction:                   redaction,
 		SkillEvents:                 opts.SkillEvents,
-		PromptAttributions:          opts.PromptAttributionsJSON,
 		SessionMetrics:              opts.SessionMetrics,
 		Summary:                     checkpoint.RedactSummary(opts.Summary),
-		Attribution:                 opts.Attribution,
 		Kind:                        opts.Kind,
 		ReviewSkills:                opts.ReviewSkills,
 		ReviewPrompt:                redact.String(opts.ReviewPrompt),
@@ -442,6 +444,10 @@ func metadataFromWriteOptions(opts cp.WriteOptions) cp.Metadata {
 
 func upsertSession(sessions []storedSession, session storedSession) []storedSession {
 	if idx := sessionIndexByID(sessions, session.SessionID); idx >= 0 {
+		// Keep the opaque line attribution an older CLI recorded for this
+		// session through the overwrite, as the git store does.
+		session.Metadata.LegacyInitialAttribution = sessions[idx].Metadata.LegacyInitialAttribution
+		session.Metadata.LegacyPromptAttributions = sessions[idx].Metadata.LegacyPromptAttributions
 		sessions[idx] = session
 		return sessions
 	}

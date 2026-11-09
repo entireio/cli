@@ -70,11 +70,15 @@ func TestSeam_GitPrimaryWithFsMirror(t *testing.T) {
 	require.NoError(t, stores.Persistent.Write(ctx, cp.SessionSummary{
 		CheckpointID: cid, Summary: &cp.Summary{Intent: "intent-x", Outcome: "outcome-y"},
 	}))
-	// 5. CheckpointAttribution: set combined attribution.
-	require.NoError(t, stores.Persistent.Write(ctx, cp.CheckpointAttribution{
-		CheckpointID: cid, Attribution: &cp.Attribution{AgentLines: 7, AgentPercentage: 70},
+	// 5. Tasks: add a subagent task to the existing checkpoint.
+	require.NoError(t, stores.Persistent.Write(ctx, cp.Tasks{
+		CheckpointID: cid,
+		Tasks: []cp.TaskPayload{{
+			ToolUseID:  "toolu_01Seam",
+			AgentID:    "a0123456789abcdef",
+			Transcript: redact.AlreadyRedacted([]byte("subagent transcript")),
+		}},
 	}))
-
 	// Reads resolve from the git primary.
 	t.Run("git primary", func(t *testing.T) {
 		assertAllVariants(t, stores.Persistent, cid, reservedCID)
@@ -108,9 +112,10 @@ func assertAllVariants(t *testing.T, store cp.PersistentStore, cid, reservedCID 
 	require.NotNil(t, meta.Summary)
 	assert.Equal(t, "intent-x", meta.Summary.Intent)
 
-	// CheckpointAttribution landed.
-	require.NotNil(t, summary.CombinedAttribution)
-	assert.Equal(t, 7, summary.CombinedAttribution.AgentLines)
+	// Tasks landed.
+	taskTranscript, err := store.ReadTaskTranscript(ctx, cid, "toolu_01Seam")
+	require.NoError(t, err)
+	assert.Equal(t, []byte("subagent transcript"), taskTranscript)
 
 	reservedContent, err := store.ReadSessionContent(ctx, reservedCID, 0)
 	require.NoError(t, err)

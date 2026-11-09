@@ -11,6 +11,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/search"
 	"github.com/entireio/cli/cmd/entire/cli/telemetry"
+	"github.com/entireio/cli/internal/entireclient/tokenstore"
 )
 
 // The wrapping in each case mirrors how the real search paths build their
@@ -29,6 +30,7 @@ func TestClassifySearchError(t *testing.T) {
 		want string
 	}{
 		{"not logged in via login hint", fmt.Errorf("search failed: %w", loginHintErr(auth.ErrNotLoggedIn)), telemetry.SearchErrClassAuth},
+		{"unreadable keyring", fmt.Errorf("search failed: %w", fmt.Errorf("cannot read the saved login: %w", tokenstore.ErrKeyringUnavailable)), telemetry.SearchErrClassAuth},
 		{"jurisdiction cell skip", regionSkip(auth.ErrNoCellForJurisdiction), telemetry.SearchErrClassCellSkip},
 		{"gateway without query-serve", regionSkip(search.ErrCellUnavailable), telemetry.SearchErrClassRegionUnavailable},
 		{"bare region sentinel", fmt.Errorf("semantic search: %w", errNoRegionAvailable), telemetry.SearchErrClassRegionUnavailable},

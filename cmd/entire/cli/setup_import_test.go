@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -65,7 +67,7 @@ func TestImporterForAgent_UnknownTypeReturnsNil(t *testing.T) {
 
 // withImportSeams overrides the package seams and restores them after the test.
 // Tests using it must not call t.Parallel (shared package state).
-func withImportSeams(t *testing.T, discover func(context.Context, []agent.Agent, string) []eligibleImport, prompt func(context.Context, io.Writer, []eligibleImport) ([]eligibleImport, error), run func(context.Context, io.Writer, string, string, []eligibleImport)) {
+func withImportSeams(t *testing.T, discover func(context.Context, io.Writer, []agent.Agent, string) []eligibleImport, prompt func(context.Context, io.Writer, []eligibleImport) ([]eligibleImport, error), run func(context.Context, io.Writer, string, string, []eligibleImport)) {
 	t.Helper()
 	oldDiscover, oldPrompt, oldRun := sessionImportDiscover, sessionImportPrompt, sessionImportRun
 	t.Cleanup(func() {
@@ -87,7 +89,7 @@ func TestMaybeOfferSessionImport_FirstRunGate(t *testing.T) {
 	// before any discovery.
 	called := false
 	withImportSeams(t,
-		func(context.Context, []agent.Agent, string) []eligibleImport {
+		func(context.Context, io.Writer, []agent.Agent, string) []eligibleImport {
 			called = true
 			return []eligibleImport{{displayName: "X", sessionCount: 1}}
 		}, nil, nil)
@@ -125,7 +127,7 @@ func TestMaybeOfferSessionImport_ImportHistoryImportsAllWithoutPrompting(t *test
 	var anchor string
 	promptCalled := false
 	withImportSeams(t,
-		func(context.Context, []agent.Agent, string) []eligibleImport { return eligible },
+		func(context.Context, io.Writer, []agent.Agent, string) []eligibleImport { return eligible },
 		func(context.Context, io.Writer, []eligibleImport) ([]eligibleImport, error) {
 			promptCalled = true
 			return nil, nil
@@ -168,7 +170,7 @@ func TestMaybeOfferSessionImport_YesDoesNotImport(t *testing.T) {
 	promptCalled := false
 	var ran []eligibleImport
 	withImportSeams(t,
-		func(context.Context, []agent.Agent, string) []eligibleImport {
+		func(context.Context, io.Writer, []agent.Agent, string) []eligibleImport {
 			return []eligibleImport{{displayName: testAgentClaude, sessionCount: 3}}
 		},
 		func(context.Context, io.Writer, []eligibleImport) ([]eligibleImport, error) {
@@ -198,7 +200,7 @@ func TestMaybeOfferSessionImport_ImportHistoryOnNonFirstRunIsReported(t *testing
 	// Not parallel: overrides package seams.
 	called := false
 	withImportSeams(t,
-		func(context.Context, []agent.Agent, string) []eligibleImport {
+		func(context.Context, io.Writer, []agent.Agent, string) []eligibleImport {
 			called = true
 			return nil
 		}, nil, nil)
@@ -222,7 +224,7 @@ func TestMaybeOfferSessionImport_NonInteractiveWithoutOptInSkips(t *testing.T) {
 	promptCalled := false
 	var ran []eligibleImport
 	withImportSeams(t,
-		func(context.Context, []agent.Agent, string) []eligibleImport {
+		func(context.Context, io.Writer, []agent.Agent, string) []eligibleImport {
 			return []eligibleImport{{displayName: testAgentClaude, sessionCount: 3}}
 		},
 		func(context.Context, io.Writer, []eligibleImport) ([]eligibleImport, error) {
@@ -254,7 +256,7 @@ func TestMaybeOfferSessionImport_NoEligibleIsNoOp(t *testing.T) {
 
 	runCalled := false
 	withImportSeams(t,
-		func(context.Context, []agent.Agent, string) []eligibleImport { return nil },
+		func(context.Context, io.Writer, []agent.Agent, string) []eligibleImport { return nil },
 		nil,
 		func(context.Context, io.Writer, string, string, []eligibleImport) { runCalled = true },
 	)
@@ -276,7 +278,7 @@ func TestMaybeOfferSessionImport_InteractiveUsesSelection(t *testing.T) {
 	}
 	var ran []eligibleImport
 	withImportSeams(t,
-		func(context.Context, []agent.Agent, string) []eligibleImport { return eligible },
+		func(context.Context, io.Writer, []agent.Agent, string) []eligibleImport { return eligible },
 		func(_ context.Context, _ io.Writer, e []eligibleImport) ([]eligibleImport, error) {
 			return e[:1], nil // user picks only the first
 		},
@@ -295,7 +297,7 @@ func TestMaybeOfferSessionImport_EmptySelectionSkips(t *testing.T) {
 
 	runCalled := false
 	withImportSeams(t,
-		func(context.Context, []agent.Agent, string) []eligibleImport {
+		func(context.Context, io.Writer, []agent.Agent, string) []eligibleImport {
 			return []eligibleImport{{displayName: testAgentClaude, sessionCount: 3}}
 		},
 		func(context.Context, io.Writer, []eligibleImport) ([]eligibleImport, error) { return nil, nil },
@@ -314,7 +316,7 @@ func TestMaybeOfferSessionImport_PromptErrorIsBestEffort(t *testing.T) {
 
 	runCalled := false
 	withImportSeams(t,
-		func(context.Context, []agent.Agent, string) []eligibleImport {
+		func(context.Context, io.Writer, []agent.Agent, string) []eligibleImport {
 			return []eligibleImport{{displayName: testAgentClaude, sessionCount: 3}}
 		},
 		func(context.Context, io.Writer, []eligibleImport) ([]eligibleImport, error) {
@@ -353,12 +355,25 @@ func (f fixedDiscoverImporter) Discover(string, string, time.Time, []string) ([]
 	return f.sessions, nil
 }
 
+// importFixtureCwdJSON returns cwd as a JSON string literal for splicing a
+// "cwd" field into hand-written transcript fixtures; json.Marshal escapes
+// Windows backslashes that naive concatenation would leave invalid.
+func importFixtureCwdJSON(t *testing.T, cwd string) string {
+	t.Helper()
+	b, err := json.Marshal(cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
 // writeImportProgressFixtureSession writes a 2-turn Claude Code transcript
-// fixture, matching the format agentimport's claude importer parses.
-func writeImportProgressFixtureSession(t *testing.T, dir, name string) {
+// fixture, matching the format agentimport's claude importer parses. It
+// records cwd so discovery attributes the session to the repo at cwd.
+func writeImportProgressFixtureSession(t *testing.T, dir, name, cwd string) {
 	t.Helper()
 	content := strings.Join([]string{
-		`{"type":"user","uuid":"u1","timestamp":"2026-06-20T00:00:00Z","message":{"role":"user","content":"first"}}`,
+		`{"type":"user","uuid":"u1","cwd":` + importFixtureCwdJSON(t, cwd) + `,"timestamp":"2026-06-20T00:00:00Z","message":{"role":"user","content":"first"}}`,
 		`{"type":"assistant","uuid":"a1","message":{"id":"m1","model":"claude-x","content":[{"type":"text","text":"ok"}],"usage":{"output_tokens":5}}}`,
 		`{"type":"user","uuid":"u2","timestamp":"2026-06-20T00:01:00Z","message":{"role":"user","content":"second"}}`,
 	}, "\n") + "\n"
@@ -381,8 +396,8 @@ func TestRunSelectedImports_NonTTYProgressLines(t *testing.T) {
 	ctx := context.Background()
 
 	sessionsDir := t.TempDir()
-	writeImportProgressFixtureSession(t, sessionsDir, "sess1.jsonl")
-	writeImportProgressFixtureSession(t, sessionsDir, "sess2.jsonl")
+	writeImportProgressFixtureSession(t, sessionsDir, "sess1.jsonl", dir)
+	writeImportProgressFixtureSession(t, sessionsDir, "sess2.jsonl", dir)
 
 	var claudeImp agentimport.Importer
 	for _, imp := range agentimport.All() {
@@ -483,8 +498,8 @@ func TestRunSelectedImports_NonTTYProgressLines_Reimport(t *testing.T) {
 	ctx := context.Background()
 
 	sessionsDir := t.TempDir()
-	writeImportProgressFixtureSession(t, sessionsDir, "sess1.jsonl")
-	writeImportProgressFixtureSession(t, sessionsDir, "sess2.jsonl")
+	writeImportProgressFixtureSession(t, sessionsDir, "sess1.jsonl", dir)
+	writeImportProgressFixtureSession(t, sessionsDir, "sess2.jsonl", dir)
 
 	var claudeImp agentimport.Importer
 	for _, imp := range agentimport.All() {
@@ -550,7 +565,7 @@ func TestRunSelectedImports_InterruptedStopsBeforeNextAgent(t *testing.T) {
 	defer cancel()
 
 	sessionsDir := t.TempDir()
-	writeImportProgressFixtureSession(t, sessionsDir, "sess1.jsonl")
+	writeImportProgressFixtureSession(t, sessionsDir, "sess1.jsonl", dir)
 
 	var claudeImp agentimport.Importer
 	for _, imp := range agentimport.All() {
@@ -587,5 +602,32 @@ func TestRunSelectedImports_InterruptedStopsBeforeNextAgent(t *testing.T) {
 	}
 	if strings.Contains(out, "could not import") {
 		t.Errorf("interruption reported as an import failure: %q", out)
+	}
+}
+
+// The enable-time offer must say why Cursor wasn't offered when its project
+// directory may hold another repository's sessions, and how to import anyway.
+// Not parallel: GetSessionDir reads ENTIRE_TEST_CURSOR_PROJECT_DIR.
+func TestDiscoverImportableAgents_ReportsCursorRefusal(t *testing.T) {
+	project := filepath.Join(t.TempDir(), "project")
+	transcripts := filepath.Join(project, "agent-transcripts")
+	if err := os.MkdirAll(transcripts, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(transcripts, "sess.jsonl"), []byte(`{"role":"user","message":{"content":"hi"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, ".workspace-trusted"), []byte(`{"workspacePath":"/elsewhere"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ENTIRE_TEST_CURSOR_PROJECT_DIR", transcripts)
+
+	var out bytes.Buffer
+	got := discoverImportableAgents(context.Background(), &out, []agent.Agent{fakeAgent{typ: agent.AgentTypeCursor}}, t.TempDir())
+	if len(got) != 0 {
+		t.Fatalf("Cursor was offered despite a shared project directory: %+v", got)
+	}
+	if !strings.Contains(out.String(), "skipping Cursor history import") || !strings.Contains(out.String(), "entire import cursor --path") {
+		t.Fatalf("output doesn't explain the skip or the --path rerun:\n%s", out.String())
 	}
 }

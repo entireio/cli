@@ -3,6 +3,7 @@ package external
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -368,18 +369,6 @@ func (e *Agent) ExtractPrompts(sessionRef string, fromOffset int) ([]string, err
 	return resp.Prompts, nil
 }
 
-func (e *Agent) ExtractSummary(sessionRef string) (string, error) {
-	stdout, err := e.run(context.Background(), nil, "extract-summary", "--session-ref", sessionRef)
-	if err != nil {
-		return "", fmt.Errorf("extract-summary: %w", err)
-	}
-	var resp ExtractSummaryResponse
-	if err := json.Unmarshal(stdout, &resp); err != nil {
-		return "", fmt.Errorf("extract-summary: invalid JSON: %w", err)
-	}
-	return resp.Summary, nil
-}
-
 // --- TranscriptPreparer methods ---
 
 func (e *Agent) PrepareTranscript(ctx context.Context, sessionRef string) error {
@@ -538,7 +527,11 @@ func (e *Agent) runIn(ctx context.Context, isolatedDir string, stdin []byte, arg
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
 
-	const maxOutputBytes = 10 * 1024 * 1024 // 10 MB
+	maxOutputBytes := 10 * 1024 * 1024 // 10 MB
+	if len(args) > 0 && args[0] == "compact-transcript" {
+		// Room for a base64 transcript up to the compact blob cap, plus JSON.
+		maxOutputBytes = base64.StdEncoding.EncodedLen(agent.MaxChunkSize) + 1024*1024
+	}
 
 	var stdoutBuf, stderrBuf bytes.Buffer
 	stdoutLW := &limitedWriter{buf: &stdoutBuf, limit: maxOutputBytes}

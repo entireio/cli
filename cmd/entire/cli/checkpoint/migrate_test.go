@@ -126,7 +126,7 @@ func TestMigrateBranchToRefs(t *testing.T) {
 		doc["future_field"] = "keep-me"
 	})
 
-	result, err := MigrateBranchToRefs(ctx, repo, false)
+	result, err := MigrateBranchToRefs(ctx, repo, MigrateOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, 2, result.Total)
 	assert.Len(t, result.Migrated, 2)
@@ -195,7 +195,7 @@ func TestMigrateBranchToRefs(t *testing.T) {
 
 	// Idempotent: a second run skips everything and leaves the refs untouched.
 	before := map[string]plumbing.Hash{cid1.String(): refHash(t, repo, cid1), cid2.String(): refHash(t, repo, cid2)}
-	result2, err := MigrateBranchToRefs(ctx, repo, false)
+	result2, err := MigrateBranchToRefs(ctx, repo, MigrateOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, 2, result2.Total)
 	assert.Empty(t, result2.Migrated, "nothing to migrate on a repeat run")
@@ -243,7 +243,7 @@ func TestMigrateBranchToRefs_IdempotentRerunDoesNotUpdateRef(t *testing.T) {
 			cid := id.MustCheckpointID("a1b2c3d4e5f6")
 			seedBranchCheckpoint(t, branch, cid, "s1")
 
-			_, err := MigrateBranchToRefs(t.Context(), repo, false)
+			_, err := MigrateBranchToRefs(t.Context(), repo, MigrateOptions{})
 			require.NoError(t, err)
 			refName, err := RefName(cid)
 			require.NoError(t, err)
@@ -251,7 +251,7 @@ func TestMigrateBranchToRefs_IdempotentRerunDoesNotUpdateRef(t *testing.T) {
 
 			ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
 			defer cancel()
-			result, err := MigrateBranchToRefs(ctx, repo, false)
+			result, err := MigrateBranchToRefs(ctx, repo, MigrateOptions{})
 			require.NoError(t, err)
 			assert.Equal(t, 1, result.Skipped)
 			assert.Empty(t, result.Migrated)
@@ -283,7 +283,7 @@ func TestMigrateBranchToRefs_RechecksIdempotencyAfterConcurrentImport(t *testing
 		return updatePersistentRef(ctx, repo, refName, build)
 	}
 
-	result, err := migrateBranchToRefs(t.Context(), repo, false, concurrentImport)
+	result, err := migrateBranchToRefs(t.Context(), repo, MigrateOptions{}, concurrentImport)
 	require.NoError(t, err)
 	assert.Equal(t, 1, updateCalls, "the unlocked check must miss before the concurrent import")
 	assert.Empty(t, result.Migrated)
@@ -312,7 +312,7 @@ func TestMigrateBranchToRefs_MetadataMatchesNativeRefsLayout(t *testing.T) {
 
 	branch := NewGitStore(repo, DefaultV1Refs())
 	seedBranchCheckpoint(t, branch, migratedCID, "s1")
-	_, err := MigrateBranchToRefs(ctx, repo, false)
+	_, err := MigrateBranchToRefs(ctx, repo, MigrateOptions{})
 	require.NoError(t, err)
 
 	nativeCommit, err := repo.CommitObject(refHash(t, repo, nativeCID))
@@ -356,14 +356,14 @@ func TestMigrateBranchToRefs_AdvancesOnBranchChange(t *testing.T) {
 	cid := id.MustCheckpointID("a1b2c3d4e5f6")
 
 	seedBranchCheckpoint(t, branch, cid, "s1")
-	_, err := MigrateBranchToRefs(ctx, repo, false)
+	_, err := MigrateBranchToRefs(ctx, repo, MigrateOptions{})
 	require.NoError(t, err)
 	first := refHash(t, repo, cid)
 
 	// The branch checkpoint gains a second session (its subtree changes).
 	seedBranchCheckpoint(t, branch, cid, "s2")
 
-	result, err := MigrateBranchToRefs(ctx, repo, false)
+	result, err := MigrateBranchToRefs(ctx, repo, MigrateOptions{})
 	require.NoError(t, err)
 	assert.Len(t, result.Migrated, 1, "changed checkpoint is re-migrated")
 	assert.Equal(t, 0, result.Skipped)
@@ -393,7 +393,7 @@ func TestMigrateBranchToRefs_DryRunWritesNothing(t *testing.T) {
 	})
 
 	before := countObjects(t, repo)
-	result, err := MigrateBranchToRefs(ctx, repo, true)
+	result, err := MigrateBranchToRefs(ctx, repo, MigrateOptions{DryRun: true})
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Total)
 	assert.Len(t, result.Migrated, 1, "dry-run reports what would migrate")
@@ -437,13 +437,13 @@ func TestMigrateBranchToRefs_DryRunRecognizesAlreadyMigrated(t *testing.T) {
 	})
 
 	// Real migration persists the normalized tree.
-	res, err := MigrateBranchToRefs(ctx, repo, false)
+	res, err := MigrateBranchToRefs(ctx, repo, MigrateOptions{})
 	require.NoError(t, err)
 	require.Len(t, res.Migrated, 1)
 
 	// Dry-run must see it as already migrated — proving the non-persisting hash
 	// computation matches the persisted tree hash byte-for-byte.
-	dry, err := MigrateBranchToRefs(ctx, repo, true)
+	dry, err := MigrateBranchToRefs(ctx, repo, MigrateOptions{DryRun: true})
 	require.NoError(t, err)
 	assert.Empty(t, dry.Migrated, "already-migrated checkpoint is not a would-migrate")
 	assert.Equal(t, 1, dry.Skipped)
@@ -457,7 +457,7 @@ func TestMigrateBranchToRefs_SkipsRefAdvancedPastBranchSnapshot(t *testing.T) {
 	cid := id.MustCheckpointID("a1b2c3d4e5f6")
 	seedBranchCheckpoint(t, branch, cid, "s1")
 
-	_, err := MigrateBranchToRefs(ctx, repo, false)
+	_, err := MigrateBranchToRefs(ctx, repo, MigrateOptions{})
 	require.NoError(t, err)
 	imported := refHash(t, repo, cid)
 
@@ -476,7 +476,7 @@ func TestMigrateBranchToRefs_SkipsRefAdvancedPastBranchSnapshot(t *testing.T) {
 
 	// A re-run must recognize the already-imported snapshot in the ref's
 	// history and skip — not regress the tip to the old branch tree.
-	result, err := MigrateBranchToRefs(ctx, repo, false)
+	result, err := MigrateBranchToRefs(ctx, repo, MigrateOptions{})
 	require.NoError(t, err)
 	assert.Empty(t, result.Migrated, "already-imported checkpoint must not be re-migrated")
 	assert.Equal(t, 1, result.Skipped)
@@ -498,7 +498,7 @@ func TestMigrateBranchToRefs_UnreadableRefIsReplacedWithOrphan(t *testing.T) {
 	bogus := plumbing.NewHash("0123456789abcdef0123456789abcdef01234567")
 	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(refName, bogus)))
 
-	result, err := MigrateBranchToRefs(context.Background(), repo, false)
+	result, err := MigrateBranchToRefs(context.Background(), repo, MigrateOptions{})
 	require.NoError(t, err)
 	assert.Len(t, result.Migrated, 1)
 
@@ -522,7 +522,7 @@ func TestMigrateBranchToRefs_EnqueueFailureIsError(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(queue.queuePath(), 0o755))
 
-	_, err = MigrateBranchToRefs(ctx, repo, false)
+	_, err = MigrateBranchToRefs(ctx, repo, MigrateOptions{})
 	require.Error(t, err, "a failed enqueue must fail the migration")
 }
 
@@ -534,12 +534,12 @@ func TestMigrateBranchToRefs_ReenqueuesAlreadyImportedRef(t *testing.T) {
 	cid := id.MustCheckpointID("a1b2c3d4e5f6")
 	seedBranchCheckpoint(t, branch, cid, "s1")
 
-	_, err := MigrateBranchToRefs(ctx, repo, false)
+	_, err := MigrateBranchToRefs(ctx, repo, MigrateOptions{})
 	require.NoError(t, err)
 	first := refHash(t, repo, cid)
 
 	// Simulate a prior run that wrote the ref but lost its push-queue entry
-	// (a failed enqueue, or a crash between setRef and Enqueue): the ref exists
+	// (a failed enqueue, or a crash between setRef and EnqueueRef): the ref exists
 	// but nothing is queued for it.
 	refName, err := RefName(cid)
 	require.NoError(t, err)
@@ -552,7 +552,7 @@ func TestMigrateBranchToRefs_ReenqueuesAlreadyImportedRef(t *testing.T) {
 
 	// Re-running skips the already-imported snapshot but must re-enqueue it, so
 	// the ref a partial earlier run left behind still reaches the remote.
-	result, err := MigrateBranchToRefs(ctx, repo, false)
+	result, err := MigrateBranchToRefs(ctx, repo, MigrateOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Skipped, "already-imported checkpoint is a skip")
 	assert.Empty(t, result.Migrated)
@@ -567,8 +567,41 @@ func TestMigrateBranchToRefs_ReenqueuesAlreadyImportedRef(t *testing.T) {
 func TestMigrateBranchToRefs_NoBranchIsNoop(t *testing.T) {
 	t.Parallel()
 	repo, _ := setupBranchTestRepo(t) // initial commit only; no v1 checkpoint branch yet
-	result, err := MigrateBranchToRefs(context.Background(), repo, false)
+	result, err := MigrateBranchToRefs(context.Background(), repo, MigrateOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, 0, result.Total)
 	assert.Empty(t, result.Migrated)
+}
+
+// A checkpoint `entire checkpoint delete` removed must not be re-created by a
+// migration that still sees it on the v1 branch (e.g. through a stale
+// remote-tracking ref the delete could not reach).
+func TestMigrateBranchToRefs_SkipsDeletedCheckpoints(t *testing.T) {
+	t.Parallel()
+	repo, _ := setupBranchTestRepo(t)
+	ctx := context.Background()
+	branch := NewGitStore(repo, DefaultV1Refs())
+	deleted := id.MustCheckpointID("a1b2c3d4e5f6")
+	kept := id.MustCheckpointID("b2c3d4e5f6a1")
+	seedBranchCheckpoint(t, branch, deleted, "s1")
+	seedBranchCheckpoint(t, branch, kept, "s2")
+
+	list, err := DeletedCheckpointsForRepo(repo)
+	require.NoError(t, err)
+	require.NoError(t, list.Record(deleted))
+
+	result, err := MigrateBranchToRefs(ctx, repo, MigrateOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, []id.CheckpointID{kept}, result.Migrated)
+
+	refName, err := RefName(deleted)
+	require.NoError(t, err)
+	_, err = repo.Reference(refName, true)
+	require.ErrorIs(t, err, plumbing.ErrReferenceNotFound, "a deleted checkpoint must not get a ref")
+
+	queue, err := PushQueueForRepo(ctx, repo)
+	require.NoError(t, err)
+	queued, err := queue.Drain()
+	require.NoError(t, err)
+	assert.NotContains(t, queued, refName, "a deleted checkpoint must not be queued for push")
 }

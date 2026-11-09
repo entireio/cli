@@ -112,11 +112,12 @@ func TestAgentHookInstallation(t *testing.T) {
 			t.Fatalf("InstallHooks() error = %v", err)
 		}
 
-		// Should install 9 hooks: SessionStart, SessionEnd, Stop, StopFailure,
-		// SubagentStop, UserPromptSubmit, PreToolUse[Task], PostToolUse[Task],
-		// PostToolUse[TodoWrite]
-		if count != 9 {
-			t.Errorf("InstallHooks() count = %d, want 9", count)
+		// Should install 10 hooks: SessionStart, SessionEnd, Stop, StopFailure,
+		// SubagentStart[workflow-subagent], SubagentStop, UserPromptSubmit,
+		// PreToolUse[Agent], PostToolUse[Agent], PostToolUse[Skill].
+		// post-todo is no longer installed.
+		if count != 10 {
+			t.Errorf("InstallHooks() count = %d, want 10", count)
 		}
 
 		// Verify hooks are installed
@@ -748,7 +749,7 @@ func TestOpenCodeHookInstallation(t *testing.T) {
 		}
 
 		// Verify plugin file was created
-		pluginPath := filepath.Join(env.RepoDir, ".opencode", "plugins", "entire.ts")
+		pluginPath := filepath.Join(env.RepoDir, ".opencode", "plugin", "entire.ts")
 		if _, err := os.Stat(pluginPath); os.IsNotExist(err) {
 			t.Error("entire.ts plugin was not created")
 		}

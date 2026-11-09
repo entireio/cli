@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+#MISE description="Fail on functions this branch made new or worse than the base (cognitive complexity > 30)"
+set -euo pipefail
+
+# The blocking half of the complexity gate, run identically here and in CI
+# (.github/workflows/ci.yml calls this task). It compares the working tree
+# against the merge base with BASE_REF and fails on functions that are both
+# over the threshold and new or worsened; the repo's long tail of pre-existing
+# violations is deliberately exempt. See tools/complexity/README.md.
+#
+# BASE_REF     ref to take the merge base with (default origin/main; CI passes
+#              the pull request's base SHA)
+# COGNIT_WARN  the threshold (default 30)
+
+BASE_REF="${BASE_REF:-origin/main}"
+COGNIT_WARN="${COGNIT_WARN:-30}"
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+if ! base_sha="$(git merge-base "$BASE_REF" HEAD)"; then
+  echo "error: no merge base between $BASE_REF and HEAD (fetch it first: git fetch origin main)" >&2
+  exit 1
+fi
+# --no-optional-locks per the repo rule: `git status` otherwise rewrites the
+# index, and this can run while an agent's hooks are touching the same repo.
+# Untracked files count as a change, because a new .go file is exactly what
+# this gate exists to look at and `git diff` would not see it.
+if [ "$base_sha" = "$(git rev-parse HEAD)" ] && [ -z "$(git --no-optional-locks status --porcelain)" ]; then
+  echo "complexity gate: working tree is the merge base with $BASE_REF — nothing to compare"
+  exit 0
+fi
+
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+
+# `git archive` rather than `git worktree add`: this task is meant to be run
+# from a dirty working tree, and an export leaves no entry in the repo's
+# worktree list to clean up if it is interrupted. The repo has no
+# .gitattributes, so the export is a faithful copy of the tree.
+mkdir -p "$tmpdir/basetree"
+git archive "$base_sha" | tar -x -C "$tmpdir/basetree"
+
+# Both runs use the HEAD version of the tool and of the feature mapping, so
+# cxtool can evolve without a change to it looking like a complexity change.
+cd tools/complexity
+go build -o "$tmpdir/cxtool" .
+go build -o "$tmpdir/gate" ./gate
+
+# No -cover: the diff reads only per-function complexity, and skipping the
+# coverage profiles (and churn, which needs a git dir the export does not
+# have) keeps each run to about a second. cxtool's stderr is left alone — it
+# lists unmapped files there, and swallowing it would swallow its errors too.
+"$tmpdir/cxtool" -root "$tmpdir/basetree" -churn-days '' -out "$tmpdir/base"
+"$tmpdir/cxtool" -root "$repo_root" -churn-days '' -out "$tmpdir/head"
+
+echo "complexity gate: HEAD vs $(git -C "$repo_root" rev-parse --short "$base_sha") (merge base with $BASE_REF)"
+"$tmpdir/gate" -base "$tmpdir/base" -head "$tmpdir/head" -cognit-warn "$COGNIT_WARN"

@@ -64,6 +64,33 @@ func GitGrepGuard(t *testing.T, repoRoot string, args ...string) string {
 	return string(out)
 }
 
+// GuardGoFiles lists the repository's tracked and untracked Go files for a
+// guard test that parses files instead of grepping them, slash-separated
+// relative to repoRoot and failing the test when it finds none. It applies the
+// same untracked-file and repo-selector protections as GitGrepGuard; -z keeps
+// non-ASCII paths unquoted, since GuardGitEnv drops the caller's core.quotePath.
+func GuardGoFiles(t *testing.T, repoRoot string) []string {
+	t.Helper()
+
+	cmd := exec.Command("git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "*.go") //nolint:noctx // guard test, no cancellation needed
+	cmd.Dir = repoRoot
+	cmd.Env = GuardGitEnv()
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git ls-files: %v", err)
+	}
+	var files []string
+	for name := range strings.SplitSeq(string(out), "\x00") {
+		if name != "" {
+			files = append(files, name)
+		}
+	}
+	if len(files) == 0 {
+		t.Fatal("git ls-files found no Go files — the guard's file discovery has gone stale")
+	}
+	return files
+}
+
 // GitGrepGuardRepoRoot resolves the repository root for a guard test, skipping
 // when there is no checkout to scan.
 func GitGrepGuardRepoRoot(t *testing.T) (string, bool) {
@@ -80,7 +107,7 @@ func GitGrepGuardRepoRoot(t *testing.T) (string, bool) {
 }
 
 // GuardGitEnv drops the repo selectors and the caller's git config, keeping
-// both isolations in one place so the two subprocesses above cannot disagree
+// both isolations in one place so the guard subprocesses cannot disagree
 // about which repository they are looking at.
 func GuardGitEnv() []string {
 	scrubbed := gitrepo.EnvWithoutRepoOverrides()

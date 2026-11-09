@@ -18,8 +18,8 @@ func TestHooksProbeSupported(t *testing.T) {
 		"dev":     false,
 	}
 	for version, want := range cases {
-		if got := HooksProbeSupported(version); got != want {
-			t.Errorf("HooksProbeSupported(%q) = %v, want %v", version, got, want)
+		if got := hooksProbeSupported(version); got != want {
+			t.Errorf("hooksProbeSupported(%q) = %v, want %v", version, got, want)
 		}
 	}
 }
@@ -85,4 +85,11 @@ func TestParseHooksProbeOutput_RejectsNonSuccessStatus(t *testing.T) {
 		[]byte(`{"command":{"name":"hooks","data":{"hooks":[]}}}`), hooksPath); err != nil {
 		t.Errorf("an envelope with no status must still parse: %v", err)
 	}
+}
+
+// hooksProbeSupported reports whether an agy version string answers /hooks
+// locally in print mode. Unparseable versions are treated as unsupported —
+// the failure mode of a wrong guess is a real model turn on the user's quota.
+func hooksProbeSupported(version string) bool {
+	return classifyProbeVersion(version) == nil
 }

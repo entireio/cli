@@ -268,21 +268,10 @@ func TestAttach_Success(t *testing.T) {
 // recognize the session as active and never wrote Entire-Checkpoint trailers
 // onto subsequent commits in that session.
 //
-// After attach, BaseCommit (and AttributionBaseCommit) must be populated
-// from HEAD so the session is recognized as active.
+// After attach, BaseCommit must be populated from HEAD so the session is
+// recognized as active.
 func TestAttach_PopulatesBaseCommitFromHEAD(t *testing.T) {
 	setupAttachTestRepo(t)
-
-	repoRoot := mustGetwd(t)
-	repo, err := git.PlainOpen(repoRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	headRef, err := repo.Head()
-	if err != nil {
-		t.Fatal(err)
-	}
-	headHash := headRef.Hash().String()
 
 	sessionID := "test-attach-empty-base-commit"
 	setupClaudeTranscript(t, sessionID, `{"type":"user","message":{"role":"user","content":"hello"},"uuid":"u1"}
@@ -300,7 +289,7 @@ func TestAttach_PopulatesBaseCommitFromHEAD(t *testing.T) {
 		SessionID: sessionID,
 		AgentType: agent.AgentTypeClaudeCode,
 		StartedAt: time.Now(),
-		// BaseCommit and AttributionBaseCommit deliberately empty.
+		// BaseCommit deliberately empty.
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -310,6 +299,8 @@ func TestAttach_PopulatesBaseCommitFromHEAD(t *testing.T) {
 		t.Fatalf("runAttach failed: %v", err)
 	}
 
+	// Attach added the trailer to HEAD, so the base is the rewritten HEAD.
+	headHash := headCommitOf(t).Hash.String()
 	state, err := store.Load(context.Background(), sessionID)
 	if err != nil {
 		t.Fatal(err)
@@ -320,10 +311,6 @@ func TestAttach_PopulatesBaseCommitFromHEAD(t *testing.T) {
 	if state.BaseCommit != headHash {
 		t.Errorf("BaseCommit = %q, want %q (HEAD); attach did not populate empty BaseCommit",
 			state.BaseCommit, headHash)
-	}
-	if state.AttributionBaseCommit != headHash {
-		t.Errorf("AttributionBaseCommit = %q, want %q (HEAD); attach did not populate empty AttributionBaseCommit",
-			state.AttributionBaseCommit, headHash)
 	}
 }
 
@@ -860,7 +847,7 @@ func TestExtractTranscriptMetadataForAgent_Pi(t *testing.T) {
 		t.Fatalf("generic parser unexpectedly understood native Pi transcript: %+v", generic)
 	}
 
-	got := extractTranscriptMetadataForAgent(piagent.NewPiAgent(), path, data)
+	got := extractTranscriptMetadataForAgent(piagent.NewPiAgent(), path, data, 0)
 	if got.FirstPrompt != "Review this trail" {
 		t.Errorf("FirstPrompt = %q, want %q", got.FirstPrompt, "Review this trail")
 	}
@@ -893,7 +880,7 @@ func TestExtractTranscriptMetadataForAgent_CodexSkipsEnvironmentContext(t *testi
 		t.Fatal(err)
 	}
 
-	got := extractTranscriptMetadataForAgent(codexagent.NewCodexAgent(), path, data)
+	got := extractTranscriptMetadataForAgent(codexagent.NewCodexAgent(), path, data, 0)
 	if got.FirstPrompt != "Review this trail for correctness" {
 		t.Errorf("FirstPrompt = %q, want the genuine user prompt, not the injected environment context", got.FirstPrompt)
 	}
@@ -920,7 +907,7 @@ func TestExtractTranscriptMetadata_CodexOnlyEnvironmentContext(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := extractTranscriptMetadataForAgent(codexagent.NewCodexAgent(), path, data)
+	got := extractTranscriptMetadataForAgent(codexagent.NewCodexAgent(), path, data, 0)
 	if got.FirstPrompt != envContext {
 		t.Errorf("FirstPrompt = %q, want the raw environment context as fallback", got.FirstPrompt)
 	}
@@ -1284,8 +1271,8 @@ func TestAttach_ReviewWithExistingCheckpointErrors(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when review-attaching a session that already has a checkpoint")
 	}
-	if !strings.Contains(err.Error(), "already has checkpoint") {
-		t.Errorf("error should mention 'already has checkpoint'; got: %v", err)
+	if !strings.Contains(err.Error(), "already recorded in checkpoint") {
+		t.Errorf("error should mention 'already recorded in checkpoint'; got: %v", err)
 	}
 }
 
@@ -1838,11 +1825,11 @@ func TestAttachSummaryLine(t *testing.T) {
 	}
 }
 
-// TestAttach_NonInteractivePrintsTrailerForManualPaste: with --force unset and
-// no TTY (the test default), attach cannot prompt to amend, so it prints the
-// Entire-Checkpoint trailer for manual paste instead of failing.
-func TestAttach_NonInteractivePrintsTrailerForManualPaste(t *testing.T) {
+// Without a terminal, attach describes the change and makes none until the
+// caller reruns with --force; with it, the trailer is added to the unpushed HEAD.
+func TestAttach_NonInteractiveNeedsForce(t *testing.T) {
 	setupAttachTestRepo(t)
+	head := headCommitOf(t)
 
 	sessionID := "test-attach-noninteractive"
 	setupClaudeTranscript(t, sessionID, `{"type":"user","message":{"role":"user","content":"hello"},"uuid":"u1"}
@@ -1850,14 +1837,144 @@ func TestAttach_NonInteractivePrintsTrailerForManualPaste(t *testing.T) {
 `)
 
 	var out, errOut bytes.Buffer
-	// Force:false — exercise the non-interactive fallback branch.
-	if err := runAttach(context.Background(), &out, &errOut, sessionID, agent.AgentNameClaudeCode, attachOptions{}); err != nil {
-		t.Fatalf("runAttach failed: %v", err)
+	err := runAttach(context.Background(), &out, &errOut, sessionID, agent.AgentNameClaudeCode, attachOptions{})
+	if err == nil {
+		t.Fatalf("attach without --force and without a terminal succeeded:\n%s", out.String())
+	}
+	if !strings.Contains(errOut.String(), "This rewrites git history") || !strings.Contains(errOut.String(), "rerun with --force") {
+		t.Errorf("expected the rewrite warning and the --force instruction, got:\n%s", errOut.String())
+	}
+	if got := headCommitOf(t); got.Hash != head.Hash {
+		t.Fatalf("HEAD changed without confirmation: %s", got.Hash)
+	}
+	if state, err := loadAttachState(t, sessionID); err != nil || state != nil {
+		t.Fatalf("session state written without confirmation: %+v (%v)", state, err)
 	}
 
-	re := regexp.MustCompile(`Entire-Checkpoint: ` + id.CheckpointPattern)
+	out.Reset()
+	errOut.Reset()
+	if err := runAttach(context.Background(), &out, &errOut, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true}); err != nil {
+		t.Fatalf("runAttach --force: %v\n%s", err, errOut.String())
+	}
+	re := regexp.MustCompile(`Added Entire-Checkpoint: ` + id.CheckpointPattern + ` to commit [0-9a-f]+ \(was ` + head.Hash.String()[:12] + `\)`)
 	if !re.MatchString(out.String()) {
-		t.Errorf("expected Entire-Checkpoint trailer for manual paste, got:\n%s", out.String())
+		t.Errorf("expected HEAD to get the trailer, got:\n%s", out.String())
+	}
+}
+
+// A checkpoint ID that appears in the body of a commit message, rather than in
+// its final trailer block, does not link the commit to that checkpoint: attach
+// must not write the attached session into it.
+func TestAttach_BodyCheckpointLineDoesNotSelectCheckpoint(t *testing.T) {
+	assertAttachIgnoresBodyCheckpoint(t, "Subject\n\nEntire-Checkpoint: a1b2c3d4e5f6\n\nSigned-off-by: Test User <test@example.com>\n")
+}
+
+func TestAttach_IndentedCheckpointLineDoesNotSelectCheckpoint(t *testing.T) {
+	assertAttachIgnoresBodyCheckpoint(t, "Subject\n\n  Entire-Checkpoint: a1b2c3d4e5f6\n")
+}
+
+func TestAttach_CheckpointMentionedInProseDoesNotSelectCheckpoint(t *testing.T) {
+	assertAttachIgnoresBodyCheckpoint(t, "Subject\n\nFollow-up to Entire-Checkpoint: a1b2c3d4e5f6 from last week.\n")
+}
+
+// Git reads "Entire-Checkpoint:<id>" (no space after the colon) as a trailer,
+// so attach joins that checkpoint as it would a canonical trailer.
+func TestAttach_NoSpaceTrailerJoinsCheckpoint(t *testing.T) {
+	assertAttachJoinsNamedCheckpoint(t, "Subject\n\nEntire-Checkpoint:a1b2c3d4e5f6\n")
+}
+
+// commit.cleanup=scissors keeps Entire's explanation below the trailer. Git's
+// trailer grammar skips comment lines, so the trailer still links the commit.
+func TestAttach_TrailerFollowedByCommentLinesJoinsCheckpoint(t *testing.T) {
+	assertAttachJoinsNamedCheckpoint(t, "Subject\n\nEntire-Checkpoint: a1b2c3d4e5f6\n"+
+		"# Remove the Entire-Checkpoint trailer above if you don't want to link this commit to Claude Code session context.\n"+
+		"# The trailer will be added to your next commit based on this branch.\n")
+}
+
+func assertAttachJoinsNamedCheckpoint(t *testing.T, commitMessage string) {
+	t.Helper()
+	setupAttachTestRepo(t)
+	named, state := attachToCommitNamingCheckpoint(t, commitMessage)
+	if state.LastCheckpointID != named {
+		t.Fatalf("attach wrote the session into %s, want the trailer's checkpoint %s", state.LastCheckpointID, named)
+	}
+	if summary := readSummary(t, named.String()); len(summary.Sessions) != 2 {
+		t.Errorf("joined checkpoint sessions: got %d, want 2", len(summary.Sessions))
+	}
+}
+
+// attachToCommitNamingCheckpoint stores a checkpoint for an unrelated session,
+// commits with commitMessage (which names that checkpoint somewhere), and
+// attaches a new session to the commit. Returns the named checkpoint and the
+// attached session's state. Requires setupAttachTestRepo.
+func attachToCommitNamingCheckpoint(t *testing.T, commitMessage string) (id.CheckpointID, *session.State) {
+	t.Helper()
+	ctx := context.Background()
+	repoDir := mustGetwd(t)
+	named := id.MustCheckpointID("a1b2c3d4e5f6")
+
+	repo, err := git.PlainOpen(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cpkg.NewGitStore(repo, cpkg.DefaultV1Refs()).Write(ctx, cpkg.Session{
+		CheckpointID: named,
+		SessionID:    "unrelated-session",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte(`{"type":"user","message":"unrelated"}` + "\n")),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@example.com",
+	}); err != nil {
+		t.Fatalf("seed unrelated checkpoint: %v", err)
+	}
+
+	testutil.WriteFile(t, repoDir, "change.txt", "change")
+	testutil.GitAdd(t, repoDir, "change.txt")
+	testutil.GitCommit(t, repoDir, commitMessage)
+
+	const sessionID = "attach-body-checkpoint"
+	setupClaudeTranscript(t, sessionID, `{"type":"user","message":{"role":"user","content":"hello"},"uuid":"u1"}
+{"type":"assistant","message":{"role":"assistant","content":"hi"},"uuid":"a1"}
+`)
+	var out bytes.Buffer
+	if err := runAttach(ctx, &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true}); err != nil {
+		t.Fatalf("runAttach: %v\n%s", err, out.String())
+	}
+
+	state, err := loadAttachState(t, sessionID)
+	if err != nil || state == nil {
+		t.Fatalf("load attached session state: %+v (%v)", state, err)
+	}
+	return named, state
+}
+
+func assertAttachIgnoresBodyCheckpoint(t *testing.T, commitMessage string) {
+	t.Helper()
+	setupAttachTestRepo(t)
+	named, state := attachToCommitNamingCheckpoint(t, commitMessage)
+	if state.LastCheckpointID == named {
+		t.Fatalf("attach wrote the session into checkpoint %s, which the commit only mentions in its body", named)
+	}
+
+	headMessage := headCommitOf(t).Message
+	if linked := trailers.ParseAllCheckpointsFromFinalTrailerBlock(headMessage, trailers.DefaultCommentPrefix); len(linked) == 0 || linked[0] != state.LastCheckpointID {
+		t.Errorf("HEAD's final trailer block should name the attached checkpoint %s, got %v:\n%s",
+			state.LastCheckpointID, linked, headMessage)
+	}
+
+	if summary := readSummary(t, named.String()); len(summary.Sessions) != 1 {
+		t.Errorf("unrelated checkpoint gained sessions: got %d, want 1", len(summary.Sessions))
+	}
+	repo, err := git.PlainOpen(mustGetwd(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := cpkg.NewGitStore(repo, cpkg.DefaultV1Refs()).ReadSessionContent(context.Background(), named, 0)
+	if err != nil {
+		t.Fatalf("read unrelated checkpoint session: %v", err)
+	}
+	if content.Metadata.SessionID != "unrelated-session" {
+		t.Errorf("unrelated checkpoint session = %q, want unrelated-session", content.Metadata.SessionID)
 	}
 }
 

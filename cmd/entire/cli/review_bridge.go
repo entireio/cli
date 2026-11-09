@@ -8,14 +8,16 @@ package cli
 //   review → claudecode/codex/pi → review
 
 import (
+	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
@@ -33,6 +35,10 @@ const (
 	reviewTrailGranularityLine        = "line"
 	reviewTrailGranularityRange       = "range"
 )
+
+// maxReviewTrailAnchorLines caps the span a review finding may quote from the
+// worktree; a wider location is posted against its file instead.
+const maxReviewTrailAnchorLines = 50
 
 // buildReviewDeps builds the review.Deps struct used by review.NewCommand.
 func buildReviewDeps() cliReview.Deps {
@@ -52,19 +58,15 @@ func buildReviewDeps() cliReview.Deps {
 	}
 }
 
-// postReviewToTrail posts the final review verdict to the current branch's
-// trail as a finding, implementing the review subpackage's "trail" output
+// postReviewToTrail posts the final review report to the current branch's
+// trail as findings, implementing the review subpackage's "trail" output
 // destination. It lives in the cli package because the data API client and
 // auth flow do.
-func postReviewToTrail(ctx context.Context, out io.Writer, profileName, verdict string) error {
-	if strings.TrimSpace(verdict) == "" {
+func postReviewToTrail(ctx context.Context, out io.Writer, profileName string, report cliReview.TrailReport) error {
+	if len(report.Comments) == 0 && strings.TrimSpace(report.Prose) == "" {
 		return errors.New("no review output to post")
 	}
-	inputs := reviewTrailFindingInputs(profileName, verdict)
-	if len(inputs) == 0 {
-		fmt.Fprintln(out, "Nothing to report, so nothing was posted to the trail.")
-		return nil
-	}
+	inputs, leftOut, shortened := capReviewTrailFindingInputs(reviewTrailFindingInputs(profileName, report))
 	return runAuthenticatedTrailAPI(ctx, out, false, "", func(ctx context.Context, client *api.Client, repoID string) error {
 		target, err := resolveTrailReviewTarget(ctx, client, repoID, "", "", "")
 		if err != nil {
@@ -82,6 +84,12 @@ func postReviewToTrail(ctx context.Context, out io.Writer, profileName, verdict 
 		} else {
 			fmt.Fprintf(out, "Posted the review verdict to the trail as %d %s.\n", len(inputs), findingWord)
 		}
+		if leftOut > 0 {
+			fmt.Fprintf(out, "Left out %d of %d findings: a review posts at most %d, most severe first.\n", leftOut, len(inputs)+leftOut, maxPostedReviewFindings)
+		}
+		if shortened > 0 {
+			fmt.Fprintf(out, "Shortened %s longer than %d characters.\n", pluralCount(shortened, "finding", "findings"), maxPostedReviewFindingRunes)
+		}
 		if link := trailReviewWebURL(target); link != "" {
 			fmt.Fprintf(out, "View the trail: %s\n", link)
 		}
@@ -89,14 +97,144 @@ func postReviewToTrail(ctx context.Context, out io.Writer, profileName, verdict 
 	})
 }
 
-// reviewTrailFindingInputs turns a final review verdict into trail findings.
-// It first accepts the runner-style last JSON line format
-// {"summary":"","comments":[...]}; when absent, it falls back to splitting
-// top-level markdown bullets. This keeps trail output structurally correct even
-// when custom judge prompts produce prose.
-func reviewTrailFindingInputs(profileName, verdict string) []api.TrailReviewCommentInput {
-	if inputs, ok := reviewTrailFindingInputsFromJSON(verdict); ok {
-		return inputs
+const (
+	// maxPostedReviewFindings bounds how many findings one review posts. It
+	// stays under the server's per-batch limit, so a capped review posts in
+	// one request.
+	maxPostedReviewFindings = 50
+	// maxPostedReviewFindingRunes bounds a posted finding's body and its
+	// selected text, counted in runes as the server counts body length. The
+	// body stays under the server's body limit, which rejects the whole batch
+	// when one body exceeds it; the server sets no limit on selected text.
+	maxPostedReviewFindingRunes = 16384
+)
+
+func withinPostedFindingCap(text string) bool {
+	return utf8.RuneCountInString(text) <= maxPostedReviewFindingRunes
+}
+
+// capReviewTrailFindingInputs keeps at most maxPostedReviewFindings findings,
+// most severe first, in their original order, and shortens bodies longer than
+// maxPostedReviewFindingRunes. It returns how many findings it left out and
+// how many bodies it shortened.
+func capReviewTrailFindingInputs(inputs []api.TrailReviewCommentInput) (capped []api.TrailReviewCommentInput, leftOut, shortened int) {
+	keep := make([]int, len(inputs))
+	for i := range keep {
+		keep[i] = i
+	}
+	if len(keep) > maxPostedReviewFindings {
+		slices.SortStableFunc(keep, func(a, b int) int {
+			return cmp.Compare(reviewTrailSeverityRank(inputs[a].Severity), reviewTrailSeverityRank(inputs[b].Severity))
+		})
+		keep = keep[:maxPostedReviewFindings]
+		slices.Sort(keep)
+	}
+	capped = make([]api.TrailReviewCommentInput, 0, len(keep))
+	for _, i := range keep {
+		input := inputs[i]
+		if input.Body != nil {
+			if body, ok := shortenReviewTrailFindingBody(*input.Body); ok {
+				input.Body = &body
+				shortened++
+			}
+		}
+		capped = append(capped, input)
+	}
+	return capped, len(inputs) - len(capped), shortened
+}
+
+// reviewTrailSeverityRank orders findings for capping: high, medium, low,
+// then unrated.
+func reviewTrailSeverityRank(severity *string) int {
+	if severity == nil {
+		return 3
+	}
+	switch *severity {
+	case trailReviewSeverityHigh:
+		return 0
+	case trailReviewSeverityMedium:
+		return 1
+	case trailReviewSeverityLow:
+		return 2
+	default:
+		return 3
+	}
+}
+
+// shortenReviewTrailFindingBody cuts an over-long body on a rune boundary so
+// that, with a note saying so, it fits maxPostedReviewFindingRunes. A code
+// fence the cut leaves open is closed first, or the note would render as code.
+func shortenReviewTrailFindingBody(body string) (string, bool) {
+	if withinPostedFindingCap(body) {
+		return body, false
+	}
+	note := fmt.Sprintf("\n\n[Shortened: this finding was longer than %d characters.]", maxPostedReviewFindingRunes)
+	budget := maxPostedReviewFindingRunes - utf8.RuneCountInString(note)
+	kept := runePrefix(body, budget)
+	for {
+		fence := openCodeFence(kept)
+		if fence == "" {
+			break
+		}
+		closer := "\n" + fence
+		// Making room for the closer can drop the opening line itself, so
+		// check again after trimming.
+		if room := budget - utf8.RuneCountInString(closer); utf8.RuneCountInString(kept) > room {
+			kept = runePrefix(kept, room)
+			continue
+		}
+		kept += closer
+		break
+	}
+	return kept + note, true
+}
+
+// runePrefix returns the first n runes of s.
+func runePrefix(s string, n int) string {
+	cut := 0
+	for range n {
+		_, size := utf8.DecodeRuneInString(s[cut:])
+		cut += size
+	}
+	return s[:cut]
+}
+
+// openCodeFence returns the marker of the code fence left open at the end of
+// text, or "" when none is. Fence lines toggle as in
+// splitReviewVerdictFindings.
+func openCodeFence(text string) string {
+	open := ""
+	for _, line := range strings.Split(text, "\n") {
+		if !isCodeFence(line) {
+			continue
+		}
+		if open != "" {
+			open = ""
+			continue
+		}
+		trimmed := strings.TrimSpace(line)
+		open = trimmed[:len(trimmed)-len(strings.TrimLeft(trimmed, trimmed[:1]))]
+	}
+	return open
+}
+
+// reviewTrailFindingInputs turns a trail report into trail findings.
+// Structured comments map directly; prose falls back to splitting top-level
+// markdown bullets, which keeps custom judge prompts that ignore the JSON
+// contract structurally correct. Every line or range location is then
+// restricted to report.Scope by restrictReviewTrailLocation.
+func reviewTrailFindingInputs(profileName string, report cliReview.TrailReport) []api.TrailReviewCommentInput {
+	inputs := reviewTrailFindingInputsFromComments(report.Comments)
+	inputs = append(inputs, reviewTrailFindingInputsFromProse(profileName, report.Prose)...)
+	for i := range inputs {
+		inputs[i].Location = restrictReviewTrailLocation(inputs[i].Location, report.Scope)
+	}
+	return inputs
+}
+
+func reviewTrailFindingInputsFromProse(profileName, verdict string) []api.TrailReviewCommentInput {
+	if strings.TrimSpace(verdict) == "" {
+		return nil
 	}
 	items := splitReviewVerdictFindings(verdict)
 	if len(items) == 0 {
@@ -113,24 +251,37 @@ func reviewTrailFindingInputs(profileName, verdict string) []api.TrailReviewComm
 	return inputs
 }
 
-func reviewTrailFindingInputsFromJSON(verdict string) ([]api.TrailReviewCommentInput, bool) {
-	line := lastNonEmptyLine(verdict)
-	if !strings.HasPrefix(line, "{") || !strings.Contains(line, "\"comments\"") {
-		return nil, false
+// restrictReviewTrailLocation keeps a line or range location only when the
+// scope lets its file be quoted and the span is at most
+// maxReviewTrailAnchorLines. Otherwise a file the scope covers is posted
+// against that file, and any other file against the whole change. The location
+// comes from the model, and posting uploads the worktree text at a line
+// location as its quoted snippet.
+func restrictReviewTrailLocation(loc api.TrailReviewLocationCreateRequest, scope cliReview.TrailScope) api.TrailReviewLocationCreateRequest {
+	if loc.Granularity != reviewTrailGranularityLine && loc.Granularity != reviewTrailGranularityRange {
+		return loc
 	}
-	var payload reviewTrailJSONOutput
-	if err := json.Unmarshal([]byte(line), &payload); err != nil {
-		return nil, false
+	if loc.FilePath == nil || loc.StartLine == nil {
+		return loc
 	}
-	inputs := make([]api.TrailReviewCommentInput, 0, len(payload.Comments))
-	for _, comment := range payload.Comments {
-		body := strings.TrimSpace(comment.Body)
-		if body == "" {
-			continue
-		}
+	filePath := normalizeFindingPath(*loc.FilePath)
+	if !scope.Covers(filePath) {
+		return api.TrailReviewLocationCreateRequest{Granularity: reviewTrailGranularityWholeChange}
+	}
+	tooWide := loc.EndLine != nil && *loc.EndLine-*loc.StartLine >= maxReviewTrailAnchorLines
+	if tooWide || !scope.CanQuote(filePath) {
+		return api.TrailReviewLocationCreateRequest{Granularity: reviewTrailGranularityFile, FilePath: &filePath}
+	}
+	loc.FilePath = &filePath
+	return loc
+}
+
+func reviewTrailFindingInputsFromComments(comments []cliReview.TrailComment) []api.TrailReviewCommentInput {
+	inputs := make([]api.TrailReviewCommentInput, 0, len(comments))
+	for _, comment := range comments {
 		input := api.TrailReviewCommentInput{
 			ClientID: generateTrailReviewClientID(),
-			Body:     stringPtr(body),
+			Body:     stringPtr(strings.TrimSpace(comment.Body)),
 			Location: reviewTrailLocationFromJSON(comment.Location),
 		}
 		if sev := normalizeReviewTrailSeverity(comment.Severity); sev != nil {
@@ -141,7 +292,7 @@ func reviewTrailFindingInputsFromJSON(verdict string) ([]api.TrailReviewCommentI
 		}
 		inputs = append(inputs, input)
 	}
-	return inputs, true
+	return inputs
 }
 
 func reviewTrailFindingInputWithKind(profileName, text, kind string) api.TrailReviewCommentInput {
@@ -156,47 +307,21 @@ func reviewTrailFindingInputWithKind(profileName, text, kind string) api.TrailRe
 	}
 }
 
-type reviewTrailJSONOutput struct {
-	Summary  string                   `json:"summary"`
-	Comments []reviewTrailJSONComment `json:"comments"`
-}
-
-type reviewTrailJSONComment struct {
-	Severity   string                  `json:"severity"`
-	Confidence *float64                `json:"confidence"`
-	Body       string                  `json:"body"`
-	Location   reviewTrailJSONLocation `json:"location"`
-}
-
-type reviewTrailJSONLocation struct {
-	Granularity  string `json:"granularity"`
-	FilePath     string `json:"file_path"`
-	StartLine    int    `json:"start_line"`
-	EndLine      int    `json:"end_line"`
-	SelectedText string `json:"selected_text"`
-}
-
-func reviewTrailLocationFromJSON(loc reviewTrailJSONLocation) api.TrailReviewLocationCreateRequest {
+func reviewTrailLocationFromJSON(loc cliReview.TrailLocation) api.TrailReviewLocationCreateRequest {
 	filePath := strings.TrimSpace(loc.FilePath)
-	withSelectedText := func(req api.TrailReviewLocationCreateRequest) api.TrailReviewLocationCreateRequest {
-		if strings.TrimSpace(loc.SelectedText) != "" {
-			req.SelectedText = stringPtr(loc.SelectedText)
-		}
-		return req
-	}
 	switch strings.ToLower(strings.TrimSpace(loc.Granularity)) {
 	case reviewTrailGranularityLine:
 		if filePath != "" && loc.StartLine > 0 {
-			return withSelectedText(api.TrailReviewLocationCreateRequest{Granularity: reviewTrailGranularityLine, FilePath: stringPtr(filePath), StartLine: &loc.StartLine})
+			return api.TrailReviewLocationCreateRequest{Granularity: reviewTrailGranularityLine, FilePath: stringPtr(filePath), StartLine: &loc.StartLine}
 		}
 	case reviewTrailGranularityRange:
 		if filePath != "" && loc.StartLine > 0 && loc.EndLine > loc.StartLine {
-			return withSelectedText(api.TrailReviewLocationCreateRequest{Granularity: reviewTrailGranularityRange, FilePath: stringPtr(filePath), StartLine: &loc.StartLine, EndLine: &loc.EndLine})
+			return api.TrailReviewLocationCreateRequest{Granularity: reviewTrailGranularityRange, FilePath: stringPtr(filePath), StartLine: &loc.StartLine, EndLine: &loc.EndLine}
 		}
 		if filePath != "" && loc.StartLine > 0 {
 			// Preserve the precise start-line anchor for malformed, missing, or
 			// single-line ranges instead of silently degrading to whole-change.
-			return withSelectedText(api.TrailReviewLocationCreateRequest{Granularity: reviewTrailGranularityLine, FilePath: stringPtr(filePath), StartLine: &loc.StartLine})
+			return api.TrailReviewLocationCreateRequest{Granularity: reviewTrailGranularityLine, FilePath: stringPtr(filePath), StartLine: &loc.StartLine}
 		}
 	case reviewTrailGranularityFile:
 		if filePath != "" {
@@ -216,16 +341,6 @@ func enrichReviewTrailFindingInputFromMarkdown(input *api.TrailReviewCommentInpu
 	if loc, ok := inferReviewTrailLocation(body); ok {
 		input.Location = loc
 	}
-}
-
-func lastNonEmptyLine(s string) string {
-	lines := strings.Split(s, "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		if line := strings.TrimSpace(lines[i]); line != "" {
-			return line
-		}
-	}
-	return ""
 }
 
 var reviewTrailLocationPattern = regexp.MustCompile("(?:^|[\\s(`])([A-Za-z0-9_./-]+\\.[A-Za-z0-9_+-]+):(\\d+)")
@@ -276,35 +391,99 @@ func normalizeReviewTrailSeverity(raw string) *string {
 	}
 }
 
+// splitReviewVerdictFindings splits a prose verdict into its top-level
+// findings. A line holding only a severity ("### High", "**Low:**") or a
+// Markdown heading that is not itself a marked finding, such as the
+// "## <reviewer>" separating combined narratives, ends the current finding
+// and is not one itself. Text under a heading is preamble when a finding
+// follows it and a finding of its own when none does, so a section without
+// list items is not lost. Code blocks always continue the current text, so
+// their "#" or "- " lines neither start nor end a finding.
 func splitReviewVerdictFindings(verdict string) []string {
 	var findings []string
-	var current strings.Builder
-	flush := func() {
-		item := strings.TrimSpace(current.String())
-		current.Reset()
+	var current, section strings.Builder
+	inSection, inFence := false, false
+	flush := func(b *strings.Builder) {
+		item := strings.TrimSpace(b.String())
+		b.Reset()
 		if item != "" {
 			findings = append(findings, item)
 		}
 	}
+	appendLine := func(line string) {
+		target := &current
+		if current.Len() == 0 {
+			if !inSection || (section.Len() == 0 && strings.TrimSpace(line) == "") {
+				return
+			}
+			target = &section
+		}
+		if target.Len() > 0 {
+			target.WriteByte('\n')
+		}
+		target.WriteString(line)
+	}
+	startFinding := func(item string) {
+		flush(&current)
+		section.Reset()
+		current.WriteString(item)
+	}
+	startSection := func() {
+		flush(&current)
+		flush(&section)
+		inSection = true
+	}
 	for _, line := range strings.Split(strings.TrimSpace(verdict), "\n") {
+		if fence := isCodeFence(line); inFence || fence {
+			if fence {
+				inFence = !inFence
+			}
+			appendLine(line)
+			continue
+		}
+		if isSeverityHeading(line) {
+			startSection()
+			continue
+		}
 		if item, ok := topLevelBulletText(line); ok {
-			flush()
-			current.WriteString(item)
+			startFinding(item)
 			continue
 		}
 		if item, ok := topLevelMarkedFindingText(line); ok {
-			flush()
-			current.WriteString(item)
+			startFinding(item)
 			continue
 		}
-		if current.Len() == 0 {
+		if isMarkdownHeading(line) {
+			startSection()
 			continue
 		}
-		current.WriteByte('\n')
-		current.WriteString(line)
+		appendLine(line)
 	}
-	flush()
+	flush(&current)
+	flush(&section)
 	return findings
+}
+
+func isCodeFence(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	return strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~")
+}
+
+// isSeverityHeading reports whether line, unindented, holds only a severity
+// label.
+func isSeverityHeading(line string) bool {
+	if line != strings.TrimLeft(line, " \t") {
+		return false
+	}
+	return normalizeReviewTrailSeverity(strings.TrimLeft(strings.TrimSpace(line), "#> ")) != nil
+}
+
+// isMarkdownHeading reports whether line is an unindented ATX heading:
+// one to six "#" followed by a space or nothing.
+func isMarkdownHeading(line string) bool {
+	rest := strings.TrimLeft(line, "#")
+	level := len(line) - len(rest)
+	return level >= 1 && level <= 6 && (strings.TrimSpace(rest) == "" || strings.HasPrefix(rest, " "))
 }
 
 func topLevelBulletText(line string) (string, bool) {
@@ -313,23 +492,11 @@ func topLevelBulletText(line string) (string, bool) {
 	if leading != 0 {
 		return "", false
 	}
-	trimmed := strings.TrimSpace(trimmedRight)
-	if len(trimmed) < 3 {
+	item, ok := cliReview.ListItemText(strings.TrimSpace(trimmedRight))
+	if !ok || item == "" {
 		return "", false
 	}
-	if strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "* ") || strings.HasPrefix(trimmed, "+ ") {
-		return strings.TrimSpace(trimmed[2:]), true
-	}
-	for i, r := range trimmed {
-		if r >= '0' && r <= '9' {
-			continue
-		}
-		if r == '.' && i > 0 && i+1 < len(trimmed) && trimmed[i+1] == ' ' {
-			return strings.TrimSpace(trimmed[i+2:]), true
-		}
-		return "", false
-	}
-	return "", false
+	return item, true
 }
 
 func topLevelMarkedFindingText(line string) (string, bool) {
@@ -339,45 +506,25 @@ func topLevelMarkedFindingText(line string) (string, bool) {
 		return "", false
 	}
 	trimmed := strings.TrimSpace(trimmedRight)
-	if !startsWithReviewSeverityMarker(trimmed) {
+	if !cliReview.StartsWithSeverityMarker(trimmed) {
 		return "", false
 	}
 	return trimmed, true
 }
 
-func startsWithReviewSeverityMarker(s string) bool {
-	s = strings.TrimSpace(s)
-	s = strings.TrimPrefix(s, "**")
-	s = strings.TrimPrefix(s, "__")
-	s = strings.TrimSpace(s)
-	lower := strings.ToLower(s)
-	for _, marker := range []string{"[critical]", "[high]", "[medium]", "[low]", "[p0]", "[p1]", "[p2]", "[p3]", "[nit]"} {
-		if strings.HasPrefix(lower, marker) {
-			return true
-		}
-	}
-	for _, marker := range []string{"critical", "high", "medium", "low", "p0", "p1", "p2", "p3", "nit"} {
-		if strings.HasPrefix(lower, marker+" —") || strings.HasPrefix(lower, marker+" -") || strings.HasPrefix(lower, marker+":") {
-			return true
-		}
-	}
-	return false
-}
-
-// trailWebURL builds the browser URL for a trail, matching the server's
-// `<base>/<forge>/<owner>/<repo>/trails/<number>/<branch>` layout (the web UI
-// shares the API origin). Returns "" when the target lacks the parts needed for
-// a stable link.
+// trailReviewWebURL builds the browser URL for a trail, matching the server's
+// `<web-origin>/<forge>/<owner>/<repo>/trails/<number>/<branch>` layout.
+// Returns "" when the target lacks the parts needed for a stable link.
 func trailReviewWebURL(target trailReviewTarget) string {
 	if target.Trail.Number <= 0 || target.Host == "" || target.Owner == "" || target.Repo == "" {
 		return ""
 	}
-	base, err := auth.DataBaseURL()
+	base, err := auth.WebBaseURL()
 	if err != nil {
 		return ""
 	}
 	return fmt.Sprintf("%s/%s/%s/%s/trails/%d/%s",
-		strings.TrimRight(base, "/"), target.Host, target.Owner, target.Repo, target.Trail.Number, target.Trail.Branch)
+		base, target.Host, target.Owner, target.Repo, target.Trail.Number, target.Trail.Branch)
 }
 
 // launchableReviewerFor returns the AgentReviewer for agents with a review-runner

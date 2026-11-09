@@ -75,7 +75,7 @@ func TestMaybeRunPlugin_InstallGraphAndRun(t *testing.T) { //nolint:paralleltest
 			withIndexCache(t)
 			indexURL, _ := newIndexRepo(t, `{"version":1,"plugins":[{"name":"graph","repo_url":"https://github.com/entireio/entire-graph"}]}`)
 			t.Setenv(pluginIndexEnvVar, indexURL)
-			interceptVersionCheck(t)
+			interceptPluginNotices(t)
 			argFile := filepath.Join(dir, "args.txt")
 			sourceDir := t.TempDir()
 			source := writePluginBinary(t, sourceDir, "entire-graph", argFile, tc.pluginCode)
@@ -160,7 +160,7 @@ func TestMaybeRunPlugin_GraphInstalledSkipsPrompt(t *testing.T) { //nolint:paral
 	argFile := filepath.Join(dir, "args.txt")
 	writePluginBinary(t, dir, "entire-graph", argFile, 0)
 	t.Setenv("PATH", dir)
-	interceptVersionCheck(t)
+	interceptPluginNotices(t)
 	root := newTestRoot()
 	var stderr bytes.Buffer
 	root.SetErr(&stderr)
@@ -191,7 +191,7 @@ func TestResolvePlugin_OnDemandEligibility(t *testing.T) { //nolint:paralleltest
 // and got "already installed; use --force to replace".
 func TestMaybeRunPlugin_GraphInManagedDirIsRunNotReinstalled(t *testing.T) { //nolint:paralleltest // isolates PATH and managed plugins
 	withIsolatedPluginEnv(t)
-	interceptVersionCheck(t)
+	interceptPluginNotices(t)
 	binDir, err := EnsurePluginBinDir()
 	if err != nil {
 		t.Fatal(err)
@@ -247,7 +247,7 @@ func TestMaybeRunPlugin_GraphInManagedDirIsRunNotReinstalled(t *testing.T) { //n
 // a token that then lands in any log capturing stderr.
 func TestMaybeRunPlugin_AnnouncementNeverEchoesArguments(t *testing.T) { //nolint:paralleltest // isolates PATH and managed plugins
 	withIsolatedPluginEnv(t)
-	interceptVersionCheck(t)
+	interceptPluginNotices(t)
 	binDir, err := EnsurePluginBinDir()
 	if err != nil {
 		t.Fatal(err)
@@ -280,7 +280,7 @@ func TestMaybeRunPlugin_AnnouncementNeverEchoesArguments(t *testing.T) { //nolin
 // not the index release a bare-name reinstall would fetch over the symlink.
 func TestMaybeRunPlugin_BrokenManagedEntryReportsARemedy(t *testing.T) { //nolint:paralleltest // isolates PATH and managed plugins
 	withIsolatedPluginEnv(t)
-	interceptVersionCheck(t)
+	interceptPluginNotices(t)
 	binDir, err := EnsurePluginBinDir()
 	if err != nil {
 		t.Fatal(err)
@@ -337,7 +337,7 @@ func TestMaybeRunPlugin_BrokenManagedEntryReportsARemedy(t *testing.T) { //nolin
 // repair is the recorded source with its options, not a bare name.
 func TestMaybeRunPlugin_EmptyManagedEntryOnPathReportsARemedy(t *testing.T) { //nolint:paralleltest // isolates PATH and managed plugins
 	withIsolatedPluginEnv(t)
-	interceptVersionCheck(t)
+	interceptPluginNotices(t)
 	binDir, err := EnsurePluginBinDir()
 	if err != nil {
 		t.Fatal(err)
@@ -524,16 +524,17 @@ func TestMaybeRunPlugin_MissingInvestigateNonInteractive(t *testing.T) { //nolin
 
 // TestOffersOnDemandInstall_IsNarrow pins that the offer is not extended to
 // arbitrary names. The prompt defaults to Yes and ends in a downloaded binary
-// linked onto $PATH, so it belongs only to names this CLI previously answered
-// itself.
+// linked onto $PATH, so it belongs only to former built-ins and to commands
+// Entire's docs or generated agent guides tell people to run as
+// `entire <name>`.
 func TestOffersOnDemandInstall_IsNarrow(t *testing.T) {
 	t.Parallel()
-	for _, name := range []string{"graph", "investigate"} {
+	for _, name := range []string{"graph", "brain", "investigate"} {
 		if !offersOnDemandInstall(name) {
 			t.Errorf("offersOnDemandInstall(%q) = false, want true", name)
 		}
 	}
-	for _, name := range []string{"run", "upgrade", "brain", "ci", "definitely-not-a-plugin", ""} {
+	for _, name := range []string{"run", "upgrade", "ci", "definitely-not-a-plugin", ""} {
 		if offersOnDemandInstall(name) {
 			t.Errorf("offersOnDemandInstall(%q) = true, want false", name)
 		}

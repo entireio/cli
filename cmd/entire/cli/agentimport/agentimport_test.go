@@ -2,6 +2,7 @@ package agentimport
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -124,10 +125,24 @@ func importedCheckpointID(t *testing.T, stores *cp.Stores, sessionID string, tur
 	return cid
 }
 
-func writeFixtureSession(t *testing.T, dir, name string) {
+// fixtureCwdJSON returns cwd as a JSON string literal, for splicing a
+// "cwd" field into hand-written transcript fixtures. json.Marshal escapes
+// Windows backslashes that naive concatenation would leave invalid.
+func fixtureCwdJSON(t *testing.T, cwd string) string {
+	t.Helper()
+	b, err := json.Marshal(cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// writeFixtureSession writes a two-turn Claude transcript recording cwd, so
+// Discover attributes it to the repository at (or containing) cwd.
+func writeFixtureSession(t *testing.T, dir, name, cwd string) {
 	t.Helper()
 	content := strings.Join([]string{
-		`{"type":"user","uuid":"u1","timestamp":"2026-06-20T00:00:00Z","message":{"role":"user","content":"first"}}`,
+		`{"type":"user","uuid":"u1","cwd":` + fixtureCwdJSON(t, cwd) + `,"timestamp":"2026-06-20T00:00:00Z","message":{"role":"user","content":"first"}}`,
 		`{"type":"assistant","uuid":"a1","message":{"id":"m1","model":"claude-x","content":[{"type":"text","text":"ok"}],"usage":{"output_tokens":5}}}`,
 		`{"type":"user","uuid":"u2","timestamp":"2026-06-20T00:01:00Z","message":{"role":"user","content":"second"}}`,
 	}, "\n") + "\n"
@@ -140,7 +155,7 @@ func TestRun_ImportsAndIsIdempotent(t *testing.T) {
 	t.Parallel()
 	repo, repoDir := initRepoWithCommit(t)
 	claudeDir := t.TempDir()
-	writeFixtureSession(t, claudeDir, "sess1.jsonl")
+	writeFixtureSession(t, claudeDir, "sess1.jsonl", repoDir)
 
 	opts := Options{LinkCommitSHA: repoHeadSHA(t, repo), RepoRoot: repoDir, OverridePath: claudeDir, Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC)}
 	imp := claudeImporter{}
@@ -220,7 +235,7 @@ func TestRun_StampsLinkCommitSHA(t *testing.T) {
 	}
 
 	claudeDirWithSHA := t.TempDir()
-	writeFixtureSession(t, claudeDirWithSHA, "sess-with-sha.jsonl")
+	writeFixtureSession(t, claudeDirWithSHA, "sess-with-sha.jsonl", repoDir)
 	res, err := Run(context.Background(), repo, claudeImporter{}, Options{
 		RepoRoot: repoDir, OverridePath: claudeDirWithSHA,
 		Now:           time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
@@ -282,7 +297,7 @@ func TestRun_AnchorsTurnToRecordedCommit(t *testing.T) {
 
 	claudeDir := t.TempDir()
 	content := strings.Join([]string{
-		`{"type":"user","uuid":"u1","timestamp":"2026-06-20T00:00:00Z","message":{"role":"user","content":"first"}}`,
+		`{"type":"user","uuid":"u1","cwd":` + fixtureCwdJSON(t, repoDir) + `,"timestamp":"2026-06-20T00:00:00Z","message":{"role":"user","content":"first"}}`,
 		`{"type":"assistant","uuid":"a1","message":{"id":"m1","model":"claude-x","content":[{"type":"text","text":"ok"}],"usage":{"output_tokens":5}}}`,
 		`{"type":"user","uuid":"tr1","toolUseResult":{"gitOperation":{"commit":{"sha":"` + firstSHA[:7] + `","kind":"committed"}}}}`,
 		`{"type":"user","uuid":"u2","timestamp":"2026-06-20T00:01:00Z","message":{"role":"user","content":"second"}}`,
@@ -342,7 +357,7 @@ func TestRun_AppliesConfiguredCustomRedaction(t *testing.T) {
 	repo, repoDir := initRepoWithCommit(t)
 	claudeDir := t.TempDir()
 	content := strings.Join([]string{
-		`{"type":"user","uuid":"u1","timestamp":"2026-06-20T00:00:00Z","message":{"role":"user","content":"use ` + secret + ` please"}}`,
+		`{"type":"user","uuid":"u1","cwd":` + fixtureCwdJSON(t, repoDir) + `,"timestamp":"2026-06-20T00:00:00Z","message":{"role":"user","content":"use ` + secret + ` please"}}`,
 		`{"type":"assistant","uuid":"a1","message":{"id":"m1","model":"claude-x","content":[{"type":"text","text":"ok"}],"usage":{"output_tokens":5}}}`,
 	}, "\n") + "\n"
 	if err := os.WriteFile(filepath.Join(claudeDir, "sess1.jsonl"), []byte(content), 0o644); err != nil {
@@ -437,7 +452,7 @@ func TestRun_StampsImporterGitAuthorOnCheckpointCommit(t *testing.T) {
 	t.Parallel()
 	repo, repoDir := initRepoWithCommit(t)
 	claudeDir := t.TempDir()
-	writeFixtureSession(t, claudeDir, "sess-author.jsonl")
+	writeFixtureSession(t, claudeDir, "sess-author.jsonl", repoDir)
 
 	res, err := Run(context.Background(), repo, claudeImporter{}, Options{
 		LinkCommitSHA: repoHeadSHA(t, repo),
@@ -519,7 +534,7 @@ func TestRun_UnconfiguredGitIdentityFallsBackToDefaults(t *testing.T) {
 	}
 
 	claudeDir := t.TempDir()
-	writeFixtureSession(t, claudeDir, "sess-noauthor.jsonl")
+	writeFixtureSession(t, claudeDir, "sess-noauthor.jsonl", repoDir)
 
 	res, err := Run(context.Background(), repo, claudeImporter{}, Options{
 		LinkCommitSHA: repoHeadSHA(t, repo),
@@ -555,7 +570,7 @@ func TestRun_DryRunWritesNothing(t *testing.T) {
 	t.Parallel()
 	repo, repoDir := initRepoWithCommit(t)
 	claudeDir := t.TempDir()
-	writeFixtureSession(t, claudeDir, "sess1.jsonl")
+	writeFixtureSession(t, claudeDir, "sess1.jsonl", repoDir)
 
 	res, err := Run(context.Background(), repo, claudeImporter{}, Options{
 		LinkCommitSHA: repoHeadSHA(t, repo),
@@ -670,8 +685,8 @@ func TestRun_StopsOnContextCancellation(t *testing.T) {
 	t.Parallel()
 	repo, repoDir := initRepoWithCommit(t)
 	claudeDir := t.TempDir()
-	writeFixtureSession(t, claudeDir, "sess1.jsonl")
-	writeFixtureSession(t, claudeDir, "sess2.jsonl")
+	writeFixtureSession(t, claudeDir, "sess1.jsonl", repoDir)
+	writeFixtureSession(t, claudeDir, "sess2.jsonl", repoDir)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -713,8 +728,8 @@ func TestRun_CancellationStopsRefsBackedImport(t *testing.T) {
 
 	repo, repoDir := initRepoWithCommit(t)
 	claudeDir := t.TempDir()
-	writeFixtureSession(t, claudeDir, "sess1.jsonl")
-	writeFixtureSession(t, claudeDir, "sess2.jsonl")
+	writeFixtureSession(t, claudeDir, "sess1.jsonl", repoDir)
+	writeFixtureSession(t, claudeDir, "sess2.jsonl", repoDir)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -758,7 +773,7 @@ func TestRun_GitRefsPrimaryDerivesULIDs(t *testing.T) {
 
 	repo, repoDir := initRepoWithCommit(t)
 	claudeDir := t.TempDir()
-	writeFixtureSession(t, claudeDir, "sess-ulid.jsonl")
+	writeFixtureSession(t, claudeDir, "sess-ulid.jsonl", repoDir)
 	opts := Options{
 		LinkCommitSHA: repoHeadSHA(t, repo),
 		RepoRoot:      repoDir,
@@ -842,7 +857,7 @@ func TestRun_SkipsTurnsImportedUnderOtherPrimary(t *testing.T) {
 
 			repo, repoDir := initRepoWithCommit(t)
 			claudeDir := t.TempDir()
-			writeFixtureSession(t, claudeDir, "sess-switch.jsonl")
+			writeFixtureSession(t, claudeDir, "sess-switch.jsonl", repoDir)
 			opts := Options{
 				LinkCommitSHA: repoHeadSHA(t, repo),
 				RepoRoot:      repoDir,
@@ -952,7 +967,7 @@ func TestRun_SkipsTurnsImportedOnlyOnRemote(t *testing.T) {
 
 	repo, repoDir := initRepoWithCommit(t)
 	claudeDir := t.TempDir()
-	writeFixtureSession(t, claudeDir, "sess-remote.jsonl")
+	writeFixtureSession(t, claudeDir, "sess-remote.jsonl", repoDir)
 	var remote []plumbing.ReferenceName
 	for _, uuid := range []string{"u1", "u2"} {
 		ref, err := cp.RefName(DeriveCheckpointID("sess-remote", uuid))

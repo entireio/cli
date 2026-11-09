@@ -14,7 +14,7 @@ import (
 // HookConfigFile is an agent's hook-configuration file inside the worktree —
 // .claude/settings.json, .cursor/hooks.json,
 // .github/hooks/entire.json, .factory/settings.json, .codex/hooks.json,
-// .opencode/plugins/entire.ts, .pi/extensions/entire/index.ts.
+// .opencode/plugin/entire.ts, .pi/extensions/entire/index.ts.
 //
 // Eight agents each carried the same four lines: filepath.Join a repo root with
 // a fixed relative path, then os.ReadFile / os.MkdirAll / os.WriteFile /
@@ -75,7 +75,7 @@ type HookConfigFile struct {
 // It exists for the callers that must reason about that path WITHOUT doing I/O
 // on it. Doctor's symlink diagnosis is the first: the directories BETWEEN an
 // agent's own directory and its config file — `.pi/extensions`,
-// `.pi/extensions/entire`, `.opencode/plugins` — are created by Entire and
+// `.pi/extensions/entire`, `.opencode/plugin` — are created by Entire and
 // appear in no other registry, because ProtectedDirs names what the AGENT owns
 // (`.pi`, `.opencode`) and stops there. Deriving them from a hand-kept list in
 // the caller is how two of them came to be unchecked in the first place.
@@ -88,6 +88,13 @@ type HookConfigLocator interface {
 	// HookConfigRelPath returns the config file's path relative to the worktree
 	// root, slash-separated, exactly as passed to OpenHookConfig.
 	HookConfigRelPath() string
+}
+
+// AsHookConfigLocator returns the agent as HookConfigLocator if it implements
+// the interface. External agents declare hooks in their manifest instead, so
+// there is no DeclaredCaps gate.
+func AsHookConfigLocator(ag Agent) (HookConfigLocator, bool) {
+	return builtinCapability[HookConfigLocator](ag)
 }
 
 // OpenHookConfig returns the hook-config file at relPath inside worktreeRoot.
@@ -200,9 +207,9 @@ func (f *HookConfigFile) Remove() error {
 //
 // A blocklist of the agents' own directories was the obvious alternative and is
 // not sound. AllProtectedDirs() holds `.opencode` and `.github/hooks` but not
-// `.opencode/plugins`, `.pi/extensions` or `.github`, so deriving the target
+// `.opencode/plugin`, `.pi/extensions` or `.github`, so deriving the target
 // with path.Dir and checking it against that list still permits
-// RemoveAll(".opencode/plugins") — the user's other OpenCode plugins — for any
+// RemoveAll(".opencode/plugin") — the user's other OpenCode plugins — for any
 // future agent whose config sits one level deeper than its root. Every agent
 // root and every shared intermediate fails the name test instead, and pi's
 // `.pi/extensions/entire` passes it because Entire is what created it.

@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
@@ -29,9 +31,7 @@ type ClusterCache map[string]*ClusterEntry
 
 // ClusterEntry holds cached data for a single cluster.
 type ClusterEntry struct {
-	Nodes          []string              `json:"nodes"`
-	NodesExpiresAt time.Time             `json:"nodes_expires_at"`
-	Repos          map[string]*RepoEntry `json:"repos,omitempty"`
+	Repos map[string]*RepoEntry `json:"repos,omitempty"`
 }
 
 // RepoEntry caches the hosting nodes for a single repository.
@@ -62,7 +62,12 @@ func readCacheNoLock(f cacheFile) (ClusterCache, error) {
 	return cache, err
 }
 
+// writeCacheNoLock drops expired entries before writing. Nothing reads an
+// expired entry, and without pruning the file keeps every repository the
+// helper has ever seen, so each write — and the lock it holds — would cost
+// time proportional to that history.
 func writeCacheNoLock(f cacheFile, cache ClusterCache) error {
+	cache.pruneExpired(time.Now())
 	return writeCacheFile(f, cache)
 }
 
@@ -228,27 +233,6 @@ func writeCacheBytesAtomic(f cacheFile, data []byte) error {
 	return nil
 }
 
-// GetClusterNodes returns the cached cluster nodes. The second return value
-// indicates whether the cache entry is fresh (not expired).
-func (c ClusterCache) GetClusterNodes(cluster string) ([]string, bool) {
-	entry := c[cluster]
-	if entry == nil || len(entry.Nodes) == 0 {
-		return nil, false
-	}
-	return entry.Nodes, time.Now().Before(entry.NodesExpiresAt)
-}
-
-// SetClusterNodes stores cluster nodes with the given TTL.
-func (c ClusterCache) SetClusterNodes(cluster string, nodes []string, ttl time.Duration) {
-	entry := c[cluster]
-	if entry == nil {
-		entry = &ClusterEntry{}
-		c[cluster] = entry
-	}
-	entry.Nodes = nodes
-	entry.NodesExpiresAt = time.Now().Add(ttl)
-}
-
 // GetRepoNodes returns cached hosting nodes for a repo. The second return
 // value indicates freshness.
 func (c ClusterCache) GetRepoNodes(cluster, repoPath string) ([]string, bool) {
@@ -279,14 +263,42 @@ func (c ClusterCache) SetRepoNodes(cluster, repoPath string, nodes []string, ttl
 	}
 }
 
+// HasRepoNodes reports whether the cache already holds nodes for the repo,
+// in any order, with at least minRemaining left before the entry expires.
+// Callers use it to skip rewriting an entry that is already current.
+func (c ClusterCache) HasRepoNodes(cluster, repoPath string, nodes []string, minRemaining time.Duration) bool {
+	entry := c[cluster]
+	if entry == nil {
+		return false
+	}
+	repo := entry.Repos[repoPath]
+	if repo == nil || time.Until(repo.ExpiresAt) < minRemaining {
+		return false
+	}
+	cached, want := slices.Clone(repo.Nodes), slices.Clone(nodes)
+	slices.Sort(cached)
+	slices.Sort(want)
+	return slices.Equal(cached, want)
+}
+
+// pruneExpired removes repo entries that expired before now, and clusters
+// left with no repos.
+func (c ClusterCache) pruneExpired(now time.Time) {
+	for cluster, entry := range c {
+		if entry != nil {
+			maps.DeleteFunc(entry.Repos, func(_ string, repo *RepoEntry) bool {
+				return repo == nil || !now.Before(repo.ExpiresAt)
+			})
+		}
+		if entry == nil || len(entry.Repos) == 0 {
+			delete(c, cluster)
+		}
+	}
+}
+
 // InvalidateRepo removes the cached repo entry.
 func (c ClusterCache) InvalidateRepo(cluster, repoPath string) {
 	if entry := c[cluster]; entry != nil && entry.Repos != nil {
 		delete(entry.Repos, repoPath)
 	}
-}
-
-// InvalidateCluster removes all cached data for a cluster.
-func (c ClusterCache) InvalidateCluster(cluster string) {
-	delete(c, cluster)
 }

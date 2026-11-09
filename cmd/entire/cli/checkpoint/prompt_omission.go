@@ -32,8 +32,7 @@ const TaskTranscriptReasonOmittedBySettings = "transcript omitted by settings"
 //
 // Checkpoint metadata, attribution, files touched, token usage, and metrics are
 // kept. Reads are untouched, so checkpoints written before the setting was
-// enabled stay readable. Local shadow-branch (ephemeral) capture is not
-// affected; it never leaves the machine.
+// enabled stay readable. Local session capture is not affected.
 type promptOmittingStore struct {
 	PersistentStore
 }
@@ -88,6 +87,9 @@ func omitPromptContent(req WriteRequest) (WriteRequest, bool) {
 		opts.Prompts = nil
 		opts.SkillEvents = omitFromSkillEvents(opts.SkillEvents)
 		return SessionTranscript(opts), true
+	case Tasks:
+		r.Tasks = omitFromTasks(r.Tasks)
+		return r, true
 	case SessionSummary:
 		return nil, false
 	default:
@@ -104,17 +106,22 @@ func omitFromWriteOptions(opts WriteOptions) WriteOptions {
 	opts.ReviewPrompt = ""
 	opts.InvestigateTopic = ""
 	opts.SkillEvents = omitFromSkillEvents(opts.SkillEvents)
-	if len(opts.Tasks) > 0 {
-		tasks := make([]TaskPayload, len(opts.Tasks))
-		for i, task := range opts.Tasks {
-			task.Transcript = redact.RedactedBytes{}
-			task.TaskDescription = ""
-			task.TranscriptUnavailableReason = TaskTranscriptReasonOmittedBySettings
-			tasks[i] = task
-		}
-		opts.Tasks = tasks
-	}
+	opts.Tasks = omitFromTasks(opts.Tasks)
 	return opts
+}
+
+func omitFromTasks(tasks []TaskPayload) []TaskPayload {
+	if len(tasks) == 0 {
+		return tasks
+	}
+	out := make([]TaskPayload, len(tasks))
+	for i, task := range tasks {
+		task.Transcript = redact.RedactedBytes{}
+		task.TaskDescription = ""
+		task.TranscriptUnavailableReason = TaskTranscriptReasonOmittedBySettings
+		out[i] = task
+	}
+	return out
 }
 
 func omitFromSkillEvents(events []types.SkillEvent) []types.SkillEvent {

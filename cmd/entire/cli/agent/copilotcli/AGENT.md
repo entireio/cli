@@ -133,7 +133,6 @@ The `TranscriptAnalyzer` interface is implemented for Copilot CLI, providing:
 - `GetTranscriptPosition` — counts JSONL lines (lightweight, no JSON parsing)
 - `ExtractModifiedFilesFromOffset` — collects `filePaths` from `tool.execution_complete` events after a given line offset
 - `ExtractPrompts` — collects `content` from `user.message` events
-- `ExtractSummary` — returns the `content` of the last `assistant.message` event
 
 ## Session State Directory
 

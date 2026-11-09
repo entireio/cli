@@ -128,7 +128,7 @@ func printTrailChecks(w io.Writer, styles statusStyles, label func(string) strin
 	var failed []api.TrailCheckRun
 	for _, run := range checks.Runs {
 		switch {
-		case run.Status != "completed":
+		case run.Status != statusCompleted:
 			running++
 		case run.Conclusion != nil && trailFailedCheckConclusions[*run.Conclusion]:
 			failed = append(failed, run)

@@ -25,7 +25,9 @@ func TestNormalizeReviewTargetSelector(t *testing.T) {
 	}{
 		{name: "branch", raw: "feature/review-me", want: "feature/review-me"},
 		{name: "trail id", raw: "01JABCDEF", want: "01JABCDEF"},
-		{name: "trail URL number", raw: "https://entire.io/gh/entireio/cli/trails/604/review-target", want: "604", wantURL: true},
+		{name: "trail URL number", raw: "https://entire.com/gh/entireio/cli/trails/604/review-target", want: "604", wantURL: true},
+		{name: "legacy entire.io trail URL", raw: "https://entire.io/gh/entireio/cli/trails/604/review-target", want: "604", wantURL: true},
+		{name: "lookalike host", raw: "https://notentire.com/gh/entireio/cli/trails/7", wantURL: true, wantErr: true},
 		{name: "trail URL id", raw: "https://app.entire.io/gh/entireio/cli/trails/01JABCDEF", want: "01JABCDEF", wantURL: true},
 		{name: "wrong repo", raw: "https://entire.io/gh/acme/other/trails/7/topic", wantURL: true, wantErr: true},
 		{name: "non Entire URL", raw: "https://example.com/gh/entireio/cli/trails/7", wantURL: true, wantErr: true},

@@ -4,16 +4,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
+	"github.com/entireio/cli/internal/entireclient/userdirs"
 	"github.com/spf13/cobra"
 )
 
@@ -71,6 +74,12 @@ func TestIsNightly(t *testing.T) {
 		{"1.0.0-rc1", false},
 		{"1.0.0-dev-xxx", false},
 		{"dev", false},
+		// Near misses the old substring test accepted. install.sh and the
+		// GitHub release scan reject all three, so accepting them here made
+		// the CLI announce updates the installer would not install.
+		{"0.5.3-nightly", false},
+		{"0.5.3-prenightly", false},
+		{"0.5.3-rc.nightly.1", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.version, func(t *testing.T) {
@@ -112,6 +121,9 @@ func TestIsDevBuild(t *testing.T) {
 	}
 }
 
+// testStableVersion is the stable tag reused across these tests.
+const testStableVersion = "v1.2.3"
+
 func TestFetchLatestNightlyVersion(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		releases := []GitHubRelease{
@@ -129,7 +141,7 @@ func TestFetchLatestNightlyVersion(t *testing.T) {
 	githubReleasesURL = server.URL
 	t.Cleanup(func() { githubReleasesURL = original })
 
-	version, err := fetchLatestNightlyVersion(context.Background())
+	version, err := fetchLatestNightlyVersion(context.Background(), http.DefaultClient)
 	if err != nil {
 		t.Fatalf("fetchLatestNightlyVersion() error = %v", err)
 	}
@@ -153,7 +165,7 @@ func TestFetchLatestNightlyVersion_NoNightlies(t *testing.T) {
 	githubReleasesURL = server.URL
 	t.Cleanup(func() { githubReleasesURL = original })
 
-	_, err := fetchLatestNightlyVersion(context.Background())
+	_, err := fetchLatestNightlyVersion(context.Background(), http.DefaultClient)
 	if err == nil {
 		t.Fatal("fetchLatestNightlyVersion() expected error when no nightlies, got nil")
 	}
@@ -253,7 +265,7 @@ func TestFetchLatestVersion(t *testing.T) {
 		}
 
 		release := GitHubRelease{
-			TagName:    "v1.2.3",
+			TagName:    testStableVersion,
 			Prerelease: false,
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -266,12 +278,12 @@ func TestFetchLatestVersion(t *testing.T) {
 	githubAPIURL = server.URL
 	t.Cleanup(func() { githubAPIURL = original })
 
-	version, err := fetchLatestVersion(context.Background())
+	version, err := fetchLatestVersion(context.Background(), http.DefaultClient)
 	if err != nil {
-		t.Fatalf("fetchLatestVersion(context.Background()) error = %v", err)
+		t.Fatalf("fetchLatestVersion() error = %v", err)
 	}
-	if version != "v1.2.3" {
-		t.Errorf("fetchLatestVersion(context.Background()) = %q, want v1.2.3", version)
+	if version != testStableVersion {
+		t.Errorf("fetchLatestVersion() = %q, want v1.2.3", version)
 	}
 }
 
@@ -291,9 +303,9 @@ func TestFetchLatestVersionPrerelease(t *testing.T) {
 	githubAPIURL = server.URL
 	t.Cleanup(func() { githubAPIURL = original })
 
-	_, err := fetchLatestVersion(context.Background())
+	_, err := fetchLatestVersion(context.Background(), http.DefaultClient)
 	if err == nil {
-		t.Fatal("fetchLatestVersion(context.Background()) expected error for prerelease, got nil")
+		t.Fatal("fetchLatestVersion() expected error for prerelease, got nil")
 	}
 }
 
@@ -307,9 +319,9 @@ func TestFetchLatestVersionServerError(t *testing.T) {
 	githubAPIURL = server.URL
 	t.Cleanup(func() { githubAPIURL = original })
 
-	_, err := fetchLatestVersion(context.Background())
+	_, err := fetchLatestVersion(context.Background(), http.DefaultClient)
 	if err == nil {
-		t.Fatal("fetchLatestVersion(context.Background()) expected error for 500 response, got nil")
+		t.Fatal("fetchLatestVersion() expected error for 500 response, got nil")
 	}
 }
 
@@ -320,7 +332,7 @@ func TestParseGitHubRelease(t *testing.T) {
 		want    string
 		wantErr bool
 	}{
-		{"valid release", `{"tag_name": "v1.2.3", "prerelease": false}`, "v1.2.3", false},
+		{"valid release", `{"tag_name": "v1.2.3", "prerelease": false}`, testStableVersion, false},
 		{"prerelease", `{"tag_name": "v2.0.0-rc1", "prerelease": true}`, "", true},
 		{"empty tag", `{"tag_name": "", "prerelease": false}`, "", true},
 		{"invalid json", `not json`, "", true},
@@ -400,6 +412,12 @@ func setupCheckAndNotifyTest(t *testing.T, serverURL string) (*cobra.Command, *b
 	t.Helper()
 
 	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	t.Setenv(envKillSwitch, "")
+
+	// These tests exercise the GitHub origin specifically. Without this the
+	// chain would try the real install.entire.com first, putting a live network call
+	// in a unit test.
+	useGitHubOriginOnly(t)
 
 	origURL := githubAPIURL
 	githubAPIURL = serverURL
@@ -410,6 +428,27 @@ func setupCheckAndNotifyTest(t *testing.T, serverURL string) (*cobra.Command, *b
 	cmd.SetOut(&buf)
 
 	return cmd, &buf
+}
+
+// useGitHubOriginOnly narrows the origin chain to the GitHub candidate for
+// tests that stub githubAPIURL / githubReleasesURL, so nothing reaches the
+// real release origin.
+func useGitHubOriginOnly(t *testing.T) {
+	t.Helper()
+	orig := versionOrigins
+	versionOrigins = func() []versionOrigin {
+		return []versionOrigin{{name: "api.github.com", fetch: fetchGitHubVersion}}
+	}
+	t.Cleanup(func() { versionOrigins = orig })
+}
+
+// useChannelOrigin points the release-origin candidate at a local server and
+// keeps GitHub in the chain behind it, which is the production ordering.
+func useChannelOrigin(t *testing.T, baseURL string) {
+	t.Helper()
+	orig := channelBaseURL
+	channelBaseURL = baseURL
+	t.Cleanup(func() { channelBaseURL = orig })
 }
 
 // newVersionServer returns an httptest.Server that responds with the given version.
@@ -468,6 +507,155 @@ func TestCheckAndNotify_SkipsPseudoVersion(t *testing.T) {
 
 	if buf.Len() != 0 {
 		t.Errorf("expected no output for pseudo-version build, got %q", buf.String())
+	}
+}
+
+// newCountingServer serves version and counts requests.
+func newCountingServer(t *testing.T, version string) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		//nolint:errcheck // test helper
+		json.NewEncoder(w).Encode(GitHubRelease{TagName: version})
+	}))
+	t.Cleanup(server.Close)
+	return server, &hits
+}
+
+func TestCheckAndNotify_NixStoreBinaryTellsOncePerVersion(t *testing.T) {
+	server, hits := newCountingServer(t, "v9.9.9")
+	cmd, buf := setupCheckAndNotifyTest(t, server.URL)
+	f := newAutoUpdateFixture(t)
+	setExecutablePath(t, "/nix/store/abc123-entire-1.0.0/bin/entire")
+
+	CheckAndNotify(context.Background(), cmd.OutOrStdout(), "1.0.0")
+
+	out := buf.String()
+	for _, want := range []string{"v9.9.9", "Nix manages this install"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output %q missing %q", out, want)
+		}
+	}
+	if strings.Contains(out, "To update, run") || strings.Contains(out, "curl") {
+		t.Errorf("output %q names a non-Nix upgrade command", out)
+	}
+	if f.installCalls != 0 || f.chooseCalls != 0 {
+		t.Errorf("installer calls = %d, prompts = %d, want 0 and 0", f.installCalls, f.chooseCalls)
+	}
+
+	// The next daily check stays quiet.
+	seedVersionCache(t, &VersionCache{
+		LastCheckTime:  time.Now().Add(-checkInterval - time.Minute),
+		SkippedVersion: mustLoadCache(t).SkippedVersion,
+	})
+	buf.Reset()
+	CheckAndNotify(context.Background(), cmd.OutOrStdout(), "1.0.0")
+	if buf.Len() != 0 {
+		t.Errorf("second check printed %q, want nothing", buf.String())
+	}
+	if n := hits.Load(); n != 2 {
+		t.Errorf("version server hit %d times, want 2", n)
+	}
+}
+
+func TestCheckAndNotify_OffSwitch(t *testing.T) {
+	for _, tc := range []struct {
+		name, env, config string
+	}{
+		{name: "env", env: "1"},
+		{name: "config", config: `{"no_auto_update": true}`},
+		{name: "bad config", config: `{"no_auto_update": "yes"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server, hits := newCountingServer(t, "v9.9.9")
+			cmd, buf := setupCheckAndNotifyTest(t, server.URL)
+			f := newAutoUpdateFixture(t)
+			setExecutablePath(t, brewCaskPath)
+			t.Setenv(envKillSwitch, tc.env)
+			if tc.config != "" {
+				writeUserConfig(t, tc.config)
+			}
+
+			CheckAndNotify(context.Background(), cmd.OutOrStdout(), "1.0.0")
+
+			if buf.Len() != 0 {
+				t.Errorf("expected no output, got %q", buf.String())
+			}
+			if n := hits.Load(); n != 0 {
+				t.Errorf("version server hit %d times, want 0", n)
+			}
+			if f.installCalls != 0 || f.chooseCalls != 0 {
+				t.Errorf("installer calls = %d, prompts = %d, want 0 and 0", f.installCalls, f.chooseCalls)
+			}
+		})
+	}
+}
+
+func TestCheckAndNotify_OffValuesStillCheck(t *testing.T) {
+	for _, tc := range []struct {
+		name, env, config string
+	}{
+		{name: "config false", config: `{"no_auto_update": false}`},
+		{name: "env 0", env: "0"},
+		{name: "env false", env: "false"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server, hits := newCountingServer(t, "v9.9.9")
+			cmd, buf := setupCheckAndNotifyTest(t, server.URL)
+			t.Setenv(envKillSwitch, tc.env)
+			if tc.config != "" {
+				writeUserConfig(t, tc.config)
+			}
+
+			CheckAndNotify(context.Background(), cmd.OutOrStdout(), "1.0.0")
+
+			if !strings.Contains(buf.String(), "v9.9.9") {
+				t.Errorf("expected a notice, got %q", buf.String())
+			}
+			if n := hits.Load(); n != 1 {
+				t.Errorf("version server hit %d times, want 1", n)
+			}
+		})
+	}
+}
+
+// writeUserConfig writes config.json into ENTIRE_CONFIG_DIR.
+func writeUserConfig(t *testing.T, config string) {
+	t.Helper()
+	path := filepath.Join(os.Getenv("ENTIRE_CONFIG_DIR"), "config.json")
+	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// mustLoadCache reads the version cache.
+func mustLoadCache(t *testing.T) *VersionCache {
+	t.Helper()
+	cache, err := loadCache()
+	if err != nil {
+		t.Fatalf("loadCache() error = %v", err)
+	}
+	return cache
+}
+
+func TestIsNixStoreBinary(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{"/nix/store/abc123-entire-1.0.0/bin/entire", true},
+		{"/usr/local/bin/entire", false},
+		{"/home/user/nix/store/entire", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			setExecutablePath(t, tt.path)
+			if got := isNixStoreBinary(); got != tt.want {
+				t.Errorf("isNixStoreBinary() for %q = %v, want %v", tt.path, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -560,5 +748,300 @@ func TestCheckAndNotify_FetchFailureUpdatesCacheToPreventRetry(t *testing.T) {
 	}
 	if time.Since(cache.LastCheckTime) > time.Minute {
 		t.Errorf("cache LastCheckTime not updated after fetch failure: %v", cache.LastCheckTime)
+	}
+}
+
+// globalConfigDirPath returns the CLI's global config directory. Resolution
+// lives in userdirs.Config — the single implementation shared by all
+// config-dir consumers (contexts.json, the file token store, this cache).
+func globalConfigDirPath() string {
+	return userdirs.Config()
+}
+
+// globalConfigDirName is the name of the global config directory in the user's home.
+const globalConfigDirName = ".config/entire"
+
+// newChannelServer serves a channel manifest at /channels/<channel>.json and
+// records which paths were requested.
+func newChannelServer(t *testing.T, manifest ChannelManifest) (*httptest.Server, *[]string) {
+	t.Helper()
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		//nolint:errcheck // test helper
+		json.NewEncoder(w).Encode(manifest)
+	}))
+	t.Cleanup(server.Close)
+	return server, &paths
+}
+
+func TestFetchLatestForChannel_PrefersReleaseOrigin(t *testing.T) {
+	channelServer, paths := newChannelServer(t, ChannelManifest{
+		Channel: "stable",
+		Tag:     testStableVersion,
+		Version: "1.2.3",
+	})
+	useChannelOrigin(t, channelServer.URL)
+
+	githubHits := 0
+	githubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		githubHits++
+		w.Header().Set("Content-Type", "application/json")
+		//nolint:errcheck // test helper
+		json.NewEncoder(w).Encode(GitHubRelease{TagName: "v9.9.9"})
+	}))
+	defer githubServer.Close()
+	origURL := githubAPIURL
+	githubAPIURL = githubServer.URL
+	t.Cleanup(func() { githubAPIURL = origURL })
+
+	version, err := fetchLatestForChannel(context.Background(), false)
+	if err != nil {
+		t.Fatalf("fetchLatestForChannel() error = %v", err)
+	}
+	if version != testStableVersion {
+		t.Errorf("fetchLatestForChannel() = %q, want v1.2.3", version)
+	}
+	if githubHits != 0 {
+		t.Errorf("GitHub was queried %d times, want 0 when the release origin answers", githubHits)
+	}
+	if len(*paths) != 1 || (*paths)[0] != "/channels/stable.json" {
+		t.Errorf("requested paths = %v, want [/channels/stable.json]", *paths)
+	}
+}
+
+func TestFetchLatestForChannel_FallsBackToGitHub(t *testing.T) {
+	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer down.Close()
+	useChannelOrigin(t, down.URL)
+
+	githubServer := newVersionServer(t, testStableVersion)
+	origURL := githubAPIURL
+	githubAPIURL = githubServer.URL
+	t.Cleanup(func() { githubAPIURL = origURL })
+
+	version, err := fetchLatestForChannel(context.Background(), false)
+	if err != nil {
+		t.Fatalf("fetchLatestForChannel() error = %v", err)
+	}
+	if version != testStableVersion {
+		t.Errorf("fetchLatestForChannel() = %q, want v1.2.3 from the fallback origin", version)
+	}
+}
+
+func TestFetchLatestForChannel_NightlyFromReleaseOrigin(t *testing.T) {
+	want := "v0.5.4-nightly.202604061200.abc1234"
+	channelServer, paths := newChannelServer(t, ChannelManifest{
+		Channel: "nightly",
+		Tag:     want,
+	})
+	useChannelOrigin(t, channelServer.URL)
+
+	version, err := fetchLatestForChannel(context.Background(), true)
+	if err != nil {
+		t.Fatalf("fetchLatestForChannel() error = %v", err)
+	}
+	if version != want {
+		t.Errorf("fetchLatestForChannel() = %q, want %q", version, want)
+	}
+	if len(*paths) != 1 || (*paths)[0] != "/channels/nightly.json" {
+		t.Errorf("requested paths = %v, want [/channels/nightly.json]", *paths)
+	}
+}
+
+func TestFetchLatestForChannel_FallsBackWhenManifestIsUnusable(t *testing.T) {
+	// The whole point of validating the manifest is that a corrupt pointer on
+	// our own origin must not take update checks down with it.
+	channelServer, _ := newChannelServer(t, ChannelManifest{
+		Channel: "stable",
+		Version: "not-a-version",
+	})
+	useChannelOrigin(t, channelServer.URL)
+
+	githubServer := newVersionServer(t, testStableVersion)
+	origURL := githubAPIURL
+	githubAPIURL = githubServer.URL
+	t.Cleanup(func() { githubAPIURL = origURL })
+
+	version, err := fetchLatestForChannel(context.Background(), false)
+	if err != nil {
+		t.Fatalf("fetchLatestForChannel() error = %v", err)
+	}
+	if version != testStableVersion {
+		t.Errorf("fetchLatestForChannel() = %q, want %q from the fallback origin", version, testStableVersion)
+	}
+}
+
+func TestFetchLatestForChannel_HangingPrimaryStillReachesFallback(t *testing.T) {
+	// The failure the second origin exists for: a primary that accepts the
+	// connection and never answers. If it could consume the whole chain budget
+	// the fallback would never be tried, and the update check would be worse
+	// off than before the primary existed.
+	blocked := make(chan struct{})
+	t.Cleanup(func() { close(blocked) })
+	hung := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-blocked:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(hung.Close)
+	useChannelOrigin(t, hung.URL)
+
+	githubServer := newVersionServer(t, testStableVersion)
+	origURL := githubAPIURL
+	githubAPIURL = githubServer.URL
+	t.Cleanup(func() { githubAPIURL = origURL })
+
+	started := time.Now()
+	version, err := fetchLatestForChannel(context.Background(), false)
+	elapsed := time.Since(started)
+
+	if err != nil {
+		t.Fatalf("fetchLatestForChannel() error = %v (after %s)", err, elapsed)
+	}
+	if version != testStableVersion {
+		t.Errorf("fetchLatestForChannel() = %q, want %q from the fallback", version, testStableVersion)
+	}
+	if elapsed > httpTimeout {
+		t.Errorf("took %s, which exceeds the whole-chain budget of %s", elapsed, httpTimeout)
+	}
+}
+
+func TestFetchLatestForChannel_CancelledContextReportsCancellation(t *testing.T) {
+	useGitHubOriginOnly(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := fetchLatestForChannel(ctx, false)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("error = %v, want it to report the cancellation rather than an empty chain", err)
+	}
+}
+
+func TestFetchLatestForChannel_AllOriginsFail(t *testing.T) {
+	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer down.Close()
+	useChannelOrigin(t, down.URL)
+
+	origURL := githubAPIURL
+	githubAPIURL = down.URL
+	t.Cleanup(func() { githubAPIURL = origURL })
+
+	_, err := fetchLatestForChannel(context.Background(), false)
+	if err == nil {
+		t.Fatal("fetchLatestForChannel() expected an error when every origin fails, got nil")
+	}
+	// The first origin's failure is the one reported, so an operator reading a
+	// debug log learns which origin they should be looking at first.
+	if !strings.Contains(err.Error(), "install.entire.com") {
+		t.Errorf("error = %q, want it to name the first origin", err.Error())
+	}
+}
+
+func TestFetchChannelManifestVersion_RejectsCrossChannel(t *testing.T) {
+	tests := []struct {
+		name     string
+		nightly  bool
+		manifest ChannelManifest
+	}{
+		{
+			name:     "nightly tag on the stable channel",
+			nightly:  false,
+			manifest: ChannelManifest{Channel: "stable", Tag: "v0.5.4-nightly.202604061200.abc1234"},
+		},
+		{
+			name:     "stable tag on the nightly channel",
+			nightly:  true,
+			manifest: ChannelManifest{Channel: "nightly", Tag: testStableVersion},
+		},
+		{
+			name:     "manifest declares a different channel",
+			nightly:  false,
+			manifest: ChannelManifest{Channel: "nightly", Tag: testStableVersion},
+		},
+		{
+			name:     "manifest names no version",
+			nightly:  false,
+			manifest: ChannelManifest{Channel: "stable"},
+		},
+		{
+			// isNightly is false for an unparseable string, so this passes the
+			// channel check. Accepting it ends the chain, and isOutdated then
+			// reports no update because an invalid version sorts below every
+			// valid one — update checks silently switch off.
+			name:     "version is not a version",
+			nightly:  false,
+			manifest: ChannelManifest{Channel: "stable", Version: "not-a-version"},
+		},
+		{
+			name:     "tag is not a version",
+			nightly:  false,
+			manifest: ChannelManifest{Channel: "stable", Tag: "vnope"},
+		},
+		{
+			name:     "version is a bare major.minor",
+			nightly:  false,
+			manifest: ChannelManifest{Channel: "stable", Version: "1.2"},
+		},
+		{
+			// publish-channel-manifest.sh refuses to route this at all, and
+			// install.sh rejects it on stable. Accepting it here would push an
+			// rc to every stable user from the one reader that allowed it.
+			name:     "non-nightly prerelease on the stable channel",
+			nightly:  false,
+			manifest: ChannelManifest{Channel: "stable", Tag: "v1.2.3-rc.1"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server, _ := newChannelServer(t, tt.manifest)
+			useChannelOrigin(t, server.URL)
+
+			if _, err := fetchChannelManifestVersion(context.Background(), http.DefaultClient, tt.nightly); err == nil {
+				t.Fatalf("fetchChannelManifestVersion(nightly=%v) expected an error, got nil", tt.nightly)
+			}
+		})
+	}
+}
+
+func TestFetchChannelManifestVersion_FallsBackToVersionField(t *testing.T) {
+	// A manifest without a tag is still usable: the version field carries the
+	// same value without the "v" prefix.
+	server, _ := newChannelServer(t, ChannelManifest{Channel: "stable", Version: "1.2.3"})
+	useChannelOrigin(t, server.URL)
+
+	version, err := fetchChannelManifestVersion(context.Background(), http.DefaultClient, false)
+	if err != nil {
+		t.Fatalf("fetchChannelManifestVersion() error = %v", err)
+	}
+	if version != "1.2.3" {
+		t.Errorf("fetchChannelManifestVersion() = %q, want 1.2.3", version)
+	}
+}
+
+func TestFetchLatestForChannel_StopsWhenBudgetSpent(t *testing.T) {
+	// A cancelled context must not produce requests that can only fail.
+	hits := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	useChannelOrigin(t, server.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := fetchLatestForChannel(ctx, false); err == nil {
+		t.Fatal("fetchLatestForChannel() expected an error on a cancelled context, got nil")
+	}
+	if hits != 0 {
+		t.Errorf("server was hit %d times on a cancelled context, want 0", hits)
 	}
 }

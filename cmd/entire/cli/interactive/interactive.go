@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"golang.org/x/term"
+
+	"github.com/entireio/cli/cmd/entire/cli/envflag"
 )
 
 // EnvTestTTY is the env-var name for the force-interactive test override.
@@ -30,8 +32,10 @@ const EnvTestTTY = "ENTIRE_TEST_TTY"
 //     don't hang on developer terminals that have a real controlling terminal.
 //     Subprocess tests must spawn via execx.NonInteractive (or set EnvTestTTY).
 //  3. Agent sentinels — vendor-set by agent subprocesses.
-//  4. CI=<non-empty-non-false> — de-facto CI convention.
-//  5. Platform-specific controlling-terminal probe, plus its terminal mode on
+//  4. CI set and not "0"/"false" (envflag.Truthy) — de-facto CI convention.
+//  5. A Windows console with no window (a desktop app's hidden shell): see
+//     console_windows.go.
+//  6. Platform-specific controlling-terminal probe, plus its terminal mode on
 //     platforms that expose one: a terminal held in raw mode belongs to a
 //     full-screen TUI (lazygit, gitui, tig, …) that spawned us, not to a shell
 //     we can prompt. See rawmode_unix.go and rawmode_windows.go.
@@ -48,9 +52,14 @@ func CanPromptInteractively() bool {
 	// CI=<non-empty> is the de-facto CI-provider convention (GitHub Actions,
 	// CircleCI, GitLab, Travis, Buildkite). Self-hosted runners expose /dev/tty,
 	// so the probe below isn't enough — an interactive prompt on CI hangs.
-	// CI=false is the `is-ci` escape hatch for developers who need to override
-	// an inherited value.
-	if v := os.Getenv("CI"); v != "" && v != "false" {
+	// CI=false (or CI=0) is the `is-ci` escape hatch for developers who need
+	// to override an inherited value.
+	if envflag.Enabled("CI") {
+		return false
+	}
+	// A Windows console without a window opens and reads like any other, but
+	// nobody can see the prompt or answer it. See console_windows.go.
+	if consoleHasNoWindow() {
 		return false
 	}
 
@@ -87,11 +96,12 @@ func UnderTest() bool {
 //     interactive prompt from the largest agent population at once. That is a
 //     product call, not a detection fix.
 var agentSubprocessEnvVars = []string{
-	"COPILOT_CLI",     // Copilot CLI hook subprocesses (v0.0.421+)
-	"CURSOR_AGENT",    // cursor-agent shell tool; set alongside CURSOR_CONVERSATION_ID
-	"GEMINI_CLI",      // Gemini CLI shell tool (https://geminicli.com/docs/tools/shell/)
-	"OPENCODE",        // set on opencode's own process, so every child inherits it
-	"PI_CODING_AGENT", // Pi Coding Agent shell tool
+	"ANTIGRAVITY_AGENT", // agy shell tool (seen in 1.2.13): runs commands in a line-mode pty the tty probe accepts
+	"COPILOT_CLI",       // Copilot CLI hook subprocesses (v0.0.421+)
+	"CURSOR_AGENT",      // cursor-agent shell tool; set alongside CURSOR_CONVERSATION_ID
+	"GEMINI_CLI",        // Gemini CLI shell tool (https://geminicli.com/docs/tools/shell/)
+	"OPENCODE",          // set on opencode's own process, so every child inherits it
+	"PI_CODING_AGENT",   // Pi Coding Agent shell tool
 }
 
 // isAgentSubprocessEnv reports whether the env indicates we're running inside

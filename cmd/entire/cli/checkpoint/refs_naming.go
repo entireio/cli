@@ -9,6 +9,11 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 )
 
+// InternalBranchPrefix is the namespace of Entire's own local branches: the
+// entire/checkpoints/v1 metadata branch, trails, and the shadow branches older
+// CLIs wrote. Branch pickers skip it.
+const InternalBranchPrefix = "entire/"
+
 // CheckpointRefPrefix is the namespace under which the git-refs backend stores
 // one ref per checkpoint: refs/entire/checkpoints/<shard>/<id>. Each ref points
 // at a checkpoint commit whose tree root is that checkpoint's contents. This is

@@ -81,7 +81,7 @@ func TestStore_BackfillTranscriptReplacesWithoutClobbering(t *testing.T) {
 	assert.Equal(t, []string{"a.go"}, summary.FilesTouched)
 }
 
-func TestStore_SessionSummaryAndAttribution(t *testing.T) {
+func TestStore_SessionSummary(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store := New(t.TempDir())
@@ -94,19 +94,10 @@ func TestStore_SessionSummaryAndAttribution(t *testing.T) {
 	require.NoError(t, store.Write(ctx, cp.SessionSummary{
 		CheckpointID: cid, Summary: &cp.Summary{Intent: "do a thing", Outcome: "did it"},
 	}))
-	require.NoError(t, store.Write(ctx, cp.CheckpointAttribution{
-		CheckpointID: cid, Attribution: &cp.Attribution{AgentLines: 10, AgentPercentage: 80},
-	}))
-
 	meta, err := store.ReadSessionMetadata(ctx, cid, 0)
 	require.NoError(t, err)
 	require.NotNil(t, meta.Summary)
 	assert.Equal(t, "do a thing", meta.Summary.Intent)
-
-	summary, err := store.Read(ctx, cid)
-	require.NoError(t, err)
-	require.NotNil(t, summary.CombinedAttribution)
-	assert.Equal(t, 10, summary.CombinedAttribution.AgentLines)
 }
 
 func TestStore_ListReturnsCheckpoints(t *testing.T) {
@@ -146,7 +137,7 @@ func TestStore_DefaultsCreatedAtWhenZero(t *testing.T) {
 	assert.False(t, meta.CreatedAt.IsZero(), "zero CreatedAt should default to the current time")
 }
 
-func TestStore_PersistsReviewFlagAndCombinedAttribution(t *testing.T) {
+func TestStore_PersistsReviewFlag(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store := New(t.TempDir())
@@ -154,15 +145,12 @@ func TestStore_PersistsReviewFlagAndCombinedAttribution(t *testing.T) {
 
 	require.NoError(t, store.Write(ctx, cp.Session{
 		CheckpointID: cid, SessionID: "s1", Transcript: redact.AlreadyRedacted([]byte("t")),
-		HasReview:           true,
-		CombinedAttribution: &cp.Attribution{AgentLines: 3},
+		HasReview: true,
 	}))
 
 	summary, err := store.Read(ctx, cid)
 	require.NoError(t, err)
 	assert.True(t, summary.HasReview)
-	require.NotNil(t, summary.CombinedAttribution)
-	assert.Equal(t, 3, summary.CombinedAttribution.AgentLines)
 }
 
 func TestStore_FactoryRequiresPath(t *testing.T) {

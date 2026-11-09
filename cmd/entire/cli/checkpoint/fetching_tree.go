@@ -3,7 +3,6 @@ package checkpoint
 import (
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
 	"os/exec"
 	"strings"
@@ -89,6 +88,11 @@ func NewFetchingTree(ctx context.Context, tree *object.Tree, s storer.EncodedObj
 		storer: s,
 		fetch:  fetch,
 	}
+}
+
+// Hash returns the hash of the wrapped tree.
+func (t *FetchingTree) Hash() plumbing.Hash {
+	return t.inner.Hash
 }
 
 // File returns the file at the given path. Resolution order:
@@ -343,16 +347,4 @@ func (t *FetchingTree) Tree(path string) (*FetchingTree, error) {
 // RawEntries returns the direct tree entries (no blob reads needed).
 func (t *FetchingTree) RawEntries() []object.TreeEntry {
 	return t.inner.Entries
-}
-
-// FileReader provides read access to files within a git tree.
-// Both *object.Tree and *FetchingTree implement this interface.
-type FileReader interface {
-	File(path string) (*object.File, error)
-}
-
-// FileOpener provides access to a file's content reader.
-// *object.File implements this interface.
-type FileOpener interface {
-	Reader() (io.ReadCloser, error)
 }

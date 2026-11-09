@@ -31,10 +31,14 @@ import (
 // A bare opaque token is no longer enough for a --server login: with no iss
 // claim there is nothing to key the login context by, and login fails.
 func fakeLoginJWT(iss string) string {
+	return fakeJWT(iss, time.Now().Add(time.Hour).Unix())
+}
+
+func fakeJWT(iss string, exp int64) string {
 	enc := base64.RawURLEncoding
 	header := enc.EncodeToString([]byte(`{"alg":"RS256","typ":"JWT"}`))
 	payload := enc.EncodeToString(fmt.Appendf(nil,
-		`{"iss":%q,"sub":"user-123","exp":%d}`, iss, time.Now().Add(time.Hour).Unix()))
+		`{"iss":%q,"sub":"user-123","exp":%d}`, iss, exp))
 	return header + "." + payload + "." + enc.EncodeToString([]byte("sig"))
 }
 

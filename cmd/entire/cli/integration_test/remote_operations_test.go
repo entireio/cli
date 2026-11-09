@@ -292,7 +292,7 @@ func createCheckpointedCommit(t *testing.T, env *TestEnv, prompt, fileName, file
 		t.Fatalf("SimulateStop failed: %v", err)
 	}
 
-	env.GitCommitWithShadowHooks(commitMsg, fileName)
+	env.GitCommitWithHooks(commitMsg, fileName)
 
 	return env.LatestCheckpointID()
 }
@@ -617,7 +617,7 @@ func TestGracefulDegradation_UnreachableCheckpointRemoteOnCloneIsSilent(t *testi
 		// (origin is a local path, can't parse it), so it falls back to pushing to origin.
 		cloneEnv.WriteFile("clone.go", "package clone")
 		cloneEnv.GitAdd("clone.go")
-		cloneEnv.GitCommitWithShadowHooks("Clone work", "clone.go")
+		cloneEnv.GitCommitWithHooks("Clone work", "clone.go")
 		cloneEnv.RunPrePush("origin")
 
 		// Verify that the session actually created a local checkpoint despite the

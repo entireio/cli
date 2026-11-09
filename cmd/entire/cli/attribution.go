@@ -29,13 +29,19 @@ import (
 	"github.com/spf13/cobra"
 )
 
-type attributionAuthorship string
+// attributionLineStatus says how a line relates to Entire: whether the commit
+// that last touched it links a checkpoint. It is linkage, not authorship —
+// Entire does not compute line authorship.
+type attributionLineStatus string
 
 const (
-	attributionAI          attributionAuthorship = "ai"
-	attributionHuman       attributionAuthorship = "human"
-	attributionMixed       attributionAuthorship = "mixed"
-	attributionUncommitted attributionAuthorship = "uncommitted"
+	// lineStatusCheckpoint: the commit that last touched the line carries an
+	// Entire-Checkpoint trailer.
+	lineStatusCheckpoint attributionLineStatus = "checkpoint"
+	// lineStatusCommit: committed, but the commit links no checkpoint.
+	lineStatusCommit attributionLineStatus = "commit"
+	// lineStatusUncommitted: the line is not committed yet.
+	lineStatusUncommitted attributionLineStatus = "uncommitted"
 )
 
 type attributionLineRange struct {
@@ -53,8 +59,7 @@ type rawBlameLine struct {
 
 type attributionLine struct {
 	LineNumber            int                   `json:"line_number"`
-	Authorship            attributionAuthorship `json:"authorship"`
-	Tag                   string                `json:"tag"`
+	Status                attributionLineStatus `json:"status"`
 	CommitSHA             string                `json:"commit_sha,omitempty"`
 	ShortCommitSHA        string                `json:"short_commit_sha,omitempty"`
 	Author                string                `json:"author,omitempty"`
@@ -73,9 +78,14 @@ type attributionLine struct {
 	// specific checkpoint. `why` labels these differently and points at
 	// `checkpoint explain`, since the prompt may not appear in this checkpoint's
 	// own transcript slice.
-	PromptSessionLevel bool                   `json:"prompt_session_level,omitempty"`
-	Content            string                 `json:"content"`
-	Candidates         []attributionCandidate `json:"candidates,omitempty"`
+	PromptSessionLevel bool `json:"prompt_session_level,omitempty"`
+	// RecordedLink is set when the commit has no Entire-Checkpoint trailer and
+	// its checkpoint was found through a link recorded in checkpoint metadata
+	// (entire session attach on a pushed commit). The CLI can't verify who
+	// recorded it: anyone who can push checkpoints can name any commit.
+	RecordedLink bool                   `json:"recorded_link,omitempty"`
+	Content      string                 `json:"content"`
+	Candidates   []attributionCandidate `json:"candidates,omitempty"`
 }
 
 // attributionCheckpointContext is the resolved metadata for one checkpoint as
@@ -94,7 +104,6 @@ type attributionCheckpointContext struct {
 	FilesTouched          []string `json:"files_touched,omitempty"`
 	MetadataMissing       bool     `json:"metadata_missing,omitempty"`
 	MetadataMissingReason string   `json:"metadata_missing_reason,omitempty"`
-	Mixed                 bool     `json:"mixed,omitempty"`
 	// SessionFallback is set when the file is not in any resolved session's
 	// recorded paths (e.g. it was renamed after the checkpoint) and the
 	// agent/prompt shown is a best-effort guess from the checkpoint's first
@@ -114,15 +123,15 @@ type fileAttributionResult struct {
 	Summary     attributionSummary                      `json:"summary"`
 }
 
+// attributionSummary counts lines by attributionLineStatus. Percentages are
+// apportioned across all three buckets so they total 100.
 type attributionSummary struct {
-	TotalLines       int `json:"total_lines"`
-	AILines          int `json:"ai_lines"`
-	HumanLines       int `json:"human_lines"`
-	MixedLines       int `json:"mixed_lines"`
-	UncommittedLines int `json:"uncommitted_lines"`
-	AIPercentage     int `json:"ai_percentage"`
-	HumanPercentage  int `json:"human_percentage"`
-	MixedPercentage  int `json:"mixed_percentage"`
+	TotalLines           int `json:"total_lines"`
+	CheckpointLines      int `json:"checkpoint_lines"`
+	CommitLines          int `json:"commit_lines"`
+	UncommittedLines     int `json:"uncommitted_lines"`
+	CheckpointPercentage int `json:"checkpoint_percentage"`
+	CommitPercentage     int `json:"commit_percentage"`
 }
 
 type attributionCheckpointReader interface {
@@ -138,6 +147,35 @@ type attributionResolver struct {
 
 	commitCache     map[string]*object.Commit
 	checkpointCache map[string]attributionCheckpointContext
+	// linked lists checkpoints once, for commits linked without a trailer
+	// (`entire session attach --commit`). nil until first needed.
+	linked []checkpoint.CheckpointInfo
+	// linkedByCommit caches linkedCheckpoints per commit, since reading a
+	// remote-discovered stub for its links can fetch.
+	linkedByCommit map[string][]id.CheckpointID
+	// linkedStubs reads each remote-discovered stub at most once per run, and
+	// linkedDeadline gives every such read in the run one shared budget.
+	linkedStubs    *stubSummaryCache
+	linkedDeadline time.Time
+}
+
+// stubSummaryCache remembers each checkpoint summary it reads, failures
+// included, so a blame run reads a stub at most once.
+type stubSummaryCache struct {
+	reader    attributionCheckpointReader
+	summaries map[id.CheckpointID]*checkpoint.CheckpointSummary
+}
+
+func (c *stubSummaryCache) Read(ctx context.Context, cpID id.CheckpointID) (*checkpoint.CheckpointSummary, error) {
+	if summary, ok := c.summaries[cpID]; ok {
+		return summary, nil
+	}
+	summary, err := c.reader.Read(ctx, cpID)
+	if err != nil {
+		summary = nil
+	}
+	c.summaries[cpID] = summary
+	return summary, err //nolint:wrapcheck // callers treat a failed read as no links
 }
 
 func newBlameCmd() *cobra.Command {
@@ -152,7 +190,7 @@ func newBlameCmd() *cobra.Command {
 		// --help` keep working normally.
 		Hidden:  true,
 		Short:   "Show which lines came from Entire checkpoints",
-		Long:    "Show git-blame-style line attribution enriched with Entire checkpoint metadata.\n\nLimit to a line or range with <file>:12, <file>:12-20, or the --line flag.",
+		Long:    "Show git blame enriched with Entire checkpoint metadata: for each line, the commit that last touched it and, when that commit links an Entire checkpoint, the checkpoint's agent, session, and prompt. Entire does not attribute individual lines to AI or humans.\n\nLimit to a line or range with <file>:12, <file>:12-20, or the --line flag.",
 		Example: "  entire blame src/auth.go\n  entire blame src/auth.go:10-40 --json",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -165,8 +203,8 @@ func newBlameCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&lineFlag, "line", "", "Only show a line or range, for example 12 or 12-20")
-	cmd.Flags().BoolVar(&jsonFlag, "json", false, "Output attribution as JSON")
-	cmd.Flags().BoolVar(&longFlag, "long", false, "Show the full attribution table with agent, model, author, and session columns")
+	cmd.Flags().BoolVar(&jsonFlag, "json", false, "Output as JSON")
+	cmd.Flags().BoolVar(&longFlag, "long", false, "Show the full table with agent, model, author, and session columns")
 	return cmd
 }
 
@@ -392,38 +430,33 @@ func (r *attributionResolver) resolveLine(raw rawBlameLine, file string) attribu
 	}
 
 	if isZeroCommit(raw.CommitSHA) {
-		line.Authorship = attributionUncommitted
-		line.Tag = attributionTag(line.Authorship)
+		line.Status = lineStatusUncommitted
 		return line
 	}
 
+	line.Status = lineStatusCommit
 	commit, err := r.commit(raw.CommitSHA)
 	if err != nil {
-		line.Authorship = attributionHuman
-		line.Tag = attributionTag(line.Authorship)
 		return line
 	}
 
 	cpIDs := trailers.ParseAllCheckpoints(commit.Message)
 	if len(cpIDs) == 0 {
-		line.Authorship = attributionHuman
-		line.Tag = attributionTag(line.Authorship)
+		cpIDs = r.linkedCheckpoints(commit)
+		line.RecordedLink = len(cpIDs) > 0
+	}
+	if len(cpIDs) == 0 {
 		return line
 	}
 
-	var candidates []attributionCandidate
+	candidates := make([]attributionCandidate, 0, len(cpIDs))
 	for _, cpID := range cpIDs {
 		candidates = append(candidates, r.checkpointContext(cpID, file))
 	}
 
-	preferred := preferredAttributionCandidate(candidates, file)
-	applyPreferredToLine(&line, preferred)
-	line.Authorship = authorshipForPreferred(preferred)
-	if len(candidates) > 0 {
-		line.Candidates = candidates
-	}
-
-	line.Tag = attributionTag(line.Authorship)
+	applyPreferredToLine(&line, preferredAttributionCandidate(candidates, file))
+	line.Status = lineStatusCheckpoint
+	line.Candidates = candidates
 	return line
 }
 
@@ -437,6 +470,36 @@ func (r *attributionResolver) commit(sha string) (*object.Commit, error) {
 	}
 	r.commitCache[sha] = commit
 	return commit, nil
+}
+
+// linkedCheckpoints returns the checkpoints that link commit without a
+// trailer. The store is listed once per blame run; a store that cannot list
+// contributes none.
+func (r *attributionResolver) linkedCheckpoints(commit *object.Commit) []id.CheckpointID {
+	sha := commit.Hash.String()
+	if ids, ok := r.linkedByCommit[sha]; ok {
+		return ids
+	}
+	if r.linked == nil {
+		r.linked = []checkpoint.CheckpointInfo{}
+		r.linkedStubs = &stubSummaryCache{reader: r.store, summaries: make(map[id.CheckpointID]*checkpoint.CheckpointSummary)}
+		r.linkedDeadline = time.Now().Add(checkpoint.ListHydrationPassTimeout)
+		if lister, ok := r.store.(interface {
+			List(ctx context.Context) ([]checkpoint.CheckpointInfo, error)
+		}); ok {
+			if infos, err := lister.List(r.ctx); err == nil {
+				r.linked = infos
+			}
+		}
+	}
+	ctx, cancel := context.WithDeadline(r.ctx, r.linkedDeadline)
+	ids := checkpoint.CheckpointsLinkedToWithStubs(ctx, r.linkedStubs, r.linked, sha, commit.Committer.When)
+	cancel()
+	if r.linkedByCommit == nil {
+		r.linkedByCommit = make(map[string][]id.CheckpointID)
+	}
+	r.linkedByCommit[sha] = ids
+	return ids
 }
 
 func (r *attributionResolver) checkpointContext(cpID id.CheckpointID, file string) attributionCheckpointContext {
@@ -519,18 +582,6 @@ func (r *attributionResolver) readCheckpointContext(cpID id.CheckpointID, file s
 		ctx.MetadataMissing = true
 	}
 
-	// Mixed authorship is scoped to the session whose work actually touched
-	// this file, not the checkpoint as a whole. A checkpoint that edited one
-	// file with the agent and another by hand is "combined" overall, but a
-	// line from the agent-only file is still purely [AI]. Fall back to the
-	// checkpoint-wide attribution only when no session metadata resolved.
-	switch {
-	case selected.Attribution != nil:
-		ctx.Mixed = attributionIsMixed(selected.Attribution)
-	case selected.SessionID == "":
-		ctx.Mixed = attributionIsMixed(summary.CombinedAttribution)
-	}
-
 	ctx.SessionID = selected.SessionID
 	ctx.Agent = selected.Agent
 	ctx.Model = selected.Model
@@ -605,7 +656,6 @@ type checkpointSessionForFile struct {
 	PromptSessionLevel bool
 	Intent             string
 	FilesTouched       []string
-	Attribution        *checkpoint.Attribution
 }
 
 func (r *attributionResolver) readSessionForCheckpoint(cpID id.CheckpointID, index int) (checkpointSessionForFile, error) {
@@ -645,7 +695,6 @@ func (r *attributionResolver) readSessionForCheckpoint(cpID id.CheckpointID, ind
 		PromptSessionLevel: sessionLevel,
 		Intent:             intent,
 		FilesTouched:       normalizePathSlice(meta.FilesTouched),
-		Attribution:        meta.Attribution,
 	}, nil
 }
 
@@ -850,29 +899,25 @@ func summarizeAttributionLines(lines []attributionLine) attributionSummary {
 	var summary attributionSummary
 	summary.TotalLines = len(lines)
 	for _, line := range lines {
-		switch line.Authorship {
-		case attributionAI:
-			summary.AILines++
-		case attributionHuman:
-			summary.HumanLines++
-		case attributionMixed:
-			summary.MixedLines++
-		case attributionUncommitted:
+		switch line.Status {
+		case lineStatusCheckpoint:
+			summary.CheckpointLines++
+		case lineStatusCommit:
+			summary.CommitLines++
+		case lineStatusUncommitted:
 			summary.UncommittedLines++
 		}
 	}
-	// Apportion percentages with the largest-remainder method across all four
-	// buckets so the displayed AI/Human/Mixed figures don't drift (e.g. three
-	// equal thirds rendering as 33/33/33 = 99). Uncommitted shares the 100% but
-	// is shown only as a count, so when it is present the three visible
-	// percentages correctly total less than 100.
+	// Apportion percentages with the largest-remainder method across all three
+	// buckets so they don't drift (e.g. three equal thirds rendering as
+	// 33/33/33 = 99). Uncommitted shares the 100% but is shown only as a count,
+	// so when it is present the two visible percentages total less than 100.
 	pct := largestRemainderPercent(
-		[]int{summary.AILines, summary.HumanLines, summary.MixedLines, summary.UncommittedLines},
+		[]int{summary.CheckpointLines, summary.CommitLines, summary.UncommittedLines},
 		summary.TotalLines,
 	)
-	summary.AIPercentage = pct[0]
-	summary.HumanPercentage = pct[1]
-	summary.MixedPercentage = pct[2]
+	summary.CheckpointPercentage = pct[0]
+	summary.CommitPercentage = pct[1]
 	return summary
 }
 
@@ -912,14 +957,21 @@ func largestRemainderPercent(counts []int, total int) []int {
 	return pct
 }
 
+// recordedLinkNote explains a checkpoint found through a recorded link.
+const recordedLinkNote = "The commit has no Entire-Checkpoint trailer; this checkpoint names it in a link recorded by entire session attach. The CLI can't verify who recorded the link: anyone who can push checkpoints can name any commit."
+
 // attributionLineMarker returns a one-character flag for the blame tables:
 // "~" when the agent/checkpoint shown is a best-effort guess (the file is not in
 // the checkpoint session's recorded paths, or only trailer-level metadata was
 // found), "?" when more than one checkpoint is a candidate for the line, and a
-// space otherwise. `entire why` surfaces the same information in prose; this
-// closes the gap where the blame table looked equally confident on every line.
+// space otherwise; "!" when the checkpoint was found through an unverified
+// recorded link rather than a trailer. `entire why` surfaces the same
+// information in prose; this closes the gap where the blame table looked
+// equally confident on every line.
 func attributionLineMarker(line attributionLine) string {
 	switch {
+	case line.RecordedLink:
+		return "!"
 	case line.SessionFallback || line.MetadataMissing:
 		return "~"
 	case len(line.Candidates) > 1:
@@ -932,21 +984,26 @@ func attributionLineMarker(line attributionLine) string {
 // renderAttributionMarkerLegend prints a one-line legend explaining the blame
 // markers, but only for the markers actually present in the table.
 func renderAttributionMarkerLegend(w io.Writer, sty statusStyles, lines []attributionLine) {
-	approximate, ambiguous := false, false
+	approximate, ambiguous, recorded := false, false, false
 	for _, line := range lines {
 		switch attributionLineMarker(line) {
 		case "~":
 			approximate = true
 		case "?":
 			ambiguous = true
+		case "!":
+			recorded = true
 		}
 	}
-	if !approximate && !ambiguous {
+	if !approximate && !ambiguous && !recorded {
 		return
 	}
 	var parts []string
+	if recorded {
+		parts = append(parts, "! from a recorded link, not a trailer (unverified)")
+	}
 	if approximate {
-		parts = append(parts, "~ best-effort attribution (file not in the checkpoint's recorded paths)")
+		parts = append(parts, "~ best-effort session match (file not in the checkpoint's recorded paths)")
 	}
 	if ambiguous {
 		parts = append(parts, "? multiple candidate checkpoints — see entire why <file>:<line>")
@@ -975,6 +1032,10 @@ func renderAttributionBlameTable(w io.Writer, result *fileAttributionResult, lin
 	}
 
 	body(sty)
+	// The Agent column names the agent of the checkpoint linked to the line's
+	// commit. It does not claim the agent wrote the line: linking is by file,
+	// so a human edit committed alongside agent work shows the same agent.
+	fmt.Fprintf(w, "  %s\n", sty.render(sty.dim, "Agent: the agent of the checkpoint linked to the line's commit, not necessarily who wrote the line"))
 	renderAttributionMarkerLegend(w, sty, result.Lines)
 	renderAttributionSummary(w, sty, result.Summary, lineFlag)
 }
@@ -988,22 +1049,21 @@ func renderAttributionBlameCompact(w io.Writer, result *fileAttributionResult, l
 		const minContentWidth = 12
 		// The trailing "+ 1 + 1" reserves a one-character marker column (plus its
 		// separator) between Checkpoint and Content. Placing it after the last
-		// fixed column means only Content shifts — the Tag/Agent/Author/Checkpoint
+		// fixed column means only Content shifts — the Agent/Author/Checkpoint
 		// positions stay put.
-		fixedWidth := 2 + lineWidth + 2 + len("[AI]") + 2 + agentWidth + 2 + authorWidth + 2 + checkpointWidth + 2 + 1 + 1
+		fixedWidth := 2 + lineWidth + 2 + agentWidth + 2 + authorWidth + 2 + checkpointWidth + 2 + 1 + 1
 		contentWidth := sty.width - fixedWidth
 		if contentWidth < minContentWidth {
 			contentWidth = minContentWidth
 		}
 		tableWidth := fixedWidth + contentWidth - 2
 
-		fmt.Fprintf(w, "  %*s  Tag   %-*s  %-*s  %-*s    Content\n", lineWidth, "Line", agentWidth, "Agent", authorWidth, "Author", checkpointWidth, "Checkpoint")
+		fmt.Fprintf(w, "  %*s  %-*s  %-*s  %-*s    Content\n", lineWidth, "Line", agentWidth, "Agent", authorWidth, "Author", checkpointWidth, "Checkpoint")
 		fmt.Fprintf(w, "  %s\n", sty.render(sty.dim, strings.Repeat("─", tableWidth)))
 
 		for _, line := range result.Lines {
-			fmt.Fprintf(w, "  %s  %s  %-*s  %-*s  %-*s  %s %s\n",
+			fmt.Fprintf(w, "  %s  %-*s  %-*s  %-*s  %s %s\n",
 				sty.render(sty.dim, fmt.Sprintf("%*d", lineWidth, line.LineNumber)),
-				renderAttributionTag(sty, line.Authorship),
 				agentWidth,
 				stringutil.TruncateRunes(compactAttributionAgent(line), agentWidth, ""),
 				authorWidth,
@@ -1022,17 +1082,16 @@ func renderAttributionBlameLong(w io.Writer, result *fileAttributionResult, line
 		lineWidth := attributionLineColumnWidth(result.Lines)
 		// Size the Checkpoint/Session column to its content so a ULID checkpoint
 		// (26 chars, vs a 12-hex ID) is not front-truncated into an unresolvable,
-		// session-less prefix. The other columns sum to 71 alongside these two.
+		// session-less prefix. The other columns sum to 65 alongside these two.
 		cpWidth := attributionCheckpointColumnWidth(result.Lines)
-		ruleWidth := lineWidth + cpWidth + 71
-		fmt.Fprintf(w, "  %*s  Tag   %-12s  %-18s  %-16s  %-*s    Content\n",
+		ruleWidth := lineWidth + cpWidth + 65
+		fmt.Fprintf(w, "  %*s  %-12s  %-18s  %-16s  %-*s    Content\n",
 			lineWidth, "Line", "Agent", "Model", "Author", cpWidth, "Checkpoint/Session")
 		fmt.Fprintf(w, "  %s\n", sty.render(sty.dim, strings.Repeat("─", ruleWidth)))
 
 		for _, line := range result.Lines {
-			fmt.Fprintf(w, "  %s  %s  %-12s  %-18s  %-16s  %-*s  %s %s\n",
+			fmt.Fprintf(w, "  %s  %-12s  %-18s  %-16s  %-*s  %s %s\n",
 				sty.render(sty.dim, fmt.Sprintf("%*d", lineWidth, line.LineNumber)),
-				renderAttributionTag(sty, line.Authorship),
 				stringutil.TruncateRunes(line.Agent, 12, ""),
 				stringutil.TruncateRunes(line.Model, 18, ""),
 				stringutil.TruncateRunes(shortAuthorName(line.Author), 16, ""),
@@ -1061,9 +1120,8 @@ func attributionCheckpointColumnWidth(lines []attributionLine) int {
 
 func renderAttributionSummary(w io.Writer, sty statusStyles, summary attributionSummary, lineFlag string) {
 	parts := []string{
-		sty.render(sty.green, fmt.Sprintf("AI: %d (%d%%)", summary.AILines, summary.AIPercentage)),
-		fmt.Sprintf("Human: %d (%d%%)", summary.HumanLines, summary.HumanPercentage),
-		sty.render(sty.yellow, fmt.Sprintf("Mixed: %d (%d%%)", summary.MixedLines, summary.MixedPercentage)),
+		sty.render(sty.cyan, fmt.Sprintf("Linked to a checkpoint: %d (%d%%)", summary.CheckpointLines, summary.CheckpointPercentage)),
+		fmt.Sprintf("Other commits: %d (%d%%)", summary.CommitLines, summary.CommitPercentage),
 	}
 	if summary.UncommittedLines > 0 {
 		parts = append(parts, sty.render(sty.dim, fmt.Sprintf("Uncommitted: %d", summary.UncommittedLines)))
@@ -1076,12 +1134,12 @@ func renderAttributionSummary(w io.Writer, sty statusStyles, summary attribution
 }
 
 func compactAttributionAgent(line attributionLine) string {
-	switch line.Authorship {
-	case attributionAI, attributionMixed:
-		return fallbackString(line.Agent, "AI")
-	case attributionUncommitted:
+	switch line.Status {
+	case lineStatusCheckpoint:
+		return fallbackString(line.Agent, "agent")
+	case lineStatusUncommitted:
 		return "working"
-	case attributionHuman:
+	case lineStatusCommit:
 		return ""
 	default:
 		return ""
@@ -1092,14 +1150,14 @@ func compactAttributionCheckpoint(line attributionLine) string {
 	if line.CheckpointID != "" {
 		return line.CheckpointID
 	}
-	if line.Authorship == attributionUncommitted {
+	if line.Status == lineStatusUncommitted {
 		return "uncommitted"
 	}
 	return ""
 }
 
 func renderAttributionContentCompact(sty statusStyles, line attributionLine, width int) string {
-	return renderByAuthorship(sty, line.Authorship, stringutil.TruncateRunes(line.Content, width, "..."))
+	return renderByStatus(sty, line.Status, stringutil.TruncateRunes(line.Content, width, "..."))
 }
 
 func renderAttributionLineWhy(w io.Writer, file string, line attributionLine) {
@@ -1109,10 +1167,10 @@ func renderAttributionLineWhy(w io.Writer, file string, line attributionLine) {
 		fmt.Fprintf(w, "  %s\n\n", sty.render(sty.dim, strings.TrimRight(line.Content, "\r")))
 	}
 
-	switch line.Authorship {
-	case attributionUncommitted:
-		fmt.Fprintf(w, "  %s\n\n", sty.render(sty.yellow, "This line is not committed yet, so Entire cannot attribute it."))
-	case attributionHuman:
+	switch line.Status {
+	case lineStatusUncommitted:
+		fmt.Fprintf(w, "  %s\n\n", sty.render(sty.yellow, "This line is not committed yet, so no checkpoint is linked to it."))
+	case lineStatusCommit:
 		fmt.Fprintf(w, "  Written by %s", sty.render(sty.cyan, fallbackString(shortAuthorName(line.Author), "unknown")))
 		if line.ShortCommitSHA != "" {
 			fmt.Fprintf(w, " %s commit %s", sty.render(sty.dim, "·"), sty.render(sty.dim, line.ShortCommitSHA))
@@ -1121,8 +1179,8 @@ func renderAttributionLineWhy(w io.Writer, file string, line attributionLine) {
 			fmt.Fprintf(w, " %s %s", sty.render(sty.dim, "·"), line.AuthorTime.Format("2006-01-02"))
 		}
 		fmt.Fprintf(w, "\n  %s\n\n", sty.render(sty.dim, "No Entire checkpoint is linked to the commit that last touched this line."))
-	case attributionAI, attributionMixed:
-		fmt.Fprintf(w, "  %s by %s", renderAttributionTag(sty, line.Authorship), sty.render(sty.agent, fallbackString(line.Agent, "Entire-tracked agent")))
+	case lineStatusCheckpoint:
+		fmt.Fprintf(w, "  Checkpoint from %s", sty.render(sty.agent, fallbackString(line.Agent, "an Entire-tracked agent")))
 		if line.Model != "" {
 			fmt.Fprintf(w, " %s %s", sty.render(sty.dim, "·"), sty.render(sty.dim, line.Model))
 		}
@@ -1150,11 +1208,14 @@ func renderAttributionLineWhy(w io.Writer, file string, line attributionLine) {
 			fmt.Fprintf(w, "  %s %q\n", sty.render(sty.bold, "Intent:"), stringutil.TruncateRunes(stringutil.CollapseWhitespace(line.Intent), 160, "..."))
 		}
 		if line.MetadataMissing {
-			message := "Checkpoint metadata was not found locally; showing trailer-level attribution only."
+			message := "Checkpoint metadata was not found locally; showing the commit's checkpoint trailer only."
 			if line.MetadataMissingReason != "" {
 				message = line.MetadataMissingReason
 			}
 			fmt.Fprintf(w, "  %s\n", sty.render(sty.yellow, message))
+		}
+		if line.RecordedLink {
+			fmt.Fprintf(w, "  %s\n", sty.render(sty.yellow, recordedLinkNote))
 		}
 		if line.SessionFallback {
 			fmt.Fprintf(w, "  %s\n", sty.render(sty.yellow, "This file is not in the checkpoint session's recorded paths (it may have been renamed); the agent and prompt shown are a best-effort guess, not necessarily the session that produced this line."))
@@ -1193,15 +1254,13 @@ func renderAttributionFileWhy(w io.Writer, result *fileAttributionResult) {
 	sty := newStatusStyles(w)
 	summary := result.Summary
 	fmt.Fprintf(w, "\n  %s\n", sty.render(sty.bold, result.File))
-	fmt.Fprintf(w, "  %d lines %s %s %s %s",
+	fmt.Fprintf(w, "  %d lines %s %s",
 		summary.TotalLines,
 		sty.render(sty.dim, "·"),
-		sty.render(sty.green, fmt.Sprintf("%d%% AI (%d)", summary.AIPercentage, summary.AILines)),
-		sty.render(sty.dim, "·"),
-		fmt.Sprintf("%d%% human (%d)", summary.HumanPercentage, summary.HumanLines),
+		sty.render(sty.cyan, fmt.Sprintf("%d%% linked to a checkpoint (%d)", summary.CheckpointPercentage, summary.CheckpointLines)),
 	)
-	if summary.MixedLines > 0 {
-		fmt.Fprintf(w, " %s %s", sty.render(sty.dim, "·"), sty.render(sty.yellow, fmt.Sprintf("%d%% mixed (%d)", summary.MixedPercentage, summary.MixedLines)))
+	if summary.UncommittedLines > 0 {
+		fmt.Fprintf(w, " %s %s", sty.render(sty.dim, "·"), sty.render(sty.dim, fmt.Sprintf("%d uncommitted", summary.UncommittedLines)))
 	}
 	fmt.Fprintln(w)
 
@@ -1264,29 +1323,16 @@ func checkpointLineCounts(lines []attributionLine) []checkpointLineCount {
 	return out
 }
 
-// renderByAuthorship applies the authorship colour to text. Human and any
-// unknown authorship render plain.
-func renderByAuthorship(sty statusStyles, authorship attributionAuthorship, text string) string {
-	switch authorship {
-	case attributionAI:
-		return sty.render(sty.green, text)
-	case attributionMixed:
-		return sty.render(sty.yellow, text)
-	case attributionUncommitted:
+// renderByStatus dims uncommitted lines; everything else renders plain.
+func renderByStatus(sty statusStyles, status attributionLineStatus, text string) string {
+	if status == lineStatusUncommitted {
 		return sty.render(sty.dim, text)
-	case attributionHuman:
-		return text
-	default:
-		return text
 	}
-}
-
-func renderAttributionTag(sty statusStyles, authorship attributionAuthorship) string {
-	return renderByAuthorship(sty, authorship, attributionTag(authorship))
+	return text
 }
 
 func renderAttributionContent(sty statusStyles, line attributionLine) string {
-	return renderByAuthorship(sty, line.Authorship, stringutil.TruncateRunes(line.Content, 120, "..."))
+	return renderByStatus(sty, line.Status, stringutil.TruncateRunes(line.Content, 120, "..."))
 }
 
 func maxAttributionLineNumber(lines []attributionLine) int {
@@ -1303,23 +1349,7 @@ func attributionLineColumnWidth(lines []attributionLine) int {
 	return max(len("Line"), len(strconv.Itoa(maxAttributionLineNumber(lines))))
 }
 
-func attributionTag(authorship attributionAuthorship) string {
-	switch authorship {
-	case attributionAI:
-		return "[AI]"
-	case attributionMixed:
-		return "[MX]"
-	case attributionUncommitted:
-		return "[??]"
-	case attributionHuman:
-		return "[HU]"
-	default:
-		return "[HU]"
-	}
-}
-
 // applyPreferredToLine copies the preferred candidate's metadata onto the line.
-// It does not touch line.Authorship; callers decide how Mixed maps to authorship.
 func applyPreferredToLine(line *attributionLine, preferred *attributionCandidate) {
 	if preferred == nil {
 		return
@@ -1334,19 +1364,6 @@ func applyPreferredToLine(line *attributionLine, preferred *attributionCandidate
 	line.MetadataMissingReason = preferred.MetadataMissingReason
 	line.SessionFallback = preferred.SessionFallback
 	line.PromptSessionLevel = preferred.PromptSessionLevel
-}
-
-// authorshipForPreferred maps the preferred candidate to a line's authorship.
-// A committed line that carries a checkpoint trailer is [AI]; it is [MX] only
-// when the candidate that actually produced it (the session whose work touched
-// this file) reflects mixed AI+human work. Both the initial blame resolution
-// and the why-time remote enrichment use this single rule, so a line never
-// changes tag between `entire blame` and `entire why`.
-func authorshipForPreferred(preferred *attributionCandidate) attributionAuthorship {
-	if preferred != nil && preferred.Mixed {
-		return attributionMixed
-	}
-	return attributionAI
 }
 
 func preferredAttributionCandidate(candidates []attributionCandidate, file string) *attributionCandidate {
@@ -1385,15 +1402,6 @@ func normalizeGitPath(path string) string {
 	path = strings.TrimSpace(path)
 	path = strings.TrimPrefix(path, "/")
 	return filepath.ToSlash(path)
-}
-
-func attributionIsMixed(attr *checkpoint.Attribution) bool {
-	if attr == nil {
-		return false
-	}
-	agentChanged := attr.AgentLines+attr.AgentRemoved > 0
-	humanChanged := attr.HumanAdded+attr.HumanModified+attr.HumanRemoved > 0
-	return agentChanged && humanChanged
 }
 
 func shortCheckpointSession(line attributionLine) string {

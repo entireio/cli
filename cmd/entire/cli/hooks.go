@@ -10,7 +10,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
-	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
 // SubagentCheckpointHookInput represents the JSON input from PostToolUse hooks for
@@ -103,51 +102,4 @@ func isBackgroundLaunch(ctx context.Context, event *agent.Event) bool {
 	logging.Warn(ctx, "unrecognized run_in_background value; treating as foreground",
 		slog.String("type", fmt.Sprintf("%T", value)))
 	return false
-}
-
-// todoWriteToolInput represents the tool_input structure for the TodoWrite tool.
-// Used to extract the todos array for the strategy-package todo helpers.
-type todoWriteToolInput struct {
-	Todos json.RawMessage `json:"todos"`
-}
-
-// ExtractLastCompletedTodoFromToolInput extracts the content of the last completed todo item.
-// In PostToolUse[TodoWrite], the tool_input contains the NEW todo list where the
-// just-finished work is marked as "completed". The last completed item represents
-// the work that was just done.
-//
-// Returns empty string if no completed items exist or JSON is invalid.
-func ExtractLastCompletedTodoFromToolInput(toolInput json.RawMessage) string {
-	if len(toolInput) == 0 {
-		return ""
-	}
-
-	// First extract the todos array from tool_input
-	var input todoWriteToolInput
-	if err := json.Unmarshal(toolInput, &input); err != nil {
-		return ""
-	}
-
-	// Delegate to strategy package for the actual extraction logic
-	return strategy.ExtractLastCompletedTodo(input.Todos)
-}
-
-// CountTodosFromToolInput returns the number of todo items in the TodoWrite tool_input.
-// Returns 0 if the JSON is invalid or empty.
-//
-// This function unwraps the outer tool_input object to extract the todos array,
-// then delegates to strategy.CountTodos for the actual count.
-func CountTodosFromToolInput(toolInput json.RawMessage) int {
-	if len(toolInput) == 0 {
-		return 0
-	}
-
-	// First extract the todos array from tool_input
-	var input todoWriteToolInput
-	if err := json.Unmarshal(toolInput, &input); err != nil {
-		return 0
-	}
-
-	// Delegate to strategy package for the actual count
-	return strategy.CountTodos(input.Todos)
 }

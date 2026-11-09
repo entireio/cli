@@ -12,6 +12,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/internal/coreapi"
 )
 
@@ -37,6 +38,7 @@ func newRepoCmd() *cobra.Command {
 	cmd.AddCommand(newRepoRemoteCmd())
 	cmd.AddCommand(newRepoVisibilityCmd())
 	cmd.AddCommand(newRepoProtectionCmd())
+	cmd.AddCommand(newDefaultBranchCmd())
 	cmd.AddCommand(newRepoGrantCmd())
 	return requireSubcommand(cmd)
 }
@@ -303,11 +305,11 @@ and recovery instructions go to stderr.`,
 					return err
 				}
 				req.projectID, req.projectName = project.ID, project.Name
-				created, err := createRepo(ctx, c, req)
+				created, commitToken, err := createRepo(ctx, c, req)
 				if err != nil {
 					return err
 				}
-				return finishRepoCreate(ctx, cmd, c, req, created, opts)
+				return finishRepoCreate(ctx, cmd, c, req, created, commitToken, opts)
 			})
 		},
 	}
@@ -449,11 +451,20 @@ func newRepoListCmd() *cobra.Command {
 func newRepoViewCmd() *cobra.Command {
 	var authoritative bool
 	cmd := &cobra.Command{
-		Use:   "view <repo>",
+		Use:   "view [repo]",
 		Short: "Show a repository and every cluster holding a copy of it",
 		Long: "Show a repository: its identity, visibility, and one row per cluster " +
 			"it is placed on, with that cluster's clone URL and status.\n\n" +
-			"<repo> names its forge, and nothing else addresses a repository here:\n\n" +
+			"With no repository argument, resolve the current clone's origin remote.\n" +
+			"--json includes repoId and apiUrl for the responsible API cell when resolvable.\n\n" +
+			"A GitHub mirror whose owner refused the Entire app's access while syncing " +
+			"(an org IP allow list, or a suspension Entire hit mid-sync; a suspension " +
+			"GitHub reported directly shows as placement status suspended instead) " +
+			"shows a Sync section with the fix and the resync command; --json carries " +
+			"it as syncBlock. When that read fails " +
+			"the text view prints a note and --json sets syncStatus to \"unavailable\", " +
+			"so a missing syncBlock means not blocked only when syncStatus is absent.\n\n" +
+			"An explicit <repo> names its forge:\n\n" +
 			"  - /et/<project>/<repo> — an Entire-native repo, shown with its\n" +
 			"    primary cluster and each mirror of it, plus how far a seed in\n" +
 			"    progress has got\n" +
@@ -469,14 +480,24 @@ func newRepoViewCmd() *cobra.Command {
 			"A native repo's state is read authoritatively, so the primary's STATUS " +
 			"says whether it is usable. Pass --authoritative to fail rather than " +
 			"dash that cell when the server cannot answer.",
-		Example: "  entire repo view /et/acme/web\n" +
+		Example: "  entire repo view --json\n" +
+			"  entire repo view /et/acme/web\n" +
 			"  entire repo view /gh/octocat/hello-world\n" +
 			"  entire repo view /et/acme/web --json\n" +
 			"  entire repo view entire://aws-us-east-2.entire.io/et/acme/web",
-		Args: cobra.ExactArgs(1),
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cmd.SilenceUsage = true
-			ref := strings.TrimSpace(args[0])
+			var ref string
+			if len(args) == 0 {
+				var err error
+				ref, err = currentRepoViewRef(cmd.Context())
+				if err != nil {
+					return err
+				}
+			} else {
+				ref = strings.TrimSpace(args[0])
+			}
 			// A clone URL names its own cluster, so it is looked up on the core
 			// fronting that cluster. Recognised by its scheme so a malformed one
 			// keeps the clone-URL parser's reason instead of being reported as a
@@ -514,6 +535,32 @@ func newRepoViewCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&authoritative, "authoritative", false, "Fail if the server cannot confirm provisioning state")
 	addJSONFlag(cmd)
 	return cmd
+}
+
+// Keep Entire clone URLs intact so the normal view path selects the login
+// server fronting that cluster, including origins in another federation.
+func currentRepoViewRef(ctx context.Context) (string, error) {
+	if _, err := paths.WorktreeRoot(ctx); err != nil {
+		if errors.Is(err, paths.ErrNotARepository) {
+			return "", fmt.Errorf("not in a git repository; pass /gh/<owner>/<repo> or /et/<project>/<repo> explicitly: %w", err)
+		}
+		return "", fmt.Errorf("resolve current git repository: %w", err)
+	}
+	remoteURL, err := gitremote.GetRemoteURL(ctx, "origin")
+	if err != nil {
+		return "", fmt.Errorf("%w; pass /gh/<owner>/<repo> or /et/<project>/<repo> explicitly", err)
+	}
+	if strings.HasPrefix(strings.ToLower(remoteURL), entireCloneURLScheme) {
+		return remoteURL, nil
+	}
+	forge, owner, repo, err := gitremote.ResolveRemoteRepo(ctx, "origin")
+	if err != nil {
+		return "", fmt.Errorf("resolve origin remote: %w", err)
+	}
+	if forge != mirrorCloneForge {
+		return "", errors.New("origin must name a GitHub or Entire repository; pass a /gh/ or /et/ repository reference explicitly")
+	}
+	return "/gh/" + owner + "/" + repo, nil
 }
 
 // repoVisibility is the field/JSON view shared by `visibility get` and

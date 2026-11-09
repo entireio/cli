@@ -121,23 +121,3 @@ func setRunner(tg agent.TextGenerator, runner agent.TextCommandRunner) {
 		a.CommandRunner = runner
 	}
 }
-
-// At least one agent must implement Launcher. This test also documents the
-// contract: the Launch call blocks until the agent subprocess exits.
-func TestLauncher_AtLeastOneImplementor(t *testing.T) {
-	t.Parallel()
-	var found bool
-	for _, name := range agent.List() {
-		a, err := agent.Get(name)
-		if err != nil {
-			t.Fatalf("get %q: %v", name, err)
-		}
-		if _, ok := a.(agent.Launcher); ok {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatal("no agent implements Launcher — entire review cannot spawn")
-	}
-}

@@ -28,26 +28,30 @@ func TestCleanCurrentHead(t *testing.T) {
 		sessionStatesBefore := sessionStateFiles(t, s.Dir)
 		require.NotEmpty(t, sessionStatesBefore, "expected session state files before clean")
 
-		shadowBranchesBefore := testutil.ShadowBranches(t, s.Dir)
-		require.NotEmpty(t, shadowBranchesBefore, "expected shadow branches before clean")
+		// A shadow branch an older CLI version left behind: nothing writes
+		// these anymore, and `entire clean` removes them.
+		const legacyBranch = "entire/1234567-abcdef"
+		s.Git(t, "branch", legacyBranch)
 
 		dryRunOut := entire.CleanDryRun(t, s.Dir)
 		assert.Contains(t, dryRunOut, "Would clean the following items:")
 		assert.Contains(t, dryRunOut, "Session states")
-		assert.Contains(t, dryRunOut, "Shadow branch")
+		assert.Contains(t, dryRunOut, "Legacy shadow branches")
+		assert.Contains(t, dryRunOut, legacyBranch)
 		assert.Contains(t, dryRunOut, "Run without --dry-run to clean these items.")
 
 		assert.ElementsMatch(t, sessionStatesBefore, sessionStateFiles(t, s.Dir),
 			"dry-run should not delete session state files")
-		assert.ElementsMatch(t, shadowBranchesBefore, testutil.ShadowBranches(t, s.Dir),
-			"dry-run should not delete shadow branches")
+		_, err = testutil.GitOutputErr(s.Dir, "rev-parse", "--verify", "refs/heads/"+legacyBranch)
+		require.NoError(t, err, "dry-run should not delete the legacy shadow branch")
 
 		cleanOut := entire.CleanForce(t, s.Dir)
 		assert.Contains(t, cleanOut, "Cleared session state")
-		assert.Contains(t, cleanOut, "Deleted shadow branch")
+		assert.Contains(t, cleanOut, "Deleted legacy shadow branch "+legacyBranch)
 
 		assert.Empty(t, sessionStateFiles(t, s.Dir), "clean should remove current HEAD session state files")
-		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
+		_, err = testutil.GitOutputErr(s.Dir, "rev-parse", "--verify", "refs/heads/"+legacyBranch)
+		assert.Error(t, err, "clean should delete the legacy shadow branch")
 	})
 }
 

@@ -6,15 +6,12 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"charm.land/huh/v2"
 	"github.com/spf13/cobra"
 
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
-	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/uiform"
 )
 
@@ -100,7 +97,24 @@ func runPromptForm(cmd *cobra.Command, form *huh.Form) (render io.Writer, err er
 // set, on the writer the form renders on: what the question asks about follows
 // the prompt rather than the command's output.
 func runPromptFormWithPreamble(cmd *cobra.Command, form *huh.Form, preamble func(io.Writer) error) (render io.Writer, err error) {
-	render = cmd.ErrOrStderr()
+	return runPromptFormOn(cmd.Context(), cmd.ErrOrStderr(), form, preamble)
+}
+
+// runPromptFormOn is runPromptFormWithPreamble for callers that hold the
+// command's context and error stream rather than the command itself.
+func runPromptFormOn(ctx context.Context, errOut io.Writer, form *huh.Form, preamble func(io.Writer) error) (render io.Writer, err error) {
+	return runPromptFormThen(ctx, errOut, form, preamble, nil)
+}
+
+// runPromptFormThen is runPromptFormOn that, once the form has run, hands its
+// error (nil when answered) to then on the render writer before releasing the
+// terminal. The writer returned by the others may be a fallback terminal that
+// is already closed, so whatever follows the form — an abort's "cancelled"
+// line, the action an answer sets off, the report of how it went — belongs in
+// then, or it is written to nothing. then's error is returned as is; then is
+// not called when the terminal cannot be opened, since no form ran.
+func runPromptFormThen(ctx context.Context, errOut io.Writer, form *huh.Form, preamble func(io.Writer) error, then func(io.Writer, error) error) (render io.Writer, err error) {
+	render = errOut
 	if !interactive.IsTerminalWriter(render) {
 		term, terr := openPromptTerminal()
 		if terr != nil {
@@ -126,7 +140,11 @@ func runPromptFormWithPreamble(cmd *cobra.Command, form *huh.Form, preamble func
 	// Returned unwrapped: every caller classifies it, matching huh's own
 	// sentinels through handleFormCancellation, and wraps whatever survives
 	// with the name of the thing being prompted for.
-	return render, form.WithOutput(render).RunWithContext(cmd.Context()) //nolint:wrapcheck // classified and wrapped by the caller
+	formErr := form.WithOutput(render).RunWithContext(ctx)
+	if then != nil {
+		return render, then(render, formErr)
+	}
+	return render, formErr //nolint:wrapcheck // classified and wrapped by the caller
 }
 
 // printSessionCommand writes a single session resume command line to w.
@@ -150,109 +168,6 @@ func printSessionCommand(w io.Writer, resumeCmd, prompt string, isMulti, isLast 
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
-}
-
-// copyFile copies a file from src to dst using os.Root for traversal-resistant
-// writes (Go 1.24+). dst must be absolute and reside under either the repo
-// worktree root, the user's home directory (for agent session dirs such as
-// ~/.claude/), or the system temp directory (used during tests).
-// The kernel enforces that the write cannot escape the allowed directory,
-// eliminating TOCTOU races and symlink escapes.
-func copyFile(src, dst string) error {
-	src = filepath.Clean(src)
-	dst = filepath.Clean(dst)
-
-	if !filepath.IsAbs(dst) {
-		return fmt.Errorf("copyFile: dst must be absolute, got %q", dst)
-	}
-
-	input, err := os.ReadFile(src)
-	if err != nil {
-		return err //nolint:wrapcheck // already present in codebase
-	}
-
-	root, relPath, err := openAllowedRoot(dst)
-	if err != nil {
-		return err
-	}
-	defer root.Close()
-
-	if err := jsonutil.WriteFileAtomicIn(root, relPath, input, 0o600); err != nil {
-		return fmt.Errorf("failed to write file: %w", err)
-	}
-	return nil
-}
-
-// openAllowedRoot finds the allowed root directory that contains dst and returns
-// an os.Root handle along with the relative path within that root.
-//
-// The root's base is always one of three directories resolved independently of
-// dst — the worktree root, the user's home, the system temp dir — never
-// filepath.Dir(dst). dst only selects WHICH of them applies and supplies the
-// name inside it, so a dst that escapes every one of them is refused here rather
-// than opening a root wherever it points.
-// dst is resolved through symlinks before matching to handle macOS /var → /private/var.
-func openAllowedRoot(dst string) (*os.Root, string, error) {
-	allowed := allowedRootDirs()
-
-	// Resolve the directory portion of dst through symlinks so that e.g.
-	// /var/folders/... matches /private/var/folders/... on macOS.
-	// Only the parent directory is resolved; the final component may not exist yet.
-	resolvedDst := dst
-	if r, err := filepath.EvalSymlinks(filepath.Dir(dst)); err == nil {
-		resolvedDst = filepath.Join(r, filepath.Base(dst))
-	}
-
-	for _, dir := range allowed {
-		if !paths.IsSubpath(dir, resolvedDst) {
-			continue
-		}
-		rel, err := filepath.Rel(dir, resolvedDst)
-		if err != nil {
-			continue
-		}
-		// A PRIVATE root, deliberately not osroot.Shared. Two of the three
-		// candidate bases are the user's home and the system temp dir, which have
-		// no business sharing a lifecycle with .entire: ResetShared closes every
-		// cached root, so routing this through the registry let an unrelated
-		// `entire disable` — or, in tests, any parallel entiredir.Reset — close
-		// the handle out from under a copy in progress. The registry exists to
-		// memoize long-lived anchors, and this is a single write.
-		root, err := os.OpenRoot(dir)
-		if err != nil {
-			return nil, "", fmt.Errorf("openAllowedRoot: failed to open root %q: %w", dir, err)
-		}
-		return root, filepath.ToSlash(rel), nil
-	}
-
-	return nil, "", fmt.Errorf("openAllowedRoot: dst %q is outside allowed directories", dst)
-}
-
-// allowedRootDirs returns the list of directories that copyFile may write to.
-// Directories are resolved through symlinks so they match resolved dst paths.
-func allowedRootDirs() []string {
-	allowed := make([]string, 0, 3)
-
-	if repoRoot, err := paths.WorktreeRoot(context.Background()); err == nil {
-		allowed = appendResolved(allowed, repoRoot)
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		allowed = appendResolved(allowed, home)
-	}
-	if tmpDir := os.TempDir(); tmpDir != "" {
-		allowed = appendResolved(allowed, tmpDir)
-	}
-
-	return allowed
-}
-
-// appendResolved appends dir to the list after resolving symlinks.
-// Falls back to the original path if symlink resolution fails.
-func appendResolved(dirs []string, dir string) []string {
-	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
-		return append(dirs, resolved)
-	}
-	return append(dirs, dir)
 }
 
 // confirmPrompt asks one yes/no question through runPromptFormWithPreamble.

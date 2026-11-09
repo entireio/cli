@@ -67,3 +67,73 @@ func TestIsTransient(t *testing.T) {
 		}
 	}
 }
+
+func TestWalkAncestry_Completeness(t *testing.T) {
+	t.Parallel()
+
+	// parents maps a PID to its parent; a missing PID fails the stat.
+	statFrom := func(parents map[int]int) statFunc {
+		return func(pid int) (int, string, string, error) {
+			ppid, ok := parents[pid]
+			if !ok {
+				return 0, "", "", errProcessGone
+			}
+			return ppid, "p", "start", nil
+		}
+	}
+
+	for _, tc := range []struct {
+		name     string
+		parents  map[int]int
+		limit    int
+		wantLen  int
+		complete bool
+	}{
+		{"reaches init", map[int]int{30: 20, 20: 1}, 64, 2, true},
+		{"reaches init exactly at the limit", map[int]int{30: 20, 20: 1}, 2, 2, true},
+		{"cut off by the limit", map[int]int{30: 20, 20: 10, 10: 1}, 2, 2, false},
+		{"stat failure mid-walk", map[int]int{30: 20}, 64, 1, false},
+		{"parent outside the PID namespace", map[int]int{30: 20, 20: 0}, 64, 2, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			chain, complete := walkAncestry(statFrom(tc.parents), 30, "", "h", tc.limit)
+			if len(chain) != tc.wantLen || complete != tc.complete {
+				t.Fatalf("walkAncestry = %d entries, complete=%v; want %d, %v", len(chain), complete, tc.wantLen, tc.complete)
+			}
+		})
+	}
+}
+
+func TestAncestryExcludes(t *testing.T) {
+	t.Parallel()
+
+	ancestor := Identity{PID: 42, Start: "100", Host: "host-a"}
+	complete := Ancestry{host: "host-a", boot: "boot-a", chain: []Identity{ancestor}, complete: true}
+	truncated := complete
+	truncated.complete = false
+
+	for _, tc := range []struct {
+		name     string
+		ancestry Ancestry
+		id       Identity
+		want     bool
+	}{
+		{"absent from a complete chain", complete, Identity{PID: 7, Start: "1", Host: "host-a"}, true},
+		{"an ancestor", complete, ancestor, false},
+		{"recycled ancestor PID", complete, Identity{PID: 42, Start: "999", Host: "host-a"}, true},
+		{"absent from a truncated chain", truncated, Identity{PID: 7, Start: "1", Host: "host-a"}, false},
+		{"no start fingerprint", complete, Identity{PID: 7, Host: "host-a"}, false},
+		{"no host", complete, Identity{PID: 7, Start: "1"}, false},
+		{"another host", complete, Identity{PID: 7, Start: "1", Host: "host-b"}, false},
+		{"another boot", complete, Identity{PID: 7, Start: "1", Host: "host-a", Boot: "boot-b"}, false},
+		{"zero identity", complete, Identity{}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.ancestry.Excludes(tc.id); got != tc.want {
+				t.Fatalf("Excludes(%+v) = %v, want %v", tc.id, got, tc.want)
+			}
+		})
+	}
+}

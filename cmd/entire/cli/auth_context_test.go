@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -104,6 +105,29 @@ func TestResolveStatusTarget_FallsBackToStoredWhenRefreshFails(t *testing.T) {
 	}
 	if got.coreURL != testCoreURL || got.activeContext == "" {
 		t.Errorf("want the active context preserved on fallback, got coreURL=%q activeContext=%q", got.coreURL, got.activeContext)
+	}
+}
+
+// A saved login whose keyring cannot be searched is an error, not the
+// zero-token target that `auth status`, `auth token`, `api` and the mirror
+// wizard all render as "Not logged in. Run 'entire login'".
+func TestResolveStatusTarget_UnreachableKeyringErrors(t *testing.T) {
+	cfgDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
+	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
+	t.Cleanup(restore)
+
+	exp := time.Now().Add(time.Hour).Unix()
+	stored := makeContextJWT(t, fmt.Sprintf(`{"iss":"`+testCoreURL+`","handle":"alice","exp":%d}`, exp))
+	if _, err := auth.RecordLoginContext(stored, "", true); err != nil {
+		t.Fatalf("record context: %v", err)
+	}
+	// The login is saved, but the keyring now cannot be searched.
+	t.Cleanup(tokenstore.UseUnreachableKeyringForTesting(filepath.Join(t.TempDir(), "empty.json")))
+
+	_, err := resolveStatusTarget(t.Context(), auth.Contexts, auth.RefreshedLoginToken)
+	if !errors.Is(err, tokenstore.ErrKeyringUnavailable) {
+		t.Fatalf("resolveStatusTarget error = %v, want ErrKeyringUnavailable", err)
 	}
 }
 

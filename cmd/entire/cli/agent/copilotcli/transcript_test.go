@@ -181,18 +181,6 @@ func TestExtractPromptsFromEvents(t *testing.T) {
 	})
 }
 
-func TestExtractSummaryFromEvents(t *testing.T) {
-	t.Parallel()
-
-	t.Run("empty events returns empty string", func(t *testing.T) {
-		t.Parallel()
-		summary := extractSummaryFromEvents(nil)
-		if summary != "" {
-			t.Errorf("expected empty summary, got %q", summary)
-		}
-	})
-}
-
 func TestGetTranscriptPositionCopilot(t *testing.T) {
 	t.Parallel()
 
@@ -348,37 +336,6 @@ func TestExtractPrompts(t *testing.T) {
 	})
 }
 
-func TestExtractSummary(t *testing.T) {
-	t.Parallel()
-	ag := &CopilotCLIAgent{}
-	path := writeTestJSONL(t, testJSONLLines)
-
-	summary, err := ag.ExtractSummary(path)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if summary != "Created hello.txt." {
-		t.Errorf("expected 'Created hello.txt.', got %q", summary)
-	}
-}
-
-func TestExtractSummary_EmptyTranscript(t *testing.T) {
-	t.Parallel()
-	ag := &CopilotCLIAgent{}
-	lines := []string{
-		`{"type":"session.start","data":{"sessionId":"abc123"},"id":"1","timestamp":"2026-03-03T00:00:00Z","parentId":""}`,
-	}
-	path := writeTestJSONL(t, lines)
-
-	summary, err := ag.ExtractSummary(path)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if summary != "" {
-		t.Errorf("expected empty summary, got %q", summary)
-	}
-}
-
 func TestParseEventsFromBytes_MalformedLines(t *testing.T) {
 	t.Parallel()
 	lines := []string{
@@ -396,23 +353,6 @@ func TestParseEventsFromBytes_MalformedLines(t *testing.T) {
 	}
 	if events[1].Type != eventTypeUserMessage {
 		t.Errorf("expected second event type %q, got %q", eventTypeUserMessage, events[1].Type)
-	}
-}
-
-func TestExtractSummary_SkipsEmptyContentAssistantMessages(t *testing.T) {
-	t.Parallel()
-	// Simulates -p (headless) mode where assistant.message has content: ""
-	// and tool requests but no text. Summary should fall back to the earlier
-	// assistant message that has text.
-	lines := []string{
-		`{"type":"assistant.message","data":{"content":"I'll create that file.","toolRequests":[{"toolCallId":"tc1"}]},"id":"1","timestamp":"2026-03-03T00:00:00Z","parentId":""}`,
-		`{"type":"assistant.message","data":{"content":"","toolRequests":[{"toolCallId":"tc2"}]},"id":"2","timestamp":"2026-03-03T00:00:01Z","parentId":""}`,
-	}
-	content := strings.Join(lines, "\n") + "\n"
-	events, _ := parseEventsFromBytes([]byte(content)) //nolint:errcheck // test input is always valid
-	summary := extractSummaryFromEvents(events)
-	if summary != "I'll create that file." {
-		t.Errorf("expected summary from earlier message, got %q", summary)
 	}
 }
 

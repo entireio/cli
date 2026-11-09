@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
@@ -20,15 +22,69 @@ import (
 
 type persistentRefBuilder func() (newHash, expectedHash plumbing.Hash, err error)
 
-// casUpdateRef adapts precise native Git CAS outcomes to the legacy retry
-// sentinel used by checkpoint writers.
+// ErrRefBusy is returned when a checkpoint ref changed or its native Git lock
+// is held. Checkpoint writers retry with a fresh read.
+var ErrRefBusy = errors.New("checkpoint ref busy")
+
+// refCASMaxRetries bounds a checkpoint ref writer's retry loop. With the
+// per-ref flock held, our own writers never collide; this budget is purely a
+// safety net against an external `git update-ref` writer that repeatedly beats
+// us to the ref.
+const refCASMaxRetries = 16
+
+// refCASMaxJitter is the upper bound for randomized backoff between CAS
+// retries. Random jitter avoids thundering-herd retry patterns when many
+// writers hit the same ref simultaneously.
+const refCASMaxJitter = 8 * time.Millisecond
+
+// refCASBackoff sleeps for a small random jitter before the next CAS retry.
+// After several retries the upper bound doubles to slow the thundering herd
+// further. Respects context cancellation.
+func refCASBackoff(ctx context.Context, attempt int) error {
+	base := refCASMaxJitter
+	if attempt > 4 {
+		base *= 2
+	}
+	// Add a 1ms floor so the chosen sleep is always non-trivial, even when
+	// rand.Int64N happens to return 0.
+	d := time.Duration(rand.Int64N(int64(base))) + time.Millisecond //nolint:gosec // jitter, not security-sensitive
+	select {
+	case <-time.After(d):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err() //nolint:wrapcheck // canonical context cancellation
+	}
+}
+
+// tryDeleteLooseObject best-effort removes a loose object file. Used to
+// clean up dangling commits created during a CAS-losing attempt. Failures
+// (e.g. object already packed by a concurrent gc, or never written as a
+// loose object) are ignored — the object will be picked up by the next gc
+// pass either way.
+func tryDeleteLooseObject(commonDir string, hash plumbing.Hash) {
+	h := hash.String()
+	if len(h) < 3 {
+		return
+	}
+	// Through the common dir's root: a delete is the operation least worth
+	// leaving on a joined path. The hash is hex, so nothing here can traverse
+	// today; the root is what keeps that true without depending on it.
+	root, err := gitdir.OpenAt(commonDir)
+	if err != nil {
+		return
+	}
+	_ = osroot.RemoveNoSymlinks(root, "objects/"+h[:2]+"/"+h[2:]) //nolint:errcheck // best-effort; see doc comment
+}
+
+// casUpdateRef adapts precise native Git CAS outcomes to the retry sentinel
+// used by checkpoint writers.
 func casUpdateRef(ctx context.Context, repoRoot string, refName plumbing.ReferenceName, newHash, expectedHash plumbing.Hash) error {
 	err := gitrepo.CompareAndSwapRef(ctx, repoRoot, refName, newHash, expectedHash)
 	if err == nil {
 		return nil
 	}
 	if !errors.Is(err, gitrepo.ErrRefSymbolic) && (errors.Is(err, gitrepo.ErrRefCASConflict) || errors.Is(err, gitrepo.ErrRefLocked)) {
-		return fmt.Errorf("%w: %w", ErrShadowRefBusy, err)
+		return fmt.Errorf("%w: %w", ErrRefBusy, err)
 	}
 	return fmt.Errorf("compare and swap ref %s: %w", refName, err)
 }
@@ -105,7 +161,7 @@ func retryPersistentRefLockContention(
 	update func() error,
 ) error {
 	var lockErr error
-	for attempt := range shadowRefMaxRetries {
+	for attempt := range refCASMaxRetries {
 		refErr := update()
 		if refErr == nil {
 			return nil
@@ -114,14 +170,14 @@ func retryPersistentRefLockContention(
 			return refErr
 		}
 		lockErr = refErr
-		if attempt+1 == shadowRefMaxRetries {
+		if attempt+1 == refCASMaxRetries {
 			break
 		}
-		if backoffErr := shadowRefBackoff(ctx, attempt); backoffErr != nil {
+		if backoffErr := refCASBackoff(ctx, attempt); backoffErr != nil {
 			return backoffErr
 		}
 	}
-	return fmt.Errorf("update persistent ref %s after %d lock attempts: %w", refName, shadowRefMaxRetries, lockErr)
+	return fmt.Errorf("update persistent ref %s after %d lock attempts: %w", refName, refCASMaxRetries, lockErr)
 }
 
 // updatePersistentRef serializes Entire writers for one ref and retains a CAS
@@ -129,7 +185,7 @@ func retryPersistentRefLockContention(
 // conflict, so each retry reconstructs its tree and commit from the fresh tip.
 func updatePersistentRef(ctx context.Context, repo *git.Repository, refName plumbing.ReferenceName, build persistentRefBuilder) error {
 	return withLockedPersistentRef(ctx, repo, refName, func(repoRoot, commonDir string) error {
-		for attempt := range shadowRefMaxRetries {
+		for attempt := range refCASMaxRetries {
 			newHash, expectedHash, buildErr := build()
 			if buildErr != nil {
 				return buildErr
@@ -139,14 +195,14 @@ func updatePersistentRef(ctx context.Context, repo *git.Repository, refName plum
 			if refErr == nil {
 				return nil
 			}
-			if !errors.Is(refErr, ErrShadowRefBusy) {
+			if !errors.Is(refErr, ErrRefBusy) {
 				return fmt.Errorf("update persistent ref %s: %w", refName, refErr)
 			}
 			if newHash != expectedHash {
 				tryDeleteLooseObject(commonDir, newHash)
 			}
 
-			if backoffErr := shadowRefBackoff(ctx, attempt); backoffErr != nil {
+			if backoffErr := refCASBackoff(ctx, attempt); backoffErr != nil {
 				return backoffErr
 			}
 		}
@@ -154,8 +210,8 @@ func updatePersistentRef(ctx context.Context, repo *git.Repository, refName plum
 		logging.Warn(logging.WithComponent(ctx, "checkpoint"),
 			"persistent ref CAS retry budget exhausted",
 			slog.String("ref", refName.String()),
-			slog.Int("retries", shadowRefMaxRetries),
+			slog.Int("retries", refCASMaxRetries),
 		)
-		return fmt.Errorf("failed to update persistent ref %s after %d CAS retries: %w", refName, shadowRefMaxRetries, ErrShadowRefBusy)
+		return fmt.Errorf("failed to update persistent ref %s after %d CAS retries: %w", refName, refCASMaxRetries, ErrRefBusy)
 	})
 }

@@ -104,17 +104,24 @@ func repoCreateFlagsGiven(cmd *cobra.Command) bool {
 }
 
 // createRepo sends the create request and returns the created repo in the
-// shape the readiness wait and the report share.
-func createRepo(ctx context.Context, c *coreapi.Client, req repoCreateRequest) (*coreapi.Repo, error) {
+// shape the readiness wait and the report share, with the create's commit
+// token for the readiness reads.
+func createRepo(ctx context.Context, c *coreapi.Client, req repoCreateRequest) (*coreapi.Repo, string, error) {
 	body := &coreapi.CreateRepoInputBody{Name: req.name, ProjectId: req.projectID}
 	if req.objectFormat != "" {
 		body.ObjectFormat = coreapi.NewOptCreateRepoInputBodyObjectFormat(req.objectFormat)
 	}
 	response, err := c.CreateRepo(ctx, body)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return createdRepoAsRepo(&response.Response)
+	created, err := createdRepoAsRepo(&response.Response)
+	if err != nil {
+		return nil, "", err
+	}
+	// The header is the token; the body copy is deprecated. Empty when the
+	// server sent none, and the readiness reads then go without.
+	return created, strings.TrimSpace(response.XEntireCommitToken.Or("")), nil
 }
 
 // isRepoCreateConflict reports the server refusing a create with a 409. A
@@ -149,11 +156,11 @@ func isRepoCreateRefusal(err error) bool {
 // Visibility is set after the wait, or straight away with --no-wait: core
 // accepts it on a provisioning repo (its records exist once the create
 // returns, and the visibility write does not look at the repo's state).
-func finishRepoCreate(ctx context.Context, cmd *cobra.Command, c *coreapi.Client, req repoCreateRequest, created *coreapi.Repo, opts repoCreateOptions) error {
+func finishRepoCreate(ctx context.Context, cmd *cobra.Command, c *coreapi.Client, req repoCreateRequest, created *coreapi.Repo, commitToken string, opts repoCreateOptions) error {
 	var waitErr error
 	if !opts.noWait {
 		var finish func(bool)
-		waitErr = awaitRepoActive(ctx, c, created, func() {
+		waitErr = awaitRepoActive(ctx, c, created, commitToken, func() {
 			finish = startSpinner(cmd.ErrOrStderr(), "Waiting for repository "+created.Name+" to become active")
 		})
 		if finish != nil {

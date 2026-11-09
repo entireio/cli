@@ -5,13 +5,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 const (
@@ -113,36 +114,6 @@ func (f *fakeRunner) hasCall(match func(fakeCall) bool) bool {
 		}
 	}
 	return false
-}
-
-func TestGhHelpers(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	r := newFakeRunner()
-
-	r.set("gh", []string{"--version"}, "gh version 2.81.0\n", nil)
-	r.set("gh", []string{"auth", "status"}, "Logged in", nil)
-	r.set("gh", []string{"api", "user", "--jq", ".login"}, "octocat\n", nil)
-
-	if !ghAvailable(ctx, r) {
-		t.Fatal("ghAvailable should be true")
-	}
-	if !ghAuthenticated(ctx, r) {
-		t.Fatal("ghAuthenticated should be true")
-	}
-	user, err := ghCurrentUser(ctx, r)
-	if err != nil || user != testUser {
-		t.Fatalf("ghCurrentUser = %q, %v; want octocat", user, err)
-	}
-}
-
-func TestGhAvailable_Missing(t *testing.T) {
-	t.Parallel()
-	r := newFakeRunner()
-	r.set("gh", []string{"--version"}, "", errors.New("not found"))
-	if ghAvailable(context.Background(), r) {
-		t.Fatal("expected ghAvailable to return false when gh is missing")
-	}
 }
 
 func TestDoInitialCommit_EmptyFolder(t *testing.T) {

@@ -12,7 +12,6 @@ import (
 
 	"charm.land/huh/v2"
 	"github.com/entireio/cli/cmd/entire/cli/agent"
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -21,20 +20,20 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
-	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/spf13/cobra"
 )
 
 func cleanLongDescription() string {
 	description := `Clean up Entire session data for the current HEAD commit.
 
-By default, cleans session state and shadow branches for the current HEAD:
+By default, cleans session state for the current HEAD:
   - Session state files (.git/entire-sessions/<session-id>.json)
-  - Shadow branch (entire/<commit-hash>-<worktree-hash>)
+  - Legacy shadow branches older CLI versions left behind
+    (entire/<commit-hash>-<worktree-hash>)
 
 Use --all to clean all Entire session data across the repository:
   - All session state files (.git/entire-sessions/)
-  - All shadow branches
+  - All legacy shadow branches, including the old entire/<commit-hash> form
   - Temporary files (.entire/tmp/)`
 
 	description += `
@@ -100,32 +99,54 @@ func runCleanCurrentHead(ctx context.Context, cmd *cobra.Command, force, dryRun 
 		return previewCurrentHead(ctx, w)
 	}
 
+	// List exactly what will be deleted: the sessions based on HEAD (whose
+	// state is the only record of their pending agent work) and every
+	// strict-shape legacy shadow branch in the repository. The same listing
+	// backs the confirmation prompt, the active-session refusal, and --force.
+	sessions, legacyBranches, listErr := currentHeadCleanItems(ctx)
+	if listErr != nil {
+		return listErr
+	}
+	if len(sessions) == 0 && len(legacyBranches) == 0 {
+		fmt.Fprintln(w, "Nothing to clean for current HEAD.")
+		return nil
+	}
+
 	// Check for active sessions before cleaning
 	if !force {
+		errW := cmd.ErrOrStderr()
 		activeSessions, err := activeSessionsOnCurrentHead(ctx)
 		if err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not check for active sessions: %v\n", err)
-			fmt.Fprintln(cmd.ErrOrStderr(), "Use --force to override.")
+			fmt.Fprintf(errW, "Warning: could not check for active sessions: %v\n", err)
+			fmt.Fprint(errW, "Cleaning would delete:\n\n")
+			printCurrentHeadCleanItems(errW, sessions, legacyBranches)
+			printCleanForceHint(errW)
 			return nil
 		}
 		if len(activeSessions) > 0 {
-			fmt.Fprintln(cmd.ErrOrStderr(), "Active sessions detected on current HEAD:")
+			fmt.Fprintln(errW, "Active sessions detected on current HEAD:")
 			for _, s := range activeSessions {
-				fmt.Fprintf(cmd.ErrOrStderr(), "  %s (phase: %s)\n", s.SessionID, s.Phase)
+				fmt.Fprintf(errW, "  %s (phase: %s)\n", s.SessionID, s.Phase)
 			}
-			fmt.Fprintln(cmd.ErrOrStderr(), "Use --force to override or wait for sessions to finish.")
+			fmt.Fprint(errW, "\nCleaning would delete:\n\n")
+			printCurrentHeadCleanItems(errW, sessions, legacyBranches)
+			fmt.Fprintln(errW, "Wait for the sessions to finish, or override:")
+			printCleanForceHint(errW)
 			return nil
 		}
 	}
 
-	// Prompt for confirmation
+	fmt.Fprint(w, "This will delete:\n\n")
+	printCurrentHeadCleanItems(w, sessions, legacyBranches)
+
+	// Prompt for confirmation; --force skips it but still lists the items.
 	if !force {
 		var confirmed bool
 
 		form := NewAccessibleForm(
 			huh.NewGroup(
 				huh.NewConfirm().
-					Title("Clean session data for current HEAD?").
+					Title("Delete these items?").
 					Value(&confirmed),
 			),
 		)
@@ -151,61 +172,82 @@ func runCleanCurrentHead(ctx context.Context, cmd *cobra.Command, force, dryRun 
 
 // previewCurrentHead shows what would be cleaned for the current HEAD.
 func previewCurrentHead(ctx context.Context, w io.Writer) error {
-	repo, err := openRepository(ctx)
+	sessions, legacyBranches, err := currentHeadCleanItems(ctx)
 	if err != nil {
 		return err
 	}
-	defer repo.Close()
-
-	head, err := repo.Head()
-	if err != nil {
-		return fmt.Errorf("failed to get HEAD: %w", err)
-	}
-
-	worktreePath, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get worktree path: %w", err)
-	}
-	worktreeID, err := paths.GetWorktreeID(worktreePath)
-	if err != nil {
-		return fmt.Errorf("failed to get worktree ID: %w", err)
-	}
-
-	shadowBranchName := checkpoint.ShadowBranchNameForCommit(head.Hash().String(), worktreeID)
-
-	// Check if shadow branch exists
-	refName := plumbing.NewBranchReferenceName(shadowBranchName)
-	_, refErr := repo.Reference(refName, true)
-	hasShadowBranch := refErr == nil
-
-	// Find sessions for this commit
-	strat := GetStrategy(ctx)
-	sessions, err := strat.FindSessionsForCommit(ctx, head.Hash().String())
-	if err != nil {
-		sessions = nil
-	}
-
-	if !hasShadowBranch && len(sessions) == 0 {
+	if len(legacyBranches) == 0 && len(sessions) == 0 {
 		fmt.Fprintln(w, "Nothing to clean for current HEAD.")
 		return nil
 	}
 
 	fmt.Fprint(w, "Would clean the following items:\n\n")
+	printCurrentHeadCleanItems(w, sessions, legacyBranches)
+	fmt.Fprintln(w, "Run without --dry-run to clean these items.")
+	return nil
+}
 
+// currentHeadCleanItems returns what a plain `entire clean` deletes: the
+// sessions based on the current HEAD and the strict-shape legacy shadow
+// branches anywhere in the repository (the same lists Reset acts on).
+func currentHeadCleanItems(ctx context.Context) ([]*strategy.SessionState, []string, error) {
+	repo, err := openRepository(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer repo.Close()
+
+	head, err := repo.Head()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get HEAD: %w", err)
+	}
+
+	legacyBranches, err := strategy.ListRemovableLegacyShadowBranches(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to list legacy shadow branches: %w", err)
+	}
+
+	sessions, err := GetStrategy(ctx).FindSessionsForCommit(ctx, head.Hash().String())
+	if err != nil {
+		sessions = nil
+	}
+	return sessions, legacyBranches, nil
+}
+
+// printCurrentHeadCleanItems lists the sessions and legacy branches a plain
+// clean deletes, warning when a session still holds pending agent work.
+func printCurrentHeadCleanItems(w io.Writer, sessions []*strategy.SessionState, legacyBranches []string) {
 	if len(sessions) > 0 {
 		fmt.Fprintf(w, "Session states (%d):\n", len(sessions))
+		pending := 0
 		for _, s := range sessions {
-			fmt.Fprintf(w, "  %s (checkpoints: %d)\n", s.SessionID, s.StepCount)
+			fmt.Fprintf(w, "  %s (pending turns: %d)\n", s.SessionID, s.StepCount)
+			if s.HasPendingWork() {
+				pending++
+			}
+		}
+		if pending > 0 {
+			fmt.Fprintf(w, "  %d of these hold agent work not yet committed. Their file changes stay in\n", pending)
+			fmt.Fprintln(w, "  your worktree, but will no longer link to a checkpoint when you commit them.")
 		}
 		fmt.Fprintln(w)
 	}
 
-	if hasShadowBranch {
-		fmt.Fprintf(w, "Shadow branch:\n  %s\n\n", shadowBranchName)
+	if len(legacyBranches) > 0 {
+		fmt.Fprintf(w, "Legacy shadow branches (%d):\n", len(legacyBranches))
+		for _, branch := range legacyBranches {
+			fmt.Fprintf(w, "  %s\n", branch)
+		}
+		fmt.Fprintln(w, "  To delete only these branches and keep session state, run `entire doctor --force`.")
+		fmt.Fprintln(w)
 	}
+}
 
-	fmt.Fprintln(w, "Run without --dry-run to clean these items.")
-	return nil
+// printCleanForceHint tells a refused `entire clean` how to override. The
+// listing above it already names `entire doctor --force` for deleting only the
+// legacy shadow branches.
+func printCleanForceHint(w io.Writer) {
+	fmt.Fprintln(w, "  `entire clean --force` deletes everything listed above.")
 }
 
 // runCleanSession handles the --session flag: clean/reset a single session.
@@ -223,7 +265,7 @@ func runCleanSession(ctx context.Context, cmd *cobra.Command, strat *strategy.Ma
 
 	if dryRun {
 		w := cmd.OutOrStdout()
-		fmt.Fprintf(w, "Would %s session %s (phase: %s, checkpoints: %d)\n", strings.ToLower(actionVerb), sessionID, state.Phase, state.StepCount)
+		fmt.Fprintf(w, "Would %s session %s (phase: %s, pending turns: %d)\n", strings.ToLower(actionVerb), sessionID, state.Phase, state.StepCount)
 		return nil
 	}
 
@@ -231,7 +273,7 @@ func runCleanSession(ctx context.Context, cmd *cobra.Command, strat *strategy.Ma
 		var confirmed bool
 
 		title := fmt.Sprintf("%s session %s?", actionVerb, sessionID)
-		description := fmt.Sprintf("Phase: %s, Checkpoints: %d", state.Phase, state.StepCount)
+		description := fmt.Sprintf("Phase: %s, Pending turns: %d", state.Phase, state.StepCount)
 
 		form := NewAccessibleForm(
 			huh.NewGroup(
@@ -364,7 +406,7 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 		totalItems := len(items) + len(tempFiles) + len(orphanTemps)
 		fmt.Fprintf(w, "Found %d %s to clean:\n\n", totalItems, itemWord(totalItems))
 
-		printSection(w, "Shadow branches", cleanupItemIDs(branches))
+		printSection(w, "Legacy shadow branches", cleanupItemIDs(branches))
 		printSection(w, "Session states", cleanupItemIDs(states))
 		printSection(w, "Checkpoint metadata", cleanupItemIDs(checkpoints))
 		printSection(w, "Redaction cache", cleanupItemIDs(redactCaches))
@@ -415,7 +457,7 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 	if totalDeleted > 0 {
 		fmt.Fprintf(w, "✓ Deleted %d %s:\n", totalDeleted, itemWord(totalDeleted))
 
-		printResultSection(w, "Shadow branches", result.ShadowBranches)
+		printResultSection(w, "Legacy shadow branches", result.ShadowBranches)
 		printResultSection(w, "Session states", result.SessionStates)
 		printResultSection(w, "Checkpoints", result.Checkpoints)
 
@@ -427,7 +469,7 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 	if totalFailed > 0 {
 		fmt.Fprintf(errW, "\nFailed to delete %d %s:\n", totalFailed, itemWord(totalFailed))
 
-		printResultSection(errW, "Shadow branches", result.FailedBranches)
+		printResultSection(errW, "Legacy shadow branches", result.FailedBranches)
 		printResultSection(errW, "Session states", result.FailedStates)
 		printResultSection(errW, "Checkpoints", result.FailedCheckpoints)
 

@@ -58,9 +58,9 @@ type PersistentStore interface {
 // unexported isWriteRequest marker. A store dispatches on the concrete type; a
 // mirror/fan-out store forwards the same value to each backend's Write.
 //
-// Four requests are session-level (Session, ReservedSession, SessionTranscript,
-// SessionSummary) and one is checkpoint-level (CheckpointAttribution). Adding
-// a write operation is a new request type plus one dispatch case in every
+// Four requests are session-level (Session, ReservedSession,
+// SessionTranscript, SessionSummary); Tasks is checkpoint-level.
+// Adding a write operation is a new request type plus one dispatch case in every
 // backend. The Store interface stays unchanged, so seam tests must exercise the
 // full union because Go does not exhaustively check type switches.
 type WriteRequest interface {
@@ -87,20 +87,22 @@ type SessionSummary struct {
 	Summary      *Summary
 }
 
-// CheckpointAttribution rewrites the checkpoint root's combined attribution
-// across all sessions. (checkpoint-level)
-//
-//nolint:revive // CheckpointAttribution stutter is accepted — the name makes the checkpoint (vs session) tier explicit.
-type CheckpointAttribution struct {
+// Tasks adds subagent task records to an existing checkpoint without
+// touching its sessions, replacing any stored task with the same tool use ID.
+// A foreground subagent that commits its own work finishes after that commit's
+// checkpoint was written, so its record can only be added afterwards. Never
+// creates a checkpoint: an absent one is ErrCheckpointNotFound.
+// (checkpoint-level)
+type Tasks struct {
 	CheckpointID id.CheckpointID
-	Attribution  *Attribution
+	Tasks        []TaskPayload
 }
 
-func (Session) isWriteRequest()               {}
-func (ReservedSession) isWriteRequest()       {}
-func (SessionTranscript) isWriteRequest()     {}
-func (SessionSummary) isWriteRequest()        {}
-func (CheckpointAttribution) isWriteRequest() {}
+func (Session) isWriteRequest()           {}
+func (ReservedSession) isWriteRequest()   {}
+func (SessionTranscript) isWriteRequest() {}
+func (SessionSummary) isWriteRequest()    {}
+func (Tasks) isWriteRequest()             {}
 
 // Writer is the persistent-store write surface: a single Write that accepts any
 // WriteRequest. It is the natural type for mirror fan-out.

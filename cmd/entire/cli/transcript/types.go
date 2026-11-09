@@ -4,18 +4,6 @@ package transcript
 
 import "encoding/json"
 
-// Message type constants for transcript lines.
-const (
-	TypeUser      = "user"
-	TypeAssistant = "assistant"
-)
-
-// Content type constants for content blocks within messages.
-const (
-	ContentTypeText    = "text"
-	ContentTypeToolUse = "tool_use"
-)
-
 // Line represents a single line in a Claude Code or Cursor JSONL transcript.
 // Claude Code uses "type" to distinguish user/assistant messages.
 // Cursor uses "role" for the same purpose.

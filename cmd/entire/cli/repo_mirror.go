@@ -18,6 +18,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/internal/coreapi"
 )
 
@@ -188,6 +189,13 @@ type repoDirRow struct {
 	State           string             `json:"state,omitempty"`
 	ProvisionReason string             `json:"provisionReason,omitempty"`
 	Placements      []repoDirPlacement `json:"placements,omitempty"`
+	// SyncBlock is set when GitHub blocks the Entire installation serving this
+	// repo's owner, so no placement is being kept current. It sits on the row
+	// rather than on a placement because the block is per installation. Only
+	// `repo view` reads it (lookupMirrorSyncBlock: the repo's own mirror
+	// record, since the /repos placements do not carry it); the directory
+	// never sets it, so `mirror list --json` rows omit the key.
+	SyncBlock *mirrorSyncBlock `json:"syncBlock,omitempty"`
 }
 
 // visibilityOf renders a wire visibility string as the tri-state Private field:
@@ -649,6 +657,7 @@ func newRepoMirrorCmd() *cobra.Command {
 	cmd.AddCommand(newRepoMirrorAddCmd())
 	cmd.AddCommand(newRepoMirrorListCmd())
 	cmd.AddCommand(newRepoMirrorRemoveCmd())
+	cmd.AddCommand(newRepoMirrorResyncCmd())
 	cmd.AddCommand(newRepoMirrorDetachCmd())
 	return requireSubcommand(cmd)
 }
@@ -1321,8 +1330,8 @@ func newRepoMirrorListCmd() *cobra.Command {
 // its access and availability instead of a placements table — though today's
 // control plane only matches onboarded repos in the filter, so that path
 // waits on the server (the not-found error points at `list --available`).
-// --json emits the same repoDirRow shape `list --json` uses, placements
-// nested.
+// --json adds top-level repoId/apiUrl to the directory row; placements stay
+// nested. Coordinates are omitted together when resolution is unavailable.
 //
 // clusterHost is empty for a repository reference, which carries no cluster and
 // so resolves on the active context's core. A clone URL names its cluster, and
@@ -1330,27 +1339,74 @@ func newRepoMirrorListCmd() *cobra.Command {
 // than the active login resolves instead of reading as "no repo matching".
 func runRepoMirrorViewByName(cmd *cobra.Command, ref, clusterHost string) error {
 	return coreRunnerFor(clusterHost)(cmd, func(ctx context.Context, c *coreapi.Client) error {
-		out, err := c.ListRepos(ctx, coreapi.ListReposParams{Filter: coreapi.NewOptString(ref)})
-		if err != nil {
-			return err
-		}
-		if len(out.Repos) == 0 {
+		entry, err := lookupRepoIndexEntry(ctx, c, ref)
+		if errors.Is(err, errRepoNotOnboarded) {
 			// The filter only matches onboarded repos on today's control
 			// plane, so a not-yet-mirrored GitHub repo lands here too —
 			// point at the list mode that shows those.
 			return fmt.Errorf("no repo matching %q visible from your login (GitHub repos you could onboard: `entire repo mirror list --available`)", ref)
 		}
+		if err != nil {
+			return err
+		}
 		clusters, err := c.ListClusters(ctx)
 		if err != nil {
 			return err
 		}
-		row := mirrorRepoDetailRow(out.Repos[0], clusterHostBySlug(clusters.Clusters))
+		row := mirrorRepoDetailRow(entry, clusterHostBySlug(clusters.Clusters))
+		// The block rides on the mirror record, not the directory entry, so
+		// it is one more exact read for this repo, by the placement ID the
+		// entry carries. A failed read is a note: the record is still right
+		// about everything else it shows — and --json says the read failed,
+		// since an absent block there would read as "not blocked".
+		block, blocked, berr := lookupMirrorSyncBlock(ctx, c, entry)
+		syncNoted, err := noteSyncStatusUnavailable(ctx, cmd.ErrOrStderr(), berr)
+		if err != nil {
+			return err
+		}
+		if blocked {
+			row.SyncBlock = &block
+		}
 		if jsonRequested(cmd) {
-			return printJSON(cmd.OutOrStdout(), row)
+			view := mirrorRepoViewJSON{repoDirRow: row}
+			if syncNoted {
+				view.SyncStatus = syncStatusUnavailable
+			}
+			view.RepoID, view.APIURL, err = repoViewCoords(entry, clusters.Clusters)
+			if err != nil {
+				logging.Debug(ctx, "repo view: API coordinates unavailable", "error", err)
+			}
+			return printJSON(cmd.OutOrStdout(), view)
 		}
 		renderRepoDetail(cmd.OutOrStdout(), row)
 		return nil
 	})
+}
+
+// mirrorRepoViewJSON adds the responsible cell's coordinates to the detail
+// view. Both fields are omitted when the processing placement cannot resolve.
+type mirrorRepoViewJSON struct {
+	repoDirRow
+
+	RepoID string `json:"repoId,omitempty"`
+	APIURL string `json:"apiUrl,omitempty"`
+	// SyncStatus is "unavailable" when the block could not be read, and
+	// absent otherwise: with it absent, no syncBlock means not blocked.
+	SyncStatus string `json:"syncStatus,omitempty"`
+}
+
+// repoViewCoords reuses the routing resolver's selection and catalog join.
+// Missing coordinates must not prevent viewing an unready repo's status.
+func repoViewCoords(entry coreapi.RepoIndexEntry, clusters []coreapi.Cluster) (repoID, apiURL string, err error) {
+	placement, err := processingPlacementOfEntry(entry)
+	if err != nil {
+		return "", "", err
+	}
+	target, err := cellTargetForPlacementInCatalog(clusters, placement)
+	if err != nil {
+		return "", "", err
+	}
+	return strings.TrimSpace(placement.ID), target.BaseURL, nil
 }
 
 // mirrorRepoDetailRow shapes one directory entry for the record view, reusing the
@@ -1404,6 +1460,9 @@ func renderRepoDetail(w io.Writer, row repoDirRow) {
 	// for (reportNativeMirrorNotes).
 	if row.Access != "" {
 		section("Access", row.Access)
+	}
+	if row.SyncBlock != nil {
+		renderSyncBlock(w, st, row.Repo, row.SyncBlock)
 	}
 	fmt.Fprintln(w)
 

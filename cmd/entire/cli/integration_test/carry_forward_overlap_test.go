@@ -65,7 +65,7 @@ func TestCarryForward_EndedSession_NotCondensedOnUnrelatedCommit(t *testing.T) {
 	// Partial commit - only file1.txt
 	t.Log("Phase 1b: Partial commit - only file1.txt")
 	env.GitAdd("file1.txt")
-	env.GitCommitWithShadowHooks("Partial commit: only file1", "file1.txt")
+	env.GitCommitWithHooks("Partial commit: only file1", "file1.txt")
 
 	// End session 1 (simulating user ending session while file2.txt is uncommitted)
 	state1, err := env.GetSessionState(session1.ID)
@@ -121,7 +121,7 @@ func TestCarryForward_EndedSession_NotCondensedOnUnrelatedCommit(t *testing.T) {
 	t.Log("Phase 3: Committing file6.txt from session 2")
 
 	env.GitAdd("file6.txt")
-	env.GitCommitWithShadowHooks("Add file6 from session 2", "file6.txt")
+	env.GitCommitWithHooks("Add file6 from session 2", "file6.txt")
 
 	// ========================================
 	// Phase 4: Verify session 1 was NOT condensed (no overlap with file2.txt)

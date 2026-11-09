@@ -58,11 +58,13 @@ func TestReconcileWorktreePathForResumedTurn_LeavesValidSiblingUntouched(t *test
 
 // TestReconcileWorktreePathForResumedTurn_LeavesLinkedWorktreeSessionUntouched
 // covers the disalignment guard: a session started in a linked worktree
-// (WorktreeID != "") whose path is later gone must NOT be reconciled. Repointing
-// its WorktreePath to the main worktree while keeping WorktreeID would leave the
-// two describing different worktrees, which breaks the shadow-branch derivation
-// in `entire clean`/`entire explain` and the post-commit base/attribution
-// updates. Linked-worktree relocation is a documented non-goal.
+// (WorktreeID != "") whose worktree was removed must NOT be reconciled onto the
+// main worktree. Keeping WorktreeID while repointing WorktreePath there would
+// leave the two describing different worktrees, which breaks the worktree
+// derivation in `entire clean`/`entire explain` and the post-commit
+// base/attribution updates. A linked home is followed only to the worktree
+// holding its marker, which keeps its ID (see
+// TestReconcileWorktreePathForResumedTurn_FollowsAMovedLinkedHome).
 func TestReconcileWorktreePathForResumedTurn_LeavesLinkedWorktreeSessionUntouched(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 	ctx := context.Background()

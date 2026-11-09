@@ -35,9 +35,11 @@ type statusStyles struct {
 
 // newStatusStyles creates styles appropriate for the output writer.
 func newStatusStyles(w io.Writer) statusStyles {
-	useColor := shouldUseColor(w)
-	width := getTerminalWidth(w)
+	return statusStylesFor(shouldUseColor(w), getTerminalWidth(w))
+}
 
+// statusStylesFor builds the styles for a known color mode and width.
+func statusStylesFor(useColor bool, width int) statusStyles {
 	s := statusStyles{
 		colorEnabled: useColor,
 		width:        width,
@@ -138,8 +140,7 @@ type explainRow struct {
 // identityBullet renders "● <label> <id>\n". Bullet is the brand accent
 // (magenta) when color is enabled; ID is also the accent to mirror the existing
 // checkpoint header. When
-// id is empty (e.g., temporary checkpoints append "[temporary]" to the label
-// instead of using an id slot), the trailing space + id is suppressed.
+// id is empty, the trailing space + id is suppressed.
 func (s statusStyles) identityBullet(label, id string) string {
 	if id == "" {
 		if !s.colorEnabled {

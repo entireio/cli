@@ -828,3 +828,13 @@ func runExpertsGit(t *testing.T, dir string, args ...string) {
 		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, out)
 	}
 }
+
+func setExpertsClientFactoryForTest(
+	t interface{ Helper() },
+	fn func(context.Context, bool, *auth.CellTarget) (expertsAPIClient, error),
+) func() {
+	t.Helper()
+	prev := newExpertsAPIClient
+	newExpertsAPIClient = fn
+	return func() { newExpertsAPIClient = prev }
+}

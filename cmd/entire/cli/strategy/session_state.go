@@ -66,16 +66,6 @@ func sessionLockDeadlineFromContext(ctx context.Context) (time.Time, bool) {
 // Session state management functions shared across all strategies.
 // SessionState is stored in .git/entire-sessions/{session_id}.json
 
-// getSessionStateDir returns the path to the session state directory.
-// This is stored in the git common dir so it's shared across all worktrees.
-func getSessionStateDir(ctx context.Context) (string, error) {
-	commonDir, err := GetGitCommonDir(ctx)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(commonDir, session.SessionStateDirName), nil
-}
-
 // openSessionStateRoot creates the session state directory if needed and returns
 // an os.Root scoped to it. Hint/marker files are named from the (already
 // validated) session ID; routing their writes through os.Root makes escaping
@@ -191,6 +181,12 @@ func FindMostRecentSessionInCurrentWorktree(ctx context.Context) string {
 	return mostRecentSessionID(sessionStatesForCurrentWorktree(ctx, states))
 }
 
+// sessionStatesForCurrentWorktree returns the sessions recorded as homed in
+// the current worktree, by path alone: it names a session rather than acting
+// on one, so it doesn't consult home markers (homeAt). A session whose home
+// was moved shows here once its next turn starts and follows the move, and
+// one whose home was removed and re-added at the same path still shows here
+// until its agent resumes in it or it ages out.
 func sessionStatesForCurrentWorktree(ctx context.Context, states []*SessionState) []*SessionState {
 	worktreePath, err := paths.WorktreeRoot(ctx)
 	if err != nil || worktreePath == "" {
@@ -278,7 +274,7 @@ func TransitionAndLog(goCtx context.Context, state *SessionState, event session.
 //
 // Why a separate file instead of SessionState?
 //
-// SessionState requires BaseCommit (used for shadow branch naming, checkpoint
+// SessionState requires BaseCommit (used for commit linking, checkpoint
 // writing, doctor classification, etc.) and is only created during TurnStart
 // when the git repo is fully inspected. Some agents report the model on earlier
 // hooks that fire as separate CLI processes before TurnStart:
@@ -520,8 +516,8 @@ func goroutineID() int64 {
 // inner load/save, so all mutations are flushed by the outermost call.
 //
 // fn may hold the lock for slow operations — PostCommit's callback, for
-// example, runs CondenseSession (shadow-branch tree builds, transcript
-// compaction) inside the gate. That's deliberate: PostToolUse must not slip
+// example, runs CondenseSession (transcript redaction and compaction,
+// checkpoint tree builds) inside the gate. That's deliberate: PostToolUse must not slip
 // in mid-condense and revert CheckpointTranscriptStart or files_touched.
 // A concurrent PostToolUse on the same session waits for the commit to
 // finish.
@@ -813,11 +809,12 @@ func RecordFilesTouched(ctx context.Context, sessionID string, modified, added, 
 		return nil
 	}
 	err := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
-		merged := mergeFilesTouched(state.FilesTouched, modified, added, deleted)
-		if slices.Equal(merged, state.FilesTouched) {
+		before := slices.Clone(state.FilesTouched)
+		hashesBefore := len(state.TouchedFileHashes)
+		MergeUnhashedFilesTouched(state, modified, added, deleted)
+		if slices.Equal(before, state.FilesTouched) && hashesBefore == len(state.TouchedFileHashes) {
 			return ErrMutationSkip
 		}
-		state.FilesTouched = merged
 		return nil
 	})
 	if errors.Is(err, ErrStateNotFound) {
@@ -1031,21 +1028,16 @@ func ClearSessionState(ctx context.Context, sessionID string) error {
 	return nil
 }
 
-// AccumulateSessionTokenUsage adds a token-usage delta to both the
-// session-cumulative total and the checkpoint-scoped accumulator, mirroring
-// SaveStep's accounting (manual_commit_git.go). It exists for turns that end
-// with no uncommitted changes — e.g. Antigravity committing all its work
-// mid-turn, its normal flow — where the TurnEnd handler skips SaveStep
-// entirely but the turn's out-of-band token delta must still be recorded so
-// the next condensation (or `entire status`) attributes it. A nil or empty
-// delta is a no-op.
-func AccumulateSessionTokenUsage(ctx context.Context, sessionID string, delta *agent.TokenUsage) error {
-	if delta == nil {
-		return nil
-	}
-	return MutateSessionState(ctx, sessionID, func(state *SessionState) error {
-		state.TokenUsage = accumulateTokenUsage(state.TokenUsage, delta)
-		state.CheckpointTokenUsage = accumulateTokenUsage(state.CheckpointTokenUsage, delta)
-		return nil
-	})
+// ApplyTurnTokenUsage records a turn's token usage on state exactly as SaveStep
+// does (applyTurnTokenUsage): into the session total and the pending
+// checkpoint window, with SubagentTokens rescoped against the baseline. It
+// exists for turns that end with no uncommitted changes, where the TurnEnd
+// handler skips SaveStep but the turn's tokens must still be recorded so
+// `entire status` and the next condensation attribute them. The caller applies
+// it inside the MutateSessionState that ends the turn, so the turn's phase
+// decides whether it is still unaccounted. ledgerVersion is the subagent
+// ledger version the usage was computed against (Codex), or nil; a stale one
+// drops the child aggregate, as it does for a step. A nil delta is a no-op.
+func ApplyTurnTokenUsage(state *SessionState, delta *agent.TokenUsage, ledgerVersion *uint64) {
+	applyTurnTokenUsage(state, withoutStaleSubagentSnapshot(delta, ledgerVersion, state))
 }

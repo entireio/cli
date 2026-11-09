@@ -182,6 +182,9 @@ func TestPreparedRefCASCancellationReleasesGitLock(t *testing.T) {
 			require.Equal(t, refCASWaitDelay, tx.cmd.WaitDelay)
 
 			cancel()
+			// wait reports the cancellation only once cmd.Cancel has run; under
+			// load git can exit on the closed stdin before os/exec gets there.
+			require.Eventually(t, tx.canceled.Load, time.Second, time.Millisecond)
 			require.ErrorIs(t, tx.wait(), context.Canceled)
 			require.Equal(t, initial, strings.TrimSpace(gitenv.Run(t, repoDir, "rev-parse", refName.String())))
 

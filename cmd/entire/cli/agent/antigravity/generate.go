@@ -15,24 +15,21 @@ import (
 )
 
 // GenerateText submits a non-interactive prompt to the Antigravity CLI. The
-// binary is `agy`; -p is the short alias for --print (single-prompt mode).
+// binary is `agy`; --print is single-prompt mode.
 //
-// The prompt travels in argv. Earlier releases accepted it on stdin behind a
-// single-space -p placeholder (the Gemini CLI convention, verified on agy
-// 1.0.16), but agy 1.2.7 ignores stdin in print mode: `-p " "` fails with
-// "Error: empty prompt", and `-p -` is answered as the literal message "-"
-// (both observed live, trail 444, 2026-09-22), which is how
-// `entire dispatch --local --agent antigravity` came to hand agy an empty
-// prompt. argv is the only documented route ("Usage: agy --print 'your
-// prompt here'").
-//
-// That makes prompt size this agent's problem in a way it is not for agents
-// that use RunIsolatedTextGeneratorCLI's stdin. Linux caps a SINGLE argument
-// at MAX_ARG_STRLEN (128 KiB) however large the total ARG_MAX is, so an
-// unbounded prompt fails with E2BIG. summarize.maxCondensedTranscriptBytes is
-// what keeps summary prompts inside it. Windows' ~32 KiB whole-command-line
-// limit is tighter than any useful transcript budget and is not covered; a
-// long enough prompt still fails there, loudly.
+// The prompt travels on stdin as one stream-json message, never in argv: it
+// carries condensed transcript content, and argv is readable by other local
+// users through the process table (ps, /proc/<pid>/cmdline) for the life of
+// the run. Earlier releases accepted stdin behind a single-space -p
+// placeholder (verified on agy 1.0.16), but agy 1.2.7 ignores stdin in text
+// print mode: `-p " "` fails with "Error: empty prompt" and
+// `-p -` is answered as the literal message "-" (trail 444, 2026-09-22).
+// `--input-format stream-json` (agy 1.1.15+) reads NDJSON messages from stdin
+// instead; it requires `--output-format stream-json`, and the empty
+// `--print=` is how print mode is selected without a command-line prompt,
+// which that mode rejects (observed live on agy 1.3.3). stdin also removes the
+// per-argument (Linux 128 KiB) and command-line (Windows ~32 KiB) size limits
+// the argv prompt was subject to.
 //
 // agy also runs with a home directory of its own (isolatedHomeEnv). It reads
 // its window-title command (~/.gemini/antigravity-cli/settings.json), its
@@ -43,23 +40,43 @@ import (
 // so a summary run, whose prompt carries untrusted transcript content, would
 // otherwise execute whatever the user's global configuration names.
 func (a *AntigravityAgent) GenerateText(ctx context.Context, prompt string, model string) (string, error) {
-	args := []string{"-p", prompt}
+	args := []string{"--input-format", "stream-json", "--output-format", "stream-json"}
 	if model != "" {
 		args = append(args, "--model", model)
+	}
+	args = append(args, "--print=")
+	input, err := streamUserMessage(prompt)
+	if err != nil {
+		return "", fmt.Errorf("antigravity text generation failed: %w", err)
 	}
 	home, cleanup, err := agent.NewTextGenerationDir()
 	if err != nil {
 		return "", fmt.Errorf("antigravity text generation failed: %w", err)
 	}
 	defer cleanup()
-	env, err := isolatedHomeEnv(home)
+	auth := a.textGenerationAuth
+	if auth == nil {
+		resolved := resolveTextGenerationAuth()
+		auth = &resolved
+	}
+	env, err := isolatedHomeEnv(home, *auth)
 	if err != nil {
 		return "", fmt.Errorf("antigravity text generation failed: %w", err)
 	}
-	result, capturedStderr, stdoutBytes, err := agent.RunIsolatedTextGeneratorCLI(ctx, a.CommandRunner, "agy", "antigravity", args, "", env...)
+	output, capturedStderr, stdoutBytes, err := agent.RunIsolatedTextGeneratorCLI(ctx, a.CommandRunner, "agy", "antigravity", args, input, env...)
+	if err == nil {
+		output, err = streamResultResponse(output)
+	}
 	if err != nil {
-		if strings.Contains(capturedStderr, "Authentication required") {
+		// A sign-in failure shows on stderr ("Authentication required" in text
+		// mode, lowercase in stream-json) and in the result event's error
+		// ("authentication failed or timed out"), which only err carries.
+		failure := strings.ToLower(capturedStderr + "\n" + err.Error())
+		switch {
+		case strings.Contains(failure, "authentication required"), strings.Contains(failure, "authentication failed"):
 			err = fmt.Errorf("%w: agy runs summaries with an isolated home so your agy settings, hooks, and MCP servers are not loaded; only its sign-in is carried over (the OS keyring, its file token, application-default credentials, or Gemini API-key mode), and none of them authenticated. Run `agy` to sign in again, or choose another summary provider", err)
+		case strings.Contains(capturedStderr, "input-format"):
+			err = fmt.Errorf("%w: summaries need agy 1.1.15 or newer, which reads the prompt from stdin (--input-format stream-json); run `agy update`", err)
 		}
 		return "", &agent.TextGenerationError{
 			Err:         fmt.Errorf("antigravity text generation failed: %w", err),
@@ -67,7 +84,87 @@ func (a *AntigravityAgent) GenerateText(ctx context.Context, prompt string, mode
 			StdoutBytes: stdoutBytes,
 		}
 	}
-	return result, nil
+	return output, nil
+}
+
+// streamInputMessage is one line of agy's `--input-format stream-json` input.
+type streamInputMessage struct {
+	Event   string             `json:"event"`
+	Message streamInputContent `json:"message"`
+}
+
+type streamInputContent struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// streamUserMessage encodes prompt as the single user turn agy reads from
+// stdin. json.Marshal escapes newlines, so the message stays on one line.
+func streamUserMessage(prompt string) (string, error) {
+	line, err := json.Marshal(streamInputMessage{
+		Event:   "user",
+		Message: streamInputContent{Role: "user", Content: prompt},
+	})
+	if err != nil {
+		return "", fmt.Errorf("encode stream-json prompt: %w", err)
+	}
+	return string(line) + "\n", nil
+}
+
+// streamResultResponse extracts the reply from agy's `--output-format
+// stream-json` output: init and step_update events, then a final result event
+// whose status is SUCCESS or ERROR.
+func streamResultResponse(output string) (string, error) {
+	type resultEvent struct {
+		Event  string `json:"event"`
+		Result *struct {
+			Status   string `json:"status"`
+			Response string `json:"response"`
+			Error    string `json:"error"`
+		} `json:"result"`
+	}
+	var final *resultEvent
+	for line := range strings.Lines(output) {
+		var ev resultEvent
+		if json.Unmarshal([]byte(line), &ev) != nil || ev.Event != "result" || ev.Result == nil {
+			continue
+		}
+		final = &ev
+	}
+	if final == nil {
+		return "", errors.New("agy printed no stream-json result event")
+	}
+	if final.Result.Status != "SUCCESS" {
+		return "", fmt.Errorf("agy run ended with status %q: %s", final.Result.Status, final.Result.Error)
+	}
+	response := strings.TrimSpace(final.Result.Response)
+	if response == "" {
+		return "", errors.New("agy returned an empty response")
+	}
+	return response, nil
+}
+
+// textGenerationAuth names the authentication sources for one generation run.
+// Paths come only from the user's home/config resolvers in production, or
+// temporary fixtures in tests. Preparing an isolated home never discovers
+// additional sources from the ambient process environment.
+type textGenerationAuth struct {
+	userHome       string
+	configDir      string
+	adcCredentials string
+}
+
+func resolveTextGenerationAuth() textGenerationAuth {
+	// Missing sources remain empty so agy can report a missing sign-in, as it
+	// did before; they must not become cwd-relative credential paths.
+	auth := textGenerationAuth{adcCredentials: os.Getenv(adcCredentialsEnvVar)}
+	if home, err := os.UserHomeDir(); err == nil {
+		auth.userHome = home
+	}
+	if configDir, err := agyConfigDir(); err == nil {
+		auth.configDir = configDir
+	}
+	return auth
 }
 
 // isolatedHomeEnv returns the environment overrides that point agy at home
@@ -98,16 +195,16 @@ func (a *AntigravityAgent) GenerateText(ctx context.Context, prompt string, mode
 //
 // The file locations were observed on agy 1.3.1 by tracing which paths it
 // opens under an empty home.
-func isolatedHomeEnv(home string) ([]string, error) {
+func isolatedHomeEnv(home string, auth textGenerationAuth) ([]string, error) {
 	if runtime.GOOS == "darwin" {
-		if err := linkLoginKeychain(home); err != nil {
+		if err := linkLoginKeychain(home, auth.userHome); err != nil {
 			return nil, err
 		}
 	}
-	if err := linkFileToken(home); err != nil {
+	if err := linkFileToken(home, auth.configDir); err != nil {
 		return nil, err
 	}
-	if err := carryAPIKeyMode(home); err != nil {
+	if err := carryAPIKeyMode(home, auth.configDir); err != nil {
 		return nil, err
 	}
 	env := []string{
@@ -120,7 +217,7 @@ func isolatedHomeEnv(home string) ([]string, error) {
 	if runtime.GOOS == "windows" {
 		env = append(env, "USERPROFILE="+home)
 	}
-	return append(env, adcCredentialsEnv()...), nil
+	return append(env, adcCredentialsEnv(auth)...), nil
 }
 
 // agyFileTokenName is the file agy stores its sign-in in, inside its config
@@ -135,8 +232,11 @@ const agyFileTokenName = "antigravity-oauth-token" //nolint:gosec // a file name
 // title command, is not reachable through it. Where a symlink cannot be made
 // (Windows without the privilege), the token is copied instead; the isolated
 // home is removed when the run ends.
-func linkFileToken(home string) error {
-	root, err := openAgyConfigRoot(false)
+func linkFileToken(home, configDir string) error {
+	if configDir == "" {
+		return nil
+	}
+	root, err := openAgyConfigRootAt(configDir, false)
 	if err != nil {
 		return nil // no agy config directory: no file token to carry
 	}
@@ -144,10 +244,6 @@ func linkFileToken(home string) error {
 	info, err := root.Lstat(agyFileTokenName)
 	if err != nil || !info.Mode().IsRegular() {
 		return nil // absent, or not a regular file: agy reports the missing sign-in
-	}
-	configDir, err := agyConfigDir()
-	if err != nil {
-		return nil // the root above resolved it; nothing to link if it no longer does
 	}
 	dir := filepath.Join(home, ".gemini", "antigravity-cli")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -178,21 +274,22 @@ var adcCredentialsFile = filepath.Join(".config", "gcloud", "application_default
 
 // adcCredentialsEnv points GOOGLE_APPLICATION_CREDENTIALS at the user's
 // application-default credentials, which agy would otherwise look for under
-// the isolated home. A variable the user already set is inherited as it is,
-// and Windows needs nothing because agy finds the file through %APPDATA%.
-func adcCredentialsEnv() []string {
-	if runtime.GOOS == "windows" || os.Getenv(adcCredentialsEnvVar) != "" {
-		return nil
+// the isolated home. A variable captured during source resolution is preserved.
+// With no selected file it explicitly clears any ambient value inherited by
+// the subprocess. Windows still finds default credentials through %APPDATA%.
+func adcCredentialsEnv(auth textGenerationAuth) []string {
+	if auth.adcCredentials != "" {
+		return []string{adcCredentialsEnvVar + "=" + auth.adcCredentials}
 	}
-	realHome, err := os.UserHomeDir()
-	if err != nil {
-		return nil
+	if runtime.GOOS != "windows" && auth.userHome != "" {
+		path := filepath.Join(auth.userHome, adcCredentialsFile)
+		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+			return []string{adcCredentialsEnvVar + "=" + path}
+		}
 	}
-	path := filepath.Join(realHome, adcCredentialsFile)
-	if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
-		return nil
-	}
-	return []string{adcCredentialsEnvVar + "=" + path}
+	// RunIsolatedTextGeneratorCLI appends overrides to os.Environ. Omitting
+	// this entry would let an ambient credential escape the source snapshot.
+	return []string{adcCredentialsEnvVar + "="}
 }
 
 // linkLoginKeychain links home/Library/Keychains/login.keychain-db to the
@@ -202,10 +299,9 @@ func adcCredentialsEnv() []string {
 // encrypted and every read goes through securityd, as it does when agy runs
 // normally. A user without a resolvable home or login keychain gets no link,
 // and agy reports that it is not signed in.
-func linkLoginKeychain(home string) error {
-	realHome, err := os.UserHomeDir()
-	if err != nil {
-		return nil //nolint:nilerr // no home to link from: agy reports the missing sign-in
+func linkLoginKeychain(home, realHome string) error {
+	if realHome == "" {
+		return nil // no home to link from: agy reports the missing sign-in
 	}
 	keychain := filepath.Join(realHome, "Library", "Keychains", "login.keychain-db")
 	if _, err := os.Stat(keychain); err != nil {
@@ -234,8 +330,8 @@ const apiKeyModelProvider = "gemini"
 // same file names the window-title command agy executes. The value is matched
 // against the one documented provider rather than copied, and an unreadable
 // or malformed file selects nothing, leaving agy to report the missing sign-in.
-func carryAPIKeyMode(home string) error {
-	if !userSelectsAPIKeyMode() {
+func carryAPIKeyMode(home, configDir string) error {
+	if !userSelectsAPIKeyMode(configDir) {
 		return nil
 	}
 	dir := filepath.Join(home, ".gemini", "antigravity-cli")
@@ -251,8 +347,11 @@ func carryAPIKeyMode(home string) error {
 // userSelectsAPIKeyMode reports whether the user's agy settings.json selects
 // the Gemini API-key provider, read the way the title installer reads it (a
 // symlinked file is refused, not read through).
-func userSelectsAPIKeyMode() bool {
-	settings, err := readAgySettings()
+func userSelectsAPIKeyMode(configDir string) bool {
+	if configDir == "" {
+		return false
+	}
+	settings, err := readAgySettingsAt(configDir)
 	if err != nil {
 		return false
 	}

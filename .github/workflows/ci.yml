@@ -20,10 +20,35 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
+      # The attach signing tests run once per git signing format and skip a
+      # format whose tool is missing; here they must all run.
+      - name: Install commit signing tools
+        run: |
+          for tool in ssh-keygen gpg gpgsm gpgconf; do
+            command -v "$tool" >/dev/null || missing=1
+          done
+          if [ -n "${missing:-}" ]; then
+            sudo apt-get update -q
+            sudo apt-get install -y -q --no-install-recommends openssh-client gnupg gpgsm
+          fi
       - name: Core Tests
         env:
           GO_TEST_PARALLEL: "16"
+          ENTIRE_TEST_REQUIRE_COMMIT_SIGNERS: "1"
         run: mise run test:ci:core
+
+  # The installer reads our own release origin first and falls back to GitHub.
+  # A fallback that only runs during an incident is a fallback nobody knows
+  # works, so both tiers are exercised here against local fake origins.
+  test-release-origins:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
+      - name: Release origin tests
+        run: mise run test:release-origins
 
   test-integration:
     runs-on: ubuntu-latest
@@ -51,7 +76,12 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
       - name: Install latest Codex CLI
-        run: npm install --global @openai/codex
+        shell: bash
+        env:
+          CODEX_NON_INTERACTIVE: "1"
+        run: |
+          curl -fsSL --compressed https://chatgpt.com/codex/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Codex app-server integration tests
         env:
           ENTIRE_TEST_REQUIRE_CODEX_APP_SERVER: "1"
@@ -76,6 +106,50 @@ jobs:
           E2E_CHECKPOINT_STORE: ${{ matrix.checkpoint_store }}
         run: mise run test:e2e:canary
 
+  # The Vogon canary on Windows: no API calls, so it runs on every PR. Vogon
+  # commits from a console with no window, as desktop agents do, which is the
+  # case a Windows-only prompt regression hangs on (#2725). The roger-roger
+  # lane stays on Linux; the canary script skips it here.
+  #
+  # Sharded; per-test overhead is ~10s here.
+  test-canary-windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - name: Pin Go cache paths
+        shell: pwsh
+        run: |
+          "GOCACHE=$env:LOCALAPPDATA\go-build" >> $env:GITHUB_ENV
+          "GOMODCACHE=$env:USERPROFILE\go\pkg\mod" >> $env:GITHUB_ENV
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Restore Go cache
+        id: go-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ env.GOCACHE }}
+            ${{ env.GOMODCACHE }}
+          key: go-${{ runner.os }}-${{ github.job }}-${{ hashFiles('go.mod', 'go.sum') }}
+      - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
+      - name: E2E Canary (Vogon)
+        shell: bash
+        run: mise run test:ci:canary:shard -- ${{ matrix.shard }} 3
+      # PRs restore main's cache, never save.
+      - name: Save Go cache
+        if: github.event_name != 'pull_request' && matrix.shard == 1 && steps.go-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ env.GOCACHE }}
+            ${{ env.GOMODCACHE }}
+          key: ${{ steps.go-cache.outputs.cache-primary-key }}
+
   test-windows:
     runs-on: windows-latest
     timeout-minutes: 10
@@ -91,21 +165,57 @@ jobs:
       - name: Windows unit tests
         run: go test ./cmd/entire/cli/... -run '(Windows|MSYS)' -count=1 -v
 
+  # Fails only on functions this pull request made new or worse than the merge
+  # base; the repo's ~127 pre-existing violations are exempt. Deliberately not
+  # the gocognit linter: golangci has no per-linter new-only mode, so enabling
+  # it would fail `mise run lint` locally on all of them, and the action's
+  # only-new-issues switch is workflow-wide. See tools/complexity/README.md.
+  complexity-gate:
+    # Pull requests only: the gate diffs against the merge base with the target
+    # branch, and a push to main has no such base to diff against.
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          # The merge base is resolved locally, so both sides of the history
+          # have to be present.
+          fetch-depth: 0
+      - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
+      - name: Test the gate itself
+        # The nested module is invisible to the root test jobs, so this job is
+        # the only thing that keeps the gate's own tests honest.
+        run: cd tools/complexity && go test ./...
+      - name: Complexity gate
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha }}
+        run: mise run complexity:gate
+
   test:
     runs-on: ubuntu-latest
     permissions: {}
     needs:
       - test-core
+      - test-release-origins
       - test-integration
       - test-codex-hooks
       - test-canary
+      - test-canary-windows
       - test-windows
+      - complexity-gate
     if: ${{ always() }}
     steps:
       - name: Check dependencies
         run: |
           [ "${{ needs.test-core.result }}" = "success" ]
+          [ "${{ needs.test-release-origins.result }}" = "success" ]
           [ "${{ needs.test-integration.result }}" = "success" ]
           [ "${{ needs.test-codex-hooks.result }}" = "success" ]
           [ "${{ needs.test-canary.result }}" = "success" ]
+          [ "${{ needs.test-canary-windows.result }}" = "success" ]
           [ "${{ needs.test-windows.result }}" = "success" ]
+          # "skipped" is the push-to-main and workflow_dispatch case, where the
+          # gate has no merge base and does not run.
+          [ "${{ needs.complexity-gate.result }}" = "success" ] || [ "${{ needs.complexity-gate.result }}" = "skipped" ]

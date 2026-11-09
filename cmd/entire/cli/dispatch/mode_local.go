@@ -11,7 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	checkpointid "github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
@@ -26,10 +25,6 @@ import (
 )
 
 var (
-	// resolveDataAPI picks the data API and bearer for the selected login.
-	// Tests swap in a fixed target.
-	resolveDataAPI = auth.ResolveDataAPI
-
 	nowUTC = func() time.Time { return time.Now().UTC() }
 )
 
@@ -530,7 +525,7 @@ func localBranchNames(repo *git.Repository) ([]string, error) {
 	var names []string
 	if err := iter.ForEach(func(ref *plumbing.Reference) error {
 		name := ref.Name().Short()
-		if strings.HasPrefix(name, checkpoint.ShadowBranchPrefix) {
+		if strings.HasPrefix(name, checkpoint.InternalBranchPrefix) {
 			return nil
 		}
 		names = append(names, name)

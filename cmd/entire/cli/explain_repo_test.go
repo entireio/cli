@@ -127,9 +127,11 @@ func TestExplainRepoIsCurrent(t *testing.T) {
 // stubCrossRepoReader serves a fixed checkpoint so the render paths can be
 // exercised without a cell.
 type stubCrossRepoReader struct {
-	transcript []byte
-	metaErr    error
-	sessions   int
+	transcript  []byte
+	metaErr     error
+	sessions    int
+	resolvedSHA string
+	resolveErr  error
 }
 
 func (s *stubCrossRepoReader) Read(context.Context, id.CheckpointID) (*checkpoint.CheckpointSummary, error) {
@@ -200,6 +202,14 @@ func (s *stubCrossRepoReader) GetCheckpointAuthor(context.Context, id.Checkpoint
 
 func (s *stubCrossRepoReader) checkpointCommit(context.Context, id.CheckpointID) ([]associatedCommit, error) {
 	return []associatedCommit{{SHA: "13e379e4b", ShortSHA: "13e379e", Message: "foreign commit"}}, nil
+}
+
+func (s *stubCrossRepoReader) resolveCommitCheckpoint(_ context.Context, sha string) (id.CheckpointID, error) {
+	s.resolvedSHA = sha
+	if s.resolveErr != nil {
+		return id.EmptyCheckpointID, s.resolveErr
+	}
+	return testAPICheckpointID, nil
 }
 
 // withStubCrossRepoReader points the cross-repo path at stub and records the
@@ -351,14 +361,89 @@ func TestRunCrossRepoExplain_EmptyTranscriptIsAnError(t *testing.T) {
 }
 
 func TestRunCrossRepoExplain_RejectsPrefix(t *testing.T) {
-	withStubCrossRepoReader(t, &stubCrossRepoReader{})
+	for name, target := range map[string]string{
+		"ulid prefix":       "01KXGT",
+		"short commit hash": "13e379e",
+		"39-hex":            strings.Repeat("a", 39),
+	} {
+		t.Run(name, func(t *testing.T) {
+			stub := &stubCrossRepoReader{}
+			withStubCrossRepoReader(t, stub)
 
-	err := runCrossRepoExplain(context.Background(), io.Discard, io.Discard, crossRepoExplainOptions{
+			err := runCrossRepoExplain(context.Background(), io.Discard, io.Discard, crossRepoExplainOptions{
+				repoFlag:     "gh/acme/widgets",
+				target:       target,
+				sessionIndex: -1,
+			})
+			require.ErrorContains(t, err, "requires a full checkpoint ID")
+			// The message has to name the other accepted form, or an agent that
+			// pasted a short SHA from a search hit learns only half the rule.
+			assert.Contains(t, err.Error(), "commit SHA")
+			assert.Empty(t, stub.resolvedSHA, "a non-SHA target must never reach the cell as a commit")
+		})
+	}
+}
+
+// ENT-2102: a search hit's commit SHA is what agents paste into explain --repo.
+func TestRunCrossRepoExplain_CommitSHAResolvesToCheckpoint(t *testing.T) {
+	stub := &stubCrossRepoReader{transcript: []byte(`{"type":"user","message":{"role":"user","content":"do the foreign thing"}}` + "\n")}
+	asked := withStubCrossRepoReader(t, stub)
+
+	sha := "13E379E4B0000000000000000000000000000000"
+	var out bytes.Buffer
+	require.NoError(t, runCrossRepoExplain(context.Background(), &out, io.Discard, crossRepoExplainOptions{
 		repoFlag:     "gh/acme/widgets",
-		target:       "01KXGT",
+		target:       sha,
+		sessionIndex: -1,
+		noPager:      true,
+		verbose:      true,
+	}))
+	assert.Equal(t, "gh/acme/widgets", *asked)
+	assert.Equal(t, sha, stub.resolvedSHA, "the SHA reaches the reader as given; the reader owns normalization")
+	assert.Contains(t, out.String(), testAPICheckpointID.String(), "the resolved checkpoint is what gets rendered")
+	assert.Contains(t, out.String(), "do the foreign thing")
+}
+
+func TestRunCrossRepoExplain_CommitFlagResolvesToCheckpoint(t *testing.T) {
+	stub := &stubCrossRepoReader{}
+	withStubCrossRepoReader(t, stub)
+
+	sha := "13e379e4b0000000000000000000000000000000"
+	var out bytes.Buffer
+	require.NoError(t, runCrossRepoExplain(context.Background(), &out, io.Discard, crossRepoExplainOptions{
+		repoFlag:     "gh/acme/widgets",
+		commitSHA:    sha,
+		sessionIndex: -1,
+		noPager:      true,
+	}))
+	assert.Equal(t, sha, stub.resolvedSHA)
+	assert.Contains(t, out.String(), testAPICheckpointID.String())
+}
+
+// The flag layer rejects the pair first; this pins the classifier's own
+// refusal so a new caller cannot reach the reader with two targets.
+func TestClassifyCrossRepoTarget_RejectsTwoTargets(t *testing.T) {
+	t.Parallel()
+
+	_, _, err := classifyCrossRepoTarget(crossRepoExplainOptions{
+		commitSHA:    strings.Repeat("a", 40),
+		checkpointID: testAPICheckpointID.String(),
+	})
+	require.ErrorContains(t, err, "cannot combine --commit with --checkpoint")
+}
+
+func TestRunCrossRepoExplain_CommitSHAResolutionErrorSurfaces(t *testing.T) {
+	stub := &stubCrossRepoReader{resolveErr: errors.New("commit 13e379e in gh/acme/widgets has no linked Entire checkpoint")}
+	withStubCrossRepoReader(t, stub)
+
+	var errOut bytes.Buffer
+	err := runCrossRepoExplain(context.Background(), io.Discard, &errOut, crossRepoExplainOptions{
+		repoFlag:     "gh/acme/widgets",
+		target:       "13e379e4b0000000000000000000000000000000",
 		sessionIndex: -1,
 	})
-	require.ErrorContains(t, err, "requires a full checkpoint ID")
+	require.ErrorContains(t, err, "no linked Entire checkpoint")
+	assert.NotContains(t, errOut.String(), "✓", "a failed resolution must not report success first")
 }
 
 func TestCrossRepoExplainSessionIndex(t *testing.T) {
@@ -390,9 +475,31 @@ func TestExplainCmd_RepoFlagValidation(t *testing.T) {
 			wantErr: "forge prefix is required",
 		},
 		{
-			name:    "repo with commit",
+			name:    "repo with a commit ref instead of a full SHA",
 			args:    []string{"checkpoint", "explain", "--repo", "gh/acme/widgets", "--commit", "HEAD"},
-			wantErr: "[repo commit]",
+			wantErr: "--commit with --repo requires a full commit SHA",
+		},
+		{
+			// Codex adversarial review: without this the classifier picked the
+			// SHA and silently explained a different checkpoint than --checkpoint named.
+			name:    "repo with both --commit and --checkpoint",
+			args:    []string{"checkpoint", "explain", "--repo", "gh/acme/widgets", "--commit", strings.Repeat("a", 40), "--checkpoint", testAPICheckpointID.String()},
+			wantErr: "[commit checkpoint]",
+		},
+		{
+			name:    "repo with both targets under --json",
+			args:    []string{"checkpoint", "explain", "--repo", "gh/acme/widgets", "--commit", strings.Repeat("a", 40), "--checkpoint", testAPICheckpointID.String(), "--json"},
+			wantErr: "[commit checkpoint]",
+		},
+		{
+			name:    "repo with both targets under --transcript",
+			args:    []string{"checkpoint", "explain", "--repo", "gh/acme/widgets", "--commit", strings.Repeat("a", 40), "--checkpoint", testAPICheckpointID.String(), "--transcript"},
+			wantErr: "[commit checkpoint]",
+		},
+		{
+			name:    "repo with a SHA under --checkpoint",
+			args:    []string{"checkpoint", "explain", "--repo", "gh/acme/widgets", "--checkpoint", strings.Repeat("a", 40)},
+			wantErr: "--checkpoint with --repo requires a full checkpoint ID",
 		},
 		{
 			name:    "repo with generate",

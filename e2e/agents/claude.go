@@ -12,19 +12,11 @@ import (
 	"time"
 )
 
-// cleanEnv returns os.Environ() with agent-incompatible variables removed.
-// It strips CLAUDECODE (so Claude Code doesn't refuse to start inside this
-// test runner) and ENTIRE_TEST_TTY (so agents exercise the real TTY detection
-// paths instead of the test override).
+// cleanEnv returns os.Environ() as Claude Code should see it: agentEnv's
+// harness-only variables removed, plus CLAUDECODE so Claude Code doesn't
+// refuse to start inside this test runner.
 func cleanEnv() []string {
-	var env []string
-	for _, e := range os.Environ() {
-		if strings.HasPrefix(e, "CLAUDECODE=") || strings.HasPrefix(e, "ENTIRE_TEST_TTY=") {
-			continue
-		}
-		env = append(env, e)
-	}
-	return env
+	return agentEnv(os.Environ(), "CLAUDECODE")
 }
 
 func init() {
@@ -169,7 +161,7 @@ func (c *Claude) StartSession(ctx context.Context, dir string) (Session, error) 
 
 	args := append([]string{"env"}, envArgs...)
 	args = append(args, c.Binary(), "--dangerously-skip-permissions")
-	s, err := NewTmuxSession(name, dir, []string{"CLAUDECODE", "ENTIRE_TEST_TTY"}, args[0], args[1:]...)
+	s, err := NewTmuxSession(name, dir, []string{"CLAUDECODE"}, args[0], args[1:]...)
 	if err != nil {
 		_ = os.RemoveAll(configDir)
 		return nil, err

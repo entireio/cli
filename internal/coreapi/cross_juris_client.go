@@ -11,6 +11,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/internal/entireclient/httpclient"
+	"github.com/entireio/cli/internal/entireclient/netcause"
 )
 
 // newCrossJurisHTTPClient builds the *http.Client the control-plane
@@ -20,20 +21,33 @@ import (
 // home jurisdiction is another region. Inert for same-jurisdiction calls.
 //
 // coreURL is the origin the client is built against. An http:// loopback
-// core (local dev, httptest) unlocks http:// loopback redirect and
-// exchange targets; anything else demands https, so a production core
-// can never re-target the login JWT over plaintext.
+// core (local dev, httptest) unlocks http:// loopback 421 and exchange
+// targets; anything else demands https. Ordinary HTTP redirects are handled
+// by the outer client, which independently forbids downgrades from HTTPS.
 func newCrossJurisHTTPClient(coreURL string) (*http.Client, error) {
+	return newCrossJurisHTTPClientWrapped(coreURL, nil)
+}
+
+// newCrossJurisHTTPClientWrapped is newCrossJurisHTTPClient with wrap (when
+// non-nil) applied outside the cross-juris transport, so it sees the request
+// as the client sent it.
+func newCrossJurisHTTPClientWrapped(coreURL string, wrap func(http.RoundTripper) http.RoundTripper) (*http.Client, error) {
 	// The User-Agent wrapper goes *under* the cross-juris round tripper,
 	// not over it. That transport sends requests it builds itself — the
 	// RFC 8693 exchange and the federation manifest fetch, both straight
 	// to its base — and those bypass anything wrapped outside it.
-	base := versioninfo.WrapTransport(httpclient.NewTransport(false))
+	//
+	// netcause sits at the very base for the same reason: a sandboxed or
+	// firewalled dial from any of those requests names its cause.
+	base := netcause.Transport(versioninfo.WrapTransport(httpclient.NewTransport(false)))
 	rt, err := newCrossJurisRoundTripper(base, isLoopbackHTTP(coreURL))
 	if err != nil {
 		return nil, err
 	}
-	return &http.Client{Transport: rt}, nil
+	if wrap != nil {
+		rt = wrap(rt)
+	}
+	return httpclient.New(httpclient.Options{Transport: rt}), nil
 }
 
 // newCrossJurisRoundTripper stacks the coreapi transport chain over base:

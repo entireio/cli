@@ -60,7 +60,7 @@ func TestCondenseSession_SkipsEmptySessionEvenWithCommittedFiles(t *testing.T) {
 	s := &ManualCommitStrategy{}
 	checkpointID := id.MustCheckpointID("b2c3d4e5f6a1")
 
-	// Session with no transcript path, no shadow branch, no FilesTouched (empty Codex companion)
+	// Session with no transcript path, no steps, no FilesTouched (empty Codex companion)
 	state := &SessionState{
 		SessionID:  "empty-codex-with-committed-files",
 		AgentType:  "Codex",
@@ -273,11 +273,11 @@ func TestCondenseSessionByID_SkippedPreservesState(t *testing.T) {
 	metadataDirAbs := filepath.Join(dir, metadataDir)
 	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
 
-	// Write a dummy file so SaveStep has something to commit to the shadow branch
+	// Write a dummy file so SaveStep has something to record
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "dummy.txt"), []byte("x"), 0o644))
 
-	// SaveStep creates the shadow branch (so CondenseSessionByID gets past the
-	// hasShadowBranch check), but there's no transcript in the metadata dir.
+	// SaveStep records a turn-end step (so CondenseSessionByID sees pending
+	// work), but there's no transcript in the metadata dir.
 	err := s.SaveStep(context.Background(), StepContext{
 		SessionID:     sessionID,
 		ModifiedFiles: []string{},
@@ -323,10 +323,10 @@ func TestCondenseAndMarkFullyCondensed_SkippedMarksFullyCondensed(t *testing.T) 
 	metadataDirAbs := filepath.Join(dir, metadataDir)
 	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
 
-	// Write a dummy file so SaveStep has something to commit to the shadow branch
+	// Write a dummy file so SaveStep has something to record
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "dummy.txt"), []byte("x"), 0o644))
 
-	// SaveStep creates the shadow branch
+	// SaveStep records a turn-end step
 	err := s.SaveStep(context.Background(), StepContext{
 		SessionID:     sessionID,
 		ModifiedFiles: []string{},
@@ -399,7 +399,7 @@ func TestTryAgentCommitFastPath_SkipsAntigravityWithUnflushedTranscript(t *testi
 
 	// agy writes its transcript only after Stop: mid-turn the recorded path
 	// points at a missing (or empty placeholder) file. With no tracked files
-	// and no shadow branch, condensation degrades to an empty transcript and
+	// and no turn-end step, condensation degrades to an empty transcript and
 	// the skip gate fires — a stamped trailer would dangle permanently.
 	emptyTranscript := filepath.Join(dir, "transcript_full.jsonl")
 	require.NoError(t, os.WriteFile(emptyTranscript, nil, 0o600))
@@ -605,4 +605,21 @@ func getHeadHash(t *testing.T, repo *git.Repository) string {
 	head, err := repo.Head()
 	require.NoError(t, err)
 	return head.Hash().String()
+}
+
+// A commit in another worktree that shares nothing with the session's record
+// of that worktree (its agent committed a shell edit, linked by ancestry)
+// falls back to the committed files as an empty record would; at home a
+// non-overlapping record still narrows to nothing.
+func TestFilterFilesTouched_WorktreeRecordWithoutOverlapFallsBack(t *testing.T) {
+	t.Parallel()
+	committed := map[string]struct{}{"g.txt": {}}
+
+	inView := &ExtractedSessionData{Transcript: []byte("x\n"), FilesTouched: []string{"f.txt"}}
+	filterFilesTouched(inView, committed, &SessionState{SessionID: "view", InWorktreeView: true})
+	require.Equal(t, []string{"g.txt"}, inView.FilesTouched)
+
+	atHome := &ExtractedSessionData{Transcript: []byte("x\n"), FilesTouched: []string{"f.txt"}}
+	filterFilesTouched(atHome, committed, &SessionState{SessionID: "home"})
+	require.Empty(t, atHome.FilesTouched)
 }

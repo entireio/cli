@@ -28,7 +28,6 @@ func promptBearingWriteOptions(checkpointID id.CheckpointID) WriteOptions {
 		Summary:          &Summary{Intent: promptOmissionSecret},
 		ReviewPrompt:     promptOmissionSecret,
 		InvestigateTopic: promptOmissionSecret,
-		Attribution:      &Attribution{AgentLines: 7},
 		Tasks: []TaskPayload{{
 			ToolUseID:       "toolu_1",
 			AgentID:         "agent-1",
@@ -85,7 +84,6 @@ func TestOmitPromptContent_SessionStripsPromptBearingFields(t *testing.T) {
 
 		// Non-prompt metadata survives.
 		assert.Equal(t, []string{"main.go"}, out.FilesTouched)
-		assert.Equal(t, 7, out.Attribution.AgentLines)
 	}
 
 	// The caller's request is not mutated (Tasks/SkillEvents are copied).
@@ -115,10 +113,18 @@ func TestOmitPromptContent_BackfillsAndOtherRequests(t *testing.T) {
 	_, ok = omitPromptContent(SessionSummary{CheckpointID: cpID, Summary: &Summary{Intent: promptOmissionSecret}})
 	assert.False(t, ok, "summary backfill carries only prompt-derived content and must be dropped")
 
-	attr := CheckpointAttribution{CheckpointID: cpID, Attribution: &Attribution{AgentLines: 1}}
-	got, ok = omitPromptContent(attr)
+	tasks := promptBearingWriteOptions(cpID).Tasks
+	got, ok = omitPromptContent(Tasks{CheckpointID: cpID, Tasks: tasks})
 	require.True(t, ok)
-	assert.Equal(t, attr, got)
+	out, isTasks := got.(Tasks)
+	require.True(t, isTasks)
+	assert.Equal(t, cpID, out.CheckpointID)
+	require.Len(t, out.Tasks, 1)
+	assert.Zero(t, out.Tasks[0].Transcript.Len())
+	assert.Empty(t, out.Tasks[0].TaskDescription)
+	assert.Equal(t, TaskTranscriptReasonOmittedBySettings, out.Tasks[0].TranscriptUnavailableReason)
+	assert.Equal(t, tasks[0].Files, out.Tasks[0].Files)
+	assert.Equal(t, promptOmissionSecret, tasks[0].TaskDescription)
 }
 
 func TestWithPromptOmission_PassThroughWhenSyncEnabled(t *testing.T) {
@@ -163,6 +169,19 @@ func TestOpen_SyncPromptsFalseOmitsPromptContent(t *testing.T) {
 				CheckpointID: cpID,
 				Summary:      &Summary{Intent: promptOmissionSecret},
 			}))
+
+			require.NoError(t, stores.Persistent.Write(ctx, Tasks{
+				CheckpointID: cpID,
+				Tasks:        opts.Tasks,
+			}))
+			tasks, err := stores.Persistent.ListTasks(ctx, cpID)
+			require.NoError(t, err)
+			require.Len(t, tasks, 1)
+			require.NoError(t, tasks[0].Err)
+			assert.Empty(t, tasks[0].Record.TaskDescription)
+			assert.False(t, tasks[0].TranscriptStored)
+			assert.Equal(t, TaskTranscriptReasonOmittedBySettings, tasks[0].Record.TranscriptUnavailableReason)
+			assert.Equal(t, []string{"sub.go"}, tasks[0].Record.Files)
 
 			meta, err := stores.Persistent.ReadSessionMetadata(ctx, cpID, 0)
 			require.NoError(t, err)

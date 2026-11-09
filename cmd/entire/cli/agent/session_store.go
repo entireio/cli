@@ -166,6 +166,13 @@ type SessionFileCandidatesProvider interface {
 	ResolveSessionFileCandidates(sessionDir, agentSessionID string) []string
 }
 
+// AsSessionFileCandidatesProvider returns loc as SessionFileCandidatesProvider
+// if it implements the interface. It takes the SessionLocator a SessionStore
+// holds rather than a full Agent; there is no DeclaredCaps gate.
+func AsSessionFileCandidatesProvider(loc SessionLocator) (SessionFileCandidatesProvider, bool) {
+	return builtinCapability[SessionFileCandidatesProvider](loc)
+}
+
 // SessionFileCandidatesIn returns the absolute paths inside the store that
 // agentSessionID may be stored at, most preferred first, resolved from
 // sessionDir: the agent's SessionFileCandidatesProvider candidates when it
@@ -182,7 +189,7 @@ func (s *SessionStore) SessionFileCandidatesIn(sessionDir, agentSessionID string
 		}
 	}
 	var resolved []string
-	if provider, ok := s.agent.(SessionFileCandidatesProvider); ok {
+	if provider, ok := AsSessionFileCandidatesProvider(s.agent); ok {
 		resolved = provider.ResolveSessionFileCandidates(sessionDir, agentSessionID)
 	} else {
 		resolved = []string{s.agent.ResolveSessionFile(sessionDir, agentSessionID)}
@@ -493,7 +500,7 @@ func (s *SessionStore) CreateExclusive(name string, perm os.FileMode) error {
 
 // Exists reports whether name is present in the store. Lstat, not Stat: a
 // dangling symlink is still a file that exists and must not be overwritten
-// silently (see the rewind restore path, which distinguishes the two).
+// silently (resume's session-log restore relies on that distinction).
 func (s *SessionStore) Exists(name string) bool {
 	_, err := s.Lstat(name)
 	return err == nil

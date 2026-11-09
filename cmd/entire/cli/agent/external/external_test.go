@@ -118,9 +118,6 @@ case "$1" in
   extract-prompts)
     echo '{"prompts": ["hello", "world"]}'
     ;;
-  extract-summary)
-    echo '{"summary": "test summary", "has_summary": true}'
-    ;;
   *)
     echo "unknown subcommand: $1" >&2
     exit 1
@@ -617,14 +614,6 @@ func TestExternalAgent_TranscriptAnalyzer(t *testing.T) {
 	}
 	if len(prompts) != 2 || prompts[0] != "hello" {
 		t.Errorf("ExtractPrompts() = %v, want [hello world]", prompts)
-	}
-
-	summary, err := ea.ExtractSummary("/path")
-	if err != nil {
-		t.Fatalf("ExtractSummary: %v", err)
-	}
-	if summary != "test summary" {
-		t.Errorf("ExtractSummary() = %q, want 'test summary'", summary)
 	}
 }
 
@@ -1333,5 +1322,32 @@ esac
 	}
 	if want := realRepo + "|" + realRepo; dir != want {
 		t.Errorf("get-session-dir saw %q, want %q", dir, want)
+	}
+}
+
+// compact-transcript returns a base64 transcript that can legitimately exceed
+// the 10 MB cap other subcommands get.
+func TestCompactTranscript_AllowsOutputOverDefaultCap(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	script := `#!/bin/sh
+case "$1" in
+  info)
+    echo '` + validInfoJSON + `'
+    ;;
+  compact-transcript)
+    printf '{"transcript":"%s"}' "$(head -c 9000000 /dev/zero | base64 | tr -d '\n')"
+    ;;
+esac
+`
+	ea := newExternalAgent(t, testBinaryDir(t, script))
+	got, err := ea.CompactTranscript(context.Background(), "/dev/null")
+	if err != nil {
+		t.Fatalf("CompactTranscript() error = %v", err)
+	}
+	if len(got.Transcript) != 9000000 {
+		t.Fatalf("transcript length = %d, want 9000000", len(got.Transcript))
 	}
 }

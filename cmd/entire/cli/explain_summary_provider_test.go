@@ -113,12 +113,12 @@ func TestResolveCheckpointSummaryProvider_UsesConfiguredProvider(t *testing.T) {
 	originalLoad := loadSummarySettings
 	originalGet := getSummaryAgent
 	originalCLI := isSummaryCLIAvailable
-	originalDiscover := discoverSummaryProviders
+	originalDiscover := discoverSummaryProvidersAlways
 	t.Cleanup(func() {
 		loadSummarySettings = originalLoad
 		getSummaryAgent = originalGet
 		isSummaryCLIAvailable = originalCLI
-		discoverSummaryProviders = originalDiscover
+		discoverSummaryProvidersAlways = originalDiscover
 	})
 
 	loadSummarySettings = func(context.Context) (*settings.EntireSettings, error) {
@@ -137,7 +137,7 @@ func TestResolveCheckpointSummaryProvider_UsesConfiguredProvider(t *testing.T) {
 		}, nil
 	}
 	isSummaryCLIAvailable = func(types.AgentName) bool { return true }
-	discoverSummaryProviders = func(context.Context) {
+	discoverSummaryProvidersAlways = func(context.Context) {
 		t.Fatal("configured registered provider should not trigger external discovery")
 	}
 

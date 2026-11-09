@@ -10,7 +10,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/redact"
@@ -20,8 +19,8 @@ import (
 )
 
 // setupNoFileChangesSession records the session a snapshot is for: one that
-// changed no files, so turn end never ran SaveStep — no steps, no shadow
-// branch, no FilesTouched, only a live transcript (researchTranscript).
+// changed no files, so turn end never ran SaveStep — no steps, no
+// FilesTouched, only a live transcript (researchTranscript).
 func setupNoFileChangesSession(t *testing.T, sessionID string) *git.Repository {
 	t.Helper()
 	dir := setupGitRepo(t)
@@ -138,7 +137,7 @@ func TestCreateSnapshotCheckpoint_UnknownSession(t *testing.T) {
 	require.ErrorContains(t, err, "session not found")
 }
 
-// A session with a shadow branch but no transcript and no files is the
+// A session with a turn-end step but no transcript and no files is the
 // condensation skip gate; the snapshot reports it rather than returning an ID
 // for a checkpoint that was never written.
 func TestCreateSnapshotCheckpoint_NothingToCheckpoint(t *testing.T) {
@@ -167,36 +166,6 @@ func TestCreateSnapshotCheckpoint_NothingToCheckpoint(t *testing.T) {
 	require.ErrorIs(t, err, ErrNothingToCheckpoint)
 }
 
-// A snapshot has no commit, so HEAD still predates any work in the shadow tree.
-// Commit attribution compares the shadow tree with HEAD and would count that
-// work as human edits, so the snapshot passes noCommitAttribution. With pending
-// files refused, a snapshot rarely has anything to attribute, so the option is
-// tested directly on a session that does: the control write records
-// attribution, the opted-out one must not.
-func TestCondenseSession_NoCommitAttributionOmitsAttribution(t *testing.T) {
-	sessionID := "2026-09-25-snapshot-attribution"
-	// The fixture's shadow tree holds an agent edit to test.txt that HEAD lacks.
-	repo, _ := setupCondensableSessionWithTranscript(t, sessionID)
-	s := &ManualCommitStrategy{}
-	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
-
-	attribution := func(cpID id.CheckpointID, opts condenseOpts) *checkpoint.Attribution {
-		t.Helper()
-		state, err := s.loadSessionState(context.Background(), sessionID)
-		require.NoError(t, err)
-		_, err = s.CondenseSession(context.Background(), repo, cpID, state, nil, opts)
-		require.NoError(t, err)
-		content, err := store.ReadSessionContent(context.Background(), cpID, 0)
-		require.NoError(t, err)
-		return content.Metadata.Attribution
-	}
-
-	require.NotNil(t, attribution(id.MustCheckpointID("a1a1a1a1a1a1"), condenseOpts{}),
-		"control: without the option this fixture records attribution, or the assertion below proves nothing")
-	assert.Nil(t, attribution(id.MustCheckpointID("b2b2b2b2b2b2"), condenseOpts{noCommitAttribution: true}),
-		"a commitless write must not carry commit attribution")
-}
-
 // Hook-path condensation drops the transcript when runtime redaction fails, so
 // a commit is never blocked on it. A snapshot exists for its transcript, so the
 // same failure must be an error: not an ID for a transcript-less checkpoint,
@@ -221,11 +190,11 @@ func TestCreateSnapshotCheckpoint_RedactionFailureIsAnError(t *testing.T) {
 	assert.Empty(t, checkpoints, "no checkpoint may be written when the transcript could not be redacted")
 }
 
-// The per-session redaction prefix cache is written in two steps, so a snapshot
-// must condense under the session's state lock, like a commit's condensation or
-// a turn-end finalize. Probed from inside redaction: another writer trying to
-// take the lock then must time out. (Racing two writers instead would pass by
-// luck whenever the snapshot happened to be slow.)
+// A snapshot shares the per-session redaction prefix cache, so it must condense
+// under the session's state lock, like a commit's condensation or a turn-end
+// finalize. Probed from inside redaction: another writer trying to take the
+// lock then must time out. (Racing two writers instead would pass by luck
+// whenever the snapshot happened to be slow.)
 func TestCreateSnapshotCheckpoint_RedactsUnderTheSessionLock(t *testing.T) {
 	// No t.Parallel: swaps the package-level redaction seam and uses t.Chdir.
 	sessionID := "2026-10-03-snapshot-lock"

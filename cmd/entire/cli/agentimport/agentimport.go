@@ -79,6 +79,9 @@ type Importer interface {
 	// Discover returns the agent's transcript files for the repo within the
 	// lookback window. overridePath replaces the default transcript dir;
 	// sessionFilter, when non-empty, keeps only matching session IDs.
+	// Imported turns are pushed with repoRoot's checkpoints, so Discover must
+	// return only sessions it can attribute to repoRoot; an agent's per-repo
+	// directory is not proof on its own when its path encoding is lossy.
 	Discover(repoRoot, overridePath string, now time.Time, sessionFilter []string) ([]SessionFile, error)
 	// SplitTurns splits one session's raw transcript bytes into per-turn units.
 	SplitTurns(sf SessionFile, full []byte) ([]Turn, error)

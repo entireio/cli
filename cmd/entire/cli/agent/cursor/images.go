@@ -2,6 +2,7 @@ package cursor
 
 import (
 	"context"
+	"crypto/md5" //nolint:gosec // Cursor names its chats directories by MD5; not a security use
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -136,6 +137,27 @@ func sessionIDFromTranscriptPath(transcriptPath string) string {
 	return id
 }
 
+// ChatsBaseDir is the directory holding Cursor's per-session stores,
+// <base>/<workspace key>/<session id>/ (see ChatsWorkspaceKey).
+func ChatsBaseDir() (string, error) {
+	if base := os.Getenv(cursorChatsDirEnv); base != "" {
+		return base, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("get home directory: %w", err)
+	}
+	return filepath.Join(home, ".cursor", "chats"), nil
+}
+
+// ChatsWorkspaceKey is the directory name Cursor files a workspace's sessions
+// under in ChatsBaseDir: the hex MD5 of the workspace path, as Cursor spells
+// it. Unlike the projects directory name it doesn't merge different paths.
+func ChatsWorkspaceKey(workspacePath string) string {
+	sum := md5.Sum([]byte(workspacePath)) //nolint:gosec // Cursor's own naming, not a security use
+	return hex.EncodeToString(sum[:])
+}
+
 // findStoreDBs locates every SQLite blob store for a session. Cursor lays these
 // out as <chats>/<workspace-hash>/<session-id>/store.db; the workspace hash is
 // not derivable from the session id, so we enumerate workspaces and check each.
@@ -147,13 +169,9 @@ func sessionIDFromTranscriptPath(transcriptPath string) string {
 // which avoids silently dropping images when a session resolves under more than
 // one workspace directory.
 func findStoreDBs(sessionID string) ([]string, error) {
-	base := os.Getenv(cursorChatsDirEnv)
-	if base == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("get home directory: %w", err)
-		}
-		base = filepath.Join(home, ".cursor", "chats")
+	base, err := ChatsBaseDir()
+	if err != nil {
+		return nil, err
 	}
 
 	workspaces, err := filepath.Glob(filepath.Join(base, "*"))
@@ -269,7 +287,7 @@ func sqlite3Available() bool {
 func fileExists(path string) bool {
 	// path is built from a workspace glob result plus a filepath.Base-sanitized
 	// session id (separators stripped, "."/".." rejected), so no traversal.
-	info, err := os.Stat(path) //nolint:gosec // G703 false positive: path is sanitized (see above)
+	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
 }
 

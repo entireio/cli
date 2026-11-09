@@ -30,7 +30,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/vercelconfig"
-	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v6"
@@ -57,6 +56,34 @@ const MaxCommitTraversalDepth = 1000
 var errStop = errors.New("stop iteration")
 
 var errNoMergeBase = errors.New("no merge base")
+
+// errShallowHidesMergeBase means git found no merge base, but a shallow
+// boundary is reachable from one of the tips: the shared history may simply
+// not be present, so the refs cannot be treated as disconnected.
+//
+// Callers that own the fetch heal it with RetryAfterDeepFetch. The message
+// names no command: a hand-run git fetch skips Entire's checkpoint token header
+// and SSH handling, and git fetch --unshallow deepens the whole clone,
+// downloading all of a shallow monorepo. Nor does it suggest entire doctor,
+// which repairs through the same replay and refuses too.
+var errShallowHidesMergeBase = errors.New("reachable shallow history prevents proving refs are disconnected; fetch the ref's full history and try again")
+
+// RetryAfterDeepFetch runs attempt, and when it refuses with
+// errShallowHidesMergeBase runs deepen, a fetch of that one ref at
+// remote.FullRefDepth, then attempts once more. The deep fetch is the same
+// ref-scoped heal the metadata read path uses: it removes a boundary on the
+// fetched history without deepening a shallow source tree. A boundary only the
+// local history reaches survives it, so the second refusal is returned as is.
+func RetryAfterDeepFetch(attempt, deepen func() error) error {
+	err := attempt()
+	if !errors.Is(err, errShallowHidesMergeBase) {
+		return err
+	}
+	if fetchErr := deepen(); fetchErr != nil {
+		return fmt.Errorf("%w; fetching the ref's full history failed: %w", err, fetchErr)
+	}
+	return attempt()
+}
 
 // checkpointRemoteBootstrapContextKey gates whether EnsurePrimaryRef is
 // allowed to perform a network fetch against a configured checkpoint_remote
@@ -180,12 +207,16 @@ func SafelyAdvanceLocalRef(ctx context.Context, repo *git.Repository, localRefNa
 
 	mergeBase, err := getMergeBase(ctx, repoPath, localHash.String(), targetHash.String())
 	if errors.Is(err, errNoMergeBase) {
-		shallow, shallowErr := hasReachableShallowBoundary(ctx, repo, repoPath, localHash.String(), targetHash.String())
+		shallowSet, loadErr := loadShallowHashes(ctx, repoPath)
+		if loadErr != nil {
+			return fmt.Errorf("failed to load shallow boundaries for %s: %w", localRefName, loadErr)
+		}
+		shallow, shallowErr := reachesShallowBoundary(ctx, repoPath, shallowSet, localHash, targetHash)
 		if shallowErr != nil {
 			return fmt.Errorf("failed to check shallow history for %s: %w", localRefName, shallowErr)
 		}
 		if shallow {
-			return fmt.Errorf("no merge base for %s, and reachable shallow history prevents proving refs are disconnected; run 'entire doctor' or 'git fetch --unshallow' and try again", localRefName)
+			return fmt.Errorf("no merge base for %s: %w", localRefName, errShallowHidesMergeBase)
 		}
 		return replayDisconnectedLocalRef(ctx, repo, repoPath, localRefName, localHash, targetHash)
 	}
@@ -259,24 +290,17 @@ func replayLocalCommits(ctx context.Context, repo *git.Repository, reason string
 	return setRefHash(repo, localRefName, newTip)
 }
 
-func hasReachableShallowBoundary(ctx context.Context, repo *git.Repository, repoPath string, hashes ...string) (bool, error) {
+// reachesShallowBoundary reports whether the history of any of hashes
+// contains a commit in shallow, the clone's .git/shallow set.
+func reachesShallowBoundary(ctx context.Context, repoPath string, shallow map[plumbing.Hash]bool, hashes ...plumbing.Hash) (bool, error) {
+	if len(shallow) == 0 {
+		return false, nil
+	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	shallowHashes, err := repo.Storer.Shallow()
-	if err != nil {
-		return false, fmt.Errorf("read shallow commits: %w", err)
-	}
-	if len(shallowHashes) == 0 {
-		return false, nil
-	}
-
-	shallowCommits := make(map[string]struct{}, len(shallowHashes))
-	for _, hash := range shallowHashes {
-		shallowCommits[hash.String()] = struct{}{}
-	}
 	for _, hash := range hashes {
-		reachesBoundary, err := historyReachesShallowBoundary(ctx, repoPath, hash, shallowCommits)
+		reachesBoundary, err := historyReachesShallowBoundary(ctx, repoPath, hash, shallow)
 		if err != nil {
 			return false, err
 		}
@@ -287,15 +311,15 @@ func hasReachableShallowBoundary(ctx context.Context, repo *git.Repository, repo
 	return false, nil
 }
 
-func historyReachesShallowBoundary(ctx context.Context, repoPath, hash string, shallowCommits map[string]struct{}) (bool, error) {
-	cmd := exec.CommandContext(ctx, "git", "rev-list", hash)
+func historyReachesShallowBoundary(ctx context.Context, repoPath string, hash plumbing.Hash, shallow map[plumbing.Hash]bool) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "rev-list", hash.String())
 	cmd.Dir = repoPath
 	output, err := cmd.Output()
 	if err != nil {
 		return false, fmt.Errorf("git rev-list %s failed: %w", hash, err)
 	}
 	for _, commitHash := range strings.Fields(string(output)) {
-		if _, ok := shallowCommits[commitHash]; ok {
+		if shallow[plumbing.NewHash(commitHash)] {
 			return true, nil
 		}
 	}
@@ -356,10 +380,9 @@ func checkpointInfosFromCommitted(committed []checkpoint.CheckpointInfo) []Check
 }
 
 const (
-	entireGitignore    = ".entire/.gitignore"
-	entireDir          = ".entire"
-	gitDir             = ".git"
-	shadowBranchPrefix = "entire/"
+	entireGitignore = ".entire/.gitignore"
+	entireDir       = ".entire"
+	gitDir          = ".git"
 )
 
 // isProtectedPath returns true if relPath is inside a directory that should
@@ -412,6 +435,11 @@ var (
 	// errRedactionScanner is set inside the Once and returned by every
 	// subsequent EnsureRedactionConfigured call (sticky failure).
 	errRedactionScanner error
+	// errRedactionRulesUnloaded is set inside the Once when settings or the
+	// redactor packs directory failed to load, so user-defined rules may be
+	// missing. Hooks keep the warn-and-default behavior; callers whose output
+	// leaves the machine check it through RedactionRulesUnloaded.
+	errRedactionRulesUnloaded error
 )
 
 // resetRedactionConfiguredForTest reinitializes the Once so tests can
@@ -419,6 +447,34 @@ var (
 func resetRedactionConfiguredForTest() {
 	initRedactionOnce = sync.Once{}
 	errRedactionScanner = nil
+	errRedactionRulesUnloaded = nil
+}
+
+// RedactionRulesUnloaded reports why a user-defined redaction rule may not be
+// in effect after EnsureRedactionConfigured — settings that declare redaction
+// but failed to load, an unloadable redactors directory, a skipped pack file,
+// or a rule that failed to compile — or nil when every configured rule is
+// active. Only meaningful after EnsureRedactionConfigured.
+func RedactionRulesUnloaded() error {
+	return errRedactionRulesUnloaded
+}
+
+// settingsDeclareRedaction reports whether either settings file has a top-level
+// "redaction" key, read raw because the typed load just failed. Unreadable
+// files count as declaring it: they could.
+func settingsDeclareRedaction(ctx context.Context) bool {
+	for _, load := range []func(context.Context) (string, map[string]json.RawMessage, bool, error){
+		settings.LoadProjectRaw, settings.LoadLocalRaw,
+	} {
+		_, raw, _, err := load(ctx)
+		if err != nil {
+			return true
+		}
+		if _, ok := raw["redaction"]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // EnsureRedactionConfigured loads redaction settings and configures the
@@ -458,7 +514,14 @@ func EnsureRedactionConfigured(ctx context.Context) error {
 			}
 			logCtx := logging.WithComponent(ctx, "redaction")
 			logging.Warn(logCtx, "failed to load settings for redaction", slog.String("error", err.Error()))
-			return
+			// Only a settings file that declares redaction can hold inline
+			// rules or PII that now will not apply. Anything else (an
+			// unknown key from a newer CLI, an unrelated invalid field)
+			// leaves the built-ins and packs, which still load below.
+			if settingsDeclareRedaction(ctx) {
+				errRedactionRulesUnloaded = fmt.Errorf("load settings: %w", err)
+			}
+			s = &settings.EntireSettings{}
 		}
 
 		if err := redact.ConfigureScanners(redact.ScannersConfig{
@@ -489,17 +552,7 @@ func EnsureRedactionConfigured(ctx context.Context) error {
 
 		// PII detection (opt-in).
 		if s.Redaction != nil && s.Redaction.PII != nil && s.Redaction.PII.Enabled {
-			pii := s.Redaction.PII
-			cfg := redact.PIIConfig{
-				Enabled:        true,
-				Categories:     make(map[redact.PIICategory]bool),
-				CustomPatterns: pii.CustomPatterns,
-				Logger:         logger,
-			}
-			cfg.Categories[redact.PIIEmail] = pii.Email == nil || *pii.Email
-			cfg.Categories[redact.PIIPhone] = pii.Phone == nil || *pii.Phone
-			cfg.Categories[redact.PIIAddress] = pii.Address != nil && *pii.Address
-			redact.ConfigurePII(cfg)
+			redact.ConfigurePII(piiConfigFromSettings(s.Redaction.PII, logger))
 		}
 
 		// Custom rules: inline + packs.
@@ -510,12 +563,18 @@ func EnsureRedactionConfigured(ctx context.Context) error {
 		var packs []*redact.Pack
 		var lerr error
 		if root, rerr := entiredir.OpenForRead(ctx); rerr == nil {
-			packs, lerr = redact.LoadPacks(root.FS(), redact.RedactorsDirName, logger)
+			var skipped int
+			packs, skipped, lerr = redact.LoadPacksCountingSkipped(root.FS(), redact.RedactorsDirName, logger)
+			if skipped > 0 && errRedactionRulesUnloaded == nil {
+				errRedactionRulesUnloaded = fmt.Errorf("%d redactor pack file(s) skipped as unreadable or invalid", skipped)
+			}
 		} else if !errors.Is(rerr, fs.ErrNotExist) {
+			errRedactionRulesUnloaded = fmt.Errorf("open .entire for redactor packs: %w", rerr)
 			logCtx := logging.WithComponent(ctx, "redaction")
 			logging.Warn(logCtx, "failed to open .entire for redactor packs", slog.String("error", rerr.Error()))
 		}
 		if lerr != nil {
+			errRedactionRulesUnloaded = fmt.Errorf("load redactor packs: %w", lerr)
 			warnUser(ctx, "redaction",
 				"failed to load redactor packs",
 				fmt.Sprintf("redactor packs failed to load (%v); see .entire/logs/entire.log or run `entire doctor`.", lerr),
@@ -528,11 +587,18 @@ func EnsureRedactionConfigured(ctx context.Context) error {
 				Packs:  packs,
 				Logger: logger,
 			})
+			configured := len(inline)
+			for _, p := range packs {
+				configured += len(p.Rules)
+			}
+			if active := redact.ActiveCustomRules(); active < configured && errRedactionRulesUnloaded == nil {
+				errRedactionRulesUnloaded = fmt.Errorf("%d of %d custom redaction rule(s) failed to compile", configured-active, configured)
+			}
 		}
 
 		// OpenAI Privacy Filter (opt-in 9th layer).
-		if s.Redaction != nil && s.Redaction.OpenAIPrivacyFilter != nil {
-			opf := s.Redaction.OpenAIPrivacyFilter
+		if s.Redaction != nil && s.Redaction.OpenAIPrivacyFilter != nil { //nolint:staticcheck // OPF is deprecated but still honored until it is removed
+			opf := s.Redaction.OpenAIPrivacyFilter //nolint:staticcheck // OPF is deprecated but still honored until it is removed
 			// The loader records rather than logs (see
 			// settings.enforceOPFCommandTrust); surface it here or a user
 			// whose configured binary is ignored gets no signal.
@@ -573,7 +639,8 @@ func EnsureRedactionConfigured(ctx context.Context) error {
 				slog.Int("pack_rules", packRules),
 				slog.Int("inline_patterns", len(inline)),
 				// Configured counts above, compiled below: a gap between
-				// them means a rule failed to compile (warned separately).
+				// them means a rule was rejected: it failed to compile or can
+				// match the empty string (warned separately).
 				slog.Int("active_rules", redact.ActiveCustomRules()),
 				slog.Bool("pii", piiEnabled),
 				slog.Bool("opf", redact.OPFEnabled()),
@@ -641,11 +708,18 @@ func resolveAgentType(ctxAgentType types.AgentType, state *SessionState) types.A
 // git-refs. Resolution is fail-soft: any config-load error is treated as the
 // default git-branch backend (returns false), preserving legacy behavior.
 func primaryIsGitRefs(ctx context.Context) bool {
+	isRefs, err := primaryBackendIsGitRefs(ctx)
+	return err == nil && isRefs
+}
+
+// primaryBackendIsGitRefs is primaryIsGitRefs for callers that must not treat
+// an unreadable checkpoints config as the git-branch backend.
+func primaryBackendIsGitRefs(ctx context.Context) (bool, error) {
 	cfg, err := settings.LoadCheckpointsConfig(ctx)
 	if err != nil {
-		return false
+		return false, fmt.Errorf("read checkpoint backend: %w", err)
 	}
-	return checkpoint.PrimaryIsRefs(cfg)
+	return checkpoint.PrimaryIsRefs(cfg), nil
 }
 
 func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
@@ -940,7 +1014,12 @@ func bootstrapPrimaryFromCheckpointRemote(ctx context.Context, repo *git.Reposit
 	// resolves the recovery tier never fires again, so a blob-filtered bootstrap
 	// would leave `checkpoint list` permanently showing bare IDs with no prompt,
 	// date, or counts.
-	if err := fetchURLIntoTmpRef(ctx, worktreeRoot, url, primary.String(), tmpRefName.String(), "metadata branch", true, checkpointRemoteForegroundFetchTimeout); err != nil {
+	fetchCtx, release, err := startForegroundFetch(ctx, worktreeRoot)
+	if err == nil {
+		defer release()
+		err = fetchURLIntoTmpRef(fetchCtx, worktreeRoot, url, primary.String(), tmpRefName.String(), "metadata branch", true, foregroundFetch, 0)
+	}
+	if err != nil {
 		// Warn, not Debug: `entire enable` is an explicit user action, and this
 		// failure means existing checkpoints stay unreachable until a read
 		// re-fetches them. At Debug the command looked like it had simply
@@ -1043,12 +1122,31 @@ func healEmptyOrphanFromCheckpointRemote(ctx context.Context, repo *git.Reposito
 	}
 
 	tmpRefName := plumbing.ReferenceName(FetchTmpRefPrefix + primary.Short())
+	// Taken before the cleanup defer so the lock outlives the tmp ref.
+	fetchCtx, release, err := startForegroundFetch(ctx, worktreeRoot)
+	if err != nil {
+		logging.Warn(ctx, "checkpoint-remote: empty-orphan heal could not start its fetch; keeping local orphan",
+			slog.String("error", err.Error()),
+		)
+		return false, nil
+	}
+	defer release()
 	defer func() { _ = repo.Storer.RemoveReference(tmpRefName) }() //nolint:errcheck // cleanup is best-effort
+
+	// The ref is force-set below, and the lock wait can be long enough for a
+	// checkpoint to land on the orphan meanwhile, so check for data again.
+	current, err := repo.Reference(primary, true)
+	if err != nil {
+		return false, nil
+	}
+	if hasData, err := metadataBranchHasData(repo, current); err != nil || hasData {
+		return false, nil
+	}
 
 	// Unfiltered, for the same reason as the bootstrap fetch above: this heal
 	// replaces a data-free orphan with the real branch, which readers then treat
 	// as the checkpoint store.
-	if err := fetchURLIntoTmpRef(ctx, worktreeRoot, url, primary.String(), tmpRefName.String(), "metadata branch", true, checkpointRemoteForegroundFetchTimeout); err != nil {
+	if err := fetchURLIntoTmpRef(fetchCtx, worktreeRoot, url, primary.String(), tmpRefName.String(), "metadata branch", true, foregroundFetch, 0); err != nil {
 		// Warn for the same reason as the bootstrap fetch: this only runs from an
 		// explicit setup flow, and failing leaves the repo on a data-free orphan.
 		logging.Warn(ctx, "checkpoint-remote: empty-orphan heal fetch failed; keeping local orphan",
@@ -1176,7 +1274,7 @@ func ReadSessionPromptFromTree(tree *object.Tree, checkpointPath string) string 
 }
 
 // ReadAgentTypeFromTree reads the agent type from a checkpoint's metadata.json file in a git tree.
-// If metadata.json doesn't exist (shadow branches), it falls back to detecting the agent
+// If metadata.json doesn't exist, it falls back to detecting the agent
 // from the presence of agent-specific config markers (.claude/, .codex/, .cursor/, etc.).
 // Returns agent.AgentTypeUnknown if the agent type cannot be determined.
 func ReadAgentTypeFromTree(tree *object.Tree, checkpointPath string) types.AgentType {
@@ -1191,7 +1289,7 @@ func ReadAgentTypeFromTree(tree *object.Tree, checkpointPath string) types.Agent
 		}
 	}
 
-	// Fall back to detecting agent from config markers (shadow branches don't have metadata.json).
+	// Fall back to detecting agent from config markers when there is no metadata.json.
 	// Multiple agent config markers may coexist when users configure multiple agents via
 	// `entire configure`. Only return a specific agent type when exactly one agent config
 	// marker (directory or file) is present; otherwise return Unknown since we can't
@@ -1227,7 +1325,7 @@ func ReadAgentTypeFromTree(tree *object.Tree, checkpointPath string) types.Agent
 		return detected
 	}
 	// Gemini CLI support was removed, but a session still in flight when it
-	// was leaves a shadow branch until its next commit, and its JSON-document
+	// was is condensed at its next commit, and its JSON-document
 	// transcript cannot be read as anything else. Only a last resort: counted
 	// with the others, a leftover .gemini would make every later session in a
 	// repo that also has another agent's marker ambiguous.
@@ -1458,136 +1556,10 @@ func EnsureEntireGitignore(ctx context.Context) error {
 	return nil
 }
 
-// readWorktreeFile reads a repo-relative file through the worktree's shared
-// root. The names come from git status, so they are already the coordinate the
-// root reads in — joining them onto repoRoot and reading the result was the
-// thing that made "which directory is this relative to?" a per-call-site
-// question.
-func readWorktreeFile(repoRoot, file string) ([]byte, error) {
-	root, err := worktreedir.OpenAt(repoRoot)
-	if err != nil {
-		return nil, fmt.Errorf("open worktree root: %w", err)
-	}
-	name, err := worktreedir.Name(repoRoot, file)
-	if err != nil {
-		return nil, fmt.Errorf("resolve %s in worktree: %w", file, err)
-	}
-	content, err := osroot.ReadFileNoFollow(root, name)
-	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", file, err)
-	}
-	return content, nil
-}
-
-// splitLines splits content into lines, preserving empty lines.
-// Handles both Unix (\n) and Windows (\r\n) line endings.
-func splitLines(content []byte) []string {
-	if len(content) == 0 {
-		return nil
-	}
-	s := string(content)
-	// Normalize Windows line endings to Unix
-	s = strings.ReplaceAll(s, "\r\n", "\n")
-	// Remove trailing newline to avoid empty last element
-	s = strings.TrimSuffix(s, "\n")
-	return strings.Split(s, "\n")
-}
-
 // fileExists checks if a file exists at the given path.
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
-}
-
-// getTaskCheckpointFromTree retrieves a task checkpoint from a commit tree.
-// Shared implementation for shadow and linear-shadow strategies.
-func getTaskCheckpointFromTree(ctx context.Context, point PendingCheckpoint) (*TaskCheckpoint, error) {
-	if !point.IsTaskCheckpoint {
-		return nil, ErrNotTaskCheckpoint
-	}
-
-	repo, err := OpenRepository(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open repository: %w", err)
-	}
-	defer repo.Close()
-
-	commitHash := plumbing.NewHash(point.ID)
-	commit, err := repo.CommitObject(commitHash)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get commit: %w", err)
-	}
-
-	tree, err := commit.Tree()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get tree: %w", err)
-	}
-
-	// Read checkpoint.json from the tree
-	checkpointPath := point.MetadataDir + "/checkpoint.json"
-	file, err := tree.File(checkpointPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to find checkpoint at %s: %w", checkpointPath, err)
-	}
-
-	content, err := file.Contents()
-	if err != nil {
-		return nil, fmt.Errorf("failed to read checkpoint: %w", err)
-	}
-
-	var checkpoint TaskCheckpoint
-	if err := json.Unmarshal([]byte(content), &checkpoint); err != nil {
-		return nil, fmt.Errorf("failed to parse checkpoint: %w", err)
-	}
-
-	return &checkpoint, nil
-}
-
-// getTaskTranscriptFromTree retrieves a task transcript from a commit tree.
-// Shared implementation for shadow and linear-shadow strategies.
-func getTaskTranscriptFromTree(ctx context.Context, point PendingCheckpoint) ([]byte, error) {
-	if !point.IsTaskCheckpoint {
-		return nil, ErrNotTaskCheckpoint
-	}
-
-	repo, err := OpenRepository(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open repository: %w", err)
-	}
-	defer repo.Close()
-
-	commitHash := plumbing.NewHash(point.ID)
-	commit, err := repo.CommitObject(commitHash)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get commit: %w", err)
-	}
-
-	tree, err := commit.Tree()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get tree: %w", err)
-	}
-
-	// MetadataDir format: .entire/metadata/<session>/tasks/<toolUseID>
-	// Session transcript is at: .entire/metadata/<session>/<TranscriptFileName>
-	sessionDir := filepath.Dir(filepath.Dir(point.MetadataDir))
-
-	// Try current format first, then legacy
-	transcriptPath := sessionDir + "/" + paths.TranscriptFileName
-	file, err := tree.File(transcriptPath)
-	if err != nil {
-		transcriptPath = sessionDir + "/" + paths.TranscriptFileNameLegacy
-		file, err = tree.File(transcriptPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to find transcript: %w", err)
-		}
-	}
-
-	content, err := file.Contents()
-	if err != nil {
-		return nil, fmt.Errorf("failed to read transcript: %w", err)
-	}
-
-	return []byte(content), nil
 }
 
 // ErrBranchNotFound is returned by DeleteBranchCLI when the branch does not exist.
@@ -1620,46 +1592,6 @@ func DeleteBranchCLI(ctx context.Context, branchName string) error {
 	cmd := exec.CommandContext(ctx, "git", "branch", "-D", "--", branchName)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to delete branch %s: %s: %w", branchName, strings.TrimSpace(string(output)), err)
-	}
-	return nil
-}
-
-// branchExists checks a branch through the caller's repository. Packed refs
-// are reread on lookup, so native deletions are visible through the same handle.
-// Like show-ref --verify, it also checks that the target object exists.
-//
-// When gitrepo.ReadsNeedNativeGit selects native Git, repo is ignored and
-// show-ref resolves the repository from the process CWD and Git's selectors,
-// so repo must be the CWD repository (as OpenRepository returns). Any non-nil
-// error means the branch is absent or unreadable; the wrapped cause differs by
-// path (plumbing.ErrReferenceNotFound or an *exec.ExitError), so callers must
-// not match a specific sentinel.
-func branchExists(ctx context.Context, repo *git.Repository, branchName string) error {
-	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("check branch %s: %w", branchName, err)
-	}
-	if gitrepo.ReadsNeedNativeGit(ctx) {
-		return branchExistsNative(ctx, branchName)
-	}
-	ref, err := repo.Reference(plumbing.NewBranchReferenceName(branchName), true)
-	if err != nil {
-		return fmt.Errorf("read branch %s: %w", branchName, err)
-	}
-	if err := repo.Storer.HasEncodedObject(ref.Hash()); err != nil {
-		return fmt.Errorf("read branch %s target: %w", branchName, err)
-	}
-	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("check branch %s: %w", branchName, err)
-	}
-	return nil
-}
-
-// branchExistsNative retains native selection for explicit store overrides and
-// repositories outside the worktree-opening contract (for example bare repos).
-func branchExistsNative(ctx context.Context, branchName string) error {
-	cmd := exec.CommandContext(ctx, "git", "show-ref", "--verify", "--quiet", "refs/heads/"+branchName)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("check branch %s: %w", branchName, err)
 	}
 	return nil
 }
@@ -1842,5 +1774,21 @@ func prepareTranscriptIfNeeded(ctx context.Context, ag agent.Agent, transcriptPa
 		// Best-effort: callers handle missing files gracefully.
 		// Transcript may not be available yet (e.g., agent not installed).
 		_ = preparer.PrepareTranscript(ctx, transcriptPath) //nolint:errcheck // Best-effort in hook path
+	}
+}
+
+// piiConfigFromSettings maps enabled PII settings to the redaction config.
+// Email, phone and ip default on when unset; address defaults off.
+func piiConfigFromSettings(pii *settings.PIISettings, logger *slog.Logger) redact.PIIConfig {
+	return redact.PIIConfig{
+		Enabled: true,
+		Categories: map[redact.PIICategory]bool{
+			redact.PIIEmail:   pii.Email == nil || *pii.Email,
+			redact.PIIPhone:   pii.Phone == nil || *pii.Phone,
+			redact.PIIAddress: pii.Address != nil && *pii.Address,
+			redact.PIIIP:      pii.IP == nil || *pii.IP,
+		},
+		CustomPatterns: pii.CustomPatterns,
+		Logger:         logger,
 	}
 }

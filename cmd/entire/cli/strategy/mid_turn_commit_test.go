@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -65,7 +66,7 @@ func TestSessionHasNewContentFromLiveTranscript_NormalizesAbsolutePaths(t *testi
 	stale := time.Now().Add(-3 * time.Minute)
 	require.NoError(t, os.Chtimes(transcriptPath, stale, stale))
 
-	// Create session state: no shadow branch (it was deleted after last condensation),
+	// Create session state: no turn-end step since the last condensation,
 	// transcript path points to the file, agent type is Claude Code
 	now := time.Now()
 
@@ -87,7 +88,7 @@ func TestSessionHasNewContentFromLiveTranscript_NormalizesAbsolutePaths(t *testi
 	require.NoError(t, s.saveSessionState(context.Background(), state))
 
 	// Call sessionHasNewContent — should fall through to live transcript check
-	// since there's no shadow branch. Pass staged files via contentCheckOpts.
+	// since there's no turn-end step. Pass staged files via contentCheckOpts.
 	stagedFiles, err := getStagedFiles(context.Background())
 	require.NoError(t, err)
 	hasNew, err := s.sessionHasNewContent(context.Background(), repo, state, contentCheckOpts{stagedFiles: stagedFiles})
@@ -239,7 +240,7 @@ func TestSessionHasNewContentFromLiveTranscript_IncludesSubagentFiles(t *testing
 		[]byte(subagentTranscript), 0o644,
 	))
 
-	// Create session state: no shadow branch, transcript has only Task calls,
+	// Create session state: no turn-end step, transcript has only Task calls,
 	// agent type is Claude Code so the subagent path resolution works
 	now := time.Now()
 	head, err := repo.Head()
@@ -260,7 +261,7 @@ func TestSessionHasNewContentFromLiveTranscript_IncludesSubagentFiles(t *testing
 	require.NoError(t, s.saveSessionState(context.Background(), state))
 
 	// Call sessionHasNewContent — should fall through to live transcript check
-	// since there's no shadow branch, and should detect subagent file modifications.
+	// since there's no turn-end step, and should detect subagent file modifications.
 	// Pass staged files via contentCheckOpts.
 	stagedFiles, err := getStagedFiles(context.Background())
 	require.NoError(t, err)
@@ -335,4 +336,50 @@ func TestPostCommit_NoTrailer_UpdatesBaseCommit(t *testing.T) {
 	// Phase should stay ACTIVE (no state machine transition, just BaseCommit update)
 	assert.Equal(t, session.PhaseActive, state.Phase,
 		"Phase should remain ACTIVE when commit has no trailer")
+}
+
+// After a carry-forward moves CheckpointTranscriptStart back to 0 (a session's
+// work split by commits in two worktrees), edits before TokenStart are already
+// in a checkpoint: a later commit of the same path must not claim them as new
+// work, while an edit since still does.
+func TestSessionHasNewContentFromLiveTranscript_IgnoresCheckpointedEdits(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	s := &ManualCommitStrategy{}
+	worktreePath, err := paths.WorktreeRoot(context.Background())
+	require.NoError(t, err)
+
+	write := func(name string) string {
+		return `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"` + filepath.Join(worktreePath, name) + `","content":"x"}}]}}`
+	}
+	transcriptPath := filepath.Join(dir, "transcript.jsonl")
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(strings.Join([]string{
+		`{"type":"human","message":{"content":"first"}}`, write("old.go"),
+		`{"type":"human","message":{"content":"second"}}`, write("new.go"),
+	}, "\n")+"\n"), 0o644))
+	stale := time.Now().Add(-3 * time.Minute)
+	require.NoError(t, os.Chtimes(transcriptPath, stale, stale))
+
+	head, err := repo.Head()
+	require.NoError(t, err)
+	now := time.Now()
+	state := &SessionState{
+		SessionID: "checkpointed-edits", BaseCommit: head.Hash().String(), WorktreePath: worktreePath,
+		StartedAt: now, Phase: session.PhaseActive, LastInteractionTime: &now,
+		AgentType: agent.AgentTypeClaudeCode, TranscriptPath: transcriptPath,
+		CheckpointTranscriptStart: 0, // carried forward
+	}
+	state.SetTokenStart(2) // old.go is in an earlier checkpoint
+	require.NoError(t, s.saveSessionState(context.Background(), state))
+
+	hasNew, err := s.sessionHasNewContentFromLiveTranscript(context.Background(), state, fileSet([]string{"old.go"}))
+	require.NoError(t, err)
+	assert.False(t, hasNew, "an edit already in a checkpoint claimed a later commit")
+
+	hasNew, err = s.sessionHasNewContentFromLiveTranscript(context.Background(), state, fileSet([]string{"new.go"}))
+	require.NoError(t, err)
+	assert.True(t, hasNew, "the edit since the last checkpoint should still count")
 }

@@ -12,9 +12,9 @@ import (
 	"time"
 
 	"charm.land/huh/v2"
-	"github.com/entireio/cli/cmd/entire/cli/api"
 	dispatchpkg "github.com/entireio/cli/cmd/entire/cli/dispatch"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/internal/coreapi"
 	"github.com/spf13/cobra"
 )
 
@@ -364,7 +364,7 @@ func TestRunDispatchWizard_ProceedsWhenCurrentBranchCannotBeResolved(t *testing.
 		runDispatchWizardForm = oldRunForm
 	})
 	// Keep the wizard's cloud catalogue off the network.
-	stubDispatchWizardScopeSources(t, []string{"gh/entireio/cli"}, nil, "")
+	stubDispatchWizardScopeSources(t, []string{"gh/entireio/cli"}, "")
 
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
@@ -395,25 +395,14 @@ func TestDispatchWizardState_CloudIgnoresCurrentBranchResolutionError(t *testing
 func TestDiscoverAuthenticatedDispatchWizardRepos_FiltersEmptyCheckpointsAndPreservesRecentOrder(t *testing.T) {
 	t.Parallel()
 
-	old := listDispatchWizardRepoResources
-	listDispatchWizardRepoResources = func(context.Context) ([]api.Repository, error) {
-		return []api.Repository{
-			{FullName: "entireio/most-recent", CheckpointCount: 3},
-			{FullName: "entireio/never-dispatched", CheckpointCount: 0},
-			{FullName: "entireio/older", CheckpointCount: 1},
-			{FullName: "", CheckpointCount: 5},
-		}, nil
-	}
-	t.Cleanup(func() {
-		listDispatchWizardRepoResources = old
+	slugs := checkpointRepoSlugs([]coreapi.RepoIndexEntry{
+		{FullName: "entireio/most-recent", Provider: coreapi.NewOptString("github"), CheckpointCount: coreapi.NewOptInt64(3)},
+		{FullName: "entireio/never-dispatched", Provider: coreapi.NewOptString("github")},
+		{FullName: "entireio/older", Provider: coreapi.NewOptString("entire"), CheckpointCount: coreapi.NewOptInt64(1)},
+		{FullName: "", Provider: coreapi.NewOptString("github"), CheckpointCount: coreapi.NewOptInt64(5)},
 	})
-
-	slugs, err := discoverAuthenticatedDispatchWizardRepos(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
 	// The index lists GitHub mirrors bare; the picker names the forge.
-	if got := strings.Join(slugs, ","); got != "gh/entireio/most-recent,gh/entireio/older" {
+	if got := strings.Join(slugs, ","); got != "gh/entireio/most-recent,et/entireio/older" {
 		t.Fatalf("expected recent-first, forge-qualified slugs with empty-checkpoint and blank repos filtered, got %q", got)
 	}
 }

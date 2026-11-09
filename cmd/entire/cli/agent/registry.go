@@ -257,7 +257,7 @@ func AllHookConfigRelPaths() []string {
 	seen := make(map[string]struct{})
 	var out []string
 	for _, factory := range factories {
-		locator, ok := factory().(HookConfigLocator)
+		locator, ok := AsHookConfigLocator(factory())
 		if !ok {
 			continue
 		}
@@ -288,7 +288,7 @@ func AllProtectedFiles() []string {
 	seen := make(map[string]struct{})
 	var files []string
 	for _, factory := range factories {
-		pf, ok := factory().(ProtectedFilesProvider)
+		pf, ok := AsProtectedFilesProvider(factory())
 		if !ok {
 			continue
 		}
@@ -301,18 +301,6 @@ func AllProtectedFiles() []string {
 	}
 	slices.Sort(files)
 	return files
-}
-
-// LauncherFor returns the Launcher implementation for the given agent name,
-// or ok=false if the agent does not support subprocess launching. Callers
-// should tell the user to start the agent manually in that case.
-func LauncherFor(name types.AgentName) (Launcher, bool) {
-	a, err := Get(name)
-	if err != nil {
-		return nil, false
-	}
-	l, ok := a.(Launcher)
-	return l, ok
 }
 
 // Default returns the default agent.

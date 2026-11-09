@@ -14,6 +14,8 @@ import (
 	"charm.land/huh/v2"
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/review"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 	"github.com/spf13/cobra"
 )
 
@@ -93,7 +95,43 @@ replies. Code-review comments are managed separately under 'entire trail finding
 	cmd.AddCommand(newTrailCommentDeleteCmd())
 	cmd.AddCommand(newTrailCommentResolveCmd("resolve", true, "Resolve", "Resolved"))
 	cmd.AddCommand(newTrailCommentResolveCmd("unresolve", false, "Reopen", "Reopened"))
+	guardTrailCommentWrites(cmd)
 	return cmd
+}
+
+// trailCommentHumanOverrideFlag lets a comment write through from an agent
+// session. The guard is a workflow nudge, not an authorization check: the flag
+// proves nothing about who asked, and the source and binary still reveal it.
+// It is kept out of help, agent-help, and the refusal so an agent is not handed
+// it as the obvious next step.
+const trailCommentHumanOverrideFlag = "human-says-do-it"
+
+// guardTrailCommentWrites refuses every comment write in an agent session:
+// discussions are conversation between people, and agents report through
+// findings. Only list and show stay open, so a write verb added later is
+// guarded by default. Detection counts only agents that identify themselves
+// (review.DetectAgentSession); GIT_TERMINAL_PROMPT=0 alone is a human's or
+// script's prompt suppression and must not block their writes.
+func guardTrailCommentWrites(group *cobra.Command) {
+	for _, child := range group.Commands() {
+		if name := child.Name(); name == cmdList || name == discussionShow {
+			continue
+		}
+		var humanSaysDoIt bool
+		child.Flags().BoolVar(&humanSaysDoIt, trailCommentHumanOverrideFlag, false, "Allow this comment write from an agent session")
+		if err := child.Flags().MarkHidden(trailCommentHumanOverrideFlag); err != nil {
+			panic(fmt.Sprintf("hide %s flag: %v", trailCommentHumanOverrideFlag, err))
+		}
+		run := child.RunE
+		child.RunE = func(cmd *cobra.Command, args []string) error {
+			if caller := review.DetectAgentSession(); caller != "" && !humanSaysDoIt {
+				return fmt.Errorf("refusing `%s` from %s: trail comments are for people. "+
+					"Post feedback as a finding with `entire trail finding` instead",
+					cmd.CommandPath(), caller)
+			}
+			return run(cmd, args)
+		}
+	}
 }
 
 func newTrailCommentListCmd() *cobra.Command {
@@ -108,7 +146,7 @@ func newTrailCommentListCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				return printTrailDiscussions(cmd.OutOrStdout(), items, found.Number, jsonOut, all)
+				return printTrailDiscussions(cmd.OutOrStdout(), items, fmt.Sprintf("trail #%d", found.Number), jsonOut, all)
 			})
 		},
 	}
@@ -157,7 +195,8 @@ func fetchAllTrailDiscussions(ctx context.Context, client *api.Client, path stri
 	return items, nil
 }
 
-func printTrailDiscussions(w io.Writer, items []api.TrailDiscussionSummary, number int, jsonOut, all bool) error {
+// subject names the trail in the empty-list message, e.g. "trail #42".
+func printTrailDiscussions(w io.Writer, items []api.TrailDiscussionSummary, subject string, jsonOut, all bool) error {
 	filtered := items
 	if !all {
 		filtered = make([]api.TrailDiscussionSummary, 0, len(items))
@@ -176,7 +215,7 @@ func printTrailDiscussions(w io.Writer, items []api.TrailDiscussionSummary, numb
 		return nil
 	}
 	if len(filtered) == 0 {
-		fmt.Fprintf(w, "No discussions on trail #%d\n", number)
+		fmt.Fprintf(w, "No discussions on %s\n", subject)
 		return nil
 	}
 	for _, it := range filtered {
@@ -367,24 +406,8 @@ func newTrailCommentDeleteCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			discussionID, messageID := args[0], args[1]
-			if !force && !interactive.CanPromptInteractively() {
-				return fmt.Errorf("refusing to delete message %s without confirmation; pass --force", messageID)
-			}
-			if !force {
-				confirmed := false
-				form := NewAccessibleForm(
-					huh.NewGroup(huh.NewConfirm().Title(fmt.Sprintf("Delete message %s?", messageID)).Value(&confirmed)),
-				)
-				if err := form.RunWithContext(cmd.Context()); err != nil {
-					if errors.Is(err, huh.ErrUserAborted) || errors.Is(err, context.Canceled) {
-						return nil
-					}
-					return fmt.Errorf("message deletion prompt: %w", err)
-				}
-				if !confirmed {
-					fmt.Fprintln(cmd.OutOrStdout(), "Deletion cancelled.")
-					return nil
-				}
+			if proceed, err := confirmTrailMessageDelete(cmd, messageID, force); !proceed {
+				return err
 			}
 			return withNumberedTrail(cmd, func(ctx context.Context, client *api.Client, found *api.TrailResource, basePath string) error {
 				resp, err := client.Delete(ctx, trailDiscussionMessagePath(basePath, found.Number, discussionID, messageID))
@@ -430,4 +453,31 @@ func newTrailCommentResolveCmd(use string, resolved bool, shortVerb, successVerb
 			})
 		},
 	}
+}
+
+// confirmTrailMessageDelete gates a message delete: --force skips it, a
+// terminal prompts, and without one the delete is refused. It reports whether
+// to proceed; a declined or aborted prompt proceeds no further without error.
+func confirmTrailMessageDelete(cmd *cobra.Command, messageID string, force bool) (bool, error) {
+	if force {
+		return true, nil
+	}
+	label := tuiutil.SanitizeTerminalLabel(messageID)
+	if !interactive.CanPromptInteractively() {
+		return false, fmt.Errorf("refusing to delete message %s without confirmation; pass --force", label)
+	}
+	confirmed := false
+	form := NewAccessibleForm(
+		huh.NewGroup(huh.NewConfirm().Title(fmt.Sprintf("Delete message %s?", label)).Value(&confirmed)),
+	)
+	if err := form.RunWithContext(cmd.Context()); err != nil {
+		if errors.Is(err, huh.ErrUserAborted) || errors.Is(err, context.Canceled) {
+			return false, nil
+		}
+		return false, fmt.Errorf("message deletion prompt: %w", err)
+	}
+	if !confirmed {
+		fmt.Fprintln(cmd.OutOrStdout(), "Deletion cancelled.")
+	}
+	return confirmed, nil
 }

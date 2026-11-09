@@ -449,7 +449,7 @@ func writeSessionCard(w io.Writer, s *strategy.SessionState, sty statusStyles) {
 	if s.LastInteractionTime != nil && s.LastInteractionTime.Sub(s.StartedAt) > time.Minute {
 		stats = append(stats, activeTimeDisplay(s.LastInteractionTime))
 	}
-	if t := totalTokens(s.TokenUsage); t > 0 {
+	if t := totalTokens(s.TotalTokenUsage()); t > 0 {
 		stats = append(stats, "tokens "+formatTokenCount(t))
 	}
 	statsLine := strings.Join(stats, sty.render(sty.dim, " · "))
@@ -484,6 +484,9 @@ and files touched. Works for both active and ended sessions.
 Output modes:
   Default       Human-readable summary.
   --json        Metadata-only JSON envelope (no transcript bytes).
+                "pending_turns" counts turns not yet condensed into a
+                checkpoint. "checkpoints" is a deprecated alias with the
+                same value and will be removed in the next release.
   --transcript  Stream the live raw agent transcript bytes to stdout in
                 the agent's native format (e.g. JSONL for
                 Claude/Cursor/Codex). Snapshot is bounded to the file size
@@ -574,19 +577,23 @@ func writeSessionTranscript(ctx context.Context, cmd *cobra.Command, state *stra
 
 // sessionInfoJSON is the JSON output structure for sessions info --json.
 type sessionInfoJSON struct {
-	SessionID      string         `json:"session_id"`
-	Agent          string         `json:"agent"`
-	Model          string         `json:"model,omitempty"`
-	Status         string         `json:"status"`
-	Kind           string         `json:"kind,omitempty"`
-	ReadOnly       bool           `json:"read_only,omitempty"`
-	Branch         string         `json:"branch,omitempty"`
-	WorktreeID     string         `json:"worktree_id,omitempty"`
-	WorktreePath   string         `json:"worktree_path,omitempty"`
-	StartedAt      time.Time      `json:"started_at"`
-	EndedAt        *time.Time     `json:"ended_at,omitempty"`
-	LastActive     *time.Time     `json:"last_active,omitempty"`
-	Turns          int            `json:"turns"`
+	SessionID    string     `json:"session_id"`
+	Agent        string     `json:"agent"`
+	Model        string     `json:"model,omitempty"`
+	Status       string     `json:"status"`
+	Kind         string     `json:"kind,omitempty"`
+	ReadOnly     bool       `json:"read_only,omitempty"`
+	Branch       string     `json:"branch,omitempty"`
+	WorktreeID   string     `json:"worktree_id,omitempty"`
+	WorktreePath string     `json:"worktree_path,omitempty"`
+	StartedAt    time.Time  `json:"started_at"`
+	EndedAt      *time.Time `json:"ended_at,omitempty"`
+	LastActive   *time.Time `json:"last_active,omitempty"`
+	Turns        int        `json:"turns"`
+	PendingTurns int        `json:"pending_turns"`
+	// Checkpoints is the deprecated name of PendingTurns, kept for one release
+	// so scripts reading `checkpoints` keep working. Remove it in the release
+	// after the one that introduced pending_turns.
 	Checkpoints    int            `json:"checkpoints"`
 	LastCheckpoint string         `json:"last_checkpoint_id,omitempty"`
 	Tokens         *tokenInfoJSON `json:"tokens,omitempty"`
@@ -634,18 +641,19 @@ func buildSessionInfoJSON(state *strategy.SessionState, status string) sessionIn
 		EndedAt:        state.EndedAt,
 		LastActive:     state.LastInteractionTime,
 		Turns:          state.SessionTurnCount,
+		PendingTurns:   state.StepCount,
 		Checkpoints:    state.StepCount,
 		LastCheckpoint: string(state.LastCheckpointID),
 		LastPrompt:     state.LastPrompt,
-		FilesTouched:   state.FilesTouched,
+		FilesTouched:   state.PendingFiles(),
 	}
-	if state.TokenUsage != nil {
+	if usage := state.TotalTokenUsage(); usage != nil {
 		info.Tokens = &tokenInfoJSON{
-			Total:      totalTokens(state.TokenUsage),
-			Input:      state.TokenUsage.InputTokens,
-			CacheRead:  state.TokenUsage.CacheReadTokens,
-			CacheWrite: state.TokenUsage.CacheCreationTokens,
-			Output:     state.TokenUsage.OutputTokens,
+			Total:      totalTokens(usage),
+			Input:      usage.InputTokens,
+			CacheRead:  usage.CacheReadTokens,
+			CacheWrite: usage.CacheCreationTokens,
+			Output:     usage.OutputTokens,
 		}
 	}
 	return info
@@ -704,27 +712,28 @@ func writeSessionInfoText(w io.Writer, state *strategy.SessionState, status stri
 		fmt.Fprintf(w, "Turns:       %d\n", state.SessionTurnCount)
 	}
 
-	fmt.Fprintf(w, "Checkpoints: %d\n", state.StepCount)
+	fmt.Fprintf(w, "Pending turns: %d\n", state.StepCount)
 
 	if state.LastCheckpointID != "" {
 		fmt.Fprintf(w, "Checkpoint:  %s\n", state.LastCheckpointID)
 	}
 
-	if t := totalTokens(state.TokenUsage); t > 0 {
+	usage := state.TotalTokenUsage()
+	if t := totalTokens(usage); t > 0 {
 		fmt.Fprintf(w, "\nTokens:      %s\n", formatTokenCount(t))
 
 		var parts []string
-		if state.TokenUsage.InputTokens > 0 {
-			parts = append(parts, "Input: "+formatTokenCount(state.TokenUsage.InputTokens))
+		if usage.InputTokens > 0 {
+			parts = append(parts, "Input: "+formatTokenCount(usage.InputTokens))
 		}
-		if state.TokenUsage.CacheReadTokens > 0 {
-			parts = append(parts, "Cache read: "+formatTokenCount(state.TokenUsage.CacheReadTokens))
+		if usage.CacheReadTokens > 0 {
+			parts = append(parts, "Cache read: "+formatTokenCount(usage.CacheReadTokens))
 		}
-		if state.TokenUsage.CacheCreationTokens > 0 {
-			parts = append(parts, "Cache write: "+formatTokenCount(state.TokenUsage.CacheCreationTokens))
+		if usage.CacheCreationTokens > 0 {
+			parts = append(parts, "Cache write: "+formatTokenCount(usage.CacheCreationTokens))
 		}
-		if state.TokenUsage.OutputTokens > 0 {
-			parts = append(parts, "Output: "+formatTokenCount(state.TokenUsage.OutputTokens))
+		if usage.OutputTokens > 0 {
+			parts = append(parts, "Output: "+formatTokenCount(usage.OutputTokens))
 		}
 		if len(parts) > 0 {
 			fmt.Fprintf(w, "  %s\n", strings.Join(parts, " · "))
@@ -735,9 +744,9 @@ func writeSessionInfoText(w io.Writer, state *strategy.SessionState, status stri
 		fmt.Fprintf(w, "\nLast prompt: %q\n", state.LastPrompt)
 	}
 
-	if len(state.FilesTouched) > 0 {
+	if files := state.PendingFiles(); len(files) > 0 {
 		fmt.Fprintln(w, "\nFiles touched:")
-		for _, f := range state.FilesTouched {
+		for _, f := range files {
 			fmt.Fprintf(w, "  %s\n", f)
 		}
 	}

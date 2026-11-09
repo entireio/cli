@@ -47,9 +47,9 @@ Key files: `gitrepo/repository.go` (open entry points) and
 
 #### Local ref and commit reads
 
-HEAD checkpoint messages, metadata tracking-tip checks, and shadow-branch existence checks use go-git for files-backed worktrees without explicit Git store selectors. Pre-push tracking-ref detection stays native: go-git enumerates every ref before a prefix filter can apply, which is tens of times slower with many loose refs, and one empty loose ref file aborts that enumeration. Open through `gitrepo` and close each owned repository/iterator. Root discovery still uses native Git. Detect reftable before opening its CLI-backed storer and keep these reads as single native commands, rather than expanding one read into multiple adapter subprocesses. Git exports `GIT_DIR` to hooks in linked worktrees; when it names the discovered Git directory (compared by file identity), the reads stay on go-git. A `GIT_DIR` naming any other directory, or any other selector including `GIT_WORK_TREE`, keeps native reads.
+HEAD checkpoint messages and metadata tracking-tip checks use go-git for files-backed worktrees without explicit Git store selectors. Pre-push tracking-ref detection stays native: go-git enumerates every ref before a prefix filter can apply, which is tens of times slower with many loose refs, and one empty loose ref file aborts that enumeration. Open through `gitrepo` and close each owned repository/iterator. Root discovery still uses native Git. Detect reftable before opening its CLI-backed storer and keep these reads as single native commands, rather than expanding one read into multiple adapter subprocesses. Git exports `GIT_DIR` to hooks in linked worktrees; when it names the discovered Git directory (compared by file identity), the reads stay on go-git. A `GIT_DIR` naming any other directory, or any other selector including `GIT_WORK_TREE`, keeps native reads.
 
-`gitrepo.CommitAtReference` reads an exact ref, resolves symbolic refs, and peels nested annotated tags to a commit. It does not parse revision expressions. Missing refs, missing objects, non-commit targets, and context errors are distinct errors; the existing best-effort consumers decide when to treat them as absence. Shadow-branch existence verification reuses the repository already held by `ResetSession`: the pinned go-git version rereads `packed-refs` on lookup, so native deletion is visible through the same handle. Branch deletion and its native pre-check remain unchanged.
+`gitrepo.CommitAtReference` reads an exact ref, resolves symbolic refs, and peels nested annotated tags to a commit. It does not parse revision expressions. Missing refs, missing objects, non-commit targets, and context errors are distinct errors; the existing best-effort consumers decide when to treat them as absence.
 
 Keep the native compatibility paths: explicit repository/object-store selectors and reftable storage (`gitrepo.ReadsNeedNativeGit`), repositories the worktree opener cannot handle (including bare repositories), and HEAD/commit reads requiring replace-ref interpretation or promisor-object backfill. Do not replace these with a guessed CWD repository. No migrated read uses status, refreshes the index, or mutates worktree files.
 
@@ -69,8 +69,7 @@ expensive git read on the hook paths. Avoid calling it more than once per hook.
 Do not memoize it either: a context-scoped cache was tried and removed, because
 the write-free window it required cost more to maintain than the walk saved (see
 `git log` on `gitrepo/status.go` for the measurements). The turn-start hook
-currently walks twice — `CapturePrePromptState` and the strategy's prompt
-attribution each read their own status.
+walks once, in `CapturePrePromptState`.
 
 Agent-hook capture paths must use `gitrepo.StatusWithBudget` instead: it bounds
 the walk with a wall-clock budget (`gitrepo.StatusWalkBudget`) because go-git's walk is
@@ -151,19 +150,30 @@ can land between someone's `git add` and their `git commit`. For the writers we
 do not control, the mitigation is `GIT_OPTIONAL_LOCKS=0` in the environment
 (devcontainers: `containerEnv`), which covers every git process in the session.
 
-Related: any git subprocess that can run inside a git hook and names its target
-with `cmd.Dir` or `-C` must also set `cmd.Env = gitrepo.EnvWithoutRepoOverrides()`
-(`gitrepo/env.go`). Git exports `GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE` to
-hooks and those take precedence over `cmd.Dir`, so a bare `exec.Command`
-silently operates on the hook's repo. Deliberately *not* applied to user-invoked
-commands that act on the current directory (`status`, `doctor`, `review`): there
-a `GIT_DIR` the user exported is an instruction, not contamination.
-
 This exact producer was diagnosed once before (ENT-242, Feb 2026) and lost: the
 fix was closed unmerged on the premise that `git status --porcelain -z` "reads
 without rewriting", which is false, and it would have grown the number of
 index-rewriting call sites from one to eleven. That is why the guard test exists
 rather than a comment.
+
+#### Git Subprocesses in Hooks - Keep the Commit Index
+
+Git subprocesses that target a repository independently of the current hook must
+set `cmd.Env = gitrepo.EnvWithoutRepoOverrides()` (`gitrepo/env.go`). Setting
+`cmd.Dir` or `-C` alone does not override inherited repository selectors.
+
+Queries inspecting the commit Git is preparing must retain the hook environment,
+including `GIT_INDEX_FILE`: `git commit -a` and path-limited commits supply a
+temporary index that can differ from the worktree's ordinary index. Read staged
+paths and their blob IDs together from that commit index (`getStagedChanges`),
+never paths from one index and blobs from go-git's `Storer.Index()`. A query
+that compares per-path state must pass `--no-renames`: rename detection, which
+follows the user's `diff.renames`, reports only a rename's destination and hides
+the staged deletion of its source.
+
+Hook queries reading only the hook's own refs or reflog may strip selectors and
+resolve from `paths.WorktreeRoot`. User-invoked commands acting on the current
+repository also honor the user's repository selectors.
 
 #### go-git v5 Bugs - Use CLI Instead
 
@@ -326,21 +336,6 @@ Two rules about *where* the check goes, both learned by getting them wrong:
   there, and a cwd-relative directory that works beats a hard failure, so the
   distinction is drawn in the one place that still has the information.
 
-**The OPF `command` is the deliberate exception, and stays one.**
-`redaction.openai_privacy_filter.command` becomes `argv[0]` of an
-`exec.CommandContext` in `redact/opf.go` with no `cmd.Dir` and no absoluteness
-check, so `"command": "./tools/opf"` resolves against the pre-push process's
-working directory. That is allowed because the field is not repo-supplied: the
-[OPF ownership gate](checkpoint-implementation.md) honors it only from an untracked, index-and-HEAD-verified
-`.entire/settings.local.json`, so a relative path there is the developer's own
-choice about their own machine, and a bare name is still covered by
-`exec.Command`'s `ErrDot` re-check. The scanners are the opposite case — they
-resolve names nobody chose, out of a `$PATH` the repository can reach — which
-is why the rule is theirs and not this field's. Do not "finish the job" by
-rejecting a relative OPF `command`: it would break the GUI-git-client setups
-the explicit `command` exists to serve, without closing anything the trust gate
-leaves open.
-
 #### Invoking Commands on Windows - Never Put a Dynamic Value on a cmd.exe Line
 
 **When Entire performs the exec itself, do not go through `cmd.exe`.** Pass the
@@ -389,3 +384,22 @@ Windows is deliberately outside that invariant rather than an exception to it:
 `-InstallDir`, and it is safe to because Windows never *runs* the command —
 `realRunInstaller` is unimplemented there, so the string is only ever printed
 for the user to paste.
+
+#### Background Workers on Windows - A Headless Console, Not No Console
+
+`execx.SpawnDetached` starts its workers with `CREATE_NO_WINDOW`
+(`detachBackgroundWorker`). A worker started with `DETACHED_PROCESS` has no
+console at all, so every console program it runs (git, for one) allocates a
+fresh console with a visible window on the user's desktop. `CREATE_NO_WINDOW`
+gives the worker a console without a window, and its subprocesses inherit it.
+The trade is that `CONIN$` still opens on that console, so a subprocess that
+prompts hangs instead of flashing; workers run only local git commands, and
+Entire's own prompts go through `interactive.CanPromptInteractively`, which
+reports no window.
+
+`execx.NonInteractive` keeps `DETACHED_PROCESS`: its callers need console input
+probes to fail. Never route one helper through the other. Windows ignores
+`CREATE_NO_WINDOW` when `DETACHED_PROCESS` is also set, and
+`TestWindowsDetachHelpersSetDistinctConsoleFlags` pins each helper's flags.
+Unix workers start a new session, which already leaves their descendants
+without a terminal.

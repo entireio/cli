@@ -127,38 +127,34 @@ func runRecap(ctx context.Context, w, errW io.Writer, f *recapFlags) error {
 	// scope value is a repo_id ULID when routed to a cell (echoed back verbatim
 	// by the response), which is meaningless to show a user. Both are empty when
 	// no repo query is sent, so an unscoped recap isn't mislabelled.
-	client, repoScope, repoName, err := newRecapClient(ctx, f.insecureHTTP)
+	source, repoName, err := newRecapSource(ctx, f.insecureHTTP)
 	if err != nil {
 		if errors.Is(err, api.ErrInsecureHTTP) {
 			// Name the variable and the host it points at: the generic error says
 			// only that *some* base URL is http, which sends the reader looking for
-			// a setting they may not know they have. newRecapClient rejects the
+			// a setting they may not know they have. newRecapSource rejects the
 			// override before resolving anything, so an http URL here is always
 			// this one. insecureDataOverrideNote strips any credentials from it.
 			fmt.Fprintf(errW, "%s. Use https:// for production, or pass --insecure-http-auth for local dev.\n", insecureDataOverrideNote())
 			return NewSilentError(err)
 		}
-		// Token resolution can fail for many reasons unrelated to the
-		// keyring — STS exchange rejected, network error, audience
-		// misconfiguration. Surface the underlying error verbatim
-		// rather than misattributing it to a missing or locked
-		// keyring entry; main.go's default printer is honest about
-		// what went wrong.
-		return err
+		// Not logged in gets the login hint; every other failure (refresh
+		// rejected, network error, no cell for the home jurisdiction) surfaces
+		// verbatim rather than being misattributed to a missing login.
+		return renderDataAPIAuthError(ctx, errW, "", err)
 	}
 	rangeKey := f.rangeKey()
 	if f.useTUI(interactive.IsTerminalWriter(w), interactive.CanPromptInteractively(), IsAccessibleMode()) {
-		return runRecapTUI(ctx, client, recapTUIOptions{
+		return runRecapTUI(ctx, source, recapTUIOptions{
 			Range:    rangeKey,
 			View:     mode,
 			Agent:    f.agentName(),
-			Repo:     repoScope,
 			RepoName: repoName,
 			Color:    color,
 		})
 	}
 	start, end := rangeKey.Bounds(time.Now())
-	resp, err := recap.FetchMeRecap(ctx, client, start, end, repoScope, 0)
+	resp, err := source.fetch(ctx, start, end)
 	if err != nil {
 		return handleRecapFetchError(errW, err)
 	}
@@ -174,65 +170,31 @@ func runRecap(ctx context.Context, w, errW io.Writer, f *recapFlags) error {
 	return nil
 }
 
-// newRecapClient does not gate on a missing token; FetchMeRecap surfaces
-// 401s via recapLoadErrorMessage so flag effects (--week, --agent, ...)
-// and the real auth error are not collapsed into one "sign in" hint.
+// newRecapSource returns the recap source for the current repo and the repo's
+// owner/repo display name. Its home client is the caller's home entire-api
+// cell; /me/recap's ?repo= is the current repo's processing placement id (its
+// team/contributors scope). When that placement lives on another cell, the
+// source also reads the team side there. The repo fields are empty when the
+// current repo can't be resolved; recap then shows the personal side only.
 //
-// Goes through auth.ResolveDataAPI (the same login-following path as
-// activity/search/dispatch). ErrNotLoggedIn is collapsed back into an empty
-// token so the caller's "render with no bearer, let the server respond 401"
-// path still fires. Every other resolution failure (refresh rejected, network
-// error, keyring locked) surfaces verbatim to the caller.
-// newRecapClient returns the recap client, the value to pass as /me/recap's
-// ?repo= (its team/contributors scope), and the repo's owner/repo display name.
-// The scope is the current repo's ULID when routed to an entire-api cell (which
-// addresses repos by id), or its owner/repo slug on the data API (which
-// addresses them by name); both come from one remote/mirror resolution, so the
-// caller never re-resolves for display. Empty when the current repo can't be
-// resolved — recap then shows the personal side only.
-//
-// It prefers the caller's home entire-api cell (the shared client) and falls
-// back to the data API on a cell-client failure — the cell path is a
-// best-effort upgrade, so a cell problem must never break a command that worked
-// before it existed. Expected fallbacks (region has no cell yet, not logged in)
-// are silent; unexpected ones are debug-logged (logCellClientFallback). Only
-// failures of the data-API path itself surface — except ErrNotLoggedIn, which
-// recap tolerates, rendering and letting the server answer 401. Both paths
-// act as the same login (auth.ResolveDataAPI mirrors the cell path's
-// precedence), so a selected staging login whose refresh failed is reported,
-// never answered by a production login.
-func newRecapClient(ctx context.Context, insecureHTTP bool) (client *api.Client, repoScope, repoName string, err error) {
-	cellClient, cellErr := auth.NewEntireAPICellClient(ctx, insecureHTTP, nil)
-	if cellErr == nil {
-		repoID, repoSlug := currentRepoRef(ctx)
-		return cellClient, repoID, repoSlug, nil
-	}
-	logCellClientFallback(ctx, cellErr)
-
-	if insecureHTTP {
-		auth.EnableInsecureHTTP()
-	} else if err := requireSecureDataOverride(); err != nil {
-		return nil, "", "", err
-	}
-	target, err := auth.ResolveDataAPI(ctx)
-	if errors.Is(err, auth.ErrNotLoggedIn) {
-		target, err = auth.DataAPI{BaseURL: api.BaseURL()}, nil
-		if base, berr := auth.DataBaseURL(); berr == nil {
-			target.BaseURL = base
-		}
-	}
+// There is no data-API fallback: the BFF answers /me/recap by proxying to that
+// same home cell, so a caller the cell path cannot serve gets nothing better
+// there. Client-construction errors (not logged in, no cell for the home
+// jurisdiction, refresh rejected) are returned for runRecap to render.
+func newRecapSource(ctx context.Context, insecureHTTP bool) (recapSource, string, error) {
+	// One factory for both cells: it resolves and refreshes the login once.
+	factory, err := auth.NewEntireAPICellClientFactory(ctx, insecureHTTP)
 	if err != nil {
-		return nil, "", "", err
+		return recapSource{}, "", err //nolint:wrapcheck // auth returns contextual, user-facing errors
 	}
-	// No second scheme check: requireSecureDataOverride above already rejected an
-	// http ENTIRE_API_BASE_URL, and every other value target.BaseURL can hold is
-	// built by auth.dataBaseURLForCore as "https://" + site. The one that mattered
-	// is the one that runs before credentials are resolved —
-	// TestNewRecapClient_RejectsInsecureOverrideBeforeDiscovery pins it.
-
-	// The data API scopes by slug, so scope and display name coincide.
-	slug := currentRepoSlug(ctx)
-	return api.NewClientWithBaseURL(target.Token, target.BaseURL), slug, slug, nil
+	home, err := factory.ClientFor(ctx, nil)
+	if err != nil {
+		return recapSource{}, "", err //nolint:wrapcheck // auth returns contextual, user-facing errors
+	}
+	repoID, repoSlug, repoCell := currentRepoRef(ctx)
+	source := recapSource{home: home, repo: repoID, teamTimeout: recapTeamTimeout}
+	source = withTeamCell(ctx, source, recapTeamCell(home.BaseURL(), repoCell, auth.BaseURLOverridePinsCell()), factory.ClientFor)
+	return source, repoSlug, nil
 }
 
 func handleRecapFetchError(w io.Writer, err error) error {
@@ -269,15 +231,7 @@ func terminalWidth(w io.Writer) int {
 	return width
 }
 
-func currentRepoSlug(ctx context.Context) string {
-	_, owner, repoName, err := gitremote.ResolveRemoteRepo(ctx, "origin")
-	if err != nil || owner == "" || repoName == "" {
-		return ""
-	}
-	return owner + "/" + repoName
-}
-
-// currentRepoSlugWithForge is like currentRepoSlug but includes the forge
+// currentRepoSlugWithForge returns the origin remote as owner/repo, with the forge
 // prefix (e.g. "gh/owner/repo", "et/proj/repo") when the remote maps to a
 // known forge. Code search needs this because the repo index FullName may
 // include the forge prefix (especially for Entire forge repos stored as

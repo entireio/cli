@@ -115,3 +115,28 @@ func (f faultStore) Delete(service, user string) error {
 	//nolint:wrapcheck // thin test wrapper; callers handle errors
 	return f.inner.Delete(service, user)
 }
+
+// UseUnreachableKeyringForTesting makes the store behave like a macOS Keychain
+// the process cannot search: every "not found" from the file backend at path
+// is reported through the production classifier as ErrKeyringUnavailable.
+// Returns a cleanup function.
+func UseUnreachableKeyringForTesting(path string) func() {
+	return installFaultStore(faultStore{inner: unreachableKeyring{inner: &fileStore{path: path}}})
+}
+
+type unreachableKeyring struct{ inner store }
+
+func (u unreachableKeyring) Get(service, user string) (string, error) {
+	val, err := u.inner.Get(service, user)
+	return checkNotFound(val, err, func() bool { return false })
+}
+
+func (u unreachableKeyring) Set(service, user, password string) error {
+	//nolint:wrapcheck // thin test wrapper; callers handle errors
+	return u.inner.Set(service, user, password)
+}
+
+func (u unreachableKeyring) Delete(service, user string) error {
+	//nolint:wrapcheck // thin test wrapper; callers handle errors
+	return u.inner.Delete(service, user)
+}

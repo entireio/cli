@@ -22,7 +22,7 @@ import (
 //  4. Prompt 2 starts (user-prompt-submit) → EnsureSetup reinstalls hooks
 //  5. Agent commits via hooks → checkpoint trailer ✓ (hooks restored)
 //
-// The key insight: GitCommitWithShadowHooks invokes the binary directly (simulating
+// The key insight: GitCommitWithHooks invokes the binary directly (simulating
 // working hooks), while GitAdd+GitCommit uses go-git without hooks (simulating
 // overwritten hooks where `entire` is never called).
 func TestHookOverwrite_MidTurnWipe_NextPromptRecovers(t *testing.T) {
@@ -47,7 +47,7 @@ func TestHookOverwrite_MidTurnWipe_NextPromptRecovers(t *testing.T) {
 	})
 
 	// First commit — hooks are intact, binary is invoked → trailer added
-	env.GitCommitWithShadowHooks("Add file A", "fileA.go")
+	env.GitCommitWithHooks("Add file A", "fileA.go")
 	cpID1 := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
 	require.NotEmpty(t, cpID1, "first commit should have checkpoint trailer")
 
@@ -104,7 +104,7 @@ func TestHookOverwrite_MidTurnWipe_NextPromptRecovers(t *testing.T) {
 	}
 
 	// Third commit — hooks restored, agent commits (no TTY) → trailer added via fast path
-	env.GitCommitWithShadowHooksAsAgent("Add file C", "fileC.go")
+	env.GitCommitWithHooksAsAgent("Add file C", "fileC.go")
 	cpID3 := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
 	assert.NotEmpty(t, cpID3,
 		"third commit should have trailer (hooks reinstalled by prompt 2)")

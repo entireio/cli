@@ -386,7 +386,7 @@ func repoHasNoRemotes(ctx context.Context) bool {
 }
 
 // HookCheckpointRefFetcher returns the write-probe fetcher for git-hook
-// contexts (post-commit attribution, stop-time transcript finalize): the
+// contexts (post-commit condensation, stop-time transcript finalize): the
 // bounded budget plus BatchMode SSH, so a passphrase-protected key can never
 // prompt — or invisibly hang — inside a hook the user's git command is
 // waiting on.
@@ -398,6 +398,20 @@ func HookCheckpointRefFetcher() func(context.Context, plumbing.ReferenceName) er
 	bounded := BoundedCheckpointRefFetcher(WriteProbeFetchBudget)
 	return func(ctx context.Context, ref plumbing.ReferenceName) error {
 		return bounded(WithNonInteractiveSSH(ctx), ref)
+	}
+}
+
+// HookCheckpointRefFetcherFrom is HookCheckpointRefFetcher over the
+// read-candidate chain (see FetchCheckpointRefFrom), with the whole chain under
+// one write-probe budget. A hook about to seed a local checkpoint ref from v1
+// needs the elected remote to prove the ref absent: once checkpoint_push_remote
+// elects a remote other than origin, the single-target probe asks origin, which
+// cannot certify absence, and the hook would never go ahead.
+func HookCheckpointRefFetcherFrom(readRemotes []string, electionErr error) func(context.Context, plumbing.ReferenceName) error {
+	return func(ctx context.Context, ref plumbing.ReferenceName) error {
+		ctx, cancel := context.WithTimeout(WithNonInteractiveSSH(ctx), WriteProbeFetchBudget)
+		defer cancel()
+		return fetchCheckpointRefFrom(ctx, ref, readRemotes, WriteProbeFetchBudget, WriteProbeFetchBudget, electionErr)
 	}
 }
 

@@ -101,9 +101,6 @@ func (w *wrappedAgent) ExtractModifiedFilesFromOffset(ctx context.Context, path 
 func (w *wrappedAgent) ExtractPrompts(ref string, offset int) ([]string, error) {
 	return w.ea.ExtractPrompts(ref, offset)
 }
-func (w *wrappedAgent) ExtractSummary(ref string) (string, error) {
-	return w.ea.ExtractSummary(ref)
-}
 
 // --- TranscriptPreparer ---
 

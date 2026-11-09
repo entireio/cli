@@ -3,7 +3,6 @@ package auth
 import (
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 
 	"github.com/entireio/cli/internal/entireclient/contexts"
@@ -19,34 +18,6 @@ func RemoveContext(name string) error {
 		return f.Find(name)
 	}); err != nil {
 		return fmt.Errorf("remove context %q: %w", name, err)
-	}
-	return nil
-}
-
-// RememberJurisdictionAudience adds audience to context `name`'s
-// JurisdictionAudiences, so logout can find the matching keyring slot.
-// Idempotent: an already-recorded audience rewrites nothing.
-//
-// Callers MUST record before writing the token to the credential store — a
-// persisted-but-unrecorded token is a bearer logout can't find, whereas a
-// failed record that aborts the write costs only one token exchange.
-func RememberJurisdictionAudience(name, audience string) error {
-	aud := strings.TrimRight(strings.TrimSpace(audience), "/")
-	if name == "" || aud == "" {
-		return errors.New("context name and jurisdiction audience are both required")
-	}
-	if err := contexts.Modify(userdirs.Config(), func(f *contexts.File) (bool, error) {
-		c := f.Find(name)
-		if c == nil {
-			return false, fmt.Errorf("no login context named %q", name)
-		}
-		if slices.Contains(c.JurisdictionAudiences, aud) {
-			return false, nil
-		}
-		c.JurisdictionAudiences = append(c.JurisdictionAudiences, aud)
-		return true, nil
-	}); err != nil {
-		return fmt.Errorf("record jurisdiction audience %q for context %q: %w", aud, name, err)
 	}
 	return nil
 }

@@ -172,13 +172,6 @@ func unresolvedHookDiscoveryAt(worktreeRoot, reason string) HookDiscovery {
 	}
 }
 
-// WorktreeProjectLayerExists reports whether the current checkout has a valid
-// local .codex project directory.
-func WorktreeProjectLayerExists(ctx context.Context) bool {
-	hooks, err := ResolveWorktreeHooksPath(ctx)
-	return err == nil && projectLayerExists(filepath.Dir(hooks.Path()))
-}
-
 func projectLayerExists(projectDir string) bool {
 	return validateExistingProjectDir(projectDir) == nil
 }

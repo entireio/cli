@@ -600,7 +600,20 @@ func assertStrictJSONSearchInstructions(t *testing.T, content string) {
 		t.Fatal("scaffolded file should escalate to `explain --full` for the session transcript")
 	}
 	if !strings.Contains(content, "summarize from the compact fields alone") {
-		t.Fatal("scaffolded file should tell agents repo/pr and cross-repo hits aren't explainable")
+		t.Fatal("scaffolded file should tell agents repo/pr and cross-repo session hits aren't explainable")
+	}
+	// ENT-2102: agents paste a commit hit's id (its SHA) into `explain --repo`.
+	if !strings.Contains(content, "For a checkpoint or commit hit from another repo") {
+		t.Fatal("scaffolded file should allow cross-repo explain for commit hits as well as checkpoint hits")
+	}
+	if !strings.Contains(content, "a commit SHA, which that repo's Entire API resolves to its checkpoint") {
+		t.Fatal("scaffolded file should explain that a cross-repo commit SHA resolves to its checkpoint")
+	}
+	if !strings.Contains(content, "never a prefix") {
+		t.Fatal("scaffolded file should forbid prefixes with --repo")
+	}
+	if strings.Contains(content, "other-repo commit and session") {
+		t.Fatal("scaffolded file must not claim other-repo commit hits are unexplainable")
 	}
 }
 

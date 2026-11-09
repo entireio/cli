@@ -18,7 +18,7 @@ type branchRule struct {
 	ServerSideMergeOnly bool   `json:"serverSideMergeOnly"`
 }
 
-var protectionColumns = []string{"BRANCH", "LEVEL"}
+var protectionColumns = []string{colHeaderBranch, "LEVEL"}
 
 const (
 	protectionLevelProtected = "protected"

@@ -4,6 +4,8 @@ import (
 	"context"
 	"os/exec"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 )
 
 // Not parallel: uses t.Setenv. Clearing ENTIRE_CHECKPOINT_TOKEN keeps the test
@@ -31,3 +33,8 @@ func TestTerminateOnCancel_SetsWaitDelay(t *testing.T) {
 		t.Errorf("WaitDelay = %v; want %v", cmd.WaitDelay, killWaitDelay)
 	}
 }
+
+// killWaitDelay is the wait bound applied after ctx-cancel. A transport-helper
+// grandchild (e.g. git-remote-entire) can keep the output pipe open after `git`
+// is SIGKILLed, otherwise blocking CombinedOutput indefinitely.
+const killWaitDelay = execx.KillWaitDelay
