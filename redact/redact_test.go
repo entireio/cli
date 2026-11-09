@@ -1469,6 +1469,16 @@ func TestString_ShellWordSecretsCaughtWithoutScanners(t *testing.T) {
 			want:  "API_KEY=REDACTED|API_KEY=REDACTED",
 		},
 		{
+			name:  "a password after a word that ends inside another redacted word",
+			input: `DB_PASSWORD=a" DB_PASSWORD="|DB_PASSWORD=c' DB_PASSWORD=d'|echo "safe" DB_PASSWORD="hunter'2 secretpart"`,
+			want:  `DB_PASSWORD=REDACTED|DB_PASSWORD=REDACTED|echo "safe" DB_PASSWORD="REDACTED"`,
+		},
+		{
+			name:  "a credential after a word that ends inside another redacted word",
+			input: `API_KEY=a" API_KEY="|API_KEY=c' API_KEY=d'|echo "safe" API_KEY="hunter'2 secretpart"`,
+			want:  `API_KEY=REDACTED|API_KEY=REDACTED|echo "safe" API_KEY="REDACTED"`,
+		},
+		{
 			name:  "code literal joined with more text",
 			input: `API_KEY="None"realtoken`,
 			want:  "API_KEY=REDACTED",
@@ -2994,6 +3004,11 @@ func TestString_JoinedShellWordValues(t *testing.T) {
 			input: `DB_PASSWORD=a" DB_PASSWORD=b"|DB_PASSWORD=changeme`,
 			want:  `DB_PASSWORD=REDACTED|DB_PASSWORD=changeme`,
 		},
+		{
+			name:  "a closing quote inside a redacted word does not open a string",
+			input: `DB_PASSWORD=a" DB_PASSWORD="|DB_PASSWORD=c' DB_PASSWORD=d'|echo "safe" DB_PASSWORD="hunter'2 secretpart"`,
+			want:  `DB_PASSWORD=REDACTED|DB_PASSWORD=REDACTED|echo "safe" DB_PASSWORD="REDACTED"`,
+		},
 	})
 }
 
@@ -3002,13 +3017,13 @@ func TestString_JoinedShellWordValues(t *testing.T) {
 // per match.
 func TestString_JoinedShellWordsStayLinear(t *testing.T) {
 	t.Parallel()
-	for _, unit := range []string{`DB_PASSWORD=a" "`, `API_KEY=a" "`, `DB_PASSWORD=a" "=`, `DB_PASSWORD=a" DB_PASSWORD=b"|`} {
+	for _, unit := range []string{`DB_PASSWORD=a" "`, `API_KEY=a" "`, `DB_PASSWORD=a" "=`, `DB_PASSWORD=a" DB_PASSWORD=b"|`, `DB_PASSWORD=a' DB_PASSWORD=b'|`} {
 		in := strings.Repeat(unit, 20000)
 		done := make(chan string, 1)
 		go func() { done <- String(in) }()
 		select {
 		case out := <-done:
-			if strings.Contains(out, `a" `) {
+			if strings.Contains(out, `a" `) || strings.Contains(out, `a' `) {
 				t.Fatalf("joined values of %q left visible: %.80q", unit, out)
 			}
 		case <-time.After(30 * time.Second):

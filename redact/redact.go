@@ -887,42 +887,30 @@ func detectCredentialKeyCaptures(
 // region it redacted ends, or 0 when it redacted nothing.
 //
 // A shell word redacted whole can hold more key=value text, as in
-// DB_PASSWORD=a" DB_PASSWORD=b", and pattern finds those matches too. Reading
-// one again from inside the word would misread the rest of the line, and on
-// a line of such words (DB_PASSWORD=a" "DB_PASSWORD=a" "...) it would take
-// quadratic time, so a match whose value starts inside a redacted region is
-// skipped. When that match runs on past the region, the text after the region
-// is not part of the word, so it is searched again on its own and a later
-// assignment there (b"|DB_PASSWORD=hunter2) is still found. Matches in that
-// second search are visited even when they run past a newer region, so each
-// stretch of s is searched at most twice.
+// DB_PASSWORD=a" DB_PASSWORD=b", and reading a match again from inside the
+// word would misread the rest of the line: a closing quote in the word would
+// open a new string and run into a later password. So each search starts
+// where the last match or redacted region ends, whichever is later. A later
+// assignment after the word (b"|DB_PASSWORD=hunter2) is still found, and as
+// with FindAll no search starts before the last one's match ended, so a line
+// of such words (DB_PASSWORD=a" "DB_PASSWORD=a" "...) takes linear time.
 func forEachUncoveredMatch(s string, pattern *regexp.Regexp, valueGroup int, visit func(match []int) int) {
-	covered := 0
-	var search func(from, to int, again bool)
-	search = func(from, to int, again bool) {
-		for _, match := range pattern.FindAllStringSubmatchIndex(s[from:to], -1) {
-			for i := range match {
-				if match[i] >= 0 {
-					match[i] += from
-				}
-			}
-			valueStart, _, ok := captureRange(match, valueGroup)
-			if !ok {
-				continue
-			}
-			if valueStart < covered {
-				if match[1] <= covered {
-					continue
-				}
-				if !again {
-					search(covered, match[1], true)
-					continue
-				}
-			}
-			covered = max(covered, visit(match))
+	for from := 0; from < len(s); {
+		match := pattern.FindStringSubmatchIndex(s[from:])
+		if match == nil {
+			return
 		}
+		for i := range match {
+			if match[i] >= 0 {
+				match[i] += from
+			}
+		}
+		next := max(match[1], from+1)
+		if _, _, ok := captureRange(match, valueGroup); ok {
+			next = max(next, visit(match))
+		}
+		from = next
 	}
-	search(0, len(s), false)
 }
 
 // extendPastValueSeparators continues an unquoted credential value across ',',
