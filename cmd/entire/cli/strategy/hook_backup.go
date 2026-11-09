@@ -632,10 +632,9 @@ func refreshMovedEntireHooks(root *os.Root, hook, content string) ([]string, err
 	if err != nil {
 		return nil, err
 	}
-	backup := hook + backupSuffix
 	var rewritten []string
 	for _, n := range names {
-		if !strings.HasPrefix(n, hook+".") || n == backup || strings.HasPrefix(n, backup+".") {
+		if !isMovedHookName(n, hook) {
 			continue
 		}
 		if !carriesEntireMarker(root, n) {
@@ -650,6 +649,55 @@ func refreshMovedEntireHooks(root *os.Root, hook, content string) ([]string, err
 		}
 	}
 	return rewritten, nil
+}
+
+// isMovedHookName: n is a name refreshMovedEntireHooks looks at for hook,
+// <hook>.<suffix> other than the backup and its older copies.
+func isMovedHookName(n, hook string) bool {
+	backup := hook + backupSuffix
+	return strings.HasPrefix(n, hook+".") && n != backup && !strings.HasPrefix(n, backup+".")
+}
+
+// hasStaleMovedEntireHook reports whether hook has a copy of Entire's hook that
+// a hook manager moved aside (see refreshMovedEntireHooks) in a shape this
+// version replaces. Only an install rewrites those copies, and the per-turn
+// install skips a hook that reads current, so without this a stale copy stays
+// for good: the manager's wrapper in the backup runs it from behind Entire's
+// current hook. A hooks directory that cannot be listed reports none.
+func hasStaleMovedEntireHook(root *os.Root, hook string) bool {
+	names, err := hookDirNames(root)
+	if err != nil {
+		return false
+	}
+	for _, n := range names {
+		if !isMovedHookName(n, hook) {
+			continue
+		}
+		data, err := osroot.ReadFileNoFollow(root, n)
+		if err == nil && bytes.Contains(data, []byte(entireHookMarker)) && movedEntireHookOutdated(hook, string(data)) {
+			return true
+		}
+	}
+	return false
+}
+
+// movedEntireHookOutdated reports whether content, a moved copy of Entire's
+// hook, is a shape ownHookStateIn reads as Outdated at the hook's own name, or
+// chains back to the backup without the guard chainCall sets. The wrapper that
+// runs the copy is that backup, so an unguarded chain calls it again and the
+// commit or push never finishes. What refreshMovedEntireHooks writes has no
+// chain and is current, so one install clears every case.
+func movedEntireHookOutdated(hook, content string) bool {
+	if entireHookLineRunsFromWorkingTree(content) || (hook == prePushHook && isPrePushBeforeRefList(content)) {
+		return true
+	}
+	return namesFile([]byte(content), hook+backupSuffix) && !strings.Contains(content, chainGuard(hook))
+}
+
+// chainGuard names the variable chainCall sets while it runs hookName's
+// backup. Installed hooks test it by this name, so it must not change.
+func chainGuard(hookName string) string {
+	return "ENTIRE_CHAINING_" + strings.ToUpper(strings.ReplaceAll(hookName, "-", "_"))
 }
 
 // restoreMovedHooks undoes, on uninstall, what hook managers and Entire's

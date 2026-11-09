@@ -59,6 +59,9 @@ func ManagedGitHookNames() []string {
 type hookSpec struct {
 	name    string
 	content string
+	// keepHook leaves an Entire hook at name as it is and only repairs what
+	// surrounds it: the hook is current, and stale only for a moved copy.
+	keepHook bool
 }
 
 // GetGitDir returns the actual git directory path by delegating to git itself.
@@ -458,9 +461,12 @@ const (
 	// GitHooksCurrent means every managed hook is ours and in the shape this
 	// version writes.
 	GitHooksCurrent
-	// GitHooksOutdated means the hooks are ours but at least one is a shape we no
-	// longer write. Today that means running Entire from the working tree, which
-	// is broken as well as stale — the path it names is gone.
+	// GitHooksOutdated means the hooks are ours but at least one, or a copy of
+	// one that another tool moved aside, is a shape we no longer write: it runs
+	// Entire from the working tree (broken as well as stale, since the path it
+	// names is gone), it is a pre-push hook from before Entire read git's ref
+	// list, or it is a moved copy that chains without the guard (see
+	// hasStaleMovedEntireHook).
 	GitHooksOutdated
 )
 
@@ -512,9 +518,9 @@ func AnyGitHookInstalled(ctx context.Context) bool {
 // An Entire hook that is current stays as it is even when its text differs from
 // what this version writes: it carries entireHookMarker, so InstallGitHook would
 // replace it without a backup, and the difference may be lines the user added.
-// Skipping it also skips refreshing copies another tool moved aside, which is
-// safe: such a copy only runs from that tool's wrapper, and a wrapper in the
-// hook's place lacks the marker, so the hook reads Absent and is reinstalled.
+// That holds when the hook reads Outdated only for a stale copy another tool
+// moved aside: the copy runs from that tool's wrapper, which can sit in the
+// backup behind a current hook, so the copies are refreshed and the hook kept.
 func ReinstallGitHooks(ctx context.Context) (int, error) {
 	return installGitHooks(ctx, true, hookSettingsFromConfig(ctx), true)
 }
@@ -572,8 +578,18 @@ func gitHookStateInHooksDir(hooksDir string) GitHookState {
 }
 
 // hookStateIn classifies one managed hook in root, as gitHookStateInHooksDir
-// does for the set.
+// does for the set: the hook itself, then the copies of Entire's hook another
+// tool moved aside, which only an install refreshes.
 func hookStateIn(root *os.Root, hook string) GitHookState {
+	state := ownHookStateIn(root, hook)
+	if state == GitHooksCurrent && hasStaleMovedEntireHook(root, hook) {
+		return GitHooksOutdated
+	}
+	return state
+}
+
+// ownHookStateIn classifies the file at hook alone.
+func ownHookStateIn(root *os.Root, hook string) GitHookState {
 	// NoFollow: a hook that is a symlink is not one Entire wrote, whatever is at
 	// the far end. Reporting Absent is what sends EnsureSetup to InstallGitHook,
 	// which backs the link up and chains to it.
@@ -881,6 +897,9 @@ func installGitHooks(ctx context.Context, silent, absolutePath, onlyStale bool) 
 		specs = slices.DeleteFunc(specs, func(spec hookSpec) bool {
 			return hookStateIn(root, spec.name) == GitHooksCurrent
 		})
+		for i := range specs {
+			specs[i].keepHook = ownHookStateIn(root, specs[i].name) == GitHooksCurrent
+		}
 	}
 	installedCount, err := installHooks(ctx, lockRoot, root, hooksDir, specs, time.Now())
 	if err != nil {
@@ -980,28 +999,45 @@ func installHooks(ctx context.Context, lockRoot, root *os.Root, hooksDir string,
 			logging.Info(ctx, "updated moved copies of Entire's git hook", slog.String("hook", spec.name), slog.String("copies", strings.Join(moved, ",")))
 		}
 
-		// Chain to the backup, unless it is Entire's own hook, which would call itself.
-		content := spec.content
-		if hookFileExists(root, backupName) && !carriesEntireMarker(root, backupName) {
-			content = generateChainedContent(spec.content, spec.name)
-		}
-
-		afterHookBackup(spec.name)
-		if !hookUnchanged(root, spec.name, class) {
-			return installedCount, fmt.Errorf("%w: %s changed while Entire was installing its hook; "+
-				"it was left as it is, so re-run 'entire enable' to back it up and chain to it",
-				errHookChangedDuringInstall, filepath.Join(hooksDir, spec.name))
-		}
-
-		written, err := writeHookFile(root, spec.name, content)
+		written, err := writeSpecHook(root, hooksDir, spec, class)
 		if err != nil {
-			return installedCount, fmt.Errorf("failed to install %s hook: %w", spec.name, err)
+			return installedCount, err
 		}
 		if written {
 			installedCount++
 		}
 	}
 	return installedCount, nil
+}
+
+// writeSpecHook is installHooks' last step for spec, writing its hook over the
+// one the install classified as class. A spec with keepHook leaves Entire's
+// hook as it is: only the moved copies were stale, the hook may hold lines the
+// user added, and rewriting it would drop them with no backup.
+func writeSpecHook(root *os.Root, hooksDir string, spec hookSpec, class hookClassification) (bool, error) {
+	if spec.keepHook && class == hookOurs {
+		return false, nil
+	}
+
+	// Chain to the backup, unless it is Entire's own hook, which would call itself.
+	backupName := spec.name + backupSuffix
+	content := spec.content
+	if hookFileExists(root, backupName) && !carriesEntireMarker(root, backupName) {
+		content = generateChainedContent(spec.content, spec.name)
+	}
+
+	afterHookBackup(spec.name)
+	if !hookUnchanged(root, spec.name, class) {
+		return false, fmt.Errorf("%w: %s changed while Entire was installing its hook; "+
+			"it was left as it is, so re-run 'entire enable' to back it up and chain to it",
+			errHookChangedDuringInstall, filepath.Join(hooksDir, spec.name))
+	}
+
+	written, err := writeHookFile(root, spec.name, content)
+	if err != nil {
+		return false, fmt.Errorf("failed to install %s hook: %w", spec.name, err)
+	}
+	return written, nil
 }
 
 // writeHookFile writes a hook file if it doesn't exist or has different content.
@@ -1189,7 +1225,7 @@ func generateChainedContent(baseContent, hookName string) string {
 func chainCall(hookName, redirect string) string {
 	backup := hookName + backupSuffix
 	keep := hookName + keepSuffix
-	guard := "ENTIRE_CHAINING_" + strings.ToUpper(strings.ReplaceAll(hookName, "-", "_"))
+	guard := chainGuard(hookName)
 	return fmt.Sprintf(`%s
 _entire_hook_dir="$(dirname "$0")"
 if [ -z "${%s:-}" ]; then
