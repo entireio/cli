@@ -1,0 +1,241 @@
+package strategy
+
+import (
+	"context"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/cmd/entire/cli/trailers"
+)
+
+// Uses t.Chdir — do NOT add t.Parallel().
+
+// takeInheritedTrailers takes the stamp records as post-commit does for a
+// commit on parent, and returns the trailers recorded as inherited.
+func takeInheritedTrailers(ctx context.Context, parent string) map[id.CheckpointID]bool {
+	return takeStampRecords(ctx, commitOn(parent, "")).inherited
+}
+
+// commitOn is a commit on parent with message, as post-commit reads it, that
+// no prepare can have run on.
+func commitOn(parent, message string) *object.Commit {
+	c := &object.Commit{Hash: plumbing.NewHash(strings.Repeat("c", 40)), Message: message}
+	if parent != "" {
+		c.ParentHashes = []plumbing.Hash{plumbing.NewHash(parent)}
+	}
+	return c
+}
+
+// commitWith commits the staged changes with message carrying cpIDs and
+// returns the commit, as post-commit reads it.
+func commitWith(t *testing.T, dir, subject string, cpIDs ...id.CheckpointID) *object.Commit {
+	t.Helper()
+	msg := subject + "\n"
+	for _, cpID := range cpIDs {
+		msg = addCheckpointTrailer(msg, cpID)
+	}
+	testutil.WriteFile(t, dir, subject+".txt", subject)
+	testutil.GitAdd(t, dir, subject+".txt")
+	testutil.GitCommit(t, dir, msg)
+	return headCommit(t, dir)
+}
+
+func mustPerWorktreeGitRoot(t *testing.T) *os.Root {
+	t.Helper()
+	root, err := perWorktreeGitRoot(context.Background())
+	require.NoError(t, err)
+	return root
+}
+
+// waitBriefly gives a hook blocked on the lock time to proceed if it wrongly
+// does not wait.
+func waitBriefly() <-chan time.Time {
+	return time.After(200 * time.Millisecond)
+}
+
+// git runs post-commit after the commit is made, so the next commit in the
+// worktree can start, and its prepare stamp, before this post-commit takes
+// the records. Post-commit used to take every stamp, the next commit's too,
+// which then kept a trailer naming a checkpoint that is never written. It now
+// takes only the stamps its commit carries, keeps the ones stamped on top of
+// its commit, and drops the rest: stamps of commits that never happened.
+func TestTakeStampRecords_KeepsTheNextCommitsStamp(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	ctx := context.Background()
+	first, second, abandoned := id.MustCheckpointID("a1a1a1a1a1a1"), id.MustCheckpointID("b2b2b2b2b2b2"), id.MustCheckpointID("c3c3c3c3c3c3")
+
+	require.True(t, recordStampedTrailer(withLinkedSessions(ctx, []string{"sess-first"}), first))
+	require.True(t, recordStampedTrailer(ctx, abandoned), "a commit on the same parent that never happens")
+	firstCommit := commitWith(t, dir, "first", first)
+	require.True(t, recordStampedTrailer(withLinkedSessions(ctx, []string{"sess-second"}), second), "the next commit's prepare, before the first post-commit")
+
+	records := takeStampRecords(ctx, firstCommit)
+	assert.Equal(t, map[id.CheckpointID]bool{first: true}, records.stamped, "only the stamps the commit carries are its")
+	assert.Equal(t, []string{"sess-first"}, records.sessions[first].SessionIDs)
+	assert.NotContains(t, records.sessions, second)
+	assert.Equal(t, map[id.CheckpointID]bool{second: true}, readStampedTrailers(ctx), "the next commit's stamp is kept, the abandoned one dropped")
+
+	secondCommit := commitWith(t, dir, "second", second)
+	records = takeStampRecords(ctx, secondCommit)
+	assert.Equal(t, map[id.CheckpointID]bool{second: true}, records.stamped, "the next commit's post-commit finds its stamp")
+	assert.Equal(t, []string{"sess-second"}, records.sessions[second].SessionIDs, "and the sessions its prepare linked")
+	assert.Empty(t, readStampedTrailers(ctx))
+	assert.Empty(t, readStampedSessionsIn(mustPerWorktreeGitRoot(t)))
+}
+
+// A stamp left on top of a commit belongs to a commit that may never happen
+// either: the post-commit after that keeps it no longer.
+func TestTakeStampRecords_DropsAKeptStampAtTheNextPostCommit(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	ctx := context.Background()
+	first, abandoned, third := id.MustCheckpointID("a1a1a1a1a1a1"), id.MustCheckpointID("c3c3c3c3c3c3"), id.MustCheckpointID("d4d4d4d4d4d4")
+
+	require.True(t, recordStampedTrailer(ctx, first))
+	firstCommit := commitWith(t, dir, "first", first)
+	require.True(t, recordStampedTrailer(ctx, abandoned), "prepared on top of the first commit, then abandoned")
+	takeStampRecords(ctx, firstCommit)
+	require.True(t, readStampedTrailers(ctx)[abandoned], "precondition: kept for its own post-commit")
+
+	require.True(t, recordStampedTrailer(ctx, third))
+	thirdCommit := commitWith(t, dir, "third", third)
+	assert.Equal(t, map[id.CheckpointID]bool{third: true}, takeStampRecords(ctx, thirdCommit).stamped)
+	assert.Empty(t, readStampedTrailers(ctx), "the abandoned stamp goes with the next post-commit")
+}
+
+// A stamp recorded by a binary that did not record the HEAD it stamped on
+// keeps the old lifetime: the next post-commit consumes it.
+func TestTakeStampRecords_StampWithoutHeadLastsOnePostCommit(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	ctx := context.Background()
+	old := id.MustCheckpointID("e5e5e5e5e5e5")
+	root := mustPerWorktreeGitRoot(t)
+	require.NoError(t, writeStampedTrailersIn(root, []id.CheckpointID{old}))
+
+	takeStampRecords(ctx, headCommit(t, dir))
+	assert.Empty(t, readStampedTrailers(ctx))
+}
+
+// The next commit's prepare can also run before this post-commit takes the
+// inherited marker. With nothing inherited it used to clear the marker, and a
+// squash commit then lost its inherited trailers and redone paths; it now
+// leaves a marker HEAD's commit recorded. Post-commit in turn leaves a marker
+// the next commit's prepare recorded on top of its commit.
+func TestInheritedTrailersMarker_SurvivesTheNextCommitsPrepare(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	ctx := context.Background()
+	squashed, nextSquashed := id.MustCheckpointID("f6f6f6f6f6f6"), id.MustCheckpointID("a7a7a7a7a7a7")
+
+	recordInheritedMarker(ctx, []id.CheckpointID{squashed}, map[string]bool{"redone.txt": true})
+	squashCommit := commitWith(t, dir, "squash", squashed)
+	recordInheritedTrailers(ctx, nil) // the next commit's prepare, which inherited nothing
+
+	records := takeStampRecords(ctx, squashCommit)
+	assert.Equal(t, map[id.CheckpointID]bool{squashed: true}, records.inherited, "the squash keeps its inherited trailers")
+	assert.Equal(t, map[string]bool{"redone.txt": true}, records.redone)
+
+	plainCommit := commitWith(t, dir, "plain")
+	recordInheritedTrailers(ctx, []id.CheckpointID{nextSquashed}) // the next commit's prepare, before this post-commit
+	assert.Empty(t, takeStampRecords(ctx, plainCommit).inherited, "a marker prepared on top of the commit is not its")
+	nextCommit := commitWith(t, dir, "next", nextSquashed)
+	assert.Equal(t, map[id.CheckpointID]bool{nextSquashed: true}, takeStampRecords(ctx, nextCommit).inherited, "it is the next commit's")
+}
+
+// Prepare's read-modify-write of the records and post-commit's take hold the
+// stamp-records lock, so neither can interleave with the other or with a
+// second post-commit: a stamp appended between a take's read and its removal
+// was lost, a stamp written back after a take resurrected the record it had
+// consumed, and two post-commits could each take half the records.
+func TestStampRecords_WaitForTheLock(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	ctx := context.Background()
+	cpID := id.MustCheckpointID("b8b8b8b8b8b8")
+	root := mustPerWorktreeGitRoot(t)
+
+	release := lockStampRecords(ctx, root)
+	stamped := make(chan bool)
+	go func() { stamped <- recordStampedTrailer(ctx, cpID) }()
+	select {
+	case <-stamped:
+		t.Fatal("prepare recorded its stamp while another hook held the lock")
+	case <-waitBriefly():
+	}
+	assert.Empty(t, readStampedTrailers(ctx))
+	release()
+	require.True(t, <-stamped)
+
+	commit := commitWith(t, dir, "locked", cpID)
+	release = lockStampRecords(ctx, root)
+	taken := make(chan stampRecords)
+	go func() { taken <- takeStampRecords(ctx, commit) }()
+	select {
+	case <-taken:
+		t.Fatal("post-commit took the records while another hook held the lock")
+	case <-waitBriefly():
+	}
+	release()
+	assert.Equal(t, map[id.CheckpointID]bool{cpID: true}, (<-taken).stamped)
+}
+
+// The stamp's sessions entry carries the HEAD prepare stamped on, even when
+// prepare linked no session, so post-commit can tell the next commit's stamp
+// from an abandoned one.
+func TestRecordStampedTrailer_RecordsTheHeadItStampedOn(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	ctx := context.Background()
+	cpID := id.MustCheckpointID("c9c9c9c9c9c9")
+	require.True(t, recordStampedTrailer(ctx, cpID))
+
+	entries := readStampedSessionsIn(mustPerWorktreeGitRoot(t))
+	require.Len(t, entries, 1)
+	assert.Equal(t, testutil.GetHeadHash(t, dir), entries[0].Head)
+	assert.Empty(t, entries[0].SessionIDs)
+	assert.Contains(t, trailers.ParseAllCheckpoints(addCheckpointTrailer("x\n", cpID)), cpID, "sanity: the carried check parses the trailer prepare writes")
+}
+
+// The same race through the hooks: the next commit is prepared before the
+// first commit's post-commit runs. Both commits keep their checkpoints.
+func TestCommitHooks_NextCommitPreparedBeforePostCommitGetsItsCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	s := NewManualCommitStrategy()
+	saveReadOnlySession(t, s, dir, "sess-busy", startReadOnlySubagent)
+
+	testutil.WriteFile(t, dir, "first.txt", "first")
+	testutil.GitAdd(t, dir, "first.txt")
+	first := prepareMessage(t, "first\n")
+	require.Len(t, checkpointIDs(first), 1, "prepare stamps the session by its shape: %q", first)
+	testutil.GitCommit(t, dir, first)
+
+	testutil.WriteFile(t, dir, "second.txt", "second")
+	testutil.GitAdd(t, dir, "second.txt")
+	second := prepareMessage(t, "second\n")
+	require.Len(t, checkpointIDs(second), 1, "%q", second)
+	require.NotEqual(t, checkpointIDs(first), checkpointIDs(second))
+
+	require.NoError(t, NewManualCommitStrategy().PostCommit(ctx), "the first commit's post-commit")
+	state, err := s.loadSessionState(ctx, "sess-busy")
+	require.NoError(t, err)
+	require.Equal(t, checkpointIDs(first)[0], state.LastCheckpointID.String())
+
+	testutil.GitCommit(t, dir, second)
+	require.NoError(t, NewManualCommitStrategy().PostCommit(ctx), "the second commit's post-commit")
+	state, err = s.loadSessionState(ctx, "sess-busy")
+	require.NoError(t, err)
+	assert.Equal(t, checkpointIDs(second)[0], state.LastCheckpointID.String(), "the second commit's checkpoint is written too")
+}

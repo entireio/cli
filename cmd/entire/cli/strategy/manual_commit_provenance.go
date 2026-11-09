@@ -3,11 +3,14 @@ package strategy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"maps"
 	"os"
 	"slices"
+	"time"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -16,6 +19,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
@@ -184,7 +188,7 @@ func checkpointExists(ctx context.Context, store checkpoint.PersistentStore, che
 // Both possible parents are recorded: HEAD for an ordinary commit and HEAD's
 // parent for an amend. git's source word cannot tell them apart (`--amend -m`
 // reports "message", `-C <rev>` reports "commit"), and post-commit sees the
-// real parent.
+// real parent. The first is the HEAD prepare ran on (commitParentCandidates).
 const inheritedTrailersFile = "entire-inherited-trailers.json"
 
 type inheritedTrailers struct {
@@ -195,10 +199,21 @@ type inheritedTrailers struct {
 	Redone []string `json:"redone,omitempty"`
 }
 
+// recordedOn returns the HEAD the prepare that recorded marker ran on, empty
+// before the first commit.
+func (marker inheritedTrailers) recordedOn() string {
+	if len(marker.Parents) == 0 {
+		return ""
+	}
+	return marker.Parents[0]
+}
+
 // recordInheritedTrailers tells post-commit which trailers this commit
 // inherited, so it never condenses into one: an inherited trailer links an
 // existing checkpoint, which may simply not be in this clone's store yet.
-// With nothing inherited it clears any marker a commit that never happened left.
+// With nothing inherited it clears any marker a commit that never happened
+// left, but not one HEAD's commit may still be waiting to take
+// (markerAwaitsHeadCommit).
 func recordInheritedTrailers(ctx context.Context, inherited []id.CheckpointID) {
 	recordInheritedMarker(ctx, inherited, nil)
 }
@@ -211,14 +226,48 @@ func recordInheritedMarker(ctx context.Context, inherited []id.CheckpointID, red
 		return
 	}
 	if len(inherited) == 0 {
-		_ = osroot.RemoveNoSymlinks(root, inheritedTrailersFile) //nolint:errcheck // absent is the usual case
+		if _, err := osroot.LstatNoSymlinks(root, inheritedTrailersFile); err != nil {
+			return // absent is the usual case
+		}
+		candidates := commitParentCandidates(ctx)
+		release := lockStampRecords(ctx, root)
+		defer release()
+		if !markerAwaitsHeadCommit(root, candidates) {
+			_ = osroot.RemoveNoSymlinks(root, inheritedTrailersFile) //nolint:errcheck // absent once post-commit took it
+		}
 		return
 	}
-	writeInheritedTrailers(ctx, root, inheritedTrailers{
+	marker := inheritedTrailers{
 		IDs:     inherited,
 		Parents: commitParentCandidates(ctx),
 		Redone:  slices.Sorted(maps.Keys(redone)),
-	})
+	}
+	release := lockStampRecords(ctx, root)
+	defer release()
+	writeInheritedTrailers(ctx, root, marker)
+}
+
+// markerAwaitsHeadCommit reports whether the inherited marker in root may be
+// the one HEAD's commit recorded, which its post-commit has not taken yet: git
+// runs post-commit after the commit is made, so the next commit's prepare can
+// run first. That is a marker for a commit on HEAD's parent, recorded by a
+// prepare that did not run on HEAD itself. candidates are HEAD and its parent
+// (commitParentCandidates). Callers hold the stamp-records lock.
+func markerAwaitsHeadCommit(root *os.Root, candidates []string) bool {
+	if len(candidates) < 2 {
+		return false
+	}
+	marker, ok := readInheritedMarkerIn(root)
+	return ok && marker.recordedOn() != candidates[0] && slices.Contains(marker.Parents, candidates[1])
+}
+
+func readInheritedMarkerIn(root *os.Root) (inheritedTrailers, bool) {
+	var marker inheritedTrailers
+	data, err := osroot.ReadFileNoFollow(root, inheritedTrailersFile)
+	if err != nil || json.Unmarshal(data, &marker) != nil {
+		return inheritedTrailers{}, false
+	}
+	return marker, true
 }
 
 func writeInheritedTrailers(ctx context.Context, root *os.Root, marker inheritedTrailers) {
@@ -257,22 +306,14 @@ func commitParentCandidates(ctx context.Context) []string {
 // paragraph added below it (an editor, a commit-msg hook) moved out of the
 // final trailer block, leaving out the ones prepare recorded as inherited and any
 // checkpoint deleted from this clone: post-commit must never condense new work
-// into a deleted ID, which would re-create it. It also returns, consuming the
-// record, the IDs prepare stamped (see pickCondensationTarget), the committed
-// paths a redo's inherited checkpoints hold, and the stamped trailers found
-// outside the final trailer block.
-func linkedTrailersOf(ctx context.Context, commit *object.Commit) (ids []id.CheckpointID, stamped map[id.CheckpointID]bool, redone map[string]bool, moved []id.CheckpointID) {
-	var parent string
-	if len(commit.ParentHashes) > 0 {
-		parent = commit.ParentHashes[0].String()
-	}
-	var inherited map[id.CheckpointID]bool
-	inherited, redone = takeInheritedMarker(ctx, parent)
-	stamped = takeStampedTrailers(ctx)
+// into a deleted ID, which would re-create it. records is what prepare
+// recorded for commit (takeStampRecords). It also returns the stamped
+// trailers found outside the final trailer block.
+func linkedTrailersOf(ctx context.Context, commit *object.Commit, records stampRecords) (ids, moved []id.CheckpointID) {
 	linked := LinkedCheckpoints(ctx, commit.Message)
-	moved = stampedOutsideFinalBlock(linked, commit.Message, stamped)
-	ids = withoutInherited(append(slices.Clone(moved), linked...), inherited)
-	return withoutDeletedCheckpoints(ctx, ids), stamped, redone, moved
+	moved = stampedOutsideFinalBlock(linked, commit.Message, records.stamped)
+	ids = withoutInherited(append(slices.Clone(moved), linked...), records.inherited)
+	return withoutDeletedCheckpoints(ctx, ids), moved
 }
 
 // stampedOutsideFinalBlock returns the stamped trailers message names outside
@@ -306,96 +347,115 @@ func recordedCommitLink(ctx context.Context) (string, bool) {
 	return sha, ok && sha != ""
 }
 
-// stampedTrailersFile lists the trailers prepare-commit-msg stamped since the
-// last post-commit: IDs it generated or took from a session's reservation. An
-// amend's restored trailer names an existing checkpoint and is not listed.
-// Post-commit may create the checkpoint of only these (pickCondensationTarget).
-// Per worktree, like inheritedTrailersFile. An entry a commit that never
-// happened left stays until the next post-commit; it names a checkpoint only
-// this clone minted and nothing holds, so no commit can steal it.
+// stampedTrailersFile lists the trailers prepare-commit-msg stamped that no
+// post-commit has taken yet: IDs it generated or took from a session's
+// reservation. An amend's restored trailer names an existing checkpoint and is
+// not listed. Post-commit may create the checkpoint of only these
+// (pickCondensationTarget), and takes the ones its commit carries
+// (takeStampRecords). Per worktree, like inheritedTrailersFile. An entry a
+// commit that never happened left stays until the next post-commit, or the
+// one after when it was stamped on top of that post-commit's commit; it names
+// a checkpoint only this clone minted and nothing holds, so no commit can
+// steal it.
 const stampedTrailersFile = "entire-stamped-trailers.json"
 
 // recordStampedTrailer adds cpID to the trailers prepare-commit-msg stamped,
-// and reports whether it did. Prepare writes a trailer only once its stamp is
-// recorded: post-commit would never create the checkpoint of an unrecorded
-// one, so the commit would name a checkpoint that does not exist.
+// with what prepare linked it to (stampedSessionsFile), and reports whether it
+// did. Prepare writes a trailer only once its stamp is recorded: post-commit
+// would never create the checkpoint of an unrecorded one, so the commit would
+// name a checkpoint that does not exist.
 func recordStampedTrailer(ctx context.Context, cpID id.CheckpointID) bool {
-	err := writeStampedTrailer(ctx, cpID)
+	err := writeStampRecords(ctx, stampedSessions{
+		CheckpointID:      cpID,
+		SessionIDs:        linkedSessions(ctx),
+		TrustedSessionIDs: trustedSessions(ctx),
+		Head:              headHash(ctx),
+	})
 	if err != nil {
 		logging.Warn(logging.WithComponent(ctx, "checkpoint"), "prepare-commit-msg: could not record the stamped trailer, leaving the commit unlinked",
 			slog.String("checkpoint_id", cpID.String()),
 			slog.String("error", err.Error()))
 		return false
 	}
-	recordStampedSessions(ctx, cpID)
 	return true
 }
 
 // stampedSessionsFile records, for each trailer prepare-commit-msg stamped,
-// the sessions it linked the commit to (withLinkedSessions). Post-commit keeps
-// those sessions in its own matching, so it condenses into the trailer the
-// sessions prepare linked. It sits beside stampedTrailersFile, not in it, so a
-// binary that reads that file as a list of IDs is unaffected. Prepare writes
-// it after the stamp and post-commit takes it before the stamps, so a
-// post-commit that finds its stamp finds the entry too, even with another
-// commit's prepare racing it. With no entry for its trailer, post-commit
-// matches afresh, as before. The entry also names the linked sessions prepare
-// stamped on their shape alone (withTrustedSessions), which post-commit
-// condenses without overlap evidence however they have settled since.
+// the sessions it linked the commit to (withLinkedSessions) and the HEAD it
+// ran on. Post-commit keeps those sessions in its own matching, so it
+// condenses into the trailer the sessions prepare linked. It sits beside
+// stampedTrailersFile, not in it, so a binary that reads that file as a list of
+// IDs is unaffected. Prepare writes both under the stamp-records lock and
+// post-commit takes both under it, so a post-commit that finds its stamp finds
+// the entry too, however another commit's hooks overlap it. With no entry for
+// its trailer, post-commit matches afresh, as before. The entry also names the
+// linked sessions prepare stamped on their shape alone (withTrustedSessions),
+// which post-commit condenses without overlap evidence however they have
+// settled since.
 const stampedSessionsFile = "entire-stamped-sessions.json"
 
 type stampedSessions struct {
 	CheckpointID      id.CheckpointID `json:"checkpoint_id"`
 	SessionIDs        []string        `json:"session_ids"`
 	TrustedSessionIDs []string        `json:"trusted_session_ids,omitempty"`
+	// Head is the commit HEAD named when prepare stamped the trailer, empty
+	// before the first commit or from a binary that did not record it. A
+	// post-commit keeps the stamps prepared on top of its own commit
+	// (takeStampRecords).
+	Head string `json:"head,omitempty"`
 }
 
-// recordStampedSessions records the sessions ctx marks as linked and trusted
-// for cpID, replacing an earlier entry for it (a reservation stamped again by
-// a later prepare). Best effort: without the entry post-commit matches afresh.
-func recordStampedSessions(ctx context.Context, cpID id.CheckpointID) {
-	sessionIDs := linkedSessions(ctx)
-	if len(sessionIDs) == 0 {
-		return
-	}
-	entry := stampedSessions{CheckpointID: cpID, SessionIDs: sessionIDs, TrustedSessionIDs: trustedSessions(ctx)}
-	if err := writeStampedSessions(ctx, entry); err != nil {
-		logging.Debug(logging.WithComponent(ctx, "checkpoint"), "prepare-commit-msg: could not record the sessions linked to the trailer",
-			slog.String("checkpoint_id", cpID.String()),
-			slog.String("error", err.Error()))
-	}
-}
-
-func writeStampedSessions(ctx context.Context, entry stampedSessions) error {
+// writeStampRecords records entry's trailer as stamped, and entry with it,
+// replacing an earlier entry for the trailer (a reservation stamped again by a
+// later prepare). Only the stamp must land; without the entry post-commit
+// matches afresh, and keeps the stamp for the post-commit of its own commit
+// only.
+func writeStampRecords(ctx context.Context, entry stampedSessions) error {
 	root, err := perWorktreeGitRoot(ctx)
 	if err != nil {
+		return err
+	}
+	release := lockStampRecords(ctx, root)
+	defer release()
+	if err := writeStampedTrailerIn(root, entry.CheckpointID); err != nil {
 		return err
 	}
 	entries := slices.DeleteFunc(readStampedSessionsIn(root), func(e stampedSessions) bool {
 		return e.CheckpointID == entry.CheckpointID
 	})
-	data, err := json.Marshal(append(entries, entry))
+	if err := writeStampedSessionsIn(root, append(entries, entry)); err != nil {
+		logging.Debug(logging.WithComponent(ctx, "checkpoint"), "prepare-commit-msg: could not record the sessions linked to the trailer",
+			slog.String("checkpoint_id", entry.CheckpointID.String()),
+			slog.String("error", err.Error()))
+	}
+	return nil
+}
+
+// headHash returns the commit HEAD names, empty before the first commit.
+func headHash(ctx context.Context) string {
+	if candidates := commitParentCandidates(ctx); len(candidates) > 0 {
+		return candidates[0]
+	}
+	return ""
+}
+
+func writeStampedSessionsIn(root *os.Root, entries []stampedSessions) error {
+	if len(entries) == 0 {
+		return removeRecord(root, stampedSessionsFile)
+	}
+	data, err := json.Marshal(entries)
 	if err != nil {
 		return fmt.Errorf("encode stamped sessions: %w", err)
 	}
-	return jsonutil.WriteFileAtomicIn(root, stampedSessionsFile, data, 0o600) //nolint:wrapcheck // recordStampedSessions logs it with context
+	return jsonutil.WriteFileAtomicIn(root, stampedSessionsFile, data, 0o600) //nolint:wrapcheck // callers log it with context
 }
 
-// takeStampedSessions returns what prepare-commit-msg recorded with each
-// trailer it stamped since the last post-commit, by checkpoint ID, and
-// consumes the record.
-func takeStampedSessions(ctx context.Context) map[id.CheckpointID]stampedSessions {
-	root, err := perWorktreeGitRoot(ctx)
-	if err != nil {
-		return nil
+// removeRecord removes one of the stamp records; an absent one is already gone.
+func removeRecord(root *os.Root, name string) error {
+	if err := osroot.RemoveNoSymlinks(root, name); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err //nolint:wrapcheck // callers log it with context
 	}
-	entries := readStampedSessionsIn(root)
-	_ = osroot.RemoveNoSymlinks(root, stampedSessionsFile) //nolint:errcheck // absent when prepare stamped nothing
-	linked := make(map[id.CheckpointID]stampedSessions, len(entries))
-	for _, e := range entries {
-		linked[e.CheckpointID] = e
-	}
-	return linked
+	return nil
 }
 
 func readStampedSessionsIn(root *os.Root) []stampedSessions {
@@ -410,42 +470,33 @@ func readStampedSessionsIn(root *os.Root) []stampedSessions {
 	return entries
 }
 
-func writeStampedTrailer(ctx context.Context, cpID id.CheckpointID) error {
-	root, err := perWorktreeGitRoot(ctx)
-	if err != nil {
-		return err
-	}
+func writeStampedTrailerIn(root *os.Root, cpID id.CheckpointID) error {
 	stamped := readStampedTrailersIn(root)
 	if slices.Contains(stamped, cpID) {
 		return nil
 	}
-	data, err := json.Marshal(append(stamped, cpID))
+	return writeStampedTrailersIn(root, append(stamped, cpID))
+}
+
+func writeStampedTrailersIn(root *os.Root, stamped []id.CheckpointID) error {
+	if len(stamped) == 0 {
+		return removeRecord(root, stampedTrailersFile)
+	}
+	data, err := json.Marshal(stamped)
 	if err != nil {
 		return fmt.Errorf("encode stamped trailers: %w", err)
 	}
-	return jsonutil.WriteFileAtomicIn(root, stampedTrailersFile, data, 0o600) //nolint:wrapcheck // recordStampedTrailer logs it with context
+	return jsonutil.WriteFileAtomicIn(root, stampedTrailersFile, data, 0o600) //nolint:wrapcheck // callers log it with context
 }
 
-// readStampedTrailers returns the trailers prepare-commit-msg stamped since the
-// last post-commit.
+// readStampedTrailers returns the trailers prepare-commit-msg stamped that no
+// post-commit has taken yet.
 func readStampedTrailers(ctx context.Context) map[id.CheckpointID]bool {
 	root, err := perWorktreeGitRoot(ctx)
 	if err != nil {
 		return nil
 	}
 	return checkpointSet(readStampedTrailersIn(root))
-}
-
-// takeStampedTrailers is readStampedTrailers for post-commit, which consumes
-// the record.
-func takeStampedTrailers(ctx context.Context) map[id.CheckpointID]bool {
-	root, err := perWorktreeGitRoot(ctx)
-	if err != nil {
-		return nil
-	}
-	stamped := readStampedTrailersIn(root)
-	_ = osroot.RemoveNoSymlinks(root, stampedTrailersFile) //nolint:errcheck // absent when prepare stamped nothing
-	return checkpointSet(stamped)
 }
 
 func readStampedTrailersIn(root *os.Root) []id.CheckpointID {
@@ -468,27 +519,139 @@ func checkpointSet(ids []id.CheckpointID) map[id.CheckpointID]bool {
 	return set
 }
 
-// takeInheritedTrailers returns the trailers prepare-commit-msg recorded as
-// inherited for a commit on parent, and consumes the marker either way.
-func takeInheritedTrailers(ctx context.Context, parent string) map[id.CheckpointID]bool {
-	inherited, _ := takeInheritedMarker(ctx, parent)
-	return inherited
+// stampRecordsLockName serializes the records prepare-commit-msg leaves for
+// post-commit in the per-worktree git dir (stampedTrailersFile,
+// stampedSessionsFile, inheritedTrailersFile). git releases the index lock
+// before it runs prepare-commit-msg for a plain commit, and before
+// post-commit for every commit, so in one worktree another commit's prepare
+// can run while a post-commit takes the records, and two post-commits can
+// overlap. Unserialized, either can lose an update the other made.
+const stampRecordsLockName = "entire-stamp-records.lock"
+
+// stampRecordsLockWait bounds the wait for the lock. A holder only reads and
+// writes the small records, so a longer wait means the holder is stuck.
+const stampRecordsLockWait = 2 * time.Second
+
+// lockStampRecords takes the stamp-records lock in root, the per-worktree git
+// dir, and returns its release. When the lock cannot be taken the hook goes
+// on unserialized, as before the lock existed: a race can then lose a record,
+// while giving up would lose this hook's records every time.
+func lockStampRecords(ctx context.Context, root *os.Root) func() {
+	waitCtx, cancel := context.WithTimeout(ctx, stampRecordsLockWait)
+	defer cancel()
+	release, err := flock.AcquireContextIn(waitCtx, root, stampRecordsLockName)
+	if err != nil {
+		logging.Warn(logging.WithComponent(ctx, "checkpoint"), "could not lock the commit stamp records; going on unserialized",
+			slog.String("error", err.Error()))
+		return func() {}
+	}
+	return release
 }
 
-// takeInheritedMarker is takeInheritedTrailers that also returns the recorded
-// redone paths.
-func takeInheritedMarker(ctx context.Context, parent string) (map[id.CheckpointID]bool, map[string]bool) {
+// stampRecords is what prepare-commit-msg recorded for one commit
+// (takeStampRecords).
+type stampRecords struct {
+	// stamped are the trailers the commit carries that prepare stamped (see
+	// pickCondensationTarget).
+	stamped map[id.CheckpointID]bool
+	// sessions is what prepare recorded with each trailer the commit carries,
+	// by checkpoint ID.
+	sessions map[id.CheckpointID]stampedSessions
+	// inherited are the trailers prepare recorded as inherited, and redone
+	// the committed paths a redo's inherited checkpoints hold.
+	inherited map[id.CheckpointID]bool
+	redone    map[string]bool
+}
+
+// takeStampRecords returns, for post-commit, what prepare-commit-msg recorded
+// for commit, and consumes it. It holds the stamp-records lock throughout, so
+// it takes every record in one step that a racing prepare or post-commit
+// cannot split.
+//
+// It consumes only what is the commit's. git lets the next commit start once
+// this one is made, before its post-commit runs, so that commit's prepare may
+// already have stamped: a stamp the commit does not carry is kept when it was
+// stamped on top of commit, for the post-commit of the commit that carries
+// it. Any other is one a commit that never happened left, and is dropped. In
+// the same way, an inherited marker for another parent is dropped unless a
+// prepare on top of commit recorded it.
+func takeStampRecords(ctx context.Context, commit *object.Commit) stampRecords {
 	root, err := perWorktreeGitRoot(ctx)
 	if err != nil {
+		return stampRecords{}
+	}
+	head := commit.Hash.String()
+	var parent string
+	if len(commit.ParentHashes) > 0 {
+		parent = commit.ParentHashes[0].String()
+	}
+	carried := checkpointSet(trailers.ParseAllCheckpoints(commit.Message))
+
+	release := lockStampRecords(ctx, root)
+	defer release()
+	var out stampRecords
+	out.inherited, out.redone = takeInheritedMarkerIn(ctx, root, parent, head)
+	out.stamped, out.sessions = takeStampsIn(ctx, root, carried, head)
+	return out
+}
+
+// takeStampsIn takes the stamps and sessions entries of the trailers carried,
+// keeps the ones stamped on top of head, and drops the rest. Callers hold the
+// stamp-records lock.
+func takeStampsIn(ctx context.Context, root *os.Root, carried map[id.CheckpointID]bool, head string) (map[id.CheckpointID]bool, map[id.CheckpointID]stampedSessions) {
+	entries := readStampedSessionsIn(root)
+	stampedOn := make(map[id.CheckpointID]string, len(entries))
+	for _, e := range entries {
+		stampedOn[e.CheckpointID] = e.Head
+	}
+	stamped := make(map[id.CheckpointID]bool)
+	var kept []id.CheckpointID
+	for _, cpID := range readStampedTrailersIn(root) {
+		switch {
+		case carried[cpID]:
+			stamped[cpID] = true
+		case stampedOn[cpID] == head:
+			kept = append(kept, cpID)
+		}
+	}
+	sessions := make(map[id.CheckpointID]stampedSessions)
+	var keptEntries []stampedSessions
+	for _, e := range entries {
+		switch {
+		case carried[e.CheckpointID]:
+			sessions[e.CheckpointID] = e
+		case slices.Contains(kept, e.CheckpointID):
+			keptEntries = append(keptEntries, e)
+		}
+	}
+
+	logCtx := logging.WithComponent(ctx, "checkpoint")
+	if err := writeStampedSessionsIn(root, keptEntries); err != nil {
+		logging.Debug(logCtx, "post-commit: could not rewrite the stamped sessions", slog.String("error", err.Error()))
+	}
+	if err := writeStampedTrailersIn(root, kept); err != nil {
+		logging.Debug(logCtx, "post-commit: could not rewrite the stamped trailers", slog.String("error", err.Error()))
+	}
+	return stamped, sessions
+}
+
+// takeInheritedMarkerIn returns the trailers prepare-commit-msg recorded as
+// inherited for a commit on parent, with the recorded redone paths, and
+// consumes the marker unless a prepare on top of head recorded it. Callers
+// hold the stamp-records lock.
+func takeInheritedMarkerIn(ctx context.Context, root *os.Root, parent, head string) (map[id.CheckpointID]bool, map[string]bool) {
+	if _, err := osroot.LstatNoSymlinks(root, inheritedTrailersFile); err != nil {
 		return nil, nil
 	}
-	data, err := osroot.ReadFileNoFollow(root, inheritedTrailersFile)
-	if err != nil {
+	marker, ok := readInheritedMarkerIn(root)
+	if ok && marker.recordedOn() == head {
 		return nil, nil
 	}
-	_ = osroot.RemoveNoSymlinks(root, inheritedTrailersFile) //nolint:errcheck // a stale marker is ignored by its parent check
-	var marker inheritedTrailers
-	if json.Unmarshal(data, &marker) != nil || !slices.Contains(marker.Parents, parent) {
+	if err := removeRecord(root, inheritedTrailersFile); err != nil {
+		logging.Debug(logging.WithComponent(ctx, "checkpoint"), "post-commit: could not remove the inherited trailers marker",
+			slog.String("error", err.Error()))
+	}
+	if !ok || !slices.Contains(marker.Parents, parent) {
 		return nil, nil
 	}
 	out := checkpointSet(marker.IDs)

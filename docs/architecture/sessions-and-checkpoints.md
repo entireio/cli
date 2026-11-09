@@ -319,9 +319,16 @@ commit.
   them. An ID in that draft's final trailer block counts as already stamped
   (`stampedTrailer`) only when prepare recorded stamping it: each ID it stamps
   (one it generates, or a session's reserved one) goes into
-  `entire-stamped-trailers.json` in the per-worktree git dir until the next
-  post-commit, which consumes it. Beside it, `entire-stamped-sessions.json`
-  records the sessions prepare linked for each stamped ID, and post-commit
+  `entire-stamped-trailers.json` in the per-worktree git dir until the
+  post-commit of the commit that carries it takes it. git lets the next commit
+  start before a commit's post-commit runs, so post-commit takes only the
+  stamps its commit carries, keeps the ones prepared on top of its commit for
+  their own post-commit, and drops the rest, left by commits that never
+  happened (`takeStampRecords`). Prepare writes the records and post-commit
+  takes them under `entire-stamp-records.lock` in the same dir, so hooks of
+  overlapping commits in one worktree cannot lose each other's updates. Beside
+  it, `entire-stamped-sessions.json` records the HEAD prepare stamped on and
+  the sessions it linked for each stamped ID, and post-commit
   keeps them when it matches sessions again (`withLinkedSessions`): one that
   looks idle by then, after a long prompt or editor wait, is still condensed
   into the trailer prepare wrote. The entry also names the sessions prepare

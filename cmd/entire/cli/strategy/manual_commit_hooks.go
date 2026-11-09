@@ -1510,12 +1510,12 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	}
 
 	// Condense into the trailer prepare stamped, never into an inherited one.
-	// The sessions prepare linked are taken before its stamps: prepare records
-	// them after the stamp, so a later commit's prepare racing this hook can
-	// lose its stamp here, as before, but never keep its stamp without them.
-	linkedByStamp := takeStampedSessions(ctx)
-	ids, stamped, redone, moved := linkedTrailersOf(ctx, commit)
-	checkpointID, targetPreexisting, found := s.condensationTarget(ctx, repo, ids, stamped)
+	// The records are taken in one step under their lock, so a later commit's
+	// prepare or post-commit racing this hook cannot split them, and this hook
+	// leaves that commit's own records in place.
+	records := takeStampRecords(ctx, commit)
+	ids, moved := linkedTrailersOf(ctx, commit, records)
+	checkpointID, targetPreexisting, found := s.condensationTarget(ctx, repo, ids, records.stamped)
 	openRepoSpan.End()
 
 	if !found {
@@ -1523,7 +1523,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 		// Still update BaseCommit for active sessions so future commits can match.
 		// A redo that stamped nothing (pure, or partial with no session's
 		// other work) settles the held files the inherited checkpoints have.
-		s.reconcileRedoneFiles(ctx, repo, commit, redone)
+		s.reconcileRedoneFiles(ctx, repo, commit, records.redone)
 		s.postCommitUpdateBaseCommitOnly(ctx, head)
 		return nil
 	}
@@ -1548,7 +1548,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	// for this trailer, however long the prompt or editor took in between,
 	// its trust in the ones it stamped on their shape alone, and on an amend
 	// the owner of the checkpoint the amended commit links.
-	stamp := linkedByStamp[checkpointID]
+	stamp := records.sessions[checkpointID]
 	ctx = withTrustedSessions(withLinkedSessions(ctx, stamp.SessionIDs), stamp.TrustedSessionIDs)
 	ctx = withAmendedCheckpoint(ctx, s.amendedCheckpoint(ctx, repo, commit, checkpointID, targetPreexisting))
 	sessions, err := s.findSessionsForCommitLinking(ctx, worktreePath)
