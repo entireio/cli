@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/cmd/entire/cli/testutil/gitenv"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -102,10 +103,13 @@ func skipWithoutPOSIXShell(t *testing.T) {
 // added another.
 //
 // Not parallel: Fetch runs git with the process environment, so the test
-// isolates git config through t.Setenv.
+// isolates git config and repository selectors through t.Setenv.
 func TestFetch_CutOffReceiveLeavesNoTempPack(t *testing.T) {
 	skipWithoutPOSIXShell(t)
-	testutil.IsolateGitConfigEnv(t)
+	// A GIT_DIR or GIT_INDEX_FILE inherited from a hook outranks cmd.Dir, so
+	// without this the setup's git commands would add a remote, push and switch
+	// branches in the repository running the tests instead of its temp repos.
+	gitenv.IsolateRepository(t)
 
 	t.Run("plain git leaves the partial pack", func(t *testing.T) {
 		// Control: shows the setup really makes git leave a temp pack, so the
@@ -198,8 +202,11 @@ func TestFetch_CutOffReceiveLeavesNoTempPack(t *testing.T) {
 	})
 }
 
+// Not parallel: the snapshot runs git with the process environment, so the
+// test strips inherited repository selectors through t.Setenv; an inherited
+// GIT_DIR would point it at the repository running the tests.
 func TestPackTemps_RemovesOnlyNewReceiveTemps(t *testing.T) {
-	t.Parallel()
+	gitenv.IsolateRepository(t)
 
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)
@@ -224,9 +231,10 @@ func TestPackTemps_RemovesOnlyNewReceiveTemps(t *testing.T) {
 		"only the receive temps that appeared after the snapshot are git's leftovers")
 }
 
+// Not parallel: repository selectors, as in TestPackTemps_RemovesOnlyNewReceiveTemps.
 func TestPackTemps_LeavesSymlinks(t *testing.T) {
-	t.Parallel()
 	testutil.SkipWithoutSymlinks(t)
+	gitenv.IsolateRepository(t)
 
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)
@@ -258,8 +266,9 @@ func packDirNames(t *testing.T, packDir string) []string {
 	return names
 }
 
+// Not parallel: repository selectors, as in TestPackTemps_RemovesOnlyNewReceiveTemps.
 func TestPackTemps_NilIsNoOp(t *testing.T) {
-	t.Parallel()
+	gitenv.IsolateRepository(t)
 	var temps *packTemps
 	temps.removeLeftovers(context.Background())
 	assert.Nil(t, snapshotPackTemps(context.Background(), filepath.Join(t.TempDir(), "not-a-repo")))
