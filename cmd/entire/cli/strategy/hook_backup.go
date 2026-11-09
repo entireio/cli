@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -175,11 +176,16 @@ func replaceWith(root *os.Root, src, dst string, create func(root *os.Root, src,
 // linkOrCopy creates dst holding src, failing if dst exists. A hard link keeps
 // a symlink a symlink; where links are unsupported it copies instead.
 func linkOrCopy(root *os.Root, src, dst string) error {
-	err := root.Link(src, dst)
+	err := linkHookFile(root, src, dst)
 	if err == nil || errors.Is(err, fs.ErrExist) {
-		return err //nolint:wrapcheck // callers check fs.ErrExist
+		return err // unwrapped: callers check fs.ErrExist
 	}
 	return copyOrRelink(root, src, dst)
+}
+
+// linkHookFile hard-links src to dst; tests replace it to take the copy path.
+var linkHookFile = func(root *os.Root, src, dst string) error {
+	return root.Link(src, dst) // unwrapped: linkOrCopy checks fs.ErrExist
 }
 
 // copyOrRelink creates dst as a byte copy of src, or as a symlink to the same
@@ -205,23 +211,47 @@ var writeHookCopy = func(f *os.File, data []byte) error {
 	return err //nolint:wrapcheck // copyHookFile wraps it
 }
 
-// copyHookFile creates dst as a byte copy of src. A failed write removes dst,
-// so no partial hook is left under a name that reads as a complete version.
+// copyHookFile creates dst as a byte copy of src with src's permission bits,
+// as a hard link would share them. Git skips a hook that is not executable, and
+// so does Entire's chain call, so a copy made executable would start running a
+// hook the user had switched off; a private hook would also become readable by
+// everyone. A failed write removes dst, so no partial hook is left under a name
+// that reads as a complete version.
 func copyHookFile(root *os.Root, src, dst string) error {
-	data, err := osroot.ReadFileNoFollow(root, src)
+	data, perm, err := readHookFile(root, src)
 	if err != nil {
 		return fmt.Errorf("copy %s: %w", src, err)
 	}
-	f, err := root.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o755)
+	f, err := root.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
 	if err != nil {
 		return err //nolint:wrapcheck // callers check fs.ErrExist
 	}
 	werr := writeHookCopy(f, data)
 	cerr := f.Close()
-	if err := errors.Join(werr, cerr, root.Chmod(dst, 0o755)); err != nil {
+	// OpenFile applies the umask to perm; Chmod sets it exactly.
+	if err := errors.Join(werr, cerr, root.Chmod(dst, perm)); err != nil {
 		return errors.Join(fmt.Errorf("copy %s to %s: %w", src, dst, err), root.Remove(dst))
 	}
 	return nil
+}
+
+// readHookFile reads a regular file's bytes and permission bits through one
+// descriptor, so both come from the same file.
+func readHookFile(root *os.Root, name string) ([]byte, fs.FileMode, error) {
+	f, err := osroot.OpenNoFollow(root, name)
+	if err != nil {
+		return nil, 0, err //nolint:wrapcheck // copyHookFile wraps it
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, 0, err //nolint:wrapcheck // copyHookFile wraps it
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, 0, err //nolint:wrapcheck // copyHookFile wraps it
+	}
+	return data, info.Mode().Perm(), nil
 }
 
 // keepOlderCopy links backup to a free <backup>.<timestamp>[-N] name; the link
