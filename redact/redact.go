@@ -1201,7 +1201,7 @@ func bareValuesPast(s string, pattern *regexp.Regexp, valueGroup int, r region, 
 	var matches [][]int
 	for _, from := range []int{r.start, matchEnd} {
 		for from < r.end {
-			match := nextMatch(s, pattern, from, limit)
+			match := nextValueMatch(s, pattern, valueGroup, from, r.end, limit)
 			if match == nil {
 				break
 			}
@@ -1213,6 +1213,43 @@ func bareValuesPast(s string, pattern *regexp.Regexp, valueGroup int, r region, 
 		}
 	}
 	return matches
+}
+
+// valueHiddenText is the longest fixed value credentialAssignmentPattern
+// reads, (value hidden).
+const valueHiddenText = "(value hidden)"
+
+// nextValueMatch returns nextMatch(s, pattern, from, limit) for a search that
+// only needs matches whose value starts before end, where limit ends the run
+// of value bytes that holds the byte at end. A bare value that holds that byte
+// runs on to limit, so on a long line without blanks, searching on to limit
+// for each region would read the rest of the line once per region. So the
+// search reads only the text up to len(valueHiddenText) bytes past end, which
+// holds any (value hidden) that starts before end. A value that reaches the
+// end of that window and doesn't open with a quote is a bare value of the key
+// and password patterns, which stop at the bytes that end the run, so it ends
+// at limit. A value that opens with a quote can close past the window, so that
+// match is found again over the whole text: its closing quote, or the end of
+// its run when it has none, is the first one after it, so these searches don't
+// read the same text twice. The shell-stdin pattern goes on past its value, to
+// the command it pipes into, and bounds its literal, so it is searched as
+// before.
+func nextValueMatch(s string, pattern *regexp.Regexp, valueGroup, from, end, limit int) []int {
+	window := min(limit, end+len(valueHiddenText))
+	if pattern == shellStdinSecretPattern || window == limit {
+		return nextMatch(s, pattern, from, limit)
+	}
+	match := nextMatch(s, pattern, from, window)
+	valueStart, valueEnd, ok := captureRange(match, valueGroup)
+	switch {
+	case !ok || valueStart >= end:
+		return match
+	case s[valueStart] == '"' || s[valueStart] == '\'':
+		return nextMatch(s, pattern, from, limit)
+	case valueEnd == window && match[1] == valueEnd:
+		match[2*valueGroup+1], match[1] = limit, limit
+	}
+	return match
 }
 
 // valueRunStopBytes end a run of bare value bytes: blanks, line ends and the
