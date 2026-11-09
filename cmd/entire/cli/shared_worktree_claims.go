@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -113,7 +114,7 @@ func (c statusClaim) withoutUnchangedDirty(files []string) []string {
 type namedFiles struct {
 	repoRoot string
 	exact    map[string]struct{}
-	// folded maps a lower-cased name to the transcript's spellings of it
+	// folded maps a name's caseFoldKey to the transcript's spellings of it
 	// that git status does not list.
 	folded map[string][]string
 	// cases asks the worktree's directories about case, only for a
@@ -139,7 +140,7 @@ func newNamedFiles(repoRoot string, named []string, listed ...[]string) namedFil
 		if _, ok := inStatus[f]; ok {
 			n.exact[f] = struct{}{}
 		} else {
-			key := strings.ToLower(f)
+			key := caseFoldKey(f)
 			n.folded[key] = append(n.folded[key], f)
 		}
 	}
@@ -168,7 +169,7 @@ func (n namedFiles) only(all []string) []string {
 // case-sensitive filesystem a spelling that still opens a file is another
 // file.
 func (n namedFiles) namedInOtherCase(file string) bool {
-	spellings := n.folded[strings.ToLower(file)]
+	spellings := n.folded[caseFoldKey(file)]
 	if len(spellings) == 0 {
 		return false
 	}
@@ -185,6 +186,22 @@ func (n namedFiles) namedInOtherCase(file string) bool {
 		}
 	}
 	return false
+}
+
+// caseFoldKey returns a key two names share when they are equal under
+// Unicode simple case folding, as strings.EqualFold and worktreedir.CaseProbe
+// compare them: each rune becomes the smallest rune it folds with. Lower case
+// is not such a key: Σ lowercases to σ, while ς, which folds with both, stays
+// ς. Sharing a key only makes two names candidates; the filesystem still has
+// to say they name one file.
+func caseFoldKey(name string) string {
+	return strings.Map(func(r rune) rune {
+		smallest := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			smallest = min(smallest, f)
+		}
+		return smallest
+	}, name)
 }
 
 // deletedInOtherCase is namedInOtherCase for a file the worktree lacks.

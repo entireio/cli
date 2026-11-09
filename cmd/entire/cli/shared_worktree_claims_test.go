@@ -208,6 +208,39 @@ func TestNamedFiles_OtherCaseIsAnotherFile(t *testing.T) {
 	require.Equal(t, other, newNamedFiles(dir, []string{"readme.md"}, other).only(other))
 }
 
+// TestNamedFiles_UnicodeCaseFold covers a name in another case outside
+// ASCII: ς folds with Σ, as filesystems that ignore case treat it, but
+// lowercases to itself rather than to σ, so a lower-case key never brought the
+// two together. Where the filesystem does not fold the pair, a hard link
+// stands in for one file under both names.
+func TestNamedFiles_UnicodeCaseFold(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	forgetSharedRoot(t, dir)
+	testutil.WriteFile(t, dir, "Σ.txt", "sigma\n")
+	if _, err := os.Lstat(filepath.Join(dir, "ς.txt")); err != nil {
+		require.NoError(t, os.Link(filepath.Join(dir, "Σ.txt"), filepath.Join(dir, "ς.txt")))
+	}
+	listed := []string{"Σ.txt"}
+	require.Equal(t, listed, newNamedFiles(dir, []string{"ς.txt"}, listed).only(listed))
+}
+
+func TestCaseFoldKey(t *testing.T) {
+	t.Parallel()
+	same := [][]string{
+		{"Σ.txt", "σ.txt", "ς.txt"},
+		{"README.md", "readme.md", "ReadMe.MD"},
+		{"k.go", "K.go", "\u212a.go"}, // the Kelvin sign folds with k
+	}
+	for _, names := range same {
+		for _, name := range names[1:] {
+			require.Equal(t, caseFoldKey(names[0]), caseFoldKey(name), "%s and %s fold together", names[0], name)
+		}
+	}
+	require.NotEqual(t, caseFoldKey("a.txt"), caseFoldKey("b.txt"))
+	require.NotEqual(t, caseFoldKey("ss.txt"), caseFoldKey("ß.txt"), "simple folding does not expand ß into ss")
+}
+
 func TestParseCaptureTime(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
