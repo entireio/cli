@@ -149,10 +149,10 @@ func TestReinstallGitHooks_RepairsStaleMovedCopyAndKeepsHook(t *testing.T) {
 
 // Entire will not install through a symlinked hooks directory, so the moved
 // copies there cannot be repaired by the per-turn reinstall. Counting them
-// would send every agent turn to a reinstall that fails on that refusal, so
-// only the hooks themselves count, as they did before. The same directory
-// reached without the link still reads Outdated.
-func TestCheckGitHookState_StaleMovedCopyBehindSymlinkedHooksDir(t *testing.T) {
+// would send every agent turn to a reinstall that fails on that refusal, so a
+// stale copy alone there does not trigger one. It still reads Outdated, so
+// doctor reports it.
+func TestHooksNeedReinstall_StaleMovedCopyBehindSymlinkedHooksDir(t *testing.T) {
 	t.Parallel()
 	target := t.TempDir()
 	writeCurrentManagedHooks(t, target)
@@ -164,11 +164,14 @@ func TestCheckGitHookState_StaleMovedCopyBehindSymlinkedHooksDir(t *testing.T) {
 		t.Skipf("symlink not supported: %v", err)
 	}
 
-	if got := gitHookStateInHooksDir(link); got != GitHooksCurrent {
-		t.Errorf("state through the link = %v, want GitHooksCurrent", got)
+	if got := gitHookStateInHooksDir(link); got != GitHooksOutdated {
+		t.Errorf("state through the link = %v, want GitHooksOutdated", got)
 	}
-	if got := gitHookStateInHooksDir(target); got != GitHooksOutdated {
-		t.Errorf("state of the directory itself = %v, want GitHooksOutdated", got)
+	if hooksNeedReinstall(link) {
+		t.Error("a stale moved copy behind a symlinked hooks directory triggers a reinstall that is refused")
+	}
+	if !hooksNeedReinstall(target) {
+		t.Error("the directory itself does not trigger a reinstall")
 	}
 }
 

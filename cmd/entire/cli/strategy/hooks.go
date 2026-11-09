@@ -558,6 +558,11 @@ const bareEntireHookCmd = "entire"
 // Current, which is what makes EnsureSetup reinstall it rather than leaving a
 // broken hook in place forever.
 func gitHookStateInHooksDir(hooksDir string) GitHookState {
+	return hooksDirState(hooksDir, hookStateIn)
+}
+
+// hooksDirState is gitHookStateInHooksDir classifying each hook with state.
+func hooksDirState(hooksDir string, state func(*os.Root, string) GitHookState) GitHookState {
 	// ForRemoval: this is a read, and reporting GitHooksAbsent for a symlinked
 	// hooks directory is what sent EnsureSetup to InstallGitHook on every agent
 	// turn, to fail on a refusal only `entire enable` should ever hit. Seeing
@@ -565,13 +570,6 @@ func gitHookStateInHooksDir(hooksDir string) GitHookState {
 	root, err := hooksRootForRemoval(hooksDir)
 	if err != nil {
 		return GitHooksAbsent
-	}
-	state := hookStateIn
-	if hooksDirIsLink(hooksDir) {
-		// The install that refreshes a moved copy refuses a symlinked hooks
-		// directory, so a stale copy there would send every agent turn to a
-		// reinstall that fails. Only the hooks themselves count there.
-		state = ownHookStateIn
 	}
 	outdated := false
 	for _, hook := range gitHookNames {
@@ -587,6 +585,26 @@ func gitHookStateInHooksDir(hooksDir string) GitHookState {
 		return GitHooksOutdated
 	}
 	return GitHooksCurrent
+}
+
+// gitHooksNeedReinstall reports whether EnsureSetup reinstalls the hooks at
+// the start of a turn: when CheckGitHookState reads anything but Current,
+// except for a stale moved copy alone behind a symlinked hooks directory. The
+// install refuses that directory, so every turn would fail on the refusal.
+// Doctor still reports the copy, and how to point core.hooksPath past the link.
+func gitHooksNeedReinstall(ctx context.Context) bool {
+	hooksDir, err := GetHooksDir(ctx)
+	if err != nil {
+		return true
+	}
+	return hooksNeedReinstall(hooksDir)
+}
+
+func hooksNeedReinstall(hooksDir string) bool {
+	if gitHookStateInHooksDir(hooksDir) == GitHooksCurrent {
+		return false
+	}
+	return !hooksDirIsLink(hooksDir) || hooksDirState(hooksDir, ownHookStateIn) != GitHooksCurrent
 }
 
 // hooksDirIsLink: the hooks directory itself is a symlink, which
