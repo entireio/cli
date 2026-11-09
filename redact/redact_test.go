@@ -1432,6 +1432,16 @@ func TestString_ConnectionSecretsCaughtWithoutScanners(t *testing.T) {
 			want:  "DB_PASSWORD=REDACTED",
 		},
 		{
+			name:  "placeholder head of a value that runs past a comma",
+			input: "DB_PASSWORD=example,hunter2",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "quoted default holding a blank",
+			input: `DB_PASSWORD=${PW:-'x y'}`,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
 			name:  "two joined placeholder words form a new literal",
 			input: `DB_PASSWORD=changeme'example'`,
 			want:  "DB_PASSWORD=REDACTED",
@@ -2835,6 +2845,21 @@ func TestString_JoinedShellWordValues(t *testing.T) {
 			name:  "two joined references",
 			input: `DB_PASSWORD="$DB_PASS"${DB_SUFFIX}`,
 			want:  `DB_PASSWORD="$DB_PASS"${DB_SUFFIX}`,
+		},
+		{
+			name:  "an empty quoted default",
+			input: `DB_PASSWORD=${PW:-""}`,
+			want:  `DB_PASSWORD=${PW:-""}`,
+		},
+		{
+			name:  "a quoted reference as the default",
+			input: `DB_PASSWORD=${PW:-"$FALLBACK"}`,
+			want:  `DB_PASSWORD=${PW:-"$FALLBACK"}`,
+		},
+		{
+			name:  "a reference joined to an empty quoted default",
+			input: `DB_PASSWORD="$DB_PASS"${DB_SUFFIX:-""}`,
+			want:  `DB_PASSWORD="$DB_PASS"${DB_SUFFIX:-""}`,
 		},
 		{
 			name:  "two joined quoted references",

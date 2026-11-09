@@ -1019,8 +1019,8 @@ type wordPiece struct {
 // text with nothing between them into one value, so ""'$X' is the literal $X
 // and "hunter"'2' is hunter2. A pattern stops at the first closing quote, or,
 // for a bare value, at a blank inside a later quoted string (abc"d e"). It
-// returns the word's pieces and end, and false when the word is a single
-// piece. Quoted strings close on their own line.
+// returns the word's pieces and end, and false when the word is the capture
+// itself as a single piece. Quoted strings close on their own line.
 func joinedShellWord(s string, start, end int) ([]wordPiece, int, bool) {
 	if start >= end {
 		return nil, end, false
@@ -1053,7 +1053,7 @@ func joinedShellWord(s string, start, end int) ([]wordPiece, int, bool) {
 		pieces = append(pieces, wordPiece{start: bareStart, end: bareEnd})
 		i = bareEnd
 	}
-	if len(pieces) < 2 || i < end {
+	if i < end || len(pieces) < 2 && i == end {
 		return nil, end, false
 	}
 	return pieces, i, true
@@ -1086,23 +1086,24 @@ const bareWordStopBytes = " \t\n\r\f\v\"',;&|<>()`="
 const codeAfterStringBytes = ".:+*?[]{}\\"
 
 // bareWordTextEnd returns where the bare text of a shell word that starts at
-// s[i] ends: at one of bareWordStopBytes. In a word that started as a quoted
-// string, codeAfterStringBytes and a $( command substitution end it too, but
-// a ${...} reference closed before any blank or quote is part of it
-// ("$A"${B}).
+// s[i] ends: at one of bareWordStopBytes. A ${...} expansion closed on its
+// line is read whole, quotes and all, so ${PW:-""} and "$A"${B} are each one
+// piece. In a word that started as a quoted string, codeAfterStringBytes, a
+// $( command substitution and a ${ that does not close end it too.
 func bareWordTextEnd(s string, i int, startsQuoted bool) int {
 	for i < len(s) {
 		c := s[i]
 		if strings.IndexByte(bareWordStopBytes, c) >= 0 {
 			return i
 		}
-		if startsQuoted && c == '$' && i+1 < len(s) && s[i+1] == '{' {
-			closeAt := strings.IndexAny(s[i+2:], " \t\n\r\f\v\"'{}")
-			if closeAt < 0 || s[i+2+closeAt] != '}' {
+		if c == '$' && i+1 < len(s) && s[i+1] == '{' {
+			if closeAt := braceExpansionEnd(s, i+1); closeAt >= 0 {
+				i = closeAt + 1
+				continue
+			}
+			if startsQuoted {
 				return i
 			}
-			i += closeAt + 3
-			continue
 		}
 		if startsQuoted && c == '$' && i+1 < len(s) && s[i+1] == '(' {
 			return i
@@ -1113,6 +1114,26 @@ func bareWordTextEnd(s string, i int, startsQuoted bool) int {
 		i++
 	}
 	return i
+}
+
+// braceExpansionEnd returns the index of the } that closes the ${ whose {
+// is at s[open], or -1 when a blank, a line end, a nested { or the end of s
+// comes first. Quoted strings inside it (${PW:-"x y"}) are skipped whole.
+// Stopping at nesting and blanks keeps each read to one expansion's text.
+func braceExpansionEnd(s string, open int) int {
+	for i := open + 1; i < len(s); i++ {
+		switch c := s[i]; c {
+		case '}':
+			return i
+		case '"', '\'':
+			if i = quotedPieceEnd(s, i); i < 0 {
+				return -1
+			}
+		case '{', ' ', '\t', '\n', '\r', '\f', '\v':
+			return -1
+		}
+	}
+	return -1
 }
 
 func captureRange(match []int, captureGroup int) (int, int, bool) {
