@@ -52,8 +52,8 @@ func helperCommand(ctx context.Context, roles string) *exec.Cmd {
 }
 
 // startHelper starts the tree described by roles and returns the command and
-// the PID of its sleeping leaf. The test context kills the command when the
-// test ends, and cleanup kills the leaf.
+// the PID of its sleeping leaf. Cleanup kills and waits for the command, and
+// kills the leaf.
 func startHelper(t *testing.T, roles string) (*exec.Cmd, int) {
 	t.Helper()
 	cmd := helperCommand(t.Context(), roles)
@@ -64,6 +64,12 @@ func startHelper(t *testing.T, roles string) (*exec.Cmd, int) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start helper: %v", err)
 	}
+	t.Cleanup(func() {
+		// A test that already waited gets ErrProcessDone and "Wait was
+		// already called" here, which is fine.
+		_ = cmd.Process.Kill() //nolint:errcheck // see above
+		_ = cmd.Wait()         //nolint:errcheck // see above
+	})
 	r := bufio.NewReader(stdout)
 	for {
 		line, err := r.ReadString('\n')
@@ -81,7 +87,8 @@ func startHelper(t *testing.T, roles string) (*exec.Cmd, int) {
 		if pid != cmd.Process.Pid {
 			t.Cleanup(func() {
 				if leaf, err := os.FindProcess(pid); err == nil {
-					_ = leaf.Kill() //nolint:errcheck // cleanup; the leaf may already be gone
+					_ = leaf.Kill()    //nolint:errcheck // cleanup; the leaf may already be gone
+					_ = leaf.Release() //nolint:errcheck // closes the handle FindProcess opened
 				}
 			})
 		}
@@ -229,5 +236,27 @@ func TestResolveOwnerWindows(t *testing.T) {
 	}
 	if got := Check(id); got != LivenessAlive {
 		t.Errorf("resolved owner Check = %v, want alive", got)
+	}
+}
+
+func TestProcessCreatedAfterWindows(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name        string
+		p, other    process
+		wantCreated bool
+	}{
+		{"later sequence number", process{seq: 11, created: 5}, process{seq: 10, created: 9}, true},
+		{"earlier sequence number", process{seq: 9, created: 15}, process{seq: 10, created: 9}, false},
+		{"clock fallback, later", process{created: 10}, process{seq: 10, created: 9}, true},
+		{"clock fallback, same tick", process{created: 9}, process{created: 9}, false},
+		{"clock fallback, earlier", process{seq: 11, created: 8}, process{created: 9}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.p.createdAfter(tc.other); got != tc.wantCreated {
+				t.Fatalf("createdAfter = %v, want %v", got, tc.wantCreated)
+			}
+		})
 	}
 }

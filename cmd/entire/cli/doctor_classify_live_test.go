@@ -19,9 +19,10 @@ import (
 // (proclive returns LivenessUnknown elsewhere), so these live-process
 // classifications are platform-gated. An owner with a mismatched start
 // fingerprint reads as a reused — i.e. dead — PID, which is deterministic on
-// each of them.
+// each of them. The names say Windows because the test-windows CI job selects
+// tests by name.
 
-func TestClassifySession_IdlePhaseOwnerExited_Stuck(t *testing.T) {
+func TestClassifySession_IdlePhaseOwnerExited_StuckOnUnixAndWindows(t *testing.T) {
 	t.Parallel()
 
 	// An agent that finished its last turn and then quit without firing a
@@ -43,7 +44,7 @@ func TestClassifySession_IdlePhaseOwnerExited_Stuck(t *testing.T) {
 	assert.Equal(t, 2, result.CheckpointCount)
 }
 
-func TestClassifySession_IdlePhaseOwnerAlive_Healthy(t *testing.T) {
+func TestClassifySession_IdlePhaseOwnerAlive_HealthyOnUnixAndWindows(t *testing.T) {
 	t.Parallel()
 
 	owner, ok := proclive.ResolveOwner()

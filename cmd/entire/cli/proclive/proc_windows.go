@@ -64,7 +64,20 @@ func bootID() (string, error) {
 type process struct {
 	ppid    int
 	created int64 // creation time, in 100ns ticks since 1601
-	exited  bool
+	// seq is the process's sequence number, which the kernel assigns from one
+	// counter per boot, so it orders processes even if the clock moved. Zero
+	// where the system doesn't report it: older Windows versions, and Wine.
+	seq    uint64
+	exited bool
+}
+
+// createdAfter reports whether p was created after other. It compares
+// sequence numbers when both have one, and creation times otherwise.
+func (p process) createdAfter(other process) bool {
+	if p.seq != 0 && other.seq != 0 {
+		return p.seq > other.seq
+	}
+	return p.created > other.created
 }
 
 // livingParent returns proc's parent PID, or noLivingParent when that parent
@@ -85,7 +98,7 @@ func livingParent(proc process) int {
 	switch {
 	case err != nil:
 		return proc.ppid
-	case parent.exited, parent.created > proc.created:
+	case parent.exited, parent.createdAfter(proc):
 		return noLivingParent
 	default:
 		return proc.ppid
@@ -93,12 +106,18 @@ func livingParent(proc process) int {
 }
 
 // openProcess opens pid for querying. It returns errProcessGone when no
-// process holds pid.
+// process holds pid. It asks for SYNCHRONIZE too, so inspect can tell whether
+// the process has exited, and settles for a query-only handle where the
+// process's DACL denies it.
 func openProcess(pid int) (windows.Handle, error) {
 	if pid <= 0 || uint64(pid) > math.MaxUint32 {
 		return 0, errProcessGone
 	}
-	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	const access = windows.PROCESS_QUERY_LIMITED_INFORMATION
+	handle, err := windows.OpenProcess(access|windows.SYNCHRONIZE, false, uint32(pid))
+	if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		handle, err = windows.OpenProcess(access, false, uint32(pid))
+	}
 	if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
 		return 0, errProcessGone
 	}
@@ -108,7 +127,7 @@ func openProcess(pid int) (windows.Handle, error) {
 	return handle, nil
 }
 
-// inspect reads handle's parent PID, creation time, and whether it exited.
+// inspect reads handle's parent PID, birth, and whether it exited.
 func inspect(handle windows.Handle) (process, error) {
 	var info windows.PROCESS_BASIC_INFORMATION
 	//nolint:gosec // G103: x/sys has no typed wrapper; the kernel fills info, bounded by its size
@@ -123,13 +142,28 @@ func inspect(handle windows.Handle) (process, error) {
 	if err := windows.GetExitCodeProcess(handle, &code); err != nil {
 		return process{}, fmt.Errorf("read exit code: %w", err)
 	}
+	var seq uint64
+	//nolint:gosec // G103: x/sys has no typed wrapper; the kernel fills seq, bounded by its size
+	if err := windows.NtQueryInformationProcess(handle, windows.ProcessSequenceNumber, unsafe.Pointer(&seq), uint32(unsafe.Sizeof(seq)), nil); err != nil {
+		seq = 0 // not reported here; order by creation time instead
+	}
 	return process{
 		ppid:    int(info.InheritedFromUniqueProcessId),
 		created: int64(created.HighDateTime)<<32 | int64(created.LowDateTime),
-		// A process that exits with STILL_ACTIVE as its code reads as running
-		// for as long as a handle keeps it; once the last closes, it is gone.
-		exited: code != stillActive,
+		seq:     seq,
+		// The exit code alone can't tell a process that exited with
+		// STILL_ACTIVE (259) as its code from a running one, so a signaled
+		// handle counts too. A handle without SYNCHRONIZE falls back on the
+		// exit code.
+		exited: code != stillActive || signaled(handle),
 	}, nil
+}
+
+// signaled reports whether handle's process has exited, as far as the
+// handle's access lets it tell.
+func signaled(handle windows.Handle) bool {
+	event, err := windows.WaitForSingleObject(handle, 0)
+	return err == nil && event == windows.WAIT_OBJECT_0
 }
 
 // imageName returns the base name of handle's executable, such as "node.exe".
