@@ -280,11 +280,16 @@ func installRepoAtTag(ctx context.Context, repoURL, expectedName, tag string, op
 		return nil, err
 	}
 
-	entry, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: pkgBin, Force: true})
+	if _, err := placeManagedEntry(InstallPluginOptions{SourcePath: pkgBin, Force: true}); err != nil {
+		return nil, err
+	}
+	// The bin/ entry now runs the new binary: from here on pkg/ must stay on
+	// the new version too, whatever else fails.
+	installed = true
+	entry, err := FindInstalledPlugin(name)
 	if err != nil {
 		return nil, err
 	}
-	installed = true
 	return &RemoteInstallResult{Installed: entry, Manifest: manifest, Metadata: meta, ReplacedFrom: replacedFrom}, nil
 }
 
@@ -298,6 +303,10 @@ type pkgInstallBackup struct {
 	manifestName string
 	manifest     []byte // nil when there was no previous manifest
 }
+
+// pkgBackupLink creates the hard link stashPreviousPkgInstall prefers; a seam
+// so tests can force the rename fallback used where hard links are unavailable.
+var pkgBackupLink = func(root *os.Root, oldName, newName string) error { return root.Link(oldName, newName) }
 
 // stashPreviousPkgInstall keeps the current pkg binary under a .old- name and
 // reads the current manifest so restore can put both back. The binary gets a
@@ -325,7 +334,7 @@ func stashPreviousPkgInstall(root *os.Root, pkgName, binBase string) (*pkgInstal
 		}
 		return nil, fmt.Errorf("stat previous plugin binary: %w", err)
 	}
-	if err := root.Link(b.binName, aside); err != nil {
+	if err := pkgBackupLink(root, b.binName, aside); err != nil {
 		if err := root.Rename(b.binName, aside); err != nil {
 			return nil, fmt.Errorf("move previous plugin binary aside: %w", err)
 		}

@@ -185,6 +185,20 @@ func TestInstallPluginFromPath_SweepsAndHidesAsideLeftovers(t *testing.T) { //no
 // manifest records the new tag over the old running binary and every later
 // upgrade reports "up to date". The next upgrade has to retry and succeed.
 func TestUpgrade_FailedBinSwapLeavesPreviousVersionAndRetries(t *testing.T) { //nolint:paralleltest // mutates env and seams
+	assertFailedBinSwapRollsBack(t)
+}
+
+// The same, where the previous pkg binary cannot be hard-linked aside and is
+// moved instead (filesystems without hard links).
+func TestUpgrade_FailedBinSwapRollsBackWithoutHardLinks(t *testing.T) { //nolint:paralleltest // mutates env and seams
+	prev := pkgBackupLink
+	pkgBackupLink = func(*os.Root, string, string) error { return errors.New("hard links unsupported") }
+	t.Cleanup(func() { pkgBackupLink = prev })
+	assertFailedBinSwapRollsBack(t)
+}
+
+func assertFailedBinSwapRollsBack(t *testing.T) {
+	t.Helper()
 	withIsolatedPluginEnv(t)
 	ctx := context.Background()
 	repoURL, _ := newDemoPluginRepo(t, []string{remoteTestTagOld}, "0.1.0", "0.2.0")
@@ -240,6 +254,9 @@ func TestUpgrade_FailedBinSwapLeavesPreviousVersionAndRetries(t *testing.T) { //
 	}
 	if got := installedPayload(t); got != "payload-0.2.0" {
 		t.Errorf("bin entry payload after retry = %q, want payload-0.2.0", got)
+	}
+	if entries, err := os.ReadDir(pkgDir); err != nil || len(entries) != 2 {
+		t.Errorf("pkg dir after a successful upgrade holds %d entries (%v), want binary + manifest", len(entries), err)
 	}
 }
 

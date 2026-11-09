@@ -385,36 +385,49 @@ type InstallPluginOptions struct {
 // atomic: the new entry is created under a temp name and renamed onto <dest>,
 // so a failed --force never leaves the previous install missing.
 func InstallPluginFromPath(opts InstallPluginOptions) (*InstalledPlugin, error) {
+	bare, err := placeManagedEntry(opts)
+	if err != nil {
+		return nil, err
+	}
+	return FindInstalledPlugin(bare)
+}
+
+// placeManagedEntry is InstallPluginFromPath up to and including the swap of
+// the bin/ entry, returning the installed bare name. Callers that must know
+// whether the entry was replaced (installRepoAtTag rolls pkg/ back unless it
+// was) use it directly, so a failure in the lookup that follows is never
+// mistaken for a failed swap.
+func placeManagedEntry(opts InstallPluginOptions) (string, error) {
 	src, err := filepath.Abs(opts.SourcePath)
 	if err != nil {
-		return nil, fmt.Errorf("resolve source path: %w", err)
+		return "", fmt.Errorf("resolve source path: %w", err)
 	}
 	srcInfo, err := os.Stat(src)
 	if err != nil {
-		return nil, fmt.Errorf("stat source: %w", err)
+		return "", fmt.Errorf("stat source: %w", err)
 	}
 	if srcInfo.IsDir() {
-		return nil, fmt.Errorf("source must be a file, got directory: %s", src)
+		return "", fmt.Errorf("source must be a file, got directory: %s", src)
 	}
 	base := filepath.Base(src)
 	bare := bareNameFromBinaryName(base)
 	if bare == "" {
-		return nil, fmt.Errorf("source basename %q must start with %q and have a runnable name", base, pluginBinaryPrefix)
+		return "", fmt.Errorf("source basename %q must start with %q and have a runnable name", base, pluginBinaryPrefix)
 	}
 	if err := validatePluginName(bare); err != nil {
-		return nil, fmt.Errorf("derived plugin name from %q is not dispatchable: %w", base, err)
+		return "", fmt.Errorf("derived plugin name from %q is not dispatchable: %w", base, err)
 	}
 	if runtime.GOOS != windowsGOOS && srcInfo.Mode()&0o111 == 0 {
-		return nil, fmt.Errorf("source %s is not executable (chmod +x)", src)
+		return "", fmt.Errorf("source %s is not executable (chmod +x)", src)
 	}
 
 	binDir, err := EnsurePluginBinDir()
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	root, err := pluginRoot(true)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	// dest stays absolute for the messages and the self-install check below;
 	// destName is the same entry addressed inside the managed tree's root,
@@ -432,7 +445,7 @@ func InstallPluginFromPath(opts InstallPluginOptions) (*InstalledPlugin, error) 
 	// install; SameFile would resolve dest through the symlink to src
 	// and falsely trip. Path equality is the precise risky case.
 	if filepath.Clean(src) == filepath.Clean(dest) {
-		return nil, fmt.Errorf("source %s is already the managed entry; nothing to install", src)
+		return "", fmt.Errorf("source %s is already the managed entry; nothing to install", src)
 	}
 
 	// Conflict check on the bare name (not the exact filename). On Windows,
@@ -443,10 +456,10 @@ func InstallPluginFromPath(opts InstallPluginOptions) (*InstalledPlugin, error) 
 	// any exist.
 	conflicts, err := installedVariantsByBareName(bare)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	if len(conflicts) > 0 && !opts.Force {
-		return nil, fmt.Errorf("plugin %q already installed at %s; use --force to replace", bare, conflicts[0].Path)
+		return "", fmt.Errorf("plugin %q already installed at %s; use --force to replace", bare, conflicts[0].Path)
 	}
 	// With --force, remove every variant other than the one we're about to
 	// atomically overwrite. The same-extension case is handled by the
@@ -456,7 +469,7 @@ func InstallPluginFromPath(opts InstallPluginOptions) (*InstalledPlugin, error) 
 			continue
 		}
 		if err := root.Remove(pluginBinName(filepath.Base(c.Path))); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("remove existing variant %s: %w", c.Path, err)
+			return "", fmt.Errorf("remove existing variant %s: %w", c.Path, err)
 		}
 	}
 
@@ -475,17 +488,17 @@ func InstallPluginFromPath(opts InstallPluginOptions) (*InstalledPlugin, error) 
 	//      while the install is in progress.
 	tmpName, err := makeInstallTmpName()
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	if err := materializeManagedEntry(root, src, tmpName, srcInfo); err != nil {
-		return nil, fmt.Errorf("install plugin: %w", err)
+		return "", fmt.Errorf("install plugin: %w", err)
 	}
 	sweepOldManagedEntries(root)
 	if err := replaceManagedEntry(root, tmpName, destName); err != nil {
 		_ = root.Remove(tmpName) //nolint:errcheck // best-effort cleanup; previous install is intact
-		return nil, fmt.Errorf("install plugin: %w", err)
+		return "", fmt.Errorf("install plugin: %w", err)
 	}
-	return FindInstalledPlugin(bare)
+	return bare, nil
 }
 
 // oldManagedEntryPrefix starts the name a replaced bin/ entry is moved aside
