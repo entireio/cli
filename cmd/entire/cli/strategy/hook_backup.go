@@ -545,6 +545,10 @@ func isFileNameByte(b byte) bool {
 // install runs because of them, and a current copy may hold lines the user
 // added. Reports the moved copies it changed.
 func reclaimFromWrappers(root *os.Root, hook string, staleOnly bool) (wrapperReclaim, error) {
+	// The caller decided staleOnly before taking the lock, which a hook manager
+	// does not take. If one has since moved Entire's hook aside and put its
+	// wrapper in the hook's place, every moved copy is that manager's again.
+	staleOnly = staleOnly && ownHookStateIn(root, hook) == GitHooksCurrent
 	var reclaimed wrapperReclaim
 	moved, err := movedHookCopies(root, hook)
 	if err != nil {

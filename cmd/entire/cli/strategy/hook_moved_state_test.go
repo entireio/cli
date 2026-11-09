@@ -223,3 +223,30 @@ func TestReinstallGitHooks_KeepsCurrentMovedCopy(t *testing.T) {
 		})
 	}
 }
+
+// The per-turn reinstall decides keepHook before it takes the hooks lock, and a
+// hook manager does not take that lock. If the manager installs in between,
+// moving Entire's current hook aside and putting its wrapper in its place, the
+// copy it moved is the one the wrapper runs, and the install takes it back for
+// the user's hook as any install would, so each hook runs once.
+func TestInstallHooks_KeepHookRechecksTheHookUnderTheLock(t *testing.T) {
+	t.Parallel()
+	spec := specFor(t, "commit-msg")
+	f := newHooksFixture(t)
+	f.write("commit-msg", generateChainedContent(spec.content, spec.name))
+	f.write("commit-msg"+backupSuffix, userHookV1)
+	stale := spec
+	stale.keepHook, stale.staleCopiesOnly = true, true // decided before the manager ran
+	wrapper := toolWrapper("commit-msg.tool-old", "/dev/null")
+	f.toolInstall(wrapper)
+
+	f.install(stale)
+
+	assertHooks(t, f, map[string]string{
+		"commit-msg.tool-old":       userHookV1,
+		"commit-msg" + backupSuffix: wrapper,
+	})
+	if !carriesEntireMarker(f.root, "commit-msg") {
+		t.Errorf("commit-msg = %q, want Entire's hook", f.read("commit-msg"))
+	}
+}
