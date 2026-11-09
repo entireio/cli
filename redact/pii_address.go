@@ -47,8 +47,12 @@ const (
 	euSpace = `[ \t]+`
 	// euHouseNumber is the number that ends an Italian or Spanish street
 	// line, optionally after n., n.º, nº or n°, with an optional letter or
-	// sub-number (3/A, 12b, 7/2).
-	euHouseNumber = `(?:n(?:\.[°º]?|[°º])[ \t]?)?\d{1,4}(?:[ \t]?/[ \t]?[0-9A-Za-z]{1,3}|[A-Za-z])?`
+	// sub-number (3/A, 12b, 7/2). It ends at a word boundary in the pattern
+	// itself, not only in endsStreetLine, so when a date's year could take a
+	// four-digit house number (Via XX Settembre 1234, 20121 Milano), the
+	// regex reads 1234 as the house number instead of returning a match that
+	// ends inside the postal code.
+	euHouseNumber = `(?:n(?:\.[°º]?|[°º])[ \t]?)?\d{1,4}(?:[ \t]?/[ \t]?[0-9A-Za-z]{1,3}|[A-Za-z])?\b`
 	// euGermanAdjective may come before a German street's name: Alte
 	// Schönhauser Straße, Große Hamburger Straße, Alter Postweg.
 	euGermanAdjective = `(?:Alt|Neu|Gro(?:ß|ss)|Klein|Ober|Unter|Mittler|Vorder|Hinter|Hoh|Lang|Breit)e[nrs]?`

@@ -32,6 +32,11 @@ func TestDetectPII_EuropeanAddresses(t *testing.T) {
 		{"Via Roma n. 12", "[REDACTED_ADDRESS]"},
 		{"Via XX Settembre 20", "[REDACTED_ADDRESS]"},
 		{"Via 20 Settembre 97", "[REDACTED_ADDRESS]"},
+		// A four-digit house number after a month is not taken as the year.
+		{"Via XX Settembre 1234, 20121 Milano", "[REDACTED_ADDRESS], 20121 Milano"},
+		{"Via XX Settembre 1234 20121 Milano", "[REDACTED_ADDRESS] 20121 Milano"},
+		// A year still counts when a house number follows it.
+		{"Via XX Settembre 1870 12, 00187 Roma", "[REDACTED_ADDRESS], 00187 Roma"},
 
 		// Spanish
 		{"Calle de Alcalá, 42", "[REDACTED_ADDRESS]"},
@@ -43,6 +48,7 @@ func TestDetectPII_EuropeanAddresses(t *testing.T) {
 		{"Avda. Diagonal 640", "[REDACTED_ADDRESS]"},
 		{"Calle Mayor n.º 1", "[REDACTED_ADDRESS]"},
 		{"Avenida 9 de Julio 1000", "[REDACTED_ADDRESS]"},
+		{"Calle 2 de Mayo 1234 28004 Madrid", "[REDACTED_ADDRESS] 28004 Madrid"},
 
 		// French
 		{"5 avenue des Champs-Élysées", "[REDACTED_ADDRESS]"},
