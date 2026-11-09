@@ -1339,15 +1339,7 @@ func TestString_ConnectionSecretsCaughtWithoutScanners(t *testing.T) {
 // Shell parameter defaults and values joined from several quoted and bare
 // pieces must be caught by the key/value rules alone, with the scanners off.
 func TestString_ShellWordSecretsCaughtWithoutScanners(t *testing.T) {
-	t.Cleanup(func() {
-		if err := ConfigureScanners(ScannersConfig{Betterleaks: true}); err != nil {
-			t.Fatalf("restore default scanners: %v", err)
-		}
-	})
-	if err := ConfigureScanners(ScannersConfig{}); err != nil {
-		t.Fatalf("ConfigureScanners(none): %v", err)
-	}
-	tests := []stringRedactionCase{
+	assertStringRedactionCasesWithoutScanners(t, []stringRedactionCase{
 		{
 			name:  "credential value with a real default on a positional parameter",
 			input: "DB_PASSWORD=${1:-hunter2}",
@@ -1459,6 +1451,64 @@ func TestString_ShellWordSecretsCaughtWithoutScanners(t *testing.T) {
 			want:  "API_KEY=REDACTED",
 		},
 		{
+			name:  "code literal joined with more text",
+			input: `API_KEY="None"realtoken`,
+			want:  "API_KEY=REDACTED",
+		},
+		{
+			name:  "placeholder head of a value that runs past a separator",
+			input: "DB_PASSWORD=changeme;hunter2",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "placeholder head of a value that runs past a comma",
+			input: "DB_PASSWORD=example,hunter2",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "quoted default holding a blank",
+			input: `DB_PASSWORD=${PW:-'x y'}`,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "single-quoted default is a literal, not a reference",
+			input: `DB_PASSWORD=${PW:-'$S3CRET'}`,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "single-quoted credential default is a literal",
+			input: `API_KEY=${K:-'$S3CRET'}`,
+			want:  "API_KEY=REDACTED",
+		},
+		{
+			name:  "single-quoted default in a URI password",
+			input: `postgres://app:${PW:-'$S3CRET'}@db.example.com/app`,
+			want:  "REDACTED",
+		},
+		{
+			name:  "two joined placeholder words form a new literal",
+			input: `DB_PASSWORD=changeme'example'`,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "a joined quoted password stops at the command separator",
+			input: `DB_PASSWORD="hunter"'2';echo done`,
+			want:  "DB_PASSWORD=REDACTED;echo done",
+		},
+		{
+			name:  "a joined quoted credential stops at the command separator",
+			input: `API_KEY="hunter"'2abc';echo done`,
+			want:  "API_KEY=REDACTED;echo done",
+		},
+	})
+}
+
+// A value that a quote or separator carries past the end of a redacted word,
+// and a key that such a word ends inside, must still be caught by the
+// key/value rules alone, with the scanners off.
+func TestString_ValuesPastRedactedWordsCaughtWithoutScanners(t *testing.T) {
+	assertStringRedactionCasesWithoutScanners(t, []stringRedactionCase{
+		{
 			name:  "a password after a key inside a redacted word",
 			input: `DB_PASSWORD=a" DB_PASSWORD=b";DB_PASSWORD=hunter2`,
 			want:  "DB_PASSWORD=REDACTED;DB_PASSWORD=REDACTED",
@@ -1497,6 +1547,36 @@ func TestString_ShellWordSecretsCaughtWithoutScanners(t *testing.T) {
 			name:  "a spaced credential after the word of a value that opens inside a word",
 			input: `API_KEY=abc\" API_KEY="hunter2 API_KEY=foo"API_KEY = hunter2xyz`,
 			want:  `API_KEY=REDACTED = REDACTED`,
+		},
+		{
+			name:  "a credential after a non-credential key at the end of a redacted word",
+			input: `DB_PASSWORD="a"b= API_KEY=hunter2`,
+			want:  `DB_PASSWORD=REDACTED API_KEY=REDACTED`,
+		},
+		{
+			name:  "a credential after a spaced non-credential key at the end of a redacted word",
+			input: `DB_PASSWORD="a"b = API_KEY=hunter2`,
+			want:  `DB_PASSWORD=REDACTED = API_KEY=REDACTED`,
+		},
+		{
+			name:  "a credential after a key joined to a non-credential quoted value",
+			input: `FOO="x"b= API_KEY=hunter2`,
+			want:  `FOO="x"b= API_KEY=REDACTED`,
+		},
+		{
+			name:  "a bare value past a word that holds a non-credential assignment",
+			input: `API_KEY=a=" API_KEY=aaa\"|bbb"`,
+			want:  `API_KEY=REDACTED`,
+		},
+		{
+			name:  "a value joined past a separator that ends a word holding its key",
+			input: `DB_PASSWORD="a\"b";API_KEY=a"b;c"hunter2xyz`,
+			want:  `DB_PASSWORD=REDACTED`,
+		},
+		{
+			name:  "a value that starts with a quote that never closes is extended past separators",
+			input: `GITHUB_CLIENT_SECRET="abc;hunter2xyz`,
+			want:  `GITHUB_CLIENT_SECRET=REDACTED`,
 		},
 		{
 			name:  "a spaced quoted value whose opening quote follows a stray quote",
@@ -1558,56 +1638,21 @@ func TestString_ShellWordSecretsCaughtWithoutScanners(t *testing.T) {
 			input: `DB_PASSWORD=foo;DB_PASSWORD = hunter2`,
 			want:  `DB_PASSWORD=REDACTED = REDACTED`,
 		},
-		{
-			name:  "code literal joined with more text",
-			input: `API_KEY="None"realtoken`,
-			want:  "API_KEY=REDACTED",
-		},
-		{
-			name:  "placeholder head of a value that runs past a separator",
-			input: "DB_PASSWORD=changeme;hunter2",
-			want:  "DB_PASSWORD=REDACTED",
-		},
-		{
-			name:  "placeholder head of a value that runs past a comma",
-			input: "DB_PASSWORD=example,hunter2",
-			want:  "DB_PASSWORD=REDACTED",
-		},
-		{
-			name:  "quoted default holding a blank",
-			input: `DB_PASSWORD=${PW:-'x y'}`,
-			want:  "DB_PASSWORD=REDACTED",
-		},
-		{
-			name:  "single-quoted default is a literal, not a reference",
-			input: `DB_PASSWORD=${PW:-'$S3CRET'}`,
-			want:  "DB_PASSWORD=REDACTED",
-		},
-		{
-			name:  "single-quoted credential default is a literal",
-			input: `API_KEY=${K:-'$S3CRET'}`,
-			want:  "API_KEY=REDACTED",
-		},
-		{
-			name:  "single-quoted default in a URI password",
-			input: `postgres://app:${PW:-'$S3CRET'}@db.example.com/app`,
-			want:  "REDACTED",
-		},
-		{
-			name:  "two joined placeholder words form a new literal",
-			input: `DB_PASSWORD=changeme'example'`,
-			want:  "DB_PASSWORD=REDACTED",
-		},
-		{
-			name:  "a joined quoted password stops at the command separator",
-			input: `DB_PASSWORD="hunter"'2';echo done`,
-			want:  "DB_PASSWORD=REDACTED;echo done",
-		},
-		{
-			name:  "a joined quoted credential stops at the command separator",
-			input: `API_KEY="hunter"'2abc';echo done`,
-			want:  "API_KEY=REDACTED;echo done",
-		},
+	})
+}
+
+// assertStringRedactionCasesWithoutScanners checks each case with only the
+// key/value rules on, then restores the default scanners. The scanner
+// configuration is process-wide, so the cases run one at a time.
+func assertStringRedactionCasesWithoutScanners(t *testing.T, tests []stringRedactionCase) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := ConfigureScanners(ScannersConfig{Betterleaks: true}); err != nil {
+			t.Fatalf("restore default scanners: %v", err)
+		}
+	})
+	if err := ConfigureScanners(ScannersConfig{}); err != nil {
+		t.Fatalf("ConfigureScanners(none): %v", err)
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -3102,7 +3147,7 @@ func TestString_JoinedShellWordValues(t *testing.T) {
 // per match.
 func TestString_JoinedShellWordsStayLinear(t *testing.T) {
 	t.Parallel()
-	for _, unit := range []string{`DB_PASSWORD=a" "`, `API_KEY=a" "`, `DB_PASSWORD=a" "=`, `DB_PASSWORD=a" DB_PASSWORD=b"|`, `DB_PASSWORD=a' DB_PASSWORD=b'|`, `db_password=foo,client_secret = `, `DB_PASSWORD=a" API_KEY="b `, `DB_PASSWORD=a' API_KEY="b' `, `DB_PASSWORD=a" FOO="b `, `DB_PASSWORD=a" FOO='b API_KEY="c' `, `DB_PASSWORD=a\" API_KEY=b\"|c `, `API_KEY=a" API_KEY="b API_KEY=c"API_KEY = `} {
+	for _, unit := range []string{`DB_PASSWORD=a" "`, `API_KEY=a" "`, `DB_PASSWORD=a" "=`, `DB_PASSWORD=a" DB_PASSWORD=b"|`, `DB_PASSWORD=a' DB_PASSWORD=b'|`, `db_password=foo,client_secret = `, `DB_PASSWORD=a" API_KEY="b `, `DB_PASSWORD=a' API_KEY="b' `, `DB_PASSWORD=a" FOO="b `, `DB_PASSWORD=a" FOO='b API_KEY="c' `, `DB_PASSWORD=a\" API_KEY=b\"|c `, `API_KEY=a" API_KEY="b API_KEY=c"API_KEY = `, `DB_PASSWORD="a\"b";API_KEY=a"b;c"x `, "GITHUB_CLIENT_SECRET=\"a;b\n", `DB_PASSWORD="a"b= `, `API_KEY=a=" API_KEY=aaa\"|bbb" `} {
 		in := strings.Repeat(unit, 20000)
 		done := make(chan string, 1)
 		go func() { done <- String(in) }()
