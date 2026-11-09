@@ -3,12 +3,13 @@ package agents
 import (
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 func TestAntigravityIdentity(t *testing.T) {
@@ -542,14 +543,14 @@ func TestAntigravityInteractiveSessionRetriesRequestedCommitWhenHeadUnchanged(t 
 	t.Parallel()
 
 	dir := t.TempDir()
-	runGitForAntigravityTest(t, dir, "init")
-	runGitForAntigravityTest(t, dir, "config", "user.name", "E2E Test")
-	runGitForAntigravityTest(t, dir, "config", "user.email", "e2e@test.local")
+	testutil.RunGit(t, dir, "init")
+	testutil.RunGit(t, dir, "config", "user.name", "E2E Test")
+	testutil.RunGit(t, dir, "config", "user.email", "e2e@test.local")
 	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("initial\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	runGitForAntigravityTest(t, dir, "add", "README.md")
-	runGitForAntigravityTest(t, dir, "commit", "-m", "initial commit")
+	testutil.RunGit(t, dir, "add", "README.md")
+	testutil.RunGit(t, dir, "commit", "-m", "initial commit")
 
 	rec := &recordingSession{waits: []string{"claimed committed\n>", "done\n>"}}
 	session := &antigravityInteractiveSession{Session: rec, dir: dir}
@@ -578,27 +579,18 @@ func TestAntigravityInteractiveSessionRetriesRequestedCommitWhenHeadUnchanged(t 
 	}
 }
 
-func runGitForAntigravityTest(t *testing.T, dir string, args ...string) {
-	t.Helper()
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %v: %v\n%s", args, err, out)
-	}
-}
-
 func TestAntigravityShouldRetryMissingCommit(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	runGitForAntigravityTest(t, dir, "init")
-	runGitForAntigravityTest(t, dir, "config", "user.name", "E2E Test")
-	runGitForAntigravityTest(t, dir, "config", "user.email", "e2e@test.local")
+	testutil.RunGit(t, dir, "init")
+	testutil.RunGit(t, dir, "config", "user.name", "E2E Test")
+	testutil.RunGit(t, dir, "config", "user.email", "e2e@test.local")
 	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("initial\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	runGitForAntigravityTest(t, dir, "add", "README.md")
-	runGitForAntigravityTest(t, dir, "commit", "-m", "initial commit")
+	testutil.RunGit(t, dir, "add", "README.md")
+	testutil.RunGit(t, dir, "commit", "-m", "initial commit")
 	head := antigravityGitHead(dir)
 
 	if !antigravityShouldRetryMissingCommit("create docs/red.md and commit it", dir, head) {
@@ -611,8 +603,8 @@ func TestAntigravityShouldRetryMissingCommit(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "next.md"), []byte("next\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	runGitForAntigravityTest(t, dir, "add", "next.md")
-	runGitForAntigravityTest(t, dir, "commit", "-m", "next commit")
+	testutil.RunGit(t, dir, "add", "next.md")
+	testutil.RunGit(t, dir, "commit", "-m", "next commit")
 	if antigravityShouldRetryMissingCommit("create docs/red.md and commit it", dir, head) {
 		t.Fatal("antigravityShouldRetryMissingCommit() = true, want false after HEAD changed")
 	}

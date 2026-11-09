@@ -150,6 +150,42 @@ the only failure mode here that would not announce itself (a requirement
 mixing `oauth2` with `bearerAuth` survives whole and makes ogen abort at
 generate time on the now-dangling scheme).
 
+## 4. Hand-spliced ahead of a full refresh: ENT-3417 sync block and resync
+
+**Symptom:** the control plane has moved well past the vendored spec (new
+security schemes, dozens of new operations), and a full `curl` refresh no
+longer compiles without unrelated client work. `core.openapi.json` carries
+the ENT-3417 contract spliced in from the live spec: `MirrorSyncBlock`,
+`Mirror.syncBlock`, and `POST /mirrors/resync` with its two bodies.
+
+**Fix upstream:** nothing — the pieces are verbatim from the published spec.
+The next full refresh carries them on its own, and this entry goes.
+
+`PUT /repos/{repoId}/default-branch` (`setDefaultBranch`) and its two bodies
+(`SetDefaultBranchInputBody`, `SetDefaultBranchOutputBody`) are spliced the
+same way, verbatim from the published spec (entiredb#5136).
+
+`CreateServiceAccountInputBody`, `ServiceAccount`, `ServiceAccountWithGrants`
+and `GET /service-accounts` are spliced verbatim from the published spec. They
+carry `project_id`: service accounts belong to a project, and `orgId` is
+deprecated and optional.
+
+`OIDCProvider` (`name`, `label`, `docs_url`, `self_serve`, `attributes`) and
+`OIDCProviderAttribute` are written by hand from `api/corev1/identity.go`
+(https://entire.com/gh/entirehq/-/trails/23562, entiredb#5327). That change is
+merged and prod US serves these fields. Every new field is optional, so a core
+that predates them still decodes. Replace both schemas with the published ones
+at the next spec refresh.
+
+`CreateProjectInputBody.cell` is spliced from the entiredb change in
+https://entire.com/gh/entirehq/-/trails/23479. A core without it ignores the
+field and assigns the default cell, so `project create` prints the cell the
+server chose.
+
+**Workaround:** none in `normalize.go` beyond the `ResyncMirrorOutputBody.status`
+enum loosening. entiredb#4961 is on main and in prod, so any refresh from a
+current core keeps the three schemas and the route.
+
 <!-- Resolved upstream and removed:
   - Nullable arrays (`"type": ["array","null"]`) — entiredb now emits
     non-nullable arrays (`"type": "array"`, absent ⇒ `[]`), so the

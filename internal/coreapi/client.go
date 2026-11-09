@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 
 	"github.com/ogen-go/ogen/ogenerrors"
 
+	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 )
 
@@ -99,6 +101,9 @@ func NewForCluster(ctx context.Context, clusterHost string) (*Client, error) {
 // (NewForCluster doesn't tighten this even though it has a cluster host to
 // anchor against: the same no-escalation argument holds — the env token is the
 // credential, sent verbatim, not exchanged.)
+//
+// A service account secret is the exception to "verbatim": it is exchanged,
+// and the exchanged token is renewed per request (auth.EnvTokenSource).
 func clientFromEnvToken() (*Client, bool, error) {
 	raw, ok := os.LookupEnv(auth.EnvTokenVar)
 	if !ok {
@@ -108,8 +113,52 @@ func clientFromEnvToken() (*Client, bool, error) {
 	if err != nil {
 		return nil, true, err //nolint:wrapcheck // auth.ParseEnvToken already prefixes with EnvTokenVar
 	}
+	if source := auth.EnvTokenSource(raw); source != nil {
+		// A service account secret's exchanged token lives minutes: renew it
+		// per request, and drop it from the cache when the core refuses it.
+		client, err := newWithTokenSource(coreURL, source)
+		return client, true, err
+	}
 	client, err := NewWithBearer(coreURL, envToken)
 	return client, true, err
+}
+
+// newWithTokenSource is NewWithBearer with a bearer resolved per request from
+// source, which also hears about every 401 the core answers.
+func newWithTokenSource(coreBaseURL string, source api.TokenSource) (*Client, error) {
+	base := strings.TrimRight(coreBaseURL, "/")
+	httpClient, err := newCrossJurisHTTPClientWrapped(base, func(next http.RoundTripper) http.RoundTripper {
+		return unauthorizedReporter{next: next, source: source}
+	})
+	if err != nil {
+		return nil, fmt.Errorf("build cross-juris HTTP client: %w", err)
+	}
+	client, err := NewClient(base+apiBasePath, &providerSource{provide: source.Token}, WithClient(httpClient))
+	if err != nil {
+		return nil, fmt.Errorf("build Entire API client: %w", err)
+	}
+	return client, nil
+}
+
+// unauthorizedReporter tells source about a 401 for the bearer a request
+// carried. It sits outside the cross-juris transport, so the token it reports
+// is the one source supplied, not a token exchanged for another core.
+type unauthorizedReporter struct {
+	next   http.RoundTripper
+	source api.TokenSource
+}
+
+func (u unauthorizedReporter) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := u.next.RoundTrip(req)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // the transport chain already describes the failure
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		if token, ok := strings.CutPrefix(req.Header.Get("Authorization"), "Bearer "); ok && token != "" {
+			u.source.Unauthorized(token)
+		}
+	}
+	return resp, nil
 }
 
 // clientForTarget builds the *Client for a resolved control-plane target: the
@@ -235,4 +284,45 @@ func APIError(err error) string {
 	default:
 		return fmt.Sprintf("control-plane request failed with status %d", statusErr.StatusCode)
 	}
+}
+
+// APIErrorDetail returns the first problem detail an API error carries at the
+// given location (e.g. "body.owner"), so a caller can read a structured value
+// the server attached to a coded failure — the sync-block reason on a 409
+// from resyncMirror — without parsing the human message. ok is false when err
+// is not an API error or carries no detail there.
+func APIErrorDetail(err error, location string) (detail ErrorDetail, ok bool) {
+	var statusErr *ErrorModelStatusCode
+	if !errors.As(err, &statusErr) {
+		return ErrorDetail{}, false
+	}
+	for _, d := range statusErr.Response.Errors {
+		if d.Location.Or("") == location {
+			return d, true
+		}
+	}
+	return ErrorDetail{}, false
+}
+
+// APIErrorStatus returns the HTTP status of an API error, or 0 when err is
+// not one.
+func APIErrorStatus(err error) int {
+	var statusErr *ErrorModelStatusCode
+	if !errors.As(err, &statusErr) {
+		return 0
+	}
+	return statusErr.StatusCode
+}
+
+// APIErrorType returns an error's problem type.
+func APIErrorType(err error) string {
+	var statusErr *ErrorModelStatusCode
+	if !errors.As(err, &statusErr) {
+		return ""
+	}
+	t, ok := statusErr.Response.Type.Get()
+	if !ok {
+		return ""
+	}
+	return t.String()
 }

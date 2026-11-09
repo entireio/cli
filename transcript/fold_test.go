@@ -395,7 +395,7 @@ func TestFold_ResultIsCopied(t *testing.T) {
 	t.Parallel()
 
 	f := NewFolder(testMeta)
-	result := &ToolResult{Output: "first", Status: ToolStatusSuccess, File: &ToolResultFile{FilePath: "/a"}}
+	result := &ToolResult{Output: "first", Status: ToolStatusSuccess, File: &ToolResultFile{FilePath: "/a"}, Agent: &ToolResultAgent{ID: "a1"}}
 	if _, err := f.Apply([]Record{
 		assistantRecord("a", "a", `[{"type":"tool_use","id":"tu1","name":"Read","input":{}}]`),
 		{Op: OpResult, ID: "a", ToolUseID: "tu1", Result: result},
@@ -404,12 +404,13 @@ func TestFold_ResultIsCopied(t *testing.T) {
 	}
 	result.Output = "changed"
 	result.File.FilePath = "/b"
+	result.Agent.ID = "a2"
 	line, ok := f.Line("a")
 	if !ok {
 		t.Fatal("line not visible")
 	}
 	assertLines(t, []string{string(line)},
-		linePrefix+`"type":"assistant","ts":"t1","id":"a","content":[{"id":"tu1","input":{},"name":"Read","result":{"output":"first","status":"success","file":{"filePath":"/a"}},"type":"tool_use"}]}`,
+		linePrefix+`"type":"assistant","ts":"t1","id":"a","content":[{"id":"tu1","input":{},"name":"Read","result":{"output":"first","status":"success","file":{"filePath":"/a"},"agent":{"id":"a1"}},"type":"tool_use"}]}`,
 	)
 }
 
@@ -455,6 +456,7 @@ func TestRecord_JSONRoundTrip(t *testing.T) {
 		{Op: OpResult, ID: "m1", Result: &ToolResult{Status: ToolStatusSuccess}},
 		{Op: OpUsage, ID: "m1", InputTokens: 4},
 		{Op: OpDrop, ID: "@L2"},
+		{Op: OpResult, ID: "m1", Result: &ToolResult{Status: ToolStatusSuccess, Agent: &ToolResultAgent{ID: "a1"}}},
 	}
 
 	data, err := json.Marshal(records)
@@ -493,5 +495,40 @@ func TestRecord_JSONRoundTrip(t *testing.T) {
 	const wantResult = `{"op":"result","id":"m1","toolUseId":"tu1","result":{"output":"out","status":"error","file":{"filePath":"/f","numLines":3},"matchCount":2}}`
 	if result, err := json.Marshal(records[4]); err != nil || string(result) != wantResult {
 		t.Errorf("result record encoding = %s (%v), want %s", result, err, wantResult)
+	}
+	const wantAgent = `{"op":"result","id":"m1","result":{"output":"","status":"success","agent":{"id":"a1"}}}`
+	if result, err := json.Marshal(records[8]); err != nil || string(result) != wantAgent {
+		t.Errorf("agent result record encoding = %s (%v), want %s", result, err, wantAgent)
+	}
+}
+
+func TestRecord_MalformedResultAgentDecodesAsAbsent(t *testing.T) {
+	t.Parallel()
+
+	for _, agent := range []string{`"a17"`, `{"id":""}`, `{"id":7}`, `null`, `[]`} {
+		var r Record
+		in := `{"op":"result","id":"a","toolUseId":"tu1","result":{"output":"x","status":"success","agent":` + agent + `}}`
+		if err := json.Unmarshal([]byte(in), &r); err != nil {
+			t.Fatalf("agent %s: %v", agent, err)
+		}
+		if r.Result.Agent != nil {
+			t.Errorf("agent %s decoded as %+v, want absent", agent, r.Result.Agent)
+		}
+		got := foldLines(t, assistantRecord("a", "a", `[{"type":"tool_use","id":"tu1","name":"Agent","input":{}}]`), r)
+		assertLines(t, got,
+			linePrefix+`"type":"assistant","ts":"t1","id":"a","content":[{"id":"tu1","input":{},"name":"Agent","result":{"output":"x","status":"success"},"type":"tool_use"}]}`,
+		)
+	}
+
+	var r ToolResult
+	if err := json.Unmarshal([]byte(`{"output":"x","status":"success","agent":{"id":"a17"}}`), &r); err != nil || r.Agent == nil || r.Agent.ID != "a17" {
+		t.Errorf("well-formed agent decoded as %+v (%v)", r.Agent, err)
+	}
+	if err := json.Unmarshal([]byte(`{"output":7}`), &r); err == nil {
+		t.Error("a mistyped output decoded without error")
+	}
+	r = ToolResult{Output: "prev"}
+	if err := json.Unmarshal([]byte(`null`), &r); err != nil || r.Output != "prev" {
+		t.Errorf("null changed the result to %+v (%v)", r, err)
 	}
 }

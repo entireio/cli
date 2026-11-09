@@ -50,10 +50,11 @@ Every agent must implement all 19 methods on the `Agent` interface:
 | `TranscriptAnalyzer` | `GetTranscriptPosition`, `ExtractModifiedFilesFromOffset` | You want richer checkpoints with transcript-derived file lists |
 | `TranscriptPreparer` | `PrepareTranscript` | Agent writes transcripts asynchronously and needs a flush/sync step |
 | `TokenCalculator` | `CalculateTokenUsage` | Agent's transcript contains token usage data |
+| `OutOfBandTokenSource` | `SnapshotTokenBaseline`, `CalculateTokenUsageSince` | Agent keeps token usage only outside its transcript, as a running total: the lifecycle snapshots it at turn start and records the difference at turn end, falling back to it when the transcript reports no usage (Antigravity's title tee, Factory AI Droid's per-session `.settings.json`). Built-in agents only |
 | `SubagentAwareExtractor` | `ExtractAllModifiedFiles`, `CalculateTotalTokenUsage` | Agent spawns subagents (like Claude Code's Task tool) |
 | `SubagentSessionResolver` | `ResolveSubagentSession` | Agent runs subagents as **detached sessions of their own** rather than as a blocking tool call (Factory AI Droid's Workers) |
 | `HookResponseWriter` | `WriteHookResponse` | Agent can display messages from hook responses (e.g., session start banner). Claude Code uses JSON `systemMessage` on stdout; Factory AI Droid uses plain text on stdout. |
-| `ContextInjector` | `InjectionEvent`, `RenderContextInjection` | Agent can inject text into the **model's** context window (distinct from `HookResponseWriter`, which targets the *user*). The agent declares which lifecycle event it injects at and renders a native stdout payload. The dispatcher (`emitContextInjection`) emits it once per normal session via `session.State.ContextInjectionDecided`, skipping review/investigate sessions, and only when fresh clone-local preferences say trails are enabled for the current repo/API/auth target. The API check happens before the prompt path (`entire enable`, successful `entire trail ...` commands, and stale/missing cache refresh on SessionStart all refresh `ClonePreferences.TrailsEnabled` using `api.Client.TrailsEnabled`); TurnStart performs no auth/network work and leaves unknown/stale caches undecided so a later refresh can still inject. Claude Code / Codex inject at `TurnStart` using `hookSpecificOutput.additionalContext` (UserPromptSubmit); Pi and OpenCode emit a `{"inject_context":...}` envelope that their embedded extension applies (Pi via a `before_agent_start` message, OpenCode via `experimental.chat.system.transform`). |
+| `ContextInjector` | `InjectionEvent`, `RenderContextInjection` | Agent can inject text into the **model's** context window (distinct from `HookResponseWriter`, which targets the *user*). The agent declares which lifecycle event it injects at and renders a native stdout payload. The dispatcher (`emitContextInjection`) skips review/investigate sessions. It emits the base text (agent-help pointer, checkpoint and setup/destructive rules, repo line) once per normal session on the first turn, recorded in `session.State.ContextInjectionBaseDone`, and adds the trails paragraph once fresh clone-local preferences say trails are enabled for the current repo/API/auth target, recorded in `session.State.ContextInjectionDecided`. The API check happens before the prompt path (`entire enable`, successful `entire trail ...` commands, and stale/missing cache refresh on SessionStart all refresh `ClonePreferences.TrailsEnabled` using `api.Client.TrailsEnabled`); TurnStart performs no auth/network work and leaves unknown/stale caches undecided, so when a later refresh says enabled the trails paragraph follows on its own on that turn. Claude Code / Codex inject at `TurnStart` using `hookSpecificOutput.additionalContext` (UserPromptSubmit); Pi and OpenCode emit a `{"inject_context":...}` envelope that their embedded extension applies (Pi via a `before_agent_start` message, OpenCode via `experimental.chat.system.transform`). |
 | `FileWatcher` | `GetWatchPaths`, `OnFileChange` | Agent doesn't support hooks; uses file-based detection instead |
 | `HomeLayoutProvider` | `SessionHome`, `HomeLayout` | Built-in agent keeps transcripts in one or more stores beneath a relocatable home (e.g. Codex's `sessions` and `archived_sessions` beneath `CODEX_HOME`). Transcript discovery for `attach` then searches every store, session initialization and turn start record the home in `State.AgentHome` and the per-user registry, and a test checks that `GetSessionDir` lies in the first one |
 | `HomeScopedInventoryExtractor` | `ExtractWithSubagentInventoryUnderHome` | Agent keeps a child-session inventory (`InventoryAwareExtractor`) and can look up child transcripts beneath a session's recorded home rather than the active one (Codex) |
@@ -467,6 +468,14 @@ Windows — see `agent.HookHostIsWindows`'s doc comment for how its runner was
 read out of the shipped binaries, and for why codex and cursor are on the other
 gate for reasons of evidence rather than mechanism.
 
+Put a warning wrapper on one hook that fires every session (usually session
+start) so a broken install is visible. The sh-based warning wrappers warn both
+when `entire` is missing from PATH and when it is on PATH but `entire --version`
+fails, such as a version-manager shim with no version selected, and exit 0
+either way. Otherwise they `exec` the hook, so an agent's timeout signal reaches
+`entire` itself and the hook's exit code and output pass through unchanged. The
+silent and Windows wrappers still check only that `entire` is on PATH.
+
 Both gates are overridable in tests via `agent.SetWindowsHookProbeForTesting`;
 key install-test expectations to the host rather than hardcoding one wrapper, or
 they assert a command `InstallHooks` does not write on the other platform.
@@ -643,7 +652,7 @@ Single JSON object with `info` and `messages` array. Messages contain `parts` (t
 {"info": {"id": "...", "title": "..."}, "messages": [{"info": {"role": "user"}, "parts": [{"type": "text", "text": "..."}]}]}
 ```
 
-Key difference: OpenCode stores transcripts in a database, not files. The transcript is fetched via `opencode export <sessionID>` at turn-end and cached to `.entire/tmp/<sessionID>.json`.
+Key difference: OpenCode stores transcripts in a database, not files. The transcript is fetched via `opencode export <sessionID>` (OpenCode 2: `opencode session export --standalone <sessionID>`, converted to the 1.x shape) at turn-end and cached to `.entire/tmp/<sessionID>.json`.
 
 **Chunking:** Parse JSON, distribute messages across chunks (each chunk is complete JSON with `info` + subset of `messages`).
 **Reassembly:** Merge message arrays from all chunks, preserve `info` from first chunk.
@@ -825,7 +834,7 @@ See `cmd/entire/cli/agent/pi/entire_extension.ts` for the full extension source.
 
 ### Plugin File Pattern (OpenCode)
 
-OpenCode uses a TypeScript plugin file (`.opencode/plugins/entire.ts`) instead of a JSON config. The plugin is auto-generated by `entire enable --agent opencode`.
+OpenCode uses a TypeScript plugin file (`.opencode/plugin/entire.ts`) instead of a JSON config. The plugin is auto-generated by `entire enable --agent opencode`. One file serves OpenCode 1 (`server`) and OpenCode 2 (`setup`); see `cmd/entire/cli/agent/opencode/AGENT.md`.
 
 Key differences from JSON config agents:
 - Plugin file is written/removed entirely (not partial JSON edits)

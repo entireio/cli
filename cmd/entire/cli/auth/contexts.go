@@ -172,6 +172,9 @@ func sameIssuer(a, b string) bool {
 // LocalIdentityCacheKey returns a non-secret local auth identity key.
 func LocalIdentityCacheKey() (string, error) {
 	if raw := strings.TrimSpace(os.Getenv(EnvTokenVar)); raw != "" {
+		if IsServiceAccountSecret(raw) {
+			return serviceAccountSecretCacheKey(raw)
+		}
 		claims, err := tokens.ParseClaims(raw)
 		if err != nil {
 			return "", fmt.Errorf("parse %s claims: %w", EnvTokenVar, err)
@@ -203,9 +206,9 @@ func LocalIdentityCacheKey() (string, error) {
 
 // LoginTokenForContext returns the login JWT stored for c, read from the
 // OS keyring slot the context points at. The encoded expiry is stripped;
-// the server is the authority on validity and the device-flow login holds
-// no refresh token, so an expired token surfaces as a 401 the caller can
-// translate into a re-login hint.
+// the server is the authority on validity and this read never refreshes,
+// so an expired token surfaces as a 401 the caller can translate into a
+// re-login hint.
 func LoginTokenForContext(c *contexts.Context) (string, error) {
 	if c == nil {
 		return "", errors.New("nil context")

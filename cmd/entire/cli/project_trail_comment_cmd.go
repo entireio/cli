@@ -57,6 +57,7 @@ func newProjectTrailCommentCmd() *cobra.Command {
 		}
 		cmd.AddCommand(child)
 	}
+	guardTrailCommentWrites(cmd)
 	return cmd
 }
 

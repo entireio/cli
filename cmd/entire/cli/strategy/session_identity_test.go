@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -491,6 +492,7 @@ func TestPostCommit_GuestCondensationPreservesHomePendingState(t *testing.T) {
 	t.Chdir(guestDir)
 	testutil.WriteFile(t, guestDir, "guest.txt", "guest worktree content")
 	testutil.GitAdd(t, guestDir, "guest.txt")
+	recordStampedTrailer(context.Background(), id.MustCheckpointID("a1b2c3d4e5f6"))
 	testutil.GitCommit(t, guestDir, "guest commit\n\n"+trailers.CheckpointTrailerKey+": a1b2c3d4e5f6\n")
 
 	guestStrategy := NewManualCommitStrategy()
@@ -553,6 +555,59 @@ func TestIsNearerOwner_Contract(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ENT-2463 through the commit hooks: the committer, started in the main
+// checkout, commits from a sibling worktree where no session is homed, while
+// another main-checkout session is mid-turn with pending work. Only the
+// committer is stamped and condensed; the other session keeps its pending
+// work for its own commit.
+//
+// Not parallel: uses t.Chdir().
+func TestCommitHooks_IdentifiedCommitterLeavesMainCheckoutSessionsPending(t *testing.T) {
+	ctx := context.Background()
+	homeDir, err := filepath.EvalSymlinks(setupGitRepo(t))
+	require.NoError(t, err, "the recorded home must match git's worktree list")
+	t.Chdir(homeDir)
+	homeRepo, err := gitrepo.OpenPath(homeDir)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = homeRepo.Close() })
+
+	s := NewManualCommitStrategy()
+	setupSessionWithCheckpoint(t, s, homeRepo, homeDir, "sess-unrelated")
+	unrelated, err := s.loadSessionState(ctx, "sess-unrelated")
+	require.NoError(t, err)
+	unrelated.WorktreePath = homeDir
+	unrelated.Phase = session.PhaseActive
+	require.NoError(t, s.saveSessionState(ctx, unrelated))
+	stepsBefore := unrelated.StepCount
+	require.Positive(t, stepsBefore, "sanity: the unrelated session has pending work")
+
+	setupSessionWithCheckpointAndFile(t, s, homeDir, "sess-committer", "notes.txt")
+	committer, err := s.loadSessionState(ctx, "sess-committer")
+	require.NoError(t, err)
+	committer.Owner = selfAncestorOwner(t)
+	committer.WorktreePath = homeDir
+	committer.Phase = session.PhaseActive
+	require.NoError(t, s.saveSessionState(ctx, committer))
+
+	guestDir := addSiblingWorktree(t, homeDir, "committer-wt")
+	t.Chdir(guestDir)
+	testutil.WriteFile(t, guestDir, "guest.txt", "committer's shell edit")
+	testutil.GitAdd(t, guestDir, "guest.txt")
+	msg := prepareMessage(t, "committer's change\n")
+	cps := checkpointIDs(msg)
+	require.Len(t, cps, 1, "the committer's commit is stamped: %q", msg)
+	testutil.GitCommit(t, guestDir, msg)
+	require.NoError(t, NewManualCommitStrategy().PostCommit(ctx))
+
+	unrelated, err = s.loadSessionState(ctx, "sess-unrelated")
+	require.NoError(t, err)
+	assert.Equal(t, stepsBefore, unrelated.StepCount, "the main checkout's mid-turn session keeps its pending work")
+	assert.NotEqual(t, cps[0], unrelated.LastCheckpointID.String(), "the main checkout's session is not condensed into the commit")
+	committer, err = s.loadSessionState(ctx, "sess-committer")
+	require.NoError(t, err)
+	assert.Equal(t, cps[0], committer.LastCheckpointID.String(), "the stamped checkpoint is the committer's")
 }
 
 // A commit hook walks its process ancestry once, however many identity

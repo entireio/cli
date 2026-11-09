@@ -69,6 +69,7 @@ type projectCreateInput struct {
 	owner     string
 	ownerType string
 	region    string
+	cell      string
 }
 
 // complete reports whether the command line names everything a project needs,
@@ -82,7 +83,7 @@ func (in projectCreateInput) complete() bool {
 // flag with a missing name or owner is refused rather than prompted for.
 func (in projectCreateInput) usesFlags(cmd *cobra.Command) bool {
 	f := cmd.Flags()
-	return f.Changed("owner") || f.Changed("region") || f.Changed("owner-type")
+	return f.Changed("owner") || f.Changed("region") || f.Changed("owner-type") || f.Changed("cell")
 }
 
 // projectOwner is one row of the owner picker. The user only ever sees ref (an

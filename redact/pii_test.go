@@ -327,6 +327,7 @@ func TestPII_ReplacementTokenFormat(t *testing.T) {
 		{labelEmail, "[REDACTED_EMAIL]"},
 		{labelPhone, "[REDACTED_PHONE]"},
 		{labelAddress, "[REDACTED_ADDRESS]"},
+		{labelIP, "[REDACTED_IP]"},
 		{"EMPLOYEE_ID", "[REDACTED_EMPLOYEE_ID]"},
 	}
 	for _, tt := range tests {

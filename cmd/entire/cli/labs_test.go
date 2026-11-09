@@ -133,11 +133,11 @@ func rootHelpHasTokensCommand(got string) bool {
 	return false
 }
 
-// TestRootHelp_ReleaseHidesExperimental verifies a shipped build
-// (experimental.Visible="false") omits experimental commands and the group
-// header from root help. Mutates the global gate, so it cannot run in parallel.
+// TestRootHelp_ReleaseHidesExperimental verifies a shipped build (stable
+// release version) omits experimental commands and the group header from root
+// help. Mutates the global version, so it cannot run in parallel.
 func TestRootHelp_ReleaseHidesExperimental(t *testing.T) {
-	withVisible(t, "false")
+	withBuildVersion(t, releaseVersion)
 
 	got := rootHelp(t)
 	for _, marker := range experimentalCommandMarkers {
@@ -150,12 +150,11 @@ func TestRootHelp_ReleaseHidesExperimental(t *testing.T) {
 	}
 }
 
-// TestRootHelp_DevShowsExperimentalGroup verifies a developer build
-// (experimental.Visible="true") shows experimental commands under the
-// "Experimental commands:" group in root help. Mutates the global gate, so it
-// cannot run in parallel.
+// TestRootHelp_DevShowsExperimentalGroup verifies a developer build (version
+// "dev") shows experimental commands under the "Experimental commands:" group
+// in root help. Mutates the global version, so it cannot run in parallel.
 func TestRootHelp_DevShowsExperimentalGroup(t *testing.T) {
-	withVisible(t, "true")
+	withBuildVersion(t, devBuildVersion)
 
 	got := rootHelp(t)
 	if !strings.Contains(got, experimental.GroupID) && !strings.Contains(got, "Experimental commands:") {

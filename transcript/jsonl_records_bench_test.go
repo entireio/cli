@@ -80,7 +80,7 @@ func BenchmarkJSONLConversion(b *testing.B) {
 		b.Run(in.name+"/records", func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
-				if _, err := compactJSONLWith(in.input, defaultOpts, nil); err != nil {
+				if _, err := compactJSONL(in.input, defaultOpts); err != nil {
 					b.Fatal(err)
 				}
 			}

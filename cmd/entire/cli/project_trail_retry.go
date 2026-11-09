@@ -16,33 +16,17 @@ func projectTrailLinkRetry(cmd *cobra.Command, target *projectTrailTarget, chang
 	}
 	args := []string{"entire " + cmdTrail + " link", target.TrailID}
 	add := func(name, value string) {
-		quoted := shellQuote(value)
-		if runtime.GOOS == windowsGOOS {
-			quoted = powerShellQuote(value)
-		}
-		args = append(args, "--"+name+"="+quoted)
+		args = append(args, "--"+name+"="+quoteForUserShell(value))
 	}
 	add("repo", target.RepoRef)
 	add("project", target.Host+"/"+target.Project)
 	add("branch", change.BranchName)
 	add("branch-action", change.BranchAction)
 	add("base", change.Base)
-	add("title", change.Title)
-	add("body", change.Body)
-	for _, field := range []struct{ name, value string }{
-		{cmdStatus, change.Status}, {"type", change.Type}, {"priority", change.Priority},
-	} {
-		// Empty enum flags are rejected; omission preserves their empty wire values.
-		if field.value != "" {
-			add(field.name, field.value)
-		}
+	// An empty enum flag is rejected; omission preserves the empty wire value.
+	if change.Status != "" {
+		add(cmdStatus, change.Status)
 	}
-	// --assignee is a CSV flag. Quote each element before shell-quoting the value.
-	assignees := make([]string, len(change.Assignees))
-	for i, assignee := range change.Assignees {
-		assignees[i] = `"` + strings.ReplaceAll(assignee, `"`, `""`) + `"`
-	}
-	add("assignee", strings.Join(assignees, ","))
 	add("idempotency-key", key)
 	if flag := cmd.Flags().Lookup(contextFlagName); flag != nil && flag.Value.String() != "" {
 		add(contextFlagName, flag.Value.String())
@@ -54,4 +38,13 @@ func projectTrailLinkRetry(cmd *cobra.Command, target *projectTrailTarget, chang
 		args = append(args, "--json")
 	}
 	return "Retry in " + shell + ":\n" + strings.Join(args, " ")
+}
+
+// quoteForUserShell quotes value for the shell a copy-paste hint names:
+// PowerShell on Windows, a POSIX shell elsewhere.
+func quoteForUserShell(value string) string {
+	if runtime.GOOS == windowsGOOS {
+		return powerShellQuote(value)
+	}
+	return shellQuote(value)
 }

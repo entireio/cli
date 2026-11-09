@@ -29,7 +29,7 @@ type NamedBlob struct {
 // operations (e.g. the pre-push rewrite) must abort rather than
 // proceed with partially-redacted content. The per-blob
 // JSONLContentWithPrivacyFilter falls back to the regex-only pipeline
-// (the eight always-on/opt-in layers, no OPF) on batch failure; this
+// (the nine always-on/opt-in layers, no OPF) on batch failure; this
 // batched variant intentionally does not, because the only caller
 // (cross-blob walker) needs an explicit signal that OPF did not
 // finish.
@@ -131,10 +131,10 @@ func BatchBytesWithPrivacyFilter(ctx context.Context, inputs []NamedBlob) ([][]b
 // regex-only pipeline applied, just without leaf-by-leaf precision.
 func collectLeaves(in NamedBlob, add func(string)) {
 	if isJSONLikeName(in.Name) {
-		if _, err := jsonlContentImpl(string(in.Content), func(v string) string {
+		if _, err := jsonlContentImpl(string(in.Content), leafRedactor{detect: func(v string) []taggedRegion {
 			add(v)
-			return v
-		}, concurrencyUnsafeRedactor); err == nil {
+			return nil
+		}}, concurrencyUnsafeRedactor); err == nil {
 			return
 		}
 		// JSONL parse failed — fall through to whole-content.
@@ -146,17 +146,15 @@ func collectLeaves(in NamedBlob, add func(string)) {
 // the always-on/opt-in regex layers with the cached OPF spans for each leaf. The
 // per-leaf closure mirrors JSONLContentWithPrivacyFilter's Pass 3.
 func applyToBlob(in NamedBlob, spansByInput map[string][]Span, cfg *OPFConfig) []byte {
-	applier := func(v string) string {
-		regions := detectAllLayers(v)
-		regions = append(regions, opfSpanRegions(v, spansByInput[v], cfg)...)
-		return applyRegions(v, regions)
-	}
+	applier := leafRedactor{detect: func(v string) []taggedRegion {
+		return append(detectAllLayers(v), opfSpanRegions(v, spansByInput[v], cfg)...)
+	}}
 	if isJSONLikeName(in.Name) {
 		if redacted, err := jsonlContentImpl(string(in.Content), applier, concurrencySafeRedactor); err == nil {
 			return []byte(redacted)
 		}
 	}
-	return []byte(applier(string(in.Content)))
+	return []byte(applier.redact(string(in.Content)))
 }
 
 // applyRegexLayersToBlobs is the OPF-disabled fast path: each blob gets
@@ -166,7 +164,7 @@ func applyRegexLayersToBlobs(inputs []NamedBlob) [][]byte {
 	out := make([][]byte, len(inputs))
 	for i, in := range inputs {
 		if isJSONLikeName(in.Name) {
-			if redacted, err := jsonlContentImpl(string(in.Content), String, concurrencySafeRedactor); err == nil {
+			if redacted, err := jsonlContentImpl(string(in.Content), regexLayers, concurrencySafeRedactor); err == nil {
 				out[i] = []byte(redacted)
 				continue
 			}
@@ -203,12 +201,12 @@ func SumProseLeafBytes(inputs []NamedBlob) int {
 	var total int
 	for _, in := range inputs {
 		if isJSONLikeName(in.Name) {
-			if _, err := jsonlContentImpl(string(in.Content), func(v string) string {
+			if _, err := jsonlContentImpl(string(in.Content), leafRedactor{detect: func(v string) []taggedRegion {
 				if strings.ContainsRune(v, ' ') {
 					total += len(v)
 				}
-				return v
-			}, concurrencyUnsafeRedactor); err == nil {
+				return nil
+			}}, concurrencyUnsafeRedactor); err == nil {
 				continue
 			}
 			// JSON parse failed — fall through to whole-content (matches

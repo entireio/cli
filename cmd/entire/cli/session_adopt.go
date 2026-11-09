@@ -223,6 +223,7 @@ func retireAdoptedSourceSession(source, target *session.State) session.State {
 	retired.OtherWorktrees = nil
 	retired.TurnID = ""
 	retired.TurnCheckpointIDs = nil
+	retired.PendingTaskAttachments = nil
 	retired.AdoptedIntoWorktreePath = target.WorktreePath
 	retired.AdoptedIntoWorktreeID = target.WorktreeID
 	return retired
@@ -741,12 +742,14 @@ func buildAdoptedSessionState(ctx context.Context, source *session.State, home a
 	adopted.ClearLegacyTranscriptOffsets()
 	adopted.TurnID = ""
 	adopted.TurnCheckpointIDs = nil
+	adopted.PendingTaskAttachments = nil
 	adopted.LastCheckpointID = id.EmptyCheckpointID
 	adopted.ClearCondensationAttempt()
 	// Token accounting continues from the source's last checkpoint, unlike the
 	// transcript window above: the retired source never condenses again, so
 	// tokens it used but never checkpointed (TokenTranscriptStart, pending
-	// CheckpointTokenUsage, the subagent baseline) are counted once here, and
+	// CheckpointTokenUsage, the subagent and child-session baselines) are
+	// counted once here, and
 	// tokens it did checkpoint are not counted again.
 	adopted.SetTokenStart(source.TokenStart())
 
@@ -777,6 +780,9 @@ func cloneAdoptSourceState(source *session.State) session.State {
 	adopted.TaskRecords = cloneTaskRecords(source.TaskRecords)
 	adopted.SubagentInventory = cloneSubagentInventory(source.SubagentInventory)
 	adopted.TokenUsage = cloneTokenUsage(source.TokenUsage)
+	adopted.ChildSessionTokens = cloneTokenUsage(source.ChildSessionTokens)
+	adopted.ChildSessionTokensBaseline = cloneTokenUsage(source.ChildSessionTokensBaseline)
+	adopted.CreditedChildCalls = slices.Clone(source.CreditedChildCalls)
 	adopted.SkillEvents = cloneSkillEvents(source.SkillEvents)
 	return adopted
 }

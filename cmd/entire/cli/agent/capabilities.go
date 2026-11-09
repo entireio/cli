@@ -25,6 +25,7 @@ type CapabilityDeclarer interface {
 // have no DeclaredCaps field:
 //
 //   - CallerSessionIdentifier
+//   - ChildSessionSubagents
 //   - ContextInjector
 //   - EffectiveHookDiagnostics
 //   - HomeLayoutProvider
@@ -237,6 +238,12 @@ func AsSubagentTranscriptFetcher(ag Agent) (SubagentTranscriptFetcher, bool) {
 // it implements the interface. Built-in only, like SubagentTranscriptFetcher.
 func AsLiveSubagentFileReporter(ag Agent) (LiveSubagentFileReporter, bool) {
 	return builtinCapability[LiveSubagentFileReporter](ag)
+}
+
+// AsChildSessionSubagents returns the agent as ChildSessionSubagents if it
+// implements the interface. Built-in only, like LiveSubagentFileReporter.
+func AsChildSessionSubagents(ag Agent) (ChildSessionSubagents, bool) {
+	return builtinCapability[ChildSessionSubagents](ag)
 }
 
 // AsTokenCalculator returns the agent as TokenCalculator if it both

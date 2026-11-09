@@ -171,7 +171,7 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 // checkpoint would store the earlier turns a second time.
 func isOrphanedSessionState(state *SessionState) bool {
 	return isEndedWithoutContent(state) &&
-		!hasTokenUsageData(state.CheckpointTokenUsage) && !hasTokenUsageData(state.SubagentTokensBaseline) &&
+		!HasTokenUsageData(state.CheckpointTokenUsage) && !HasTokenUsageData(state.SubagentTokensBaseline) &&
 		state.TokenStart() == 0 && state.CheckpointTranscriptStart == 0
 }
 
@@ -344,7 +344,7 @@ func (s *ManualCommitStrategy) findSessionsForWorktree(ctx context.Context, work
 	if err != nil {
 		return nil, err
 	}
-	matches, _ := s.findSessionsForWorktreeFromStates(ctx, allStates, worktreePath)
+	matches, _, _ := s.findSessionsForWorktreeFromStates(ctx, allStates, worktreePath)
 	return matches, nil
 }
 
@@ -352,11 +352,13 @@ func (s *ManualCommitStrategy) findSessionsForWorktree(ctx context.Context, work
 // already-loaded state list. The second result reports a multi-worktree
 // ambiguity decline — candidates existed but spanned several worktrees, so
 // nothing was linked; findSessionsForCommitLinking surfaces it to the user
-// only when identity matching cannot rescue the commit either.
-func (s *ManualCommitStrategy) findSessionsForWorktreeFromStates(ctx context.Context, allStates []*SessionState, worktreePath string) ([]*SessionState, bool) {
+// only when identity matching cannot rescue the commit either. The third
+// reports that no session is homed in worktreePath, so the matches (if any)
+// are sessions of other worktrees from the fallback.
+func (s *ManualCommitStrategy) findSessionsForWorktreeFromStates(ctx context.Context, allStates []*SessionState, worktreePath string) (matches []*SessionState, ambiguous, fromFallback bool) {
 	exact, notHome := matchWorktreeHomes(ctx, allStates, worktreePath)
 	if len(exact) > 0 {
-		return exact, false
+		return exact, false, false
 	}
 
 	worktreeCommonDir, err := gitCommonDirForWorktree(ctx, worktreePath)
@@ -364,7 +366,7 @@ func (s *ManualCommitStrategy) findSessionsForWorktreeFromStates(ctx context.Con
 		logging.Debug(logging.WithComponent(ctx, "checkpoint"),
 			"session matching: cannot resolve common dir for fallback matching",
 			slog.String("error", err.Error()))
-		return nil, false
+		return nil, false, true
 	}
 
 	var parentWorktreeMatches []*SessionState
@@ -394,10 +396,12 @@ func (s *ManualCommitStrategy) findSessionsForWorktreeFromStates(ctx context.Con
 		commonDirMatches = append(commonDirMatches, state)
 	}
 
+	candidates := commonDirMatches
 	if len(parentWorktreeMatches) > 0 {
-		return resolveWorktreeCandidates(ctx, worktreePath, parentWorktreeMatches)
+		candidates = parentWorktreeMatches
 	}
-	return resolveWorktreeCandidates(ctx, worktreePath, commonDirMatches)
+	matches, ambiguous = resolveWorktreeCandidates(ctx, worktreePath, candidates)
+	return matches, ambiguous, true
 }
 
 // recentSessionWindow bounds the liveness filter below: a session that
