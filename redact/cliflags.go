@@ -11,13 +11,15 @@ import (
 
 // cliFlagValue is one password argument on a command line: a quoted string
 // that stays on its line (a double-quoted one may go on past an escaped line
-// break, which the shell removes), or a bare word that ends at whitespace, a
+// break, which the shell removes, and its match may stop at a command
+// substitution, which shellWordValue reads on to a later line:
+// "$(printf x<newline>)"), or a bare word that ends at whitespace, a
 // quote or a shell metacharacter. Ending at a backtick or a parenthesis keeps
 // the closing delimiter of Markdown code (`mysql -pX`) and of $(...) out of
 // the value. A value may start with a backtick, which shellWordValue reads
 // as a command substitution (--password=`printf x`) or rejects as the end
 // of Markdown code.
-const cliFlagValue = `"(?:[^"\r\n]|\\\r?\n)*"|'[^'\r\n]*'|[^\s'"` + "`" + `|;&()<>]+|` + "`"
+const cliFlagValue = `"(?:[^"\r\n]|\\\r?\n)*(?:"|\$\()|'[^'\r\n]*'|[^\s'"` + "`" + `|;&()<>]+|` + "`"
 
 // cliSameCommandChar is one piece of the text between a command name and one
 // of its flags. It skips quoted strings (with escapes inside double quotes:
@@ -97,10 +99,39 @@ var (
 // (mysql --password=..., mongosh --password ..., az login --password ...).
 // Group 1 is the quote that closes a quoted flag ("--password" x, or
 // \"--password\" x in a double-quoted string), group 2 "=" or the blank that
-// separates the flag from its value, and group 3 the value. --password-stdin
+// separates the flag from its value, or the comma between the elements of
+// an argument list in code (["wget", "--password", "x"]), and group 3 the
+// value. --password-stdin
 // and --password-file never match: the flag must be followed by "=" or a
-// blank.
-var cliLongPasswordPattern = regexp.MustCompile(`(?:^|[\s"'])--(?:password|passwd|pass)((?:\\?["'])?)(=|` + cliBlank + `)(` + cliFlagValue + `)`)
+// blank. The name may be joined from quoted pieces (--pass"word"=x), which
+// longPasswordName checks.
+var cliLongPasswordPattern = regexp.MustCompile(`(?:^|[\s"'])--(?:password|passwd|pass|` + cliQuotedFlagName + `)((?:\\?["'])?)(=|` + cliBlank + `|,[ \t]*(?:\r?\n[ \t]*)?)(` + cliFlagValue + `)`)
+
+// cliQuotedFlagName matches the name of a long flag joined from quoted and
+// bare pieces of letters.
+const cliQuotedFlagName = `(?:[a-z]|"[a-z]*"|'[a-z]*')+`
+
+// longPasswordName reports whether the flag that loc, a
+// cliLongPasswordPattern match in s, found is a password flag once the shell
+// removes its quotes, and whether it is --pass.
+func longPasswordName(s string, loc []int) (ok, pass bool) {
+	from := loc[0] + len("--")
+	if s[loc[0]] != '-' {
+		from++
+	}
+	name := s[from:loc[2]]
+	if strings.ContainsAny(name, `"'`) {
+		name = wordQuotes.Replace(name)
+	}
+	return name == "password" || name == "passwd" || name == "pass", name == "pass"
+}
+
+// mayHoldLongPasswordFlag reports whether s may hold a match of
+// cliLongPasswordPattern, which spares most strings the pattern.
+func mayHoldLongPasswordFlag(s string) bool {
+	return strings.Contains(s, "--pass") ||
+		(strings.Contains(s, "--p") || strings.Contains(s, `--"`) || strings.Contains(s, "--'")) && strings.ContainsAny(s, `"'`)
+}
 
 // cliPasswordFlag is the short password flag of one family of clients. A
 // short flag means different things to different programs (-p is a port to
@@ -189,16 +220,22 @@ var cliPasswordFlags = []cliPasswordFlag{
 		command: regexp.MustCompile(`\bredis-cli\b`),
 		flag:    regexp.MustCompile(cliShortFlag(`\s`, "a", cliBlank)),
 	},
-	// openssl takes a source after a blank or "=" (-pass=pass:x). The flag
-	// may be quoted, in escaped quotes too in a double-quoted script
+	// openssl takes a source after a blank or "=" (-pass=pass:x), and its
+	// options with two dashes too (--passin pass:x). The flag may be
+	// quoted, in escaped quotes too in a double-quoted script
 	// (sh -c "openssl enc \"-pass\" \"pass:x\"").
 	{
-		needles: []string{"pass:"},
+		needles: []string{"openssl"},
 		command: regexp.MustCompile(`\bopenssl\b`),
-		flag:    regexp.MustCompile(`\s(?:-pass(?:in|out|word)?|'-pass(?:in|out|word)?'|"-pass(?:in|out|word)?"|\\"-pass(?:in|out|word)?\\")(?:=|` + cliBlank + `)(` + cliFlagValue + `)`),
+		flag:    regexp.MustCompile(`\s(?:` + opensslSourceFlag + `|'` + opensslSourceFlag + `'|"` + opensslSourceFlag + `"|\\"` + opensslSourceFlag + `\\")(?:=|` + cliBlank + `)(` + cliFlagValue + `)`),
 		prefix:  "pass:",
 	},
 }
+
+// opensslSourceFlag matches openssl's options that take a password source,
+// with one dash or two (-passin, --passout). The long-flag pattern already
+// reads the other two-dash spellings (--pass, --password).
+const opensslSourceFlag = `-(?:-pass(?:in|out)|pass(?:in|out|word)?)`
 
 // mysqlNoValueOptions matches the short options that take no value in every
 // mysql and MariaDB tool that has them (-v, -s, -B, -N, ...), which may come
@@ -220,12 +257,21 @@ func cliShortFlag(before, name, sep string) string {
 }
 
 // netrcValue is a .netrc token. A double-quoted one may hold escaped quotes
-// ("abc\"def", as curl reads it). Outside quotes, a quote or backtick ends it
-// when whitespace, a shell metacharacter or a separator of code follows, so
-// the closing quote of echo "machine h login me password p" > ~/.netrc and
-// of fmt.Sprintf("machine %s login %s password %s", h, u, p) stays outside
-// the value.
-const netrcValue = `"(?:[^"\\\r\n]|\\[^\r\n])*"|'[^'\r\n]*'|[^\s"'` + "`" + `]+(?:["'` + "`" + `]+[^\s"'` + "`" + `;|&()<>,\]}][^\s"'` + "`" + `]*)*`
+// ("abc\"def", as curl reads it), and one in escaped quotes is that in a
+// double-quoted command that writes the file (echo "... password
+// \"Summer 2026\"" > ~/.netrc). curl reads a single quote as part of a
+// token ('Summer'2026, and an empty pair before hunter2), so a single-quoted
+// piece takes the rest of its token. A command substitution, which the
+// command writing the file runs ($(printf hunter2)), is one piece of a
+// token. Outside quotes, a quote or backtick ends it when whitespace, a
+// shell metacharacter or a separator of code follows, so the closing quote
+// of echo "machine h login me password p" > ~/.netrc and of
+// fmt.Sprintf("machine %s login %s password %s", h, u, p) stays outside the
+// value.
+const netrcValue = `"(?:[^"\\\r\n]|\\[^\r\n])*"|\\"(?:[^"\\\r\n]|\\[^"\r\n])*\\"|'[^'\r\n]*'(?:` + netrcBareValue + `)?|` + netrcBareValue
+
+// netrcBareValue is a .netrc token outside quotes (see netrcValue).
+const netrcBareValue = `(?:\$` + cliParens3 + `|[^\s"'` + "`" + `])+(?:["'` + "`" + `]+(?:\$` + cliParens3 + `|[^\s"'` + "`" + `;|&()<>,\]}])(?:\$` + cliParens3 + `|[^\s"'` + "`" + `])*)*`
 
 // netrcName is a .netrc machine, login or account name, quoted when it
 // holds blanks (login "alice smith").
@@ -234,7 +280,7 @@ const netrcName = `"(?:[^"\\\r\n]|\\[^\r\n])*"|\S+`
 // netrcEntry starts a .netrc entry. A default entry must start a line or a
 // quoted string, so "by default login with password is" is not one. Group 1
 // is the machine, absent for default.
-const netrcEntry = `(?:\bmachine[ \t\r\n]+(` + netrcName + `)|(?:^|[\r\n"'])[ \t]*default)`
+const netrcEntry = `(?:\b(?i:machine)[ \t\r\n]+(` + netrcName + `)|(?:^|[\r\n"'])[ \t]*(?i:default))`
 
 const (
 	// netrcSep comes before a .netrc keyword: blanks, line breaks, and
@@ -249,7 +295,7 @@ const (
 	// netrcCommentLines are whole comment lines after a line break. A
 	// comment runs to the end of its line, so no part of it is a value.
 	netrcCommentLines = `(?:[ \t]*#[^\r\n]*\r?\n)*`
-	netrcAccount      = `(?:` + netrcSep + `account` + netrcValueSep + `(?:` + netrcName + `))?`
+	netrcAccount      = `(?:` + netrcSep + `(?i:account)` + netrcValueSep + `(?:` + netrcName + `))?`
 )
 
 // netrcPasswordPatterns match the password of a .netrc entry that also names
@@ -265,15 +311,15 @@ var netrcPasswordPatterns = []netrcPattern{
 // its line (machine h login a password x default login b password y), which
 // netrcEntry does not, so prose with "default" is not read as an entry.
 var netrcDefaultPatterns = []netrcPattern{
-	{regexp.MustCompile(`^` + netrcAccount + `[ \t]+default()` + netrcLoginPassword), 2, 3},
-	{regexp.MustCompile(`^` + netrcAccount + `[ \t]+default()` + netrcPasswordLogin), 3, 2},
+	{regexp.MustCompile(`^` + netrcAccount + `[ \t]+(?i:default)()` + netrcLoginPassword), 2, 3},
+	{regexp.MustCompile(`^` + netrcAccount + `[ \t]+(?i:default)()` + netrcPasswordLogin), 3, 2},
 }
 
 // netrcLoginPassword and netrcPasswordLogin are the fields of a .netrc entry
 // after its machine, in either order.
 const (
-	netrcLoginPassword = netrcAccount + netrcSep + `login` + netrcValueSep + `(` + netrcName + `)` + netrcAccount + netrcSep + `password` + netrcValueSep + `(` + netrcValue + `)`
-	netrcPasswordLogin = netrcAccount + netrcSep + `password` + netrcValueSep + `(` + netrcValue + `)` + netrcAccount + netrcSep + `login` + netrcValueSep + `(` + netrcName + `)`
+	netrcLoginPassword = netrcAccount + netrcSep + `(?i:login)` + netrcValueSep + `(` + netrcName + `)` + netrcAccount + netrcSep + `(?i:password)` + netrcValueSep + `(` + netrcValue + `)`
+	netrcPasswordLogin = netrcAccount + netrcSep + `(?i:password)` + netrcValueSep + `(` + netrcValue + `)` + netrcAccount + netrcSep + `(?i:login)` + netrcValueSep + `(` + netrcName + `)`
 )
 
 // netrcPattern is a .netrc entry pattern, whose group 1 is the machine, and
@@ -298,17 +344,26 @@ func detectCommandLinePasswords(s string) []taggedRegion {
 		}
 		regions = appendLongPasswordFlags(regions, s, &noValue)
 	}
-	if strings.Contains(s, "password") && strings.Contains(s, loginCommand) {
+	if mayHoldNetrcEntry(s) {
 		regions = appendNetrcPasswords(regions, s)
 	}
 	return regions
 }
 
+// mayHoldNetrcEntry reports whether s may hold a .netrc entry, whose
+// keywords curl reads in any case (MACHINE h LOGIN me PASSWORD x). Lower,
+// capitalized and upper-case keywords pass this check, which spares most
+// strings the patterns.
+func mayHoldNetrcEntry(s string) bool {
+	return (strings.Contains(s, "assword") || strings.Contains(s, "ASSWORD")) &&
+		(strings.Contains(s, "ogin") || strings.Contains(s, "OGIN"))
+}
+
 func appendLongPasswordFlags(regions []taggedRegion, s string, noValue *noValueFlags) []taggedRegion {
-	if !strings.Contains(s, "--pass") {
+	if !mayHoldLongPasswordFlag(s) {
 		return regions
 	}
-	lines := quoteScan{s: s, prose: true}
+	lines := quoteScan{s: s, prose: true, acrossLines: true}
 	subs := substitutionMemo{}
 	for pos := 0; ; {
 		loc := cliLongPasswordPattern.FindStringSubmatchIndex(s[pos:])
@@ -320,13 +375,18 @@ func appendLongPasswordFlags(regions []taggedRegion, s string, noValue *noValueF
 				loc[k] += pos
 			}
 		}
+		isPassword, pass := longPasswordName(s, loc)
+		if !isPassword {
+			pos = loc[2]
+			continue
+		}
 		// After "=" a leading '-' is part of the value. After a blank it
 		// is too (docker login --password -x, wget --password --x), but
 		// starts the next flag of a client whose --password takes no
 		// value (psql --password -h db, see noValueLong); --pass always
 		// takes one (curl --pass -x, redis-cli --pass -x).
 		blank := s[loc[4]] != '='
-		dashFlag := blank && !strings.HasSuffix(s[:loc[2]], "--pass") && noValue.has(loc[2])
+		dashFlag := blank && !pass && noValue.has(loc[2])
 		stringEnd := lines.stringEnd(loc[2] - 1)
 		var r taggedRegion
 		// A '-' after a blank starts the next flag, whose word is not
@@ -360,6 +420,9 @@ func appendLongPasswordFlags(regions []taggedRegion, s string, noValue *noValueF
 // string that a flag opens ("--password=Summer 2026") runs to that string's
 // end, since the shell passes the whole string as one argument.
 func longFlagValue(s string, loc []int, stringEnd int, subs substitutionMemo) (cliValue, bool) {
+	if s[loc[4]] == ',' && !isListPassword(s, loc, stringEnd, subs) {
+		return cliValue{}, false
+	}
 	open, quoteLen := loc[0], 0
 	if s[open] == '"' && open > 0 && s[open-1] == '\\' {
 		open--
@@ -384,6 +447,21 @@ func longFlagValue(s string, loc []int, stringEnd int, subs substitutionMemo) (c
 	return shellWordValue(s, loc[6], loc[7], stringEnd, subs), true
 }
 
+// isListPassword reports whether the value after a comma that loc, a
+// cliLongPasswordPattern match, found is the next element of an argument
+// list in code: a quoted flag and a quoted value (["wget", "--password",
+// "x"]), not a name (["wget", "--password", pw]). A value that starts with
+// '-' is the next flag (["psql", "--password", "-h", "db"]), and one with
+// a blank or a word of prose is text (print("--password", "is required")).
+func isListPassword(s string, loc []int, stringEnd int, subs substitutionMemo) bool {
+	if loc[3] == loc[2] || s[loc[6]] != '"' && s[loc[6]] != '\'' {
+		return false
+	}
+	v := shellWordValue(s, loc[6], loc[7], stringEnd, subs)
+	value := s[v.start:v.end]
+	return v.quoted && value != "" && value[0] != '-' && !strings.ContainsAny(value, " \t") && !slices.Contains(proseWords, value)
+}
+
 // appendPasswords adds the value of every password flag in the segment of
 // each command f defines. A command inside a quoted argument or a command
 // substitution of an earlier one, at any depth (docker exec db sh -c
@@ -394,13 +472,14 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string, noVal
 	if !slices.ContainsFunc(f.needles, func(n string) bool { return strings.Contains(s, n) }) {
 		return regions
 	}
-	ownLong := f.noValueLong && strings.Contains(s, "--pass")
+	ownLong := f.noValueLong && mayHoldLongPasswordFlag(s)
 	lines := quoteScan{s: s, prose: true}
 	var nested nestedScan
 	var paths programPathMemo
 	scripts := commandStart{lenient: true}
 	var entrypoint entrypointArgs
 	var entrypointStarts commandStart
+	var long wrapperStarts
 	// A segment cut at a ")" (ssh $(mysql -Nse 'x') -p2222) goes on after
 	// it, to uncutEnd, in a string that closes at uncutAt; a command there
 	// starts a segment that ends there too, which is not found again.
@@ -418,7 +497,7 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string, noVal
 		// an opening one: "/usr/bin/mysql" -p"x" or sh -c "mysql ...".
 		closeAt, stringEnd := lines.enclosing(cmd[0])
 		cmdFrom := lines.commandFrom(closeAt)
-		if isWrapperOperand(s, cmdFrom, cmd[0]) || closeAt >= 0 && isPrintedInScript(s, &lines, &scripts, cmd[0]) {
+		if isWrapperOperand(s, &long, lines.wordFrom(closeAt), cmd[0]) || closeAt >= 0 && isPrintedInScript(s, &lines, &scripts, cmd[0]) {
 			continue
 		}
 		skip, skipEnd := closeAt, stringEnd
@@ -490,6 +569,10 @@ func (n *noValueFlags) read(s string, quotes *quoteScan, cmdFrom, name, from, en
 		loc := cliLongPasswordPattern.FindStringSubmatchIndex(s[pos:end])
 		if loc == nil {
 			return
+		}
+		if ok, _ := longPasswordName(s[pos:end], loc); !ok {
+			pos += loc[2]
+			continue
 		}
 		// An escaped quote around the flag (sh -c "psql \"--password\" -h
 		// db") is read from its backslash.
@@ -1068,6 +1151,11 @@ func untilUnmatchedParen(rest string, skip, skipEnd int, cases caseMemo) string 
 				continue
 			}
 		}
+		// A parameter expansion is one word (-in ${INPUT:-a)b}).
+		if end := braceExpansionEnd(rest, i, cases.memo()); end > 0 {
+			i = end - 1
+			continue
+		}
 		switch rest[i] {
 		case '\\':
 			i++
@@ -1166,6 +1254,10 @@ type commandStart struct {
 	// name after any word is run (mysql -h mysql -pX), except after the
 	// name of a command that prints its arguments (echo mysql -pX).
 	lenient bool
+	// words, when set, reads a command or process substitution that closes
+	// as part of a word (ssh -i $(printf key) mysql), as the shell does,
+	// rather than as a command of its own, and finds where each closes.
+	words *caseMemo
 	// parens counts the parentheses open in a script or a substitution
 	// (a substitution, a subshell), across its shell operators, and cases
 	// holds the case statements open inside each of them.
@@ -1218,7 +1310,7 @@ type commandWords struct {
 // assignment.
 func (c *commandStart) at(s string, from, p int) bool {
 	if c.from != from || p < c.i {
-		*c = commandStart{from: from, i: from, j: from, lenient: c.lenient}
+		*c = commandStart{from: from, i: from, j: from, lenient: c.lenient, words: c.words}
 	}
 	for c.i < p {
 		if c.j == c.i {
@@ -1241,6 +1333,12 @@ func (c *commandStart) at(s string, from, p int) bool {
 			if end, quoteLen := quotedPiece(s[:p], c.j); quoteLen > 0 {
 				c.j = end
 				continue
+			}
+			if c.words != nil {
+				if n := c.words.substitutionLen(s, c.j); n > 0 {
+					c.j += n
+					continue
+				}
 			}
 			r, size := utf8.DecodeRuneInString(s[c.j:])
 			if unicode.IsSpace(r) || size == 1 && (isCommandSeparator(s, c.j) || c.isTick(s, c.j)) {
@@ -1292,9 +1390,10 @@ const maxCommandPart = 64
 func isCommandSeparator(s string, i int) bool {
 	switch s[i] {
 	case ';', '(':
-		return true
+		// An escaped one is part of a word (ssh -i key\;mysql).
+		return !isEscaped(s, i)
 	case '&', '|':
-		return !isRedirectionOperator(s, i)
+		return !isRedirectionOperator(s, i) && !isEscaped(s, i)
 	case '\n':
 		return !isEscaped(s, i) && (i == 0 || s[i-1] != '\r' || !isEscaped(s, i-1))
 	}
@@ -1343,7 +1442,7 @@ func redirection(word string) (ok, operatorOnly bool) {
 // argument whose text starts at from, keeping the case statements and the
 // parentheses open in a script or a substitution.
 func (c *commandStart) separate(s string, from int) {
-	next := commandStart{from: from, i: c.i + 1, j: c.i + 1, lenient: c.lenient, parens: c.parens, cases: c.cases, tick: c.tick}
+	next := commandStart{from: from, i: c.i + 1, j: c.i + 1, lenient: c.lenient, words: c.words, parens: c.parens, cases: c.cases, tick: c.tick}
 	level := next.level()
 	switch op := s[c.i]; {
 	case !c.lenient:
@@ -1446,7 +1545,7 @@ func (c *commandStart) readCase(word string) bool {
 		word = word[i+1:]
 	}
 	if ended {
-		*c = commandStart{from: c.from, i: c.i, j: c.j, lenient: true, parens: c.parens, cases: c.cases, tick: c.tick}
+		*c = commandStart{from: c.from, i: c.i, j: c.j, lenient: true, words: c.words, parens: c.parens, cases: c.cases, tick: c.tick}
 	}
 	return inCase || ended || restored
 }
@@ -1531,16 +1630,18 @@ func (c *commandStart) word(word string) {
 		c.splitString(word)
 	case c.optionArg:
 		c.optionArg, c.command, c.execArg = false, c.execArg, false
-	case c.wrapper != "" && strings.HasPrefix(word, "-"):
+	case c.wrapper != "" && strings.HasPrefix(unquotedWord(word), "-"):
 		// An option of the wrapper (sudo -E, env -i), some of which take
 		// the next word as their argument (sudo -u root), and a few the
-		// command to run (env -S mysql, env -Ssudo).
+		// command to run (env -S mysql, env -Ssudo). The shell removes
+		// its quotes (ssh "-l" mysql).
 		if line, ok := joinedSplitString(c.wrapper, word); ok {
 			c.splitString(line)
 			return
 		}
-		c.optionArg = takesArgument(c.wrapper, word)
-		c.execArg = c.optionArg && runsArgument(c.wrapper, word)
+		option := unquotedWord(word)
+		c.optionArg = takesArgument(c.wrapper, option)
+		c.execArg = c.optionArg && runsArgument(c.wrapper, option)
 	case isContainerClient(c.wrapper) && !c.sub:
 		// The subcommand of a container client: exec and run run a
 		// command in a container (docker exec db mysql -pX), and the
@@ -1582,7 +1683,7 @@ func (c *commandStart) word(word string) {
 // would, so a quoted string in it stays one word
 // (env -S 'env A="x ssh"' mysql -pX).
 func (c *commandStart) splitString(arg string) {
-	*c = commandStart{from: c.from, i: c.i, j: c.j, lenient: c.lenient, parens: c.parens, cases: c.cases, tick: c.tick}
+	*c = commandStart{from: c.from, i: c.i, j: c.j, lenient: c.lenient, words: c.words, parens: c.parens, cases: c.cases, tick: c.tick}
 	shellWords(arg, func(line string) {
 		shellWords(line, c.word)
 	})
@@ -1648,14 +1749,20 @@ func programName(word string) string {
 		// An assignment (FOO=/usr/bin/ssh), not a program.
 		return word
 	}
-	if strings.ContainsAny(word, `"'`) {
-		word = wordQuotes.Replace(word)
-	}
+	word = unquotedWord(word)
 	name := word[strings.LastIndexAny(word, `/\`)+1:]
 	if ext := len(name) - len(".exe"); ext > 0 && strings.EqualFold(name[ext:], ".exe") {
 		return name[:ext]
 	}
 	return name
+}
+
+// unquotedWord returns word without its quotes (see wordQuotes).
+func unquotedWord(word string) string {
+	if strings.ContainsAny(word, `"'`) {
+		return wordQuotes.Replace(word)
+	}
+	return word
 }
 
 // wordQuotes removes the quotes of a word, also escaped ones of a command in
@@ -1968,6 +2075,11 @@ func shellWordValue(s string, start, end, stringEnd int, subs substitutionMemo) 
 		return cliValue{start: start, end: start}
 	}
 	if wordEnd <= start {
+		if s[start] == '"' && s[end-1] != '"' {
+			// A string that does not close, up to a substitution in it
+			// (cliFlagValue), holds no value.
+			return cliValue{start: start, end: start}
+		}
 		wordEnd = end
 	}
 	if strings.HasPrefix(s[start:], "$'") {
@@ -1976,16 +2088,19 @@ func shellWordValue(s string, start, end, stringEnd int, subs substitutionMemo) 
 		if pieceEnd := ansiCQuoteEnd(s, start); pieceEnd > 0 {
 			if end := ansiCWordEnd(s, pieceEnd, stringEnd, subs); end > pieceEnd {
 				// The word goes on after the string ($'pass:x\\'y), so it
-				// is read from the quote, like 'pass:x'y.
-				return cliValue{start: start + 1, end: end}
+				// is read from the quote, like 'pass:x'y, whose $ is
+				// literal ($'pass:$PASSWORD'"").
+				return cliValue{start: start + 1, end: end, singleQuoted: true}
 			}
 			return cliValue{start: start + 2, end: pieceEnd - 1, quoted: true, singleQuoted: true}
 		}
 	}
-	if pieceEnd, quoteLen := quotedPiece(s, start); quoteLen > 0 {
+	if pieceEnd, quoteLen := quotedPieceAcrossLines(s, start, stringEnd, subs); quoteLen > 0 {
 		inner := cliValue{start: start + quoteLen, end: pieceEnd - quoteLen, quoted: true, singleQuoted: s[start] == '\''}
 		inner.gap = inner.start == stringEnd && isStringGap(s[inner.start:inner.end])
-		if pieceEnd >= wordEnd || inner.gap {
+		if pieceEnd >= wordEnd || inner.gap || isCodeSeparator(s, start, pieceEnd) {
+			// A separator of code ends an element of code
+			// (["wget", "--password", "x"], see joinedWordEnd).
 			return inner
 		}
 		// The joined word starts with the text of its first piece that
@@ -1994,6 +2109,36 @@ func shellWordValue(s string, start, end, stringEnd int, subs substitutionMemo) 
 		return cliValue{start: start, end: wordEnd, singleQuoted: startsSingleQuoted(s, start, wordEnd)}
 	}
 	return cliValue{start: start, end: wordEnd}
+}
+
+// quotedPieceAcrossLines is quotedPiece, except that in the word of a
+// password, which subs marks (see shellWordEnd), a double-quoted string may
+// hold a command substitution that goes on to later lines, as the shell
+// reads it ("$(printf hunter2<newline>)"). The string holding the command
+// ends at stringEnd (-1 for none).
+func quotedPieceAcrossLines(s string, i, stringEnd int, subs substitutionMemo) (end, quoteLen int) {
+	if end, quoteLen = quotedPiece(s, i); quoteLen > 0 || subs == nil || s[i] != '"' {
+		return end, quoteLen
+	}
+	for j := i + 1; j < len(s); j++ {
+		switch {
+		case s[j] == '"':
+			return j + 1, 1
+		case s[j] == '\r' || s[j] == '\n':
+			return 0, 0
+		case strings.HasPrefix(s[j:], "$("):
+			end, closed := substitutionEnd(s, j, stringEnd, subs, true)
+			if !closed {
+				return 0, 0
+			}
+			j = end - 1
+		case strings.HasPrefix(s[j:], "\\\r\n"):
+			j += 2
+		case s[j] == '\\':
+			j++
+		}
+	}
+	return 0, 0
 }
 
 // emptyPiecesEnd returns where the text of a shell word at s[start:end]
@@ -2055,10 +2200,11 @@ const maxCodeElements = 16
 // after an opening bracket, or after a comma, colon or operator that
 // follows other elements back to an opening bracket: strings ("a", 'a'),
 // closed brackets and names, joined into expressions by operators
-// (f("mysql", db, ...), {"arg": ...}, f("mysql", "db-"+suffix, ...)).
+// (f("mysql", db, ...), {"arg": ...}, f("mysql", "db-"+suffix, ...)), one
+// to a line or more ([<newline>"wget",<newline>"--password", ...).
 func isCodeElementStart(code string) bool {
 	for range maxCodeElements {
-		code = strings.TrimRight(code, " \t")
+		code = strings.TrimRight(code, " \t\r\n")
 		switch {
 		case code == "":
 			return false
@@ -2067,7 +2213,7 @@ func isCodeElementStart(code string) bool {
 		case strings.IndexByte(",:+-*/%", code[len(code)-1]) < 0:
 			return false
 		}
-		code = strings.TrimRight(code[:len(code)-1], " \t")
+		code = strings.TrimRight(code[:len(code)-1], " \t\r\n")
 		if code != "" && strings.IndexByte(")]}", code[len(code)-1]) >= 0 {
 			// A closed bracket ends an element of code (f(x), [a]).
 			return true
@@ -2146,7 +2292,17 @@ func (v cliValue) trimPrefix(s, prefix string, stringEnd int, subs substitutionM
 		}
 	}
 	if !strings.HasPrefix(s[from+skip:v.end], prefix) {
-		return v, false
+		// The prefix may be joined from pieces ("pass":x, pa"ss":x), and
+		// then the rest is read as after a bare one.
+		if v.quoted {
+			return v, false
+		}
+		end := joinedPrefixEnd(s, v.start, v.end, prefix)
+		if end < 0 {
+			return v, false
+		}
+		from, skip = end-len(prefix), 0
+		v.singleQuoted = false
 	}
 	v.start = from + skip + len(prefix)
 	if skip == 1 && v.start < v.end && s[v.start] == s[v.start-len(prefix)-1] {
@@ -2166,6 +2322,45 @@ func (v cliValue) trimPrefix(s, prefix string, stringEnd int, subs substitutionM
 		}
 	}
 	return v, true
+}
+
+// joinedPrefixEnd returns where prefix ends in the shell word at
+// s[start:end] when the word, its quotes removed as the shell removes them,
+// starts with it and it ends outside quotes ("pass":x, pa"ss":x, pass\:x),
+// after a quote that closes right after it too, or -1.
+func joinedPrefixEnd(s string, start, end int, prefix string) int {
+	k, quote := 0, byte(0)
+	for j := start; j < end; j++ {
+		c := s[j]
+		if k == len(prefix) {
+			switch quote {
+			case 0:
+				return j
+			case c:
+				return j + 1
+			}
+			return -1
+		}
+		switch {
+		case quote == 0 && (c == '"' || c == '\''):
+			quote = c
+			continue
+		case c == quote:
+			quote = 0
+			continue
+		case c == '\\' && quote != '\'' && j+1 < end:
+			j++
+			c = s[j]
+		}
+		if c != prefix[k] {
+			return -1
+		}
+		k++
+	}
+	if k == len(prefix) && quote == 0 {
+		return end
+	}
+	return -1
 }
 
 // shellWordEnd returns the end of the shell word that starts at start. A
@@ -2235,7 +2430,7 @@ func wordPieceEnd(s string, i, stringEnd int, first bool, subs substitutionMemo)
 			return end, false
 		}
 	}
-	pieceEnd, quoteLen := quotedPiece(s, i)
+	pieceEnd, quoteLen := quotedPieceAcrossLines(s, i, stringEnd, subs)
 	if strings.HasPrefix(s[i:], `\"`) && !first {
 		// Elsewhere than in a double-quoted string, \" is a literal
 		// quote (mysql -pabc\"def).
@@ -2366,9 +2561,9 @@ const braceKey = -2
 // braceExpansionEnd returns the end of the parameter expansion that starts
 // at s[i] (${PW:-hunter&2}, ${PW:-"a b"}), after its matching brace, or 0
 // when none starts there or it does not close on its line. Inside it,
-// blanks and shell operators are part of the word, braces nest at any
-// depth (${A:-abc&${B:-${C:-x}}}), and a quoted string or an escaped
-// character is one piece. braces, when set, keeps the ends found, of the
+// blanks and shell operators are part of the word, expansions nest at any
+// depth (${A:-abc&${B:-${C:-x}}}) while a literal { is text, and a quoted
+// string or an escaped character is one piece. braces, when set, keeps the ends found, of the
 // braces nested in it too, so a word read again after a value that is no
 // password does not read them again.
 func braceExpansionEnd(s string, i int, braces substitutionMemo) int {
@@ -2386,15 +2581,14 @@ func braceExpansionEnd(s string, i int, braces substitutionMemo) int {
 	for j := i + 2; j < len(s); j++ {
 		switch s[j] {
 		case '{':
-			r, known := braces[key(j-1)]
+			// Only a nested expansion opens a level: the shell reads a
+			// literal { as text (${PW:-a{&b} is a{&b).
 			if s[j-1] != '$' {
-				r, known = braces[key(j)]
+				continue
 			}
-			switch {
-			case !known && s[j-1] == '$':
-				open = append(open, j-1)
+			switch r, known := braces[key(j-1)]; {
 			case !known:
-				open = append(open, j)
+				open = append(open, j-1)
 			case r.closed:
 				j = r.end - 1
 			default:
@@ -2500,9 +2694,14 @@ func quotedPiece(s string, i int) (end, quoteLen int) {
 			return j + quoteLen, quoteLen
 		case quote == `"` && strings.HasPrefix(s[j:], "$("):
 			// A command substitution has quotes of its own
-			// ("$(printf "%s" x)").
+			// ("$(printf "%s" x)"), and so does a parameter expansion
+			// ("${PW:-"a&b"}").
 			if m := cliSubstitution.FindStringIndex(s[j:]); m != nil {
 				j += m[1] - 1
+			}
+		case quote == `"` && strings.HasPrefix(s[j:], "${"):
+			if end := braceExpansionEnd(s, j, nil); end > 0 {
+				j = end - 1
 			}
 		case quote == `"` && strings.HasPrefix(s[j:], "\\\r\n"):
 			j += 2
@@ -2553,6 +2752,8 @@ func readSubstitution(s string, i, stringEnd int, subs substitutionMemo, multili
 	}
 	limit := substitutionLimit(s, i, stringEnd)
 	scan.open(i)
+	// Arithmetic ($((x << 2))) has no here-documents.
+	scan.readsHeredocs = multiline && !strings.HasPrefix(s[i:], "$((")
 	j := i + 2
 	for ; j < limit; j++ {
 		if pieceEnd, quoteLen := quotedPiece(s, j); quoteLen == 1 {
@@ -2564,6 +2765,7 @@ func readSubstitution(s string, i, stringEnd int, subs substitutionMemo, multili
 			if !multiline {
 				return substitutionResult{end: scan.stop(j)}
 			}
+			j = scan.lineBreak(s, j, limit)
 		case '`':
 			at, closed := backtickClose(s, j, limit)
 			if !closed {
@@ -2576,7 +2778,7 @@ func readSubstitution(s string, i, stringEnd int, subs substitutionMemo, multili
 				j++
 			}
 		case '$', '<', '>':
-			next, stop := scan.inner(s, j, limit)
+			next, stop := scan.expansion(s, j, limit)
 			if stop {
 				return substitutionResult{end: next}
 			}
@@ -2596,6 +2798,91 @@ func readSubstitution(s string, i, stringEnd int, subs substitutionMemo, multili
 		}
 	}
 	return substitutionResult{end: scan.stop(min(j, limit))}
+}
+
+// heredoc is a here-document's delimiter word, which ends its body on a
+// line of its own, after the tabs that <<- strips.
+type heredoc struct {
+	word      string
+	stripTabs bool
+}
+
+// heredocAt returns the here-document whose redirection (<<X, <<-'X',
+// <<"X") starts at s[j], and the end of its delimiter word, or 0 when none
+// does before limit. The word is a name or a quoted string; <<< reads a
+// string instead.
+func heredocAt(s string, j, limit int) (heredoc, int) {
+	if !strings.HasPrefix(s[j:limit], "<<") || strings.HasPrefix(s[j:limit], "<<<") {
+		return heredoc{}, 0
+	}
+	var doc heredoc
+	k := j + 2
+	if k < limit && s[k] == '-' {
+		doc.stripTabs = true
+		k++
+	}
+	for k < limit && (s[k] == ' ' || s[k] == '\t') {
+		k++
+	}
+	end := k
+	for end < limit && !isShellWordEnd(s[end]) {
+		if pieceEnd, quoteLen := quotedPiece(s[:limit], end); quoteLen == 1 {
+			end = pieceEnd
+			continue
+		}
+		end++
+	}
+	raw := s[k:end]
+	doc.word = strings.ReplaceAll(wordQuotes.Replace(raw), `\`, "")
+	if doc.word == "" || doc.word == raw && doc.word[0] != '_' && !isLetterByte(doc.word[0]) {
+		// No word, or a bare one that is no name (x<<2).
+		return heredoc{}, 0
+	}
+	return doc, end
+}
+
+// heredocBodiesEnd returns where the text after the bodies of docs, which
+// start at from, starts: after the line that holds only the last one's
+// delimiter, or limit when a body runs to it.
+func heredocBodiesEnd(s string, from, limit int, docs []heredoc, subs substitutionMemo) int {
+	for _, doc := range docs {
+		from = heredocBodyEnd(s, from, limit, doc, subs)
+	}
+	return from
+}
+
+// heredocBodyEnd returns where the text after the body of doc, which starts
+// at from, starts, as heredocBodiesEnd does. subs keeps the end for each
+// line read, so the substitutions in a body that does not end, each read
+// on its own, do not read the rest of it again
+// ($(cat <<X<newline>$(cat <<X<newline>...).
+func heredocBodyEnd(s string, from, limit int, doc heredoc, subs substitutionMemo) int {
+	var lines []int
+	end := limit
+	for p := from; p < limit; {
+		if r, ok := subs[substitutionKey{start: p, stringEnd: limit, heredoc: doc}]; ok {
+			end = r.end
+			break
+		}
+		lines = append(lines, p)
+		lineEnd, next := limit, limit
+		if n := strings.IndexByte(s[p:limit], '\n'); n >= 0 {
+			lineEnd, next = p+n, p+n+1
+		}
+		line := strings.TrimSuffix(s[p:lineEnd], "\r")
+		if doc.stripTabs {
+			line = strings.TrimLeft(line, "\t")
+		}
+		if line == doc.word {
+			end = next
+			break
+		}
+		p = next
+	}
+	for _, p := range lines {
+		subs[substitutionKey{start: p, stringEnd: limit, heredoc: doc}] = substitutionResult{end: end}
+	}
+	return end
 }
 
 // commentEnd returns where the comment that the # at s[j] starts ends, at
@@ -2634,6 +2921,41 @@ type substitutionScan struct {
 	// frames are the substitutions open, the innermost last.
 	frames []parenScan
 	ends   substitutionEnds
+	// heredocs are the here-documents whose bodies start on the next line,
+	// read when readsHeredocs is set, as the substitution may go on to it.
+	heredocs      []heredoc
+	readsHeredocs bool
+}
+
+// expansion reads the parameter expansion, here-document redirection or
+// substitution that starts at s[j], if one does, and returns where the
+// reading goes on, before the next character, or, with stop, where the
+// outermost substitution stops, as inner does. A parameter expansion is one
+// word, whose ")" closes nothing ($(printf %s ${PW:-a)b})).
+func (c *substitutionScan) expansion(s string, j, limit int) (next int, stop bool) {
+	if end := braceExpansionEnd(s[:limit], j, c.ends.subs); end > 0 {
+		return end - 1, false
+	}
+	if c.readsHeredocs {
+		if doc, end := heredocAt(s, j, limit); end > 0 {
+			c.heredocs = append(c.heredocs, doc)
+			return end - 1, false
+		}
+	}
+	return c.inner(s, j, limit)
+}
+
+// lineBreak reads the line break at s[j], after which the bodies of the
+// here-documents redirected on its line start, whose text closes nothing
+// ($(cat <<X<newline>a)b<newline>X<newline>)), and returns where the
+// reading goes on, before the next character.
+func (c *substitutionScan) lineBreak(s string, j, limit int) int {
+	if len(c.heredocs) == 0 || s[j] != '\n' {
+		return j
+	}
+	end := heredocBodiesEnd(s, j+1, limit, c.heredocs, c.ends.subs)
+	c.heredocs = c.heredocs[:0]
+	return end - 1
 }
 
 func (c *substitutionScan) open(i int) {
@@ -2745,6 +3067,9 @@ type substitutionMemo map[substitutionKey]substitutionResult
 type substitutionKey struct {
 	start, stringEnd int
 	multiline        bool
+	// heredoc, when set, keys where the body of a here-document with this
+	// delimiter, starting on the line at start, ends (see heredocBodyEnd).
+	heredoc heredoc
 }
 
 type substitutionResult struct {
@@ -2764,7 +3089,7 @@ type substitutionEnds struct {
 }
 
 func (e substitutionEnds) key(i int) substitutionKey {
-	return substitutionKey{i, e.stringEnd, e.multiline}
+	return substitutionKey{start: i, stringEnd: e.stringEnd, multiline: e.multiline}
 }
 
 // closedEnd returns the end of the substitution that starts at i, when it
@@ -2789,6 +3114,10 @@ type quoteScan struct {
 	// prose skips an apostrophe inside a word (Let's), which opens no
 	// string in the text around a command.
 	prose bool
+	// acrossLines reads a double-quoted string that holds a command
+	// substitution going on to a later line as one string, as the value
+	// of a long flag is read ("$(printf x<newline>)").
+	acrossLines bool
 	// substitutions steps over the command substitutions outside quoted
 	// strings, and braces the parameter expansions too; subStart and
 	// subEnd bound the last one found.
@@ -2799,12 +3128,22 @@ type quoteScan struct {
 	subStart, subEnd                 int
 	cases                            caseMemo
 	// sep is where the text after the last shell operator outside the
-	// quoted strings found starts.
-	sep int
+	// quoted strings found starts. wordSep is the same, except that a
+	// command substitution that closes is part of a word of the command
+	// around it (ssh -i $(printf key) mysql), whose start wordSep goes
+	// back to after it; closes holds the ones open where the scan is.
+	sep, wordSep int
+	closes       []substitutionClose
 	// blankOf is one past the start of the last quoted string commandFrom
 	// read, 0 when none, and blank whether its text holds a blank.
 	blankOf int
 	blank   bool
+}
+
+// substitutionClose is a command substitution that closes at end, around
+// which a command started at sep.
+type substitutionClose struct {
+	end, sep int
 }
 
 // stringAt returns the end of the quoted string that p is inside, after its
@@ -2815,6 +3154,7 @@ func (q *quoteScan) stringAt(p int) (end int, ok bool) {
 		return q.end, true
 	}
 	for q.i < p {
+		q.closeSubstitutions()
 		if q.i == q.skip && q.skipEnd > q.i {
 			q.i = q.skipEnd
 			continue
@@ -2837,15 +3177,16 @@ func (q *quoteScan) stringAt(p int) (end int, ok bool) {
 				continue
 			}
 		}
-		if end, quoteLen := quotedPiece(q.s, q.i); quoteLen > 0 {
+		if end, quoteLen := q.quotedPiece(); quoteLen > 0 {
 			q.start, q.end, q.i = q.i, end, end
 			if p < end {
 				return end, true
 			}
 			continue
 		}
+		q.openSubstitution()
 		if isCommandEnd(q.s, q.i) {
-			q.sep = q.i + 1
+			q.sep, q.wordSep = q.i+1, q.i+1
 		}
 		if q.s[q.i] == '\\' {
 			q.i++
@@ -2853,6 +3194,47 @@ func (q *quoteScan) stringAt(p int) (end int, ok bool) {
 		q.i++
 	}
 	return 0, false
+}
+
+// quotedPiece returns the end of the quoted string that starts where the
+// scan is, and its quote's length, as quotedPiece does, or as
+// quotedPieceAcrossLines does with acrossLines.
+func (q *quoteScan) quotedPiece() (end, quoteLen int) {
+	if q.acrossLines {
+		return quotedPieceAcrossLines(q.s, q.i, -1, q.cases.memo())
+	}
+	return quotedPiece(q.s, q.i)
+}
+
+// openSubstitution notes the command substitution that starts where the
+// scan is, when it closes and the scan does not step over it.
+func (q *quoteScan) openSubstitution() {
+	if q.substitutions || !isSubstitutionStart(q.s, q.i) {
+		return
+	}
+	if n := q.cases.substitutionLen(q.s, q.i); n > 0 {
+		q.closes = append(q.closes, substitutionClose{end: q.i + n, sep: q.wordSep})
+	}
+}
+
+// closeSubstitutions ends the command substitutions that closed before
+// where the scan is, after which the command around each goes on.
+func (q *quoteScan) closeSubstitutions() {
+	for n := len(q.closes); n > 0 && q.closes[n-1].end <= q.i; n = len(q.closes) {
+		q.wordSep, q.closes = q.closes[n-1].sep, q.closes[:n-1]
+	}
+}
+
+// wordFrom is commandFrom, for a command of whose words a substitution
+// that closes before the position of the last stringAt query is one
+// (ssh -i $(printf key) mysql).
+func (q *quoteScan) wordFrom(closeAt int) int {
+	from := q.commandFrom(closeAt)
+	if closeAt >= 0 && q.blank {
+		return from
+	}
+	q.closeSubstitutions()
+	return q.wordSep
 }
 
 // commandEnds are the characters after which a new command starts: shell
@@ -3186,16 +3568,15 @@ const (
 // destination of an ssh command (ssh mysql -p2222, ssh -i "key" mysql
 // -p2222, where -p2222 is ssh's port) or the argument of a wrapper's option
 // (sudo -u mysql ssh -p2222), not a command. It reads the words of the
-// command from its start, at most maxSSHCommand bytes back, so an ssh that
-// is an argument of another command (docker exec ssh mysql -pX) does not
-// count. from is outside quoted strings, at or before the command's start;
-// when it is further back, the command starts after the last quote or shell
-// operator.
-func isWrapperOperand(s string, from, start int) bool {
-	// The word may be a path ending in the name (ssh -i ~/.ssh/mysql), and
-	// quoted (ssh "mysql").
+// command from its start (see wrapperWords), so an ssh that is an argument
+// of another command (docker exec ssh mysql -pX) does not count. from is
+// outside quoted strings, at or before the command's start.
+func isWrapperOperand(s string, long *wrapperStarts, from, start int) bool {
+	// The word may be a path ending in the name (ssh -i ~/.ssh/mysql),
+	// with escaped operators in it (ssh -i key\;mysql), and quoted
+	// (ssh "mysql").
 	word := start
-	for word > 0 && start-word < maxSSHCommand && !isShellWordEnd(s[word-1]) && s[word-1] != '"' && s[word-1] != '\'' {
+	for word > 0 && start-word < maxSSHCommand && (!isShellWordEnd(s[word-1]) || isEscaped(s, word-1)) && s[word-1] != '"' && s[word-1] != '\'' {
 		word--
 	}
 	if word > from && (s[word-1] == '"' || s[word-1] == '\'') {
@@ -3207,14 +3588,8 @@ func isWrapperOperand(s string, from, start int) bool {
 		return false
 	}
 	part := s[word:start]
-	start = word
-	from, ok := wrapperCommandFrom(s, from, start)
-	if !ok || !slices.ContainsFunc(argWrappers, func(w string) bool { return strings.Contains(s[from:start], w) }) {
-		return false
-	}
-	var c commandStart
-	c.at(s, from, start)
-	if runsJoinedArgument(c.wrapper, part) {
+	c, ok := wrapperWords(s, long, from, word)
+	if !ok || runsJoinedArgument(c.wrapper, part) {
 		return false
 	}
 	// The destination, or the argument of an option (ssh -i mysql,
@@ -3222,19 +3597,47 @@ func isWrapperOperand(s string, from, start int) bool {
 	return !c.text && !c.execArg && (c.optionArg || hasDestination(c.wrapper) && !c.host)
 }
 
-// wrapperCommandFrom returns where the command whose word starts at start
-// begins, reading s from from, which is outside quoted strings: at most
-// maxSSHCommand bytes back, where the command starts after the last quote or
-// shell operator. It is false when the command starts further back.
-func wrapperCommandFrom(s string, from, start int) (int, bool) {
-	if start-from <= maxSSHCommand {
-		return commandFrom(s, from, start), true
+// wrapperWords returns what the words before start of the command it is in
+// tell of it, reading s from from, which is outside quoted strings, and
+// false when no wrapper that takes an argument is in them. A substitution
+// that closes is part of a word (ssh -i $(printf key) mysql). A command that
+// starts at most maxSSHCommand bytes back is read from where commandFrom
+// finds it starts, and a longer one from from, once for names at increasing
+// positions in it, by long (ssh -i /a/long/path mysql).
+func wrapperWords(s string, long *wrapperStarts, from, start int) (commandWords, bool) {
+	if start-from > maxSSHCommand {
+		c := long.at(from)
+		c.at(s, from, start)
+		return c.commandWords, c.wrapper != ""
 	}
-	from = max(0, start-maxSSHCommand)
-	if i := strings.LastIndexAny(s[from:start], commandEnds+`'"`); i >= 0 {
-		return from + i + 1, true
+	from = commandFrom(s, from, start)
+	if !slices.ContainsFunc(argWrappers, func(w string) bool { return strings.Contains(s[from:start], w) }) {
+		return commandWords{}, false
 	}
-	return from, from == 0
+	c := commandStart{words: &long.words}
+	c.at(s, from, start)
+	return c.commandWords, true
+}
+
+// wrapperStarts reads the commands longer than maxSSHCommand bytes for
+// isWrapperOperand, one commandStart for each start, so each is read once,
+// and words finds where the substitutions in any command close.
+type wrapperStarts struct {
+	starts map[int]*commandStart
+	words  caseMemo
+}
+
+// at returns the commandStart of the command that starts at from.
+func (w *wrapperStarts) at(from int) *commandStart {
+	c := w.starts[from]
+	if c == nil {
+		if w.starts == nil {
+			w.starts = map[int]*commandStart{}
+		}
+		c = &commandStart{words: &w.words}
+		w.starts[from] = c
+	}
+	return c
 }
 
 // argWrappers are the wrappers that take an argument after the command's
@@ -3247,10 +3650,12 @@ const maxSSHCommand = 256
 
 // commandFrom returns where the command that start is in begins, reading s
 // from from, which is outside quoted strings: after the last shell operator
-// before start, or inside the quoted string start is in. A quoted string
-// that closes before start is part of a word (ssh -i "key" mysql).
+// before start, or inside the quoted string or substitution start is in. A
+// quoted string or substitution that closes before start is part of a word
+// (ssh -i "key" mysql, ssh -i $(printf key) mysql).
 func commandFrom(s string, from, start int) int {
 	head, b := s[:start], from
+	var cases caseMemo
 	for i := from; i < start; {
 		if isApostrophe(s, i) {
 			i++
@@ -3258,6 +3663,12 @@ func commandFrom(s string, from, start int) int {
 		}
 		if end, quoteLen := quotedPiece(head, i); quoteLen > 0 {
 			i = end
+			continue
+		}
+		// So is a substitution that closes before start
+		// (ssh -i $(printf key) mysql).
+		if n := cases.substitutionLen(head, i); n > 0 {
+			i += n
 			continue
 		}
 		switch {
@@ -3442,13 +3853,22 @@ const functionKeyword = "function"
 
 // isContainerNameArgument reports whether the client name at start is the
 // value of --name (docker run --name mysql -p3306 mysql:8), not a command.
+// The option must be a word of its own, so an assignment ending in it
+// (env TAG=--name openssl ...) is not one.
 func isContainerNameArgument(s string, start int) bool {
 	before := s[:start]
-	if strings.HasSuffix(before, "--name=") {
-		return true
+	if option, ok := strings.CutSuffix(before, "--name="); ok {
+		return startsWord(option)
 	}
 	trimmed := strings.TrimRight(before, " \t")
-	return len(trimmed) < len(before) && strings.HasSuffix(trimmed, "--name")
+	option, ok := strings.CutSuffix(trimmed, "--name")
+	return ok && len(trimmed) < len(before) && startsWord(option)
+}
+
+// startsWord reports whether a shell word starts after before: at the start
+// of the text or after a blank.
+func startsWord(before string) bool {
+	return before == "" || strings.ContainsRune(" \t\r\n", rune(before[len(before)-1]))
 }
 
 func appendNetrcPasswords(regions []taggedRegion, s string) []taggedRegion {
@@ -3485,6 +3905,9 @@ func (p netrcPattern) appendPassword(regions []taggedRegion, s string, lines *qu
 		return regions
 	}
 	valueStart, valueEnd, singleQuoted := unquoteRangeQuoted(s, start, end)
+	if end-start >= 4 && strings.HasPrefix(s[start:end], `\"`) && strings.HasSuffix(s[start:end], `\"`) {
+		valueStart, valueEnd = start+2, end-2
+	}
 	// A .netrc file expands nothing, so a password that starts with $ or
 	// a backtick ($ecret, $SUMMER2026, `cat /run/pw`) is literal, as in
 	// single quotes.
@@ -3564,7 +3987,9 @@ func isRecipeSubstitution(body string) bool {
 // string, value) may also be the password, so another word makes it prose
 // only when that word is prose too ("the --password flag is") or the text
 // of a help line ("--password string   Password for"); the words after it
-// may be arguments (mongosh --password string db admin).
+// may be arguments (mongosh --password string db admin). A word ended by
+// punctuation is the password when an argument follows it on its line
+// (wget --password string. http://host/).
 func isProseValue(s string, v cliValue) bool {
 	value := s[v.start:v.end]
 	word := strings.TrimRight(value, ".,:!?")
@@ -3572,7 +3997,7 @@ func isProseValue(s string, v cliValue) bool {
 		return false
 	}
 	if len(word) < len(value) {
-		return v.end == len(s) || unicode.IsSpace(rune(s[v.end]))
+		return v.end == len(s) || unicode.IsSpace(rune(s[v.end])) && !startsArgument(strings.TrimLeft(s[v.end:], " \t"))
 	}
 	gap := len(s[v.end:]) - len(strings.TrimLeft(s[v.end:], " \t"))
 	first, _ := proseWord(s[v.end+gap:])
@@ -3580,6 +4005,22 @@ func isProseValue(s string, v cliValue) bool {
 		return false
 	}
 	return !slices.Contains(proseNouns, word) || gap > 1 || s[v.end] == '\t' || slices.Contains(proseWords, strings.TrimRight(first, ".,:!?"))
+}
+
+// startsArgument reports whether text starts with a word that only a
+// command line holds: a flag, a path, an expansion or a URL.
+func startsArgument(text string) bool {
+	word := text
+	if end := strings.IndexAny(text, " \t\r\n"); end >= 0 {
+		word = text[:end]
+	}
+	switch {
+	case strings.Contains(word, "://"), strings.HasPrefix(word, "./"), strings.HasPrefix(word, "../"):
+		return true
+	case len(word) < 2 || word == "--":
+		return false
+	}
+	return strings.IndexByte("-/~$", word[0]) >= 0
 }
 
 // proseWord returns the word of prose that text starts with, letters and
