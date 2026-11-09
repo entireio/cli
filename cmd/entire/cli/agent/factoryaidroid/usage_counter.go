@@ -15,6 +15,11 @@ const recentMessageWindow = 64
 
 const settingsSuffix = ".settings.json"
 
+// sessionSettingsPath is the settings.json Droid keeps beside a transcript.
+func sessionSettingsPath(transcriptPath string) string {
+	return strings.TrimSuffix(transcriptPath, ".jsonl") + settingsSuffix
+}
+
 // NewUsageCounter prefers the session-cumulative tokenUsage Droid keeps in the
 // settings.json beside the transcript (verified on captured Droid 0.243.0
 // sessions, BYOK included), with one call per distinct assistant message in
@@ -46,7 +51,7 @@ type usageCounter struct {
 func (u *usageCounter) Files(in agent.CumulativeTokenInput) []agent.UsageFile {
 	return []agent.UsageFile{
 		{Path: in.TranscriptPath, NoRestart: true},
-		{Path: strings.TrimSuffix(in.TranscriptPath, ".jsonl") + settingsSuffix, Whole: true},
+		{Path: sessionSettingsPath(in.TranscriptPath), Whole: true},
 	}
 }
 

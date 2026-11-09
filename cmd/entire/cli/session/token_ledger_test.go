@@ -56,6 +56,16 @@ func TestTokenLedger(t *testing.T) {
 		assertUsage(t, "pending", l.Pending(), withKids(&agent.TokenUsage{}, usage(7, 1, 1)))
 	})
 
+	t.Run("a rewrite keeps what the rewritten-away copy counted", func(t *testing.T) {
+		t.Parallel()
+		var l TokenLedger
+		l.Observe(reading(usage(100, 50, 2), nil))
+		// Restored to an older copy that has since grown: input passed the
+		// old total, output did not.
+		l.Observe(agent.CumulativeObservation{Total: usage(120, 30, 3), Restarted: true})
+		assertUsage(t, "total", l.Total(), usage(120, 50, 3))
+	})
+
 	t.Run("nothing used is nil", func(t *testing.T) {
 		t.Parallel()
 		var l TokenLedger

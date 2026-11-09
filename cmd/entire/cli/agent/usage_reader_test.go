@@ -107,6 +107,18 @@ func TestReadCumulativeUsage(t *testing.T) {
 		require.Equal(t, 3, calls(readLines(t, ag, path, obs.Cursor)), "not counted twice when it returns")
 	})
 
+	t.Run("a session given a new transcript forgets the old one's records", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		old, renamed := filepath.Join(dir, "old.jsonl"), filepath.Join(dir, "new.jsonl")
+		require.NoError(t, os.WriteFile(old, []byte("a\nb\n"), 0o600))
+		require.NoError(t, os.WriteFile(renamed, []byte("a\nb\nc\n"), 0o600))
+		obs := readLines(t, &lineAgent{}, old, nil)
+		again := readLines(t, &lineAgent{}, renamed, obs.Cursor)
+		require.True(t, again.Restarted)
+		require.Equal(t, 3, calls(again), "the copied history is not counted twice")
+	})
+
 	t.Run("an unreadable transcript is an error; another agent's cursor is ignored", func(t *testing.T) {
 		t.Parallel()
 		path := filepath.Join(t.TempDir(), "t.jsonl")

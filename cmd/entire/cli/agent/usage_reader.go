@@ -95,10 +95,12 @@ const usageCursorCheckBytes = 512
 const maxUsageFilePasses = 8
 
 type usageCursor struct {
-	Version int                      `json:"v"`
-	Agent   string                   `json:"agent"`
-	Files   map[string]usageFileMark `json:"files,omitempty"`
-	State   json.RawMessage          `json:"state,omitempty"`
+	Version int    `json:"v"`
+	Agent   string `json:"agent"`
+	// Main is the transcript the counter read as the session's own.
+	Main  string                   `json:"main,omitempty"`
+	Files map[string]usageFileMark `json:"files,omitempty"`
+	State json.RawMessage          `json:"state,omitempty"`
 }
 
 // usageFileMark is how far a file was read: the end of the last complete line
@@ -130,6 +132,14 @@ func ReadCumulativeUsage(ctx context.Context, ag Agent, in CumulativeTokenInput,
 	}
 	if !known {
 		cur = usageCursor{}
+	}
+	// A session given a new transcript is read from the new one's start: the
+	// counter forgets the old one's records, which the new file may repeat,
+	// and the ledger is told of a restart.
+	newMain := cur.Main != "" && cur.Main != in.TranscriptPath
+	if newMain {
+		counter.Reset(cur.Main)
+		obs.Restarted = true
 	}
 
 	// A file this reading does not reach keeps its mark: the counter still
@@ -168,7 +178,7 @@ func ReadCumulativeUsage(ctx context.Context, ag Agent, in CumulativeTokenInput,
 	if err != nil {
 		return CumulativeObservation{}, true, fmt.Errorf("encode token counter: %w", err)
 	}
-	next, err := json.Marshal(usageCursor{Version: usageCursorVersion, Agent: string(ag.Name()), Files: marks, State: state})
+	next, err := json.Marshal(usageCursor{Version: usageCursorVersion, Agent: string(ag.Name()), Main: in.TranscriptPath, Files: marks, State: state})
 	if err != nil {
 		return CumulativeObservation{}, true, fmt.Errorf("encode token cursor: %w", err)
 	}

@@ -37,13 +37,15 @@ type TokenLedger struct {
 // moves to Base so the total carries on. A lower total without one is a stale
 // copy (OpenCode's export) and is ignored; where no restart can be reported
 // (an OpenCode undo, Droid), a real rewrite undercounts until the total passes
-// the old one, never double counts.
+// the old one, never double counts. A rewrite is seen by the turn-start
+// reading, before the next turn's calls; one that has already grown past the
+// old total moves only the fields still below it.
 func (l *TokenLedger) Observe(obs agent.CumulativeObservation) {
 	switch {
-	case agent.TokenTotal(obs.Total) >= agent.TokenTotal(l.Main):
-		l.Main = cloneUsage(obs.Total)
 	case obs.Restarted:
 		l.Base = types.AddTokenUsage(l.Base, types.SubtractTokenUsage(cloneUsage(l.Main), cloneUsage(obs.Total)))
+		l.Main = cloneUsage(obs.Total)
+	case agent.TokenTotal(obs.Total) >= agent.TokenTotal(l.Main):
 		l.Main = cloneUsage(obs.Total)
 	}
 	for id, usage := range obs.Children {

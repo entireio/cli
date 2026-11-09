@@ -2,6 +2,7 @@ package opencode
 
 import (
 	"context"
+
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 )
 

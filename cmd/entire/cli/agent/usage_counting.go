@@ -2,7 +2,7 @@ package agent
 
 import (
 	"crypto/sha256"
-	"encoding/hex"
+	"encoding/base64"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 )
@@ -31,10 +31,13 @@ type KeyedUsage struct {
 	Window   int         `json:"-"`
 	Remember bool        `json:"-"`
 
-	Closed map[string]*TokenUsage     `json:"closed,omitempty"`
-	Open   []keyedRecord              `json:"open,omitempty"`
-	Seen   map[string]map[string]bool `json:"seen,omitempty"`
-	Marked *TokenUsage                `json:"marked,omitempty"`
+	Closed map[string]*TokenUsage `json:"closed,omitempty"`
+	Open   []keyedRecord          `json:"open,omitempty"`
+	// Seen packs each child's closed keys as 8-character hashes; seen is its
+	// lookup set, built on first use.
+	Seen   map[string]string `json:"seen,omitempty"`
+	seen   map[string]map[string]bool
+	Marked *TokenUsage `json:"marked,omitempty"`
 }
 
 type keyedRecord struct {
@@ -58,7 +61,7 @@ func (k *KeyedUsage) Add(child, key string, usage TokenUsage) {
 			return
 		}
 	}
-	if k.Seen[child][keyHash(key)] {
+	if k.seenSet(child)[keyHash(key)] {
 		return
 	}
 	k.Open = append(k.Open, keyedRecord{Child: child, Key: key, Usage: usage})
@@ -91,13 +94,12 @@ func (k *KeyedUsage) close(r keyedRecord) {
 	if !k.Remember {
 		return
 	}
+	h := keyHash(r.Key)
+	k.seenSet(r.Child)[h] = true
 	if k.Seen == nil {
-		k.Seen = make(map[string]map[string]bool)
+		k.Seen = make(map[string]string)
 	}
-	if k.Seen[r.Child] == nil {
-		k.Seen[r.Child] = make(map[string]bool)
-	}
-	k.Seen[r.Child][keyHash(r.Key)] = true
+	k.Seen[r.Child] += h
 }
 
 // Sum returns child's total, nil when it has no records.
@@ -174,6 +176,7 @@ func (k *KeyedUsage) CloseChild(child string) {
 func (k *KeyedUsage) ResetChild(child string) {
 	delete(k.Closed, child)
 	delete(k.Seen, child)
+	delete(k.seen, child)
 	open := k.Open[:0]
 	for _, r := range k.Open {
 		if r.Child != child {
@@ -185,13 +188,30 @@ func (k *KeyedUsage) ResetChild(child string) {
 
 // Reset forgets every record.
 func (k *KeyedUsage) Reset() {
-	k.Closed, k.Open, k.Seen, k.Marked = nil, nil, nil, nil
+	k.Closed, k.Open, k.Seen, k.seen, k.Marked = nil, nil, nil, nil, nil
 }
 
-// keyHash shortens a record key for the seen set.
+// keyHash shortens a record key to 8 characters for the seen set.
 func keyHash(key string) string {
 	sum := sha256.Sum256([]byte(key))
-	return hex.EncodeToString(sum[:6])
+	return base64.RawURLEncoding.EncodeToString(sum[:6])
+}
+
+// seenSet returns child's seen keys, unpacking Seen on first use.
+func (k *KeyedUsage) seenSet(child string) map[string]bool {
+	if k.seen == nil {
+		k.seen = make(map[string]map[string]bool)
+	}
+	set, ok := k.seen[child]
+	if !ok {
+		packed := k.Seen[child]
+		set = make(map[string]bool, len(packed)/8)
+		for i := 0; i+8 <= len(packed); i += 8 {
+			set[packed[i:i+8]] = true
+		}
+		k.seen[child] = set
+	}
+	return set
 }
 
 // RunningTotal sums running-total snapshots from a source that restarts its
