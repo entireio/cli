@@ -814,18 +814,14 @@ func detectCredentialValues(s string) []taggedRegion {
 		if len(loc) < 6 || loc[4] < 0 || loc[5] < 0 {
 			continue
 		}
-		start, end, singleQuoted := unquoteRangeQuoted(s, loc[4], loc[5])
-		if start == loc[4] {
-			end = extendPastValueSeparators(s, end)
-		}
 		// Main's shared placeholder rules, except that a single-quoted value
 		// is a shell literal and only the literal placeholder words apply.
-		isReal := hasNonPlaceholderPasswordValue(s[start:end])
-		if singleQuoted {
-			isReal = hasNonPlaceholderQuotedPasswordValue(s[start:end], true)
+		value, isReal := credentialValueRegion(s, loc[4], loc[5], isRealPasswordPiece)
+		if value.start == loc[4] {
+			value.end = extendPastValueSeparators(s, value.end)
 		}
 		if isReal {
-			regions = append(regions, taggedRegion{region: region{start, end}})
+			regions = append(regions, taggedRegion{region: value})
 		}
 	}
 	if strings.Contains(s, "sig=") {
@@ -863,24 +859,26 @@ func detectCredentialKeyCaptures(
 		} else if !isCredentialJSONSecretKey(key, credentialContext) {
 			continue
 		}
-		if valueStart, valueEnd, valueOK := captureRange(match, valueGroup); valueOK &&
-			isNonPasswordCodeLiteral(key, strings.Trim(s[valueStart:valueEnd], `"'`)) {
+		valueStart, valueEnd, valueOK := captureRange(match, valueGroup)
+		if !valueOK {
 			continue
 		}
-		if shouldPreserve != nil {
-			valueStart, valueEnd, valueOK := captureRange(match, valueGroup)
-			if valueOK && keyEnd <= valueStart && shouldPreserve(s[valueStart:valueEnd], s[keyEnd:valueStart]) {
-				continue
-			}
+		// The whole shell word is the value ("None"x is not None).
+		if _, wordEnd, joined := joinedShellWord(s, valueStart, valueEnd); joined {
+			valueEnd = wordEnd
 		}
-		if captured, ok := nonPlaceholderCapture(s, key, match, valueGroup); ok {
+		if isNonPasswordCodeLiteral(key, strings.Trim(s[valueStart:valueEnd], `"'`)) {
+			continue
+		}
+		if shouldPreserve != nil && keyEnd <= valueStart && shouldPreserve(s[valueStart:valueEnd], s[keyEnd:valueStart]) {
+			continue
+		}
+		if captured, ok := nonPlaceholderCapture(s, key, valueStart, valueEnd); ok {
 			// Assignments get the same separator handling as the password
 			// pattern above: "ab;cd" is one value. Shell-stdin literals stop
 			// at the pipe syntax their pattern already bounds.
-			if shouldPreserve != nil {
-				if valueStart, _, _ := captureRange(match, valueGroup); captured.start == valueStart {
-					captured.end = extendPastValueSeparators(s, captured.end)
-				}
+			if shouldPreserve != nil && captured.start == valueStart {
+				captured.end = extendPastValueSeparators(s, captured.end)
 			}
 			regions = append(regions, captured)
 		}
@@ -931,16 +929,147 @@ func isCredentialCodeReference(value string) bool {
 	return isCredentialJSONSecretKey(value[memberStart:], false)
 }
 
-func nonPlaceholderCapture(s, key string, match []int, captureGroup int) (taggedRegion, bool) {
-	start, end, ok := captureRange(match, captureGroup)
-	if !ok {
+// nonPlaceholderCapture returns the value captured at s[start:end] under key
+// when it is a real credential.
+func nonPlaceholderCapture(s, key string, start, end int) (taggedRegion, bool) {
+	value, isReal := credentialValueRegion(s, start, end, func(piece string, singleQuoted bool) bool {
+		return hasNonPlaceholderKeyValue(key, piece, singleQuoted)
+	})
+	if !isReal {
 		return taggedRegion{}, false
+	}
+	return taggedRegion{region: value}, true
+}
+
+// isRealPasswordPiece applies the shared placeholder rules to a password
+// value, where single quotes leave only the literal placeholder words.
+func isRealPasswordPiece(value string, singleQuoted bool) bool {
+	if singleQuoted {
+		return hasNonPlaceholderQuotedPasswordValue(value, true)
+	}
+	return hasNonPlaceholderPasswordValue(value)
+}
+
+// credentialValueRegion returns the region to redact for the value a
+// key/value pattern captured at s[start:end], and whether isReal finds a real
+// secret in it. isReal judges one piece of the value: its text, and whether
+// single quotes made that text a literal. A value that is one quoted string
+// is redacted inside its quotes. A shell word joined from several pieces
+// (""'$X', "hunter"'2') is redacted whole, and is real when any piece is: an
+// empty piece holds nothing, so it decides nothing.
+func credentialValueRegion(s string, start, end int, isReal func(piece string, singleQuoted bool) bool) (region, bool) {
+	if pieces, wordEnd, joined := joinedShellWord(s, start, end); joined {
+		for _, piece := range pieces {
+			if isReal(s[piece.start:piece.end], piece.quote == '\'') {
+				return region{start, wordEnd}, true
+			}
+		}
+		return region{start, wordEnd}, false
 	}
 	start, end, singleQuoted := unquoteRangeQuoted(s, start, end)
-	if !hasNonPlaceholderKeyValue(key, s[start:end], singleQuoted) {
-		return taggedRegion{}, false
+	return region{start, end}, isReal(s[start:end], singleQuoted)
+}
+
+// wordPiece is one quoted string or run of bare text in a shell word. Its
+// text is s[start:end], inside the quotes; quote is the quote byte, or 0.
+type wordPiece struct {
+	start, end int
+	quote      byte
+}
+
+// joinedShellWord reads on through the shell word whose value a key/value
+// pattern captured at s[start:end]. The shell joins quoted strings and bare
+// text with nothing between them into one value, so ""'$X' is the literal $X
+// and "hunter"'2' is hunter2. A pattern stops at the first closing quote, or,
+// for a bare value, at a blank inside a later quoted string (abc"d e"). It
+// returns the word's pieces and end, and false when the word is a single
+// piece. Quoted strings close on their own line.
+func joinedShellWord(s string, start, end int) ([]wordPiece, int, bool) {
+	if start >= end {
+		return nil, end, false
 	}
-	return taggedRegion{region: region{start, end}}, true
+	startsQuoted := s[start] == '"' || s[start] == '\''
+	if !startsQuoted && !strings.ContainsAny(s[start:end], `"'`) {
+		return nil, end, false
+	}
+	var pieces []wordPiece
+	i := start
+	for i < len(s) {
+		bareStart := i
+		if c := s[i]; c == '"' || c == '\'' {
+			if closeAt := quotedPieceEnd(s, i); closeAt >= 0 {
+				pieces = append(pieces, wordPiece{start: i + 1, end: closeAt, quote: c})
+				i = closeAt + 1
+				continue
+			}
+			// A quote that never closes ends a word that started quoted;
+			// in bare text it is one more byte, as the pattern read it.
+			if startsQuoted {
+				break
+			}
+			i++
+		}
+		bareEnd := bareWordTextEnd(s, i, startsQuoted)
+		if bareEnd == bareStart {
+			break
+		}
+		pieces = append(pieces, wordPiece{start: bareStart, end: bareEnd})
+		i = bareEnd
+	}
+	if len(pieces) < 2 || i < end {
+		return nil, end, false
+	}
+	return pieces, i, true
+}
+
+// quotedPieceEnd returns the index of the quote that closes the string opened
+// at s[open], or -1 when the line ends first.
+func quotedPieceEnd(s string, open int) int {
+	for i := open + 1; i < len(s); i++ {
+		switch s[i] {
+		case s[open]:
+			return i
+		case '\n', '\r':
+			return -1
+		}
+	}
+	return -1
+}
+
+// codeAfterStringBytes end the bare text of a word that started as a quoted
+// string. Right after a string they read as code or Markdown, not as more of
+// the value: "x".strip(), "x"), "x"+y, cond ? "x":"y", **"x"**, "x"\n in
+// JSON-escaped text.
+const codeAfterStringBytes = ".:+*?=()[]{}<>|`\\"
+
+// bareWordTextEnd returns where the bare text of a shell word that starts at
+// s[i] ends: at a blank, a quote, or a value separator (, ; &). In a word
+// that started as a quoted string, codeAfterStringBytes and a $( command
+// substitution end it too, but a ${...} reference closed before any blank or
+// quote is part of it ("$A"${B}).
+func bareWordTextEnd(s string, i int, startsQuoted bool) int {
+	for i < len(s) {
+		c := s[i]
+		if strings.IndexByte(" \t\n\r\f\v\"',;&", c) >= 0 {
+			return i
+		}
+		if startsQuoted && c == '$' && i+1 < len(s) && s[i+1] == '{' {
+			closeAt := strings.IndexAny(s[i+2:], " \t\n\r\f\v\"'{}")
+			if closeAt < 0 || s[i+2+closeAt] != '}' {
+				return i
+			}
+			i += closeAt + 3
+			continue
+		}
+		if startsQuoted && c == '$' && i+1 < len(s) && s[i+1] == '(' {
+			return i
+		}
+		if startsQuoted && strings.IndexByte(codeAfterStringBytes, c) >= 0 {
+			return i
+		}
+		i++
+	}
+	return i
 }
 
 func captureRange(match []int, captureGroup int) (int, int, bool) {
@@ -1162,19 +1291,32 @@ func isSecretRecipeCommand(cmd string) bool {
 	return ok
 }
 
+// shellParameterName matches the parameter a ${…} expansion names: a
+// variable or array element (${DB_PASSWORD}, ${pw[0]}), a positional
+// parameter (${1}, ${10}), or a special parameter (${@}, ${*}, ${#}, ${?},
+// ${-}, ${$}, ${!}), each optionally behind ! for indirection (${!ref}).
+const shellParameterName = `!?(?:[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?|[0-9]+|[@*#?$!-])`
+
 // shellExpansionWordRE matches ${NAME<op>word}, whose word becomes the value
 // when NAME is unset (-, =) or set (+); with a colon, an empty NAME counts as
 // unset. ${NAME:?word} is left out: its word is an error message, never a
 // value.
-var shellExpansionWordRE = regexp.MustCompile(`^\$\{[A-Za-z_][A-Za-z0-9_]*:?[-=+](.*)\}$`)
+var shellExpansionWordRE = regexp.MustCompile(`^\$\{` + shellParameterName + `:?[-=+](.*)\}$`)
+
+// shellLengthRE matches ${#NAME}, the length of a parameter, which holds no
+// text of its own even when NAME is itself # (${##}).
+var shellLengthRE = regexp.MustCompile(`^\$\{#` + shellParameterName + `\}$`)
 
 // isPlaceholderShellExpansion reports whether a ${…} value is a placeholder:
 // one complete expression that is a plain reference, or one whose word is
-// itself empty or a placeholder, so ${DB_PASSWORD:-hunter2} and
-// ${A}hunter2${B} still count as secrets.
+// itself empty or a placeholder, so ${DB_PASSWORD:-hunter2},
+// ${1:-hunter2} and ${A}hunter2${B} still count as secrets.
 func isPlaceholderShellExpansion(s string) bool {
 	if !isSingleBraceExpression(s) {
 		return false
+	}
+	if shellLengthRE.MatchString(s) {
+		return true
 	}
 	if m := shellExpansionWordRE.FindStringSubmatch(s); m != nil {
 		return isPlaceholderSecretValue(m[1])
@@ -1186,7 +1328,7 @@ func isPlaceholderShellExpansion(s string) bool {
 // carry a literal value: pattern substitution and removal (/ # %), case
 // changes (^ ,), and substrings (:offset). Non-shell forms such as ${var.x},
 // ${env:X} and ${{secrets.X}} do not match.
-var shellTextOperatorRE = regexp.MustCompile(`^\$\{[A-Za-z_][A-Za-z0-9_]*(?:[/#%^,]|:[-0-9 ])`)
+var shellTextOperatorRE = regexp.MustCompile(`^\$\{` + shellParameterName + `(?:[/#%^,]|:[-0-9 ])`)
 
 // isSingleBraceExpression reports whether the brace opened by the leading "${"
 // of s is closed by its final "}".

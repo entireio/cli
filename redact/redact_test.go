@@ -1325,6 +1325,106 @@ func TestString_ConnectionSecretsCaughtWithoutScanners(t *testing.T) {
 			input: "DB_PASSWORD=${DB_PASSWORD:-hunter2}",
 			want:  "DB_PASSWORD=REDACTED",
 		},
+		{
+			name:  "credential value with a real default on a positional parameter",
+			input: "DB_PASSWORD=${1:-hunter2}",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "one-letter default on a positional parameter",
+			input: "PGPASSWORD=${2:-x}",
+			want:  "PGPASSWORD=REDACTED",
+		},
+		{
+			name:  "colonless default on a two-digit positional parameter",
+			input: "DB_PASSWORD=${10-hunter2}",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "alternate value on a positional parameter",
+			input: "DB_PASSWORD=${1:+hunter2}",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "default on the special parameter @",
+			input: "DB_PASSWORD=${@:-hunter2}",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "default on the special parameter #",
+			input: "DB_PASSWORD=${#:-hunter2}",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "default on the special parameter -",
+			input: "DB_PASSWORD=${--hunter2}",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "default behind an indirect reference",
+			input: "DB_PASSWORD=${!ref:-hunter2}",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "default on an array element",
+			input: "DB_PASSWORD=${pw[0]:-hunter2}",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "literal in a substitution on a positional parameter",
+			input: "DB_PASSWORD=${1/x/hunter2}",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "nested defaults after a positional default",
+			input: "DB_PASSWORD=${1:-hunter2;${B:-${C:-x}}}",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "quoted positional default",
+			input: `export PGPASSWORD="${2:-s3cr3t}"`,
+			want:  `export PGPASSWORD="REDACTED"`,
+		},
+		{
+			name:  "credentialed URI with a positional default",
+			input: "postgres://app:${1:-hunter2}@db/app",
+			want:  "REDACTED",
+		},
+		{
+			name:  "single-quoted literal after an empty string",
+			input: `DB_PASSWORD=""'$X'`,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "single-quoted literal after an empty string under another credential key",
+			input: `API_TOKEN=""'$uperSecret123'`,
+			want:  "API_TOKEN=REDACTED",
+		},
+		{
+			name:  "password joined from two quoted strings",
+			input: `DB_PASSWORD="hunter"'2'`,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "password joined from a quoted string and bare text",
+			input: `DB_PASSWORD="hunter"2xyz`,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "reference joined with a literal suffix",
+			input: `DB_PASSWORD="$BASE"_dev`,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "bare password whose quoted part holds a blank",
+			input: `DB_PASSWORD=abc"d e"`,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "code literal joined with more text",
+			input: `API_KEY="None"realtoken`,
+			want:  "API_KEY=REDACTED",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2669,6 +2769,91 @@ func TestString_SingleQuotedDollarPasswordRedacted(t *testing.T) {
 			name:  "double-quoted $VAR stays a placeholder",
 			input: `DB_PASSWORD="$DB_PASS"`,
 			want:  `DB_PASSWORD="$DB_PASS"`,
+		},
+	})
+}
+
+// Shell expansions on positional and special parameters are references like
+// ${DB_PASSWORD}: only a default or other text inside them is a secret.
+func TestString_ShellParameterReferencesPreserved(t *testing.T) {
+	t.Parallel()
+	var cases []stringRedactionCase
+	for _, value := range []string{
+		"${1}", "${10}", "${1:-}", "${1-}", "${1:-$DEFAULT_PW}", "${2:-${FALLBACK_PASSWORD}}",
+		"${@}", "${*}", "${#}", "${?}", "${-}", "${$}", "${!}", "${0}",
+		"${#1}", "${##}", "${#@}", "${#pw[@]}",
+		"${!ref}", "${!pre*}", "${!pw[@]}", "${pw[0]}", "${pw[@]}",
+	} {
+		cases = append(cases, stringRedactionCase{
+			name:  value,
+			input: "DB_PASSWORD=" + value,
+			want:  "DB_PASSWORD=" + value,
+		})
+	}
+	assertStringRedactionCases(t, cases)
+}
+
+// A key/value value is one shell word, joined from every quoted and bare piece
+// with nothing between them, and each piece keeps its own quoting: an empty
+// piece decides nothing, and a reference stays a placeholder. Text right
+// after a closing quote that reads as code or Markdown is not part of it.
+func TestString_JoinedShellWordValues(t *testing.T) {
+	t.Parallel()
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "single-quoted literal after an empty string",
+			input: `DB_PASSWORD=""'$uperSecret123'`,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "reference after an empty single-quoted string",
+			input: `DB_PASSWORD=''"$DB_PASS"`,
+			want:  `DB_PASSWORD=''"$DB_PASS"`,
+		},
+		{
+			name:  "two joined references",
+			input: `DB_PASSWORD="$DB_PASS"${DB_SUFFIX}`,
+			want:  `DB_PASSWORD="$DB_PASS"${DB_SUFFIX}`,
+		},
+		{
+			name:  "placeholder after an empty string",
+			input: `DB_PASSWORD=""'changeme'`,
+			want:  `DB_PASSWORD=""'changeme'`,
+		},
+		{
+			name:  "only empty strings",
+			input: `DB_PASSWORD=""''`,
+			want:  `DB_PASSWORD=""''`,
+		},
+		{
+			name:  "a single-quoted literal joined to a reference",
+			input: `DB_PASSWORD="$DB_PASS"'$X'`,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "a call's closing parenthesis",
+			input: `connect(db_password="hunter2")`,
+			want:  `connect(db_password="REDACTED")`,
+		},
+		{
+			name:  "string concatenation in code",
+			input: `client_secret="abc123xyz"+suffix`,
+			want:  `client_secret="REDACTED"+suffix`,
+		},
+		{
+			name:  "Markdown emphasis",
+			input: `**DB_PASSWORD="hunter2"**`,
+			want:  `**DB_PASSWORD="REDACTED"**`,
+		},
+		{
+			name:  "a command substitution after the string",
+			input: `DB_PASSWORD="hunter2"$(cat suffix)`,
+			want:  `DB_PASSWORD="REDACTED"$(cat suffix)`,
+		},
+		{
+			name:  "a value separator after the string",
+			input: `DB_PASSWORD="hunter2";DB_USER=app`,
+			want:  `DB_PASSWORD="REDACTED";DB_USER=app`,
 		},
 	})
 }
