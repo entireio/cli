@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"github.com/entireio/cli/internal/transcript/opencodev2"
 )
 
 // OpenCodeAdapter turns snapshots of an OpenCode session's messages into
@@ -15,7 +16,7 @@ import (
 // snapshot.
 //
 // A snapshot line is one message as OpenCodeSnapshotLines writes it: the
-// message of a normalized export (NormalizeOpenCodeExport, so OpenCode 1
+// message of a normalized export (opencodev2.Normalize, so OpenCode 1
 // shape for either version), {"info":{...},"parts":[...]}, on one line.
 // Each message is keyed by its info.id, which is also its SourceID on
 // assistant lines, and sent whole (OpMessage). Feeding a message again sends
@@ -39,8 +40,8 @@ import (
 // have no size limit: a long line is held whole until its newline arrives.
 // Records carry no redaction: redact the snapshots before feeding them.
 type OpenCodeAdapter struct {
-	lines lineSplitter
-	line  int // snapshot lines consumed so far
+	pending []byte // bytes after the last newline fed
+	line    int    // snapshot lines consumed so far
 	// sent is the digest of the record last sent for each message, for
 	// those sent and not dropped since. order lists every key ever sent, in
 	// first-sent order, so FeedExport drops in a stable order.
@@ -68,19 +69,31 @@ func (a *OpenCodeAdapter) Lines() int {
 // chunk completes it, or until Flush.
 func (a *OpenCodeAdapter) Feed(chunk []byte) []Record {
 	var out []Record
-	a.lines.feed(chunk, func(line []byte) bool {
+	for len(chunk) > 0 {
+		i := bytes.IndexByte(chunk, '\n')
+		if i < 0 {
+			a.pending = append(a.pending, chunk...)
+			break
+		}
+		line := chunk[:i+1]
+		if len(a.pending) > 0 {
+			a.pending = append(a.pending, line...)
+			line = a.pending
+		}
 		out = a.consume(line, out)
-		return true
-	})
+		a.pending = a.pending[:0]
+		chunk = chunk[i+1:]
+	}
 	return out
 }
 
 // Flush treats a held partial line as complete.
 func (a *OpenCodeAdapter) Flush() []Record {
-	line := a.lines.flush()
-	if line == nil {
+	if len(a.pending) == 0 {
 		return nil
 	}
+	line := a.pending
+	a.pending = nil
 	return a.consume(line, nil)
 }
 
@@ -161,7 +174,7 @@ func decodeOpenCodeSnapshot(line []byte) (openCodeMessage, bool) {
 
 // OpenCodeSnapshotLines splits an OpenCode export, either version, into the
 // snapshot lines OpenCodeAdapter reads: the messages of the normalized
-// export (NormalizeOpenCodeExport), in order, each compacted onto one line
+// export (opencodev2.Normalize), in order, each compacted onto one line
 // with no trailing newline. Feed them each followed by "\n".
 //
 // A pending revert (the session's info.revert, set by OpenCode's undo) hides
@@ -172,9 +185,9 @@ func decodeOpenCodeSnapshot(line []byte) (openCodeMessage, bool) {
 // database still holds them, so for such an export the fold of these lines
 // is Convert of the export without them.
 func OpenCodeSnapshotLines(export []byte) ([][]byte, error) {
-	normalized, err := NormalizeOpenCodeExport(bytes.TrimSpace(export))
+	normalized, err := opencodev2.Normalize(bytes.TrimSpace(export))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("converting opencode 2 export: %w", err)
 	}
 	var doc struct {
 		Info struct {

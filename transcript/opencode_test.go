@@ -2,6 +2,7 @@ package transcript
 
 import (
 	"bytes"
+	"github.com/entireio/cli/internal/transcript/opencodev2"
 	"testing"
 )
 
@@ -143,7 +144,7 @@ func TestCompact_OpenCodeV2Export(t *testing.T) {
 	t.Parallel()
 
 	raw := []byte(openCodeV2Steps[len(openCodeV2Steps)-1])
-	normalized, err := NormalizeOpenCodeExport(raw)
+	normalized, err := opencodev2.Normalize(raw)
 	if err != nil {
 		t.Fatal(err)
 	}

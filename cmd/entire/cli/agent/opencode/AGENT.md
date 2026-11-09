@@ -167,7 +167,7 @@ installed. On 0.15.31 and 1.0.0 the plugin loads and its hooks fire
   `--standalone` it would start or attach to the shared service). The CLI
   picks the command from `opencode --version`; only a readable 0.x/1.x version
   selects 1.x commands. A 2.x export (flat, typed messages) is converted to
-  the 1.x shape at capture (`transcript.NormalizeOpenCodeExport`, shared
+  the 1.x shape at capture (`internal/transcript/opencodev2`, shared
   with `transcript.Convert` and the live stream's `transcript.OpenCodeAdapter`),
   so every reader and stored checkpoint sees one format: tool names map back (`subagent`→`task`,
   `patch`→`apply_patch`, `shell`→`bash`), `path` inputs and patch `files[].file`

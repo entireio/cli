@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/entireio/cli/internal/transcript/opencodev2"
 	"log/slog"
 	"math"
 	"os"
@@ -194,8 +195,8 @@ func (a *OpenCodeAgent) LiveSubagentModifiedFiles(ctx context.Context, childID, 
 	if err != nil {
 		return nil, err
 	}
-	if data, err = normalizeOpenCodeExport(data); err != nil {
-		return nil, err
+	if data, err = opencodev2.Normalize(data); err != nil {
+		return nil, fmt.Errorf("convert the OpenCode 2 export: %w", err)
 	}
 	scoped, _, err := scopeExportToCall(data, since, time.Time{})
 	if err != nil {

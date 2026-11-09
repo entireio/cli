@@ -1,4 +1,8 @@
-package transcript
+// Package opencodev2 converts an OpenCode 2 session export to the OpenCode 1
+// shape every reader of OpenCode sessions takes: the transcript library's
+// Convert and OpenCode adapter, and the CLI's OpenCode agent. It imports only
+// the standard library (the library's dependency guard).
+package opencodev2
 
 import (
 	"encoding/json"
@@ -17,21 +21,31 @@ import (
 // extraction, subagent slicing and checkpoint storage, Convert, the
 // OpenCodeAdapter and entire.io's transcript view) reads the OpenCode 1
 // shape, {"info": ..., "parts": [...]} per message, so a 2.x export is
-// converted to that shape once, when it is read (NormalizeOpenCodeExport).
+// converted to that shape once, when it is read (Normalize).
 // Sessions OpenCode 2 migrated from a 1.x database keep their 1.x tool names
 // and input keys, so both naming schemes are accepted.
 
+// The OpenCode 1 names the conversion writes.
+const (
+	roleUser       = "user"
+	roleAssistant  = "assistant"
+	partText       = "text"
+	partCompaction = "compaction"
+	partTool       = "tool"
+	toolTask       = "task" // OpenCode 1's subagent tool
+)
+
 // openCodeV2ToolNames maps OpenCode 2 tool names to their 1.x names.
 var openCodeV2ToolNames = map[string]string{
-	"subagent": openCodeToolTask,
+	"subagent": toolTask,
 	"patch":    "apply_patch",
 	"shell":    "bash",
 }
 
-// IsOpenCodeV2Export reports whether data is an OpenCode 2 export: its
+// IsExport reports whether data is an OpenCode 2 export: its
 // messages carry a top-level "type" rather than an "info" object. An export
 // with no messages is the same in both versions.
-func IsOpenCodeV2Export(data []byte) bool {
+func IsExport(data []byte) bool {
 	var doc struct {
 		Messages []map[string]json.RawMessage `json:"messages"`
 	}
@@ -48,23 +62,23 @@ func IsOpenCodeV2Export(data []byte) bool {
 	return false
 }
 
-// OpenCodeNativeKey is the message info key that keeps the OpenCode 2
+// NativeKey is the message info key that keeps the OpenCode 2
 // messages a converted message came from, verbatim. Every reader ignores it;
 // the CLI's OpenCode resume uses it to give OpenCode 2 back the exact session
 // it exported, which the 1.x shape alone cannot reproduce.
-const OpenCodeNativeKey = "opencode2"
+const NativeKey = "opencode2"
 
-// NormalizeOpenCodeExport converts an OpenCode 2 export to the OpenCode 1
+// Normalize converts an OpenCode 2 export to the OpenCode 1
 // shape and returns other payloads unchanged. The conversion is
 // deterministic, so re-exporting the same session yields the same message
 // indices; transcript offsets stored between turns depend on that.
 //
 // Each converted message carries its source messages under
-// info[OpenCodeNativeKey]: the 2.x message itself, plus any that convert to
+// info[NativeKey]: the 2.x message itself, plus any that convert to
 // nothing (idle markers, kinds this version does not know) after it. Both
 // messages of a converted compaction carry the key, the summary with none.
-func NormalizeOpenCodeExport(data []byte) ([]byte, error) {
-	if !IsOpenCodeV2Export(data) {
+func Normalize(data []byte) ([]byte, error) {
+	if !IsExport(data) {
 		return data, nil
 	}
 	var doc struct {
@@ -120,17 +134,17 @@ func NormalizeOpenCodeExport(data []byte) ([]byte, error) {
 }
 
 // addNativeMessages appends source messages to a converted message's
-// info[OpenCodeNativeKey], creating it (possibly empty).
+// info[NativeKey], creating it (possibly empty).
 func addNativeMessages(msg map[string]any, raw ...json.RawMessage) {
 	info, ok := msg["info"].(map[string]any)
 	if !ok {
 		return
 	}
-	existing, ok := info[OpenCodeNativeKey].([]json.RawMessage)
+	existing, ok := info[NativeKey].([]json.RawMessage)
 	if !ok {
 		existing = []json.RawMessage{}
 	}
-	info[OpenCodeNativeKey] = append(existing, raw...)
+	info[NativeKey] = append(existing, raw...)
 }
 
 // convertOpenCodeV2Message returns the OpenCode 1 messages for one OpenCode 2
@@ -150,10 +164,10 @@ func convertOpenCodeV2Message(msg map[string]any, sessionID, dir string) []map[s
 	}
 	switch typ {
 	case "user":
-		info["role"] = TypeUser
+		info["role"] = roleUser
 		parts := []map[string]any{}
 		if text := v2String(msg, "text"); text != "" {
-			parts = append(parts, v2Part(id, 0, map[string]any{"type": ContentTypeText, "text": text}))
+			parts = append(parts, v2Part(id, 0, map[string]any{"type": partText, "text": text}))
 		}
 		if files, ok := msg["files"].([]any); ok {
 			for _, f := range files {
@@ -170,30 +184,30 @@ func convertOpenCodeV2Message(msg map[string]any, sessionID, dir string) []map[s
 	case "synthetic", "system":
 		// Text OpenCode wrote into the conversation itself: a background
 		// subagent's result, or the tool-rename notice after a 1.x migration.
-		info["role"] = TypeUser
+		info["role"] = roleUser
 		text := v2String(msg, "text")
 		return []map[string]any{{"info": info, "parts": []map[string]any{
-			v2Part(id, 0, map[string]any{"type": ContentTypeText, "text": text, "synthetic": true}),
+			v2Part(id, 0, map[string]any{"type": partText, "text": text, "synthetic": true}),
 		}}}
-	case openCodePartCompaction:
-		info["role"] = TypeUser
+	case partCompaction:
+		info["role"] = roleUser
 		marker := map[string]any{"info": info, "parts": []map[string]any{
-			v2Part(id, 0, map[string]any{"type": openCodePartCompaction, "auto": msg["reason"] == "auto"}),
+			v2Part(id, 0, map[string]any{"type": partCompaction, "auto": msg["reason"] == "auto"}),
 		}}
 		summary := map[string]any{
 			"id":        id + "-summary",
 			"sessionID": sessionID,
-			"role":      TypeAssistant,
+			"role":      roleAssistant,
 			"summary":   true,
 			"time":      map[string]any{"created": created, "completed": created},
 		}
 		copyV2Usage(summary, msg)
 		text := v2String(msg, "summary")
 		return []map[string]any{marker, {"info": summary, "parts": []map[string]any{
-			v2Part(id+"-summary", 0, map[string]any{"type": ContentTypeText, "text": text}),
+			v2Part(id+"-summary", 0, map[string]any{"type": partText, "text": text}),
 		}}}
-	case TypeAssistant:
-		info["role"] = TypeAssistant
+	case roleAssistant:
+		info["role"] = roleAssistant
 		timeInfo := map[string]any{"created": created}
 		if completed := v2Time(msg, "completed"); completed != 0 {
 			timeInfo["completed"] = completed
@@ -250,14 +264,14 @@ func copyV2Usage(info, msg map[string]any) {
 // convertOpenCodeV2Content converts one assistant content entry. Text and
 // reasoning keep their shape; a tool entry becomes a 1.x tool part.
 func convertOpenCodeV2Content(part map[string]any, dir string) map[string]any {
-	if part["type"] != openCodePartTool {
+	if part["type"] != partTool {
 		return part
 	}
 	name := v2String(part, "name")
 	if legacy, ok := openCodeV2ToolNames[name]; ok {
 		name = legacy
 	}
-	out := map[string]any{"type": openCodePartTool, "tool": name}
+	out := map[string]any{"type": partTool, "tool": name}
 	if id, ok := part["id"].(string); ok {
 		out["callID"] = id
 	}
@@ -321,7 +335,7 @@ func convertOpenCodeV2ToolInput(tool string, input map[string]any, dir string) m
 			out["path"] = v2AbsPath(dir, p)
 		}
 		rename("path", "filePath")
-	case openCodeToolTask:
+	case toolTask:
 		rename("agent", "subagent_type")
 		rename("sessionID", "task_id")
 	}

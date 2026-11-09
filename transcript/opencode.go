@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/entireio/cli/internal/transcript/opencodev2"
 	"strconv"
 	"time"
 )
@@ -68,14 +69,14 @@ const (
 const openCodeToolTask = "task"
 
 // compactOpenCode converts a full OpenCode session JSON, either version
-// (NormalizeOpenCodeExport), into transcript lines. opts.StartLine is treated
+// (opencodev2.Normalize), into transcript lines. opts.StartLine is treated
 // as a message-index offset (not a newline offset) because the OpenCode
 // transcript is a single JSON object. It folds the records openCodeRecord
 // gives each message, as OpenCodeAdapter streams them.
 func compactOpenCode(content []byte, opts Options) ([]byte, error) {
-	normalized, err := NormalizeOpenCodeExport(bytes.TrimSpace(content))
+	normalized, err := opencodev2.Normalize(bytes.TrimSpace(content))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("converting opencode 2 export: %w", err)
 	}
 	var session struct {
 		Messages []openCodeMessage `json:"messages"`

@@ -3,6 +3,7 @@ package opencode
 import (
 	"context"
 	"encoding/json"
+	"github.com/entireio/cli/internal/transcript/opencodev2"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -88,7 +89,7 @@ func TestRunOpenCodeExportToFile_OpenCode2(t *testing.T) {
 func TestWriteSession_OpenCode2(t *testing.T) {
 	// No t.Parallel: t.Setenv.
 	useOpenCodeCLI(t, false)
-	stored, err := normalizeOpenCodeExport(loadOpenCode2Fixture(t, "tools"))
+	stored, err := opencodev2.Normalize(loadOpenCode2Fixture(t, "tools"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +165,7 @@ func TestFetchAndCacheExport_NormalizesOpenCode2(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if isOpenCodeV2Export(data) || !json.Valid(data) {
+	if opencodev2.IsExport(data) || !json.Valid(data) {
 		t.Fatalf("cached transcript is not a normalized export: %.200s", data)
 	}
 	prompts, err := ExtractAllUserPrompts(data)

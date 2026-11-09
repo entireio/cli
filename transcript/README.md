@@ -226,7 +226,7 @@ A live producer exports the session again once it changes (`opencode export
 `OpenCodeAdapter` (`NewOpenCodeAdapter`) snapshot lines: one message per
 line, `{"info":{...},"parts":[...]}` in the OpenCode 1 shape, as
 `OpenCodeSnapshotLines` splits an export of either version
-(`NormalizeOpenCodeExport` converts a 2.x export). `FeedExport` does both:
+(a 2.x export is converted by the internal `opencodev2` package). `FeedExport` does both:
 it feeds every message of an export in order, then drops the messages sent
 before that the export no longer has (a revert or a compaction), in the
 order they were first sent. A producer feeding lines itself calls
