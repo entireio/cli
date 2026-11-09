@@ -51,6 +51,9 @@ func TestCheckGitHookState_StaleMovedCopy(t *testing.T) {
 		"what an install writes there": {
 			"commit-msg.tool-old", commitMsg.content, GitHooksCurrent,
 		},
+		"names the backup only in a comment": {
+			"commit-msg.saved", commitMsg.content + "# Original hook: commit-msg" + backupSuffix + "\n", GitHooksCurrent,
+		},
 		"not Entire's hook": {
 			"commit-msg.tool-old", "#!/bin/sh\n\"$(dirname \"$0\")/commit-msg.pre-entire\" \"$@\"\n", GitHooksCurrent,
 		},

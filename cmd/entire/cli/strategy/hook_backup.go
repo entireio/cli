@@ -715,12 +715,27 @@ func movedEntireHook(root *os.Root, hook, n string) (ours, stale bool) {
 // chains back to the backup without the guard chainCall sets. The wrapper that
 // runs the copy is that backup, so an unguarded chain calls it again and the
 // commit or push never finishes. What refreshMovedEntireHooks writes has no
-// chain and is current, so one install clears every case.
+// chain and is current, so one install clears every case. Only lines that run
+// count: a copy that names the backup in a comment does not chain to it, and
+// reading it stale would rewrite a current copy the user may have added to.
 func movedEntireHookOutdated(hook, content string) bool {
 	if entireHookLineRunsFromWorkingTree(content) || (hook == prePushHook && isPrePushBeforeRefList(content)) {
 		return true
 	}
-	return namesFile([]byte(content), hook+backupSuffix) && !strings.Contains(content, chainGuard(hook))
+	code := shellCode(content)
+	return namesFile([]byte(code), hook+backupSuffix) && !strings.Contains(code, chainGuard(hook))
+}
+
+// shellCode is content without its comment lines.
+func shellCode(content string) string {
+	var b strings.Builder
+	for line := range strings.SplitSeq(content, "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(line), "#") {
+			b.WriteString(line)
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
 }
 
 // chainGuard names the variable chainCall sets while it runs hookName's
