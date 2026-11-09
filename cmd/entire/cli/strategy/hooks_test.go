@@ -1780,7 +1780,7 @@ func TestPrePushHookLine_UnwritableTMPDIRFallsBack(t *testing.T) {
 			require.Equal(t, entireExit, exit, "the script's status must be Entire's")
 			env, readErr := os.ReadFile(filepath.Join(dir, "entire.env"))
 			require.NoError(t, readErr, "Entire must still run")
-			require.NotContains(t, string(env), PrePushStdinRefsEnv+"=1", "without a saved list Entire runs as an old hook")
+			require.Contains(t, string(env), PrePushStdinRefsEnv+"=0", "Entire is told the list could not be saved, unlike an old hook")
 			after, afterErr := os.ReadFile(filepath.Join(dir, "after.stdin"))
 			if entireExit == 0 {
 				require.NoError(t, afterErr)
@@ -2547,4 +2547,35 @@ func TestReinstallGitHooks_OnlyReplacesHooksThatNeedIt(t *testing.T) {
 	require.Equal(t, findHookSpec(t, specs, prePushHook).content, read(prePushHook), "the old pre-push hook is upgraded")
 	require.Equal(t, findHookSpec(t, specs, "commit-msg").content, read("commit-msg"), "a missing hook is installed")
 	require.Equal(t, editedPostCommit, read("post-commit"), "an edited Entire hook keeps the user's lines")
+}
+
+// A commit hook asks git for its git dir once; outside a hook every call asks.
+func TestGetGitDir_HookAsksOnce(t *testing.T) {
+	repo := t.TempDir()
+	testutil.InitRepo(t, repo)
+	t.Chdir(repo)
+	ctx := withGitDir(context.Background())
+	first, err := GetGitDir(ctx)
+	require.NoError(t, err)
+
+	t.Chdir(t.TempDir())
+	_, err = GetGitDir(context.Background())
+	require.Error(t, err, "precondition: outside a hook git is asked again")
+	got, err := GetGitDir(ctx)
+	require.NoError(t, err, "the hook keeps its first answer")
+	assert.Equal(t, first, got)
+}
+
+// A failed git dir read is not cached: a later call in the same hook asks again.
+func TestGetGitDir_HookRetriesAFailedRead(t *testing.T) {
+	t.Chdir(t.TempDir())
+	ctx := withGitDir(context.Background())
+	_, err := GetGitDir(ctx)
+	require.Error(t, err, "precondition: not a repository")
+
+	repo := t.TempDir()
+	testutil.InitRepo(t, repo)
+	t.Chdir(repo)
+	_, err = GetGitDir(ctx)
+	assert.NoError(t, err, "the failure must not be cached")
 }
