@@ -647,7 +647,8 @@ var scriptOption = regexp.MustCompile(`^-[a-z]*c[a-z]*$`)
 // records whether its text is a program path. A command
 // quoted with its arguments (sh -c 'mysql --version'; ssh -p2222 host) ends
 // with the string, and so does a name at the end of text that runs no
-// command (ssh -o "HostName mysql" -p2222 host); a quoted program path
+// command (Run "connect mysql" through ssh -p2222 host,
+// ssh -o "HostName mysql" -p2222 host); a quoted program path
 // ("/usr/bin/mysql" -pX, or "/opt/mysql tools/bin/mysql" -pX, where the
 // name first matched a directory) or command (ssh db "sudo mysql" -pX)
 // goes on after it.
@@ -701,8 +702,10 @@ type programPathMemo struct {
 	// to is one past where the text with its last blank at blank ends, 0
 	// when nothing is recorded.
 	to, blank int
-	// starts reads whether names in the text run as commands.
+	// starts reads whether names in the text run as commands, and args
+	// whether the string is part of a command that ssh or eval runs.
 	starts commandStart
+	args   joinedArgs
 }
 
 // blankAfter reports whether s[i:to] holds a blank, where s[from:to] is the
@@ -719,36 +722,130 @@ func (m *programPathMemo) blankAfter(s string, from, i, to int) bool {
 
 // endsText reports whether the client name at p ends the text of the quoted
 // string that lines last found, which closes at to, as a word of text that
-// runs no command: the string is an option's value (ssh -o "HostName mysql"),
-// its text holds a blank before the name, is no program path, and no word
-// before the name lets it run (sudo mysql, cd app && mysql). A string after
-// any other word may be part of a command that ssh joins from its arguments
-// (ssh db "nice mysql" -pX). blankAfter has read the text.
+// runs no command: its text holds a blank before the name, is no program
+// path, no word before the name lets it run (sudo mysql, cd app && mysql),
+// and the string is no argument that ssh or eval joins into the command it
+// runs (ssh db "nice mysql" -pX, eval "nice mysql" -pX), as text around a
+// command is not (Run "connect mysql" through ssh -p2222 host), nor the
+// value of one of ssh's options (ssh -o "HostName mysql" -p2222 host).
+// blankAfter has read the text.
 func (m *programPathMemo) endsText(f cliPasswordFlag, s string, lines *quoteScan, p, to int) bool {
 	from := lines.inner()
-	return m.blank >= from && m.blank < p && isOptionValue(s, lines.sep, lines.start) &&
+	return m.blank >= from && m.blank < p && !m.args.joins(s, lines.sep, lines.start) &&
 		!m.isProgramPath(f, s, lines, to) && !m.starts.at(s, from, p)
 }
 
-// isOptionValue reports whether the quoted string at start, in a command
-// whose text starts at from, is the value of an option: the word before it,
-// or joined to it, is an option of ssh that takes one (ssh -o "HostName
-// mysql", ssh -o"HostName mysql"). A flag that takes none, or "--", is
-// followed by the command ssh runs (ssh db -t "nice mysql" -pX). A word
-// longer than maxOptionWord is none.
-func isOptionValue(s string, from, start int) bool {
-	before := strings.TrimRight(s[min(from, start):start], " \t")
-	word := before[max(0, len(before)-maxOptionWord):]
-	if i := strings.LastIndexAny(word, " \t"); i >= 0 {
-		word = word[i+1:]
-	} else if len(word) < len(before) {
-		return false
-	}
-	return strings.HasPrefix(word, "-") && takesArgument(sshCommand, word)
+// joinedArgs reads the words of a command up to a quoted string in it for
+// an ssh, which joins the words after its destination into the command it
+// runs (ssh db "nice mysql" -pX), whatever runs ssh (nice ssh db ...), or an
+// eval, which joins all of them. It reads a command's text once for strings
+// at increasing positions in it.
+type joinedArgs struct {
+	// from is where the command's text starts, i where the word being read
+	// starts, and j how far it was read.
+	from, i, j int
+	// ssh is set after a word that names ssh, dest after its destination,
+	// command after the first word of the command it runs, or all three
+	// after eval, and optionArg after an option of ssh that takes the next
+	// word. unknown is set when the
+	// command may start before from: after a ")" in the text, which closes
+	// a substitution from is in (ssh $(hostname) "nice mysql" -pX), or
+	// after a closing backtick or a continued line break.
+	ssh, dest, command, optionArg, unknown bool
 }
 
-// maxOptionWord bounds the length of the option isOptionValue reads.
+// joins reports whether the quoted string at start, in the command whose
+// text starts at from, is an argument that ssh or eval joins into the
+// command it runs, and no value of one of ssh's options (ssh db -o
+// "HostName mysql" -p2222, ssh db -o"HostName mysql" -p2222), or may be one.
+func (a *joinedArgs) joins(s string, from, start int) bool {
+	if from > start {
+		return true
+	}
+	a.read(s, from, start)
+	switch {
+	case a.unknown:
+		return true
+	case !a.dest:
+		return false
+	case a.command:
+		return true
+	case a.optionArg:
+		return false
+	}
+	// A word joined to the string may be an option that takes it.
+	part := s[a.i:start]
+	return !strings.HasPrefix(part, "-") || len(part) > maxOptionWord || !takesArgument(sshCommand, part)
+}
+
+// maxOptionWord bounds the length of an option joined to a string that
+// joins reads.
 const maxOptionWord = 64
+
+// read reads the words of s from from up to p, where a quoted string
+// starts; a word joined to it starts at a.i.
+func (a *joinedArgs) read(s string, from, p int) {
+	if a.from != from || p < a.i {
+		*a = joinedArgs{from: from, i: from, j: from, unknown: startsMidCommand(s, from)}
+	}
+	for a.j < p {
+		if end, quoteLen := quotedPiece(s[:p], a.j); quoteLen > 0 {
+			a.j = end
+			continue
+		}
+		switch s[a.j] {
+		case ' ', '\t', '\r', '\n':
+			if a.i < a.j {
+				a.word(s[a.i:a.j])
+			}
+			a.i = a.j + 1
+		case ')':
+			a.unknown = true
+		case '\\':
+			a.j++
+		}
+		a.j++
+	}
+}
+
+// word reads one word of the command.
+func (a *joinedArgs) word(word string) {
+	switch {
+	case a.optionArg:
+		a.optionArg = false
+	case a.command:
+	case !a.ssh:
+		name := programName(word)
+		a.ssh = name == sshCommand
+		if name == evalCommand {
+			a.ssh, a.dest, a.command = true, true, true
+		}
+	case strings.HasPrefix(word, "-"):
+		// ssh reads its options also after its destination
+		// (ssh db -p 2222 mysql -pX).
+		a.optionArg = takesArgument(sshCommand, word)
+	case a.dest:
+		a.command = true
+	default:
+		a.dest = true
+	}
+}
+
+// startsMidCommand reports whether the command whose text the last shell
+// operator before from starts may start before it: from follows a closing
+// backtick and a blank (ssh `hostname` "nice mysql" -pX), or a line break
+// that a backslash continues.
+func startsMidCommand(s string, from int) bool {
+	switch {
+	case from == 0 || from >= len(s):
+		return false
+	case s[from-1] == '`':
+		return s[from] == ' ' || s[from] == '\t'
+	case s[from-1] == '\n':
+		return !isCommandSeparator(s, from-1)
+	}
+	return false
+}
 
 // isProgramPath reports whether the text of the quoted string that lines
 // last found, which closes at to, is the path of a program f defines. A path
@@ -1913,8 +2010,44 @@ func wordPieceEnd(s string, i, stringEnd int, first bool, subs substitutionMemo)
 	if end := braceExpansionEnd(s, i, subs); end > 0 {
 		return end, false
 	}
+	if end := backtickEnd(s, i, stringEnd); end > 0 {
+		return end, false
+	}
 	return i, false
 }
+
+// backtickEnd returns the end of the command substitution in backticks that
+// starts at s[i] in a shell word (pass:abc`printf hunter2`), after the
+// backtick that closes it on its line, before the quote that closes the
+// string holding the command, which ends at stringEnd (-1 for none), or 0
+// when none starts there. One that does not close on its line runs to the
+// end of it, as a $(...) does (mysql -pabc`printf hunter2), except in a
+// quoted string. A backtick followed by a blank, the end of a line,
+// punctuation or another backtick ends Markdown code instead
+// (`openssl enc -pass pass:abc`, then `ls`).
+func backtickEnd(s string, i, stringEnd int) int {
+	if s[i] != '`' || i+1 == len(s) || strings.IndexByte(codeSpanFollowers, s[i+1]) >= 0 {
+		return 0
+	}
+	limit := len(s)
+	if i < stringEnd {
+		limit = stringEnd
+	}
+	n := strings.IndexAny(s[i+1:limit], "`\r\n")
+	switch {
+	case n >= 0 && s[i+1+n] == '`':
+		return i + 2 + n
+	case i < stringEnd:
+		return 0
+	case n < 0:
+		return limit
+	}
+	return i + 1 + n
+}
+
+// codeSpanFollowers are the characters after which a backtick that ends a
+// shell word ends Markdown code rather than starting a command substitution.
+const codeSpanFollowers = " \t\r\n.,;:!?)]}>'\"`|&<("
 
 // braceKey is the stringEnd of the keys under which a substitutionMemo
 // keeps the ends of parameter expansions, which no substitution has.
@@ -2708,6 +2841,9 @@ func isStringGap(s string) bool {
 // sshCommand is ssh, a command wrapper that runs the words after its
 // destination.
 const sshCommand = "ssh"
+
+// evalCommand is eval, which joins its arguments into the command it runs.
+const evalCommand = "eval"
 
 // execCommand and envCommand are the command wrappers exec and env; exec is
 // also the subcommand of a container client that runs a command, and
