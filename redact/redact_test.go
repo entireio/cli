@@ -1494,6 +1494,11 @@ func TestString_ShellWordSecretsCaughtWithoutScanners(t *testing.T) {
 			want:  `DB_PASSWORD=REDACTED echo "safe"`,
 		},
 		{
+			name:  "a spaced credential after the word of a value that opens inside a word",
+			input: `API_KEY=abc\" API_KEY="hunter2 API_KEY=foo"API_KEY = hunter2xyz`,
+			want:  `API_KEY=REDACTED = REDACTED`,
+		},
+		{
 			name:  "a spaced quoted value whose opening quote follows a stray quote",
 			input: `DB_PASSWORD=abc" API_KEY = "hunter2 secretpart"`,
 			want:  `DB_PASSWORD=REDACTED"`,
@@ -3097,7 +3102,7 @@ func TestString_JoinedShellWordValues(t *testing.T) {
 // per match.
 func TestString_JoinedShellWordsStayLinear(t *testing.T) {
 	t.Parallel()
-	for _, unit := range []string{`DB_PASSWORD=a" "`, `API_KEY=a" "`, `DB_PASSWORD=a" "=`, `DB_PASSWORD=a" DB_PASSWORD=b"|`, `DB_PASSWORD=a' DB_PASSWORD=b'|`, `db_password=foo,client_secret = `, `DB_PASSWORD=a" API_KEY="b `, `DB_PASSWORD=a' API_KEY="b' `, `DB_PASSWORD=a" FOO="b `, `DB_PASSWORD=a" FOO='b API_KEY="c' `, `DB_PASSWORD=a\" API_KEY=b\"|c `} {
+	for _, unit := range []string{`DB_PASSWORD=a" "`, `API_KEY=a" "`, `DB_PASSWORD=a" "=`, `DB_PASSWORD=a" DB_PASSWORD=b"|`, `DB_PASSWORD=a' DB_PASSWORD=b'|`, `db_password=foo,client_secret = `, `DB_PASSWORD=a" API_KEY="b `, `DB_PASSWORD=a' API_KEY="b' `, `DB_PASSWORD=a" FOO="b `, `DB_PASSWORD=a" FOO='b API_KEY="c' `, `DB_PASSWORD=a\" API_KEY=b\"|c `, `API_KEY=a" API_KEY="b API_KEY=c"API_KEY = `} {
 		in := strings.Repeat(unit, 20000)
 		done := make(chan string, 1)
 		go func() { done <- String(in) }()

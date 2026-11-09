@@ -903,6 +903,8 @@ func detectCredentialKeyCaptures(
 // is a region that ends in a key whose value comes after it, as when a value
 // runs past a separator into db_password=foo,client_secret = "x": the next
 // search starts at that key, which is read once more, so its value is found.
+// That region is the one that ends last, which can be one of the regions
+// visitStraddlingValues adds.
 //
 // The only values read from inside a region are those visitStraddlingValues
 // finds, and they add to what the region already redacts.
@@ -919,8 +921,9 @@ func forEachUncoveredMatch(s string, pattern *regexp.Regexp, valueGroup int, vis
 			if valueStart < covered {
 				next = covered
 			} else if end := visit(match, true); end > 0 {
-				covered = max(covered, visitStraddlingValues(s, pattern, valueGroup, visit, valueStart, end))
-				next = max(next, assignedKeyStart(s, valueStart, end))
+				last := visitStraddlingValues(s, pattern, valueGroup, visit, region{valueStart, end})
+				covered = max(covered, last.end)
+				next = max(next, assignedKeyStart(s, last.start, last.end))
 			}
 		}
 		from = next
@@ -928,9 +931,9 @@ func forEachUncoveredMatch(s string, pattern *regexp.Regexp, valueGroup int, vis
 }
 
 // visitStraddlingValues calls visit for each value that starts inside the
-// redacted region s[start:end] and runs past it, does the same for the
-// regions those values are redacted in, and returns where the furthest region
-// ends, or end. There are two kinds:
+// redacted region r and runs past it, does the same for the
+// regions those values are redacted in, and returns the region that ends
+// last, which is r unless one of theirs ends past it. There are two kinds:
 //
 //   - A key's quoted value that opens inside the region and closes past it,
 //     as API_KEY in abc\" API_KEY="hunter2 x"tail, where the shell word ends
@@ -946,33 +949,36 @@ func forEachUncoveredMatch(s string, pattern *regexp.Regexp, valueGroup int, vis
 //     the region's own.
 //
 // Two regions can share a value, so each is read once.
-func visitStraddlingValues(s string, pattern *regexp.Regexp, valueGroup int, visit func(match []int, wholeWord bool) int, start, end int) int {
-	furthest := end
-	pending := []region{{start, end}}
+func visitStraddlingValues(s string, pattern *regexp.Regexp, valueGroup int, visit func(match []int, wholeWord bool) int, r region) region {
+	last := r
+	pending := []region{r}
 	read := map[int]bool{}
 	readValue := func(match []int, wholeWord bool) {
 		if valueEnd := visit(match, wholeWord); valueEnd > 0 {
-			furthest = max(furthest, valueEnd)
-			pending = append(pending, region{match[2*valueGroup], valueEnd})
+			value := region{match[2*valueGroup], valueEnd}
+			if value.end > last.end {
+				last = value
+			}
+			pending = append(pending, value)
 		}
 	}
 	for len(pending) > 0 {
-		r := pending[len(pending)-1]
+		current := pending[len(pending)-1]
 		pending = pending[:len(pending)-1]
 		for _, quote := range []byte{'"', '\''} {
-			if match := quotedValuePast(s, pattern, valueGroup, r, quote); match != nil && !read[match[2*valueGroup]] {
+			if match := quotedValuePast(s, pattern, valueGroup, current, quote); match != nil && !read[match[2*valueGroup]] {
 				read[match[2*valueGroup]] = true
 				readValue(match, true)
 			}
 		}
-		for _, match := range bareValuesPast(s, pattern, valueGroup, r) {
+		for _, match := range bareValuesPast(s, pattern, valueGroup, current) {
 			if !read[match[2*valueGroup]] {
 				read[match[2*valueGroup]] = true
 				readValue(match, false)
 			}
 		}
 	}
-	return furthest
+	return last
 }
 
 // quotedValuePast returns the match for the key whose value, quoted with
