@@ -3032,3 +3032,26 @@ func TestPrepareTrailCreateBranchPushesToDeclaredRemote(t *testing.T) {
 	cleanupCreatedTrailBranch(ctx, repo, remote, branch, state.LocalCreated, state.RemotePushed, &errOut)
 	require.False(t, gitBranchExistsTrailTest(t, forkDir, branch), "cleanup left the branch on the declared remote; stderr: %s", errOut.String())
 }
+
+func TestCheckTrailResponse_LoginHintOnlyOn401(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		status int
+		hint   bool
+	}{
+		{status: http.StatusUnauthorized, hint: true},
+		{status: http.StatusForbidden, hint: false},
+	} {
+		rec := httptest.NewRecorder()
+		rec.WriteHeader(tt.status)
+		_, _ = rec.WriteString(`{"detail":"server says no"}`) //nolint:errcheck // recorder write cannot fail
+		err := checkTrailResponse(rec.Result())
+		if err == nil || !strings.Contains(err.Error(), "server says no") {
+			t.Fatalf("checkTrailResponse(%d) = %v, want the server's message", tt.status, err)
+		}
+		if got := strings.Contains(err.Error(), "entire login"); got != tt.hint {
+			t.Errorf("checkTrailResponse(%d) = %q, login hint %v, want %v", tt.status, err, got, tt.hint)
+		}
+	}
+}
