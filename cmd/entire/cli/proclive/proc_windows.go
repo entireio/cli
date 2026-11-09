@@ -108,7 +108,8 @@ func livingParent(proc process) int {
 // openProcess opens pid for querying. It returns errProcessGone when no
 // process holds pid. It asks for SYNCHRONIZE too, so inspect can tell whether
 // the process has exited, and settles for a query-only handle where the
-// process's DACL denies it.
+// process's DACL denies it; inspect then reports a process whose exit code
+// is STILL_ACTIVE as unknown.
 func openProcess(pid int) (windows.Handle, error) {
 	if pid <= 0 || uint64(pid) > math.MaxUint32 {
 		return 0, errProcessGone
@@ -147,23 +148,24 @@ func inspect(handle windows.Handle) (process, error) {
 	if err := windows.NtQueryInformationProcess(handle, windows.ProcessSequenceNumber, unsafe.Pointer(&seq), uint32(unsafe.Sizeof(seq)), nil); err != nil {
 		seq = 0 // not reported here; order by creation time instead
 	}
-	return process{
+	proc := process{
 		ppid:    int(info.InheritedFromUniqueProcessId),
 		created: int64(created.HighDateTime)<<32 | int64(created.LowDateTime),
 		seq:     seq,
+		exited:  code != stillActive,
+	}
+	if !proc.exited {
 		// The exit code alone can't tell a process that exited with
-		// STILL_ACTIVE (259) as its code from a running one, so a signaled
-		// handle counts too. A handle without SYNCHRONIZE falls back on the
-		// exit code.
-		exited: code != stillActive || signaled(handle),
-	}, nil
-}
-
-// signaled reports whether handle's process has exited, as far as the
-// handle's access lets it tell.
-func signaled(handle windows.Handle) bool {
-	event, err := windows.WaitForSingleObject(handle, 0)
-	return err == nil && event == windows.WAIT_OBJECT_0
+		// STILL_ACTIVE (259) as its code from a running one; the handle's
+		// signaled state can. Without SYNCHRONIZE access to read it, whether
+		// the process runs is unknown, not alive.
+		event, err := windows.WaitForSingleObject(handle, 0)
+		if err != nil {
+			return process{}, fmt.Errorf("read exit state: %w", err)
+		}
+		proc.exited = event == windows.WAIT_OBJECT_0
+	}
+	return proc, nil
 }
 
 // imageName returns the base name of handle's executable, such as "node.exe".
