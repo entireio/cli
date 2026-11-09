@@ -1139,7 +1139,7 @@ func bareWordTextEnd(s string, i int, startsQuoted bool) int {
 			return i
 		}
 		if c == '$' && i+1 < len(s) && s[i+1] == '{' {
-			if closeAt := braceExpansionEnd(s, i+1); closeAt >= 0 {
+			if closeAt := wordBraceExpansionEnd(s, i+1); closeAt >= 0 {
 				i = closeAt + 1
 				continue
 			}
@@ -1158,11 +1158,11 @@ func bareWordTextEnd(s string, i int, startsQuoted bool) int {
 	return i
 }
 
-// braceExpansionEnd returns the index of the } that closes the ${ whose {
+// wordBraceExpansionEnd returns the index of the } that closes the ${ whose {
 // is at s[open], or -1 when a blank, a line end, a nested { or the end of s
 // comes first. Quoted strings inside it (${PW:-"x y"}) are skipped whole.
 // Stopping at nesting and blanks keeps each read to one expansion's text.
-func braceExpansionEnd(s string, open int) int {
+func wordBraceExpansionEnd(s string, open int) int {
 	for i := open + 1; i < len(s); i++ {
 		switch c := s[i]; c {
 		case '}':
