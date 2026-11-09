@@ -132,7 +132,7 @@ func runRecap(ctx context.Context, w, errW io.Writer, f *recapFlags) error {
 		if errors.Is(err, api.ErrInsecureHTTP) {
 			// Name the variable and the host it points at: the generic error says
 			// only that *some* base URL is http, which sends the reader looking for
-			// a setting they may not know they have. newRecapClient rejects the
+			// a setting they may not know they have. newRecapSource rejects the
 			// override before resolving anything, so an http URL here is always
 			// this one. insecureDataOverrideNote strips any credentials from it.
 			fmt.Fprintf(errW, "%s. Use https:// for production, or pass --insecure-http-auth for local dev.\n", insecureDataOverrideNote())
