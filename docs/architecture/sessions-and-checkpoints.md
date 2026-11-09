@@ -190,7 +190,9 @@ however indirectly, by that session's agent? Snapshotting once matters — the
 shared store holds one state file per session, so a per-candidate walk would
 repeat the hostname, boot-id, and proc reads dozens of times per commit.
 Host, boot, and start-time guards mean a recycled PID or an identity recorded
-on another machine can never match. The nearest ancestor wins, so a nested
+on another machine can never match. An OS guard does the same for native
+Windows and WSL, which can share a hostname and a checkout but not a process
+table. The nearest ancestor wins, so a nested
 agent is attributed over the outer agent that spawned it; only sessions
 matching at the same depth (one agent process hosting several sessions) fall
 back to the most recently interacting one. Windows keeps a process's parent

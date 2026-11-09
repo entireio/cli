@@ -234,6 +234,9 @@ func TestResolveOwnerWindows(t *testing.T) {
 	if isTransient(id.Name) {
 		t.Errorf("resolved owner %q is a shell or the hook binary", id.Name)
 	}
+	if id.OS != "windows" {
+		t.Errorf("resolved owner OS = %q, want windows", id.OS)
+	}
 	if got := Check(id); got != LivenessAlive {
 		t.Errorf("resolved owner Check = %v, want alive", got)
 	}

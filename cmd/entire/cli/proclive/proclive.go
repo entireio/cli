@@ -15,6 +15,7 @@ package proclive
 import (
 	"errors"
 	"os"
+	"runtime"
 	"strings"
 )
 
@@ -23,8 +24,8 @@ type Liveness int
 
 const (
 	// LivenessUnknown means liveness could not be determined: the identity is
-	// empty, was recorded on another host, or the platform cannot introspect
-	// processes. Callers should fall back to a time-based heuristic.
+	// empty, was recorded on another host or by a binary for another OS, or the
+	// platform cannot introspect processes. Callers should fall back to a time-based heuristic.
 	LivenessUnknown Liveness = iota
 	// LivenessAlive means the recorded process is still running.
 	LivenessAlive
@@ -62,6 +63,11 @@ type Identity struct {
 	// Host is the hostname where the identity was recorded. PIDs are only
 	// meaningful on their own machine, so a mismatch yields Unknown.
 	Host string `json:"host,omitempty"`
+	// OS is the GOOS of the binary that recorded the identity. Windows and WSL
+	// can share a hostname and a checkout while their PIDs name different
+	// process tables, so a mismatch yields Unknown. Identities recorded before
+	// this field existed carry none, and are judged as before.
+	OS string `json:"os,omitempty"`
 	// Name is the owning process's executable name (comm). Diagnostic only.
 	Name string `json:"name,omitempty"`
 }
@@ -162,7 +168,7 @@ func ResolveOwner() (Identity, bool) {
 			return Identity{}, false
 		}
 		if !isTransient(name) {
-			return Identity{PID: candidate, Start: start, Boot: boot, Host: host, Name: name}, true
+			return Identity{PID: candidate, Start: start, Boot: boot, Host: host, OS: runtime.GOOS, Name: name}, true
 		}
 		candidate = parent
 	}
@@ -171,12 +177,12 @@ func ResolveOwner() (Identity, bool) {
 
 // Check reports whether the process recorded in id is still alive.
 //
-// Precedence: an empty identity or a host mismatch is Unknown (cannot judge); a
-// boot mismatch means a reboot, so the process is Dead; a missing PID or a
+// Precedence: an empty identity, a host mismatch or an identity recorded for
+// another OS is Unknown (cannot judge); a boot mismatch means a reboot, so the process is Dead; a missing PID or a
 // start-fingerprint mismatch (PID reuse) is Dead; otherwise Alive. An
 // unsupported platform is always Unknown so callers fall back to a timeout.
 func Check(id Identity) Liveness {
-	if id.PID <= 0 {
+	if id.PID <= 0 || fromOtherOS(id) {
 		return LivenessUnknown
 	}
 	if id.Host != "" {
@@ -232,7 +238,17 @@ func IdentityOf(pid int) (Identity, bool) {
 	if err != nil {
 		return Identity{}, false
 	}
-	return Identity{PID: pid, Start: start, Boot: boot, Host: host, Name: name}, true
+	return Identity{PID: pid, Start: start, Boot: boot, Host: host, OS: runtime.GOOS, Name: name}, true
+}
+
+// fromOtherOS reports whether id was recorded by a binary built for another
+// operating system. Native Windows and WSL can share a hostname and a
+// checkout, but a Windows PID names nothing in WSL's process table and the
+// other way round, so neither side can judge the other's identities. An
+// identity recorded before Identity.OS existed carries no OS and is judged as
+// before.
+func fromOtherOS(id Identity) bool {
+	return id.OS != "" && id.OS != runtime.GOOS
 }
 
 // Ancestry is a one-shot snapshot of the current process's ancestor chain.
@@ -284,7 +300,7 @@ func walkAncestry(stat statFunc, first int, boot, host string, limit int) (chain
 		if err != nil {
 			return chain, false
 		}
-		chain = append(chain, Identity{PID: candidate, Start: start, Boot: boot, Host: host, Name: name})
+		chain = append(chain, Identity{PID: candidate, Start: start, Boot: boot, Host: host, OS: runtime.GOOS, Name: name})
 		candidate = parent
 	}
 	return chain, candidate == 1
@@ -298,10 +314,10 @@ func (a Ancestry) Complete() bool {
 // Excludes reports whether id is provably not an ancestor of the current
 // process. Depth(id) < 0 also covers "cannot tell"; Excludes is true only
 // when the walk reached init and id is an identity Depth can judge (same
-// host, a start fingerprint, and the same boot when both sides know it) that
-// appears nowhere in the chain.
+// host and OS, a start fingerprint, and the same boot when both sides know
+// it) that appears nowhere in the chain.
 func (a Ancestry) Excludes(id Identity) bool {
-	if !a.complete || id.PID <= 0 || id.Start == "" || id.Host == "" || id.Host != a.host {
+	if !a.complete || id.PID <= 0 || id.Start == "" || id.Host == "" || id.Host != a.host || fromOtherOS(id) {
 		return false
 	}
 	if id.Boot != "" && a.boot != "" && a.boot != id.Boot {
@@ -312,12 +328,12 @@ func (a Ancestry) Excludes(id Identity) bool {
 
 // Depth returns id's position in the snapshot chain — 0 is the nearest
 // ancestor (the current process's parent) — or -1 when id is not an
-// ancestor. Matching requires the full identity to hold: same host, same
-// boot (when both sides could read one), and the start fingerprint equal to
-// the recorded one — so a recycled PID or an identity from another machine
+// ancestor. Matching requires the full identity to hold: same host and OS,
+// same boot (when both sides could read one), and the start fingerprint equal
+// to the recorded one — so a recycled PID or an identity from another machine
 // can never match.
 func (a Ancestry) Depth(id Identity) int {
-	if id.PID <= 0 || id.Start == "" || id.Host == "" || id.Host != a.host {
+	if id.PID <= 0 || id.Start == "" || id.Host == "" || id.Host != a.host || fromOtherOS(id) {
 		return -1
 	}
 	if id.Boot != "" && a.boot != "" && a.boot != id.Boot {
