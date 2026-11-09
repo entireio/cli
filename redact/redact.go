@@ -899,14 +899,14 @@ func detectCredentialKeyCaptures(
 // last match or redacted region ends, whichever is later. A later assignment
 // after the word (b"|DB_PASSWORD=hunter2) is still found, and as with FindAll
 // no search starts before the last one's match ended, so a line of such words
-// (DB_PASSWORD=a" "DB_PASSWORD=a" "...) takes linear time.
+// (DB_PASSWORD=a" "DB_PASSWORD=a" "...) takes linear time. The one exception
+// is a region that ends in a key whose value comes after it, as when a value
+// runs past a separator into db_password=foo,client_secret = "x": the next
+// search starts at that key, which is read once more, so its value is found.
 //
-// Two keys in a region are read again, because the region does not hold
-// their whole value (see resumeKeyStart): a key at its end whose value comes
-// after it, and a key whose quoted value opens inside it and closes past it.
-// The second is the only value read from inside a region, and only as the
-// quoted string the pattern matched, as on main, so it adds to what the
-// region already redacts and never reads on into the rest of the line.
+// The only values read from inside a region are those visitStraddlingValues
+// finds, each only as the quoted string the pattern matched, so they add to
+// what the region already redacts.
 func forEachUncoveredMatch(s string, pattern *regexp.Regexp, valueGroup int, visit func(match []int, inside bool) int) {
 	covered := 0
 	for from := 0; from < len(s); {
@@ -914,50 +914,75 @@ func forEachUncoveredMatch(s string, pattern *regexp.Regexp, valueGroup int, vis
 		if match == nil {
 			return
 		}
-		for i := range match {
-			if match[i] >= 0 {
-				match[i] += from
-			}
-		}
+		offsetMatch(match, from)
 		next := max(match[1], from+1)
-		if valueStart, valueEnd, ok := captureRange(match, valueGroup); ok {
-			inside := valueStart < covered
-			if inside && (!isQuoteByte(s[valueStart]) || valueEnd <= covered) {
+		if valueStart, _, ok := captureRange(match, valueGroup); ok {
+			if valueStart < covered {
 				next = covered
-			} else if end := visit(match, inside); end > 0 {
-				covered = max(covered, end)
-				if key := resumeKeyStart(s, valueStart, end); key < end {
-					next = key
-				} else {
-					next = max(next, end)
-				}
-			} else if inside {
-				next = covered
+			} else if end := visit(match, false); end > 0 {
+				covered = max(covered, visitStraddlingValues(s, pattern, valueGroup, visit, valueStart, end))
+				next = max(next, assignedKeyStart(s, valueStart, end))
 			}
 		}
 		from = next
 	}
 }
 
-// resumeKeyStart returns where the earliest key in the redacted region
-// s[start:end] begins whose value the region does not hold, or end when there
-// is none. That is a key at the end of the region that an = after it assigns,
-// as client_secret in foo,client_secret = "x" or "x"client_secret= "y", or a
-// key whose quoted value opens inside the region and closes past it, as
-// API_KEY in abc\" API_KEY="hunter2 x", where the shell word ends at the blank.
-func resumeKeyStart(s string, start, end int) int {
-	resume := assignedKeyStart(s, start, end)
-	for _, quote := range []byte{'"', '\''} {
-		open := strings.LastIndexByte(s[start:end], quote)
-		if open < 0 {
-			continue
-		}
-		open += start
-		if keyStart := assignmentKeyStart(s, start, open); keyStart >= 0 && keyStart < resume && quotedPieceEnd(s, open) > end {
-			resume = keyStart
+// visitStraddlingValues calls visit, with inside set, for each key whose
+// quoted value opens inside the redacted region s[start:end] and closes past
+// it, as API_KEY in abc\" API_KEY="hunter2 x", where the shell word ends at
+// the blank. It does the same for the regions those values are redacted in,
+// and returns where the furthest region ends, or end.
+//
+// Such a value's opening quote is the last quote of its kind in the region,
+// so each region has at most two, and each read covers only the key and its
+// quoted string. Two regions can share a value, so each is read once.
+func visitStraddlingValues(s string, pattern *regexp.Regexp, valueGroup int, visit func(match []int, inside bool) int, start, end int) int {
+	furthest := end
+	pending := []region{{start, end}}
+	read := map[int]bool{}
+	for len(pending) > 0 {
+		r := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		for _, quote := range []byte{'"', '\''} {
+			open := strings.LastIndexByte(s[r.start:r.end], quote)
+			if open < 0 {
+				continue
+			}
+			open += r.start
+			if read[open] {
+				continue
+			}
+			keyStart := assignmentKeyStart(s, r.start, open)
+			closeAt := quotedPieceEnd(s, open)
+			if keyStart < 0 || closeAt <= r.end {
+				continue
+			}
+			read[open] = true
+			match := pattern.FindStringSubmatchIndex(s[keyStart : closeAt+1])
+			if match == nil {
+				continue
+			}
+			offsetMatch(match, keyStart)
+			if valueStart, valueEnd, ok := captureRange(match, valueGroup); !ok || valueStart != open || valueEnd != closeAt+1 {
+				continue
+			}
+			if valueRegionEnd := visit(match, true); valueRegionEnd > 0 {
+				furthest = max(furthest, valueRegionEnd)
+				pending = append(pending, region{open, valueRegionEnd})
+			}
 		}
 	}
-	return resume
+	return furthest
+}
+
+// offsetMatch moves the indexes of a match made on s[from:] onto s.
+func offsetMatch(match []int, from int) {
+	for i := range match {
+		if match[i] >= 0 {
+			match[i] += from
+		}
+	}
 }
 
 // assignedKeyStart returns where the key at the end of the redacted region
