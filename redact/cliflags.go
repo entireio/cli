@@ -74,6 +74,11 @@ const (
 	cliFlagClose = `((?:\\?["'])?)`
 )
 
+// cliListNext matches the end of one quoted element of an argument list in
+// code and the start of the next, which may name the subcommand of a client
+// that the list runs (["docker", "login", ...]).
+const cliListNext = `\\?["'],` + cliListGap + `\\?["']`
+
 // cliGlobalOptions matches the options a client takes before its
 // subcommand, each a shell word (--config="$HOME/.docker") with at most one
 // value (--config $(mktemp -d)).
@@ -187,14 +192,14 @@ var cliPasswordFlags = []cliPasswordFlag{
 	// container named login (docker run --name login -p 8080:80) is not.
 	{
 		needles: []string{loginCommand},
-		command: regexp.MustCompile(`\b(?:docker|podman|nerdctl|buildah|skopeo|oras|helm)\b(?i:\.exe)?["']?` + cliGlobalOptions + cliBlank + `(?:registry` + cliGlobalOptions + cliBlank + `)?login\b`),
+		command: regexp.MustCompile(`\b(?:docker|podman|nerdctl|buildah|skopeo|oras|helm)\b(?i:\.exe)?(?:["']?` + cliGlobalOptions + cliBlank + `(?:registry` + cliGlobalOptions + cliBlank + `)?|` + cliListNext + `(?:registry` + cliListNext + `)?)login\b`),
 		flag:    regexp.MustCompile(cliShortFlag(`\s`, "p", `(?:`+cliBlank+`)?`)),
 	},
 	// az may be quoted with its path ("/usr/bin/az" login) and take
 	// global options before login (az --debug login).
 	{
 		needles: []string{loginCommand},
-		command: regexp.MustCompile(`\baz\b(?i:\.exe)?["']?` + cliGlobalOptions + cliBlank + `login\b`),
+		command: regexp.MustCompile(`\baz\b(?i:\.exe)?(?:["']?` + cliGlobalOptions + cliBlank + `|` + cliListNext + `)login\b`),
 		flag:    regexp.MustCompile(cliShortFlag(`\s`, "p", `(?:`+cliBlank+`)?`)),
 	},
 	{
@@ -213,11 +218,12 @@ var cliPasswordFlags = []cliPasswordFlag{
 	},
 	// sshpass reads its own options only before the command it wraps, so
 	// the -p of sshpass -e ssh -p 2222 is ssh's port. They may be
-	// clustered after -v (-vv, -vp x, -vPprompt).
+	// clustered after -v (-vv, -vp x, -vPprompt), and be elements of an
+	// argument list in code (["sshpass", "-v", "-p", "x", "ssh", "h"]).
 	{
 		needles: []string{"sshpass"},
 		command: regexp.MustCompile(`\bsshpass\b`),
-		flag:    regexp.MustCompile(cliShortFlag(`^(?:`+cliBlank+`-(?:v+|v*P[ \t]*(?:`+cliFlagValue+`)))*`+cliBlank, "v*p", `[ \t]*`)),
+		flag:    regexp.MustCompile(cliShortFlag(`^(?:(?:`+cliBlank+`-(?:v+|v*P[ \t]*(?:`+cliFlagValue+`)))*`+cliBlank+`|\\?["'](?:,`+cliListGap+`\\?["']-v+\\?["'])*,`+cliListGap+`)`, "v*p", `[ \t]*`)),
 		leading: true,
 	},
 	{
@@ -228,19 +234,21 @@ var cliPasswordFlags = []cliPasswordFlag{
 	// openssl takes a source after a blank or "=" (-pass=pass:x), and its
 	// options with two dashes too (--passin pass:x). The flag may be
 	// quoted, in escaped quotes too in a double-quoted script
-	// (sh -c "openssl enc \"-pass\" \"pass:x\"").
+	// (sh -c "openssl enc \"-pass\" \"pass:x\""), or with its source as one
+	// element of an argument list in code (["openssl", "-pass=pass:x"]).
 	{
 		needles: []string{"openssl"},
 		command: regexp.MustCompile(`\bopenssl\b`),
-		flag:    regexp.MustCompile(`\s(?:` + opensslSourceFlag + `|'` + opensslSourceFlag + `'|"` + opensslSourceFlag + `"|\\"` + opensslSourceFlag + `\\")(?:=|` + cliBlank + `)(` + cliFlagValue + `)`),
+		flag:    regexp.MustCompile(cliShortFlag(`\s`, opensslSourceFlag, `(?:=|`+cliBlank+`)`)),
 		prefix:  "pass:",
 	},
 }
 
-// opensslSourceFlag matches openssl's options that take a password source,
-// with one dash or two (-passin, --passout). The long-flag pattern already
-// reads the other two-dash spellings (--pass, --password).
-const opensslSourceFlag = `-(?:-pass(?:in|out)|pass(?:in|out|word)?)`
+// opensslSourceFlag matches the names of openssl's options that take a
+// password source, after their first dash, with one more dash or none
+// (-passin, --passout). The long-flag pattern already reads the other
+// two-dash spellings (--pass, --password).
+const opensslSourceFlag = `(?:-pass(?:in|out)|pass(?:in|out|word)?)`
 
 // mysqlNoValueOptions matches the short options that take no value in every
 // mysql and MariaDB tool that has them (-v, -s, -B, -N, ...), which may come
@@ -253,12 +261,18 @@ const mysqlNoValueOptions = `[ABCENVXbnsv]*`
 // value: -px, a flag quoted with its value ("-px", "-p x"), or one quoted on
 // its own ("-p" x, "-p"'x'). A blank before may also be a separator of code,
 // as in an argument list written without blanks (["mysql","-px"]), before a
-// quoted flag only (see isJoinedFlag).
+// quoted flag only (see isJoinedFlag). Where sep may be a blank, a flag
+// quoted on its own may also take the next element of an argument list in
+// code as its value (["redis-cli", "-a", "x"], see isListFlag).
 func cliShortFlag(before, name, sep string) string {
 	if before == `\s` {
 		before = `[\s,(\[]`
 	}
-	return before + `(?:` + cliFlagQuote + `-` + name + cliFlagClose + sep + `|-` + name + sep + `)(` + cliFlagValue + `)`
+	quotedSep := sep
+	if sep != "" {
+		quotedSep = `(?:,` + cliListGap + `|` + sep + `)`
+	}
+	return before + `(?:` + cliFlagQuote + `-` + name + cliFlagClose + quotedSep + `|-` + name + sep + `)(` + cliFlagValue + `)`
 }
 
 // netrcValue is a .netrc token. A double-quoted one may hold escaped quotes
@@ -393,8 +407,11 @@ func appendLongPasswordFlags(regions []taggedRegion, s string, noValue *noValueF
 		// takes one (curl --pass -x, redis-cli --pass -x).
 		blank := s[loc[4]] != '='
 		dashFlag := blank && !pass && noValue.has(loc[2])
-		if s[loc[4]] == ',' && !pass && !dashFlag {
-			dashFlag = listNamesNoValueClient(s, loc[0])
+		argv := false
+		if s[loc[4]] == ',' {
+			program := listProgram(s, loc[0])
+			dashFlag = dashFlag || !pass && isNoValueClientName(program)
+			argv = isListProgram(program)
 		}
 		stringEnd := lines.stringEnd(loc[2] - 1)
 		var r taggedRegion
@@ -405,7 +422,7 @@ func appendLongPasswordFlags(regions []taggedRegion, s string, noValue *noValueF
 		ok := !dashFlag || s[loc[6]] != '-'
 		var v cliValue
 		if ok {
-			v, ok = longFlagValue(s, loc, stringEnd, subs, dashFlag)
+			v, ok = longFlagValue(s, loc, stringEnd, subs, dashFlag, argv)
 		}
 		if ok {
 			r, ok = passwordValueRegion(s, v, stringEnd, subs, dashFlag, blank)
@@ -428,13 +445,15 @@ func appendLongPasswordFlags(regions []taggedRegion, s string, noValue *noValueF
 // ("--password" x) must close the quote that opens it, and a value in the
 // string that a flag opens ("--password=Summer 2026") runs to that string's
 // end, since the shell passes the whole string as one argument. dashFlag is
-// set when a value that starts with '-' is the next flag.
-func longFlagValue(s string, loc []int, stringEnd int, subs substitutionMemo, dashFlag bool) (cliValue, bool) {
+// set when a value that starts with '-' is the next flag, and argv when the
+// flag is an element of an argument list that names its program (see
+// listPasswordValue).
+func longFlagValue(s string, loc []int, stringEnd int, subs substitutionMemo, dashFlag, argv bool) (cliValue, bool) {
 	list := s[loc[4]] == ','
 	var listValue cliValue
 	if list {
 		var ok bool
-		if listValue, ok = listPasswordValue(s, loc, dashFlag); !ok {
+		if listValue, ok = listPasswordValue(s, loc, dashFlag, argv); !ok {
 			return cliValue{}, false
 		}
 	}
@@ -470,32 +489,33 @@ func longFlagValue(s string, loc []int, stringEnd int, subs substitutionMemo, da
 // argument list in code: a quoted flag and a quoted value (["wget",
 // "--password", "x"], or [\"wget\", \"--password\", \"x\"] in a JSON
 // string), not a name (["wget", "--password", pw]). A value that starts
-// with "--" is the next flag (["--password", "--verbose"]), and so is one
-// that starts with '-' where dashFlag is set (["psql", "--password", "-h",
-// "db"]), while it is the password of other clients (["wget",
-// "--password", "-x"]). A value made of prose is text: a word of
-// prose, or several words with a grammatical one among them
-// (print("--password", "is required")), while a passphrase is not
-// ("correct horse battery staple").
-func listPasswordValue(s string, loc []int, dashFlag bool) (cliValue, bool) {
+// with '-' is the next flag where dashFlag is set (["psql", "--password",
+// "-h", "db"]), while it is the password of other clients (["wget",
+// "--password", "-x"]). Where argv is set, the list names the program it
+// runs, so each element is one argument, whatever it holds (["wget",
+// "--password", "--x"], ["wget", "--password", "my secret is x"]).
+// Elsewhere a value that starts with "--" is the next flag (["--password",
+// "--verbose"]), and one made of prose is text: a word of prose, or several
+// words with a grammatical one among them (print("--password", "is
+// required")), while a passphrase is not ("correct horse battery staple").
+func listPasswordValue(s string, loc []int, dashFlag, argv bool) (cliValue, bool) {
 	if loc[3] == loc[2] {
 		return cliValue{}, false
 	}
-	end, n := quotedPiece(s, loc[6])
-	if n == 0 {
+	v, ok := listElementValue(s, loc[6])
+	if !ok {
 		return cliValue{}, false
 	}
-	v := cliValue{start: loc[6] + n, end: end - n, quoted: true, singleQuoted: s[loc[6]] == '\''}
 	value := s[v.start:v.end]
-	return v, value != "" && (!dashFlag || value[0] != '-') && !strings.HasPrefix(value, "--") && !isListProse(value)
+	return v, value != "" && (!dashFlag || value[0] != '-') && (argv || !strings.HasPrefix(value, "--") && !isListProse(value))
 }
 
-// listNamesNoValueClient reports whether the argument list in code that
-// holds the element quoted at s[open] (a quoted --password) starts with
-// the name of a client whose --password takes no value (["psql",
-// "--password", "-h", "db"], see noValueLong), up to maxCodeElements
-// elements back.
-func listNamesNoValueClient(s string, open int) bool {
+// listProgram returns the first element of the argument list in code that
+// holds the element quoted at s[open] (a quoted --password), with its
+// quotes, up to maxCodeElements elements back: the program the list runs
+// (["psql", "--password", ...]). It is "" when the element at open is the
+// first, or when no list start is found.
+func listProgram(s string, open int) string {
 	if open > 0 && s[open-1] == '\\' {
 		open--
 	}
@@ -504,20 +524,37 @@ func listNamesNoValueClient(s string, open int) bool {
 		code = strings.TrimRight(code, " \t\r\n")
 		switch {
 		case code == "":
-			return false
+			return ""
 		case strings.IndexByte("[(", code[len(code)-1]) >= 0:
-			return isNoValueClientName(first)
+			return first
 		case code[len(code)-1] != ',':
-			return false
+			return ""
 		}
 		code = strings.TrimRight(code[:len(code)-1], " \t\r\n")
 		element, ok := codeElementStart(code)
 		if !ok {
-			return false
+			return ""
 		}
 		code, first = element, code[len(element):]
 	}
-	return false
+	return ""
+}
+
+// isListProgram reports whether element, the first element of an argument
+// list (see listProgram), is a string that names a program: one word that
+// starts with no '-' ("wget", "/usr/bin/wget"), in lower case unless it is
+// a path or has an extension ("C:\\Tools\\Wget.exe"), not a name (cmd), a
+// label ("Usage:") or a word of prose (print("Use", "--password", "to set
+// it")).
+func isListProgram(element string) bool {
+	if element == "" || strings.IndexByte(`"'\`, element[0]) < 0 {
+		return false
+	}
+	name := strings.Trim(element, `"'\`)
+	if name == "" || name[0] == '-' || strings.ContainsAny(name, " \t") || strings.HasSuffix(name, ":") || slices.Contains(proseWords, name) {
+		return false
+	}
+	return strings.ContainsAny(name, `/\.`) || strings.ToLower(name) == name
 }
 
 // isNoValueClientName reports whether element, a quoted element of code,
@@ -597,7 +634,7 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string, noVal
 		if isWrapperOperand(s, &long, lines.wordFrom(closeAt), cmd[0]) || closeAt >= 0 && isPrintedInScript(s, &lines, &scripts, cmd[0]) {
 			continue
 		}
-		skip, skipEnd := closeAt, stringEnd
+		skip, skipEnd := commandCloseQuote(s, cmd, closeAt, stringEnd)
 		var rest string
 		switch {
 		case cmd[0] >= segmentEnd:
@@ -640,6 +677,19 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string, noVal
 		}
 	}
 	return regions
+}
+
+// commandCloseQuote returns where the quote that closes the string a
+// command is quoted in starts and ends, given the one after its name at
+// closeAt, which ends at stringEnd (-1 for none). A client and its
+// subcommand may be elements of an argument list in code (["docker",
+// "login", ...]), and then the quote after the subcommand closes the last
+// of them.
+func commandCloseQuote(s string, cmd []int, closeAt, stringEnd int) (int, int) {
+	if closeAt >= 0 && closeAt < cmd[1] && strings.HasPrefix(s[cmd[1]:], s[closeAt:stringEnd]) {
+		return cmd[1], cmd[1] + stringEnd - closeAt
+	}
+	return closeAt, stringEnd
 }
 
 // noValueFlags holds the ends of the --password and --passwd flags that a
@@ -2055,6 +2105,56 @@ func isJoinedFlag(s string, base int, loc []int) bool {
 	return len(loc) >= 8 && loc[2] < 0 && strings.IndexByte(",([", s[base+loc[0]]) >= 0
 }
 
+// isListFlag reports whether loc, a match of a flag pattern in s from base,
+// is a flag quoted on its own whose value is the next element of an
+// argument list in code (["redis-cli", "-a", "x"], see cliShortFlag).
+func isListFlag(s string, base int, loc []int) bool {
+	return len(loc) >= 8 && loc[5] > loc[4] && s[base+loc[5]] == ',' && loc[len(loc)-2] > loc[5]
+}
+
+// listElementValue returns the value in the string of code that opens at
+// s[open], an element of an argument list, false when no string opens there
+// (a name, such as pw).
+func listElementValue(s string, open int) (cliValue, bool) {
+	end, n := codeStringEnd(s, open)
+	if n == 0 {
+		return cliValue{}, false
+	}
+	return cliValue{start: open + n, end: end - n, quoted: true, singleQuoted: s[open] == '\''}, true
+}
+
+// codeStringEnd is quotedPiece for a string in code: a backslash escapes
+// the character after it in single quotes too ('abc\'def'), and in a string
+// in escaped quotes, which a JSON string holds, an escaped backslash
+// escapes the character after it, as the code in the JSON reads it
+// ([\"wget\", \"--password\", \"abc\\\"def\"]).
+func codeStringEnd(s string, i int) (end, quoteLen int) {
+	switch {
+	case s[i] == '"' || s[i] == '\'':
+		quoteLen = 1
+	case strings.HasPrefix(s[i:], `\"`):
+		quoteLen = 2
+	default:
+		return 0, 0
+	}
+	quote := s[i : i+quoteLen]
+	for j := i + quoteLen; j < len(s); j++ {
+		switch {
+		case s[j] == '\r' || s[j] == '\n':
+			return 0, 0
+		case strings.HasPrefix(s[j:], quote):
+			return j + quoteLen, quoteLen
+		case s[j] != '\\':
+		case quoteLen == 2 && strings.HasPrefix(s[j:], `\\\`):
+			// \\\" and \\\\ are one escaped character.
+			j += 3
+		default:
+			j++
+		}
+	}
+	return 0, 0
+}
+
 // joinedFlagEnd returns where the word of the joined flag that loc found in
 // rest ends: at the first blank in the match, since a flag whose value may
 // follow a blank took the next word as one (docker login -u a,-p -p x,
@@ -2076,7 +2176,9 @@ func (f cliPasswordFlag) valueRegion(s string, base int, loc []int, stringEnd in
 		return taggedRegion{}, false
 	}
 	v, ok := shortFlagValue(s, base, loc, stringEnd, subs)
-	if !ok {
+	if !ok || f.optional && isListFlag(s, base, loc) && strings.HasPrefix(s[v.start:v.end], "-") {
+		// The next element of a list is the next flag of such a client
+		// too (["mongosh", "-p", "--host", "db"]).
 		return taggedRegion{}, false
 	}
 	if f.prefix != "" {
@@ -2108,6 +2210,10 @@ func shortFlagValue(s string, base int, loc []int, stringEnd int, subs substitut
 			return cliValue{}, false
 		}
 		return shellWordValue(s, start, end, stringEnd, subs), true
+	case closed && closeAt == closeFrom && isListFlag(s, base, loc):
+		// The next element of an argument list, which must be a string
+		// (["redis-cli", "-a", "x"], not ["redis-cli", "-a", pw]).
+		return listElementValue(s, start)
 	case closed && closeAt == closeFrom:
 		// A flag quoted on its own ("-p" x, "-p"'x'). In code, "-p"+pw,
 		// "-p" + pw and "-p" . $pw join strings, so a value right after the
@@ -2242,6 +2348,12 @@ func doubleQuotedAcrossLines(s string, i, stringEnd int, subs substitutionMemo) 
 				return 0, 0
 			}
 			j = end - 1
+		case strings.HasPrefix(s[j:], "${"):
+			// A parameter expansion has quotes of its own too
+			// ("$(printf x)${PW:-"a&b"}"), as in quotedPiece.
+			if end := braceExpansionEnd(s, j, subs); end > 0 {
+				j = end - 1
+			}
 		case strings.HasPrefix(s[j:], "\\\r\n"):
 			j += 2
 		case s[j] == '\\':

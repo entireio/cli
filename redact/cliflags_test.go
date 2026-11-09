@@ -542,6 +542,23 @@ func TestString_CommandLinePasswordsQuotingAndListCases(t *testing.T) {
 		{name: "netrc password quoted in backticks on its own", input: "machine h login me password `" + p + "`", want: "machine h login me password REDACTED"},
 		{name: "many arithmetic shifts in substitutions across lines", input: strings.Repeat("openssl enc -in $(printf %s $((1 << n))\nx\n) -pass pass:"+p+"\n", 2000), want: strings.Repeat("openssl enc -in $(printf %s $((1 << n))\nx\n) -pass pass:REDACTED\n", 2000)},
 		{name: "many list elements after comments", input: "f([" + strings.Repeat(`"--password", # c`+"\n", 8000) + `"` + p + `"])`, want: "f([" + strings.Repeat(`"--password", # c`+"\n", 8000) + `"REDACTED"])`},
+		{name: "parameter expansion with quotes after a substitution in a quoted value", input: `wget --password="$(printf x)${PW:-"abc&` + p + `"}" URL`, want: `wget --password="REDACTED" URL`},
+		{name: "openssl source as the next list element", input: `subprocess.run(["openssl", "enc", "-aes-128-cbc", "-pass", "pass:` + p + `"])`, want: `subprocess.run(["openssl", "enc", "-aes-128-cbc", "-pass", "pass:REDACTED"])`},
+		{name: "openssl source joined to its flag in one list element", input: `subprocess.run(["openssl", "enc", "-pass=pass:` + p + `"])`, want: `subprocess.run(["openssl", "enc", "-pass=pass:REDACTED"])`},
+		{name: "openssl passin source as the next element of a call", input: `exec.Command("openssl", "rsa", "-in", "k.pem", "-passin", "pass:` + p + `")`, want: `exec.Command("openssl", "rsa", "-in", "k.pem", "-passin", "pass:REDACTED")`},
+		{name: "redis-cli password as the next list element", input: `subprocess.run(["redis-cli", "-a", "` + p + `", "ping"])`, want: `subprocess.run(["redis-cli", "-a", "REDACTED", "ping"])`},
+		{name: "mongosh password as the next list element", input: `subprocess.run(["mongosh", "-u", "admin", "-p", "` + p + `"])`, want: `subprocess.run(["mongosh", "-u", "admin", "-p", "REDACTED"])`},
+		{name: "sshpass password as the next list element", input: `subprocess.run(["sshpass", "-v", "-p", "` + p + `", "ssh", "host"])`, want: `subprocess.run(["sshpass", "-v", "-p", "REDACTED", "ssh", "host"])`},
+		{name: "sshpass password joined to its flag in a list", input: `subprocess.run(["sshpass", "-p` + p + `", "ssh", "host"])`, want: `subprocess.run(["sshpass", "-pREDACTED", "ssh", "host"])`},
+		{name: "docker login password as the next list element", input: `subprocess.run(["docker", "login", "-u", "me", "-p", "` + p + `"])`, want: `subprocess.run(["docker", "login", "-u", "me", "-p", "REDACTED"])`},
+		{name: "docker login password joined to its flag in a list", input: `subprocess.run(["docker", "login", "-u", "me", "-p` + p + `"])`, want: `subprocess.run(["docker", "login", "-u", "me", "-pREDACTED"])`},
+		{name: "helm registry login password in a list", input: `subprocess.run(["helm", "registry", "login", "-p", "` + p + `", "r.io"])`, want: `subprocess.run(["helm", "registry", "login", "-p", "REDACTED", "r.io"])`},
+		{name: "az login password in a call", input: `exec.Command("az", "login", "-u", "me", "-p", "` + p + `")`, want: `exec.Command("az", "login", "-u", "me", "-p", "REDACTED")`},
+		{name: "list value that starts with two dashes after a program", input: `subprocess.run(["wget", "--password", "--` + p + `", url])`, want: `subprocess.run(["wget", "--password", "REDACTED", url])`},
+		{name: "list passphrase with grammatical words after a program", input: `subprocess.run(["wget", "--password", "my password is ` + p + `", url])`, want: `subprocess.run(["wget", "--password", "REDACTED", url])`},
+		{name: "list value with an escaped single quote", input: `subprocess.run(['wget', '--password', 'abc\'` + p + `'])`, want: `subprocess.run(['wget', '--password', 'REDACTED'])`},
+		{name: "list in escaped quotes with an escaped quote in its value", input: `{"cmd": "[\"wget\", \"--password\", \"abc\\\"` + p + `\"]"}`, want: `{"cmd": "[\"wget\", \"--password\", \"REDACTED\"]"}`},
+		{name: "many client flags as list elements", input: strings.Repeat(`["redis-cli", "-a", "`+p+`", "-a", "`+p+`"]`+"\n", 2000), want: strings.Repeat(`["redis-cli", "-a", "REDACTED", "-a", "REDACTED"]`+"\n", 2000)},
 	})
 }
 
@@ -941,6 +958,17 @@ func TestString_CommandLinePasswordListAndQuotingNonSecretsPreserved(t *testing.
 		`openssl enc -pass pa"ss:$PASSWORD"`,
 		"x=$(( 1 << 2 ))\nmysql -p",
 		`echo 'machine h login me password '"$PW" >> ~/.netrc`,
+		// client flags in argument lists whose next element is a name, the
+		// next flag, a reference or no value of that flag; lists that name
+		// no program
+		`subprocess.run(["redis-cli", "-a", pw, "ping"])`,
+		`subprocess.run(["mongosh", "-p", "--host", "db"])`,
+		`subprocess.run(["mysql", "-p", "dbname"])`,
+		`subprocess.run(["openssl", "enc", "-pass", "env:PW"])`,
+		`subprocess.run(["sshpass", "-e", "ssh", "-p", "2222", "host"])`,
+		`print("Note", "--password", "is required")`,
+		`print("Use", "--password", "to set it")`,
+		`args = ["--password", "--verbose"]`,
 	})
 }
 
