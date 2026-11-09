@@ -283,21 +283,24 @@ func appendLongPasswordFlags(regions []taggedRegion, s string) []taggedRegion {
 			}
 		}
 		// After "=" a leading '-' is part of the value; after a blank it
-		// starts the next flag.
+		// starts the next flag (psql --password -h db), except after
+		// --pass, which always takes a value (curl --pass -x, redis-cli
+		// --pass -x).
 		blank := s[loc[4]] != '='
+		dashFlag := blank && !strings.HasSuffix(s[:loc[2]], "--pass")
 		stringEnd := lines.stringEnd(loc[2] - 1)
 		var r taggedRegion
 		// A '-' after a blank starts the next flag, whose word is not
 		// read: one that a parameter expansion around it goes on after
 		// would be read again for each (--password -${x --password -${x
 		// ...}}).
-		ok := !blank || s[loc[6]] != '-'
+		ok := !dashFlag || s[loc[6]] != '-'
 		var v cliValue
 		if ok {
 			v, ok = longFlagValue(s, loc, stringEnd, subs)
 		}
 		if ok {
-			r, ok = passwordValueRegion(s, v, stringEnd, subs, blank, blank)
+			r, ok = passwordValueRegion(s, v, stringEnd, subs, dashFlag, blank)
 		}
 		if !ok {
 			// A value that is no password may hold the next flag
@@ -403,7 +406,7 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string) []tag
 		if isEntrypointArgument(s, &entrypointStarts, cmdFrom, cmd[0]) {
 			from = entrypoint.at(s, cmd[0], cmd[1]+len(rest), stringEnd)
 		}
-		quotes := quoteScan{s: s[:cmd[1]+len(rest)], i: from, skip: skip, skipEnd: skipEnd, substitutions: true, cases: caseMemo{lines: reads}}
+		quotes := quoteScan{s: s[:cmd[1]+len(rest)], i: from, skip: skip, skipEnd: skipEnd, substitutions: true, backticks: true, cases: caseMemo{lines: reads}}
 		n := len(regions)
 		regions = f.appendFlags(regions, s, &quotes, s[from:cmd[1]+len(rest)], stringEnd, subs)
 		for _, r := range regions[n:] {
@@ -517,7 +520,7 @@ func newNestedScan(s string, i, closeAt, stringEnd int, reads *lineReads) nested
 		kind: segmentArg,
 		from: i,
 		to:   len(s),
-		scan: quoteScan{s: s, i: i, skip: closeAt, skipEnd: stringEnd, substitutions: true, cases: caseMemo{lines: reads}},
+		scan: quoteScan{s: s, i: i, skip: closeAt, skipEnd: stringEnd, substitutions: true, backticks: true, cases: caseMemo{lines: reads}},
 	}}}
 }
 
@@ -573,12 +576,16 @@ func (n *nestedScan) descend(s string, p int) {
 			// arguments runs (sh -c 'case x in x) mysql -pX;; esac').
 			child.starts.lenient = runsScript(s, arg.from, arg.scan.start)
 		} else if start, end, ok := arg.scan.substitutionAt(p); ok {
+			// $( or <( opens one, or a backtick (see backtickSegment).
 			child.kind, child.from, child.to = substitutionArg, start+2, end-1
+			if s[start] == '`' {
+				child.from = start + 1
+			}
 			child.starts.lenient = true
 		} else {
 			return
 		}
-		child.scan = quoteScan{s: s[:child.to], i: child.from, substitutions: true, cases: caseMemo{lines: n.reads}}
+		child.scan = quoteScan{s: s[:child.to], i: child.from, substitutions: true, backticks: true, cases: caseMemo{lines: n.reads}}
 		n.args = append(n.args, child)
 	}
 }
@@ -657,14 +664,42 @@ func (f cliPasswordFlag) segmentRest(s string, lines *quoteScan, paths *programP
 	i := cmd[1]
 	switch {
 	case closeAt < i:
-		return segmentMatch(pattern, s[i:], caseMemo{anyHeight: true, lines: reads, base: i})
+		return backtickSegment(pattern, s, cmd[0], i, len(s), reads, true)
 	case paths.blankAfter(s, lines.inner(), i, closeAt) && !paths.isProgramPath(f, s, lines, closeAt):
-		return segmentMatch(pattern, s[i:closeAt], caseMemo{anyHeight: true})
+		return backtickSegment(pattern, s, cmd[0], i, closeAt, reads, false)
 	case paths.endsText(f, s, lines, cmd[0], closeAt):
 		return s[i:closeAt]
 	default:
 		return s[i:paths.segmentEnd(s, stringEnd, reads)]
 	}
+}
+
+// backtickSegment returns the rest of the pipeline segment of the command
+// whose name is at p, which goes on at i and ends by end, as segmentMatch
+// reads it with pattern, carried on past each command substitution in
+// backticks that closes on its line (openssl enc -in `printf f` -pass
+// pass:x), as the shell reads it. In Markdown code, which an odd number of
+// backticks before the name on its line opens, a backtick ends the segment
+// instead (`openssl enc -in f`, then `ls -pass x`), and so does one that a
+// blank or punctuation follows (see backtickEnd). acrossLines reads
+// substitutions that do not close on their line with reads (see caseMemo).
+func backtickSegment(pattern *regexp.Regexp, s string, p, i, end int, reads *lineReads, acrossLines bool) string {
+	memo := func(at int) caseMemo {
+		if !acrossLines {
+			return caseMemo{anyHeight: true}
+		}
+		return caseMemo{anyHeight: true, lines: reads, base: at}
+	}
+	j := i + len(segmentMatch(pattern, s[i:end], memo(i)))
+	for j+1 < end && s[j] == '`' && strings.IndexByte(codeSpanFollowers, s[j+1]) < 0 && !oddTicksBefore(s, p, reads.subs, nameTickKey) {
+		n := strings.IndexAny(s[j+1:end], "`\r\n")
+		if n < 0 || s[j+1+n] != '`' {
+			break
+		}
+		k := j + 2 + n
+		j = k + len(segmentMatch(pattern, s[k:end], memo(k)))
+	}
+	return s[i:j]
 }
 
 // segmentMatch returns the rest of a pipeline segment that pattern matches
@@ -765,11 +800,13 @@ type joinedArgs struct {
 	// ssh is set after a word that names ssh, dest after its destination,
 	// command after the first word of the command it runs, or all three
 	// after eval, and optionArg after an option of ssh that takes the next
-	// word. unknown is set when the
+	// word. env is set after a word that names env, and split after its
+	// option -S, which takes the next word as the command it splits into
+	// words. unknown is set when the
 	// command may start before from: after a ")" in the text, which closes
 	// a substitution from is in (ssh $(hostname) "nice mysql" -pX), or
 	// after a closing backtick or a continued line break.
-	ssh, dest, command, optionArg, unknown bool
+	ssh, dest, command, optionArg, env, split, unknown bool
 }
 
 // joins reports whether the quoted string at start, in the command whose
@@ -826,15 +863,43 @@ func (a *joinedArgs) read(s string, from, p int) {
 	}
 }
 
-// word reads one word of the command.
+// word reads one word of the command. After env and before ssh, the
+// string env -S splits into words is read as those words
+// (env -S 'ssh db' "nice mysql" -pX, env -S'ssh db' ...,
+// env --split-string='ssh db' ...).
 func (a *joinedArgs) word(word string) {
+	if a.ssh || !a.env {
+		a.step(word)
+		return
+	}
+	shellWords(word, func(arg string) {
+		switch {
+		case a.split:
+			a.split = false
+		case strings.HasPrefix(arg, "-"):
+			line, ok := joinedSplitString(envCommand, arg)
+			a.split = !ok && takesArgument(envCommand, arg) && runsArgument(envCommand, arg)
+			if !ok {
+				return
+			}
+			arg = line
+		default:
+			a.step(arg)
+			return
+		}
+		shellWords(arg, a.step)
+	})
+}
+
+// step reads one word of the command as a single word.
+func (a *joinedArgs) step(word string) {
 	switch {
 	case a.optionArg:
 		a.optionArg = false
 	case a.command:
 	case !a.ssh:
 		name := programName(word)
-		a.ssh = name == sshCommand
+		a.ssh, a.env = name == sshCommand, a.env || name == envCommand
 		if name == evalCommand {
 			a.ssh, a.dest, a.command = true, true, true
 		}
@@ -2028,7 +2093,7 @@ func wordPieceEnd(s string, i, stringEnd int, first bool, subs substitutionMemo)
 	if end := braceExpansionEnd(s, i, subs); end > 0 {
 		return end, false
 	}
-	if end := backtickEnd(s, i, stringEnd); end > 0 {
+	if end := backtickEnd(s, i, stringEnd, subs); end > 0 {
 		return end, false
 	}
 	return i, false
@@ -2040,11 +2105,13 @@ func wordPieceEnd(s string, i, stringEnd int, first bool, subs substitutionMemo)
 // string holding the command, which ends at stringEnd (-1 for none), or 0
 // when none starts there. One that does not close on its line runs to the
 // end of it, as a $(...) does (mysql -pabc`printf hunter2), except in a
-// quoted string. A backtick followed by a blank, the end of a line,
-// punctuation or another backtick ends Markdown code instead
-// (`openssl enc -pass pass:abc`, then `ls`).
-func backtickEnd(s string, i, stringEnd int) int {
-	if s[i] != '`' || i+1 == len(s) || strings.IndexByte(codeSpanFollowers, s[i+1]) >= 0 {
+// quoted string. A backtick after an odd number of others on its line, or
+// followed by a blank, the end of a line, punctuation or another backtick,
+// ends Markdown code instead (`openssl enc -pass pass:abc`, then `ls`;
+// `mysql -pfoo`/`mysql -pbar`). Only the word of a password, which subs
+// marks (see shellWordEnd), reads one.
+func backtickEnd(s string, i, stringEnd int, subs substitutionMemo) int {
+	if subs == nil || s[i] != '`' || i+1 == len(s) || strings.IndexByte(codeSpanFollowers, s[i+1]) >= 0 || oddTicksBefore(s, i, subs, wordTickKey) {
 		return 0
 	}
 	limit := len(s)
@@ -2066,6 +2133,40 @@ func backtickEnd(s string, i, stringEnd int) int {
 // codeSpanFollowers are the characters after which a backtick that ends a
 // shell word ends Markdown code rather than starting a command substitution.
 const codeSpanFollowers = " \t\r\n.,;:!?)]}>'\"`|&<("
+
+// wordTickKey and nameTickKey are the stringEnd of the keys under which a
+// substitutionMemo keeps how many backticks its line holds before the
+// position oddTicksBefore was last asked about, which is the key's end: in
+// password words, and before command names.
+const (
+	wordTickKey = -3
+	nameTickKey = -4
+)
+
+// oddTicksBefore reports whether an odd number of backticks that no
+// backslash escapes comes before s[i] on its line, so the one at s[i]
+// closes Markdown code. subs keeps the count under the key that tickKey
+// names, so positions asked about in increasing order are counted once.
+func oddTicksBefore(s string, i int, subs substitutionMemo, tickKey int) bool {
+	key := substitutionKey{start: -1, stringEnd: tickKey}
+	r, ok := subs[key]
+	from, n := r.end, r.height
+	if !ok || i < from {
+		from, n = strings.LastIndexAny(s[:i], "\r\n")+1, 0
+	}
+	for j := from; j < i; j++ {
+		switch s[j] {
+		case '\r', '\n':
+			n = 0
+		case '`':
+			n++
+		case '\\':
+			j++
+		}
+	}
+	subs[key] = substitutionResult{end: i, height: n}
+	return n%2 == 1
+}
 
 // braceKey is the stringEnd of the keys under which a substitutionMemo
 // keeps the ends of parameter expansions, which no substitution has.
@@ -2500,9 +2601,12 @@ type quoteScan struct {
 	// substitutions steps over the command substitutions outside quoted
 	// strings, and braces the parameter expansions too; subStart and
 	// subEnd bound the last one found.
-	substitutions, braces bool
-	subStart, subEnd      int
-	cases                 caseMemo
+	// backticks steps over the command substitutions in backticks that
+	// close on their line too, which a segment goes on past (see
+	// backtickSegment).
+	substitutions, braces, backticks bool
+	subStart, subEnd                 int
+	cases                            caseMemo
 	// sep is where the text after the last shell operator outside the
 	// quoted strings found starts.
 	sep int
@@ -2588,6 +2692,10 @@ func (q *quoteScan) stepSubstitution() bool {
 	case isSubstitutionStart(q.s, q.i):
 		if n := q.cases.substitutionLen(q.s, q.i); n > 0 {
 			end = q.i + n
+		}
+	case q.backticks && q.s[q.i] == '`':
+		if n := strings.IndexAny(q.s[q.i+1:], "`\r\n"); n >= 0 && q.s[q.i+1+n] == '`' {
+			end = q.i + 2 + n
 		}
 	case q.braces:
 		end = braceExpansionEnd(q.s, q.i, q.cases.memo())
