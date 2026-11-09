@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 )
@@ -14,7 +15,31 @@ import (
 // with literal, case-insensitive pathspecs. A path the index tracks under its
 // own spelling is returned too. Bounded by PathClassificationBudget on top of
 // the caller's context.
+//
+// It reads repoRoot's own index, whatever index an enclosing hook names. A
+// commit hook asking about the commit it is preparing uses
+// CommitIndexPathsIgnoringCase instead.
 func IndexPathsIgnoringCase(ctx context.Context, repoRoot string, paths []string) (map[string][]string, error) {
+	return indexPathsIgnoringCase(ctx, repoRoot, paths, EnvWithoutRepoOverrides())
+}
+
+// CommitIndexPathsIgnoringCase is IndexPathsIgnoringCase for a commit hook
+// running in repoRoot, asking about the commit git is preparing: it keeps the
+// hook's GIT_INDEX_FILE. `git commit -a` and path-limited commits prepare the
+// commit in a temporary index, which can spell a path otherwise than the
+// worktree's index does. The other repository selectors are still dropped,
+// so repoRoot names the repository.
+func CommitIndexPathsIgnoringCase(ctx context.Context, repoRoot string, paths []string) (map[string][]string, error) {
+	env := EnvWithoutRepoOverrides()
+	if index, ok := os.LookupEnv("GIT_INDEX_FILE"); ok {
+		env = append(env, "GIT_INDEX_FILE="+index)
+	}
+	return indexPathsIgnoringCase(ctx, repoRoot, paths, env)
+}
+
+// indexPathsIgnoringCase is IndexPathsIgnoringCase with the environment the
+// git calls run in.
+func indexPathsIgnoringCase(ctx context.Context, repoRoot string, paths, env []string) (map[string][]string, error) {
 	found := make(map[string][]string)
 	if len(paths) == 0 {
 		return found, nil
@@ -32,7 +57,7 @@ func IndexPathsIgnoringCase(ctx context.Context, repoRoot string, paths []string
 		cmd := worktreeGitCommand(ctx, repoRoot, args...)
 		// Per-pathspec magic: an inherited GIT_LITERAL_PATHSPECS would make
 		// git read ":(literal,icase)" as part of the name.
-		cmd.Env = slices.DeleteFunc(withoutPathspecMagicEnv(cmd.Env), func(entry string) bool {
+		cmd.Env = slices.DeleteFunc(withoutPathspecMagicEnv(env), func(entry string) bool {
 			name, _, _ := strings.Cut(entry, "=")
 			return strings.EqualFold(name, "GIT_LITERAL_PATHSPECS")
 		})

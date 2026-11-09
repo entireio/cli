@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 
@@ -135,6 +136,33 @@ func TestFilterTrackableFiles_KeepsGitsSpellingWindows(t *testing.T) {
 	} else {
 		require.Equal(t, []string{"readme.md", "notes.txt"}, got, "readme.md is another file here")
 	}
+}
+
+// TestFilterTrackableFiles_SpellsAsTheCommitIndexWindows covers a commit git
+// prepares in a temporary index: README.md is staged as renamed to
+// readme.md, and a path-limited commit of README.md keeps README.md in the
+// index the hook sees. The transcript's README.md must stay as that index,
+// and so the commit's staged paths, spell it, not take the worktree index's
+// readme.md. CI's Windows job runs it by its name. On a case-sensitive
+// filesystem nothing is respelled.
+func TestFilterTrackableFiles_SpellsAsTheCommitIndexWindows(t *testing.T) {
+	// Not parallel: t.Chdir and t.Setenv.
+	dir, _ := trackedCaseRepo(t)
+	// The worktree root git reports can be another spelling of dir (a short
+	// TEMP path on Windows), which opens a second shared root on it.
+	t.Cleanup(osroot.ResetShared)
+	index, err := os.ReadFile(filepath.Join(dir, ".git", "index"))
+	require.NoError(t, err)
+	commitIndex := filepath.Join(t.TempDir(), "next-index.lock")
+	require.NoError(t, os.WriteFile(commitIndex, index, 0o644))
+	testutil.RunGit(t, dir, "mv", "-f", "README.md", "readme.md")
+	t.Chdir(dir)
+	ctx := context.Background()
+	root, err := paths.WorktreeRoot(ctx)
+	require.NoError(t, err)
+	t.Setenv("GIT_INDEX_FILE", commitIndex)
+
+	require.Equal(t, []string{"README.md"}, filterTrackableFiles(ctx, root, []string{"README.md"}))
 }
 
 // On a case-sensitive filesystem FilterTrackableChanges keeps both

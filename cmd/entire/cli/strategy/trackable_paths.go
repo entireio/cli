@@ -51,7 +51,7 @@ import (
 // (TrackedSpellings): a transcript's readme.md for README.md would otherwise
 // stay pending in the same way.
 func FilterTrackableChanges(ctx context.Context, repoRoot string, modified, added, deleted []string) (keptModified, keptAdded, keptDeleted []string) {
-	spelled := trackedSpellingsOf(ctx, repoRoot, modified, added, deleted)
+	spelled := trackedSpellingsOf(ctx, repoRoot, gitrepo.IndexPathsIgnoringCase, modified, added, deleted)
 	return filterTrackableSpelled(ctx, repoRoot, spelled[0], spelled[1], spelled[2])
 }
 
@@ -277,13 +277,14 @@ func (c *trackablePathCache) store(cache *map[trackablePathKey]bool, repoRoot st
 // drop the only path of a commit that deletes it. A path in HEAD is
 // committable by definition. The gitlink drop still applies. If HEAD cannot be
 // read, every path is ignore-checked as before. The paths kept are spelled as
-// git spells them (TrackedSpellings).
+// the commit's index spells them (commitTrackedSpellings).
 func filterTrackableFiles(ctx context.Context, repoRoot string, files []string) []string {
 	if len(files) == 0 {
 		return files
 	}
-	// Spelled first, so the paths below and the ones kept are git's.
-	files = TrackedSpellings(ctx, repoRoot, files)
+	// Spelled first, so the paths below and the ones kept are git's, as the
+	// commit being prepared spells them.
+	files = commitTrackedSpellings(ctx, repoRoot, files)
 	inHead, err := gitrepo.PathsInHEAD(ctx, repoRoot, files)
 	if err != nil {
 		logging.Debug(logging.WithComponent(ctx, "checkpoint"), "could not check HEAD for transcript files; ignore-checking all of them",

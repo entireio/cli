@@ -12,6 +12,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 )
 
@@ -36,12 +37,32 @@ import (
 // asked, since readme.md and README.md are two files there. If git cannot
 // answer, the files are returned as they are.
 func TrackedSpellings(ctx context.Context, repoRoot string, files []string) []string {
-	return trackedSpellingsOf(ctx, repoRoot, files)[0]
+	return trackedSpellingsOf(ctx, repoRoot, gitrepo.IndexPathsIgnoringCase, files)[0]
 }
 
-// trackedSpellingsOf is TrackedSpellings for several lists, with one git call
-// for all of them.
-func trackedSpellingsOf(ctx context.Context, repoRoot string, lists ...[]string) [][]string {
+// commitTrackedSpellings is TrackedSpellings for paths a commit hook checks
+// against the commit git is preparing. When repoRoot is the worktree the hook
+// runs in, the spellings come from the commit's own index: `git commit -a`
+// and path-limited commits prepare it in a temporary index, which can spell a
+// path otherwise than the worktree's index (a staged rename of README.md to
+// readme.md, with only README.md committed), and the commit's paths come from
+// that index too (getStagedChanges). Another worktree's paths are spelled as
+// its own index does.
+func commitTrackedSpellings(ctx context.Context, repoRoot string, files []string) []string {
+	index := gitrepo.IndexPathsIgnoringCase
+	if root, err := paths.WorktreeRoot(ctx); err == nil && sameDir(root, repoRoot) {
+		index = gitrepo.CommitIndexPathsIgnoringCase
+	}
+	return trackedSpellingsOf(ctx, repoRoot, index, files)[0]
+}
+
+// indexSpellings returns the spellings an index tracks for files, ignoring
+// case, as gitrepo.IndexPathsIgnoringCase does.
+type indexSpellings func(ctx context.Context, repoRoot string, files []string) (map[string][]string, error)
+
+// trackedSpellingsOf is TrackedSpellings for several lists, with one call of
+// index for all of them.
+func trackedSpellingsOf(ctx context.Context, repoRoot string, index indexSpellings, lists ...[]string) [][]string {
 	var all []string
 	for _, list := range lists {
 		all = append(all, list...)
@@ -57,7 +78,7 @@ func trackedSpellingsOf(ctx context.Context, repoRoot string, lists ...[]string)
 	if !anyDirectoryIgnoresCase(cases, all) {
 		return lists
 	}
-	tracked, err := gitrepo.IndexPathsIgnoringCase(ctx, repoRoot, all)
+	tracked, err := index(ctx, repoRoot, all)
 	if err != nil {
 		logging.Debug(logging.WithComponent(ctx, "checkpoint"), "could not read git's spelling of reported paths; keeping them as reported",
 			slog.String("error", err.Error()))

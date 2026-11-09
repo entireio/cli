@@ -45,3 +45,37 @@ func TestIndexPathsIgnoringCase(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, none)
 }
+
+// TestCommitIndexPathsIgnoringCase covers a commit hook's temporary index:
+// README.md is staged as renamed to readme.md, and a path-limited commit is
+// prepared in an index that still has README.md. Only the commit variant
+// reads that index.
+func TestCommitIndexPathsIgnoringCase(t *testing.T) {
+	// Not parallel: isolateGitConfig and GIT_INDEX_FILE use t.Setenv.
+	isolateGitConfig(t)
+	dir := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.CommandContext(t.Context(), "git", append([]string{"-C", dir}, args...)...)
+		cmd.Env = EnvWithoutRepoOverrides()
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "%s", out)
+	}
+	git("init", "-q")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("x\n"), 0o644))
+	git("add", "README.md")
+	commitIndex := filepath.Join(t.TempDir(), "next-index.lock")
+	index, err := os.ReadFile(filepath.Join(dir, ".git", "index"))
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(commitIndex, index, 0o644))
+	git("mv", "README.md", "readme.md")
+	t.Setenv("GIT_INDEX_FILE", commitIndex)
+
+	worktree, err := IndexPathsIgnoringCase(context.Background(), dir, []string{"README.md"})
+	require.NoError(t, err)
+	require.Equal(t, map[string][]string{"readme.md": {"readme.md"}}, worktree, "the worktree's index has the rename")
+
+	commit, err := CommitIndexPathsIgnoringCase(context.Background(), dir, []string{"README.md"})
+	require.NoError(t, err)
+	require.Equal(t, map[string][]string{"readme.md": {"README.md"}}, commit, "the commit's index keeps README.md")
+}
