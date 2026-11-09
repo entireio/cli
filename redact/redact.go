@@ -1385,7 +1385,8 @@ var shellLengthRE = regexp.MustCompile(`^\$\{#` + shellParameterName + `\}$`)
 // isPlaceholderShellExpansion reports whether a ${…} value is a placeholder:
 // one complete expression that is a plain reference, or one whose word is
 // itself empty or a placeholder, so ${DB_PASSWORD:-hunter2},
-// ${1:-hunter2} and ${A}hunter2${B} still count as secrets.
+// ${1:-hunter2} and ${A}hunter2${B} still count as secrets. A single-quoted
+// word is a literal, so ${PW:-'$S3CRET'} is a secret too.
 func isPlaceholderShellExpansion(s string) bool {
 	if !isSingleBraceExpression(s) {
 		return false
@@ -1394,6 +1395,9 @@ func isPlaceholderShellExpansion(s string) bool {
 		return true
 	}
 	if m := shellExpansionWordRE.FindStringSubmatch(s); m != nil {
+		if word := m[1]; len(word) >= 2 && word[0] == '\'' && word[len(word)-1] == '\'' {
+			return isPlaceholderSecretValueQuoted(word, true)
+		}
 		return isPlaceholderSecretValue(m[1])
 	}
 	return !shellTextOperatorRE.MatchString(s)

@@ -1457,6 +1457,21 @@ func TestString_ConnectionSecretsCaughtWithoutScanners(t *testing.T) {
 			want:  "DB_PASSWORD=REDACTED",
 		},
 		{
+			name:  "single-quoted default is a literal, not a reference",
+			input: `DB_PASSWORD=${PW:-'$S3CRET'}`,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "single-quoted credential default is a literal",
+			input: `API_KEY=${K:-'$S3CRET'}`,
+			want:  "API_KEY=REDACTED",
+		},
+		{
+			name:  "single-quoted default in a URI password",
+			input: `postgres://app:${PW:-'$S3CRET'}@db.example.com/app`,
+			want:  "REDACTED",
+		},
+		{
 			name:  "two joined placeholder words form a new literal",
 			input: `DB_PASSWORD=changeme'example'`,
 			want:  "DB_PASSWORD=REDACTED",
@@ -2829,6 +2844,7 @@ func TestString_ShellParameterReferencesPreserved(t *testing.T) {
 		"${@}", "${*}", "${#}", "${?}", "${-}", "${$}", "${!}", "${0}",
 		"${#1}", "${##}", "${#@}", "${#pw[@]}",
 		"${!ref}", "${!pre*}", "${!pw[@]}", "${pw[0]}", "${pw[@]}",
+		"${1:-''}", "${PW:-'changeme'}", "${PW:-'<password>'}",
 	} {
 		cases = append(cases, stringRedactionCase{
 			name:  value,
