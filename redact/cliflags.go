@@ -363,7 +363,16 @@ const (
 var netrcPasswordPatterns = []netrcPattern{
 	{regexp.MustCompile(netrcEntry + netrcLoginPassword), 2, 3},
 	{regexp.MustCompile(netrcEntry + netrcPasswordLogin), 3, 2},
+	// An entry may leave the login to the URL (machine 127.0.0.1 password
+	// x) when it starts a line or a quoted string, as a default entry must,
+	// and its machine is shaped like a host, which prose such as "the
+	// machine learning password policy" is not.
+	{regexp.MustCompile(`(?:^|[\r\n"'])[ \t]*(?i:machine)[ \t\r\n]+(` + netrcHost + `)` + netrcAccount + netrcSep + `(?i:password)` + netrcValueSep + `(` + netrcValue + `)`), 0, 2},
 }
+
+// netrcHost is a .netrc machine name shaped like a host: localhost, or a
+// name or address with a dot (db.example.com, 127.0.0.1).
+const netrcHost = `(?:localhost|[\w-]+(?:\.[\w-]+)+)`
 
 // netrcDefaultPatterns match a default entry right after another entry on
 // its line (machine h login a password x default login b password y), which
@@ -381,7 +390,8 @@ const (
 )
 
 // netrcPattern is a .netrc entry pattern, whose group 1 is the machine, and
-// login and value the indexes of the login and password groups.
+// login and value the indexes of the login and password groups, login 0
+// for one that names no login.
 type netrcPattern struct {
 	pattern      *regexp.Regexp
 	login, value int
@@ -410,9 +420,10 @@ func detectCommandLinePasswords(s string) []taggedRegion {
 
 // mayHoldNetrcEntry reports whether s may hold a .netrc entry, whose
 // keywords curl reads in any case (MACHINE h LOGIN me PASSWORD x, LoGiN me
-// PaSsWoRd x), which spares most strings the patterns.
+// PaSsWoRd x, machine 127.0.0.1 password x), which spares most strings the
+// patterns.
 func mayHoldNetrcEntry(s string) bool {
-	return containsFoldASCII(s, "password") && containsFoldASCII(s, "login")
+	return containsFoldASCII(s, "password") && (containsFoldASCII(s, "login") || containsFoldASCII(s, "machine"))
 }
 
 func appendLongPasswordFlags(regions []taggedRegion, s string, noValue *noValueFlags) []taggedRegion {
@@ -1194,7 +1205,14 @@ func (f cliPasswordFlag) segmentRest(s string, lines *quoteScan, paths *programP
 	case closeAt < i:
 		return backtickSegment(pattern, s, cmd[0], i, len(s), reads, true)
 	case paths.blankAfter(s, lines.inner(), i, closeAt) && !paths.isProgramPath(f, s, lines, closeAt):
-		return backtickSegment(pattern, s, cmd[0], i, closeAt, reads, false)
+		rest := backtickSegment(pattern, s, cmd[0], i, closeAt, reads, false)
+		if i+len(rest) == closeAt && paths.args.joins(s, lines.sep, lines.start) {
+			// eval and ssh join the string to the words after it into the
+			// command they run (eval "openssl enc" -pass pass:x), so a
+			// segment that the string does not end goes on past it.
+			return s[i:paths.segmentEnd(s, stringEnd, reads)]
+		}
+		return rest
 	case paths.endsText(f, s, lines, cmd[0], closeAt):
 		return s[i:closeAt]
 	default:
@@ -1284,9 +1302,38 @@ type programPathMemo struct {
 func (m *programPathMemo) segmentEnd(s string, from int, reads *lineReads) int {
 	if m.goesOnEnd == 0 || from < m.goesOnFrom || from > m.goesOnEnd {
 		m.goesOnFrom = from
-		m.goesOnEnd = from + len(segmentMatch(cliSegmentRest, s[from:], caseMemo{anyHeight: true, lines: reads, base: from}))
+		end := from
+		for {
+			end += len(segmentMatch(cliSegmentRest, s[end:], caseMemo{anyHeight: true, lines: reads, base: end}))
+			// A raw string, as Go writes one, is an element of the list
+			// too (exec.Command("redis-cli", "-a", `x`, "ping")).
+			next := rawListElementEnd(s, end)
+			if next < 0 {
+				break
+			}
+			end = next
+		}
+		m.goesOnEnd = end
 	}
 	return m.goesOnEnd
+}
+
+// rawListElementEnd returns where the raw string that opens at s[at] ends,
+// when it is an element of an argument list in code: a comma comes before
+// it, and a comma or a closing bracket after it. It returns -1 otherwise.
+func rawListElementEnd(s string, at int) int {
+	if at >= len(s) || s[at] != '`' || !strings.HasSuffix(strings.TrimRight(s[:at], " \t"), ",") {
+		return -1
+	}
+	k := strings.IndexAny(s[at+1:], "`\r\n")
+	if k < 0 || s[at+1+k] != '`' {
+		return -1
+	}
+	end := at + k + 2
+	if after := strings.TrimLeft(s[end:], " \t"); after == "" || strings.IndexByte(",)]", after[0]) < 0 {
+		return -1
+	}
+	return end
 }
 
 // blankAfter reports whether s[i:to] holds a blank, where s[from:to] is the
@@ -1566,9 +1613,32 @@ func isCommandToken(s string, start, end int) bool {
 
 // hasExecOptionBefore reports whether the word before start is a long option
 // whose argument, joined to it, is the command to run
-// (docker run --entrypoint=mysql, env --split-string=mysql).
+// (docker run --entrypoint=mysql, env --split-string=mysql), or an ssh
+// option whose value is a command line (ssh -o ProxyCommand=openssl ...).
 func hasExecOptionBefore(s string, start int) bool {
-	return strings.HasSuffix(s[:start], "--entrypoint=") || strings.HasSuffix(s[:start], "--split-string=")
+	return strings.HasSuffix(s[:start], "--entrypoint=") || strings.HasSuffix(s[:start], "--split-string=") || endsSSHCommandOption(s[:start])
+}
+
+// sshCommandOptions are the ssh options whose value is a command line, which
+// ssh runs with the user's shell.
+var sshCommandOptions = []string{"ProxyCommand", "LocalCommand", "RemoteCommand", "KnownHostsCommand"}
+
+// endsSSHCommandOption reports whether before ends with one of
+// sshCommandOptions and the "=" that joins its value, as a word of its own
+// or one quoted (ssh -o 'ProxyCommand=...'), or joined to -o
+// (ssh -oProxyCommand=...). ssh reads the names in any case.
+func endsSSHCommandOption(before string) bool {
+	name, ok := strings.CutSuffix(before, "=")
+	if !ok {
+		return false
+	}
+	for _, o := range sshCommandOptions {
+		k := len(name) - len(o)
+		if k >= 0 && strings.EqualFold(name[k:], o) {
+			return k == 0 || strings.IndexByte(" \t\"'", name[k-1]) >= 0 || strings.HasSuffix(name[:k], "-o")
+		}
+	}
+	return false
 }
 
 // isWordByte reports whether c is an ASCII letter, digit or underscore.
@@ -1675,24 +1745,7 @@ func (c *commandStart) at(s string, from, p int) bool {
 				continue
 			}
 		}
-		for c.j < p {
-			// A quoted string is part of the word (sudo -u "my user").
-			if end, quoteLen := quotedPiece(s[:p], c.j); quoteLen > 0 {
-				c.j = end
-				continue
-			}
-			if c.words != nil {
-				if n := c.words.substitutionLen(s, c.j); n > 0 {
-					c.j += n
-					continue
-				}
-			}
-			r, size := utf8.DecodeRuneInString(s[c.j:])
-			if unicode.IsSpace(r) || size == 1 && (isCommandSeparator(s, c.j) || c.isTick(s, c.j)) {
-				break
-			}
-			c.j += size
-		}
+		c.j = c.wordEnd(s, c.j, p)
 		if c.j >= p {
 			return c.runsBefore(s[c.i:p])
 		}
@@ -1700,6 +1753,35 @@ func (c *commandStart) at(s string, from, p int) bool {
 		c.i = c.j
 	}
 	return c.runs()
+}
+
+// wordEnd returns where the word that goes on at s[j] ends, by p.
+func (c *commandStart) wordEnd(s string, j, p int) int {
+	for j < p {
+		// A quoted string is part of the word (sudo -u "my user").
+		if end, quoteLen := quotedPiece(s[:p], j); quoteLen > 0 {
+			j = end
+			continue
+		}
+		if c.words != nil {
+			if n := c.words.substitutionLen(s, j); n > 0 {
+				j += n
+				continue
+			}
+		}
+		if s[j] == '\\' && j+1 < p && s[j+1] != '\r' && s[j+1] != '\n' {
+			// An escaped character is part of the word, a blank too
+			// (ssh -i /tmp/my\ key mysql).
+			j += 2
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[j:])
+		if unicode.IsSpace(r) || size == 1 && (isCommandSeparator(s, j) || c.isTick(s, j)) {
+			break
+		}
+		j += size
+	}
+	return j
 }
 
 // runsBefore reports whether a command name right after part, the start of
@@ -2216,7 +2298,14 @@ func takesArgument(wrapper, option string) bool {
 // with the directory of its path (docker run --entrypoint=/usr/bin/mysql).
 func runsJoinedArgument(wrapper, part string) bool {
 	option, dir, ok := strings.Cut(part, "=")
-	return ok && (dir == "" || strings.HasSuffix(dir, "/")) && strings.HasPrefix(option, "--") && runsArgument(wrapper, option)
+	if !ok || dir != "" && !strings.HasSuffix(dir, "/") {
+		return false
+	}
+	if wrapper == sshCommand {
+		// The value of an option that runs it (ssh -o ProxyCommand=openssl).
+		return endsSSHCommandOption(option + "=")
+	}
+	return strings.HasPrefix(option, "--") && runsArgument(wrapper, option)
 }
 
 // runsArgument reports whether option, an option of wrapper that takes an
@@ -2318,10 +2407,17 @@ func isListFlag(s string, base int, loc []int) bool {
 // a colon follows ({"literal": "--password", "caseFold": true}).
 func listElementValue(s string, open int) (cliValue, bool) {
 	end, n := codeStringEnd(s, open)
+	if n == 0 && s[open] == '`' {
+		// A raw string, as Go writes one (exec.Command("wget",
+		// "--password", `x`, url)), whose text is literal.
+		if k := strings.IndexAny(s[open+1:], "`\r\n"); k >= 0 && s[open+1+k] == '`' {
+			end, n = open+k+2, 1
+		}
+	}
 	if n == 0 || strings.HasPrefix(strings.TrimLeft(s[end:], " \t\r\n"), ":") {
 		return cliValue{}, false
 	}
-	return cliValue{start: open + n, end: end - n, quoted: true, singleQuoted: s[open] == '\''}, true
+	return cliValue{start: open + n, end: end - n, quoted: true, singleQuoted: s[open] != '"' && s[open] != '\\'}, true
 }
 
 // codeStringEnd is quotedPiece for a string in code: a backslash escapes
@@ -2947,7 +3043,51 @@ func backtickEnd(s string, i, stringEnd int, subs substitutionMemo) int {
 	case i < stringEnd:
 		return 0
 	}
+	if subs != nil {
+		// In a password, one that closes on a later line goes on to it, as
+		// the shell reads it (pass:`printf %s<newline>printf hunter2`).
+		if later := laterBacktick(s, at, subs); later >= 0 {
+			return later + 1
+		}
+	}
 	return at
+}
+
+// backtickLineKey is the stringEnd of the keys under which a
+// substitutionMemo keeps, for a line break, where laterBacktick found the
+// next backtick.
+const backtickLineKey = -5
+
+// laterBacktick returns where the first backtick after s[from], a line
+// break, that no backslash escapes is, or -1 when none is. subs keeps the
+// answer for each line break read, so the passwords on many lines, each
+// with a backtick that closes on none of them, read the text after them
+// once.
+func laterBacktick(s string, from int, subs substitutionMemo) int {
+	key := func(p int) substitutionKey { return substitutionKey{start: p, stringEnd: backtickLineKey} }
+	var breaks []int
+	found := -1
+	for j := from; j < len(s) && found < 0; j++ {
+		switch s[j] {
+		case '\r', '\n':
+			if r, ok := subs[key(j)]; ok {
+				found = r.end - 1
+				j = len(s)
+				continue
+			}
+			breaks = append(breaks, j)
+		case '\\':
+			if j+1 < len(s) && s[j+1] != '\r' && s[j+1] != '\n' {
+				j++
+			}
+		case '`':
+			found = j
+		}
+	}
+	for _, p := range breaks {
+		subs[key(p)] = substitutionResult{end: found + 1}
+	}
+	return found
 }
 
 // backtickClose returns where the command substitution in backticks that
@@ -3053,6 +3193,18 @@ func braceExpansionEnd(s string, i int, braces substitutionMemo) int {
 			case r.closed:
 				j = r.end - 1
 			default:
+				j = len(s)
+			}
+		case '$':
+			// A command substitution is one piece, whose } closes nothing
+			// (${PW:-$(printf a})hunter2}). Its reads are keyed under
+			// braceKey too, which no ${ shares, as one starts with $(.
+			if !strings.HasPrefix(s[j:], "$(") {
+				continue
+			}
+			if r := readSubstitution(s, j, braceKey, braces, false); r.closed {
+				j = r.end - 1
+			} else {
 				j = len(s)
 			}
 		case '}':
@@ -3216,8 +3368,8 @@ func readSubstitution(s string, i, stringEnd int, subs substitutionMemo, multili
 	scan.readsHeredocs = multiline
 	j := i + 2
 	for ; j < limit; j++ {
-		if pieceEnd, quoteLen := quotedPiece(s, j); quoteLen == 1 {
-			j = pieceEnd - 1
+		if end := substitutionQuoteEnd(s, j, limit); end > 0 {
+			j = end - 1
 			continue
 		}
 		switch s[j] {
@@ -3260,6 +3412,22 @@ func readSubstitution(s string, i, stringEnd int, subs substitutionMemo, multili
 	return substitutionResult{end: scan.stop(min(j, limit))}
 }
 
+// substitutionQuoteEnd returns where the quoted string that opens at s[j],
+// in a substitution that ends by limit, ends, or 0 when none opens there. An
+// ANSI-C quoted one is read with its escapes, a backslash escaping its
+// quote ($(printf %s $'a\')&b')).
+func substitutionQuoteEnd(s string, j, limit int) int {
+	if strings.HasPrefix(s[j:limit], "$'") {
+		if end := ansiCQuoteEnd(s[:limit], j); end > 0 {
+			return end
+		}
+	}
+	if pieceEnd, quoteLen := quotedPiece(s, j); quoteLen == 1 {
+		return pieceEnd
+	}
+	return 0
+}
+
 // heredoc is a here-document's delimiter word, which ends its body on a
 // line of its own, after the tabs that <<- strips.
 type heredoc struct {
@@ -3288,6 +3456,11 @@ func heredocAt(s string, j, limit int) (heredoc, int) {
 		if pieceEnd, quoteLen := quotedPiece(s[:limit], end); quoteLen == 1 {
 			end = pieceEnd
 			continue
+		}
+		if s[end] == '\\' && end+1 < limit && s[end+1] != '\r' && s[end+1] != '\n' {
+			// An escaped character is part of the word (<<E\ OF ends at a
+			// line E OF).
+			end++
 		}
 		end++
 	}
@@ -3376,13 +3549,19 @@ func heredocBodyEnd(s string, from, limit int, doc heredoc, subs substitutionMem
 // after a blank or a shell operator ($(echo #x) prints nothing, while
 // $(echo a#b) and ${#x} hold no comment).
 func commentEnd(s string, j, limit, from int) int {
-	if j != from && (strings.IndexByte(" \t\r\n;&|(", s[j-1]) < 0 || isEscaped(s, j-1)) {
+	if !startsComment(s, j, from) {
 		return j
 	}
 	if n := strings.IndexAny(s[j:limit], "\r\n"); n >= 0 {
 		return j + n - 1
 	}
 	return limit - 1
+}
+
+// startsComment reports whether the # at s[j] starts a comment, as
+// commentEnd reads one.
+func startsComment(s string, j, from int) bool {
+	return j == from || strings.IndexByte(" \t\r\n;&|(", s[j-1]) >= 0 && !isEscaped(s, j-1)
 }
 
 // substitutionLimit returns where the reading of a substitution that starts
@@ -3418,6 +3597,11 @@ type substitutionScan struct {
 func (c *substitutionScan) expansion(s string, j, limit int) (next int, stop bool) {
 	if end := braceExpansionEnd(s[:limit], j, c.ends.subs); end > 0 {
 		return end - 1, false
+	}
+	if strings.HasPrefix(s[j:limit], "<<<") {
+		// A here-string reads the word after it, and its last two < start
+		// no here-document ($(cat <<< /dev/null<newline>)).
+		return j + 2, false
 	}
 	if c.readsHeredocs && c.frames[len(c.frames)-1].arithmetic == 0 {
 		// Arithmetic ($((x << n)), ((y = x << n))) has no here-documents.
@@ -3927,6 +4111,14 @@ func (c *caseScan) read(s string, from int) bool {
 			// A "|" between patterns starts no command.
 			c.start = c.start || c.state != casePattern
 			i++
+		case ch == '#' && startsComment(s, i, from):
+			// A comment runs to the end of its line, so a ")" in it ends
+			// no pattern (case x in # note )<newline>x) ...).
+			if n := strings.IndexAny(s[i:], "\r\n"); n >= 0 {
+				i += n
+			} else {
+				i = len(s)
+			}
 		default:
 			end := caseWordEnd(s, i, c.ends)
 			c.word(s[i:end])
@@ -4394,11 +4586,53 @@ func (p netrcPattern) appendPassword(regions []taggedRegion, s string, lines *qu
 	if loc[2] >= 0 {
 		machine = s[loc[2]:loc[3]]
 	}
-	login := s[loc[2*p.login]:loc[2*p.login+1]]
+	login := ""
+	if p.login > 0 {
+		login = s[loc[2*p.login]:loc[2*p.login+1]]
+	}
 	start, end := loc[2*p.value], loc[2*p.value+1]
 	if isNetrcDeclaration(s, loc[0], machine, login, s[start:end]) {
 		return regions
 	}
+	if p.login == 0 && slices.Contains(proseWords, strings.ToLower(s[start:end])) {
+		// Prose about a machine's password, which names no login either
+		// (the machine example.com password is in the vault).
+		return regions
+	}
+	regions = appendNetrcValue(regions, s, lines, start, end)
+	if s[start] == '#' {
+		// curl reads a token that starts with # as a comment that runs to
+		// the end of its line, and the next token as the password
+		// (password #rotated<newline>hunter2). Both are redacted, as other
+		// readers may take the first.
+		if next := netrcTokenAfterComment.FindStringSubmatchIndex(s[end:]); next != nil && s[end+next[2]] != '#' && !isNetrcKeyword(s[end+next[2]:end+next[3]]) {
+			regions = appendNetrcValue(regions, s, lines, end+next[2], end+next[3])
+		}
+	}
+	return regions
+}
+
+// netrcTokenAfterComment matches the rest of a line that a comment ends,
+// the blank and comment lines after it, and the next .netrc token, group 1.
+var netrcTokenAfterComment = regexp.MustCompile(`^[^\r\n]*\r?\n(?:[ \t]*(?:#[^\r\n]*)?\r?\n)*[ \t]*(` + netrcValue + `)`)
+
+// netrcKeywords are the keywords of a .netrc file.
+var netrcKeywords = strings.Fields("machine default login password account macdef")
+
+// isNetrcKeyword reports whether token is a .netrc keyword, which curl reads
+// in any case.
+func isNetrcKeyword(token string) bool {
+	for _, k := range netrcKeywords {
+		if strings.EqualFold(token, k) {
+			return true
+		}
+	}
+	return false
+}
+
+// appendNetrcValue appends the region of the .netrc password token at
+// s[start:end].
+func appendNetrcValue(regions []taggedRegion, s string, lines *quoteScan, start, end int) []taggedRegion {
 	valueStart, valueEnd, singleQuoted := unquoteRangeQuoted(s, start, end)
 	if end-start >= 4 && strings.HasPrefix(s[start:end], `\"`) && strings.HasSuffix(s[start:end], `\"`) {
 		valueStart, valueEnd = start+2, end-2

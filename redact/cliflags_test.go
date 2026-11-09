@@ -641,6 +641,37 @@ func TestString_CommandLinePasswordsNestedAndMultilineSubstitutions(t *testing.T
 	})
 }
 
+// Cases from the review of the sixty-second commit: shell grammar inside
+// substitutions and expansions, ssh options and eval arguments that run a
+// command, raw strings in code, and .netrc entries.
+func TestString_CommandLinePasswordsShellGrammarCases(t *testing.T) {
+	t.Parallel()
+
+	p := cliTestPassword
+	ticks := strings.Repeat("openssl enc -pass pass:`printf %s\nprintf "+p+"` -in f\n", 4000)
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{name: "openssl source in a parameter expansion around a substitution with a brace", input: "openssl enc -pass pass:${PW:-$(printf a})" + p + "} -in f", want: "openssl enc -pass pass:REDACTED -in f"},
+		{name: "openssl source in a substitution with an ANSI-C quoted parenthesis", input: "openssl enc -pass pass:$(printf %s $'a\\')&" + p + "') -in f", want: "openssl enc -pass pass:REDACTED -in f"},
+		{name: "openssl source after a here-string in a substitution", input: "openssl enc -in $(cat <<< /dev/null\n) -pass pass:" + p, want: "openssl enc -in $(cat <<< /dev/null\n) -pass pass:REDACTED"},
+		{name: "openssl source after a here-document with an escaped blank in its word", input: "openssl enc -in $(cat <<E\\ OF\n/dev/null\nE OF\n) -pass pass:" + p, want: "openssl enc -in $(cat <<E\\ OF\n/dev/null\nE OF\n) -pass pass:REDACTED"},
+		{name: "openssl source in a substitution with a parenthesis in a case comment", input: "openssl enc -pass pass:$(case x in # note )\nx) printf " + p + ";; esac) -in f", want: "openssl enc -pass pass:REDACTED -in f"},
+		{name: "openssl source in backticks across lines", input: "openssl enc -pass pass:`printf %s\nprintf " + p + "` -in f", want: "openssl enc -pass pass:REDACTED -in f"},
+		{name: "many openssl sources in backticks across lines", input: ticks, want: strings.Repeat("openssl enc -pass pass:REDACTED -in f\n", 4000)},
+		{name: "openssl source in a single-quoted ssh ProxyCommand", input: "ssh -o 'ProxyCommand=openssl s_client -connect %h:443 -pass pass:" + p + "' host", want: "ssh -o 'ProxyCommand=openssl s_client -connect %h:443 -pass pass:REDACTED' host"},
+		{name: "openssl source in a double-quoted ssh ProxyCommand", input: `ssh -o "ProxyCommand=openssl s_client -connect %h:443 -pass pass:` + p + `" host`, want: `ssh -o "ProxyCommand=openssl s_client -connect %h:443 -pass pass:REDACTED" host`},
+		{name: "openssl source in an ssh LocalCommand joined to -o", input: `ssh -o"localcommand=openssl enc -pass pass:` + p + `" host`, want: `ssh -o"localcommand=openssl enc -pass pass:REDACTED" host`},
+		{name: "openssl source after a quoted command that eval joins", input: `eval "openssl enc" -aes-128-cbc -pass pass:` + p, want: `eval "openssl enc" -aes-128-cbc -pass pass:REDACTED`},
+		{name: "openssl source after a quoted command that ssh joins", input: `ssh db "openssl enc" -pass pass:` + p, want: `ssh db "openssl enc" -pass pass:REDACTED`},
+		{name: "long password in a Go raw string", input: "exec.Command(\"wget\", \"--user=me\", \"--password\", `" + p + "`, url)", want: "exec.Command(\"wget\", \"--user=me\", \"--password\", `REDACTED`, url)"},
+		{name: "short password in a Go raw string", input: "exec.Command(\"redis-cli\", \"-a\", `" + p + "`, \"ping\")", want: "exec.Command(\"redis-cli\", \"-a\", `REDACTED`, \"ping\")"},
+		{name: "openssl source in a Go raw string after another one", input: "exec.Command(\"openssl\", \"enc\", \"-in\", `f`, \"-pass\", `pass:" + p + "`)", want: "exec.Command(\"openssl\", \"enc\", \"-in\", `f`, \"-pass\", `pass:REDACTED`)"},
+		{name: "netrc password after a comment token", input: "machine example.com login me password #rotated\n" + p + "\n", want: "machine example.com login me password REDACTED\nREDACTED\n"},
+		{name: "netrc entry with no login", input: "machine 127.0.0.1 password " + p, want: "machine 127.0.0.1 password REDACTED"},
+		{name: "netrc entry with no login across lines", input: "  machine db.internal\n  password " + p + "\n", want: "  machine db.internal\n  password REDACTED\n"},
+		{name: "netrc entry with no login written by echo", input: `echo "machine 127.0.0.1 password ` + p + `" > ~/.netrc`, want: `echo "machine 127.0.0.1 password REDACTED" > ~/.netrc`},
+	})
+}
+
 // The layer reads every flag on its own, so a flag whose value is no
 // password does not hide the next one, which other layers may not catch.
 func TestCommandLinePasswordsReadFlagAfterRejectedValue(t *testing.T) {
@@ -1026,6 +1057,19 @@ func TestString_CommandLinePasswordListAndQuotingNonSecretsPreserved(t *testing.
 		// list too (PHP, Perl, Kotlin, Groovy, Dart), and which is a name
 		// where they do not
 		`subprocess.run(["redis-cli", "-a", "$PASSWORD"])`,
+		// a wrapper option's argument with an escaped blank, after which
+		// -p2222 is ssh's port
+		`ssh -i /tmp/my\ key mysql -p2222`,
+		`sudo -u my\ user ssh mysql -p2222`,
+		// prose about a machine's password, which names no login
+		"Set the machine example.com password in the vault.",
+		"reset the machine localhost password first",
+		"the machine learning password policy",
+		// mysql's -p takes its password joined, so an element after it is
+		// the database, in a raw string too
+		"exec.Command(\"mysql\", \"-u\", \"root\", \"-p\", `appdb`)",
+		// an ssh option that runs no command
+		`ssh -o "HostName=mysql" -p2222 host`,
 	})
 }
 
