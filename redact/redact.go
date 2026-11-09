@@ -948,9 +948,15 @@ func detectCredentialKeyCaptures(
 // captured, as the second DB_PASSWORD in DB_PASSWORD = DB_PASSWORD = hunter2:
 // the search then starts again inside the match, at a key that begins after
 // the match's own key, so it moves on, and only the key is read again, since
-// its value comes after the region. When the key's value is not redacted, as
-// for b in DB_PASSWORD="a"b= API_KEY=hunter2, the search starts again where
-// the region ends, so that value can not hide an assignment after the region.
+// its value comes after the region. A key that begins with '_' right where the
+// match ends is read as FindAll reads it, with the '_' as the byte before it,
+// so API_KEY="x"_PASSWORD=+hunter2 has the key PASSWORD, as on main. When the
+// key's value is not redacted, as for b in DB_PASSWORD="a"b= API_KEY=hunter2,
+// the search starts again where the region ends, so that value can not hide
+// an assignment after the region. FindAll took that match, though, so a match
+// found inside it whose value stays visible ends that search at the match's
+// end, where FindAll goes on: in API_KEY="x"=a=\b= API_KEY=hunter2, b= is
+// not an assignment whose value takes API_KEY=hunter2.
 //
 // The only values read from inside a region are those visitStraddlingValues
 // finds, and they add to what the region already redacts. One that stays
@@ -959,7 +965,7 @@ func detectCredentialKeyCaptures(
 // as the byte before a key: the closing quote there would make
 // ";client_secret=" the value of b and hide the client_secret.
 func forEachUncoveredMatch(s string, pattern *regexp.Regexp, valueGroup int, visit func(match []int, wholeWord bool) int) {
-	covered, atKey, unredactedEnd := 0, false, -1
+	covered, atKey, unredactedEnd, rejectedEnd := 0, false, -1, -1
 	runs := valueRunEnd{start: -1, end: -1}
 	for from := 0; from < len(s); {
 		searchFrom := from
@@ -987,12 +993,16 @@ func forEachUncoveredMatch(s string, pattern *regexp.Regexp, valueGroup int, vis
 				last, readEnd := visitStraddlingValues(s, pattern, valueGroup, visit, match, end, &runs)
 				covered, unredactedEnd = max(covered, last.end), max(unredactedEnd, readEnd)
 				if keyStart := assignedKeyStart(s, last.start, last.end); keyStart >= valueStart && last.end >= next {
-					next, atKey = keyStart, true
+					// FindAll goes on at match[1], so it reads a '_' there as
+					// the byte before the key.
+					next, atKey = keyStart, keyStart != match[1] || s[keyStart] != '_'
 				} else if keyStart < 0 {
 					next = max(next, last.end)
 				}
 			} else if match[0] < covered {
-				next = covered
+				next, rejectedEnd = covered, match[1]
+			} else if match[0] < rejectedEnd {
+				next = max(rejectedEnd, from+1)
 			}
 		}
 		from = next
