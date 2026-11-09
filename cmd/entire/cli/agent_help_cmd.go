@@ -139,10 +139,12 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"trail finding":   {agentHelpAudienceTaskDriven, false},
 	"trail merge":     {agentHelpAudienceUserOwned, false},
 	"trail resume":    {agentHelpAudienceTaskDriven, false},
-	"trail link":      {agentHelpAudienceUserOwned, false},
-	"trail unlink":    {agentHelpAudienceUserOwned, false},
-	"trail ready":     {agentHelpAudienceUserOwned, false},
-	"trail retarget":  {agentHelpAudienceUserOwned, false},
+	// The push workflow links a branch to the trail the user named, and
+	// trail create prints a link retry when its own linking fails.
+	"trail link":     {agentHelpAudienceTaskDriven, false},
+	"trail unlink":   {agentHelpAudienceUserOwned, false},
+	"trail ready":    {agentHelpAudienceUserOwned, false},
+	"trail retarget": {agentHelpAudienceUserOwned, false},
 	// Each acts on shared state or spends the repository's agent budget.
 	"trail update-branch": {agentHelpAudienceUserOwned, false},
 	"trail ci-pr":         {agentHelpAudienceUserOwned, false},

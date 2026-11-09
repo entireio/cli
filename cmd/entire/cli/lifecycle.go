@@ -506,10 +506,14 @@ func normalizeToolUsePaths(files []string, eventCWD, repoRoot string) []string {
 // sometimes-appropriate query as an always-do step. Which commands suit a given
 // task is agent-help's job, where it is pulled on demand and grouped by who
 // should initiate the command (see agentHelpAudience); this string carries only
-// invariants that hold on every turn of every session. The one workflow it does
-// state is the trail being the work's record: agents otherwise edit only the
-// pull request and share its URL, and they rarely open agent-help at that
-// moment (guidance evals, November 2026).
+// invariants that hold on every turn of every session. The exception is the
+// trail being the work's record, with the steps that make it so: publishing an
+// untracked branch with `trail create` when asked to push, reporting status
+// with the change URL, and answering pull request requests with the pull
+// request only. Agents otherwise open pull requests, edit only their bodies and
+// share their URLs, and they rarely open agent-help at those moments, so the
+// steps are worth their first-turn tokens (guidance evals, November 2026).
+// Details stay in agent-help for trail show/create/update/finding/merge.
 func entireContextInjection(scope trailEnablementScope, base, trails bool) string {
 	var b strings.Builder
 	if base {
