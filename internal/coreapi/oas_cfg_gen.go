@@ -14,7 +14,6 @@ var regexMap = map[string]ogenregex.Regexp{
 	"^$|^[A-Za-z0-9_-]{20,512}$":  ogenregex.MustCompile("^$|^[A-Za-z0-9_-]{20,512}$"),
 	"^$|^[A-Za-z0-9_-]{60,512}$":  ogenregex.MustCompile("^$|^[A-Za-z0-9_-]{60,512}$"),
 	"^[0-9A-HJKMNP-TV-Z]{26}$":    ogenregex.MustCompile("^[0-9A-HJKMNP-TV-Z]{26}$"),
-	"^[a-z0-9][a-z0-9-]*$":        ogenregex.MustCompile("^[a-z0-9][a-z0-9-]*$"),
 }
 
 type (
