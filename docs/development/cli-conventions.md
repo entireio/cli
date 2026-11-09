@@ -915,9 +915,9 @@ truth the first-turn context injection and the `--agent-help-skill` skill point
 agents at, instead of enumerating a surface that goes stale.
 
 When trails are enabled, the first-turn injection introduces a trail as
-project-level intent across repositories and branches. It asks agents to inspect
-the current branch's trail, reuse intent where appropriate, and treat the trail,
-not the pull request, as the record of the work. Asked to push a branch with no
+project-level intent across repositories and branches. It asks agents to check
+the current branch's trail first and treat the trail, not the pull request, as
+the record of the work. Asked to push a branch with no
 trail, agents publish it with `entire trail create` instead of a pull request
 (asking first on the default branch); status reports carry the change's full
 URL; and pull request details are given only when the user asks for the pull

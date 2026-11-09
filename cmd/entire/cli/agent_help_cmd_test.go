@@ -830,6 +830,23 @@ func TestRenderAgentHelpJSON_CarriesAudienceWhereClassified(t *testing.T) {
 		}
 	}
 
+	// The push workflow has agents link a branch to a named trail, so trail
+	// link must stay task-driven; merge stays user-owned.
+	drill = drillJSON(t, projectTrailsHelpTestRoot(), "trail")
+	want = map[string]string{"link": "task-driven", "create": "task-driven", "merge": agentHelpUserOwnedSlug}
+	found := 0
+	for _, sub := range drill.Subcommands {
+		if w, ok := want[sub.Name]; ok {
+			found++
+			if sub.Audience != w {
+				t.Errorf("trail %s audience = %q, want %q", sub.Name, sub.Audience, w)
+			}
+		}
+	}
+	if found != len(want) {
+		t.Errorf("found %d of %d trail subcommands checked for audience", found, len(want))
+	}
+
 	drill = drillJSON(t, root, "org")
 	for _, sub := range drill.Subcommands {
 		if sub.Audience != "" {
