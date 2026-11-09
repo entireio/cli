@@ -13,14 +13,16 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// treeKillPasses bounds how many times Cancel re-reads the process table for
-// descendants that were started while it was killing the ones it had found.
+// treeKillPasses bounds how many times Cancel reads the process table: once
+// before it terminates the direct child, then again for descendants started
+// while it was killing the ones it had found.
 const treeKillPasses = 3
 
 // treeKillExitWait bounds how long Cancel waits, in all, for the processes it
 // terminated to finish exiting. TerminateProcess only starts the termination,
-// and a process can still create a child until it has exited, so each pass
-// reads the table only once the processes from the pass before are gone.
+// and a process can still create a child until it has exited, so a pass that
+// finds nothing ends the walk only if everything terminated before it had
+// already exited when it read the table.
 const treeKillExitWait = 2 * time.Second
 
 // killProcessGroupOnCancel makes ctx-cancel terminate cmd's process and every
@@ -66,17 +68,7 @@ func killProcessTree(p *os.Process) error {
 // output pipe, which is the case this exists for.
 func terminateTree(rootPID uint32, root windows.Handle) error {
 	deadline := time.Now().Add(treeKillExitWait)
-	var killErr error
-	if err := windows.TerminateProcess(root, 1); err != nil && !hasExited(root) {
-		killErr = fmt.Errorf("terminate process %d: %w", rootPID, err)
-	}
-	rootBirth, err := birthOf(root)
-	if err != nil {
-		// Without root's creation time no process can be proven to be its child.
-		return killErr
-	}
-	waitForExit(root, deadline)
-
+	rootBirth, birthErr := birthOf(root)
 	tree := map[uint32]birth{rootPID: rootBirth}
 	var opened []windows.Handle
 	defer func() {
@@ -84,28 +76,57 @@ func terminateTree(rootPID uint32, root windows.Handle) error {
 			_ = windows.CloseHandle(h) //nolint:errcheck // closing a handle we opened; nothing to recover
 		}
 	}()
-	for range treeKillPasses {
+	scan := func() ([]openedProc, bool) {
 		entries, err := processTable()
 		if err != nil {
-			break
+			return nil, false
 		}
-		found := findDescendants(entries, tree, openProcess, closeProcess)
-		if len(found) == 0 {
-			break
-		}
+		return findDescendants(entries, tree, openProcess, closeProcess), true
+	}
+
+	// The first pass reads the table before root is terminated, so it pins
+	// each existing descendant before that one can exit on seeing root die.
+	// Without root's creation time no process can be proven to be its child.
+	var found []openedProc
+	if birthErr == nil {
+		found, _ = scan()
+	}
+	var killErr error
+	if err := windows.TerminateProcess(root, 1); err != nil && !hasExited(root) {
+		killErr = fmt.Errorf("terminate process %d: %w", rootPID, err)
+	}
+	if birthErr != nil {
+		return killErr
+	}
+
+	// terminated holds every process killed so far, root first.
+	terminated := []windows.Handle{root}
+	for pass := 1; ; pass++ {
 		for _, proc := range found {
 			// Keep every handle open until the walk ends: it pins the PID, so
 			// the next pass can still prove which processes this one started.
 			opened = append(opened, proc.handle)
+			terminated = append(terminated, proc.handle)
 			// A descendant that exits on its own first cannot be terminated,
 			// which is the outcome we wanted anyway.
 			_ = windows.TerminateProcess(proc.handle, 1) //nolint:errcheck // best effort, see above
 		}
-		for _, proc := range found {
-			waitForExit(proc.handle, deadline)
+		if pass == treeKillPasses {
+			return killErr
+		}
+		for _, h := range terminated {
+			waitForExit(h, deadline)
+		}
+		settled := allExited(terminated)
+		var ok bool
+		if found, ok = scan(); !ok {
+			return killErr
+		}
+		if len(found) == 0 && settled {
+			// Nothing killed so far could start a process after the table was read.
+			return killErr
 		}
 	}
-	return killErr
 }
 
 // processEntry is one row of the process table: a PID and the PID that was
@@ -209,10 +230,15 @@ func processTable() ([]processEntry, error) {
 }
 
 // openProcess opens pid for termination and reads its parent PID and birth
-// through the new handle.
+// through the new handle. It asks for SYNCHRONIZE too, so Cancel can wait for
+// the process to exit, but settles for a handle without it: a process whose
+// DACL grants termination alone still gets terminated.
 func openProcess(pid uint32) (openedProc, error) {
-	const access = windows.PROCESS_TERMINATE | windows.PROCESS_QUERY_LIMITED_INFORMATION | windows.SYNCHRONIZE
-	handle, err := windows.OpenProcess(access, false, pid)
+	const access = windows.PROCESS_TERMINATE | windows.PROCESS_QUERY_LIMITED_INFORMATION
+	handle, err := windows.OpenProcess(access|windows.SYNCHRONIZE, false, pid)
+	if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		handle, err = windows.OpenProcess(access, false, pid)
+	}
 	if err != nil {
 		return openedProc{}, fmt.Errorf("open process %d: %w", pid, err)
 	}
@@ -260,10 +286,21 @@ func birthOf(handle windows.Handle) (birth, error) {
 	return b, nil
 }
 
-// hasExited reports whether handle's process has already exited.
+// hasExited reports whether handle's process has already exited. A handle
+// without SYNCHRONIZE access reads as not exited.
 func hasExited(handle windows.Handle) bool {
 	event, err := windows.WaitForSingleObject(handle, 0)
 	return err == nil && event == windows.WAIT_OBJECT_0
+}
+
+// allExited reports whether every process in handles has already exited.
+func allExited(handles []windows.Handle) bool {
+	for _, h := range handles {
+		if !hasExited(h) {
+			return false
+		}
+	}
+	return true
 }
 
 // waitForExit waits until handle's process has exited or deadline passes.

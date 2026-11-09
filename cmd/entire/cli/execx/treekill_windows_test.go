@@ -21,7 +21,8 @@ import (
 // treeKillRoleEnv tells a re-exec'd test binary to act as one level of a
 // process tree. It holds the roles from this level down, comma-separated:
 // "wait" starts the next level and waits for it, "exit" starts it and exits,
-// and "sleep" prints "ready <pid>" and sleeps. Every level inherits stdout.
+// "orphan" starts it and exits once its own parent has exited, and "sleep"
+// prints "ready <pid>" and sleeps. Every level inherits stdout.
 const treeKillRoleEnv = "ENTIRE_EXECX_TREEKILL_ROLE"
 
 // TestTreeKillHelperProcess is not a test: it is the process the tree-kill
@@ -39,15 +40,31 @@ func TestTreeKillHelperProcess(t *testing.T) {
 			t.Fatal(err)
 		}
 		time.Sleep(60 * time.Second)
-	case "wait", "exit":
+	case "wait", "exit", "orphan":
+		var parent windows.Handle
+		if role == "orphan" {
+			// Open the parent first, so its PID can't be reused before we wait.
+			ppid, ok := toPID(os.Getppid())
+			if !ok {
+				t.Fatalf("parent PID %d", os.Getppid())
+			}
+			h, err := windows.OpenProcess(windows.SYNCHRONIZE, false, ppid)
+			if err != nil {
+				t.Fatalf("open parent: %v", err)
+			}
+			parent = h
+		}
 		child := treeKillHelper(context.Background(), rest)
 		child.Stdout = os.Stdout
 		child.Stderr = os.Stderr
 		if err := child.Start(); err != nil {
 			t.Fatal(err)
 		}
-		if role == "wait" {
+		switch role {
+		case "wait":
 			_ = child.Wait() //nolint:errcheck // killed by the test; the exit error is expected
+		case "orphan":
+			_, _ = windows.WaitForSingleObject(parent, windows.INFINITE) //nolint:errcheck // exits either way
 		}
 	default:
 		t.Fatalf("unknown role %q", role)
@@ -142,6 +159,7 @@ func TestTerminateOnCancel_KillsProcessTreeWindows(t *testing.T) {
 		{"child of a parent that already exited", "exit,sleep"},
 		{"grandchild", "wait,wait,sleep"},
 		{"grandchild under a parent that already exited", "exit,wait,sleep"},
+		{"grandchild under a child that exits when its parent dies", "wait,orphan,sleep"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
