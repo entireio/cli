@@ -1509,6 +1509,11 @@ func TestString_ShellWordSecretsCaughtWithoutScanners(t *testing.T) {
 			want:  `DB_PASSWORD=REDACTED echo "safe"`,
 		},
 		{
+			name:  "a quoted value that opens inside a word with no blank before its key",
+			input: `DB_PASSWORD=a"API_KEY="hunter2 secretpart"`,
+			want:  `DB_PASSWORD=REDACTED"`,
+		},
+		{
 			name:  "a joined password holding a non-credential key's quoted string stays whole",
 			input: `DB_PASSWORD=abc" note="hunter2" tail"`,
 			want:  `DB_PASSWORD=REDACTED`,
