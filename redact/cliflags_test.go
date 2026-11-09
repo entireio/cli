@@ -383,6 +383,8 @@ func TestString_CommandLinePasswordsNestedAndMultilineSubstitutions(t *testing.T
 	rejected := "wget" + strings.Repeat(" --password -$(x", 8000) + strings.Repeat(")", 8000) + " --password="
 	rejectedCases := "wget" + strings.Repeat(" --password -$(case x in x)", 4000) + strings.Repeat(";; esac)", 4000) + " --password="
 	nestedClients := strings.Repeat("mysql -p"+p+" $(", 4000) + strings.Repeat(")", 4000)
+	rejectedBraces := "wget" + strings.Repeat(" --password -${x", 8000) + strings.Repeat("}", 8000) + " --password="
+	rejectedShortBraces := "mongosh" + strings.Repeat(" -p -${x", 8000) + strings.Repeat("}", 8000) + " -p "
 	assertStringRedactionCases(t, []stringRedactionCase{
 		{name: "password in a substitution that closes on a later line", input: "mysql -p$(printf foo;\nprintf " + p + ") db\nssh -p2222 host", want: "mysql -pREDACTED db\nssh -p2222 host"},
 		{name: "password in a substitution that opens at a line end", input: "mysql -p$(\nprintf " + p + "\n) db", want: "mysql -pREDACTED db"},
@@ -405,6 +407,11 @@ func TestString_CommandLinePasswordsNestedAndMultilineSubstitutions(t *testing.T
 		{name: "password after a case statement in a substitution nested four deep", input: "mysql -h $(case x in x) $(a $(b $(c))) ;; esac) -p" + p, want: "mysql -h $(case x in x) $(a $(b $(c))) ;; esac) -pREDACTED"},
 		{name: "many nested commands with passwords", input: nestedClients, want: strings.ReplaceAll(nestedClients, p, "REDACTED")},
 		{name: "many nested commands with passwords in a script", input: "sh -c '" + nestedClients + "'", want: "sh -c '" + strings.ReplaceAll(nestedClients, p, "REDACTED") + "'"},
+		{name: "openssl source in parameter expansions nested three deep", input: "openssl enc -pass pass:${A:-abc&${B:-${C:-" + p + "}}} -in f", want: "openssl enc -pass pass:REDACTED -in f"},
+		{name: "password in parameter expansions nested four deep", input: "mysql -p${A:-a b${B:-${C:-${D:-" + p + "}}}} db", want: "mysql -pREDACTED db"},
+		{name: "password after parameter expansions nested three deep", input: "mysql -h ${A:-a;${B:-${C:-b}}} -p" + p, want: "mysql -h ${A:-a;${B:-${C:-b}}} -pREDACTED"},
+		{name: "many rejected values in nested parameter expansions", input: rejectedBraces + p, want: rejectedBraces + "REDACTED"},
+		{name: "many rejected short flag values in nested parameter expansions", input: rejectedShortBraces + p, want: rejectedShortBraces + "REDACTED"},
 	})
 }
 
@@ -435,6 +442,7 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		"pg_dump --password-file=/run/secrets/db app",
 		"mongosh --password $(cat /run/secrets/mongo)",
 		"redis-cli -a ${REDIS_PASSWORD} ping",
+		"mysql -p${MYSQL_PWD:-${DB_PASSWORD:-${FALLBACK_PASSWORD}}} db",
 		`mysql -u root -p"$MYSQL_PWD" mydb`,
 		`docker login -u me -p "$(gh auth token)" ghcr.io`,
 		"mongosh -u admin -p --host db.example.com",

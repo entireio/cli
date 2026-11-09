@@ -49,11 +49,6 @@ const (
 
 var cliSubstitution = regexp.MustCompile(`^` + cliSubstitutionPattern)
 
-// cliBraceExpansion matches a parameter expansion at the start of a string
-// (${PW:-hunter&2}, ${PW:-"a b"}), whose braces nest at most two deep. Inside
-// it, blanks and shell operators are part of the word.
-var cliBraceExpansion = regexp.MustCompile(`^\$` + cliBraces2)
-
 // cliBraces1 and cliBraces2 are text in braces that nest at most one and two
 // deep. Inside, a quoted string or an escaped character is one piece.
 const (
@@ -291,8 +286,16 @@ func appendLongPasswordFlags(regions []taggedRegion, s string) []taggedRegion {
 		// starts the next flag.
 		blank := s[loc[4]] != '='
 		stringEnd := lines.stringEnd(loc[2] - 1)
-		v, ok := longFlagValue(s, loc, stringEnd, subs)
 		var r taggedRegion
+		// A '-' after a blank starts the next flag, whose word is not
+		// read: one that a parameter expansion around it goes on after
+		// would be read again for each (--password -${x --password -${x
+		// ...}}).
+		ok := !blank || s[loc[6]] != '-'
+		var v cliValue
+		if ok {
+			v, ok = longFlagValue(s, loc, stringEnd, subs)
+		}
 		if ok {
 			r, ok = passwordValueRegion(s, v, stringEnd, subs, blank, blank)
 		}
@@ -659,13 +662,14 @@ func (f cliPasswordFlag) segmentRest(s string, lines *quoteScan, paths *programP
 // at the start of text, carried on past each command substitution that
 // pattern ended inside, at a ";;" of a case statement
 // ($(case x in x) printf h;; esac)), also one whose parentheses nest deeper
-// than maxSubstitutionHeight.
+// than maxSubstitutionHeight, and past each parameter expansion it ended
+// inside, whose braces nest deeper than it reads (${H:-a;${B:-${C:-b}}}).
 func segmentMatch(pattern *regexp.Regexp, text string) string {
 	n := len(pattern.FindString(text))
-	if !strings.Contains(text[:n], caseKeyword) {
+	if !strings.Contains(text[:n], caseKeyword) && !strings.Contains(text[:n], "${") {
 		return text[:n]
 	}
-	q := quoteScan{s: text, substitutions: true, cases: caseMemo{anyHeight: true}}
+	q := quoteScan{s: text, substitutions: true, braces: true, cases: caseMemo{anyHeight: true}}
 	for n < len(text) {
 		if _, quoted := q.stringAt(n); quoted || n <= q.subStart || n >= q.subEnd {
 			break
@@ -1474,6 +1478,11 @@ func (f cliPasswordFlag) appendFlags(regions []taggedRegion, s string, quotes *q
 // valueRegion returns the password of the flag that loc, a match of f.flag in
 // s from base, found. stringEnd and subs are as in appendFlags.
 func (f cliPasswordFlag) valueRegion(s string, base int, loc []int, stringEnd int, subs substitutionMemo) (taggedRegion, bool) {
+	if f.optional && (len(loc) < 8 || loc[2] < 0) && s[base+loc[len(loc)-2]] == '-' {
+		// The next flag of a client whose value is optional, whose word
+		// is not read (see appendLongPasswordFlags).
+		return taggedRegion{}, false
+	}
 	v, ok := shortFlagValue(s, base, loc, stringEnd, subs)
 	if !ok {
 		return taggedRegion{}, false
@@ -1824,12 +1833,77 @@ func wordPieceEnd(s string, i, stringEnd int, first bool, subs substitutionMemo)
 		// password's goes on to (mysql -p$(printf a<newline>printf b)).
 		return end, false
 	}
-	if strings.HasPrefix(s[i:], "${") {
-		if m := cliBraceExpansion.FindStringIndex(s[i:]); m != nil {
-			return i + m[1], false
-		}
+	if end := braceExpansionEnd(s, i, subs); end > 0 {
+		return end, false
 	}
 	return i, false
+}
+
+// braceKey is the stringEnd of the keys under which a substitutionMemo
+// keeps the ends of parameter expansions, which no substitution has.
+const braceKey = -2
+
+// braceExpansionEnd returns the end of the parameter expansion that starts
+// at s[i] (${PW:-hunter&2}, ${PW:-"a b"}), after its matching brace, or 0
+// when none starts there or it does not close on its line. Inside it,
+// blanks and shell operators are part of the word, braces nest at any
+// depth (${A:-abc&${B:-${C:-x}}}), and a quoted string or an escaped
+// character is one piece. braces, when set, keeps the ends found, of the
+// braces nested in it too, so a word read again after a value that is no
+// password does not read them again.
+func braceExpansionEnd(s string, i int, braces substitutionMemo) int {
+	if !strings.HasPrefix(s[i:], "${") {
+		return 0
+	}
+	if braces == nil {
+		braces = substitutionMemo{}
+	}
+	key := func(p int) substitutionKey { return substitutionKey{start: p, stringEnd: braceKey} }
+	if r, ok := braces[key(i)]; ok {
+		return r.end
+	}
+	open := []int{i}
+	for j := i + 2; j < len(s); j++ {
+		switch s[j] {
+		case '{':
+			r, known := braces[key(j-1)]
+			if s[j-1] != '$' {
+				r, known = braces[key(j)]
+			}
+			switch {
+			case !known && s[j-1] == '$':
+				open = append(open, j-1)
+			case !known:
+				open = append(open, j)
+			case r.closed:
+				j = r.end - 1
+			default:
+				j = len(s)
+			}
+		case '}':
+			braces[key(open[len(open)-1])] = substitutionResult{end: j + 1, closed: true}
+			if open = open[:len(open)-1]; len(open) == 0 {
+				return j + 1
+			}
+		case '\\':
+			if j+1 == len(s) || s[j+1] == '\r' || s[j+1] == '\n' {
+				j = len(s)
+			}
+			j++
+		case '\'', '"':
+			end, quoteLen := quotedPiece(s, j)
+			if quoteLen != 1 {
+				j = len(s)
+			}
+			j = max(j, end-1)
+		case '\r', '\n':
+			j = len(s)
+		}
+	}
+	for _, p := range open {
+		braces[key(p)] = substitutionResult{}
+	}
+	return 0
 }
 
 // maxInnerQuoteScan bounds how far closesInnerString counts quotes, so a
@@ -2177,10 +2251,11 @@ type quoteScan struct {
 	// string in the text around a command.
 	prose bool
 	// substitutions steps over the command substitutions outside quoted
-	// strings, and subStart and subEnd bound the last one found.
-	substitutions    bool
-	subStart, subEnd int
-	cases            caseMemo
+	// strings, and braces the parameter expansions too; subStart and
+	// subEnd bound the last one found.
+	substitutions, braces bool
+	subStart, subEnd      int
+	cases                 caseMemo
 	// sep is where the text after the last shell operator outside the
 	// quoted strings found starts.
 	sep int
@@ -2256,17 +2331,24 @@ func (q *quoteScan) commandFrom(closeAt int) int {
 	return q.sep
 }
 
-// stepSubstitution steps over the command substitution that starts where the
-// scan is, when the scan looks for them, and reports whether one did.
+// stepSubstitution steps over the command substitution, or with braces the
+// parameter expansion, that starts where the scan is, when the scan looks
+// for them, and reports whether one did.
 func (q *quoteScan) stepSubstitution() bool {
-	if !q.substitutions || !isSubstitutionStart(q.s, q.i) {
+	end := 0
+	switch {
+	case !q.substitutions:
+	case isSubstitutionStart(q.s, q.i):
+		if n := q.cases.substitutionLen(q.s, q.i); n > 0 {
+			end = q.i + n
+		}
+	case q.braces:
+		end = braceExpansionEnd(q.s, q.i, q.cases.memo())
+	}
+	if end == 0 {
 		return false
 	}
-	n := q.cases.substitutionLen(q.s, q.i)
-	if n == 0 {
-		return false
-	}
-	q.subStart, q.subEnd, q.i = q.i, q.i+n, q.i+n
+	q.subStart, q.subEnd, q.i = q.i, end, end
 	return true
 }
 
@@ -2289,6 +2371,14 @@ type caseMemo struct {
 	anyHeight bool
 }
 
+// memo returns the memo of the ends found, made on first use.
+func (m *caseMemo) memo() substitutionMemo {
+	if m.subs == nil {
+		m.subs = substitutionMemo{}
+	}
+	return m.subs
+}
+
 // maxSubstitutionHeight is how deep the parentheses of a substitution that
 // a command's segment reads on its own may nest, as in
 // cliSubstitutionPattern. A deeper one is text of the command around it,
@@ -2306,10 +2396,7 @@ func (m *caseMemo) substitutionLen(s string, i int) int {
 	if !isSubstitutionStart(s, i) {
 		return 0
 	}
-	if m.subs == nil {
-		m.subs = substitutionMemo{}
-	}
-	if r := readSubstitution(s, i, -1, m.subs, false); r.closed && (m.anyHeight || r.height <= maxSubstitutionHeight) {
+	if r := readSubstitution(s, i, -1, m.memo(), false); r.closed && (m.anyHeight || r.height <= maxSubstitutionHeight) {
 		return r.end - i
 	}
 	return 0
