@@ -455,22 +455,46 @@ repository B links that commit in B (`strategy/foreign_session.go`).
   and sequence operations. Like the local fast path, `--amend -m` and a
   squash with no trailers to inherit are linked as new commits. The session must be the identified caller (`IsCaller()`),
   ranked together with B's local sessions.
-- Linking copies the session's transcript into B's checkpoints, so it is
-  allowed only when neither repository has an `origin`, or both `origin`
-  remotes have the same owner (host and org/user). Otherwise the commit stays unlinked and the
-  commit-msg hook prints why (prepare-commit-msg's stderr is discarded by
-  the installed hook).
+- Linking copies the session's transcript into B's checkpoints, which B
+  pushes, so it is allowed only when all of these hold, and otherwise the
+  commit stays unlinked and the commit-msg hook prints one path-free line
+  saying why (prepare-commit-msg's stderr is discarded by the installed
+  hook). The line names no command: the committer reading it may be the
+  agent.
+  - **A's clone opted in.** The opt-in is `entire/cross-repo-commits` (`on`
+    or `off`) in A's git common dir, so nothing cloned or pulled can set it;
+    anything but a readable `on` is off. `entire configure
+    --cross-repo-commits on` sets it, and refuses without an interactive
+    terminal so an agent cannot opt its own sessions in; `off` works anywhere.
+    It is read again under A's lock at post-commit.
+  - **B's checkpoints go to A's owner.** Every push URL of B's checkpoint sync
+    remote, and B's `checkpoint_remote` when one is in use, must resolve
+    (`gitremote.ResolveRepository`, SSH aliases included) to a repository on
+    the same forge and owner as A's `origin`. A missing origin, an unknown
+    forge or anything unresolvable refuses. The same owner is not the same
+    audience: a private A's transcript can land in a public B.
+  - **B's redaction covers A's.** B's transcript pipeline runs B's rules
+    alone, so B must enable every scanner engine A enables, PII redaction and
+    each PII category and pattern A has, and every custom rule A has (inline
+    or in `.entire/redactors`, compared by regex). Settings or packs that
+    cannot be read refuse. The OpenAI Privacy Filter is not compared.
 - prepare-commit-msg stamps a fresh checkpoint ID; post-commit condenses the
-  session's transcript since its last checkpoint into B's store, through B's
-  normal pipeline and settings, so A's session content reaches B's checkpoint
-  remote. A's state advances as for a guest-linked commit, under A's lock with
-  a bounded wait; A keeps its own base, files and `LastCheckpointID`.
+  session into B's store through B's normal pipeline and settings, so A's
+  session content reaches B's checkpoint remote. Like every checkpoint, B's
+  stores the session's whole transcript up to the commit, earlier turns
+  included; its displayed window starts after A's last checkpoint. No
+  summary is generated, so B's summary provider never sees it, and the
+  commit's telemetry follows B's consent. A's state advances as for a
+  guest-linked commit, under A's lock with a bounded wait; A keeps its own
+  base, files and `LastCheckpointID`.
+- The checks run at commit time: a remote or redaction rule B adds later is
+  not re-checked before B pushes.
 - B's checkpoint is not finalized at turn end; the rest of the turn goes into
   A's next checkpoint. The window B's checkpoint takes includes any earlier
   turns that edited files in A, so A's next checkpoint starts after them.
-- If post-commit cannot condense (A's lock is busy past its bound, or the
-  session stopped being eligible), B's commit keeps a trailer with no
-  checkpoint; this is logged.
+- If post-commit cannot condense (A's lock is busy past its bound, the
+  opt-in was turned off, or the session stopped being eligible), B's commit
+  keeps a trailer with no checkpoint; this is logged.
 
 Under `go test`, the session state store refuses to open outside the temp
 root (both `session.NewStateStore` and `NewStateStoreForWorktree`), so a test

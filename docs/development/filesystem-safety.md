@@ -313,6 +313,10 @@ to `os.ReadFile`/`os.WriteFile`/`os.MkdirAll`/`os.ReadDir`/`filepath.Walk`.**
 The per-user cache's `session-homes/` directory belongs to
 `session/home_index.go`. Its records are pointers only: readers resolve the
 named worktree's repository through git and load the session from there.
+The cross-repo commit opt-in, `entire/cross-repo-commits` in the git common
+dir, is read and written only through `settings` (`LoadCrossRepoCommitsAt`,
+`SaveCrossRepoCommits`), which open it beneath the common dir with
+`gitdir.OpenPathIn` like the checkpoint push policy; a symlink reads as off.
 
 **An `os.Root`'s base directory must always be a trusted path — one a resolver
 produced — never `filepath.Dir` of the file being opened, and never a path that
