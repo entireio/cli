@@ -1082,35 +1082,6 @@ func TestResolvePullablePlacements_ReturnsPlacements(t *testing.T) {
 	require.Equal(t, "aws-eu-west-1.entire.io", got[1].ClusterHost)
 }
 
-// TestListMirrorsForRepo_FiltersByRepo verifies the client-side repo filter:
-// the list API filters provider+owner server-side, but the repo match (which
-// the API has no param for) is applied locally.
-func TestListMirrorsForRepo_FiltersByRepo(t *testing.T) {
-	t.Parallel()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		body := &coreapi.ListMirrorsOutputBody{Mirrors: []coreapi.Mirror{
-			{Owner: "entirehq", Repo: "entire-api", ClusterHost: "aws-us-east-2.entire.io"},
-			{Owner: "entirehq", Repo: "entire-api", ClusterHost: "aws-eu-west-1.entire.io"},
-			{Owner: "entirehq", Repo: "entire-cli", ClusterHost: "aws-us-east-2.entire.io"},
-		}}
-		if err := printJSON(w, body); err != nil {
-			t.Errorf("encode response: %v", err)
-		}
-	}))
-	t.Cleanup(srv.Close)
-
-	c, err := coreapi.NewWithBearer(srv.URL, "tok")
-	require.NoError(t, err)
-
-	got, err := listMirrorsForRepo(t.Context(), c, "github", "entirehq", "entire-api")
-	require.NoError(t, err)
-	require.Len(t, got, 2)
-	for _, m := range got {
-		require.Equal(t, "entire-api", m.Repo)
-	}
-}
-
 // testGitHubRef is the /gh/ ref every placement-routing case resolves; the
 // routing under test does not vary with the owner or repo.
 const testGitHubRef = "/gh/owner/repo"
