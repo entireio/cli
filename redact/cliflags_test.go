@@ -559,7 +559,12 @@ func TestString_CommandLinePasswordsQuotingAndListCases(t *testing.T) {
 		{name: "helm registry login after options in a list", input: `subprocess.run(["helm", "--debug", "registry", "--kube-context", "x", "login", "-p", "` + p + `"])`, want: `subprocess.run(["helm", "--debug", "registry", "--kube-context", "x", "login", "-p", "REDACTED"])`},
 		{name: "az login after a global option in a list", input: `subprocess.run(["az", "--debug", "login", "-p", "` + p + `"])`, want: `subprocess.run(["az", "--debug", "login", "-p", "REDACTED"])`},
 		{name: "login after global options with and without values", input: "docker --tls --log-level debug login -p " + p, want: "docker --tls --log-level debug login -p REDACTED"},
+		{name: "login after a quoted value or substitution holding an option", input: `docker --config "/opt --debug staging" login -u me -p ` + p + "; docker --config $(mktemp -d /tmp/docker.XXXXXX) login -p " + p, want: `docker --config "/opt --debug staging" login -u me -p REDACTED; docker --config $(mktemp -d /tmp/docker.XXXXXX) login -p REDACTED`},
 		{name: "login after a no-value option in a list", input: `subprocess.run(["docker", "--tls", "login", "-p", "` + p + `"])`, want: `subprocess.run(["docker", "--tls", "login", "-p", "REDACTED"])`},
+		{name: "login after a list value holding an option", input: `subprocess.run(["docker", "--config", "/opt --debug staging", "login", "-p", "` + p + `"])`, want: `subprocess.run(["docker", "--config", "/opt --debug staging", "login", "-p", "REDACTED"])`},
+		{name: "login after quoted and joined global options", input: `docker "--config=/tmp/c" login -p ` + p + `; docker "--debug" login -p ` + p + "; docker --config=/tmp/c login -p " + p + `; subprocess.run(["docker", "--config=/tmp/c", "login", "-p", "` + p + `"])`, want: `docker "--config=/tmp/c" login -p REDACTED; docker "--debug" login -p REDACTED; docker --config=/tmp/c login -p REDACTED; subprocess.run(["docker", "--config=/tmp/c", "login", "-p", "REDACTED"])`},
+		{name: "glued flag with an escaped quote in a list", input: `subprocess.run(['mysql', '-pabc\' ` + p + `', 'app']); [\"mysql\", \"-pabc\\\" ` + p + `\", \"app\"]`, want: `subprocess.run(['mysql', '-pREDACTED', 'app']); [\"mysql\", \"-pREDACTED\", \"app\"]`},
+		{name: "remote command after a wrapper in a list", input: `subprocess.run(["ssh", "host", "mysql", "-p` + p + `"]); subprocess.run(["sudo", "-u", "root", "mysql", "-p` + p + `"])`, want: `subprocess.run(["ssh", "host", "mysql", "-pREDACTED"]); subprocess.run(["sudo", "-u", "root", "mysql", "-pREDACTED"])`},
 		{name: "openssl two-dash pass source and literal", input: "openssl enc --pass pass:" + p + " -in f; openssl enc --password " + p, want: "openssl enc --pass REDACTED -in f; openssl enc --password REDACTED"},
 		{name: "sshpass password after a prompt option in a list", input: `subprocess.run(["sshpass", "-P", "Password:", "-p", "` + p + `", "ssh", "host"])`, want: `subprocess.run(["sshpass", "-P", "Password:", "-p", "REDACTED", "ssh", "host"])`},
 		{name: "sshpass password after a joined prompt option in a list", input: `subprocess.run(["sshpass", "-v", "-PPassword:", "-v", "-p", "` + p + `", "ssh", "host"])`, want: `subprocess.run(["sshpass", "-v", "-PPassword:", "-v", "-p", "REDACTED", "ssh", "host"])`},
@@ -991,6 +996,17 @@ func TestString_CommandLinePasswordListAndQuotingNonSecretsPreserved(t *testing.
 		"docker --debug run --name login -p 8080:80 nginx",
 		"podman --remote run --name login -p 8080:80 nginx",
 		`[\"docker\", \"-D\", \"run\", \"--name\", \"login\", \"-p\", \"8080:80\"]`,
+		// a global option quoted whole, or joined to its value, whose next
+		// word is the subcommand
+		`docker "--debug" run --name login -p 8080:80`,
+		"docker --config=/tmp/c run --name login -p8080:80 nginx",
+		`subprocess.run(["docker", "--config=/tmp/c", "run", "--name", "login", "-p", "8080:80"])`,
+		// ssh's destination, and a wrapper option's argument, in a list:
+		// -p2222 is ssh's port
+		`subprocess.run(["ssh", "mysql", "-p2222"])`,
+		`subprocess.run(["ssh", "-i", "key", "mysql", "-p2222"])`,
+		`subprocess.run(["sudo", "-u", "mysql", "ssh", "-p2222", "host"])`,
+		`subprocess.run(["sshpass", "-e", "ssh", "mysql", "-p2222"])`,
 		// openssl's two-dash sources that name where the password is
 		"openssl enc --pass env:ENC_PASS -in f",
 		"openssl enc --pass file:/run/secrets/key -in f",

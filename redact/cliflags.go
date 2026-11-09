@@ -90,15 +90,27 @@ const (
 )
 
 // cliNoValueGlobalOption matches a global option of the login clients that
-// takes no value (docker --debug, podman --remote, az --verbose) on a
-// command line or as an element of an argument list, and the word after
-// it, group 1, which is then the client's subcommand.
-var cliNoValueGlobalOption = regexp.MustCompile(`(?:^|[\s"',])(?:-[Ddhrv]|--(?:debug|debug-full|tls|tlsverify|verbose|only-show-errors|remote|syslog|noout|transient-store|insecure-policy|insecure-registry|experimental|kube-insecure-skip-tls-verify|help|version))\\?["']?(?:` + cliBlank + `|,` + cliListGap + `)\\?["']?([^-\s"'\\,][^\s"'\\,]*)`)
+// takes no value (docker --debug, podman --remote, az --verbose), or one
+// joined to its value (docker --config=/tmp/c). The word after one is the
+// client's subcommand.
+var cliNoValueGlobalOption = regexp.MustCompile(`^(?:-[Ddhrv]|--(?:debug|debug-full|tls|tlsverify|verbose|only-show-errors|remote|syslog|noout|transient-store|insecure-policy|insecure-registry|experimental|kube-insecure-skip-tls-verify|help|version)$|\\?["']?--[\w-]+=)`)
+
+// cliOptionWord matches the next shell word of a client's global options on
+// a command line, group 1, after the blank before it, and cliListElement the
+// next element of an argument list in code, group 1, after the end of the
+// one before it. They read the words as cliGlobalOptions and cliListOptions
+// do, so text inside a quoted value or a substitution is part of its word
+// (docker --config "/opt --debug x" login, --config $(mktemp -d) login).
+var (
+	cliOptionWord  = regexp.MustCompile(`^` + cliBlank + `(` + cliWordPiece + `+)`)
+	cliListElement = regexp.MustCompile(`^` + cliListNext + `(` + cliListChar + `*)`)
+	cliClientName  = regexp.MustCompile(`^\w+(?i:\.exe)?`)
+)
 
 // cliGlobalOptions matches the options a client takes before its
-// subcommand, each a shell word (--config="$HOME/.docker") with at most one
-// value (--config $(mktemp -d)).
-const cliGlobalOptions = `(?:` + cliBlank + `-` + cliWordPiece + `+(?:` + cliBlank + cliWordPiece + `+)?)*`
+// subcommand, each a shell word (--config="$HOME/.docker", or quoted
+// whole: "--config=/tmp/c") with at most one value (--config $(mktemp -d)).
+const cliGlobalOptions = `(?:` + cliBlank + `(?:-` + cliWordPiece + `+|(?:"-(?:[^"\\\r\n]|\\[^\r\n])*"|'-[^'\r\n]*')` + cliWordPiece + `*)(?:` + cliBlank + cliWordPiece + `+)?)*`
 
 // cliWordPiece is one piece of a shell word: a quoted string, a command
 // substitution, a parameter expansion (${D:-a b}), an escaped line break,
@@ -544,28 +556,77 @@ func listPasswordValue(s string, loc []int, dashFlag, argv bool) (cliValue, bool
 // (["psql", "--password", ...]). It is "" when the element at open is the
 // first, or when no list start is found.
 func listProgram(s string, open int) string {
+	if elements := listElementsBefore(s, open); len(elements) > 0 {
+		return elements[0]
+	}
+	return ""
+}
+
+// listElementsBefore returns the elements of the argument list in code
+// that holds the element quoted at s[open], before it and with their
+// quotes, from the first, up to maxCodeElements back. It returns none when
+// the element at open is the first, or when no list start is found.
+func listElementsBefore(s string, open int) []string {
 	if open > 0 && s[open-1] == '\\' {
 		open--
 	}
-	code, first := s[:open], ""
+	code := s[:open]
+	var elements []string
 	for range maxCodeElements {
 		code = strings.TrimRight(code, " \t\r\n")
 		switch {
 		case code == "":
-			return ""
+			return nil
 		case strings.IndexByte("[(", code[len(code)-1]) >= 0:
-			return first
+			slices.Reverse(elements)
+			return elements
 		case code[len(code)-1] != ',':
-			return ""
+			return nil
 		}
 		code = strings.TrimRight(code[:len(code)-1], " \t\r\n")
 		element, ok := codeElementStart(code)
 		if !ok {
-			return ""
+			return nil
 		}
-		code, first = element, code[len(element):]
+		code, elements = element, append(elements, code[len(element):])
 	}
-	return ""
+	return nil
+}
+
+// isListWrapperOperand reports whether the client name at start is an
+// element of an argument list in code that runs a wrapper, and is the
+// destination of an ssh it runs (["ssh", "mysql", "-p2222"], where -p2222
+// is ssh's port) or the argument of a wrapper's option (["sudo", "-u",
+// "mysql", "ssh", "-p2222"]), as isWrapperOperand reads a command line.
+func isListWrapperOperand(s string, start int) bool {
+	if start == 0 || s[start-1] != '"' && s[start-1] != '\'' {
+		return false
+	}
+	elements := listElementsBefore(s, start-1)
+	if len(elements) == 0 {
+		return false
+	}
+	wrapper, optionArg := listProgramName(elements[0]), false
+	if _, ok := wrapperArgOptions[wrapper]; !ok {
+		return false
+	}
+	for _, element := range elements[1:] {
+		name := strings.Trim(element, `"'\`)
+		_, runsWrapper := wrapperArgOptions[listProgramName(element)]
+		switch {
+		case optionArg:
+			optionArg = false
+		case strings.HasPrefix(name, "-"):
+			optionArg = len(name) == 2 && strings.IndexByte(wrapperArgOptions[wrapper], name[1]) >= 0
+		case runsWrapper && wrapper != sshCommand:
+			// The command it runs is another wrapper (["sudo", "ssh", ...]).
+			wrapper = listProgramName(element)
+		default:
+			// The destination, or the command run, comes before it.
+			return false
+		}
+	}
+	return optionArg || wrapper == sshCommand
 }
 
 // isListProgram reports whether element, the first element of an argument
@@ -716,19 +777,61 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string, noVal
 }
 
 // runsOtherSubcommand reports whether cmd, a match of f.command, is a login
-// client's whose global options took a word after one that takes no value
-// as its value. That word is the client's subcommand, so the client runs
-// no login (docker --debug run --name login -p 8080:80).
+// client's whose global options took a word after one that takes no value,
+// or after one joined to its value, as its value. That word is the client's
+// subcommand, so the client runs no login (docker --debug run --name login
+// -p 8080:80, docker --config=/tmp/c run --name login -p8080:80).
 func (f cliPasswordFlag) runsOtherSubcommand(cmd string) bool {
 	if f.needles[0] != loginCommand {
 		return false
 	}
-	for _, m := range cliNoValueGlobalOption.FindAllStringSubmatch(cmd, -1) {
-		if m[1] != loginCommand && m[1] != "registry" {
+	words := clientWords(cmd)
+	for i := 0; i+1 < len(words); i++ {
+		if !cliNoValueGlobalOption.MatchString(words[i]) {
+			continue
+		}
+		next := words[i+1]
+		if !strings.HasPrefix(next, "-") && next != loginCommand && next != "registry" {
 			return true
 		}
 	}
 	return false
+}
+
+// clientWords returns the words after the client's name in cmd, a match of
+// a login client's command: the elements of an argument list in code, or
+// else the shell words of a command line, each with its quotes removed when
+// it is no more than a quoted name ("--debug", \"run\").
+func clientWords(cmd string) []string {
+	rest := cmd[len(cliClientName.FindString(cmd)):]
+	var words []string
+	if cliListElement.MatchString(rest) {
+		for m := cliListElement.FindStringSubmatchIndex(rest); m != nil; m = cliListElement.FindStringSubmatchIndex(rest) {
+			words = append(words, rest[m[2]:m[3]])
+			rest = rest[m[1]:]
+		}
+		return words
+	}
+	if strings.HasPrefix(rest, `"`) || strings.HasPrefix(rest, "'") {
+		rest = rest[1:]
+	}
+	for m := cliOptionWord.FindStringSubmatchIndex(rest); m != nil; m = cliOptionWord.FindStringSubmatchIndex(rest) {
+		words = append(words, plainWord(rest[m[2]:m[3]]))
+		rest = rest[m[1]:]
+	}
+	return words
+}
+
+// plainWord returns word without its quotes and backslashes when what is
+// left is a plain name or option (-D, --debug, run), and otherwise word.
+func plainWord(word string) string {
+	plain := strings.NewReplacer(`\`, "", `"`, "", `'`, "").Replace(word)
+	for _, c := range plain {
+		if c != '-' && c != '_' && c != '.' && !unicode.IsLetter(c) && !unicode.IsDigit(c) {
+			return word
+		}
+	}
+	return plain
 }
 
 // commandCloseQuote returns where the quote that closes the string a
@@ -2292,7 +2395,7 @@ func shortFlagValue(s string, base int, loc []int, stringEnd int, subs substitut
 		return shellWordValue(s, start, end, stringEnd, subs), true
 	}
 	closeFrom, closed := base+loc[4], loc[5] > loc[4]
-	pieceEnd, quoteLen := quotedPiece(s, base+loc[2])
+	pieceEnd, quoteLen := flagStringEnd(s, base+loc[2])
 	closeAt := pieceEnd - quoteLen
 	switch {
 	case quoteLen == 0:
@@ -2323,6 +2426,19 @@ func shortFlagValue(s string, base int, loc []int, stringEnd int, subs substitut
 		return cliValue{}, false
 	}
 	return quotedFlagValue(s, base+loc[2], start, pieceEnd, quoteLen, stringEnd, subs), true
+}
+
+// flagStringEnd is quotedPiece for the string that opens a short flag at
+// s[open], or codeStringEnd when that string is an element of an argument
+// list in code that names its program, where a backslash escapes a quote
+// in single quotes too (['mysql', '-pabc\' x']).
+func flagStringEnd(s string, open int) (end, quoteLen int) {
+	if p := listProgram(s, open); p != "" && isListProgram(p) {
+		if end, quoteLen = codeStringEnd(s, open); quoteLen > 0 {
+			return end, quoteLen
+		}
+	}
+	return quotedPiece(s, open)
 }
 
 // isConcatOperator reports whether value is an operator that joins strings
@@ -3941,6 +4057,9 @@ const (
 // of another command (docker exec ssh mysql -pX) does not count. from is
 // outside quoted strings, at or before the command's start.
 func isWrapperOperand(s string, long *wrapperStarts, from, start int) bool {
+	if isListWrapperOperand(s, start) {
+		return true
+	}
 	// The word may be a path ending in the name (ssh -i ~/.ssh/mysql),
 	// with escaped operators in it (ssh -i key\;mysql), and quoted
 	// (ssh "mysql").
