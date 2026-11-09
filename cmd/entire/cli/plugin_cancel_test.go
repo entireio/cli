@@ -1,0 +1,102 @@
+package cli
+
+import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"testing"
+	"time"
+)
+
+// startCancelledPlugin runs script as a plugin, cancels the context once the
+// script has created its ready marker, and returns runPlugin's outcome.
+func startCancelledPlugin(t *testing.T, script string) (int, os.Signal) {
+	t.Helper()
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("shell-script plugin harness only runs on Unix")
+	}
+	withPluginDir(t)
+	dir := t.TempDir()
+	ready := filepath.Join(dir, "ready")
+	bin := filepath.Join(dir, "entire-canceller")
+	writeExecutableScript(t, bin, "#!/bin/sh\nREADY='"+ready+"'\n"+script)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, err := os.Stat(ready); err == nil {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		cancel()
+	}()
+	return runPlugin(ctx, "canceller", bin, nil)
+}
+
+func setPluginCancelGOOS(t *testing.T, goos string) {
+	t.Helper()
+	prev := pluginCancelGOOS
+	pluginCancelGOOS = goos
+	t.Cleanup(func() { pluginCancelGOOS = prev })
+}
+
+// A plugin that handles the Ctrl-C itself and exits 0 keeps its exit code.
+// exec reports the cancellation (context.Canceled) instead of the exit, which
+// used to surface as "Failed to run plugin ...: context canceled" and exit 1.
+func TestRunPlugin_CancelledPluginThatExitsCleanlyKeepsExitZero(t *testing.T) { //nolint:paralleltest // mutates env and seams
+	setPluginCancelGOOS(t, runtime.GOOS)
+	code, sig := startCancelledPlugin(t, "trap 'exit 0' INT\ntouch \"$READY\"\nwhile :; do sleep 0.05; done\n")
+	if code != 0 || sig != nil {
+		t.Errorf("runPlugin = (%d, %v), want (0, nil)", code, sig)
+	}
+}
+
+// A plugin without a SIGINT handler still dies from the SIGINT we forward,
+// and that stays reported as a signal.
+func TestRunPlugin_CancelledPluginKilledBySIGINTReportsSignal(t *testing.T) { //nolint:paralleltest // mutates env and seams
+	setPluginCancelGOOS(t, runtime.GOOS)
+	// exec: a shell waiting on a foreground child defers SIGINT until the
+	// child exits, so the signal must reach a process with default handling.
+	code, sig := startCancelledPlugin(t, "touch \"$READY\"\nexec sleep 30\n")
+	if code != ExitPluginSignalled || sig != os.Interrupt {
+		t.Errorf("runPlugin = (%d, %v), want (%d, interrupt)", code, sig, ExitPluginSignalled)
+	}
+}
+
+// The Windows configuration, run against a real child: cancelling neither
+// signals nor kills the plugin (the console already delivered Ctrl-C to it),
+// so it finishes its wind-down and its exit code is what we report.
+func TestRunPlugin_WindowsCancelWaitsForPluginToExit(t *testing.T) { //nolint:paralleltest // mutates env and seams
+	setPluginCancelGOOS(t, windowsGOOS)
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("covered on Windows by TestRunPlugin_WindowsCancelWaitsForRealPlugin")
+	}
+	// The trap tells the two apart: a forwarded SIGINT would exit 9.
+	code, sig := startCancelledPlugin(t, "trap 'exit 9' INT\ntouch \"$READY\"\nsleep 0.5\nexit 3\n")
+	if code != 3 || sig != nil {
+		t.Errorf("runPlugin = (%d, %v), want the plugin's own (3, nil)", code, sig)
+	}
+}
+
+func TestConfigurePluginCancel_Windows(t *testing.T) {
+	t.Parallel()
+	cmd := exec.CommandContext(context.Background(), "unused")
+	configurePluginCancel(cmd, windowsGOOS)
+	if err := cmd.Cancel(); err != nil {
+		t.Errorf("Windows Cancel = %v, want nil (Ctrl-C already reached the plugin)", err)
+	}
+	if cmd.WaitDelay != 0 {
+		t.Errorf("Windows WaitDelay = %v, want 0 (never kill a winding-down plugin)", cmd.WaitDelay)
+	}
+
+	cmd = exec.CommandContext(context.Background(), "unused")
+	configurePluginCancel(cmd, "linux")
+	if cmd.WaitDelay != pluginCancelGrace {
+		t.Errorf("Unix WaitDelay = %v, want %v", cmd.WaitDelay, pluginCancelGrace)
+	}
+}

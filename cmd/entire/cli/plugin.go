@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -289,13 +290,12 @@ func isAgentProtocolBinary(binPath string) bool {
 }
 
 // runPlugin executes the resolved plugin binary, propagating its exit code.
-// On context cancellation the child gets SIGINT (with a 5s grace before the
-// runtime falls back to SIGKILL) so plugins can clean up. Terminal signals
-// reach the child directly via the shared process group.
+// On context cancellation the child is interrupted (configurePluginCancel)
+// so plugins can clean up. Terminal signals reach the child directly via the
+// shared process group.
 func runPlugin(ctx context.Context, pluginName, binPath string, args []string) (exitCode int, killedBy os.Signal) {
 	cmd := exec.CommandContext(ctx, binPath, args...)
-	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
-	cmd.WaitDelay = 5 * time.Second
+	configurePluginCancel(cmd, pluginCancelGOOS)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -342,10 +342,49 @@ func runPlugin(ctx context.Context, pluginName, binPath string, args []string) (
 			// received — see pluginTerminatingSignal.
 			return exitErr.ExitCode(), pluginTerminatingSignal(exitErr.ProcessState)
 		}
+		// The plugin ran and exited successfully after we cancelled it (it
+		// handled the Ctrl-C itself). exec then reports the cancellation
+		// instead of the exit — context.Canceled, or the Cancel func's own
+		// error — but the plugin's outcome is what the user gets: a TUI that
+		// quits cleanly on Ctrl-C exits 0, not "Failed to run plugin".
+		if cmd.ProcessState != nil && cmd.ProcessState.Success() && ctx.Err() != nil {
+			return 0, nil
+		}
 		// Prefix with the plugin name so users can tell parent vs child
 		// errors apart in mixed stderr.
 		fmt.Fprintf(os.Stderr, "Failed to run plugin %s: %v\n", filepath.Base(binPath), err)
 		return 1, nil
 	}
 	return 0, nil
+}
+
+// pluginCancelGOOS selects configurePluginCancel's platform behaviour; a seam
+// so the Windows behaviour is exercised by real child processes everywhere.
+var pluginCancelGOOS = runtime.GOOS
+
+// pluginCancelGrace is how long a cancelled plugin may take to exit after
+// SIGINT before exec kills it, on platforms where we can send SIGINT.
+const pluginCancelGrace = 5 * time.Second
+
+// configurePluginCancel decides what cancelling the root context (our signal
+// handler, on the first Ctrl-C or SIGTERM) does to a running plugin.
+//
+// Unix: send SIGINT, then kill after pluginCancelGrace.
+//
+// Windows: nothing. os.Process.Signal supports only Kill there, so sending
+// os.Interrupt fails ("not supported by windows") and exec reports that
+// failure instead of the plugin's exit. It is also unnecessary: the context
+// is only ever cancelled by os.Interrupt (Ctrl-C/Ctrl-Break), which the
+// console has already delivered to the plugin, a member of the same console.
+// And no kill after a grace period: it would cut off a plugin's own wind-down
+// (entire-stream flushes its last records and closes the session), and a
+// second Ctrl-C already reaches both processes and force-quits the CLI.
+func configurePluginCancel(cmd *exec.Cmd, goos string) {
+	if goos == windowsGOOS {
+		cmd.Cancel = func() error { return nil }
+		cmd.WaitDelay = 0
+		return
+	}
+	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
+	cmd.WaitDelay = pluginCancelGrace
 }
