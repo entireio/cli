@@ -842,7 +842,7 @@ func detectCredentialKeyCaptures(
 	valueGroup := pattern.SubexpIndex("value")
 	keyGroup := pattern.SubexpIndex("key")
 	var regions []taggedRegion
-	forEachUncoveredMatch(s, pattern, valueGroup, func(match []int, wholeWord bool) int {
+	visit := func(match []int, wholeWord bool) int {
 		keyStart, keyEnd, ok := captureRange(match, keyGroup)
 		if !ok {
 			return 0
@@ -884,7 +884,19 @@ func detectCredentialKeyCaptures(
 		}
 		regions = append(regions, captured)
 		return captured.end
-	})
+	}
+	forEachUncoveredMatch(s, pattern, valueGroup, visit)
+	if shouldPreserve == nil {
+		// Each shell-stdin literal is bounded by its own pipe and key, and a
+		// word redacted whole can run into the next command's printf
+		// (printf a"|... ; printf "x y"|...), where the search no longer
+		// starts. So each match is also read as main reads it, as captured.
+		// These literals are never extended past separators, so the reads
+		// stay linear.
+		for _, match := range pattern.FindAllStringSubmatchIndex(s, -1) {
+			visit(match, false)
+		}
+	}
 	return regions
 }
 
