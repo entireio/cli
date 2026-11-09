@@ -206,8 +206,13 @@ const mysqlNoValueOptions = `[ABCENVXbnsv]*`
 
 // cliShortFlag matches the short flag -name after before, then sep and its
 // value: -px, a flag quoted with its value ("-px", "-p x"), or one quoted on
-// its own ("-p" x, "-p"'x').
+// its own ("-p" x, "-p"'x'). A blank before may also be a separator of code,
+// as in an argument list written without blanks (["mysql","-px"]), before a
+// quoted flag only (see isJoinedFlag).
 func cliShortFlag(before, name, sep string) string {
+	if before == `\s` {
+		before = `[\s,(\[]`
+	}
 	return before + `(?:` + cliFlagQuote + `-` + name + cliFlagClose + sep + `|-` + name + sep + `)(` + cliFlagValue + `)`
 }
 
@@ -1163,6 +1168,17 @@ type commandStart struct {
 	// holds the case statements open inside each of them.
 	parens int
 	cases  [caseLevels]caseLevel
+	// tick is the backtick substitution open in a script or a substitution.
+	tick tickLevel
+}
+
+// tickLevel is a backtick substitution open where commandStart reads. A
+// command starts in it (sh -c 'echo `mysql -pX`'), and after the backtick
+// that closes it the words read before it, outer, go on
+// (sh -c 'echo `date` mysql -p2222').
+type tickLevel struct {
+	open  bool
+	outer commandWords
 }
 
 // commandWords is what the words read since a command could start tell of
@@ -1208,6 +1224,9 @@ func (c *commandStart) at(s string, from, p int) bool {
 			case size == 1 && isCommandSeparator(s, c.i):
 				c.separate(s, from)
 				continue
+			case c.isTick(s, c.i):
+				c.backtick()
+				continue
 			case unicode.IsSpace(r):
 				c.i += size
 				c.j = c.i
@@ -1221,7 +1240,7 @@ func (c *commandStart) at(s string, from, p int) bool {
 				continue
 			}
 			r, size := utf8.DecodeRuneInString(s[c.j:])
-			if unicode.IsSpace(r) || size == 1 && isCommandSeparator(s, c.j) {
+			if unicode.IsSpace(r) || size == 1 && (isCommandSeparator(s, c.j) || c.isTick(s, c.j)) {
 				break
 			}
 			c.j += size
@@ -1321,7 +1340,7 @@ func redirection(word string) (ok, operatorOnly bool) {
 // argument whose text starts at from, keeping the case statements and the
 // parentheses open in a script or a substitution.
 func (c *commandStart) separate(s string, from int) {
-	next := commandStart{from: from, i: c.i + 1, j: c.i + 1, lenient: c.lenient, parens: c.parens, cases: c.cases}
+	next := commandStart{from: from, i: c.i + 1, j: c.i + 1, lenient: c.lenient, parens: c.parens, cases: c.cases, tick: c.tick}
 	level := next.level()
 	switch op := s[c.i]; {
 	case !c.lenient:
@@ -1342,6 +1361,28 @@ func (c *commandStart) separate(s string, from int) {
 		level.pos = casePattern
 	}
 	*c = next
+}
+
+// isTick reports whether s[i] is a backtick that opens or closes a command
+// substitution where c reads a script or a substitution. In the text of
+// another quoted argument a backtick is text (the identifiers of
+// mysql -e 'select `mysql`.`user`').
+func (c *commandStart) isTick(s string, i int) bool {
+	return c.lenient && s[i] == '`' && !isEscaped(s, i)
+}
+
+// backtick reads the backtick at c.i: one opens a substitution, where a
+// command starts, and the next closes it, after which the words before it go
+// on (see tickLevel).
+func (c *commandStart) backtick() {
+	if c.tick.open {
+		c.commandWords, c.tick = c.tick.outer, tickLevel{}
+	} else {
+		c.tick = tickLevel{open: true, outer: c.commandWords}
+		c.commandWords = commandWords{}
+	}
+	c.i++
+	c.j = c.i
 }
 
 // caseLevel is what is open of the case statements read inside one pair of
@@ -1402,7 +1443,7 @@ func (c *commandStart) readCase(word string) bool {
 		word = word[i+1:]
 	}
 	if ended {
-		*c = commandStart{from: c.from, i: c.i, j: c.j, lenient: true, parens: c.parens, cases: c.cases}
+		*c = commandStart{from: c.from, i: c.i, j: c.j, lenient: true, parens: c.parens, cases: c.cases, tick: c.tick}
 	}
 	return inCase || ended || restored
 }
@@ -1538,7 +1579,7 @@ func (c *commandStart) word(word string) {
 // would, so a quoted string in it stays one word
 // (env -S 'env A="x ssh"' mysql -pX).
 func (c *commandStart) splitString(arg string) {
-	*c = commandStart{from: c.from, i: c.i, j: c.j, lenient: c.lenient, parens: c.parens, cases: c.cases}
+	*c = commandStart{from: c.from, i: c.i, j: c.j, lenient: c.lenient, parens: c.parens, cases: c.cases, tick: c.tick}
 	shellWords(arg, func(line string) {
 		shellWords(line, c.word)
 	})
@@ -1773,6 +1814,11 @@ func (f cliPasswordFlag) appendFlags(regions []taggedRegion, s string, quotes *q
 				loc[k] += pos
 			}
 		}
+		if isJoinedFlag(s, base, loc) {
+			// The rest of the word is part of it too (-h a,-px,-py).
+			pos = loc[1]
+			continue
+		}
 		r, ok := taggedRegion{}, false
 		if _, quoted := quotes.stringAt(base + loc[0]); !quoted {
 			if _, _, inner := quotes.substitutionAt(base + loc[0]); !inner {
@@ -1792,6 +1838,14 @@ func (f cliPasswordFlag) appendFlags(regions []taggedRegion, s string, quotes *q
 		pos = max(loc[1], r.end-base)
 	}
 	return regions
+}
+
+// isJoinedFlag reports whether loc, a match of a flag pattern in s from base,
+// is a bare short flag after a separator of code, which is joined to the word
+// before it (mysql -h db,-px); only a quoted one starts an element of code
+// there (["mysql","-px"], see cliShortFlag).
+func isJoinedFlag(s string, base int, loc []int) bool {
+	return len(loc) >= 8 && loc[2] < 0 && strings.IndexByte(",([", s[base+loc[0]]) >= 0
 }
 
 // valueRegion returns the password of the flag that loc, a match of f.flag in
