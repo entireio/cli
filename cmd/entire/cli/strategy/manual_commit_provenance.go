@@ -301,26 +301,37 @@ const maxCommitsInFlight = 16
 // headFirstParents returns HEAD and its first-parent ancestors, newest first,
 // at most limit of them. Empty before the first commit.
 func headFirstParents(ctx context.Context, limit int) []string {
+	chain, _ := walkHeadFirstParents(ctx, limit)
+	return chain
+}
+
+// walkHeadFirstParents is headFirstParents that also reports whether the walk
+// reached a root commit, rather than stopping at limit or at an unreadable
+// HEAD or commit.
+func walkHeadFirstParents(ctx context.Context, limit int) (chain []string, reachedRoot bool) {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
-		return nil
+		return nil, false
 	}
 	defer repo.Close()
 	head, err := repo.Head()
 	if err != nil {
-		return nil
+		return nil, false
 	}
 	hash := head.Hash()
-	out := []string{hash.String()}
-	for len(out) < limit {
+	chain = []string{hash.String()}
+	for len(chain) < limit {
 		commit, err := repo.CommitObject(hash)
-		if err != nil || len(commit.ParentHashes) == 0 {
-			break
+		if err != nil {
+			return chain, false
+		}
+		if len(commit.ParentHashes) == 0 {
+			return chain, true
 		}
 		hash = commit.ParentHashes[0]
-		out = append(out, hash.String())
+		chain = append(chain, hash.String())
 	}
-	return out
+	return chain, false
 }
 
 // inFlight is what a post-commit knows of the commits whose post-commit may
@@ -329,9 +340,9 @@ type inFlight struct {
 	// commits are the post-commit's commit and the commits on top of it up to
 	// HEAD.
 	commits map[string]bool
-	// unknown is set when HEAD could not be read, or its first parents ran to
-	// the bound without reaching the commit: any commit may then be a later
-	// one.
+	// unknown is set when HEAD's first parents could not be followed to the
+	// commit or to a root commit: HEAD or a commit could not be read, or the
+	// walk ran to its bound. Any commit may then be a later one.
 	unknown bool
 }
 
@@ -344,18 +355,18 @@ func (f inFlight) mayBePending(hash string) bool {
 // commitsUpToHead returns commit and the commits on top of it up to HEAD,
 // along HEAD's first parents: the commits whose post-commit may not have run
 // when commit's does, since git lets the next commit start once one is made.
-// Only commit when HEAD's first parents end without reaching it (HEAD moved
-// elsewhere), and unknown when they run past maxCommitsInFlight first.
+// Only commit when HEAD's first parents reach a root commit without it (HEAD
+// moved elsewhere), and unknown when the walk stops short of both.
 func commitsUpToHead(ctx context.Context, commit string) inFlight {
 	out := inFlight{commits: map[string]bool{commit: true}}
-	chain := headFirstParents(ctx, maxCommitsInFlight)
+	chain, reachedRoot := walkHeadFirstParents(ctx, maxCommitsInFlight)
 	i := slices.Index(chain, commit)
 	switch {
 	case i >= 0:
 		for _, hash := range chain[:i] {
 			out.commits[hash] = true
 		}
-	case len(chain) == 0 || len(chain) == maxCommitsInFlight:
+	case !reachedRoot:
 		out.unknown = true
 	}
 	return out

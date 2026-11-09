@@ -148,6 +148,29 @@ func TestTakeStampRecords_KeepsAllWhenLaterCommitsAreOutOfReach(t *testing.T) {
 	assert.True(t, ok, "and so is the later marker")
 }
 
+// A commit the walk cannot read stops it short in the same way: post-commit
+// cannot tell whether HEAD moved elsewhere or later commits landed, so it keeps
+// the stamps it does not carry.
+func TestTakeStampRecords_KeepsAllWhenTheWalkCannotReadACommit(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	ctx := context.Background()
+	first, later := id.MustCheckpointID("a1a1a1a1a1a1"), id.MustCheckpointID("e8e8e8e8e8e8")
+
+	require.True(t, recordStampedTrailer(ctx, first))
+	firstCommit := commitWith(t, dir, "first", first)
+	unreadable := commitWith(t, dir, "unreadable")
+	commitWith(t, dir, "top")
+	require.True(t, recordStampedTrailer(ctx, later), "a prepare on the top commit")
+
+	hash := unreadable.Hash.String()
+	gitDir := strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", "--absolute-git-dir"))
+	require.NoError(t, os.Remove(filepath.Join(gitDir, "objects", hash[:2], hash[2:])))
+
+	assert.Equal(t, map[id.CheckpointID]bool{first: true}, takeStampRecords(ctx, firstCommit).stamped)
+	assert.Equal(t, map[id.CheckpointID]bool{later: true}, readStampedTrailers(ctx), "the later stamp is kept")
+}
+
 // A stamp left on top of a commit belongs to a commit that may never happen
 // either: the post-commit after that keeps it no longer.
 func TestTakeStampRecords_DropsAKeptStampAtTheNextPostCommit(t *testing.T) {
