@@ -110,11 +110,11 @@ func TestUpgrade_WindowsReplacesRunningPluginExecutable(t *testing.T) { //nolint
 	}
 }
 
-// Installs made before the hard-link layout (CLI 0.12.x), and every local-dev
-// install from outside the managed tree, give bin\ its own copy of the
-// binary. Replacing that copy while it runs is what failed with "Access is
-// denied"; the rename-aside fallback in replaceManagedEntry is what lets it
-// through.
+// A local-dev install from outside the managed tree, or a binary placed in
+// bin\ by hand, gives bin\ its own copy rather than a hard link to pkg\.
+// Replacing that copy while it runs fails with "Access is denied"; the
+// rename-aside fallback in replaceManagedEntry is what lets it through.
+// (Verified on Windows Server 2025: the test sees exactly one bin\ leftover.)
 func TestInstallPluginFromPath_WindowsReplacesRunningCopiedEntry(t *testing.T) { //nolint:paralleltest // mutates env
 	withIsolatedPluginEnv(t)
 	ping, err := os.ReadFile(filepath.Join(os.Getenv("SystemRoot"), "System32", "PING.EXE"))
