@@ -966,7 +966,11 @@ func detectCredentialKeyCaptures(
 // visible, as a="+" in api_key="x""a="+"b=";client_secret="hunter2", was
 // still matched, so as with FindAll no match takes the last byte of its match
 // as the byte before a key: the closing quote there would make
-// ";client_secret=" the value of b and hide the client_secret.
+// ";client_secret=" the value of b and hide the client_secret. That holds
+// only for a match that starts where FindAll goes on, at or after the end of
+// the match the region was redacted for. One that starts before it, inside
+// the text that match took, as b='b' in API_KEY='b='b'API_KEY=hunter2xyz,
+// is one FindAll never finds, so the second API_KEY is still read.
 func forEachUncoveredMatch(s string, pattern *regexp.Regexp, valueGroup int, visit func(match []int, wholeWord bool) int) {
 	covered, atKey, unredactedEnd, rejectedEnd := 0, false, -1, -1
 	runs := valueRunEnd{start: -1, end: -1}
@@ -1065,21 +1069,24 @@ func nextMatch(s string, pattern *regexp.Regexp, from, limit int) []int {
 // ends inside it adds nothing, and searching it would read a line such as
 // DB_PASSWORD=DB_PASSWORD=...hunter2, once for each key. runs finds where the
 // run of value bytes at a region's end ends (see valueRunEnd). It also returns
-// where the last match it read whose value stays visible ends, or -1, since
-// FindAll would go on from there (see forEachUncoveredMatch).
+// where the last match it read whose value stays visible ends, of those that
+// start at or after where match ends, or -1, since FindAll would go on from
+// there (see forEachUncoveredMatch).
 func visitStraddlingValues(s string, pattern *regexp.Regexp, valueGroup int, visit func(match []int, wholeWord bool) int, match []int, end int, runs *valueRunEnd) (region, int) {
 	type straddled struct {
 		r        region
 		matchEnd int
 	}
-	last := region{match[2*valueGroup], end}
-	pending := []straddled{{last, match[1]}}
+	last, matchEnd := region{match[2*valueGroup], end}, match[1]
+	pending := []straddled{{last, matchEnd}}
 	read := map[int]bool{}
 	unredactedEnd := -1
 	readValue := func(match []int, wholeWord bool, inside region) {
 		valueEnd := visit(match, wholeWord)
 		if valueEnd <= 0 {
-			unredactedEnd = max(unredactedEnd, match[1])
+			if match[0] >= matchEnd {
+				unredactedEnd = max(unredactedEnd, match[1])
+			}
 			return
 		}
 		value := region{match[2*valueGroup], valueEnd}
