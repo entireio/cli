@@ -4594,18 +4594,19 @@ func (p netrcPattern) appendPassword(regions []taggedRegion, s string, lines *qu
 	if isNetrcDeclaration(s, loc[0], machine, login, s[start:end]) {
 		return regions
 	}
-	if p.login == 0 && slices.Contains(proseWords, strings.ToLower(s[start:end])) {
+	if p.login == 0 && !endsNetrcEntry(s, start, end) {
 		// Prose about a machine's password, which names no login either
-		// (the machine example.com password is in the vault).
+		// and goes on after the word (machine example.com password is
+		// in the vault).
 		return regions
 	}
 	regions = appendNetrcValue(regions, s, lines, start, end)
 	if s[start] == '#' {
 		// curl reads a token that starts with # as a comment that runs to
 		// the end of its line, and the next token as the password
-		// (password #rotated<newline>hunter2). Both are redacted, as other
-		// readers may take the first.
-		if next := netrcTokenAfterComment.FindStringSubmatchIndex(s[end:]); next != nil && s[end+next[2]] != '#' && !isNetrcKeyword(s[end+next[2]:end+next[3]]) {
+		// (password #rotated<newline>hunter2), even a keyword. Both are
+		// redacted, as other readers may take the first.
+		if next := netrcTokenAfterComment.FindStringSubmatchIndex(s[end:]); next != nil && s[end+next[2]] != '#' {
 			regions = appendNetrcValue(regions, s, lines, end+next[2], end+next[3])
 		}
 	}
@@ -4628,6 +4629,24 @@ func isNetrcKeyword(token string) bool {
 		}
 	}
 	return false
+}
+
+// endsNetrcEntry reports whether the .netrc password token s[start:end]
+// ends its entry's text, as a file's or a string's that holds one does: the
+// text ends, a line, a comment, a quoted string or a command does, or the
+// next entry or field starts (machine h password x login me). A token that
+// holds an escaped line break ends its line in a string of code
+// ("machine h password x\nmachine ...").
+func endsNetrcEntry(s string, start, end int) bool {
+	rest := strings.TrimLeft(s[end:], " \t")
+	if rest == "" || strings.Contains(s[start:end], `\n`) || strings.IndexByte("\r\n#\"'`;|&<>)]},", rest[0]) >= 0 || strings.HasPrefix(rest, `\"`) {
+		return true
+	}
+	n := strings.IndexAny(rest, " \t\r\n")
+	if n < 0 {
+		n = len(rest)
+	}
+	return isNetrcKeyword(rest[:n])
 }
 
 // appendNetrcValue appends the region of the .netrc password token at

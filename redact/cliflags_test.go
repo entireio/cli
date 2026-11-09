@@ -669,6 +669,9 @@ func TestString_CommandLinePasswordsShellGrammarCases(t *testing.T) {
 		{name: "netrc entry with no login", input: "machine 127.0.0.1 password " + p, want: "machine 127.0.0.1 password REDACTED"},
 		{name: "netrc entry with no login across lines", input: "  machine db.internal\n  password " + p + "\n", want: "  machine db.internal\n  password REDACTED\n"},
 		{name: "netrc entry with no login written by echo", input: `echo "machine 127.0.0.1 password ` + p + `" > ~/.netrc`, want: `echo "machine 127.0.0.1 password REDACTED" > ~/.netrc`},
+		{name: "netrc entry with no login whose password is a prose word", input: "machine db.internal password string", want: "machine db.internal password REDACTED"},
+		{name: "netrc entry with no login before a login field", input: "machine 127.0.0.1 password " + p + " account ops", want: "machine 127.0.0.1 password REDACTED account ops"},
+		{name: "netrc keyword after a comment token", input: "machine db.internal login me password #rotated\naccount\n", want: "machine db.internal login me password REDACTED\nREDACTED\n"},
 	})
 }
 
@@ -1063,6 +1066,7 @@ func TestString_CommandLinePasswordListAndQuotingNonSecretsPreserved(t *testing.
 		`sudo -u my\ user ssh mysql -p2222`,
 		// prose about a machine's password, which names no login
 		"Set the machine example.com password in the vault.",
+		"machine example.com password is stored in the vault",
 		"reset the machine localhost password first",
 		"the machine learning password policy",
 		// mysql's -p takes its password joined, so an element after it is
