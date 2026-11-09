@@ -334,8 +334,11 @@ func hookDirNames(root *os.Root) ([]string, error) {
 	return names, nil
 }
 
-// sameHookFile: a and b are regular files with identical bytes, or symlinks to
-// the same target.
+// sameHookFile: a and b are regular files with identical bytes and permission
+// bits, or symlinks to the same target. The bits count because git and the
+// chain call run a hook only when it is executable: the same script switched
+// on or off with chmod is a different hook, which a backup or keep copy must
+// pick up.
 func sameHookFile(root *os.Root, a, b string) bool {
 	infoA, errA := root.Lstat(a)
 	infoB, errB := root.Lstat(b)
@@ -350,6 +353,9 @@ func sameHookFile(root *os.Root, a, b string) bool {
 		targetA, errA := root.Readlink(a)
 		targetB, errB := root.Readlink(b)
 		return errA == nil && errB == nil && targetA == targetB
+	}
+	if infoA.Mode().Perm() != infoB.Mode().Perm() {
+		return false
 	}
 	dataA, errA := osroot.ReadFileNoFollow(root, a)
 	dataB, errB := osroot.ReadFileNoFollow(root, b)

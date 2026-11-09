@@ -140,3 +140,76 @@ func TestInstallHooks_ReclaimedUserHookKeepsMode(t *testing.T) {
 		})
 	}
 }
+
+// With the mode kept, a change of mode alone is a new version of the hook. A
+// hook manager can put the backed-up script, switched back on, in Entire's
+// place; reusing the switched-off backup would keep the chain call skipping
+// it. The backup is refreshed and the old one kept as an older copy, whether
+// the backup is a copy or a hard link of the file the first install found.
+func TestInstallHooks_ModeOnlyChangeRefreshesBackup(t *testing.T) { //nolint:paralleltest // replaces linkHookFile
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits")
+	}
+	spec := specFor(t, "pre-push")
+	for name, noLinks := range map[string]bool{"copy": true, "link": false} {
+		t.Run(name, func(t *testing.T) {
+			if noLinks {
+				failHookLinks(t)
+			}
+			f := newHooksFixture(t)
+			f.writeMode("pre-push", userHookV1, 0o644)
+			f.install(spec)
+			f.writeMode("pre-push", userHookV1, 0o755) // the same script, switched on, replaces Entire's
+
+			f.install(spec)
+
+			f.assertMode("pre-push"+backupSuffix, 0o755)
+			older := f.olderCopies()
+			if len(older) != 1 {
+				t.Fatalf("older copies = %v, want one", older)
+			}
+			assertHooks(t, f, map[string]string{older[0]: userHookV1, "pre-push" + backupSuffix: userHookV1})
+			f.assertMode(older[0], 0o644)
+		})
+	}
+}
+
+// A keep copy picks up a change of mode alone in the file a manager's wrapper
+// runs, so a user who switches their hook off there gets it back switched off
+// when the manager next moves Entire's hook onto that file and Entire takes it
+// back from the keep copy.
+func TestInstallHooks_KeepCopyFollowsModeOnlyChange(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits")
+	}
+	spec := specFor(t, "commit-msg")
+	chained := generateChainedContent(spec.content, spec.name)
+	for name, tc := range map[string]struct {
+		wrapper, moved string
+	}{
+		"pre-commit":   {preCommitWrapper("commit-msg"), "commit-msg" + legacySuffix},
+		"tool wrapper": {toolWrapper("commit-msg.tool-old", "/dev/null"), "commit-msg.tool-old"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newHooksFixture(t)
+			f.write("commit-msg", tc.wrapper)
+			f.write(tc.moved, chained)
+			f.write("commit-msg"+backupSuffix, userHookV1)
+			f.install(spec)
+			if err := os.Chmod(filepath.Join(f.dir, tc.moved), 0o644); err != nil { // the user switches it off
+				t.Fatal(err)
+			}
+
+			f.install(spec)
+			f.assertMode(tc.moved+backupSuffix, 0o644)
+
+			f.write("commit-msg", tc.wrapper) // the manager reinstalls, moving Entire's hook onto it
+			f.write(tc.moved, chained)
+			f.install(spec)
+			assertHooks(t, f, map[string]string{tc.moved: userHookV1})
+			f.assertMode(tc.moved, 0o644)
+		})
+	}
+}
