@@ -366,6 +366,7 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string) []tag
 	// (mysql -p$(printf x; mysql -py), and is not read again.
 	var found foundPasswords
 	subs := substitutionMemo{}
+	reads := &lineReads{s: s, subs: subs}
 	for _, cmd := range f.command.FindAllStringIndex(s, -1) {
 		if found.covers(cmd[0]) || !isCommandToken(s, cmd[0], cmd[1]) || isContainerNameArgument(s, cmd[0]) || isFunctionName(s, cmd[0], cmd[1]) {
 			continue
@@ -381,11 +382,11 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string) []tag
 		var rest string
 		switch {
 		case cmd[0] >= segmentEnd:
-			nested = newNestedScan(s, cmd[1], closeAt, stringEnd)
+			nested = newNestedScan(s, cmd[1], closeAt, stringEnd, reads)
 			if cmd[1] >= uncutEnd || closeAt != uncutAt {
-				uncutEnd, uncutAt = cmd[1]+len(f.segmentRest(s, &lines, &paths, cmd[1], closeAt, stringEnd)), closeAt
+				uncutEnd, uncutAt = cmd[1]+len(f.segmentRest(s, &lines, &paths, reads, cmd, closeAt, stringEnd)), closeAt
 			}
-			rest = untilUnmatchedParen(s[cmd[1]:uncutEnd], closeAt-cmd[1], stringEnd-cmd[1])
+			rest = untilUnmatchedParen(s[cmd[1]:uncutEnd], closeAt-cmd[1], stringEnd-cmd[1], caseMemo{anyHeight: true, lines: reads, base: cmd[1]})
 			segmentEnd = cmd[1] + len(rest)
 		case f.leading:
 			// Only the options right after the name are read, and they
@@ -402,7 +403,7 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string) []tag
 		if isEntrypointArgument(s, &entrypointStarts, cmdFrom, cmd[0]) {
 			from = entrypoint.at(s, cmd[0], cmd[1]+len(rest), stringEnd)
 		}
-		quotes := quoteScan{s: s[:cmd[1]+len(rest)], i: from, skip: skip, skipEnd: skipEnd, substitutions: true}
+		quotes := quoteScan{s: s[:cmd[1]+len(rest)], i: from, skip: skip, skipEnd: skipEnd, substitutions: true, cases: caseMemo{lines: reads}}
 		n := len(regions)
 		regions = f.appendFlags(regions, s, &quotes, s[from:cmd[1]+len(rest)], stringEnd, subs)
 		for _, r := range regions[n:] {
@@ -468,6 +469,8 @@ type nestedScan struct {
 	// args are the segment, the quoted string or command substitution in
 	// it that the last name was in, the one in that, and so on.
 	args []nestedArg
+	// reads reads the substitutions that close on a later line.
+	reads *lineReads
 }
 
 // nestedArg is the text of a segment, a quoted string or a command
@@ -509,12 +512,12 @@ const (
 // newNestedScan returns a scan of the segment of a command whose name ends
 // at i, in a quoted string that closes at closeAt and ends at stringEnd
 // (both -1 when it is in none).
-func newNestedScan(s string, i, closeAt, stringEnd int) nestedScan {
-	return nestedScan{args: []nestedArg{{
+func newNestedScan(s string, i, closeAt, stringEnd int, reads *lineReads) nestedScan {
+	return nestedScan{reads: reads, args: []nestedArg{{
 		kind: segmentArg,
 		from: i,
 		to:   len(s),
-		scan: quoteScan{s: s, i: i, skip: closeAt, skipEnd: stringEnd, substitutions: true},
+		scan: quoteScan{s: s, i: i, skip: closeAt, skipEnd: stringEnd, substitutions: true, cases: caseMemo{lines: reads}},
 	}}}
 }
 
@@ -538,14 +541,14 @@ func (n *nestedScan) rest(f cliPasswordFlag, s string, cmd []int, closeAt, strin
 		if !parent.runsAt(s, arg.from-arg.quote) {
 			return "", 0, 0, false
 		}
-		rest = s[cmd[1] : end+len(segmentMatch(pattern, s[end:max(parent.to, end)]))]
+		rest = s[cmd[1] : end+len(segmentMatch(pattern, s[end:max(parent.to, end)], caseMemo{anyHeight: true, lines: n.reads, base: end}))]
 		parent.readEnd = cmd[1] + len(rest)
 		return rest, arg.to, end, true
 	}
 	if !arg.runsAt(s, p) {
 		return "", 0, 0, false
 	}
-	rest = segmentMatch(pattern, s[cmd[1]:max(arg.to, cmd[1])])
+	rest = segmentMatch(pattern, s[cmd[1]:max(arg.to, cmd[1])], caseMemo{anyHeight: true, lines: n.reads, base: cmd[1]})
 	arg.readEnd = cmd[1] + len(rest)
 	return rest, closeAt, stringEnd, true
 }
@@ -575,7 +578,7 @@ func (n *nestedScan) descend(s string, p int) {
 		} else {
 			return
 		}
-		child.scan = quoteScan{s: s[:child.to], i: child.from, substitutions: true}
+		child.scan = quoteScan{s: s[:child.to], i: child.from, substitutions: true, cases: caseMemo{lines: n.reads}}
 		n.args = append(n.args, child)
 	}
 }
@@ -639,22 +642,27 @@ const maxScriptOption = 8
 var scriptOption = regexp.MustCompile(`^-[a-z]*c[a-z]*$`)
 
 // segmentRest returns the rest of the pipeline segment of a command whose
-// name ends at i, in a quoted string that closes at closeAt and ends at
+// name is at cmd, in a quoted string that closes at closeAt and ends at
 // stringEnd (both -1 when it is in none); lines found that string, and paths
 // records whether its text is a program path. A command
 // quoted with its arguments (sh -c 'mysql --version'; ssh -p2222 host) ends
-// with the string; a quoted program path ("/usr/bin/mysql" -pX, or
-// "/opt/mysql tools/bin/mysql" -pX, where the name first matched a
-// directory) goes on after it.
-func (f cliPasswordFlag) segmentRest(s string, lines *quoteScan, paths *programPathMemo, i, closeAt, stringEnd int) string {
+// with the string, and so does a name at the end of text that runs no
+// command (ssh -o "HostName mysql" -p2222 host); a quoted program path
+// ("/usr/bin/mysql" -pX, or "/opt/mysql tools/bin/mysql" -pX, where the
+// name first matched a directory) or command (ssh db "sudo mysql" -pX)
+// goes on after it.
+func (f cliPasswordFlag) segmentRest(s string, lines *quoteScan, paths *programPathMemo, reads *lineReads, cmd []int, closeAt, stringEnd int) string {
 	pattern := segmentRestPattern(s, closeAt)
+	i := cmd[1]
 	switch {
 	case closeAt < i:
-		return segmentMatch(pattern, s[i:])
+		return segmentMatch(pattern, s[i:], caseMemo{anyHeight: true, lines: reads, base: i})
 	case paths.blankAfter(s, lines.inner(), i, closeAt) && !paths.isProgramPath(f, s, lines, closeAt):
-		return segmentMatch(pattern, s[i:closeAt])
+		return segmentMatch(pattern, s[i:closeAt], caseMemo{anyHeight: true})
+	case paths.endsText(f, s, lines, cmd[0], closeAt):
+		return s[i:closeAt]
 	default:
-		return s[i : stringEnd+len(segmentMatch(cliSegmentRest, s[stringEnd:]))]
+		return s[i : stringEnd+len(segmentMatch(cliSegmentRest, s[stringEnd:], caseMemo{anyHeight: true, lines: reads, base: stringEnd}))]
 	}
 }
 
@@ -662,14 +670,17 @@ func (f cliPasswordFlag) segmentRest(s string, lines *quoteScan, paths *programP
 // at the start of text, carried on past each command substitution that
 // pattern ended inside, at a ";;" of a case statement
 // ($(case x in x) printf h;; esac)), also one whose parentheses nest deeper
-// than maxSubstitutionHeight, and past each parameter expansion it ended
-// inside, whose braces nest deeper than it reads (${H:-a;${B:-${C:-b}}}).
-func segmentMatch(pattern *regexp.Regexp, text string) string {
+// than maxSubstitutionHeight, or at a line break of one that cases reads to
+// a later line (openssl enc -in $(printf f;<newline>true) -pass pass:x), and
+// past each parameter expansion it ended inside, whose braces nest deeper
+// than it reads (${H:-a;${B:-${C:-b}}}). cases reads the substitutions of
+// text.
+func segmentMatch(pattern *regexp.Regexp, text string, cases caseMemo) string {
 	n := len(pattern.FindString(text))
-	if !strings.Contains(text[:n], caseKeyword) && !strings.Contains(text[:n], "${") {
+	if !strings.Contains(text[:n], caseKeyword) && !strings.Contains(text[:n], "${") && !cases.mayOpenLine(text, n) {
 		return text[:n]
 	}
-	q := quoteScan{s: text, substitutions: true, braces: true, cases: caseMemo{anyHeight: true}}
+	q := quoteScan{s: text, substitutions: true, braces: true, cases: cases}
 	for n < len(text) {
 		if _, quoted := q.stringAt(n); quoted || n <= q.subStart || n >= q.subEnd {
 			break
@@ -690,6 +701,8 @@ type programPathMemo struct {
 	// to is one past where the text with its last blank at blank ends, 0
 	// when nothing is recorded.
 	to, blank int
+	// starts reads whether names in the text run as commands.
+	starts commandStart
 }
 
 // blankAfter reports whether s[i:to] holds a blank, where s[from:to] is the
@@ -702,6 +715,16 @@ func (m *programPathMemo) blankAfter(s string, from, i, to int) bool {
 		}
 	}
 	return m.blank >= i
+}
+
+// endsText reports whether the client name at p ends the text of the quoted
+// string that lines last found, which closes at to, as a word of text that
+// runs no command (ssh -o "HostName mysql"): the text holds a blank before
+// it, is no program path, and no word before the name lets it run (sudo
+// mysql, cd app && mysql). blankAfter has read the text.
+func (m *programPathMemo) endsText(f cliPasswordFlag, s string, lines *quoteScan, p, to int) bool {
+	from := lines.inner()
+	return m.blank >= from && m.blank < p && !m.isProgramPath(f, s, lines, to) && !m.starts.at(s, from, p)
 }
 
 // isProgramPath reports whether the text of the quoted string that lines
@@ -724,9 +747,9 @@ func (m *programPathMemo) isProgramPath(f cliPasswordFlag, s string, lines *quot
 // is in (ssh $(mysql -Nse 'select host') -p2222, where -p2222 is ssh's
 // port). rest[skip:skipEnd] is the closing quote of the string the command
 // is quoted in, which opens nothing ("/usr/bin/mysql" -e "select 1)" -pX).
-func untilUnmatchedParen(rest string, skip, skipEnd int) string {
+// cases reads the substitutions of rest.
+func untilUnmatchedParen(rest string, skip, skipEnd int, cases caseMemo) string {
 	depth := 0
-	cases := caseMemo{anyHeight: true}
 	for i := 0; i < len(rest); i++ {
 		if i == skip {
 			i = skipEnd - 1
@@ -1595,12 +1618,36 @@ func shellWordValue(s string, start, end, stringEnd int, subs substitutionMemo) 
 		if pieceEnd >= wordEnd || inner.gap {
 			return inner
 		}
-		// The joined word starts with the text of its first piece, so
-		// 'pass:$PASSWORD'"" is literal, as 'pass:$PASSWORD' is, and
-		// ''"$PASSWORD" is not.
-		return cliValue{start: start, end: wordEnd, singleQuoted: inner.singleQuoted && inner.start < inner.end}
+		// The joined word starts with the text of its first piece that
+		// holds any, so 'pass:$PASSWORD'"" and ""'$PASSWORD' are literal,
+		// as 'pass:$PASSWORD' is, and ''"$PASSWORD" is not.
+		return cliValue{start: start, end: wordEnd, singleQuoted: startsSingleQuoted(s, start, wordEnd)}
 	}
 	return cliValue{start: start, end: wordEnd}
+}
+
+// emptyPiecesEnd returns where the text of a shell word at s[start:end]
+// starts, after the empty quoted pieces it starts with, such as "".
+func emptyPiecesEnd(s string, start, end int) int {
+	for start < end {
+		pieceEnd, quoteLen := quotedPiece(s, start)
+		if quoteLen == 0 || pieceEnd > end || pieceEnd-start != 2*quoteLen {
+			break
+		}
+		start = pieceEnd
+	}
+	return start
+}
+
+// startsSingleQuoted reports whether the first piece of the shell word at
+// s[start:end] that holds text is in single quotes, which make $ literal.
+func startsSingleQuoted(s string, start, end int) bool {
+	start = emptyPiecesEnd(s, start, end)
+	if start == end || s[start] != '\'' {
+		return false
+	}
+	_, quoteLen := quotedPiece(s, start)
+	return quoteLen == 1
 }
 
 // joinedWordEnd returns the end of the shell word in which a quoted string,
@@ -1720,14 +1767,18 @@ func ansiCWordEnd(s string, i, stringEnd int, subs substitutionMemo) int {
 // quoted string holding the flag ends, or -1, and subs is as in
 // shellWordEnd.
 func (v cliValue) trimPrefix(s, prefix string, stringEnd int, subs substitutionMemo) (cliValue, bool) {
-	skip := 0
-	if !v.quoted && v.start < v.end && (s[v.start] == '"' || s[v.start] == '\'') {
-		skip = 1
+	from, skip := v.start, 0
+	if !v.quoted {
+		// Empty pieces before the prefix ""'pass:$PASSWORD' join nothing.
+		from = emptyPiecesEnd(s, v.start, v.end)
+		if from < v.end && (s[from] == '"' || s[from] == '\'') {
+			skip = 1
+		}
 	}
-	if !strings.HasPrefix(s[v.start+skip:v.end], prefix) {
+	if !strings.HasPrefix(s[from+skip:v.end], prefix) {
 		return v, false
 	}
-	v.start += skip + len(prefix)
+	v.start = from + skip + len(prefix)
 	if skip == 1 && v.start < v.end && s[v.start] == s[v.start-len(prefix)-1] {
 		// The first piece holds only the prefix, so the rest is read as
 		// after a bare one: 'pass:'"$PASSWORD" is a reference and
@@ -2369,6 +2420,31 @@ type caseMemo struct {
 	// for where a segment ends rather than which commands in it run on
 	// their own.
 	anyHeight bool
+	// lines, when set, reads an unquoted substitution that does not close
+	// on its line on to a later one, as the shell does, in the text it
+	// holds, where the text this memo reads starts at base.
+	lines *lineReads
+	base  int
+}
+
+// lineReads reads the command and process substitutions of s across lines,
+// keeping the ends found, so a substitution that does not close on its line
+// is read once for all the segments and scans of s that meet it (each line
+// a client name and a $( that never closes).
+type lineReads struct {
+	s    string
+	subs substitutionMemo
+}
+
+// mayOpenLine reports whether text[:n], where a segment pattern stopped
+// before the end of text, holds the start of a substitution, which m may
+// read on to a later line, so the pattern may have stopped inside it.
+func (m *caseMemo) mayOpenLine(text string, n int) bool {
+	if m.lines == nil || n == len(text) {
+		return false
+	}
+	head := text[:n]
+	return strings.Contains(head, "$(") || strings.Contains(head, "<(") || strings.Contains(head, ">(")
 }
 
 // memo returns the memo of the ends found, made on first use.
@@ -2389,14 +2465,21 @@ func (m *caseMemo) memo() substitutionMemo {
 const maxSubstitutionHeight = 3
 
 // substitutionLen returns the length of the command or process substitution
-// that starts at s[i], or 0 when none does, or it does not close, or,
+// that starts at s[i], or 0 when none does, or it does not close in s, or,
 // unless anyHeight is set, its parentheses nest deeper than
-// maxSubstitutionHeight.
+// maxSubstitutionHeight. One that stops at the end of its line is read on
+// to a later one when lines is set.
 func (m *caseMemo) substitutionLen(s string, i int) int {
 	if !isSubstitutionStart(s, i) {
 		return 0
 	}
-	if r := readSubstitution(s, i, -1, m.memo(), false); r.closed && (m.anyHeight || r.height <= maxSubstitutionHeight) {
+	r := readSubstitution(s, i, -1, m.memo(), false)
+	if !r.closed && m.lines != nil && r.end < len(s) && (s[r.end] == '\r' || s[r.end] == '\n') {
+		r = readSubstitution(m.lines.s, m.base+i, -1, m.lines.subs, true)
+		r.end -= m.base
+		r.closed = r.closed && r.end <= len(s)
+	}
+	if r.closed && (m.anyHeight || r.height <= maxSubstitutionHeight) {
 		return r.end - i
 	}
 	return 0
