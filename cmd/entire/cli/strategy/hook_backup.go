@@ -625,9 +625,11 @@ func olderCopiesOf(root *os.Root, hook string) []string {
 // than the backup and its older copies) to content, which never chains. A
 // manager's wrapper that runs such a copy becomes Entire's backup on the next
 // install, and a copy written before the chain guard existed chains straight
-// back to that backup, so commits would recurse forever. It reports the names
-// it rewrote.
-func refreshMovedEntireHooks(root *os.Root, hook, content string) ([]string, error) {
+// back to that backup, so commits would recurse forever. With staleOnly it
+// rewrites only copies in a shape this version replaces (movedEntireHookOutdated)
+// and leaves current ones, which may hold lines the user added, as they are. It
+// reports the names it rewrote.
+func refreshMovedEntireHooks(root *os.Root, hook, content string, staleOnly bool) ([]string, error) {
 	names, err := hookDirNames(root)
 	if err != nil {
 		return nil, err
@@ -637,7 +639,8 @@ func refreshMovedEntireHooks(root *os.Root, hook, content string) ([]string, err
 		if !isMovedHookName(n, hook) {
 			continue
 		}
-		if !carriesEntireMarker(root, n) {
+		ours, stale := movedEntireHook(root, hook, n)
+		if !ours || staleOnly && !stale {
 			continue
 		}
 		written, err := writeHookFile(root, n, content)
@@ -673,12 +676,21 @@ func hasStaleMovedEntireHook(root *os.Root, hook string) bool {
 		if !isMovedHookName(n, hook) {
 			continue
 		}
-		data, err := osroot.ReadFileNoFollow(root, n)
-		if err == nil && bytes.Contains(data, []byte(entireHookMarker)) && movedEntireHookOutdated(hook, string(data)) {
+		if _, stale := movedEntireHook(root, hook, n); stale {
 			return true
 		}
 	}
 	return false
+}
+
+// movedEntireHook reads n, a moved hook name for hook: ours when it carries
+// Entire's marker, and stale when it is also a copy this version replaces.
+func movedEntireHook(root *os.Root, hook, n string) (ours, stale bool) {
+	data, err := osroot.ReadFileNoFollow(root, n)
+	if err != nil || !bytes.Contains(data, []byte(entireHookMarker)) {
+		return false, false
+	}
+	return true, movedEntireHookOutdated(hook, string(data))
 }
 
 // movedEntireHookOutdated reports whether content, a moved copy of Entire's

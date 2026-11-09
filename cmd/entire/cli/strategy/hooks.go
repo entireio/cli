@@ -62,6 +62,10 @@ type hookSpec struct {
 	// keepHook leaves an Entire hook at name as it is and only repairs what
 	// surrounds it: the hook is current, and stale only for a moved copy.
 	keepHook bool
+	// staleCopiesOnly limits the refresh of moved copies of Entire's hook to the
+	// stale ones. The per-turn reinstall sets it: a current copy may hold lines
+	// the user added, as a current hook may, and gets no backup either.
+	staleCopiesOnly bool
 }
 
 // GetGitDir returns the actual git directory path by delegating to git itself.
@@ -520,7 +524,8 @@ func AnyGitHookInstalled(ctx context.Context) bool {
 // replace it without a backup, and the difference may be lines the user added.
 // That holds when the hook reads Outdated only for a stale copy another tool
 // moved aside: the copy runs from that tool's wrapper, which can sit in the
-// backup behind a current hook, so the copies are refreshed and the hook kept.
+// backup behind a current hook, so the stale copies are refreshed and the hook
+// kept. A moved copy that is current stays as it is too, for the same reason.
 func ReinstallGitHooks(ctx context.Context) (int, error) {
 	return installGitHooks(ctx, true, hookSettingsFromConfig(ctx), true)
 }
@@ -561,9 +566,16 @@ func gitHookStateInHooksDir(hooksDir string) GitHookState {
 	if err != nil {
 		return GitHooksAbsent
 	}
+	state := hookStateIn
+	if hooksDirIsLink(hooksDir) {
+		// The install that refreshes a moved copy refuses a symlinked hooks
+		// directory, so a stale copy there would send every agent turn to a
+		// reinstall that fails. Only the hooks themselves count there.
+		state = ownHookStateIn
+	}
 	outdated := false
 	for _, hook := range gitHookNames {
-		switch hookStateIn(root, hook) {
+		switch state(root, hook) {
 		case GitHooksAbsent:
 			return GitHooksAbsent
 		case GitHooksOutdated:
@@ -575,6 +587,17 @@ func gitHookStateInHooksDir(hooksDir string) GitHookState {
 		return GitHooksOutdated
 	}
 	return GitHooksCurrent
+}
+
+// hooksDirIsLink: the hooks directory itself is a symlink, which
+// hooksRootForInstall refuses.
+func hooksDirIsLink(hooksDir string) bool {
+	abs, err := absHooksDir(hooksDir)
+	if err != nil {
+		return false
+	}
+	info, err := os.Lstat(abs)
+	return err == nil && info.Mode()&os.ModeSymlink != 0
 }
 
 // hookStateIn classifies one managed hook in root, as gitHookStateInHooksDir
@@ -899,6 +922,7 @@ func installGitHooks(ctx context.Context, silent, absolutePath, onlyStale bool) 
 		})
 		for i := range specs {
 			specs[i].keepHook = ownHookStateIn(root, specs[i].name) == GitHooksCurrent
+			specs[i].staleCopiesOnly = true
 		}
 	}
 	installedCount, err := installHooks(ctx, lockRoot, root, hooksDir, specs, time.Now())
@@ -991,7 +1015,7 @@ func installHooks(ctx context.Context, lockRoot, root *os.Root, hooksDir string,
 			}
 		}
 
-		moved, err := refreshMovedEntireHooks(root, spec.name, spec.content)
+		moved, err := refreshMovedEntireHooks(root, spec.name, spec.content, spec.staleCopiesOnly)
 		if err != nil {
 			return installedCount, fmt.Errorf("failed to update the copy of Entire's %s hook another tool moved aside: %w", spec.name, err)
 		}

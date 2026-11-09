@@ -146,3 +146,65 @@ func TestReinstallGitHooks_RepairsStaleMovedCopyAndKeepsHook(t *testing.T) {
 		})
 	}
 }
+
+// Entire will not install through a symlinked hooks directory, so the moved
+// copies there cannot be repaired by the per-turn reinstall. Counting them
+// would send every agent turn to a reinstall that fails on that refusal, so
+// only the hooks themselves count, as they did before. The same directory
+// reached without the link still reads Outdated.
+func TestCheckGitHookState_StaleMovedCopyBehindSymlinkedHooksDir(t *testing.T) {
+	t.Parallel()
+	target := t.TempDir()
+	writeCurrentManagedHooks(t, target)
+	if err := os.WriteFile(filepath.Join(target, "commit-msg.tool-old"), []byte(preGuardChained(specFor(t, "commit-msg"))), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "hooks")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	if got := gitHookStateInHooksDir(link); got != GitHooksCurrent {
+		t.Errorf("state through the link = %v, want GitHooksCurrent", got)
+	}
+	if got := gitHookStateInHooksDir(target); got != GitHooksOutdated {
+		t.Errorf("state of the directory itself = %v, want GitHooksOutdated", got)
+	}
+}
+
+// The per-turn reinstall rewrites only the moved copies that are stale. A
+// current copy of Entire's hook beside a stale one may hold lines the user
+// added and gets no backup, so it stays as it is, as a current hook does,
+// whether or not the hook itself needed the reinstall.
+func TestReinstallGitHooks_KeepsCurrentMovedCopy(t *testing.T) {
+	spec := specFor(t, "commit-msg")
+	saved := spec.content + "echo mine\n"
+	for name, hookIsCurrent := range map[string]bool{"hook current": true, "hook outdated": false} {
+		t.Run(name, func(t *testing.T) {
+			_, hooksDir := initHooksTestRepo(t)
+			ctx := context.Background()
+			if _, err := InstallGitHook(ctx, true, false); err != nil {
+				t.Fatalf("InstallGitHook: %v", err)
+			}
+			if !hookIsCurrent {
+				writeExec(t, filepath.Join(hooksDir, "commit-msg"), "#!/bin/sh\n# "+entireHookMarker+"\n./scripts/entire-dev hooks git commit-msg\n")
+			}
+			writeExec(t, filepath.Join(hooksDir, "commit-msg.tool-old"), preGuardChained(spec))
+			writeExec(t, filepath.Join(hooksDir, "commit-msg.saved"), saved)
+
+			if _, err := ReinstallGitHooks(ctx); err != nil {
+				t.Fatalf("ReinstallGitHooks: %v", err)
+			}
+
+			if got, err := os.ReadFile(filepath.Join(hooksDir, "commit-msg.tool-old")); err != nil || movedEntireHookOutdated(spec.name, string(got)) {
+				t.Errorf("commit-msg.tool-old = %q (err %v), want it repaired", got, err)
+			}
+			if got, err := os.ReadFile(filepath.Join(hooksDir, "commit-msg.saved")); err != nil || string(got) != saved {
+				t.Errorf("commit-msg.saved = %q (err %v), want it kept with the user's line", got, err)
+			}
+			if got := gitHookStateInHooksDir(hooksDir); got != GitHooksCurrent {
+				t.Errorf("state after = %v, want GitHooksCurrent", got)
+			}
+		})
+	}
+}
