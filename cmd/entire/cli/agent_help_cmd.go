@@ -199,6 +199,8 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"project":   {agentHelpAudienceUserOwned, false},
 	"repo":      {agentHelpAudienceUserOwned, false},
 	"review":    {agentHelpAudienceUserOwned, false},
+	// Mints credentials and grants access.
+	"service-account": {agentHelpAudienceUserOwned, false},
 }
 
 // agentHelpGuidance is agent-only advice about WHEN to reach for a command,
