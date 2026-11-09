@@ -4,6 +4,8 @@ package procutil
 import (
 	"os/exec"
 	"time"
+
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 )
 
 // terminateWaitDelay backstops Wait/Run after ctx-cancel so cancellation is
@@ -14,12 +16,12 @@ const terminateWaitDelay = 5 * time.Second
 // blocked forever on inherited output pipes. Call after building cmd, before
 // Start/Run.
 //
-// On Unix, cmd starts in a new process group and context cancellation SIGKILLs
-// the whole group, so agent grandchildren (sandbox helpers, MCP servers, etc.)
-// die instead of holding stdout/stderr pipes open. On Windows, process-tree
-// killing is not implemented here; only WaitDelay bounds how long Wait/Run can
-// remain blocked after cancellation.
+// Context cancellation kills cmd's whole process tree (execx.KillTreeOnCancel),
+// so agent grandchildren (sandbox helpers, MCP servers, etc.) die instead of
+// holding stdout/stderr pipes open: on Unix through a new process group, on
+// Windows by walking the process table. WaitDelay bounds Wait/Run for any
+// descendant that escapes.
 func TerminateOnCancel(cmd *exec.Cmd) {
 	cmd.WaitDelay = terminateWaitDelay
-	killProcessGroupOnCancel(cmd)
+	execx.KillTreeOnCancel(cmd)
 }

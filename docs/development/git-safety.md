@@ -403,3 +403,25 @@ probes to fail. Never route one helper through the other. Windows ignores
 `TestWindowsDetachHelpersSetDistinctConsoleFlags` pins each helper's flags.
 Unix workers start a new session, which already leaves their descendants
 without a terminal.
+
+#### Cancelling Subprocesses on Windows - Kill the Tree, Not Just the Child
+
+`execx.TerminateOnCancel` and `procutil.TerminateOnCancel` (which shares
+execx's Cancel through `execx.KillTreeOnCancel`) must kill a cancelled
+command's descendants too, or one that inherited stdout keeps `Wait` blocked
+until `WaitDelay`. Unix kills the process group. Windows has no group to signal
+and never kills a process's children when it dies, so Cancel terminates the
+direct child, then walks the process table and terminates each descendant, as
+`taskkill /T` does (`execx/treekill_windows.go`).
+
+A table entry's parent PID survives the parent and can be reused, so a process
+counts as a descendant only if, opened by PID, it reports a tree member as its
+parent and was created no earlier than that member. Every member stays open
+until the walk ends, which keeps its PID from being reused, and Go's own handle
+keeps the direct child's PID even after it exits. The walk repeats (up to three
+passes) for processes started while it ran. It cannot reach a process whose
+parent, other than the direct child, had already exited, and `WaitDelay` still
+bounds that case. A Job Object would cover it, but joining one without a race
+needs a step between creating the process and running it, which `exec.Cmd` does
+not have. Once `Wait` has reaped the direct child, Cancel walks nothing and
+returns `os.ErrProcessDone`, since that PID may already name another process.
