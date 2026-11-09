@@ -71,8 +71,11 @@ const codexSpawnAgentTool = "spawnAgent"
 // item ID. Convert's Codex item path and CodexNotificationRecords both use it,
 // so a completed item looks the same stored and live. A running command shows
 // its output so far, when it has any. Items that aren't shown (reasoning,
-// compaction, …) give no records.
-func codexItemRecords(it codexitem.Item) []Record {
+// compaction, …) give no records. A finished call's status is error when the
+// item failed or was declined, and a declined one's result says so. A
+// command's result carries its exit code and working directory. A file change
+// records no directory of its own, so its result carries turnCWD, the turn's.
+func codexItemRecords(it codexitem.Item, turnCWD string) []Record {
 	done := it.Status != codexitem.StatusInProgress
 	status := ToolStatusSuccess
 	if it.Failed() {
@@ -80,7 +83,7 @@ func codexItemRecords(it codexitem.Item) []Record {
 	}
 	var result *ToolResult
 	if done {
-		result = &ToolResult{Status: status}
+		result = &ToolResult{Status: status, Declined: it.Status == codexitem.StatusDeclined}
 	}
 
 	var name string
@@ -101,9 +104,9 @@ func codexItemRecords(it codexitem.Item) []Record {
 		name, input = "Bash", codexCommandInput{Command: it.Command}
 		switch {
 		case done:
-			result.Output = it.Output
+			result.Output, result.ExitCode, result.CWD = it.Output, it.ExitCode, it.CWD
 		case it.Output != "":
-			result = &ToolResult{Output: it.Output, Status: ToolStatusSuccess}
+			result = &ToolResult{Output: it.Output, Status: ToolStatusSuccess, CWD: it.CWD}
 		}
 	case codexitem.KindFileChange:
 		changes := make([]codexFileChangeInputChange, 0, len(it.Changes))
@@ -111,6 +114,9 @@ func codexItemRecords(it codexitem.Item) []Record {
 			changes = append(changes, codexFileChangeInputChange(c))
 		}
 		name, input = "FileChange", codexFileChangeInput{Changes: changes}
+		if result != nil {
+			result.CWD = turnCWD
+		}
 	case codexitem.KindMCPTool:
 		name, input = it.Server+"."+it.Tool, it.Arguments
 		if len(it.Arguments) == 0 {
@@ -219,6 +225,7 @@ type CodexLive struct {
 	Output      *string // command output so far; nil: the item's own output
 	Interrupted bool    // the item's turn ended while it was in progress: show it failed
 	TS          string  // fallback time (RFC 3339), used when the item has none
+	TurnCWD     string  // the turn's working directory, shown on a file change's result; empty: none
 }
 
 // CodexNotificationRecords maps one Codex app-server item notification
@@ -241,5 +248,5 @@ func CodexNotificationRecords(method string, params []byte, live CodexLive) (rec
 		it.Status = codexitem.StatusFailed
 	}
 	it.LineTS = live.TS
-	return codexItemRecords(it), true
+	return codexItemRecords(it, live.TurnCWD), true
 }

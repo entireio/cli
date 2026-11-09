@@ -127,7 +127,7 @@ func decodeRolloutBody(it *Item, head rolloutItem, raw json.RawMessage) bool {
 			return false
 		}
 		it.Kind, it.Status = KindCommand, status(c.Status, StatusCompleted)
-		it.Command, it.CWD = scriptOfArgv(c.Command), pathOfFileURI(c.CWD)
+		it.Command, it.CWD = scriptOfArgv(c.Command), PathOfFileURI(c.CWD)
 		it.Output, it.ExitCode = c.AggregatedOutput, c.ExitCode
 	case "FileChange":
 		var f rolloutFileChange
@@ -186,9 +186,9 @@ func decodeRolloutBody(it *Item, head rolloutItem, raw json.RawMessage) bool {
 	return true
 }
 
-// pathOfFileURI is the path of a file:// URI (the rollout's cwd), or s itself
-// when it isn't one.
-func pathOfFileURI(s string) string {
+// PathOfFileURI is the path of a file:// URI (the rollout's command cwd), or s
+// itself when it isn't one.
+func PathOfFileURI(s string) string {
 	u, err := url.Parse(s)
 	if err != nil || u.Scheme != "file" {
 		return s
