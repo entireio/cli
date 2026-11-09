@@ -510,6 +510,41 @@ func TestString_CommandLinePasswordsMoreReviewCases(t *testing.T) {
 	})
 }
 
+// Netrc keywords in any case, arithmetic and here-document delimiters in a
+// substitution, openssl sources joined from quoted pieces, multi-line quoted
+// values, and argument-list values after blank lines, comments or a dash.
+func TestString_CommandLinePasswordsQuotingAndListCases(t *testing.T) {
+	t.Parallel()
+
+	p := cliTestPassword
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{name: "netrc keywords in mixed case", input: "machine 127.0.0.1 LoGiN alice PaSsWoRd " + p, want: "machine 127.0.0.1 LoGiN alice PaSsWoRd REDACTED"},
+		{name: "arithmetic shift nested in a substitution across lines", input: "openssl enc -in $(printf %s $((1 << n))\nprintf input.txt\n) -pass pass:" + p, want: "openssl enc -in $(printf %s $((1 << n))\nprintf input.txt\n) -pass pass:REDACTED"},
+		{name: "arithmetic command in a substitution across lines", input: "openssl enc -in $(x=1; ((y = 1 << n))\nprintf input.txt\n) -pass pass:" + p, want: "openssl enc -in $(x=1; ((y = 1 << n))\nprintf input.txt\n) -pass pass:REDACTED"},
+		{name: "here-document delimiter with a backslash in single quotes", input: "openssl enc -in $(cat <<'E\\F'\nin)file\nE\\F\n) -pass pass:" + p, want: "openssl enc -in $(cat <<'E\\F'\nin)file\nE\\F\n) -pass pass:REDACTED"},
+		{name: "here-document delimiter with a backslash in double quotes", input: "openssl enc -in $(cat <<\"E\\F\"\nin)file\nE\\F\n) -pass pass:" + p, want: "openssl enc -in $(cat <<\"E\\F\"\nin)file\nE\\F\n) -pass pass:REDACTED"},
+		{name: "here-document delimiter with an escaped letter", input: "openssl enc -in $(cat <<E\\F\nin)file\nEF\n) -pass pass:" + p, want: "openssl enc -in $(cat <<E\\F\nin)file\nEF\n) -pass pass:REDACTED"},
+		{name: "numeric here-document delimiter", input: "openssl enc -in $(cat <<123\nin)file\n123\n) -pass pass:" + p, want: "openssl enc -in $(cat <<123\nin)file\n123\n) -pass pass:REDACTED"},
+		{name: "openssl prefix that ends inside a double-quoted piece", input: `openssl enc -pass pa"ss:` + p + `"`, want: `openssl enc -pass pa"ss:REDACTED"`},
+		{name: "openssl prefix that ends inside a single-quoted piece", input: `openssl enc -pass pa'ss:$PASSWORD' -in f`, want: `openssl enc -pass pa'ss:REDACTED' -in f`},
+		{name: "openssl prefix inside a quoted piece the word goes on after", input: `openssl enc -pass pa"ss:abc"` + p + ` -in f`, want: `openssl enc -pass pa"ss:REDACTED -in f`},
+		{name: "quoted long value holding quotes in a substitution across lines", input: "wget --password=\"$(printf \"%s\" " + p + "\n)\" URL", want: "wget --password=\"REDACTED\" URL"},
+		{name: "quoted short value holding a substitution across lines", input: "mysql -p\"$(printf a\nprintf " + p + ")\" db", want: "mysql -p\"REDACTED\" db"},
+		{name: "quoted openssl source holding a substitution across lines", input: "openssl enc -pass \"pass:$(printf a\nprintf " + p + ")\"", want: "openssl enc -pass \"pass:REDACTED\""},
+		{name: "list value after a blank line", input: "subprocess.run([\"wget\", \"--password\",\n\n    \"" + p + "\", url])", want: "subprocess.run([\"wget\", \"--password\",\n\n    \"REDACTED\", url])"},
+		{name: "list value after a hash comment", input: "subprocess.run([\"wget\", \"--password\",  # the password\n    \"" + p + "\", url])", want: "subprocess.run([\"wget\", \"--password\",  # the password\n    \"REDACTED\", url])"},
+		{name: "list value after a slash comment", input: "exec.Command(\"wget\", \"--password\", // the password\n\t\"" + p + "\", url)", want: "exec.Command(\"wget\", \"--password\", // the password\n\t\"REDACTED\", url)"},
+		{name: "list in escaped quotes in a JSON string", input: `{"code":"subprocess.run([\"wget\", \"--password\", \"` + p + `\", url])"}`, want: `{"code":"subprocess.run([\"wget\", \"--password\", \"REDACTED\", url])"}`},
+		{name: "list passphrase with blanks", input: `subprocess.run(["wget", "--password", "correct horse ` + p + `", url])`, want: `subprocess.run(["wget", "--password", "REDACTED", url])`},
+		{name: "list value that starts with a dash", input: `subprocess.run(["wget", "--password", "-` + p + `", url])`, want: `subprocess.run(["wget", "--password", "REDACTED", url])`},
+		{name: "list value that starts with a dash after --pass", input: `subprocess.run(["mysql", "--pass", "-` + p + `"])`, want: `subprocess.run(["mysql", "--pass", "REDACTED"])`},
+		{name: "netrc password after an apostrophe that closes nothing", input: "machine h login me password '" + p, want: "machine h login me password REDACTED"},
+		{name: "netrc password quoted in backticks on its own", input: "machine h login me password `" + p + "`", want: "machine h login me password REDACTED"},
+		{name: "many arithmetic shifts in substitutions across lines", input: strings.Repeat("openssl enc -in $(printf %s $((1 << n))\nx\n) -pass pass:"+p+"\n", 2000), want: strings.Repeat("openssl enc -in $(printf %s $((1 << n))\nx\n) -pass pass:REDACTED\n", 2000)},
+		{name: "many list elements after comments", input: "f([" + strings.Repeat(`"--password", # c`+"\n", 8000) + `"` + p + `"])`, want: "f([" + strings.Repeat(`"--password", # c`+"\n", 8000) + `"REDACTED"])`},
+	})
+}
+
 // A substitution goes on to the ")" that closes it, on a later line too,
 // and each one in it is read on its own.
 func TestString_CommandLinePasswordsNestedAndMultilineSubstitutions(t *testing.T) {
@@ -590,7 +625,7 @@ func TestCommandLinePasswordsReadFlagAfterRejectedValue(t *testing.T) {
 func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 	t.Parallel()
 
-	for _, input := range []string{
+	assertStringsUnchanged(t, []string{
 		// references and prompts
 		"mysql -u root -p mydb",
 		"mysql -u root -p$MYSQL_PWD mydb",
@@ -889,7 +924,30 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		strings.Repeat("openssl enc -in $(cat <<E\n", 4000) + "-pass pass:x",
 		`wget --pass"wordx"=1 URL`,
 		"git log --pretty=format:%h",
-	} {
+	})
+}
+
+func TestString_CommandLinePasswordListAndQuotingNonSecretsPreserved(t *testing.T) {
+	t.Parallel()
+
+	assertStringsUnchanged(t, []string{
+		// argument lists of clients whose --password takes no value, and
+		// prose elements
+		`subprocess.run(["mysql", "--password", "-uroot"])`,
+		`subprocess.run(["/usr/bin/psql", "--password", "-h", "db"])`,
+		`print("--password", "for the database")`,
+		`print("--password", "value")`,
+		// an openssl source that is a reference, a shift in arithmetic
+		`openssl enc -pass pa"ss:$PASSWORD"`,
+		"x=$(( 1 << 2 ))\nmysql -p",
+		`echo 'machine h login me password '"$PW" >> ~/.netrc`,
+	})
+}
+
+// assertStringsUnchanged checks that String leaves each input as it is.
+func assertStringsUnchanged(t *testing.T, inputs []string) {
+	t.Helper()
+	for _, input := range inputs {
 		t.Run(input, func(t *testing.T) {
 			t.Parallel()
 			if got := String(input); got != input {

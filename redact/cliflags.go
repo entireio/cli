@@ -105,7 +105,12 @@ var (
 // and --password-file never match: the flag must be followed by "=" or a
 // blank. The name may be joined from quoted pieces (--pass"word"=x), which
 // longPasswordName checks.
-var cliLongPasswordPattern = regexp.MustCompile(`(?:^|[\s"'])--(?:password|passwd|pass|` + cliQuotedFlagName + `)((?:\\?["'])?)(=|` + cliBlank + `|,[ \t]*(?:\r?\n[ \t]*)?)(` + cliFlagValue + `)`)
+var cliLongPasswordPattern = regexp.MustCompile(`(?:^|[\s"'])--(?:password|passwd|pass|` + cliQuotedFlagName + `)((?:\\?["'])?)(=|` + cliBlank + `|,` + cliListGap + `)(` + cliFlagValue + `)`)
+
+// cliListGap is what may come between the elements of an argument list in
+// code: blanks, line breaks, blank lines and comments ("--password", # pw,
+// then "x" on the next line).
+const cliListGap = `(?:[ \t\r\n]|#[^\r\n]*|//[^\r\n]*)*`
 
 // cliQuotedFlagName matches the name of a long flag joined from quoted and
 // bare pieces of letters.
@@ -261,14 +266,17 @@ func cliShortFlag(before, name, sep string) string {
 // double-quoted command that writes the file (echo "... password
 // \"Summer 2026\"" > ~/.netrc). curl reads a single quote as part of a
 // token ('Summer'2026, and an empty pair before hunter2), so a single-quoted
-// piece takes the rest of its token. A command substitution, which the
+// piece takes the rest of its token, and so does a backtick-quoted one
+// (`hunter2`). A quote or backtick that closes nothing on its line starts a
+// token too ('hunter2), as curl reads it. A command substitution, which the
 // command writing the file runs ($(printf hunter2)), is one piece of a
 // token. Outside quotes, a quote or backtick ends it when whitespace, a
 // shell metacharacter or a separator of code follows, so the closing quote
 // of echo "machine h login me password p" > ~/.netrc and of
 // fmt.Sprintf("machine %s login %s password %s", h, u, p) stays outside the
 // value.
-const netrcValue = `"(?:[^"\\\r\n]|\\[^\r\n])*"|\\"(?:[^"\\\r\n]|\\[^"\r\n])*\\"|'[^'\r\n]*'(?:` + netrcBareValue + `)?|` + netrcBareValue
+const netrcValue = `"(?:[^"\\\r\n]|\\[^\r\n])*"|\\"(?:[^"\\\r\n]|\\[^"\r\n])*\\"|'[^'\r\n]*'(?:` + netrcBareValue + `)?|` +
+	"`[^`\\s]*`(?:" + netrcBareValue + `)?|['` + "`" + `]+(?:` + netrcBareValue + `)|` + netrcBareValue
 
 // netrcBareValue is a .netrc token outside quotes (see netrcValue).
 const netrcBareValue = `(?:\$` + cliParens3 + `|[^\s"'` + "`" + `])+(?:["'` + "`" + `]+(?:\$` + cliParens3 + `|[^\s"'` + "`" + `;|&()<>,\]}])(?:\$` + cliParens3 + `|[^\s"'` + "`" + `])*)*`
@@ -351,12 +359,10 @@ func detectCommandLinePasswords(s string) []taggedRegion {
 }
 
 // mayHoldNetrcEntry reports whether s may hold a .netrc entry, whose
-// keywords curl reads in any case (MACHINE h LOGIN me PASSWORD x). Lower,
-// capitalized and upper-case keywords pass this check, which spares most
-// strings the patterns.
+// keywords curl reads in any case (MACHINE h LOGIN me PASSWORD x, LoGiN me
+// PaSsWoRd x), which spares most strings the patterns.
 func mayHoldNetrcEntry(s string) bool {
-	return (strings.Contains(s, "assword") || strings.Contains(s, "ASSWORD")) &&
-		(strings.Contains(s, "ogin") || strings.Contains(s, "OGIN"))
+	return containsFoldASCII(s, "password") && containsFoldASCII(s, "login")
 }
 
 func appendLongPasswordFlags(regions []taggedRegion, s string, noValue *noValueFlags) []taggedRegion {
@@ -387,6 +393,9 @@ func appendLongPasswordFlags(regions []taggedRegion, s string, noValue *noValueF
 		// takes one (curl --pass -x, redis-cli --pass -x).
 		blank := s[loc[4]] != '='
 		dashFlag := blank && !pass && noValue.has(loc[2])
+		if s[loc[4]] == ',' && !pass && !dashFlag {
+			dashFlag = listNamesNoValueClient(s, loc[0])
+		}
 		stringEnd := lines.stringEnd(loc[2] - 1)
 		var r taggedRegion
 		// A '-' after a blank starts the next flag, whose word is not
@@ -396,7 +405,7 @@ func appendLongPasswordFlags(regions []taggedRegion, s string, noValue *noValueF
 		ok := !dashFlag || s[loc[6]] != '-'
 		var v cliValue
 		if ok {
-			v, ok = longFlagValue(s, loc, stringEnd, subs)
+			v, ok = longFlagValue(s, loc, stringEnd, subs, dashFlag)
 		}
 		if ok {
 			r, ok = passwordValueRegion(s, v, stringEnd, subs, dashFlag, blank)
@@ -418,10 +427,16 @@ func appendLongPasswordFlags(regions []taggedRegion, s string, noValue *noValueF
 // cliLongPasswordPattern match, found. A flag quoted on its own
 // ("--password" x) must close the quote that opens it, and a value in the
 // string that a flag opens ("--password=Summer 2026") runs to that string's
-// end, since the shell passes the whole string as one argument.
-func longFlagValue(s string, loc []int, stringEnd int, subs substitutionMemo) (cliValue, bool) {
-	if s[loc[4]] == ',' && !isListPassword(s, loc, stringEnd, subs) {
-		return cliValue{}, false
+// end, since the shell passes the whole string as one argument. dashFlag is
+// set when a value that starts with '-' is the next flag.
+func longFlagValue(s string, loc []int, stringEnd int, subs substitutionMemo, dashFlag bool) (cliValue, bool) {
+	list := s[loc[4]] == ','
+	var listValue cliValue
+	if list {
+		var ok bool
+		if listValue, ok = listPasswordValue(s, loc, dashFlag); !ok {
+			return cliValue{}, false
+		}
 	}
 	open, quoteLen := loc[0], 0
 	if s[open] == '"' && open > 0 && s[open-1] == '\\' {
@@ -444,22 +459,104 @@ func longFlagValue(s string, loc []int, stringEnd int, subs substitutionMemo) (c
 		// A quote after the name that opened nothing before it.
 		return cliValue{}, false
 	}
+	if list {
+		return listValue, true
+	}
 	return shellWordValue(s, loc[6], loc[7], stringEnd, subs), true
 }
 
-// isListPassword reports whether the value after a comma that loc, a
-// cliLongPasswordPattern match, found is the next element of an argument
-// list in code: a quoted flag and a quoted value (["wget", "--password",
-// "x"]), not a name (["wget", "--password", pw]). A value that starts with
-// '-' is the next flag (["psql", "--password", "-h", "db"]), and one with
-// a blank or a word of prose is text (print("--password", "is required")).
-func isListPassword(s string, loc []int, stringEnd int, subs substitutionMemo) bool {
-	if loc[3] == loc[2] || s[loc[6]] != '"' && s[loc[6]] != '\'' {
-		return false
+// listPasswordValue returns the value after a comma that loc, a
+// cliLongPasswordPattern match, found when it is the next element of an
+// argument list in code: a quoted flag and a quoted value (["wget",
+// "--password", "x"], or [\"wget\", \"--password\", \"x\"] in a JSON
+// string), not a name (["wget", "--password", pw]). A value that starts
+// with "--" is the next flag (["--password", "--verbose"]), and so is one
+// that starts with '-' where dashFlag is set (["psql", "--password", "-h",
+// "db"]), while it is the password of other clients (["wget",
+// "--password", "-x"]). A value made of prose is text: a word of
+// prose, or several words with a grammatical one among them
+// (print("--password", "is required")), while a passphrase is not
+// ("correct horse battery staple").
+func listPasswordValue(s string, loc []int, dashFlag bool) (cliValue, bool) {
+	if loc[3] == loc[2] {
+		return cliValue{}, false
 	}
-	v := shellWordValue(s, loc[6], loc[7], stringEnd, subs)
+	end, n := quotedPiece(s, loc[6])
+	if n == 0 {
+		return cliValue{}, false
+	}
+	v := cliValue{start: loc[6] + n, end: end - n, quoted: true, singleQuoted: s[loc[6]] == '\''}
 	value := s[v.start:v.end]
-	return v.quoted && value != "" && value[0] != '-' && !strings.ContainsAny(value, " \t") && !slices.Contains(proseWords, value)
+	return v, value != "" && (!dashFlag || value[0] != '-') && !strings.HasPrefix(value, "--") && !isListProse(value)
+}
+
+// listNamesNoValueClient reports whether the argument list in code that
+// holds the element quoted at s[open] (a quoted --password) starts with
+// the name of a client whose --password takes no value (["psql",
+// "--password", "-h", "db"], see noValueLong), up to maxCodeElements
+// elements back.
+func listNamesNoValueClient(s string, open int) bool {
+	if open > 0 && s[open-1] == '\\' {
+		open--
+	}
+	code, first := s[:open], ""
+	for range maxCodeElements {
+		code = strings.TrimRight(code, " \t\r\n")
+		switch {
+		case code == "":
+			return false
+		case strings.IndexByte("[(", code[len(code)-1]) >= 0:
+			return isNoValueClientName(first)
+		case code[len(code)-1] != ',':
+			return false
+		}
+		code = strings.TrimRight(code[:len(code)-1], " \t\r\n")
+		element, ok := codeElementStart(code)
+		if !ok {
+			return false
+		}
+		code, first = element, code[len(element):]
+	}
+	return false
+}
+
+// isNoValueClientName reports whether element, a quoted element of code,
+// names a client whose --password takes no value, with or without its
+// directory and .exe ("psql", "/usr/bin/psql").
+func isNoValueClientName(element string) bool {
+	name := strings.Trim(element, `"'\`)
+	name = name[strings.LastIndexAny(name, `/\`)+1:]
+	if ext := len(name) - len(".exe"); ext > 0 && strings.EqualFold(name[ext:], ".exe") {
+		name = name[:ext]
+	}
+	for _, f := range cliPasswordFlags {
+		if !f.noValueLong {
+			continue
+		}
+		if m := f.command.FindStringIndex(name); m != nil && m[0] == 0 && m[1] == len(name) {
+			return true
+		}
+	}
+	return false
+}
+
+// isListProse reports whether value, an element of an argument list after
+// a long password flag, is prose (see listPasswordValue).
+func isListProse(value string) bool {
+	words := strings.Fields(value)
+	prose := 0
+	for _, w := range words {
+		switch {
+		case slices.Contains(proseNouns, w):
+			prose++
+		case slices.Contains(proseWords, w):
+			if len(words) > 1 {
+				return true
+			}
+			prose++
+		}
+	}
+	return prose == len(words)
 }
 
 // appendPasswords adds the value of every password flag in the segment of
@@ -2117,9 +2214,22 @@ func shellWordValue(s string, start, end, stringEnd int, subs substitutionMemo) 
 // reads it ("$(printf hunter2<newline>)"). The string holding the command
 // ends at stringEnd (-1 for none).
 func quotedPieceAcrossLines(s string, i, stringEnd int, subs substitutionMemo) (end, quoteLen int) {
-	if end, quoteLen = quotedPiece(s, i); quoteLen > 0 || subs == nil || s[i] != '"' {
+	end, quoteLen = quotedPiece(s, i)
+	if subs == nil || s[i] != '"' || quoteLen > 0 && !strings.Contains(s[i:end], "$(") {
 		return end, quoteLen
 	}
+	// A substitution that goes on to later lines may hold quotes of its
+	// own, which the piece read within its line closes at
+	// ("$(printf "%s" hunter2<newline>)").
+	if e, n := doubleQuotedAcrossLines(s, i, stringEnd, subs); n > 0 {
+		return e, n
+	}
+	return end, quoteLen
+}
+
+// doubleQuotedAcrossLines reads the double-quoted string at s[i] for
+// quotedPieceAcrossLines.
+func doubleQuotedAcrossLines(s string, i, stringEnd int, subs substitutionMemo) (end, quoteLen int) {
 	for j := i + 1; j < len(s); j++ {
 		switch {
 		case s[j] == '"':
@@ -2297,9 +2407,12 @@ func (v cliValue) trimPrefix(s, prefix string, stringEnd int, subs substitutionM
 		if v.quoted {
 			return v, false
 		}
-		end := joinedPrefixEnd(s, v.start, v.end, prefix)
+		end, quote := joinedPrefixEnd(s, v.start, v.end, prefix)
 		if end < 0 {
 			return v, false
+		}
+		if quote != 0 {
+			return quotedPrefixRest(s, end, v.end, quote), true
 		}
 		from, skip = end-len(prefix), 0
 		v.singleQuoted = false
@@ -2326,20 +2439,21 @@ func (v cliValue) trimPrefix(s, prefix string, stringEnd int, subs substitutionM
 
 // joinedPrefixEnd returns where prefix ends in the shell word at
 // s[start:end] when the word, its quotes removed as the shell removes them,
-// starts with it and it ends outside quotes ("pass":x, pa"ss":x, pass\:x),
-// after a quote that closes right after it too, or -1.
-func joinedPrefixEnd(s string, start, end int, prefix string) int {
-	k, quote := 0, byte(0)
+// starts with it ("pass":x, pa"ss":x, pass\:x), after a quote that closes
+// right after it too, or -1. quote is the quote of the piece it ends in
+// when the piece goes on after it (pa"ss:x"), or 0.
+func joinedPrefixEnd(s string, start, end int, prefix string) (at int, quote byte) {
+	k := 0
 	for j := start; j < end; j++ {
 		c := s[j]
 		if k == len(prefix) {
 			switch quote {
 			case 0:
-				return j
+				return j, 0
 			case c:
-				return j + 1
+				return j + 1, 0
 			}
-			return -1
+			return j, quote
 		}
 		switch {
 		case quote == 0 && (c == '"' || c == '\''):
@@ -2353,14 +2467,35 @@ func joinedPrefixEnd(s string, start, end int, prefix string) int {
 			c = s[j]
 		}
 		if c != prefix[k] {
-			return -1
+			return -1, 0
 		}
 		k++
 	}
 	if k == len(prefix) && quote == 0 {
-		return end
+		return end, 0
 	}
-	return -1
+	return -1, 0
+}
+
+// quotedPrefixRest returns the value after a prefix that ends at s[at],
+// inside a piece quoted with quote of the shell word that ends at wordEnd
+// (pa"ss:x"): the rest of the piece when it ends the word, quoted as the
+// piece is, so pa'ss:$PASSWORD' is literal and pa"ss:$PASSWORD" a
+// reference, or else the rest of the word.
+func quotedPrefixRest(s string, at, wordEnd int, quote byte) cliValue {
+	v := cliValue{start: at, end: wordEnd, singleQuoted: quote == '\''}
+	for j := at; j < wordEnd; j++ {
+		switch {
+		case s[j] == '\\' && quote == '"':
+			j++
+		case s[j] == quote:
+			if j+1 == wordEnd {
+				v.end, v.quoted = j, true
+			}
+			return v
+		}
+	}
+	return v
 }
 
 // shellWordEnd returns the end of the shell word that starts at start. A
@@ -2752,8 +2887,7 @@ func readSubstitution(s string, i, stringEnd int, subs substitutionMemo, multili
 	}
 	limit := substitutionLimit(s, i, stringEnd)
 	scan.open(i)
-	// Arithmetic ($((x << 2))) has no here-documents.
-	scan.readsHeredocs = multiline && !strings.HasPrefix(s[i:], "$((")
+	scan.readsHeredocs = multiline
 	j := i + 2
 	for ; j < limit; j++ {
 		if pieceEnd, quoteLen := quotedPiece(s, j); quoteLen == 1 {
@@ -2784,7 +2918,7 @@ func readSubstitution(s string, i, stringEnd int, subs substitutionMemo, multili
 			}
 			j = next
 		case '(':
-			scan.frames[len(scan.frames)-1].open()
+			scan.frames[len(scan.frames)-1].open(s, j)
 		case ')':
 			if scan.close(s, j) {
 				return subs[scan.ends.key(i)]
@@ -2808,9 +2942,8 @@ type heredoc struct {
 }
 
 // heredocAt returns the here-document whose redirection (<<X, <<-'X',
-// <<"X") starts at s[j], and the end of its delimiter word, or 0 when none
-// does before limit. The word is a name or a quoted string; <<< reads a
-// string instead.
+// <<"X", <<123) starts at s[j], and the end of its delimiter word, or 0 when
+// none does before limit. <<< reads a string instead.
 func heredocAt(s string, j, limit int) (heredoc, int) {
 	if !strings.HasPrefix(s[j:limit], "<<") || strings.HasPrefix(s[j:limit], "<<<") {
 		return heredoc{}, 0
@@ -2832,13 +2965,37 @@ func heredocAt(s string, j, limit int) (heredoc, int) {
 		}
 		end++
 	}
-	raw := s[k:end]
-	doc.word = strings.ReplaceAll(wordQuotes.Replace(raw), `\`, "")
-	if doc.word == "" || doc.word == raw && doc.word[0] != '_' && !isLetterByte(doc.word[0]) {
-		// No word, or a bare one that is no name (x<<2).
+	if end == k {
 		return heredoc{}, 0
 	}
+	doc.word = heredocWord(s[k:end])
 	return doc, end
+}
+
+// heredocWord returns the delimiter that the word raw of a here-document
+// redirection names, its quotes removed as the shell removes them: a
+// backslash escapes the next character outside quotes and, in double
+// quotes, only $, `, ", \ and a line break, while in single quotes it is
+// literal (<<'E\F' ends at a line E\F, <<E\F at EF).
+func heredocWord(raw string) string {
+	var b strings.Builder
+	quote := byte(0)
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		switch {
+		case quote == 0 && (c == '\'' || c == '"'):
+			quote = c
+			continue
+		case quote != 0 && c == quote:
+			quote = 0
+			continue
+		case c == '\\' && i+1 < len(raw) && (quote == 0 || quote == '"' && strings.IndexByte("$`\"\\\n", raw[i+1]) >= 0):
+			i++
+			c = raw[i]
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
 }
 
 // heredocBodiesEnd returns where the text after the bodies of docs, which
@@ -2936,7 +3093,8 @@ func (c *substitutionScan) expansion(s string, j, limit int) (next int, stop boo
 	if end := braceExpansionEnd(s[:limit], j, c.ends.subs); end > 0 {
 		return end - 1, false
 	}
-	if c.readsHeredocs {
+	if c.readsHeredocs && c.frames[len(c.frames)-1].arithmetic == 0 {
+		// Arithmetic ($((x << n)), ((y = x << n))) has no here-documents.
 		if doc, end := heredocAt(s, j, limit); end > 0 {
 			c.heredocs = append(c.heredocs, doc)
 			return end - 1, false
@@ -3021,14 +3179,19 @@ type parenScan struct {
 	// start is where the substitution starts, from is where the text not
 	// yet read for case statements starts, depth the number of parentheses
 	// open, and height the most that were, with the ones of the
-	// substitutions in it.
-	start, from, depth, height int
+	// substitutions in it. arithmetic, when not 0, is the depth inside the
+	// (( that opens arithmetic ($((...)) or ((...))).
+	start, from, depth, height, arithmetic int
 }
 
-// open reads a "(" in the substitution's text.
-func (p *parenScan) open() {
+// open reads the "(" at s[j] in the substitution's text, which opens
+// arithmetic right after another "(".
+func (p *parenScan) open(s string, j int) {
 	p.depth++
 	p.height = max(p.height, p.depth)
+	if p.arithmetic == 0 && s[j-1] == '(' && !isEscaped(s, j-1) {
+		p.arithmetic = p.depth
+	}
 }
 
 // nest records a substitution in the text, whose parentheses nest height
@@ -3041,7 +3204,10 @@ func (p *parenScan) nest(height int) {
 // substitution, which it does not after a case pattern. ends are where the
 // substitutions in it end.
 func (p *parenScan) close(s string, j int, ends substitutionEnds) bool {
-	if p.depth--; p.depth > 0 {
+	if p.depth--; p.depth < p.arithmetic {
+		p.arithmetic = 0
+	}
+	if p.depth > 0 {
 		return false
 	}
 	if !p.hasCase {
