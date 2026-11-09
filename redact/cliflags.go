@@ -663,7 +663,7 @@ func (f cliPasswordFlag) segmentRest(s string, lines *quoteScan, paths *programP
 	case paths.endsText(f, s, lines, cmd[0], closeAt):
 		return s[i:closeAt]
 	default:
-		return s[i : stringEnd+len(segmentMatch(cliSegmentRest, s[stringEnd:], caseMemo{anyHeight: true, lines: reads, base: stringEnd}))]
+		return s[i:paths.segmentEnd(s, stringEnd, reads)]
 	}
 }
 
@@ -706,6 +706,24 @@ type programPathMemo struct {
 	// whether the string is part of a command that ssh or eval runs.
 	starts commandStart
 	args   joinedArgs
+	// goesOnFrom is where the segment that the last command going on past
+	// its string was read in goes on, and goesOnEnd where it ends, 0 when
+	// none was read.
+	goesOnFrom, goesOnEnd int
+}
+
+// segmentEnd returns the end of the pipeline segment that goes on at from,
+// after the quoted string a command is in, as cliSegmentRest reads it. A
+// string inside the segment read last ends in that segment, so its end is
+// reused (f("mysql", "-h", h) + f("mysql", "-h", h) + ..., where each
+// command's rest ends at its ")"), which keeps many such strings linear.
+// reads reads the substitutions of s.
+func (m *programPathMemo) segmentEnd(s string, from int, reads *lineReads) int {
+	if m.goesOnEnd == 0 || from < m.goesOnFrom || from > m.goesOnEnd {
+		m.goesOnFrom = from
+		m.goesOnEnd = from + len(segmentMatch(cliSegmentRest, s[from:], caseMemo{anyHeight: true, lines: reads, base: from}))
+	}
+	return m.goesOnEnd
 }
 
 // blankAfter reports whether s[i:to] holds a blank, where s[from:to] is the
