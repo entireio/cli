@@ -28,7 +28,7 @@ const cliFlagValue = `"(?:[^"\r\n]|\\\r?\n)*"|'[^'\r\n]*'|[^\s'"` + "`" + `|;&()
 // command substitution, or ends Markdown code), so a flag is only read as
 // belonging to the command that precedes it in the same pipeline segment.
 // The & and | of a redirection (2>&1, &>log, >|f) are no shell operator.
-const cliSameCommandChar = `\\\r?\n|\\[^\r\n]|\$'(?:[^'\\\r\n]|\\[^\r\n])*'|"(?:[^"\\\r\n]|\\\r?\n|\\[^\r\n])*"|'[^'\r\n]*'|` + cliSubstitutionPattern + `|\$` + cliBraces2 + `|[<>]&|&>|>\||[^\r\n|;&` + "`" + `]`
+const cliSameCommandChar = `\\\r?\n|\\[^\r\n]|\$'(?:[^'\\\r\n]|\\[^\r\n])*'|"(?:[^"\\\r\n$]|\$` + cliParens3 + `|\$|\\\r?\n|\\[^\r\n])*"|'[^'\r\n]*'|` + cliSubstitutionPattern + `|\$` + cliBraces2 + `|[<>]&|&>|>\||[^\r\n|;&` + "`" + `]`
 
 const cliSameCommand = `(?:` + cliSameCommandChar + `)`
 
@@ -154,9 +154,11 @@ var cliPasswordFlags = []cliPasswordFlag{
 		command: regexp.MustCompile(`\b(?:docker|podman|nerdctl|buildah|skopeo|oras|helm)\b(?i:\.exe)?["']?` + cliGlobalOptions + cliBlank + `(?:registry` + cliGlobalOptions + cliBlank + `)?login\b`),
 		flag:    regexp.MustCompile(cliShortFlag(`\s`, "p", `(?:`+cliBlank+`)?`)),
 	},
+	// az may be quoted with its path ("/usr/bin/az" login) and take
+	// global options before login (az --debug login).
 	{
 		needles: []string{loginCommand},
-		command: regexp.MustCompile(`\baz[ \t]+login\b`),
+		command: regexp.MustCompile(`\baz\b(?i:\.exe)?["']?` + cliGlobalOptions + cliBlank + `login\b`),
 		flag:    regexp.MustCompile(cliShortFlag(`\s`, "p", `(?:`+cliBlank+`)?`)),
 	},
 	{
@@ -174,11 +176,12 @@ var cliPasswordFlags = []cliPasswordFlag{
 		noValueLong: true,
 	},
 	// sshpass reads its own options only before the command it wraps, so
-	// the -p of sshpass -e ssh -p 2222 is ssh's port.
+	// the -p of sshpass -e ssh -p 2222 is ssh's port. They may be
+	// clustered after -v (-vv, -vp x, -vPprompt).
 	{
 		needles: []string{"sshpass"},
 		command: regexp.MustCompile(`\bsshpass\b`),
-		flag:    regexp.MustCompile(cliShortFlag(`^(?:`+cliBlank+`-(?:v|P[ \t]*(?:`+cliFlagValue+`)))*`+cliBlank, "p", `[ \t]*`)),
+		flag:    regexp.MustCompile(cliShortFlag(`^(?:`+cliBlank+`-(?:v+|v*P[ \t]*(?:`+cliFlagValue+`)))*`+cliBlank, "v*p", `[ \t]*`)),
 		leading: true,
 	},
 	{
@@ -1816,7 +1819,7 @@ func (f cliPasswordFlag) appendFlags(regions []taggedRegion, s string, quotes *q
 		}
 		if isJoinedFlag(s, base, loc) {
 			// The rest of the word is part of it too (-h a,-px,-py).
-			pos = loc[1]
+			pos = joinedFlagEnd(rest, loc)
 			continue
 		}
 		r, ok := taggedRegion{}, false
@@ -1846,6 +1849,18 @@ func (f cliPasswordFlag) appendFlags(regions []taggedRegion, s string, quotes *q
 // there (["mysql","-px"], see cliShortFlag).
 func isJoinedFlag(s string, base int, loc []int) bool {
 	return len(loc) >= 8 && loc[2] < 0 && strings.IndexByte(",([", s[base+loc[0]]) >= 0
+}
+
+// joinedFlagEnd returns where the word of the joined flag that loc found in
+// rest ends: at the first blank in the match, since a flag whose value may
+// follow a blank took the next word as one (docker login -u a,-p -p x,
+// where the real -p comes after it), or else at the match's end, so a long
+// word of joined flags is read once.
+func joinedFlagEnd(rest string, loc []int) int {
+	if k := strings.IndexAny(rest[loc[0]+1:loc[1]], " \t\r\n"); k >= 0 {
+		return loc[0] + 1 + k
+	}
+	return loc[1]
 }
 
 // valueRegion returns the password of the flag that loc, a match of f.flag in
