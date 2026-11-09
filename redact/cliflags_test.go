@@ -1,6 +1,7 @@
 package redact
 
 import (
+	"runtime/debug"
 	"strings"
 	"testing"
 )
@@ -672,7 +673,37 @@ func TestString_CommandLinePasswordsShellGrammarCases(t *testing.T) {
 		{name: "netrc entry with no login whose password is a prose word", input: "machine db.internal password string", want: "machine db.internal password REDACTED"},
 		{name: "netrc entry with no login before a login field", input: "machine 127.0.0.1 password " + p + " account ops", want: "machine 127.0.0.1 password REDACTED account ops"},
 		{name: "netrc keyword after a comment token", input: "machine db.internal login me password #rotated\naccount\n", want: "machine db.internal login me password REDACTED\nREDACTED\n"},
+		{name: "long password in a Go raw string across lines", input: "exec.Command(\"wget\", \"--password\", `" + p + "\nmore`, url)", want: "exec.Command(\"wget\", \"--password\", `REDACTED`, url)"},
+		{name: "short password in a Go raw string across lines", input: "exec.Command(\"redis-cli\", \"-a\", `\r\n" + p + "`, \"ping\")", want: "exec.Command(\"redis-cli\", \"-a\", `REDACTED`, \"ping\")"},
+		{name: "openssl source in a Go raw string across lines", input: "exec.Command(\"openssl\", \"enc\", \"-pass\", `pass:" + p + "\nmore`)", want: "exec.Command(\"openssl\", \"enc\", \"-pass\", `pass:REDACTED`)"},
+		{name: "openssl source after a Go raw string across lines", input: "exec.Command(\"openssl\", \"enc\", \"-in\", `f\ng`, \"-pass\", \"pass:" + p + "\")", want: "exec.Command(\"openssl\", \"enc\", \"-in\", `f\ng`, \"-pass\", \"pass:REDACTED\")"},
 	})
+}
+
+// Each parameter expansion, quoted string in one and command substitution
+// in those is read by a call of its own, so a line that nests them
+// alternately, however deep, must not exhaust the stack, which would end
+// the process. The stack is capped here, so the depth that would exhaust it
+// stays small and quick to read; the test changes that process-wide limit,
+// so it does not run in parallel.
+func TestString_CommandLinePasswordsDeepExpansionNesting(t *testing.T) { //nolint:paralleltest // sets the process-wide stack limit
+	defer debug.SetMaxStack(debug.SetMaxStack(2 << 20))
+
+	p := cliTestPassword
+	for _, tc := range []struct{ name, open, close string }{
+		{"substitutions in expansions", "${a:-$(", ")}"},
+		{"quoted strings in expansions", "\"${a:-", "}\""},
+		{"quoted expansions in substitutions in expansions", "${a:-$(printf \"", "\")}"},
+		{"expansions in quoted substitutions", "$(printf ${a:-\"$(", ")\"})"},
+	} {
+		n := 10000
+		nested := strings.Repeat(tc.open, n) + "x" + strings.Repeat(tc.close, n)
+		input := "mysql -u " + nested + " -p" + p + " db"
+		want := "mysql -u " + nested + " -pREDACTED db"
+		if got := String(input); got != want {
+			t.Errorf("%s: String(...) left the password after %d nested levels: ...%q", tc.name, n, got[max(0, len(got)-40):])
+		}
+	}
 }
 
 // The layer reads every flag on its own, so a flag whose value is no
@@ -1069,6 +1100,9 @@ func TestString_CommandLinePasswordListAndQuotingNonSecretsPreserved(t *testing.
 		"machine example.com password is stored in the vault",
 		"reset the machine localhost password first",
 		"the machine learning password policy",
+		// a backtick after a list flag that prose, and no element's end,
+		// follows on a later line
+		"args := []string{\"wget\", \"--password\", `\nREDIS_KEY` holds it.",
 		// mysql's -p takes its password joined, so an element after it is
 		// the database, in a raw string too
 		"exec.Command(\"mysql\", \"-u\", \"root\", \"-p\", `appdb`)",

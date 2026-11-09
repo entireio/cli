@@ -1325,15 +1325,35 @@ func rawListElementEnd(s string, at int) int {
 	if at >= len(s) || s[at] != '`' || !strings.HasSuffix(strings.TrimRight(s[:at], " \t"), ",") {
 		return -1
 	}
-	k := strings.IndexAny(s[at+1:], "`\r\n")
-	if k < 0 || s[at+1+k] != '`' {
+	if end := rawStringEnd(s, at); end > 0 && endsListElement(s, end) {
+		return end
+	}
+	return -1
+}
+
+// rawStringEnd returns where the raw string that opens at s[at], as Go
+// writes one, ends, after its closing backtick, or -1 when none closes it.
+// Its text may go on across lines (exec.Command("wget", "--password",
+// `a<newline>b`, url)), but then only to a backtick that ends an element of
+// a list, which a comma or a closing bracket follows, so that a backtick
+// of Markdown code reads no later line.
+func rawStringEnd(s string, at int) int {
+	k := strings.IndexByte(s[at+1:], '`')
+	if k < 0 {
 		return -1
 	}
 	end := at + k + 2
-	if after := strings.TrimLeft(s[end:], " \t"); after == "" || strings.IndexByte(",)]", after[0]) < 0 {
+	if strings.ContainsAny(s[at+1:end-1], "\r\n") && !endsListElement(s, end) {
 		return -1
 	}
 	return end
+}
+
+// endsListElement reports whether a comma or a closing bracket follows
+// s[:end], after blanks, as one does an element of a list in code.
+func endsListElement(s string, end int) bool {
+	after := strings.TrimLeft(s[end:], " \t")
+	return after != "" && strings.IndexByte(",)]", after[0]) >= 0
 }
 
 // blankAfter reports whether s[i:to] holds a blank, where s[from:to] is the
@@ -2410,8 +2430,8 @@ func listElementValue(s string, open int) (cliValue, bool) {
 	if n == 0 && s[open] == '`' {
 		// A raw string, as Go writes one (exec.Command("wget",
 		// "--password", `x`, url)), whose text is literal.
-		if k := strings.IndexAny(s[open+1:], "`\r\n"); k >= 0 && s[open+1+k] == '`' {
-			end, n = open+k+2, 1
+		if e := rawStringEnd(s, open); e > 0 {
+			end, n = e, 1
 		}
 	}
 	if n == 0 || strings.HasPrefix(strings.TrimLeft(s[end:], " \t\r\n"), ":") {
@@ -3168,14 +3188,50 @@ const braceKey = -2
 // braces nested in it too, so a word read again after a value that is no
 // password does not read them again.
 func braceExpansionEnd(s string, i int, braces substitutionMemo) int {
+	return braceReader{braces: braces}.end(s, i)
+}
+
+// maxExpansionNesting is how deep parameter expansions, and the quoted
+// strings and command substitutions in them, nest at most for braceReader
+// to read each in full. Each is read by a call of its own
+// (${A:-$(printf ${B:-"${C:-x}"})}), so past that depth a command
+// substitution is read as quotedPiece reads one, with cliSubstitution, and
+// a quoted string reads no expansion in it: a line that nests them,
+// however long, then cannot exhaust the stack and end the process.
+const maxExpansionNesting = 32
+
+// braceReader reads parameter expansions for braceExpansionEnd.
+type braceReader struct {
+	braces substitutionMemo
+	// nesting is how many expansions, and quoted strings and command
+	// substitutions in them, are around the one read.
+	nesting int
+	// shallow is set when the command substitutions in it are read as
+	// quotedPiece reads one, with cliSubstitution, as they are in a string
+	// that quotedPiece reads. quotedPiece is also read inside
+	// substitutions, which would otherwise nest without a bound.
+	shallow bool
+}
+
+func braceKeyAt(p int) substitutionKey {
+	return substitutionKey{start: p, stringEnd: braceKey}
+}
+
+// in returns the reader of what nests in the part it reads.
+func (b braceReader) in() braceReader {
+	b.nesting++
+	return b
+}
+
+// end is braceExpansionEnd.
+func (b braceReader) end(s string, i int) int {
 	if !strings.HasPrefix(s[i:], "${") {
 		return 0
 	}
-	if braces == nil {
-		braces = substitutionMemo{}
+	if b.braces == nil {
+		b.braces = substitutionMemo{}
 	}
-	key := func(p int) substitutionKey { return substitutionKey{start: p, stringEnd: braceKey} }
-	if r, ok := braces[key(i)]; ok {
+	if r, ok := b.braces[braceKeyAt(i)]; ok {
 		return r.end
 	}
 	open := []int{i}
@@ -3187,7 +3243,7 @@ func braceExpansionEnd(s string, i int, braces substitutionMemo) int {
 			if s[j-1] != '$' {
 				continue
 			}
-			switch r, known := braces[key(j-1)]; {
+			switch r, known := b.braces[braceKeyAt(j-1)]; {
 			case !known:
 				open = append(open, j-1)
 			case r.closed:
@@ -3196,19 +3252,9 @@ func braceExpansionEnd(s string, i int, braces substitutionMemo) int {
 				j = len(s)
 			}
 		case '$':
-			// A command substitution is one piece, whose } closes nothing
-			// (${PW:-$(printf a})hunter2}). Its reads are keyed under
-			// braceKey too, which no ${ shares, as one starts with $(.
-			if !strings.HasPrefix(s[j:], "$(") {
-				continue
-			}
-			if r := readSubstitution(s, j, braceKey, braces, false); r.closed {
-				j = r.end - 1
-			} else {
-				j = len(s)
-			}
+			j = b.substitutionEnd(s, j) - 1
 		case '}':
-			braces[key(open[len(open)-1])] = substitutionResult{end: j + 1, closed: true}
+			b.braces[braceKeyAt(open[len(open)-1])] = substitutionResult{end: j + 1, closed: true}
 			if open = open[:len(open)-1]; len(open) == 0 {
 				return j + 1
 			}
@@ -3218,7 +3264,7 @@ func braceExpansionEnd(s string, i int, braces substitutionMemo) int {
 			}
 			j++
 		case '\'', '"':
-			end, quoteLen := quotedPiece(s, j)
+			end, quoteLen := b.in().quotedPiece(s, j)
 			if quoteLen != 1 {
 				j = len(s)
 			}
@@ -3228,9 +3274,30 @@ func braceExpansionEnd(s string, i int, braces substitutionMemo) int {
 		}
 	}
 	for _, p := range open {
-		braces[key(p)] = substitutionResult{}
+		b.braces[braceKeyAt(p)] = substitutionResult{}
 	}
 	return 0
+}
+
+// substitutionEnd returns where the reading of the expansion goes on after
+// the $ at s[j]: after the command substitution that starts there, one
+// piece whose } closes nothing (${PW:-$(printf a})hunter2}), at the end of
+// s when that does not close, or after the $. Its reads are keyed under
+// braceKey too, which no ${ shares, as one starts with $(.
+func (b braceReader) substitutionEnd(s string, j int) int {
+	if !strings.HasPrefix(s[j:], "$(") {
+		return j + 1
+	}
+	if b.shallow || b.nesting >= maxExpansionNesting {
+		if m := cliSubstitution.FindStringIndex(s[j:]); m != nil {
+			return j + m[1]
+		}
+		return j + 1
+	}
+	if r := (substitutionEnds{subs: b.braces, stringEnd: braceKey}).read(s, j, b.nesting+1); r.closed {
+		return r.end
+	}
+	return len(s)
 }
 
 // maxInnerQuoteScan bounds how far closesInnerString counts quotes, so a
@@ -3290,6 +3357,14 @@ func closesString(s string, i, stringEnd int) bool {
 // quotes, and an escaped line break goes on to the next line, which the shell
 // joins to the string ("pass:Summer\<newline>2026").
 func quotedPiece(s string, i int) (end, quoteLen int) {
+	return braceReader{shallow: true}.quotedPiece(s, i)
+}
+
+// quotedPiece is quotedPiece for a string that b.nesting parameter
+// expansions, and the quoted strings and command substitutions in them, are
+// around. It reads the expansions in it with b, none past
+// maxExpansionNesting.
+func (b braceReader) quotedPiece(s string, i int) (end, quoteLen int) {
 	switch {
 	case s[i] == '"' || s[i] == '\'':
 		quoteLen = 1
@@ -3312,8 +3387,8 @@ func quotedPiece(s string, i int) (end, quoteLen int) {
 			if m := cliSubstitution.FindStringIndex(s[j:]); m != nil {
 				j += m[1] - 1
 			}
-		case quote == `"` && strings.HasPrefix(s[j:], "${"):
-			if end := braceExpansionEnd(s, j, nil); end > 0 {
+		case quote == `"` && strings.HasPrefix(s[j:], "${") && b.nesting < maxExpansionNesting:
+			if end := b.end(s, j); end > 0 {
 				j = end - 1
 			}
 		case quote == `"` && strings.HasPrefix(s[j:], "\\\r\n"):
@@ -3359,13 +3434,21 @@ func readSubstitution(s string, i, stringEnd int, subs substitutionMemo, multili
 	if subs == nil {
 		subs = substitutionMemo{}
 	}
-	scan := substitutionScan{ends: substitutionEnds{subs, stringEnd, multiline}}
+	return substitutionEnds{subs, stringEnd, multiline}.read(s, i, 0)
+}
+
+// read is readSubstitution for a substitution that nesting parameter
+// expansions, and the quoted strings and substitutions in them, are around
+// (see maxExpansionNesting).
+func (e substitutionEnds) read(s string, i, nesting int) substitutionResult {
+	subs := e.subs
+	scan := substitutionScan{ends: e, nesting: nesting}
 	if r, ok := subs[scan.ends.key(i)]; ok {
 		return r
 	}
-	limit := substitutionLimit(s, i, stringEnd)
+	limit := substitutionLimit(s, i, e.stringEnd)
 	scan.open(i)
-	scan.readsHeredocs = multiline
+	scan.readsHeredocs = e.multiline
 	j := i + 2
 	for ; j < limit; j++ {
 		if end := substitutionQuoteEnd(s, j, limit); end > 0 {
@@ -3374,7 +3457,7 @@ func readSubstitution(s string, i, stringEnd int, subs substitutionMemo, multili
 		}
 		switch s[j] {
 		case '\r', '\n':
-			if !multiline {
+			if !e.multiline {
 				return substitutionResult{end: scan.stop(j)}
 			}
 			j = scan.lineBreak(s, j, limit)
@@ -3587,6 +3670,9 @@ type substitutionScan struct {
 	// read when readsHeredocs is set, as the substitution may go on to it.
 	heredocs      []heredoc
 	readsHeredocs bool
+	// nesting is how many parameter expansions, and the quoted strings and
+	// substitutions in them, the substitution is in.
+	nesting int
 }
 
 // expansion reads the parameter expansion, here-document redirection or
@@ -3595,7 +3681,7 @@ type substitutionScan struct {
 // outermost substitution stops, as inner does. A parameter expansion is one
 // word, whose ")" closes nothing ($(printf %s ${PW:-a)b})).
 func (c *substitutionScan) expansion(s string, j, limit int) (next int, stop bool) {
-	if end := braceExpansionEnd(s[:limit], j, c.ends.subs); end > 0 {
+	if end := (braceReader{braces: c.ends.subs, nesting: c.nesting}).end(s[:limit], j); end > 0 {
 		return end - 1, false
 	}
 	if strings.HasPrefix(s[j:limit], "<<<") {
