@@ -1759,6 +1759,11 @@ func TestString_ValuesPastRedactedWordsCaughtWithoutScanners(t *testing.T) {
 			want:  `API_KEY=REDACTED\b= API_KEY=REDACTED`,
 		},
 		{
+			name:  "a credential after a placeholder inside a non-credential key's value",
+			input: `API_KEY="a"b= API_KEY=""|API_KEY=hunter2xyz`,
+			want:  `API_KEY=REDACTED API_KEY=""|API_KEY=REDACTED`,
+		},
+		{
 			name:  "a password key joined to a quoted value after an underscore",
 			input: `API_KEY="x"_PASSWORD=+hunter2`,
 			want:  `API_KEY=REDACTED`,

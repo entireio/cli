@@ -954,9 +954,12 @@ func detectCredentialKeyCaptures(
 // key's value is not redacted, as for b in DB_PASSWORD="a"b= API_KEY=hunter2,
 // the search starts again where the region ends, so that value can not hide
 // an assignment after the region. FindAll took that match, though, so a match
-// found inside it whose value stays visible ends that search at the match's
-// end, where FindAll goes on: in API_KEY="x"=a=\b= API_KEY=hunter2, b= is
-// not an assignment whose value takes API_KEY=hunter2.
+// found inside it whose value stays visible and runs past it does not take
+// the text after it: the search goes on where that match ends, as FindAll
+// does. In API_KEY="x"=a=\b= API_KEY=hunter2, b= is not an assignment whose
+// value takes API_KEY=hunter2, while a match that ends inside it, as the
+// empty API_KEY="" in API_KEY="a"b= API_KEY=""|API_KEY=hunter2xyz, moves the
+// search on only to its own end.
 //
 // The only values read from inside a region are those visitStraddlingValues
 // finds, and they add to what the region already redacts. One that stays
@@ -1001,7 +1004,7 @@ func forEachUncoveredMatch(s string, pattern *regexp.Regexp, valueGroup int, vis
 				}
 			} else if match[0] < covered {
 				next, rejectedEnd = covered, match[1]
-			} else if match[0] < rejectedEnd {
+			} else if match[0] < rejectedEnd && next > rejectedEnd {
 				next = max(rejectedEnd, from+1)
 			}
 		}
