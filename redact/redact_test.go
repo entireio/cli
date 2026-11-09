@@ -1326,6 +1326,28 @@ func TestString_ConnectionSecretsCaughtWithoutScanners(t *testing.T) {
 			input: "DB_PASSWORD=${DB_PASSWORD:-hunter2}",
 			want:  "DB_PASSWORD=REDACTED",
 		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := String(tt.input); got != tt.want {
+				t.Errorf("String(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// Shell parameter defaults and values joined from several quoted and bare
+// pieces must be caught by the key/value rules alone, with the scanners off.
+func TestString_ShellWordSecretsCaughtWithoutScanners(t *testing.T) {
+	t.Cleanup(func() {
+		if err := ConfigureScanners(ScannersConfig{Betterleaks: true}); err != nil {
+			t.Fatalf("restore default scanners: %v", err)
+		}
+	})
+	if err := ConfigureScanners(ScannersConfig{}); err != nil {
+		t.Fatalf("ConfigureScanners(none): %v", err)
+	}
+	tests := []stringRedactionCase{
 		{
 			name:  "credential value with a real default on a positional parameter",
 			input: "DB_PASSWORD=${1:-hunter2}",
@@ -1435,6 +1457,16 @@ func TestString_ConnectionSecretsCaughtWithoutScanners(t *testing.T) {
 			name:  "an equals sign after the quoted blank of a credential",
 			input: `API_KEY=abc"d e"=hunter2xyz`,
 			want:  "API_KEY=REDACTED",
+		},
+		{
+			name:  "a password after a key inside a redacted word",
+			input: `DB_PASSWORD=a" DB_PASSWORD=b"|DB_PASSWORD=hunter2`,
+			want:  "DB_PASSWORD=REDACTED|DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "a credential after a key inside a redacted word",
+			input: `API_KEY=a" API_KEY=b"|API_KEY=hunter2xyz`,
+			want:  "API_KEY=REDACTED|API_KEY=REDACTED",
 		},
 		{
 			name:  "code literal joined with more text",
@@ -2957,6 +2989,11 @@ func TestString_JoinedShellWordValues(t *testing.T) {
 			input: `API_KEY=a"x API_KEY=b" echo "hi"`,
 			want:  `API_KEY=REDACTED echo "hi"`,
 		},
+		{
+			name:  "a placeholder after a key inside a redacted word",
+			input: `DB_PASSWORD=a" DB_PASSWORD=b"|DB_PASSWORD=changeme`,
+			want:  `DB_PASSWORD=REDACTED|DB_PASSWORD=changeme`,
+		},
 	})
 }
 
@@ -2965,13 +3002,13 @@ func TestString_JoinedShellWordValues(t *testing.T) {
 // per match.
 func TestString_JoinedShellWordsStayLinear(t *testing.T) {
 	t.Parallel()
-	for _, unit := range []string{`DB_PASSWORD=a" "`, `API_KEY=a" "`, `DB_PASSWORD=a" "=`} {
+	for _, unit := range []string{`DB_PASSWORD=a" "`, `API_KEY=a" "`, `DB_PASSWORD=a" "=`, `DB_PASSWORD=a" DB_PASSWORD=b"|`} {
 		in := strings.Repeat(unit, 20000)
 		done := make(chan string, 1)
 		go func() { done <- String(in) }()
 		select {
 		case out := <-done:
-			if strings.Contains(out, `a" "`) {
+			if strings.Contains(out, `a" `) {
 				t.Fatalf("joined values of %q left visible: %.80q", unit, out)
 			}
 		case <-time.After(30 * time.Second):

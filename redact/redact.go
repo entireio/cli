@@ -810,23 +810,16 @@ func detectCredentialValues(s string) []taggedRegion {
 	if !strings.ContainsRune(s, '=') {
 		return regions
 	}
-	// covered is where the last redacted value ends. A match whose value
-	// starts before it lies inside a shell word already redacted whole
-	// (DB_PASSWORD=a" "DB_PASSWORD=b is one word), so it is not read again:
-	// reading each such match to the word's end would take quadratic time.
-	covered := 0
-	for _, loc := range credentialValuePattern.FindAllStringSubmatchIndex(s, -1) {
-		if len(loc) < 6 || loc[4] < 0 || loc[5] < 0 || loc[4] < covered {
-			continue
-		}
+	forEachUncoveredMatch(s, credentialValuePattern, 2, func(loc []int) int {
 		// Main's shared placeholder rules, except that a single-quoted value
 		// is a shell literal and only the literal placeholder words apply.
 		value, isReal := credentialValueRegion(s, loc[4], loc[5], true, isRealPasswordPiece)
-		if isReal {
-			regions = append(regions, taggedRegion{region: value})
-			covered = value.end
+		if !isReal {
+			return 0
 		}
-	}
+		regions = append(regions, taggedRegion{region: value})
+		return value.end
+	})
 	if strings.Contains(s, "sig=") {
 		for _, loc := range sasSignaturePattern.FindAllStringSubmatchIndex(s, -1) {
 			regions = append(regions, taggedRegion{region: region{loc[2], loc[3]}})
@@ -845,14 +838,10 @@ func detectCredentialKeyCaptures(
 	valueGroup := pattern.SubexpIndex("value")
 	keyGroup := pattern.SubexpIndex("key")
 	var regions []taggedRegion
-	// covered is where the last redacted value ends, as in
-	// detectCredentialValues: a value inside it is part of a word already
-	// redacted whole.
-	covered := 0
-	for _, match := range pattern.FindAllStringSubmatchIndex(s, -1) {
+	forEachUncoveredMatch(s, pattern, valueGroup, func(match []int) int {
 		keyStart, keyEnd, ok := captureRange(match, keyGroup)
 		if !ok {
-			continue
+			return 0
 		}
 		key := s[keyStart:keyEnd]
 		credentialContext := genericPasswordContext || key == "PASSWORD" || key == "PASSWD"
@@ -861,37 +850,79 @@ func detectCredentialKeyCaptures(
 			// the key is called (STRIPE_KEY, DATABASE_URL); only a pure
 			// identifier key such as CLIENT_ID names a non-secret.
 			if isPureIdentifierKey(key) {
-				continue
+				return 0
 			}
 		} else if !isCredentialJSONSecretKey(key, credentialContext) {
-			continue
+			return 0
 		}
-		valueStart, valueEnd, valueOK := captureRange(match, valueGroup)
-		if !valueOK || valueStart < covered {
-			continue
-		}
+		valueStart, valueEnd, _ := captureRange(match, valueGroup)
 		// The whole shell word is the value ("None"x is not None).
 		if _, wordEnd, joined := joinedShellWord(s, valueStart, valueEnd); joined {
 			valueEnd = wordEnd
 		}
 		if isNonPasswordCodeLiteral(key, strings.Trim(s[valueStart:valueEnd], `"'`)) {
-			continue
+			return 0
 		}
 		if shouldPreserve != nil && keyEnd <= valueStart && shouldPreserve(s[valueStart:valueEnd], s[keyEnd:valueStart]) {
-			continue
+			return 0
 		}
-		if captured, ok := nonPlaceholderCapture(s, key, valueStart, valueEnd); ok {
-			// Assignments get the same separator handling as the password
-			// pattern above: "ab;cd" is one value. Shell-stdin literals stop
-			// at the pipe syntax their pattern already bounds.
-			if shouldPreserve != nil && captured.start == valueStart && !isQuoteByte(s[valueStart]) {
-				captured.end = extendPastValueSeparators(s, captured.end)
+		captured, ok := nonPlaceholderCapture(s, key, valueStart, valueEnd)
+		if !ok {
+			return 0
+		}
+		// Assignments get the same separator handling as the password
+		// pattern above: "ab;cd" is one value. Shell-stdin literals stop
+		// at the pipe syntax their pattern already bounds.
+		if shouldPreserve != nil && captured.start == valueStart && !isQuoteByte(s[valueStart]) {
+			captured.end = extendPastValueSeparators(s, captured.end)
+		}
+		regions = append(regions, captured)
+		return captured.end
+	})
+	return regions
+}
+
+// forEachUncoveredMatch calls visit for each match of pattern in s, left to
+// right, that has a value capture (group valueGroup). visit returns where the
+// region it redacted ends, or 0 when it redacted nothing.
+//
+// A shell word redacted whole can hold more key=value text, as in
+// DB_PASSWORD=a" DB_PASSWORD=b", and pattern finds those matches too. Reading
+// one again from inside the word would misread the rest of the line, and on
+// a line of such words (DB_PASSWORD=a" "DB_PASSWORD=a" "...) it would take
+// quadratic time, so a match whose value starts inside a redacted region is
+// skipped. When that match runs on past the region, the text after the region
+// is not part of the word, so it is searched again on its own and a later
+// assignment there (b"|DB_PASSWORD=hunter2) is still found. Matches in that
+// second search are visited even when they run past a newer region, so each
+// stretch of s is searched at most twice.
+func forEachUncoveredMatch(s string, pattern *regexp.Regexp, valueGroup int, visit func(match []int) int) {
+	covered := 0
+	var search func(from, to int, again bool)
+	search = func(from, to int, again bool) {
+		for _, match := range pattern.FindAllStringSubmatchIndex(s[from:to], -1) {
+			for i := range match {
+				if match[i] >= 0 {
+					match[i] += from
+				}
 			}
-			regions = append(regions, captured)
-			covered = captured.end
+			valueStart, _, ok := captureRange(match, valueGroup)
+			if !ok {
+				continue
+			}
+			if valueStart < covered {
+				if match[1] <= covered {
+					continue
+				}
+				if !again {
+					search(covered, match[1], true)
+					continue
+				}
+			}
+			covered = max(covered, visit(match))
 		}
 	}
-	return regions
+	search(0, len(s), false)
 }
 
 // extendPastValueSeparators continues an unquoted credential value across ',',
