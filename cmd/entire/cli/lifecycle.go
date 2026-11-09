@@ -1123,10 +1123,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		// its work mid-turn (its normal flow) lands here with a clean tree.
 		// The tokens are applied by the turn-end transition itself, so a
 		// repeated or concurrent Stop for the same turn adds nothing.
-		var turnUsage *agent.TokenUsage
-		if !countsTokensWithLedger(ctx, sessionID) {
-			turnUsage = resolveTurnTokenUsage(ctx, ag, event, sessionID, preState, transcriptData, subagentsDir, codexInventoryUsage)
-		}
+		turnUsage := turnTokenUsageWithoutLedger(ctx, ag, event, sessionID, preState, transcriptData, subagentsDir, codexInventoryUsage)
 		transitionSessionTurnEnd(ctx, sessionID, ag.Type(), event, &checkpointlessTurnUsage{usage: turnUsage, ledgerVersion: codexLedgerVersion})
 		if cleanupErr := CleanupPrePromptState(ctx, sessionID); cleanupErr != nil {
 			logging.Warn(logCtx, "failed to cleanup pre-prompt state",
@@ -1156,10 +1153,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		transcriptLinesAtStart = preState.TranscriptOffset
 	}
 
-	var tokenUsage *agent.TokenUsage
-	if !countsTokensWithLedger(ctx, sessionID) {
-		tokenUsage = resolveTurnTokenUsage(ctx, ag, event, sessionID, preState, transcriptData, subagentsDir, codexInventoryUsage)
-	}
+	tokenUsage := turnTokenUsageWithoutLedger(ctx, ag, event, sessionID, preState, transcriptData, subagentsDir, codexInventoryUsage)
 
 	// Build fully-populated step context and delegate to strategy
 	stepCtx := strategy.StepContext{
@@ -1247,13 +1241,15 @@ func workerTurnTokenUsage(ctx context.Context, ag agent.Agent, event *agent.Even
 	return computeOutOfBandTokenUsage(ctx, ag, event.SessionID, event.SessionRef, preState)
 }
 
-// countsTokensWithLedger reports whether the session's tokens come from its
-// token ledger, which reads the agent's running total itself: the per-turn
-// usage would be computed (Claude Code: every subagent transcript read) only
-// to be discarded.
-func countsTokensWithLedger(ctx context.Context, sessionID string) bool {
-	state, err := strategy.LoadSessionState(ctx, sessionID)
-	return err == nil && state != nil && state.TokenLedger.IsActive()
+// turnTokenUsageWithoutLedger returns resolveTurnTokenUsage, or nil when the
+// session's tokens come from its token ledger, which reads the agent's running
+// total itself: the per-turn usage would be computed (Claude Code: every
+// subagent transcript read) only to be discarded.
+func turnTokenUsageWithoutLedger(ctx context.Context, ag agent.Agent, event *agent.Event, sessionID string, preState *PrePromptState, transcriptData []byte, subagentsDir string, codexInventoryUsage *agent.TokenUsage) *agent.TokenUsage {
+	if state, err := strategy.LoadSessionState(ctx, sessionID); err == nil && state != nil && state.TokenLedger.IsActive() {
+		return nil
+	}
+	return resolveTurnTokenUsage(ctx, ag, event, sessionID, preState, transcriptData, subagentsDir, codexInventoryUsage)
 }
 
 // resolveTurnTokenUsage returns the token usage of the turn ending now.

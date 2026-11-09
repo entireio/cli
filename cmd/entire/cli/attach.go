@@ -1627,37 +1627,43 @@ func applyAttachSessionState(ctx context.Context, state *session.State, now time
 		logging.Warn(ctx, "attach: session tokens changed while attach was waiting; leaving token state as the hooks set it",
 			slog.Int("counted_from", countedFrom), slog.Int("token_start", tokenStartOnDisk))
 	default:
-		if state.Phase.IsActive() && !noStopComing {
-			// The running turn's Stop adds its tokens from turn start, including
-			// those before this attach, so the whole-transcript total would count
-			// them twice. Keep the hooks' total; take only the cumulative subagent
-			// total, which the re-baseline below must cover. An agent that exited
-			// or went quiet mid-turn sends no Stop, so its session takes the
-			// whole-transcript total below instead.
-			if sessionUsage != nil && sessionUsage.SubagentTokens != nil {
-				total := agent.TokenUsage{}
-				if state.TokenUsage != nil {
-					total = *state.TokenUsage
-				}
-				total.SubagentTokens = sessionUsage.SubagentTokens
-				total.SubagentTokensComplete = sessionUsage.SubagentTokensComplete
-				state.TokenUsage = &total
-			}
-		} else if sessionUsage != nil {
-			// Without a cumulative subagent total of its own, keep the one hooks
-			// recorded so the re-baseline doesn't drop it.
-			if sessionUsage.SubagentTokens == nil && state.TokenUsage != nil {
-				sessionUsage.SubagentTokens = state.TokenUsage.SubagentTokens
-				sessionUsage.SubagentTokensComplete = state.TokenUsage.SubagentTokensComplete
-			}
-			state.TokenUsage = sessionUsage
-		}
+		applyAttachTokenTotal(state, sessionUsage, noStopComing)
 		strategy.ConsumeAttachTokenWindow(state, tokenPos)
 	}
 	if opts.Review {
 		state.Kind = session.KindAgentReview
 		state.ReviewSkills = reviewSkills
 		state.ReviewPrompt = reviewPromptForAttach(meta, opts)
+	}
+}
+
+// applyAttachTokenTotal sets the session's token total from attach's whole-
+// transcript reading, when the hooks left token state as attach read it.
+func applyAttachTokenTotal(state *session.State, sessionUsage *agent.TokenUsage, noStopComing bool) {
+	if state.Phase.IsActive() && !noStopComing {
+		// The running turn's Stop adds its tokens from turn start, including
+		// those before this attach, so the whole-transcript total would count
+		// them twice. Keep the hooks' total; take only the cumulative subagent
+		// total, which the re-baseline below must cover. An agent that exited
+		// or went quiet mid-turn sends no Stop, so its session takes the
+		// whole-transcript total below instead.
+		if sessionUsage != nil && sessionUsage.SubagentTokens != nil {
+			total := agent.TokenUsage{}
+			if state.TokenUsage != nil {
+				total = *state.TokenUsage
+			}
+			total.SubagentTokens = sessionUsage.SubagentTokens
+			total.SubagentTokensComplete = sessionUsage.SubagentTokensComplete
+			state.TokenUsage = &total
+		}
+	} else if sessionUsage != nil {
+		// Without a cumulative subagent total of its own, keep the one hooks
+		// recorded so the re-baseline doesn't drop it.
+		if sessionUsage.SubagentTokens == nil && state.TokenUsage != nil {
+			sessionUsage.SubagentTokens = state.TokenUsage.SubagentTokens
+			sessionUsage.SubagentTokensComplete = state.TokenUsage.SubagentTokensComplete
+		}
+		state.TokenUsage = sessionUsage
 	}
 }
 
