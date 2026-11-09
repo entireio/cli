@@ -1484,6 +1484,11 @@ func TestString_ShellWordSecretsCaughtWithoutScanners(t *testing.T) {
 			want:  `DB_PASSWORD=REDACTED"`,
 		},
 		{
+			name:  "text joined after a quoted value whose opening quote follows an escaped quote",
+			input: `DB_PASSWORD=abc\" API_KEY="hunter2 secretpart"tail echo "safe"`,
+			want:  `DB_PASSWORD=REDACTED echo "safe"`,
+		},
+		{
 			name:  "a spaced quoted value whose opening quote follows a stray quote",
 			input: `DB_PASSWORD=abc" API_KEY = "hunter2 secretpart"`,
 			want:  `DB_PASSWORD=REDACTED"`,
@@ -1501,7 +1506,7 @@ func TestString_ShellWordSecretsCaughtWithoutScanners(t *testing.T) {
 		{
 			name:  "quoted values that open inside joined words around a pipe",
 			input: `DB_PASSWORD=a" DB_PASSWORD="|DB_PASSWORD=c' DB_PASSWORD=d'|echo "safe" DB_PASSWORD="hunter'2 secretpart"`,
-			want:  `DB_PASSWORD=REDACTED"safe" DB_PASSWORD="REDACTED"`,
+			want:  `DB_PASSWORD=REDACTED"`,
 		},
 		{
 			name:  "a quoted password piece holding a non-credential assignment stays whole",

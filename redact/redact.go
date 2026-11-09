@@ -810,14 +810,10 @@ func detectCredentialValues(s string) []taggedRegion {
 	if !strings.ContainsRune(s, '=') {
 		return regions
 	}
-	forEachUncoveredMatch(s, credentialValuePattern, 2, func(loc []int, inside bool) int {
+	forEachUncoveredMatch(s, credentialValuePattern, 2, func(loc []int) int {
 		// Main's shared placeholder rules, except that a single-quoted value
 		// is a shell literal and only the literal placeholder words apply.
-		valueRegion := credentialValueRegion
-		if inside {
-			valueRegion = capturedValueRegion
-		}
-		value, isReal := valueRegion(s, loc[4], loc[5], true, isRealPasswordPiece)
+		value, isReal := credentialValueRegion(s, loc[4], loc[5], true, isRealPasswordPiece)
 		if !isReal {
 			return 0
 		}
@@ -842,7 +838,7 @@ func detectCredentialKeyCaptures(
 	valueGroup := pattern.SubexpIndex("value")
 	keyGroup := pattern.SubexpIndex("key")
 	var regions []taggedRegion
-	forEachUncoveredMatch(s, pattern, valueGroup, func(match []int, inside bool) int {
+	forEachUncoveredMatch(s, pattern, valueGroup, func(match []int) int {
 		keyStart, keyEnd, ok := captureRange(match, keyGroup)
 		if !ok {
 			return 0
@@ -860,9 +856,8 @@ func detectCredentialKeyCaptures(
 			return 0
 		}
 		valueStart, valueEnd, _ := captureRange(match, valueGroup)
-		// The whole shell word is the value ("None"x is not None), except
-		// for a quoted value that opened inside a redacted word.
-		if _, wordEnd, joined := joinedShellWord(s, valueStart, valueEnd); joined && !inside {
+		// The whole shell word is the value ("None"x is not None).
+		if _, wordEnd, joined := joinedShellWord(s, valueStart, valueEnd); joined {
 			valueEnd = wordEnd
 		}
 		if isNonPasswordCodeLiteral(key, strings.Trim(s[valueStart:valueEnd], `"'`)) {
@@ -871,7 +866,7 @@ func detectCredentialKeyCaptures(
 		if shouldPreserve != nil && keyEnd <= valueStart && shouldPreserve(s[valueStart:valueEnd], s[keyEnd:valueStart]) {
 			return 0
 		}
-		captured, ok := nonPlaceholderCapture(s, key, valueStart, valueEnd, !inside)
+		captured, ok := nonPlaceholderCapture(s, key, valueStart, valueEnd)
 		if !ok {
 			return 0
 		}
@@ -889,8 +884,7 @@ func detectCredentialKeyCaptures(
 
 // forEachUncoveredMatch calls visit for each match of pattern in s, left to
 // right, that has a value capture (group valueGroup). visit returns where the
-// region it redacted ends, or 0 when it redacted nothing; inside tells it the
-// value opened inside a region and is read only as captured.
+// region it redacted ends, or 0 when it redacted nothing.
 //
 // A shell word redacted whole can hold more key=value text, as in
 // DB_PASSWORD=a" DB_PASSWORD=b", and reading a value from inside the word
@@ -905,9 +899,8 @@ func detectCredentialKeyCaptures(
 // search starts at that key, which is read once more, so its value is found.
 //
 // The only values read from inside a region are those visitStraddlingValues
-// finds, each only as the quoted string the pattern matched, so they add to
-// what the region already redacts.
-func forEachUncoveredMatch(s string, pattern *regexp.Regexp, valueGroup int, visit func(match []int, inside bool) int) {
+// finds, and they add to what the region already redacts.
+func forEachUncoveredMatch(s string, pattern *regexp.Regexp, valueGroup int, visit func(match []int) int) {
 	covered := 0
 	for from := 0; from < len(s); {
 		match := pattern.FindStringSubmatchIndex(s[from:])
@@ -919,7 +912,7 @@ func forEachUncoveredMatch(s string, pattern *regexp.Regexp, valueGroup int, vis
 		if valueStart, _, ok := captureRange(match, valueGroup); ok {
 			if valueStart < covered {
 				next = covered
-			} else if end := visit(match, false); end > 0 {
+			} else if end := visit(match); end > 0 {
 				covered = max(covered, visitStraddlingValues(s, pattern, valueGroup, visit, valueStart, end))
 				next = max(next, assignedKeyStart(s, valueStart, end))
 			}
@@ -928,16 +921,19 @@ func forEachUncoveredMatch(s string, pattern *regexp.Regexp, valueGroup int, vis
 	}
 }
 
-// visitStraddlingValues calls visit, with inside set, for each key whose
-// quoted value opens inside the redacted region s[start:end] and closes past
-// it, as API_KEY in abc\" API_KEY="hunter2 x", where the shell word ends at
-// the blank. It does the same for the regions those values are redacted in,
-// and returns where the furthest region ends, or end.
+// visitStraddlingValues calls visit for each key whose quoted value opens
+// inside the redacted region s[start:end] and closes past it, as API_KEY in
+// abc\" API_KEY="hunter2 x"tail, where the shell word ends at the blank. That
+// reads the line as if the region's own quote there were escaped, so the
+// value's shell word ("hunter2 x"tail) is redacted whole, as any other. It
+// does the same for the regions those values are redacted in, and returns
+// where the furthest region ends, or end.
 //
 // Such a value's opening quote is the last quote of its kind in the region,
-// so each region has at most two, and each read covers only the key and its
-// quoted string. Two regions can share a value, so each is read once.
-func visitStraddlingValues(s string, pattern *regexp.Regexp, valueGroup int, visit func(match []int, inside bool) int, start, end int) int {
+// so each region has at most two, and the pattern is matched only over the
+// key and its quoted string. Two regions can share a value, so each is read
+// once.
+func visitStraddlingValues(s string, pattern *regexp.Regexp, valueGroup int, visit func(match []int) int, start, end int) int {
 	furthest := end
 	pending := []region{{start, end}}
 	read := map[int]bool{}
@@ -967,7 +963,7 @@ func visitStraddlingValues(s string, pattern *regexp.Regexp, valueGroup int, vis
 			if valueStart, valueEnd, ok := captureRange(match, valueGroup); !ok || valueStart != open || valueEnd != closeAt+1 {
 				continue
 			}
-			if valueRegionEnd := visit(match, true); valueRegionEnd > 0 {
+			if valueRegionEnd := visit(match); valueRegionEnd > 0 {
 				furthest = max(furthest, valueRegionEnd)
 				pending = append(pending, region{open, valueRegionEnd})
 			}
@@ -1089,12 +1085,8 @@ func isCredentialCodeReference(value string) bool {
 // nonPlaceholderCapture returns the value captured at s[start:end] under key
 // when it is a real credential. wholeWord reads it as a shell word joined
 // from pieces; otherwise it is read as captured.
-func nonPlaceholderCapture(s, key string, start, end int, wholeWord bool) (taggedRegion, bool) {
-	valueRegion := credentialValueRegion
-	if !wholeWord {
-		valueRegion = capturedValueRegion
-	}
-	value, isReal := valueRegion(s, start, end, false, func(piece string, singleQuoted bool) bool {
+func nonPlaceholderCapture(s, key string, start, end int) (taggedRegion, bool) {
+	value, isReal := credentialValueRegion(s, start, end, false, func(piece string, singleQuoted bool) bool {
 		return hasNonPlaceholderKeyValue(key, piece, singleQuoted)
 	})
 	if !isReal {
@@ -1132,14 +1124,6 @@ func credentialValueRegion(s string, start, end int, extend bool, isReal func(pi
 		}
 		return region{start, wordEnd}, isRealJoinedWord(s, pieces, isReal)
 	}
-	return capturedValueRegion(s, start, end, extend, isReal)
-}
-
-// capturedValueRegion is credentialValueRegion for a value read as the
-// pattern captured it, without the rest of its shell word: one quoted string
-// is redacted inside its quotes, and a bare value is extended past separators
-// when extend is set.
-func capturedValueRegion(s string, start, end int, extend bool, isReal func(piece string, singleQuoted bool) bool) (region, bool) {
 	valueStart, valueEnd, singleQuoted := unquoteRangeQuoted(s, start, end)
 	if extend && valueStart == start {
 		valueEnd = extendPastValueSeparators(s, valueEnd)
