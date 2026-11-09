@@ -520,10 +520,7 @@ func replaceManagedEntry(root *os.Root, tmpName, destName string) error {
 	if err == nil || !renameAsideOnReplaceFailure {
 		return err
 	}
-	aside, nameErr := oldManagedEntryName(path.Base(destName))
-	if nameErr != nil {
-		return errors.Join(err, nameErr)
-	}
+	aside := oldManagedEntryName(path.Base(destName))
 	if asideErr := managedEntryRename(root, destName, aside); asideErr != nil {
 		return errors.Join(err, fmt.Errorf("move existing entry aside: %w", asideErr))
 	}
@@ -539,28 +536,20 @@ func replaceManagedEntry(root *os.Root, tmpName, destName string) error {
 	return errors.Join(err, retryErr)
 }
 
-// oldManagedEntryName returns a unique bin/ name for moving base aside.
-func oldManagedEntryName(base string) (string, error) {
-	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", fmt.Errorf("generate aside name suffix: %w", err)
-	}
-	return pluginBinName(oldManagedEntryPrefix + hex.EncodeToString(b[:]) + "-" + base), nil
+// oldManagedEntryName returns a unique bin/ name for moving base aside. The
+// suffix scheme of oldBinaryAsideName would not do here: the name must not
+// start with pluginBinaryPrefix (see oldManagedEntryPrefix).
+func oldManagedEntryName(base string) string {
+	return pluginBinName(oldManagedEntryPrefix + asideSuffix() + "-" + base)
 }
 
 // sweepOldManagedEntries best-effort removes entries replaceManagedEntry moved
-// aside. One whose process is still running fails to delete on Windows and is
-// left for the next install; the files are inert either way.
+// aside. Matching on the prefix, not a substring as the pkg/ sweep does, so a
+// real plugin whose name merely contains ".old-" is never deleted.
 func sweepOldManagedEntries(root *os.Root) {
-	entries, err := osroot.ReadDirNoSymlinks(root, pluginManagedBinSubdir)
-	if err != nil {
-		return
-	}
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), oldManagedEntryPrefix) {
-			_ = root.Remove(pluginBinName(e.Name())) //nolint:errcheck // inert leftovers; swept again next install
-		}
-	}
+	sweepAsideLeftovers(root, pluginManagedBinSubdir, func(name string) bool {
+		return strings.HasPrefix(name, oldManagedEntryPrefix)
+	})
 }
 
 // installedVariantsByBareName returns every managed entry whose bare name

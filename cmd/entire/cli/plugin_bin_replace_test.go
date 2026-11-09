@@ -161,10 +161,7 @@ func TestInstallPluginFromPath_SweepsAndHidesAsideLeftovers(t *testing.T) { //no
 	if err != nil {
 		t.Fatal(err)
 	}
-	leftover, err := oldManagedEntryName(pluginBinaryName("foo"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	leftover := oldManagedEntryName(pluginBinaryName("foo"))
 	leftoverPath := filepath.Join(binDir, filepath.Base(leftover))
 	writeExecutableScript(t, leftoverPath, "stale")
 

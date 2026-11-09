@@ -464,23 +464,36 @@ func replaceBinary(srcRoot *os.Root, srcName string, destRoot *os.Root, destName
 // oldBinaryAsideName returns a unique .old- sibling name for the rename-aside
 // trick. Random suffix so concurrent upgrades can't collide.
 func oldBinaryAsideName(destName string) string {
+	return destName + ".old-" + asideSuffix()
+}
+
+// asideSuffix is the random part of a rename-aside name, shared by the pkg/
+// (oldBinaryAsideName) and bin/ (oldManagedEntryName) schemes.
+func asideSuffix() string {
 	var b [4]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		return destName + ".old-fallback"
+		return "fallback"
 	}
-	return destName + ".old-" + hex.EncodeToString(b[:])
+	return hex.EncodeToString(b[:])
 }
 
 // sweepOldBinaries best-effort removes .old-* leftovers from the Windows
-// rename-aside fallback. Failures are ignored — the files are inert.
+// rename-aside fallback in a pkg dir.
 func sweepOldBinaries(root *os.Root, pkgName string) {
-	entries, err := osroot.ReadDirNoSymlinks(root, pkgName)
+	sweepAsideLeftovers(root, pkgName, func(name string) bool { return strings.Contains(name, ".old-") })
+}
+
+// sweepAsideLeftovers best-effort removes the entries of dir that isLeftover
+// matches. Failures are ignored: the files are inert, and one still held by a
+// running process on Windows is swept again on the next install.
+func sweepAsideLeftovers(root *os.Root, dir string, isLeftover func(name string) bool) {
+	entries, err := osroot.ReadDirNoSymlinks(root, dir)
 	if err != nil {
 		return
 	}
 	for _, e := range entries {
-		if strings.Contains(e.Name(), ".old-") {
-			_ = root.Remove(pkgName + "/" + e.Name()) //nolint:errcheck // inert leftovers; swept again next install
+		if isLeftover(e.Name()) {
+			_ = root.Remove(dir + "/" + e.Name()) //nolint:errcheck // inert leftovers; swept again next install
 		}
 	}
 }
