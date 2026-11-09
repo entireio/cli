@@ -49,6 +49,7 @@ const (
 	flagCheckpointRemote     = "checkpoint-remote"
 	flagCheckpointBackend    = "checkpoint-backend"
 	flagCheckpointPushPolicy = "checkpoint-push-policy"
+	flagCrossRepoCommits     = "cross-repo-commits"
 	flagSkipPushSessions     = "skip-push-sessions"
 	flagSummarizeModel       = "summarize-model"
 	flagSummarizeAgent       = "summarize-provider"
@@ -172,7 +173,7 @@ func hasGlobalSettingsFlags(cmd *cobra.Command) bool {
 // hasConfigureSettingsFlags reports whether configure was invoked with any
 // flag that mutates settings or hooks. Bare invocation prints help instead.
 func hasConfigureSettingsFlags(cmd *cobra.Command) bool {
-	return hasStrategyFlags(cmd) || hasCheckpointBackendFlag(cmd) || cmd.Flags().Changed(flagCheckpointPushPolicy) || hasSummaryProviderFlags(cmd) || hasSummaryTimeoutFlag(cmd) || hasGlobalSettingsFlags(cmd)
+	return hasStrategyFlags(cmd) || hasCheckpointBackendFlag(cmd) || cmd.Flags().Changed(flagCheckpointPushPolicy) || cmd.Flags().Changed(flagCrossRepoCommits) || hasSummaryProviderFlags(cmd) || hasSummaryTimeoutFlag(cmd) || hasGlobalSettingsFlags(cmd)
 }
 
 // enableUsesSetupFlow reports whether `entire enable` should delegate to the
@@ -840,6 +841,7 @@ func newSetupCmd() *cobra.Command {
 	var summarizeModel string
 	var summarizeTimeoutSeconds int
 	var checkpointPushPolicy string
+	var crossRepoCommits string
 
 	cmd := &cobra.Command{
 		Use:   "configure",
@@ -857,6 +859,7 @@ Examples:
   entire configure --checkpoint-remote github:org/checkpoints   # or gitlab:org/checkpoints
   entire configure --checkpoint-backend refs      # Move a legacy repo to per-checkpoint git refs
   entire configure --checkpoint-push-policy manual   # Keep checkpoints local until 'entire checkpoint push'
+  entire configure --cross-repo-commits on       # Link agent commits in other repos (see the flag's help first)
   entire configure --summarize-provider claude-code
   entire configure --summarize-timeout-seconds 300   # 5m deadline for explain --generate`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -885,17 +888,9 @@ Examples:
 			// Checked first, so an invalid value is refused before any other
 			// flag has changed anything, and saved last, so a failed step
 			// cannot leave manual on a backend it does not support.
-			var pushPolicy settings.CheckpointPushPolicy
-			if cmd.Flags().Changed(flagCheckpointPushPolicy) {
-				var backend string
-				if hasCheckpointBackendFlag(cmd) {
-					backend = opts.CheckpointBackend
-				}
-				policy, err := checkCheckpointPushPolicy(ctx, checkpointPushPolicy, backend)
-				if err != nil {
-					return err
-				}
-				pushPolicy = policy
+			choices, err := checkCloneChoices(ctx, cmd, opts.CheckpointBackend, checkpointPushPolicy, crossRepoCommits)
+			if err != nil {
+				return err
 			}
 			if hasStrategyFlags(cmd) {
 				if err := updateStrategyOptions(ctx, cmd.OutOrStdout(), opts); err != nil {
@@ -922,12 +917,7 @@ Examples:
 					return err
 				}
 			}
-			if pushPolicy != "" {
-				if err := saveCheckpointPushPolicy(ctx, cmd.OutOrStdout(), pushPolicy); err != nil {
-					return err
-				}
-			}
-			return nil
+			return saveCloneChoices(ctx, cmd.OutOrStdout(), choices)
 		},
 	}
 
@@ -938,6 +928,7 @@ Examples:
 	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", checkpointRemoteFlagUsage)
 	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", checkpointBackendFlagUsage)
 	cmd.Flags().StringVar(&checkpointPushPolicy, flagCheckpointPushPolicy, "", "When checkpoints upload for this clone: automatic (on git push) or manual (only with 'entire checkpoint push'). Applies to the whole clone; --local and --project don't change where it is saved")
+	cmd.Flags().StringVar(&crossRepoCommits, flagCrossRepoCommits, "", crossRepoCommitsFlagUsage)
 	cmd.Flags().StringVar(&summarizeProvider, flagSummarizeAgent, "", "Set the provider used by explain --generate (e.g., claude-code, codex, antigravity, pi, opencode, cursor, copilot-cli)")
 	cmd.Flags().StringVar(&summarizeModel, flagSummarizeModel, "", "Set the model hint used by explain --generate")
 	cmd.Flags().IntVar(&summarizeTimeoutSeconds, flagSummarizeTimeout, 0, "Set the hard deadline (seconds) for explain --generate summary generation. 0 clears the setting, leaving summary generation unbounded.")
@@ -3410,6 +3401,86 @@ func checkCheckpointPushPolicy(ctx context.Context, value, backend string) (sett
 		}
 	}
 	return policy, nil
+}
+
+// cloneChoices are configure's settings kept per clone in the git common dir
+// rather than in settings, so --local and --project do not apply to them.
+// Zero values mean the flag was not given.
+type cloneChoices struct {
+	pushPolicy settings.CheckpointPushPolicy
+	crossRepo  *bool
+}
+
+// checkCloneChoices validates configure's clone-choice flags. backend is the
+// --checkpoint-backend value, used only when that flag was given.
+func checkCloneChoices(ctx context.Context, cmd *cobra.Command, backend, pushPolicy, crossRepo string) (cloneChoices, error) {
+	var choices cloneChoices
+	if cmd.Flags().Changed(flagCheckpointPushPolicy) {
+		if !hasCheckpointBackendFlag(cmd) {
+			backend = ""
+		}
+		policy, err := checkCheckpointPushPolicy(ctx, pushPolicy, backend)
+		if err != nil {
+			return cloneChoices{}, err
+		}
+		choices.pushPolicy = policy
+	}
+	if cmd.Flags().Changed(flagCrossRepoCommits) {
+		on, err := checkCrossRepoCommits(crossRepo)
+		if err != nil {
+			return cloneChoices{}, err
+		}
+		choices.crossRepo = &on
+	}
+	return choices, nil
+}
+
+func saveCloneChoices(ctx context.Context, w io.Writer, choices cloneChoices) error {
+	if choices.pushPolicy != "" {
+		if err := saveCheckpointPushPolicy(ctx, w, choices.pushPolicy); err != nil {
+			return err
+		}
+	}
+	if choices.crossRepo != nil {
+		return saveCrossRepoCommits(ctx, w, *choices.crossRepo)
+	}
+	return nil
+}
+
+// crossRepoCommitsFlagUsage says what turning cross-repo commits on shares,
+// because the person turning it on is deciding who may read this clone's
+// agent transcripts.
+const crossRepoCommitsFlagUsage = "Link commits that agent sessions started in this clone make in other repositories: on or off (default off). " +
+	"Linking copies the session's transcript up to that commit, earlier turns included, into the other repository's checkpoints, which are pushed wherever it pushes them. " +
+	"It is allowed only when that repository's checkpoints go to the same owner as this one's origin and its redaction covers this one's, " +
+	"but the same owner is not the same audience: a private repository's transcript can land in a public one. " +
+	"Turning it on needs a terminal. Applies to the whole clone"
+
+// checkCrossRepoCommits parses a --cross-repo-commits value. Turning it on
+// shares this clone's transcripts beyond it, so it needs a person at a
+// terminal: an agent, which runs commands without one, cannot opt its own
+// sessions in. Turning it off is allowed anywhere.
+func checkCrossRepoCommits(value string) (bool, error) {
+	on, err := settings.ParseCrossRepoCommits(value)
+	if err != nil {
+		return false, err //nolint:wrapcheck // names the value and the accepted ones
+	}
+	if on && !interactive.CanPromptInteractively() {
+		return false, errors.New("turning cross-repo commits on needs an interactive terminal; run it yourself, not through an agent")
+	}
+	return on, nil
+}
+
+func saveCrossRepoCommits(ctx context.Context, w io.Writer, on bool) error {
+	if err := settings.SaveCrossRepoCommits(ctx, on); err != nil {
+		return err //nolint:wrapcheck // already names what failed
+	}
+	if on {
+		fmt.Fprintln(w, "✓ Cross-repo commits: on. Agent sessions started in this clone can link commits they make in other repositories, copying their transcript into those repositories' checkpoints.")
+	} else {
+		fmt.Fprintln(w, "✓ Cross-repo commits: off.")
+	}
+	return nil
 }
 
 // saveCheckpointPushPolicy saves the clone's checkpoint push policy. It is a
