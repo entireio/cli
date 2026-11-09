@@ -810,10 +810,14 @@ func detectCredentialValues(s string) []taggedRegion {
 	if !strings.ContainsRune(s, '=') {
 		return regions
 	}
-	forEachUncoveredMatch(s, credentialValuePattern, 2, func(loc []int) int {
+	forEachUncoveredMatch(s, credentialValuePattern, 2, func(loc []int, inside bool) int {
 		// Main's shared placeholder rules, except that a single-quoted value
 		// is a shell literal and only the literal placeholder words apply.
-		value, isReal := credentialValueRegion(s, loc[4], loc[5], true, isRealPasswordPiece)
+		valueRegion := credentialValueRegion
+		if inside {
+			valueRegion = capturedValueRegion
+		}
+		value, isReal := valueRegion(s, loc[4], loc[5], true, isRealPasswordPiece)
 		if !isReal {
 			return 0
 		}
@@ -838,7 +842,7 @@ func detectCredentialKeyCaptures(
 	valueGroup := pattern.SubexpIndex("value")
 	keyGroup := pattern.SubexpIndex("key")
 	var regions []taggedRegion
-	forEachUncoveredMatch(s, pattern, valueGroup, func(match []int) int {
+	forEachUncoveredMatch(s, pattern, valueGroup, func(match []int, inside bool) int {
 		keyStart, keyEnd, ok := captureRange(match, keyGroup)
 		if !ok {
 			return 0
@@ -856,8 +860,9 @@ func detectCredentialKeyCaptures(
 			return 0
 		}
 		valueStart, valueEnd, _ := captureRange(match, valueGroup)
-		// The whole shell word is the value ("None"x is not None).
-		if _, wordEnd, joined := joinedShellWord(s, valueStart, valueEnd); joined {
+		// The whole shell word is the value ("None"x is not None), except
+		// for a quoted value that opened inside a redacted word.
+		if _, wordEnd, joined := joinedShellWord(s, valueStart, valueEnd); joined && !inside {
 			valueEnd = wordEnd
 		}
 		if isNonPasswordCodeLiteral(key, strings.Trim(s[valueStart:valueEnd], `"'`)) {
@@ -866,7 +871,7 @@ func detectCredentialKeyCaptures(
 		if shouldPreserve != nil && keyEnd <= valueStart && shouldPreserve(s[valueStart:valueEnd], s[keyEnd:valueStart]) {
 			return 0
 		}
-		captured, ok := nonPlaceholderCapture(s, key, valueStart, valueEnd)
+		captured, ok := nonPlaceholderCapture(s, key, valueStart, valueEnd, !inside)
 		if !ok {
 			return 0
 		}
@@ -884,7 +889,8 @@ func detectCredentialKeyCaptures(
 
 // forEachUncoveredMatch calls visit for each match of pattern in s, left to
 // right, that has a value capture (group valueGroup). visit returns where the
-// region it redacted ends, or 0 when it redacted nothing.
+// region it redacted ends, or 0 when it redacted nothing; inside tells it the
+// value opened inside a region and is read only as captured.
 //
 // A shell word redacted whole can hold more key=value text, as in
 // DB_PASSWORD=a" DB_PASSWORD=b", and reading a value from inside the word
@@ -893,11 +899,15 @@ func detectCredentialKeyCaptures(
 // last match or redacted region ends, whichever is later. A later assignment
 // after the word (b"|DB_PASSWORD=hunter2) is still found, and as with FindAll
 // no search starts before the last one's match ended, so a line of such words
-// (DB_PASSWORD=a" "DB_PASSWORD=a" "...) takes linear time. The one exception
-// is a region that ends in a key whose value comes after it, as when a value
-// runs past a separator into db_password=foo,client_secret = "x": the next
-// search starts at that key, which is read once more, so its value is found.
-func forEachUncoveredMatch(s string, pattern *regexp.Regexp, valueGroup int, visit func(match []int) int) {
+// (DB_PASSWORD=a" "DB_PASSWORD=a" "...) takes linear time.
+//
+// Two keys in a region are read again, because the region does not hold
+// their whole value (see resumeKeyStart): a key at its end whose value comes
+// after it, and a key whose quoted value opens inside it and closes past it.
+// The second is the only value read from inside a region, and only as the
+// quoted string the pattern matched, as on main, so it adds to what the
+// region already redacts and never reads on into the rest of the line.
+func forEachUncoveredMatch(s string, pattern *regexp.Regexp, valueGroup int, visit func(match []int, inside bool) int) {
 	covered := 0
 	for from := 0; from < len(s); {
 		match := pattern.FindStringSubmatchIndex(s[from:])
@@ -910,43 +920,94 @@ func forEachUncoveredMatch(s string, pattern *regexp.Regexp, valueGroup int, vis
 			}
 		}
 		next := max(match[1], from+1)
-		if valueStart, _, ok := captureRange(match, valueGroup); ok {
-			if valueStart < covered {
-				// Only a search from a key inside a region gets here; a
-				// value is never read from inside a region.
+		if valueStart, valueEnd, ok := captureRange(match, valueGroup); ok {
+			inside := valueStart < covered
+			if inside && (!isQuoteByte(s[valueStart]) || valueEnd <= covered) {
 				next = covered
-			} else if end := visit(match); end > 0 {
+			} else if end := visit(match, inside); end > 0 {
 				covered = max(covered, end)
-				next = max(next, assignedKeyStart(s, valueStart, end))
+				if key := resumeKeyStart(s, valueStart, end); key < end {
+					next = key
+				} else {
+					next = max(next, end)
+				}
+			} else if inside {
+				next = covered
 			}
 		}
 		from = next
 	}
 }
 
+// resumeKeyStart returns where the earliest key in the redacted region
+// s[start:end] begins whose value the region does not hold, or end when there
+// is none. That is a key at the end of the region that an = after it assigns,
+// as client_secret in foo,client_secret = "x" or "x"client_secret= "y", or a
+// key whose quoted value opens inside the region and closes past it, as
+// API_KEY in abc\" API_KEY="hunter2 x", where the shell word ends at the blank.
+func resumeKeyStart(s string, start, end int) int {
+	resume := assignedKeyStart(s, start, end)
+	for _, quote := range []byte{'"', '\''} {
+		open := strings.LastIndexByte(s[start:end], quote)
+		if open < 0 {
+			continue
+		}
+		open += start
+		if keyStart := assignmentKeyStart(s, start, open); keyStart >= 0 && keyStart < resume && quotedPieceEnd(s, open) > end {
+			resume = keyStart
+		}
+	}
+	return resume
+}
+
 // assignedKeyStart returns where the key at the end of the redacted region
-// s[start:end] begins when an = assigns it a value that starts after end, as
-// client_secret in foo,client_secret = "x" or "x"client_secret= "y". Otherwise
-// it returns end.
+// s[start:end] begins when an = assigns it a value that starts after end.
+// Otherwise it returns end.
 func assignedKeyStart(s string, start, end int) int {
-	keyEnd := end
 	if s[end-1] == '=' {
-		keyEnd--
-	} else {
-		next := end
-		for next < len(s) && (s[next] == ' ' || s[next] == '\t') {
-			next++
+		if keyStart := assignmentKeyStart(s, start, end); keyStart >= 0 {
+			return keyStart
 		}
-		if next == len(s) || s[next] != '=' {
-			return end
-		}
-	}
-	keyStart := keyEnd
-	for keyStart > start && isCredentialKeyByte(s[keyStart-1]) {
-		keyStart--
-	}
-	if keyStart == keyEnd {
 		return end
+	}
+	next := end
+	for next < len(s) && (s[next] == ' ' || s[next] == '\t') {
+		next++
+	}
+	if next < len(s) && s[next] == '=' {
+		if keyStart := keyStartBefore(s, start, end); keyStart < end {
+			return keyStart
+		}
+	}
+	return end
+}
+
+// assignmentKeyStart returns where the key begins in a key= or key = that
+// ends at s[at], all inside s[lo:at], or -1 when s[lo:at] does not end so.
+func assignmentKeyStart(s string, lo, at int) int {
+	j := at
+	for j > lo && (s[j-1] == ' ' || s[j-1] == '\t') {
+		j--
+	}
+	if j == lo || s[j-1] != '=' {
+		return -1
+	}
+	j--
+	for j > lo && (s[j-1] == ' ' || s[j-1] == '\t') {
+		j--
+	}
+	if keyStart := keyStartBefore(s, lo, j); keyStart < j {
+		return keyStart
+	}
+	return -1
+}
+
+// keyStartBefore returns where the run of key bytes that ends at s[end]
+// begins, no earlier than lo; end when there is none.
+func keyStartBefore(s string, lo, end int) int {
+	keyStart := end
+	for keyStart > lo && isCredentialKeyByte(s[keyStart-1]) {
+		keyStart--
 	}
 	return keyStart
 }
@@ -1001,9 +1062,14 @@ func isCredentialCodeReference(value string) bool {
 }
 
 // nonPlaceholderCapture returns the value captured at s[start:end] under key
-// when it is a real credential.
-func nonPlaceholderCapture(s, key string, start, end int) (taggedRegion, bool) {
-	value, isReal := credentialValueRegion(s, start, end, false, func(piece string, singleQuoted bool) bool {
+// when it is a real credential. wholeWord reads it as a shell word joined
+// from pieces; otherwise it is read as captured.
+func nonPlaceholderCapture(s, key string, start, end int, wholeWord bool) (taggedRegion, bool) {
+	valueRegion := credentialValueRegion
+	if !wholeWord {
+		valueRegion = capturedValueRegion
+	}
+	value, isReal := valueRegion(s, start, end, false, func(piece string, singleQuoted bool) bool {
 		return hasNonPlaceholderKeyValue(key, piece, singleQuoted)
 	})
 	if !isReal {
@@ -1041,6 +1107,14 @@ func credentialValueRegion(s string, start, end int, extend bool, isReal func(pi
 		}
 		return region{start, wordEnd}, isRealJoinedWord(s, pieces, isReal)
 	}
+	return capturedValueRegion(s, start, end, extend, isReal)
+}
+
+// capturedValueRegion is credentialValueRegion for a value read as the
+// pattern captured it, without the rest of its shell word: one quoted string
+// is redacted inside its quotes, and a bare value is extended past separators
+// when extend is set.
+func capturedValueRegion(s string, start, end int, extend bool, isReal func(piece string, singleQuoted bool) bool) (region, bool) {
 	valueStart, valueEnd, singleQuoted := unquoteRangeQuoted(s, start, end)
 	if extend && valueStart == start {
 		valueEnd = extendPastValueSeparators(s, valueEnd)
@@ -1095,12 +1169,6 @@ type wordPiece struct {
 // for a bare value, at a blank inside a later quoted string (abc"d e"). It
 // returns the word's pieces and end, and false when the word is the capture
 // itself as a single piece. Quoted strings close on their own line.
-//
-// A word never takes in a piece that holds the opening quote of a key's
-// quoted value running past that piece, as in abc\" API_KEY="hunter2 x":
-// the word would end inside that value and leave the rest of it visible. The
-// word ends before such a piece, so the key/value patterns read the value as
-// on main.
 func joinedShellWord(s string, start, end int) ([]wordPiece, int, bool) {
 	if start >= end {
 		return nil, end, false
@@ -1115,9 +1183,6 @@ func joinedShellWord(s string, start, end int) ([]wordPiece, int, bool) {
 		bareStart := i
 		if c := s[i]; isQuoteByte(c) {
 			if closeAt := quotedPieceEnd(s, i); closeAt >= 0 {
-				if opensValueBeyond(s, i, closeAt+1) {
-					break
-				}
 				pieces = append(pieces, wordPiece{start: i + 1, end: closeAt, quote: c})
 				i = closeAt + 1
 				continue
@@ -1130,8 +1195,7 @@ func joinedShellWord(s string, start, end int) ([]wordPiece, int, bool) {
 			i++
 		}
 		bareEnd := bareWordTextEnd(s, i, startsQuoted)
-		if bareEnd == bareStart || opensValueBeyond(s, bareStart, bareEnd) {
-			i = bareStart
+		if bareEnd == bareStart {
 			break
 		}
 		pieces = append(pieces, wordPiece{start: bareStart, end: bareEnd})
@@ -1141,36 +1205,6 @@ func joinedShellWord(s string, start, end int) ([]wordPiece, int, bool) {
 		return nil, end, false
 	}
 	return pieces, i, true
-}
-
-// opensValueBeyond reports whether the word piece s[from:to] holds a quote,
-// after its first byte, that opens a key's quoted value closing past the
-// piece: the last quote of " API_KEY=", or the " in ' API_KEY="x'. Only bare
-// text inside a ${...} expansion can hold a quote in a bare piece.
-func opensValueBeyond(s string, from, to int) bool {
-	for p := from + 1; p < to; p++ {
-		if isQuoteByte(s[p]) && followsAssignment(s, from, p) && quotedPieceEnd(s, p) >= to {
-			return true
-		}
-	}
-	return false
-}
-
-// followsAssignment reports whether the quote at s[p] comes right after a key
-// and an = inside s[lo:p], as in API_KEY=" or API_KEY = ".
-func followsAssignment(s string, lo, p int) bool {
-	j := p
-	for j > lo && (s[j-1] == ' ' || s[j-1] == '\t') {
-		j--
-	}
-	if j == lo || s[j-1] != '=' {
-		return false
-	}
-	j--
-	for j > lo && (s[j-1] == ' ' || s[j-1] == '\t') {
-		j--
-	}
-	return j > lo && isCredentialKeyByte(s[j-1])
 }
 
 // quotedPieceEnd returns the index of the quote that closes the string opened
