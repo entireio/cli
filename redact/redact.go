@@ -615,14 +615,28 @@ func isSlashedBase64Secret(run string) bool {
 }
 
 // uriPassword returns the password s[start:end] of the URI that starts at
-// s[uriStart], as the placeholder rules read it: for a URI a double quote
-// opens, as in psql "postgres://app:${PW:-'$FALLBACK'}@db/app", it is read as
-// double quotes enclose it (see doubleQuotedText).
+// s[uriStart], as the placeholder rules read it: for a URI inside a double
+// quoted string, as in psql "postgres://app:${PW:-'$FALLBACK'}@db/app", it is
+// read as double quotes enclose it (see doubleQuotedText). The quote before
+// the URI must open a string that closes after it on its line: in
+// psql ""postgres://app:${PW:-'$S3CRET'}@db/app the quotes are an empty
+// string, so the single quotes make $S3CRET literal.
 func uriPassword(s string, uriStart, start, end int) string {
-	if uriStart > 0 && s[uriStart-1] == '"' {
+	if open := uriStart - 1; open >= 0 && opensDoubleQuotedString(s, open) && quotedPieceEnd(s, open) >= 0 {
 		return doubleQuotedText(s[start:end])
 	}
 	return s[start:end]
+}
+
+// opensDoubleQuotedString reports whether s[i] is a double quote that opens a
+// string, judged by the run of double quotes that ends there: in a run of
+// even length, as "", each quote closes the one before it.
+func opensDoubleQuotedString(s string, i int) bool {
+	n := 0
+	for i-n >= 0 && s[i-n] == '"' {
+		n++
+	}
+	return n%2 == 1
 }
 
 // detectDatabaseURIPasswords covers database URIs whose password contains a
@@ -1123,9 +1137,11 @@ func quotedValuePast(s string, pattern *regexp.Regexp, valueGroup int, r region,
 // a=" API_KEY=aaa\"|bbb", where the search from r's start reads a= as a key
 // and takes the quoted text as its value. Such a value holds the byte at
 // r.end, so the searches stop where that run of value bytes does. A value
-// that ends at a separator at r.end is returned too, because it is judged
-// with the text the separator joins to it, as in API_KEY=a"b;c"x after a word
-// that ended at the ';'.
+// that a separator ends at or before r.end is returned too when the text the
+// separator joins to it runs past r.end, because it is judged with that text,
+// as in API_KEY=a"b;c"x after a word that ended at the ';', and API_KEY in
+// DB_PASSWORD="a\"b";API_KEY=\;"a"hunter2xyz, where the word read from the
+// first quote ends at the last one.
 func bareValuesPast(s string, pattern *regexp.Regexp, valueGroup int, r region, matchEnd int, runs *valueRunEnd) [][]int {
 	limit := r.end
 	if limit >= len(s) || strings.IndexByte(",;&", s[limit]) < 0 {
@@ -1141,7 +1157,7 @@ func bareValuesPast(s string, pattern *regexp.Regexp, valueGroup int, r region, 
 				break
 			}
 			valueStart, valueEnd, ok := captureRange(match, valueGroup)
-			if ok && valueStart < r.end && valueEnd >= r.end {
+			if ok && valueStart < r.end && (valueEnd >= r.end || extendPastValueSeparators(s, valueEnd) > r.end) {
 				matches = append(matches, match)
 			}
 			from = max(match[1], from+1)

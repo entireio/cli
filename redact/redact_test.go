@@ -1486,6 +1486,21 @@ func TestString_ShellWordSecretsCaughtWithoutScanners(t *testing.T) {
 			want:  "REDACTED",
 		},
 		{
+			name:  "single-quoted default in a URI after an empty string",
+			input: `psql ""postgres://app:${PW:-'$S3CRET'}@db/app`,
+			want:  `psql ""REDACTED`,
+		},
+		{
+			name:  "single-quoted default in a URI after an empty string that a quote follows",
+			input: `psql ""postgres://app:${PW:-'$S3CRET'}@db/app"`,
+			want:  `psql ""REDACTED"`,
+		},
+		{
+			name:  "single-quoted default in a URI after a closed string",
+			input: `psql "x"postgres://app:${PW:-'$S3CRET'}@db/app`,
+			want:  `psql "x"REDACTED`,
+		},
+		{
 			name:  "double-quoted default whose single quotes wrap a literal",
 			input: `DB_PASSWORD="${PW:-'hunter2'}"`,
 			want:  `DB_PASSWORD="REDACTED"`,
@@ -1722,6 +1737,16 @@ func TestString_ValuesPastRedactedWordsCaughtWithoutScanners(t *testing.T) {
 			name:  "a spaced password whose key a password value took",
 			input: `DB_PASSWORD=foo;DB_PASSWORD = hunter2`,
 			want:  `DB_PASSWORD=REDACTED = REDACTED`,
+		},
+		{
+			name:  "a credential that an escaped separator joins past a redacted word",
+			input: `DB_PASSWORD="a\"b";API_KEY=\;"a"hunter2xyz`,
+			want:  `DB_PASSWORD=REDACTED`,
+		},
+		{
+			name:  "a password that an escaped separator joins past a redacted word",
+			input: `DB_PASSWORD="a\"b";DB_PASSWORD=\;"a"hunter2`,
+			want:  `DB_PASSWORD=REDACTED`,
 		},
 	})
 }
