@@ -98,11 +98,12 @@ var cliNoValueGlobalOption = regexp.MustCompile(`^(?:-[Ddhrv]|--(?:debug|debug-f
 // cliOptionWord matches the next shell word of a client's global options on
 // a command line, group 1, after the blank before it, and cliListElement the
 // next element of an argument list in code, group 1, after the end of the
-// one before it. They read the words as cliGlobalOptions and cliListOptions
-// do, so text inside a quoted value or a substitution is part of its word
-// (docker --config "/opt --debug x" login, --config $(mktemp -d) login).
+// one before it. They read the words as the shell does, so text inside a
+// quoted value or a substitution, or after an escaped blank, is part of its
+// word (docker --config "/opt --debug x" login, --config $(mktemp -d)
+// login, --config /opt\ --debug\ x login).
 var (
-	cliOptionWord  = regexp.MustCompile(`^` + cliBlank + `(` + cliWordPiece + `+)`)
+	cliOptionWord  = regexp.MustCompile(`^` + cliBlank + `((?:\\[^\r\n]|` + cliWordPiece + `)+)`)
 	cliListElement = regexp.MustCompile(`^` + cliListNext + `(` + cliListChar + `*)`)
 	cliClientName  = regexp.MustCompile(`^\w+(?i:\.exe)?`)
 )
@@ -616,6 +617,9 @@ func isListWrapperOperand(s string, start int) bool {
 		switch {
 		case optionArg:
 			optionArg = false
+		case wrapper == envCommand && name == "-S":
+			// env -S runs its argument (["env", "-S", "mysql", "-pX"]).
+			return false
 		case strings.HasPrefix(name, "-"):
 			optionArg = len(name) == 2 && strings.IndexByte(wrapperArgOptions[wrapper], name[1]) >= 0
 		case runsWrapper && wrapper != sshCommand:
@@ -790,8 +794,9 @@ func (f cliPasswordFlag) runsOtherSubcommand(cmd string) bool {
 		if !cliNoValueGlobalOption.MatchString(words[i]) {
 			continue
 		}
+		// An option may be quoted whole (docker --debug "--config=/c").
 		next := words[i+1]
-		if !strings.HasPrefix(next, "-") && next != loginCommand && next != "registry" {
+		if !strings.HasPrefix(strings.TrimLeft(next, `"'\`), "-") && next != loginCommand && next != "registry" {
 			return true
 		}
 	}
