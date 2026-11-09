@@ -163,19 +163,36 @@ func decodeOpenCodeSnapshot(line []byte) (openCodeMessage, bool) {
 // snapshot lines OpenCodeAdapter reads: the messages of the normalized
 // export (NormalizeOpenCodeExport), in order, each compacted onto one line
 // with no trailing newline. Feed them each followed by "\n".
+//
+// A pending revert (the session's info.revert, set by OpenCode's undo) hides
+// the messages from its message on, as OpenCode shows the session: the
+// reverted message and every later one, or, when the revert names a part of
+// that message, its parts from that one on. OpenCode deletes them with the
+// next prompt, or brings them back with redo; Convert keeps them, as the
+// database still holds them, so for such an export the fold of these lines
+// is Convert of the export without them.
 func OpenCodeSnapshotLines(export []byte) ([][]byte, error) {
 	normalized, err := NormalizeOpenCodeExport(bytes.TrimSpace(export))
 	if err != nil {
 		return nil, err
 	}
 	var doc struct {
+		Info struct {
+			Revert *openCodeRevert `json:"revert"`
+		} `json:"info"`
 		Messages []json.RawMessage `json:"messages"`
 	}
 	if err := json.Unmarshal(normalized, &doc); err != nil {
 		return nil, fmt.Errorf("parsing opencode export: %w", err)
 	}
-	lines := make([][]byte, 0, len(doc.Messages))
-	for _, raw := range doc.Messages {
+	messages := doc.Messages
+	if r := doc.Info.Revert; r != nil && r.MessageID != "" {
+		if messages, err = openCodeBeforeRevert(messages, *r); err != nil {
+			return nil, err
+		}
+	}
+	lines := make([][]byte, 0, len(messages))
+	for _, raw := range messages {
 		var buf bytes.Buffer
 		if err := json.Compact(&buf, raw); err != nil {
 			return nil, fmt.Errorf("compacting opencode message: %w", err)
@@ -183,4 +200,80 @@ func OpenCodeSnapshotLines(export []byte) ([][]byte, error) {
 		lines = append(lines, buf.Bytes())
 	}
 	return lines, nil
+}
+
+// openCodeRevert is a session's pending revert (info.revert).
+type openCodeRevert struct {
+	MessageID string `json:"messageID"`
+	PartID    string `json:"partID"`
+}
+
+// openCodeBeforeRevert is messages without what revert r hides: from the
+// message r names (by its ID, or, for OpenCode 2, an ID among the source
+// messages it carries: one after its own, an idle marker, hides only the
+// later messages) on, or, when r names one of that message's parts after
+// its first, that message's parts from that one on and every later
+// message. A revert naming no message of the export hides nothing.
+func openCodeBeforeRevert(messages []json.RawMessage, r openCodeRevert) ([]json.RawMessage, error) {
+	for i, raw := range messages {
+		var msg struct {
+			Info struct {
+				ID     string `json:"id"`
+				Native []struct {
+					ID string `json:"id"`
+				} `json:"opencode2"`
+			} `json:"info"`
+			Parts []struct {
+				ID string `json:"id"`
+			} `json:"parts"`
+		}
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			return nil, fmt.Errorf("parsing opencode message: %w", err)
+		}
+		// An OpenCode 2 message's sources are the ones before it that
+		// convert to nothing, itself, then those after it (idle markers):
+		// a revert of one after it keeps the message.
+		hit, after, own := msg.Info.ID == r.MessageID, false, false
+		for _, n := range msg.Info.Native {
+			own = own || n.ID == msg.Info.ID
+			if n.ID == r.MessageID && !hit {
+				hit, after = true, own && n.ID != msg.Info.ID
+			}
+		}
+		if !hit {
+			continue
+		}
+		if after {
+			return messages[: i+1 : i+1], nil
+		}
+		kept := messages[:i:i]
+		if r.PartID == "" {
+			return kept, nil
+		}
+		for k, part := range msg.Parts {
+			if part.ID != r.PartID || k == 0 {
+				continue
+			}
+			var whole map[string]json.RawMessage
+			var parts []json.RawMessage
+			if err := json.Unmarshal(raw, &whole); err != nil {
+				return nil, fmt.Errorf("parsing opencode message: %w", err)
+			}
+			if err := json.Unmarshal(whole["parts"], &parts); err != nil {
+				return nil, fmt.Errorf("parsing opencode message parts: %w", err)
+			}
+			trimmed, err := json.Marshal(parts[:k])
+			if err != nil {
+				return nil, fmt.Errorf("encoding opencode message parts: %w", err)
+			}
+			whole["parts"] = trimmed
+			cut, err := json.Marshal(whole)
+			if err != nil {
+				return nil, fmt.Errorf("encoding opencode message: %w", err)
+			}
+			return append(kept, cut), nil
+		}
+		return kept, nil
+	}
+	return messages, nil
 }

@@ -232,6 +232,14 @@ before that the export no longer has (a revert or a compaction), in the
 order they were first sent. A producer feeding lines itself calls
 `Drop(messageID)` for those.
 
+A pending revert (OpenCode's undo sets the session's `info.revert`; the
+next prompt deletes the reverted messages, redo clears it) hides what
+OpenCode hides: `OpenCodeSnapshotLines` leaves out the reverted message and
+every later one, or, for a revert of one of its parts, that message's parts
+from it on. So an undo drops them from the stream at once and a redo
+restores them. `Convert` still writes them, as the database holds them
+until the next prompt.
+
 Each message is keyed by its `info.id` (also the assistant line's `id`) and
 sent whole as a `message` record. It is sent again only when its record
 changed: a repeated snapshot, or a change that does not show (a

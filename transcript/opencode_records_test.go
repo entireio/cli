@@ -360,3 +360,103 @@ func TestOpenCodeAdapterKeepsPlaceOfEmptyMessage(t *testing.T) {
 	records = append(records, a.Feed(openCodeSnapshotStream(t, after))...)
 	requireOpenCodeFoldMatchesConvert(t, records, after)
 }
+
+// withRevert is export with info.revert set to revert (JSON).
+func withRevert(t *testing.T, export, revert string) string {
+	t.Helper()
+	out := strings.Replace(export, `"info":{"id":"ses_`, `"info":{"revert":`+revert+`,"id":"ses_`, 1)
+	if out == export {
+		t.Fatal("the export has no session info to set the revert in")
+	}
+	return out
+}
+
+// snapshotIDs is the message IDs of export's snapshot lines.
+func snapshotIDs(t *testing.T, export string) string {
+	t.Helper()
+	lines, err := OpenCodeSnapshotLines([]byte(export))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, line := range lines {
+		msg, ok := decodeOpenCodeSnapshot(line)
+		if !ok {
+			t.Fatalf("not a message: %s", line)
+		}
+		ids = append(ids, msg.Info.ID)
+	}
+	return strings.Join(ids, ",")
+}
+
+// A pending revert (OpenCode's undo) hides the reverted message and every
+// later one, as OpenCode shows the session; a revert of a part hides that
+// message's parts from it on; a revert naming nothing hides nothing.
+func TestOpenCodeSnapshotLinesHideARevert(t *testing.T) {
+	t.Parallel()
+	v1, v2 := openCodeV1Steps[2], openCodeV2Steps[2]
+	for _, c := range []struct {
+		name, export, revert, want string
+	}{
+		{"v1 message", v1, `{"messageID":"msg_u2","snapshot":"abc"}`, "msg_u1,msg_a1,msg_a2"},
+		{"v1 first message", v1, `{"messageID":"msg_u1"}`, ""},
+		{"v1 part", v1, `{"messageID":"msg_a1","partID":"prt_a1b"}`, "msg_u1,msg_a1"},
+		{"v1 first part", v1, `{"messageID":"msg_a1","partID":"prt_a1s"}`, "msg_u1"},
+		{"v1 unknown", v1, `{"messageID":"msg_gone"}`, "msg_u1,msg_a1,msg_a2,msg_u2,msg_a3"},
+		{"v1 no message", v1, `{"snapshot":"abc"}`, "msg_u1,msg_a1,msg_a2,msg_u2,msg_a3"},
+		{"v2 message", v2, `{"messageID":"msg_u2"}`, "msg_u1,msg_a1"},
+		{"v2 idle after a message", v2, `{"messageID":"msg_i1"}`, "msg_u1,msg_a1"},
+		{"v2 compaction", v2, `{"messageID":"msg_c1"}`, "msg_u1,msg_a1,msg_u2"},
+	} {
+		if got := snapshotIDs(t, withRevert(t, c.export, c.revert)); got != c.want {
+			t.Errorf("%s: messages %q, want %q", c.name, got, c.want)
+		}
+	}
+	lines, err := OpenCodeSnapshotLines([]byte(withRevert(t, v1, `{"messageID":"msg_a1","partID":"prt_a1b"}`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, _ := decodeOpenCodeSnapshot(lines[1])
+	if len(msg.Parts) != 2 {
+		t.Errorf("msg_a1 keeps %d parts, want the 2 before the reverted one: %s", len(msg.Parts), lines[1])
+	}
+}
+
+// Undo then redo while streaming: the undo drops the reverted messages,
+// the redo (the revert cleared) brings them back in place, and the fold
+// equals Convert of what OpenCode shows each time.
+func TestOpenCodeAdapterFollowsUndoAndRedo(t *testing.T) {
+	t.Parallel()
+	full := openCodeV1Steps[2]
+	// What OpenCode shows after the undo: full without msg_u2 and msg_a3.
+	cut := strings.Index(full, `{"info":{"id":"msg_u2"`)
+	if cut < 0 {
+		t.Fatal("the fixture has no msg_u2")
+	}
+	shown := strings.TrimRight(full[:cut], ", \n\t") + "\n\t]}"
+	a := NewOpenCodeAdapter()
+	var records []Record
+	feed := func(export string) []Record {
+		t.Helper()
+		got, err := a.FeedExport([]byte(export))
+		if err != nil {
+			t.Fatal(err)
+		}
+		records = append(records, got...)
+		return got
+	}
+	feed(full)
+	undone := withRevert(t, full, `{"messageID":"msg_u2"}`)
+	drops := 0
+	for _, r := range feed(undone) {
+		if r.Op == OpDrop {
+			drops++
+		}
+	}
+	if drops != 2 {
+		t.Fatalf("the undo dropped %d messages, want 2 (msg_u2, msg_a3)", drops)
+	}
+	requireOpenCodeFoldMatchesConvert(t, records, shown)
+	feed(full) // redo
+	requireOpenCodeFoldMatchesConvert(t, records, full)
+}
