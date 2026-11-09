@@ -1,6 +1,7 @@
 package redact
 
 import (
+	"slices"
 	"sort"
 	"strings"
 )
@@ -27,13 +28,14 @@ type argvElement struct {
 }
 
 // newArgvLine returns the argvLine for arr, nil when arr cannot be an argument
-// vector: fewer than two elements, or a first element that is no string. The
-// other elements are checked when the line is read.
+// vector: fewer than two elements, or a first element that names no program
+// (no string, empty, or an option such as "--password"). The other elements
+// are checked when the line is read.
 func newArgvLine(arr []any) *argvLine {
 	if len(arr) < 2 {
 		return nil
 	}
-	if _, ok := arr[0].(string); !ok {
+	if program, ok := arr[0].(string); !ok || program == "" || program[0] == '-' {
 		return nil
 	}
 	return &argvLine{arr: arr}
@@ -56,6 +58,35 @@ func (e argvElement) regions() []taggedRegion {
 	return e.line.regions[e.index]
 }
 
+// argvRegionsByValue returns, for each string that is an element of an
+// argument vector in v, the command-line regions its vectors find in it. A
+// leaf anywhere in v with that text takes them too, since the splice writes
+// one result into every copy of a string, and the re-encode fallback must
+// write the same. Nil when there are none.
+func argvRegionsByValue(v any) map[string][]taggedRegion {
+	var byValue map[string][]taggedRegion
+	walkRedactableStrings(v, func(_, _ string, _ bool, val string, argv argvElement) string {
+		found := argv.regions()
+		if len(found) == 0 {
+			return val
+		}
+		if byValue == nil {
+			byValue = make(map[string][]taggedRegion)
+		}
+		// The same text in several vectors takes the regions of each, so a
+		// password one of them finds is hidden in every copy.
+		known := byValue[val]
+		for _, r := range found {
+			if !slices.Contains(known, r) {
+				known = append(known, r)
+			}
+		}
+		byValue[val] = known
+		return val
+	})
+	return byValue
+}
+
 // find joins the elements into a command line and maps the command-line
 // regions found in it to the elements, nil when there are none.
 func (l *argvLine) find() [][]taggedRegion {
@@ -68,8 +99,8 @@ func (l *argvLine) find() [][]taggedRegion {
 		}
 		args[i] = s
 		// The layer reads only flags, which start with '-', and .netrc
-		// entries, which name a password.
-		maybe = maybe || strings.Contains(s, "-") || strings.Contains(s, "password")
+		// entries, which name a password in any case.
+		maybe = maybe || strings.Contains(s, "-") || containsFoldASCII(s, "password")
 	}
 	if !maybe {
 		return nil
@@ -81,7 +112,7 @@ func (l *argvLine) find() [][]taggedRegion {
 			b = append(b, ' ')
 		}
 		starts[i] = len(b)
-		b, _ = appendArgvWord(b, arg, false)
+		b, _ = appendArgvWord(b, arg, argvQuotesValue(args, i), false)
 	}
 	found := detectCommandLinePasswords(string(b))
 	if len(found) == 0 {
@@ -95,7 +126,7 @@ func (l *argvLine) find() [][]taggedRegion {
 		for ; k < len(args) && starts[k] < r.end; k++ {
 			pos, ok := positions[k]
 			if !ok {
-				_, pos = appendArgvWord(nil, args[k], true)
+				_, pos = appendArgvWord(nil, args[k], argvQuotesValue(args, k), true)
 				positions[k] = pos
 			}
 			start, end := argvRegion(pos, r.start-starts[k], r.end-starts[k])
@@ -105,6 +136,21 @@ func (l *argvLine) find() [][]taggedRegion {
 		}
 	}
 	return regions
+}
+
+// argvQuotesValue reports whether element i is written in quotes because it
+// is the value of a long password flag in the element before it. The layer
+// reads a bare word there as prose when more words follow (--password to
+// set it), but an element is a value of its own, whatever its words.
+func argvQuotesValue(args []string, i int) bool {
+	if i == 0 || args[i] == "" || args[i][0] == '-' {
+		return false
+	}
+	switch args[i-1] {
+	case "--password", "--passwd", "--pass":
+		return true
+	}
+	return false
 }
 
 // wordEnd returns where the word of element k ends in a command line of
@@ -138,11 +184,24 @@ func argvRegion(pos []int, start, end int) (int, int) {
 //   - otherwise single quotes, each quote in the word closing them, escaped,
 //     and opening them again
 //
-// A word with a line break is ANSI-C quoted, so the command line stays on one
+// An option joined to a value that needs quotes keeps the option bare and
+// quotes the value (--password=' x', -p' x'), as one types it, since the layer
+// reads a value that starts with a blank only in quotes of its own.
+// quoteValue quotes a bare word too. A line break is written as '_', a byte
+// that is part of a word in every quoting, so the command line stays on one
 // line, where the layer reads quoted strings.
-func appendArgvWord(b []byte, arg string, positions bool) ([]byte, []int) {
+func appendArgvWord(b []byte, arg string, quoteValue, positions bool) ([]byte, []int) {
 	start := len(b)
 	var pos []int
+	quoting := argvQuoting(arg)
+	option := 0
+	if quoting != argvBare && !quoteValue {
+		option = argvOptionPrefix(arg)
+		quoting = argvQuoting(arg[option:])
+	}
+	if quoteValue && quoting == argvBare {
+		quoting = argvSingle
+	}
 	// at records that the next byte of arg is written skip bytes into what is
 	// about to be appended for it.
 	at := func(skip int) {
@@ -150,48 +209,37 @@ func appendArgvWord(b []byte, arg string, positions bool) ([]byte, []int) {
 			pos = append(pos, len(b)-start+skip)
 		}
 	}
-	quoting := argvQuoting(arg)
+	for i := range option {
+		at(0)
+		b = append(b, arg[i])
+	}
+	rest := arg[option:]
 	switch quoting {
 	case argvBare:
-		for i := range len(arg) {
-			at(i)
+		for i := range len(rest) {
+			at(0)
+			b = append(b, argvWordByte(rest[i]))
 		}
-		return append(b, arg...), pos
+		return b, pos
 	case argvEscaped:
-		for i := range len(arg) {
-			if c := arg[i]; !argvSafe(c) {
+		for i := range len(rest) {
+			if c := argvWordByte(rest[i]); !argvSafe(c) {
 				at(1)
 				b = append(b, '\\', c)
 				continue
 			}
 			at(0)
-			b = append(b, arg[i])
+			b = append(b, argvWordByte(rest[i]))
 		}
 		return b, pos
-	case argvANSIC:
-		b = append(b, '$', '\'')
-		for i := range len(arg) {
-			at(0)
-			switch c := arg[i]; c {
-			case '\n':
-				b = append(b, '\\', 'n')
-			case '\r':
-				b = append(b, '\\', 'r')
-			case '\\', '\'':
-				b = append(b, '\\', c)
-			default:
-				b = append(b, c)
-			}
-		}
-		return append(b, '\''), pos
 	}
 	quote := byte('\'')
 	if quoting == argvDouble {
 		quote = '"'
 	}
 	b = append(b, quote)
-	for i := range len(arg) {
-		if arg[i] == '\'' && quoting == argvSingle {
+	for i := range len(rest) {
+		if rest[i] == '\'' && quoting == argvSingle {
 			// '\'' closes the quotes, writes an escaped quote and opens
 			// them again: the quote itself is the third byte.
 			at(2)
@@ -199,7 +247,7 @@ func appendArgvWord(b []byte, arg string, positions bool) ([]byte, []int) {
 			continue
 		}
 		at(0)
-		b = append(b, arg[i])
+		b = append(b, argvWordByte(rest[i]))
 	}
 	return append(b, quote), pos
 }
@@ -209,12 +257,39 @@ const (
 	argvSingle
 	argvDouble
 	argvEscaped
-	argvANSIC
 )
+
+// argvWordByte is the byte appendArgvWord writes for c.
+func argvWordByte(c byte) byte {
+	if c == '\n' || c == '\r' {
+		return '_'
+	}
+	return c
+}
 
 // argvSafe reports whether c stays as it is in a bare shell word.
 func argvSafe(c byte) bool {
 	return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || strings.IndexByte("@%+=:./_-", c) >= 0
+}
+
+// argvOptionPrefix returns the length of the option that starts arg: a dash,
+// letters, digits and dashes, and an '=' after them, 0 when arg starts with
+// no option.
+func argvOptionPrefix(arg string) int {
+	if len(arg) < 2 || arg[0] != '-' {
+		return 0
+	}
+	j := 1
+	for j < len(arg) && (arg[j] == '-' || 'a' <= arg[j] && arg[j] <= 'z' || 'A' <= arg[j] && arg[j] <= 'Z' || '0' <= arg[j] && arg[j] <= '9') {
+		j++
+	}
+	if j == 1 || strings.Trim(arg[:j], "-") == "" {
+		return 0
+	}
+	if j < len(arg) && arg[j] == '=' {
+		j++
+	}
+	return j
 }
 
 func argvQuoting(arg string) int {
@@ -223,9 +298,7 @@ func argvQuoting(arg string) int {
 	}
 	bare, apostrophe, expands, blank := true, false, false, false
 	for i := range len(arg) {
-		switch c := arg[i]; {
-		case c == '\n' || c == '\r':
-			return argvANSIC
+		switch c := argvWordByte(arg[i]); {
 		case argvSafe(c):
 		default:
 			bare = false

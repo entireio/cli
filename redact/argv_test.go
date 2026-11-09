@@ -40,8 +40,24 @@ func TestJSONLBytes_CommandLinePasswordsInArgvArrays(t *testing.T) {
 		// array element already is.
 		{`{"command":["mysql","-phunter2"],"echo":"-phunter2"}`, `{"command":["mysql","-pREDACTED"],"echo":"-pREDACTED"}`},
 		// A spelling the splice does not find goes through the structural
-		// fallback, which reads the array the same way.
-		{`{"command":["mysql","-phunter2"]}`, `{"command":["mysql","-pREDACTED"]}`},
+		// fallback, which reads the array the same way, and hides the
+		// password in every copy, as the splice does.
+		{`{"command":["mysql","\u002dphunter2"]}`, `{"command":["mysql","-pREDACTED"]}`},
+		{`{"command":["mysql","-phunter2"],"echo":"\u002dphunter2"}`, `{"command":["mysql","-pREDACTED"],"echo":"-pREDACTED"}`},
+		// A value that starts with a blank, joined to its option.
+		{`{"command":["wget","--password= hunter"]}`, `{"command":["wget","--password=REDACTED"]}`},
+		{`{"command":["mysql","-p hunter"]}`, `{"command":["mysql","-pREDACTED"]}`},
+		// A line break in a password element.
+		{`{"command":["mysql","-phunter2\nfoo"]}`, `{"command":["mysql","-pREDACTED"]}`},
+		// An element after --password is its value, though it reads as prose.
+		{`{"command":["docker","login","--password","instead","registry"]}`, `{"command":["docker","login","--password","REDACTED","registry"]}`},
+		// .netrc keywords in any case.
+		{`{"command":["echo","MACHINE","host","LOGIN","alice","PASSWORD","hunter2"]}`, `{"command":["echo","MACHINE","host","LOGIN","alice","PASSWORD","REDACTED"]}`},
+		// A password that is also an object key leaves the key as it is.
+		{`{"type":"x","command":["redis-cli","-a","type"]}`, `{"type":"x","command":["redis-cli","-a","REDACTED"]}`},
+		// The same element in two vectors takes the regions of both, so the
+		// mysql password is hidden in the echo's copy too.
+		{`{"a":["echo","-phunter2 --password=Summer2026"],"b":["mysql","-phunter2 --password=Summer2026"]}`, `{"a":["echo","-pREDACTED"],"b":["mysql","-pREDACTED"]}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.in, func(t *testing.T) {
@@ -76,6 +92,9 @@ func TestJSONLBytes_ArgvArraysWithoutPasswordsStayVisible(t *testing.T) {
 		`{"files":["src/mysql.go","-p.txt","a-b"]}`,
 		`{"a":["mysql"],"b":["-phunter2"]}`,
 		`{"command":"mysql","args":["-phunter2"]}`,
+		// An array that starts with an option names no program.
+		`{"flags":["--password","--help"]}`,
+		`{"opts":["-u","root","--password","--verbose"]}`,
 	} {
 		t.Run(in, func(t *testing.T) {
 			t.Parallel()
@@ -107,34 +126,38 @@ func TestJSONLBytes_LongArgvArraysStayLinear(t *testing.T) {
 
 func TestAppendArgvWord(t *testing.T) {
 	t.Parallel()
-	cases := []struct{ arg, word string }{
-		{"-phunter2", "-phunter2"},
-		{"pass:x@y%z+=,./_", "'pass:x@y%z+=,./_'"},
-		{"", "''"},
-		{"two words", "'two words'"},
-		{"it's", `"it's"`},
-		{`it's"x"`, `it\'s\"x\"`},
-		{`it's "x"`, `'it'\''s "x"'`},
-		{"a\nb'c\\", `$'a\nb\'c\\'`},
+	cases := []struct {
+		arg        string
+		quoteValue bool
+		word       string
+	}{
+		{"-phunter2", false, "-phunter2"},
+		{"pass:x@y%z+=,./_", false, "'pass:x@y%z+=,./_'"},
+		{"", false, "''"},
+		{"two words", false, "'two words'"},
+		{"it's", false, `"it's"`},
+		{`it's"x"`, false, `it\'s\"x\"`},
+		{`it's "x"`, false, `'it'\''s "x"'`},
+		{"a\nb'c\\", false, `a_b\'c\\`},
+		// An option keeps its name bare when its value needs quotes.
+		{"--password= hunter", false, "--password=' hunter'"},
+		{"-phunter 2", false, "-phunter' 2'"},
+		{"-p'x'", false, `-p"'x'"`},
+		{"--", false, "--"},
+		{"-'x'", false, `"-'x'"`},
+		{"instead", true, "'instead'"},
+		{"-x\ny", false, "-x_y"},
 	}
 	for _, tc := range cases {
-		word, pos := appendArgvWord(nil, tc.arg, true)
+		word, pos := appendArgvWord(nil, tc.arg, tc.quoteValue, true)
 		require.Equal(t, tc.word, string(word), tc.arg)
 		require.Len(t, pos, len(tc.arg), tc.arg)
 		for i, p := range pos {
-			// Each byte of the element is where the word writes it, or
-			// the start of the escape that writes it.
-			switch tc.arg[i] {
-			case '\n':
-				require.Equal(t, `\n`, string(word[p:p+2]), tc.arg)
-			case '\\':
-				require.Equal(t, `\\`, string(word[p:p+2]), tc.arg)
-			default:
-				if word[0] == '$' && tc.arg[i] == '\'' {
-					require.Equal(t, `\'`, string(word[p:p+2]), tc.arg)
-					continue
-				}
-				require.Equal(t, tc.arg[i], word[p], tc.arg)
+			// Each byte of the element is where the word writes it, after
+			// the backslash or quotes that escape it.
+			require.Equal(t, argvWordByte(tc.arg[i]), word[p], tc.arg)
+			if i > 0 {
+				require.Greater(t, p, pos[i-1], tc.arg)
 			}
 		}
 	}
