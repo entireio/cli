@@ -1073,21 +1073,27 @@ func quotedPieceEnd(s string, open int) int {
 	return -1
 }
 
-// codeAfterStringBytes end the bare text of a word that started as a quoted
-// string. Right after a string they read as code or Markdown, not as more of
-// the value: "x".strip(), "x"), "x"+y, cond ? "x":"y", **"x"**, "x"\n in
-// JSON-escaped text.
-const codeAfterStringBytes = ".:+*?=()[]{}<>|`\\"
+// bareWordStopBytes end the bare text of any shell word: blanks, quotes,
+// value separators (, ; &), the other shell operators (| < > ( ) and a
+// backtick), so printf v"x"|secrets keeps its pipe, and = so a word never
+// reads on into the next assignment (DB_PASSWORD=a" "DB_PASSWORD=...).
+const bareWordStopBytes = " \t\n\r\f\v\"',;&|<>()`="
+
+// codeAfterStringBytes also end the bare text of a word that started as a
+// quoted string. Right after a string they read as code or Markdown, not as
+// more of the value: "x".strip(), cond ? "x":"y", "x"+y, **"x"**, "x"[0],
+// and "x"\n in JSON-escaped text.
+const codeAfterStringBytes = ".:+*?[]{}\\"
 
 // bareWordTextEnd returns where the bare text of a shell word that starts at
-// s[i] ends: at a blank, a quote, or a value separator (, ; &). In a word
-// that started as a quoted string, codeAfterStringBytes and a $( command
-// substitution end it too, but a ${...} reference closed before any blank or
-// quote is part of it ("$A"${B}).
+// s[i] ends: at one of bareWordStopBytes. In a word that started as a quoted
+// string, codeAfterStringBytes and a $( command substitution end it too, but
+// a ${...} reference closed before any blank or quote is part of it
+// ("$A"${B}).
 func bareWordTextEnd(s string, i int, startsQuoted bool) int {
 	for i < len(s) {
 		c := s[i]
-		if strings.IndexByte(" \t\n\r\f\v\"',;&", c) >= 0 {
+		if strings.IndexByte(bareWordStopBytes, c) >= 0 {
 			return i
 		}
 		if startsQuoted && c == '$' && i+1 < len(s) && s[i+1] == '{' {

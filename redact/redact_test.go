@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // highEntropySecret is a string with Shannon entropy > 4.5 that will trigger redaction.
@@ -2880,7 +2881,34 @@ func TestString_JoinedShellWordValues(t *testing.T) {
 			input: `DB_PASSWORD="hunter2";DB_USER=app`,
 			want:  `DB_PASSWORD="REDACTED";DB_USER=app`,
 		},
+		{
+			name:  "a pipe after a bare word with a quoted part",
+			input: `printf v"x"|examplectl secrets put API_KEY`,
+			want:  `printf REDACTED|examplectl secrets put API_KEY`,
+		},
+		{
+			name:  "the next assignment after a quoted blank",
+			input: `DB_PASSWORD=a" "DB_USER=app`,
+			want:  `DB_PASSWORD=REDACTED=app`,
+		},
 	})
+}
+
+// A word that reads on past its capture stops at the next assignment, so a
+// line of joined assignments is read in linear time, not once per match.
+func TestString_JoinedShellWordsStayLinear(t *testing.T) {
+	t.Parallel()
+	in := strings.Repeat(`DB_PASSWORD=a" "`, 20000)
+	done := make(chan string, 1)
+	go func() { done <- String(in) }()
+	select {
+	case out := <-done:
+		if strings.Contains(out, `a" "`) {
+			t.Fatalf("joined passwords left visible: %.80q", out)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("String took over 30s on 20000 joined assignments")
+	}
 }
 
 // Pins the high-entropy escape hatch inside isNonSecretIdentifierAssignment:
