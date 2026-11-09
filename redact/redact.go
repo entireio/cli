@@ -939,9 +939,13 @@ func detectCredentialKeyCaptures(
 // the region ends, so that value can not hide an assignment after the region.
 //
 // The only values read from inside a region are those visitStraddlingValues
-// finds, and they add to what the region already redacts.
+// finds, and they add to what the region already redacts. One that stays
+// visible, as a="+" in api_key="x""a="+"b=";client_secret="hunter2", was
+// still matched, so as with FindAll no match takes the last byte of its match
+// as the byte before a key: the closing quote there would make
+// ";client_secret=" the value of b and hide the client_secret.
 func forEachUncoveredMatch(s string, pattern *regexp.Regexp, valueGroup int, visit func(match []int, wholeWord bool) int) {
-	covered, atKey := 0, false
+	covered, atKey, unredactedEnd := 0, false, -1
 	runs := valueRunEnd{start: -1, end: -1}
 	for from := 0; from < len(s); {
 		searchFrom := from
@@ -954,14 +958,20 @@ func forEachUncoveredMatch(s string, pattern *regexp.Regexp, valueGroup int, vis
 		if match == nil {
 			return
 		}
+		if match[0] == unredactedEnd-1 {
+			// The byte before the key ends a match that was read, so
+			// FindAll would not match the key with it.
+			from, atKey = unredactedEnd, false
+			continue
+		}
 		next := max(match[1], from+1)
 		atKey = false
 		if valueStart, _, ok := captureRange(match, valueGroup); ok {
 			if valueStart < covered {
 				next = covered
 			} else if end := visit(match, true); end > 0 {
-				last := visitStraddlingValues(s, pattern, valueGroup, visit, match, end, &runs)
-				covered = max(covered, last.end)
+				last, readEnd := visitStraddlingValues(s, pattern, valueGroup, visit, match, end, &runs)
+				covered, unredactedEnd = max(covered, last.end), max(unredactedEnd, readEnd)
 				if keyStart := assignedKeyStart(s, last.start, last.end); keyStart >= valueStart && last.end >= next {
 					next, atKey = keyStart, true
 				} else if keyStart < 0 {
@@ -1023,9 +1033,14 @@ func nextMatch(s string, pattern *regexp.Regexp, from, limit int) []int {
 //     is read as main reads it, as captured: read on as a shell word from
 //     inside the region, its quotes could pair with the region's own.
 //
-// Two regions can share a value, so each is read once. runs finds where the
-// run of value bytes at a region's end ends (see valueRunEnd).
-func visitStraddlingValues(s string, pattern *regexp.Regexp, valueGroup int, visit func(match []int, wholeWord bool) int, match []int, end int, runs *valueRunEnd) region {
+// Two regions can share a value, so each is read once, and a value is searched
+// in turn only when its region ends past the one it was found in: one that
+// ends inside it adds nothing, and searching it would read a line such as
+// DB_PASSWORD=DB_PASSWORD=...hunter2, once for each key. runs finds where the
+// run of value bytes at a region's end ends (see valueRunEnd). It also returns
+// where the last match it read whose value stays visible ends, or -1, since
+// FindAll would go on from there (see forEachUncoveredMatch).
+func visitStraddlingValues(s string, pattern *regexp.Regexp, valueGroup int, visit func(match []int, wholeWord bool) int, match []int, end int, runs *valueRunEnd) (region, int) {
 	type straddled struct {
 		r        region
 		matchEnd int
@@ -1033,12 +1048,18 @@ func visitStraddlingValues(s string, pattern *regexp.Regexp, valueGroup int, vis
 	last := region{match[2*valueGroup], end}
 	pending := []straddled{{last, match[1]}}
 	read := map[int]bool{}
-	readValue := func(match []int, wholeWord bool) {
-		if valueEnd := visit(match, wholeWord); valueEnd > 0 {
-			value := region{match[2*valueGroup], valueEnd}
-			if value.end > last.end {
-				last = value
-			}
+	unredactedEnd := -1
+	readValue := func(match []int, wholeWord bool, inside region) {
+		valueEnd := visit(match, wholeWord)
+		if valueEnd <= 0 {
+			unredactedEnd = max(unredactedEnd, match[1])
+			return
+		}
+		value := region{match[2*valueGroup], valueEnd}
+		if value.end > last.end {
+			last = value
+		}
+		if value.end > inside.end {
 			pending = append(pending, straddled{value, match[1]})
 		}
 	}
@@ -1048,21 +1069,24 @@ func visitStraddlingValues(s string, pattern *regexp.Regexp, valueGroup int, vis
 		for _, quote := range []byte{'"', '\''} {
 			if match := quotedValuePast(s, pattern, valueGroup, current.r, quote); match != nil && !read[match[2*valueGroup]] {
 				read[match[2*valueGroup]] = true
-				readValue(match, true)
+				readValue(match, true, current.r)
 			}
 		}
 		for _, match := range bareValuesPast(s, pattern, valueGroup, current.r, current.matchEnd, runs) {
 			if !read[match[2*valueGroup]] {
 				read[match[2*valueGroup]] = true
-				readValue(match, false)
+				readValue(match, false, current.r)
 			}
 		}
 	}
-	return last
+	return last, unredactedEnd
 }
 
 // quotedValuePast returns the match for the key whose value, quoted with
-// quote, opens inside r and closes past it, or nil.
+// quote, opens inside r and closes past it, or nil. The value closes where the
+// pattern reads it closing, which for DB_PASSWORD= can be on a later line
+// (DB_PASSWORD="hunter2\nsecretpart"), while the shell word that holds r
+// ends with its line.
 func quotedValuePast(s string, pattern *regexp.Regexp, valueGroup int, r region, quote byte) []int {
 	open := strings.LastIndexByte(s[r.start:r.end], quote)
 	if open < 0 {
@@ -1070,8 +1094,14 @@ func quotedValuePast(s string, pattern *regexp.Regexp, valueGroup int, r region,
 	}
 	open += r.start
 	keyStart := assignmentKeyStart(s, r.start, open)
-	closeAt := quotedPieceEnd(s, open)
-	if keyStart < 0 || closeAt <= r.end {
+	if keyStart < 0 {
+		return nil
+	}
+	closeAt := strings.IndexByte(s[open+1:], quote)
+	if closeAt < 0 {
+		return nil
+	}
+	if closeAt += open + 1; closeAt <= r.end {
 		return nil
 	}
 	match := pattern.FindStringSubmatchIndex(s[keyStart : closeAt+1])

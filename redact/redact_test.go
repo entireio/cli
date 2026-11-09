@@ -1579,6 +1579,16 @@ func TestString_ValuesPastRedactedWordsCaughtWithoutScanners(t *testing.T) {
 			want:  `DB_PASSWORD=REDACTED = REDACTED = REDACTED`,
 		},
 		{
+			name:  "a credential after a non-credential quoted value that opens inside a joined word",
+			input: `api_key="x""a="+"b=";client_secret="hunter2"`,
+			want:  `api_key=REDACTED+"b=";client_secret="REDACTED"`,
+		},
+		{
+			name:  "a password whose quoted value opens inside a word and closes on the next line",
+			input: "PGPASSWORD=abc\\\" DB_PASSWORD=\"hunter2\nsecretpart\"",
+			want:  `PGPASSWORD=REDACTED"`,
+		},
+		{
 			name:  "a password after a chain of spaced keys",
 			input: `DB_PASSWORD = DB_PASSWORD = DB_PASSWORD = hunter2xyz`,
 			want:  `DB_PASSWORD = REDACTED = REDACTED = REDACTED`,
@@ -3266,13 +3276,17 @@ func TestString_JoinedShellWordValues(t *testing.T) {
 // per match.
 func TestString_JoinedShellWordsStayLinear(t *testing.T) {
 	t.Parallel()
-	for _, unit := range []string{`DB_PASSWORD=a" "`, `API_KEY=a" "`, `DB_PASSWORD=a" "=`, `DB_PASSWORD=a" DB_PASSWORD=b"|`, `DB_PASSWORD=a' DB_PASSWORD=b'|`, `db_password=foo,client_secret = `, `DB_PASSWORD=a" API_KEY="b `, `DB_PASSWORD=a' API_KEY="b' `, `DB_PASSWORD=a" FOO="b `, `DB_PASSWORD=a" FOO='b API_KEY="c' `, `DB_PASSWORD=a\" API_KEY=b\"|c `, `API_KEY=a" API_KEY="b API_KEY=c"API_KEY = `, `DB_PASSWORD="a\"b";API_KEY=a"b;c"x `, "GITHUB_CLIENT_SECRET=\"a;b\n", `DB_PASSWORD="a"b= `, `API_KEY=a=" API_KEY=aaa\"|bbb" `, `FOO="x"API_KEY=a `, `DB_PASSWORD="x DB_PASSWORD=a\";b" `, `FOO="x"b=`, `DB_PASSWORD=a"b"\|`, `API_KEY=${A}"${B}",`, `printf a"|x secrets put K; printf "b c"|x secrets put K; `, `DB_PASSWORD="a"|`, `API_KEY='a'|`} {
+	for _, unit := range []string{`DB_PASSWORD=a" "`, `API_KEY=a" "`, `DB_PASSWORD=a" "=`, `DB_PASSWORD=a" DB_PASSWORD=b"|`, `DB_PASSWORD=a' DB_PASSWORD=b'|`, `db_password=foo,client_secret = `, `DB_PASSWORD=a" API_KEY="b `, `DB_PASSWORD=a' API_KEY="b' `, `DB_PASSWORD=a" FOO="b `, `DB_PASSWORD=a" FOO='b API_KEY="c' `, `DB_PASSWORD=a\" API_KEY=b\"|c `, `API_KEY=a" API_KEY="b API_KEY=c"API_KEY = `, `DB_PASSWORD="a\"b";API_KEY=a"b;c"x `, "GITHUB_CLIENT_SECRET=\"a;b\n", `DB_PASSWORD="a"b= `, `API_KEY=a=" API_KEY=aaa\"|bbb" `, `FOO="x"API_KEY=a `, `DB_PASSWORD="x DB_PASSWORD=a\";b" `, `FOO="x"b=`, `DB_PASSWORD=a"b"\|`, `API_KEY=${A}"${B}",`, `printf a"|x secrets put K; printf "b c"|x secrets put K; `, `DB_PASSWORD="a"|`, `API_KEY='a'|`, `DB_PASSWORD=`} {
 		in := strings.Repeat(unit, 20000)
+		if unit == `DB_PASSWORD=` {
+			// Each key's value holds the next key and ends at the separator.
+			in += "hunter2,"
+		}
 		done := make(chan string, 1)
 		go func() { done <- String(in) }()
 		select {
 		case out := <-done:
-			if strings.Contains(out, `a" `) || strings.Contains(out, `a' `) {
+			if strings.Contains(out, `a" `) || strings.Contains(out, `a' `) || strings.Contains(out, "hunter2") {
 				t.Fatalf("joined values of %q left visible: %.80q", unit, out)
 			}
 		case <-time.After(30 * time.Second):
