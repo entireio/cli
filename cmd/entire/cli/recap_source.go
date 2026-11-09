@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
@@ -26,6 +25,10 @@ type recapSource struct {
 	team        *api.Client
 	repo        string
 	teamTimeout time.Duration
+	// teamUnavailable is set when the repo is processed on another cell but
+	// no client for it could be built: the home cell's team side would be
+	// the wrong cell's zeros, so fetch drops it instead.
+	teamUnavailable bool
 }
 
 // fetch returns the recap for [since, until). With a separate team cell it
@@ -33,7 +36,14 @@ type recapSource struct {
 // A home failure fails the fetch; a team failure only drops the team side.
 func (s recapSource) fetch(ctx context.Context, since, until time.Time) (*recap.MeRecapResponse, error) {
 	if s.team == nil || s.repo == "" {
-		return recap.FetchMeRecap(ctx, s.home, since, until, s.repo, 0) //nolint:wrapcheck // callers render recap fetch errors
+		resp, err := recap.FetchMeRecap(ctx, s.home, since, until, s.repo, 0)
+		if err != nil {
+			return nil, err //nolint:wrapcheck // callers render recap fetch errors
+		}
+		if s.teamUnavailable {
+			recap.ClearTeam(resp)
+		}
+		return resp, nil
 	}
 	var teamResp *recap.MeRecapResponse
 	var teamErr error
@@ -65,14 +75,27 @@ func recapTeamCell(homeBaseURL string, repoCell *auth.CellTarget, baseURLPinsCel
 	if baseURLPinsCell || repoCell == nil || repoCell.BaseURL == "" {
 		return nil
 	}
-	if normalizeCellURL(homeBaseURL) == normalizeCellURL(repoCell.BaseURL) {
+	// A false "different" costs one same-cell call; it cannot hide data.
+	if api.OriginOnly(homeBaseURL) == api.OriginOnly(repoCell.BaseURL) {
 		return nil
 	}
 	return repoCell
 }
 
-// normalizeCellURL compares cell origins without trailing slashes or case.
-// A false "different" costs one same-cell call; it cannot hide data.
-func normalizeCellURL(u string) string {
-	return strings.ToLower(strings.TrimRight(strings.TrimSpace(u), "/"))
+// withTeamCell points source's team side at cell, the repo's processing cell
+// when recapTeamCell chose one (nil keeps the home cell). When no client for
+// it can be built, the team side is marked unavailable rather than left to
+// the home cell, which would show the wrong cell's zeros.
+func withTeamCell(ctx context.Context, source recapSource, cell *auth.CellTarget, clientFor func(context.Context, *auth.CellTarget) (*api.Client, error)) recapSource {
+	if cell == nil || source.repo == "" {
+		return source
+	}
+	team, err := clientFor(ctx, cell)
+	if err != nil {
+		logging.Debug(ctx, "recap cannot reach the repo's cell; showing the personal side only", "error", err.Error())
+		source.teamUnavailable = true
+		return source
+	}
+	source.team = team
+	return source
 }

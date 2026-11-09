@@ -18,7 +18,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
-	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/recap"
 )
@@ -194,14 +193,7 @@ func newRecapSource(ctx context.Context, insecureHTTP bool) (recapSource, string
 	}
 	repoID, repoSlug, repoCell := currentRepoRef(ctx)
 	source := recapSource{home: home, repo: repoID, teamTimeout: recapTeamTimeout}
-	if cell := recapTeamCell(home.BaseURL(), repoCell, auth.BaseURLOverridePinsCell()); cell != nil && repoID != "" {
-		team, err := factory.ClientFor(ctx, cell)
-		if err != nil {
-			logging.Debug(ctx, "recap cannot reach the repo's cell; showing the personal side only", "error", err.Error())
-		} else {
-			source.team = team
-		}
-	}
+	source = withTeamCell(ctx, source, recapTeamCell(home.BaseURL(), repoCell, auth.BaseURLOverridePinsCell()), factory.ClientFor)
 	return source, repoSlug, nil
 }
 

@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -11,6 +13,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/recap"
+	"github.com/stretchr/testify/require"
 )
 
 // recapServer serves one canned /me/recap response (or status) and counts
@@ -140,4 +143,81 @@ func TestRecapTeamCell(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A slow repo cell is cut off at teamTimeout; the personal side still renders.
+func TestRecapSource_SlowTeamCellIsCutOff(t *testing.T) {
+	t.Parallel()
+	home, _ := recapServer(t, http.StatusOK, homeRecap())
+	slow := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	t.Cleanup(slow.Close)
+	src := recapSource{
+		home: api.NewClientWithBaseURL("tok", home.URL), team: api.NewClientWithBaseURL("tok", slow.URL),
+		repo: "01REPO", teamTimeout: 50 * time.Millisecond,
+	}
+	start := time.Now()
+	resp, err := src.fetch(t.Context(), time.Now().Add(-time.Hour), time.Now())
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("fetch took %s, want it bounded by teamTimeout", elapsed)
+	}
+	if resp.Summary.Me.Sessions != 3 || resp.Summary.Team != nil {
+		t.Errorf("summary = %+v, want the personal side and no team side", resp.Summary)
+	}
+}
+
+// withTeamCell wires the repo cell's client in, and when that client cannot be
+// built, marks the team side unavailable so the home cell's zeros are dropped.
+func TestWithTeamCell(t *testing.T) {
+	t.Parallel()
+	home, _ := recapServer(t, http.StatusOK, homeRecap())
+	team, _ := recapServer(t, http.StatusOK, teamRecap())
+	base := recapSource{home: api.NewClientWithBaseURL("tok", home.URL), repo: "01REPO", teamTimeout: time.Second}
+	cell := &auth.CellTarget{BaseURL: team.URL, Jurisdiction: "eu"}
+
+	t.Run("no foreign cell keeps the home cell", func(t *testing.T) {
+		t.Parallel()
+		src := withTeamCell(t.Context(), base, nil, func(context.Context, *auth.CellTarget) (*api.Client, error) {
+			t.Error("no client should be built without a foreign cell")
+			return nil, errors.New("unexpected client build")
+		})
+		require.Nil(t, src.team)
+		require.False(t, src.teamUnavailable)
+	})
+	t.Run("unknown repo keeps the home cell", func(t *testing.T) {
+		t.Parallel()
+		noRepo := base
+		noRepo.repo = ""
+		src := withTeamCell(t.Context(), noRepo, cell, func(context.Context, *auth.CellTarget) (*api.Client, error) {
+			t.Error("no client should be built for an unknown repo")
+			return nil, errors.New("unexpected client build")
+		})
+		require.Nil(t, src.team)
+	})
+	t.Run("foreign cell supplies the team side", func(t *testing.T) {
+		t.Parallel()
+		src := withTeamCell(t.Context(), base, cell, func(_ context.Context, got *auth.CellTarget) (*api.Client, error) {
+			require.Equal(t, cell, got)
+			return api.NewClientWithBaseURL("tok", got.BaseURL), nil
+		})
+		resp, err := src.fetch(t.Context(), time.Now().Add(-time.Hour), time.Now())
+		require.NoError(t, err)
+		require.NotNil(t, resp.Summary.Team)
+		require.Equal(t, 40, resp.Summary.Team.Sessions)
+	})
+	t.Run("unreachable foreign cell drops the team side", func(t *testing.T) {
+		t.Parallel()
+		src := withTeamCell(t.Context(), base, cell, func(context.Context, *auth.CellTarget) (*api.Client, error) {
+			return nil, errors.New("no cell client")
+		})
+		require.True(t, src.teamUnavailable)
+		resp, err := src.fetch(t.Context(), time.Now().Add(-time.Hour), time.Now())
+		require.NoError(t, err)
+		require.Equal(t, 3, resp.Summary.Me.Sessions)
+		require.Nil(t, resp.Summary.Team, "the home cell's team zeros are the wrong cell's")
+	})
 }

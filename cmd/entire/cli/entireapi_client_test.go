@@ -26,9 +26,14 @@ func TestCurrentRepoRef_UsesProcessingPlacement(t *testing.T) {
 		clusters: clustersWithSlugs(),
 	})
 
-	repoID, slug, _ := currentRepoRef(t.Context())
+	repoID, slug, cell := currentRepoRef(t.Context())
 	if repoID != "mirror-us" || slug != "entirehq/entire.io" {
 		t.Errorf("currentRepoRef = (%q, %q), want (mirror-us, entirehq/entire.io)", repoID, slug)
+	}
+	// Recap reads the team side from this cell, so it must be the processing
+	// placement's, not the first one listed (eu).
+	if cell == nil || cell.BaseURL != usCellAPIURL || cell.Jurisdiction != "us" {
+		t.Errorf("currentRepoRef cell = %+v, want the processing placement's us cell %s", cell, usCellAPIURL)
 	}
 }
 
