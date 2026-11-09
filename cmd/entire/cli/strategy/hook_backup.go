@@ -540,8 +540,11 @@ func isFileNameByte(b byte) bool {
 // It also repairs what earlier releases left when Entire already chains to
 // the wrapper: the moved copy is Entire's hook again, run a second time. The
 // user's hook those releases rotated away cannot be told from any other older
-// copy, so it stays where it is. Reports the moved copies it changed.
-func reclaimFromWrappers(root *os.Root, hook string) (wrapperReclaim, error) {
+// copy, so it stays where it is. With staleOnly, which the per-turn reinstall
+// passes for a hook that is current, it takes back only stale copies: the
+// install runs because of them, and a current copy may hold lines the user
+// added. Reports the moved copies it changed.
+func reclaimFromWrappers(root *os.Root, hook string, staleOnly bool) (wrapperReclaim, error) {
 	var reclaimed wrapperReclaim
 	moved, err := movedHookCopies(root, hook)
 	if err != nil {
@@ -553,6 +556,9 @@ func reclaimFromWrappers(root *os.Root, hook string) (wrapperReclaim, error) {
 			if err := refreshKeepCopy(root, m); err != nil {
 				return reclaimed, err
 			}
+			continue
+		}
+		if staleOnly && !isStaleMovedEntireHook(root, hook, m) {
 			continue
 		}
 		var userHookInBackup bool
@@ -676,11 +682,18 @@ func hasStaleMovedEntireHook(root *os.Root, hook string) bool {
 		if !isMovedHookName(n, hook) {
 			continue
 		}
-		if _, stale := movedEntireHook(root, hook, n); stale {
+		if isStaleMovedEntireHook(root, hook, n) {
 			return true
 		}
 	}
 	return false
+}
+
+// isStaleMovedEntireHook: n carries Entire's marker and is a copy this version
+// replaces (movedEntireHookOutdated).
+func isStaleMovedEntireHook(root *os.Root, hook, n string) bool {
+	_, stale := movedEntireHook(root, hook, n)
+	return stale
 }
 
 // movedEntireHook reads n, a moved hook name for hook: ours when it carries

@@ -175,19 +175,31 @@ func TestCheckGitHookState_StaleMovedCopyBehindSymlinkedHooksDir(t *testing.T) {
 // The per-turn reinstall rewrites only the moved copies that are stale. A
 // current copy of Entire's hook beside a stale one may hold lines the user
 // added and gets no backup, so it stays as it is, as a current hook does,
-// whether or not the hook itself needed the reinstall.
+// whether or not the hook itself needed the reinstall. For a current hook that
+// holds when the manager's wrapper in the backup runs the current copy by
+// name: reclaimFromWrappers takes back only the stale one.
 func TestReinstallGitHooks_KeepsCurrentMovedCopy(t *testing.T) {
 	spec := specFor(t, "commit-msg")
 	saved := spec.content + "echo mine\n"
-	for name, hookIsCurrent := range map[string]bool{"hook current": true, "hook outdated": false} {
+	for name, tc := range map[string]struct {
+		hookIsCurrent, wrapperRunsSaved bool
+	}{
+		"hook current":                        {hookIsCurrent: true},
+		"hook outdated":                       {},
+		"hook current, wrapper runs the copy": {hookIsCurrent: true, wrapperRunsSaved: true},
+	} {
 		t.Run(name, func(t *testing.T) {
 			_, hooksDir := initHooksTestRepo(t)
 			ctx := context.Background()
 			if _, err := InstallGitHook(ctx, true, false); err != nil {
 				t.Fatalf("InstallGitHook: %v", err)
 			}
-			if !hookIsCurrent {
+			if !tc.hookIsCurrent {
 				writeExec(t, filepath.Join(hooksDir, "commit-msg"), "#!/bin/sh\n# "+entireHookMarker+"\n./scripts/entire-dev hooks git commit-msg\n")
+			}
+			if tc.wrapperRunsSaved {
+				writeExec(t, filepath.Join(hooksDir, "commit-msg"), generateChainedContent(spec.content, spec.name))
+				writeExec(t, filepath.Join(hooksDir, "commit-msg"+backupSuffix), toolWrapper("commit-msg.saved", "/dev/null"))
 			}
 			writeExec(t, filepath.Join(hooksDir, "commit-msg.tool-old"), preGuardChained(spec))
 			writeExec(t, filepath.Join(hooksDir, "commit-msg.saved"), saved)

@@ -971,7 +971,7 @@ func installHooks(ctx context.Context, lockRoot, root *os.Root, hooksDir string,
 			fmt.Fprintf(stderrWriter, "[entire] pre-commit had moved Entire's %s hook to %s%s; Entire's hook is back and runs pre-commit's after it.\n", spec.name, spec.name, legacySuffix)
 			logging.Info(ctx, "git hook reclaimed from pre-commit", slog.String("hook", spec.name))
 		}
-		wrapped, err := reclaimFromWrappers(root, spec.name)
+		wrapped, err := reclaimFromWrappers(root, spec.name, spec.keepHook)
 		if err != nil {
 			return installedCount, fmt.Errorf("failed to take %s back from the hook manager that moved it: %w", spec.name, err)
 		}
