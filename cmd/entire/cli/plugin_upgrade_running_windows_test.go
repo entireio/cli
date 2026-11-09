@@ -109,3 +109,73 @@ func TestUpgrade_WindowsReplacesRunningPluginExecutable(t *testing.T) { //nolint
 		}
 	}
 }
+
+// Installs made before the hard-link layout (CLI 0.12.x), and every local-dev
+// install from outside the managed tree, give bin\ its own copy of the
+// binary. Replacing that copy while it runs is what failed with "Access is
+// denied"; the rename-aside fallback in replaceManagedEntry is what lets it
+// through.
+func TestInstallPluginFromPath_WindowsReplacesRunningCopiedEntry(t *testing.T) { //nolint:paralleltest // mutates env
+	withIsolatedPluginEnv(t)
+	ping, err := os.ReadFile(filepath.Join(os.Getenv("SystemRoot"), "System32", "PING.EXE"))
+	if err != nil {
+		t.Skipf("no ping.exe to run as the plugin: %v", err)
+	}
+	writeSource := func(body []byte) string {
+		t.Helper()
+		src := filepath.Join(t.TempDir(), pluginBinaryName("pinger"))
+		if err := os.WriteFile(src, body, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return src
+	}
+	// A source outside the managed tree is copied, never hard-linked.
+	installed, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: writeSource(ping)})
+	if err != nil {
+		t.Fatalf("initial install: %v", err)
+	}
+
+	cmd := exec.CommandContext(context.Background(), installed.Path, "-n", "60", "127.0.0.1")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start installed plugin: %v", err)
+	}
+	stopped := false
+	stop := func() {
+		if !stopped {
+			stopped = true
+			_ = cmd.Process.Kill() //nolint:errcheck // test cleanup
+			_ = cmd.Wait()         //nolint:errcheck // killed on purpose
+		}
+	}
+	t.Cleanup(stop)
+
+	if _, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: writeSource([]byte("new")), Force: true}); err != nil {
+		t.Fatalf("replace the running copied entry: %v", err)
+	}
+	data, err := os.ReadFile(installed.Path)
+	if err != nil || string(data) != "new" {
+		t.Errorf("bin entry after replace = %d bytes (%v), want the new binary", len(data), err)
+	}
+	list, err := ListInstalledPlugins()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].Name != "pinger" {
+		t.Errorf("ListInstalledPlugins = %+v, want only pinger (no .old- entry)", list)
+	}
+	binDir, err := PluginBinDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := countOldEntries(t, binDir); n != 1 {
+		t.Errorf("bin dir holds %d .old- entries while the old copy runs, want 1", n)
+	}
+
+	stop()
+	if _, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: writeSource([]byte("newer")), Force: true}); err != nil {
+		t.Fatalf("reinstall after exit: %v", err)
+	}
+	if n := countOldEntries(t, binDir); n != 0 {
+		t.Errorf("bin dir still holds %d .old- entries after the next install", n)
+	}
+}
