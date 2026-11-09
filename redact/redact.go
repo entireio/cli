@@ -464,7 +464,7 @@ func detectAllLayers(s string) []taggedRegion {
 	// placeholder stays intact, like the connection strings in layer 5, unless
 	// its query carries a real password.
 	for _, loc := range credentialedURIPattern.FindAllStringSubmatchIndex(s, -1) {
-		if isPlaceholderSecretValue(s[loc[2]:loc[3]]) && !uriQueryHasPassword(s[loc[0]:loc[1]]) {
+		if isPlaceholderSecretValue(uriPassword(s, loc[0], loc[2], loc[3])) && !uriQueryHasPassword(s[loc[0]:loc[1]]) {
 			continue
 		}
 		regions = append(regions, taggedRegion{region: region{loc[0], loc[1]}})
@@ -614,6 +614,17 @@ func isSlashedBase64Secret(run string) bool {
 	return shannonEntropy(run) > entropyThreshold
 }
 
+// uriPassword returns the password s[start:end] of the URI that starts at
+// s[uriStart], as the placeholder rules read it: for a URI a double quote
+// opens, as in psql "postgres://app:${PW:-'$FALLBACK'}@db/app", it is read as
+// double quotes enclose it (see doubleQuotedText).
+func uriPassword(s string, uriStart, start, end int) string {
+	if uriStart > 0 && s[uriStart-1] == '"' {
+		return doubleQuotedText(s[start:end])
+	}
+	return s[start:end]
+}
+
 // detectDatabaseURIPasswords covers database URIs whose password contains a
 // character credentialedURIPattern stops at. Placeholder passwords stay
 // visible, as in every other credential layer.
@@ -623,7 +634,7 @@ func detectDatabaseURIPasswords(s string) []taggedRegion {
 	}
 	var regions []taggedRegion
 	for _, loc := range databaseURIPasswordPattern.FindAllStringSubmatchIndex(s, -1) {
-		password := s[loc[2]:loc[3]]
+		password := uriPassword(s, loc[0], loc[2], loc[3])
 		if uriPortPrefixPattern.MatchString(password) || !hasNonPlaceholderPasswordValue(password) {
 			continue
 		}
@@ -919,9 +930,13 @@ func detectCredentialKeyCaptures(
 // runs past a separator into db_password=foo,client_secret = "x": the next
 // search starts at that key, which is read once more, so its value is found.
 // That region is the one that ends last, which can be one of the regions
-// visitStraddlingValues adds. When the key's value is not redacted, as for b
-// in DB_PASSWORD="a"b= API_KEY=hunter2, the search starts again where the
-// region ends, so that value can not hide an assignment after the region.
+// visitStraddlingValues adds. The key can also be the value this match
+// captured, as the second DB_PASSWORD in DB_PASSWORD = DB_PASSWORD = hunter2:
+// the search then starts again inside the match, at a key that begins after
+// the match's own key, so it moves on, and only the key is read again, since
+// its value comes after the region. When the key's value is not redacted, as
+// for b in DB_PASSWORD="a"b= API_KEY=hunter2, the search starts again where
+// the region ends, so that value can not hide an assignment after the region.
 //
 // The only values read from inside a region are those visitStraddlingValues
 // finds, and they add to what the region already redacts.
@@ -947,7 +962,7 @@ func forEachUncoveredMatch(s string, pattern *regexp.Regexp, valueGroup int, vis
 			} else if end := visit(match, true); end > 0 {
 				last := visitStraddlingValues(s, pattern, valueGroup, visit, match, end, &runs)
 				covered = max(covered, last.end)
-				if keyStart := assignedKeyStart(s, last.start, last.end); keyStart >= next {
+				if keyStart := assignedKeyStart(s, last.start, last.end); keyStart >= valueStart && last.end >= next {
 					next, atKey = keyStart, true
 				} else if keyStart < 0 {
 					next = max(next, last.end)
@@ -1318,7 +1333,11 @@ func capturedValueRegion(s string, start, end int, extend bool, isReal func(piec
 	if extend && valueStart == start {
 		valueEnd = extendPastValueSeparators(s, valueEnd)
 	}
-	return region{valueStart, valueEnd}, isReal(s[valueStart:valueEnd], singleQuoted)
+	value := s[valueStart:valueEnd]
+	if valueStart > start && s[start] == '"' {
+		value = doubleQuotedText(value)
+	}
+	return region{valueStart, valueEnd}, isReal(value, singleQuoted)
 }
 
 // isRealJoinedWord reports whether a shell word joined from pieces holds a
@@ -1339,10 +1358,14 @@ func isRealJoinedWord(s string, pieces []wordPiece, isReal func(piece string, si
 	case 0:
 		return false
 	case 1:
-		return isReal(s[text[0].start:text[0].end], text[0].quote == '\'')
+		piece := s[text[0].start:text[0].end]
+		if text[0].quote == '"' {
+			piece = doubleQuotedText(piece)
+		}
+		return isReal(piece, text[0].quote == '\'')
 	}
 	for _, piece := range text {
-		if piece.quote == '\'' || !isReferenceRun(s[piece.start:piece.end], isReal) {
+		if piece.quote == '\'' || !isReferenceRun(s[piece.start:piece.end], piece.quote == '"', isReal) {
 			return true
 		}
 	}
@@ -1351,17 +1374,24 @@ func isRealJoinedWord(s string, pieces []wordPiece, isReal func(piece string, si
 
 // isReferenceRun reports whether text is a shell reference that isReal
 // accepts as a placeholder, or a run of such references with nothing between
-// them: $A, ${B} and ${B}${C}, but not ${B}x or ${B:-x}.
-func isReferenceRun(text string, isReal func(piece string, singleQuoted bool) bool) bool {
+// them: $A, ${B} and ${B}${C}, but not ${B}x or ${B:-x}. doubleQuoted reads
+// each reference as double quotes enclose it (see doubleQuotedText).
+func isReferenceRun(text string, doubleQuoted bool, isReal func(piece string, singleQuoted bool) bool) bool {
 	if text == "" || text[0] != '$' {
 		return false
 	}
-	if !isReal(text, false) {
+	isPlaceholder := func(ref string) bool {
+		if doubleQuoted {
+			ref = doubleQuotedText(ref)
+		}
+		return !isReal(ref, false)
+	}
+	if isPlaceholder(text) {
 		return true
 	}
 	for i := 0; i < len(text); {
 		end := shellReferenceEnd(text, i)
-		if end < 0 || isReal(text[i:end], false) {
+		if end < 0 || !isPlaceholder(text[i:end]) {
 			return false
 		}
 		i = end
@@ -1447,7 +1477,29 @@ func joinedShellWord(s string, start, end int) ([]wordPiece, int, bool) {
 	if i < end || len(pieces) < 2 && i == end {
 		return nil, end, false
 	}
+	markEnclosingString(s, pieces)
 	return pieces, i, true
+}
+
+// markEnclosingString handles a word that ends in a quote that never closes,
+// as the pattern read it: in echo "DB_PASSWORD=${PW}", the quote closes the
+// string the word sits in. That quote holds no text of the value, and when it
+// is a double quote, the bare text before it was inside double quotes, which
+// isRealJoinedWord needs to read "${PW:-'$FALLBACK'}" (see doubleQuotedText).
+func markEnclosingString(s string, pieces []wordPiece) {
+	last := &pieces[len(pieces)-1]
+	if last.quote != 0 || last.end-last.start != 1 || !isQuoteByte(s[last.start]) {
+		return
+	}
+	last.start = last.end
+	if s[last.end-1] != '"' {
+		return
+	}
+	for i := range pieces {
+		if pieces[i].quote == 0 {
+			pieces[i].quote = '"'
+		}
+	}
 }
 
 // startsWithQuotedString reports whether a quoted string that closes on its
@@ -1802,6 +1854,23 @@ func isPlaceholderShellExpansion(s string) bool {
 		return isPlaceholderSecretValue(m[1])
 	}
 	return !shellTextOperatorRE.MatchString(s)
+}
+
+// doubleQuotedText returns text, which double quotes enclose, as the
+// placeholder rules read it. Inside double quotes a single quote is a plain
+// character: "${PW:-'$FALLBACK'}" expands $FALLBACK and puts apostrophes
+// around it, so an expansion whose word is all single-quoted is read without
+// those quotes, as ${PW:-$FALLBACK}. Without double quotes the same word is the
+// literal text $FALLBACK, a secret (see isPlaceholderShellExpansion).
+func doubleQuotedText(text string) string {
+	m := shellExpansionWordRE.FindStringSubmatchIndex(text)
+	if m == nil || !isSingleBraceExpression(text) {
+		return text
+	}
+	if word := text[m[2]:m[3]]; len(word) >= 2 && word[0] == '\'' && word[len(word)-1] == '\'' {
+		return text[:m[2]] + word[1:len(word)-1] + text[m[3]:]
+	}
+	return text
 }
 
 // shellTextOperatorRE matches ${NAME<op>...} for shell operators whose text can

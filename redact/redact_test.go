@@ -1486,6 +1486,26 @@ func TestString_ShellWordSecretsCaughtWithoutScanners(t *testing.T) {
 			want:  "REDACTED",
 		},
 		{
+			name:  "double-quoted default whose single quotes wrap a literal",
+			input: `DB_PASSWORD="${PW:-'hunter2'}"`,
+			want:  `DB_PASSWORD="REDACTED"`,
+		},
+		{
+			name:  "literal default in a double-quoted piece of a joined word",
+			input: `DB_PASSWORD="$A""${PW:-'hunter2'}"`,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "unquoted single-quoted default after an empty string",
+			input: `DB_PASSWORD=""${PW:-'$S3CRET'}`,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "literal default inside a double-quoted string",
+			input: `echo "DB_PASSWORD=${PW:-hunter2}"`,
+			want:  `echo "DB_PASSWORD=REDACTED`,
+		},
+		{
 			name:  "two joined placeholder words form a new literal",
 			input: `DB_PASSWORD=changeme'example'`,
 			want:  "DB_PASSWORD=REDACTED",
@@ -1547,6 +1567,26 @@ func TestString_ValuesPastRedactedWordsCaughtWithoutScanners(t *testing.T) {
 			name:  "a spaced credential after the word of a value that opens inside a word",
 			input: `API_KEY=abc\" API_KEY="hunter2 API_KEY=foo"API_KEY = hunter2xyz`,
 			want:  `API_KEY=REDACTED = REDACTED`,
+		},
+		{
+			name:  "a password after a key that is the value of a key at the end of a redacted word",
+			input: `DB_PASSWORD="a"DB_PASSWORD = DB_PASSWORD = hunter2xyz`,
+			want:  `DB_PASSWORD=REDACTED = REDACTED = REDACTED`,
+		},
+		{
+			name:  "a credential after a key that is the value of a key at the end of a redacted word",
+			input: `DB_PASSWORD="a"API_KEY = API_KEY = hunter2xyz`,
+			want:  `DB_PASSWORD=REDACTED = REDACTED = REDACTED`,
+		},
+		{
+			name:  "a password after a chain of spaced keys",
+			input: `DB_PASSWORD = DB_PASSWORD = DB_PASSWORD = hunter2xyz`,
+			want:  `DB_PASSWORD = REDACTED = REDACTED = REDACTED`,
+		},
+		{
+			name:  "a credential after a key that is the value of a password key",
+			input: `a DB_PASSWORD = API_KEY = hunter2xyz b`,
+			want:  `a DB_PASSWORD = REDACTED = REDACTED b`,
 		},
 		{
 			name:  "a credential after a non-credential key at the end of a redacted word",
@@ -3053,6 +3093,30 @@ func TestString_ShellParameterReferencesPreserved(t *testing.T) {
 			input: "DB_PASSWORD=" + value,
 			want:  "DB_PASSWORD=" + value,
 		})
+	}
+	assertStringRedactionCases(t, cases)
+}
+
+// Inside double quotes a single quote is a plain character, so the default in
+// "${PW:-'$FALLBACK'}" expands $FALLBACK, as it does in a URI or a value that
+// a double-quoted string holds; only the unquoted form is the literal text
+// $FALLBACK. A quote that closes the string a value sits in is not part of it.
+func TestString_DoubleQuotedShellDefaultsPreserved(t *testing.T) {
+	t.Parallel()
+	var cases []stringRedactionCase
+	for _, input := range []string{
+		`DB_PASSWORD="${PW:-'$FALLBACK'}"`,
+		`API_KEY="${KEY:-'$FALLBACK'}"`,
+		`PGPASSWORD="${1:-'$FALLBACK'}" psql -h db`,
+		`DB_PASSWORD="$A""${PW:-'$FALLBACK'}"`,
+		`DB_PASSWORD="""${PW:-'$FALLBACK'}"`,
+		`echo "DB_PASSWORD=${PW:-'$FALLBACK'}" done`,
+		`psql "postgres://app:${PW:-'$FALLBACK'}@db/app"`,
+		`echo "DB_PASSWORD=${PW}"`,
+		`echo "DB_PASSWORD=${PW:-}"`,
+		`echo "DB_PASSWORD=${1:-$FALLBACK}"`,
+	} {
+		cases = append(cases, stringRedactionCase{name: input, input: input, want: input})
 	}
 	assertStringRedactionCases(t, cases)
 }
