@@ -313,13 +313,12 @@ func appendLongPasswordFlags(regions []taggedRegion, s string, noValue *noValueF
 			}
 		}
 		// After "=" a leading '-' is part of the value. After a blank it
-		// is too (docker login --password -x, wget --password -x), but
+		// is too (docker login --password -x, wget --password --x), but
 		// starts the next flag of a client whose --password takes no
-		// value (psql --password -h db, see noValueLong), and "--" starts
-		// one after any (--password --prompt); --pass always takes one
-		// (curl --pass -x, redis-cli --pass -x).
+		// value (psql --password -h db, see noValueLong); --pass always
+		// takes one (curl --pass -x, redis-cli --pass -x).
 		blank := s[loc[4]] != '='
-		dashFlag := blank && !strings.HasSuffix(s[:loc[2]], "--pass") && (strings.HasPrefix(s[loc[6]:], "--") || noValue.has(loc[2]))
+		dashFlag := blank && !strings.HasSuffix(s[:loc[2]], "--pass") && noValue.has(loc[2])
 		stringEnd := lines.stringEnd(loc[2] - 1)
 		var r taggedRegion
 		// A '-' after a blank starts the next flag, whose word is not
@@ -445,7 +444,7 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string, noVal
 		quotes := quoteScan{s: s[:cmd[1]+len(rest)], i: from, skip: skip, skipEnd: skipEnd, substitutions: true, backticks: true, cases: caseMemo{lines: reads}}
 		if ownLong {
 			own := quotes
-			noValue.read(s, &own, from, cmd[1]+len(rest))
+			noValue.read(s, &own, cmdFrom, cmd[0], from, cmd[1]+len(rest))
 		}
 		if f.flag == nil {
 			continue
@@ -464,13 +463,21 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string, noVal
 // dash-led word after one of them is its next flag.
 type noValueFlags struct {
 	ends map[int]bool
+	// starts tells whether a client's name starts a command.
+	starts commandStart
 }
 
-// read adds the flags in s[from:end], a client's segment, that are its own
-// words, not in a quoted string or a command substitution that another
-// command reads (psql -c "$(wget --password -x)"); quotes scans that segment
-// as in appendFlags.
-func (n *noValueFlags) read(s string, quotes *quoteScan, from, end int) {
+// read adds the flags in s[from:end], the segment of a client whose name
+// is at name in a command from cmdFrom, that are its own words: not in a
+// quoted string or a command substitution that another command reads
+// (psql -c "$(wget --password -x)"). quotes scans that segment as in
+// appendFlags. A client reads none where its name does not start a
+// command, as another's argument (docker login -u mysql --password -x,
+// wget --user mysql --password -x).
+func (n *noValueFlags) read(s string, quotes *quoteScan, cmdFrom, name, from, end int) {
+	if !n.starts.at(s, cmdFrom, name) {
+		return
+	}
 	for pos := from; pos < end; {
 		loc := cliLongPasswordPattern.FindStringSubmatchIndex(s[pos:end])
 		if loc == nil {
@@ -3409,9 +3416,10 @@ func (p netrcPattern) appendPassword(regions []taggedRegion, s string, lines *qu
 		return regions
 	}
 	valueStart, valueEnd, singleQuoted := unquoteRangeQuoted(s, start, end)
-	// A .netrc file expands nothing, so a password that starts with $
-	// ($ecret, $SUMMER2026) is literal, as in single quotes.
-	literal := singleQuoted || strings.HasPrefix(s[valueStart:valueEnd], "$")
+	// A .netrc file expands nothing, so a password that starts with $ or
+	// a backtick ($ecret, $SUMMER2026, `cat /run/pw`) is literal, as in
+	// single quotes.
+	literal := singleQuoted || strings.HasPrefix(s[valueStart:valueEnd], "$") || strings.HasPrefix(s[valueStart:valueEnd], "`")
 	v := cliValue{start: valueStart, end: valueEnd, quoted: valueStart != start, singleQuoted: literal}
 	v.gap = v.quoted && valueStart == lines.stringEnd(start-1) && isStringGap(s[valueStart:valueEnd])
 	if r, ok := passwordValueRegion(s, v, -1, nil, false, false); ok {

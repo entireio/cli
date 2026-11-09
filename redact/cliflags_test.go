@@ -408,6 +408,11 @@ func TestString_CommandLinePasswordsMoreReviewCases(t *testing.T) {
 		{name: "dash-led wget password after a blank", input: "wget --password -" + p + " https://example.com", want: "wget --password REDACTED https://example.com"},
 		{name: "dash-led passwd after a blank", input: "tool --passwd -" + p + " host", want: "tool --passwd REDACTED host"},
 		{name: "dash-led password before a postgres command", input: "wget --password -" + p + " https://example.com; psql --password -h db", want: "wget --password REDACTED https://example.com; psql --password -h db"},
+		{name: "double-dash-led docker login password after a blank", input: "docker login --password --" + p + " registry", want: "docker login --password REDACTED registry"},
+		{name: "double-dash-led wget password after a blank", input: "wget --user alice --password --" + p + " http://localhost/", want: "wget --user alice --password REDACTED http://localhost/"},
+		{name: "dash-led docker login password after a username named like a client", input: "docker login -u mysql --password -" + p + " registry.example", want: "docker login -u mysql --password REDACTED registry.example"},
+		{name: "dash-led wget password after a user named like a client", input: "wget --user mysql --password -" + p + " https://example.com", want: "wget --user mysql --password REDACTED https://example.com"},
+		{name: "netrc password in backticks", input: "machine h login me password \"`cat /run/pw`\"", want: "machine h login me password \"REDACTED\""},
 		{name: "dash-led password in a substitution in a postgres command", input: `psql -c "$(wget --password -` + p + ` https://example.com)" db`, want: `psql -c "$(wget --password REDACTED https://example.com)" db`},
 		{name: "long password in a backtick substitution", input: "wget --password=`printf " + p + "` https://example.com", want: "wget --password=REDACTED https://example.com"},
 		{name: "long password in a backtick substitution after a blank", input: "wget --password `printf " + p + "` https://example.com", want: "wget --password REDACTED https://example.com"},
@@ -451,7 +456,7 @@ func TestString_CommandLinePasswordsNestedAndMultilineSubstitutions(t *testing.T
 	p := cliTestPassword
 	rejected := "psql" + strings.Repeat(" --password -$(psql", 8000) + strings.Repeat(")", 8000) + " --password="
 	dashLed := strings.Repeat(" --password -$(x", 8000) + strings.Repeat(")", 8000) + " --password="
-	rejectedCases := "psql" + strings.Repeat(" --password -$(case x in x) psql", 4000) + strings.Repeat(";; esac)", 4000) + " --password="
+	rejectedCases := "psql" + strings.Repeat(" --password -$(case x in x) :; psql", 4000) + strings.Repeat(";; esac)", 4000) + " --password="
 	nestedClients := strings.Repeat("mysql -p"+p+" $(", 4000) + strings.Repeat(")", 4000)
 	rejectedBraces := "psql" + strings.Repeat(" --password -${x", 8000) + strings.Repeat("}", 8000) + " --password="
 	rejectedShortBraces := "mongosh" + strings.Repeat(" -p -${x", 8000) + strings.Repeat("}", 8000) + " -p "
@@ -575,7 +580,9 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		`sh -c "psql \"--password\" -h db"`,
 		"sh -c 'psql --password -h db'",
 		"psql -c \"$(cat q)\" --password -h db",
-		"wget --password --no-check-certificate https://example.com",
+		"docker exec -it pg psql --password -h db",
+		"psql --password --host db",
+		"ssh db psql --password -h db",
 		"mongosh --password -u admin",
 		"mysqlsh --password -uroot",
 		"wget --password=`cat /run/pw` https://example.com",
