@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -15,6 +16,12 @@ import (
 // treeKillPasses bounds how many times Cancel re-reads the process table for
 // descendants that were started while it was killing the ones it had found.
 const treeKillPasses = 3
+
+// treeKillExitWait bounds how long Cancel waits, in all, for the processes it
+// terminated to finish exiting. TerminateProcess only starts the termination,
+// and a process can still create a child until it has exited, so each pass
+// reads the table only once the processes from the pass before are gone.
+const treeKillExitWait = 2 * time.Second
 
 // killProcessGroupOnCancel makes ctx-cancel terminate cmd's process and every
 // descendant it can prove is one. Windows has no process group to signal, and
@@ -58,17 +65,19 @@ func killProcessTree(p *os.Process) error {
 // that exits after starting a grandchild leaves the grandchild holding the
 // output pipe, which is the case this exists for.
 func terminateTree(rootPID uint32, root windows.Handle) error {
+	deadline := time.Now().Add(treeKillExitWait)
 	var killErr error
 	if err := windows.TerminateProcess(root, 1); err != nil && !hasExited(root) {
 		killErr = fmt.Errorf("terminate process %d: %w", rootPID, err)
 	}
-	created, err := creationTime(root)
+	rootBirth, err := birthOf(root)
 	if err != nil {
 		// Without root's creation time no process can be proven to be its child.
 		return killErr
 	}
+	waitForExit(root, deadline)
 
-	tree := map[uint32]int64{rootPID: created}
+	tree := map[uint32]birth{rootPID: rootBirth}
 	var opened []windows.Handle
 	defer func() {
 		for _, h := range opened {
@@ -92,6 +101,9 @@ func terminateTree(rootPID uint32, root windows.Handle) error {
 			// which is the outcome we wanted anyway.
 			_ = windows.TerminateProcess(proc.handle, 1) //nolint:errcheck // best effort, see above
 		}
+		for _, proc := range found {
+			waitForExit(proc.handle, deadline)
+		}
 	}
 	return killErr
 }
@@ -106,24 +118,43 @@ type processEntry struct {
 // openedProc is a process opened by PID, with what the kernel reports for that
 // handle. While the handle is open, the PID cannot be reused.
 type openedProc struct {
-	handle  windows.Handle
-	ppid    uint32
-	created int64 // creation time, in 100ns ticks since 1601
+	handle windows.Handle
+	ppid   uint32
+	born   birth
+}
+
+// birth places a process in creation order.
+type birth struct {
+	// seq is the process's sequence number, which the kernel assigns from one
+	// counter per boot, so it orders processes even if the clock moved. Zero
+	// where the system doesn't report it: older Windows versions, and Wine.
+	seq uint64
+	// created is the creation time in 100ns ticks since 1601: wall-clock time,
+	// used only when either side has no sequence number.
+	created int64
+}
+
+// after reports whether b was created after parent was.
+func (b birth) after(parent birth) bool {
+	if b.seq != 0 && parent.seq != 0 {
+		return b.seq > parent.seq
+	}
+	return b.created >= parent.created
 }
 
 // findDescendants returns every process in entries that descends from a
 // member of tree and is not one yet, parents before children, and adds each to
-// tree. tree maps a PID to its process's creation time, and each PID in it must
-// stay pinned by an open handle while findDescendants runs.
+// tree. tree maps a PID to its process's birth, and each PID in it must stay
+// pinned by an open handle while findDescendants runs.
 //
 // A table entry's parent PID only says where to look. Windows keeps a process's
 // parent PID after the parent exits, and the PID can then be reused, so a
 // process listing a member's PID may have been started by an earlier holder of
 // that PID. Each candidate is opened, which pins its PID, and kept only if the
-// kernel reports a member as its parent for that handle and it was created no
-// earlier than that member. A member has held its PID since its own creation,
-// so any process created later that names that PID as parent was started by it.
-func findDescendants(entries []processEntry, tree map[uint32]int64, open func(uint32) (openedProc, error), release func(openedProc)) []openedProc {
+// kernel reports a member as its parent for that handle and it was created
+// after that member. A member has held its PID since its own creation, so any
+// process created later that names that PID as parent was started by it.
+func findDescendants(entries []processEntry, tree map[uint32]birth, open func(uint32) (openedProc, error), release func(openedProc)) []openedProc {
 	children := make(map[uint32][]uint32)
 	for _, e := range entries {
 		if e.pid != 0 && e.pid != e.ppid {
@@ -146,11 +177,11 @@ func findDescendants(entries []processEntry, tree map[uint32]int64, open func(ui
 			if err != nil {
 				continue // already gone, or not ours to open
 			}
-			if proc.ppid != parent || proc.created < tree[parent] {
+			if proc.ppid != parent || !proc.born.after(tree[parent]) {
 				release(proc)
 				continue
 			}
-			tree[pid] = proc.created
+			tree[pid] = proc.born
 			found = append(found, proc)
 			queue = append(queue, pid)
 		}
@@ -177,16 +208,17 @@ func processTable() ([]processEntry, error) {
 	return entries, nil
 }
 
-// openProcess opens pid for termination and reads its parent PID and
-// creation time through the new handle.
+// openProcess opens pid for termination and reads its parent PID and birth
+// through the new handle.
 func openProcess(pid uint32) (openedProc, error) {
-	handle, err := windows.OpenProcess(windows.PROCESS_TERMINATE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	const access = windows.PROCESS_TERMINATE | windows.PROCESS_QUERY_LIMITED_INFORMATION | windows.SYNCHRONIZE
+	handle, err := windows.OpenProcess(access, false, pid)
 	if err != nil {
 		return openedProc{}, fmt.Errorf("open process %d: %w", pid, err)
 	}
 	proc := openedProc{handle: handle}
 	if proc.ppid, err = parentPID(handle); err == nil {
-		proc.created, err = creationTime(handle)
+		proc.born, err = birthOf(handle)
 	}
 	if err != nil {
 		closeProcess(proc)
@@ -213,20 +245,35 @@ func parentPID(handle windows.Handle) (uint32, error) {
 	return ppid, nil
 }
 
-// creationTime returns when handle's process was created, in 100ns ticks
-// since 1601.
-func creationTime(handle windows.Handle) (int64, error) {
+// birthOf reads handle's sequence number, when Windows reports one, and its
+// creation time.
+func birthOf(handle windows.Handle) (birth, error) {
 	var created, exited, kernel, user windows.Filetime
 	if err := windows.GetProcessTimes(handle, &created, &exited, &kernel, &user); err != nil {
-		return 0, fmt.Errorf("read process times: %w", err)
+		return birth{}, fmt.Errorf("read process times: %w", err)
 	}
-	return int64(created.HighDateTime)<<32 | int64(created.LowDateTime), nil
+	b := birth{created: int64(created.HighDateTime)<<32 | int64(created.LowDateTime)}
+	//nolint:gosec // G103: x/sys has no typed wrapper; the kernel fills b.seq, bounded by its size
+	if err := windows.NtQueryInformationProcess(handle, windows.ProcessSequenceNumber, unsafe.Pointer(&b.seq), uint32(unsafe.Sizeof(b.seq)), nil); err != nil {
+		b.seq = 0 // not reported here; order by creation time instead
+	}
+	return b, nil
 }
 
 // hasExited reports whether handle's process has already exited.
 func hasExited(handle windows.Handle) bool {
 	event, err := windows.WaitForSingleObject(handle, 0)
 	return err == nil && event == windows.WAIT_OBJECT_0
+}
+
+// waitForExit waits until handle's process has exited or deadline passes.
+func waitForExit(handle windows.Handle, deadline time.Time) {
+	remaining := time.Until(deadline).Milliseconds()
+	if remaining <= 0 {
+		return
+	}
+	//nolint:gosec,errcheck // G115: remaining is at most treeKillExitWait; a process that outlives the wait is caught by WaitDelay instead
+	_, _ = windows.WaitForSingleObject(handle, uint32(remaining))
 }
 
 // toPID converts a Go PID to the DWORD Windows uses.

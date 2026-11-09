@@ -416,10 +416,16 @@ direct child, then walks the process table and terminates each descendant, as
 
 A table entry's parent PID survives the parent and can be reused, so a process
 counts as a descendant only if, opened by PID, it reports a tree member as its
-parent and was created no earlier than that member. Every member stays open
-until the walk ends, which keeps its PID from being reused, and Go's own handle
-keeps the direct child's PID even after it exits. The walk repeats (up to three
-passes) for processes started while it ran. It cannot reach a process whose
+parent and was created after that member. Creation order comes from the
+process sequence number, which the kernel counts per boot, and falls back to
+the wall-clock creation time where the system doesn't report one (older
+Windows versions, and Wine). Every member stays open until the walk ends, which keeps its PID from
+being reused, and Go's own handle keeps the direct child's PID even after it
+exits. `TerminateProcess` only starts a termination, and a process can create
+children until it has exited, so each pass reads the table only once the
+processes from the pass before have exited (waiting at most two seconds in
+all). The walk repeats (up to three passes) for processes started while it ran.
+It cannot reach a process whose
 parent, other than the direct child, had already exited, and `WaitDelay` still
 bounds that case. A Job Object would cover it, but joining one without a race
 needs a step between creating the process and running it, which `exec.Cmd` does

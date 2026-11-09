@@ -236,8 +236,11 @@ func foundPIDs(found []openedProc) []uint32 {
 func TestFindDescendantsWindows(t *testing.T) {
 	t.Parallel()
 	const root = 100
+	clockOnly := birth{created: 10}
+	sequenced := birth{seq: 100, created: 50}
 	for _, tc := range []struct {
 		name         string
+		root         birth
 		entries      []processEntry
 		procs        map[uint32]openedProc
 		want         []uint32
@@ -247,9 +250,9 @@ func TestFindDescendantsWindows(t *testing.T) {
 			name:    "follows each generation, parents first",
 			entries: []processEntry{{300, 200}, {200, root}, {400, 300}, {0, 0}},
 			procs: map[uint32]openedProc{
-				200: {ppid: root, created: 20},
-				300: {ppid: 200, created: 30},
-				400: {ppid: 300, created: 40},
+				200: {ppid: root, born: birth{created: 20}},
+				300: {ppid: 200, born: birth{created: 30}},
+				400: {ppid: 300, born: birth{created: 40}},
 			},
 			want: []uint32{200, 300, 400},
 		},
@@ -258,8 +261,8 @@ func TestFindDescendantsWindows(t *testing.T) {
 			entries: []processEntry{{200, root}, {300, 200}},
 			procs: map[uint32]openedProc{
 				// Started by an earlier holder of PID 100, before root existed.
-				200: {ppid: root, created: 5},
-				300: {ppid: 200, created: 30},
+				200: {ppid: root, born: birth{created: 5}},
+				300: {ppid: 200, born: birth{created: 30}},
 			},
 			wantReleased: []uint32{200},
 		},
@@ -269,7 +272,7 @@ func TestFindDescendantsWindows(t *testing.T) {
 			procs: map[uint32]openedProc{
 				// The table said root started PID 200; the process holding it now
 				// was started by someone else.
-				200: {ppid: 999, created: 50},
+				200: {ppid: 999, born: birth{created: 50}},
 			},
 			wantReleased: []uint32{200},
 		},
@@ -277,20 +280,58 @@ func TestFindDescendantsWindows(t *testing.T) {
 			name:    "cannot vouch for children of a process it cannot open",
 			entries: []processEntry{{200, root}, {300, 200}},
 			procs: map[uint32]openedProc{
-				300: {ppid: 200, created: 30},
+				300: {ppid: 200, born: birth{created: 30}},
 			},
 		},
 		{
 			name:    "accepts a child created in the same clock tick as its parent",
 			entries: []processEntry{{200, root}},
-			procs:   map[uint32]openedProc{200: {ppid: root, created: 10}},
+			procs:   map[uint32]openedProc{200: {ppid: root, born: birth{created: 10}}},
 			want:    []uint32{200},
+		},
+		{
+			name:    "orders by sequence number, not the clock, when both have one",
+			root:    sequenced,
+			entries: []processEntry{{200, root}, {300, root}},
+			procs: map[uint32]openedProc{
+				// Created after root, but the clock was set back in between.
+				200: {ppid: root, born: birth{seq: 110, created: 40}},
+				// Created before root, by an earlier holder of PID 100, though
+				// the clock reads later.
+				300: {ppid: root, born: birth{seq: 90, created: 60}},
+			},
+			want:         []uint32{200},
+			wantReleased: []uint32{300},
+		},
+		{
+			name:    "rejects a sequence number equal to its parent's",
+			root:    sequenced,
+			entries: []processEntry{{200, root}},
+			procs: map[uint32]openedProc{
+				200: {ppid: root, born: birth{seq: 100, created: 50}},
+			},
+			wantReleased: []uint32{200},
+		},
+		{
+			name:    "falls back to the clock when one side has no sequence number",
+			root:    sequenced,
+			entries: []processEntry{{200, root}, {300, root}},
+			procs: map[uint32]openedProc{
+				200: {ppid: root, born: birth{created: 50}},
+				300: {ppid: root, born: birth{created: 49}},
+			},
+			want:         []uint32{200},
+			wantReleased: []uint32{300},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			table := &fakeTable{procs: tc.procs}
-			tree := map[uint32]int64{root: 10}
+			rootBirth := tc.root
+			if rootBirth == (birth{}) {
+				rootBirth = clockOnly
+			}
+			tree := map[uint32]birth{root: rootBirth}
 			found := findDescendants(tc.entries, tree, table.open, table.release)
 
 			if got := foundPIDs(found); !slices.Equal(got, tc.want) {
@@ -312,10 +353,10 @@ func TestFindDescendantsWindows(t *testing.T) {
 func TestFindDescendantsWindows_SkipsMembers(t *testing.T) {
 	t.Parallel()
 	table := &fakeTable{procs: map[uint32]openedProc{
-		200: {ppid: 100, created: 20},
-		300: {ppid: 200, created: 30},
+		200: {ppid: 100, born: birth{created: 20}},
+		300: {ppid: 200, born: birth{created: 30}},
 	}}
-	tree := map[uint32]int64{100: 10, 200: 20}
+	tree := map[uint32]birth{100: {created: 10}, 200: {created: 20}}
 	found := findDescendants([]processEntry{{200, 100}, {300, 200}}, tree, table.open, table.release)
 	if got := foundPIDs(found); !slices.Equal(got, []uint32{300}) {
 		t.Fatalf("found %v; want [300]", got)
