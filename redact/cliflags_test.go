@@ -404,6 +404,17 @@ func TestString_CommandLinePasswordsMoreReviewCases(t *testing.T) {
 		{name: "dash-led docker login password after a blank", input: "docker login --username user --password -" + p + " registry.example", want: "docker login --username user --password REDACTED registry.example"},
 		{name: "dash-led helm registry login password after a blank", input: "helm registry login --username me --password -" + p + " host", want: "helm registry login --username me --password REDACTED host"},
 		{name: "dash-led az login password after a blank", input: "az login -u me --password -" + p, want: "az login -u me --password REDACTED"},
+		{name: "dash-led docker login password after a quoted flag", input: "docker login \"--password\" -" + p + " registry", want: "docker login \"--password\" REDACTED registry"},
+		{name: "dash-led wget password after a blank", input: "wget --password -" + p + " https://example.com", want: "wget --password REDACTED https://example.com"},
+		{name: "dash-led passwd after a blank", input: "tool --passwd -" + p + " host", want: "tool --passwd REDACTED host"},
+		{name: "dash-led password before a postgres command", input: "wget --password -" + p + " https://example.com; psql --password -h db", want: "wget --password REDACTED https://example.com; psql --password -h db"},
+		{name: "dash-led password in a substitution in a postgres command", input: `psql -c "$(wget --password -` + p + ` https://example.com)" db`, want: `psql -c "$(wget --password REDACTED https://example.com)" db`},
+		{name: "long password in a backtick substitution", input: "wget --password=`printf " + p + "` https://example.com", want: "wget --password=REDACTED https://example.com"},
+		{name: "long password in a backtick substitution after a blank", input: "wget --password `printf " + p + "` https://example.com", want: "wget --password REDACTED https://example.com"},
+		{name: "short password in a backtick substitution", input: "mysql -p`printf " + p + "` db", want: "mysql -pREDACTED db"},
+		{name: "openssl source in a backtick substitution", input: "openssl enc -pass pass:`printf " + p + "`", want: "openssl enc -pass pass:REDACTED"},
+		{name: "dash-led docker login password after an escaped quoted flag in a script", input: `sh -c "docker login \"--password\" -` + p + ` registry"`, want: `sh -c "docker login \"--password\" REDACTED registry"`},
+		{name: "dash-led docker login password after a single-quoted flag in a script", input: "sh -c \"docker login '--password' -" + p + " registry\"", want: "sh -c \"docker login '--password' REDACTED registry\""},
 		{name: "passwords in code spans joined by a word", input: "`mysql -pfoo`or`mysql -p" + p + "`", want: "`mysql -pREDACTED`or`mysql -pREDACTED`"},
 		{name: "openssl source after a backtick substitution", input: "openssl enc -in `printf input.txt` -pass pass:" + p, want: "openssl enc -in `printf input.txt` -pass pass:REDACTED"},
 		{name: "password after backtick substitutions", input: "mysql -h `hostname` -u `whoami` -p" + p + " db", want: "mysql -h `hostname` -u `whoami` -pREDACTED db"},
@@ -438,10 +449,11 @@ func TestString_CommandLinePasswordsNestedAndMultilineSubstitutions(t *testing.T
 	t.Parallel()
 
 	p := cliTestPassword
-	rejected := "wget" + strings.Repeat(" --password -$(x", 8000) + strings.Repeat(")", 8000) + " --password="
-	rejectedCases := "wget" + strings.Repeat(" --password -$(case x in x)", 4000) + strings.Repeat(";; esac)", 4000) + " --password="
+	rejected := "psql" + strings.Repeat(" --password -$(psql", 8000) + strings.Repeat(")", 8000) + " --password="
+	dashLed := strings.Repeat(" --password -$(x", 8000) + strings.Repeat(")", 8000) + " --password="
+	rejectedCases := "psql" + strings.Repeat(" --password -$(case x in x) psql", 4000) + strings.Repeat(";; esac)", 4000) + " --password="
 	nestedClients := strings.Repeat("mysql -p"+p+" $(", 4000) + strings.Repeat(")", 4000)
-	rejectedBraces := "wget" + strings.Repeat(" --password -${x", 8000) + strings.Repeat("}", 8000) + " --password="
+	rejectedBraces := "psql" + strings.Repeat(" --password -${x", 8000) + strings.Repeat("}", 8000) + " --password="
 	rejectedShortBraces := "mongosh" + strings.Repeat(" -p -${x", 8000) + strings.Repeat("}", 8000) + " -p "
 	assertStringRedactionCases(t, []stringRedactionCase{
 		{name: "password in a substitution that closes on a later line", input: "mysql -p$(printf foo;\nprintf " + p + ") db\nssh -p2222 host", want: "mysql -pREDACTED db\nssh -p2222 host"},
@@ -457,6 +469,7 @@ func TestString_CommandLinePasswordsNestedAndMultilineSubstitutions(t *testing.T
 		{name: "many lines in substitutions that do not close", input: strings.Repeat("mysql -p$(\n", 8000) + p, want: "mysql -pREDACTED"},
 		{name: "many substitutions that close on the next line", input: strings.Repeat("mysql -p$(printf "+p+"\n) db\n", 4000), want: strings.Repeat("mysql -pREDACTED db\n", 4000)},
 		{name: "many rejected values in nested substitutions", input: rejected + p, want: rejected + "REDACTED"},
+		{name: "many dash-led values in nested substitutions", input: "wget" + dashLed + p, want: "wget --password REDACTED --password=REDACTED"},
 		{name: "many rejected values in nested substitutions with case statements", input: rejectedCases + p, want: rejectedCases + "REDACTED"},
 		{name: "many nested substitutions with case statements", input: "mysql -p" + strings.Repeat("$(case x in x) ", 8000) + strings.Repeat(";; esac)", 8000) + " db -p" + p, want: "mysql -pREDACTED db -pREDACTED"},
 		{name: "password after a case statement in a process substitution", input: "mysql -h <(case x in x) printf h;; esac) -p" + p, want: "mysql -h <(case x in x) printf h;; esac) -pREDACTED"},
@@ -471,6 +484,7 @@ func TestString_CommandLinePasswordsNestedAndMultilineSubstitutions(t *testing.T
 		{name: "password in parameter expansions nested four deep", input: "mysql -p${A:-a b${B:-${C:-${D:-" + p + "}}}} db", want: "mysql -pREDACTED db"},
 		{name: "password after parameter expansions nested three deep", input: "mysql -h ${A:-a;${B:-${C:-b}}} -p" + p, want: "mysql -h ${A:-a;${B:-${C:-b}}} -pREDACTED"},
 		{name: "many rejected values in nested parameter expansions", input: rejectedBraces + p, want: rejectedBraces + "REDACTED"},
+		{name: "many dash-led values in nested parameter expansions", input: "wget" + rejectedBraces[len("psql"):] + p, want: "wget --password REDACTED --password=REDACTED"},
 		{name: "many rejected short flag values in nested parameter expansions", input: rejectedShortBraces + p, want: rejectedShortBraces + "REDACTED"},
 		{name: "openssl source after a substitution that closes on a later line", input: "openssl enc -aes-128-cbc -in $(printf f;\ntrue) -pass pass:" + p, want: "openssl enc -aes-128-cbc -in $(printf f;\ntrue) -pass pass:REDACTED"},
 		{name: "password after a substitution that opens at a line end", input: "mysql -h $(\nprintf h\n) -p" + p + " db", want: "mysql -h $(\nprintf h\n) -pREDACTED db"},
@@ -553,6 +567,22 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		"ssh mariadb-dumps -p2222",
 		"docker login registry && mysql --password -uroot db",
 		"docker login --password-stdin -u me registry",
+		"pg_dump --password -h db -U app app",
+		"pgcli --password -h db",
+		"createdb --password -U app db",
+		"sudo -u postgres psql --password -d app",
+		"psql \"--password\" -h db",
+		`sh -c "psql \"--password\" -h db"`,
+		"sh -c 'psql --password -h db'",
+		"psql -c \"$(cat q)\" --password -h db",
+		"wget --password --no-check-certificate https://example.com",
+		"mongosh --password -u admin",
+		"mysqlsh --password -uroot",
+		"wget --password=`cat /run/pw` https://example.com",
+		"Run `mysql -p`, then `ls`",
+		"Run `wget --password`, then `ls`",
+		"docker login \"--password-stdin\" -u me registry",
+		"docker login --password-file=-x -u me registry",
 		"mysql --password -uroot db",
 		"Run " + strings.Repeat(`"connect mysql" `, 4000) + "through ssh -p2222 host",
 		strings.Repeat(`run("mysql", "-h", h) + `, 4000),

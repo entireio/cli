@@ -14,8 +14,10 @@ import (
 // break, which the shell removes), or a bare word that ends at whitespace, a
 // quote or a shell metacharacter. Ending at a backtick or a parenthesis keeps
 // the closing delimiter of Markdown code (`mysql -pX`) and of $(...) out of
-// the value.
-const cliFlagValue = `"(?:[^"\r\n]|\\\r?\n)*"|'[^'\r\n]*'|[^\s'"` + "`" + `|;&()<>]+`
+// the value. A value may start with a backtick, which shellWordValue reads
+// as a command substitution (--password=`printf x`) or rejects as the end
+// of Markdown code.
+const cliFlagValue = `"(?:[^"\r\n]|\\\r?\n)*"|'[^'\r\n]*'|[^\s'"` + "`" + `|;&()<>]+|` + "`"
 
 // cliSameCommandChar is one piece of the text between a command name and one
 // of its flags. It skips quoted strings (with escapes inside double quotes:
@@ -123,18 +125,13 @@ type cliPasswordFlag struct {
 	// so every occurrence of the name is tried (docker exec sshpass sshpass
 	// -p ...).
 	leading bool
-	// requiredLong marks a client whose --password always takes a value,
-	// so a word after a blank that starts with '-' is that value
-	// (docker login --password -x). flag then also matches --password and
-	// a blank, and reads only such a value; appendLongPasswordFlags reads
-	// the others, and reads this one as the next flag, as it is for
-	// clients that take --password with no value (psql --password -h db).
-	requiredLong bool
+	// noValueLong marks a client whose --password takes no value, or one
+	// only after "=" (psql --password -h db, mysql --password -uroot), so
+	// a word after a blank that starts with '-' is its next flag. For
+	// other commands it is the value (docker login --password -x, wget
+	// --password -x). flag is nil for a client with no short flag.
+	noValueLong bool
 }
-
-// loginPasswordFlag is the name of the password flags of a registry login
-// for cliShortFlag: -p, or --password and a blank.
-const loginPasswordFlag = `(?:p|-password` + cliBlank + `)`
 
 var cliPasswordFlags = []cliPasswordFlag{
 	// mysql takes the password glued to -p; a bare -p prompts for it. Its
@@ -144,30 +141,37 @@ var cliPasswordFlags = []cliPasswordFlag{
 	// and so on, which mariadb alone would leave to isCommandToken to
 	// reject.
 	{
-		needles: []string{"mysql", "mariadb"},
-		command: regexp.MustCompile(`\b(?:mariadb-(?:dump|admin|import|check|show|slap|binlog|upgrade|backup)|mysql(?:dump|admin|import|check|pump|sh|show|slap|binlog|_upgrade)?|mariadb)\b`),
-		flag:    regexp.MustCompile(cliShortFlag(`\s`, mysqlNoValueOptions+"p", "")),
+		needles:     []string{"mysql", "mariadb"},
+		command:     regexp.MustCompile(`\b(?:mariadb-(?:dump|admin|import|check|show|slap|binlog|upgrade|backup)|mysql(?:dump|admin|import|check|pump|sh|show|slap|binlog|_upgrade)?|mariadb)\b`),
+		flag:        regexp.MustCompile(cliShortFlag(`\s`, mysqlNoValueOptions+"p", "")),
+		noValueLong: true,
 	},
 	// login must be the client's subcommand, after its global options
 	// (docker --config dir login, helm registry --debug login), so a
 	// container named login (docker run --name login -p 8080:80) is not.
 	{
-		needles:      []string{loginCommand},
-		command:      regexp.MustCompile(`\b(?:docker|podman|nerdctl|buildah|skopeo|oras|helm)\b(?i:\.exe)?["']?` + cliGlobalOptions + cliBlank + `(?:registry` + cliGlobalOptions + cliBlank + `)?login\b`),
-		flag:         regexp.MustCompile(cliShortFlag(`\s`, loginPasswordFlag, `(?:`+cliBlank+`)?`)),
-		requiredLong: true,
+		needles: []string{loginCommand},
+		command: regexp.MustCompile(`\b(?:docker|podman|nerdctl|buildah|skopeo|oras|helm)\b(?i:\.exe)?["']?` + cliGlobalOptions + cliBlank + `(?:registry` + cliGlobalOptions + cliBlank + `)?login\b`),
+		flag:    regexp.MustCompile(cliShortFlag(`\s`, "p", `(?:`+cliBlank+`)?`)),
 	},
 	{
-		needles:      []string{loginCommand},
-		command:      regexp.MustCompile(`\baz[ \t]+login\b`),
-		flag:         regexp.MustCompile(cliShortFlag(`\s`, loginPasswordFlag, `(?:`+cliBlank+`)?`)),
-		requiredLong: true,
+		needles: []string{loginCommand},
+		command: regexp.MustCompile(`\baz[ \t]+login\b`),
+		flag:    regexp.MustCompile(cliShortFlag(`\s`, "p", `(?:`+cliBlank+`)?`)),
 	},
 	{
-		needles:  []string{"mongo"},
-		command:  regexp.MustCompile(`\b(?:mongosh|mongo|mongodump|mongorestore|mongoexport|mongoimport|mongostat|mongotop)\b`),
-		flag:     regexp.MustCompile(cliShortFlag(`\s`, "p", cliBlank)),
-		optional: true,
+		needles:     []string{"mongo"},
+		command:     regexp.MustCompile(`\b(?:mongosh|mongo|mongodump|mongorestore|mongoexport|mongoimport|mongostat|mongotop)\b`),
+		flag:        regexp.MustCompile(cliShortFlag(`\s`, "p", cliBlank)),
+		optional:    true,
+		noValueLong: true,
+	},
+	// The PostgreSQL clients take --password with no value: it makes them
+	// prompt (psql --password -h db).
+	{
+		needles:     []string{"psql", "pgcli", "pg_", "createdb", "dropdb", "createuser", "dropuser", "clusterdb", "reindexdb", "vacuumdb"},
+		command:     regexp.MustCompile(`\b(?:psql|pgcli|pg_(?:dump(?:all)?|restore|basebackup|receivewal|recvlogical|amcheck)|createdb|dropdb|createuser|dropuser|clusterdb|reindexdb|vacuumdb)\b`),
+		noValueLong: true,
 	},
 	// sshpass reads its own options only before the command it wraps, so
 	// the -p of sshpass -e ssh -p 2222 is ssh's port.
@@ -280,10 +284,11 @@ func detectCommandLinePasswords(s string) []taggedRegion {
 	// Every flag starts with '-', and a .netrc entry names its login and
 	// password.
 	if strings.Contains(s, "-") {
-		regions = appendLongPasswordFlags(regions, s)
+		var noValue noValueFlags
 		for _, flag := range cliPasswordFlags {
-			regions = flag.appendPasswords(regions, s)
+			regions = flag.appendPasswords(regions, s, &noValue)
 		}
+		regions = appendLongPasswordFlags(regions, s, &noValue)
 	}
 	if strings.Contains(s, "password") && strings.Contains(s, loginCommand) {
 		regions = appendNetrcPasswords(regions, s)
@@ -291,7 +296,7 @@ func detectCommandLinePasswords(s string) []taggedRegion {
 	return regions
 }
 
-func appendLongPasswordFlags(regions []taggedRegion, s string) []taggedRegion {
+func appendLongPasswordFlags(regions []taggedRegion, s string, noValue *noValueFlags) []taggedRegion {
 	if !strings.Contains(s, "--pass") {
 		return regions
 	}
@@ -307,13 +312,14 @@ func appendLongPasswordFlags(regions []taggedRegion, s string) []taggedRegion {
 				loc[k] += pos
 			}
 		}
-		// After "=" a leading '-' is part of the value; after a blank it
-		// starts the next flag (psql --password -h db), except after
-		// --pass, which always takes a value (curl --pass -x, redis-cli
-		// --pass -x). A registry login's --password always takes one too,
-		// and its client reads that (see requiredLong).
+		// After "=" a leading '-' is part of the value. After a blank it
+		// is too (docker login --password -x, wget --password -x), but
+		// starts the next flag of a client whose --password takes no
+		// value (psql --password -h db, see noValueLong), and "--" starts
+		// one after any (--password --prompt); --pass always takes one
+		// (curl --pass -x, redis-cli --pass -x).
 		blank := s[loc[4]] != '='
-		dashFlag := blank && !strings.HasSuffix(s[:loc[2]], "--pass")
+		dashFlag := blank && !strings.HasSuffix(s[:loc[2]], "--pass") && (strings.HasPrefix(s[loc[6]:], "--") || noValue.has(loc[2]))
 		stringEnd := lines.stringEnd(loc[2] - 1)
 		var r taggedRegion
 		// A '-' after a blank starts the next flag, whose word is not
@@ -377,10 +383,11 @@ func longFlagValue(s string, loc []int, stringEnd int, subs substitutionMemo) (c
 // 'mysql -pX', mysql -h $(cat h; mysql -pX)), runs on its own, so its
 // segment ends with that argument and the flags in it are not the earlier
 // command's; any other command in an earlier segment was read with it.
-func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string) []taggedRegion {
+func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string, noValue *noValueFlags) []taggedRegion {
 	if !slices.ContainsFunc(f.needles, func(n string) bool { return strings.Contains(s, n) }) {
 		return regions
 	}
+	ownLong := f.noValueLong && strings.Contains(s, "--pass")
 	lines := quoteScan{s: s, prose: true}
 	var nested nestedScan
 	var paths programPathMemo
@@ -428,11 +435,21 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string) []tag
 				continue
 			}
 		}
+		if f.flag == nil && !ownLong {
+			continue
+		}
 		from := cmd[1]
 		if isEntrypointArgument(s, &entrypointStarts, cmdFrom, cmd[0]) {
 			from = entrypoint.at(s, cmd[0], cmd[1]+len(rest), stringEnd)
 		}
 		quotes := quoteScan{s: s[:cmd[1]+len(rest)], i: from, skip: skip, skipEnd: skipEnd, substitutions: true, backticks: true, cases: caseMemo{lines: reads}}
+		if ownLong {
+			own := quotes
+			noValue.read(s, &own, from, cmd[1]+len(rest))
+		}
+		if f.flag == nil {
+			continue
+		}
 		n := len(regions)
 		regions = f.appendFlags(regions, s, &quotes, s[from:cmd[1]+len(rest)], stringEnd, subs)
 		for _, r := range regions[n:] {
@@ -440,6 +457,46 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string) []tag
 		}
 	}
 	return regions
+}
+
+// noValueFlags holds the ends of the --password and --passwd flags that a
+// client whose --password takes no value (see noValueLong) reads itself: a
+// dash-led word after one of them is its next flag.
+type noValueFlags struct {
+	ends map[int]bool
+}
+
+// read adds the flags in s[from:end], a client's segment, that are its own
+// words, not in a quoted string or a command substitution that another
+// command reads (psql -c "$(wget --password -x)"); quotes scans that segment
+// as in appendFlags.
+func (n *noValueFlags) read(s string, quotes *quoteScan, from, end int) {
+	for pos := from; pos < end; {
+		loc := cliLongPasswordPattern.FindStringSubmatchIndex(s[pos:end])
+		if loc == nil {
+			return
+		}
+		// An escaped quote around the flag (sh -c "psql \"--password\" -h
+		// db") is read from its backslash.
+		at := pos + loc[0]
+		if at > 0 && s[at-1] == '\\' {
+			at--
+		}
+		if _, quoted := quotes.stringAt(at); !quoted {
+			if _, _, inner := quotes.substitutionAt(at); !inner {
+				if n.ends == nil {
+					n.ends = map[int]bool{}
+				}
+				n.ends[pos+loc[2]] = true
+			}
+		}
+		pos += loc[2]
+	}
+}
+
+// has reports whether read found a flag that ends at i.
+func (n *noValueFlags) has(i int) bool {
+	return n.ends[i]
 }
 
 // foundPasswords tells, for names at increasing positions, whether a name is
@@ -1738,10 +1795,6 @@ func (f cliPasswordFlag) valueRegion(s string, base int, loc []int, stringEnd in
 		// is not read (see appendLongPasswordFlags).
 		return taggedRegion{}, false
 	}
-	if f.requiredLong && s[base+loc[len(loc)-2]] != '-' && strings.Contains(s[base+loc[0]:base+loc[len(loc)-2]], "--password") {
-		// appendLongPasswordFlags reads that value.
-		return taggedRegion{}, false
-	}
 	v, ok := shortFlagValue(s, base, loc, stringEnd, subs)
 	if !ok {
 		return taggedRegion{}, false
@@ -1833,6 +1886,11 @@ type cliValue struct {
 // subs is as in shellWordEnd.
 func shellWordValue(s string, start, end, stringEnd int, subs substitutionMemo) cliValue {
 	wordEnd := shellWordEnd(s, start, stringEnd, subs)
+	if s[start] == '`' && wordEnd <= start+1 {
+		// A backtick that opens no substitution ends Markdown code
+		// (`mysql -p`), which leaves the flag with no value.
+		return cliValue{start: start, end: start}
+	}
 	if wordEnd <= start {
 		wordEnd = end
 	}
@@ -3382,6 +3440,12 @@ func passwordValueRegion(s string, v cliValue, stringEnd int, subs substitutionM
 		return taggedRegion{}, false
 	case v.singleQuoted:
 		if !hasNonPlaceholderQuotedPasswordValue(value, true) {
+			return taggedRegion{}, false
+		}
+	case strings.HasPrefix(s[v.start:], "`"):
+		// As $(...) below: `cat /run/pw` fetches the password,
+		// `printf hunter2` carries it.
+		if end := backtickEnd(s, v.start, stringEnd, subs); end == v.end && s[end-1] == '`' && isRecipeSubstitution(s[v.start+1:end-1]) {
 			return taggedRegion{}, false
 		}
 	case strings.HasPrefix(s[v.start:], "$("):
