@@ -1,4 +1,4 @@
-//go:build linux || darwin
+//go:build linux || darwin || windows
 
 package cli
 
@@ -15,10 +15,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Owner liveness is only introspectable on linux/darwin (proclive returns
-// LivenessUnknown elsewhere), so these live-process classifications are
-// platform-gated. An owner with a mismatched start fingerprint reads as a
-// reused — i.e. dead — PID, which is deterministic on both platforms.
+// Owner liveness is only introspectable on linux, darwin and windows
+// (proclive returns LivenessUnknown elsewhere), so these live-process
+// classifications are platform-gated. An owner with a mismatched start
+// fingerprint reads as a reused — i.e. dead — PID, which is deterministic on
+// each of them.
 
 func TestClassifySession_IdlePhaseOwnerExited_Stuck(t *testing.T) {
 	t.Parallel()

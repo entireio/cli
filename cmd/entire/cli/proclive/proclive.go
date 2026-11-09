@@ -8,7 +8,7 @@
 // immediately, instead of waiting out a coarse inactivity timeout.
 //
 // This package is a leaf: it imports only the standard library and
-// golang.org/x/sys/unix. It must NOT import session, strategy, agent, or cli,
+// golang.org/x/sys. It must NOT import session, strategy, agent, or cli,
 // so those packages can depend on it without an import cycle.
 package proclive
 
@@ -71,7 +71,8 @@ var (
 	// exists. Check maps it to LivenessDead.
 	errProcessGone = errors.New("proclive: process not found")
 	// errUnsupported is returned by the per-platform seam when the OS cannot be
-	// introspected (e.g. Windows). Check maps it to LivenessUnknown.
+	// introspected (any platform but Linux, darwin and Windows). Check maps it
+	// to LivenessUnknown.
 	errUnsupported = errors.New("proclive: unsupported platform")
 )
 
@@ -90,27 +91,35 @@ const maxAncestryDepth = 64
 type statFunc func(pid int) (ppid int, name, start string, err error)
 
 // transientNames are process names that are never the long-lived session owner:
-// our own hook binary, the shells agents commonly use to exec hooks, and the Go
+// our own hook binary, the shells agents commonly use to exec hooks (cmd,
+// powershell and pwsh on Windows, plus conhost, its console host), and the Go
 // toolchain (a `go run`-launched hook has a short-lived `go` parent that would
 // otherwise be recorded as the owner and exit immediately). The walk skips
 // past these to reach the real agent process. Note that interpreter runtimes
 // (node, bun, python) are deliberately absent — for several agents the runtime
 // IS the long-lived agent, so treating it as transient would skip the real owner.
 var transientNames = map[string]bool{
-	"entire": true,
-	"sh":     true,
-	"bash":   true,
-	"zsh":    true,
-	"dash":   true,
-	"fish":   true,
-	"ash":    true,
-	"ksh":    true,
-	"env":    true,
-	"go":     true,
+	"entire":     true,
+	"sh":         true,
+	"bash":       true,
+	"zsh":        true,
+	"dash":       true,
+	"fish":       true,
+	"ash":        true,
+	"ksh":        true,
+	"env":        true,
+	"go":         true,
+	"cmd":        true,
+	"powershell": true,
+	"pwsh":       true,
+	"conhost":    true,
 }
 
+// isTransient matches name case-insensitively, without a Windows ".exe"
+// suffix, so "Bash.EXE" is "bash".
 func isTransient(name string) bool {
-	return transientNames[strings.ToLower(strings.TrimSpace(name))]
+	name = strings.ToLower(strings.TrimSpace(name))
+	return transientNames[strings.TrimSuffix(name, ".exe")]
 }
 
 // ResolveOwner walks up the process tree from the current process and returns

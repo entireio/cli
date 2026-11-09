@@ -56,12 +56,16 @@ func TestAncestryDepth_MatchesWhenCurrentBootIDIsUnavailable(t *testing.T) {
 
 func TestIsTransient(t *testing.T) {
 	t.Parallel()
-	for _, name := range []string{"entire", "sh", "bash", "ZSH", " dash ", "Fish", "go"} {
+	for _, name := range []string{
+		"entire", "sh", "bash", "ZSH", " dash ", "Fish", "go",
+		// Windows image names.
+		"entire.exe", "Bash.EXE", "cmd.exe", "powershell.exe", "pwsh.exe", "conhost.exe",
+	} {
 		if !isTransient(name) {
 			t.Errorf("isTransient(%q) = false, want true", name)
 		}
 	}
-	for _, name := range []string{"node", "bun", "claude", "cursor", "python3", ""} {
+	for _, name := range []string{"node", "bun", "claude", "cursor", "python3", "", "node.exe", "claude.exe", "codex.exe", ".exe", "exe"} {
 		if isTransient(name) {
 			t.Errorf("isTransient(%q) = true, want false", name)
 		}
