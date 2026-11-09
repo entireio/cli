@@ -810,7 +810,7 @@ func detectCredentialValues(s string) []taggedRegion {
 	if !strings.ContainsRune(s, '=') {
 		return regions
 	}
-	forEachUncoveredMatch(s, credentialValuePattern, 1, 2, func(loc []int, wholeWord bool) int {
+	forEachUncoveredMatch(s, credentialValuePattern, 2, func(loc []int, wholeWord bool) int {
 		// Main's shared placeholder rules, except that a single-quoted value
 		// is a shell literal and only the literal placeholder words apply.
 		valueRegion := credentialValueRegion
@@ -842,7 +842,7 @@ func detectCredentialKeyCaptures(
 	valueGroup := pattern.SubexpIndex("value")
 	keyGroup := pattern.SubexpIndex("key")
 	var regions []taggedRegion
-	forEachUncoveredMatch(s, pattern, keyGroup, valueGroup, func(match []int, wholeWord bool) int {
+	forEachUncoveredMatch(s, pattern, valueGroup, func(match []int, wholeWord bool) int {
 		keyStart, keyEnd, ok := captureRange(match, keyGroup)
 		if !ok {
 			return 0
@@ -889,10 +889,10 @@ func detectCredentialKeyCaptures(
 }
 
 // forEachUncoveredMatch calls visit for each match of pattern in s, left to
-// right, that has a value capture (group valueGroup; keyGroup is the key's).
-// visit returns where the region it redacted ends, or 0 when it redacted
-// nothing. wholeWord tells it to read the value's whole shell word; otherwise
-// the value is read as main reads it, as the pattern captured it.
+// right, that has a value capture (group valueGroup). visit returns where the
+// region it redacted ends, or 0 when it redacted nothing. wholeWord tells it
+// to read the value's whole shell word; otherwise the value is read as main
+// reads it, as the pattern captured it.
 //
 // A shell word redacted whole can hold more key=value text, as in
 // DB_PASSWORD=a" DB_PASSWORD=b", and reading a value from inside the word
@@ -913,7 +913,7 @@ func detectCredentialKeyCaptures(
 //
 // The only values read from inside a region are those visitStraddlingValues
 // finds, and they add to what the region already redacts.
-func forEachUncoveredMatch(s string, pattern *regexp.Regexp, keyGroup, valueGroup int, visit func(match []int, wholeWord bool) int) {
+func forEachUncoveredMatch(s string, pattern *regexp.Regexp, valueGroup int, visit func(match []int, wholeWord bool) int) {
 	covered, atKey := 0, false
 	for from := 0; from < len(s); {
 		searchFrom := from
@@ -922,7 +922,7 @@ func forEachUncoveredMatch(s string, pattern *regexp.Regexp, keyGroup, valueGrou
 			// the key with it.
 			searchFrom--
 		}
-		match := nextMatch(s, pattern, keyGroup, searchFrom, len(s))
+		match := nextMatch(s, pattern, searchFrom, len(s))
 		if match == nil {
 			return
 		}
@@ -932,7 +932,7 @@ func forEachUncoveredMatch(s string, pattern *regexp.Regexp, keyGroup, valueGrou
 			if valueStart < covered {
 				next = covered
 			} else if end := visit(match, true); end > 0 {
-				last := visitStraddlingValues(s, pattern, keyGroup, valueGroup, visit, match, end)
+				last := visitStraddlingValues(s, pattern, valueGroup, visit, match, end)
 				covered = max(covered, last.end)
 				if keyStart := assignedKeyStart(s, last.start, last.end); keyStart >= next {
 					next, atKey = keyStart, true
@@ -951,33 +951,28 @@ func forEachUncoveredMatch(s string, pattern *regexp.Regexp, keyGroup, valueGrou
 // would find after a match that ended at from, with its indexes on s. The
 // key/value patterns open with (?:^|[^A-Za-z0-9]): a key follows the start of
 // the text or a byte that is not a letter or digit, and that byte is part of
-// the match. Searching s[from:] reads ^ at from, so for from > 0 a key could
-// begin there with no such byte, where FindAll would find none: the byte
-// before from belongs to text already read. Such a match is dropped, and the
-// search starts again just past the first byte at or after from that can come
-// before a key, where ^ stands for that byte. A pattern whose match does not
-// open with its key, as the shell-stdin one, is searched as it is.
-func nextMatch(s string, pattern *regexp.Regexp, keyGroup, from, limit int) []int {
+// the match. Searching s[from:] would read ^ at from, so for from > 0 a key
+// could begin right there, where FindAll finds none because the byte before
+// from belongs to text already read: b in FOO="x"b= API_KEY=hunter2 would
+// take API_KEY=hunter2 as its value. So a search that would start at a letter,
+// digit or '_' starts instead just past the first byte from there on that can
+// come before a key, where ^ stands for that byte. The shell-stdin pattern opens
+// with \bprintf, which also needs a byte before it that is not a letter or
+// digit, so the same start finds what FindAll would, or more.
+func nextMatch(s string, pattern *regexp.Regexp, from, limit int) []int {
+	if from > 0 && from < limit && (isASCIIAlnum(s[from]) || s[from] == '_') {
+		for from < limit && isASCIIAlnum(s[from]) {
+			from++
+		}
+		if from >= limit {
+			return nil
+		}
+		from++
+	}
 	match := pattern.FindStringSubmatchIndex(s[from:limit])
-	if match == nil {
-		return nil
+	if match != nil {
+		offsetMatch(match, from)
 	}
-	offsetMatch(match, from)
-	if from == 0 || match[0] != from || match[2*keyGroup] != from {
-		return match
-	}
-	prefix := from
-	for prefix < limit && isASCIIAlnum(s[prefix]) {
-		prefix++
-	}
-	if prefix >= limit {
-		return nil
-	}
-	match = pattern.FindStringSubmatchIndex(s[prefix+1 : limit])
-	if match == nil {
-		return nil
-	}
-	offsetMatch(match, prefix+1)
 	return match
 }
 
@@ -994,14 +989,14 @@ func nextMatch(s string, pattern *regexp.Regexp, keyGroup, from, limit int) []in
 //     whole, as any other. Its opening quote is the last quote of its kind in
 //     the region, so a region has at most two, and the pattern is matched only
 //     over the key and its quoted string.
-//   - A bare value that FindAll, going on from where the region's match ends
-//     as main does, reads past the region's end, as API_KEY in
-//     abc\" API_KEY=aaa\"|bbb, where the word ends at the pipe. It is read as
-//     main reads it, as captured: read on as a shell word from inside the
-//     region, its quotes could pair with the region's own.
+//   - A bare value that FindAll, searching from the region's start or from
+//     where its match ends, as main does, reads past the region's end, as
+//     API_KEY in abc\" API_KEY=aaa\"|bbb, where the word ends at the pipe. It
+//     is read as main reads it, as captured: read on as a shell word from
+//     inside the region, its quotes could pair with the region's own.
 //
 // Two regions can share a value, so each is read once.
-func visitStraddlingValues(s string, pattern *regexp.Regexp, keyGroup, valueGroup int, visit func(match []int, wholeWord bool) int, match []int, end int) region {
+func visitStraddlingValues(s string, pattern *regexp.Regexp, valueGroup int, visit func(match []int, wholeWord bool) int, match []int, end int) region {
 	type straddled struct {
 		r        region
 		matchEnd int
@@ -1027,7 +1022,7 @@ func visitStraddlingValues(s string, pattern *regexp.Regexp, keyGroup, valueGrou
 				readValue(match, true)
 			}
 		}
-		for _, match := range bareValuesPast(s, pattern, keyGroup, valueGroup, current.r, current.matchEnd) {
+		for _, match := range bareValuesPast(s, pattern, valueGroup, current.r, current.matchEnd) {
 			if !read[match[2*valueGroup]] {
 				read[match[2*valueGroup]] = true
 				readValue(match, false)
@@ -1061,13 +1056,18 @@ func quotedValuePast(s string, pattern *regexp.Regexp, valueGroup int, r region,
 	return match
 }
 
-// bareValuesPast returns the matches that FindAll, going on from from, the end
-// of the match that r was redacted for, finds with a value that starts inside
-// r and runs past its end. Such a value holds the byte at r.end, so the search
-// stops where that run of value bytes does. A value that ends at a separator
-// at r.end is returned too, because it is judged with the text the separator
-// joins to it, as in API_KEY=a"b;c"x after a word that ended at the ';'.
-func bareValuesPast(s string, pattern *regexp.Regexp, keyGroup, valueGroup int, r region, from int) [][]int {
+// bareValuesPast returns the matches with a value that starts inside r and
+// runs past its end, found by searching as FindAll does from two places: from
+// r's start, which reads the keys inside r's value, as DB_PASSWORD in
+// "x DB_PASSWORD=abc\";hunter2", and from matchEnd, where the match r was
+// redacted for ends and main's FindAll goes on, as for API_KEY in
+// a=" API_KEY=aaa\"|bbb", where the search from r's start reads a= as a key
+// and takes the quoted text as its value. Such a value holds the byte at
+// r.end, so the searches stop where that run of value bytes does. A value
+// that ends at a separator at r.end is returned too, because it is judged
+// with the text the separator joins to it, as in API_KEY=a"b;c"x after a word
+// that ended at the ';'.
+func bareValuesPast(s string, pattern *regexp.Regexp, valueGroup int, r region, matchEnd int) [][]int {
 	limit := r.end
 	if limit >= len(s) || strings.IndexByte(",;&", s[limit]) < 0 {
 		for limit < len(s) && strings.IndexByte(" \t\n\f\r,;&", s[limit]) < 0 {
@@ -1078,16 +1078,18 @@ func bareValuesPast(s string, pattern *regexp.Regexp, keyGroup, valueGroup int, 
 		}
 	}
 	var matches [][]int
-	for from < r.end {
-		match := nextMatch(s, pattern, keyGroup, from, limit)
-		if match == nil {
-			break
+	for _, from := range []int{r.start, matchEnd} {
+		for from < r.end {
+			match := nextMatch(s, pattern, from, limit)
+			if match == nil {
+				break
+			}
+			valueStart, valueEnd, ok := captureRange(match, valueGroup)
+			if ok && valueStart < r.end && valueEnd >= r.end {
+				matches = append(matches, match)
+			}
+			from = max(match[1], from+1)
 		}
-		valueStart, valueEnd, ok := captureRange(match, valueGroup)
-		if ok && valueStart < r.end && valueEnd >= r.end {
-			matches = append(matches, match)
-		}
-		from = max(match[1], from+1)
 	}
 	return matches
 }
