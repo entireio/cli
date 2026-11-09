@@ -361,6 +361,8 @@ func TestString_CommandLinePasswordsMoreReviewCases(t *testing.T) {
 		{name: "password in a substitution joined across a CRLF line", input: "mysql -p$(printf a \\\r\n" + p + ") db", want: "mysql -pREDACTED db"},
 		{name: "client after a function keyword that is an argument", input: "ssh function mysql -p" + p, want: "ssh function mysql -pREDACTED"},
 		{name: "client after a name and parentheses that are arguments", input: "ssh db mysql () -p" + p, want: "ssh db mysql () -pREDACTED"},
+		{name: "client after a word that ends in a function keyword", input: "ssh thenfunction mysql -p" + p, want: "ssh thenfunction mysql -pREDACTED"},
+		{name: "client after a function keyword after a destination named like a keyword", input: "ssh then function mysql -p" + p, want: "ssh then function mysql -pREDACTED"},
 		{name: "client in the body of a function named after it", input: "mysql() { mysql -p" + p + ` "$@"; }`, want: `mysql() { mysql -pREDACTED "$@"; }`},
 		{name: "many substitutions that do not close", input: "mysql" + strings.Repeat(" -p$(", 4000) + " -p" + p, want: "mysql -pREDACTED"},
 		{name: "many code spans with a substitution that does not close", input: strings.Repeat("`mysql -p$(printf "+p+"` ", 2000), want: "`mysql -pREDACTED` "},
@@ -380,6 +382,7 @@ func TestString_CommandLinePasswordsNestedAndMultilineSubstitutions(t *testing.T
 	p := cliTestPassword
 	rejected := "wget" + strings.Repeat(" --password -$(x", 8000) + strings.Repeat(")", 8000) + " --password="
 	rejectedCases := "wget" + strings.Repeat(" --password -$(case x in x)", 4000) + strings.Repeat(";; esac)", 4000) + " --password="
+	nestedClients := strings.Repeat("mysql -p"+p+" $(", 4000) + strings.Repeat(")", 4000)
 	assertStringRedactionCases(t, []stringRedactionCase{
 		{name: "password in a substitution that closes on a later line", input: "mysql -p$(printf foo;\nprintf " + p + ") db\nssh -p2222 host", want: "mysql -pREDACTED db\nssh -p2222 host"},
 		{name: "password in a substitution that opens at a line end", input: "mysql -p$(\nprintf " + p + "\n) db", want: "mysql -pREDACTED db"},
@@ -396,6 +399,12 @@ func TestString_CommandLinePasswordsNestedAndMultilineSubstitutions(t *testing.T
 		{name: "many rejected values in nested substitutions", input: rejected + p, want: rejected + "REDACTED"},
 		{name: "many rejected values in nested substitutions with case statements", input: rejectedCases + p, want: rejectedCases + "REDACTED"},
 		{name: "many nested substitutions with case statements", input: "mysql -p" + strings.Repeat("$(case x in x) ", 8000) + strings.Repeat(";; esac)", 8000) + " db -p" + p, want: "mysql -pREDACTED db -pREDACTED"},
+		{name: "password after a case statement in a process substitution", input: "mysql -h <(case x in x) printf h;; esac) -p" + p, want: "mysql -h <(case x in x) printf h;; esac) -pREDACTED"},
+		{name: "password after a case statement in an output process substitution", input: "mysql -h >(case x in x) tee h;; esac) -p" + p, want: "mysql -h >(case x in x) tee h;; esac) -pREDACTED"},
+		{name: "password after a case statement in a process substitution in a substitution", input: "mysql -h $(cat <(case x in x) printf h;; esac)) -p" + p, want: "mysql -h $(cat <(case x in x) printf h;; esac)) -pREDACTED"},
+		{name: "password after a case statement in a substitution nested four deep", input: "mysql -h $(case x in x) $(a $(b $(c))) ;; esac) -p" + p, want: "mysql -h $(case x in x) $(a $(b $(c))) ;; esac) -pREDACTED"},
+		{name: "many nested commands with passwords", input: nestedClients, want: strings.ReplaceAll(nestedClients, p, "REDACTED")},
+		{name: "many nested commands with passwords in a script", input: "sh -c '" + nestedClients + "'", want: "sh -c '" + strings.ReplaceAll(nestedClients, p, "REDACTED") + "'"},
 	})
 }
 
@@ -590,6 +599,7 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		"function mysql { ssh -p2222 host; }",
 		"function\tmysql() { ssh -p2222 host; }",
 		"if true; then function mysql { ssh -p2222 host; }; fi",
+		"while true; do function mysql { ssh -p2222 host; }; done",
 		"{ mysql() { ssh -p2222 host; }; }",
 		// fetch recipes across lines
 		"mysql -p$(\n  cat /run/pw\n) db",

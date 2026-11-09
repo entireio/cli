@@ -658,13 +658,14 @@ func (f cliPasswordFlag) segmentRest(s string, lines *quoteScan, paths *programP
 // segmentMatch returns the rest of a pipeline segment that pattern matches
 // at the start of text, carried on past each command substitution that
 // pattern ended inside, at a ";;" of a case statement
-// ($(case x in x) printf h;; esac)).
+// ($(case x in x) printf h;; esac)), also one whose parentheses nest deeper
+// than maxSubstitutionHeight.
 func segmentMatch(pattern *regexp.Regexp, text string) string {
 	n := len(pattern.FindString(text))
 	if !strings.Contains(text[:n], caseKeyword) {
 		return text[:n]
 	}
-	q := quoteScan{s: text, substitutions: true}
+	q := quoteScan{s: text, substitutions: true, cases: caseMemo{anyHeight: true}}
 	for n < len(text) {
 		if _, quoted := q.stringAt(n); quoted || n <= q.subStart || n >= q.subEnd {
 			break
@@ -721,7 +722,7 @@ func (m *programPathMemo) isProgramPath(f cliPasswordFlag, s string, lines *quot
 // is quoted in, which opens nothing ("/usr/bin/mysql" -e "select 1)" -pX).
 func untilUnmatchedParen(rest string, skip, skipEnd int) string {
 	depth := 0
-	var cases caseMemo
+	cases := caseMemo{anyHeight: true}
 	for i := 0; i < len(rest); i++ {
 		if i == skip {
 			i = skipEnd - 1
@@ -1940,12 +1941,21 @@ func substitutionEnd(s string, i, stringEnd int, subs substitutionMemo, multilin
 	if !strings.HasPrefix(s[i:], "$(") {
 		return 0, false
 	}
+	r := readSubstitution(s, i, stringEnd, subs, multiline)
+	return r.end, r.closed
+}
+
+// readSubstitution reads the command or process substitution ($(...),
+// <(...), >(...)) that starts at s[i] as substitutionEnd does, and returns
+// where it ends, whether it closes there, and, when it does, how deep the
+// parentheses in it nest, its own counted.
+func readSubstitution(s string, i, stringEnd int, subs substitutionMemo, multiline bool) substitutionResult {
 	if subs == nil {
 		subs = substitutionMemo{}
 	}
 	scan := substitutionScan{ends: substitutionEnds{subs, stringEnd, multiline}}
-	if end, ok := subs[scan.ends.key(i)]; ok {
-		return end.end, end.closed
+	if r, ok := subs[scan.ends.key(i)]; ok {
+		return r
 	}
 	limit := substitutionLimit(s, i, stringEnd)
 	scan.open(i)
@@ -1958,12 +1968,12 @@ func substitutionEnd(s string, i, stringEnd int, subs substitutionMemo, multilin
 		switch s[j] {
 		case '\r', '\n':
 			if !multiline {
-				return scan.stop(j), false
+				return substitutionResult{end: scan.stop(j)}
 			}
 		case '`':
 			n := strings.IndexAny(s[j+1:limit], "`\r\n")
 			if n < 0 || s[j+1+n] != '`' {
-				return scan.stop(j), false
+				return substitutionResult{end: scan.stop(j)}
 			}
 			j += 1 + n
 		case '\\':
@@ -1971,17 +1981,17 @@ func substitutionEnd(s string, i, stringEnd int, subs substitutionMemo, multilin
 			if j++; strings.HasPrefix(s[j:], "\r\n") {
 				j++
 			}
-		case '$':
+		case '$', '<', '>':
 			next, stop := scan.inner(s, j, limit)
 			if stop {
-				return next, false
+				return substitutionResult{end: next}
 			}
 			j = next
 		case '(':
-			scan.frames[len(scan.frames)-1].depth++
+			scan.frames[len(scan.frames)-1].open()
 		case ')':
 			if scan.close(s, j) {
-				return j + 1, true
+				return subs[scan.ends.key(i)]
 			}
 		case caseKeyword[0]:
 			if strings.HasPrefix(s[j:], caseKeyword) {
@@ -1989,7 +1999,7 @@ func substitutionEnd(s string, i, stringEnd int, subs substitutionMemo, multilin
 			}
 		}
 	}
-	return scan.stop(min(j, limit)), false
+	return substitutionResult{end: scan.stop(min(j, limit))}
 }
 
 // substitutionLimit returns where the reading of a substitution that starts
@@ -2014,7 +2024,7 @@ type substitutionScan struct {
 }
 
 func (c *substitutionScan) open(i int) {
-	c.frames = append(c.frames, parenScan{start: i, from: i + 2, depth: 1})
+	c.frames = append(c.frames, parenScan{start: i, from: i + 2, depth: 1, height: 1})
 }
 
 // inner reads the substitution that starts at s[j], if one does, and
@@ -2022,13 +2032,14 @@ func (c *substitutionScan) open(i int) {
 // stop, where the outermost one stops: one that does not close keeps the
 // ones it is in open.
 func (c *substitutionScan) inner(s string, j, limit int) (next int, stop bool) {
-	if !strings.HasPrefix(s[j:limit], "$(") {
+	if !isSubstitutionStart(s[:limit], j) {
 		return j, false
 	}
 	if r, ok := c.ends.subs[c.ends.key(j)]; ok {
 		if !r.closed {
 			return c.stop(r.end), true
 		}
+		c.frames[len(c.frames)-1].nest(r.height)
 		return r.end - 1, false
 	}
 	c.open(j)
@@ -2042,21 +2053,26 @@ func (c *substitutionScan) close(s string, j int) bool {
 	if !top.close(s, j, c.ends) {
 		return false
 	}
-	c.keep(top.start, j+1, true)
+	height := top.height
+	c.keep(top.start, substitutionResult{end: j + 1, closed: true, height: height})
 	c.frames = c.frames[:len(c.frames)-1]
-	return len(c.frames) == 0
+	if len(c.frames) == 0 {
+		return true
+	}
+	c.frames[len(c.frames)-1].nest(height)
+	return false
 }
 
 // stop ends the substitutions open, which do not close, at end.
 func (c *substitutionScan) stop(end int) int {
 	for _, f := range c.frames {
-		c.keep(f.start, end, false)
+		c.keep(f.start, substitutionResult{end: end})
 	}
 	return end
 }
 
-func (c *substitutionScan) keep(i, end int, closed bool) {
-	c.ends.subs[c.ends.key(i)] = substitutionResult{end, closed}
+func (c *substitutionScan) keep(i int, r substitutionResult) {
+	c.ends.subs[c.ends.key(i)] = r
 }
 
 // parenScan reads the parentheses of one command substitution for
@@ -2068,9 +2084,22 @@ type parenScan struct {
 	// statements are read.
 	hasCase, readCases bool
 	// start is where the substitution starts, from is where the text not
-	// yet read for case statements starts, and depth the number of
-	// parentheses open.
-	start, from, depth int
+	// yet read for case statements starts, depth the number of parentheses
+	// open, and height the most that were, with the ones of the
+	// substitutions in it.
+	start, from, depth, height int
+}
+
+// open reads a "(" in the substitution's text.
+func (p *parenScan) open() {
+	p.depth++
+	p.height = max(p.height, p.depth)
+}
+
+// nest records a substitution in the text, whose parentheses nest height
+// deep.
+func (p *parenScan) nest(height int) {
+	p.height = max(p.height, p.depth+height)
 }
 
 // close reads the ")" at s[j] and reports whether it closes the
@@ -2108,6 +2137,8 @@ type substitutionKey struct {
 type substitutionResult struct {
 	end    int
 	closed bool
+	// height is how deep the parentheses of one that closes nest.
+	height int
 }
 
 // substitutionEnds are the ends in subs of the substitutions in the string
@@ -2246,25 +2277,40 @@ func isSubstitutionStart(s string, i int) bool {
 }
 
 // caseMemo finds the length of command and process substitutions at
-// increasing positions of one string. The ")" that ends a pattern of a case
-// statement in a command substitution does not close it
-// ($(case x in x) mysql -pX;; esac)), nor one in a substitution in it
-// ($(echo $(case x in x) a;; esac) mysql -pX)).
+// increasing positions of one string, as readSubstitution reads them. The
+// ")" that ends a pattern of a case statement in one does not close it
+// ($(case x in x) mysql -pX;; esac), <(case x in x) printf h;; esac)), nor
+// one in a substitution in it ($(echo $(case x in x) a;; esac) mysql -pX)).
 type caseMemo struct {
 	subs substitutionMemo
+	// anyHeight finds substitutions however deep their parentheses nest,
+	// for where a segment ends rather than which commands in it run on
+	// their own.
+	anyHeight bool
 }
 
+// maxSubstitutionHeight is how deep the parentheses of a substitution that
+// a command's segment reads on its own may nest, as in
+// cliSubstitutionPattern. A deeper one is text of the command around it,
+// whose flags in it are read as that command's, while the substitutions
+// nested in it are read on their own. Reading every depth on its own made
+// each command read the rest of the substitutions it is in again
+// (mysql -pX $(mysql -pX $(...)) took quadratic time).
+const maxSubstitutionHeight = 3
+
 // substitutionLen returns the length of the command or process substitution
-// that starts at s[i], or 0 when none does.
+// that starts at s[i], or 0 when none does, or it does not close, or,
+// unless anyHeight is set, its parentheses nest deeper than
+// maxSubstitutionHeight.
 func (m *caseMemo) substitutionLen(s string, i int) int {
-	if !strings.HasPrefix(s[i:], "$(") {
-		return len(cliSubstitution.FindString(s[i:]))
+	if !isSubstitutionStart(s, i) {
+		return 0
 	}
 	if m.subs == nil {
 		m.subs = substitutionMemo{}
 	}
-	if end, closed := substitutionEnd(s, i, -1, m.subs, false); closed {
-		return end - i
+	if r := readSubstitution(s, i, -1, m.subs, false); r.closed && (m.anyHeight || r.height <= maxSubstitutionHeight) {
+		return r.end - i
 	}
 	return 0
 }
@@ -2690,13 +2736,26 @@ const commandStarts = commandEnds + ")'\""
 
 // startsCommand reports whether the word at s[i] starts a command: it is at
 // the start of s, or after one of commandStarts or a keyword that a command
-// follows (then function mysql { ... }), each with blanks between.
+// follows (then function mysql { ... }) and itself starts one, each with
+// blanks between. A word that goes on before i (thenfunction mysql) starts
+// none.
 func startsCommand(s string, i int) bool {
-	before := strings.TrimRight(s[:i], " \t")
-	if before == "" || strings.IndexByte(commandStarts, before[len(before)-1]) >= 0 {
-		return true
+	for {
+		if i > 0 && strings.IndexByte(" \t"+commandStarts, s[i-1]) < 0 {
+			return false
+		}
+		before := strings.TrimRight(s[:i], " \t")
+		if before == "" || strings.IndexByte(commandStarts, before[len(before)-1]) >= 0 {
+			return true
+		}
+		word := strings.LastIndexAny(before, " \t"+commandStarts) + 1
+		if !isShellKeyword(before[word:]) {
+			return false
+		}
+		// A keyword is one only where a command starts, so a destination
+		// named like one (ssh then function mysql) is not.
+		i = word
 	}
-	return isShellKeyword(before[strings.LastIndexAny(before, " \t"+commandStarts)+1:])
 }
 
 // functionKeyword starts a function definition (function mysql { ... }).
