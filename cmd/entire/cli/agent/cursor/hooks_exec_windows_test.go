@@ -64,7 +64,12 @@ func TestWindowsInstalledHooks_RunUnderPowerShell(t *testing.T) {
 	if err != nil {
 		t.Fatalf("installed hook %q did not start entire under PowerShell (%v); stdout=%q stderr=%q", hookCommand, err, stdout.String(), stderr.String())
 	}
-	if got := strings.TrimSpace(string(ranIn)); !strings.EqualFold(filepath.Clean(got), filepath.Clean(repo)) {
+	// Compared as files: PowerShell reports long names where the temp path may
+	// use 8.3 short names (GitHub's runners set TEMP to C:\Users\RUNNER~1\…).
+	got := strings.TrimSpace(string(ranIn))
+	gotInfo, gotErr := os.Stat(got)
+	repoInfo, repoErr := os.Stat(repo)
+	if gotErr != nil || repoErr != nil || !os.SameFile(gotInfo, repoInfo) {
 		t.Fatalf("entire ran in %q, want the repository %q", got, repo)
 	}
 }

@@ -328,6 +328,20 @@ func clearPathOnlyLookup(t *testing.T) {
 	}
 }
 
+// assertSameDir fails unless got and want name the same directory. They are
+// compared as files, not strings: a hook shell may report the working
+// directory with long names where the test's temp path uses 8.3 short names
+// (GitHub's runners set TEMP to C:\Users\RUNNER~1\…, and PowerShell starts
+// its children in C:\Users\runneradmin\…).
+func assertSameDir(t *testing.T, got, want string) {
+	t.Helper()
+	gotInfo, gotErr := os.Stat(got)
+	wantInfo, wantErr := os.Stat(want)
+	if gotErr != nil || wantErr != nil || !os.SameFile(gotInfo, wantInfo) {
+		t.Fatalf("entire ran in %q, want the hook's working directory %q", got, want)
+	}
+}
+
 func system32Dir() string {
 	sysRoot := os.Getenv("SystemRoot")
 	if sysRoot == "" {
@@ -456,9 +470,7 @@ func TestWindowsWrappers_IgnoreRepositoryPrograms(t *testing.T) {
 					}
 					// The guard runs where.exe from %SystemRoot%; the hook must
 					// still run in the directory the agent started it in.
-					if got := strings.TrimSpace(string(ranIn)); !strings.EqualFold(filepath.Clean(got), filepath.Clean(repo)) {
-						t.Fatalf("entire ran in %q, want the hook's working directory %q", got, repo)
-					}
+					assertSameDir(t, strings.TrimSpace(string(ranIn)), repo)
 					return
 				}
 				if tc.warning != "" && !warned {
