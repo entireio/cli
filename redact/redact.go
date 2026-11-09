@@ -887,14 +887,18 @@ func detectCredentialKeyCaptures(
 // region it redacted ends, or 0 when it redacted nothing.
 //
 // A shell word redacted whole can hold more key=value text, as in
-// DB_PASSWORD=a" DB_PASSWORD=b", and reading a match again from inside the
-// word would misread the rest of the line: a closing quote in the word would
-// open a new string and run into a later password. So each search starts
-// where the last match or redacted region ends, whichever is later. A later
-// assignment after the word (b"|DB_PASSWORD=hunter2) is still found, and as
-// with FindAll no search starts before the last one's match ended, so a line
-// of such words (DB_PASSWORD=a" "DB_PASSWORD=a" "...) takes linear time.
+// DB_PASSWORD=a" DB_PASSWORD=b", and reading a value from inside the word
+// would misread the rest of the line: a closing quote in the word would open
+// a new string and run into a later password. So each search starts where the
+// last match or redacted region ends, whichever is later. A later assignment
+// after the word (b"|DB_PASSWORD=hunter2) is still found, and as with FindAll
+// no search starts before the last one's match ended, so a line of such words
+// (DB_PASSWORD=a" "DB_PASSWORD=a" "...) takes linear time. The one exception
+// is a region that ends in a key whose value comes after it, as when a value
+// runs past a separator into db_password=foo,client_secret = "x": the next
+// search starts at that key, which is read once more, so its value is found.
 func forEachUncoveredMatch(s string, pattern *regexp.Regexp, valueGroup int, visit func(match []int) int) {
+	covered := 0
 	for from := 0; from < len(s); {
 		match := pattern.FindStringSubmatchIndex(s[from:])
 		if match == nil {
@@ -906,11 +910,51 @@ func forEachUncoveredMatch(s string, pattern *regexp.Regexp, valueGroup int, vis
 			}
 		}
 		next := max(match[1], from+1)
-		if _, _, ok := captureRange(match, valueGroup); ok {
-			next = max(next, visit(match))
+		if valueStart, _, ok := captureRange(match, valueGroup); ok {
+			if valueStart < covered {
+				// Only a search from a key inside a region gets here; a
+				// value is never read from inside a region.
+				next = covered
+			} else if end := visit(match); end > 0 {
+				covered = max(covered, end)
+				next = max(next, assignedKeyStart(s, valueStart, end))
+			}
 		}
 		from = next
 	}
+}
+
+// assignedKeyStart returns where the key at the end of the redacted region
+// s[start:end] begins when an = assigns it a value that starts after end, as
+// client_secret in foo,client_secret = "x" or "x"client_secret= "y". Otherwise
+// it returns end.
+func assignedKeyStart(s string, start, end int) int {
+	keyEnd := end
+	if s[end-1] == '=' {
+		keyEnd--
+	} else {
+		next := end
+		for next < len(s) && (s[next] == ' ' || s[next] == '\t') {
+			next++
+		}
+		if next == len(s) || s[next] != '=' {
+			return end
+		}
+	}
+	keyStart := keyEnd
+	for keyStart > start && isCredentialKeyByte(s[keyStart-1]) {
+		keyStart--
+	}
+	if keyStart == keyEnd {
+		return end
+	}
+	return keyStart
+}
+
+// isCredentialKeyByte reports whether c can be part of a key that the
+// key/value patterns read ([A-Za-z0-9_.-]).
+func isCredentialKeyByte(c byte) bool {
+	return isASCIIAlnum(c) || c == '_' || c == '.' || c == '-'
 }
 
 // extendPastValueSeparators continues an unquoted credential value across ',',
