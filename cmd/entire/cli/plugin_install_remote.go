@@ -111,7 +111,7 @@ func InstallPluginFromRepo(ctx context.Context, repoURL, expectedName string, op
 	return nil, lastErr
 }
 
-func installRepoAtTag(ctx context.Context, repoURL, expectedName, tag string, opts RemoteInstallOptions) (_ *RemoteInstallResult, retErr error) {
+func installRepoAtTag(ctx context.Context, repoURL, expectedName, tag string, opts RemoteInstallOptions) (*RemoteInstallResult, error) {
 	stopMetadata := startPluginStep(ctx, fmt.Sprintf("Fetching plugin metadata for %s...", tag))
 	meta, err := fetchPluginMetadataAtTag(ctx, repoURL, tag)
 	stopMetadata()
@@ -203,17 +203,47 @@ func installRepoAtTag(ctx context.Context, repoURL, expectedName, tag string, op
 		return nil, err
 	}
 
-	pkgDir, err := EnsurePluginPkgDir(name)
+	// BinarySHA256 is filled in by placeStagedBinary once the binary is placed.
+	manifest := &PluginManifest{
+		Name:        name,
+		RepoURL:     repoURL,
+		Tag:         tag,
+		Asset:       asset.Asset,
+		SHA256:      asset.SHA256,
+		Unverified:  !asset.Verified,
+		Pinned:      opts.Pin != "",
+		InstalledAt: time.Now().UTC(),
+	}
+	if meta != nil {
+		manifest.Requires = meta.Requires
+	}
+	if err := placeStagedBinary(stagingRoot, stagedName, manifest); err != nil {
+		return nil, err
+	}
+	entry, err := FindInstalledPlugin(name)
 	if err != nil {
 		return nil, err
+	}
+	return &RemoteInstallResult{Installed: entry, Manifest: manifest, Metadata: meta, ReplacedFrom: replacedFrom}, nil
+}
+
+// placeStagedBinary moves the extracted binary into pkg/<name>/, records
+// manifest (setting its BinarySHA256) and swaps the bin/ entry onto it. It
+// either completes or leaves the previous install in place.
+func placeStagedBinary(stagingRoot *os.Root, stagedName string, manifest *PluginManifest) (retErr error) {
+	name := manifest.Name
+	binBase := pluginBinaryName(name)
+	pkgDir, err := EnsurePluginPkgDir(name)
+	if err != nil {
+		return err
 	}
 	pkgName, err := pluginPkgName(name)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	pluginTreeRoot, err := pluginRoot(true)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	sweepOldBinaries(pluginTreeRoot, pkgName)
 	pkgBinName := pkgName + "/" + binBase
@@ -226,7 +256,7 @@ func installRepoAtTag(ctx context.Context, repoURL, expectedName, tag string, op
 	// previous binary and manifest restorable until the swap has succeeded.
 	prev, err := stashPreviousPkgInstall(pluginTreeRoot, pkgName, binBase)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	installed := false
 	defer func() {
@@ -239,7 +269,7 @@ func installRepoAtTag(ctx context.Context, repoURL, expectedName, tag string, op
 		}
 	}()
 	if err := replaceBinary(stagingRoot, stagedName, pluginTreeRoot, pkgBinName); err != nil {
-		return nil, fmt.Errorf("place plugin binary: %w", err)
+		return fmt.Errorf("place plugin binary: %w", err)
 	}
 
 	// Digest the binary we actually placed, not just the archive it came from.
@@ -248,23 +278,10 @@ func installRepoAtTag(ctx context.Context, repoURL, expectedName, tag string, op
 	// tampering. binDigest is what `plugin doctor` re-checks.
 	binDigest, err := fileSHA256(pkgBin)
 	if err != nil {
-		return nil, fmt.Errorf("hash installed plugin binary: %w", err)
+		return fmt.Errorf("hash installed plugin binary: %w", err)
 	}
 
-	manifest := &PluginManifest{
-		Name:         name,
-		RepoURL:      repoURL,
-		Tag:          tag,
-		Asset:        asset.Asset,
-		SHA256:       asset.SHA256,
-		BinarySHA256: binDigest,
-		Unverified:   !asset.Verified,
-		Pinned:       opts.Pin != "",
-		InstalledAt:  time.Now().UTC(),
-	}
-	if meta != nil {
-		manifest.Requires = meta.Requires
-	}
+	manifest.BinarySHA256 = binDigest
 	// The manifest is written before the bin/ link, immediately after the
 	// binary swap. Ordering matters because replaceBinary has already mutated
 	// pkg/<name>/: until the manifest catches up, it records the *previous*
@@ -277,20 +294,16 @@ func installRepoAtTag(ctx context.Context, repoURL, expectedName, tag string, op
 	// binary and manifest back together, so pkg/ and bin/ agree on the old
 	// version and the next upgrade retries.
 	if err := SavePluginManifest(manifest); err != nil {
-		return nil, err
+		return err
 	}
 
 	if _, err := placeManagedEntry(InstallPluginOptions{SourcePath: pkgBin, Force: true}); err != nil {
-		return nil, err
+		return err
 	}
 	// The bin/ entry now runs the new binary: from here on pkg/ must stay on
 	// the new version too, whatever else fails.
 	installed = true
-	entry, err := FindInstalledPlugin(name)
-	if err != nil {
-		return nil, err
-	}
-	return &RemoteInstallResult{Installed: entry, Manifest: manifest, Metadata: meta, ReplacedFrom: replacedFrom}, nil
+	return nil
 }
 
 // pkgInstallBackup is the previous contents of pkg/<name>/ held during a
