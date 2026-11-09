@@ -468,9 +468,10 @@ poll:
 	return nil
 }
 
-// transcriptStore resolves transcriptRef to agy's brain-directory session store
-// (GetSessionDir, which ignores the repo path: agy keeps one brain per user)
-// and a name inside it. A path outside the store is reported through
+// transcriptStore resolves transcriptRef to the session store of whichever
+// Antigravity brain directory contains it (brainDirs: the CLI's, then the IDE's
+// and the 2.0 app's; each ignores the repo path, one brain per user per
+// surface) and a name inside it. A path outside every brain is reported through
 // agent.ErrOutsideSessionStore; it is never re-anchored on the path's own
 // parent, the derived base the filesystem-safety rules refuse because it
 // contains nothing while looking like it does.
