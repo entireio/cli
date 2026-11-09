@@ -1584,6 +1584,11 @@ func TestString_ValuesPastRedactedWordsCaughtWithoutScanners(t *testing.T) {
 			want:  `DB_PASSWORD=REDACTED`,
 		},
 		{
+			name:  "an escaped blank after a literal backslash is text inside a joined password",
+			input: `DB_PASSWORD=a"b"\\\ hunter2xyz`,
+			want:  `DB_PASSWORD=REDACTED`,
+		},
+		{
 			name:  "a bare value past a quoted value that opens at an earlier value's closing quote",
 			input: `API_KEY="API_KEY="x API_KEY=aaa\"|bbb`,
 			want:  `API_KEY=REDACTED`,
@@ -3095,6 +3100,26 @@ func TestString_JoinedShellWordValues(t *testing.T) {
 			want:  `DB_PASSWORD="$DB_PASS""$DB_SUFFIX"`,
 		},
 		{
+			name:  "a run of references after a quoted reference",
+			input: `DB_PASSWORD="$PREFIX"${BASE}${SUFFIX}`,
+			want:  `DB_PASSWORD="$PREFIX"${BASE}${SUFFIX}`,
+		},
+		{
+			name:  "a run of bare references after a quoted reference",
+			input: `DB_PASSWORD="$PREFIX"$BASE$SUFFIX`,
+			want:  `DB_PASSWORD="$PREFIX"$BASE$SUFFIX`,
+		},
+		{
+			name:  "a literal default inside a run of references",
+			input: `DB_PASSWORD="$PREFIX"${BASE}${SUFFIX:-hunter2}`,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "a literal backslash before a blank ends a joined password",
+			input: `DB_PASSWORD=a"b"\\ echo safe`,
+			want:  "DB_PASSWORD=REDACTED echo safe",
+		},
+		{
 			name:  "placeholder after an empty string",
 			input: `DB_PASSWORD=""'changeme'`,
 			want:  `DB_PASSWORD=""'changeme'`,
@@ -3177,7 +3202,7 @@ func TestString_JoinedShellWordValues(t *testing.T) {
 // per match.
 func TestString_JoinedShellWordsStayLinear(t *testing.T) {
 	t.Parallel()
-	for _, unit := range []string{`DB_PASSWORD=a" "`, `API_KEY=a" "`, `DB_PASSWORD=a" "=`, `DB_PASSWORD=a" DB_PASSWORD=b"|`, `DB_PASSWORD=a' DB_PASSWORD=b'|`, `db_password=foo,client_secret = `, `DB_PASSWORD=a" API_KEY="b `, `DB_PASSWORD=a' API_KEY="b' `, `DB_PASSWORD=a" FOO="b `, `DB_PASSWORD=a" FOO='b API_KEY="c' `, `DB_PASSWORD=a\" API_KEY=b\"|c `, `API_KEY=a" API_KEY="b API_KEY=c"API_KEY = `, `DB_PASSWORD="a\"b";API_KEY=a"b;c"x `, "GITHUB_CLIENT_SECRET=\"a;b\n", `DB_PASSWORD="a"b= `, `API_KEY=a=" API_KEY=aaa\"|bbb" `, `FOO="x"API_KEY=a `, `DB_PASSWORD="x DB_PASSWORD=a\";b" `, `FOO="x"b=`, `DB_PASSWORD=a"b"\|`, `API_KEY=${A}"${B}",`, `printf a"|x secrets put K; printf "b c"|x secrets put K; `} {
+	for _, unit := range []string{`DB_PASSWORD=a" "`, `API_KEY=a" "`, `DB_PASSWORD=a" "=`, `DB_PASSWORD=a" DB_PASSWORD=b"|`, `DB_PASSWORD=a' DB_PASSWORD=b'|`, `db_password=foo,client_secret = `, `DB_PASSWORD=a" API_KEY="b `, `DB_PASSWORD=a' API_KEY="b' `, `DB_PASSWORD=a" FOO="b `, `DB_PASSWORD=a" FOO='b API_KEY="c' `, `DB_PASSWORD=a\" API_KEY=b\"|c `, `API_KEY=a" API_KEY="b API_KEY=c"API_KEY = `, `DB_PASSWORD="a\"b";API_KEY=a"b;c"x `, "GITHUB_CLIENT_SECRET=\"a;b\n", `DB_PASSWORD="a"b= `, `API_KEY=a=" API_KEY=aaa\"|bbb" `, `FOO="x"API_KEY=a `, `DB_PASSWORD="x DB_PASSWORD=a\";b" `, `FOO="x"b=`, `DB_PASSWORD=a"b"\|`, `API_KEY=${A}"${B}",`, `printf a"|x secrets put K; printf "b c"|x secrets put K; `, `DB_PASSWORD="a"|`, `API_KEY='a'|`} {
 		in := strings.Repeat(unit, 20000)
 		done := make(chan string, 1)
 		go func() { done <- String(in) }()

@@ -927,6 +927,7 @@ func detectCredentialKeyCaptures(
 // finds, and they add to what the region already redacts.
 func forEachUncoveredMatch(s string, pattern *regexp.Regexp, valueGroup int, visit func(match []int, wholeWord bool) int) {
 	covered, atKey := 0, false
+	runs := valueRunEnd{start: -1, end: -1}
 	for from := 0; from < len(s); {
 		searchFrom := from
 		if atKey {
@@ -944,7 +945,7 @@ func forEachUncoveredMatch(s string, pattern *regexp.Regexp, valueGroup int, vis
 			if valueStart < covered {
 				next = covered
 			} else if end := visit(match, true); end > 0 {
-				last := visitStraddlingValues(s, pattern, valueGroup, visit, match, end)
+				last := visitStraddlingValues(s, pattern, valueGroup, visit, match, end, &runs)
 				covered = max(covered, last.end)
 				if keyStart := assignedKeyStart(s, last.start, last.end); keyStart >= next {
 					next, atKey = keyStart, true
@@ -1007,8 +1008,9 @@ func nextMatch(s string, pattern *regexp.Regexp, from, limit int) []int {
 //     is read as main reads it, as captured: read on as a shell word from
 //     inside the region, its quotes could pair with the region's own.
 //
-// Two regions can share a value, so each is read once.
-func visitStraddlingValues(s string, pattern *regexp.Regexp, valueGroup int, visit func(match []int, wholeWord bool) int, match []int, end int) region {
+// Two regions can share a value, so each is read once. runs finds where the
+// run of value bytes at a region's end ends (see valueRunEnd).
+func visitStraddlingValues(s string, pattern *regexp.Regexp, valueGroup int, visit func(match []int, wholeWord bool) int, match []int, end int, runs *valueRunEnd) region {
 	type straddled struct {
 		r        region
 		matchEnd int
@@ -1034,7 +1036,7 @@ func visitStraddlingValues(s string, pattern *regexp.Regexp, valueGroup int, vis
 				readValue(match, true)
 			}
 		}
-		for _, match := range bareValuesPast(s, pattern, valueGroup, current.r, current.matchEnd) {
+		for _, match := range bareValuesPast(s, pattern, valueGroup, current.r, current.matchEnd, runs) {
 			if !read[match[2*valueGroup]] {
 				read[match[2*valueGroup]] = true
 				readValue(match, false)
@@ -1079,13 +1081,10 @@ func quotedValuePast(s string, pattern *regexp.Regexp, valueGroup int, r region,
 // that ends at a separator at r.end is returned too, because it is judged
 // with the text the separator joins to it, as in API_KEY=a"b;c"x after a word
 // that ended at the ';'.
-func bareValuesPast(s string, pattern *regexp.Regexp, valueGroup int, r region, matchEnd int) [][]int {
+func bareValuesPast(s string, pattern *regexp.Regexp, valueGroup int, r region, matchEnd int, runs *valueRunEnd) [][]int {
 	limit := r.end
 	if limit >= len(s) || strings.IndexByte(",;&", s[limit]) < 0 {
-		for limit < len(s) && strings.IndexByte(" \t\n\f\r,;&", s[limit]) < 0 {
-			limit++
-		}
-		if limit == r.end {
+		if limit = runs.from(s, r.end); limit == r.end {
 			return nil
 		}
 	}
@@ -1104,6 +1103,40 @@ func bareValuesPast(s string, pattern *regexp.Regexp, valueGroup int, r region, 
 		}
 	}
 	return matches
+}
+
+// valueRunStopBytes end a run of bare value bytes: blanks, line ends and the
+// value separators.
+const valueRunStopBytes = " \t\n\f\r,;&"
+
+// valueRunEnd finds where a run of bare value bytes ends. It remembers the
+// run it found furthest along the text, s[start:end], which holds no stop
+// byte, so the regions on a long line without blanks, as in
+// DB_PASSWORD="a"|DB_PASSWORD="a"|..., which all end inside one run, share
+// one scan of it instead of each scanning on to its end.
+type valueRunEnd struct {
+	start, end int
+}
+
+// from returns the index of the first of valueRunStopBytes at or after s[i],
+// or len(s).
+func (runs *valueRunEnd) from(s string, i int) int {
+	if runs.start <= i && i <= runs.end {
+		return runs.end
+	}
+	end := i
+	for end < len(s) && strings.IndexByte(valueRunStopBytes, s[end]) < 0 {
+		if end == runs.start {
+			// The rest of the run is the one remembered.
+			runs.start = i
+			return runs.end
+		}
+		end++
+	}
+	if i > runs.end {
+		runs.start, runs.end = i, end
+	}
+	return end
 }
 
 // offsetMatch moves the indexes of a match made on s[from:] onto s.
@@ -1293,8 +1326,8 @@ func capturedValueRegion(s string, start, end int, extend bool, isReal func(piec
 // judged by that piece under its own quotes: ""'$X' is the literal $X, and
 // ""'changeme' is a placeholder. The text of two or more pieces joins into a
 // new literal (changeme'example' is changemeexample), so the word is a
-// placeholder only when every piece is a shell reference that isReal accepts
-// as a placeholder ("$A"${B}).
+// placeholder only when every piece is made of shell references that isReal
+// accepts as placeholders ("$A"${B}, "$A"${B}${C}; see isReferenceRun).
 func isRealJoinedWord(s string, pieces []wordPiece, isReal func(piece string, singleQuoted bool) bool) bool {
 	var text []wordPiece
 	for _, piece := range pieces {
@@ -1309,12 +1342,56 @@ func isRealJoinedWord(s string, pieces []wordPiece, isReal func(piece string, si
 		return isReal(s[text[0].start:text[0].end], text[0].quote == '\'')
 	}
 	for _, piece := range text {
-		value := s[piece.start:piece.end]
-		if piece.quote == '\'' || value[0] != '$' || isReal(value, false) {
+		if piece.quote == '\'' || !isReferenceRun(s[piece.start:piece.end], isReal) {
 			return true
 		}
 	}
 	return false
+}
+
+// isReferenceRun reports whether text is a shell reference that isReal
+// accepts as a placeholder, or a run of such references with nothing between
+// them: $A, ${B} and ${B}${C}, but not ${B}x or ${B:-x}.
+func isReferenceRun(text string, isReal func(piece string, singleQuoted bool) bool) bool {
+	if text == "" || text[0] != '$' {
+		return false
+	}
+	if !isReal(text, false) {
+		return true
+	}
+	for i := 0; i < len(text); {
+		end := shellReferenceEnd(text, i)
+		if end < 0 || isReal(text[i:end], false) {
+			return false
+		}
+		i = end
+	}
+	return true
+}
+
+// shellReferenceEnd returns where the shell reference that starts at text[i]
+// ends: a ${...} that closes, a $NAME, or a $ and one digit or special
+// parameter. It returns -1 when text[i] does not start one.
+func shellReferenceEnd(text string, i int) int {
+	if text[i] != '$' || i+1 >= len(text) {
+		return -1
+	}
+	switch c := text[i+1]; {
+	case c == '{':
+		if closeAt := wordBraceExpansionEnd(text, i+1); closeAt >= 0 {
+			return closeAt + 1
+		}
+		return -1
+	case '0' <= c && c <= '9' || strings.IndexByte("@*#?$!-", c) >= 0:
+		return i + 2
+	case c == '_' || isASCIIAlnum(c):
+		end := i + 2
+		for end < len(text) && (text[end] == '_' || isASCIIAlnum(text[end])) {
+			end++
+		}
+		return end
+	}
+	return -1
 }
 
 func isQuoteByte(c byte) bool {
@@ -1407,9 +1484,11 @@ const codeAfterStringBytes = ".:+*?[]{}\\"
 
 // escapedWordBytes are the bareWordStopBytes that a backslash makes part of
 // a word that started as bare text, as the shell reads them: the | in
-// a"b"\|c is text. A backslash before a quote is left as it is, because raw
-// JSON text escapes quotes the same way, and one before a line end continues
-// the line rather than the word.
+// a"b"\|c is text. Two backslashes are one literal backslash and escape
+// nothing, so the blank in a"b"\\ echo still ends the word. A backslash
+// before a quote is left as it is, because raw JSON text escapes quotes the
+// same way, and one before a line end continues the line rather than the
+// word.
 const escapedWordBytes = " \t,;&|<>()`"
 
 // bareWordTextEnd returns where the bare text of a shell word that starts at
@@ -1422,7 +1501,7 @@ const escapedWordBytes = " \t,;&|<>()`"
 func bareWordTextEnd(s string, i int, startsQuoted bool) int {
 	for i < len(s) {
 		c := s[i]
-		if !startsQuoted && c == '\\' && i+1 < len(s) && strings.IndexByte(escapedWordBytes, s[i+1]) >= 0 {
+		if !startsQuoted && c == '\\' && i+1 < len(s) && (s[i+1] == '\\' || strings.IndexByte(escapedWordBytes, s[i+1]) >= 0) {
 			i += 2
 			continue
 		}
