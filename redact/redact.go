@@ -1095,6 +1095,12 @@ type wordPiece struct {
 // for a bare value, at a blank inside a later quoted string (abc"d e"). It
 // returns the word's pieces and end, and false when the word is the capture
 // itself as a single piece. Quoted strings close on their own line.
+//
+// A word never takes in a piece that holds the opening quote of a key's
+// quoted value running past that piece, as in abc\" API_KEY="hunter2 x":
+// the word would end inside that value and leave the rest of it visible. The
+// word ends before such a piece, so the key/value patterns read the value as
+// on main.
 func joinedShellWord(s string, start, end int) ([]wordPiece, int, bool) {
 	if start >= end {
 		return nil, end, false
@@ -1109,6 +1115,9 @@ func joinedShellWord(s string, start, end int) ([]wordPiece, int, bool) {
 		bareStart := i
 		if c := s[i]; isQuoteByte(c) {
 			if closeAt := quotedPieceEnd(s, i); closeAt >= 0 {
+				if opensValueBeyond(s, i, closeAt+1) {
+					break
+				}
 				pieces = append(pieces, wordPiece{start: i + 1, end: closeAt, quote: c})
 				i = closeAt + 1
 				continue
@@ -1121,7 +1130,8 @@ func joinedShellWord(s string, start, end int) ([]wordPiece, int, bool) {
 			i++
 		}
 		bareEnd := bareWordTextEnd(s, i, startsQuoted)
-		if bareEnd == bareStart {
+		if bareEnd == bareStart || opensValueBeyond(s, bareStart, bareEnd) {
+			i = bareStart
 			break
 		}
 		pieces = append(pieces, wordPiece{start: bareStart, end: bareEnd})
@@ -1131,6 +1141,36 @@ func joinedShellWord(s string, start, end int) ([]wordPiece, int, bool) {
 		return nil, end, false
 	}
 	return pieces, i, true
+}
+
+// opensValueBeyond reports whether the word piece s[from:to] holds a quote,
+// after its first byte, that opens a key's quoted value closing past the
+// piece: the last quote of " API_KEY=", or the " in ' API_KEY="x'. Only bare
+// text inside a ${...} expansion can hold a quote in a bare piece.
+func opensValueBeyond(s string, from, to int) bool {
+	for p := from + 1; p < to; p++ {
+		if isQuoteByte(s[p]) && followsAssignment(s, from, p) && quotedPieceEnd(s, p) >= to {
+			return true
+		}
+	}
+	return false
+}
+
+// followsAssignment reports whether the quote at s[p] comes right after a key
+// and an = inside s[lo:p], as in API_KEY=" or API_KEY = ".
+func followsAssignment(s string, lo, p int) bool {
+	j := p
+	for j > lo && (s[j-1] == ' ' || s[j-1] == '\t') {
+		j--
+	}
+	if j == lo || s[j-1] != '=' {
+		return false
+	}
+	j--
+	for j > lo && (s[j-1] == ' ' || s[j-1] == '\t') {
+		j--
+	}
+	return j > lo && isCredentialKeyByte(s[j-1])
 }
 
 // quotedPieceEnd returns the index of the quote that closes the string opened

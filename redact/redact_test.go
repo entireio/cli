@@ -1470,13 +1470,38 @@ func TestString_ShellWordSecretsCaughtWithoutScanners(t *testing.T) {
 		},
 		{
 			name:  "a password after a word that ends inside another redacted word",
-			input: `DB_PASSWORD=a" DB_PASSWORD="|DB_PASSWORD=c' DB_PASSWORD=d'|echo "safe" DB_PASSWORD="hunter'2 secretpart"`,
-			want:  `DB_PASSWORD=REDACTED|DB_PASSWORD=REDACTED|echo "safe" DB_PASSWORD="REDACTED"`,
+			input: `DB_PASSWORD=c' DB_PASSWORD=d'|echo "safe" DB_PASSWORD="hunter'2 secretpart"`,
+			want:  `DB_PASSWORD=REDACTED|echo "safe" DB_PASSWORD="REDACTED"`,
 		},
 		{
 			name:  "a credential after a word that ends inside another redacted word",
-			input: `API_KEY=a" API_KEY="|API_KEY=c' API_KEY=d'|echo "safe" API_KEY="hunter'2 secretpart"`,
-			want:  `API_KEY=REDACTED|API_KEY=REDACTED|echo "safe" API_KEY="REDACTED"`,
+			input: `API_KEY=c' API_KEY=d'|echo "safe" API_KEY="hunter'2 secretpart"`,
+			want:  `API_KEY=REDACTED|echo "safe" API_KEY="REDACTED"`,
+		},
+		{
+			name:  "a quoted value whose opening quote follows an escaped quote",
+			input: `DB_PASSWORD=abc\" API_KEY="hunter2 secretpart"`,
+			want:  `DB_PASSWORD=REDACTED API_KEY="REDACTED"`,
+		},
+		{
+			name:  "a spaced quoted value whose opening quote follows a stray quote",
+			input: `DB_PASSWORD=abc" API_KEY = "hunter2 secretpart"`,
+			want:  `DB_PASSWORD=REDACTED API_KEY = "REDACTED"`,
+		},
+		{
+			name:  "a quoted value that opens inside a single-quoted piece",
+			input: `DB_PASSWORD=abc' API_KEY="x' y"`,
+			want:  `DB_PASSWORD=REDACTED API_KEY="REDACTED"`,
+		},
+		{
+			name:  "a quoted value that opens inside an expansion",
+			input: `DB_PASSWORD=abc${X:-" API_KEY="}hunter2 secretpart"`,
+			want:  `DB_PASSWORD=REDACTED API_KEY="REDACTED"`,
+		},
+		{
+			name:  "quoted values that open inside joined words around a pipe",
+			input: `DB_PASSWORD=a" DB_PASSWORD="|DB_PASSWORD=c' DB_PASSWORD=d'|echo "safe" DB_PASSWORD="hunter'2 secretpart"`,
+			want:  `DB_PASSWORD=REDACTED DB_PASSWORD=REDACTED" DB_PASSWORD="REDACTED"`,
 		},
 		{
 			name:  "a spaced assignment whose key a separator extension took",
@@ -3021,8 +3046,13 @@ func TestString_JoinedShellWordValues(t *testing.T) {
 		},
 		{
 			name:  "a closing quote inside a redacted word does not open a string",
-			input: `DB_PASSWORD=a" DB_PASSWORD="|DB_PASSWORD=c' DB_PASSWORD=d'|echo "safe" DB_PASSWORD="hunter'2 secretpart"`,
-			want:  `DB_PASSWORD=REDACTED|DB_PASSWORD=REDACTED|echo "safe" DB_PASSWORD="REDACTED"`,
+			input: `DB_PASSWORD=c' DB_PASSWORD=d'|echo "safe" DB_PASSWORD="hunter'2 secretpart"`,
+			want:  `DB_PASSWORD=REDACTED|echo "safe" DB_PASSWORD="REDACTED"`,
+		},
+		{
+			name:  "a key inside a joined word whose quote opens no string stays in the word",
+			input: `DB_PASSWORD=abc" API_KEY="hunter2`,
+			want:  `DB_PASSWORD=REDACTED`,
 		},
 	})
 }
@@ -3032,7 +3062,7 @@ func TestString_JoinedShellWordValues(t *testing.T) {
 // per match.
 func TestString_JoinedShellWordsStayLinear(t *testing.T) {
 	t.Parallel()
-	for _, unit := range []string{`DB_PASSWORD=a" "`, `API_KEY=a" "`, `DB_PASSWORD=a" "=`, `DB_PASSWORD=a" DB_PASSWORD=b"|`, `DB_PASSWORD=a' DB_PASSWORD=b'|`, `db_password=foo,client_secret = `} {
+	for _, unit := range []string{`DB_PASSWORD=a" "`, `API_KEY=a" "`, `DB_PASSWORD=a" "=`, `DB_PASSWORD=a" DB_PASSWORD=b"|`, `DB_PASSWORD=a' DB_PASSWORD=b'|`, `db_password=foo,client_secret = `, `DB_PASSWORD=a" API_KEY="b `, `DB_PASSWORD=a' API_KEY="b' `} {
 		in := strings.Repeat(unit, 20000)
 		done := make(chan string, 1)
 		go func() { done <- String(in) }()
