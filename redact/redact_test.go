@@ -1425,6 +1425,26 @@ func TestString_ConnectionSecretsCaughtWithoutScanners(t *testing.T) {
 			input: `API_KEY="None"realtoken`,
 			want:  "API_KEY=REDACTED",
 		},
+		{
+			name:  "placeholder head of a value that runs past a separator",
+			input: "DB_PASSWORD=changeme;hunter2",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "two joined placeholder words form a new literal",
+			input: `DB_PASSWORD=changeme'example'`,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "a joined quoted password stops at the command separator",
+			input: `DB_PASSWORD="hunter"'2';echo done`,
+			want:  "DB_PASSWORD=REDACTED;echo done",
+		},
+		{
+			name:  "a joined quoted credential stops at the command separator",
+			input: `API_KEY="hunter"'2abc';echo done`,
+			want:  "API_KEY=REDACTED;echo done",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2814,6 +2834,11 @@ func TestString_JoinedShellWordValues(t *testing.T) {
 			name:  "two joined references",
 			input: `DB_PASSWORD="$DB_PASS"${DB_SUFFIX}`,
 			want:  `DB_PASSWORD="$DB_PASS"${DB_SUFFIX}`,
+		},
+		{
+			name:  "two joined quoted references",
+			input: `DB_PASSWORD="$DB_PASS""$DB_SUFFIX"`,
+			want:  `DB_PASSWORD="$DB_PASS""$DB_SUFFIX"`,
 		},
 		{
 			name:  "placeholder after an empty string",

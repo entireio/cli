@@ -816,10 +816,7 @@ func detectCredentialValues(s string) []taggedRegion {
 		}
 		// Main's shared placeholder rules, except that a single-quoted value
 		// is a shell literal and only the literal placeholder words apply.
-		value, isReal := credentialValueRegion(s, loc[4], loc[5], isRealPasswordPiece)
-		if value.start == loc[4] {
-			value.end = extendPastValueSeparators(s, value.end)
-		}
+		value, isReal := credentialValueRegion(s, loc[4], loc[5], true, isRealPasswordPiece)
 		if isReal {
 			regions = append(regions, taggedRegion{region: value})
 		}
@@ -877,7 +874,7 @@ func detectCredentialKeyCaptures(
 			// Assignments get the same separator handling as the password
 			// pattern above: "ab;cd" is one value. Shell-stdin literals stop
 			// at the pipe syntax their pattern already bounds.
-			if shouldPreserve != nil && captured.start == valueStart {
+			if shouldPreserve != nil && captured.start == valueStart && !isQuoteByte(s[valueStart]) {
 				captured.end = extendPastValueSeparators(s, captured.end)
 			}
 			regions = append(regions, captured)
@@ -932,7 +929,7 @@ func isCredentialCodeReference(value string) bool {
 // nonPlaceholderCapture returns the value captured at s[start:end] under key
 // when it is a real credential.
 func nonPlaceholderCapture(s, key string, start, end int) (taggedRegion, bool) {
-	value, isReal := credentialValueRegion(s, start, end, func(piece string, singleQuoted bool) bool {
+	value, isReal := credentialValueRegion(s, start, end, false, func(piece string, singleQuoted bool) bool {
 		return hasNonPlaceholderKeyValue(key, piece, singleQuoted)
 	})
 	if !isReal {
@@ -951,23 +948,63 @@ func isRealPasswordPiece(value string, singleQuoted bool) bool {
 }
 
 // credentialValueRegion returns the region to redact for the value a
-// key/value pattern captured at s[start:end], and whether isReal finds a real
-// secret in it. isReal judges one piece of the value: its text, and whether
-// single quotes made that text a literal. A value that is one quoted string
-// is redacted inside its quotes. A shell word joined from several pieces
-// (""'$X', "hunter"'2') is redacted whole, and is real when any piece is: an
-// empty piece holds nothing, so it decides nothing.
-func credentialValueRegion(s string, start, end int, isReal func(piece string, singleQuoted bool) bool) (region, bool) {
+// key/value pattern captured at s[start:end], and whether it holds a real
+// secret. isReal judges one piece of the value: its text, and whether single
+// quotes made that text a literal. extend continues an unquoted value past
+// value separators before it is judged, so "changeme;hunter2" is one value.
+// A value that is one quoted string is redacted inside its quotes, and a
+// shell word joined from several pieces (""'$X', "hunter"'2') is redacted
+// whole and judged by isRealJoinedWord. A word that starts with a quoted
+// string was quoted on purpose, so a separator after it ends a command, not
+// the value ("x"'y';echo).
+func credentialValueRegion(s string, start, end int, extend bool, isReal func(piece string, singleQuoted bool) bool) (region, bool) {
 	if pieces, wordEnd, joined := joinedShellWord(s, start, end); joined {
-		for _, piece := range pieces {
-			if isReal(s[piece.start:piece.end], piece.quote == '\'') {
-				return region{start, wordEnd}, true
+		if extend && !isQuoteByte(s[start]) {
+			if extended := extendPastValueSeparators(s, wordEnd); extended > wordEnd {
+				pieces = append(pieces, wordPiece{start: wordEnd, end: extended})
+				wordEnd = extended
 			}
 		}
-		return region{start, wordEnd}, false
+		return region{start, wordEnd}, isRealJoinedWord(s, pieces, isReal)
 	}
-	start, end, singleQuoted := unquoteRangeQuoted(s, start, end)
-	return region{start, end}, isReal(s[start:end], singleQuoted)
+	valueStart, valueEnd, singleQuoted := unquoteRangeQuoted(s, start, end)
+	if extend && valueStart == start {
+		valueEnd = extendPastValueSeparators(s, valueEnd)
+	}
+	return region{valueStart, valueEnd}, isReal(s[valueStart:valueEnd], singleQuoted)
+}
+
+// isRealJoinedWord reports whether a shell word joined from pieces holds a
+// real secret. Empty pieces hold nothing. A word with one piece of text is
+// judged by that piece under its own quotes: ""'$X' is the literal $X, and
+// ""'changeme' is a placeholder. The text of two or more pieces joins into a
+// new literal (changeme'example' is changemeexample), so the word is a
+// placeholder only when every piece is a shell reference that isReal accepts
+// as a placeholder ("$A"${B}).
+func isRealJoinedWord(s string, pieces []wordPiece, isReal func(piece string, singleQuoted bool) bool) bool {
+	var text []wordPiece
+	for _, piece := range pieces {
+		if piece.end > piece.start {
+			text = append(text, piece)
+		}
+	}
+	switch len(text) {
+	case 0:
+		return false
+	case 1:
+		return isReal(s[text[0].start:text[0].end], text[0].quote == '\'')
+	}
+	for _, piece := range text {
+		value := s[piece.start:piece.end]
+		if piece.quote == '\'' || value[0] != '$' || isReal(value, false) {
+			return true
+		}
+	}
+	return false
+}
+
+func isQuoteByte(c byte) bool {
+	return c == '"' || c == '\''
 }
 
 // wordPiece is one quoted string or run of bare text in a shell word. Its
@@ -988,7 +1025,7 @@ func joinedShellWord(s string, start, end int) ([]wordPiece, int, bool) {
 	if start >= end {
 		return nil, end, false
 	}
-	startsQuoted := s[start] == '"' || s[start] == '\''
+	startsQuoted := isQuoteByte(s[start])
 	if !startsQuoted && !strings.ContainsAny(s[start:end], `"'`) {
 		return nil, end, false
 	}
@@ -996,7 +1033,7 @@ func joinedShellWord(s string, start, end int) ([]wordPiece, int, bool) {
 	i := start
 	for i < len(s) {
 		bareStart := i
-		if c := s[i]; c == '"' || c == '\'' {
+		if c := s[i]; isQuoteByte(c) {
 			if closeAt := quotedPieceEnd(s, i); closeAt >= 0 {
 				pieces = append(pieces, wordPiece{start: i + 1, end: closeAt, quote: c})
 				i = closeAt + 1
