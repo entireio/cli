@@ -340,6 +340,36 @@ func TestString_CommandLinePasswordsReviewCases(t *testing.T) {
 	})
 }
 
+// More cases found reviewing the upstream PR, in a table of their own so
+// each table stays maintainable.
+func TestString_CommandLinePasswordsMoreReviewCases(t *testing.T) {
+	t.Parallel()
+
+	p := cliTestPassword
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{name: "openssl source flag in escaped quotes", input: `sh -c "openssl enc -aes-128-cbc \"-pass\" \"pass:` + p + `\""`, want: `sh -c "openssl enc -aes-128-cbc \"-pass\" \"pass:REDACTED\""`},
+		{name: "openssl source from a substitution with a case statement", input: "openssl enc -aes-128-cbc -pass pass:$(case x in x) printf " + p + ";; esac)", want: "openssl enc -aes-128-cbc -pass pass:REDACTED"},
+		{name: "password from a substitution with a case statement", input: "mysql -p$(case x in x) printf " + p + ";; esac) db; ssh -p2222 host", want: "mysql -pREDACTED db; ssh -p2222 host"},
+		{name: "literal openssl source joined to an empty string", input: `openssl enc -pass 'pass:$PASSWORD'""`, want: "openssl enc -pass 'pass:REDACTED"},
+		{name: "literal openssl source after a quoted prefix", input: `openssl enc -pass "pass:"'$PASSWORD'`, want: `openssl enc -pass "pass:"'REDACTED'`},
+		{name: "literal short password joined to an empty string", input: `mysql -p'$PASSWORD'""`, want: "mysql -pREDACTED"},
+		{name: "literal long password joined to an empty string", input: `wget --password='$PASSWORD'""`, want: "wget --password=REDACTED"},
+		{name: "password in a substitution that does not close", input: "mysql -p$(printf " + p, want: "mysql -pREDACTED"},
+		{name: "password in a substitution that does not close in a code span", input: "Run `mysql -p$(printf " + p + "` then `ssh -p2222 host`", want: "Run `mysql -pREDACTED`"},
+		{name: "password in a backtick substitution in a substitution", input: "mysql -p$(echo `printf " + p + "`) db", want: "mysql -pREDACTED db"},
+		{name: "password in a substitution that does not close in a quoted script", input: "sh -c 'mysql -p$(printf " + p + "'; ssh -p2222 host", want: "sh -c 'mysql -pREDACTED'; ssh -p2222 host"},
+		{name: "password in a substitution joined across a CRLF line", input: "mysql -p$(printf a \\\r\n" + p + ") db", want: "mysql -pREDACTED db"},
+		{name: "client in the body of a function named after it", input: "mysql() { mysql -p" + p + ` "$@"; }`, want: `mysql() { mysql -pREDACTED "$@"; }`},
+		{name: "many substitutions that do not close", input: "mysql" + strings.Repeat(" -p$(", 4000) + " -p" + p, want: "mysql -pREDACTED"},
+		{name: "many code spans with a substitution that does not close", input: strings.Repeat("`mysql -p$(printf "+p+"` ", 2000), want: "`mysql -pREDACTED` "},
+		{name: "many quoted scripts with a substitution that does not close", input: strings.Repeat("sh -c 'mysql -p$(printf "+p+"'; ", 2000), want: strings.Repeat("sh -c 'mysql -pREDACTED'; ", 2000)},
+		{name: "many code elements with a substitution that does not close", input: strings.Repeat(`["mysql", "-p$(printf `+p+`"], `, 2000), want: strings.Repeat(`["mysql", "-pREDACTED"], `, 2000)},
+		{name: "many quoted values with a substitution that does not close", input: strings.Repeat(`mysql -p"$(printf `+p+`" `, 2000), want: strings.Repeat(`mysql -p"REDACTED" `, 2000)},
+		{name: "many clients in a substitution that does not close", input: "mysql -p$(printf " + p + strings.Repeat("; mysql -p$(y) mysql -p$(z", 2000), want: "mysql -pREDACTED"},
+		{name: "many case patterns in a substitution", input: "mysql -p$(case x in " + strings.Repeat("x) :;; ", 4000) + "esac) db -p" + p, want: "mysql -pREDACTED db -pREDACTED"},
+	})
+}
+
 // The layer reads every flag on its own, so a flag whose value is no
 // password does not hide the next one, which other layers may not catch.
 func TestCommandLinePasswordsReadFlagAfterRejectedValue(t *testing.T) {
@@ -521,7 +551,15 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		`sh -c 'case a$(true)x in x) printf mysql -p2222;; esac'`,
 		`sh -c 'case x in a) echo;; esac; echo x) mysql -p2222'`,
 		"openssl enc -aes-128-cbc -pass=env:PW",
-		// declarations
+		`mysql -p"$PASSWORD"''`,
+		`mysql -p''"$PASSWORD"`,
+		`openssl enc -pass 'pass:'"$PASSWORD"`,
+		`openssl enc -pass 'pass:'$PASSWORD`,
+		// functions named after a client
+		"mysql() { ssh -p2222 host; }",
+		"sh -c 'mysql () { ssh -p2222 host; }; mysql'",
+		"function mysql { ssh -p2222 host; }",
+		"function\tmysql() { ssh -p2222 host; }",
 		"type netrcLine struct {\n\tmachine  string\n\tlogin    string\n\tpassword string\n}",
 		"func connect(machine string, login string, password string) error",
 		"func connect(ctx context.Context, machine string, login string, password string) error",
