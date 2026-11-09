@@ -566,6 +566,7 @@ func TestString_CommandLinePasswordsQuotingAndListCases(t *testing.T) {
 		{name: "glued flag with an escaped quote in a list", input: `subprocess.run(['mysql', '-pabc\' ` + p + `', 'app']); [\"mysql\", \"-pabc\\\" ` + p + `\", \"app\"]`, want: `subprocess.run(['mysql', '-pREDACTED', 'app']); [\"mysql\", \"-pREDACTED\", \"app\"]`},
 		{name: "login after an escaped blank or a quoted option after a no-value one", input: `docker --config /tmp/foo\ --debug\ staging login -p ` + p + `; docker --debug "--config=/tmp/c" login -p ` + p, want: `docker --config /tmp/foo\ --debug\ staging login -p REDACTED; docker --debug "--config=/tmp/c" login -p REDACTED`},
 		{name: "env -S runs its argument in a list", input: `subprocess.run(["env", "-S", "mysql", "-p` + p + `"])`, want: `subprocess.run(["env", "-S", "mysql", "-pREDACTED"])`},
+		{name: "client run by wrappers that env -S runs in a list", input: `subprocess.run(["env", "-S", "sudo", "-u", "root", "mysql", "-p` + p + `"]); subprocess.run(["env", "-S", "ssh", "db", "mysql", "-p` + p + `"])`, want: `subprocess.run(["env", "-S", "sudo", "-u", "root", "mysql", "-pREDACTED"]); subprocess.run(["env", "-S", "ssh", "db", "mysql", "-pREDACTED"])`},
 		{name: "remote command after a wrapper in a list", input: `subprocess.run(["ssh", "host", "mysql", "-p` + p + `"]); subprocess.run(["sudo", "-u", "root", "mysql", "-p` + p + `"])`, want: `subprocess.run(["ssh", "host", "mysql", "-pREDACTED"]); subprocess.run(["sudo", "-u", "root", "mysql", "-pREDACTED"])`},
 		{name: "openssl two-dash pass source and literal", input: "openssl enc --pass pass:" + p + " -in f; openssl enc --password " + p, want: "openssl enc --pass REDACTED -in f; openssl enc --password REDACTED"},
 		{name: "sshpass password after a prompt option in a list", input: `subprocess.run(["sshpass", "-P", "Password:", "-p", "` + p + `", "ssh", "host"])`, want: `subprocess.run(["sshpass", "-P", "Password:", "-p", "REDACTED", "ssh", "host"])`},
@@ -1009,6 +1010,10 @@ func TestString_CommandLinePasswordListAndQuotingNonSecretsPreserved(t *testing.
 		`subprocess.run(["ssh", "-i", "key", "mysql", "-p2222"])`,
 		`subprocess.run(["sudo", "-u", "mysql", "ssh", "-p2222", "host"])`,
 		`subprocess.run(["sshpass", "-e", "ssh", "mysql", "-p2222"])`,
+		// the same after env -S, which runs the wrapper that follows it
+		`subprocess.run(["env", "-S", "sudo", "-u", "mysql", "ssh", "-p2222", "host"])`,
+		`subprocess.run(["env", "-S", "ssh", "mysql", "-p2222"])`,
+		`subprocess.run(["env", "-i", "-S", "sudo", "-u", "mysql", "ssh", "-p2222", "host"])`,
 		// openssl's two-dash sources that name where the password is
 		"openssl enc --pass env:ENC_PASS -in f",
 		"openssl enc --pass file:/run/secrets/key -in f",
