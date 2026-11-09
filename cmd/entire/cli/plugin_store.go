@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -461,8 +462,9 @@ func InstallPluginFromPath(opts InstallPluginOptions) (*InstalledPlugin, error) 
 
 	// Atomic replace via tmp + rename. Rename is atomic on POSIX and
 	// replaces an existing target on Windows (Go's os.Rename uses
-	// MoveFileEx with MOVEFILE_REPLACE_EXISTING). If linking or rename
-	// fails, the previously installed plugin (if any) is unaffected.
+	// MoveFileEx with MOVEFILE_REPLACE_EXISTING) unless that target is a
+	// running executable — replaceManagedEntry handles that case. If linking
+	// or rename fails, the previously installed plugin (if any) is unaffected.
 	//
 	// The tmp path uses a random suffix and a `.install-` prefix that does
 	// NOT match `entire-`. This protects against two distinct hazards:
@@ -478,11 +480,87 @@ func InstallPluginFromPath(opts InstallPluginOptions) (*InstalledPlugin, error) 
 	if err := materializeManagedEntry(root, src, tmpName, srcInfo); err != nil {
 		return nil, fmt.Errorf("install plugin: %w", err)
 	}
-	if err := root.Rename(tmpName, destName); err != nil {
+	sweepOldManagedEntries(root)
+	if err := replaceManagedEntry(root, tmpName, destName); err != nil {
 		_ = root.Remove(tmpName) //nolint:errcheck // best-effort cleanup; previous install is intact
 		return nil, fmt.Errorf("install plugin: %w", err)
 	}
 	return FindInstalledPlugin(bare)
+}
+
+// oldManagedEntryPrefix starts the name a replaced bin/ entry is moved aside
+// to. Like `.install-`, it deliberately does not start with
+// pluginBinaryPrefix: "entire-foo.exe.old-1a2b" would pass the `entire-`
+// filter in ListInstalledPlugins, list as plugin "foo.exe.old-1a2b", and be
+// dispatchable (Windows LookPath accepts any existing file whose name already
+// has an extension). A leading dot keeps the aside file out of both.
+const oldManagedEntryPrefix = ".old-"
+
+// Seams for replaceManagedEntry. renameAsideOnReplaceFailure is the Windows
+// running-executable fallback, on by default only there; managedEntryRename is
+// the rename itself, so tests on any platform can simulate the sharing
+// violation a running .exe produces.
+var (
+	renameAsideOnReplaceFailure = runtime.GOOS == windowsGOOS
+	managedEntryRename          = func(root *os.Root, from, to string) error { return root.Rename(from, to) }
+)
+
+// replaceManagedEntry renames tmpName onto destName (both names in root).
+//
+// On Windows the managed entry is a hardlink or copy of the plugin binary, and
+// a running executable cannot be replaced by a rename (MoveFileEx with
+// MOVEFILE_REPLACE_EXISTING fails with "Access is denied") although it can be
+// renamed itself. So when the replace fails, move the current entry aside to a
+// `.old-` name and retry — the trick replaceBinary uses for pkg/. If the retry
+// also fails, the entry is moved back so the previous install keeps working.
+// Leftovers are removed by sweepOldManagedEntries on a later install, once the
+// process holding them has exited.
+func replaceManagedEntry(root *os.Root, tmpName, destName string) error {
+	err := managedEntryRename(root, tmpName, destName)
+	if err == nil || !renameAsideOnReplaceFailure {
+		return err
+	}
+	aside, nameErr := oldManagedEntryName(path.Base(destName))
+	if nameErr != nil {
+		return errors.Join(err, nameErr)
+	}
+	if asideErr := managedEntryRename(root, destName, aside); asideErr != nil {
+		return errors.Join(err, fmt.Errorf("move existing entry aside: %w", asideErr))
+	}
+	retryErr := managedEntryRename(root, tmpName, destName)
+	if retryErr == nil {
+		// Best effort: succeeds when the old entry is not running after all.
+		_ = root.Remove(aside) //nolint:errcheck // swept on a later install
+		return nil
+	}
+	if restoreErr := managedEntryRename(root, aside, destName); restoreErr != nil {
+		return errors.Join(err, retryErr, fmt.Errorf("restore previous entry from %s: %w", aside, restoreErr))
+	}
+	return errors.Join(err, retryErr)
+}
+
+// oldManagedEntryName returns a unique bin/ name for moving base aside.
+func oldManagedEntryName(base string) (string, error) {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("generate aside name suffix: %w", err)
+	}
+	return pluginBinName(oldManagedEntryPrefix + hex.EncodeToString(b[:]) + "-" + base), nil
+}
+
+// sweepOldManagedEntries best-effort removes entries replaceManagedEntry moved
+// aside. One whose process is still running fails to delete on Windows and is
+// left for the next install; the files are inert either way.
+func sweepOldManagedEntries(root *os.Root) {
+	entries, err := osroot.ReadDirNoSymlinks(root, pluginManagedBinSubdir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), oldManagedEntryPrefix) {
+			_ = root.Remove(pluginBinName(e.Name())) //nolint:errcheck // inert leftovers; swept again next install
+		}
+	}
 }
 
 // installedVariantsByBareName returns every managed entry whose bare name

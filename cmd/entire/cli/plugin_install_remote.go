@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"golang.org/x/mod/semver"
 )
@@ -110,7 +111,7 @@ func InstallPluginFromRepo(ctx context.Context, repoURL, expectedName string, op
 	return nil, lastErr
 }
 
-func installRepoAtTag(ctx context.Context, repoURL, expectedName, tag string, opts RemoteInstallOptions) (*RemoteInstallResult, error) {
+func installRepoAtTag(ctx context.Context, repoURL, expectedName, tag string, opts RemoteInstallOptions) (_ *RemoteInstallResult, retErr error) {
 	stopMetadata := startPluginStep(ctx, fmt.Sprintf("Fetching plugin metadata for %s...", tag))
 	meta, err := fetchPluginMetadataAtTag(ctx, repoURL, tag)
 	stopMetadata()
@@ -217,6 +218,26 @@ func installRepoAtTag(ctx context.Context, repoURL, expectedName, tag string, op
 	sweepOldBinaries(pluginTreeRoot, pkgName)
 	pkgBinName := pkgName + "/" + binBase
 	pkgBin := filepath.Join(pkgDir, binBase)
+	// pkg/<name>/ is what upgrade compares against, so it must not record the
+	// new tag unless the bin/ entry — what actually runs — moved to it too.
+	// Otherwise a failed bin/ swap (a running .exe on Windows) leaves the
+	// manifest on the new tag and the entry on the old one, and every later
+	// `plugin upgrade` reports "up to date" over a stale binary. Keep the
+	// previous binary and manifest restorable until the swap has succeeded.
+	prev, err := stashPreviousPkgInstall(pluginTreeRoot, pkgName, binBase)
+	if err != nil {
+		return nil, err
+	}
+	installed := false
+	defer func() {
+		if installed {
+			prev.discard()
+			return
+		}
+		if rbErr := prev.restore(); rbErr != nil {
+			retErr = errors.Join(retErr, rbErr)
+		}
+	}()
 	if err := replaceBinary(stagingRoot, stagedName, pluginTreeRoot, pkgBinName); err != nil {
 		return nil, fmt.Errorf("place plugin binary: %w", err)
 	}
@@ -252,19 +273,96 @@ func installRepoAtTag(ctx context.Context, repoURL, expectedName, tag string, op
 	// alarm on a perfectly good install. Writing it here leaves only the local
 	// re-hash above in that window.
 	//
-	// If the bin/ link then fails, the manifest is still accurate and doctor
-	// reports the real problem ("has an install manifest but no entry in the
-	// managed bin dir") with a fix that works, instead of accusing the user of
-	// tampering.
+	// If the bin/ link then fails, the deferred restore puts the previous
+	// binary and manifest back together, so pkg/ and bin/ agree on the old
+	// version and the next upgrade retries.
 	if err := SavePluginManifest(manifest); err != nil {
 		return nil, err
 	}
 
-	installed, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: pkgBin, Force: true})
+	entry, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: pkgBin, Force: true})
 	if err != nil {
 		return nil, err
 	}
-	return &RemoteInstallResult{Installed: installed, Manifest: manifest, Metadata: meta, ReplacedFrom: replacedFrom}, nil
+	installed = true
+	return &RemoteInstallResult{Installed: entry, Manifest: manifest, Metadata: meta, ReplacedFrom: replacedFrom}, nil
+}
+
+// pkgInstallBackup is the previous contents of pkg/<name>/ held during a
+// remote install: the binary moved aside to a .old- name, and the manifest's
+// bytes. Both are nil/empty when there was nothing to keep.
+type pkgInstallBackup struct {
+	root         *os.Root
+	binName      string
+	asideName    string // "" when there was no previous binary
+	manifestName string
+	manifest     []byte // nil when there was no previous manifest
+}
+
+// stashPreviousPkgInstall keeps the current pkg binary under a .old- name and
+// reads the current manifest so restore can put both back. The binary gets a
+// second hard link under that name, so it stays in place — and the Unix bin/ symlink to it
+// stays valid — until replaceBinary swaps it atomically. Where hardlinks are
+// unavailable it is moved instead, which also works on Windows while the
+// binary runs: a running executable can be renamed, just not replaced.
+func stashPreviousPkgInstall(root *os.Root, pkgName, binBase string) (*pkgInstallBackup, error) {
+	b := &pkgInstallBackup{
+		root:         root,
+		binName:      pkgName + "/" + binBase,
+		manifestName: pkgName + "/" + pluginManifestFileName,
+	}
+	data, err := readFileLimitedIn(root, b.manifestName, maxPluginManifestSize)
+	switch {
+	case err == nil:
+		b.manifest = data
+	case !errors.Is(err, os.ErrNotExist):
+		return nil, fmt.Errorf("read previous plugin manifest: %w", err)
+	}
+	aside := oldBinaryAsideName(b.binName)
+	if _, err := root.Lstat(b.binName); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return b, nil
+		}
+		return nil, fmt.Errorf("stat previous plugin binary: %w", err)
+	}
+	if err := root.Link(b.binName, aside); err != nil {
+		if err := root.Rename(b.binName, aside); err != nil {
+			return nil, fmt.Errorf("move previous plugin binary aside: %w", err)
+		}
+	}
+	b.asideName = aside
+	return b, nil
+}
+
+// restore puts the previous binary and manifest back, replacing whatever the
+// failed install wrote. With no previous install, it removes the new ones so
+// a failed first install leaves no manifest claiming success.
+func (b *pkgInstallBackup) restore() error {
+	var errs []error
+	if b.asideName != "" {
+		if err := b.root.Rename(b.asideName, b.binName); err != nil {
+			errs = append(errs, fmt.Errorf("restore previous plugin binary: %w", err))
+		}
+	} else if err := b.root.Remove(b.binName); err != nil && !errors.Is(err, os.ErrNotExist) {
+		errs = append(errs, fmt.Errorf("remove plugin binary: %w", err))
+	}
+	if b.manifest != nil {
+		if err := jsonutil.WriteFileAtomicIn(b.root, b.manifestName, b.manifest, 0o644); err != nil {
+			errs = append(errs, fmt.Errorf("restore previous plugin manifest: %w", err))
+		}
+	} else if err := b.root.Remove(b.manifestName); err != nil && !errors.Is(err, os.ErrNotExist) {
+		errs = append(errs, fmt.Errorf("remove plugin manifest: %w", err))
+	}
+	return errors.Join(errs...)
+}
+
+// discard drops the previous binary once the new install is complete. On
+// Windows it fails while the old version still runs; sweepOldBinaries removes
+// it on a later install.
+func (b *pkgInstallBackup) discard() {
+	if b.asideName != "" {
+		_ = b.root.Remove(b.asideName) //nolint:errcheck // swept on a later install
+	}
 }
 
 // UpgradeOutcome describes what UpgradeInstalledPlugin did.
