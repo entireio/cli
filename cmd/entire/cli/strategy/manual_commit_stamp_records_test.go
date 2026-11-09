@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -120,6 +121,31 @@ func TestTakeStampRecords_KeepsStampsOfCommitsLandedSince(t *testing.T) {
 	assert.Equal(t, map[id.CheckpointID]bool{third: true}, takeStampRecords(ctx, thirdCommit).stamped, "the third commit's post-commit finds its stamp")
 	assert.Empty(t, readStampedTrailers(ctx))
 	assert.Empty(t, readStampedSessionsIn(mustPerWorktreeGitRoot(t)))
+}
+
+// When more commits land than HEAD's walk reaches, post-commit cannot tell a
+// later commit's stamp or marker from an abandoned one, so it keeps them all
+// and takes only its own.
+func TestTakeStampRecords_KeepsAllWhenLaterCommitsAreOutOfReach(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	ctx := context.Background()
+	first, later, nextSquashed := id.MustCheckpointID("a1a1a1a1a1a1"), id.MustCheckpointID("e9e9e9e9e9e9"), id.MustCheckpointID("a7a7a7a7a7a7")
+
+	require.True(t, recordStampedTrailer(ctx, first))
+	firstCommit := commitWith(t, dir, "first", first)
+	for i := range maxCommitsInFlight {
+		commitWith(t, dir, fmt.Sprintf("landed-%d", i))
+	}
+	require.True(t, recordStampedTrailer(ctx, later), "a prepare far above the first commit")
+	recordInheritedTrailers(ctx, []id.CheckpointID{nextSquashed})
+
+	records := takeStampRecords(ctx, firstCommit)
+	assert.Equal(t, map[id.CheckpointID]bool{first: true}, records.stamped)
+	assert.Empty(t, records.inherited)
+	assert.Equal(t, map[id.CheckpointID]bool{later: true}, readStampedTrailers(ctx), "the later stamp is kept")
+	_, ok := readInheritedMarkerIn(mustPerWorktreeGitRoot(t))
+	assert.True(t, ok, "and so is the later marker")
 }
 
 // A stamp left on top of a commit belongs to a commit that may never happen

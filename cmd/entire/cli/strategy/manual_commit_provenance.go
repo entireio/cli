@@ -323,17 +323,40 @@ func headFirstParents(ctx context.Context, limit int) []string {
 	return out
 }
 
+// inFlight is what a post-commit knows of the commits whose post-commit may
+// not have run when its own does (commitsUpToHead).
+type inFlight struct {
+	// commits are the post-commit's commit and the commits on top of it up to
+	// HEAD.
+	commits map[string]bool
+	// unknown is set when HEAD could not be read, or its first parents ran to
+	// the bound without reaching the commit: any commit may then be a later
+	// one.
+	unknown bool
+}
+
+// mayBePending reports whether hash may be the commit or a commit on top of
+// it.
+func (f inFlight) mayBePending(hash string) bool {
+	return f.unknown || f.commits[hash]
+}
+
 // commitsUpToHead returns commit and the commits on top of it up to HEAD,
 // along HEAD's first parents: the commits whose post-commit may not have run
 // when commit's does, since git lets the next commit start once one is made.
-// Only commit when HEAD is not within maxCommitsInFlight first parents of it.
-func commitsUpToHead(ctx context.Context, commit string) map[string]bool {
-	out := map[string]bool{commit: true}
+// Only commit when HEAD's first parents end without reaching it (HEAD moved
+// elsewhere), and unknown when they run past maxCommitsInFlight first.
+func commitsUpToHead(ctx context.Context, commit string) inFlight {
+	out := inFlight{commits: map[string]bool{commit: true}}
 	chain := headFirstParents(ctx, maxCommitsInFlight)
-	if i := slices.Index(chain, commit); i > 0 {
+	i := slices.Index(chain, commit)
+	switch {
+	case i >= 0:
 		for _, hash := range chain[:i] {
-			out[hash] = true
+			out.commits[hash] = true
 		}
+	case len(chain) == 0 || len(chain) == maxCommitsInFlight:
+		out.unknown = true
 	}
 	return out
 }
@@ -643,9 +666,10 @@ func takeStampRecords(ctx context.Context, commit *object.Commit) stampRecords {
 }
 
 // takeStampsIn takes the stamps and sessions entries of the trailers carried,
-// keeps the ones stamped on a commit in pending, and drops the rest. Callers
+// keeps the ones that may be stamped on a commit in pending, and drops the
+// rest. Callers
 // hold the stamp-records lock.
-func takeStampsIn(ctx context.Context, root *os.Root, carried map[id.CheckpointID]bool, pending map[string]bool) (map[id.CheckpointID]bool, map[id.CheckpointID]stampedSessions) {
+func takeStampsIn(ctx context.Context, root *os.Root, carried map[id.CheckpointID]bool, pending inFlight) (map[id.CheckpointID]bool, map[id.CheckpointID]stampedSessions) {
 	entries := readStampedSessionsIn(root)
 	stampedOn := make(map[id.CheckpointID]string, len(entries))
 	for _, e := range entries {
@@ -657,7 +681,7 @@ func takeStampsIn(ctx context.Context, root *os.Root, carried map[id.CheckpointI
 		switch {
 		case carried[cpID]:
 			stamped[cpID] = true
-		case pending[stampedOn[cpID]]:
+		case pending.mayBePending(stampedOn[cpID]):
 			kept = append(kept, cpID)
 		}
 	}
@@ -684,21 +708,23 @@ func takeStampsIn(ctx context.Context, root *os.Root, carried map[id.CheckpointI
 
 // takeInheritedMarkerIn returns the trailers prepare-commit-msg recorded as
 // inherited for a commit on parent, with the recorded redone paths, and
-// consumes the marker unless a prepare on a commit in pending recorded it.
+// consumes the marker unless a prepare on a commit in pending recorded it:
+// when pending is unknown, it leaves any marker that is not for parent.
 // Callers hold the stamp-records lock.
-func takeInheritedMarkerIn(ctx context.Context, root *os.Root, parent string, pending map[string]bool) (map[id.CheckpointID]bool, map[string]bool) {
+func takeInheritedMarkerIn(ctx context.Context, root *os.Root, parent string, pending inFlight) (map[id.CheckpointID]bool, map[string]bool) {
 	if _, err := osroot.LstatNoSymlinks(root, inheritedTrailersFile); err != nil {
 		return nil, nil
 	}
 	marker, ok := readInheritedMarkerIn(root)
-	if ok && pending[marker.recordedOn()] {
+	mine := ok && !pending.commits[marker.recordedOn()] && slices.Contains(marker.Parents, parent)
+	if ok && !mine && pending.mayBePending(marker.recordedOn()) {
 		return nil, nil
 	}
 	if err := removeRecord(root, inheritedTrailersFile); err != nil {
 		logging.Debug(logging.WithComponent(ctx, "checkpoint"), "post-commit: could not remove the inherited trailers marker",
 			slog.String("error", err.Error()))
 	}
-	if !ok || !slices.Contains(marker.Parents, parent) {
+	if !mine {
 		return nil, nil
 	}
 	out := checkpointSet(marker.IDs)
