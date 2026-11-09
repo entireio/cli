@@ -216,64 +216,102 @@ type openCodeRevert struct {
 // message. A revert naming no message of the export hides nothing.
 func openCodeBeforeRevert(messages []json.RawMessage, r openCodeRevert) ([]json.RawMessage, error) {
 	for i, raw := range messages {
-		var msg struct {
-			Info struct {
-				ID     string `json:"id"`
-				Native []struct {
-					ID string `json:"id"`
-				} `json:"opencode2"`
-			} `json:"info"`
-			Parts []struct {
-				ID string `json:"id"`
-			} `json:"parts"`
+		msg, err := decodeOpenCodeRevertTarget(raw)
+		if err != nil {
+			return nil, err
 		}
-		if err := json.Unmarshal(raw, &msg); err != nil {
-			return nil, fmt.Errorf("parsing opencode message: %w", err)
-		}
-		// An OpenCode 2 message's sources are the ones before it that
-		// convert to nothing, itself, then those after it (idle markers):
-		// a revert of one after it keeps the message.
-		hit, after, own := msg.Info.ID == r.MessageID, false, false
-		for _, n := range msg.Info.Native {
-			own = own || n.ID == msg.Info.ID
-			if n.ID == r.MessageID && !hit {
-				hit, after = true, own && n.ID != msg.Info.ID
-			}
-		}
-		if !hit {
+		hit, after := msg.reverts(r.MessageID)
+		switch {
+		case !hit:
 			continue
-		}
-		if after {
+		case after:
 			return messages[: i+1 : i+1], nil
 		}
 		kept := messages[:i:i]
-		if r.PartID == "" {
+		k := msg.partIndex(r.PartID)
+		if k <= 0 {
 			return kept, nil
 		}
-		for k, part := range msg.Parts {
-			if part.ID != r.PartID || k == 0 {
-				continue
-			}
-			var whole map[string]json.RawMessage
-			var parts []json.RawMessage
-			if err := json.Unmarshal(raw, &whole); err != nil {
-				return nil, fmt.Errorf("parsing opencode message: %w", err)
-			}
-			if err := json.Unmarshal(whole["parts"], &parts); err != nil {
-				return nil, fmt.Errorf("parsing opencode message parts: %w", err)
-			}
-			trimmed, err := json.Marshal(parts[:k])
-			if err != nil {
-				return nil, fmt.Errorf("encoding opencode message parts: %w", err)
-			}
-			whole["parts"] = trimmed
-			cut, err := json.Marshal(whole)
-			if err != nil {
-				return nil, fmt.Errorf("encoding opencode message: %w", err)
-			}
-			return append(kept, cut), nil
+		cut, err := openCodeFirstParts(raw, k)
+		if err != nil {
+			return nil, err
 		}
-		return kept, nil
+		return append(kept, cut), nil
 	}
 	return messages, nil
+}
+
+// openCodeRevertTarget is what a revert reads of a snapshot line: its ID,
+// its OpenCode 2 source messages' IDs and its parts' IDs.
+type openCodeRevertTarget struct {
+	Info struct {
+		ID     string `json:"id"`
+		Native []struct {
+			ID string `json:"id"`
+		} `json:"opencode2"`
+	} `json:"info"`
+	Parts []struct {
+		ID string `json:"id"`
+	} `json:"parts"`
+}
+
+func decodeOpenCodeRevertTarget(raw json.RawMessage) (openCodeRevertTarget, error) {
+	var msg openCodeRevertTarget
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		return msg, fmt.Errorf("parsing opencode message: %w", err)
+	}
+	return msg, nil
+}
+
+// reverts reports whether a revert of message id hits this message, and
+// whether it hits one of the OpenCode 2 source messages after its own (an
+// idle marker), which keeps this message. Its sources are the ones before
+// it that convert to nothing, itself, then those after it.
+func (m openCodeRevertTarget) reverts(id string) (hit, after bool) {
+	if m.Info.ID == id {
+		return true, false
+	}
+	own := false
+	for _, n := range m.Info.Native {
+		own = own || n.ID == m.Info.ID
+		if n.ID == id {
+			return true, own
+		}
+	}
+	return false, false
+}
+
+// partIndex is the index of part id, -1 when id is empty or not a part.
+func (m openCodeRevertTarget) partIndex(id string) int {
+	if id == "" {
+		return -1
+	}
+	for k, part := range m.Parts {
+		if part.ID == id {
+			return k
+		}
+	}
+	return -1
+}
+
+// openCodeFirstParts is message raw with only its first k parts.
+func openCodeFirstParts(raw json.RawMessage, k int) (json.RawMessage, error) {
+	var whole map[string]json.RawMessage
+	var parts []json.RawMessage
+	if err := json.Unmarshal(raw, &whole); err != nil {
+		return nil, fmt.Errorf("parsing opencode message: %w", err)
+	}
+	if err := json.Unmarshal(whole["parts"], &parts); err != nil {
+		return nil, fmt.Errorf("parsing opencode message parts: %w", err)
+	}
+	trimmed, err := json.Marshal(parts[:k])
+	if err != nil {
+		return nil, fmt.Errorf("encoding opencode message parts: %w", err)
+	}
+	whole["parts"] = trimmed
+	cut, err := json.Marshal(whole)
+	if err != nil {
+		return nil, fmt.Errorf("encoding opencode message: %w", err)
+	}
+	return cut, nil
 }

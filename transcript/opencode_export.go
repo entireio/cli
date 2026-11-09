@@ -353,7 +353,7 @@ func convertOpenCodeV2ToolMetadata(meta map[string]any, dir string) map[string]a
 			converted = append(converted, f)
 			continue
 		}
-		entry := make(map[string]any, len(file)+1)
+		entry := make(map[string]any, len(file))
 		for k, v := range file {
 			entry[k] = v
 		}

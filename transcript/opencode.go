@@ -176,9 +176,7 @@ func openCodeAssistantBlocks(msg openCodeMessage) []map[string]json.RawMessage {
 	content := make([]map[string]json.RawMessage, 0, len(msg.Parts))
 
 	for _, part := range msg.Parts {
-		partType := unquote(part["type"])
-
-		switch partType {
+		switch unquote(part["type"]) {
 		case ContentTypeText:
 			b, err := json.Marshal(ContentTypeText)
 			if err != nil {
@@ -189,33 +187,39 @@ func openCodeAssistantBlocks(msg openCodeMessage) []map[string]json.RawMessage {
 				"text": part[ContentTypeText],
 			})
 		case openCodePartTool:
-			toolBlock := make(map[string]json.RawMessage)
-			b, err := json.Marshal(ContentTypeToolUse)
-			if err != nil {
-				continue
+			if block, ok := openCodeToolBlock(part); ok {
+				content = append(content, block)
 			}
-			toolBlock["type"] = b
-			if callID := part["callID"]; callID != nil {
-				toolBlock["id"] = callID
-			}
-			if toolName := part["tool"]; toolName != nil {
-				toolBlock["name"] = toolName
-			}
-			if stateRaw := part["state"]; stateRaw != nil {
-				var state map[string]json.RawMessage
-				if json.Unmarshal(stateRaw, &state) == nil {
-					if inp := state["input"]; inp != nil {
-						toolBlock["input"] = inp
-					}
-					if openCodeToolDone(state) {
-						toolBlock["result"] = openCodeToolResult(unquote(part["tool"]), state)
-					}
-				}
-			}
-			content = append(content, toolBlock)
 		}
 	}
 	return content
+}
+
+// openCodeToolBlock is a tool part's tool_use block: its call ID, name and
+// input, and its result once the tool finished.
+func openCodeToolBlock(part map[string]json.RawMessage) (map[string]json.RawMessage, bool) {
+	b, err := json.Marshal(ContentTypeToolUse)
+	if err != nil {
+		return nil, false
+	}
+	toolBlock := map[string]json.RawMessage{"type": b}
+	if callID := part["callID"]; callID != nil {
+		toolBlock["id"] = callID
+	}
+	if toolName := part["tool"]; toolName != nil {
+		toolBlock["name"] = toolName
+	}
+	var state map[string]json.RawMessage
+	if stateRaw := part["state"]; stateRaw == nil || json.Unmarshal(stateRaw, &state) != nil {
+		return toolBlock, true
+	}
+	if inp := state["input"]; inp != nil {
+		toolBlock["input"] = inp
+	}
+	if openCodeToolDone(state) {
+		toolBlock["result"] = openCodeToolResult(unquote(part["tool"]), state)
+	}
+	return toolBlock, true
 }
 
 // openCodeToolDone reports whether a tool part's state has a result: a
