@@ -276,7 +276,7 @@ func appendLongPasswordFlags(regions []taggedRegion, s string) []taggedRegion {
 		return regions
 	}
 	lines := quoteScan{s: s, prose: true}
-	var subs substitutionMemo
+	subs := substitutionMemo{}
 	for pos := 0; ; {
 		loc := cliLongPasswordPattern.FindStringSubmatchIndex(s[pos:])
 		if loc == nil {
@@ -291,10 +291,10 @@ func appendLongPasswordFlags(regions []taggedRegion, s string) []taggedRegion {
 		// starts the next flag.
 		blank := s[loc[4]] != '='
 		stringEnd := lines.stringEnd(loc[2] - 1)
-		v, ok := longFlagValue(s, loc, stringEnd)
+		v, ok := longFlagValue(s, loc, stringEnd, subs)
 		var r taggedRegion
 		if ok {
-			r, ok = passwordValueRegion(s, v, stringEnd, &subs, blank, blank)
+			r, ok = passwordValueRegion(s, v, stringEnd, subs, blank, blank)
 		}
 		if !ok {
 			// A value that is no password may hold the next flag
@@ -314,7 +314,7 @@ func appendLongPasswordFlags(regions []taggedRegion, s string) []taggedRegion {
 // ("--password" x) must close the quote that opens it, and a value in the
 // string that a flag opens ("--password=Summer 2026") runs to that string's
 // end, since the shell passes the whole string as one argument.
-func longFlagValue(s string, loc []int, stringEnd int) (cliValue, bool) {
+func longFlagValue(s string, loc []int, stringEnd int, subs substitutionMemo) (cliValue, bool) {
 	open, quoteLen := loc[0], 0
 	if s[open] == '"' && open > 0 && s[open-1] == '\\' {
 		open--
@@ -329,14 +329,14 @@ func longFlagValue(s string, loc []int, stringEnd int) (cliValue, bool) {
 				return cliValue{}, false
 			}
 		case s[loc[4]] == '=' && closeAt > loc[6]:
-			return quotedFlagValue(s, open, loc[6], end, n, stringEnd), true
+			return quotedFlagValue(s, open, loc[6], end, n, stringEnd, subs), true
 		}
 	}
 	if loc[3] > loc[2] && quoteLen == 0 {
 		// A quote after the name that opened nothing before it.
 		return cliValue{}, false
 	}
-	return shellWordValue(s, loc[6], loc[7], stringEnd), true
+	return shellWordValue(s, loc[6], loc[7], stringEnd, subs), true
 }
 
 // appendPasswords adds the value of every password flag in the segment of
@@ -362,7 +362,7 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string) []tag
 	// A name inside a password found before is part of that word
 	// (mysql -p$(printf x; mysql -py), and is not read again.
 	var found foundPasswords
-	var subs substitutionMemo
+	subs := substitutionMemo{}
 	for _, cmd := range f.command.FindAllStringIndex(s, -1) {
 		if found.covers(cmd[0]) || !isCommandToken(s, cmd[0], cmd[1]) || isContainerNameArgument(s, cmd[0]) || isFunctionName(s, cmd[0], cmd[1]) {
 			continue
@@ -401,7 +401,7 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string) []tag
 		}
 		quotes := quoteScan{s: s[:cmd[1]+len(rest)], i: from, skip: skip, skipEnd: skipEnd, substitutions: true}
 		n := len(regions)
-		regions = f.appendFlags(regions, s, &quotes, s[from:cmd[1]+len(rest)], stringEnd, &subs)
+		regions = f.appendFlags(regions, s, &quotes, s[from:cmd[1]+len(rest)], stringEnd, subs)
 		for _, r := range regions[n:] {
 			heap.Push(&found.ahead, r.region)
 		}
@@ -1437,7 +1437,7 @@ func isShellName(s string) bool {
 // another command, read on its own if f defines it. stringEnd is where the
 // quoted string holding the command ends, or -1, and subs is as in
 // passwordValueRegion.
-func (f cliPasswordFlag) appendFlags(regions []taggedRegion, s string, quotes *quoteScan, rest string, stringEnd int, subs *substitutionMemo) []taggedRegion {
+func (f cliPasswordFlag) appendFlags(regions []taggedRegion, s string, quotes *quoteScan, rest string, stringEnd int, subs substitutionMemo) []taggedRegion {
 	base := quotes.i
 	for pos := 0; pos < len(rest); {
 		loc := f.flag.FindStringSubmatchIndex(rest[pos:])
@@ -1472,14 +1472,14 @@ func (f cliPasswordFlag) appendFlags(regions []taggedRegion, s string, quotes *q
 
 // valueRegion returns the password of the flag that loc, a match of f.flag in
 // s from base, found. stringEnd and subs are as in appendFlags.
-func (f cliPasswordFlag) valueRegion(s string, base int, loc []int, stringEnd int, subs *substitutionMemo) (taggedRegion, bool) {
-	v, ok := shortFlagValue(s, base, loc, stringEnd)
+func (f cliPasswordFlag) valueRegion(s string, base int, loc []int, stringEnd int, subs substitutionMemo) (taggedRegion, bool) {
+	v, ok := shortFlagValue(s, base, loc, stringEnd, subs)
 	if !ok {
 		return taggedRegion{}, false
 	}
 	if f.prefix != "" {
 		var ok bool
-		if v, ok = v.trimPrefix(s, f.prefix, stringEnd); !ok {
+		if v, ok = v.trimPrefix(s, f.prefix, stringEnd, subs); !ok {
 			return taggedRegion{}, false
 		}
 	}
@@ -1491,10 +1491,10 @@ func (f cliPasswordFlag) valueRegion(s string, base int, loc []int, stringEnd in
 // bare: a value in the string that opens the flag ("-pSummer 2026") runs to
 // that string's end, and a flag quoted on its own ("-p" x) must close the
 // quote that opens it.
-func shortFlagValue(s string, base int, loc []int, stringEnd int) (cliValue, bool) {
+func shortFlagValue(s string, base int, loc []int, stringEnd int, subs substitutionMemo) (cliValue, bool) {
 	start, end := base+loc[len(loc)-2], base+loc[len(loc)-1]
 	if len(loc) < 8 || loc[2] < 0 {
-		return shellWordValue(s, start, end, stringEnd), true
+		return shellWordValue(s, start, end, stringEnd, subs), true
 	}
 	closeFrom, closed := base+loc[4], loc[5] > loc[4]
 	pieceEnd, quoteLen := quotedPiece(s, base+loc[2])
@@ -1505,7 +1505,7 @@ func shortFlagValue(s string, base int, loc []int, stringEnd int) (cliValue, boo
 		if closed {
 			return cliValue{}, false
 		}
-		return shellWordValue(s, start, end, stringEnd), true
+		return shellWordValue(s, start, end, stringEnd, subs), true
 	case closed && closeAt == closeFrom:
 		// A flag quoted on its own ("-p" x, "-p"'x'). In code, "-p"+pw,
 		// "-p" + pw and "-p" . $pw join strings, so a value right after the
@@ -1513,7 +1513,7 @@ func shortFlagValue(s string, base int, loc []int, stringEnd int) (cliValue, boo
 		if _, n := quotedPiece(s, start); start == base+loc[5] && n == 0 || isConcatOperator(s[start:end]) {
 			return cliValue{}, false
 		}
-		return shellWordValue(s, start, end, stringEnd), true
+		return shellWordValue(s, start, end, stringEnd, subs), true
 	case closed:
 		// The quote after the name is the first character of the value
 		// ('-p"x y').
@@ -1523,7 +1523,7 @@ func shortFlagValue(s string, base int, loc []int, stringEnd int) (cliValue, boo
 		// "-p" alone prompts for the password.
 		return cliValue{}, false
 	}
-	return quotedFlagValue(s, base+loc[2], start, pieceEnd, quoteLen, stringEnd), true
+	return quotedFlagValue(s, base+loc[2], start, pieceEnd, quoteLen, stringEnd, subs), true
 }
 
 // isConcatOperator reports whether value is an operator that joins strings
@@ -1536,9 +1536,9 @@ func isConcatOperator(value string) bool {
 // string that opens its flag at open and ends at end. When the word goes on
 // after the string ("-pabc"def), the shell joins its pieces into one
 // password, whose start keeps its quoting ('-p$ecret'"" is literal).
-func quotedFlagValue(s string, open, start, end, quoteLen, stringEnd int) cliValue {
+func quotedFlagValue(s string, open, start, end, quoteLen, stringEnd int, subs substitutionMemo) cliValue {
 	closeAt := end - quoteLen
-	if wordEnd := joinedWordEnd(s, open, end, stringEnd); wordEnd > end {
+	if wordEnd := joinedWordEnd(s, open, end, stringEnd, subs); wordEnd > end {
 		return cliValue{start: start, end: wordEnd, singleQuoted: s[closeAt] == '\''}
 	}
 	return cliValue{start: start, end: closeAt, quoted: true, singleQuoted: s[closeAt] == '\''}
@@ -1560,9 +1560,10 @@ type cliValue struct {
 // whose first piece cliFlagValue matched up to end. The shell joins quoted
 // and bare pieces into one argument ('alpha'hunter2, "abc\"def"), so the
 // value is the whole word, without its quotes when it is one quoted string.
-// stringEnd is where the quoted string holding the flag ends, or -1.
-func shellWordValue(s string, start, end, stringEnd int) cliValue {
-	wordEnd := shellWordEnd(s, start, stringEnd)
+// stringEnd is where the quoted string holding the flag ends, or -1, and
+// subs is as in shellWordEnd.
+func shellWordValue(s string, start, end, stringEnd int, subs substitutionMemo) cliValue {
+	wordEnd := shellWordEnd(s, start, stringEnd, subs)
 	if wordEnd <= start {
 		wordEnd = end
 	}
@@ -1570,7 +1571,7 @@ func shellWordValue(s string, start, end, stringEnd int) cliValue {
 		// An ANSI-C quoted string ($'pass:x'), where $ is literal and a
 		// backslash escapes a quote ($'a\'b').
 		if pieceEnd := ansiCQuoteEnd(s, start); pieceEnd > 0 {
-			if end := ansiCWordEnd(s, pieceEnd, stringEnd); end > pieceEnd {
+			if end := ansiCWordEnd(s, pieceEnd, stringEnd, subs); end > pieceEnd {
 				// The word goes on after the string ($'pass:x\\'y), so it
 				// is read from the quote, like 'pass:x'y.
 				return cliValue{start: start + 1, end: end}
@@ -1599,11 +1600,11 @@ func shellWordValue(s string, start, end, stringEnd int) cliValue {
 // after a string that is an element of code (["mysql", "-px"],
 // exec.Command("mysql", "-px",db), {"arg": "--password=x"}), but not one
 // that a shell word goes on after (mysql "-pabc",def).
-func joinedWordEnd(s string, open, i, stringEnd int) int {
+func joinedWordEnd(s string, open, i, stringEnd int, subs substitutionMemo) int {
 	if i+1 == stringEnd && (s[i] == '"' || s[i] == '\'') || isCodeSeparator(s, open, i) {
 		return i
 	}
-	return ansiCWordEnd(s, i, stringEnd)
+	return ansiCWordEnd(s, i, stringEnd, subs)
 }
 
 // isCodeSeparator reports whether s[i] is a comma or closing bracket after a
@@ -1699,15 +1700,16 @@ func ansiCQuoteEnd(s string, i int) int {
 }
 
 // ansiCWordEnd returns the end of the shell word in which a quoted string
-// ends at i. stringEnd is as in shellWordEnd.
-func ansiCWordEnd(s string, i, stringEnd int) int {
-	return wordRestEnd(s, i, stringEnd, false)
+// ends at i. stringEnd and subs are as in shellWordEnd.
+func ansiCWordEnd(s string, i, stringEnd int, subs substitutionMemo) int {
+	return wordRestEnd(s, i, stringEnd, false, subs)
 }
 
 // trimPrefix drops prefix from the start of v, also when v is a word whose
 // first quoted piece starts with it ('pass:abc'def). stringEnd is where the
-// quoted string holding the flag ends, or -1.
-func (v cliValue) trimPrefix(s, prefix string, stringEnd int) (cliValue, bool) {
+// quoted string holding the flag ends, or -1, and subs is as in
+// shellWordEnd.
+func (v cliValue) trimPrefix(s, prefix string, stringEnd int, subs substitutionMemo) (cliValue, bool) {
 	skip := 0
 	if !v.quoted && v.start < v.end && (s[v.start] == '"' || s[v.start] == '\'') {
 		skip = 1
@@ -1729,7 +1731,7 @@ func (v cliValue) trimPrefix(s, prefix string, stringEnd int) (cliValue, bool) {
 		// (pass:"$(printf x)"), unless it is the gap after the string the
 		// command is quoted in ("openssl enc -pass pass:" + pw).
 		if _, quoteLen := quotedPiece(s, v.start); quoteLen > 0 {
-			v = shellWordValue(s, v.start, v.start, stringEnd)
+			v = shellWordValue(s, v.start, v.start, stringEnd, subs)
 		}
 	}
 	return v, true
@@ -1745,17 +1747,20 @@ func (v cliValue) trimPrefix(s, prefix string, stringEnd int) (cliValue, bool) {
 // one an escaped quote opens a quoted piece of the command
 // (sh -c "mysql -pabc\"x y\""), unless it closes a string of that command.
 // Elsewhere \" is a literal quote (mysql -pabc\"def), and any quoted piece
-// joins the word (mysql -pabc"x;y").
-func shellWordEnd(s string, start, stringEnd int) int {
-	return wordRestEnd(s, start, stringEnd, true)
+// joins the word (mysql -pabc"x;y"). subs, when set, marks the word of a
+// password, in which a command substitution goes on, as the shell reads it,
+// to the line that closes it (mysql -p$(printf a<newline>printf b)), and
+// keeps where the ones read end (see substitutionEnd).
+func shellWordEnd(s string, start, stringEnd int, subs substitutionMemo) int {
+	return wordRestEnd(s, start, stringEnd, true, subs)
 }
 
 // wordRestEnd returns the end of the shell word that goes on at i, which
 // is the word's start when atStart is set, as in shellWordEnd.
-func wordRestEnd(s string, i, stringEnd int, atStart bool) int {
+func wordRestEnd(s string, i, stringEnd int, atStart bool, subs substitutionMemo) int {
 	first := i
 	for i < len(s) {
-		if end, stop := wordPieceEnd(s, i, stringEnd, atStart && i == first); stop {
+		if end, stop := wordPieceEnd(s, i, stringEnd, atStart && i == first, subs); stop {
 			return i
 		} else if end > i {
 			i = end
@@ -1786,8 +1791,8 @@ func wordRestEnd(s string, i, stringEnd int, atStart bool) int {
 // parameter expansion of a shell word that starts at s[i], or i when none
 // does, and whether the word ends at i instead, at a quote that closes the
 // string holding it, which ends at stringEnd (-1 for none). first marks the
-// word's first piece.
-func wordPieceEnd(s string, i, stringEnd int, first bool) (end int, stop bool) {
+// word's first piece, and subs is as in shellWordEnd.
+func wordPieceEnd(s string, i, stringEnd int, first bool, subs substitutionMemo) (end int, stop bool) {
 	inString := i < stringEnd
 	if inString && closesString(s, i, stringEnd) {
 		return i, true
@@ -1812,9 +1817,10 @@ func wordPieceEnd(s string, i, stringEnd int, first bool) (end int, stop bool) {
 	if quoteLen > 0 && (!inString || pieceEnd < stringEnd) {
 		return pieceEnd, false
 	}
-	if end, _ := substitutionEnd(s, i, stringEnd, nil); end > i {
+	if end, _ := substitutionEnd(s, i, stringEnd, subs, subs != nil); end > i {
 		// A password in one that does not close is part of the word
-		// (mysql -p$(printf hunter2).
+		// (mysql -p$(printf hunter2), and so is one on the lines that a
+		// password's goes on to (mysql -p$(printf a<newline>printf b)).
 		return end, false
 	}
 	if strings.HasPrefix(s[i:], "${") {
@@ -1918,32 +1924,32 @@ func isShellWordEnd(c byte) bool {
 }
 
 // substitutionEnd returns the end of the $(...) that starts at i, after its
-// matching parenthesis, and whether it closes there. The ")" that ends a
-// pattern of a case statement in it does not close it
-// ($(case x in x) printf hunter2;; esac)). One that does not close runs, as
-// the shell reads it, to the end of its line, or to the quote that closes the
-// string holding the command, which ends at stringEnd (-1 for none), or to a
-// backtick that pairs with no other on the line, as one that ends a code
-// span does (`mysql -p$(printf hunter2`); end is then where it stops. A
-// backtick that pairs with a later one starts a command of its own
-// ($(echo `printf x`)). end is 0 when no $(...) starts at i. subs, when set,
-// keeps what the scan finds for the queries after it.
-func substitutionEnd(s string, i, stringEnd int, subs *substitutionMemo) (end int, closed bool) {
+// matching parenthesis, and whether it closes there. A substitution in it
+// is read on its own, and the ")" that ends a pattern of a case statement
+// does not close the one it is in ($(case x in x) printf hunter2;; esac),
+// $(echo $(case x in x) printf a;; esac) hunter2)). One that does not
+// close runs, as the shell reads it, to the end of its line, or of s when
+// multiline is set, or to the quote that closes the string holding the
+// command, which ends at stringEnd (-1 for none), or to a backtick that
+// pairs with no other on the line, as one that ends a code span does
+// (`mysql -p$(printf hunter2`); end is then where it stops. A backtick that
+// pairs with a later one starts a command of its own ($(echo `printf x`)).
+// end is 0 when no $(...) starts at i. subs, when set, keeps what the scan
+// finds for the queries after it.
+func substitutionEnd(s string, i, stringEnd int, subs substitutionMemo, multiline bool) (end int, closed bool) {
 	if !strings.HasPrefix(s[i:], "$(") {
 		return 0, false
 	}
-	if end, ok := subs.unclosed(i, stringEnd); ok {
-		return end, false
+	if subs == nil {
+		subs = substitutionMemo{}
 	}
-	limit := len(s)
-	if i < stringEnd {
-		limit = stringEnd - 1
-		if stringEnd >= 2 && strings.HasPrefix(s[stringEnd-2:], `\"`) {
-			limit--
-		}
+	scan := substitutionScan{ends: substitutionEnds{subs, stringEnd, multiline}}
+	if end, ok := subs[scan.ends.key(i)]; ok {
+		return end.end, end.closed
 	}
-	p := parenScan{from: i + 2, keep: subs != nil}
-	j := i + 1
+	limit := substitutionLimit(s, i, stringEnd)
+	scan.open(i)
+	j := i + 2
 	for ; j < limit; j++ {
 		if pieceEnd, quoteLen := quotedPiece(s, j); quoteLen == 1 {
 			j = pieceEnd - 1
@@ -1951,11 +1957,13 @@ func substitutionEnd(s string, i, stringEnd int, subs *substitutionMemo) (end in
 		}
 		switch s[j] {
 		case '\r', '\n':
-			return subs.keep(s, stringEnd, j, p.opens), false
+			if !multiline {
+				return scan.stop(j), false
+			}
 		case '`':
 			n := strings.IndexAny(s[j+1:limit], "`\r\n")
 			if n < 0 || s[j+1+n] != '`' {
-				return subs.keep(s, stringEnd, j, p.opens), false
+				return scan.stop(j), false
 			}
 			j += 1 + n
 		case '\\':
@@ -1963,51 +1971,120 @@ func substitutionEnd(s string, i, stringEnd int, subs *substitutionMemo) (end in
 			if j++; strings.HasPrefix(s[j:], "\r\n") {
 				j++
 			}
+		case '$':
+			next, stop := scan.inner(s, j, limit)
+			if stop {
+				return next, false
+			}
+			j = next
 		case '(':
-			p.open(j)
+			scan.frames[len(scan.frames)-1].depth++
 		case ')':
-			if p.close(s, j) {
+			if scan.close(s, j) {
 				return j + 1, true
+			}
+		case caseKeyword[0]:
+			if strings.HasPrefix(s[j:], caseKeyword) {
+				scan.frames[len(scan.frames)-1].hasCase = true
 			}
 		}
 	}
-	return subs.keep(s, stringEnd, min(j, limit), p.opens), false
+	return scan.stop(min(j, limit)), false
 }
 
-// parenScan reads the parentheses of a command substitution for
-// substitutionEnd.
-type parenScan struct {
-	cases     caseScan
-	readCases bool
-	// from is where the text not yet read for case statements starts, and
-	// depth the number of parentheses open.
-	from, depth int
-	// opens are where the parentheses still open opened, when keep is set.
-	opens []int
-	keep  bool
-}
-
-func (p *parenScan) open(j int) {
-	p.depth++
-	if p.keep {
-		p.opens = append(p.opens, j)
+// substitutionLimit returns where the reading of a substitution that starts
+// at i stops: at the closing quote of the string holding the command, which
+// ends at stringEnd, or at the end of s.
+func substitutionLimit(s string, i, stringEnd int) int {
+	if i >= stringEnd {
+		return len(s)
 	}
+	if stringEnd >= 2 && strings.HasPrefix(s[stringEnd-2:], `\"`) {
+		return stringEnd - 2
+	}
+	return stringEnd - 1
+}
+
+// substitutionScan reads a command substitution for substitutionEnd, with
+// the ones in it.
+type substitutionScan struct {
+	// frames are the substitutions open, the innermost last.
+	frames []parenScan
+	ends   substitutionEnds
+}
+
+func (c *substitutionScan) open(i int) {
+	c.frames = append(c.frames, parenScan{start: i, from: i + 2, depth: 1})
+}
+
+// inner reads the substitution that starts at s[j], if one does, and
+// returns where the reading goes on, before the next character, or, with
+// stop, where the outermost one stops: one that does not close keeps the
+// ones it is in open.
+func (c *substitutionScan) inner(s string, j, limit int) (next int, stop bool) {
+	if !strings.HasPrefix(s[j:limit], "$(") {
+		return j, false
+	}
+	if r, ok := c.ends.subs[c.ends.key(j)]; ok {
+		if !r.closed {
+			return c.stop(r.end), true
+		}
+		return r.end - 1, false
+	}
+	c.open(j)
+	return j + 1, false
+}
+
+// close reads the ")" at s[j] and reports whether it closes the outermost
+// substitution.
+func (c *substitutionScan) close(s string, j int) bool {
+	top := &c.frames[len(c.frames)-1]
+	if !top.close(s, j, c.ends) {
+		return false
+	}
+	c.keep(top.start, j+1, true)
+	c.frames = c.frames[:len(c.frames)-1]
+	return len(c.frames) == 0
+}
+
+// stop ends the substitutions open, which do not close, at end.
+func (c *substitutionScan) stop(end int) int {
+	for _, f := range c.frames {
+		c.keep(f.start, end, false)
+	}
+	return end
+}
+
+func (c *substitutionScan) keep(i, end int, closed bool) {
+	c.ends.subs[c.ends.key(i)] = substitutionResult{end, closed}
+}
+
+// parenScan reads the parentheses of one command substitution for
+// substitutionScan.
+type parenScan struct {
+	cases caseScan
+	// hasCase is set once the text of the substitution, outside the ones
+	// in it, holds the case keyword, and readCases once its case
+	// statements are read.
+	hasCase, readCases bool
+	// start is where the substitution starts, from is where the text not
+	// yet read for case statements starts, and depth the number of
+	// parentheses open.
+	start, from, depth int
 }
 
 // close reads the ")" at s[j] and reports whether it closes the
-// substitution, which it does not after a case pattern.
-func (p *parenScan) close(s string, j int) bool {
+// substitution, which it does not after a case pattern. ends are where the
+// substitutions in it end.
+func (p *parenScan) close(s string, j int, ends substitutionEnds) bool {
 	if p.depth--; p.depth > 0 {
-		if p.keep {
-			p.opens = p.opens[:len(p.opens)-1]
-		}
 		return false
 	}
+	if !p.hasCase {
+		return true
+	}
 	if !p.readCases {
-		if !strings.Contains(s[p.from:j], caseKeyword) {
-			return true
-		}
-		p.cases, p.readCases = caseScan{start: true}, true
+		p.cases, p.readCases = caseScan{start: true, ends: ends}, true
 	}
 	if !p.cases.read(s[:j], p.from) {
 		return true
@@ -2016,45 +2093,41 @@ func (p *parenScan) close(s string, j int) bool {
 	return false
 }
 
-// substitutionMemo keeps the command substitutions found in one that does
-// not close, which do not close either, and end where it does
-// (["mysql", "-p$(x"], ["mysql", "-p$(y"]): a ")" that closes one of them
-// would have closed it first. A ")" after a case pattern in one only keeps
-// it open longer. So a line of them is read once.
-type substitutionMemo struct {
-	// open are the positions of those substitutions, in order, in the
-	// string holding the command that ends at stringEnd; end is where they
-	// end.
-	open           []int
-	stringEnd, end int
+// substitutionMemo keeps where the command substitutions read so far end,
+// so each is read once however many flags and commands are in and after it
+// (["mysql", "-p$(x"], ["mysql", "-p$(y"], wget --password -$(x --password
+// -$(y ...))). Where one ends depends only on where it starts, on the string
+// holding the command and on whether it goes on across lines.
+type substitutionMemo map[substitutionKey]substitutionResult
+
+type substitutionKey struct {
+	start, stringEnd int
+	multiline        bool
 }
 
-// unclosed returns where the substitution at i ends when it is one that m
-// keeps.
-func (m *substitutionMemo) unclosed(i, stringEnd int) (int, bool) {
-	if m == nil || m.stringEnd != stringEnd {
-		return 0, false
-	}
-	if _, found := slices.BinarySearch(m.open, i); found {
-		return m.end, true
-	}
-	return 0, false
+type substitutionResult struct {
+	end    int
+	closed bool
 }
 
-// keep records the substitutions in s that open with the parentheses at
-// opens, which are still open where the first of them stops at end without
-// closing, and returns end.
-func (m *substitutionMemo) keep(s string, stringEnd, end int, opens []int) int {
-	if m == nil {
-		return end
-	}
-	m.open, m.stringEnd, m.end = m.open[:0], stringEnd, end
-	for _, p := range opens {
-		if p > 0 && s[p-1] == '$' {
-			m.open = append(m.open, p-1)
-		}
-	}
-	return end
+// substitutionEnds are the ends in subs of the substitutions in the string
+// holding the command that ends at stringEnd, read across lines when
+// multiline is set.
+type substitutionEnds struct {
+	subs      substitutionMemo
+	stringEnd int
+	multiline bool
+}
+
+func (e substitutionEnds) key(i int) substitutionKey {
+	return substitutionKey{i, e.stringEnd, e.multiline}
+}
+
+// closedEnd returns the end of the substitution that starts at i, when it
+// is one that closes.
+func (e substitutionEnds) closedEnd(i int) (int, bool) {
+	r, ok := e.subs[e.key(i)]
+	return r.end, ok && r.closed
 }
 
 // quoteScan finds the quoted strings of s, from position i on, in one pass
@@ -2174,42 +2247,27 @@ func isSubstitutionStart(s string, i int) bool {
 
 // caseMemo finds the length of command and process substitutions at
 // increasing positions of one string. The ")" that ends a pattern of a case
-// statement in one does not close it ($(case x in x) mysql -pX;; esac)).
+// statement in a command substitution does not close it
+// ($(case x in x) mysql -pX;; esac)), nor one in a substitution in it
+// ($(echo $(case x in x) a;; esac) mysql -pX)).
 type caseMemo struct {
-	// openTo is the end of the line where a case statement in a
-	// substitution did not close, 0 when none: one there is read as
-	// before, and the rest of the line is not searched again.
-	openTo int
+	subs substitutionMemo
 }
 
 // substitutionLen returns the length of the command or process substitution
 // that starts at s[i], or 0 when none does.
 func (m *caseMemo) substitutionLen(s string, i int) int {
-	rest := s[i:]
-	n := len(cliSubstitution.FindString(rest))
-	if n == 0 || i < m.openTo || !strings.Contains(rest[:n], caseKeyword) {
-		return n
+	if !strings.HasPrefix(s[i:], "$(") {
+		return len(cliSubstitution.FindString(s[i:]))
 	}
-	c := caseScan{start: true}
-	from, end := 2, n
-	for c.read(rest[:end-1], from) {
-		more := len(cliParensRest.FindString(rest[end:]))
-		if more == 0 {
-			lineEnd := strings.IndexAny(rest[end:], "\r\n")
-			if lineEnd < 0 {
-				lineEnd = len(rest) - end
-			}
-			m.openTo = i + end + lineEnd
-			return n
-		}
-		from, end = end-1, end+more
+	if m.subs == nil {
+		m.subs = substitutionMemo{}
 	}
-	return end
+	if end, closed := substitutionEnd(s, i, -1, m.subs, false); closed {
+		return end - i
+	}
+	return 0
 }
-
-// cliParensRest matches text inside parentheses up to the ")" that closes
-// them.
-var cliParensRest = regexp.MustCompile(`^(?:` + cliParensPiece + `|\$?` + cliParens2 + `)*\)`)
 
 // cliParensGroup matches text in parentheses at the start of a string.
 var cliParensGroup = regexp.MustCompile(`^\$?` + cliParens2)
@@ -2224,6 +2282,9 @@ type caseScan struct {
 	state caseState
 	// start is set where a command starts.
 	start bool
+	// ends are where the substitutions in the text end, when they are
+	// known.
+	ends substitutionEnds
 }
 
 // caseKeyword and esacKeyword open and close a case statement.
@@ -2271,7 +2332,7 @@ func (c *caseScan) read(s string, from int) bool {
 			c.start = c.start || c.state != casePattern
 			i++
 		default:
-			end := caseWordEnd(s, i)
+			end := caseWordEnd(s, i, c.ends)
 			c.word(s[i:end])
 			i = end
 		}
@@ -2280,8 +2341,9 @@ func (c *caseScan) read(s string, from int) bool {
 }
 
 // caseWordEnd returns the end of the word that starts at s[i], whose quoted
-// strings, escaped characters and substitutions are part of it.
-func caseWordEnd(s string, i int) int {
+// strings, escaped characters and substitutions are part of it. ends are
+// where the substitutions end, when they are known.
+func caseWordEnd(s string, i int, ends substitutionEnds) int {
 	for i < len(s) && strings.IndexByte(" \t\r\n;&|()", s[i]) < 0 {
 		if end, quoteLen := quotedPiece(s, i); quoteLen == 1 {
 			i = end
@@ -2289,6 +2351,8 @@ func caseWordEnd(s string, i int) int {
 		}
 		if s[i] == '\\' {
 			i++
+		} else if end, ok := ends.closedEnd(i); ok {
+			i = end - 1
 		} else if isSubstitutionStart(s, i) {
 			i += len(cliParensGroup.FindString(s[i+1:]))
 		}
@@ -2583,14 +2647,14 @@ func isSameLevel(text string) bool {
 // -p3306:3306 mysql:8 -pX), or at end when no image comes before it.
 // stringEnd is where the quoted string holding the command ends, or -1.
 func entrypointArgsStart(s string, start, end, stringEnd int) int {
-	i := min(shellWordEnd(s, start, stringEnd), end)
+	i := min(shellWordEnd(s, start, stringEnd, nil), end)
 	optionArg := false
 	for i < end {
 		if s[i] == ' ' || s[i] == '\t' {
 			i++
 			continue
 		}
-		j := min(max(shellWordEnd(s, i, stringEnd), i+1), end)
+		j := min(max(shellWordEnd(s, i, stringEnd, nil), i+1), end)
 		word := s[i:j]
 		switch {
 		case optionArg:
@@ -2608,18 +2672,31 @@ func entrypointArgsStart(s string, start, end, stringEnd int) int {
 // isFunctionName reports whether the client name between start and end
 // names a shell function being defined (mysql() { ssh -p2222 db; },
 // function mysql { ... }), whose body runs other commands, rather than the
-// client run.
+// client run. The definition starts a command, so a name or a function
+// keyword that is an argument (ssh function mysql -pX) defines nothing.
 func isFunctionName(s string, start, end int) bool {
-	after := strings.TrimLeft(s[end:], " \t")
-	if strings.HasPrefix(after, "(") && strings.HasPrefix(strings.TrimLeft(after[1:], " \t"), ")") {
+	before := strings.TrimRight(s[:start], " \t")
+	if len(before) < start && strings.HasSuffix(before, functionKeyword) && startsCommand(s, len(before)-len(functionKeyword)) {
 		return true
 	}
-	before := strings.TrimRight(s[:start], " \t")
-	if len(before) == start || !strings.HasSuffix(before, functionKeyword) {
-		return false
+	after := strings.TrimLeft(s[end:], " \t")
+	return strings.HasPrefix(after, "(") && strings.HasPrefix(strings.TrimLeft(after[1:], " \t"), ")") && startsCommand(s, start)
+}
+
+// commandStarts are the characters after which a word starts a command:
+// commandEnds, the ")" after a case pattern, and the quote that opens a
+// script.
+const commandStarts = commandEnds + ")'\""
+
+// startsCommand reports whether the word at s[i] starts a command: it is at
+// the start of s, or after one of commandStarts or a keyword that a command
+// follows (then function mysql { ... }), each with blanks between.
+func startsCommand(s string, i int) bool {
+	before := strings.TrimRight(s[:i], " \t")
+	if before == "" || strings.IndexByte(commandStarts, before[len(before)-1]) >= 0 {
+		return true
 	}
-	at := len(before) - len(functionKeyword)
-	return at == 0 || strings.IndexByte(" \t\r\n;&|({", before[at-1]) >= 0
+	return isShellKeyword(before[strings.LastIndexAny(before, " \t"+commandStarts)+1:])
 }
 
 // functionKeyword starts a function definition (function mysql { ... }).
@@ -2694,7 +2771,7 @@ func (p netrcPattern) appendPassword(regions []taggedRegion, s string, lines *qu
 // (mongosh --password swordfish, mongosh --password string). stringEnd is
 // where the quoted string holding the command ends, or -1, and subs keeps the
 // substitutions read for the values after it, or is nil.
-func passwordValueRegion(s string, v cliValue, stringEnd int, subs *substitutionMemo, dashFlag, requireNonWord bool) (taggedRegion, bool) {
+func passwordValueRegion(s string, v cliValue, stringEnd int, subs substitutionMemo, dashFlag, requireNonWord bool) (taggedRegion, bool) {
 	value := s[v.start:v.end]
 	switch {
 	case value == "", dashFlag && !v.quoted && value[0] == '-', v.gap:
@@ -2708,9 +2785,9 @@ func passwordValueRegion(s string, v cliValue, stringEnd int, subs *substitution
 		// password from elsewhere stays visible: $(printf hunter2) and
 		// $(cat f)suffix carry it.
 		// One that does not close takes the rest of an unquoted word, and
-		// ends with a quoted value.
-		end, closed := substitutionEnd(s, v.start, stringEnd, subs)
-		if closed && end >= v.end && isSecretRecipeCommand(s[v.start+2:end-1]) {
+		// ends with a quoted value. An unquoted one goes on across lines.
+		end, closed := substitutionEnd(s, v.start, stringEnd, subs, subs != nil && !v.quoted)
+		if closed && end >= v.end && isRecipeSubstitution(s[v.start+2:end-1]) {
 			return taggedRegion{}, false
 		}
 		if closed || !v.quoted {
@@ -2723,6 +2800,15 @@ func passwordValueRegion(s string, v cliValue, stringEnd int, subs *substitution
 		return taggedRegion{}, false
 	}
 	return taggedRegion{region: region{v.start, v.end}}, true
+}
+
+// isRecipeSubstitution reports whether body, the text of a $(...), only
+// fetches the password from elsewhere ($(cat /run/pw)). A line break in it
+// runs another command after the first ($(cat f<newline>printf hunter2)),
+// so only the ones around the command can be there.
+func isRecipeSubstitution(body string) bool {
+	body = strings.TrimSpace(body)
+	return !strings.ContainsAny(body, "\r\n") && isSecretRecipeCommand(body)
 }
 
 // isProseValue reports whether v, the value after a long flag and a blank,

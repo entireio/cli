@@ -359,6 +359,8 @@ func TestString_CommandLinePasswordsMoreReviewCases(t *testing.T) {
 		{name: "password in a backtick substitution in a substitution", input: "mysql -p$(echo `printf " + p + "`) db", want: "mysql -pREDACTED db"},
 		{name: "password in a substitution that does not close in a quoted script", input: "sh -c 'mysql -p$(printf " + p + "'; ssh -p2222 host", want: "sh -c 'mysql -pREDACTED'; ssh -p2222 host"},
 		{name: "password in a substitution joined across a CRLF line", input: "mysql -p$(printf a \\\r\n" + p + ") db", want: "mysql -pREDACTED db"},
+		{name: "client after a function keyword that is an argument", input: "ssh function mysql -p" + p, want: "ssh function mysql -pREDACTED"},
+		{name: "client after a name and parentheses that are arguments", input: "ssh db mysql () -p" + p, want: "ssh db mysql () -pREDACTED"},
 		{name: "client in the body of a function named after it", input: "mysql() { mysql -p" + p + ` "$@"; }`, want: `mysql() { mysql -pREDACTED "$@"; }`},
 		{name: "many substitutions that do not close", input: "mysql" + strings.Repeat(" -p$(", 4000) + " -p" + p, want: "mysql -pREDACTED"},
 		{name: "many code spans with a substitution that does not close", input: strings.Repeat("`mysql -p$(printf "+p+"` ", 2000), want: "`mysql -pREDACTED` "},
@@ -367,6 +369,33 @@ func TestString_CommandLinePasswordsMoreReviewCases(t *testing.T) {
 		{name: "many quoted values with a substitution that does not close", input: strings.Repeat(`mysql -p"$(printf `+p+`" `, 2000), want: strings.Repeat(`mysql -p"REDACTED" `, 2000)},
 		{name: "many clients in a substitution that does not close", input: "mysql -p$(printf " + p + strings.Repeat("; mysql -p$(y) mysql -p$(z", 2000), want: "mysql -pREDACTED"},
 		{name: "many case patterns in a substitution", input: "mysql -p$(case x in " + strings.Repeat("x) :;; ", 4000) + "esac) db -p" + p, want: "mysql -pREDACTED db -pREDACTED"},
+	})
+}
+
+// A substitution goes on to the ")" that closes it, on a later line too,
+// and each one in it is read on its own.
+func TestString_CommandLinePasswordsNestedAndMultilineSubstitutions(t *testing.T) {
+	t.Parallel()
+
+	p := cliTestPassword
+	rejected := "wget" + strings.Repeat(" --password -$(x", 8000) + strings.Repeat(")", 8000) + " --password="
+	rejectedCases := "wget" + strings.Repeat(" --password -$(case x in x)", 4000) + strings.Repeat(";; esac)", 4000) + " --password="
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{name: "password in a substitution that closes on a later line", input: "mysql -p$(printf foo;\nprintf " + p + ") db\nssh -p2222 host", want: "mysql -pREDACTED db\nssh -p2222 host"},
+		{name: "password in a substitution that opens at a line end", input: "mysql -p$(\nprintf " + p + "\n) db", want: "mysql -pREDACTED db"},
+		{name: "password in a substitution across CRLF lines", input: "mysql -p$(printf foo;\r\nprintf " + p + ") db", want: "mysql -pREDACTED db"},
+		{name: "password joined to a substitution that closes on a later line", input: "mysql -pabc$(printf foo;\nprintf " + p + ") db", want: "mysql -pREDACTED db"},
+		{name: "long password in a substitution that closes on a later line", input: "wget --password=$(printf foo;\nprintf " + p + ") https://example.com/f", want: "wget --password=REDACTED https://example.com/f"},
+		{name: "openssl source in a substitution that closes on a later line", input: "openssl enc -aes-128-cbc -pass pass:$(printf foo;\nprintf " + p + ") -in f", want: "openssl enc -aes-128-cbc -pass pass:REDACTED -in f"},
+		{name: "fetch recipe followed by another command on the next line", input: "mysql -p$(cat /run/pw\nprintf " + p + ") db", want: "mysql -pREDACTED db"},
+		{name: "password in a substitution that does not close on any line", input: "mysql -p$(printf foo;\nprintf " + p, want: "mysql -pREDACTED"},
+		{name: "password after a case statement in a nested substitution", input: "mysql -p$(echo $(case x in x) printf a;; esac) " + p + ") db", want: "mysql -pREDACTED db"},
+		{name: "flag after a case statement in a nested substitution", input: "mysql -p$(echo $(case x in x) printf a;; esac)) db -p" + p, want: "mysql -pREDACTED db -pREDACTED"},
+		{name: "many lines in substitutions that do not close", input: strings.Repeat("mysql -p$(\n", 8000) + p, want: "mysql -pREDACTED"},
+		{name: "many substitutions that close on the next line", input: strings.Repeat("mysql -p$(printf "+p+"\n) db\n", 4000), want: strings.Repeat("mysql -pREDACTED db\n", 4000)},
+		{name: "many rejected values in nested substitutions", input: rejected + p, want: rejected + "REDACTED"},
+		{name: "many rejected values in nested substitutions with case statements", input: rejectedCases + p, want: rejectedCases + "REDACTED"},
+		{name: "many nested substitutions with case statements", input: "mysql -p" + strings.Repeat("$(case x in x) ", 8000) + strings.Repeat(";; esac)", 8000) + " db -p" + p, want: "mysql -pREDACTED db -pREDACTED"},
 	})
 }
 
@@ -560,6 +589,11 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		"sh -c 'mysql () { ssh -p2222 host; }; mysql'",
 		"function mysql { ssh -p2222 host; }",
 		"function\tmysql() { ssh -p2222 host; }",
+		"if true; then function mysql { ssh -p2222 host; }; fi",
+		"{ mysql() { ssh -p2222 host; }; }",
+		// fetch recipes across lines
+		"mysql -p$(\n  cat /run/pw\n) db",
+		"mysql -p$(cat /run/pw\n) db\nssh -p2222 host",
 		"type netrcLine struct {\n\tmachine  string\n\tlogin    string\n\tpassword string\n}",
 		"func connect(machine string, login string, password string) error",
 		"func connect(ctx context.Context, machine string, login string, password string) error",
