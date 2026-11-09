@@ -554,6 +554,12 @@ func TestString_CommandLinePasswordsQuotingAndListCases(t *testing.T) {
 		{name: "docker login password joined to its flag in a list", input: `subprocess.run(["docker", "login", "-u", "me", "-p` + p + `"])`, want: `subprocess.run(["docker", "login", "-u", "me", "-pREDACTED"])`},
 		{name: "helm registry login password in a list", input: `subprocess.run(["helm", "registry", "login", "-p", "` + p + `", "r.io"])`, want: `subprocess.run(["helm", "registry", "login", "-p", "REDACTED", "r.io"])`},
 		{name: "az login password in a call", input: `exec.Command("az", "login", "-u", "me", "-p", "` + p + `")`, want: `exec.Command("az", "login", "-u", "me", "-p", "REDACTED")`},
+		{name: "docker login after global options in a list", input: `subprocess.run(["docker", "--config", "/tmp/config", "login", "-p", "` + p + `"])`, want: `subprocess.run(["docker", "--config", "/tmp/config", "login", "-p", "REDACTED"])`},
+		{name: "docker login after global options in escaped quotes", input: `[\"docker\", \"-H\", \"tcp://h:2376\", \"--tls\", \"login\", \"-p\", \"` + p + `\"]`, want: `[\"docker\", \"-H\", \"tcp://h:2376\", \"--tls\", \"login\", \"-p\", \"REDACTED\"]`},
+		{name: "helm registry login after options in a list", input: `subprocess.run(["helm", "--debug", "registry", "--kube-context", "x", "login", "-p", "` + p + `"])`, want: `subprocess.run(["helm", "--debug", "registry", "--kube-context", "x", "login", "-p", "REDACTED"])`},
+		{name: "az login after a global option in a list", input: `subprocess.run(["az", "--debug", "login", "-p", "` + p + `"])`, want: `subprocess.run(["az", "--debug", "login", "-p", "REDACTED"])`},
+		{name: "sshpass password after a prompt option in a list", input: `subprocess.run(["sshpass", "-P", "Password:", "-p", "` + p + `", "ssh", "host"])`, want: `subprocess.run(["sshpass", "-P", "Password:", "-p", "REDACTED", "ssh", "host"])`},
+		{name: "sshpass password after a joined prompt option in a list", input: `subprocess.run(["sshpass", "-v", "-PPassword:", "-v", "-p", "` + p + `", "ssh", "host"])`, want: `subprocess.run(["sshpass", "-v", "-PPassword:", "-v", "-p", "REDACTED", "ssh", "host"])`},
 		{name: "list value that starts with two dashes after a program", input: `subprocess.run(["wget", "--password", "--` + p + `", url])`, want: `subprocess.run(["wget", "--password", "REDACTED", url])`},
 		{name: "list passphrase with grammatical words after a program", input: `subprocess.run(["wget", "--password", "my password is ` + p + `", url])`, want: `subprocess.run(["wget", "--password", "REDACTED", url])`},
 		{name: "list value with an escaped single quote", input: `subprocess.run(['wget', '--password', 'abc\'` + p + `'])`, want: `subprocess.run(['wget', '--password', 'REDACTED'])`},
@@ -969,6 +975,18 @@ func TestString_CommandLinePasswordListAndQuotingNonSecretsPreserved(t *testing.
 		`print("Note", "--password", "is required")`,
 		`print("Use", "--password", "to set it")`,
 		`args = ["--password", "--verbose"]`,
+		// a flag that is the value of an object, before the next key
+		"\"triggers\": [\n  {\n    \"literal\": \"--password\",\n    \"caseFold\": true\n  },",
+		`{"literal": "--passwd", "caseFold": true}`,
+		`{\"literal\": \"--password\", \"caseFold\": true}`,
+		// a container named login after global options, and a -p after
+		// sshpass -e, which is ssh's port
+		`subprocess.run(["docker", "--config", "/tmp/c", "run", "--name", "login", "-p", "8080:80"])`,
+		`subprocess.run(["sshpass", "-e", "-P", "Password:", "ssh", "-p", "2222", "host"])`,
+		// a reference in double quotes, which many languages expand in a
+		// list too (PHP, Perl, Kotlin, Groovy, Dart), and which is a name
+		// where they do not
+		`subprocess.run(["redis-cli", "-a", "$PASSWORD"])`,
 	})
 }
 

@@ -79,6 +79,16 @@ const (
 // that the list runs (["docker", "login", ...]).
 const cliListNext = `\\?["'],` + cliListGap + `\\?["']`
 
+// cliListOptions matches the options a client takes before its subcommand
+// in an argument list in code, as cliGlobalOptions does on a command line:
+// each an element that starts with '-', with at most one value element
+// after it (["docker", "--config", "/tmp/config", "login"]), each with the
+// end of the element before it. cliListChar is a character of an element.
+const (
+	cliListOptions = `(?:` + cliListNext + `-` + cliListChar + `*(?:` + cliListNext + `[^-"'\\\r\n]` + cliListChar + `*)?)*`
+	cliListChar    = `(?:[^"'\\\r\n]|\\\\)`
+)
+
 // cliGlobalOptions matches the options a client takes before its
 // subcommand, each a shell word (--config="$HOME/.docker") with at most one
 // value (--config $(mktemp -d)).
@@ -192,14 +202,14 @@ var cliPasswordFlags = []cliPasswordFlag{
 	// container named login (docker run --name login -p 8080:80) is not.
 	{
 		needles: []string{loginCommand},
-		command: regexp.MustCompile(`\b(?:docker|podman|nerdctl|buildah|skopeo|oras|helm)\b(?i:\.exe)?(?:["']?` + cliGlobalOptions + cliBlank + `(?:registry` + cliGlobalOptions + cliBlank + `)?|` + cliListNext + `(?:registry` + cliListNext + `)?)login\b`),
+		command: regexp.MustCompile(`\b(?:docker|podman|nerdctl|buildah|skopeo|oras|helm)\b(?i:\.exe)?(?:["']?` + cliGlobalOptions + cliBlank + `(?:registry` + cliGlobalOptions + cliBlank + `)?|` + cliListOptions + cliListNext + `(?:registry` + cliListOptions + cliListNext + `)?)login\b`),
 		flag:    regexp.MustCompile(cliShortFlag(`\s`, "p", `(?:`+cliBlank+`)?`)),
 	},
 	// az may be quoted with its path ("/usr/bin/az" login) and take
 	// global options before login (az --debug login).
 	{
 		needles: []string{loginCommand},
-		command: regexp.MustCompile(`\baz\b(?i:\.exe)?(?:["']?` + cliGlobalOptions + cliBlank + `|` + cliListNext + `)login\b`),
+		command: regexp.MustCompile(`\baz\b(?i:\.exe)?(?:["']?` + cliGlobalOptions + cliBlank + `|` + cliListOptions + cliListNext + `)login\b`),
 		flag:    regexp.MustCompile(cliShortFlag(`\s`, "p", `(?:`+cliBlank+`)?`)),
 	},
 	{
@@ -219,11 +229,12 @@ var cliPasswordFlags = []cliPasswordFlag{
 	// sshpass reads its own options only before the command it wraps, so
 	// the -p of sshpass -e ssh -p 2222 is ssh's port. They may be
 	// clustered after -v (-vv, -vp x, -vPprompt), and be elements of an
-	// argument list in code (["sshpass", "-v", "-p", "x", "ssh", "h"]).
+	// argument list in code (["sshpass", "-v", "-p", "x", "ssh", "h"],
+	// ["sshpass", "-P", "Password:", "-p", "x", ...]).
 	{
 		needles: []string{"sshpass"},
 		command: regexp.MustCompile(`\bsshpass\b`),
-		flag:    regexp.MustCompile(cliShortFlag(`^(?:(?:`+cliBlank+`-(?:v+|v*P[ \t]*(?:`+cliFlagValue+`)))*`+cliBlank+`|\\?["'](?:,`+cliListGap+`\\?["']-v+\\?["'])*,`+cliListGap+`)`, "v*p", `[ \t]*`)),
+		flag:    regexp.MustCompile(cliShortFlag(`^(?:(?:`+cliBlank+`-(?:v+|v*P[ \t]*(?:`+cliFlagValue+`)))*`+cliBlank+`|\\?["'](?:,`+cliListGap+`\\?["']-(?:v+|v*P(?:`+cliListChar+`+|`+cliListNext+cliListChar+`*))\\?["'])*,`+cliListGap+`)`, "v*p", `[ \t]*`)),
 		leading: true,
 	},
 	{
@@ -2114,10 +2125,11 @@ func isListFlag(s string, base int, loc []int) bool {
 
 // listElementValue returns the value in the string of code that opens at
 // s[open], an element of an argument list, false when no string opens there
-// (a name, such as pw).
+// (a name, such as pw) or when the string is the key of an object, which
+// a colon follows ({"literal": "--password", "caseFold": true}).
 func listElementValue(s string, open int) (cliValue, bool) {
 	end, n := codeStringEnd(s, open)
-	if n == 0 {
+	if n == 0 || strings.HasPrefix(strings.TrimLeft(s[end:], " \t\r\n"), ":") {
 		return cliValue{}, false
 	}
 	return cliValue{start: open + n, end: end - n, quoted: true, singleQuoted: s[open] == '\''}, true
