@@ -123,13 +123,16 @@ func (c *CursorAgent) InstallHooks(ctx context.Context, force bool) (int, error)
 	// Define hook commands
 	const cmdPrefix = "entire hooks cursor "
 
-	// Cursor spawns hook commands through the native OS shell (cmd.exe on
-	// Windows), so a `sh -c '…'` wrapper silently fails to launch on a
-	// Windows host without a working POSIX sh — no hook fires and, because
-	// this is the *silent* wrapper, no error surfaces (issue #1424).
-	// UseWindowsProductionHooks probes for a runnable sh and only swaps in
-	// the native cmd.exe wrapper when one is absent, so this is a no-op on
-	// hosts (incl. all non-Windows) where the sh wrapper already works.
+	// Cursor spawns hook commands through the native OS shell, which on
+	// Windows is PowerShell (https://cursor.com/docs/hooks), so a
+	// `sh -c '…'` wrapper silently fails to launch on a Windows host without
+	// a working POSIX sh — no hook fires and, because this is the *silent*
+	// wrapper, no error surfaces (issue #1424). UseWindowsProductionHooks
+	// probes for a runnable sh and only swaps in the native wrapper when one
+	// is absent, so this is a no-op on hosts (incl. all non-Windows) where
+	// the sh wrapper already works. The native wrapper is the bare-cmd.exe
+	// form, not the cmd-host form droid uses: PowerShell does not expand its
+	// %SystemRoot%. See agent.WrapWindowsProductionSilentHookCommand.
 	useWindowsHooks := agent.UseWindowsProductionHooks(ctx)
 	sessionStartCmd := agent.WrapProductionSilentHookCommandForOS(cmdPrefix+HookNameSessionStart, useWindowsHooks)
 	sessionEndCmd := agent.WrapProductionSilentHookCommandForOS(cmdPrefix+HookNameSessionEnd, useWindowsHooks)

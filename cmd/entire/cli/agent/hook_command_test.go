@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"os"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -388,8 +390,8 @@ func TestWrapProductionPlainTextWarningHookCommandForOS(t *testing.T) {
 func TestIsManagedHookCommand_RecognisesDirectWindowsSilentWrapper(t *testing.T) {
 	// No t.Parallel(): sibling tests in this file mutate the package-level OS seam.
 	cmd := WrapWindowsProductionSilentHookCommandDirect("entire hooks antigravity stop")
-	if !strings.HasPrefix(cmd, windowsProductionHookWrapperPrefix) {
-		t.Fatalf("direct wrapper must start with the bare Windows prefix, got %q", cmd)
+	if !strings.HasPrefix(cmd, windowsPathOnlyLookup+windowsEntireGuard) {
+		t.Fatalf("direct wrapper must start with the bare Windows body, got %q", cmd)
 	}
 	if strings.HasPrefix(cmd, "cmd.exe") {
 		t.Fatalf("direct wrapper must not nest a cmd.exe invocation, got %q", cmd)
@@ -404,5 +406,127 @@ func TestIsManagedHookCommand_RecognisesDirectWindowsSilentWrapper(t *testing.T)
 	_, dropped = DropStaleManagedHooks([]string{cmd}, func(s string) string { return s }, nil)
 	if !dropped {
 		t.Fatal("an unwanted direct-wrapper command must be dropped as Entire's own")
+	}
+}
+
+// TestWindowsWrappers_ExactForms pins every Windows wrapper string, since the
+// agents write them verbatim into config files and compare them byte for byte.
+// Each body sets NoDefaultCurrentDirectoryInExePath before it names a program,
+// so cmd.exe resolves `where.exe` and `entire` from PATH and never from the
+// repository the hook runs in.
+func TestWindowsWrappers_ExactForms(t *testing.T) {
+	t.Parallel()
+
+	const hook = "entire hooks x stop"
+	const body = `set NoDefaultCurrentDirectoryInExePath=1& pushd %SystemRoot%& where.exe entire >nul 2>nul & if errorlevel 1 `
+	cases := []struct {
+		name, got, want string
+	}{
+		{"nested, bare cmd.exe", WrapWindowsProductionSilentHookCommand(hook),
+			`cmd.exe /d /s /c "` + body + `(popd& ver>nul) else (popd& entire hooks x stop)"`},
+		{"nested, cmd host", WrapWindowsProductionSilentHookCommandForCmdHost(hook),
+			`%SystemRoot%\System32\cmd.exe /d /s /c "` + body + `(popd& ver>nul) else (popd& entire hooks x stop)"`},
+		{"direct silent", WrapWindowsProductionSilentHookCommandDirect(hook),
+			body + `(popd& ver>nul) else (popd& entire hooks x stop)`},
+		{"plain-text warning", WrapWindowsProductionPlainTextWarningHookCommand(hook, WarningFormatSingleLine),
+			body + `(popd& echo ` + escapeWindowsCMD(windowsPlainTextWarning(WarningFormatSingleLine)) + `) else (popd& entire hooks x stop)`},
+	}
+	for _, tc := range cases {
+		if tc.got != tc.want {
+			t.Errorf("%s:\n got %q\nwant %q", tc.name, tc.got, tc.want)
+		}
+	}
+	if json := WrapWindowsProductionJSONWarningHookCommand(hook, WarningFormatSingleLine); !strings.HasPrefix(json, body+`(popd& echo {^"systemMessage^":`) {
+		t.Errorf("JSON warning wrapper must start with the path-only body, got %q", json)
+	}
+}
+
+func TestWrapProductionSilentHookCommandForCmdHostOS(t *testing.T) {
+	t.Parallel()
+
+	const hook = "entire hooks cursor stop"
+	if got, want := WrapProductionSilentHookCommandForCmdHostOS(hook, false), WrapProductionSilentHookCommand(hook); got != want {
+		t.Errorf("useWindows=false = %q, want the sh wrapper %q", got, want)
+	}
+	if got, want := WrapProductionSilentHookCommandForCmdHostOS(hook, true), WrapWindowsProductionSilentHookCommandForCmdHost(hook); got != want {
+		t.Errorf("useWindows=true = %q, want %q", got, want)
+	}
+}
+
+// TestIsManagedHookCommand_WindowsWrapperMigration covers every Windows wrapper
+// an older version installed: each must still read as Entire's own, differ from
+// what is installed now, and be dropped by DropStaleManagedHooks, so the next
+// `entire enable` replaces it and `entire disable` removes it.
+func TestIsManagedHookCommand_WindowsWrapperMigration(t *testing.T) {
+	t.Parallel()
+
+	const hook = "entire hooks codex stop"
+	legacy := []string{
+		`cmd.exe /d /s /c "where.exe entire >nul 2>nul & if errorlevel 1 (ver>nul) else (entire hooks codex stop)"`,
+		`where.exe entire >nul 2>nul & if errorlevel 1 (ver>nul) else (entire hooks codex stop)`,
+		`where.exe entire >nul 2>nul & if errorlevel 1 (echo Entire CLI is enabled but not installed or not on PATH.) else (entire hooks codex stop)`,
+		`cmd.exe /d /s /c "set NoDefaultCurrentDirectoryInExePath=1& where.exe entire >nul 2>nul & if errorlevel 1 (ver>nul) else (entire hooks codex stop)"`,
+		`%SystemRoot%\System32\cmd.exe /d /s /c "set NoDefaultCurrentDirectoryInExePath=1& where.exe entire >nul 2>nul & if errorlevel 1 (ver>nul) else (entire hooks codex stop)"`,
+		`set NoDefaultCurrentDirectoryInExePath=1& where.exe entire >nul 2>nul & if errorlevel 1 (ver>nul) else (entire hooks codex stop)`,
+	}
+	current := []string{
+		WrapWindowsProductionSilentHookCommand(hook),
+		WrapWindowsProductionSilentHookCommandForCmdHost(hook),
+		WrapWindowsProductionSilentHookCommandDirect(hook),
+		WrapWindowsProductionJSONWarningHookCommand(hook, WarningFormatSingleLine),
+		WrapWindowsProductionPlainTextWarningHookCommand(hook, WarningFormatSingleLine),
+	}
+	id := func(s string) string { return s }
+	for _, command := range append(slices.Clone(legacy), current...) {
+		if !IsManagedHookCommand(command) {
+			t.Errorf("IsManagedHookCommand(%q) = false, want true", command)
+		}
+	}
+	for _, old := range legacy {
+		if slices.Contains(current, old) {
+			t.Errorf("legacy wrapper %q is still generated; installs would not replace it", old)
+		}
+	}
+	kept, dropped := DropStaleManagedHooks(append(slices.Clone(legacy), current[0]), id, current[:1])
+	if !dropped || !slices.Equal(kept, current[:1]) {
+		t.Errorf("DropStaleManagedHooks kept %q (dropped=%v), want only the current wrapper", kept, dropped)
+	}
+	if kept, _ := DropStaleManagedHooks(current, id, nil); len(kept) != 0 {
+		t.Errorf("disable must remove every current Windows wrapper, kept %q", kept)
+	}
+}
+
+func TestIsManagedHookCommand_WindowsWrapperAroundForeignCommand(t *testing.T) {
+	t.Parallel()
+
+	for _, command := range []string{
+		WrapWindowsProductionSilentHookCommand("entire status --json"),
+		WrapWindowsProductionSilentHookCommandForCmdHost("my-tool hooks stop"),
+		WrapWindowsProductionSilentHookCommandDirect("echo entire hooks"),
+		`%SystemRoot%\System32\cmd.exe /d /s /c "echo hi"`,
+	} {
+		if IsManagedHookCommand(command) {
+			t.Errorf("IsManagedHookCommand(%q) = true; it does not run an Entire hook", command)
+		}
+	}
+}
+
+// TestSHHookWrapperProbe_DoesNotSearchWorkingDirectory pins how the sh probe is
+// started: outside the directory `entire` runs in, and with cmd.exe told not to
+// search its own working directory, so a repository `sh.bat` neither runs nor
+// decides which hook wrapper is installed. The Windows execution of the same
+// probe is in hook_command_exec_windows_test.go.
+func TestSHHookWrapperProbe_DoesNotSearchWorkingDirectory(t *testing.T) {
+	t.Parallel()
+
+	cmd := shHookWrapperProbe(t.Context(), shHookWrapperProbeCommand)
+	if cmd.Dir != os.TempDir() {
+		t.Errorf("probe Dir = %q, want the temp directory %q", cmd.Dir, os.TempDir())
+	}
+	if !slices.Contains(cmd.Env, "NoDefaultCurrentDirectoryInExePath=1") {
+		t.Errorf("probe environment must set NoDefaultCurrentDirectoryInExePath=1, got %q", cmd.Env)
+	}
+	if got := cmd.Args; !slices.Equal(got, []string{systemCmdExe(), "/d", "/s", "/c", shHookWrapperProbeCommand}) {
+		t.Errorf("probe args = %q", got)
 	}
 }

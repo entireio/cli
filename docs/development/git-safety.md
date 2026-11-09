@@ -365,6 +365,22 @@ avoid-the-shell side) and `cmd/entire/cli/agent/hook_command.go`
 (`escapeWindowsCMD`, the third-party-exec side). Each doc comment points at the
 other.
 
+#### Hook Commands Resolve Programs from PATH, Not the Working Directory
+
+cmd.exe looks for a bare program name in its current directory before PATH unless the environment variable `NoDefaultCurrentDirectoryInExePath` is set (see `NeedCurrentDirectoryForExePathW`). Agents run Entire's hooks with the repository root as the working directory, so without that variable an `entire.cmd`, `entire.bat`, `entire.exe` or `where.exe` committed at a repository root would run in place of the installed CLI on every hook.
+
+- Every Windows hook wrapper in `agent/hook_command.go` starts its cmd.exe body with `set NoDefaultCurrentDirectoryInExePath=1& `, so `where.exe` and `entire` resolve from PATH. The `entire` it starts inherits the variable.
+- The nested form's leading `cmd.exe` is resolved by the agent's shell before that `set` runs. For agents that always hand the line to cmd.exe (Factory Droid) it is `%SystemRoot%\System32\cmd.exe`. PowerShell does not expand `%SystemRoot%` and never runs programs from the current directory, so agents whose hook shell is or may be PowerShell keep a bare `cmd.exe`: Cursor, whose desktop app runs Windows hooks through PowerShell, and Codex, whose hook shell is the session shell (PowerShell by default). Under a Codex session whose shell is cmd.exe that token is still looked up in the working directory. Antigravity's direct form has no leading program.
+- `where.exe` searches its working directory for its argument whatever the variable says, so the guard runs it from `%SystemRoot%` (`pushd %SystemRoot%& where.exe entire …`) and both branches start with `popd& `. A repository `entire.*` therefore cannot make the check report a CLI that `entire` then fails to find on PATH: with the CLI missing, the hook still skips silently or prints its warning and exits 0. `$PATH:entire` would restrict `where` too, but PowerShell expands it inside the Codex form's quoted block.
+- The sh probe behind `agent.UseWindowsProductionHooks` (run by `entire enable`, the Codex hook check and Codex review setup) starts the system cmd.exe by full path, from the temp directory, with the variable set. `os/exec` checks the working directory before PATH on Windows and fails a match there with `ErrDot`, so a bare `cmd.exe` name would let a repository file fail the probe and choose the wrapper form.
+
+`hook_command_exec_windows_test.go` runs each wrapper through each agent's shell, and the probe, from a directory of decoy programs and fails if any of them runs. With the CLI missing it also checks the exit code is 0 and that the warning forms print their warning.
+
+This is partial hardening. These gaps remain, and predate it:
+
+- Under a Codex session whose shell is cmd.exe, the bare `cmd.exe` that opens the Codex wrapper is looked up in the working directory first, so a repository `cmd.exe` runs before the wrapper can set the variable.
+- When the probe finds a working sh, Codex and Cursor install the `sh -c '…'` wrapper. A host that hands that line to cmd.exe (Codex's cmd.exe shell) resolves the leading `sh` from the working directory first, so a repository `sh.bat`, `sh.cmd` or `sh.exe` runs. PowerShell and a POSIX sh do not look there.
+
 **The auto-updater's `sh -c` is a considered exception, and it is enforced
 rather than asserted.** `versioncheck.realRunInstaller` (unix only) runs the
 update command through a shell, which the rule above would otherwise forbid. It

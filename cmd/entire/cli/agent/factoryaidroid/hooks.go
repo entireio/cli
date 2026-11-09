@@ -75,7 +75,10 @@ const hookCommandPrefix = "entire hooks factoryai-droid "
 // Unlike Codex and Cursor the choice is NOT gated on
 // agent.UseWindowsProductionHooks: droid never hands a hook to sh on Windows,
 // so whether a working sh exists there changes nothing. See
-// agent.HookHostIsWindows.
+// agent.HookHostIsWindows. Because droid's own cmd.exe resolves the first
+// token of the line, the silent wrapper is the cmd-host form, which names the
+// nested cmd.exe as %SystemRoot%\System32\cmd.exe rather than leaving cmd.exe
+// to look in the repository first.
 //
 // Scope: this fixes droid 0.178.0 and later, the two compositions verified end
 // to end on Windows. 0.109.1 spawned `cmd.exe /c <H>` WITHOUT
@@ -88,7 +91,7 @@ const hookCommandPrefix = "entire hooks factoryai-droid "
 // is not taken here because it would trade the shape actually verified on
 // current droid for one that is not.
 func silentHookCommand(verb string, useWindows bool) string {
-	return agent.WrapProductionSilentHookCommandForOS(hookCommandPrefix+verb, useWindows)
+	return agent.WrapProductionSilentHookCommandForCmdHostOS(hookCommandPrefix+verb, useWindows)
 }
 
 // stopHookCommand is silentHookCommand for the Stop hook, which carries the
