@@ -11,6 +11,8 @@ func TestDetectPII_InternationalPhones(t *testing.T) {
 	redacted := []struct{ name, input, want string }{
 		{"IT mobile", "chiamami al +39 347 000 0001 domani", "chiamami al [REDACTED_PHONE] domani"},
 		{"IT country code in parentheses", "Tel. (+39) 347 000 0001", "Tel. [REDACTED_PHONE]"},
+		{"country code in parentheses after a dot", "Tel.(+44) 20 7946 0958", "Tel.[REDACTED_PHONE]"},
+		{"country code in parentheses after a word", "tel(+39) 347 000 0001", "tel[REDACTED_PHONE]"},
 		{"AR mobile", "WhatsApp: +54 9 11 0000-0001", "WhatsApp: [REDACTED_PHONE]"},
 		{"UK London", "call +44 20 7946 0958.", "call [REDACTED_PHONE]."},
 		{"UK trunk zero", "+44 (0)20 7946 0958", "[REDACTED_PHONE]"},

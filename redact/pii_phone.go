@@ -32,6 +32,11 @@ const (
 // number in international format, and its bounds: a "(+39)" country code
 // starts one byte earlier, and digits past the 15th are left out.
 func redactableIntlPhone(s string, start, end int) (int, int, bool) {
+	// The byte before the + decides, before a "(" around the country code
+	// joins the match: the "(" is the boundary (Tel.(+44) 20 7946 0958).
+	if !intlPhoneStandsAlone(s, start) {
+		return 0, 0, false
+	}
 	ccEnd := start + 1
 	for ccEnd < end && isDigit(s[ccEnd]) {
 		ccEnd++
@@ -45,9 +50,6 @@ func redactableIntlPhone(s string, start, end int) (int, int, bool) {
 			// "(+442079460958)": the parenthesis closes the text around it.
 			end = ccEnd
 		}
-	}
-	if !intlPhoneStandsAlone(s, start) {
-		return 0, 0, false
 	}
 	end, ok := endIntlPhone(s, ccEnd, end)
 	if !ok {
