@@ -716,13 +716,14 @@ func movedEntireHook(root *os.Root, hook, n string) (ours, stale bool) {
 // runs the copy is that backup, so an unguarded chain calls it again and the
 // commit or push never finishes. What refreshMovedEntireHooks writes has no
 // chain and is current, so one install clears every case. Only lines that run
-// count: a copy that names the backup in a comment does not chain to it, and
-// reading it stale would rewrite a current copy the user may have added to.
+// count: a copy that names the backup or a launcher in a comment does not run
+// it, and reading it stale would rewrite a current copy the user may have added
+// to. The pre-push texts are matched whole, comments included.
 func movedEntireHookOutdated(hook, content string) bool {
-	if entireHookLineRunsFromWorkingTree(content) || (hook == prePushHook && isPrePushBeforeRefList(content)) {
+	code := shellCode(content)
+	if entireHookLineRunsFromWorkingTree(code) || (hook == prePushHook && isPrePushBeforeRefList(content)) {
 		return true
 	}
-	code := shellCode(content)
 	return namesFile([]byte(code), hook+backupSuffix) && !strings.Contains(code, chainGuard(hook))
 }
 
