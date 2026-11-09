@@ -1422,6 +1422,21 @@ func TestString_ConnectionSecretsCaughtWithoutScanners(t *testing.T) {
 			want:  "DB_PASSWORD=REDACTED",
 		},
 		{
+			name:  "an equals sign after the quoted blank is still the value",
+			input: `DB_PASSWORD=abc"d e"=hunter2`,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "an equals sign after a quoted password is still the value",
+			input: `DB_PASSWORD="d e"=hunter2`,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "an equals sign after the quoted blank of a credential",
+			input: `API_KEY=abc"d e"=hunter2xyz`,
+			want:  "API_KEY=REDACTED",
+		},
+		{
 			name:  "code literal joined with more text",
 			input: `API_KEY="None"realtoken`,
 			want:  "API_KEY=REDACTED",
@@ -2912,27 +2927,40 @@ func TestString_JoinedShellWordValues(t *testing.T) {
 			want:  `printf REDACTED|examplectl secrets put API_KEY`,
 		},
 		{
-			name:  "the next assignment after a quoted blank",
+			name:  "an assignment after a quoted blank is part of the value",
 			input: `DB_PASSWORD=a" "DB_USER=app`,
-			want:  `DB_PASSWORD=REDACTED=app`,
+			want:  `DB_PASSWORD=REDACTED`,
+		},
+		{
+			name:  "a key inside a redacted word is not read again",
+			input: `DB_PASSWORD=a"x DB_PASSWORD=b" echo "hi"`,
+			want:  `DB_PASSWORD=REDACTED echo "hi"`,
+		},
+		{
+			name:  "a credential key inside a redacted word is not read again",
+			input: `API_KEY=a"x API_KEY=b" echo "hi"`,
+			want:  `API_KEY=REDACTED echo "hi"`,
 		},
 	})
 }
 
-// A word that reads on past its capture stops at the next assignment, so a
-// line of joined assignments is read in linear time, not once per match.
+// A match inside a shell word an earlier match already redacted is not read
+// again, so a line of joined assignments is read in linear time, not once
+// per match.
 func TestString_JoinedShellWordsStayLinear(t *testing.T) {
 	t.Parallel()
-	in := strings.Repeat(`DB_PASSWORD=a" "`, 20000)
-	done := make(chan string, 1)
-	go func() { done <- String(in) }()
-	select {
-	case out := <-done:
-		if strings.Contains(out, `a" "`) {
-			t.Fatalf("joined passwords left visible: %.80q", out)
+	for _, unit := range []string{`DB_PASSWORD=a" "`, `API_KEY=a" "`, `DB_PASSWORD=a" "=`} {
+		in := strings.Repeat(unit, 20000)
+		done := make(chan string, 1)
+		go func() { done <- String(in) }()
+		select {
+		case out := <-done:
+			if strings.Contains(out, `a" "`) {
+				t.Fatalf("joined values of %q left visible: %.80q", unit, out)
+			}
+		case <-time.After(30 * time.Second):
+			t.Fatalf("String took over 30s on 20000 joined %q assignments", unit)
 		}
-	case <-time.After(30 * time.Second):
-		t.Fatal("String took over 30s on 20000 joined assignments")
 	}
 }
 

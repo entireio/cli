@@ -810,8 +810,13 @@ func detectCredentialValues(s string) []taggedRegion {
 	if !strings.ContainsRune(s, '=') {
 		return regions
 	}
+	// covered is where the last redacted value ends. A match whose value
+	// starts before it lies inside a shell word already redacted whole
+	// (DB_PASSWORD=a" "DB_PASSWORD=b is one word), so it is not read again:
+	// reading each such match to the word's end would take quadratic time.
+	covered := 0
 	for _, loc := range credentialValuePattern.FindAllStringSubmatchIndex(s, -1) {
-		if len(loc) < 6 || loc[4] < 0 || loc[5] < 0 {
+		if len(loc) < 6 || loc[4] < 0 || loc[5] < 0 || loc[4] < covered {
 			continue
 		}
 		// Main's shared placeholder rules, except that a single-quoted value
@@ -819,6 +824,7 @@ func detectCredentialValues(s string) []taggedRegion {
 		value, isReal := credentialValueRegion(s, loc[4], loc[5], true, isRealPasswordPiece)
 		if isReal {
 			regions = append(regions, taggedRegion{region: value})
+			covered = value.end
 		}
 	}
 	if strings.Contains(s, "sig=") {
@@ -839,6 +845,10 @@ func detectCredentialKeyCaptures(
 	valueGroup := pattern.SubexpIndex("value")
 	keyGroup := pattern.SubexpIndex("key")
 	var regions []taggedRegion
+	// covered is where the last redacted value ends, as in
+	// detectCredentialValues: a value inside it is part of a word already
+	// redacted whole.
+	covered := 0
 	for _, match := range pattern.FindAllStringSubmatchIndex(s, -1) {
 		keyStart, keyEnd, ok := captureRange(match, keyGroup)
 		if !ok {
@@ -857,7 +867,7 @@ func detectCredentialKeyCaptures(
 			continue
 		}
 		valueStart, valueEnd, valueOK := captureRange(match, valueGroup)
-		if !valueOK {
+		if !valueOK || valueStart < covered {
 			continue
 		}
 		// The whole shell word is the value ("None"x is not None).
@@ -878,6 +888,7 @@ func detectCredentialKeyCaptures(
 				captured.end = extendPastValueSeparators(s, captured.end)
 			}
 			regions = append(regions, captured)
+			covered = captured.end
 		}
 	}
 	return regions
@@ -1074,10 +1085,10 @@ func quotedPieceEnd(s string, open int) int {
 }
 
 // bareWordStopBytes end the bare text of any shell word: blanks, quotes,
-// value separators (, ; &), the other shell operators (| < > ( ) and a
-// backtick), so printf v"x"|secrets keeps its pipe, and = so a word never
-// reads on into the next assignment (DB_PASSWORD=a" "DB_PASSWORD=...).
-const bareWordStopBytes = " \t\n\r\f\v\"',;&|<>()`="
+// value separators (, ; &) and the other shell operators (| < > ( ) and a
+// backtick), so printf v"x"|secrets keeps its pipe. An = is part of the word,
+// as in the shell: DB_PASSWORD=abc"d e"=hunter2 is the value abcd e=hunter2.
+const bareWordStopBytes = " \t\n\r\f\v\"',;&|<>()`"
 
 // codeAfterStringBytes also end the bare text of a word that started as a
 // quoted string. Right after a string they read as code or Markdown, not as
