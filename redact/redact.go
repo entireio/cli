@@ -870,7 +870,7 @@ func detectCredentialKeyCaptures(
 		if shouldPreserve != nil && keyEnd <= valueStart && shouldPreserve(s[valueStart:valueEnd], s[keyEnd:valueStart]) {
 			return 0
 		}
-		captured, ok := nonPlaceholderCapture(s, key, valueStart, valueEnd, wholeWord)
+		captured, ok := nonPlaceholderCapture(s, key, valueStart, valueEnd, wholeWord, shouldPreserve != nil)
 		if !ok {
 			return 0
 		}
@@ -1203,16 +1203,21 @@ func isCredentialCodeReference(value string) bool {
 
 // nonPlaceholderCapture returns the value captured at s[start:end] under key
 // when it is a real credential. wholeWord reads it as a shell word joined
-// from pieces; otherwise it is read as captured.
-func nonPlaceholderCapture(s, key string, start, end int, wholeWord bool) (taggedRegion, bool) {
-	valueRegion := credentialValueRegion
-	if !wholeWord {
-		valueRegion = capturedValueRegion
-	}
-	value, isReal := valueRegion(s, start, end, false, func(piece string, singleQuoted bool) bool {
+// from pieces; otherwise it is read as captured. extendJoined judges a joined
+// word that starts as bare text after the separator extension its region gets
+// anyway, as the password pattern does, so ${A}"${B}",hunter2 is one value.
+func nonPlaceholderCapture(s, key string, start, end int, wholeWord, extendJoined bool) (taggedRegion, bool) {
+	isReal := func(piece string, singleQuoted bool) bool {
 		return hasNonPlaceholderKeyValue(key, piece, singleQuoted)
-	})
-	if !isReal {
+	}
+	value, secret, joined := region{}, false, false
+	if wholeWord {
+		value, secret, joined = joinedValueRegion(s, start, end, extendJoined, isReal)
+	}
+	if !joined {
+		value, secret = capturedValueRegion(s, start, end, false, isReal)
+	}
+	if !secret {
 		return taggedRegion{}, false
 	}
 	return taggedRegion{region: value}, true
@@ -1238,16 +1243,26 @@ func isRealPasswordPiece(value string, singleQuoted bool) bool {
 // string was quoted on purpose, so a separator after it ends a command, not
 // the value ("x"'y';echo).
 func credentialValueRegion(s string, start, end int, extend bool, isReal func(piece string, singleQuoted bool) bool) (region, bool) {
-	if pieces, wordEnd, joined := joinedShellWord(s, start, end); joined {
-		if extend && !isQuoteByte(s[start]) {
-			if extended := extendPastValueSeparators(s, wordEnd); extended > wordEnd {
-				pieces = append(pieces, wordPiece{start: wordEnd, end: extended})
-				wordEnd = extended
-			}
-		}
-		return region{start, wordEnd}, isRealJoinedWord(s, pieces, isReal)
+	if value, secret, joined := joinedValueRegion(s, start, end, extend, isReal); joined {
+		return value, secret
 	}
 	return capturedValueRegion(s, start, end, extend, isReal)
+}
+
+// joinedValueRegion is credentialValueRegion for a value whose shell word is
+// joined from several pieces, and joined is false for any other value.
+func joinedValueRegion(s string, start, end int, extend bool, isReal func(piece string, singleQuoted bool) bool) (value region, secret, joined bool) {
+	pieces, wordEnd, joined := joinedShellWord(s, start, end)
+	if !joined {
+		return region{}, false, false
+	}
+	if extend && !isQuoteByte(s[start]) {
+		if extended := extendPastValueSeparators(s, wordEnd); extended > wordEnd {
+			pieces = append(pieces, wordPiece{start: wordEnd, end: extended})
+			wordEnd = extended
+		}
+	}
+	return region{start, wordEnd}, isRealJoinedWord(s, pieces, isReal), true
 }
 
 // capturedValueRegion is credentialValueRegion for a value read as main reads
@@ -1378,14 +1393,27 @@ const bareWordStopBytes = " \t\n\r\f\v\"',;&|<>()`"
 // and "x"\n in JSON-escaped text.
 const codeAfterStringBytes = ".:+*?[]{}\\"
 
+// escapedWordBytes are the bareWordStopBytes that a backslash makes part of
+// a word that started as bare text, as the shell reads them: the | in
+// a"b"\|c is text. A backslash before a quote is left as it is, because raw
+// JSON text escapes quotes the same way, and one before a line end continues
+// the line rather than the word.
+const escapedWordBytes = " \t,;&|<>()`"
+
 // bareWordTextEnd returns where the bare text of a shell word that starts at
-// s[i] ends: at one of bareWordStopBytes. A ${...} expansion closed on its
-// line is read whole, quotes and all, so ${PW:-""} and "$A"${B} are each one
-// piece. In a word that started as a quoted string, codeAfterStringBytes, a
-// $( command substitution and a ${ that does not close end it too.
+// s[i] ends: at one of bareWordStopBytes, unless a backslash escapes it in a
+// word that started as bare text (see escapedWordBytes). A ${...} expansion
+// closed on its line is read whole, quotes and all, so ${PW:-""} and "$A"${B}
+// are each one piece. In a word that started as a quoted string,
+// codeAfterStringBytes, a $( command substitution and a ${ that does not
+// close end it too.
 func bareWordTextEnd(s string, i int, startsQuoted bool) int {
 	for i < len(s) {
 		c := s[i]
+		if !startsQuoted && c == '\\' && i+1 < len(s) && strings.IndexByte(escapedWordBytes, s[i+1]) >= 0 {
+			i += 2
+			continue
+		}
 		if strings.IndexByte(bareWordStopBytes, c) >= 0 {
 			return i
 		}
