@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -259,6 +260,26 @@ func TestRecordStampedTrailer_RecordsTheHeadItStampedOn(t *testing.T) {
 	assert.Equal(t, testutil.GetHeadHash(t, dir), entries[0].Head)
 	assert.Empty(t, entries[0].SessionIDs)
 	assert.Contains(t, trailers.ParseAllCheckpoints(addCheckpointTrailer("x\n", cpID)), cpID, "sanity: the carried check parses the trailer prepare writes")
+}
+
+// A stamp whose sessions entry cannot be written is not recorded: without the
+// HEAD in it, an earlier commit's post-commit would drop the stamp, and the
+// commit would keep a trailer for a checkpoint that is never written. Prepare
+// then leaves the commit unlinked, as for any stamp it cannot record.
+func TestRecordStampedTrailer_FailsWithoutItsSessionsEntry(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	ctx := context.Background()
+	kept, cpID := id.MustCheckpointID("d1d1d1d1d1d1"), id.MustCheckpointID("d2d2d2d2d2d2")
+	require.True(t, recordStampedTrailer(ctx, kept))
+
+	gitDir := strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", "--absolute-git-dir"))
+	sessionsPath := filepath.Join(gitDir, stampedSessionsFile)
+	require.NoError(t, os.Remove(sessionsPath))
+	require.NoError(t, os.Mkdir(sessionsPath, 0o700), "an entry nothing can write over")
+
+	assert.False(t, recordStampedTrailer(ctx, cpID))
+	assert.Equal(t, map[id.CheckpointID]bool{kept: true}, readStampedTrailers(ctx), "the stamp is not recorded")
 }
 
 // The same race through the hooks: the next commit is prepared before the

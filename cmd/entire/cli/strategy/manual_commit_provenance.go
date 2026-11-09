@@ -425,10 +425,10 @@ func recordStampedTrailer(ctx context.Context, cpID id.CheckpointID) bool {
 // IDs is unaffected. Prepare writes both under the stamp-records lock and
 // post-commit takes both under it, so a post-commit that finds its stamp finds
 // the entry too, however another commit's hooks overlap it. With no entry for
-// its trailer, post-commit matches afresh, as before. The entry also names the
-// linked sessions prepare stamped on their shape alone (withTrustedSessions),
-// which post-commit condenses without overlap evidence however they have
-// settled since.
+// its trailer (a stamp an older binary wrote), post-commit matches afresh, as
+// before. The entry also names the linked sessions prepare stamped on their
+// shape alone (withTrustedSessions), which post-commit condenses without
+// overlap evidence however they have settled since.
 const stampedSessionsFile = "entire-stamped-sessions.json"
 
 type stampedSessions struct {
@@ -437,16 +437,19 @@ type stampedSessions struct {
 	TrustedSessionIDs []string        `json:"trusted_session_ids,omitempty"`
 	// Head is the commit HEAD named when prepare stamped the trailer, empty
 	// before the first commit or from a binary that did not record it. A
-	// post-commit keeps the stamps prepared on top of its own commit
-	// (takeStampRecords).
+	// post-commit keeps the stamps prepared on its own commit or on one made on
+	// top of it since (takeStampRecords).
 	Head string `json:"head,omitempty"`
 }
 
 // writeStampRecords records entry's trailer as stamped, and entry with it,
 // replacing an earlier entry for the trailer (a reservation stamped again by a
-// later prepare). Only the stamp must land; without the entry post-commit
-// matches afresh, and keeps the stamp for the post-commit of its own commit
-// only.
+// later prepare). Both must land: the entry's HEAD is what keeps the stamp
+// when an earlier commit's post-commit takes the records first, so a stamp
+// without it can be dropped before its own post-commit, leaving the commit a
+// trailer for a checkpoint that is never written. The entry is written first,
+// and restored if the stamp then fails; an entry without a stamp is dropped by
+// the next post-commit.
 func writeStampRecords(ctx context.Context, entry stampedSessions) error {
 	root, err := perWorktreeGitRoot(ctx)
 	if err != nil {
@@ -454,16 +457,19 @@ func writeStampRecords(ctx context.Context, entry stampedSessions) error {
 	}
 	release := lockStampRecords(ctx, root)
 	defer release()
-	if err := writeStampedTrailerIn(root, entry.CheckpointID); err != nil {
-		return err
-	}
-	entries := slices.DeleteFunc(readStampedSessionsIn(root), func(e stampedSessions) bool {
+	before := readStampedSessionsIn(root)
+	entries := slices.DeleteFunc(slices.Clone(before), func(e stampedSessions) bool {
 		return e.CheckpointID == entry.CheckpointID
 	})
 	if err := writeStampedSessionsIn(root, append(entries, entry)); err != nil {
-		logging.Debug(logging.WithComponent(ctx, "checkpoint"), "prepare-commit-msg: could not record the sessions linked to the trailer",
-			slog.String("checkpoint_id", entry.CheckpointID.String()),
-			slog.String("error", err.Error()))
+		return fmt.Errorf("record the stamp's sessions entry: %w", err)
+	}
+	if err := writeStampedTrailerIn(root, entry.CheckpointID); err != nil {
+		if restoreErr := writeStampedSessionsIn(root, before); restoreErr != nil {
+			logging.Debug(logging.WithComponent(ctx, "checkpoint"), "prepare-commit-msg: could not restore the stamped sessions",
+				slog.String("error", restoreErr.Error()))
+		}
+		return err
 	}
 	return nil
 }
