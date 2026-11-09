@@ -19,14 +19,14 @@ const cliFlagValue = `"(?:[^"\r\n]|\\\r?\n)*"|'[^'\r\n]*'|[^\s'"` + "`" + `|;&()
 
 // cliSameCommandChar is one piece of the text between a command name and one
 // of its flags. It skips quoted strings (with escapes inside double quotes:
-// "abc\";x"), command substitutions ($(printf x; true)), parameter
+// "abc\";x", and in ANSI-C quotes: $'abc\';x'), command substitutions ($(printf x; true)), parameter
 // expansions (${IN:-a&b}), escaped characters (\;) and escaped line breaks
 // (a command continued with a trailing backslash), and otherwise never
 // crosses a line break, a shell operator or a backtick (which starts a
 // command substitution, or ends Markdown code), so a flag is only read as
 // belonging to the command that precedes it in the same pipeline segment.
 // The & and | of a redirection (2>&1, &>log, >|f) are no shell operator.
-const cliSameCommandChar = `\\\r?\n|\\[^\r\n]|"(?:[^"\\\r\n]|\\\r?\n|\\[^\r\n])*"|'[^'\r\n]*'|` + cliSubstitutionPattern + `|\$` + cliBraces2 + `|[<>]&|&>|>\||[^\r\n|;&` + "`" + `]`
+const cliSameCommandChar = `\\\r?\n|\\[^\r\n]|\$'(?:[^'\\\r\n]|\\[^\r\n])*'|"(?:[^"\\\r\n]|\\\r?\n|\\[^\r\n])*"|'[^'\r\n]*'|` + cliSubstitutionPattern + `|\$` + cliBraces2 + `|[<>]&|&>|>\||[^\r\n|;&` + "`" + `]`
 
 const cliSameCommand = `(?:` + cliSameCommandChar + `)`
 
@@ -692,11 +692,11 @@ func backtickSegment(pattern *regexp.Regexp, s string, p, i, end int, reads *lin
 	}
 	j := i + len(segmentMatch(pattern, s[i:end], memo(i)))
 	for j+1 < end && s[j] == '`' && strings.IndexByte(codeSpanFollowers, s[j+1]) < 0 && !oddTicksBefore(s, p, reads.subs, nameTickKey) {
-		n := strings.IndexAny(s[j+1:end], "`\r\n")
-		if n < 0 || s[j+1+n] != '`' {
+		at, closed := backtickClose(s, j, end)
+		if !closed {
 			break
 		}
-		k := j + 2 + n
+		k := at + 1
 		j = k + len(segmentMatch(pattern, s[k:end], memo(k)))
 	}
 	return s[i:j]
@@ -2109,25 +2109,45 @@ func wordPieceEnd(s string, i, stringEnd int, first bool, subs substitutionMemo)
 // followed by a blank, the end of a line, punctuation or another backtick,
 // ends Markdown code instead (`openssl enc -pass pass:abc`, then `ls`;
 // `mysql -pfoo`/`mysql -pbar`). Only the word of a password, which subs
-// marks (see shellWordEnd), reads one.
+// marks (see shellWordEnd), counts the backticks before it; another word
+// (docker run --entrypoint mysql -e X=`printf x` image) reads every one
+// that a command follows.
 func backtickEnd(s string, i, stringEnd int, subs substitutionMemo) int {
-	if subs == nil || s[i] != '`' || i+1 == len(s) || strings.IndexByte(codeSpanFollowers, s[i+1]) >= 0 || oddTicksBefore(s, i, subs, wordTickKey) {
+	if s[i] != '`' || i+1 == len(s) || strings.IndexByte(codeSpanFollowers, s[i+1]) >= 0 || subs != nil && oddTicksBefore(s, i, subs, wordTickKey) {
 		return 0
 	}
 	limit := len(s)
 	if i < stringEnd {
 		limit = stringEnd
 	}
-	n := strings.IndexAny(s[i+1:limit], "`\r\n")
+	at, closed := backtickClose(s, i, limit)
 	switch {
-	case n >= 0 && s[i+1+n] == '`':
-		return i + 2 + n
+	case closed:
+		return at + 1
 	case i < stringEnd:
 		return 0
-	case n < 0:
-		return limit
 	}
-	return i + 1 + n
+	return at
+}
+
+// backtickClose returns where the command substitution in backticks that
+// opens at s[i] stops before limit: at the backtick that closes it, with
+// closed set, or at the end of its line or limit. A backslash escapes the
+// character after it on the line (`printf x\` -p2222`).
+func backtickClose(s string, i, limit int) (at int, closed bool) {
+	for j := i + 1; j < limit; j++ {
+		switch s[j] {
+		case '`':
+			return j, true
+		case '\r', '\n':
+			return j, false
+		case '\\':
+			if j+1 < limit && s[j+1] != '\r' && s[j+1] != '\n' {
+				j++
+			}
+		}
+	}
+	return limit, false
 }
 
 // codeSpanFollowers are the characters after which a backtick that ends a
@@ -2145,8 +2165,11 @@ const (
 
 // oddTicksBefore reports whether an odd number of backticks that no
 // backslash escapes comes before s[i] on its line, so the one at s[i]
-// closes Markdown code. subs keeps the count under the key that tickKey
-// names, so positions asked about in increasing order are counted once.
+// closes Markdown code. A backtick in a quoted string that opens at the
+// start of a word and closes before s[i] is a character of that string
+// (echo '`'; mysql -pabc`printf x`), not counted. subs keeps the count under
+// the key that tickKey names, so positions asked about in increasing order
+// are counted once.
 func oddTicksBefore(s string, i int, subs substitutionMemo, tickKey int) bool {
 	key := substitutionKey{start: -1, stringEnd: tickKey}
 	r, ok := subs[key]
@@ -2155,13 +2178,17 @@ func oddTicksBefore(s string, i int, subs substitutionMemo, tickKey int) bool {
 		from, n = strings.LastIndexAny(s[:i], "\r\n")+1, 0
 	}
 	for j := from; j < i; j++ {
-		switch s[j] {
-		case '\r', '\n':
+		switch c := s[j]; {
+		case c == '\r' || c == '\n':
 			n = 0
-		case '`':
+		case c == '`':
 			n++
-		case '\\':
+		case c == '\\':
 			j++
+		case (c == '\'' || c == '"') && (j == 0 || strings.IndexByte(" \t\r\n;|&(=", s[j-1]) >= 0):
+			if end, quoteLen := quotedPiece(s, j); quoteLen > 0 && end <= i {
+				j = end - 1
+			}
 		}
 	}
 	subs[key] = substitutionResult{end: i, height: n}
@@ -2374,11 +2401,11 @@ func readSubstitution(s string, i, stringEnd int, subs substitutionMemo, multili
 				return substitutionResult{end: scan.stop(j)}
 			}
 		case '`':
-			n := strings.IndexAny(s[j+1:limit], "`\r\n")
-			if n < 0 || s[j+1+n] != '`' {
+			at, closed := backtickClose(s, j, limit)
+			if !closed {
 				return substitutionResult{end: scan.stop(j)}
 			}
-			j += 1 + n
+			j = at
 		case '\\':
 			// An escaped character, or a line break that the shell joins.
 			if j++; strings.HasPrefix(s[j:], "\r\n") {
@@ -2635,6 +2662,17 @@ func (q *quoteScan) stringAt(p int) (end int, ok bool) {
 		if q.stepSubstitution() {
 			continue
 		}
+		if strings.HasPrefix(q.s[q.i:], "$'") {
+			// An ANSI-C quoted string, in which a backslash escapes its
+			// quote ($'abc\';x').
+			if end := ansiCQuoteEnd(q.s, q.i); end > 0 {
+				q.start, q.end, q.i = q.i+1, end, end
+				if p < end {
+					return end, true
+				}
+				continue
+			}
+		}
 		if end, quoteLen := quotedPiece(q.s, q.i); quoteLen > 0 {
 			q.start, q.end, q.i = q.i, end, end
 			if p < end {
@@ -2694,8 +2732,8 @@ func (q *quoteScan) stepSubstitution() bool {
 			end = q.i + n
 		}
 	case q.backticks && q.s[q.i] == '`':
-		if n := strings.IndexAny(q.s[q.i+1:], "`\r\n"); n >= 0 && q.s[q.i+1+n] == '`' {
-			end = q.i + 2 + n
+		if at, closed := backtickClose(q.s, q.i, len(q.s)); closed {
+			end = at + 1
 		}
 	case q.braces:
 		end = braceExpansionEnd(q.s, q.i, q.cases.memo())
