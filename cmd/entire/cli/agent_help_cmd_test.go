@@ -1098,6 +1098,11 @@ func TestAgentHelpProjectTrailGuidance_TrailWorkflow(t *testing.T) {
 		{"finding", []string{"After a push, run `entire trail finding`", "while any are open, the change is not\nready",
 			"Dismiss with -m only when the\nfinding is wrong", "Reply to a finding with `entire trail finding reply`"}},
 		{"merge", []string{"--dry-run only reports", "\"looks\ngood\" is not that", "never pass --force or --yes on your own"}},
+		{"create", []string{"so do not also\n`git push` or open a pull request", "ask the user first",
+			"If it\nfails, do not rerun it", "`git push` and then `entire trail link <P>` instead"}},
+		{"show", []string{"For questions about status, review, CI, or readiness, start here",
+			"with the change's full url", "Give pull request details only\nwhen the user asks for the pull request",
+			"find it with\n`gh pr view` rather than creating another"}},
 	} {
 		cmd := agentHelpFindChild(trail, tc.cmd)
 		if cmd == nil {

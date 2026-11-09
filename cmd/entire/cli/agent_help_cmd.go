@@ -313,6 +313,17 @@ var agentHelpProjectTrailGuidance = map[string]string{
 		"a selector first; if this branch's change or pull request is N, act\n" +
 		"without a selector. If trail N is not this branch's trail, do not\n" +
 		"change it: ask the user which trail they meant.",
+	// Pushing a branch with no trail opens one, so work is tracked as trails
+	// rather than pull requests (guidance evals, November 2026).
+	"trail create": "Use this when asked to push a feature branch that `entire trail show`\n" +
+		"reports has no trail: it pushes the branch (git push -u), so do not also\n" +
+		"`git push` or open a pull request. --title is required; give --body a\n" +
+		"short description. On the default branch it would create and push a new\n" +
+		"branch instead: ask the user first. Do not pass --checkout, --repo or\n" +
+		"--branch-action create on your own. Give the change url it prints. If it\n" +
+		"fails, do not rerun it: when the error prints an `entire trail link`\n" +
+		"retry, run that once; otherwise report the error. If the user named an\n" +
+		"existing trail, `git push` and then `entire trail link <P>` instead.",
 	// Updates through a change write the shared parent trail, and agents
 	// otherwise edit only the pull request (guidance evals, November 2026).
 	"trail update": "Without a selector this updates the checked-out branch's trail. Its fields\n" +
@@ -339,7 +350,16 @@ var agentHelpProjectTrailGuidance = map[string]string{
 		"good\" is not that), and never pass --force or --yes on your own.",
 	// Inherits the group's URL mapping above, so an agent that goes straight
 	// to `agent-help trail show` still gets it.
-	"trail show": "To list a project trail's changes, run `entire trail show <P>\n" +
+	"trail show": "For questions about status, review, CI, or readiness, start here: the text\n" +
+		"view prints the trail URL and each change's gates and CI checks. Pair it\n" +
+		"with `entire trail finding` for findings and agent readings. Report these\n" +
+		"trail values with the change's full url (the changes[] entry with\n" +
+		"current: true), not only the trail's. Give pull request details only\n" +
+		"when the user asks for the pull request. On a GitHub repository Entire\n" +
+		"already opened a draft pull request for the trail: find it with\n" +
+		"`gh pr view` rather than creating another. Entire-native repositories\n" +
+		"have none; say so and give the change's url.\n" +
+		"To list a project trail's changes, run `entire trail show <P>\n" +
 		"--project <forge>/<project> --json`; each changes[] entry is the change\n" +
 		"<repository>/<number> with its own url and base (the branch it merges\n" +
 		"into). When show reaches the trail through a change (the current\n" +
