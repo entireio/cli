@@ -719,13 +719,36 @@ func (m *programPathMemo) blankAfter(s string, from, i, to int) bool {
 
 // endsText reports whether the client name at p ends the text of the quoted
 // string that lines last found, which closes at to, as a word of text that
-// runs no command (ssh -o "HostName mysql"): the text holds a blank before
-// it, is no program path, and no word before the name lets it run (sudo
-// mysql, cd app && mysql). blankAfter has read the text.
+// runs no command: the string is an option's value (ssh -o "HostName mysql"),
+// its text holds a blank before the name, is no program path, and no word
+// before the name lets it run (sudo mysql, cd app && mysql). A string after
+// any other word may be part of a command that ssh joins from its arguments
+// (ssh db "nice mysql" -pX). blankAfter has read the text.
 func (m *programPathMemo) endsText(f cliPasswordFlag, s string, lines *quoteScan, p, to int) bool {
 	from := lines.inner()
-	return m.blank >= from && m.blank < p && !m.isProgramPath(f, s, lines, to) && !m.starts.at(s, from, p)
+	return m.blank >= from && m.blank < p && isOptionValue(s, lines.sep, lines.start) &&
+		!m.isProgramPath(f, s, lines, to) && !m.starts.at(s, from, p)
 }
+
+// isOptionValue reports whether the quoted string at start, in a command
+// whose text starts at from, is the value of an option: the word before it,
+// or joined to it, is an option of ssh that takes one (ssh -o "HostName
+// mysql", ssh -o"HostName mysql"). A flag that takes none, or "--", is
+// followed by the command ssh runs (ssh db -t "nice mysql" -pX). A word
+// longer than maxOptionWord is none.
+func isOptionValue(s string, from, start int) bool {
+	before := strings.TrimRight(s[min(from, start):start], " \t")
+	word := before[max(0, len(before)-maxOptionWord):]
+	if i := strings.LastIndexAny(word, " \t"); i >= 0 {
+		word = word[i+1:]
+	} else if len(word) < len(before) {
+		return false
+	}
+	return strings.HasPrefix(word, "-") && takesArgument(sshCommand, word)
+}
+
+// maxOptionWord bounds the length of the option isOptionValue reads.
+const maxOptionWord = 64
 
 // isProgramPath reports whether the text of the quoted string that lines
 // last found, which closes at to, is the path of a program f defines. A path
@@ -912,12 +935,12 @@ func (c *commandStart) at(s string, from, p int) bool {
 		if c.j == c.i {
 			r, size := utf8.DecodeRuneInString(s[c.i:])
 			switch {
+			case size == 1 && isCommandSeparator(s, c.i):
+				c.separate(s, from)
+				continue
 			case unicode.IsSpace(r):
 				c.i += size
 				c.j = c.i
-				continue
-			case size == 1 && isCommandSeparator(s, c.i):
-				c.separate(s, from)
 				continue
 			}
 		}
@@ -971,14 +994,17 @@ func (c *commandStart) runsBefore(part string) bool {
 const maxCommandPart = 64
 
 // isCommandSeparator reports whether s[i] is a shell operator after which a
-// command starts (;, |, &, or the ( of a subshell), and not part of a
-// redirection (2>&1, &>log, >|f).
+// command starts (;, |, &, the ( of a subshell, or a line break, as in a
+// substitution that spans lines), and not part of a redirection (2>&1,
+// &>log, >|f) or a line continuation.
 func isCommandSeparator(s string, i int) bool {
 	switch s[i] {
 	case ';', '(':
 		return true
 	case '&', '|':
 		return !isRedirectionOperator(s, i)
+	case '\n':
+		return !isEscaped(s, i) && (i == 0 || s[i-1] != '\r' || !isEscaped(s, i-1))
 	}
 	return false
 }
@@ -2122,9 +2148,28 @@ func readSubstitution(s string, i, stringEnd int, subs substitutionMemo, multili
 			if strings.HasPrefix(s[j:], caseKeyword) {
 				scan.frames[len(scan.frames)-1].hasCase = true
 			}
+		case '#':
+			j = commentEnd(s, j, limit, scan.frames[len(scan.frames)-1].from)
 		}
 	}
 	return substitutionResult{end: scan.stop(min(j, limit))}
+}
+
+// commentEnd returns where the comment that the # at s[j] starts ends, at
+// its last character before the line break or limit, or j when it starts
+// none. A comment runs to the end of its line, so a ")" in it closes nothing
+// ($(printf h<newline># ) x<newline>)). The # starts one when it starts a
+// word: at from, where the text of the substitution it is in starts, or
+// after a blank or a shell operator ($(echo #x) prints nothing, while
+// $(echo a#b) and ${#x} hold no comment).
+func commentEnd(s string, j, limit, from int) int {
+	if j != from && (strings.IndexByte(" \t\r\n;&|(", s[j-1]) < 0 || isEscaped(s, j-1)) {
+		return j
+	}
+	if n := strings.IndexAny(s[j:limit], "\r\n"); n >= 0 {
+		return j + n - 1
+	}
+	return limit - 1
 }
 
 // substitutionLimit returns where the reading of a substitution that starts
