@@ -1541,8 +1541,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	findSessionsSpan.End()
 
 	if err != nil || len(sessions) == 0 {
-		s.postCommitWithoutLocalSessions(ctx, repo, head, commit, checkpointID, worktreePath,
-			err == nil && !targetPreexisting)
+		s.postCommitWithoutLocalSessions(ctx, repo, head, commit, checkpointID, worktreePath, err == nil, targetPreexisting)
 		return nil
 	}
 	if beforeCondense != nil && beforeCondense(ctx, sessions) {
@@ -1653,10 +1652,8 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	}
 	processSessionsLoop.End()
 
-	// No session of this repository claimed the trailer: it may be a foreign
-	// session's (tryForeignAgentCommit).
-	trailerOwned = trailerOwned || s.linkForeignAgentCommit(ctx, repo, head, commit, checkpointID, worktreePath,
-		committedFileSet, !isRebase && !targetPreexisting)
+	trailerOwned = s.claimTrailerForForeignSession(ctx, repo, head, commit, checkpointID, worktreePath,
+		committedFileSet, condensedTelemetry, trailerOwned, isRebase, targetPreexisting)
 
 	logUnclaimedCheckpointTrailer(logCtx, checkpointID, sessions, trailerOwned, isRebase)
 
@@ -2159,9 +2156,11 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 	// (or letting the caller recompute them via carry-forward, which compares
 	// files in the current — wrong — worktree) would replace the home
 	// worktree's in-flight state with the committing worktree's files.
-	isHome := committedAtHome(opts.repoDir, state)
+	isHome := !opts.foreignHome && committedAtHome(opts.repoDir, state)
 	if !isHome {
-		state.LastCheckpointID = result.CheckpointID
+		if !opts.foreignHome {
+			state.LastCheckpointID = result.CheckpointID
+		}
 		pendingStepCount := state.StepCount
 		resetCheckpointWindow(state)
 		// The checkpoint window was consumed, but the home worktree's pending

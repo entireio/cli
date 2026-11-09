@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/go-git/go-git/v6"
@@ -17,11 +17,11 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
-	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
@@ -98,11 +98,15 @@ func openForeignStore(ctx context.Context, worktreePath string) (*session.StateS
 // refuses a state that cannot be a foreign caller.
 func loadForeignState(ctx context.Context, store *session.StateStore, sessionID string) *SessionState {
 	state, err := store.LoadReadOnly(ctx, sessionID)
-	if err != nil || state == nil || state.SessionID != sessionID || state.Kind.IsImported() ||
-		state.AdoptedIntoWorktreePath != "" || state.Phase == session.PhaseEnded {
+	if err != nil || state == nil || !canBeForeignCaller(state, sessionID) {
 		return nil
 	}
 	return state
+}
+
+func canBeForeignCaller(state *SessionState, sessionID string) bool {
+	return state.SessionID == sessionID && !state.Kind.IsImported() &&
+		state.AdoptedIntoWorktreePath == "" && state.Phase != session.PhaseEnded
 }
 
 // foreignIneligibility returns why state may not link this commit, or "" when
@@ -229,8 +233,8 @@ func (s *ManualCommitStrategy) tryForeignAgentCommit(ctx context.Context, commit
 	if !ok {
 		return
 	}
-	if notice := foreignOwnerNotice(ctx, fs); notice != "" {
-		recordForeignNotice(ctx, fs.state.SessionID, notice)
+	if reason := foreignLinkRefusal(ctx, fs); reason != "" {
+		recordForeignNotice(ctx, fs.state.SessionID, reason)
 		return
 	}
 	content, err := os.ReadFile(commitMsgFile) //nolint:gosec // commitMsgFile is provided by git hook
@@ -280,53 +284,90 @@ func (s *ManualCommitStrategy) tryForeignAgentCommit(ctx context.Context, commit
 // discards its own).
 const foreignNoticeFile = "entire-foreign-notice.txt"
 
-// repoOwner returns the host/owner of the origin remote of the repository at
-// dir (the current one when dir is empty), and whether it has an origin at all.
-func repoOwner(ctx context.Context, dir string, env []string) (owner string, hasOrigin bool) {
+// foreignLinkRefusal returns why the foreign session must not link this
+// commit, or "" when it may. Linking copies the session's transcript into this
+// repository's checkpoints, which are pushed with it, so it needs all of: the
+// home clone's opt-in, this repository's checkpoints going to the home
+// origin's owner, and this repository's redaction covering the home's. Each
+// reason is one path-free line that names no command, since the committer
+// reading it may be the agent.
+func foreignLinkRefusal(ctx context.Context, fs *foreignSession) string {
+	home := filepath.Base(fs.state.WorktreePath)
+	if !settings.LoadCrossRepoCommitsAt(fs.commonDir) {
+		return fmt.Sprintf("linking commits in other repositories is off for %s; a developer can turn it on from a terminal in %s", home, home)
+	}
+	if reason := foreignDestinationRefusal(ctx, fs.state.WorktreePath); reason != "" {
+		return reason
+	}
+	return foreignRedactionRefusal(ctx, fs.state.WorktreePath)
+}
+
+// foreignDestinationRefusal returns why this repository's checkpoints may not
+// carry the transcript of a session homed at homeWorktree, or "". Every place
+// they are pushed to (each push URL of the checkpoint sync remote, and the
+// checkpoint_remote when one is in use) must be a repository of the forge
+// account that owns the home's origin. Anything unresolvable refuses.
+func foreignDestinationRefusal(ctx context.Context, homeWorktree string) string {
+	home, ok := homeOriginRepository(ctx, homeWorktree)
+	if !ok {
+		return "the session's home repository has no origin on a known forge"
+	}
+	dests, ok := checkpointDestinations(ctx)
+	if !ok {
+		return "this repository's checkpoint destination is not a repository on a known forge"
+	}
+	for _, d := range dests {
+		if d.Forge != home.Forge || d.Owner != home.Owner {
+			return "this repository's checkpoints go to a different owner than the session's home repository's origin"
+		}
+	}
+	return ""
+}
+
+// homeOriginRepository resolves the origin of the repository at dir. Hooks
+// export git's repo selectors, so they are scrubbed: inherited, they would
+// answer for this repository.
+func homeOriginRepository(ctx context.Context, dir string) (gitremote.Repository, bool) {
+	env := gitrepo.EnvWithoutRepoOverrides()
 	url, err := gitremote.GetRemoteURLInDirEnv(ctx, dir, env, "origin")
 	if err != nil {
-		return "", false
+		return gitremote.Repository{}, false
 	}
-	info, err := gitremote.ParseURL(url)
-	if err != nil || info.Owner == "" {
-		return "", true
-	}
-	return strings.ToLower(info.CanonicalHost() + "/" + info.Owner), true
+	return gitremote.ResolveRepository(ctx, dir, env, url)
 }
 
-// foreignOwnerNotice returns why the foreign session must not link this
-// commit, or "" when it may. Linking copies the session's transcript into this
-// repository's checkpoints, which are pushed with it (now, or once a remote is
-// added), so it is allowed only when neither repository has an origin or both
-// origins have the same owner: a session in a private repository must not
-// publish into someone else's.
-func foreignOwnerNotice(ctx context.Context, fs *foreignSession) string {
-	here, hereHasOrigin := repoOwner(ctx, "", nil)
-	home, homeHasOrigin := repoOwner(ctx, fs.state.WorktreePath, gitrepo.EnvWithoutRepoOverrides())
-	if !hereHasOrigin && !homeHasOrigin {
-		return ""
+// checkpointDestinations returns the forge repositories this repository's
+// checkpoints are pushed to; false when any of them does not resolve.
+func checkpointDestinations(ctx context.Context) ([]gitremote.Repository, bool) {
+	syncRemote, err := ResolveCheckpointSyncRemote(ctx)
+	if err != nil || syncRemote.Name == "" {
+		return nil, false
 	}
-	if here != "" && here == home {
-		return ""
+	pushed, ok := remotePushForgeRepository(ctx, syncRemote.Name)
+	if !ok {
+		return nil, false
 	}
-	return fmt.Sprintf("[entire] This commit is not linked to agent session %s: the session started in a repository owned by %s, "+
-		"and this repository (owned by %s) would publish its transcript in its checkpoints.",
-		fs.state.SessionID, ownerLabel(home, homeHasOrigin), ownerLabel(here, hereHasOrigin))
+	dests := []gitremote.Repository{pushed}
+	url, enabled, err := remote.PushURL(ctx, syncRemote.Name)
+	if err != nil {
+		return nil, false
+	}
+	if enabled {
+		checkpointRepo, ok := gitremote.ResolveRepository(ctx, "", nil, url)
+		if !ok {
+			return nil, false
+		}
+		dests = append(dests, checkpointRepo)
+	}
+	return dests, true
 }
 
-func ownerLabel(owner string, hasOrigin bool) string {
-	switch {
-	case !hasOrigin:
-		return "no one (no origin remote)"
-	case owner == "":
-		return "an unknown owner"
-	}
-	return owner
-}
-
-func recordForeignNotice(ctx context.Context, sessionID, notice string) {
-	logging.Info(logging.WithComponent(ctx, "checkpoint"), "prepare-commit-msg: foreign agent commit not linked: different owner",
-		slog.String("session_id", sessionID))
+// recordForeignNotice leaves reason for commit-msg to print.
+func recordForeignNotice(ctx context.Context, sessionID, reason string) {
+	logging.Info(logging.WithComponent(ctx, "checkpoint"), "prepare-commit-msg: foreign agent commit not linked",
+		slog.String("session_id", sessionID),
+		slog.String("reason", reason))
+	notice := fmt.Sprintf("[entire] This commit is not linked to agent session %s: %s.", sessionID, reason)
 	if root, err := perWorktreeGitRoot(ctx); err == nil {
 		_ = jsonutil.WriteFileAtomicIn(root, foreignNoticeFile, []byte(notice+"\n"), 0o600) //nolint:errcheck // best-effort notice
 	}
@@ -366,18 +407,33 @@ func takeForeignLink(ctx context.Context, cpID id.CheckpointID) (foreignLink, bo
 }
 
 // postCommitWithoutLocalSessions handles a stamped commit no session of this
-// repository can claim: the trailer may be a foreign session's. eligible is
-// false when listing sessions failed or the target checkpoint already existed.
+// repository can claim: the trailer may be a foreign session's. listed is
+// false when listing sessions failed.
 func (s *ManualCommitStrategy) postCommitWithoutLocalSessions(ctx context.Context, repo *git.Repository, head *plumbing.Reference,
-	commit *object.Commit, checkpointID id.CheckpointID, worktreePath string, eligible bool,
+	commit *object.Commit, checkpointID id.CheckpointID, worktreePath string, listed, targetPreexisting bool,
 ) {
-	if s.linkForeignAgentCommit(ctx, repo, head, commit, checkpointID, worktreePath, nil, eligible && !isGitSequenceOperation(ctx)) {
+	emitter := newCommitCondensedEmitter(worktreePath, head.Hash().String())
+	if s.linkForeignAgentCommit(ctx, repo, head, commit, checkpointID, worktreePath, nil, emitter,
+		listed && !targetPreexisting && !isGitSequenceOperation(ctx)) {
 		return
 	}
 	logging.Warn(logging.WithComponent(ctx, "checkpoint"), "post-commit: no active sessions despite trailer",
 		slog.String("strategy", "manual-commit"),
 		slog.String("checkpoint_id", checkpointID.String()),
 	)
+}
+
+// claimTrailerForForeignSession is PostCommit's last chance for a trailer no
+// session of this repository claimed: it may be a foreign session's
+// (tryForeignAgentCommit). It reports whether the trailer is claimed now.
+func (s *ManualCommitStrategy) claimTrailerForForeignSession(ctx context.Context, repo *git.Repository, head *plumbing.Reference,
+	commit *object.Commit, cpID id.CheckpointID, worktreePath string, committed map[string]struct{},
+	emitter *commitCondensedEmitter, claimed, isRebase, targetPreexisting bool,
+) bool {
+	if claimed {
+		return true
+	}
+	return s.linkForeignAgentCommit(ctx, repo, head, commit, cpID, worktreePath, committed, emitter, !isRebase && !targetPreexisting)
 }
 
 // linkForeignAgentCommit condenses the foreign session prepare-commit-msg
@@ -387,17 +443,17 @@ func (s *ManualCommitStrategy) postCommitWithoutLocalSessions(ctx context.Contex
 // session may own this trailer (a sequence operation, an existing checkpoint);
 // the marker is consumed either way. It reports whether it condensed.
 //
-// The home state advances as for a guest-linked commit (HomeNotHere): the
-// transcript window moves past this checkpoint, while the home's BaseCommit,
-// files, turn checkpoints and LastCheckpointID stay as they were.
+// The home state advances as for a guest-linked commit (condenseOpts.foreignHome):
+// the transcript window moves past this checkpoint, while the home's
+// BaseCommit, files, turn checkpoints and LastCheckpointID stay as they were.
 func (s *ManualCommitStrategy) linkForeignAgentCommit(ctx context.Context, repo *git.Repository, head *plumbing.Reference, commit *object.Commit,
-	cpID id.CheckpointID, worktreePath string, committed map[string]struct{}, eligible bool,
+	cpID id.CheckpointID, worktreePath string, committed map[string]struct{}, emitter *commitCondensedEmitter, eligible bool,
 ) bool {
 	link, ok := takeForeignLink(ctx, cpID)
 	if !ok || !eligible {
 		return false
 	}
-	if s.condenseForeignLink(ctx, repo, head, commit, cpID, worktreePath, committed, link) {
+	if s.condenseForeignLink(ctx, repo, head, commit, cpID, worktreePath, committed, emitter, link) {
 		return true
 	}
 	// The trailer is already in the commit; say so rather than leave it silent.
@@ -408,52 +464,61 @@ func (s *ManualCommitStrategy) linkForeignAgentCommit(ctx context.Context, repo 
 }
 
 func (s *ManualCommitStrategy) condenseForeignLink(ctx context.Context, repo *git.Repository, head *plumbing.Reference, commit *object.Commit,
-	cpID id.CheckpointID, worktreePath string, committed map[string]struct{}, link foreignLink,
+	cpID id.CheckpointID, worktreePath string, committed map[string]struct{}, emitter *commitCondensedEmitter, link foreignLink,
 ) bool {
-	logCtx := logging.WithComponent(ctx, "checkpoint")
 	store, commonDir, err := openForeignStore(ctx, link.WorktreePath)
 	if err != nil {
 		return false
 	}
-	lock, err := stateLockInCommonDir(commonDir, link.SessionID)
+	var condensed bool
+	var newSkillEvents []agent.SkillEvent
+	var condensedSignal *commitCondensedSignal
+	err = mutateForeignSessionState(ctx, store, commonDir, link.SessionID, func(state *SessionState) error {
+		// Judged again under the home's lock: the opt-in may have been turned
+		// off, or the session may have moved on, since prepare-commit-msg.
+		if !settings.LoadCrossRepoCommitsAt(commonDir) || !canBeForeignCaller(state, link.SessionID) || foreignIneligibility(state) != "" {
+			return ErrMutationSkip
+		}
+		if committed == nil {
+			committed = filesChangedInCommit(ctx, worktreePath, commit, nil, nil)
+		}
+		// The session's own files are its home's paths; this checkpoint gets
+		// the committed files its transcript wrote under this worktree.
+		homeFiles := state.FilesTouched
+		defer func() { state.FilesTouched = homeFiles }()
+		state.FilesTouched = s.foreignEditedFiles(ctx, state, worktreePath, committed)
+		condensed, newSkillEvents, condensedSignal = s.condenseAndUpdateState(ctx, repo, cpID, state, head, committed,
+			condenseOpts{repoDir: worktreePath, noStoredFallback: true, foreignHome: true,
+				searchProbeAllowed: func() bool { return emitter.searchProbeAllowed(ctx) }})
+		if !condensed {
+			return ErrMutationSkip
+		}
+		return nil
+	}, func() {
+		EmitSkillInvocationTelemetry(ctx, newSkillEvents)
+		emitter.emit(ctx, condensedSignal)
+	})
 	if err != nil {
-		return false
-	}
-	acqCtx, cancel := context.WithTimeout(ctx, foreignLockWait)
-	release, err := flock.AcquireContextIn(acqCtx, lock.root, lock.name)
-	cancel()
-	if err != nil {
-		logging.Debug(logCtx, "post-commit: foreign session lock unavailable",
-			slog.String("session_id", link.SessionID))
-		return false
-	}
-	defer release()
-
-	state := loadForeignState(ctx, store, link.SessionID)
-	if state == nil || foreignIneligibility(state) != "" {
-		return false
-	}
-	if committed == nil {
-		committed = filesChangedInCommit(ctx, worktreePath, commit, nil, nil)
-	}
-
-	// The session's own files are its home's paths; this checkpoint gets the
-	// committed files its transcript wrote under this worktree.
-	homeFiles, homeLast := state.FilesTouched, state.LastCheckpointID
-	state.FilesTouched = s.foreignEditedFiles(ctx, state, worktreePath, committed)
-	state.HomeNotHere = true
-	condensed, _, _ := s.condenseAndUpdateState(ctx, repo, cpID, state, head, committed,
-		condenseOpts{repoDir: worktreePath, noStoredFallback: true})
-	state.FilesTouched, state.HomeNotHere, state.LastCheckpointID = homeFiles, false, homeLast
-	if !condensed {
-		return false
-	}
-	if err := store.Save(ctx, state); err != nil {
-		logging.Warn(logCtx, "post-commit: could not save foreign session state",
+		logging.Warn(logging.WithComponent(ctx, "checkpoint"), "post-commit: foreign session state not updated",
 			slog.String("session_id", link.SessionID),
 			slog.String("error", err.Error()))
 	}
-	return true
+	return condensed
+}
+
+// mutateForeignSessionState is MutateSessionStateOnSaved for a session homed
+// in the repository whose git common dir is commonDir: its lock, read without
+// cleanup, and saved to store. The lock wait is bounded by foreignLockWait,
+// and a call nested in a mutation of the same session is refused.
+func mutateForeignSessionState(ctx context.Context, store *session.StateStore, commonDir, sessionID string,
+	fn func(*SessionState) error, onSaved func(),
+) error {
+	return mutateSessionStateIn(WithSessionLockWait(ctx, foreignLockWait), sessionID, sessionStateAccess{
+		lock:      func() (stateLock, error) { return stateLockInCommonDir(commonDir, sessionID) },
+		load:      store.LoadReadOnly,
+		save:      store.Save,
+		outerOnly: true,
+	}, fn, onSaved)
 }
 
 // foreignEditedFiles returns the committed files the session's transcript

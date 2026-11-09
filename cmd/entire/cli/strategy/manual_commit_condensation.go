@@ -107,6 +107,12 @@ type condenseOpts struct {
 	// noStoredFallback makes a nil storedRoot mean "no stored copy": a session
 	// homed in another repository must never read this repository's .entire.
 	noStoredFallback bool
+
+	// foreignHome condenses a session homed in another repository
+	// (linkForeignAgentCommit): its state advances as for a guest-linked
+	// commit but keeps its own LastCheckpointID, and no summary is generated,
+	// so its transcript is not sent to this repository's summary provider.
+	foreignHome bool
 }
 
 // redactSessionJSONLBytes runs the regex-only redaction pipeline (the
@@ -859,7 +865,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 
 	writeOpts, newSkillEvents := buildCondensationWriteOptions(
 		ctx, repo, state, sessionData, redactedTranscript, extractedAssets,
-		taskPayloads, checkpointID,
+		taskPayloads, checkpointID, !o.foreignHome,
 	)
 	if o.recordedBranch != nil {
 		writeOpts.Branch = *o.recordedBranch
@@ -948,12 +954,13 @@ func buildCondensationWriteOptions(
 	assets []cpkg.TranscriptAsset,
 	tasks []cpkg.TaskPayload,
 	checkpointID id.CheckpointID,
+	summarize bool,
 ) (cpkg.WriteOptions, []agent.SkillEvent) {
 	authorName, authorEmail := GetGitAuthorFromRepo(repo)
 
 	var summary *cpkg.Summary
-	if settings.IsSummarizeEnabled(ctx) && transcript.Len() > 0 {
-		summary = generateSummary(ctx, transcript, sessionData.FilesTouched, state)
+	if summarize && transcript.Len() > 0 && settings.IsSummarizeEnabled(ctx) {
+		summary = generateCheckpointSummary(ctx, transcript, sessionData.FilesTouched, state)
 	}
 
 	// Post-commit emits regex-only blobs. OPF runs later in the
@@ -1159,6 +1166,10 @@ func sliceByAgentMetric(agentType types.AgentType, content []byte, startOffset i
 	}
 	return lw.SliceTranscriptFromPosition(content, startOffset), true
 }
+
+// generateCheckpointSummary is generateSummary, a var so tests can observe
+// whether a condensation asks for a summary without running a provider.
+var generateCheckpointSummary = generateSummary
 
 // generateSummary produces an LLM-generated summary of the session transcript.
 // The transcript must be pre-redacted to avoid sending secrets to the LLM.

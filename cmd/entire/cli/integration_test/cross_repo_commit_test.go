@@ -3,12 +3,15 @@
 package integration
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/execx"
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/require"
 )
@@ -43,7 +46,30 @@ func newCrossRepoFixture(t *testing.T) *crossRepoFixture {
 	hooks, s := startSession(t, a, cache, crossRepoSessionID,
 		FileChange{Path: filepath.Join(a.RepoDir, "a.txt"), Content: "a\n"},
 		FileChange{Path: filepath.Join(b.RepoDir, "b.txt"), Content: "b\n"})
+	setOrigin(a, "git@github.com:acme/a.git")
+	setOrigin(b, "git@github.com:acme/b.git")
+	optInCrossRepoCommits(a)
 	return &crossRepoFixture{a: a, b: b, cache: cache, hooks: hooks, session: s}
+}
+
+// setOrigin points env's origin at url, adding it when absent.
+func setOrigin(env *TestEnv, url string) {
+	env.T.Helper()
+	if _, err := gitremote.GetRemoteURLInDir(env.T.Context(), env.RepoDir, "origin"); err == nil {
+		testutil.RunGit(env.T, env.RepoDir, "remote", "set-url", "origin", url)
+	} else {
+		testutil.RunGit(env.T, env.RepoDir, "remote", "add", "origin", url)
+	}
+	env.setGitConfigBaseline()
+}
+
+// optInCrossRepoCommits turns cross-repo commits on in env's clone, as
+// `entire configure --cross-repo-commits on` does from a terminal.
+func optInCrossRepoCommits(env *TestEnv) {
+	env.T.Helper()
+	path := filepath.Join(env.RepoDir, ".git", filepath.FromSlash(settings.CrossRepoCommitsFile))
+	require.NoError(env.T, os.MkdirAll(filepath.Dir(path), 0o750))
+	require.NoError(env.T, os.WriteFile(path, []byte("on\n"), 0o600))
 }
 
 // startSession starts a turn of session id homed in env, recorded in cache,
@@ -149,6 +175,8 @@ func TestCrossRepoCommit_TwoForeignSessionsOnlyCommitterLinks(t *testing.T) {
 	f.b.WriteFile("c.txt", "c\n")
 	_, _ = startSession(t, c, f.cache, otherID,
 		FileChange{Path: filepath.Join(f.b.RepoDir, "c.txt"), Content: "c\n"})
+	setOrigin(c, "git@github.com:acme/c.git")
+	optInCrossRepoCommits(c)
 	moveOwnerOutOfAncestry(t, f.a, f.session.ID)
 	moveOwnerOutOfAncestry(t, c, otherID)
 	otherBefore, err := c.GetSessionState(otherID)
@@ -199,28 +227,40 @@ func TestCrossRepoCommit_LocalSessionWithContentTakesCommit(t *testing.T) {
 		"the foreign session is not condensed into B's commit")
 }
 
-// B's origin has a different owner than A's: the commit is left unlinked and
-// the agent's git output says why.
-func TestCrossRepoCommit_DifferentOwnerNotLinkedWithNotice(t *testing.T) {
+// B's checkpoints go to a different owner than A's origin, or A's clone has
+// not opted in: the commit is left unlinked and the agent's git output says why.
+func TestCrossRepoCommit_RefusedWithNotice(t *testing.T) {
 	t.Parallel()
-	f := newCrossRepoFixture(t)
-	testutil.RunGit(t, f.a.RepoDir, "remote", "add", "origin", "git@github.com:acme/a.git")
-	testutil.RunGit(t, f.b.RepoDir, "remote", "add", "origin", "git@github.com:other/b.git")
-	f.a.setGitConfigBaseline()
-	f.b.setGitConfigBaseline()
-	before, err := f.a.GetSessionState(f.session.ID)
-	require.NoError(t, err)
+	cases := map[string]struct {
+		setup  func(f *crossRepoFixture)
+		reason string
+	}{
+		"different owner": {func(f *crossRepoFixture) { setOrigin(f.b, "git@github.com:other/b.git") }, "different owner"},
+		"not opted in": {func(f *crossRepoFixture) {
+			require.NoError(f.a.T, os.Remove(filepath.Join(f.a.RepoDir, ".git", filepath.FromSlash(settings.CrossRepoCommitsFile))))
+		}, "is off for"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newCrossRepoFixture(t)
+			tc.setup(f)
+			before, err := f.a.GetSessionState(f.session.ID)
+			require.NoError(t, err)
 
-	agentGit(f.b, f.session.ID, "add", "b.txt")
-	cmd := execx.NonInteractive(t.Context(), "git", "commit", "-m", "add b")
-	cmd.Dir = f.b.RepoDir
-	cmd.Env = f.b.gitHookEnv("CLAUDE_CODE_SESSION_ID=" + f.session.ID)
-	out, err := cmd.CombinedOutput()
-	require.NoError(t, err, string(out))
+			agentGit(f.b, f.session.ID, "add", "b.txt")
+			cmd := execx.NonInteractive(t.Context(), "git", "commit", "-m", "add b")
+			cmd.Dir = f.b.RepoDir
+			cmd.Env = f.b.gitHookEnv("CLAUDE_CODE_SESSION_ID=" + f.session.ID)
+			out, err := cmd.CombinedOutput()
+			require.NoError(t, err, string(out))
 
-	require.Contains(t, string(out), "This commit is not linked to agent session "+f.session.ID)
-	require.Empty(t, f.b.GetCheckpointIDFromCommitMessage(f.b.GetHeadHash()))
-	after, err := f.a.GetSessionState(f.session.ID)
-	require.NoError(t, err)
-	require.Equal(t, before.CheckpointTranscriptStart, after.CheckpointTranscriptStart)
+			require.Contains(t, string(out), "This commit is not linked to agent session "+f.session.ID)
+			require.Contains(t, string(out), tc.reason)
+			require.Empty(t, f.b.GetCheckpointIDFromCommitMessage(f.b.GetHeadHash()))
+			after, err := f.a.GetSessionState(f.session.ID)
+			require.NoError(t, err)
+			require.Equal(t, before.CheckpointTranscriptStart, after.CheckpointTranscriptStart)
+		})
+	}
 }
