@@ -149,6 +149,11 @@ func ReadCumulativeUsage(ctx context.Context, ag Agent, in CumulativeTokenInput,
 	if marks == nil {
 		marks = make(map[string]usageFileMark)
 	}
+	if newMain {
+		// The counter forgot the old transcript, so its mark goes too: a
+		// session that returns to it reads it from its start.
+		delete(marks, cur.Main)
+	}
 	read := make(map[string]bool)
 	for pass := range maxUsageFilePasses {
 		progressed := false
