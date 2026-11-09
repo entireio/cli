@@ -959,7 +959,12 @@ func detectCredentialKeyCaptures(
 // does. In API_KEY="x"=a=\b= API_KEY=hunter2, b= is not an assignment whose
 // value takes API_KEY=hunter2, while a match that ends inside it, as the
 // empty API_KEY="" in API_KEY="a"b= API_KEY=""|API_KEY=hunter2xyz, moves the
-// search on only to its own end.
+// search on only to its own end. That holds only for a key that starts at or
+// after the end of the region's match, in text FindAll goes on to read. A key
+// inside the text that match took, as abc in DB_PASSWORD=abc= DB_USER=
+// DB_NAME= API_KEY=hunter2, is one FindAll never reads, so its match sets no
+// such end, and the search goes on from the region's end, where it finds
+// DB_USER= DB_NAME= and then API_KEY=hunter2, as FindAll does.
 //
 // The only values read from inside a region are those visitStraddlingValues
 // finds, and they add to what the region already redacts. One that stays
@@ -970,9 +975,16 @@ func detectCredentialKeyCaptures(
 // only for a match that starts where FindAll goes on, at or after the end of
 // the match the region was redacted for. One that starts before it, inside
 // the text that match took, as b='b' in API_KEY='b='b'API_KEY=hunter2xyz,
-// is one FindAll never finds, so the second API_KEY is still read.
+// is one FindAll never finds, so the second API_KEY is still read. A later
+// match that starts inside such a match and whose value stays visible and
+// runs past it is cut back to its end, as for a rejected trailing key, so
+// FOO= in API_KEY="x""a=b"|FOO= API_KEY=hunter2, which a's value holds, does
+// not take API_KEY=hunter2.
 func forEachUncoveredMatch(s string, pattern *regexp.Regexp, valueGroup int, visit func(match []int, wholeWord bool) int) {
 	covered, atKey, unredactedEnd, rejectedEnd := 0, false, -1, -1
+	// coveredMatchEnd is where the match that covered was redacted for ends,
+	// where FindAll goes on.
+	coveredMatchEnd := 0
 	runs := valueRunEnd{start: -1, end: -1}
 	for from := 0; from < len(s); {
 		searchFrom := from
@@ -998,7 +1010,7 @@ func forEachUncoveredMatch(s string, pattern *regexp.Regexp, valueGroup int, vis
 				next = covered
 			} else if end := visit(match, true); end > 0 {
 				last, readEnd := visitStraddlingValues(s, pattern, valueGroup, visit, match, end, &runs)
-				covered, unredactedEnd = max(covered, last.end), max(unredactedEnd, readEnd)
+				covered, unredactedEnd, coveredMatchEnd = max(covered, last.end), max(unredactedEnd, readEnd), match[1]
 				if keyStart := assignedKeyStart(s, last.start, last.end); keyStart >= valueStart && last.end >= next {
 					// FindAll goes on at match[1], so it reads a '_' there as
 					// the byte before the key.
@@ -1007,13 +1019,30 @@ func forEachUncoveredMatch(s string, pattern *regexp.Regexp, valueGroup int, vis
 					next = max(next, last.end)
 				}
 			} else if match[0] < covered {
-				next, rejectedEnd = covered, match[1]
-			} else if match[0] < rejectedEnd && next > rejectedEnd {
-				next = max(rejectedEnd, from+1)
+				next = covered
+				if from >= coveredMatchEnd {
+					rejectedEnd = match[1]
+				}
+			} else {
+				next = endAtFindAllBoundary(match[0], next, from, rejectedEnd, unredactedEnd)
 			}
 		}
 		from = next
 	}
+}
+
+// endAtFindAllBoundary returns where the search goes on after a match from
+// start to next whose value stays visible: at the first of ends, the ends of
+// matches FindAll took, that the match starts before and runs past, as FindAll
+// goes on there, and otherwise at next. It moves on by at least a byte past
+// from.
+func endAtFindAllBoundary(start, next, from int, ends ...int) int {
+	for _, end := range ends {
+		if start < end && end < next {
+			next = max(end, from+1)
+		}
+	}
+	return next
 }
 
 // nextMatch returns the first match of pattern in s[from:limit] that FindAll
