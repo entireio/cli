@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+
 	"github.com/entireio/cli/internal/transcript/opencodev2"
 )
 

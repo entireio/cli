@@ -2,8 +2,9 @@ package transcript
 
 import (
 	"bytes"
-	"github.com/entireio/cli/internal/transcript/opencodev2"
 	"testing"
+
+	"github.com/entireio/cli/internal/transcript/opencodev2"
 )
 
 func TestCompact_OpenCodeFixture(t *testing.T) {

@@ -3,7 +3,6 @@ package opencode
 import (
 	"context"
 	"encoding/json"
-	"github.com/entireio/cli/internal/transcript/opencodev2"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -12,6 +11,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/internal/transcript/opencodev2"
 )
 
 // useOpenCodeCLI pins the detected OpenCode version for one test.

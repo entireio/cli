@@ -4,9 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"github.com/entireio/cli/internal/transcript/opencodev2"
 	"strconv"
 	"time"
+
+	"github.com/entireio/cli/internal/transcript/opencodev2"
 )
 
 // --- OpenCode format support ---

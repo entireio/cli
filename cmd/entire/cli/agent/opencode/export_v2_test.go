@@ -3,13 +3,14 @@ package opencode
 import (
 	"bytes"
 	"encoding/json"
-	"github.com/entireio/cli/internal/transcript/opencodev2"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/entireio/cli/internal/transcript/opencodev2"
 )
 
 // The testdata/opencode2 fixtures are real OpenCode 2.1.1 exports, captured

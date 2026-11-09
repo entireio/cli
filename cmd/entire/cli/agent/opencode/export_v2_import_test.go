@@ -4,10 +4,10 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
-	"github.com/entireio/cli/internal/transcript/opencodev2"
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/internal/transcript/opencodev2"
 	"github.com/entireio/cli/redact"
 )
 

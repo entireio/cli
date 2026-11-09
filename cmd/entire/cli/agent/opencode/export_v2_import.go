@@ -4,10 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/entireio/cli/internal/transcript/opencodev2"
 	"regexp"
 	"strings"
 
+	"github.com/entireio/cli/internal/transcript/opencodev2"
 	"github.com/entireio/cli/redact"
 )
 

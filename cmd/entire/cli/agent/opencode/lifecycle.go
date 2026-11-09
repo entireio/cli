@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/entireio/cli/internal/transcript/opencodev2"
 	"io"
 	"log/slog"
 	"os"
@@ -23,6 +22,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
+	"github.com/entireio/cli/internal/transcript/opencodev2"
 )
 
 var runOpenCodeExportToFileFn = runOpenCodeExportToFile

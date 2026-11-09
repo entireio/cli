@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/entireio/cli/internal/transcript/opencodev2"
 	"log/slog"
 	"math"
 	"os"
@@ -18,6 +17,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
+	"github.com/entireio/cli/internal/transcript/opencodev2"
 )
 
 // exportSubagent exports a child session and returns the transcript for one
