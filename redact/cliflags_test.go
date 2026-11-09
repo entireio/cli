@@ -558,6 +558,9 @@ func TestString_CommandLinePasswordsQuotingAndListCases(t *testing.T) {
 		{name: "docker login after global options in escaped quotes", input: `[\"docker\", \"-H\", \"tcp://h:2376\", \"--tls\", \"login\", \"-p\", \"` + p + `\"]`, want: `[\"docker\", \"-H\", \"tcp://h:2376\", \"--tls\", \"login\", \"-p\", \"REDACTED\"]`},
 		{name: "helm registry login after options in a list", input: `subprocess.run(["helm", "--debug", "registry", "--kube-context", "x", "login", "-p", "` + p + `"])`, want: `subprocess.run(["helm", "--debug", "registry", "--kube-context", "x", "login", "-p", "REDACTED"])`},
 		{name: "az login after a global option in a list", input: `subprocess.run(["az", "--debug", "login", "-p", "` + p + `"])`, want: `subprocess.run(["az", "--debug", "login", "-p", "REDACTED"])`},
+		{name: "login after global options with and without values", input: "docker --tls --log-level debug login -p " + p, want: "docker --tls --log-level debug login -p REDACTED"},
+		{name: "login after a no-value option in a list", input: `subprocess.run(["docker", "--tls", "login", "-p", "` + p + `"])`, want: `subprocess.run(["docker", "--tls", "login", "-p", "REDACTED"])`},
+		{name: "openssl two-dash pass source and literal", input: "openssl enc --pass pass:" + p + " -in f; openssl enc --password " + p, want: "openssl enc --pass REDACTED -in f; openssl enc --password REDACTED"},
 		{name: "sshpass password after a prompt option in a list", input: `subprocess.run(["sshpass", "-P", "Password:", "-p", "` + p + `", "ssh", "host"])`, want: `subprocess.run(["sshpass", "-P", "Password:", "-p", "REDACTED", "ssh", "host"])`},
 		{name: "sshpass password after a joined prompt option in a list", input: `subprocess.run(["sshpass", "-v", "-PPassword:", "-v", "-p", "` + p + `", "ssh", "host"])`, want: `subprocess.run(["sshpass", "-v", "-PPassword:", "-v", "-p", "REDACTED", "ssh", "host"])`},
 		{name: "list value that starts with two dashes after a program", input: `subprocess.run(["wget", "--password", "--` + p + `", url])`, want: `subprocess.run(["wget", "--password", "REDACTED", url])`},
@@ -982,6 +985,19 @@ func TestString_CommandLinePasswordListAndQuotingNonSecretsPreserved(t *testing.
 		// a container named login after global options, and a -p after
 		// sshpass -e, which is ssh's port
 		`subprocess.run(["docker", "--config", "/tmp/c", "run", "--name", "login", "-p", "8080:80"])`,
+		// a container named login after a global option that takes no value,
+		// whose next word is the subcommand
+		`subprocess.run(["docker", "--debug", "run", "--name", "login", "-p", "8080:80"])`,
+		"docker --debug run --name login -p 8080:80 nginx",
+		"podman --remote run --name login -p 8080:80 nginx",
+		`[\"docker\", \"-D\", \"run\", \"--name\", \"login\", \"-p\", \"8080:80\"]`,
+		// openssl's two-dash sources that name where the password is
+		"openssl enc --pass env:ENC_PASS -in f",
+		"openssl enc --pass file:/run/secrets/key -in f",
+		"openssl pkcs12 --password=fd:3 -in f",
+		"openssl enc --pass stdin -in f",
+		`sh -c 'openssl enc --pass "env:PW" -in f'`,
+		`subprocess.run(["openssl", "enc", "--pass", "env:PW"])`,
 		`subprocess.run(["sshpass", "-e", "-P", "Password:", "ssh", "-p", "2222", "host"])`,
 		// a reference in double quotes, which many languages expand in a
 		// list too (PHP, Perl, Kotlin, Groovy, Dart), and which is a name

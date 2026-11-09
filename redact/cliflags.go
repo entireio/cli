@@ -89,6 +89,12 @@ const (
 	cliListChar    = `(?:[^"'\\\r\n]|\\\\)`
 )
 
+// cliNoValueGlobalOption matches a global option of the login clients that
+// takes no value (docker --debug, podman --remote, az --verbose) on a
+// command line or as an element of an argument list, and the word after
+// it, group 1, which is then the client's subcommand.
+var cliNoValueGlobalOption = regexp.MustCompile(`(?:^|[\s"',])(?:-[Ddhrv]|--(?:debug|debug-full|tls|tlsverify|verbose|only-show-errors|remote|syslog|noout|transient-store|insecure-policy|insecure-registry|experimental|kube-insecure-skip-tls-verify|help|version))\\?["']?(?:` + cliBlank + `|,` + cliListGap + `)\\?["']?([^-\s"'\\,][^\s"'\\,]*)`)
+
 // cliGlobalOptions matches the options a client takes before its
 // subcommand, each a shell word (--config="$HOME/.docker") with at most one
 // value (--config $(mktemp -d)).
@@ -182,6 +188,11 @@ type cliPasswordFlag struct {
 	// other commands it is the value (docker login --password -x, wget
 	// --password -x). flag is nil for a client with no short flag.
 	noValueLong bool
+	// sourceLong marks a client whose --pass and --password take a
+	// password source, as its one-dash flags do (openssl enc --pass
+	// env:PW): one that names where the password is (env:, file:, fd:,
+	// stdin) stays visible after them too.
+	sourceLong bool
 }
 
 var cliPasswordFlags = []cliPasswordFlag{
@@ -248,10 +259,11 @@ var cliPasswordFlags = []cliPasswordFlag{
 	// (sh -c "openssl enc \"-pass\" \"pass:x\""), or with its source as one
 	// element of an argument list in code (["openssl", "-pass=pass:x"]).
 	{
-		needles: []string{"openssl"},
-		command: regexp.MustCompile(`\bopenssl\b`),
-		flag:    regexp.MustCompile(cliShortFlag(`\s`, opensslSourceFlag, `(?:=|`+cliBlank+`)`)),
-		prefix:  "pass:",
+		needles:    []string{"openssl"},
+		command:    regexp.MustCompile(`\bopenssl\b`),
+		flag:       regexp.MustCompile(cliShortFlag(`\s`, opensslSourceFlag, `(?:=|`+cliBlank+`)`)),
+		prefix:     "pass:",
+		sourceLong: true,
 	},
 }
 
@@ -418,11 +430,16 @@ func appendLongPasswordFlags(regions []taggedRegion, s string, noValue *noValueF
 		// takes one (curl --pass -x, redis-cli --pass -x).
 		blank := s[loc[4]] != '='
 		dashFlag := blank && !pass && noValue.has(loc[2])
-		argv := false
+		argv, program := false, ""
 		if s[loc[4]] == ',' {
-			program := listProgram(s, loc[0])
+			program = listProgram(s, loc[0])
 			dashFlag = dashFlag || !pass && isNoValueClientName(program)
 			argv = isListProgram(program)
+		}
+		if noValue.isSourceReference(s, loc, program) {
+			// openssl enc --pass env:PW names where the password is.
+			pos = loc[6]
+			continue
 		}
 		stringEnd := lines.stringEnd(loc[2] - 1)
 		var r taggedRegion
@@ -572,11 +589,7 @@ func isListProgram(element string) bool {
 // names a client whose --password takes no value, with or without its
 // directory and .exe ("psql", "/usr/bin/psql").
 func isNoValueClientName(element string) bool {
-	name := strings.Trim(element, `"'\`)
-	name = name[strings.LastIndexAny(name, `/\`)+1:]
-	if ext := len(name) - len(".exe"); ext > 0 && strings.EqualFold(name[ext:], ".exe") {
-		name = name[:ext]
-	}
+	name := listProgramName(element)
 	for _, f := range cliPasswordFlags {
 		if !f.noValueLong {
 			continue
@@ -586,6 +599,18 @@ func isNoValueClientName(element string) bool {
 		}
 	}
 	return false
+}
+
+// listProgramName returns the name of the program that element, a quoted
+// element of code, names, without its quotes, directory and .exe
+// ("/usr/bin/psql" is psql).
+func listProgramName(element string) string {
+	name := strings.Trim(element, `"'\`)
+	name = name[strings.LastIndexAny(name, `/\`)+1:]
+	if ext := len(name) - len(".exe"); ext > 0 && strings.EqualFold(name[ext:], ".exe") {
+		name = name[:ext]
+	}
+	return name
 }
 
 // isListProse reports whether value, an element of an argument list after
@@ -617,7 +642,7 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string, noVal
 	if !slices.ContainsFunc(f.needles, func(n string) bool { return strings.Contains(s, n) }) {
 		return regions
 	}
-	ownLong := f.noValueLong && mayHoldLongPasswordFlag(s)
+	ownLong := f.readsOwnLong() && mayHoldLongPasswordFlag(s)
 	lines := quoteScan{s: s, prose: true}
 	var nested nestedScan
 	var paths programPathMemo
@@ -635,7 +660,7 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string, noVal
 	subs := substitutionMemo{}
 	reads := &lineReads{s: s, subs: subs}
 	for _, cmd := range f.command.FindAllStringIndex(s, -1) {
-		if found.covers(cmd[0]) || !isCommandToken(s, cmd[0], cmd[1]) || isContainerNameArgument(s, cmd[0]) || isFunctionName(s, cmd[0], cmd[1]) {
+		if found.covers(cmd[0]) || !isCommandToken(s, cmd[0], cmd[1]) || isContainerNameArgument(s, cmd[0]) || isFunctionName(s, cmd[0], cmd[1]) || f.runsOtherSubcommand(s[cmd[0]:cmd[1]]) {
 			continue
 		}
 		// The closing quote of a string the command is quoted in is not
@@ -676,7 +701,7 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string, noVal
 		quotes := quoteScan{s: s[:cmd[1]+len(rest)], i: from, skip: skip, skipEnd: skipEnd, substitutions: true, backticks: true, cases: caseMemo{lines: reads}}
 		if ownLong {
 			own := quotes
-			noValue.read(s, &own, cmdFrom, cmd[0], from, cmd[1]+len(rest))
+			noValue.read(s, &own, cmdFrom, cmd[0], from, cmd[1]+len(rest), f.sourceLong)
 		}
 		if f.flag == nil {
 			continue
@@ -688,6 +713,22 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string, noVal
 		}
 	}
 	return regions
+}
+
+// runsOtherSubcommand reports whether cmd, a match of f.command, is a login
+// client's whose global options took a word after one that takes no value
+// as its value. That word is the client's subcommand, so the client runs
+// no login (docker --debug run --name login -p 8080:80).
+func (f cliPasswordFlag) runsOtherSubcommand(cmd string) bool {
+	if f.needles[0] != loginCommand {
+		return false
+	}
+	for _, m := range cliNoValueGlobalOption.FindAllStringSubmatch(cmd, -1) {
+		if m[1] != loginCommand && m[1] != "registry" {
+			return true
+		}
+	}
+	return false
 }
 
 // commandCloseQuote returns where the quote that closes the string a
@@ -705,9 +746,12 @@ func commandCloseQuote(s string, cmd []int, closeAt, stringEnd int) (int, int) {
 
 // noValueFlags holds the ends of the --password and --passwd flags that a
 // client whose --password takes no value (see noValueLong) reads itself: a
-// dash-led word after one of them is its next flag.
+// dash-led word after one of them is its next flag. sources holds those of
+// the --pass and --password flags that take a password source (see
+// sourceLong).
 type noValueFlags struct {
-	ends map[int]bool
+	ends    map[int]bool
+	sources map[int]bool
 	// starts tells whether a client's name starts a command.
 	starts commandStart
 }
@@ -718,8 +762,8 @@ type noValueFlags struct {
 // (psql -c "$(wget --password -x)"). quotes scans that segment as in
 // appendFlags. A client reads none where its name does not start a
 // command, as another's argument (docker login -u mysql --password -x,
-// wget --user mysql --password -x).
-func (n *noValueFlags) read(s string, quotes *quoteScan, cmdFrom, name, from, end int) {
+// wget --user mysql --password -x). With source, they go in sources.
+func (n *noValueFlags) read(s string, quotes *quoteScan, cmdFrom, name, from, end int, source bool) {
 	if !n.starts.at(s, cmdFrom, name) {
 		return
 	}
@@ -740,19 +784,54 @@ func (n *noValueFlags) read(s string, quotes *quoteScan, cmdFrom, name, from, en
 		}
 		if _, quoted := quotes.stringAt(at); !quoted {
 			if _, _, inner := quotes.substitutionAt(at); !inner {
-				if n.ends == nil {
-					n.ends = map[int]bool{}
-				}
-				n.ends[pos+loc[2]] = true
+				n.add(pos+loc[2], source)
 			}
 		}
 		pos += loc[2]
 	}
 }
 
-// has reports whether read found a flag that ends at i.
+// add records a flag that ends at i, in sources with source.
+func (n *noValueFlags) add(i int, source bool) {
+	ends := &n.ends
+	if source {
+		ends = &n.sources
+	}
+	if *ends == nil {
+		*ends = map[int]bool{}
+	}
+	(*ends)[i] = true
+}
+
+// has reports whether read found a flag that ends at i, other than a source
+// flag.
 func (n *noValueFlags) has(i int) bool {
 	return n.ends[i]
+}
+
+// readsOwnLong reports whether f reads its own long password flags (see
+// noValueLong and sourceLong).
+func (f cliPasswordFlag) readsOwnLong() bool {
+	return f.noValueLong || f.sourceLong
+}
+
+// isSourceReference reports whether the long flag that loc, a
+// cliLongPasswordPattern match in s, found takes a password source (see
+// sourceLong) and its value names where the password is: env:, file:,
+// fd: or stdin. A pass: source is redacted whole, as a value. program is
+// the first element of the argument list in code the flag is an element
+// of, "" for none.
+func (n *noValueFlags) isSourceReference(s string, loc []int, program string) bool {
+	if !n.sources[loc[2]] && listProgramName(program) != "openssl" {
+		return false
+	}
+	v := strings.TrimLeft(s[loc[6]:], `"'\`)
+	for _, ref := range []string{"env:", "file:", "fd:"} {
+		if len(v) > len(ref) && strings.HasPrefix(v, ref) && !strings.ContainsRune(" \t\r\n\"'\\", rune(v[len(ref)])) {
+			return true
+		}
+	}
+	return strings.HasPrefix(v, "stdin") && (len(v) == len("stdin") || !isWordByte(v[len("stdin")]))
 }
 
 // foundPasswords tells, for names at increasing positions, whether a name is
