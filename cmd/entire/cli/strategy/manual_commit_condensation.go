@@ -798,6 +798,11 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	}
 	extractSessionDataSpan.End()
 	extractDuration := time.Since(extractStart)
+	if o.foreignHome {
+		// The caller scoped the files to this repository; extraction's
+		// fallback for an empty list would resolve them against the home.
+		sessionData.FilesTouched = slices.Clone(state.FilesTouched)
+	}
 
 	resolveCondensedTokenUsage(ctx, ag, state, sessionData)
 

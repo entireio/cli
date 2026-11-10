@@ -37,6 +37,18 @@ func TestSessionHome_RecordAndList(t *testing.T) {
 	assert.WithinDuration(t, time.Now(), homes[0].UpdatedAt, time.Minute)
 }
 
+// The worktree path is git's spelling (forward slashes from Git for Windows),
+// not filepath.Clean's, and is kept verbatim.
+func TestSessionHome_KeepsGitSpelledPath(t *testing.T) {
+	isolateHomeIndex(t)
+	wt := filepath.ToSlash(t.TempDir()) + "/"
+	require.NoError(t, RecordSessionHome(SessionHome{SessionID: "sess-1", WorktreePath: wt}))
+	homes, err := ListSessionHomes(time.Hour)
+	require.NoError(t, err)
+	require.Len(t, homes, 1)
+	assert.Equal(t, wt, homes[0].WorktreePath)
+}
+
 func TestSessionHome_RecordRejectsInvalid(t *testing.T) {
 	isolateHomeIndex(t)
 	require.Error(t, RecordSessionHome(SessionHome{SessionID: "../escape", WorktreePath: t.TempDir()}))

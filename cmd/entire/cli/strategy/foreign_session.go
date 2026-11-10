@@ -525,8 +525,8 @@ func mutateForeignSessionState(ctx context.Context, store *session.StateStore, c
 // wrote under worktreePath since its last checkpoint, sorted. When it wrote
 // none of them (the agent edited through a shell, say), the agent's own
 // commit is attributed whole, as filterFilesTouched does for a session with
-// evidence of work. Never empty for a non-empty commit, so condensation never
-// re-resolves files against the home repository.
+// evidence of work. Condensation takes the result as authoritative, even
+// when empty (an empty commit), and never re-resolves against the home.
 func (s *ManualCommitStrategy) foreignEditedFiles(ctx context.Context, state *SessionState, worktreePath string, committed map[string]struct{}) []string {
 	view := *state
 	view.WorktreePath = worktreePath

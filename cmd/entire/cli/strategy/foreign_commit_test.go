@@ -249,6 +249,28 @@ func TestPostCommit_ForeignAgentCommitWithoutTranscriptOverlap(t *testing.T) {
 	assert.ElementsMatch(t, []string{"README.md", "b.txt"}, content.Metadata.FilesTouched)
 }
 
+// An empty commit has no committed files to attribute; the transcript's A
+// paths must not stand in for them.
+func TestPostCommit_ForeignEmptyCommitRecordsNoHomeFiles(t *testing.T) {
+	r := foreignCommitFixture(t, nil)
+	state := loadForeignTestState(t, r)
+	aPath, err := json.Marshal(filepath.Join(r.a, "README.md"))
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(state.TranscriptPath, []byte(`{"type":"human","message":{"content":"x"}}`+"\n"+
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":`+string(aPath)+`,"content":"x"}}]}}`+"\n"), 0o600))
+	testutil.RunGit(t, r.b, "rm", "-q", "--cached", "b.txt")
+
+	msg := prepareForeign(t, "empty\n", commitSourceMessage)
+	cpID, found := trailers.ParseCheckpoint(msg)
+	require.True(t, found)
+	testutil.RunGit(t, r.b, "commit", "-q", "--allow-empty", "-m", msg)
+	require.NoError(t, NewManualCommitStrategy().PostCommit(context.Background()))
+
+	content := readBCheckpoint(t, r, cpID)
+	require.NotNil(t, content)
+	assert.Empty(t, content.Metadata.FilesTouched, "A's README.md is not a file of B's commit")
+}
+
 // stampedOrNotice prepares a commit in B and returns whether it was stamped
 // and the notice commit-msg would print.
 func stampedOrNotice(t *testing.T) (bool, string) {
