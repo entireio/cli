@@ -16,7 +16,14 @@ import (
 // The folder holds a decoy title-helper.bat; the real one is on PATH.
 func TestWindowsWrappedTitleCommand_ResolvesProgramsFromPath(t *testing.T) {
 	// No t.Parallel — uses t.Setenv.
-	t.Setenv("NoDefaultCurrentDirectoryInExePath", "") // not set by the caller
+	// Unset, not empty: Windows checks only whether the variable exists, so an
+	// empty value would already stop cmd.exe searching the folder. t.Setenv
+	// registers the restore.
+	const key = "NoDefaultCurrentDirectoryInExePath"
+	t.Setenv(key, "")
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatalf("unset %s: %v", key, err)
+	}
 
 	folder := t.TempDir()
 	decoyMarker := filepath.Join(folder, "decoy-ran")
