@@ -488,8 +488,14 @@ func readJSONFile(t *testing.T, path string) map[string]any {
 // userReposEntry returns the user settings file's repos[key], or nil.
 func userReposEntry(t *testing.T, key string) map[string]any {
 	t.Helper()
-	repos, _ := readJSONFile(t, filepath.Join(os.Getenv(userdirs.EnvConfigDir), usersettings.FileName))["repos"].(map[string]any)
-	entry, _ := repos[key].(map[string]any)
+	repos, ok := readJSONFile(t, filepath.Join(os.Getenv(userdirs.EnvConfigDir), usersettings.FileName))["repos"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	entry, ok := repos[key].(map[string]any)
+	if !ok {
+		return nil
+	}
 	return entry
 }
 

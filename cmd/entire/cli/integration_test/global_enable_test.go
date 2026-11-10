@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -146,7 +147,7 @@ func TestGlobalEnable_PushesHeldUntilAgreed(t *testing.T) {
 			env.CheckpointStore = store
 			bare := env.SetupBareRemote()
 			extra, _ := userTierEnv(t, `{"global_enable": true}`)
-			env.ExtraEnv = append(extra, agentFreeEnv()...)
+			env.ExtraEnv = slices.Concat(extra, agentFreeEnv())
 
 			runClaudeTurn(t, env, "a.go", "package a\n")
 			held := entireLines(gitPushWithHooksIn(t, env, env.RepoDir))
@@ -234,7 +235,7 @@ func TestGlobalEnable_HeldPushAsksOnlyAPerson(t *testing.T) {
 			env.CheckpointStore = StoreGitRefs
 			bare := env.SetupBareRemote()
 			extra, _ := userTierEnv(t, `{"global_enable": true}`)
-			env.ExtraEnv = append(append(extra, agentFreeEnv()...), tc.agentEnv...)
+			env.ExtraEnv = slices.Concat(extra, agentFreeEnv(), tc.agentEnv)
 
 			runClaudeTurn(t, env, "a.go", "package a\n")
 			out := gitPushAsTerminal(t, env, "1")
@@ -275,7 +276,7 @@ func TestGlobalEnable_CheckpointPushReportsTheHold(t *testing.T) {
 	env.CheckpointStore = StoreGitRefs
 	bare := env.SetupBareRemote()
 	extra, _ := userTierEnv(t, `{"global_enable": true}`)
-	env.ExtraEnv = append(extra, agentFreeEnv()...)
+	env.ExtraEnv = slices.Concat(extra, agentFreeEnv())
 	runClaudeTurn(t, env, "a.go", "package a\n")
 	cpID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
 	if cpID == "" {
@@ -380,7 +381,7 @@ func TestGlobalEnable_ClaimedRepoPushesWithoutNotice(t *testing.T) {
 	env.CheckpointStore = StoreGitRefs
 	bare := env.SetupBareRemote()
 	extra, _ := userTierEnv(t, `{"global_enable": true}`)
-	env.ExtraEnv = append(extra, agentFreeEnv()...)
+	env.ExtraEnv = slices.Concat(extra, agentFreeEnv())
 	env.WriteFile(".entire/settings.local.json", `{"enabled": true}`)
 
 	runClaudeTurn(t, env, "a.go", "package a\n")
@@ -469,7 +470,7 @@ func TestGlobalEnable_AttachReportsTheHold(t *testing.T) {
 	env := newNeverEnabledRepo(t)
 	bare := env.SetupBareRemote()
 	extra, _ := userTierEnv(t, `{"global_enable": true}`)
-	env.ExtraEnv = append(extra, agentFreeEnv()...)
+	env.ExtraEnv = slices.Concat(extra, agentFreeEnv())
 
 	const sessionID = "held-attach"
 	tb := NewTranscriptBuilder()

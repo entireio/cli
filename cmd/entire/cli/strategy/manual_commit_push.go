@@ -107,20 +107,11 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	// Everything in between can still stop delivery, and the election is
 	// permanent, so intent is not enough to move it. The hint below then speaks
 	// only for what capture left gated — see hintGatedCheckpointSync.
-	var pendingCapture string
-	if !ps.hasCheckpointURL() {
-		if pendingCaptureCheckpointSyncRemote(ctx, ps.remote) {
-			pendingCapture = ps.remote
-		}
-		if !checkpointSyncAllowedForRemote(ctx, ps.remote, pendingCapture) {
-			hintGatedCheckpointSync(ctx, ps.remote)
-			return nil
-		}
-	}
-
-	// After the sync-remote gate, so only a push that would carry
-	// checkpoints asks for consent to.
-	if !globalEnablePushAllowed(ctx, &ps, protectFirstUserBranch) {
+	//
+	// The global-enable consent gate comes after it, so only a push that
+	// would carry checkpoints asks for consent to.
+	pendingCapture, allowed := checkpointSyncGate(ctx, ps)
+	if !allowed || !globalEnablePushAllowed(ctx, &ps, protectFirstUserBranch) {
 		return nil
 	}
 
@@ -250,6 +241,23 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 		noticeGlobalEnablePush(ctx, ps)
 	}
 	return nil
+}
+
+// checkpointSyncGate is prePush's single-remote gate: the remote whose
+// election this push would capture, and whether checkpoints may go to
+// ps.remote at all. A checkpoint_remote URL is exempt.
+func checkpointSyncGate(ctx context.Context, ps pushSettings) (pendingCapture string, allowed bool) {
+	if ps.hasCheckpointURL() {
+		return "", true
+	}
+	if pendingCaptureCheckpointSyncRemote(ctx, ps.remote) {
+		pendingCapture = ps.remote
+	}
+	if !checkpointSyncAllowedForRemote(ctx, ps.remote, pendingCapture) {
+		hintGatedCheckpointSync(ctx, ps.remote)
+		return pendingCapture, false
+	}
+	return pendingCapture, true
 }
 
 // opfPrePushDecision resolves the user's OPF decision for this push (env >

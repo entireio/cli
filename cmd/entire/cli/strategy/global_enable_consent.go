@@ -33,6 +33,9 @@ var ErrCheckpointPushHeldForConsent = errors.New(
 	"this repository is on only through global enable and you have not agreed to push its checkpoints; " +
 		"run `git push` in a terminal and answer yes, and they stay queued until then")
 
+// consentYes is the long form of the consent question's yes.
+const consentYes = "yes"
+
 // globalEnablePushConsentTimeout bounds the question, like the first-push
 // policy question: nothing else bounds the hook, and running out of time holds.
 const globalEnablePushConsentTimeout = 60 * time.Second
@@ -224,7 +227,7 @@ func askGlobalEnablePushConsentTTY(waiting int, destination string) bool {
 		return false
 	}
 	answer := strings.ToLower(strings.TrimSpace(line))
-	return answer == "y" || answer == "yes"
+	return answer == "y" || answer == consentYes
 }
 
 func pluralSessionCheckpoints(n int) string {
@@ -272,11 +275,13 @@ func GlobalEnablePushStatus(ctx context.Context) (GlobalEnablePushReport, error)
 		}
 	}
 	report := GlobalEnablePushReport{Consent: globalEnablePushConsent(ctx, ps)}
-	if report.Consent == GlobalEnableConsentHeld {
+	switch report.Consent {
+	case GlobalEnableConsentHeld:
 		report.Waiting, _ = CountUnpushedCheckpoints(ctx, syncRemote.Name) //nolint:errcheck // a count status cannot take is reported as none waiting
 		report.Owner = destinationOwner(ctx, ps)
-	} else if report.Consent == GlobalEnableConsentOwnerListed {
+	case GlobalEnableConsentOwnerListed:
 		report.Owner = destinationOwner(ctx, ps)
+	case GlobalEnableConsentNotNeeded, GlobalEnableConsentAgreed:
 	}
 	return report, nil
 }

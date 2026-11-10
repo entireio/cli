@@ -157,10 +157,13 @@ func TestGlobalEnableConsent_ExplicitPushesReportTheHold(t *testing.T) {
 	defer repo.Close()
 	_, _, err = PushQueuedCheckpointRefs(t.Context(), repo, "origin")
 	require.ErrorIs(t, err, ErrCheckpointPushHeldForConsent)
-	_, _, err = CheckpointPushTarget(t.Context(), "origin")
+	target, disabled, err := CheckpointPushTarget(t.Context(), "origin")
 	require.ErrorIs(t, err, ErrCheckpointPushHeldForConsent)
-	_, err = PushCheckpoints(t.Context(), nil)
+	assert.Empty(t, target, "a held push has no target to confirm against")
+	assert.False(t, disabled)
+	report, err := PushCheckpoints(t.Context(), nil)
 	require.ErrorIs(t, err, ErrCheckpointPushHeldForConsent)
+	assert.Empty(t, report.Outcomes)
 	assert.Empty(t, remoteCheckpointRefs(t, bareDir))
 }
 

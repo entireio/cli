@@ -292,9 +292,12 @@ func TestRemoveUserHooks_RemovesOnlyEntireHooks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	removed, _, err := RemoveUserHooks(context.Background())
+	removed, path, err := RemoveUserHooks(context.Background())
 	if err != nil {
 		t.Fatalf("RemoveUserHooks() error = %v", err)
+	}
+	if want := filepath.Join(userDir, ClaudeSettingsFileName); path != want {
+		t.Errorf("path = %q, want %q", path, want)
 	}
 	if !removed {
 		t.Error("RemoveUserHooks() reported nothing removed")
