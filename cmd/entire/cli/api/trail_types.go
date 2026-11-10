@@ -101,11 +101,6 @@ func (r *TrailResource) ToMetadata() *trail.Metadata {
 }
 
 type TrailUpdateRequest struct {
-	Status             *string   `json:"status,omitempty"`
-	Title              *string   `json:"title,omitempty"`
-	RequestedReviewers *[]string `json:"requested_reviewers,omitempty"`
-	Type               *string   `json:"type,omitempty"`
-	Priority           *string   `json:"priority,omitempty"`
 	// ReadyForReview marks the change ready (true) or back to draft (false).
 	// The server keeps it false on a repository without an approval gate, but
 	// still applies the matching draft state to a backing pull request.

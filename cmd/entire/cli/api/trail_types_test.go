@@ -199,15 +199,14 @@ func TestTrailApprovalResponseDecodesStringAuthor(t *testing.T) {
 
 func TestTrailWriteContracts(t *testing.T) {
 	t.Parallel()
-	reviewers := []string{}
-	title := "Renamed"
+	base := "main"
 	no := false
 	for _, tc := range []struct {
 		name string
 		body any
 		want string
 	}{
-		{"update", TrailUpdateRequest{Title: &title, RequestedReviewers: &reviewers}, `{"title":"Renamed","requested_reviewers":[]}`},
+		{"update", TrailUpdateRequest{ReadyForReview: &no, Base: &base}, `{"ready_for_review":false,"base":"main"}`},
 		{"approve", TrailApprovalRequest{Event: "approve", Body: "Reviewed"}, `{"event":"approve","body":"Reviewed"}`},
 		{"request changes", TrailApprovalRequest{Event: "request_changes", Body: "Please fix"}, `{"event":"request_changes","body":"Please fix"}`},
 		{"discussion", TrailDiscussionCreateRequest{Title: "Design", Body: "Discuss"}, `{"title":"Design","body":"Discuss"}`},
