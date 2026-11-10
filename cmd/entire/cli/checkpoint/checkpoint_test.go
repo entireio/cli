@@ -35,6 +35,8 @@ import (
 )
 
 func TestCopyMetadataDir_RefusesSymlinks(t *testing.T) {
+	testutil.SkipWithoutSymlinks(t)
+
 	// Create a temp directory for the test
 	tempDir := t.TempDir()
 
