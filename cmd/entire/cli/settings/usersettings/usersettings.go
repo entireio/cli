@@ -86,7 +86,7 @@ type UserSettings struct {
 	// extra holds every top-level block this package does not decode: the
 	// blocks the settings package owns (`preferences`, `repos`,
 	// `global_enable` — read them with Block) and any block a newer binary
-	// wrote. SetGlobalEnable, the only writer, keeps all of them.
+	// wrote. Modify, the only writer, keeps all of them.
 	extra map[string]json.RawMessage
 }
 
@@ -172,14 +172,29 @@ func decode(data []byte) (*UserSettings, error) {
 }
 
 // SetGlobalEnable writes GlobalEnableKey into the user settings file, keeping
-// every other block, and returns the file's path. It is the file's only
-// writer, used by `entire enable --global` and `entire disable --global`.
+// every other block, and returns the file's path. Used by `entire enable
+// --global` and `entire disable --global`.
+func SetGlobalEnable(ctx context.Context, enabled bool) (string, error) {
+	return Modify(ctx, func(blocks map[string]json.RawMessage) error {
+		value, err := json.Marshal(enabled)
+		if err != nil {
+			return fmt.Errorf("encoding %s: %w", GlobalEnableKey, err)
+		}
+		blocks[GlobalEnableKey] = value
+		return nil
+	})
+}
+
+// Modify is the user settings file's one writer: it hands fn every top-level
+// block as raw JSON, writes back whatever fn leaves, and returns the file's
+// path. Blocks fn does not touch, including ones a newer binary wrote, keep
+// their values. An error from fn writes nothing.
 //
 // The read and the write happen under one lock and through one root, so two
 // concurrent writers cannot lose each other's change and a symlink swapped in
 // between cannot redirect the write. A file that does not parse is refused
 // rather than replaced.
-func SetGlobalEnable(_ context.Context, enabled bool) (string, error) {
+func Modify(_ context.Context, fn func(blocks map[string]json.RawMessage) error) (string, error) {
 	root, err := userdirs.ConfigRoot()
 	if err != nil {
 		return "", fmt.Errorf("opening user settings directory: %w", err)
@@ -206,11 +221,9 @@ func SetGlobalEnable(_ context.Context, enabled bool) (string, error) {
 	if blocks == nil {
 		blocks = map[string]json.RawMessage{}
 	}
-	value, err := json.Marshal(enabled)
-	if err != nil {
-		return path, fmt.Errorf("encoding %s: %w", GlobalEnableKey, err)
+	if err := fn(blocks); err != nil {
+		return path, fmt.Errorf("%s: %w", path, err)
 	}
-	blocks[GlobalEnableKey] = value
 	out, err := jsonutil.MarshalIndentWithNewline(blocks, "", "  ")
 	if err != nil {
 		return path, fmt.Errorf("encoding user settings: %w", err)

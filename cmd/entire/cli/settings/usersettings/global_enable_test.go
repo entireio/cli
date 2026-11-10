@@ -1,6 +1,8 @@
 package usersettings
 
 import (
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -86,4 +88,39 @@ func TestSetGlobalEnable_RefusesASymlinkedFile(t *testing.T) {
 	data, err := os.ReadFile(target)
 	require.NoError(t, err)
 	assert.Equal(t, `{}`, string(data))
+}
+
+// Modify writes nothing when its function fails: a writer that refuses the
+// file's contents must leave them as they were.
+func TestModify_WritesNothingWhenTheFunctionFails(t *testing.T) {
+	const content = `{"repos": {"gh/acme/app": [1]}}`
+	writeUserFile(t, content)
+	path := filepath.Join(os.Getenv(userdirs.EnvConfigDir), FileName)
+
+	_, err := Modify(t.Context(), func(blocks map[string]json.RawMessage) error {
+		blocks["global_enable"] = json.RawMessage(`true`)
+		return errors.New("refused")
+	})
+	require.ErrorContains(t, err, "refused")
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, content, string(data))
+}
+
+// Modify hands the function every block and writes back what it leaves,
+// creating the file when there is none.
+func TestModify_RoundTripsBlocks(t *testing.T) {
+	writeUserFile(t, `{"newer_block": {"x": 1}}`)
+
+	path, err := Modify(t.Context(), func(blocks map[string]json.RawMessage) error {
+		assert.JSONEq(t, `{"x": 1}`, string(blocks["newer_block"]))
+		blocks["repos"] = json.RawMessage(`{"gh/acme/app": {"push_checkpoints": true}}`)
+		return nil
+	})
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"newer_block": {"x": 1}, "repos": {"gh/acme/app": {"push_checkpoints": true}}}`, string(data))
 }
