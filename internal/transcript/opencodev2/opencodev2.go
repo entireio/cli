@@ -5,6 +5,7 @@
 package opencodev2
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -42,22 +43,39 @@ var openCodeV2ToolNames = map[string]string{
 	"shell":    "bash",
 }
 
-// IsExport reports whether data is an OpenCode 2 export: its
-// messages carry a top-level "type" rather than an "info" object. An export
-// with no messages is the same in both versions.
+// IsExport reports whether data is an OpenCode 2 export: its messages carry
+// a top-level "type" rather than an "info" object. An export is written by
+// one OpenCode version, so the first message decides; it is read with a
+// streaming decoder, so a 1.x export (every stored transcript) costs one
+// message's decode, not the whole file's. An export with no messages is the
+// same in both versions.
 func IsExport(data []byte) bool {
-	var doc struct {
-		Messages []map[string]json.RawMessage `json:"messages"`
-	}
-	if err := json.Unmarshal(data, &doc); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
 		return false
 	}
-	for _, msg := range doc.Messages {
-		_, hasInfo := msg["info"]
-		_, hasType := msg["type"]
-		if hasType && !hasInfo {
-			return true
+	for dec.More() {
+		key, err := dec.Token()
+		if err != nil {
+			return false
 		}
+		if key != "messages" {
+			var skip json.RawMessage
+			if dec.Decode(&skip) != nil {
+				return false
+			}
+			continue
+		}
+		if t, err := dec.Token(); err != nil || t != json.Delim('[') || !dec.More() {
+			return false
+		}
+		var first map[string]json.RawMessage
+		if dec.Decode(&first) != nil {
+			return false
+		}
+		_, hasInfo := first["info"]
+		_, hasType := first["type"]
+		return hasType && !hasInfo
 	}
 	return false
 }
