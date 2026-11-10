@@ -3,7 +3,12 @@ package codex
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"maps"
+	"os"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 )
@@ -57,6 +62,11 @@ type usageCounter struct {
 	// Calls counts distinct consecutive token_count totals: a replayed total
 	// is not a new call.
 	Calls int `json:"calls,omitempty"`
+	// ChildKey fingerprints the inventoried children's files when ChildTotals
+	// was read: an unchanged inventory reuses it instead of reading every
+	// child rollout again.
+	ChildKey    string                       `json:"child_key,omitempty"`
+	ChildTotals map[string]*agent.TokenUsage `json:"child_totals,omitempty"`
 }
 
 func (u *usageCounter) Files(in agent.CumulativeTokenInput) []agent.UsageFile {
@@ -121,6 +131,10 @@ func (u *usageCounter) children(ctx context.Context, in agent.CumulativeTokenInp
 	if len(in.Subagents) == 0 {
 		return nil
 	}
+	key, cacheable := childFingerprint(in)
+	if cacheable && key == u.ChildKey {
+		return maps.Clone(u.ChildTotals)
+	}
 	extraction, ok := agent.ExtractWithSubagentInventory(ctx, u.agent, nil, 0, in.Subagents, in.Home)
 	if !ok {
 		return nil
@@ -135,5 +149,28 @@ func (u *usageCounter) children(ctx context.Context, in agent.CumulativeTokenInp
 		}
 		children[child.AgentID] = child.TokenUsage
 	}
+	if cacheable {
+		u.ChildKey, u.ChildTotals = key, maps.Clone(children)
+	}
 	return children
+}
+
+// childFingerprint identifies the inventory and each child file's size and
+// modification time. A child without a known path is found by scanning, so
+// such an inventory is not cached.
+func childFingerprint(in agent.CumulativeTokenInput) (string, bool) {
+	h := sha256.New()
+	fmt.Fprintf(h, "%s\n", in.Home)
+	for _, ref := range in.Subagents {
+		path := ref.ResolvedTranscriptPath
+		if path == "" {
+			path = ref.DeclaredTranscriptPath
+		}
+		info, err := os.Stat(path)
+		if path == "" || err != nil {
+			return "", false
+		}
+		fmt.Fprintf(h, "%s\x00%s\x00%d\x00%d\n", ref.AgentID, path, info.Size(), info.ModTime().UnixNano())
+	}
+	return hex.EncodeToString(h.Sum(nil)[:12]), true
 }

@@ -395,7 +395,7 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 		return fmt.Errorf("failed to redact transcript: %w", redactErr)
 	}
 
-	writeOpts := attachWriteOptions(ctx, plan, checkpointID, isExistingCheckpoint, sessionID, ag, redactedTranscript, meta, window, author, tokenUsage, opts, reviewSkills)
+	writeOpts := attachWriteOptions(ctx, plan, checkpointID, isExistingCheckpoint, sessionID, ag, redactedTranscript, meta, window, author, tokenUsage, existingState, opts, reviewSkills)
 
 	// ReservedSession routes by the checkpoint ID's backend, as condensation
 	// does: appending to an existing ULID checkpoint under the git-branch
@@ -508,7 +508,7 @@ func resolveAttachCheckpoint(ctx, logCtx context.Context, repo *git.Repository, 
 
 // attachWriteOptions is the checkpoint write for one attach: the session's
 // turns in window, and a recorded link when plan names a pushed commit.
-func attachWriteOptions(ctx context.Context, plan attachLinkPlan, checkpointID id.CheckpointID, isExistingCheckpoint bool, sessionID string, ag agent.Agent, transcript redact.RedactedBytes, meta transcriptMetadata, window attachTranscriptWindow, author *GitAuthor, tokenUsage *agent.TokenUsage, opts attachOptions, reviewSkills []string) cpkg.WriteOptions {
+func attachWriteOptions(ctx context.Context, plan attachLinkPlan, checkpointID id.CheckpointID, isExistingCheckpoint bool, sessionID string, ag agent.Agent, transcript redact.RedactedBytes, meta transcriptMetadata, window attachTranscriptWindow, author *GitAuthor, tokenUsage *agent.TokenUsage, existingState *session.State, opts attachOptions, reviewSkills []string) cpkg.WriteOptions {
 	writeOpts := cpkg.WriteOptions{
 		CheckpointID:              checkpointID,
 		SessionID:                 sessionID,
@@ -522,6 +522,8 @@ func attachWriteOptions(ctx context.Context, plan attachLinkPlan, checkpointID i
 		Agent:                     ag.Type(),
 		Model:                     meta.Model,
 		TokenUsage:                tokenUsage,
+		// attachTokens read the ledger into existingState.
+		SessionTokenUsage: strategy.SessionTokenUsage(existingState),
 	}
 	if plan.mode == attachRecordLink && !isExistingCheckpoint {
 		writeOpts.LinkedCommits = []cpkg.LinkedCommit{{SHA: plan.target.Hash.String(), Repo: attachLinkRepo(ctx, plan.holder)}}

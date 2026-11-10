@@ -983,7 +983,7 @@ func buildCondensationWriteOptions(
 		TranscriptIdentifierAtStart: state.TranscriptIdentifierAtStart,
 		CheckpointTranscriptStart:   state.CheckpointTranscriptStart,
 		TokenUsage:                  sessionData.TokenUsage,
-		SessionTokenUsage:           sessionTokenUsage(state),
+		SessionTokenUsage:           SessionTokenUsage(state),
 		SkillEvents:                 skillEvents,
 		SessionMetrics:              buildSessionMetrics(state),
 		Summary:                     summary,
@@ -1339,10 +1339,10 @@ func resolveCondensedTokenUsage(ctx context.Context, ag agent.Agent, state *Sess
 	sessionData.TokenUsage = session.WithChildSessionTokens(sessionData.TokenUsage, state.PendingChildSessionTokens())
 }
 
-// sessionTokenUsage is the session's running total a checkpoint records, for
+// SessionTokenUsage is the session's running total a checkpoint records, for
 // token-ledger sessions; nil for the per-turn path, whose total is not one.
-func sessionTokenUsage(state *SessionState) *agent.TokenUsage {
-	if !state.TokenLedger.IsActive() {
+func SessionTokenUsage(state *SessionState) *agent.TokenUsage {
+	if state == nil || !state.TokenLedger.IsActive() {
 		return nil
 	}
 	return state.TotalTokenUsage()

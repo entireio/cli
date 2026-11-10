@@ -35,5 +35,16 @@ func TestUsageCounter_InventoriedChild(t *testing.T) {
 
 	again, _, err := agent.ReadCumulativeUsage(t.Context(), ag, in, first.Cursor)
 	require.NoError(t, err)
-	require.Equal(t, first.Children, again.Children, "a later reading reports the same child total")
+	require.Equal(t, first.Children, again.Children, "an unchanged child reports the same total")
+
+	// The child grows: its total is read again.
+	f, err := os.OpenFile(child, os.O_APPEND|os.O_WRONLY, 0)
+	require.NoError(t, err)
+	line := tokenCountEvent(map[string]any{"total_token_usage": map[string]any{"input_tokens": 9, "cached_input_tokens": 2, "output_tokens": 4}})
+	_, err = f.Write(append(line, '\n'))
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	grown, _, err := agent.ReadCumulativeUsage(t.Context(), ag, in, again.Cursor)
+	require.NoError(t, err)
+	require.Equal(t, 4, grown.Children["child"].OutputTokens)
 }
