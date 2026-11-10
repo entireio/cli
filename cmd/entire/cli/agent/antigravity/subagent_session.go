@@ -264,12 +264,13 @@ func lastNonBlankLine(data []byte) []byte {
 // TurnSubagents implements agent.SubagentReplyCounter: the subagents whose IDs
 // appear in the parent's steps after fromOffset — created by invoke_subagent,
 // messaged by send_message, or heard from in a SYSTEM_MESSAGE — each with how
-// many messages from it the whole transcript holds. Only conversations this
-// parent created count (its "Created the following subagent" steps, the same
-// link ResolveSubagentSession requires), from any turn: a later turn can
+// many messages from it the whole transcript holds and how many the parent
+// sent it (its launch prompt and its send_message calls). Only conversations
+// this parent created count (its "Created the following subagent" steps, the
+// same link ResolveSubagentSession requires), from any turn: a later turn can
 // message a child created earlier, while a conversation it never created is no
 // subagent of its, and must not hold its turn open.
-func (a *AntigravityAgent) TurnSubagents(parentRef string, fromOffset int) (map[string]int, error) {
+func (a *AntigravityAgent) TurnSubagents(parentRef string, fromOffset int) (map[string]agent.SubagentExchange, error) {
 	data, err := a.readStoreTranscript(parentRef)
 	if err != nil {
 		return nil, err
@@ -277,7 +278,7 @@ func (a *AntigravityAgent) TurnSubagents(parentRef string, fromOffset int) (map[
 	scan := turnSubagentScan{
 		turn:     make(map[string]struct{}),
 		created:  make(map[string]struct{}),
-		received: make(map[string]int),
+		exchange: make(map[string]agent.SubagentExchange),
 	}
 	line := 0
 	forEachNonBlankLine(data, 0, func(raw []byte) {
@@ -288,21 +289,21 @@ func (a *AntigravityAgent) TurnSubagents(parentRef string, fromOffset int) (map[
 		}
 		scan.record(step, line > fromOffset)
 	})
-	out := make(map[string]int, len(scan.turn))
+	out := make(map[string]agent.SubagentExchange, len(scan.turn))
 	for id := range scan.turn {
 		if _, ok := scan.created[id]; ok && validation.ValidateAgentSessionID(id) == nil {
-			out[id] = scan.received[id]
+			out[id] = scan.exchange[id]
 		}
 	}
 	return out, nil
 }
 
 // turnSubagentScan collects, across a parent's steps, the subagent IDs its
-// turn involves, the subagents it created, and the messages heard from each.
+// turn involves, the subagents it created, and the exchange with each.
 type turnSubagentScan struct {
 	turn     map[string]struct{}
 	created  map[string]struct{}
-	received map[string]int
+	exchange map[string]agent.SubagentExchange
 }
 
 // record adds one parent step; inTurn reports whether it is past the turn's
@@ -311,56 +312,68 @@ func (s *turnSubagentScan) record(step agyStep, inTurn bool) {
 	switch step.Type {
 	case agyStepTypeSystemMessage:
 		if m := agySenderRe.FindStringSubmatch(step.Content); m != nil {
-			s.received[m[1]]++
-			if inTurn {
-				s.turn[m[1]] = struct{}{}
-			}
+			s.add(m[1], inTurn, agent.SubagentExchange{Replies: 1})
 		}
 	case agyStepTypeGeneric:
 		if id := createdSubagentID(step.Content); id != "" {
 			s.created[id] = struct{}{}
-			if inTurn {
-				s.turn[id] = struct{}{}
-			}
+			s.add(id, inTurn, agent.SubagentExchange{Messages: 1})
 		}
 	case agyStepTypePlannerResponse:
-		if !inTurn {
-			return
-		}
 		for _, call := range step.ToolCalls {
 			if call.Name != agyToolSendMessage {
 				continue
 			}
 			if id := decodeAgyString(call.Args["Recipient"]); id != "" {
-				s.turn[id] = struct{}{}
+				s.add(id, inTurn, agent.SubagentExchange{Messages: 1})
 			}
 		}
 	}
 }
 
-// RepliesSent implements agent.SubagentReplyCounter: the subagent's
-// send_message calls addressed to parentID.
-func (a *AntigravityAgent) RepliesSent(subagentRef, parentID string) (int, error) {
+// add counts one message with id, and marks id as involved in the turn when
+// the step is past the turn's start.
+func (s *turnSubagentScan) add(id string, inTurn bool, delta agent.SubagentExchange) {
+	ex := s.exchange[id]
+	ex.Replies += delta.Replies
+	ex.Messages += delta.Messages
+	s.exchange[id] = ex
+	if inTurn {
+		s.turn[id] = struct{}{}
+	}
+}
+
+// ExchangeWithParent implements agent.SubagentReplyCounter: the subagent's
+// send_message calls addressed to parentID, and the messages from parentID
+// (its launch prompt first) its transcript holds.
+func (a *AntigravityAgent) ExchangeWithParent(subagentRef, parentID string) (agent.SubagentExchange, error) {
 	data, err := a.readStoreTranscript(subagentRef)
 	if err != nil {
-		return 0, err
+		return agent.SubagentExchange{}, err
 	}
-	sent := 0
+	var ex agent.SubagentExchange
 	forEachNonBlankLine(data, 0, func(raw []byte) {
-		if !bytes.Contains(raw, []byte(agyToolSendMessage)) {
+		if !bytes.Contains(raw, []byte(agyToolSendMessage)) && !bytes.Contains(raw, []byte("sender=")) {
 			return
 		}
 		var step agyStep
-		if json.Unmarshal(raw, &step) != nil || step.Type != agyStepTypePlannerResponse {
+		if json.Unmarshal(raw, &step) != nil {
 			return
 		}
-		for _, call := range step.ToolCalls {
-			if call.Name == agyToolSendMessage && decodeAgyString(call.Args["Recipient"]) == parentID {
-				sent++
+		switch step.Type {
+		case agyStepTypeSystemMessage:
+			if m := agySenderRe.FindStringSubmatch(step.Content); m != nil && m[1] == parentID {
+				ex.Messages++
+			}
+		case agyStepTypePlannerResponse:
+			for _, call := range step.ToolCalls {
+				if call.Name == agyToolSendMessage && decodeAgyString(call.Args["Recipient"]) == parentID {
+					ex.Replies++
+				}
 			}
 		}
 	})
-	return sent, nil
+	return ex, nil
 }
 
 // readStoreTranscript reads a transcript inside agy's brain directory. A

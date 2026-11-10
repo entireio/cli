@@ -3083,9 +3083,11 @@ func recordAwaitingSubagents(ctx context.Context, sessionID string, awaiting boo
 // endParentTurnIfSubagentsDone ends the parent's turn when it stopped to wait
 // for its subagents and they are done: the agent will not report the turn's
 // end itself (Antigravity sends one fullyIdle=false Stop and nothing after
-// it). Every subagent the turn involved must have stopped, and every reply it
-// sent must be in the parent's transcript: an unread reply wakes the parent,
-// so its turn is not over. A subagent whose agent died sends nothing more.
+// it). Every subagent the turn involved must have stopped, must have taken in
+// every message the parent sent it (one still on its way will wake it), and
+// every reply it sent must be in the parent's transcript: an unread reply
+// wakes the parent, so its turn is not over. A subagent whose agent died
+// sends nothing more.
 // The turn then ends exactly as a reported one would, from the parent's own
 // transcript and turn start, so its tokens and files count once.
 //
@@ -3112,8 +3114,8 @@ func endParentTurnIfSubagentsDone(ctx context.Context, ag agent.Agent, parentID 
 	if err != nil || len(subagents) == 0 {
 		return // not waiting on subagents (a background command), or unknown
 	}
-	for id, received := range subagents {
-		if !subagentDone(ctx, counter, id, parentID, received) {
+	for id, exchange := range subagents {
+		if !subagentDone(ctx, counter, id, parentID, exchange) {
 			return
 		}
 	}
@@ -3158,16 +3160,18 @@ func releaseSubagentTurnEndClaim(ctx context.Context, sessionID string) error {
 }
 
 // subagentDone reports whether a subagent is finished from its parent's point
-// of view: its session is not running, and either its agent died or the parent
-// has received every reply it sent. A subagent without a session yet is
-// starting, not done.
+// of view: its session is not running, and either its agent died or it has
+// taken in every message the parent sent it and the parent has received every
+// reply it sent. A subagent without a session yet is starting, not done; nor
+// is an IDLE one the parent just messaged, before its next hook marks it
+// running again.
 //
 // A stuck-looking subagent (ACTIVE with no hook past StuckActiveThreshold)
 // counts as dead only when its owner's liveness is unknown. With a recorded,
 // checkable owner, OwnerExited already answers that: a live owner means the
 // subagent may still be doing long hookless work, and ending the parent's turn
 // then would split it early.
-func subagentDone(ctx context.Context, counter agent.SubagentReplyCounter, subagentID, parentID string, received int) bool {
+func subagentDone(ctx context.Context, counter agent.SubagentReplyCounter, subagentID, parentID string, parentSide agent.SubagentExchange) bool {
 	state, err := strategy.LoadSessionState(ctx, subagentID)
 	if err != nil || state == nil {
 		return false
@@ -3181,8 +3185,8 @@ func subagentDone(ctx context.Context, counter agent.SubagentReplyCounter, subag
 	if state.Phase.IsActive() || state.TranscriptPath == "" {
 		return false
 	}
-	sent, err := counter.RepliesSent(state.TranscriptPath, parentID)
-	return err == nil && sent <= received
+	childSide, err := counter.ExchangeWithParent(state.TranscriptPath, parentID)
+	return err == nil && childSide.Replies <= parentSide.Replies && childSide.Messages >= parentSide.Messages
 }
 
 // --- Helper functions ---

@@ -228,9 +228,13 @@ and `Role`. Captured on agy 1.4.2:
   The pause is recorded (`AwaitingSubagentsAt`), and the parent's turn is ended
   for it once every subagent the turn involved (launched, messaged, or heard
   from, per the parent's transcript, and created by this parent in any turn)
-  has stopped and every reply it sent
+  has stopped, holds every message the parent sent it (its launch prompt and
+  each `send_message` to it, as `sender=<parent>` messages in its transcript),
+  and every reply it sent
   (`send_message` with the parent as `Recipient`) is in the parent's transcript
-  — an unread reply will wake the parent, so its turn is not over. A subagent
+  — an unread reply will wake the parent, so its turn is not over, and a
+  message the subagent has not taken in yet will wake it: the parent can pause
+  before a messaged IDLE subagent's next hook marks it running. A subagent
   whose agent died counts as stopped. The subagent's turn end and the parent's
   Stop can land milliseconds apart in either order, so both check; the first to
   find the turn done claims it (`SubagentTurnEndClaimed`, cleared at the next

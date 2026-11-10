@@ -371,3 +371,37 @@ func TestAntigravity_LongRunningSubagentKeepsItsParentWaiting(t *testing.T) {
 	s.stop(s.parentID, false)
 	s.requireParentActive("the subagent's tool call shows it is still running")
 }
+
+// The parent can message an idle subagent and pause before that subagent's
+// first hook marks it running again. A subagent the parent has just messaged
+// is not done, even though its state still shows its earlier turn finished.
+func TestAntigravity_ParentTurnWaitsForASubagentItMessagedBeforeItWakes(t *testing.T) {
+	t.Parallel()
+	s := newAgyParentChild(t)
+	s.start()
+	s.childReplies()
+	s.stop(s.childID, true)
+
+	// The parent reads the reply, messages the child again and pauses; the
+	// child has not woken yet.
+	s.hook(s.parentID, "pre-invocation", map[string]any{"invocationNum": 0, "initialNumSteps": 4})
+	appendLines(t, s.path(s.parentID), agyMessage(4, s.childID),
+		agyCall(5, 7618, 107, fmt.Sprintf(`,"tool_calls":[{"name":"send_message","args":{"Recipient":"%s"}}]`, s.childID)))
+	s.stop(s.parentID, false)
+	s.requireParentActive("the messaged subagent has not woken yet")
+
+	// The child wakes, replies and stops; the parent reads the reply and stops.
+	appendLines(t, s.path(s.childID), agyMessage(6, s.parentID))
+	s.hook(s.childID, "pre-invocation", map[string]any{"invocationNum": 0, "initialNumSteps": 7})
+	appendLines(t, s.path(s.childID), agyCall(7, 100, 10, fmt.Sprintf(`,"tool_calls":[{"name":"send_message","args":{"Recipient":"%s"}}]`, s.parentID)))
+	s.stop(s.childID, true)
+	s.requireParentActive("its second reply is unread")
+
+	s.hook(s.parentID, "pre-invocation", map[string]any{"invocationNum": 0, "initialNumSteps": 6})
+	appendLines(t, s.path(s.parentID), agyMessage(6, s.childID), agyCall(7, 50, 5, ""))
+	s.stop(s.parentID, false)
+	parent, err := s.env.GetSessionState(s.parentID)
+	require.NoError(t, err)
+	require.Equal(t, "idle", string(parent.Phase))
+	require.Equal(t, 3+1, parent.TokenUsage.APICallCount, "every parent call, once")
+}

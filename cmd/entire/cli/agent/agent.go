@@ -766,20 +766,31 @@ type SubagentSessionResolver interface {
 // SubagentReplyCounter is implemented by agents whose parent can stop while its
 // detached subagents still run and may not report its turn's end afterwards
 // (Antigravity: a fullyIdle=false Stop, then nothing). The lifecycle ends such a
-// turn itself once every subagent the turn involved has stopped and every
-// reply it sent has reached the parent, so a reply still in flight, which will
-// wake the parent, is never cut off.
+// turn itself once every subagent the turn involved has stopped, has taken in
+// every message the parent sent it, and every reply it sent has reached the
+// parent: a reply still in flight will wake the parent, and a message still in
+// flight will wake the subagent, so neither turn is over.
 type SubagentReplyCounter interface {
 	Agent
 
 	// TurnSubagents returns the subagent session IDs the parent's turn involved
-	// after fromOffset (launched, messaged, or heard from), each with how many
-	// of its replies the parent's whole transcript holds.
-	TurnSubagents(parentRef string, fromOffset int) (map[string]int, error)
+	// after fromOffset (launched, messaged, or heard from), each with the
+	// exchange the parent's whole transcript records with it.
+	TurnSubagents(parentRef string, fromOffset int) (map[string]SubagentExchange, error)
 
-	// RepliesSent returns how many replies the subagent's transcript sent to
-	// parentID.
-	RepliesSent(subagentRef, parentID string) (int, error)
+	// ExchangeWithParent returns the exchange the subagent's transcript records
+	// with parentID.
+	ExchangeWithParent(subagentRef, parentID string) (SubagentExchange, error)
+}
+
+// SubagentExchange counts the messages between a parent and one subagent, as
+// one side's transcript records them.
+type SubagentExchange struct {
+	// Replies is the subagent's messages to the parent.
+	Replies int
+	// Messages is the parent's messages to the subagent, its launch prompt
+	// included.
+	Messages int
 }
 
 // SubagentAwareExtractor provides methods for extracting files and tokens including subagents.

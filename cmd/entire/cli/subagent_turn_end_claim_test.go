@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -97,7 +98,7 @@ func TestSubagentDone_StuckActiveChildNeedsADeadOrUnknownOwner(t *testing.T) {
 
 	// No recorded owner: liveness is unknown, so the stuck heuristic decides.
 	saveChild(nil)
-	require.True(t, subagentDone(ctx, nil, "child", "parent", 0),
+	require.True(t, subagentDone(ctx, nil, "child", "parent", agent.SubagentExchange{}),
 		"a stuck child with no owner counts as done")
 
 	live, ok := proclive.IdentityOf(os.Getpid())
@@ -105,12 +106,12 @@ func TestSubagentDone_StuckActiveChildNeedsADeadOrUnknownOwner(t *testing.T) {
 		t.Skip("process liveness is unknown on this platform")
 	}
 	saveChild(&live)
-	require.False(t, subagentDone(ctx, nil, "child", "parent", 0),
+	require.False(t, subagentDone(ctx, nil, "child", "parent", agent.SubagentExchange{}),
 		"a stuck-looking child whose owner is alive is still working")
 
 	dead := live
 	dead.Start = "not-" + live.Start
 	saveChild(&dead)
-	require.True(t, subagentDone(ctx, nil, "child", "parent", 0),
+	require.True(t, subagentDone(ctx, nil, "child", "parent", agent.SubagentExchange{}),
 		"a child whose owner exited is done")
 }

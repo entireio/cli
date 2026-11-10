@@ -189,7 +189,32 @@ func TestTurnSubagents_OnlyChildrenThisParentCreated(t *testing.T) {
 
 	got, err := (&AntigravityAgent{}).TurnSubagents(parentPath, firstTurnLines)
 	require.NoError(t, err)
-	require.Equal(t, map[string]int{testChildID: 1}, got)
+	require.Equal(t, map[string]agent.SubagentExchange{testChildID: {Replies: 1, Messages: 2}}, got)
+}
+
+// A subagent's side of the exchange: its replies to the parent, and the
+// messages it has taken in from the parent, its launch prompt first. Messages
+// from or replies to any other conversation are not the parent's.
+func TestExchangeWithParent_CountsBothDirections(t *testing.T) {
+	brain := brainDir(t)
+	const otherID = "77777777-8888-4999-aaaa-bbbbbbbbbbbb"
+	message := func(step int, sender string) string {
+		return fmt.Sprintf(`{"step_index":%d,"type":"SYSTEM_MESSAGE","content":"[Message] timestamp=2026-10-20T01:50:00Z sender=%s content=hi"}`, step, sender)
+	}
+	sendTo := func(step int, recipient string) string {
+		return fmt.Sprintf(`{"step_index":%d,"type":"PLANNER_RESPONSE","tool_calls":[{"name":"send_message","args":{"Recipient":"%s"}}]}`, step, recipient)
+	}
+	lines := append(childLines(testParentID),
+		sendTo(2, testParentID),
+		message(3, testParentID),
+		message(4, otherID),
+		sendTo(5, otherID),
+	)
+	childPath := writeBrainTranscript(t, brain, testChildID, lines...)
+
+	got, err := (&AntigravityAgent{}).ExchangeWithParent(childPath, testParentID)
+	require.NoError(t, err)
+	require.Equal(t, agent.SubagentExchange{Replies: 1, Messages: 2}, got)
 }
 
 // A prompt longer than the head read leaves step 0 cut off mid-line. Its
