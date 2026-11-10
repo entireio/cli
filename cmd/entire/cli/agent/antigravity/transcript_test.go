@@ -169,6 +169,11 @@ func TestPrepareTranscript_RefusesUnknownSurfaceBrainDir(t *testing.T) {
 	if !errors.Is(err, agent.ErrOutsideSessionStore) {
 		t.Fatalf("PrepareTranscript() error = %v, want agent.ErrOutsideSessionStore", err)
 	}
+	for _, surface := range []string{"antigravity-cli", "antigravity-ide", "antigravity"} {
+		if want := filepath.Join(geminiDir, surface, "brain"); !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %s", err, want)
+		}
+	}
 	if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
 		t.Fatalf("a placeholder must not be created outside the known stores; Lstat err = %v", statErr)
 	}

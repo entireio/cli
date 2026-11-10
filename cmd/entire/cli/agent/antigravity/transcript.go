@@ -487,7 +487,6 @@ func (a *AntigravityAgent) transcriptStore(transcriptRef string) (*agent.Session
 	if err != nil {
 		return nil, "", fmt.Errorf("resolve %s session directory: %w", a.Name(), err)
 	}
-	var firstErr error
 	for _, dir := range dirs {
 		store, err := agent.OpenSessionStoreAt(a, dir)
 		if err != nil {
@@ -497,9 +496,10 @@ func (a *AntigravityAgent) transcriptStore(transcriptRef string) (*agent.Session
 		if err == nil {
 			return store, name, nil
 		}
-		if firstErr == nil {
-			firstErr = err
+		if !errors.Is(err, agent.ErrOutsideSessionStore) {
+			return nil, "", err //nolint:wrapcheck // inside this store but unusable; preserved for errors.Is
 		}
 	}
-	return nil, "", firstErr
+	return nil, "", fmt.Errorf("%w: %s is not inside any of %s",
+		agent.ErrOutsideSessionStore, transcriptRef, strings.Join(dirs, ", "))
 }

@@ -115,6 +115,10 @@ the CLI:
   2.5.x), beside the CLI's `~/.gemini/antigravity-cli/brain`. `transcriptPath`
   points into the surface's brain; the transcript store accepts all three
   (`brainDirs`), so the late-write placeholder works for every surface.
+  `HomeLayout` (home `~/.gemini`, stores `antigravity-cli/brain`,
+  `antigravity-ide/brain`, `antigravity/brain`) is the one list of them, and
+  `ResolveSessionFileCandidates` lets `entire attach` find IDE and app
+  conversations by ID.
 - The IDE writes the transcript incrementally (it already exists at `Stop`).
 - **No token usage recorded yet**: the title-slot tee is CLI-only. IDE 2.6.0
   (like agy 1.4.x) writes `input_tokens`/`cache_read_tokens`/`output_tokens`
