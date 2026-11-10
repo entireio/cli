@@ -453,9 +453,11 @@ install the git hooks.
 - A committed `"enabled": false` in `.entire/settings.json` keeps Entire off.
   Global enable turns on repositories nobody configured, not ones whose team
   turned it off.
-- `entire disable` writes `"enabled": false` to `.entire/settings.local.json`,
-  which belongs to one worktree. `entire disable --global` turns the flag off
-  everywhere; repositories you enabled yourself stay enabled.
+- `entire disable` in a repository on only through global enable writes
+  `"enabled": false` to that repository's `repos` entry in the user settings
+  file, so every clone and worktree of it stays off. Elsewhere it writes
+  `.entire/settings.local.json` as before. `entire disable --global` turns the
+  flag off everywhere; repositories you enabled yourself stay enabled.
 - A `repos` entry for the repository in the user settings file applies to every
   worktree of the clone, and one that sets `enabled` is the clone-wide way to
   turn one repository on or off.
@@ -467,8 +469,12 @@ install the git hooks.
   transcripts to a model provider. `entire status` names what was ignored.
   Redaction settings are always honored.
 - Running `entire enable` in such a repository claims it: it writes
-  `"enabled": true` to this worktree's `.entire/settings.local.json`, after which
-  the committed settings apply in full and the global-enable notices stop.
+  `"enabled": true` to the repository's `repos` entry (keyed by origin, or by
+  the main worktree's path when there is no usable origin), after which the
+  committed settings apply in full, in every clone and worktree, and the
+  global-enable notices stop. An agent session cannot claim a repository:
+  `entire enable` run by one still succeeds but leaves it on only through
+  global enable.
 
 ## Reporting a vulnerability
 

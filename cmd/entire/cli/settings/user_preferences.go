@@ -496,9 +496,9 @@ func UserTierEnablesEverywhere(ctx context.Context) bool {
 // can write it — and neither do the other keys Entire writes to the local file
 // on its own (commit_linking and the like).
 //
-// The local file belongs to one worktree, so `entire enable` and `entire
-// disable` claim one worktree; a `repos` entry that sets `enabled` claims the
-// whole clone.
+// A `repos` entry that sets `enabled` claims every clone and worktree, which
+// is what `entire enable` and `entire disable` write in such a repository; a
+// local file carrying `enabled` claims only its own worktree.
 func (s *EntireSettings) EnabledOnlyByGlobal() bool {
 	return s != nil && s.enabledOnlyByGlobal
 }

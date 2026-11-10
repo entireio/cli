@@ -28,6 +28,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/settings/usersettings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/uiform"
 	"github.com/entireio/cli/cmd/entire/cli/vercelconfig"
@@ -1699,12 +1700,21 @@ func runDisable(ctx context.Context, w io.Writer, useProjectSettings bool) error
 		configDisplay = configDisplayProject
 	}
 
-	// A repository on only through global enable may have no .entire yet, and
-	// the local file written below must not be committable from it. Only then:
-	// with global enable off, disable writes nothing else.
-	globalOnly := false
+	// A repository on only through global enable is turned off in the user
+	// settings file, so every clone and worktree of it stays off; the
+	// per-worktree local file would leave the others recording.
 	if s, err := LoadEntireSettings(ctx); err == nil && s.EnabledOnlyByGlobal() {
-		globalOnly = true
+		if !useProjectSettings {
+			key, err := setRepoEnabledHere(ctx, false)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(w, "Entire is now disabled in %s (repos in %s).\n", describeRepoKey(key), usersettings.Path())
+			fmt.Fprintln(w, "global enable stays on for your other repositories.")
+			return nil
+		}
+		// The committed file is written below; keep the local files beside it
+		// out of git in a repository that may have no .entire yet.
 		if err := strategy.EnsureEntireGitignore(ctx); err != nil {
 			logging.Debug(ctx, "disable: could not update .entire/.gitignore", slog.String("error", err.Error()))
 		}
@@ -1715,9 +1725,6 @@ func runDisable(ctx context.Context, w io.Writer, useProjectSettings bool) error
 	}
 
 	fmt.Fprintf(w, "Entire is now disabled (%s).\n", configDisplay)
-	if globalOnly && !useProjectSettings {
-		fmt.Fprintln(w, "global enable stays on for your other repositories and other worktrees of this one.")
-	}
 	return nil
 }
 

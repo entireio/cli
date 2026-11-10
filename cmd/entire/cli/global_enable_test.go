@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -303,6 +302,7 @@ func newGlobalOnlyRepo(t *testing.T, globalEnable bool) string {
 	entireDir := t.TempDir()
 	t.Setenv(userdirs.EnvConfigDir, entireDir)
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(t.TempDir(), "claude"))
+	clearAgentCallerEnv(t)
 	t.Cleanup(settings.ClearOriginKeyCache)
 	content := `{"global_enable": false}`
 	if globalEnable {
@@ -350,10 +350,19 @@ func readJSONFile(t *testing.T, path string) map[string]any {
 	return out
 }
 
+// userReposEntry returns the user settings file's repos[key], or nil.
+func userReposEntry(t *testing.T, key string) map[string]any {
+	t.Helper()
+	repos, _ := readJSONFile(t, filepath.Join(os.Getenv(userdirs.EnvConfigDir), usersettings.FileName))["repos"].(map[string]any)
+	entry, _ := repos[key].(map[string]any)
+	return entry
+}
+
 // Running `entire enable` in a repository that was on only through global
 // enable records that the developer enabled it themselves, whichever path
-// enable takes: the bare already-enabled path, --agent, or recovering a
-// repository whose committed settings had turned it off.
+// enable takes: the bare already-enabled path, or recovering a repository
+// whose committed settings had turned it off. The claim goes to the user
+// settings file, so it covers every clone and worktree of the repository.
 func TestEnable_ClaimsARepoEnabledOnlyByGlobal(t *testing.T) {
 	for name, tc := range map[string]struct {
 		committed string
@@ -364,6 +373,7 @@ func TestEnable_ClaimsARepoEnabledOnlyByGlobal(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			repo := newGlobalOnlyRepo(t, true)
+			testutil.RunGit(t, repo, "remote", "add", "origin", "https://github.com/acme/widgets.git")
 			if tc.committed != "" {
 				writeSettings(t, tc.committed)
 			}
@@ -371,9 +381,13 @@ func TestEnable_ClaimsARepoEnabledOnlyByGlobal(t *testing.T) {
 			if err != nil {
 				t.Fatalf("%v: %v\n%s", tc.args, err, out)
 			}
-			assert.Equal(t, true, readJSONFile(t, filepath.Join(repo, EntireSettingsLocalFile))["enabled"])
-			assert.Contains(t, out, "not only through global enable")
+			assert.Equal(t, true, userReposEntry(t, "gh/acme/widgets")["enabled"])
+			assert.Contains(t, out, "every clone of gh/acme/widgets")
+			if local, err := os.ReadFile(filepath.Join(repo, EntireSettingsLocalFile)); err == nil {
+				assert.NotContains(t, string(local), `"enabled": true`, "the claim is clone-wide, not this worktree's")
+			}
 
+			settings.ClearOriginKeyCache()
 			s, err := settings.Load(t.Context())
 			if err != nil {
 				t.Fatal(err)
@@ -384,47 +398,34 @@ func TestEnable_ClaimsARepoEnabledOnlyByGlobal(t *testing.T) {
 	}
 }
 
-// A tracked local file is not this developer's own, so enable does not write
-// the claim into it; it says why instead.
-func TestEnable_DoesNotClaimThroughATrackedLocalFile(t *testing.T) {
-	repo := newGlobalOnlyRepo(t, true)
-	if err := os.MkdirAll(filepath.Join(repo, ".entire"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	local := filepath.Join(repo, EntireSettingsLocalFile)
-	if err := os.WriteFile(local, []byte(`{"commit_linking": "always"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	testutil.RunGit(t, repo, "add", "-f", EntireSettingsLocalFile)
+// An agent cannot claim a repository on the developer's behalf: enable still
+// succeeds, but the repository stays on only through global enable and the
+// output says the developer has to run it themselves.
+func TestEnable_AgentSessionDoesNotClaim(t *testing.T) {
+	newGlobalOnlyRepo(t, true)
+	t.Setenv("CLAUDECODE", "1")
 
 	out, err := runRepoCmd(t, "enable")
 	if err != nil {
 		t.Fatalf("enable: %v\n%s", err, out)
 	}
-	_, hasEnabled := readJSONFile(t, local)["enabled"]
-	assert.False(t, hasEnabled, "the claim must not be written into a tracked file")
-	assert.Contains(t, out, "tracked in git")
+	assert.Contains(t, out, "ask the user to run `entire enable` here themselves")
+	s, err := settings.Load(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	assert.True(t, s.EnabledOnlyByGlobal())
 }
 
 // The claim is best effort: enable already succeeded, so a failed write is a
-// warning, not an error.
+// warning, not an error. A user settings file that does not parse is refused
+// rather than rewritten.
 func TestClaimRepoFromGlobalEnable_WarnsWhenTheWriteFails(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("directory permissions do not block writes on Windows")
-	}
-	repo := newGlobalOnlyRepo(t, true)
-	entire := filepath.Join(repo, ".entire")
-	if err := os.MkdirAll(entire, 0o755); err != nil {
+	newGlobalOnlyRepo(t, true)
+	path := filepath.Join(os.Getenv(userdirs.EnvConfigDir), usersettings.FileName)
+	if err := os.WriteFile(path, []byte(`{"global_enable": true, "repos": [1]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(entire, 0o555); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := os.Chmod(entire, 0o755); err != nil {
-			t.Error(err)
-		}
-	})
 
 	var out, errOut bytes.Buffer
 	claimRepoFromGlobalEnable(t.Context(), &out, &errOut)
@@ -432,22 +433,22 @@ func TestClaimRepoFromGlobalEnable_WarnsWhenTheWriteFails(t *testing.T) {
 	assert.Contains(t, errOut.String(), "Warning: Entire stays enabled here only through global enable")
 }
 
-// `entire disable` in a global-only repository writes the local file, keeps
-// it out of git, and says global enable is still on elsewhere.
+// `entire disable` in a global-only repository turns it off for every clone
+// and worktree through the user settings file, writes nothing in the
+// worktree, and says global enable is still on elsewhere.
 func TestDisable_GlobalOnlyRepo(t *testing.T) {
 	repo := newGlobalOnlyRepo(t, true)
+	testutil.RunGit(t, repo, "remote", "add", "origin", "https://github.com/acme/widgets.git")
 	out, err := runRepoCmd(t, "disable")
 	if err != nil {
 		t.Fatalf("disable: %v\n%s", err, out)
 	}
-	assert.Equal(t, false, readJSONFile(t, filepath.Join(repo, EntireSettingsLocalFile))["enabled"])
-	gitignore, readErr := os.ReadFile(filepath.Join(repo, ".entire", ".gitignore"))
-	if readErr != nil {
-		t.Fatalf("disable did not keep settings.local.json out of git: %v", readErr)
-	}
-	assert.Contains(t, string(gitignore), "settings.local.json")
+	assert.Equal(t, false, userReposEntry(t, "gh/acme/widgets")["enabled"])
+	assert.NoFileExists(t, filepath.Join(repo, EntireSettingsLocalFile))
+	assert.Contains(t, out, "every clone of gh/acme/widgets")
 	assert.Contains(t, out, "global enable stays on for your other repositories")
 
+	settings.ClearOriginKeyCache()
 	s, err := settings.Load(t.Context())
 	if err != nil {
 		t.Fatal(err)

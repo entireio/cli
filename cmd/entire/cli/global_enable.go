@@ -16,8 +16,11 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/settings/usersettings"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 )
 
 // flagGlobal is `entire enable --global` / `entire disable --global`.
@@ -120,9 +123,10 @@ func confirmGlobalEnable(cmd *cobra.Command, yes bool) (bool, error) {
 // the developer enabled this repository themselves when it was on only through
 // global enable: once global enable is not the only reason, the committed
 // settings it set aside apply and the global-enable notices stop. It writes
-// `enabled` to this worktree's settings.local.json, unless that file is
-// tracked and so not the developer's own. Best effort: enable already
-// succeeded, so a failure here is a warning.
+// `enabled` to the repository's `repos` entry in the user settings file, so
+// the claim covers every clone and worktree of it. An agent cannot make that
+// claim for the developer. Best effort: enable already succeeded, so a
+// failure here is a warning.
 func claimRepoFromGlobalEnable(ctx context.Context, w, errW io.Writer) {
 	if !settings.UserTierEnablesEverywhere(ctx) {
 		return
@@ -131,18 +135,41 @@ func claimRepoFromGlobalEnable(ctx context.Context, w, errW io.Writer) {
 	if err != nil || !s.EnabledOnlyByGlobal() {
 		return
 	}
-	if reason := s.LocalLayerRejection(); reason != "" {
-		fmt.Fprintf(w, "Entire stays enabled here only through global enable: %s is not written because %s.\n",
-			settings.EntireSettingsLocalFile, reason)
+	if caller := review.DetectAgentSession(); caller != "" {
+		fmt.Fprintf(w, "Entire stays enabled here only through global enable: %s cannot enable a repository for the user; ask the user to run `entire enable` here themselves.\n",
+			caller)
 		return
 	}
-	if err := setEnabledFlag(ctx, true, false); err != nil {
-		fmt.Fprintf(errW, "Warning: Entire stays enabled here only through global enable: could not write %s: %v\n",
-			settings.EntireSettingsLocalFile, err)
+	key, err := setRepoEnabledHere(ctx, true)
+	if err != nil {
+		fmt.Fprintf(errW, "Warning: Entire stays enabled here only through global enable: %v\n", err)
 		return
 	}
-	fmt.Fprintf(w, "Entire is now enabled in this repository itself (%s), not only through global enable.\n",
-		settings.EntireSettingsLocalFile)
+	fmt.Fprintf(w, "Entire is now enabled in %s itself, not only through global enable (repos in %s).\n",
+		describeRepoKey(key), usersettings.Path())
+}
+
+// setRepoEnabledHere writes `enabled` to this repository's `repos` entry in
+// the user settings file and returns the entry's key.
+func setRepoEnabledHere(ctx context.Context, enabled bool) (string, error) {
+	root, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return "", fmt.Errorf("resolving the repository: %w", err)
+	}
+	key, err := settings.SetRepoEnabled(ctx, root, enabled)
+	if err != nil {
+		return "", err //nolint:wrapcheck // settings names the file and the reason
+	}
+	return key, nil
+}
+
+// describeRepoKey names what a `repos` key covers: every clone of an origin,
+// or every worktree of the clone at a path.
+func describeRepoKey(key string) string {
+	if filepath.IsAbs(filepath.FromSlash(key)) {
+		return "every worktree of " + tuiutil.SanitizeDisplayText(key)
+	}
+	return "every clone of " + tuiutil.SanitizeDisplayText(key)
 }
 
 // rejectFlagsWithGlobal refuses any other flag of this command beside
