@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"io"
 	"net/http"
 	"net/url"
@@ -330,12 +331,11 @@ func runTrailReviewDashboard(cmd *cobra.Command, mode *trailMode, selector strin
 	if err != nil {
 		return err
 	}
-	counts := countTrailReviewComments(summaryComments)
 	agents := fetchTrailChangeAgents(cmd.Context(), cmd.ErrOrStderr(), client, target.Trail)
 	if opts.JSON {
-		return encodeTrailReviewJSON(cmd.OutOrStdout(), target, comments, nextCursor, counts, agents)
+		return encodeTrailReviewJSON(cmd.OutOrStdout(), target, comments, nextCursor, countTrailReviewComments(summaryComments), agents)
 	}
-	return printTrailReviewDashboard(cmd.OutOrStdout(), target, comments, nextCursor, opts, counts, agents)
+	return printTrailReviewDashboard(cmd.OutOrStdout(), target, comments, nextCursor, opts, summaryComments, agents)
 }
 
 func runTrailReviewComments(cmd *cobra.Command, mode *trailMode, selector string, opts trailReviewListOptions) error {
@@ -356,34 +356,27 @@ func runTrailReviewComments(cmd *cobra.Command, mode *trailMode, selector string
 		return encodeTrailReviewJSON(cmd.OutOrStdout(), target, comments, nextCursor, countTrailReviewComments(comments), nil)
 	}
 	printTrailReviewComments(cmd.OutOrStdout(), comments, nextCursor)
-	if !trailReviewListChecksHidden(opts, nextCursor) {
-		return nil
-	}
-	summaryComments, err := fetchAllTrailReviewComments(cmd.Context(), client, target.Trail.ID, trailReviewSummaryOptions())
-	if err != nil {
-		return err
-	}
-	if note := trailReviewListHiddenNote(countTrailReviewComments(summaryComments), comments, opts); note != "" {
-		fmt.Fprintln(cmd.OutOrStdout(), note)
-	}
+	printTrailReviewListHiddenNote(cmd.Context(), cmd.OutOrStdout(), client, target.Trail.ID, comments, nextCursor, opts)
 	return nil
 }
 
-// trailReviewListChecksHidden reports whether `finding list` looks for open
-// findings its filters hide. A paged view shows only part of what the filters
-// select, so it cannot tell hidden findings from later pages.
-func trailReviewListChecksHidden(opts trailReviewListOptions, nextCursor string) bool {
-	return nextCursor == "" && opts.Cursor == "" && trailReviewStatusFilterIncludes(opts.Status, trailReviewStatusOpen)
-}
-
-// trailReviewListHiddenNote names the open findings a `finding list` view's
-// filters leave out, or returns "" when it shows them all.
-func trailReviewListHiddenNote(counts trailReviewCommentCounts, rows []api.TrailReviewComment, opts trailReviewListOptions) string {
-	outside := trailReviewOpenOutsideRows(counts, rows, opts, false)
-	if outside.hidden == 0 {
-		return ""
+// printTrailReviewListHiddenNote names the open findings a `finding list`
+// view's filters leave out. It needs the trail's full findings, so it is
+// skipped on a paged view, which cannot tell hidden findings from later pages.
+// The note is informational: if that request fails, the list already printed
+// stands and the command still succeeds.
+func printTrailReviewListHiddenNote(ctx context.Context, w io.Writer, client *api.Client, trailID string, rows []api.TrailReviewComment, nextCursor string, opts trailReviewListOptions) {
+	if nextCursor != "" || opts.Cursor != "" || !trailReviewStatusFilterIncludes(opts.Status, trailReviewStatusOpen) {
+		return
 	}
-	return trailReviewHiddenOpenNote(outside, opts)
+	summary, err := fetchAllTrailReviewComments(ctx, client, trailID, trailReviewSummaryOptions())
+	if err != nil {
+		logging.Debug(ctx, "trail finding list: skipped the hidden-findings note", "error", err.Error())
+		return
+	}
+	if outside := trailReviewOpenOutsideRows(summary, rows, opts, false); outside.hidden > 0 {
+		fmt.Fprintln(w, trailReviewHiddenOpenNote(outside))
+	}
 }
 
 func runTrailReviewCommentAdd(cmd *cobra.Command, mode *trailMode, selector string, opts trailReviewCommentAddOptions) error {
@@ -1507,10 +1500,13 @@ func encodeTrailReviewJSON(w io.Writer, target trailReviewTarget, comments []api
 	})
 }
 
-func printTrailReviewDashboard(w io.Writer, target trailReviewTarget, comments []api.TrailReviewComment, nextCursor string, opts trailReviewListOptions, counts trailReviewCommentCounts, agents json.RawMessage) error {
+// printTrailReviewDashboard renders the filtered rows; summary is every
+// finding on the trail, for the totals and the open findings the rows leave out.
+func printTrailReviewDashboard(w io.Writer, target trailReviewTarget, comments []api.TrailReviewComment, nextCursor string, opts trailReviewListOptions, summary []api.TrailReviewComment, agents json.RawMessage) error {
 	if s := newStatusStyles(w); s.colorEnabled {
-		return renderTrailReviewDashboardStyled(w, newTrailReviewStyles(s), trailReviewWidth(w), target, comments, nextCursor, opts, counts, agents)
+		return renderTrailReviewDashboardStyled(w, newTrailReviewStyles(s), trailReviewWidth(w), target, comments, nextCursor, opts, summary, agents)
 	}
+	counts := countTrailReviewComments(summary)
 	trail := trailForDisplay(target.Trail)
 	clean := trailReviewCleanLine
 	if trail.Number > 0 {
@@ -1522,8 +1518,8 @@ func printTrailReviewDashboard(w io.Writer, target trailReviewTarget, comments [
 	fmt.Fprintf(w, "  ID: %s\n\n", clean(trail.ID))
 
 	fmt.Fprintf(w, "  Open findings: %d  high %d  medium %d  low %d", counts.Open, counts.OpenHigh, counts.OpenMedium, counts.OpenLow)
-	if counts.OpenStale > 0 {
-		fmt.Fprintf(w, "  (%d stale)", counts.OpenStale)
+	if stale := trailReviewOpenStaleCount(summary); stale > 0 {
+		fmt.Fprintf(w, "  (%d stale)", stale)
 	}
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "  Resolved: %d        Dismissed: %d     Stale (all statuses): %d\n", counts.Resolved, counts.Dismissed, counts.Stale)
@@ -1536,10 +1532,10 @@ func printTrailReviewDashboard(w io.Writer, target trailReviewTarget, comments [
 	}
 
 	paged := nextCursor != "" || opts.Cursor != ""
-	outside := trailReviewOpenOutsideRows(counts, comments, opts, trailReviewDashboardListsStale(opts, paged))
+	outside := trailReviewOpenOutsideRows(summary, comments, opts, trailReviewDashboardListsStale(opts, paged))
 	hiddenNote := func() {
 		if !paged && outside.hidden > 0 {
-			fmt.Fprintln(w, "  "+trailReviewHiddenOpenNote(outside, opts))
+			fmt.Fprintln(w, "  "+trailReviewHiddenOpenNote(outside))
 		}
 	}
 	if len(comments) == 0 && len(outside.stale) == 0 {
@@ -1686,11 +1682,6 @@ type trailReviewCommentCounts struct {
 	Resolved   int
 	Dismissed  int
 	Stale      int
-	// OpenStale and open stay out of --json, whose counts keep their shape.
-	OpenStale int `json:"-"`
-	// open is every counted open finding, so a view can tell which of them
-	// its own rows leave out.
-	open []api.TrailReviewComment
 }
 
 func countTrailReviewComments(comments []api.TrailReviewComment) trailReviewCommentCounts {
@@ -1703,10 +1694,6 @@ func countTrailReviewComments(comments []api.TrailReviewComment) trailReviewComm
 			counts.Dismissed++
 		case trailReviewStatusOpen:
 			counts.Open++
-			counts.open = append(counts.open, comment)
-			if comment.StaleOutcome == trailReviewFreshnessStale {
-				counts.OpenStale++
-			}
 			switch strings.ToLower(stringPtrValue(comment.Severity)) {
 			case trailReviewSeverityHigh:
 				counts.OpenHigh++

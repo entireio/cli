@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -94,7 +95,7 @@ func TestPrintTrailReviewDashboard_PlainGolden(t *testing.T) {
 	t.Parallel()
 	target, comments := trailReviewRenderFixture()
 	var out strings.Builder
-	if err := printTrailReviewDashboard(&out, target, comments, "next-1", defaultTrailReviewListOptions(), countTrailReviewComments(comments), nil); err != nil {
+	if err := printTrailReviewDashboard(&out, target, comments, "next-1", defaultTrailReviewListOptions(), comments, nil); err != nil {
 		t.Fatal(err)
 	}
 	assertTrailReviewGolden(t, out.String(), trailReviewDashboardPlainGolden)
@@ -139,7 +140,7 @@ func TestPrintTrailReview_PlainStripsTerminalEscapes(t *testing.T) {
 	detail.SuggestedChanges[0].Instruction = trailReviewStrPtr("do \x1b[5mthis")
 
 	var out strings.Builder
-	if err := printTrailReviewDashboard(&out, target, comments, "", defaultTrailReviewListOptions(), countTrailReviewComments(comments), nil); err != nil {
+	if err := printTrailReviewDashboard(&out, target, comments, "", defaultTrailReviewListOptions(), comments, nil); err != nil {
 		t.Fatal(err)
 	}
 	printTrailReviewComments(&out, comments, "")
@@ -228,11 +229,11 @@ func colorTrailReviewStyles() trailReviewStyles {
 	return newTrailReviewStyles(statusStylesFor(true, 80))
 }
 
-func renderStyledDashboard(t *testing.T, width int, comments []api.TrailReviewComment, nextCursor string, opts trailReviewListOptions, counts trailReviewCommentCounts) string {
+func renderStyledDashboard(t *testing.T, width int, comments []api.TrailReviewComment, nextCursor string, opts trailReviewListOptions, summary []api.TrailReviewComment) string {
 	t.Helper()
 	target, _ := trailReviewRenderFixture()
 	var out strings.Builder
-	if err := renderTrailReviewDashboardStyled(&out, colorTrailReviewStyles(), width, target, comments, nextCursor, opts, counts, nil); err != nil {
+	if err := renderTrailReviewDashboardStyled(&out, colorTrailReviewStyles(), width, target, comments, nextCursor, opts, summary, nil); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "\x1b[") {
@@ -250,7 +251,7 @@ func anyStatusOptions() trailReviewListOptions {
 func TestRenderTrailReviewDashboardStyled_GroupsBySeverityAndStatus(t *testing.T) {
 	t.Parallel()
 	_, comments := trailReviewRenderFixture()
-	text := renderStyledDashboard(t, 100, comments, "", anyStatusOptions(), countTrailReviewComments(comments))
+	text := renderStyledDashboard(t, 100, comments, "", anyStatusOptions(), comments)
 	for _, want := range []string{
 		"● Trail #42  Add token refresh",
 		"  open · feat/token-refresh → main · 01M62HSGVJWDRV0Y3AB3HQRJ4G",
@@ -278,7 +279,7 @@ func TestRenderTrailReviewDashboardStyled_WrapsSummaryToTwoLinesWithAge(t *testi
 	t.Parallel()
 	_, comments := trailReviewRenderFixture()
 	const width = 60
-	text := renderStyledDashboard(t, width, comments[1:2], "", defaultTrailReviewListOptions(), countTrailReviewComments(comments[1:2]))
+	text := renderStyledDashboard(t, width, comments[1:2], "", defaultTrailReviewListOptions(), comments[1:2])
 	lines := strings.Split(text, "\n")
 	first := -1
 	for i, line := range lines {
@@ -307,7 +308,7 @@ func TestRenderTrailReviewDashboardStyled_ZeroCreatedAtHasNoAge(t *testing.T) {
 	t.Parallel()
 	_, comments := trailReviewRenderFixture()
 	comments[0].CreatedAt = time.Time{}
-	text := renderStyledDashboard(t, 100, comments[:1], "", defaultTrailReviewListOptions(), countTrailReviewComments(comments[:1]))
+	text := renderStyledDashboard(t, 100, comments[:1], "", defaultTrailReviewListOptions(), comments[:1])
 	if strings.Contains(text, "ago") {
 		t.Fatalf("zero CreatedAt rendered an age:\n%s", text)
 	}
@@ -318,7 +319,7 @@ func TestRenderTrailReviewDashboardStyled_ListsStaleOpenFindings(t *testing.T) {
 	_, comments := trailReviewRenderFixture()
 	// The default filter returned only the current open finding; the
 	// summary counts know about the stale one too, so it gets its own section.
-	text := renderStyledDashboard(t, 100, comments[:1], "", defaultTrailReviewListOptions(), countTrailReviewComments(comments))
+	text := renderStyledDashboard(t, 100, comments[:1], "", defaultTrailReviewListOptions(), comments)
 	for _, want := range []string{
 		"── Needs attention (1) ",
 		"── Stale (1) ",
@@ -340,7 +341,7 @@ func TestRenderTrailReviewDashboardStyled_AnnouncesOpenFindingsHiddenByFilters(t
 	// --severity medium hides the stale high finding from both sections.
 	opts := defaultTrailReviewListOptions()
 	opts.Severity = trailReviewSeverityMedium
-	text := renderStyledDashboard(t, 100, comments[:1], "", opts, countTrailReviewComments(comments))
+	text := renderStyledDashboard(t, 100, comments[:1], "", opts, comments)
 	if want := "+1 open finding not shown by the current filters — drop --severity"; !strings.Contains(text, want) {
 		t.Fatalf("styled dashboard missing %q:\n%s", want, text)
 	}
@@ -354,10 +355,9 @@ func TestRenderTrailReviewDashboardStyled_AnnouncesOpenFindingsHiddenByFilters(t
 func TestPrintTrailReviewDashboard_PlainListsStaleAndHiddenOpenFindings(t *testing.T) {
 	t.Parallel()
 	target, comments := trailReviewRenderFixture()
-	counts := countTrailReviewComments(comments)
 	render := func(rows []api.TrailReviewComment, opts trailReviewListOptions) string {
 		var out strings.Builder
-		if err := printTrailReviewDashboard(&out, target, rows, "", opts, counts, nil); err != nil {
+		if err := printTrailReviewDashboard(&out, target, rows, "", opts, comments, nil); err != nil {
 			t.Fatal(err)
 		}
 		return out.String()
@@ -397,7 +397,7 @@ func TestPrintTrailReviewDashboard_PlainListsStaleAndHiddenOpenFindings(t *testi
 
 	// A paged view cannot tell hidden findings from later pages.
 	var out strings.Builder
-	if err := printTrailReviewDashboard(&out, target, comments[:1], "next-1", defaultTrailReviewListOptions(), counts, nil); err != nil {
+	if err := printTrailReviewDashboard(&out, target, comments[:1], "next-1", defaultTrailReviewListOptions(), comments, nil); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(out.String(), "Stale open findings") || strings.Contains(out.String(), "not shown") {
@@ -410,9 +410,7 @@ func TestPrintTrailReviewDashboard_PlainListsStaleAndHiddenOpenFindings(t *testi
 func TestRenderTrailReviewDashboardStyled_PagedCountsOnlyShownFindings(t *testing.T) {
 	t.Parallel()
 	_, comments := trailReviewRenderFixture()
-	counts := countTrailReviewComments(comments)
-	counts.Open = 37
-	text := renderStyledDashboard(t, 100, comments[:2], "next-1", defaultTrailReviewListOptions(), counts)
+	text := renderStyledDashboard(t, 100, comments[:2], "next-1", defaultTrailReviewListOptions(), withOpenFindingsTotal(comments, 37))
 	if strings.Contains(text, "of 37") {
 		t.Fatalf("a paged section must not compare against the unfiltered open total:\n%s", text)
 	}
@@ -435,7 +433,7 @@ func TestRenderTrailReviewDashboardStyled_StatusFilterWithoutOpenHidesNeedsAtten
 	_, comments := trailReviewRenderFixture()
 	opts := defaultTrailReviewListOptions()
 	opts.Status = trailReviewStatusResolved
-	text := renderStyledDashboard(t, 100, comments[2:3], "", opts, countTrailReviewComments(comments))
+	text := renderStyledDashboard(t, 100, comments[2:3], "", opts, comments)
 	if strings.Contains(text, "Needs attention") || strings.Contains(text, "No open findings") {
 		t.Fatalf("--status resolved should not render the open group:\n%s", text)
 	}
@@ -446,7 +444,7 @@ func TestRenderTrailReviewDashboardStyled_StatusFilterWithoutOpenHidesNeedsAtten
 
 func TestRenderTrailReviewDashboardStyled_EmptyOpenGroup(t *testing.T) {
 	t.Parallel()
-	text := renderStyledDashboard(t, 100, nil, "", defaultTrailReviewListOptions(), trailReviewCommentCounts{})
+	text := renderStyledDashboard(t, 100, nil, "", defaultTrailReviewListOptions(), nil)
 	if !strings.Contains(text, "No open findings match the current filters.") {
 		t.Fatalf("empty open group not explained:\n%s", text)
 	}
@@ -568,7 +566,7 @@ func TestRenderTrailReviewStyled_StripsTerminalEscapes(t *testing.T) {
 
 	var out strings.Builder
 	s := colorTrailReviewStyles()
-	if err := renderTrailReviewDashboardStyled(&out, s, 100, target, comments, "", anyStatusOptions(), countTrailReviewComments(comments), nil); err != nil {
+	if err := renderTrailReviewDashboardStyled(&out, s, 100, target, comments, "", anyStatusOptions(), comments, nil); err != nil {
 		t.Fatal(err)
 	}
 	renderTrailReviewCommentDetailStyled(&out, s, 100, detail)
@@ -596,7 +594,7 @@ func TestRenderTrailReviewStyled_FitsWidthInDisplayCells(t *testing.T) {
 
 	var out strings.Builder
 	s := colorTrailReviewStyles()
-	if err := renderTrailReviewDashboardStyled(&out, s, width, target, comments, "", anyStatusOptions(), countTrailReviewComments(comments), nil); err != nil {
+	if err := renderTrailReviewDashboardStyled(&out, s, width, target, comments, "", anyStatusOptions(), comments, nil); err != nil {
 		t.Fatal(err)
 	}
 	renderTrailReviewCommentsStyled(&out, s, width, comments, "")
@@ -636,7 +634,7 @@ func TestRenderTrailReviewDashboardStyled_ShowsProjectAgents(t *testing.T) {
 		`"signal":{"value_type":"size","polarity":"lower_is_better"},"reading":{"size_value":"small"},` +
 		`"latest_run":{"id":"01M66YSQN8151AHGC5WCEQTTMP","status":"succeeded","head_sha":"71e662cdc07ed6c2a30f98b20ad1b7726334ba83"}}]`)
 	var out strings.Builder
-	if err := renderTrailReviewDashboardStyled(&out, colorTrailReviewStyles(), 100, target, comments, "", anyStatusOptions(), countTrailReviewComments(comments), agents); err != nil {
+	if err := renderTrailReviewDashboardStyled(&out, colorTrailReviewStyles(), 100, target, comments, "", anyStatusOptions(), comments, agents); err != nil {
 		t.Fatal(err)
 	}
 	text := tuiutil.StripANSI(out.String())
@@ -678,11 +676,9 @@ func TestTrailReviewPatchTextShowsLoneCarriageReturn(t *testing.T) {
 func TestRenderTrailReviewDashboardStyled_LastPageIsStillPaged(t *testing.T) {
 	t.Parallel()
 	_, comments := trailReviewRenderFixture()
-	counts := countTrailReviewComments(comments)
-	counts.Open = 37
 	opts := defaultTrailReviewListOptions()
 	opts.Cursor = "page-3"
-	text := renderStyledDashboard(t, 100, comments[:2], "", opts, counts)
+	text := renderStyledDashboard(t, 100, comments[:2], "", opts, withOpenFindingsTotal(comments, 37))
 	if !strings.Contains(text, "── Needs attention (2 shown) ") {
 		t.Fatalf("last page should say it is partial:\n%s", text)
 	}
@@ -699,9 +695,8 @@ func TestRenderTrailReviewDashboardStyled_CursorWithoutStatusRendersReturnedFind
 	_, comments := trailReviewRenderFixture()
 	opts := defaultTrailReviewListOptions()
 	opts.Cursor = "page-2"
-	counts := countTrailReviewComments(comments)
 
-	text := renderStyledDashboard(t, 100, comments[2:], "", opts, counts)
+	text := renderStyledDashboard(t, 100, comments[2:], "", opts, comments)
 	for _, bad := range []string{"Needs attention", "No open findings match", "not shown by the current filters"} {
 		if strings.Contains(text, bad) {
 			t.Fatalf("a page of done findings must not render %q:\n%s", bad, text)
@@ -711,7 +706,7 @@ func TestRenderTrailReviewDashboardStyled_CursorWithoutStatusRendersReturnedFind
 		t.Fatalf("returned findings missing:\n%s", text)
 	}
 
-	text = renderStyledDashboard(t, 100, nil, "", opts, counts)
+	text = renderStyledDashboard(t, 100, nil, "", opts, comments)
 	if !strings.Contains(text, "  No findings found.\n") || strings.Contains(text, "No open findings match") {
 		t.Fatalf("an empty cursor page should say only that nothing came back:\n%s", text)
 	}
@@ -724,7 +719,7 @@ func TestRenderTrailReviewDashboardStyled_CursorWithExplicitStatusKeepsOpenSecti
 	opts := defaultTrailReviewListOptions()
 	opts.Cursor = "page-2"
 	opts.StatusChanged = true
-	text := renderStyledDashboard(t, 100, nil, "", opts, trailReviewCommentCounts{Open: 3})
+	text := renderStyledDashboard(t, 100, nil, "", opts, withOpenFindingsTotal(nil, 3))
 	for _, want := range []string{"── Needs attention (0 shown) ", "No open findings match the current filters."} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("styled dashboard missing %q:\n%s", want, text)
@@ -748,7 +743,7 @@ func TestRenderTrailReview_StripsBidiControls(t *testing.T) {
 	detail.Title = trailReviewStrPtr("Expiry \u2066skew\u2069 ignored")
 
 	var plain strings.Builder
-	if err := printTrailReviewDashboard(&plain, target, comments, "", anyStatusOptions(), countTrailReviewComments(comments), nil); err != nil {
+	if err := printTrailReviewDashboard(&plain, target, comments, "", anyStatusOptions(), comments, nil); err != nil {
 		t.Fatal(err)
 	}
 	printTrailReviewComments(&plain, comments, "")
@@ -757,7 +752,7 @@ func TestRenderTrailReview_StripsBidiControls(t *testing.T) {
 
 	var styled strings.Builder
 	s := colorTrailReviewStyles()
-	if err := renderTrailReviewDashboardStyled(&styled, s, 100, target, comments, "", anyStatusOptions(), countTrailReviewComments(comments), nil); err != nil {
+	if err := renderTrailReviewDashboardStyled(&styled, s, 100, target, comments, "", anyStatusOptions(), comments, nil); err != nil {
 		t.Fatal(err)
 	}
 	renderTrailReviewCommentsStyled(&styled, s, 100, comments, "")
@@ -848,42 +843,44 @@ func TestRenderPatchKeepsTabsAndCarriageReturns(t *testing.T) {
 	}
 }
 
-func TestTrailReviewHiddenOpenNoteNamesEveryActiveFilter(t *testing.T) {
+// The note names only the filters that hide at least one open finding.
+func TestTrailReviewOpenOutsideRowsNamesOnlyHidingFilters(t *testing.T) {
 	t.Parallel()
+	high, low := trailReviewSeverityHigh, trailReviewSeverityLow
+	summary := []api.TrailReviewComment{
+		{ID: "cur-low", Status: trailReviewStatusOpen, StaleOutcome: trailReviewFreshnessCurrent, Severity: &low},
+		{ID: "stale-high", Status: trailReviewStatusOpen, StaleOutcome: trailReviewFreshnessStale, Severity: &high},
+		{ID: "done", Status: trailReviewStatusResolved, StaleOutcome: trailReviewFreshnessStale, Severity: &high},
+	}
+	note := func(rows []api.TrailReviewComment, opts trailReviewListOptions, listStale bool) string {
+		outside := trailReviewOpenOutsideRows(summary, rows, opts, listStale)
+		if outside.hidden == 0 {
+			return ""
+		}
+		return trailReviewHiddenOpenNote(outside)
+	}
 	opts := defaultTrailReviewListOptions()
-	opts.Severity = "high"
-	hidden := trailReviewOpenOutside{hidden: 2, hiddenStale: true}
-	if got := trailReviewHiddenOpenNote(hidden, opts); !strings.HasSuffix(got, "— add --freshness any or drop --severity") {
-		t.Fatalf("hint = %q", got)
+	opts.Severity = high
+	// --severity high with --freshness current: the stale high finding is
+	// hidden only by freshness, so dropping --severity would not show it.
+	if got, want := note(nil, opts, false), "+2 open findings not shown by the current filters — add --freshness any or drop --severity"; got != want {
+		t.Fatalf("both filters hide: %q, want %q", got, want)
 	}
-	// Freshness is named only when a hidden finding is stale.
-	if got := trailReviewHiddenOpenNote(trailReviewOpenOutside{hidden: 2}, opts); !strings.HasSuffix(got, "— drop --severity") {
-		t.Fatalf("current-only hint = %q", got)
+	if got, want := note(summary[:1], opts, false), "+1 open finding not shown by the current filters — add --freshness any"; got != want {
+		t.Fatalf("freshness hides: %q, want %q", got, want)
 	}
-	opts.Freshness = trailReviewFreshnessAny
-	if got := trailReviewHiddenOpenNote(hidden, opts); !strings.HasSuffix(got, "— drop --severity") {
-		t.Fatalf("severity-only hint = %q", got)
+	// With a stale section the stale high finding is listed; only --severity hides the low one.
+	if got, want := note(nil, opts, true), "+1 open finding not shown by the current filters — drop --severity"; got != want {
+		t.Fatalf("stale section: %q, want %q", got, want)
 	}
 }
 
-// `finding list` names open findings its filters hide; it has no stale
-// section, so stale ones point at --freshness.
-func TestTrailReviewListHiddenNote(t *testing.T) {
-	t.Parallel()
-	_, comments := trailReviewRenderFixture()
-	counts := countTrailReviewComments(comments)
-	opts := defaultTrailReviewListOptions()
-	if got, want := trailReviewListHiddenNote(counts, comments[:1], opts), "+1 open finding not shown by the current filters — add --freshness any"; got != want {
-		t.Fatalf("note = %q, want %q", got, want)
+// withOpenFindingsTotal pads summary with current open findings until the
+// trail has total open findings.
+func withOpenFindingsTotal(summary []api.TrailReviewComment, total int) []api.TrailReviewComment {
+	out := append([]api.TrailReviewComment(nil), summary...)
+	for i := countTrailReviewComments(out).Open; i < total; i++ {
+		out = append(out, api.TrailReviewComment{ID: fmt.Sprintf("pad-%d", i), Status: trailReviewStatusOpen, StaleOutcome: trailReviewFreshnessCurrent})
 	}
-	if got := trailReviewListHiddenNote(counts, comments[:2], opts); got != "" {
-		t.Fatalf("every open finding shown, note = %q", got)
-	}
-	if trailReviewListChecksHidden(opts, "next-1") {
-		t.Fatal("a paged list cannot tell hidden findings from later pages")
-	}
-	opts.Status = trailReviewStatusResolved
-	if trailReviewListChecksHidden(opts, "") {
-		t.Fatal("a list that excludes open findings has none to hide")
-	}
+	return out
 }
