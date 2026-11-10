@@ -32,6 +32,42 @@ context and silently ignores both `ENTIRE_TOKEN` and the cluster case, so it can
 name a core the request never touches (this was a real bug in the `mirror list`
 banner; see `repo_mirror.go` and `coreapi.Client.CoreOrigin`).
 
+A service account secret (`ENTIRE_TOKEN=ent_svc_…`) has no `aud`. Every reader
+that needs the bearer or its claims goes through `auth.ResolveEnvToken` (via
+`auth.ParseEnvToken`, or `ResolveEnvTokenContext` in `git-remote-entire`).
+`auth.LocalIdentityCacheKey` is the one exception: it keys a secret on the
+exchange Core and the service account ID, so a cache lookup needs no network.
+Readers that only test whether `ENTIRE_TOKEN` is set need nothing. A v1
+secret is `ent_svc_<juri>_<account ULID>_<secret ULID>_<random><check>` and is
+validated offline, checksum included, before anything is sent
+(`parseServiceAccountSecret`). The secret lives in the regional database of
+its jurisdiction, so the exchange sends it to `https://<juri>.auth.entire.io`
+and nowhere else: there is no override. Against a non-production Core,
+exchange the secret by hand and put the JWT in `ENTIRE_TOKEN`, which already
+works. The exchange, the identity cache key and
+`ForgetServiceAccountSecretToken` derive that origin in one place
+(`secretExchangeSubject`). It returns the service account JWT, which lives at
+most 10 minutes; that JWT's `aud` then drives the precedence above. The
+exchanged token must name the secret's `svc_` account as `sub` and that
+Core as its only URL `aud`; its own `exp` wins over `expires_in` when earlier
+(`checkExchangedToken`, applied again to every cache read). It is cached under
+the user cache root, keyed by a hash of the Core and the secret, and reused
+until 2 minutes before it expires. On a miss the exchange and write-back run
+under a per-entry file lock, which `ForgetServiceAccountSecretToken` also
+takes, so parallel commands share one exchange; a lock that cannot be taken
+falls back to an unshared exchange rather than failing auth. The exchange never follows a
+redirect, because a 307/308 would resend the secret in the body. Because that
+token lives minutes, a client built once must not hold it: `coreapi`, the data
+API client (`auth.DataAPI.Client`) and cell clients take `auth.EnvTokenSource`,
+which asks the cache for every request (renewing near expiry) and drops the
+cached token on a 401 that names it, so a long-running command such as `entire
+trail watch` keeps working and a refused token is not reused.
+`git-remote-entire` does the same through `secretCreds`. Readers that need only
+the origin use `auth.EnvTokenCoreURL`, which derives a secret's core offline
+instead of exchanging it. `entire auth
+status --json` reports `credential_source: sa_secret` for it. Never send the
+secret itself as a bearer, and never name it in an error.
+
 When a command resolves auth *outside* a `coreapi.Client` (e.g. `entire auth
 status`, which builds its own `/me` client), it must apply the same
 env-token-first precedence itself — see `resolveAuthStatusTarget` /
@@ -87,9 +123,15 @@ uses the following routing shapes, mirroring the entire.io BFF:
   forge-qualified `resolveForgeRepoCellPlacement`), by cross-repo checkpoint
   reads (`explain --repo`, `explain_repo.go`; the same placement id keys both
   `/checkpoints/{id}` and the commit→checkpoint resolution at
-  `/commits/{sha}/checkpoints`) and by `experts --repo owner/repo`, which sends
+  `/commits/{sha}/checkpoints`), by `experts --repo owner/repo`, which sends
   that placement id to entire-api
-  instead of re-deriving it from a data-plane repo listing.
+  instead of re-deriving it from a data-plane repo listing, and by `entire api`'s
+  `{repo_id}` placeholder. A `--to cell` request whose path (not query) names
+  `{repo_id}` dials that placement's cell; `/me/*` paths stay on the home cell,
+  and an explicit `--jurisdiction`, or an `ENTIRE_API_BASE_URL` naming a direct
+  cell or loopback host (`auth.BaseURLOverridePinsCell`), wins; an override naming
+  a BFF/apex still routes by catalog. Another cell answers a placement id it
+  does not host with an error or, for the processing id, an empty result.
 - **Project-scoped trails → assigned project cell**:
   Core resolves the required `--project`; list uses
   `GET /api/v1/trails?projectId=<ID>` at its assigned API URL, and a numeric
@@ -100,9 +142,18 @@ uses the following routing shapes, mirroring the entire.io BFF:
   `auth.NewEntireAPICellClient(ctx, insecure, nil)` routes by the
   `home_jurisdiction` JWT claim. Activity and recap use it with no data-API
   fallback (`runAuthenticatedActivityAPI` in `entireapi_client.go`,
-  `newRecapClient` in `recap.go`): the BFF serves `/me/*` by proxying to the
+  `newRecapSource` in `recap.go`): the BFF serves `/me/*` by proxying to the
   same home cell, so it cannot answer a caller the cell path cannot.
-  One exception: `/me/project-trails` (`trail list --mine`,
+  One exception is recap's team side: a repo's team rollups live only on
+  its processing cell and the caller's own activity only on their home cell,
+  and entire-api does not merge across cells. When the current repo's
+  processing placement is on another cell, recap also asks that cell for the
+  same window and takes only the team fields from it (`recapSource` in
+  `recap_source.go`, `recap.MergeTeam`). The personal side always comes from
+  the home cell, both calls share one `CellClientFactory`, and an
+  `ENTIRE_API_BASE_URL` that pins a cell keeps recap on that one host.
+
+  The other is `/me/project-trails` (`trail list --mine`,
   `project_trail_list_mine.go`). A project trail lives in its project's cell,
   so each cell knows only the caller's trails homed there. Like the web
   sidebar (`me-project-trails.ts`), the CLI asks every jurisdiction's default

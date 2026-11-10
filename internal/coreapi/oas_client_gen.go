@@ -129,6 +129,13 @@ type Invoker interface {
 	//
 	// POST /service-accounts
 	CreateServiceAccount(ctx context.Context, request *CreateServiceAccountInputBody) (*ServiceAccount, error)
+	// CreateServiceAccountSecret invokes createServiceAccountSecret operation.
+	//
+	// Returns the secret once. Exchange it at /oauth/token for a short-lived service account token.
+	// Answers 421 with the home core URL outside the service account's jurisdiction.
+	//
+	// POST /service-accounts/{accountId}/secrets
+	CreateServiceAccountSecret(ctx context.Context, request OptCreateServiceAccountSecretBody, params CreateServiceAccountSecretParams) (*CreateServiceAccountSecretOutputBody, error)
 	// DeclineInvitation invokes declineInvitation operation.
 	//
 	// Decline an organization invitation.
@@ -211,6 +218,12 @@ type Invoker interface {
 	//
 	// DELETE /service-accounts/{accountId}
 	DeleteServiceAccount(ctx context.Context, params DeleteServiceAccountParams) error
+	// DeleteServiceAccountSecret invokes deleteServiceAccountSecret operation.
+	//
+	// Delete service account secret.
+	//
+	// DELETE /service-accounts/{accountId}/secrets/{secret_id}
+	DeleteServiceAccountSecret(ctx context.Context, params DeleteServiceAccountSecretParams) error
 	// DetachMyHandle invokes detachMyHandle operation.
 	//
 	// Detach a linked sign-in method from the calling account.
@@ -623,6 +636,12 @@ type Invoker interface {
 	//
 	// GET /service-accounts/{accountId}/grants
 	ListServiceAccountGrants(ctx context.Context, params ListServiceAccountGrantsParams) (*ListServiceAccountGrantsOutputBody, error)
+	// ListServiceAccountSecrets invokes listServiceAccountSecrets operation.
+	//
+	// List service account secrets.
+	//
+	// GET /service-accounts/{accountId}/secrets
+	ListServiceAccountSecrets(ctx context.Context, params ListServiceAccountSecretsParams) (*ListServiceAccountSecretsOutputBody, error)
 	// ListServiceAccounts invokes listServiceAccounts operation.
 	//
 	// List service accounts in an org or project.
@@ -2490,6 +2509,111 @@ func (c *Client) sendCreateServiceAccount(ctx context.Context, request *CreateSe
 	return result, nil
 }
 
+// CreateServiceAccountSecret invokes createServiceAccountSecret operation.
+//
+// Returns the secret once. Exchange it at /oauth/token for a short-lived service account token.
+// Answers 421 with the home core URL outside the service account's jurisdiction.
+//
+// POST /service-accounts/{accountId}/secrets
+func (c *Client) CreateServiceAccountSecret(ctx context.Context, request OptCreateServiceAccountSecretBody, params CreateServiceAccountSecretParams) (*CreateServiceAccountSecretOutputBody, error) {
+	res, err := c.sendCreateServiceAccountSecret(ctx, request, params)
+	return res, err
+}
+
+func (c *Client) sendCreateServiceAccountSecret(ctx context.Context, request OptCreateServiceAccountSecretBody, params CreateServiceAccountSecretParams) (res *CreateServiceAccountSecretOutputBody, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [3]string
+	pathParts[0] = "/service-accounts/"
+	{
+		// Encode "accountId" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "accountId",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.AccountId))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/secrets"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "POST", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+	if err := encodeCreateServiceAccountSecretRequest(request, r); err != nil {
+		return res, errors.Wrap(err, "encode request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, CreateServiceAccountSecretOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, CreateServiceAccountSecretOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeCreateServiceAccountSecretResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
 // DeclineInvitation invokes declineInvitation operation.
 //
 // Decline an organization invitation.
@@ -3970,6 +4094,125 @@ func (c *Client) sendDeleteServiceAccount(ctx context.Context, params DeleteServ
 	defer body.Close()
 
 	result, err := decodeDeleteServiceAccountResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// DeleteServiceAccountSecret invokes deleteServiceAccountSecret operation.
+//
+// Delete service account secret.
+//
+// DELETE /service-accounts/{accountId}/secrets/{secret_id}
+func (c *Client) DeleteServiceAccountSecret(ctx context.Context, params DeleteServiceAccountSecretParams) error {
+	_, err := c.sendDeleteServiceAccountSecret(ctx, params)
+	return err
+}
+
+func (c *Client) sendDeleteServiceAccountSecret(ctx context.Context, params DeleteServiceAccountSecretParams) (res *DeleteServiceAccountSecretNoContent, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [4]string
+	pathParts[0] = "/service-accounts/"
+	{
+		// Encode "accountId" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "accountId",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.AccountId))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/secrets/"
+	{
+		// Encode "secret_id" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "secret_id",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.SecretID))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[3] = encoded
+	}
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "DELETE", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, DeleteServiceAccountSecretOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, DeleteServiceAccountSecretOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeDeleteServiceAccountSecretResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}
@@ -11605,6 +11848,144 @@ func (c *Client) sendListServiceAccountGrants(ctx context.Context, params ListSe
 	defer body.Close()
 
 	result, err := decodeListServiceAccountGrantsResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// ListServiceAccountSecrets invokes listServiceAccountSecrets operation.
+//
+// List service account secrets.
+//
+// GET /service-accounts/{accountId}/secrets
+func (c *Client) ListServiceAccountSecrets(ctx context.Context, params ListServiceAccountSecretsParams) (*ListServiceAccountSecretsOutputBody, error) {
+	res, err := c.sendListServiceAccountSecrets(ctx, params)
+	return res, err
+}
+
+func (c *Client) sendListServiceAccountSecrets(ctx context.Context, params ListServiceAccountSecretsParams) (res *ListServiceAccountSecretsOutputBody, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [3]string
+	pathParts[0] = "/service-accounts/"
+	{
+		// Encode "accountId" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "accountId",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.AccountId))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/secrets"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	q := uri.NewQueryEncoder()
+	{
+		// Encode "cursor" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "cursor",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.Cursor.Get(); ok {
+				return e.EncodeValue(conv.StringToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "per_page" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "per_page",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.PerPage.Get(); ok {
+				return e.EncodeValue(conv.Int64ToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	u.RawQuery = q.Values().Encode()
+
+	r, err := ht.NewRequest(ctx, "GET", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, ListServiceAccountSecretsOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, ListServiceAccountSecretsOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeListServiceAccountSecretsResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}

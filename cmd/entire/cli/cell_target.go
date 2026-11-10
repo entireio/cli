@@ -438,18 +438,6 @@ func cellPlacementError(ctx context.Context, subject string, fallback error) err
 	return fallback
 }
 
-// isActiveMirror reports whether a mirror placement can currently serve the
-// repo: not archived, and not in a failed/suspended clone state. An unset status
-// is treated as active (older data). Shared by every caller that must ignore
-// placements a cell can't answer for.
-func isActiveMirror(m coreapi.Mirror) bool {
-	if m.IsArchived.Or(false) {
-		return false
-	}
-	st := m.Status.Or(coreapi.MirrorStatusReady)
-	return st != coreapi.MirrorStatusFailed && st != coreapi.MirrorStatusSuspended
-}
-
 // matchClusterByHost finds the catalog cluster whose public host equals
 // clusterHost (case-insensitive). The cluster's apiUrl + jurisdiction are the
 // authoritative cell coordinates. Used by the ULID path (GetRepo returns a
