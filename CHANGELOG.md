@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.13.2] - 2026-11-10
+
+### Added
+
+- `entire service-account secret create`, `list` and `delete` manage a service account's secrets. `create` prints only the secret on stdout so it redirects cleanly into a file or secret store; `--expires-in-days` takes 1 to 365 and otherwise Core's 90-day default applies. An `ENTIRE_TOKEN` starting with `ent_svc_` is exchanged for the service account's short-lived token, cached and renewed near expiry, including in `git-remote-entire` ([#3020](https://github.com/entireio/cli/pull/3020))
+- Each release also ships `git-remote-entire` on its own as a `git-remote-entire-<os>-<arch>` archive. The `entire_*` archive, Homebrew and Scoop still ship both binaries ([#3019](https://github.com/entireio/cli/pull/3019))
+- `entire rsl` offers to install the entire-rsl plugin when it is missing, like `entire graph`, `entire brain` and `entire investigate` ([#3076](https://github.com/entireio/cli/pull/3076))
+
+### Changed
+
+- Session and checkpoint tokens are counted from each agent's own running total instead of by slicing transcripts, for sessions started by this version with Claude Code, Codex, Copilot CLI, OpenCode, Pi, Factory Droid or Antigravity. Turns without file changes are no longer missed, and a repeated Stop, a commit in the middle of a turn or Copilot's cache no longer count twice. Checkpoint metadata adds `session_token_usage`, the session's total at that checkpoint ([#2782](https://github.com/entireio/cli/pull/2782))
+- Repository-scoped `entire trail create` and `entire trail update` are removed; assignees and editable descriptions live on project trails, whose `create` and `update` are unchanged. Trail output and `--json` no longer include assignees or the aggregate comment and unresolved counts ([#3089](https://github.com/entireio/cli/pull/3089))
+- OpenCode checkpoints: a tool still pending or running is no longer written as failed, an assistant message with only usage writes `"content":null` instead of `"content":[]`, and a raw OpenCode 2 export converts in full. Live OpenCode views hide messages you undid, as OpenCode does ([#3064](https://github.com/entireio/cli/pull/3064))
+
+### Fixed
+
+- Antigravity IDE and Antigravity 2.0 app sessions are captured: transcripts under `~/.gemini/antigravity/brain` and `~/.gemini/antigravity-ide/brain` are accepted, so a turn end no longer fails with `transcript file not found` and `entire session attach` finds those conversations ([#3061](https://github.com/entireio/cli/pull/3061))
+- `entire api` fills `{repo_id}` with the repository's processing placement and sends `--to cell` requests for that repository to its cell, so a repo mirrored in several regions no longer returns an empty list. `entire recap`'s repository scope uses the same lookup ([#2857](https://github.com/entireio/cli/pull/2857))
+- `install.sh` verifies the archive against its exact line in `checksums.txt` instead of a suffix match that could pick the wrong archive ([#3019](https://github.com/entireio/cli/pull/3019))
+
 ## [0.13.1] - 2026-11-06
 
 ### Added
