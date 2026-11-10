@@ -98,11 +98,14 @@ type pushSettings struct {
 	primaryIsRefs bool
 	// enabledOnlyByGlobal records that the repository is on only through
 	// global enable, and pushConsent that the developer agreed to push its
-	// checkpoints anyway (see globalEnablePushConsent). consentAsked records
-	// that this push asked, so it asks nothing else.
+	// checkpoints anyway, and owners the global_enable_owners list (see
+	// globalEnablePushConsent). consentAsked records that this push asked, so
+	// it asks nothing else; ownerListed that it pushes because of the list.
 	enabledOnlyByGlobal bool
 	pushConsent         bool
+	owners              []string
 	consentAsked        bool
+	ownerListed         bool
 }
 
 // pushTarget returns the target to use for git push/fetch commands for checkpoint branches.
@@ -142,6 +145,7 @@ func resolvePushSettings(ctx context.Context, pushRemoteName string) pushSetting
 		primaryIsRefs:       primaryIsGitRefs(ctx),
 		enabledOnlyByGlobal: s.EnabledOnlyByGlobal(),
 		pushConsent:         s.RepoPushConsent(),
+		owners:              s.GlobalEnableOwners(),
 	}
 
 	config := s.GetCheckpointRemote()

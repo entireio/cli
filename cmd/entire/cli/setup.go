@@ -960,6 +960,7 @@ func newEnableCmdWithIdentityResolverFactory(identityFactory identityResolverFac
 	var bootstrapOpts BootstrapOptions
 	var insecureHTTPAuth bool
 	var enableGlobal bool
+	var enableOwners []string
 
 	cmd := &cobra.Command{
 		Use:   "enable",
@@ -976,7 +977,7 @@ If the current directory is not a git repository, Entire can initialize one
 for you and create an initial commit. It never creates or pushes to a remote —
 publish the repository yourself when you're ready.`,
 		Annotations: map[string]string{skipGlobalEnableHooksAnnotation: skipGlobalEnableHooksEnabled},
-		RunE: runEnableGlobalOr(&enableGlobal, &opts.Yes, func(cmd *cobra.Command, _ []string) (runErr error) {
+		RunE: runEnableGlobalOr(&enableGlobal, &opts.Yes, &enableOwners, func(cmd *cobra.Command, _ []string) (runErr error) {
 			ctx := cmd.Context()
 			// The destination report needs the choice pointer, not the answer,
 			// so it can be registered here (first, therefore run last) while
@@ -1106,6 +1107,7 @@ publish the repository yourself when you're ready.`,
 	}
 
 	cmd.Flags().BoolVar(&enableGlobal, flagGlobal, false, "Enable Entire for Claude Code sessions in every repository you work in (sets global_enable in ~/.config/entire/settings.json)")
+	cmd.Flags().StringArrayVar(&enableOwners, flagOwner, nil, "With --global: push checkpoints without asking from repositories this owner owns, such as gh/entireio (repeatable)")
 	cmd.Flags().BoolVar(&ignoreUntracked, "ignore-untracked", false, "Commit all new files without tracking pre-existing untracked files")
 	cmd.Flags().StringVar(&opts.CheckpointPushRemote, flagCheckpointPushRemote, "", "Git remote for checkpoint uploads (saved to .entire/settings.local.json, even with --project)")
 	cmd.Flags().MarkHidden("ignore-untracked") //nolint:errcheck,gosec // flag is defined above

@@ -186,3 +186,52 @@ func TestGlobalEnableConsent_GitBranchBackend(t *testing.T) {
 	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
 	assert.NotEmpty(t, strings.TrimSpace(testutil.RunGit(t, bareDir, "for-each-ref", v1LocalRef)))
 }
+
+// An owner on the list stands in for asking, but only when EVERY URL the
+// checkpoints go to belongs to a listed owner; anything that names no forge
+// owner is not listed.
+func TestGlobalEnablePushConsent_OwnerList(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.AddRemote(t, dir, "mirrored", "https://github.com/acme/app.git")
+	testutil.RunGit(t, dir, "remote", "set-url", "--add", "--push", "mirrored", "https://github.com/acme/app.git")
+	testutil.RunGit(t, dir, "remote", "set-url", "--add", "--push", "mirrored", "git@gitlab.com:other/app.git")
+	testutil.AddRemote(t, dir, "local", "/srv/git/app.git")
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+
+	for name, tc := range map[string]struct {
+		ps   pushSettings
+		want GlobalEnablePushConsent
+	}{
+		"listed owner":          {pushSettings{remote: "https://github.com/acme/app.git", owners: []string{"gh/acme"}}, GlobalEnableConsentOwnerListed},
+		"other owner":           {pushSettings{remote: "https://github.com/acme/app.git", owners: []string{"gh/other"}}, GlobalEnableConsentHeld},
+		"no list":               {pushSettings{remote: "https://github.com/acme/app.git"}, GlobalEnableConsentHeld},
+		"checkpoint remote":     {pushSettings{remote: "origin", checkpointURL: "git@github.com:acme/checkpoints.git", owners: []string{"gh/acme"}}, GlobalEnableConsentOwnerListed},
+		"gitlab subgroup":       {pushSettings{remote: "https://gitlab.com/grp/sub/app.git", owners: []string{"gitlab.com/grp"}}, GlobalEnableConsentOwnerListed},
+		"one push URL unlisted": {pushSettings{remote: "mirrored", owners: []string{"gh/acme"}}, GlobalEnableConsentHeld},
+		"every push URL listed": {pushSettings{remote: "mirrored", owners: []string{"gh/acme", "gitlab.com/other"}}, GlobalEnableConsentOwnerListed},
+		"local path":            {pushSettings{remote: "local", owners: []string{"gh/acme"}}, GlobalEnableConsentHeld},
+		"unknown remote":        {pushSettings{remote: "missing", owners: []string{"gh/acme"}}, GlobalEnableConsentHeld},
+		"agreed":                {pushSettings{remote: "local", pushConsent: true}, GlobalEnableConsentAgreed},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tc.ps.enabledOnlyByGlobal = true
+			assert.Equal(t, tc.want, globalEnablePushConsent(t.Context(), tc.ps))
+		})
+	}
+	assert.Equal(t, GlobalEnableConsentNotNeeded, globalEnablePushConsent(t.Context(), pushSettings{remote: "local"}))
+}
+
+// A held push names the owner to add when every destination shares one, and
+// never prints the URL itself.
+func TestGlobalEnableConsent_HoldSuggestsTheOwner(t *testing.T) {
+	workDir, _ := globalOnlyRefsRepo(t)
+	testutil.RunGit(t, workDir, "remote", "set-url", "--push", "origin", "https://user:secret@github.com/acme/app.git")
+	stderr := captureStderrWriter(t)
+
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
+	assert.Contains(t, stderr.String(), "`entire enable --global --owner gh/acme`")
+	assert.NotContains(t, stderr.String(), "secret")
+	assert.NotContains(t, stderr.String(), "github.com")
+}

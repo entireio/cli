@@ -23,22 +23,39 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 )
 
-// flagGlobal is `entire enable --global` / `entire disable --global`.
-const flagGlobal = "global"
+// flagGlobal is `entire enable --global` / `entire disable --global`, and
+// flagOwner is `entire enable --global --owner`.
+const (
+	flagGlobal = "global"
+	flagOwner  = "owner"
+)
 
 // runEnableGlobal turns Entire on in every repository: it sets
-// `global_enable: true` in the user settings file and installs Claude Code's
-// user-level hooks now rather than on the next command. It does not set up the
-// repository it runs in; the hooks do that the first time an agent runs there.
-func runEnableGlobal(cmd *cobra.Command, yes bool) error {
-	if err := rejectFlagsWithGlobal(cmd, "yes"); err != nil {
+// `global_enable: true` in the user settings file, adds any --owner to the
+// owner list, and installs Claude Code's user-level hooks now rather than on
+// the next command. It does not set up the repository it runs in; the hooks
+// do that the first time an agent runs there.
+func runEnableGlobal(cmd *cobra.Command, yes bool, ownerFlags []string) error {
+	if err := rejectFlagsWithGlobal(cmd, "yes", flagOwner); err != nil {
 		return err
 	}
 	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
-	// Turning it on again adds nothing to agree to.
-	if !settings.UserTierEnablesEverywhere(ctx) {
-		confirmed, err := confirmGlobalEnable(cmd, yes)
+	owners, err := validateOwners(cmd, ownerFlags)
+	if err != nil {
+		return err
+	}
+	listed := settings.UserGlobalEnableOwners(ctx)
+	var newOwners []string
+	for _, owner := range owners {
+		if !slices.Contains(listed, owner) && !slices.Contains(newOwners, owner) {
+			newOwners = append(newOwners, owner)
+		}
+	}
+	// Turning it on again, with no owner it did not already have, adds
+	// nothing to agree to.
+	if !settings.UserTierEnablesEverywhere(ctx) || len(newOwners) > 0 {
+		confirmed, err := confirmGlobalEnable(cmd, yes, globalEnableDisclosureFor(newOwners))
 		if err != nil || !confirmed {
 			return err
 		}
@@ -48,6 +65,12 @@ func runEnableGlobal(cmd *cobra.Command, yes bool) error {
 		return err //nolint:wrapcheck // usersettings names the file and the reason
 	}
 	fmt.Fprintf(w, "Entire is now enabled in every repository you work in (global_enable in %s).\n", path)
+	if len(newOwners) > 0 {
+		if listed, err = usersettings.AddGlobalEnableOwners(ctx, newOwners); err != nil {
+			return err //nolint:wrapcheck // usersettings names the file and the reason
+		}
+	}
+	reportGlobalEnableOwners(w, listed)
 
 	n, hooksPath, err := claudecode.EnsureUserHooks(ctx)
 	switch {
@@ -64,13 +87,43 @@ func runEnableGlobal(cmd *cobra.Command, yes bool) error {
 	return nil
 }
 
+// validateOwners normalizes every --owner, refusing the command on the first
+// that is not one.
+func validateOwners(cmd *cobra.Command, ownerFlags []string) ([]string, error) {
+	owners := make([]string, 0, len(ownerFlags))
+	for _, flag := range ownerFlags {
+		owner, err := usersettings.ValidateOwner(flag)
+		if err != nil {
+			cmd.SilenceUsage = true
+			return nil, err //nolint:wrapcheck // names the flag value and the expected shape
+		}
+		owners = append(owners, owner)
+	}
+	return owners, nil
+}
+
+// reportGlobalEnableOwners says which repositories push checkpoints without
+// asking, and how every other one gets to push.
+func reportGlobalEnableOwners(w io.Writer, owners []string) {
+	if len(owners) == 0 {
+		fmt.Fprintln(w, "Checkpoints from a repository you have not enabled are pushed only after you agree, on a git push from a terminal. Add owners whose repositories should push without asking with --owner.")
+		return
+	}
+	fmt.Fprintf(w, "Checkpoints are pushed without asking for repositories owned by: %s. Remove an owner by editing %s in %s.\n",
+		strings.Join(owners, ", "), usersettings.GlobalEnableOwnersKey, usersettings.Path())
+}
+
 // runEnableGlobalOr is the enable command's RunE: with --global it runs
 // runEnableGlobal instead of run, so none of run's defers fire. They report
 // the current repository as enabled, and --global does not enable it.
-func runEnableGlobalOr(global, yes *bool, run func(*cobra.Command, []string) error) func(*cobra.Command, []string) error {
+func runEnableGlobalOr(global, yes *bool, owners *[]string, run func(*cobra.Command, []string) error) func(*cobra.Command, []string) error {
 	return func(cmd *cobra.Command, args []string) error {
 		if *global {
-			return runEnableGlobal(cmd, *yes)
+			return runEnableGlobal(cmd, *yes, *owners)
+		}
+		if len(*owners) > 0 {
+			cmd.SilenceUsage = true
+			return errors.New("--owner applies only with --global")
 		}
 		return run(cmd, args)
 	}
@@ -96,16 +149,26 @@ func runDisableGlobal(cmd *cobra.Command) error {
 // globalEnableDisclosure is what `entire enable --global` asks the developer
 // to agree to.
 const globalEnableDisclosure = "With global enable on, Entire records your Claude Code sessions in every git repository you work in, " +
-	"not just ones you ran `entire enable` in; other agents are recorded only where you ran it. Session checkpoints are pushed alongside your normal git pushes to that " +
-	"repository's remote — including public repositories and forks. Run `entire disable` in a repository to stop it " +
-	"there, or `entire disable --global` to turn this off."
+	"not just ones you ran `entire enable` in; other agents are recorded only where you ran it. In a repository you did not enable, " +
+	"session checkpoints stay on this machine until you agree, on a git push from a terminal, to push them to that repository's remote. " +
+	"Run `entire disable` in a repository to stop it there, or `entire disable --global` to turn this off."
 
-// confirmGlobalEnable asks the developer to agree to global enable. --yes
+// globalEnableDisclosureFor is the disclosure, plus what adding owners to the
+// owner list means.
+func globalEnableDisclosureFor(newOwners []string) string {
+	if len(newOwners) == 0 {
+		return globalEnableDisclosure
+	}
+	return globalEnableDisclosure + " Session checkpoints from repositories owned by " + strings.Join(newOwners, ", ") +
+		" are pushed with your git pushes without asking, including public repositories and forks they own."
+}
+
+// confirmGlobalEnable asks the developer to agree to disclosure. --yes
 // accepts, and still prints what was accepted; with no terminal to ask in it
 // refuses, since the answer must be the developer's.
-func confirmGlobalEnable(cmd *cobra.Command, yes bool) (bool, error) {
+func confirmGlobalEnable(cmd *cobra.Command, yes bool, disclosure string) (bool, error) {
 	if yes {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Accepted with --yes: %s\n", globalEnableDisclosure)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Accepted with --yes: %s\n", disclosure)
 		return true, nil
 	}
 	if !interactive.CanPromptInteractively() {
@@ -114,7 +177,7 @@ func confirmGlobalEnable(cmd *cobra.Command, yes bool) (bool, error) {
 	}
 	return confirmPrompt(cmd, "Global enable", "Enable Entire in every repository you work in?", "",
 		func(w io.Writer) error {
-			_, err := fmt.Fprintf(w, "%s\n\n", globalEnableDisclosure)
+			_, err := fmt.Fprintf(w, "%s\n\n", disclosure)
 			return err //nolint:wrapcheck // a write to the prompt's own terminal
 		})
 }

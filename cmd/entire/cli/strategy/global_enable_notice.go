@@ -22,17 +22,19 @@ import (
 const globalEnablePushNoticeName = "entire-global-enable-push-notice"
 
 // noticeGlobalEnablePush tells the developer, the first time a push from this
-// clone carries session checkpoints, that the repository is on only through
-// global enable and how to stop it. Callers invoke it only after delivery.
+// clone carries session checkpoints because the repository's owner is on their
+// global-enable owner list, that it did and how to stop it: nobody was asked
+// about this repository. Callers invoke it only after delivery.
 //
-// It blocks nothing and never fails the push: global enable was agreed to at
-// `entire enable --global`, and this is the reminder of where that applies.
+// It blocks nothing and never fails the push: the owner list was agreed to at
+// `entire enable --global --owner`, and this is the reminder of where that
+// applies.
 func noticeGlobalEnablePush(ctx context.Context, ps pushSettings) {
-	if !ps.enabledOnlyByGlobal || !claimGlobalEnablePushNotice(ctx) {
+	if !ps.ownerListed || !claimGlobalEnablePushNotice(ctx) {
 		return
 	}
 	fmt.Fprintf(stderrWriter,
-		"[entire] Entire pushed session checkpoints to %s. This repository is enabled through global enable, not `entire enable`; run 'entire disable' here to stop.\n",
+		"[entire] Entire pushed session checkpoints to %s without asking: this repository is on through global enable and its owner is on your owner list. Run 'entire disable' here to stop.\n",
 		globalEnablePushDestination(ps))
 	logging.Info(ctx, "global enable: first checkpoint push from this clone")
 }

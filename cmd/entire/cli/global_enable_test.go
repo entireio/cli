@@ -185,7 +185,52 @@ func TestEnableGlobal_WritesTheFlagAndInstallsHooks(t *testing.T) {
 	assert.Contains(t, out, "Accepted with --yes")
 	assert.Contains(t, out, "records your Claude Code sessions in every git repository")
 	assert.Contains(t, out, "other agents are recorded only where you ran it")
-	assert.Contains(t, out, "public repositories and forks")
+	assert.Contains(t, out, "stay on this machine until you agree")
+}
+
+// --owner adds to the owner list, normalized and without repeats, and the
+// output lists every owner whose checkpoints now push without asking.
+func TestEnableGlobal_OwnersAreAddedAndListed(t *testing.T) {
+	entireDir, _, _, out, err := runGlobalCmd(t, true, `{"global_enable_owners": ["gh/acme"]}`,
+		"enable", "--global", "--yes", "--owner", "GitHub.com/Other", "--owner", "gh/acme")
+	if err != nil {
+		t.Fatalf("enable --global --owner: %v\n%s", err, out)
+	}
+	assert.JSONEq(t, `{"global_enable": true, "global_enable_owners": ["gh/acme", "gh/other"]}`, readUserSettingsFile(t, entireDir))
+	assert.Contains(t, out, "pushed with your git pushes without asking, including public repositories and forks they own")
+	assert.Contains(t, out, "gh/acme, gh/other")
+}
+
+// An owner that is not one is refused before anything is written, and
+// --owner means nothing without --global.
+func TestEnableGlobal_RejectsBadOwnerUse(t *testing.T) {
+	for name, args := range map[string][]string{
+		"wildcard":       {"enable", "--global", "--yes", "--owner", "gh/*"},
+		"subgroup":       {"enable", "--global", "--yes", "--owner", "gitlab.com/grp/sub"},
+		"without global": {"enable", "--owner", "gh/acme"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			entireDir, _, _, out, err := runGlobalCmd(t, true, "", args...)
+			if err == nil {
+				t.Fatalf("%v succeeded:\n%s", args, out)
+			}
+			assert.NoFileExists(t, filepath.Join(entireDir, usersettings.FileName))
+		})
+	}
+}
+
+// Adding an owner while global enable is already on is something new to
+// agree to; naming one already listed is not.
+func TestEnableGlobal_NewOwnerNeedsConfirmation(t *testing.T) {
+	const on = `{"global_enable": true, "global_enable_owners": ["gh/acme"]}`
+	_, _, _, out, err := runGlobalCmd(t, true, on, "enable", "--global", "--owner", "gh/other")
+	if err == nil || !strings.Contains(err.Error(), "--yes") {
+		t.Fatalf("adding an owner without confirmation: err=%v\n%s", err, out)
+	}
+	_, _, _, out, err = runGlobalCmd(t, true, on, "enable", "--global", "--owner", "gh/acme")
+	if err != nil {
+		t.Fatalf("naming a listed owner: %v\n%s", err, out)
+	}
 }
 
 // With no Claude config directory, nothing is created and the output does
@@ -284,7 +329,7 @@ func TestEnableGlobal_PromptAnswers(t *testing.T) {
 				t.Fatalf("enable --global: %v\n%s", err, out)
 			}
 			assert.Contains(t, terminal.String(), "records your Claude Code sessions")
-			assert.Contains(t, terminal.String(), "public repositories and forks")
+			assert.Contains(t, terminal.String(), "stay on this machine until you agree")
 			if tc.want {
 				assert.JSONEq(t, `{"global_enable": true}`, readUserSettingsFile(t, entireDir))
 			} else {

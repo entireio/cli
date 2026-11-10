@@ -23,16 +23,17 @@ func noticeMarker(dir string) string {
 	return filepath.Join(dir, ".git", globalEnablePushNoticeName)
 }
 
-// The first push that carries checkpoints from a repository on only through
-// global enable says so; later pushes from the same clone do not.
+// The first push that carries checkpoints without asking, because the
+// repository's owner is on the owner list, says so; later pushes from the
+// same clone do not.
 func TestNoticeGlobalEnablePush_PrintsOncePerClone(t *testing.T) {
 	dir := noticeRepo(t)
 	stderr := captureHintStderr(t)
-	ps := pushSettings{remote: "origin", enabledOnlyByGlobal: true}
+	ps := pushSettings{remote: "origin", ownerListed: true}
 
 	noticeGlobalEnablePush(t.Context(), ps)
-	assert.Contains(t, stderr.String(), `pushed session checkpoints to "origin"`)
-	assert.Contains(t, stderr.String(), "not `entire enable`; run 'entire disable' here to stop")
+	assert.Contains(t, stderr.String(), `pushed session checkpoints to "origin" without asking`)
+	assert.Contains(t, stderr.String(), "its owner is on your owner list")
 	assert.FileExists(t, noticeMarker(dir))
 
 	stderr.Reset()
@@ -40,8 +41,8 @@ func TestNoticeGlobalEnablePush_PrintsOncePerClone(t *testing.T) {
 	assert.Empty(t, stderr.String())
 }
 
-// A repository the developer enabled, or any repository with global enable
-// off, gets no notice and no marker.
+// A push that was not owner-listed (the developer enabled the repository, or
+// agreed to push it) gets no notice and no marker.
 func TestNoticeGlobalEnablePush_SilentUnlessGlobalOnly(t *testing.T) {
 	dir := noticeRepo(t)
 	stderr := captureHintStderr(t)
@@ -66,7 +67,7 @@ func TestNoticeGlobalEnablePush_NeverPrintsAURL(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			noticeRepo(t)
 			stderr := captureHintStderr(t)
-			tc.ps.enabledOnlyByGlobal = true
+			tc.ps.ownerListed = true
 
 			noticeGlobalEnablePush(t.Context(), tc.ps)
 			out := stderr.String()

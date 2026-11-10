@@ -5,14 +5,19 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/settings/usersettings"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 )
 
 // GlobalEnablePushConsentLogMsg is logged when pre-push asks whether to push
@@ -43,6 +48,9 @@ const (
 	// GlobalEnableConsentAgreed: the repository's `repos` entry says
 	// `push_checkpoints: true`.
 	GlobalEnableConsentAgreed
+	// GlobalEnableConsentOwnerListed: every URL the checkpoints go to belongs
+	// to an owner on the user's global_enable_owners list.
+	GlobalEnableConsentOwnerListed
 	// GlobalEnableConsentHeld: on only through global enable and not agreed
 	// to, so checkpoints stay local.
 	GlobalEnableConsentHeld
@@ -51,15 +59,66 @@ const (
 // globalEnablePushConsent decides ps's consent. Only a repository on only
 // through global enable needs any: one the developer enabled was agreed to
 // when they did.
-func globalEnablePushConsent(_ context.Context, ps pushSettings) GlobalEnablePushConsent {
+func globalEnablePushConsent(ctx context.Context, ps pushSettings) GlobalEnablePushConsent {
 	switch {
 	case !ps.enabledOnlyByGlobal:
 		return GlobalEnableConsentNotNeeded
 	case ps.pushConsent:
 		return GlobalEnableConsentAgreed
+	case len(ps.owners) > 0 && destinationsOwnerListed(checkpointDestinationURLs(ctx, ps), ps.owners):
+		return GlobalEnableConsentOwnerListed
 	default:
 		return GlobalEnableConsentHeld
 	}
+}
+
+// destinationsOwnerListed reports whether every URL belongs to a listed
+// owner. Fails closed: no URLs, or any URL that names no forge owner, is not
+// listed.
+func destinationsOwnerListed(urls, owners []string) bool {
+	if len(urls) == 0 {
+		return false
+	}
+	for _, url := range urls {
+		owner := usersettings.NormalizeOwner(url)
+		if owner == "" || !slices.Contains(owners, owner) {
+			return false
+		}
+	}
+	return true
+}
+
+// checkpointDestinationURLs is every URL ps sends checkpoints to: the
+// checkpoint_remote URL when one is configured, a URL the push names
+// directly, or every push URL of the remote. Nil when the remote's URLs
+// cannot be read, which no owner matches.
+func checkpointDestinationURLs(ctx context.Context, ps pushSettings) []string {
+	if ps.hasCheckpointURL() {
+		return []string{ps.checkpointURL}
+	}
+	if remote.IsURL(ps.remote) {
+		return []string{ps.remote}
+	}
+	dir, env := gitHookSafeDirEnv(ctx)
+	urls, err := gitremote.GetPushURLsInDir(ctx, dir, env, ps.remote)
+	if err != nil {
+		return nil
+	}
+	return urls
+}
+
+// destinationOwner is the owner to suggest adding to the list: the one owner
+// every destination shares, or "" when there is none.
+func destinationOwner(ctx context.Context, ps pushSettings) string {
+	var shared string
+	for i, url := range checkpointDestinationURLs(ctx, ps) {
+		owner := usersettings.NormalizeOwner(url)
+		if owner == "" || (i > 0 && owner != shared) {
+			return ""
+		}
+		shared = owner
+	}
+	return shared
 }
 
 // heldForGlobalEnableConsent is the explicit pushes' form of the gate: they
@@ -80,8 +139,13 @@ func heldForGlobalEnableConsent(ctx context.Context, ps pushSettings) error {
 // never fails the user's push. It records on ps that it asked, so the
 // first-push policy question does not follow it on the same push.
 func globalEnablePushAllowed(ctx context.Context, ps *pushSettings, fromGitHook bool) bool {
-	if globalEnablePushConsent(ctx, *ps) != GlobalEnableConsentHeld {
+	switch globalEnablePushConsent(ctx, *ps) {
+	case GlobalEnableConsentOwnerListed:
+		ps.ownerListed = true
 		return true
+	case GlobalEnableConsentNotNeeded, GlobalEnableConsentAgreed:
+		return true
+	case GlobalEnableConsentHeld:
 	}
 	waiting, err := CountUnpushedCheckpoints(ctx, ps.remote)
 	if err != nil || waiting == 0 {
@@ -96,9 +160,13 @@ func globalEnablePushAllowed(ctx context.Context, ps *pushSettings, fromGitHook 
 			return true
 		}
 	}
+	remedy := "Run `git push` in a terminal and answer yes to push them"
+	if owner := destinationOwner(ctx, *ps); owner != "" {
+		remedy += ", or push every repository of " + owner + " with `entire enable --global --owner " + owner + "`"
+	}
 	fmt.Fprintf(stderrWriter,
-		"[entire] Entire is holding %s for %s: this repository is on only through global enable. Run `git push` in a terminal and answer yes to push them.\n",
-		pluralSessionCheckpoints(waiting), globalEnablePushDestination(*ps))
+		"[entire] Entire is holding %s for %s: this repository is on only through global enable. %s.\n",
+		pluralSessionCheckpoints(waiting), globalEnablePushDestination(*ps), tuiutil.SanitizeDisplayText(remedy))
 	return false
 }
 
