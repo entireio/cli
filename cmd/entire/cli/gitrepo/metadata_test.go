@@ -165,6 +165,50 @@ func TestResolveWorktreeMetadata_RealGitLayouts(t *testing.T) {
 		require.Equal(t, filepath.Join(alias, gitDir), metadata.CommonDir)
 	})
 
+	t.Run("unregistered commondir checkout", func(t *testing.T) {
+		t.Parallel()
+		mainRoot, checkout := unregisteredCommonDirCheckout(t)
+		require.NoDirExists(t, filepath.Join(mainRoot, gitDir, "worktrees"))
+
+		metadata := assertMetadataMatchesGit(t, checkout, "")
+		require.Equal(t, filepath.Join(checkout, gitDir), metadata.GitDir)
+		requireSameDirectory(t, filepath.Join(mainRoot, gitDir), metadata.CommonDir)
+		requireOpensAtMainHead(t, mainRoot, checkout)
+	})
+
+	t.Run("unregistered commondir checkout beside registered worktrees", func(t *testing.T) {
+		t.Parallel()
+		mainRoot, checkout := unregisteredCommonDirCheckout(t)
+		runMetadataGit(t, mainRoot, "worktree", "add", "-b", "registered", filepath.Join(t.TempDir(), "registered"))
+		require.DirExists(t, filepath.Join(mainRoot, gitDir, "worktrees"))
+
+		assertMetadataMatchesGit(t, checkout, "")
+		requireOpensAtMainHead(t, mainRoot, checkout)
+	})
+
+	t.Run("unregistered commondir checkout with relative commondir", func(t *testing.T) {
+		t.Parallel()
+		mainRoot, checkout := unregisteredCommonDirCheckout(t)
+		writeMetadataFile(t, filepath.Join(checkout, gitDir, "commondir"), "../../main/.git\n")
+
+		metadata := assertMetadataMatchesGit(t, checkout, "")
+		requireSameDirectory(t, filepath.Join(mainRoot, gitDir), metadata.CommonDir)
+		requireOpensAtMainHead(t, mainRoot, checkout)
+	})
+
+	t.Run("gitdir file to an unregistered commondir Git directory", func(t *testing.T) {
+		t.Parallel()
+		mainRoot, checkout := unregisteredCommonDirCheckout(t)
+		storage := filepath.Join(t.TempDir(), "checkout-git")
+		require.NoError(t, os.Rename(filepath.Join(checkout, gitDir), storage))
+		writeMetadataFile(t, filepath.Join(checkout, gitDir), "gitdir: "+storage+"\n")
+
+		metadata := assertMetadataMatchesGit(t, checkout, "")
+		require.Equal(t, storage, metadata.GitDir)
+		requireSameDirectory(t, filepath.Join(mainRoot, gitDir), metadata.CommonDir)
+		requireOpensAtMainHead(t, mainRoot, checkout)
+	})
+
 	t.Run("symlinked .git directory", func(t *testing.T) {
 		t.Parallel()
 		if runtime.GOOS == windowsOS {
@@ -640,6 +684,33 @@ func conventionalMetadataWorktree(t *testing.T, name string) (string, string) {
 	initMetadataRepo(t, mainRoot)
 	runMetadataGit(t, mainRoot, "worktree", "add", "-b", name, linkedRoot)
 	return mainRoot, linkedRoot
+}
+
+// unregisteredCommonDirCheckout builds a checkout whose .git directory holds
+// its own HEAD and index and shares another repository's objects and refs
+// through commondir, without a <common>/worktrees registration. Container
+// launchers materialize checkouts this way over mounted host metadata.
+func unregisteredCommonDirCheckout(t *testing.T) (string, string) {
+	t.Helper()
+	tmp := t.TempDir()
+	mainRoot := filepath.Join(tmp, "main")
+	checkout := filepath.Join(tmp, "workdir")
+	initMetadataRepo(t, mainRoot)
+	writeMetadataFile(t, filepath.Join(checkout, gitDir, "HEAD"), "ref: refs/heads/main\n")
+	writeMetadataFile(t, filepath.Join(checkout, gitDir, "commondir"), filepath.Join(mainRoot, gitDir)+"\n")
+	runMetadataGit(t, checkout, "read-tree", "-u", "--reset", "HEAD")
+	require.Empty(t, runMetadataGit(t, checkout, "--no-optional-locks", "status", "--porcelain"))
+	return mainRoot, checkout
+}
+
+func requireOpensAtMainHead(t *testing.T, mainRoot, checkout string) {
+	t.Helper()
+	repo, err := OpenPath(checkout)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = repo.Close() })
+	head, err := repo.Head()
+	require.NoError(t, err)
+	require.Equal(t, runMetadataGit(t, mainRoot, "rev-parse", "HEAD"), head.Hash().String())
 }
 
 func metadataSubmoduleWorktrees(t *testing.T) (string, string) {
