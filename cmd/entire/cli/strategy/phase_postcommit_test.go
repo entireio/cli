@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -1432,11 +1433,10 @@ func TestHandleTurnEnd_PartialFailure(t *testing.T) {
 	require.NoError(t, err,
 		"HandleTurnEnd should return nil even with partial failures (best-effort)")
 
-	// TurnCheckpointIDs should be cleared regardless of partial failure
-	assert.Empty(t, state.TurnCheckpointIDs,
-		"TurnCheckpointIDs should be cleared after HandleTurnEnd, even with errors")
-	assert.Nil(t, state.CaptureDegradedAt,
-		"a write that fails while the context is alive is an error, not capture degradation")
+	assert.Equal(t, []string{"ffffffffffff"}, state.TurnCheckpointIDs,
+		"only the checkpoint that failed to write is kept for a repeated Stop")
+	assert.NotNil(t, state.CaptureDegradedAt,
+		"a checkpoint that failed to write keeps its provisional transcript, so capture degraded")
 
 	// Verify the 2 valid checkpoints were finalized with the full transcript
 	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
@@ -1497,6 +1497,7 @@ func TestFinalizeAllTurnCheckpoints_ScannerDegraded(t *testing.T) {
 	require.Equal(t, 1, errCount)
 	require.Equal(t, []string{testTrailerCheckpointID.String()}, state.TurnCheckpointIDs,
 		"TurnCheckpointIDs must survive a degraded finalize so a repeated Stop process can retry")
+	require.NotNil(t, state.CaptureDegradedAt, "a skipped finalize leaves the checkpoint provisional")
 
 	content, err := store.ReadSessionContent(context.Background(), testTrailerCheckpointID, 0)
 	require.NoError(t, err)
@@ -2514,14 +2515,19 @@ func TestWarnStaleEndedSessions_RateLimit(t *testing.T) {
 	t.Chdir(dir)
 	ctx := context.Background()
 
-	// First call: no sentinel file → should write to stderr
 	var buf bytes.Buffer
-	warnStaleEndedSessionsTo(ctx, 5, &buf)
+	seen := func(line string) bool {
+		buf.WriteString(line)
+		return true
+	}
+
+	// First call: no sentinel file → the warning is shown
+	warnStaleEndedSessionsTo(ctx, 5, seen)
 	assert.Contains(t, buf.String(), "entire doctor")
 
 	// Sentinel file now exists with current mtime → second call suppressed
 	buf.Reset()
-	warnStaleEndedSessionsTo(ctx, 5, &buf)
+	warnStaleEndedSessionsTo(ctx, 5, seen)
 	assert.Empty(t, buf.String(), "second call within window must be suppressed")
 
 	// Backdate sentinel file by 25h → call should warn again
@@ -2532,7 +2538,26 @@ func TestWarnStaleEndedSessions_RateLimit(t *testing.T) {
 	require.NoError(t, os.Chtimes(warnFile, past, past))
 
 	buf.Reset()
-	warnStaleEndedSessionsTo(ctx, 5, &buf)
+	warnStaleEndedSessionsTo(ctx, 5, seen)
+	assert.Contains(t, buf.String(), "entire doctor")
+}
+
+// A warning nobody saw (an agent's commit, where git discards hook output)
+// must not start the 24h window, or it silences the warning for the person
+// who commits next.
+// Uses t.Chdir — do NOT add t.Parallel().
+func TestWarnStaleEndedSessions_UnseenWarningDoesNotStartTheWindow(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	ctx := context.Background()
+
+	warnStaleEndedSessionsTo(ctx, 5, func(string) bool { return false })
+
+	var buf bytes.Buffer
+	warnStaleEndedSessionsTo(ctx, 5, func(line string) bool {
+		buf.WriteString(line)
+		return true
+	})
 	assert.Contains(t, buf.String(), "entire doctor")
 }
 
@@ -2713,4 +2738,23 @@ func TestPostCommit_BeforeCondenseSeesTheCondensedSessions(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, s.PostCommit(context.Background()))
 	require.Len(t, seen, 1, "a commit without a trailer condenses nothing, so the hook must not run")
+}
+
+// Every session that owns a refused checkpoint fails on it in the same commit;
+// the person needs the notice once per commit, not once per session.
+// Swaps stderrWriter — do NOT add t.Parallel().
+func TestNoticeLegacyDiverged_OncePerCommit(t *testing.T) {
+	var buf bytes.Buffer
+	oldWriter := stderrWriter
+	stderrWriter = &buf
+	defer func() { stderrWriter = oldWriter }()
+	cid := id.MustCheckpointID("a1b2c3d4e5f6")
+
+	commit := withLegacyDivergedNotice(context.Background())
+	noticeLegacyDiverged(commit, cid)
+	noticeLegacyDiverged(commit, cid)
+	assert.Equal(t, 1, strings.Count(buf.String(), "[entire] Checkpoint a1b2c3d4e5f6 was not saved."))
+
+	noticeLegacyDiverged(withLegacyDivergedNotice(context.Background()), cid)
+	assert.Equal(t, 2, strings.Count(buf.String(), "[entire] Checkpoint a1b2c3d4e5f6 was not saved."), "the next commit says it again")
 }

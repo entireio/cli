@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -436,6 +437,32 @@ type checkpointSyncInfo struct {
 	IgnoredRemedy string
 }
 
+// dedicatedCheckpointStoreInUse reports whether the status line should name
+// the configured checkpoint_remote, asking the side that line describes: the
+// fetch side when pushing is disabled, PushURL otherwise. done means info is
+// already complete and the caller returns it as is: the read probe failed
+// (ReadSourceUnknown), or pre-push withholds checkpoints (Err).
+func dedicatedCheckpointStoreInUse(ctx context.Context, s *EntireSettings, electedName string, info *checkpointSyncInfo) (dedicated, done bool) {
+	if info.PushDisabled {
+		if !resolveDedicatedReadSource(ctx, s, electedName, info) {
+			return false, false
+		}
+		return !info.ReadSourceUnknown, info.ReadSourceUnknown
+	}
+	_, enabled, err := checkpointremote.PushURL(ctx, electedName)
+	if errors.Is(err, checkpointremote.ErrCheckpointRemoteUnroutable) {
+		// Pre-push withholds checkpoints rather than falling soft to the
+		// elected remote, so naming that remote would misstate where they go.
+		info.Err = err.Error()
+		return false, true
+	}
+	// The push side may fall soft to the elected remote because
+	// resolvePushSettings degrades the same way; the read side may not, which
+	// is why resolveDedicatedReadSource distinguishes error from false and
+	// this path does not need to.
+	return err == nil && enabled, false
+}
+
 // resolveDedicatedReadSource records where checkpoint READS land when the
 // configured checkpoint_remote is what serves them. Used by both paths that
 // name a read source, so the two cannot answer the question differently — the
@@ -541,20 +568,9 @@ func computeCheckpointSyncInfoCounting(ctx context.Context, s *EntireSettings, c
 	// Accepted divergence: a real push to a different named remote may derive
 	// PushURL differently than this elected-remote probe does.
 	if cr := s.GetCheckpointRemote(); cr != nil {
-		dedicated := false
-		if info.PushDisabled {
-			if resolveDedicatedReadSource(ctx, s, elected.Name, &info) {
-				if info.ReadSourceUnknown {
-					return info
-				}
-				dedicated = true
-			}
-		} else if _, enabled, purlErr := checkpointremote.PushURL(ctx, elected.Name); purlErr == nil {
-			// The push side may fall soft to the elected remote because
-			// resolvePushSettings degrades the same way; the read side may
-			// not, which is why the helper above distinguishes error from
-			// false and this branch does not need to.
-			dedicated = enabled
+		dedicated, done := dedicatedCheckpointStoreInUse(ctx, s, elected.Name, &info)
+		if done {
+			return info
 		}
 		if dedicated {
 			info.Remote = cr.Repo
@@ -964,7 +980,7 @@ func writeActiveSessions(ctx context.Context, w io.Writer, sty statusStyles) {
 				fmt.Fprintf(w, "%s %s\n", sty.render(sty.yellow, "!"), sty.render(sty.yellow, warning))
 			}
 			if st.CaptureDegradedAt != nil {
-				warning := fmt.Sprintf("capture degraded %s: a status scan or checkpoint finalize ran out of time (see 'entire doctor logs')",
+				warning := fmt.Sprintf("capture degraded %s: a status scan ran out of time or a checkpoint finalize did not complete (see 'entire doctor logs')",
 					timeAgo(*st.CaptureDegradedAt))
 				fmt.Fprintf(w, "%s %s\n", sty.render(sty.yellow, "!"), sty.render(sty.yellow, warning))
 			}
@@ -1252,8 +1268,8 @@ type sessionBriefJSON struct {
 	Branch       string `json:"branch,omitempty"`
 	Model        string `json:"model,omitempty"`
 	Status       string `json:"status"`
-	// CaptureDegraded reports that a session for this agent last turned with a
-	// capture operation over budget.
+	// CaptureDegraded reports that a session for this agent last turned with
+	// degraded capture (see SessionState.CaptureDegradedAt).
 	CaptureDegraded bool `json:"capture_degraded,omitempty"`
 }
 

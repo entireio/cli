@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/testutil/gitenv"
@@ -28,6 +29,11 @@ func TestMain(m *testing.M) {
 	// developer's real keychain and trigger a macOS unlock prompt. Mirrors the
 	// auth subpackage's TestMain.
 	keyring.MockInit()
+
+	// Trail creation asks origin for its default branch. Test repos point origin
+	// at made-up GitHub URLs, so the real lookup would reach the network; report
+	// "unknown" instead. Tests of remoteDefaultBranch call it directly.
+	trailRemoteDefaultBranch = func(context.Context, string) (string, bool) { return "", false }
 
 	// keyring.MockInit only covers in-process credential access. Several tests
 	// in this package spawn the real entire binary (or a git hook that invokes

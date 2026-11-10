@@ -220,8 +220,9 @@ type State struct {
 	LastInteractionTime *time.Time `json:"last_interaction_time,omitempty"`
 
 	// CaptureDegradedAt records when the session's most recent turn degraded
-	// capture because a bounded capture operation exceeded its budget. Set at
-	// turn end, cleared by the next healthy turn, and surfaced by `entire status`.
+	// capture: a bounded capture operation exceeded its budget, or turn-end
+	// finalize left checkpoints with their provisional transcripts. Set at turn
+	// end, cleared by the next healthy turn, and surfaced by `entire status`.
 	CaptureDegradedAt *time.Time `json:"capture_degraded_at,omitempty"`
 
 	// StepCount is the number of checkpoints/steps created in this session.
@@ -379,6 +380,12 @@ type State struct {
 	// (this total - SubagentTokensBaseline) and floored at 0 by clampSubtract, so
 	// a shrunk snapshot yields 0, never a negative or stale delta.
 	TokenUsage *agent.TokenUsage `json:"token_usage,omitempty"`
+
+	// TokenLedger, when set, is the source of this session's token usage:
+	// TokenUsage is its Total and a checkpoint stores its Pending. Only
+	// sessions this CLI started at a turn start have one; the others keep the
+	// per-turn accounting below until they end.
+	TokenLedger *TokenLedger `json:"token_ledger,omitempty"`
 
 	// CheckpointTokenUsage tracks hook-provided token usage since the last condensation.
 	// This is checkpoint-scoped; TokenUsage remains the session-wide total.

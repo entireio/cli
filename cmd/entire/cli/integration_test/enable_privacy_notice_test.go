@@ -99,22 +99,7 @@ func TestEnable_PrivacyNoticeWhileDedicatedUploadsContinue(t *testing.T) {
 		}
 		env := NewFeatureBranchEnv(t)
 		env.CheckpointStore = backend
-		origin := env.SetupBareRemote()
-		// The dedicated URL is derived from origin's protocol, which a bare
-		// path does not have.
-		testutil.RunGit(t, env.RepoDir, "remote", "set-url", "origin", "file://"+origin)
-		dedicated := t.TempDir()
-		testutil.RunGit(t, dedicated, "init", "--bare")
-		for _, derived := range []string{
-			"https://github.com/" + checkpointRemoteRepoSlug + ".git",
-			"git@github.com:" + checkpointRemoteRepoSlug + ".git",
-		} {
-			testutil.RunGit(t, env.RepoDir, "config", "--add", "url.file://"+dedicated+".insteadOf", derived)
-		}
-		env.setGitConfigBaseline()
-		// The local layer vouches for the store, which a file:// origin cannot.
-		require.NoError(t, os.WriteFile(filepath.Join(env.RepoDir, ".entire", "settings.local.json"),
-			[]byte(`{"strategy_options":{"checkpoint_push_remote":"missing","checkpoint_remote":{"provider":"github","repo":"`+checkpointRemoteRepoSlug+`"}}}`), 0o644))
+		origin, dedicated := setupDedicatedCheckpointStore(t, env, `"checkpoint_push_remote":"missing",`)
 
 		out := env.RunCLI("enable")
 		require.Contains(t, out, "Cannot resolve checkpoint remote selection")
@@ -125,6 +110,107 @@ func TestEnable_PrivacyNoticeWhileDedicatedUploadsContinue(t *testing.T) {
 		require.True(t, env.CheckpointsPresentOnRemote(dedicated), "pushes should still upload to the dedicated store")
 		require.False(t, env.CheckpointsPresentOnRemote(origin))
 	})
+}
+
+// setupDedicatedCheckpointStore points the clone's checkpoint_remote at a local
+// bare and returns origin and that bare. extraOptions is spliced into the
+// local strategy_options, empty or ending in a comma.
+func setupDedicatedCheckpointStore(t *testing.T, env *TestEnv, extraOptions string) (origin, dedicated string) {
+	t.Helper()
+	origin = env.SetupBareRemote()
+	// The dedicated URL is derived from origin's protocol, which a bare
+	// path does not have.
+	testutil.RunGit(t, env.RepoDir, "remote", "set-url", "origin", "file://"+origin)
+	dedicated = t.TempDir()
+	testutil.RunGit(t, dedicated, "init", "--bare")
+	for _, derived := range []string{
+		"https://github.com/" + checkpointRemoteRepoSlug + ".git",
+		"git@github.com:" + checkpointRemoteRepoSlug + ".git",
+	} {
+		testutil.RunGit(t, env.RepoDir, "config", "--add", "url.file://"+dedicated+".insteadOf", derived)
+	}
+	env.setGitConfigBaseline()
+	// The local layer vouches for the store, which a file:// origin cannot.
+	require.NoError(t, os.MkdirAll(filepath.Join(env.RepoDir, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(env.RepoDir, ".entire", "settings.local.json"),
+		[]byte(`{"strategy_options":{`+extraOptions+`"checkpoint_remote":{"provider":"github","repo":"`+checkpointRemoteRepoSlug+`"}}}`), 0o644))
+	return origin, dedicated
+}
+
+// git push uploads nothing while the checkpoint push policy cannot be read,
+// to any destination, so enable must not promise uploads there. It still names
+// the destination, and offers the command that replaces the policy.
+func TestEnable_UnreadablePushPolicyPromisesNoUploads(t *testing.T) {
+	t.Parallel()
+	const (
+		waits  = "git push uploads none of them until the checkpoint push policy can be read: "
+		reason = `checkpoint push policy "stricter" is not one of "automatic", "manual"`
+		notice = "  They contain your agent transcripts. If that repo is public, anyone can read them.\n" +
+			"  Secret redaction is best effort, not bulletproof. Review with `entire checkpoint explain`.\n" +
+			"  To stop uploads: `entire configure --local --skip-push-sessions`\n" +
+			"  To replace the unreadable checkpoint push policy: `entire configure --checkpoint-push-policy <automatic|manual>`\n"
+		privateRepo = "  To use a separate private repo: `entire configure --local --checkpoint-remote github:<owner>/<repo>`\n"
+	)
+	for _, tc := range []struct {
+		name string
+		// setup prepares the remotes; nil leaves the clone without any.
+		setup func(t *testing.T, env *TestEnv)
+		// lead is where the destination line starts, and tail what follows its reason.
+		lead, tail string
+	}{
+		{
+			name:  "origin",
+			setup: func(_ *testing.T, env *TestEnv) { env.SetupBareRemote() },
+			lead:  "Checkpoints go to origin, but " + waits,
+			tail:  notice + privateRepo,
+		},
+		{
+			name: "no remote",
+			lead: "No Git remotes configured. Once you add one, checkpoints go to it, but " + waits,
+			tail: notice + privateRepo,
+		},
+		{
+			name: "dedicated",
+			setup: func(t *testing.T, env *TestEnv) {
+				t.Helper()
+				setupDedicatedCheckpointStore(t, env, "")
+			},
+			lead: "Checkpoints go to the dedicated destination git@github.com:org/checkpoints.git, but " + waits,
+			tail: notice,
+		},
+		{
+			name: "dedicated without a resolved remote",
+			setup: func(t *testing.T, env *TestEnv) {
+				t.Helper()
+				setupDedicatedCheckpointStore(t, env, `"checkpoint_push_remote":"missing",`)
+			},
+			lead: ". Checkpoints go to the dedicated destination, but " + waits,
+			tail: notice,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env := freshRepoEnv(t)
+			// Only the git-refs backend reads the policy.
+			env.CheckpointStore = StoreGitRefs
+			setCheckpointPushPolicy(t, env, "stricter")
+			if tc.setup != nil {
+				tc.setup(t, env)
+			}
+
+			out := env.RunCLI("enable", "--agent", agentClaudeCode, "--telemetry=false")
+
+			require.NotContains(t, out, "will be uploaded")
+			require.NotContains(t, out, "can still proceed")
+			require.NotContains(t, out, "use the dedicated destination")
+			start := strings.LastIndex(out, tc.lead)
+			require.GreaterOrEqual(t, start, 0, "want a line starting %q; got:\n%s", tc.lead, out)
+			rest := out[start:]
+			require.Contains(t, rest, waits)
+			require.Contains(t, rest, reason+"\n"+tc.tail)
+			require.True(t, strings.HasSuffix(out, reason+"\n"+tc.tail), "the notice should end the output; got:\n%s", out)
+		})
+	}
 }
 
 // `entire agent add` shares enable's --agent setup path but has no destination
