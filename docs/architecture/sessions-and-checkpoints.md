@@ -466,10 +466,12 @@ repository B links that commit in B (`strategy/foreign_session.go`).
     anything but a readable `on` is off. `entire configure
     --cross-repo-commits on` sets it, and needs a person at an interactive
     terminal, outside an agent session, so an agent cannot opt its own
-    sessions in; there is no override, and `off` works anywhere. Detection is
-    best-effort: agent sessions are recognised by their environment, which an
-    agent can strip, so the interactive-terminal check is the second signal.
-    It is read again under A's lock at post-commit.
+    sessions in; there is no override flag, and `off` works anywhere.
+    Detection is best-effort: agent sessions are recognised by their
+    environment, which an agent can strip, so the interactive-terminal check
+    (which ignores the test-only `ENTIRE_TEST_TTY` override) is the second
+    signal. Neither is a sandbox: an agent with a shell can write the file
+    itself. It is read again under A's lock at post-commit.
   - **B's checkpoints go to A's owner.** Every push URL of B's checkpoint sync
     remote, and B's `checkpoint_remote` when one is in use, must resolve
     (`gitremote.ResolveRepository`, SSH aliases included) to a repository on

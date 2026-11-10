@@ -3461,8 +3461,9 @@ const crossRepoCommitsFlagUsage = "Link commits that agent sessions started in t
 // shares this clone's transcripts beyond it, so it needs a person at an
 // interactive terminal, outside an agent session: an agent must not opt its own
 // sessions in. Agent detection reads the environment, which an agent can strip,
-// so the terminal check is the second signal; there is no override. Turning it
-// off is allowed anywhere. The refusals name no command an agent could rerun.
+// so the terminal check is the second signal, and it ignores the test-only
+// terminal override. Neither is a sandbox: an agent with a shell can write the
+// opt-in file itself. Turning it off is allowed anywhere. The refusals name no command an agent could rerun.
 func checkCrossRepoCommits(value string) (bool, error) {
 	on, err := settings.ParseCrossRepoCommits(value)
 	if err != nil {
@@ -3474,7 +3475,7 @@ func checkCrossRepoCommits(value string) (bool, error) {
 	if caller := review.DetectAgentSession(); caller != "" {
 		return false, fmt.Errorf("refusing to turn cross-repo commits on from an agent session (%s): it shares this clone's transcripts with other repositories, so a person must choose it", caller)
 	}
-	if !interactive.CanPromptInteractively() {
+	if !interactive.PersonAtTerminal() {
 		return false, errors.New("turning cross-repo commits on needs a person at an interactive terminal: it shares this clone's transcripts with other repositories")
 	}
 	return true, nil

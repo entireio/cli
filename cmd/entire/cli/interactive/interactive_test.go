@@ -167,3 +167,17 @@ func TestShouldStyle_ReadsEnv(t *testing.T) {
 		t.Error("ShouldStyle(os.Stdout) = true with NO_COLOR set; want false")
 	}
 }
+
+// PersonAtTerminal backs gates that grant trust, so inside tests it follows
+// the EnvTestTTY override like CanPromptInteractively; outside tests (not
+// reachable here) it ignores it.
+func TestPersonAtTerminal_FollowsTheTestOverrideUnderTest(t *testing.T) {
+	t.Setenv(EnvTestTTY, "1")
+	if !PersonAtTerminal() {
+		t.Fatal("under test, EnvTestTTY=1 must read as a person at a terminal")
+	}
+	t.Setenv(EnvTestTTY, "0")
+	if PersonAtTerminal() {
+		t.Fatal("under test, EnvTestTTY=0 must read as no terminal")
+	}
+}
