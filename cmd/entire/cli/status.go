@@ -168,7 +168,7 @@ func globalEnablePushes(ctx context.Context, s *EntireSettings) *globalEnablePus
 	out := &globalEnablePushesJSON{Waiting: report.Waiting, Owner: report.Owner}
 	switch report.Consent {
 	case strategy.GlobalEnableConsentHeld:
-		out.State = "held"
+		out.State = globalEnablePushesHeld
 	case strategy.GlobalEnableConsentAgreed:
 		out.State = "agreed"
 	case strategy.GlobalEnableConsentOwnerListed:
@@ -187,7 +187,7 @@ func writeGlobalEnablePushes(ctx context.Context, w io.Writer, s *EntireSettings
 		return
 	}
 	switch pushes.State {
-	case "held":
+	case globalEnablePushesHeld:
 		remedy := "run `git push` in a terminal and answer yes"
 		if pushes.Owner != "" {
 			remedy += ", or `entire enable --global --owner " + pushes.Owner + "`"
@@ -735,7 +735,7 @@ func countUnpushedCheckpointsForStatus(ctx context.Context, remoteName string) i
 // status is the only surface that names either.
 func writeCheckpointSyncLines(ctx context.Context, b *strings.Builder, s *EntireSettings, sty statusStyles) {
 	info := computeCheckpointSyncInfo(ctx, s)
-	if pushes := globalEnablePushes(ctx, s); pushes != nil && pushes.State == "held" {
+	if pushes := globalEnablePushes(ctx, s); pushes != nil && pushes.State == globalEnablePushesHeld {
 		info.HeldForGlobalEnable = true
 	}
 	destination := "\n  Checkpoints sync to: "
@@ -1247,6 +1247,9 @@ func normalizeWorktreePath(path string) string {
 }
 
 // statusJSON is the JSON output for `entire status --json`.
+// globalEnablePushesHeld is the State of a repository whose pushes are held.
+const globalEnablePushesHeld = "held"
+
 // globalEnablePushesJSON is statusJSON.GlobalEnablePushes. State is "held",
 // "agreed" or "owner_listed"; Waiting counts held checkpoints; Owner is the
 // listed owner, or for a held repository the one to add.
