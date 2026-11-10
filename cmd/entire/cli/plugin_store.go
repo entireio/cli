@@ -17,6 +17,7 @@ import (
 	"unicode"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
@@ -385,11 +386,37 @@ type InstallPluginOptions struct {
 // atomic: the new entry is created under a temp name and renamed onto <dest>,
 // so a failed --force never leaves the previous install missing.
 func InstallPluginFromPath(opts InstallPluginOptions) (*InstalledPlugin, error) {
+	release, err := lockPluginTree(context.Background(), true)
+	if err != nil {
+		return nil, err
+	}
 	bare, err := placeManagedEntry(opts)
+	release()
 	if err != nil {
 		return nil, err
 	}
 	return FindInstalledPlugin(bare)
+}
+
+// pluginTreeLockName is the advisory lock, at the top of the managed plugin
+// tree, that serialises every change to it: installs, upgrades and removals.
+const pluginTreeLockName = ".plugins.lock"
+
+// lockPluginTree takes the managed tree's lock and returns its release. The
+// rename-aside rollbacks need it: each install sweeps .old- leftovers from
+// bin/ and pkg/<name>/, and without the lock a concurrent install's sweep
+// could delete the backup another install is about to restore from.
+// Callers hold it across one whole change and must not nest it.
+func lockPluginTree(ctx context.Context, create bool) (func(), error) {
+	root, err := pluginRoot(create)
+	if err != nil {
+		return nil, err
+	}
+	release, err := flock.AcquireContextIn(ctx, root, pluginTreeLockName)
+	if err != nil {
+		return nil, fmt.Errorf("lock plugin directory: %w", err)
+	}
+	return release, nil
 }
 
 // placeManagedEntry is InstallPluginFromPath up to and including the swap of
@@ -682,6 +709,8 @@ func RemoveInstalledPlugin(name string) error {
 			return fmt.Errorf("remove plugin entry %s: %w", p.Path, err)
 		}
 	}
+	// No later install may come to sweep an upgrade's moved-aside entries.
+	sweepOldManagedEntries(root)
 	return nil
 }
 

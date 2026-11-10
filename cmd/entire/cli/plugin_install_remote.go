@@ -217,7 +217,7 @@ func installRepoAtTag(ctx context.Context, repoURL, expectedName, tag string, op
 	if meta != nil {
 		manifest.Requires = meta.Requires
 	}
-	if err := placeStagedBinary(stagingRoot, stagedName, manifest); err != nil {
+	if err := placeStagedBinary(ctx, stagingRoot, stagedName, manifest); err != nil {
 		return nil, err
 	}
 	entry, err := FindInstalledPlugin(name)
@@ -229,8 +229,14 @@ func installRepoAtTag(ctx context.Context, repoURL, expectedName, tag string, op
 
 // placeStagedBinary moves the extracted binary into pkg/<name>/, records
 // manifest (setting its BinarySHA256) and swaps the bin/ entry onto it. It
-// either completes or leaves the previous install in place.
-func placeStagedBinary(stagingRoot *os.Root, stagedName string, manifest *PluginManifest) (retErr error) {
+// either completes or leaves the previous install in place, holding the
+// plugin tree's lock throughout so no concurrent install sweeps its backup.
+func placeStagedBinary(ctx context.Context, stagingRoot *os.Root, stagedName string, manifest *PluginManifest) (retErr error) {
+	release, err := lockPluginTree(ctx, true)
+	if err != nil {
+		return err
+	}
+	defer release()
 	name := manifest.Name
 	binBase := pluginBinaryName(name)
 	pkgDir, err := EnsurePluginPkgDir(name)
@@ -523,6 +529,14 @@ func sweepAsideLeftovers(root *os.Root, dir string, isLeftover func(name string)
 // RemoveManagedPlugin removes a plugin's bin entries and its pkg dir.
 // The dependency guard lives in the command layer so --force can bypass it.
 func RemoveManagedPlugin(name string) error {
+	release, err := lockPluginTree(context.Background(), false)
+	switch {
+	case err == nil:
+		defer release()
+	case !errors.Is(err, os.ErrNotExist):
+		return err
+	}
+	// No plugin tree at all: RemoveInstalledPlugin reports "not installed".
 	if err := RemoveInstalledPlugin(name); err != nil {
 		return err
 	}

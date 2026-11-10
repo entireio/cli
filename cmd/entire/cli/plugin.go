@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
@@ -332,7 +333,7 @@ func runPlugin(ctx context.Context, pluginName, binPath string, args []string) (
 	}
 	cmd.Env = pluginEnv(parentEnv, extras...)
 
-	if err := cmd.Run(); err != nil {
+	if err := runTrackedPlugin(cmd); err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			// A signalled child reports -1, i.e. ExitPluginSignalled: it is
@@ -358,6 +359,45 @@ func runPlugin(ctx context.Context, pluginName, binPath string, args []string) (
 	return 0, nil
 }
 
+// runningPlugins holds the plugin processes this CLI is waiting on, for
+// KillRunningPlugins.
+var runningPlugins = struct {
+	sync.Mutex
+
+	procs map[*os.Process]struct{}
+}{procs: map[*os.Process]struct{}{}}
+
+// runTrackedPlugin is cmd.Run with the process registered for
+// KillRunningPlugins while it runs.
+func runTrackedPlugin(cmd *exec.Cmd) error {
+	if err := cmd.Start(); err != nil {
+		return err //nolint:wrapcheck // runPlugin reports exec's errors as they are
+	}
+	proc := cmd.Process
+	runningPlugins.Lock()
+	runningPlugins.procs[proc] = struct{}{}
+	runningPlugins.Unlock()
+	defer func() {
+		runningPlugins.Lock()
+		delete(runningPlugins.procs, proc)
+		runningPlugins.Unlock()
+	}()
+	return cmd.Wait() //nolint:wrapcheck // runPlugin reports exec's errors as they are
+}
+
+// KillRunningPlugins kills every plugin process this CLI started and is still
+// waiting on. The force-quit path (a second Ctrl-C) calls it before exiting:
+// exec's own kill after the cancel grace period dies with this process, and
+// Windows does not end a child when its parent exits, so a plugin ignoring
+// Ctrl-C would otherwise keep running on the console.
+func KillRunningPlugins() {
+	runningPlugins.Lock()
+	defer runningPlugins.Unlock()
+	for proc := range runningPlugins.procs {
+		_ = proc.Kill() //nolint:errcheck // best effort; it may have just exited
+	}
+}
+
 // pluginCancelGOOS selects configurePluginCancel's platform behaviour; a seam
 // so the Windows behaviour is exercised by real child processes everywhere.
 var pluginCancelGOOS = runtime.GOOS
@@ -366,23 +406,30 @@ var pluginCancelGOOS = runtime.GOOS
 // SIGINT before exec kills it, on platforms where we can send SIGINT.
 const pluginCancelGrace = 5 * time.Second
 
+// pluginWindowsCancelGrace is how long a plugin may wind down on Windows after
+// the Ctrl-C the console delivered to it, before exec kills it. Longer than
+// pluginCancelGrace because the plugin's own wind-down is under way, not
+// merely signalled (entire-stream allows itself 5s), and cutting it off loses
+// its last records. A var so tests can shorten it.
+var pluginWindowsCancelGrace = 30 * time.Second
+
 // configurePluginCancel decides what cancelling the root context (our signal
 // handler, on the first Ctrl-C or SIGTERM) does to a running plugin.
 //
 // Unix: send SIGINT, then kill after pluginCancelGrace.
 //
-// Windows: nothing. os.Process.Signal supports only Kill there, so sending
-// os.Interrupt fails ("not supported by windows") and exec reports that
-// failure instead of the plugin's exit. It is also unnecessary: the context
-// is only ever cancelled by os.Interrupt (Ctrl-C/Ctrl-Break), which the
-// console has already delivered to the plugin, a member of the same console.
-// And no kill after a grace period: it would cut off a plugin's own wind-down
-// (entire-stream flushes its last records and closes the session), and a
-// second Ctrl-C already reaches both processes and force-quits the CLI.
+// Windows: send nothing, then kill after pluginWindowsCancelGrace.
+// os.Process.Signal supports only Kill there, so sending os.Interrupt fails
+// ("not supported by windows") and exec reports that failure instead of the
+// plugin's exit. It is also unnecessary: the context is only ever cancelled by
+// os.Interrupt (Ctrl-C/Ctrl-Break), which the console has already delivered
+// to the plugin, a member of the same console. The kill is still needed: a
+// plugin that ignores Ctrl-C would otherwise run on after the CLI gave up on
+// it. (A second Ctrl-C force-quits sooner: see KillRunningPlugins.)
 func configurePluginCancel(cmd *exec.Cmd, goos string) {
 	if goos == windowsGOOS {
 		cmd.Cancel = func() error { return nil }
-		cmd.WaitDelay = 0
+		cmd.WaitDelay = pluginWindowsCancelGrace
 		return
 	}
 	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }

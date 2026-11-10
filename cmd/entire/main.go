@@ -64,6 +64,7 @@ func main() {
 		}
 		cancel()
 		<-sigChan
+		cli.KillRunningPlugins()
 		dieFromSignal(sig)
 	}()
 

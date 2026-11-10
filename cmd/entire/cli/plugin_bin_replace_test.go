@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // errSimulatedAccessDenied stands in for the sharing violation MoveFileEx
@@ -275,5 +276,97 @@ func TestInstallPluginFromRepo_FailedBinSwapLeavesNoManifest(t *testing.T) { //n
 	}
 	if p, err := FindInstalledPlugin("demo"); err != nil || p != nil {
 		t.Errorf("FindInstalledPlugin after failed install = %+v, %v; want none", p, err)
+	}
+}
+
+// `plugin remove` is the last install-tree change a plugin sees, so it must
+// sweep the entries an upgrade moved aside itself; nothing later would.
+func TestRemoveManagedPlugin_SweepsAsideLeftovers(t *testing.T) { //nolint:paralleltest // mutates env
+	withPluginDir(t)
+	if _, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: writePluginSource(t, "old")}); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	binDir, err := PluginBinDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	leftoverPath := filepath.Join(binDir, filepath.Base(oldManagedEntryName(pluginBinaryName("foo"))))
+	writeExecutableScript(t, leftoverPath, "stale")
+
+	if err := RemoveManagedPlugin("foo"); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if _, err := os.Lstat(leftoverPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("leftover %s survived remove: %v", leftoverPath, err)
+	}
+}
+
+// pluginTreeLockHeld reports whether another holder has the plugin tree lock.
+func pluginTreeLockHeld(t *testing.T) bool {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	release, err := lockPluginTree(ctx, false)
+	if err != nil {
+		return true
+	}
+	release()
+	return false
+}
+
+// An install holds the tree lock through the bin/ swap, so a concurrent
+// install's sweep cannot delete the pkg/ backup it would roll back from.
+func TestUpgrade_HoldsPluginTreeLockThroughBinSwap(t *testing.T) { //nolint:paralleltest // mutates env and seams
+	withIsolatedPluginEnv(t)
+	ctx := context.Background()
+	repoURL, _ := newDemoPluginRepo(t, []string{remoteTestTagOld}, "0.1.0", "0.2.0")
+	if _, err := InstallPluginFromRepo(ctx, repoURL, "", RemoteInstallOptions{}); err != nil {
+		t.Fatalf("initial install: %v", err)
+	}
+	gitTag(t, repoURL, remoteTestTagMid)
+
+	heldDuringSwap := false
+	setManagedEntryRenameSeam(t, false, func(root *os.Root, from, to string) error {
+		heldDuringSwap = pluginTreeLockHeld(t)
+		return root.Rename(from, to)
+	})
+	if _, err := UpgradeInstalledPlugin(ctx, "demo"); err != nil {
+		t.Fatalf("upgrade: %v", err)
+	}
+	if !heldDuringSwap {
+		t.Error("plugin tree lock was free during the bin/ swap")
+	}
+	if pluginTreeLockHeld(t) {
+		t.Error("plugin tree lock still held after the upgrade returned")
+	}
+}
+
+// A local install waits for whoever holds the tree lock.
+func TestInstallPluginFromPath_WaitsForPluginTreeLock(t *testing.T) { //nolint:paralleltest // mutates env
+	withPluginDir(t)
+	release, err := lockPluginTree(context.Background(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := writePluginSource(t, "new")
+	done := make(chan error, 1)
+	go func() {
+		_, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: src})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		release()
+		t.Fatalf("install finished (%v) while the tree lock was held", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	release()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("install after release: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("install still blocked after the lock was released")
 	}
 }

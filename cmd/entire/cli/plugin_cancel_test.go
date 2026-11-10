@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -13,6 +14,13 @@ import (
 // startCancelledPlugin runs script as a plugin, cancels the context once the
 // script has created its ready marker, and returns runPlugin's outcome.
 func startCancelledPlugin(t *testing.T, script string) (int, os.Signal) {
+	t.Helper()
+	return startPluginUntilReady(t, script, func(cancel context.CancelFunc) { cancel() })
+}
+
+// startPluginUntilReady runs script as a plugin, calls onReady once the script
+// has created its ready marker (or after 10s), and returns runPlugin's outcome.
+func startPluginUntilReady(t *testing.T, script string, onReady func(cancel context.CancelFunc)) (int, os.Signal) {
 	t.Helper()
 	if runtime.GOOS == windowsGOOS {
 		t.Skip("shell-script plugin harness only runs on Unix")
@@ -33,7 +41,7 @@ func startCancelledPlugin(t *testing.T, script string) (int, os.Signal) {
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
-		cancel()
+		onReady(cancel)
 	}()
 	return runPlugin(ctx, "canceller", bin, nil)
 }
@@ -83,6 +91,43 @@ func TestRunPlugin_WindowsCancelWaitsForPluginToExit(t *testing.T) { //nolint:pa
 	}
 }
 
+// The Windows configuration still kills a plugin that ignores the Ctrl-C,
+// once pluginWindowsCancelGrace has passed: nothing else would end it.
+func TestRunPlugin_WindowsCancelKillsPluginAfterGrace(t *testing.T) { //nolint:paralleltest // mutates env and seams
+	setPluginCancelGOOS(t, windowsGOOS)
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("shell-script plugin harness only runs on Unix")
+	}
+	prev := pluginWindowsCancelGrace
+	pluginWindowsCancelGrace = 200 * time.Millisecond
+	t.Cleanup(func() { pluginWindowsCancelGrace = prev })
+	start := time.Now()
+	code, sig := startCancelledPlugin(t, "trap '' INT\ntouch \"$READY\"\nexec sleep 30\n")
+	if code != ExitPluginSignalled || sig != syscall.SIGKILL {
+		t.Errorf("runPlugin = (%d, %v), want (%d, killed)", code, sig, ExitPluginSignalled)
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Errorf("plugin ran %v after cancel, want it killed after the grace period", elapsed)
+	}
+}
+
+// The force-quit path kills a running plugin outright, cancelled or not.
+func TestKillRunningPlugins_KillsARunningPlugin(t *testing.T) { //nolint:paralleltest // mutates env and seams
+	setPluginCancelGOOS(t, runtime.GOOS)
+	code, sig := startPluginUntilReady(t, "trap '' INT\ntouch \"$READY\"\nexec sleep 30\n", func(context.CancelFunc) {
+		KillRunningPlugins()
+	})
+	if code != ExitPluginSignalled || sig != syscall.SIGKILL {
+		t.Errorf("runPlugin = (%d, %v), want (%d, killed)", code, sig, ExitPluginSignalled)
+	}
+	runningPlugins.Lock()
+	n := len(runningPlugins.procs)
+	runningPlugins.Unlock()
+	if n != 0 {
+		t.Errorf("%d plugin processes still tracked after runPlugin returned", n)
+	}
+}
+
 func TestConfigurePluginCancel_Windows(t *testing.T) {
 	t.Parallel()
 	cmd := exec.CommandContext(context.Background(), "unused")
@@ -90,8 +135,8 @@ func TestConfigurePluginCancel_Windows(t *testing.T) {
 	if err := cmd.Cancel(); err != nil {
 		t.Errorf("Windows Cancel = %v, want nil (Ctrl-C already reached the plugin)", err)
 	}
-	if cmd.WaitDelay != 0 {
-		t.Errorf("Windows WaitDelay = %v, want 0 (never kill a winding-down plugin)", cmd.WaitDelay)
+	if cmd.WaitDelay != pluginWindowsCancelGrace {
+		t.Errorf("Windows WaitDelay = %v, want %v", cmd.WaitDelay, pluginWindowsCancelGrace)
 	}
 
 	cmd = exec.CommandContext(context.Background(), "unused")
