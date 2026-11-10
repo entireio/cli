@@ -817,7 +817,7 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 			return fmt.Errorf("open checkpoint store: %w", openErr)
 		}
 		lookup.store = reopened.Persistent
-		content, err = checkpoint.ReadLatestSessionContent(ctx, lookup.store, fullCheckpointID, summary)
+		content, err = checkpoint.ReadLatestSessionContent(ctx, transcriptOptionalReader{lookup.store}, fullCheckpointID, summary)
 		if err != nil {
 			stopLoad(false)
 			return fmt.Errorf("failed to reload checkpoint %s: %w", fullCheckpointID, err)
@@ -877,11 +877,31 @@ func loadCheckpointForExplain(ctx context.Context, lookup *explainCheckpointLook
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to read checkpoint %s: %w", cpID, err)
 	}
-	content, contentErr := checkpoint.ReadLatestSessionContent(ctx, store, cpID, summary)
+	content, contentErr := checkpoint.ReadLatestSessionContent(ctx, transcriptOptionalReader{store}, cpID, summary)
 	if contentErr != nil {
 		return nil, nil, fmt.Errorf("failed to read checkpoint content for %s: %w", cpID, contentErr)
 	}
 	return summary, content, nil
+}
+
+// transcriptOptionalReader reads a session for explain even when its
+// checkpoint holds no transcript. Such a checkpoint is written on purpose when
+// the transcript could not be read at commit (a files/prompt-only checkpoint),
+// and still records the session's metadata and prompts, which explain shows.
+type transcriptOptionalReader struct {
+	checkpoint.SessionReader
+}
+
+func (r transcriptOptionalReader) ReadSessionContent(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (*checkpoint.SessionContent, error) {
+	content, err := r.SessionReader.ReadSessionContent(ctx, checkpointID, sessionIndex)
+	if !errors.Is(err, checkpoint.ErrNoTranscript) {
+		return content, err //nolint:wrapcheck // callers wrap with checkpoint context
+	}
+	meta, prompts, metaErr := r.ReadSessionMetadataAndPrompts(ctx, checkpointID, sessionIndex)
+	if metaErr != nil || meta == nil {
+		return nil, err //nolint:wrapcheck // the reader's ErrNoTranscript, as without this fallback
+	}
+	return &checkpoint.SessionContent{Metadata: *meta, Prompts: prompts}, nil
 }
 
 // prefetchCheckpointBlobs navigates to the checkpoint's local subtree(s),

@@ -327,6 +327,81 @@ func readStampedTrailersIn(root *os.Root) []id.CheckpointID {
 	return stamped
 }
 
+// agentStampsFile records, for each trailer the agent-commit fast path
+// stamped (addTrailerForAgentCommit), the one session it stamped it for. That
+// session made the commit by the fast path's own selection, so post-commit
+// writes its checkpoint even without a transcript or recorded files
+// (agentStampedFor). It is a separate file from stampedTrailersFile, so a CLI
+// that predates it reads the stamped IDs unchanged. Consumed with them.
+const agentStampsFile = "entire-agent-stamps.json"
+
+// recordAgentStamp records that the fast path stamped cpID for sessionID.
+// Best-effort: without the record post-commit applies the ordinary gates.
+func recordAgentStamp(ctx context.Context, cpID id.CheckpointID, sessionID string) {
+	root, err := perWorktreeGitRoot(ctx)
+	if err != nil {
+		return
+	}
+	stamps := readAgentStampsIn(root)
+	stamps[cpID] = sessionID
+	data, err := json.Marshal(stamps)
+	if err == nil {
+		err = jsonutil.WriteFileAtomicIn(root, agentStampsFile, data, 0o600)
+	}
+	if err != nil {
+		logging.Debug(logging.WithComponent(ctx, "checkpoint"), "prepare-commit-msg: could not record the agent stamp",
+			slog.String("checkpoint_id", cpID.String()),
+			slog.String("error", err.Error()))
+	}
+}
+
+// takeAgentStamps returns the fast path's stamps since the last post-commit
+// and consumes the record.
+func takeAgentStamps(ctx context.Context) map[id.CheckpointID]string {
+	root, err := perWorktreeGitRoot(ctx)
+	if err != nil {
+		return nil
+	}
+	stamps := readAgentStampsIn(root)
+	_ = osroot.RemoveNoSymlinks(root, agentStampsFile) //nolint:errcheck // absent when the fast path stamped nothing
+	return stamps
+}
+
+func readAgentStampsIn(root *os.Root) map[id.CheckpointID]string {
+	stamps := map[id.CheckpointID]string{}
+	data, err := osroot.ReadFileNoFollow(root, agentStampsFile)
+	if err != nil {
+		return stamps
+	}
+	if json.Unmarshal(data, &stamps) != nil {
+		return map[id.CheckpointID]string{}
+	}
+	return stamps
+}
+
+type agentStampKey struct{}
+
+type agentStamp struct {
+	checkpointID id.CheckpointID
+	sessionID    string
+}
+
+// withAgentStamp marks a post-commit whose condensation target the fast path
+// stamped for sessionID.
+func withAgentStamp(ctx context.Context, cpID id.CheckpointID, sessionID string) context.Context {
+	return context.WithValue(ctx, agentStampKey{}, agentStamp{checkpointID: cpID, sessionID: sessionID})
+}
+
+// agentStampedFor reports whether the fast path stamped checkpointID for
+// sessionID in this commit. That session made the commit, so condensation
+// writes its checkpoint even when its transcript cannot be read and it
+// recorded no files: the trailer is already in the commit, and skipping or
+// failing would leave it naming a checkpoint that never exists.
+func agentStampedFor(ctx context.Context, checkpointID id.CheckpointID, sessionID string) bool {
+	stamp, ok := ctx.Value(agentStampKey{}).(agentStamp)
+	return ok && sessionID != "" && stamp.checkpointID == checkpointID && stamp.sessionID == sessionID
+}
+
 func checkpointSet(ids []id.CheckpointID) map[id.CheckpointID]bool {
 	set := make(map[id.CheckpointID]bool, len(ids))
 	for _, cpID := range ids {

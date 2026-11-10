@@ -780,7 +780,11 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	if storedRoot == nil {
 		storedRoot = storedSessionRootOrNil(ctx, state)
 	}
-	sessionData, extractErr := s.extractSessionDataFrom(ctx, ag, state, storedRoot)
+	// The session the agent-commit fast path stamped this trailer for made the
+	// commit: its checkpoint is written even without a transcript or recorded
+	// files, since the trailer already names it (agentStampedFor).
+	stampedFor := agentStampedFor(ctx, checkpointID, state.SessionID)
+	sessionData, extractErr := s.extractSessionDataFrom(ctx, ag, state, storedRoot, stampedFor)
 	if extractErr != nil {
 		extractSessionDataSpan.RecordError(extractErr)
 		extractSessionDataSpan.End()
@@ -801,11 +805,13 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		}
 	}
 
-	if skipped := skipIfNothingToCondense(logCtx, sessionData, state, checkpointID); skipped != nil {
-		return skipped, nil
+	if !stampedFor {
+		if skipped := skipIfNothingToCondense(logCtx, sessionData, state, checkpointID); skipped != nil {
+			return skipped, nil
+		}
 	}
 
-	filterFilesTouched(sessionData, committedFiles, state)
+	filterFilesTouched(sessionData, committedFiles, state, stampedFor)
 
 	// sessionData.Transcript is left as the raw transcript; only the sanitized,
 	// externalized, redacted copy is stored.
@@ -1098,7 +1104,7 @@ func redactSessionTranscript(
 // were registered at SessionStart but never produced anything (e.g. ephemeral
 // Codex sessions whose hooks fired with a null transcript_path and never
 // reached SaveStep) inherit another session's committed files.
-func filterFilesTouched(sessionData *ExtractedSessionData, committedFiles map[string]struct{}, state *SessionState) {
+func filterFilesTouched(sessionData *ExtractedSessionData, committedFiles map[string]struct{}, state *SessionState, stampedFor bool) {
 	if len(committedFiles) == 0 {
 		return
 	}
@@ -1118,7 +1124,7 @@ func filterFilesTouched(sessionData *ExtractedSessionData, committedFiles map[st
 			return
 		}
 	}
-	if !sessionHasEvidenceOfWork(sessionData, state) {
+	if !stampedFor && !sessionHasEvidenceOfWork(sessionData, state) {
 		return
 	}
 	sessionData.FilesTouched = committedFilesExcludingMetadata(committedFiles)
@@ -1556,16 +1562,22 @@ func condensationTranscript(ctx context.Context, ag agent.Agent, state *SessionS
 //     missing transcript will not appear: degrade likewise. Erroring here made
 //     the zombie sweep retry such a session at every session start until it
 //     aged out.
-//   - Anything else is a transient race (the file exists but the write has not
-//     landed): error, so the failed condensation leaves session state
-//     untouched and the next commit re-condenses with the populated transcript.
+//   - Anything else is treated as a transient race (the file exists but the
+//     write has not landed): error, leaving session state untouched for the
+//     next commit. That commit gets a new checkpoint ID, so this applies only
+//     where no trailer depends on the write (see extractSessionDataFrom).
 func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, ag agent.Agent, state *SessionState) (*ExtractedSessionData, error) {
-	return s.extractSessionDataFrom(ctx, ag, state, storedSessionRootOrNil(ctx, state))
+	return s.extractSessionDataFrom(ctx, ag, state, storedSessionRootOrNil(ctx, state), false)
 }
 
 // extractSessionDataFrom is extractSessionData with the stored-copy root
-// already resolved (see condensationTranscript).
-func (s *ManualCommitStrategy) extractSessionDataFrom(ctx context.Context, ag agent.Agent, state *SessionState, storedRoot *os.Root) (*ExtractedSessionData, error) {
+// already resolved (see condensationTranscript). stampedFor marks the session
+// the agent-commit fast path stamped the trailer for (agentStampedFor): a
+// missing transcript then degrades like the cases above, since erroring would
+// leave the already-written trailer naming a checkpoint that never exists. A
+// failed condensation does not retry into the same ID: the reservation is
+// taken only after extraction succeeds.
+func (s *ManualCommitStrategy) extractSessionDataFrom(ctx context.Context, ag agent.Agent, state *SessionState, storedRoot *os.Root, stampedFor bool) (*ExtractedSessionData, error) {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	transcript, transcriptPath := condensationTranscript(ctx, ag, state, storedRoot)
 
@@ -1578,7 +1590,7 @@ func (s *ManualCommitStrategy) extractSessionDataFrom(ctx context.Context, ag ag
 				slog.String("agent_type", string(state.AgentType)),
 			)
 			return &ExtractedSessionData{FilesTouched: state.FilesTouched}, nil
-		case lateWriter || state.StepCount > 0 || state.IsEnded():
+		case lateWriter || state.StepCount > 0 || state.IsEnded() || stampedFor:
 			logging.Warn(logCtx, "transcript unavailable at condensation, degrading to files/prompt-only checkpoint",
 				slog.String("session_id", state.SessionID),
 				slog.Int("step_count", state.StepCount))

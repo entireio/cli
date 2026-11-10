@@ -1508,6 +1508,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 
 	// Condense into the trailer prepare stamped, never into an inherited one.
 	ids, stamped, redone, moved := linkedTrailersOf(ctx, commit)
+	agentStamps := takeAgentStamps(ctx)
 	checkpointID, targetPreexisting, found := s.condensationTarget(ctx, repo, ids, stamped)
 	openRepoSpan.End()
 
@@ -1525,6 +1526,9 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	}
 	if slices.Contains(moved, checkpointID) {
 		ctx = withRecordedCommitLink(ctx, head.Hash().String())
+	}
+	if sessionID := agentStamps[checkpointID]; sessionID != "" && stamped[checkpointID] {
+		ctx = withAgentStamp(ctx, checkpointID, sessionID)
 	}
 
 	_, findSessionsSpan := perf.Start(ctx, "find_sessions_for_worktree")
@@ -3040,9 +3044,9 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 // writes its transcript file only AFTER the Stop hook, so mid-turn the
 // recorded path routinely points at a missing or still-empty file; only an
 // on-disk stat tells the truth. Other agents keep the cheap path-only check:
-// for them an empty transcript file at commit time is a transient write race,
-// and condensation errors-and-retries rather than skipping, so the trailer
-// heals on the next commit.
+// a transcript that turns out empty or unreadable at condensation does not
+// leave the trailer dangling, because the session the fast path stamped for
+// condenses without one (agentStampedFor).
 //
 // NOTE: conservative approximation of the skip gate in CondenseSession (which
 // checks extracted data, not raw state). Keep aligned.
@@ -3127,6 +3131,7 @@ func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, 
 	if !recordStampedTrailer(logCtx, cpID) {
 		return nil
 	}
+	recordAgentStamp(logCtx, cpID, state.SessionID)
 
 	logging.Info(logCtx, "prepare-commit-msg: agent commit trailer added",
 		slog.String("strategy", "manual-commit"),
