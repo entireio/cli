@@ -2522,10 +2522,7 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 	}
 	if reservedState.IsSubagentSession() {
 		// Its work condenses with the parent's task record.
-		if err := releaseSubagentSessionWork(ctx, sessionID); err != nil {
-			logging.Warn(logCtx, "eager condense: failed to release subagent session",
-				slog.String("session_id", sessionID), slog.String("error", err.Error()))
-		}
+		releaseSubagentSessionForEagerCondense(ctx, logCtx, sessionID)
 		return nil
 	}
 	// Files waiting for a commit belong to PostCommit; a fully condensed
@@ -2616,6 +2613,16 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 		return fmt.Errorf("failed to save session state: %w", mutErr)
 	}
 	return nil
+}
+
+// releaseSubagentSessionForEagerCondense releases a subagent session's work
+// to its parent in place of eager condensation. Best effort: a failure is
+// logged and retried on a later condensation.
+func releaseSubagentSessionForEagerCondense(ctx, logCtx context.Context, sessionID string) {
+	if err := releaseSubagentSessionWork(ctx, sessionID); err != nil {
+		logging.Warn(logCtx, "eager condense: failed to release subagent session",
+			slog.String("session_id", sessionID), slog.String("error", err.Error()))
+	}
 }
 
 // idleStuckSubagentSession retires a subagent session that doctor condensed

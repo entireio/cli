@@ -274,9 +274,11 @@ func (a *AntigravityAgent) TurnSubagents(parentRef string, fromOffset int) (map[
 	if err != nil {
 		return nil, err
 	}
-	turn := make(map[string]struct{})
-	created := make(map[string]struct{})
-	received := make(map[string]int)
+	scan := turnSubagentScan{
+		turn:     make(map[string]struct{}),
+		created:  make(map[string]struct{}),
+		received: make(map[string]int),
+	}
 	line := 0
 	forEachNonBlankLine(data, 0, func(raw []byte) {
 		line++
@@ -284,42 +286,56 @@ func (a *AntigravityAgent) TurnSubagents(parentRef string, fromOffset int) (map[
 		if json.Unmarshal(raw, &step) != nil {
 			return
 		}
-		inTurn := line > fromOffset
-		switch step.Type {
-		case agyStepTypeSystemMessage:
-			if m := agySenderRe.FindStringSubmatch(step.Content); m != nil {
-				received[m[1]]++
-				if inTurn {
-					turn[m[1]] = struct{}{}
-				}
-			}
-		case agyStepTypeGeneric:
-			if id := createdSubagentID(step.Content); id != "" {
-				created[id] = struct{}{}
-				if inTurn {
-					turn[id] = struct{}{}
-				}
-			}
-		case agyStepTypePlannerResponse:
-			if !inTurn {
-				return
-			}
-			for _, call := range step.ToolCalls {
-				if call.Name == agyToolSendMessage {
-					if id := decodeAgyString(call.Args["Recipient"]); id != "" {
-						turn[id] = struct{}{}
-					}
-				}
-			}
-		}
+		scan.record(step, line > fromOffset)
 	})
-	out := make(map[string]int, len(turn))
-	for id := range turn {
-		if _, ok := created[id]; ok && validation.ValidateAgentSessionID(id) == nil {
-			out[id] = received[id]
+	out := make(map[string]int, len(scan.turn))
+	for id := range scan.turn {
+		if _, ok := scan.created[id]; ok && validation.ValidateAgentSessionID(id) == nil {
+			out[id] = scan.received[id]
 		}
 	}
 	return out, nil
+}
+
+// turnSubagentScan collects, across a parent's steps, the subagent IDs its
+// turn involves, the subagents it created, and the messages heard from each.
+type turnSubagentScan struct {
+	turn     map[string]struct{}
+	created  map[string]struct{}
+	received map[string]int
+}
+
+// record adds one parent step; inTurn reports whether it is past the turn's
+// start offset.
+func (s *turnSubagentScan) record(step agyStep, inTurn bool) {
+	switch step.Type {
+	case agyStepTypeSystemMessage:
+		if m := agySenderRe.FindStringSubmatch(step.Content); m != nil {
+			s.received[m[1]]++
+			if inTurn {
+				s.turn[m[1]] = struct{}{}
+			}
+		}
+	case agyStepTypeGeneric:
+		if id := createdSubagentID(step.Content); id != "" {
+			s.created[id] = struct{}{}
+			if inTurn {
+				s.turn[id] = struct{}{}
+			}
+		}
+	case agyStepTypePlannerResponse:
+		if !inTurn {
+			return
+		}
+		for _, call := range step.ToolCalls {
+			if call.Name != agyToolSendMessage {
+				continue
+			}
+			if id := decodeAgyString(call.Args["Recipient"]); id != "" {
+				s.turn[id] = struct{}{}
+			}
+		}
+	}
 }
 
 // RepliesSent implements agent.SubagentReplyCounter: the subagent's
