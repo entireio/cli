@@ -78,13 +78,26 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 	mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
 		// A step in a worktree other than the session's home records into
 		// that worktree's entry (see enterWorktreeView), never the home's.
-		if leave, inView := enterStepWorktree(ctx, state, worktreeRoot); inView {
+		leave, inView := enterStepWorktree(ctx, state, worktreeRoot)
+		switch {
+		case inView:
 			defer leave()
 			if state.BaseCommit == "" {
 				if head, headErr := repo.Head(); headErr == nil {
 					state.BaseCommit = head.Hash().String()
 				}
 			}
+		case !homedAt(state, worktreeRoot):
+			// Elsewhere, but with no entry of its own: the worktree could not
+			// be marked, or it shares the home's ID (an unregistered checkout
+			// sharing the repository through commondir has the main worktree's
+			// empty ID). Recording it as the home's would claim another tree's
+			// files and move the home's base to that tree's HEAD.
+			logging.Warn(logging.WithComponent(ctx, "checkpoint"), "turn-end step in another worktree has no record of its own; not recorded",
+				slog.String("session_id", sessionID),
+				slog.String("worktree", worktreeRoot),
+				slog.String("home", state.WorktreePath))
+			return ErrMutationSkip
 		}
 		invalidateStaleSubagentSnapshot(&step, state)
 		if err := syncBaseCommitToHead(ctx, repo, state); err != nil {

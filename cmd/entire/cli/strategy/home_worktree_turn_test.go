@@ -196,3 +196,45 @@ func mustEvalSymlinks(t *testing.T, path string) string {
 	require.NoError(t, err)
 	return resolved
 }
+
+// An unregistered checkout sharing the repository through commondir has the
+// main worktree's empty ID, so it cannot hold an OtherWorktrees entry of its
+// own. A guest turn ending there must not be recorded as the home's work.
+func TestGuestTurnEnd_InUnregisteredCheckoutIsNotRecordedAsHome(t *testing.T) {
+	s := &ManualCommitStrategy{}
+	mainDir := setupGitRepo(t)
+	checkout := unregisteredCheckoutOf(t, mainDir)
+	testutil.WriteFile(t, checkout, "checkout-only.txt", "advance the checkout's branch")
+	testutil.GitAdd(t, checkout, "checkout-only.txt")
+	testutil.RunGit(t, checkout, "commit", "-q", "-m", "checkout commit")
+
+	chdirWorktree(t, mainDir)
+	testutil.WriteFile(t, mainDir, "home.go", "package home // written at home")
+	saveStepIn(t, s, "guest-unregistered", []string{"home.go"}, nil)
+	before := mustLoad(t, s, "guest-unregistered")
+
+	chdirWorktree(t, checkout)
+	testutil.WriteFile(t, checkout, "guest.go", "package guest")
+	testutil.WriteFile(t, checkout, "checkout-only.txt", "edited in the checkout")
+	saveStepIn(t, s, "guest-unregistered", []string{"guest.go"}, []string{"checkout-only.txt"})
+
+	after := mustLoad(t, s, "guest-unregistered")
+	assert.Equal(t, []string{"home.go"}, after.FilesTouched, "another checkout's file was recorded as the home's")
+	assert.Equal(t, before.BaseCommit, after.BaseCommit, "the base moved to another checkout's HEAD")
+	assert.Equal(t, before.TouchedFileHashes, after.TouchedFileHashes)
+	assert.True(t, isSessionHomeWorktree(mustEvalSymlinks(t, mainDir), after), "the session left its home: %s", after.WorktreePath)
+}
+
+// unregisteredCheckoutOf materializes a checkout of mainDir's current branch on
+// its own branch whose .git directory shares mainDir's repository through
+// commondir, without a <common>/worktrees registration.
+func unregisteredCheckoutOf(t *testing.T, mainDir string) string {
+	t.Helper()
+	checkout := filepath.Join(t.TempDir(), "workdir")
+	testutil.RunGit(t, mainDir, "branch", "checkout-branch")
+	require.NoError(t, os.MkdirAll(filepath.Join(checkout, ".git"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(checkout, ".git", "HEAD"), []byte("ref: refs/heads/checkout-branch\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(checkout, ".git", "commondir"), []byte(filepath.Join(mainDir, ".git")+"\n"), 0o600))
+	testutil.RunGit(t, checkout, "read-tree", "-u", "--reset", "HEAD")
+	return checkout
+}
