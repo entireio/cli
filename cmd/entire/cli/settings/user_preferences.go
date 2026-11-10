@@ -66,6 +66,12 @@ type UserPreferences struct {
 	// free-form map inside it is a hole in that boundary. Applied into
 	// StrategyOptions so every existing reader is unchanged.
 	CheckpointRemote *CheckpointRemoteConfig `json:"checkpoint_remote,omitempty"`
+
+	// PushCheckpoints is the developer's answer, for a repository on only
+	// through global enable, to whether its session checkpoints may be pushed.
+	// It is consent to push and nothing more: the repository stays on only
+	// through global enable. See RepoPushConsent.
+	PushCheckpoints *bool `json:"push_checkpoints,omitempty"`
 }
 
 // userOverlay is everything the user tier contributes to one settings load.
@@ -122,7 +128,8 @@ func loadUserOverlay(ctx context.Context) userOverlay {
 // own with a reported reason, so the rest of the block still applies. Whether
 // Entire is on would make every repository on the machine read as set up, and
 // a checkpoint_remote would route every repository's transcripts to one store;
-// both are per-repository facts and are read only from `repos`.
+// both are per-repository facts and are read only from `repos`, as is
+// push_checkpoints, which answers for one repository.
 func (o *userOverlay) withoutPerRepoKeys(ctx context.Context, prefs *UserPreferences) *UserPreferences {
 	if prefs == nil {
 		return nil
@@ -136,6 +143,11 @@ func (o *userOverlay) withoutPerRepoKeys(ctx context.Context, prefs *UserPrefere
 		o.reject(ctx, fmt.Sprintf("%s: checkpoint_remote is not read here; set it for one repository under %s",
 			userPreferencesBlock, userReposBlock))
 		prefs.CheckpointRemote = nil
+	}
+	if prefs.PushCheckpoints != nil {
+		o.reject(ctx, fmt.Sprintf("%s: push_checkpoints is not read here; it is set for one repository under %s",
+			userPreferencesBlock, userReposBlock))
+		prefs.PushCheckpoints = nil
 	}
 	return prefs
 }
@@ -413,6 +425,9 @@ func applyUserTier(settings *EntireSettings, overlay userOverlay, repoPrefs []*U
 		if prefs.CheckpointRemote != nil {
 			settings.userCheckpointRemote = prefs.CheckpointRemote
 		}
+		if prefs.PushCheckpoints != nil {
+			settings.repoPushConsent = *prefs.PushCheckpoints
+		}
 	}
 
 	apply(overlay.preferences)
@@ -486,6 +501,13 @@ func UserTierEnablesEverywhere(ctx context.Context) bool {
 // whole clone.
 func (s *EntireSettings) EnabledOnlyByGlobal() bool {
 	return s != nil && s.enabledOnlyByGlobal
+}
+
+// RepoPushConsent reports whether this repository's `repos` entry in the user
+// settings file says `push_checkpoints: true`: the developer agreed that
+// checkpoints captured here only through global enable may be pushed.
+func (s *EntireSettings) RepoPushConsent() bool {
+	return s != nil && s.repoPushConsent
 }
 
 // CommittedKeysIgnoredForGlobalEnable names the keys of the committed
