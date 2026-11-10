@@ -2,6 +2,7 @@ package transcript
 
 import (
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -42,5 +43,24 @@ func TestLineSplitter(t *testing.T) {
 	}
 	if tail := s.flush(); tail != nil {
 		t.Errorf("stopped: flush = %q, want nil (the rest is dropped)", tail)
+	}
+}
+
+// A line longer than lineSplitterKeep that arrived in pieces (a rollout line
+// with an inline image) does not pin its buffer for the reader's lifetime; a
+// short one keeps its buffer for reuse.
+func TestLineSplitterReleasesALongLine(t *testing.T) {
+	t.Parallel()
+	var s lineSplitter
+	long := strings.Repeat("x", 2*lineSplitterKeep)
+	s.feed([]byte(long[:len(long)/2]), func([]byte) bool { return true })
+	s.feed([]byte(long[len(long)/2:]+"\n"), func([]byte) bool { return true })
+	if c := cap(s.pending); c > lineSplitterKeep {
+		t.Fatalf("pending keeps %d bytes after the long line was read", c)
+	}
+	s.feed([]byte("sh"), func([]byte) bool { return true })
+	s.feed([]byte("ort\n"), func([]byte) bool { return true })
+	if c := cap(s.pending); c == 0 {
+		t.Fatal("pending let a short line's buffer go")
 	}
 }

@@ -3,12 +3,18 @@ package transcript
 import "bytes"
 
 // lineSplitter splits a growing transcript into complete lines for the
-// streaming readers (JSONLAdapter, CodexRolloutAdapter,
+// streaming readers (JSONLAdapter, PiAdapter, CodexRolloutAdapter,
 // CodexItemRolloutDecider), holding a trailing partial line until a later
 // chunk completes it, or until flush.
 type lineSplitter struct {
-	pending []byte // bytes after the last newline fed
+	pending []byte // bytes after the last newline fed; see lineSplitterKeep
 }
+
+// lineSplitterKeep is the most capacity feed keeps in pending once a line it
+// held is read: a longer line's buffer (a rollout line carrying an inline
+// image can be several MB) is let go rather than kept for the reader's
+// lifetime.
+const lineSplitterKeep = 1 << 20
 
 // feed calls fn with each line chunk completes, its newline included. The
 // line may alias the splitter's buffer: fn must not keep it. fn returns
@@ -26,7 +32,11 @@ func (s *lineSplitter) feed(chunk []byte, fn func(line []byte) bool) {
 			line = s.pending
 		}
 		more := fn(line)
-		s.pending = s.pending[:0]
+		if cap(s.pending) > lineSplitterKeep {
+			s.pending = nil
+		} else {
+			s.pending = s.pending[:0]
+		}
 		if !more {
 			s.pending = nil
 			return
