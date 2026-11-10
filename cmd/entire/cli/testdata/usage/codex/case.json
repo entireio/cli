@@ -1,0 +1,5 @@
+{
+  "about": "records count once by response_id (a replay keeps its first copy); a repeated running total is no new call; a record after the last running total is added on top",
+  "transcript": "rollout.jsonl",
+  "total": {"input_tokens": 137, "cache_read_tokens": 20, "output_tokens": 16, "api_call_count": 3}
+}

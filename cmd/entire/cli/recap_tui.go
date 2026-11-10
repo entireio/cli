@@ -12,7 +12,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/palette"
 	"github.com/entireio/cli/cmd/entire/cli/recap"
 )
@@ -21,9 +20,8 @@ type recapTUIOptions struct {
 	Range recap.RangeKey
 	View  recap.ViewMode
 	Agent string
-	Repo  string
-	// RepoName is the human owner/repo display name for the scoped repo; Repo is
-	// the ?repo= query value (a repo_id ULID when routed to a cell).
+	// RepoName is the human owner/repo display name for the scoped repo; the
+	// source carries the ?repo= query value (a repo_id ULID).
 	RepoName string
 	Color    bool
 }
@@ -40,8 +38,7 @@ type recapErrMsg struct {
 
 type recapTUIModel struct {
 	ctx      context.Context
-	client   *api.Client
-	repo     string
+	source   recapSource
 	repoName string
 
 	rangeKey recap.RangeKey
@@ -60,15 +57,15 @@ type recapTUIModel struct {
 	ready    bool
 }
 
-func runRecapTUI(ctx context.Context, client *api.Client, opts recapTUIOptions) error {
-	p := tea.NewProgram(newRecapTUIModel(ctx, client, opts))
+func runRecapTUI(ctx context.Context, source recapSource, opts recapTUIOptions) error {
+	p := tea.NewProgram(newRecapTUIModel(ctx, source, opts))
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("recap TUI: %w", err)
 	}
 	return nil
 }
 
-func newRecapTUIModel(ctx context.Context, client *api.Client, opts recapTUIOptions) recapTUIModel {
+func newRecapTUIModel(ctx context.Context, source recapSource, opts recapTUIOptions) recapTUIModel {
 	if opts.Range == "" {
 		opts.Range = recap.RangeDay
 	}
@@ -80,8 +77,7 @@ func newRecapTUIModel(ctx context.Context, client *api.Client, opts recapTUIOpti
 	}
 	return recapTUIModel{
 		ctx:       ctx,
-		client:    client,
-		repo:      opts.Repo,
+		source:    source,
 		repoName:  opts.RepoName,
 		rangeKey:  opts.Range,
 		view:      opts.View,
@@ -102,7 +98,7 @@ func (m recapTUIModel) Init() tea.Cmd {
 func (m recapTUIModel) fetch(requestID int) tea.Cmd {
 	return func() tea.Msg {
 		start, end := m.rangeKey.Bounds(time.Now())
-		resp, err := recap.FetchMeRecap(m.ctx, m.client, start, end, m.repo, 0)
+		resp, err := m.source.fetch(m.ctx, start, end)
 		if err != nil {
 			return recapErrMsg{requestID: requestID, err: err}
 		}
