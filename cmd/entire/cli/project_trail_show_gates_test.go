@@ -302,3 +302,54 @@ func TestProjectTrailShowServedNullGates(t *testing.T) {
 	assert.Empty(t, errOut)
 	assert.Contains(t, out, "  Gates for widget/7:\n    Mergeable: unknown\n")
 }
+
+// Readiness is only recorded behind an approvals gate, so `trail show`
+// reports it for a change with that gate and leaves it out otherwise, where
+// a stored false would wrongly read as a draft.
+func TestReadTrailChangeStateReadinessNeedsApprovalsGate(t *testing.T) {
+	t.Parallel()
+	const withApprovals = `{"mergeable":false,"conflict_status":"clean","checks":{"availability":"available","runs":[]},` +
+		`"gates":[{"gate_key":"approvals","status":"failed","blocking":true,"rationale":"No reviewers have approved this trail"}]}`
+	draft, ready := false, true
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resource := api.TrailResource{ID: "trail", ReadyForReview: &draft, Mergeability: json.RawMessage(withApprovals)}
+		switch r.URL.Path {
+		case "/api/v1/trails/gh/acme/widget/1":
+			resource.Number = 1
+		case "/api/v1/trails/gh/acme/widget/2":
+			resource.Number, resource.ReadyForReview = 2, &ready
+		case "/api/v1/trails/gh/acme/widget/3":
+			resource.Number, resource.Mergeability = 3, json.RawMessage(projectTrailGatesFixture)
+		default:
+			http.Error(w, "unexpected", http.StatusNotFound)
+			return
+		}
+		assert.NoError(t, json.NewEncoder(w).Encode(resource))
+	}))
+	t.Cleanup(srv.Close)
+	access := &trailRepoAccess{Client: api.NewClientWithBaseURL("tok", srv.URL), BasePath: "/api/v1/trails/gh/acme/widget"}
+
+	for number, want := range map[int]*bool{1: &draft, 2: &ready, 3: nil} {
+		state, err := readTrailChangeState(t.Context(), access, number)
+		require.NoError(t, err)
+		require.NotNil(t, state.mergeability, "change %d", number)
+		assert.Equal(t, want, state.readyForReview, "change %d", number)
+	}
+}
+
+func TestProjectTrailShowTextPrintsReadiness(t *testing.T) {
+	t.Parallel()
+	draft, ready := false, true
+	render := func(readiness *bool) string {
+		var out bytes.Buffer
+		changes := []projectTrailChangeJSON{{
+			ChangeSummary:  api.ChangeSummary{ID: "c1", Repository: "widget", Number: 7, Branch: "feature/a", Status: "open"},
+			ReadyForReview: readiness, selector: "widget/7", gatesLoaded: true,
+		}}
+		printProjectTrailDetails(&out, projectTrailTestResource(), changes)
+		return out.String()
+	}
+	require.Contains(t, render(&draft), "  Gates for widget/7:\n    Review:    draft\n    Mergeable: unknown\n")
+	require.Contains(t, render(&ready), "    Review:    ready for review\n")
+	require.NotContains(t, render(nil), "Review:")
+}
