@@ -16,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/pi" // the e2e harness links every other built-in agent
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/e2e/entire"
@@ -96,31 +97,27 @@ func TestTokenLedger_EveryCallCountedOnce(t *testing.T) {
 	})
 }
 
-// pinGitHooks points the repo's git hooks at the binary under test. An agent
-// that runs git through a login shell (Codex) would otherwise reach whatever
-// `entire` the shell profile puts first, and an older build drops the ledger
-// when it saves session state.
+// pinGitHooks reinstalls the repo's git hooks to call the binary under test
+// by absolute path. An agent that runs git through a login shell (Codex)
+// would otherwise reach whatever `entire` the shell profile puts first, and
+// an older build drops the ledger when it saves session state.
 func pinGitHooks(t *testing.T, dir string) {
 	t.Helper()
-	hooks := filepath.Join(dir, ".git", "hooks")
-	entries, err := os.ReadDir(hooks)
-	if err != nil {
-		t.Fatalf("read git hooks: %v", err)
+	cmd := execx.NonInteractive(context.Background(), entire.BinPath(), "configure", "--absolute-git-hook-path")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("pin git hooks: %v\n%s", err, out)
 	}
-	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".sample") {
-			continue
-		}
-		p := filepath.Join(hooks, e.Name())
-		data, err := os.ReadFile(p)
-		if err != nil {
-			t.Fatal(err)
-		}
-		pinned := strings.ReplaceAll(string(data), "command -v entire ", "command -v "+entire.BinPath()+" ")
-		pinned = strings.ReplaceAll(pinned, "then entire hooks", "then "+entire.BinPath()+" hooks")
-		if err := os.WriteFile(p, []byte(pinned), 0o755); err != nil {
-			t.Fatal(err)
-		}
+	bin, err := filepath.EvalSymlinks(entire.BinPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	hook, err := os.ReadFile(filepath.Join(dir, ".git", "hooks", "post-commit"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(hook), bin) {
+		t.Fatalf("post-commit hook does not call %s:\n%s", bin, hook)
 	}
 }
 
