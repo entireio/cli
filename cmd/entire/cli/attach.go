@@ -1065,13 +1065,13 @@ func isRemoteBranchName(name string) bool {
 // rather than to an unrelated remote that happens to hold the commit; the
 // holder is preferred when it is one of them.
 func remoteHoldingCommit(ctx context.Context, target *object.Commit, remotes []string) (holder, pushTo string, err error) {
-	out, err := exec.CommandContext(ctx, "git", "branch", "-r", "--contains", target.Hash.String(), "--format=%(refname)").Output()
+	refs, err := remoteTrackingRefsContaining(ctx, target)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to check which remote branches contain %s: %w", target.Hash.String()[:12], err)
+		return "", "", err
 	}
 	all := attachRemotes(ctx)
 	owners := map[string]bool{}
-	for _, ref := range strings.Fields(string(out)) {
+	for _, ref := range refs {
 		if owner := trackingRefRemote(ref, all); owner != "" {
 			owners[owner] = true
 		}

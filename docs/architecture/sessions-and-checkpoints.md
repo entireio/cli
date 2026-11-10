@@ -939,10 +939,14 @@ chooses a recorded link for the user.
   changes nothing, and names `--link-without-trailer` with its caveats
   (`defaultBranchRefusal`). "On a default branch" means reachable from the tip
   of the branch a remote's HEAD names (`defaultBranchContaining`): the remotes
-  the branch pushes to are asked directly with `ls-remote --symref`, and other
-  remotes (upstream in a fork) are judged from their tracking refs
-  (`<remote>/HEAD`, else `main`, else `master`). If a remote the branch pushes
-  to can't name its default branch, attach refuses rather than guess.
+  the branch pushes to are asked directly with `ls-remote --symref`, with no
+  fallback to their possibly stale tracking refs, and the tip's objects are
+  fetched when they aren't local; other remotes (upstream in a fork) are
+  judged from their tracking refs (`<remote>/HEAD`, else `main`, else
+  `master`). If a remote the branch pushes to can't answer, or another remote
+  holds the commit but names no default branch, attach refuses rather than
+  guess. A default branch name read from a remote is validated before it
+  becomes a fetch refspec.
 
 "Pushed" means a remote-tracking ref of any remote contains the commit, or one
 of the remotes the branch pushes to (its upstream and push remotes, else

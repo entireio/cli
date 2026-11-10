@@ -52,77 +52,83 @@ func defaultBranchUnknownRefusal(target *object.Commit, cause error) error {
 // remote counts, as for remoteHoldingCommit: in a fork, a commit on upstream's
 // default branch is as shared as one on origin's. checked are the remotes the
 // commit's branch pushes to; they are asked directly, since their tracking refs
-// may be stale, and when one of them can't answer the result is an error rather
-// than "none". Other remotes are judged from their tracking refs alone.
+// may be stale, and one that can't answer makes the result an error rather than
+// "none" (no fallback to those tracking refs). Other remotes are judged from
+// their tracking refs alone; one whose tracking refs hold target but name no
+// default branch is an error too.
 func defaultBranchContaining(ctx context.Context, target *object.Commit, checked []string) (string, error) {
+	tracking, err := remoteTrackingRefsContaining(ctx, target)
+	if err != nil {
+		return "", err
+	}
+	all := attachRemotes(ctx)
+	holds := map[string]bool{}
+	for _, ref := range tracking {
+		holds[trackingRefRemote(ref, all)] = true
+	}
 	var unknown []string
-	for _, remote := range attachRemotes(ctx) {
+	for _, remote := range all {
 		ask := slices.Contains(checked, remote)
-		branch, tip, ok := remoteDefaultTip(ctx, remote, ask)
-		if !ok {
-			if ask {
-				unknown = append(unknown, remote)
-			}
-			continue
-		}
-		if tip == "" {
-			// The default branch has no commits yet, so it contains nothing.
-			continue
-		}
-		on, err := reachableFromAny(ctx, target, []string{tip})
-		if err != nil {
-			if ask {
-				unknown = append(unknown, remote)
-			}
-			continue
-		}
-		if on {
+		branch, on, err := onRemoteDefaultBranch(ctx, target, remote, ask)
+		switch {
+		case err != nil && (ask || holds[remote]):
+			unknown = append(unknown, err.Error())
+		case err == nil && on:
 			return remote + "/" + branch, nil
 		}
 	}
 	if len(unknown) > 0 {
-		return "", fmt.Errorf("couldn't read the default branch of %s", strings.Join(unknown, ", "))
+		return "", errors.New(strings.Join(unknown, "; "))
 	}
 	return "", nil
 }
 
-// remoteDefaultTip returns remote's default branch and the commit at its tip,
-// with the tip's objects present locally. ask asks the remote first; its
-// tracking refs are the fallback: origin/HEAD, then a main or master branch.
-// tip is "" for a default branch with no commits. ok is false when the default
-// branch can't be determined.
-func remoteDefaultTip(ctx context.Context, remote string, ask bool) (branch, tip string, ok bool) {
+// onRemoteDefaultBranch reports whether remote's default branch contains
+// target, naming the branch. ask reads the default branch from the remote
+// itself, else from its tracking refs.
+func onRemoteDefaultBranch(ctx context.Context, target *object.Commit, remote string, ask bool) (string, bool, error) {
+	var branch, tip string
+	var err error
 	if ask {
-		if branch, tip, ok = askRemoteDefaultTip(ctx, remote); ok {
-			return branch, tip, true
-		}
+		branch, tip, err = askRemoteDefaultTip(ctx, remote)
+	} else {
+		branch, tip, err = trackedDefaultTip(ctx, remote)
 	}
-	return trackedDefaultTip(ctx, remote)
+	if err != nil {
+		return "", false, err
+	}
+	on, err := reachableFromAny(ctx, target, []string{tip})
+	if err != nil {
+		return "", false, fmt.Errorf("couldn't check %s/%s: %w", remote, branch, err)
+	}
+	return branch, on, nil
 }
 
-// askRemoteDefaultTip reads remote's HEAD with ls-remote --symref, then fetches
-// its tip's objects, writing no ref, when they aren't local.
-func askRemoteDefaultTip(ctx context.Context, remote string) (branch, tip string, ok bool) {
-	lsCtx, cancel := context.WithTimeout(ctx, attachFetchTimeout)
-	defer cancel()
-	out, err := attachGitCommand(lsCtx, "ls-remote", "--symref", "--", remote, remoteHEADRef).Output()
+// askRemoteDefaultTip reads remote's default branch and the commit at its tip
+// with ls-remote --symref, then fetches the tip's objects, writing no ref,
+// when they aren't local. A remote that doesn't answer, or names no default
+// branch with a commit, is an error: its tracking refs may be stale.
+func askRemoteDefaultTip(ctx context.Context, remote string) (branch, tip string, err error) {
+	out, err := lsRemoteSymrefHEAD(ctx, remote, attachFetchTimeout)
 	if err != nil {
-		return "", "", false
+		return "", "", fmt.Errorf("couldn't read the default branch of %s: %w", remote, err)
 	}
-	branch, ok = parseSymrefHEAD(string(out))
-	if !ok {
-		return "", "", false
+	branch, ok := parseSymrefHEAD(out)
+	tip = symrefHEADTip(out)
+	// The name becomes a fetch refspec, so a hostile remote's
+	// "x:refs/heads/main" must not write a local ref.
+	if !ok || tip == "" || !isRemoteBranchName("refs/heads/"+branch) {
+		return "", "", fmt.Errorf("%s names no default branch", remote)
 	}
-	tip = symrefHEADTip(string(out))
-	if tip == "" || commitPresent(ctx, tip) {
-		return branch, tip, true
+	if commitPresent(ctx, tip) {
+		return branch, tip, nil
 	}
 	fetchCtx, cancel := context.WithTimeout(ctx, attachFetchTimeout)
 	defer cancel()
-	if attachGitCommand(fetchCtx, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--refmap=", "--", remote, "refs/heads/"+branch).Run() != nil {
-		return "", "", false
+	if err := attachGitCommand(fetchCtx, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--refmap=", "--", remote, "refs/heads/"+branch).Run(); err != nil {
+		return "", "", fmt.Errorf("couldn't fetch %s/%s: %w", remote, branch, err)
 	}
-	return branch, tip, true
+	return branch, tip, nil
 }
 
 // symrefHEADTip reads the `<sha>\tHEAD` line from ls-remote --symref output.
@@ -138,21 +144,21 @@ func symrefHEADTip(out string) string {
 
 // trackedDefaultTip finds remote's default branch from its tracking refs:
 // refs/remotes/<remote>/HEAD, else a main or master branch.
-func trackedDefaultTip(ctx context.Context, remote string) (branch, tip string, ok bool) {
+func trackedDefaultTip(ctx context.Context, remote string) (branch, tip string, err error) {
 	prefix := "refs/remotes/" + remote + "/"
 	if out, err := exec.CommandContext(ctx, "git", "symbolic-ref", "-q", prefix+remoteHEADRef).Output(); err == nil {
 		if name, found := strings.CutPrefix(strings.TrimSpace(string(out)), prefix); found && name != "" {
 			if sha := attachRevParse(ctx, prefix+name); sha != "" {
-				return name, sha, true
+				return name, sha, nil
 			}
 		}
 	}
 	for _, name := range []string{defaultBaseBranch, masterBaseBranch} {
 		if sha := attachRevParse(ctx, prefix+name); sha != "" {
-			return name, sha, true
+			return name, sha, nil
 		}
 	}
-	return "", "", false
+	return "", "", fmt.Errorf("%s has no known default branch ('git remote set-head %s --auto' records it)", remote, remote)
 }
 
 // attachRevParse resolves ref to a commit hash, or "" when it doesn't exist.
@@ -169,12 +175,30 @@ func commitPresent(ctx context.Context, sha string) bool {
 	return exec.CommandContext(ctx, "git", "cat-file", "-e", sha+"^{commit}").Run() == nil
 }
 
+// remoteTrackingRefsContaining lists the full names of the remote-tracking
+// refs that contain target.
+func remoteTrackingRefsContaining(ctx context.Context, target *object.Commit) ([]string, error) {
+	out, err := exec.CommandContext(ctx, "git", "branch", "-r", "--contains", target.Hash.String(), "--format=%(refname)").Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to check which remote branches contain %s: %w", target.Hash.String()[:12], err)
+	}
+	return strings.Fields(string(out)), nil
+}
+
 // remoteBranchesContaining lists the remote-tracking branches that contain
-// target, for the confirmation before rewriting a pushed commit.
+// target, short names without <remote>/HEAD, for the confirmation before
+// rewriting a pushed commit. A failed query lists none: it only words the
+// confirmation.
 func remoteBranchesContaining(ctx context.Context, target *object.Commit) []string {
-	out, err := exec.CommandContext(ctx, "git", "branch", "-r", "--contains", target.Hash.String(), "--format=%(refname:short)").Output()
+	refs, err := remoteTrackingRefsContaining(ctx, target)
 	if err != nil {
 		return nil
 	}
-	return slices.DeleteFunc(strings.Fields(string(out)), func(ref string) bool { return strings.HasSuffix(ref, "/HEAD") })
+	var branches []string
+	for _, ref := range refs {
+		if short := strings.TrimPrefix(ref, "refs/remotes/"); !strings.HasSuffix(short, "/"+remoteHEADRef) {
+			branches = append(branches, short)
+		}
+	}
+	return branches
 }

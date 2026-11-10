@@ -1134,7 +1134,7 @@ func TestAttachCommit_RefusesToRewriteANonUTF8Commit(t *testing.T) {
 // the confirmation says the rewrite needs a force-push.
 func TestAttachCommit_SeesACommitPushedToAnUntrackedBranch(t *testing.T) {
 	setupAttachTestRepo(t)
-	commitAt(t, "work.txt")
+	pushed := commitAt(t, "work.txt")
 	dir := mustGetwd(t)
 	remote := newBareRemote(t)
 	testutil.RunGit(t, dir, "remote", "add", "origin", remote)
@@ -1148,6 +1148,12 @@ func TestAttachCommit_SeesACommitPushedToAnUntrackedBranch(t *testing.T) {
 	}
 	if !strings.Contains(out, "already pushed (origin)") || !strings.Contains(out, "--force-with-lease") {
 		t.Fatalf("a commit the remote already holds was rewritten without warning of the force-push:\n%s", out)
+	}
+	if got := headCommitOf(t); got.Hash == pushed.Hash || !strings.Contains(got.Message, "Entire-Checkpoint") {
+		t.Fatalf("HEAD was not rewritten with a trailer: %s %q", got.Hash, got.Message)
+	}
+	if got := strings.TrimSpace(testutil.RunGit(t, remote, "rev-parse", "refs/heads/someone-elses-branch")); got != pushed.Hash.String() {
+		t.Errorf("attach changed the remote branch to %s; the force-push is the user's", got)
 	}
 }
 
@@ -1615,5 +1621,78 @@ func TestAttachAgentHelp_SHALinkIsALastResort(t *testing.T) {
 		if !strings.Contains(guidance, want) {
 			t.Errorf("session attach agent guidance should say %q:\n%s", want, guidance)
 		}
+	}
+}
+
+// A remote the branch pushes to that can't be asked is unknown, even when its
+// tracking refs name a default branch: they may predate a merge. Before, a
+// stale origin/main without the commit let attach rewrite it.
+func TestAttachCommit_UnreachablePushRemoteRefusesTheRewrite(t *testing.T) {
+	setupAttachTestRepo(t)
+	pushed, _ := pushFeatureBranch(t)
+	testutil.RunGit(t, mustGetwd(t), "remote", "set-url", "origin", filepath.Join(t.TempDir(), "gone.git"))
+
+	out, err := attachHeadless(t, "attach-unreachable-push-remote", attachOptions{})
+	if err == nil || !strings.Contains(err.Error(), "couldn't tell whether it is on a default branch") {
+		t.Fatalf("err = %v, want a refusal because origin couldn't be asked\n%s", err, out)
+	}
+	if got := headCommitOf(t); got.Hash != pushed.Hash {
+		t.Fatalf("HEAD was rewritten on stale tracking refs: %s", got.Hash)
+	}
+}
+
+// Another remote's default branch is read from its tracking refs. One that
+// holds the commit but names no default branch (no <remote>/HEAD, no main or
+// master) is unknown rather than skipped; with <remote>/HEAD set, its
+// default branch counts like origin's.
+func TestAttachCommit_UpstreamDefaultBranchFromTrackingRefs(t *testing.T) {
+	setupAttachTestRepo(t)
+	pushed, _ := pushFeatureBranch(t)
+	dir := mustGetwd(t)
+	testutil.RunGit(t, dir, "remote", "add", "upstream", filepath.Join(t.TempDir(), "missing.git"))
+	testutil.RunGit(t, dir, "update-ref", "refs/remotes/upstream/develop", "HEAD")
+
+	out, err := attachHeadless(t, "attach-upstream-develop", attachOptions{})
+	if err == nil || !strings.Contains(err.Error(), "upstream has no known default branch") || !strings.Contains(err.Error(), "git remote set-head upstream --auto") {
+		t.Fatalf("err = %v, want a refusal naming upstream's unknown default branch\n%s", err, out)
+	}
+
+	testutil.RunGit(t, dir, "symbolic-ref", "refs/remotes/upstream/HEAD", "refs/remotes/upstream/develop")
+	out, err = attachHeadless(t, "attach-upstream-develop", attachOptions{})
+	if err == nil || !strings.Contains(err.Error(), "upstream/develop, a default branch") {
+		t.Fatalf("err = %v, want a refusal naming upstream/develop\n%s", err, out)
+	}
+	if got := headCommitOf(t); got.Hash != pushed.Hash {
+		t.Fatalf("a commit on upstream's default branch was rewritten: %s", got.Hash)
+	}
+}
+
+// A merge made elsewhere puts a commit on the default branch that this clone
+// doesn't have. The recheck fetches that tip's objects to see the feature
+// commit under it, rather than reading the tip as "not containing".
+func TestAttachCommit_MergeCommitMadeElsewhereIsFetchedForTheRecheck(t *testing.T) {
+	setupAttachTestRepo(t)
+	pushed, remote := pushFeatureBranch(t)
+	const sessionID = "attach-merged-elsewhere"
+	setupClaudeTranscript(t, sessionID, attachCommitTranscript)
+
+	t.Setenv(interactive.EnvTestTTY, "1")
+	old := askAttachConfirmation
+	t.Cleanup(func() { askAttachConfirmation = old })
+	askAttachConfirmation = func() (bool, error) {
+		other := filepath.Join(t.TempDir(), "other")
+		testutil.RunGit(t, t.TempDir(), "clone", "-q", remote, other)
+		testutil.RunGit(t, other, "-c", "user.name=Other", "-c", "user.email=other@example.com", "merge", "-q", "--no-ff", "-m", "merge feature", "origin/feature")
+		testutil.RunGit(t, other, "push", "-q", "origin", "HEAD:main")
+		return true, nil
+	}
+
+	var out bytes.Buffer
+	err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{})
+	if err == nil || !strings.Contains(err.Error(), "reached origin/main while attach was waiting") {
+		t.Fatalf("err = %v, want a refusal because the commit was merged during the prompt\n%s", err, out.String())
+	}
+	if got := headCommitOf(t); got.Hash != pushed.Hash {
+		t.Fatalf("a commit merged during the prompt was rewritten: %s", got.Hash)
 	}
 }
