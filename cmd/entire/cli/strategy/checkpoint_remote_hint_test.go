@@ -8,9 +8,12 @@ import (
 	"testing"
 
 	git "github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
@@ -229,4 +232,81 @@ func TestPrePushSaysNothingWhenThePushCarriesNoCheckpoints(t *testing.T) {
 
 	assert.NotContains(t, out.String(), "checkpoint_remote",
 		"nothing was pushed, so nothing was misdirected")
+}
+
+// withheldStoreRepo is a git-refs clone with one queued checkpoint ref whose
+// locally declared checkpoint_remote has a provider no URL can be built for.
+// Its origin is a bare repository on disk: reachable, so a regressed withhold
+// actually delivers there instead of failing quietly on the network. That path
+// is no URL, so ownership rests on settings.local.json alone, and there is no
+// transport to derive a store URL from either.
+func withheldStoreRepo(t *testing.T) (dir, bare string, refs []plumbing.ReferenceName) {
+	t.Helper()
+	dir, bare, refs = setupRepoWithNCheckpointRefs(t, 1)
+	testutil.RunGit(t, dir, "remote", "add", "origin", bare)
+	entireDir := filepath.Join(dir, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled": true, "checkpoints": {"primary": {"type": "git-refs"}}}`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(entireDir, "settings.local.json"),
+		[]byte(`{"strategy_options": {"checkpoint_remote": {"provider": "entire", "repo": "acme/checkpoints"}}}`), 0o644))
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	// Should the withhold regress into routing to a provider host instead,
+	// refuse every transport but file so the failure stays local.
+	t.Setenv("GIT_ALLOW_PROTOCOL", "file")
+
+	repo, err := gitrepo.OpenPath(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { repo.Close() })
+	enqueueRefs(t, repo, refs)
+	return dir, bare, refs
+}
+
+// TestPrePushWithholdsCheckpointsWhenTheCheckpointRemoteHasNoURL: a
+// checkpoint_remote the developer declared locally, for a provider no URL can
+// be built for, must keep checkpoints local and say so — not deliver them to
+// the code repository's push remote.
+//
+// Not parallel: t.Chdir, t.Setenv.
+func TestPrePushWithholdsCheckpointsWhenTheCheckpointRemoteHasNoURL(t *testing.T) {
+	dir, bare, refs := withheldStoreRepo(t)
+	out := captureHintStderr(t)
+
+	ctx := context.Background()
+	require.NoError(t, NewManualCommitStrategy().PrePush(ctx, "origin"))
+	assertRefsAbsentFromRemote(t, bare, refs, "a withheld store's checkpoints must not reach the push remote")
+	assert.Contains(t, out.String(), "Checkpoints were not pushed and stay local")
+	assert.Contains(t, out.String(), `provider "entire"`)
+
+	ps := resolvePushSettings(ctx, "origin")
+	require.ErrorIs(t, ps.withheld, remote.ErrCheckpointRemoteUnroutable)
+	require.False(t, ps.hasCheckpointURL())
+
+	// Attach confirms delivery against this target; there must be none, or a
+	// stale copy on the push remote would read as delivered.
+	_, _, err := CheckpointPushTarget(ctx, "origin")
+	require.ErrorIs(t, err, remote.ErrCheckpointRemoteUnroutable)
+
+	repo, err := gitrepo.OpenPath(dir)
+	require.NoError(t, err)
+	defer repo.Close()
+	_, _, err = PushQueuedCheckpointRefs(ctx, repo, "origin")
+	require.ErrorIs(t, err, remote.ErrCheckpointRemoteUnroutable)
+
+	_, err = flushCheckpointRefs(ctx, repo, ps, checkpointRefSelection{})
+	require.ErrorIs(t, err, remote.ErrCheckpointRemoteUnroutable)
+	assertRefsAbsentFromRemote(t, bare, refs, "a withheld store's checkpoints must not reach the push remote")
+}
+
+// TestPushCheckpointsWithholdsWhenTheCheckpointRemoteHasNoURL: naming
+// checkpoints bypasses the push policy, not the withhold.
+//
+// Not parallel: t.Chdir, t.Setenv.
+func TestPushCheckpointsWithholdsWhenTheCheckpointRemoteHasNoURL(t *testing.T) {
+	_, bare, refs := withheldStoreRepo(t)
+
+	_, err := PushCheckpoints(context.Background(), []CheckpointPushRequest{{Ref: refs[0]}})
+	require.ErrorIs(t, err, remote.ErrCheckpointRemoteUnroutable)
+	assertRefsAbsentFromRemote(t, bare, refs, "a withheld store's checkpoints must not reach the push remote")
 }

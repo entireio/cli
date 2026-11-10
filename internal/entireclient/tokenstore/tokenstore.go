@@ -30,6 +30,7 @@ import (
 
 	"github.com/zalando/go-keyring"
 
+	"github.com/entireio/cli/internal/entireclient/userconfig"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 	"github.com/entireio/cli/internal/testdirs"
 )
@@ -118,7 +119,7 @@ type backendChoice struct {
 }
 
 // fileBackend selects the file store.
-const fileBackend = "file"
+const fileBackend = userconfig.TokenStoreFile
 
 // chooseBackend is the one backend rule:
 // bad config fails, then the variable wins.
