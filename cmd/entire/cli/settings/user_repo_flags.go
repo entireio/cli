@@ -39,7 +39,8 @@ func setRepoFlag(ctx context.Context, worktreeRoot, field string, value bool) (s
 	if worktreeRoot == "" {
 		return "", errors.New("no repository to configure")
 	}
-	originKeys, _, err := originKeysCached(ctx, worktreeRoot)
+	// Uncached: a write is rare, and the cache is cleared after it anyway.
+	originKeys, _, err := usersettings.OriginKeys(ctx, worktreeRoot)
 	if err != nil {
 		originKeys = nil // unnormalizable or unreadable: key by path, as repoPreferences matches
 	}
@@ -54,11 +55,9 @@ func setRepoFlag(ctx context.Context, worktreeRoot, field string, value bool) (s
 
 	var written string
 	_, err = usersettings.Modify(ctx, func(blocks map[string]json.RawMessage) error {
-		repos := map[string]json.RawMessage{}
-		if raw, ok := blocks[userReposBlock]; ok && !usersettings.IsJSONNull(raw) {
-			if err := json.Unmarshal(raw, &repos); err != nil || repos == nil {
-				return fmt.Errorf("%s is not an object; not changing it", userReposBlock)
-			}
+		repos, err := decodeReposForWrite(blocks[userReposBlock])
+		if err != nil {
+			return err
 		}
 		var matched []string
 		for name := range repos {
@@ -71,18 +70,9 @@ func setRepoFlag(ctx context.Context, worktreeRoot, field string, value bool) (s
 			matched = []string{fallbackKey}
 		}
 		for _, name := range matched {
-			entry := map[string]json.RawMessage{}
-			if raw, ok := repos[name]; ok && !usersettings.IsJSONNull(raw) {
-				if err := json.Unmarshal(raw, &entry); err != nil || entry == nil {
-					return fmt.Errorf("%s[%q] is not an object; not changing it", userReposBlock, name)
-				}
+			if err := setRepoEntryField(repos, name, field, encoded); err != nil {
+				return err
 			}
-			entry[field] = encoded
-			out, err := json.Marshal(entry)
-			if err != nil {
-				return fmt.Errorf("encoding %s[%q]: %w", userReposBlock, name, err)
-			}
-			repos[name] = out
 		}
 		out, err := json.Marshal(repos)
 		if err != nil {
@@ -97,6 +87,37 @@ func setRepoFlag(ctx context.Context, worktreeRoot, field string, value bool) (s
 		return "", err //nolint:wrapcheck // usersettings names the file and the reason
 	}
 	return written, nil
+}
+
+// decodeReposForWrite decodes the `repos` block, absent or null being empty.
+// Entries stay raw, so ones this write does not touch are kept as written.
+func decodeReposForWrite(raw json.RawMessage) (map[string]json.RawMessage, error) {
+	repos := map[string]json.RawMessage{}
+	if raw == nil || usersettings.IsJSONNull(raw) {
+		return repos, nil
+	}
+	if err := json.Unmarshal(raw, &repos); err != nil || repos == nil {
+		return nil, fmt.Errorf("%s is not an object; not changing it", userReposBlock)
+	}
+	return repos, nil
+}
+
+// setRepoEntryField sets field in repos[name], creating the entry and keeping
+// its other keys. An entry that is not an object is refused, not replaced.
+func setRepoEntryField(repos map[string]json.RawMessage, name, field string, value json.RawMessage) error {
+	entry := map[string]json.RawMessage{}
+	if raw, ok := repos[name]; ok && !usersettings.IsJSONNull(raw) {
+		if err := json.Unmarshal(raw, &entry); err != nil || entry == nil {
+			return fmt.Errorf("%s[%q] is not an object; not changing it", userReposBlock, name)
+		}
+	}
+	entry[field] = value
+	out, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("encoding %s[%q]: %w", userReposBlock, name, err)
+	}
+	repos[name] = out
+	return nil
 }
 
 // repoEntryKey is the key a new `repos` entry for this repository gets: its

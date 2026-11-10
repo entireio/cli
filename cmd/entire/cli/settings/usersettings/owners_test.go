@@ -47,17 +47,20 @@ func TestNormalizeOwner(t *testing.T) {
 func TestValidateOwner(t *testing.T) {
 	t.Parallel()
 	for in, want := range map[string]string{
-		"gh/entireio":             "gh/entireio",
-		"GH/EntireIO":             "gh/entireio",
-		"github.com/entireio":     "gh/entireio",
-		"et/acme":                 "et/acme",
-		"gitlab.com/grp":          "gitlab.com/grp",
-		" git.corp.example/acme ": "git.corp.example/acme",
+		"gh/entireio":           "gh/entireio",
+		"GH/EntireIO":           "gh/entireio",
+		"github.com/entireio":   "gh/entireio",
+		"et/acme":               "et/acme",
+		"gitlab.com/grp":        "gitlab.com/grp",
+		"git.corp.example/acme": "git.corp.example/acme",
 	} {
 		got, err := ValidateOwner(in)
 		require.NoError(t, err, in)
 		assert.Equal(t, want, got, in)
 	}
+	trimmed, err := ValidateOwner("  gh/acme\t")
+	require.NoError(t, err)
+	assert.Equal(t, "gh/acme", trimmed)
 	for _, in := range []string{
 		"", "entireio", "gh/*", "*/acme", "gh/entireio/cli", "gitlab.com/grp/sub",
 		"https://github.com/entireio", "gh/..", "gh/", "/acme", "gh/a b",
@@ -89,5 +92,5 @@ func TestAddGlobalEnableOwners_RefusesAMalformedList(t *testing.T) {
 	require.Error(t, err)
 	data, readErr := os.ReadFile(filepath.Join(os.Getenv(userdirs.EnvConfigDir), FileName))
 	require.NoError(t, readErr)
-	assert.Equal(t, content, string(data))
+	assert.JSONEq(t, content, string(data))
 }

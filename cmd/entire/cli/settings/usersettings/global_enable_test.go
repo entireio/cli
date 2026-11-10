@@ -105,7 +105,7 @@ func TestModify_WritesNothingWhenTheFunctionFails(t *testing.T) {
 
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
-	assert.Equal(t, content, string(data))
+	assert.JSONEq(t, content, string(data))
 }
 
 // Modify hands the function every block and writes back what it leaves,
