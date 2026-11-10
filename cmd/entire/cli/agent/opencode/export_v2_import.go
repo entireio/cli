@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/entireio/cli/internal/transcript/opencodev2"
 	"github.com/entireio/cli/redact"
 )
 
@@ -27,7 +28,7 @@ var openCodeBase64 = regexp.MustCompile(`^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{
 var openCodeImportInfoKeys = []string{"id", "projectID", "model", "cost", "tokens", "outcome", "time", "title", "location", "subpath"}
 
 // openCodeV2ImportPayload rebuilds the OpenCode 2 export a stored transcript
-// was converted from (see normalizeOpenCodeExport), for `opencode session
+// was converted from (see opencodev2.Normalize), for `opencode session
 // import`. The transcript must be sessionID's: the import keeps the ID it
 // carries. directory becomes the session's location. Attachments whose data
 // redaction or image externalization changed are dropped, since OpenCode
@@ -50,7 +51,7 @@ func openCodeV2ImportPayload(data []byte, sessionID, directory string) ([]byte, 
 	}
 	messages := make([]any, 0, len(doc.Messages))
 	for _, msg := range doc.Messages {
-		raw, ok := msg.Info[openCodeNativeKey]
+		raw, ok := msg.Info[opencodev2.NativeKey]
 		if !ok {
 			return nil, errNotOpenCode2Capture
 		}
