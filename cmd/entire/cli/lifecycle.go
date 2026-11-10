@@ -2819,7 +2819,12 @@ func markSubagentSession(ctx context.Context, ag agent.Agent, sessionID, transcr
 		return agent.SubagentSessionLink{}, false
 	}
 	logCtx := logging.WithComponent(ctx, "lifecycle")
-	child, _ := strategy.LoadSessionState(ctx, sessionID) //nolint:errcheck // unreadable state resolves from the transcript below
+	// Unreadable state resolves from the transcript below.
+	child, err := strategy.LoadSessionState(ctx, sessionID)
+	if err != nil {
+		logging.Warn(logCtx, "failed to load subagent session state",
+			slog.String("session_id", sessionID), slog.String("error", err.Error()))
+	}
 
 	// Already marked, with its live record on the parent: rebuild the link from
 	// that record instead of re-reading both transcripts on every hook.
@@ -3009,6 +3014,10 @@ func claimSubagentTurnEnd(ctx context.Context, sessionID string) bool {
 		claimed = true
 		return nil
 	})
+	if err != nil && !errors.Is(err, strategy.ErrStateNotFound) {
+		logging.Warn(logging.WithComponent(ctx, "lifecycle"), "failed to claim the subagent turn end",
+			slog.String("session_id", sessionID), slog.String("error", err.Error()))
+	}
 	return err == nil && claimed
 }
 
