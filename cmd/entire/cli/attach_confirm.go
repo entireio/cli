@@ -193,7 +193,7 @@ func pushedRewriteWarning(ctx context.Context, plan attachLinkPlan) []string {
 		where = strings.Join(branches, ", ")
 	}
 	lines := []string{
-		fmt.Sprintf("It is already pushed (%s), though not to a default branch. Afterwards, replace it there with 'git push --force-with-lease'.", where),
+		fmt.Sprintf("It is already pushed (%s), this branch's own copy only. Afterwards, replace it there with 'git push --force-with-lease'.", where),
 		"Anyone who has built on the pushed commits has to rebase onto the rewritten ones.",
 	}
 	return append(lines, fmt.Sprintf("To keep the pushed commit unchanged instead, rerun with --%s; that records a link that a rebase or amend loses.", linkWithoutTrailerFlag))

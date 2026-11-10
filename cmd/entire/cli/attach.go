@@ -63,7 +63,7 @@ type attachOptions struct {
 	// LinkWithoutTrailer records the commit's SHA in the checkpoint instead of
 	// adding the Entire-Checkpoint trailer. A trailer is the stable link, so
 	// this is never chosen for the user: it is the way to link a commit on a
-	// default branch, which attach won't rewrite.
+	// default branch or another shared branch, which attach won't rewrite.
 	LinkWithoutTrailer bool
 	// Force skips the confirmation, after the user has agreed to what attach
 	// printed. Without it and without a terminal, attach changes nothing.
@@ -122,17 +122,19 @@ How the session is linked follows from the commit, the same for HEAD and
     and any commits after it on the current branch (their content is
     unchanged). A trailer is the stable link: it survives a later rebase.
     Merges after the commit, or a rebase or merge in progress, are refused.
-  - If the commit is already pushed to a feature branch, the rewrite replaces
-    it: push the branch again with 'git push --force-with-lease' afterwards.
-  - If the commit is on a remote's default branch, attach won't rewrite it and
-    changes nothing. If a remote can't be reached to tell, attach refuses
+  - If the commit is already pushed, but only to this branch's own remote
+    copy, the rewrite replaces it: push the branch again with
+    'git push --force-with-lease' afterwards.
+  - If the commit is on a remote's default branch, or any other branch holds
+    it too (a teammate's branch, a release branch), attach won't rewrite it
+    and changes nothing. If a remote can't be reached to tell, attach refuses
     rather than risk rewriting a shared commit.
 
 --link-without-trailer records the commit's SHA in a new checkpoint instead,
 leaving the commit unchanged; the checkpoint is pushed right away for a pushed
 commit (under the manual checkpoint push policy it waits for
 'entire checkpoint push'). Use it only when the trailer can't be added, such
-as for a commit on a default branch. A recorded link is weaker than a trailer:
+as for a commit on a default branch or another shared branch. A recorded link is weaker than a trailer:
 it names that exact commit, so a rebase, amend or cherry-pick loses it; the
 commit doesn't point at the checkpoint; and it counts only when the commit's
 author attaches it.
@@ -469,16 +471,12 @@ type attachCheckpoint struct {
 func resolveAttachCheckpoint(ctx, logCtx context.Context, repo *git.Repository, refs cpkg.PersistentRefs, plan attachLinkPlan, sessionID string, opts attachOptions) (attachCheckpoint, error) {
 	checkpointID, isExistingCheckpoint := resolveCheckpointID(ctx, plan)
 	// A pushed commit an earlier attach already linked has no trailer to find
-	// its checkpoint by; its checkpoint names it instead. Join that one, as the
-	// trailer paths do, rather than start a second checkpoint for the commit.
-	// The lookup reads every copy, remote-tracking included, so a fresh clone
-	// joins the commit's checkpoint instead of starting a duplicate.
-	if plan.mode == attachRecordLink && !isExistingCheckpoint {
-		if readStore, openErr := openAttachStore(ctx, repo, refs); openErr == nil {
-			if linkedID, ok := checkpointLinkedTo(ctx, readStore, plan.target); ok {
-				checkpointID, isExistingCheckpoint = linkedID, true
-			}
-		}
+	// its checkpoint by; its checkpoint names it instead, and planning found
+	// it (attachRecordedLinkTo reads every copy, remote-tracking included, so
+	// a fresh clone joins it too). Join that one, as the trailer paths do,
+	// rather than start a second checkpoint for the commit.
+	if plan.mode == attachRecordLink && !plan.linked.IsEmpty() {
+		checkpointID, isExistingCheckpoint = plan.linked, true
 	}
 	cp := attachCheckpoint{id: checkpointID, existing: isExistingCheckpoint}
 	refreshedRepo, err := ensureCheckpointAvailable(ctx, logCtx, repo, refs, checkpointID, isExistingCheckpoint)
@@ -530,7 +528,7 @@ func attachWriteOptions(ctx context.Context, plan attachLinkPlan, checkpointID i
 		SessionTokenUsage: strategy.SessionTokenUsage(existingState),
 	}
 	if plan.mode == attachRecordLink && !isExistingCheckpoint {
-		writeOpts.LinkedCommits = []cpkg.LinkedCommit{{SHA: plan.target.Hash.String(), Repo: attachLinkRepo(ctx, plan.holder)}}
+		writeOpts.LinkedCommits = []cpkg.LinkedCommit{{SHA: plan.target.Hash.String(), Repo: attachLinkRepo(ctx, plan.linkRepo)}}
 	}
 	if opts.Review {
 		writeOpts.Kind = string(session.KindAgentReview)
@@ -639,8 +637,9 @@ func finishAttachLink(ctx context.Context, w, errW io.Writer, plan attachLinkPla
 
 // recheckBeforeRewrite asks the remotes again, directly, right before a
 // trailer rewrite: the prompt can stay open for a while, and meanwhile the
-// commit may have been pushed (when it wasn't) or reached a default branch
-// (when it was on a feature branch), from here or another clone.
+// commit may have been pushed (when it wasn't), or reached a default branch or
+// another branch (when only this branch's copy held it), from here or another
+// clone.
 func recheckBeforeRewrite(ctx context.Context, plan attachLinkPlan) error {
 	if plan.mode != attachAddTrailer {
 		return nil
@@ -653,6 +652,16 @@ func recheckBeforeRewrite(ctx context.Context, plan attachLinkPlan) error {
 			return fmt.Errorf("couldn't check again whether commit %s reached a default branch while attach was waiting, so it won't be rewritten; nothing was changed: %w", target.Hash.String()[:12], err)
 		case branch != "":
 			return fmt.Errorf("commit %s reached %s while attach was waiting, so it won't be rewritten; nothing was changed, run attach again", target.Hash.String()[:12], branch)
+		}
+		// Another branch pushed meanwhile only shows in tracking refs
+		// refreshed now.
+		fetchRemotesForAttach(ctx, plan.checkedRemotes)
+		others, err := otherBranchesHolding(ctx, target, plan.checkedRemotes)
+		switch {
+		case err != nil:
+			return err
+		case len(others) > 0:
+			return fmt.Errorf("commit %s reached %s while attach was waiting, so it won't be rewritten; nothing was changed, run attach again", target.Hash.String()[:12], strings.Join(others, ", "))
 		}
 		return nil
 	}
@@ -706,10 +715,11 @@ const (
 	// its checkpoint; the session joins that checkpoint and history is
 	// unchanged.
 	attachJoinExisting attachLinkMode = iota
-	// attachAddTrailer: the commit is on no remote default branch. The trailer
-	// is added, rewriting the commit and any after it, because a trailer
-	// survives a later rebase, where a recorded link wouldn't. A commit pushed
-	// to a feature branch (holder set) is replaced there by a force-push.
+	// attachAddTrailer: the commit is unpushed, or only this branch's own
+	// pushed copy holds it. The trailer is added, rewriting the commit and any
+	// after it, because a trailer survives a later rebase, where a recorded
+	// link wouldn't. A pushed commit (holder set) is replaced there by a
+	// force-push.
 	attachAddTrailer
 	// attachRecordLink: the user chose --link-without-trailer, or an earlier
 	// attach already recorded a link to this pushed commit. The link is
@@ -721,10 +731,16 @@ const (
 type attachLinkPlan struct {
 	target *object.Commit
 	mode   attachLinkMode
-	// linked is the checkpoint target links to (attachJoinExisting only): its
+	// linked is the checkpoint target links to: for attachJoinExisting its
 	// last-paragraph trailer, resolved once with git config
-	// (strategy.LinkedCheckpoints), or the checkpoint that records it.
+	// (strategy.LinkedCheckpoints), or the checkpoint that records it; for
+	// attachRecordLink the checkpoint an earlier attach recorded the link in,
+	// empty when none did.
 	linked id.CheckpointID
+	// linkRepo is the remote whose repository a recorded link names
+	// (attachRecordLink only): holder, or for an unpushed commit the remote
+	// it will be pushed to.
+	linkRepo string
 	// holder is a remote whose branches hold target, empty when none does (or,
 	// when joining, none could be reached).
 	holder string
@@ -780,7 +796,7 @@ func planAttachLink(ctx context.Context, repo *git.Repository, headCommit *objec
 		return attachLinkPlan{target: target, mode: attachJoinExisting, linked: recorded, remote: pushTo, checkedRemotes: remotes}, nil
 	}
 	if opts.LinkWithoutTrailer {
-		return attachLinkPlan{target: target, mode: attachRecordLink, checkedRemotes: remotes}, nil
+		return attachLinkPlan{target: target, mode: attachRecordLink, linkRepo: attachPushRemote(ctx), checkedRemotes: remotes}, nil
 	}
 	if len(unreachable) > 0 {
 		// Absence from a remote we couldn't reach proves nothing; rewriting a
@@ -797,13 +813,16 @@ func planAttachLink(ctx context.Context, repo *git.Repository, headCommit *objec
 
 // planPushedCommitLink decides how to link a pushed commit with no trailer.
 // plan carries the target and where it was found. A link an earlier attach
-// recorded is joined (resolveAttachCheckpoint finds it), and
+// recorded is joined (plan.linked names its checkpoint), and
 // --link-without-trailer records a new one. Otherwise the trailer is added,
-// as for an unpushed commit, unless the commit is on a remote's default
-// branch: rewriting that is never right, so attach refuses and names the flag.
+// as for an unpushed commit, when only this branch's own pushed copy holds
+// it. On a remote's default branch, or on any other branch, rewriting it isn't
+// this branch's call, so attach refuses and names the flag.
 func planPushedCommitLink(ctx context.Context, repo *git.Repository, target, headCommit *object.Commit, opts attachOptions, plan attachLinkPlan) (attachLinkPlan, error) {
-	if _, ok := attachRecordedLinkTo(ctx, repo, opts, target); ok || opts.LinkWithoutTrailer {
+	if recorded, ok := attachRecordedLinkTo(ctx, repo, opts, target); ok || opts.LinkWithoutTrailer {
 		plan.mode = attachRecordLink
+		plan.linked = recorded
+		plan.linkRepo = plan.holder
 		return plan, nil
 	}
 	branch, err := defaultBranchContaining(ctx, target, plan.checkedRemotes)
@@ -812,6 +831,13 @@ func planPushedCommitLink(ctx context.Context, repo *git.Repository, target, hea
 	}
 	if branch != "" {
 		return attachLinkPlan{}, defaultBranchRefusal(target, branch)
+	}
+	others, err := otherBranchesHolding(ctx, target, plan.checkedRemotes)
+	if err != nil {
+		return attachLinkPlan{}, err
+	}
+	if len(others) > 0 {
+		return attachLinkPlan{}, sharedBranchRefusal(target, others)
 	}
 	chain, err := attachRewriteChain(ctx, repo, target, headCommit)
 	if err != nil {
@@ -904,6 +930,23 @@ func attachRemotesToCheck(ctx context.Context) []string {
 	default:
 		return all
 	}
+}
+
+// attachPushRemote names the remote the current branch pushes to: its push
+// remote (which git resolves through pushRemote, pushDefault and the
+// upstream), else origin, else "" (detached HEAD, or no such remote).
+func attachPushRemote(ctx context.Context) string {
+	all := attachRemotes(ctx)
+	if branch, err := exec.CommandContext(ctx, "git", "symbolic-ref", "-q", "HEAD").Output(); err == nil {
+		out, err := exec.CommandContext(ctx, "git", "for-each-ref", "--format=%(push:remotename)", "--", strings.TrimSpace(string(branch))).Output()
+		if name := strings.TrimSpace(string(out)); err == nil && slices.Contains(all, name) {
+			return name
+		}
+	}
+	if slices.Contains(all, defaultMirrorRemote) {
+		return defaultMirrorRemote
+	}
+	return ""
 }
 
 // attachGitCommand runs git against a remote without credential prompts. SSH

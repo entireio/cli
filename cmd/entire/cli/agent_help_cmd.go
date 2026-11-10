@@ -217,10 +217,10 @@ var agentHelpGuidance = map[string]string{
 		"only when one was missed: `entire session attach <session-id> --commit <sha>`\n" +
 		"(default HEAD). Run it without --force first: it prints what it would do\n" +
 		"(rewrite the commit and any after it to add the trailer; for a commit\n" +
-		"already pushed to a feature branch, the user then force-pushes) and exits\n" +
-		"non-zero without changing anything. Show the user that output and ask\n" +
-		"them; pass --force only after they agree to that exact change, never\n" +
-		"pre-emptively.\n" +
+		"already pushed to this branch's own remote copy, the user then\n" +
+		"force-pushes) and exits non-zero without changing anything. Show the user\n" +
+		"that output and ask them; pass --force only after they agree to that exact\n" +
+		"change, never pre-emptively.\n" +
 		"\n" +
 		"The Entire-Checkpoint trailer is the link to aim for. It lives in the\n" +
 		"commit message, so it travels with the commit: through a rebase, amend or\n" +
@@ -235,10 +235,11 @@ var agentHelpGuidance = map[string]string{
 		"  - can't be verified locally: anyone who can push checkpoints can name any\n" +
 		"    commit, so explain and blame label it unverified;\n" +
 		"  - counts only when the commit's author attaches it.\n" +
-		"Never pass it on your own, and never to avoid a force-push: on a feature\n" +
-		"branch, the trailer plus the user's `git push --force-with-lease` is the\n" +
-		"right outcome. It is meant for a commit already on a default branch, which\n" +
-		"attach refuses to rewrite. When attach refuses that way, show the user the\n" +
+		"Never pass it on your own, and never to avoid a force-push: on the user's\n" +
+		"own feature branch, the trailer plus their `git push --force-with-lease` is\n" +
+		"the right outcome. It is meant for a commit on a default branch or another\n" +
+		"shared branch (a teammate's, a release branch), which attach refuses to\n" +
+		"rewrite. When attach refuses that way, show the user the\n" +
 		"refusal and its caveats, and pass the flag only if they choose it.",
 	"api": "LAST RESORT. Right in two cases: you are developing against Entire's own\n" +
 		"APIs and want a raw response, or no first-class command covers your need.\n" +

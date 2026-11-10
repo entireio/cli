@@ -1130,9 +1130,10 @@ func TestAttachCommit_RefusesToRewriteANonUTF8Commit(t *testing.T) {
 }
 
 // Finding 1: a remote's branch tip is checked directly, so a commit pushed to a
-// branch this clone's fetch refspec doesn't track still reads as pushed, and
-// the confirmation says the rewrite needs a force-push.
-func TestAttachCommit_SeesACommitPushedToAnUntrackedBranch(t *testing.T) {
+// branch this clone's fetch refspec doesn't track still reads as pushed. Attach
+// can't name the branch holding it, so it can't tell whether it is this
+// branch's own copy, and refuses rather than rewrite a shared commit.
+func TestAttachCommit_RefusesACommitPushedToAnUntrackedBranch(t *testing.T) {
 	setupAttachTestRepo(t)
 	pushed := commitAt(t, "work.txt")
 	dir := mustGetwd(t)
@@ -1143,17 +1144,43 @@ func TestAttachCommit_SeesACommitPushedToAnUntrackedBranch(t *testing.T) {
 	testutil.RunGit(t, dir, "push", "-q", remote, "HEAD:refs/heads/someone-elses-branch")
 
 	out, err := attachHeadless(t, "attach-untracked-branch", attachOptions{})
-	if err != nil {
-		t.Fatalf("runAttach: %v\n%s", err, out)
+	if err == nil || !strings.Contains(err.Error(), "couldn't tell which remote branches hold it") || !strings.Contains(err.Error(), "--link-without-trailer") {
+		t.Fatalf("err = %v, want a refusal naming the flag\n%s", err, out)
 	}
-	if !strings.Contains(out, "already pushed (origin)") || !strings.Contains(out, "--force-with-lease") {
-		t.Fatalf("a commit the remote already holds was rewritten without warning of the force-push:\n%s", out)
+	if got := headCommitOf(t); got.Hash != pushed.Hash {
+		t.Fatalf("a commit on a branch attach can't name was rewritten: %s", got.Hash)
 	}
-	if got := headCommitOf(t); got.Hash == pushed.Hash || !strings.Contains(got.Message, "Entire-Checkpoint") {
-		t.Fatalf("HEAD was not rewritten with a trailer: %s %q", got.Hash, got.Message)
+}
+
+// A pushed commit that another branch also holds (a teammate's branch this one
+// was built on, a release branch) is shared: rewriting it would leave their
+// copy without the trailer, so attach refuses and names the branch and the
+// flag, even though no default branch holds it.
+func TestAttachCommit_RefusesACommitAnotherBranchHolds(t *testing.T) {
+	setupAttachTestRepo(t)
+	_, remote := pushFeatureBranch(t)
+	dir := mustGetwd(t)
+	head := headCommitOf(t)
+	testutil.RunGit(t, dir, "push", "-q", "origin", "HEAD:refs/heads/teammate")
+	testutil.RunGit(t, dir, "fetch", "-q", "origin")
+
+	out, err := attachHeadless(t, "attach-shared-branch", attachOptions{})
+	if err == nil {
+		t.Fatalf("attach rewrote a commit another branch holds:\n%s", out)
 	}
-	if got := strings.TrimSpace(testutil.RunGit(t, remote, "rev-parse", "refs/heads/someone-elses-branch")); got != pushed.Hash.String() {
-		t.Errorf("attach changed the remote branch to %s; the force-push is the user's", got)
+	for _, want := range []string{"is also on origin/teammate", "--link-without-trailer", "nothing was changed"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal should mention %q:\n%v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "origin/feature") {
+		t.Errorf("the branch's own pushed copy isn't another branch:\n%v", err)
+	}
+	if got := headCommitOf(t); got.Hash != head.Hash {
+		t.Fatalf("a shared commit was rewritten: %s", got.Hash)
+	}
+	if refs := remoteCheckpointRefs(t, remote); refs != "" {
+		t.Fatalf("a checkpoint was pushed after the refusal:\n%s", refs)
 	}
 }
 
@@ -1534,6 +1561,11 @@ func TestAttachCommit_LinkWithoutTrailerOnAFeatureBranch(t *testing.T) {
 func TestAttachCommit_LinkWithoutTrailerOnAnUnpushedCommit(t *testing.T) {
 	setupAttachTestRepo(t)
 	head := commitAt(t, "work.txt")
+	// The link names the repository the commit will be pushed to. https is
+	// refused locally so the remote check fails fast instead of dialing out.
+	dir := mustGetwd(t)
+	testutil.RunGit(t, dir, "remote", "add", "origin", "https://github.com/acme/widgets.git")
+	testutil.RunGit(t, dir, "config", "protocol.https.allow", "never")
 
 	out, err := attachHeadless(t, "attach-unpushed-no-trailer", attachOptions{LinkWithoutTrailer: true})
 	if err != nil {
@@ -1548,6 +1580,8 @@ func TestAttachCommit_LinkWithoutTrailerOnAnUnpushedCommit(t *testing.T) {
 	}
 	if summary := readSummary(t, state.LastCheckpointID.String()); len(summary.LinkedCommits) != 1 || summary.LinkedCommits[0].SHA != head.Hash.String() {
 		t.Fatalf("LinkedCommits = %v, want [%s]", summary.LinkedCommits, head.Hash)
+	} else if got := summary.LinkedCommits[0].Repo; got != "gh/acme/widgets" {
+		t.Errorf("LinkedCommits[0].Repo = %q, want the push remote's repository", got)
 	}
 	if strings.Contains(out, "Pushed checkpoint metadata") {
 		t.Errorf("nothing should be pushed for an unpushed commit:\n%s", out)
@@ -1606,6 +1640,32 @@ func TestAttachCommit_MergedWhileConfirmationIsOpenIsNotRewritten(t *testing.T) 
 	}
 	if state, loadErr := loadAttachState(t, sessionID); loadErr != nil || state != nil {
 		t.Fatalf("session state was written after the refusal: %+v, %v", state, loadErr)
+	}
+}
+
+// A teammate can push a branch on top of the commit while the prompt is open:
+// the commit is shared from then on and is not rewritten.
+func TestAttachCommit_SharedWhileConfirmationIsOpenIsNotRewritten(t *testing.T) {
+	setupAttachTestRepo(t)
+	pushed, remote := pushFeatureBranch(t)
+	const sessionID = "attach-shared-during-prompt"
+	setupClaudeTranscript(t, sessionID, attachCommitTranscript)
+
+	t.Setenv(interactive.EnvTestTTY, "1")
+	old := askAttachConfirmation
+	t.Cleanup(func() { askAttachConfirmation = old })
+	askAttachConfirmation = func() (bool, error) {
+		pushFromAnotherClone(t, remote, pushed.Hash.String()+":refs/heads/teammate")
+		return true, nil
+	}
+
+	var out bytes.Buffer
+	err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{})
+	if err == nil || !strings.Contains(err.Error(), "reached origin/teammate while attach was waiting") {
+		t.Fatalf("err = %v, want a refusal because another branch took the commit during the prompt\n%s", err, out.String())
+	}
+	if got := headCommitOf(t); got.Hash != pushed.Hash {
+		t.Fatalf("a commit shared during the prompt was rewritten: %s", got.Hash)
 	}
 }
 

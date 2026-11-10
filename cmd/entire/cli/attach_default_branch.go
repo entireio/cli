@@ -40,6 +40,18 @@ func defaultBranchRefusal(target *object.Commit, branch string) error {
 	return errors.New(strings.Join(append(lines, recordedLinkCaveats()...), "\n"))
 }
 
+// sharedBranchRefusal is the error for a pushed commit that branches other
+// than this one's own pushed copy hold: rewriting it would leave theirs
+// without the trailer, and force-pushing them is not this branch's call.
+func sharedBranchRefusal(target *object.Commit, others []string) error {
+	lines := []string{
+		fmt.Sprintf("commit %s is also on %s, not just this branch's own pushed copy, so attach won't rewrite it to add the Entire-Checkpoint trailer; nothing was changed.", describeCommit(target), strings.Join(others, ", ")),
+		"",
+		fmt.Sprintf("To link the session anyway, rerun with --%s. That records the commit's SHA in the checkpoint instead of a trailer in the commit, which is weaker:", linkWithoutTrailerFlag),
+	}
+	return errors.New(strings.Join(append(lines, recordedLinkCaveats()...), "\n"))
+}
+
 // defaultBranchUnknownRefusal is the error when attach can't tell whether a
 // pushed commit is on a default branch: rewriting it might rewrite one.
 func defaultBranchUnknownRefusal(target *object.Commit, cause error) error {
@@ -69,11 +81,15 @@ func defaultBranchContaining(ctx context.Context, target *object.Commit, checked
 	var unknown []string
 	for _, remote := range all {
 		ask := slices.Contains(checked, remote)
+		if !ask && !holds[remote] {
+			// Its tracking refs hold no copy of target, so its tracked
+			// default branch can't contain it either.
+			continue
+		}
 		branch, on, err := onRemoteDefaultBranch(ctx, target, remote, ask)
-		switch {
-		case err != nil && (ask || holds[remote]):
+		if err != nil {
 			unknown = append(unknown, err.Error())
-		case err == nil && on:
+		} else if on {
 			return remote + "/" + branch, nil
 		}
 	}
@@ -81,6 +97,48 @@ func defaultBranchContaining(ctx context.Context, target *object.Commit, checked
 		return "", errors.New(strings.Join(unknown, "; "))
 	}
 	return "", nil
+}
+
+// otherBranchesHolding lists the remote branches holding target other than the
+// current branch's own pushed copies: its upstream, its push branch, and a
+// branch of the same name on a remote it pushes to (checked). A commit only
+// those hold is this branch's to rewrite; any other branch holding it is
+// shared. It is an error when no remote branch is known to hold target, since
+// a remote that holds it then does so on a branch attach can't name.
+func otherBranchesHolding(ctx context.Context, target *object.Commit, checked []string) ([]string, error) {
+	holding := remoteBranchesContaining(ctx, target)
+	if len(holding) == 0 {
+		return nil, fmt.Errorf("commit %s is pushed, but attach couldn't tell which remote branches hold it, so it won't be rewritten; nothing was changed. Rerun with --%s to record a link to it instead of a trailer",
+			target.Hash.String()[:12], linkWithoutTrailerFlag)
+	}
+	own := currentBranchPushedCopies(ctx, checked)
+	var others []string
+	for _, branch := range holding {
+		if !slices.Contains(own, branch) {
+			others = append(others, branch)
+		}
+	}
+	return others, nil
+}
+
+// currentBranchPushedCopies names the current branch's own copies on its
+// remotes as "<remote>/<branch>": its upstream and push branch, and the same
+// name on each of checked. None for a detached HEAD.
+func currentBranchPushedCopies(ctx context.Context, checked []string) []string {
+	ref, err := exec.CommandContext(ctx, "git", "symbolic-ref", "-q", "HEAD").Output()
+	if err != nil {
+		return nil
+	}
+	fullName := strings.TrimSpace(string(ref))
+	var own []string
+	if out, err := exec.CommandContext(ctx, "git", "for-each-ref", "--format=%(upstream:short)%0a%(push:short)", "--", fullName).Output(); err == nil {
+		own = strings.Fields(string(out))
+	}
+	name := strings.TrimPrefix(fullName, "refs/heads/")
+	for _, remote := range checked {
+		own = append(own, remote+"/"+name)
+	}
+	return own
 }
 
 // onRemoteDefaultBranch reports whether remote's default branch contains

@@ -931,10 +931,18 @@ chooses a recorded link for the user.
   current branch, and an operation in progress (rebase, merge, cherry-pick,
   revert, bisect) are refused, as is a commit with a non-UTF-8 encoding or
   extra headers, which `commit-tree` can't reproduce;
-- a commit already pushed to a feature branch is rewritten the same way
-  (`planPushedCommitLink`): the confirmation names the remote branches that
-  hold it and says the user replaces it with `git push --force-with-lease`.
-  Attach pushes nothing itself; the checkpoint goes out with that push;
+- a commit already pushed, but held only by the current branch's own remote
+  copies (its upstream, its push branch, or a branch of the same name on a
+  remote it pushes to), is rewritten the same way (`planPushedCommitLink`):
+  the confirmation names those branches and says the user replaces it with
+  `git push --force-with-lease`. Attach pushes nothing itself; the checkpoint
+  goes out with that push;
+- a commit any other remote branch holds (a teammate's branch this one was
+  built on, a release branch) is shared and never rewritten: attach refuses,
+  changes nothing, and names the branches and `--link-without-trailer`
+  (`otherBranchesHolding`, `sharedBranchRefusal`). A commit a remote holds on
+  a branch no tracking ref names (outside the fetch refspec) is refused too,
+  since attach can't tell whose branch it is;
 - a commit on a remote's default branch is never rewritten: attach refuses,
   changes nothing, and names `--link-without-trailer` with its caveats
   (`defaultBranchRefusal`). "On a default branch" means reachable from the tip
@@ -956,11 +964,12 @@ and asks each directly, fetching only branches whose tips aren't local
 an apparently unpushed commit, it refuses rather than rewrite a commit it
 couldn't check. Right before rewriting, after the prompt, attach asks again
 (`recheckBeforeRewrite`): an unpushed commit that was pushed meanwhile, or a
-feature commit that reached a default branch meanwhile, is not rewritten.
+pushed one that reached a default branch or another branch meanwhile, is not
+rewritten.
 
 `--link-without-trailer` is the explicit opt-out: the commit is left unchanged
 and its SHA is recorded in a new checkpoint, on any branch. It exists for the
-default-branch case; agent-help tells agents never to pass it on their own.
+default-branch and shared-branch cases; agent-help tells agents never to pass it on their own.
 The checkpoint of a pushed commit goes to the branch's remote even when only
 another remote (upstream in a fork) holds the commit.
 
