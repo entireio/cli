@@ -172,6 +172,9 @@ func sameIssuer(a, b string) bool {
 // LocalIdentityCacheKey returns a non-secret local auth identity key.
 func LocalIdentityCacheKey() (string, error) {
 	if raw := strings.TrimSpace(os.Getenv(EnvTokenVar)); raw != "" {
+		if IsServiceAccountSecret(raw) {
+			return serviceAccountSecretCacheKey(raw)
+		}
 		claims, err := tokens.ParseClaims(raw)
 		if err != nil {
 			return "", fmt.Errorf("parse %s claims: %w", EnvTokenVar, err)

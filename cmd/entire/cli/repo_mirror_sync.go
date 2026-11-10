@@ -96,8 +96,15 @@ const maxSyncReasonRunes = 64
 // tokens, but it is echoed into a terminal, so an escape sequence must not
 // reach it whatever the server sends.
 func cleanSyncReason(raw string) string {
-	if runes := []rune(raw); len(runes) > maxSyncReasonRunes {
-		raw = string(runes[:maxSyncReasonRunes])
+	return terminalText(raw, maxSyncReasonRunes)
+}
+
+// terminalText cuts raw to maxRunes, then strips control and format
+// characters and trims it, so a value from the server or another client can
+// be echoed into a terminal without carrying an escape sequence.
+func terminalText(raw string, maxRunes int) string {
+	if runes := []rune(raw); len(runes) > maxRunes {
+		raw = string(runes[:maxRunes])
 	}
 	return strings.TrimSpace(strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {

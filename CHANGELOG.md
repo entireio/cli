@@ -5,6 +5,75 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.13.1] - 2026-11-06
+
+### Added
+
+- Checkpoint push policy: each clone can keep checkpoints local until you send them. `automatic`, the default, keeps today's behavior. Under `manual`, `git push` uploads no checkpoints and pre-push prints how many are waiting; `entire checkpoint push <id>[@<commit>]` or `--all` uploads them. On the first terminal push with checkpoints waiting, Entire asks once whether to push automatically, manually, or decide later (it waits 60s and backs off for 7 days on timeout). A policy that can't be read uploads nothing. `manual` is not supported on the git-branch backend ([#2921](https://github.com/entireio/cli/pull/2921), [#2936](https://github.com/entireio/cli/pull/2936), [#3008](https://github.com/entireio/cli/pull/3008))
+- OpenCode 2 support, with the same coverage as OpenCode 1, which keeps working. The plugin moves to `.opencode/plugin/entire.ts` ([#2854](https://github.com/entireio/cli/pull/2854))
+- New trail commands for a single change: `entire trail ready` (`--undo` returns it to draft) and `entire trail retarget --base <branch>`; `entire trail rerun-review` (or `--agent <id>` to run one project agent), `entire trail update-branch` and `entire trail ci-pr`; and the read-only `entire trail timeline`, `entire trail sessions` and `entire trail stack` ([#2967](https://github.com/entireio/cli/pull/2967), [#2969](https://github.com/entireio/cli/pull/2969), [#2970](https://github.com/entireio/cli/pull/2970))
+- `entire trail finding reply`, `edit-reply` and `delete-reply` manage the replies on a finding's thread, and `entire trail finding show` prints them with their message IDs. The `entire trail finding` dashboard shows each project agent's latest reading, trend and run status ([#2968](https://github.com/entireio/cli/pull/2968), [#2969](https://github.com/entireio/cli/pull/2969))
+- `entire trail list --mine` lists the trails you authored or are assigned across every project and region ([#2971](https://github.com/entireio/cli/pull/2971))
+- `entire trail attachment add`, `list` and `remove` manage the images in a project trail's description. `add` prints the `![image](attachment:<id>)` line to paste, and a failed upload leaves nothing behind ([#3002](https://github.com/entireio/cli/pull/3002))
+- `entire trail show` prints each open change's merge gates and check runs again (`changes[].mergeability` in `--json`), the trail's phase and last activity, and the base branch of each change. `entire trail list` gains a PHASE column ([#2909](https://github.com/entireio/cli/pull/2909), [#2991](https://github.com/entireio/cli/pull/2991), [#3023](https://github.com/entireio/cli/pull/3023))
+- `entire project agent run list`, `show`, `cancel` and `retry` manage the runs of a project's review agents ([#3001](https://github.com/entireio/cli/pull/3001))
+- `entire service-account` (alias `sa`) manages project-owned service accounts: `create`, `list`, `get`, `delete`, repository and project grants, and GitHub Actions OIDC bindings ([#3007](https://github.com/entireio/cli/pull/3007), [#3035](https://github.com/entireio/cli/pull/3035))
+- `entire repo default-branch <repo> <branch>` changes an Entire repository's default branch. GitHub mirrors follow GitHub's default branch and are refused ([#2913](https://github.com/entireio/cli/pull/2913))
+- `entire project create --cell` picks the processing cell instead of the region's default, and the success line shows the region and cell ([#3004](https://github.com/entireio/cli/pull/3004))
+- After a plugin runs, Entire tells you when that plugin has a newer release and how to upgrade it, checked at most once a day per plugin ([#2907](https://github.com/entireio/cli/pull/2907))
+
+### Changed
+
+- Trail runners are replaced by project agents, stored in Entire per project instead of in `.entire/runners/*.json`. `entire runner` (including `runner setup`) is removed; `entire project agent list` shows a project's agents and `entire project agent add [<preset>...]` adds preset reviewers for the current repository ([#2946](https://github.com/entireio/cli/pull/2946), [#2948](https://github.com/entireio/cli/pull/2948))
+- On a color terminal, `entire trail finding` and `finding list` show open findings as cards like `entire search` results, most severe first, with resolved and dismissed findings collapsed under Done. `finding show` prints the body as written and patches flush-left so they still apply. Plain output, pipes and `--json` stay stable ([#2984](https://github.com/entireio/cli/pull/2984))
+- `entire trail create` without `--base` no longer sends a guessed `main`. It uses `origin/HEAD`, then origin's HEAD from the remote, and otherwise lets the server use the repository's default branch ([#2886](https://github.com/entireio/cli/pull/2886))
+- `entire trail create` checks the repository's Trails setting before pushing the branch and stops with how to turn Trails on. A create the server rejects now says no trail was created ([#3017](https://github.com/entireio/cli/pull/3017))
+- `entire trail update` reached through a change (no selector, `--branch` or `<repo>/<n>`) says on stderr that it edits the parent project trail. A bare number run from a clone sends the checked-out branch so the server can refuse an update that would overwrite an unrelated trail. `trail list` and `trail timeline` accept `-n` for `--limit` ([#3013](https://github.com/entireio/cli/pull/3013), [#3016](https://github.com/entireio/cli/pull/3016))
+- Only `Entire-Checkpoint:` lines in a commit message's last paragraph link a commit to a checkpoint. A trailer pasted into the body, or reused from a teammate's commit with `git commit -C`, no longer links or rewrites that checkpoint ([#2923](https://github.com/entireio/cli/pull/2923))
+- The pre-push hook passes git's list of pushed refs to Entire and replays it to hooks that run after it, so Entire sees what the push sends ([#2878](https://github.com/entireio/cli/pull/2878))
+- An invalid `config.json` is reported before a command runs instead of surfacing later as "not logged in". Only the `token_store` key is accepted. `entire hooks` is exempt, and `ENTIRE_TOKEN` skips the check ([#2937](https://github.com/entireio/cli/pull/2937))
+- root, and any process without `$HOME`, finds its home folder from the password database, as ssh does. Under `sudo -E` root no longer writes into the invoking user's `~/.config/entire`, and root can use a file token store set in its own `config.json` ([#2914](https://github.com/entireio/cli/pull/2914))
+- Codex transcripts from current Codex versions map commands, file changes, MCP calls, web searches and sub-agent spawns from the recorded items, the same way a live Codex stream does ([#2897](https://github.com/entireio/cli/pull/2897))
+- Pi checkpoints are folded through the same streaming adapter as live Pi views. Pi lines that carry only usage now print `"content":null` instead of `"content":[]` ([#2904](https://github.com/entireio/cli/pull/2904), [#2973](https://github.com/entireio/cli/pull/2973))
+- `git push` and `entire status` read waiting checkpoints and their tips from one ref listing ([#2998](https://github.com/entireio/cli/pull/2998))
+- Nix-installed binaries (under `/nix/store/`) skip the update check ([#3006](https://github.com/entireio/cli/pull/3006))
+
+### Fixed
+
+- A `checkpoint_remote` with no URL the CLI can build no longer falls back to the code repository's push remote, which could be public. Checkpoints stay queued locally and every push says why until the setting is fixed. A push to a raw URL no longer reports origin as a fallback, and the URL is redacted from the debug log ([#2947](https://github.com/entireio/cli/pull/2947), [#3033](https://github.com/entireio/cli/pull/3033))
+- On the git-refs backend, pre-push pushes each checkpoint ref at the exact version that was queued, so a newer version written during the push stays queued instead of waiting for the next write ([#2876](https://github.com/entireio/cli/pull/2876))
+- Queued checkpoint refs are pushed in chunks of 200 under one time budget. On Windows the batch push failed past about 340 refs, and a large backlog never caught up ([#3018](https://github.com/entireio/cli/pull/3018))
+- Foreground checkpoint fetches (`explain`, `resume`, `enable`, `checkpoint delete`) are no longer killed after 2 minutes and restarted from zero; they run under one 30-minute budget ([#2920](https://github.com/entireio/cli/pull/2920))
+- Legacy (v1) checkpoints are copied into their refs from whichever copy changed them last, after asking the remote, so a teammate's newer sessions are no longer hidden. When both copies changed, post-commit, attach and explain point at `entire doctor migrate-checkpoints`, which keeps the newer copy or asks which to keep. The doctor scan is much faster on clones with many legacy checkpoints ([#2994](https://github.com/entireio/cli/pull/2994), [#3021](https://github.com/entireio/cli/pull/3021))
+- Checkpoint push recovery no longer replays over history that a shallow clone hides; it deep-fetches the ref and retries once, and otherwise says how to unblock it ([#3009](https://github.com/entireio/cli/pull/3009))
+- A turn-end checkpoint write that fails is reported as degraded capture in `entire status` and retried on the next Stop in the same turn, instead of being dropped silently ([#2961](https://github.com/entireio/cli/pull/2961))
+- Token totals include Claude Code subagents launched by other subagents ([#2900](https://github.com/entireio/cli/pull/2900))
+- A Claude Code foreground subagent that commits its own work now gets its task record and transcript stored in that commit's checkpoint ([#2919](https://github.com/entireio/cli/pull/2919))
+- Agent hooks warn when `entire` is on PATH but fails to run (for example a mise shim with no version selected), instead of silently capturing nothing ([#2922](https://github.com/entireio/cli/pull/2922))
+- `entire session attach` re-signs the rewritten commits that you signed, instead of dropping every signature ([#2978](https://github.com/entireio/cli/pull/2978))
+- On Windows, background workers no longer open visible terminal windows for their git subprocesses ([#2972](https://github.com/entireio/cli/pull/2972))
+- Objects that `git maintenance` packed into `loose-<hash>.pack` files are found again, so read-only turns no longer list every file under those trees as touched ([#3024](https://github.com/entireio/cli/pull/3024))
+- `git-remote-entire` holds a pushed pack in memory once instead of about four times, bounds its replica cache, and relays fetch negotiation rounds the way `git upload-pack` does, fixing "bad pack header" and "bad band" fetch failures ([#2987](https://github.com/entireio/cli/pull/2987), [#3037](https://github.com/entireio/cli/pull/3037))
+- `entire trail create` accepts `--checkout` and `--add-assignee` again, and prints the `git switch` command when the trail's branch isn't checked out ([#3012](https://github.com/entireio/cli/pull/3012))
+- Trail commands explain a project that does not exist or is not visible to your login, instead of printing a raw API error ([#2955](https://github.com/entireio/cli/pull/2955))
+- Review findings quote only files in the reviewed change, read from the worktree; anchors outside the change post at file level ([#2939](https://github.com/entireio/cli/pull/2939))
+- The stale ended sessions warning reaches the terminal; the post-commit hook used to discard it ([#3021](https://github.com/entireio/cli/pull/3021))
+- The Windows installer skips invalid or quoted PATH entries with a warning instead of failing ([#2929](https://github.com/entireio/cli/pull/2929))
+
+### Housekeeping
+
+- CI fails a PR on functions over cognitive complexity 30 that are new or worse than at the merge base ([#2340](https://github.com/entireio/cli/pull/2340))
+- The README is rewritten around Entire as a Git forge, with reference detail moved to docs.entire.com ([#2899](https://github.com/entireio/cli/pull/2899))
+- Checkpoint push and reconcile share one replay implementation ([#2999](https://github.com/entireio/cli/pull/2999))
+- Faster `-race` tests for redact and transcript, a sharded Windows canary, and fixes for two flaky tests ([#2915](https://github.com/entireio/cli/pull/2915), [#2916](https://github.com/entireio/cli/pull/2916), [#2917](https://github.com/entireio/cli/pull/2917), [#2934](https://github.com/entireio/cli/pull/2934))
+- Dependency updates, including brotli and klauspost/compress past GO-2026-6888 and GO-2026-6865 ([#1913](https://github.com/entireio/cli/pull/1913), [#2995](https://github.com/entireio/cli/pull/2995), [#3027](https://github.com/entireio/cli/pull/3027))
+
+### Thanks
+
+Thanks to @dhanushk-offl for keeping Windows background workers headless (#2972), and to @lcv-leo for the diagnosis and patch it was based on (#2926)!
+
+Thanks also to everyone who reported the issues fixed in this release: @postusername, @SamPlaysKeys and @0x7CFE (OpenCode 2), @VytlaDinesh (hooks failing silently and subagent task records), @rennf93 (`session attach` dropping signatures), @marcosnils (`git-remote-entire` push memory) and @AndreaBozzo (Windows checkpoint ref push)!
+
 ## [0.12.2] - 2026-10-26
 
 ### Added

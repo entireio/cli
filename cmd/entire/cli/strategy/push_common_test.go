@@ -1642,3 +1642,37 @@ func TestNonInteractiveSSHAuthFailure(t *testing.T) {
 	assert.False(t, nonInteractiveSSHAuthFailure(ctx, errors.New("non-fast-forward")))
 	assert.False(t, nonInteractiveSSHAuthFailure(ctx, nil))
 }
+
+// Not parallel: uses t.Chdir() (required for OpenRepository in fetchAndRebaseRefCommon).
+func TestFetchAndRebaseRefCommon_DeepFetchesWhenShallowHistoryHidesTheMergeBase(t *testing.T) {
+	cloneDir := cloneWithShallowHiddenMergeBase(t)
+	t.Chdir(cloneDir)
+	paths.ClearWorktreeRootCache()
+	ref := metadataLocalRef()
+
+	require.NoError(t, fetchAndRebaseRefCommon(t.Context(), "origin", ref))
+
+	assert.Equal(t,
+		strings.TrimSpace(testutil.RunGit(t, cloneDir, "rev-parse", metadataOriginRemoteRef().String())),
+		strings.TrimSpace(testutil.RunGit(t, cloneDir, "rev-parse", ref.String())),
+		"the deep fetch reveals the merge base, so the local ref fast-forwards to the teammate's update")
+}
+
+// Not parallel: uses t.Chdir() (required for OpenRepository in fetchAndRebaseRefCommon).
+func TestFetchAndRebaseRefCommon_StillRefusesWhenOnlyLocalHistoryIsCutOff(t *testing.T) {
+	cloneDir, bareDir := cloneWithLocalTipShallowBoundary(t)
+	t.Chdir(cloneDir)
+	paths.ClearWorktreeRootCache()
+	ref := metadataLocalRef()
+	before := strings.TrimSpace(testutil.RunGit(t, cloneDir, "rev-parse", ref.String()))
+
+	err := fetchAndRebaseRefCommon(t.Context(), "origin", ref)
+
+	require.ErrorIs(t, err, errShallowHidesMergeBase)
+	// A hand-run fetch skips Entire's token header and SSH handling, and a URL
+	// can carry credentials, so the message names neither.
+	assert.NotContains(t, err.Error(), "git fetch")
+	assert.NotContains(t, err.Error(), bareDir)
+	assert.Equal(t, before, strings.TrimSpace(testutil.RunGit(t, cloneDir, "rev-parse", ref.String())),
+		"refusal must not rewrite the local ref")
+}

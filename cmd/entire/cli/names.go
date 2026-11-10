@@ -28,10 +28,13 @@ const (
 // plus their grant subtrees and repo's mirror subtree, print several of the
 // same columns.
 const (
+	colHeaderAgent    = "AGENT"
+	colHeaderBase     = "BASE"
 	colHeaderBranch   = "BRANCH"
 	colHeaderChange   = "CHANGE"
 	colHeaderCloneURL = "CLONE URL"
 	colHeaderCluster  = "CLUSTER"
+	colHeaderCreated  = "CREATED"
 	colHeaderGrantee  = "GRANTEE"
 	colHeaderName     = "NAME"
 	colHeaderProject  = "PROJECT"

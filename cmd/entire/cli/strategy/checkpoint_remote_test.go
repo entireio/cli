@@ -2066,3 +2066,19 @@ func setupEmptyOrphanHeal(t *testing.T) (localDir, remoteTip string) {
 	paths.ClearWorktreeRootCache()
 	return localDir, remoteTip
 }
+
+// Not parallel: uses t.Chdir()
+func TestFetchMetadataBranch_DeepFetchesWhenShallowHistoryHidesTheMergeBase(t *testing.T) {
+	cloneDir := cloneWithShallowHiddenMergeBase(t)
+	bareDir := strings.TrimSpace(testutil.RunGit(t, cloneDir, "remote", "get-url", "origin"))
+	t.Chdir(cloneDir)
+	paths.ClearWorktreeRootCache()
+	ref := metadataLocalRef()
+
+	require.NoError(t, FetchMetadataBranch(t.Context(), bareDir))
+
+	assert.Equal(t,
+		strings.TrimSpace(testutil.RunGit(t, cloneDir, "rev-parse", metadataOriginRemoteRef().String())),
+		strings.TrimSpace(testutil.RunGit(t, cloneDir, "rev-parse", ref.String())),
+		"the deep fetch reveals the merge base, so the local ref fast-forwards to the teammate's update")
+}
