@@ -218,7 +218,7 @@ func NormalizeOrigin(rawURL string) string {
 //
 // present distinguishes "this repository has no origin" (false, nil error —
 // the caller falls back to matching by path) from "origin exists but could not
-// be read or normalized" (an error). Collapsing the two would let an
+// be read, or no URL of it normalizes" (an error). Collapsing the two would let an
 // unreadable remote config read as an unconfigured repository.
 func OriginKeys(ctx context.Context, worktreeRoot string) (keys []string, present bool, err error) {
 	// The environment is scrubbed because this runs on the hook path:
@@ -237,14 +237,17 @@ func OriginKeys(ctx context.Context, worktreeRoot string) (keys []string, presen
 	if !fetchFound && !pushFound {
 		return nil, false, nil
 	}
+	// A URL that names no forge repository (a local mirror, a `no_push` guard)
+	// is skipped rather than fatal: the other URLs still identify this
+	// repository, and aborting would drop the developer's `repos` entry for it.
 	for _, origin := range append(fetchURLs, pushURLs...) {
 		normalized := NormalizeOrigin(origin)
-		if normalized == "" {
-			return nil, true, errors.New("origin remote cannot be normalized")
-		}
-		if !slices.Contains(keys, normalized) {
+		if normalized != "" && !slices.Contains(keys, normalized) {
 			keys = append(keys, normalized)
 		}
+	}
+	if len(keys) == 0 {
+		return nil, true, errors.New("origin remote cannot be normalized")
 	}
 	return keys, true, nil
 }
