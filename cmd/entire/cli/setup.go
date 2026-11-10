@@ -1317,7 +1317,7 @@ was not fully uninstalled.`,
 	cmd.Flags().BoolVar(&useProjectSettings, "project", false, "Update .entire/settings.json instead of .entire/settings.local.json")
 	cmd.Flags().BoolVar(&uninstall, "uninstall", false, "Completely remove Entire from this repository")
 	cmd.Flags().BoolVar(&force, "force", false, "Skip confirmation prompt (use with --uninstall)")
-	cmd.Flags().BoolVar(&disableGlobal, flagGlobal, false, "Stop enabling Entire in every repository (sets global_enable to false); repositories enabled with `entire enable` stay enabled")
+	cmd.Flags().BoolVar(&disableGlobal, flagGlobal, false, "Stop enabling Entire in every repository (sets global_enable to false and removes Entire's Claude Code user-level hooks); repositories enabled with `entire enable` stay enabled")
 
 	return cmd
 }

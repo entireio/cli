@@ -268,6 +268,58 @@ func TestDisableGlobal_WritesFalseAndKeepsTheRest(t *testing.T) {
 	}
 	assert.JSONEq(t, `{"global_enable": false, "repos": {"github/acme/app": {"log_level": "debug"}}}`,
 		readUserSettingsFile(t, entireDir))
+	assert.NotContains(t, out, "repos entry", "no entry enables a repository")
+}
+
+// disable --global also takes Entire's hooks out of Claude Code's user-level
+// settings, keeping the user's own keys, and names the repositories a repos
+// entry alone enabled, which recorded only through those hooks.
+func TestDisableGlobal_RemovesTheUserLevelClaudeHooks(t *testing.T) {
+	const on = `{"global_enable": true, "repos": {"gh/acme/app": {"enabled": true}}}`
+	_, claudeDir, _, out, err := runGlobalCmd(t, true, on, "enable", "--global")
+	if err != nil {
+		t.Fatalf("enable --global: %v\n%s", err, out)
+	}
+	hooksPath := filepath.Join(claudeDir, "settings.json")
+	data, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var withUserKey map[string]any
+	if err := json.Unmarshal(data, &withUserKey); err != nil {
+		t.Fatal(err)
+	}
+	withUserKey["model"] = "opus"
+	data, err = json.Marshal(withUserKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hooksPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	root := NewRootCmd()
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetArgs([]string{"disable", "--global"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("disable --global: %v\n%s", err, buf.String())
+	}
+	after := readJSONFile(t, hooksPath)
+	assert.Equal(t, "opus", after["model"])
+	assert.NotContains(t, readUserSettingsRaw(t, hooksPath), "entire hooks claude-code")
+	assert.Contains(t, buf.String(), "Removed Entire's hooks from Claude Code's user settings")
+	assert.Contains(t, buf.String(), "repos entry")
+}
+
+func readUserSettingsRaw(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
 }
 
 // --global covers every repository, so a repository-scoped flag beside it is

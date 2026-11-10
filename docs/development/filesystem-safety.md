@@ -637,7 +637,8 @@ comments at each site say which case applies:
   `.git/config` is served by `r.Storer.Config()` and never reaches this. Its
   mutating methods fail closed.
 - **User-level Claude Code settings** — `claudecode.EnsureUserHooks` (global
-  enable) writes `$CLAUDE_CONFIG_DIR/settings.json`, else
+  enable) and `claudecode.RemoveUserHooks` (`entire disable --global`) write
+  `$CLAUDE_CONFIG_DIR/settings.json`, else
   `~/.claude/settings.json`, and follows a symlinked file there: that path is
   the developer's own (a dotfiles checkout), not one a repository supplies. The
   write goes to the resolved target, keeping its mode; a link that does not

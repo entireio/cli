@@ -528,6 +528,13 @@ func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	return uninstallHooksIn(cfg)
+}
+
+// uninstallHooksIn removes Entire's hooks from cfg, keeping everything else;
+// the project file and the user-level one share it, as they share
+// installHooksIn.
+func uninstallHooksIn(cfg claudeSettingsFile) error {
 	data, err := cfg.Read()
 	if err != nil {
 		// Same split AreHooksInstalled makes: an absent file is an answer, an

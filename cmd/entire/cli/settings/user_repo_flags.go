@@ -117,3 +117,16 @@ func repoEntryKey(ctx context.Context, worktreeRoot string, originKeys []string)
 	// A bare repository's worktrees have no main checkout to name.
 	return filepath.ToSlash(filepath.Clean(worktreeRoot)), nil
 }
+
+// UserReposEnableAny reports whether any `repos` entry in the user settings
+// file sets `enabled: true`, for any repository.
+func UserReposEnableAny(ctx context.Context) bool {
+	overlay := loadUserOverlay(ctx)
+	for _, raw := range overlay.repos {
+		prefs, err := decodeUserPreferences(raw)
+		if err == nil && prefs != nil && prefs.Enabled != nil && *prefs.Enabled {
+			return true
+		}
+	}
+	return false
+}

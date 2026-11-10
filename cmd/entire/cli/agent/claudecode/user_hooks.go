@@ -2,6 +2,7 @@ package claudecode
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -28,6 +29,14 @@ var ErrClaudeNotInUse = errors.New("no Claude Code config directory")
 // the file's path, or ErrClaudeNotInUse when there is no Claude config
 // directory.
 func EnsureUserHooks(ctx context.Context) (int, string, error) {
+	return EnsureUserHooksWhile(ctx, nil)
+}
+
+// EnsureUserHooksWhile is EnsureUserHooks that installs only while wanted
+// still holds once the lock is taken (nil: always). `entire disable --global`
+// turns the flag off and then removes the hooks under the same lock, so a
+// command that read the flag as on just before cannot put them back after.
+func EnsureUserHooksWhile(ctx context.Context, wanted func(context.Context) bool) (int, string, error) {
 	path, err := userClaudeSettingsPath()
 	if err != nil {
 		return 0, "", err
@@ -50,8 +59,64 @@ func EnsureUserHooks(ctx context.Context) (int, string, error) {
 		return 0, path, fmt.Errorf("lock %s: %w", path, err)
 	}
 	defer release()
+	if wanted != nil && !wanted(ctx) {
+		return 0, path, nil
+	}
 	n, err := installUserHooks(cfg)
 	return n, path, err
+}
+
+// RemoveUserHooks takes Entire's hooks out of the user-level Claude Code
+// settings, keeping everything else, for `entire disable --global`. It
+// reports whether there were any. A missing file or directory, or a file
+// without Entire's hooks, is left as it is.
+func RemoveUserHooks(ctx context.Context) (bool, string, error) {
+	path, err := userClaudeSettingsPath()
+	if err != nil {
+		return false, "", err
+	}
+	if _, err := os.Stat(filepath.Dir(path)); errors.Is(err, fs.ErrNotExist) {
+		return false, path, nil
+	}
+	release, err := flock.AcquireContext(ctx, path+".lock")
+	if err != nil {
+		return false, path, fmt.Errorf("lock %s: %w", path, err)
+	}
+	defer release()
+	cfg := userClaudeSettings{path: path}
+	data, err := cfg.Read()
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, path, nil
+	}
+	if err != nil {
+		return false, path, fmt.Errorf("read %s: %w", path, err)
+	}
+	if !settingsHaveEntireHooks(data) {
+		return false, path, nil
+	}
+	if err := uninstallHooksIn(cfg); err != nil {
+		return false, path, err
+	}
+	return true, path, nil
+}
+
+// settingsHaveEntireHooks reports whether any hook type in a Claude settings
+// file runs an Entire command. A hook type whose shape is not Claude's
+// matcher list is not Entire's.
+func settingsHaveEntireHooks(data []byte) bool {
+	var settings struct {
+		Hooks map[string]json.RawMessage `json:"hooks"`
+	}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return true // let the uninstall report the parse error
+	}
+	for _, raw := range settings.Hooks {
+		var matchers []ClaudeHookMatcher
+		if json.Unmarshal(raw, &matchers) == nil && hasEntireHook(matchers) {
+			return true
+		}
+	}
+	return false
 }
 
 // installUserHooks merges Entire's hooks into cfg. A file that exists but

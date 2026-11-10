@@ -277,3 +277,85 @@ func TestEnsureUserHooks_KeepsTheFileMode(t *testing.T) {
 		t.Errorf("settings.json mode = %o, want 644", got)
 	}
 }
+
+// RemoveUserHooks takes out exactly Entire's hooks and keeps everything the
+// user put in the file, including their own hooks.
+func TestRemoveUserHooks_RemovesOnlyEntireHooks(t *testing.T) {
+	userDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", userDir)
+	t.Chdir(t.TempDir())
+	existing := `{"model":"opus","hooks":{"Notification":[{"matcher":"","hooks":[{"type":"command","command":"say hi"}]}],"Stop":[{"matcher":"","hooks":[{"type":"command","command":"say bye"}]}]}}`
+	if err := os.WriteFile(filepath.Join(userDir, ClaudeSettingsFileName), []byte(existing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := EnsureUserHooks(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, _, err := RemoveUserHooks(context.Background())
+	if err != nil {
+		t.Fatalf("RemoveUserHooks() error = %v", err)
+	}
+	if !removed {
+		t.Error("RemoveUserHooks() reported nothing removed")
+	}
+	raw := readUserClaudeSettings(t, userDir)
+	if string(raw["model"]) != `"opus"` {
+		t.Errorf("model = %s, want the user's value kept", raw["model"])
+	}
+	var hooks map[string][]ClaudeHookMatcher
+	if err := json.Unmarshal(raw["hooks"], &hooks); err != nil {
+		t.Fatal(err)
+	}
+	for hookType, matchers := range hooks {
+		if hasEntireHook(matchers) {
+			t.Errorf("%s still has an Entire hook", hookType)
+		}
+	}
+	if len(hooks["Notification"]) != 1 || len(hooks["Stop"]) != 1 {
+		t.Errorf("the user's own hooks were not kept: %s", raw["hooks"])
+	}
+}
+
+// Nothing to remove writes nothing: no file is created, and a file without
+// Entire's hooks is left byte for byte.
+func TestRemoveUserHooks_NothingToRemoveWritesNothing(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(t.TempDir(), "absent"))
+	if removed, _, err := RemoveUserHooks(context.Background()); err != nil || removed {
+		t.Fatalf("RemoveUserHooks() with no config dir = %v, %v", removed, err)
+	}
+
+	userDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", userDir)
+	const existing = `{ "model": "opus" }`
+	path := filepath.Join(userDir, ClaudeSettingsFileName)
+	if err := os.WriteFile(path, []byte(existing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if removed, _, err := RemoveUserHooks(context.Background()); err != nil || removed {
+		t.Fatalf("RemoveUserHooks() without Entire hooks = %v, %v", removed, err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != existing {
+		t.Errorf("file rewritten to %q", data)
+	}
+}
+
+// The install re-checks, under the lock, that it is still wanted: a disable
+// that turned the flag off while it waited must not be undone.
+func TestEnsureUserHooksWhile_InstallsNothingOnceUnwanted(t *testing.T) {
+	userDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", userDir)
+	t.Chdir(t.TempDir())
+
+	n, _, err := EnsureUserHooksWhile(context.Background(), func(context.Context) bool { return false })
+	if err != nil || n != 0 {
+		t.Fatalf("EnsureUserHooksWhile(unwanted) = %d, %v", n, err)
+	}
+	if _, err := os.Stat(filepath.Join(userDir, ClaudeSettingsFileName)); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("settings written although unwanted (stat err = %v)", err)
+	}
+}

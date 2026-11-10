@@ -79,7 +79,7 @@ func runEnableGlobal(cmd *cobra.Command, yes bool, ownerFlags []string) error {
 	}
 	reportGlobalEnableOwners(w, listed)
 
-	n, hooksPath, err := claudecode.EnsureUserHooks(ctx)
+	n, hooksPath, err := claudecode.EnsureUserHooksWhile(ctx, settings.UserTierEnablesEverywhere)
 	switch {
 	case errors.Is(err, claudecode.ErrClaudeNotInUse):
 		fmt.Fprintf(w, "Claude Code is not set up here (%s not found); its hooks will be added the next time you run entire after it is.\n",
@@ -136,20 +136,34 @@ func runEnableGlobalOr(global, yes *bool, owners *[]string, run func(*cobra.Comm
 	}
 }
 
-// runDisableGlobal sets `global_enable: false`. Repositories enabled with
-// `entire enable` stay enabled, and the user-level Claude hooks stay: with the
-// flag off they do nothing in a repository that was never enabled.
+// runDisableGlobal sets `global_enable: false` and then takes Entire's hooks
+// out of Claude Code's user-level settings. In that order: a command that
+// read the flag as on re-checks it under the hooks file's lock before
+// installing, so once the flag is off the removal cannot be undone.
+// Repositories enabled with `entire enable` stay enabled, with their own
+// project hooks.
 func runDisableGlobal(cmd *cobra.Command) error {
 	if err := rejectFlagsWithGlobal(cmd); err != nil {
 		return err
 	}
-	path, err := usersettings.SetGlobalEnable(cmd.Context(), false)
+	ctx := cmd.Context()
+	path, err := usersettings.SetGlobalEnable(ctx, false)
 	if err != nil {
 		return err //nolint:wrapcheck // usersettings names the file and the reason
 	}
 	w := cmd.OutOrStdout()
 	fmt.Fprintf(w, "Entire is no longer enabled in every repository (global_enable in %s).\n", path)
+	removed, hooksPath, err := claudecode.RemoveUserHooks(ctx)
+	switch {
+	case err != nil:
+		fmt.Fprintf(cmd.ErrOrStderr(), "Could not remove Entire's hooks from %s: %v\nRemove them by hand, or run `entire disable --global` again.\n", hooksPath, err)
+	case removed:
+		fmt.Fprintf(w, "Removed Entire's hooks from Claude Code's user settings: %s\n", hooksPath)
+	}
 	fmt.Fprintln(w, "Repositories you enabled with `entire enable` stay enabled.")
+	if settings.UserReposEnableAny(ctx) {
+		fmt.Fprintf(w, "A repository enabled only by a repos entry in %s records Claude Code sessions again once you run `entire enable` in it.\n", path)
+	}
 	return nil
 }
 
@@ -273,7 +287,7 @@ func ensureGlobalEnableHooks(cmd *cobra.Command) {
 	if skipsGlobalEnableHooks(cmd) || !settings.UserTierEnablesEverywhere(ctx) {
 		return
 	}
-	n, path, err := claudecode.EnsureUserHooks(ctx)
+	n, path, err := claudecode.EnsureUserHooksWhile(ctx, settings.UserTierEnablesEverywhere)
 	if errors.Is(err, claudecode.ErrClaudeNotInUse) {
 		return
 	}
