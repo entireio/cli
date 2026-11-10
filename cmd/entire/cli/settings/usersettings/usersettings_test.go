@@ -153,6 +153,37 @@ func TestOriginKeysCollapsesGitHubTransports(t *testing.T) {
 	assert.Equal(t, []string{"gh/entireio/cli"}, keys)
 }
 
+// A push URL that names no forge repository (a local mirror, or the common
+// `no_push` guard against accidental pushes) must not cost the fetch URL its
+// key: the fetch URL still identifies this repository, and dropping it would
+// silently ignore the developer's `repos` entry for it.
+func TestOriginKeysKeepsKeysWhenOneURLCannotBeNormalized(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	runGit(t, root, "init", "-q", ".")
+	runGit(t, root, "remote", "add", "origin", "https://github.com/acme/widgets.git")
+	runGit(t, root, "config", "--add", "remote.origin.pushurl", "no_push")
+
+	keys, present, err := OriginKeys(t.Context(), root)
+	require.NoError(t, err)
+	require.True(t, present)
+	assert.Equal(t, []string{"gh/acme/widgets"}, keys)
+}
+
+func TestOriginKeysErrorsWhenNoURLCanBeNormalized(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	runGit(t, root, "init", "-q", ".")
+	runGit(t, root, "remote", "add", "origin", "no_fetch")
+
+	keys, present, err := OriginKeys(t.Context(), root)
+	require.Error(t, err)
+	require.True(t, present)
+	assert.Empty(t, keys)
+}
+
 // OriginKeys runs on the hook path: IsSetUpAndEnabled reaches it, and git
 // exports GIT_DIR and GIT_WORK_TREE to every hook it runs. Those OUTRANK
 // cmd.Dir, so a child that inherits them reads the hook's repository instead
