@@ -1951,28 +1951,30 @@ func JSONLContentWithPrivacyFilter(ctx context.Context, content string) (string,
 	}}, concurrencySafeRedactor)
 }
 
+type jsonReplacementEntry struct {
+	replJSON     string
+	placeholders int
+}
+
+type keyedJSONToken struct {
+	keyJSON  string
+	origJSON string
+}
+
 // applyJSONReplacements applies collected (original, redacted) string pairs
-// to the raw JSON text, replacing JSON-encoded originals with their redacted forms.
+// to the raw JSON text in a single linear pass over the line, replacing JSON-encoded
+// originals with their redacted forms.
 // Returns s unchanged if repls is empty. written is how many placeholders the
 // replacements put in: each copy replaced carries its pair's placeholders.
 func applyJSONReplacements(s string, repls []jsonReplacement) (result string, written int, err error) {
 	if len(repls) == 0 {
 		return s, 0, nil
 	}
-	// Keyed replacements go first. An unkeyed one replaces every copy of its
-	// text, so applied earlier it would also rewrite a keyed copy that needs
-	// a different result (a password under a credential key, an address under
-	// a network key), and the outcome would follow the walk's map order.
-	repls = slices.Clone(repls)
-	slices.SortStableFunc(repls, func(a, b jsonReplacement) int {
-		switch {
-		case a.key != "" && b.key == "":
-			return -1
-		case a.key == "" && b.key != "":
-			return 1
-		}
-		return 0
-	})
+	// Keyed replacements take precedence over unkeyed ones. An unkeyed one
+	// would otherwise rewrite a keyed copy that needs a different result
+	// (a password under a credential key, an address under a network key).
+	keyedMap := make(map[keyedJSONToken]jsonReplacementEntry, len(repls))
+	unkeyedMap := make(map[string]jsonReplacementEntry, len(repls))
 	for _, r := range repls {
 		origJSON, err := jsonEncodeString(r.original)
 		if err != nil {
@@ -1982,65 +1984,106 @@ func applyJSONReplacements(s string, repls []jsonReplacement) (result string, wr
 		if err != nil {
 			return "", 0, err
 		}
-		if r.key == "" {
-			written += strings.Count(s, origJSON) * r.placeholders
-			s = strings.ReplaceAll(s, origJSON, replJSON)
-			continue
+		entry := jsonReplacementEntry{
+			replJSON:     replJSON,
+			placeholders: r.placeholders,
 		}
-		keyJSON, err := jsonEncodeString(r.key)
-		if err != nil {
-			return "", 0, err
+		if r.key != "" {
+			keyJSON, err := jsonEncodeString(r.key)
+			if err != nil {
+				return "", 0, err
+			}
+			k := keyedJSONToken{keyJSON: keyJSON, origJSON: origJSON}
+			if _, exists := keyedMap[k]; !exists {
+				keyedMap[k] = entry
+			}
+		} else {
+			if _, exists := unkeyedMap[origJSON]; !exists {
+				unkeyedMap[origJSON] = entry
+			}
 		}
-		var replaced int
-		s, replaced = replaceKeyedJSONValue(s, keyJSON, origJSON, replJSON)
-		written += replaced * r.placeholders
 	}
-	return s, written, nil
-}
 
-// replaceKeyedJSONValue replaces every occurrence of origJSON that follows
-// keyJSON + optional whitespace + ':' + optional whitespace, and reports how
-// many it replaced. Restricts substitution to value positions so a key's own
-// redacted text is not rewritten when it collides with another field's value.
-func replaceKeyedJSONValue(s, keyJSON, origJSON, replJSON string) (string, int) {
-	if !strings.Contains(s, keyJSON) {
-		return s, 0
-	}
-	replaced := 0
 	var b strings.Builder
 	b.Grow(len(s))
+
+	var currentKey string
 	i := 0
 	for i < len(s) {
-		j := strings.Index(s[i:], keyJSON)
-		if j < 0 {
-			b.WriteString(s[i:])
-			break
-		}
-		keyEnd := i + j + len(keyJSON)
-		b.WriteString(s[i : i+j])
-		b.WriteString(keyJSON)
-		p := keyEnd
-		for p < len(s) && isJSONWhitespace(s[p]) {
-			p++
-		}
-		if p >= len(s) || s[p] != ':' {
-			i = keyEnd
+		if s[i] == '"' {
+			token, nextIdx := scanJSONString(s, i)
+
+			// Look ahead past optional whitespace to determine whether this string
+			// is an object key (followed by ':').
+			p := nextIdx
+			for p < len(s) && isJSONWhitespace(s[p]) {
+				p++
+			}
+			if p < len(s) && s[p] == ':' {
+				// Object key: keys are never redacted; record for subsequent value position.
+				currentKey = token
+				b.WriteString(token)
+				i = nextIdx
+				continue
+			}
+
+			// Value token: keyed replacements take precedence over unkeyed replacements.
+			if currentKey != "" && len(keyedMap) > 0 {
+				if entry, ok := keyedMap[keyedJSONToken{keyJSON: currentKey, origJSON: token}]; ok {
+					b.WriteString(entry.replJSON)
+					written += entry.placeholders
+					currentKey = ""
+					i = nextIdx
+					continue
+				}
+			}
+			if len(unkeyedMap) > 0 {
+				if entry, ok := unkeyedMap[token]; ok {
+					b.WriteString(entry.replJSON)
+					written += entry.placeholders
+					currentKey = ""
+					i = nextIdx
+					continue
+				}
+			}
+
+			b.WriteString(token)
+			currentKey = ""
+			i = nextIdx
 			continue
 		}
-		p++
-		for p < len(s) && isJSONWhitespace(s[p]) {
-			p++
+
+		switch s[i] {
+		case ',', '{', '}', '[', ']':
+			currentKey = ""
 		}
-		if p+len(origJSON) <= len(s) && s[p:p+len(origJSON)] == origJSON {
-			b.WriteString(s[keyEnd:p])
-			b.WriteString(replJSON)
-			i = p + len(origJSON)
-			replaced++
-			continue
-		}
-		i = keyEnd
+		b.WriteByte(s[i])
+		i++
 	}
-	return b.String(), replaced
+	return b.String(), written, nil
+}
+
+// scanJSONString scans a JSON string token beginning at s[start] (where s[start] == '"')
+// and returns the raw string token including its enclosing quotes and the index immediately
+// following the closing quote.
+func scanJSONString(s string, start int) (string, int) {
+	i := start + 1
+	for i < len(s) {
+		if s[i] == '\\' {
+			if i+1 < len(s) {
+				i += 2
+			} else {
+				i++
+			}
+			continue
+		}
+		if s[i] == '"' {
+			i++
+			return s[start:i], i
+		}
+		i++
+	}
+	return s[start:i], i
 }
 
 func isJSONWhitespace(c byte) bool {
@@ -2065,7 +2108,8 @@ func isSingleJSONValue(dec *json.Decoder) bool {
 // http.Header, keeps the key context of {"Authorization":"Bearer <token>"}.
 // spliceKey is the key a raw-text splice can scope a replacement to: the
 // leaf's own key, but empty inside arrays and at the root, because
-// replaceKeyedJSONValue only finds a value written directly after its key.
+// the single-pass splice only matches keyed replacements for values written
+// directly after their key.
 //
 // A skip key preserves its own string values, including the strings in its
 // arrays, but objects beneath it are walked with their own keys. The id rule

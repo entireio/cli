@@ -225,3 +225,48 @@ func TestJSONLContent_SingleJSONValueVerifiesSplice(t *testing.T) {
 	assert.Contains(t, got, RedactedPlaceholder)
 	assert.True(t, strings.HasSuffix(got, "\n"))
 }
+
+func TestApplyJSONReplacements_PrecedenceAndKeyPreservation(t *testing.T) {
+	t.Parallel()
+
+	repls := []jsonReplacement{
+		{key: "password", original: "secret123", redacted: "REDACTED_PASSWORD", placeholders: 1},
+		{key: "", original: "secret123", redacted: "REDACTED_GENERIC", placeholders: 1},
+		{key: "", original: "arrSecret", redacted: "REDACTED_ARR", placeholders: 1},
+	}
+
+	// 1. password key takes keyed replacement "REDACTED_PASSWORD".
+	// 2. note key takes unkeyed replacement "REDACTED_GENERIC".
+	// 3. an object key named "secret123" is preserved (not redacted).
+	// 4. array elements take unkeyed replacements.
+	input := `{"password":"secret123","note":"secret123","secret123":"value","items":["arrSecret","plain"]}`
+	got, written, err := applyJSONReplacements(input, repls)
+	require.NoError(t, err)
+	assert.Equal(t, 3, written)
+	assert.Contains(t, got, `"password":"REDACTED_PASSWORD"`)
+	assert.Contains(t, got, `"note":"REDACTED_GENERIC"`)
+	assert.Contains(t, got, `"secret123":"value"`)
+	assert.Contains(t, got, `["REDACTED_ARR","plain"]`)
+}
+
+func TestJSONLContent_ManyDistinctSecretsLinearSplice(t *testing.T) {
+	t.Parallel()
+
+	// Pin #3081: Ensure a line with many distinct secrets redacts all of them
+	// cleanly in a single pass without quadratic slowdown or missed splices.
+	var b strings.Builder
+	b.WriteString(`{"urls":[`)
+	for i := range 500 {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		fmt.Fprintf(&b, `"postgres://u:Zq%dxK9@db/app"`, i*7919+123456789)
+	}
+	b.WriteString("]}\n")
+
+	got, err := JSONLContent(b.String())
+	require.NoError(t, err)
+	assert.NotContains(t, got, "Zq")
+	assert.Equal(t, 500, strings.Count(got, RedactedPlaceholder))
+}
+
