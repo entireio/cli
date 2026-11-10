@@ -25,6 +25,13 @@ import (
 // targets; anything else demands https. Ordinary HTTP redirects are handled
 // by the outer client, which independently forbids downgrades from HTTPS.
 func newCrossJurisHTTPClient(coreURL string) (*http.Client, error) {
+	return newCrossJurisHTTPClientWrapped(coreURL, nil)
+}
+
+// newCrossJurisHTTPClientWrapped is newCrossJurisHTTPClient with wrap (when
+// non-nil) applied outside the cross-juris transport, so it sees the request
+// as the client sent it.
+func newCrossJurisHTTPClientWrapped(coreURL string, wrap func(http.RoundTripper) http.RoundTripper) (*http.Client, error) {
 	// The User-Agent wrapper goes *under* the cross-juris round tripper,
 	// not over it. That transport sends requests it builds itself — the
 	// RFC 8693 exchange and the federation manifest fetch, both straight
@@ -36,6 +43,9 @@ func newCrossJurisHTTPClient(coreURL string) (*http.Client, error) {
 	rt, err := newCrossJurisRoundTripper(base, isLoopbackHTTP(coreURL))
 	if err != nil {
 		return nil, err
+	}
+	if wrap != nil {
+		rt = wrap(rt)
 	}
 	return httpclient.New(httpclient.Options{Transport: rt}), nil
 }

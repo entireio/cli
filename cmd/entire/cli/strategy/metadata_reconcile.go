@@ -242,32 +242,17 @@ func ReconcileDisconnectedMetadataRef(
 	}
 
 	// Disconnected — cherry-pick local commits onto remote tip
-	fmt.Fprintln(w, "[entire] Detected disconnected session metadata (local and remote share no common ancestor)")
-
 	shallow, err := loadShallowHashes(ctx, repoPath)
 	if err != nil {
 		return fmt.Errorf("failed to load shallow boundaries: %w", err)
 	}
 
-	// Collect local commits oldest-first
-	localCommits, err := collectCommitChain(repo, localHash, shallow)
+	newTip, replayed, err := replayDisconnectedOnto(ctx, repo, repoPath, localHash, remoteHash, shallow, w)
 	if err != nil {
-		return fmt.Errorf("failed to collect local commits: %w", err)
+		return err
 	}
 
-	// Filter out empty-tree commits (the orphan bug commit)
-	var dataCommits []*object.Commit
-	for _, c := range localCommits {
-		tree, treeErr := c.Tree()
-		if treeErr != nil {
-			return fmt.Errorf("failed to read tree for commit %s: %w", c.Hash.String()[:7], treeErr)
-		}
-		if len(tree.Entries) > 0 {
-			dataCommits = append(dataCommits, c)
-		}
-	}
-
-	if len(dataCommits) == 0 {
+	if replayed == 0 {
 		// Local only had empty orphan — just point to remote
 		if err := advance(remoteHash); err != nil {
 			return fmt.Errorf("failed to reset metadata ref to remote: %w", err)
@@ -276,19 +261,71 @@ func ReconcileDisconnectedMetadataRef(
 		return nil
 	}
 
-	fmt.Fprintf(w, "[entire] Cherry-picking %d local checkpoint(s) onto remote...\n", len(dataCommits))
-
-	newTip, err := cherryPickOnto(ctx, repo, remoteHash, dataCommits, shallow)
-	if err != nil {
-		return fmt.Errorf("failed to cherry-pick local commits onto remote: %w", err)
-	}
-
 	if err := advance(newTip); err != nil {
 		return fmt.Errorf("failed to update metadata ref: %w", err)
 	}
 
 	fmt.Fprintln(w, "[entire] Done — all local and remote checkpoints preserved")
 	return nil
+}
+
+// replayDisconnectedOnto replays localHash's first-parent chain onto remoteHash
+// when the two share no merge base, and returns the resulting tip without
+// writing a ref. Empty-tree commits (the empty-orphan bug's root) carry no
+// checkpoint data and are dropped; when nothing else remains the remote tip is
+// returned with replayed == 0. Progress is written to w.
+//
+// When there is data to replay and either tip reaches a shallow boundary, it
+// refuses with errShallowHidesMergeBase: the missing merge base may only be
+// hidden behind the boundary, and replaying would apply the boundary commit's
+// whole tree over newer remote content. A local chain with no data needs no
+// such proof, since returning the remote tip drops nothing.
+func replayDisconnectedOnto(
+	ctx context.Context,
+	repo *git.Repository,
+	repoPath string,
+	localHash, remoteHash plumbing.Hash,
+	shallow map[plumbing.Hash]bool,
+	w io.Writer,
+) (tip plumbing.Hash, replayed int, err error) {
+	// Collect local commits oldest-first
+	localCommits, err := collectCommitChain(repo, localHash, shallow)
+	if err != nil {
+		return plumbing.ZeroHash, 0, fmt.Errorf("failed to collect local commits: %w", err)
+	}
+
+	var dataCommits []*object.Commit
+	for _, c := range localCommits {
+		tree, treeErr := c.Tree()
+		if treeErr != nil {
+			return plumbing.ZeroHash, 0, fmt.Errorf("failed to read tree for commit %s: %w", c.Hash.String()[:7], treeErr)
+		}
+		if len(tree.Entries) > 0 {
+			dataCommits = append(dataCommits, c)
+		}
+	}
+	if len(dataCommits) > 0 {
+		hidden, shallowErr := reachesShallowBoundary(ctx, repoPath, shallow, localHash, remoteHash)
+		if shallowErr != nil {
+			return plumbing.ZeroHash, 0, fmt.Errorf("check shallow history: %w", shallowErr)
+		}
+		if hidden {
+			return plumbing.ZeroHash, 0, errShallowHidesMergeBase
+		}
+	}
+
+	fmt.Fprintln(w, "[entire] Detected disconnected session metadata (local and remote share no common ancestor)")
+	if len(dataCommits) == 0 {
+		return remoteHash, 0, nil
+	}
+
+	fmt.Fprintf(w, "[entire] Cherry-picking %d local checkpoint(s) onto remote...\n", len(dataCommits))
+
+	newTip, err := cherryPickOnto(ctx, repo, remoteHash, dataCommits, shallow)
+	if err != nil {
+		return plumbing.ZeroHash, 0, fmt.Errorf("failed to cherry-pick local commits onto remote: %w", err)
+	}
+	return newTip, len(dataCommits), nil
 }
 
 // isDisconnected checks if two commits have no common ancestor using git merge-base.

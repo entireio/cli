@@ -353,7 +353,10 @@ func TestJSONLAdapter_AlternatingFragmentRecordsGrowLinearly(t *testing.T) {
 	}
 	for _, n := range []int{1000, 4000} {
 		input := alternating(n)
-		assertMatchesLegacy(t, input, nil)
+		// The legacy oracle is quadratic here.
+		if n == 1000 {
+			assertMatchesLegacy(t, input, nil)
+		}
 		if size := len(encodeRecords(t, adapterRecords(input, nil, nil))); size > 2*len(input) {
 			t.Errorf("%d fragments: %d bytes of records for %d bytes of input", n, size, len(input))
 		}

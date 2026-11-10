@@ -13,7 +13,7 @@ import (
 // token of Use).
 var experimentalRootCommands = []string{
 	"tokens", "import", "review",
-	"blame", "why", "experts", "runner",
+	"blame", "why", "experts",
 }
 
 // Version stamps standing in for a developer build and a stable release.

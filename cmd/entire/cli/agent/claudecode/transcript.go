@@ -2,8 +2,10 @@ package claudecode
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
@@ -109,10 +112,16 @@ func addUsageByMessageID(usageByMessageID map[string]messageUsage, transcript []
 			continue
 		}
 
-		existing, exists := usageByMessageID[msg.ID]
-		if !exists || msg.Usage.OutputTokens > existing.OutputTokens {
-			usageByMessageID[msg.ID] = msg.Usage
-		}
+		keepFinalUsage(usageByMessageID, msg.ID, msg.Usage)
+	}
+}
+
+// keepFinalUsage records usage for messageID unless usageByMessageID already
+// holds a row for it with at least as many output_tokens.
+func keepFinalUsage(usageByMessageID map[string]messageUsage, messageID string, usage messageUsage) {
+	existing, exists := usageByMessageID[messageID]
+	if !exists || usage.OutputTokens > existing.OutputTokens {
+		usageByMessageID[messageID] = usage
 	}
 }
 
@@ -198,16 +207,20 @@ func (c *ClaudeCodeAgent) CalculateSubagentTokenUsage(transcriptData []byte) (*a
 // When a Task tool completes, the tool_result contains "agentId: <id>" in its content.
 // Returns a map of agentID -> toolUseID for all spawned agents.
 func ExtractSpawnedAgentIDs(transcript []TranscriptLine) map[string]string {
-	return textAgentIDs(transcript, nil)
+	return textAgentIDs(transcript, readAnyResultText)
 }
 
+// readAnyResultText reads the text of every tool result: the main transcript
+// names its launches in text when it predates the structured results.
+func readAnyResultText(string) bool { return true }
+
 // textAgentIDs maps the agent each tool result's text names ("agentId:") to
-// that result's tool_use_id, the last result winning, skipping results whose
-// tool_use_id is in skip.
-func textAgentIDs(transcript []TranscriptLine, skip map[string]bool) map[string]string {
+// that result's tool_use_id, the last result winning, reading only results
+// whose tool_use_id readText accepts.
+func textAgentIDs(transcript []TranscriptLine, readText func(toolUseID string) bool) map[string]string {
 	agentIDs := make(map[string]string)
-	forEachToolResultText(transcript, func(toolUseID, text string) {
-		if skip[toolUseID] {
+	forEachToolResultText(transcript, agentIDTextMarker, func(toolUseID, text string) {
+		if !readText(toolUseID) {
 			return
 		}
 		// Look for agentId in the text. Drop any ID that isn't path-safe:
@@ -223,19 +236,70 @@ func textAgentIDs(transcript []TranscriptLine, skip map[string]bool) map[string]
 
 // spawnedAgentIDs returns every agent the transcript launched, keyed to the
 // launching tool_use_id: the agents tool results name in their structured
-// result (toolResultAgentIDs), plus, for results that name none (older
-// transcripts), the "agentId:" in their text (ExtractSpawnedAgentIDs). A
-// result that names an agent is never read for text, which can quote other
-// agents' IDs. They are skipped before the text IDs are collected, so a
-// quote can't take over the result an earlier agent was found in.
-func spawnedAgentIDs(transcriptData []byte, parsed []TranscriptLine) map[string]string {
+// result (toolResultAgentIDs), plus, for results that name none and that
+// readText accepts, the "agentId:" in their text (textAgentIDs). A result
+// that names an agent is never read for text, which can quote other agents'
+// IDs. They are skipped before the text IDs are collected, so a quote can't
+// take over the result an earlier agent was found in.
+func spawnedAgentIDs(transcriptData []byte, parsed []TranscriptLine, readText func(toolUseID string) bool) map[string]string {
 	agentIDs, named := toolResultAgentIDs(transcriptData)
-	for agentID, toolUseID := range textAgentIDs(parsed, named) {
+	unnamed := func(toolUseID string) bool { return !named[toolUseID] && readText(toolUseID) }
+	for agentID, toolUseID := range textAgentIDs(parsed, unnamed) {
 		if _, ok := agentIDs[agentID]; !ok {
 			agentIDs[agentID] = toolUseID
 		}
 	}
 	return agentIDs
+}
+
+// launchedBy returns what the main transcript launched: its agents, keyed to
+// the launching tool_use_id (spawnedAgentIDs), and its Workflow runs, from the
+// structured result or the "Run ID:" text. The text is read for transcripts
+// older than the structured results.
+func launchedBy(data []byte, lines []TranscriptLine) (agentIDs map[string]string, runIDs []string) {
+	runIDs = workflowRunIDsFromToolUseResults(data)
+	for _, runID := range ExtractWorkflowRunIDs(lines) {
+		runIDs = appendWorkflowRunID(runIDs, runID)
+	}
+	return spawnedAgentIDs(data, lines, readAnyResultText), runIDs
+}
+
+// launchedBySubagent returns what a subagent's transcript launched: a
+// subagent that launches its own records the launch in its own transcript,
+// not the main one. Agents come from structured results and, since Claude
+// Code 2.1.311 writes no toolUseResult in subagent transcripts, from the
+// "agentId:" text of the results of the subagent's own Agent calls
+// (agentToolUseIDs). Other results' text is not read: an ordinary result (a
+// Read of a log, a Bash grep) can quote another agent's "agentId:", and
+// following the quote would credit that agent to this subagent's launch.
+// Workflow runs come from structured results only, for the same reason: no
+// Workflow tool name is relied on elsewhere to scope "Run ID:" text to.
+func launchedBySubagent(data []byte, lines []TranscriptLine) (agentIDs map[string]string, runIDs []string) {
+	launches := agentToolUseIDs(lines)
+	return spawnedAgentIDs(data, lines, func(toolUseID string) bool { return launches[toolUseID] }),
+		workflowRunIDsFromToolUseResults(data)
+}
+
+// agentToolUseIDs returns the IDs of the transcript's calls to the subagent
+// dispatch tool (subagentToolMatcher): the only calls whose results name, in
+// text, an agent the transcript launched.
+func agentToolUseIDs(lines []TranscriptLine) map[string]bool {
+	ids := make(map[string]bool)
+	for _, line := range lines {
+		if line.Type != envelopeTypeAssistant || !bytes.Contains(line.Message, []byte(`"`+subagentToolMatcher+`"`)) {
+			continue
+		}
+		var msg assistantMessage
+		if json.Unmarshal(line.Message, &msg) != nil {
+			continue
+		}
+		for _, block := range msg.Content {
+			if block.Type == transcriptlib.ContentTypeToolUse && block.Name == subagentToolMatcher && block.ID != "" {
+				ids[block.ID] = true
+			}
+		}
+	}
+	return ids
 }
 
 // toolResultAgentIDs returns every agent a tool result names in its
@@ -253,7 +317,7 @@ func toolResultAgentIDs(transcriptData []byte) (agentIDs map[string]string, name
 	agentIDs = make(map[string]string)
 	named = make(map[string]bool)
 	for _, line := range bytes.Split(transcriptData, []byte("\n")) {
-		if !bytes.Contains(line, []byte(`"toolUseResult"`)) || !bytes.Contains(line, []byte(`"agentId"`)) {
+		if !toolUseResultMayNameAgent(line) {
 			continue
 		}
 		var entry struct {
@@ -293,6 +357,15 @@ func toolResultAgentIDs(transcriptData []byte) (agentIDs map[string]string, name
 	return agentIDs, named
 }
 
+// toolUseResultMayNameAgent reports whether line can hold a structured result
+// naming an agent: an "agentId" key after "toolUseResult". Every line of a
+// subagent's transcript carries the subagent's own top-level "agentId", so the
+// key alone would let all of them through to the JSON decode.
+func toolUseResultMayNameAgent(line []byte) bool {
+	idx := bytes.Index(line, []byte(`"toolUseResult"`))
+	return idx != -1 && bytes.Contains(line[idx:], []byte(`"agentId"`))
+}
+
 // ExtractWorkflowRunIDs returns the IDs of the Workflow runs a transcript
 // launched, from the tool_result text: a Workflow call's result names its run
 // as "Run ID: <runId>" (Claude Code 2.1.291) and none of the agents the run
@@ -303,8 +376,8 @@ func toolResultAgentIDs(transcriptData []byte) (agentIDs map[string]string, name
 // run from the structured result.
 func ExtractWorkflowRunIDs(transcript []TranscriptLine) []string {
 	var runIDs []string
-	forEachToolResultText(transcript, func(_, text string) {
-		const marker = "Run ID: "
+	const marker = "Run ID: "
+	forEachToolResultText(transcript, marker, func(_, text string) {
 		for rest := text; ; {
 			idx := strings.Index(rest, marker)
 			if idx == -1 {
@@ -352,10 +425,12 @@ func appendWorkflowRunID(runIDs []string, runID string) []string {
 
 // forEachToolResultText calls fn with the text of every tool_result in the
 // transcript's user lines, whether the result content is a string or an array
-// of text blocks.
-func forEachToolResultText(transcript []TranscriptLine, fn func(toolUseID, text string)) {
+// of text blocks. Lines whose message does not contain marker are skipped
+// undecoded: fn only looks for text after marker, and a subagent's transcript
+// is mostly tool results that name nothing.
+func forEachToolResultText(transcript []TranscriptLine, marker string, fn func(toolUseID, text string)) {
 	for _, line := range transcript {
-		if line.Type != "user" {
+		if line.Type != "user" || !bytes.Contains(line.Message, []byte(marker)) {
 			continue
 		}
 
@@ -411,13 +486,15 @@ func toolResultText(content json.RawMessage) string {
 // in text: Claude Code appends it as a trailer, and the report before it may
 // quote other agents' IDs.
 func extractAgentIDFromText(text string) string {
-	const prefix = "agentId: "
-	idx := strings.LastIndex(text, prefix)
+	idx := strings.LastIndex(text, agentIDTextMarker)
 	if idx == -1 {
 		return ""
 	}
-	return extractIDAfter(text[idx:], prefix, false)
+	return extractIDAfter(text[idx:], agentIDTextMarker, false)
 }
+
+// agentIDTextMarker precedes the agent ID in a tool result's text.
+const agentIDTextMarker = "agentId: "
 
 // extractIDAfter extracts the identifier following the first occurrence of
 // prefix in text: letters and digits, plus '_' and '-' when withSeparators is
@@ -567,11 +644,7 @@ func (c *ClaudeCodeAgent) CalculateTotalTokenUsage(transcriptData []byte, startL
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse full transcript: %w", err)
 	}
-	runIDs := workflowRunIDsFromToolUseResults(transcriptData)
-	for _, runID := range ExtractWorkflowRunIDs(fullParsed) {
-		runIDs = appendWorkflowRunID(runIDs, runID)
-	}
-	agentPaths := subagentTranscriptPaths(spawnedAgentIDs(transcriptData, fullParsed), runIDs, subagentsDir)
+	agentUsages, subagentModelByMessageID := launchedSubagentUsage(transcriptData, fullParsed, subagentsDir)
 
 	// Calculate subagent token usage. This re-reads each subagent transcript from
 	// line 0 on every call, so mainUsage.SubagentTokens is a cumulative-since-
@@ -584,15 +657,10 @@ func (c *ClaudeCodeAgent) CalculateTotalTokenUsage(transcriptData []byte, startL
 	// drop the messages the parent's transcript holds, which are the parent's
 	// calls, not a subagent's.
 	subagentByMessageID := make(map[string]messageUsage)
-	subagentModelByMessageID := make(map[string]string)
-	for _, agentPath := range agentPaths {
-		lines, err := transcript.ParseFromFileAtLine(agentPath, 0)
-		if err != nil {
-			// Agent transcript may not exist yet or may have been cleaned up
-			continue
+	for _, usageByMessageID := range agentUsages {
+		for messageID, usage := range usageByMessageID {
+			keepFinalUsage(subagentByMessageID, messageID, usage)
 		}
-		addUsageByMessageID(subagentByMessageID, lines)
-		addModelsByMessageID(subagentModelByMessageID, lines)
 	}
 	// A fork cancelled before its first reply holds only the copied launch.
 	// Its zero is still a reading, not a missing one: callers keep the last
@@ -612,6 +680,86 @@ func (c *ClaudeCodeAgent) CalculateTotalTokenUsage(transcriptData []byte, startL
 	}
 
 	return mainUsage, nil
+}
+
+// maxSubagentLaunchDepth bounds how many levels of subagents launched by
+// subagents launchedSubagentUsage follows below the main transcript.
+const maxSubagentLaunchDepth = 8
+
+// launchedSubagentUsage returns the usage by message.id (addUsageByMessageID)
+// of every subagent the main transcript launched, keyed by transcript path,
+// and of every subagent those launched in turn (launchedBySubagent), down to
+// maxSubagentLaunchDepth levels: a launch made by a subagent is recorded only
+// in the launching subagent's transcript. Each transcript is reduced to its
+// usage as soon as it is read, so memory grows with the number of messages,
+// not with the size of every transcript found. Each pass
+// rebuilds the paths from every agent and run found so far, so an agent's
+// transcript is chosen by subagentTranscriptPaths' precedence however it was
+// found, and reads only transcripts not read before, which also ends launch
+// cycles. A transcript that is missing or unreadable is skipped.
+//
+// It also returns each read message's model (addModelsByMessageID), for
+// splitting the subagents' usage by model.
+//
+// Nested subagents were not counted before, so the first Stop after upgrading
+// counts their usage to date in one checkpoint, rescoped against a baseline
+// that never included them.
+func launchedSubagentUsage(mainData []byte, mainParsed []TranscriptLine, subagentsDir string) (map[string]map[string]messageUsage, map[string]string) {
+	agentIDs, runIDs := launchedBy(mainData, mainParsed)
+	read := make(map[string]map[string]messageUsage)
+	modelByMessageID := make(map[string]string)
+	for depth := 1; ; depth++ {
+		agentPaths := subagentTranscriptPaths(agentIDs, runIDs, subagentsDir)
+		found := false
+		for _, agentPath := range agentPaths {
+			if _, done := read[agentPath]; done {
+				continue
+			}
+			read[agentPath] = nil
+			data, err := os.ReadFile(agentPath) //nolint:gosec // built from path-safe agent and run IDs under subagentsDir
+			if err != nil {
+				// Agent transcript may not exist yet or may have been cleaned up
+				continue
+			}
+			lines, err := transcript.ParseFromBytes(data)
+			if err != nil {
+				continue
+			}
+			usageByMessageID := make(map[string]messageUsage)
+			addUsageByMessageID(usageByMessageID, lines)
+			addModelsByMessageID(modelByMessageID, lines)
+			read[agentPath] = usageByMessageID
+			launchedAgents, launchedRuns := launchedBySubagent(data, lines)
+			for agentID, toolUseID := range launchedAgents {
+				if _, ok := agentIDs[agentID]; !ok {
+					agentIDs[agentID] = toolUseID
+					found = true
+				}
+			}
+			for _, runID := range launchedRuns {
+				if !slices.Contains(runIDs, runID) {
+					runIDs = append(runIDs, runID)
+					found = true
+				}
+			}
+		}
+		if !found {
+			break
+		}
+		if depth == maxSubagentLaunchDepth {
+			logging.Debug(context.Background(), "claude-code: subagent launch depth cap reached; deeper subagents not counted",
+				slog.Int("depth", depth))
+			break
+		}
+	}
+
+	usages := make(map[string]map[string]messageUsage)
+	for _, agentPath := range subagentTranscriptPaths(agentIDs, runIDs, subagentsDir) {
+		if usageByMessageID := read[agentPath]; usageByMessageID != nil {
+			usages[agentPath] = usageByMessageID
+		}
+	}
+	return usages, modelByMessageID
 }
 
 // subagentTranscriptPaths maps every subagent the transcript launched to its
@@ -696,7 +844,7 @@ func (c *ClaudeCodeAgent) ExtractAllModifiedFiles(transcriptData []byte, startLi
 	// session through their task records when each agent's SubagentStop
 	// completes it (unlike tokens, which CalculateTotalTokenUsage re-reads from
 	// every run the transcript launched).
-	agentIDs := spawnedAgentIDs(transcriptData, fullParsed)
+	agentIDs := spawnedAgentIDs(transcriptData, fullParsed, readAnyResultText)
 	for agentID := range agentIDs {
 		agentPath := filepath.Join(subagentsDir, paths.AgentTranscriptFileName(agentID))
 		agentLines, agentErr := transcript.ParseFromFileAtLine(agentPath, 0)

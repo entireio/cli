@@ -943,7 +943,7 @@ func RunReviewProfileConfigPicker(ctx context.Context, out io.Writer, getInstall
 // Exported so tests can drive it directly — the picker itself
 // can't run headless.
 func MergePickerResults(existing map[string]settings.ReviewConfig, offered map[string]struct{}, selected map[string]settings.ReviewConfig) map[string]settings.ReviewConfig {
-	merged := make(map[string]settings.ReviewConfig, len(existing)+len(selected))
+	merged := make(map[string]settings.ReviewConfig, len(existing))
 	for name, cfg := range existing {
 		if _, wasOffered := offered[name]; !wasOffered {
 			merged[name] = cfg
