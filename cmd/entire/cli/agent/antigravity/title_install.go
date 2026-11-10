@@ -116,7 +116,10 @@ func titleTeeCommand(original string) string {
 	// cmd.exe treats POSIX single quotes as literal characters and the tee has
 	// no sh to re-run the original with. The original travels base64url-encoded
 	// instead — an alphabet ([A-Za-z0-9_-], no padding) no shell touches — and
-	// the tee runs it through cmd.exe itself, exactly as agy would have.
+	// the tee runs it through cmd.exe itself, as agy would have, with one
+	// difference: that cmd.exe also resolves programs from PATH only
+	// (wrappedTitleCommand), since the user's own title command runs in every
+	// folder agy opens too.
 	return agent.WindowsPathOnlyLookupPrefix + titleTeeBase + wrapB64Flag + base64.RawURLEncoding.EncodeToString([]byte(original))
 }
 

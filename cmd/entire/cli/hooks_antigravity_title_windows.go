@@ -4,6 +4,7 @@ package cli
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"syscall"
 
@@ -20,8 +21,14 @@ import (
 // os/exec checks the working directory, the folder agy was opened in, before
 // PATH and refuses a match there with ErrDot, so a repository cmd.exe would
 // otherwise make the user's own title command fail.
+//
+// Unlike agy, the cmd.exe started here has NoDefaultCurrentDirectoryInExePath
+// set, so the programs the user's command names resolve from PATH, never from
+// the folder agy was opened in: that folder may be any repository, and the
+// title slot runs in all of them.
 func wrappedTitleCommand(ctx context.Context, original string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, agent.SystemCmdExe())
+	cmd.Env = agent.AppendWindowsPathOnlyLookupEnv(os.Environ())
 	cmd.SysProcAttr = &syscall.SysProcAttr{CmdLine: `cmd.exe /d /s /c "` + original + `"`}
 	return cmd
 }
