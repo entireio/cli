@@ -39,6 +39,13 @@ func runEnableGlobal(cmd *cobra.Command, yes bool, ownerFlags []string) error {
 	if err := rejectFlagsWithGlobal(cmd, "yes", flagOwner); err != nil {
 		return err
 	}
+	// Before the already-on short-circuit: an agent re-running it, or adding
+	// an owner, is answering for the user just the same. Without a terminal
+	// --yes still works, for a person's scripts.
+	if caller := review.DetectAgentSession(); caller != "" {
+		cmd.SilenceUsage = true
+		return fmt.Errorf("refusing `entire enable --global` from %s: it records sessions and pushes checkpoints in every repository the user works in; ask the user to run it themselves", caller)
+	}
 	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
 	owners, err := validateOwners(cmd, ownerFlags)

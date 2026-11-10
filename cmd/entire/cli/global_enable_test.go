@@ -125,6 +125,13 @@ func TestGlobalEnable_HiddenEnableAndDisableCommandsSkipInstall(t *testing.T) {
 // command's output. claudeDir is created only when withClaude is set.
 func runGlobalCmd(t *testing.T, withClaude bool, userSettings string, args ...string) (entireDir, claudeDir, repo, out string, err error) {
 	t.Helper()
+	return runGlobalCmdAs(t, withClaude, userSettings, "", args...)
+}
+
+// runGlobalCmdAs is runGlobalCmd with agentVar, when set, marking the caller
+// as an agent session.
+func runGlobalCmdAs(t *testing.T, withClaude bool, userSettings, agentVar string, args ...string) (entireDir, claudeDir, repo, out string, err error) {
+	t.Helper()
 	entireDir = t.TempDir()
 	claudeDir = filepath.Join(t.TempDir(), "claude")
 	if withClaude {
@@ -136,6 +143,10 @@ func runGlobalCmd(t *testing.T, withClaude bool, userSettings string, args ...st
 	testutil.InitRepo(t, repo)
 	t.Setenv(userdirs.EnvConfigDir, entireDir)
 	t.Setenv("CLAUDE_CONFIG_DIR", claudeDir)
+	clearAgentCallerEnv(t)
+	if agentVar != "" {
+		t.Setenv(agentVar, "1")
+	}
 	t.Chdir(repo)
 	if userSettings != "" {
 		if wErr := os.WriteFile(filepath.Join(entireDir, usersettings.FileName), []byte(userSettings), 0o600); wErr != nil {
@@ -280,6 +291,33 @@ func TestGlobal_RejectsRepositoryFlags(t *testing.T) {
 			if _, statErr := os.Stat(filepath.Join(entireDir, usersettings.FileName)); !os.IsNotExist(statErr) {
 				t.Errorf("user settings written despite the error (stat err = %v)", statErr)
 			}
+		})
+	}
+}
+
+// An agent session cannot turn global enable on, add an owner, or even
+// re-run it once it is on: the answer is the user's. Nothing is written.
+func TestEnableGlobal_RefusesAnAgentSession(t *testing.T) {
+	for name, tc := range map[string]struct {
+		file string
+		args []string
+	}{
+		"turn on":      {"", []string{"enable", "--global", "--yes"}},
+		"add an owner": {`{"global_enable": true}`, []string{"enable", "--global", "--yes", "--owner", "gh/acme"}},
+		"already on":   {`{"global_enable": true}`, []string{"enable", "--global"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			entireDir, claudeDir, _, out, err := runGlobalCmdAs(t, true, tc.file, "CLAUDECODE", tc.args...)
+			if err == nil {
+				t.Fatalf("%v from an agent session succeeded:\n%s", tc.args, out)
+			}
+			assert.Contains(t, err.Error(), "ask the user to run it")
+			if tc.file == "" {
+				assert.NoFileExists(t, filepath.Join(entireDir, usersettings.FileName))
+			} else {
+				assert.JSONEq(t, tc.file, readUserSettingsFile(t, entireDir))
+			}
+			assert.NoFileExists(t, filepath.Join(claudeDir, "settings.json"))
 		})
 	}
 }
