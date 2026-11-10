@@ -9,10 +9,12 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/redact"
 	"github.com/stretchr/testify/require"
 )
 
@@ -193,4 +195,22 @@ func TestSaveAttachSessionState_LedgerMarksOnlyWhatAttachRead(t *testing.T) {
 			require.Nil(t, got.CheckpointTokenUsage, "%s: the per-turn window hands over to the ledger", tc.name)
 		}
 	}
+}
+
+// An attach checkpoint records the session's running total for a ledger
+// session, like a condensed one, and none for a per-turn or new session.
+func TestAttachWriteOptions_SessionTokenUsage(t *testing.T) {
+	t.Parallel()
+	ledger := &session.TokenLedger{}
+	ledger.Activate(nil, nil)
+	ledger.Observe(agent.CumulativeObservation{Total: &agent.TokenUsage{OutputTokens: 40, APICallCount: 1}})
+	opts := func(state *session.State) *agent.TokenUsage {
+		return attachWriteOptions(context.Background(), attachLinkPlan{}, id.MustCheckpointID("a1b2c3d4e5f6"), false, "s",
+			&claudecode.ClaudeCodeAgent{}, redact.RedactedBytes{}, transcriptMetadata{}, attachTranscriptWindow{}, &GitAuthor{}, nil, state, attachOptions{}, nil).SessionTokenUsage
+	}
+	got := opts(&session.State{TokenLedger: ledger, TokenUsage: ledger.Total()})
+	require.NotNil(t, got)
+	require.Equal(t, 40, got.OutputTokens)
+	require.Nil(t, opts(&session.State{TokenUsage: &agent.TokenUsage{OutputTokens: 40}}), "per-turn session")
+	require.Nil(t, opts(nil), "new session")
 }

@@ -156,8 +156,9 @@ func (u *usageCounter) children(ctx context.Context, in agent.CumulativeTokenInp
 }
 
 // childFingerprint identifies the inventory and each child file's size and
-// modification time. A child without a known path is found by scanning, so
-// such an inventory is not cached.
+// modification time. A child without a known path is found by scanning, and
+// one that is not a regular file is left to the inventory's own checks, so
+// neither inventory is cached.
 func childFingerprint(in agent.CumulativeTokenInput) (string, bool) {
 	h := sha256.New()
 	fmt.Fprintf(h, "%s\n", in.Home)
@@ -166,8 +167,8 @@ func childFingerprint(in agent.CumulativeTokenInput) (string, bool) {
 		if path == "" {
 			path = ref.DeclaredTranscriptPath
 		}
-		info, err := os.Stat(path)
-		if path == "" || err != nil {
+		info, err := os.Lstat(path)
+		if path == "" || err != nil || !info.Mode().IsRegular() {
 			return "", false
 		}
 		fmt.Fprintf(h, "%s\x00%s\x00%d\x00%d\n", ref.AgentID, path, info.Size(), info.ModTime().UnixNano())
