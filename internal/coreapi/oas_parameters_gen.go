@@ -55,6 +55,11 @@ type CreateRepoCIWebhookParams struct {
 	RepoId string
 }
 
+// CreateServiceAccountSecretParams is parameters of createServiceAccountSecret operation.
+type CreateServiceAccountSecretParams struct {
+	AccountId string
+}
+
 // DeleteBindingParams is parameters of deleteBinding operation.
 type DeleteBindingParams struct {
 	AccountId string
@@ -126,6 +131,12 @@ type DeleteRepoCIWebhookParams struct {
 // DeleteServiceAccountParams is parameters of deleteServiceAccount operation.
 type DeleteServiceAccountParams struct {
 	AccountId string
+}
+
+// DeleteServiceAccountSecretParams is parameters of deleteServiceAccountSecret operation.
+type DeleteServiceAccountSecretParams struct {
+	AccountId string
+	SecretID  string
 }
 
 // DetachMyHandleParams is parameters of detachMyHandle operation.
@@ -632,6 +643,15 @@ type ListServiceAccountGrantsParams struct {
 	// Opaque cursor from a previous response's nextPageToken.
 	PageToken OptString `json:",omitempty,omitzero"`
 	AccountId string
+}
+
+// ListServiceAccountSecretsParams is parameters of listServiceAccountSecrets operation.
+type ListServiceAccountSecretsParams struct {
+	AccountId string
+	// Opaque cursor from a previous response's next_cursor.
+	Cursor OptString `json:",omitempty,omitzero"`
+	// Secrets per page.
+	PerPage OptInt64 `json:",omitempty,omitzero"`
 }
 
 // ListServiceAccountsParams is parameters of listServiceAccounts operation.
