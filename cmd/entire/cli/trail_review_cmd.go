@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"io"
 	"net/http"
 	"net/url"
@@ -21,6 +20,7 @@ import (
 	"unicode"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
