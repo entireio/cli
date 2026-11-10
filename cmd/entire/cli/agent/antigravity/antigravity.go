@@ -117,7 +117,7 @@ func (a *AntigravityAgent) ResolveSessionFileCandidates(sessionDir, agentSession
 	brains := a.surfaceBrains(sessionDir)
 	candidates := make([]string, 0, len(brains))
 	for _, brain := range brains {
-		candidates = append(candidates, a.ResolveSessionFile(brain, agentSessionID))
+		candidates = append(candidates, transcriptInBrain(brain, agentSessionID))
 	}
 	return candidates
 }
@@ -125,7 +125,13 @@ func (a *AntigravityAgent) ResolveSessionFileCandidates(sessionDir, agentSession
 var _ agent.SessionFileCandidatesProvider = (*AntigravityAgent)(nil)
 
 func (a *AntigravityAgent) ResolveSessionFile(sessionDir, agentSessionID string) string {
-	return filepath.Join(sessionDir, agentSessionID, ".system_generated", "logs", "transcript_full.jsonl")
+	return transcriptInBrain(sessionDir, agentSessionID)
+}
+
+// transcriptInBrain is where agy writes conversation agentSessionID's
+// transcript in brain. Callers validate agentSessionID first.
+func transcriptInBrain(brain, agentSessionID string) string {
+	return filepath.Join(brain, agentSessionID, ".system_generated", "logs", "transcript_full.jsonl")
 }
 
 func (a *AntigravityAgent) ReadSession(_ *agent.HookInput) (*agent.AgentSession, error) {
