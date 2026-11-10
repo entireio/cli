@@ -482,11 +482,15 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpCli
 	// cleaned value; a trailing newline from $(cat token) is common. An empty
 	// or whitespace-only value fails closed.
 	if raw, ok := os.LookupEnv(auth.EnvTokenVar); ok {
-		envToken := strings.TrimSpace(raw)
-		if envToken == "" {
-			return nil, nil, fmt.Errorf("%s is set but blank", auth.EnvTokenVar)
+		envToken, err := auth.ResolveEnvTokenContext(ctx, raw)
+		if err != nil {
+			return nil, nil, err //nolint:wrapcheck // ResolveEnvToken names ENTIRE_TOKEN
 		}
-		return resolveEnvTokenCreds(ctx, envToken, parsedURL.Host, userdirs.Cache(), httpClient)
+		provider, onUnauthorized, err := resolveEnvTokenCreds(ctx, envToken, parsedURL.Host, userdirs.Cache(), httpClient)
+		if err != nil || !auth.IsServiceAccountSecret(strings.TrimSpace(raw)) {
+			return provider, onUnauthorized, err
+		}
+		return secretCreds(raw, onUnauthorized)
 	}
 
 	// Resolve which login context authenticates this cluster: the cluster's
@@ -548,6 +552,43 @@ func resolveEnvTokenCreds(ctx context.Context, envToken, clusterHost, cacheDir s
 		debuglog.Printf("data plane rejected static %s bearer; transport will retry once with the configured token", auth.EnvTokenVar)
 	}
 	return provider, onUnauthorized, nil
+}
+
+// secretCreds re-resolves a service account secret on every request, so a long
+// clone or push renews its token from the cache or a fresh exchange instead
+// of holding one token for the whole session. A 401 drops the cached token
+// through the same token-conditional path as every other client
+// (auth.EnvTokenSource), so the transport's one retry exchanges again unless
+// another process already replaced it. The trust gate in resolveEnvTokenCreds
+// already checked the exchange Core, and every re-exchange goes to that same
+// Core.
+func secretCreds(raw string, onUnauthorized func()) (credentialProvider, func(), error) {
+	source := auth.EnvTokenSource(raw)
+	if source == nil {
+		return nil, nil, fmt.Errorf("%s does not hold a service account secret", auth.EnvTokenVar)
+	}
+	var mu sync.Mutex
+	var served string
+	provider := func(ctx context.Context) (string, error) {
+		token, err := source.Token(ctx)
+		if err != nil {
+			return "", err //nolint:wrapcheck // ResolveEnvToken names ENTIRE_TOKEN
+		}
+		mu.Lock()
+		served = token
+		mu.Unlock()
+		return token, nil
+	}
+	evict := func() {
+		mu.Lock()
+		rejected := served
+		mu.Unlock()
+		if rejected != "" {
+			source.Unauthorized(rejected)
+		}
+		onUnauthorized()
+	}
+	return provider, evict, nil
 }
 
 // coreTrusted reports whether coreURL is in the cluster's advertised core
