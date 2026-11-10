@@ -192,8 +192,8 @@ func writeGlobalEnablePushes(ctx context.Context, w io.Writer, s *EntireSettings
 		if pushes.Owner != "" {
 			remedy += ", or `entire enable --global --owner " + pushes.Owner + "`"
 		}
-		fmt.Fprintf(w, "  checkpoint pushes held: %d waiting (this repository is on only through global enable; %s)\n",
-			pushes.Waiting, tuiutil.SanitizeDisplayText(remedy))
+		fmt.Fprintf(w, "  checkpoint pushes held (this repository is on only through global enable; %s)\n",
+			tuiutil.SanitizeDisplayText(remedy))
 	case "owner_listed":
 		fmt.Fprintf(w, "  checkpoint pushes: on, %s is on your global-enable owner list\n", tuiutil.SanitizeDisplayText(pushes.Owner))
 	case "agreed":
@@ -499,8 +499,11 @@ type checkpointSyncInfo struct {
 	// PushPolicy is the clone's checkpoint push policy, empty when
 	// PushPolicyErr reports it could not be read: an unreadable policy is
 	// neither value, and git push uploads nothing while it lasts.
-	PushPolicy    settings.CheckpointPushPolicy
-	PushPolicyErr string
+	PushPolicy settings.CheckpointPushPolicy
+	// HeldForGlobalEnable marks pushes held until the developer agrees, so the
+	// count must not promise that the next push sends it.
+	HeldForGlobalEnable bool
+	PushPolicyErr       string
 	// IgnoredRemote and IgnoredReason report a configured checkpoint_remote
 	// that the ownership check rejected as inherited with the clone. Both
 	// reads and pushes then fall back to the elected remote, and status is
@@ -732,6 +735,9 @@ func countUnpushedCheckpointsForStatus(ctx context.Context, remoteName string) i
 // status is the only surface that names either.
 func writeCheckpointSyncLines(ctx context.Context, b *strings.Builder, s *EntireSettings, sty statusStyles) {
 	info := computeCheckpointSyncInfo(ctx, s)
+	if pushes := globalEnablePushes(ctx, s); pushes != nil && pushes.State == "held" {
+		info.HeldForGlobalEnable = true
+	}
 	destination := "\n  Checkpoints sync to: "
 	if info.PushDisabled {
 		b.WriteString("\n  Automatic checkpoint pushing: disabled")
@@ -852,6 +858,10 @@ func formatUnpushedCheckpointsLine(info checkpointSyncInfo) string {
 		return line
 	}
 	line := fmt.Sprintf("%d %s not yet on %s", info.Unpushed, noun, info.Remote)
+	if info.HeldForGlobalEnable {
+		// Held until the developer agrees; the next push will not send them.
+		return line + "; held until you agree"
+	}
 	if manual {
 		return line + manualHint
 	}

@@ -159,7 +159,7 @@ func globalEnablePushAllowed(ctx context.Context, ps *pushSettings, fromGitHook 
 	if fromGitHook && canAskGlobalEnablePushConsent() {
 		ps.consentAsked = true
 		logging.Info(ctx, GlobalEnablePushConsentLogMsg)
-		if askGlobalEnablePushConsent(waiting, globalEnablePushDestination(*ps)) && recordGlobalEnablePushConsent(ctx, ps) {
+		if askGlobalEnablePushConsent(globalEnablePushDestination(*ps)) && recordGlobalEnablePushConsent(ctx, ps) {
 			return true
 		}
 	}
@@ -168,8 +168,8 @@ func globalEnablePushAllowed(ctx context.Context, ps *pushSettings, fromGitHook 
 		remedy += ", or push every repository of " + owner + " with `entire enable --global --owner " + owner + "`"
 	}
 	fmt.Fprintf(stderrWriter,
-		"[entire] Entire is holding %s for %s: this repository is on only through global enable. %s.\n",
-		pluralSessionCheckpoints(waiting), globalEnablePushDestination(*ps), tuiutil.SanitizeDisplayText(remedy))
+		"[entire] Entire is holding session checkpoints for %s: this repository is on only through global enable. %s.\n",
+		globalEnablePushDestination(*ps), tuiutil.SanitizeDisplayText(remedy))
 	return false
 }
 
@@ -208,7 +208,7 @@ var askGlobalEnablePushConsent = askGlobalEnablePushConsentTTY
 // askGlobalEnablePushConsentTTY asks on the controlling terminal, like
 // askCheckpointPushQuestionTTY. Anything but yes, including no answer in
 // time, holds.
-func askGlobalEnablePushConsentTTY(waiting int, destination string) bool {
+func askGlobalEnablePushConsentTTY(destination string) bool {
 	if interactive.UnderTest() {
 		return false
 	}
@@ -219,8 +219,8 @@ func askGlobalEnablePushConsentTTY(waiting int, destination string) bool {
 	defer tty.Close()
 
 	fmt.Fprintf(tty, "\nEntire recorded sessions in this repository because global enable is on, and has not pushed them.\n"+
-		"Push %s to %s, now and from every clone of this repository? [y/N] (%s): ",
-		pluralSessionCheckpoints(waiting), destination, globalEnablePushConsentTimeout)
+		"Push its session checkpoints to %s, now and from every clone of this repository? [y/N] (%s): ",
+		destination, globalEnablePushConsentTimeout)
 	line, err := readPromptAnswer(tty, globalEnablePushConsentTimeout)
 	if errors.Is(err, errPromptTimedOut) {
 		fmt.Fprintln(tty, "\nNo answer; the checkpoints stay on this machine.")
@@ -228,13 +228,6 @@ func askGlobalEnablePushConsentTTY(waiting int, destination string) bool {
 	}
 	answer := strings.ToLower(strings.TrimSpace(line))
 	return answer == "y" || answer == consentYes
-}
-
-func pluralSessionCheckpoints(n int) string {
-	if n == 1 {
-		return "1 session checkpoint"
-	}
-	return fmt.Sprintf("%d session checkpoints", n)
 }
 
 // GlobalEnablePushReport is what `entire status` says about checkpoint pushes

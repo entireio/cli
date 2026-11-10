@@ -166,7 +166,7 @@ func TestStatus_ReportsGlobalEnablePushes(t *testing.T) {
 	for name, tc := range map[string]struct {
 		file, want, wantState string
 	}{
-		"held":         {`{"global_enable": true}`, "checkpoint pushes held: 0 waiting", "held"},
+		"held":         {`{"global_enable": true}`, "checkpoint pushes held (", "held"},
 		"owner listed": {`{"global_enable": true, "global_enable_owners": ["gh/acme"]}`, "gh/acme is on your global-enable owner list", "owner_listed"},
 		"agreed":       {`{"global_enable": true, "repos": {"gh/acme/widgets": {"push_checkpoints": true}}}`, "you agreed for this repository", "agreed"},
 	} {

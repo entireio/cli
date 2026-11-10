@@ -42,7 +42,7 @@ func answerGlobalEnablePushConsentWith(t *testing.T, yes bool) (consent, policy 
 	t.Setenv(interactive.EnvTestTTY, "1")
 	consent, policy = new(int), new(int)
 	previous := askGlobalEnablePushConsent
-	askGlobalEnablePushConsent = func(int, string) bool { *consent++; return yes }
+	askGlobalEnablePushConsent = func(string) bool { *consent++; return yes }
 	t.Cleanup(func() { askGlobalEnablePushConsent = previous })
 	previousPolicy := askCheckpointPushQuestion
 	askCheckpointPushQuestion = func() checkpointPushQuestionAnswer { *policy++; return checkpointPushAnswerNotNow }
@@ -84,7 +84,7 @@ func TestGlobalEnableConsent_HoldsWithoutATerminal(t *testing.T) {
 
 	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
 	assert.Empty(t, remoteCheckpointRefs(t, bareDir))
-	assert.Contains(t, stderr.String(), "holding 2 session checkpoints")
+	assert.Contains(t, stderr.String(), "holding session checkpoints")
 	outgoing, err := ListOutgoingCheckpoints(t.Context())
 	require.NoError(t, err)
 	assert.Len(t, outgoing.Checkpoints, 2, "held checkpoints stay queued")
@@ -118,7 +118,7 @@ func TestGlobalEnableConsent_NoHolds(t *testing.T) {
 	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
 	assert.Equal(t, 2, *asked)
 	assert.Empty(t, remoteCheckpointRefs(t, bareDir))
-	assert.Contains(t, stderr.String(), "holding 2 session checkpoints")
+	assert.Contains(t, stderr.String(), "holding session checkpoints")
 }
 
 // An agent's shell can pass the terminal probe, but its yes is not the
