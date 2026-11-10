@@ -538,12 +538,6 @@ func saveTrailsEnabledForRepoBestEffort(ctx context.Context, enabled bool) {
 	}
 }
 
-func saveTrailsEnabledForRemoteBestEffort(ctx context.Context, forge, owner, repo string, enabled bool) {
-	if err := saveTrailsEnabledForRemote(ctx, forge, owner, repo, enabled); err != nil {
-		logging.Debug(ctx, "failed to cache trails enablement", "error", err)
-	}
-}
-
 func refreshTrailsEnabledCacheBestEffort(ctx context.Context, client *api.Client) {
 	refreshCtx, cancel := context.WithTimeout(ctx, trailEnablementRefreshTimeout)
 	defer cancel()

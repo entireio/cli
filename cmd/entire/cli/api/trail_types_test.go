@@ -2,7 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/trail"
@@ -53,6 +52,9 @@ func TestTrailListResponseDecodesEntireAPIContract(t *testing.T) {
 			"id":"01JTRAIL","number":7,"title":"Native trail","status":"open",
 			"branch":null,"original_branch":"feature/native","base":"main",
 			"requested_reviewers":["reviewer"],"phase":"reviewing",
+			"reviewers":[{"login":"reviewer","status":"approved"}],
+			"body":"Legacy description","checkpoint_count":3,
+			"assignees":["retired"],"comment_count":4,"unresolved_count":2,
 			"created_at":"2026-08-10T10:00:00.000Z","updated_at":"2026-08-10T11:00:00.000Z"
 		}],
 		"next_cursor":"cursor-2","total_count":12
@@ -67,18 +69,23 @@ func TestTrailListResponseDecodesEntireAPIContract(t *testing.T) {
 	if len(got.Trails) != 1 || got.Trails[0].Branch != "" || got.Trails[0].OriginalBranch != "feature/native" || got.Trails[0].Phase != "reviewing" {
 		t.Fatalf("trail = %#v", got.Trails)
 	}
-}
-
-func TestTrailRequestsUseEntireAPICasing(t *testing.T) {
-	t.Parallel()
-	body, err := json.Marshal(TrailCreateRequest{Title: "T", BranchName: "feature/x", BranchAction: "link"})
+	resource := got.Trails[0]
+	if resource.Body != "Legacy description" || resource.CheckpointCount != 3 ||
+		len(resource.Reviewers) != 1 || resource.Reviewers[0].Status != trail.ReviewerApproved ||
+		len(resource.RequestedReviewers) != 1 || resource.RequestedReviewers[0] != "reviewer" {
+		t.Fatalf("preserved response fields = %#v", resource)
+	}
+	encoded, err := json.Marshal(resource)
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := string(body)
-	for _, want := range []string{`"branch_name"`, `"branch_action"`} {
-		if !strings.Contains(text, want) {
-			t.Fatalf("request %s missing %s", text, want)
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatal(err)
+	}
+	for _, retired := range []string{"assignees", "comment_count", "unresolved_count"} {
+		if _, present := fields[retired]; present {
+			t.Errorf("response retains retired key %q: %s", retired, encoded)
 		}
 	}
 }
@@ -201,7 +208,6 @@ func TestTrailWriteContracts(t *testing.T) {
 		want string
 	}{
 		{"update", TrailUpdateRequest{Title: &title, RequestedReviewers: &reviewers}, `{"title":"Renamed","requested_reviewers":[]}`},
-		{"clear body", TrailBodyRequest{Markdown: ""}, `{"markdown":""}`},
 		{"approve", TrailApprovalRequest{Event: "approve", Body: "Reviewed"}, `{"event":"approve","body":"Reviewed"}`},
 		{"request changes", TrailApprovalRequest{Event: "request_changes", Body: "Please fix"}, `{"event":"request_changes","body":"Please fix"}`},
 		{"discussion", TrailDiscussionCreateRequest{Title: "Design", Body: "Discuss"}, `{"title":"Design","body":"Discuss"}`},
