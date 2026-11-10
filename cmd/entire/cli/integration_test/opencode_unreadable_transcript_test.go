@@ -58,7 +58,9 @@ func assertTrailerCheckpointWritten(t *testing.T, env *TestEnv) {
 	t.Helper()
 	checkpointID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
 	if checkpointID == "" {
-		t.Skip("commit was not stamped; nothing can dangle")
+		// The agent's own commit always takes the fast path, which stamps it;
+		// a missing trailer means the wiring under test never ran.
+		t.Fatal("agent commit was not stamped with an Entire-Checkpoint trailer")
 	}
 	if _, ok := checkpointBlob(env, checkpointID, paths.MetadataFileName); !ok {
 		t.Fatalf("commit trailer names checkpoint %s, which was never written", checkpointID)

@@ -1527,9 +1527,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	if slices.Contains(moved, checkpointID) {
 		ctx = withRecordedCommitLink(ctx, head.Hash().String())
 	}
-	if sessionID := agentStamps[checkpointID]; sessionID != "" && stamped[checkpointID] {
-		ctx = withAgentStamp(ctx, checkpointID, sessionID)
-	}
+	ctx = withAgentStampOf(ctx, checkpointID, stamped, agentStamps)
 
 	_, findSessionsSpan := perf.Start(ctx, "find_sessions_for_worktree")
 	worktreePath, err := paths.WorktreeRoot(ctx)
@@ -2102,6 +2100,18 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 	return handler.newSkillEvents, handler.condensedSignal, handler.condensed
 }
 
+// advanceWindowAfterCondense moves the session's checkpoint window past what
+// the condensation stored. A checkpoint the agent-commit fast path stamped for
+// this session but wrote without a transcript (agentStampedFor) stored none of
+// it, so the window stays put and the next checkpoint covers that transcript,
+// rather than restarting at 0 and re-covering earlier checkpoints.
+func advanceWindowAfterCondense(ctx context.Context, state *SessionState, result *CondenseResult) {
+	if result.TotalTranscriptLines == 0 && agentStampedFor(ctx, result.CheckpointID, state.SessionID) {
+		return
+	}
+	state.AdvanceCheckpointWindow(result.TotalTranscriptLines)
+}
+
 // condenseAndUpdateState runs condensation for a session and updates state afterward.
 // Returns whether condensation succeeded, plus the skill events it appended to
 // session state (for telemetry after the surrounding session gate releases).
@@ -2171,7 +2181,7 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 		// work was not. Keep its existing SaveStep count, which keeps the
 		// session pending (State.HasPendingWork) until a home commit consumes it.
 		state.StepCount = pendingStepCount
-		state.AdvanceCheckpointWindow(result.TotalTranscriptLines)
+		advanceWindowAfterCondense(ctx, state, result)
 		state.CheckpointTranscriptSize = result.TranscriptSizeBaseline
 		logging.Info(logCtx, "session guest-condensed from a sibling worktree; home worktree state untouched",
 			slog.String("strategy", "manual-commit"),
@@ -2186,7 +2196,7 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 	newHead := head.Hash().String()
 	state.BaseCommit = newHead
 	resetCheckpointWindow(state)
-	state.AdvanceCheckpointWindow(result.TotalTranscriptLines)
+	advanceWindowAfterCondense(ctx, state, result)
 	state.CheckpointTranscriptSize = result.TranscriptSizeBaseline
 	state.FilesTouched = nil
 	state.TouchedFileHashes = nil

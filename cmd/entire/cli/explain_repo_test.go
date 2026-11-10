@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os/exec"
 	"strings"
@@ -127,11 +128,12 @@ func TestExplainRepoIsCurrent(t *testing.T) {
 // stubCrossRepoReader serves a fixed checkpoint so the render paths can be
 // exercised without a cell.
 type stubCrossRepoReader struct {
-	transcript  []byte
-	metaErr     error
-	sessions    int
-	resolvedSHA string
-	resolveErr  error
+	transcript   []byte
+	noTranscript bool // ReadSessionContent reports ErrNoTranscript, as a store does for a files/prompt-only checkpoint
+	metaErr      error
+	sessions     int
+	resolvedSHA  string
+	resolveErr   error
 }
 
 func (s *stubCrossRepoReader) Read(context.Context, id.CheckpointID) (*checkpoint.CheckpointSummary, error) {
@@ -179,6 +181,9 @@ func (s *stubCrossRepoReader) ReadSessionMetadataAndPrompts(ctx context.Context,
 }
 
 func (s *stubCrossRepoReader) ReadSessionContent(ctx context.Context, cid id.CheckpointID, idx int) (*checkpoint.SessionContent, error) {
+	if s.noTranscript {
+		return nil, checkpoint.ErrNoTranscript
+	}
 	meta, prompts, err := s.ReadSessionMetadataAndPrompts(ctx, cid, idx)
 	if err != nil {
 		return nil, err
@@ -248,6 +253,27 @@ func TestRunCrossRepoExplain_Prose(t *testing.T) {
 	assert.Contains(t, got, "13e379e", "the checkpoint's own commit must render, not '(none on this branch)'")
 	assert.NotContains(t, got, "none on this branch")
 	assert.Contains(t, got, "do the foreign thing")
+}
+
+// A checkpoint without a transcript is explained from its metadata and
+// prompts, for the latest session and for an explicit one.
+func TestRunCrossRepoExplain_CheckpointWithoutTranscript(t *testing.T) {
+	for _, index := range []int{-1, 0} {
+		t.Run(fmt.Sprintf("session index %d", index), func(t *testing.T) {
+			withStubCrossRepoReader(t, &stubCrossRepoReader{noTranscript: true})
+
+			var out, errOut bytes.Buffer
+			require.NoError(t, runCrossRepoExplain(context.Background(), &out, &errOut, crossRepoExplainOptions{
+				repoFlag:     "gh/acme/widgets",
+				target:       testAPICheckpointID.String(),
+				sessionIndex: index,
+				verbose:      true,
+				noPager:      true,
+			}))
+			assert.Contains(t, out.String(), testAPICheckpointID.String())
+			assert.Contains(t, out.String(), "do the foreign thing")
+		})
+	}
 }
 
 func TestRunCrossRepoExplain_JSON(t *testing.T) {

@@ -392,6 +392,15 @@ func withAgentStamp(ctx context.Context, cpID id.CheckpointID, sessionID string)
 	return context.WithValue(ctx, agentStampKey{}, agentStamp{checkpointID: cpID, sessionID: sessionID})
 }
 
+// withAgentStampOf marks ctx with the session the fast path stamped
+// checkpointID for, when prepare recorded both the stamp and its session.
+func withAgentStampOf(ctx context.Context, checkpointID id.CheckpointID, stamped map[id.CheckpointID]bool, stamps map[id.CheckpointID]string) context.Context {
+	if sessionID := stamps[checkpointID]; sessionID != "" && stamped[checkpointID] {
+		return withAgentStamp(ctx, checkpointID, sessionID)
+	}
+	return ctx
+}
+
 // agentStampedFor reports whether the fast path stamped checkpointID for
 // sessionID in this commit. That session made the commit, so condensation
 // writes its checkpoint even when its transcript cannot be read and it

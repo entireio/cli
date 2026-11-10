@@ -86,11 +86,11 @@ func TestCondenseSession_AgentStampedSessionWithoutTranscript(t *testing.T) {
 		// work and keeps today's outcome.
 		ctx := withAgentStamp(context.Background(), cpID, "stamped")
 		_, err := s.CondenseSession(ctx, repo, cpID, newState("bystander"), committed)
-		require.Error(t, err)
+		require.ErrorContains(t, err, "live transcript is empty or unreadable")
 	})
 	t.Run("not stamped", func(t *testing.T) {
 		_, err := s.CondenseSession(context.Background(), repo, cpID, newState("unstamped"), committed)
-		require.Error(t, err)
+		require.ErrorContains(t, err, "live transcript is empty or unreadable")
 	})
 }
 
@@ -102,4 +102,30 @@ func TestFilterFilesTouched_AppliesFallbackForAgentStampedSession(t *testing.T) 
 	filterFilesTouched(sessionData, map[string]struct{}{"app/foo.go": {}}, state, true)
 
 	assert.Equal(t, []string{"app/foo.go"}, sessionData.FilesTouched)
+}
+
+// A stamped checkpoint written without a transcript stored none of it, so the
+// window stays where the last checkpoint left it: the next checkpoint covers
+// the transcript this one could not, without re-covering earlier ones.
+func TestAdvanceWindowAfterCondense(t *testing.T) {
+	t.Parallel()
+	cpID := id.MustCheckpointID("d4e5f6a1b2c3")
+	stamped := withAgentStamp(context.Background(), cpID, "sess")
+	for _, tt := range []struct {
+		name      string
+		ctx       context.Context
+		lines     int
+		wantStart int
+	}{
+		{"stamped, no transcript", stamped, 0, 7},
+		{"stamped, transcript", stamped, 12, 12},
+		{"not stamped, no transcript", context.Background(), 0, 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			state := &SessionState{SessionID: "sess", CheckpointTranscriptStart: 7}
+			advanceWindowAfterCondense(tt.ctx, state, &CondenseResult{CheckpointID: cpID, TotalTranscriptLines: tt.lines})
+			assert.Equal(t, tt.wantStart, state.CheckpointTranscriptStart)
+		})
+	}
 }
