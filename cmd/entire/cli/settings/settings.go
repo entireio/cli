@@ -117,6 +117,10 @@ type EntireSettings struct {
 	// See RepoPushConsent.
 	repoPushConsent bool
 
+	// globalEnableOwners is the user settings file's global_enable_owners.
+	// See GlobalEnableOwners.
+	globalEnableOwners []string
+
 	// userLayerRejections records preference blocks (or this repository's
 	// repos entries) dropped from the user settings file, one human-readable
 	// line each. Unexported for the same reason as its siblings: a block that

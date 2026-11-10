@@ -126,3 +126,17 @@ func TestPreferencesPushCheckpoints_IsRejectedAloneAndTheBlockStillApplies(t *te
 	require.Len(t, s.UserLayerRejections(), 1)
 	assert.Contains(t, s.UserLayerRejections()[0], "push_checkpoints")
 }
+
+// The owner list is read normalized, and an entry that is not an owner is
+// dropped on its own with a reason.
+func TestGlobalEnableOwners_ReadsValidEntries(t *testing.T) {
+	root := newNeverEnabledRepo(t)
+	writeUserSettings(t, `{"global_enable": true, "global_enable_owners": ["GitHub.com/Acme", "gh/*", "et/acme"]}`)
+
+	s, err := loadMergedSettings(t.Context(), filepath.Join(root, EntireSettingsFile), "", filepath.Join(root, EntireSettingsLocalFile))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"gh/acme", "et/acme"}, s.GlobalEnableOwners())
+	assert.Equal(t, []string{"gh/acme", "et/acme"}, UserGlobalEnableOwners(t.Context()))
+	require.Len(t, s.UserLayerRejections(), 1)
+	assert.Contains(t, s.UserLayerRejections()[0], "gh/*")
+}

@@ -79,9 +79,11 @@ type userOverlay struct {
 	// globalEnable is the top-level `global_enable` key `entire enable
 	// --global` writes; false when absent, null, or not a boolean.
 	globalEnable bool
-	preferences  *UserPreferences
-	repos        map[string]json.RawMessage
-	rejections   []string
+	// owners is the validated `global_enable_owners` list.
+	owners      []string
+	preferences *UserPreferences
+	repos       map[string]json.RawMessage
+	rejections  []string
 }
 
 // loadUserOverlay reads the user settings file. An unreadable or invalid file
@@ -105,6 +107,9 @@ func loadUserOverlay(ctx context.Context) userOverlay {
 			overlay.globalEnable = enabled != nil && *enabled
 		}
 	}
+	if raw, ok := us.Block(usersettings.GlobalEnableOwnersKey); ok {
+		overlay.owners = overlay.decodeOwners(ctx, raw)
+	}
 	if raw, ok := us.Block(userPreferencesBlock); ok {
 		prefs, err := decodeUserPreferences(raw)
 		if err != nil {
@@ -122,6 +127,26 @@ func loadUserOverlay(ctx context.Context) userOverlay {
 		}
 	}
 	return overlay
+}
+
+// decodeOwners reads the `global_enable_owners` list, dropping each entry
+// that is not an owner on its own and the whole list when it is not one.
+func (o *userOverlay) decodeOwners(ctx context.Context, raw json.RawMessage) []string {
+	var entries []string
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		o.reject(ctx, usersettings.GlobalEnableOwnersKey+": must be a list such as [\"gh/entireio\"]")
+		return nil
+	}
+	owners := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		owner, err := usersettings.ValidateOwner(entry)
+		if err != nil {
+			o.reject(ctx, fmt.Sprintf("%s: %v", usersettings.GlobalEnableOwnersKey, err))
+			continue
+		}
+		owners = append(owners, owner)
+	}
+	return owners
 }
 
 // withoutPerRepoKeys drops the keys `preferences` must not carry, each on its
@@ -436,6 +461,7 @@ func applyUserTier(settings *EntireSettings, overlay userOverlay, repoPrefs []*U
 	}
 	settings.userPromptOwnership = owned
 	settings.userLayerRejections = overlay.rejections
+	settings.globalEnableOwners = overlay.owners
 }
 
 // userPromptOwnership records which agent instruction fields came from the
@@ -508,6 +534,21 @@ func (s *EntireSettings) EnabledOnlyByGlobal() bool {
 // checkpoints captured here only through global enable may be pushed.
 func (s *EntireSettings) RepoPushConsent() bool {
 	return s != nil && s.repoPushConsent
+}
+
+// GlobalEnableOwners is the validated `global_enable_owners` list from the
+// user settings file: owners whose repositories' checkpoints global enable
+// pushes without asking.
+func (s *EntireSettings) GlobalEnableOwners() []string {
+	if s == nil {
+		return nil
+	}
+	return s.globalEnableOwners
+}
+
+// UserGlobalEnableOwners is GlobalEnableOwners without a repository.
+func UserGlobalEnableOwners(ctx context.Context) []string {
+	return loadUserOverlay(ctx).owners
 }
 
 // CommittedKeysIgnoredForGlobalEnable names the keys of the committed

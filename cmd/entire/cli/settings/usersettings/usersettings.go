@@ -279,11 +279,8 @@ func NormalizeOrigin(rawURL string) string {
 	if err != nil || info == nil || info.Owner == "" || info.Repo == "" {
 		return ""
 	}
-	prefix := info.Forge
-	if !gitremote.IsForgePathToken(prefix) {
-		prefix = info.CanonicalHost()
-	}
-	if prefix == "" {
+	prefix, ok := forgePrefix(info)
+	if !ok {
 		return ""
 	}
 	return strings.ToLower(prefix + "/" + info.Owner + "/" + info.Repo)
