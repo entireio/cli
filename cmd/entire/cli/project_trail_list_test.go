@@ -181,6 +181,36 @@ func TestProjectTrailListAgentHelpScope(t *testing.T) {
 	require.NotContains(t, out, "pass --repo only for a DIFFERENT repo")
 }
 
+func TestProjectTrailListShowsPhase(t *testing.T) {
+	setupProjectTrailTest(t, func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `{"items":[%s],"nextPageToken":null}`, projectTrailWireJSON("complete"))
+	})
+	out, _, err := executeProjectTrailTest(t, "list", "--project", "gh/acme")
+	require.NoError(t, err)
+	require.Regexp(t, `(?m)^PROJECT\s+NUMBER\s+ID\s+STATUS\s+PHASE\s+TITLE$`, out)
+	require.Regexp(t, `(?m)^gh/acme\s+42\s+`+projectTrailTestID+`\s+open\s+complete\s+Project intent$`, out)
+
+	js, _, err := executeProjectTrailTest(t, "list", "--project", "gh/acme", "--json")
+	require.NoError(t, err)
+	var page struct {
+		Items []map[string]any `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(js), &page))
+	require.Len(t, page.Items, 1)
+	require.Equal(t, "complete", page.Items[0]["phase"])
+	require.Equal(t, "2026-10-29T17:52:10Z", page.Items[0]["lastActivityAt"])
+	require.NotContains(t, page.Items[0], "updatedAt")
+}
+
+func TestProjectTrailListMissingPhaseIsDash(t *testing.T) {
+	setupProjectTrailTest(t, func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `{"items":[%s],"nextPageToken":null}`, projectTrailWireJSON(""))
+	})
+	out, _, err := executeProjectTrailTest(t, "list", "--project", "gh/acme")
+	require.NoError(t, err)
+	require.Regexp(t, `(?m)^gh/acme\s+42\s+`+projectTrailTestID+`\s+open\s+-\s+Project intent$`, out)
+}
+
 func TestProjectTrailListEmptyResponse(t *testing.T) {
 	setupProjectTrailTest(t, func(w http.ResponseWriter, _ *http.Request) {
 		assert.NoError(t, json.NewEncoder(w).Encode(api.ProjectTrailListResponse{}))

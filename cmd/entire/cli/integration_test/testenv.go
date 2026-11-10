@@ -984,6 +984,7 @@ func (env *TestEnv) gitCommitWithHooks(message string, simulateTTY bool, files .
 	// Run prepare-commit-msg hook using the shared binary.
 	// Pass source="message" to match real `git commit -m` behavior.
 	prepCmd := env.prepareCommitMsgCmd(simulateTTY, msgFile, "message")
+	prepCmd.Env = append(prepCmd.Env, gitNoEditorEnv)
 	if output, err := prepCmd.CombinedOutput(); err != nil {
 		env.T.Logf("prepare-commit-msg output: %s", output)
 		// Don't fail - hook may silently succeed
@@ -1033,6 +1034,9 @@ func (env *TestEnv) gitHookEnv(extra ...string) []string {
 	envVars := append(testutil.GitIsolatedEnv(),
 		"ENTIRE_TEST_OPENCODE_PROJECT_DIR="+env.OpenCodeProjectDir,
 		"ENTIRE_TEST_OPENCODE_MOCK_EXPORT=1",
+		// As for a commit that opens the editor, whatever the developer's
+		// shell exports; see gitNoEditorEnv.
+		"GIT_EDITOR=true",
 	)
 	// Propagate per-test overrides (e.g. agent project/store dirs) to hook
 	// subprocesses. Empty for tests that don't set ExtraEnv.
@@ -1041,10 +1045,15 @@ func (env *TestEnv) gitHookEnv(extra ...string) []string {
 	return append(envVars, extra...)
 }
 
+// gitNoEditorEnv is what git sets for its commit hooks when it does not open
+// the editor (-m/-F, --no-edit, -C); appended after gitHookEnv, it wins.
+const gitNoEditorEnv = "GIT_EDITOR=:"
+
 // GitCommitAmendWithHooks amends the last commit with Entire's git hooks.
 // This simulates `git commit --amend` with the prepare-commit-msg and post-commit hooks.
 // The prepare-commit-msg hook is called with "commit" source to indicate an amend.
-func (env *TestEnv) GitCommitAmendWithHooks(message string, files ...string) {
+// It returns the post-commit hook's combined output.
+func (env *TestEnv) GitCommitAmendWithHooks(message string, files ...string) string {
 	env.T.Helper()
 
 	// Stage any additional files
@@ -1101,9 +1110,11 @@ func (env *TestEnv) GitCommitAmendWithHooks(message string, files ...string) {
 	postCmd := exec.CommandContext(env.T.Context(), getTestBinary(), "hooks", "git", "post-commit")
 	postCmd.Dir = env.RepoDir
 	postCmd.Env = env.gitHookEnv()
-	if output, err := postCmd.CombinedOutput(); err != nil {
+	output, err := postCmd.CombinedOutput()
+	if err != nil {
 		env.T.Logf("post-commit (amend) output: %s", output)
 	}
+	return string(output)
 }
 
 // GitPostRewriteWithHooks runs the git post-rewrite hook with the provided
@@ -1244,6 +1255,7 @@ func (env *TestEnv) gitCommitStagedWithHooks(message string, simulateTTY bool) {
 
 	// Run prepare-commit-msg hook using the shared binary.
 	prepCmd := env.prepareCommitMsgCmd(simulateTTY, msgFile, "message")
+	prepCmd.Env = append(prepCmd.Env, gitNoEditorEnv)
 	if output, err := prepCmd.CombinedOutput(); err != nil {
 		env.T.Logf("prepare-commit-msg output: %s", output)
 	}

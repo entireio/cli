@@ -2176,6 +2176,139 @@ func (s *GitStore) getCheckpointFetchingTree(ctx context.Context, checkpointID i
 	return nil, ErrCheckpointNotFound
 }
 
+// ErrLegacyCheckpointDiverged reports that the local v1 branch and a
+// remote-tracking copy of it both changed a checkpoint since they split, so
+// neither copy can be taken as the checkpoint's current state.
+var ErrLegacyCheckpointDiverged = errors.New("the checkpoint changed on both the local and a remote-tracking " +
+	paths.MetadataBranchName + " branch since they split, so it is not copied into its own ref; " +
+	"either copy would hide the other's sessions")
+
+// LegacyCheckpointDivergedError is ErrLegacyCheckpointDiverged for one
+// checkpoint, naming the two v1 refs whose copies both changed it, in read
+// precedence.
+type LegacyCheckpointDivergedError struct {
+	CheckpointID id.CheckpointID
+	Refs         [2]plumbing.ReferenceName
+}
+
+func (e *LegacyCheckpointDivergedError) Error() string {
+	return fmt.Sprintf("checkpoint %s on %s and %s: %v", e.CheckpointID, e.Refs[0], e.Refs[1], ErrLegacyCheckpointDiverged)
+}
+
+func (e *LegacyCheckpointDivergedError) Unwrap() error { return ErrLegacyCheckpointDiverged }
+
+// checkpointSubtreeHash returns the hash of checkpointID's subtree as a copy
+// from v1 into its own ref takes it. It considers the same tiers as reads (see
+// getSessionsBranchTrees), but where reads stop at the first tier holding the
+// checkpoint, this takes the tier that changed it last. Under git-refs nothing
+// advances the local branch while a plain git fetch still advances its
+// remote-tracking copy, and a stale copy, once pushed as the checkpoint's ref,
+// hides newer sessions from every clone that reads refs first. When two tiers
+// both changed the checkpoint since their merge base, it returns
+// ErrLegacyCheckpointDiverged.
+func (s *GitStore) checkpointSubtreeHash(ctx context.Context, checkpointID id.CheckpointID) (plumbing.Hash, error) {
+	trees, err := s.getSessionsBranchTrees(ctx)
+	if err != nil {
+		return plumbing.ZeroHash, err
+	}
+	picked, _, err := s.pickCheckpointCopy(ctx, trees, checkpointID, mergeBases)
+	if err != nil {
+		return plumbing.ZeroHash, err
+	}
+	return picked.subtree, nil
+}
+
+// pickCheckpointCopy is checkpointSubtreeHash over trees already resolved, so a
+// caller visiting many checkpoints resolves the tiers once. When two tiers both
+// changed the checkpoint it returns ErrLegacyCheckpointDiverged together with
+// those two copies, in read precedence.
+func (s *GitStore) pickCheckpointCopy(ctx context.Context, trees []metadataTree, checkpointID id.CheckpointID, bases mergeBaseFunc) (picked *checkpointCopy, diverged [2]*checkpointCopy, err error) {
+	for _, entry := range trees {
+		subtree, ok := s.subtreeIn(ctx, entry.tree, checkpointID)
+		if !ok {
+			continue
+		}
+		candidate := &checkpointCopy{ref: entry.ref, commit: entry.commit, subtree: subtree}
+		if picked == nil {
+			picked = candidate
+			continue
+		}
+		if picked.subtree == candidate.subtree {
+			continue
+		}
+		later, err := s.laterCheckpointCopy(ctx, checkpointID, picked, candidate, bases)
+		if errors.Is(err, ErrLegacyCheckpointDiverged) {
+			return nil, [2]*checkpointCopy{picked, candidate}, err
+		}
+		if err != nil {
+			return nil, diverged, err
+		}
+		picked = later
+	}
+	if picked == nil {
+		return nil, diverged, ErrCheckpointNotFound
+	}
+	return picked, diverged, nil
+}
+
+// mergeBaseFunc returns the merge bases of two v1 tips. A caller comparing
+// many checkpoints passes a cached one, since every checkpoint compares the
+// same tips.
+type mergeBaseFunc func(a, b *object.Commit) ([]*object.Commit, error)
+
+func mergeBases(a, b *object.Commit) ([]*object.Commit, error) {
+	return a.MergeBase(b) //nolint:wrapcheck // the caller wraps it with both refs
+}
+
+// checkpointCopy is one v1 tier's copy of a checkpoint.
+type checkpointCopy struct {
+	ref     plumbing.ReferenceName
+	commit  *object.Commit
+	subtree plumbing.Hash
+}
+
+// laterCheckpointCopy returns whichever of a and b holds the checkpoint as last
+// changed: the other must still hold it as it was at every merge base of the
+// two commits. Otherwise both changed it, and it returns
+// ErrLegacyCheckpointDiverged.
+func (s *GitStore) laterCheckpointCopy(ctx context.Context, checkpointID id.CheckpointID, a, b *checkpointCopy, mergeBase mergeBaseFunc) (*checkpointCopy, error) {
+	bases, err := mergeBase(a.commit, b.commit)
+	if err != nil {
+		return nil, fmt.Errorf("merge base of %s and %s: %w", a.ref, b.ref, err)
+	}
+	aUnchanged, bUnchanged := len(bases) > 0, len(bases) > 0
+	for _, base := range bases {
+		tree, err := base.Tree()
+		if err != nil {
+			return nil, fmt.Errorf("read %s tree at merge base %s: %w", paths.MetadataBranchName, base.Hash, err)
+		}
+		atBase, ok := s.subtreeIn(ctx, tree, checkpointID)
+		if !ok {
+			atBase = plumbing.ZeroHash
+		}
+		aUnchanged = aUnchanged && a.subtree == atBase
+		bUnchanged = bUnchanged && b.subtree == atBase
+	}
+	switch {
+	case aUnchanged:
+		return b, nil
+	case bUnchanged:
+		return a, nil
+	default:
+		return nil, &LegacyCheckpointDivergedError{CheckpointID: checkpointID, Refs: [2]plumbing.ReferenceName{a.ref, b.ref}}
+	}
+}
+
+// subtreeIn returns checkpointID's subtree hash in a metadata branch root tree,
+// resolved like reads (see getCheckpointFetchingTree).
+func (s *GitStore) subtreeIn(ctx context.Context, root *object.Tree, checkpointID id.CheckpointID) (plumbing.Hash, bool) {
+	subtree, err := NewFetchingTree(ctx, root, s.repo.Storer, s.blobFetcher).Tree(checkpointID.Path())
+	if err != nil {
+		return plumbing.ZeroHash, false
+	}
+	return subtree.Hash(), true
+}
+
 // getSessionsBranchTree returns the first available committed metadata tree. See
 // getSessionsBranchTrees for the precedence and recovery it delegates to.
 func (s *GitStore) getSessionsBranchTree(ctx context.Context) (*object.Tree, error) {
@@ -2258,8 +2391,9 @@ func anyTreeHasCheckpointData(trees []metadataTree) bool {
 // chain carries is a wrong-tier read going unnoticed, and "silently" is the
 // part observability removes.
 type metadataTree struct {
-	tree *object.Tree
-	ref  plumbing.ReferenceName
+	tree   *object.Tree
+	commit *object.Commit
+	ref    plumbing.ReferenceName
 }
 
 // local reports whether this tree came from the local read ref rather than a
@@ -2320,7 +2454,7 @@ func (s *GitStore) resolveSessionsBranchTrees() ([]metadataTree, error) {
 		}
 		seen[ref.Hash()] = struct{}{}
 		kept = append(kept, commit)
-		trees = append(trees, metadataTree{tree: tree, ref: refName})
+		trees = append(trees, metadataTree{tree: tree, commit: commit, ref: refName})
 	}
 	return trees, firstErr
 }

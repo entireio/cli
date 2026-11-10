@@ -25,6 +25,7 @@ func newProjectCmd() *cobra.Command {
 	cmd.AddCommand(newProjectGetCmd())
 	cmd.AddCommand(newProjectDeleteCmd())
 	cmd.AddCommand(newProjectGrantCmd())
+	cmd.AddCommand(newProjectAgentCmd())
 	return cmd
 }
 
@@ -44,10 +45,12 @@ func newProjectCreateCmd() *cobra.Command {
 			"owning org (by name) or account (github:handle), and --owner-type " +
 			"selects which (org or account).\n\n" +
 			"With both a name and --owner the project is created directly. " +
-			"Run in an interactive terminal without --owner, --owner-type or " +
-			"--region (optionally with a name), a wizard asks for the owner, name " +
-			"and region; those flags always mean the flag form, so one given with " +
-			"a missing name or --owner is an error.\n\n" +
+			"Run in an interactive terminal without --owner, --owner-type, " +
+			"--region or --cell (optionally with a name), a wizard asks for the " +
+			"owner, name and region; those flags always mean the flag form, so one " +
+			"given with a missing name or --owner is an error.\n\n" +
+			"--cell picks the processing cell (e.g. aws-us-east-2) instead of " +
+			"the region's default. The cell must be in the project's region.\n\n" +
 			"Project names are 3-32 lowercase letters, digits or hyphens, starting " +
 			"and ending with a letter or digit, can't look like an id, and are " +
 			"unique across all owners. The wizard lowercases a typed name and " +
@@ -56,6 +59,8 @@ func newProjectCreateCmd() *cobra.Command {
 			"  entire project create widgets --owner acme --owner-type org\n\n" +
 			"  # Project owned by an account (by handle)\n" +
 			"  entire project create widgets --owner github:alice --owner-type account\n\n" +
+			"  # Project in a specific processing cell\n" +
+			"  entire project create widgets --owner acme --region us --cell aws-us-east-2\n\n" +
 			"  # Pick the owner and region interactively\n" +
 			"  entire project create widgets",
 		Args: cobra.RangeArgs(0, 1),
@@ -82,9 +87,10 @@ func newProjectCreateCmd() *cobra.Command {
 			return runProjectCreateWizard(cmd, in.name)
 		},
 	}
-	cmd.Flags().StringVar(&in.owner, "owner", "", "Owning org (name), or account (github:handle) (required; run in a terminal without --owner, --owner-type or --region to be asked instead)")
+	cmd.Flags().StringVar(&in.owner, "owner", "", "Owning org (name), or account (github:handle) (required; run in a terminal without --owner, --owner-type, --region or --cell to be asked instead)")
 	cmd.Flags().StringVar(&in.ownerType, "owner-type", ownerTypeOrg, "Owner kind: org or account")
 	cmd.Flags().StringVar(&in.region, "region", "", "Jurisdiction slug (defaults to the server's jurisdiction; the wizard suggests the owner's region)")
+	cmd.Flags().StringVar(&in.cell, "cell", "", "Processing cell ID, e.g. aws-us-east-2 (defaults to the region's default cell; must be in the region)")
 	addJSONFlag(cmd)
 	return cmd
 }
@@ -107,7 +113,7 @@ func projectCreateMissingErr(in projectCreateInput) error {
 	return fmt.Errorf("%s %s required:\n"+
 		"  entire project create <name> --owner <org>\n"+
 		"  entire project create <name> --owner github:<handle> --owner-type account\n"+
-		"or run 'entire project create' in a terminal, without --owner, --owner-type or --region, to be asked",
+		"or run 'entire project create' in a terminal, without --owner, --owner-type, --region or --cell, to be asked",
 		strings.Join(missing, " and "), verb)
 }
 
@@ -144,22 +150,52 @@ func createProjectDirect(cmd *cobra.Command, in projectCreateInput, ot coreapi.C
 		if in.region != "" {
 			body.Region = coreapi.NewOptString(in.region)
 		}
+		if in.cell != "" {
+			body.Cell = coreapi.NewOptString(in.cell)
+		}
 		created, err := c.CreateProject(ctx, body)
 		if err != nil {
 			return err
 		}
 		project := &created.Response
-		return printProjectCreated(cmd, project)
+		if err := printProjectCreated(cmd, project); err != nil {
+			return err
+		}
+		return checkCreatedCell(in.cell, project)
 	})
+}
+
+// checkCreatedCell fails a --cell create that landed elsewhere. A core that
+// predates the cell field ignores it and assigns the default cell, so the
+// project exists but not where the caller asked.
+func checkCreatedCell(want string, project *coreapi.CreatedProject) error {
+	if want == "" {
+		return nil
+	}
+	got := project.PrimaryProcessingCell.Or("")
+	if got == want {
+		return nil
+	}
+	if got == "" {
+		got = "no cell"
+	} else {
+		got = "cell " + got
+	}
+	return fmt.Errorf("project %s was created in %s, not %s; the server ignored --cell", project.Name, got, want)
 }
 
 // printProjectCreated renders a created project the way runCoreMutation renders
 // any mutation: the wire object under --json, else a ✓ line naming the project
 // the way every command takes it (its name, unique across owners) and the
 // region it landed in, which the flag form leaves to the server. Never by id.
+// The cell is shown so a --cell caller can confirm the server honoured it.
 func printProjectCreated(cmd *cobra.Command, project *coreapi.CreatedProject) error {
 	if jsonRequested(cmd) {
 		return printJSON(cmd.OutOrStdout(), project)
+	}
+	if cell := project.PrimaryProcessingCell.Or(""); project.Region != "" && cell != "" {
+		fmt.Fprintf(cmd.OutOrStdout(), "✓ Created project %s in %s, cell %s\n", project.Name, project.Region, cell)
+		return nil
 	}
 	if project.Region != "" {
 		fmt.Fprintf(cmd.OutOrStdout(), "✓ Created project %s in %s\n", project.Name, project.Region)

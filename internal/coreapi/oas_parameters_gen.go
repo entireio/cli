@@ -55,6 +55,11 @@ type CreateRepoCIWebhookParams struct {
 	RepoId string
 }
 
+// CreateServiceAccountSecretParams is parameters of createServiceAccountSecret operation.
+type CreateServiceAccountSecretParams struct {
+	AccountId string
+}
+
 // DeleteBindingParams is parameters of deleteBinding operation.
 type DeleteBindingParams struct {
 	AccountId string
@@ -126,6 +131,12 @@ type DeleteRepoCIWebhookParams struct {
 // DeleteServiceAccountParams is parameters of deleteServiceAccount operation.
 type DeleteServiceAccountParams struct {
 	AccountId string
+}
+
+// DeleteServiceAccountSecretParams is parameters of deleteServiceAccountSecret operation.
+type DeleteServiceAccountSecretParams struct {
+	AccountId string
+	SecretID  string
 }
 
 // DetachMyHandleParams is parameters of detachMyHandle operation.
@@ -634,13 +645,25 @@ type ListServiceAccountGrantsParams struct {
 	AccountId string
 }
 
+// ListServiceAccountSecretsParams is parameters of listServiceAccountSecrets operation.
+type ListServiceAccountSecretsParams struct {
+	AccountId string
+	// Opaque cursor from a previous response's next_cursor.
+	Cursor OptString `json:",omitempty,omitzero"`
+	// Secrets per page.
+	PerPage OptInt64 `json:",omitempty,omitzero"`
+}
+
 // ListServiceAccountsParams is parameters of listServiceAccounts operation.
 type ListServiceAccountsParams struct {
 	// Maximum entries to return; server may cap further.
 	PageSize OptInt32 `json:",omitempty,omitzero"`
 	// Opaque cursor from a previous response's nextPageToken.
 	PageToken OptString `json:",omitempty,omitzero"`
-	OrgId     string
+	// List the org's service accounts.
+	OrgId OptString `json:",omitempty,omitzero"`
+	// List the project's service accounts.
+	ProjectID OptString `json:",omitempty,omitzero"`
 }
 
 // LookupRepoBySlugParams is parameters of lookupRepoBySlug operation.

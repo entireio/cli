@@ -29,6 +29,7 @@ type TrailResource struct {
 	Title              string                `json:"title"`
 	Body               string                `json:"body,omitempty"`
 	Status             string                `json:"status"`
+	ReadyForReview     *bool                 `json:"ready_for_review,omitempty"` // nil when the server omits it
 	Phase              string                `json:"phase,omitempty"`
 	Author             *trail.Author         `json:"author"`
 	Assignees          []string              `json:"assignees"`
@@ -51,6 +52,9 @@ type TrailResource struct {
 	// review-target resolution, ...) does not depend on the snapshot's shape;
 	// only `trail show` reads it, through DecodeMergeability.
 	Mergeability json.RawMessage `json:"mergeability,omitempty"`
+	// Agents is detail-only too, and raw for the same reason: `trail finding`
+	// passes it through to --json and reads it through DecodeAgents.
+	Agents json.RawMessage `json:"agents,omitempty"`
 	// FromDetail reports that the resource was decoded from the detail route
 	// rather than a list page. It is the reliable marker: body_document can be
 	// absent from a valid detail response.
@@ -72,7 +76,7 @@ type TrailBodyDocument struct {
 // DecodeMergeability decodes the detail resource's mergeability snapshot. It
 // returns nil, nil when the snapshot is absent or null.
 func (r *TrailResource) DecodeMergeability() (*TrailMergeability, error) {
-	if len(r.Mergeability) == 0 || string(r.Mergeability) == "null" {
+	if RawJSONAbsent(r.Mergeability) {
 		return nil, nil //nolint:nilnil // nil, nil means "no snapshot served"
 	}
 	var m TrailMergeability
@@ -80,6 +84,12 @@ func (r *TrailResource) DecodeMergeability() (*TrailMergeability, error) {
 		return nil, fmt.Errorf("decode trail mergeability: %w", err)
 	}
 	return &m, nil
+}
+
+// RawJSONAbsent reports a detail-only field the read did not carry: missing
+// or null.
+func RawJSONAbsent(raw json.RawMessage) bool {
+	return len(raw) == 0 || string(raw) == "null"
 }
 
 // ToMetadata converts a TrailResource to display metadata.
@@ -140,6 +150,12 @@ type TrailUpdateRequest struct {
 	RequestedReviewers *[]string `json:"requested_reviewers,omitempty"`
 	Type               *string   `json:"type,omitempty"`
 	Priority           *string   `json:"priority,omitempty"`
+	// ReadyForReview marks the change ready (true) or back to draft (false).
+	// The server keeps it false on a repository without an approval gate, but
+	// still applies the matching draft state to a backing pull request.
+	ReadyForReview *bool `json:"ready_for_review,omitempty"`
+	// Base retargets the change onto another base branch.
+	Base *string `json:"base,omitempty"`
 }
 
 type TrailUpdateResponse struct {
@@ -196,7 +212,7 @@ func (a *TrailApproval) UnmarshalJSON(data []byte) error {
 	if wire.Body != nil {
 		a.Body = *wire.Body
 	}
-	if len(wire.Author) == 0 || string(wire.Author) == "null" {
+	if RawJSONAbsent(wire.Author) {
 		return nil
 	}
 	if err := json.Unmarshal(wire.Author, &a.Author); err == nil {

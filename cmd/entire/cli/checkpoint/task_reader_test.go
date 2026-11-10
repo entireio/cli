@@ -79,7 +79,7 @@ func TestTaskReader_ListsAndReadsTaskRecords(t *testing.T) {
 			name: "kind routing store, git-refs primary",
 			build: func(repo *git.Repository) taskReaderStore {
 				refs := newGitRefsStore(repo)
-				return newKindRoutingStore(refs, NewGitStore(repo, DefaultV1Refs()), refs, BackendTypeGitRefs)
+				return newKindRoutingStore(refs, NewGitStore(repo, DefaultV1Refs()), refs, BackendTypeGitRefs, nil)
 			},
 		},
 		{
