@@ -912,39 +912,60 @@ When condensing multiple concurrent sessions:
 - `files_touched` is merged from all sessions
 
 `entire session attach <id> [--commit <rev>]` (default HEAD) picks how to
-link from two facts about the target commit, the same for HEAD and `--commit`
-(`planAttachLink`):
+link from the target commit, the same for HEAD and `--commit`
+(`planAttachLink`). The trailer is the link to aim for: it is stable across a
+later rebase, where a SHA recorded in the checkpoint is not, so attach never
+chooses a recorded link for the user.
 - the commit already carries an `Entire-Checkpoint` trailer: the session joins
   that checkpoint, and history is unchanged. If a remote branch holds the
   commit, the checkpoint is pushed now (there may be no later push of the
-  commit to carry it); otherwise it goes with the next git push;
-- a remote branch already holds the commit: the link is recorded in a new
-  checkpoint (or joins one an earlier attach recorded for it) and the commit
-  is left unchanged, so nothing needs a force-push;
-- no remote holds it: the trailer is added, rewriting the commit and every
-  commit after it up to HEAD (`attachRewriteChain`, `rewriteWithTrailer`).
-  The replay reuses each tree, author and message through `git commit-tree`
-  and moves the branch with a compare-and-swap `update-ref`, so the worktree
-  and index are untouched and no commit hooks run; session state naming the
-  old commits is remapped through `PostRewrite`. Merges after the target, a
-  target off the current branch, and an operation in progress (rebase, merge,
-  cherry-pick, revert, bisect) are refused, as is a commit with a non-UTF-8
-  encoding or extra headers, which `commit-tree` can't reproduce. "No remote
-  holds it" means no remote-tracking ref of any remote contains the commit,
-  and none of the remotes the branch pushes to (its upstream and push remotes,
-  else `origin`, else every remote) has a branch containing it: attach fetches
-  those and asks each directly, fetching only branches whose tips aren't local
-  (single-branch clones don't track every branch). If one can't be reached it
-  refuses rather than rewrite a commit it couldn't check. The checkpoint of a
-  pushed commit goes to the branch's remote even when only another remote
-  (upstream in a fork) holds the commit.
+  commit to carry it); otherwise it goes with the next git push. A pushed
+  commit an earlier attach recorded a link to joins that checkpoint the same
+  way;
+- otherwise the trailer is added, rewriting the commit and every commit after
+  it up to HEAD (`attachRewriteChain`, `rewriteWithTrailer`). The replay
+  reuses each tree, author and message through `git commit-tree` and moves the
+  branch with a compare-and-swap `update-ref`, so the worktree and index are
+  untouched and no commit hooks run; session state naming the old commits is
+  remapped through `PostRewrite`. Merges after the target, a target off the
+  current branch, and an operation in progress (rebase, merge, cherry-pick,
+  revert, bisect) are refused, as is a commit with a non-UTF-8 encoding or
+  extra headers, which `commit-tree` can't reproduce;
+- a commit already pushed to a feature branch is rewritten the same way
+  (`planPushedCommitLink`): the confirmation names the remote branches that
+  hold it and says the user replaces it with `git push --force-with-lease`.
+  Attach pushes nothing itself; the checkpoint goes out with that push;
+- a commit on a remote's default branch is never rewritten: attach refuses,
+  changes nothing, and names `--link-without-trailer` with its caveats
+  (`defaultBranchRefusal`). "On a default branch" means reachable from the tip
+  of the branch a remote's HEAD names (`defaultBranchContaining`): the remotes
+  the branch pushes to are asked directly with `ls-remote --symref`, and other
+  remotes (upstream in a fork) are judged from their tracking refs
+  (`<remote>/HEAD`, else `main`, else `master`). If a remote the branch pushes
+  to can't name its default branch, attach refuses rather than guess.
+
+"Pushed" means a remote-tracking ref of any remote contains the commit, or one
+of the remotes the branch pushes to (its upstream and push remotes, else
+`origin`, else every remote) has a branch containing it: attach fetches those
+and asks each directly, fetching only branches whose tips aren't local
+(single-branch clones don't track every branch). If one can't be reached for
+an apparently unpushed commit, it refuses rather than rewrite a commit it
+couldn't check. Right before rewriting, after the prompt, attach asks again
+(`recheckBeforeRewrite`): an unpushed commit that was pushed meanwhile, or a
+feature commit that reached a default branch meanwhile, is not rewritten.
+
+`--link-without-trailer` is the explicit opt-out: the commit is left unchanged
+and its SHA is recorded in a new checkpoint, on any branch. It exists for the
+default-branch case; agent-help tells agents never to pass it on their own.
+The checkpoint of a pushed commit goes to the branch's remote even when only
+another remote (upstream in a fork) holds the commit.
 
 Before writing anything attach prints what it will do (`attachWarning`): the
-commits it rewrites, or the remote that holds the commit and that the
-transcript is pushed now, plus author and rebase caveats. It asks on a
-terminal; without one (an agent, a script) it changes nothing and exits
-non-zero unless `--force` is passed, and agent-help tells agents to show the
-user that output and pass `--force` only once they agree.
+commits it rewrites and any force-push that needs, or for a recorded link what
+it gives up against a trailer, plus where and when the transcript is pushed.
+It asks on a terminal; without one (an agent, a script) it changes nothing and
+exits non-zero unless `--force` is passed, and agent-help tells agents to show
+the user that output and pass `--force` only once they agree.
 
 A session can be attached to several commits. Each checkpoint records the
 turns since the session's previous checkpoint: the window starts at the

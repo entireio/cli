@@ -135,8 +135,10 @@ func replayable(c *object.Commit) bool {
 	return (c.Encoding == "" || strings.EqualFold(string(c.Encoding), "UTF-8")) && len(c.ExtraHeaders) == 0
 }
 
-// rewriteWarning describes adding a trailer to chain[0], for confirmAttach.
-func rewriteWarning(ctx context.Context, chain []*object.Commit, checkedRemotes []string) []string {
+// rewriteWarning describes adding a trailer to plan's commit, for
+// confirmAttach.
+func rewriteWarning(ctx context.Context, plan attachLinkPlan) []string {
+	chain := plan.rewrite
 	target := chain[0]
 	lines := []string{"This rewrites git history: commit " + describeCommit(target) + " gets an Entire-Checkpoint trailer."}
 	if len(chain) > 1 {
@@ -150,8 +152,11 @@ func rewriteWarning(ctx context.Context, chain []*object.Commit, checkedRemotes 
 	} else {
 		lines = append(lines, "Their SHAs change; their content doesn't.")
 	}
-	if len(checkedRemotes) > 0 {
-		lines = append(lines, fmt.Sprintf("It isn't on %s. If you pushed it somewhere else, rewriting it means a force-push there.", strings.Join(checkedRemotes, ", ")))
+	switch {
+	case plan.holder != "":
+		lines = append(lines, pushedRewriteWarning(ctx, plan)...)
+	case len(plan.checkedRemotes) > 0:
+		lines = append(lines, fmt.Sprintf("It isn't on %s. If you pushed it somewhere else, rewriting it means a force-push there.", strings.Join(plan.checkedRemotes, ", ")))
 	}
 	if others := otherRefsContaining(ctx, target); len(others) > 0 {
 		lines = append(lines, "These keep the old commits: "+strings.Join(others, ", "))
@@ -177,6 +182,21 @@ func rewriteWarning(ctx context.Context, chain []*object.Commit, checkedRemotes 
 		lines = append(lines, losing...)
 	}
 	return lines
+}
+
+// pushedRewriteWarning explains rewriting a commit already pushed to a feature
+// branch: the push that follows must replace it, and other branches built on
+// it keep the old commits.
+func pushedRewriteWarning(ctx context.Context, plan attachLinkPlan) []string {
+	where := plan.holder
+	if branches := remoteBranchesContaining(ctx, plan.target); len(branches) > 0 {
+		where = strings.Join(branches, ", ")
+	}
+	lines := []string{
+		fmt.Sprintf("It is already pushed (%s), though not to a default branch. Afterwards, replace it there with 'git push --force-with-lease'.", where),
+		"Anyone who has built on the pushed commits has to rebase onto the rewritten ones.",
+	}
+	return append(lines, fmt.Sprintf("To keep the pushed commit unchanged instead, rerun with --%s; that records a link that a rebase or amend loses.", linkWithoutTrailerFlag))
 }
 
 // yourGitEmail is the email git commits as for the user, from user.email,

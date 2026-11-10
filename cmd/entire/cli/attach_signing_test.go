@@ -445,7 +445,7 @@ func TestRewriteWarning_SaysWhichSignedCommitsKeepTheirSignature(t *testing.T) {
 	theirs := signedCommitAt(t, "theirs.txt", other, "-c", "user.name=Someone Else", "-c", "user.email=someone@example.com")
 	altered := alteredAfterSigning(t, signedCommitAt(t, "altered.txt", yours))
 
-	got := strings.Join(rewriteWarning(context.Background(), []*object.Commit{mine, theirs, altered}, nil), "\n")
+	got := strings.Join(rewriteWarning(context.Background(), attachLinkPlan{rewrite: []*object.Commit{mine, theirs, altered}}), "\n")
 	if !strings.Contains(got, "Commits you signed are signed again if your signing key made their signature") {
 		t.Errorf("expected the user's signed commits to be re-signed, got:\n%s", got)
 	}
@@ -456,7 +456,7 @@ func TestRewriteWarning_SaysWhichSignedCommitsKeepTheirSignature(t *testing.T) {
 		t.Errorf("expected %s and %s listed as losing their signatures, got:\n%s", theirs.Hash.String()[:12], altered.Hash.String()[:12], got)
 	}
 
-	if got := rewriteWarning(context.Background(), []*object.Commit{commitAt(t, "plain.txt")}, nil); strings.Contains(strings.Join(got, "\n"), "sign") {
+	if got := rewriteWarning(context.Background(), attachLinkPlan{rewrite: []*object.Commit{commitAt(t, "plain.txt")}}); strings.Contains(strings.Join(got, "\n"), "sign") {
 		t.Errorf("an unsigned commit needs no signature line, got:\n%s", strings.Join(got, "\n"))
 	}
 }
