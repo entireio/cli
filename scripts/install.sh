@@ -356,7 +356,7 @@ fetch_release_from_origin() {
         return 1
     fi
 
-    expected_checksum=$(grep -iE "${archive_name}\$" "$checksums_path" | awk '{print $1}' || true)
+    expected_checksum=$(awk -v n="$archive_name" '$2 == n || $2 == "*" n { print $1; exit }' "$checksums_path" || true)
     if [[ -z "$expected_checksum" ]]; then
         warn "checksums.txt from ${label} does not list ${archive_name}"
         return 1
