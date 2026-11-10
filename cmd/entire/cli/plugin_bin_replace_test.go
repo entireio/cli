@@ -370,3 +370,93 @@ func TestInstallPluginFromPath_WaitsForPluginTreeLock(t *testing.T) { //nolint:p
 		t.Fatal("install still blocked after the lock was released")
 	}
 }
+
+// Ctrl-C (a cancelled ctx with no deadline, like main's root ctx) stops a wait
+// for the tree lock instead of blocking until the other holder finishes.
+func TestLockPluginTree_CancelStopsTheWait(t *testing.T) { //nolint:paralleltest // mutates env
+	withPluginDir(t)
+	release, err := lockPluginTree(context.Background(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		rel, err := lockPluginTree(ctx, true)
+		if err == nil {
+			rel()
+		}
+		done <- err
+	}()
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("lockPluginTree after cancel = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("lockPluginTree ignored the cancelled ctx while another holder had the lock")
+	}
+}
+
+// When the install fails before replacing the pkg binary, restore keeps that
+// binary and drops the hard-linked backup instead of renaming it back on top:
+// on Windows that rename fails while the binary runs, and on Unix it is a
+// no-op that leaves the .old- link behind.
+func TestPkgInstallBackup_RestoreWithUntouchedLinkedBinary(t *testing.T) { //nolint:paralleltest // mutates env
+	withPluginDir(t)
+	if _, err := EnsurePluginPkgDir("foo"); err != nil {
+		t.Fatal(err)
+	}
+	root, err := pluginRoot(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkgName, err := pluginPkgName("foo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binBase := pluginBinaryName("foo")
+	if err := writeExecutable(root, pkgName+"/"+binBase, strings.NewReader("previous")); err != nil {
+		t.Fatal(err)
+	}
+	b, err := stashPreviousPkgInstall(root, pkgName, binBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !b.linked {
+		t.Skip("filesystem without hard links; the moved-aside path is covered elsewhere")
+	}
+	if err := b.restore(); err != nil {
+		t.Fatalf("restore with an untouched binary = %v, want nil", err)
+	}
+	data, err := root.ReadFile(b.binName)
+	if err != nil || string(data) != "previous" {
+		t.Errorf("pkg binary after restore = %q (%v), want previous", data, err)
+	}
+	pkgDir, err := PluginPkgDir("foo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := countAsideEntries(t, pkgDir); n != 0 {
+		t.Errorf("pkg dir holds %d .old- entries after restore, want 0", n)
+	}
+}
+
+func countAsideEntries(t *testing.T, dir string) int {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".old-") {
+			n++
+		}
+	}
+	return n
+}

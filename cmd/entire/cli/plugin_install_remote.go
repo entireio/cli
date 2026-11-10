@@ -319,6 +319,7 @@ type pkgInstallBackup struct {
 	root         *os.Root
 	binName      string
 	asideName    string // "" when there was no previous binary
+	linked       bool   // asideName is a second hard link, binName untouched by the stash
 	manifestName string
 	manifest     []byte // nil when there was no previous manifest
 }
@@ -353,7 +354,8 @@ func stashPreviousPkgInstall(root *os.Root, pkgName, binBase string) (*pkgInstal
 		}
 		return nil, fmt.Errorf("stat previous plugin binary: %w", err)
 	}
-	if err := pkgBackupLink(root, b.binName, aside); err != nil {
+	b.linked = pkgBackupLink(root, b.binName, aside) == nil
+	if !b.linked {
 		if err := root.Rename(b.binName, aside); err != nil {
 			return nil, fmt.Errorf("move previous plugin binary aside: %w", err)
 		}
@@ -367,7 +369,14 @@ func stashPreviousPkgInstall(root *os.Root, pkgName, binBase string) (*pkgInstal
 // a failed first install leaves no manifest claiming success.
 func (b *pkgInstallBackup) restore() error {
 	var errs []error
-	if b.asideName != "" {
+	if b.binaryUntouched() {
+		// The install failed before replacing binName, so it is still the
+		// previous binary: drop the extra link. Renaming the link back would
+		// fail on Windows while that binary runs ("Access is denied"), and
+		// on Unix renaming a link onto its own file is a no-op that leaves
+		// the .old- link behind.
+		_ = b.root.Remove(b.asideName) //nolint:errcheck // swept on a later install
+	} else if b.asideName != "" {
 		if err := b.root.Rename(b.asideName, b.binName); err != nil {
 			errs = append(errs, fmt.Errorf("restore previous plugin binary: %w", err))
 		}
@@ -382,6 +391,20 @@ func (b *pkgInstallBackup) restore() error {
 		errs = append(errs, fmt.Errorf("remove plugin manifest: %w", err))
 	}
 	return errors.Join(errs...)
+}
+
+// binaryUntouched reports whether binName is still the very file the stash
+// hard-linked aside, i.e. nothing replaced it.
+func (b *pkgInstallBackup) binaryUntouched() bool {
+	if !b.linked {
+		return false
+	}
+	aside, err := b.root.Lstat(b.asideName)
+	if err != nil {
+		return false
+	}
+	cur, err := b.root.Lstat(b.binName)
+	return err == nil && os.SameFile(aside, cur)
 }
 
 // discard drops the previous binary once the new install is complete. On

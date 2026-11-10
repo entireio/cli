@@ -8,25 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 )
-
-// countOldEntries counts rename-aside leftovers in dir.
-func countOldEntries(t *testing.T, dir string) int {
-	t.Helper()
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	n := 0
-	for _, e := range entries {
-		if strings.Contains(e.Name(), ".old-") {
-			n++
-		}
-	}
-	return n
-}
 
 // Upgrading a plugin while its executable runs: MoveFileEx cannot replace a
 // running image, so before the rename-aside fallback the bin\ swap failed with
@@ -89,7 +72,7 @@ func TestUpgrade_WindowsReplacesRunningPluginExecutable(t *testing.T) { //nolint
 	}
 	// The running image is normally left behind as one .old- entry (it cannot
 	// be deleted while mapped); it must never be more than that.
-	if n := countOldEntries(t, binDir); n > 1 {
+	if n := countAsideEntries(t, binDir); n > 1 {
 		t.Errorf("bin dir holds %d .old- entries while the old version runs, want at most 1", n)
 	}
 
@@ -104,7 +87,7 @@ func TestUpgrade_WindowsReplacesRunningPluginExecutable(t *testing.T) { //nolint
 		t.Fatal(err)
 	}
 	for _, dir := range []string{binDir, pkgDir} {
-		if n := countOldEntries(t, dir); n != 0 {
+		if n := countAsideEntries(t, dir); n != 0 {
 			t.Errorf("%s still holds %d .old- entries after the next install", dir, n)
 		}
 	}
@@ -167,7 +150,7 @@ func TestInstallPluginFromPath_WindowsReplacesRunningCopiedEntry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := countOldEntries(t, binDir); n != 1 {
+	if n := countAsideEntries(t, binDir); n != 1 {
 		t.Errorf("bin dir holds %d .old- entries while the old copy runs, want 1", n)
 	}
 
@@ -175,7 +158,7 @@ func TestInstallPluginFromPath_WindowsReplacesRunningCopiedEntry(t *testing.T) {
 	if _, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: writeSource([]byte("newer")), Force: true}); err != nil {
 		t.Fatalf("reinstall after exit: %v", err)
 	}
-	if n := countOldEntries(t, binDir); n != 0 {
+	if n := countAsideEntries(t, binDir); n != 0 {
 		t.Errorf("bin dir still holds %d .old- entries after the next install", n)
 	}
 }

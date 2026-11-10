@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
@@ -402,15 +403,30 @@ func InstallPluginFromPath(opts InstallPluginOptions) (*InstalledPlugin, error) 
 // tree, that serialises every change to it: installs, upgrades and removals.
 const pluginTreeLockName = ".plugins.lock"
 
+// pluginTreeLockWait bounds how long a change waits for another holder of the
+// plugin tree lock. Installs take seconds; this only stops a wedged holder
+// from hanging every later install forever.
+const pluginTreeLockWait = 10 * time.Minute
+
 // lockPluginTree takes the managed tree's lock and returns its release. The
 // rename-aside rollbacks need it: each install sweeps .old- leftovers from
 // bin/ and pkg/<name>/, and without the lock a concurrent install's sweep
 // could delete the backup another install is about to restore from.
 // Callers hold it across one whole change and must not nest it.
+//
+// The wait is cancellable: flock only watches ctx when it has a deadline (it
+// otherwise makes a blocking lock call), so a ctx without one gets
+// pluginTreeLockWait, and Ctrl-C during `plugin upgrade` behind another
+// install stops the wait instead of being ignored.
 func lockPluginTree(ctx context.Context, create bool) (func(), error) {
 	root, err := pluginRoot(create)
 	if err != nil {
 		return nil, err
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, pluginTreeLockWait)
+		defer cancel()
 	}
 	release, err := flock.AcquireContextIn(ctx, root, pluginTreeLockName)
 	if err != nil {
