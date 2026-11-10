@@ -52,14 +52,15 @@ const selfUpdatePluginName = "upgrade"
 // (`entire graph search`); `brain` is documented as `entire brain`;
 // `investigate` was a built-in until it moved to the entire-investigate
 // plugin, and without the offer `entire investigate` would answer an
-// established command with "unknown command for entire".
+// established command with "unknown command for entire"; `rsl` is documented
+// as `entire rsl` by the entire-rsl plugin.
 //
 // A name here must be resolvable through the plugin index: the install path
 // looks it up there and nowhere else, so an unlisted name turns the prompt
 // into a failure that the fall-through would have reported more plainly.
 //
 //nolint:gochecknoglobals // package-level set; a slice because there is no const slice in Go.
-var onDemandInstallPluginNames = []string{"graph", "brain", "investigate"}
+var onDemandInstallPluginNames = []string{"graph", "brain", "investigate", "rsl"}
 
 // offersOnDemandInstall reports whether a missing plugin by this name should
 // be offered for installation.
