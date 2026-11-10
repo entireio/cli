@@ -862,9 +862,17 @@ func TestTrailReviewOpenOutsideRowsNamesOnlyHidingFilters(t *testing.T) {
 	opts := defaultTrailReviewListOptions()
 	opts.Severity = high
 	// --severity high with --freshness current: the stale high finding is
-	// hidden only by freshness, so dropping --severity would not show it.
+	// hidden only by freshness and the current low one only by severity, so
+	// either change shows one of them.
 	if got, want := note(nil, opts, false), "+2 open findings not shown by the current filters — add --freshness any or drop --severity"; got != want {
-		t.Fatalf("both filters hide: %q, want %q", got, want)
+		t.Fatalf("each filter hides one: %q, want %q", got, want)
+	}
+	// A stale low finding is hidden by both filters, so it needs both changes.
+	lowOpts := defaultTrailReviewListOptions()
+	lowOpts.Severity = high
+	staleLow := []api.TrailReviewComment{{ID: "stale-low", Status: trailReviewStatusOpen, StaleOutcome: trailReviewFreshnessStale, Severity: &low}}
+	if outside := trailReviewOpenOutsideRows(staleLow, nil, lowOpts, false); trailReviewHiddenOpenNote(outside) != "+1 open finding not shown by the current filters — add --freshness any and drop --severity" {
+		t.Fatalf("hidden by both: %q", trailReviewHiddenOpenNote(outside))
 	}
 	if got, want := note(summary[:1], opts, false), "+1 open finding not shown by the current filters — add --freshness any"; got != want {
 		t.Fatalf("freshness hides: %q, want %q", got, want)

@@ -317,6 +317,8 @@ type trailReviewOpenOutside struct {
 	// the hidden findings, so the note names only filters worth changing.
 	byFreshness bool
 	bySeverity  bool
+	// byBoth is set when some finding needs both filters changed to show.
+	byBoth bool
 }
 
 // trailReviewOpenStaleCount counts the open findings whose code has changed
@@ -360,8 +362,10 @@ func trailReviewOpenOutsideRows(summary, rows []api.TrailReviewComment, opts tra
 		}
 		out.hidden++
 		// A stale section lists stale findings, so then only --severity hides them.
-		out.byFreshness = out.byFreshness || ((!listStale || !stale) && !trailReviewFreshnessFilterIncludes(opts.Freshness, stale))
+		freshnessHides := (!listStale || !stale) && !trailReviewFreshnessFilterIncludes(opts.Freshness, stale)
+		out.byFreshness = out.byFreshness || freshnessHides
 		out.bySeverity = out.bySeverity || !severityOK
+		out.byBoth = out.byBoth || (freshnessHides && !severityOK)
 	}
 	return out
 }
@@ -401,7 +405,8 @@ func trailReviewHiddenOpenNote(outside trailReviewOpenOutside) string {
 		noun += "s"
 	}
 	note := fmt.Sprintf("+%d %s not shown by the current filters", outside.hidden, noun)
-	// Either filter can hide open findings, so name every one that hides any.
+	// Name every filter that hides any of them. When one finding is hidden by
+	// both, changing either alone would not show it, so ask for both.
 	var fixes []string
 	if outside.byFreshness {
 		fixes = append(fixes, "add --freshness any")
@@ -412,7 +417,11 @@ func trailReviewHiddenOpenNote(outside trailReviewOpenOutside) string {
 	if len(fixes) == 0 {
 		return note
 	}
-	return note + " — " + strings.Join(fixes, " or ")
+	joiner := " or "
+	if outside.byBoth {
+		joiner = " and "
+	}
+	return note + " — " + strings.Join(fixes, joiner)
 }
 
 func renderTrailReviewCommentsStyled(w io.Writer, s trailReviewStyles, width int, comments []api.TrailReviewComment, nextCursor string) {
