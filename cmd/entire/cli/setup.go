@@ -25,6 +25,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -3454,19 +3455,20 @@ const crossRepoCommitsFlagUsage = "Link commits that agent sessions started in t
 	"Linking copies the session's transcript up to that commit, earlier turns included, into the other repository's checkpoints, which are pushed wherever it pushes them. " +
 	"It is allowed only when that repository's checkpoints go to the same owner as this one's origin and its redaction covers this one's, " +
 	"but the same owner is not the same audience: a private repository's transcript can land in a public one. " +
-	"Turning it on needs a terminal. Applies to the whole clone"
+	"An agent session cannot turn it on. Applies to the whole clone"
 
 // checkCrossRepoCommits parses a --cross-repo-commits value. Turning it on
-// shares this clone's transcripts beyond it, so it needs a person at a
-// terminal: an agent, which runs commands without one, cannot opt its own
-// sessions in. Turning it off is allowed anywhere.
+// shares this clone's transcripts beyond it, so it is refused in an agent
+// session: an agent cannot opt its own sessions in. A person's script without a
+// terminal (dotfiles, provisioning) may turn it on. Turning it off is allowed
+// anywhere.
 func checkCrossRepoCommits(value string) (bool, error) {
 	on, err := settings.ParseCrossRepoCommits(value)
 	if err != nil {
 		return false, err //nolint:wrapcheck // names the value and the accepted ones
 	}
-	if on && !interactive.CanPromptInteractively() {
-		return false, errors.New("turning cross-repo commits on needs an interactive terminal; run it yourself, not through an agent")
+	if caller := review.DetectAgentSession(); on && caller != "" {
+		return false, fmt.Errorf("refusing to turn cross-repo commits on from %s: it shares this clone's transcripts with other repositories, so a person must choose it", caller)
 	}
 	return on, nil
 }

@@ -464,8 +464,9 @@ repository B links that commit in B (`strategy/foreign_session.go`).
   - **A's clone opted in.** The opt-in is `entire/cross-repo-commits` (`on`
     or `off`) in A's git common dir, so nothing cloned or pulled can set it;
     anything but a readable `on` is off. `entire configure
-    --cross-repo-commits on` sets it, and refuses without an interactive
-    terminal so an agent cannot opt its own sessions in; `off` works anywhere.
+    --cross-repo-commits on` sets it, and refuses in a detected agent session
+    so an agent cannot opt its own sessions in; without one it works with no
+    terminal (dotfiles, provisioning), and `off` works anywhere.
     It is read again under A's lock at post-commit.
   - **B's checkpoints go to A's owner.** Every push URL of B's checkpoint sync
     remote, and B's `checkpoint_remote` when one is in use, must resolve
