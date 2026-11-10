@@ -103,11 +103,12 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 		return fmt.Errorf("failed to load settings: %w", err)
 	}
 
-	fmt.Fprintln(w, formatSettingsStatusShort(ctx, s, sty))
+	pushes := globalEnablePushes(ctx, s)
+	fmt.Fprintln(w, formatSettingsStatusShort(ctx, s, pushes, sty))
 	writeRefusedAgentHomes(w)
 	writeUserSettingsRejections(w, s)
 	writeCommittedKeysIgnoredForGlobalEnable(w, s)
-	writeGlobalEnablePushes(ctx, w, s)
+	writeGlobalEnablePushes(w, pushes)
 	if s.Enabled {
 		writeActiveSessions(ctx, w, sty)
 	}
@@ -157,6 +158,8 @@ func writeCommittedKeysIgnoredForGlobalEnable(w io.Writer, s *EntireSettings) {
 
 // globalEnablePushes is how a repository on only through global enable treats
 // checkpoint pushes, for both status outputs; nil for any other repository.
+// It reloads settings, resolves the sync remote and counts unpushed
+// checkpoints, so each status run computes it once and passes it along.
 func globalEnablePushes(ctx context.Context, s *EntireSettings) *globalEnablePushesJSON {
 	if !s.EnabledOnlyByGlobal() {
 		return nil
@@ -170,9 +173,9 @@ func globalEnablePushes(ctx context.Context, s *EntireSettings) *globalEnablePus
 	case strategy.GlobalEnableConsentHeld:
 		out.State = globalEnablePushesHeld
 	case strategy.GlobalEnableConsentAgreed:
-		out.State = "agreed"
+		out.State = globalEnablePushesAgreed
 	case strategy.GlobalEnableConsentOwnerListed:
-		out.State = "owner_listed"
+		out.State = globalEnablePushesOwnerListed
 	case strategy.GlobalEnableConsentNotNeeded:
 		return nil
 	}
@@ -181,8 +184,7 @@ func globalEnablePushes(ctx context.Context, s *EntireSettings) *globalEnablePus
 
 // writeGlobalEnablePushes says whether checkpoints from a repository on only
 // through global enable are pushed, and why.
-func writeGlobalEnablePushes(ctx context.Context, w io.Writer, s *EntireSettings) {
-	pushes := globalEnablePushes(ctx, s)
+func writeGlobalEnablePushes(w io.Writer, pushes *globalEnablePushesJSON) {
 	if pushes == nil {
 		return
 	}
@@ -194,9 +196,9 @@ func writeGlobalEnablePushes(ctx context.Context, w io.Writer, s *EntireSettings
 		}
 		fmt.Fprintf(w, "  checkpoint pushes held (this repository is on only through global enable; %s)\n",
 			tuiutil.SanitizeDisplayText(remedy))
-	case "owner_listed":
+	case globalEnablePushesOwnerListed:
 		fmt.Fprintf(w, "  checkpoint pushes: on, %s is on your global-enable owner list\n", tuiutil.SanitizeDisplayText(pushes.Owner))
-	case "agreed":
+	case globalEnablePushesAgreed:
 		fmt.Fprintln(w, "  checkpoint pushes: on, you agreed for this repository")
 	}
 }
@@ -222,11 +224,12 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 	if err != nil {
 		return fmt.Errorf("failed to load settings: %w", err)
 	}
-	fmt.Fprintln(w, formatSettingsStatusShort(ctx, effectiveSettings, sty))
+	pushes := globalEnablePushes(ctx, effectiveSettings)
+	fmt.Fprintln(w, formatSettingsStatusShort(ctx, effectiveSettings, pushes, sty))
 	writeRefusedAgentHomes(w)
 	writeUserSettingsRejections(w, effectiveSettings)
 	writeCommittedKeysIgnoredForGlobalEnable(w, effectiveSettings)
-	writeGlobalEnablePushes(ctx, w, effectiveSettings)
+	writeGlobalEnablePushes(w, pushes)
 	fmt.Fprintln(w) // blank line
 
 	// Show project settings if it exists
@@ -296,7 +299,7 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 // formatSettingsStatusShort formats a short settings status line.
 // Output format: "● Enabled · branch main" or "○ Disabled · branch main"
 // (the branch segment is appended whenever it can be resolved).
-func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statusStyles) string {
+func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, pushes *globalEnablePushesJSON, sty statusStyles) string {
 	var b strings.Builder
 
 	if s.Enabled {
@@ -357,7 +360,7 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 	// Where checkpoint data syncs (the single elected remote), and how many
 	// checkpoints have not reached it yet. Local-only computation.
 	if s.Enabled {
-		writeCheckpointSyncLines(ctx, &b, s, sty)
+		writeCheckpointSyncLines(ctx, &b, s, pushes, sty)
 	}
 
 	if s.Enabled {
@@ -733,9 +736,9 @@ func countUnpushedCheckpointsForStatus(ctx context.Context, remoteName string) i
 // pushing off the elected remote is still the read source and the counter still
 // reports local-only data, so the lines are reworded rather than dropped —
 // status is the only surface that names either.
-func writeCheckpointSyncLines(ctx context.Context, b *strings.Builder, s *EntireSettings, sty statusStyles) {
+func writeCheckpointSyncLines(ctx context.Context, b *strings.Builder, s *EntireSettings, pushes *globalEnablePushesJSON, sty statusStyles) {
 	info := computeCheckpointSyncInfo(ctx, s)
-	if pushes := globalEnablePushes(ctx, s); pushes != nil && pushes.State == globalEnablePushesHeld {
+	if pushes != nil && pushes.State == globalEnablePushesHeld {
 		info.HeldForGlobalEnable = true
 	}
 	destination := "\n  Checkpoints sync to: "
@@ -1246,19 +1249,27 @@ func normalizeWorktreePath(path string) string {
 	return filepath.Clean(path)
 }
 
-// statusJSON is the JSON output for `entire status --json`.
-// globalEnablePushesHeld is the State of a repository whose pushes are held.
-const globalEnablePushesHeld = "held"
+// The states of globalEnablePushesJSON.State.
+const (
+	// globalEnablePushesHeld: pushes wait for the developer to agree.
+	globalEnablePushesHeld = "held"
+	// globalEnablePushesAgreed: the developer agreed for this repository.
+	globalEnablePushesAgreed = "agreed"
+	// globalEnablePushesOwnerListed: the repository's owner is on the
+	// global-enable owner list.
+	globalEnablePushesOwnerListed = "owner_listed"
+)
 
-// globalEnablePushesJSON is statusJSON.GlobalEnablePushes. State is "held",
-// "agreed" or "owner_listed"; Waiting counts held checkpoints; Owner is the
-// listed owner, or for a held repository the one to add.
+// globalEnablePushesJSON is statusJSON.GlobalEnablePushes. State is one of
+// the globalEnablePushes* constants; Waiting counts held checkpoints; Owner is
+// the listed owner, or for a held repository the one to add.
 type globalEnablePushesJSON struct {
 	State   string `json:"state"`
 	Waiting int    `json:"waiting,omitempty"`
 	Owner   string `json:"owner,omitempty"`
 }
 
+// statusJSON is the JSON output for `entire status --json`.
 type statusJSON struct {
 	Enabled        bool               `json:"enabled"`
 	Agents         []string           `json:"agents"`
