@@ -118,6 +118,12 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 		}
 	}
 
+	// After the sync-remote gate, so only a push that would carry
+	// checkpoints asks for consent to.
+	if !globalEnablePushAllowed(ctx, &ps, protectFirstUserBranch) {
+		return nil
+	}
+
 	// git-refs primary: push the per-checkpoint refs recorded in the push queue
 	// instead of the single v1 branch. Those refs live under refs/entire/, not
 	// refs/heads/, so a forge can never pick them as a repository's default
@@ -435,7 +441,9 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 	}
 	defer repo.Close()
 
-	if fromGitHook {
+	// One question per push: a push that asked for global-enable consent
+	// leaves the policy question for the next one.
+	if fromGitHook && !ps.consentAsked {
 		answer, saved := askCheckpointPushPolicyOnFirstPush(ctx, repo)
 		if answer == checkpointPushAnswerSuperseded {
 			// The check before the question ran while the policy was unset; the
@@ -504,8 +512,9 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 // pushing is disabled in settings — a distinct signal from pushed==0 with
 // pushing enabled (an empty queue), so callers can report the two accurately.
 // Like the pre-push paths, an OPF rewrite that cannot run when OPF is enabled
-// errors with the refs left queued, and a manual policy returns
-// ErrCheckpointPushHeldByPolicy. Currently used by the checkpoint migration
+// errors with the refs left queued, a manual policy returns
+// ErrCheckpointPushHeldByPolicy, and a repository whose pushes wait for
+// global-enable consent returns ErrCheckpointPushHeldForConsent. Currently used by the checkpoint migration
 // command's opt-in "push now".
 func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote string) (pushed int, pushDisabled bool, err error) {
 	ps := resolvePushSettings(ctx, remote)
@@ -519,6 +528,9 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 	}
 	if ps.withheld != nil {
 		return 0, false, fmt.Errorf("checkpoint refs stay queued: %w", ps.withheld)
+	}
+	if err := heldForGlobalEnableConsent(ctx, ps); err != nil {
+		return 0, false, err
 	}
 	if opfErr := opfGateForCheckpointRefs(ctx, repo); opfErr != nil {
 		// Names no cause, matching flushCheckpointRefsQueue's retry message
