@@ -1,0 +1,6 @@
+{
+  "about": "input includes cache and is split; a re-written record's latest copy counts; the shutdown total includes the subagent, which is subtracted from the main agent; a record after the shutdown is added on top",
+  "transcript": "events.jsonl",
+  "total": {"input_tokens": 400, "cache_read_tokens": 1200, "output_tokens": 80, "api_call_count": 3},
+  "children": {"sub-1": {"input_tokens": 300, "output_tokens": 30, "api_call_count": 1}}
+}
