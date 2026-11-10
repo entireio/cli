@@ -118,7 +118,10 @@ func askRemoteDefaultTip(ctx context.Context, remote string) (branch, tip string
 	// The name becomes a fetch refspec, so a hostile remote's
 	// "x:refs/heads/main" must not write a local ref.
 	if !ok || tip == "" || !isRemoteBranchName("refs/heads/"+branch) {
-		return "", "", fmt.Errorf("%s names no default branch", remote)
+		// Git reports no HEAD at all when it names a branch with no
+		// commits. That is not read as "contains nothing": a bare repo made
+		// with 'git init --bare' names master while everyone pushes main.
+		return "", "", fmt.Errorf("%s's HEAD doesn't name a branch with commits, so its default branch is unknown (on the remote, 'git symbolic-ref HEAD refs/heads/<default>' sets it)", remote)
 	}
 	if commitPresent(ctx, tip) {
 		return branch, tip, nil

@@ -1554,8 +1554,10 @@ func TestAttachCommit_LinkWithoutTrailerOnAnUnpushedCommit(t *testing.T) {
 	}
 }
 
-// A remote that holds the commit but names no default branch might hold it on
-// one, so attach refuses rather than guess.
+// A remote whose HEAD names a branch with no commits (a bare repo made with
+// 'git init --bare' names master while everyone pushes main) might hold the
+// commit on its real default branch, so attach refuses rather than guess, and
+// says why.
 func TestAttachCommit_UnknownDefaultBranchRefusesTheRewrite(t *testing.T) {
 	setupAttachTestRepo(t)
 	head := commitAt(t, "work.txt")
@@ -1569,6 +1571,9 @@ func TestAttachCommit_UnknownDefaultBranchRefusesTheRewrite(t *testing.T) {
 	out, err := attachHeadless(t, "attach-unknown-default", attachOptions{})
 	if err == nil || !strings.Contains(err.Error(), "couldn't tell whether it is on a default branch") {
 		t.Fatalf("err = %v, want a refusal because the default branch is unknown\n%s", err, out)
+	}
+	if !strings.Contains(err.Error(), "origin's HEAD doesn't name a branch with commits") {
+		t.Errorf("refusal should say the remote's HEAD names a branch with no commits:\n%v", err)
 	}
 	if got := headCommitOf(t); got.Hash != head.Hash {
 		t.Fatalf("HEAD was rewritten without knowing the default branch: %s", got.Hash)
