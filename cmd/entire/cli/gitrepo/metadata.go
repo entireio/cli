@@ -196,8 +196,12 @@ func isImmediateRegistration(resolvedGitDir, registrationRoot string) (bool, err
 	return metadataDirectoriesIdentifySameFile(filepath.Dir(resolvedGitDir), registrationRoot)
 }
 
-// namesRegistrationTree reports whether the Git directory's spelling or its
-// resolved location lies inside <common>/worktrees.
+// namesRegistrationTree reports whether the Git directory lies inside
+// <common>/worktrees by its spelling, by its spelling with only the parent
+// resolved, or by its resolved location. The parent-only form catches an
+// escaping registration symlink reached through an alias of the common
+// directory or of the registration tree: neither the alias spelling nor the
+// symlink's target names the real tree, but the symlink's own location does.
 func namesRegistrationTree(gitDirPath, resolvedGitDir, commonDir string) (bool, error) {
 	if pathWithin(filepath.Join(commonDir, "worktrees"), gitDirPath) {
 		return true, nil
@@ -206,7 +210,15 @@ func namesRegistrationTree(gitDirPath, resolvedGitDir, commonDir string) (bool, 
 	if err != nil {
 		return false, fmt.Errorf("resolve common Git directory %s: %w", commonDir, err)
 	}
-	return pathWithin(filepath.Join(resolvedCommon, "worktrees"), resolvedGitDir), nil
+	resolvedRegistrationRoot := filepath.Join(resolvedCommon, "worktrees")
+	resolvedParent, err := filepath.EvalSymlinks(filepath.Dir(gitDirPath))
+	if err != nil {
+		return false, fmt.Errorf("resolve parent of Git directory %s: %w", gitDirPath, err)
+	}
+	if pathWithin(resolvedRegistrationRoot, filepath.Join(resolvedParent, filepath.Base(gitDirPath))) {
+		return true, nil
+	}
+	return pathWithin(resolvedRegistrationRoot, resolvedGitDir), nil
 }
 
 func pathWithin(base, target string) bool {

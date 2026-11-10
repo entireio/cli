@@ -3,6 +3,7 @@ package strategy
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -222,6 +223,29 @@ func TestGuestTurnEnd_InUnregisteredCheckoutIsNotRecordedAsHome(t *testing.T) {
 	assert.Equal(t, []string{"home.go"}, after.FilesTouched, "another checkout's file was recorded as the home's")
 	assert.Equal(t, before.BaseCommit, after.BaseCommit, "the base moved to another checkout's HEAD")
 	assert.Equal(t, before.TouchedFileHashes, after.TouchedFileHashes)
+	assert.True(t, isSessionHomeWorktree(mustEvalSymlinks(t, mainDir), after), "the session left its home: %s", after.WorktreePath)
+}
+
+// A linked worktree whose marker cannot be created or read gets no record of
+// its own, and its step must not fall through to the home's record either:
+// that would claim another tree's files and move the home's base.
+func TestGuestTurnEnd_UnmarkableWorktreeIsNotRecordedAsHome(t *testing.T) {
+	s, mainDir, linkedDir := homedSession(t, "guest-unmarkable")
+	before := mustLoad(t, s, "guest-unmarkable")
+	admin := strings.TrimSpace(testutil.RunGit(t, linkedDir, "rev-parse", "--path-format=absolute", "--git-dir"))
+	require.NoError(t, os.WriteFile(filepath.Join(admin, worktreeIncarnationFile), []byte("not a marker"), 0o600))
+	_, markErr := worktreeIncarnation(t.Context(), linkedDir, filepath.Base(admin), true)
+	require.Error(t, markErr, "precondition: the linked worktree cannot be marked")
+
+	chdirWorktree(t, linkedDir)
+	testutil.WriteFile(t, linkedDir, "guest.go", "package guest")
+	saveStepIn(t, s, "guest-unmarkable", []string{"guest.go"}, nil)
+
+	after := mustLoad(t, s, "guest-unmarkable")
+	assert.Equal(t, []string{"home.go"}, after.FilesTouched, "another worktree's file was recorded as the home's")
+	assert.Equal(t, before.StepCount, after.StepCount, "the guest step was counted")
+	assert.Equal(t, before.BaseCommit, after.BaseCommit, "the base moved to another worktree's HEAD")
+	assert.Empty(t, after.OtherWorktrees, "the unmarked worktree got a record that can never count")
 	assert.True(t, isSessionHomeWorktree(mustEvalSymlinks(t, mainDir), after), "the session left its home: %s", after.WorktreePath)
 }
 

@@ -247,26 +247,72 @@ func TestResolveWorktreeMetadata_RejectsRegistrationSymlinkEscapingCommonDir(t *
 		t.Skip("symlink creation requires privileges on some Windows builders")
 	}
 
-	tmp := t.TempDir()
-	root := filepath.Join(tmp, "worktree")
-	commonDir := filepath.Join(tmp, "common")
-	registrationRoot := filepath.Join(commonDir, "worktrees")
-	plantedRegistration := filepath.Join(tmp, "planted-registration")
-	require.NoError(t, os.MkdirAll(root, 0o750))
-	require.NoError(t, os.MkdirAll(registrationRoot, 0o750))
-	require.NoError(t, os.MkdirAll(plantedRegistration, 0o750))
-	require.NoError(t, os.Symlink(plantedRegistration, filepath.Join(registrationRoot, "escaped")))
-	writeMetadataFile(t, filepath.Join(root, gitDir), "gitdir: "+filepath.Join(registrationRoot, "escaped")+"\n")
-	writeMetadataFile(t, filepath.Join(plantedRegistration, "commondir"), commonDir+"\n")
+	// Each layout plants <common>/worktrees/escaped -> <tmp>/planted-registration
+	// and spells the .git pointer and the planted commondir differently. An
+	// alias spelling of either side must not turn the escaping registration
+	// into an accepted unregistered checkout.
+	tests := []struct {
+		name string
+		// gitdirVia and commondirVia return the spellings, given the real
+		// common directory and a scratch directory for aliases.
+		gitdirVia    func(t *testing.T, commonDir, tmp string) string
+		commondirVia func(t *testing.T, commonDir, tmp string) string
+	}{
+		{
+			name: "real spellings",
+			gitdirVia: func(_ *testing.T, commonDir, _ string) string {
+				return filepath.Join(commonDir, "worktrees", "escaped")
+			},
+			commondirVia: func(_ *testing.T, commonDir, _ string) string { return commonDir },
+		},
+		{
+			name: "commondir through an alias of the common directory",
+			gitdirVia: func(_ *testing.T, commonDir, _ string) string {
+				return filepath.Join(commonDir, "worktrees", "escaped")
+			},
+			commondirVia: func(t *testing.T, commonDir, tmp string) string {
+				t.Helper()
+				alias := filepath.Join(tmp, "common-alias")
+				require.NoError(t, os.Symlink(commonDir, alias))
+				return alias
+			},
+		},
+		{
+			name: "gitdir through an alias of the registration tree",
+			gitdirVia: func(t *testing.T, commonDir, tmp string) string {
+				t.Helper()
+				alias := filepath.Join(tmp, "worktrees-alias")
+				require.NoError(t, os.Symlink(filepath.Join(commonDir, "worktrees"), alias))
+				return filepath.Join(alias, "escaped")
+			},
+			commondirVia: func(_ *testing.T, commonDir, _ string) string { return commonDir },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tmp := t.TempDir()
+			root := filepath.Join(tmp, "worktree")
+			commonDir := filepath.Join(tmp, "common")
+			registrationRoot := filepath.Join(commonDir, "worktrees")
+			plantedRegistration := filepath.Join(tmp, "planted-registration")
+			require.NoError(t, os.MkdirAll(root, 0o750))
+			require.NoError(t, os.MkdirAll(registrationRoot, 0o750))
+			require.NoError(t, os.MkdirAll(plantedRegistration, 0o750))
+			require.NoError(t, os.Symlink(plantedRegistration, filepath.Join(registrationRoot, "escaped")))
+			writeMetadataFile(t, filepath.Join(root, gitDir), "gitdir: "+tt.gitdirVia(t, commonDir, tmp)+"\n")
+			writeMetadataFile(t, filepath.Join(plantedRegistration, "commondir"), tt.commondirVia(t, commonDir, tmp)+"\n")
 
-	metadata, err := ResolveWorktreeMetadata(root)
-	require.ErrorContains(t, err, "not an immediate child")
-	require.Equal(t, WorktreeMetadata{}, metadata)
+			metadata, err := ResolveWorktreeMetadata(root)
+			require.ErrorContains(t, err, "not an immediate child")
+			require.Equal(t, WorktreeMetadata{}, metadata)
 
-	repo, err := OpenPath(root)
-	require.ErrorContains(t, err, "resolve worktree metadata")
-	require.ErrorContains(t, err, "not an immediate child")
-	require.Nil(t, repo)
+			repo, err := OpenPath(root)
+			require.ErrorContains(t, err, "resolve worktree metadata")
+			require.ErrorContains(t, err, "not an immediate child")
+			require.Nil(t, repo)
+		})
+	}
 }
 
 func TestResolveWorktreeMetadata_RequiresExplicitRoot(t *testing.T) {
