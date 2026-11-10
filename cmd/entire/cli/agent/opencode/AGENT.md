@@ -173,8 +173,9 @@ installed. On 0.15.31 and 1.0.0 the plugin loads and its hooks fire
   hooks run with the OpenCode process's environment, which lacks it when
   OpenCode was not started from that shell (a desktop app, a systemd or launchd
   service). A 2.x export (flat, typed messages) is converted to
-  the 1.x shape at capture (`normalizeOpenCodeExport`), so every reader and
-  stored checkpoint sees one format: tool names map back (`subagent`→`task`,
+  the 1.x shape at capture (`internal/transcript/opencodev2`, shared
+  with `transcript.Convert` and the live stream's `transcript.OpenCodeAdapter`),
+  so every reader and stored checkpoint sees one format: tool names map back (`subagent`→`task`,
   `patch`→`apply_patch`, `shell`→`bash`), `path` inputs and patch `files[].file`
   become absolute `filePath`s, synthetic and migration-notice messages become
   synthetic user text, compaction becomes a 1.x marker plus a summary message,
