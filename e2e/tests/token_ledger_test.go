@@ -18,6 +18,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/e2e/entire"
 	"github.com/entireio/cli/e2e/testutil"
 )
 
@@ -37,6 +38,7 @@ func TestTokenLedger_EveryCallCountedOnce(t *testing.T) {
 			t.Skipf("%s keeps the per-turn token accounting", s.Agent.Name())
 		}
 
+		pinGitHooks(t, s.Dir)
 		for _, prompt := range []string{
 			"Create a file called a.txt containing the word alpha. Do not commit. Do not ask for confirmation.",
 			"What is 2+2? Reply with just the number. Do not create or change any files.",
@@ -92,6 +94,34 @@ func TestTokenLedger_EveryCallCountedOnce(t *testing.T) {
 			t.Fatal("no session counted its tokens with the ledger")
 		}
 	})
+}
+
+// pinGitHooks points the repo's git hooks at the binary under test. An agent
+// that runs git through a login shell (Codex) would otherwise reach whatever
+// `entire` the shell profile puts first, and an older build drops the ledger
+// when it saves session state.
+func pinGitHooks(t *testing.T, dir string) {
+	t.Helper()
+	hooks := filepath.Join(dir, ".git", "hooks")
+	entries, err := os.ReadDir(hooks)
+	if err != nil {
+		t.Fatalf("read git hooks: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".sample") {
+			continue
+		}
+		p := filepath.Join(hooks, e.Name())
+		data, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pinned := strings.ReplaceAll(string(data), "command -v entire ", "command -v "+entire.BinPath()+" ")
+		pinned = strings.ReplaceAll(pinned, "then entire hooks", "then "+entire.BinPath()+" hooks")
+		if err := os.WriteFile(p, []byte(pinned), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func sessionStates(t *testing.T, dir string) []*session.State {
