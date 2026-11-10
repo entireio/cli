@@ -99,13 +99,22 @@ func readSummary(t *testing.T, cpID string) *cpkg.CheckpointSummary {
 	return summary
 }
 
-// pushToOrigin adds a bare "origin" and publishes HEAD to it, so remote
-// branches contain every commit made so far.
+// newBareRemote creates a bare repository whose HEAD names main, as a hosted
+// remote's default branch would.
+func newBareRemote(t *testing.T) string {
+	t.Helper()
+	remote := t.TempDir()
+	testutil.RunGit(t, remote, "init", "--bare", "-q")
+	testutil.RunGit(t, remote, "symbolic-ref", "HEAD", "refs/heads/main")
+	return remote
+}
+
+// pushToOrigin adds a bare "origin" and publishes HEAD to its default branch,
+// main, so it contains every commit made so far.
 func pushToOrigin(t *testing.T) string {
 	t.Helper()
 	dir := mustGetwd(t)
-	remote := t.TempDir()
-	testutil.RunGit(t, remote, "init", "--bare", "-q")
+	remote := newBareRemote(t)
 	testutil.RunGit(t, dir, "remote", "add", "origin", remote)
 	testutil.RunGit(t, dir, "push", "-q", "origin", "HEAD:refs/heads/main")
 	testutil.RunGit(t, dir, "fetch", "-q", "origin")
@@ -161,7 +170,7 @@ func TestAttachCommit_PushedHeadIsLinkedInTheCheckpoint(t *testing.T) {
 	head := commitAt(t, "work.txt")
 	remote := pushToOrigin(t)
 
-	out, err := attachHeadless(t, "attach-pushed-head", attachOptions{})
+	out, err := attachHeadless(t, "attach-pushed-head", attachOptions{LinkWithoutTrailer: true})
 	if err != nil {
 		t.Fatalf("runAttach: %v\n%s", err, out)
 	}
@@ -195,7 +204,7 @@ func TestAttachCommit_PushedHeadIsDeliveredOnGitRefs(t *testing.T) {
 	head := commitAt(t, "work.txt")
 	remote := pushToOrigin(t)
 
-	out, err := attachHeadless(t, "attach-pushed-head-refs", attachOptions{})
+	out, err := attachHeadless(t, "attach-pushed-head-refs", attachOptions{LinkWithoutTrailer: true})
 	if err != nil {
 		t.Fatalf("runAttach: %v\n%s", err, out)
 	}
@@ -254,7 +263,7 @@ func TestAttachCommit_PushedHeadWaitsUnderManualPolicy(t *testing.T) {
 	setAttachCheckpointPushPolicy(t, "manual")
 	const sessionID = "attach-pushed-head-manual"
 
-	out, err := attachHeadless(t, sessionID, attachOptions{})
+	out, err := attachHeadless(t, sessionID, attachOptions{LinkWithoutTrailer: true})
 	if err != nil {
 		t.Fatalf("runAttach under manual: %v\n%s", err, out)
 	}
@@ -278,7 +287,7 @@ func TestAttachCommit_PushedHeadWaitsUnderManualPolicy(t *testing.T) {
 	}
 
 	var rerun bytes.Buffer
-	if err := runAttach(context.Background(), &rerun, &rerun, sessionID, agent.AgentNameClaudeCode, attachOptions{}); err != nil {
+	if err := runAttach(context.Background(), &rerun, &rerun, sessionID, agent.AgentNameClaudeCode, attachOptions{LinkWithoutTrailer: true}); err != nil {
 		t.Fatalf("rerun without confirmation must succeed, since it sends nothing: %v\n%s", err, rerun.String())
 	}
 	if !strings.Contains(rerun.String(), "entire checkpoint push "+cpID) {
@@ -306,7 +315,7 @@ func TestAttachCommit_FailedEnqueueIsNotReportedAsWaiting(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, err := attachHeadless(t, "attach-failed-enqueue", attachOptions{})
+	out, err := attachHeadless(t, "attach-failed-enqueue", attachOptions{LinkWithoutTrailer: true})
 	if err == nil || !strings.Contains(err.Error(), "not queued") {
 		t.Fatalf("expected an error saying the checkpoint is not queued, got %v\n%s", err, out)
 	}
@@ -327,7 +336,7 @@ func TestAttachCommit_ManualConfirmationSaysTheCheckpointWaits(t *testing.T) {
 	setupClaudeTranscript(t, sessionID, attachCommitTranscript)
 
 	var out, errOut bytes.Buffer
-	if err := runAttach(context.Background(), &out, &errOut, sessionID, agent.AgentNameClaudeCode, attachOptions{}); err == nil {
+	if err := runAttach(context.Background(), &out, &errOut, sessionID, agent.AgentNameClaudeCode, attachOptions{LinkWithoutTrailer: true}); err == nil {
 		t.Fatalf("attach without confirmation succeeded:\n%s", out.String())
 	}
 	if strings.Contains(errOut.String(), "pushed to origin now") || !strings.Contains(errOut.String(), "entire checkpoint push") {
@@ -344,7 +353,7 @@ func TestAttachCommit_UnreadablePolicyIsAnError(t *testing.T) {
 	remote := pushToOrigin(t)
 	setAttachCheckpointPushPolicy(t, "approved")
 
-	out, err := attachHeadless(t, "attach-unreadable-policy", attachOptions{})
+	out, err := attachHeadless(t, "attach-unreadable-policy", attachOptions{LinkWithoutTrailer: true})
 	if err == nil || !strings.Contains(err.Error(), "checkpoint-push-policy") {
 		t.Fatalf("expected an error naming the policy file, got %v\n%s", err, out)
 	}
@@ -363,13 +372,13 @@ func TestAttachCommit_RetryWithUnreadablePolicyNamesTheFile(t *testing.T) {
 	pushToOrigin(t)
 	setAttachCheckpointPushPolicy(t, "manual")
 	const sessionID = "attach-retry-unreadable-policy"
-	if out, err := attachHeadless(t, sessionID, attachOptions{}); err != nil {
+	if out, err := attachHeadless(t, sessionID, attachOptions{LinkWithoutTrailer: true}); err != nil {
 		t.Fatalf("first attach: %v\n%s", err, out)
 	}
 	setAttachCheckpointPushPolicy(t, "approved")
 
 	var out bytes.Buffer
-	err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{})
+	err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{LinkWithoutTrailer: true})
 	if err == nil || !strings.Contains(err.Error(), "checkpoint-push-policy") {
 		t.Fatalf("expected an error naming the policy file, got %v\n%s", err, out.String())
 	}
@@ -386,7 +395,7 @@ func TestAttachCommit_DeliveryUsesThePolicyAttachWarnedAbout(t *testing.T) {
 	remote := pushToOrigin(t)
 	setAttachCheckpointPushPolicy(t, "manual")
 	const sessionID = "attach-policy-changes-mid-attach"
-	if out, err := attachHeadless(t, sessionID, attachOptions{}); err != nil {
+	if out, err := attachHeadless(t, sessionID, attachOptions{LinkWithoutTrailer: true}); err != nil {
 		t.Fatalf("attach: %v\n%s", err, out)
 	}
 	state, err := loadAttachState(t, sessionID)
@@ -585,7 +594,7 @@ func TestAttachCommit_PushedOlderCommitIsLinkedInTheCheckpoint(t *testing.T) {
 	head := commitAt(t, "later.txt")
 	pushToOrigin(t)
 
-	out, err := attachHeadless(t, "attach-pushed-older", attachOptions{Commit: target.Hash.String()[:10]})
+	out, err := attachHeadless(t, "attach-pushed-older", attachOptions{Commit: target.Hash.String()[:10], LinkWithoutTrailer: true})
 	if err != nil {
 		t.Fatalf("runAttach: %v\n%s", err, out)
 	}
@@ -708,7 +717,7 @@ func TestAttachCommit_WarnsWhenNotTheCommitsAuthor(t *testing.T) {
 	testutil.RunGit(t, dir, "-c", "user.name=Someone Else", "-c", "user.email=someone@example.com", "commit", "-q", "-m", "their commit")
 	pushToOrigin(t)
 
-	out, err := attachHeadless(t, "attach-not-author", attachOptions{})
+	out, err := attachHeadless(t, "attach-not-author", attachOptions{LinkWithoutTrailer: true})
 	if err != nil {
 		t.Fatalf("runAttach: %v\n%s", err, out)
 	}
@@ -732,7 +741,7 @@ func TestAttachCommit_ExplainFindsTheLinkedCheckpoint(t *testing.T) {
 	commitAt(t, "later.txt")
 	pushToOrigin(t)
 	sessionID := "attach-commit-explain"
-	if out, err := attachHeadless(t, sessionID, attachOptions{Commit: target.Hash.String()}); err != nil {
+	if out, err := attachHeadless(t, sessionID, attachOptions{Commit: target.Hash.String(), LinkWithoutTrailer: true}); err != nil {
 		t.Fatalf("runAttach: %v\n%s", err, out)
 	}
 	state, err := loadAttachState(t, sessionID)
@@ -856,7 +865,7 @@ func TestAttachCommit_SecondSessionJoinsTheRecordedLinkCheckpoint(t *testing.T) 
 	head := commitAt(t, "work.txt")
 	pushToOrigin(t)
 
-	if out, err := attachHeadless(t, "attach-recorded-first", attachOptions{}); err != nil {
+	if out, err := attachHeadless(t, "attach-recorded-first", attachOptions{LinkWithoutTrailer: true}); err != nil {
 		t.Fatalf("first attach: %v\n%s", err, out)
 	}
 	first, err := loadAttachState(t, "attach-recorded-first")
@@ -891,7 +900,7 @@ func TestAttachCommit_JoinsARemoteOnlyLinkedCheckpointAfterFetchingIt(t *testing
 	setupAttachTestRepo(t)
 	commitAt(t, "work.txt")
 	pushToOrigin(t)
-	if out, err := attachHeadless(t, "attach-remote-only-first", attachOptions{}); err != nil {
+	if out, err := attachHeadless(t, "attach-remote-only-first", attachOptions{LinkWithoutTrailer: true}); err != nil {
 		t.Fatalf("first attach: %v\n%s", err, out)
 	}
 	first, err := loadAttachState(t, "attach-remote-only-first")
@@ -918,13 +927,12 @@ func TestAttachCommit_JoinsARemoteOnlyLinkedCheckpointAfterFetchingIt(t *testing
 
 // Remote-tracking refs can be stale: a commit someone already pushed from
 // another clone reads as unpushed here. attach fetches before deciding, so it
-// records the link instead of amending a shared commit.
+// sees the commit on the default branch and refuses instead of amending it.
 func TestAttachCommit_FetchesBeforeDecidingAHeadIsUnpushed(t *testing.T) {
 	setupAttachTestRepo(t)
 	head := commitAt(t, "work.txt")
 	dir := mustGetwd(t)
-	remote := t.TempDir()
-	testutil.RunGit(t, remote, "init", "--bare", "-q")
+	remote := newBareRemote(t)
 	testutil.RunGit(t, dir, "remote", "add", "origin", remote)
 	pushFromAnotherClone(t, remote, "HEAD:refs/heads/main")
 	if refs := testutil.RunGit(t, dir, "branch", "-r"); strings.TrimSpace(refs) != "" {
@@ -932,8 +940,8 @@ func TestAttachCommit_FetchesBeforeDecidingAHeadIsUnpushed(t *testing.T) {
 	}
 
 	out, err := attachHeadless(t, "attach-stale-tracking", attachOptions{})
-	if err != nil {
-		t.Fatalf("runAttach: %v\n%s", err, out)
+	if err == nil || !strings.Contains(err.Error(), "origin/main, a default branch") {
+		t.Fatalf("err = %v, want a refusal naming origin/main\n%s", err, out)
 	}
 	if got := headCommitOf(t); got.Hash != head.Hash || strings.Contains(got.Message, "Entire-Checkpoint") {
 		t.Fatalf("a commit the remote already holds was amended: %s %q\n%s", got.Hash, got.Message, out)
@@ -1052,8 +1060,9 @@ func TestAttachCommit_IgnoresAnUnreachableUnrelatedRemote(t *testing.T) {
 }
 
 // Any remote's tracking ref holding the commit means it is shared — upstream
-// in a fork, say — so it is never rewritten. The checkpoint still goes to the
-// branch's own remote, not to the unrelated one.
+// in a fork, say — so it is never rewritten: on upstream's default branch it
+// is refused, and with --link-without-trailer the link's checkpoint still goes
+// to the branch's own remote, not to the unrelated one.
 func TestAttachCommit_TrackingRefOfAnotherRemoteBlocksTheRewrite(t *testing.T) {
 	setupAttachTestRepo(t)
 	commitAt(t, "work.txt")
@@ -1064,14 +1073,21 @@ func TestAttachCommit_TrackingRefOfAnotherRemoteBlocksTheRewrite(t *testing.T) {
 	testutil.RunGit(t, dir, "update-ref", "refs/remotes/upstream/main", "HEAD")
 
 	out, err := attachHeadless(t, "attach-upstream-tracking-ref", attachOptions{})
-	if err != nil {
-		t.Fatalf("runAttach: %v\n%s", err, out)
+	if err == nil || !strings.Contains(err.Error(), "upstream/main, a default branch") {
+		t.Fatalf("err = %v, want a refusal naming upstream/main\n%s", err, out)
 	}
 	if got := headCommitOf(t); got.Hash != head.Hash {
 		t.Fatalf("a commit upstream holds was rewritten: %s\n%s", got.Hash, out)
 	}
-	if !strings.Contains(out, "already pushed to upstream") || !strings.Contains(out, "Pushed checkpoint metadata to origin") {
-		t.Fatalf("want the link recorded against upstream and pushed to origin:\n%s", out)
+	out, err = attachHeadless(t, "attach-upstream-tracking-ref", attachOptions{LinkWithoutTrailer: true})
+	if err != nil {
+		t.Fatalf("runAttach --link-without-trailer: %v\n%s", err, out)
+	}
+	if got := headCommitOf(t); got.Hash != head.Hash {
+		t.Fatalf("a commit upstream holds was rewritten: %s\n%s", got.Hash, out)
+	}
+	if !strings.Contains(out, "Pushed checkpoint metadata to origin") {
+		t.Fatalf("want the link's checkpoint pushed to origin:\n%s", out)
 	}
 }
 
@@ -1114,23 +1130,30 @@ func TestAttachCommit_RefusesToRewriteANonUTF8Commit(t *testing.T) {
 }
 
 // Finding 1: a remote's branch tip is checked directly, so a commit pushed to a
-// branch this clone's fetch refspec doesn't track still reads as pushed.
+// branch this clone's fetch refspec doesn't track still reads as pushed, and
+// the confirmation says the rewrite needs a force-push.
 func TestAttachCommit_SeesACommitPushedToAnUntrackedBranch(t *testing.T) {
 	setupAttachTestRepo(t)
-	head := commitAt(t, "work.txt")
+	pushed := commitAt(t, "work.txt")
 	dir := mustGetwd(t)
-	remote := t.TempDir()
-	testutil.RunGit(t, remote, "init", "--bare", "-q")
+	remote := newBareRemote(t)
 	testutil.RunGit(t, dir, "remote", "add", "origin", remote)
 	testutil.RunGit(t, dir, "config", "remote.origin.fetch", "+refs/heads/main:refs/remotes/origin/main")
+	testutil.RunGit(t, dir, "push", "-q", remote, "HEAD~1:refs/heads/main")
 	testutil.RunGit(t, dir, "push", "-q", remote, "HEAD:refs/heads/someone-elses-branch")
 
 	out, err := attachHeadless(t, "attach-untracked-branch", attachOptions{})
 	if err != nil {
 		t.Fatalf("runAttach: %v\n%s", err, out)
 	}
-	if got := headCommitOf(t); got.Hash != head.Hash || strings.Contains(got.Message, "Entire-Checkpoint") {
-		t.Fatalf("a commit the remote already holds was amended: %s %q\n%s", got.Hash, got.Message, out)
+	if !strings.Contains(out, "already pushed (origin)") || !strings.Contains(out, "--force-with-lease") {
+		t.Fatalf("a commit the remote already holds was rewritten without warning of the force-push:\n%s", out)
+	}
+	if got := headCommitOf(t); got.Hash == pushed.Hash || !strings.Contains(got.Message, "Entire-Checkpoint") {
+		t.Fatalf("HEAD was not rewritten with a trailer: %s %q", got.Hash, got.Message)
+	}
+	if got := strings.TrimSpace(testutil.RunGit(t, remote, "rev-parse", "refs/heads/someone-elses-branch")); got != pushed.Hash.String() {
+		t.Errorf("attach changed the remote branch to %s; the force-push is the user's", got)
 	}
 }
 
@@ -1142,7 +1165,7 @@ func TestAttachCommit_FailsWhenTheCheckpointIsNotDelivered(t *testing.T) {
 	pushToOrigin(t)
 	writeAttachTestSettings(t, `{"enabled": true, "strategy_options": {"push_sessions": false}}`)
 
-	out, err := attachHeadless(t, "attach-not-delivered", attachOptions{})
+	out, err := attachHeadless(t, "attach-not-delivered", attachOptions{LinkWithoutTrailer: true})
 	if err == nil || !strings.Contains(err.Error(), "push_sessions") {
 		t.Fatalf("err = %v, want an error naming push_sessions as the reason nothing was pushed\n%s", err, out)
 	}
@@ -1158,7 +1181,7 @@ func TestAttachCommit_RerunRetriesAnUndeliveredCheckpoint(t *testing.T) {
 	commitAt(t, "work.txt")
 	pushToOrigin(t)
 	writeAttachTestSettings(t, `{"enabled": true, "strategy_options": {"push_sessions": false}}`)
-	if out, err := attachHeadless(t, "attach-retry-delivery", attachOptions{}); err == nil {
+	if out, err := attachHeadless(t, "attach-retry-delivery", attachOptions{LinkWithoutTrailer: true}); err == nil {
 		t.Fatalf("first attach should fail to deliver:\n%s", out)
 	}
 
@@ -1190,34 +1213,35 @@ func writeAttachTestSettings(t *testing.T, content string) {
 
 // A commit someone pushed and then built on, on a branch this clone doesn't
 // track, is an ancestor of that branch's tip rather than the tip itself. It is
-// still pushed, so attach must not amend it.
+// still pushed: once it reaches the default branch, attach must not amend it.
 func TestAttachCommit_SeesACommitBuriedInAnUntrackedBranch(t *testing.T) {
 	setupAttachTestRepo(t)
 	head := commitAt(t, "work.txt")
 	dir := mustGetwd(t)
-	remote := t.TempDir()
-	testutil.RunGit(t, remote, "init", "--bare", "-q")
+	remote := newBareRemote(t)
 	testutil.RunGit(t, dir, "remote", "add", "origin", remote)
 	testutil.RunGit(t, dir, "config", "remote.origin.fetch", "+refs/heads/main:refs/remotes/origin/main")
+	testutil.RunGit(t, dir, "push", "-q", remote, "HEAD~1:refs/heads/main")
 	testutil.RunGit(t, dir, "push", "-q", remote, "HEAD:refs/heads/shared")
 	other := filepath.Join(t.TempDir(), "other")
 	testutil.RunGit(t, t.TempDir(), "clone", "-q", "--branch", "shared", remote, other)
 	testutil.WriteFile(t, other, "more.txt", "more")
 	testutil.GitAdd(t, other, "more.txt")
 	testutil.RunGit(t, other, "-c", "user.name=Other", "-c", "user.email=other@example.com", "commit", "-q", "-m", "built on top")
-	testutil.RunGit(t, other, "push", "-q", "origin", "shared")
+	testutil.RunGit(t, other, "push", "-q", "origin", "shared", "shared:main")
 
 	out, err := attachHeadless(t, "attach-buried", attachOptions{})
-	if err != nil {
-		t.Fatalf("runAttach: %v\n%s", err, out)
+	if err == nil || !strings.Contains(err.Error(), "origin/main, a default branch") {
+		t.Fatalf("err = %v, want a refusal naming origin/main\n%s", err, out)
 	}
 	if got := headCommitOf(t); got.Hash != head.Hash || strings.Contains(got.Message, "Entire-Checkpoint") {
 		t.Fatalf("a commit already on the remote (buried under another commit) was amended: %s %q\n%s", got.Hash, got.Message, out)
 	}
 }
 
-// Recording a link to a pushed commit publishes the transcript, so it needs the
-// user's go-ahead too: without a terminal or --force nothing is written.
+// Recording a link to a pushed commit publishes the transcript and gives up the
+// trailer, so it needs the user's go-ahead too: without a terminal or --force
+// nothing is written, and the confirmation names what a recorded link loses.
 func TestAttachCommit_PushedCommitNeedsConfirmation(t *testing.T) {
 	setupAttachTestRepo(t)
 	commitAt(t, "work.txt")
@@ -1226,11 +1250,11 @@ func TestAttachCommit_PushedCommitNeedsConfirmation(t *testing.T) {
 	setupClaudeTranscript(t, sessionID, attachCommitTranscript)
 
 	var out, errOut bytes.Buffer
-	err := runAttach(context.Background(), &out, &errOut, sessionID, agent.AgentNameClaudeCode, attachOptions{})
+	err := runAttach(context.Background(), &out, &errOut, sessionID, agent.AgentNameClaudeCode, attachOptions{LinkWithoutTrailer: true})
 	if err == nil {
 		t.Fatalf("attach without confirmation succeeded:\n%s", out.String())
 	}
-	if !strings.Contains(errOut.String(), "already pushed") || !strings.Contains(errOut.String(), "are pushed to origin now") {
+	if !strings.Contains(errOut.String(), "won't be changed") || !strings.Contains(errOut.String(), "rebase, amend or cherry-pick") || !strings.Contains(errOut.String(), "are pushed to origin now") {
 		t.Errorf("expected the pushed-commit warning, got:\n%s", errOut.String())
 	}
 	if state, err := loadAttachState(t, sessionID); err != nil || state != nil {
@@ -1387,5 +1411,293 @@ func TestAttachCommit_RemoteBranchNameCannotWriteLocalRefs(t *testing.T) {
 	}
 	if err != nil {
 		t.Fatalf("runAttach: %v\n%s", err, out)
+	}
+}
+
+// pushFeatureBranch publishes main to a new origin, then commits on a feature
+// branch and pushes it there, as an open pull request looks.
+func pushFeatureBranch(t *testing.T) (head *object.Commit, remote string) {
+	t.Helper()
+	remote = pushToOrigin(t)
+	dir := mustGetwd(t)
+	testutil.RunGit(t, dir, "checkout", "-q", "-b", "feature")
+	head = commitAt(t, "feature.txt")
+	testutil.RunGit(t, dir, "push", "-q", "-u", "origin", "feature")
+	return head, remote
+}
+
+// A commit on a remote's default branch is never rewritten, and a recorded
+// link is never chosen for the user: attach refuses, names the flag and what a
+// recorded link gives up, and writes nothing.
+func TestAttachCommit_RefusesToRewriteACommitOnTheDefaultBranch(t *testing.T) {
+	setupAttachTestRepo(t)
+	head := commitAt(t, "work.txt")
+	remote := pushToOrigin(t)
+	const sessionID = "attach-default-branch"
+
+	out, err := attachHeadless(t, sessionID, attachOptions{})
+	if err == nil {
+		t.Fatalf("attach to a commit on the default branch succeeded:\n%s", out)
+	}
+	for _, want := range []string{"origin/main, a default branch", "--link-without-trailer", "rebase, amend or cherry-pick", "nothing was changed"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal should mention %q:\n%v", want, err)
+		}
+	}
+	if got := headCommitOf(t); got.Hash != head.Hash {
+		t.Fatalf("a commit on the default branch was rewritten: %s", got.Hash)
+	}
+	if state, loadErr := loadAttachState(t, sessionID); loadErr != nil || state != nil {
+		t.Fatalf("session state was written after the refusal: %+v, %v", state, loadErr)
+	}
+	if refs := remoteCheckpointRefs(t, remote); refs != "" {
+		t.Fatalf("a checkpoint was pushed after the refusal:\n%s", refs)
+	}
+}
+
+// A commit pushed only to a feature branch gets the trailer, the stable link,
+// as an unpushed one does: attach rewrites it locally and tells the user to
+// force-push, and pushes nothing itself.
+func TestAttachCommit_PushedFeatureBranchCommitGetsTheTrailer(t *testing.T) {
+	setupAttachTestRepo(t)
+	pushed, remote := pushFeatureBranch(t)
+
+	out, err := attachHeadless(t, "attach-pushed-feature", attachOptions{})
+	if err != nil {
+		t.Fatalf("runAttach: %v\n%s", err, out)
+	}
+	head := headCommitOf(t)
+	cpID, ok := trailers.ParseCheckpoint(head.Message)
+	if !ok || head.Hash == pushed.Hash {
+		t.Fatalf("pushed feature-branch HEAD was not rewritten with a trailer:\n%s", out)
+	}
+	if summary := readSummary(t, cpID.String()); len(summary.LinkedCommits) != 0 {
+		t.Errorf("LinkedCommits = %v: a trailer-linked checkpoint needs no recorded link", summary.LinkedCommits)
+	}
+	if !strings.Contains(out, "already pushed (origin/feature)") || !strings.Contains(out, "replace it there with 'git push --force-with-lease'") {
+		t.Errorf("output should warn of and explain the force-push:\n%s", out)
+	}
+	if got := strings.TrimSpace(testutil.RunGit(t, remote, "rev-parse", "refs/heads/feature")); got != pushed.Hash.String() {
+		t.Errorf("attach changed the remote's feature branch to %s; the force-push is the user's", got)
+	}
+	if refs := remoteCheckpointRefs(t, remote); refs != "" {
+		t.Errorf("the checkpoint should go out with the force-push, not before it:\n%s", refs)
+	}
+}
+
+// The force-push is part of what the user agrees to: without --force or a
+// terminal, nothing changes and the confirmation says so.
+func TestAttachCommit_PushedFeatureBranchConfirmationNamesTheForcePush(t *testing.T) {
+	setupAttachTestRepo(t)
+	pushed, _ := pushFeatureBranch(t)
+	const sessionID = "attach-pushed-feature-unconfirmed"
+	setupClaudeTranscript(t, sessionID, attachCommitTranscript)
+
+	var out, errOut bytes.Buffer
+	if err := runAttach(context.Background(), &out, &errOut, sessionID, agent.AgentNameClaudeCode, attachOptions{}); err == nil {
+		t.Fatalf("attach without confirmation succeeded:\n%s", out.String())
+	}
+	for _, want := range []string{"This rewrites git history", "already pushed (origin/feature)", "git push --force-with-lease", "--link-without-trailer"} {
+		if !strings.Contains(errOut.String(), want) {
+			t.Errorf("confirmation should mention %q:\n%s", want, errOut.String())
+		}
+	}
+	if got := headCommitOf(t); got.Hash != pushed.Hash {
+		t.Fatalf("HEAD was rewritten without confirmation: %s", got.Hash)
+	}
+}
+
+// --link-without-trailer is the user's explicit choice: on a pushed feature
+// branch it records the link and leaves the commit alone.
+func TestAttachCommit_LinkWithoutTrailerOnAFeatureBranch(t *testing.T) {
+	setupAttachTestRepo(t)
+	pushed, _ := pushFeatureBranch(t)
+
+	out, err := attachHeadless(t, "attach-feature-no-trailer", attachOptions{LinkWithoutTrailer: true})
+	if err != nil {
+		t.Fatalf("runAttach: %v\n%s", err, out)
+	}
+	if got := headCommitOf(t); got.Hash != pushed.Hash {
+		t.Fatalf("HEAD was rewritten despite --link-without-trailer: %s", got.Hash)
+	}
+	state, err := loadAttachState(t, "attach-feature-no-trailer")
+	if err != nil || state == nil {
+		t.Fatalf("load state: %v, %v", state, err)
+	}
+	if summary := readSummary(t, state.LastCheckpointID.String()); len(summary.LinkedCommits) != 1 || summary.LinkedCommits[0].SHA != pushed.Hash.String() {
+		t.Fatalf("LinkedCommits = %v, want [%s]", summary.LinkedCommits, pushed.Hash)
+	}
+}
+
+// On an unpushed commit the flag records a link too, without rewriting it;
+// with no remote holding the commit, the checkpoint waits for the next push.
+func TestAttachCommit_LinkWithoutTrailerOnAnUnpushedCommit(t *testing.T) {
+	setupAttachTestRepo(t)
+	head := commitAt(t, "work.txt")
+
+	out, err := attachHeadless(t, "attach-unpushed-no-trailer", attachOptions{LinkWithoutTrailer: true})
+	if err != nil {
+		t.Fatalf("runAttach: %v\n%s", err, out)
+	}
+	if got := headCommitOf(t); got.Hash != head.Hash {
+		t.Fatalf("HEAD was rewritten despite --link-without-trailer: %s", got.Hash)
+	}
+	state, err := loadAttachState(t, "attach-unpushed-no-trailer")
+	if err != nil || state == nil {
+		t.Fatalf("load state: %v, %v", state, err)
+	}
+	if summary := readSummary(t, state.LastCheckpointID.String()); len(summary.LinkedCommits) != 1 || summary.LinkedCommits[0].SHA != head.Hash.String() {
+		t.Fatalf("LinkedCommits = %v, want [%s]", summary.LinkedCommits, head.Hash)
+	}
+	if strings.Contains(out, "Pushed checkpoint metadata") {
+		t.Errorf("nothing should be pushed for an unpushed commit:\n%s", out)
+	}
+}
+
+// A remote whose HEAD names a branch with no commits (a bare repo made with
+// 'git init --bare' names master while everyone pushes main) might hold the
+// commit on its real default branch, so attach refuses rather than guess, and
+// says why.
+func TestAttachCommit_UnknownDefaultBranchRefusesTheRewrite(t *testing.T) {
+	setupAttachTestRepo(t)
+	head := commitAt(t, "work.txt")
+	dir := mustGetwd(t)
+	remote := t.TempDir()
+	testutil.RunGit(t, remote, "init", "--bare", "-q")
+	testutil.RunGit(t, remote, "symbolic-ref", "HEAD", "refs/heads/nowhere")
+	testutil.RunGit(t, dir, "remote", "add", "origin", remote)
+	testutil.RunGit(t, dir, "push", "-q", "origin", "HEAD:refs/heads/feature")
+
+	out, err := attachHeadless(t, "attach-unknown-default", attachOptions{})
+	if err == nil || !strings.Contains(err.Error(), "couldn't tell whether it is on a default branch") {
+		t.Fatalf("err = %v, want a refusal because the default branch is unknown\n%s", err, out)
+	}
+	if !strings.Contains(err.Error(), "origin's HEAD doesn't name a branch with commits") {
+		t.Errorf("refusal should say the remote's HEAD names a branch with no commits:\n%v", err)
+	}
+	if got := headCommitOf(t); got.Hash != head.Hash {
+		t.Fatalf("HEAD was rewritten without knowing the default branch: %s", got.Hash)
+	}
+}
+
+// The prompt can stay open while a pull request is merged: a feature commit
+// that reaches the default branch meanwhile is not rewritten.
+func TestAttachCommit_MergedWhileConfirmationIsOpenIsNotRewritten(t *testing.T) {
+	setupAttachTestRepo(t)
+	pushed, remote := pushFeatureBranch(t)
+	const sessionID = "attach-merged-during-prompt"
+	setupClaudeTranscript(t, sessionID, attachCommitTranscript)
+
+	t.Setenv(interactive.EnvTestTTY, "1")
+	old := askAttachConfirmation
+	t.Cleanup(func() { askAttachConfirmation = old })
+	askAttachConfirmation = func() (bool, error) {
+		pushFromAnotherClone(t, remote, pushed.Hash.String()+":refs/heads/main")
+		return true, nil
+	}
+
+	var out bytes.Buffer
+	err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{})
+	if err == nil || !strings.Contains(err.Error(), "reached origin/main while attach was waiting") {
+		t.Fatalf("err = %v, want a refusal because the commit reached main during the prompt\n%s", err, out.String())
+	}
+	if got := headCommitOf(t); got.Hash != pushed.Hash {
+		t.Fatalf("a commit merged during the prompt was rewritten: %s", got.Hash)
+	}
+	if state, loadErr := loadAttachState(t, sessionID); loadErr != nil || state != nil {
+		t.Fatalf("session state was written after the refusal: %+v, %v", state, loadErr)
+	}
+}
+
+// Agents pick flags from agent-help, so it has to say why a recorded link is a
+// last resort and that it is never theirs to choose, least of all to dodge a
+// force-push on a feature branch.
+func TestAttachAgentHelp_SHALinkIsALastResort(t *testing.T) {
+	t.Parallel()
+	guidance := agentHelpGuidance["session attach"]
+	for _, want := range []string{
+		"--link-without-trailer is a last resort",
+		"silently orphans the session",
+		"can't be verified locally",
+		"counts only when the commit's author attaches it",
+		"Never pass it on your own, and never to avoid a force-push",
+		"pass the flag only if they choose it",
+	} {
+		if !strings.Contains(guidance, want) {
+			t.Errorf("session attach agent guidance should say %q:\n%s", want, guidance)
+		}
+	}
+}
+
+// A remote the branch pushes to that can't be asked is unknown, even when its
+// tracking refs name a default branch: they may predate a merge. Before, a
+// stale origin/main without the commit let attach rewrite it.
+func TestAttachCommit_UnreachablePushRemoteRefusesTheRewrite(t *testing.T) {
+	setupAttachTestRepo(t)
+	pushed, _ := pushFeatureBranch(t)
+	testutil.RunGit(t, mustGetwd(t), "remote", "set-url", "origin", filepath.Join(t.TempDir(), "gone.git"))
+
+	out, err := attachHeadless(t, "attach-unreachable-push-remote", attachOptions{})
+	if err == nil || !strings.Contains(err.Error(), "couldn't tell whether it is on a default branch") {
+		t.Fatalf("err = %v, want a refusal because origin couldn't be asked\n%s", err, out)
+	}
+	if got := headCommitOf(t); got.Hash != pushed.Hash {
+		t.Fatalf("HEAD was rewritten on stale tracking refs: %s", got.Hash)
+	}
+}
+
+// Another remote's default branch is read from its tracking refs. One that
+// holds the commit but names no default branch (no <remote>/HEAD, no main or
+// master) is unknown rather than skipped; with <remote>/HEAD set, its
+// default branch counts like origin's.
+func TestAttachCommit_UpstreamDefaultBranchFromTrackingRefs(t *testing.T) {
+	setupAttachTestRepo(t)
+	pushed, _ := pushFeatureBranch(t)
+	dir := mustGetwd(t)
+	testutil.RunGit(t, dir, "remote", "add", "upstream", filepath.Join(t.TempDir(), "missing.git"))
+	testutil.RunGit(t, dir, "update-ref", "refs/remotes/upstream/develop", "HEAD")
+
+	out, err := attachHeadless(t, "attach-upstream-develop", attachOptions{})
+	if err == nil || !strings.Contains(err.Error(), "upstream has no known default branch") || !strings.Contains(err.Error(), "git remote set-head upstream --auto") {
+		t.Fatalf("err = %v, want a refusal naming upstream's unknown default branch\n%s", err, out)
+	}
+
+	testutil.RunGit(t, dir, "symbolic-ref", "refs/remotes/upstream/HEAD", "refs/remotes/upstream/develop")
+	out, err = attachHeadless(t, "attach-upstream-develop", attachOptions{})
+	if err == nil || !strings.Contains(err.Error(), "upstream/develop, a default branch") {
+		t.Fatalf("err = %v, want a refusal naming upstream/develop\n%s", err, out)
+	}
+	if got := headCommitOf(t); got.Hash != pushed.Hash {
+		t.Fatalf("a commit on upstream's default branch was rewritten: %s", got.Hash)
+	}
+}
+
+// A merge made elsewhere puts a commit on the default branch that this clone
+// doesn't have. The recheck fetches that tip's objects to see the feature
+// commit under it, rather than reading the tip as "not containing".
+func TestAttachCommit_MergeCommitMadeElsewhereIsFetchedForTheRecheck(t *testing.T) {
+	setupAttachTestRepo(t)
+	pushed, remote := pushFeatureBranch(t)
+	const sessionID = "attach-merged-elsewhere"
+	setupClaudeTranscript(t, sessionID, attachCommitTranscript)
+
+	t.Setenv(interactive.EnvTestTTY, "1")
+	old := askAttachConfirmation
+	t.Cleanup(func() { askAttachConfirmation = old })
+	askAttachConfirmation = func() (bool, error) {
+		other := filepath.Join(t.TempDir(), "other")
+		testutil.RunGit(t, t.TempDir(), "clone", "-q", remote, other)
+		testutil.RunGit(t, other, "-c", "user.name=Other", "-c", "user.email=other@example.com", "merge", "-q", "--no-ff", "-m", "merge feature", "origin/feature")
+		testutil.RunGit(t, other, "push", "-q", "origin", "HEAD:main")
+		return true, nil
+	}
+
+	var out bytes.Buffer
+	err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{})
+	if err == nil || !strings.Contains(err.Error(), "reached origin/main while attach was waiting") {
+		t.Fatalf("err = %v, want a refusal because the commit was merged during the prompt\n%s", err, out.String())
+	}
+	if got := headCommitOf(t); got.Hash != pushed.Hash {
+		t.Fatalf("a commit merged during the prompt was rewritten: %s", got.Hash)
 	}
 }

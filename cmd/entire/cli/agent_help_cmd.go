@@ -216,11 +216,30 @@ var agentHelpGuidance = map[string]string{
 	"session attach": "Commits made during a session are linked to it automatically. Use this\n" +
 		"only when one was missed: `entire session attach <session-id> --commit <sha>`\n" +
 		"(default HEAD). Run it without --force first: it prints what it would do\n" +
-		"(rewrite unpushed commits to add the trailer, or record a link to a pushed\n" +
-		"commit and push the session transcript) and exits non-zero without changing\n" +
-		"anything. Show the user that output and ask them; pass --force only after\n" +
-		"they agree to that exact change, never pre-emptively. A link to a pushed\n" +
-		"commit counts only when its author attaches it.",
+		"(rewrite the commit and any after it to add the trailer; for a commit\n" +
+		"already pushed to a feature branch, the user then force-pushes) and exits\n" +
+		"non-zero without changing anything. Show the user that output and ask\n" +
+		"them; pass --force only after they agree to that exact change, never\n" +
+		"pre-emptively.\n" +
+		"\n" +
+		"The Entire-Checkpoint trailer is the link to aim for. It lives in the\n" +
+		"commit message, so it travels with the commit: through a rebase, amend or\n" +
+		"cherry-pick, to every clone, and anyone reading git log sees it.\n" +
+		"\n" +
+		"--link-without-trailer is a last resort. It records the commit's SHA in\n" +
+		"the checkpoint instead, and that link:\n" +
+		"  - names one exact commit, so the next rebase, amend or cherry-pick of it\n" +
+		"    silently orphans the session (feature branches are rewritten often);\n" +
+		"  - lives only in Entire's checkpoint data: the commit doesn't point at the\n" +
+		"    checkpoint, and git log never shows it;\n" +
+		"  - can't be verified locally: anyone who can push checkpoints can name any\n" +
+		"    commit, so explain and blame label it unverified;\n" +
+		"  - counts only when the commit's author attaches it.\n" +
+		"Never pass it on your own, and never to avoid a force-push: on a feature\n" +
+		"branch, the trailer plus the user's `git push --force-with-lease` is the\n" +
+		"right outcome. It is meant for a commit already on a default branch, which\n" +
+		"attach refuses to rewrite. When attach refuses that way, show the user the\n" +
+		"refusal and its caveats, and pass the flag only if they choose it.",
 	"api": "LAST RESORT. Right in two cases: you are developing against Entire's own\n" +
 		"APIs and want a raw response, or no first-class command covers your need.\n" +
 		"Otherwise prefer the command built for the job (checkpoint, session, trail,\n" +

@@ -78,23 +78,35 @@ func localOriginHEADBranch(repo *git.Repository) string {
 // It runs against the user's repository as invoked, like the other trail
 // ls-remote checks, so exported repo selectors still apply.
 func remoteDefaultBranch(ctx context.Context, remote string) (string, bool) {
-	ctx, cancel := context.WithTimeout(ctx, trailDefaultBranchTimeout)
+	out, err := lsRemoteSymrefHEAD(ctx, remote, trailDefaultBranchTimeout)
+	if err != nil {
+		logging.Debug(ctx, "trail create: could not read the remote's default branch",
+			"remote", remote, "error", err.Error())
+		return "", false
+	}
+	return parseSymrefHEAD(out)
+}
+
+// lsRemoteSymrefHEAD runs `git ls-remote --symref <remote> HEAD` without
+// prompting, bounded by timeout and in output size, and returns its stdout.
+// The remote and its transport helper control that output, and a timeout
+// limits time, not bytes.
+func lsRemoteSymrefHEAD(ctx context.Context, remote string, timeout time.Duration) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := execx.NonInteractive(ctx, "git", "ls-remote", "--symref", remote, "HEAD")
+	cmd := execx.NonInteractive(ctx, "git", "ls-remote", "--symref", "--", remote, "HEAD")
 	cmd.WaitDelay = trailBranchCheckWaitDelay
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-	// Bound both streams while git writes them: the remote and its transport
-	// helper control this output, and the timeout limits time, not bytes.
 	stdout := &limitedWriter{limit: trailRemoteDefaultBranchMaxOutput, failOnOverflow: true}
 	stderr := &limitedWriter{limit: maxGitStderr}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
-	if err := cmd.Run(); err != nil || stdout.exceeded {
-		logging.Debug(ctx, "trail create: could not read the remote's default branch",
-			"remote", remote, "error", fmt.Sprint(err), "stdout_too_large", stdout.exceeded,
-			"stderr", redactGitStderr(stderr.buf.String()))
-		return "", false
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("ls-remote --symref %s HEAD: %w: %s", remote, err, redactGitStderr(stderr.buf.String()))
 	}
-	return parseSymrefHEAD(stdout.buf.String())
+	if stdout.exceeded {
+		return "", fmt.Errorf("ls-remote --symref %s HEAD: output over %d bytes", remote, trailRemoteDefaultBranchMaxOutput)
+	}
+	return stdout.buf.String(), nil
 }
 
 // parseSymrefHEAD reads `ref: refs/heads/<name>\tHEAD` from ls-remote --symref
