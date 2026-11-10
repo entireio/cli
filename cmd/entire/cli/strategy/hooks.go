@@ -459,8 +459,9 @@ const (
 	// version writes.
 	GitHooksCurrent
 	// GitHooksOutdated means the hooks are ours but at least one is a shape we no
-	// longer write. Today that means running Entire from the working tree, which
-	// is broken as well as stale — the path it names is gone.
+	// longer write: a hook that still runs Entire from the working tree, an old
+	// pre-push that does not pass git's ref list, or a chain that still executes
+	// Trunk's launcher under the backup's name.
 	GitHooksOutdated
 )
 
@@ -543,9 +544,9 @@ var legacyGitHookLaunchers = []string{"scripts/entire-dev", "go run "}
 const bareEntireHookCmd = "entire"
 
 // gitHookStateInHooksDir classifies the hooks in the given directory. A hook that
-// is present but still invokes a removed local-dev launcher reads Outdated, not
-// Current, which is what makes EnsureSetup reinstall it rather than leaving a
-// broken hook in place forever.
+// is present but in a shape we no longer write — a removed local-dev launcher,
+// an old pre-push, or a Trunk chain from before sourcing — reads Outdated, not
+// Current, so EnsureSetup reinstalls it rather than leaving a broken hook in place.
 func gitHookStateInHooksDir(hooksDir string) GitHookState {
 	// ForRemoval: this is a read, and reporting GitHooksAbsent for a symlinked
 	// hooks directory is what sent EnsureSetup to InstallGitHook on every agent
@@ -592,7 +593,50 @@ func hookStateIn(root *os.Root, hook string) GitHookState {
 		// Predates passing git's ref list to Entire.
 		return GitHooksOutdated
 	}
+	if isTrunkChainBeforeSourcing(root, hook, content) {
+		return GitHooksOutdated
+	}
 	return GitHooksCurrent
+}
+
+// isTrunkChainBeforeSourcing reports whether hook is Entire's chain from before
+// it sourced Trunk's launcher under the hook's own name. Those installs still
+// execute the launcher as <hook>.pre-entire, which Trunk refuses with exit 2,
+// aborting the commit or push.
+//
+// The check is Trunk-specific and only reads the backup for hooks that chain.
+// InstallGitHook rewrites a hook that carries Entire's marker without a backup,
+// so an old-format chain that is not Trunk must not read Outdated, or lines the
+// user added would be discarded.
+func isTrunkChainBeforeSourcing(root *os.Root, hook, content string) bool {
+	backup := hook + backupSuffix
+	if !strings.Contains(content, "$_entire_hook_dir/"+backup) {
+		return false
+	}
+	// The sourcing branch greps for this exact quoted line.
+	if strings.Contains(content, shellQuote(trunkHookCallback)) {
+		return false
+	}
+	return backupHasTrunkCallback(root, hook)
+}
+
+// backupHasTrunkCallback reports whether <hook>.pre-entire contains
+// trunkHookCallback as a whole line, the same match the chain's grep -qxF
+// uses. The read follows a symlink, including a launcher kept outside the
+// hooks directory (Trunk's shared-launcher layout); os.Root would refuse that
+// escape, and ReadFileNoFollow would not see the file's contents.
+func backupHasTrunkCallback(root *os.Root, hook string) bool {
+	//nolint:gosec // G304: hook is a managed git hook name; the path is inside the hooks directory already opened as root.
+	data, err := os.ReadFile(filepath.Join(root.Name(), hook+backupSuffix))
+	if err != nil {
+		return false
+	}
+	for line := range strings.SplitSeq(string(data), "\n") {
+		if line == trunkHookCallback {
+			return true
+		}
+	}
+	return false
 }
 
 // entireHookLineRunsFromWorkingTree reports whether the hook's OWN Entire
