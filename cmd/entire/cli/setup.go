@@ -3455,22 +3455,29 @@ const crossRepoCommitsFlagUsage = "Link commits that agent sessions started in t
 	"Linking copies the session's transcript up to that commit, earlier turns included, into the other repository's checkpoints, which are pushed wherever it pushes them. " +
 	"It is allowed only when that repository's checkpoints go to the same owner as this one's origin and its redaction covers this one's, " +
 	"but the same owner is not the same audience: a private repository's transcript can land in a public one. " +
-	"An agent session cannot turn it on. Applies to the whole clone"
+	"Turning it on needs a person at an interactive terminal, outside an agent session. Applies to the whole clone"
 
 // checkCrossRepoCommits parses a --cross-repo-commits value. Turning it on
-// shares this clone's transcripts beyond it, so it is refused in an agent
-// session: an agent cannot opt its own sessions in. A person's script without a
-// terminal (dotfiles, provisioning) may turn it on. Turning it off is allowed
-// anywhere.
+// shares this clone's transcripts beyond it, so it needs a person at an
+// interactive terminal, outside an agent session: an agent must not opt its own
+// sessions in. Agent detection reads the environment, which an agent can strip,
+// so the terminal check is the second signal; there is no override. Turning it
+// off is allowed anywhere. The refusals name no command an agent could rerun.
 func checkCrossRepoCommits(value string) (bool, error) {
 	on, err := settings.ParseCrossRepoCommits(value)
 	if err != nil {
 		return false, err //nolint:wrapcheck // names the value and the accepted ones
 	}
-	if caller := review.DetectAgentSession(); on && caller != "" {
-		return false, fmt.Errorf("refusing to turn cross-repo commits on from %s: it shares this clone's transcripts with other repositories, so a person must choose it", caller)
+	if !on {
+		return false, nil
 	}
-	return on, nil
+	if caller := review.DetectAgentSession(); caller != "" {
+		return false, fmt.Errorf("refusing to turn cross-repo commits on from an agent session (%s): it shares this clone's transcripts with other repositories, so a person must choose it", caller)
+	}
+	if !interactive.CanPromptInteractively() {
+		return false, errors.New("turning cross-repo commits on needs a person at an interactive terminal: it shares this clone's transcripts with other repositories")
+	}
+	return true, nil
 }
 
 func saveCrossRepoCommits(ctx context.Context, w io.Writer, on bool) error {

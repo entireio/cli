@@ -64,7 +64,9 @@ func setOrigin(env *TestEnv, url string) {
 }
 
 // optInCrossRepoCommits turns cross-repo commits on in env's clone, as
-// `entire configure --cross-repo-commits on` does outside an agent session.
+// `entire configure --cross-repo-commits on` does for a person at an
+// interactive terminal. It writes the file directly: the command refuses
+// without a terminal, and these tests have none.
 func optInCrossRepoCommits(env *TestEnv) {
 	env.T.Helper()
 	path := filepath.Join(env.RepoDir, ".git", filepath.FromSlash(settings.CrossRepoCommitsFile))

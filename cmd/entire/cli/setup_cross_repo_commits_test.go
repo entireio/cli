@@ -31,21 +31,37 @@ func crossRepoCommitsOn(t *testing.T) bool {
 	return settings.LoadCrossRepoCommitsAt(commonDir)
 }
 
-// A person's script (dotfiles, provisioning) has no terminal and may still
-// turn it on.
+// A person at an interactive terminal, outside an agent session, may turn it
+// on; off needs neither.
 func TestConfigureCmd_CrossRepoCommits(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	clearAgentCallerEnv(t)
+	t.Setenv(interactive.EnvTestTTY, "1")
+
+	out, err := runConfigureCrossRepoCommits(t, "on")
+	require.NoError(t, err)
+	assert.True(t, crossRepoCommitsOn(t))
+	assert.Contains(t, out, "Cross-repo commits: on")
+
+	t.Setenv(interactive.EnvTestTTY, "0")
+	_, err = runConfigureCrossRepoCommits(t, "off")
+	require.NoError(t, err, "off needs no terminal")
+	assert.False(t, crossRepoCommitsOn(t))
+}
+
+// Agent detection reads the environment, which an agent can strip, so without
+// a terminal on is refused even when no agent is detected.
+func TestConfigureCmd_CrossRepoCommitsOnNeedsTerminal(t *testing.T) {
 	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
 	clearAgentCallerEnv(t)
 	t.Setenv(interactive.EnvTestTTY, "0")
 
-	out, err := runConfigureCrossRepoCommits(t, "on")
-	require.NoError(t, err, "on needs no terminal outside an agent session")
-	assert.True(t, crossRepoCommitsOn(t))
-	assert.Contains(t, out, "Cross-repo commits: on")
-
-	_, err = runConfigureCrossRepoCommits(t, "off")
-	require.NoError(t, err)
+	_, err := runConfigureCrossRepoCommits(t, "on")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "needs a person at an interactive terminal")
+	assert.NotContains(t, err.Error(), "entire ", "the refusal must not hand the agent a command")
 	assert.False(t, crossRepoCommitsOn(t))
 }
 
@@ -60,12 +76,13 @@ func TestConfigureCmd_CrossRepoCommitsOnRefusesAgentSession(t *testing.T) {
 
 	_, err := runConfigureCrossRepoCommits(t, "on")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "refusing to turn cross-repo commits on from")
+	assert.Contains(t, err.Error(), "refusing to turn cross-repo commits on from an agent session")
 	assert.NotContains(t, err.Error(), "entire ", "the refusal must not hand the agent a command")
 	assert.False(t, crossRepoCommitsOn(t))
 
+	t.Setenv(interactive.EnvTestTTY, "0")
 	_, err = runConfigureCrossRepoCommits(t, "off")
-	require.NoError(t, err, "off works in an agent session")
+	require.NoError(t, err, "off works in an agent session without a terminal")
 }
 
 func TestConfigureCmd_CrossRepoCommitsInvalid(t *testing.T) {
