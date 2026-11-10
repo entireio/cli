@@ -233,8 +233,14 @@ const windowsBranchStart = `popd& `
 const legacyWindowsEntireGuard = `where.exe entire >nul 2>nul & if errorlevel 1 `
 
 // windowsBareCmdLauncher and windowsSystemCmdLauncher open the nested form's
-// quoted cmd.exe block. The leading program token is resolved by the agent's
-// own shell, before windowsPathOnlyLookup can take effect:
+// quoted cmd.exe block.
+//
+// The first program of a hook line is resolved by the agent's own hook shell
+// before anything in the line runs, and Entire cannot control how that shell
+// looks it up; the wrappers control everything after it. Where Entire starts
+// the agent itself (review runs), AppendWindowsPathOnlyLookupEnv puts
+// NoDefaultCurrentDirectoryInExePath in the agent's environment, which its hook
+// shell inherits. The two launchers differ in what the first program is:
 //   - windowsSystemCmdLauncher names cmd.exe by its full path. The agent's
 //     cmd.exe expands %SystemRoot% (so it works when Windows is not on C:),
 //     and nothing is looked up in the working directory. Use it for hosts that
@@ -248,9 +254,7 @@ const legacyWindowsEntireGuard = `where.exe entire >nul 2>nul & if errorlevel 1 
 //     PowerShell user, `cmd.exe /c "<line>"` for a cmd.exe user, and
 //     `%COMSPEC% /C "<line>"` only when no shell was detected. PowerShell does
 //     not expand %SystemRoot% and never runs a program from the current
-//     directory, so the bare token is the one that works under both. Under a
-//     cmd.exe hook shell the bare `cmd.exe` token is still looked up in the
-//     working directory first.
+//     directory, so the bare token is the one that works under both.
 const (
 	windowsBareCmdLauncher   = `cmd.exe /d /s /c "`
 	windowsSystemCmdLauncher = `%SystemRoot%\System32\cmd.exe /d /s /c "`
@@ -291,8 +295,7 @@ func windowsWarningBody(command, escapedWarning string) string {
 //     forms, WrapWindowsProductionSilentHookCommandForCmdHost names the inner
 //     cmd.exe as %SystemRoot%\System32\cmd.exe, which only cmd.exe expands;
 //     WrapWindowsProductionSilentHookCommand keeps a bare `cmd.exe` that works
-//     under both shells but is looked up in the working directory first when
-//     the host shell is cmd.exe. See windowsBareCmdLauncher.
+//     under both shells. See windowsBareCmdLauncher.
 //
 // Hence: Codex (PowerShell or cmd.exe, verbatim) and Cursor (PowerShell) use
 // the bare nested form; droid (cmd.exe, verbatim) uses the cmd-host nested
@@ -563,6 +566,21 @@ func shHookWrapperProbe(ctx context.Context, command string) *exec.Cmd {
 // windowsNoCurrentDirLookupEnv is the environment entry windowsPathOnlyLookup
 // sets inside a hook line, for processes Entire starts through cmd.exe itself.
 const windowsNoCurrentDirLookupEnv = "NoDefaultCurrentDirectoryInExePath=1"
+
+// AppendWindowsPathOnlyLookupEnv returns env with
+// NoDefaultCurrentDirectoryInExePath=1 appended when hooks run on a Windows
+// host, and env unchanged elsewhere. It is for an agent process Entire starts
+// itself, such as a review run: the agent's hook shell inherits the session
+// environment, so cmd.exe there resolves every program in a hook line from
+// PATH, including the line's first program, which no wrapper text can reach.
+// os/exec keeps the last of duplicate keys, so an inherited value is
+// overridden.
+func AppendWindowsPathOnlyLookupEnv(env []string) []string {
+	if !HookHostIsWindows() {
+		return env
+	}
+	return append(env, windowsNoCurrentDirLookupEnv)
+}
 
 // HookHostIsWindows reports whether hook commands will run on a Windows host,
 // without asking whether a POSIX sh is reachable there.

@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/provenance"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 )
@@ -72,15 +73,21 @@ func DecodeSkills(encoded string) ([]string, error) {
 // precedence. Stripping investigate entries prevents an outer
 // `entire investigate` session from mis-tagging a child review session if
 // invoked nested (symmetric to AppendInvestigateEnv's behavior).
+//
+// On a Windows host it also sets NoDefaultCurrentDirectoryInExePath=1 (see
+// agent.AppendWindowsPathOnlyLookupEnv), so the hook shell the agent starts
+// resolves every program in a hook line from PATH, never from the reviewed
+// checkout.
 func AppendReviewEnv(base []string, agentName string, cfg reviewtypes.RunConfig, prompt string) []string {
 	skillsJSON, _ := EncodeSkills(cfg.Skills) //nolint:errcheck // EncodeSkills only fails on json.Marshal([]string), which is infallible
-	out := make([]string, 0, len(base)+5)
+	out := make([]string, 0, len(base)+6)
 	for _, kv := range base {
 		if provenance.IsEntry(kv) {
 			continue
 		}
 		out = append(out, kv)
 	}
+	out = agent.AppendWindowsPathOnlyLookupEnv(out)
 	return append(out,
 		EnvSession+"=1",
 		EnvAgent+"="+agentName,
