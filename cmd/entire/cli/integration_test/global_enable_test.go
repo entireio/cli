@@ -10,8 +10,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/settings/usersettings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 // userTierEnv points the spawned binary at a private user settings file and a
@@ -59,9 +61,10 @@ func runClaudeTurn(t *testing.T, env *TestEnv, path, content string) string {
 
 // The whole design: with `global_enable: true` in the user settings file,
 // a repository nobody ran `entire enable` in is tracked like an enabled one —
-// the commit is linked to a checkpoint carrying the session, and a push
-// carries the checkpoint. No project settings or project hooks are written.
-func TestGlobalEnable_NeverEnabledRepoIsTrackedAndPushed(t *testing.T) {
+// the commit is linked to a checkpoint carrying the session. No project
+// settings or project hooks are written, and the push holds the checkpoint
+// until the user agrees (see TestGlobalEnable_PushesHeldUntilAgreed).
+func TestGlobalEnable_NeverEnabledRepoIsTracked(t *testing.T) {
 	t.Parallel()
 	env := newNeverEnabledRepo(t)
 	bare := env.SetupBareRemote()
@@ -96,10 +99,198 @@ func TestGlobalEnable_NeverEnabledRepoIsTrackedAndPushed(t *testing.T) {
 		}
 	}
 	env.GitPushWithHooks("origin", "feature/global")
-	out := gitOutput(t, bare, "for-each-ref", "--format=%(refname)")
-	t.Logf("remote refs after push:\n%s", out)
-	if !strings.Contains(out, "refs/heads/entire/checkpoints/v1") && !strings.Contains(out, "refs/entire/") {
-		t.Errorf("push carried no checkpoint refs; remote has:\n%s", out)
+	if refs := remoteCheckpointRefNames(t, bare); refs != "" {
+		t.Errorf("push carried checkpoint refs the user never agreed to push:\n%s", refs)
+	}
+}
+
+// remoteCheckpointRefNames lists the checkpoint refs on bare, from either
+// backend: the v1 branch and per-checkpoint refs.
+func remoteCheckpointRefNames(t *testing.T, bare string) string {
+	t.Helper()
+	return gitOutput(t, bare, "for-each-ref", "--format=%(refname)", "refs/heads/entire/", "refs/entire/")
+}
+
+// userTierFile is the private user settings file userTierEnv points at.
+func userTierFile(t *testing.T, extra []string) string {
+	t.Helper()
+	for _, kv := range extra {
+		if dir, ok := strings.CutPrefix(kv, "ENTIRE_CONFIG_DIR="); ok {
+			return filepath.Join(dir, usersettings.FileName)
+		}
+	}
+	t.Fatal("no ENTIRE_CONFIG_DIR in the env")
+	return ""
+}
+
+// agentFreeEnv clears every variable that marks an agent caller, so the
+// developer's own session (the suite usually runs inside one) cannot leak in.
+func agentFreeEnv() []string {
+	var env []string
+	for _, name := range review.AgentCallerEnvVars() {
+		env = append(env, name+"=")
+	}
+	return env
+}
+
+// Checkpoints from a repository on only through global enable are held on
+// both backends until the user agrees for that repository; then the held
+// checkpoints go with the next push, and a push from another worktree of the
+// clone carries new ones without asking again.
+func TestGlobalEnable_PushesHeldUntilAgreed(t *testing.T) {
+	t.Parallel()
+	for name, store := range map[string]string{"git-branch": "", "git-refs": StoreGitRefs} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			env := newNeverEnabledRepo(t)
+			env.CheckpointStore = store
+			bare := env.SetupBareRemote()
+			extra, _ := userTierEnv(t, `{"global_enable": true}`)
+			env.ExtraEnv = append(extra, agentFreeEnv()...)
+
+			runClaudeTurn(t, env, "a.go", "package a\n")
+			held := entireLines(gitPushWithHooksIn(t, env, env.RepoDir))
+			// git-branch counts unpushed v1 commits, so the number is approximate.
+			if !strings.Contains(held, "Entire is holding ") || !strings.Contains(held, "session checkpoint") {
+				t.Errorf("held push does not say so:\n%s", held)
+			}
+			if strings.Contains(held, bare) {
+				t.Errorf("the hold line names the remote's path:\n%s", held)
+			}
+			if refs := remoteCheckpointRefNames(t, bare); refs != "" {
+				t.Fatalf("held push carried checkpoint refs:\n%s", refs)
+			}
+
+			// What a yes at the push prompt writes. The bare remote's path
+			// names no forge, so the entry is keyed by the worktree's path.
+			agreed := `{"global_enable": true, "repos": {` + jsonQuote(env.RepoDir) + `: {"push_checkpoints": true}}}`
+			if err := os.WriteFile(userTierFile(t, extra), []byte(agreed), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if out := gitPushWithHooksIn(t, env, env.RepoDir); strings.Contains(out, "holding") {
+				t.Errorf("push after agreeing still holds:\n%s", out)
+			}
+			first := remoteCheckpointRefNames(t, bare)
+			if first == "" {
+				t.Fatal("push after agreeing carried no checkpoint refs")
+			}
+
+			linked := filepath.Join(t.TempDir(), "linked")
+			testutil.RunGit(t, env.RepoDir, "worktree", "add", "-b", "linked-branch", linked)
+			runClaudeTurn(t, env, "b.go", "package b\n")
+			if out := gitPushWithHooksIn(t, env, linked); strings.Contains(out, "holding") {
+				t.Errorf("push from another worktree holds:\n%s", out)
+			}
+			if after := remoteCheckpointRefNames(t, bare); after == first && store == StoreGitRefs {
+				t.Errorf("push from another worktree carried no new checkpoint ref:\n%s", after)
+			}
+			if store == "" {
+				local := gitOutput(t, env.RepoDir, "rev-parse", "refs/heads/entire/checkpoints/v1")
+				if remote := gitOutput(t, bare, "rev-parse", "refs/heads/entire/checkpoints/v1"); remote != local {
+					t.Errorf("remote v1 %s, local %s: the second checkpoint did not go", remote, local)
+				}
+			}
+		})
+	}
+}
+
+// entireLines keeps Entire's own lines of a push's output, dropping git's
+// (which name the remote's path).
+func entireLines(out string) string {
+	var kept []string
+	for line := range strings.Lines(out) {
+		if strings.HasPrefix(line, "[entire]") {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "")
+}
+
+func jsonQuote(s string) string {
+	data, err := json.Marshal(filepath.ToSlash(s))
+	if err != nil {
+		panic(err)
+	}
+	return string(data)
+}
+
+// A terminal push from a person asks (here the test override logs the
+// question and reads no answer, which holds); the same push from an agent
+// session never asks, because an agent's shell can pass the terminal probe
+// and its yes is not the user's. Neither push asks the first-push policy
+// question on top.
+func TestGlobalEnable_HeldPushAsksOnlyAPerson(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		agentEnv []string
+		asked    int
+	}{
+		"person": {asked: 1},
+		"agent":  {agentEnv: []string{"CLAUDECODE=1"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			env := newNeverEnabledRepo(t)
+			env.CheckpointStore = StoreGitRefs
+			bare := env.SetupBareRemote()
+			extra, _ := userTierEnv(t, `{"global_enable": true}`)
+			env.ExtraEnv = append(append(extra, agentFreeEnv()...), tc.agentEnv...)
+
+			runClaudeTurn(t, env, "a.go", "package a\n")
+			out := gitPushAsTerminal(t, env, "1")
+			if !strings.Contains(out, "holding") {
+				t.Errorf("push did not hold:\n%s", out)
+			}
+			if refs := remoteCheckpointRefNames(t, bare); refs != "" {
+				t.Errorf("push carried checkpoint refs:\n%s", refs)
+			}
+			log := entireLog(t, env)
+			if got := strings.Count(log, strategy.GlobalEnablePushConsentLogMsg); got != tc.asked {
+				t.Errorf("consent question asked %d times, want %d", got, tc.asked)
+			}
+			if strings.Contains(log, strategy.CheckpointPushQuestionLogMsg) {
+				t.Error("the policy question was asked on a held push")
+			}
+		})
+	}
+}
+
+func entireLog(t *testing.T, env *TestEnv) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(env.RepoDir, ".entire", "logs", "entire.log"))
+	if os.IsNotExist(err) {
+		return ""
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+// `entire checkpoint push` never asks: in a held repository it reports the
+// hold and sends nothing.
+func TestGlobalEnable_CheckpointPushReportsTheHold(t *testing.T) {
+	t.Parallel()
+	env := newNeverEnabledRepo(t)
+	env.CheckpointStore = StoreGitRefs
+	bare := env.SetupBareRemote()
+	extra, _ := userTierEnv(t, `{"global_enable": true}`)
+	env.ExtraEnv = append(extra, agentFreeEnv()...)
+	runClaudeTurn(t, env, "a.go", "package a\n")
+	cpID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
+	if cpID == "" {
+		t.Fatal("commit not linked to a checkpoint")
+	}
+
+	_, stderr, err := runCheckpointPush(t, env, true, cpID)
+	if err == nil {
+		t.Fatal("entire checkpoint push succeeded in a held repository")
+	}
+	if !strings.Contains(stderr, "on only through global enable") {
+		t.Errorf("error does not name the hold:\n%s", stderr)
+	}
+	if refs := remoteCheckpointRefNames(t, bare); refs != "" {
+		t.Errorf("checkpoint push sent refs:\n%s", refs)
 	}
 }
 
@@ -179,51 +370,29 @@ func TestGlobalEnable_DisabledRepoStaysUntracked(t *testing.T) {
 	}
 }
 
-// The first push that carries checkpoints from a repository on only through
-// global enable says so, once per clone; a repository the developer enabled
-// themselves never sees it. The global-only row runs on the git-refs backend,
-// whose pre-push path prints the notice separately from the v1 branch's.
-func TestGlobalEnable_FirstCheckpointPushNotice(t *testing.T) {
+// A repository the developer claimed pushes its checkpoints with no hold and
+// no global-enable notice: the one-time notice speaks only for a push the
+// owner list let through without asking, which a local bare remote (no forge
+// owner) can never be.
+func TestGlobalEnable_ClaimedRepoPushesWithoutNotice(t *testing.T) {
 	t.Parallel()
-	const notice = "This repository is enabled through global enable"
-	for name, tc := range map[string]struct {
-		store      string
-		claim      bool
-		wantNotice bool
-	}{
-		"global only": {store: StoreGitRefs, wantNotice: true},
-		"claimed":     {claim: true},
-	} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			env := newNeverEnabledRepo(t)
-			env.CheckpointStore = tc.store
-			env.SetupBareRemote()
-			extra, _ := userTierEnv(t, `{"global_enable": true}`)
-			env.ExtraEnv = extra
-			if tc.claim {
-				env.WriteFile(".entire/settings.local.json", `{"enabled": true}`)
-			}
+	env := newNeverEnabledRepo(t)
+	env.CheckpointStore = StoreGitRefs
+	bare := env.SetupBareRemote()
+	extra, _ := userTierEnv(t, `{"global_enable": true}`)
+	env.ExtraEnv = append(extra, agentFreeEnv()...)
+	env.WriteFile(".entire/settings.local.json", `{"enabled": true}`)
 
-			runClaudeTurn(t, env, "a.go", "package a\n")
-			first := env.RunPrePushOutput("origin")
-			if got := strings.Contains(first, notice); got != tc.wantNotice {
-				t.Errorf("first push notice = %v, want %v:\n%s", got, tc.wantNotice, first)
-			}
-			if tc.wantNotice && strings.Contains(first, env.RepoDir) {
-				t.Errorf("notice names a path:\n%s", first)
-			}
-
-			runClaudeTurn(t, env, "b.go", "package b\n")
-			if second := env.RunPrePushOutput("origin"); strings.Contains(second, notice) {
-				t.Errorf("notice repeated on the second push:\n%s", second)
-			}
-
-			marker := filepath.Join(env.RepoDir, ".git", "entire-global-enable-push-notice")
-			if _, err := os.Stat(marker); (err == nil) != tc.wantNotice {
-				t.Errorf("marker present = %v, want %v", err == nil, tc.wantNotice)
-			}
-		})
+	runClaudeTurn(t, env, "a.go", "package a\n")
+	out := env.RunPrePushOutput("origin")
+	if strings.Contains(out, "holding") || strings.Contains(out, "without asking") {
+		t.Errorf("claimed repository's push mentions global enable:\n%s", out)
+	}
+	if refs := remoteCheckpointRefNames(t, bare); refs == "" {
+		t.Error("claimed repository's push carried no checkpoint refs")
+	}
+	if _, err := os.Stat(filepath.Join(env.RepoDir, ".git", "entire-global-enable-push-notice")); err == nil {
+		t.Error("notice marker written for a claimed repository")
 	}
 }
 
@@ -289,5 +458,34 @@ func TestGlobalEnable_SaysWhenItInstallsGitHooks(t *testing.T) {
 				t.Errorf("a later session repeated the banner once the hooks are in:\n%s", again.Stdout)
 			}
 		})
+	}
+}
+
+// Attaching a session to a pushed commit pushes its checkpoint at once, so in
+// a held repository attach reports the hold instead: the checkpoint is
+// written locally and nothing is sent.
+func TestGlobalEnable_AttachReportsTheHold(t *testing.T) {
+	t.Parallel()
+	env := newNeverEnabledRepo(t)
+	bare := env.SetupBareRemote()
+	extra, _ := userTierEnv(t, `{"global_enable": true}`)
+	env.ExtraEnv = append(extra, agentFreeEnv()...)
+
+	const sessionID = "held-attach"
+	tb := NewTranscriptBuilder()
+	tb.AddUserMessage("explain the readme")
+	tb.AddAssistantMessage("It names the project.")
+	if err := tb.WriteToFile(filepath.Join(env.ClaudeProjectDir, sessionID+".jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	out, err := env.RunCLIWithError("session", "attach", sessionID, "-a", agentClaudeCode, "-f", "--commit", "HEAD")
+	if err == nil {
+		t.Fatalf("attach to a pushed commit succeeded in a held repository:\n%s", out)
+	}
+	if !strings.Contains(out, "written locally but not pushed") || !strings.Contains(out, "on only through global enable") {
+		t.Errorf("attach does not report the hold:\n%s", out)
+	}
+	if refs := remoteCheckpointRefNames(t, bare); refs != "" {
+		t.Errorf("attach sent checkpoint refs:\n%s", refs)
 	}
 }
