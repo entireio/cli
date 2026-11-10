@@ -526,7 +526,7 @@ func TestSHHookWrapperProbe_DoesNotSearchWorkingDirectory(t *testing.T) {
 	if !slices.Contains(cmd.Env, "NoDefaultCurrentDirectoryInExePath=1") {
 		t.Errorf("probe environment must set NoDefaultCurrentDirectoryInExePath=1, got %q", cmd.Env)
 	}
-	if got := cmd.Args; !slices.Equal(got, []string{systemCmdExe(), "/d", "/s", "/c", shHookWrapperProbeCommand}) {
+	if got := cmd.Args; !slices.Equal(got, []string{SystemCmdExe(), "/d", "/s", "/c", shHookWrapperProbeCommand}) {
 		t.Errorf("probe args = %q", got)
 	}
 }

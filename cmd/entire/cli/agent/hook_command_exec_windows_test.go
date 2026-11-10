@@ -506,8 +506,8 @@ func TestWindowsSHHookWrapperProbe_IgnoresWorkingDirectory(t *testing.T) {
 	}
 
 	t.Run("starts the system cmd.exe", func(t *testing.T) {
-		if got, want := systemCmdExe(), filepath.Join(system32Dir(), "cmd.exe"); !strings.EqualFold(got, want) {
-			t.Fatalf("systemCmdExe() = %q, want %q", got, want)
+		if got, want := SystemCmdExe(), filepath.Join(system32Dir(), "cmd.exe"); !strings.EqualFold(got, want) {
+			t.Fatalf("SystemCmdExe() = %q, want %q", got, want)
 		}
 	})
 

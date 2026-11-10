@@ -119,11 +119,12 @@ func TestInstallTitle_WindowsHostWrapsExistingCommandBase64(t *testing.T) {
 		t.Fatalf("InstallTitleTee: %v", err)
 	}
 	got := readTitleCommand(t, cfgDir)
-	want := "entire hooks antigravity title-tee --wrap-b64 " + base64.RawURLEncoding.EncodeToString([]byte(original))
+	const teePrefix = agent.WindowsPathOnlyLookupPrefix + "entire hooks antigravity title-tee --wrap-b64 "
+	want := teePrefix + base64.RawURLEncoding.EncodeToString([]byte(original))
 	if got != want {
 		t.Errorf("title.command = %q, want %q", got, want)
 	}
-	if strings.ContainsAny(strings.TrimPrefix(got, "entire hooks antigravity title-tee --wrap-b64 "), `'"&%^|<>()=`) {
+	if strings.ContainsAny(strings.TrimPrefix(got, teePrefix), `'"&%^|<>()=`) {
 		t.Errorf("encoded form carries a cmd.exe metacharacter: %q", got)
 	}
 
@@ -132,6 +133,71 @@ func TestInstallTitle_WindowsHostWrapsExistingCommandBase64(t *testing.T) {
 	}
 	if got := readTitleCommand(t, cfgDir); got != original {
 		t.Errorf("after uninstall title.command = %q, want the original %q", got, original)
+	}
+}
+
+// TestInstallTitle_WindowsHostResolvesEntireFromPath pins that the Windows
+// title command resolves `entire` from PATH: agy runs the global slot through
+// cmd.exe in whatever folder it was opened in, and cmd.exe would otherwise run
+// an `entire.bat` there in place of the installed CLI. It also pins the
+// upgrade of a tee an earlier version wrote without the prefix, bare or
+// wrapping an original, and that uninstall still handles both forms.
+func TestInstallTitle_WindowsHostResolvesEntireFromPath(t *testing.T) {
+	// No t.Parallel — uses t.Setenv and the process-global hook-host override.
+	t.Cleanup(agent.SetWindowsHookProbeForTesting("windows", nil))
+	const original = `powershell -c "Write-Host 'x'"`
+	wrapped := "entire hooks antigravity title-tee --wrap-b64 " + base64.RawURLEncoding.EncodeToString([]byte(original))
+
+	for _, tc := range []struct {
+		name, existing, want, afterUninstall string
+	}{
+		{name: "fresh", existing: "", want: agent.WindowsPathOnlyLookupPrefix + "entire hooks antigravity title-tee"},
+		{name: "legacy bare tee", existing: "entire hooks antigravity title-tee", want: agent.WindowsPathOnlyLookupPrefix + "entire hooks antigravity title-tee"},
+		{name: "legacy wrapping tee", existing: wrapped, want: agent.WindowsPathOnlyLookupPrefix + wrapped, afterUninstall: original},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfgDir := t.TempDir()
+			t.Setenv(configDirEnv, cfgDir)
+			if tc.existing != "" {
+				writeAgySettingsFile(t, cfgDir, `{"title":{"type":"command","command":`+string(mustJSON(t, tc.existing))+`}}`)
+			}
+			for range 2 { // the second install must leave the current form alone
+				if err := InstallTitleTee(); err != nil {
+					t.Fatalf("InstallTitleTee: %v", err)
+				}
+				if got := readTitleCommand(t, cfgDir); got != tc.want {
+					t.Fatalf("title.command = %q, want %q", got, tc.want)
+				}
+			}
+			if err := UninstallTitleTee(); err != nil {
+				t.Fatalf("UninstallTitleTee: %v", err)
+			}
+			if got := readTitleCommand(t, cfgDir); got != tc.afterUninstall {
+				t.Errorf("after uninstall title.command = %q, want %q", got, tc.afterUninstall)
+			}
+		})
+	}
+}
+
+// TestInstallTitle_WindowsHostLeavesOtherTeeCommandsAlone pins what the
+// Windows upgrade must not touch: a user's own command that runs the tee, and
+// the legacy local-dev form, are left exactly as they are.
+func TestInstallTitle_WindowsHostLeavesOtherTeeCommandsAlone(t *testing.T) {
+	// No t.Parallel — uses t.Setenv and the process-global hook-host override.
+	t.Cleanup(agent.SetWindowsHookProbeForTesting("windows", nil))
+	for _, existing := range []string{
+		"my-wrapper.cmd entire hooks antigravity title-tee",
+		"go run 'C:/src/cli/cmd/entire/main.go' hooks antigravity title-tee",
+	} {
+		cfgDir := t.TempDir()
+		t.Setenv(configDirEnv, cfgDir)
+		writeAgySettingsFile(t, cfgDir, `{"title":{"type":"command","command":`+string(mustJSON(t, existing))+`}}`)
+		if err := InstallTitleTee(); err != nil {
+			t.Fatalf("InstallTitleTee: %v", err)
+		}
+		if got := readTitleCommand(t, cfgDir); got != existing {
+			t.Errorf("title.command = %q, want it left as %q", got, existing)
+		}
 	}
 }
 
@@ -153,6 +219,7 @@ func TestExtractWrappedCommand_Forms(t *testing.T) {
 		{"base64 token not base64url", "entire hooks antigravity title-tee --wrap-b64 not*base64!", "", false},
 		{"empty base64 token", "entire hooks antigravity title-tee --wrap-b64 ", "", false},
 		{"bare tee", "entire hooks antigravity title-tee", "", false},
+		{"Windows prefixed base64 form", agent.WindowsPathOnlyLookupPrefix + "entire hooks antigravity title-tee --wrap-b64 " + b64("x & y"), "x & y", true},
 		{"unquoted legacy", "entire hooks antigravity title-tee --wrap unquoted", "", false},
 	}
 	for _, tc := range cases {

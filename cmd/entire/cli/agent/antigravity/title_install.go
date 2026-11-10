@@ -97,20 +97,46 @@ func openAgyConfigRootAt(dir string, create bool) (*os.Root, error) {
 // The command always names the `entire` binary (resolved via $PATH): the title
 // slot lives in agy's GLOBAL settings.json and is invoked from whatever
 // directory agy runs in, so it must never depend on a repository path.
+//
+// On Windows agy hands the slot to cmd.exe, which looks for a bare program name
+// in its working directory before PATH. The line therefore starts with
+// agent.WindowsPathOnlyLookupPrefix, so `entire` resolves from PATH and a
+// repository `entire.cmd`, `entire.bat` or `entire.exe` in the folder agy
+// was opened in never runs, whether or not Entire is enabled there.
 func titleTeeCommand(original string) string {
-	base := "entire hooks antigravity title-tee"
+	if !agent.HookHostIsWindows() {
+		if original == "" {
+			return titleTeeBase
+		}
+		return titleTeeBase + " --wrap " + shellSingleQuote(original)
+	}
 	if original == "" {
-		return base
+		return agent.WindowsPathOnlyLookupPrefix + titleTeeBase
 	}
-	if agent.HookHostIsWindows() {
-		// agy hands the slot to cmd.exe on Windows, where POSIX single quotes
-		// are literal characters and the tee has no sh to re-run the original
-		// with. The original travels base64url-encoded instead — an alphabet
-		// ([A-Za-z0-9_-], no padding) no shell touches — and the tee runs it
-		// through cmd.exe itself, exactly as agy would have.
-		return base + " " + strings.TrimSpace(wrapB64Flag) + " " + base64.RawURLEncoding.EncodeToString([]byte(original))
+	// cmd.exe treats POSIX single quotes as literal characters and the tee has
+	// no sh to re-run the original with. The original travels base64url-encoded
+	// instead — an alphabet ([A-Za-z0-9_-], no padding) no shell touches — and
+	// the tee runs it through cmd.exe itself, exactly as agy would have.
+	return agent.WindowsPathOnlyLookupPrefix + titleTeeBase + wrapB64Flag + base64.RawURLEncoding.EncodeToString([]byte(original))
+}
+
+// titleTeeBase is the tee invocation every production title command starts
+// with, after the Windows PATH-only prefix where there is one.
+const titleTeeBase = "entire hooks antigravity title-tee"
+
+// upgradedTitleTeeCommand returns the Windows form of a tee command written by
+// an earlier version without agent.WindowsPathOnlyLookupPrefix, keeping any
+// wrapped original byte for byte. It reports false for anything else: a
+// current command, a non-Windows host, a POSIX --wrap form, or a user's own
+// command that merely mentions the tee, all of which are left alone.
+func upgradedTitleTeeCommand(command string) (string, bool) {
+	if !agent.HookHostIsWindows() || strings.HasPrefix(command, agent.WindowsPathOnlyLookupPrefix) {
+		return "", false
 	}
-	return base + " --wrap " + shellSingleQuote(original)
+	if command == titleTeeBase || strings.HasPrefix(command, titleTeeBase+wrapB64Flag) {
+		return agent.WindowsPathOnlyLookupPrefix + command, true
+	}
+	return "", false
 }
 
 // wrapFlag and wrapB64Flag are the two spellings of a preserved original
@@ -168,7 +194,9 @@ func lockAgySettings(create bool) (release func(), err error) {
 
 // InstallTitleTee installs the title-tee shim into agy's global settings.json.
 // If a user's own title command is already present, it is preserved via --wrap.
-// The call is idempotent: if our marker is already in the command, it returns nil.
+// The call is idempotent: if our marker is already in the command, it returns
+// nil, except that a Windows tee written without the PATH-only prefix is
+// rewritten with it (upgradedTitleTeeCommand).
 func InstallTitleTee() error {
 	release, err := lockAgySettings(true)
 	if err != nil {
@@ -187,15 +215,16 @@ func InstallTitleTee() error {
 		_ = json.Unmarshal(raw, &existing) //nolint:errcheck // treat unparseable as absent
 	}
 
-	// Idempotency: already contains our marker.
-	if strings.Contains(existing.Command, titleTeeMarker) {
-		return nil
-	}
-
 	// Build new title config, wrapping any pre-existing command.
-	cfg := titleConfig{
-		Type:    hookTypeCommand,
-		Command: titleTeeCommand(existing.Command),
+	cfg := titleConfig{Type: hookTypeCommand}
+	if strings.Contains(existing.Command, titleTeeMarker) {
+		upgraded, ok := upgradedTitleTeeCommand(existing.Command)
+		if !ok {
+			return nil // already ours and current
+		}
+		cfg.Command = upgraded
+	} else {
+		cfg.Command = titleTeeCommand(existing.Command)
 	}
 
 	cfgBytes, err := jsonutil.MarshalWithNoHTMLEscape(cfg)
@@ -308,7 +337,9 @@ func UninstallTitleTee() error {
 // leaving agy to spawn a failing `go run` on every state change after the
 // original worktree is deleted.
 func isBareTitleTeeCommand(command string) bool {
-	if command == titleTeeCommand("") {
+	// Both the current Windows form and the unprefixed one it replaced, on any
+	// host: uninstall must recognise whichever form an earlier install wrote.
+	if command == titleTeeBase || command == agent.WindowsPathOnlyLookupPrefix+titleTeeBase {
 		return true
 	}
 	return strings.HasPrefix(command, "go run ") &&

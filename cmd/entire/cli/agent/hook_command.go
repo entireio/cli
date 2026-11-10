@@ -217,6 +217,12 @@ func warningHookCommand(command, missing, failed string) string {
 // whichever cmd.exe parses the line.
 const windowsPathOnlyLookup = `set NoDefaultCurrentDirectoryInExePath=1& `
 
+// WindowsPathOnlyLookupPrefix is windowsPathOnlyLookup for a cmd.exe line Entire
+// writes outside the hook wrappers, such as Antigravity's global title command:
+// prepended to the line, it makes cmd.exe resolve every program after it from
+// PATH.
+const WindowsPathOnlyLookupPrefix = windowsPathOnlyLookup
+
 // windowsEntireGuard is the PATH check every Windows wrapper body runs after
 // windowsPathOnlyLookup, up to the branch that handles a missing CLI. Both
 // branches must start with windowsBranchStart. The errorlevel test has to come
@@ -553,9 +559,9 @@ func defaultSHHookWrapperWorks(ctx context.Context, command string) bool {
 // decide which wrapper form gets installed. NoDefaultCurrentDirectoryInExePath
 // stops cmd.exe searching its working directory; running from the temp
 // directory keeps the checkout out of the picture even if it is ignored.
-// cmd.exe itself is started by full path: see systemCmdExe.
+// cmd.exe itself is started by full path: see SystemCmdExe.
 func shHookWrapperProbe(ctx context.Context, command string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, systemCmdExe(), "/d", "/s", "/c", command)
+	cmd := exec.CommandContext(ctx, SystemCmdExe(), "/d", "/s", "/c", command)
 	cmd.Dir = os.TempDir()
 	cmd.Env = append(os.Environ(), windowsNoCurrentDirLookupEnv)
 	cmd.Stdout = io.Discard
