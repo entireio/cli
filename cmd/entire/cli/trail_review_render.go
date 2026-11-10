@@ -233,9 +233,14 @@ func (s trailReviewStyles) dashboardHeader(width int, trail api.TrailResource, c
 	}
 	meta = append(meta, s.render(s.dim, trailReviewCleanLine(trail.ID)))
 	fmt.Fprintf(&b, "  %s\n", tuiutil.TruncateDisplayWidth(strings.Join(meta, s.render(s.dim, " · ")), width-2))
+	open := fmt.Sprintf("%d open (%d high · %d medium · %d low", counts.Open, counts.OpenHigh, counts.OpenMedium, counts.OpenLow)
+	if counts.OpenStale > 0 {
+		open += fmt.Sprintf("; %d stale", counts.OpenStale)
+	}
+	// The stale section lists stale open findings; the all-status stale
+	// total stays in the plain view, where width is not a concern.
 	fmt.Fprintf(&b, "  %s\n\n", s.render(s.dim, tuiutil.TruncateDisplayWidth(fmt.Sprintf(
-		"%d open (%d high · %d medium · %d low) · %d stale · %d resolved · %d dismissed",
-		counts.Open, counts.OpenHigh, counts.OpenMedium, counts.OpenLow, counts.Stale, counts.Resolved, counts.Dismissed), width-2)))
+		"%s) · %d resolved · %d dismissed", open, counts.Resolved, counts.Dismissed), width-2)))
 	return b.String()
 }
 
@@ -263,14 +268,26 @@ func (s trailReviewStyles) dashboardFindings(width int, comments []api.TrailRevi
 	if !trailReviewStatusFilterIncludes(opts.Status, trailReviewStatusOpen) {
 		return s.renderOtherAndDone(width, groups)
 	}
+	outside := trailReviewOpenOutsideRows(counts, comments, opts, trailReviewDashboardListsStale(opts, paged))
 	var b strings.Builder
 	b.WriteString(s.sectionRule(openTitle, width) + "\n")
 	if len(groups.open) == 0 {
-		fmt.Fprintf(&b, "  %s\n", s.render(s.dim, "No open findings match the current filters."))
+		empty := "No open findings match the current filters."
+		if len(outside.stale) > 0 {
+			empty = "No current open findings match the current filters."
+		}
+		fmt.Fprintf(&b, "  %s\n", s.render(s.dim, empty))
 	}
 	b.WriteString(s.renderCards(width, groups.open))
-	if hidden := counts.Open - len(groups.open); !paged && hidden > 0 {
-		fmt.Fprintf(&b, "  %s\n", s.render(s.yellow, trailReviewHiddenOpenNote(hidden, opts)))
+	if len(outside.stale) > 0 {
+		b.WriteString("\n" + s.sectionRule(fmt.Sprintf("Stale (%d)", len(outside.stale)), width) + "\n")
+		for _, line := range wrapTrailReviewText(trailReviewStaleSectionNote, width-2) {
+			fmt.Fprintf(&b, "  %s\n", s.render(s.dim, line))
+		}
+		b.WriteString(s.renderCards(width, groupTrailReviewComments(outside.stale).open))
+	}
+	if !paged && outside.hidden > 0 {
+		fmt.Fprintf(&b, "  %s\n", s.render(s.yellow, trailReviewHiddenOpenNote(outside, opts)))
 	}
 	b.WriteString("\n")
 	b.WriteString(s.renderOtherAndDone(width, groups))
@@ -285,16 +302,74 @@ var trailReviewFooterActions = []string{
 	`entire trail finding dismiss <id> -m "…"`,
 }
 
-func trailReviewHiddenOpenNote(hidden int, opts trailReviewListOptions) string {
+// trailReviewStaleSectionNote explains the dashboard's stale section: a push
+// changed the code these findings point at, and the merge gate skips them.
+const trailReviewStaleSectionNote = "the code changed after these were raised, so they don't block the merge gate; re-check each one"
+
+// trailReviewOpenOutside is what happened to the trail's open findings that a
+// view's rows leave out: the dashboard lists stale ones in their own section,
+// and the rest are hidden by the filters.
+type trailReviewOpenOutside struct {
+	stale       []api.TrailReviewComment
+	hidden      int
+	hiddenStale bool
+}
+
+// trailReviewDashboardListsStale reports whether the dashboard adds a stale
+// section: only on a full view whose rows hold open, current findings, since
+// any other freshness filter already decides what stale findings show.
+func trailReviewDashboardListsStale(opts trailReviewListOptions, paged bool) bool {
+	return !paged && opts.Freshness == trailReviewFreshnessCurrent &&
+		trailReviewStatusFilterIncludes(opts.Status, trailReviewStatusOpen)
+}
+
+func trailReviewOpenOutsideRows(counts trailReviewCommentCounts, rows []api.TrailReviewComment, opts trailReviewListOptions, listStale bool) trailReviewOpenOutside {
+	shown := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		shown[row.ID] = true
+	}
+	var out trailReviewOpenOutside
+	for _, comment := range counts.open {
+		if shown[comment.ID] {
+			continue
+		}
+		stale := comment.StaleOutcome == trailReviewFreshnessStale
+		if listStale && stale && trailReviewSeverityFilterIncludes(opts.Severity, comment.Severity) {
+			out.stale = append(out.stale, comment)
+			continue
+		}
+		out.hidden++
+		// With a stale section, only --severity can hide a stale finding.
+		out.hiddenStale = out.hiddenStale || (stale && !listStale)
+	}
+	return out
+}
+
+// trailReviewSeverityFilterIncludes reports whether a normalized --severity
+// filter selects a finding's severity; a filter never selects a finding
+// without one, as on the server.
+func trailReviewSeverityFilterIncludes(filter string, severity *string) bool {
+	if filter == "" {
+		return true
+	}
+	want := strings.ToLower(stringPtrValue(severity))
+	for part := range strings.SplitSeq(filter, ",") {
+		if want != "" && strings.TrimSpace(part) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func trailReviewHiddenOpenNote(outside trailReviewOpenOutside, opts trailReviewListOptions) string {
 	noun := "open finding"
-	if hidden != 1 {
+	if outside.hidden != 1 {
 		noun += "s"
 	}
-	note := fmt.Sprintf("+%d %s not shown by the current filters", hidden, noun)
-	// Either filter can hide open findings, and the counts do not say which,
-	// so name every one that is in effect.
+	note := fmt.Sprintf("+%d %s not shown by the current filters", outside.hidden, noun)
+	// Either filter can hide open findings, so name every one that hides any.
 	var fixes []string
-	if opts.Freshness == trailReviewFreshnessCurrent {
+	if outside.hiddenStale && opts.Freshness == trailReviewFreshnessCurrent {
 		fixes = append(fixes, "add --freshness any")
 	}
 	if opts.Severity != "" {

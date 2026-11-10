@@ -891,7 +891,10 @@ func encodeTrailResumeContextJSON(w io.Writer, ctx trailResumeContext) error {
 }
 
 func trailResumeFindingCountsFromReviewCounts(counts trailReviewCommentCounts) trailResumeFindingCounts {
-	return trailResumeFindingCounts(counts)
+	return trailResumeFindingCounts{
+		Open: counts.Open, OpenHigh: counts.OpenHigh, OpenMedium: counts.OpenMedium, OpenLow: counts.OpenLow,
+		Resolved: counts.Resolved, Dismissed: counts.Dismissed, Stale: counts.Stale,
+	}
 }
 
 func findTrailResumeSession(sessions []trailResumeSessionContext, sessionID string) (trailResumeSessionContext, bool) {

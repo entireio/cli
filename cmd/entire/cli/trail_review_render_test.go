@@ -166,8 +166,8 @@ const trailReviewDashboardPlainGolden = `  Trail #42  Add token refresh
   Status: open · Branch: feat/token-refresh · Base: main
   ID: 01M62HSGVJWDRV0Y3AB3HQRJ4G
 
-  Open findings: 2  high 1  medium 1  low 0
-  Resolved: 1        Dismissed: 1     Stale: 1
+  Open findings: 2  high 1  medium 1  low 0  (1 stale)
+  Resolved: 1        Dismissed: 1     Stale (all statuses): 1
   Showing up to 100 findings; next page: --cursor "next-1"
 
   ID            SEV     STATUS     FRESHNESS  LOCATION                   SUMMARY
@@ -254,7 +254,7 @@ func TestRenderTrailReviewDashboardStyled_GroupsBySeverityAndStatus(t *testing.T
 	for _, want := range []string{
 		"● Trail #42  Add token refresh",
 		"  open · feat/token-refresh → main · 01M62HSGVJWDRV0Y3AB3HQRJ4G",
-		"  2 open (1 high · 1 medium · 0 low) · 1 stale · 1 resolved · 1 dismissed",
+		"  2 open (1 high · 1 medium · 0 low; 1 stale) · 1 resolved · 1 dismissed",
 		"── Needs attention (2) ",
 		"   High  open · stale  src/auth/session.ts:12  · 01M63Q22C0DZ",
 		"   Medium  open  src/auth/session.ts:88-92  · 01M63Q23WNMW",
@@ -313,19 +313,95 @@ func TestRenderTrailReviewDashboardStyled_ZeroCreatedAtHasNoAge(t *testing.T) {
 	}
 }
 
-func TestRenderTrailReviewDashboardStyled_AnnouncesOpenFindingsHiddenByFilters(t *testing.T) {
+func TestRenderTrailReviewDashboardStyled_ListsStaleOpenFindings(t *testing.T) {
 	t.Parallel()
 	_, comments := trailReviewRenderFixture()
 	// The default filter returned only the current open finding; the
-	// summary counts know about the stale one too.
+	// summary counts know about the stale one too, so it gets its own section.
 	text := renderStyledDashboard(t, 100, comments[:1], "", defaultTrailReviewListOptions(), countTrailReviewComments(comments))
 	for _, want := range []string{
 		"── Needs attention (1) ",
-		"+1 open finding not shown by the current filters — add --freshness any",
+		"── Stale (1) ",
+		"the code changed after these were raised",
+		"The retry loop never backs off",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("styled dashboard missing %q:\n%s", want, text)
 		}
+	}
+	if strings.Contains(text, "not shown by the current filters") {
+		t.Fatalf("a listed stale finding is not hidden:\n%s", text)
+	}
+}
+
+func TestRenderTrailReviewDashboardStyled_AnnouncesOpenFindingsHiddenByFilters(t *testing.T) {
+	t.Parallel()
+	_, comments := trailReviewRenderFixture()
+	// --severity medium hides the stale high finding from both sections.
+	opts := defaultTrailReviewListOptions()
+	opts.Severity = trailReviewSeverityMedium
+	text := renderStyledDashboard(t, 100, comments[:1], "", opts, countTrailReviewComments(comments))
+	if want := "+1 open finding not shown by the current filters — drop --severity"; !strings.Contains(text, want) {
+		t.Fatalf("styled dashboard missing %q:\n%s", want, text)
+	}
+	if strings.Contains(text, "── Stale") {
+		t.Fatalf("stale section ignored --severity:\n%s", text)
+	}
+}
+
+// Agents read the plain dashboard, so it lists stale open findings and names
+// hidden ones the same way the styled view does.
+func TestPrintTrailReviewDashboard_PlainListsStaleAndHiddenOpenFindings(t *testing.T) {
+	t.Parallel()
+	target, comments := trailReviewRenderFixture()
+	counts := countTrailReviewComments(comments)
+	render := func(rows []api.TrailReviewComment, opts trailReviewListOptions) string {
+		var out strings.Builder
+		if err := printTrailReviewDashboard(&out, target, rows, "", opts, counts, nil); err != nil {
+			t.Fatal(err)
+		}
+		return out.String()
+	}
+
+	text := render(comments[:1], defaultTrailReviewListOptions())
+	for _, want := range []string{
+		"  Stale open findings (1): " + trailReviewStaleSectionNote,
+		"01M63Q22C0DZ  High  open    stale",
+		"Actions:",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("plain dashboard missing %q:\n%s", want, text)
+		}
+	}
+
+	// No current rows: the stale section still shows, and the empty line says
+	// only current findings are missing.
+	text = render(nil, defaultTrailReviewListOptions())
+	if !strings.Contains(text, "No current findings match the current filters.") || !strings.Contains(text, "Stale open findings (1)") {
+		t.Fatalf("plain dashboard without current rows:\n%s", text)
+	}
+
+	opts := defaultTrailReviewListOptions()
+	opts.Severity = trailReviewSeverityMedium
+	text = render(comments[:1], opts)
+	if want := "  +1 open finding not shown by the current filters — drop --severity"; !strings.Contains(text, want) {
+		t.Fatalf("plain dashboard missing %q:\n%s", want, text)
+	}
+
+	// --freshness current still hides stale findings, and says so.
+	opts = defaultTrailReviewListOptions()
+	opts.Freshness = trailReviewFreshnessAny
+	if text = render(comments[:2], opts); strings.Contains(text, "Stale open findings") || strings.Contains(text, "not shown") {
+		t.Fatalf("--freshness any lists stale findings in the rows only:\n%s", text)
+	}
+
+	// A paged view cannot tell hidden findings from later pages.
+	var out strings.Builder
+	if err := printTrailReviewDashboard(&out, target, comments[:1], "next-1", defaultTrailReviewListOptions(), counts, nil); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "Stale open findings") || strings.Contains(out.String(), "not shown") {
+		t.Fatalf("paged dashboard should not add a stale section or hidden note:\n%s", out.String())
 	}
 }
 
@@ -776,11 +852,38 @@ func TestTrailReviewHiddenOpenNoteNamesEveryActiveFilter(t *testing.T) {
 	t.Parallel()
 	opts := defaultTrailReviewListOptions()
 	opts.Severity = "high"
-	if got := trailReviewHiddenOpenNote(2, opts); !strings.HasSuffix(got, "— add --freshness any or drop --severity") {
+	hidden := trailReviewOpenOutside{hidden: 2, hiddenStale: true}
+	if got := trailReviewHiddenOpenNote(hidden, opts); !strings.HasSuffix(got, "— add --freshness any or drop --severity") {
 		t.Fatalf("hint = %q", got)
 	}
+	// Freshness is named only when a hidden finding is stale.
+	if got := trailReviewHiddenOpenNote(trailReviewOpenOutside{hidden: 2}, opts); !strings.HasSuffix(got, "— drop --severity") {
+		t.Fatalf("current-only hint = %q", got)
+	}
 	opts.Freshness = trailReviewFreshnessAny
-	if got := trailReviewHiddenOpenNote(2, opts); !strings.HasSuffix(got, "— drop --severity") {
+	if got := trailReviewHiddenOpenNote(hidden, opts); !strings.HasSuffix(got, "— drop --severity") {
 		t.Fatalf("severity-only hint = %q", got)
+	}
+}
+
+// `finding list` names open findings its filters hide; it has no stale
+// section, so stale ones point at --freshness.
+func TestTrailReviewListHiddenNote(t *testing.T) {
+	t.Parallel()
+	_, comments := trailReviewRenderFixture()
+	counts := countTrailReviewComments(comments)
+	opts := defaultTrailReviewListOptions()
+	if got, want := trailReviewListHiddenNote(counts, comments[:1], opts), "+1 open finding not shown by the current filters — add --freshness any"; got != want {
+		t.Fatalf("note = %q, want %q", got, want)
+	}
+	if got := trailReviewListHiddenNote(counts, comments[:2], opts); got != "" {
+		t.Fatalf("every open finding shown, note = %q", got)
+	}
+	if trailReviewListChecksHidden(opts, "next-1") {
+		t.Fatal("a paged list cannot tell hidden findings from later pages")
+	}
+	opts.Status = trailReviewStatusResolved
+	if trailReviewListChecksHidden(opts, "") {
+		t.Fatal("a list that excludes open findings has none to hide")
 	}
 }

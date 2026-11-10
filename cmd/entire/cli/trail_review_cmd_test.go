@@ -926,7 +926,7 @@ func TestPrintTrailReviewDashboard_UsesSeparateCountsWhenFilteredCommentsEmpty(t
 	text := out.String()
 	for _, want := range []string{
 		"Open findings: 0  high 0  medium 0  low 0",
-		"Resolved: 1        Dismissed: 1     Stale: 1",
+		"Resolved: 1        Dismissed: 1     Stale (all statuses): 1",
 		"No findings match the current filters.",
 	} {
 		if !strings.Contains(text, want) {
