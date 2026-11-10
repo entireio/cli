@@ -233,3 +233,50 @@ func pluralSessionCheckpoints(n int) string {
 	}
 	return fmt.Sprintf("%d session checkpoints", n)
 }
+
+// GlobalEnablePushReport is what `entire status` says about checkpoint pushes
+// from a repository on only through global enable.
+type GlobalEnablePushReport struct {
+	Consent GlobalEnablePushConsent
+	// Waiting counts the checkpoints a held push keeps local.
+	Waiting int
+	// Owner is the owner a held repository could be pushed under with
+	// `entire enable --global --owner`, or "".
+	Owner string
+}
+
+// GlobalEnablePushStatus decides consent for the checkpoint sync remote the
+// way pre-push would, from local state only: unlike resolvePushSettings it
+// never fetches a missing metadata branch.
+func GlobalEnablePushStatus(ctx context.Context) (GlobalEnablePushReport, error) {
+	s, err := settings.Load(ctx)
+	if err != nil {
+		return GlobalEnablePushReport{}, fmt.Errorf("load settings: %w", err)
+	}
+	if !s.EnabledOnlyByGlobal() {
+		return GlobalEnablePushReport{Consent: GlobalEnableConsentNotNeeded}, nil
+	}
+	syncRemote, err := ResolveCheckpointSyncRemote(ctx)
+	if err != nil {
+		return GlobalEnablePushReport{}, err
+	}
+	ps := pushSettings{
+		remote:              syncRemote.Name,
+		enabledOnlyByGlobal: true,
+		pushConsent:         s.RepoPushConsent(),
+		owners:              s.GlobalEnableOwners(),
+	}
+	if s.GetCheckpointRemote() != nil {
+		if url, enabled, err := remote.PushURL(ctx, syncRemote.Name); err == nil && enabled {
+			ps.checkpointURL = url
+		}
+	}
+	report := GlobalEnablePushReport{Consent: globalEnablePushConsent(ctx, ps)}
+	if report.Consent == GlobalEnableConsentHeld {
+		report.Waiting, _ = CountUnpushedCheckpoints(ctx, syncRemote.Name) //nolint:errcheck // a count status cannot take is reported as none waiting
+		report.Owner = destinationOwner(ctx, ps)
+	} else if report.Consent == GlobalEnableConsentOwnerListed {
+		report.Owner = destinationOwner(ctx, ps)
+	}
+	return report, nil
+}

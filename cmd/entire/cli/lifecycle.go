@@ -341,7 +341,7 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 // install Entire's git hooks, that global enable is the only reason.
 var globalEnableBannerLines = []string{
 	"Entire is on in this repository through global enable (you have not run `entire enable` here).",
-	"It installs its git hooks here and pushes session checkpoints with your git pushes.",
+	"It installs its git hooks here and keeps session checkpoints on this machine until you agree, at a git push from a terminal, to push them.",
 	"Run `entire disable` here to stop.",
 }
 

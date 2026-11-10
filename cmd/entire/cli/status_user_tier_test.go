@@ -159,3 +159,37 @@ func TestStatus_NamesDroppedUserSettings(t *testing.T) {
 	require.Len(t, got.UserSettingsIgnored, 1)
 	assert.Contains(t, got.UserSettingsIgnored[0], "checkpoint_remote")
 }
+
+// In a repository on only through global enable, status says whether its
+// checkpoints push and why, in both status paths and in JSON.
+func TestStatus_ReportsGlobalEnablePushes(t *testing.T) {
+	for name, tc := range map[string]struct {
+		file, want, wantState string
+	}{
+		"held":         {`{"global_enable": true}`, "checkpoint pushes held: 0 waiting", "held"},
+		"owner listed": {`{"global_enable": true, "global_enable_owners": ["gh/acme"]}`, "gh/acme is on your global-enable owner list", "owner_listed"},
+		"agreed":       {`{"global_enable": true, "repos": {"gh/acme/widgets": {"push_checkpoints": true}}}`, "you agreed for this repository", "agreed"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := setupTestRepo(t)
+			testutil.RunGit(t, root, "remote", "add", "origin", "https://github.com/acme/widgets.git")
+			configDir := t.TempDir()
+			t.Setenv(userdirs.EnvConfigDir, configDir)
+			settings.ClearOriginKeyCache()
+			t.Cleanup(settings.ClearOriginKeyCache)
+			require.NoError(t, os.WriteFile(filepath.Join(configDir, usersettings.FileName), []byte(tc.file), 0o600))
+
+			for _, detailed := range []bool{false, true} {
+				var out bytes.Buffer
+				require.NoError(t, runStatus(t.Context(), &out, detailed, false))
+				assert.Contains(t, out.String(), tc.want)
+			}
+			var out bytes.Buffer
+			require.NoError(t, runStatus(t.Context(), &out, false, true))
+			var got statusJSON
+			require.NoError(t, json.Unmarshal(out.Bytes(), &got))
+			require.NotNil(t, got.GlobalEnablePushes)
+			assert.Equal(t, tc.wantState, got.GlobalEnablePushes.State)
+		})
+	}
+}

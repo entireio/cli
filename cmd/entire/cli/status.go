@@ -107,6 +107,7 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 	writeRefusedAgentHomes(w)
 	writeUserSettingsRejections(w, s)
 	writeCommittedKeysIgnoredForGlobalEnable(w, s)
+	writeGlobalEnablePushes(ctx, w, s)
 	if s.Enabled {
 		writeActiveSessions(ctx, w, sty)
 	}
@@ -154,6 +155,52 @@ func writeCommittedKeysIgnoredForGlobalEnable(w io.Writer, s *EntireSettings) {
 	}
 }
 
+// globalEnablePushes is how a repository on only through global enable treats
+// checkpoint pushes, for both status outputs; nil for any other repository.
+func globalEnablePushes(ctx context.Context, s *EntireSettings) *globalEnablePushesJSON {
+	if !s.EnabledOnlyByGlobal() {
+		return nil
+	}
+	report, err := strategy.GlobalEnablePushStatus(ctx)
+	if err != nil {
+		return nil
+	}
+	out := &globalEnablePushesJSON{Waiting: report.Waiting, Owner: report.Owner}
+	switch report.Consent {
+	case strategy.GlobalEnableConsentHeld:
+		out.State = "held"
+	case strategy.GlobalEnableConsentAgreed:
+		out.State = "agreed"
+	case strategy.GlobalEnableConsentOwnerListed:
+		out.State = "owner_listed"
+	case strategy.GlobalEnableConsentNotNeeded:
+		return nil
+	}
+	return out
+}
+
+// writeGlobalEnablePushes says whether checkpoints from a repository on only
+// through global enable are pushed, and why.
+func writeGlobalEnablePushes(ctx context.Context, w io.Writer, s *EntireSettings) {
+	pushes := globalEnablePushes(ctx, s)
+	if pushes == nil {
+		return
+	}
+	switch pushes.State {
+	case "held":
+		remedy := "run `git push` in a terminal and answer yes"
+		if pushes.Owner != "" {
+			remedy += ", or `entire enable --global --owner " + pushes.Owner + "`"
+		}
+		fmt.Fprintf(w, "  checkpoint pushes held: %d waiting (this repository is on only through global enable; %s)\n",
+			pushes.Waiting, tuiutil.SanitizeDisplayText(remedy))
+	case "owner_listed":
+		fmt.Fprintf(w, "  checkpoint pushes: on, %s is on your global-enable owner list\n", tuiutil.SanitizeDisplayText(pushes.Owner))
+	case "agreed":
+		fmt.Fprintln(w, "  checkpoint pushes: on, you agreed for this repository")
+	}
+}
+
 // agentHelpCommand is the invocation a coding agent runs to get machine-readable
 // usage. It is surfaced both in the human status footer (writeAgentHelpHint) and
 // in `entire status --json` (statusJSON.AgentHelp), so no-channel agents (Cursor,
@@ -179,6 +226,7 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 	writeRefusedAgentHomes(w)
 	writeUserSettingsRejections(w, effectiveSettings)
 	writeCommittedKeysIgnoredForGlobalEnable(w, effectiveSettings)
+	writeGlobalEnablePushes(ctx, w, effectiveSettings)
 	fmt.Fprintln(w) // blank line
 
 	// Show project settings if it exists
@@ -1189,6 +1237,15 @@ func normalizeWorktreePath(path string) string {
 }
 
 // statusJSON is the JSON output for `entire status --json`.
+// globalEnablePushesJSON is statusJSON.GlobalEnablePushes. State is "held",
+// "agreed" or "owner_listed"; Waiting counts held checkpoints; Owner is the
+// listed owner, or for a held repository the one to add.
+type globalEnablePushesJSON struct {
+	State   string `json:"state"`
+	Waiting int    `json:"waiting,omitempty"`
+	Owner   string `json:"owner,omitempty"`
+}
+
 type statusJSON struct {
 	Enabled        bool               `json:"enabled"`
 	Agents         []string           `json:"agents"`
@@ -1211,6 +1268,9 @@ type statusJSON struct {
 	// UserSettingsIgnored lists the parts of the user settings file that were
 	// dropped, one message each.
 	UserSettingsIgnored []string `json:"user_settings_ignored,omitempty"`
+	// GlobalEnablePushes says, for a repository on only through global
+	// enable, whether its checkpoints are pushed.
+	GlobalEnablePushes *globalEnablePushesJSON `json:"global_enable_pushes,omitempty"`
 	// CodexHooks reports effective discovery/trust warnings separately from
 	// current-checkout installation and freshness semantics.
 	CodexHooks *codexHooksStatusJSON `json:"codex_hooks,omitempty"`
@@ -1344,6 +1404,7 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		// Before the Enabled gate: a dropped `enabled` is one of the
 		// things a user would need to see.
 		UserSettingsIgnored: s.UserLayerRejections(),
+		GlobalEnablePushes:  globalEnablePushes(ctx, s),
 	}
 	for _, refusal := range agent.RefusedRelocationEnvVars() {
 		result.RefusedAgentHomes = append(result.RefusedAgentHomes, refusal.Error())
