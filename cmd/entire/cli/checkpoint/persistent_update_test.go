@@ -432,8 +432,7 @@ func TestUpdateCommitted_UsesCorrectAuthor(t *testing.T) {
 
 			// Isolate global git config by pointing HOME to a temp dir
 			home := t.TempDir()
-			t.Setenv("HOME", home)
-			t.Setenv("XDG_CONFIG_HOME", "")
+			pointHomeAt(t, home)
 
 			// Write global .gitconfig if needed
 			if tt.globalName != "" || tt.globalEmail != "" {
@@ -539,8 +538,7 @@ func TestGetGitAuthorFromRepo_GlobalFallback(t *testing.T) {
 	useAutoConfigLoader(t)
 
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", "")
+	pointHomeAt(t, home)
 
 	// Write global .gitconfig with user info
 	globalCfg := "[user]\n\tname = Global Author\n\temail = global@test.com\n"
@@ -569,8 +567,7 @@ func TestGetGitAuthorFromRepo_NoConfig(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Setenv.
 
 	home := t.TempDir() // Empty home — no .gitconfig
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", "")
+	pointHomeAt(t, home)
 
 	dir := t.TempDir()
 	repo, err := git.PlainInit(dir, false)
