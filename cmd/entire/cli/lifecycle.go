@@ -31,6 +31,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/provenance"
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -3151,12 +3152,21 @@ func releaseSubagentTurnEndClaim(ctx context.Context, sessionID string) error {
 // of view: its session is not running, and either its agent died or the parent
 // has received every reply it sent. A subagent without a session yet is
 // starting, not done.
+//
+// A stuck-looking subagent (ACTIVE with no hook past StuckActiveThreshold)
+// counts as dead only when its owner's liveness is unknown. With a recorded,
+// checkable owner, OwnerExited already answers that: a live owner means the
+// subagent may still be doing long hookless work, and ending the parent's turn
+// then would split it early.
 func subagentDone(ctx context.Context, counter agent.SubagentReplyCounter, subagentID, parentID string, received int) bool {
 	state, err := strategy.LoadSessionState(ctx, subagentID)
 	if err != nil || state == nil {
 		return false
 	}
-	if state.OwnerExited() || state.IsStuckActive() {
+	if state.OwnerExited() {
+		return true
+	}
+	if state.IsStuckActive() && state.OwnerLiveness() == proclive.LivenessUnknown {
 		return true
 	}
 	if state.Phase.IsActive() || state.TranscriptPath == "" {

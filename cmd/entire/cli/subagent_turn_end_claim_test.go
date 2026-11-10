@@ -2,10 +2,12 @@ package cli
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -61,4 +63,54 @@ func TestSubagentTurnEndClaim_ReleasedWhenTheTurnEndFails(t *testing.T) {
 	}))
 	require.NoError(t, releaseSubagentTurnEndClaim(ctx, "parent"))
 	require.True(t, load().SubagentTurnEndClaimed)
+}
+
+// A subagent past the stuck threshold may still be doing long work that fires
+// no hook. With a live recorded owner it is not done, so its parent's turn
+// keeps running; only an unknown owner falls back to the stuck heuristic, and
+// an exited owner is done at once.
+//
+// Not parallel: uses t.Chdir()
+func TestSubagentDone_StuckActiveChildNeedsADeadOrUnknownOwner(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+
+	stale := time.Now().Add(-session.StuckActiveThreshold - time.Minute)
+	saveChild := func(owner *proclive.Identity) {
+		t.Helper()
+		require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+			SessionID:           "child",
+			ParentSessionID:     "parent",
+			BaseCommit:          "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+			StartedAt:           stale,
+			LastInteractionTime: &stale,
+			Phase:               session.PhaseActive,
+			Owner:               owner,
+		}))
+	}
+
+	// No recorded owner: liveness is unknown, so the stuck heuristic decides.
+	saveChild(nil)
+	require.True(t, subagentDone(ctx, nil, "child", "parent", 0),
+		"a stuck child with no owner counts as done")
+
+	live, ok := proclive.IdentityOf(os.Getpid())
+	if !ok {
+		t.Skip("process liveness is unknown on this platform")
+	}
+	saveChild(&live)
+	require.False(t, subagentDone(ctx, nil, "child", "parent", 0),
+		"a stuck-looking child whose owner is alive is still working")
+
+	dead := live
+	dead.Start = "not-" + live.Start
+	saveChild(&dead)
+	require.True(t, subagentDone(ctx, nil, "child", "parent", 0),
+		"a child whose owner exited is done")
 }
