@@ -104,8 +104,16 @@ type Tokens struct {
 // OpenCode 1.3.16 and later store reasoning apart from output; earlier versions
 // stored the provider's output, which for some providers already includes it.
 // A total (recorded since 1.1.57) of input + output + cache marks reasoning as
-// inside output. Any other total, or no total (zero-usage messages, or messages
-// written before 1.1.57), is assumed to store reasoning apart, so it is added.
+// inside output. Any other total, or no total (zero-usage messages, messages
+// written before 1.1.57, and every OpenCode 2 message), is assumed to store
+// reasoning apart, so it is added.
+//
+// Accepted inaccuracy: a message with no total whose output already includes
+// reasoning (written before 1.1.57, or written before 1.3.16 and migrated into
+// OpenCode 2, which drops total) counts its reasoning twice. OpenCode computes
+// total itself as input + output + reasoning + cache, so a total that omits
+// reasoning while storing it apart does not occur; every local message with
+// reasoning matched one of the two layouts.
 func (t Tokens) OutputWithReasoning() int {
 	if t.Total > 0 && t.Total == t.Input+t.Output+t.Cache.Read+t.Cache.Write {
 		return t.Output
