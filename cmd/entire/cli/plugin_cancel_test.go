@@ -33,7 +33,11 @@ func startPluginUntilReady(t *testing.T, script string, onReady func(cancel cont
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	// Joined before returning, so onReady never outlives the test's seams.
+	done := make(chan struct{})
+	defer func() { <-done }()
 	go func() {
+		defer close(done)
 		deadline := time.Now().Add(10 * time.Second)
 		for time.Now().Before(deadline) {
 			if _, err := os.Stat(ready); err == nil {
@@ -111,9 +115,13 @@ func TestRunPlugin_WindowsCancelKillsPluginAfterGrace(t *testing.T) { //nolint:p
 	}
 }
 
-// The force-quit path kills a running plugin outright, cancelled or not.
-func TestKillRunningPlugins_KillsARunningPlugin(t *testing.T) { //nolint:paralleltest // mutates env and seams
-	setPluginCancelGOOS(t, runtime.GOOS)
+// On Windows the force-quit path kills a running plugin outright, cancelled
+// or not: nothing else would end it once the CLI exits.
+func TestKillRunningPlugins_WindowsKillsARunningPlugin(t *testing.T) { //nolint:paralleltest // mutates env and seams
+	setPluginCancelGOOS(t, windowsGOOS)
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("shell-script plugin harness only runs on Unix")
+	}
 	code, sig := startPluginUntilReady(t, "trap '' INT\ntouch \"$READY\"\nexec sleep 30\n", func(context.CancelFunc) {
 		KillRunningPlugins()
 	})
@@ -125,6 +133,18 @@ func TestKillRunningPlugins_KillsARunningPlugin(t *testing.T) { //nolint:paralle
 	runningPlugins.Unlock()
 	if n != 0 {
 		t.Errorf("%d plugin processes still tracked after runPlugin returned", n)
+	}
+}
+
+// On Unix the force-quit path leaves the plugin alone: it got the second
+// Ctrl-C itself and must be free to run its own force-quit handling.
+func TestKillRunningPlugins_UnixLeavesPluginRunning(t *testing.T) { //nolint:paralleltest // mutates env and seams
+	setPluginCancelGOOS(t, "linux")
+	code, sig := startPluginUntilReady(t, "touch \"$READY\"\nsleep 0.5\nexit 3\n", func(context.CancelFunc) {
+		KillRunningPlugins()
+	})
+	if code != 3 || sig != nil {
+		t.Errorf("runPlugin = (%d, %v), want the plugin's own (3, nil)", code, sig)
 	}
 }
 

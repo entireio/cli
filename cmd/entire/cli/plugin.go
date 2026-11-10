@@ -387,11 +387,19 @@ func runTrackedPlugin(cmd *exec.Cmd) error {
 }
 
 // KillRunningPlugins kills every plugin process this CLI started and is still
-// waiting on. The force-quit path (a second Ctrl-C) calls it before exiting:
-// exec's own kill after the cancel grace period dies with this process, and
-// Windows does not end a child when its parent exits, so a plugin ignoring
-// Ctrl-C would otherwise keep running on the console.
+// waiting on, on Windows only. The force-quit path (a second Ctrl-C) calls it
+// before exiting. On Windows a plugin cannot be sent SIGINT and is not ended
+// when its parent exits, so one ignoring Ctrl-C would otherwise keep running on
+// the console once exec's kill-after-grace timer dies with this process.
+//
+// On Unix it does nothing: the terminal delivers the second Ctrl-C to the
+// whole foreground process group, so the plugin gets its own second SIGINT
+// and runs its own force-quit (entire-stream flushes its last records). A
+// SIGKILL from here would cut that short.
 func KillRunningPlugins() {
+	if pluginCancelGOOS != windowsGOOS {
+		return
+	}
 	runningPlugins.Lock()
 	defer runningPlugins.Unlock()
 	for proc := range runningPlugins.procs {
@@ -426,7 +434,7 @@ var pluginWindowsCancelGrace = 30 * time.Second
 // os.Interrupt (Ctrl-C/Ctrl-Break), which the console has already delivered
 // to the plugin, a member of the same console. The kill is still needed: a
 // plugin that ignores Ctrl-C would otherwise run on after the CLI gave up on
-// it. (A second Ctrl-C force-quits sooner: see KillRunningPlugins.)
+// it. (A second Ctrl-C kills it sooner: see KillRunningPlugins.)
 func configurePluginCancel(cmd *exec.Cmd, goos string) {
 	if goos == windowsGOOS {
 		cmd.Cancel = func() error { return nil }
