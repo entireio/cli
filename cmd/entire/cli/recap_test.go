@@ -171,7 +171,7 @@ func TestRunRecap_PrerequisiteErrorsUseErrorWriter(t *testing.T) {
 // runRecap's ErrInsecureHTTP guidance fires instead of a discovery failure.
 //
 // Not parallel: it sets ENTIRE_API_BASE_URL and swaps the discovery seam.
-func TestNewRecapClient_RejectsInsecureOverrideBeforeDiscovery(t *testing.T) {
+func TestNewRecapSource_RejectsInsecureOverrideBeforeDiscovery(t *testing.T) {
 	unsetEnv(t, auth.EnvTokenVar)
 	t.Setenv(userdirs.EnvConfigDir, t.TempDir())
 	t.Setenv(userdirs.EnvCacheHome, t.TempDir())
@@ -182,7 +182,7 @@ func TestNewRecapClient_RejectsInsecureOverrideBeforeDiscovery(t *testing.T) {
 			return nil, errors.New("unreachable")
 		}))
 
-	_, _, _, err := newRecapClient(t.Context(), false)
+	_, _, err := newRecapSource(t.Context(), false)
 	if !errors.Is(err, api.ErrInsecureHTTP) {
 		t.Fatalf("error = %v, want ErrInsecureHTTP", err)
 	}

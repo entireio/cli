@@ -60,7 +60,7 @@ type Item struct {
 	Text  string   // agent: the message text (rollout: the parts' text joined with no separator)
 
 	Command  string // command: the script (see scriptOfArgv / scriptOfString)
-	CWD      string
+	CWD      string // command: its working directory; others record none
 	Output   string // command: aggregated output; mcpTool: result text
 	ExitCode *int
 

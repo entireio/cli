@@ -3,6 +3,7 @@ package redact
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1969,6 +1970,25 @@ func wordBraceExpansionEnd(s string, open int) int {
 	return -1
 }
 
+// capturedValueText returns the value s[start:end] that a key/value pattern
+// captured from s[captureStart], as the placeholder rules read it. Double
+// quotes around the value, or a double quote that ends it and closes the
+// string it sits in (echo "DB_PASSWORD=${PW:-'$FALLBACK'}"), put it inside
+// double quotes, where the shell reads it as doubleQuotedText describes.
+func capturedValueText(s string, captureStart, start, end int) string {
+	value := s[start:end]
+	if start > captureStart {
+		if s[captureStart] == '"' {
+			return doubleQuotedText(value)
+		}
+		return value
+	}
+	if inner, ok := strings.CutSuffix(value, `"`); ok && !strings.Contains(inner, `"`) {
+		return doubleQuotedText(inner) + `"`
+	}
+	return value
+}
+
 func captureRange(match []int, captureGroup int) (int, int, bool) {
 	index := captureGroup * 2
 	if captureGroup < 0 || len(match) <= index+1 || match[index] < 0 || match[index+1] < 0 {
@@ -2191,8 +2211,10 @@ func isSecretRecipeCommand(cmd string) bool {
 // shellParameterName matches the parameter a ${…} expansion names: a
 // variable or array element (${DB_PASSWORD}, ${pw[0]}), a positional
 // parameter (${1}, ${10}), or a special parameter (${@}, ${*}, ${#}, ${?},
-// ${-}, ${$}, ${!}), each optionally behind ! for indirection (${!ref}).
-const shellParameterName = `!?(?:[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?|[0-9]+|[@*#?$!-])`
+// ${-}, ${$}, ${!}), each optionally behind ! for indirection (${!ref}). An
+// array subscript may hold one more level of brackets (${pw[idx[0]]},
+// ${pw[${idx[0]}]}); a deeper one is not read as a parameter name.
+const shellParameterName = `!?(?:[A-Za-z_][A-Za-z0-9_]*(?:\[(?:[^\[\]]|\[[^\[\]]*\])*\])?|[0-9]+|[@*#?$!-])`
 
 // shellExpansionWordRE matches ${NAME<op>word}, whose word becomes the value
 // when NAME is unset (-, =) or set (+); with a colon, an empty NAME counts as
@@ -2217,12 +2239,17 @@ func isPlaceholderShellExpansion(s string) bool {
 		return true
 	}
 	if m := shellExpansionWordRE.FindStringSubmatch(s); m != nil {
-		if word := m[1]; len(word) >= 2 && word[0] == '\'' && word[len(word)-1] == '\'' {
+		if word := m[1]; isSingleQuotedWord(word) {
 			return isPlaceholderSecretValueQuoted(word, true)
 		}
 		return isPlaceholderSecretValue(m[1])
 	}
 	return !shellTextOperatorRE.MatchString(s)
+}
+
+// isSingleQuotedWord reports whether word is wrapped in single quotes.
+func isSingleQuotedWord(word string) bool {
+	return len(word) >= 2 && word[0] == '\'' && word[len(word)-1] == '\''
 }
 
 // doubleQuotedText returns text, which double quotes enclose, as the
@@ -2236,7 +2263,7 @@ func doubleQuotedText(text string) string {
 	if m == nil || !isSingleBraceExpression(text) {
 		return text
 	}
-	if word := text[m[2]:m[3]]; len(word) >= 2 && word[0] == '\'' && word[len(word)-1] == '\'' {
+	if word := text[m[2]:m[3]]; isSingleQuotedWord(word) {
 		return text[:m[2]] + word[1:len(word)-1] + text[m[3]:]
 	}
 	return text
@@ -3127,6 +3154,9 @@ func isSingleJSONValue(dec *json.Decoder) bool {
 // leaf's own key, but empty inside arrays and at the root, because
 // replaceKeyedJSONValue only finds a value written directly after its key.
 //
+// A string that is exactly an inline image data URI is preserved wherever it
+// appears, except under a credential key; see isInlineImageDataURI.
+//
 // A skip key preserves its own string values, including the strings in its
 // arrays, but objects beneath it are walked with their own keys. The id rule
 // matches any key ending in "id", so {"android":{"apiKey":...}} is not an
@@ -3180,7 +3210,7 @@ func walkRedactableStrings(v any, transform func(key, spliceKey string, credenti
 			}
 			return out, true
 		case string:
-			if skipStrings {
+			if skipLeaf(skipStrings, key, credentialContext, val) {
 				return v, false
 			}
 			redacted := transform(key, spliceKey, credentialContext, val)
@@ -3591,10 +3621,57 @@ func shouldSkipJSONLField(key string) bool {
 	return false
 }
 
-// shouldSkipJSONLObject returns true if the object has "type":"image" or "type":"image_url".
+// shouldSkipJSONLObject returns true if the object's "type" starts with "image" or equals "base64".
 func shouldSkipJSONLObject(obj map[string]any) bool {
 	t, ok := obj["type"].(string)
 	return ok && (strings.HasPrefix(t, "image") || t == "base64")
+}
+
+// skipLeaf reports whether a string leaf is left unscanned: under a skip key,
+// or a whole-string inline image outside a credential key.
+func skipLeaf(skipStrings bool, key string, credentialContext bool, val string) bool {
+	return skipStrings || (isInlineImageDataURI(val) && !isCredentialJSONSecretKey(key, credentialContext))
+}
+
+// isInlineImageDataURI reports whether s is, in its entirety, a base64 image
+// data URI (data:image/<subtype>;base64,<data>) for a PNG, JPEG, GIF or WebP
+// image. Codex writes inline images this way: in input_image image_url values,
+// in tool call output, and as bare metadata strings such as a browser-use
+// screenshot URL. None of those match shouldSkipJSONLObject, and the entropy
+// layer would otherwise splice placeholders into the base64 and leave an
+// undecodable image.
+//
+// The check is per string rather than per object, so it hides no sibling
+// field. Only those four raster subtypes are accepted, and the decoded bytes
+// must start with one of their magic numbers, so base64 text under an image/
+// label and SVG (text that can carry secrets) stay on the scanned path. The
+// bytes need not match the label, which can be wrong: older Codex releases
+// took it from the file extension, and MCP tools declare their own. A data URI
+// embedded inside a longer string is still scanned.
+func isInlineImageDataURI(s string) bool {
+	rest, ok := strings.CutPrefix(s, "data:image/")
+	if !ok {
+		return false
+	}
+	subtype, data, ok := strings.Cut(rest, ";base64,")
+	// The decoder skips \r and \n even in strict mode, so a line after the
+	// image would decode as image data and escape scanning with it.
+	if !ok || data == "" || strings.ContainsAny(data, "\r\n") {
+		return false
+	}
+	switch strings.ToLower(subtype) {
+	case "png", "jpeg", "jpg", "gif", "webp":
+	default:
+		return false
+	}
+	raw, err := base64.StdEncoding.Strict().DecodeString(data)
+	if err != nil {
+		return false
+	}
+	return bytes.HasPrefix(raw, []byte("\x89PNG\r\n\x1a\n")) ||
+		bytes.HasPrefix(raw, []byte{0xFF, 0xD8, 0xFF}) ||
+		bytes.HasPrefix(raw, []byte("GIF87a")) || bytes.HasPrefix(raw, []byte("GIF89a")) ||
+		(len(raw) >= 12 && bytes.HasPrefix(raw, []byte("RIFF")) && bytes.Equal(raw[8:12], []byte("WEBP")))
 }
 
 func shannonEntropy(s string) float64 {

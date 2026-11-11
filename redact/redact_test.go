@@ -1341,69 +1341,9 @@ func TestString_ConnectionSecretsCaughtWithoutScanners(t *testing.T) {
 func TestString_ShellWordSecretsCaughtWithoutScanners(t *testing.T) {
 	assertStringRedactionCasesWithoutScanners(t, []stringRedactionCase{
 		{
-			name:  "credential value with a real default on a positional parameter",
-			input: "DB_PASSWORD=${1:-hunter2}",
-			want:  "DB_PASSWORD=REDACTED",
-		},
-		{
-			name:  "one-letter default on a positional parameter",
-			input: "PGPASSWORD=${2:-x}",
-			want:  "PGPASSWORD=REDACTED",
-		},
-		{
-			name:  "colonless default on a two-digit positional parameter",
-			input: "DB_PASSWORD=${10-hunter2}",
-			want:  "DB_PASSWORD=REDACTED",
-		},
-		{
-			name:  "alternate value on a positional parameter",
-			input: "DB_PASSWORD=${1:+hunter2}",
-			want:  "DB_PASSWORD=REDACTED",
-		},
-		{
-			name:  "default on the special parameter @",
-			input: "DB_PASSWORD=${@:-hunter2}",
-			want:  "DB_PASSWORD=REDACTED",
-		},
-		{
-			name:  "default on the special parameter #",
-			input: "DB_PASSWORD=${#:-hunter2}",
-			want:  "DB_PASSWORD=REDACTED",
-		},
-		{
-			name:  "default on the special parameter -",
-			input: "DB_PASSWORD=${--hunter2}",
-			want:  "DB_PASSWORD=REDACTED",
-		},
-		{
-			name:  "default behind an indirect reference",
-			input: "DB_PASSWORD=${!ref:-hunter2}",
-			want:  "DB_PASSWORD=REDACTED",
-		},
-		{
-			name:  "default on an array element",
-			input: "DB_PASSWORD=${pw[0]:-hunter2}",
-			want:  "DB_PASSWORD=REDACTED",
-		},
-		{
-			name:  "literal in a substitution on a positional parameter",
-			input: "DB_PASSWORD=${1/x/hunter2}",
-			want:  "DB_PASSWORD=REDACTED",
-		},
-		{
 			name:  "nested defaults after a positional default",
 			input: "DB_PASSWORD=${1:-hunter2;${B:-${C:-x}}}",
 			want:  "DB_PASSWORD=REDACTED",
-		},
-		{
-			name:  "quoted positional default",
-			input: `export PGPASSWORD="${2:-s3cr3t}"`,
-			want:  `export PGPASSWORD="REDACTED"`,
-		},
-		{
-			name:  "credentialed URI with a positional default",
-			input: "postgres://app:${1:-hunter2}@db/app",
-			want:  "REDACTED",
 		},
 		{
 			name:  "single-quoted literal after an empty string",
@@ -1471,41 +1411,6 @@ func TestString_ShellWordSecretsCaughtWithoutScanners(t *testing.T) {
 			want:  "DB_PASSWORD=REDACTED",
 		},
 		{
-			name:  "single-quoted default is a literal, not a reference",
-			input: `DB_PASSWORD=${PW:-'$S3CRET'}`,
-			want:  "DB_PASSWORD=REDACTED",
-		},
-		{
-			name:  "single-quoted credential default is a literal",
-			input: `API_KEY=${K:-'$S3CRET'}`,
-			want:  "API_KEY=REDACTED",
-		},
-		{
-			name:  "single-quoted default in a URI password",
-			input: `postgres://app:${PW:-'$S3CRET'}@db.example.com/app`,
-			want:  "REDACTED",
-		},
-		{
-			name:  "single-quoted default in a URI after an empty string",
-			input: `psql ""postgres://app:${PW:-'$S3CRET'}@db/app`,
-			want:  `psql ""REDACTED`,
-		},
-		{
-			name:  "single-quoted default in a URI after an empty string that a quote follows",
-			input: `psql ""postgres://app:${PW:-'$S3CRET'}@db/app"`,
-			want:  `psql ""REDACTED"`,
-		},
-		{
-			name:  "single-quoted default in a URI after a closed string",
-			input: `psql "x"postgres://app:${PW:-'$S3CRET'}@db/app`,
-			want:  `psql "x"REDACTED`,
-		},
-		{
-			name:  "double-quoted default whose single quotes wrap a literal",
-			input: `DB_PASSWORD="${PW:-'hunter2'}"`,
-			want:  `DB_PASSWORD="REDACTED"`,
-		},
-		{
 			name:  "literal default in a double-quoted piece of a joined word",
 			input: `DB_PASSWORD="$A""${PW:-'hunter2'}"`,
 			want:  "DB_PASSWORD=REDACTED",
@@ -1514,11 +1419,6 @@ func TestString_ShellWordSecretsCaughtWithoutScanners(t *testing.T) {
 			name:  "unquoted single-quoted default after an empty string",
 			input: `DB_PASSWORD=""${PW:-'$S3CRET'}`,
 			want:  "DB_PASSWORD=REDACTED",
-		},
-		{
-			name:  "literal default inside a double-quoted string",
-			input: `echo "DB_PASSWORD=${PW:-hunter2}"`,
-			want:  `echo "DB_PASSWORD=REDACTED`,
 		},
 		{
 			name:  "two joined placeholder words form a new literal",
@@ -1892,28 +1792,6 @@ func TestString_TrailingKeysCaughtWithoutScanners(t *testing.T) {
 			want:  "api_key=REDACTED x",
 		},
 	})
-}
-
-// assertStringRedactionCasesWithoutScanners checks each case with only the
-// key/value rules on, then restores the default scanners. The scanner
-// configuration is process-wide, so the cases run one at a time.
-func assertStringRedactionCasesWithoutScanners(t *testing.T, tests []stringRedactionCase) {
-	t.Helper()
-	t.Cleanup(func() {
-		if err := ConfigureScanners(ScannersConfig{Betterleaks: true}); err != nil {
-			t.Fatalf("restore default scanners: %v", err)
-		}
-	})
-	if err := ConfigureScanners(ScannersConfig{}); err != nil {
-		t.Fatalf("ConfigureScanners(none): %v", err)
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := String(tt.input); got != tt.want {
-				t.Errorf("String(%q) = %q, want %q", tt.input, got, tt.want)
-			}
-		})
-	}
 }
 
 // Content digests (go.sum h1: hashes, Subresource Integrity values) are hashes
@@ -3254,45 +3132,15 @@ func TestString_SingleQuotedDollarPasswordRedacted(t *testing.T) {
 	})
 }
 
-// Shell expansions on positional and special parameters are references like
-// ${DB_PASSWORD}: only a default or other text inside them is a secret.
-func TestString_ShellParameterReferencesPreserved(t *testing.T) {
-	t.Parallel()
-	var cases []stringRedactionCase
-	for _, value := range []string{
-		"${1}", "${10}", "${1:-}", "${1-}", "${1:-$DEFAULT_PW}", "${2:-${FALLBACK_PASSWORD}}",
-		"${@}", "${*}", "${#}", "${?}", "${-}", "${$}", "${!}", "${0}",
-		"${#1}", "${##}", "${#@}", "${#pw[@]}",
-		"${!ref}", "${!pre*}", "${!pw[@]}", "${pw[0]}", "${pw[@]}",
-		"${1:-''}", "${PW:-'changeme'}", "${PW:-'<password>'}",
-	} {
-		cases = append(cases, stringRedactionCase{
-			name:  value,
-			input: "DB_PASSWORD=" + value,
-			want:  "DB_PASSWORD=" + value,
-		})
-	}
-	assertStringRedactionCases(t, cases)
-}
-
-// Inside double quotes a single quote is a plain character, so the default in
-// "${PW:-'$FALLBACK'}" expands $FALLBACK, as it does in a URI or a value that
-// a double-quoted string holds; only the unquoted form is the literal text
-// $FALLBACK. A quote that closes the string a value sits in is not part of it.
-func TestString_DoubleQuotedShellDefaultsPreserved(t *testing.T) {
+// Inside double quotes a single quote is a plain character, so a default
+// such as ${PW:-'$FALLBACK'} in a double-quoted piece of a joined word
+// expands $FALLBACK and stays a reference.
+func TestString_DoubleQuotedJoinedShellDefaultsPreserved(t *testing.T) {
 	t.Parallel()
 	var cases []stringRedactionCase
 	for _, input := range []string{
-		`DB_PASSWORD="${PW:-'$FALLBACK'}"`,
-		`API_KEY="${KEY:-'$FALLBACK'}"`,
-		`PGPASSWORD="${1:-'$FALLBACK'}" psql -h db`,
 		`DB_PASSWORD="$A""${PW:-'$FALLBACK'}"`,
 		`DB_PASSWORD="""${PW:-'$FALLBACK'}"`,
-		`echo "DB_PASSWORD=${PW:-'$FALLBACK'}" done`,
-		`psql "postgres://app:${PW:-'$FALLBACK'}@db/app"`,
-		`echo "DB_PASSWORD=${PW}"`,
-		`echo "DB_PASSWORD=${PW:-}"`,
-		`echo "DB_PASSWORD=${1:-$FALLBACK}"`,
 	} {
 		cases = append(cases, stringRedactionCase{name: input, input: input, want: input})
 	}
