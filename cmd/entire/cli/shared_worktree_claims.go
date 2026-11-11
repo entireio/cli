@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode"
@@ -114,8 +115,8 @@ func (c statusClaim) withoutUnchangedDirty(files []string) []string {
 // one must not take the other.
 //
 // A transcript can also name a file through a symlink to a directory in the
-// worktree (alias/data.txt for alias -> real), which git status lists under
-// the directory's own path, real/data.txt. Such a name is matched as its
+// worktree, or to its root (alias/data.txt for alias -> real), which git
+// status lists under the directory's own path, real/data.txt. Such a name is matched as its
 // directory resolves.
 type namedFiles struct {
 	repoRoot string
@@ -168,12 +169,34 @@ func resolvedDir(repoRoot, file string, resolved map[string]string) string {
 	target, ok := resolved[dir]
 	if !ok {
 		target = dir
-		if name, err := worktreedir.NameFollowingLinks(repoRoot, dir); err == nil {
+		if name, ok := dirName(repoRoot, dir); ok {
 			target = name
 		}
 		resolved[dir] = target
 	}
 	return path.Join(target, path.Base(file))
+}
+
+// dirName returns the worktree-relative name dir resolves to through its
+// symlinks, and false when it leaves the worktree or does not resolve. A link
+// to the worktree root itself, such as alias -> ., resolves to ".", which
+// NameFollowingLinks refuses as naming no file in the worktree.
+func dirName(repoRoot, dir string) (string, bool) {
+	if name, err := worktreedir.NameFollowingLinks(repoRoot, dir); err == nil {
+		return name, true
+	}
+	root, err := filepath.Abs(repoRoot)
+	if err != nil {
+		return "", false
+	}
+	target, err := filepath.EvalSymlinks(filepath.Join(root, filepath.FromSlash(dir)))
+	if err != nil {
+		return "", false
+	}
+	if root, err = filepath.EvalSymlinks(root); err != nil || target != root {
+		return "", false
+	}
+	return ".", true
 }
 
 // only returns the files of all the transcript names, in all's order and

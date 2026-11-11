@@ -228,8 +228,8 @@ func TestNamedFiles_UnicodeCaseFold(t *testing.T) {
 // TestNamedFiles_ThroughDirectoryLink covers a transcript that names a file
 // through a symlink to a directory in the worktree, alias -> real: git status
 // lists the file under real/, which the transcript never spells. A link
-// written as an absolute path matches too, and one to another directory names
-// nothing there.
+// written as an absolute path matches too, as does one to the worktree root
+// itself, and one to another directory names nothing there.
 func TestNamedFiles_ThroughDirectoryLink(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -241,6 +241,8 @@ func TestNamedFiles_ThroughDirectoryLink(t *testing.T) {
 	}
 	require.NoError(t, os.Symlink(filepath.Join(dir, "real"), filepath.Join(dir, "absolute")))
 	require.NoError(t, os.Symlink("other", filepath.Join(dir, "elsewhere")))
+	require.NoError(t, os.Symlink(".", filepath.Join(dir, "top")))
+	testutil.WriteFile(t, dir, "notes.txt", "edited through top\n")
 
 	modified := []string{"real/data.txt"}
 	deleted := []string{"real/gone.txt"}
@@ -249,6 +251,8 @@ func TestNamedFiles_ThroughDirectoryLink(t *testing.T) {
 	require.Equal(t, deleted, named.only(deleted), "a deletion through the link")
 	require.Equal(t, modified, newNamedFiles(dir, []string{"absolute/data.txt"}, modified).only(modified))
 	require.Empty(t, newNamedFiles(dir, []string{"elsewhere/data.txt"}, modified).only(modified))
+	atRoot := []string{"notes.txt"}
+	require.Equal(t, atRoot, newNamedFiles(dir, []string{"top/notes.txt"}, atRoot).only(atRoot), "a link to the root")
 }
 
 func TestCaseFoldKey(t *testing.T) {
