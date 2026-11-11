@@ -55,6 +55,10 @@ func TestJSONLBytes_CommandLinePasswordsInArgvArrays(t *testing.T) {
 		{`{"command":["docker","login","--password","instead","registry"]}`, `{"command":["docker","login","--password","REDACTED","registry"]}`},
 		// .netrc keywords in any case.
 		{`{"command":["echo","MACHINE","host","LOGIN","alice","PASSWORD","hunter2"]}`, `{"command":["echo","MACHINE","host","LOGIN","alice","PASSWORD","REDACTED"]}`},
+		// A .netrc password written with '\'' (an apostrophe and a character
+		// a double-quoted string would expand) is still one token.
+		{`{"command":["echo","machine","host","login","alice","password","it's $2026"]}`, `{"command":["echo","machine","host","login","alice","password","REDACTED"]}`},
+		{`{"command":["echo","machine","host","login","alice","password","it's \"2026\""]}`, `{"command":["echo","machine","host","login","alice","password","REDACTED"]}`},
 		// A password that is also an object key leaves the key as it is, and
 		// one after an escaped quote inside another string leaves that
 		// string as it is.

@@ -492,6 +492,7 @@ func TestString_CommandLinePasswordsMoreReviewCases(t *testing.T) {
 		{name: "netrc keywords capitalized", input: "Machine 127.0.0.1 Login me Password " + p, want: "Machine 127.0.0.1 Login me Password REDACTED"},
 		{name: "netrc password after an empty quoted piece", input: "machine 127.0.0.1 login me password ''" + p, want: "machine 127.0.0.1 login me password REDACTED"},
 		{name: "netrc password joined from a quoted and a bare piece", input: "machine 127.0.0.1 login me password 'Summer'2026", want: "machine 127.0.0.1 login me password REDACTED"},
+		{name: "netrc password with an escaped apostrophe in single quotes", input: "echo machine 127.0.0.1 login me password 'it'\\''s $2026'", want: "echo machine 127.0.0.1 login me password 'REDACTED'"},
 		{name: "netrc password in escaped quotes in a double-quoted string", input: `echo "machine 127.0.0.1 login me password \"Summer 2026\"" > ~/.netrc`, want: `echo "machine 127.0.0.1 login me password \"REDACTED\"" > ~/.netrc`},
 		{name: "netrc password from a substitution in a double-quoted string", input: `echo "machine 127.0.0.1 login me password $(printf ` + p + `)" > ~/.netrc`, want: `echo "machine 127.0.0.1 login me password REDACTED" > ~/.netrc`},
 		{name: "long flag value as the next element of an argument list", input: `subprocess.run(["wget", "--user=me", "--password", "` + p + `", url])`, want: `subprocess.run(["wget", "--user=me", "--password", "REDACTED", url])`},

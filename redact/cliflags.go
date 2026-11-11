@@ -317,15 +317,18 @@ func cliShortFlag(before, name, sep string) string {
 // \"Summer 2026\"" > ~/.netrc). curl reads a single quote as part of a
 // token ('Summer'2026, and an empty pair before hunter2), so a single-quoted
 // piece takes the rest of its token, and so does a backtick-quoted one
-// (`hunter2`). A quote or backtick that closes nothing on its line starts a
-// token too ('hunter2), as curl reads it. A command substitution, which the
+// (`hunter2`). A shell-escaped apostrophe between single-quoted pieces
+// (it's $2026 written in single quotes) is still that token. A quote or
+// backtick that closes nothing on its line starts a token too ('hunter2),
+// as curl reads it. A
+// command substitution, which the
 // command writing the file runs ($(printf hunter2)), is one piece of a
 // token. Outside quotes, a quote or backtick ends it when whitespace, a
 // shell metacharacter or a separator of code follows, so the closing quote
 // of echo "machine h login me password p" > ~/.netrc and of
 // fmt.Sprintf("machine %s login %s password %s", h, u, p) stays outside the
 // value.
-const netrcValue = `"(?:[^"\\\r\n]|\\[^\r\n])*"|\\"(?:[^"\\\r\n]|\\[^"\r\n])*\\"|'[^'\r\n]*'(?:` + netrcBareValue + `)?|` +
+const netrcValue = `"(?:[^"\\\r\n]|\\[^\r\n])*"|\\"(?:[^"\\\r\n]|\\[^"\r\n])*\\"|'[^'\r\n]*'(?:\\''[^'\r\n]*')*(?:` + netrcBareValue + `)?|` +
 	"`[^`\\s]*`(?:" + netrcBareValue + `)?|['` + "`" + `]+(?:` + netrcBareValue + `)|` + netrcBareValue
 
 // netrcBareValue is a .netrc token outside quotes (see netrcValue).
