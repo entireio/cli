@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"os"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/go-git/go-git/v6"
@@ -22,9 +21,9 @@ import (
 // commit. git lets the next commit start once one is made, before its
 // post-commit runs, and the session holds the reservation until that
 // post-commit condenses it. So prepare passes over a reservation a commit
-// already made carries (stampCarriedInFlight), and the later commit's
-// post-commit, which may reach the session first, waits for the earlier one
-// to condense it (awaitEarlierCondensations).
+// already made carries (stampCarriedInFlight), and a later post-commit, which
+// may reach the session first, waits for the one that took the reservation's
+// stamp to condense it (awaitEarlierCondensations).
 
 // takenEntryLife bounds how long the post-commit that took a stamp counts as
 // running when proclive cannot tell whether its process is alive (on Windows,
@@ -92,21 +91,26 @@ func stampedSessionsEntry(entries []stampedSessions, cpID id.CheckpointID) (stam
 // post-commit would write its own work over that checkpoint.
 //
 // Prepare recorded stamping cpID (stampedSessionsFile), and no post-commit
-// has released the entry (releaseStampedSessions) or stopped running after
-// taking it; a commit on HEAD's first parents made since the HEAD that prepare
-// stamped on carries cpID. A stamp prepared on HEAD itself, as when a commit
-// is tried again after its first attempt was aborted, is the same commit's,
-// so the retry keeps it. Once the post-commit is done, a session that still
-// holds the reservation was not condensed into it, and the next commit takes
-// it, as before.
+// has released the entry (releaseStampedSessions). A post-commit that took the
+// stamp did so because its commit carries cpID, so the stamp is carried while
+// that post-commit runs, wherever HEAD has gone since, as when the commit was
+// amended away. Before any post-commit takes it, a commit on HEAD's first
+// parents made since the HEAD that prepare stamped on carries cpID. A stamp
+// prepared on HEAD itself, as when a commit is tried again after its first
+// attempt was aborted, is the same commit's, so the retry keeps it. Once the
+// post-commit is done, a session that still holds the reservation was not
+// condensed into it, and the next commit takes it, as before.
 func stampCarriedInFlight(ctx context.Context, cpID id.CheckpointID) bool {
 	root, err := perWorktreeGitRoot(ctx)
 	if err != nil {
 		return false
 	}
 	entry, ok := stampedSessionsEntry(readStampedSessionsIn(root), cpID)
-	if !ok || (entry.Taken != nil && !entry.Taken.running(time.Now())) {
+	if !ok {
 		return false
+	}
+	if entry.Taken != nil {
+		return entry.Taken.running(time.Now())
 	}
 	return commitSinceCarries(ctx, entry.Head, cpID)
 }
@@ -201,20 +205,19 @@ func savedReservation(ctx context.Context, sessionID string) (id.CheckpointID, b
 }
 
 // awaitEarlierCondensations waits while a session about to be condensed into
-// cpID, commit's checkpoint, still reserves another checkpoint ID that an
-// earlier commit carries (carriedByEarlierCommit: one before commit on its
-// first parents, or the commit an amend replaced) whose post-commit took the
-// stamp and is still running. The two post-commits run
+// cpID, this post-commit's checkpoint, still reserves another checkpoint ID
+// whose stamp another post-commit took before this one took its own (at
+// tookAt, takeStampRecords) and is still running. The two post-commits run
 // side by side, and this one can reach the session first. It would skip the
 // session then (postCommitProcessSessionLocked keeps a reservation for its own
 // checkpoint), and with no other session condensing into cpID, the commit
-// would name a checkpoint that is never written. It never waits for a later
-// commit's reservation, so two post-commits never wait for each other. The
-// wait ends once the session no longer holds the reservation, the other
-// post-commit releases its entry or stops running, or earlierCondensationWait
-// has passed. It reports whether it waited, so the caller reads the sessions
-// again.
-func awaitEarlierCondensations(ctx context.Context, sessions []*SessionState, commit *object.Commit, cpID id.CheckpointID) bool {
+// would name a checkpoint that is never written. A post-commit only waits for
+// one that took its stamps first, so two post-commits never wait for each
+// other. The wait ends once the session no longer holds the reservation, the
+// other post-commit releases its entry or stops running, or
+// earlierCondensationWait has passed. It reports whether it waited, so the
+// caller reads the sessions again.
+func awaitEarlierCondensations(ctx context.Context, sessions []*SessionState, cpID id.CheckpointID, tookAt time.Time) bool {
 	root, err := perWorktreeGitRoot(ctx)
 	if err != nil {
 		return false
@@ -223,7 +226,7 @@ func awaitEarlierCondensations(ctx context.Context, sessions []*SessionState, co
 	waited := false
 	for _, sess := range sessions {
 		reserved := sess.PendingCondensationID()
-		if reserved.IsEmpty() || reserved == cpID || !carriedByEarlierCommit(ctx, root, commit, reserved) {
+		if reserved.IsEmpty() || reserved == cpID || !takenBefore(root, reserved, tookAt) {
 			continue
 		}
 		for condensingElsewhere(ctx, root, sess.SessionID, reserved) {
@@ -245,51 +248,13 @@ func awaitEarlierCondensations(ctx context.Context, sessions []*SessionState, co
 	return waited
 }
 
-// carriedByEarlierCommit reports whether prepare recorded stamping reserved,
-// and a commit made since that commit comes after carries it: one before
-// commit on its first parents (carriedBefore) or, when commit is an amend, the
-// commit it replaced or one before that (carriedByReplaced).
-func carriedByEarlierCommit(ctx context.Context, root *os.Root, commit *object.Commit, reserved id.CheckpointID) bool {
+// takenBefore reports whether a post-commit took reserved's stamp before
+// tookAt. A take marks every entry it takes with the one time it took them
+// at, so of two post-commits that took stamps, only the later one counts the
+// other's as taken before its own.
+func takenBefore(root *os.Root, reserved id.CheckpointID, tookAt time.Time) bool {
 	entry, ok := stampedSessionsEntry(readStampedSessionsIn(root), reserved)
-	if !ok {
-		return false
-	}
-	if carriedBefore(ctx, commit, entry.Head, reserved) {
-		return true
-	}
-	return carriedByReplaced(ctx, commit, entry.Head, reserved)
-}
-
-// carriedByReplaced reports whether commit is an amend (amendReplaced) and
-// the commit it replaced, or one before that on its first parents made after
-// stampedOn, carries cpID (carriedSince). An amend does not descend from the
-// commit it replaces, so carriedBefore does not reach it. With no reflog to
-// tell, commit is not taken as an amend.
-func carriedByReplaced(ctx context.Context, commit *object.Commit, stampedOn string, cpID id.CheckpointID) bool {
-	replaced := amendReplaced(ctx, commit)
-	if replaced.IsZero() {
-		return false
-	}
-	repo, err := OpenRepository(ctx)
-	if err != nil {
-		return false
-	}
-	defer repo.Close()
-	return carriedSince(repo, replaced, stampedOn, cpID)
-}
-
-// amendReplaced returns the commit that commit replaced, when HEAD's reflog
-// records making commit as a commit that is not a child of the one HEAD left
-// (an amend), or the zero hash. Unlike commitReplaced, it looks past entries
-// made since: the amend's post-commit can run after HEAD has moved on, as when
-// the next commit lands first.
-func amendReplaced(ctx context.Context, commit *object.Commit) plumbing.Hash {
-	for _, e := range headReflog(ctx) {
-		if e.newHash.Equal(commit.Hash) && strings.HasPrefix(e.msg, "commit") {
-			return e.replaced(commit)
-		}
-	}
-	return plumbing.ZeroHash
+	return ok && entry.Taken != nil && entry.Taken.At.Before(tookAt)
 }
 
 // condensingElsewhere reports whether sessionID's saved state still reserves

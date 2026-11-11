@@ -328,19 +328,20 @@ commit.
   A session's reserved ID goes to one commit: while a commit already made
   carries it and that commit's post-commit is not done (post-commit leaves the
   sessions entries of the stamps it took, marked as its own, until it returns,
-  `releaseStampedSessions`), prepare gives the next commit an ID of its own
-  (`stampCarriedInFlight`), and reads the reservation again after that
+  `releaseStampedSessions`; once taken, a stamp counts as carried while its
+  taker runs, even if the commit was amended away), prepare gives the next
+  commit an ID of its own (`stampCarriedInFlight`), and reads the reservation again after that
   check, since the earlier post-commit may have condensed it in between. A
   commit retried on the same HEAD after an aborted attempt keeps the
   reservation. A later post-commit's take keeps an entry the earlier one marked
   while that process runs (where proclive cannot tell, for a minute), and
   leaves a stamp its commit carries for an earlier commit that carries it too,
-  as a message saved from that commit does (`carriedBefore`). The later
-  commit's post-commit can reach the session first; it then waits, up to ten
-  seconds, for the earlier one to condense the session
-  (`awaitEarlierCondensations`) rather than skip it. An earlier commit is one
-  before it on its first parents or, for an amend, the commit it replaced
-  (read from HEAD's reflog). It never waits for a later commit's reservation. Prepare writes the records and post-commit
+  as a message saved from that commit does (`carriedBefore`). A later
+  post-commit can reach the session first; it then waits, up to ten seconds,
+  for the post-commit that took the reservation's stamp to condense the
+  session (`awaitEarlierCondensations`) rather than skip it. It waits only for
+  a post-commit that took its stamps before its own take, so two never wait
+  for each other. Prepare writes the records and post-commit
   takes them under `entire-stamp-records.lock` in the same dir, so hooks of
   overlapping commits in one worktree cannot lose each other's updates. Beside
   it, `entire-stamped-sessions.json` records the HEAD prepare stamped on and

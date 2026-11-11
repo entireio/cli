@@ -1474,13 +1474,14 @@ func (h *postCommitActionHandler) HandleWarnStaleSession(_ *session.State) error
 var beforeCondense func(ctx context.Context, sessions []*SessionState) bool
 
 // settledSessions runs, for the sessions PostCommit is about to condense into
-// cpID, commit's checkpoint, what may change their state outside every session
-// lock: the beforeCondense hook, and the wait for an earlier commit's
-// post-commit to condense them (awaitEarlierCondensations). When either did,
-// it reads the set again so commit claims see the change.
-func (s *ManualCommitStrategy) settledSessions(ctx context.Context, worktreePath string, sessions []*SessionState, commit *object.Commit, cpID id.CheckpointID) []*SessionState {
+// cpID, the commit's checkpoint, what may change their state outside every
+// session lock: the beforeCondense hook, and the wait for a post-commit that
+// took its stamps before this one's take (at tookAt) to condense them
+// (awaitEarlierCondensations). When either did, it reads the set again so
+// commit claims see the change.
+func (s *ManualCommitStrategy) settledSessions(ctx context.Context, worktreePath string, sessions []*SessionState, tookAt time.Time, cpID id.CheckpointID) []*SessionState {
 	changed := beforeCondense != nil && beforeCondense(ctx, sessions)
-	if !awaitEarlierCondensations(ctx, sessions, commit, cpID) && !changed {
+	if !awaitEarlierCondensations(ctx, sessions, cpID, tookAt) && !changed {
 		return sessions
 	}
 	if reloaded, err := s.findSessionsForCommitLinking(ctx, worktreePath); err == nil && len(reloaded) > 0 {
@@ -1578,7 +1579,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 		)
 		return nil
 	}
-	sessions = s.settledSessions(ctx, worktreePath, sessions, commit, checkpointID)
+	sessions = s.settledSessions(ctx, worktreePath, sessions, records.takenAt, checkpointID)
 	provenance := newCommitProvenance(ctx, sessions)
 
 	// Build transition context
