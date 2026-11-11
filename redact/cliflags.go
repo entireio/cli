@@ -566,9 +566,11 @@ func longFlagValue(s string, loc []int, stringEnd int, subs substitutionMemo, da
 // runs, so each element is one argument, whatever it holds (["wget",
 // "--password", "--x"], ["wget", "--password", "my secret is x"]).
 // Elsewhere a value that starts with "--" is the next flag (["--password",
-// "--verbose"]), and one made of prose is text: a word of prose, or several
-// words with a grammatical one among them (print("--password", "is
-// required")), while a passphrase is not ("correct horse battery staple").
+// "--verbose"]), and so is a short option, as a parser declares a flag's
+// names (parser.add_argument("--password", "-p", required=True)), and one
+// made of prose is text: a word of prose, or several words with a
+// grammatical one among them (print("--password", "is required")), while a
+// passphrase is not ("correct horse battery staple").
 func listPasswordValue(s string, loc []int, dashFlag, argv bool) (cliValue, bool) {
 	if loc[3] == loc[2] {
 		return cliValue{}, false
@@ -578,7 +580,16 @@ func listPasswordValue(s string, loc []int, dashFlag, argv bool) (cliValue, bool
 		return cliValue{}, false
 	}
 	value := s[v.start:v.end]
-	return v, value != "" && (!dashFlag || value[0] != '-') && (argv || !strings.HasPrefix(value, "--") && !isListProse(value))
+	if value == "" || dashFlag && value[0] == '-' {
+		return cliValue{}, false
+	}
+	return v, argv || !strings.HasPrefix(value, "--") && !isShortOption(value) && !isListProse(value)
+}
+
+// isShortOption reports whether value is one short option: a dash and a
+// letter or digit (-p).
+func isShortOption(value string) bool {
+	return len(value) == 2 && value[0] == '-' && isASCIIAlnum(value[1])
 }
 
 // listProgram returns the first element of the argument list in code that

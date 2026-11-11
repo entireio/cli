@@ -1177,6 +1177,10 @@ func TestString_CommandLinePasswordListAndQuotingNonSecretsPreserved(t *testing.
 		`subprocess.run(["openssl", "enc", "-pass", f"pass:{pw}"])`,
 		`mysql -u root r"-pfoo"`,
 		`psql_cmd = [r"C:\Program Files\PostgreSQL\16\bin\psql.exe", "--password", "-h", "db"]`,
+		// a parser declares a flag's long and short names in one list
+		`parser.add_argument("--password", "-p", required=True)`,
+		`@click.option('--password', '-p', help='Password')`,
+		`parser.add_argument("--pass", "-P", dest="pw")`,
 	})
 }
 
