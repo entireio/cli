@@ -451,11 +451,12 @@ func (n namedFiles) deletedInOtherCase(file string, spellings []string) bool {
 // sameDeletedEntry is CaseProbe.SameEntry, with names that differ in Unicode
 // normalization taken as one where the filesystem ignores normalization.
 func (n namedFiles) sameDeletedEntry(file, spelling string) bool {
+	compared, comparedSpelling := file, spelling
 	// The filesystem is asked only when a name is not composed already.
 	if composedFile, composedSpelling := norm.NFC.String(file), norm.NFC.String(spelling); (composedFile != file || composedSpelling != spelling) && n.ignoresNormalization() {
-		file, spelling = composedFile, composedSpelling
+		compared, comparedSpelling = composedFile, composedSpelling
 	}
-	return n.cases.SameEntry(file, spelling)
+	return n.cases.SameEntry(compared, comparedSpelling)
 }
 
 // statusClaim returns the statusClaim for the turn this state began. A nil
