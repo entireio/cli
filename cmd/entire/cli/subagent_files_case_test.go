@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 )
@@ -21,6 +22,9 @@ import (
 func TestSplitSubagentFiles_KeepsTheCommittedSpellingOfAStagedRenameWindows(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
+	// The case probe keeps dir's root open; Windows cannot remove an open
+	// directory.
+	t.Cleanup(func() { osroot.Forget(dir) })
 	testutil.InitRepo(t, dir)
 	if !worktreedir.NewCaseProbe(dir).IgnoresCase(".") {
 		t.Skip("a case-only rename is two files on a case-sensitive filesystem")
