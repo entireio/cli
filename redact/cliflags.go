@@ -296,6 +296,11 @@ const opensslSourceFlag = `(?:-pass(?:in|out)|pass(?:in|out|word)?)`
 // -H and -t, ...) is left out, since its value would be the rest of the word.
 const mysqlNoValueOptions = `[ABCENVXbnsv]*`
 
+// cliPythonPrefix matches the prefix of a Python string, which may open a
+// quoted flag in an argument list in code ([r"-pC:\x"], see
+// pythonStringPrefix).
+const cliPythonPrefix = `(?:[rRbBuU]|[rR][bB]|[bB][rR])?`
+
 // cliShortFlag matches the short flag -name after before, then sep and its
 // value: -px, a flag quoted with its value ("-px", "-p x"), or one quoted on
 // its own ("-p" x, "-p"'x'). A blank before may also be a separator of code,
@@ -311,7 +316,7 @@ func cliShortFlag(before, name, sep string) string {
 	if sep != "" {
 		quotedSep = `(?:,` + cliListGap + `|` + sep + `)`
 	}
-	return before + `(?:` + cliFlagQuote + `-` + name + cliFlagClose + quotedSep + `|-` + name + sep + `)(` + cliFlagValue + `)`
+	return before + `(?:` + cliPythonPrefix + cliFlagQuote + `-` + name + cliFlagClose + quotedSep + `|-` + name + sep + `)(` + cliFlagValue + `)`
 }
 
 // cliSubcommand matches name as a client's subcommand, which may be quoted
@@ -596,7 +601,7 @@ func listElementsBefore(s string, open int) []string {
 	if open > 0 && s[open-1] == '\\' {
 		open--
 	}
-	code := s[:open]
+	code := s[:open-pythonPrefixBefore(s, open)]
 	var elements []string
 	for range maxCodeElements {
 		code = strings.TrimRight(code, " \t\r\n")
@@ -614,7 +619,8 @@ func listElementsBefore(s string, open int) []string {
 		if !ok {
 			return nil
 		}
-		code, elements = element, append(elements, code[len(element):])
+		text := code[len(element):]
+		code, elements = element, append(elements, text[pythonStringPrefix(text, 0):])
 	}
 	return nil
 }
@@ -2514,8 +2520,12 @@ func isListFlag(s string, base int, loc []int) bool {
 // listElementValue returns the value in the string of code that opens at
 // s[open], an element of an argument list, false when no string opens there
 // (a name, such as pw) or when the string is the key of an object, which
-// a colon follows ({"literal": "--password", "caseFold": true}).
+// a colon follows ({"literal": "--password", "caseFold": true}). The
+// string may have a Python prefix (r"pass:x", see pythonStringPrefix),
+// which makes it literal: Python expands no $ (r"$ecret").
 func listElementValue(s string, open int) (cliValue, bool) {
+	prefix := pythonStringPrefix(s, open)
+	open += prefix
 	end, n := codeStringEnd(s, open)
 	if n == 0 && s[open] == '`' {
 		// A raw string, as Go writes one (exec.Command("wget",
@@ -2527,7 +2537,36 @@ func listElementValue(s string, open int) (cliValue, bool) {
 	if n == 0 || strings.HasPrefix(strings.TrimLeft(s[end:], " \t\r\n"), ":") {
 		return cliValue{}, false
 	}
-	return cliValue{start: open + n, end: end - n, quoted: true, singleQuoted: s[open] != '"' && s[open] != '\\'}, true
+	return cliValue{start: open + n, end: end - n, quoted: true, singleQuoted: prefix > 0 || s[open] != '"' && s[open] != '\\'}, true
+}
+
+// pythonStringPrefix returns the length of the Python string prefix at
+// s[i] that a quote, or an escaped one in a JSON string, follows: r, b, u,
+// rb or br in either case (r"pass:x", rb'x'), else 0. An f-string's braces
+// interpolate (f"{pw}"), so its prefix is not read as one.
+func pythonStringPrefix(s string, i int) int {
+	for n := 1; n <= 2 && i+n < len(s); n++ {
+		if c := s[i+n]; c == '"' || c == '\'' || strings.HasPrefix(s[i+n:], `\"`) {
+			switch strings.ToLower(s[i : i+n]) {
+			case "r", "b", "u", "rb", "br":
+				return n
+			}
+			return 0
+		}
+	}
+	return 0
+}
+
+// pythonPrefixBefore returns the length of the Python string prefix that
+// ends at code[i], the opening quote of a string (see pythonStringPrefix),
+// where no other word character comes before it, else 0.
+func pythonPrefixBefore(code string, i int) int {
+	for n := 2; n >= 1; n-- {
+		if from := i - n; from >= 0 && (from == 0 || !isWordByte(code[from-1])) && pythonStringPrefix(code, from) == n {
+			return n
+		}
+	}
+	return 0
 }
 
 // codeStringEnd is quotedPiece for a string in code: a backslash escapes
@@ -2610,6 +2649,11 @@ func shortFlagValue(s string, base int, loc []int, stringEnd int, subs substitut
 	if len(loc) < 8 || loc[2] < 0 {
 		return shellWordValue(s, start, end, stringEnd, subs), true
 	}
+	if k := pythonPrefixBefore(s, base+loc[2]); k > 0 && !isCodeElementStart(s[:base+loc[2]-k]) {
+		// A Python prefix opens a string of code only; on a command line
+		// the shell joins it to the word (mysql r"-px" passes r-px).
+		return cliValue{}, false
+	}
 	closeFrom, closed := base+loc[4], loc[5] > loc[4]
 	pieceEnd, quoteLen := flagStringEnd(s, base+loc[2])
 	closeAt := pieceEnd - quoteLen
@@ -2641,7 +2685,9 @@ func shortFlagValue(s string, base int, loc []int, stringEnd int, subs substitut
 		// "-p" alone prompts for the password.
 		return cliValue{}, false
 	}
-	return quotedFlagValue(s, base+loc[2], start, pieceEnd, quoteLen, stringEnd, subs), true
+	v := quotedFlagValue(s, base+loc[2], start, pieceEnd, quoteLen, stringEnd, subs)
+	v.singleQuoted = v.singleQuoted || pythonPrefixBefore(s, base+loc[2]) > 0
+	return v, true
 }
 
 // flagStringEnd is quotedPiece for the string that opens a short flag at
@@ -2832,7 +2878,7 @@ func isCodeSeparator(s string, open, i int) bool {
 	if i == len(s) || strings.IndexByte(",]}", s[i]) < 0 {
 		return false
 	}
-	return isCodeElementStart(s[:open])
+	return isCodeElementStart(s[:open-pythonPrefixBefore(s, open)])
 }
 
 // maxCodeElements bounds how many elements before a string isCodeSeparator
@@ -2873,7 +2919,8 @@ func isCodeElementStart(code string) bool {
 }
 
 // codeElementStart returns the code before the string or name (db, os.Args)
-// that code ends with, or false when it ends with neither.
+// that code ends with, or false when it ends with neither. A string's
+// Python prefix is part of it (r"C:\Tools\wget.exe").
 func codeElementStart(code string) (string, bool) {
 	if code == "" {
 		return "", false
@@ -2885,7 +2932,7 @@ func codeElementStart(code string) (string, bool) {
 				if escaped {
 					i--
 				}
-				return code[:i], true
+				return code[:i-pythonPrefixBefore(code, i)], true
 			}
 		}
 		return "", false

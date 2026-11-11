@@ -708,6 +708,13 @@ func TestString_CommandLinePasswordsShellGrammarCases(t *testing.T) {
 		{name: "mongo short flag glued to its value", input: "mongosh -u admin -p" + p + " db", want: "mongosh -u admin -pREDACTED db"},
 		{name: "mongo short flag joined by an equals sign in a list", input: `subprocess.run(["mongodump", "-p=` + p + `"])`, want: `subprocess.run(["mongodump", "-p=REDACTED"])`},
 		{name: "dash-led mongo password joined by an equals sign in a list", input: `subprocess.run(["mongosh", "-p=-` + p + `"])`, want: `subprocess.run(["mongosh", "-p=REDACTED"])`},
+		{name: "openssl source in a Python raw string", input: `subprocess.run(["openssl", "enc", "-aes-128-cbc", "-pass", r"pass:` + p + `"])`, want: `subprocess.run(["openssl", "enc", "-aes-128-cbc", "-pass", r"pass:REDACTED"])`},
+		{name: "long flag value in a Python bytes string", input: `subprocess.run(["wget", "--password", rb'` + p + `', url])`, want: `subprocess.run(["wget", "--password", rb'REDACTED', url])`},
+		{name: "short flag value in an uppercase Python raw string", input: `subprocess.run(["redis-cli", "-a", R"` + p + `"])`, want: `subprocess.run(["redis-cli", "-a", R"REDACTED"])`},
+		{name: "glued short flag in a Python raw string", input: `subprocess.run(["mysql", "-u", "root", r"-p` + p + `", "db"])`, want: `subprocess.run(["mysql", "-u", "root", r"-pREDACTED", "db"])`},
+		{name: "Python raw strings for the program and the password", input: `subprocess.run([r"C:\Tools\wget.exe", "--password", r"C:\vault\` + p + `", url])`, want: `subprocess.run([r"C:\Tools\wget.exe", "--password", r"REDACTED", url])`},
+		{name: "dollar sign in a Python raw string", input: `subprocess.run(["wget", "--password", r"$` + p + `", url])`, want: `subprocess.run(["wget", "--password", r"REDACTED", url])`},
+		{name: "Python raw string in a JSON string", input: `{"cmd": "subprocess.run([\"wget\", \"--password\", r\"` + p + `\", url])"}`, want: `{"cmd": "subprocess.run([\"wget\", \"--password\", r\"REDACTED\", url])"}`},
 	})
 }
 
@@ -1158,6 +1165,11 @@ func TestString_CommandLinePasswordListAndQuotingNonSecretsPreserved(t *testing.
 		"exec.Command(\"mysql\", \"-u\", \"root\", \"-p\", `appdb`)",
 		// an ssh option that runs no command
 		`ssh -o "HostName=mysql" -p2222 host`,
+		// an f-string's braces interpolate, and a Python prefix on a
+		// command line is joined to the word (r-pfoo)
+		`subprocess.run(["openssl", "enc", "-pass", f"pass:{pw}"])`,
+		`mysql -u root r"-pfoo"`,
+		`psql_cmd = [r"C:\Program Files\PostgreSQL\16\bin\psql.exe", "--password", "-h", "db"]`,
 	})
 }
 
