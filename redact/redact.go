@@ -465,7 +465,7 @@ func detectAllLayers(s string) []taggedRegion {
 	// placeholder stays intact, like the connection strings in layer 5, unless
 	// its query carries a real password.
 	for _, loc := range credentialedURIPattern.FindAllStringSubmatchIndex(s, -1) {
-		if isPlaceholderSecretValue(s[loc[2]:loc[3]]) && !uriQueryHasPassword(s[loc[0]:loc[1]]) {
+		if isPlaceholderSecretValue(uriPassword(s, loc[0], loc[2], loc[3])) && !uriQueryHasPassword(s[loc[0]:loc[1]]) {
 			continue
 		}
 		regions = append(regions, taggedRegion{region: region{loc[0], loc[1]}})
@@ -615,6 +615,45 @@ func isSlashedBase64Secret(run string) bool {
 	return shannonEntropy(run) > entropyThreshold
 }
 
+// uriPassword returns the password s[start:end] of the URI that starts at
+// s[uriStart], as the placeholder rules read it: for a URI inside a double
+// quoted string, as in psql "postgres://app:${PW:-'$FALLBACK'}@db/app", it is
+// read as double quotes enclose it (see doubleQuotedText). The quote before
+// the URI must open a string that closes after it on its line: in
+// psql ""postgres://app:${PW:-'$S3CRET'}@db/app the quotes are an empty
+// string, so the single quotes make $S3CRET literal.
+func uriPassword(s string, uriStart, start, end int) string {
+	if open := uriStart - 1; open >= 0 && opensDoubleQuotedString(s, open) && quotedStringEnd(s, open) >= 0 {
+		return doubleQuotedText(s[start:end])
+	}
+	return s[start:end]
+}
+
+// opensDoubleQuotedString reports whether s[i] is a double quote that opens a
+// string, judged by the run of double quotes that ends there: in a run of
+// even length, as "", each quote closes the one before it.
+func opensDoubleQuotedString(s string, i int) bool {
+	n := 0
+	for i-n >= 0 && s[i-n] == '"' {
+		n++
+	}
+	return n%2 == 1
+}
+
+// quotedStringEnd returns the index of the quote that closes the string
+// opened at s[open], or -1 when the line ends first.
+func quotedStringEnd(s string, open int) int {
+	for i := open + 1; i < len(s); i++ {
+		switch s[i] {
+		case s[open]:
+			return i
+		case '\n', '\r':
+			return -1
+		}
+	}
+	return -1
+}
+
 // detectDatabaseURIPasswords covers database URIs whose password contains a
 // character credentialedURIPattern stops at. Placeholder passwords stay
 // visible, as in every other credential layer.
@@ -624,7 +663,7 @@ func detectDatabaseURIPasswords(s string) []taggedRegion {
 	}
 	var regions []taggedRegion
 	for _, loc := range databaseURIPasswordPattern.FindAllStringSubmatchIndex(s, -1) {
-		password := s[loc[2]:loc[3]]
+		password := uriPassword(s, loc[0], loc[2], loc[3])
 		if uriPortPrefixPattern.MatchString(password) || !hasNonPlaceholderPasswordValue(password) {
 			continue
 		}
@@ -819,11 +858,12 @@ func detectCredentialValues(s string) []taggedRegion {
 		if start == loc[4] {
 			end = extendPastValueSeparators(s, end)
 		}
-		// Main's shared placeholder rules, except that a single-quoted value
-		// is a shell literal and only the literal placeholder words apply.
-		isReal := hasNonPlaceholderPasswordValue(s[start:end])
+		// The shared placeholder rules, except that a single-quoted value is
+		// a shell literal and only the literal placeholder words apply.
+		value := capturedValueText(s, loc[4], start, end)
+		isReal := hasNonPlaceholderPasswordValue(value)
 		if singleQuoted {
-			isReal = hasNonPlaceholderQuotedPasswordValue(s[start:end], true)
+			isReal = hasNonPlaceholderQuotedPasswordValue(value, true)
 		}
 		if isReal {
 			regions = append(regions, taggedRegion{region: region{start, end}})
@@ -933,15 +973,34 @@ func isCredentialCodeReference(value string) bool {
 }
 
 func nonPlaceholderCapture(s, key string, match []int, captureGroup int) (taggedRegion, bool) {
-	start, end, ok := captureRange(match, captureGroup)
+	captureStart, end, ok := captureRange(match, captureGroup)
 	if !ok {
 		return taggedRegion{}, false
 	}
-	start, end, singleQuoted := unquoteRangeQuoted(s, start, end)
-	if !hasNonPlaceholderKeyValue(key, s[start:end], singleQuoted) {
+	start, end, singleQuoted := unquoteRangeQuoted(s, captureStart, end)
+	if !hasNonPlaceholderKeyValue(key, capturedValueText(s, captureStart, start, end), singleQuoted) {
 		return taggedRegion{}, false
 	}
 	return taggedRegion{region: region{start, end}}, true
+}
+
+// capturedValueText returns the value s[start:end] that a key/value pattern
+// captured from s[captureStart], as the placeholder rules read it. Double
+// quotes around the value, or a double quote that ends it and closes the
+// string it sits in (echo "DB_PASSWORD=${PW:-'$FALLBACK'}"), put it inside
+// double quotes, where the shell reads it as doubleQuotedText describes.
+func capturedValueText(s string, captureStart, start, end int) string {
+	value := s[start:end]
+	if start > captureStart {
+		if s[captureStart] == '"' {
+			return doubleQuotedText(value)
+		}
+		return value
+	}
+	if inner, ok := strings.CutSuffix(value, `"`); ok && !strings.Contains(inner, `"`) {
+		return doubleQuotedText(inner) + `"`
+	}
+	return value
 }
 
 func captureRange(match []int, captureGroup int) (int, int, bool) {
@@ -1163,31 +1222,72 @@ func isSecretRecipeCommand(cmd string) bool {
 	return ok
 }
 
+// shellParameterName matches the parameter a ${…} expansion names: a
+// variable or array element (${DB_PASSWORD}, ${pw[0]}), a positional
+// parameter (${1}, ${10}), or a special parameter (${@}, ${*}, ${#}, ${?},
+// ${-}, ${$}, ${!}), each optionally behind ! for indirection (${!ref}). An
+// array subscript may hold one more level of brackets (${pw[idx[0]]},
+// ${pw[${idx[0]}]}); a deeper one is not read as a parameter name.
+const shellParameterName = `!?(?:[A-Za-z_][A-Za-z0-9_]*(?:\[(?:[^\[\]]|\[[^\[\]]*\])*\])?|[0-9]+|[@*#?$!-])`
+
 // shellExpansionWordRE matches ${NAME<op>word}, whose word becomes the value
 // when NAME is unset (-, =) or set (+); with a colon, an empty NAME counts as
 // unset. ${NAME:?word} is left out: its word is an error message, never a
 // value.
-var shellExpansionWordRE = regexp.MustCompile(`^\$\{[A-Za-z_][A-Za-z0-9_]*:?[-=+](.*)\}$`)
+var shellExpansionWordRE = regexp.MustCompile(`^\$\{` + shellParameterName + `:?[-=+](.*)\}$`)
+
+// shellLengthRE matches ${#NAME}, the length of a parameter, which holds no
+// text of its own even when NAME is itself # (${##}).
+var shellLengthRE = regexp.MustCompile(`^\$\{#` + shellParameterName + `\}$`)
 
 // isPlaceholderShellExpansion reports whether a ${…} value is a placeholder:
 // one complete expression that is a plain reference, or one whose word is
-// itself empty or a placeholder, so ${DB_PASSWORD:-hunter2} and
-// ${A}hunter2${B} still count as secrets.
+// itself empty or a placeholder, so ${DB_PASSWORD:-hunter2},
+// ${1:-hunter2} and ${A}hunter2${B} still count as secrets. A single-quoted
+// word is a literal, so ${PW:-'$S3CRET'} is a secret too.
 func isPlaceholderShellExpansion(s string) bool {
 	if !isSingleBraceExpression(s) {
 		return false
 	}
+	if shellLengthRE.MatchString(s) {
+		return true
+	}
 	if m := shellExpansionWordRE.FindStringSubmatch(s); m != nil {
+		if word := m[1]; isSingleQuotedWord(word) {
+			return isPlaceholderSecretValueQuoted(word, true)
+		}
 		return isPlaceholderSecretValue(m[1])
 	}
 	return !shellTextOperatorRE.MatchString(s)
+}
+
+// isSingleQuotedWord reports whether word is wrapped in single quotes.
+func isSingleQuotedWord(word string) bool {
+	return len(word) >= 2 && word[0] == '\'' && word[len(word)-1] == '\''
+}
+
+// doubleQuotedText returns text, which double quotes enclose, as the
+// placeholder rules read it. Inside double quotes a single quote is a plain
+// character: "${PW:-'$FALLBACK'}" expands $FALLBACK and puts apostrophes
+// around it, so an expansion whose word is all single-quoted is read without
+// those quotes, as ${PW:-$FALLBACK}. Without double quotes the same word is the
+// literal text $FALLBACK, a secret (see isPlaceholderShellExpansion).
+func doubleQuotedText(text string) string {
+	m := shellExpansionWordRE.FindStringSubmatchIndex(text)
+	if m == nil || !isSingleBraceExpression(text) {
+		return text
+	}
+	if word := text[m[2]:m[3]]; isSingleQuotedWord(word) {
+		return text[:m[2]] + word[1:len(word)-1] + text[m[3]:]
+	}
+	return text
 }
 
 // shellTextOperatorRE matches ${NAME<op>...} for shell operators whose text can
 // carry a literal value: pattern substitution and removal (/ # %), case
 // changes (^ ,), and substrings (:offset). Non-shell forms such as ${var.x},
 // ${env:X} and ${{secrets.X}} do not match.
-var shellTextOperatorRE = regexp.MustCompile(`^\$\{[A-Za-z_][A-Za-z0-9_]*(?:[/#%^,]|:[-0-9 ])`)
+var shellTextOperatorRE = regexp.MustCompile(`^\$\{` + shellParameterName + `(?:[/#%^,]|:[-0-9 ])`)
 
 // isSingleBraceExpression reports whether the brace opened by the leading "${"
 // of s is closed by its final "}".
