@@ -386,8 +386,11 @@ type InstallPluginOptions struct {
 // is the same file as the would-be managed entry. The replace step is
 // atomic: the new entry is created under a temp name and renamed onto <dest>,
 // so a failed --force never leaves the previous install missing.
-func InstallPluginFromPath(opts InstallPluginOptions) (*InstalledPlugin, error) {
-	release, err := lockPluginTree(context.Background(), true)
+//
+// ctx bounds the wait for another install holding the plugin tree, and
+// carries the writer that wait is announced on (see lockPluginTree).
+func InstallPluginFromPath(ctx context.Context, opts InstallPluginOptions) (*InstalledPlugin, error) {
+	release, err := lockPluginTree(ctx, true)
 	if err != nil {
 		return nil, err
 	}
@@ -414,21 +417,28 @@ const pluginTreeLockWait = 10 * time.Minute
 // could delete the backup another install is about to restore from.
 // Callers hold it across one whole change and must not nest it.
 //
-// The wait is cancellable: flock only watches ctx when it has a deadline (it
-// otherwise makes a blocking lock call), so a ctx without one gets
-// pluginTreeLockWait, and Ctrl-C during `plugin upgrade` behind another
-// install stops the wait instead of being ignored.
+// A wait is announced on ctx's plugin progress writer (withPluginProgress),
+// so a user stuck behind a stalled install sees why. The wait ends when ctx
+// does — callers pass the command's context, so Ctrl-C stops it with an error
+// wrapping context.Canceled — and after pluginTreeLockWait at the latest.
+// (flock watches ctx only when it has a deadline; without one it makes a
+// blocking lock call, hence the ceiling doubles as the deadline.)
 func lockPluginTree(ctx context.Context, create bool) (func(), error) {
 	root, err := pluginRoot(create)
 	if err != nil {
 		return nil, err
 	}
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, pluginTreeLockWait)
-		defer cancel()
+	release, err := flock.TryAcquireIn(root, pluginTreeLockName)
+	if errors.Is(err, flock.ErrLocked) {
+		stop := startPluginStep(ctx, "Waiting for another plugin install to finish...")
+		defer stop()
+		if _, ok := ctx.Deadline(); !ok {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, pluginTreeLockWait)
+			defer cancel()
+		}
+		release, err = flock.AcquireContextIn(ctx, root, pluginTreeLockName)
 	}
-	release, err := flock.AcquireContextIn(ctx, root, pluginTreeLockName)
 	if err != nil {
 		return nil, fmt.Errorf("lock plugin directory: %w", err)
 	}

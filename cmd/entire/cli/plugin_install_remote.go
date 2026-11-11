@@ -551,8 +551,10 @@ func sweepAsideLeftovers(root *os.Root, dir string, isLeftover func(name string)
 
 // RemoveManagedPlugin removes a plugin's bin entries and its pkg dir.
 // The dependency guard lives in the command layer so --force can bypass it.
-func RemoveManagedPlugin(name string) error {
-	release, err := lockPluginTree(context.Background(), false)
+// ctx bounds the wait for another install holding the plugin tree, and
+// carries the writer that wait is announced on (see lockPluginTree).
+func RemoveManagedPlugin(ctx context.Context, name string) error {
+	release, err := lockPluginTree(ctx, false)
 	switch {
 	case err == nil:
 		defer release()

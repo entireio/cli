@@ -113,7 +113,7 @@ func TestInstallPluginFromPath_WindowsReplacesRunningCopiedEntry(t *testing.T) {
 		return src
 	}
 	// A source outside the managed tree is copied, never hard-linked.
-	installed, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: writeSource(ping)})
+	installed, err := InstallPluginFromPath(t.Context(), InstallPluginOptions{SourcePath: writeSource(ping)})
 	if err != nil {
 		t.Fatalf("initial install: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestInstallPluginFromPath_WindowsReplacesRunningCopiedEntry(t *testing.T) {
 	}
 	t.Cleanup(stop)
 
-	if _, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: writeSource([]byte("new")), Force: true}); err != nil {
+	if _, err := InstallPluginFromPath(t.Context(), InstallPluginOptions{SourcePath: writeSource([]byte("new")), Force: true}); err != nil {
 		t.Fatalf("replace the running copied entry: %v", err)
 	}
 	data, err := os.ReadFile(installed.Path)
@@ -155,7 +155,7 @@ func TestInstallPluginFromPath_WindowsReplacesRunningCopiedEntry(t *testing.T) {
 	}
 
 	stop()
-	if _, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: writeSource([]byte("newer")), Force: true}); err != nil {
+	if _, err := InstallPluginFromPath(t.Context(), InstallPluginOptions{SourcePath: writeSource([]byte("newer")), Force: true}); err != nil {
 		t.Fatalf("reinstall after exit: %v", err)
 	}
 	if n := countAsideEntries(t, binDir); n != 0 {

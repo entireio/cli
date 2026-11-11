@@ -248,7 +248,7 @@ func TestRemoveManagedPlugin_CleansBinAndPkg(t *testing.T) { //nolint:parallelte
 	if _, err := InstallPluginFromRepo(ctx, repoURL, "", RemoteInstallOptions{}); err != nil {
 		t.Fatalf("install: %v", err)
 	}
-	if err := RemoveManagedPlugin("demo"); err != nil {
+	if err := RemoveManagedPlugin(t.Context(), "demo"); err != nil {
 		t.Fatalf("RemoveManagedPlugin: %v", err)
 	}
 	if p, err := FindInstalledPlugin("demo"); err != nil || p != nil {

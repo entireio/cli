@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -87,12 +88,12 @@ func readInstalledFoo(t *testing.T) string {
 // invisible to listing and dispatch.
 func TestInstallPluginFromPath_ReplacesRunningEntryByMovingItAside(t *testing.T) { //nolint:paralleltest // mutates env and seams
 	withPluginDir(t)
-	if _, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: writePluginSource(t, "old")}); err != nil {
+	if _, err := InstallPluginFromPath(t.Context(), InstallPluginOptions{SourcePath: writePluginSource(t, "old")}); err != nil {
 		t.Fatalf("first install: %v", err)
 	}
 	simulateRunningManagedEntry(t, pluginBinName(pluginBinaryName("foo")), true)
 
-	if _, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: writePluginSource(t, "new"), Force: true}); err != nil {
+	if _, err := InstallPluginFromPath(t.Context(), InstallPluginOptions{SourcePath: writePluginSource(t, "new"), Force: true}); err != nil {
 		t.Fatalf("replace running entry: %v", err)
 	}
 	if got := readInstalledFoo(t); got != "new" {
@@ -111,12 +112,12 @@ func TestInstallPluginFromPath_ReplacesRunningEntryByMovingItAside(t *testing.T)
 // is what keeps the test above honest.
 func TestInstallPluginFromPath_RunningEntryFailsWithoutAsideFallback(t *testing.T) { //nolint:paralleltest // mutates env and seams
 	withPluginDir(t)
-	if _, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: writePluginSource(t, "old")}); err != nil {
+	if _, err := InstallPluginFromPath(t.Context(), InstallPluginOptions{SourcePath: writePluginSource(t, "old")}); err != nil {
 		t.Fatalf("first install: %v", err)
 	}
 	simulateRunningManagedEntry(t, pluginBinName(pluginBinaryName("foo")), false)
 
-	_, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: writePluginSource(t, "new"), Force: true})
+	_, err := InstallPluginFromPath(t.Context(), InstallPluginOptions{SourcePath: writePluginSource(t, "new"), Force: true})
 	if !errors.Is(err, errSimulatedAccessDenied) {
 		t.Fatalf("replace without fallback = %v, want access denied", err)
 	}
@@ -129,7 +130,7 @@ func TestInstallPluginFromPath_RunningEntryFailsWithoutAsideFallback(t *testing.
 // failed replace must never leave the plugin missing.
 func TestInstallPluginFromPath_RestoresEntryWhenRetryFails(t *testing.T) { //nolint:paralleltest // mutates env and seams
 	withPluginDir(t)
-	if _, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: writePluginSource(t, "old")}); err != nil {
+	if _, err := InstallPluginFromPath(t.Context(), InstallPluginOptions{SourcePath: writePluginSource(t, "old")}); err != nil {
 		t.Fatalf("first install: %v", err)
 	}
 	destName := pluginBinName(pluginBinaryName("foo"))
@@ -140,7 +141,7 @@ func TestInstallPluginFromPath_RestoresEntryWhenRetryFails(t *testing.T) { //nol
 		return root.Rename(from, to)
 	})
 
-	if _, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: writePluginSource(t, "new"), Force: true}); err == nil {
+	if _, err := InstallPluginFromPath(t.Context(), InstallPluginOptions{SourcePath: writePluginSource(t, "new"), Force: true}); err == nil {
 		t.Fatal("replace succeeded although every swap onto the entry failed")
 	}
 	if got := readInstalledFoo(t); got != "old" {
@@ -155,7 +156,7 @@ func TestInstallPluginFromPath_RestoresEntryWhenRetryFails(t *testing.T) { //nol
 // them, and until then they never list as plugins.
 func TestInstallPluginFromPath_SweepsAndHidesAsideLeftovers(t *testing.T) { //nolint:paralleltest // mutates env
 	withPluginDir(t)
-	if _, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: writePluginSource(t, "old")}); err != nil {
+	if _, err := InstallPluginFromPath(t.Context(), InstallPluginOptions{SourcePath: writePluginSource(t, "old")}); err != nil {
 		t.Fatalf("first install: %v", err)
 	}
 	binDir, err := PluginBinDir()
@@ -174,7 +175,7 @@ func TestInstallPluginFromPath_SweepsAndHidesAsideLeftovers(t *testing.T) { //no
 		t.Errorf("ListInstalledPlugins with a leftover = %+v, want only foo", installed)
 	}
 
-	if _, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: writePluginSource(t, "new"), Force: true}); err != nil {
+	if _, err := InstallPluginFromPath(t.Context(), InstallPluginOptions{SourcePath: writePluginSource(t, "new"), Force: true}); err != nil {
 		t.Fatalf("reinstall: %v", err)
 	}
 	if _, err := os.Lstat(leftoverPath); !errors.Is(err, os.ErrNotExist) {
@@ -283,7 +284,7 @@ func TestInstallPluginFromRepo_FailedBinSwapLeavesNoManifest(t *testing.T) { //n
 // sweep the entries an upgrade moved aside itself; nothing later would.
 func TestRemoveManagedPlugin_SweepsAsideLeftovers(t *testing.T) { //nolint:paralleltest // mutates env
 	withPluginDir(t)
-	if _, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: writePluginSource(t, "old")}); err != nil {
+	if _, err := InstallPluginFromPath(t.Context(), InstallPluginOptions{SourcePath: writePluginSource(t, "old")}); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 	binDir, err := PluginBinDir()
@@ -293,7 +294,7 @@ func TestRemoveManagedPlugin_SweepsAsideLeftovers(t *testing.T) { //nolint:paral
 	leftoverPath := filepath.Join(binDir, filepath.Base(oldManagedEntryName(pluginBinaryName("foo"))))
 	writeExecutableScript(t, leftoverPath, "stale")
 
-	if err := RemoveManagedPlugin("foo"); err != nil {
+	if err := RemoveManagedPlugin(t.Context(), "foo"); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 	if _, err := os.Lstat(leftoverPath); !errors.Is(err, os.ErrNotExist) {
@@ -351,7 +352,7 @@ func TestInstallPluginFromPath_WaitsForPluginTreeLock(t *testing.T) { //nolint:p
 	src := writePluginSource(t, "new")
 	done := make(chan error, 1)
 	go func() {
-		_, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: src})
+		_, err := InstallPluginFromPath(t.Context(), InstallPluginOptions{SourcePath: src})
 		done <- err
 	}()
 	select {
@@ -459,4 +460,62 @@ func countAsideEntries(t *testing.T, dir string) int {
 		}
 	}
 	return n
+}
+
+const pluginTreeWaitNotice = "Waiting for another plugin install to finish..."
+
+// `plugin install ./path` and `plugin remove` stuck behind another holder of
+// the tree lock say so once, and the first Ctrl-C (a cancelled command ctx)
+// ends the wait with an error main.go treats as an interrupt.
+func TestPluginTreeLockWait_AnnouncedAndCancellable(t *testing.T) { //nolint:paralleltest // mutates env
+	cases := []struct {
+		name string
+		run  func(ctx context.Context) error
+	}{
+		{"install from path", func(ctx context.Context) error {
+			_, err := InstallPluginFromPath(ctx, InstallPluginOptions{SourcePath: writePluginSource(t, "new")})
+			return err
+		}},
+		{"remove", func(ctx context.Context) error { return RemoveManagedPlugin(ctx, "foo") }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) { //nolint:paralleltest // mutates env
+			withPluginDir(t)
+			release, err := lockPluginTree(context.Background(), true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer release()
+
+			var progress bytes.Buffer
+			ctx, cancel := context.WithCancel(withPluginProgress(context.Background(), &progress))
+			done := make(chan error, 1)
+			go func() { done <- tc.run(ctx) }()
+			time.Sleep(150 * time.Millisecond)
+			cancel()
+			select {
+			case err := <-done:
+				if !errors.Is(err, context.Canceled) {
+					t.Errorf("%s while the tree lock is held, then cancelled = %v, want context.Canceled", tc.name, err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatalf("%s ignored the cancelled ctx while waiting for the tree lock", tc.name)
+			}
+			if n := strings.Count(progress.String(), pluginTreeWaitNotice); n != 1 {
+				t.Errorf("wait notice written %d times, want once; progress = %q", n, progress.String())
+			}
+		})
+	}
+}
+
+// Taking a free tree lock says nothing.
+func TestPluginTreeLock_UncontendedIsSilent(t *testing.T) { //nolint:paralleltest // mutates env
+	withPluginDir(t)
+	var progress bytes.Buffer
+	if _, err := InstallPluginFromPath(withPluginProgress(context.Background(), &progress), InstallPluginOptions{SourcePath: writePluginSource(t, "new")}); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if progress.Len() != 0 {
+		t.Errorf("uncontended install wrote progress %q, want nothing", progress.String())
+	}
 }
