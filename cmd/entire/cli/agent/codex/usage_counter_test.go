@@ -48,3 +48,42 @@ func TestUsageCounter_InventoriedChild(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 4, grown.Children["child"].OutputTokens)
 }
+
+// A reading saves the child totals it read, so the next reading of an
+// unchanged inventory reuses them instead of reading every child rollout
+// again: a child rewritten with the same size and modification time still
+// reports the saved total.
+func TestUsageCounter_UnchangedChildReusesSavedTotal(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	ag := &CodexAgent{RolloutRoots: []string{root}}
+	childEvents := func(input int) []json.RawMessage {
+		return []json.RawMessage{
+			taskEvent("task_started", stringPointer("child-turn")),
+			taskEvent("task_complete", stringPointer("child-turn")),
+			tokenCountEvent(map[string]any{"total_token_usage": map[string]any{"input_tokens": input, "cached_input_tokens": 2, "output_tokens": 1}}),
+		}
+	}
+	child := writeRollout(t, root, "rollout-child.jsonl", "child", childEvents(5))
+	parent := filepath.Join(root, "rollout-parent.jsonl")
+	require.NoError(t, os.WriteFile(parent, rolloutData(t, "parent", []json.RawMessage{
+		tokenCountEvent(map[string]any{"total_token_usage": map[string]any{"input_tokens": 100, "cached_input_tokens": 0, "output_tokens": 10}}),
+	}), 0o600))
+	in := agent.CumulativeTokenInput{TranscriptPath: parent, Subagents: []agent.SubagentReference{{AgentID: "child", DeclaredTranscriptPath: child}}}
+
+	first, _, err := agent.ReadCumulativeUsage(t.Context(), ag, in, nil)
+	require.NoError(t, err)
+	require.Equal(t, 3, first.Children["child"].InputTokens)
+
+	info, err := os.Stat(child)
+	require.NoError(t, err)
+	writeRollout(t, root, "rollout-child.jsonl", "child", childEvents(6))
+	require.NoError(t, os.Chtimes(child, info.ModTime(), info.ModTime()))
+	again, err := os.Stat(child)
+	require.NoError(t, err)
+	require.Equal(t, info.Size(), again.Size(), "the rewrite keeps the child's size")
+
+	second, _, err := agent.ReadCumulativeUsage(t.Context(), ag, in, first.Cursor)
+	require.NoError(t, err)
+	require.Equal(t, 3, second.Children["child"].InputTokens, "an unchanged inventory reuses the saved child total")
+}
