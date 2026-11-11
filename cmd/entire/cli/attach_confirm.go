@@ -91,7 +91,7 @@ func attachRewriteChain(ctx context.Context, repo *git.Repository, target, head 
 	}
 	for _, c := range chain {
 		if !replayable(c) {
-			return nil, fmt.Errorf("commit %s has a non-UTF-8 encoding or extra headers that attach can't carry over when it rewrites it; push %s first, or add the trailer yourself", c.Hash.String()[:12], target.Hash.String()[:12])
+			return nil, fmt.Errorf("commit %s has a non-UTF-8 encoding or extra headers that attach can't carry over when it rewrites it; add the trailer yourself, or rerun with --%s to record a link to %s instead", c.Hash.String()[:12], linkWithoutTrailerFlag, target.Hash.String()[:12])
 		}
 	}
 	return chain, nil
@@ -104,7 +104,7 @@ func commitsFromTargetToHead(ctx context.Context, repo *git.Repository, target, 
 		return []*object.Commit{target}, nil
 	}
 	if exec.CommandContext(ctx, "git", "merge-base", "--is-ancestor", target.Hash.String(), head.Hash.String()).Run() != nil {
-		return nil, fmt.Errorf("commit %s is not pushed and is not on the current branch, so attach can't add a trailer to it; check out a branch that contains it, or push it first", target.Hash.String()[:12])
+		return nil, fmt.Errorf("commit %s is not on the current branch, so attach can't add a trailer to it; check out a branch that contains it, or rerun with --%s to record a link to it instead", target.Hash.String()[:12], linkWithoutTrailerFlag)
 	}
 	out, err := exec.CommandContext(ctx, "git", "rev-list", "--reverse", "--parents", target.Hash.String()+".."+head.Hash.String()).Output()
 	if err != nil {
@@ -117,7 +117,7 @@ func commitsFromTargetToHead(ctx context.Context, repo *git.Repository, target, 
 			continue
 		}
 		if len(fields) != 2 {
-			return nil, fmt.Errorf("commit %s after %s is a merge, so attach can't rewrite the commits after it; push %s first, or attach while it is HEAD", fields[0][:12], target.Hash.String()[:12], target.Hash.String()[:12])
+			return nil, fmt.Errorf("commit %s after %s is a merge, so attach can't rewrite the commits after it; attach while %s is HEAD, or rerun with --%s to record a link to it instead", fields[0][:12], target.Hash.String()[:12], target.Hash.String()[:12], linkWithoutTrailerFlag)
 		}
 		c, err := repo.CommitObject(plumbing.NewHash(fields[0]))
 		if err != nil {

@@ -940,9 +940,15 @@ chooses a recorded link for the user.
 - a commit any other remote branch holds (a teammate's branch this one was
   built on, a release branch) is shared and never rewritten: attach refuses,
   changes nothing, and names the branches and `--link-without-trailer`
-  (`otherBranchesHolding`, `sharedBranchRefusal`). A commit a remote holds on
-  a branch no tracking ref names (outside the fetch refspec) is refused too,
-  since attach can't tell whose branch it is;
+  (`checkPushedCopies`, `sharedBranchRefusal`). The remotes the branch pushes
+  to are asked directly with `ls-remote`, so a branch outside a narrowed
+  fetch refspec still counts; other remotes count through their tracking
+  refs. A remote that can't answer refuses the rewrite;
+- a commit whose branch's own remote copy has commits HEAD lacks (pushed from
+  another clone, or by a teammate on the same branch) is not rewritten either
+  (`ownCopyAheadRefusal`): the force-push would drop them, and
+  `--force-with-lease` wouldn't stop it, since attach's own fetch updated the
+  lease. The user pulls first;
 - a commit on a remote's default branch is never rewritten: attach refuses,
   changes nothing, and names `--link-without-trailer` with its caveats
   (`defaultBranchRefusal`). "On a default branch" means reachable from the tip

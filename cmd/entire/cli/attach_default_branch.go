@@ -52,6 +52,21 @@ func sharedBranchRefusal(target *object.Commit, others []string) error {
 	return errors.New(strings.Join(append(lines, recordedLinkCaveats()...), "\n"))
 }
 
+// ownCopyAheadRefusal is the error when the branch's own pushed copy has
+// commits HEAD lacks: the force-push after the rewrite would drop them, and a
+// lease taken after attach's fetch wouldn't stop it.
+func ownCopyAheadRefusal(target *object.Commit, ahead []string) error {
+	return fmt.Errorf("%s has commits this branch doesn't (pushed from another clone, or by someone else), and the force-push after rewriting commit %s would drop them, so it won't be rewritten; nothing was changed. Pull them first, then run attach again",
+		strings.Join(ahead, ", "), target.Hash.String()[:12])
+}
+
+// pushedCopiesUnknownRefusal is the error when attach can't tell which remote
+// branches hold a pushed commit: rewriting might rewrite a shared one.
+func pushedCopiesUnknownRefusal(target *object.Commit, cause error) error {
+	return fmt.Errorf("commit %s is pushed, and attach couldn't tell which remote branches hold it (%w), so it won't be rewritten; nothing was changed. Retry once the remote can be reached, or rerun with --%s to record a link to it instead of a trailer",
+		target.Hash.String()[:12], cause, linkWithoutTrailerFlag)
+}
+
 // defaultBranchUnknownRefusal is the error when attach can't tell whether a
 // pushed commit is on a default branch: rewriting it might rewrite one.
 func defaultBranchUnknownRefusal(target *object.Commit, cause error) error {
@@ -99,46 +114,81 @@ func defaultBranchContaining(ctx context.Context, target *object.Commit, checked
 	return "", nil
 }
 
-// otherBranchesHolding lists the remote branches holding target other than the
-// current branch's own pushed copies: its upstream, its push branch, and a
-// branch of the same name on a remote it pushes to (checked). A commit only
-// those hold is this branch's to rewrite; any other branch holding it is
-// shared. It is an error when no remote branch is known to hold target, since
-// a remote that holds it then does so on a branch attach can't name.
-func otherBranchesHolding(ctx context.Context, target *object.Commit, checked []string) ([]string, error) {
-	holding := remoteBranchesContaining(ctx, target)
-	if len(holding) == 0 {
-		return nil, fmt.Errorf("commit %s is pushed, but attach couldn't tell which remote branches hold it, so it won't be rewritten; nothing was changed. Rerun with --%s to record a link to it instead of a trailer",
-			target.Hash.String()[:12], linkWithoutTrailerFlag)
-	}
-	own := currentBranchPushedCopies(ctx, checked)
-	var others []string
-	for _, branch := range holding {
-		if !slices.Contains(own, branch) {
-			others = append(others, branch)
-		}
-	}
-	return others, nil
+// pushedCopies is what rewriting a pushed commit would collide with.
+type pushedCopies struct {
+	// others are the remote branches holding target besides the current
+	// branch's own copies: rewriting would leave theirs without the trailer.
+	others []string
+	// ahead are the current branch's own copies holding commits HEAD lacks:
+	// the force-push after the rewrite would drop them.
+	ahead []string
 }
 
-// currentBranchPushedCopies names the current branch's own copies on its
-// remotes as "<remote>/<branch>": its upstream and push branch, and the same
-// name on each of checked. None for a detached HEAD.
-func currentBranchPushedCopies(ctx context.Context, checked []string) []string {
-	ref, err := exec.CommandContext(ctx, "git", "symbolic-ref", "-q", "HEAD").Output()
-	if err != nil {
-		return nil
-	}
-	fullName := strings.TrimSpace(string(ref))
-	var own []string
-	if out, err := exec.CommandContext(ctx, "git", "for-each-ref", "--format=%(upstream:short)%0a%(push:short)", "--", fullName).Output(); err == nil {
-		own = strings.Fields(string(out))
-	}
-	name := strings.TrimPrefix(fullName, "refs/heads/")
+// checkPushedCopies finds the remote branches a rewrite of target up to head
+// would collide with. The remotes the branch pushes to (checked) are asked
+// directly with ls-remote, since a narrowed fetch refspec or a stale or failed
+// fetch leaves their tracking refs incomplete, and the tips' objects are
+// fetched when they aren't local; a remote that can't answer is an error.
+// Other remotes (upstream in a fork) count through their tracking refs.
+func checkPushedCopies(ctx context.Context, target *object.Commit, head string, checked []string) (pushedCopies, error) {
+	var copies pushedCopies
+	own := readAttachBranch(ctx).ownCopies(checked)
 	for _, remote := range checked {
-		own = append(own, remote+"/"+name)
+		branches, tips, err := remoteBranchTips(ctx, remote)
+		if err != nil {
+			return copies, err
+		}
+		if err := fetchMissingTips(ctx, remote, branches, tips); err != nil {
+			return copies, err
+		}
+		var otherNames, otherTips []string
+		for i, ref := range branches {
+			name := remote + "/" + strings.TrimPrefix(ref, "refs/heads/")
+			if !slices.Contains(own, name) {
+				otherNames, otherTips = append(otherNames, name), append(otherTips, tips[i])
+				continue
+			}
+			if tips[i] != head && exec.CommandContext(ctx, "git", "merge-base", "--is-ancestor", tips[i], head).Run() != nil {
+				copies.ahead = append(copies.ahead, name)
+			}
+		}
+		holding, err := tipsHolding(ctx, target, otherNames, otherTips)
+		if err != nil {
+			return copies, fmt.Errorf("couldn't check %s's branches: %w", remote, err)
+		}
+		copies.others = append(copies.others, holding...)
 	}
-	return own
+	refs, err := remoteTrackingRefsContaining(ctx, target)
+	if err != nil {
+		return copies, err
+	}
+	all := attachRemotes(ctx)
+	for _, ref := range refs {
+		short := strings.TrimPrefix(ref, "refs/remotes/")
+		if !slices.Contains(checked, trackingRefRemote(ref, all)) && !strings.HasSuffix(short, "/"+remoteHEADRef) {
+			copies.others = append(copies.others, short)
+		}
+	}
+	return copies, nil
+}
+
+// tipsHolding returns the names whose tips contain target. One walk answers
+// whether any does; only then is each tip walked to name them.
+func tipsHolding(ctx context.Context, target *object.Commit, names, tips []string) ([]string, error) {
+	if on, err := reachableFromAny(ctx, target, tips); err != nil || !on {
+		return nil, err
+	}
+	var holding []string
+	for i, tip := range tips {
+		on, err := reachableFromAny(ctx, target, []string{tip})
+		if err != nil {
+			return nil, err
+		}
+		if on {
+			holding = append(holding, names[i])
+		}
+	}
+	return holding, nil
 }
 
 // onRemoteDefaultBranch reports whether remote's default branch contains
@@ -249,7 +299,7 @@ func remoteTrackingRefsContaining(ctx context.Context, target *object.Commit) ([
 // remoteBranchesContaining lists the remote-tracking branches that contain
 // target, short names without <remote>/HEAD, for the confirmation before
 // rewriting a pushed commit. A failed query lists none: it only words the
-// confirmation.
+// confirmation; checkPushedCopies is the guard.
 func remoteBranchesContaining(ctx context.Context, target *object.Commit) []string {
 	refs, err := remoteTrackingRefsContaining(ctx, target)
 	if err != nil {

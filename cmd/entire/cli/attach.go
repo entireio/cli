@@ -127,7 +127,8 @@ How the session is linked follows from the commit, the same for HEAD and
     'git push --force-with-lease' afterwards.
   - If the commit is on a remote's default branch, or any other branch holds
     it too (a teammate's branch, a release branch), attach won't rewrite it
-    and changes nothing. If a remote can't be reached to tell, attach refuses
+    and changes nothing. Nor will it while the branch's remote copy has
+    commits this one doesn't: pull them first. If a remote can't be reached to tell, attach refuses
     rather than risk rewriting a shared commit.
 
 --link-without-trailer records the commit's SHA in a new checkpoint instead,
@@ -653,15 +654,15 @@ func recheckBeforeRewrite(ctx context.Context, plan attachLinkPlan) error {
 		case branch != "":
 			return fmt.Errorf("commit %s reached %s while attach was waiting, so it won't be rewritten; nothing was changed, run attach again", target.Hash.String()[:12], branch)
 		}
-		// Another branch pushed meanwhile only shows in tracking refs
-		// refreshed now.
-		fetchRemotesForAttach(ctx, plan.checkedRemotes)
-		others, err := otherBranchesHolding(ctx, target, plan.checkedRemotes)
+		head := plan.rewrite[len(plan.rewrite)-1].Hash.String()
+		copies, err := checkPushedCopies(ctx, target, head, plan.checkedRemotes)
 		switch {
 		case err != nil:
-			return err
-		case len(others) > 0:
-			return fmt.Errorf("commit %s reached %s while attach was waiting, so it won't be rewritten; nothing was changed, run attach again", target.Hash.String()[:12], strings.Join(others, ", "))
+			return pushedCopiesUnknownRefusal(target, err)
+		case len(copies.others) > 0:
+			return fmt.Errorf("commit %s reached %s while attach was waiting, so it won't be rewritten; nothing was changed, run attach again", target.Hash.String()[:12], strings.Join(copies.others, ", "))
+		case len(copies.ahead) > 0:
+			return fmt.Errorf("%s got commits this branch doesn't have while attach was waiting, so commit %s won't be rewritten; nothing was changed. Pull them first, then run attach again", strings.Join(copies.ahead, ", "), target.Hash.String()[:12])
 		}
 		return nil
 	}
@@ -832,12 +833,14 @@ func planPushedCommitLink(ctx context.Context, repo *git.Repository, target, hea
 	if branch != "" {
 		return attachLinkPlan{}, defaultBranchRefusal(target, branch)
 	}
-	others, err := otherBranchesHolding(ctx, target, plan.checkedRemotes)
-	if err != nil {
-		return attachLinkPlan{}, err
-	}
-	if len(others) > 0 {
-		return attachLinkPlan{}, sharedBranchRefusal(target, others)
+	copies, err := checkPushedCopies(ctx, target, headCommit.Hash.String(), plan.checkedRemotes)
+	switch {
+	case err != nil:
+		return attachLinkPlan{}, pushedCopiesUnknownRefusal(target, err)
+	case len(copies.others) > 0:
+		return attachLinkPlan{}, sharedBranchRefusal(target, copies.others)
+	case len(copies.ahead) > 0:
+		return attachLinkPlan{}, ownCopyAheadRefusal(target, copies.ahead)
 	}
 	chain, err := attachRewriteChain(ctx, repo, target, headCommit)
 	if err != nil {
@@ -905,21 +908,68 @@ func attachRemotes(ctx context.Context) []string {
 	return strings.Fields(string(out))
 }
 
+// attachBranch is the current branch and where it pushes, read once with
+// for-each-ref, so remote selection and the rewrite guard agree on it.
+type attachBranch struct {
+	// name is the branch's short name, "" for a detached HEAD.
+	name string
+	// upstreamRemote and pushRemote are the remotes git resolves for
+	// %(upstream:remotename) and %(push:remotename) (pushRemote, pushDefault,
+	// then the upstream's).
+	upstreamRemote, pushRemote string
+	// upstream and push are those branches as "<remote>/<branch>".
+	upstream, push string
+}
+
+// readAttachBranch reads the current branch; a detached HEAD or a failed
+// read gives the zero value.
+func readAttachBranch(ctx context.Context) attachBranch {
+	ref, err := exec.CommandContext(ctx, "git", "symbolic-ref", "-q", "HEAD").Output()
+	if err != nil {
+		return attachBranch{}
+	}
+	fullName := strings.TrimSpace(string(ref))
+	b := attachBranch{name: strings.TrimPrefix(fullName, "refs/heads/")}
+	out, err := exec.CommandContext(ctx, "git", "for-each-ref", "--format=%(upstream:remotename)%0a%(push:remotename)%0a%(upstream:short)%0a%(push:short)", "--", fullName).Output()
+	if err != nil {
+		return b
+	}
+	fields := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	fields = append(fields, make([]string, 4)...)
+	b.upstreamRemote, b.pushRemote, b.upstream, b.push = fields[0], fields[1], fields[2], fields[3]
+	return b
+}
+
+// ownCopies names the branch's own copies on its remotes as
+// "<remote>/<branch>": its upstream and push branch, and the same name on each
+// of checked. None for a detached HEAD.
+func (b attachBranch) ownCopies(checked []string) []string {
+	if b.name == "" {
+		return nil
+	}
+	var own []string
+	for _, name := range []string{b.upstream, b.push} {
+		if name != "" {
+			own = append(own, name)
+		}
+	}
+	for _, remote := range checked {
+		own = append(own, remote+"/"+b.name)
+	}
+	return own
+}
+
 // attachRemotesToCheck lists the remotes a commit on the current branch would
 // have been pushed to: the branch's upstream and push remotes, else origin, else
 // every remote (detached HEAD, or no origin). Unrelated remotes, like an old
 // fork's, are left alone, so one that is unreachable doesn't block attach.
 func attachRemotesToCheck(ctx context.Context) []string {
 	all := attachRemotes(ctx)
+	b := readAttachBranch(ctx)
 	var remotes []string
-	if branch, err := exec.CommandContext(ctx, "git", "symbolic-ref", "-q", "HEAD").Output(); err == nil {
-		out, err := exec.CommandContext(ctx, "git", "for-each-ref", "--format=%(upstream:remotename)%0a%(push:remotename)", "--", strings.TrimSpace(string(branch))).Output()
-		if err == nil {
-			for _, name := range strings.Fields(string(out)) {
-				if slices.Contains(all, name) && !slices.Contains(remotes, name) {
-					remotes = append(remotes, name)
-				}
-			}
+	for _, name := range []string{b.upstreamRemote, b.pushRemote} {
+		if slices.Contains(all, name) && !slices.Contains(remotes, name) {
+			remotes = append(remotes, name)
 		}
 	}
 	switch {
@@ -933,15 +983,11 @@ func attachRemotesToCheck(ctx context.Context) []string {
 }
 
 // attachPushRemote names the remote the current branch pushes to: its push
-// remote (which git resolves through pushRemote, pushDefault and the
-// upstream), else origin, else "" (detached HEAD, or no such remote).
+// remote, else origin, else "" (detached HEAD, or no such remote).
 func attachPushRemote(ctx context.Context) string {
 	all := attachRemotes(ctx)
-	if branch, err := exec.CommandContext(ctx, "git", "symbolic-ref", "-q", "HEAD").Output(); err == nil {
-		out, err := exec.CommandContext(ctx, "git", "for-each-ref", "--format=%(push:remotename)", "--", strings.TrimSpace(string(branch))).Output()
-		if name := strings.TrimSpace(string(out)); err == nil && slices.Contains(all, name) {
-			return name
-		}
+	if name := readAttachBranch(ctx).pushRemote; slices.Contains(all, name) {
+		return name
 	}
 	if slices.Contains(all, defaultMirrorRemote) {
 		return defaultMirrorRemote
@@ -985,19 +1031,9 @@ func remoteContainingCommit(ctx context.Context, target *object.Commit, remotes 
 		if slices.Contains(tips, sha) {
 			return remote, unreachable
 		}
-		if missing := branchesWithMissingTips(ctx, branches, tips); len(missing) > 0 {
-			// Fetch the branches by name (a source-only glob refspec is
-			// invalid), writing no ref, only to get their objects for the
-			// ancestry check: an empty --refmap stops git updating the
-			// remote-tracking refs the configured refspec maps them to.
-			fetchArgs := append([]string{"fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--refmap=", "--", remote}, missing...)
-			fetchCtx, cancel := context.WithTimeout(ctx, attachFetchTimeout)
-			err = attachGitCommand(fetchCtx, fetchArgs...).Run()
-			cancel()
-			if err != nil {
-				unreachable = append(unreachable, remote)
-				continue
-			}
+		if err := fetchMissingTips(ctx, remote, branches, tips); err != nil {
+			unreachable = append(unreachable, remote)
+			continue
 		}
 		reachable, err := reachableFromAny(ctx, target, untrackedTips(ctx, tips))
 		if err != nil {
@@ -1012,6 +1048,25 @@ func remoteContainingCommit(ctx context.Context, target *object.Commit, remotes 
 		}
 	}
 	return "", unreachable
+}
+
+// fetchMissingTips fetches the objects of remote's branches whose tips
+// aren't local. It fetches the branches by name (a source-only glob refspec is
+// invalid), writing no ref, only to get their objects for an ancestry check:
+// an empty --refmap stops git updating the remote-tracking refs the configured
+// refspec maps them to.
+func fetchMissingTips(ctx context.Context, remote string, branches, tips []string) error {
+	missing := branchesWithMissingTips(ctx, branches, tips)
+	if len(missing) == 0 {
+		return nil
+	}
+	fetchArgs := append([]string{"fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--refmap=", "--", remote}, missing...)
+	fetchCtx, cancel := context.WithTimeout(ctx, attachFetchTimeout)
+	defer cancel()
+	if err := attachGitCommand(fetchCtx, fetchArgs...).Run(); err != nil {
+		return fmt.Errorf("couldn't fetch %s's branches: %w", remote, err)
+	}
+	return nil
 }
 
 // untrackedTips drops the tips a local remote-tracking ref already points at:

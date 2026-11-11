@@ -1130,9 +1130,8 @@ func TestAttachCommit_RefusesToRewriteANonUTF8Commit(t *testing.T) {
 }
 
 // Finding 1: a remote's branch tip is checked directly, so a commit pushed to a
-// branch this clone's fetch refspec doesn't track still reads as pushed. Attach
-// can't name the branch holding it, so it can't tell whether it is this
-// branch's own copy, and refuses rather than rewrite a shared commit.
+// branch this clone's fetch refspec doesn't track still reads as pushed, and as
+// held by that branch: a shared commit, which attach refuses to rewrite.
 func TestAttachCommit_RefusesACommitPushedToAnUntrackedBranch(t *testing.T) {
 	setupAttachTestRepo(t)
 	pushed := commitAt(t, "work.txt")
@@ -1144,11 +1143,55 @@ func TestAttachCommit_RefusesACommitPushedToAnUntrackedBranch(t *testing.T) {
 	testutil.RunGit(t, dir, "push", "-q", remote, "HEAD:refs/heads/someone-elses-branch")
 
 	out, err := attachHeadless(t, "attach-untracked-branch", attachOptions{})
-	if err == nil || !strings.Contains(err.Error(), "couldn't tell which remote branches hold it") || !strings.Contains(err.Error(), "--link-without-trailer") {
-		t.Fatalf("err = %v, want a refusal naming the flag\n%s", err, out)
+	if err == nil || !strings.Contains(err.Error(), "is also on origin/someone-elses-branch") || !strings.Contains(err.Error(), "--link-without-trailer") {
+		t.Fatalf("err = %v, want a refusal naming the untracked branch and the flag\n%s", err, out)
 	}
 	if got := headCommitOf(t); got.Hash != pushed.Hash {
-		t.Fatalf("a commit on a branch attach can't name was rewritten: %s", got.Hash)
+		t.Fatalf("a commit on another branch was rewritten: %s", got.Hash)
+	}
+}
+
+// A clone that tracks only its own branch (single-branch, or a narrowed
+// refspec) has no tracking ref for a teammate's branch built on the commit.
+// The remote is asked directly, so the teammate's branch still blocks the
+// rewrite.
+func TestAttachCommit_NarrowRefspecStillSeesAnotherBranch(t *testing.T) {
+	setupAttachTestRepo(t)
+	pushed, remote := pushFeatureBranch(t)
+	dir := mustGetwd(t)
+	testutil.RunGit(t, dir, "config", "remote.origin.fetch", "+refs/heads/feature:refs/remotes/origin/feature")
+	pushFromAnotherClone(t, remote, pushed.Hash.String()+":refs/heads/teammate")
+
+	out, err := attachHeadless(t, "attach-narrow-refspec", attachOptions{})
+	if err == nil || !strings.Contains(err.Error(), "is also on origin/teammate") {
+		t.Fatalf("err = %v, want a refusal naming the teammate's branch\n%s", err, out)
+	}
+	if got := headCommitOf(t); got.Hash != pushed.Hash {
+		t.Fatalf("a shared commit was rewritten: %s", got.Hash)
+	}
+}
+
+// The branch's own remote copy can be ahead of HEAD: pushed from another clone,
+// or by a teammate on the same branch. Rewriting and force-pushing would drop
+// those commits (the lease matches, since attach just fetched), so attach
+// refuses and says to pull first.
+func TestAttachCommit_OwnCopyAheadOfHeadIsNotRewritten(t *testing.T) {
+	setupAttachTestRepo(t)
+	pushed, remote := pushFeatureBranch(t)
+	dir := mustGetwd(t)
+	later := commitAt(t, "later.txt")
+	testutil.RunGit(t, dir, "push", "-q", "origin", "feature")
+	testutil.RunGit(t, dir, "reset", "-q", "--hard", pushed.Hash.String())
+
+	out, err := attachHeadless(t, "attach-own-copy-ahead", attachOptions{})
+	if err == nil || !strings.Contains(err.Error(), "origin/feature has commits this branch doesn't") || !strings.Contains(err.Error(), "Pull them first") {
+		t.Fatalf("err = %v, want a refusal because origin/feature is ahead\n%s", err, out)
+	}
+	if got := headCommitOf(t); got.Hash != pushed.Hash {
+		t.Fatalf("HEAD was rewritten under a remote copy that is ahead: %s", got.Hash)
+	}
+	if got := strings.TrimSpace(testutil.RunGit(t, remote, "rev-parse", "refs/heads/feature")); got != later.Hash.String() {
+		t.Errorf("the remote's feature branch moved to %s", got)
 	}
 }
 
