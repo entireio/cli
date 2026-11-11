@@ -182,6 +182,12 @@ https://entire.com/gh/entirehq/-/trails/23479. A core without it ignores the
 field and assigns the default cell, so `project create` prints the cell the
 server chose.
 
+The legacy Buildkite routes are spliced *out* the same way. Core no longer
+serves them (entiredb#4868, #4982). The splice removes the seven
+`/orgs/{orgId}/ci/buildkite/...` operations and
+`POST /repos/{repoId}/ci-webhooks` (`createRepoCIWebhook`). It also removes the
+schemas that only those operations referenced. The CLI never called them.
+
 **Workaround:** none in `normalize.go` beyond the `ResyncMirrorOutputBody.status`
 enum loosening. entiredb#4961 is on main and in prod, so any refresh from a
 current core keeps the three schemas and the route.
