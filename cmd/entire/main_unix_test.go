@@ -110,9 +110,10 @@ func TestNohup_EntireSleepsThroughSIGHUP(t *testing.T) {
 // plugin's clean exit is entire's. The terminal delivers it to the whole
 // foreground process group, plugin included; forwarding entire's copy as well
 // would make one key press look like the second Ctrl-C a plugin treats as
-// force quit. The duplicate lands microseconds after the original, so where
-// the kernel or Go's signal handling merges the two (as on macOS) this cannot
-// see it; TestTerminalSentInterrupt_UnderATerminal guards the detection.
+// force quit. This test cannot reliably see that duplicate: it lands
+// microseconds after the original, and Go's os/signal keeps one pending bit
+// per signal, so this Go plugin usually counts the pair as one (seen on macOS
+// and Linux). TestTerminalSentInterrupt_UnderATerminal guards the detection.
 func TestTerminalCtrlC_ReachesPluginOnce(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
