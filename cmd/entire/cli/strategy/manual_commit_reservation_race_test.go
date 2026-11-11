@@ -390,13 +390,35 @@ func TestAwaitEarlierCondensations_ForTheCommitAnAmendReplaced(t *testing.T) {
 	dir := setupGitRepo(t)
 	t.Chdir(dir)
 	reserved, next := id.MustCheckpointID("a1b2c3d4e5f6"), id.MustCheckpointID("b1b2c3d4e5f6")
+	amend := amendOfTakenReservation(t, dir, reserved, next)
+
+	assertWaitsUntilCondensed(t, reservedSnapshot(t), amend, next)
+}
+
+// The amend's post-commit can run after HEAD has moved on, as when the next
+// commit lands first. It still finds the commit the amend replaced.
+func TestAwaitEarlierCondensations_ForAnAmendOnceHeadMovedOn(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	reserved, next := id.MustCheckpointID("a1b2c3d4e5f6"), id.MustCheckpointID("b1b2c3d4e5f6")
+	amend := amendOfTakenReservation(t, dir, reserved, next)
+	stageFile(t, dir, "later.txt")
+	testutil.RunGit(t, dir, "commit", "-q", "-m", "later") // through git, which logs it in HEAD's reflog
+
+	assertWaitsUntilCondensed(t, reservedSnapshot(t), amend, next)
+}
+
+// amendOfTakenReservation amends a commit carrying reserved, whose
+// post-commit has taken its stamp (takenReservation), with a message carrying
+// next, as `commit --amend -m` does.
+func amendOfTakenReservation(t *testing.T, dir string, reserved, next id.CheckpointID) *object.Commit {
+	t.Helper()
 	first := takenReservation(t, dir, reserved)
 	require.True(t, recordStampedTrailer(context.Background(), next))
 	testutil.RunGit(t, dir, "commit", "--amend", "-q", "-m", addCheckpointTrailer("amended\n", next))
 	amend := headCommit(t, dir)
 	require.Equal(t, first.ParentHashes, amend.ParentHashes, "the amend replaced the first commit")
-
-	assertWaitsUntilCondensed(t, reservedSnapshot(t), amend, next)
+	return amend
 }
 
 // It never waits for its own checkpoint, or for a post-commit that has

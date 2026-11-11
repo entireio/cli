@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/go-git/go-git/v6"
@@ -250,16 +251,22 @@ func awaitEarlierCondensations(ctx context.Context, sessions []*SessionState, co
 // commit it replaced or one before that (carriedByReplaced).
 func carriedByEarlierCommit(ctx context.Context, root *os.Root, commit *object.Commit, reserved id.CheckpointID) bool {
 	entry, ok := stampedSessionsEntry(readStampedSessionsIn(root), reserved)
-	return ok && (carriedBefore(ctx, commit, entry.Head, reserved) || carriedByReplaced(ctx, commit, entry.Head, reserved))
+	if !ok {
+		return false
+	}
+	if carriedBefore(ctx, commit, entry.Head, reserved) {
+		return true
+	}
+	return carriedByReplaced(ctx, commit, entry.Head, reserved)
 }
 
-// carriedByReplaced reports whether commit is an amend (commitReplaced) and
+// carriedByReplaced reports whether commit is an amend (amendReplaced) and
 // the commit it replaced, or one before that on its first parents made after
 // stampedOn, carries cpID (carriedSince). An amend does not descend from the
 // commit it replaces, so carriedBefore does not reach it. With no reflog to
 // tell, commit is not taken as an amend.
 func carriedByReplaced(ctx context.Context, commit *object.Commit, stampedOn string, cpID id.CheckpointID) bool {
-	replaced, _ := commitReplaced(ctx, commit)
+	replaced := amendReplaced(ctx, commit)
 	if replaced.IsZero() {
 		return false
 	}
@@ -269,6 +276,20 @@ func carriedByReplaced(ctx context.Context, commit *object.Commit, stampedOn str
 	}
 	defer repo.Close()
 	return carriedSince(repo, replaced, stampedOn, cpID)
+}
+
+// amendReplaced returns the commit that commit replaced, when HEAD's reflog
+// records making commit as a commit that is not a child of the one HEAD left
+// (an amend), or the zero hash. Unlike commitReplaced, it looks past entries
+// made since: the amend's post-commit can run after HEAD has moved on, as when
+// the next commit lands first.
+func amendReplaced(ctx context.Context, commit *object.Commit) plumbing.Hash {
+	for _, e := range headReflog(ctx) {
+		if e.newHash.Equal(commit.Hash) && strings.HasPrefix(e.msg, "commit") {
+			return e.replaced(commit)
+		}
+	}
+	return plumbing.ZeroHash
 }
 
 // condensingElsewhere reports whether sessionID's saved state still reserves

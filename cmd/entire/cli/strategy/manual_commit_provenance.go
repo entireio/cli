@@ -174,12 +174,18 @@ func commitReplaced(ctx context.Context, commit *object.Commit) (replaced plumbi
 		if e.oldHash.Equal(e.newHash) {
 			continue // HEAD did not move, as with another hook's `git reset HEAD`
 		}
-		if !e.newHash.Equal(commit.Hash) || e.oldHash.IsZero() || slices.ContainsFunc(commit.ParentHashes, e.oldHash.Equal) {
-			return plumbing.ZeroHash, true
-		}
-		return e.oldHash, true
+		return e.replaced(commit), true
 	}
 	return plumbing.ZeroHash, false
+}
+
+// replaced returns the commit e replaced with commit, when e moved HEAD to
+// commit from another commit that is not one of its parents, or the zero hash.
+func (e reflogEntry) replaced(commit *object.Commit) plumbing.Hash {
+	if !e.newHash.Equal(commit.Hash) || e.oldHash.IsZero() || e.oldHash.Equal(commit.Hash) || slices.ContainsFunc(commit.ParentHashes, e.oldHash.Equal) {
+		return plumbing.ZeroHash
+	}
+	return e.oldHash
 }
 
 // commitLinksCheckpoint reports whether the commit at hash links checkpointID:
