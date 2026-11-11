@@ -1677,7 +1677,7 @@ func redactSingleJSONValue(content string, redactor leafRedactor) (result string
 	}
 	redactor.spliced(before, written)
 	if len(repls) > 0 {
-		result, err = ensureReplacementsLanded(content, result, repls, redactor, before)
+		result, err = ensureReplacementsLanded(parsed, content, result, repls, redactor, before)
 		if err != nil {
 			return "", true, err
 		}
@@ -1864,7 +1864,7 @@ func redactJSONLLines(lines []string, redactor leafRedactor) (string, error) {
 		}
 		redactor.spliced(before, written)
 		if len(repls) > 0 {
-			result, err = ensureReplacementsLanded(line, result, repls, redactor, before)
+			result, err = ensureReplacementsLanded(parsed, line, result, repls, redactor, before)
 			if err != nil {
 				return "", err
 			}
@@ -1979,6 +1979,7 @@ func applyJSONReplacements(s string, repls []jsonReplacement) (result string, wr
 		}
 		return 0
 	})
+	result = s
 	for _, r := range repls {
 		origJSON, err := jsonEncodeString(r.original)
 		if err != nil {
@@ -1990,13 +1991,13 @@ func applyJSONReplacements(s string, repls []jsonReplacement) (result string, wr
 		}
 		if r.key == "" && r.valuesOnly {
 			var replaced int
-			s, replaced = replaceJSONValues(s, origJSON, replJSON)
+			result, replaced = replaceJSONValues(result, origJSON, replJSON)
 			written += replaced * r.placeholders
 			continue
 		}
 		if r.key == "" {
-			written += strings.Count(s, origJSON) * r.placeholders
-			s = strings.ReplaceAll(s, origJSON, replJSON)
+			written += strings.Count(result, origJSON) * r.placeholders
+			result = strings.ReplaceAll(result, origJSON, replJSON)
 			continue
 		}
 		keyJSON, err := jsonEncodeString(r.key)
@@ -2004,10 +2005,10 @@ func applyJSONReplacements(s string, repls []jsonReplacement) (result string, wr
 			return "", 0, err
 		}
 		var replaced int
-		s, replaced = replaceKeyedJSONValue(s, keyJSON, origJSON, replJSON)
+		result, replaced = replaceKeyedJSONValue(result, keyJSON, origJSON, replJSON)
 		written += replaced * r.placeholders
 	}
-	return s, written, nil
+	return result, written, nil
 }
 
 // replaceJSONValues replaces every occurrence of origJSON, a JSON string,
@@ -2032,7 +2033,8 @@ func replaceJSONValues(s, origJSON, replJSON string) (string, int) {
 		for k < len(s) && isJSONWhitespace(s[k]) {
 			k++
 		}
-		if !isJSONValueStart(s, j) || k < len(s) && s[k] == ':' {
+		isObjectKey := k < len(s) && s[k] == ':'
+		if !isJSONValueStart(s, j) || isObjectKey {
 			// The search goes on inside the match, whose closing quote
 			// may open the next string.
 			from = j + 1
@@ -2471,14 +2473,72 @@ func tokenStreamHasDuplicateKeys(dec *json.Decoder) bool {
 // splice could not rewrite. Content that cannot be re-encoded fails the
 // redaction, so JSONLBytes refuses to certify rather than shipping the line.
 //
+// The splice is also given up when it would rewrite a leaf the walk skips.
+// A values-only replacement rewrites every value with its text, and an
+// argument vector's password can be a word as plain as an identifier's
+// ({"id":"type","command":["redis-cli","-a","type"]}), so parsed, the tree
+// the replacements were collected from, is checked for such a copy first.
+//
 // The re-encode redacts every leaf again, so the counts roll back to before,
 // taken ahead of the collection pass, and each value is counted once.
-func ensureReplacementsLanded(content, spliced string, repls []jsonReplacement, redactor leafRedactor, before tally) (string, error) {
-	if !spliceMissed(spliced, repls) {
+func ensureReplacementsLanded(parsed any, content, spliced string, repls []jsonReplacement, redactor leafRedactor, before tally) (string, error) {
+	if !spliceHitsSkippedLeaf(parsed, repls) && !spliceMissed(spliced, repls) {
 		return spliced, nil
 	}
 	redactor.rollback(before)
 	return reencodeRedacted(content, redactor)
+}
+
+// spliceHitsSkippedLeaf reports whether a values-only replacement's original
+// is also the text of a string value the walk leaves alone: one under an id,
+// path or signature key, or in an image object. The splice cannot tell that
+// copy from the redactable ones, so it would rewrite a value the structural
+// re-encode keeps. It counts the copies of each such original among the
+// redactable leaves and among all string values, and any difference is a
+// skipped copy.
+func spliceHitsSkippedLeaf(parsed any, repls []jsonReplacement) bool {
+	redactable := make(map[string]int)
+	for _, r := range repls {
+		if r.key == "" && r.valuesOnly {
+			redactable[r.original] = 0
+		}
+	}
+	if len(redactable) == 0 {
+		return false
+	}
+	walkRedactableStrings(parsed, func(_, _ string, _ bool, val string, _ argvElement) string {
+		if n, ok := redactable[val]; ok {
+			redactable[val] = n + 1
+		}
+		return val
+	})
+	all := make(map[string]int, len(redactable))
+	countStringValues(parsed, redactable, all)
+	for original, n := range redactable {
+		if all[original] > n {
+			return true
+		}
+	}
+	return false
+}
+
+// countStringValues adds to counts how many string values of v, every one
+// whatever its key, have each text in texts. Object keys are not values.
+func countStringValues(v any, texts map[string]int, counts map[string]int) {
+	switch val := v.(type) {
+	case map[string]any:
+		for _, child := range val {
+			countStringValues(child, texts, counts)
+		}
+	case []any:
+		for _, child := range val {
+			countStringValues(child, texts, counts)
+		}
+	case string:
+		if _, ok := texts[val]; ok {
+			counts[val]++
+		}
+	}
 }
 
 // spliceMissed reports whether any eligible string leaf of the spliced content

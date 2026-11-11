@@ -1,6 +1,7 @@
 package redact
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -59,6 +60,7 @@ func TestJSONLBytes_CommandLinePasswordsInArgvArrays(t *testing.T) {
 		// a double-quoted string would expand) is still one token.
 		{`{"command":["echo","machine","host","login","alice","password","it's $2026"]}`, `{"command":["echo","machine","host","login","alice","password","REDACTED"]}`},
 		{`{"command":["echo","machine","host","login","alice","password","it's \"2026\""]}`, `{"command":["echo","machine","host","login","alice","password","REDACTED"]}`},
+		{`{"command":["echo","machine","host","login","alice","password","\"it's 2026\""]}`, `{"command":["echo","machine","host","login","alice","password","REDACTED"]}`},
 		// A password that is also an object key leaves the key as it is, and
 		// one after an escaped quote inside another string leaves that
 		// string as it is.
@@ -80,6 +82,41 @@ func TestJSONLBytes_CommandLinePasswordsInArgvArrays(t *testing.T) {
 			content, err := JSONLContent(tc.in)
 			require.NoError(t, err)
 			require.Equal(t, tc.want, content)
+		})
+	}
+}
+
+// The walk leaves identifiers, paths and signatures as they are. A copy of
+// an argv password there keeps its text, though a values-only splice would
+// rewrite every value with that text, so such a line is rebuilt
+// structurally instead.
+func TestJSONLBytes_ArgvPasswordCopiesInSkippedFieldsStay(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in, key, secret string
+		want            any
+	}{
+		{`{"id":"type","command":["redis-cli","-a","type"]}`, "id", "type", "type"},
+		{`{"session_id":"type","command":["redis-cli","-a","type"]}`, "session_id", "type", "type"},
+		{`{"cwd":"/srv","command":["redis-cli","-a","/srv"]}`, "cwd", "/srv", "/srv"},
+		{`{"ids":["type"],"command":["redis-cli","-a","type"]}`, "ids", "type", []any{"type"}},
+		{`{"thinkingSignature":"-phunter2","command":["mysql","-phunter2"]}`, "thinkingSignature", "-phunter2", "-phunter2"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			t.Parallel()
+			got, err := JSONLBytes([]byte(tc.in + "\n"))
+			require.NoError(t, err)
+			content, err := JSONLContent(tc.in)
+			require.NoError(t, err)
+			require.Equal(t, content+"\n", string(got.Bytes()))
+			var obj map[string]any
+			require.NoError(t, json.Unmarshal([]byte(content), &obj))
+			require.Equal(t, tc.want, obj[tc.key])
+			command, ok := obj["command"].([]any)
+			require.True(t, ok)
+			require.NotContains(t, command, tc.secret)
+			require.Contains(t, content, "REDACTED")
 		})
 	}
 }

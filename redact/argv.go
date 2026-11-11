@@ -94,7 +94,8 @@ func compareTaggedRegions(a, b taggedRegion) int {
 		cmp.Compare(a.layer, b.layer), compareBools(a.builtinIP, b.builtinIP))
 }
 
-// compareBools orders false before true.
+// compareBools lets compareTaggedRegions order regions by every field, so
+// equal regions end up next to each other for slices.Compact.
 func compareBools(a, b bool) int {
 	switch {
 	case a == b:
@@ -186,7 +187,7 @@ func wordEnd(starts []int, n, k int) int {
 func argvRegion(pos []int, start, end int) (int, int) {
 	first := sort.SearchInts(pos, start)
 	last := sort.SearchInts(pos, end)
-	return first, max(first, last)
+	return first, last
 }
 
 // appendArgvWord appends arg to b as one shell word, and with positions also
@@ -300,7 +301,13 @@ func argvOptionPrefix(arg string) int {
 		return 0
 	}
 	j := 1
-	for j < len(arg) && (arg[j] == '-' || 'a' <= arg[j] && arg[j] <= 'z' || 'A' <= arg[j] && arg[j] <= 'Z' || '0' <= arg[j] && arg[j] <= '9') {
+	for j < len(arg) {
+		c := arg[j]
+		isLetter := 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z'
+		isDigit := '0' <= c && c <= '9'
+		if c != '-' && !isLetter && !isDigit {
+			break
+		}
 		j++
 	}
 	if j == 1 || strings.Trim(arg[:j], "-") == "" {
