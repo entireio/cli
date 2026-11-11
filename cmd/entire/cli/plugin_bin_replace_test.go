@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
@@ -533,7 +532,7 @@ func TestInstallPluginFromRepo_TreeLockWaitAnnouncedAndCancellable(t *testing.T)
 	}
 	defer release()
 
-	var progress safeBuffer
+	var progress syncBuffer
 	ctx, cancel := context.WithCancel(withPluginProgress(context.Background(), &progress))
 	defer cancel()
 	done := make(chan error, 1)
@@ -561,23 +560,4 @@ func TestInstallPluginFromRepo_TreeLockWaitAnnouncedAndCancellable(t *testing.T)
 	if i, j := strings.Index(out, "Installing entire-demo"), strings.Index(out, pluginTreeWaitNotice); i < 0 || i > j {
 		t.Errorf("want the Installing step before the wait notice; progress = %q", out)
 	}
-}
-
-// safeBuffer is a bytes.Buffer safe to write from one goroutine while
-// another reads it.
-type safeBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *safeBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *safeBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
 }
