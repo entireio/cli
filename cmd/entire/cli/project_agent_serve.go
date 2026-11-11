@@ -21,7 +21,10 @@ import (
 const agentJobsPath = "/api/v1/self-hosted-runner/jobs"
 const agentSubmitFail = "fail"
 
-var errAgentExecution = errors.New("agent execution failed")
+var (
+	errAgentExecution  = errors.New("agent execution failed")
+	errAgentClaimRetry = errors.New("claim temporarily unavailable")
+)
 
 type projectAgentJob struct {
 	RunID     string `json:"run_id"`
@@ -203,6 +206,10 @@ func (w *projectAgentWorker) serve(ctx context.Context, once bool, interval time
 			fmt.Fprintln(w.out, "Polling temporarily unavailable; retrying.")
 		case job != nil:
 			processed, err := w.run(ctx, *job)
+			if !once && errors.Is(err, errAgentClaimRetry) {
+				fmt.Fprintln(w.out, "Claim temporarily unavailable; retrying.")
+				break // Wait before polling again; do not skip an uncertain claim.
+			}
 			if err != nil && (once || !errors.Is(err, errAgentExecution)) {
 				return err
 			}
@@ -232,6 +239,9 @@ func (w *projectAgentWorker) run(ctx context.Context, job projectAgentJob) (bool
 	if err != nil {
 		if api.IsHTTPErrorStatus(err, http.StatusNotFound) || api.IsHTTPErrorStatus(err, http.StatusConflict) {
 			return false, nil
+		}
+		if retryProjectAgent(err) {
+			return false, fmt.Errorf("%w: %w", errAgentClaimRetry, err)
 		}
 		return false, err
 	}

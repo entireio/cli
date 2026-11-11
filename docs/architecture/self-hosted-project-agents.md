@@ -64,8 +64,11 @@ pages, filters by project and Claude, and claims by run ID. Claims refused with
 clear the skip list after processing a job or exhausting the scan, so a temporarily paused repository
 can become eligible again. The same claim is retried after uncertain responses. Previously
 claimed runs belonging to this account are recoverable from the server's job
-list. Transient requests receive bounded retries. Polling transient failures
-continue; an uncertain terminal submission stops with a retained payload.
+list. Transient requests receive bounded retries. Continuous workers wait for
+the poll interval and resume after transient polling or claim failures, without
+skipping an uncertain claim. `--once` returns the error after bounded retries.
+Authorization and invalid-claim errors stop the worker; an uncertain terminal
+submission also stops with a retained payload.
 
 Each run:
 
