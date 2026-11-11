@@ -82,10 +82,31 @@ func TestTokenLedger(t *testing.T) {
 		l.Observe(reading(usage(10, 1, 1), map[string]*agent.TokenUsage{"a": usage(50, 5, 2), "b": usage(7, 1, 1)}))
 		complete("total once counted", l.Total(), true)
 
-		// Counted once, it keeps its total when its file can no longer be read.
+		// Counted once, it keeps its total while its file can't be read, but
+		// it may have grown since, so the children are incomplete until a
+		// reading counts it or stops listing it (its file deleted).
 		l.Observe(reading(usage(10, 1, 1), map[string]*agent.TokenUsage{"a": usage(50, 5, 2), "b": nil}))
 		assertUsage(t, "total", l.Total(), withKids(usage(10, 1, 1), usage(57, 6, 3)))
+		complete("total while its file can't be read", l.Total(), false)
+		l.Observe(reading(usage(10, 1, 1), map[string]*agent.TokenUsage{"a": usage(50, 5, 2)}))
+		assertUsage(t, "total", l.Total(), withKids(usage(10, 1, 1), usage(57, 6, 3)))
 		complete("total after its file is gone", l.Total(), true)
+	})
+
+	t.Run("a checkpoint taken while a child was uncounted leaves the next delta incomplete", func(t *testing.T) {
+		t.Parallel()
+		var l TokenLedger
+		l.Observe(reading(usage(10, 1, 1), map[string]*agent.TokenUsage{"a": usage(50, 5, 2), "b": nil}))
+		l.MarkCheckpointed()
+		// b's total now includes what it used before that checkpoint.
+		l.Observe(reading(usage(20, 2, 2), map[string]*agent.TokenUsage{"a": usage(50, 5, 2), "b": usage(7, 1, 1)}))
+		assertSubagentsComplete(t, "total", l.Total(), true)
+		assertSubagentsComplete(t, "pending", l.Pending(), false)
+		assertSubagentsComplete(t, "cloned pending", l.Clone().Pending(), false)
+
+		l.MarkCheckpointed()
+		l.Observe(reading(usage(30, 3, 3), map[string]*agent.TokenUsage{"a": usage(60, 6, 3), "b": usage(7, 1, 1)}))
+		assertSubagentsComplete(t, "pending after a checkpoint that counted every child", l.Pending(), true)
 	})
 
 	t.Run("an uncounted only child marks main usage incomplete", func(t *testing.T) {
