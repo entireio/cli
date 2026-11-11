@@ -242,16 +242,7 @@ func TestGuestTurnEnd_UnmarkableWorktreeIsNotRecordedAsHome(t *testing.T) {
 
 	chdirWorktree(t, linkedDir)
 	testutil.WriteFile(t, linkedDir, "guest.go", "package guest")
-	require.NoError(t, s.SaveStep(t.Context(), StepContext{
-		SessionID:     "guest-unmarkable",
-		NewFiles:      []string{"guest.go"},
-		MetadataDir:   paths.SessionMetadataDirFromSessionID("guest-unmarkable"),
-		CommitMessage: "Checkpoint",
-		AuthorName:    "Test",
-		AuthorEmail:   "test@test.com",
-		AgentType:     agent.AgentTypeClaudeCode,
-		TokenUsage:    &agent.TokenUsage{InputTokens: 1000, APICallCount: 1},
-	}))
+	saveStepWithTokens(t, s, "guest-unmarkable", []string{"guest.go"}, 1000)
 
 	after := mustLoad(t, s, "guest-unmarkable")
 	assert.Equal(t, []string{"home.go"}, after.FilesTouched, "another worktree's file was recorded as the home's")
@@ -265,12 +256,14 @@ func TestGuestTurnEnd_UnmarkableWorktreeIsNotRecordedAsHome(t *testing.T) {
 	assert.Equal(t, 1000, after.CheckpointTokenUsage.InputTokens)
 }
 
-// A session homed in a linked worktree records the unregistered checkout
-// under the empty ID's key. That record is the checkout's alone: it doesn't
-// count in the main worktree (same key), and a step in the main worktree
-// neither replaces it nor merges into it.
-func TestGuestTurnEnd_EmptyIDEntryBelongsToOneCheckout(t *testing.T) {
-	const sid = "empty-id-entry"
+// A session homed in a linked worktree gets no record of a turn in an
+// unregistered checkout: git never lists the checkout, so pruning would drop
+// the record anyway, and the empty ID's one entry is the main worktree's. The
+// step is skipped like any step without an entry of its own, keeping its
+// tokens. A later step in the main worktree is recorded under the empty ID,
+// and that record doesn't count in the checkout.
+func TestGuestTurnEnd_UnregisteredCheckoutIsSkippedForLinkedHome(t *testing.T) {
+	const sid = "linked-home-checkout"
 	s := &ManualCommitStrategy{}
 	mainDir := setupGitRepo(t)
 	linkedDir := filepath.Join(t.TempDir(), "linked")
@@ -280,29 +273,32 @@ func TestGuestTurnEnd_EmptyIDEntryBelongsToOneCheckout(t *testing.T) {
 	chdirWorktree(t, linkedDir)
 	testutil.WriteFile(t, linkedDir, "linked.go", "package linked")
 	saveStepIn(t, s, sid, []string{"linked.go"}, nil)
+	before := mustLoad(t, s, sid)
 
 	chdirWorktree(t, checkout)
 	testutil.WriteFile(t, checkout, "a.go", "package a // in the checkout")
-	saveStepIn(t, s, sid, []string{"a.go"}, nil)
+	saveStepWithTokens(t, s, sid, []string{"a.go"}, 1000)
 
-	state := mustLoad(t, s, sid)
-	entry := state.OtherWorktrees[session.WorktreeKey("")]
-	require.NotNil(t, entry, "the checkout's step wasn't recorded for it")
-	assert.Equal(t, []string{"a.go"}, entry.FilesTouched)
-	assert.True(t, sameDir(entry.Path, checkout), "entry path = %s", entry.Path)
-	assert.True(t, hasWorktreeEntry(t.Context(), state, checkout))
-	assert.False(t, hasWorktreeEntry(t.Context(), state, mainDir), "the checkout's record counts in the main worktree")
+	after := mustLoad(t, s, sid)
+	assert.Empty(t, after.OtherWorktrees, "the checkout's step was recorded")
+	assert.Equal(t, []string{"linked.go"}, after.FilesTouched, "the checkout's file was recorded as the home's")
+	assert.Equal(t, before.StepCount, after.StepCount, "the skipped step was counted")
+	assert.Equal(t, before.BaseCommit, after.BaseCommit, "the base moved to the checkout's HEAD")
+	require.NotNil(t, after.TokenUsage, "the skipped step's tokens were dropped")
+	assert.Equal(t, 1000, after.TokenUsage.InputTokens, "the skipped step's tokens were dropped")
 
 	chdirWorktree(t, mainDir)
 	testutil.WriteFile(t, mainDir, "b.go", "package b // in the main worktree")
 	saveStepIn(t, s, sid, []string{"b.go"}, nil)
+	PruneRemovedWorktrees(t.Context(), sid, mainDir)
 
-	after := mustLoad(t, s, sid)
-	assert.Equal(t, []string{"linked.go"}, after.FilesTouched, "the home's record changed")
-	entry = after.OtherWorktrees[session.WorktreeKey("")]
-	require.NotNil(t, entry, "the main worktree's step replaced the checkout's record")
-	assert.Equal(t, []string{"a.go"}, entry.FilesTouched, "the main worktree's step merged into the checkout's record")
-	assert.True(t, sameDir(entry.Path, checkout), "entry path = %s", entry.Path)
+	state := mustLoad(t, s, sid)
+	entry := state.OtherWorktrees[session.WorktreeKey("")]
+	require.NotNil(t, entry, "the main worktree's step wasn't recorded for it")
+	assert.Equal(t, []string{"b.go"}, entry.FilesTouched)
+	assert.True(t, sameDir(entry.Path, mainDir), "entry path = %s", entry.Path)
+	assert.True(t, hasWorktreeEntry(t.Context(), state, mainDir))
+	assert.False(t, hasWorktreeEntry(t.Context(), state, checkout), "the main worktree's record counts in the checkout")
 }
 
 // A linked home moved between two steps of one turn, before turn start could
@@ -351,16 +347,7 @@ func TestGuestTurnEnd_VanishedEmptyIDHomeIsNotAdopted(t *testing.T) {
 	chdirWorktree(t, mainDir)
 	require.NoError(t, os.RemoveAll(checkout))
 	testutil.WriteFile(t, mainDir, "b.go", "package b // in the main worktree")
-	require.NoError(t, s.SaveStep(t.Context(), StepContext{
-		SessionID:     sid,
-		NewFiles:      []string{"b.go"},
-		MetadataDir:   paths.SessionMetadataDirFromSessionID(sid),
-		CommitMessage: "Checkpoint",
-		AuthorName:    "Test",
-		AuthorEmail:   "test@test.com",
-		AgentType:     agent.AgentTypeClaudeCode,
-		TokenUsage:    &agent.TokenUsage{InputTokens: 1000, APICallCount: 1},
-	}))
+	saveStepWithTokens(t, s, sid, []string{"b.go"}, 1000)
 
 	after := mustLoad(t, s, sid)
 	assert.Equal(t, []string{"a.go"}, after.FilesTouched, "the main worktree's file was recorded as the vanished home's")
@@ -369,6 +356,22 @@ func TestGuestTurnEnd_VanishedEmptyIDHomeIsNotAdopted(t *testing.T) {
 	assert.Equal(t, before.WorktreePath, after.WorktreePath)
 	require.NotNil(t, after.TokenUsage)
 	assert.Equal(t, 1000, after.TokenUsage.InputTokens)
+}
+
+// saveStepWithTokens runs a turn-end step in the current directory that
+// creates newFiles and reports inputTokens of usage.
+func saveStepWithTokens(t *testing.T, s *ManualCommitStrategy, sessionID string, newFiles []string, inputTokens int) {
+	t.Helper()
+	require.NoError(t, s.SaveStep(t.Context(), StepContext{
+		SessionID:     sessionID,
+		NewFiles:      newFiles,
+		MetadataDir:   paths.SessionMetadataDirFromSessionID(sessionID),
+		CommitMessage: "Checkpoint",
+		AuthorName:    "Test",
+		AuthorEmail:   "test@test.com",
+		AgentType:     agent.AgentTypeClaudeCode,
+		TokenUsage:    &agent.TokenUsage{InputTokens: inputTokens, APICallCount: 1},
+	}))
 }
 
 // unregisteredCheckoutOf materializes a checkout of mainDir's current branch on

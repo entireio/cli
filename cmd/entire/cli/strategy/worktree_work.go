@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"path/filepath"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -129,9 +130,10 @@ func homeMovedTo(ctx context.Context, state *SessionState, root string) bool {
 
 // enterStepWorktree is enterWorktreeView for a turn-end step recorded in
 // root, creating root's entry when the session has none yet, or only one
-// left from an earlier worktree git gave root's ID to. A session with
-// no recorded home is first homed in the hook's worktree, so a step elsewhere
-// can't make that worktree its home by default.
+// left from an earlier worktree git gave root's ID to. An unregistered
+// checkout gets no entry (its step is skipped, see recordUnhomedStepTokens).
+// A session with no recorded home is first homed in the hook's worktree, so a
+// step elsewhere can't make that worktree its home by default.
 func enterStepWorktree(ctx context.Context, state *SessionState, root string) (leave func(), ok bool) {
 	if state.WorktreePath == "" {
 		hookRoot, err := paths.WorktreeRoot(ctx)
@@ -149,6 +151,16 @@ func enterStepWorktree(ctx context.Context, state *SessionState, root string) (l
 	worktreeID, err := paths.GetWorktreeID(root)
 	if err != nil {
 		return nil, false
+	}
+	if worktreeID == "" {
+		// The main worktree and every unregistered checkout sharing the
+		// repository through commondir have the empty ID. Only the main
+		// worktree gets the entry under it: git never lists such a checkout,
+		// so pruning would drop its record in the same hook, and nothing could
+		// tell a checkout from a later one at the same path.
+		if metadata, metaErr := gitrepo.ResolveWorktreeMetadata(root); metaErr != nil || metadata.Unregistered {
+			return nil, false
+		}
 	}
 	key := session.WorktreeKey(worktreeID)
 	if state.OtherWorktrees == nil {
