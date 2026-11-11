@@ -153,9 +153,10 @@ type tally struct {
 
 // addRegions counts the non-empty regions found in one string, merged into
 // replaced placeholders. A layer that flags the same span more than once, as
-// when two of its rules match one value, counts it once. So does a PII match
-// inside an earlier one with the same label: a custom ip pattern that matches
-// the IPv4 tail of a built-in match (::ffff:10.0.0.1) finds one address.
+// when two of its rules match one value, counts it once. So does an IP match
+// inside an earlier IP match: a custom ip pattern that matches the IPv4 tail
+// of a built-in match (::ffff:10.0.0.1) finds one address, since
+// dropNestedIPRegions keeps both. Other labels count every match, as before.
 //
 // regions must be sorted by span, as redactRegions sorts them, so identical
 // spans are adjacent and a region follows those that contain it.
@@ -164,19 +165,18 @@ func (t *tally) addRegions(regions []taggedRegion, replaced int) {
 		return
 	}
 	t.replacements += replaced
-	var piiEnds map[string]int
+	ipEnd := -1
 	for i, r := range regions {
 		if layerFlaggedSpanBefore(regions, i) {
 			continue
 		}
 		if r.layer == layerPII {
-			if end, ok := piiEnds[r.label]; ok && r.end <= end {
-				continue
+			if r.label == labelIP {
+				if r.end <= ipEnd {
+					continue
+				}
+				ipEnd = r.end
 			}
-			if piiEnds == nil {
-				piiEnds = make(map[string]int)
-			}
-			piiEnds[r.label] = r.end
 			t.pii[piiBucket(r.label)]++
 		}
 		t.layers[r.layer]++
