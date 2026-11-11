@@ -444,7 +444,7 @@ func lockPluginTree(ctx context.Context, create bool) (func(), error) {
 	if err != nil {
 		return nil, err
 	}
-	release, err := acquirePluginLockFile(ctx, root, pluginTreeLockName)
+	release, err := acquirePluginLockFile(ctx, root, pluginTreeLockName, "Waiting for another plugin install to finish...")
 	if err != nil {
 		return nil, fmt.Errorf("lock plugin directory: %w", err)
 	}
@@ -463,10 +463,25 @@ func lockPlugin(ctx context.Context, name string, create bool) (func(), error) {
 	if err != nil {
 		return nil, err
 	}
+	if !create {
+		// Upgrade and remove need no lock for a plugin that is not there,
+		// and taking one would leave a lock file behind for a name that was
+		// never installed. A lock file outlives its plugin's removal, though:
+		// deleting one safely is racy against waiters (and impossible on
+		// Windows while anyone holds it open); it is empty and reused.
+		present, err := pluginPresent(root, name)
+		if err != nil {
+			return nil, err
+		}
+		if !present {
+			return nil, fmt.Errorf("plugin %q is not installed: %w", name, os.ErrNotExist)
+		}
+	}
 	if err := osroot.MkdirAllNoSymlink(root, pluginLocksDir, 0o750); err != nil {
 		return nil, fmt.Errorf("create plugin locks dir: %w", err)
 	}
-	release, err := acquirePluginLockFile(ctx, root, pluginLocksDir+"/"+name+".lock")
+	release, err := acquirePluginLockFile(ctx, root, pluginLocksDir+"/"+name+".lock",
+		fmt.Sprintf("Waiting for another install, upgrade or removal of plugin %q to finish...", name))
 	if err != nil {
 		return nil, fmt.Errorf("lock plugin %q: %w", name, err)
 	}
@@ -474,18 +489,18 @@ func lockPlugin(ctx context.Context, name string, create bool) (func(), error) {
 }
 
 // acquirePluginLockFile takes the lock file name inside root. A wait is
-// announced on ctx's plugin progress writer (withPluginProgress), so a user
-// stuck behind a stalled install sees why. The wait ends when ctx does —
+// announced, as waitNotice, on ctx's plugin progress writer
+// (withPluginProgress), so a user stuck behind a stalled install sees why. The wait ends when ctx does —
 // callers pass the command's context, so Ctrl-C stops it with an error
 // wrapping context.Canceled — and after pluginTreeLockWait at the latest.
 // (flock watches ctx only when it has a deadline; without one it makes a
 // blocking lock call, hence the ceiling doubles as the deadline.)
-func acquirePluginLockFile(ctx context.Context, root *os.Root, name string) (func(), error) {
+func acquirePluginLockFile(ctx context.Context, root *os.Root, name, waitNotice string) (func(), error) {
 	release, err := flock.TryAcquireIn(root, name)
 	if !errors.Is(err, flock.ErrLocked) {
 		return release, err //nolint:wrapcheck // callers name the lock
 	}
-	stop := startPluginStep(ctx, "Waiting for another plugin install to finish...")
+	stop := startPluginStep(ctx, waitNotice)
 	defer stop()
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
@@ -493,6 +508,25 @@ func acquirePluginLockFile(ctx context.Context, root *os.Root, name string) (fun
 		defer cancel()
 	}
 	return flock.AcquireContextIn(ctx, root, name) //nolint:wrapcheck // callers name the lock
+}
+
+// pluginPresent reports whether name has anything in the managed tree: a bin/
+// entry or a pkg/ directory.
+func pluginPresent(root *os.Root, name string) (bool, error) {
+	if p, err := FindInstalledPlugin(name); err != nil || p != nil {
+		return p != nil, err
+	}
+	pkgName, err := pluginPkgName(name)
+	if err != nil {
+		return false, err
+	}
+	if _, err := root.Lstat(pkgName); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("stat plugin pkg dir: %w", err)
+	}
+	return true, nil
 }
 
 // lockPluginIfNamed takes name's lock when name is a valid plugin name, and

@@ -4,11 +4,17 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+// pluginLockWaitNotice starts every lock-wait notice, the tree's and each
+// plugin's.
+const pluginLockWaitNotice = "Waiting for another "
 
 // waitNoticeWriter is a plugin progress writer that reports when the
 // lock-wait notice is written, so a test knows its goroutine is blocked on a
@@ -28,7 +34,7 @@ func (w *waitNoticeWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	n, err := w.buf.Write(p)
-	if strings.Contains(w.buf.String(), pluginTreeWaitNotice) {
+	if strings.Contains(w.buf.String(), pluginLockWaitNotice) {
 		w.once.Do(func() { close(w.seen) })
 	}
 	return n, err
@@ -201,7 +207,7 @@ func TestPluginLock_OtherPluginsDoNotWait(t *testing.T) { //nolint:paralleltest 
 	if _, err := InstallPluginFromPath(ctx, InstallPluginOptions{SourcePath: writePluginSource(t, "new")}); err != nil {
 		t.Fatalf("install foo while bar is locked: %v", err)
 	}
-	if strings.Contains(progress.String(), pluginTreeWaitNotice) {
+	if strings.Contains(progress.String(), pluginLockWaitNotice) {
 		t.Errorf("install of foo waited on bar's lock; progress = %q", progress.String())
 	}
 }
@@ -209,16 +215,22 @@ func TestPluginLock_OtherPluginsDoNotWait(t *testing.T) { //nolint:paralleltest 
 // Ctrl-C while waiting for a plugin's lock ends the wait promptly.
 func TestPluginLock_CancelStopsTheWait(t *testing.T) { //nolint:paralleltest // mutates env
 	withPluginDir(t)
-	holdPluginLock(t, "demo")
+	if _, err := InstallPluginFromPath(t.Context(), InstallPluginOptions{SourcePath: writePluginSource(t, "old")}); err != nil {
+		t.Fatal(err)
+	}
+	holdPluginLock(t, "foo")
 	w := newWaitNoticeWriter()
 	ctx, cancel := context.WithCancel(withPluginProgress(context.Background(), w))
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		_, err := UpgradeInstalledPlugin(ctx, "demo")
+		_, err := UpgradeInstalledPlugin(ctx, "foo")
 		done <- err
 	}()
 	w.awaitWaiting(t)
+	if got := w.String(); !strings.Contains(got, `plugin "foo"`) {
+		t.Errorf("wait notice %q does not name the plugin waited on", got)
+	}
 	cancel()
 	select {
 	case err := <-done:
@@ -227,5 +239,25 @@ func TestPluginLock_CancelStopsTheWait(t *testing.T) { //nolint:paralleltest // 
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("upgrade ignored the cancelled ctx while waiting for the plugin lock")
+	}
+}
+
+// Upgrading or removing a name that is not installed takes no lock, so it
+// leaves no lock file behind.
+func TestPluginLock_AbsentPluginLeavesNoLockFile(t *testing.T) { //nolint:paralleltest // mutates env
+	withPluginDir(t)
+	holdPluginLock(t, "other") // the plugin tree and its locks dir exist
+	if _, err := UpgradeInstalledPlugin(t.Context(), "ghost"); err == nil || !strings.Contains(err.Error(), "not installed") {
+		t.Errorf("upgrade ghost = %v, want not installed", err)
+	}
+	if err := RemoveManagedPlugin(t.Context(), "ghost"); err == nil {
+		t.Error("remove ghost succeeded, want not installed")
+	}
+	dir, err := pluginParentDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, pluginLocksDir, "ghost.lock")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("ghost.lock after upgrade/remove of an absent plugin: %v, want none", err)
 	}
 }
