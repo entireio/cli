@@ -16,7 +16,7 @@ import (
 func TestCheckGitHookState_FIFOBackupDoesNotHang(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	writeOldChain(t, dir, prePushHook, "#!/bin/sh\necho user hook\n")
+	writeOldChain(t, dir, "#!/bin/sh\necho user hook\n")
 	backup := filepath.Join(dir, prePushHook+backupSuffix)
 	if err := os.Remove(backup); err != nil {
 		t.Fatal(err)

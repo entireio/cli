@@ -605,20 +605,24 @@ func hookStateIn(root *os.Root, hook string) GitHookState {
 // execute the launcher as <hook>.pre-entire, which Trunk refuses with exit 2,
 // aborting the commit or push.
 //
-// The check is Trunk-specific and only reads the backup for hooks that chain.
-// InstallGitHook rewrites a hook that carries Entire's marker without a backup,
-// so an old-format chain that is not Trunk must not read Outdated, or lines the
-// user added would be discarded.
+// The check is Trunk-specific and only reads the backup for hooks that still
+// carry the old generated call. InstallGitHook rewrites a hook that carries
+// Entire's marker without a backup, so a chain that is not Trunk's, or one the
+// user changed by hand (say, to source the backup themselves), must not read
+// Outdated, or lines the user wrote would be discarded.
 func isTrunkChainBeforeSourcing(root *os.Root, hook, content string) bool {
-	backup := hook + backupSuffix
-	if !strings.Contains(content, "$_entire_hook_dir/"+backup) {
-		return false
-	}
-	// The sourcing branch greps for this exact quoted line.
-	if strings.Contains(content, shellQuote(trunkHookCallback)) {
+	if !strings.Contains(content, preSourcingBackupCall(hook+backupSuffix)) {
 		return false
 	}
 	return backupHasTrunkCallback(root, hook)
+}
+
+// preSourcingBackupCall is the branch chainCall wrote before it sourced
+// Trunk's launcher, exactly as generated: the elif that executes the backup
+// directly. Today's chain puts the grep for Trunk's callback between those two
+// lines, so it never matches.
+func preSourcingBackupCall(backup string) string {
+	return fmt.Sprintf("    elif [ -x \"$_entire_hook_dir/%[1]s\" ]; then\n        \"$_entire_hook_dir/%[1]s\" \"$@\"", backup)
 }
 
 // maxTrunkCallbackBackup is well above Trunk's launcher (about 1.5KiB) and
@@ -628,46 +632,18 @@ const maxTrunkCallbackBackup = 1 << 20
 
 // backupHasTrunkCallback reports whether <hook>.pre-entire contains
 // trunkHookCallback as a whole line, the same match the chain's grep -qxF
-// uses. A regular file in the hooks directory is read through the root,
-// no-follow. A symlink is followed only when its target is a regular file
-// no larger than maxTrunkCallbackBackup, which is how Trunk's shared
-// launcher (kept outside the hooks dir) is still recognized. A FIFO or
-// device is not read, so it cannot hang an agent-turn setup check.
+// uses. Only a regular file in the hooks directory is read, through the root
+// and no-follow. A symlinked backup is not followed, since git hooks are not a
+// symlink exception; that install keeps the old chain until entire enable
+// rewrites every hook. A FIFO or device is not read either, so it cannot hang
+// an agent-turn setup check.
 func backupHasTrunkCallback(root *os.Root, hook string) bool {
 	name := hook + backupSuffix
 	info, err := root.Lstat(name)
-	if err != nil {
-		return false
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return symlinkBackupHasTrunkCallback(root, name)
-	}
-	if !info.Mode().IsRegular() || info.Size() > maxTrunkCallbackBackup {
-		return false
-	}
-	f, err := osroot.OpenNoFollow(root, name)
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-	return fileHasTrunkCallback(f)
-}
-
-func symlinkBackupHasTrunkCallback(root *os.Root, name string) bool {
-	path := filepath.Join(root.Name(), name)
-	target, err := os.Readlink(path)
-	if err != nil {
-		return false
-	}
-	if !filepath.IsAbs(target) {
-		target = filepath.Join(root.Name(), target)
-	}
-	info, err := os.Stat(target)
 	if err != nil || !info.Mode().IsRegular() || info.Size() > maxTrunkCallbackBackup {
 		return false
 	}
-	//nolint:gosec // G304: target was just Stat'ed as a regular file reached from a hooks backup symlink.
-	f, err := os.Open(target)
+	f, err := osroot.OpenNoFollow(root, name)
 	if err != nil {
 		return false
 	}
