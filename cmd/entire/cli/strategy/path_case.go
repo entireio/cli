@@ -110,7 +110,8 @@ func trackedSpellingsOf(ctx context.Context, repoRoot string, index indexSpellin
 	return spelled
 }
 
-// entryCases is what TrackedSpellings asks of a worktreedir.CaseProbe.
+// entryCases is what TrackedSpellings asks of a worktreedir.CaseProbe, so
+// that a test can stand in for a directory that ignores case.
 type entryCases interface {
 	IgnoresCase(dir string) bool
 	SameEntry(file, spelling string) bool
