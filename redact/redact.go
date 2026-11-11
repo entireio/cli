@@ -827,27 +827,34 @@ func detectShellStdinSecrets(s string) []taggedRegion {
 	if !strings.ContainsRune(s, '|') || !containsFoldASCII(s, "printf") || !containsFoldASCII(s, "secret") {
 		return nil
 	}
-	return detectCredentialKeyCaptures(s, shellStdinSecretPattern, true, nil)
+	return detectCredentialKeyCaptures(s, shellStdinSecretPattern, true, nil, true)
 }
 
 func detectCredentialValues(s string) []taggedRegion {
+	return credentialValueRegions(s, true)
+}
+
+// credentialValueRegions is detectCredentialValues, where wholeWords also
+// reads each key/value match as its whole shell word (see forEachValueMatch).
+// Without it, each value is read only as the patterns captured it, which
+// tests compare against.
+func credentialValueRegions(s string, wholeWords bool) []taggedRegion {
 	// Authorization headers use ':', so they run before the '=' gate below.
 	regions := detectAuthorizationHeaders(s)
 	if !strings.ContainsRune(s, '=') {
 		return regions
 	}
-	forEachUncoveredMatch(s, credentialValuePattern, 2, func(loc []int, wholeWord bool) int {
-		// Main's shared placeholder rules, except that a single-quoted value
-		// is a shell literal and only the literal placeholder words apply.
+	forEachValueMatch(s, credentialValuePattern, 2, wholeWords, func(loc []int, wholeWord bool) int {
+		// The shared placeholder rules, except that a single-quoted value is
+		// a shell literal and only the literal placeholder words apply.
 		valueRegion := credentialValueRegion
 		if !wholeWord {
 			valueRegion = capturedValueRegion
 		}
 		value, isReal := valueRegion(s, loc[4], loc[5], true, isRealPasswordPiece)
-		if !isReal {
-			return 0
+		if isReal {
+			regions = append(regions, taggedRegion{region: value})
 		}
-		regions = append(regions, taggedRegion{region: value})
 		return value.end
 	})
 	if strings.Contains(s, "sig=") {
@@ -855,15 +862,19 @@ func detectCredentialValues(s string) []taggedRegion {
 			regions = append(regions, taggedRegion{region: region{loc[2], loc[3]}})
 		}
 	}
-	regions = append(regions, detectCredentialKeyCaptures(s, credentialAssignmentPattern, false, shouldPreserveCredentialCodeAssignment)...)
+	regions = append(regions, detectCredentialKeyCaptures(s, credentialAssignmentPattern, false, shouldPreserveCredentialCodeAssignment, wholeWords)...)
 	return regions
 }
 
+// detectCredentialKeyCaptures returns the regions to redact for the values
+// pattern captures under credential keys; wholeWords is as in
+// credentialValueRegions.
 func detectCredentialKeyCaptures(
 	s string,
 	pattern *regexp.Regexp,
 	genericPasswordContext bool,
 	shouldPreserve func(value, separator string) bool,
+	wholeWords bool,
 ) []taggedRegion {
 	valueGroup := pattern.SubexpIndex("value")
 	keyGroup := pattern.SubexpIndex("key")
@@ -890,36 +901,21 @@ func detectCredentialKeyCaptures(
 			return assignedValueCapture(s, key, keyEnd, valueStart, valueEnd, wholeWord, shouldPreserve)
 		}
 		// The whole shell word is the value ("None"x is not None).
-		end := valueEnd
-		_, wordEnd, joined := joinedShellWord(s, valueStart, valueEnd)
-		if joined = joined && wholeWord; joined {
+		end, wordEnd, joined := valueEnd, valueEnd, false
+		if wholeWord {
+			_, wordEnd, joined = joinedShellWord(s, valueStart, valueEnd)
+		}
+		if joined {
 			end = wordEnd
 		}
 		captured, ok := judge(end, wholeWord)
-		if joined && shouldPreserve != nil && readsPastJoinedWord(s, valueStart, valueEnd, wordEnd) {
-			// Main reads the value past its word, so what either reading
-			// redacts is redacted (see readsPastJoinedWord).
-			main, mainOK := judge(valueEnd, false)
-			captured.region, ok = eitherReading(captured.region, ok, main.region, mainOK)
-		}
 		if !ok {
-			return 0
+			return end
 		}
 		regions = append(regions, captured)
-		return captured.end
+		return max(end, captured.end)
 	}
-	forEachUncoveredMatch(s, pattern, valueGroup, visit)
-	if shouldPreserve == nil {
-		// Each shell-stdin literal is bounded by its own pipe and key, and a
-		// word redacted whole can run into the next command's printf
-		// (printf a"|... ; printf "x y"|...), where the search no longer
-		// starts. So each match is also read as main reads it, as captured.
-		// These literals are never extended past separators, so the reads
-		// stay linear.
-		for _, match := range pattern.FindAllStringSubmatchIndex(s, -1) {
-			visit(match, false)
-		}
-	}
+	forEachValueMatch(s, pattern, valueGroup, wholeWords, visit)
 	return regions
 }
 
@@ -947,617 +943,28 @@ func assignedValueCapture(s, key string, keyEnd, valueStart, valueEnd int, whole
 	return captured, ok
 }
 
-// forEachUncoveredMatch calls visit for each match of pattern in s, left to
-// right, that has a value capture (group valueGroup). visit returns where the
-// region it redacted ends, or 0 when it redacted nothing. wholeWord tells it
-// to read the value's whole shell word; otherwise the value is read as main
-// reads it, as the pattern captured it.
-//
-// A shell word redacted whole can hold more key=value text, as in
-// DB_PASSWORD=a" DB_PASSWORD=b", and reading a value from inside the word
-// would misread the rest of the line: a closing quote in the word would open
-// a new string and run into a later password. So each search starts where the
-// last match or redacted region ends, whichever is later, and finds what
-// FindAll would find from there (see nextMatch). A later assignment after the
-// word (b";DB_PASSWORD=hunter2) is still found, and as with FindAll no search
-// starts before the last one's match ended, so a line of such words
-// (DB_PASSWORD=a" "DB_PASSWORD=a" "...) takes linear time. The one exception
-// is a region that ends in a key whose value comes after it, as when a value
-// runs past a separator into db_password=foo,client_secret = "x": the next
-// search starts at that key, which is read once more, so its value is found.
-// That region is the one that ends last, which can be one of the regions
-// visitStraddlingValues adds. The key can also be the value this match
-// captured, as the second DB_PASSWORD in DB_PASSWORD = DB_PASSWORD = hunter2:
-// the search then starts again inside the match, at a key that begins after
-// the match's own key, so it moves on, and only the key is read again, since
-// its value comes after the region. A key that begins with '_' right where the
-// match ends is read as FindAll reads it, with the '_' as the byte before it,
-// so API_KEY="x"_PASSWORD=+hunter2 has the key PASSWORD, as on main. Any other
-// trailing key is read whole, and when its value stays visible and the key is
-// in text FindAll reads, also as FindAll reads it when it goes on at the key's
-// first byte, so API_KEY="x"x_PASSWORD=+hunter2 has the key PASSWORD as well
-// (see visitCursorMatch). When the key's value is not redacted, as for b in
-// DB_PASSWORD="a"b= API_KEY=hunter2, the search starts again where the region
-// ends, so that value can not hide an assignment after the region. FindAll
-// took that match, though, so a match found inside it whose value stays
-// visible and runs past it does not take the text after it: the search goes
-// on where that match ends, as FindAll does. In
-// API_KEY="x"=a=\b= API_KEY=hunter2, b= is not an assignment whose
-// value takes API_KEY=hunter2, while a match that ends inside it, as the
-// empty API_KEY="" in API_KEY="a"b= API_KEY=""|API_KEY=hunter2xyz, moves the
-// search on only to its own end. That holds only for a key that starts at or
-// after the end of the region's match, in text FindAll goes on to read, and
-// that FindAll can match there. A key inside the text that match took, as abc
-// in DB_PASSWORD=abc= DB_USER= DB_NAME= API_KEY=hunter2, is one FindAll never
-// reads, so its match sets no such end, and the search goes on from the
-// region's end, where it finds DB_USER= DB_NAME= and then API_KEY=hunter2, as
-// FindAll does. So is FOO in API_KEY="x"FOO= DB_USER= DB_NAME= API_KEY=hunter2,
-// read whole with the match's closing quote before it, which FindAll can not
-// take as the byte before a key (see endsRejectedMatch). Nor, when its
-// value is redacted, does it move where FindAll goes on: in API_KEY=API_KEY=
-// a= b= API_KEY=hunter2xyz, the second API_KEY takes a= as its value, but
-// FindAll's match a= b= still starts at the first match's end, so b= does not
-// take API_KEY=hunter2xyz.
-//
-// The only values read from inside a region are those visitStraddlingValues
-// finds, and they add to what the region already redacts. One that stays
-// visible, as a="+" in api_key="x""a="+"b=";client_secret="hunter2", was
-// still matched, so as with FindAll no match takes the last byte of its match
-// as the byte before a key: the closing quote there would make
-// ";client_secret=" the value of b and hide the client_secret. The same holds
-// for one whose value is redacted short of its match's end, as API_KEY="x'"
-// in API_KEY=""'API_KEY="x'"a= API_KEY=hunter2, whose value keeps its quotes:
-// its closing quote would make a= API_KEY=hunter2 an assignment. A match that
-// does take that byte is still read, and kept when its value is redacted,
-// which only redacts more than FindAll does, as API_KEY after the closing
-// quote of "a" in API_KEY="x""|api_key="a"API_KEY=hunter2xyz. This holds
-// only for a match FindAll finds, going on from the end of the match the
-// region was redacted for (see findAllChain). One that starts before that
-// end, inside the text that match took, as b='b' in
-// API_KEY='b='b'API_KEY=hunter2xyz, is one FindAll never finds, so the
-// second API_KEY is still read. So is one inside a match FindAll finds after
-// that end: in api_key="x""a=b="; note=" f=";client_secret="hunter2", FindAll
-// takes a=b=" whole, so b="; note=" sets no such end, and note=" f=" and then
-// client_secret are read as FindAll reads them. A later
-// match that starts inside such a match and whose value stays visible and
-// runs past it is cut back to its end, as for a rejected trailing key, so
-// FOO= in API_KEY="x""a=b"|FOO= API_KEY=hunter2, which a's value holds, does
-// not take API_KEY=hunter2.
-func forEachUncoveredMatch(s string, pattern *regexp.Regexp, valueGroup int, visit func(match []int, wholeWord bool) int) {
-	covered, atKey, unredactedEnd, rejectedEnd := 0, false, -1, -1
-	// trailing marks a search that starts again at a key that ends a
-	// redacted region.
-	trailing := false
-	// coveredMatchEnd is where the match that covered was redacted for ends,
-	// where FindAll goes on.
-	coveredMatchEnd := 0
-	// findAllKeyAt is where that trailing key starts, to read it as FindAll
-	// does too (see visitCursorMatch), or -1.
-	findAllKeyAt := -1
-	runs := valueRunEnd{start: -1, end: -1}
-	for from := 0; from < len(s); {
-		searchFrom := from
-		if atKey {
-			// The byte before the key is not a key byte; FindAll matches
-			// the key with it.
-			searchFrom--
+// forEachValueMatch calls visit for each match of pattern in s that has a
+// value capture (group valueGroup), as FindAll finds them, left to right.
+// visit returns where the value it read ends, redacted or not. Each match is
+// read as captured (wholeWord false), so a value is never redacted less than
+// the pattern alone redacts it. With wholeWords, it is also read as its whole
+// shell word (wholeWord true), unless its value starts inside a word read so
+// far. A value inside a word, as the second one in
+// DB_PASSWORD=a" DB_PASSWORD=b", is part of that word: read on as a word from
+// there, a closing quote of the outer word would open a new string. Each word
+// is read once, so the passes stay linear.
+func forEachValueMatch(s string, pattern *regexp.Regexp, valueGroup int, wholeWords bool, visit func(match []int, wholeWord bool) int) {
+	covered := 0
+	for _, match := range pattern.FindAllStringSubmatchIndex(s, -1) {
+		valueStart, _, ok := captureRange(match, valueGroup)
+		if !ok {
+			continue
 		}
-		match := cursorMatch(s, pattern, valueGroup, searchFrom, from, trailing, &runs)
-		keyAt := findAllKeyAt
-		trailing, findAllKeyAt = false, -1
-		if match == nil {
-			return
-		}
-		next := max(match[1], from+1)
-		atKey = false
-		// readByte marks a match whose key follows the last byte of a match
-		// that was read, which FindAll would not match the key with.
-		readByte := match[0] == unredactedEnd-1
-		if valueStart, _, ok := captureRange(match, valueGroup); ok {
-			if valueStart < covered {
-				next = afterCovered(readByte, covered, unredactedEnd)
-			} else if read, end := visitCursorMatch(s, pattern, valueGroup, visit, match, keyAt, &runs); end > 0 {
-				match = read
-				coveredMatchEnd = findAllGoesOn(from, coveredMatchEnd, match[1])
-				last, readEnd := visitStraddlingValues(s, pattern, valueGroup, visit, match, end, coveredMatchEnd, &runs)
-				covered, unredactedEnd = max(covered, last.end), max(unredactedEnd, readEnd)
-				if keyStart := assignedKeyStart(s, last.start, last.end); keyStart >= valueStart && last.end >= next {
-					// FindAll goes on at match[1], so it reads a '_' there as
-					// the byte before the key.
-					next, atKey, trailing = keyStart, keyStart != match[1] || s[keyStart] != '_', true
-					findAllKeyAt = keyFindAllReads(keyStart, coveredMatchEnd)
-				} else if keyStart < 0 {
-					next = max(next, last.end)
-				}
-			} else if match[0] < covered || readByte {
-				next = afterCovered(readByte, covered, unredactedEnd)
-				if !readByte && endsRejectedMatch(from, match[0], valueStart, covered, coveredMatchEnd) {
-					rejectedEnd = match[1]
-				}
-			} else {
-				next = endAtFindAllBoundary(match[0], next, from, rejectedEnd, unredactedEnd)
-			}
-		}
-		from = next
-	}
-}
-
-// afterCovered returns where the search goes on after a match it skips: one
-// whose value, or whose start, is inside the text the regions so far cover,
-// which ends at covered, or one whose value stays visible and whose key
-// follows the last byte of a match that was read. When the key follows that
-// byte, the search goes on at readEnd, where that match ends, as FindAll
-// would, and otherwise at covered.
-func afterCovered(readByte bool, covered, readEnd int) int {
-	if readByte {
-		return readEnd
-	}
-	return covered
-}
-
-// endsRejectedMatch reports whether a match that starts at matchStart, read
-// from from, whose value stays visible and starts at valueStart, after a
-// region that ends at regionEnd, ends the matches the search finds inside
-// it, as for one FindAll took, where FindAll goes on at findAllEnd. A match
-// read again inside the text FindAll's match took is not one of them. Nor is
-// a key read with the last byte of that match before it, which FindAll can
-// not take as the byte before a key, as FOO in
-// API_KEY="x"FOO= DB_USER= DB_NAME= API_KEY=hunter2: its end would cut
-// DB_USER= DB_NAME= short, and DB_NAME would then take API_KEY=hunter2 as its
-// value. Such a key whose value starts right where the region ends still
-// counts, as a in API_KEY="x"a=\b= API_KEY=hunter2, where the word ends at
-// the backslash and its value is \b=, so b= does not take API_KEY=hunter2
-// either. FOO's value starts only after the blank that ends the word, and in
-// the shell FOO has none.
-func endsRejectedMatch(from, matchStart, valueStart, regionEnd, findAllEnd int) bool {
-	return from >= findAllEnd && (matchStart >= findAllEnd || valueStart == regionEnd)
-}
-
-// visitCursorMatch calls visit for match and returns match and what visit
-// returned. When match reads the trailing key at findAllKeyAt whole and its
-// value stays visible, it also reads the key as FindAll does when FindAll goes
-// on at its first byte, after the next byte that can come before a key, and
-// returns that reading when its value is redacted. In
-// API_KEY="a"x_PASSWORD=+hunter2xyz, the word ends at the +, so the search
-// starts again at x_PASSWORD, which is not a credential key, but FindAll goes
-// on at the x and reads PASSWORD, which is. In
-// api_key="a"api_key="a"_api_key= hunter2xyz, FindAll's match _key="a" ends at
-// the last '_', so FindAll reads api_key, not _api_key. Both readings share
-// the value, so it is redacted when either key is a credential's. Where
-// FindAll goes on before the key, it reads the key whole, so the second
-// reading can only redact more than main does.
-func visitCursorMatch(s string, pattern *regexp.Regexp, valueGroup int, visit func(match []int, wholeWord bool) int, match []int, findAllKeyAt int, runs *valueRunEnd) ([]int, int) {
-	end := visit(match, true)
-	if end > 0 || findAllKeyAt < 0 {
-		return match, end
-	}
-	read := trailingKeyMatch(s, pattern, valueGroup, findAllKeyAt, findAllKeyAt, runs)
-	if read == nil || read[0] == match[0] || read[2*valueGroup] != match[2*valueGroup] {
-		return match, end
-	}
-	if readEnd := visit(read, true); readEnd > 0 {
-		return read, readEnd
-	}
-	return match, end
-}
-
-// keyFindAllReads returns keyStart, where a trailing key starts, when it is in
-// text FindAll reads, going on at findAllEnd, and -1 when it is inside the text
-// a match FindAll took, which FindAll never reads, as xDB_PASSWORD in
-// api_key=xDB_PASSWORD= x.
-func keyFindAllReads(keyStart, findAllEnd int) int {
-	if keyStart < findAllEnd {
-		return -1
-	}
-	return keyStart
-}
-
-// cursorMatch returns the match forEachUncoveredMatch reads from searchFrom:
-// for a search that starts again at the trailing key at from, the bounded
-// trailingKeyMatch, and otherwise nextMatch.
-func cursorMatch(s string, pattern *regexp.Regexp, valueGroup, searchFrom, from int, trailing bool, runs *valueRunEnd) []int {
-	if trailing {
-		return trailingKeyMatch(s, pattern, valueGroup, searchFrom, from, runs)
-	}
-	return nextMatch(s, pattern, searchFrom, len(s))
-}
-
-// findAllGoesOn returns where FindAll goes on after the match from a search
-// at from that ends at matchEnd, when it went on at findAllEnd before. A key
-// inside the text the last match took, read again because it ends a redacted
-// region, is one FindAll never reads, so FindAll still goes on at findAllEnd.
-func findAllGoesOn(from, findAllEnd, matchEnd int) int {
-	if from < findAllEnd {
-		return findAllEnd
-	}
-	return matchEnd
-}
-
-// endAtFindAllBoundary returns where the search goes on after a match from
-// start to next whose value stays visible: at the first of ends, the ends of
-// matches FindAll took, that the match starts before and runs past, as FindAll
-// goes on there, and otherwise at next. It moves on by at least a byte past
-// from.
-func endAtFindAllBoundary(start, next, from int, ends ...int) int {
-	for _, end := range ends {
-		if start < end && end < next {
-			next = max(end, from+1)
+		visit(match, false)
+		if wholeWords && valueStart >= covered {
+			covered = max(covered, visit(match, true))
 		}
 	}
-	return next
-}
-
-// nextMatch returns the first match of pattern in s[from:limit] that FindAll
-// would find after a match that ended at from, with its indexes on s. The
-// key/value patterns open with (?:^|[^A-Za-z0-9]): a key follows the start of
-// the text or a byte that is not a letter or digit, and that byte is part of
-// the match. Searching s[from:] would read ^ at from, so for from > 0 a key
-// could begin right there, where FindAll finds none because the byte before
-// from belongs to text already read: b in FOO="x"b= API_KEY=hunter2 would
-// take API_KEY=hunter2 as its value. So a search that would start at a letter,
-// digit or '_' starts instead just past the first byte from there on that can
-// come before a key, where ^ stands for that byte. The shell-stdin pattern opens
-// with \bprintf, which also needs a byte before it that is not a letter or
-// digit, so the same start finds what FindAll would, or more.
-func nextMatch(s string, pattern *regexp.Regexp, from, limit int) []int {
-	if from > 0 && from < limit && (isASCIIAlnum(s[from]) || s[from] == '_') {
-		for from < limit && isASCIIAlnum(s[from]) {
-			from++
-		}
-		if from >= limit {
-			return nil
-		}
-		from++
-	}
-	match := pattern.FindStringSubmatchIndex(s[from:limit])
-	if match != nil {
-		offsetMatch(match, from)
-	}
-	return match
-}
-
-// visitStraddlingValues calls visit for each value that starts inside the
-// region s[match's value start:end], which visit redacted for match, and runs
-// past it, does the same for the regions those values are redacted in, and
-// returns the region that ends last, which is the first unless one of theirs
-// ends past it. There are two kinds:
-//
-//   - A key's quoted value that opens inside the region and closes past it,
-//     as API_KEY in abc\" API_KEY="hunter2 x"tail, where the shell word ends
-//     at the blank. That reads the line as if the region's own quote there
-//     were escaped, so the value's shell word ("hunter2 x"tail) is redacted
-//     whole, as any other. Its opening quote is the last quote of its kind in
-//     the region, so a region has at most two, and the pattern is matched only
-//     over the key and its quoted string.
-//   - A bare value that FindAll, searching from the region's start or from
-//     where its match ends, as main does, reads past the region's end, as
-//     API_KEY in abc\" API_KEY=aaa\"|bbb, where the word ends at the pipe. It
-//     is read as main reads it, as captured: read on as a shell word from
-//     inside the region, its quotes could pair with the region's own.
-//
-// Two regions can share a value, so each is read once, and a value is searched
-// in turn only when its region ends past the one it was found in: one that
-// ends inside it adds nothing, and searching it would read a line such as
-// DB_PASSWORD=DB_PASSWORD=...hunter2, once for each key. runs finds where the
-// run of value bytes at a region's end ends (see valueRunEnd). It also returns
-// where the last match it read whose value stays visible, or is redacted short
-// of the match's end, ends, of those that FindAll finds going on at
-// findAllFrom, or -1, since FindAll would go on from there (see
-// forEachUncoveredMatch).
-func visitStraddlingValues(s string, pattern *regexp.Regexp, valueGroup int, visit func(match []int, wholeWord bool) int, match []int, end, findAllFrom int, runs *valueRunEnd) (region, int) {
-	type straddled struct {
-		r        region
-		matchEnd int
-	}
-	last, matchEnd := region{match[2*valueGroup], end}, match[1]
-	pending := []straddled{{last, matchEnd}}
-	read := map[[2]int]bool{}
-	unredactedEnd := -1
-	findAll := findAllChain{from: findAllFrom, starts: map[int]bool{}}
-	readValue := func(match []int, wholeWord bool, inside region) {
-		valueEnd := visit(match, wholeWord)
-		if valueEnd < match[1] && findAll.holds(s, pattern, valueGroup, match[2*valueGroup], runs) {
-			unredactedEnd = max(unredactedEnd, match[1])
-		}
-		if valueEnd <= 0 {
-			return
-		}
-		value := region{match[2*valueGroup], valueEnd}
-		if value.end > last.end {
-			last = value
-		}
-		if value.end > inside.end {
-			pending = append(pending, straddled{value, match[1]})
-		}
-	}
-	for len(pending) > 0 {
-		current := pending[len(pending)-1]
-		pending = pending[:len(pending)-1]
-		for _, quote := range []byte{'"', '\''} {
-			if match := quotedValuePast(s, pattern, valueGroup, current.r, quote); match != nil && !read[matchKey(match, valueGroup)] {
-				read[matchKey(match, valueGroup)] = true
-				readValue(match, true, current.r)
-			}
-		}
-		for _, match := range bareValuesPast(s, pattern, valueGroup, current.r, current.matchEnd, runs) {
-			if !read[matchKey(match, valueGroup)] {
-				read[matchKey(match, valueGroup)] = true
-				readValue(match, false, current.r)
-			}
-		}
-	}
-	return last, unredactedEnd
-}
-
-// matchKey identifies a match by where it starts and where its value does.
-// The searches from a region's start and from its match's end can read one
-// value under two keys, as _api_key and api_key in "x"_api_key=b=\hunter2xyz,
-// and the second, FindAll's, is read too when the first is not a credential.
-func matchKey(match []int, valueGroup int) [2]int {
-	return [2]int{match[0], match[2*valueGroup]}
-}
-
-// quotedValuePast returns the match for the key whose value, quoted with
-// quote, opens inside r and closes past it, or nil. The value closes where the
-// pattern reads it closing, which for DB_PASSWORD= can be on a later line
-// (DB_PASSWORD="hunter2\nsecretpart"), while the shell word that holds r
-// ends with its line.
-func quotedValuePast(s string, pattern *regexp.Regexp, valueGroup int, r region, quote byte) []int {
-	open := strings.LastIndexByte(s[r.start:r.end], quote)
-	if open < 0 {
-		return nil
-	}
-	open += r.start
-	keyStart := assignmentKeyStart(s, r.start, open)
-	if keyStart < 0 {
-		return nil
-	}
-	closeAt := strings.IndexByte(s[open+1:], quote)
-	if closeAt < 0 {
-		return nil
-	}
-	if closeAt += open + 1; closeAt <= r.end {
-		return nil
-	}
-	match := pattern.FindStringSubmatchIndex(s[keyStart : closeAt+1])
-	if match == nil {
-		return nil
-	}
-	offsetMatch(match, keyStart)
-	if valueStart, valueEnd, ok := captureRange(match, valueGroup); !ok || valueStart != open || valueEnd != closeAt+1 {
-		return nil
-	}
-	return match
-}
-
-// bareValuesPast returns the matches with a value that starts inside r and
-// runs past its end, found by searching as FindAll does from two places: from
-// r's start, which reads the keys inside r's value, as DB_PASSWORD in
-// "x DB_PASSWORD=abc\";hunter2", and from matchEnd, where the match r was
-// redacted for ends and main's FindAll goes on, as for API_KEY in
-// a=" API_KEY=aaa\"|bbb", where the search from r's start reads a= as a key
-// and takes the quoted text as its value. Such a value holds the byte at
-// r.end, so the searches stop where that run of value bytes does. A value
-// that a separator ends at or before r.end is returned too when the text the
-// separator joins to it runs past r.end, because it is judged with that text,
-// as in API_KEY=a"b;c"x after a word that ended at the ';', and API_KEY in
-// DB_PASSWORD="a\"b";API_KEY=\;"a"hunter2xyz, where the word read from the
-// first quote ends at the last one.
-func bareValuesPast(s string, pattern *regexp.Regexp, valueGroup int, r region, matchEnd int, runs *valueRunEnd) [][]int {
-	limit := r.end
-	if limit >= len(s) || strings.IndexByte(",;&", s[limit]) < 0 {
-		if limit = runs.from(s, r.end); limit == r.end {
-			return nil
-		}
-	}
-	var matches [][]int
-	for _, from := range []int{r.start, matchEnd} {
-		for from < r.end {
-			match := nextValueMatch(s, pattern, valueGroup, from, r.end, limit)
-			if match == nil {
-				break
-			}
-			valueStart, valueEnd, ok := captureRange(match, valueGroup)
-			if ok && valueStart < r.end && (valueEnd >= r.end || extendPastValueSeparators(s, valueEnd) > r.end) {
-				matches = append(matches, match)
-			}
-			from = max(match[1], from+1)
-		}
-	}
-	return matches
-}
-
-// valueHiddenText is the longest fixed value credentialAssignmentPattern
-// reads, (value hidden).
-const valueHiddenText = "(value hidden)"
-
-// nextValueMatch returns nextMatch(s, pattern, from, limit) for a search that
-// only needs matches whose value starts before end, where limit ends the run
-// of value bytes that holds the byte at end. A bare value that holds that byte
-// runs on to limit, so on a long line without blanks, searching on to limit
-// for each region would read the rest of the line once per region. So the
-// search reads only the text up to len(valueHiddenText) bytes past end, which
-// holds any (value hidden) that starts before end. A value that reaches the
-// end of that window and doesn't open with a quote is a bare value of the key
-// and password patterns, which stop at the bytes that end the run, so it ends
-// at limit. A value that opens with a quote can close past the window, so that
-// match is found again over the whole text: its closing quote, or the end of
-// its run when it has none, is the first one after it, so these searches don't
-// read the same text twice. The shell-stdin pattern goes on past its value, to
-// the command it pipes into, and bounds its literal, so it is searched as
-// before.
-func nextValueMatch(s string, pattern *regexp.Regexp, valueGroup, from, end, limit int) []int {
-	window := min(limit, end+len(valueHiddenText))
-	if pattern == shellStdinSecretPattern || window == limit {
-		return nextMatch(s, pattern, from, limit)
-	}
-	match := nextMatch(s, pattern, from, window)
-	valueStart, valueEnd, ok := captureRange(match, valueGroup)
-	switch {
-	case !ok || valueStart >= end:
-		return match
-	case s[valueStart] == '"' || s[valueStart] == '\'':
-		return nextMatch(s, pattern, from, limit)
-	case valueEnd == window && match[1] == valueEnd:
-		match[2*valueGroup+1], match[1] = limit, limit
-	}
-	return match
-}
-
-// findAllValueMatch is nextValueMatch for a search with no run end known,
-// whose match must end where FindAll's does: a bare value that runs past the
-// window ends where its run of value bytes does, and one that opens with a
-// quote is found again over the whole text.
-func findAllValueMatch(s string, pattern *regexp.Regexp, valueGroup, from, end int, runs *valueRunEnd) []int {
-	match := nextValueMatch(s, pattern, valueGroup, from, end, len(s))
-	valueStart, valueEnd, ok := captureRange(match, valueGroup)
-	if ok && valueStart < end && valueEnd == len(s) && !isQuoteByte(s[valueStart]) && pattern != shellStdinSecretPattern {
-		runEnd := runs.from(s, valueStart)
-		match[2*valueGroup+1], match[1] = runEnd, runEnd
-	}
-	return match
-}
-
-// trailingKeyMatch is nextMatch(s, pattern, from, len(s)) for the search
-// that starts again at a key that ends a redacted region (see
-// forEachUncoveredMatch). That key's bare value can run on to the end of a
-// line without blanks, as FOO's does in API_KEY="x"FOO=|API_KEY="x"FOO=|...,
-// and reading it for each word would read the rest of the line once per word.
-// So the search reads only a few bytes past where the value starts, and the
-// value ends where its run of value bytes does (see findAllValueMatch).
-func trailingKeyMatch(s string, pattern *regexp.Regexp, valueGroup, from, keyStart int, runs *valueRunEnd) []int {
-	if eq := strings.IndexByte(s[keyStart:], '='); eq >= 0 {
-		valueStart := len(s) - len(strings.TrimLeft(s[keyStart+eq+1:], " \t"))
-		match := findAllValueMatch(s, pattern, valueGroup, from, valueStart+1, runs)
-		if start, _, ok := captureRange(match, valueGroup); ok && start == valueStart {
-			return match
-		}
-	}
-	return nextMatch(s, pattern, from, len(s))
-}
-
-// findAllChain follows the matches FindAll finds after it goes on at from, as
-// far as it needs to tell whether one of them has a given value start.
-type findAllChain struct {
-	from int
-	// starts holds the value starts of the matches found so far; every match
-	// with a value start before reached has been found.
-	starts  map[int]bool
-	reached int
-}
-
-// holds reports whether the value that starts at valueStart is one of the
-// matches FindAll finds.
-func (c *findAllChain) holds(s string, pattern *regexp.Regexp, valueGroup, valueStart int, runs *valueRunEnd) bool {
-	for c.reached <= valueStart && c.from <= valueStart {
-		match := findAllValueMatch(s, pattern, valueGroup, c.from, valueStart+1, runs)
-		start, _, ok := captureRange(match, valueGroup)
-		if !ok || start > valueStart {
-			c.reached = valueStart + 1
-			break
-		}
-		c.starts[start], c.reached = true, start+1
-		c.from = max(match[1], c.from+1)
-	}
-	return c.starts[valueStart]
-}
-
-// valueRunStopBytes end a run of bare value bytes: blanks, line ends and the
-// value separators.
-const valueRunStopBytes = " \t\n\f\r,;&"
-
-// valueRunEnd finds where a run of bare value bytes ends. It remembers the
-// run it found furthest along the text, s[start:end], which holds no stop
-// byte, so the regions on a long line without blanks, as in
-// DB_PASSWORD="a"|DB_PASSWORD="a"|..., which all end inside one run, share
-// one scan of it instead of each scanning on to its end.
-type valueRunEnd struct {
-	start, end int
-}
-
-// from returns the index of the first of valueRunStopBytes at or after s[i],
-// or len(s).
-func (runs *valueRunEnd) from(s string, i int) int {
-	if runs.start <= i && i <= runs.end {
-		return runs.end
-	}
-	end := i
-	for end < len(s) && strings.IndexByte(valueRunStopBytes, s[end]) < 0 {
-		if end == runs.start {
-			// The rest of the run is the one remembered.
-			runs.start = i
-			return runs.end
-		}
-		end++
-	}
-	if i > runs.end {
-		runs.start, runs.end = i, end
-	}
-	return end
-}
-
-// offsetMatch moves the indexes of a match made on s[from:] onto s.
-func offsetMatch(match []int, from int) {
-	for i := range match {
-		if match[i] >= 0 {
-			match[i] += from
-		}
-	}
-}
-
-// assignedKeyStart returns where the key at the end of the redacted region
-// s[start:end] begins when an = assigns it a value that starts after end, or
-// -1.
-func assignedKeyStart(s string, start, end int) int {
-	if s[end-1] == '=' {
-		return assignmentKeyStart(s, start, end)
-	}
-	next := end
-	for next < len(s) && (s[next] == ' ' || s[next] == '\t') {
-		next++
-	}
-	if next < len(s) && s[next] == '=' {
-		if keyStart := keyStartBefore(s, start, end); keyStart < end {
-			return keyStart
-		}
-	}
-	return -1
-}
-
-// assignmentKeyStart returns where the key begins in a key= or key = that
-// ends at s[at], all inside s[lo:at], or -1 when s[lo:at] does not end so.
-func assignmentKeyStart(s string, lo, at int) int {
-	j := at
-	for j > lo && (s[j-1] == ' ' || s[j-1] == '\t') {
-		j--
-	}
-	if j == lo || s[j-1] != '=' {
-		return -1
-	}
-	j--
-	for j > lo && (s[j-1] == ' ' || s[j-1] == '\t') {
-		j--
-	}
-	if keyStart := keyStartBefore(s, lo, j); keyStart < j {
-		return keyStart
-	}
-	return -1
-}
-
-// keyStartBefore returns where the run of key bytes that ends at s[end]
-// begins, no earlier than lo; end when there is none.
-func keyStartBefore(s string, lo, end int) int {
-	keyStart := end
-	for keyStart > lo && isCredentialKeyByte(s[keyStart-1]) {
-		keyStart--
-	}
-	return keyStart
-}
-
-// isCredentialKeyByte reports whether c can be part of a key that the
-// key/value patterns read ([A-Za-z0-9_.-]).
-func isCredentialKeyByte(c byte) bool {
-	return isASCIIAlnum(c) || c == '_' || c == '.' || c == '-'
 }
 
 // extendPastValueSeparators continues an unquoted credential value across ',',
@@ -1655,7 +1062,7 @@ func credentialValueRegion(s string, start, end int, extend bool, isReal func(pi
 // joined from several pieces, and joined is false for any other value.
 func joinedValueRegion(s string, start, end int, extend bool, isReal func(piece string, singleQuoted bool) bool) (value region, secret, joined bool) {
 	pieces, wordEnd, joined := joinedShellWord(s, start, end)
-	if !joined || extend && readsPastJoinedWord(s, start, end, wordEnd) {
+	if !joined {
 		return region{}, false, false
 	}
 	if extend && !isQuoteByte(s[start]) {
@@ -1667,47 +1074,16 @@ func joinedValueRegion(s string, start, end int, extend bool, isReal func(piece 
 	return region{start, wordEnd}, isRealJoinedWord(s, pieces, isReal), true
 }
 
-// readsPastJoinedWord reports whether main's reading of a bare value captured
-// at s[start:end], extended past value separators, runs past the shell word
-// that ends at wordEnd, extended the same way. The pattern can stop at a
-// separator inside a quoted piece of the word, and the word can then end at
-// a quote main does not pair: the shell reads a"b;c\"d|hunter2xyz" as one
-// quoted string, but a backslash before a quote is left alone (see
-// escapedWordBytes), so the word ends at the pipe. Such a value is judged
-// both as its word and as main reads it, and what either reading redacts is
-// redacted, so it never redacts less than main does, nor less than its word:
-// main judges changeme" alone in changeme";hunter2"|cat, a placeholder.
-func readsPastJoinedWord(s string, start, end, wordEnd int) bool {
-	return !isQuoteByte(s[start]) && extendPastValueSeparators(s, end) > extendPastValueSeparators(s, wordEnd)
-}
-
-// eitherReading returns what a value's word reading and main's reading of it
-// redact together: both regions start at the value, so when both readings
-// find a secret one region covers them, and otherwise the one that does.
-func eitherReading(word region, wordSecret bool, main region, mainSecret bool) (region, bool) {
-	switch {
-	case wordSecret && mainSecret:
-		return region{min(word.start, main.start), max(word.end, main.end)}, true
-	case wordSecret:
-		return word, true
-	default:
-		return main, mainSecret
-	}
-}
-
-// capturedValueRegion is credentialValueRegion for a value read as main reads
-// it, as the pattern captured it: one quoted string is redacted inside its
-// quotes, and a bare value is extended past separators when extend is set.
+// capturedValueRegion is credentialValueRegion for a value read as captured:
+// one quoted string is redacted inside its quotes, and a bare value is
+// extended past separators when extend is set. The value is judged as
+// capturedValueText reads it.
 func capturedValueRegion(s string, start, end int, extend bool, isReal func(piece string, singleQuoted bool) bool) (region, bool) {
 	valueStart, valueEnd, singleQuoted := unquoteRangeQuoted(s, start, end)
 	if extend && valueStart == start {
 		valueEnd = extendPastValueSeparators(s, valueEnd)
 	}
-	value := s[valueStart:valueEnd]
-	if valueStart > start && s[start] == '"' {
-		value = doubleQuotedText(value)
-	}
-	return region{valueStart, valueEnd}, isReal(value, singleQuoted)
+	return region{valueStart, valueEnd}, isReal(capturedValueText(s, start, valueStart, valueEnd), singleQuoted)
 }
 
 // isRealJoinedWord reports whether a shell word joined from pieces holds a
