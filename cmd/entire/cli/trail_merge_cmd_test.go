@@ -64,7 +64,7 @@ func withField(key string, value any) func(map[string]any) {
 
 var (
 	blocked         = withField("mergeable", false)
-	baseChecksRed   = withGate(map[string]any{"gate_type": "base_checks", "gate_key": "base_checks", "blocking": true, "status": "failed", "state": "evaluated", "rationale": "trunk is red: acme/entire-api build #1234 failed", "value": map[string]any{"web_url": "https://buildkite.com/acme/entire-api/builds/1234", "build_number": 1234}})
+	baseChecksRed   = withGate(map[string]any{"gate_type": "base_checks", "gate_key": "base_checks", "blocking": true, "status": "failed", "state": "evaluated", "rationale": "trunk is red: acme/entire-api build #1234 failed", "value": map[string]any{"web_url": "https://ci.example.com/acme/entire-api/builds/1234", "build_number": 1234}})
 	findingsAdvisry = withGate(map[string]any{"gate_type": "findings", "gate_key": "findings", "blocking": false, "status": "failed", "state": "evaluated", "rationale": "advisory findings open"})
 )
 
@@ -188,7 +188,7 @@ func TestTrailMerge_BlockedWithoutForce(t *testing.T) {
 
 	require.Error(t, err)
 	require.Contains(t, out, "trunk is red: acme/entire-api build #1234 failed")
-	require.Contains(t, out, "https://buildkite.com/acme/entire-api/builds/1234")
+	require.Contains(t, out, "https://ci.example.com/acme/entire-api/builds/1234")
 	require.Contains(t, err.Error(), "trail #7 is not mergeable")
 	require.Contains(t, err.Error(), "--force")
 	require.Empty(t, stub.mergePosts(), "a blocked merge without --force must not POST")
@@ -747,7 +747,7 @@ func TestTrailMerge_JSON(t *testing.T) {
 		require.JSONEq(t, `{"number":7,"branch":"feature/example","base":"trunk","headSha":"head-example",
 			"mergeable":false,"conflictStatus":"clean","bypassPolicy":"admins",
 			"blockers":[{"gateKey":"base_checks","gateType":"base_checks","status":"failed",
-				"rationale":"trunk is red: acme/entire-api build #1234 failed","url":"https://buildkite.com/acme/entire-api/builds/1234"}],
+				"rationale":"trunk is red: acme/entire-api build #1234 failed","url":"https://ci.example.com/acme/entire-api/builds/1234"}],
 			"dryRun":true,"merged":false,"bypassed":false,"wouldBypass":false}`, out)
 		require.Empty(t, stub.mergePosts())
 	})
