@@ -715,6 +715,14 @@ func TestString_CommandLinePasswordsShellGrammarCases(t *testing.T) {
 		{name: "Python raw strings for the program and the password", input: `subprocess.run([r"C:\Tools\wget.exe", "--password", r"C:\vault\` + p + `", url])`, want: `subprocess.run([r"C:\Tools\wget.exe", "--password", r"REDACTED", url])`},
 		{name: "dollar sign in a Python raw string", input: `subprocess.run(["wget", "--password", r"$` + p + `", url])`, want: `subprocess.run(["wget", "--password", r"REDACTED", url])`},
 		{name: "Python raw string in a JSON string", input: `{"cmd": "subprocess.run([\"wget\", \"--password\", r\"` + p + `\", url])"}`, want: `{"cmd": "subprocess.run([\"wget\", \"--password\", r\"REDACTED\", url])"}`},
+		{name: "mysql password after --force in an option cluster", input: "mysql -uroot -fp" + p + " db < dump.sql", want: "mysql -uroot -fpREDACTED db < dump.sql"},
+		{name: "mysqldump password after --force in an option cluster", input: "mysqldump -fp" + p + " db", want: "mysqldump -fpREDACTED db"},
+		{name: "mariadb password after --force in an option cluster", input: "mariadb -fp" + p + " db", want: "mariadb -fpREDACTED db"},
+		{name: "client after podman exec -l", input: "podman exec -l mysql -uroot -p" + p, want: "podman exec -l mysql -uroot -pREDACTED"},
+		{name: "client after podman exec --latest", input: "podman exec --latest mysql -uroot -p" + p, want: "podman exec --latest mysql -uroot -pREDACTED"},
+		{name: "client after podman exec -l in an option cluster", input: "podman exec -itl mysql -p" + p, want: "podman exec -itl mysql -pREDACTED"},
+		{name: "client after podman exec -l after an option with a value", input: "podman exec -e A=1 -l mysql -p" + p, want: "podman exec -e A=1 -l mysql -pREDACTED"},
+		{name: "client after podman exec -l in a list", input: `subprocess.run(["podman", "exec", "-l", "mysql", "-p` + p + `"])`, want: `subprocess.run(["podman", "exec", "-l", "mysql", "-pREDACTED"])`},
 		{name: "short flag value in a Python triple-quoted string", input: `subprocess.run(["redis-cli", "-a", """` + p + `"""])`, want: `subprocess.run(["redis-cli", "-a", """REDACTED"""])`},
 		{name: "openssl source in a Python triple-quoted string", input: `subprocess.run(["openssl", "enc", "-pass", """pass:` + p + `"""])`, want: `subprocess.run(["openssl", "enc", "-pass", """pass:REDACTED"""])`},
 		{name: "long flag value in a Python triple-quoted string", input: `subprocess.run(["wget", "--password", '''` + p + `''', url])`, want: `subprocess.run(["wget", "--password", '''REDACTED''', url])`},
@@ -1177,6 +1185,11 @@ func TestString_CommandLinePasswordListAndQuotingNonSecretsPreserved(t *testing.
 		`subprocess.run(["openssl", "enc", "-pass", f"pass:{pw}"])`,
 		`mysql -u root r"-pfoo"`,
 		`psql_cmd = [r"C:\Program Files\PostgreSQL\16\bin\psql.exe", "--password", "-h", "db"]`,
+		// mysqlsh's -f takes a file, so a cluster after it is that file's name
+		"mysqlsh -fpreload.js",
+		// podman's run -l is --label, which takes a value, so the next word
+		// is no command
+		"podman run -l app=db mysql -p3306",
 		// a parser declares a flag's long and short names in one list
 		`parser.add_argument("--password", "-p", required=True)`,
 		`@click.option('--password', '-p', help='Password')`,

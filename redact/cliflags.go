@@ -217,7 +217,13 @@ var cliPasswordFlags = []cliPasswordFlag{
 	// reject.
 	{
 		needles:     []string{"mysql", "mariadb"},
-		command:     regexp.MustCompile(`\b(?:mariadb-(?:dump|admin|import|check|show|slap|binlog|upgrade|backup)|mysql(?:dump|admin|import|check|pump|sh|show|slap|binlog|_upgrade)?|mariadb)\b`),
+		command:     regexp.MustCompile(`\b(?:mariadb-(?:dump|admin|import|check|upgrade)|mysql(?:dump|admin|import|check|_upgrade)?|mariadb)\b`),
+		flag:        regexp.MustCompile(cliShortFlag(`\s`, mysqlForceOptions+"p", "")),
+		noValueLong: true,
+	},
+	{
+		needles:     []string{"mysql", "mariadb"},
+		command:     regexp.MustCompile(`\b(?:mariadb-(?:show|slap|binlog|backup)|mysql(?:pump|sh|show|slap|binlog))\b`),
 		flag:        regexp.MustCompile(cliShortFlag(`\s`, mysqlNoValueOptions+"p", "")),
 		noValueLong: true,
 	},
@@ -295,6 +301,11 @@ const opensslSourceFlag = `(?:-pass(?:in|out)|pass(?:in|out|word)?)`
 // -h, -D, -e, -c, -i, -r, -w, mysqlslap's -q, mysqlsh's -f, mariadb-backup's
 // -H and -t, ...) is left out, since its value would be the rest of the word.
 const mysqlNoValueOptions = `[ABCENVXbnsv]*`
+
+// mysqlForceOptions is mysqlNoValueOptions with -f, which is --force in the
+// client and in the dump, admin, import, check and upgrade tools, and takes
+// no value there (mysql -uroot -fpX), unlike mysqlsh's -f.
+const mysqlForceOptions = `[ABCENVXbfnsv]*`
 
 // cliPythonPrefix matches the prefix of a Python string, which may open a
 // quoted flag in an argument list in code ([r"-pC:\x"], see
@@ -1803,6 +1814,9 @@ type commandWords struct {
 	optionArg bool
 	host      bool
 	sub       bool
+	// latestExec is set after podman's exec, whose -l (--latest) runs in
+	// the latest container and so names it (podman exec -l mysql -pX).
+	latestExec bool
 	// execArg is set with optionArg when that option's argument is the
 	// command to run (env -S 'mysql -pX', docker run --entrypoint mysql).
 	execArg bool
@@ -2128,6 +2142,31 @@ func closingParen(word string) int {
 	return -1
 }
 
+// latestOption returns option, an option of podman's exec before its
+// container, without --latest or -l, which take no value: either one names
+// the container, so it sets host, and the next word is the command
+// (podman exec -l mysql -pX, podman exec -itl mysql -pX).
+func (c *commandStart) latestOption(option string) string {
+	if option == "--latest" {
+		c.host = true
+		return ""
+	}
+	if strings.HasPrefix(option, "--") {
+		return option
+	}
+	for i := 1; i < len(option); i++ {
+		if option[i] == 'l' {
+			c.host = true
+			return option[:i] + option[i+1:]
+		}
+		if strings.IndexByte(containerArgOptions, option[i]) >= 0 {
+			// The rest of the word is this option's value (-ul is user l).
+			break
+		}
+	}
+	return option
+}
+
 // fresh reports whether no word has been read since the command could start.
 func (c *commandStart) fresh() bool {
 	return !c.text && !c.command && c.wrapper == "" && !c.optionArg && !c.redirectArg && !c.funcName
@@ -2178,6 +2217,9 @@ func (c *commandStart) word(word string) {
 			return
 		}
 		option := unquotedWord(word)
+		if c.latestExec && !c.host {
+			option = c.latestOption(option)
+		}
 		c.optionArg = takesArgument(c.wrapper, option)
 		c.execArg = c.optionArg && runsArgument(c.wrapper, option)
 		c.optionUnknown = c.optionUnknown || isContainerClient(c.wrapper) && !c.sub && !c.optionArg && mayTakeArgument(option)
@@ -2191,6 +2233,7 @@ func (c *commandStart) word(word string) {
 		switch sub := unquotedWord(word); {
 		case slices.Contains(containerRunSubcommands, sub):
 			c.sub = true
+			c.latestExec = c.wrapper == "podman" && sub == execCommand
 		case slices.Contains(containerTextSubcommands, sub):
 			c.text, c.noRun = true, !c.optionUnknown
 		}
@@ -2201,7 +2244,7 @@ func (c *commandStart) word(word string) {
 		// -pX, docker exec mysql ssh -p2222 h).
 		c.host = true
 	case isShellKeyword(word):
-		c.wrapper, c.host, c.sub, c.command = "", false, false, false
+		c.wrapper, c.host, c.sub, c.latestExec, c.command = "", false, false, false, false
 	case !c.command && isCommandWrapper(programName(word)):
 		c.wrapper, c.host = programName(word), false
 	default:
