@@ -306,33 +306,15 @@ func WrapWindowsProductionSilentHookCommandForCmdHost(command string) string {
 // >nul 2>nul & …"' is not recognized as an internal or external command) — and
 // the sh wrapper fails too, because cmd.exe reads its `>/dev/null` as a redirect
 // to a nonexistent path. Both were observed on Windows 11 with agy 1.2.7; only
-// this shape produced a tracked session. Same distinction
-// WrapWindowsProductionJSONWarningHookCommand draws for Codex.
+// this shape produced a tracked session.
 func WrapWindowsProductionSilentHookCommandDirect(command string) string {
 	return windowsSilentBody(command)
 }
 
-// WrapWindowsProductionJSONWarningHookCommand emits a JSON hook response with a
-// systemMessage field on stdout when the Entire CLI is missing from PATH. It
-// avoids sh so Codex hooks still work from native Windows shells. It is the
-// direct form, with no nested cmd.exe, so it only runs when the hook shell is
-// cmd.exe (Codex's cmd.exe and %COMSPEC% hook shells; see
-// windowsBareCmdLauncher).
-func WrapWindowsProductionJSONWarningHookCommand(command string, format WarningFormat) string {
-	payload, err := jsonutil.MarshalWithNoHTMLEscape(struct {
-		SystemMessage string `json:"systemMessage,omitempty"`
-	}{
-		SystemMessage: MissingEntireWarning(format),
-	})
-	if err != nil {
-		return WrapWindowsProductionPlainTextWarningHookCommand(command, format)
-	}
-
-	return windowsWarningBody(command, escapeWindowsCMD(string(payload)))
-}
-
-// WrapWindowsProductionPlainTextWarningHookCommand is the direct-shell fallback
-// for WrapWindowsProductionJSONWarningHookCommand when JSON marshaling fails.
+// WrapWindowsProductionPlainTextWarningHookCommand prints the warning as plain
+// text when the Entire CLI is missing from PATH. It is the direct form, with no
+// nested cmd.exe and no quotes, so it runs only when the hook shell is cmd.exe
+// (Factory Droid's Stop hook).
 func WrapWindowsProductionPlainTextWarningHookCommand(command string, format WarningFormat) string {
 	return windowsWarningBody(command, escapeWindowsCMD(windowsPlainTextWarning(format)))
 }
@@ -624,15 +606,6 @@ func WrapProductionSilentHookCommandForCmdHostOS(command string, useWindows bool
 		return WrapWindowsProductionSilentHookCommandForCmdHost(command)
 	}
 	return WrapProductionSilentHookCommand(command)
-}
-
-// WrapProductionJSONWarningHookCommandForOS picks the sh-based or native Windows
-// JSON-warning wrapper based on useWindows.
-func WrapProductionJSONWarningHookCommandForOS(command string, format WarningFormat, useWindows bool) string {
-	if useWindows {
-		return WrapWindowsProductionJSONWarningHookCommand(command, format)
-	}
-	return WrapProductionJSONWarningHookCommand(command, format)
 }
 
 // WrapProductionPlainTextWarningHookCommandForOS picks the sh-based or native
