@@ -49,14 +49,15 @@ const (
 	euSpace = `[ \t]+`
 	// euHouseNumber is the number that ends an Italian or Spanish street
 	// line, optionally after n., n.º, nº or n°, with an optional letter or
-	// sub-number (3/A, 12b, 7/2, 12/bis). A sub-number is digits, one letter,
-	// bis or ter, so it never takes the next street's type (Via Roma 1 / Via
-	// Milano 2). It ends at a word boundary in the pattern
+	// sub-number (3/A, 12b, 7/2, 12/14A, 12/bis). A sub-number is digits with
+	// an optional letter, one letter, bis or ter, so it never takes the next
+	// street's type (Via Roma 1 / Via Milano 2). It ends at a word boundary in
+	// the pattern
 	// itself, not only in endsStreetLine, so when a date's year could take a
 	// four-digit house number (Via XX Settembre 1234, 20121 Milano), the
 	// regex reads 1234 as the house number instead of returning a match that
 	// ends inside the postal code.
-	euHouseNumber = `(?:n(?:\.[°º]?|[°º])[ \t]?)?\d{1,4}(?:[ \t]?/[ \t]?(?:bis|ter|[0-9]{1,3}|[A-Za-z])|[A-Za-z])?\b`
+	euHouseNumber = `(?:n(?:\.[°º]?|[°º])[ \t]?)?\d{1,4}(?:[ \t]?/[ \t]?(?:bis|ter|[0-9]{1,3}[A-Za-z]?|[A-Za-z])|[A-Za-z])?\b`
 	// euGermanAdjective may come before a German street's name: Alte
 	// Schönhauser Straße, Große Hamburger Straße, Alter Postweg.
 	euGermanAdjective = `(?:Alt|Neu|Gro(?:ß|ss)|Klein|Ober|Unter|Mittler|Vorder|Hinter|Hoh|Lang|Breit)e[nrs]?`
@@ -100,7 +101,9 @@ func euAlternation(words []string) string {
 	return `(?:` + strings.Join(alts, "|") + `)`
 }
 
-// capitalized returns words with their first letter in upper case.
+// capitalized lets one lowercase list serve the French and German types
+// that are also written capitalized (Rue de la Paix, Karl-Marx-Straße), so
+// the two spellings cannot drift apart.
 func capitalized(words []string) []string {
 	out := make([]string, len(words))
 	for i, w := range words {
@@ -236,7 +239,8 @@ func hasStreetKeyword(s string, k streetKeyword) bool {
 		if start > 0 {
 			prev = s[start-1]
 		}
-		before := k.inWord || (!isASCIIAlnum(prev) && prev != '_') || followsJSONEscape(s, start)
+		atWordEdge := !isASCIIAlnum(prev) && prev != '_'
+		before := k.inWord || atWordEdge || followsJSONEscape(s, start)
 		after := end < len(s) && (s[end] == ' ' || s[end] == '\t' || k.nameFollows)
 		if before && after {
 			return true

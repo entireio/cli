@@ -31,6 +31,7 @@ func TestDetectPII_EuropeanAddresses(t *testing.T) {
 		{"Via dei Mille 3/A", "[REDACTED_ADDRESS]"},
 		{"Via Verdi 12/14", "[REDACTED_ADDRESS]"},
 		{"Via Roma 12/bis", "[REDACTED_ADDRESS]"},
+		{"Via Roma 12/14A, 20121 Milano", "[REDACTED_ADDRESS], 20121 Milano"},
 		// A sub-number does not take the next street's type.
 		{"Via Roma 1 / Via Milano 2", "[REDACTED_ADDRESS] / [REDACTED_ADDRESS]"},
 		{"Viale dell'Indipendenza 8", "[REDACTED_ADDRESS]"},
@@ -53,6 +54,7 @@ func TestDetectPII_EuropeanAddresses(t *testing.T) {
 		{"Plaza Mayor nº 1", "[REDACTED_ADDRESS]"},
 		{"Avda. Diagonal 640", "[REDACTED_ADDRESS]"},
 		{"Calle Mayor n.º 1", "[REDACTED_ADDRESS]"},
+		{"Calle Mayor 5/2B", "[REDACTED_ADDRESS]"},
 		{"Avenida 9 de Julio 1000", "[REDACTED_ADDRESS]"},
 		{"Calle 2 de Mayo 1234 28004 Madrid", "[REDACTED_ADDRESS] 28004 Madrid"},
 
