@@ -719,7 +719,9 @@ func (q *shellQuotes) doubleQuotedAt(at int) bool {
 }
 
 // read reads the token at s[i], a byte or a run that the shell reads as one
-// piece, and returns where it ends.
+// piece, and returns where it ends. Reading whole tokens keeps a quote inside
+// one, as in 'it"s' or a comment, from changing the quoting after it, and lets
+// doubleQuotedAt tell a position inside a token from one between tokens.
 func (q *shellQuotes) read(i int) int {
 	s, frame := q.s, &q.frames[len(q.frames)-1]
 	wordStart, commandStart := q.wordStart, q.commandStart
@@ -931,10 +933,11 @@ func appendANSICText(word *strings.Builder, s string, from int) int {
 // heredocsEnd returns where the bodies of docs, starting at s[from], end:
 // after the line that closes the last of them, or at the end of s.
 func heredocsEnd(s string, from int, docs []heredoc) int {
+	end := from
 	for _, doc := range docs {
-		from = heredocEnd(s, from, doc)
+		end = heredocEnd(s, end, doc)
 	}
-	return from
+	return end
 }
 
 // heredocEnd returns where the body of doc, starting at s[from], ends: after
@@ -944,12 +947,12 @@ func heredocsEnd(s string, from int, docs []heredoc) int {
 // backslash goes on at the next one, as the shell joins them.
 func heredocEnd(s string, from int, doc heredoc) int {
 	var joined strings.Builder
-	for from < len(s) {
-		line, next := s[from:], len(s)
+	for pos := from; pos < len(s); {
+		line, next := s[pos:], len(s)
 		if n := strings.IndexByte(line, '\n'); n >= 0 {
-			line, next = line[:n], from+n+1
+			line, next = line[:n], pos+n+1
 		}
-		from = next
+		pos = next
 		if !doc.quoted && endsInLineContinuation(line) {
 			joined.WriteString(line[:len(line)-1])
 			continue
@@ -963,7 +966,7 @@ func heredocEnd(s string, from int, doc heredoc) int {
 			line = strings.TrimLeft(line, "\t")
 		}
 		if line == doc.delimiter {
-			return from
+			return pos
 		}
 	}
 	return len(s)
@@ -1615,11 +1618,12 @@ func isPlaceholderShellExpansion(s string) bool {
 	return !shellTextOperatorRE.MatchString(s)
 }
 
-// isSingleQuotedWord reports whether word is wrapped in single quotes, which
-// make it literal text outside double quotes: ${PW:-'$S3CRET'} defaults to the
-// characters $S3CRET, not to a variable.
+// isSingleQuotedWord reports whether word is one single quoted string, which
+// is literal text outside double quotes: ${PW:-'$S3CRET'} defaults to the
+// characters $S3CRET, not to a variable. A word joined from several pieces,
+// as in ${PW:-”$FALLBACK”}, is not one: its $FALLBACK is a reference.
 func isSingleQuotedWord(word string) bool {
-	return len(word) >= 2 && word[0] == '\'' && word[len(word)-1] == '\''
+	return len(word) >= 2 && word[0] == '\'' && strings.IndexByte(word[1:], '\'') == len(word)-2
 }
 
 // singleQuotedDefaultRE matches a ${NAME<op>'word'} expansion whose word is
