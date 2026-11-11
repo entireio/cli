@@ -298,15 +298,10 @@ func TestImageKeyRevealsSecret(t *testing.T) {
 	}
 }
 
-// A custom rule written for one field still redacts an image under it. Custom
-// rules are process-wide, so this test does not run in parallel.
-//
 // customRuleReadsValue stops at a rule's first match past the key, so a rule
 // that matches every byte of an image costs no more than one that matches
-// once, and a match in the key alone reads nothing of the value.
-//
-//nolint:paralleltest // configures the process-wide custom rules
-//nolint:paralleltest // custom rules are process-global
+// once, and a match in the key alone reads nothing of the value. Custom rules
+// are process-wide, so this test and the next do not run in parallel.
 func TestCustomRuleReadsValue(t *testing.T) {
 	resetCustomRulesForTest(t)
 	uri := "data:image/jpeg;base64," + fakeImageBase64(jpegMagic)
@@ -316,6 +311,7 @@ func TestCustomRuleReadsValue(t *testing.T) {
 	assert.False(t, customRuleReadsValue("image_url", uri))
 }
 
+// A custom rule written for one field still redacts an image under it.
 func TestJSONLContent_CustomRuleOverridesImageDataURI(t *testing.T) {
 	resetCustomRulesForTest(t)
 	ConfigureCustomRules(CustomRulesConfig{Inline: map[string]string{"blob": `"auth_blob":"[^"]+"`}})
