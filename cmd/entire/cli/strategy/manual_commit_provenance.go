@@ -32,14 +32,22 @@ import (
 // `commit -C`, inherited from squashed commits) names a checkpoint this commit
 // did not stamp, and would otherwise suppress the fresh trailer new work
 // needs; so does an ID anywhere else in the message. A checkpoint deleted from
-// this clone never counts either. rules is messageCommentRules' answer for
-// message.
+// this clone never counts either, nor does a stamp a commit made since carries
+// (stampCarriedInFlight), which a message saved from that commit can name
+// before its post-commit takes the stamp. rules is messageCommentRules' answer
+// for message.
 func stampedTrailer(ctx context.Context, message string, rules commentRules, inherited []id.CheckpointID) (id.CheckpointID, bool) {
 	ids := withoutInherited(withoutDeletedCheckpoints(ctx, preparedFinalTrailers(message, rules)), checkpointSet(inherited))
 	if len(ids) == 0 {
 		return id.EmptyCheckpointID, false
 	}
-	return lastStamped(ids, readStampedTrailers(ctx))
+	stamped := readStampedTrailers(ctx)
+	for _, cpID := range ids {
+		if stamped[cpID] && stampCarriedInFlight(ctx, cpID) {
+			delete(stamped, cpID)
+		}
+	}
+	return lastStamped(ids, stamped)
 }
 
 // preparedFinalTrailers returns the checkpoint IDs in the final trailer block
@@ -465,7 +473,7 @@ func recordStampedTrailer(ctx context.Context, cpID id.CheckpointID) bool {
 // overlap evidence however they have settled since. Post-commit leaves the
 // entries of the stamps it takes, marked as its own, until it is done
 // (releaseStampedSessions), which is how a racing prepare knows a reserved ID
-// is already another commit's (reservationCarriedInFlight), and a racing
+// is already another commit's (stampCarriedInFlight), and a racing
 // post-commit that the session is still to be condensed into it
 // (awaitEarlierCondensations).
 const stampedSessionsFile = "entire-stamped-sessions.json"
@@ -654,7 +662,7 @@ type stampRecords struct {
 // cannot split. The sessions entries of the stamps it takes stay in place,
 // without their stamps, until post-commit is done with them
 // (releaseStampedSessions), so a prepare racing it can tell that its commit
-// carries a session's reserved ID (reservationCarriedInFlight).
+// carries a session's reserved ID (stampCarriedInFlight).
 //
 // It consumes only what is the commit's. git lets the next commit start once
 // this one is made, before its post-commit runs, so later commits' prepares

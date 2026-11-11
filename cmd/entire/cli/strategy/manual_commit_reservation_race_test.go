@@ -99,6 +99,30 @@ func TestCommitHooks_NextCommitPreparedBeforePostCommitDoesNotShareTheReservatio
 	assert.Empty(t, readStampedSessionsIn(mustPerWorktreeGitRoot(t)), "each post-commit releases its entries")
 }
 
+// A message saved from a commit already made (`commit -F`, or `-C` of it)
+// names that commit's stamp. Before that commit's post-commit takes the stamp,
+// prepare took it for its own and added no trailer, so the two commits named
+// one checkpoint. The next commit now gets a trailer of its own.
+func TestPrepareCommitMsg_SavedMessageNamingAnInFlightStampGetsItsOwn(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	s := NewManualCommitStrategy()
+	reserved := id.MustCheckpointID("a1b2c3d4e5f6")
+	saveReservedSession(t, s, dir, reserved)
+
+	stageFile(t, dir, "first.txt")
+	first := prepareMessage(t, "first\n")
+	require.Equal(t, []string{reserved.String()}, checkpointIDs(first))
+	testutil.GitCommit(t, dir, first)
+
+	stageFile(t, dir, "second.txt")
+	second := prepareMessage(t, first)
+	ids := checkpointIDs(second)
+	require.Len(t, ids, 2, "%q", second)
+	assert.Equal(t, reserved.String(), ids[0], "the saved message keeps its trailer")
+	assert.NotEqual(t, reserved.String(), ids[1], "and the commit gets a trailer of its own: %q", second)
+}
+
 // A commit tried again after its first attempt was aborted (the editor quit,
 // a commit-msg hook refused) is prepared on the same HEAD. The stamp left by
 // the first attempt is its own, so it keeps the reservation.
@@ -117,32 +141,32 @@ func TestPrepareCommitMsg_RetryAfterAbortedAttemptKeepsTheReservation(t *testing
 // The reservation is another commit's only while that commit's post-commit
 // may still condense into it: from the moment the commit carrying it is made
 // until its post-commit is done, through the take that removes its stamp.
-func TestReservationCarriedInFlight_UntilItsPostCommitIsDone(t *testing.T) {
+func TestStampCarriedInFlight_UntilItsPostCommitIsDone(t *testing.T) {
 	dir := setupGitRepo(t)
 	t.Chdir(dir)
 	ctx := context.Background()
 	reserved, other := id.MustCheckpointID("a1b2c3d4e5f6"), id.MustCheckpointID("b1b2c3d4e5f6")
 
 	require.True(t, recordStampedTrailer(ctx, reserved))
-	assert.False(t, reservationCarriedInFlight(ctx, reserved), "stamped on HEAD: the commit is not made yet")
+	assert.False(t, stampCarriedInFlight(ctx, reserved), "stamped on HEAD: the commit is not made yet")
 	commit := commitWith(t, dir, "first", reserved)
-	assert.True(t, reservationCarriedInFlight(ctx, reserved), "made, its post-commit not run")
-	assert.False(t, reservationCarriedInFlight(ctx, other), "never stamped")
+	assert.True(t, stampCarriedInFlight(ctx, reserved), "made, its post-commit not run")
+	assert.False(t, stampCarriedInFlight(ctx, other), "never stamped")
 
 	records := takeStampRecords(ctx, commit)
 	require.True(t, records.stamped[reserved])
-	assert.True(t, reservationCarriedInFlight(ctx, reserved), "taken, its post-commit not done")
+	assert.True(t, stampCarriedInFlight(ctx, reserved), "taken, its post-commit not done")
 	commitWith(t, dir, "second")
-	assert.True(t, reservationCarriedInFlight(ctx, reserved), "with a later commit made on top of it")
+	assert.True(t, stampCarriedInFlight(ctx, reserved), "with a later commit made on top of it")
 
 	releaseStampedSessions(ctx, records.sessions)
-	assert.False(t, reservationCarriedInFlight(ctx, reserved), "its post-commit is done")
+	assert.False(t, stampCarriedInFlight(ctx, reserved), "its post-commit is done")
 	assert.Empty(t, readStampedSessionsIn(mustPerWorktreeGitRoot(t)))
 }
 
 // A reserved ID stamped on a commit that never happened, with other commits
 // made since, is no commit's: the next commit takes it, as before.
-func TestReservationCarriedInFlight_NotForAnAbandonedStamp(t *testing.T) {
+func TestStampCarriedInFlight_NotForAnAbandonedStamp(t *testing.T) {
 	dir := setupGitRepo(t)
 	t.Chdir(dir)
 	ctx := context.Background()
@@ -150,7 +174,7 @@ func TestReservationCarriedInFlight_NotForAnAbandonedStamp(t *testing.T) {
 
 	require.True(t, recordStampedTrailer(ctx, reserved), "an attempt that is abandoned")
 	commitWith(t, dir, "unrelated")
-	assert.False(t, reservationCarriedInFlight(ctx, reserved))
+	assert.False(t, stampCarriedInFlight(ctx, reserved))
 }
 
 // The entry an earlier post-commit's take left stays while that post-commit
@@ -167,12 +191,12 @@ func TestTakeStampRecords_KeepsAnEntryWhileItsTakerRuns(t *testing.T) {
 	require.True(t, recordStampedTrailer(ctx, next))
 	second := takeStampRecords(ctx, commitWith(t, dir, "second", next))
 	assert.NotContains(t, second.sessions, reserved)
-	assert.True(t, reservationCarriedInFlight(ctx, reserved), "the first commit's post-commit still runs")
+	assert.True(t, stampCarriedInFlight(ctx, reserved), "the first commit's post-commit still runs")
 
 	releaseStampedSessions(ctx, second.sessions)
-	assert.True(t, reservationCarriedInFlight(ctx, reserved))
+	assert.True(t, stampCarriedInFlight(ctx, reserved))
 	releaseStampedSessions(ctx, first.sessions)
-	assert.False(t, reservationCarriedInFlight(ctx, reserved))
+	assert.False(t, stampCarriedInFlight(ctx, reserved))
 	assert.Empty(t, readStampedSessionsIn(mustPerWorktreeGitRoot(t)))
 }
 
@@ -187,9 +211,9 @@ func TestTakeStampRecords_DropsAnEntryWhoseTakerStopped(t *testing.T) {
 
 	require.True(t, recordStampedTrailer(ctx, reserved))
 	takeStampRecords(ctx, commitWith(t, dir, "first", reserved))
-	require.True(t, reservationCarriedInFlight(ctx, reserved))
+	require.True(t, stampCarriedInFlight(ctx, reserved))
 	stopTaker(t, reserved)
-	assert.False(t, reservationCarriedInFlight(ctx, reserved), "its post-commit stopped")
+	assert.False(t, stampCarriedInFlight(ctx, reserved), "its post-commit stopped")
 
 	require.True(t, recordStampedTrailer(ctx, next))
 	records := takeStampRecords(ctx, commitWith(t, dir, "second", next))

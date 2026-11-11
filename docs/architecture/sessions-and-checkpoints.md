@@ -329,7 +329,7 @@ commit.
   carries it and that commit's post-commit is not done (post-commit leaves the
   sessions entries of the stamps it took, marked as its own, until it returns,
   `releaseStampedSessions`), prepare gives the next commit an ID of its own
-  (`reservationCarriedInFlight`), and reads the reservation again after that
+  (`stampCarriedInFlight`), and reads the reservation again after that
   check, since the earlier post-commit may have condensed it in between. A
   commit retried on the same HEAD after an aborted attempt keeps the
   reservation. A later post-commit's take keeps an entry the earlier one marked

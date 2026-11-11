@@ -17,7 +17,7 @@ import (
 // commit. git lets the next commit start once one is made, before its
 // post-commit runs, and the session holds the reservation until that
 // post-commit condenses it. So prepare passes over a reservation a commit
-// already made carries (reservationCarriedInFlight), and the later commit's
+// already made carries (stampCarriedInFlight), and the later commit's
 // post-commit, which may reach the session first, waits for the earlier one
 // to condense it (awaitEarlierCondensations).
 
@@ -79,10 +79,11 @@ func stampedSessionsEntry(entries []stampedSessions, cpID id.CheckpointID) (stam
 	return entries[i], true
 }
 
-// reservationCarriedInFlight reports whether a commit already made carries
-// cpID, a session's reserved checkpoint ID, while its post-commit may not have
-// condensed the session into it yet. A commit prepared in between must not be
-// given the same ID: it would name the other commit's checkpoint, and its
+// stampCarriedInFlight reports whether a commit already made carries cpID, a
+// checkpoint ID prepare stamped, while its post-commit may not be done with
+// it yet. A commit prepared in between must not be given the same ID, as a
+// session's reservation (freeReservation) or as a stamp its message already
+// names (stampedTrailer): it would name the other commit's checkpoint, and its
 // post-commit would write its own work over that checkpoint.
 //
 // Prepare recorded stamping cpID (stampedSessionsFile), and no post-commit
@@ -90,10 +91,10 @@ func stampedSessionsEntry(entries []stampedSessions, cpID id.CheckpointID) (stam
 // taking it; a commit on HEAD's first parents made since the HEAD that prepare
 // stamped on carries cpID. A stamp prepared on HEAD itself, as when a commit
 // is tried again after its first attempt was aborted, is the same commit's,
-// so the retry keeps the reservation. Once the post-commit is done, a session
-// that still holds the reservation was not condensed into it, and the next
-// commit takes it, as before.
-func reservationCarriedInFlight(ctx context.Context, cpID id.CheckpointID) bool {
+// so the retry keeps it. Once the post-commit is done, a session that still
+// holds the reservation was not condensed into it, and the next commit takes
+// it, as before.
+func stampCarriedInFlight(ctx context.Context, cpID id.CheckpointID) bool {
 	root, err := perWorktreeGitRoot(ctx)
 	if err != nil {
 		return false
@@ -150,7 +151,7 @@ func freeReservation(ctx context.Context, state *SessionState) id.CheckpointID {
 	if reserved.IsEmpty() {
 		return id.EmptyCheckpointID
 	}
-	if reservationCarriedInFlight(ctx, reserved) {
+	if stampCarriedInFlight(ctx, reserved) {
 		logging.Debug(logging.WithComponent(ctx, "checkpoint"), "prepare-commit-msg: reserved checkpoint ID already carried by a commit awaiting its post-commit",
 			slog.String("session_id", state.SessionID),
 			slog.String("reserved_checkpoint_id", reserved.String()))
