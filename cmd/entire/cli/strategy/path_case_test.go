@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path"
 	"path/filepath"
@@ -9,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -210,6 +213,33 @@ func TestSessionHasNewContentFromLiveTranscript_SpellsAsTheCommitWindows(t *test
 	}
 }
 
+// TestSessionHasNewContentFromLiveTranscript_SpellsExtractedPathsAsTheCommitWindows
+// is TestSessionHasNewContentFromLiveTranscript_SpellsAsTheCommitWindows for
+// a session whose edit only its transcript names. Extraction spells the path
+// as the worktree's index does, readme.md, and in PostCommit that is not the
+// temporary index the commit of README.md was prepared in. CI's Windows job
+// runs it by its name.
+func TestSessionHasNewContentFromLiveTranscript_SpellsExtractedPathsAsTheCommitWindows(t *testing.T) {
+	t.Parallel()
+	dir, _ := trackedCaseRepo(t)
+	testutil.RunGit(t, dir, "mv", "-f", "README.md", "readme.md")
+	written, err := json.Marshal(filepath.Join(dir, "readme.md"))
+	require.NoError(t, err)
+	transcript := filepath.Join(t.TempDir(), "transcript.jsonl")
+	require.NoError(t, os.WriteFile(transcript, []byte(`{"type":"human","message":{"content":"edit the readme"}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":`+string(written)+`,"content":"edited\n"}}]}}
+`), 0o644))
+	s := &ManualCommitStrategy{}
+	state := &SessionState{
+		SessionID: "extracted-as-commit", WorktreePath: dir, Phase: session.PhaseIdle,
+		AgentType: agent.AgentTypeClaudeCode, TranscriptPath: transcript,
+	}
+	got, err := s.sessionHasNewContentFromLiveTranscript(context.Background(), state, fileSet([]string{"README.md"}))
+	require.NoError(t, err)
+	require.Equal(t, worktreedir.NewCaseProbe(dir).IgnoresCase("."), got,
+		"README.md and readme.md name one file where the filesystem ignores case")
+}
+
 // TestOverlapSpelledAsCommittedWindows is the post-commit side of
 // TestSessionHasNewContentFromLiveTranscript_SpellsAsTheCommitWindows: the
 // overlap gate must see the session's readme.md in the commit of README.md
@@ -293,11 +323,62 @@ func TestCarryForward_KeepsAStagedCaseRenameWindows(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, testutil.RunGit(t, dir, "ls-tree", "-r", "--name-only", paths.MetadataBranchName), "c3c3c3c3c3",
 		"the commit of README.md condensed the session")
+	require.Equal(t, []string{"README.md"}, checkpointFilesTouched(t, "c3c3c3c3c3c3"),
+		"the checkpoint lists the edit as the commit spells it")
 	require.Contains(t, state.FilesTouched, "readme.md", "the staged rename is still the session's to commit")
 
 	testutil.RunGit(t, dir, "commit", "-q", "-m", "commit the rename")
 	require.True(t, filesOverlapWithContent(ctx, state.TouchedFileHashes, headCommit(t, dir), state.FilesTouched),
 		"the commit of the rename should link the session")
+}
+
+// TestCarryForward_DropsACommittedCaseRenameWindows: the session recorded its
+// edit of README.md, and the user commits it with a case-only rename to
+// readme.md. The commit removes README.md, which still opens readme.md where
+// the filesystem ignores case: carry-forward must take the edit as the
+// committed readme.md, not keep the removed name pending for good. CI's
+// Windows job runs it by its name. Uses t.Chdir — do NOT add t.Parallel().
+func TestCarryForward_DropsACommittedCaseRenameWindows(t *testing.T) {
+	dir := setupGitRepo(t)
+	if !worktreedir.NewCaseProbe(dir).IgnoresCase(".") {
+		t.Skip("a case-only rename is two files on a case-sensitive filesystem")
+	}
+	// As git init sets it on such a filesystem; go-git's init does not.
+	testutil.RunGit(t, dir, "config", "core.ignorecase", "true")
+	t.Chdir(dir)
+	s := &ManualCommitStrategy{}
+	sid := "2026-11-11-committed-case-rename"
+	ctx := context.Background()
+	testutil.WriteFile(t, dir, "README.md", "readme\n")
+	testutil.GitAdd(t, dir, "README.md")
+	testutil.GitCommit(t, dir, "Add README.md")
+
+	testutil.WriteFile(t, dir, "README.md", "readme, edited\n")
+	saveTestStep(t, s, dir, sid, "README.md")
+	testutil.RunGit(t, dir, "mv", "-f", "README.md", "readme.md")
+	testutil.GitAdd(t, dir, "readme.md")
+	commitPathsWithTrailer(t, dir, "d4d4d4d4d4d4")
+	require.NoError(t, s.PostCommit(ctx))
+
+	state, err := s.loadSessionState(ctx, sid)
+	require.NoError(t, err)
+	require.Contains(t, testutil.RunGit(t, dir, "ls-tree", "-r", "--name-only", paths.MetadataBranchName), "d4d4d4d4d4",
+		"the commit of the rename condensed the session")
+	require.Empty(t, state.FilesTouched, "the edit and the rename are committed")
+	require.False(t, state.HasPendingFiles())
+}
+
+// checkpointFilesTouched returns the files_touched the checkpoint
+// checkpointID recorded for its first session.
+func checkpointFilesTouched(t *testing.T, checkpointID string) []string {
+	t.Helper()
+	ctx := t.Context()
+	repo, err := OpenRepository(ctx)
+	require.NoError(t, err)
+	defer repo.Close()
+	content, err := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()).ReadSessionContent(ctx, id.MustCheckpointID(checkpointID), 0)
+	require.NoError(t, err)
+	return content.Metadata.FilesTouched
 }
 
 // On a case-sensitive filesystem FilterTrackableChanges keeps both

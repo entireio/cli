@@ -805,6 +805,11 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		return skipped, nil
 	}
 
+	// The session's files are spelled as an index spelled them when they were
+	// recorded or extracted, which the commit can spell otherwise; filtered
+	// as they are, a file the overlap gate found in the commit would be
+	// missing from the checkpoint (overlapSpelledAsCommitted).
+	sessionData.FilesTouched, _ = overlapSpelledAsCommitted(sessionWorktreeRoot(ctx, state), sessionData.FilesTouched, nil, committedFiles)
 	filterFilesTouched(sessionData, committedFiles, state)
 
 	// sessionData.Transcript is left as the raw transcript; only the sanitized,

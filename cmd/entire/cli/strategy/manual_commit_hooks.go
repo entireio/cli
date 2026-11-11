@@ -1926,29 +1926,12 @@ func (s *ManualCommitStrategy) postCommitFilesTouchedBefore(ctx context.Context,
 // the commit holds in another case spelled as the commit spells it
 // (spelledAsCommitted), its hash under that spelling too. PrepareCommitMsg
 // and PostCommit's overlap gate must see the same files, or a trailer would
-// have no checkpoint. Carry-forward keeps the recorded spellings: after a
-// staged rename of README.md to readme.md, a commit of README.md leaves the
-// rename staged, still the session's to commit.
+// have no checkpoint. Carry-forward keeps the recorded spellings but for the
+// ones carriedSpelledAsCommitted respells: after a staged rename of README.md
+// to readme.md, a commit of README.md leaves the rename staged, still the
+// session's to commit.
 func overlapSpelledAsCommitted(repoRoot string, files []string, hashes map[string]string, committedFileSet map[string]struct{}) ([]string, map[string]string) {
-	spelled := spelledAsCommitted(repoRoot, files, committedFileSet)
-	if slices.Equal(spelled, files) {
-		return files, hashes
-	}
-	overlapHashes := maps.Clone(hashes)
-	overlapFiles := make([]string, 0, len(spelled))
-	seen := make(map[string]struct{}, len(spelled))
-	for i, file := range spelled {
-		if hash, ok := hashes[files[i]]; ok && file != files[i] {
-			if _, taken := overlapHashes[file]; !taken {
-				overlapHashes[file] = hash
-			}
-		}
-		if _, dup := seen[file]; !dup {
-			seen[file] = struct{}{}
-			overlapFiles = append(overlapFiles, file)
-		}
-	}
-	return overlapFiles, overlapHashes
+	return respelled(files, spelledAsCommitted(repoRoot, files, committedFileSet), hashes)
 }
 
 // stagedOverlap is stagedFilesOverlapWithContent for state's files and
@@ -2076,11 +2059,12 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 	// condenseAndUpdateState).
 	_, carryForwardSpan := perf.Start(ctx, "carry_forward_files")
 	if handler.condensed && committedAtHome(repoDir, state) {
-		remainingFiles := filesWithRemainingAgentChanges(ctx, repo, touchedFileHashesBefore, commit, filesTouchedBefore, committedFileSet, overlapOpts{
+		carriedFiles, carriedHashes := carriedSpelledAsCommitted(ctx, sessionWorktreeRoot(ctx, state), headTree, filesTouchedBefore, touchedFileHashesBefore, committedFileSet)
+		remainingFiles := filesWithRemainingAgentChanges(ctx, repo, carriedHashes, commit, carriedFiles, committedFileSet, overlapOpts{
 			headTree: headTree,
 		})
 		state.FilesTouched = remainingFiles
-		state.TouchedFileHashes = touchedFileHashesBefore
+		state.TouchedFileHashes = carriedHashes
 		pruneTouchedFileHashes(state)
 		logging.Debug(logCtx, "post-commit: carry-forward decision (content-aware)",
 			slog.String("session_id", state.SessionID),
@@ -2719,12 +2703,13 @@ func (s *ManualCommitStrategy) sessionHasNewContentFromLiveTranscript(ctx contex
 	modifiedFiles := state.FilesTouched
 	if len(modifiedFiles) == 0 {
 		modifiedFiles = s.extractModifiedFilesFromLiveTranscript(ctx, state, uncheckpointedTranscriptStart(state))
-	} else {
-		// A tool hook recorded each path as the worktree's index spelled it
-		// then, which the commit can spell otherwise (spelledAsCommitted);
-		// the extracted ones are already spelled as the commit's index does.
-		modifiedFiles = spelledAsCommitted(sessionWorktreeRoot(ctx, state), modifiedFiles, commitFiles)
 	}
+	// A tool hook recorded each path as the worktree's index spelled it then,
+	// and extraction spells it as the index it reads does: in PostCommit the
+	// worktree's, not the temporary one a path-limited commit was prepared
+	// in. Either can spell a path otherwise than the commit
+	// (spelledAsCommitted).
+	modifiedFiles = spelledAsCommitted(sessionWorktreeRoot(ctx, state), modifiedFiles, commitFiles)
 	if len(modifiedFiles) == 0 {
 		return false, nil
 	}

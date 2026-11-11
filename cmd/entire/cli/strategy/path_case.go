@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"os"
 	"path"
 	"slices"
@@ -14,6 +15,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
+
+	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
 // TrackedSpellings rewrites each of files (repo-relative) that git's index
@@ -100,6 +103,93 @@ func spelledAsCommitted(repoRoot string, files []string, commitFiles map[string]
 		spelled = append(spelled, trackedSpelling(worktree, cases, repoRoot, file, spellings, false))
 	}
 	return spelled
+}
+
+// carriedSpelledAsCommitted returns files, a session's files, and hashes, its
+// recorded hashes, for carry-forward after the commit: a file the commit
+// removed, that the index no longer tracks under that spelling but that still
+// opens the file the index tracks in another case, is carried as the index
+// spells it, its hash too. After the commit of a case-only rename of README.md
+// to readme.md, README.md still opens readme.md where the filesystem ignores
+// case, so carry-forward would find the removed README.md still in the
+// worktree and keep the committed file pending for good. A spelling the index
+// still tracks stays the session's to commit (trackedSpelling), as readme.md
+// does after a commit of README.md that leaves a staged rename to readme.md.
+func carriedSpelledAsCommitted(ctx context.Context, repoRoot string, commitTree *object.Tree, files []string, hashes map[string]string, committedFileSet map[string]struct{}) ([]string, map[string]string) {
+	removed := removedInAnotherCase(repoRoot, commitTree, files, committedFileSet)
+	if len(removed) == 0 {
+		return files, hashes
+	}
+	lists := make([]spellingList, len(removed))
+	for j, i := range removed {
+		lists[j] = spellingList{files: files[i : i+1]}
+	}
+	spelledLists := trackedSpellingsOf(ctx, repoRoot, gitrepo.IndexPathsIgnoringCase, lists...)
+	spelled := slices.Clone(files)
+	for j, i := range removed {
+		spelled[i] = spelledLists[j][0]
+	}
+	return respelled(files, spelled, hashes)
+}
+
+// removedInAnotherCase returns the indexes of the files the commit removed
+// that it also changed in another case and that still open a file in
+// repoRoot: the old spelling of a case-only rename where the filesystem
+// ignores case. An ordinary commit pays a map lookup per file.
+func removedInAnotherCase(repoRoot string, commitTree *object.Tree, files []string, committedFileSet map[string]struct{}) []int {
+	if repoRoot == "" || commitTree == nil || len(files) == 0 || len(committedFileSet) == 0 {
+		return nil
+	}
+	committed := make(map[string]int, len(committedFileSet))
+	for file := range committedFileSet {
+		committed[strings.ToLower(file)]++
+	}
+	var removed []int
+	var worktree *os.Root
+	for i, file := range files {
+		if _, changed := committedFileSet[file]; !changed || committed[strings.ToLower(file)] < 2 {
+			continue
+		}
+		if _, err := commitTree.File(file); err == nil {
+			continue
+		}
+		if worktree == nil {
+			root, err := worktreedir.OpenAt(repoRoot)
+			if err != nil {
+				return nil
+			}
+			worktree = root
+		}
+		if _, err := lstatIn(worktree, repoRoot, file); err == nil {
+			removed = append(removed, i)
+		}
+	}
+	return removed
+}
+
+// respelled returns files with each one replaced by spelled's entry at the
+// same place, once each, and hashes with each recorded hash also under its
+// file's new spelling, unless a hash is recorded under that spelling already.
+// hashes itself is not changed.
+func respelled(files, spelled []string, hashes map[string]string) ([]string, map[string]string) {
+	if slices.Equal(spelled, files) {
+		return files, hashes
+	}
+	spelledHashes := maps.Clone(hashes)
+	spelledFiles := make([]string, 0, len(spelled))
+	seen := make(map[string]struct{}, len(spelled))
+	for i, file := range spelled {
+		if hash, ok := hashes[files[i]]; ok && file != files[i] {
+			if _, taken := spelledHashes[file]; !taken {
+				spelledHashes[file] = hash
+			}
+		}
+		if _, dup := seen[file]; !dup {
+			seen[file] = struct{}{}
+			spelledFiles = append(spelledFiles, file)
+		}
+	}
+	return spelledFiles, spelledHashes
 }
 
 // indexSpellings returns the spellings an index tracks for files, ignoring
