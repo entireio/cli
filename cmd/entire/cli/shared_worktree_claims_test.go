@@ -255,6 +255,17 @@ func TestNamedFiles_ThroughDirectoryLink(t *testing.T) {
 	require.Equal(t, atRoot, newNamedFiles(dir, []string{"top/notes.txt"}, atRoot).only(atRoot), "a link to the root")
 }
 
+// TestNamedFiles_LexicalSpelling covers a transcript that names a file with
+// lexical components git status never shows, such as ./notes.txt.
+func TestNamedFiles_LexicalSpelling(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	forgetSharedRoot(t, dir)
+	modified := []string{"notes.txt", "src/app.go"}
+	named := newNamedFiles(dir, []string{"./notes.txt", "src/./lib/../app.go"}, modified)
+	require.Equal(t, modified, named.only(modified))
+}
+
 func TestCaseFoldKey(t *testing.T) {
 	t.Parallel()
 	same := [][]string{

@@ -144,6 +144,30 @@ func TestSharedCheckout_OverlappingTurnsClaimOnlyTheirOwnFiles(t *testing.T) {
 	assertHeadLinksOnly(t, env, sessB, sessA)
 }
 
+// TestSharedCheckout_TranscriptNameWithDotSlashIsClaimed covers a transcript
+// that names ./a.txt, which git status lists as a.txt. During an overlap the
+// turn keeps only the files its transcript names, and a.txt must still count
+// as named.
+func TestSharedCheckout_TranscriptNameWithDotSlashIsClaimed(t *testing.T) {
+	t.Parallel()
+	env := newSharedCheckoutEnv(t)
+
+	sessA, sessB := startOverlappingTurns(t, env)
+	env.WriteFile("a.txt", "a, edited by A\n")
+	sessA.CreateTranscript("edit a.txt", []FileChange{{Path: "./a.txt", Content: "a, edited by A\n"}})
+	env.WriteFile("b.txt", "b, edited by B\n")
+	sessB.CreateTranscript("edit b.txt", []FileChange{{Path: "b.txt", Content: "b, edited by B\n"}})
+
+	endTurn(t, env, sessA)
+	endTurn(t, env, sessB)
+
+	if got := filesTouched(t, env, sessA); !slices.Contains(got, "a.txt") {
+		t.Errorf("session A FilesTouched = %v, want it to hold a.txt", got)
+	}
+	env.GitCommitWithHooks("Commit a.txt", "a.txt")
+	assertHeadLinksOnly(t, env, sessA, sessB)
+}
+
 // TestSharedCheckout_TranscriptNameInAnotherCaseIsClaimed covers a transcript
 // that spells a path in another case than git does, as an agent on a
 // case-insensitive filesystem (macOS, Windows) can: writing readme.md there

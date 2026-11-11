@@ -145,6 +145,8 @@ func newNamedFiles(repoRoot string, named []string, listed ...[]string) namedFil
 	}
 	resolved := make(map[string]string)
 	for _, f := range named {
+		// git status never spells ./ or a/../ components; a transcript can.
+		f = path.Clean(f)
 		if _, ok := inStatus[f]; !ok {
 			f = resolvedDir(repoRoot, f, resolved)
 		}
