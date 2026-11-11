@@ -72,6 +72,8 @@ func TestString_ShellParameterDefaultsCaughtWithoutScanners(t *testing.T) {
 		// The quoting is read from the start of the text, however long.
 		strings.Repeat("echo ok\n", 200) + "echo \"a\nx \"DB_PASSWORD=${PW:-'$S3CRET'}\" y":                   strings.Repeat("echo ok\n", 200) + "echo \"a\nx \"DB_PASSWORD=REDACTED y",
 		"echo \"" + strings.Repeat("a", 1100) + "\nx\" DB_PASSWORD=${PW:-'$S3CRET'} printenv \"DB_PASSWORD\"": "echo \"" + strings.Repeat("a", 1100) + "\nx\" DB_PASSWORD=REDACTED printenv \"DB_PASSWORD\"",
+		strings.Repeat("echo ok\n", 200) + "echo \"a\nx \"postgres://app:${PW:-'$S3CRET'}@db/app \"y\"":       strings.Repeat("echo ok\n", 200) + "echo \"a\nx \"REDACTED \"y\"",
+		`printf '%s' ok; DB_PASSWORD=${PW:-'$S3CRET'}`:                                                        `printf '%s' ok; DB_PASSWORD=REDACTED`,
 		// An escaped blank does not end a word, so # after it starts no comment.
 		"echo foo\\ #\"a\nx \"DB_PASSWORD=${PW:-'$S3CRET'}\" y\"": "echo foo\\ #\"a\nx \"DB_PASSWORD=REDACTED y\"",
 		// A here-document body is text: its quote opens no string.
@@ -134,6 +136,7 @@ func TestString_DoubleQuotedShellDefaultsPreserved(t *testing.T) {
 		// The quoting is read from the start of the text, however long.
 		strings.Repeat("echo ok\n", 200) + `DB_PASSWORD="${PW:-'$FALLBACK'}"`,
 		"echo \"a\n" + strings.Repeat("b\n", 600) + "DB_PASSWORD=${PW:-'$FALLBACK'} c\"",
+		`printf '%s' ok; DB_PASSWORD="${PW:-'$FALLBACK'}"`,
 		// Closed $'...' strings and command substitutions leave the quoting
 		// after them as it was.
 		`printf $'ok'; DB_PASSWORD="${PW:-'$FALLBACK'}"`,
