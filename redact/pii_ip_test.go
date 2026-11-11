@@ -242,6 +242,33 @@ func TestPIIIntegration_IPUnderNetworkKey(t *testing.T) {
 	}
 }
 
+// A custom pattern named ip that matches inside a built-in IP match keeps its
+// own region: the version-key rule drops the built-in match, and the custom
+// match's text must still be redacted, whatever other regions sort between.
+//
+// Not parallel: sets the package-global PII config.
+func TestPIIIntegration_CustomIPInsideVersionValue(t *testing.T) {
+	tests := []struct {
+		custom map[string]string
+		want   string
+	}{
+		{map[string]string{"ip": `0\.0\.5`}, `{"version":"::ffff:10.[REDACTED_IP]"}`},
+		{map[string]string{"ip": `0\.0\.5`, "marker": `ffff|10`}, `{"version":"::[REDACTED_MARKER]:[REDACTED_MARKER].[REDACTED_IP]"}`},
+	}
+	for _, tt := range tests {
+		ConfigurePII(PIIConfig{Enabled: true, Categories: map[PIICategory]bool{PIIIP: true}, CustomPatterns: tt.custom})
+		t.Cleanup(resetPIIConfig)
+		in := `{"version":"::ffff:10.0.0.5"}`
+		got, err := JSONLContent(in)
+		if err != nil {
+			t.Fatalf("JSONLContent(%s): %v", in, err)
+		}
+		if got != tt.want {
+			t.Errorf("JSONLContent(%s) with %v = %s, want %s", in, tt.custom, got, tt.want)
+		}
+	}
+}
+
 // The same text in two arrays is spliced with one result, and only the copy
 // under a network key redacts the bare address. Map order decides which copy
 // is visited first, so the test repeats to cover both orders.
