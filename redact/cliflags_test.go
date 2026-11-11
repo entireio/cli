@@ -162,9 +162,11 @@ func TestString_CommandLinePasswords(t *testing.T) {
 	})
 }
 
-// Cases found reviewing the upstream PR, kept apart so each table stays
-// readable.
-func TestString_CommandLinePasswordsReviewCases(t *testing.T) {
+// Where a command runs (through ssh, env, env -S, sudo or sshpass, in a
+// subshell, a function body, a case arm, a process substitution, a
+// container or a pod, as an entrypoint), redirections before its flags, and
+// flags and values quoted alone, together or in escaped quotes.
+func TestString_CommandLinePasswordsCommandContextsAndQuotedFlags(t *testing.T) {
 	t.Parallel()
 
 	p := cliTestPassword
@@ -340,9 +342,11 @@ func TestString_CommandLinePasswordsReviewCases(t *testing.T) {
 	})
 }
 
-// More cases found reviewing the upstream PR, in a table of their own so
-// each table stays maintainable.
-func TestString_CommandLinePasswordsMoreReviewCases(t *testing.T) {
+// Values joined to empty strings, clients quoted as ssh's remote command,
+// backtick substitutions and Markdown code spans, the mysql and mariadb
+// utilities, dash-led values after a blank, flags after code commas or a
+// joined flag, az login, and sshpass after verbosity flags.
+func TestString_CommandLinePasswordsJoinedWordsBackticksAndClientVariants(t *testing.T) {
 	t.Parallel()
 
 	p := cliTestPassword
@@ -638,9 +642,11 @@ func TestString_CommandLinePasswordsNestedAndMultilineSubstitutions(t *testing.T
 	})
 }
 
-// Cases from the review of the sixty-second commit: shell grammar inside
-// substitutions and expansions, ssh options and eval arguments that run a
-// command, raw strings in code, and .netrc entries.
+// Shell grammar inside substitutions and expansions, ssh options and eval
+// arguments that run a command, raw and Python triple-quoted strings in
+// code, .netrc entries that printf writes, a client's own short options
+// (mysql --force, podman exec --latest), and programs that run the words
+// after their operands (find -exec, go run).
 func TestString_CommandLinePasswordsShellGrammarCases(t *testing.T) {
 	t.Parallel()
 

@@ -827,7 +827,8 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string, noVal
 		case f.leading:
 			// Only the options right after the name are read, and they
 			// end inside the segment already found, so it is not scanned
-			// again for every name (which took quadratic time).
+			// again for every name, which keeps a line of many names
+			// linear.
 			rest = s[cmd[1]:max(segmentEnd, cmd[1])]
 		default:
 			var ok bool
@@ -4376,9 +4377,9 @@ func (m *caseMemo) memo() substitutionMemo {
 // a command's segment reads on its own may nest, as in
 // cliSubstitutionPattern. A deeper one is text of the command around it,
 // whose flags in it are read as that command's, while the substitutions
-// nested in it are read on their own. Reading every depth on its own made
-// each command read the rest of the substitutions it is in again
-// (mysql -pX $(mysql -pX $(...)) took quadratic time).
+// nested in it are read on their own. Reading every depth on its own would
+// make each command read the rest of the substitutions it is in again, in
+// time quadratic in the length of the line (mysql -pX $(mysql -pX $(...))).
 const maxSubstitutionHeight = 3
 
 // substitutionLen returns the length of the command or process substitution
