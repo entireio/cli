@@ -249,6 +249,56 @@ func detectPII(cfg *PIIConfig, s string) []taggedRegion {
 	return dropNestedPIIRegions(regions)
 }
 
+// dropNestedPIIRegions removes a region that lies inside an earlier one with
+// the same label, so a value counts once: the North American phone rule
+// matches the national part of +39 347 000 0001, and both IP rules match an
+// IPv4-mapped address, the IPv4 rule only its dotted tail (::ffff:10.0.0.1).
+// Regions are sorted by start, so a kept region with the same label that ends
+// at or after r contains it, even when a region with another label sorts
+// between them (a custom pattern matching the 39).
+//
+// An IP region keeps the rule it had and is compared only with the region
+// kept just before it. The version-key rule removes built-in IP matches
+// afterwards, so dropping more custom ip matches inside them would expose
+// their text ({"version":"::ffff:10.0.0.5"} with custom patterns matching
+// ffff and 0.0.5).
+func dropNestedPIIRegions(regions []taggedRegion) []taggedRegion {
+	if len(regions) < 2 {
+		return regions
+	}
+	slices.SortFunc(regions, func(a, b taggedRegion) int {
+		if a.start != b.start {
+			return a.start - b.start
+		}
+		return b.end - a.end
+	})
+	var ends []labelEnd
+	kept := regions[:0]
+	for _, r := range regions {
+		i := slices.IndexFunc(ends, func(e labelEnd) bool { return e.label == r.label })
+		if r.label == labelIP {
+			if n := len(kept); n > 0 && kept[n-1].label == labelIP && r.end <= kept[n-1].end {
+				continue
+			}
+		} else if i >= 0 && r.end <= ends[i].end {
+			continue
+		}
+		if i < 0 {
+			ends = append(ends, labelEnd{r.label, r.end})
+		} else {
+			ends[i].end = max(ends[i].end, r.end)
+		}
+		kept = append(kept, r)
+	}
+	return kept
+}
+
+// labelEnd is the furthest end of the kept regions with one label.
+type labelEnd struct {
+	label string
+	end   int
+}
+
 // compilePIIPatterns builds the pattern list from config.
 // Builtin regexes are pre-compiled package vars; only custom patterns
 // need compilation here.
