@@ -15,6 +15,8 @@ import (
 	"time"
 	"unicode"
 
+	"golang.org/x/text/unicode/norm"
+
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
@@ -119,8 +121,9 @@ func (c statusClaim) withoutUnchangedDirty(files []string) []string {
 //
 // A transcript can also name a file through a symlink to a directory in the
 // worktree, or to its root (alias/data.txt for alias -> real), which git
-// status lists under the directory's own path, real/data.txt. Such a name is matched as its
-// directory resolves.
+// status lists under the directory's own path, real/data.txt. Such a name is
+// matched as its directory resolves. A name that is itself a symlink to a
+// file git status lists (AGENTS.md -> CLAUDE.md) matches that file.
 type namedFiles struct {
 	repoRoot string
 	exact    map[string]struct{}
@@ -151,6 +154,9 @@ func newNamedFiles(repoRoot string, named []string, listed ...[]string) namedFil
 		f = withoutDotComponents(f)
 		if _, ok := inStatus[f]; !ok {
 			f = resolvedDir(repoRoot, f, resolved)
+		}
+		if _, ok := inStatus[f]; !ok {
+			f = listedLinkTarget(repoRoot, f, inStatus)
 		}
 		if _, ok := inStatus[f]; ok {
 			n.exact[f] = struct{}{}
@@ -204,23 +210,40 @@ func dirName(repoRoot, dir string) (string, bool) {
 	}
 	// Not filepath.Join, which would clean ".." away: EvalSymlinks takes it
 	// after the links before it.
-	name, err := resolvedDirName(root, root+string(filepath.Separator)+filepath.FromSlash(dir))
+	name, err := resolvedName(root, root+string(filepath.Separator)+filepath.FromSlash(dir))
 	return name, err == nil
 }
 
-// errOutsideWorktree is resolvedDirName's answer for a directory that
-// resolves outside the worktree.
+// listedLinkTarget returns the file git status lists that file, a symlink in
+// the worktree, leads to, or else file itself.
+func listedLinkTarget(repoRoot, file string, inStatus map[string]struct{}) string {
+	root, err := filepath.Abs(repoRoot)
+	if err != nil {
+		return file
+	}
+	name, err := resolvedName(root, filepath.Join(root, filepath.FromSlash(file)))
+	if err != nil {
+		return file
+	}
+	if _, ok := inStatus[name]; ok {
+		return name
+	}
+	return file
+}
+
+// errOutsideWorktree is resolvedName's answer for a path that resolves
+// outside the worktree.
 var errOutsideWorktree = errors.New("directory resolves outside the worktree")
 
-// resolvedDirName returns the worktree-relative name the directory at absDir
-// resolves to, symlinks and ".." taken as the filesystem takes them, and "."
-// for the worktree root itself (a link such as alias -> .). It fails with
-// errOutsideWorktree when absDir resolves outside the worktree, and with
+// resolvedName returns the worktree-relative name the file or directory at
+// abs resolves to, symlinks and ".." taken as the filesystem takes them, and
+// "." for the worktree root itself (a link such as alias -> .). It fails with
+// errOutsideWorktree when abs resolves outside the worktree, and with
 // another error when it does not resolve.
-func resolvedDirName(repoRoot, absDir string) (string, error) {
-	target, err := filepath.EvalSymlinks(absDir)
+func resolvedName(repoRoot, abs string) (string, error) {
+	target, err := filepath.EvalSymlinks(abs)
 	if err != nil {
-		return "", fmt.Errorf("resolve %s: %w", absDir, err)
+		return "", fmt.Errorf("resolve %s: %w", abs, err)
 	}
 	root, err := filepath.EvalSymlinks(repoRoot)
 	if err != nil {
@@ -281,8 +304,11 @@ func (n namedFiles) namedInOtherCase(file string) bool {
 // Unicode simple case folding, as strings.EqualFold and worktreedir.CaseProbe
 // compare them: each rune becomes the smallest rune it folds with. Lower case
 // is not such a key: Σ lowercases to σ, while ς, which folds with both, stays
-// ς. Sharing a key only makes two names candidates; the filesystem still has
-// to say they name one file.
+// ς. The name is composed (NFC) first, so a decomposed spelling (cafe\u0301)
+// shares the key too: a filesystem that ignores normalization, as macOS's
+// does, opens both as one file, while git on macOS lists the composed one.
+// Sharing a key only makes two names candidates; the filesystem still has to
+// say they name one file.
 func caseFoldKey(name string) string {
 	return strings.Map(func(r rune) rune {
 		smallest := r
@@ -290,7 +316,7 @@ func caseFoldKey(name string) string {
 			smallest = min(smallest, f)
 		}
 		return smallest
-	}, name)
+	}, norm.NFC.String(name))
 }
 
 // deletedInOtherCase is namedInOtherCase for a file the worktree lacks.

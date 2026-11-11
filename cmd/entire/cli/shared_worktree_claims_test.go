@@ -256,6 +256,57 @@ func TestNamedFiles_ThroughDirectoryLink(t *testing.T) {
 	require.Equal(t, atRoot, newNamedFiles(dir, []string{"top/notes.txt"}, atRoot).only(atRoot), "a link to the root")
 }
 
+// TestNamedFiles_ThroughFileLink covers a transcript that names a symlink to
+// a file, AGENTS.md -> CLAUDE.md: git status lists the file the write
+// changed, CLAUDE.md, and the link itself not at all. A link to a file git
+// status does not list names nothing there.
+func TestNamedFiles_ThroughFileLink(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	forgetSharedRoot(t, dir)
+	testutil.WriteFile(t, dir, "CLAUDE.md", "edited through AGENTS.md\n")
+	testutil.WriteFile(t, dir, "docs/other.md", "untouched\n")
+	if err := os.Symlink("CLAUDE.md", filepath.Join(dir, "AGENTS.md")); err != nil {
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
+	require.NoError(t, os.Symlink(filepath.Join("..", "CLAUDE.md"), filepath.Join(dir, "docs", "CLAUDE.md")))
+	require.NoError(t, os.Symlink("other.md", filepath.Join(dir, "docs", "link.md")))
+
+	modified := []string{"CLAUDE.md"}
+	require.Equal(t, modified, newNamedFiles(dir, []string{"AGENTS.md"}, modified).only(modified))
+	require.Equal(t, modified, newNamedFiles(dir, []string{"docs/CLAUDE.md"}, modified).only(modified), "a link in another directory")
+	require.Empty(t, newNamedFiles(dir, []string{"docs/link.md"}, modified).only(modified), "a link to a file git status does not list")
+}
+
+// TestNamedFiles_OtherNormalizationForm covers a transcript that spells a
+// name decomposed (cafe\u0301.txt) where git status lists it composed
+// (caf\u00e9.txt), as git does on macOS, whose filesystem opens both as one
+// file. A hard link stands in for such a filesystem here; without one, the
+// two spellings are two files and must not match.
+func TestNamedFiles_OtherNormalizationForm(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	forgetSharedRoot(t, dir)
+	composed, decomposed := "caf\u00e9.txt", "cafe\u0301.txt"
+	testutil.WriteFile(t, dir, composed, "edited\n")
+	modified := []string{composed}
+	listed, err := os.Lstat(filepath.Join(dir, composed))
+	require.NoError(t, err)
+	if named, err := os.Lstat(filepath.Join(dir, decomposed)); err == nil && os.SameFile(listed, named) {
+		require.Equal(t, modified, newNamedFiles(dir, []string{decomposed}, modified).only(modified), "this filesystem ignores normalization")
+		return
+	}
+	require.Empty(t, newNamedFiles(dir, []string{decomposed}, modified).only(modified), "the decomposed spelling opens no file")
+	if err := os.Link(filepath.Join(dir, composed), filepath.Join(dir, decomposed)); err != nil {
+		t.Skipf("cannot create a hard link here: %v", err)
+	}
+	require.Equal(t, modified, newNamedFiles(dir, []string{decomposed}, modified).only(modified), "both spellings open one file")
+	testutil.WriteFile(t, dir, "other\u00e9.txt", "another file\n")
+	testutil.WriteFile(t, dir, "othere\u0301.txt", "another file\n")
+	other := []string{"other\u00e9.txt"}
+	require.Empty(t, newNamedFiles(dir, []string{"othere\u0301.txt"}, other).only(other), "two files")
+}
+
 // TestNamedFiles_LexicalSpelling covers a transcript that names a file with
 // components git status never shows, such as ./notes.txt. A ".." is taken as
 // the filesystem takes it: after a symlink to a directory, it leaves the
@@ -287,6 +338,8 @@ func TestCaseFoldKey(t *testing.T) {
 		{"Σ.txt", "σ.txt", "ς.txt"},
 		{"README.md", "readme.md", "ReadMe.MD"},
 		{"k.go", "K.go", "\u212a.go"}, // the Kelvin sign folds with k
+		// composed and decomposed
+		{"caf\u00e9.txt", "cafe\u0301.txt", "CAFE\u0301.TXT"},
 	}
 	for _, names := range same {
 		for _, name := range names[1:] {

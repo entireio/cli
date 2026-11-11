@@ -509,7 +509,7 @@ func physicalAgentPath(p, repoRoot string) string {
 		return p
 	}
 	i := strings.LastIndex(p, string(filepath.Separator))
-	name, err := resolvedDirName(repoRoot, p[:i])
+	name, err := resolvedName(repoRoot, p[:i])
 	switch {
 	case errors.Is(err, errOutsideWorktree):
 		return ""
