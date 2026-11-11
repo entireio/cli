@@ -41,6 +41,7 @@ var betterleaksIdentifierComponents = map[string]bool{
 	"browserstack-username.1":              true,
 	"canva-client-id":                      true,
 	"clickhouse-cloud-key-id":              true,
+	"cloudflare-account-id.1":              true,
 	"cloudinary-api-key":                   true,
 	"cloudinary-cloud-name":                true,
 	"ebay-client-id":                       true,
