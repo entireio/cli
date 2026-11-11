@@ -645,11 +645,12 @@ func backupHasTrunkCallback(root *os.Root, hook string) bool {
 	if !info.Mode().IsRegular() || info.Size() > maxTrunkCallbackBackup {
 		return false
 	}
-	data, err := osroot.ReadFileNoFollow(root, name)
+	f, err := osroot.OpenNoFollow(root, name)
 	if err != nil {
 		return false
 	}
-	return linesContainTrunkCallback(data)
+	defer f.Close()
+	return fileHasTrunkCallback(f)
 }
 
 func symlinkBackupHasTrunkCallback(root *os.Root, name string) bool {
@@ -671,6 +672,10 @@ func symlinkBackupHasTrunkCallback(root *os.Root, name string) bool {
 		return false
 	}
 	defer f.Close()
+	return fileHasTrunkCallback(f)
+}
+
+func fileHasTrunkCallback(f *os.File) bool {
 	data, err := io.ReadAll(io.LimitReader(f, maxTrunkCallbackBackup+1))
 	if err != nil || int64(len(data)) > maxTrunkCallbackBackup {
 		return false

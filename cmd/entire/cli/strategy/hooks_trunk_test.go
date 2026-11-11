@@ -10,9 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
-	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -349,27 +347,27 @@ func TestReinstallGitHooks_Pre3051TrunkChainIsOutdated(t *testing.T) {
 	}
 }
 
+func writeOldChain(t *testing.T, dir, hook, backup string) {
+	t.Helper()
+	for _, spec := range buildHookSpecs(bareEntireHookCmd) {
+		content := spec.content
+		if spec.name == hook {
+			content = pre3051ChainedContent(spec.content, spec.name)
+		}
+		if err := os.WriteFile(filepath.Join(dir, spec.name), []byte(content), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, hook+backupSuffix), []byte(backup), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // A chained hook that is not Trunk's launcher must stay Current: rewriting it
 // would drop lines the user added, because a hook carrying Entire's marker is
 // replaced without a backup.
 func TestCheckGitHookState_TrunkChainOutdatedIsSpecific(t *testing.T) {
 	t.Parallel()
-
-	writeOldChain := func(t *testing.T, dir, hook, backup string) {
-		t.Helper()
-		for _, spec := range buildHookSpecs(bareEntireHookCmd) {
-			content := spec.content
-			if spec.name == hook {
-				content = pre3051ChainedContent(spec.content, spec.name)
-			}
-			if err := os.WriteFile(filepath.Join(dir, spec.name), []byte(content), 0o755); err != nil {
-				t.Fatal(err)
-			}
-		}
-		if err := os.WriteFile(filepath.Join(dir, hook+backupSuffix), []byte(backup), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
 
 	t.Run("ordinary backup", func(t *testing.T) {
 		t.Parallel()
@@ -430,32 +428,6 @@ func TestCheckGitHookState_TrunkChainOutdatedIsSpecific(t *testing.T) {
 		}
 		if got := gitHookStateInHooksDir(dir); got != GitHooksOutdated {
 			t.Errorf("old chain to a symlinked Trunk launcher = %v, want GitHooksOutdated", got)
-		}
-	})
-
-	t.Run("FIFO backup does not hang", func(t *testing.T) {
-		t.Parallel()
-		if runtime.GOOS == "windows" {
-			t.Skip("named pipes are not POSIX FIFOs")
-		}
-		dir := t.TempDir()
-		writeOldChain(t, dir, prePushHook, "#!/bin/sh\necho user hook\n")
-		backup := filepath.Join(dir, prePushHook+backupSuffix)
-		if err := os.Remove(backup); err != nil {
-			t.Fatal(err)
-		}
-		if err := syscall.Mkfifo(backup, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		done := make(chan GitHookState, 1)
-		go func() { done <- gitHookStateInHooksDir(dir) }()
-		select {
-		case got := <-done:
-			if got != GitHooksCurrent {
-				t.Errorf("old chain to a FIFO backup = %v, want GitHooksCurrent", got)
-			}
-		case <-time.After(2 * time.Second):
-			t.Fatal("gitHookStateInHooksDir hung on a FIFO backup")
 		}
 	})
 }
