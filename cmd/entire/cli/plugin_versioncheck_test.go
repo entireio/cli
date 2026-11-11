@@ -19,6 +19,7 @@ func setupPluginUpdateCheck(t *testing.T, manifest *PluginManifest, tags []strin
 	t.Helper()
 	withPluginDir(t)
 	t.Setenv(userdirs.EnvConfigDir, t.TempDir())
+	t.Setenv("ENTIRE_NO_AUTO_UPDATE", "")
 	if manifest != nil {
 		if err := SavePluginManifest(manifest); err != nil {
 			t.Fatalf("SavePluginManifest: %v", err)
@@ -52,6 +53,36 @@ func TestPluginUpdateCheck_NotifiesWhenOutdated(t *testing.T) { //nolint:paralle
 		if !strings.Contains(got, want) {
 			t.Errorf("notice %q missing %q", got, want)
 		}
+	}
+}
+
+func TestPluginUpdateCheck_OffSwitch(t *testing.T) { //nolint:paralleltest // mutates env
+	for _, tc := range []struct {
+		name, env, config string
+	}{
+		{name: "env", env: "1"},
+		{name: "config", config: `{"no_auto_update": true}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := setupPluginUpdateCheck(t, brainManifest(), []string{"v0.2.0"}, nil)
+			t.Setenv("ENTIRE_NO_AUTO_UPDATE", tc.env)
+			if tc.config != "" {
+				dir := os.Getenv(userdirs.EnvConfigDir)
+				if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(tc.config), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			var out strings.Builder
+			checkPluginUpdateAndNotify(t.Context(), &out, "brain")
+
+			if *calls != 0 {
+				t.Errorf("tag listings = %d, want 0", *calls)
+			}
+			if out.Len() != 0 {
+				t.Errorf("expected no output, got %q", out.String())
+			}
+		})
 	}
 }
 

@@ -115,3 +115,33 @@ func TestOpenSessionCondensationRepository(t *testing.T) { //nolint:paralleltest
 		assert.Equal(t, mainDir, worktree.Filesystem().Root())
 	})
 }
+
+// An unregistered checkout that shares the repository through commondir is the
+// same repository, so it is a usable home in either direction.
+func TestOpenSessionCondensationRepository_UnregisteredCommonDirCheckout(t *testing.T) { //nolint:paralleltest // uses t.Chdir
+	testutil.IsolateGitConfigEnv(t)
+	mainDir := setupSessionMatchRepo(t)
+	checkout := filepath.Join(resolvedTempDir(t), "workdir")
+	branch := testutil.RunGit(t, mainDir, "rev-parse", "--abbrev-ref", "HEAD")
+	require.NoError(t, os.MkdirAll(filepath.Join(checkout, ".git"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(checkout, ".git", "HEAD"), []byte("ref: refs/heads/"+branch+"\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(checkout, ".git", "commondir"), []byte(filepath.Join(mainDir, ".git")+"\n"), 0o600))
+	testutil.RunGit(t, checkout, "read-tree", "-u", "--reset", "HEAD")
+
+	for _, tc := range []struct {
+		name, current, recorded string
+	}{
+		{name: "recorded home is the unregistered checkout", current: mainDir, recorded: checkout},
+		{name: "current worktree is the unregistered checkout", current: checkout, recorded: mainDir},
+	} {
+		t.Run(tc.name, func(t *testing.T) { //nolint:paralleltest // uses t.Chdir
+			chdirWorktree(t, tc.current)
+			repo, err := openSessionCondensationRepository(t.Context(), &SessionState{WorktreePath: tc.recorded})
+			require.NoError(t, err)
+			defer repo.Close()
+			worktree, err := repo.Worktree()
+			require.NoError(t, err)
+			assert.Equal(t, tc.recorded, worktree.Filesystem().Root())
+		})
+	}
+}

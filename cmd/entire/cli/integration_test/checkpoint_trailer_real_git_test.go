@@ -3,9 +3,7 @@
 package integration
 
 import (
-	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -323,10 +321,5 @@ func TestTrailerAuthority_RealGitCommits(t *testing.T) {
 // the empty and "#" lines that end the message.
 func gitAutoSkipsTrailingComments(t *testing.T) bool {
 	t.Helper()
-	out, err := exec.CommandContext(t.Context(), "git", "--version").Output()
-	require.NoError(t, err)
-	var major, minor int
-	_, err = fmt.Sscanf(string(out), "git version %d.%d", &major, &minor)
-	require.NoError(t, err, "git --version: %q", out)
-	return major > 2 || major == 2 && minor >= 51
+	return gitVersionAtLeast(t, 2, 51)
 }

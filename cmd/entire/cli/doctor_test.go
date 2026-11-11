@@ -2193,3 +2193,51 @@ func TestCheckGitHooks_PrePushBeforeRefList(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, edited, string(data), "doctor --force must keep the user's own lines")
 }
+
+// A --depth=1 fetch of the remote metadata tip hides the real merge base, so
+// doctor sees DISCONNECTED. Its repair must deepen that branch and reconcile
+// again rather than refuse.
+func TestCheckDisconnectedMetadata_DeepFetchesWhenShallowHistoryHidesTheMergeBase(t *testing.T) {
+	// Cannot use t.Parallel(): t.Chdir and IsolateGitConfigEnv (t.Setenv)
+	// modify process-global state.
+	testutil.IsolateGitConfigEnv(t)
+	source := setupGitRepoForPhaseTest(t)
+	testutil.WriteFile(t, source, "f.txt", "init")
+	testutil.GitAdd(t, source, "f.txt")
+	testutil.GitCommit(t, source, "init")
+	defaultBranch := strings.TrimSpace(testutil.RunGit(t, source, "rev-parse", "--abbrev-ref", "HEAD"))
+	testutil.RunGit(t, source, "checkout", "--orphan", paths.MetadataBranchName)
+	testutil.RunGit(t, source, "rm", "-rf", ".")
+	commitMetadata := func(content, message string) {
+		testutil.WriteFile(t, source, "metadata.json", content)
+		testutil.GitAdd(t, source, "metadata.json")
+		testutil.GitCommit(t, source, message)
+	}
+	commitMetadata(`{"v":1}`, "Checkpoint: base")
+	testutil.RunGit(t, source, "checkout", defaultBranch)
+
+	dir := filepath.Join(t.TempDir(), "clone")
+	testutil.RunGit(t, source, "clone", source, dir)
+	trackingRef := "refs/remotes/origin/" + paths.MetadataBranchName
+	testutil.RunGit(t, dir, "update-ref", "refs/heads/"+paths.MetadataBranchName, trackingRef)
+	base := strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", trackingRef))
+
+	testutil.RunGit(t, source, "checkout", paths.MetadataBranchName)
+	commitMetadata(`{"v":2}`, "Checkpoint: teammate 1")
+	commitMetadata(`{"v":3}`, "Checkpoint: teammate 2")
+	testutil.RunGit(t, source, "checkout", defaultBranch)
+	testutil.RunGit(t, dir, "fetch", "--depth=1", "origin", "+refs/heads/"+paths.MetadataBranchName+":"+trackingRef)
+	t.Chdir(dir)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+
+	require.NoError(t, checkDisconnectedMetadata(cmd, true), stderr.String())
+
+	assert.Contains(t, stdout.String(), "Metadata branches: DISCONNECTED")
+	assert.Contains(t, stdout.String(), "Fixed")
+	testutil.RunGit(t, dir, "merge-base", "--is-ancestor", base, trackingRef)
+}

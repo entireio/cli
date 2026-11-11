@@ -395,14 +395,14 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 		return fmt.Errorf("failed to redact transcript: %w", redactErr)
 	}
 
-	writeOpts := attachWriteOptions(ctx, plan, checkpointID, isExistingCheckpoint, sessionID, ag, redactedTranscript, meta, window, author, tokenUsage, opts, reviewSkills)
+	writeOpts := attachWriteOptions(ctx, plan, checkpointID, isExistingCheckpoint, sessionID, ag, redactedTranscript, meta, window, author, tokenUsage, existingState, opts, reviewSkills)
 
 	// ReservedSession routes by the checkpoint ID's backend, as condensation
 	// does: appending to an existing ULID checkpoint under the git-branch
 	// primary must land in its ref, not on the v1 branch where reads never
 	// look for a ULID. A freshly minted ID already matches the primary.
 	if err := cp.store.Write(ctx, cpkg.ReservedSession(writeOpts)); err != nil {
-		return fmt.Errorf("failed to write checkpoint: %w", err)
+		return fmt.Errorf("failed to write checkpoint: %w", withLegacyDivergedFix(err))
 	}
 
 	fmt.Fprintf(w, "Attached session %s\n", sessionID)
@@ -508,7 +508,7 @@ func resolveAttachCheckpoint(ctx, logCtx context.Context, repo *git.Repository, 
 
 // attachWriteOptions is the checkpoint write for one attach: the session's
 // turns in window, and a recorded link when plan names a pushed commit.
-func attachWriteOptions(ctx context.Context, plan attachLinkPlan, checkpointID id.CheckpointID, isExistingCheckpoint bool, sessionID string, ag agent.Agent, transcript redact.RedactedBytes, meta transcriptMetadata, window attachTranscriptWindow, author *GitAuthor, tokenUsage *agent.TokenUsage, opts attachOptions, reviewSkills []string) cpkg.WriteOptions {
+func attachWriteOptions(ctx context.Context, plan attachLinkPlan, checkpointID id.CheckpointID, isExistingCheckpoint bool, sessionID string, ag agent.Agent, transcript redact.RedactedBytes, meta transcriptMetadata, window attachTranscriptWindow, author *GitAuthor, tokenUsage *agent.TokenUsage, existingState *session.State, opts attachOptions, reviewSkills []string) cpkg.WriteOptions {
 	writeOpts := cpkg.WriteOptions{
 		CheckpointID:              checkpointID,
 		SessionID:                 sessionID,
@@ -522,6 +522,8 @@ func attachWriteOptions(ctx context.Context, plan attachLinkPlan, checkpointID i
 		Agent:                     ag.Type(),
 		Model:                     meta.Model,
 		TokenUsage:                tokenUsage,
+		// attachTokens read the ledger into existingState.
+		SessionTokenUsage: strategy.SessionTokenUsage(existingState),
 	}
 	if plan.mode == attachRecordLink && !isExistingCheckpoint {
 		writeOpts.LinkedCommits = []cpkg.LinkedCommit{{SHA: plan.target.Hash.String(), Repo: attachLinkRepo(ctx, plan.holder)}}
@@ -631,8 +633,8 @@ func finishAttachLink(ctx context.Context, w, errW io.Writer, plan attachLinkPla
 // checkpointID as written locally. Anything it can't confirm reads as not
 // there.
 func checkpointOnRemote(ctx context.Context, remote string, checkpointID id.CheckpointID) bool {
-	target, disabled := strategy.CheckpointPushTarget(ctx, remote)
-	return !disabled && confirmCheckpointDelivered(ctx, target, checkpointID) == nil
+	target, disabled, err := strategy.CheckpointPushTarget(ctx, remote)
+	return err == nil && !disabled && confirmCheckpointDelivered(ctx, target, checkpointID) == nil
 }
 
 // redeliverAttachedCheckpoint pushes an existing checkpoint now when its
@@ -1060,9 +1062,12 @@ func attachLinkRepo(ctx context.Context, remote string) string {
 // manual checkpoint push policy the checkpoint waits like any other.
 func pushAttachedCheckpoint(ctx context.Context, w io.Writer, plan attachLinkPlan, checkpointID id.CheckpointID) error {
 	remote := plan.remote
-	target, disabled := strategy.CheckpointPushTarget(ctx, remote)
+	target, disabled, err := strategy.CheckpointPushTarget(ctx, remote)
 	if disabled {
 		return fmt.Errorf("checkpoint %s was written locally but not pushed: push_sessions is turned off in settings, so the link stays invisible to others until the checkpoint is pushed", checkpointID)
+	}
+	if err != nil {
+		return fmt.Errorf("checkpoint %s was written locally but not pushed: %w", checkpointID, err)
 	}
 	if plan.policyErr != nil {
 		return fmt.Errorf("checkpoint %s was written locally but not pushed: %w", checkpointID, plan.policyErr)
@@ -1505,18 +1510,37 @@ func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingS
 	}
 
 	now := time.Now()
-	state := existingState
-	// A trailer rewrite remaps stored state to the new commits; start from
-	// that rather than the copy loaded before it.
-	if fresh, loadErr := stateStore.Load(ctx, sessionID); loadErr == nil && fresh != nil {
-		state = fresh
+
+	// A trailer rewrite remaps stored state to the new commits, and hooks may
+	// have moved it on while attach waited: update the state on disk under the
+	// session lock, so a concurrent hook's write is neither lost nor lost to.
+	mutErr := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+		applyAttachSessionState(ctx, state, now, repo, existingState, agentType, transcriptPath, agentHome, checkpointID, meta, sessionUsage, tokenPos, transcriptEnd, opts, reviewSkills, seedBase)
+		return nil
+	})
+	if mutErr == nil {
+		return nil
 	}
+	if !errors.Is(mutErr, strategy.ErrStateNotFound) {
+		return fmt.Errorf("failed to save session state: %w", mutErr)
+	}
+	state := existingState
 	if state == nil {
 		state = &session.State{
 			SessionID: sessionID,
 			StartedAt: now,
 		}
 	}
+	applyAttachSessionState(ctx, state, now, repo, existingState, agentType, transcriptPath, agentHome, checkpointID, meta, sessionUsage, tokenPos, transcriptEnd, opts, reviewSkills, seedBase)
+	if err := stateStore.Save(ctx, state); err != nil {
+		return fmt.Errorf("failed to save session state: %w", err)
+	}
+	return nil
+}
+
+// applyAttachSessionState updates state, the session's state as stored now,
+// with what attach read and checkpointed.
+func applyAttachSessionState(ctx context.Context, state *session.State, now time.Time, repo *git.Repository, existingState *session.State, agentType types.AgentType, transcriptPath, agentHome string, checkpointID id.CheckpointID, meta transcriptMetadata, sessionUsage *agent.TokenUsage, tokenPos, transcriptEnd int, opts attachOptions, reviewSkills []string, seedBase bool) {
 	// Read before the display offset below moves: TokenStart falls back to it
 	// for state written before the token offset existed.
 	tokenStartOnDisk := state.TokenStart()
@@ -1584,6 +1608,20 @@ func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingS
 		lastCheckpointRead = existingState.LastCheckpointID
 	}
 	switch {
+	case existingState != nil && existingState.TokenLedger.IsActive():
+		// The checkpoint stored what attach's reading of the ledger had grown
+		// by. Mark exactly that as checkpointed: the ledger on disk may have
+		// read further since (a Stop while attach waited), and those tokens
+		// are in no checkpoint yet.
+		read := existingState.TokenLedger
+		if !state.TokenLedger.IsActive() {
+			// Attach's reading activated the ledger; hooks have not yet.
+			state.TokenLedger = read.Clone()
+			state.CheckpointTokenUsage = nil
+		}
+		state.TokenLedger.MarkCheckpointedUpTo(read)
+		strategy.ConsumeAttachTokenWindow(state, tokenPos)
+		state.TokenUsage = state.TokenLedger.Total()
 	case tokenStartOnDisk != countedFrom,
 		!reflect.DeepEqual(pendingOnDisk, pendingRead),
 		!reflect.DeepEqual(pendingChildOnDisk, pendingChildRead),
@@ -1591,31 +1629,7 @@ func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingS
 		logging.Warn(ctx, "attach: session tokens changed while attach was waiting; leaving token state as the hooks set it",
 			slog.Int("counted_from", countedFrom), slog.Int("token_start", tokenStartOnDisk))
 	default:
-		if state.Phase.IsActive() && !noStopComing {
-			// The running turn's Stop adds its tokens from turn start, including
-			// those before this attach, so the whole-transcript total would count
-			// them twice. Keep the hooks' total; take only the cumulative subagent
-			// total, which the re-baseline below must cover. An agent that exited
-			// or went quiet mid-turn sends no Stop, so its session takes the
-			// whole-transcript total below instead.
-			if sessionUsage != nil && sessionUsage.SubagentTokens != nil {
-				total := agent.TokenUsage{}
-				if state.TokenUsage != nil {
-					total = *state.TokenUsage
-				}
-				total.SubagentTokens = sessionUsage.SubagentTokens
-				total.SubagentTokensComplete = sessionUsage.SubagentTokensComplete
-				state.TokenUsage = &total
-			}
-		} else if sessionUsage != nil {
-			// Without a cumulative subagent total of its own, keep the one hooks
-			// recorded so the re-baseline doesn't drop it.
-			if sessionUsage.SubagentTokens == nil && state.TokenUsage != nil {
-				sessionUsage.SubagentTokens = state.TokenUsage.SubagentTokens
-				sessionUsage.SubagentTokensComplete = state.TokenUsage.SubagentTokensComplete
-			}
-			state.TokenUsage = sessionUsage
-		}
+		applyAttachTokenTotal(state, sessionUsage, noStopComing)
 		strategy.ConsumeAttachTokenWindow(state, tokenPos)
 	}
 	if opts.Review {
@@ -1623,11 +1637,36 @@ func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingS
 		state.ReviewSkills = reviewSkills
 		state.ReviewPrompt = reviewPromptForAttach(meta, opts)
 	}
+}
 
-	if err := stateStore.Save(ctx, state); err != nil {
-		return fmt.Errorf("failed to save session state: %w", err)
+// applyAttachTokenTotal sets the session's token total from attach's whole-
+// transcript reading, when the hooks left token state as attach read it.
+func applyAttachTokenTotal(state *session.State, sessionUsage *agent.TokenUsage, noStopComing bool) {
+	if state.Phase.IsActive() && !noStopComing {
+		// The running turn's Stop adds its tokens from turn start, including
+		// those before this attach, so the whole-transcript total would count
+		// them twice. Keep the hooks' total; take only the cumulative subagent
+		// total, which the re-baseline below must cover. An agent that exited
+		// or went quiet mid-turn sends no Stop, so its session takes the
+		// whole-transcript total below instead.
+		if sessionUsage != nil && sessionUsage.SubagentTokens != nil {
+			total := agent.TokenUsage{}
+			if state.TokenUsage != nil {
+				total = *state.TokenUsage
+			}
+			total.SubagentTokens = sessionUsage.SubagentTokens
+			total.SubagentTokensComplete = sessionUsage.SubagentTokensComplete
+			state.TokenUsage = &total
+		}
+	} else if sessionUsage != nil {
+		// Without a cumulative subagent total of its own, keep the one hooks
+		// recorded so the re-baseline doesn't drop it.
+		if sessionUsage.SubagentTokens == nil && state.TokenUsage != nil {
+			sessionUsage.SubagentTokens = state.TokenUsage.SubagentTokens
+			sessionUsage.SubagentTokensComplete = state.TokenUsage.SubagentTokensComplete
+		}
+		state.TokenUsage = sessionUsage
 	}
-	return nil
 }
 
 func reviewPromptForAttach(meta transcriptMetadata, opts attachOptions) string {

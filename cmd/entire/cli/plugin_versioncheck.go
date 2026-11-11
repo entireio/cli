@@ -11,6 +11,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
+	"github.com/entireio/cli/cmd/entire/cli/versioncheck"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 	"golang.org/x/mod/semver"
 )
@@ -52,6 +53,10 @@ var listPluginTagsForUpdateCheck = listRemoteSemverTags
 // on PATH) and pinned installs are skipped — the same installs
 // `entire plugin upgrade` skips.
 func checkPluginUpdateAndNotify(ctx context.Context, w io.Writer, pluginName string) {
+	// The CLI's off switch covers plugins.
+	if versioncheck.AutoUpdateDisabled() {
+		return
+	}
 	cache := loadPluginVersionCache()
 	if time.Since(cache[pluginName]) < pluginCheckInterval {
 		return

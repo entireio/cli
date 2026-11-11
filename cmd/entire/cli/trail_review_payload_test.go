@@ -97,12 +97,14 @@ func TestFindingJSONPreservesKeysAndReturnsNextCursor(t *testing.T) {
 	t.Parallel()
 	var comment api.TrailReviewComment
 	require.NoError(t, json.Unmarshal([]byte(`{"id":"comment-example","repo_id":"repo_example","review_id":"review-example","discussion_id":"thread-example","discussion_message_count":2,"location":{"file_path":"example.go","start_line":2},"suggested_changes":[{"change_type":"manual_instruction","expected_file_path":"example.go"}],"outgoing_links":[{"source_comment_id":"comment-example","target_comment_id":"other-example","link_type":"related"}]}`), &comment))
-	target := trailReviewTarget{Trail: api.TrailResource{OriginalBranch: "feature/example", BodyDocument: &api.TrailBodyDocument{TextSnapshot: "Description"}}}
+	var resource api.TrailResource
+	require.NoError(t, json.Unmarshal([]byte(`{"original_branch":"feature/example","body_document":{"text_snapshot":"Description"},"checkpoint_count":3,"requested_reviewers":["alice"],"assignees":["retired"],"comment_count":4,"unresolved_count":2}`), &resource))
+	target := trailReviewTarget{Trail: resource}
 	for _, cursor := range []string{"opaque-next", ""} {
 		t.Run(cursor, func(t *testing.T) {
 			t.Parallel()
 			var out bytes.Buffer
-			require.NoError(t, encodeTrailReviewJSON(&out, target, []api.TrailReviewComment{comment}, cursor, trailReviewCommentCounts{}))
+			require.NoError(t, encodeTrailReviewJSON(&out, target, []api.TrailReviewComment{comment}, cursor, trailReviewCommentCounts{Open: 2}, nil))
 			var got map[string]json.RawMessage
 			require.NoError(t, json.Unmarshal(out.Bytes(), &got))
 			if cursor != "" {
@@ -119,6 +121,16 @@ func TestFindingJSONPreservesKeysAndReturnsNextCursor(t *testing.T) {
 			requireCamelCaseKeys(t, got["trail"])
 			require.Contains(t, string(got["trail"]), `"originalBranch": "feature/example"`)
 			require.Contains(t, string(got["trail"]), `"textSnapshot": "Description"`)
+			var change map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(got["trail"], &change))
+			for _, retired := range []string{"assignees", "commentCount", "unresolvedCount"} {
+				require.NotContains(t, change, retired)
+			}
+			require.JSONEq(t, `3`, string(change["checkpointCount"]))
+			require.JSONEq(t, `["alice"]`, string(change["requestedReviewers"]))
+			var counts map[string]int
+			require.NoError(t, json.Unmarshal(got["counts"], &counts))
+			require.Equal(t, 2, counts["Open"])
 		})
 	}
 }

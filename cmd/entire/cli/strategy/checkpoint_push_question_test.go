@@ -1,6 +1,8 @@
 package strategy
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -259,5 +261,59 @@ func TestFirstPushQuestion_ManualRefusesPushWhoseRefsWereNotSaved(t *testing.T) 
 
 	require.ErrorIs(t, err, ErrOuterPushUncheckable)
 	assert.Contains(t, err.Error(), "you just chose the manual checkpoint push policy")
+	assertRefsAbsentFromRemote(t, bareDir, refs, "Entire's own flush sends nothing either")
+}
+
+// failCheckpointPushPolicySave makes the next policy save fail: a directory
+// where the save takes its lock cannot be opened as the lock file.
+func failCheckpointPushPolicySave(t *testing.T, workDir string) {
+	t.Helper()
+	lock := filepath.Join(workDir, ".git", filepath.FromSlash(settings.CheckpointPushPolicyFile)+".lock")
+	require.NoError(t, os.MkdirAll(lock, 0o750))
+}
+
+// An answer of manual that cannot be saved still holds this push: the policy
+// on disk stays unset, which reads as automatic.
+func TestFirstPushQuestion_UnsavedManualAnswerHoldsThisPush(t *testing.T) {
+	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	prepareGitRefsPrePush(t, workDir, bareDir)
+	answerFirstPushQuestionWith(t, checkpointPushAnswerManual)
+	failCheckpointPushPolicySave(t, workDir)
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	enqueueRefs(t, repo, refs)
+
+	stderr := captureStderrWriter(t)
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(WithPrePushRefs(t.Context(), nil), "origin"))
+
+	assert.Contains(t, stderr.String(), "No checkpoints were pushed: could not save the checkpoint push policy")
+	stored, err := settings.CheckpointPushPolicyStored(t.Context())
+	require.NoError(t, err)
+	assert.False(t, stored, "the failed save leaves the policy unset")
+	assertRefsAbsentFromRemote(t, bareDir, refs, "an unsaved answer of manual still holds this push")
+}
+
+// The re-check after an answer of manual follows the answer, not the stored
+// policy, so a failed save cannot let the push send what was just held.
+func TestFirstPushQuestion_UnsavedManualAnswerRefusesPushCarryingCheckpointRefs(t *testing.T) {
+	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	prepareGitRefsPrePush(t, workDir, bareDir)
+	answerFirstPushQuestionWith(t, checkpointPushAnswerManual)
+	failCheckpointPushPolicySave(t, workDir)
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	enqueueRefs(t, repo, refs)
+
+	outer := refs[0].String()
+	tip := strings.TrimSpace(testutil.RunGit(t, workDir, "rev-parse", outer))
+	ctx := WithPrePushRefs(t.Context(), []PrePushRef{{
+		LocalRef: outer, LocalSHA: tip, RemoteRef: outer, RemoteSHA: plumbing.ZeroHash.String(),
+	}})
+	captureStderrWriter(t)
+	err = NewManualCommitStrategy().PrePushFromGitHook(ctx, "origin")
+
+	require.ErrorIs(t, err, ErrOuterPushCarriesHeldCheckpoints)
 	assertRefsAbsentFromRemote(t, bareDir, refs, "Entire's own flush sends nothing either")
 }

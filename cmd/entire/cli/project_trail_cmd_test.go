@@ -137,6 +137,7 @@ func TestProjectTrailShowFollowsParentAcrossCells(t *testing.T) {
 		item := projectTrailTestResource()
 		item.URL = "https://entire.io/gh/acme/-/trails/42/"
 		item.Changes[0].Repository = "widget"
+		item.Changes[0].Base = "release/1.2"
 		item.Changes = append(item.Changes,
 			api.ChangeSummary{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAY", Repository: "api", Number: 3, Branch: "feature/a"},
 			api.ChangeSummary{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAZ", RepositoryID: "repo-hidden", Number: 9},
@@ -168,6 +169,8 @@ func TestProjectTrailShowFollowsParentAcrossCells(t *testing.T) {
 	require.Len(t, item.Changes, 4)
 	require.Equal(t, "https://entire.io/gh/acme/-/trails/42/changes/widget/7", item.Changes[0].URL)
 	require.True(t, item.Changes[0].Current, "the branch's own change is current")
+	require.Equal(t, "release/1.2", item.Changes[0].Base, "a change's base is the branch it merges into")
+	require.Empty(t, item.Changes[1].Base)
 	require.Equal(t, "https://entire.io/gh/acme/-/trails/42/changes/api/3", item.Changes[1].URL)
 	require.False(t, item.Changes[1].Current, "a same-named branch in another repository is not current")
 	require.Empty(t, item.Changes[2].URL, "a change without a repository name has no URL")
@@ -179,8 +182,8 @@ func TestProjectTrailShowFollowsParentAcrossCells(t *testing.T) {
 	require.NoError(t, err)
 	require.Regexp(t, `(?s)^Trail #42: Project intent\n  ID:        `+projectTrailTestID+`\n.*`+
 		`  URL:       https://entire\.io/gh/acme/-/trails/42/\n  Assignees: alice\n  Changes:\n`+
-		`    CHANGE +BRANCH +STATUS +URL\n`+
-		`    widget/7 \(current\) +feature/a +https://entire\.io/gh/acme/-/trails/42/changes/widget/7\n`+
+		`    CHANGE +BRANCH +BASE +STATUS +URL\n`+
+		`    widget/7 \(current\) +feature/a +release/1\.2 +https://entire\.io/gh/acme/-/trails/42/changes/widget/7\n`+
 		`    api/3 +feature/a +https://entire\.io/gh/acme/-/trails/42/changes/api/3\n`+
 		`    -\n`+
 		`    - +feature/dots\n`+
