@@ -656,16 +656,19 @@ func insideDoubleQuotes(s string, start, end int) bool {
 }
 
 // endsInDoubleQuotes reports whether a shell reading prefix from its start
-// ends inside a double quoted string. Single quoted strings and backslash
-// escapes are skipped as the shell skips them, so printf '%s\n' "x" and
-// echo \"x\" read as they run. A command substitution or backquote starts a
-// new quoting context ("$(DB_PASSWORD=${PW:-'$S3CRET'} env)"), and an
-// unclosed single quote or a trailing backslash leaves the next byte's
-// meaning open, so they report false.
+// ends inside a double quoted string. Single quoted strings, backslash
+// escapes and comments are skipped as the shell skips them, so
+// printf '%s\n' "x", echo \"x\" and a # comment holding a quote read as they
+// run. A command substitution or backquote starts a new quoting context
+// ("$(DB_PASSWORD=${PW:-'$S3CRET'} env)"), a $'...' string can escape a single
+// quote, and an unclosed single quote, a trailing backslash or a comment that
+// runs to the end of prefix leave the next byte's meaning open, so they
+// report false.
 func endsInDoubleQuotes(prefix string) bool {
 	inDouble := false
 	for i := 0; i < len(prefix); i++ {
-		switch c := prefix[i]; {
+		c := prefix[i]
+		switch {
 		case c == '`' || c == '$' && strings.HasPrefix(prefix[i+1:], "("):
 			return false
 		case c == '\\':
@@ -674,12 +677,21 @@ func endsInDoubleQuotes(prefix string) bool {
 			}
 		case c == '"':
 			inDouble = !inDouble
-		case c == '\'' && !inDouble:
+		case inDouble:
+		case c == '$' && strings.HasPrefix(prefix[i+1:], "'"):
+			return false
+		case c == '\'':
 			closing := strings.IndexByte(prefix[i+1:], '\'')
 			if closing < 0 {
 				return false
 			}
 			i += 1 + closing
+		case c == '#' && (i == 0 || strings.IndexByte(" \t\n\r;&|()", prefix[i-1]) >= 0):
+			lineEnd := strings.IndexAny(prefix[i:], "\n\r")
+			if lineEnd < 0 {
+				return false
+			}
+			i += lineEnd
 		}
 	}
 	return inDouble
