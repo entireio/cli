@@ -771,6 +771,22 @@ func TestString_CommandLinePasswordsShellGrammarCases(t *testing.T) {
 		{name: "short flag in a Go slice literal", input: `exec.Command("mysql", []string{"-u", "root", "-p` + p + `"}...)`, want: `exec.Command("mysql", []string{"-u", "root", "-pREDACTED"}...)`},
 		{name: "client run by nice", input: "nice -n 5 mysql -p" + p, want: "nice -n 5 mysql -pREDACTED"},
 		{name: "client run by nice with an old-style adjustment", input: "nice -5 mysql -p" + p, want: "nice -5 mysql -pREDACTED"},
+		// passwords spelled like a metavar or a pass number, adjacent
+		// strings in code, quoted pieces after a template, go tool, and
+		// .netrc fields that look like prose or end in an escaped keyword
+		{name: "capitals that hold PASS in a word after a short flag", input: "mysql -uroot -pBYPASS db", want: "mysql -uroot -pREDACTED db"},
+		{name: "capitals that end in PASS after a short flag", input: "mysql -pCOMPASS", want: "mysql -pREDACTED"},
+		{name: "two digits after --pass", input: "redis-cli --pass 12", want: "redis-cli --pass REDACTED"},
+		{name: "two digits after curl --pass", input: "curl --pass 42 sftp://example.com", want: "curl --pass REDACTED sftp://example.com"},
+		{name: "long flag value of adjacent Python strings", input: `subprocess.run(["wget", "--password", "` + p[:3] + `" "` + p[3:] + `", url])`, want: `subprocess.run(["wget", "--password", "REDACTED", url])`},
+		{name: "long flag value after an empty adjacent Python string", input: `subprocess.run(["wget", "--password", "" "` + p + `", url])`, want: `subprocess.run(["wget", "--password", "REDACTED", url])`},
+		{name: "short flag value of adjacent Python strings on two lines", input: "subprocess.run([\"redis-cli\", \"-a\", \"" + p[:3] + "\"\n    \"" + p[3:] + "\"])", want: `subprocess.run(["redis-cli", "-a", "REDACTED"])`},
+		{name: "quoted piece after a template", input: `tool --password={{ .Values.prefix }}"` + p + `"`, want: "tool --password=REDACTED"},
+		{name: "quoted piece after a template in an sh -c string", input: `sh -c "tool --password={{ .Values.prefix }}'` + p + `'"`, want: `sh -c "tool --password=REDACTED"`},
+		{name: "client run by go tool", input: "go tool mysql -p" + p, want: "go tool mysql -pREDACTED"},
+		{name: "netrc password that is a prose word ending the entry", input: "machine api.example.com login alice password first", want: "machine api.example.com login alice password REDACTED"},
+		{name: "netrc login that is a prose word", input: "machine api.example.com login the password " + p, want: "machine api.example.com login the password REDACTED"},
+		{name: "netrc password that ends in an escaped keyword", input: `machine db.internal login me password ` + p + `\nmachine`, want: "machine db.internal login me password REDACTED"},
 	})
 }
 
@@ -1225,7 +1241,15 @@ func TestString_CommandLinePasswordListAndQuotingNonSecretsPreserved(t *testing.
 		"tool --password={{.Values.pw}}",
 		"  --password PASSWORD   the password",
 		"mysql -uUSER -pPASSWORD db",
+		"mysql -uUSER -pDB_PASS db",
 		"tool --pass 3",
+		"x264 --pass 2 -o out.mkv in.y4m",
+		// a template that fills the whole value in before the quote that
+		// closes the string holding the command, also in a JSON string
+		`sh -c "tool --password={{ .Values.password }}" && echo "done"`,
+		`{"command":"sh -c \"tool --password={{ .Values.password }}\""}`,
+		// adjacent empty strings in code
+		`subprocess.run(["wget", "--password", "" "", url])`,
 		// prose with each keyword of an entry, whose login is a word that
 		// joins a sentence, or whose machine ends a clause
 		"Enter machine name, login and password below.",
