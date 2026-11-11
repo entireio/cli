@@ -10,6 +10,7 @@ import (
 	"maps"
 	"os"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/go-git/go-git/v6"
@@ -219,7 +220,7 @@ func (marker inheritedTrailers) recordedOn() string {
 // existing checkpoint, which may simply not be in this clone's store yet.
 // With nothing inherited it clears any marker a commit that never happened
 // left, but not one HEAD's commit, or a commit below it, may still be waiting
-// to take (markerAwaitsCommitOnHead).
+// to take (markerAwaitsCommitOnHead, which also reads HEAD's reflog).
 func recordInheritedTrailers(ctx context.Context, inherited []id.CheckpointID) {
 	recordInheritedMarker(ctx, inherited, nil)
 }
@@ -236,9 +237,10 @@ func recordInheritedMarker(ctx context.Context, inherited []id.CheckpointID, red
 			return // absent is the usual case
 		}
 		chain := headFirstParents(ctx, maxCommitsInFlight)
+		reflog := headReflog(ctx)
 		release := lockStampRecords(ctx, root)
 		defer release()
-		if !markerAwaitsCommitOnHead(root, chain) {
+		if !markerAwaitsCommitOnHead(root, chain, reflog) {
 			_ = osroot.RemoveNoSymlinks(root, inheritedTrailersFile) //nolint:errcheck // absent once post-commit took it
 		}
 		return
@@ -257,10 +259,14 @@ func recordInheritedMarker(ctx context.Context, inherited []id.CheckpointID, red
 // one that HEAD's commit, or a commit below it, recorded and whose post-commit
 // has not taken it yet: git runs post-commit after the commit is made, so the
 // next commit's prepare can run first. That is a marker for a commit on one of
-// HEAD's ancestors, recorded by a prepare that did not run on HEAD itself.
-// chain is HEAD and its first parents (headFirstParents). Callers hold the
+// HEAD's ancestors, recorded by a prepare that did not run on HEAD itself,
+// with only commits moving HEAD since one was made on the HEAD that prepare
+// ran on. A prepare whose commit was cancelled leaves a marker the same shape
+// once HEAD is reset back onto a commit on top of it, and an amend of that
+// commit would take it. chain is HEAD and its first parents
+// (headFirstParents), reflog is HEAD's reflog (headReflog). Callers hold the
 // stamp-records lock.
-func markerAwaitsCommitOnHead(root *os.Root, chain []string) bool {
+func markerAwaitsCommitOnHead(root *os.Root, chain []string, reflog []reflogEntry) bool {
 	if len(chain) < 2 {
 		return false
 	}
@@ -268,9 +274,30 @@ func markerAwaitsCommitOnHead(root *os.Root, chain []string) bool {
 	if !ok || marker.recordedOn() == chain[0] {
 		return false
 	}
-	return slices.ContainsFunc(marker.Parents, func(parent string) bool {
+	onHead := slices.ContainsFunc(marker.Parents, func(parent string) bool {
 		return slices.Contains(chain[1:], parent)
 	})
+	return onHead && committedOnSince(reflog, marker.recordedOn())
+}
+
+// committedOnSince reports whether HEAD's reflog, newest first, shows only
+// commits since a commit made on base. Resets that did not move HEAD are
+// skipped, as replacedCommits skips them. Any other entry, or a reflog that
+// does not reach such a commit (none kept, or GIT_REFLOG_ACTION renamed the
+// commits), says no, so the marker is cleared as it was before it could wait.
+func committedOnSince(reflog []reflogEntry, base string) bool {
+	for _, e := range reflog {
+		if strings.HasPrefix(e.msg, "reset:") && e.oldHash == e.newHash {
+			continue // unstaging or a stash: HEAD did not move
+		}
+		if !strings.HasPrefix(e.msg, "commit") {
+			return false
+		}
+		if e.oldHash.String() == base {
+			return true
+		}
+	}
+	return false
 }
 
 func readInheritedMarkerIn(root *os.Root) (inheritedTrailers, bool) {
