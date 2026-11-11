@@ -231,24 +231,72 @@ func TestCreateAndAwaitMirror_AsyncFailures(t *testing.T) {
 	})
 }
 
-func TestCreateAndAwaitMirror_AsyncLocationValidation(t *testing.T) {
+// TestCreateAndAwaitMirror_AsyncIgnoresLocation pins that the placement poll
+// is addressed by the 202 body's requestId on the client's own base URL, and
+// that the Location header — optional in the spec — is never read. A missing
+// or unparseable header must not fail a request whose body is fine, and a
+// header naming another origin must not become the place the bearer is sent.
+func TestCreateAndAwaitMirror_AsyncIgnoresLocation(t *testing.T) {
 	useFastMirrorPolling(t)
 
-	for _, location := range []string{"", ":", "/api/v1/mirrors/not-a-request", "/api/v1/mirror-requests/not-a-uuid", mirrorRequestPath() + "?extra=true"} {
-		t.Run("invalid Location "+location, func(t *testing.T) {
-			client := newMirrorRequestClient(t, func(w http.ResponseWriter, _ *http.Request) {
-				if location != "" {
-					w.Header().Set("Location", location)
+	var foreignHits atomic.Int32
+	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		foreignHits.Add(1)
+		w.WriteHeader(http.StatusTeapot)
+	}))
+	t.Cleanup(foreign.Close)
+
+	for _, location := range []string{
+		"",
+		":",
+		"/api/v1/mirrors/not-a-request",
+		"/api/v1/mirror-requests/not-a-uuid",
+		mirrorRequestPath() + "?extra=true",
+		"/prefixed" + mirrorRequestPath(),
+		foreign.URL + mirrorRequestPath(),
+	} {
+		t.Run("Location "+location, func(t *testing.T) {
+			var polls atomic.Int32
+			client := newMirrorRequestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case mirrorRequestsAPIPath:
+					if location != "" {
+						w.Header().Set("Location", location)
+					}
+					writeJSONResponse(t, w, http.StatusAccepted, &coreapi.MirrorRequest{RequestId: testMirrorRequestID, Status: coreapi.MirrorRequestStatusPending})
+				case mirrorRequestPath():
+					polls.Add(1)
+					writeSuccessfulMirrorRequest(t, w)
+				default:
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 				}
-				writeJSONResponse(t, w, http.StatusAccepted, &coreapi.MirrorRequest{RequestId: testMirrorRequestID, Status: coreapi.MirrorRequestStatusPending})
 			})
 
-			_, err := addAndAwaitMirror(t.Context(), client, "owner", "repo", "cluster", mirrorAddOptions{
-				timeout: time.Second,
+			outcome, err := addAndAwaitMirror(t.Context(), client, "owner", "repo", "cluster", mirrorAddOptions{
+				noWait: true, timeout: time.Second,
 			})
-			require.ErrorContains(t, err, "Location")
+			require.NoError(t, err)
+			require.Equal(t, "mirror-1", outcome.created.MirrorId)
+			require.Equal(t, int32(1), polls.Load())
 		})
 	}
+	require.Zero(t, foreignHits.Load(), "a Location naming another origin must never be dialled")
+}
+
+func TestCreateAndAwaitMirror_AsyncMissingRequestID(t *testing.T) {
+	useFastMirrorPolling(t)
+
+	client := newMirrorRequestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != mirrorRequestsAPIPath {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		writeJSONResponse(t, w, http.StatusAccepted, &coreapi.MirrorRequest{Status: coreapi.MirrorRequestStatusPending})
+	})
+
+	_, err := addAndAwaitMirror(t.Context(), client, "owner", "repo", "cluster", mirrorAddOptions{
+		timeout: time.Second,
+	})
+	require.ErrorContains(t, err, "missing a request id")
 }
 
 // pollPhaseTimeout is the deadline for the subtests that assert WHICH phase a
@@ -280,7 +328,6 @@ func TestCreateAndAwaitMirror_AsyncTimeout(t *testing.T) {
 		client := newMirrorRequestClient(t, func(w http.ResponseWriter, r *http.Request) {
 			switch {
 			case r.URL.Path == mirrorRequestsAPIPath:
-				w.Header().Set("Location", mirrorRequestPath())
 				writeSuccessfulMirrorRequestWithStatus(t, w, http.StatusAccepted)
 			case strings.HasPrefix(r.URL.Path, "/api/v1/mirrors/"):
 				writeJSONResponse(t, w, http.StatusOK, &coreapi.Mirror{Status: coreapi.NewOptMirrorStatus(coreapi.MirrorStatusProcessing)})
@@ -307,10 +354,12 @@ func TestCreateAndAwaitMirror_AsyncTimeout(t *testing.T) {
 			}
 		})
 
-		_, err := addAndAwaitMirror(t.Context(), client, "owner", "repo", "cluster", mirrorAddOptions{
+		outcome, err := addAndAwaitMirror(t.Context(), client, "owner", "repo", "cluster", mirrorAddOptions{
 			timeout: pollPhaseTimeout,
 		})
 		require.ErrorContains(t, err, "timed out waiting for mirror placement")
+		require.Nil(t, outcome.created)
+		require.Equal(t, testMirrorRequestID, outcome.requestID, "the accepted request's id must survive a placement timeout")
 	})
 }
 
@@ -341,10 +390,14 @@ func TestCreateAndAwaitMirror_AsyncCrossJurisdiction(t *testing.T) {
 		}))
 		t.Cleanup(homeCore.Close)
 
+		var wrongCorePolls atomic.Int32
 		wrongCore := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/.well-known/entire-federation" {
 				writeJSONResponse(t, w, http.StatusOK, map[string]any{"peer_auth_hosts": []string{homeCore.URL}})
 				return
+			}
+			if r.URL.Path == mirrorRequestPath() {
+				wrongCorePolls.Add(1)
 			}
 			w.WriteHeader(http.StatusMisdirectedRequest)
 			if _, err := fmt.Fprintf(w, `{"home_core_url":%q}`, homeCore.URL); err != nil {
@@ -361,6 +414,12 @@ func TestCreateAndAwaitMirror_AsyncCrossJurisdiction(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, "mirror-1", outcome.created.MirrorId)
 		require.Equal(t, []string{"Bearer original-token", "Bearer home-token", "Bearer home-token"}, homeAuths)
+		// The poll is sent to the configured core and reaches the home core by
+		// following its 421, every time. Short-circuiting to the home core
+		// skips the follow, and the follower only treats the home core's bare
+		// 401 as an exchange trigger on a hop it reached by following a 421 —
+		// so a short-circuited poll dies once the exchanged token expires.
+		require.Equal(t, int32(1), wrongCorePolls.Load())
 	})
 }
 
@@ -413,7 +472,6 @@ func TestCreateAndAwaitMirror_AsyncCancellation(t *testing.T) {
 			client := newMirrorRequestClient(t, func(w http.ResponseWriter, r *http.Request) {
 				switch {
 				case r.URL.Path == mirrorRequestsAPIPath:
-					w.Header().Set("Location", mirrorRequestPath())
 					if phase == "clone" {
 						writeSuccessfulMirrorRequestWithStatus(t, w, http.StatusAccepted)
 					} else {
@@ -557,7 +615,6 @@ func TestCreateMirrors_AsyncKeepsConcurrencyAndFailuresIndependent(t *testing.T)
 			writeCoreProblem(t, w, http.StatusBadRequest, "repository rejected")
 			return
 		}
-		w.Header().Set("Location", mirrorRequestPath())
 		writeSuccessfulMirrorRequestWithStatus(t, w, http.StatusAccepted)
 	})
 	previousClient := clusterCoreClient
@@ -626,7 +683,6 @@ func newMirrorRequestClient(t *testing.T, handler http.HandlerFunc) *coreapi.Cli
 
 func writeAcceptedMirrorRequest(t *testing.T, w http.ResponseWriter) {
 	t.Helper()
-	w.Header().Set("Location", mirrorRequestPath())
 	writeJSONResponse(t, w, http.StatusAccepted, &coreapi.MirrorRequest{RequestId: testMirrorRequestID, Status: coreapi.MirrorRequestStatusPending})
 }
 
