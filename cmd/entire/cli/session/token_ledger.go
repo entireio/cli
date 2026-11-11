@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"maps"
+	"reflect"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -26,12 +27,10 @@ type TokenLedger struct {
 	// Children is each subagent's highest total, so one whose file is
 	// deleted keeps its last total.
 	Children map[string]*agent.TokenUsage `json:"children,omitempty"`
-	// UncountedChildren holds each subagent the latest reading knew of but
-	// could not count, so the children's total is not exact: Children lacks
-	// it, or has only a total it may have grown past. One never counted
-	// stays here, even once no reading lists it (its file deleted), until a
-	// reading counts it; one counted before leaves when it stops being
-	// listed, keeping its last total as a deleted file's does.
+	// UncountedChildren holds each subagent a reading knew of but could not
+	// count, so the children's total is not exact: Children lacks it, or has
+	// only a total it may have grown past. It stays here, even once no
+	// reading lists it (its file deleted), until a reading counts it.
 	UncountedChildren map[string]bool `json:"uncounted_children,omitempty"`
 	// Cursor lets the next reading continue where the last one stopped.
 	Cursor json.RawMessage `json:"cursor,omitempty"`
@@ -73,13 +72,6 @@ func (l *TokenLedger) Observe(obs agent.CumulativeObservation) {
 			l.Children = make(map[string]*agent.TokenUsage)
 		}
 		l.Children[id] = cloneUsage(usage)
-	}
-	for id := range l.UncountedChildren {
-		if _, listed := obs.Children[id]; !listed {
-			if _, counted := l.Children[id]; counted {
-				delete(l.UncountedChildren, id)
-			}
-		}
 	}
 	if len(l.UncountedChildren) == 0 {
 		l.UncountedChildren = nil
@@ -138,11 +130,31 @@ func (l *TokenLedger) MarkCheckpointed() {
 }
 
 // MarkCheckpointedUpTo marks only what o, an earlier copy of this ledger,
-// had read: readings made since stay pending.
+// had read: readings made since stay pending. A checkpoint marked since o
+// was read (a hook's, while attach waited) can hold more than o did, and the
+// marks keep whichever is higher, so the subagents either one could not
+// count stay unknown.
 func (l *TokenLedger) MarkCheckpointedUpTo(o *TokenLedger) {
+	uncounted := maps.Clone(o.UncountedChildren)
+	if l.markedSince(o) {
+		for id := range l.CheckpointedUncounted {
+			if uncounted == nil {
+				uncounted = make(map[string]bool)
+			}
+			uncounted[id] = true
+		}
+	}
 	l.Checkpointed = agent.MaxTokenUsage(l.Checkpointed, o.mainTotal())
 	l.CheckpointedChildren = agent.MaxTokenUsage(l.CheckpointedChildren, o.childrenTotal())
-	l.CheckpointedUncounted = maps.Clone(o.UncountedChildren)
+	l.CheckpointedUncounted = uncounted
+}
+
+// markedSince reports whether a checkpoint was marked on l after o, an
+// earlier copy of it, was taken.
+func (l *TokenLedger) markedSince(o *TokenLedger) bool {
+	return !reflect.DeepEqual(l.Checkpointed, o.Checkpointed) ||
+		!reflect.DeepEqual(l.CheckpointedChildren, o.CheckpointedChildren) ||
+		!maps.Equal(l.CheckpointedUncounted, o.CheckpointedUncounted)
 }
 
 // Clone returns a deep copy.

@@ -75,6 +75,15 @@ type UsageCounter interface {
 	Totals(ctx context.Context, in CumulativeTokenInput) (total *TokenUsage, children map[string]*TokenUsage)
 }
 
+// UnreadFileCounter is a UsageCounter told which files a reading listed but
+// could not read, so a total it counted from one earlier is not taken as the
+// file's current one (a Claude Code subagent's).
+type UnreadFileCounter interface {
+	UsageCounter
+	// Unread reports that path could not be read this reading.
+	Unread(path string)
+}
+
 // UsageCounterSource is an agent whose session totals ReadCumulativeUsage can
 // read. Built-in agents only.
 type UsageCounterSource interface {
@@ -156,30 +165,11 @@ func ReadCumulativeUsage(ctx context.Context, ag Agent, in CumulativeTokenInput,
 		// session that returns to it reads it from its start.
 		delete(marks, cur.Main)
 	}
-	read := make(map[string]bool)
-	for pass := range maxUsageFilePasses {
-		progressed := false
-		for i, f := range counter.Files(in) {
-			if read[f.Path] {
-				continue
-			}
-			read[f.Path] = true
-			progressed = true
-			main := pass == 0 && i == 0
-			mark, restarted, readErr := readUsageFile(counter, f, cur.Files[f.Path], main)
-			if readErr != nil {
-				if main {
-					return CumulativeObservation{}, true, readErr
-				}
-				continue // not written yet, or already cleaned up
-			}
-			marks[f.Path] = mark
-			obs.Restarted = obs.Restarted || (main && restarted && !f.NoRestart)
-		}
-		if !progressed {
-			break
-		}
+	restarted, err := readUsageFiles(counter, in, cur.Files, marks)
+	if err != nil {
+		return CumulativeObservation{}, true, err
 	}
+	obs.Restarted = obs.Restarted || restarted
 
 	state, err := json.Marshal(counter)
 	if err != nil {
@@ -192,6 +182,42 @@ func ReadCumulativeUsage(ctx context.Context, ag Agent, in CumulativeTokenInput,
 	obs.Total, obs.Children = counter.Totals(ctx, in)
 	obs.Cursor = next
 	return obs, true, nil
+}
+
+// readUsageFiles feeds counter the files it names, following newly named ones
+// for up to maxUsageFilePasses rounds, and records each read file's mark in
+// marks. restarted reports a rewritten main transcript; an unreadable main
+// transcript is an error.
+func readUsageFiles(counter UsageCounter, in CumulativeTokenInput, prev, marks map[string]usageFileMark) (restarted bool, err error) {
+	read := make(map[string]bool)
+	for pass := range maxUsageFilePasses {
+		progressed := false
+		for i, f := range counter.Files(in) {
+			if read[f.Path] {
+				continue
+			}
+			read[f.Path] = true
+			progressed = true
+			main := pass == 0 && i == 0
+			mark, rewritten, readErr := readUsageFile(counter, f, prev[f.Path], main)
+			if readErr != nil {
+				if main {
+					return false, readErr
+				}
+				// Not written yet, or already cleaned up.
+				if u, ok := counter.(UnreadFileCounter); ok {
+					u.Unread(f.Path)
+				}
+				continue
+			}
+			marks[f.Path] = mark
+			restarted = restarted || (main && rewritten && !f.NoRestart)
+		}
+		if !progressed {
+			break
+		}
+	}
+	return restarted, nil
 }
 
 // readUsageFile feeds counter what f gained since prev. restarted reports a

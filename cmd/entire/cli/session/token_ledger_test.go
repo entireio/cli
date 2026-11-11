@@ -84,13 +84,43 @@ func TestTokenLedger(t *testing.T) {
 
 		// Counted once, it keeps its total while its file can't be read, but
 		// it may have grown since, so the children are incomplete until a
-		// reading counts it or stops listing it (its file deleted).
+		// reading counts it again, even once no reading lists it (its file
+		// deleted).
 		l.Observe(reading(usage(10, 1, 1), map[string]*agent.TokenUsage{"a": usage(50, 5, 2), "b": nil}))
 		assertUsage(t, "total", l.Total(), withKids(usage(10, 1, 1), usage(57, 6, 3)))
 		complete("total while its file can't be read", l.Total(), false)
 		l.Observe(reading(usage(10, 1, 1), map[string]*agent.TokenUsage{"a": usage(50, 5, 2)}))
 		assertUsage(t, "total", l.Total(), withKids(usage(10, 1, 1), usage(57, 6, 3)))
-		complete("total after its file is gone", l.Total(), true)
+		complete("total after its file is gone", l.Total(), false)
+		l.Observe(reading(usage(10, 1, 1), map[string]*agent.TokenUsage{"a": usage(50, 5, 2), "b": usage(9, 1, 2)}))
+		complete("total once counted again", l.Total(), true)
+	})
+
+	t.Run("attach's mark keeps a newer checkpoint's uncounted child", func(t *testing.T) {
+		t.Parallel()
+		var l TokenLedger
+		l.Observe(reading(usage(10, 1, 1), map[string]*agent.TokenUsage{"a": usage(50, 5, 2), "b": usage(7, 1, 1)}))
+		read := l.Clone() // attach's reading, every child counted
+		// While attach waits, a hook can't read b and checkpoints.
+		l.Observe(reading(usage(20, 2, 2), map[string]*agent.TokenUsage{"a": usage(50, 5, 2), "b": nil}))
+		l.MarkCheckpointed()
+		l.MarkCheckpointedUpTo(read)
+		// b's total now includes what it used before the hook's checkpoint.
+		l.Observe(reading(usage(20, 2, 2), map[string]*agent.TokenUsage{"a": usage(50, 5, 2), "b": usage(9, 1, 2)}))
+		assertSubagentsComplete(t, "pending", l.Pending(), false)
+	})
+
+	t.Run("attach's mark takes its own reading's counted children", func(t *testing.T) {
+		t.Parallel()
+		var l TokenLedger
+		l.Observe(reading(usage(10, 1, 1), map[string]*agent.TokenUsage{"a": usage(50, 5, 2), "b": nil}))
+		l.MarkCheckpointed()
+		l.Observe(reading(usage(20, 2, 2), map[string]*agent.TokenUsage{"a": usage(50, 5, 2), "b": usage(7, 1, 1)}))
+		read := l.Clone() // attach's reading counted b; no checkpoint since
+		l.Observe(reading(usage(30, 3, 3), map[string]*agent.TokenUsage{"a": usage(60, 6, 3), "b": usage(7, 1, 1)}))
+		l.MarkCheckpointedUpTo(read)
+		assertUsage(t, "pending", l.Pending(), withKids(usage(10, 1, 1), usage(10, 1, 1)))
+		assertSubagentsComplete(t, "pending", l.Pending(), true)
 	})
 
 	t.Run("a checkpoint taken while a child was uncounted leaves the next delta incomplete", func(t *testing.T) {

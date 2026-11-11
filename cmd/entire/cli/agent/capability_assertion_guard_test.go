@@ -25,6 +25,7 @@ var nonCapabilityInterfaces = map[string]string{
 	"CapabilityDeclarer": "the resolvers' own declaration gate",
 	"SessionLocator":     "the narrow slice of Agent a SessionStore holds, not an optional capability",
 	"TestOnly":           "registry marker that hides test agents from selection, not a capability",
+	"UnreadFileCounter":  "an optional hook on a UsageCounter, asserted on the counter, never on an agent",
 }
 
 // TestCapabilitiesAreOnlyReachedThroughHelpers fails when code type-asserts an
