@@ -715,6 +715,14 @@ func TestString_CommandLinePasswordsShellGrammarCases(t *testing.T) {
 		{name: "Python raw strings for the program and the password", input: `subprocess.run([r"C:\Tools\wget.exe", "--password", r"C:\vault\` + p + `", url])`, want: `subprocess.run([r"C:\Tools\wget.exe", "--password", r"REDACTED", url])`},
 		{name: "dollar sign in a Python raw string", input: `subprocess.run(["wget", "--password", r"$` + p + `", url])`, want: `subprocess.run(["wget", "--password", r"REDACTED", url])`},
 		{name: "Python raw string in a JSON string", input: `{"cmd": "subprocess.run([\"wget\", \"--password\", r\"` + p + `\", url])"}`, want: `{"cmd": "subprocess.run([\"wget\", \"--password\", r\"REDACTED\", url])"}`},
+		{name: "netrc entry written by printf with escaped line breaks", input: `printf "machine h\nlogin me\npassword ` + p + `\n" > ~/.netrc`, want: `printf "machine h\nlogin me\npassword REDACTED\n" > ~/.netrc`},
+		{name: "netrc entry written by printf in single quotes", input: `printf 'machine api.github.com\nlogin me\npassword ` + p + `\n' >> ~/.netrc`, want: `printf 'machine api.github.com\nlogin me\npassword REDACTED\n' >> ~/.netrc`},
+		{name: "netrc entry written by echo -e", input: `echo -e "machine h\nlogin me\npassword ` + p + `" > ~/.netrc`, want: `echo -e "machine h\nlogin me\npassword REDACTED" > ~/.netrc`},
+		{name: "netrc entry written by printf with escaped tabs", input: `printf "machine h\tlogin me\tpassword ` + p + `\n" > ~/.netrc`, want: `printf "machine h\tlogin me\tpassword REDACTED\n" > ~/.netrc`},
+		{name: "netrc entries written by printf on one line", input: `printf "machine a login me password ` + p + `\nmachine b login me password ` + p + `2\n"`, want: `printf "machine a login me password REDACTED\nmachine b login me password REDACTED\n"`},
+		{name: "default netrc entry written by printf", input: `printf 'default\nlogin me\npassword ` + p + `\n'`, want: `printf 'default\nlogin me\npassword REDACTED\n'`},
+		{name: "netrc entry with no login written by printf", input: `printf "machine 127.0.0.1\npassword ` + p + `\n"`, want: `printf "machine 127.0.0.1\npassword REDACTED\n"`},
+		{name: "netrc password with an escaped line break written by plain echo", input: `echo "machine h login me password ab\n` + p + `" > ~/.netrc`, want: `echo "machine h login me password REDACTED" > ~/.netrc`},
 		{name: "mysql password after --force in an option cluster", input: "mysql -uroot -fp" + p + " db < dump.sql", want: "mysql -uroot -fpREDACTED db < dump.sql"},
 		{name: "mysqldump password after --force in an option cluster", input: "mysqldump -fp" + p + " db", want: "mysqldump -fpREDACTED db"},
 		{name: "mariadb password after --force in an option cluster", input: "mariadb -fp" + p + " db", want: "mariadb -fpREDACTED db"},
@@ -1172,6 +1180,10 @@ func TestString_CommandLinePasswordListAndQuotingNonSecretsPreserved(t *testing.
 		"machine example.com password is stored in the vault",
 		"reset the machine localhost password first",
 		"the machine learning password policy",
+		// prose with each keyword of an entry, whose login is a word that
+		// joins a sentence, or whose machine ends a clause
+		"Enter machine name, login and password below.",
+		"the state machine handles login then password then mfa",
 		// a backtick after a list flag that prose, and no element's end,
 		// follows on a later line
 		"args := []string{\"wget\", \"--password\", `\nREDIS_KEY` holds it.",

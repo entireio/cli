@@ -4846,7 +4846,48 @@ func startsWord(before string) bool {
 	return before == "" || strings.ContainsRune(" \t\r\n", rune(before[len(before)-1]))
 }
 
+// appendNetrcPasswords adds the password of every .netrc entry in s, and of
+// every one that printf or echo -e writes from a quoted string, where \n,
+// \r and \t stand for a line break and blanks (printf "machine h\nlogin
+// me\npassword x\n" > ~/.netrc). Each is read as text too, as plain echo
+// writes it, so a password with \n in it is hidden whole either way.
 func appendNetrcPasswords(regions []taggedRegion, s string) []taggedRegion {
+	regions = appendNetrcEntries(regions, s)
+	if written, ok := netrcEscapesAsBlanks(s); ok {
+		regions = appendNetrcEntries(regions, written)
+	}
+	return regions
+}
+
+// netrcEscapesAsBlanks returns s with each \n, \r and \t inside a quoted
+// string written as the blanks they stand for, \n as a blank and a line
+// break, so the text keeps its offsets. ok is false when s holds none.
+func netrcEscapesAsBlanks(s string) (string, bool) {
+	var written []byte
+	quotes := quoteScan{s: s, prose: true}
+	for i := strings.IndexByte(s, '\\'); i >= 0 && i+1 < len(s); {
+		if c := s[i+1]; c == 'n' || c == 'r' || c == 't' {
+			if _, quoted := quotes.stringAt(i); quoted {
+				if written == nil {
+					written = []byte(s)
+				}
+				written[i], written[i+1] = ' ', ' '
+				if c == 'n' {
+					written[i+1] = '\n'
+				}
+			}
+		}
+		// The escaped character is skipped too, so \\n is a backslash and n.
+		next := strings.IndexByte(s[i+2:], '\\')
+		if next < 0 {
+			break
+		}
+		i += 2 + next
+	}
+	return string(written), written != nil
+}
+
+func appendNetrcEntries(regions []taggedRegion, s string) []taggedRegion {
 	for _, p := range netrcPasswordPatterns {
 		lines := quoteScan{s: s, prose: true}
 		for _, loc := range p.pattern.FindAllStringSubmatchIndex(s, -1) {
@@ -4879,7 +4920,7 @@ func (p netrcPattern) appendPassword(regions []taggedRegion, s string, lines *qu
 		login = s[loc[2*p.login]:loc[2*p.login+1]]
 	}
 	start, end := loc[2*p.value], loc[2*p.value+1]
-	if isNetrcDeclaration(s, loc[0], machine, login, s[start:end]) {
+	if isNetrcDeclaration(s, loc[0], machine, login, s[start:end]) || isNetrcProse(machine, login, s[start:end]) {
 		return regions
 	}
 	if p.login == 0 && !endsNetrcEntry(s, start, end) {
@@ -4888,7 +4929,7 @@ func (p netrcPattern) appendPassword(regions []taggedRegion, s string, lines *qu
 		// in the vault).
 		return regions
 	}
-	regions = appendNetrcValue(regions, s, lines, start, end)
+	regions = appendNetrcValue(regions, s, lines, start, netrcTokenEnd(s, start, end))
 	if s[start] == '#' {
 		// curl reads a token that starts with # as a comment that runs to
 		// the end of its line, and the next token as the password
@@ -4900,6 +4941,41 @@ func (p netrcPattern) appendPassword(regions []taggedRegion, s string, lines *qu
 	}
 	return regions
 }
+
+// netrcTokenEnd returns where the .netrc token s[start:end] ends: before a
+// \n, \r or \t that a .netrc keyword follows, which printf writes as the
+// next field (printf "machine h login me password x\nmachine b ..."), or
+// at end.
+func netrcTokenEnd(s string, start, end int) int {
+	token := s[start:end]
+	for i := strings.IndexByte(token, '\\'); i >= 0 && i+1 < len(token); {
+		if c := token[i+1]; c == 'n' || c == 'r' || c == 't' {
+			word, _, _ := strings.Cut(token[i+2:], `\`)
+			if isNetrcKeyword(word) {
+				return start + i
+			}
+		}
+		next := strings.IndexByte(token[i+2:], '\\')
+		if next < 0 {
+			break
+		}
+		i += 2 + next
+	}
+	return end
+}
+
+// isNetrcProse reports whether the fields of a .netrc entry's match are
+// prose: a login or password that is a word joining a sentence ("login and
+// password below", "login then password then mfa"), or a machine name that
+// ends a clause ("machine name, login and password"). No file names a login
+// that way.
+func isNetrcProse(machine, login, password string) bool {
+	return strings.ContainsAny(machine[max(len(machine)-1, 0):], ",;") ||
+		slices.Contains(netrcProseWords, strings.ToLower(login)) || slices.Contains(netrcProseWords, strings.ToLower(strings.TrimRight(password, ".,;:")))
+}
+
+// netrcProseWords join the words of a sentence.
+var netrcProseWords = strings.Fields("and or then with the is are to for from below above here first next")
 
 // netrcTokenAfterComment matches the rest of a line that a comment ends,
 // the blank and comment lines after it, and the next .netrc token, group 1.
