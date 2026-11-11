@@ -716,6 +716,13 @@ func TestString_CommandLinePasswordsShellGrammarCases(t *testing.T) {
 		{name: "Python raw strings for the program and the password", input: `subprocess.run([r"C:\Tools\wget.exe", "--password", r"C:\vault\` + p + `", url])`, want: `subprocess.run([r"C:\Tools\wget.exe", "--password", r"REDACTED", url])`},
 		{name: "dollar sign in a Python raw string", input: `subprocess.run(["wget", "--password", r"$` + p + `", url])`, want: `subprocess.run(["wget", "--password", r"REDACTED", url])`},
 		{name: "Python raw string in a JSON string", input: `{"cmd": "subprocess.run([\"wget\", \"--password\", r\"` + p + `\", url])"}`, want: `{"cmd": "subprocess.run([\"wget\", \"--password\", r\"REDACTED\", url])"}`},
+		{name: "short flag value in a Python triple-quoted string", input: `subprocess.run(["redis-cli", "-a", """` + p + `"""])`, want: `subprocess.run(["redis-cli", "-a", """REDACTED"""])`},
+		{name: "openssl source in a Python triple-quoted string", input: `subprocess.run(["openssl", "enc", "-pass", """pass:` + p + `"""])`, want: `subprocess.run(["openssl", "enc", "-pass", """pass:REDACTED"""])`},
+		{name: "long flag value in a Python triple-quoted string", input: `subprocess.run(["wget", "--password", '''` + p + `''', url])`, want: `subprocess.run(["wget", "--password", '''REDACTED''', url])`},
+		{name: "quote inside a Python triple-quoted string", input: `subprocess.run(["redis-cli", "-a", """abc"` + p + `"""])`, want: `subprocess.run(["redis-cli", "-a", """REDACTED"""])`},
+		{name: "Python raw triple-quoted string", input: `subprocess.run(["redis-cli", "-a", r"""` + p + `"""])`, want: `subprocess.run(["redis-cli", "-a", r"""REDACTED"""])`},
+		{name: "Python triple-quoted string in a JSON string", input: `{"cmd": "subprocess.run([\"wget\", \"--password\", \"\"\"` + p + `\"\"\"])"}`, want: `{"cmd": "subprocess.run([\"wget\", \"--password\", \"\"\"REDACTED\"\"\"])"}`},
+		{name: "Python triple-quoted string in escaped quotes", input: `[\"redis-cli\", \"-a\", \"\"\"` + p + `\"\"\"]`, want: `[\"redis-cli\", \"-a\", \"\"\"REDACTED\"\"\"]`},
 	})
 }
 
