@@ -932,8 +932,10 @@ chooses a recorded link for the user.
   revert, bisect) are refused, as is a commit with a non-UTF-8 encoding or
   extra headers, which `commit-tree` can't reproduce;
 - a commit already pushed, but held only by the current branch's own remote
-  copies (its upstream, its push branch, or a branch of the same name on a
-  remote it pushes to), is rewritten the same way (`planPushedCommitLink`):
+  copies (the branch it pushes to, or a branch of the same name on a remote
+  it pushes to; an upstream of another name, as after
+  `git switch -c feat origin/develop`, is shared, not its copy), is rewritten
+  the same way (`planPushedCommitLink`):
   the confirmation names those branches and says the user replaces it with
   `git push --force-with-lease`. Attach pushes nothing itself; the checkpoint
   goes out with that push;

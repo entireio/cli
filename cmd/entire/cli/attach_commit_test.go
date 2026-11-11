@@ -1712,6 +1712,117 @@ func TestAttachCommit_SharedWhileConfirmationIsOpenIsNotRewritten(t *testing.T) 
 	}
 }
 
+// pushFromAnotherCloneOnTop commits on top of base in a fresh clone and pushes
+// it to remote's branch, so none of this repository's refs learn of it.
+func pushFromAnotherCloneOnTop(t *testing.T, remote, base, branch string) {
+	t.Helper()
+	other := t.TempDir()
+	testutil.RunGit(t, other, "clone", "-q", remote, ".")
+	testutil.RunGit(t, other, "checkout", "-q", "--detach", base)
+	testutil.RunGit(t, other, "-c", "user.name=Other", "-c", "user.email=other@example.com", "commit", "-q", "--allow-empty", "-m", "elsewhere")
+	testutil.RunGit(t, other, "push", "-q", "origin", "HEAD:refs/heads/"+branch)
+}
+
+// The branch's own remote copy can move ahead while the prompt is open; the
+// force-push after the rewrite would then drop the new commit, so attach
+// checks again and doesn't rewrite.
+func TestAttachCommit_OwnCopyAheadWhileConfirmationIsOpenIsNotRewritten(t *testing.T) {
+	setupAttachTestRepo(t)
+	pushed, remote := pushFeatureBranch(t)
+	const sessionID = "attach-ahead-during-prompt"
+	setupClaudeTranscript(t, sessionID, attachCommitTranscript)
+
+	t.Setenv(interactive.EnvTestTTY, "1")
+	old := askAttachConfirmation
+	t.Cleanup(func() { askAttachConfirmation = old })
+	askAttachConfirmation = func() (bool, error) {
+		pushFromAnotherCloneOnTop(t, remote, pushed.Hash.String(), "feature")
+		return true, nil
+	}
+
+	var out bytes.Buffer
+	err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{})
+	if err == nil || !strings.Contains(err.Error(), "origin/feature got commits this branch doesn't have while attach was waiting") {
+		t.Fatalf("err = %v, want a refusal because origin/feature moved ahead during the prompt\n%s", err, out.String())
+	}
+	if got := headCommitOf(t); got.Hash != pushed.Hash {
+		t.Fatalf("HEAD was rewritten under a remote copy that moved ahead: %s", got.Hash)
+	}
+}
+
+// A remote that stops answering while the prompt is open can't confirm which
+// branches hold the commit, so attach doesn't rewrite it.
+func TestAttachCommit_UnreachableAfterConfirmationIsNotRewritten(t *testing.T) {
+	setupAttachTestRepo(t)
+	pushed, remote := pushFeatureBranch(t)
+	const sessionID = "attach-unreachable-during-prompt"
+	setupClaudeTranscript(t, sessionID, attachCommitTranscript)
+
+	t.Setenv(interactive.EnvTestTTY, "1")
+	old := askAttachConfirmation
+	t.Cleanup(func() { askAttachConfirmation = old })
+	askAttachConfirmation = func() (bool, error) {
+		if err := os.Rename(remote, remote+"-gone"); err != nil {
+			t.Fatalf("move the remote away: %v", err)
+		}
+		return true, nil
+	}
+
+	var out bytes.Buffer
+	err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{})
+	if err == nil || !strings.Contains(err.Error(), "couldn't check again") || !strings.Contains(err.Error(), "won't be rewritten") {
+		t.Fatalf("err = %v, want a refusal because the remote stopped answering\n%s", err, out.String())
+	}
+	if got := headCommitOf(t); got.Hash != pushed.Hash {
+		t.Fatalf("HEAD was rewritten without the remote confirming: %s", got.Hash)
+	}
+}
+
+// A branch made with 'git switch -c feat origin/main' tracks origin/main but
+// pushes to origin/feat. main moving on is not this branch's copy being ahead,
+// so the commit, held only by origin/feat, is still rewritten.
+func TestAttachCommit_UpstreamOfAnotherNameIsNotTheBranchsCopy(t *testing.T) {
+	setupAttachTestRepo(t)
+	remote := pushToOrigin(t)
+	dir := mustGetwd(t)
+	testutil.RunGit(t, dir, "checkout", "-q", "-b", "feat", "--track", "origin/main")
+	pushed := commitAt(t, "feat.txt")
+	testutil.RunGit(t, dir, "push", "-q", "origin", "feat")
+	main := strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", "origin/main"))
+	pushFromAnotherCloneOnTop(t, remote, main, "main")
+	testutil.RunGit(t, dir, "fetch", "-q", "origin")
+
+	out, err := attachHeadless(t, "attach-upstream-main", attachOptions{})
+	if err != nil {
+		t.Fatalf("runAttach: %v\n%s", err, out)
+	}
+	if got := headCommitOf(t); got.Hash == pushed.Hash || !strings.Contains(got.Message, "Entire-Checkpoint") {
+		t.Fatalf("HEAD was not rewritten with a trailer:\n%s", out)
+	}
+}
+
+// The same setup tracking a shared integration branch: when origin/develop
+// holds the commit, it is another branch's commit, not this branch's copy, and
+// attach refuses.
+func TestAttachCommit_SharedUpstreamHoldingTheCommitIsNotRewritten(t *testing.T) {
+	setupAttachTestRepo(t)
+	pushToOrigin(t)
+	dir := mustGetwd(t)
+	testutil.RunGit(t, dir, "checkout", "-q", "-b", "develop")
+	pushed := commitAt(t, "develop.txt")
+	testutil.RunGit(t, dir, "push", "-q", "origin", "develop")
+	testutil.RunGit(t, dir, "fetch", "-q", "origin")
+	testutil.RunGit(t, dir, "checkout", "-q", "-b", "feat", "--track", "origin/develop")
+
+	out, err := attachHeadless(t, "attach-upstream-develop", attachOptions{})
+	if err == nil || !strings.Contains(err.Error(), "is also on origin/develop") {
+		t.Fatalf("err = %v, want a refusal because origin/develop holds the commit\n%s", err, out)
+	}
+	if got := headCommitOf(t); got.Hash != pushed.Hash {
+		t.Fatalf("a commit on the shared upstream was rewritten: %s", got.Hash)
+	}
+}
+
 // Agents pick flags from agent-help, so it has to say why a recorded link is a
 // last resort and that it is never theirs to choose, least of all to dodge a
 // force-push on a feature branch.

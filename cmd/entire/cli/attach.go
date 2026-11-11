@@ -917,8 +917,10 @@ type attachBranch struct {
 	// %(upstream:remotename) and %(push:remotename) (pushRemote, pushDefault,
 	// then the upstream's).
 	upstreamRemote, pushRemote string
-	// upstream and push are those branches as "<remote>/<branch>".
-	upstream, push string
+	// push is the branch it pushes to as "<remote>/<branch>", "" when git
+	// can't resolve one (push.default=simple with a differently named
+	// upstream, say).
+	push string
 }
 
 // readAttachBranch reads the current branch; a detached HEAD or a failed
@@ -930,28 +932,28 @@ func readAttachBranch(ctx context.Context) attachBranch {
 	}
 	fullName := strings.TrimSpace(string(ref))
 	b := attachBranch{name: strings.TrimPrefix(fullName, "refs/heads/")}
-	out, err := exec.CommandContext(ctx, "git", "for-each-ref", "--format=%(upstream:remotename)%0a%(push:remotename)%0a%(upstream:short)%0a%(push:short)", "--", fullName).Output()
+	out, err := exec.CommandContext(ctx, "git", "for-each-ref", "--format=%(upstream:remotename)%0a%(push:remotename)%0a%(push:short)", "--", fullName).Output()
 	if err != nil {
 		return b
 	}
 	fields := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
-	fields = append(fields, make([]string, 4)...)
-	b.upstreamRemote, b.pushRemote, b.upstream, b.push = fields[0], fields[1], fields[2], fields[3]
+	fields = append(fields, make([]string, 3)...)
+	b.upstreamRemote, b.pushRemote, b.push = fields[0], fields[1], fields[2]
 	return b
 }
 
 // ownCopies names the branch's own copies on its remotes as
-// "<remote>/<branch>": its upstream and push branch, and the same name on each
-// of checked. None for a detached HEAD.
+// "<remote>/<branch>": the branch it pushes to, and the same name on each of
+// checked. None for a detached HEAD. The upstream counts only as one of
+// those: a branch made with 'git switch -c feat origin/develop' tracks
+// origin/develop, which is shared, not this branch's copy.
 func (b attachBranch) ownCopies(checked []string) []string {
 	if b.name == "" {
 		return nil
 	}
 	var own []string
-	for _, name := range []string{b.upstream, b.push} {
-		if name != "" {
-			own = append(own, name)
-		}
+	if b.push != "" {
+		own = append(own, b.push)
 	}
 	for _, remote := range checked {
 		own = append(own, remote+"/"+b.name)
