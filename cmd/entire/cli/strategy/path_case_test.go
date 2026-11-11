@@ -368,6 +368,41 @@ func TestCarryForward_DropsACommittedCaseRenameWindows(t *testing.T) {
 	require.False(t, state.HasPendingFiles())
 }
 
+// TestCarryForward_DropsACaseRenamedStagedAdditionWindows: the session
+// created NEW.md, and the user stages it, renames it to new.md and commits.
+// The commit adds new.md and never had NEW.md, which still opens new.md where
+// the filesystem ignores case: carry-forward must take the session's file as
+// the committed new.md, not keep NEW.md pending for good. CI's Windows job
+// runs it by its name. Uses t.Chdir — do NOT add t.Parallel().
+func TestCarryForward_DropsACaseRenamedStagedAdditionWindows(t *testing.T) {
+	dir := setupGitRepo(t)
+	if !worktreedir.NewCaseProbe(dir).IgnoresCase(".") {
+		t.Skip("a case-only rename is two files on a case-sensitive filesystem")
+	}
+	// As git init sets it on such a filesystem; go-git's init does not.
+	testutil.RunGit(t, dir, "config", "core.ignorecase", "true")
+	t.Chdir(dir)
+	s := &ManualCommitStrategy{}
+	sid := "2026-11-11-case-renamed-addition"
+	ctx := context.Background()
+
+	testutil.WriteFile(t, dir, "NEW.md", "new\n")
+	saveTestStep(t, s, dir, sid, "NEW.md")
+	testutil.GitAdd(t, dir, "NEW.md")
+	testutil.RunGit(t, dir, "mv", "-f", "NEW.md", "new.md")
+	commitPathsWithTrailer(t, dir, "f6f6f6f6f6f6")
+	require.Equal(t, "new.md", strings.TrimSpace(testutil.RunGit(t, dir, "ls-tree", "--name-only", "HEAD", "--", "new.md", "NEW.md")),
+		"fixture: the commit added the file as new.md only")
+	require.NoError(t, s.PostCommit(ctx))
+
+	state, err := s.loadSessionState(ctx, sid)
+	require.NoError(t, err)
+	require.Contains(t, testutil.RunGit(t, dir, "ls-tree", "-r", "--name-only", paths.MetadataBranchName), "f6f6f6f6f6",
+		"the commit of new.md condensed the session")
+	require.Empty(t, state.FilesTouched, "the session's file is committed as new.md")
+	require.False(t, state.HasPendingFiles())
+}
+
 // TestRespelled_DropsConflictingHashes: a session recorded readme.md with an
 // older hash and README.md with a newer one, and both now spell one file.
 // Neither hash can stand for it: kept, the older one could find older content

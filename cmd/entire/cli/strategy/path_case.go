@@ -107,41 +107,45 @@ func spelledAsCommitted(repoRoot string, files []string, commitFiles map[string]
 
 // carriedSpelledAsCommitted returns files, a session's files, and hashes, its
 // recorded hashes, for carry-forward after the commit: a file the commit
-// removed, that the index no longer tracks under that spelling but tracks in
-// another case that the name opens, or names in a directory that ignores case
-// once both are gone (trackedSpelling), is carried as the index spells it,
-// its hash too. After the commit of a case-only rename of README.md to
-// readme.md, README.md still opens readme.md where the filesystem ignores
-// case, so carry-forward would find the removed README.md still in the
-// worktree and keep the committed file pending for good. With readme.md
-// removed from the worktree before that commit, carry-forward would instead
-// drop README.md as gone from both, and with it the session's claim on the
-// deletion still pending. A spelling the index still tracks stays the
-// session's to commit, as readme.md does after a commit of README.md that
-// leaves a staged rename to readme.md.
+// does not hold under that spelling but changed in another case, that the
+// index no longer tracks under that spelling but tracks in another case that
+// the name opens, or names in a directory that ignores case once both are
+// gone (trackedSpelling), is carried as the index spells it, its hash too.
+// After the commit of a case-only rename of README.md to readme.md, README.md
+// still opens readme.md where the filesystem ignores case, so carry-forward
+// would find the removed README.md still in the worktree and keep the
+// committed file pending for good. With readme.md removed from the worktree
+// before that commit, carry-forward would instead drop README.md as gone from
+// both, and with it the session's claim on the deletion still pending. The
+// same holds for a file the session created as NEW.md that the user staged
+// and renamed to new.md before committing: the commit adds new.md and never
+// had NEW.md. A spelling the index still tracks stays the session's to
+// commit, as readme.md does after a commit of README.md that leaves a staged
+// rename to readme.md.
 func carriedSpelledAsCommitted(ctx context.Context, repoRoot string, commitTree *object.Tree, files []string, hashes map[string]string, committedFileSet map[string]struct{}) ([]string, map[string]string) {
-	removed := removedInAnotherCase(repoRoot, commitTree, files, committedFileSet)
-	if len(removed) == 0 {
+	renamed := renamedInAnotherCase(repoRoot, commitTree, files, committedFileSet)
+	if len(renamed) == 0 {
 		return files, hashes
 	}
-	lists := make([]spellingList, len(removed))
-	for j, i := range removed {
+	lists := make([]spellingList, len(renamed))
+	for j, i := range renamed {
 		lists[j] = spellingList{files: files[i : i+1]}
 	}
 	spelledLists := trackedSpellingsOf(ctx, repoRoot, gitrepo.IndexPathsIgnoringCase, lists...)
 	spelled := slices.Clone(files)
-	for j, i := range removed {
+	for j, i := range renamed {
 		spelled[i] = spelledLists[j][0]
 	}
 	return respelled(files, spelled, hashes)
 }
 
-// removedInAnotherCase returns the indexes of the files the commit removed
-// that it also changed in another case and that still open a file in
-// repoRoot, or open nothing there: the old spelling of a case-only rename
-// where the filesystem ignores case, which trackedSpelling decides. An
-// ordinary commit pays a map lookup per file.
-func removedInAnotherCase(repoRoot string, commitTree *object.Tree, files []string, committedFileSet map[string]struct{}) []int {
+// renamedInAnotherCase returns the indexes of the files the commit does not
+// hold under their spelling but changed in another case, and that still open
+// a file in repoRoot, or open nothing there: the old spelling of a case-only
+// rename where the filesystem ignores case, which trackedSpelling decides.
+// The commit removed that spelling, or never had it, when the file renamed
+// was a staged addition. An ordinary commit pays a map lookup per file.
+func renamedInAnotherCase(repoRoot string, commitTree *object.Tree, files []string, committedFileSet map[string]struct{}) []int {
 	if repoRoot == "" || commitTree == nil || len(files) == 0 || len(committedFileSet) == 0 {
 		return nil
 	}
@@ -149,10 +153,14 @@ func removedInAnotherCase(repoRoot string, commitTree *object.Tree, files []stri
 	for file := range committedFileSet {
 		committed[strings.ToLower(file)]++
 	}
-	var removed []int
+	var renamed []int
 	var worktree *os.Root
 	for i, file := range files {
-		if _, changed := committedFileSet[file]; !changed || committed[strings.ToLower(file)] < 2 {
+		otherSpellings := committed[strings.ToLower(file)]
+		if _, changed := committedFileSet[file]; changed {
+			otherSpellings--
+		}
+		if otherSpellings == 0 {
 			continue
 		}
 		if _, err := commitTree.File(file); err == nil {
@@ -166,10 +174,10 @@ func removedInAnotherCase(repoRoot string, commitTree *object.Tree, files []stri
 			worktree = root
 		}
 		if _, err := lstatIn(worktree, repoRoot, file); err == nil || errors.Is(err, fs.ErrNotExist) {
-			removed = append(removed, i)
+			renamed = append(renamed, i)
 		}
 	}
-	return removed
+	return renamed
 }
 
 // respelled returns files with each one replaced by spelled's entry at the
