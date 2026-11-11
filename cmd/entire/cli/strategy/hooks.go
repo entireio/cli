@@ -1301,9 +1301,11 @@ func generateChainedContent(baseContent, hookName string) string {
 // git command run by the chained hook does not chain that same hook again.
 //
 // A backup that is Trunk's launcher is sourced rather than executed; see
-// trunkHookCallback. The launcher is identified by a whole-line shell
-// comparison, not grep, so a PATH that lacks grep cannot fall through to
-// executing it as <hook>.pre-entire.
+// trunkHookCallback. The launcher is identified by a whole-line comparison
+// in /bin/bash, not grep, so a PATH that lacks grep cannot fall through to
+// executing it as <hook>.pre-entire. The scan reads at most 64KiB (Trunk's
+// launcher is under 2KiB) so a compiled or otherwise large backup is not
+// read to EOF before it runs.
 func chainCall(hookName, redirect string) string {
 	backup := hookName + backupSuffix
 	keep := hookName + keepSuffix
@@ -1318,14 +1320,22 @@ if [ -z "${%s:-}" ]; then
             "$_entire_hook_dir/%s" "$@"%s
         fi
     elif [ -x "$_entire_hook_dir/%s" ]; then
-        _entire_is_trunk=0
-        while IFS= read -r _entire_line || [ -n "$_entire_line" ]; do
-            if [ "$_entire_line" = %s ]; then
-                _entire_is_trunk=1
-                break
+        if /bin/bash --norc -c 'LC_ALL=C IFS= read -r -d "" -n 65536 _entire_data < "$1" || true
+            _entire_nl="
+"
+            if [ "${#_entire_data}" -eq 65536 ]; then
+                case "$_entire_data" in
+                *"$_entire_nl") ;;
+                *"$_entire_nl"*) _entire_data="${_entire_data%%"$_entire_nl"*}" ;;
+                *) exit 1 ;;
+                esac
             fi
-        done < "$_entire_hook_dir/%s"
-        if [ "$_entire_is_trunk" -eq 1 ]; then
+            while IFS= read -r _entire_line || [ -n "$_entire_line" ]; do
+                if [ "$_entire_line" = "$2" ]; then
+                    exit 0
+                fi
+            done <<< "$_entire_data"
+            exit 1' bash "$_entire_hook_dir/%s" %s; then
             /bin/bash --norc -c '_entire_saved_hook=$1; shift; . "$_entire_saved_hook"' "$_entire_hook_dir/%s" "$_entire_hook_dir/%s" "$@"%s
         else
             "$_entire_hook_dir/%s" "$@"%s
@@ -1333,7 +1343,7 @@ if [ -z "${%s:-}" ]; then
     fi
 fi
 `, chainComment, guard, guard, guard, preCommitSignatures[0], backup, keep, keep, redirect,
-		backup, shellQuote(trunkHookCallback), backup, hookName, backup, redirect, backup, redirect)
+		backup, backup, shellQuote(trunkHookCallback), hookName, backup, redirect, backup, redirect)
 }
 
 // trunkHookCallback is the last line of the launcher Trunk writes for every git

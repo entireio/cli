@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -254,6 +255,48 @@ func TestInstallHooks_ChainedTrunkLauncherNeedsNoGrepOnPath(t *testing.T) {
 	tf.path = tf.bin
 	if code, got := tf.run("pre-push", "\n", "origin", "url"); code != 0 || !strings.Contains(got, "trunk pre-push origin url") {
 		t.Errorf("pre-push exited %d after running:\n%s\nwant Trunk's pre-push to run without grep on PATH", code, got)
+	}
+}
+
+// A large compiled-like backup must still run promptly. The chain used to
+// identify Trunk's launcher by reading the backup to EOF, which took several
+// seconds on a 15MB executable; the scan is now capped at 64KiB.
+func TestInstallHooks_ChainedLargeBackupRunsPromptly(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("runs POSIX shell hooks")
+	}
+	f := newHooksFixture(t)
+	bin := t.TempDir()
+	log := filepath.Join(t.TempDir(), "log")
+	writeExec(t, filepath.Join(bin, "entire"), "#!/bin/sh\n")
+	hook := filepath.Join(f.dir, "post-commit")
+	writeExec(t, hook, "#!/bin/sh\necho ran >> "+log+"\nexit 0\n")
+	pad, err := os.OpenFile(hook, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunk := strings.Repeat("A", 1<<20)
+	for range 8 {
+		if _, err := pad.WriteString(chunk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := pad.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.installExecutable(specFor(t, "post-commit"))
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	if out, err := runHook(ctx, bin, filepath.Join(f.dir, "post-commit")); err != nil {
+		t.Fatalf("post-commit: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "ran" {
+		t.Errorf("backup ran %q, want ran", got)
 	}
 }
 
