@@ -387,6 +387,52 @@ func TestRespelled_DropsConflictingHashes(t *testing.T) {
 
 	_, moved := respelled([]string{"README.md"}, []string{"readme.md"}, map[string]string{"README.md": "abc"})
 	require.Equal(t, "abc", moved["readme.md"], "a hash moves to the new spelling")
+
+	// A per-tool hook recorded readme.md with no hash: README.md's older hash
+	// cannot stand for the newer edit either.
+	_, unhashed := respelled([]string{"README.md", "readme.md"}, []string{"readme.md", "readme.md"}, map[string]string{"README.md": "older"})
+	require.NotContains(t, unhashed, "readme.md", "one spelling recorded no hash")
+}
+
+// TestCarryForward_KeepsAPendingDeletionAfterACaseRenameWindows: a per-tool
+// hook recorded the session's edit of README.md with no hash. The user
+// stages a case-only rename to readme.md, removes the file and commits the
+// rename. Neither spelling opens a file now, but the commit tracks readme.md
+// and its deletion is pending: carry-forward must keep the session's record
+// as readme.md, as it keeps any file recorded without a hash while the
+// worktree differs from the commit, not drop README.md as gone from both.
+// CI's Windows job runs it by its name. Uses t.Chdir — do NOT add
+// t.Parallel().
+func TestCarryForward_KeepsAPendingDeletionAfterACaseRenameWindows(t *testing.T) {
+	dir := setupGitRepo(t)
+	if !worktreedir.NewCaseProbe(dir).IgnoresCase(".") {
+		t.Skip("a case-only rename is two files on a case-sensitive filesystem")
+	}
+	// As git init sets it on such a filesystem; go-git's init does not.
+	testutil.RunGit(t, dir, "config", "core.ignorecase", "true")
+	t.Chdir(dir)
+	s := &ManualCommitStrategy{}
+	sid := "2026-11-11-pending-deletion-after-case-rename"
+	ctx := context.Background()
+	testutil.WriteFile(t, dir, "README.md", "readme\n")
+	testutil.GitAdd(t, dir, "README.md")
+	testutil.GitCommit(t, dir, "Add README.md")
+
+	testutil.WriteFile(t, dir, "README.md", "readme, edited\n")
+	saveTestStep(t, s, dir, sid, "README.md")
+	state, err := s.loadSessionState(ctx, sid)
+	require.NoError(t, err)
+	delete(state.TouchedFileHashes, "README.md") // as a per-tool hook records it
+	require.NoError(t, s.saveSessionState(ctx, state))
+	testutil.RunGit(t, dir, "mv", "-f", "README.md", "readme.md")
+	testutil.GitAdd(t, dir, "readme.md")
+	require.NoError(t, os.Remove(filepath.Join(dir, "readme.md")))
+	commitPathsWithTrailer(t, dir, "e5e5e5e5e5e5")
+	require.NoError(t, s.PostCommit(ctx))
+
+	state, err = s.loadSessionState(ctx, sid)
+	require.NoError(t, err)
+	require.Equal(t, []string{"readme.md"}, state.FilesTouched, "the deletion of the committed readme.md is pending")
 }
 
 // checkpointFilesTouched returns the files_touched the checkpoint

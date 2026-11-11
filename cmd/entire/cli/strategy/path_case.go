@@ -107,14 +107,18 @@ func spelledAsCommitted(repoRoot string, files []string, commitFiles map[string]
 
 // carriedSpelledAsCommitted returns files, a session's files, and hashes, its
 // recorded hashes, for carry-forward after the commit: a file the commit
-// removed, that the index no longer tracks under that spelling but that still
-// opens the file the index tracks in another case, is carried as the index
-// spells it, its hash too. After the commit of a case-only rename of README.md
-// to readme.md, README.md still opens readme.md where the filesystem ignores
+// removed, that the index no longer tracks under that spelling but tracks in
+// another case that the name opens, or names in a directory that ignores case
+// once both are gone (trackedSpelling), is carried as the index spells it,
+// its hash too. After the commit of a case-only rename of README.md to
+// readme.md, README.md still opens readme.md where the filesystem ignores
 // case, so carry-forward would find the removed README.md still in the
-// worktree and keep the committed file pending for good. A spelling the index
-// still tracks stays the session's to commit (trackedSpelling), as readme.md
-// does after a commit of README.md that leaves a staged rename to readme.md.
+// worktree and keep the committed file pending for good. With readme.md
+// removed from the worktree before that commit, carry-forward would instead
+// drop README.md as gone from both, and with it the session's claim on the
+// deletion still pending. A spelling the index still tracks stays the
+// session's to commit, as readme.md does after a commit of README.md that
+// leaves a staged rename to readme.md.
 func carriedSpelledAsCommitted(ctx context.Context, repoRoot string, commitTree *object.Tree, files []string, hashes map[string]string, committedFileSet map[string]struct{}) ([]string, map[string]string) {
 	removed := removedInAnotherCase(repoRoot, commitTree, files, committedFileSet)
 	if len(removed) == 0 {
@@ -134,8 +138,9 @@ func carriedSpelledAsCommitted(ctx context.Context, repoRoot string, commitTree 
 
 // removedInAnotherCase returns the indexes of the files the commit removed
 // that it also changed in another case and that still open a file in
-// repoRoot: the old spelling of a case-only rename where the filesystem
-// ignores case. An ordinary commit pays a map lookup per file.
+// repoRoot, or open nothing there: the old spelling of a case-only rename
+// where the filesystem ignores case, which trackedSpelling decides. An
+// ordinary commit pays a map lookup per file.
 func removedInAnotherCase(repoRoot string, commitTree *object.Tree, files []string, committedFileSet map[string]struct{}) []int {
 	if repoRoot == "" || commitTree == nil || len(files) == 0 || len(committedFileSet) == 0 {
 		return nil
@@ -160,7 +165,7 @@ func removedInAnotherCase(repoRoot string, commitTree *object.Tree, files []stri
 			}
 			worktree = root
 		}
-		if _, err := lstatIn(worktree, repoRoot, file); err == nil {
+		if _, err := lstatIn(worktree, repoRoot, file); err == nil || errors.Is(err, fs.ErrNotExist) {
 			removed = append(removed, i)
 		}
 	}
@@ -168,42 +173,58 @@ func removedInAnotherCase(repoRoot string, commitTree *object.Tree, files []stri
 }
 
 // respelled returns files with each one replaced by spelled's entry at the
-// same place, once each, and hashes with each recorded hash also under its
-// file's new spelling. hashes itself is not changed.
+// same place, once each, and hashes with each new spelling's hash: the one
+// hash recorded for every spelling that became it. hashes itself is not
+// changed.
 //
-// Spellings that become one can carry different hashes: a session that
-// recorded readme.md, then README.md after a case-only rename and another
-// edit, holds an older hash under one and the newer under the other. Which
-// one the file's remaining work matches is unknown, so the new spelling keeps
-// no hash, and the file is judged as one recorded without one: by its name
-// for an overlap, by whether the worktree still differs from the commit for
-// carry-forward (filesWithRemainingAgentChanges). Keeping either hash could
-// find the older content committed and drop the newer edit.
+// Spellings that become one need not agree. A session that recorded
+// readme.md, then README.md after a case-only rename and another edit, holds
+// an older hash under one and the newer under the other, and a per-tool hook
+// records an edit with no hash at all (MergeUnhashedFilesTouched). Which
+// record the file's remaining work matches is unknown, so then the new
+// spelling keeps no hash, and the file is judged as one recorded without one:
+// by its name for an overlap, by whether the worktree still differs from the
+// commit for carry-forward (filesWithRemainingAgentChanges). Keeping a hash
+// could find older content committed and drop a newer edit.
 func respelled(files, spelled []string, hashes map[string]string) ([]string, map[string]string) {
 	if slices.Equal(spelled, files) {
 		return files, hashes
 	}
-	spelledHashes := maps.Clone(hashes)
 	spelledFiles := make([]string, 0, len(spelled))
-	seen := make(map[string]struct{}, len(spelled))
-	var conflicting []string
+	sources := make(map[string][]string, len(spelled))
 	for i, file := range spelled {
-		if hash, ok := hashes[files[i]]; ok && file != files[i] {
-			if recorded, taken := spelledHashes[file]; !taken {
-				spelledHashes[file] = hash
-			} else if recorded != hash {
-				conflicting = append(conflicting, file)
-			}
-		}
-		if _, dup := seen[file]; !dup {
-			seen[file] = struct{}{}
+		if _, dup := sources[file]; !dup {
 			spelledFiles = append(spelledFiles, file)
 		}
+		sources[file] = append(sources[file], files[i])
 	}
-	for _, file := range conflicting {
-		delete(spelledHashes, file)
+	spelledHashes := maps.Clone(hashes)
+	for file, from := range sources {
+		if len(from) == 1 && from[0] == file {
+			continue
+		}
+		if hash, ok := agreedHash(hashes, file, from); ok {
+			spelledHashes[file] = hash
+		} else {
+			delete(spelledHashes, file)
+		}
 	}
 	return spelledFiles, spelledHashes
+}
+
+// agreedHash returns the hash recorded for each of from, the spellings that
+// became file, and for file itself if one is recorded under it, and false
+// when one of from has none or two differ.
+func agreedHash(hashes map[string]string, file string, from []string) (string, bool) {
+	agreed, ok := hashes[file]
+	for _, spelling := range from {
+		hash, recorded := hashes[spelling]
+		if !recorded || ok && hash != agreed {
+			return "", false
+		}
+		agreed, ok = hash, true
+	}
+	return agreed, ok
 }
 
 // indexSpellings returns the spellings an index tracks for files, ignoring
