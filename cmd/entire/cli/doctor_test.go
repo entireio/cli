@@ -1369,6 +1369,10 @@ func TestCheckAntigravityTitleTee_WarnsWhenNotConfigured(t *testing.T) {
 func TestCheckAntigravityTitleTee_WindowsWarnsWhenOutdated(t *testing.T) {
 	t.Cleanup(agent.SetWindowsHookProbeForTesting("windows", nil))
 	dir := setupGitRepoForPhaseTest(t)
+	// The check opens the worktree through the shared root registry, which
+	// keeps the directory open; Windows cannot remove it until that closes.
+	// Registered after t.TempDir, so it runs before the removal.
+	t.Cleanup(osroot.ResetShared)
 	t.Chdir(dir)
 	stubAgyOnPath(t)
 

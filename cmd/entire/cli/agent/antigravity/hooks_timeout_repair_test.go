@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 )
 
 func writeHooksJSON(t *testing.T, dir, content string) string {
@@ -277,6 +278,10 @@ func TestCheckHookConfig_WindowsLegacyCommandIsOutdated(t *testing.T) {
 	t.Cleanup(agent.SetWindowsHookProbeForTesting("windows", nil))
 	t.Setenv(configDirEnv, t.TempDir())
 	tmpDir := t.TempDir()
+	// InstallHooks opens the worktree through the shared root registry, which
+	// keeps the directory open; Windows cannot remove it until that closes.
+	// Registered after t.TempDir, so it runs before the removal.
+	t.Cleanup(osroot.ResetShared)
 	t.Chdir(tmpDir)
 
 	legacy := func(verb string) string {
