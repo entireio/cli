@@ -1791,8 +1791,13 @@ type commandWords struct {
 	text    bool
 	// noRun is set with text after a container client's subcommand that
 	// runs no command, all of whose words are its operands
-	// (kubectl patch deployment mysql -p='{...}').
-	noRun bool
+	// (kubectl patch deployment mysql -p='{...}'), unless optionUnknown
+	// is: it is set after a long option of a container client, before its
+	// subcommand, that may take the next word as its argument but is not
+	// known to (podman --connection build exec db mysql -pX), so that word
+	// may be no subcommand.
+	noRun         bool
+	optionUnknown bool
 }
 
 // at reports whether a command name at p, in the argument of s whose text
@@ -2115,6 +2120,9 @@ func (c *commandStart) word(word string) {
 		level.open, level.pos = level.open+1, caseWord
 		c.command = true
 	case c.text:
+		// Words after "--" may be a command to run (kubectl ... -- mysql
+		// -pX), so they are no longer all operands.
+		c.noRun = c.noRun && word != "--"
 	case c.redirectArg:
 		c.redirectArg = false
 	case c.funcName:
@@ -2145,6 +2153,7 @@ func (c *commandStart) word(word string) {
 		option := unquotedWord(word)
 		c.optionArg = takesArgument(c.wrapper, option)
 		c.execArg = c.optionArg && runsArgument(c.wrapper, option)
+		c.optionUnknown = c.optionUnknown || isContainerClient(c.wrapper) && !c.sub && !c.optionArg && strings.HasPrefix(option, "--") && !strings.Contains(option, "=")
 	case isContainerClient(c.wrapper) && !c.sub:
 		// The subcommand of a container client: exec and run run a
 		// command in a container (docker exec db mysql -pX), and the
@@ -2155,7 +2164,7 @@ func (c *commandStart) word(word string) {
 		case slices.Contains(containerRunSubcommands, word):
 			c.sub = true
 		case slices.Contains(containerTextSubcommands, word):
-			c.text, c.noRun = true, true
+			c.text, c.noRun = true, !c.optionUnknown
 		}
 	case hasDestination(c.wrapper) && !c.host:
 		// The destination of ssh (ssh db mysql -pX), or the container or
@@ -2308,11 +2317,12 @@ func isContainerClient(word string) bool {
 
 // containerRunSubcommands are the subcommands of container clients that run
 // a command in a container, and containerTextSubcommands those that run
-// none.
+// none. A group of subcommands whose create runs one (docker service create
+// alpine mysql -pX) is in neither, as container is.
 var (
 	containerRunSubcommands  = []string{execCommand, "run", "create", "debug"}
 	containerTextSubcommands = []string{
-		"annotate", "api-resources", "api-versions", "apply", "attach", "auth", "autoscale", "build", "builder", "buildx", "certificate", "cluster-info", "commit", "completion", "config", "context", "cordon", "cp", "delete", "describe", "diff", "drain", "edit", "events", "explain", "export", "expose", "get", "history", "image", "images", "import", "info", "inspect", "kill", "kustomize", "label", "load", loginCommand, "logout", "logs", "manifest", "network", "node", "patch", "pause", "plugin", "port", "port-forward", "proxy", "ps", "pull", "push", "rename", "replace", "restart", "rm", "rmi", "rollout", "save", "scale", "search", "service", "set", "stack", "start", "stats", "stop", "swarm", "system", "tag", "taint", "top", "trust", "uncordon", "unpause", "update", "version", "volume", "wait",
+		"annotate", "api-resources", "api-versions", "apply", "attach", "auth", "autoscale", "build", "builder", "buildx", "certificate", "cluster-info", "commit", "completion", "config", "context", "cordon", "cp", "delete", "describe", "diff", "drain", "edit", "events", "explain", "export", "expose", "get", "history", "image", "images", "import", "info", "inspect", "kill", "kustomize", "label", "load", loginCommand, "logout", "logs", "manifest", "network", "node", "patch", "pause", "plugin", "port", "port-forward", "proxy", "ps", "pull", "push", "rename", "replace", "restart", "rm", "rmi", "rollout", "save", "scale", "search", "set", "stack", "start", "stats", "stop", "swarm", "system", "tag", "taint", "top", "trust", "uncordon", "unpause", "update", "version", "volume", "wait",
 	}
 )
 
@@ -2343,7 +2353,7 @@ var (
 		"chdir", "chroot", "close-from", "command-timeout", "format", "group", "host", "other-user", "output", "prompt", "role", "split-string", "type", "unset", "user",
 		// container clients
 		"as", "as-group", "as-uid", "cache-dir", "certificate-authority", "client-certificate", "client-key", "log-dir", "log-file", "password", "profile", "profile-output", "request-timeout", "server", "tls-server-name", "tlscacert", "tlscert", "tlskey", "token", "username",
-		"add-host", "attach", "cap-add", "cap-drop", "cgroupns", "cidfile", "cluster", "config", "container", "context", "cpu-shares", "cpus", "detach-keys", "device", "dns", "entrypoint", "env", "env-file", "filename", "gpus", "hostname", "ip", "ipc", "kubeconfig", "label", "link", "log-driver", "log-level", "log-opt", "memory", "mount", "name", "namespace", "network", "network-alias", "pid", "platform", "publish", "pull", "restart", "runtime", "security-opt", "shm-size", "tmpfs", "ulimit", "volume", "volumes-from", "workdir",
+		"add-host", "ansi", "attach", "cap-add", "cap-drop", "cgroupns", "cidfile", "cluster", "config", "container", "context", "cpu-shares", "cpus", "detach-keys", "device", "dns", "entrypoint", "env", "env-file", "file", "filename", "gpus", "hostname", "ip", "ipc", "kubeconfig", "label", "link", "log-driver", "log-level", "log-opt", "memory", "mount", "name", "namespace", "network", "network-alias", "parallel", "pid", "platform", "progress", "project-directory", "project-name", "publish", "pull", "restart", "runtime", "security-opt", "shm-size", "tmpfs", "ulimit", "volume", "volumes-from", "workdir",
 	}
 )
 

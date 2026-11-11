@@ -692,6 +692,10 @@ func TestString_CommandLinePasswordsShellGrammarCases(t *testing.T) {
 		{name: "mysql password after env --split-string in a list", input: `subprocess.run(["env", "--split-string", "mysql", "-p` + p + `"])`, want: `subprocess.run(["env", "--split-string", "mysql", "-pREDACTED"])`},
 		{name: "mysql password after env -iS in a list", input: `subprocess.run(["env", "-iS", "mysql", "-p` + p + `"])`, want: `subprocess.run(["env", "-iS", "mysql", "-pREDACTED"])`},
 		{name: "client after a container subcommand that runs nothing", input: "kubectl patch deployment mysql -p='{\"spec\":{}}' && mysql -p" + p, want: "kubectl patch deployment mysql -p='{\"spec\":{}}' && mysql -pREDACTED"},
+		{name: "compose option value named like a subcommand", input: "docker compose --project-directory build exec db mysql -p" + p, want: "docker compose --project-directory build exec db mysql -pREDACTED"},
+		{name: "unknown container option before a word named like a subcommand", input: "podman --connection build exec db mysql -p" + p, want: "podman --connection build exec db mysql -pREDACTED"},
+		{name: "client run by a container service", input: "docker service create --name db alpine mysql -h h -p" + p, want: "docker service create --name db alpine mysql -h h -pREDACTED"},
+		{name: "client after -- following a container subcommand that runs nothing", input: "kubectl set env deployment/db A=1 -- mysql -p" + p, want: "kubectl set env deployment/db A=1 -- mysql -pREDACTED"},
 	})
 }
 
@@ -873,6 +877,9 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		`kubectl patch deployment mysql -p='{"spec":{"replicas":3}}'`,
 		`kubectl -n prod patch deployment mysql -p{"spec":{"replicas":3}}`,
 		"docker logs mysql -pfoo",
+		"docker compose --project-directory build logs mysql -pfoo",
+		"docker service logs mysql -pfoo",
+		`kubectl --namespace prod patch deployment mysql -p{"spec":{"replicas":3}}`,
 		"the machine learning password policy",
 		"By default login with password is disabled.",
 		"default password is stored in the vault",
