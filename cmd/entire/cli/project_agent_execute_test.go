@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/stretchr/testify/require"
 )
@@ -20,8 +21,8 @@ func TestProjectAgentExecuteStages(t *testing.T) {
 	for _, stage := range []string{"success", "clone", "checkout", "diff", "claude"} {
 		t.Run(stage, func(t *testing.T) {
 			var calls []string
-			e := projectAgentExecutor{git: "/trusted/git", claude: "/trusted/claude"}
-			e.run = func(_ context.Context, binary, dir string, _, args []string, input string) ([]byte, error) {
+			e := projectAgentExecutor{git: "/trusted/git"}
+			e.run = func(_ context.Context, binary, _ string, _, args []string, _ string) ([]byte, error) {
 				kind := "claude"
 				for _, s := range []string{"clone", "checkout", "diff"} {
 					for _, arg := range args {
@@ -34,16 +35,7 @@ func TestProjectAgentExecuteStages(t *testing.T) {
 				if kind == stage {
 					return nil, errors.New("mock failure")
 				}
-				if kind == "claude" {
-					require.Equal(t, e.claude, binary)
-					require.Contains(t, args, "--restricted")
-					require.Contains(t, args, "--strict-mcp-config")
-					require.Contains(t, args, "Read,Grep,Glob")
-					require.Contains(t, input, "change.diff")
-					require.NotContains(t, args, "--dangerously-skip-permissions")
-					require.Equal(t, "repo", filepath.Base(dir))
-					return []byte(`{"type":"result","subtype":"success","structured_output":{"findings":[]}}`), nil
-				}
+				require.Equal(t, e.git, binary)
 				require.Contains(t, args, "core.symlinks=false")
 				require.Contains(t, args, "protocol.allow=never")
 				if kind == "diff" {
@@ -51,6 +43,17 @@ func TestProjectAgentExecuteStages(t *testing.T) {
 					require.Contains(t, args, "--no-textconv")
 				}
 				return []byte("diff"), nil
+			}
+			e.review = func(_ context.Context, cfg claudecode.RestrictedReview) (json.RawMessage, error) {
+				calls = append(calls, "claude")
+				if stage == "claude" {
+					return nil, errors.New("mock failure")
+				}
+				require.Equal(t, "repo", filepath.Base(cfg.Directory))
+				require.Equal(t, "review", filepath.Base(cfg.ReadDir))
+				require.Contains(t, cfg.Prompt, "change.diff")
+				require.JSONEq(t, string(agentServeClaim().OutputSchema), string(cfg.OutputSchema))
+				return json.RawMessage(`{"findings":[]}`), nil
 			}
 			result, err := e.execute(t.Context(), agentServeClaim())
 			if stage == "success" {
@@ -76,11 +79,6 @@ func TestProjectAgentExecuteCredentialBoundary(t *testing.T) {
 	t.Setenv("GIT_CONFIG_VALUE_0", "/bad/hooks")
 	t.Setenv("CLAUDECODE", "inherited-session")
 	t.Setenv("ANTHROPIC_API_KEY", "model-key")
-	env := strings.Join(projectAgentHarnessEnv(), "\n")
-	require.Contains(t, env, "ANTHROPIC_API_KEY=model-key")
-	for _, secret := range []string{"runner-secret", "other-secret", "NODE_OPTIONS=", "GIT_DIR=", "GIT_CONFIG_COUNT=", "CLAUDECODE="} {
-		require.NotContains(t, env, secret)
-	}
 	git := strings.Join(projectAgentGitEnv(), "\n")
 	require.Contains(t, git, "ENTIRE_TOKEN=runner-secret")
 	for _, key := range []string{"GIT_DIR=", "GIT_CONFIG_COUNT=", "GIT_CONFIG_KEY_0=", "GIT_CONFIG_VALUE_0="} {
@@ -101,14 +99,6 @@ func TestProjectAgentExecuteRefusesUnsafeClaims(t *testing.T) {
 	c := agentServeClaim()
 	c.HeadSHA = "--upload-pack=evil"
 	require.Error(t, validateProjectAgentClaim(c))
-}
-
-func TestProjectAgentStructuredResult(t *testing.T) {
-	t.Parallel()
-	for _, bad := range []string{`not json`, `{}`, `{"structured_output":null}`, `{"is_error":true,"structured_output":{}}`} {
-		_, err := projectAgentStructuredResult([]byte(bad))
-		require.Error(t, err)
-	}
 }
 
 func TestProjectAgentLimitedOutput(t *testing.T) {

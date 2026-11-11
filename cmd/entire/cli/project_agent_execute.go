@@ -14,8 +14,8 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
-	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
@@ -25,60 +25,31 @@ import (
 
 const agentOutputLimit = 8 * 1024 * 1024
 const nativeCloneScheme = "entire"
-const agentRestrictedFlag = "--restricted"
 
 var agentCommitPattern = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
 
 type projectAgentExecutor struct {
-	git, claude string
-	run         func(context.Context, string, string, []string, []string, string) ([]byte, error)
+	git    string
+	run    func(context.Context, string, string, []string, []string, string) ([]byte, error)
+	review func(context.Context, claudecode.RestrictedReview) (json.RawMessage, error)
 }
 
 func newProjectAgentExecutor(ctx context.Context) (*projectAgentExecutor, error) {
 	if runtime.GOOS == "windows" {
 		return nil, errors.New("self-hosted execution currently requires macOS or Linux")
 	}
-	if config := os.Getenv("CLAUDE_CONFIG_DIR"); config != "" && !filepath.IsAbs(config) {
-		return nil, errors.New("CLAUDE_CONFIG_DIR must be absolute")
-	}
 	git, err := exec.LookPath("git")
 	if err != nil {
 		return nil, fmt.Errorf("git is required: %w", err)
 	}
-	claude, err := exec.LookPath(activityAgentClaude)
+	if !filepath.IsAbs(git) {
+		return nil, errors.New("git must resolve to an absolute executable path")
+	}
+	reviewer, err := claudecode.NewRestrictedReviewer(ctx, runProjectAgentProcess)
 	if err != nil {
-		return nil, fmt.Errorf("claude Code is required: %w", err)
+		return nil, fmt.Errorf("prepare restricted reviewer: %w", err)
 	}
-	if !filepath.IsAbs(git) || !filepath.IsAbs(claude) {
-		return nil, errors.New("git and claude must resolve to absolute executable paths")
-	}
-	e := &projectAgentExecutor{git: git, claude: claude, run: runProjectAgentProcess}
-	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	out, err := e.run(probeCtx, claude, os.TempDir(), projectAgentHarnessEnv(), []string{agentRestrictedFlag, "--help"}, "")
-	if err != nil {
-		return nil, fmt.Errorf("check Claude capabilities: %w", err)
-	}
-	for _, flag := range []string{agentRestrictedFlag, "--strict-mcp-config", "--json-schema"} {
-		if !bytes.Contains(out, []byte(flag)) {
-			return nil, fmt.Errorf("claude Code must support %s; update Claude before serving jobs (no unrestricted fallback)", flag)
-		}
-	}
-	return e, nil
-}
-
-// Only harness authentication and basic OS runtime variables cross this boundary.
-// In particular no ENTIRE_*, git configuration, caller-session markers or arbitrary
-// environment variables from the worker reach the model process.
-func projectAgentHarnessEnv() []string {
-	keys := []string{"HOME", "USERPROFILE", "SystemRoot", "WINDIR", "TEMP", "TMP", "TMPDIR", "LANG", "LC_ALL", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR"}
-	env := []string{"PATH=" + strings.Join(execx.PathScanDirs(), string(os.PathListSeparator))}
-	for _, key := range keys {
-		if value, ok := os.LookupEnv(key); ok {
-			env = append(env, key+"="+value)
-		}
-	}
-	return env
+	return &projectAgentExecutor{git: git, run: runProjectAgentProcess, review: reviewer.Review}, nil
 }
 
 func projectAgentGitEnv() []string {
@@ -151,33 +122,14 @@ func (e *projectAgentExecutor) execute(ctx context.Context, c projectAgentClaim)
 		return nil, fmt.Errorf("write review diff: %w", err)
 	}
 	reviewDir := filepath.Join(dir, "review")
-	args := []string{"-p", "--output-format", "json", "--json-schema", string(c.OutputSchema), agentRestrictedFlag, "--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`, "--settings", `{"disableAllHooks":true}`, "--no-session-persistence", "--tools", "Read,Grep,Glob", "--add-dir", reviewDir}
-	if c.Model != "" {
-		args = append(args, "--model", c.Model)
-	}
 	prompt := c.Prompt + "\nThe diff is in " + filepath.Join(reviewDir, "change.diff") + ". You cannot run commands."
-	output, err := e.run(ctx, e.claude, repo, projectAgentHarnessEnv(), args, prompt)
+	result, err = e.review(ctx, claudecode.RestrictedReview{
+		Directory: repo, ReadDir: reviewDir, Prompt: prompt, Model: c.Model, OutputSchema: c.OutputSchema,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("claude review failed: %w", err)
+		return nil, fmt.Errorf("restricted review: %w", err)
 	}
-	return projectAgentStructuredResult(output)
-}
-
-func projectAgentStructuredResult(output []byte) (json.RawMessage, error) {
-	var result struct {
-		IsError    bool              `json:"is_error"`
-		Type       string            `json:"type"`
-		Subtype    string            `json:"subtype"`
-		Denials    []json.RawMessage `json:"permission_denials"`
-		Structured json.RawMessage   `json:"structured_output"`
-	}
-	if err := json.Unmarshal(output, &result); err != nil {
-		return nil, errors.New("claude returned invalid JSON")
-	}
-	if result.IsError || result.Type != "result" || result.Subtype != "success" || len(result.Denials) != 0 || len(result.Structured) == 0 || bytes.Equal(bytes.TrimSpace(result.Structured), []byte("null")) {
-		return nil, errors.New("claude returned no successful structured result")
-	}
-	return result.Structured, nil
+	return result, nil
 }
 
 // Bound output in memory and never surface raw subprocess diagnostics: clone and

@@ -83,6 +83,12 @@ Each run:
    rather than subprocess output. Output is bounded to 8 MiB. Workspaces are
    removed on normal return; abrupt termination may leave cache artifacts.
 
+The `agent/claudecode` restricted-review entry point owns executable discovery,
+capability checks, argv, the credential allowlist and structured response parsing.
+The CLI worker owns checkout, scheduling and bounded subprocess transport. The
+restricted path reuses Claude response types and error classification, not the
+ordinary reviewer permissions or text-generation auth-helper injection.
+
 Installed executables, absolute PATH directories and Claude's managed policy are
 operator-trusted. Isolation relies on Claude's restricted-mode enforcement, not
 an OS sandbox. The model may read repository instructions as untrusted content;

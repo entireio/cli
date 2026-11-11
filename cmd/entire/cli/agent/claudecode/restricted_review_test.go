@@ -1,0 +1,97 @@
+package claudecode
+
+import (
+	"context"
+	"encoding/json"
+	"github.com/stretchr/testify/require"
+	"strings"
+	"testing"
+)
+
+func TestRestrictedReviewContract(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	run := func(ctx context.Context, binary, dir string, env, args []string, input string) ([]byte, error) {
+		calls++
+		require.Equal(t, "/trusted/claude", binary)
+		require.Contains(t, args, flagRestricted)
+		if calls == 1 {
+			require.Contains(t, args, "--help")
+			require.Empty(t, input)
+			_, ok := ctx.Deadline()
+			require.True(t, ok)
+			return []byte("--restricted --strict-mcp-config --json-schema"), nil
+		}
+		require.Equal(t, "/checkout", dir)
+		require.Equal(t, "review prompt", input)
+		require.Contains(t, args, flagOutputFormat)
+		require.Contains(t, args, flagStrictMCP)
+		require.Contains(t, args, `{"mcpServers":{}}`)
+		require.Contains(t, args, `{"disableAllHooks":true}`)
+		require.Contains(t, args, "--no-session-persistence")
+		require.Contains(t, args, "Read,Grep,Glob")
+		require.Contains(t, args, "/diff")
+		require.Contains(t, args, "sonnet")
+		require.Contains(t, args, `{"type":"object"}`)
+		require.NotContains(t, args, "--dangerously-skip-permissions")
+		for _, entry := range env {
+			require.False(t, strings.HasPrefix(entry, "ENTIRE_"))
+		}
+		return []byte(`{"type":"result","subtype":"success","structured_output":{"findings":[]}}`), nil
+	}
+	reviewer, err := prepareRestrictedReviewer(t.Context(), "/trusted/claude", run)
+	require.NoError(t, err)
+	result, err := reviewer.Review(t.Context(), RestrictedReview{Directory: "/checkout", ReadDir: "/diff", Prompt: "review prompt", Model: "sonnet", OutputSchema: json.RawMessage(`{"type":"object"}`)})
+	require.NoError(t, err)
+	require.JSONEq(t, `{"findings":[]}`, string(result))
+	require.Equal(t, 2, calls)
+}
+
+func TestRestrictedReviewNoFallback(t *testing.T) {
+	t.Parallel()
+	for _, output := range []string{"--help", "--restricted", "--restricted --strict-mcp-config"} {
+		t.Run(output, func(t *testing.T) {
+			t.Parallel()
+			calls := 0
+			_, err := prepareRestrictedReviewer(t.Context(), "/trusted/claude", func(context.Context, string, string, []string, []string, string) ([]byte, error) {
+				calls++
+				return []byte(output), nil
+			})
+			require.ErrorContains(t, err, "no unrestricted fallback")
+			require.Equal(t, 1, calls)
+		})
+	}
+	_, err := prepareRestrictedReviewer(t.Context(), "/trusted/claude", func(context.Context, string, string, []string, []string, string) ([]byte, error) {
+		return nil, context.Canceled
+	})
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestRestrictedReviewCredentialBoundary(t *testing.T) {
+	t.Setenv("ENTIRE_TOKEN", "runner-secret")
+	t.Setenv("OTHER_SECRET", "other-secret")
+	t.Setenv("NODE_OPTIONS", "--require malicious")
+	t.Setenv("GIT_DIR", "/bad/repo")
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("CLAUDECODE", "inherited-session")
+	t.Setenv("ANTHROPIC_API_KEY", "model-key")
+	entries, err := restrictedReviewEnv()
+	require.NoError(t, err)
+	env := strings.Join(entries, "\n")
+	require.Contains(t, env, "ANTHROPIC_API_KEY=model-key")
+	for _, secret := range []string{"runner-secret", "other-secret", "NODE_OPTIONS=", "GIT_DIR=", "GIT_CONFIG_COUNT=", "CLAUDECODE="} {
+		require.NotContains(t, env, secret)
+	}
+}
+
+func TestRestrictedReviewResponse(t *testing.T) {
+	t.Parallel()
+	for _, bad := range []string{`not json`, `{}`, `{"type":"result","subtype":"success","structured_output":null}`, `{"type":"result","subtype":"error_max_turns","structured_output":{}}`, `{"type":"result","subtype":"success","permission_denials":[{}],"structured_output":{}}`} {
+		_, err := parseRestrictedReviewResponse([]byte(bad))
+		require.Error(t, err)
+	}
+	_, err := parseRestrictedReviewResponse([]byte(`{"type":"result","is_error":true,"api_error_status":401,"result":"secret review content","structured_output":{}}`))
+	var classified *ClaudeError
+	require.ErrorAs(t, err, &classified)
+	require.NotContains(t, err.Error(), "secret review content")
+}
