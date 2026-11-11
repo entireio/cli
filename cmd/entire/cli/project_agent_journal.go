@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
@@ -41,6 +42,11 @@ func openProjectAgentJournal(ctx context.Context, t *projectAgentTarget) (*proje
 	return &projectAgentJournal{root: root, name: key + ".json", unlock: unlock}, nil
 }
 
+// path is for operator diagnostics only; all I/O remains rooted.
+func (j *projectAgentJournal) path() string {
+	return filepath.Join(j.root.Name(), filepath.FromSlash(j.name))
+}
+
 func (j *projectAgentJournal) save(s *projectAgentSubmission) error {
 	if s == nil {
 		err := osroot.RemoveNoSymlinks(j.root, j.name)
@@ -65,11 +71,11 @@ func (j *projectAgentJournal) load() (*projectAgentSubmission, error) {
 		return nil, nil //nolint:nilnil // No file means no pending submission.
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read pending result: %w", err)
+		return nil, fmt.Errorf("read pending result %q: %w", j.path(), err)
 	}
 	var s projectAgentSubmission
 	if err := json.Unmarshal(b, &s); err != nil {
-		return nil, fmt.Errorf("decode pending result: %w", err)
+		return nil, fmt.Errorf("decode pending result %q: %w", j.path(), err)
 	}
 	return &s, nil
 }

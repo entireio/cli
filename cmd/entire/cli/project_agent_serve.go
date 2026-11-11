@@ -49,11 +49,12 @@ type projectAgentSubmission struct {
 }
 
 type projectAgentWorker struct {
-	target  *projectAgentTarget
-	out     io.Writer
-	execute func(context.Context, projectAgentClaim) (json.RawMessage, error)
-	save    func(*projectAgentSubmission) error
-	wait    func(context.Context, time.Duration) error
+	pendingPath string
+	target      *projectAgentTarget
+	out         io.Writer
+	execute     func(context.Context, projectAgentClaim) (json.RawMessage, error)
+	save        func(*projectAgentSubmission) error
+	wait        func(context.Context, time.Duration) error
 }
 
 func newProjectAgentServeCmd() *cobra.Command {
@@ -92,7 +93,7 @@ stops execution and attempts to report failure. No daemon is installed.`,
 				return err
 			}
 			defer journal.unlock()
-			w := projectAgentWorker{target: t, out: cmd.ErrOrStderr(), save: journal.save, wait: waitProjectAgent}
+			w := projectAgentWorker{target: t, out: cmd.ErrOrStderr(), save: journal.save, pendingPath: journal.path(), wait: waitProjectAgent}
 			pending, err := journal.load()
 			if err != nil {
 				return err
@@ -270,7 +271,12 @@ func (w *projectAgentWorker) run(ctx context.Context, job projectAgentJob) (bool
 	return true, nil
 }
 
-func (w *projectAgentWorker) submit(ctx context.Context, s projectAgentSubmission) error {
+func (w *projectAgentWorker) submit(ctx context.Context, s projectAgentSubmission) (retErr error) {
+	defer func() {
+		if retErr != nil && w.pendingPath != "" {
+			retErr = fmt.Errorf("%w\nPending submission file: %q", retErr, w.pendingPath)
+		}
+	}()
 	if !looksLikeULID(s.RunID) || (s.Action != "complete" && s.Action != agentSubmitFail) || !json.Valid(s.Body) {
 		return errors.New("invalid pending submission")
 	}
@@ -284,6 +290,9 @@ func (w *projectAgentWorker) submit(ctx context.Context, s projectAgentSubmissio
 			}
 			fmt.Fprintf(w.out, "Run %s is no longer submit-able.\n", s.RunID)
 			return nil
+		}
+		if api.IsHTTPErrorStatus(err, http.StatusUnprocessableEntity) {
+			return fmt.Errorf("submit %s: payload retained; correct the saved body before restarting serve (keep run_id and action unchanged): %w", s.RunID, err)
 		}
 		return fmt.Errorf("submit %s: payload retained; restart serve to retry: %w", s.RunID, err)
 	}

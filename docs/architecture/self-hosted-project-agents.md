@@ -113,7 +113,14 @@ Restarting serve replays the exact pending complete/fail payload before checking
 harness availability or claiming another job. Successful submissions remove it.
 404/409 terminal refusals clear it and report that the run can no longer accept
 it; other refusals (including 422 validation errors) retain it for inspection or
-manual repair. Restarting repeatedly cannot fix a permanently invalid result.
+manual repair. Submission failures print the exact pending-file path without
+printing its contents. For 422, stop the worker, inspect that JSON file, and
+correct `body.result` (for a completion) according to the API validation error;
+keep `run_id` and `action` unchanged. Restart serve to replay the corrected body
+before taking new work. Restarting without correcting it cannot fix validation
+errors. Once the run expires, its terminal 409 clears the pending file on replay.
+Never delete a pending file merely to retry a transient failure: that loses the
+saved result and can cause the claimed review to execute again.
 
 Ctrl-C/SIGTERM cancel execution and subprocess groups, then allow up to 15 seconds
 to report failure with a fresh context. An interrupted submission remains saved.
