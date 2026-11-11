@@ -56,6 +56,39 @@ func filesTouched(t *testing.T, env *TestEnv, sess *Session) []string {
 	return files
 }
 
+func assertFilesTouched(t *testing.T, env *TestEnv, sess *Session, want ...string) {
+	t.Helper()
+	if got := filesTouched(t, env, sess); !slices.Equal(got, want) {
+		t.Errorf("session %s FilesTouched = %v, want %v", sess.ID, got, want)
+	}
+}
+
+// startOverlappingTurns starts a turn for each of two new sessions, A and B,
+// so that each runs during the other's.
+func startOverlappingTurns(t *testing.T, env *TestEnv) (sessA, sessB *Session) {
+	t.Helper()
+	sessA, sessB = env.NewSession(), env.NewSession()
+	startTurn(t, env, sessA)
+	startTurn(t, env, sessB)
+	return sessA, sessB
+}
+
+// editAWithItsTool edits a.txt as session A's Edit tool would: the transcript
+// names the file.
+func editAWithItsTool(env *TestEnv, sessA *Session) {
+	env.WriteFile("a.txt", "a, edited by A\n")
+	sessA.CreateTranscript("edit a.txt", []FileChange{{Path: "a.txt", Content: "a, edited by A\n"}})
+}
+
+// assertHeadLinksOnly asserts that HEAD's checkpoint links linked and not
+// other.
+func assertHeadLinksOnly(t *testing.T, env *TestEnv, linked, other *Session) {
+	t.Helper()
+	summary := headCheckpointSummary(t, env)
+	env.AssertCheckpointContainsSession(t, summary, linked.ID)
+	env.AssertCheckpointExcludesSession(t, summary, other.ID)
+}
+
 // headCheckpointID returns HEAD's Entire-Checkpoint trailer, or "" when it
 // has none. It lives in a file built on every platform because
 // foreign_commit_linking_test.go, built only on linux and darwin, uses it too.
@@ -93,35 +126,22 @@ func TestSharedCheckout_OverlappingTurnsClaimOnlyTheirOwnFiles(t *testing.T) {
 	t.Parallel()
 	env := newSharedCheckoutEnv(t)
 
-	sessA := env.NewSession()
-	sessB := env.NewSession()
-	startTurn(t, env, sessA)
-	startTurn(t, env, sessB)
-
-	env.WriteFile("a.txt", "a, edited by A\n")
-	sessA.CreateTranscript("edit a.txt", []FileChange{{Path: "a.txt", Content: "a, edited by A\n"}})
+	sessA, sessB := startOverlappingTurns(t, env)
+	editAWithItsTool(env, sessA)
 	env.WriteFile("b.txt", "b, edited by B\n")
 	sessB.CreateTranscript("edit b.txt", []FileChange{{Path: "b.txt", Content: "b, edited by B\n"}})
 
 	endTurn(t, env, sessA)
 	endTurn(t, env, sessB)
 
-	if got := filesTouched(t, env, sessA); !slices.Equal(got, []string{"a.txt"}) {
-		t.Errorf("session A FilesTouched = %v, want [a.txt]", got)
-	}
-	if got := filesTouched(t, env, sessB); !slices.Equal(got, []string{"b.txt"}) {
-		t.Errorf("session B FilesTouched = %v, want [b.txt]", got)
-	}
+	assertFilesTouched(t, env, sessA, "a.txt")
+	assertFilesTouched(t, env, sessB, "b.txt")
 
 	env.GitCommitWithHooks("Commit a.txt", "a.txt")
-	summary := headCheckpointSummary(t, env)
-	env.AssertCheckpointContainsSession(t, summary, sessA.ID)
-	env.AssertCheckpointExcludesSession(t, summary, sessB.ID)
+	assertHeadLinksOnly(t, env, sessA, sessB)
 
 	env.GitCommitWithHooks("Commit b.txt", "b.txt")
-	summary = headCheckpointSummary(t, env)
-	env.AssertCheckpointContainsSession(t, summary, sessB.ID)
-	env.AssertCheckpointExcludesSession(t, summary, sessA.ID)
+	assertHeadLinksOnly(t, env, sessB, sessA)
 }
 
 // TestSharedCheckout_TranscriptNameInAnotherCaseIsClaimed covers a transcript
@@ -138,33 +158,16 @@ func TestSharedCheckout_OverlappingTurnsClaimOnlyTheirOwnFiles(t *testing.T) {
 // untracked. That case needs the fix for #3054 as well.
 func TestSharedCheckout_TranscriptNameInAnotherCaseIsClaimed(t *testing.T) {
 	t.Parallel()
-	env := newSharedCheckoutEnv(t)
-	env.WriteFile("README.md", "readme\n")
-	env.GitAdd("README.md")
-	env.GitCommit("Add README.md")
-	requireCaseInsensitive(t, env, "README.md", "readme.md")
-
-	sessA := env.NewSession()
-	sessB := env.NewSession()
-	startTurn(t, env, sessA)
-	startTurn(t, env, sessB)
-
-	env.WriteFile("a.txt", "a, edited by A\n")
-	sessA.CreateTranscript("edit a.txt", []FileChange{{Path: "a.txt", Content: "a, edited by A\n"}})
+	env := newCaseInsensitiveReadmeEnv(t)
+	sessA, sessB := startOverlappingTurns(t, env)
+	editAWithItsTool(env, sessA)
 	env.WriteFile("README.md", "readme, edited by B\n")
 	sessB.CreateTranscript("edit the readme", []FileChange{{Path: "readme.md", Content: "readme, edited by B\n"}})
 
-	endTurn(t, env, sessA)
-	endTurn(t, env, sessB)
-
-	if got := filesTouched(t, env, sessB); !slices.Contains(got, "README.md") {
-		t.Fatalf("session B FilesTouched = %v, want README.md: its transcript names it as readme.md", got)
-	}
+	endTurnsWithBClaimingReadme(t, env, sessA, sessB)
 
 	env.GitCommitWithHooks("Commit README.md", "README.md")
-	summary := headCheckpointSummary(t, env)
-	env.AssertCheckpointContainsSession(t, summary, sessB.ID)
-	env.AssertCheckpointExcludesSession(t, summary, sessA.ID)
+	assertHeadLinksOnly(t, env, sessB, sessA)
 }
 
 // TestSharedCheckout_DeletionNamedInAnotherCaseIsClaimed is the deletion side
@@ -174,36 +177,42 @@ func TestSharedCheckout_TranscriptNameInAnotherCaseIsClaimed(t *testing.T) {
 // case. It runs where the filesystem ignores case.
 func TestSharedCheckout_DeletionNamedInAnotherCaseIsClaimed(t *testing.T) {
 	t.Parallel()
-	env := newSharedCheckoutEnv(t)
-	env.WriteFile("README.md", "readme\n")
-	env.GitAdd("README.md")
-	env.GitCommit("Add README.md")
-	requireCaseInsensitive(t, env, "README.md", "readme.md")
-
-	sessA := env.NewSession()
-	sessB := env.NewSession()
-	startTurn(t, env, sessA)
-	startTurn(t, env, sessB)
-
-	env.WriteFile("a.txt", "a, edited by A\n")
-	sessA.CreateTranscript("edit a.txt", []FileChange{{Path: "a.txt", Content: "a, edited by A\n"}})
+	env := newCaseInsensitiveReadmeEnv(t)
+	sessA, sessB := startOverlappingTurns(t, env)
+	editAWithItsTool(env, sessA)
 	if err := os.Remove(filepath.Join(env.RepoDir, "README.md")); err != nil {
 		t.Fatalf("remove README.md: %v", err)
 	}
 	sessB.CreateTranscript("drop the readme", []FileChange{{Path: "readme.md", Content: ""}})
 
-	endTurn(t, env, sessA)
-	endTurn(t, env, sessB)
-
-	if got := filesTouched(t, env, sessB); !slices.Contains(got, "README.md") {
-		t.Fatalf("session B FilesTouched = %v, want README.md: its transcript names it as readme.md", got)
-	}
+	endTurnsWithBClaimingReadme(t, env, sessA, sessB)
 
 	env.GitRm("README.md")
 	env.GitCommitStagedWithHooks("Remove README.md")
-	summary := headCheckpointSummary(t, env)
-	env.AssertCheckpointContainsSession(t, summary, sessB.ID)
-	env.AssertCheckpointExcludesSession(t, summary, sessA.ID)
+	assertHeadLinksOnly(t, env, sessB, sessA)
+}
+
+// newCaseInsensitiveReadmeEnv is newSharedCheckoutEnv with README.md
+// committed too, and skips the test unless the filesystem ignores case.
+func newCaseInsensitiveReadmeEnv(t *testing.T) *TestEnv {
+	t.Helper()
+	env := newSharedCheckoutEnv(t)
+	env.WriteFile("README.md", "readme\n")
+	env.GitAdd("README.md")
+	env.GitCommit("Add README.md")
+	requireCaseInsensitive(t, env, "README.md", "readme.md")
+	return env
+}
+
+// endTurnsWithBClaimingReadme ends A's and B's turns and requires B to have
+// claimed README.md, which its transcript names as readme.md.
+func endTurnsWithBClaimingReadme(t *testing.T, env *TestEnv, sessA, sessB *Session) {
+	t.Helper()
+	endTurn(t, env, sessA)
+	endTurn(t, env, sessB)
+	if got := filesTouched(t, env, sessB); !slices.Contains(got, "README.md") {
+		t.Fatalf("session B FilesTouched = %v, want README.md: its transcript names it as readme.md", got)
+	}
 }
 
 // requireCaseInsensitive skips the test unless the repository's filesystem
@@ -226,11 +235,7 @@ func requireCaseInsensitive(t *testing.T, env *TestEnv, file, spelling string) {
 func TestSharedCheckout_StatusOnlyChangesDuringOverlapAreNotClaimed(t *testing.T) {
 	t.Parallel()
 	env := newSharedCheckoutEnv(t)
-
-	sessA := env.NewSession()
-	sessB := env.NewSession()
-	startTurn(t, env, sessA)
-	startTurn(t, env, sessB)
+	sessA, sessB := startOverlappingTurns(t, env)
 
 	// A edits a.txt with its Edit tool and b.txt through a shell command.
 	env.WriteFile("a.txt", "a, edited by A\n")
@@ -282,8 +287,7 @@ func TestSharedCheckout_SequentialTurnDoesNotTakeEarlierSessionsFile(t *testing.
 
 	sessA := env.NewSession()
 	startTurn(t, env, sessA)
-	env.WriteFile("a.txt", "a, edited by A\n")
-	sessA.CreateTranscript("edit a.txt", []FileChange{{Path: "a.txt", Content: "a, edited by A\n"}})
+	editAWithItsTool(env, sessA)
 	endTurn(t, env, sessA)
 
 	sessB := env.NewSession()
@@ -292,19 +296,13 @@ func TestSharedCheckout_SequentialTurnDoesNotTakeEarlierSessionsFile(t *testing.
 	sessB.CreateTranscript("run the formatter on b.txt", nil)
 	endTurn(t, env, sessB)
 
-	if got := filesTouched(t, env, sessA); !slices.Equal(got, []string{"a.txt"}) {
-		t.Errorf("session A FilesTouched = %v, want [a.txt]", got)
-	}
+	assertFilesTouched(t, env, sessA, "a.txt")
 	// B's shell edit is still found through git status: no other turn ran
 	// during B's.
-	if got := filesTouched(t, env, sessB); !slices.Equal(got, []string{"b.txt"}) {
-		t.Errorf("session B FilesTouched = %v, want [b.txt]", got)
-	}
+	assertFilesTouched(t, env, sessB, "b.txt")
 
 	env.GitCommitWithHooks("Commit a.txt", "a.txt")
-	summary := headCheckpointSummary(t, env)
-	env.AssertCheckpointContainsSession(t, summary, sessA.ID)
-	env.AssertCheckpointExcludesSession(t, summary, sessB.ID)
+	assertHeadLinksOnly(t, env, sessA, sessB)
 }
 
 // TestSharedCheckout_ShellEditToDirtyFileIsStillClaimed guards the git status

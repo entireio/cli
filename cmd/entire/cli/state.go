@@ -844,7 +844,9 @@ func CapturePreTaskState(ctx context.Context, sessionID, toolUseID string) error
 		return err
 	}
 
-	// Taken before the status walk, as in CapturePrePromptState.
+	// Take the time before the status walk, as CapturePrePromptState does, so
+	// that a session whose turn ends during the walk still counts as
+	// overlapping the task.
 	capturedAt := time.Now().UTC()
 
 	// Get list of untracked files (excluding .entire directory itself).
