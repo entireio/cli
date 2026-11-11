@@ -1236,7 +1236,7 @@ func probeAndCacheTrailsEnablement(ctx context.Context, insecureHTTPAuth bool, i
 	probeCtx, cancel := context.WithTimeout(ctx, enableTrailsProbeBudget)
 	defer cancel()
 
-	client, notOnboarded, err := trailsCellClient(probeCtx, insecureHTTPAuth, info.Forge, info.Owner, info.Repo)
+	client, repoID, notOnboarded, err := trailsCellClient(probeCtx, insecureHTTPAuth, info.Forge, info.Owner, info.Repo)
 	if notOnboarded {
 		if saveErr := saveTrailsEnabledForRemote(ctx, info.Forge, info.Owner, info.Repo, false); saveErr != nil {
 			logging.Debug(ctx, "failed to cache trails enablement", "error", saveErr)
@@ -1247,7 +1247,7 @@ func probeAndCacheTrailsEnablement(ctx context.Context, insecureHTTPAuth bool, i
 		logging.Debug(ctx, "trails enablement probe client unavailable", "error", err)
 		return
 	}
-	enabled, err := client.TrailsEnabled(probeCtx, info.Forge, info.Owner, info.Repo)
+	enabled, err := client.TrailsEnabled(probeCtx, repoID)
 	if err != nil {
 		logging.Debug(ctx, "trails enablement probe failed", "error", err)
 		return

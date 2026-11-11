@@ -35,8 +35,8 @@ const (
 	trailListTestAuthorAlice = "alice"
 	trailListTestAuthorBob   = "bob"
 	trailTestRepoID          = "repo-id"
-	// trailTestBasePath is the trails endpoint for the gh/acme/repo fixture.
-	trailTestBasePath = "/api/v1/trails/gh/acme/repo"
+	// trailTestBasePath is the Change collection for the gh/acme/repo fixture.
+	trailTestBasePath = "/api/v1/repos/repo-id/changes"
 	// trailTestListBody is the stand-in list-resource body used across the
 	// resolveTrailUpdateBody fallback tests.
 	trailTestListBody = "list body"
@@ -175,68 +175,23 @@ func TestTrailRootPrintsHelp(t *testing.T) {
 	}
 }
 
-func TestTrailsBasePath(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name             string
-		forge, owner, rp string
-		want             string
-	}{
-		{"gh forge", "gh", "acme", "repo", "/api/v1/trails/gh/acme/repo"},
-		{"et forge", "et", "acme", "repo", "/api/v1/trails/et/acme/repo"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got := trailsBasePath(tt.forge, tt.owner, tt.rp)
-			if got != tt.want {
-				t.Fatalf("trailsBasePath(%q, %q, %q) = %q, want %q", tt.forge, tt.owner, tt.rp, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestTrailRepoBasePath(t *testing.T) {
-	t.Parallel()
-
-	t.Run("GitHub keeps host-addressed route", func(t *testing.T) {
-		t.Parallel()
-		got, err := trailRepoBasePath("gh", "acme", "repo", "placement-id")
-		require.NoError(t, err)
-		require.Equal(t, "/api/v1/trails/gh/acme/repo", got)
-	})
-
-	t.Run("Entire-native uses repo ID route", func(t *testing.T) {
-		t.Parallel()
-		got, err := trailRepoBasePath("et", "acme", "repo", "01ARZ3NDEKTSV4RRFFQ69G5FAV")
-		require.NoError(t, err)
-		require.Equal(t, "/api/v1/repos/01ARZ3NDEKTSV4RRFFQ69G5FAV/trails", got)
-	})
-
-	t.Run("Entire-native requires repo ID", func(t *testing.T) {
-		t.Parallel()
-		_, err := trailRepoBasePath("et", "acme", "repo", "")
-		require.EqualError(t, err, "cannot access trails for an Entire-native repo without its repo ID")
-	})
-}
-
 func TestTrailPathsFromNativeRepoBase(t *testing.T) {
 	t.Parallel()
-	const basePath = "/api/v1/repos/native-repo-id/trails"
+	const basePath = "/api/v1/repos/native-repo-id/changes"
 	require.Equal(t, basePath+"/575", trailNumberPathForBase(basePath, 575))
 }
 
 func TestTrailNumberPath(t *testing.T) {
 	t.Parallel()
-	got := trailNumberPathForBase(trailsBasePath("gh", "acme", "repo"), 575)
-	want := "/api/v1/trails/gh/acme/repo/575"
+	got := trailNumberPathForBase(trailTestBasePath, 575)
+	want := "/api/v1/repos/repo-id/changes/575"
 	if got != want {
 		t.Fatalf("trailNumberPath = %q, want %q", got, want)
 	}
 	// Regression guard: the single-trail endpoint is keyed by the integer trail
 	// number, never the UUID id — the server's parseTrailNumber rejects a UUID
 	// (it starts with a non-[1-9] char), which previously surfaced as a 400.
-	if strings.Contains(got, "-") {
+	if !strings.HasSuffix(got, "/575") {
 		t.Fatalf("trailNumberPath must use the integer number, got %q", got)
 	}
 }
@@ -365,10 +320,9 @@ func TestTrailDeleteRemoved(t *testing.T) {
 }
 
 // TestParseTrailRepoShape_GitSuffixIsDroppedOnEveryForge pins that a bare
-// triple drops `.git` whichever forge it names. Both forges reach a trails
-// route — a mirror by forge/owner/repo, a native repo by ULID through
-// trailRepoBasePath — so this is user-visible normalization: `--repo
-// et/p/foo.git` and `--repo et/p/foo` name one repository.
+// triple drops `.git` whichever forge it names. Both forges resolve a repo ID
+// before reaching api.RepoChangesPath, so this is user-visible normalization:
+// `--repo et/p/foo.git` and `--repo et/p/foo` name one repository.
 func TestParseTrailRepoShape_GitSuffixIsDroppedOnEveryForge(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -581,7 +535,7 @@ func TestTrailListPageQueryCapsPageSizeAtServerMax(t *testing.T) {
 func TestListTrailResourcesRejectsNonPositiveLimit(t *testing.T) {
 	t.Parallel()
 	for _, limit := range []int{0, -1} {
-		_, _, err := listTrailResources(t.Context(), nil, trailsBasePath("gh", "acme", "repo"), nil, "", limit)
+		_, _, err := listTrailResources(t.Context(), nil, trailTestBasePath, nil, "", limit)
 		if err == nil || err.Error() != "limit must be greater than 0" {
 			t.Fatalf("limit %d error = %v, want limit validation error", limit, err)
 		}
@@ -599,7 +553,7 @@ func TestRunTrailListAllPrintsNoServerLimitNote(t *testing.T) {
 
 	client := api.NewClientWithBaseURL("tok", srv.URL)
 	var out bytes.Buffer
-	err := runTrailListAllWithClient(t.Context(), &out, client, "", trailListOptions{
+	err := runTrailListAllWithClient(t.Context(), &out, client, trailTestRepoID, trailListOptions{
 		Repo: "gh/acme/repo", Limit: 500,
 	}, []trail.Status{trail.StatusOpen})
 	if err != nil {
@@ -631,7 +585,7 @@ func TestRunTrailListAllWithClientNativeUsesRepoIDRoute(t *testing.T) {
 		Repo: "entire://aws-us-east-2.entire.io/et/entirehq/marvin", Limit: 10,
 	}, []trail.Status{trail.StatusOpen})
 	require.NoError(t, err)
-	require.Equal(t, "/api/v1/repos/01ARZ3NDEKTSV4RRFFQ69G5FAV/trails", gotPath)
+	require.Equal(t, "/api/v1/repos/01ARZ3NDEKTSV4RRFFQ69G5FAV/changes", gotPath)
 }
 
 func TestListTrailResourcesStopsWhenAuthorLimitIsSatisfied(t *testing.T) {
@@ -661,7 +615,7 @@ func TestListTrailResourcesStopsWhenAuthorLimitIsSatisfied(t *testing.T) {
 	defer srv.Close()
 	client := api.NewClientWithBaseURL("tok", srv.URL)
 
-	items, total, err := listTrailResources(t.Context(), client, trailsBasePath("gh", "acme", "repo"), nil, login, 5)
+	items, total, err := listTrailResources(t.Context(), client, trailTestBasePath, nil, login, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -690,7 +644,7 @@ func TestFindTrailByNumberUsesDirectEntireAPIRoute(t *testing.T) {
 	t.Parallel()
 	const trailNumber = 1201
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got, want := r.URL.Path, "/api/v1/trails/gh/acme/repo/1201"; got != want {
+		if got, want := r.URL.Path, "/api/v1/repos/repo-id/changes/1201"; got != want {
 			t.Fatalf("path = %q, want %q", got, want)
 		}
 		if r.URL.RawQuery != "" {
@@ -703,7 +657,7 @@ func TestFindTrailByNumberUsesDirectEntireAPIRoute(t *testing.T) {
 	defer srv.Close()
 
 	client := api.NewClientWithBaseURL("tok", srv.URL)
-	found, err := findTrailByNumberAtPath(t.Context(), client, trailsBasePath("gh", "acme", "repo"), trailNumber)
+	found, err := findTrailByNumberAtPath(t.Context(), client, trailTestBasePath, trailNumber)
 	if err != nil {
 		t.Fatalf("findTrailByNumber: %v", err)
 	}
@@ -715,7 +669,7 @@ func TestFindTrailByNumberUsesDirectEntireAPIRoute(t *testing.T) {
 func TestFindTrailByNumberAtPathUsesNativeRepoIDRoute(t *testing.T) {
 	t.Parallel()
 	const (
-		basePath    = "/api/v1/repos/native-repo-id/trails"
+		basePath    = "/api/v1/repos/native-repo-id/changes"
 		trailNumber = 3
 	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -756,7 +710,7 @@ func TestFindTrailByNumberTreatsIdentitylessBodyAsNotFound(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			found, err := findTrailByNumberAtPath(t.Context(), api.NewClientWithBaseURL("tok", srv.URL), trailsBasePath("gh", "acme", "repo"), 575)
+			found, err := findTrailByNumberAtPath(t.Context(), api.NewClientWithBaseURL("tok", srv.URL), trailTestBasePath, 575)
 			if err != nil {
 				t.Fatalf("findTrailByNumber: %v", err)
 			}
@@ -794,7 +748,7 @@ func TestFindTrailPaginatesPastServerMax(t *testing.T) {
 	defer srv.Close()
 
 	client := api.NewClientWithBaseURL("tok", srv.URL)
-	found, err := findTrailByBranchAtPath(context.Background(), client, trailsBasePath("gh", "acme", "repo"), "target")
+	found, err := findTrailByBranchAtPath(context.Background(), client, trailTestBasePath, "target")
 	if err != nil {
 		t.Fatalf("findTrailByBranch: %v", err)
 	}
@@ -833,7 +787,7 @@ func TestFindTrailPaginatesToTheEndOfItsBudget(t *testing.T) {
 	defer srv.Close()
 
 	client := api.NewClientWithBaseURL("tok", srv.URL)
-	found, err := findTrailByBranchAtPath(t.Context(), client, trailsBasePath("gh", "acme", "repo"), "target")
+	found, err := findTrailByBranchAtPath(t.Context(), client, trailTestBasePath, "target")
 	if err != nil {
 		t.Fatalf("findTrailByBranch: %v", err)
 	}
@@ -862,7 +816,7 @@ func TestFindTrailStopsWhenServerRepeatsUnpaginatedFullPage(t *testing.T) {
 	defer srv.Close()
 
 	client := api.NewClientWithBaseURL("tok", srv.URL)
-	found, err := findTrailByBranchAtPath(context.Background(), client, trailsBasePath("gh", "acme", "repo"), "target")
+	found, err := findTrailByBranchAtPath(context.Background(), client, trailTestBasePath, "target")
 	if err != nil {
 		t.Fatalf("findTrailByBranch: %v", err)
 	}
@@ -892,7 +846,7 @@ func TestFindTrailStopsAtMaxPagesWithoutTotal(t *testing.T) {
 	defer srv.Close()
 
 	client := api.NewClientWithBaseURL("tok", srv.URL)
-	found, err := findTrailByBranchAtPath(context.Background(), client, trailsBasePath("gh", "acme", "repo"), "target")
+	found, err := findTrailByBranchAtPath(context.Background(), client, trailTestBasePath, "target")
 	if err != nil {
 		t.Fatalf("findTrailByBranch: %v", err)
 	}
@@ -1200,7 +1154,7 @@ func TestRunTrailListAndShowJSONPreserveBranchState(t *testing.T) {
 			client := api.NewClientWithBaseURL("tok", srv.URL)
 
 			var listOut bytes.Buffer
-			err := runTrailListAllWithClient(t.Context(), &listOut, client, "", trailListOptions{
+			err := runTrailListAllWithClient(t.Context(), &listOut, client, trailTestRepoID, trailListOptions{
 				Repo: "gh/acme/repo", Limit: 10, JSON: true,
 			}, nil)
 			require.NoError(t, err)
@@ -1289,7 +1243,7 @@ func TestRunTrailShowJSONEmitsOneTrailObject(t *testing.T) {
 
 func TestRunTrailShowWithClientAtPathUsesNativeRepoIDRoutes(t *testing.T) {
 	t.Parallel()
-	const basePath = "/api/v1/repos/native-repo-id/trails"
+	const basePath = "/api/v1/repos/native-repo-id/changes"
 	var paths []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		paths = append(paths, r.URL.Path)
