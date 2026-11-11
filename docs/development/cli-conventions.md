@@ -253,7 +253,13 @@ always runnable in every build.
   `/{host}/{project}/runs`; `list` prints one page with its cursor, run IDs
   must be ULIDs before any request, `retry` sends an `Idempotency-Key`, and
   `--json` passes the server's runs through. What the agents did on one trail
-  change is `trail finding`, and `trail rerun-review` starts them. Also
+  change is `trail finding`, and `trail rerun-review` starts them.
+  `agent setup` explicitly confirms a service-account repository grant and managed
+  self-hosted Environment binding; `agent serve` executes claimed jobs in the
+  foreground (`--once` processes at most one). These are user-owned commands,
+  separate from local `entire agent` integrations. See
+  [self-hosted project Agents](../architecture/self-hosted-project-agents.md)
+  for identity, isolation and recovery contracts. Also
   `grant` (`add`/`list`/`remove`): project access for a `provider:handle`
   grantee, roles reader/writer/admin; both `add` and `remove` take the grantee
   optionally (see the grant-subtree notes below). `create <name> --owner <ref>`

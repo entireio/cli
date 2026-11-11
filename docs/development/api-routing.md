@@ -138,6 +138,13 @@ uses the following routing shapes, mirroring the entire.io BFF:
   selector is one `GET /api/v1/{host}/{project}/trails/{number}` there. `--repo` only
   filters within that project. No fanout or fallback; server cursors pass through.
   See [Project trails CLI](../architecture/project-trails-cli.md).
+  Self-hosted `project agent serve` is an explicit exception to fresh project
+  discovery: `project agent setup` saves the administrator-resolved project ID
+  and cell URL in private user config. Repo-only service accounts cannot inspect
+  the project shell, so serve reuses that operator-approved route rather than
+  widening their grants. Missing configuration falls back to normal discovery;
+  malformed configuration fails closed. See
+  [self-hosted project Agents](../architecture/self-hosted-project-agents.md).
 - **User-scoped `/me` → home cell, never fan out**:
   `auth.NewEntireAPICellClient(ctx, insecure, nil)` routes by the
   `home_jurisdiction` JWT claim. Activity and recap use it with no data-API

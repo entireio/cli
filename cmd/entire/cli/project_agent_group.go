@@ -47,6 +47,7 @@ The project is the current repository's (gh/<owner> or et/<project>) unless
 	cmd.AddCommand(newProjectAgentListCmd())
 	cmd.AddCommand(newProjectAgentAddCmd())
 	cmd.AddCommand(newProjectAgentRunCmd())
+	cmd.AddCommand(newProjectAgentSetupCmd(), newProjectAgentServeCmd())
 	return cmd
 }
 
