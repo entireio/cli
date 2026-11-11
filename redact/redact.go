@@ -464,8 +464,9 @@ func detectAllLayers(s string) []taggedRegion {
 	// 4. Credentialed URIs (secrets — always on). A URI whose password is a
 	// placeholder stays intact, like the connection strings in layer 5, unless
 	// its query carries a real password.
+	uriQuotes := newShellQuotes(s)
 	for _, loc := range credentialedURIPattern.FindAllStringSubmatchIndex(s, -1) {
-		if isPlaceholderSecretValue(uriPassword(s, loc[0], loc[2], loc[3])) && !uriQueryHasPassword(s[loc[0]:loc[1]]) {
+		if isPlaceholderSecretValue(uriPassword(uriQuotes, loc[0], loc[2], loc[3])) && !uriQueryHasPassword(s[loc[0]:loc[1]]) {
 			continue
 		}
 		regions = append(regions, taggedRegion{region: region{loc[0], loc[1]}})
@@ -616,54 +617,35 @@ func isSlashedBase64Secret(run string) bool {
 }
 
 // uriPassword returns the password s[start:end] of the URI that starts at
-// s[uriStart], as the placeholder rules read it: for a URI inside a double
-// quoted string, as in psql "postgres://app:${PW:-'$FALLBACK'}@db/app", it is
-// read as double quotes enclose it (see doubleQuotedText and
-// insideDoubleQuotes).
-func uriPassword(s string, uriStart, start, end int) string {
-	password := s[start:end]
-	if strings.Contains(password, "'") && insideDoubleQuotes(s, uriStart, end) {
+// s[uriStart], s being quotes.s, as the placeholder rules read it: for a URI
+// inside a double quoted string, as in
+// psql "postgres://app:${PW:-'$FALLBACK'}@db/app", it is read as double quotes
+// enclose it (see doubleQuotedText and insideDoubleQuotes).
+func uriPassword(quotes *shellQuotes, uriStart, start, end int) string {
+	password := quotes.s[start:end]
+	if strings.Contains(password, "'") && insideDoubleQuotes(quotes, uriStart, end) {
 		return doubleQuotedText(password)
 	}
 	return password
 }
 
-// doubleQuoteContextLimit bounds how much text before and after a value
-// inDoubleQuotesAt and insideDoubleQuotes read, so that many values cost
+// doubleQuoteContextLimit bounds how far after a value insideDoubleQuotes
+// looks for the quote that closes its string, so that many values cost
 // linear time.
 const doubleQuoteContextLimit = 1024
 
-// inDoubleQuotesAt reports whether s[start] sits inside a double quoted
-// string. Within doubleQuoteContextLimit bytes of the start of s, it reads s
-// from there (endsInDoubleQuotes). Further in, it reads the value's line from
-// its start, when that is within the limit, so it can misread only a string
-// that spans lines; a longer line is read as unquoted. Reading a value as
-// quoted only keeps a single quoted default in it a reference, which is how
-// it was read before single quotes were told apart.
-func inDoubleQuotesAt(s string, start int) bool {
-	if start <= doubleQuoteContextLimit {
-		return endsInDoubleQuotes(s[:start])
-	}
-	from := start - doubleQuoteContextLimit
-	lineStart := strings.LastIndexAny(s[from:start], "\n\r")
-	if lineStart < 0 {
-		return false
-	}
-	return endsInDoubleQuotes(s[from+lineStart+1 : start])
-}
-
 // insideDoubleQuotes reports whether s[start:end] sits inside a double quoted
-// string (inDoubleQuotesAt) that closes after the value on the same line. A
-// value holding a
-// double quote, backslash, backquote or $( can change which quotes pair or
-// start a new quoting context, so it is then read as unquoted, which only
-// ever redacts more: a single quoted default is a literal there (see
-// isPlaceholderShellExpansion). The value may end with the quote that closes
-// its string.
-func insideDoubleQuotes(s string, start, end int) bool {
-	if !inDoubleQuotesAt(s, start) {
+// string (see shellQuotes) that closes after the value on the same line. A
+// value holding a double quote, backslash, backquote or $( can change which
+// quotes pair or start a new quoting context, so it is then read as unquoted,
+// which only ever redacts more: a single quoted default is a literal there
+// (see isPlaceholderShellExpansion). The value may end with the quote that
+// closes its string.
+func insideDoubleQuotes(quotes *shellQuotes, start, end int) bool {
+	if !quotes.doubleQuotedAt(start) {
 		return false
 	}
+	s := quotes.s
 	value := strings.TrimSuffix(s[start:end], `"`)
 	if strings.ContainsAny(value, "\"\\`") || strings.Contains(value, "$(") {
 		return false
@@ -673,48 +655,211 @@ func insideDoubleQuotes(s string, start, end int) bool {
 	return closing >= 0 && rest[closing] == '"'
 }
 
-// endsInDoubleQuotes reports whether a shell reading prefix from its start
-// ends inside a double quoted string. Single quoted strings, backslash
-// escapes and comments are skipped as the shell skips them, so
-// printf '%s\n' "x", echo \"x\" and a # comment holding a quote read as they
-// run. A command substitution or backquote starts a new quoting context
-// ("$(DB_PASSWORD=${PW:-'$S3CRET'} env)"), a $'...' string can escape a single
-// quote, and an unclosed single quote, a trailing backslash or a comment that
-// runs to the end of prefix leave the next byte's meaning open, so they
-// report false.
-func endsInDoubleQuotes(prefix string) bool {
-	inDouble := false
-	for i := 0; i < len(prefix); i++ {
-		c := prefix[i]
-		switch {
-		case c == '`':
-			return false
-		case c == '$' && strings.HasPrefix(prefix[i+1:], "("):
-			return false
-		case c == '\\':
-			if i++; i == len(prefix) {
-				return false
-			}
-		case c == '"':
-			inDouble = !inDouble
-		case inDouble:
-		case c == '$' && strings.HasPrefix(prefix[i+1:], "'"):
-			return false
-		case c == '\'':
-			closing := strings.IndexByte(prefix[i+1:], '\'')
+// shellQuotes reads the quoting of s as a shell does, from its start. A
+// detector makes one for its pass over s and asks about positions in
+// increasing order, so that all its reads cost linear time together; asking
+// about an earlier position starts the reading over.
+//
+// Single quoted and $'...' strings, backslash escapes, comments and
+// here-document bodies are skipped as the shell skips them, so
+// printf '%s\n' "x", echo \"x\", a # comment or a here-document holding a
+// quote read as they run. A command substitution, $(...) or backquoted,
+// starts a new quoting context inside it, so its own quotes pair there:
+// "$(DB_PASSWORD=${PW:-'$S3CRET'} env)" is outside double quotes.
+type shellQuotes struct {
+	s         string
+	pos       int // the end of the text read so far
+	token     int // where the last token read starts
+	frames    []quoteFrame
+	heredocs  []heredoc // here-documents whose bodies start at the next newline
+	wordStart bool      // whether s[pos] starts a word
+}
+
+// quoteFrame is one quoting context: the top level, or a command substitution.
+type quoteFrame struct {
+	closer     byte // ')' for $(...), '`' for a backquoted one, 0 at the top level
+	depth      int  // parentheses open inside a $(...)
+	arithmetic bool // $((...)), where << shifts instead of starting a here-document
+	inDouble   bool
+}
+
+type heredoc struct {
+	delimiter string
+	stripTabs bool // <<- strips leading tabs from the delimiter line
+}
+
+func newShellQuotes(s string) *shellQuotes {
+	return &shellQuotes{s: s, frames: []quoteFrame{{}}, wordStart: true}
+}
+
+// doubleQuotedAt reports whether s[at] sits inside a double quoted string of
+// its innermost quoting context. A position inside a single quoted or $'...'
+// string, a comment or a here-document body, or right after a backslash, is
+// not: the shell reads none of those as double quoted.
+func (q *shellQuotes) doubleQuotedAt(at int) bool {
+	if at < q.pos && at <= q.token {
+		*q = *newShellQuotes(q.s)
+	}
+	for q.pos < at {
+		q.token = q.pos
+		q.pos = q.read(q.pos)
+	}
+	return q.pos == at && q.frames[len(q.frames)-1].inDouble
+}
+
+// read reads the token at s[i], a byte or a run that the shell reads as one
+// piece, and returns where it ends.
+func (q *shellQuotes) read(i int) int {
+	s, frame := q.s, &q.frames[len(q.frames)-1]
+	wordStart := q.wordStart
+	q.wordStart = false
+	switch c := s[i]; {
+	case c == '\\':
+		return min(len(s), i+2)
+	case c == '`' && frame.closer == '`':
+		q.frames = q.frames[:len(q.frames)-1]
+		return i + 1
+	case c == '`':
+		q.frames = append(q.frames, quoteFrame{closer: '`'})
+		q.wordStart = true
+		return i + 1
+	case c == '$' && strings.HasPrefix(s[i+1:], "("):
+		q.frames = append(q.frames, quoteFrame{closer: ')', arithmetic: strings.HasPrefix(s[i+2:], "(")})
+		q.wordStart = true
+		return i + 2
+	case c == '"':
+		frame.inDouble = !frame.inDouble
+		return i + 1
+	case frame.inDouble:
+		return i + 1
+	}
+	return q.readUnquoted(i, wordStart)
+}
+
+// readUnquoted reads the token at s[i] outside double quotes.
+func (q *shellQuotes) readUnquoted(i int, wordStart bool) int {
+	s, frame := q.s, &q.frames[len(q.frames)-1]
+	switch c := s[i]; {
+	case c == '\'':
+		return singleQuotedEnd(s, i+1)
+	case c == '$' && strings.HasPrefix(s[i+1:], "'"):
+		return ansiCQuotedEnd(s, i+2)
+	case c == '#' && wordStart:
+		return lineEnd(s, i)
+	case c == '\n' && len(q.heredocs) > 0:
+		end := heredocsEnd(s, i+1, q.heredocs)
+		q.heredocs = q.heredocs[:0]
+		q.wordStart = true
+		return end
+	case strings.HasPrefix(s[i:], "<<<"):
+		return i + 3
+	case strings.HasPrefix(s[i:], "<<") && !frame.arithmetic:
+		return q.readHeredocOperator(i + 2)
+	case c == '(' && frame.closer == ')':
+		frame.depth++
+	case c == ')' && frame.closer == ')' && frame.depth == 0:
+		q.frames = q.frames[:len(q.frames)-1]
+	case c == ')' && frame.closer == ')':
+		frame.depth--
+	}
+	q.wordStart = strings.IndexByte(" \t\n\r;&|()", s[i]) >= 0
+	return i + 1
+}
+
+// readHeredocOperator reads the rest of a << or <<- operator from s[i], its
+// delimiter word included, and queues the here-document it starts.
+func (q *shellQuotes) readHeredocOperator(i int) int {
+	s := q.s
+	stripTabs := strings.HasPrefix(s[i:], "-")
+	if stripTabs {
+		i++
+	}
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+		i++
+	}
+	delimiter, end := heredocDelimiter(s, i)
+	if end > i {
+		q.heredocs = append(q.heredocs, heredoc{delimiter: delimiter, stripTabs: stripTabs})
+	}
+	return end
+}
+
+// heredocDelimiter reads the delimiter word at s[i] with its quotes removed,
+// and returns it with where the word ends.
+func heredocDelimiter(s string, i int) (string, int) {
+	var word strings.Builder
+	for i < len(s) && strings.IndexByte(" \t\n\r;&|()<>", s[i]) < 0 {
+		switch s[i] {
+		case '\'', '"':
+			closing := strings.IndexByte(s[i+1:], s[i])
 			if closing < 0 {
-				return false
+				closing = len(s) - i - 1
 			}
-			i += 1 + closing
-		case c == '#' && (i == 0 || strings.IndexByte(" \t\n\r;&|()", prefix[i-1]) >= 0):
-			lineEnd := strings.IndexAny(prefix[i:], "\n\r")
-			if lineEnd < 0 {
-				return false
-			}
-			i += lineEnd
+			word.WriteString(s[i+1 : i+1+closing])
+			i += 2 + closing
+		case '\\':
+			word.WriteString(s[min(len(s), i+1):min(len(s), i+2)])
+			i += 2
+		default:
+			word.WriteByte(s[i])
+			i++
 		}
 	}
-	return inDouble
+	return word.String(), min(len(s), i)
+}
+
+// heredocsEnd returns where the bodies of docs, starting at s[from], end:
+// after the line that closes the last of them, or at the end of s.
+func heredocsEnd(s string, from int, docs []heredoc) int {
+	for _, doc := range docs {
+		for from < len(s) {
+			line, next := s[from:], len(s)
+			if n := strings.IndexByte(line, '\n'); n >= 0 {
+				line, next = line[:n], from+n+1
+			}
+			line = strings.TrimSuffix(line, "\r")
+			if doc.stripTabs {
+				line = strings.TrimLeft(line, "\t")
+			}
+			from = next
+			if line == doc.delimiter {
+				break
+			}
+		}
+	}
+	return from
+}
+
+// singleQuotedEnd returns where the single quoted string whose text starts at
+// s[from] ends: after its closing quote, or at the end of s.
+func singleQuotedEnd(s string, from int) int {
+	if closing := strings.IndexByte(s[from:], '\''); closing >= 0 {
+		return from + closing + 1
+	}
+	return len(s)
+}
+
+// ansiCQuotedEnd is singleQuotedEnd for a $'...' string, where a backslash
+// escapes the next byte.
+func ansiCQuotedEnd(s string, from int) int {
+	for i := from; i < len(s); i++ {
+		switch s[i] {
+		case '\\':
+			i++
+		case '\'':
+			return i + 1
+		}
+	}
+	return len(s)
+}
+
+// lineEnd returns the index of the first line break at or after s[from], or
+// len(s).
+func lineEnd(s string, from int) int {
+	if n := strings.IndexAny(s[from:], "\n\r"); n >= 0 {
+		return from + n
+	}
+	return len(s)
 }
 
 // detectDatabaseURIPasswords covers database URIs whose password contains a
@@ -725,8 +870,9 @@ func detectDatabaseURIPasswords(s string) []taggedRegion {
 		return nil
 	}
 	var regions []taggedRegion
+	quotes := newShellQuotes(s)
 	for _, loc := range databaseURIPasswordPattern.FindAllStringSubmatchIndex(s, -1) {
-		password := uriPassword(s, loc[0], loc[2], loc[3])
+		password := uriPassword(quotes, loc[0], loc[2], loc[3])
 		if uriPortPrefixPattern.MatchString(password) || !hasNonPlaceholderPasswordValue(password) {
 			continue
 		}
@@ -913,6 +1059,7 @@ func detectCredentialValues(s string) []taggedRegion {
 	if !strings.ContainsRune(s, '=') {
 		return regions
 	}
+	quotes := newShellQuotes(s)
 	for _, loc := range credentialValuePattern.FindAllStringSubmatchIndex(s, -1) {
 		if len(loc) < 6 || loc[4] < 0 || loc[5] < 0 {
 			continue
@@ -923,7 +1070,7 @@ func detectCredentialValues(s string) []taggedRegion {
 		}
 		// The shared placeholder rules, except that a single-quoted value is
 		// a shell literal and only the literal placeholder words apply.
-		value := capturedValueText(s, start, end)
+		value := capturedValueText(quotes, start, end)
 		isReal := hasNonPlaceholderPasswordValue(value)
 		if singleQuoted {
 			isReal = hasNonPlaceholderQuotedPasswordValue(value, true)
@@ -950,6 +1097,7 @@ func detectCredentialKeyCaptures(
 	valueGroup := pattern.SubexpIndex("value")
 	keyGroup := pattern.SubexpIndex("key")
 	var regions []taggedRegion
+	quotes := newShellQuotes(s)
 	for _, match := range pattern.FindAllStringSubmatchIndex(s, -1) {
 		keyStart, keyEnd, ok := captureRange(match, keyGroup)
 		if !ok {
@@ -977,7 +1125,7 @@ func detectCredentialKeyCaptures(
 				continue
 			}
 		}
-		if captured, ok := nonPlaceholderCapture(s, key, match, valueGroup); ok {
+		if captured, ok := nonPlaceholderCapture(quotes, key, match, valueGroup); ok {
 			// Assignments get the same separator handling as the password
 			// pattern above: "ab;cd" is one value. Shell-stdin literals stop
 			// at the pipe syntax their pattern already bounds.
@@ -1035,25 +1183,26 @@ func isCredentialCodeReference(value string) bool {
 	return isCredentialJSONSecretKey(value[memberStart:], false)
 }
 
-func nonPlaceholderCapture(s, key string, match []int, captureGroup int) (taggedRegion, bool) {
+func nonPlaceholderCapture(quotes *shellQuotes, key string, match []int, captureGroup int) (taggedRegion, bool) {
 	captureStart, end, ok := captureRange(match, captureGroup)
 	if !ok {
 		return taggedRegion{}, false
 	}
-	start, end, singleQuoted := unquoteRangeQuoted(s, captureStart, end)
-	if !hasNonPlaceholderKeyValue(key, capturedValueText(s, start, end), singleQuoted) {
+	start, end, singleQuoted := unquoteRangeQuoted(quotes.s, captureStart, end)
+	if !hasNonPlaceholderKeyValue(key, capturedValueText(quotes, start, end), singleQuoted) {
 		return taggedRegion{}, false
 	}
 	return taggedRegion{region: region{start, end}}, true
 }
 
 // capturedValueText returns the value s[start:end] that a key/value pattern
-// captured, as the placeholder rules read it: inside a double-quoted string
-// (DB_PASSWORD="${PW:-'$FALLBACK'}", echo "DB_PASSWORD=${PW:-'$FALLBACK'} done"),
-// the shell reads it as doubleQuotedText describes.
-func capturedValueText(s string, start, end int) string {
-	value := s[start:end]
-	if !strings.Contains(value, "'") || !insideDoubleQuotes(s, start, end) {
+// captured, s being quotes.s, as the placeholder rules read it: inside a
+// double-quoted string (DB_PASSWORD="${PW:-'$FALLBACK'}",
+// echo "DB_PASSWORD=${PW:-'$FALLBACK'} done"), the shell reads it as
+// doubleQuotedText describes.
+func capturedValueText(quotes *shellQuotes, start, end int) string {
+	value := quotes.s[start:end]
+	if !strings.Contains(value, "'") || !insideDoubleQuotes(quotes, start, end) {
 		return value
 	}
 	if inner, ok := strings.CutSuffix(value, `"`); ok {
