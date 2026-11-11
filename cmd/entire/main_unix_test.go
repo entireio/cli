@@ -110,10 +110,8 @@ func TestNohup_EntireSleepsThroughSIGHUP(t *testing.T) {
 // plugin's clean exit is entire's. The terminal delivers it to the whole
 // foreground process group, plugin included; forwarding entire's copy as well
 // would make one key press look like the second Ctrl-C a plugin treats as
-// force quit. This test cannot reliably see that duplicate: it lands
-// microseconds after the original, and Go's os/signal keeps one pending bit
-// per signal, so this Go plugin usually counts the pair as one (seen on macOS
-// and Linux). TestTerminalSentInterrupt_UnderATerminal guards the detection.
+// force quit (with forwarding restored, this plugin counts 2 on macOS and
+// Linux).
 func TestTerminalCtrlC_ReachesPluginOnce(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -121,7 +119,7 @@ func TestTerminalCtrlC_ReachesPluginOnce(t *testing.T) {
 	if err := os.Mkdir(binDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(os.Args[0], filepath.Join(binDir, "entire-sigcount")); err != nil {
+	if err := os.Symlink(os.Args[0], filepath.Join(binDir, sigCountPlugin)); err != nil {
 		t.Fatal(err)
 	}
 	countFile := filepath.Join(dir, "count")

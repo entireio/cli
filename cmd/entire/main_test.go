@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strconv"
@@ -26,9 +27,14 @@ const dieFromSignalEnvVar = "ENTIRE_TEST_DIE_FROM_SIGNAL"
 // instead of the test suite.
 const runMainEnvVar = "ENTIRE_TEST_RUN_MAIN"
 
-// sigCountEnvVar, when set on a re-executed test binary, makes it a plugin
-// that counts the SIGINTs it receives: see runSigCountPlugin.
-const sigCountEnvVar = "ENTIRE_TEST_SIGCOUNT_FILE"
+// sigCountPlugin is the name under which the test binary, run as a plugin,
+// counts the SIGINTs it receives (runSigCountPlugin), writing the count to
+// the file named by sigCountEnvVar. Keyed on the name, not the variable,
+// because entire passes its ENTIRE_* environment on to the plugin.
+const (
+	sigCountPlugin = "entire-sigcount"
+	sigCountEnvVar = "ENTIRE_TEST_SIGCOUNT_FILE"
+)
 
 func TestMain(m *testing.M) {
 	// Child mode: exercise dieFromSignal for the named signal and let it
@@ -43,8 +49,8 @@ func TestMain(m *testing.M) {
 		os.Exit(exitCodeForSignal(sig))
 	}
 	// Before runMainEnvVar: a plugin inherits the ENTIRE_* environment.
-	if path := os.Getenv(sigCountEnvVar); path != "" {
-		runSigCountPlugin(path)
+	if filepath.Base(os.Args[0]) == sigCountPlugin {
+		runSigCountPlugin(os.Getenv(sigCountEnvVar))
 	}
 	if line := os.Getenv(runMainEnvVar); line != "" {
 		os.Args = append([]string{"entire"}, strings.Fields(line)...)
