@@ -691,17 +691,20 @@ func takeStampRecords(ctx context.Context, commit *object.Commit) stampRecords {
 	pending := commitsUpToHead(ctx, head)
 	var out stampRecords
 	out.inherited, out.redone = takeInheritedMarkerIn(ctx, root, parent, pending)
-	out.stamped, out.sessions = takeStampsIn(ctx, root, carried, pending)
+	out.stamped, out.sessions = takeStampsIn(ctx, root, commit, carried, pending)
 	return out
 }
 
-// takeStampsIn takes the stamps and sessions entries of the trailers carried,
-// keeps the ones that may be stamped on a commit in pending, and drops the
-// rest, including an entry an earlier take left without its stamp once the
-// post-commit that took it has stopped running. It leaves the entries it takes
-// in place, without their stamps and marked as this post-commit's, for
+// takeStampsIn takes the stamps and sessions entries of the trailers commit
+// carries, keeps the ones that may be stamped on a commit in pending, and
+// drops the rest, including an entry an earlier take left without its stamp
+// once the post-commit that took it has stopped running. A stamp commit
+// carries is an earlier commit's when a commit before it, made since the
+// stamp, carries it too (carriedBefore), as a message saved from that commit
+// does; it is kept for that commit's post-commit. It leaves the entries it
+// takes in place, without their stamps and marked as this post-commit's, for
 // releaseStampedSessions. Callers hold the stamp-records lock.
-func takeStampsIn(ctx context.Context, root *os.Root, carried map[id.CheckpointID]bool, pending inFlight) (map[id.CheckpointID]bool, map[id.CheckpointID]stampedSessions) {
+func takeStampsIn(ctx context.Context, root *os.Root, commit *object.Commit, carried map[id.CheckpointID]bool, pending inFlight) (map[id.CheckpointID]bool, map[id.CheckpointID]stampedSessions) {
 	entries := readStampedSessionsIn(root)
 	stampedOn := make(map[id.CheckpointID]string, len(entries))
 	for _, e := range entries {
@@ -711,9 +714,9 @@ func takeStampsIn(ctx context.Context, root *os.Root, carried map[id.CheckpointI
 	var kept []id.CheckpointID
 	for _, cpID := range readStampedTrailersIn(root) {
 		switch {
-		case carried[cpID]:
+		case carried[cpID] && !carriedBefore(ctx, commit, stampedOn[cpID], cpID):
 			stamped[cpID] = true
-		case pending.mayBePending(stampedOn[cpID]):
+		case carried[cpID], pending.mayBePending(stampedOn[cpID]):
 			kept = append(kept, cpID)
 		}
 	}

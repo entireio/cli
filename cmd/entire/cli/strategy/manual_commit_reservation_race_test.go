@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -200,6 +201,24 @@ func TestTakeStampRecords_KeepsAnEntryWhileItsTakerRuns(t *testing.T) {
 	assert.Empty(t, readStampedSessionsIn(mustPerWorktreeGitRoot(t)))
 }
 
+// A commit whose message was saved from an earlier commit carries that
+// commit's stamp too. When its post-commit takes the records first, the stamp
+// stays for the earlier commit's post-commit, which used to find it gone.
+func TestTakeStampRecords_LeavesAStampAnEarlierCommitCarries(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	ctx := context.Background()
+	reserved, next := id.MustCheckpointID("a1b2c3d4e5f6"), id.MustCheckpointID("b1b2c3d4e5f6")
+
+	require.True(t, recordStampedTrailer(ctx, reserved))
+	first := commitWith(t, dir, "first", reserved)
+	require.True(t, recordStampedTrailer(ctx, next))
+	second := takeStampRecords(ctx, commitWith(t, dir, "second", reserved, next))
+	assert.Equal(t, map[id.CheckpointID]bool{next: true}, second.stamped, "only its own stamp")
+	assert.Equal(t, map[id.CheckpointID]bool{reserved: true}, readStampedTrailers(ctx), "the first commit's is kept for it")
+	assert.Equal(t, map[id.CheckpointID]bool{reserved: true}, takeStampRecords(ctx, first).stamped)
+}
+
 // A post-commit that stopped before releasing its entries leaves them only
 // until the next post-commit's take, and the reservation counts as carried
 // no longer: the next commit takes it, as when no commit carried it.
@@ -298,19 +317,23 @@ func settleReservation() error {
 	return SaveSessionState(context.Background(), state)
 }
 
-// heldReservation saves a session holding reserved, carried by a commit whose
-// post-commit, this process, has taken its stamp, and returns the session as
-// a post-commit's snapshot holds it.
-func heldReservation(t *testing.T, dir string, reserved id.CheckpointID) *SessionState {
+// heldReservation saves a session holding reserved, carried by a first
+// commit whose post-commit, this process, has taken its stamp, and a second
+// commit on top of it, prepared meanwhile with next. It returns the session as
+// a post-commit's snapshot holds it, and the two commits.
+func heldReservation(t *testing.T, dir string, reserved, next id.CheckpointID) (*SessionState, *object.Commit, *object.Commit) {
 	t.Helper()
 	ctx := context.Background()
 	s := NewManualCommitStrategy()
 	saveReservedSession(t, s, dir, reserved)
 	require.True(t, recordStampedTrailer(ctx, reserved))
-	takeStampRecords(ctx, commitWith(t, dir, "first", reserved))
+	first := commitWith(t, dir, "first", reserved)
+	takeStampRecords(ctx, first)
+	require.True(t, recordStampedTrailer(ctx, next))
+	second := commitWith(t, dir, "second", next)
 	snapshot, err := s.loadSessionState(ctx, reservedSession)
 	require.NoError(t, err)
-	return snapshot
+	return snapshot, first, second
 }
 
 // A post-commit whose session still reserves the checkpoint ID an earlier
@@ -321,7 +344,7 @@ func TestAwaitEarlierCondensations_UntilTheSessionIsCondensed(t *testing.T) {
 	t.Chdir(dir)
 	ctx := context.Background()
 	reserved, next := id.MustCheckpointID("a1b2c3d4e5f6"), id.MustCheckpointID("b1b2c3d4e5f6")
-	snapshot := heldReservation(t, dir, reserved)
+	snapshot, _, second := heldReservation(t, dir, reserved, next)
 
 	const condenseAfter = 200 * time.Millisecond
 	condensed := make(chan error, 1)
@@ -330,7 +353,7 @@ func TestAwaitEarlierCondensations_UntilTheSessionIsCondensed(t *testing.T) {
 		condensed <- settleReservation()
 	}()
 	start := time.Now()
-	assert.True(t, awaitEarlierCondensations(ctx, []*SessionState{snapshot}, next, nil))
+	assert.True(t, awaitEarlierCondensations(ctx, []*SessionState{snapshot}, second, next))
 	assert.GreaterOrEqual(t, time.Since(start), condenseAfter)
 	require.NoError(t, <-condensed)
 	now, read := savedReservation(ctx, reservedSession)
@@ -338,20 +361,40 @@ func TestAwaitEarlierCondensations_UntilTheSessionIsCondensed(t *testing.T) {
 	assert.True(t, now.IsEmpty(), "it returned once the session was condensed")
 }
 
-// It never waits for its own stamp, for its own checkpoint, or for a
-// post-commit that has stopped.
+// It never waits for its own checkpoint, or for a post-commit that has
+// stopped.
 func TestAwaitEarlierCondensations_NotWhenNothingIsComing(t *testing.T) {
 	dir := setupGitRepo(t)
 	t.Chdir(dir)
 	ctx := context.Background()
 	reserved, next := id.MustCheckpointID("a1b2c3d4e5f6"), id.MustCheckpointID("b1b2c3d4e5f6")
-	snapshot := heldReservation(t, dir, reserved)
+	snapshot, _, second := heldReservation(t, dir, reserved, next)
 	sessions := []*SessionState{snapshot}
 
-	assert.False(t, awaitEarlierCondensations(ctx, sessions, reserved, nil), "its own checkpoint")
-	assert.False(t, awaitEarlierCondensations(ctx, sessions, next, map[id.CheckpointID]stampedSessions{reserved: {}}), "its own stamp")
+	assert.False(t, awaitEarlierCondensations(ctx, sessions, second, reserved), "its own checkpoint")
 	stopTaker(t, reserved)
-	assert.False(t, awaitEarlierCondensations(ctx, sessions, next, nil), "a stopped post-commit")
+	assert.False(t, awaitEarlierCondensations(ctx, sessions, second, next), "a stopped post-commit")
+}
+
+// It waits only for a reservation an earlier commit carries. The earlier
+// commit's post-commit, finding a session that reserves the later commit's ID
+// while that commit's post-commit runs, goes on: the two would otherwise wait
+// for each other until both gave up.
+func TestAwaitEarlierCondensations_NotForALaterCommitsReservation(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	ctx := context.Background()
+	reserved, next := id.MustCheckpointID("a1b2c3d4e5f6"), id.MustCheckpointID("b1b2c3d4e5f6")
+	_, first, second := heldReservation(t, dir, reserved, next)
+	takeStampRecords(ctx, second)
+	state, err := LoadSessionState(ctx, reservedSession)
+	require.NoError(t, err)
+	state.BeginCondensationAttempt(next)
+	require.NoError(t, SaveSessionState(ctx, state), "the session now reserves the second commit's ID")
+
+	start := time.Now()
+	assert.False(t, awaitEarlierCondensations(ctx, []*SessionState{state}, first, reserved))
+	assert.Less(t, time.Since(start), earlierCondensationWait)
 }
 
 // The wait is bounded: a post-commit that takes too long to condense the
@@ -361,13 +404,13 @@ func TestAwaitEarlierCondensations_GivesUpAtTheBound(t *testing.T) {
 	t.Chdir(dir)
 	ctx := context.Background()
 	reserved, next := id.MustCheckpointID("a1b2c3d4e5f6"), id.MustCheckpointID("b1b2c3d4e5f6")
-	snapshot := heldReservation(t, dir, reserved)
+	snapshot, _, second := heldReservation(t, dir, reserved, next)
 	bound := earlierCondensationWait
 	earlierCondensationWait = 200 * time.Millisecond
 	t.Cleanup(func() { earlierCondensationWait = bound })
 
 	start := time.Now()
-	assert.True(t, awaitEarlierCondensations(ctx, []*SessionState{snapshot}, next, nil))
+	assert.True(t, awaitEarlierCondensations(ctx, []*SessionState{snapshot}, second, next))
 	assert.GreaterOrEqual(t, time.Since(start), earlierCondensationWait)
 	assert.Less(t, time.Since(start), bound)
 }

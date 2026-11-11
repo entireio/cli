@@ -333,10 +333,13 @@ commit.
   check, since the earlier post-commit may have condensed it in between. A
   commit retried on the same HEAD after an aborted attempt keeps the
   reservation. A later post-commit's take keeps an entry the earlier one marked
-  while that process runs (where proclive cannot tell, for a minute). The later
+  while that process runs (where proclive cannot tell, for a minute), and
+  leaves a stamp its commit carries for an earlier commit that carries it too,
+  as a message saved from that commit does (`carriedBefore`). The later
   commit's post-commit can reach the session first; it then waits, up to ten
   seconds, for the earlier one to condense the session
-  (`awaitEarlierCondensations`) rather than skip it. Prepare writes the records and post-commit
+  (`awaitEarlierCondensations`) rather than skip it. It never waits for a later
+  commit's reservation. Prepare writes the records and post-commit
   takes them under `entire-stamp-records.lock` in the same dir, so hooks of
   overlapping commits in one worktree cannot lose each other's updates. Beside
   it, `entire-stamped-sessions.json` records the HEAD prepare stamped on and

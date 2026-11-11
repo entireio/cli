@@ -7,6 +7,10 @@ import (
 	"slices"
 	"time"
 
+	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/object"
+
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
@@ -107,8 +111,7 @@ func stampCarriedInFlight(ctx context.Context, cpID id.CheckpointID) bool {
 }
 
 // commitSinceCarries reports whether a commit on HEAD's first parents, made
-// after stampedOn (any, when it is empty), carries cpID. It looks at most
-// maxCommitsInFlight commits back, and an unreadable HEAD or commit ends the
+// after stampedOn, carries cpID (carriedSince). An unreadable HEAD ends the
 // search.
 func commitSinceCarries(ctx context.Context, stampedOn string, cpID id.CheckpointID) bool {
 	repo, err := OpenRepository(ctx)
@@ -120,7 +123,30 @@ func commitSinceCarries(ctx context.Context, stampedOn string, cpID id.Checkpoin
 	if err != nil {
 		return false
 	}
-	hash := head.Hash()
+	return carriedSince(repo, head.Hash(), stampedOn, cpID)
+}
+
+// carriedBefore reports whether a commit before commit on its first parents,
+// made after stampedOn, carries cpID (carriedSince): the stamp is that
+// earlier commit's, though commit carries it too, as a message saved from the
+// earlier commit does.
+func carriedBefore(ctx context.Context, commit *object.Commit, stampedOn string, cpID id.CheckpointID) bool {
+	if len(commit.ParentHashes) == 0 {
+		return false
+	}
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		return false
+	}
+	defer repo.Close()
+	return carriedSince(repo, commit.ParentHashes[0], stampedOn, cpID)
+}
+
+// carriedSince reports whether from or a commit on its first parents, made
+// after stampedOn (any, when it is empty), carries cpID. It looks at most
+// maxCommitsInFlight commits back, and an unreadable commit ends the search.
+func carriedSince(repo *git.Repository, from plumbing.Hash, stampedOn string, cpID id.CheckpointID) bool {
+	hash := from
 	for range maxCommitsInFlight {
 		if hash.String() == stampedOn {
 			return false
@@ -174,17 +200,19 @@ func savedReservation(ctx context.Context, sessionID string) (id.CheckpointID, b
 }
 
 // awaitEarlierCondensations waits while a session about to be condensed into
-// cpID still reserves another checkpoint ID, carried by an earlier commit
-// whose post-commit took its stamp and is still running. The two post-commits
-// run side by side, and this one can reach the session first. It would skip
-// the session then (postCommitProcessSessionLocked keeps a reservation for its
-// own checkpoint), and with no other session condensing into cpID, the commit
-// would name a checkpoint that is never written. The wait ends once the
-// session no longer holds the reservation, the other post-commit releases its
-// entry or stops running, or earlierCondensationWait has passed. own are the
-// stamps this post-commit took, which it never waits for. It reports whether
-// it waited, so the caller reads the sessions again.
-func awaitEarlierCondensations(ctx context.Context, sessions []*SessionState, cpID id.CheckpointID, own map[id.CheckpointID]stampedSessions) bool {
+// cpID, commit's checkpoint, still reserves another checkpoint ID that an
+// earlier commit carries, one before commit on its first parents whose
+// post-commit took the stamp and is still running. The two post-commits run
+// side by side, and this one can reach the session first. It would skip the
+// session then (postCommitProcessSessionLocked keeps a reservation for its own
+// checkpoint), and with no other session condensing into cpID, the commit
+// would name a checkpoint that is never written. It never waits for a later
+// commit's reservation, so two post-commits never wait for each other. The
+// wait ends once the session no longer holds the reservation, the other
+// post-commit releases its entry or stops running, or earlierCondensationWait
+// has passed. It reports whether it waited, so the caller reads the sessions
+// again.
+func awaitEarlierCondensations(ctx context.Context, sessions []*SessionState, commit *object.Commit, cpID id.CheckpointID) bool {
 	root, err := perWorktreeGitRoot(ctx)
 	if err != nil {
 		return false
@@ -193,7 +221,7 @@ func awaitEarlierCondensations(ctx context.Context, sessions []*SessionState, cp
 	waited := false
 	for _, sess := range sessions {
 		reserved := sess.PendingCondensationID()
-		if _, mine := own[reserved]; reserved.IsEmpty() || reserved == cpID || mine {
+		if reserved.IsEmpty() || reserved == cpID || !carriedByEarlierCommit(ctx, root, commit, reserved) {
 			continue
 		}
 		for condensingElsewhere(ctx, root, sess.SessionID, reserved) {
@@ -213,6 +241,13 @@ func awaitEarlierCondensations(ctx context.Context, sessions []*SessionState, cp
 		}
 	}
 	return waited
+}
+
+// carriedByEarlierCommit reports whether prepare recorded stamping reserved,
+// and a commit before commit made since carries it (carriedBefore).
+func carriedByEarlierCommit(ctx context.Context, root *os.Root, commit *object.Commit, reserved id.CheckpointID) bool {
+	entry, ok := stampedSessionsEntry(readStampedSessionsIn(root), reserved)
+	return ok && carriedBefore(ctx, commit, entry.Head, reserved)
 }
 
 // condensingElsewhere reports whether sessionID's saved state still reserves
