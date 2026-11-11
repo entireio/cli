@@ -886,7 +886,7 @@ func detectCredentialKeyCaptures(
 		}
 		valueStart, valueEnd, _ := captureRange(match, valueGroup)
 		// The whole shell word is the value ("None"x is not None).
-		if _, wordEnd, joined := joinedShellWord(s, valueStart, valueEnd); joined && wholeWord {
+		if _, wordEnd, joined := joinedShellWord(s, valueStart, valueEnd); joined && wholeWord && (shouldPreserve == nil || !readsPastJoinedWord(s, valueStart, valueEnd, wordEnd)) {
 			valueEnd = wordEnd
 		}
 		if isNonPasswordCodeLiteral(key, strings.Trim(s[valueStart:valueEnd], `"'`)) {
@@ -964,7 +964,11 @@ func detectCredentialKeyCaptures(
 // inside the text that match took, as abc in DB_PASSWORD=abc= DB_USER=
 // DB_NAME= API_KEY=hunter2, is one FindAll never reads, so its match sets no
 // such end, and the search goes on from the region's end, where it finds
-// DB_USER= DB_NAME= and then API_KEY=hunter2, as FindAll does.
+// DB_USER= DB_NAME= and then API_KEY=hunter2, as FindAll does. Nor, when its
+// value is redacted, does it move where FindAll goes on: in API_KEY=API_KEY=
+// a= b= API_KEY=hunter2xyz, the second API_KEY takes a= as its value, but
+// FindAll's match a= b= still starts at the first match's end, so b= does not
+// take API_KEY=hunter2xyz.
 //
 // The only values read from inside a region are those visitStraddlingValues
 // finds, and they add to what the region already redacts. One that stays
@@ -1010,7 +1014,10 @@ func forEachUncoveredMatch(s string, pattern *regexp.Regexp, valueGroup int, vis
 				next = covered
 			} else if end := visit(match, true); end > 0 {
 				last, readEnd := visitStraddlingValues(s, pattern, valueGroup, visit, match, end, &runs)
-				covered, unredactedEnd, coveredMatchEnd = max(covered, last.end), max(unredactedEnd, readEnd), match[1]
+				covered, unredactedEnd = max(covered, last.end), max(unredactedEnd, readEnd)
+				if from >= coveredMatchEnd {
+					coveredMatchEnd = match[1]
+				}
 				if keyStart := assignedKeyStart(s, last.start, last.end); keyStart >= valueStart && last.end >= next {
 					// FindAll goes on at match[1], so it reads a '_' there as
 					// the byte before the key.
@@ -1445,7 +1452,7 @@ func credentialValueRegion(s string, start, end int, extend bool, isReal func(pi
 // joined from several pieces, and joined is false for any other value.
 func joinedValueRegion(s string, start, end int, extend bool, isReal func(piece string, singleQuoted bool) bool) (value region, secret, joined bool) {
 	pieces, wordEnd, joined := joinedShellWord(s, start, end)
-	if !joined {
+	if !joined || extend && readsPastJoinedWord(s, start, end, wordEnd) {
 		return region{}, false, false
 	}
 	if extend && !isQuoteByte(s[start]) {
@@ -1455,6 +1462,18 @@ func joinedValueRegion(s string, start, end int, extend bool, isReal func(piece 
 		}
 	}
 	return region{start, wordEnd}, isRealJoinedWord(s, pieces, isReal), true
+}
+
+// readsPastJoinedWord reports whether main's reading of a bare value captured
+// at s[start:end], extended past value separators, runs past the shell word
+// that ends at wordEnd, extended the same way. The pattern can stop at a
+// separator inside a quoted piece of the word, and the word can then end at
+// a quote main does not pair: the shell reads a"b;c\"d|hunter2xyz" as one
+// quoted string, but a backslash before a quote is left alone (see
+// escapedWordBytes), so the word ends at the pipe. Such a value is read as
+// main reads it, so the word never redacts less than main does.
+func readsPastJoinedWord(s string, start, end, wordEnd int) bool {
+	return !isQuoteByte(s[start]) && extendPastValueSeparators(s, end) > extendPastValueSeparators(s, wordEnd)
 }
 
 // capturedValueRegion is credentialValueRegion for a value read as main reads

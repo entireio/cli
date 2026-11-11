@@ -1788,6 +1788,16 @@ func TestString_ValuesPastRedactedWordsCaughtWithoutScanners(t *testing.T) {
 			input: `API_KEY="x""a=b"|FOO= API_KEY=hunter2`,
 			want:  `API_KEY=REDACTED|FOO= API_KEY=REDACTED`,
 		},
+		{
+			name:  "a credential after spaced keys past a key inside a captured value",
+			input: `API_KEY=API_KEY= a= b= API_KEY=hunter2xyz`,
+			want:  `API_KEY=REDACTED REDACTED b= API_KEY=REDACTED`,
+		},
+		{
+			name:  "a password after spaced keys past a key inside a captured value",
+			input: `DB_PASSWORD=DB_PASSWORD= a= b= DB_PASSWORD=hunter2xyz`,
+			want:  `DB_PASSWORD=REDACTED REDACTED b= DB_PASSWORD=REDACTED`,
+		},
 	})
 }
 
@@ -3203,6 +3213,21 @@ func TestString_DoubleQuotedShellDefaultsPreserved(t *testing.T) {
 func TestString_JoinedShellWordValues(t *testing.T) {
 	t.Parallel()
 	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "password whose quoted piece holds a separator and a backslash before a quote",
+			input: `DB_PASSWORD=a"b;c\"d|hunter2xyz"`,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "credential whose quoted piece holds a separator and a backslash before a quote",
+			input: `API_KEY=a"b;c\"d|hunter2xyz"`,
+			want:  "API_KEY=REDACTED",
+		},
+		{
+			name:  "bare value read past a separator inside its quoted piece, as main reads it",
+			input: `DB_PASSWORD=a"b;c"d|echo done`,
+			want:  "DB_PASSWORD=REDACTED done",
+		},
 		{
 			name:  "single-quoted literal after an empty string",
 			input: `DB_PASSWORD=""'$uperSecret123'`,
