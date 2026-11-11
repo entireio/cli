@@ -690,6 +690,7 @@ func TestString_CommandLinePasswordsShellGrammarCases(t *testing.T) {
 		{name: "mysql password after sudo --user joined in a list", input: `subprocess.run(["sudo", "--user=ssh", "mysql", "-p` + p + `"])`, want: `subprocess.run(["sudo", "--user=ssh", "mysql", "-pREDACTED"])`},
 		{name: "mysql password after env --split-string in a list", input: `subprocess.run(["env", "--split-string", "mysql", "-p` + p + `"])`, want: `subprocess.run(["env", "--split-string", "mysql", "-pREDACTED"])`},
 		{name: "mysql password after env -iS in a list", input: `subprocess.run(["env", "-iS", "mysql", "-p` + p + `"])`, want: `subprocess.run(["env", "-iS", "mysql", "-pREDACTED"])`},
+		{name: "client after a container subcommand that runs nothing", input: "kubectl patch deployment mysql -p='{\"spec\":{}}' && mysql -p" + p, want: "kubectl patch deployment mysql -p='{\"spec\":{}}' && mysql -pREDACTED"},
 	})
 }
 
@@ -866,6 +867,11 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		"The --password flag is required.",
 		"  --password value   The password to use",
 		"kubectl --as alice logs mysql -p",
+		// a client name that is an operand of a container client's
+		// subcommand that runs nothing
+		`kubectl patch deployment mysql -p='{"spec":{"replicas":3}}'`,
+		`kubectl -n prod patch deployment mysql -p{"spec":{"replicas":3}}`,
+		"docker logs mysql -pfoo",
 		"the machine learning password policy",
 		"By default login with password is disabled.",
 		"default password is stored in the vault",

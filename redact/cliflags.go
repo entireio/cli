@@ -1789,6 +1789,10 @@ type commandWords struct {
 	// the name of a command that prints its arguments.
 	command bool
 	text    bool
+	// noRun is set with text after a container client's subcommand that
+	// runs no command, all of whose words are its operands
+	// (kubectl patch deployment mysql -p='{...}').
+	noRun bool
 }
 
 // at reports whether a command name at p, in the argument of s whose text
@@ -2151,7 +2155,7 @@ func (c *commandStart) word(word string) {
 		case slices.Contains(containerRunSubcommands, word):
 			c.sub = true
 		case slices.Contains(containerTextSubcommands, word):
-			c.text = true
+			c.text, c.noRun = true, true
 		}
 	case hasDestination(c.wrapper) && !c.host:
 		// The destination of ssh (ssh db mysql -pX), or the container or
@@ -4415,9 +4419,11 @@ func isWrapperOperand(s string, long *wrapperStarts, from, start int) bool {
 	if !ok || runsJoinedArgument(c.wrapper, part) {
 		return false
 	}
-	// The destination, or the argument of an option (ssh -i mysql,
-	// sudo -u mysql), unless that option runs it (env -S mysql).
-	return !c.text && !c.execArg && (c.optionArg || hasDestination(c.wrapper) && !c.host)
+	// The destination, the argument of an option (ssh -i mysql,
+	// sudo -u mysql) unless that option runs it (env -S mysql), or an
+	// operand of a container client's subcommand that runs nothing
+	// (kubectl patch deployment mysql).
+	return c.noRun || !c.text && !c.execArg && (c.optionArg || hasDestination(c.wrapper) && !c.host)
 }
 
 // wrapperWords returns what the words before start of the command it is in
