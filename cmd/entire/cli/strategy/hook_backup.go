@@ -271,31 +271,12 @@ func replaceWithCopy(root *os.Root, src, dst string) error {
 	return replaceWith(root, src, dst, linkOrCopy)
 }
 
-// replaceWithCopyKeepingMode is replaceWithCopy for a hook that goes where it
-// runs: when hard links are unavailable, the copy gets src's permission bits
-// rather than copyHookFile's 0o755, so a hook that could not run is not made
-// runnable by the move. A link already shares src's mode, and a symlink has
-// none of its own.
+// replaceWithCopyKeepingMode is replaceWithCopy. After cli PR 3072,
+// copyHookFile already copies a hook with the source's permission bits, so a
+// second path that Lstat's the mode and opens the file again is redundant
+// and can split the mode from the bytes.
 func replaceWithCopyKeepingMode(root *os.Root, src, dst string) error {
-	return replaceWith(root, src, dst, linkOrCopyKeepingMode)
-}
-
-// linkOrCopyKeepingMode is linkOrCopy whose byte copy is created with src's
-// permission bits from the start, so not even a temporary file left by an
-// interrupted install is more open than src.
-func linkOrCopyKeepingMode(root *os.Root, src, dst string) error {
-	err := linkHookFile(root, src, dst)
-	if err == nil || errors.Is(err, fs.ErrExist) {
-		return err // unwrapped: callers check fs.ErrExist
-	}
-	info, err := root.Lstat(src)
-	if err != nil {
-		return fmt.Errorf("copy %s: %w", src, err)
-	}
-	if !info.Mode().IsRegular() {
-		return copyOrRelink(root, src, dst)
-	}
-	return copyHookFileWithMode(root, src, dst, info.Mode().Perm())
+	return replaceWithCopy(root, src, dst)
 }
 
 // replaceWithOwnCopy is replaceWithCopy without the hard link: dst gets its
@@ -381,25 +362,6 @@ func copyHookFile(root *os.Root, src, dst string) error {
 	return nil
 }
 
-// copyHookFileWithMode is copyHookFile creating dst with mode, then setting
-// exactly mode whatever the umask removed.
-func copyHookFileWithMode(root *os.Root, src, dst string, mode fs.FileMode) error {
-	data, err := osroot.ReadFileNoFollow(root, src)
-	if err != nil {
-		return fmt.Errorf("copy %s: %w", src, err)
-	}
-	f, err := root.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
-	if err != nil {
-		return err //nolint:wrapcheck // callers check fs.ErrExist
-	}
-	werr := writeHookCopy(f, data)
-	cerr := f.Close()
-	if err := errors.Join(werr, cerr, root.Chmod(dst, mode)); err != nil {
-		return errors.Join(fmt.Errorf("copy %s to %s: %w", src, dst, err), root.Remove(dst))
-	}
-	return nil
-}
-
 // readHookFile reads a regular file's bytes and permission bits through one
 // descriptor, so both come from the same file.
 func readHookFile(root *os.Root, name string) ([]byte, fs.FileMode, error) {
@@ -425,11 +387,11 @@ func keepOlderCopy(root *os.Root, backup string, now time.Time) (string, error) 
 	return keepOlderCopyWith(root, backup, now, linkOrCopy)
 }
 
-// keepOlderCopyKeepingMode is keepOlderCopy whose copy, where hard links are
-// unavailable, keeps backup's permission bits (see linkOrCopyKeepingMode), so
-// a private hook's older copy is not readable by everyone.
+// keepOlderCopyKeepingMode is keepOlderCopy. copyHookFile already keeps the
+// source's permission bits, so a private hook's older copy stays private
+// without a second copy path.
 func keepOlderCopyKeepingMode(root *os.Root, backup string, now time.Time) (string, error) {
-	return keepOlderCopyWith(root, backup, now, linkOrCopyKeepingMode)
+	return keepOlderCopy(root, backup, now)
 }
 
 func keepOlderCopyWith(root *os.Root, backup string, now time.Time, create func(root *os.Root, src, dst string) error) (string, error) {
