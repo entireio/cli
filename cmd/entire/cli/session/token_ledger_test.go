@@ -70,9 +70,7 @@ func TestTokenLedger(t *testing.T) {
 		t.Parallel()
 		complete := func(name string, u *agent.TokenUsage, want bool) {
 			t.Helper()
-			if u == nil || u.SubagentTokensComplete == nil || *u.SubagentTokensComplete != want {
-				t.Fatalf("%s = %+v, want subagent_tokens_complete %v", name, u, want)
-			}
+			assertSubagentsComplete(t, name, u, want)
 		}
 		var l TokenLedger
 		l.Observe(reading(usage(10, 1, 1), map[string]*agent.TokenUsage{"a": usage(50, 5, 2), "b": nil}))
@@ -94,11 +92,18 @@ func TestTokenLedger(t *testing.T) {
 		t.Parallel()
 		var l TokenLedger
 		l.Observe(reading(usage(10, 1, 1), map[string]*agent.TokenUsage{"b": nil}))
-		total := l.Total()
-		assertUsage(t, "total", total, usage(10, 1, 1))
-		if total.SubagentTokensComplete == nil || *total.SubagentTokensComplete {
-			t.Fatalf("total = %+v, want subagent_tokens_complete false", total)
-		}
+		assertUsage(t, "total", l.Total(), usage(10, 1, 1))
+		assertSubagentsComplete(t, "total", l.Total(), false)
+	})
+
+	t.Run("an uncounted child that stops being listed stays uncounted", func(t *testing.T) {
+		t.Parallel()
+		var l TokenLedger
+		l.Observe(reading(usage(10, 1, 1), map[string]*agent.TokenUsage{"a": usage(50, 5, 2), "b": nil}))
+		// b's file is gone: the reading no longer lists it.
+		l.Observe(reading(usage(10, 1, 1), map[string]*agent.TokenUsage{"a": usage(50, 5, 2)}))
+		assertSubagentsComplete(t, "total", l.Total(), false)
+		assertSubagentsComplete(t, "pending", l.Pending(), false)
 	})
 
 	t.Run("nothing used is nil", func(t *testing.T) {
@@ -113,4 +118,13 @@ func TestTokenLedger(t *testing.T) {
 			t.Fatal("nil ledger has pending")
 		}
 	})
+}
+
+// assertSubagentsComplete fails unless u's subagent totals are marked
+// complete as want says.
+func assertSubagentsComplete(t *testing.T, name string, u *agent.TokenUsage, want bool) {
+	t.Helper()
+	if u == nil || u.SubagentTokensComplete == nil || *u.SubagentTokensComplete != want {
+		t.Fatalf("%s = %+v, want subagent_tokens_complete %v", name, u, want)
+	}
 }

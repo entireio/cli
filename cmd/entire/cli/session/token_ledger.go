@@ -3,6 +3,7 @@ package session
 import (
 	"bytes"
 	"encoding/json"
+	"maps"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -25,10 +26,11 @@ type TokenLedger struct {
 	// Children is each subagent's highest total, so one whose file is
 	// deleted keeps its last total.
 	Children map[string]*agent.TokenUsage `json:"children,omitempty"`
-	// UncountedChildren is set when the latest reading knew of a subagent it
-	// could not count and no earlier reading counted: Children lacks it, so
-	// their total is not complete.
-	UncountedChildren bool `json:"uncounted_children,omitempty"`
+	// UncountedChildren holds each subagent a reading knew of but could not
+	// count, until a later reading counts it: Children lacks it, so their
+	// total is not complete. One that stops being listed (its file deleted)
+	// stays here.
+	UncountedChildren map[string]bool `json:"uncounted_children,omitempty"`
 	// Cursor lets the next reading continue where the last one stopped.
 	Cursor json.RawMessage `json:"cursor,omitempty"`
 	// Checkpointed is what the session's checkpoints already hold.
@@ -52,14 +54,12 @@ func (l *TokenLedger) Observe(obs agent.CumulativeObservation) {
 	case agent.TokenTotal(obs.Total) >= agent.TokenTotal(l.Main):
 		l.Main = cloneUsage(obs.Total)
 	}
-	uncounted := false
 	for id, usage := range obs.Children {
 		if usage == nil {
-			if _, counted := l.Children[id]; !counted {
-				uncounted = true
-			}
+			l.markUncounted(id)
 			continue
 		}
+		delete(l.UncountedChildren, id)
 		if prev, ok := l.Children[id]; ok && agent.TokenTotal(usage) < agent.TokenTotal(prev) {
 			continue
 		}
@@ -68,23 +68,37 @@ func (l *TokenLedger) Observe(obs agent.CumulativeObservation) {
 		}
 		l.Children[id] = cloneUsage(usage)
 	}
-	l.UncountedChildren = uncounted
+	if len(l.UncountedChildren) == 0 {
+		l.UncountedChildren = nil
+	}
 	if obs.Cursor != nil {
 		l.Cursor = obs.Cursor
 	}
 }
 
+// markUncounted records that a reading could not count subagent id, unless
+// an earlier reading counted it: its last total stands.
+func (l *TokenLedger) markUncounted(id string) {
+	if _, counted := l.Children[id]; counted {
+		return
+	}
+	if l.UncountedChildren == nil {
+		l.UncountedChildren = make(map[string]bool)
+	}
+	l.UncountedChildren[id] = true
+}
+
 // Total returns the session's usage, subagents in SubagentTokens; nil when
 // nothing was used.
 func (l *TokenLedger) Total() *agent.TokenUsage {
-	return withSubagents(l.mainTotal(), l.childrenTotal(), !l.UncountedChildren)
+	return withSubagents(l.mainTotal(), l.childrenTotal(), len(l.UncountedChildren) == 0)
 }
 
 // Pending returns what the session used since its last checkpoint.
 func (l *TokenLedger) Pending() *agent.TokenUsage {
 	main := types.SubtractTokenUsage(l.mainTotal(), l.Checkpointed)
 	children := types.SubtractTokenUsage(l.childrenTotal(), l.CheckpointedChildren)
-	return withSubagents(main, children, !l.UncountedChildren)
+	return withSubagents(main, children, len(l.UncountedChildren) == 0)
 }
 
 // HasPending reports whether a checkpoint would store any tokens now.
@@ -126,7 +140,7 @@ func (l *TokenLedger) Clone() *TokenLedger {
 	}
 	c := &TokenLedger{
 		Active:               l.Active,
-		UncountedChildren:    l.UncountedChildren,
+		UncountedChildren:    maps.Clone(l.UncountedChildren),
 		Main:                 cloneUsage(l.Main),
 		Base:                 cloneUsage(l.Base),
 		Cursor:               bytes.Clone(l.Cursor),
