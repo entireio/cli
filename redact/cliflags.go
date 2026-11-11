@@ -506,6 +506,10 @@ func appendLongPasswordFlags(regions []taggedRegion, s string, noValue *noValueF
 		if ok {
 			v, ok = longFlagValue(s, loc, stringEnd, subs, dashFlag, argv)
 		}
+		if ok && pass && isPassNumber(s[v.start:v.end]) {
+			// --pass 2 numbers a pass of a tool that runs several.
+			ok = false
+		}
 		if ok {
 			r, ok = passwordValueRegion(s, v, stringEnd, subs, dashFlag, blank)
 		}
@@ -523,15 +527,23 @@ func appendLongPasswordFlags(regions []taggedRegion, s string, noValue *noValueF
 }
 
 // longFlagValue returns the value of the long password flag that loc, a
-// cliLongPasswordPattern match, found. A flag quoted on its own
-// ("--password" x) must close the quote that opens it, and a value in the
-// string that a flag opens ("--password=Summer 2026") runs to that string's
-// end, since the shell passes the whole string as one argument. dashFlag is
+// cliLongPasswordPattern match, found. A flag quoted on its own takes a
+// value only after "=" ("--password"=x), and must close the quote that
+// opens it, and a value in the string that a flag opens
+// ("--password=Summer 2026") runs to that string's end, since the shell
+// passes the whole string as one argument. dashFlag is
 // set when a value that starts with '-' is the next flag, and argv when the
 // flag is an element of an argument list that names its program (see
 // listPasswordValue).
 func longFlagValue(s string, loc []int, stringEnd int, subs substitutionMemo, dashFlag, argv bool) (cliValue, bool) {
 	list := s[loc[4]] == ','
+	if loc[3] > loc[2] && !list && s[loc[4]] != '=' {
+		// A flag quoted on its own before a blank is a word of code or
+		// an argument that names it (if arg == "--password" {, grep --
+		// "--password" docs/), so it takes a value only after "=" or as
+		// an element of a list.
+		return cliValue{}, false
+	}
 	var listValue cliValue
 	if list {
 		var ok bool
@@ -5048,8 +5060,19 @@ func appendNetrcValue(regions []taggedRegion, s string, lines *quoteScan, start,
 func passwordValueRegion(s string, v cliValue, stringEnd int, subs substitutionMemo, dashFlag, requireNonWord bool) (taggedRegion, bool) {
 	value := s[v.start:v.end]
 	switch {
-	case value == "", dashFlag && !v.quoted && value[0] == '-', v.gap:
+	case value == "", dashFlag && !v.quoted && value[0] == '-', v.gap, isPasswordMetavar(value):
 		return taggedRegion{}, false
+	case strings.HasPrefix(value, "{{"):
+		// A template fills the value in, as ${...} would
+		// (--password {{ .Values.password }}); text joined after it is
+		// part of the password ({{ .Values.prefix }}x).
+		closeEnd, wordEnd, ok := templateWord(s, v.start)
+		if ok && closeEnd >= v.end && wordEnd == closeEnd {
+			return taggedRegion{}, false
+		}
+		if ok {
+			v.end = max(v.end, wordEnd)
+		}
 	case v.singleQuoted:
 		if !hasNonPlaceholderQuotedPasswordValue(value, true) {
 			return taggedRegion{}, false
@@ -5080,6 +5103,42 @@ func passwordValueRegion(s string, v cliValue, stringEnd int, subs substitutionM
 		return taggedRegion{}, false
 	}
 	return taggedRegion{region: region{v.start, v.end}}, true
+}
+
+// isPasswordMetavar reports whether value is the name a help text gives a
+// password flag's value, in capitals (--password PASSWORD, -pPASSWORD,
+// --pass=DB_PASS).
+func isPasswordMetavar(value string) bool {
+	return strings.Contains(value, "PASS") && strings.Trim(value, "ABCDEFGHIJKLMNOPQRSTUVWXYZ_") == ""
+}
+
+// templateWord returns where the {{ ... }} template that starts at s[start]
+// closes on its line, within maxTemplateLen bytes, after its "}}", and where
+// the word it starts ends, with the text joined after it; ok is false when
+// none closes. The bound keeps a line of unclosed templates linear.
+func templateWord(s string, start int) (closeEnd, wordEnd int, ok bool) {
+	line := s[start:min(len(s), start+maxTemplateLen)]
+	if k := strings.IndexAny(line, "\r\n"); k >= 0 {
+		line = line[:k]
+	}
+	closeAt := strings.Index(line, "}}")
+	if closeAt < 0 {
+		return 0, 0, false
+	}
+	closeEnd = start + closeAt + len("}}")
+	wordEnd = closeEnd
+	for wordEnd < len(s) && strings.IndexByte(" \t\r\n\"'`;,)]|&<>", s[wordEnd]) < 0 {
+		wordEnd++
+	}
+	return closeEnd, wordEnd, true
+}
+
+// maxTemplateLen is the longest {{ ... }} template read as one.
+const maxTemplateLen = 256
+
+// isPassNumber reports whether value numbers a pass, one or two digits.
+func isPassNumber(value string) bool {
+	return len(value) <= 2 && strings.Trim(value, "0123456789") == ""
 }
 
 // isRecipeSubstitution reports whether body, the text of a $(...), only
@@ -5200,6 +5259,7 @@ var declarationTypes = []string{"string", "str", "text", "varchar", "char", "byt
 var proseWords = append([]string{
 	"a", "an", "and", "are", "as", "at", "be", "but", "by", "can", "does", "for", "from", "if", "in", "into", "is", "it", "not", "of", "on", "or", "so", "than", "that", "the", "then", "this", "to", "was", "when", "where", "which", "while", "will", "with", "you", "your",
 	"also", "instead", "only", "here", "now", "too", "via", "etc",
+	"requires", "required", "expects", "takes", "accepts", "needs", "must", "should", "missing",
 }, proseNouns...)
 
 // proseNouns are the proseWords that name what a flag takes, which a
