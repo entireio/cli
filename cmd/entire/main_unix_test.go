@@ -4,6 +4,7 @@ package main
 
 import (
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/creack/pty"
 )
 
 // `nohup entire <plugin> &`, then the terminal closes: both entire and the
@@ -100,5 +103,80 @@ func TestNohup_EntireSleepsThroughSIGHUP(t *testing.T) {
 	ws, ok := exitErr.Sys().(syscall.WaitStatus)
 	if !ok || !ws.Signaled() || ws.Signal() != syscall.SIGTERM {
 		t.Errorf("entire ended with %v, want death by SIGTERM: a SIGHUP death means it caught the SIGHUP nohup ignored; stderr: %s", exitErr, stderr.String())
+	}
+}
+
+// One Ctrl-C typed in the terminal reaches a plugin as one SIGINT, and the
+// plugin's clean exit is entire's. The terminal delivers it to the whole
+// foreground process group, plugin included; forwarding entire's copy as well
+// would make one key press look like the second Ctrl-C a plugin treats as
+// force quit. The duplicate lands microseconds after the original, so where
+// the kernel or Go's signal handling merges the two (as on macOS) this cannot
+// see it; TestTerminalSentInterrupt_UnderATerminal guards the detection.
+func TestTerminalCtrlC_ReachesPluginOnce(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(os.Args[0], filepath.Join(binDir, "entire-sigcount")); err != nil {
+		t.Fatal(err)
+	}
+	countFile := filepath.Join(dir, "count")
+
+	entire := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^$")
+	entire.Dir = dir
+	entire.Env = append(os.Environ(),
+		runMainEnvVar+"=sigcount",
+		sigCountEnvVar+"="+countFile,
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"ENTIRE_CONFIG_DIR="+filepath.Join(dir, "config"),
+		"ENTIRE_PLUGIN_DIR="+filepath.Join(dir, "plugins"),
+		"XDG_CACHE_HOME="+filepath.Join(dir, "cache"),
+		"ENTIRE_TOKEN_STORE=file",
+		"ENTIRE_TOKEN_STORE_PATH="+filepath.Join(dir, "tokens.json"),
+		"ENTIRE_TEST_AUTH_STORE_FILE="+filepath.Join(dir, "auth.json"),
+		"ENTIRE_TELEMETRY_OPTOUT=1",
+	)
+	// Its own session with the pty as controlling terminal, so entire's
+	// process group is the terminal's foreground group, as in a shell.
+	terminal, err := pty.StartWithAttrs(entire, &pty.Winsize{Rows: 24, Cols: 100}, &syscall.SysProcAttr{Setsid: true, Setctty: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer terminal.Close()
+	go func() { _, _ = io.Copy(io.Discard, terminal) }() //nolint:errcheck // ends with EIO when entire exits
+	exited := make(chan error, 1)
+	go func() { exited <- entire.Wait() }()
+	t.Cleanup(func() { _ = entire.Process.Kill() }) //nolint:errcheck // test cleanup
+
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		if _, err := os.Stat(countFile + ".ready"); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("plugin never started")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, err := terminal.Write([]byte{0x03}); err != nil { // Ctrl-C
+		t.Fatal(err)
+	}
+	select {
+	case err := <-exited:
+		if err != nil {
+			t.Errorf("entire exited with %v, want the plugin's 0", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("entire still running 30s after Ctrl-C")
+	}
+	data, err := os.ReadFile(countFile)
+	if err != nil {
+		t.Fatalf("plugin wrote no count: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "1" {
+		t.Errorf("plugin received %s SIGINTs for one Ctrl-C, want 1", got)
 	}
 }

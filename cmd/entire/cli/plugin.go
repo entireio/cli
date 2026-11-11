@@ -473,6 +473,8 @@ var pluginWindowsCancelGrace = 30 * time.Second
 // Unix: forward the signal this process received (pluginCancelSignal), then
 // kill after pluginCancelGrace. Forwarding the real signal matters: a
 // supervisor's SIGTERM must reach the plugin as SIGTERM, not as a Ctrl-C.
+// Except a terminal's Ctrl-C (terminalSentInterrupt): that already reached the
+// plugin, and a second copy would read as the user's second Ctrl-C.
 //
 // Windows: send nothing, then kill after pluginWindowsCancelGrace.
 // os.Process.Signal supports only Kill there, so sending os.Interrupt fails
@@ -488,15 +490,24 @@ func configurePluginCancel(cmd *exec.Cmd, goos string) {
 		cmd.WaitDelay = pluginWindowsCancelGrace
 		return
 	}
-	cmd.Cancel = func() error { return cmd.Process.Signal(pluginCancelSignal()) }
+	cmd.Cancel = func() error {
+		received := procsignal.Load()
+		if received == os.Interrupt && pluginTerminalSentInterrupt(cmd.Process.Pid) {
+			// The terminal delivered this Ctrl-C to the plugin already.
+			return nil
+		}
+		return cmd.Process.Signal(pluginCancelSignal())
+	}
 	cmd.WaitDelay = pluginCancelGrace
 }
 
+// pluginTerminalSentInterrupt is terminalSentInterrupt, a seam so tests can
+// stand in for a terminal.
+var pluginTerminalSentInterrupt = terminalSentInterrupt
+
 // pluginCancelSignal is the signal to forward to a plugin when the root
 // context is cancelled: the one this process received, or SIGINT when the
-// cancellation came from elsewhere. A terminal Ctrl-C therefore reaches the
-// plugin twice — from the terminal and from here — which plugins tolerate
-// today; telling a terminal's SIGINT from a `kill -INT` is not possible here.
+// cancellation came from elsewhere.
 func pluginCancelSignal() os.Signal {
 	if sig := procsignal.Load(); sig != nil {
 		return sig

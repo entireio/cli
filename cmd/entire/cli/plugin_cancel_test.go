@@ -135,6 +135,38 @@ func TestRunPlugin_CancelForwardsTheReceivedSignal(t *testing.T) { //nolint:para
 	}
 }
 
+// pretendTerminalSentInterrupt stands in for a terminal whose foreground
+// process group holds this process and the plugin.
+func pretendTerminalSentInterrupt(t *testing.T) {
+	t.Helper()
+	prev := pluginTerminalSentInterrupt
+	pluginTerminalSentInterrupt = func(int) bool { return true }
+	t.Cleanup(func() { pluginTerminalSentInterrupt = prev })
+}
+
+// A Ctrl-C the terminal delivered to the plugin is not sent again: a second
+// copy would read as the user's second Ctrl-C and force-quit the plugin.
+func TestRunPlugin_TerminalInterruptIsNotForwarded(t *testing.T) { //nolint:paralleltest // mutates env, seams and procsignal
+	pretendTerminalSentInterrupt(t)
+	storeReceivedSignal(t, os.Interrupt)
+	// The trap tells the two apart: a forwarded SIGINT would exit 9.
+	code, sig := startCancelledPlugin(t, "trap 'exit 9' INT\ntouch \"$READY\"\nsleep 0.5\nexit 3\n")
+	if code != 3 || sig != nil {
+		t.Errorf("runPlugin = (%d, %v), want the plugin's own (3, nil): the SIGINT was forwarded", code, sig)
+	}
+}
+
+// Only a Ctrl-C is the terminal's: a SIGTERM reached this process alone and
+// is still forwarded.
+func TestRunPlugin_TerminalCheckLeavesSIGTERMForwarded(t *testing.T) { //nolint:paralleltest // mutates env, seams and procsignal
+	pretendTerminalSentInterrupt(t)
+	storeReceivedSignal(t, syscall.SIGTERM)
+	code, sig := startCancelledPlugin(t, "trap 'exit 7' TERM\ntouch \"$READY\"\nwhile :; do sleep 0.05; done\n")
+	if code != 7 || sig != nil {
+		t.Errorf("runPlugin = (%d, %v), want (7, nil) from the plugin's TERM trap", code, sig)
+	}
+}
+
 // A force quit by anything but Ctrl-C reached only us, so a plugin is killed
 // at once rather than left running after we exit.
 func TestForceQuitPlugins_NonInterruptKillsAtOnce(t *testing.T) { //nolint:paralleltest // mutates env and seams
