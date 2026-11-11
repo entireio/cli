@@ -2678,6 +2678,11 @@ func (s *ManualCommitStrategy) sessionHasNewContentFromLiveTranscript(ctx contex
 	modifiedFiles := state.FilesTouched
 	if len(modifiedFiles) == 0 {
 		modifiedFiles = s.extractModifiedFilesFromLiveTranscript(ctx, state, uncheckpointedTranscriptStart(state))
+	} else {
+		// A tool hook recorded each path as the worktree's index spelled it
+		// then, which the commit can spell otherwise (spelledAsCommitted);
+		// the extracted ones are already spelled as the commit's index does.
+		modifiedFiles = spelledAsCommitted(sessionWorktreeRoot(ctx, state), modifiedFiles, commitFiles)
 	}
 	if len(modifiedFiles) == 0 {
 		return false, nil
@@ -2902,16 +2907,23 @@ func (s *ManualCommitStrategy) extractModifiedFilesFromLiveTranscript(ctx contex
 	// Transcript output reaches FilesTouched through mid-turn carry-forward
 	// and condensation, so it gets the same filter as every capture route.
 	normalized := normalizeTranscriptFilePaths(ctx, state, modifiedFiles)
-	repoRoot := state.WorktreePath
-	if repoRoot == "" {
-		if root, rootErr := paths.WorktreeRoot(ctx); rootErr == nil {
-			repoRoot = root
-		}
-	}
+	repoRoot := sessionWorktreeRoot(ctx, state)
 	if repoRoot == "" {
 		return normalized
 	}
 	return filterTrackableFiles(ctx, repoRoot, normalized)
+}
+
+// sessionWorktreeRoot returns the session's worktree, or else the current
+// one, or "" when neither is known.
+func sessionWorktreeRoot(ctx context.Context, state *SessionState) string {
+	if state.WorktreePath != "" {
+		return state.WorktreePath
+	}
+	if root, err := paths.WorktreeRoot(ctx); err == nil {
+		return root
+	}
+	return ""
 }
 
 // normalizeTranscriptFilePaths converts transcript file paths to repo-relative

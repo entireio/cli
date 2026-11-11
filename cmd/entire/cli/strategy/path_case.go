@@ -56,6 +56,43 @@ func commitTrackedSpellings(ctx context.Context, repoRoot string, files []string
 	return trackedSpellingsOf(ctx, repoRoot, index, spellingList{files: files})[0]
 }
 
+// spelledAsCommitted returns files with each one the commit holds in another
+// case respelled as the commit spells it, by trackedSpelling's rule with the
+// commit's paths in place of an index's.
+//
+// A session records a path as the worktree's index spelled it when the
+// session saw it, and a commit can spell it otherwise: with a staged rename
+// of README.md to readme.md, a tool hook records readme.md, and a
+// path-limited commit of README.md, which git prepares in a temporary index,
+// commits README.md. Matching the commit's own paths rather than an index
+// gives PrepareCommitMsg and PostCommit, which see different indexes, the
+// same answer.
+func spelledAsCommitted(repoRoot string, files []string, commitFiles map[string]struct{}) []string {
+	if repoRoot == "" || len(files) == 0 || len(commitFiles) == 0 {
+		return files
+	}
+	worktree, err := worktreedir.OpenAt(repoRoot)
+	if err != nil {
+		return files
+	}
+	cases := worktreedir.NewCaseProbe(repoRoot)
+	if !anyDirectoryIgnoresCase(cases, files) {
+		return files
+	}
+	committed := make(map[string][]string, len(commitFiles))
+	for file := range commitFiles {
+		key := strings.ToLower(file)
+		committed[key] = append(committed[key], file)
+	}
+	spelled := make([]string, 0, len(files))
+	for _, file := range files {
+		spellings := committed[strings.ToLower(file)]
+		slices.Sort(spellings)
+		spelled = append(spelled, trackedSpelling(worktree, cases, repoRoot, file, spellings, false))
+	}
+	return spelled
+}
+
 // indexSpellings returns the spellings an index tracks for files, ignoring
 // case, as gitrepo.IndexPathsIgnoringCase does.
 type indexSpellings func(ctx context.Context, repoRoot string, files []string) (map[string][]string, error)

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -181,6 +182,30 @@ func TestFilterTrackableChanges_KeepsACaseRenamesDeletionWindows(t *testing.T) {
 	require.Empty(t, modified)
 	require.Equal(t, []string{"readme.md"}, added)
 	require.Equal(t, []string{"README.md"}, deleted)
+}
+
+// TestSessionHasNewContentFromLiveTranscript_SpellsAsTheCommitWindows covers
+// a session, before its first Stop, whose tool hook recorded readme.md: after
+// a staged rename of README.md to readme.md, the worktree's index spells it
+// so. A path-limited commit of README.md commits README.md, which names the
+// same file where the filesystem ignores case, so the session's edit is in
+// it. CI's Windows job runs it by its name.
+func TestSessionHasNewContentFromLiveTranscript_SpellsAsTheCommitWindows(t *testing.T) {
+	t.Parallel()
+	dir, _ := trackedCaseRepo(t)
+	testutil.RunGit(t, dir, "mv", "-f", "README.md", "readme.md")
+	s := &ManualCommitStrategy{}
+	state := &SessionState{
+		SessionID: "spelled-as-commit", WorktreePath: dir,
+		AgentType: agent.AgentTypeAntigravity, FilesTouched: []string{"readme.md"},
+	}
+	got, err := s.sessionHasNewContentFromLiveTranscript(context.Background(), state, fileSet([]string{"README.md"}))
+	require.NoError(t, err)
+	if worktreedir.NewCaseProbe(dir).IgnoresCase(".") {
+		require.True(t, got, "README.md and readme.md name one file here")
+	} else {
+		require.False(t, got, "README.md is another file here")
+	}
 }
 
 // On a case-sensitive filesystem FilterTrackableChanges keeps both
