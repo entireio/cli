@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"path"
 	"strings"
 	"time"
 	"unicode"
@@ -111,6 +112,11 @@ func (c statusClaim) withoutUnchangedDirty(files []string) []string {
 // and both spellings open the same file in the worktree. On a case-sensitive
 // filesystem readme.md and README.md are two files, and a session that named
 // one must not take the other.
+//
+// A transcript can also name a file through a symlink to a directory in the
+// worktree (alias/data.txt for alias -> real), which git status lists under
+// the directory's own path, real/data.txt. Such a name is matched as its
+// directory resolves.
 type namedFiles struct {
 	repoRoot string
 	exact    map[string]struct{}
@@ -136,7 +142,11 @@ func newNamedFiles(repoRoot string, named []string, listed ...[]string) namedFil
 		folded:   make(map[string][]string),
 		cases:    worktreedir.NewCaseProbe(repoRoot),
 	}
+	resolved := make(map[string]string)
 	for _, f := range named {
+		if _, ok := inStatus[f]; !ok {
+			f = resolvedDir(repoRoot, f, resolved)
+		}
 		if _, ok := inStatus[f]; ok {
 			n.exact[f] = struct{}{}
 		} else {
@@ -145,6 +155,25 @@ func newNamedFiles(repoRoot string, named []string, listed ...[]string) namedFil
 		}
 	}
 	return n
+}
+
+// resolvedDir returns file with the symlinks in its directory resolved, when
+// they lead to a directory in the worktree, or else file itself. resolved
+// caches each directory's answer.
+func resolvedDir(repoRoot, file string, resolved map[string]string) string {
+	dir := path.Dir(file)
+	if dir == "." {
+		return file
+	}
+	target, ok := resolved[dir]
+	if !ok {
+		target = dir
+		if name, err := worktreedir.NameFollowingLinks(repoRoot, dir); err == nil {
+			target = name
+		}
+		resolved[dir] = target
+	}
+	return path.Join(target, path.Base(file))
 }
 
 // only returns the files of all the transcript names, in all's order and
