@@ -29,8 +29,15 @@ const cliFlagValue = `"(?:[^"\r\n]|\\\r?\n)*(?:"|\$\()|'[^'\r\n]*'|[^\s'"` + "`"
 // crosses a line break, a shell operator or a backtick (which starts a
 // command substitution, or ends Markdown code), so a flag is only read as
 // belonging to the command that precedes it in the same pipeline segment.
-// The & and | of a redirection (2>&1, &>log, >|f) are no shell operator.
-const cliSameCommandChar = `\\\r?\n|\\[^\r\n]|\$'(?:[^'\\\r\n]|\\[^\r\n])*'|"(?:[^"\\\r\n$]|\$` + cliParens3 + `|\$|\\\r?\n|\\[^\r\n])*"|'[^'\r\n]*'|` + cliSubstitutionPattern + `|\$` + cliBraces2 + `|[<>]&|&>|>\||[^\r\n|;&` + "`" + `]`
+// The & and | of a redirection (2>&1, &>log, >|f) are no shell operator,
+// and neither is the | between the patterns of an extended glob
+// (-in /dev/@(null|zero)).
+const cliSameCommandChar = `\\\r?\n|\\[^\r\n]|\$'(?:[^'\\\r\n]|\\[^\r\n])*'|"(?:[^"\\\r\n$]|\$` + cliParens3 + `|\$|\\\r?\n|\\[^\r\n])*"|'[^'\r\n]*'|` + cliSubstitutionPattern + `|\$` + cliBraces2 + `|[<>]&|&>|>\||` + cliExtendedGlob + `|[^\r\n|;&` + "`" + `]`
+
+// cliExtendedGlob is an extended glob's patterns in parentheses, which bash
+// reads with extglob set (@(a|b), !(*.log), +(x)), with no quote,
+// parenthesis, backtick or line break in them.
+const cliExtendedGlob = `[?*+@!]\([^()'"\r\n` + "`" + `]*\)`
 
 const cliSameCommand = `(?:` + cliSameCommandChar + `)`
 
@@ -380,6 +387,10 @@ const (
 	// comment runs to the end of its line, so no part of it is a value.
 	netrcCommentLines = `(?:[ \t]*#[^\r\n]*\r?\n)*`
 	netrcAccount      = `(?:` + netrcSep + `(?i:account)` + netrcValueSep + `(?:` + netrcName + `))?`
+	// netrcFields are the account and login fields that may come before
+	// the ones a pattern reads, each any number of times, as a client
+	// reads the last of each (machine h login old login me password x).
+	netrcFields = `(?:` + netrcSep + `(?i:account|login)` + netrcValueSep + `(?:` + netrcName + `))*`
 )
 
 // netrcPasswordPatterns match the password of a .netrc entry that also names
@@ -415,7 +426,7 @@ var netrcDefaultPatterns = []netrcPattern{
 // netrcLoginPassword and netrcPasswordLogin are the fields of a .netrc entry
 // after its machine, in either order.
 const (
-	netrcLoginPassword = netrcAccount + netrcSep + `(?i:login)` + netrcValueSep + `(` + netrcName + `)` + netrcAccount + netrcSep + `(?i:password)` + netrcValueSep + `(` + netrcValue + `)`
+	netrcLoginPassword = netrcFields + netrcSep + `(?i:login)` + netrcValueSep + `(` + netrcName + `)` + netrcFields + netrcSep + `(?i:password)` + netrcValueSep + `(` + netrcValue + `)`
 	netrcPasswordLogin = netrcAccount + netrcSep + `(?i:password)` + netrcValueSep + `(` + netrcValue + `)` + netrcAccount + netrcSep + `(?i:login)` + netrcValueSep + `(` + netrcName + `)`
 )
 
@@ -642,7 +653,7 @@ func listElementsBefore(s string, open int) []string {
 		switch {
 		case code == "":
 			return nil
-		case strings.IndexByte("[(", code[len(code)-1]) >= 0:
+		case strings.IndexByte("[(", code[len(code)-1]) >= 0 || isArrayLiteralOpen(code):
 			slices.Reverse(elements)
 			return elements
 		case code[len(code)-1] != ',':
@@ -657,6 +668,18 @@ func listElementsBefore(s string, open int) []string {
 		code, elements = element, append(elements, text[pythonStringPrefix(text, 0):])
 	}
 	return nil
+}
+
+// isArrayLiteralOpen reports whether code ends with the brace that opens
+// an array or slice literal: after a type that ends with [] ([]string{,
+// String[] {, new[] {), not a Python set or a JSON object.
+func isArrayLiteralOpen(code string) bool {
+	before, ok := strings.CutSuffix(code, "{")
+	if !ok {
+		return false
+	}
+	before = strings.TrimRight(strings.TrimRight(before, " \t"), "_.abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+	return strings.HasSuffix(before, "[]")
 }
 
 // isListWrapperOperand reports whether the client name at start is an
@@ -2396,7 +2419,7 @@ func isPrintCommand(word string) bool {
 // sshpass -e ssh mysql -p2222, where mysql is ssh's destination.
 func isCommandWrapper(word string) bool {
 	switch word {
-	case "sudo", execCommand, envCommand, "time", "nohup", "command", "sshpass", sshCommand:
+	case "sudo", execCommand, envCommand, "time", "nohup", "nice", "command", "sshpass", sshCommand:
 		return true
 	}
 	return isContainerClient(word)
@@ -2444,11 +2467,11 @@ func isShellKeyword(word string) bool {
 // argument, and wrapperLongArgOptions the long ones.
 var (
 	wrapperArgOptions = map[string]string{
-		"sudo": "CDghpRrTtUu", envCommand: "CSu", "time": "fo", execCommand: "a", "sshpass": "dfPp", sshCommand: "BbcDEeFIiJLlmOoPpQRSWw",
+		"sudo": "CDghpRrTtUu", envCommand: "CSu", "time": "fo", execCommand: "a", "nice": "n", "sshpass": "dfPp", sshCommand: "BbcDEeFIiJLlmOoPpQRSWw",
 		"docker": containerArgOptions, podmanCommand: containerArgOptions, "nerdctl": containerArgOptions, "kubectl": containerArgOptions,
 	}
 	wrapperLongArgOptions = []string{
-		"chdir", "chroot", "close-from", "command-timeout", "format", "group", "host", "other-user", "output", "prompt", "role", "split-string", "type", "unset", "user",
+		"adjustment", "chdir", "chroot", "close-from", "command-timeout", "format", "group", "host", "other-user", "output", "prompt", "role", "split-string", "type", "unset", "user",
 		// container clients
 		"as", "as-group", "as-uid", "cache-dir", "certificate-authority", "client-certificate", "client-key", "log-dir", "log-file", "password", "profile", "profile-output", "request-timeout", "server", "tls-server-name", "tlscacert", "tlscert", "tlskey", "token", "username",
 		"add-host", "ansi", "attach", "cap-add", "cap-drop", "cgroupns", "cidfile", "cluster", "config", "container", "context", "cpu-shares", "cpus", "detach-keys", "device", "dns", "entrypoint", "env", "env-file", "file", "filename", "gpus", "hostname", "ip", "ipc", "kubeconfig", "label", "link", "log-driver", "log-level", "log-opt", "memory", "mount", "name", "namespace", "network", "network-alias", "parallel", "pid", "platform", "progress", "project-directory", "project-name", "publish", "pull", "restart", "runtime", "security-opt", "shm-size", "tmpfs", "ulimit", "volume", "volumes-from", "workdir",
@@ -3272,11 +3295,17 @@ func wordPieceEnd(s string, i, stringEnd int, first bool, subs substitutionMemo)
 // followed by a blank, the end of a line, punctuation or another backtick,
 // ends Markdown code instead (`openssl enc -pass pass:abc`, then `ls`;
 // `mysql -pfoo`/`mysql -pbar`). Only the word of a password, which subs
-// marks (see shellWordEnd), counts the backticks before it; another word
+// marks (see shellWordEnd), counts the backticks before it, and there one
+// after an even number of others that a blank follows starts a command
+// when it closes on its line (pass:` printf hunter2`); another word
 // (docker run --entrypoint mysql -e X=`printf x` image) reads every one
 // that a command follows.
 func backtickEnd(s string, i, stringEnd int, subs substitutionMemo) int {
-	if s[i] != '`' || i+1 == len(s) || strings.IndexByte(codeSpanFollowers, s[i+1]) >= 0 || subs != nil && oddTicksBefore(s, i, subs, wordTickKey) {
+	if s[i] != '`' || i+1 == len(s) {
+		return 0
+	}
+	blank := subs != nil && (s[i+1] == ' ' || s[i+1] == '\t')
+	if !blank && strings.IndexByte(codeSpanFollowers, s[i+1]) >= 0 || subs != nil && oddTicksBefore(s, i, subs, wordTickKey) {
 		return 0
 	}
 	limit := len(s)
@@ -3287,7 +3316,7 @@ func backtickEnd(s string, i, stringEnd int, subs substitutionMemo) int {
 	switch {
 	case closed:
 		return at + 1
-	case i < stringEnd:
+	case i < stringEnd || blank:
 		return 0
 	}
 	if subs != nil {
@@ -3785,19 +3814,34 @@ func heredocAt(s string, j, limit int) (heredoc, int) {
 // redirection names, its quotes removed as the shell removes them: a
 // backslash escapes the next character outside quotes and, in double
 // quotes, only $, `, ", \ and a line break, while in single quotes it is
-// literal (<<'E\F' ends at a line E\F, <<E\F at EF).
+// literal (<<'E\F' ends at a line E\F, <<E\F at EF). An ANSI-C quoted
+// piece ($'EOF') is decoded (see ansiCEscape), and a $ before a double
+// quote ($"EOF") dropped.
 func heredocWord(raw string) string {
 	var b strings.Builder
 	quote := byte(0)
 	for i := 0; i < len(raw); i++ {
 		c := raw[i]
 		switch {
+		case quote == 0 && c == '$' && i+1 < len(raw) && (raw[i+1] == '\'' || raw[i+1] == '"'):
+			i++
+			quote = raw[i]
+			if quote == '\'' {
+				quote = ansiCQuote
+			}
+			continue
 		case quote == 0 && (c == '\'' || c == '"'):
 			quote = c
 			continue
-		case quote != 0 && c == quote:
+		case quote == ansiCQuote && c == '\'', quote != 0 && c == quote:
 			quote = 0
 			continue
+		case quote == ansiCQuote && c == '\\' && i+1 < len(raw):
+			i++
+			var known bool
+			if c, known = ansiCEscape(raw[i]); !known {
+				b.WriteByte('\\')
+			}
 		case c == '\\' && i+1 < len(raw) && (quote == 0 || quote == '"' && strings.IndexByte("$`\"\\\n", raw[i+1]) >= 0):
 			i++
 			c = raw[i]
@@ -3805,6 +3849,21 @@ func heredocWord(raw string) string {
 		b.WriteByte(c)
 	}
 	return b.String()
+}
+
+// ansiCQuote marks an ANSI-C quoted piece ($'...') for heredocWord.
+const ansiCQuote = 1
+
+// ansiCEscape returns the character that a backslash and c stand for in an
+// ANSI-C quoted string, and whether they stand for one: a line break, tab
+// or other control character for n, t, r, a, b, e, f and v, and c itself
+// for \', \", \\ and ?. Otherwise the backslash stays, as the shell keeps
+// it.
+func ansiCEscape(c byte) (byte, bool) {
+	if i := strings.IndexByte("ntrabefv", c); i >= 0 {
+		return "\n\t\r\a\b\x1b\f\v"[i], true
+	}
+	return c, strings.IndexByte("'\"\\?", c) >= 0
 }
 
 // heredocBodiesEnd returns where the text after the bodies of docs, which
@@ -4511,8 +4570,9 @@ func (c *caseScan) read(s string, from int) bool {
 }
 
 // caseWordEnd returns the end of the word that starts at s[i], whose quoted
-// strings, escaped characters and substitutions are part of it. ends are
-// where the substitutions end, when they are known.
+// strings, escaped characters, substitutions and parameter expansions are
+// part of it (case ${PW:-x)y} in). ends are where the substitutions end,
+// when they are known.
 func caseWordEnd(s string, i int, ends substitutionEnds) int {
 	for i < len(s) && strings.IndexByte(" \t\r\n;&|()", s[i]) < 0 {
 		if end, quoteLen := quotedPiece(s, i); quoteLen == 1 {
@@ -4521,6 +4581,8 @@ func caseWordEnd(s string, i int, ends substitutionEnds) int {
 		}
 		if s[i] == '\\' {
 			i++
+		} else if end := braceExpansionEnd(s, i, ends.subs); end > 0 {
+			i = end - 1
 		} else if end, ok := ends.closedEnd(i); ok {
 			i = end - 1
 		} else if isSubstitutionStart(s, i) {
@@ -4763,7 +4825,7 @@ func (w *wrapperStarts) at(from int) *commandStart {
 
 // argWrappers are the wrappers that take an argument after the command's
 // start: a destination, or an option's (wrapperArgOptions).
-var argWrappers = []string{sshCommand, "sudo", envCommand, "time", execCommand, "docker", podmanCommand, "nerdctl", "kubectl"}
+var argWrappers = []string{sshCommand, "sudo", envCommand, "time", execCommand, "nice", "docker", podmanCommand, "nerdctl", "kubectl"}
 
 // maxSSHCommand bounds how far back isWrapperOperand looks for the start of
 // a wrapper command.

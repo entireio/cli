@@ -753,6 +753,24 @@ func TestString_CommandLinePasswordsShellGrammarCases(t *testing.T) {
 		{name: "client in a substitution in a find operand", input: "cat $(mysql -p" + p + " -e 1)", want: "cat $(mysql -pREDACTED -e 1)"},
 		{name: "client run by xargs after a find", input: "find . | xargs mysql -p" + p, want: "find . | xargs mysql -pREDACTED"},
 		{name: "client named in prose", input: "connect with mysql -uroot -p" + p, want: "connect with mysql -uroot -pREDACTED"},
+		// .netrc fields given again, extended globs, ANSI-C quoted
+		// here-document delimiters, expansions in case words, backtick
+		// substitutions that start with a blank, array literals in code,
+		// and nice
+		{name: "netrc login given twice before the password", input: "machine 127.0.0.1 login old login me password " + p, want: "machine 127.0.0.1 login old login me password REDACTED"},
+		{name: "netrc account and login given twice", input: "machine h account a login b account c login d password " + p, want: "machine h account a login b account c login d password REDACTED"},
+		{name: "openssl source after an extended glob", input: "openssl enc -aes-128-cbc -pbkdf2 -in /dev/@(null|nonexistent) -pass pass:" + p, want: "openssl enc -aes-128-cbc -pbkdf2 -in /dev/@(null|nonexistent) -pass pass:REDACTED"},
+		{name: "mysql password after a negated extended glob", input: "mysql --defaults-file=!(a|b).cnf -p" + p, want: "mysql --defaults-file=!(a|b).cnf -pREDACTED"},
+		{name: "openssl source after a here-document with an ANSI-C quoted delimiter", input: "openssl enc -in $(cat <<$'EOF'\n/dev/null\nEOF\n) -pass pass:" + p, want: "openssl enc -in $(cat <<$'EOF'\n/dev/null\nEOF\n) -pass pass:REDACTED"},
+		{name: "openssl source after a here-document with a locale-quoted delimiter", input: "openssl enc -in $(cat <<$\"EOF\"\n/dev/null\nEOF\n) -pass pass:" + p, want: "openssl enc -in $(cat <<$\"EOF\"\n/dev/null\nEOF\n) -pass pass:REDACTED"},
+		{name: "openssl source from a case statement whose word holds a parenthesis in an expansion", input: "openssl enc -pass pass:$(case ${PW:-x)y} in x*) printf " + p + ";; esac)", want: "openssl enc -pass pass:REDACTED"},
+		{name: "openssl source from a backtick substitution that starts with a blank", input: "openssl enc -aes-128-cbc -pbkdf2 -pass pass:` printf " + p + "`", want: "openssl enc -aes-128-cbc -pbkdf2 -pass pass:REDACTED"},
+		{name: "openssl source from a backtick substitution that starts with a blank before a flag", input: "openssl enc -pass pass:` printf " + p + "` -in f", want: "openssl enc -pass pass:REDACTED -in f"},
+		{name: "long flag prose-like value in a Go slice literal", input: `argv := []string{"wget", "--password", "open the gate", url}`, want: `argv := []string{"wget", "--password", "REDACTED", url}`},
+		{name: "long flag prose-like value in a Java array literal", input: `new String[]{"wget", "--password", "open the gate", url}`, want: `new String[]{"wget", "--password", "REDACTED", url}`},
+		{name: "short flag in a Go slice literal", input: `exec.Command("mysql", []string{"-u", "root", "-p` + p + `"}...)`, want: `exec.Command("mysql", []string{"-u", "root", "-pREDACTED"}...)`},
+		{name: "client run by nice", input: "nice -n 5 mysql -p" + p, want: "nice -n 5 mysql -pREDACTED"},
+		{name: "client run by nice with an old-style adjustment", input: "nice -5 mysql -p" + p, want: "nice -5 mysql -pREDACTED"},
 	})
 }
 
@@ -1246,6 +1264,14 @@ func TestString_CommandLinePasswordListAndQuotingNonSecretsPreserved(t *testing.
 		"systemctl show mysql -p MainPID",
 		"sudo find /etc/mysql -print",
 		"kubectl exec db -- find /etc/mysql -print",
+		// ssh's port after nice and its options, a Python set, and
+		// Markdown code spans after a password
+		"nice -n 5 ssh mysql -p2222",
+		"nice ssh mysql -p2222",
+		"nice --adjustment=5 ssh mysql -p2222",
+		`flags = {"wget", "--password", "open the gate"}`,
+		"Run `mysql -pREDACTED` to connect and `ls` after",
+		"Run `openssl enc -pass pass:REDACTED` then ` ls`",
 		`sh -c "find /etc/mysql -print"`,
 	})
 }
