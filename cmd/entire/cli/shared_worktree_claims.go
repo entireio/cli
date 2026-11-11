@@ -123,7 +123,8 @@ func (c statusClaim) withoutUnchangedDirty(files []string) []string {
 // worktree, or to its root (alias/data.txt for alias -> real), which git
 // status lists under the directory's own path, real/data.txt. Such a name is
 // matched as its directory resolves. A name that is itself a symlink to a
-// file git status lists (AGENTS.md -> CLAUDE.md) matches that file.
+// file git status lists (AGENTS.md -> CLAUDE.md) matches that file, also when
+// the link spells it in another case or form that opens the same file.
 type namedFiles struct {
 	repoRoot string
 	exact    map[string]struct{}
@@ -156,16 +157,28 @@ func newNamedFiles(repoRoot string, named []string, listed ...[]string) namedFil
 			f = resolvedDir(repoRoot, f, resolved)
 		}
 		if _, ok := inStatus[f]; !ok {
-			f = listedLinkTarget(repoRoot, f, inStatus)
+			target := linkTarget(repoRoot, f)
+			if _, ok := inStatus[target]; ok {
+				f = target
+			} else if target != f {
+				// A link to a listed file in another case or form,
+				// AGENTS.md -> claude.md for CLAUDE.md.
+				n.fold(target)
+			}
 		}
 		if _, ok := inStatus[f]; ok {
 			n.exact[f] = struct{}{}
 		} else {
-			key := caseFoldKey(f)
-			n.folded[key] = append(n.folded[key], f)
+			n.fold(f)
 		}
 	}
 	return n
+}
+
+// fold records name, which git status does not list, for namedInOtherCase.
+func (n namedFiles) fold(name string) {
+	key := caseFoldKey(name)
+	n.folded[key] = append(n.folded[key], name)
 }
 
 // withoutDotComponents drops a name's "." components and repeated slashes,
@@ -214,9 +227,9 @@ func dirName(repoRoot, dir string) (string, bool) {
 	return name, err == nil
 }
 
-// listedLinkTarget returns the file git status lists that file, a symlink in
-// the worktree, leads to, or else file itself.
-func listedLinkTarget(repoRoot, file string, inStatus map[string]struct{}) string {
+// linkTarget returns the worktree file that file, a symlink in the worktree,
+// leads to, or else file itself.
+func linkTarget(repoRoot, file string) string {
 	root, err := filepath.Abs(repoRoot)
 	if err != nil {
 		return file
@@ -225,10 +238,7 @@ func listedLinkTarget(repoRoot, file string, inStatus map[string]struct{}) strin
 	if err != nil {
 		return file
 	}
-	if _, ok := inStatus[name]; ok {
-		return name
-	}
-	return file
+	return name
 }
 
 // errOutsideWorktree is resolvedName's answer for a path that resolves

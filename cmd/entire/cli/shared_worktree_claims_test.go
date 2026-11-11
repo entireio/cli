@@ -278,6 +278,32 @@ func TestNamedFiles_ThroughFileLink(t *testing.T) {
 	require.Empty(t, newNamedFiles(dir, []string{"docs/link.md"}, modified).only(modified), "a link to a file git status does not list")
 }
 
+// TestNamedFiles_ThroughFileLinkInOtherCase: on a case-insensitive
+// filesystem, a write through AGENTS.md -> claude.md changes git's CLAUDE.md.
+// A hard link stands in for such a filesystem here; without one, claude.md
+// is another file and must not match.
+func TestNamedFiles_ThroughFileLinkInOtherCase(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	forgetSharedRoot(t, dir)
+	testutil.WriteFile(t, dir, "CLAUDE.md", "edited through AGENTS.md\n")
+	if err := os.Symlink("claude.md", filepath.Join(dir, "AGENTS.md")); err != nil {
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
+	modified := []string{"CLAUDE.md"}
+	listed, err := os.Lstat(filepath.Join(dir, "CLAUDE.md"))
+	require.NoError(t, err)
+	if other, err := os.Lstat(filepath.Join(dir, "claude.md")); err != nil || !os.SameFile(listed, other) {
+		testutil.WriteFile(t, dir, "claude.md", "another file\n")
+		require.Empty(t, newNamedFiles(dir, []string{"AGENTS.md"}, modified).only(modified), "claude.md is another file")
+		require.NoError(t, os.Remove(filepath.Join(dir, "claude.md")))
+		if err := os.Link(filepath.Join(dir, "CLAUDE.md"), filepath.Join(dir, "claude.md")); err != nil {
+			t.Skipf("cannot create a hard link here: %v", err)
+		}
+	}
+	require.Equal(t, modified, newNamedFiles(dir, []string{"AGENTS.md"}, modified).only(modified))
+}
+
 // TestNamedFiles_OtherNormalizationForm covers a transcript that spells a
 // name decomposed (cafe\u0301.txt) where git status lists it composed
 // (caf\u00e9.txt), as git does on macOS, whose filesystem opens both as one
