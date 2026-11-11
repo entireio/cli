@@ -2,8 +2,10 @@ package strategy
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -266,7 +268,9 @@ func TestPostRewrite_StillRemapsAnIdleSiblingSession(t *testing.T) {
 // checkpoint records the amended commit for (moved out of its final trailer
 // block, then put back by the amend). Without a reflog
 // to tell an amend from a new commit, the owner is kept, as it was before the
-// idle check.
+// idle check. A commit started while the amend's post-commit runs can land
+// between post-commit reading HEAD and reading HEAD's reflog: its entry is
+// then the newest, and the amend is still told by its own entry.
 func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
 	for _, tt := range []struct {
 		name       string
@@ -281,7 +285,13 @@ func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
 		// movedTrailer commits the first commit with its trailer moved out of
 		// the final trailer block, and the amend puts it back.
 		movedTrailer bool
-		condensed    bool
+		// laterCommit lands another commit after the amend, before its
+		// post-commit reads HEAD's reflog.
+		laterCommit bool
+		// dropEntry removes the commit's own entry from HEAD's reflog,
+		// leaving only older ones.
+		dropEntry bool
+		condensed bool
 	}{
 		{name: "amend", commitArgs: []string{"--amend"}, condensed: true},
 		{name: "message reused with commit -C", condensed: false},
@@ -290,6 +300,9 @@ func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
 		{name: "amend of another commit reusing the message", commitArgs: []string{"--amend"}, amendOther: true, condensed: false},
 		{name: "amend restoring the trailer of a session based on it", commitArgs: []string{"--amend"}, amendOther: true, restore: true, condensed: true},
 		{name: "amend of a commit whose trailer was moved", commitArgs: []string{"--amend"}, movedTrailer: true, condensed: true},
+		{name: "amend, then another commit lands before post-commit reads the reflog", commitArgs: []string{"--amend"}, laterCommit: true, condensed: true},
+		{name: "commit -C, then another commit lands before post-commit reads the reflog", laterCommit: true, condensed: false},
+		{name: "amend with no reflog entry of its own", commitArgs: []string{"--amend"}, dropEntry: true, condensed: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -320,7 +333,13 @@ func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
 			if tt.movedTrailer {
 				committed = msg + "\nA note written after the trailer.\n"
 			}
-			testutil.GitCommit(t, siblingDir, committed)
+			if tt.dropEntry {
+				// Through git, so HEAD's reflog keeps an older entry that moved
+				// HEAD once the amend's own is gone.
+				testutil.RunGit(t, siblingDir, "commit", "-q", "-m", committed)
+			} else {
+				testutil.GitCommit(t, siblingDir, committed)
+			}
 			require.NoError(t, NewManualCommitStrategy().PostCommit(ctx))
 			state, err := s.loadSessionState(ctx, "sess-sibling")
 			require.NoError(t, err)
@@ -386,6 +405,15 @@ func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
 				// does not move HEAD.
 				testutil.RunGit(t, siblingDir, "reset", "-q", "HEAD")
 			}
+			if tt.dropEntry {
+				dropNewestReflogEntry(t, siblingDir)
+			}
+			if tt.laterCommit {
+				// The next commit lands after post-commit has read HEAD (still
+				// this commit) and before it reads HEAD's reflog, whose newest
+				// entry is then that commit's.
+				landLaterCommitInReflog(t, siblingDir)
+			}
 			require.NoError(t, NewManualCommitStrategy().PostCommit(ctx))
 
 			repo, err := OpenRepository(ctx)
@@ -403,4 +431,39 @@ func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
 			}
 		})
 	}
+}
+
+// landLaterCommitInReflog records in HEAD's reflog a commit on top of HEAD, as
+// git does once that commit lands, but leaves HEAD where it is: what a hook
+// that read HEAD just before sees when it reads the reflog.
+func landLaterCommitInReflog(t *testing.T, dir string) {
+	t.Helper()
+	head := strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", "HEAD"))
+	next := strings.TrimSpace(testutil.RunGit(t, dir, "commit-tree", "-p", head, "-m", "next commit", head+"^{tree}"))
+	gitDir := strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", "--path-format=absolute", "--absolute-git-dir"))
+	logFile, err := os.OpenFile(filepath.Join(gitDir, "logs", "HEAD"), os.O_APPEND|os.O_WRONLY, 0)
+	require.NoError(t, err)
+	defer logFile.Close()
+	_, err = fmt.Fprintf(logFile, "%s %s Test <test@test.com> %d +0000\tcommit: next commit\n", head, next, time.Now().Unix())
+	require.NoError(t, err)
+	require.Equal(t, next, headReflog(context.Background())[0].newHash.String(), "sanity: the later commit's entry is the newest")
+}
+
+// dropNewestReflogEntry removes the newest entry of HEAD's reflog, leaving
+// HEAD as it is.
+func dropNewestReflogEntry(t *testing.T, dir string) {
+	t.Helper()
+	gitDir := strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", "--path-format=absolute", "--absolute-git-dir"))
+	logPath := filepath.Join(gitDir, "logs", "HEAD")
+	data, err := os.ReadFile(logPath)
+	require.NoError(t, err)
+	lines := strings.SplitAfter(strings.TrimSuffix(string(data), "\n"), "\n")
+	require.Greater(t, len(lines), 1, "sanity: older entries stay")
+	require.NoError(t, os.WriteFile(logPath, []byte(strings.Join(lines[:len(lines)-1], "")), 0o600))
+	head := strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", "HEAD"))
+	entries := headReflog(context.Background())
+	require.False(t, slices.ContainsFunc(entries, func(e reflogEntry) bool { return e.newHash.String() == head }),
+		"sanity: no entry names the commit")
+	require.True(t, slices.ContainsFunc(entries, func(e reflogEntry) bool { return !e.oldHash.Equal(e.newHash) }),
+		"sanity: an older entry that moved HEAD is left")
 }
