@@ -162,9 +162,11 @@ func TestString_CommandLinePasswords(t *testing.T) {
 	})
 }
 
-// Cases found reviewing the upstream PR, kept apart so each table stays
-// readable.
-func TestString_CommandLinePasswordsReviewCases(t *testing.T) {
+// Where a command runs (through ssh, env, env -S, sudo or sshpass, in a
+// subshell, a function body, a case arm, a process substitution, a
+// container or a pod, as an entrypoint), redirections before its flags, and
+// flags and values quoted alone, together or in escaped quotes.
+func TestString_CommandLinePasswordsCommandContextsAndQuotedFlags(t *testing.T) {
 	t.Parallel()
 
 	p := cliTestPassword
@@ -214,7 +216,6 @@ func TestString_CommandLinePasswordsReviewCases(t *testing.T) {
 		{name: "long flag quoted with the first piece of its value", input: `wget "--password=changeme"` + p + ` x`, want: `wget "--password=REDACTED x`},
 		{name: "long flag quoted with its value and a quoted piece after it", input: `wget '--password=abc'"Summer 2026` + p + `" x`, want: `wget '--password=REDACTED x`},
 		{name: "long flag quoted with its value in a script before the script's quote", input: `sh -c "wget '--password=` + p + `'"; echo "ok"`, want: `sh -c "wget '--password=REDACTED'"; echo "ok"`},
-		{name: "quoted long flag before a quoted value", input: `wget "--password" "Summer 2026` + p + `" x`, want: `wget "--password" "REDACTED" x`},
 		{name: "openssl flag after a descriptor redirection", input: "openssl enc -aes-128-cbc -in /dev/null 2>&1 -pass pass:" + p, want: "openssl enc -aes-128-cbc -in /dev/null 2>&1 -pass pass:REDACTED"},
 		{name: "mysql flag after a descriptor redirection", input: "mysql 2>&1 -p" + p, want: "mysql 2>&1 -pREDACTED"},
 		{name: "mysql flag after redirections of both streams", input: "mysql &>/dev/null -p" + p, want: "mysql &>/dev/null -pREDACTED"},
@@ -325,7 +326,6 @@ func TestString_CommandLinePasswordsReviewCases(t *testing.T) {
 		{name: "flag after a substitution holding a case statement", input: "mysql -h $(case x in x) printf h;; esac) -p" + p, want: "mysql -h $(case x in x) printf h;; esac) -pREDACTED"},
 		{name: "openssl sources after an equals sign", input: "openssl enc -aes-128-cbc -pbkdf2 -in /dev/null -pass=pass:" + p + " && openssl rsa -passin=pass:" + p, want: "openssl enc -aes-128-cbc -pbkdf2 -in /dev/null -pass=pass:REDACTED && openssl rsa -passin=pass:REDACTED"},
 		{name: "quoted Windows client path below a directory named like it", input: `"C:\mysql\bin\mysql.exe" -p` + p, want: `"C:\mysql\bin\mysql.exe" -pREDACTED`},
-		{name: "long flag in escaped quotes in a double-quoted script", input: `sh -c "wget \"--password\" \"` + p + `\" https://example.com"`, want: `sh -c "wget \"--password\" \"REDACTED\" https://example.com"`},
 		{name: "flag after a parameter expansion holding an operator", input: "openssl enc -aes-128-cbc -in ${INPUT:-a&b} -pass pass:" + p + "; mysql -h ${H:-a;b} -p" + p, want: "openssl enc -aes-128-cbc -in ${INPUT:-a&b} -pass pass:REDACTED; mysql -h ${H:-a;b} -pREDACTED"},
 		{name: "client in a case arm after a shell keyword", input: "sh -c 'if true; then case $1 in a|b) echo;; (c) mysql -p" + p + ";; esac; fi'", want: "sh -c 'if true; then case $1 in a|b) echo;; (c) mysql -pREDACTED;; esac; fi'"},
 		{name: "client run on a host by a quoted ssh path", input: `"/usr/bin/ssh" db mysql -p` + p, want: `"/usr/bin/ssh" db mysql -pREDACTED`},
@@ -342,9 +342,11 @@ func TestString_CommandLinePasswordsReviewCases(t *testing.T) {
 	})
 }
 
-// More cases found reviewing the upstream PR, in a table of their own so
-// each table stays maintainable.
-func TestString_CommandLinePasswordsMoreReviewCases(t *testing.T) {
+// Values joined to empty strings, clients quoted as ssh's remote command,
+// backtick substitutions and Markdown code spans, the mysql and mariadb
+// utilities, dash-led values after a blank, flags after code commas or a
+// joined flag, az login, and sshpass after verbosity flags.
+func TestString_CommandLinePasswordsJoinedWordsBackticksAndClientVariants(t *testing.T) {
 	t.Parallel()
 
 	p := cliTestPassword
@@ -406,7 +408,6 @@ func TestString_CommandLinePasswordsMoreReviewCases(t *testing.T) {
 		{name: "dash-led docker login password after a blank", input: "docker login --username user --password -" + p + " registry.example", want: "docker login --username user --password REDACTED registry.example"},
 		{name: "dash-led helm registry login password after a blank", input: "helm registry login --username me --password -" + p + " host", want: "helm registry login --username me --password REDACTED host"},
 		{name: "dash-led az login password after a blank", input: "az login -u me --password -" + p, want: "az login -u me --password REDACTED"},
-		{name: "dash-led docker login password after a quoted flag", input: "docker login \"--password\" -" + p + " registry", want: "docker login \"--password\" REDACTED registry"},
 		{name: "dash-led wget password after a blank", input: "wget --password -" + p + " https://example.com", want: "wget --password REDACTED https://example.com"},
 		{name: "dash-led passwd after a blank", input: "tool --passwd -" + p + " host", want: "tool --passwd REDACTED host"},
 		{name: "dash-led password before a postgres command", input: "wget --password -" + p + " https://example.com; psql --password -h db", want: "wget --password REDACTED https://example.com; psql --password -h db"},
@@ -448,8 +449,6 @@ func TestString_CommandLinePasswordsMoreReviewCases(t *testing.T) {
 		{name: "long password in a backtick substitution after a blank", input: "wget --password `printf " + p + "` https://example.com", want: "wget --password REDACTED https://example.com"},
 		{name: "short password in a backtick substitution", input: "mysql -p`printf " + p + "` db", want: "mysql -pREDACTED db"},
 		{name: "openssl source in a backtick substitution", input: "openssl enc -pass pass:`printf " + p + "`", want: "openssl enc -pass pass:REDACTED"},
-		{name: "dash-led docker login password after an escaped quoted flag in a script", input: `sh -c "docker login \"--password\" -` + p + ` registry"`, want: `sh -c "docker login \"--password\" REDACTED registry"`},
-		{name: "dash-led docker login password after a single-quoted flag in a script", input: "sh -c \"docker login '--password' -" + p + " registry\"", want: "sh -c \"docker login '--password' REDACTED registry\""},
 		{name: "passwords in code spans joined by a word", input: "`mysql -pfoo`or`mysql -p" + p + "`", want: "`mysql -pREDACTED`or`mysql -pREDACTED`"},
 		{name: "openssl source after a backtick substitution", input: "openssl enc -in `printf input.txt` -pass pass:" + p, want: "openssl enc -in `printf input.txt` -pass pass:REDACTED"},
 		{name: "password after backtick substitutions", input: "mysql -h `hostname` -u `whoami` -p" + p + " db", want: "mysql -h `hostname` -u `whoami` -pREDACTED db"},
@@ -644,9 +643,11 @@ func TestString_CommandLinePasswordsNestedAndMultilineSubstitutions(t *testing.T
 	})
 }
 
-// Cases from the review of the sixty-second commit: shell grammar inside
-// substitutions and expansions, ssh options and eval arguments that run a
-// command, raw strings in code, and .netrc entries.
+// Shell grammar inside substitutions and expansions, ssh options and eval
+// arguments that run a command, raw and Python triple-quoted strings in
+// code, .netrc entries that printf writes, a client's own short options
+// (mysql --force, podman exec --latest), and programs that run the words
+// after their operands (find -exec, go run).
 func TestString_CommandLinePasswordsShellGrammarCases(t *testing.T) {
 	t.Parallel()
 
@@ -716,6 +717,26 @@ func TestString_CommandLinePasswordsShellGrammarCases(t *testing.T) {
 		{name: "Python raw strings for the program and the password", input: `subprocess.run([r"C:\Tools\wget.exe", "--password", r"C:\vault\` + p + `", url])`, want: `subprocess.run([r"C:\Tools\wget.exe", "--password", r"REDACTED", url])`},
 		{name: "dollar sign in a Python raw string", input: `subprocess.run(["wget", "--password", r"$` + p + `", url])`, want: `subprocess.run(["wget", "--password", r"REDACTED", url])`},
 		{name: "Python raw string in a JSON string", input: `{"cmd": "subprocess.run([\"wget\", \"--password\", r\"` + p + `\", url])"}`, want: `{"cmd": "subprocess.run([\"wget\", \"--password\", r\"REDACTED\", url])"}`},
+		{name: "long flag value that a template only starts", input: "tool --password={{ .Values.prefix }}" + p, want: "tool --password=REDACTED"},
+		{name: "capitals and digits after a long flag", input: "wget --password SUMMERPASS2026 https://example.com", want: "wget --password REDACTED https://example.com"},
+		{name: "three digits after --pass", input: "curl --pass 482 sftp://example.com", want: "curl --pass REDACTED sftp://example.com"},
+		{name: "quoted long flag joined to its value by an equals sign", input: `wget "--password"=` + p + " https://example.com", want: `wget "--password"=REDACTED https://example.com`},
+		{name: "netrc entry written by printf with escaped line breaks", input: `printf "machine h\nlogin me\npassword ` + p + `\n" > ~/.netrc`, want: `printf "machine h\nlogin me\npassword REDACTED\n" > ~/.netrc`},
+		{name: "netrc entry written by printf in single quotes", input: `printf 'machine api.github.com\nlogin me\npassword ` + p + `\n' >> ~/.netrc`, want: `printf 'machine api.github.com\nlogin me\npassword REDACTED\n' >> ~/.netrc`},
+		{name: "netrc entry written by echo -e", input: `echo -e "machine h\nlogin me\npassword ` + p + `" > ~/.netrc`, want: `echo -e "machine h\nlogin me\npassword REDACTED" > ~/.netrc`},
+		{name: "netrc entry written by printf with escaped tabs", input: `printf "machine h\tlogin me\tpassword ` + p + `\n" > ~/.netrc`, want: `printf "machine h\tlogin me\tpassword REDACTED\n" > ~/.netrc`},
+		{name: "netrc entries written by printf on one line", input: `printf "machine a login me password ` + p + `\nmachine b login me password ` + p + `2\n"`, want: `printf "machine a login me password REDACTED\nmachine b login me password REDACTED\n"`},
+		{name: "default netrc entry written by printf", input: `printf 'default\nlogin me\npassword ` + p + `\n'`, want: `printf 'default\nlogin me\npassword REDACTED\n'`},
+		{name: "netrc entry with no login written by printf", input: `printf "machine 127.0.0.1\npassword ` + p + `\n"`, want: `printf "machine 127.0.0.1\npassword REDACTED\n"`},
+		{name: "netrc password with an escaped line break written by plain echo", input: `echo "machine h login me password ab\n` + p + `" > ~/.netrc`, want: `echo "machine h login me password REDACTED" > ~/.netrc`},
+		{name: "mysql password after --force in an option cluster", input: "mysql -uroot -fp" + p + " db < dump.sql", want: "mysql -uroot -fpREDACTED db < dump.sql"},
+		{name: "mysqldump password after --force in an option cluster", input: "mysqldump -fp" + p + " db", want: "mysqldump -fpREDACTED db"},
+		{name: "mariadb password after --force in an option cluster", input: "mariadb -fp" + p + " db", want: "mariadb -fpREDACTED db"},
+		{name: "client after podman exec -l", input: "podman exec -l mysql -uroot -p" + p, want: "podman exec -l mysql -uroot -pREDACTED"},
+		{name: "client after podman exec --latest", input: "podman exec --latest mysql -uroot -p" + p, want: "podman exec --latest mysql -uroot -pREDACTED"},
+		{name: "client after podman exec -l in an option cluster", input: "podman exec -itl mysql -p" + p, want: "podman exec -itl mysql -pREDACTED"},
+		{name: "client after podman exec -l after an option with a value", input: "podman exec -e A=1 -l mysql -p" + p, want: "podman exec -e A=1 -l mysql -pREDACTED"},
+		{name: "client after podman exec -l in a list", input: `subprocess.run(["podman", "exec", "-l", "mysql", "-p` + p + `"])`, want: `subprocess.run(["podman", "exec", "-l", "mysql", "-pREDACTED"])`},
 		{name: "short flag value in a Python triple-quoted string", input: `subprocess.run(["redis-cli", "-a", """` + p + `"""])`, want: `subprocess.run(["redis-cli", "-a", """REDACTED"""])`},
 		{name: "openssl source in a Python triple-quoted string", input: `subprocess.run(["openssl", "enc", "-pass", """pass:` + p + `"""])`, want: `subprocess.run(["openssl", "enc", "-pass", """pass:REDACTED"""])`},
 		{name: "long flag value in a Python triple-quoted string", input: `subprocess.run(["wget", "--password", '''` + p + `''', url])`, want: `subprocess.run(["wget", "--password", '''REDACTED''', url])`},
@@ -723,6 +744,34 @@ func TestString_CommandLinePasswordsShellGrammarCases(t *testing.T) {
 		{name: "Python raw triple-quoted string", input: `subprocess.run(["redis-cli", "-a", r"""` + p + `"""])`, want: `subprocess.run(["redis-cli", "-a", r"""REDACTED"""])`},
 		{name: "Python triple-quoted string in a JSON string", input: `{"cmd": "subprocess.run([\"wget\", \"--password\", \"\"\"` + p + `\"\"\"])"}`, want: `{"cmd": "subprocess.run([\"wget\", \"--password\", \"\"\"REDACTED\"\"\"])"}`},
 		{name: "Python triple-quoted string in escaped quotes", input: `[\"redis-cli\", \"-a\", \"\"\"` + p + `\"\"\"]`, want: `[\"redis-cli\", \"-a\", \"\"\"REDACTED\"\"\"]`},
+		// a program that runs the words after its operands
+		{name: "client run by find -exec", input: `find . -name x -exec mysql -p` + p + ` \;`, want: `find . -name x -exec mysql -pREDACTED \;`},
+		{name: "client run by find -execdir", input: `find . -execdir mysql -p` + p + ` {} +`, want: `find . -execdir mysql -pREDACTED {} +`},
+		{name: "client run by find -ok", input: `find . -ok mysql -p` + p + ` \;`, want: `find . -ok mysql -pREDACTED \;`},
+		{name: "client run by go run", input: "go run ./cmd/mysql -p" + p, want: "go run ./cmd/mysql -pREDACTED"},
+		{name: "client run by go run with a build flag", input: "go run -race ./cmd/mysql -p" + p, want: "go run -race ./cmd/mysql -pREDACTED"},
+		{name: "client after a find in its own command", input: "find /etc/mysql -print; mysql -p" + p, want: "find /etc/mysql -print; mysql -pREDACTED"},
+		{name: "client in a substitution in a find operand", input: "cat $(mysql -p" + p + " -e 1)", want: "cat $(mysql -pREDACTED -e 1)"},
+		{name: "client run by xargs after a find", input: "find . | xargs mysql -p" + p, want: "find . | xargs mysql -pREDACTED"},
+		{name: "client named in prose", input: "connect with mysql -uroot -p" + p, want: "connect with mysql -uroot -pREDACTED"},
+		// .netrc fields given again, extended globs, ANSI-C quoted
+		// here-document delimiters, expansions in case words, backtick
+		// substitutions that start with a blank, array literals in code,
+		// and nice
+		{name: "netrc login given twice before the password", input: "machine 127.0.0.1 login old login me password " + p, want: "machine 127.0.0.1 login old login me password REDACTED"},
+		{name: "netrc account and login given twice", input: "machine h account a login b account c login d password " + p, want: "machine h account a login b account c login d password REDACTED"},
+		{name: "openssl source after an extended glob", input: "openssl enc -aes-128-cbc -pbkdf2 -in /dev/@(null|nonexistent) -pass pass:" + p, want: "openssl enc -aes-128-cbc -pbkdf2 -in /dev/@(null|nonexistent) -pass pass:REDACTED"},
+		{name: "mysql password after a negated extended glob", input: "mysql --defaults-file=!(a|b).cnf -p" + p, want: "mysql --defaults-file=!(a|b).cnf -pREDACTED"},
+		{name: "openssl source after a here-document with an ANSI-C quoted delimiter", input: "openssl enc -in $(cat <<$'EOF'\n/dev/null\nEOF\n) -pass pass:" + p, want: "openssl enc -in $(cat <<$'EOF'\n/dev/null\nEOF\n) -pass pass:REDACTED"},
+		{name: "openssl source after a here-document with a locale-quoted delimiter", input: "openssl enc -in $(cat <<$\"EOF\"\n/dev/null\nEOF\n) -pass pass:" + p, want: "openssl enc -in $(cat <<$\"EOF\"\n/dev/null\nEOF\n) -pass pass:REDACTED"},
+		{name: "openssl source from a case statement whose word holds a parenthesis in an expansion", input: "openssl enc -pass pass:$(case ${PW:-x)y} in x*) printf " + p + ";; esac)", want: "openssl enc -pass pass:REDACTED"},
+		{name: "openssl source from a backtick substitution that starts with a blank", input: "openssl enc -aes-128-cbc -pbkdf2 -pass pass:` printf " + p + "`", want: "openssl enc -aes-128-cbc -pbkdf2 -pass pass:REDACTED"},
+		{name: "openssl source from a backtick substitution that starts with a blank before a flag", input: "openssl enc -pass pass:` printf " + p + "` -in f", want: "openssl enc -pass pass:REDACTED -in f"},
+		{name: "long flag prose-like value in a Go slice literal", input: `argv := []string{"wget", "--password", "open the gate", url}`, want: `argv := []string{"wget", "--password", "REDACTED", url}`},
+		{name: "long flag prose-like value in a Java array literal", input: `new String[]{"wget", "--password", "open the gate", url}`, want: `new String[]{"wget", "--password", "REDACTED", url}`},
+		{name: "short flag in a Go slice literal", input: `exec.Command("mysql", []string{"-u", "root", "-p` + p + `"}...)`, want: `exec.Command("mysql", []string{"-u", "root", "-pREDACTED"}...)`},
+		{name: "client run by nice", input: "nice -n 5 mysql -p" + p, want: "nice -n 5 mysql -pREDACTED"},
+		{name: "client run by nice with an old-style adjustment", input: "nice -5 mysql -p" + p, want: "nice -5 mysql -pREDACTED"},
 	})
 }
 
@@ -1165,6 +1214,23 @@ func TestString_CommandLinePasswordListAndQuotingNonSecretsPreserved(t *testing.
 		"machine example.com password is stored in the vault",
 		"reset the machine localhost password first",
 		"the machine learning password policy",
+		// a long flag that is not given a value: a flag quoted on its own
+		// before a blank is a word of code or an argument naming it, a
+		// help text names the value in capitals, a template fills it in,
+		// and --pass may number a pass
+		`grep -rn -- "--password" docs/`,
+		`if arg == "--password" {`,
+		`echo "--password" x`,
+		"error: --password requires a value",
+		"tool --password {{ .Values.password }}",
+		"tool --password={{.Values.pw}}",
+		"  --password PASSWORD   the password",
+		"mysql -uUSER -pPASSWORD db",
+		"tool --pass 3",
+		// prose with each keyword of an entry, whose login is a word that
+		// joins a sentence, or whose machine ends a clause
+		"Enter machine name, login and password below.",
+		"the state machine handles login then password then mfa",
 		// a backtick after a list flag that prose, and no element's end,
 		// follows on a later line
 		"args := []string{\"wget\", \"--password\", `\nREDIS_KEY` holds it.",
@@ -1178,6 +1244,36 @@ func TestString_CommandLinePasswordListAndQuotingNonSecretsPreserved(t *testing.
 		`subprocess.run(["openssl", "enc", "-pass", f"pass:{pw}"])`,
 		`mysql -u root r"-pfoo"`,
 		`psql_cmd = [r"C:\Program Files\PostgreSQL\16\bin\psql.exe", "--password", "-h", "db"]`,
+		// mysqlsh's -f takes a file, so a cluster after it is that file's name
+		"mysqlsh -fpreload.js",
+		// podman's run -l is --label, which takes a value, so the next word
+		// is no command
+		"podman run -l app=db mysql -p3306",
+		// a parser declares a flag's long and short names in one list
+		`parser.add_argument("--password", "-p", required=True)`,
+		`@click.option('--password', '-p', help='Password')`,
+		`parser.add_argument("--pass", "-P", dest="pw")`,
+		// a client name as a path or name that another program reads,
+		// whose flags are that program's
+		"find /etc/mysql -type f -print",
+		"find /var/lib/mysql -perm 600",
+		"find . -name mysql -printf '%p\\n'",
+		"go test ./mysql -parallel 8",
+		"tar -C /opt/mysql -pxzf a.tgz",
+		"nmap mysql -p3306",
+		"journalctl -u mysql -p err",
+		"systemctl show mysql -p MainPID",
+		"sudo find /etc/mysql -print",
+		"kubectl exec db -- find /etc/mysql -print",
+		// ssh's port after nice and its options, a Python set, and
+		// Markdown code spans after a password
+		"nice -n 5 ssh mysql -p2222",
+		"nice ssh mysql -p2222",
+		"nice --adjustment=5 ssh mysql -p2222",
+		`flags = {"wget", "--password", "open the gate"}`,
+		"Run `mysql -pREDACTED` to connect and `ls` after",
+		"Run `openssl enc -pass pass:REDACTED` then ` ls`",
+		`sh -c "find /etc/mysql -print"`,
 	})
 }
 
