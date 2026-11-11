@@ -1713,7 +1713,7 @@ func untilUnmatchedParen(rest string, skip, skipEnd int, cases caseMemo) string 
 			}
 		}
 		// A parameter expansion is one word (-in ${INPUT:-a)b}).
-		if end := braceExpansionEnd(rest, i, cases.memo()); end > 0 {
+		if end := cases.braceEnd(rest, i); end > 0 {
 			i = end - 1
 			continue
 		}
@@ -2646,8 +2646,9 @@ func isListFlag(s string, base int, loc []int) bool {
 // string may have a Python prefix (r"pass:x", see pythonStringPrefix),
 // which makes it literal: Python expands no $ (r"$ecret"). Python and C
 // join the strings that follow it with only blanks between them into one
-// ("hun" "ter2", "" "hunter2"), and the value runs to the last one's
-// closing quote unless all of them are empty.
+// ("hun" "ter2", "" "hunter2"), and the value runs from the first one
+// that is not empty to the last one's closing quote, so an option joined
+// to empty strings is read as one ("" "--host").
 func listElementValue(s string, open int) (cliValue, bool) {
 	prefix := pythonStringPrefix(s, open)
 	open += prefix
@@ -2662,17 +2663,22 @@ func listElementValue(s string, open int) (cliValue, bool) {
 	if n == 0 {
 		return cliValue{}, false
 	}
-	v := cliValue{start: open + n, end: end - n, quoted: true, singleQuoted: prefix > 0 || s[open] != '"' && s[open] != '\\'}
+	v := cliValue{start: open + n, end: end - n, quoted: true, singleQuoted: isLiteralCodeString(s, open, prefix)}
 	for empty := v.end == v.start; ; {
 		next := end + len(s[end:]) - len(strings.TrimLeft(s[end:], " \t\r\n"))
 		if next == end || next == len(s) {
 			break
 		}
-		pieceEnd, m := codeStringEnd(s, next+pythonStringPrefix(s, next))
+		piecePrefix := pythonStringPrefix(s, next)
+		pieceEnd, m := codeStringEnd(s, next+piecePrefix)
 		if m == 0 {
 			break
 		}
-		if empty = empty && pieceEnd-m == next+pythonStringPrefix(s, next)+m; !empty {
+		if pieceStart := next + piecePrefix + m; empty && pieceEnd-m > pieceStart {
+			v.start, v.singleQuoted = pieceStart, isLiteralCodeString(s, next+piecePrefix, piecePrefix)
+			empty = false
+		}
+		if !empty {
 			v.end = pieceEnd - m
 		}
 		end = pieceEnd
@@ -2681,6 +2687,13 @@ func listElementValue(s string, open int) (cliValue, bool) {
 		return cliValue{}, false
 	}
 	return v, true
+}
+
+// isLiteralCodeString reports whether the string of code whose quote is at
+// s[quote], after a Python prefix of length prefix, is literal: a prefixed
+// one, or one in single quotes or backticks, which expands no $.
+func isLiteralCodeString(s string, quote, prefix int) bool {
+	return prefix > 0 || s[quote] != '"' && s[quote] != '\\'
 }
 
 // pythonStringPrefix returns the length of the Python string prefix at
@@ -4378,7 +4391,7 @@ func (q *quoteScan) stepSubstitution() bool {
 			end = at + 1
 		}
 	case q.braces:
-		end = braceExpansionEnd(q.s, q.i, q.cases.memo())
+		end = q.cases.braceEnd(q.s, q.i)
 	}
 	if end == 0 {
 		return false
@@ -4425,8 +4438,12 @@ type lineReads struct {
 	// $(echo `x`...).
 	within map[int]substitutionMemo
 	// pieces is within for the parameter expansions in the quoted strings
-	// that quotedPiece reads, which it reads its own way (see shallow).
+	// that quotedPiece reads, which it reads its own way (see shallow), and
+	// braces for those that braceEnd reads, also where one does not close,
+	// which each segment of a line of client names after an unclosed
+	// ${PW:-) would otherwise read to the line's end again.
 	pieces map[int]substitutionMemo
+	braces map[int]substitutionMemo
 }
 
 // in returns the memo of the substitutions read in the texts of s that end
@@ -4437,6 +4454,10 @@ func (l *lineReads) in(end int) substitutionMemo {
 
 func (l *lineReads) piecesIn(end int) substitutionMemo {
 	return memoAt(&l.pieces, end)
+}
+
+func (l *lineReads) bracesIn(end int) substitutionMemo {
+	return memoAt(&l.braces, end)
 }
 
 // memoAt returns the memo that memos holds for end, made on first use.
@@ -4527,6 +4548,21 @@ func (m *caseMemo) quotedPiece(s string, i int) (end, quoteLen int) {
 		end -= m.base
 	}
 	return end, quoteLen
+}
+
+// braceEnd is braceExpansionEnd, keeping the ends it reads in the memo
+// that lines shares for every text of its string that ends where s does,
+// when m has lines, so each is read once (${PW:-)mysql ${PW:-)mysql ...).
+func (m *caseMemo) braceEnd(s string, i int) int {
+	if m.lines == nil {
+		return braceExpansionEnd(s, i, m.memo())
+	}
+	to := m.base + len(s)
+	end := braceExpansionEnd(m.lines.s[:to], m.base+i, m.lines.bracesIn(to))
+	if end > 0 {
+		end -= m.base
+	}
+	return end
 }
 
 // cliParensGroup matches text in parentheses at the start of a string.
@@ -5098,11 +5134,13 @@ func startsWord(before string) bool {
 // every one that printf or echo -e writes from a quoted string, where \n,
 // \r and \t stand for a line break and blanks (printf "machine h\nlogin
 // me\npassword x\n" > ~/.netrc). Each is read as text too, as plain echo
-// writes it, so a password with \n in it is hidden whole either way.
+// writes it, so a password with \n in it is hidden whole either way, and
+// one outside a quoted string, as a file holds it, is hidden whole.
 func appendNetrcPasswords(regions []taggedRegion, s string) []taggedRegion {
-	regions = appendNetrcEntries(regions, s)
-	if written, ok := netrcEscapesAsBlanks(s); ok {
-		regions = appendNetrcEntries(regions, written)
+	written, ok := netrcEscapesAsBlanks(s)
+	regions = appendNetrcEntries(regions, s, written)
+	if ok {
+		regions = appendNetrcEntries(regions, written, "")
 	}
 	return regions
 }
@@ -5135,11 +5173,15 @@ func netrcEscapesAsBlanks(s string) (string, bool) {
 	return string(written), written != nil
 }
 
-func appendNetrcEntries(regions []taggedRegion, s string) []taggedRegion {
+// appendNetrcEntries adds the password of every .netrc entry in s. written
+// is s with the escapes that printf writes as blanks written so (see
+// netrcEscapesAsBlanks), or empty when s holds none: a token ends before
+// only those (see netrcTokenEnd).
+func appendNetrcEntries(regions []taggedRegion, s, written string) []taggedRegion {
 	for _, p := range netrcPasswordPatterns {
 		lines := quoteScan{s: s, prose: true}
 		for _, loc := range p.pattern.FindAllStringSubmatchIndex(s, -1) {
-			regions = p.appendPassword(regions, s, &lines, loc)
+			regions = p.appendPassword(regions, s, written, &lines, loc)
 			for _, d := range netrcDefaultPatterns {
 				if dloc := d.pattern.FindStringSubmatchIndex(s[loc[1]:]); dloc != nil {
 					for k := range dloc {
@@ -5147,7 +5189,7 @@ func appendNetrcEntries(regions []taggedRegion, s string) []taggedRegion {
 							dloc[k] += loc[1]
 						}
 					}
-					regions = d.appendPassword(regions, s, &lines, dloc)
+					regions = d.appendPassword(regions, s, written, &lines, dloc)
 					break
 				}
 			}
@@ -5157,8 +5199,8 @@ func appendNetrcEntries(regions []taggedRegion, s string) []taggedRegion {
 }
 
 // appendPassword adds the password of the .netrc entry that loc, a match of
-// p in s, found.
-func (p netrcPattern) appendPassword(regions []taggedRegion, s string, lines *quoteScan, loc []int) []taggedRegion {
+// p in s, found. written is as for appendNetrcEntries.
+func (p netrcPattern) appendPassword(regions []taggedRegion, s, written string, lines *quoteScan, loc []int) []taggedRegion {
 	machine := ""
 	if loc[2] >= 0 {
 		machine = s[loc[2]:loc[3]]
@@ -5177,7 +5219,7 @@ func (p netrcPattern) appendPassword(regions []taggedRegion, s string, lines *qu
 		// in the vault).
 		return regions
 	}
-	regions = appendNetrcValue(regions, s, lines, start, netrcTokenEnd(s, start, end))
+	regions = appendNetrcValue(regions, s, lines, start, netrcTokenEnd(s, written, start, end))
 	if s[start] == '#' {
 		// curl reads a token that starts with # as a comment that runs to
 		// the end of its line, and the next token as the password
@@ -5191,14 +5233,17 @@ func (p netrcPattern) appendPassword(regions []taggedRegion, s string, lines *qu
 }
 
 // netrcTokenEnd returns where the .netrc token s[start:end] ends: before a
-// \n, \r or \t that a .netrc keyword and another field follow, which printf
-// writes as the next entry or field (printf "machine h login me password
-// x\nmachine b ..."), or at end. A keyword that nothing follows is part of
-// the token (password x\nmachine), as no field shows that printf writes it.
-func netrcTokenEnd(s string, start, end int) int {
+// \n, \r or \t in a quoted string, which written holds as blanks, that a
+// .netrc keyword and another field follow, which printf writes as the next
+// entry or field (printf "machine h login me password x\nmachine b ..."),
+// or at end. A keyword that nothing follows is part of the token (password
+// x\nmachine), as no field shows that printf writes it, and so is one
+// outside a quoted string, which a file holds as it is (password
+// abc\nmachine other).
+func netrcTokenEnd(s, written string, start, end int) int {
 	token := s[start:end]
 	for i := strings.IndexByte(token, '\\'); i >= 0 && i+1 < len(token); {
-		if c := token[i+1]; c == 'n' || c == 'r' || c == 't' {
+		if c := token[i+1]; (c == 'n' || c == 'r' || c == 't') && written != "" && written[start+i] == ' ' {
 			word, _, _ := strings.Cut(token[i+2:], `\`)
 			if isNetrcKeyword(word) && netrcFieldFollows(s, start+i+2+len(word)) {
 				return start + i

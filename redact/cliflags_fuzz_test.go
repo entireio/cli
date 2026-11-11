@@ -41,9 +41,9 @@ const (
 // and the long text must be read within fuzzLineBudget, which a reading in
 // time quadratic in the length of a line exceeds. The seeds are texts whose
 // repetitions were read in quadratic time once: commands after the closing
-// quotes of strings, expansions that never close inside quoted strings,
-// substitutions that never close before code spans, and substitutions
-// nested in the arguments of a client.
+// quotes of strings, expansions that never close inside quoted strings or
+// before client names, substitutions that never close before code spans,
+// and substitutions nested in the arguments of a client.
 func FuzzString_CommandLinePasswordsLinear(f *testing.F) {
 	for _, words := range [][]string{
 		{"- ", ")", "'", "sshpass", " "},
@@ -56,6 +56,8 @@ func FuzzString_CommandLinePasswordsLinear(f *testing.F) {
 		{"subprocess.run([", `"`, "mysql", `", "`, "-pX", `", "`},
 		{"x", "machine", " ", "x", " ", "login", " ", "x", " ", "password", " ", "x", "\n"},
 		{"x", "find", " ", "mysql", " ", "-exec", " ", "mysql", " ", "-pX", " "},
+		{"x", "${PW:-", ")", "login", " ", "mysql", " "},
+		{"x", "`", "${PW:-", ")", "mysql", " "},
 	} {
 		f.Add(fuzzPicks(f, words))
 	}
