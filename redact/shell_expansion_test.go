@@ -52,8 +52,8 @@ func TestString_ShellParameterDefaultsCaughtWithoutScanners(t *testing.T) {
 		`postgres://app:${PW:-'$S3CRET'}@db.example.com/app`: "REDACTED",
 		`DB_PASSWORD="${PW:-'hunter2'}"`:                     `DB_PASSWORD="REDACTED"`,
 		`echo "DB_PASSWORD=${PW:-hunter2}"`:                  `echo "DB_PASSWORD=REDACTED`,
-		// Quotes that close a string, or are escaped, leave the default
-		// outside double quotes.
+		// Quotes that close a string, are escaped, or sit in single quotes
+		// leave the default outside double quotes.
 		`psql ""postgres://app:${PW:-'$S3CRET'}@db/app`:            `psql ""REDACTED`,
 		`psql ""postgres://app:${PW:-'$S3CRET'}@db/app"`:           `psql ""REDACTED"`,
 		`psql "x"postgres://app:${PW:-'$S3CRET'}@db/app`:           `psql "x"REDACTED`,
@@ -63,9 +63,11 @@ func TestString_ShellParameterDefaultsCaughtWithoutScanners(t *testing.T) {
 		`psql \"postgres://app:${PW:-'$S3CRET'}@db/app\"`:          `psql \"REDACTED"`,
 		`printf '%s\n' \"postgres://app:${PW:-'$S3CRET'}@db/app\"`: `printf '%s\n' \"REDACTED"`,
 		`echo \"DB_PASSWORD=${PW:-'$S3CRET'} more\"`:               `echo \"DB_PASSWORD=REDACTED more\"`,
-		// A single quote earlier on the line can change which quotes pair, so
-		// the value is read as unquoted: this redacts more than a shell needs.
-		`echo 'it' "DB_PASSWORD=${PW:-'$FALLBACK'}"`: `echo 'it' "DB_PASSWORD=REDACTED`,
+		`echo 'a"b' DB_PASSWORD=${PW:-'$S3CRET'}`:                  `echo 'a"b' DB_PASSWORD=REDACTED`,
+		"echo \"a\nx \"DB_PASSWORD=${PW:-'$S3CRET'}\" y":           "echo \"a\nx \"DB_PASSWORD=REDACTED y",
+		// A command substitution starts a new quoting context.
+		`echo "$(DB_PASSWORD=${PW:-'$S3CRET'} env)"`:  `echo "$(DB_PASSWORD=REDACTED env)"`,
+		"echo \"`DB_PASSWORD=${PW:-'$S3CRET'} env`\"": "echo \"`DB_PASSWORD=REDACTED env`\"",
 	} {
 		cases = append(cases, stringRedactionCase{name: input, input: input, want: want})
 	}
@@ -96,9 +98,9 @@ func TestString_ShellParameterReferencesPreserved(t *testing.T) {
 }
 
 // Inside double quotes a single quote is a plain character, so the default in
-// "${PW:-'$FALLBACK'}" expands $FALLBACK, as it does nested, in a URI, or in a
-// value that a double-quoted string holds with more text after it; only the
-// unquoted form is the literal text $FALLBACK.
+// "${PW:-'$FALLBACK'}" expands $FALLBACK, as it does nested, in a URI, in a
+// value that a double-quoted string holds with more text after it, or after
+// other quoted words; only the unquoted form is the literal text $FALLBACK.
 func TestString_DoubleQuotedShellDefaultsPreserved(t *testing.T) {
 	t.Parallel()
 	var cases []stringRedactionCase
@@ -113,6 +115,10 @@ func TestString_DoubleQuotedShellDefaultsPreserved(t *testing.T) {
 		`DB_PASSWORD="${PW:-${FALLBACK:-'$DEFAULT_PASSWORD'}}"`,
 		`DB_PASSWORD="${A:-${B:-'$FALLBACK'}}"`,
 		`psql "postgres://app:${PW:-${F:-'$X'}}@db/app"`,
+		`echo 'it' "DB_PASSWORD=${PW:-'$FALLBACK'}"`,
+		`echo "x" 'y' "DB_PASSWORD=${PW:-'$FALLBACK'}" "z"`,
+		`printf '%s\n' "postgres://app:${PW:-'$FALLBACK'}@db/app"`,
+		"echo \"a\nDB_PASSWORD=${PW:-'$FALLBACK'} b\"",
 		`echo "API_KEY=${KEY:-'$FALLBACK'}"`,
 		`psql "postgres://app:${PW:-'$FALLBACK'}@db/app"`,
 		`echo "DB_PASSWORD=${PW}"`,
@@ -161,6 +167,29 @@ func TestDoubleQuotedText(t *testing.T) {
 	} {
 		if got := doubleQuotedText(text); got != want {
 			t.Errorf("doubleQuotedText(%q) = %q, want %q", text, got, want)
+		}
+	}
+}
+
+func TestEndsInDoubleQuotes(t *testing.T) {
+	t.Parallel()
+	for prefix, want := range map[string]bool{
+		`echo "`:           true,
+		`echo "a" "`:       true,
+		`echo 'it' "`:      true,
+		`echo 'a"b' `:      false,
+		`echo \"`:          false,
+		`echo "x\"y `:      true,
+		"echo \"a\nb\" \"": true,
+		"echo \"a\nx \"":   false,
+		`echo "$(`:         false,
+		"echo \"`":         false,
+		`echo 'unclosed "`: false,
+		`echo "trailing \`: false,
+		`DB_PASSWORD=`:     false,
+	} {
+		if got := endsInDoubleQuotes(prefix); got != want {
+			t.Errorf("endsInDoubleQuotes(%q) = %v, want %v", prefix, got, want)
 		}
 	}
 }
