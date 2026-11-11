@@ -403,6 +403,41 @@ func TestCarryForward_DropsACaseRenamedStagedAdditionWindows(t *testing.T) {
 	require.False(t, state.HasPendingFiles())
 }
 
+// TestCarryForward_KeepsAPendingDeletionOfACaseRenamedAdditionWindows: as
+// TestCarryForward_DropsACaseRenamedStagedAdditionWindows, with NEW.md
+// recorded without a hash, as a per-tool hook records it, and the file
+// removed from the worktree before the commit. The commit adds new.md, whose
+// deletion is still pending, so that file stays the session's. Uses t.Chdir —
+// do NOT add t.Parallel().
+func TestCarryForward_KeepsAPendingDeletionOfACaseRenamedAdditionWindows(t *testing.T) {
+	dir := setupGitRepo(t)
+	if !worktreedir.NewCaseProbe(dir).IgnoresCase(".") {
+		t.Skip("a case-only rename is two files on a case-sensitive filesystem")
+	}
+	// As git init sets it on such a filesystem; go-git's init does not.
+	testutil.RunGit(t, dir, "config", "core.ignorecase", "true")
+	t.Chdir(dir)
+	s := &ManualCommitStrategy{}
+	sid := "2026-11-11-deleted-case-renamed-addition"
+	ctx := context.Background()
+
+	testutil.WriteFile(t, dir, "NEW.md", "new\n")
+	saveTestStep(t, s, dir, sid, "NEW.md")
+	state, err := s.loadSessionState(ctx, sid)
+	require.NoError(t, err)
+	delete(state.TouchedFileHashes, "NEW.md") // as a per-tool hook records it
+	require.NoError(t, s.saveSessionState(ctx, state))
+	testutil.GitAdd(t, dir, "NEW.md")
+	testutil.RunGit(t, dir, "mv", "-f", "NEW.md", "new.md")
+	require.NoError(t, os.Remove(filepath.Join(dir, "new.md")))
+	commitPathsWithTrailer(t, dir, "a7a7a7a7a7a7")
+	require.NoError(t, s.PostCommit(ctx))
+
+	state, err = s.loadSessionState(ctx, sid)
+	require.NoError(t, err)
+	require.Equal(t, []string{"new.md"}, state.FilesTouched, "the deletion of the committed new.md is pending")
+}
+
 // TestCheckpointTouchesAny_MatchesACaseRenameWindows: after a commit of a
 // case-only rename of README.md to readme.md, the checkpoint lists the
 // README.md the session recorded, while a task that ran during the commit
