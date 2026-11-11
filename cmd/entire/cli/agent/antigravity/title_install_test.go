@@ -161,12 +161,19 @@ func TestInstallTitle_WindowsHostResolvesEntireFromPath(t *testing.T) {
 			if tc.existing != "" {
 				writeAgySettingsFile(t, cfgDir, `{"title":{"type":"command","command":`+string(mustJSON(t, tc.existing))+`}}`)
 			}
+			// `entire doctor` reports the earlier forms, and only those.
+			if got, want := TitleTeeOutdated(), tc.existing != ""; got != want {
+				t.Fatalf("before install: TitleTeeOutdated = %v, want %v", got, want)
+			}
 			for range 2 { // the second install must leave the current form alone
 				if err := InstallTitleTee(); err != nil {
 					t.Fatalf("InstallTitleTee: %v", err)
 				}
 				if got := readTitleCommand(t, cfgDir); got != tc.want {
 					t.Fatalf("title.command = %q, want %q", got, tc.want)
+				}
+				if TitleTeeOutdated() {
+					t.Fatal("after install: TitleTeeOutdated = true, want false")
 				}
 			}
 			if err := UninstallTitleTee(); err != nil {
@@ -197,6 +204,9 @@ func TestInstallTitle_WindowsHostLeavesOtherTeeCommandsAlone(t *testing.T) {
 		}
 		if got := readTitleCommand(t, cfgDir); got != existing {
 			t.Errorf("title.command = %q, want it left as %q", got, existing)
+		}
+		if TitleTeeOutdated() {
+			t.Errorf("TitleTeeOutdated = true for %q, which install leaves alone", existing)
 		}
 	}
 }

@@ -17,6 +17,7 @@ import (
 var (
 	_ agent.HookSupport       = (*CursorAgent)(nil)
 	_ agent.HookConfigLocator = (*CursorAgent)(nil)
+	_ agent.HookFreshness     = (*CursorAgent)(nil)
 )
 
 // Cursor hook names - these become subcommands under `entire hooks cursor`
@@ -321,6 +322,59 @@ func (c *CursorAgent) AreHooksInstalled(ctx context.Context) (bool, error) {
 		hasEntireHook(hooksFile.Hooks.PreCompact) ||
 		hasEntireHook(hooksFile.Hooks.SubagentStart) ||
 		hasEntireHook(hooksFile.Hooks.SubagentStop), nil
+}
+
+// cursorHookTypes maps each hook verb to the key Cursor stores it under.
+var cursorHookTypes = []struct{ verb, key string }{
+	{HookNameSessionStart, "sessionStart"},
+	{HookNameSessionEnd, "sessionEnd"},
+	{HookNameBeforeSubmitPrompt, "beforeSubmitPrompt"},
+	{HookNameStop, "stop"},
+	{HookNamePreCompact, "preCompact"},
+	{HookNameSubagentStart, "subagentStart"},
+	{HookNameSubagentStop, "subagentStop"},
+}
+
+// CheckHookConfig implements agent.HookFreshness: outdated when any Entire hook
+// in .cursor/hooks.json differs from the command InstallHooks writes on this
+// host, or one is missing. That includes a Windows wrapper written before
+// hooks resolved programs from PATH only, which keeps working but still
+// searches the folder Cursor was opened in. An absent, unreadable or malformed
+// file, or one holding no Entire hook, reads as absent.
+func (c *CursorAgent) CheckHookConfig(ctx context.Context) agent.HookConfigState {
+	cfg, err := cursorHookConfig(ctx)
+	if err != nil {
+		return agent.HooksAbsent
+	}
+	data, err := cfg.Read()
+	if err != nil {
+		return agent.HooksAbsent
+	}
+	var rawFile map[string]json.RawMessage
+	var rawHooks map[string]json.RawMessage
+	if json.Unmarshal(data, &rawFile) != nil || json.Unmarshal(rawFile["hooks"], &rawHooks) != nil {
+		return agent.HooksAbsent
+	}
+	parsed := make([][]CursorHookEntry, len(cursorHookTypes))
+	owned := false
+	for i, ht := range cursorHookTypes {
+		parseCursorHookType(rawHooks, ht.key, &parsed[i])
+		owned = owned || hasEntireHook(parsed[i])
+	}
+	if !owned {
+		return agent.HooksAbsent
+	}
+	// Decided only once Entire's hooks are known to be here: on Windows the
+	// decision runs the sh probe, which `entire status` should not pay for in
+	// every repository.
+	useWindowsHooks := agent.UseWindowsProductionHooks(ctx)
+	for i, ht := range cursorHookTypes {
+		want := agent.WrapProductionSilentHookCommandForOS("entire hooks cursor "+ht.verb, useWindowsHooks)
+		if _, current := agent.ManagedHookListState(parsed[i], hookEntryCommand, []string{want}); !current {
+			return agent.HooksOutdated
+		}
+	}
+	return agent.HooksCurrent
 }
 
 // parseCursorHookType parses a specific hook type from rawHooks into the target slice.

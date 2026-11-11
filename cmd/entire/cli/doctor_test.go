@@ -1275,6 +1275,10 @@ func stubAgyOnPath(t *testing.T) {
 	t.Helper()
 	binDir := t.TempDir()
 	stub := filepath.Join(binDir, "agy")
+	if runtime.GOOS == "windows" {
+		// exec.LookPath on Windows finds only names with a PATHEXT extension.
+		stub += ".bat"
+	}
 	require.NoError(t, os.WriteFile(stub, []byte("#!/bin/sh\nexit 0\n"), 0o755))
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
@@ -1357,6 +1361,35 @@ func TestCheckAntigravityTitleTee_WarnsWhenNotConfigured(t *testing.T) {
 	require.Contains(t, out, "Antigravity title-tee: NOT CONFIGURED")
 	require.Contains(t, out, "token counts")
 	require.Contains(t, out, "entire agent add antigravity")
+}
+
+// TestCheckAntigravityTitleTee_WindowsWarnsWhenOutdated reports a title tee
+// an earlier version wrote on Windows, which still looks for `entire` in the
+// folder agy was opened in, and names the reinstall that rewrites it.
+func TestCheckAntigravityTitleTee_WindowsWarnsWhenOutdated(t *testing.T) {
+	t.Cleanup(agent.SetWindowsHookProbeForTesting("windows", nil))
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	stubAgyOnPath(t)
+
+	agentsDir := filepath.Join(dir, ".agents")
+	require.NoError(t, os.MkdirAll(agentsDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(agentsDir, "hooks.json"),
+		[]byte(antigravityHooksJSON()), 0o600))
+
+	cfgDir := filepath.Join(t.TempDir(), "agy")
+	require.NoError(t, os.MkdirAll(cfgDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(cfgDir, "settings.json"),
+		[]byte(`{"title":{"type":"command","command":"entire hooks antigravity title-tee"}}`), 0o600))
+	t.Setenv("ENTIRE_ANTIGRAVITY_CONFIG_DIR", cfgDir)
+
+	cmd, stdout := newTestCmd(t)
+	checkAntigravityTitleTee(cmd)
+
+	out := stdout.String()
+	require.Contains(t, out, "Antigravity title-tee: OUT OF DATE")
+	require.Contains(t, out, "entire agent add antigravity")
+	require.NotContains(t, out, "✓ Antigravity title-tee: OK")
 }
 
 // TestConfirmDoctorFix_CancelledContext verifies that a cancelled command

@@ -18,6 +18,7 @@ var (
 	_ agent.HookSupport           = (*FactoryAIDroidAgent)(nil)
 	_ agent.HookConfigLocator     = (*FactoryAIDroidAgent)(nil)
 	_ agent.PermissionConfigOwner = (*FactoryAIDroidAgent)(nil)
+	_ agent.HookFreshness         = (*FactoryAIDroidAgent)(nil)
 )
 
 // Factory AI Droid hook names - these become subcommands under `entire hooks factoryai-droid`
@@ -222,11 +223,11 @@ func (f *FactoryAIDroidAgent) InstallHooks(ctx context.Context, force bool) (int
 		userPromptSubmit = addHookToMatcher(userPromptSubmit, "", userPromptSubmitCmd)
 		count++
 	}
-	if !hookCommandExistsWithMatcher(preToolUse, "Task", preTaskCmd) {
+	if !taskHookCommandExists(preToolUse, preTaskCmd) {
 		preToolUse = addHookToMatcher(preToolUse, "Task", preTaskCmd)
 		count++
 	}
-	if !hookCommandExistsWithMatcher(postToolUse, "Task", postTaskCmd) {
+	if !taskHookCommandExists(postToolUse, postTaskCmd) {
 		postToolUse = addHookToMatcher(postToolUse, "Task", postTaskCmd)
 		count++
 	}
@@ -453,6 +454,62 @@ func (f *FactoryAIDroidAgent) AreHooksInstalled(ctx context.Context) (bool, erro
 	return hasEntireHook(settings.Hooks.Stop), nil
 }
 
+// CheckHookConfig implements agent.HookFreshness: outdated when any Entire hook
+// in .factory/settings.json differs from the command InstallHooks writes on
+// this host, or one is missing. That includes a Windows wrapper written before
+// hooks resolved programs from PATH only, which keeps working but still
+// searches the folder Droid was opened in. An absent, unreadable or malformed
+// file, or one with no Entire Stop hook (AreHooksInstalled's test), reads as
+// absent.
+func (f *FactoryAIDroidAgent) CheckHookConfig(ctx context.Context) agent.HookConfigState {
+	cfg, err := factoryHookConfig(ctx)
+	if err != nil {
+		return agent.HooksAbsent
+	}
+	data, err := cfg.Read()
+	if err != nil {
+		return agent.HooksAbsent
+	}
+	var settings FactorySettings
+	if json.Unmarshal(data, &settings) != nil || !hasEntireHook(settings.Hooks.Stop) {
+		return agent.HooksAbsent
+	}
+
+	windows := agent.HookHostIsWindows()
+	userPromptSubmitCmd := silentHookCommand(HookNameUserPromptSubmit, windows)
+	preTaskCmd := silentHookCommand(HookNamePreToolUse, windows)
+	postTaskCmd := silentHookCommand(HookNamePostToolUse, windows)
+	h := settings.Hooks
+	// The same want sets InstallHooks drops stale hooks against.
+	lists := []struct {
+		matchers []FactoryHookMatcher
+		want     []string
+	}{
+		{h.SessionStart, []string{silentHookCommand(HookNameSessionStart, windows), userPromptSubmitCmd}},
+		{h.SessionEnd, []string{silentHookCommand(HookNameSessionEnd, windows)}},
+		{h.Stop, []string{stopHookCommand(windows)}},
+		{h.UserPromptSubmit, []string{userPromptSubmitCmd}},
+		{h.PreToolUse, []string{preTaskCmd}},
+		{h.PostToolUse, []string{postTaskCmd}},
+		{h.PreCompact, []string{silentHookCommand(HookNamePreCompact, windows)}},
+	}
+	for _, l := range lists {
+		var entries []FactoryHookEntry
+		for _, m := range l.matchers {
+			entries = append(entries, m.Hooks...)
+		}
+		if _, current := agent.ManagedHookListState(entries, hookEntryCommand, l.want); !current {
+			return agent.HooksOutdated
+		}
+	}
+	// InstallHooks adds the task hooks under the "Task" matcher only.
+	if !taskHookCommandExists(h.PreToolUse, preTaskCmd) ||
+		!taskHookCommandExists(h.PostToolUse, postTaskCmd) {
+		return agent.HooksOutdated
+	}
+	return agent.HooksCurrent
+}
+
 // Helper functions for hook management
 
 func hookCommandExists(matchers []FactoryHookMatcher, command string) bool {
@@ -477,9 +534,11 @@ func hasEntireHook(matchers []FactoryHookMatcher) bool {
 	return false
 }
 
-func hookCommandExistsWithMatcher(matchers []FactoryHookMatcher, matcherName, command string) bool {
+// taskHookCommandExists reports whether command is installed under the "Task"
+// matcher, the only place InstallHooks puts the task hooks.
+func taskHookCommandExists(matchers []FactoryHookMatcher, command string) bool {
 	for _, matcher := range matchers {
-		if matcher.Matcher == matcherName {
+		if matcher.Matcher == "Task" {
 			for _, hook := range matcher.Hooks {
 				if hook.Command == command {
 					return true

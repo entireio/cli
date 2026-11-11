@@ -379,6 +379,8 @@ cmd.exe looks for a bare program name in its current directory before PATH unles
 
 The first program of a hook line is resolved by the agent's own hook shell before anything in the line runs, and Entire cannot control how that shell looks it up; Entire's wrappers control everything after it. For agent processes Entire starts itself, review runs, `review.AppendReviewEnv` also sets `NoDefaultCurrentDirectoryInExePath=1` in the agent's environment (`agent.AppendWindowsPathOnlyLookupEnv`). The agent's hook shell inherits it, so in those runs the first program resolves from PATH too, whichever shell runs the line.
 
+Hooks an earlier version installed keep their old command until the agent's hooks are reinstalled (`entire agent add <agent>` or `entire enable --agent <agent>`). Codex, Cursor, Factory Droid and Antigravity compare Entire's installed commands with the ones this host gets (Cursor and Droid through `agent.ManagedHookListState`), so `entire status` and `entire doctor` report a wrapper written without the PATH-only setting as out of date. `entire doctor` also reports an Antigravity title command that `InstallTitleTee` would still upgrade (`antigravity.TitleTeeOutdated`).
+
 **The auto-updater's `sh -c` is a considered exception, and it is enforced
 rather than asserted.** `versioncheck.realRunInstaller` (unix only) runs the
 update command through a shell, which the rule above would otherwise forbid. It

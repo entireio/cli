@@ -530,3 +530,30 @@ func TestSHHookWrapperProbe_DoesNotSearchWorkingDirectory(t *testing.T) {
 		t.Errorf("probe args = %q", got)
 	}
 }
+
+func TestManagedHookListState(t *testing.T) {
+	t.Parallel()
+
+	const hook = "entire hooks cursor stop"
+	current := WrapWindowsProductionSilentHookCommand(hook)
+	legacy := `cmd.exe /d /s /c "where.exe entire >nul 2>nul & if errorlevel 1 (ver>nul) else (entire hooks cursor stop)"`
+	const foreign = "my-hook"
+	id := func(s string) string { return s }
+	for _, tc := range []struct {
+		name           string
+		entries, want  []string
+		owned, current bool
+	}{
+		{"empty", nil, []string{current}, false, false},
+		{"foreign only", []string{foreign}, []string{current}, false, false},
+		{"current", []string{foreign, current}, []string{current}, true, true},
+		{"legacy", []string{legacy}, []string{current}, true, false},
+		{"legacy beside current", []string{legacy, current}, []string{current}, true, false},
+		{"one of two wanted missing", []string{current}, []string{current, WrapWindowsProductionSilentHookCommand("entire hooks cursor session-start")}, true, false},
+	} {
+		owned, cur := ManagedHookListState(tc.entries, id, tc.want)
+		if owned != tc.owned || cur != tc.current {
+			t.Errorf("%s: ManagedHookListState = (owned %v, current %v), want (%v, %v)", tc.name, owned, cur, tc.owned, tc.current)
+		}
+	}
+}

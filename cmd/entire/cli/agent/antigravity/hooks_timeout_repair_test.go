@@ -267,3 +267,40 @@ func TestCheckHookConfig_ReinstallAddsSessionStart(t *testing.T) {
 		t.Errorf("the user's own entry was lost: %s", data)
 	}
 }
+
+// TestCheckHookConfig_WindowsLegacyCommandIsOutdated pins that `entire status`
+// and `entire doctor` flag Antigravity hooks written on Windows before the
+// PATH-only setting, and that the reinstall they point to clears the warning.
+// The name carries "Windows" so the windows-latest CI job selects it.
+func TestCheckHookConfig_WindowsLegacyCommandIsOutdated(t *testing.T) {
+	// No t.Parallel — uses t.Chdir and the process-global hook-host override.
+	t.Cleanup(agent.SetWindowsHookProbeForTesting("windows", nil))
+	t.Setenv(configDirEnv, t.TempDir())
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	legacy := func(verb string) string {
+		return `where.exe entire >nul 2>nul & if errorlevel 1 (ver>nul) else (entire hooks antigravity ` + verb + `)`
+	}
+	cfg := buildEntireHookConfig()
+	cfg.SessionStart[0].Command = legacy("session-start")
+	cfg.PreToolUse[0].Hooks[0].Command = legacy("pre-tool-use")
+	cfg.PreInvocation[0].Command = legacy("pre-invocation")
+	cfg.Stop[0].Command = legacy("stop")
+	old, err := json.Marshal(map[string]HookConfig{"entire": cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeHooksJSON(t, tmpDir, string(old))
+
+	ag := &AntigravityAgent{}
+	if got := ag.CheckHookConfig(context.Background()); got != agent.HooksOutdated {
+		t.Fatalf("legacy Windows commands: CheckHookConfig = %v, want outdated", got)
+	}
+	if _, err := ag.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("InstallHooks: %v", err)
+	}
+	if got := ag.CheckHookConfig(context.Background()); got != agent.HooksCurrent {
+		t.Fatalf("after reinstall: CheckHookConfig = %v, want current", got)
+	}
+}

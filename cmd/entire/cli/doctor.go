@@ -67,7 +67,8 @@ Checks performed:
   For each installed agent that reports hook-config drift:
   5. Hook config: warn when the installed hooks no longer match what this
      CLI writes (e.g. an older release wrote Claude Code tool matchers that
-     no longer fire, or a committed Pi/OpenCode extension has gone stale).
+     no longer fire, a committed Pi/OpenCode extension has gone stale, or a
+     Windows hook was written before hooks resolved programs from PATH only).
      Fix by running 'entire agent add <agent>' (add --force if that does
      not fix it).
 
@@ -1784,13 +1785,21 @@ func antigravityDoctorSubject(cmd *cobra.Command) (*antigravity.AntigravityAgent
 
 // checkAntigravityTitleTee warns when Antigravity hooks are installed in this
 // repo but agy's global title slot — agy's only token-usage surface — is not
-// routed through Entire, which leaves token counts missing from checkpoints.
-// Warn-only.
+// routed through Entire, which leaves token counts missing from checkpoints,
+// and when it is routed through a Windows tee an earlier version wrote, which
+// still looks for `entire` in the folder agy was opened in. Warn-only.
 func checkAntigravityTitleTee(cmd *cobra.Command) {
 	if _, ok := antigravityDoctorSubject(cmd); !ok {
 		return
 	}
 	w := cmd.OutOrStdout()
+	if antigravity.TitleTeeOutdated() {
+		fmt.Fprintln(w, "Antigravity title-tee: OUT OF DATE")
+		fmt.Fprintln(w, "  agy's title command was written by an earlier version and runs in every")
+		fmt.Fprintln(w, "  folder agy opens, looking for `entire` in that folder before PATH.")
+		fmt.Fprintln(w, "  Run `entire agent add antigravity` to update it.")
+		return
+	}
 	if antigravity.TitleTeeInstalled() {
 		fmt.Fprintln(w, "✓ Antigravity title-tee: OK")
 		return

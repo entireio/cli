@@ -263,6 +263,28 @@ func TitleTeeInstalled() bool {
 	return strings.Contains(existing.Command, titleTeeMarker)
 }
 
+// TitleTeeOutdated reports whether agy's global title command is a tee that
+// InstallTitleTee would rewrite: on Windows, one written by an earlier version
+// without agent.WindowsPathOnlyLookupPrefix, which still searches the folder
+// agy was opened in for `entire`. It is used by `entire doctor`. A missing or
+// unparseable settings file, a foreign command and a current tee report false.
+func TitleTeeOutdated() bool {
+	rawFile, err := readAgySettings()
+	if err != nil {
+		return false
+	}
+	raw, ok := rawFile["title"]
+	if !ok {
+		return false
+	}
+	var existing titleConfig
+	if err := json.Unmarshal(raw, &existing); err != nil {
+		return false
+	}
+	_, outdated := upgradedTitleTeeCommand(existing.Command)
+	return outdated
+}
+
 // UninstallTitleTee removes or restores the title entry in agy's global settings.json:
 //   - bare tee (no --wrap)      → delete "title" key
 //   - tee with --wrap 'X'       → restore X

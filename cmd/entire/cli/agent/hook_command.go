@@ -429,6 +429,32 @@ func DropStaleManagedHooks[E any](entries []E, commandOf func(E) string, want []
 	return kept, true
 }
 
+// ManagedHookListState is the read-only counterpart of DropStaleManagedHooks,
+// for HookFreshness implementations. owned reports whether entries hold any
+// command Entire wrote. current reports whether an install would leave them
+// alone: every Entire command in entries is in want, and every command in want
+// is present. A hook list an older version wrote, such as a Windows wrapper
+// from before the PATH-only setting, is owned but not current.
+func ManagedHookListState[E any](entries []E, commandOf func(E) string, want []string) (owned, current bool) {
+	current = true
+	for _, entry := range entries {
+		cmd := commandOf(entry)
+		if !IsManagedHookCommand(cmd) {
+			continue
+		}
+		owned = true
+		if !slices.Contains(want, cmd) {
+			current = false
+		}
+	}
+	for _, w := range want {
+		if !slices.ContainsFunc(entries, func(e E) bool { return commandOf(e) == w }) {
+			current = false
+		}
+	}
+	return owned, current
+}
+
 // IsManagedHookCommand reports whether command is one Entire wrote: the current
 // form or any shape an older version wrote, either bare or inside one of Entire's
 // production wrapper forms.
