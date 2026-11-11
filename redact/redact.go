@@ -2124,7 +2124,7 @@ func walkRedactableStrings(v any, transform func(key, spliceKey string, credenti
 			}
 			return out, true
 		case string:
-			if skipStrings || (isInlineImageDataURI(val) && !isCredentialJSONSecretKey(key, credentialContext)) {
+			if skipLeaf(skipStrings, key, credentialContext, val) {
 				return v, false
 			}
 			redacted := transform(key, spliceKey, credentialContext, val)
@@ -2539,6 +2539,12 @@ func shouldSkipJSONLField(key string) bool {
 func shouldSkipJSONLObject(obj map[string]any) bool {
 	t, ok := obj["type"].(string)
 	return ok && (strings.HasPrefix(t, "image") || t == "base64")
+}
+
+// skipLeaf reports whether a string leaf is left unscanned: under a skip key,
+// or a whole-string inline image outside a credential key.
+func skipLeaf(skipStrings bool, key string, credentialContext bool, val string) bool {
+	return skipStrings || (isInlineImageDataURI(val) && !isCredentialJSONSecretKey(key, credentialContext))
 }
 
 // isInlineImageDataURI reports whether s is, in its entirety, a base64 image
