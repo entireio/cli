@@ -2686,13 +2686,17 @@ func unkeyedSecretKeys(repls []jsonReplacement) map[string]string {
 // renameJSONObjectKeys returns v with object keys renamed according to keys,
 // recursively, copy-on-write. Two keys that rename to the same string keep
 // one, as a map must. changed reports whether any key was renamed, so
-// callers do not compare maps or slices with ==.
-func renameJSONObjectKeys(v any, keys map[string]string) (any, bool) {
+// callers do not compare maps or slices with ==. added is how many
+// placeholders the new keys added over the keys they replaced, so the
+// fallback can count them.
+func renameJSONObjectKeys(v any, keys map[string]string) (any, bool, int) {
 	switch val := v.(type) {
 	case map[string]any:
 		var out map[string]any
+		added := 0
 		for k, child := range val {
-			newChild, childChanged := renameJSONObjectKeys(child, keys)
+			newChild, childChanged, childAdded := renameJSONObjectKeys(child, keys)
+			added += childAdded
 			newKey := k
 			if r, ok := keys[k]; ok {
 				newKey = r
@@ -2705,17 +2709,20 @@ func renameJSONObjectKeys(v any, keys map[string]string) (any, bool) {
 			}
 			if newKey != k {
 				delete(out, k)
+				added += strings.Count(newKey, RedactedPlaceholder) - strings.Count(k, RedactedPlaceholder)
 			}
 			out[newKey] = newChild
 		}
 		if out == nil {
-			return v, false
+			return v, false, 0
 		}
-		return out, true
+		return out, true, added
 	case []any:
 		var out []any
+		added := 0
 		for i, child := range val {
-			newChild, childChanged := renameJSONObjectKeys(child, keys)
+			newChild, childChanged, childAdded := renameJSONObjectKeys(child, keys)
+			added += childAdded
 			if !childChanged {
 				continue
 			}
@@ -2726,11 +2733,11 @@ func renameJSONObjectKeys(v any, keys map[string]string) (any, bool) {
 			out[i] = newChild
 		}
 		if out == nil {
-			return v, false
+			return v, false, added
 		}
-		return out, true
+		return out, true, added
 	default:
-		return v, false
+		return v, false, 0
 	}
 }
 
@@ -2747,7 +2754,9 @@ func reencodeRedactedApplyingKeys(content string, redactor leafRedactor, renamed
 		return redactLeafValue(key, credentialContext, val, argvRegions[val], redactor)
 	})
 	if len(renamedKeys) > 0 {
-		redactedTree, _ = renameJSONObjectKeys(redactedTree, renamedKeys)
+		var added int
+		redactedTree, _, added = renameJSONObjectKeys(redactedTree, renamedKeys)
+		redactor.addReplacements(added)
 	}
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)

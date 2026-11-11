@@ -166,6 +166,9 @@ func TestJSONLBytes_SelfDetectedArgvPasswordDoesNotRewriteSkippedFields(t *testi
 				require.False(t, hasTok, content)
 				_, hasRedacted := tokens["REDACTED"]
 				require.True(t, hasRedacted, content)
+				stored := strings.Count(content, RedactedPlaceholder)
+				require.NotNil(t, got.Counts())
+				require.Equal(t, stored, got.Counts().Replacements, content)
 			}
 		})
 	}
