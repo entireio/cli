@@ -3,6 +3,7 @@
 package strategy
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -34,4 +35,34 @@ func TestCheckGitHookState_FIFOBackupDoesNotHang(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("gitHookStateInHooksDir hung on a FIFO backup")
 	}
+}
+
+// The chain's grep for Trunk's callback must not open a FIFO left as a
+// backup: an executable FIFO passes [ -x ], and grep would block on it until
+// a writer appeared, hanging every commit or push. The chain only greps a
+// regular file, so this backup is executed as before (and fails on its own).
+func TestChainedHook_FIFOBackupDoesNotHang(t *testing.T) {
+	t.Parallel()
+	f := newHooksFixture(t)
+	bin := t.TempDir()
+	writeExec(t, filepath.Join(bin, "entire"), "#!/bin/sh\n")
+	f.write("post-commit", "#!/bin/sh\n")
+	f.installExecutable(specFor(t, "post-commit"))
+	backup := filepath.Join(f.dir, "post-commit"+backupSuffix)
+	if err := os.Remove(backup); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(backup, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(backup, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	out, err := runHook(ctx, bin, filepath.Join(f.dir, "post-commit"))
+	if ctx.Err() != nil {
+		t.Fatalf("post-commit hung on a FIFO backup:\n%s", out)
+	}
+	t.Logf("post-commit with a FIFO backup: err=%v\n%s", err, out)
 }

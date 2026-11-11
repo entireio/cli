@@ -1261,7 +1261,9 @@ func generateChainedContent(baseContent, hookName string) string {
 // git command run by the chained hook does not chain that same hook again.
 //
 // A backup that is Trunk's launcher is sourced rather than executed; see
-// trunkHookCallback.
+// trunkHookCallback. Only a regular file (or a link to one) is grepped for
+// it: an executable FIFO passes [ -x ], and grep would block on it until a
+// writer appeared, hanging the commit or push.
 func chainCall(hookName, redirect string) string {
 	backup := hookName + backupSuffix
 	keep := hookName + keepSuffix
@@ -1276,7 +1278,7 @@ if [ -z "${%s:-}" ]; then
             "$_entire_hook_dir/%s" "$@"%s
         fi
     elif [ -x "$_entire_hook_dir/%s" ]; then
-        if grep -qxF %s "$_entire_hook_dir/%s" 2>/dev/null; then
+        if [ -f "$_entire_hook_dir/%s" ] && grep -qxF %s "$_entire_hook_dir/%s" 2>/dev/null; then
             /bin/bash --norc -c '_entire_saved_hook=$1; shift; . "$_entire_saved_hook"' "$_entire_hook_dir/%s" "$_entire_hook_dir/%s" "$@"%s
         else
             "$_entire_hook_dir/%s" "$@"%s
@@ -1284,7 +1286,7 @@ if [ -z "${%s:-}" ]; then
     fi
 fi
 `, chainComment, guard, guard, guard, preCommitSignatures[0], backup, keep, keep, redirect,
-		backup, shellQuote(trunkHookCallback), backup, hookName, backup, redirect, backup, redirect)
+		backup, backup, shellQuote(trunkHookCallback), backup, hookName, backup, redirect, backup, redirect)
 }
 
 // trunkHookCallback is the last line of the launcher Trunk writes for every git
