@@ -126,8 +126,10 @@ func (c statusClaim) withoutUnchangedDirty(files []string) []string {
 // matched as its directory resolves. A name that is itself a symlink to a
 // file git status lists (AGENTS.md -> CLAUDE.md) matches that file, also when
 // the link spells it in another case or form that opens the same file, unless
-// git status lists the link too: a new or retargeted link is the session's
-// change, and the file it leads to may be another session's.
+// git status lists the link too, under the name's own spelling, as its
+// directory resolves, or in another case that opens the same link: a new or
+// retargeted link is the session's change, and the file it leads to may be
+// another session's.
 type namedFiles struct {
 	repoRoot string
 	exact    map[string]struct{}
@@ -137,11 +139,13 @@ type namedFiles struct {
 	// cases asks the worktree's directories about case, only for a
 	// deletion named in another case.
 	cases *worktreedir.CaseProbe
-	// ignoresNormalization reports whether the worktree's filesystem takes
-	// names in different Unicode normalization forms as one, as macOS's
-	// APFS and HFS+ do (worktreedir.IgnoresNormalization). Only a deletion,
-	// which leaves no file to compare, asks, and only once.
-	ignoresNormalization func() bool
+	// ignoresNormalization reports whether the filesystem holding a name
+	// takes names in different Unicode normalization forms as one, as
+	// macOS's APFS and HFS+ do (worktreedir.IgnoresNormalization). A
+	// worktree can hold mounts of other filesystems, so it is asked for each
+	// name's directory. Only a deletion, which leaves no file to compare,
+	// asks.
+	ignoresNormalization func(name string) bool
 }
 
 // newNamedFiles matches named against the files git status lists.
@@ -153,15 +157,13 @@ func newNamedFiles(repoRoot string, named []string, listed ...[]string) namedFil
 		}
 	}
 	n := namedFiles{
-		repoRoot: repoRoot,
-		exact:    make(map[string]struct{}, len(named)),
-		folded:   make(map[string][]string),
-		cases:    worktreedir.NewCaseProbe(repoRoot),
-		ignoresNormalization: sync.OnceValue(func() bool {
-			root, err := worktreedir.OpenAt(repoRoot)
-			return err == nil && worktreedir.IgnoresNormalization(root)
-		}),
+		repoRoot:             repoRoot,
+		exact:                make(map[string]struct{}, len(named)),
+		folded:               make(map[string][]string),
+		cases:                worktreedir.NewCaseProbe(repoRoot),
+		ignoresNormalization: normalizationProbe(repoRoot),
 	}
+	links := listedLinks{repoRoot: repoRoot, inStatus: inStatus}
 	resolved := make(map[string]string)
 	for _, f := range named {
 		f = withoutDotComponents(f)
@@ -174,13 +176,66 @@ func newNamedFiles(repoRoot string, named []string, listed ...[]string) namedFil
 			// that change: whether the session also wrote through it, or
 			// another session wrote the file it now leads to, the name
 			// cannot tell.
-			if target, ok := linkTarget(repoRoot, f); ok {
+			if target, ok := linkTarget(repoRoot, f); ok && !links.lists(f) {
 				n.add(target, inStatus)
 			}
 		}
 		n.add(f, inStatus)
 	}
 	return n
+}
+
+// normalizationProbe returns worktreedir.IgnoresNormalization for names in
+// repoRoot's worktree, which it opens on the first ask, keeping each
+// directory's answer.
+func normalizationProbe(repoRoot string) func(name string) bool {
+	openRoot := sync.OnceValues(func() (*os.Root, error) { return worktreedir.OpenAt(repoRoot) })
+	answers := make(map[string]bool)
+	return func(name string) bool {
+		dir := path.Dir(name)
+		if answer, ok := answers[dir]; ok {
+			return answer
+		}
+		root, err := openRoot()
+		answer := err == nil && worktreedir.IgnoresNormalization(root, name)
+		answers[dir] = answer
+		return answer
+	}
+}
+
+// listedLinks tells whether git status lists a link a transcript names.
+type listedLinks struct {
+	repoRoot string
+	inStatus map[string]struct{}
+	// folded maps the caseFoldKey of each file git status lists to its
+	// names, built on the first ask.
+	folded map[string][]string
+}
+
+// lists reports whether git status lists link, in its own spelling or in
+// another case or form that opens the same link, as macOS's and Windows'
+// filesystems take agents.md for a listed AGENTS.md.
+func (l *listedLinks) lists(link string) bool {
+	if _, ok := l.inStatus[link]; ok {
+		return true
+	}
+	if l.folded == nil {
+		l.folded = make(map[string][]string, len(l.inStatus))
+		for f := range l.inStatus {
+			key := caseFoldKey(f)
+			l.folded[key] = append(l.folded[key], f)
+		}
+	}
+	named, err := lstatWorktreeFile(l.repoRoot, link)
+	if err != nil {
+		return false
+	}
+	for _, f := range l.folded[caseFoldKey(link)] {
+		if listed, err := lstatWorktreeFile(l.repoRoot, f); err == nil && os.SameFile(named, listed) {
+			return true
+		}
+	}
+	return false
 }
 
 // add records name as exact when git status lists it, where a lookup
@@ -449,11 +504,13 @@ func (n namedFiles) deletedInOtherCase(file string, spellings []string) bool {
 }
 
 // sameDeletedEntry is CaseProbe.SameEntry, with names that differ in Unicode
-// normalization taken as one where the filesystem ignores normalization.
+// normalization taken as one where the filesystem holding both ignores
+// normalization.
 func (n namedFiles) sameDeletedEntry(file, spelling string) bool {
 	compared, comparedSpelling := file, spelling
 	// The filesystem is asked only when a name is not composed already.
-	if composedFile, composedSpelling := norm.NFC.String(file), norm.NFC.String(spelling); (composedFile != file || composedSpelling != spelling) && n.ignoresNormalization() {
+	composedFile, composedSpelling := norm.NFC.String(file), norm.NFC.String(spelling)
+	if (composedFile != file || composedSpelling != spelling) && n.ignoresNormalization(file) && n.ignoresNormalization(spelling) {
 		compared, comparedSpelling = composedFile, composedSpelling
 	}
 	return n.cases.SameEntry(compared, comparedSpelling)

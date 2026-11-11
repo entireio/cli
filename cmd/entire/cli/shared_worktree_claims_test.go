@@ -2,7 +2,9 @@ package cli
 
 import (
 	"context"
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -320,6 +322,47 @@ func TestNamedFiles_ListedLinkClaimsOnlyItself(t *testing.T) {
 	require.Equal(t, []string{"AGENTS.md"}, newNamedFiles(dir, []string{"AGENTS.md"}, modified).only(modified))
 }
 
+// TestNamedFiles_ListedLinkThroughDirectoryLink: the transcript names
+// alias/AGENTS.md for alias -> real, and git status lists the link it
+// resolves to, real/AGENTS.md -> CLAUDE.md, beside real/CLAUDE.md. The link
+// is listed as its directory resolves, so it claims only itself.
+func TestNamedFiles_ListedLinkThroughDirectoryLink(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	forgetSharedRoot(t, dir)
+	testutil.WriteFile(t, dir, "real/CLAUDE.md", "edited by another session\n")
+	if err := os.Symlink("CLAUDE.md", filepath.Join(dir, "real", "AGENTS.md")); err != nil {
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
+	require.NoError(t, os.Symlink("real", filepath.Join(dir, "alias")))
+	modified := []string{"real/AGENTS.md", "real/CLAUDE.md"}
+	require.Equal(t, []string{"real/AGENTS.md"}, newNamedFiles(dir, []string{"alias/AGENTS.md"}, modified).only(modified))
+}
+
+// TestNamedFiles_ListedLinkInOtherCase: on a case-insensitive filesystem
+// the transcript's agents.md is git's listed AGENTS.md -> CLAUDE.md, so it
+// claims only the link. A hard link to the symlink stands in for such a
+// filesystem here.
+func TestNamedFiles_ListedLinkInOtherCase(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	forgetSharedRoot(t, dir)
+	testutil.WriteFile(t, dir, "CLAUDE.md", "edited by another session\n")
+	if err := os.Symlink("CLAUDE.md", filepath.Join(dir, "AGENTS.md")); err != nil {
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "agents.md")); err != nil {
+		if err := os.Link(filepath.Join(dir, "AGENTS.md"), filepath.Join(dir, "agents.md")); err != nil {
+			t.Skipf("cannot create a hard link here: %v", err)
+		}
+	}
+	if info, err := os.Lstat(filepath.Join(dir, "agents.md")); err != nil || info.Mode()&fs.ModeSymlink == 0 {
+		t.Skip("a hard link here does not keep the symlink")
+	}
+	modified := []string{"AGENTS.md", "CLAUDE.md"}
+	require.Equal(t, []string{"AGENTS.md"}, newNamedFiles(dir, []string{"agents.md"}, modified).only(modified))
+}
+
 // TestNamedFiles_DeletedInOtherNormalizationForm: a deletion named
 // decomposed (cafe\u0301.txt) matches git's composed caf\u00e9.txt only
 // where the filesystem ignores normalization, as APFS and HFS+ do; nothing is
@@ -331,12 +374,19 @@ func TestNamedFiles_DeletedInOtherNormalizationForm(t *testing.T) {
 	deleted := []string{"caf\u00e9.txt"}
 	n := newNamedFiles(dir, []string{"cafe\u0301.txt"}, deleted)
 	if runtime.GOOS != "darwin" {
-		require.False(t, n.ignoresNormalization(), "only APFS and HFS+ are known to ignore normalization")
+		require.False(t, n.ignoresNormalization(deleted[0]), "only APFS and HFS+ are known to ignore normalization")
 	}
-	n.ignoresNormalization = func() bool { return false }
+	n.ignoresNormalization = func(string) bool { return false }
 	require.Empty(t, n.only(deleted), "two names for two files")
-	n.ignoresNormalization = func() bool { return true }
+	n.ignoresNormalization = func(string) bool { return true }
 	require.Equal(t, deleted, n.only(deleted))
+
+	// A worktree on APFS can hold a mount that keeps the forms apart: each
+	// name's own directory is asked.
+	deleted = []string{"mnt/caf\u00e9.txt"}
+	n = newNamedFiles(dir, []string{"mnt/cafe\u0301.txt"}, deleted)
+	n.ignoresNormalization = func(name string) bool { return path.Dir(name) != "mnt" }
+	require.Empty(t, n.only(deleted), "a directory that keeps the forms apart")
 }
 
 // TestNamedFiles_OtherNormalizationForm covers a transcript that spells a
