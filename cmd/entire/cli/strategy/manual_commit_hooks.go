@@ -1813,7 +1813,7 @@ func (s *ManualCommitStrategy) collectCommittedFileClaims(ctx context.Context, s
 		if state.FullyCondensed && state.Phase == session.PhaseEnded {
 			continue
 		}
-		for _, f := range state.FilesTouched {
+		for _, f := range spelledAsCommitted(sessionWorktreeRoot(ctx, state), state.FilesTouched, committedFileSet) {
 			if _, ok := committedFileSet[f]; ok {
 				claimants++
 				break // count each session at most once
@@ -1852,7 +1852,8 @@ func (s *ManualCommitStrategy) hasLiveTranscriptClaimant(ctx context.Context, se
 			continue
 		}
 		prepareTranscriptForState(ctx, state)
-		for _, f := range s.extractModifiedFilesFromLiveTranscript(ctx, state, uncheckpointedTranscriptStart(state)) {
+		edited := s.extractModifiedFilesFromLiveTranscript(ctx, state, uncheckpointedTranscriptStart(state))
+		for _, f := range spelledAsCommitted(sessionWorktreeRoot(ctx, state), edited, committedFileSet) {
 			if _, ok := committedFileSet[f]; ok {
 				return true
 			}
@@ -1920,14 +1921,14 @@ func (s *ManualCommitStrategy) postCommitFilesTouchedBefore(ctx context.Context,
 	return nil
 }
 
-// overlapSpelledAsCommitted returns files, the session's files before this
-// commit, and hashes, its recorded hashes, for the overlap gate: each file the
-// commit holds in another case spelled as the commit spells it
+// overlapSpelledAsCommitted returns files, a session's files, and hashes, its
+// recorded hashes, for an overlap check against a commit's files: each file
+// the commit holds in another case spelled as the commit spells it
 // (spelledAsCommitted), its hash under that spelling too. PrepareCommitMsg
-// matched a session that no turn end recorded so, and the gate must see the
-// same files, or its trailer would have no checkpoint. Carry-forward keeps
-// the recorded spellings: after a staged rename of README.md to readme.md, a
-// commit of README.md leaves the rename staged, still the session's to commit.
+// and PostCommit's overlap gate must see the same files, or a trailer would
+// have no checkpoint. Carry-forward keeps the recorded spellings: after a
+// staged rename of README.md to readme.md, a commit of README.md leaves the
+// rename staged, still the session's to commit.
 func overlapSpelledAsCommitted(repoRoot string, files []string, hashes map[string]string, committedFileSet map[string]struct{}) ([]string, map[string]string) {
 	spelled := spelledAsCommitted(repoRoot, files, committedFileSet)
 	if slices.Equal(spelled, files) {
@@ -1948,6 +1949,15 @@ func overlapSpelledAsCommitted(repoRoot string, files []string, hashes map[strin
 		}
 	}
 	return overlapFiles, overlapHashes
+}
+
+// stagedOverlap is stagedFilesOverlapWithContent for state's files and
+// hashes, spelled as the staged files spell them (overlapSpelledAsCommitted):
+// a turn end recorded the index's spelling at the time, and a case-only
+// rename staged since can spell the commit otherwise.
+func stagedOverlap(ctx context.Context, repo *git.Repository, state *SessionState, stagedFiles []string) bool {
+	files, hashes := overlapSpelledAsCommitted(sessionWorktreeRoot(ctx, state), state.FilesTouched, state.TouchedFileHashes, fileSet(stagedFiles))
+	return stagedFilesOverlapWithContent(ctx, repo, hashes, stagedFiles, files)
 }
 
 // postCommitProcessSessionLocked handles a single session within the PostCommit loop.
@@ -1981,7 +1991,7 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 	foreign bool,
 ) (newSkillEvents []agent.SkillEvent, condensedSignal *commitCondensedSignal, condensed bool) {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
-	if state.LinkedByWorktreeEntry && !overlapsFiles(state.FilesTouched, committedFileSet) {
+	if state.LinkedByWorktreeEntry && !overlapsFiles(spelledAsCommitted(sessionWorktreeRoot(ctx, state), state.FilesTouched, committedFileSet), committedFileSet) {
 		// Linked only by its record of this worktree, and the commit holds
 		// none of those files: not this session's commit.
 		return newSkillEvents, condensedSignal, false
@@ -2420,7 +2430,7 @@ func (s *ManualCommitStrategy) filterSessionsWithNewContent(ctx context.Context,
 			)
 			continue
 		}
-		if state.LinkedByWorktreeEntry && !overlapsFiles(state.FilesTouched, fileSet(stagedFiles)) {
+		if staged := fileSet(stagedFiles); state.LinkedByWorktreeEntry && !overlapsFiles(spelledAsCommitted(sessionWorktreeRoot(ctx, state), state.FilesTouched, staged), staged) {
 			logging.Debug(logCtx, "filterSessionsWithNewContent: linked by its record of this worktree, but none of those files is staged",
 				slog.String("session_id", state.SessionID),
 			)
@@ -2562,7 +2572,7 @@ func (s *ManualCommitStrategy) sessionHasNewContent(ctx context.Context, repo *g
 		// matching content (content-aware check).
 		if len(opts.stagedFiles) > 0 {
 			// PrepareCommitMsg context: check staged files overlap with content
-			result := stagedFilesOverlapWithContent(ctx, repo, state.TouchedFileHashes, opts.stagedFiles, state.FilesTouched)
+			result := stagedOverlap(ctx, repo, state, opts.stagedFiles)
 			logging.Debug(logCtx, "sessionHasNewContent: no transcript, carry-forward with staged files",
 				slog.String("session_id", state.SessionID),
 				slog.Int("files_touched", len(state.FilesTouched)),
@@ -2622,7 +2632,7 @@ func (s *ManualCommitStrategy) sessionHasNewContent(ctx context.Context, repo *g
 	// Check if staged files overlap with session's files with content-aware matching.
 	// This is primarily for PrepareCommitMsg; in PostCommit, stagedFiles is nil/empty.
 	if len(opts.stagedFiles) > 0 {
-		result := stagedFilesOverlapWithContent(ctx, repo, state.TouchedFileHashes, opts.stagedFiles, state.FilesTouched)
+		result := stagedOverlap(ctx, repo, state, opts.stagedFiles)
 		logging.Debug(logCtx, "sessionHasNewContent: staged files overlap check",
 			slog.String("session_id", state.SessionID),
 			slog.Int("staged_files", len(opts.stagedFiles)),

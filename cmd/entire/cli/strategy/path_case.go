@@ -67,8 +67,22 @@ func commitTrackedSpellings(ctx context.Context, repoRoot string, files []string
 // commits README.md. Matching the commit's own paths rather than an index
 // gives PrepareCommitMsg and PostCommit, which see different indexes, the
 // same answer.
+//
+// It asks the filesystem only when the commit holds a file in another case
+// than one of files, so an ordinary commit pays a map lookup per file.
 func spelledAsCommitted(repoRoot string, files []string, commitFiles map[string]struct{}) []string {
 	if repoRoot == "" || len(files) == 0 || len(commitFiles) == 0 {
+		return files
+	}
+	committed := make(map[string][]string, len(commitFiles))
+	for file := range commitFiles {
+		key := strings.ToLower(file)
+		committed[key] = append(committed[key], file)
+	}
+	if !slices.ContainsFunc(files, func(file string) bool {
+		_, exact := commitFiles[file]
+		return !exact && len(committed[strings.ToLower(file)]) > 0
+	}) {
 		return files
 	}
 	worktree, err := worktreedir.OpenAt(repoRoot)
@@ -78,11 +92,6 @@ func spelledAsCommitted(repoRoot string, files []string, commitFiles map[string]
 	cases := worktreedir.NewCaseProbe(repoRoot)
 	if !anyDirectoryIgnoresCase(cases, files) {
 		return files
-	}
-	committed := make(map[string][]string, len(commitFiles))
-	for file := range commitFiles {
-		key := strings.ToLower(file)
-		committed[key] = append(committed[key], file)
 	}
 	spelled := make([]string, 0, len(files))
 	for _, file := range files {

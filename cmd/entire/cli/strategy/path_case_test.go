@@ -9,8 +9,10 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 
@@ -229,6 +231,33 @@ func TestOverlapSpelledAsCommittedWindows(t *testing.T) {
 	}
 	require.Equal(t, []string{"readme.md", "src/App.go"}, recorded, "the recorded files, which carry-forward uses, are unchanged")
 	require.Equal(t, map[string]string{"readme.md": "abc"}, recordedHashes, "and so are their hashes")
+}
+
+// TestOverlapChecksSpellAsTheCommitWindows: a turn end recorded the
+// session's file as the index spelled it then, readme.md, and a case-only
+// rename staged since has the commit spell it README.md. PrepareCommitMsg's
+// check of a turn-recorded session against the staged files, and
+// PostCommit's count of the sessions that claim the commit, must find the
+// session's file in it, as the overlap gate does. CI's Windows job runs it by
+// its name.
+func TestOverlapChecksSpellAsTheCommitWindows(t *testing.T) {
+	t.Parallel()
+	dir, _ := trackedCaseRepo(t)
+	repo, err := gitrepo.OpenPath(dir)
+	require.NoError(t, err)
+	state := &SessionState{
+		SessionID: "spelled-claims", WorktreePath: dir, Phase: session.PhaseIdle,
+		FilesTouched: []string{"readme.md"}, TouchedFileHashes: map[string]string{"readme.md": "abc"},
+	}
+	ignoresCase := worktreedir.NewCaseProbe(dir).IgnoresCase(".")
+	require.Equal(t, ignoresCase, stagedOverlap(context.Background(), repo, state, []string{"README.md"}),
+		"the staged README.md is the session's readme.md where both open one file")
+	claimants := 0
+	if ignoresCase {
+		claimants = 1
+	}
+	s := &ManualCommitStrategy{}
+	require.Equal(t, claimants, s.collectCommittedFileClaims(context.Background(), []*SessionState{state}, fileSet([]string{"README.md"})))
 }
 
 // TestCarryForward_KeepsAStagedCaseRenameWindows: after a staged rename of
