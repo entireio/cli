@@ -788,7 +788,7 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string, noVal
 	scripts := commandStart{lenient: true}
 	var entrypoint entrypointArgs
 	var entrypointStarts commandStart
-	var long wrapperStarts
+	var long, operands wrapperStarts
 	// A segment cut at a ")" (ssh $(mysql -Nse 'x') -p2222) goes on after
 	// it, to uncutEnd, in a string that closes at uncutAt; a command there
 	// starts a segment that ends there too, which is not found again.
@@ -806,7 +806,7 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string, noVal
 		// an opening one: "/usr/bin/mysql" -p"x" or sh -c "mysql ...".
 		closeAt, stringEnd := lines.enclosing(cmd[0])
 		cmdFrom := lines.commandFrom(closeAt)
-		if isWrapperOperand(s, &long, lines.wordFrom(closeAt), cmd[0]) || closeAt >= 0 && isPrintedInScript(s, &lines, &scripts, cmd[0]) {
+		if isWrapperOperand(s, &long, lines.wordFrom(closeAt), cmd[0]) || closeAt >= 0 && isPrintedInScript(s, &lines, &scripts, cmd[0]) || isOperandOfCommand(s, &operands, cmdFrom, cmd[0]) {
 			continue
 		}
 		skip, skipEnd := commandCloseQuote(s, cmd, closeAt, stringEnd)
@@ -1851,6 +1851,11 @@ type commandWords struct {
 	// may be no subcommand.
 	noRun         bool
 	optionUnknown bool
+	// name is the program the command runs, after its wrappers, and
+	// operandRuns whether a word after it runs the words that follow
+	// (find -exec, go run).
+	name        string
+	operandRuns bool
 }
 
 // at reports whether a command name at p, in the argument of s whose text
@@ -2201,6 +2206,7 @@ func (c *commandStart) word(word string) {
 		// Words after "--" may be a command to run (kubectl ... -- mysql
 		// -pX), so they are no longer all operands.
 		c.noRun = c.noRun && word != "--"
+		c.operandRuns = c.operandRuns || runsOperands(c.name, unquotedWord(word))
 	case c.redirectArg:
 		c.redirectArg = false
 	case c.funcName:
@@ -2245,7 +2251,7 @@ func (c *commandStart) word(word string) {
 		switch sub := unquotedWord(word); {
 		case slices.Contains(containerRunSubcommands, sub):
 			c.sub = true
-			c.latestExec = c.wrapper == "podman" && sub == execCommand
+			c.latestExec = c.wrapper == podmanCommand && sub == execCommand
 		case slices.Contains(containerTextSubcommands, sub):
 			c.text, c.noRun = true, !c.optionUnknown
 		}
@@ -2267,6 +2273,9 @@ func (c *commandStart) word(word string) {
 		// argument, so only the name prints the rest (echo mysql -pX,
 		// not docker exec echo mysql -pX).
 		c.text = !c.lenient || !c.command && isPrintCommand(programName(word))
+		if !c.command {
+			c.name = programName(word)
+		}
 		c.command = true
 	}
 }
@@ -2392,7 +2401,7 @@ func isCommandWrapper(word string) bool {
 // (docker exec db mysql -pX, kubectl exec -it db -- mysql -pX).
 func isContainerClient(word string) bool {
 	switch word {
-	case "docker", "podman", "nerdctl", "kubectl":
+	case "docker", podmanCommand, "nerdctl", "kubectl":
 		return true
 	}
 	return false
@@ -2430,7 +2439,7 @@ func isShellKeyword(word string) bool {
 var (
 	wrapperArgOptions = map[string]string{
 		"sudo": "CDghpRrTtUu", envCommand: "CSu", "time": "fo", execCommand: "a", "sshpass": "dfPp", sshCommand: "BbcDEeFIiJLlmOoPpQRSWw",
-		"docker": containerArgOptions, "podman": containerArgOptions, "nerdctl": containerArgOptions, "kubectl": containerArgOptions,
+		"docker": containerArgOptions, podmanCommand: containerArgOptions, "nerdctl": containerArgOptions, "kubectl": containerArgOptions,
 	}
 	wrapperLongArgOptions = []string{
 		"chdir", "chroot", "close-from", "command-timeout", "format", "group", "host", "other-user", "output", "prompt", "role", "split-string", "type", "unset", "user",
@@ -4540,10 +4549,12 @@ const evalCommand = "eval"
 // execCommand and envCommand are the command wrappers exec and env; exec is
 // also the subcommand of a container client that runs a command, and
 // loginCommand the one that logs in to a registry (docker login -p).
+// podmanCommand is the container client whose exec takes --latest.
 const (
-	execCommand  = "exec"
-	envCommand   = "env"
-	loginCommand = "login"
+	execCommand   = "exec"
+	envCommand    = "env"
+	loginCommand  = "login"
+	podmanCommand = "podman"
 )
 
 // isWrapperOperand reports whether the client name at start is the
@@ -4606,6 +4617,43 @@ func wrapperWords(s string, long *wrapperStarts, from, start int) (commandWords,
 	return c.commandWords, true
 }
 
+// isOperandOfCommand reports whether the client name at start, in the
+// command that starts at from, is an operand of a program that runs none
+// of its operands, a path or a name it reads (find /etc/mysql -print,
+// go test ./mysql -parallel 8, tar -C /opt/mysql -pxzf a.tgz, nmap mysql
+// -p3306), so the flags after it are that program's. A client named first,
+// after wrappers, or in prose before any such program, is still read.
+func isOperandOfCommand(s string, starts *wrapperStarts, from, start int) bool {
+	word := start
+	for word > from && start-word < maxSSHCommand && !isShellWordEnd(s[word-1]) {
+		word--
+	}
+	if word <= from || s[word-1] != ' ' && s[word-1] != '\t' {
+		return false
+	}
+	c := starts.at(from)
+	c.at(s, from, word)
+	return c.text && !c.operandRuns && slices.Contains(operandCommands, c.name)
+}
+
+// runsOperands reports whether word, an argument of program, makes it run
+// the words after it: find's -exec family, or go run, which runs the
+// package it builds (go run ./cmd/mysql -ppw).
+func runsOperands(program, word string) bool {
+	switch program {
+	case "find":
+		return word == "-exec" || word == "-execdir" || word == "-ok" || word == "-okdir"
+	case "go":
+		return word == "run"
+	}
+	return false
+}
+
+// operandCommands are programs whose operands are paths, names or hosts
+// they read, and that run none of them as a command (but see
+// runsOperands).
+var operandCommands = strings.Fields("find ls cd cat less head tail grep egrep fgrep rg ag tar zip unzip cp mv rm ln mkdir touch chmod chown du stat file tree wc diff nmap nc ping go journalctl systemctl service brew apt apt-get yum dnf apk pip pgrep pkill lsof ps kill which whereis man")
+
 // wrapperStarts reads the commands longer than maxSSHCommand bytes for
 // isWrapperOperand, one commandStart for each start, so each is read once,
 // and words finds where the substitutions in any command close.
@@ -4629,7 +4677,7 @@ func (w *wrapperStarts) at(from int) *commandStart {
 
 // argWrappers are the wrappers that take an argument after the command's
 // start: a destination, or an option's (wrapperArgOptions).
-var argWrappers = []string{sshCommand, "sudo", envCommand, "time", execCommand, "docker", "podman", "nerdctl", "kubectl"}
+var argWrappers = []string{sshCommand, "sudo", envCommand, "time", execCommand, "docker", podmanCommand, "nerdctl", "kubectl"}
 
 // maxSSHCommand bounds how far back isWrapperOperand looks for the start of
 // a wrapper command.

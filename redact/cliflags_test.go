@@ -737,6 +737,16 @@ func TestString_CommandLinePasswordsShellGrammarCases(t *testing.T) {
 		{name: "Python raw triple-quoted string", input: `subprocess.run(["redis-cli", "-a", r"""` + p + `"""])`, want: `subprocess.run(["redis-cli", "-a", r"""REDACTED"""])`},
 		{name: "Python triple-quoted string in a JSON string", input: `{"cmd": "subprocess.run([\"wget\", \"--password\", \"\"\"` + p + `\"\"\"])"}`, want: `{"cmd": "subprocess.run([\"wget\", \"--password\", \"\"\"REDACTED\"\"\"])"}`},
 		{name: "Python triple-quoted string in escaped quotes", input: `[\"redis-cli\", \"-a\", \"\"\"` + p + `\"\"\"]`, want: `[\"redis-cli\", \"-a\", \"\"\"REDACTED\"\"\"]`},
+		// a program that runs the words after its operands
+		{name: "client run by find -exec", input: `find . -name x -exec mysql -p` + p + ` \;`, want: `find . -name x -exec mysql -pREDACTED \;`},
+		{name: "client run by find -execdir", input: `find . -execdir mysql -p` + p + ` {} +`, want: `find . -execdir mysql -pREDACTED {} +`},
+		{name: "client run by find -ok", input: `find . -ok mysql -p` + p + ` \;`, want: `find . -ok mysql -pREDACTED \;`},
+		{name: "client run by go run", input: "go run ./cmd/mysql -p" + p, want: "go run ./cmd/mysql -pREDACTED"},
+		{name: "client run by go run with a build flag", input: "go run -race ./cmd/mysql -p" + p, want: "go run -race ./cmd/mysql -pREDACTED"},
+		{name: "client after a find in its own command", input: "find /etc/mysql -print; mysql -p" + p, want: "find /etc/mysql -print; mysql -pREDACTED"},
+		{name: "client in a substitution in a find operand", input: "cat $(mysql -p" + p + " -e 1)", want: "cat $(mysql -pREDACTED -e 1)"},
+		{name: "client run by xargs after a find", input: "find . | xargs mysql -p" + p, want: "find . | xargs mysql -pREDACTED"},
+		{name: "client named in prose", input: "connect with mysql -uroot -p" + p, want: "connect with mysql -uroot -pREDACTED"},
 	})
 }
 
@@ -1218,6 +1228,19 @@ func TestString_CommandLinePasswordListAndQuotingNonSecretsPreserved(t *testing.
 		`parser.add_argument("--password", "-p", required=True)`,
 		`@click.option('--password', '-p', help='Password')`,
 		`parser.add_argument("--pass", "-P", dest="pw")`,
+		// a client name as a path or name that another program reads,
+		// whose flags are that program's
+		"find /etc/mysql -type f -print",
+		"find /var/lib/mysql -perm 600",
+		"find . -name mysql -printf '%p\\n'",
+		"go test ./mysql -parallel 8",
+		"tar -C /opt/mysql -pxzf a.tgz",
+		"nmap mysql -p3306",
+		"journalctl -u mysql -p err",
+		"systemctl show mysql -p MainPID",
+		"sudo find /etc/mysql -print",
+		"kubectl exec db -- find /etc/mysql -print",
+		`sh -c "find /etc/mysql -print"`,
 	})
 }
 
