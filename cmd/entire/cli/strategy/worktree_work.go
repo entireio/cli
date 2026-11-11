@@ -108,8 +108,23 @@ func overlapsFiles(files []string, set map[string]struct{}) bool {
 // homes were recorded. It compares paths only, which holds for turn-end hooks
 // because turn start already followed a moved home and re-homed a session in
 // a worktree re-added at its home path (reconcileWorktreePathForResumedTurn).
+// A home moved mid-turn, after turn start, is homeMovedTo's case.
 func homedAt(state *SessionState, root string) bool {
 	return state.WorktreePath == "" || isSessionHomeWorktree(root, state) || sameDir(root, state.WorktreePath)
+}
+
+// homeMovedTo reports whether root is state's linked home moved there
+// mid-turn by `git worktree move`, before turn start could follow it
+// (homedAt's path rule misses that); its marker says so (homeAt). A home with
+// the empty ID has no marker, and a renamed main worktree can't be told from
+// an unregistered checkout (same empty ID) whose path is gone, which is
+// common for a container's path seen from the host, so neither counts: a step
+// is better skipped than recorded as another checkout's.
+func homeMovedTo(ctx context.Context, state *SessionState, root string) bool {
+	if state.WorktreePath == "" || root == "" || state.WorktreeID == "" {
+		return false
+	}
+	return homeAt(ctx, state, root) == homeMovedHere
 }
 
 // enterStepWorktree is enterWorktreeView for a turn-end step recorded in
