@@ -1962,6 +1962,59 @@ type keyedJSONToken struct {
 	origJSON string
 }
 
+// buildJSONReplacementMaps pre-encodes replacement pairs into keyed and unkeyed maps.
+func buildJSONReplacementMaps(repls []jsonReplacement) (map[keyedJSONToken]jsonReplacementEntry, map[string]jsonReplacementEntry, error) {
+	keyedMap := make(map[keyedJSONToken]jsonReplacementEntry, len(repls))
+	unkeyedMap := make(map[string]jsonReplacementEntry, len(repls))
+	for _, r := range repls {
+		origJSON, err := jsonEncodeString(r.original)
+		if err != nil {
+			return nil, nil, err
+		}
+		replJSON, err := jsonEncodeString(r.redacted)
+		if err != nil {
+			return nil, nil, err
+		}
+		entry := jsonReplacementEntry{
+			replJSON:     replJSON,
+			placeholders: r.placeholders,
+		}
+		if r.key != "" {
+			keyJSON, err := jsonEncodeString(r.key)
+			if err != nil {
+				return nil, nil, err
+			}
+			k := keyedJSONToken{keyJSON: keyJSON, origJSON: origJSON}
+			if _, exists := keyedMap[k]; !exists {
+				keyedMap[k] = entry
+			}
+		} else if _, exists := unkeyedMap[origJSON]; !exists {
+			unkeyedMap[origJSON] = entry
+		}
+	}
+	return keyedMap, unkeyedMap, nil
+}
+
+// resolveReplacement returns the replacement for token, if any, honoring keyed precedence.
+// An unkeyed replacement also rewrites an object key equal to the secret, matching
+// main's strings.ReplaceAll contract.
+func resolveReplacement(token string, isKey bool, currentKey string, keyedMap map[keyedJSONToken]jsonReplacementEntry, unkeyedMap map[string]jsonReplacementEntry) (jsonReplacementEntry, bool) {
+	if !isKey && currentKey != "" {
+		if entry, ok := keyedMap[keyedJSONToken{keyJSON: currentKey, origJSON: token}]; ok {
+			return entry, true
+		}
+	}
+	entry, ok := unkeyedMap[token]
+	return entry, ok
+}
+
+func skipJSONWhitespace(s string, i int) int {
+	for i < len(s) && isJSONWhitespace(s[i]) {
+		i++
+	}
+	return i
+}
+
 // applyJSONReplacements applies collected (original, redacted) string pairs
 // to the raw JSON text in a single linear pass over the line, replacing JSON-encoded
 // originals with their redacted forms.
@@ -1971,38 +2024,9 @@ func applyJSONReplacements(s string, repls []jsonReplacement) (result string, wr
 	if len(repls) == 0 {
 		return s, 0, nil
 	}
-	// Keyed replacements take precedence over unkeyed ones. An unkeyed one
-	// would otherwise rewrite a keyed copy that needs a different result
-	// (a password under a credential key, an address under a network key).
-	keyedMap := make(map[keyedJSONToken]jsonReplacementEntry, len(repls))
-	unkeyedMap := make(map[string]jsonReplacementEntry, len(repls))
-	for _, r := range repls {
-		origJSON, err := jsonEncodeString(r.original)
-		if err != nil {
-			return "", 0, err
-		}
-		replJSON, err := jsonEncodeString(r.redacted)
-		if err != nil {
-			return "", 0, err
-		}
-		entry := jsonReplacementEntry{
-			replJSON:     replJSON,
-			placeholders: r.placeholders,
-		}
-		if r.key != "" {
-			keyJSON, err := jsonEncodeString(r.key)
-			if err != nil {
-				return "", 0, err
-			}
-			k := keyedJSONToken{keyJSON: keyJSON, origJSON: origJSON}
-			if _, exists := keyedMap[k]; !exists {
-				keyedMap[k] = entry
-			}
-		} else {
-			if _, exists := unkeyedMap[origJSON]; !exists {
-				unkeyedMap[origJSON] = entry
-			}
-		}
+	keyedMap, unkeyedMap, err := buildJSONReplacementMaps(repls)
+	if err != nil {
+		return "", 0, err
 	}
 
 	var b strings.Builder
@@ -2013,43 +2037,21 @@ func applyJSONReplacements(s string, repls []jsonReplacement) (result string, wr
 	for i < len(s) {
 		if s[i] == '"' {
 			token, nextIdx := scanJSONString(s, i)
+			p := skipJSONWhitespace(s, nextIdx)
+			isKey := p < len(s) && s[p] == ':'
 
-			// Look ahead past optional whitespace to determine whether this string
-			// is an object key (followed by ':').
-			p := nextIdx
-			for p < len(s) && isJSONWhitespace(s[p]) {
-				p++
-			}
-			if p < len(s) && s[p] == ':' {
-				// Object key: keys are never redacted; record for subsequent value position.
-				currentKey = token
+			if entry, ok := resolveReplacement(token, isKey, currentKey, keyedMap, unkeyedMap); ok {
+				b.WriteString(entry.replJSON)
+				written += entry.placeholders
+			} else {
 				b.WriteString(token)
-				i = nextIdx
-				continue
 			}
 
-			// Value token: keyed replacements take precedence over unkeyed replacements.
-			if currentKey != "" && len(keyedMap) > 0 {
-				if entry, ok := keyedMap[keyedJSONToken{keyJSON: currentKey, origJSON: token}]; ok {
-					b.WriteString(entry.replJSON)
-					written += entry.placeholders
-					currentKey = ""
-					i = nextIdx
-					continue
-				}
+			if isKey {
+				currentKey = token
+			} else {
+				currentKey = ""
 			}
-			if len(unkeyedMap) > 0 {
-				if entry, ok := unkeyedMap[token]; ok {
-					b.WriteString(entry.replJSON)
-					written += entry.placeholders
-					currentKey = ""
-					i = nextIdx
-					continue
-				}
-			}
-
-			b.WriteString(token)
-			currentKey = ""
 			i = nextIdx
 			continue
 		}
