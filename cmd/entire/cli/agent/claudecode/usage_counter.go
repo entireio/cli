@@ -130,5 +130,17 @@ func (u *usageCounter) Add(path string, data []byte) {
 func (u *usageCounter) Reset(path string) { u.Calls.ResetChild(u.agents[path]) }
 
 func (u *usageCounter) Totals(context.Context, agent.CumulativeTokenInput) (*agent.TokenUsage, map[string]*agent.TokenUsage) {
-	return u.Calls.Sum(""), u.Calls.Children()
+	children := u.Calls.Children()
+	// A subagent transcript this reading listed but nothing was counted from
+	// (it could not be read) is a nil entry: the children's total lacks it.
+	for _, agentID := range u.agents {
+		if _, counted := children[agentID]; counted {
+			continue
+		}
+		if children == nil {
+			children = make(map[string]*agent.TokenUsage)
+		}
+		children[agentID] = nil
+	}
+	return u.Calls.Sum(""), children
 }

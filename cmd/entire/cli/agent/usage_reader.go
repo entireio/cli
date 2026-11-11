@@ -30,8 +30,10 @@ type CumulativeTokenInput struct {
 type CumulativeObservation struct {
 	// Total is the main agent's usage since the session began, without
 	// SubagentTokens; Children each subagent's, by a stable child ID (a child
-	// can vanish when its file is deleted). nil means no data. InputTokens
-	// excludes cache, OutputTokens includes reasoning.
+	// can vanish when its file is deleted). nil means no data; a nil entry in
+	// Children is a child the reading knows of but could not count (its file
+	// could not be read). InputTokens excludes cache, OutputTokens includes
+	// reasoning.
 	Total    *TokenUsage
 	Children map[string]*TokenUsage
 	// Cursor lets the next reading continue where this one stopped.
