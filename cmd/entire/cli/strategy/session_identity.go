@@ -214,8 +214,9 @@ func committedAtHome(repoDir string, state *SessionState) bool {
 
 // hookInSessionHome is isSessionHomeWorktree for an agent hook running in
 // worktreeRoot: a turn can end in another worktree of the repository (the
-// agent resumed there). Such a turn still records its own changes and tokens,
-// but nothing that reads the worktree to update what the session did at home:
+// agent resumed there). Such a turn records its tokens, and its changes in
+// that worktree's own entry when it can have one (SaveStep), but nothing that
+// reads the worktree to update what the session did at home:
 // that tree's absence of the home's untracked files is not a deletion, and its
 // HEAD and branch are not the session's. A state with no recorded worktree
 // (written before WorktreePath existed) counts as home, as before.

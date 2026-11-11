@@ -16,11 +16,7 @@ func projectTrailLinkRetry(cmd *cobra.Command, target *projectTrailTarget, chang
 	}
 	args := []string{"entire " + cmdTrail + " link", target.TrailID}
 	add := func(name, value string) {
-		quoted := shellQuote(value)
-		if runtime.GOOS == windowsGOOS {
-			quoted = powerShellQuote(value)
-		}
-		args = append(args, "--"+name+"="+quoted)
+		args = append(args, "--"+name+"="+quoteForUserShell(value))
 	}
 	add("repo", target.RepoRef)
 	add("project", target.Host+"/"+target.Project)
@@ -42,4 +38,13 @@ func projectTrailLinkRetry(cmd *cobra.Command, target *projectTrailTarget, chang
 		args = append(args, "--json")
 	}
 	return "Retry in " + shell + ":\n" + strings.Join(args, " ")
+}
+
+// quoteForUserShell quotes value for the shell a copy-paste hint names:
+// PowerShell on Windows, a POSIX shell elsewhere.
+func quoteForUserShell(value string) string {
+	if runtime.GOOS == windowsGOOS {
+		return powerShellQuote(value)
+	}
+	return shellQuote(value)
 }

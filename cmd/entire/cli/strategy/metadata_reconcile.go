@@ -242,14 +242,12 @@ func ReconcileDisconnectedMetadataRef(
 	}
 
 	// Disconnected — cherry-pick local commits onto remote tip
-	fmt.Fprintln(w, "[entire] Detected disconnected session metadata (local and remote share no common ancestor)")
-
 	shallow, err := loadShallowHashes(ctx, repoPath)
 	if err != nil {
 		return fmt.Errorf("failed to load shallow boundaries: %w", err)
 	}
 
-	newTip, replayed, err := replayDisconnectedOnto(ctx, repo, localHash, remoteHash, shallow, w)
+	newTip, replayed, err := replayDisconnectedOnto(ctx, repo, repoPath, localHash, remoteHash, shallow, w)
 	if err != nil {
 		return err
 	}
@@ -276,9 +274,16 @@ func ReconcileDisconnectedMetadataRef(
 // writing a ref. Empty-tree commits (the empty-orphan bug's root) carry no
 // checkpoint data and are dropped; when nothing else remains the remote tip is
 // returned with replayed == 0. Progress is written to w.
+//
+// When there is data to replay and either tip reaches a shallow boundary, it
+// refuses with errShallowHidesMergeBase: the missing merge base may only be
+// hidden behind the boundary, and replaying would apply the boundary commit's
+// whole tree over newer remote content. A local chain with no data needs no
+// such proof, since returning the remote tip drops nothing.
 func replayDisconnectedOnto(
 	ctx context.Context,
 	repo *git.Repository,
+	repoPath string,
 	localHash, remoteHash plumbing.Hash,
 	shallow map[plumbing.Hash]bool,
 	w io.Writer,
@@ -299,6 +304,17 @@ func replayDisconnectedOnto(
 			dataCommits = append(dataCommits, c)
 		}
 	}
+	if len(dataCommits) > 0 {
+		hidden, shallowErr := reachesShallowBoundary(ctx, repoPath, shallow, localHash, remoteHash)
+		if shallowErr != nil {
+			return plumbing.ZeroHash, 0, fmt.Errorf("check shallow history: %w", shallowErr)
+		}
+		if hidden {
+			return plumbing.ZeroHash, 0, errShallowHidesMergeBase
+		}
+	}
+
+	fmt.Fprintln(w, "[entire] Detected disconnected session metadata (local and remote share no common ancestor)")
 	if len(dataCommits) == 0 {
 		return remoteHash, 0, nil
 	}

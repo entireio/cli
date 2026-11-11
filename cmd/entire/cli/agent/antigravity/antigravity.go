@@ -46,9 +46,9 @@ func (a *AntigravityAgent) Description() string {
 }
 
 // DetectPresence reports whether Entire's Antigravity hooks are configured for
-// this workspace. Antigravity 2.0 stores runtime data user-scope in
-// ~/.gemini/antigravity-cli/, so the only meaningful workspace-level signal is
-// whether our entry exists in .agents/hooks.json.
+// this workspace. Every Antigravity surface keeps its runtime data user-scope
+// under ~/.gemini (see brainDirs), so the only meaningful workspace-level
+// signal is whether our entry exists in .agents/hooks.json.
 func (a *AntigravityAgent) DetectPresence(ctx context.Context) (bool, error) {
 	return a.AreHooksInstalled(ctx)
 }
@@ -62,15 +62,76 @@ func (a *AntigravityAgent) GetSessionDir(_ string) (string, error) {
 	if override := os.Getenv(antigravityTestBrainDirEnv); override != "" {
 		return override, nil
 	}
+	home, err := a.SessionHome()
+	if err != nil {
+		return "", err
+	}
+	return a.HomeLayout().StoresUnder(home)[0], nil
+}
+
+// SessionHome returns ~/.gemini, the directory every Antigravity surface keeps
+// its data in. agy has no variable that relocates it.
+func (a *AntigravityAgent) SessionHome() (string, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("antigravity: failed to get home directory: %w", err)
 	}
-	return filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain"), nil
+	return filepath.Join(homeDir, ".gemini"), nil
 }
 
+// HomeLayout reports one brain per Antigravity surface sharing agy's
+// hooks.json: the CLI's first, then the IDE's through 2.5.x, then the 2.0
+// app's (which the IDE also uses from 2.6.0). Hook payloads carry
+// transcriptPath values inside the surface's own brain.
+func (a *AntigravityAgent) HomeLayout() agent.HomeLayout {
+	return agent.HomeLayout{Stores: []string{"antigravity-cli/brain", "antigravity-ide/brain", "antigravity/brain"}}
+}
+
+var _ agent.HomeLayoutProvider = (*AntigravityAgent)(nil)
+
+// brainDirs returns every brain directory a hook-supplied transcriptPath may
+// lie in, the CLI's (GetSessionDir) first. They are derived from
+// GetSessionDir's own result, so the test override relocates them with it.
+func (a *AntigravityAgent) brainDirs() ([]string, error) {
+	cliBrain, err := a.GetSessionDir("")
+	if err != nil {
+		return nil, err
+	}
+	return a.surfaceBrains(cliBrain), nil
+}
+
+// surfaceBrains returns the brains beside cliBrain when it is the CLI store of
+// a home in agy's layout, and only cliBrain otherwise.
+func (a *AntigravityAgent) surfaceBrains(cliBrain string) []string {
+	cliBrain = filepath.Clean(cliBrain)
+	if stores := a.HomeLayout().StoresUnder(filepath.Dir(filepath.Dir(cliBrain))); stores[0] == cliBrain {
+		return stores
+	}
+	return []string{cliBrain}
+}
+
+// ResolveSessionFileCandidates returns agentSessionID's transcript in each
+// surface's brain, the CLI's first, so `entire attach` finds IDE and app
+// conversations too.
+func (a *AntigravityAgent) ResolveSessionFileCandidates(sessionDir, agentSessionID string) []string {
+	brains := a.surfaceBrains(sessionDir)
+	candidates := make([]string, 0, len(brains))
+	for _, brain := range brains {
+		candidates = append(candidates, transcriptInBrain(brain, agentSessionID))
+	}
+	return candidates
+}
+
+var _ agent.SessionFileCandidatesProvider = (*AntigravityAgent)(nil)
+
 func (a *AntigravityAgent) ResolveSessionFile(sessionDir, agentSessionID string) string {
-	return filepath.Join(sessionDir, agentSessionID, ".system_generated", "logs", "transcript_full.jsonl")
+	return transcriptInBrain(sessionDir, agentSessionID)
+}
+
+// transcriptInBrain is where agy writes conversation agentSessionID's
+// transcript in brain. Callers validate agentSessionID first.
+func transcriptInBrain(brain, agentSessionID string) string {
+	return filepath.Join(brain, agentSessionID, ".system_generated", "logs", "transcript_full.jsonl")
 }
 
 func (a *AntigravityAgent) ReadSession(_ *agent.HookInput) (*agent.AgentSession, error) {

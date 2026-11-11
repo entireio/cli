@@ -67,17 +67,18 @@ func TestClient_TrailRequestsUseSnakeCase(t *testing.T) {
 	defer server.Close()
 
 	client := NewClientWithBaseURL("tok", server.URL)
-	resp, err := client.Post(context.Background(), "/api/v1/trails/gh/acme/repo", TrailCreateRequest{
-		Title: "test", BranchName: "feature/test", BranchAction: "link",
+	ready := true
+	resp, err := client.Patch(context.Background(), "/api/v1/trails/gh/acme/repo/42", TrailUpdateRequest{
+		ReadyForReview: &ready,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if got["branch_name"] != "feature/test" || got["branch_action"] != "link" {
+	if got["ready_for_review"] != true {
 		t.Fatalf("body = %#v", got)
 	}
-	for _, key := range []string{"branchName", "branchAction"} {
+	for _, key := range []string{"readyForReview"} {
 		if _, ok := got[key]; ok {
 			t.Fatalf("body contains camelCase %q: %#v", key, got)
 		}
@@ -131,6 +132,47 @@ func TestClient_TrailsEnabled(t *testing.T) {
 			}
 			if gotQuery != "per_page=1" {
 				t.Errorf("query = %q, want per_page=1", gotQuery)
+			}
+		})
+	}
+}
+
+func TestClient_RepoTrailsEnabled(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                            string
+		status                          int
+		body                            string
+		wantEnabled, wantKnown, wantErr bool
+	}{
+		{"on", http.StatusOK, `{"id":"r","trails_enabled":true}`, true, true, false},
+		{"off", http.StatusOK, `{"id":"r","trails_enabled":false}`, false, true, false},
+		{"not reported", http.StatusOK, `{"id":"r"}`, false, false, false},
+		{"malformed", http.StatusOK, `{"trails_enabled":`, false, false, true},
+		{"not found", http.StatusNotFound, `{"error":"not found"}`, false, false, true},
+		{"server error", http.StatusInternalServerError, `{"error":"boom"}`, false, false, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var gotPath string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				w.WriteHeader(tt.status)
+				w.Write([]byte(tt.body)) //nolint:errcheck // test handler
+			}))
+			defer server.Close()
+
+			enabled, known, err := NewClientWithBaseURL("tok", server.URL).RepoTrailsEnabled(context.Background(), "01ARZ3NDEKTSV4RRFFQ69G5FAX")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr = %v", err, tt.wantErr)
+			}
+			if enabled != tt.wantEnabled || known != tt.wantKnown {
+				t.Errorf("(enabled, known) = (%v, %v), want (%v, %v)", enabled, known, tt.wantEnabled, tt.wantKnown)
+			}
+			if gotPath != "/api/v1/repos/01ARZ3NDEKTSV4RRFFQ69G5FAX" {
+				t.Errorf("path = %q", gotPath)
 			}
 		})
 	}

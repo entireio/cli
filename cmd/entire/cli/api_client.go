@@ -40,7 +40,7 @@ func NewAuthenticatedAPIClient(ctx context.Context, insecureHTTP bool) (*api.Cli
 	// the credential is in hand would be too late to matter anyway — the point of
 	// the gate is to run before discovery and refresh dial the host.
 	// TestNewAuthenticatedAPIClient_RejectsInsecureOverrideBeforeResolving pins it.
-	return api.NewClientWithBaseURL(target.Token, target.BaseURL), nil
+	return target.Client(), nil
 }
 
 // insecureDataOverrideNote describes a rejected http ENTIRE_API_BASE_URL for a

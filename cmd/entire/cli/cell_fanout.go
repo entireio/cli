@@ -263,20 +263,10 @@ func resolveCellBaseURLs(ctx context.Context, c cellCoreClient, cells []cellGrou
 		return
 	}
 	bySlug := make(map[string]coreapi.Cluster, len(clusters.Clusters))
-	byJurisdiction := make(map[string]coreapi.Cluster, len(clusters.Clusters))
 	for _, cl := range clusters.Clusters {
 		bySlug[strings.ToLower(strings.TrimSpace(cl.Slug))] = cl
-		// Prefer the default cluster per jurisdiction — matches the auth
-		// layer's resolution when routing by jurisdiction alone. A non-default
-		// cluster is kept only when no default has been seen yet.
-		j := strings.ToLower(strings.TrimSpace(cl.Jurisdiction))
-		if j != "" {
-			existing, exists := byJurisdiction[j]
-			if !exists || (cl.IsDefault && !existing.IsDefault) {
-				byJurisdiction[j] = cl
-			}
-		}
 	}
+	byJurisdiction := defaultClusterByJurisdiction(clusters.Clusters, nil)
 	for i := range cells {
 		cl, ok := bySlug[cells[i].clusterSlug]
 		if !ok && cells[i].cell != "" {
@@ -361,6 +351,26 @@ func (g cellGroup) cellTarget() *auth.CellTarget {
 	default:
 		return nil
 	}
+}
+
+// defaultClusterByJurisdiction picks one cluster per lowercased jurisdiction:
+// its default cluster, else the first one seen. With usable nil this matches
+// the auth layer's resolution when routing by jurisdiction alone. usable, when
+// set, leaves out clusters a caller cannot route to, so a jurisdiction falls
+// back to another of its clusters rather than to one it cannot use; the auth
+// layer would not make that choice.
+func defaultClusterByJurisdiction(clusters []coreapi.Cluster, usable func(coreapi.Cluster) bool) map[string]coreapi.Cluster {
+	out := make(map[string]coreapi.Cluster, len(clusters))
+	for _, cl := range clusters {
+		j := strings.ToLower(strings.TrimSpace(cl.Jurisdiction))
+		if j == "" || (usable != nil && !usable(cl)) {
+			continue
+		}
+		if existing, exists := out[j]; !exists || (cl.IsDefault && !existing.IsDefault) {
+			out[j] = cl
+		}
+	}
+	return out
 }
 
 // label names the group in errors and logs: cell, else jurisdiction, else home.
