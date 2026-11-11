@@ -23,7 +23,8 @@ func TestOpenCodeSeedRepoPlantsDeps(t *testing.T) {
 	if _, err := exec.LookPath(openCodeBinary); err != nil {
 		t.Skip("opencode not installed")
 	}
-	if _, err := exec.LookPath("npm"); err != nil {
+	// Only the OpenCode 1 path builds a dependency tree with npm.
+	if _, err := exec.LookPath("npm"); err != nil && !isOpenCode2() {
 		t.Skip("npm not installed")
 	}
 
