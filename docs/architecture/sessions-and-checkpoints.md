@@ -510,8 +510,9 @@ externalizing images out of items that are about to be discarded — that would 
 an asset whose referencing transcript line disappears moments later — and avoids
 redacting megabytes of ciphertext only to throw it away; base64 is the pathological
 input for the entropy layer, so a large Codex rollout otherwise costs tens of seconds
-per Stop *and* per commit. Externalizing before redaction is required because base64
-is high-entropy and redaction would otherwise flag and destroy it.
+per Stop *and* per commit. Externalizing before redaction is required because redaction
+would otherwise destroy base64 it does not recognize as a whole-string image, such as
+a data URI inside a longer string.
 
 The sanitize transform is idempotent, so a downstream write path can call it without
 knowing whether an upstream path already did (`checkpoint.sanitizeForAgentType` is

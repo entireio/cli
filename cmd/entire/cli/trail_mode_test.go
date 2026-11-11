@@ -42,10 +42,10 @@ func TestTrailModeCommandSurface(t *testing.T) {
 			cmd := newTrailCmdForMode(project)
 			root.AddCommand(cmd)
 			names := commandNames(cmd.Commands())
-			for _, name := range []string{"list", "show", "create", "update", "comment", "finding", "approve", "approvals", "watch", "checkout", "resume"} {
+			for _, name := range []string{"list", "show", "comment", "finding", "approve", "approvals", "watch", "checkout", "resume"} {
 				require.Contains(t, names, name)
 			}
-			for _, name := range []string{"link", "unlink"} {
+			for _, name := range []string{"create", "update", "link", "unlink"} {
 				require.Equal(t, project, contains(names, name))
 			}
 			require.Contains(t, names, "merge")

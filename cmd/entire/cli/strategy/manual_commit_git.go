@@ -78,13 +78,17 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 	mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
 		// A step in a worktree other than the session's home records into
 		// that worktree's entry (see enterWorktreeView), never the home's.
-		if leave, inView := enterStepWorktree(ctx, state, worktreeRoot); inView {
+		leave, inView := enterStepWorktree(ctx, state, worktreeRoot)
+		switch {
+		case inView:
 			defer leave()
 			if state.BaseCommit == "" {
 				if head, headErr := repo.Head(); headErr == nil {
 					state.BaseCommit = head.Hash().String()
 				}
 			}
+		case !homedAt(state, worktreeRoot) && !homeMovedTo(ctx, state, worktreeRoot):
+			return recordUnhomedStepTokens(ctx, state, step, worktreeRoot)
 		}
 		invalidateStaleSubagentSnapshot(&step, state)
 		if err := syncBaseCommitToHead(ctx, repo, state); err != nil {
@@ -120,7 +124,10 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 		if state.StepCount == 1 {
 			state.TranscriptIdentifierAtStart = step.StepTranscriptIdentifier
 		}
-		applyTurnTokenUsage(state, step.TokenUsage)
+		if !state.TokenLedger.IsActive() {
+			// A ledger session's tokens are read at the turn-end transition.
+			applyTurnTokenUsage(state, step.TokenUsage)
+		}
 
 		logCtx := logging.WithComponent(ctx, "checkpoint")
 		logging.Info(logCtx, "checkpoint saved",
@@ -138,6 +145,27 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 		return nil
 	}
 	return mutErr
+}
+
+// recordUnhomedStepTokens handles a turn-end step in a worktree other than
+// the session's home that has no entry of its own there: the worktree could
+// not be marked, it shares the home's ID (an unregistered checkout sharing the
+// repository through commondir has the main worktree's empty ID), or another
+// checkout holds that ID's one entry. Recording its files as the home's would
+// claim another tree's files and move the home's base to that tree's HEAD, so
+// they are not recorded. The turn's tokens are the session's wherever it ran,
+// so they are kept as for a turn that changed no files.
+func recordUnhomedStepTokens(ctx context.Context, state *SessionState, step StepContext, worktreeRoot string) error {
+	logging.Warn(logging.WithComponent(ctx, "checkpoint"), "turn-end step in another worktree has no record of its own; files not recorded",
+		slog.String("session_id", state.SessionID),
+		slog.String("worktree", worktreeRoot),
+		slog.String("home", state.WorktreePath))
+	invalidateStaleSubagentSnapshot(&step, state)
+	if step.TokenUsage == nil || state.TokenLedger.IsActive() {
+		return ErrMutationSkip
+	}
+	applyTurnTokenUsage(state, step.TokenUsage)
+	return nil
 }
 
 func invalidateStaleSubagentSnapshot(step *StepContext, state *SessionState) {
@@ -491,6 +519,9 @@ func accumulateTokenUsage(existing, incoming *agent.TokenUsage) *agent.TokenUsag
 func resetCheckpointWindow(state *SessionState) {
 	state.StepCount = 0
 	state.CheckpointTokenUsage = nil
+	if state.TokenLedger.IsActive() {
+		state.TokenLedger.MarkCheckpointed()
+	}
 	state.ClearCondensationAttempt()
 	state.RebaselineSubagentTokens()
 	removeCompletedTaskRecords(state)
