@@ -21,6 +21,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/telemetry"
 	"github.com/entireio/cli/cmd/entire/cli/versioncheck"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
+	"github.com/entireio/cli/internal/procsignal"
 	"github.com/spf13/cobra"
 )
 
@@ -292,9 +293,11 @@ func isAgentProtocolBinary(binPath string) bool {
 }
 
 // runPlugin executes the resolved plugin binary, propagating its exit code.
-// On context cancellation the child is interrupted (configurePluginCancel)
-// so plugins can clean up. Terminal signals reach the child directly via the
-// shared process group.
+// The plugin stays a plain child in our process group, so terminal signals
+// reach it directly. On context cancellation it is sent the signal we received
+// (configurePluginCancel) so it can clean up; on a force quit, ForceQuitPlugins
+// ends it; and configurePluginProcess ties it to our lifetime where the
+// platform allows, so it does not outlive a killed CLI.
 func runPlugin(ctx context.Context, pluginName, binPath string, args []string) (exitCode int, killedBy os.Signal) {
 	cmd := exec.CommandContext(ctx, binPath, args...)
 	configurePluginCancel(cmd, pluginCancelGOOS)
@@ -334,7 +337,7 @@ func runPlugin(ctx context.Context, pluginName, binPath string, args []string) (
 	}
 	cmd.Env = pluginEnv(parentEnv, extras...)
 
-	if err := runTrackedPlugin(cmd); err != nil {
+	if err := runTrackedPlugin(ctx, cmd); err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			// A signalled child reports -1, i.e. ExitPluginSignalled: it is
@@ -360,50 +363,89 @@ func runPlugin(ctx context.Context, pluginName, binPath string, args []string) (
 	return 0, nil
 }
 
-// runningPlugins holds the plugin processes this CLI is waiting on, for
-// KillRunningPlugins.
+// runningPlugins holds the plugin processes this CLI is waiting on, each with
+// a channel closed once it has exited, for ForceQuitPlugins.
 var runningPlugins = struct {
 	sync.Mutex
 
-	procs map[*os.Process]struct{}
-}{procs: map[*os.Process]struct{}{}}
+	procs map[*os.Process]chan struct{}
+}{procs: map[*os.Process]chan struct{}{}}
 
 // runTrackedPlugin is cmd.Run with the process registered for
-// KillRunningPlugins while it runs.
-func runTrackedPlugin(cmd *exec.Cmd) error {
+// ForceQuitPlugins while it runs, and tied to this process's lifetime where
+// the platform can do that (configurePluginProcess).
+//
+// The goroutine stays on one OS thread from Start to Wait: Linux's Pdeathsig
+// fires when the thread that started the child exits, not the process
+// (golang/go#27505), and Go may retire an unlocked thread at any time.
+func runTrackedPlugin(ctx context.Context, cmd *exec.Cmd) error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	configurePluginProcess(ctx, cmd)
 	if err := cmd.Start(); err != nil {
 		return err //nolint:wrapcheck // runPlugin reports exec's errors as they are
 	}
-	proc := cmd.Process
+	proc, exited := cmd.Process, make(chan struct{})
 	runningPlugins.Lock()
-	runningPlugins.procs[proc] = struct{}{}
+	runningPlugins.procs[proc] = exited
 	runningPlugins.Unlock()
 	defer func() {
 		runningPlugins.Lock()
 		delete(runningPlugins.procs, proc)
 		runningPlugins.Unlock()
+		close(exited)
 	}()
 	return cmd.Wait() //nolint:wrapcheck // runPlugin reports exec's errors as they are
 }
 
-// KillRunningPlugins kills every plugin process this CLI started and is still
-// waiting on, on Windows only. The force-quit path (a second Ctrl-C) calls it
-// before exiting. On Windows a plugin cannot be sent SIGINT and is not ended
-// when its parent exits, so one ignoring Ctrl-C would otherwise keep running on
-// the console once exec's kill-after-grace timer dies with this process.
+// pluginForceQuitGrace is how long a force quit by a second Ctrl-C waits for
+// running plugins to finish their own force-quit before killing them. A var
+// so tests can shorten it.
+var pluginForceQuitGrace = pluginCancelGrace
+
+// ForceQuitPlugins ends the plugins this CLI is still waiting on, ahead of a
+// force quit (the second signal). Once this process exits nothing else will:
+// exec's kill-after-grace timer dies with it, and a child outlives its parent
+// unless the platform ties them (configurePluginProcess does that on Linux,
+// FreeBSD and Windows, but not on macOS, nor for every way this process can
+// exit).
 //
-// On Unix it does nothing: the terminal delivers the second Ctrl-C to the
-// whole foreground process group, so the plugin gets its own second SIGINT
-// and runs its own force-quit (entire-stream flushes its last records). A
-// SIGKILL from here would cut that short.
-func KillRunningPlugins() {
-	if pluginCancelGOOS != windowsGOOS {
-		return
-	}
+// sig is the signal that forced the quit. For os.Interrupt — a Ctrl-C, which
+// the terminal or console delivers to the plugin as well — the plugin may be
+// running its own force-quit (entire-stream flushes its last records), so it
+// gets up to pluginForceQuitGrace to exit before it is killed. Any other
+// signal (a second SIGTERM or SIGHUP) reached only this process, so the
+// plugins are killed at once.
+func ForceQuitPlugins(sig os.Signal) {
 	runningPlugins.Lock()
-	defer runningPlugins.Unlock()
-	for proc := range runningPlugins.procs {
-		_ = proc.Kill() //nolint:errcheck // best effort; it may have just exited
+	pending := make(map[*os.Process]chan struct{}, len(runningPlugins.procs))
+	for proc, exited := range runningPlugins.procs {
+		pending[proc] = exited
+	}
+	runningPlugins.Unlock()
+	if sig == os.Interrupt {
+		awaitPluginExits(pending, pluginForceQuitGrace)
+	}
+	for proc, exited := range pending {
+		select {
+		case <-exited:
+		default:
+			_ = proc.Kill() //nolint:errcheck // best effort; it may have just exited
+		}
+	}
+}
+
+// awaitPluginExits waits until every plugin in pending has exited, or grace
+// has passed.
+func awaitPluginExits(pending map[*os.Process]chan struct{}, grace time.Duration) {
+	deadline := time.NewTimer(grace)
+	defer deadline.Stop()
+	for _, exited := range pending {
+		select {
+		case <-exited:
+		case <-deadline.C:
+			return
+		}
 	}
 }
 
@@ -423,9 +465,11 @@ const pluginCancelGrace = 5 * time.Second
 var pluginWindowsCancelGrace = 30 * time.Second
 
 // configurePluginCancel decides what cancelling the root context (our signal
-// handler, on the first Ctrl-C or SIGTERM) does to a running plugin.
+// handler, on the first Ctrl-C, SIGTERM or SIGHUP) does to a running plugin.
 //
-// Unix: send SIGINT, then kill after pluginCancelGrace.
+// Unix: forward the signal this process received (pluginCancelSignal), then
+// kill after pluginCancelGrace. Forwarding the real signal matters: a
+// supervisor's SIGTERM must reach the plugin as SIGTERM, not as a Ctrl-C.
 //
 // Windows: send nothing, then kill after pluginWindowsCancelGrace.
 // os.Process.Signal supports only Kill there, so sending os.Interrupt fails
@@ -434,13 +478,25 @@ var pluginWindowsCancelGrace = 30 * time.Second
 // os.Interrupt (Ctrl-C/Ctrl-Break), which the console has already delivered
 // to the plugin, a member of the same console. The kill is still needed: a
 // plugin that ignores Ctrl-C would otherwise run on after the CLI gave up on
-// it. (A second Ctrl-C kills it sooner: see KillRunningPlugins.)
+// it. (A second Ctrl-C ends it sooner: see ForceQuitPlugins.)
 func configurePluginCancel(cmd *exec.Cmd, goos string) {
 	if goos == windowsGOOS {
 		cmd.Cancel = func() error { return nil }
 		cmd.WaitDelay = pluginWindowsCancelGrace
 		return
 	}
-	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
+	cmd.Cancel = func() error { return cmd.Process.Signal(pluginCancelSignal()) }
 	cmd.WaitDelay = pluginCancelGrace
+}
+
+// pluginCancelSignal is the signal to forward to a plugin when the root
+// context is cancelled: the one this process received, or SIGINT when the
+// cancellation came from elsewhere. A terminal Ctrl-C therefore reaches the
+// plugin twice — from the terminal and from here — which plugins tolerate
+// today; telling a terminal's SIGINT from a `kill -INT` is not possible here.
+func pluginCancelSignal() os.Signal {
+	if sig := procsignal.Load(); sig != nil {
+		return sig
+	}
+	return os.Interrupt
 }

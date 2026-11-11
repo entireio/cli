@@ -9,6 +9,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/entireio/cli/internal/procsignal"
 )
 
 // startCancelledPlugin runs script as a plugin, cancels the context once the
@@ -50,10 +52,12 @@ func startPluginUntilReady(t *testing.T, script string, onReady func(cancel cont
 	return runPlugin(ctx, "canceller", bin, nil)
 }
 
-func setPluginCancelGOOS(t *testing.T, goos string) {
+// useWindowsPluginCancel gives runPlugin the Windows cancel behaviour for the
+// test, so it runs against real child processes on any platform.
+func useWindowsPluginCancel(t *testing.T) {
 	t.Helper()
 	prev := pluginCancelGOOS
-	pluginCancelGOOS = goos
+	pluginCancelGOOS = windowsGOOS
 	t.Cleanup(func() { pluginCancelGOOS = prev })
 }
 
@@ -61,7 +65,6 @@ func setPluginCancelGOOS(t *testing.T, goos string) {
 // exec reports the cancellation (context.Canceled) instead of the exit, which
 // used to surface as "Failed to run plugin ...: context canceled" and exit 1.
 func TestRunPlugin_CancelledPluginThatExitsCleanlyKeepsExitZero(t *testing.T) { //nolint:paralleltest // mutates env and seams
-	setPluginCancelGOOS(t, runtime.GOOS)
 	code, sig := startCancelledPlugin(t, "trap 'exit 0' INT\ntouch \"$READY\"\nwhile :; do sleep 0.05; done\n")
 	if code != 0 || sig != nil {
 		t.Errorf("runPlugin = (%d, %v), want (0, nil)", code, sig)
@@ -71,7 +74,6 @@ func TestRunPlugin_CancelledPluginThatExitsCleanlyKeepsExitZero(t *testing.T) { 
 // A plugin without a SIGINT handler still dies from the SIGINT we forward,
 // and that stays reported as a signal.
 func TestRunPlugin_CancelledPluginKilledBySIGINTReportsSignal(t *testing.T) { //nolint:paralleltest // mutates env and seams
-	setPluginCancelGOOS(t, runtime.GOOS)
 	// exec: a shell waiting on a foreground child defers SIGINT until the
 	// child exits, so the signal must reach a process with default handling.
 	code, sig := startCancelledPlugin(t, "touch \"$READY\"\nexec sleep 30\n")
@@ -84,7 +86,7 @@ func TestRunPlugin_CancelledPluginKilledBySIGINTReportsSignal(t *testing.T) { //
 // signals nor kills the plugin (the console already delivered Ctrl-C to it),
 // so it finishes its wind-down and its exit code is what we report.
 func TestRunPlugin_WindowsCancelWaitsForPluginToExit(t *testing.T) { //nolint:paralleltest // mutates env and seams
-	setPluginCancelGOOS(t, windowsGOOS)
+	useWindowsPluginCancel(t)
 	if runtime.GOOS == windowsGOOS {
 		t.Skip("covered on Windows by TestRunPlugin_WindowsCancelWaitsForRealPlugin")
 	}
@@ -98,7 +100,7 @@ func TestRunPlugin_WindowsCancelWaitsForPluginToExit(t *testing.T) { //nolint:pa
 // The Windows configuration still kills a plugin that ignores the Ctrl-C,
 // once pluginWindowsCancelGrace has passed: nothing else would end it.
 func TestRunPlugin_WindowsCancelKillsPluginAfterGrace(t *testing.T) { //nolint:paralleltest // mutates env and seams
-	setPluginCancelGOOS(t, windowsGOOS)
+	useWindowsPluginCancel(t)
 	if runtime.GOOS == windowsGOOS {
 		t.Skip("shell-script plugin harness only runs on Unix")
 	}
@@ -115,36 +117,74 @@ func TestRunPlugin_WindowsCancelKillsPluginAfterGrace(t *testing.T) { //nolint:p
 	}
 }
 
-// On Windows the force-quit path kills a running plugin outright, cancelled
-// or not: nothing else would end it once the CLI exits.
-func TestKillRunningPlugins_WindowsKillsARunningPlugin(t *testing.T) { //nolint:paralleltest // mutates env and seams
-	setPluginCancelGOOS(t, windowsGOOS)
-	if runtime.GOOS == windowsGOOS {
-		t.Skip("shell-script plugin harness only runs on Unix")
+// storeReceivedSignal records sig as the signal this process received, as
+// main's handler does, for the duration of the test.
+func storeReceivedSignal(t *testing.T, sig os.Signal) {
+	t.Helper()
+	procsignal.Store(sig)
+	t.Cleanup(procsignal.Reset)
+}
+
+// A SIGTERM we receive reaches the plugin as SIGTERM, not as a Ctrl-C: the
+// plugin can tell a supervisor's shutdown from a user's interrupt.
+func TestRunPlugin_CancelForwardsTheReceivedSignal(t *testing.T) { //nolint:paralleltest // mutates env, seams and procsignal
+	storeReceivedSignal(t, syscall.SIGTERM)
+	code, sig := startCancelledPlugin(t, "trap 'exit 7' TERM\ntrap 'exit 9' INT\ntouch \"$READY\"\nwhile :; do sleep 0.05; done\n")
+	if code != 7 || sig != nil {
+		t.Errorf("runPlugin = (%d, %v), want (7, nil) from the plugin's TERM trap", code, sig)
 	}
-	code, sig := startPluginUntilReady(t, "trap '' INT\ntouch \"$READY\"\nexec sleep 30\n", func(context.CancelFunc) {
-		KillRunningPlugins()
+}
+
+// A force quit by anything but Ctrl-C reached only us, so a plugin is killed
+// at once rather than left running after we exit.
+func TestForceQuitPlugins_NonInterruptKillsAtOnce(t *testing.T) { //nolint:paralleltest // mutates env and seams
+	var took time.Duration
+	code, sig := startPluginUntilReady(t, "trap '' INT TERM HUP\ntouch \"$READY\"\nexec sleep 30\n", func(context.CancelFunc) {
+		start := time.Now()
+		ForceQuitPlugins(syscall.SIGTERM)
+		took = time.Since(start)
 	})
 	if code != ExitPluginSignalled || sig != syscall.SIGKILL {
 		t.Errorf("runPlugin = (%d, %v), want (%d, killed)", code, sig, ExitPluginSignalled)
 	}
+	if took > time.Second {
+		t.Errorf("ForceQuitPlugins(SIGTERM) took %v, want an immediate kill", took)
+	}
+	assertNoTrackedPlugins(t)
+}
+
+// A second Ctrl-C reached the plugin too, so it gets to finish its own force
+// quit (entire-stream flushes its last records) instead of being killed.
+func TestForceQuitPlugins_InterruptLetsPluginFinish(t *testing.T) { //nolint:paralleltest // mutates env and seams
+	code, sig := startPluginUntilReady(t, "touch \"$READY\"\nsleep 0.5\nexit 3\n", func(context.CancelFunc) {
+		ForceQuitPlugins(os.Interrupt)
+	})
+	if code != 3 || sig != nil {
+		t.Errorf("runPlugin = (%d, %v), want the plugin's own (3, nil)", code, sig)
+	}
+}
+
+// ...but only for pluginForceQuitGrace: a plugin still running after that is
+// killed, so the CLI never exits leaving it behind.
+func TestForceQuitPlugins_InterruptKillsAfterGrace(t *testing.T) { //nolint:paralleltest // mutates env and seams
+	prev := pluginForceQuitGrace
+	pluginForceQuitGrace = 200 * time.Millisecond
+	t.Cleanup(func() { pluginForceQuitGrace = prev })
+	code, sig := startPluginUntilReady(t, "trap '' INT\ntouch \"$READY\"\nexec sleep 30\n", func(context.CancelFunc) {
+		ForceQuitPlugins(os.Interrupt)
+	})
+	if code != ExitPluginSignalled || sig != syscall.SIGKILL {
+		t.Errorf("runPlugin = (%d, %v), want (%d, killed)", code, sig, ExitPluginSignalled)
+	}
+}
+
+func assertNoTrackedPlugins(t *testing.T) {
+	t.Helper()
 	runningPlugins.Lock()
 	n := len(runningPlugins.procs)
 	runningPlugins.Unlock()
 	if n != 0 {
 		t.Errorf("%d plugin processes still tracked after runPlugin returned", n)
-	}
-}
-
-// On Unix the force-quit path leaves the plugin alone: it got the second
-// Ctrl-C itself and must be free to run its own force-quit handling.
-func TestKillRunningPlugins_UnixLeavesPluginRunning(t *testing.T) { //nolint:paralleltest // mutates env and seams
-	setPluginCancelGOOS(t, "linux")
-	code, sig := startPluginUntilReady(t, "touch \"$READY\"\nsleep 0.5\nexit 3\n", func(context.CancelFunc) {
-		KillRunningPlugins()
-	})
-	if code != 3 || sig != nil {
-		t.Errorf("runPlugin = (%d, %v), want the plugin's own (3, nil)", code, sig)
 	}
 }
 

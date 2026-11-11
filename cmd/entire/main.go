@@ -40,7 +40,9 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signals := []os.Signal{os.Interrupt}
 	if runtime.GOOS != "windows" {
-		signals = append(signals, syscall.SIGTERM)
+		// SIGHUP: a closed terminal. Uncaught, it kills this process
+		// outright, skipping the cancel path that ends a running plugin.
+		signals = append(signals, syscall.SIGTERM, syscall.SIGHUP)
 	}
 	signal.Notify(sigChan, signals...)
 	go func() {
@@ -63,8 +65,8 @@ func main() {
 			fmt.Fprintln(os.Stderr, "\nReceived termination signal, shutting down… signal again to force quit.")
 		}
 		cancel()
-		<-sigChan
-		cli.KillRunningPlugins()
+		// Ending a running plugin first: once we exit, nothing else may.
+		cli.ForceQuitPlugins(<-sigChan)
 		dieFromSignal(sig)
 	}()
 
@@ -182,12 +184,11 @@ func exitWithPluginOutcome(code int, killedBy os.Signal) {
 		case procsignal.Load() != nil:
 			// A signal we received outranks the child's, because when we
 			// were signalled the child's signal is usually OUR signal
-			// laundered — and laundered lossily. Cancelling the context
-			// makes runPlugin's cmd.Cancel send the child SIGINT whatever
-			// we got, so a supervisor's SIGTERM comes back as a SIGINT
-			// child and would report 130 for a shutdown that must report
-			// 143. That is the exact confusion dieFromSignal exists to
-			// prevent.
+			// laundered. Cancelling the context forwards our signal to
+			// the child, but on Windows nothing is forwarded, and a
+			// child killed after the grace period reports SIGKILL: a
+			// supervisor's SIGTERM must still report 143, not 137. That
+			// is the exact confusion dieFromSignal exists to prevent.
 			dieFromSignal(terminatingSignal())
 		case killedBy != nil:
 			// We were not signalled, so the child's signal is genuinely

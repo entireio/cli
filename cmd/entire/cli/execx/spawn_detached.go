@@ -31,7 +31,12 @@ func SpawnDetached(dir string, args ...string) {
 
 	cmd := newDetachedCmd(executable, dir, args...)
 	if err := cmd.Start(); err != nil {
-		return
+		// Windows: a job we are in forbids breaking away. Start the worker
+		// inside it instead; it may then end with us, but it runs.
+		cmd = newDetachedCmd(executable, dir, args...)
+		if !stayInJob(cmd) || cmd.Start() != nil {
+			return
+		}
 	}
 	// Release the process so it can run independently of the parent.
 	//nolint:errcheck // best effort — the child continues regardless

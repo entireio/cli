@@ -42,3 +42,6 @@ func killProcessGroupOnCancel(cmd *exec.Cmd) {
 		return nil
 	}
 }
+
+// stayInJob is the Windows job-breakaway retry's hook; Unix has no jobs.
+func stayInJob(*exec.Cmd) bool { return false }

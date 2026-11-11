@@ -33,11 +33,27 @@ func detachFromTTY(cmd *exec.Cmd) {
 // Do not combine with NonInteractive on the same cmd: Windows ignores
 // CREATE_NO_WINDOW when DETACHED_PROCESS is also set, so the worker would
 // silently lose its console again.
+//
+// CREATE_BREAKAWAY_FROM_JOB keeps the worker out of the kill-on-close job a
+// plugin launch puts this process in (cli's configurePluginProcess), so the
+// worker outlives us as intended. Outside any job it has no effect; inside a
+// job that forbids breakaway, CreateProcess fails, and SpawnDetached retries
+// without it (stayInJob).
 func detachBackgroundWorker(cmd *exec.Cmd) {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
-	cmd.SysProcAttr.CreationFlags |= windows.CREATE_NEW_PROCESS_GROUP | windows.CREATE_NO_WINDOW
+	cmd.SysProcAttr.CreationFlags |= windows.CREATE_NEW_PROCESS_GROUP | windows.CREATE_NO_WINDOW | windows.CREATE_BREAKAWAY_FROM_JOB
+}
+
+// stayInJob drops detachBackgroundWorker's job breakaway from cmd, reporting
+// whether it had been requested, for the retry when the job refuses it.
+func stayInJob(cmd *exec.Cmd) bool {
+	if cmd.SysProcAttr == nil || cmd.SysProcAttr.CreationFlags&windows.CREATE_BREAKAWAY_FROM_JOB == 0 {
+		return false
+	}
+	cmd.SysProcAttr.CreationFlags &^= windows.CREATE_BREAKAWAY_FROM_JOB
+	return true
 }
 
 // killProcessGroupOnCancel is a no-op on Windows: reliable tree-kill needs a Job
