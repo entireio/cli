@@ -50,6 +50,7 @@ func projectAgentCommandFixture(t *testing.T, h http.HandlerFunc) (*projectAgent
 func TestProjectAgentServeCommandValidation(t *testing.T) {
 	for _, tc := range []struct{ name, token, interval, want string }{
 		{"missing token", "", "1s", "set ENTIRE_TOKEN"},
+		{"TLS verification disabled", "test", "1s", "unset ENTIRE_TLS_SKIP_VERIFY"},
 		{"zero interval", "test", "0s", "--poll-interval must be at least 1s"},
 		{"negative interval", "test", "-1s", "--poll-interval must be at least 1s"},
 		{"short interval", "test", "999ms", "--poll-interval must be at least 1s"},
@@ -60,6 +61,11 @@ func TestProjectAgentServeCommandValidation(t *testing.T) {
 				out.WriteHeader(http.StatusInternalServerError)
 			})
 			t.Setenv("ENTIRE_TOKEN", tc.token)
+			skipTLS := ""
+			if tc.want == "unset ENTIRE_TLS_SKIP_VERIFY" {
+				skipTLS = "true"
+			}
+			t.Setenv("ENTIRE_TLS_SKIP_VERIFY", skipTLS)
 			cmd := command(t.Context(), "--poll-interval", tc.interval)
 			require.ErrorContains(t, cmd.Execute(), tc.want)
 		})

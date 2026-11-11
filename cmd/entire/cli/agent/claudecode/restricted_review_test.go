@@ -97,11 +97,14 @@ func TestRestrictedReviewCredentialBoundary(t *testing.T) {
 
 func TestRestrictedReviewResponse(t *testing.T) {
 	t.Parallel()
-	for _, bad := range []string{`not json`, `{}`, `{"type":"result","subtype":"success","structured_output":null}`, `{"type":"result","subtype":"error_max_turns","structured_output":{}}`, `{"type":"result","subtype":"success","permission_denials":[{}],"structured_output":{}}`} {
-		_, err := parseRestrictedReviewResponse([]byte(bad))
+	for _, bad := range []string{`not json`, `{}`, `{"type":"result","subtype":"success","structured_output":null}`, `{"type":"result","subtype":"error_max_turns","structured_output":{}}`} {
+		_, err := parseRestrictedReviewResponse(t.Context(), []byte(bad))
 		require.Error(t, err)
 	}
-	_, err := parseRestrictedReviewResponse([]byte(`{"type":"result","is_error":true,"api_error_status":401,"result":"secret review content","structured_output":{}}`))
+	out, err := parseRestrictedReviewResponse(t.Context(), []byte(`{"type":"result","subtype":"success","permission_denials":[{}],"structured_output":{"findings":[]}}`))
+	require.NoError(t, err, "a denied tool call must not discard the review")
+	require.JSONEq(t, `{"findings":[]}`, string(out))
+	_, err = parseRestrictedReviewResponse(t.Context(), []byte(`{"type":"result","is_error":true,"api_error_status":401,"result":"secret review content","structured_output":{}}`))
 	var classified *ClaudeError
 	require.ErrorAs(t, err, &classified)
 	require.NotContains(t, err.Error(), "secret review content")

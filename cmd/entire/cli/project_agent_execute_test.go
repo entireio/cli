@@ -134,6 +134,7 @@ func TestProjectAgentExecuteCredentialBoundary(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "model-key")
 	git := strings.Join(projectAgentGitEnv(), "\n")
 	require.Contains(t, git, "ENTIRE_TOKEN=runner-secret")
+	require.NotContains(t, git, "model-key")
 	for _, key := range []string{"GIT_DIR=", "GIT_CONFIG_COUNT=", "GIT_CONFIG_KEY_0=", "GIT_CONFIG_VALUE_0="} {
 		require.NotContains(t, git, key)
 	}

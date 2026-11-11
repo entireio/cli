@@ -14,6 +14,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/execx"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
 
 const flagRestricted = "--restricted"
@@ -96,7 +97,7 @@ func (r *RestrictedReviewer) Review(ctx context.Context, cfg RestrictedReview) (
 	if err != nil {
 		return nil, fmt.Errorf("claude review failed: %w", err)
 	}
-	return parseRestrictedReviewResponse(output)
+	return parseRestrictedReviewResponse(ctx, output)
 }
 
 // USER is required for Claude's macOS keychain login.
@@ -130,7 +131,7 @@ func restrictedReviewEnv() ([]string, error) {
 	return env, nil
 }
 
-func parseRestrictedReviewResponse(output []byte) (json.RawMessage, error) {
+func parseRestrictedReviewResponse(ctx context.Context, output []byte) (json.RawMessage, error) {
 	var result responseEnvelope
 	if err := json.Unmarshal(output, &result); err != nil {
 		return nil, errors.New("claude returned invalid JSON")
@@ -140,8 +141,13 @@ func parseRestrictedReviewResponse(output []byte) (json.RawMessage, error) {
 		// review in worker logs or the failure API.
 		return nil, classifyEnvelopeError("", result.APIErrorStatus, 0)
 	}
-	if result.Type != streamEventTypeResult || result.Subtype != "success" || len(result.PermissionDenials) != 0 || len(result.StructuredOutput) == 0 || bytes.Equal(bytes.TrimSpace(result.StructuredOutput), []byte("null")) {
+	if result.Type != streamEventTypeResult || result.Subtype != "success" || len(result.StructuredOutput) == 0 || bytes.Equal(bytes.TrimSpace(result.StructuredOutput), []byte("null")) {
 		return nil, errors.New("claude returned no successful structured result")
+	}
+	// A denial is the restriction working; failing on it would let a diff
+	// suppress its own review by prompting an out-of-tree read.
+	if n := len(result.PermissionDenials); n > 0 {
+		logging.Info(ctx, "restricted review had permission denials", "count", n)
 	}
 	return result.StructuredOutput, nil
 }

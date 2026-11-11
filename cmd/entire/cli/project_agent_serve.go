@@ -88,6 +88,10 @@ stops execution and attempts to report failure. No daemon is installed.`,
 			if interval < time.Second {
 				return errors.New("--poll-interval must be at least 1s")
 			}
+			if os.Getenv("ENTIRE_TLS_SKIP_VERIFY") != "" {
+				// git-remote-entire's ENTIRE_TOKEN cluster check relies on TLS verification.
+				return errors.New("unset ENTIRE_TLS_SKIP_VERIFY: serve holds a service-account secret and requires TLS verification")
+			}
 			if os.Getenv(auth.EnvTokenVar) == "" {
 				return errors.New("set ENTIRE_TOKEN to a service-account secret or JWT; setup uses your admin login, serve uses the service account")
 			}
@@ -184,15 +188,15 @@ func retryProjectAgent(err error) bool {
 	if errors.As(err, &h) {
 		return h.StatusCode == http.StatusTooManyRequests || h.StatusCode >= 500
 	}
-	// *url.Error also wraps non-network failures, such as a refused ENTIRE_TOKEN
-	// secret; only connection failures are transient.
+	// *url.Error is itself a net.Error but also wraps non-network failures, such
+	// as a refused ENTIRE_TOKEN secret; judge its cause instead.
 	var u *url.Error
-	if !errors.As(err, &u) {
-		return false
+	if errors.As(err, &u) {
+		err = u.Err
 	}
 	var n net.Error
-	return errors.As(u.Err, &n) || errors.Is(u.Err, io.EOF) || errors.Is(u.Err, io.ErrUnexpectedEOF) ||
-		errors.Is(u.Err, syscall.ECONNRESET) || errors.Is(u.Err, syscall.ECONNREFUSED)
+	return errors.As(err, &n) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNREFUSED)
 }
 
 // projectAgentJobScan walks the job queue once, fetching pages lazily.

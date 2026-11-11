@@ -61,7 +61,8 @@ func projectAgentGitEnv() []string {
 	var env []string
 	for _, entry := range gitrepo.EnvWithoutRepoOverrides() {
 		key, _, _ := strings.Cut(entry, "=")
-		if strings.HasPrefix(key, "GIT_") || key == "PATH" {
+		// Model credentials are for Claude only.
+		if strings.HasPrefix(key, "GIT_") || key == "PATH" || key == "ANTHROPIC_API_KEY" || key == "CLAUDE_CODE_OAUTH_TOKEN" {
 			continue
 		}
 		env = append(env, entry)
@@ -113,7 +114,7 @@ func (e *projectAgentExecutor) execute(ctx context.Context, c projectAgentClaim)
 	dir := filepath.Join(root.Name(), filepath.FromSlash(work))
 	repo := filepath.Join(dir, "repo")
 	gitEnv := projectAgentGitEnv()
-	gitArgs := []string{"-c", "core.hooksPath=" + filepath.Join(dir, "empty"), "-c", "core.symlinks=false", "-c", "protocol.allow=never", "-c", "protocol.entire.allow=always", "-c", "protocol.https.allow=always"}
+	gitArgs := []string{"-c", "core.hooksPath=" + filepath.Join(dir, "empty"), "-c", "core.symlinks=false", "-c", "protocol.allow=never", "-c", "protocol.entire.allow=always"}
 	clone := append(append([]string{}, gitArgs...), "clone", "--no-checkout", "--template="+filepath.Join(dir, "empty"), "--", c.GitRemoteURL, repo)
 	if _, err := e.run(ctx, e.git, dir, gitEnv, clone, ""); err != nil {
 		return nil, fmt.Errorf("clone failed: %w", err)
