@@ -408,7 +408,12 @@ var pluginForceQuitGrace = pluginCancelGrace
 // sig is the signal that forced the quit. For os.Interrupt — a Ctrl-C, which
 // the terminal or console delivers to the plugin as well — the plugin may be
 // running its own force-quit (entire-stream flushes its last records), so it
-// gets up to pluginForceQuitGrace to exit before it is killed. Any other
+// gets up to pluginForceQuitGrace to exit before it is killed. That window
+// never extends the deadline the first signal set: exec's kill after the
+// cancel grace (configurePluginCancel) still fires on time, so on Unix a
+// second Ctrl-C four seconds after the first leaves about one second. That is
+// deliberate — a second Ctrl-C asks to quit sooner, never later — and the
+// plugin has been winding down since the first. Any other
 // signal (a second SIGTERM or SIGHUP) reached only this process, so the
 // plugins are killed at once.
 func ForceQuitPlugins(sig os.Signal) {
