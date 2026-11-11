@@ -2,13 +2,9 @@ package strategy
 
 import (
 	"context"
-	"errors"
-	"io/fs"
 	"log/slog"
-	"os"
 	"path/filepath"
 
-	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -117,24 +113,18 @@ func homedAt(state *SessionState, root string) bool {
 	return state.WorktreePath == "" || isSessionHomeWorktree(root, state) || sameDir(root, state.WorktreePath)
 }
 
-// homeMovedTo reports whether root is state's home moved there mid-turn,
-// before turn start could follow it (homedAt's path rule misses that). A
-// linked home is known by its marker (homeAt). The main worktree has none, so
-// it counts only when the recorded path is gone and root's Git directory is
-// the common directory itself: an unregistered checkout shares the main
-// worktree's empty ID but has a Git directory of its own.
+// homeMovedTo reports whether root is state's linked home moved there
+// mid-turn by `git worktree move`, before turn start could follow it
+// (homedAt's path rule misses that); its marker says so (homeAt). A home with
+// the empty ID has no marker, and a renamed main worktree can't be told from
+// an unregistered checkout (same empty ID) whose path is gone, which is
+// common for a container's path seen from the host, so neither counts: a step
+// is better skipped than recorded as another checkout's.
 func homeMovedTo(ctx context.Context, state *SessionState, root string) bool {
-	if state.WorktreePath == "" || root == "" {
+	if state.WorktreePath == "" || root == "" || state.WorktreeID == "" {
 		return false
 	}
-	if state.WorktreeID != "" {
-		return homeAt(ctx, state, root) == homeMovedHere
-	}
-	if _, err := os.Lstat(state.WorktreePath); !errors.Is(err, fs.ErrNotExist) {
-		return false
-	}
-	metadata, err := gitrepo.ResolveWorktreeMetadata(root)
-	return err == nil && metadata.WorktreeID == "" && sameDir(metadata.GitDir, metadata.CommonDir)
+	return homeAt(ctx, state, root) == homeMovedHere
 }
 
 // enterStepWorktree is enterWorktreeView for a turn-end step recorded in

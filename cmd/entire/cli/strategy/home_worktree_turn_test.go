@@ -305,27 +305,10 @@ func TestGuestTurnEnd_EmptyIDEntryBelongsToOneCheckout(t *testing.T) {
 	assert.True(t, sameDir(entry.Path, checkout), "entry path = %s", entry.Path)
 }
 
-// A home moved between two steps of one turn, before turn start could follow
-// it, is still the home: the step is recorded there, not skipped.
+// A linked home moved between two steps of one turn, before turn start could
+// follow it, is still the home: its marker says so, and the step is recorded
+// there, not skipped.
 func TestGuestTurnEnd_HomeMovedMidTurnIsStillHome(t *testing.T) {
-	t.Run("main worktree renamed", func(t *testing.T) {
-		const sid = "home-renamed"
-		s := &ManualCommitStrategy{}
-		mainDir := setupGitRepo(t)
-		chdirWorktree(t, mainDir)
-		testutil.WriteFile(t, mainDir, "home.go", "package home")
-		saveStepIn(t, s, sid, []string{"home.go"}, nil)
-
-		moved := mainDir + "-moved"
-		require.NoError(t, os.Rename(mainDir, moved))
-		chdirWorktree(t, moved)
-		testutil.WriteFile(t, moved, "later.go", "package later")
-		saveStepIn(t, s, sid, []string{"later.go"}, nil)
-
-		after := mustLoad(t, s, sid)
-		assert.Equal(t, []string{"home.go", "later.go"}, after.FilesTouched, "the moved home's step was dropped")
-		assert.Equal(t, 2, after.StepCount)
-	})
 	t.Run("linked home moved by git", func(t *testing.T) {
 		const sid = "home-moved"
 		s := &ManualCommitStrategy{}
@@ -347,6 +330,45 @@ func TestGuestTurnEnd_HomeMovedMidTurnIsStillHome(t *testing.T) {
 		assert.Equal(t, []string{"home.go", "later.go"}, after.FilesTouched, "the moved home's step was dropped")
 		assert.Equal(t, 2, after.StepCount)
 	})
+}
+
+// A home with the empty ID has no marker, so a vanished one can't be followed:
+// a renamed main worktree looks just like an unregistered checkout whose path
+// is gone (a container's path seen from the host). A step in the main
+// worktree for a session homed in such a checkout must not be recorded as the
+// home's work; its tokens are still kept.
+func TestGuestTurnEnd_VanishedEmptyIDHomeIsNotAdopted(t *testing.T) {
+	const sid = "vanished-home"
+	s := &ManualCommitStrategy{}
+	mainDir := setupGitRepo(t)
+	checkout := unregisteredCheckoutOf(t, mainDir)
+	chdirWorktree(t, checkout)
+	testutil.WriteFile(t, checkout, "a.go", "package a // in the checkout")
+	saveStepIn(t, s, sid, []string{"a.go"}, nil)
+	before := mustLoad(t, s, sid)
+	require.True(t, sameDir(before.WorktreePath, checkout), "precondition: homed in the checkout")
+
+	chdirWorktree(t, mainDir)
+	require.NoError(t, os.RemoveAll(checkout))
+	testutil.WriteFile(t, mainDir, "b.go", "package b // in the main worktree")
+	require.NoError(t, s.SaveStep(t.Context(), StepContext{
+		SessionID:     sid,
+		NewFiles:      []string{"b.go"},
+		MetadataDir:   paths.SessionMetadataDirFromSessionID(sid),
+		CommitMessage: "Checkpoint",
+		AuthorName:    "Test",
+		AuthorEmail:   "test@test.com",
+		AgentType:     agent.AgentTypeClaudeCode,
+		TokenUsage:    &agent.TokenUsage{InputTokens: 1000, APICallCount: 1},
+	}))
+
+	after := mustLoad(t, s, sid)
+	assert.Equal(t, []string{"a.go"}, after.FilesTouched, "the main worktree's file was recorded as the vanished home's")
+	assert.Equal(t, before.BaseCommit, after.BaseCommit, "the base moved to the main worktree's HEAD")
+	assert.Equal(t, before.StepCount, after.StepCount)
+	assert.Equal(t, before.WorktreePath, after.WorktreePath)
+	require.NotNil(t, after.TokenUsage)
+	assert.Equal(t, 1000, after.TokenUsage.InputTokens)
 }
 
 // unregisteredCheckoutOf materializes a checkout of mainDir's current branch on
