@@ -11,8 +11,6 @@ import (
 	"io"
 	"io/fs"
 	"maps"
-	"os"
-	"path/filepath"
 	"slices"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -246,21 +244,14 @@ func fingerprintPath(w io.Writer, roots []string, path string) (regular, ok bool
 // lstatInRoots is Lstat of path through the first of roots that holds it, as
 // openScopedRollout opens one. A path outside every root is not looked at.
 func lstatInRoots(roots []string, path string) (fs.FileInfo, error) {
-	for _, base := range roots {
-		rel, err := filepath.Rel(base, path)
-		if err != nil || !filepath.IsLocal(rel) {
-			continue
-		}
-		root, err := os.OpenRoot(base)
-		if err != nil {
-			return nil, fmt.Errorf("open rollout root: %w", err)
-		}
-		defer root.Close()
-		info, err := root.Lstat(rel)
-		if err != nil {
-			return nil, fmt.Errorf("lstat rollout: %w", err)
-		}
-		return info, nil
+	root, rel, err := openRolloutRoot(roots, path)
+	if err != nil {
+		return nil, err
 	}
-	return nil, errors.New("rollout is outside configured roots")
+	defer root.Close()
+	info, err := root.Lstat(rel)
+	if err != nil {
+		return nil, fmt.Errorf("lstat rollout: %w", err)
+	}
+	return info, nil
 }
