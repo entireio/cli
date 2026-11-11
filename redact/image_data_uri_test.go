@@ -30,6 +30,10 @@ var (
 func TestIsInlineImageDataURI(t *testing.T) {
 	t.Parallel()
 	jpeg := fakeImageBase64(jpegMagic)
+	// The decoder skips \r and \n, so a trailing line decodes as more image
+	// data when the image base64 is unpadded and the line is base64-shaped.
+	unpadded := jpeg[:len(jpeg)-4]
+	const base64ShapedSecret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
 	tests := []struct {
 		name string
 		s    string
@@ -47,6 +51,8 @@ func TestIsInlineImageDataURI(t *testing.T) {
 		{"invalid base64", "data:image/jpeg;base64," + jpeg + "!", false},
 		{"empty data", "data:image/jpeg;base64,", false},
 		{"embedded in a longer string", "screenshot: data:image/jpeg;base64," + jpeg, false},
+		{"secret on the next line", "data:image/jpeg;base64," + unpadded + "\n" + base64ShapedSecret, false},
+		{"secret on the next CRLF line", "data:image/jpeg;base64," + unpadded + "\r\n" + base64ShapedSecret, false},
 		{"non-image data URI", "data:text/plain;base64," + jpeg, false},
 	}
 	for _, tt := range tests {

@@ -2560,7 +2560,9 @@ func isInlineImageDataURI(s string) bool {
 		return false
 	}
 	subtype, data, ok := strings.Cut(rest, ";base64,")
-	if !ok || data == "" {
+	// The decoder skips \r and \n even in strict mode, so a line after the
+	// image would decode as image data and escape scanning with it.
+	if !ok || data == "" || strings.ContainsAny(data, "\r\n") {
 		return false
 	}
 	raw, err := base64.StdEncoding.Strict().DecodeString(data)
