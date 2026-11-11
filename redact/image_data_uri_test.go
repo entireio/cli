@@ -134,6 +134,67 @@ func TestJSONLContent_CredentialKeyOverridesImageDataURI(t *testing.T) {
 	assert.Contains(t, got, "REDACTED")
 }
 
+// Outside a connection object a bare password, secret or token key is not a
+// credential key, but it still names a secret, so an image-shaped value under
+// it is scanned and keeps the placeholder it had before the image rule. So is
+// one under a key the key-context rule reads as a secret's. A real image under
+// a key that names no secret is still preserved.
+func TestJSONLContent_SecretKeyOverridesImageDataURI(t *testing.T) {
+	t.Parallel()
+	const secretShaped = "data:image/jpeg;base64,/9j/wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+	require.True(t, isInlineImageDataURI(secretShaped))
+	uri := "data:image/jpeg;base64," + fakeImageBase64(jpegMagic)
+	tests := []jsonlFieldCase{
+		{
+			name: "password",
+			line: `{"password":"` + secretShaped + `"}`,
+			want: `{"password":"REDACTED"}`,
+		},
+		{
+			name: "passwd beside a preserved image",
+			line: `{"passwd":"` + secretShaped + `","image_url":"` + uri + `"}`,
+			want: `{"passwd":"REDACTED","image_url":"` + uri + `"}`,
+		},
+		{
+			name: "secret",
+			line: `{"secret":"` + secretShaped + `"}`,
+			want: `{"secret":"data:image/jpeg;base64,REDACTED"}`,
+		},
+		{
+			name: "token",
+			line: `{"token":"` + secretShaped + `"}`,
+			want: `{"token":"data:image/jpeg;base64,REDACTED"}`,
+		},
+		{
+			name: "pwd",
+			line: `{"pwd":"` + secretShaped + `"}`,
+			want: `{"pwd":"data:image/jpeg;base64,REDACTED"}`,
+		},
+		{
+			name: "key-context only",
+			line: `{"userpassword":"` + secretShaped + `"}`,
+			want: `{"userpassword":"REDACTED"}`,
+		},
+		{
+			name: "image under a key with a credential word but no secret segment",
+			line: `{"author_avatar":"` + uri + `"}`,
+			want: `{"author_avatar":"` + uri + `"}`,
+		},
+	}
+	assertJSONLFieldCases(t, tests)
+}
+
+// Failing closed has a cost: a real image under a key that names a secret is
+// scanned too, and its compressed bytes look like one to the entropy layer.
+func TestJSONLContent_ScansImageUnderSecretKey(t *testing.T) {
+	t.Parallel()
+	uri := "data:image/jpeg;base64," + fakeImageBase64(jpegMagic)
+	got, err := JSONLContent(`{"token":"` + uri + `"}`)
+	require.NoError(t, err)
+	assert.NotContains(t, got, uri)
+	assert.Contains(t, got, "REDACTED")
+}
+
 // Duplicate keys make the raw-text splice ambiguous, so the line goes through
 // the structural re-encode, the third consumer of the shared walk. The image
 // must survive it byte-for-byte while the secret beside it is redacted.

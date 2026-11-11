@@ -2069,7 +2069,8 @@ func isSingleJSONValue(dec *json.Decoder) bool {
 // replaceKeyedJSONValue only finds a value written directly after its key.
 //
 // A string that is exactly an inline image data URI is preserved wherever it
-// appears, except under a credential key; see isInlineImageDataURI.
+// appears, except where its key reveals a secret; see imageKeyRevealsSecret
+// and isInlineImageDataURI.
 //
 // A skip key preserves its own string values, including the strings in its
 // arrays, but objects beneath it are walked with their own keys. The id rule
@@ -2542,9 +2543,29 @@ func shouldSkipJSONLObject(obj map[string]any) bool {
 }
 
 // skipLeaf reports whether a string leaf is left unscanned: under a skip key,
-// or a whole-string inline image outside a credential key.
+// or a whole-string inline image under a key that reveals no secret.
 func skipLeaf(skipStrings bool, key string, credentialContext bool, val string) bool {
-	return skipStrings || (isInlineImageDataURI(val) && !isCredentialJSONSecretKey(key, credentialContext))
+	return skipStrings || (isInlineImageDataURI(val) && !imageKeyRevealsSecret(key, credentialContext, val))
+}
+
+// imageKeyRevealsSecret reports whether key marks an inline image value as a
+// possible secret, so the value is scanned like any other string. That is a
+// credential key, a key with a secret word segment such as a bare password,
+// secret or token (which outside a connection object is not a credential key),
+// or a key under which the key-context rule flags more of the value, such as
+// userpassword. Like isNonSecretIdentifierAssignment, this only decides
+// whether the scanners may skip a value, so failing closed costs an image
+// under such a key, not a leak.
+func imageKeyRevealsSecret(key string, credentialContext bool, val string) bool {
+	if isCredentialJSONSecretKey(key, credentialContext) {
+		return true
+	}
+	for _, form := range credentialJSONKeyForms(key) {
+		if credentialWordInKeyRE.MatchString(form) {
+			return true
+		}
+	}
+	return keyContextFindsMore(key, val)
 }
 
 // isInlineImageDataURI reports whether s is, in its entirety, a base64 image
