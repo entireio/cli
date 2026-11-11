@@ -2573,9 +2573,15 @@ func pythonPrefixBefore(code string, i int) int {
 // the character after it in single quotes too ('abc\'def'), and in a string
 // in escaped quotes, which a JSON string holds, an escaped backslash
 // escapes the character after it, as the code in the JSON reads it
-// ([\"wget\", \"--password\", \"abc\\\"def\"]).
+// ([\"wget\", \"--password\", \"abc\\\"def\"]). Three quotes open a
+// Python string that only three close ("""abc"def""", or
+// \"\"\"abc\"def\"\"\" in a JSON string), not an empty string and another.
 func codeStringEnd(s string, i int) (end, quoteLen int) {
 	switch {
+	case strings.HasPrefix(s[i:], `"""`) || strings.HasPrefix(s[i:], `'''`):
+		quoteLen = 3
+	case strings.HasPrefix(s[i:], `\"\"\"`):
+		quoteLen = 6
 	case s[i] == '"' || s[i] == '\'':
 		quoteLen = 1
 	case strings.HasPrefix(s[i:], `\"`):
@@ -2591,7 +2597,7 @@ func codeStringEnd(s string, i int) (end, quoteLen int) {
 		case strings.HasPrefix(s[j:], quote):
 			return j + quoteLen, quoteLen
 		case s[j] != '\\':
-		case quoteLen == 2 && strings.HasPrefix(s[j:], `\\\`):
+		case quoteLen%2 == 0 && strings.HasPrefix(s[j:], `\\\`):
 			// \\\" and \\\\ are one escaped character.
 			j += 3
 		default:
