@@ -9,10 +9,12 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 
 	"github.com/spf13/cobra"
 )
@@ -40,6 +42,7 @@ func newTrailWatchCmd(mode *trailMode) *cobra.Command {
 		jsonOutput bool
 		showPings  bool
 		once       bool
+		full       bool
 		branch     string
 	)
 
@@ -59,11 +62,16 @@ transient network errors.
 parent is used. --repo and --branch select the working context; this does not
 aggregate streams from every repository.`) + `
 
+It starts at the latest push: the events for the trail's current head, then
+new events as they arrive. --full replays the trail's whole history instead.
+After a reconnect it resumes after the last event it printed, or where it
+started when nothing has arrived yet, so nothing is replayed.
+
 This command resolves the trail's id internally and streams
-GET /api/v1/trails/<id>/events with Accept: text/event-stream.
+GET /api/v1/trails/<id>/events?from=head with Accept: text/event-stream.
 
 Events emitted by the server:
-  ready              initial frame, includes trail and cursor
+  ready              initial frame: trail, cursor, and where it started (start, head_sha)
   <event_type>       trail domain event (reviews, findings, agent runs, monitors, ...)
   reconnect          server cap reached; re-establishing
   forbidden          access was revoked; stream ends
@@ -76,13 +84,14 @@ Events emitted by the server:
 			}
 			// Delegates to the shared trail-review resolver so number/id/branch
 			// selectors and insecure-HTTP handling stay in one place.
-			return runTrailReviewWatch(cmd, mode, selector, jsonOutput, showPings, once)
+			return runTrailReviewWatch(cmd, mode, selector, jsonOutput, showPings, once, full)
 		},
 	}
 
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Print each event as a single JSON line")
 	cmd.Flags().BoolVar(&showPings, "show-pings", false, "Print SSE keepalive pings (otherwise suppressed)")
 	cmd.Flags().BoolVar(&once, "once", false, "Open one SSE connection then exit instead of reconnecting")
+	cmd.Flags().BoolVar(&full, "full", false, "Replay the trail's whole event history instead of starting at the latest push")
 	cmd.Flags().StringVar(&branch, "branch", "", mode.help(
 		"Watch the trail for this branch instead of the current branch; cannot be combined with a trail selector",
 		"Select a repository branch within the trail"))
@@ -90,12 +99,12 @@ Events emitted by the server:
 	return cmd
 }
 
-func runTrailReviewWatch(cmd *cobra.Command, mode *trailMode, selector string, jsonOutput, showPings, once bool) error {
+func runTrailReviewWatch(cmd *cobra.Command, mode *trailMode, selector string, jsonOutput, showPings, once, full bool) error {
 	client, target, err := mode.reviewTarget(cmd, selector, false)
 	if err != nil {
 		return err
 	}
-	return runTrailWatchResolved(cmd, client, target.Trail.ID, trailWatchTargetDescription(target), jsonOutput, showPings, once)
+	return runTrailWatchResolved(cmd, client, target.Trail.ID, trailWatchTargetDescription(target), jsonOutput, showPings, once, full)
 }
 
 // trailWatchTargetDescription labels the stream: the trail, plus the branch
@@ -109,11 +118,17 @@ func trailWatchTargetDescription(target trailReviewTarget) string {
 	return description
 }
 
-func runTrailWatchResolved(cmd *cobra.Command, client *api.Client, trailID, description string, jsonOutput, showPings, once bool) error {
+func runTrailWatchResolved(cmd *cobra.Command, client *api.Client, trailID, description string, jsonOutput, showPings, once, full bool) error {
 	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
 	errW := cmd.ErrOrStderr()
+	// from=head on every request: a resume cursor (Last-Event-ID) outranks it
+	// on the server, and a retry before any cursor must not fall back to a
+	// full replay. Servers without it ignore the parameter.
 	streamPath := reviewEventsPath(trailID)
+	if !full {
+		streamPath += "?from=head"
+	}
 
 	fmt.Fprintf(errW, "Watching %s — Ctrl+C to stop\n", description)
 
@@ -267,10 +282,13 @@ func streamOnce(
 	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
 
 	var (
-		eventName  string
-		dataLines  []string
-		eventID    string // id of the in-progress frame (reset on flush)
-		lastSeenID string // most recent SSE id from any frame that includes one
+		eventName string
+		dataLines []string
+		eventID   string // id of the in-progress frame (reset on flush)
+		// lastSeenID is the resume cursor: the one this connection resumed
+		// from, then the most recent SSE id. Starting from lastEventID keeps a
+		// resumed connection's ready cursor from replacing it.
+		lastSeenID = lastEventID
 	)
 
 	flush := func() (streamCloseReason, bool) {
@@ -284,6 +302,7 @@ func streamOnce(
 		}
 		data := strings.Join(dataLines, "\n")
 		printSSEEvent(w, errW, eventName, data, jsonOutput)
+		lastSeenID = noteReadyStart(errW, eventName, data, lastSeenID)
 
 		if eventID != "" {
 			lastSeenID = eventID
@@ -403,6 +422,44 @@ func printSSEEvent(w, errW io.Writer, eventName, data string, jsonOutput bool) {
 type reviewReadyPayload struct {
 	TrailID string `json:"trail_id"`
 	Cursor  int64  `json:"cursor"`
+	// Start and HeadSHA say where a from=head stream began; servers without
+	// from=head, and resumed connections, send neither.
+	Start   string `json:"start"`
+	HeadSHA string `json:"head_sha"`
+}
+
+// noteReadyStart handles a ready frame (any other event passes through) in
+// both output modes. It returns the resume cursor: lastSeenID, or the frame's
+// cursor when no event id has been seen, so a reconnect after an idle
+// connection resumes where it started instead of replaying the whole history
+// or re-resolving the head. A from=head frame (it reports start) keeps even a
+// cursor of 0: an empty trail must resume from its start, not jump to a later
+// push. It also prints where a from=head stream began, on stderr so --json
+// stdout stays the server's frames.
+func noteReadyStart(errW io.Writer, eventName, data, lastSeenID string) string {
+	if eventName != sseEventReady {
+		return lastSeenID
+	}
+	var p reviewReadyPayload
+	if err := json.Unmarshal([]byte(data), &p); err != nil {
+		return lastSeenID
+	}
+	if lastSeenID == "" && (p.Cursor > 0 || p.Start != "") {
+		lastSeenID = strconv.FormatInt(p.Cursor, 10)
+	}
+	head := ""
+	if sha := strings.TrimSpace(p.HeadSHA); sha != "" {
+		head = " (" + tuiutil.SanitizeTerminalLabel(shortSHA(sha)) + ")"
+	}
+	switch p.Start {
+	case "head":
+		fmt.Fprintf(errW, "Showing the latest push%s; --full replays the whole history\n", head)
+	case "tail":
+		fmt.Fprintf(errW, "No events for the latest push%s yet; showing new events\n", head)
+	case "beginning":
+		fmt.Fprintln(errW, "The trail has no head yet; showing its whole history")
+	}
+	return lastSeenID
 }
 
 type reviewStreamEvent struct {
