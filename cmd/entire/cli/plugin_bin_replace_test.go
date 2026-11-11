@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -518,4 +519,65 @@ func TestPluginTreeLock_UncontendedIsSilent(t *testing.T) { //nolint:paralleltes
 	if progress.Len() != 0 {
 		t.Errorf("uncontended install wrote progress %q, want nothing", progress.String())
 	}
+}
+
+// A remote install waiting for the tree lock announces it once, after its
+// own "Installing" step has ended (two live steps would garble a terminal),
+// and the first Ctrl-C ends the wait.
+func TestInstallPluginFromRepo_TreeLockWaitAnnouncedAndCancellable(t *testing.T) { //nolint:paralleltest // mutates env
+	withIsolatedPluginEnv(t)
+	repoURL, _ := newDemoPluginRepo(t, []string{remoteTestTagOld}, "0.1.0")
+	release, err := lockPluginTree(context.Background(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+
+	var progress safeBuffer
+	ctx, cancel := context.WithCancel(withPluginProgress(context.Background(), &progress))
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := InstallPluginFromRepo(ctx, repoURL, "", RemoteInstallOptions{})
+		done <- err
+	}()
+	deadline := time.Now().Add(30 * time.Second)
+	for !strings.Contains(progress.String(), pluginTreeWaitNotice) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("remote install cancelled while waiting = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("remote install ignored the cancelled ctx while waiting for the tree lock")
+	}
+	out := progress.String()
+	if n := strings.Count(out, pluginTreeWaitNotice); n != 1 {
+		t.Errorf("wait notice written %d times, want once; progress = %q", n, out)
+	}
+	if i, j := strings.Index(out, "Installing entire-demo"), strings.Index(out, pluginTreeWaitNotice); i < 0 || i > j {
+		t.Errorf("want the Installing step before the wait notice; progress = %q", out)
+	}
+}
+
+// safeBuffer is a bytes.Buffer safe to write from one goroutine while
+// another reads it.
+type safeBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *safeBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *safeBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
