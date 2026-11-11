@@ -1,6 +1,8 @@
 package redact
 
 import (
+	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -27,6 +29,10 @@ func TestDetectPII_EuropeanAddresses(t *testing.T) {
 		{"Via Giuseppe Garibaldi, 5", "[REDACTED_ADDRESS]"},
 		{"Corso Vittorio Emanuele II 15", "[REDACTED_ADDRESS]"},
 		{"Via dei Mille 3/A", "[REDACTED_ADDRESS]"},
+		{"Via Verdi 12/14", "[REDACTED_ADDRESS]"},
+		{"Via Roma 12/bis", "[REDACTED_ADDRESS]"},
+		// A sub-number does not take the next street's type.
+		{"Via Roma 1 / Via Milano 2", "[REDACTED_ADDRESS] / [REDACTED_ADDRESS]"},
 		{"Viale dell'Indipendenza 8", "[REDACTED_ADDRESS]"},
 		{"Largo Sant'Ambrogio 2", "[REDACTED_ADDRESS]"},
 		{"Via Roma n. 12", "[REDACTED_ADDRESS]"},
@@ -60,6 +66,15 @@ func TestDetectPII_EuropeanAddresses(t *testing.T) {
 		{"12 B rue de la Paix", "[REDACTED_ADDRESS]"},
 		{"12 rue du 8 Mai 1945, 75000 Paris", "[REDACTED_ADDRESS], 75000 Paris"},
 		{"12 rue du 8 Mai 75000 Paris", "[REDACTED_ADDRESS] 75000 Paris"},
+		// A word in capitals after the name is not a roman numeral, so the
+		// street line still ends at the name.
+		{"12 rue de la Paix ID: 7", "[REDACTED_ADDRESS] ID: 7"},
+		{"12 rue de la Paix VERSAILLES", "[REDACTED_ADDRESS] VERSAILLES"},
+		{"12 rue Victor Hugo\tIDF\t75002", "[REDACTED_ADDRESS]\tIDF\t75002"},
+		{"12 rue Lecourbe Paris XV", "[REDACTED_ADDRESS]"},
+		// No house number ends a French name, so title-case words after it
+		// on the same line are replaced with it.
+		{"12 rue de la Paix Paris France", "[REDACTED_ADDRESS]"},
 
 		// German
 		{"Karl-Marx-Straße 5", "[REDACTED_ADDRESS]"},
@@ -123,6 +138,8 @@ func TestDetectPII_EuropeanAddressLookalikes(t *testing.T) {
 		"Heldeplatz 2.0MB",
 		// rue in identifiers.
 		"rue_de_la_paix 12",
+		// C/ in a path.
+		"docs/C/Readme 2",
 		"item12 rue de la Paix",
 		"getRue(12)",
 		// Plaza as a product name.
@@ -184,6 +201,42 @@ func TestHasStreetKeyword(t *testing.T) {
 	for _, tt := range tests {
 		if got := hasStreetKeyword(tt.s, tt.k); got != tt.want {
 			t.Errorf("hasStreetKeyword(%q, %+v) = %v, want %v", tt.s, tt.k, got, tt.want)
+		}
+	}
+}
+
+// TestEuropeanStreetTypes checks every listed street type end to end: the
+// prefilter lets a street line with it through, and its pattern matches the
+// whole line.
+func TestEuropeanStreetTypes(t *testing.T) {
+	t.Parallel()
+	type line struct {
+		re   *regexp.Regexp
+		text string
+	}
+	var lines []line
+	add := func(re *regexp.Regexp, format string, types []string) {
+		for _, ty := range types {
+			lines = append(lines, line{re, fmt.Sprintf(format, ty)})
+			if d := strings.ReplaceAll(ty, "é", "e\u0301"); d != ty {
+				lines = append(lines, line{re, fmt.Sprintf(format, d)})
+			}
+		}
+	}
+	add(italianAddressRegex, "%s Roma 12", italianStreetTypes)
+	add(spanishAddressRegex, "%s Mayor 5", spanishStreetTypes)
+	add(spanishSlashAddressRegex, "%s Mayor 5", []string{"C/"})
+	add(frenchAddressRegex, "12 %s de la Paix", frenchStreetTypes)
+	add(frenchAddressRegex, "12 %s de la Paix", capitalized(frenchStreetTypes))
+	add(germanAddressRegex, "Haupt%s 12", germanStreetTypes)
+	add(germanAddressRegex, "Karl-Marx-%s 5", capitalized(germanStreetTypes))
+	add(germanAddressRegex, "Berliner %s 5", capitalized(germanStreetTypes))
+	for _, l := range lines {
+		if !mayContainEuropeanAddress(l.re, l.text) {
+			t.Errorf("prefilter drops %q", l.text)
+		}
+		if got := europeanAddressMatches(l.re, l.text); len(got) != 1 || got[0][0] != 0 || got[0][1] != len(l.text) {
+			t.Errorf("pattern matches %q at %v, want the whole line", l.text, got)
 		}
 	}
 }

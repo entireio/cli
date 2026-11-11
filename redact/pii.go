@@ -193,6 +193,7 @@ var builtinPIIPatterns = []builtinPIIPattern{
 	{PIIAddress, labelAddress, addressRegex},
 	{PIIAddress, labelAddress, italianAddressRegex},
 	{PIIAddress, labelAddress, spanishAddressRegex},
+	{PIIAddress, labelAddress, spanishSlashAddressRegex},
 	{PIIAddress, labelAddress, frenchAddressRegex},
 	{PIIAddress, labelAddress, germanAddressRegex},
 	{PIIIP, labelIP, ipv4CandidateRegex},

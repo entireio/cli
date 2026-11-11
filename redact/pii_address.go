@@ -29,8 +29,10 @@ const (
 	euNameWord = `(?:(?:[dDlL]|[Dd]ell|[Aa]ll|[Ss]ant)['’])?\p{Lu}\p{M}*\p{Ll}` + euLetter + `*(?:-` + euLetter + `+)*`
 	// euRomanNumeral may follow a name word (Vittorio Emanuele II). It cannot
 	// start a name on its own, so an acronym such as CLI after Via does not
-	// count.
-	euRomanNumeral = `[IVX]{1,5}`
+	// count. It must be a whole word, so the start of a word in capitals
+	// after a French name (12 rue de la Paix VERSAILLES) is not read as a
+	// numeral that endsStreetLine would then reject with the whole match.
+	euRomanNumeral = `[IVX]{1,5}\b`
 	// euMonth is a month in Italian, Spanish or French, in either case. An
 	// accented French month also matches in decomposed form.
 	euMonth = `(?i:gennaio|febbraio|marzo|aprile|maggio|giugno|luglio|agosto|settembre|ottobre|novembre|dicembre` +
@@ -47,12 +49,14 @@ const (
 	euSpace = `[ \t]+`
 	// euHouseNumber is the number that ends an Italian or Spanish street
 	// line, optionally after n., n.º, nº or n°, with an optional letter or
-	// sub-number (3/A, 12b, 7/2). It ends at a word boundary in the pattern
+	// sub-number (3/A, 12b, 7/2, 12/bis). A sub-number is digits, one letter,
+	// bis or ter, so it never takes the next street's type (Via Roma 1 / Via
+	// Milano 2). It ends at a word boundary in the pattern
 	// itself, not only in endsStreetLine, so when a date's year could take a
 	// four-digit house number (Via XX Settembre 1234, 20121 Milano), the
 	// regex reads 1234 as the house number instead of returning a match that
 	// ends inside the postal code.
-	euHouseNumber = `(?:n(?:\.[°º]?|[°º])[ \t]?)?\d{1,4}(?:[ \t]?/[ \t]?[0-9A-Za-z]{1,3}|[A-Za-z])?\b`
+	euHouseNumber = `(?:n(?:\.[°º]?|[°º])[ \t]?)?\d{1,4}(?:[ \t]?/[ \t]?(?:bis|ter|[0-9]{1,3}|[A-Za-z])|[A-Za-z])?\b`
 	// euGermanAdjective may come before a German street's name: Alte
 	// Schönhauser Straße, Große Hamburger Straße, Alter Postweg.
 	euGermanAdjective = `(?:Alt|Neu|Gro(?:ß|ss)|Klein|Ober|Unter|Mittler|Vorder|Hinter|Hoh|Lang|Breit)e[nrs]?`
@@ -64,7 +68,47 @@ const (
 	// from starting a match, without hiding a street line later in the same
 	// run of words (xVia Foo Via Roma 12).
 	euLeftEdge = `(?:^|[^\p{L}\p{M}\p{N}_]|\\[nrt])`
+	// euSlashTypeLeftEdge is euLeftEdge without a slash, for C/: its own
+	// slash would otherwise make a path segment a street line
+	// (docs/C/Readme 2).
+	euSlashTypeLeftEdge = `(?:^|[^\p{L}\p{M}\p{N}_/]|\\[nrt])`
 )
+
+// The street types of each family. Each pattern's alternation and its
+// prefilter keywords (europeanAddressKeywords) are both built from these
+// lists, so a type cannot reach one without the other.
+var (
+	italianStreetTypes = []string{"Via", "Viale", "Piazza", "Piazzale", "Corso", "Largo", "Vicolo", "Strada"}
+	// spanishStreetTypes leaves out C/, which has a pattern of its own.
+	spanishStreetTypes = []string{"Calle", "Avenida", "Avda.", "Plaza", "Paseo", "Camino", "Ronda", "Rambla"}
+	// frenchStreetTypes are written in lowercase and also match capitalized
+	// (12 Rue de la Paix).
+	frenchStreetTypes = []string{"rue", "avenue", "boulevard", "place", "chemin", "allée", "impasse", "quai"}
+	// germanStreetTypes end a longer word in lowercase (Hauptstraße), and
+	// stand capitalized after a hyphen or on their own (Karl-Marx-Straße,
+	// Berliner Straße).
+	germanStreetTypes = []string{"straße", "strasse", "str.", "weg", "platz", "allee", "gasse"}
+)
+
+// euAlternation matches any one of words. An é in a word also matches its
+// decomposed form (e followed by U+0301).
+func euAlternation(words []string) string {
+	alts := make([]string, len(words))
+	for i, w := range words {
+		alts[i] = strings.ReplaceAll(regexp.QuoteMeta(w), "é", `(?:é|e\x{301})`)
+	}
+	return `(?:` + strings.Join(alts, "|") + `)`
+}
+
+// capitalized returns words with their first letter in upper case.
+func capitalized(words []string) []string {
+	out := make([]string, len(words))
+	for i, w := range words {
+		r, n := utf8.DecodeRuneInString(w)
+		out[i] = string(unicode.ToUpper(r)) + w[n:]
+	}
+	return out
+}
 
 // euStreetName is a street name of title-case words, with the given
 // lowercase particles allowed before and between them; the first word may be
@@ -79,28 +123,38 @@ func euStreetName(particles string) string {
 // euStreetLine wraps a family's street-line pattern in euLeftEdge, with the
 // street line as group 1.
 func euStreetLine(pattern string) *regexp.Regexp {
-	return regexp.MustCompile(euLeftEdge + `(` + pattern + `)`)
+	return euStreetLineAfter(euLeftEdge, pattern)
+}
+
+// euStreetLineAfter is euStreetLine with another left edge.
+func euStreetLineAfter(leftEdge, pattern string) *regexp.Regexp {
+	return regexp.MustCompile(leftEdge + `(` + pattern + `)`)
 }
 
 var (
 	// italianAddressRegex: Via Roma 12, Piazza del Duomo 1, Via dei Mille 3/A.
 	italianAddressRegex = euStreetLine(
-		`(?:Via|Viale|Piazza|Piazzale|Corso|Largo|Vicolo|Strada)` + euSpace +
+		euAlternation(italianStreetTypes) + euSpace +
 			euStreetName(`di|da|del|dello|della|delle|dei|degli|dal|dalla|al|alla|alle|e`) +
 			`,?` + euSpace + euHouseNumber)
 
-	// spanishAddressRegex: Calle Mayor 5, Calle de Alcalá, 42, C/ Mayor 5.
+	// spanishAddressRegex: Calle Mayor 5, Calle de Alcalá, 42.
 	spanishAddressRegex = euStreetLine(
-		`(?:(?:Calle|Avenida|Avda\.|Plaza|Paseo|Camino|Ronda|Rambla)` + euSpace + `|C/[ \t]?)` +
-			euStreetName(`de|del|la|las|los|el|y`) +
-			`,?` + euSpace + euHouseNumber)
+		euAlternation(spanishStreetTypes) + euSpace + spanishNameAndNumber)
+
+	// spanishSlashAddressRegex: C/ Mayor 5, C/Mayor 5. Not right after a
+	// slash, where C/ is part of a path (docs/C/Readme 2).
+	spanishSlashAddressRegex = euStreetLineAfter(euSlashTypeLeftEdge,
+		`C/[ \t]?`+spanishNameAndNumber)
+
+	spanishNameAndNumber = euStreetName(`de|del|la|las|los|el|y`) + `,?` + euSpace + euHouseNumber
 
 	// frenchAddressRegex: 12 rue de la Paix, 8 bis boulevard Saint-Germain,
 	// 12 B rue de la Paix. The street type may be capitalized (12 Rue de la
 	// Paix).
 	frenchAddressRegex = euStreetLine(
 		`\d{1,4}(?:[ \t]?(?:bis|ter)\b|[ \t]?[A-D]\b|[a-d]\b)?,?` + euSpace +
-			`(?:[Rr]ue|[Aa]venue|[Bb]oulevard|[Pp]lace|[Cc]hemin|[Aa]ll(?:é|e\x{301})e|[Ii]mpasse|[Qq]uai)` + euSpace +
+			euAlternation(slices.Concat(frenchStreetTypes, capitalized(frenchStreetTypes))) + euSpace +
 			euStreetName(`de|du|des|la|le|les|aux|au|sur`))
 
 	// germanAddressRegex: Hauptstraße 12, Karl-Marx-Straße 5, Berliner Str. 5,
@@ -110,9 +164,9 @@ var (
 	// first (Alte Jakobstraße 5).
 	germanAddressRegex = euStreetLine(
 		`(?:` + euGermanAdjective + euSpace + `)?` +
-			`(?:\p{Lu}` + euLetter + `*(?:-` + euLetter + `+)*(?:straße|strasse|str\.|weg|platz|allee|gasse)` +
-			`|\p{Lu}` + euLetter + `*(?:-` + euLetter + `+)*-(?:Straße|Strasse|Str\.|Weg|Platz|Allee|Gasse)` +
-			`|\p{Lu}\p{M}*\p{Ll}[\p{Ll}\p{M}]*` + euSpace + `(?:Straße|Strasse|Str\.|Weg|Platz|Allee|Gasse))` +
+			`(?:\p{Lu}` + euLetter + `*(?:-` + euLetter + `+)*` + euAlternation(germanStreetTypes) +
+			`|\p{Lu}` + euLetter + `*(?:-` + euLetter + `+)*-` + euAlternation(capitalized(germanStreetTypes)) +
+			`|\p{Lu}\p{M}*\p{Ll}[\p{Ll}\p{M}]*` + euSpace + euAlternation(capitalized(germanStreetTypes)) + `)` +
 			euSpace + `\d{1,4}[a-zA-Z]?`)
 )
 
@@ -127,10 +181,15 @@ type streetKeyword struct {
 	nameFollows bool
 }
 
+// streetTypes returns words as keywords. A word with an é is also listed in
+// decomposed form, as euAlternation matches it.
 func streetTypes(inWord bool, words ...string) []streetKeyword {
-	keywords := make([]streetKeyword, len(words))
-	for i, w := range words {
-		keywords[i] = streetKeyword{word: w, inWord: inWord}
+	var keywords []streetKeyword
+	for _, w := range words {
+		keywords = append(keywords, streetKeyword{word: w, inWord: inWord})
+		if d := strings.ReplaceAll(w, "é", "e\u0301"); d != w {
+			keywords = append(keywords, streetKeyword{word: d, inWord: inWord})
+		}
 	}
 	return keywords
 }
@@ -140,16 +199,13 @@ func streetTypes(inWord bool, words ...string) []streetKeyword {
 // them is far cheaper than running the pattern, and most strings hold none.
 // The word checks matter: true holds rue and Caller holds Calle.
 var europeanAddressKeywords = map[*regexp.Regexp][]streetKeyword{
-	italianAddressRegex: streetTypes(false, "Via", "Viale", "Piazza", "Piazzale", "Corso", "Largo", "Vicolo", "Strada"),
-	spanishAddressRegex: append(
-		streetTypes(false, "Calle", "Avenida", "Avda.", "Plaza", "Paseo", "Camino", "Ronda", "Rambla"),
-		streetKeyword{word: "C/", nameFollows: true}),
-	frenchAddressRegex: streetTypes(false,
-		"rue", "Rue", "avenue", "Avenue", "boulevard", "Boulevard", "place", "Place",
-		"chemin", "Chemin", "allée", "Allée", "allée", "Allée", "impasse", "Impasse", "quai", "Quai"),
-	germanAddressRegex: append(
-		streetTypes(false, "Straße", "Strasse", "Str.", "Weg", "Platz", "Allee", "Gasse"),
-		streetTypes(true, "straße", "strasse", "str.", "weg", "platz", "allee", "gasse")...),
+	italianAddressRegex:      streetTypes(false, italianStreetTypes...),
+	spanishAddressRegex:      streetTypes(false, spanishStreetTypes...),
+	spanishSlashAddressRegex: {{word: "C/", nameFollows: true}},
+	frenchAddressRegex:       streetTypes(false, slices.Concat(frenchStreetTypes, capitalized(frenchStreetTypes))...),
+	germanAddressRegex: slices.Concat(
+		streetTypes(false, capitalized(germanStreetTypes)...),
+		streetTypes(true, germanStreetTypes...)),
 }
 
 func isEuropeanAddressRegex(re *regexp.Regexp) bool {
