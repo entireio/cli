@@ -309,6 +309,7 @@ func TestString_CommandLinePasswordsReviewCases(t *testing.T) {
 		{name: "quoted short flag value after a quoted shell word ending in a comma", input: `mysql -h 'db', "-pabc",` + p, want: `mysql -h 'db', "-pREDACTED`},
 		{name: "quoted short flag value after a quoted element in a code list", input: `run("mysql", 'db', "-p` + p + `",x)`, want: `run("mysql", 'db', "-pREDACTED",x)`},
 		{name: "long flag password spelled like a prose word before two arguments", input: "mongosh --password string db admin", want: "mongosh --password REDACTED db admin"},
+		{name: "long flag password spelled like a prose word before a URL", input: "wget --password string http://host/", want: "wget --password REDACTED http://host/"},
 		{name: "netrc fields equal to a type name after a command in a shell group", input: "{ echo foo machine string login string password string; }", want: "{ echo foo machine string login string password REDACTED }"},
 		{name: "quoted short flag value after an expression in a code list", input: `exec.Command("mysql", "-h", "db-"+suffix, "-p` + p + `",db)`, want: `exec.Command("mysql", "-h", "db-"+suffix, "-pREDACTED",db)`},
 		{name: "quoted short flag value after a long string in a code list", input: `exec.Command("mysql", "-h", "` + strings.Repeat("h", 1100) + `", "-p` + p + `",db)`, want: `exec.Command("mysql", "-h", "` + strings.Repeat("h", 1100) + `", "-pREDACTED",db)`},
@@ -691,6 +692,30 @@ func TestString_CommandLinePasswordsShellGrammarCases(t *testing.T) {
 		{name: "mysql password after sudo --user joined in a list", input: `subprocess.run(["sudo", "--user=ssh", "mysql", "-p` + p + `"])`, want: `subprocess.run(["sudo", "--user=ssh", "mysql", "-pREDACTED"])`},
 		{name: "mysql password after env --split-string in a list", input: `subprocess.run(["env", "--split-string", "mysql", "-p` + p + `"])`, want: `subprocess.run(["env", "--split-string", "mysql", "-pREDACTED"])`},
 		{name: "mysql password after env -iS in a list", input: `subprocess.run(["env", "-iS", "mysql", "-p` + p + `"])`, want: `subprocess.run(["env", "-iS", "mysql", "-pREDACTED"])`},
+		{name: "client after a container subcommand that runs nothing", input: "kubectl patch deployment mysql -p='{\"spec\":{}}' && mysql -p" + p, want: "kubectl patch deployment mysql -p='{\"spec\":{}}' && mysql -pREDACTED"},
+		{name: "compose option value named like a subcommand", input: "docker compose --project-directory build exec db mysql -p" + p, want: "docker compose --project-directory build exec db mysql -pREDACTED"},
+		{name: "unknown container option before a word named like a subcommand", input: "podman --connection build exec db mysql -p" + p, want: "podman --connection build exec db mysql -pREDACTED"},
+		{name: "client run by a container service", input: "docker service create --name db alpine mysql -h h -p" + p, want: "docker service create --name db alpine mysql -h h -pREDACTED"},
+		{name: "client after -- following a container subcommand that runs nothing", input: "kubectl set env deployment/db A=1 -- mysql -p" + p, want: "kubectl set env deployment/db A=1 -- mysql -pREDACTED"},
+		{name: "double-quoted registry login subcommand", input: `docker "login" -u me -p ` + p + " ghcr.io", want: `docker "login" -u me -p REDACTED ghcr.io`},
+		{name: "single-quoted registry login subcommand", input: "docker 'login' -p " + p, want: "docker 'login' -p REDACTED"},
+		{name: "quoted az login subcommand", input: `az "login" -u me -p ` + p, want: `az "login" -u me -p REDACTED`},
+		{name: "quoted helm registry login subcommands", input: `helm "registry" "login" reg -u me -p ` + p, want: `helm "registry" "login" reg -u me -p REDACTED`},
+		{name: "escaped quoted registry login subcommand in a script", input: `sh -c "docker \"login\" -p ` + p + `"`, want: `sh -c "docker \"login\" -p REDACTED"`},
+		{name: "quoted container subcommand before the client", input: `docker "exec" db mysql -p` + p, want: `docker "exec" db mysql -pREDACTED`},
+		{name: "quoted kubectl subcommand before the client", input: `kubectl "exec" db -- mysql -p` + p, want: `kubectl "exec" db -- mysql -pREDACTED`},
+		{name: "mongo short flag joined by an equals sign", input: "mongodump -u admin -p=" + p + " --db app", want: "mongodump -u admin -p=REDACTED --db app"},
+		{name: "dash-led mongo password joined by an equals sign", input: "mongodump -p=-" + p + " --db app", want: "mongodump -p=REDACTED --db app"},
+		{name: "mongo short flag glued to its value", input: "mongosh -u admin -p" + p + " db", want: "mongosh -u admin -pREDACTED db"},
+		{name: "mongo short flag joined by an equals sign in a list", input: `subprocess.run(["mongodump", "-p=` + p + `"])`, want: `subprocess.run(["mongodump", "-p=REDACTED"])`},
+		{name: "dash-led mongo password joined by an equals sign in a list", input: `subprocess.run(["mongosh", "-p=-` + p + `"])`, want: `subprocess.run(["mongosh", "-p=REDACTED"])`},
+		{name: "openssl source in a Python raw string", input: `subprocess.run(["openssl", "enc", "-aes-128-cbc", "-pass", r"pass:` + p + `"])`, want: `subprocess.run(["openssl", "enc", "-aes-128-cbc", "-pass", r"pass:REDACTED"])`},
+		{name: "long flag value in a Python bytes string", input: `subprocess.run(["wget", "--password", rb'` + p + `', url])`, want: `subprocess.run(["wget", "--password", rb'REDACTED', url])`},
+		{name: "short flag value in an uppercase Python raw string", input: `subprocess.run(["redis-cli", "-a", R"` + p + `"])`, want: `subprocess.run(["redis-cli", "-a", R"REDACTED"])`},
+		{name: "glued short flag in a Python raw string", input: `subprocess.run(["mysql", "-u", "root", r"-p` + p + `", "db"])`, want: `subprocess.run(["mysql", "-u", "root", r"-pREDACTED", "db"])`},
+		{name: "Python raw strings for the program and the password", input: `subprocess.run([r"C:\Tools\wget.exe", "--password", r"C:\vault\` + p + `", url])`, want: `subprocess.run([r"C:\Tools\wget.exe", "--password", r"REDACTED", url])`},
+		{name: "dollar sign in a Python raw string", input: `subprocess.run(["wget", "--password", r"$` + p + `", url])`, want: `subprocess.run(["wget", "--password", r"REDACTED", url])`},
+		{name: "Python raw string in a JSON string", input: `{"cmd": "subprocess.run([\"wget\", \"--password\", r\"` + p + `\", url])"}`, want: `{"cmd": "subprocess.run([\"wget\", \"--password\", r\"REDACTED\", url])"}`},
 	})
 }
 
@@ -867,6 +892,21 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		"The --password flag is required.",
 		"  --password value   The password to use",
 		"kubectl --as alice logs mysql -p",
+		// a client name that is an operand of a container client's
+		// subcommand that runs nothing
+		`kubectl patch deployment mysql -p='{"spec":{"replicas":3}}'`,
+		`kubectl -n prod patch deployment mysql -p{"spec":{"replicas":3}}`,
+		"docker logs mysql -pfoo",
+		"docker compose --project-directory build logs mysql -pfoo",
+		"docker service logs mysql -pfoo",
+		`kubectl --warnings-as-errors patch deployment mysql -p '{"spec":{"replicas":3}}'`,
+		`kubectl --warnings-as-errors patch deployment mysql -p='{"spec":{"replicas":3}}'`,
+		"docker --debug logs mysql -pfoo",
+		`kubectl --namespace prod patch deployment mysql -p{"spec":{"replicas":3}}`,
+		`docker "logs" mysql -pfoo`,
+		`docker "run" --name login -p 8080:80 nginx`,
+		`echo "login" -p 8080`,
+		"docker loginx -p 8080",
 		"the machine learning password policy",
 		"By default login with password is disabled.",
 		"default password is stored in the vault",
@@ -1126,6 +1166,11 @@ func TestString_CommandLinePasswordListAndQuotingNonSecretsPreserved(t *testing.
 		"exec.Command(\"mysql\", \"-u\", \"root\", \"-p\", `appdb`)",
 		// an ssh option that runs no command
 		`ssh -o "HostName=mysql" -p2222 host`,
+		// an f-string's braces interpolate, and a Python prefix on a
+		// command line is joined to the word (r-pfoo)
+		`subprocess.run(["openssl", "enc", "-pass", f"pass:{pw}"])`,
+		`mysql -u root r"-pfoo"`,
+		`psql_cmd = [r"C:\Program Files\PostgreSQL\16\bin\psql.exe", "--password", "-h", "db"]`,
 	})
 }
 

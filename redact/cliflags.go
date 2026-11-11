@@ -224,22 +224,25 @@ var cliPasswordFlags = []cliPasswordFlag{
 	// login must be the client's subcommand, after its global options
 	// (docker --config dir login, helm registry --debug login), so a
 	// container named login (docker run --name login -p 8080:80) is not.
+	// The shell removes the quotes of a quoted one (docker "login" -p x).
 	{
 		needles: []string{loginCommand},
-		command: regexp.MustCompile(`\b(?:docker|podman|nerdctl|buildah|skopeo|oras|helm)\b(?i:\.exe)?(?:["']?` + cliGlobalOptions + cliBlank + `(?:registry` + cliGlobalOptions + cliBlank + `)?|` + cliListOptions + cliListNext + `(?:registry` + cliListOptions + cliListNext + `)?)login\b`),
+		command: regexp.MustCompile(`\b(?:docker|podman|nerdctl|buildah|skopeo|oras|helm)\b(?i:\.exe)?(?:["']?` + cliGlobalOptions + cliBlank + `(?:` + cliSubcommand("registry") + cliGlobalOptions + cliBlank + `)?|` + cliListOptions + cliListNext + `(?:registry` + cliListOptions + cliListNext + `)?)` + cliSubcommand(loginCommand)),
 		flag:    regexp.MustCompile(cliShortFlag(`\s`, "p", `(?:`+cliBlank+`)?`)),
 	},
 	// az may be quoted with its path ("/usr/bin/az" login) and take
 	// global options before login (az --debug login).
 	{
 		needles: []string{loginCommand},
-		command: regexp.MustCompile(`\baz\b(?i:\.exe)?(?:["']?` + cliGlobalOptions + cliBlank + `|` + cliListOptions + cliListNext + `)login\b`),
+		command: regexp.MustCompile(`\baz\b(?i:\.exe)?(?:["']?` + cliGlobalOptions + cliBlank + `|` + cliListOptions + cliListNext + `)` + cliSubcommand(loginCommand)),
 		flag:    regexp.MustCompile(cliShortFlag(`\s`, "p", `(?:`+cliBlank+`)?`)),
 	},
+	// The mongo tools take -p's value after a blank, after "=" (mongodump
+	// -p=x, as they document it) or joined to it.
 	{
 		needles:     []string{"mongo"},
 		command:     regexp.MustCompile(`\b(?:mongosh|mongo|mongodump|mongorestore|mongoexport|mongoimport|mongostat|mongotop)\b`),
-		flag:        regexp.MustCompile(cliShortFlag(`\s`, "p", cliBlank)),
+		flag:        regexp.MustCompile(cliShortFlag(`\s`, "p", `(?:=|`+cliBlank+`)?`)),
 		optional:    true,
 		noValueLong: true,
 	},
@@ -293,6 +296,11 @@ const opensslSourceFlag = `(?:-pass(?:in|out)|pass(?:in|out|word)?)`
 // -H and -t, ...) is left out, since its value would be the rest of the word.
 const mysqlNoValueOptions = `[ABCENVXbnsv]*`
 
+// cliPythonPrefix matches the prefix of a Python string, which may open a
+// quoted flag in an argument list in code ([r"-pC:\x"], see
+// pythonStringPrefix).
+const cliPythonPrefix = `(?:[rRbBuU]|[rR][bB]|[bB][rR])?`
+
 // cliShortFlag matches the short flag -name after before, then sep and its
 // value: -px, a flag quoted with its value ("-px", "-p x"), or one quoted on
 // its own ("-p" x, "-p"'x'). A blank before may also be a separator of code,
@@ -308,7 +316,14 @@ func cliShortFlag(before, name, sep string) string {
 	if sep != "" {
 		quotedSep = `(?:,` + cliListGap + `|` + sep + `)`
 	}
-	return before + `(?:` + cliFlagQuote + `-` + name + cliFlagClose + quotedSep + `|-` + name + sep + `)(` + cliFlagValue + `)`
+	return before + `(?:` + cliPythonPrefix + cliFlagQuote + `-` + name + cliFlagClose + quotedSep + `|-` + name + sep + `)(` + cliFlagValue + `)`
+}
+
+// cliSubcommand matches name as a client's subcommand, which may be quoted
+// ("login", 'login', or \"login\" in a double-quoted command), as the shell
+// passes it unquoted.
+func cliSubcommand(name string) string {
+	return `(?:\\?["'])?` + name + `\b(?:\\?["'])?`
 }
 
 // netrcValue is a .netrc token. A double-quoted one may hold escaped quotes
@@ -589,7 +604,7 @@ func listElementsBefore(s string, open int) []string {
 	if open > 0 && s[open-1] == '\\' {
 		open--
 	}
-	code := s[:open]
+	code := s[:open-pythonPrefixBefore(s, open)]
 	var elements []string
 	for range maxCodeElements {
 		code = strings.TrimRight(code, " \t\r\n")
@@ -607,7 +622,8 @@ func listElementsBefore(s string, open int) []string {
 		if !ok {
 			return nil
 		}
-		code, elements = element, append(elements, code[len(element):])
+		text := code[len(element):]
+		code, elements = element, append(elements, text[pythonStringPrefix(text, 0):])
 	}
 	return nil
 }
@@ -1792,6 +1808,15 @@ type commandWords struct {
 	// the name of a command that prints its arguments.
 	command bool
 	text    bool
+	// noRun is set with text after a container client's subcommand that
+	// runs no command, all of whose words are its operands
+	// (kubectl patch deployment mysql -p='{...}'), unless optionUnknown
+	// is: it is set after a long option of a container client, before its
+	// subcommand, that may take the next word as its argument but is not
+	// known to (podman --connection build exec db mysql -pX), so that word
+	// may be no subcommand.
+	noRun         bool
+	optionUnknown bool
 }
 
 // at reports whether a command name at p, in the argument of s whose text
@@ -2114,6 +2139,9 @@ func (c *commandStart) word(word string) {
 		level.open, level.pos = level.open+1, caseWord
 		c.command = true
 	case c.text:
+		// Words after "--" may be a command to run (kubectl ... -- mysql
+		// -pX), so they are no longer all operands.
+		c.noRun = c.noRun && word != "--"
 	case c.redirectArg:
 		c.redirectArg = false
 	case c.funcName:
@@ -2144,17 +2172,19 @@ func (c *commandStart) word(word string) {
 		option := unquotedWord(word)
 		c.optionArg = takesArgument(c.wrapper, option)
 		c.execArg = c.optionArg && runsArgument(c.wrapper, option)
+		c.optionUnknown = c.optionUnknown || isContainerClient(c.wrapper) && !c.sub && !c.optionArg && mayTakeArgument(option)
 	case isContainerClient(c.wrapper) && !c.sub:
 		// The subcommand of a container client: exec and run run a
 		// command in a container (docker exec db mysql -pX), and the
 		// others run none (docker logs mysql). Any other word comes
 		// before it: container, compose, or the value of a global option
 		// (kubectl --as alice exec).
-		switch {
-		case slices.Contains(containerRunSubcommands, word):
+		// The shell removes a quoted subcommand's quotes (docker "exec").
+		switch sub := unquotedWord(word); {
+		case slices.Contains(containerRunSubcommands, sub):
 			c.sub = true
-		case slices.Contains(containerTextSubcommands, word):
-			c.text = true
+		case slices.Contains(containerTextSubcommands, sub):
+			c.text, c.noRun = true, !c.optionUnknown
 		}
 	case hasDestination(c.wrapper) && !c.host:
 		// The destination of ssh (ssh db mysql -pX), or the container or
@@ -2307,11 +2337,12 @@ func isContainerClient(word string) bool {
 
 // containerRunSubcommands are the subcommands of container clients that run
 // a command in a container, and containerTextSubcommands those that run
-// none.
+// none. A group of subcommands whose create runs one (docker service create
+// alpine mysql -pX) is in neither, as container is.
 var (
 	containerRunSubcommands  = []string{execCommand, "run", "create", "debug"}
 	containerTextSubcommands = []string{
-		"annotate", "api-resources", "api-versions", "apply", "attach", "auth", "autoscale", "build", "builder", "buildx", "certificate", "cluster-info", "commit", "completion", "config", "context", "cordon", "cp", "delete", "describe", "diff", "drain", "edit", "events", "explain", "export", "expose", "get", "history", "image", "images", "import", "info", "inspect", "kill", "kustomize", "label", "load", loginCommand, "logout", "logs", "manifest", "network", "node", "patch", "pause", "plugin", "port", "port-forward", "proxy", "ps", "pull", "push", "rename", "replace", "restart", "rm", "rmi", "rollout", "save", "scale", "search", "service", "set", "stack", "start", "stats", "stop", "swarm", "system", "tag", "taint", "top", "trust", "uncordon", "unpause", "update", "version", "volume", "wait",
+		"annotate", "api-resources", "api-versions", "apply", "attach", "auth", "autoscale", "build", "builder", "buildx", "certificate", "cluster-info", "commit", "completion", "config", "context", "cordon", "cp", "delete", "describe", "diff", "drain", "edit", "events", "explain", "export", "expose", "get", "history", "image", "images", "import", "info", "inspect", "kill", "kustomize", "label", "load", loginCommand, "logout", "logs", "manifest", "network", "node", "patch", "pause", "plugin", "port", "port-forward", "proxy", "ps", "pull", "push", "rename", "replace", "restart", "rm", "rmi", "rollout", "save", "scale", "search", "set", "stack", "start", "stats", "stop", "swarm", "system", "tag", "taint", "top", "trust", "uncordon", "unpause", "update", "version", "volume", "wait",
 	}
 )
 
@@ -2342,13 +2373,28 @@ var (
 		"chdir", "chroot", "close-from", "command-timeout", "format", "group", "host", "other-user", "output", "prompt", "role", "split-string", "type", "unset", "user",
 		// container clients
 		"as", "as-group", "as-uid", "cache-dir", "certificate-authority", "client-certificate", "client-key", "log-dir", "log-file", "password", "profile", "profile-output", "request-timeout", "server", "tls-server-name", "tlscacert", "tlscert", "tlskey", "token", "username",
-		"add-host", "attach", "cap-add", "cap-drop", "cgroupns", "cidfile", "cluster", "config", "container", "context", "cpu-shares", "cpus", "detach-keys", "device", "dns", "entrypoint", "env", "env-file", "filename", "gpus", "hostname", "ip", "ipc", "kubeconfig", "label", "link", "log-driver", "log-level", "log-opt", "memory", "mount", "name", "namespace", "network", "network-alias", "pid", "platform", "publish", "pull", "restart", "runtime", "security-opt", "shm-size", "tmpfs", "ulimit", "volume", "volumes-from", "workdir",
+		"add-host", "ansi", "attach", "cap-add", "cap-drop", "cgroupns", "cidfile", "cluster", "config", "container", "context", "cpu-shares", "cpus", "detach-keys", "device", "dns", "entrypoint", "env", "env-file", "file", "filename", "gpus", "hostname", "ip", "ipc", "kubeconfig", "label", "link", "log-driver", "log-level", "log-opt", "memory", "mount", "name", "namespace", "network", "network-alias", "parallel", "pid", "platform", "progress", "project-directory", "project-name", "publish", "pull", "restart", "runtime", "security-opt", "shm-size", "tmpfs", "ulimit", "volume", "volumes-from", "workdir",
 	}
 )
 
+// containerFlagOptions are the long options of container clients, before
+// their subcommand, known to take no value (kubectl --warnings-as-errors
+// patch, docker --debug logs).
+var containerFlagOptions = []string{
+	"add-dir-header", "all-resources", "alsologtostderr", "compatibility", "debug", "debug-full", "disable-compression", "dry-run", "experimental", "insecure-registry", "insecure-skip-tls-verify", "logtostderr", "match-server-version", "noout", "one-output", "remote", "skip-headers", "skip-log-headers", "syslog", "tls", "tlsverify", "verbose", "warnings-as-errors",
+}
+
+// mayTakeArgument reports whether option, a container client's option that
+// is not known to take an argument, may still take the next word: a long one
+// with no value joined to it, unless it is known to take none.
+func mayTakeArgument(option string) bool {
+	name, ok := strings.CutPrefix(option, "--")
+	return ok && !strings.Contains(name, "=") && !slices.Contains(containerFlagOptions, name)
+}
+
 // containerArgOptions are the short options of container clients, before
 // and after their subcommand, that take an argument (docker -H host,
-// docker run -h mongo -p 27017:27017, kubectl exec -c app -n prod).
+// docker run -h web -p 8080:80, kubectl exec -c app -n prod).
 const containerArgOptions = "Hacefhlmnpsuvw"
 
 // takesArgument reports whether option, an option of wrapper, takes the next
@@ -2477,8 +2523,12 @@ func isListFlag(s string, base int, loc []int) bool {
 // listElementValue returns the value in the string of code that opens at
 // s[open], an element of an argument list, false when no string opens there
 // (a name, such as pw) or when the string is the key of an object, which
-// a colon follows ({"literal": "--password", "caseFold": true}).
+// a colon follows ({"literal": "--password", "caseFold": true}). The
+// string may have a Python prefix (r"pass:x", see pythonStringPrefix),
+// which makes it literal: Python expands no $ (r"$ecret").
 func listElementValue(s string, open int) (cliValue, bool) {
+	prefix := pythonStringPrefix(s, open)
+	open += prefix
 	end, n := codeStringEnd(s, open)
 	if n == 0 && s[open] == '`' {
 		// A raw string, as Go writes one (exec.Command("wget",
@@ -2490,7 +2540,36 @@ func listElementValue(s string, open int) (cliValue, bool) {
 	if n == 0 || strings.HasPrefix(strings.TrimLeft(s[end:], " \t\r\n"), ":") {
 		return cliValue{}, false
 	}
-	return cliValue{start: open + n, end: end - n, quoted: true, singleQuoted: s[open] != '"' && s[open] != '\\'}, true
+	return cliValue{start: open + n, end: end - n, quoted: true, singleQuoted: prefix > 0 || s[open] != '"' && s[open] != '\\'}, true
+}
+
+// pythonStringPrefix returns the length of the Python string prefix at
+// s[i] that a quote, or an escaped one in a JSON string, follows: r, b, u,
+// rb or br in either case (r"pass:x", rb'x'), else 0. An f-string's braces
+// interpolate (f"{pw}"), so its prefix is not read as one.
+func pythonStringPrefix(s string, i int) int {
+	for n := 1; n <= 2 && i+n < len(s); n++ {
+		if c := s[i+n]; c == '"' || c == '\'' || strings.HasPrefix(s[i+n:], `\"`) {
+			switch strings.ToLower(s[i : i+n]) {
+			case "r", "b", "u", "rb", "br":
+				return n
+			}
+			return 0
+		}
+	}
+	return 0
+}
+
+// pythonPrefixBefore returns the length of the Python string prefix that
+// ends at code[i], the opening quote of a string (see pythonStringPrefix),
+// where no other word character comes before it, else 0.
+func pythonPrefixBefore(code string, i int) int {
+	for n := 2; n >= 1; n-- {
+		if from := i - n; from >= 0 && (from == 0 || !isWordByte(code[from-1])) && pythonStringPrefix(code, from) == n {
+			return n
+		}
+	}
+	return 0
 }
 
 // codeStringEnd is quotedPiece for a string in code: a backslash escapes
@@ -2540,13 +2619,16 @@ func joinedFlagEnd(rest string, loc []int) int {
 // valueRegion returns the password of the flag that loc, a match of f.flag in
 // s from base, found. stringEnd and subs are as in appendFlags.
 func (f cliPasswordFlag) valueRegion(s string, base int, loc []int, stringEnd int, subs substitutionMemo) (taggedRegion, bool) {
-	if f.optional && (len(loc) < 8 || loc[2] < 0) && s[base+loc[len(loc)-2]] == '-' {
-		// The next flag of a client whose value is optional, whose word
-		// is not read (see appendLongPasswordFlags).
+	// A dash-led word after a blank is the next flag of a client whose
+	// value is optional; one after "=" is the value (mongodump -p=-x).
+	start := base + loc[len(loc)-2]
+	nextFlag := f.optional && s[start-1] != '='
+	if nextFlag && (len(loc) < 8 || loc[2] < 0) && s[start] == '-' {
+		// Its word is not read (see appendLongPasswordFlags).
 		return taggedRegion{}, false
 	}
 	v, ok := shortFlagValue(s, base, loc, stringEnd, subs)
-	if !ok || f.optional && isListFlag(s, base, loc) && strings.HasPrefix(s[v.start:v.end], "-") {
+	if !ok || nextFlag && isListFlag(s, base, loc) && strings.HasPrefix(s[v.start:v.end], "-") {
 		// The next element of a list is the next flag of such a client
 		// too (["mongosh", "-p", "--host", "db"]).
 		return taggedRegion{}, false
@@ -2557,7 +2639,7 @@ func (f cliPasswordFlag) valueRegion(s string, base int, loc []int, stringEnd in
 			return taggedRegion{}, false
 		}
 	}
-	return passwordValueRegion(s, v, stringEnd, subs, f.optional, false)
+	return passwordValueRegion(s, v, stringEnd, subs, nextFlag, false)
 }
 
 // shortFlagValue returns the value of the short password flag that loc, a
@@ -2569,6 +2651,11 @@ func shortFlagValue(s string, base int, loc []int, stringEnd int, subs substitut
 	start, end := base+loc[len(loc)-2], base+loc[len(loc)-1]
 	if len(loc) < 8 || loc[2] < 0 {
 		return shellWordValue(s, start, end, stringEnd, subs), true
+	}
+	if k := pythonPrefixBefore(s, base+loc[2]); k > 0 && !isCodeElementStart(s[:base+loc[2]-k]) {
+		// A Python prefix opens a string of code only; on a command line
+		// the shell joins it to the word (mysql r"-px" passes r-px).
+		return cliValue{}, false
 	}
 	closeFrom, closed := base+loc[4], loc[5] > loc[4]
 	pieceEnd, quoteLen := flagStringEnd(s, base+loc[2])
@@ -2601,7 +2688,9 @@ func shortFlagValue(s string, base int, loc []int, stringEnd int, subs substitut
 		// "-p" alone prompts for the password.
 		return cliValue{}, false
 	}
-	return quotedFlagValue(s, base+loc[2], start, pieceEnd, quoteLen, stringEnd, subs), true
+	v := quotedFlagValue(s, base+loc[2], start, pieceEnd, quoteLen, stringEnd, subs)
+	v.singleQuoted = v.singleQuoted || pythonPrefixBefore(s, base+loc[2]) > 0
+	return v, true
 }
 
 // flagStringEnd is quotedPiece for the string that opens a short flag at
@@ -2792,7 +2881,7 @@ func isCodeSeparator(s string, open, i int) bool {
 	if i == len(s) || strings.IndexByte(",]}", s[i]) < 0 {
 		return false
 	}
-	return isCodeElementStart(s[:open])
+	return isCodeElementStart(s[:open-pythonPrefixBefore(s, open)])
 }
 
 // maxCodeElements bounds how many elements before a string isCodeSeparator
@@ -2833,7 +2922,8 @@ func isCodeElementStart(code string) bool {
 }
 
 // codeElementStart returns the code before the string or name (db, os.Args)
-// that code ends with, or false when it ends with neither.
+// that code ends with, or false when it ends with neither. A string's
+// Python prefix is part of it (r"C:\Tools\wget.exe").
 func codeElementStart(code string) (string, bool) {
 	if code == "" {
 		return "", false
@@ -2845,7 +2935,7 @@ func codeElementStart(code string) (string, bool) {
 				if escaped {
 					i--
 				}
-				return code[:i], true
+				return code[:i-pythonPrefixBefore(code, i)], true
 			}
 		}
 		return "", false
@@ -3093,7 +3183,7 @@ func wordPieceEnd(s string, i, stringEnd int, first bool, subs substitutionMemo)
 // backtick that closes it on its line, before the quote that closes the
 // string holding the command, which ends at stringEnd (-1 for none), or 0
 // when none starts there. One that does not close on its line runs to the
-// end of it, as a $(...) does (mysql -pabc`printf hunter2), except in a
+// end of it, as a $(...) does (mysql -pfoo`printf bar), except in a
 // quoted string. A backtick after an odd number of others on its line, or
 // followed by a blank, the end of a line, punctuation or another backtick,
 // ends Markdown code instead (`openssl enc -pass pass:abc`, then `ls`;
@@ -3200,7 +3290,7 @@ const (
 // backslash escapes comes before s[i] on its line, so the one at s[i]
 // closes Markdown code. A backtick in a quoted string that opens at the
 // start of a word and closes before s[i] is a character of that string
-// (echo '`'; mysql -pabc`printf x`), not counted. subs keeps the count under
+// (echo '`'; mysql -pfoo`printf x`), not counted. subs keeps the count under
 // the key that tickKey names, so positions asked about in increasing order
 // are counted once.
 func oddTicksBefore(s string, i int, subs substitutionMemo, tickKey int) bool {
@@ -3362,7 +3452,7 @@ const maxInnerQuoteScan = 4096
 // closes the string holding a word, rather than one that opens a piece of
 // the word, which ends at pieceEnd when quoteLen is not 0. The quotes pair
 // up from the string's start, so it closes one when an odd number of them
-// follow up to the string's end ("sh -c \"mysql -phunter2\" && echo ok").
+// follow up to the string's end ("sh -c \"mysql -pX\" && echo ok").
 // Past maxInnerQuoteScan bytes, a piece that starts or ends with a blank or
 // holds a shell operator closes one.
 func closesInnerString(s string, i, stringEnd, pieceEnd, quoteLen int) bool {
@@ -4358,7 +4448,7 @@ func isApostrophe(s string, i int) bool {
 // next string rather than a value: JSON separators
 // ({"cmd":"mysql -p","x":1}), a concatenation in code
 // ("mysql -p" + password + " db") or shell operators
-// (sh -c "mysql -p"; echo "ok"). A password such as '+hunter2+' outside such
+// (sh -c "mysql -p"; ls "x"). A password such as '+hunter2+' outside such
 // a string is a value.
 func isStringGap(s string) bool {
 	trimmed := strings.TrimSpace(s)
@@ -4418,9 +4508,11 @@ func isWrapperOperand(s string, long *wrapperStarts, from, start int) bool {
 	if !ok || runsJoinedArgument(c.wrapper, part) {
 		return false
 	}
-	// The destination, or the argument of an option (ssh -i mysql,
-	// sudo -u mysql), unless that option runs it (env -S mysql).
-	return !c.text && !c.execArg && (c.optionArg || hasDestination(c.wrapper) && !c.host)
+	// The destination, the argument of an option (ssh -i mysql,
+	// sudo -u mysql) unless that option runs it (env -S mysql), or an
+	// operand of a container client's subcommand that runs nothing
+	// (kubectl patch deployment mysql).
+	return c.noRun || !c.text && !c.execArg && (c.optionArg || hasDestination(c.wrapper) && !c.host)
 }
 
 // wrapperWords returns what the words before start of the command it is in
@@ -4817,7 +4909,7 @@ func appendNetrcValue(regions []taggedRegion, s string, lines *quoteScan, start,
 // string   Password for"), so there (requireNonWord) an unquoted word of
 // prose stays visible (see isProseValue); any other word, or a prose word
 // the command ends with or gives more arguments after, may be a password
-// (mongosh --password swordfish, mongosh --password string). stringEnd is
+// (wget --password swordfish, wget --password string). stringEnd is
 // where the quoted string holding the command ends, or -1, and subs keeps the
 // substitutions read for the values after it, or is nil.
 func passwordValueRegion(s string, v cliValue, stringEnd int, subs substitutionMemo, dashFlag, requireNonWord bool) (taggedRegion, bool) {
@@ -4874,7 +4966,7 @@ func isRecipeSubstitution(body string) bool {
 // string, value) may also be the password, so another word makes it prose
 // only when that word is prose too ("the --password flag is") or the text
 // of a help line ("--password string   Password for"); the words after it
-// may be arguments (mongosh --password string db admin). A word ended by
+// may be arguments (wget --password string http://host/). A word ended by
 // punctuation is the password when an argument follows it on its line
 // (wget --password string. http://host/).
 func isProseValue(s string, v cliValue) bool {
@@ -4978,5 +5070,5 @@ var proseWords = append([]string{
 }, proseNouns...)
 
 // proseNouns are the proseWords that name what a flag takes, which a
-// password may also be (mongosh --password string db).
+// password may also be (wget --password string http://host/).
 var proseNouns = []string{"flag", "flags", "option", "options", "argument", "arguments", "arg", "args", "parameter", "parameters", "param", "value", "values", "string", "prompt", "field"}
