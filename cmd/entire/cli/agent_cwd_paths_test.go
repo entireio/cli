@@ -174,6 +174,7 @@ func TestPhysicalAgentPath(t *testing.T) {
 	require.Empty(t, physicalAgentPath(root+"/out/../file.txt", root), "the file is outside the worktree")
 	require.Equal(t, "real/file.txt", physicalAgentPath(root+"/alias/gone/../../file.txt", root), "a directory that no longer exists, after a link")
 	require.Equal(t, "file.txt", physicalAgentPath(root+"/gone/../file.txt", root), "a directory that no longer exists")
+	require.Equal(t, "real/file.txt", physicalAgentPath(root+"/gone/../alias/../file.txt", root), "a link after a directory that no longer exists")
 	require.Empty(t, physicalAgentPath(root+"/out/gone/../../file.txt", root), "a directory that no longer exists, outside the worktree")
 	require.Equal(t, root+"/real/./file.txt", physicalAgentPath(root+"/real/./file.txt", root), "no .., nothing to resolve")
 }

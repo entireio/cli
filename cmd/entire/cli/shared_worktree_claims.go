@@ -269,26 +269,52 @@ func resolvedName(repoRoot, abs string) (string, error) {
 	return name, nil
 }
 
-// evalSymlinksOfExisting is filepath.EvalSymlinks for a path whose end may
-// no longer exist, as a deleted file's directory: it resolves the deepest
-// ancestor that exists and applies the rest lexically, since an entry that
-// does not exist is no symlink. So with alias -> real/sub,
-// alias/gone/../../file.txt is real/file.txt, where a lexical clean of the
-// whole path gives the root's file.txt.
+// evalSymlinksOfExisting is filepath.EvalSymlinks for a path whose entries
+// may no longer all exist, as a deleted file's directory. It resolves the
+// path one entry at a time: an entry that does not exist is no symlink, so a
+// ".." after one only steps back out of it, and resolution resumes from
+// there. So with alias -> real/sub, alias/gone/../../file.txt and
+// gone/../alias/../file.txt are both real/file.txt, where a lexical clean
+// gives the root's file.txt.
 func evalSymlinksOfExisting(abs string) (string, error) {
-	sep := string(filepath.Separator)
-	existing, rest := abs, ""
-	for {
-		target, err := filepath.EvalSymlinks(existing)
-		if err == nil {
-			return filepath.Join(target, rest), nil
-		}
-		i := strings.LastIndex(existing, sep)
-		if !errors.Is(err, fs.ErrNotExist) || i <= 0 {
-			return "", fmt.Errorf("resolve %s: %w", abs, err)
-		}
-		existing, rest = existing[:i], existing[i+1:]+sep+rest
+	target, err := filepath.EvalSymlinks(abs)
+	if !errors.Is(err, fs.ErrNotExist) {
+		return target, wrapResolveErr(abs, err)
 	}
+	sep := string(filepath.Separator)
+	vol := filepath.VolumeName(abs)
+	resolved := vol + sep // a path without links, which exists
+	var missing []string  // names under resolved that do not exist
+	for _, part := range strings.Split(abs[len(vol):], sep) {
+		switch {
+		case part == "" || part == ".":
+		case len(missing) > 0 && part == "..":
+			missing = missing[:len(missing)-1]
+		case len(missing) > 0:
+			missing = append(missing, part)
+		case part == "..":
+			resolved = filepath.Dir(resolved)
+		default:
+			next, err := filepath.EvalSymlinks(resolved + sep + part)
+			switch {
+			case errors.Is(err, fs.ErrNotExist):
+				missing = append(missing, part)
+			case err != nil:
+				return "", wrapResolveErr(abs, err)
+			default:
+				resolved = next
+			}
+		}
+	}
+	return filepath.Join(append([]string{resolved}, missing...)...), nil
+}
+
+// wrapResolveErr names abs in err, a failure to resolve it, or returns nil.
+func wrapResolveErr(abs string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("resolve %s: %w", abs, err)
 }
 
 // only returns the files of all the transcript names, in all's order and
