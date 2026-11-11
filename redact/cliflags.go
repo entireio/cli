@@ -790,9 +790,12 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string, noVal
 	var entrypointStarts commandStart
 	var long, operands wrapperStarts
 	// A segment cut at a ")" (ssh $(mysql -Nse 'x') -p2222) goes on after
-	// it, to uncutEnd, in a string that closes at uncutAt; a command there
-	// starts a segment that ends there too, which is not found again.
-	segmentEnd, uncutEnd, uncutAt := 0, 0, 0
+	// it, to uncutEnds[closeAt], in a string that closes at closeAt (-1 for
+	// none); a command there starts a segment that ends there too, which is
+	// not found again, also after commands in other strings between them
+	// ()'sshpass )'sshpass ...).
+	segmentEnd := 0
+	uncutEnds := map[int]int{}
 	// A name inside a password found before is part of that word
 	// (mysql -p$(printf x; mysql -py), and is not read again.
 	var found foundPasswords
@@ -814,8 +817,10 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string, noVal
 		switch {
 		case cmd[0] >= segmentEnd:
 			nested = newNestedScan(s, cmd[1], closeAt, stringEnd, reads)
-			if cmd[1] >= uncutEnd || closeAt != uncutAt {
-				uncutEnd, uncutAt = cmd[1]+len(f.segmentRest(s, &lines, &paths, reads, cmd, closeAt, stringEnd)), closeAt
+			uncutEnd, ok := uncutEnds[closeAt]
+			if !ok || cmd[1] >= uncutEnd {
+				uncutEnd = cmd[1] + len(f.segmentRest(s, &lines, &paths, reads, cmd, closeAt, stringEnd))
+				uncutEnds[closeAt] = uncutEnd
 			}
 			rest = untilUnmatchedParen(s[cmd[1]:uncutEnd], closeAt-cmd[1], stringEnd-cmd[1], caseMemo{anyHeight: true, lines: reads, base: cmd[1]})
 			segmentEnd = cmd[1] + len(rest)
@@ -1653,7 +1658,7 @@ func untilUnmatchedParen(rest string, skip, skipEnd int, cases caseMemo) string 
 			i = skipEnd - 1
 			continue
 		}
-		if end, quoteLen := quotedPiece(rest, i); quoteLen > 0 {
+		if end, quoteLen := cases.quotedPiece(rest, i); quoteLen > 0 {
 			i = end - 1
 			continue
 		}
@@ -4121,6 +4126,9 @@ type quoteScan struct {
 	// read, 0 when none, and blank whether its text holds a blank.
 	blankOf int
 	blank   bool
+	// pieces keeps the parameter expansions read in the quoted strings of
+	// s, without cases.lines.
+	pieces substitutionMemo
 }
 
 // substitutionClose is a command substitution that closes at end, around
@@ -4186,7 +4194,13 @@ func (q *quoteScan) quotedPiece() (end, quoteLen int) {
 	if q.acrossLines {
 		return quotedPieceAcrossLines(q.s, q.i, -1, q.cases.memo())
 	}
-	return quotedPiece(q.s, q.i)
+	if q.cases.lines != nil {
+		return q.cases.quotedPiece(q.s, q.i)
+	}
+	if q.pieces == nil {
+		q.pieces = substitutionMemo{}
+	}
+	return braceReader{shallow: true, braces: q.pieces}.quotedPiece(q.s, q.i)
 }
 
 // openSubstitution notes the command substitution that starts where the
@@ -4305,6 +4319,38 @@ type caseMemo struct {
 type lineReads struct {
 	s    string
 	subs substitutionMemo
+	// within keeps, for each end of a text that a caseMemo reads, the
+	// substitutions read in that text, keyed by where they start in s, so
+	// the many texts of s that end there share them (each segment read from
+	// a command name to the end of its line: mysql -e $(echo `x`mysql -e
+	// $(echo `x`...).
+	within map[int]substitutionMemo
+	// pieces is within for the parameter expansions in the quoted strings
+	// that quotedPiece reads, which it reads its own way (see shallow).
+	pieces map[int]substitutionMemo
+}
+
+// in returns the memo of the substitutions read in the texts of s that end
+// at end, and piecesIn that of the quoted strings read there.
+func (l *lineReads) in(end int) substitutionMemo {
+	return memoAt(&l.within, end)
+}
+
+func (l *lineReads) piecesIn(end int) substitutionMemo {
+	return memoAt(&l.pieces, end)
+}
+
+// memoAt returns the memo that memos holds for end, made on first use.
+func memoAt(memos *map[int]substitutionMemo, end int) substitutionMemo {
+	if *memos == nil {
+		*memos = map[int]substitutionMemo{}
+	}
+	m := (*memos)[end]
+	if m == nil {
+		m = substitutionMemo{}
+		(*memos)[end] = m
+	}
+	return m
 }
 
 // mayOpenLine reports whether text[:n], where a segment pattern stopped
@@ -4344,7 +4390,7 @@ func (m *caseMemo) substitutionLen(s string, i int) int {
 	if !isSubstitutionStart(s, i) {
 		return 0
 	}
-	r := readSubstitution(s, i, -1, m.memo(), false)
+	r := m.read(s, i)
 	if !r.closed && m.lines != nil && r.end < len(s) && (s[r.end] == '\r' || s[r.end] == '\n') {
 		r = readSubstitution(m.lines.s, m.base+i, -1, m.lines.subs, true)
 		r.end -= m.base
@@ -4354,6 +4400,34 @@ func (m *caseMemo) substitutionLen(s string, i int) int {
 		return r.end - i
 	}
 	return 0
+}
+
+// read reads the substitution at s[i] within s, in the memo that lines
+// shares for every text of its string that ends where s does, when m has
+// lines, which s starts at base in.
+func (m *caseMemo) read(s string, i int) substitutionResult {
+	if m.lines == nil {
+		return readSubstitution(s, i, -1, m.memo(), false)
+	}
+	end := m.base + len(s)
+	r := readSubstitution(m.lines.s[:end], m.base+i, -1, m.lines.in(end), false)
+	r.end -= m.base
+	return r
+}
+
+// quotedPiece is quotedPiece, keeping the parameter expansions it reads in
+// the memo that lines shares for every text of its string that ends where s
+// does, when m has lines, so each is read once ("psql${ "psql${ "...).
+func (m *caseMemo) quotedPiece(s string, i int) (end, quoteLen int) {
+	if m.lines == nil {
+		return quotedPiece(s, i)
+	}
+	to := m.base + len(s)
+	end, quoteLen = braceReader{shallow: true, braces: m.lines.piecesIn(to)}.quotedPiece(m.lines.s[:to], m.base+i)
+	if quoteLen > 0 {
+		end -= m.base
+	}
+	return end, quoteLen
 }
 
 // cliParensGroup matches text in parentheses at the start of a string.
@@ -4576,7 +4650,7 @@ func isWrapperOperand(s string, long *wrapperStarts, from, start int) bool {
 		word--
 	}
 	if word > from && (s[word-1] == '"' || s[word-1] == '\'') {
-		if end, quoteLen := quotedPiece(s, word-1); quoteLen == 1 && end > start {
+		if end, quoteLen := long.quotedPiece(s, word-1); quoteLen == 1 && end > start {
 			word--
 		}
 	}
@@ -4660,6 +4734,17 @@ var operandCommands = strings.Fields("find ls cd cat less head tail grep egrep f
 type wrapperStarts struct {
 	starts map[int]*commandStart
 	words  caseMemo
+	// pieces keeps the parameter expansions read in quoted strings of s.
+	pieces substitutionMemo
+}
+
+// quotedPiece is quotedPiece for s, the string w reads, keeping the
+// parameter expansions it reads in w.
+func (w *wrapperStarts) quotedPiece(s string, i int) (end, quoteLen int) {
+	if w.pieces == nil {
+		w.pieces = substitutionMemo{}
+	}
+	return braceReader{shallow: true, braces: w.pieces}.quotedPiece(s, i)
 }
 
 // at returns the commandStart of the command that starts at from.
