@@ -69,13 +69,11 @@ func redactableIntlPhone(s string, start, end int) (int, int, bool) {
 	}
 	// The first group is the country code. Only a space may follow a longer
 	// one (+447700 900123, a national number with its 0 swapped for +44), so
-	// a date that starts with the year (+2026-11-06 19:24) never passes. One
-	// slash separates an area code (+49 30/23125678); two make a date
-	// (+31/12/2024 23:59).
-	if (cc > 3 && phoneSpaceAt(s, ccEnd) == 0) || strings.Count(s[ccEnd:end], "/") > 1 {
+	// a date that starts with the year (+2026-11-06 19:24) never passes.
+	if cc > 3 && phoneSpaceAt(s, ccEnd) == 0 {
 		return 0, 0, false
 	}
-	return start, end, dottedReadsAsPhone(s, start, ccEnd, end)
+	return start, end, groupsReadAsPhone(s, start, ccEnd, end)
 }
 
 // trimIntlPhone returns the end of the number in s[start:end] once the groups
@@ -96,14 +94,17 @@ func trimIntlPhone(s string, start, ccEnd, end int) (int, bool) {
 	return end, digits >= intlPhoneMinDigits
 }
 
-// dotsReadAsPhone reports whether the dots in s[start:end], if any, separate
-// a phone number. Apart from spaces after the country code and the
-// parenthesized group, dots must be the only separator, at least two of them,
-// and the digits must not form an IPv4 address: +33.1.99.00.12.34,
-// +33 1.99.00.12.34, +33 (0)1.99.00.12.34 and (+33) 1.99.00.12.34 are
+// separatorsReadAsPhone reports whether the slashes and dots in s[start:end],
+// if any, separate a phone number. One slash separates an area code
+// (+49 30/23125678); two make a date (+31/12/2024 23:59). With dots, apart
+// from spaces after the country code and after the parenthesized group, dots
+// must be the only separator, at least two of them, and the digits must not
+// form an IPv4 address: +33.1.99.00.12.34, +33 1.99.00.12.34,
+// +33 (0)1.99.00.12.34, +33 (0) 1.99.00.12.34 and (+33) 1.99.00.12.34 are
 // numbers, while a decimal (+48.8566140), +233.252.18.110 and
 // +31.12.2024 23 are not.
-func dotsReadAsPhone(s string, start, ccEnd, end int) bool {
+func separatorsReadAsPhone(s string, start, ccEnd, end int) bool {
+	s = s[:end]
 	i := ccEnd
 	if i < end && s[i] == ')' {
 		i++
@@ -111,15 +112,23 @@ func dotsReadAsPhone(s string, start, ccEnd, end int) bool {
 	if i < end {
 		i += phoneSpaceAt(s, i)
 	}
-	dots, other := 0, false
+	dots, slashes, other := 0, 0, false
 	for ; i < end; i++ {
 		switch c := s[i]; {
-		case isDigit(c), c == '(', c == ')':
+		case isDigit(c), c == '(':
+		case c == ')':
+			i += phoneSpaceAt(s, i+1)
 		case c == '.':
 			dots++
+		case c == '/':
+			slashes++
+			other = true
 		default:
 			other = true
 		}
+	}
+	if slashes > 1 {
+		return false
 	}
 	if dots == 0 {
 		return true
@@ -131,14 +140,15 @@ func dotsReadAsPhone(s string, start, ccEnd, end int) bool {
 	return err != nil
 }
 
-// dottedReadsAsPhone reports whether the dots in s[start:end], if any,
-// separate a phone number. A space also joins a number to the text after it,
-// so when only groups after a space break the rules, the number before them
-// decides (+33 1.99.00.12.34 2026). The groups stay in the match, as they do
-// in a number without dots (+44 20 7946 0958 202): one may belong to the
-// number (+49 30123456 78.90), and trimIntlPhone has capped the digits.
-func dottedReadsAsPhone(s string, start, ccEnd, end int) bool {
-	for cut := end; !dotsReadAsPhone(s, start, ccEnd, cut); {
+// groupsReadAsPhone reports whether the slashes and dots in s[start:end], if
+// any, separate a phone number. A space also joins a number to the text after
+// it, so when only groups after a space break the rules, the number before
+// them decides (+33 1.99.00.12.34 2026, +44 20 7946 0958 1/2/3). The groups
+// stay in the match, as they do in a number without dots
+// (+44 20 7946 0958 202): one may belong to the number (+49 30123456 78.90),
+// and trimIntlPhone has capped the digits.
+func groupsReadAsPhone(s string, start, ccEnd, end int) bool {
+	for cut := end; !separatorsReadAsPhone(s, start, ccEnd, cut); {
 		i := lastPhoneSpace(s[ccEnd:cut])
 		if i < 0 {
 			return false
