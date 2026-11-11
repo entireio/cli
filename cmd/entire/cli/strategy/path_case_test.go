@@ -88,38 +88,40 @@ func TestTrackedSpelling(t *testing.T) {
 	}
 	tracked := []string{"README.md"}
 
-	require.Equal(t, "README.md", trackedSpelling(worktree, cases, dir, "README.md", tracked), "already git's spelling")
-	require.Equal(t, "notes.txt", trackedSpelling(worktree, cases, dir, "notes.txt", nil), "not tracked in any case")
-	require.Equal(t, "readme.md", trackedSpelling(worktree, cases, dir, "readme.md", tracked), "opens no file")
+	require.Equal(t, "README.md", trackedSpelling(worktree, cases, dir, "README.md", tracked, false), "already git's spelling")
+	require.Equal(t, "notes.txt", trackedSpelling(worktree, cases, dir, "notes.txt", nil, false), "not tracked in any case")
+	require.Equal(t, "readme.md", trackedSpelling(worktree, cases, dir, "readme.md", tracked, false), "opens no file")
 
 	testutil.WriteFile(t, dir, "readme.md", "another file\n")
-	require.Equal(t, "readme.md", trackedSpelling(worktree, cases, dir, "readme.md", tracked), "another file")
+	require.Equal(t, "readme.md", trackedSpelling(worktree, cases, dir, "readme.md", tracked, false), "another file")
 
 	require.NoError(t, os.Remove(filepath.Join(dir, "readme.md")))
 	require.NoError(t, os.Link(filepath.Join(dir, "README.md"), filepath.Join(dir, "readme.md")))
-	require.Equal(t, "README.md", trackedSpelling(worktree, ignoresCaseIn("."), dir, "readme.md", tracked),
+	require.Equal(t, "README.md", trackedSpelling(worktree, ignoresCaseIn("."), dir, "readme.md", tracked, false),
 		"opens the same file where the root ignores case")
-	require.Equal(t, "readme.md", trackedSpelling(worktree, cases, dir, "readme.md", tracked),
+	require.Equal(t, "readme.md", trackedSpelling(worktree, ignoresCaseIn("."), dir, "readme.md", tracked, true),
+		"reported deleted yet still opening a file, as a case-only rename's deletion does: it keeps its spelling")
+	require.Equal(t, "readme.md", trackedSpelling(worktree, cases, dir, "readme.md", tracked, false),
 		"where the root respects case, a hard link is another entry, which git tracks apart")
 
 	// A deletion has nothing left to open, so the directory decides. The
 	// root respects case: readme.md was another file.
 	require.NoError(t, os.Remove(filepath.Join(dir, "readme.md")))
 	require.NoError(t, os.Remove(filepath.Join(dir, "README.md")))
-	require.Equal(t, "readme.md", trackedSpelling(worktree, cases, dir, "readme.md", tracked), "the root respects case")
+	require.Equal(t, "readme.md", trackedSpelling(worktree, cases, dir, "readme.md", tracked, false), "the root respects case")
 
 	// Where src/ finds its entries ignoring case, src/app.go names git's
 	// deleted src/App.go.
 	require.NoError(t, os.Remove(filepath.Join(dir, "src", "App.go")))
 	app := []string{"src/App.go"}
-	require.Equal(t, "src/app.go", trackedSpelling(worktree, cases, dir, "src/app.go", app), "src/ respects case here")
+	require.Equal(t, "src/app.go", trackedSpelling(worktree, cases, dir, "src/app.go", app, false), "src/ respects case here")
 	folding := ignoresCaseIn("src")
-	require.Equal(t, "src/App.go", trackedSpelling(worktree, folding, dir, "src/app.go", app), "deleted under git's spelling")
-	require.Equal(t, "src/app.go", trackedSpelling(worktree, folding, dir, "src/app.go", []string{"src/App.go", "src/APP.go"}),
+	require.Equal(t, "src/App.go", trackedSpelling(worktree, folding, dir, "src/app.go", app, false), "deleted under git's spelling")
+	require.Equal(t, "src/app.go", trackedSpelling(worktree, folding, dir, "src/app.go", []string{"src/App.go", "src/APP.go"}, false),
 		"ambiguous: the index has two spellings")
-	require.Equal(t, "Src/app.go", trackedSpelling(worktree, folding, dir, "Src/app.go", app), "the root respects case")
+	require.Equal(t, "Src/app.go", trackedSpelling(worktree, folding, dir, "Src/app.go", app, false), "the root respects case")
 	testutil.WriteFile(t, dir, "src/App.go", "back\n")
-	require.Equal(t, "src/app.go", trackedSpelling(worktree, folding, dir, "src/app.go", app),
+	require.Equal(t, "src/app.go", trackedSpelling(worktree, folding, dir, "src/app.go", app, false),
 		"git's spelling still opens a file, so src/app.go is another one")
 }
 
@@ -163,6 +165,22 @@ func TestFilterTrackableFiles_SpellsAsTheCommitIndexWindows(t *testing.T) {
 	t.Setenv("GIT_INDEX_FILE", commitIndex)
 
 	require.Equal(t, []string{"README.md"}, filterTrackableFiles(ctx, root, []string{"README.md"}))
+}
+
+// TestFilterTrackableChanges_KeepsACaseRenamesDeletionWindows covers a
+// staged case-only rename of README.md to readme.md. git status reports
+// README.md deleted, and on a case-insensitive filesystem README.md still
+// opens readme.md. The deletion is of HEAD's README.md, the spelling under
+// which a session recorded editing it, so it keeps that spelling. CI's
+// Windows job runs it by its name.
+func TestFilterTrackableChanges_KeepsACaseRenamesDeletionWindows(t *testing.T) {
+	t.Parallel()
+	dir, _ := trackedCaseRepo(t)
+	testutil.RunGit(t, dir, "mv", "-f", "README.md", "readme.md")
+	modified, added, deleted := FilterTrackableChanges(context.Background(), dir, nil, []string{"readme.md"}, []string{"README.md"})
+	require.Empty(t, modified)
+	require.Equal(t, []string{"readme.md"}, added)
+	require.Equal(t, []string{"README.md"}, deleted)
 }
 
 // On a case-sensitive filesystem FilterTrackableChanges keeps both

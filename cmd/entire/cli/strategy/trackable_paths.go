@@ -51,7 +51,8 @@ import (
 // (TrackedSpellings): a transcript's readme.md for README.md would otherwise
 // stay pending in the same way.
 func FilterTrackableChanges(ctx context.Context, repoRoot string, modified, added, deleted []string) (keptModified, keptAdded, keptDeleted []string) {
-	spelled := trackedSpellingsOf(ctx, repoRoot, gitrepo.IndexPathsIgnoringCase, modified, added, deleted)
+	spelled := trackedSpellingsOf(ctx, repoRoot, gitrepo.IndexPathsIgnoringCase,
+		spellingList{files: modified}, spellingList{files: added}, spellingList{files: deleted, deleted: true})
 	return filterTrackableSpelled(ctx, repoRoot, spelled[0], spelled[1], spelled[2])
 }
 

@@ -37,7 +37,7 @@ import (
 // asked, since readme.md and README.md are two files there. If git cannot
 // answer, the files are returned as they are.
 func TrackedSpellings(ctx context.Context, repoRoot string, files []string) []string {
-	return trackedSpellingsOf(ctx, repoRoot, gitrepo.IndexPathsIgnoringCase, files)[0]
+	return trackedSpellingsOf(ctx, repoRoot, gitrepo.IndexPathsIgnoringCase, spellingList{files: files})[0]
 }
 
 // commitTrackedSpellings is TrackedSpellings for paths a commit hook checks
@@ -53,43 +53,52 @@ func commitTrackedSpellings(ctx context.Context, repoRoot string, files []string
 	if root, err := paths.WorktreeRoot(ctx); err == nil && sameDir(root, repoRoot) {
 		index = gitrepo.CommitIndexPathsIgnoringCase
 	}
-	return trackedSpellingsOf(ctx, repoRoot, index, files)[0]
+	return trackedSpellingsOf(ctx, repoRoot, index, spellingList{files: files})[0]
 }
 
 // indexSpellings returns the spellings an index tracks for files, ignoring
 // case, as gitrepo.IndexPathsIgnoringCase does.
 type indexSpellings func(ctx context.Context, repoRoot string, files []string) (map[string][]string, error)
 
+// spellingList is one list of paths trackedSpellingsOf respells. deleted
+// marks paths reported as deleted (see trackedSpelling).
+type spellingList struct {
+	files   []string
+	deleted bool
+}
+
 // trackedSpellingsOf is TrackedSpellings for several lists, with one call of
 // index for all of them.
-func trackedSpellingsOf(ctx context.Context, repoRoot string, index indexSpellings, lists ...[]string) [][]string {
+func trackedSpellingsOf(ctx context.Context, repoRoot string, index indexSpellings, lists ...spellingList) [][]string {
+	unchanged := make([][]string, len(lists))
 	var all []string
-	for _, list := range lists {
-		all = append(all, list...)
+	for i, list := range lists {
+		unchanged[i] = list.files
+		all = append(all, list.files...)
 	}
 	if len(all) == 0 {
-		return lists
+		return unchanged
 	}
 	worktree, err := worktreedir.OpenAt(repoRoot)
 	if err != nil {
-		return lists
+		return unchanged
 	}
 	cases := worktreedir.NewCaseProbe(repoRoot)
 	if !anyDirectoryIgnoresCase(cases, all) {
-		return lists
+		return unchanged
 	}
 	tracked, err := index(ctx, repoRoot, all)
 	if err != nil {
 		logging.Debug(logging.WithComponent(ctx, "checkpoint"), "could not read git's spelling of reported paths; keeping them as reported",
 			slog.String("error", err.Error()))
-		return lists
+		return unchanged
 	}
 	spelled := make([][]string, len(lists))
 	for i, list := range lists {
-		seen := make(map[string]struct{}, len(list))
-		out := make([]string, 0, len(list))
-		for _, file := range list {
-			file = trackedSpelling(worktree, cases, repoRoot, file, tracked[strings.ToLower(file)])
+		seen := make(map[string]struct{}, len(list.files))
+		out := make([]string, 0, len(list.files))
+		for _, file := range list.files {
+			file = trackedSpelling(worktree, cases, repoRoot, file, tracked[strings.ToLower(file)], list.deleted)
 			if _, dup := seen[file]; dup {
 				continue
 			}
@@ -109,7 +118,15 @@ type entryCases interface {
 
 // trackedSpelling returns the one of tracked (the index's spellings of file,
 // ignoring case) that file names, or file itself.
-func trackedSpelling(worktree *os.Root, cases entryCases, repoRoot, file string, tracked []string) string {
+//
+// A path reported as deleted that still opens a file keeps its spelling. git
+// status reports a staged case-only rename of README.md to readme.md as
+// README.md deleted and readme.md added, and where the filesystem ignores case
+// README.md still opens readme.md. The deletion is of HEAD's README.md, the
+// spelling under which a session may have recorded editing it; respelled, it
+// would not mark that edit deleted, and the session would stay pending after
+// the rename is committed.
+func trackedSpelling(worktree *os.Root, cases entryCases, repoRoot, file string, tracked []string, deleted bool) string {
 	if len(tracked) == 0 || slices.Contains(tracked, file) {
 		return file
 	}
@@ -122,7 +139,7 @@ func trackedSpelling(worktree *os.Root, cases entryCases, repoRoot, file string,
 		}
 		return file
 	}
-	if err != nil {
+	if err != nil || deleted {
 		return file
 	}
 	for _, spelling := range tracked {
