@@ -271,19 +271,7 @@ func TestGuestTurnEnd_UnmarkableWorktreeIsNotRecordedAsHome(t *testing.T) {
 // neither replaces it nor merges into it.
 func TestGuestTurnEnd_EmptyIDEntryBelongsToOneCheckout(t *testing.T) {
 	const sid = "empty-id-entry"
-	s := &ManualCommitStrategy{}
-	mainDir := setupGitRepo(t)
-	linkedDir := filepath.Join(t.TempDir(), "linked")
-	testutil.RunGit(t, mainDir, "worktree", "add", linkedDir, "-b", "linked-branch")
-	checkout := unregisteredCheckoutOf(t, mainDir)
-
-	chdirWorktree(t, linkedDir)
-	testutil.WriteFile(t, linkedDir, "linked.go", "package linked")
-	saveStepIn(t, s, sid, []string{"linked.go"}, nil)
-
-	chdirWorktree(t, checkout)
-	testutil.WriteFile(t, checkout, "a.go", "package a // in the checkout")
-	saveStepIn(t, s, sid, []string{"a.go"}, nil)
+	s, mainDir, _, checkout := linkedHomeWithCheckoutTurn(t, sid)
 
 	state := mustLoad(t, s, sid)
 	entry := state.OtherWorktrees[session.WorktreeKey("")]
@@ -311,18 +299,7 @@ func TestGuestTurnEnd_EmptyIDEntryBelongsToOneCheckout(t *testing.T) {
 // is there, from any worktree's hook, and dropped once it is gone.
 func TestPruneRemovedWorktrees_KeepsUnregisteredCheckoutRecord(t *testing.T) {
 	const sid = "prune-unregistered"
-	s := &ManualCommitStrategy{}
-	mainDir := setupGitRepo(t)
-	linkedDir := filepath.Join(t.TempDir(), "linked")
-	testutil.RunGit(t, mainDir, "worktree", "add", linkedDir, "-b", "linked-branch")
-	checkout := unregisteredCheckoutOf(t, mainDir)
-
-	chdirWorktree(t, linkedDir)
-	testutil.WriteFile(t, linkedDir, "linked.go", "package linked")
-	saveStepIn(t, s, sid, []string{"linked.go"}, nil)
-	chdirWorktree(t, checkout)
-	testutil.WriteFile(t, checkout, "a.go", "package a // in the checkout")
-	saveStepIn(t, s, sid, []string{"a.go"}, nil)
+	s, mainDir, linkedDir, checkout := linkedHomeWithCheckoutTurn(t, sid)
 	require.NotNil(t, mustLoad(t, s, sid).OtherWorktrees[session.WorktreeKey("")], "precondition: the checkout's step was recorded for it")
 
 	for _, hookRoot := range []string{checkout, linkedDir, mainDir} {
@@ -405,6 +382,27 @@ func TestGuestTurnEnd_VanishedEmptyIDHomeIsNotAdopted(t *testing.T) {
 	assert.Equal(t, before.WorktreePath, after.WorktreePath)
 	require.NotNil(t, after.TokenUsage)
 	assert.Equal(t, 1000, after.TokenUsage.InputTokens)
+}
+
+// linkedHomeWithCheckoutTurn homes sid in a linked worktree with a step that
+// creates linked.go, then ends a turn in an unregistered checkout of the same
+// repository that creates a.go, which records it under the empty ID's key.
+func linkedHomeWithCheckoutTurn(t *testing.T, sid string) (s *ManualCommitStrategy, mainDir, linkedDir, checkout string) {
+	t.Helper()
+	s = &ManualCommitStrategy{}
+	mainDir = setupGitRepo(t)
+	linkedDir = filepath.Join(t.TempDir(), "linked")
+	testutil.RunGit(t, mainDir, "worktree", "add", linkedDir, "-b", "linked-branch")
+	checkout = unregisteredCheckoutOf(t, mainDir)
+
+	chdirWorktree(t, linkedDir)
+	testutil.WriteFile(t, linkedDir, "linked.go", "package linked")
+	saveStepIn(t, s, sid, []string{"linked.go"}, nil)
+
+	chdirWorktree(t, checkout)
+	testutil.WriteFile(t, checkout, "a.go", "package a // in the checkout")
+	saveStepIn(t, s, sid, []string{"a.go"}, nil)
+	return s, mainDir, linkedDir, checkout
 }
 
 // unregisteredCheckoutOf materializes a checkout of mainDir's current branch on
