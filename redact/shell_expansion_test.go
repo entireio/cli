@@ -1,6 +1,9 @@
 package redact
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // assertStringRedactionCasesWithoutScanners checks each case with only the
 // key/value rules on, then restores the default scanners. The scanner
@@ -54,17 +57,18 @@ func TestString_ShellParameterDefaultsCaughtWithoutScanners(t *testing.T) {
 		`echo "DB_PASSWORD=${PW:-hunter2}"`:                  `echo "DB_PASSWORD=REDACTED`,
 		// Quotes that close a string, are escaped, or sit in single quotes
 		// leave the default outside double quotes.
-		`psql ""postgres://app:${PW:-'$S3CRET'}@db/app`:            `psql ""REDACTED`,
-		`psql ""postgres://app:${PW:-'$S3CRET'}@db/app"`:           `psql ""REDACTED"`,
-		`psql "x"postgres://app:${PW:-'$S3CRET'}@db/app`:           `psql "x"REDACTED`,
-		`psql "a"postgres://app:${PW:-'$S3CRET'}@db/app "b"`:       `psql "a"REDACTED "b"`,
-		`echo "a"DB_PASSWORD=${PW:-'$S3CRET'} b"`:                  `echo "a"DB_PASSWORD=REDACTED b"`,
-		`echo "a DB_PASSWORD="${PW:-'$S3CRET'}"`:                   `echo "a DB_PASSWORD="REDACTED"`,
-		`psql \"postgres://app:${PW:-'$S3CRET'}@db/app\"`:          `psql \"REDACTED"`,
-		`printf '%s\n' \"postgres://app:${PW:-'$S3CRET'}@db/app\"`: `printf '%s\n' \"REDACTED"`,
-		`echo \"DB_PASSWORD=${PW:-'$S3CRET'} more\"`:               `echo \"DB_PASSWORD=REDACTED more\"`,
-		`echo 'a"b' DB_PASSWORD=${PW:-'$S3CRET'}`:                  `echo 'a"b' DB_PASSWORD=REDACTED`,
-		"echo \"a\nx \"DB_PASSWORD=${PW:-'$S3CRET'}\" y":           "echo \"a\nx \"DB_PASSWORD=REDACTED y",
+		`psql ""postgres://app:${PW:-'$S3CRET'}@db/app`:                     `psql ""REDACTED`,
+		`psql ""postgres://app:${PW:-'$S3CRET'}@db/app"`:                    `psql ""REDACTED"`,
+		`psql "x"postgres://app:${PW:-'$S3CRET'}@db/app`:                    `psql "x"REDACTED`,
+		`psql "a"postgres://app:${PW:-'$S3CRET'}@db/app "b"`:                `psql "a"REDACTED "b"`,
+		`echo "a"DB_PASSWORD=${PW:-'$S3CRET'} b"`:                           `echo "a"DB_PASSWORD=REDACTED b"`,
+		`echo "a DB_PASSWORD="${PW:-'$S3CRET'}"`:                            `echo "a DB_PASSWORD="REDACTED"`,
+		`psql \"postgres://app:${PW:-'$S3CRET'}@db/app\"`:                   `psql \"REDACTED"`,
+		`printf '%s\n' \"postgres://app:${PW:-'$S3CRET'}@db/app\"`:          `printf '%s\n' \"REDACTED"`,
+		`echo \"DB_PASSWORD=${PW:-'$S3CRET'} more\"`:                        `echo \"DB_PASSWORD=REDACTED more\"`,
+		`echo 'a"b' DB_PASSWORD=${PW:-'$S3CRET'}`:                           `echo 'a"b' DB_PASSWORD=REDACTED`,
+		"echo \"a\nx \"DB_PASSWORD=${PW:-'$S3CRET'}\" y":                    "echo \"a\nx \"DB_PASSWORD=REDACTED y",
+		"# note: \"\nDB_PASSWORD=${PW:-'$S3CRET'} printenv \"DB_PASSWORD\"": "# note: \"\nDB_PASSWORD=REDACTED printenv \"DB_PASSWORD\"",
 		// A command substitution starts a new quoting context.
 		`echo "$(DB_PASSWORD=${PW:-'$S3CRET'} env)"`:  `echo "$(DB_PASSWORD=REDACTED env)"`,
 		"echo \"`DB_PASSWORD=${PW:-'$S3CRET'} env`\"": "echo \"`DB_PASSWORD=REDACTED env`\"",
@@ -121,6 +125,9 @@ func TestString_DoubleQuotedShellDefaultsPreserved(t *testing.T) {
 		`echo "API_KEY=$KEY" "--flag"`,
 		`printf '%s\n' "postgres://app:${PW:-'$FALLBACK'}@db/app"`,
 		"echo \"a\nDB_PASSWORD=${PW:-'$FALLBACK'} b\"",
+		"# don't\nDB_PASSWORD=\"${PW:-'$FALLBACK'}\"",
+		// Past the first KiB of text, the value's own line is read.
+		strings.Repeat("echo ok\n", 200) + `DB_PASSWORD="${PW:-'$FALLBACK'}"`,
 		`echo "API_KEY=${KEY:-'$FALLBACK'}"`,
 		`psql "postgres://app:${PW:-'$FALLBACK'}@db/app"`,
 		`echo "DB_PASSWORD=${PW}"`,
@@ -189,6 +196,11 @@ func TestEndsInDoubleQuotes(t *testing.T) {
 		`echo 'unclosed "`: false,
 		`echo "trailing \`: false,
 		`DB_PASSWORD=`:     false,
+		"# note: \"\n":     false,
+		"# don't\nx=\"":    true,
+		"echo $# \"":       true,
+		`echo a#"`:         true,
+		`echo $'it\'s' "`:  false,
 	} {
 		if got := endsInDoubleQuotes(prefix); got != want {
 			t.Errorf("endsInDoubleQuotes(%q) = %v, want %v", prefix, got, want)

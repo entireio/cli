@@ -628,22 +628,40 @@ func uriPassword(s string, uriStart, start, end int) string {
 	return password
 }
 
-// doubleQuoteContextLimit bounds how far into s a value may start, and how
-// far after it the closing quote may be, for insideDoubleQuotes to read its
-// quoting, so that many values cost linear time. A value further in is read
-// as unquoted.
+// doubleQuoteContextLimit bounds how much text before and after a value
+// inDoubleQuotesAt and insideDoubleQuotes read, so that many values cost
+// linear time.
 const doubleQuoteContextLimit = 1024
 
+// inDoubleQuotesAt reports whether s[start] sits inside a double quoted
+// string. Within doubleQuoteContextLimit bytes of the start of s, it reads s
+// from there (endsInDoubleQuotes). Further in, it reads the value's line from
+// its start, when that is within the limit, so it can misread only a string
+// that spans lines; a longer line is read as unquoted. Reading a value as
+// quoted only keeps a single quoted default in it a reference, which is how
+// it was read before single quotes were told apart.
+func inDoubleQuotesAt(s string, start int) bool {
+	if start <= doubleQuoteContextLimit {
+		return endsInDoubleQuotes(s[:start])
+	}
+	from := start - doubleQuoteContextLimit
+	lineStart := strings.LastIndexAny(s[from:start], "\n\r")
+	if lineStart < 0 {
+		return false
+	}
+	return endsInDoubleQuotes(s[from+lineStart+1 : start])
+}
+
 // insideDoubleQuotes reports whether s[start:end] sits inside a double quoted
-// string, as a shell reads s from its start: endsInDoubleQuotes(s[:start]),
-// and the string closes after the value on the same line. A value holding a
+// string (inDoubleQuotesAt) that closes after the value on the same line. A
+// value holding a
 // double quote, backslash, backquote or $( can change which quotes pair or
 // start a new quoting context, so it is then read as unquoted, which only
 // ever redacts more: a single quoted default is a literal there (see
 // isPlaceholderShellExpansion). The value may end with the quote that closes
 // its string.
 func insideDoubleQuotes(s string, start, end int) bool {
-	if start > doubleQuoteContextLimit || !endsInDoubleQuotes(s[:start]) {
+	if !inDoubleQuotesAt(s, start) {
 		return false
 	}
 	value := strings.TrimSuffix(s[start:end], `"`)
@@ -656,17 +674,22 @@ func insideDoubleQuotes(s string, start, end int) bool {
 }
 
 // endsInDoubleQuotes reports whether a shell reading prefix from its start
-// ends inside a double quoted string. Single quoted strings and backslash
-// escapes are skipped as the shell skips them, so printf '%s\n' "x" and
-// echo \"x\" read as they run. A command substitution or backquote starts a
-// new quoting context ("$(DB_PASSWORD=${PW:-'$S3CRET'} env)"), and an
-// unclosed single quote or a trailing backslash leaves the next byte's
-// meaning open, so they report false.
+// ends inside a double quoted string. Single quoted strings, backslash
+// escapes and comments are skipped as the shell skips them, so
+// printf '%s\n' "x", echo \"x\" and a # comment holding a quote read as they
+// run. A command substitution or backquote starts a new quoting context
+// ("$(DB_PASSWORD=${PW:-'$S3CRET'} env)"), a $'...' string can escape a single
+// quote, and an unclosed single quote, a trailing backslash or a comment that
+// runs to the end of prefix leave the next byte's meaning open, so they
+// report false.
 func endsInDoubleQuotes(prefix string) bool {
 	inDouble := false
 	for i := 0; i < len(prefix); i++ {
-		switch c := prefix[i]; {
-		case c == '`' || c == '$' && strings.HasPrefix(prefix[i+1:], "("):
+		c := prefix[i]
+		switch {
+		case c == '`':
+			return false
+		case c == '$' && strings.HasPrefix(prefix[i+1:], "("):
 			return false
 		case c == '\\':
 			if i++; i == len(prefix) {
@@ -674,12 +697,21 @@ func endsInDoubleQuotes(prefix string) bool {
 			}
 		case c == '"':
 			inDouble = !inDouble
-		case c == '\'' && !inDouble:
+		case inDouble:
+		case c == '$' && strings.HasPrefix(prefix[i+1:], "'"):
+			return false
+		case c == '\'':
 			closing := strings.IndexByte(prefix[i+1:], '\'')
 			if closing < 0 {
 				return false
 			}
 			i += 1 + closing
+		case c == '#' && (i == 0 || strings.IndexByte(" \t\n\r;&|()", prefix[i-1]) >= 0):
+			lineEnd := strings.IndexAny(prefix[i:], "\n\r")
+			if lineEnd < 0 {
+				return false
+			}
+			i += lineEnd
 		}
 	}
 	return inDouble
