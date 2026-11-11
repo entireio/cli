@@ -143,8 +143,8 @@ var cliLongPasswordPattern = regexp.MustCompile(`(?:^|[\s"'])--(?:password|passw
 
 // cliListGap is what may come between the elements of an argument list in
 // code: blanks, line breaks, blank lines and comments ("--password", # pw,
-// then "x" on the next line).
-const cliListGap = `(?:[ \t\r\n]|#[^\r\n]*|//[^\r\n]*)*`
+// then "x" on the next line, or /* c */ between elements).
+const cliListGap = `(?:[ \t\r\n]|#[^\r\n]*|//[^\r\n]*|/\*(?:[^*]|\*+[^/])*\*/)*`
 
 // cliQuotedFlagName matches the name of a long flag joined from quoted and
 // bare pieces of letters.
@@ -1350,10 +1350,49 @@ func rawStringEnd(s string, at int) int {
 }
 
 // endsListElement reports whether a comma or a closing bracket follows
-// s[:end], after blanks, as one does an element of a list in code.
+// s[:end], after blanks, line breaks or comments, as one does an element
+// of a list in code.
 func endsListElement(s string, end int) bool {
-	after := strings.TrimLeft(s[end:], " \t")
-	return after != "" && strings.IndexByte(",)]", after[0]) >= 0
+	after := skipListGap(s, end)
+	return after < len(s) && strings.IndexByte(",)]", s[after]) >= 0
+}
+
+// skipListGap returns the index after blanks, line breaks, # or // comments
+// and /* */ block comments starting at i, as may come between elements of
+// an argument list in code. An unclosed block comment is left in place.
+func skipListGap(s string, i int) int {
+	for i < len(s) {
+		switch s[i] {
+		case ' ', '\t', '\r', '\n':
+			i++
+		case '#':
+			if j := strings.IndexAny(s[i:], "\r\n"); j >= 0 {
+				i += j
+			} else {
+				return len(s)
+			}
+		case '/':
+			if i+1 < len(s) && s[i+1] == '/' {
+				if j := strings.IndexAny(s[i:], "\r\n"); j >= 0 {
+					i += j
+					continue
+				}
+				return len(s)
+			}
+			if i+1 < len(s) && s[i+1] == '*' {
+				end := strings.Index(s[i+2:], "*/")
+				if end < 0 {
+					return i
+				}
+				i += end + 4
+				continue
+			}
+			return i
+		default:
+			return i
+		}
+	}
+	return i
 }
 
 // blankAfter reports whether s[i:to] holds a blank, where s[from:to] is the

@@ -677,6 +677,11 @@ func TestString_CommandLinePasswordsShellGrammarCases(t *testing.T) {
 		{name: "short password in a Go raw string across lines", input: "exec.Command(\"redis-cli\", \"-a\", `\r\n" + p + "`, \"ping\")", want: "exec.Command(\"redis-cli\", \"-a\", `REDACTED`, \"ping\")"},
 		{name: "openssl source in a Go raw string across lines", input: "exec.Command(\"openssl\", \"enc\", \"-pass\", `pass:" + p + "\nmore`)", want: "exec.Command(\"openssl\", \"enc\", \"-pass\", `pass:REDACTED`)"},
 		{name: "openssl source after a Go raw string across lines", input: "exec.Command(\"openssl\", \"enc\", \"-in\", `f\ng`, \"-pass\", \"pass:" + p + "\")", want: "exec.Command(\"openssl\", \"enc\", \"-in\", `f\ng`, \"-pass\", \"pass:REDACTED\")"},
+		{name: "long password in a Go raw string across lines before a block comment", input: "exec.Command(\"wget\", \"--password\", `" + p + "\nmore` /* comment */, url)", want: "exec.Command(\"wget\", \"--password\", `REDACTED` /* comment */, url)"},
+		{name: "long password in a Go raw string across lines before a line break", input: "exec.Command(\"wget\", \"--password\", `" + p + "\nmore`\n, url)", want: "exec.Command(\"wget\", \"--password\", `REDACTED`\n, url)"},
+		{name: "long password in a Go raw string across lines before a line comment", input: "exec.Command(\"wget\", \"--password\", `" + p + "\nmore` // comment\n, url)", want: "exec.Command(\"wget\", \"--password\", `REDACTED` // comment\n, url)"},
+		{name: "openssl source after a Go raw string across lines before a block comment", input: "exec.Command(\"openssl\", \"enc\", \"-in\", `f\ng` /* c */, \"-pass\", \"pass:" + p + "\")", want: "exec.Command(\"openssl\", \"enc\", \"-in\", `f\ng` /* c */, \"-pass\", \"pass:REDACTED\")"},
+		{name: "long password after a block comment in a list", input: `subprocess.run(["wget", "--password", /* c */ "` + p + `"])`, want: `subprocess.run(["wget", "--password", /* c */ "REDACTED"])`},
 	})
 }
 
