@@ -885,27 +885,24 @@ func detectCredentialKeyCaptures(
 			return 0
 		}
 		valueStart, valueEnd, _ := captureRange(match, valueGroup)
+		judge := func(valueEnd int, wholeWord bool) (taggedRegion, bool) {
+			return assignedValueCapture(s, key, keyEnd, valueStart, valueEnd, wholeWord, shouldPreserve)
+		}
 		// The whole shell word is the value ("None"x is not None).
-		if _, wordEnd, joined := joinedShellWord(s, valueStart, valueEnd); joined && wholeWord && (shouldPreserve == nil || !readsPastJoinedWord(s, valueStart, valueEnd, wordEnd)) {
-			valueEnd = wordEnd
+		end := valueEnd
+		_, wordEnd, joined := joinedShellWord(s, valueStart, valueEnd)
+		if joined = joined && wholeWord; joined {
+			end = wordEnd
 		}
-		if isNonPasswordCodeLiteral(key, strings.Trim(s[valueStart:valueEnd], `"'`)) {
-			return 0
+		captured, ok := judge(end, wholeWord)
+		if joined && shouldPreserve != nil && readsPastJoinedWord(s, valueStart, valueEnd, wordEnd) {
+			// Main reads the value past its word, so what either reading
+			// redacts is redacted (see readsPastJoinedWord).
+			main, mainOK := judge(valueEnd, false)
+			captured.region, ok = eitherReading(captured.region, ok, main.region, mainOK)
 		}
-		if shouldPreserve != nil && keyEnd <= valueStart && shouldPreserve(s[valueStart:valueEnd], s[keyEnd:valueStart]) {
-			return 0
-		}
-		captured, ok := nonPlaceholderCapture(s, key, valueStart, valueEnd, wholeWord, shouldPreserve != nil)
 		if !ok {
 			return 0
-		}
-		// Assignments get the same separator handling as the password
-		// pattern above: "ab;cd" is one value. Shell-stdin literals stop
-		// at the pipe syntax their pattern already bounds. A word that
-		// starts with a quoted string ends where its quotes say; a quote
-		// that never closes ("abc;hunter2) is one more byte of the value.
-		if shouldPreserve != nil && captured.start == valueStart && !startsWithQuotedString(s, valueStart) {
-			captured.end = extendPastValueSeparators(s, captured.end)
 		}
 		regions = append(regions, captured)
 		return captured.end
@@ -923,6 +920,30 @@ func detectCredentialKeyCaptures(
 		}
 	}
 	return regions
+}
+
+// assignedValueCapture returns the region to redact for the value at
+// s[valueStart:valueEnd] that key, which ends at keyEnd, is assigned, when it
+// is a real credential. wholeWord reads it as a shell word joined from
+// pieces (see nonPlaceholderCapture). shouldPreserve, nil for shell-stdin
+// literals, recognizes code assignments.
+func assignedValueCapture(s, key string, keyEnd, valueStart, valueEnd int, wholeWord bool, shouldPreserve func(value, separator string) bool) (taggedRegion, bool) {
+	if isNonPasswordCodeLiteral(key, strings.Trim(s[valueStart:valueEnd], `"'`)) {
+		return taggedRegion{}, false
+	}
+	if shouldPreserve != nil && keyEnd <= valueStart && shouldPreserve(s[valueStart:valueEnd], s[keyEnd:valueStart]) {
+		return taggedRegion{}, false
+	}
+	captured, ok := nonPlaceholderCapture(s, key, valueStart, valueEnd, wholeWord, shouldPreserve != nil)
+	// Assignments get the same separator handling as the password pattern:
+	// "ab;cd" is one value. Shell-stdin literals stop at the pipe syntax
+	// their pattern already bounds. A word that starts with a quoted string
+	// ends where its quotes say; a quote that never closes ("abc;hunter2) is
+	// one more byte of the value.
+	if ok && shouldPreserve != nil && captured.start == valueStart && !startsWithQuotedString(s, valueStart) {
+		captured.end = extendPastValueSeparators(s, captured.end)
+	}
+	return captured, ok
 }
 
 // forEachUncoveredMatch calls visit for each match of pattern in s, left to
@@ -1142,7 +1163,7 @@ func visitStraddlingValues(s string, pattern *regexp.Regexp, valueGroup int, vis
 	}
 	last, matchEnd := region{match[2*valueGroup], end}, match[1]
 	pending := []straddled{{last, matchEnd}}
-	read := map[int]bool{}
+	read := map[[2]int]bool{}
 	unredactedEnd := -1
 	findAll := findAllChain{from: findAllFrom, starts: map[int]bool{}}
 	readValue := func(match []int, wholeWord bool, inside region) {
@@ -1165,19 +1186,27 @@ func visitStraddlingValues(s string, pattern *regexp.Regexp, valueGroup int, vis
 		current := pending[len(pending)-1]
 		pending = pending[:len(pending)-1]
 		for _, quote := range []byte{'"', '\''} {
-			if match := quotedValuePast(s, pattern, valueGroup, current.r, quote); match != nil && !read[match[2*valueGroup]] {
-				read[match[2*valueGroup]] = true
+			if match := quotedValuePast(s, pattern, valueGroup, current.r, quote); match != nil && !read[matchKey(match, valueGroup)] {
+				read[matchKey(match, valueGroup)] = true
 				readValue(match, true, current.r)
 			}
 		}
 		for _, match := range bareValuesPast(s, pattern, valueGroup, current.r, current.matchEnd, runs) {
-			if !read[match[2*valueGroup]] {
-				read[match[2*valueGroup]] = true
+			if !read[matchKey(match, valueGroup)] {
+				read[matchKey(match, valueGroup)] = true
 				readValue(match, false, current.r)
 			}
 		}
 	}
 	return last, unredactedEnd
+}
+
+// matchKey identifies a match by where it starts and where its value does.
+// The searches from a region's start and from its match's end can read one
+// value under two keys, as _api_key and api_key in "x"_api_key=b=\hunter2xyz,
+// and the second, FindAll's, is read too when the first is not a credential.
+func matchKey(match []int, valueGroup int) [2]int {
+	return [2]int{match[0], match[2*valueGroup]}
 }
 
 // quotedValuePast returns the match for the key whose value, quoted with
@@ -1556,10 +1585,26 @@ func joinedValueRegion(s string, start, end int, extend bool, isReal func(piece 
 // separator inside a quoted piece of the word, and the word can then end at
 // a quote main does not pair: the shell reads a"b;c\"d|hunter2xyz" as one
 // quoted string, but a backslash before a quote is left alone (see
-// escapedWordBytes), so the word ends at the pipe. Such a value is read as
-// main reads it, so the word never redacts less than main does.
+// escapedWordBytes), so the word ends at the pipe. Such a value is judged
+// both as its word and as main reads it, and what either reading redacts is
+// redacted, so it never redacts less than main does, nor less than its word:
+// main judges changeme" alone in changeme";hunter2"|cat, a placeholder.
 func readsPastJoinedWord(s string, start, end, wordEnd int) bool {
 	return !isQuoteByte(s[start]) && extendPastValueSeparators(s, end) > extendPastValueSeparators(s, wordEnd)
+}
+
+// eitherReading returns what a value's word reading and main's reading of it
+// redact together: both regions start at the value, so when both readings
+// find a secret one region covers them, and otherwise the one that does.
+func eitherReading(word region, wordSecret bool, main region, mainSecret bool) (region, bool) {
+	switch {
+	case wordSecret && mainSecret:
+		return region{min(word.start, main.start), max(word.end, main.end)}, true
+	case wordSecret:
+		return word, true
+	default:
+		return main, mainSecret
+	}
 }
 
 // capturedValueRegion is credentialValueRegion for a value read as main reads

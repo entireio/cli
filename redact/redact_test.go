@@ -1535,6 +1535,16 @@ func TestString_ShellWordSecretsCaughtWithoutScanners(t *testing.T) {
 			input: `API_KEY="hunter"'2abc';echo done`,
 			want:  "API_KEY=REDACTED;echo done",
 		},
+		{
+			name:  "a joined credential whose captured piece is a placeholder",
+			input: `API_KEY=changeme";hunter2"|cat`,
+			want:  "API_KEY=REDACTED|cat",
+		},
+		{
+			name:  "a joined credential whose captured piece is a code literal",
+			input: `API_KEY=None";hunter2"|cat`,
+			want:  "API_KEY=REDACTED|cat",
+		},
 	})
 }
 
@@ -1802,6 +1812,21 @@ func TestString_ValuesPastRedactedWordsCaughtWithoutScanners(t *testing.T) {
 			name:  "a password after spaced keys past a key inside a captured value",
 			input: `DB_PASSWORD=DB_PASSWORD= a= b= DB_PASSWORD=hunter2xyz`,
 			want:  `DB_PASSWORD=REDACTED REDACTED b= DB_PASSWORD=REDACTED`,
+		},
+		{
+			name:  "a credential under the key FindAll reads when a longer key holds its value",
+			input: `API_KEY="x"_api_key=b=\hunter2xyz`,
+			want:  "API_KEY=REDACTED",
+		},
+		{
+			name:  "a credential under the key FindAll reads, joined past the word by a separator",
+			input: `API_KEY="x"_api_key=b=;hunter2xyz`,
+			want:  "API_KEY=REDACTED",
+		},
+		{
+			name:  "a password under the key FindAll reads when a longer key holds its value",
+			input: `API_KEY="a"x_PASSWORD=$A\hunter2xyz`,
+			want:  "API_KEY=REDACTED",
 		},
 	})
 }
