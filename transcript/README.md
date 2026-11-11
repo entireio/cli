@@ -59,7 +59,7 @@ Pi, one native message per call (no fragments to merge): `model` is `message.mod
 
 - User text: `{"id"?: string, "text": string}`. There is no `type` field (a v1 quirk).
 - Assistant text: `{"type": "text", "text": string}`.
-- Tool use: `{"type": "tool_use", "id"?: string, "name": string, "input": any, "result"?: {"output": string, "status": "success"|"error", "file"?: {"filePath": string, "numLines"?: int}, "matchCount"?: int, "agent"?: {"id": string}}}`.
+- Tool use: `{"type": "tool_use", "id"?: string, "name": string, "input": any, "result"?: {"output": string, "status": "success"|"error", "exitCode"?: int, "declined"?: bool, "cwd"?: string, "file"?: {"filePath": string, "numLines"?: int}, "matchCount"?: int, "agent"?: {"id": string}}}`.
   Tool results are inlined into the `tool_use` block that requested them,
   matched by tool call ID where the agent records one, including the results
   of parallel calls that the agent writes separately.
@@ -69,6 +69,16 @@ Pi, one native message per call (no fragments to merge): `model` is `message.mod
   forked Skill calls), Codex's `SubAgentActivity` thread for a `spawn_agent`
   call, OpenCode's `task` session (`state.metadata.sessionId`), and Copilot's
   `subagent.started` agent for a task call.
+  `exitCode` is the exit code of the command the call ran, when the agent
+  records one: `0` is a recorded success, and absence means unknown, never
+  success. `declined` is `true` for a call the user declined, which never
+  ran; its `status` is `error`, as it was before the field existed, so a
+  reader that only checks `status` counts it as failed. `cwd` is the
+  working directory of the call as the agent records it. Only the Codex
+  item path writes these three: a command's exit code and own `cwd`, and
+  for a file change (whose paths are absolute) the `cwd` of its turn, from
+  the rollout's latest `turn_context`. Older lines and other agents' lines
+  have none of them.
 - Image: passed through from the source verbatim. The image source is either
   inline base64 or an `entire-asset:assets/…` placeholder left by image
   externalization.
@@ -79,8 +89,10 @@ Codex: rollouts from Codex versions that record items (the first turn has a
 user message `item_completed` event) convert item by item: each
 `item_completed` item becomes its own line or lines.
 Commands are `Bash` tool uses whose input is the script inside `<shell> -lc`
-or `<shell> -c` (other commands are shown whole), with the command's output;
-file changes are `FileChange` with each file's diff; MCP calls are named
+or `<shell> -c` (other commands are shown whole), with the command's output,
+exit code and working directory; file changes are `FileChange` with each
+file's diff, and their turn's working directory on the result; a command or
+file change the user declined has an `error` result marked `declined`; MCP calls are named
 `server.tool`; web searches are `WebSearch` and image views
 `ImageView`; a sub-agent spawn is `spawn_agent`, an interrupt
 `interrupt_agent` and any other interaction (a message or a follow-up task,
@@ -100,7 +112,9 @@ sub-agent rollouts (no items in the first turn, the task prompt as a
 stream of a Codex session shows a completed item exactly as it is stored.
 Its `CodexLive` argument carries what the stream knows beyond the item: the
 agent text and command output so far, whether the turn ended while the item
-was running (shown failed), and a fallback time. Usage is not part of it:
+was running (shown failed), a fallback time, and the turn's working
+directory (`TurnCWD`, shown on a file change's result as the stored line
+shows its `turn_context` cwd). Usage is not part of it:
 a stream attaches each call's usage itself, as an `OpUsage` record.
 
 ### Evolution rules

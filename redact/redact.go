@@ -3,6 +3,7 @@ package redact
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2111,6 +2112,9 @@ func isSingleJSONValue(dec *json.Decoder) bool {
 // the single-pass splice only matches keyed replacements for values written
 // directly after their key.
 //
+// A string that is exactly an inline image data URI is preserved wherever it
+// appears, except under a credential key; see isInlineImageDataURI.
+//
 // A skip key preserves its own string values, including the strings in its
 // arrays, but objects beneath it are walked with their own keys. The id rule
 // matches any key ending in "id", so {"android":{"apiKey":...}} is not an
@@ -2164,7 +2168,7 @@ func walkRedactableStrings(v any, transform func(key, spliceKey string, credenti
 			}
 			return out, true
 		case string:
-			if skipStrings {
+			if skipLeaf(skipStrings, key, credentialContext, val) {
 				return v, false
 			}
 			redacted := transform(key, spliceKey, credentialContext, val)
@@ -2575,10 +2579,57 @@ func shouldSkipJSONLField(key string) bool {
 	return false
 }
 
-// shouldSkipJSONLObject returns true if the object has "type":"image" or "type":"image_url".
+// shouldSkipJSONLObject returns true if the object's "type" starts with "image" or equals "base64".
 func shouldSkipJSONLObject(obj map[string]any) bool {
 	t, ok := obj["type"].(string)
 	return ok && (strings.HasPrefix(t, "image") || t == "base64")
+}
+
+// skipLeaf reports whether a string leaf is left unscanned: under a skip key,
+// or a whole-string inline image outside a credential key.
+func skipLeaf(skipStrings bool, key string, credentialContext bool, val string) bool {
+	return skipStrings || (isInlineImageDataURI(val) && !isCredentialJSONSecretKey(key, credentialContext))
+}
+
+// isInlineImageDataURI reports whether s is, in its entirety, a base64 image
+// data URI (data:image/<subtype>;base64,<data>) for a PNG, JPEG, GIF or WebP
+// image. Codex writes inline images this way: in input_image image_url values,
+// in tool call output, and as bare metadata strings such as a browser-use
+// screenshot URL. None of those match shouldSkipJSONLObject, and the entropy
+// layer would otherwise splice placeholders into the base64 and leave an
+// undecodable image.
+//
+// The check is per string rather than per object, so it hides no sibling
+// field. Only those four raster subtypes are accepted, and the decoded bytes
+// must start with one of their magic numbers, so base64 text under an image/
+// label and SVG (text that can carry secrets) stay on the scanned path. The
+// bytes need not match the label, which can be wrong: older Codex releases
+// took it from the file extension, and MCP tools declare their own. A data URI
+// embedded inside a longer string is still scanned.
+func isInlineImageDataURI(s string) bool {
+	rest, ok := strings.CutPrefix(s, "data:image/")
+	if !ok {
+		return false
+	}
+	subtype, data, ok := strings.Cut(rest, ";base64,")
+	// The decoder skips \r and \n even in strict mode, so a line after the
+	// image would decode as image data and escape scanning with it.
+	if !ok || data == "" || strings.ContainsAny(data, "\r\n") {
+		return false
+	}
+	switch strings.ToLower(subtype) {
+	case "png", "jpeg", "jpg", "gif", "webp":
+	default:
+		return false
+	}
+	raw, err := base64.StdEncoding.Strict().DecodeString(data)
+	if err != nil {
+		return false
+	}
+	return bytes.HasPrefix(raw, []byte("\x89PNG\r\n\x1a\n")) ||
+		bytes.HasPrefix(raw, []byte{0xFF, 0xD8, 0xFF}) ||
+		bytes.HasPrefix(raw, []byte("GIF87a")) || bytes.HasPrefix(raw, []byte("GIF89a")) ||
+		(len(raw) >= 12 && bytes.HasPrefix(raw, []byte("RIFF")) && bytes.Equal(raw[8:12], []byte("WEBP")))
 }
 
 func shannonEntropy(s string) float64 {

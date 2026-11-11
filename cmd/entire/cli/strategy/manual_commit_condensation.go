@@ -2293,10 +2293,12 @@ func reserveDoctorCondensationAttempt(ctx context.Context, state *SessionState) 
 }
 
 // openSessionCondensationRepository uses the session's recorded worktree when
-// it is still available. The state path only selects a registered worktree of
-// this repository; a removed, replaced, or unusable worktree falls back to the
-// caller's repository. Registration alone does not establish the repository's
-// identity. The caller owns the returned repository.
+// it is still available. The state path only selects a worktree of this
+// repository: the main worktree, a registered linked worktree, or an
+// unregistered checkout sharing it through commondir. A removed, replaced, or
+// unusable worktree falls back to the caller's repository. The common
+// directory, not registration, establishes the repository's identity. The
+// caller owns the returned repository.
 func openSessionCondensationRepository(ctx context.Context, state *SessionState) (*git.Repository, error) {
 	current, err := paths.WorktreeRoot(ctx)
 	if err != nil {
@@ -2308,8 +2310,9 @@ func openSessionCondensationRepository(ctx context.Context, state *SessionState)
 			return nil, fmt.Errorf("resolve current repository metadata: %w", err)
 		}
 		sessionMetadata, err := gitrepo.ResolveWorktreeMetadata(state.WorktreePath)
-		// The metadata resolver validates linked-worktree registration. Compare
-		// the validated common directories without spawning git under the lock.
+		// The metadata resolver validates any linked-worktree registration the
+		// Git directory claims. Compare the validated common directories
+		// without spawning git under the lock.
 		if err == nil && sameDir(currentMetadata.CommonDir, sessionMetadata.CommonDir) {
 			var repo *git.Repository
 			repo, err = gitrepo.OpenPath(state.WorktreePath)

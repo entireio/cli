@@ -12,6 +12,14 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
+func TestRedactGitStderr_RedactsCredentialedURLs(t *testing.T) {
+	t.Parallel()
+	got := redactGitStderr("fatal: unable to access 'https://user:s3cret@github.com/acme/app.git/': 403\n\nhint: check access\n")
+	require.NotContains(t, got, "s3cret")
+	require.Contains(t, got, "fatal: unable to access")
+	require.Contains(t, got, "; hint: check access")
+}
+
 func TestValidateGitRemoteName(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
