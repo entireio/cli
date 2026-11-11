@@ -158,7 +158,13 @@ func enterStepWorktree(ctx context.Context, state *SessionState, root string) (l
 		// worktree gets the entry under it: git never lists such a checkout,
 		// so pruning would drop its record in the same hook, and nothing could
 		// tell a checkout from a later one at the same path.
-		if metadata, metaErr := gitrepo.ResolveWorktreeMetadata(root); metaErr != nil || metadata.Unregistered {
+		metadata, metaErr := gitrepo.ResolveWorktreeMetadata(root)
+		if metaErr != nil {
+			logging.Debug(logging.WithComponent(ctx, "session"), "could not resolve worktree metadata; its edits are not recorded",
+				slog.String("worktree", root), slog.String("error", metaErr.Error()))
+			return nil, false
+		}
+		if metadata.Unregistered {
 			return nil, false
 		}
 	}
