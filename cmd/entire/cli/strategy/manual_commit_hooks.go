@@ -1920,6 +1920,35 @@ func (s *ManualCommitStrategy) postCommitFilesTouchedBefore(ctx context.Context,
 	return nil
 }
 
+// postCommitFilesBefore returns postCommitFilesTouchedBefore and a copy of
+// the session's TouchedFileHashes, with each file the commit holds in another
+// case spelled as the commit spells it (spelledAsCommitted) and its hash
+// under that spelling too. PrepareCommitMsg matched a session that no turn
+// end recorded so; the overlap gate and carry-forward must see the same
+// files, or its trailer would have no checkpoint.
+func (s *ManualCommitStrategy) postCommitFilesBefore(ctx context.Context, state *SessionState, foreign bool, committedFileSet map[string]struct{}) ([]string, map[string]string) {
+	before := s.postCommitFilesTouchedBefore(ctx, state, foreign)
+	hashes := maps.Clone(state.TouchedFileHashes)
+	spelled := spelledAsCommitted(sessionWorktreeRoot(ctx, state), before, committedFileSet)
+	files := make([]string, 0, len(spelled))
+	seen := make(map[string]struct{}, len(spelled))
+	for i, file := range spelled {
+		if hash, ok := hashes[before[i]]; ok && file != before[i] {
+			if _, taken := hashes[file]; !taken {
+				hashes[file] = hash
+			}
+		}
+		if _, dup := seen[file]; !dup {
+			seen[file] = struct{}{}
+			files = append(files, file)
+		}
+	}
+	if before == nil {
+		return nil, hashes
+	}
+	return files, hashes
+}
+
 // postCommitProcessSessionLocked handles a single session within the PostCommit loop.
 // Pre-resolved git objects (headTree, parentTree) are shared across all sessions.
 //
@@ -1968,10 +1997,9 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 	_, checkContentSpan := perf.Start(ctx, "check_session_content")
 	hasNew := s.postCommitHasNewContent(ctx, repo, state, committedFileSet)
 	transitionCtx.HasFilesTouched = len(state.FilesTouched) > 0
-	filesTouchedBefore := s.postCommitFilesTouchedBefore(ctx, state, foreign)
 	// Like FilesTouched, the recorded hashes are cleared by condensation but
 	// needed afterwards for the carry-forward decision.
-	touchedFileHashesBefore := maps.Clone(state.TouchedFileHashes)
+	filesTouchedBefore, touchedFileHashesBefore := s.postCommitFilesBefore(ctx, state, foreign, committedFileSet)
 	checkContentSpan.End()
 
 	logging.Debug(logCtx, "post-commit: carry-forward prep",

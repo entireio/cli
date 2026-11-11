@@ -11,6 +11,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 
@@ -206,6 +207,32 @@ func TestSessionHasNewContentFromLiveTranscript_SpellsAsTheCommitWindows(t *test
 	} else {
 		require.False(t, got, "README.md is another file here")
 	}
+}
+
+// TestPostCommitFilesBefore_SpellsAsTheCommitWindows is the post-commit side
+// of TestSessionHasNewContentFromLiveTranscript_SpellsAsTheCommitWindows: the
+// overlap gate and carry-forward must see the session's readme.md in the
+// commit of README.md too, with its recorded hash, or the trailer
+// PrepareCommitMsg added would have no checkpoint. CI's Windows job runs it
+// by its name.
+func TestPostCommitFilesBefore_SpellsAsTheCommitWindows(t *testing.T) {
+	t.Parallel()
+	dir, _ := trackedCaseRepo(t)
+	testutil.RunGit(t, dir, "mv", "-f", "README.md", "readme.md")
+	s := &ManualCommitStrategy{}
+	state := &SessionState{
+		SessionID: "post-commit-spelled", WorktreePath: dir, Phase: session.PhaseIdle,
+		FilesTouched: []string{"readme.md", "src/App.go"}, TouchedFileHashes: map[string]string{"readme.md": "abc"},
+	}
+	files, hashes := s.postCommitFilesBefore(context.Background(), state, false, fileSet([]string{"README.md"}))
+	if worktreedir.NewCaseProbe(dir).IgnoresCase(".") {
+		require.Equal(t, []string{"README.md", "src/App.go"}, files)
+		require.Equal(t, "abc", hashes["README.md"], "the hash recorded under the session's spelling")
+	} else {
+		require.Equal(t, []string{"readme.md", "src/App.go"}, files, "README.md is another file here")
+		require.NotContains(t, hashes, "README.md")
+	}
+	require.Equal(t, []string{"readme.md", "src/App.go"}, state.FilesTouched, "the session's own record is unchanged")
 }
 
 // On a case-sensitive filesystem FilterTrackableChanges keeps both
