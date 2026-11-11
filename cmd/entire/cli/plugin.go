@@ -296,8 +296,14 @@ func isAgentProtocolBinary(binPath string) bool {
 // The plugin stays a plain child in our process group, so terminal signals
 // reach it directly. On context cancellation it is sent the signal we received
 // (configurePluginCancel) so it can clean up; on a force quit, ForceQuitPlugins
-// ends it; and configurePluginProcess ties it to our lifetime where the
-// platform allows, so it does not outlive a killed CLI.
+// ends it.
+//
+// Known limitation, on every platform: if this process is killed in a way it
+// cannot catch (SIGKILL, the OOM killer, taskkill /F, a crash), the plugin
+// keeps running. Closing that would take a cross-platform mechanism such as a
+// lifeline pipe (an inherited fd whose EOF the plugin SDK treats as "parent
+// gone"); the per-platform ones (Linux Pdeathsig, a Windows kill-on-close job)
+// were judged not worth their cost and side effects.
 func runPlugin(ctx context.Context, pluginName, binPath string, args []string) (exitCode int, killedBy os.Signal) {
 	cmd := exec.CommandContext(ctx, binPath, args...)
 	configurePluginCancel(cmd, pluginCancelGOOS)
@@ -337,7 +343,7 @@ func runPlugin(ctx context.Context, pluginName, binPath string, args []string) (
 	}
 	cmd.Env = pluginEnv(parentEnv, extras...)
 
-	if err := runTrackedPlugin(ctx, cmd); err != nil {
+	if err := runTrackedPlugin(cmd); err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			// A signalled child reports -1, i.e. ExitPluginSignalled: it is
@@ -372,16 +378,8 @@ var runningPlugins = struct {
 }{procs: map[*os.Process]chan struct{}{}}
 
 // runTrackedPlugin is cmd.Run with the process registered for
-// ForceQuitPlugins while it runs, and tied to this process's lifetime where
-// the platform can do that (configurePluginProcess).
-//
-// The goroutine stays on one OS thread from Start to Wait: Linux's Pdeathsig
-// fires when the thread that started the child exits, not the process
-// (golang/go#27505), and Go may retire an unlocked thread at any time.
-func runTrackedPlugin(ctx context.Context, cmd *exec.Cmd) error {
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-	configurePluginProcess(ctx, cmd)
+// ForceQuitPlugins while it runs.
+func runTrackedPlugin(cmd *exec.Cmd) error {
 	if err := cmd.Start(); err != nil {
 		return err //nolint:wrapcheck // runPlugin reports exec's errors as they are
 	}
@@ -405,10 +403,7 @@ var pluginForceQuitGrace = pluginCancelGrace
 
 // ForceQuitPlugins ends the plugins this CLI is still waiting on, ahead of a
 // force quit (the second signal). Once this process exits nothing else will:
-// exec's kill-after-grace timer dies with it, and a child outlives its parent
-// unless the platform ties them (configurePluginProcess does that on Linux,
-// FreeBSD and Windows, but not on macOS, nor for every way this process can
-// exit).
+// exec's kill-after-grace timer dies with it, and a child outlives its parent.
 //
 // sig is the signal that forced the quit. For os.Interrupt — a Ctrl-C, which
 // the terminal or console delivers to the plugin as well — the plugin may be
