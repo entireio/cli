@@ -17,6 +17,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
+	"github.com/entireio/cli/internal/transcript/opencodev2"
 )
 
 // exportSubagent exports a child session and returns the transcript for one
@@ -194,8 +195,8 @@ func (a *OpenCodeAgent) LiveSubagentModifiedFiles(ctx context.Context, childID, 
 	if err != nil {
 		return nil, err
 	}
-	if data, err = normalizeOpenCodeExport(data); err != nil {
-		return nil, err
+	if data, err = opencodev2.Normalize(data); err != nil {
+		return nil, fmt.Errorf("convert the OpenCode 2 export: %w", err)
 	}
 	scoped, _, err := scopeExportToCall(data, since, time.Time{})
 	if err != nil {

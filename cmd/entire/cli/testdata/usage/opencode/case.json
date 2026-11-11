@@ -1,0 +1,6 @@
+{
+  "about": "reasoning is added to output unless the total shows it already inside; a message still in flight counts as a call with no tokens; the export is rewritten, never appended",
+  "transcript": "ses_1.json",
+  "whole": true,
+  "total": {"input_tokens": 24, "cache_creation_tokens": 600, "cache_read_tokens": 18000, "output_tokens": 320, "api_call_count": 3}
+}

@@ -169,9 +169,13 @@ func requireTurnTokens(t *testing.T, env *TestEnv, sessionID string, input, outp
 	require.NotNil(t, state.TokenUsage, "%s: session total", msg)
 	require.Equal(t, input, state.TokenUsage.InputTokens, "%s: session total input", msg)
 	require.Equal(t, output, state.TokenUsage.OutputTokens, "%s: session total output", msg)
-	require.NotNil(t, state.CheckpointTokenUsage, "%s: pending checkpoint usage", msg)
-	require.Equal(t, input, state.CheckpointTokenUsage.InputTokens, "%s: pending checkpoint input", msg)
-	require.Equal(t, output, state.CheckpointTokenUsage.OutputTokens, "%s: pending checkpoint output", msg)
+	pending := state.CheckpointTokenUsage
+	if state.TokenLedger.IsActive() {
+		pending = state.TokenLedger.Pending()
+	}
+	require.NotNil(t, pending, "%s: pending checkpoint usage", msg)
+	require.Equal(t, input, pending.InputTokens, "%s: pending checkpoint input", msg)
+	require.Equal(t, output, pending.OutputTokens, "%s: pending checkpoint output", msg)
 }
 
 // runConcurrently runs each fn at once and returns their errors.

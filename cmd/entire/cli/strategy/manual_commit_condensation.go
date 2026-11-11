@@ -789,7 +789,15 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	extractSessionDataSpan.End()
 	extractDuration := time.Since(extractStart)
 
-	resolveCondensedTokenUsage(ctx, ag, state, sessionData)
+	// Read the live transcript now, so a commit in the middle of a turn
+	// stores everything used up to it.
+	if ObserveTokenLedger(ctx, state) {
+		// Child sessions' usage is credited outside the ledger; add it here as
+		// resolveCondensedTokenUsage does, and resetCheckpointWindow rebaselines it.
+		sessionData.TokenUsage = session.WithChildSessionTokens(state.TokenLedger.Pending(), state.PendingChildSessionTokens())
+	} else {
+		resolveCondensedTokenUsage(ctx, ag, state, sessionData)
+	}
 
 	// Backfill the model from the transcript for agents that don't report it via
 	// hooks (e.g., Pi records message.model but its hook events carry no model
@@ -975,6 +983,7 @@ func buildCondensationWriteOptions(
 		TranscriptIdentifierAtStart: state.TranscriptIdentifierAtStart,
 		CheckpointTranscriptStart:   state.CheckpointTranscriptStart,
 		TokenUsage:                  sessionData.TokenUsage,
+		SessionTokenUsage:           SessionTokenUsage(state),
 		SkillEvents:                 skillEvents,
 		SessionMetrics:              buildSessionMetrics(state),
 		Summary:                     summary,
@@ -1330,6 +1339,15 @@ func resolveCondensedTokenUsage(ctx context.Context, ag agent.Agent, state *Sess
 	sessionData.TokenUsage = session.WithChildSessionTokens(sessionData.TokenUsage, state.PendingChildSessionTokens())
 }
 
+// SessionTokenUsage is the session's running total a checkpoint records, for
+// token-ledger sessions; nil for the per-turn path, whose total is not one.
+func SessionTokenUsage(state *SessionState) *agent.TokenUsage {
+	if state == nil || !state.TokenLedger.IsActive() {
+		return nil
+	}
+	return state.TotalTokenUsage()
+}
+
 // AttachTokenUsage returns the tokens `entire session attach` stores for a
 // session's transcript and the transcript end position in the agent's offset
 // units. With existing state it counts only what no checkpoint has counted yet
@@ -1341,6 +1359,15 @@ func resolveCondensedTokenUsage(ctx context.Context, ag agent.Agent, state *Sess
 // that also moves state.TokenUsage's cumulative subagent total, which the
 // caller must keep so the re-baseline covers what this checkpoint stored.
 func AttachTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, transcript []byte, transcriptPath string) (*agent.TokenUsage, int) {
+	if state != nil && transcriptPath != "" {
+		// Read the transcript being attached; attach records it as the
+		// session's path when it saves.
+		state.TranscriptPath = transcriptPath
+	}
+	if ObserveTokenLedger(ctx, state) {
+		usage := session.WithChildSessionTokens(state.TokenLedger.Pending(), state.PendingChildSessionTokens())
+		return usage, countTranscriptItems(ag.Type(), string(transcript))
+	}
 	var usage *agent.TokenUsage
 	if state == nil {
 		usage = agent.CalculateTokenUsage(ctx, ag, transcript, 0, "")
@@ -1363,7 +1390,8 @@ func AttachTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, 
 }
 
 // ConsumeAttachTokenWindow marks the tokens an attach checkpoint stored as
-// counted: the token offset moves to pos and the pending window is reset, so
+// counted (a token ledger is marked by the caller, up to the reading attach
+// stored): the token offset moves to pos and the pending window is reset, so
 // the session's next checkpoint does not count them again. The displayed
 // transcript window (CheckpointTranscriptStart) is left alone.
 //
@@ -2265,10 +2293,12 @@ func reserveDoctorCondensationAttempt(ctx context.Context, state *SessionState) 
 }
 
 // openSessionCondensationRepository uses the session's recorded worktree when
-// it is still available. The state path only selects a registered worktree of
-// this repository; a removed, replaced, or unusable worktree falls back to the
-// caller's repository. Registration alone does not establish the repository's
-// identity. The caller owns the returned repository.
+// it is still available. The state path only selects a worktree of this
+// repository: the main worktree, a registered linked worktree, or an
+// unregistered checkout sharing it through commondir. A removed, replaced, or
+// unusable worktree falls back to the caller's repository. The common
+// directory, not registration, establishes the repository's identity. The
+// caller owns the returned repository.
 func openSessionCondensationRepository(ctx context.Context, state *SessionState) (*git.Repository, error) {
 	current, err := paths.WorktreeRoot(ctx)
 	if err != nil {
@@ -2280,8 +2310,9 @@ func openSessionCondensationRepository(ctx context.Context, state *SessionState)
 			return nil, fmt.Errorf("resolve current repository metadata: %w", err)
 		}
 		sessionMetadata, err := gitrepo.ResolveWorktreeMetadata(state.WorktreePath)
-		// The metadata resolver validates linked-worktree registration. Compare
-		// the validated common directories without spawning git under the lock.
+		// The metadata resolver validates any linked-worktree registration the
+		// Git directory claims. Compare the validated common directories
+		// without spawning git under the lock.
 		if err == nil && sameDir(currentMetadata.CommonDir, sessionMetadata.CommonDir) {
 			var repo *git.Repository
 			repo, err = gitrepo.OpenPath(state.WorktreePath)

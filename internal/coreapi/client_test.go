@@ -133,6 +133,34 @@ func TestAPIError(t *testing.T) {
 	}
 }
 
+// The type survives the generated decoder.
+func TestAPIErrorType(t *testing.T) {
+	t.Parallel()
+
+	const quota = "https://entire.com/errors/service-account/quota-reached"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusConflict)
+		fmt.Fprintf(w, `{"status":409,"detail":"service account limit reached","type":%q}`, quota)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := NewWithBearer(srv.URL, "tok")
+	if err != nil {
+		t.Fatalf("NewWithBearer: %v", err)
+	}
+	_, err = c.CreateServiceAccount(t.Context(), &CreateServiceAccountInputBody{ProjectID: "01HZX7QABCDEFGHJKMNPQRSTVW", Name: "ci"})
+	if got := APIErrorType(err); got != quota {
+		t.Errorf("APIErrorType() = %q, want %q (err %v)", got, quota, err)
+	}
+	if got := APIErrorType(errors.New("dial tcp: refused")); got != "" {
+		t.Errorf("APIErrorType(non-API) = %q, want empty", got)
+	}
+	untyped := &ErrorModelStatusCode{StatusCode: 409, Response: ErrorModel{Detail: NewOptString("x")}}
+	if got := APIErrorType(untyped); got != "" {
+		t.Errorf("APIErrorType(untyped) = %q, want empty", got)
+	}
+}
+
 // TestProviderSource_BearerAuth covers the three branches of the
 // token-provider SecuritySource New() builds: a token passes through, a
 // not-logged-in error gets the login hint, and any other error surfaces
