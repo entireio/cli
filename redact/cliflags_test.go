@@ -309,6 +309,7 @@ func TestString_CommandLinePasswordsReviewCases(t *testing.T) {
 		{name: "quoted short flag value after a quoted shell word ending in a comma", input: `mysql -h 'db', "-pabc",` + p, want: `mysql -h 'db', "-pREDACTED`},
 		{name: "quoted short flag value after a quoted element in a code list", input: `run("mysql", 'db', "-p` + p + `",x)`, want: `run("mysql", 'db', "-pREDACTED",x)`},
 		{name: "long flag password spelled like a prose word before two arguments", input: "mongosh --password string db admin", want: "mongosh --password REDACTED db admin"},
+		{name: "long flag password spelled like a prose word before a URL", input: "wget --password string http://host/", want: "wget --password REDACTED http://host/"},
 		{name: "netrc fields equal to a type name after a command in a shell group", input: "{ echo foo machine string login string password string; }", want: "{ echo foo machine string login string password REDACTED }"},
 		{name: "quoted short flag value after an expression in a code list", input: `exec.Command("mysql", "-h", "db-"+suffix, "-p` + p + `",db)`, want: `exec.Command("mysql", "-h", "db-"+suffix, "-pREDACTED",db)`},
 		{name: "quoted short flag value after a long string in a code list", input: `exec.Command("mysql", "-h", "` + strings.Repeat("h", 1100) + `", "-p` + p + `",db)`, want: `exec.Command("mysql", "-h", "` + strings.Repeat("h", 1100) + `", "-pREDACTED",db)`},

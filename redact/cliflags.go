@@ -2349,7 +2349,7 @@ var (
 
 // containerArgOptions are the short options of container clients, before
 // and after their subcommand, that take an argument (docker -H host,
-// docker run -h mongo -p 27017:27017, kubectl exec -c app -n prod).
+// docker run -h web -p 8080:80, kubectl exec -c app -n prod).
 const containerArgOptions = "Hacefhlmnpsuvw"
 
 // takesArgument reports whether option, an option of wrapper, takes the next
@@ -3094,7 +3094,7 @@ func wordPieceEnd(s string, i, stringEnd int, first bool, subs substitutionMemo)
 // backtick that closes it on its line, before the quote that closes the
 // string holding the command, which ends at stringEnd (-1 for none), or 0
 // when none starts there. One that does not close on its line runs to the
-// end of it, as a $(...) does (mysql -pabc`printf hunter2), except in a
+// end of it, as a $(...) does (mysql -pfoo`printf bar), except in a
 // quoted string. A backtick after an odd number of others on its line, or
 // followed by a blank, the end of a line, punctuation or another backtick,
 // ends Markdown code instead (`openssl enc -pass pass:abc`, then `ls`;
@@ -3201,7 +3201,7 @@ const (
 // backslash escapes comes before s[i] on its line, so the one at s[i]
 // closes Markdown code. A backtick in a quoted string that opens at the
 // start of a word and closes before s[i] is a character of that string
-// (echo '`'; mysql -pabc`printf x`), not counted. subs keeps the count under
+// (echo '`'; mysql -pfoo`printf x`), not counted. subs keeps the count under
 // the key that tickKey names, so positions asked about in increasing order
 // are counted once.
 func oddTicksBefore(s string, i int, subs substitutionMemo, tickKey int) bool {
@@ -3363,7 +3363,7 @@ const maxInnerQuoteScan = 4096
 // closes the string holding a word, rather than one that opens a piece of
 // the word, which ends at pieceEnd when quoteLen is not 0. The quotes pair
 // up from the string's start, so it closes one when an odd number of them
-// follow up to the string's end ("sh -c \"mysql -phunter2\" && echo ok").
+// follow up to the string's end ("sh -c \"mysql -pX\" && echo ok").
 // Past maxInnerQuoteScan bytes, a piece that starts or ends with a blank or
 // holds a shell operator closes one.
 func closesInnerString(s string, i, stringEnd, pieceEnd, quoteLen int) bool {
@@ -4359,7 +4359,7 @@ func isApostrophe(s string, i int) bool {
 // next string rather than a value: JSON separators
 // ({"cmd":"mysql -p","x":1}), a concatenation in code
 // ("mysql -p" + password + " db") or shell operators
-// (sh -c "mysql -p"; echo "ok"). A password such as '+hunter2+' outside such
+// (sh -c "mysql -p"; ls "x"). A password such as '+hunter2+' outside such
 // a string is a value.
 func isStringGap(s string) bool {
 	trimmed := strings.TrimSpace(s)
@@ -4820,7 +4820,7 @@ func appendNetrcValue(regions []taggedRegion, s string, lines *quoteScan, start,
 // string   Password for"), so there (requireNonWord) an unquoted word of
 // prose stays visible (see isProseValue); any other word, or a prose word
 // the command ends with or gives more arguments after, may be a password
-// (mongosh --password swordfish, mongosh --password string). stringEnd is
+// (wget --password swordfish, wget --password string). stringEnd is
 // where the quoted string holding the command ends, or -1, and subs keeps the
 // substitutions read for the values after it, or is nil.
 func passwordValueRegion(s string, v cliValue, stringEnd int, subs substitutionMemo, dashFlag, requireNonWord bool) (taggedRegion, bool) {
@@ -4877,7 +4877,7 @@ func isRecipeSubstitution(body string) bool {
 // string, value) may also be the password, so another word makes it prose
 // only when that word is prose too ("the --password flag is") or the text
 // of a help line ("--password string   Password for"); the words after it
-// may be arguments (mongosh --password string db admin). A word ended by
+// may be arguments (wget --password string http://host/). A word ended by
 // punctuation is the password when an argument follows it on its line
 // (wget --password string. http://host/).
 func isProseValue(s string, v cliValue) bool {
@@ -4981,5 +4981,5 @@ var proseWords = append([]string{
 }, proseNouns...)
 
 // proseNouns are the proseWords that name what a flag takes, which a
-// password may also be (mongosh --password string db).
+// password may also be (wget --password string http://host/).
 var proseNouns = []string{"flag", "flags", "option", "options", "argument", "arguments", "arg", "args", "parameter", "parameters", "param", "value", "values", "string", "prompt", "field"}
