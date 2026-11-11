@@ -352,8 +352,9 @@ type inFlight struct {
 	unknown bool
 }
 
-// mayBePending reports whether hash may be the commit or a commit on top of
-// it.
+// mayBePending reports whether a record prepared with HEAD at hash may be for
+// a commit whose post-commit has not run yet, so the take must leave it: hash
+// is the commit or one on top of it, or the walk could not tell.
 func (f inFlight) mayBePending(hash string) bool {
 	return f.unknown || f.commits[hash]
 }
