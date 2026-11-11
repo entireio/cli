@@ -618,26 +618,53 @@ func isSlashedBase64Secret(run string) bool {
 // uriPassword returns the password s[start:end] of the URI that starts at
 // s[uriStart], as the placeholder rules read it: for a URI inside a double
 // quoted string, as in psql "postgres://app:${PW:-'$FALLBACK'}@db/app", it is
-// read as double quotes enclose it (see doubleQuotedText). The quote before
-// the URI must open a string that closes after it on its line: in
-// psql ""postgres://app:${PW:-'$S3CRET'}@db/app the quotes are an empty
-// string, so the single quotes make $S3CRET literal.
+// read as double quotes enclose it (see doubleQuotedText and
+// insideDoubleQuotes).
 func uriPassword(s string, uriStart, start, end int) string {
-	if open := uriStart - 1; open >= 0 && opensDoubleQuotedString(s, open) && quotedPieceEnd(s, open) >= 0 {
-		return doubleQuotedText(s[start:end])
+	password := s[start:end]
+	if strings.Contains(password, "'") && insideDoubleQuotes(s, uriStart, end) {
+		return doubleQuotedText(password)
 	}
-	return s[start:end]
+	return password
 }
 
-// opensDoubleQuotedString reports whether s[i] is a double quote that opens a
-// string, judged by the run of double quotes that ends there: in a run of
-// even length, as "", each quote closes the one before it.
-func opensDoubleQuotedString(s string, i int) bool {
-	n := 0
-	for i-n >= 0 && s[i-n] == '"' {
-		n++
+// doubleQuoteContextLimit bounds how far before and after a value
+// insideDoubleQuotes reads its line, so that many values on one long line
+// cost linear time. A value further than that from its line's start, or from
+// the quote that closes its string, is read as unquoted.
+const doubleQuoteContextLimit = 1024
+
+// insideDoubleQuotes reports whether s[start:end] sits inside one double
+// quoted string on its line, as a shell reads it: the line before it holds an
+// odd number of double quotes, so the last one opens a string, and that
+// string closes after it on the same line. A single quote, backslash or
+// backquote earlier on the line, or a double quote or backslash in the value,
+// can change which quotes pair (printf \"postgres://...\" quotes nothing), so
+// the value is then read as unquoted, which only ever redacts more: a single
+// quoted default is a literal there (see isPlaceholderShellExpansion). The
+// value may end with the quote that closes its string.
+func insideDoubleQuotes(s string, start, end int) bool {
+	from := max(0, start-doubleQuoteContextLimit)
+	lineStart := strings.LastIndexAny(s[from:start], "\n\r")
+	switch {
+	case lineStart >= 0:
+		lineStart += from + 1
+	case from > 0:
+		return false
+	default:
+		lineStart = 0
 	}
-	return n%2 == 1
+	before := s[lineStart:start]
+	if strings.ContainsAny(before, "'\\`") || strings.Count(before, `"`)%2 == 0 {
+		return false
+	}
+	value := strings.TrimSuffix(s[start:end], `"`)
+	if strings.ContainsAny(value, `"\`) {
+		return false
+	}
+	rest := s[start+len(value) : min(len(s), start+len(value)+doubleQuoteContextLimit)]
+	closing := strings.IndexAny(rest, "\"\n\r")
+	return closing >= 0 && rest[closing] == '"'
 }
 
 // detectDatabaseURIPasswords covers database URIs whose password contains a
@@ -1083,7 +1110,7 @@ func capturedValueRegion(s string, start, end int, extend bool, isReal func(piec
 	if extend && valueStart == start {
 		valueEnd = extendPastValueSeparators(s, valueEnd)
 	}
-	return region{valueStart, valueEnd}, isReal(capturedValueText(s, start, valueStart, valueEnd), singleQuoted)
+	return region{valueStart, valueEnd}, isReal(capturedValueText(s, valueStart, valueEnd), singleQuoted)
 }
 
 // isRealJoinedWord reports whether a shell word joined from pieces holds a
@@ -1347,22 +1374,18 @@ func wordBraceExpansionEnd(s string, open int) int {
 }
 
 // capturedValueText returns the value s[start:end] that a key/value pattern
-// captured from s[captureStart], as the placeholder rules read it. Double
-// quotes around the value, or a double quote that ends it and closes the
-// string it sits in (echo "DB_PASSWORD=${PW:-'$FALLBACK'}"), put it inside
-// double quotes, where the shell reads it as doubleQuotedText describes.
-func capturedValueText(s string, captureStart, start, end int) string {
+// captured, as the placeholder rules read it: inside a double-quoted string
+// (DB_PASSWORD="${PW:-'$FALLBACK'}", echo "DB_PASSWORD=${PW:-'$FALLBACK'} done"),
+// the shell reads it as doubleQuotedText describes.
+func capturedValueText(s string, start, end int) string {
 	value := s[start:end]
-	if start > captureStart {
-		if s[captureStart] == '"' {
-			return doubleQuotedText(value)
-		}
+	if !strings.Contains(value, "'") || !insideDoubleQuotes(s, start, end) {
 		return value
 	}
-	if inner, ok := strings.CutSuffix(value, `"`); ok && !strings.Contains(inner, `"`) {
+	if inner, ok := strings.CutSuffix(value, `"`); ok {
 		return doubleQuotedText(inner) + `"`
 	}
-	return value
+	return doubleQuotedText(value)
 }
 
 func captureRange(match []int, captureGroup int) (int, int, bool) {
@@ -1623,26 +1646,29 @@ func isPlaceholderShellExpansion(s string) bool {
 	return !shellTextOperatorRE.MatchString(s)
 }
 
-// isSingleQuotedWord reports whether word is wrapped in single quotes.
+// isSingleQuotedWord reports whether word is wrapped in single quotes, which
+// make it literal text outside double quotes: ${PW:-'$S3CRET'} defaults to the
+// characters $S3CRET, not to a variable.
 func isSingleQuotedWord(word string) bool {
 	return len(word) >= 2 && word[0] == '\'' && word[len(word)-1] == '\''
 }
 
+// singleQuotedDefaultRE matches a ${NAME<op>'word'} expansion whose word is
+// wrapped in single quotes and holds none.
+var singleQuotedDefaultRE = regexp.MustCompile(`\$\{(` + shellParameterName + `:?[-=+])'([^']*)'\}`)
+
 // doubleQuotedText returns text, which double quotes enclose, as the
 // placeholder rules read it. Inside double quotes a single quote is a plain
 // character: "${PW:-'$FALLBACK'}" expands $FALLBACK and puts apostrophes
-// around it, so an expansion whose word is all single-quoted is read without
-// those quotes, as ${PW:-$FALLBACK}. Without double quotes the same word is the
-// literal text $FALLBACK, a secret (see isPlaceholderShellExpansion).
+// around it, so each expansion whose word is all single-quoted, nested ones
+// included, is read without those quotes, as ${PW:-$FALLBACK}. Without double
+// quotes the same word is the literal text $FALLBACK, a secret (see
+// isPlaceholderShellExpansion).
 func doubleQuotedText(text string) string {
-	m := shellExpansionWordRE.FindStringSubmatchIndex(text)
-	if m == nil || !isSingleBraceExpression(text) {
+	if !strings.Contains(text, "'") {
 		return text
 	}
-	if word := text[m[2]:m[3]]; isSingleQuotedWord(word) {
-		return text[:m[2]] + word[1:len(word)-1] + text[m[3]:]
-	}
-	return text
+	return singleQuotedDefaultRE.ReplaceAllString(text, "$${${1}${2}}")
 }
 
 // shellTextOperatorRE matches ${NAME<op>...} for shell operators whose text can
