@@ -6,7 +6,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"maps"
 	"os"
 
@@ -140,7 +143,12 @@ func (u *usageCounter) children(ctx context.Context, in agent.CumulativeTokenInp
 		return nil
 	}
 	var children map[string]*agent.TokenUsage
-	for _, child := range extraction.Children {
+	for index, child := range extraction.Children {
+		if child.AgentID != "" && (child.TokenUsage == nil || !readFromOwnPath(in.Subagents, index, child.ResolvedPath)) {
+			// A child read without a total (a failed or canceled read) or
+			// found by scanning is read again next time, not cached.
+			cacheable = false
+		}
 		if child.AgentID == "" || child.TokenUsage == nil {
 			continue
 		}
@@ -149,29 +157,67 @@ func (u *usageCounter) children(ctx context.Context, in agent.CumulativeTokenInp
 		}
 		children[child.AgentID] = child.TokenUsage
 	}
-	if cacheable {
+	if cacheable && ctx.Err() == nil {
 		u.ChildKey, u.ChildTotals = key, maps.Clone(children)
+	} else {
+		u.ChildKey, u.ChildTotals = "", nil
 	}
 	return children
 }
 
-// childFingerprint identifies the inventory and each child file's size and
-// modification time. A child without a known path is found by scanning, and
-// one that is not a regular file is left to the inventory's own checks, so
-// neither inventory is cached.
+// readFromOwnPath reports whether the child at index was read from one of
+// its reference's own paths, which childFingerprint covers.
+func readFromOwnPath(refs []agent.SubagentReference, index int, path string) bool {
+	if index >= len(refs) || path == "" {
+		return false
+	}
+	return path == refs[index].DeclaredTranscriptPath || path == refs[index].ResolvedTranscriptPath
+}
+
+// childFingerprint identifies the inventory and, for each child, every path
+// its rollout is read from (declared, then resolved, as loadDirectRollout
+// tries them): a regular file's size and modification time, or that it is
+// missing, so one appearing changes the key. A child with neither path a
+// regular file is found by scanning, and a path that is something else is
+// left to the inventory's own checks, so neither inventory is cached.
 func childFingerprint(in agent.CumulativeTokenInput) (string, bool) {
 	h := sha256.New()
 	fmt.Fprintf(h, "%s\n", in.Home)
 	for _, ref := range in.Subagents {
-		path := ref.ResolvedTranscriptPath
-		if path == "" {
-			path = ref.DeclaredTranscriptPath
+		fmt.Fprintf(h, "%s", ref.AgentID)
+		found := false
+		for _, path := range []string{ref.DeclaredTranscriptPath, ref.ResolvedTranscriptPath} {
+			regular, ok := fingerprintPath(h, path)
+			if !ok {
+				return "", false
+			}
+			found = found || regular
 		}
-		info, err := os.Lstat(path)
-		if path == "" || err != nil || !info.Mode().IsRegular() {
+		if !found {
 			return "", false
 		}
-		fmt.Fprintf(h, "%s\x00%s\x00%d\x00%d\n", ref.AgentID, path, info.Size(), info.ModTime().UnixNano())
+		fmt.Fprintln(h)
 	}
 	return hex.EncodeToString(h.Sum(nil)[:12]), true
+}
+
+// fingerprintPath writes path's part of a child fingerprint to w: its size
+// and modification time when it is a regular file (regular), a marker when
+// it is empty or missing. ok is false for anything else.
+func fingerprintPath(w io.Writer, path string) (regular, ok bool) {
+	if path == "" {
+		fmt.Fprint(w, "\x00")
+		return false, true
+	}
+	info, err := os.Lstat(path)
+	switch {
+	case err == nil && info.Mode().IsRegular():
+		fmt.Fprintf(w, "\x00%s\x00%d\x00%d", path, info.Size(), info.ModTime().UnixNano())
+		return true, true
+	case errors.Is(err, fs.ErrNotExist):
+		fmt.Fprintf(w, "\x00%s\x00missing", path)
+		return false, true
+	default:
+		return false, false
+	}
 }
