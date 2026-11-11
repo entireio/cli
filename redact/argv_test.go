@@ -130,6 +130,44 @@ func TestJSONLBytes_ArgvPasswordCopiesInSkippedFieldsStay(t *testing.T) {
 	}
 }
 
+func TestJSONLBytes_SelfDetectedArgvPasswordDoesNotRewriteSkippedFields(t *testing.T) {
+	t.Parallel()
+	tok := highEntropySecret
+	cases := []struct {
+		name, in, skipKey string
+		wantKeyRedacted   bool
+	}{
+		{"id", `{"id":"` + tok + `","command":["docker","login","-u","me","-p","` + tok + `"]}`, "id", false},
+		{"thinkingSignature", `{"thinkingSignature":"` + tok + `","command":["docker","login","-u","me","-p","` + tok + `"]}`, "thinkingSignature", false},
+		{"id and secret key", `{"id":"` + tok + `","tokens":{"` + tok + `":{"scope":"repo"}},"command":["docker","login","-u","me","-p","` + tok + `"]}`, "id", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := JSONLBytes([]byte(tc.in + "\n"))
+			require.NoError(t, err)
+			content, err := JSONLContent(tc.in)
+			require.NoError(t, err)
+			require.Equal(t, content+"\n", string(got.Bytes()))
+			var obj map[string]any
+			require.NoError(t, json.Unmarshal([]byte(content), &obj))
+			require.Equal(t, tok, obj[tc.skipKey], content)
+			require.Contains(t, content, "REDACTED")
+			command, ok := obj["command"].([]any)
+			require.True(t, ok)
+			require.NotContains(t, command, tok)
+			if tc.wantKeyRedacted {
+				tokens, ok := obj["tokens"].(map[string]any)
+				require.True(t, ok, content)
+				_, hasTok := tokens[tok]
+				require.False(t, hasTok, content)
+				_, hasRedacted := tokens["REDACTED"]
+				require.True(t, hasRedacted, content)
+			}
+		})
+	}
+}
+
 func TestJSONLBytes_ArgvArraysWithoutPasswordsStayVisible(t *testing.T) {
 	t.Parallel()
 	for _, in := range []string{

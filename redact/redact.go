@@ -352,6 +352,10 @@ type jsonReplacement struct {
 	// a token that is also a key is hidden in the key as well, as it is
 	// without the array.
 	valuesOnly bool
+	// argv is set when an argument vector contributed regions. A skipped
+	// field with the same text is then preserved, even if valuesOnly is
+	// false because the element's own detectors also flagged it.
+	argv bool
 }
 
 type connectionStringRule struct {
@@ -2345,6 +2349,7 @@ func collectJSONLReplacements(v any, redactor leafRedactor) []jsonReplacement {
 				key: spliceKey, original: val, redacted: redacted,
 				placeholders: redactor.replacements() - before,
 				valuesOnly:   len(extra) > 0 && own == val,
+				argv:         len(extra) > 0,
 			}
 			if i, ok := seen[k]; !ok {
 				seen[k] = len(repls)
@@ -2492,20 +2497,24 @@ func ensureReplacementsLanded(parsed any, content, spliced string, repls []jsonR
 		return spliced, nil
 	}
 	redactor.rollback(before)
-	return reencodeRedacted(content, redactor)
+	return reencodeRedactedApplyingKeys(content, redactor, unkeyedSecretKeys(repls))
 }
 
-// spliceHitsSkippedLeaf reports whether a values-only replacement's original
-// is also the text of a string value the walk leaves alone: one under an id,
-// path or signature key, or in an image object. The splice cannot tell that
-// copy from the redactable ones, so it would rewrite a value the structural
-// re-encode keeps. It counts the copies of each such original among the
-// redactable leaves and among all string values, and any difference is a
-// skipped copy.
+// spliceHitsSkippedLeaf reports whether an unkeyed argument-vector
+// replacement's original is also the text of a string value the walk leaves
+// alone: one under an id, path or signature key, or in an image object. The
+// splice cannot tell that copy from the redactable ones, so it would rewrite
+// a value the structural re-encode keeps. This includes self-detected argv
+// passwords, whose unkeyed replacement also redacts object keys, and would
+// otherwise rewrite skipped fields with ReplaceAll. Unkeyed replacements
+// with no argv stay on the splice, so a secret found only as a value still
+// replaces every copy, including a skipped id. It counts the copies of each
+// such original among the redactable leaves and among all string values, and
+// any difference is a skipped copy.
 func spliceHitsSkippedLeaf(parsed any, repls []jsonReplacement) bool {
 	redactable := make(map[string]int)
 	for _, r := range repls {
-		if r.key == "" && r.valuesOnly {
+		if r.key == "" && (r.valuesOnly || r.argv) {
 			redactable[r.original] = 0
 		}
 	}
@@ -2610,6 +2619,79 @@ var ErrRedactionIncomplete = errors.New("redaction incomplete")
 // once to get here, so an error is "redaction flagged this and could not
 // finish", never "this is not JSONL".
 func reencodeRedacted(content string, redactor leafRedactor) (string, error) {
+	return reencodeRedactedApplyingKeys(content, redactor, nil)
+}
+
+// unkeyedSecretKeys returns the object-key renames for unkeyed replacements
+// that are not values-only: a self-detected secret hidden as a value is also
+// hidden as a key, and the structural re-encode would otherwise leave the
+// key as it is, because it walks values only.
+func unkeyedSecretKeys(repls []jsonReplacement) map[string]string {
+	var keys map[string]string
+	for _, r := range repls {
+		if r.key != "" || r.valuesOnly || r.redacted == r.original {
+			continue
+		}
+		if keys == nil {
+			keys = make(map[string]string)
+		}
+		keys[r.original] = r.redacted
+	}
+	return keys
+}
+
+// renameJSONObjectKeys returns v with object keys renamed according to keys,
+// recursively, copy-on-write. Two keys that rename to the same string keep
+// one, as a map must. changed reports whether any key was renamed, so
+// callers do not compare maps or slices with ==.
+func renameJSONObjectKeys(v any, keys map[string]string) (any, bool) {
+	switch val := v.(type) {
+	case map[string]any:
+		var out map[string]any
+		for k, child := range val {
+			newChild, childChanged := renameJSONObjectKeys(child, keys)
+			newKey := k
+			if r, ok := keys[k]; ok {
+				newKey = r
+			}
+			if !childChanged && newKey == k {
+				continue
+			}
+			if out == nil {
+				out = maps.Clone(val)
+			}
+			if newKey != k {
+				delete(out, k)
+			}
+			out[newKey] = newChild
+		}
+		if out == nil {
+			return v, false
+		}
+		return out, true
+	case []any:
+		var out []any
+		for i, child := range val {
+			newChild, childChanged := renameJSONObjectKeys(child, keys)
+			if !childChanged {
+				continue
+			}
+			if out == nil {
+				out = make([]any, len(val))
+				copy(out, val)
+			}
+			out[i] = newChild
+		}
+		if out == nil {
+			return v, false
+		}
+		return out, true
+	default:
+		return v, false
+	}
+}
+
+func reencodeRedactedApplyingKeys(content string, redactor leafRedactor, renamedKeys map[string]string) (string, error) {
 	trimmed := strings.TrimSpace(content)
 	dec := json.NewDecoder(strings.NewReader(trimmed))
 	dec.UseNumber()
@@ -2621,6 +2703,9 @@ func reencodeRedacted(content string, redactor leafRedactor) (string, error) {
 	redactedTree, _ := walkRedactableStrings(parsed, func(key, _ string, credentialContext bool, val string) string {
 		return redactLeafValue(key, credentialContext, val, argvRegions[val], redactor)
 	})
+	if len(renamedKeys) > 0 {
+		redactedTree, _ = renameJSONObjectKeys(redactedTree, renamedKeys)
+	}
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
