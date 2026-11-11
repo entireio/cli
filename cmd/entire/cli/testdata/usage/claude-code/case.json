@@ -1,0 +1,10 @@
+{
+  "about": "a message's lines repeat its usage, the one with most output counts; an API error entry is no call; subagents, and a subagent's own subagent, are children",
+  "session_id": "sess-1",
+  "transcript": "sess-1.jsonl",
+  "total": {"input_tokens": 5, "cache_creation_tokens": 500, "cache_read_tokens": 18500, "output_tokens": 160, "api_call_count": 2},
+  "children": {
+    "sub1": {"input_tokens": 7, "output_tokens": 3, "api_call_count": 1},
+    "sub2": {"input_tokens": 11, "output_tokens": 5, "api_call_count": 1}
+  }
+}

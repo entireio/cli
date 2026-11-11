@@ -59,7 +59,7 @@ Pi, one native message per call (no fragments to merge): `model` is `message.mod
 
 - User text: `{"id"?: string, "text": string}`. There is no `type` field (a v1 quirk).
 - Assistant text: `{"type": "text", "text": string}`.
-- Tool use: `{"type": "tool_use", "id"?: string, "name": string, "input": any, "result"?: {"output": string, "status": "success"|"error", "file"?: {"filePath": string, "numLines"?: int}, "matchCount"?: int, "agent"?: {"id": string}}}`.
+- Tool use: `{"type": "tool_use", "id"?: string, "name": string, "input": any, "result"?: {"output": string, "status": "success"|"error", "exitCode"?: int, "declined"?: bool, "cwd"?: string, "file"?: {"filePath": string, "numLines"?: int}, "matchCount"?: int, "agent"?: {"id": string}}}`.
   Tool results are inlined into the `tool_use` block that requested them,
   matched by tool call ID where the agent records one, including the results
   of parallel calls that the agent writes separately.
@@ -69,6 +69,16 @@ Pi, one native message per call (no fragments to merge): `model` is `message.mod
   forked Skill calls), Codex's `SubAgentActivity` thread for a `spawn_agent`
   call, OpenCode's `task` session (`state.metadata.sessionId`), and Copilot's
   `subagent.started` agent for a task call.
+  `exitCode` is the exit code of the command the call ran, when the agent
+  records one: `0` is a recorded success, and absence means unknown, never
+  success. `declined` is `true` for a call the user declined, which never
+  ran; its `status` is `error`, as it was before the field existed, so a
+  reader that only checks `status` counts it as failed. `cwd` is the
+  working directory of the call as the agent records it. Only the Codex
+  item path writes these three: a command's exit code and own `cwd`, and
+  for a file change (whose paths are absolute) the `cwd` of its turn, from
+  the rollout's latest `turn_context`. Older lines and other agents' lines
+  have none of them.
 - Image: passed through from the source verbatim. The image source is either
   inline base64 or an `entire-asset:assets/…` placeholder left by image
   externalization.
@@ -79,8 +89,10 @@ Codex: rollouts from Codex versions that record items (the first turn has a
 user message `item_completed` event) convert item by item: each
 `item_completed` item becomes its own line or lines.
 Commands are `Bash` tool uses whose input is the script inside `<shell> -lc`
-or `<shell> -c` (other commands are shown whole), with the command's output;
-file changes are `FileChange` with each file's diff; MCP calls are named
+or `<shell> -c` (other commands are shown whole), with the command's output,
+exit code and working directory; file changes are `FileChange` with each
+file's diff, and their turn's working directory on the result; a command or
+file change the user declined has an `error` result marked `declined`; MCP calls are named
 `server.tool`; web searches are `WebSearch` and image views
 `ImageView`; a sub-agent spawn is `spawn_agent`, an interrupt
 `interrupt_agent` and any other interaction (a message or a follow-up task,
@@ -100,7 +112,9 @@ sub-agent rollouts (no items in the first turn, the task prompt as a
 stream of a Codex session shows a completed item exactly as it is stored.
 Its `CodexLive` argument carries what the stream knows beyond the item: the
 agent text and command output so far, whether the turn ended while the item
-was running (shown failed), and a fallback time. Usage is not part of it:
+was running (shown failed), a fallback time, and the turn's working
+directory (`TurnCWD`, shown on a file change's result as the stored line
+shows its `turn_context` cwd). Usage is not part of it:
 a stream attaches each call's usage itself, as an `OpUsage` record.
 
 ### Evolution rules
@@ -190,14 +204,15 @@ applies records in order and returns the transcript lines.
 
 In this repository the fold is used by `Convert`: for Claude Code, Cursor and
 Droid, it runs a `JSONLAdapter` that turns the native transcript into records
-and then folds them, and for Pi a `PiAdapter`. The other converters still write
+and then folds them, for Pi a `PiAdapter`, and for OpenCode the records
+`OpenCodeAdapter` sends for each message. The other converters still write
 lines directly. The fold
 is meant to be shared with a backend that folds the same records to show a live
 session, so that a live view and a checkpoint's `transcript.jsonl` match byte
 for byte.
 
 A live producer uses the same adapter (`NewClaudeAdapter`, `NewCursorAdapter`,
-`NewDroidAdapter`, `NewPiAdapter`). `Feed` accepts the transcript in chunks split anywhere and
+`NewDroidAdapter`, `NewPiAdapter`; OpenCode's differs, see below). `Feed` accepts the transcript in chunks split anywhere and
 returns the records for the lines it completed; `Flush` consumes a trailing
 partial line and is called only once the transcript is final. Fold keys are
 stable only when the adapter is fed from the transcript's first line, so a
@@ -215,6 +230,48 @@ no line size limit: a long line is held until its newline arrives and read
 whole. `Convert` still fails on a Pi line of 10 MiB or more (newline
 excluded), as it always has, so the fold matches `Convert` wherever `Convert`
 succeeds.
+
+### OpenCode
+
+OpenCode keeps a session in its database and rewrites a message's rows in
+place as the message grows, so there is no append-only transcript to feed.
+A live producer exports the session again once it changes (`opencode export
+<id>` on 1.x, `opencode session export --standalone <id>` on 2.x) and feeds
+`OpenCodeAdapter` (`NewOpenCodeAdapter`) snapshot lines: one message per
+line, `{"info":{...},"parts":[...]}` in the OpenCode 1 shape, as
+`OpenCodeSnapshotLines` splits an export of either version
+(a 2.x export is converted by the internal `opencodev2` package). `FeedExport` does both:
+it feeds every message of an export in order, then drops the messages sent
+before that the export no longer has (a revert or a compaction), in the
+order they were first sent. A producer feeding lines itself calls
+`Drop(messageID)` for those.
+
+A pending revert (OpenCode's undo sets the session's `info.revert`; the
+next prompt deletes the reverted messages, redo clears it) hides what
+OpenCode hides: `OpenCodeSnapshotLines` leaves out the reverted message and
+every later one, or, for a revert of one of its parts, that message's parts
+from it on. So an undo drops them from the stream at once and a redo
+restores them. `Convert` still writes them, as the database holds them
+until the next prompt.
+
+Each message is keyed by its `info.id` (also the assistant line's `id`) and
+sent whole as a `message` record. It is sent again only when its record
+changed: a repeated snapshot, or a change that does not show (a
+`step-finish` part, a completion time), sends nothing, and a changed one
+replaces the message under the same key. A dropped message's next snapshot
+restores it where it was first created. Its tokens are a usage snapshot
+(`input_tokens` and `output_tokens`, as `Convert` writes them), replaced
+whole with the message. An assistant message with no text or tool parts is
+sent with content `[]`, which the fold hides but which keeps its place; once
+it has tokens it is sent with no content, a `"content":null` line carrying
+its usage. A tool still `pending` or `running` has no `result` yet.
+
+Folding every record from a sequence of snapshots equals `Convert` of the
+export made of each message's latest snapshot, dropped messages left out,
+when messages are first fed in session order (a message keeps the position at
+which it was first fed) and message IDs are present and unique, as OpenCode
+writes them. Lines that are not such a message, or whose role is neither
+`user` nor `assistant`, are consumed and ignored; `Lines` counts them.
 
 ### Record wire format v1
 

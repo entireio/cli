@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
+
+	"github.com/entireio/cli/internal/transcript/opencodev2"
 )
 
 // --- OpenCode format support ---
@@ -57,14 +60,29 @@ type openCodeMsgToken struct {
 	Output int `json:"output"`
 }
 
-// compactOpenCode converts a full OpenCode session JSON into transcript lines.
-// opts.StartLine is treated as a message-index offset (not a newline offset)
-// because the OpenCode transcript is a single JSON object.
+// OpenCode part types this package reads beyond text.
+const (
+	openCodePartTool       = "tool"
+	openCodePartCompaction = "compaction"
+)
+
+// openCodeToolTask is OpenCode 1's subagent tool (OpenCode 2's "subagent").
+const openCodeToolTask = "task"
+
+// compactOpenCode converts a full OpenCode session JSON, either version
+// (opencodev2.Normalize), into transcript lines. opts.StartLine is treated
+// as a message-index offset (not a newline offset) because the OpenCode
+// transcript is a single JSON object. It folds the records openCodeRecord
+// gives each message, as OpenCodeAdapter streams them.
 func compactOpenCode(content []byte, opts Options) ([]byte, error) {
+	normalized, err := opencodev2.Normalize(bytes.TrimSpace(content))
+	if err != nil {
+		return nil, fmt.Errorf("converting opencode 2 export: %w", err)
+	}
 	var session struct {
 		Messages []openCodeMessage `json:"messages"`
 	}
-	if err := json.Unmarshal(bytes.TrimSpace(content), &session); err != nil {
+	if err := json.Unmarshal(normalized, &session); err != nil {
 		return nil, fmt.Errorf("parsing opencode session: %w", err)
 	}
 
@@ -76,26 +94,63 @@ func compactOpenCode(content []byte, opts Options) ([]byte, error) {
 		messages = messages[opts.StartLine:]
 	}
 
-	base := newTranscriptLine(opts)
-	var result []byte
-
-	for _, msg := range messages {
-		ts := msToTimestamp(msg.Info.Time.Created)
-
-		switch msg.Info.Role {
-		case TypeUser:
-			emitOpenCodeUser(&result, base, msg, ts)
-		case TypeAssistant:
-			emitOpenCodeAssistant(&result, base, msg, ts)
+	records := make([]Record, 0, len(messages))
+	seen := make(map[string]bool, len(messages))
+	for i, msg := range messages {
+		// The fold key is the message ID. Convert also keeps a message
+		// without one, or one repeating an earlier ID, as its own line.
+		key := msg.Info.ID
+		if key == "" || seen[key] {
+			key = "\x00" + strconv.Itoa(i)
+		}
+		seen[key] = true
+		if r, ok := openCodeRecord(key, msg); ok {
+			records = append(records, r)
 		}
 	}
-
-	return result, nil
+	return Fold(records, opts)
 }
 
-func emitOpenCodeUser(result *[]byte, base transcriptLine, msg openCodeMessage, ts json.RawMessage) {
-	var blocks []json.RawMessage
+// openCodeRecord is msg's OpMessage under fold key key, false for a role
+// other than user or assistant. An assistant message with no text or tool
+// parts gets content [] (no line) when it has no tokens, and no content
+// (a "content":null line) when it has some, so its usage still has a line.
+// Its usage is a snapshot, so a later record replaces it whole.
+func openCodeRecord(key string, msg openCodeMessage) (Record, bool) {
+	r := Record{Op: OpMessage, ID: key, Role: msg.Info.Role, TS: msToTimestamp(msg.Info.Time.Created)}
+	switch msg.Info.Role {
+	case TypeUser:
+		content, err := json.Marshal(openCodeUserBlocks(msg))
+		if err != nil {
+			return Record{}, false
+		}
+		r.Content = content
+	case TypeAssistant:
+		r.SourceID = msg.Info.ID
+		r.Usage = &CallUsage{}
+		if t := msg.Info.Tokens; t != nil {
+			r.Usage.InputTokens = int64(t.Input)
+			r.Usage.OutputTokens = int64(t.Output)
+		}
+		blocks := openCodeAssistantBlocks(msg)
+		if len(blocks) == 0 && (r.Usage.InputTokens != 0 || r.Usage.OutputTokens != 0) {
+			return r, true
+		}
+		content, err := json.Marshal(blocks)
+		if err != nil {
+			return Record{}, false
+		}
+		r.Content = content
+	default:
+		return Record{}, false
+	}
+	return r, true
+}
 
+// openCodeUserBlocks is a user message's text blocks, IDE context tags
+// stripped; nil when it has none.
+func openCodeUserBlocks(msg openCodeMessage) []json.RawMessage {
+	var blocks []json.RawMessage
 	for _, part := range msg.Parts {
 		if unquote(part["type"]) != ContentTypeText {
 			continue
@@ -114,26 +169,16 @@ func emitOpenCodeUser(result *[]byte, base transcriptLine, msg openCodeMessage, 
 		}
 		blocks = append(blocks, b)
 	}
-
-	contentJSON, err := json.Marshal(blocks)
-	if err != nil {
-		return
-	}
-
-	line := base
-	line.Type = TypeUser
-	line.TS = ts
-	line.Content = contentJSON
-	appendLine(result, line)
+	return blocks
 }
 
-func emitOpenCodeAssistant(result *[]byte, base transcriptLine, msg openCodeMessage, ts json.RawMessage) {
+// openCodeAssistantBlocks is an assistant message's text and tool_use
+// blocks, the results of finished tools inlined.
+func openCodeAssistantBlocks(msg openCodeMessage) []map[string]json.RawMessage {
 	content := make([]map[string]json.RawMessage, 0, len(msg.Parts))
 
 	for _, part := range msg.Parts {
-		partType := unquote(part["type"])
-
-		switch partType {
+		switch unquote(part["type"]) {
 		case ContentTypeText:
 			b, err := json.Marshal(ContentTypeText)
 			if err != nil {
@@ -143,47 +188,50 @@ func emitOpenCodeAssistant(result *[]byte, base transcriptLine, msg openCodeMess
 				"type": b,
 				"text": part[ContentTypeText],
 			})
-		case "tool":
-			toolBlock := make(map[string]json.RawMessage)
-			b, err := json.Marshal(ContentTypeToolUse)
-			if err != nil {
-				continue
+		case openCodePartTool:
+			if block, ok := openCodeToolBlock(part); ok {
+				content = append(content, block)
 			}
-			toolBlock["type"] = b
-			if callID := part["callID"]; callID != nil {
-				toolBlock["id"] = callID
-			}
-			if toolName := part["tool"]; toolName != nil {
-				toolBlock["name"] = toolName
-			}
-			if stateRaw := part["state"]; stateRaw != nil {
-				var state map[string]json.RawMessage
-				if json.Unmarshal(stateRaw, &state) == nil {
-					if inp := state["input"]; inp != nil {
-						toolBlock["input"] = inp
-					}
-					toolBlock["result"] = openCodeToolResult(unquote(part["tool"]), state)
-				}
-			}
-			content = append(content, toolBlock)
 		}
 	}
+	return content
+}
 
-	contentJSON, err := json.Marshal(content)
+// openCodeToolBlock is a tool part's tool_use block: its call ID, name and
+// input, and its result once the tool finished.
+func openCodeToolBlock(part map[string]json.RawMessage) (map[string]json.RawMessage, bool) {
+	b, err := json.Marshal(ContentTypeToolUse)
 	if err != nil {
-		return
+		return nil, false
 	}
+	toolBlock := map[string]json.RawMessage{"type": b}
+	if callID := part["callID"]; callID != nil {
+		toolBlock["id"] = callID
+	}
+	if toolName := part["tool"]; toolName != nil {
+		toolBlock["name"] = toolName
+	}
+	var state map[string]json.RawMessage
+	if stateRaw := part["state"]; stateRaw == nil || json.Unmarshal(stateRaw, &state) != nil {
+		return toolBlock, true
+	}
+	if inp := state["input"]; inp != nil {
+		toolBlock["input"] = inp
+	}
+	if openCodeToolDone(state) {
+		toolBlock["result"] = openCodeToolResult(unquote(part["tool"]), state)
+	}
+	return toolBlock, true
+}
 
-	line := base
-	line.Type = TypeAssistant
-	line.TS = ts
-	line.ID = msg.Info.ID
-	line.Content = contentJSON
-	if msg.Info.Tokens != nil {
-		line.InputTokens = int64(msg.Info.Tokens.Input)
-		line.OutputTokens = int64(msg.Info.Tokens.Output)
+// openCodeToolDone reports whether a tool part's state has a result: a
+// pending or running tool has none yet (a live stream shows it running).
+func openCodeToolDone(state map[string]json.RawMessage) bool {
+	switch unquote(state["status"]) {
+	case "pending", "running":
+		return false
 	}
-	appendLine(result, line)
+	return true
 }
 
 // openCodeToolResult builds the compact {"output":"...","status":"success"|"error"}
@@ -201,7 +249,7 @@ func openCodeToolResult(tool string, state map[string]json.RawMessage) json.RawM
 	var metadata struct {
 		SessionID string `json:"sessionId"`
 	}
-	if tool == "task" && json.Unmarshal(state["metadata"], &metadata) == nil && metadata.SessionID != "" {
+	if tool == openCodeToolTask && json.Unmarshal(state["metadata"], &metadata) == nil && metadata.SessionID != "" {
 		r.Agent = &ToolResultAgent{ID: metadata.SessionID}
 	}
 	b, err := json.Marshal(r)

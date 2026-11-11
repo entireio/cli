@@ -40,7 +40,14 @@ func codexRecordLines(t *testing.T, records []Record) string {
 
 func assertCodexRecords(t *testing.T, it codexitem.Item, want ...string) {
 	t.Helper()
-	got := codexRecordLines(t, codexItemRecords(it))
+	assertCodexRecordsInTurn(t, it, "", want...)
+}
+
+// assertCodexRecordsInTurn is assertCodexRecords for an item of a turn whose
+// working directory is turnCWD.
+func assertCodexRecordsInTurn(t *testing.T, it codexitem.Item, turnCWD string, want ...string) {
+	t.Helper()
+	got := codexRecordLines(t, codexItemRecords(it, turnCWD))
 	if w := strings.Join(want, "\n"); got != w {
 		t.Errorf("records differ\ngot:\n%s\nwant:\n%s", got, w)
 	}
@@ -78,45 +85,78 @@ func TestCodexItemRecordsAgent(t *testing.T) {
 	assertCodexRecords(t, doneCodexItem(codexitem.Item{ID: "m2", Kind: codexitem.KindAgent}))
 }
 
+// A command's result carries its exit code when the item has one (0
+// included) and its own working directory; a declined command is an error
+// marked declined.
 func TestCodexItemRecordsCommand(t *testing.T) {
 	t.Parallel()
 	use := `{"op":"message","id":"e1","sourceId":"e1","role":"assistant","ts":%s,"content":[{"type":"tool_use","id":"e1","name":"Bash","input":{"command":"ls -la"}}]}`
-	result := `{"op":"result","id":"e1","sourceId":"e1","ts":%s,"toolUseId":"e1","result":{"output":%q,"status":%q}}`
+	result := `{"op":"result","id":"e1","sourceId":"e1","ts":%s,"toolUseId":"e1","result":%s}`
 	cmd := codexitem.Item{ID: "e1", Kind: codexitem.KindCommand, Command: "ls -la", CWD: "/w"}
 
 	ok := cmd
 	ok.Output, ok.ExitCode = "total 0\n", codexIntp(0)
-	assertCodexRecords(t, doneCodexItem(ok),
-		fmt.Sprintf(use, codexItemDoneTS), fmt.Sprintf(result, codexItemDoneTS, "total 0\n", "success"))
+	okResult := fmt.Sprintf(result, codexItemDoneTS, `{"output":"total 0\n","status":"success","exitCode":0,"cwd":"/w"}`)
+	assertCodexRecords(t, doneCodexItem(ok), fmt.Sprintf(use, codexItemDoneTS), okResult)
+	// The command's own directory, not the turn's.
+	assertCodexRecordsInTurn(t, doneCodexItem(ok), "/turn", fmt.Sprintf(use, codexItemDoneTS), okResult)
 
 	failed := cmd
-	failed.Output, failed.ExitCode = "ls: x: No such file\n", codexIntp(2)
+	failed.Status, failed.Output, failed.ExitCode = codexitem.StatusFailed, "ls: x: No such file\n", codexIntp(2)
 	assertCodexRecords(t, doneCodexItem(failed),
-		fmt.Sprintf(use, codexItemDoneTS), fmt.Sprintf(result, codexItemDoneTS, "ls: x: No such file\n", "error"))
+		fmt.Sprintf(use, codexItemDoneTS), fmt.Sprintf(result, codexItemDoneTS, `{"output":"ls: x: No such file\n","status":"error","exitCode":2,"cwd":"/w"}`))
+
+	// Failed without an exit code (it never started): none is made up.
+	noCode := cmd
+	noCode.Status = codexitem.StatusFailed
+	assertCodexRecords(t, doneCodexItem(noCode),
+		fmt.Sprintf(use, codexItemDoneTS), fmt.Sprintf(result, codexItemDoneTS, `{"output":"","status":"error","cwd":"/w"}`))
+
+	declined := cmd
+	declined.Status = codexitem.StatusDeclined
+	assertCodexRecords(t, doneCodexItem(declined),
+		fmt.Sprintf(use, codexItemDoneTS), fmt.Sprintf(result, codexItemDoneTS, `{"output":"","status":"error","declined":true,"cwd":"/w"}`))
+
+	// No directory of its own: the turn's is not put in its place.
+	noCWD := ok
+	noCWD.CWD = ""
+	assertCodexRecordsInTurn(t, doneCodexItem(noCWD), "/turn",
+		fmt.Sprintf(use, codexItemDoneTS), fmt.Sprintf(result, codexItemDoneTS, `{"output":"total 0\n","status":"success","exitCode":0}`))
 
 	running := cmd
 	running.Status, running.StartedAtMs = codexitem.StatusInProgress, codexItemStartMs
 	assertCodexRecords(t, running, fmt.Sprintf(use, codexItemStartTS))
 	running.Output = "total"
 	assertCodexRecords(t, running,
-		fmt.Sprintf(use, codexItemStartTS), fmt.Sprintf(result, codexItemStartTS, "total", "success"))
+		fmt.Sprintf(use, codexItemStartTS), fmt.Sprintf(result, codexItemStartTS, `{"output":"total","status":"success","cwd":"/w"}`))
 }
 
+// A file change records no directory, so its result carries the turn's; a
+// declined one is an error marked declined, a failed one an error only.
 func TestCodexItemRecordsFileChange(t *testing.T) {
 	t.Parallel()
 	it := doneCodexItem(codexitem.Item{ID: "f1", Kind: codexitem.KindFileChange, Changes: []codexitem.Change{
 		{Path: "/w/a.txt", Kind: "add", Diff: "hi\n"},
 		{Path: "/w/b.go", Kind: "update", MovePath: "/w/c.go", Diff: "@@ -1 +1 @@\n-a\n+b\n"},
 	}})
-	assertCodexRecords(t, it,
-		`{"op":"message","id":"f1","sourceId":"f1","role":"assistant","ts":`+codexItemDoneTS+`,"content":[{"type":"tool_use","id":"f1","name":"FileChange","input":{"changes":[{"path":"/w/a.txt","kind":"add","diff":"hi\n"},{"path":"/w/b.go","kind":"update","move_path":"/w/c.go","diff":"@@ -1 +1 @@\n-a\n+b\n"}]}}]}`,
-		`{"op":"result","id":"f1","sourceId":"f1","ts":`+codexItemDoneTS+`,"toolUseId":"f1","result":{"output":"","status":"success"}}`)
+	use := `{"op":"message","id":"f1","sourceId":"f1","role":"assistant","ts":` + codexItemDoneTS + `,"content":[{"type":"tool_use","id":"f1","name":"FileChange","input":{"changes":[{"path":"/w/a.txt","kind":"add","diff":"hi\n"},{"path":"/w/b.go","kind":"update","move_path":"/w/c.go","diff":"@@ -1 +1 @@\n-a\n+b\n"}]}}]}`
+	result := `{"op":"result","id":"f1","sourceId":"f1","ts":` + codexItemDoneTS + `,"toolUseId":"f1","result":%s}`
+	assertCodexRecords(t, it, use, fmt.Sprintf(result, `{"output":"","status":"success"}`))
+	assertCodexRecordsInTurn(t, it, "/w", use, fmt.Sprintf(result, `{"output":"","status":"success","cwd":"/w"}`))
 
-	it.Status = codexitem.StatusDeclined
-	recs := codexItemRecords(it)
-	if len(recs) != 2 || recs[1].Result == nil || recs[1].Result.Status != ToolStatusError {
-		t.Errorf("declined file change: want an error result, got %s", codexRecordLines(t, recs))
-	}
+	declined := it
+	declined.Status = codexitem.StatusDeclined
+	assertCodexRecordsInTurn(t, declined, "/w", use, fmt.Sprintf(result, `{"output":"","status":"error","declined":true,"cwd":"/w"}`))
+
+	failed := it
+	failed.Status = codexitem.StatusFailed
+	assertCodexRecordsInTurn(t, failed, "/w", use, fmt.Sprintf(result, `{"output":"","status":"error","cwd":"/w"}`))
+
+	// Running: the change, no result, so no directory yet.
+	running := it
+	running.Status = codexitem.StatusInProgress
+	running.CompletedAtMs = 0
+	assertCodexRecordsInTurn(t, running, "/w", strings.Replace(use, codexItemDoneTS, codexItemStartTS, 1))
 }
 
 func TestCodexItemRecordsMCPTool(t *testing.T) {
@@ -140,6 +180,12 @@ func TestCodexItemRecordsMCPTool(t *testing.T) {
 	// Running: the call, no result yet.
 	assertCodexRecords(t, codexitem.Item{ID: "c3", Kind: codexitem.KindMCPTool, Server: "s", Tool: "t", Status: codexitem.StatusInProgress},
 		`{"op":"message","id":"c3","sourceId":"c3","role":"assistant","content":[{"type":"tool_use","id":"c3","name":"s.t","input":{}}]}`)
+
+	// An MCP call doesn't run in the turn's directory: its result names none.
+	assertCodexRecordsInTurn(t, doneCodexItem(codexitem.Item{ID: "c1", Kind: codexitem.KindMCPTool, Server: "test_server", Tool: "echo",
+		Arguments: json.RawMessage(`{"text":"hi"}`), Output: "hi"}), "/w",
+		`{"op":"message","id":"c1","sourceId":"c1","role":"assistant","ts":`+codexItemDoneTS+`,"content":[{"type":"tool_use","id":"c1","name":"test_server.echo","input":{"text":"hi"}}]}`,
+		`{"op":"result","id":"c1","sourceId":"c1","ts":`+codexItemDoneTS+`,"toolUseId":"c1","result":{"output":"hi","status":"success"}}`)
 }
 
 func TestCodexItemRecordsWebSearchAndImageView(t *testing.T) {
@@ -211,7 +257,7 @@ func TestCodexItemRecordsTimestamp(t *testing.T) {
 	for _, c := range cases {
 		it := codexitem.Item{ID: "m1", Kind: codexitem.KindAgent, Text: "x", Status: c.status,
 			StartedAtMs: c.started, CompletedAtMs: c.completed, LineTS: c.lineTS}
-		recs := codexItemRecords(it)
+		recs := codexItemRecords(it, "")
 		if len(recs) == 0 {
 			t.Fatalf("%s: no records", c.name)
 		}
@@ -243,7 +289,7 @@ func TestCodexItemRecordsFold(t *testing.T) {
 		if it.Status == "" {
 			it = doneCodexItem(it)
 		}
-		if _, err := f.Apply(codexItemRecords(it)); err != nil {
+		if _, err := f.Apply(codexItemRecords(it, "")); err != nil {
 			t.Fatalf("item %s (%s): %v", it.ID, it.Kind, err)
 		}
 	}
@@ -252,7 +298,7 @@ func TestCodexItemRecordsFold(t *testing.T) {
 		t.Fatalf("got %d lines, want 9 (reasoning has none):\n%s", len(lines), strings.Join(lines, "\n"))
 	}
 	wantCommand := `{"v":1,"agent":"codex","cli_version":"0.1.0","type":"assistant","ts":` + codexItemDoneTS +
-		`,"id":"e1","content":[{"id":"e1","input":{"command":"ls"},"name":"Bash","result":{"output":"a\n","status":"success"},"type":"tool_use"}]}`
+		`,"id":"e1","content":[{"id":"e1","input":{"command":"ls"},"name":"Bash","result":{"output":"a\n","status":"success","exitCode":0},"type":"tool_use"}]}`
 	if lines[2] != wantCommand {
 		t.Errorf("folded command line:\n got %s\nwant %s", lines[2], wantCommand)
 	}
@@ -314,6 +360,20 @@ var codexKindCases = []codexKindCase{
 		rollout: `{"type":"CommandExecution","id":"e4","command":["echo","'x"],"cwd":"file:///work/repo","status":"failed","aggregated_output":"","exit_code":2}`,
 		daemon:  `{"type":"commandExecution","id":"e4","command":"echo 'x","cwd":"/work/repo","status":"failed","aggregatedOutput":"","exitCode":2}`,
 		want:    codexitem.Item{ID: "e4", Kind: codexitem.KindCommand, Status: codexitem.StatusFailed, Command: "echo 'x", CWD: "/work/repo", ExitCode: codexIntp(2)},
+	},
+	{
+		name:    "command the user declined",
+		rollout: `{"type":"CommandExecution","id":"e5","command":["/bin/bash","-lc","rm -rf build"],"cwd":"file:///work/repo","status":"declined","parsed_cmd":[]}`,
+		daemon:  `{"type":"commandExecution","id":"e5","command":"/bin/bash -lc 'rm -rf build'","cwd":"/work/repo","status":"declined","aggregatedOutput":null,"exitCode":null}`,
+		want:    codexitem.Item{ID: "e5", Kind: codexitem.KindCommand, Status: codexitem.StatusDeclined, Command: "rm -rf build", CWD: "/work/repo"},
+	},
+	{
+		name:    "fileChange the user declined",
+		rollout: `{"type":"FileChange","id":"f4","changes":{"/w/a.txt":{"type":"add","content":"hi\n"}},"status":"declined"}`,
+		daemon:  `{"type":"fileChange","id":"f4","changes":[{"path":"/w/a.txt","kind":{"type":"add"},"diff":"hi\n"}],"status":"declined"}`,
+		want: codexitem.Item{ID: "f4", Kind: codexitem.KindFileChange, Status: codexitem.StatusDeclined, Changes: []codexitem.Change{
+			{Path: "/w/a.txt", Kind: "add", Diff: "hi\n"},
+		}},
 	},
 	{
 		name:    "fileChange delete",
@@ -405,7 +465,7 @@ var codexKindCases = []codexKindCase{
 // TestCodexItemBothEncodings decodes each case's rollout and app-server forms
 // to the same Item, and checks that the live mapping of the app-server form
 // (CodexNotificationRecords) gives the line Convert gives for the rollout
-// form.
+// form, in a turn whose working directory both know.
 func TestCodexItemBothEncodings(t *testing.T) {
 	t.Parallel()
 	const lineTS = "2030-01-01T00:00:00.745Z"
@@ -436,6 +496,7 @@ func TestCodexItemBothEncodings(t *testing.T) {
 			// (so Convert takes the item path); its lines after the user's.
 			rollout := `{"timestamp":"t","type":"session_meta","payload":{"id":"th1"}}
 {"timestamp":"t","type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}
+{"timestamp":"t","type":"turn_context","payload":{"turn_id":"t1","cwd":"/w","model":"m"}}
 {"timestamp":"t","type":"event_msg","payload":{"type":"item_completed","turn_id":"t1","item":{"type":"UserMessage","id":"u0","content":[{"type":"text","text":"go"}]}}}
 ` + rolloutLine + "\n"
 			full, err := Convert([]byte(rollout), codexItemsOpts)
@@ -443,7 +504,7 @@ func TestCodexItemBothEncodings(t *testing.T) {
 				t.Fatalf("Convert: %v", err)
 			}
 			_, stored, _ := bytes.Cut(full, []byte("\n"))
-			recs, ok := CodexNotificationRecords("item/completed", params, CodexLive{})
+			recs, ok := CodexNotificationRecords("item/completed", params, CodexLive{TurnCWD: "/w"})
 			if !ok {
 				t.Fatal("CodexNotificationRecords: ok = false")
 			}
@@ -467,6 +528,8 @@ func TestCodexNotificationRecordsLive(t *testing.T) {
 	agent := started(`{"type":"agentMessage","id":"m1","text":""}`)
 	command := started(`{"type":"commandExecution","id":"e1","command":"/bin/zsh -lc 'make test'","cwd":"/w","status":"inProgress","aggregatedOutput":null,"exitCode":null}`)
 	use := `{"op":"message","id":"e1","sourceId":"e1","role":"assistant","ts":` + codexItemStartTS + `,"content":[{"type":"tool_use","id":"e1","name":"Bash","input":{"command":"make test"}}]}`
+	fileChange := started(`{"type":"fileChange","id":"f1","changes":[{"path":"/w/a.txt","kind":{"type":"add"},"diff":"hi\n"}],"status":"inProgress"}`)
+	fileChangeUse := `{"op":"message","id":"f1","sourceId":"f1","role":"assistant","ts":` + codexItemStartTS + `,"content":[{"type":"tool_use","id":"f1","name":"FileChange","input":{"changes":[{"path":"/w/a.txt","kind":"add","diff":"hi\n"}]}}]}`
 	cases := []struct {
 		name   string
 		params []byte
@@ -478,10 +541,13 @@ func TestCodexNotificationRecordsLive(t *testing.T) {
 			[]string{`{"op":"message","id":"m1","sourceId":"m1","role":"assistant","ts":` + codexItemStartTS + `,"content":[{"type":"text","text":"Hel"}]}`}},
 		{"running command", command, CodexLive{}, []string{use}},
 		{"command output so far", command, CodexLive{Output: str("ok 1\n")}, []string{use,
-			`{"op":"result","id":"e1","sourceId":"e1","ts":` + codexItemStartTS + `,"toolUseId":"e1","result":{"output":"ok 1\n","status":"success"}}`}},
+			`{"op":"result","id":"e1","sourceId":"e1","ts":` + codexItemStartTS + `,"toolUseId":"e1","result":{"output":"ok 1\n","status":"success","cwd":"/w"}}`}},
 		{"interrupted command", command, CodexLive{Output: str("ok 1\n"), Interrupted: true}, []string{
 			`{"op":"message","id":"e1","sourceId":"e1","role":"assistant","ts":` + codexItemStartTS + `,"content":[{"type":"tool_use","id":"e1","name":"Bash","input":{"command":"make test"}}]}`,
-			`{"op":"result","id":"e1","sourceId":"e1","ts":` + codexItemStartTS + `,"toolUseId":"e1","result":{"output":"ok 1\n","status":"error"}}`}},
+			`{"op":"result","id":"e1","sourceId":"e1","ts":` + codexItemStartTS + `,"toolUseId":"e1","result":{"output":"ok 1\n","status":"error","cwd":"/w"}}`}},
+		{"interrupted file change", fileChange, CodexLive{Interrupted: true, TurnCWD: "/w"}, []string{fileChangeUse,
+			`{"op":"result","id":"f1","sourceId":"f1","ts":` + codexItemStartTS + `,"toolUseId":"f1","result":{"output":"","status":"error","cwd":"/w"}}`}},
+		{"running file change", fileChange, CodexLive{TurnCWD: "/w"}, []string{fileChangeUse}},
 		{"text override ignored for a command", command, CodexLive{Text: str("x")}, []string{use}},
 		{"fallback time", []byte(`{"item":{"type":"agentMessage","id":"m2","text":"Hi"},"turnId":"t1"}`), CodexLive{TS: "2030-01-01T00:00:01.400Z"},
 			[]string{`{"op":"message","id":"m2","sourceId":"m2","role":"assistant","ts":"2030-01-01T00:00:01.400Z","content":[{"type":"text","text":"Hi"}]}`}},
@@ -504,5 +570,10 @@ func TestCodexNotificationRecordsLive(t *testing.T) {
 	recs, _ := CodexNotificationRecords("item/completed", done, CodexLive{Interrupted: true})
 	if len(recs) != 2 || recs[1].Result.Status != ToolStatusSuccess {
 		t.Errorf("completed command with Interrupted: %s", codexRecordLines(t, recs))
+	}
+	// An interrupted command was not declined, and has no exit code.
+	recs, _ = CodexNotificationRecords("item/started", command, CodexLive{Interrupted: true})
+	if len(recs) != 2 || recs[1].Result.Declined || recs[1].Result.ExitCode != nil {
+		t.Errorf("interrupted command: %s", codexRecordLines(t, recs))
 	}
 }
