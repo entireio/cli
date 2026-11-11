@@ -61,11 +61,20 @@ func TestJSONLBytes_CommandLinePasswordsInArgvArrays(t *testing.T) {
 		{`{"command":["echo","machine","host","login","alice","password","it's $2026"]}`, `{"command":["echo","machine","host","login","alice","password","REDACTED"]}`},
 		{`{"command":["echo","machine","host","login","alice","password","it's \"2026\""]}`, `{"command":["echo","machine","host","login","alice","password","REDACTED"]}`},
 		{`{"command":["echo","machine","host","login","alice","password","\"it's 2026\""]}`, `{"command":["echo","machine","host","login","alice","password","REDACTED"]}`},
+		// A .netrc password that starts with a dash and contains a blank
+		// is quoted whole, so the netrc reader does not stop at a bare option prefix.
+		{`{"command":["echo","machine","h","login","me","password","-hunter2 Summer2026"]}`, `{"command":["echo","machine","h","login","me","password","REDACTED"]}`},
 		// A password that is also an object key leaves the key as it is, and
 		// one after an escaped quote inside another string leaves that
-		// string as it is.
+		// string as it is. A key after a comma, or written with spaces
+		// around the colon, is still a key.
 		{`{"type":"x","command":["redis-cli","-a","type"]}`, `{"type":"x","command":["redis-cli","-a","REDACTED"]}`},
 		{`{"event":"hello\"type","command":["redis-cli","-a","type"]}`, `{"event":"hello\"type","command":["redis-cli","-a","REDACTED"]}`},
+		{`{"a":1,"type":"x","command":["redis-cli","-a","type"]}`, `{"a":1,"type":"x","command":["redis-cli","-a","REDACTED"]}`},
+		{`{"a":1, "type" : "x", "command":["redis-cli","-a","type"]}`, `{"a":1, "type" : "x", "command":["redis-cli","-a","REDACTED"]}`},
+		// A token the element's own detectors already flag is hidden in
+		// the key as well, as it is without the array.
+		{`{"tokens":{"` + highEntropySecret + `":{"scope":"repo"}},"command":["docker","login","-u","me","-p","` + highEntropySecret + `"]}`, `{"tokens":{"REDACTED":{"scope":"repo"}},"command":["docker","login","-u","me","-p","REDACTED"]}`},
 		// A credential field with the same text as an argv element is
 		// hidden whole, as it is without the array.
 		{`{"host":"db","user":"u","pwd":"-pa","command":["mysql","-pa"]}`, `{"host":"db","user":"u","pwd":"REDACTED","command":["mysql","-pREDACTED"]}`},
@@ -155,20 +164,51 @@ func TestJSONLBytes_ArgvArraysWithoutPasswordsStayVisible(t *testing.T) {
 }
 
 // Each array is read once, however many of its elements are flags, and the
-// quoted forms map back in linear time.
+// quoted forms map back with the password hidden. Timing for large arrays
+// lives in BenchmarkJSONLBytes_LongArgvArrays.
 func TestJSONLBytes_LongArgvArraysStayLinear(t *testing.T) {
 	t.Parallel()
 	for _, elem := range []string{`"-phunter2"`, `"-p'x y'"`, `"it's"`, `"a\nb"`, `"machine h login u password pw1 machine h login u password pw2"`} {
 		var b strings.Builder
 		b.WriteString(`{"command":["mysql"`)
-		for range 20000 {
+		for range 256 {
 			b.WriteString("," + elem)
 		}
 		b.WriteString("]}\n")
 		got, err := JSONLBytes([]byte(b.String()))
 		require.NoError(t, err)
-		if elem == `"-phunter2"` {
-			require.NotContains(t, string(got.Bytes()), "hunter2")
+		out := string(got.Bytes())
+		require.True(t, json.Valid([]byte(out)), elem)
+		switch elem {
+		case `"-phunter2"`:
+			require.NotContains(t, out, "hunter2")
+			require.Contains(t, out, "REDACTED")
+			require.Equal(t, 256, strings.Count(out, "-pREDACTED"))
+		case `"machine h login u password pw1 machine h login u password pw2"`:
+			require.NotContains(t, out, "pw1")
+			require.NotContains(t, out, "pw2")
+			require.Contains(t, out, "REDACTED")
+		}
+	}
+}
+
+func BenchmarkJSONLBytes_LongArgvArrays(b *testing.B) {
+	var buf strings.Builder
+	buf.WriteString(`{"command":["mysql"`)
+	for range 20000 {
+		buf.WriteString(`,"-phunter2"`)
+	}
+	buf.WriteString("]}\n")
+	input := []byte(buf.String())
+	b.ReportAllocs()
+	b.SetBytes(int64(len(input)))
+	for b.Loop() {
+		got, err := JSONLBytes(input)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if strings.Contains(string(got.Bytes()), "hunter2") {
+			b.Fatal("password left visible")
 		}
 	}
 }
@@ -196,6 +236,9 @@ func TestAppendArgvWord(t *testing.T) {
 		{"-'x'", false, `"-'x'"`},
 		{"instead", true, "'instead'"},
 		{"-x\ny", false, "-x0y"},
+		// A .netrc password starting with a dash and containing a blank is
+		// quoted whole when quoteValue is set, not split as an option prefix.
+		{"-hunter2 Summer2026", true, "'-hunter2 Summer2026'"},
 	}
 	for _, tc := range cases {
 		word, pos := appendArgvWord(nil, tc.arg, tc.quoteValue, true)
@@ -210,4 +253,12 @@ func TestAppendArgvWord(t *testing.T) {
 			}
 		}
 	}
+
+	// at(2) records the apostrophe itself in '\'' , the third byte of the
+	// four-byte escape. A looser check that only looks at word[pos[i]] still
+	// passes if at(2) is changed to at(0), because that points at the
+	// closing quote, also an apostrophe.
+	word, pos := appendArgvWord(nil, `it's "x"`, false, true)
+	require.Equal(t, `'it'\''s "x"'`, string(word))
+	require.Equal(t, []int{1, 2, 5, 7, 8, 9, 10, 11}, pos)
 }

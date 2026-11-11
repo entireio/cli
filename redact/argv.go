@@ -64,21 +64,15 @@ func (e argvElement) regions() []taggedRegion {
 // leaf anywhere in v with that text takes them too, since the splice writes
 // one result into every copy of a string, and the re-encode fallback must
 // write the same. Nil when there are none.
+//
+// Only arrays (and the maps that hold them) are walked, so a wide object
+// with no argument vector does not pay a pre-pass over every leaf.
 func argvRegionsByValue(v any) map[string][]taggedRegion {
 	var byValue map[string][]taggedRegion
-	walkRedactableStrings(v, func(_, _ string, _ bool, val string, argv argvElement) string {
-		found := argv.regions()
-		if len(found) == 0 {
-			return val
-		}
-		if byValue == nil {
-			byValue = make(map[string][]taggedRegion)
-		}
-		// The same text in several vectors takes the regions of each, so a
-		// password one of them finds is hidden in every copy.
-		byValue[val] = append(byValue[val], found...)
-		return val
-	})
+	collectArgvRegions(false, v, &byValue)
+	if byValue == nil {
+		return nil
+	}
 	// Copies in several vectors find the same regions; sorting drops the
 	// repeats in one pass, however many regions a value has.
 	for val, regions := range byValue {
@@ -86,6 +80,44 @@ func argvRegionsByValue(v any) map[string][]taggedRegion {
 		byValue[val] = slices.Compact(regions)
 	}
 	return byValue
+}
+
+// collectArgvRegions adds to byValue the command-line regions of each
+// argument-vector element in v, following the same skip rules as
+// walkRedactableStrings so a vector under an image object or a skipped
+// field is not joined.
+func collectArgvRegions(skipStrings bool, v any, byValue *map[string][]taggedRegion) {
+	switch val := v.(type) {
+	case map[string]any:
+		if shouldSkipJSONLObject(val) {
+			return
+		}
+		for k, child := range val {
+			collectArgvRegions(shouldSkipJSONLField(k), child, byValue)
+		}
+	case []any:
+		line := newArgvLine(val)
+		for i, child := range val {
+			s, ok := child.(string)
+			if !ok {
+				collectArgvRegions(skipStrings, child, byValue)
+				continue
+			}
+			if skipStrings || line == nil {
+				continue
+			}
+			found := argvElement{line, i}.regions()
+			if len(found) == 0 {
+				continue
+			}
+			if *byValue == nil {
+				*byValue = make(map[string][]taggedRegion)
+			}
+			// The same text in several vectors takes the regions of each, so a
+			// password one of them finds is hidden in every copy.
+			(*byValue)[s] = append((*byValue)[s], found...)
+		}
+	}
 }
 
 // compareTaggedRegions orders regions by position, then by what found them.
@@ -162,14 +194,19 @@ func (l *argvLine) find() [][]taggedRegion {
 // reads a bare word there as prose when more words follow (--password to
 // set it), but an element is a value of its own, whatever its words.
 func argvQuotesValue(args []string, i int) bool {
-	if i == 0 || args[i] == "" || args[i][0] == '-' {
+	if i == 0 || args[i] == "" {
 		return false
 	}
 	switch args[i-1] {
 	case "--password", "--passwd", "--pass":
-		return true
+		// A following flag stays bare; a password value is quoted so the
+		// layer reads it as one word, even when it looks like prose.
+		return args[i][0] != '-'
 	}
-	return false
+	// A .netrc password is a value of its own, including one that starts
+	// with a dash. Otherwise appendArgvWord splits it as a bare option
+	// plus a quoted rest, and the netrc reader stops at the bare part.
+	return strings.EqualFold(args[i-1], "password")
 }
 
 // wordEnd returns where the word of element k ends in a command line of
