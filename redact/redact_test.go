@@ -1831,6 +1831,59 @@ func TestString_ValuesPastRedactedWordsCaughtWithoutScanners(t *testing.T) {
 	})
 }
 
+// TestString_TrailingKeysCaughtWithoutScanners covers a key that ends a
+// redacted word, read as FindAll reads it too, and the ends of the matches
+// FindAll takes, which no later key can start inside.
+func TestString_TrailingKeysCaughtWithoutScanners(t *testing.T) {
+	assertStringRedactionCasesWithoutScanners(t, []stringRedactionCase{
+		{
+			name:  "a credential after a joined key whose value is the next word, as FindAll reads it",
+			input: `API_KEY="x"FOO= DB_USER= DB_NAME= API_KEY=hunter2`,
+			want:  `API_KEY=REDACTED DB_USER= DB_NAME= API_KEY=REDACTED`,
+		},
+		{
+			name:  "a password under the shorter key FindAll reads at the end of a word",
+			input: `API_KEY="a"x_PASSWORD=+hunter2xyz`,
+			want:  "API_KEY=REDACTED",
+		},
+		{
+			name:  "a password after a blank under the shorter key FindAll reads",
+			input: `API_KEY="a"x_PASSWORD= hunter2xyz`,
+			want:  "API_KEY=REDACTED REDACTED",
+		},
+		{
+			name:  "a password under the shorter key FindAll reads after a single-quoted string",
+			input: `API_KEY='a'xx_PASSWORD=:hunter2xyz`,
+			want:  "API_KEY=REDACTED",
+		},
+		{
+			name:  "a password under the key FindAll reads after a match inside the word",
+			input: `API_KEY="x"api_key="a"_PASSWORD=?hunter2xyz`,
+			want:  "API_KEY=REDACTED",
+		},
+		{
+			name:  "a credential after a blank under the key FindAll reads after a match inside the word",
+			input: `api_key="a"api_key="a"_api_key= hunter2xyz`,
+			want:  "api_key=REDACTED REDACTED",
+		},
+		{
+			name:  "a credential after a value redacted inside the quotes its match ends with",
+			input: `API_KEY=""'API_KEY="x'"a= API_KEY=hunter2`,
+			want:  `API_KEY=REDACTED"a= API_KEY=REDACTED`,
+		},
+		{
+			name:  "a credential read with the closing quote of a value redacted inside its quotes",
+			input: `API_KEY="x""|api_key="a"API_KEY=hunter2xyz`,
+			want:  `API_KEY=REDACTED"API_KEY=REDACTED`,
+		},
+		{
+			name:  "a value after a key inside the text a match took is read only whole",
+			input: `api_key=xDB_PASSWORD= x`,
+			want:  "api_key=REDACTED x",
+		},
+	})
+}
+
 // assertStringRedactionCasesWithoutScanners checks each case with only the
 // key/value rules on, then restores the default scanners. The scanner
 // configuration is process-wide, so the cases run one at a time.
