@@ -2385,9 +2385,9 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 	// rather than silently dropping a real checkpoint.
 	//
 	// The transcript's paths are spelled as git spells them first, or a file
-	// the subagent named in another case would never count as committed.
-	subagentFiles := strategy.TrackedSpellings(logCtx, repoRoot, FilterAndNormalizePaths(modifiedFiles, repoRoot))
-	uncommittedSubagentFiles := filterToUncommittedFiles(logCtx, subagentFiles, repoRoot)
+	// the subagent named in another case would never count as committed
+	// (splitSubagentFiles).
+	uncommittedSubagentFiles, committedSubagentFiles := splitSubagentFiles(logCtx, repoRoot, FilterAndNormalizePaths(modifiedFiles, repoRoot))
 	relModifiedFiles := uncommittedSubagentFiles
 	var relNewFiles, relDeletedFiles []string
 	if changes != nil {
@@ -2407,8 +2407,7 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 	// later carries it.
 	attachedToCommit := false
 	if !opts.bypassNoChangesSkip {
-		committedFiles := withoutFiles(subagentFiles, uncommittedSubagentFiles)
-		attachedToCommit = attachTaskToCommitCheckpoint(logCtx, ag, event, opts, preState, subagentTranscriptPath, committedFiles)
+		attachedToCommit = attachTaskToCommitCheckpoint(logCtx, ag, event, opts, preState, subagentTranscriptPath, committedSubagentFiles)
 	}
 
 	// If no changes, skip — unless this is a Final (SubagentStop) capture: a
@@ -2498,7 +2497,8 @@ func subagentTaskRecord(logCtx context.Context, ag agent.Agent, event *agent.Eve
 // the record. That commit condensed the session before the record existed, so
 // no later commit would carry the transcript for the files it holds.
 //
-// committedFiles are the files the subagent wrote that HEAD now has. A
+// committedFiles are the files the subagent wrote that HEAD now has, spelled
+// as HEAD spells them (splitSubagentFiles). A
 // subagent with none, such as a read-only one running alongside the committer,
 // is not attributed to any commit. Among the checkpoints condensed during the
 // run, the record goes to the newest whose commit carries one of those files.
@@ -2574,6 +2574,29 @@ func checkpointsCondensedSince(atStart, current []string) []id.CheckpointID {
 		condensed = append(condensed, checkpointID)
 	}
 	return condensed
+}
+
+// splitSubagentFiles splits written, the worktree-relative files a subagent's
+// transcript names, into the ones still uncommitted, spelled as git's index
+// spells them (strategy.TrackedSpellings), and the ones HEAD now has, spelled
+// as HEAD does, which attachTaskToCommitCheckpoint matches against the
+// checkpoints' files.
+//
+// A spelling the index no longer tracks can still be the one HEAD holds.
+// With a staged rename of README.md to readme.md where the filesystem ignores
+// case, a path-limited commit of README.md commits the subagent's edit as
+// README.md, while the index, and so the respelled name, says readme.md, which
+// HEAD does not have. So each name the respelling changed is also checked
+// against HEAD as the transcript wrote it. readme.md stays uncommitted: the
+// rename is still to be committed.
+func splitSubagentFiles(ctx context.Context, repoRoot string, written []string) (uncommitted, committed []string) {
+	tracked := strategy.TrackedSpellings(ctx, repoRoot, written)
+	uncommitted = filterToUncommittedFiles(ctx, tracked, repoRoot)
+	committed = withoutFiles(tracked, uncommitted)
+	if respelled := withoutFiles(written, tracked); len(respelled) > 0 {
+		committed = mergeUnique(committed, withoutFiles(respelled, filterToUncommittedFiles(ctx, respelled, repoRoot)))
+	}
+	return uncommitted, committed
 }
 
 // withoutFiles returns the files in all that are not in remove.
