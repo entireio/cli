@@ -131,22 +131,56 @@ func (l *TokenLedger) MarkCheckpointed() {
 
 // MarkCheckpointedUpTo marks only what o, an earlier copy of this ledger,
 // had read: readings made since stay pending. A checkpoint marked since o
-// was read (a hook's, while attach waited) can hold more than o did, and the
-// marks keep whichever is higher, so the subagents either one could not
-// count stay unknown.
+// was read (a hook's, while attach waited) can hold more than o did; see
+// uncountedAtMark for which subagents stay unknown then.
 func (l *TokenLedger) MarkCheckpointedUpTo(o *TokenLedger) {
+	read := o.childrenTotal()
 	uncounted := maps.Clone(o.UncountedChildren)
 	if l.markedSince(o) {
-		for id := range l.CheckpointedUncounted {
-			if uncounted == nil {
-				uncounted = make(map[string]bool)
-			}
-			uncounted[id] = true
-		}
+		uncounted = l.uncountedAtMark(read, uncounted)
 	}
 	l.Checkpointed = agent.MaxTokenUsage(l.Checkpointed, o.mainTotal())
-	l.CheckpointedChildren = agent.MaxTokenUsage(l.CheckpointedChildren, o.childrenTotal())
+	l.CheckpointedChildren = agent.MaxTokenUsage(l.CheckpointedChildren, read)
 	l.CheckpointedUncounted = uncounted
+}
+
+// uncountedAtMark returns the subagents unknown to the children's mark once
+// read, a reading that could not count readUncounted, is marked over a newer
+// checkpoint's. The mark keeps the higher total in each field. When the newer
+// checkpoint holds at least read in every field, its mark stands and only
+// what it could not count is unknown; when read holds all of it, read's are.
+// Otherwise the mark mixes both, and so do the unknowns.
+func (l *TokenLedger) uncountedAtMark(read *agent.TokenUsage, readUncounted map[string]bool) map[string]bool {
+	switch {
+	case covers(l.CheckpointedChildren, read):
+		return maps.Clone(l.CheckpointedUncounted)
+	case covers(read, l.CheckpointedChildren):
+		return readUncounted
+	}
+	uncounted := maps.Clone(readUncounted)
+	for id := range l.CheckpointedUncounted {
+		if uncounted == nil {
+			uncounted = make(map[string]bool)
+		}
+		uncounted[id] = true
+	}
+	return uncounted
+}
+
+// covers reports whether a is at least b in every field, so a mark of a
+// holds everything a mark of b would. nil is no usage.
+func covers(a, b *agent.TokenUsage) bool {
+	if b == nil {
+		return true
+	}
+	if a == nil {
+		a = &agent.TokenUsage{}
+	}
+	return a.InputTokens >= b.InputTokens &&
+		a.CacheCreationTokens >= b.CacheCreationTokens &&
+		a.CacheReadTokens >= b.CacheReadTokens &&
+		a.OutputTokens >= b.OutputTokens &&
+		a.APICallCount >= b.APICallCount
 }
 
 // markedSince reports whether a checkpoint was marked on l after o, an

@@ -1,6 +1,7 @@
 package session
 
 import (
+	"maps"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -108,6 +109,37 @@ func TestTokenLedger(t *testing.T) {
 		// b's total now includes what it used before the hook's checkpoint.
 		l.Observe(reading(usage(20, 2, 2), map[string]*agent.TokenUsage{"a": usage(50, 5, 2), "b": usage(9, 1, 2)}))
 		assertSubagentsComplete(t, "pending", l.Pending(), false)
+	})
+
+	t.Run("attach's mark takes a newer checkpoint that counted its uncounted child", func(t *testing.T) {
+		t.Parallel()
+		var l TokenLedger
+		l.Observe(reading(usage(10, 1, 1), map[string]*agent.TokenUsage{"a": usage(50, 5, 2), "b": nil}))
+		read := l.Clone() // attach's reading could not count b
+		// While attach waits, a hook counts b and checkpoints.
+		l.Observe(reading(usage(20, 2, 2), map[string]*agent.TokenUsage{"a": usage(50, 5, 2), "b": usage(7, 1, 1)}))
+		l.MarkCheckpointed()
+		l.MarkCheckpointedUpTo(read)
+		l.Observe(reading(usage(30, 3, 3), map[string]*agent.TokenUsage{"a": usage(60, 6, 3), "b": usage(7, 1, 1)}))
+		assertUsage(t, "pending", l.Pending(), withKids(usage(10, 1, 1), usage(10, 1, 1)))
+		assertSubagentsComplete(t, "pending", l.Pending(), true)
+	})
+
+	t.Run("attach's mark keeps both uncounted sets when neither mark holds the other", func(t *testing.T) {
+		t.Parallel()
+		read := &TokenLedger{
+			Active:            true,
+			Children:          map[string]*agent.TokenUsage{"a": usage(50, 1, 1)},
+			UncountedChildren: map[string]bool{"b": true},
+		}
+		l := read.Clone()
+		// A hook's checkpoint with fewer input but more output tokens.
+		l.CheckpointedChildren = usage(40, 2, 1)
+		l.CheckpointedUncounted = map[string]bool{"c": true}
+		l.MarkCheckpointedUpTo(read)
+		if want := map[string]bool{"b": true, "c": true}; !maps.Equal(l.CheckpointedUncounted, want) {
+			t.Fatalf("checkpointed uncounted = %v, want %v", l.CheckpointedUncounted, want)
+		}
 	})
 
 	t.Run("attach's mark takes its own reading's counted children", func(t *testing.T) {
