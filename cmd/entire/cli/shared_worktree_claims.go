@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -167,7 +168,7 @@ func newNamedFiles(repoRoot string, named []string, listed ...[]string) namedFil
 // symlink to a directory, ".." leaves the link's target, which a lexical
 // clean cannot see. Windows takes ".." lexically, before any link.
 func withoutDotComponents(name string) string {
-	if runtime.GOOS != "windows" && slices.Contains(strings.Split(name, "/"), "..") {
+	if runtime.GOOS != windowsGOOS && slices.Contains(strings.Split(name, "/"), "..") {
 		return name
 	}
 	return path.Clean(name)
@@ -194,9 +195,8 @@ func resolvedDir(repoRoot, file string, resolved map[string]string) string {
 	return path.Join(target, base)
 }
 
-// dirName returns the worktree-relative name dir resolves to, "." for the
-// worktree root itself (a link such as alias -> .), and false when it leaves
-// the worktree or does not resolve.
+// dirName returns the worktree-relative name dir, a repo-relative directory,
+// resolves to, and false when it leaves the worktree or does not resolve.
 func dirName(repoRoot, dir string) (string, bool) {
 	root, err := filepath.Abs(repoRoot)
 	if err != nil {
@@ -204,18 +204,36 @@ func dirName(repoRoot, dir string) (string, bool) {
 	}
 	// Not filepath.Join, which would clean ".." away: EvalSymlinks takes it
 	// after the links before it.
-	target, err := filepath.EvalSymlinks(root + string(filepath.Separator) + filepath.FromSlash(dir))
+	name, err := resolvedDirName(root, root+string(filepath.Separator)+filepath.FromSlash(dir))
+	return name, err == nil
+}
+
+// errOutsideWorktree is resolvedDirName's answer for a directory that
+// resolves outside the worktree.
+var errOutsideWorktree = errors.New("directory resolves outside the worktree")
+
+// resolvedDirName returns the worktree-relative name the directory at absDir
+// resolves to, symlinks and ".." taken as the filesystem takes them, and "."
+// for the worktree root itself (a link such as alias -> .). It fails with
+// errOutsideWorktree when absDir resolves outside the worktree, and with
+// another error when it does not resolve.
+func resolvedDirName(repoRoot, absDir string) (string, error) {
+	target, err := filepath.EvalSymlinks(absDir)
 	if err != nil {
-		return "", false
+		return "", fmt.Errorf("resolve %s: %w", absDir, err)
 	}
-	if root, err = filepath.EvalSymlinks(root); err != nil {
-		return "", false
+	root, err := filepath.EvalSymlinks(repoRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s: %w", repoRoot, err)
 	}
 	if target == root {
-		return ".", true
+		return ".", nil
 	}
 	name, err := worktreedir.Name(root, target)
-	return name, err == nil
+	if err != nil {
+		return "", errOutsideWorktree
+	}
+	return name, nil
 }
 
 // only returns the files of all the transcript names, in all's order and

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -95,4 +96,81 @@ func TestHandleLifecycleSubagentEnd_PlacesNamesInTheAgentsDirectory(t *testing.T
 	rec := state.FindTaskRecord(toolUseID)
 	require.NotNil(t, rec)
 	require.Equal(t, []string{"sub/hello.txt"}, rec.Files)
+}
+
+// TestHandleLifecycleTurnEnd_TakesDotDotAfterALinkAsTheFilesystemDoes: with
+// alias -> real/sub, alias/../file.txt is real/file.txt, not the root's
+// file.txt the user left dirty, whether the transcript names it relative to
+// the agent's directory or absolutely. Not parallel: t.Chdir.
+func TestHandleLifecycleTurnEnd_TakesDotDotAfterALinkAsTheFilesystemDoes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows takes .. before any link")
+	}
+	for name, absolute := range map[string]bool{"relative": false, "absolute": true} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			releaseSharedRoots(t)
+			testutil.InitRepo(t, dir)
+			testutil.WriteFile(t, dir, "file.txt", "root\n")
+			testutil.WriteFile(t, dir, "real/file.txt", "real\n")
+			testutil.WriteFile(t, dir, "real/sub/keep.txt", "keep\n")
+			require.NoError(t, os.Symlink(filepath.Join("real", "sub"), filepath.Join(dir, "alias")))
+			testutil.GitAdd(t, dir, "file.txt", "real/file.txt", "real/sub/keep.txt", "alias")
+			testutil.GitCommit(t, dir, "Add files")
+			t.Chdir(dir)
+			paths.ClearWorktreeRootCache()
+			t.Cleanup(paths.ClearWorktreeRootCache)
+			root, err := filepath.EvalSymlinks(dir)
+			require.NoError(t, err)
+			testutil.WriteFile(t, root, "file.txt", "root, the user's edit\n")
+
+			named := "alias/../file.txt"
+			if absolute {
+				named = root + "/" + named
+			}
+			ag := &mockAnalyzerAgent{
+				mockLifecycleAgent: &mockLifecycleAgent{
+					name:           "mock-analyzer",
+					agentType:      "Mock Analyzer Agent",
+					transcriptData: []byte(`{"type":"user","message":"test"}`),
+				},
+				analyzerFiles: []string{named},
+			}
+			ctx := context.Background()
+			sessionID := "sess-dotdot-" + name
+			transcriptPath := writeTestTranscript(t)
+			require.NoError(t, handleLifecycleTurnStart(ctx, ag, &agent.Event{
+				Type: agent.TurnStart, SessionID: sessionID, SessionRef: transcriptPath, Prompt: "edit the file", Timestamp: time.Now(),
+			}))
+			testutil.WriteFile(t, root, "real/file.txt", "real, edited\n")
+			require.NoError(t, handleLifecycleTurnEnd(ctx, ag, &agent.Event{
+				Type: agent.TurnEnd, SessionID: sessionID, SessionRef: transcriptPath, CWD: root, Timestamp: time.Now(),
+			}))
+
+			state, err := strategy.LoadSessionState(ctx, sessionID)
+			require.NoError(t, err)
+			require.Equal(t, []string{"real/file.txt"}, state.FilesTouched)
+		})
+	}
+}
+
+func TestPhysicalAgentPath(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows takes .. before any link")
+	}
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	outside, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "real", "sub"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(outside, "sub"), 0o755))
+	require.NoError(t, os.Symlink(filepath.Join("real", "sub"), filepath.Join(root, "alias")))
+	require.NoError(t, os.Symlink(filepath.Join(outside, "sub"), filepath.Join(root, "out")))
+
+	require.Equal(t, "real/file.txt", physicalAgentPath(root+"/alias/../file.txt", root))
+	require.Equal(t, "file.txt", physicalAgentPath(root+"/real/../file.txt", root))
+	require.Empty(t, physicalAgentPath(root+"/out/../file.txt", root), "the file is outside the worktree")
+	require.Equal(t, root+"/gone/../file.txt", physicalAgentPath(root+"/gone/../file.txt", root), "a directory that does not resolve is left to the lexical clean")
+	require.Equal(t, root+"/real/./file.txt", physicalAgentPath(root+"/real/./file.txt", root), "no .., nothing to resolve")
 }

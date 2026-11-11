@@ -16,7 +16,9 @@ import (
 	"log/slog"
 	"maps"
 	"os"
+	"path"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -478,13 +480,43 @@ func normalizeAgentPaths(files []string, eventCWD, repoRoot string) []string {
 		if f == "" {
 			continue
 		}
-		if filepath.IsAbs(f) || eventCWD == "" {
-			resolved = append(resolved, f)
-			continue
+		if !filepath.IsAbs(f) {
+			if eventCWD == "" {
+				resolved = append(resolved, f)
+				continue
+			}
+			// Not filepath.Join, which would clean ".." away before
+			// physicalAgentPath sees it.
+			f = eventCWD + string(filepath.Separator) + f
 		}
-		resolved = append(resolved, filepath.Join(eventCWD, f))
+		if f = physicalAgentPath(f, repoRoot); f != "" {
+			resolved = append(resolved, f)
+		}
 	}
 	return FilterAndNormalizePaths(resolved, repoRoot)
+}
+
+// physicalAgentPath returns p, an absolute path an agent named, as the
+// worktree-relative name of the file it opens when p has a ".." component
+// outside Windows: after a symlink to a directory, ".." leaves the link's
+// target (alias/../file.txt is real/file.txt for alias -> real/sub), which
+// the lexical clean in filepath.Rel cannot see. It returns "" when p's
+// directory resolves outside the worktree, and p itself when p has no ".."
+// or its directory does not resolve, which filepath.Rel then cleans. Windows
+// takes ".." lexically, before any link.
+func physicalAgentPath(p, repoRoot string) string {
+	if runtime.GOOS == windowsGOOS || !slices.Contains(strings.Split(p, string(filepath.Separator)), "..") {
+		return p
+	}
+	i := strings.LastIndex(p, string(filepath.Separator))
+	name, err := resolvedDirName(repoRoot, p[:i])
+	switch {
+	case errors.Is(err, errOutsideWorktree):
+		return ""
+	case err != nil:
+		return p
+	}
+	return path.Join(name, p[i+1:])
 }
 
 // entireContextInjection is the one-time, model-facing pointer Entire injects
