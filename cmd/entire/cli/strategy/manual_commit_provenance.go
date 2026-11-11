@@ -126,28 +126,34 @@ func stampedByAnotherCommit(ctx context.Context, checkpointID id.CheckpointID, s
 
 // amendedCheckpoint returns the link to checkpointID, a preexisting target,
 // when this commit is an amend: the newest entry in HEAD's reflog that moved
-// HEAD replaced it with this commit instead of advancing to it. An amend keeps
-// the amended commit's trailer, or restores its session's
-// (handleAmendCommitMsg), without stamping it, so post-commit condenses into
-// the existing checkpoint for the session that owns it (withAmendedCheckpoint).
-// A checkpoint the replaced commit does not link, by trailer or by the
-// checkpoint's record of it (LinkedCommits, for a stamped trailer moved out of
-// the final block), is kept only for an owner prepare would have restored it
-// for: `commit --amend -C <other>` keeps another commit's trailer, and its
-// owner was never linked to this one. A message
+// HEAD to this commit replaced the commit before it instead of advancing from
+// it. Entries for other commits are passed over, because a commit started
+// while this post-commit runs can land after it read HEAD, and its entry is
+// then the newest. An amend keeps the amended commit's trailer, or restores
+// its session's (handleAmendCommitMsg), without stamping it, so post-commit
+// condenses into the existing checkpoint for the session that owns it
+// (withAmendedCheckpoint). A checkpoint the replaced commit does not link, by
+// trailer or by the checkpoint's record of it (LinkedCommits, for a stamped
+// trailer moved out of the final block), is kept only for an owner prepare
+// would have restored it for: `commit --amend -C <other>` keeps another
+// commit's trailer, and its owner was never linked to this one. A message
 // reused with `commit -C` keeps a trailer the same way but advances HEAD: it
-// makes a new link. With no reflog to tell them apart
+// makes a new link. With no reflog entry for this commit to tell them apart
 // (core.logAllRefUpdates=false), it is taken as an amend, so the owner keeps
-// condensing into its checkpoint as it did before the idle check.
+// condensing into its checkpoint as it did before the idle check. Judged a new
+// link instead, the owner would be dropped, and the amend's work would never
+// reach the checkpoint its trailer names.
 func (s *ManualCommitStrategy) amendedCheckpoint(ctx context.Context, repo *git.Repository, commit *object.Commit, checkpointID id.CheckpointID, preexisting bool) amendedLink {
 	if !preexisting {
 		return amendedLink{}
 	}
 	for _, e := range headReflog(ctx) {
-		if e.oldHash.Equal(e.newHash) {
-			continue // HEAD did not move, as with another hook's `git reset HEAD`
+		if !e.newHash.Equal(commit.Hash) || e.oldHash.Equal(e.newHash) {
+			// A later commit, or an entry that did not move HEAD, as with
+			// another hook's `git reset HEAD`.
+			continue
 		}
-		if !e.newHash.Equal(commit.Hash) || e.oldHash.IsZero() || slices.ContainsFunc(commit.ParentHashes, e.oldHash.Equal) {
+		if e.oldHash.IsZero() || slices.ContainsFunc(commit.ParentHashes, e.oldHash.Equal) {
 			return amendedLink{}
 		}
 		link := amendedLink{checkpointID: checkpointID}

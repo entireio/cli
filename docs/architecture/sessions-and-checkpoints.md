@@ -340,7 +340,8 @@ commit.
   trailer names. A claimed commit is the claimant's, as before. The trailer an amend restores names an
   existing checkpoint and is not recorded: post-commit condenses into it for
   its owner without a stamp, keeping that owner however idle it looks
-  (`withAmendedCheckpoint`: HEAD's reflog shows it replaced, not advanced, and
+  (`withAmendedCheckpoint`: its own entry in HEAD's reflog, past any later
+  commit's, shows it replaced, not advanced, and
   the replaced commit links the checkpoint, by trailer or in its
   `LinkedCommits`, or the owner is based on it; a
   message reused with `commit -C`, or with `--amend -C` from another commit,
