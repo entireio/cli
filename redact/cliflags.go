@@ -368,6 +368,9 @@ var netrcPasswordPatterns = []netrcPattern{
 	// and its machine is shaped like a host, which prose such as "the
 	// machine learning password policy" is not.
 	{regexp.MustCompile(`(?:^|[\r\n"'])[ \t]*(?i:machine)[ \t\r\n]+(` + netrcHost + `)` + netrcAccount + netrcSep + `(?i:password)` + netrcValueSep + `(` + netrcValue + `)`), 0, 2},
+	// A default entry may leave the login to the URL too (default password x),
+	// when it starts a line or a quoted string, as a machine entry must.
+	{regexp.MustCompile(`(?:^|[\r\n"'])[ \t]*(?i:default)()` + netrcAccount + netrcSep + `(?i:password)` + netrcValueSep + `(` + netrcValue + `)`), 0, 2},
 }
 
 // netrcHost is a .netrc machine name shaped like a host: localhost, or a
@@ -380,6 +383,7 @@ const netrcHost = `(?:localhost|[\w-]+(?:\.[\w-]+)+)`
 var netrcDefaultPatterns = []netrcPattern{
 	{regexp.MustCompile(`^` + netrcAccount + `[ \t]+(?i:default)()` + netrcLoginPassword), 2, 3},
 	{regexp.MustCompile(`^` + netrcAccount + `[ \t]+(?i:default)()` + netrcPasswordLogin), 3, 2},
+	{regexp.MustCompile(`^` + netrcAccount + `[ \t]+(?i:default)()` + netrcAccount + netrcSep + `(?i:password)` + netrcValueSep + `(` + netrcValue + `)`), 0, 2},
 }
 
 // netrcLoginPassword and netrcPasswordLogin are the fields of a .netrc entry
@@ -420,10 +424,10 @@ func detectCommandLinePasswords(s string) []taggedRegion {
 
 // mayHoldNetrcEntry reports whether s may hold a .netrc entry, whose
 // keywords curl reads in any case (MACHINE h LOGIN me PASSWORD x, LoGiN me
-// PaSsWoRd x, machine 127.0.0.1 password x), which spares most strings the
-// patterns.
+// PaSsWoRd x, machine 127.0.0.1 password x, default password x), which
+// spares most strings the patterns.
 func mayHoldNetrcEntry(s string) bool {
-	return containsFoldASCII(s, "password") && (containsFoldASCII(s, "login") || containsFoldASCII(s, "machine"))
+	return containsFoldASCII(s, "password") && (containsFoldASCII(s, "login") || containsFoldASCII(s, "machine") || containsFoldASCII(s, "default"))
 }
 
 func appendLongPasswordFlags(regions []taggedRegion, s string, noValue *noValueFlags) []taggedRegion {
@@ -513,7 +517,7 @@ func longFlagValue(s string, loc []int, stringEnd int, subs substitutionMemo, da
 	if s[open] == '"' && open > 0 && s[open-1] == '\\' {
 		open--
 	}
-	if end, n := quotedPiece(s, open); n > 0 && end > loc[2] {
+	if end, n := flagStringEnd(s, open); n > 0 && end > loc[2] {
 		quoteLen = n
 		closeAt := end - n
 		switch {
@@ -634,7 +638,14 @@ func isListWrapperOperand(s string, start int) bool {
 			// (["env", "-S", "sudo", "-u", "mysql", "ssh", "-p2222"]), so
 			// the element after it is read as the start of a command.
 		case strings.HasPrefix(name, "-"):
-			optionArg = len(name) == 2 && strings.IndexByte(wrapperArgOptions[wrapper], name[1]) >= 0
+			// Long and grouped options take an argument too (["sudo",
+			// "--user", "ssh", "mysql", "-pX"]); one already joined to
+			// its value ("--user=ssh") does not take the next element.
+			if _, _, glued := strings.Cut(name, "="); glued {
+				optionArg = false
+			} else {
+				optionArg = takesArgument(wrapper, name)
+			}
 		case runsWrapper && wrapper != sshCommand:
 			// The command it runs is another wrapper (["sudo", "ssh", ...]).
 			wrapper = listProgramName(element)

@@ -682,6 +682,12 @@ func TestString_CommandLinePasswordsShellGrammarCases(t *testing.T) {
 		{name: "long password in a Go raw string across lines before a line comment", input: "exec.Command(\"wget\", \"--password\", `" + p + "\nmore` // comment\n, url)", want: "exec.Command(\"wget\", \"--password\", `REDACTED` // comment\n, url)"},
 		{name: "openssl source after a Go raw string across lines before a block comment", input: "exec.Command(\"openssl\", \"enc\", \"-in\", `f\ng` /* c */, \"-pass\", \"pass:" + p + "\")", want: "exec.Command(\"openssl\", \"enc\", \"-in\", `f\ng` /* c */, \"-pass\", \"pass:REDACTED\")"},
 		{name: "long password after a block comment in a list", input: `subprocess.run(["wget", "--password", /* c */ "` + p + `"])`, want: `subprocess.run(["wget", "--password", /* c */ "REDACTED"])`},
+		{name: "default netrc entry with no login", input: "default password " + p, want: "default password REDACTED"},
+		{name: "default netrc entry with no login in any case", input: "DEFAULT password " + p, want: "DEFAULT password REDACTED"},
+		{name: "default netrc entry with no login after another entry", input: "machine h login me password x default password " + p, want: "machine h login me password REDACTED default password REDACTED"},
+		{name: "long password with an escaped apostrophe in a list element", input: `subprocess.run(['wget', '--password=abc\' ` + p + `', url])`, want: `subprocess.run(['wget', '--password=REDACTED', url])`},
+		{name: "mysql password after sudo --user in a list", input: `subprocess.run(["sudo", "--user", "ssh", "mysql", "-p` + p + `"])`, want: `subprocess.run(["sudo", "--user", "ssh", "mysql", "-pREDACTED"])`},
+		{name: "mysql password after sudo --user joined in a list", input: `subprocess.run(["sudo", "--user=ssh", "mysql", "-p` + p + `"])`, want: `subprocess.run(["sudo", "--user=ssh", "mysql", "-pREDACTED"])`},
 	})
 }
 
@@ -860,6 +866,9 @@ func TestString_CommandLinePasswordNonSecretsPreserved(t *testing.T) {
 		"kubectl --as alice logs mysql -p",
 		"the machine learning password policy",
 		"By default login with password is disabled.",
+		"default password is stored in the vault",
+		"the default password policy",
+		"Set the default password in the vault.",
 		`{"cmd":"mysql -uroot -p","cwd":"/app"}`,
 		`{"cmd":"mysql -uroot -p", "cwd":"/app"}`,
 		`cmd := "mysql -uroot -p" + password + " app"`,
@@ -1096,6 +1105,7 @@ func TestString_CommandLinePasswordListAndQuotingNonSecretsPreserved(t *testing.
 		// list too (PHP, Perl, Kotlin, Groovy, Dart), and which is a name
 		// where they do not
 		`subprocess.run(["redis-cli", "-a", "$PASSWORD"])`,
+		`subprocess.run(["sudo", "--user", "mysql", "ssh", "-p2222"])`,
 		// a wrapper option's argument with an escaped blank, after which
 		// -p2222 is ssh's port
 		`ssh -i /tmp/my\ key mysql -p2222`,
