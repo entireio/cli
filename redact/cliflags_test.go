@@ -688,6 +688,8 @@ func TestString_CommandLinePasswordsShellGrammarCases(t *testing.T) {
 		{name: "long password with an escaped apostrophe in a list element", input: `subprocess.run(['wget', '--password=abc\' ` + p + `', url])`, want: `subprocess.run(['wget', '--password=REDACTED', url])`},
 		{name: "mysql password after sudo --user in a list", input: `subprocess.run(["sudo", "--user", "ssh", "mysql", "-p` + p + `"])`, want: `subprocess.run(["sudo", "--user", "ssh", "mysql", "-pREDACTED"])`},
 		{name: "mysql password after sudo --user joined in a list", input: `subprocess.run(["sudo", "--user=ssh", "mysql", "-p` + p + `"])`, want: `subprocess.run(["sudo", "--user=ssh", "mysql", "-pREDACTED"])`},
+		{name: "mysql password after env --split-string in a list", input: `subprocess.run(["env", "--split-string", "mysql", "-p` + p + `"])`, want: `subprocess.run(["env", "--split-string", "mysql", "-pREDACTED"])`},
+		{name: "mysql password after env -iS in a list", input: `subprocess.run(["env", "-iS", "mysql", "-p` + p + `"])`, want: `subprocess.run(["env", "-iS", "mysql", "-pREDACTED"])`},
 	})
 }
 

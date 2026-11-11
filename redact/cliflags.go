@@ -632,11 +632,11 @@ func isListWrapperOperand(s string, start int) bool {
 		switch {
 		case optionArg:
 			optionArg = false
-		case wrapper == envCommand && name == "-S":
-			// env -S runs its argument (["env", "-S", "mysql", "-pX"]),
-			// which may be another wrapper with options of its own
-			// (["env", "-S", "sudo", "-u", "mysql", "ssh", "-p2222"]), so
-			// the element after it is read as the start of a command.
+		case strings.HasPrefix(name, "-") && runsArgument(wrapper, name):
+			// env -S, --split-string and -iS run their argument
+			// (["env", "--split-string", "mysql", "-pX"]), which may be
+			// another wrapper with options of its own, so the element
+			// after it is read as the start of a command.
 		case strings.HasPrefix(name, "-"):
 			// Long and grouped options take an argument too (["sudo",
 			// "--user", "ssh", "mysql", "-pX"]); one already joined to
