@@ -196,6 +196,73 @@ func TestManualCommit_DeferredTranscriptFinalization(t *testing.T) {
 	t.Log("DeferredTranscriptFinalization test completed successfully")
 }
 
+// A turn-end finalize that fails before writing leaves the turn's checkpoint
+// with its provisional transcript. `entire status` must report that, and a
+// repeated Stop in the same turn, once the cause is gone, must finish the
+// finalize and clear the report.
+func TestManualCommit_FailedFinalizeReportsDegradedCapture(t *testing.T) {
+	t.Parallel()
+
+	env := NewFeatureBranchEnv(t)
+	sess := env.NewSession()
+	if err := env.SimulateUserPromptSubmitWithPromptAndTranscriptPath(sess.ID, "Create feature function", sess.TranscriptPath); err != nil {
+		t.Fatalf("user-prompt-submit failed: %v", err)
+	}
+	env.WriteFile("feature.go", "package main\n\nfunc Feature() {}\n")
+	sess.CreateTranscript("Create feature function", []FileChange{
+		{Path: "feature.go", Content: "package main\n\nfunc Feature() {}\n"},
+	})
+	commitDrivingGitHooksVerbosely(t, env, "feature.go", "Add feature")
+	checkpointID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
+	transcriptPath := SessionFilePath(checkpointID, paths.TranscriptFileName)
+	provisional, found := env.ReadFileFromBranch(paths.MetadataBranchName, transcriptPath)
+	if !found {
+		t.Fatalf("provisional transcript should exist at %s", transcriptPath)
+	}
+
+	sess.TranscriptBuilder.AddUserMessage("Also add a helper function")
+	sess.TranscriptBuilder.AddAssistantMessage("Done with both changes!")
+	if err := sess.TranscriptBuilder.WriteToFile(sess.TranscriptPath); err != nil {
+		t.Fatalf("failed to write updated transcript: %v", err)
+	}
+
+	// A checkpoint backend this binary does not know, as a newer CLI could
+	// write, makes the checkpoint store fail to open at turn end.
+	settingsPath := filepath.Join(env.RepoDir, ".entire", paths.SettingsFileName)
+	validSettings, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	env.PatchSettings(map[string]any{
+		"checkpoints": map[string]any{
+			"mirrors": []any{map[string]any{"type": "backend-from-a-newer-cli"}},
+		},
+	})
+
+	if err := env.SimulateStop(sess.ID, sess.TranscriptPath); err != nil {
+		t.Fatalf("SimulateStop failed: %v", err)
+	}
+	if got, _ := env.ReadFileFromBranch(paths.MetadataBranchName, transcriptPath); got != provisional {
+		t.Fatal("a failed finalize must leave the provisional transcript in place")
+	}
+	if out := env.RunCLI("status"); !strings.Contains(out, "capture degraded") {
+		t.Errorf("status should report degraded capture after a failed finalize, got:\n%s", out)
+	}
+
+	if err := os.WriteFile(settingsPath, validSettings, 0o644); err != nil {
+		t.Fatalf("restore settings: %v", err)
+	}
+	if err := env.SimulateStop(sess.ID, sess.TranscriptPath); err != nil {
+		t.Fatalf("repeated SimulateStop failed: %v", err)
+	}
+	if got, _ := env.ReadFileFromBranch(paths.MetadataBranchName, transcriptPath); !strings.Contains(got, "Also add a helper function") {
+		t.Error("a repeated Stop should finalize the checkpoint with the full transcript")
+	}
+	if out := env.RunCLI("status"); strings.Contains(out, "capture degraded") {
+		t.Errorf("status should stop reporting degraded capture once finalize succeeds, got:\n%s", out)
+	}
+}
+
 // TestManualCommit_CarryForward_ActiveSession tests that when a user commits only
 // some of the files touched by an ACTIVE session, the remaining files are
 // carried forward as the session's pending work.

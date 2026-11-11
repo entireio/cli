@@ -2,12 +2,16 @@ package remote
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v6"
@@ -661,12 +665,13 @@ func TestPushURL(t *testing.T) {
 			wantEnabled:  false,
 		},
 		{
-			name:         "non-derivable origin with unknown provider falls back to origin",
+			// Owned store, no URL for its provider: withheld, never sent to the
+			// push remote. See TestPushURL_WithholdsWhenProviderHasNoURL.
+			name:         "non-derivable origin with unknown provider withholds rather than falling back to origin",
 			originURL:    "entire://app.entire.io/gh/acme/app",
 			pushRemote:   "origin",
 			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"bitbucket","repo":"acme/checkpoints"}}}`,
-			wantURL:      "entire://app.entire.io/gh/acme/app",
-			wantEnabled:  false,
+			wantErr:      true,
 		},
 		{
 			name:         "token with entire:// origin routes to provider host not origin host",
@@ -678,11 +683,28 @@ func TestPushURL(t *testing.T) {
 			wantEnabled:  true,
 		},
 		{
-			name:         "missing push remote falls back to origin when checkpoint remote configured",
+			// Nothing pushes to the returned URL when enabled is false, so
+			// returning origin here would only mislead a caller into using it.
+			name:         "missing push remote returns no url when checkpoint remote configured",
 			originURL:    "https://github.com/acme/app.git",
 			pushRemote:   "upstream",
 			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
-			wantURL:      "https://github.com/acme/app.git",
+			wantURL:      "",
+			wantEnabled:  false,
+		},
+		{
+			name:         "raw url push target returns no url when checkpoint remote configured",
+			originURL:    "https://github.com/acme/app.git",
+			pushRemote:   "https://github.com/acme/app.git",
+			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			wantURL:      "",
+			wantEnabled:  false,
+		},
+		{
+			name:         "raw url push target returns no url when origin is missing",
+			pushRemote:   "git@github.com:acme/app.git",
+			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			wantURL:      "",
 			wantEnabled:  false,
 		},
 		{
@@ -960,6 +982,165 @@ func TestPushURL_EntireOriginDerivesMirrorURL(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPushURL_WithholdsWhenProviderHasNoURL: a checkpoint_remote this
+// developer owns (declared in settings.local.json) whose provider has no known
+// host cannot be routed. It used to fall back to the push remote, sending
+// checkpoints to the code repository the user had explicitly moved them away
+// from. It must now report ErrCheckpointRemoteUnroutable and no URL.
+//
+// Not parallel: t.Chdir.
+func TestPushURL_WithholdsWhenProviderHasNoURL(t *testing.T) {
+	const localEntire = `{"strategy_options":{"checkpoint_remote":{"provider":"entire","repo":"acme/checkpoints"}}}`
+	tests := []struct {
+		name      string
+		originURL string
+		// pushPath, when set, is a bare filesystem path added as the push
+		// remote "local": a URL that does not parse at all.
+		pushPath string
+		token    string
+	}{
+		{name: "github https origin", originURL: "https://github.com/acme/app.git"},
+		{name: "bare path push remote", originURL: "https://github.com/acme/app.git", pushPath: "/srv/repos/app.git"},
+		{name: "github ssh origin", originURL: "git@github.com:acme/app.git"},
+		{name: "github origin with checkpoint token", originURL: "git@github.com:acme/app.git", token: "ci-token"},
+		{name: "entire mirror origin", originURL: "entire://aws-us-east-2.entire.io/gh/acme/app"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repoDir := t.TempDir()
+			testutil.InitRepo(t, repoDir)
+			runGit(t, repoDir, "remote", "add", "origin", tt.originURL)
+			writeSettings(t, repoDir, `{"enabled":true}`)
+			writeLocalSettings(t, repoDir, localEntire)
+			pushRemote := "origin"
+			if tt.pushPath != "" {
+				pushRemote = "local"
+				runGit(t, repoDir, "remote", "add", pushRemote, tt.pushPath)
+			}
+			t.Chdir(repoDir)
+			if tt.token != "" {
+				t.Setenv(CheckpointTokenEnvVar, tt.token)
+			}
+
+			gotURL, gotEnabled, err := PushURL(context.Background(), pushRemote)
+			if !errors.Is(err, ErrCheckpointRemoteUnroutable) {
+				t.Fatalf("PushURL() error = %v, want ErrCheckpointRemoteUnroutable", err)
+			}
+			if !gotEnabled {
+				t.Fatal("PushURL() enabled = false, want true: the store is configured and owned")
+			}
+			if gotURL != "" {
+				t.Fatalf("PushURL() URL = %q, want none", gotURL)
+			}
+		})
+	}
+}
+
+// TestPushURL_UnknownProviderOnSelfHostedOriginStillDerives is the control for
+// the test above: a self-hosted origin is trusted to serve whatever provider is
+// configured, so its host is a URL to build on and nothing is withheld.
+//
+// Not parallel: t.Chdir.
+func TestPushURL_UnknownProviderOnSelfHostedOriginStillDerives(t *testing.T) {
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	runGit(t, repoDir, "remote", "add", "origin", "https://git.corp.example/acme/app.git")
+	writeSettings(t, repoDir, `{"enabled":true}`)
+	writeLocalSettings(t, repoDir, `{"strategy_options":{"checkpoint_remote":{"provider":"entire","repo":"acme/checkpoints"}}}`)
+	t.Chdir(repoDir)
+
+	gotURL, gotEnabled, err := PushURL(context.Background(), "origin")
+	require.NoError(t, err)
+	require.True(t, gotEnabled)
+	require.Equal(t, "https://git.corp.example/acme/checkpoints.git", gotURL)
+}
+
+// TestPushURL_BarePathPushRemoteRoutesToProvider: a push remote that is a bare
+// filesystem path has no transport to derive from, so an owned store is built
+// on origin's — keeping a self-hosted origin's store on its own host — and on
+// the provider's host only when origin has none either.
+//
+// Not parallel: t.Chdir.
+func TestPushURL_BarePathPushRemoteRoutesToProvider(t *testing.T) {
+	tests := []struct {
+		name      string
+		originURL string
+		want      string
+	}{
+		{name: "github origin", originURL: "https://github.com/acme/app.git", want: "https://github.com/acme/checkpoints.git"},
+		{name: "self-hosted origin", originURL: "git@ghe.corp.example:acme/app.git", want: "git@ghe.corp.example:acme/checkpoints.git"},
+		{name: "origin without a parseable URL", originURL: "/srv/repos/origin.git", want: "git@github.com:acme/checkpoints.git"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repoDir := t.TempDir()
+			testutil.InitRepo(t, repoDir)
+			runGit(t, repoDir, "remote", "add", "origin", tt.originURL)
+			runGit(t, repoDir, "remote", "add", "local", "/srv/repos/app.git")
+			writeSettings(t, repoDir, `{"enabled":true}`)
+			writeLocalSettings(t, repoDir, `{"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`)
+			t.Chdir(repoDir)
+
+			gotURL, gotEnabled, err := PushURL(context.Background(), "local")
+			require.NoError(t, err)
+			require.True(t, gotEnabled)
+			require.Equal(t, tt.want, gotURL)
+		})
+	}
+}
+
+// TestPushURL_UnroutableErrorQuotesNoRemoteURL: status, enable and attach print
+// the unroutable error as-is, so it must not carry a remote URL's raw bytes —
+// here a terminal escape in the push URL — and it must say what to do.
+//
+// Not parallel: t.Chdir.
+func TestPushURL_UnroutableErrorQuotesNoRemoteURL(t *testing.T) {
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	runGit(t, repoDir, "remote", "add", "origin", "host:\x1b]0;PWNED\x07")
+	writeSettings(t, repoDir, `{"enabled":true}`)
+	writeLocalSettings(t, repoDir, `{"strategy_options":{"checkpoint_remote":{"provider":"entire","repo":"acme/checkpoints"}}}`)
+	t.Chdir(repoDir)
+
+	_, _, err := PushURL(context.Background(), "origin")
+	require.ErrorIs(t, err, ErrCheckpointRemoteUnroutable)
+	require.NotContains(t, err.Error(), "\x1b")
+	require.NotContains(t, err.Error(), "PWNED")
+	require.Contains(t, err.Error(), "set checkpoint_remote to a github or gitlab repository, or remove it")
+}
+
+// A raw-URL push never syncs checkpoints, so PushURL must not log a fallback
+// destination for it: users read that line as checkpoints going to origin. The
+// target can carry credentials, so no line may contain them either.
+func TestPushURL_RawURLTargetLogsNoFallback(t *testing.T) {
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	runGit(t, repoDir, "remote", "add", "origin", "https://github.com/acme/app.git")
+	writeSettings(t, repoDir, `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`)
+	t.Chdir(repoDir)
+
+	l, err := logging.New(logging.Config{Root: entiredir.OpenerAt(repoDir), Dir: logging.LogsName, Level: slog.LevelDebug})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = l.Close() })
+	ctx := logging.WithLogger(context.Background(), l)
+	// Proves the sink captures warn lines, so the absence below is not vacuous.
+	logging.Warn(ctx, "sentinel")
+
+	gotURL, gotEnabled, err := PushURL(ctx, "https://user:s3cret@github.com/acme/app.git")
+	require.NoError(t, err)
+	require.Empty(t, gotURL)
+	require.False(t, gotEnabled)
+
+	require.NoError(t, l.Close())
+	content, err := os.ReadFile(filepath.Join(repoDir, ".entire", logging.LogsName, "entire.log"))
+	require.NoError(t, err)
+	require.Contains(t, string(content), "sentinel")
+	require.Contains(t, string(content), "checkpoint_remote not applied")
+	require.NotContains(t, string(content), "s3cret")
+	require.NotContains(t, string(content), "fallback_url")
+	require.Equal(t, 1, strings.Count(string(content), `"level":"WARN"`), "only the sentinel may warn:\n%s", content)
 }
 
 func TestPushURL_ErrorsWhenNoCheckpointRemoteAndOriginMissing(t *testing.T) {

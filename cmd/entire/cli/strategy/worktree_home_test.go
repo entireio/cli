@@ -162,6 +162,7 @@ func TestPostCommit_StoresAMovedHome(t *testing.T) {
 
 	chdirWorktree(t, moved)
 	testutil.GitAdd(t, moved, "agent.go")
+	recordStampedTrailer(context.Background(), id.MustCheckpointID("a1b2c3d4e5f6"))
 	testutil.GitCommit(t, moved, "agent work\n\n"+trailers.CheckpointTrailerKey+": a1b2c3d4e5f6\n")
 	require.NoError(t, NewManualCommitStrategy().PostCommit(t.Context()))
 

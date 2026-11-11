@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -106,6 +107,71 @@ func LooksLikeSSHAuthFailure(errText string) bool {
 	return false
 }
 
+// unreachableRemoteNeedles are connect-phase failures printed by ssh and curl
+// themselves, so they are not translated by git's locale. Deliberately absent:
+// bare strerror text ("Connection refused", "Connection timed out") — curl's
+// trailing strerror is localized, and a timeout or reset mid-upload means the
+// host was reachable — and git's own "Could not read from remote repository"
+// epilogue, which is translated and also follows auth failures.
+var unreachableRemoteNeedles = []string{
+	"ssh: connect to host ",
+	"ssh: could not resolve hostname",
+	"could not resolve host:",
+	"could not resolve proxy:",
+	"failed to connect to ",
+	"couldn't connect to server",
+	"resolving timed out",
+}
+
+// maxUnreachableLineRunes caps the cause line printed inside the user's push.
+const maxUnreachableLineRunes = 200
+
+// UnreachableRemoteLine reports whether err shows the remote could not be
+// reached at all (name resolution or TCP connect failed), and returns the line
+// that said so, credentials redacted and capped, for display. Lines relayed
+// from the remote ("remote: ...") and push porcelain are skipped: a remote that
+// printed them was reachable, even when its own hook failed to resolve a host.
+func UnreachableRemoteLine(err error) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+	text := err.Error()
+	var pushErr *PushError
+	if errors.As(err, &pushErr) {
+		text = pushErr.Output() // Line breaks preserved, unlike Error().
+	}
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "remote:") || strings.HasPrefix(line, "!") || strings.HasPrefix(line, "=") {
+			continue
+		}
+		lower := strings.ToLower(line)
+		for _, n := range unreachableRemoteNeedles {
+			if strings.Contains(lower, n) {
+				return displayGitLine(line), true
+			}
+		}
+	}
+	return "", false
+}
+
+// displayGitLine makes one line of git output safe to print: no "fatal: "
+// prefix, no URL credentials, no control bytes, at most maxUnreachableLineRunes.
+func displayGitLine(line string) string {
+	line = strings.TrimPrefix(line, "fatal: ")
+	line = gitremote.RedactCredentialsInText(line)
+	line = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, line)
+	if r := []rune(line); len(r) > maxUnreachableLineRunes {
+		line = string(r[:maxUnreachableLineRunes]) + "…"
+	}
+	return line
+}
+
 // batchModeOptionRe matches an explicit BatchMode ssh option (e.g.
 // "-o BatchMode=yes" or "BatchMode=no"), case-insensitively. Anchored with \b
 // so it doesn't false-positive on unrelated text that merely contains
@@ -119,8 +185,63 @@ func hasExplicitBatchMode(sshCmd string) bool {
 	return batchModeOptionRe.MatchString(sshCmd)
 }
 
+// connectTimeoutOptionRe matches an explicit ConnectTimeout ssh option, in the
+// same forms batchModeOptionRe accepts.
+var connectTimeoutOptionRe = regexp.MustCompile(`(?i)\bConnectTimeout\s*=\s*\S+`)
+
+// nonInteractiveSSHConnectTimeout bounds the TCP connect to an unreachable host,
+// whose kernel default (~75-130s) would otherwise spend most of the pre-push
+// checkpoint budget on one attempt. Generous for any reachable host, including
+// one behind a slow-starting ProxyCommand, whose banner wait ssh's
+// ConnectTimeout also bounds.
+const nonInteractiveSSHConnectTimeout = "60"
+
+// isOpenSSHCommand reports whether sshCmd runs OpenSSH, by the basename of its
+// program — the same guess git makes for its ssh variant. Options are only
+// added for OpenSSH: other clients (plink, custom wrappers) may reject -o.
+func isOpenSSHCommand(sshCmd string) bool {
+	prog, ok := firstCmdlineWord(sshCmd)
+	if !ok {
+		return false
+	}
+	base := strings.ToLower(prog[strings.LastIndexAny(prog, `/\`)+1:])
+	return base == "ssh" || base == "ssh.exe"
+}
+
+// firstCmdlineWord returns the program of a shell-style command line, unquoted
+// the way git's split_cmdline does it: single and double quotes group, and a
+// backslash outside single quotes escapes the next character. ok is false for
+// an empty or unterminated command line.
+func firstCmdlineWord(cmdline string) (string, bool) {
+	var word strings.Builder
+	var quote rune
+	started, escaped := false, false
+	for _, c := range strings.TrimLeftFunc(cmdline, unicode.IsSpace) {
+		switch {
+		case escaped:
+			word.WriteRune(c)
+			escaped = false
+		case c == '\\' && quote != '\'':
+			escaped, started = true, true
+		case quote == 0 && unicode.IsSpace(c):
+			return word.String(), true
+		case quote == 0 && (c == '\'' || c == '"'):
+			quote, started = c, true
+		case c == quote:
+			quote = 0
+		default:
+			word.WriteRune(c)
+			started = true
+		}
+	}
+	if quote != 0 || escaped || !started {
+		return "", false
+	}
+	return word.String(), true
+}
+
 // withBatchModeSSH returns env with GIT_SSH_COMMAND set so ssh runs with
-// BatchMode=yes. The base ssh invocation is resolved via gitremote.EffectiveSSHCommand
+// BatchMode=yes and, for OpenSSH, a ConnectTimeout. The base ssh invocation is resolved via gitremote.EffectiveSSHCommand
 // (env GIT_SSH_COMMAND > core.sshCommand > GIT_SSH > plain "ssh") so a custom
 // ssh command configured via core.sshCommand isn't silently discarded. The
 // flag is only appended when BatchMode isn't already explicitly set — an
@@ -139,6 +260,11 @@ func withBatchModeSSH(ctx context.Context, env []string) []string {
 	if !hasExplicitBatchMode(base) {
 		base += " -o BatchMode=yes"
 	}
+	// Command-line -o beats ~/.ssh/config, so a ConnectTimeout set there is
+	// overridden here; one set on the command itself is left alone.
+	if isOpenSSHCommand(base) && !connectTimeoutOptionRe.MatchString(base) {
+		base += " -o ConnectTimeout=" + nonInteractiveSSHConnectTimeout
+	}
 	return append(out, key+base)
 }
 
@@ -154,6 +280,13 @@ func applyNonInteractiveSSH(ctx context.Context, cmd *exec.Cmd) {
 	}
 	cmd.Env = withBatchModeSSH(ctx, cmd.Env)
 }
+
+// FullRefDepth is the absolute --depth that fully fetches one ref's history,
+// healing a prior --depth=1 shallow boundary on it. It is far above any
+// realistic checkpoint history length, while staying below math.MaxInt32
+// (2147483647), which git special-cases as a global unshallow that would also
+// deepen an unrelated shallow source tree.
+const FullRefDepth = 1_000_000_000
 
 // FetchOptions configures a git fetch operation.
 type FetchOptions struct {
@@ -180,7 +313,7 @@ type FetchOptions struct {
 	// not introduce shallowness on a full repo when the value exceeds the
 	// branch's length. Use a value above the branch's realistic length but below
 	// math.MaxInt32 (2147483647), which git special-cases as a global unshallow.
-	// Ignored when zero or when Shallow is set.
+	// Ignored when zero or when Shallow is set. FullRefDepth is the value to use.
 	Depth     int
 	Dir       string   // working directory (empty = CWD)
 	ExtraArgs []string // additional flags before remote (e.g., "--no-write-fetch-head")

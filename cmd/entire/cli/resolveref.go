@@ -75,9 +75,10 @@ type repoRefClient interface {
 // The check is shape-only and case-insensitive on the alphabet; it never hits
 // the network. A name that happened to be 26 valid base32 characters would be
 // misread as an id, but real org/project names don't take that form, and the
-// user can always fall back to the explicit ULID.
+// user can always fall back to the explicit ULID. The first character is at
+// most 7: 26 base32 characters carry 130 bits, and a ULID is 128.
 func looksLikeULID(s string) bool {
-	if len(s) != 26 {
+	if len(s) != 26 || s[0] < '0' || s[0] > '7' {
 		return false
 	}
 	for _, r := range strings.ToUpper(s) {

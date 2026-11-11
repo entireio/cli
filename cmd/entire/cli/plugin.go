@@ -50,14 +50,15 @@ const selfUpdatePluginName = "upgrade"
 // (`entire graph search`); `brain` is documented as `entire brain`;
 // `investigate` was a built-in until it moved to the entire-investigate
 // plugin, and without the offer `entire investigate` would answer an
-// established command with "unknown command for entire".
+// established command with "unknown command for entire"; `rsl` is documented
+// as `entire rsl` by the entire-rsl plugin.
 //
 // A name here must be resolvable through the plugin index: the install path
 // looks it up there and nowhere else, so an unlisted name turns the prompt
 // into a failure that the fall-through would have reported more plainly.
 //
 //nolint:gochecknoglobals // package-level set; a slice because there is no const slice in Go.
-var onDemandInstallPluginNames = []string{"graph", "brain", "investigate"}
+var onDemandInstallPluginNames = []string{"graph", "brain", "investigate", "rsl"}
 
 // offersOnDemandInstall reports whether a missing plugin by this name should
 // be offered for installation.
@@ -101,6 +102,10 @@ func (e *PluginExitError) AlreadyPrinted() bool { return true }
 // postPluginVersionCheck is a test seam for the version-check notice that
 // fires after a successful plugin run.
 var postPluginVersionCheck = versioncheck.CheckAndNotify
+
+// postPluginUpdateCheck is a test seam for the plugin's own update notice,
+// same pattern as postPluginVersionCheck above.
+var postPluginUpdateCheck = checkPluginUpdateAndNotify
 
 // MaybeRunPlugin returns (true, exitCode) when an external command was
 // resolved and run. On launch failure (e.g. missing executable bit)
@@ -175,6 +180,7 @@ func MaybeRunPlugin(ctx context.Context, rootCmd *cobra.Command, args []string) 
 		if pluginName != selfUpdatePluginName {
 			postPluginVersionCheck(ctx, os.Stderr, versioninfo.Version)
 		}
+		postPluginUpdateCheck(ctx, os.Stderr, pluginName)
 	}
 	return true, exitCode, killedBy
 }

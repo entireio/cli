@@ -309,7 +309,7 @@ func readSessionSettings(ctx context.Context, transcriptPath string) (droidSetti
 		return droidSettings{}, fmt.Errorf("droid settings: %w", fs.ErrNotExist)
 	}
 
-	settingsPath := strings.TrimSuffix(transcriptPath, ".jsonl") + ".settings.json"
+	settingsPath := sessionSettingsPath(transcriptPath)
 	info, err := os.Lstat(settingsPath)
 	if err != nil {
 		return droidSettings{}, fmt.Errorf("stat droid settings: %w", err)
