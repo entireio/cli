@@ -144,6 +144,44 @@ func TestTokenLedger(t *testing.T) {
 		assertSubagentsComplete(t, "cloned pending", l.Clone().Pending(), false)
 	})
 
+	t.Run("attach's mark keeps a child the newer checkpoint held only from an earlier reading", func(t *testing.T) {
+		t.Parallel()
+		var l TokenLedger
+		l.Observe(reading(usage(10, 1, 1), map[string]*agent.TokenUsage{"a": usage(40, 4, 1)}))
+		l.MarkCheckpointed()
+		read := l.Clone()
+		// a has used more since, and attach's reading cannot read it.
+		read.Observe(reading(usage(20, 2, 2), map[string]*agent.TokenUsage{"a": nil, "b": usage(10, 1, 1)}))
+		// a's file is gone; while attach waits, a hook reads b and
+		// checkpoints, holding only the total a had at the first reading.
+		l.Observe(reading(usage(30, 3, 3), map[string]*agent.TokenUsage{"b": usage(20, 2, 2)}))
+		l.MarkCheckpointed()
+		l.MarkCheckpointedUpTo(read)
+		// a's file is back: its total includes what it used before the
+		// hook's checkpoint.
+		l.Observe(reading(usage(30, 3, 3), map[string]*agent.TokenUsage{"a": usage(70, 7, 3), "b": usage(20, 2, 2)}))
+		assertSubagentsComplete(t, "pending", l.Pending(), false)
+		assertSubagentsComplete(t, "cloned pending", l.Clone().Pending(), false)
+	})
+
+	t.Run("attach's winning mark keeps a newer checkpoint's uncounted child it did not count", func(t *testing.T) {
+		t.Parallel()
+		var l TokenLedger
+		l.Observe(reading(usage(10, 1, 1), map[string]*agent.TokenUsage{"a": usage(40, 4, 1)}))
+		l.MarkCheckpointed()
+		read := l.Clone()
+		read.Observe(reading(usage(20, 2, 2), map[string]*agent.TokenUsage{"a": usage(60, 6, 2)}))
+		// a's file is gone; while attach waits, a hook finds b, cannot read
+		// it, and checkpoints below attach's reading.
+		l.Observe(reading(usage(30, 3, 3), map[string]*agent.TokenUsage{"b": nil}))
+		l.MarkCheckpointed()
+		l.MarkCheckpointedUpTo(read)
+		// b's total now includes what it used before the hook's checkpoint.
+		l.Observe(reading(usage(30, 3, 3), map[string]*agent.TokenUsage{"a": usage(60, 6, 2), "b": usage(7, 1, 1)}))
+		assertSubagentsComplete(t, "pending", l.Pending(), false)
+		assertSubagentsComplete(t, "cloned pending", l.Clone().Pending(), false)
+	})
+
 	t.Run("attach's mark keeps both uncounted sets when neither mark holds the other", func(t *testing.T) {
 		t.Parallel()
 		read := &TokenLedger{

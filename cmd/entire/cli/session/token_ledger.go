@@ -32,6 +32,9 @@ type TokenLedger struct {
 	// only a total it may have grown past. It stays here, even once no
 	// reading lists it (its file deleted), until a reading counts it.
 	UncountedChildren map[string]bool `json:"uncounted_children,omitempty"`
+	// LastCounted holds the subagents the latest reading counted. Children
+	// can hold a total for others, kept from an earlier reading.
+	LastCounted map[string]bool `json:"last_counted,omitempty"`
 	// Cursor lets the next reading continue where the last one stopped.
 	Cursor json.RawMessage `json:"cursor,omitempty"`
 	// Checkpointed is what the session's checkpoints already hold.
@@ -41,9 +44,9 @@ type TokenLedger struct {
 	// was marked: what the checkpoints hold of those subagents is unknown,
 	// so a delta counting them is not exact either.
 	CheckpointedUncounted map[string]bool `json:"checkpointed_uncounted,omitempty"`
-	// CheckpointedCounted holds the subagents the last mark counted, so
-	// attach can tell which of the ones its reading could not count a
-	// checkpoint marked since holds.
+	// CheckpointedCounted holds the subagents the reading behind the last
+	// mark counted, so attach can tell which of the ones its reading could
+	// not count a checkpoint marked since holds.
 	CheckpointedCounted map[string]bool `json:"checkpointed_counted,omitempty"`
 }
 
@@ -63,12 +66,14 @@ func (l *TokenLedger) Observe(obs agent.CumulativeObservation) {
 	case agent.TokenTotal(obs.Total) >= agent.TokenTotal(l.Main):
 		l.Main = cloneUsage(obs.Total)
 	}
+	l.LastCounted = nil
 	for id, usage := range obs.Children {
 		if usage == nil {
 			l.markUncounted(id)
 			continue
 		}
 		delete(l.UncountedChildren, id)
+		l.LastCounted = addID(l.LastCounted, id)
 		if prev, ok := l.Children[id]; ok && agent.TokenTotal(usage) < agent.TokenTotal(prev) {
 			continue
 		}
@@ -128,16 +133,16 @@ func (l *TokenLedger) MarkCheckpointed() {
 	l.Checkpointed = agent.MaxTokenUsage(l.Checkpointed, l.mainTotal())
 	l.CheckpointedChildren = agent.MaxTokenUsage(l.CheckpointedChildren, l.childrenTotal())
 	l.CheckpointedUncounted = maps.Clone(l.UncountedChildren)
-	l.CheckpointedCounted = l.countedChildren()
+	l.CheckpointedCounted = maps.Clone(l.LastCounted)
 }
 
 // MarkCheckpointedUpTo marks only what o, an earlier copy of this ledger,
 // had read: readings made since stay pending. A checkpoint marked since o
 // was read (a hook's, while attach waited) can hold more than o did; see
-// uncountedAtMark for which subagents stay unknown then.
+// childrenAtMark for which subagents stay unknown then.
 func (l *TokenLedger) MarkCheckpointedUpTo(o *TokenLedger) {
 	read := o.childrenTotal()
-	uncounted, counted := maps.Clone(o.UncountedChildren), o.countedChildren()
+	uncounted, counted := maps.Clone(o.UncountedChildren), maps.Clone(o.LastCounted)
 	if l.markedSince(o) {
 		uncounted, counted = l.childrenAtMark(o, read)
 	}
@@ -149,30 +154,24 @@ func (l *TokenLedger) MarkCheckpointedUpTo(o *TokenLedger) {
 
 // childrenAtMark returns the subagents unknown to, and counted by, the
 // children's mark once o's reading (children total read) is marked over a
-// newer checkpoint's. The mark keeps the higher total in each field. When the
-// newer checkpoint holds at least read in every field, its mark stands: what
-// it could not count is unknown, and so is each subagent o could not count
-// that it did not count either (one its reading never listed). When read
-// holds all of it, o's mark stands. Otherwise the mark mixes both, and every
-// subagent either could not count is unknown.
+// newer checkpoint's. The mark keeps the higher total in each field. When one
+// side holds at least the other's total in every field, its mark stands:
+// what its reading could not count is unknown, and so is each subagent the
+// other could not count that its reading did not count either (one it never
+// listed, or held only a total from an earlier reading for). Otherwise the
+// mark mixes both, and every subagent either could not count is unknown.
 func (l *TokenLedger) childrenAtMark(o *TokenLedger, read *agent.TokenUsage) (uncounted, counted map[string]bool) {
 	switch {
 	case covers(l.CheckpointedChildren, read):
-		uncounted = maps.Clone(l.CheckpointedUncounted)
-		for id := range o.UncountedChildren {
-			if !l.CheckpointedCounted[id] {
-				uncounted = addID(uncounted, id)
-			}
-		}
-		return uncounted, maps.Clone(l.CheckpointedCounted)
+		return unknownAtMark(l.CheckpointedUncounted, l.CheckpointedCounted, o.UncountedChildren), maps.Clone(l.CheckpointedCounted)
 	case covers(read, l.CheckpointedChildren):
-		return maps.Clone(o.UncountedChildren), o.countedChildren()
+		return unknownAtMark(o.UncountedChildren, o.LastCounted, l.CheckpointedUncounted), maps.Clone(o.LastCounted)
 	}
 	uncounted = maps.Clone(o.UncountedChildren)
 	for id := range l.CheckpointedUncounted {
 		uncounted = addID(uncounted, id)
 	}
-	for _, ids := range []map[string]bool{o.countedChildren(), l.CheckpointedCounted} {
+	for _, ids := range []map[string]bool{o.LastCounted, l.CheckpointedCounted} {
 		for id := range ids {
 			if !uncounted[id] {
 				counted = addID(counted, id)
@@ -182,16 +181,17 @@ func (l *TokenLedger) childrenAtMark(o *TokenLedger, read *agent.TokenUsage) (un
 	return uncounted, counted
 }
 
-// countedChildren returns the subagents l holds a total for that its last
-// reading of each could count.
-func (l *TokenLedger) countedChildren() map[string]bool {
-	var counted map[string]bool
-	for id := range l.Children {
-		if !l.UncountedChildren[id] {
-			counted = addID(counted, id)
+// unknownAtMark returns the subagents unknown to a mark whose reading could
+// not count uncounted and counted counted: those, and each of other's that
+// it did not count.
+func unknownAtMark(uncounted, counted, other map[string]bool) map[string]bool {
+	unknown := maps.Clone(uncounted)
+	for id := range other {
+		if !counted[id] {
+			unknown = addID(unknown, id)
 		}
 	}
-	return counted
+	return unknown
 }
 
 func addID(set map[string]bool, id string) map[string]bool {
@@ -236,6 +236,7 @@ func (l *TokenLedger) Clone() *TokenLedger {
 	c := &TokenLedger{
 		Active:                l.Active,
 		UncountedChildren:     maps.Clone(l.UncountedChildren),
+		LastCounted:           maps.Clone(l.LastCounted),
 		CheckpointedUncounted: maps.Clone(l.CheckpointedUncounted),
 		CheckpointedCounted:   maps.Clone(l.CheckpointedCounted),
 		Main:                  cloneUsage(l.Main),

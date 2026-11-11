@@ -141,16 +141,20 @@ func (u *usageCounter) Unread(path string) {
 }
 
 func (u *usageCounter) Totals(context.Context, agent.CumulativeTokenInput) (*agent.TokenUsage, map[string]*agent.TokenUsage) {
-	children := u.Calls.Children()
-	// A subagent transcript this reading listed but could not read, or
-	// counted nothing from, is a nil entry: the children's total lacks it,
-	// or has only what an earlier reading counted.
+	counted := u.Calls.Children()
+	// Only the subagent transcripts this reading listed: one no longer
+	// listed (a Workflow agent's deleted file) was not read, so the ledger
+	// keeps its last total. One listed but not read, or that counted
+	// nothing, is a nil entry: the children's total lacks it, or has only
+	// what an earlier reading counted.
+	var children map[string]*agent.TokenUsage
 	for path, agentID := range u.agents {
-		if _, counted := children[agentID]; counted && !u.unread[path] {
-			continue
-		}
 		if children == nil {
-			children = make(map[string]*agent.TokenUsage)
+			children = make(map[string]*agent.TokenUsage, len(u.agents))
+		}
+		if total, ok := counted[agentID]; ok && !u.unread[path] {
+			children[agentID] = total
+			continue
 		}
 		children[agentID] = nil
 	}
