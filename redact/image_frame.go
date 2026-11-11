@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"image"
 	"image/gif"
-	"image/jpeg"
 	"image/png"
 	"io"
 )
@@ -25,9 +24,10 @@ var (
 )
 
 // isFramedImage reports whether raw is framed as one whole PNG, JPEG, GIF or
-// WebP image: a header its format's decoder accepts, with a positive size,
-// and the format's end marker as its last bytes (for WebP, a RIFF size that
-// covers exactly the file and a known first chunk). A magic number alone let
+// WebP image: a header its format defines, with a positive size, and the
+// format's end marker as its last bytes (for WebP, a RIFF size that covers
+// exactly the file and a known first chunk). PNG and GIF headers are read by
+// their decoders, a JPEG's by its markers (see isJPEGHeader). A magic number alone let
 // any bytes after it pass as an image, such as a token after
 // data:image/png;base64,iVBORw0KGgo, and so would bytes appended after a real
 // image. Bytes placed inside an image's own segments or chunks still pass:
@@ -40,7 +40,7 @@ func isFramedImage(raw []byte) bool {
 	case bytes.HasPrefix(raw, pngSignature):
 		return bytes.HasSuffix(raw, pngEnd) && decodesConfig(png.DecodeConfig, raw)
 	case bytes.HasPrefix(raw, jpegStart):
-		return bytes.HasSuffix(raw, jpegEnd) && decodesConfig(jpeg.DecodeConfig, raw)
+		return bytes.HasSuffix(raw, jpegEnd) && isJPEGHeader(raw)
 	case bytes.HasPrefix(raw, gif87a), bytes.HasPrefix(raw, gif89a):
 		return bytes.HasSuffix(raw, gifEnd) && decodesConfig(gif.DecodeConfig, raw)
 	case len(raw) >= 12 && bytes.HasPrefix(raw, riffTag) && bytes.Equal(raw[8:12], webpTag):
@@ -52,6 +52,53 @@ func isFramedImage(raw []byte) bool {
 func decodesConfig(decode func(io.Reader) (image.Config, error), raw []byte) bool {
 	cfg, err := decode(bytes.NewReader(raw))
 	return err == nil && cfg.Width > 0 && cfg.Height > 0
+}
+
+// isJPEGHeader reports whether raw, which starts with a JPEG start-of-image
+// marker, holds a frame header before its first scan: a run of marker
+// segments, each a 0xFF byte, a marker byte and a length that fits in raw,
+// with a start-of-frame segment (SOF0 to SOF15, but not DHT, JPG or DAC) of
+// a positive width before the start-of-scan segment. It reads the markers
+// only, so every JPEG coding process passes, including the lossless,
+// arithmetic-coded and 12-bit ones that Go's decoder does not read. A height
+// of 0 is valid (a DNL segment sets it later).
+func isJPEGHeader(raw []byte) bool {
+	frame := false
+	for i := len(jpegStart) - 1; i+2 <= len(raw); {
+		if raw[i] != 0xFF {
+			return false
+		}
+		marker := raw[i+1]
+		switch {
+		case marker == 0xFF: // a fill byte
+			i++
+			continue
+		case marker == 0x01 || marker >= 0xD0 && marker <= 0xD7: // TEM, RSTn: no length
+			i += 2
+			continue
+		case marker == 0xD8 || marker == 0xD9 || marker == 0x00: // SOI, EOI or a stuffed byte before any scan
+			return false
+		}
+		if i+4 > len(raw) {
+			return false
+		}
+		length := int(raw[i+2])<<8 | int(raw[i+3])
+		if length < 2 || i+2+length > len(raw) {
+			return false
+		}
+		switch {
+		case marker == 0xDA: // SOS
+			return frame
+		case marker >= 0xC0 && marker <= 0xCF && marker != 0xC4 && marker != 0xC8 && marker != 0xCC:
+			// Precision, then height and width, then the component count.
+			if length < 8 || raw[i+7]|raw[i+8] == 0 || raw[i+9] == 0 {
+				return false
+			}
+			frame = true
+		}
+		i += 2 + length
+	}
+	return false
 }
 
 // isFramedWebP reports whether raw is one RIFF WebP file: its RIFF size is the

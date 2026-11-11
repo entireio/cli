@@ -83,6 +83,20 @@ var (
 	pngMagic  = []byte("\x89PNG\r\n\x1a\n")
 )
 
+// jpegWithFrame returns the base64 of a JPEG whose frame segment has the
+// given marker and sample precision, with one scan of a few bytes. Go's
+// decoder reads only baseline and progressive 8-bit frames.
+func jpegWithFrame(marker, precision byte) string {
+	raw := []byte{0xFF, 0xD8}
+	raw = append(raw, 0xFF, 0xE0, 0x00, 0x10, 'J', 'F', 'I', 'F', 0, 1, 1, 0, 0, 1, 0, 1, 0, 0)
+	// Precision, height 16, width 16, one component with sampling 1x1 and
+	// quantization table 0.
+	raw = append(raw, 0xFF, marker, 0x00, 0x0B, precision, 0x00, 0x10, 0x00, 0x10, 0x01, 0x01, 0x11, 0x00)
+	raw = append(raw, 0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x01, 0x00, 0x00)
+	raw = append(raw, 0x12, 0x34, 0x56, 0x78, 0xFF, 0xD9)
+	return base64.StdEncoding.EncodeToString(raw)
+}
+
 func TestIsInlineImageDataURI(t *testing.T) {
 	t.Parallel()
 	jpeg := fakeImageBase64(jpegMagic)
@@ -126,6 +140,10 @@ func TestIsInlineImageDataURI(t *testing.T) {
 		{"token appended to a gif", "data:image/gif;base64," + withTokenAppended(fakeImage([]byte("GIF89a"))), false},
 		{"token appended to a webp", "data:image/webp;base64," + withTokenAppended(fakeImage(riffTag)), false},
 		{"png without its end chunk", "data:image/png;base64," + base64.StdEncoding.EncodeToString(fakeImage(pngMagic)[:len(fakeImage(pngMagic))-len(pngEnd)]), false},
+		{"lossless jpeg", "data:image/jpeg;base64," + jpegWithFrame(0xC3, 8), true},
+		{"12-bit jpeg", "data:image/jpeg;base64," + jpegWithFrame(0xC1, 12), true},
+		{"arithmetic-coded jpeg", "data:image/jpeg;base64," + jpegWithFrame(0xC9, 8), true},
+		{"jpeg markers without a frame header", "data:image/jpeg;base64," + jpegWithFrame(0xC4, 8), false},
 		{"jpeg without its end marker", "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(fakeImage(jpegMagic)[:len(fakeImage(jpegMagic))-len(jpegEnd)]), false},
 	}
 	for _, tt := range tests {
@@ -265,7 +283,21 @@ func TestImageKeyRevealsSecret(t *testing.T) {
 // A custom rule written for one field still redacts an image under it. Custom
 // rules are process-wide, so this test does not run in parallel.
 //
+// customRuleReadsValue stops at a rule's first match past the key, so a rule
+// that matches every byte of an image costs no more than one that matches
+// once, and a match in the key alone reads nothing of the value.
+//
 //nolint:paralleltest // configures the process-wide custom rules
+//nolint:paralleltest // custom rules are process-global
+func TestCustomRuleReadsValue(t *testing.T) {
+	resetCustomRulesForTest(t)
+	uri := "data:image/jpeg;base64," + fakeImageBase64(jpegMagic)
+	ConfigureCustomRules(CustomRulesConfig{Inline: map[string]string{"letters": `[A-Za-z]`}})
+	assert.True(t, customRuleReadsValue("image_url", uri))
+	ConfigureCustomRules(CustomRulesConfig{Inline: map[string]string{"key": `image_url`}})
+	assert.False(t, customRuleReadsValue("image_url", uri))
+}
+
 func TestJSONLContent_CustomRuleOverridesImageDataURI(t *testing.T) {
 	resetCustomRulesForTest(t)
 	ConfigureCustomRules(CustomRulesConfig{Inline: map[string]string{"blob": `"auth_blob":"[^"]+"`}})
