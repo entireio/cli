@@ -26,6 +26,11 @@ func TestDetectPII_InternationalPhones(t *testing.T) {
 		{"no-break spaces", "Tel.\u00a0+44\u00a020\u00a07946\u00a00958", "Tel.\u00a0[REDACTED_PHONE]"},
 		{"no-break spaces and a number", "+44\u00a020\u00a07946\u00a00958\u00a02026", "[REDACTED_PHONE]\u00a02026"},
 		{"no-break space after a long first group", "+447700\u00a0900123", "[REDACTED_PHONE]"},
+		{"repeated spaces", "+44  20 7946 0958", "[REDACTED_PHONE]"},
+		{"spaces and tabs mixed", "+44 \t20\t 7946  0958", "[REDACTED_PHONE]"},
+		{"repeated spaces before a dotted number", "+33   1.99.00.12.34", "[REDACTED_PHONE]"},
+		{"aligned column after a number", "+44 20 7946 0958     2026", "[REDACTED_PHONE]     2026"},
+		{"repeated spaces before a word", "call +44 20 7946 0958   9am", "call [REDACTED_PHONE]   9am"},
 		{"AR mobile", "WhatsApp: +54 9 11 0000-0001", "WhatsApp: [REDACTED_PHONE]"},
 		{"UK London", "call +44 20 7946 0958.", "call [REDACTED_PHONE]."},
 		{"UK trunk zero", "+44 (0)20 7946 0958", "[REDACTED_PHONE]"},
@@ -47,6 +52,7 @@ func TestDetectPII_InternationalPhones(t *testing.T) {
 		{"longer first group before a space", "+447700 900123", "[REDACTED_PHONE]"},
 		{"in parentheses", "(+44 20 7946 0958)", "([REDACTED_PHONE])"},
 		{"without separators in parentheses", "(+442079460958)", "([REDACTED_PHONE])"},
+		{"without separators, then a slash", "+442079460958/123", "[REDACTED_PHONE]/123"},
 		{"closing parenthesis of the text around it", "(tel +442079460958) ok", "(tel [REDACTED_PHONE]) ok"},
 		{"attached extension", "+44 20 7946 0958x123", "[REDACTED_PHONE]x123"},
 		{"attached ext extension", "+33 1 99 00 12 34ext123", "[REDACTED_PHONE]ext123"},
@@ -59,6 +65,7 @@ func TestDetectPII_InternationalPhones(t *testing.T) {
 		{"known limit: a number after a dotted number goes with it", "+33 1.99.00.12.34 2026", "[REDACTED_PHONE]"},
 		{"known limit: a number after a number with dots only goes with it", "+33.1.99.00.12.34 5 rue", "[REDACTED_PHONE] rue"},
 		{"number and a decimal", "+44 20 7946 0958 1.5", "[REDACTED_PHONE]"},
+		{"without separators, a tab and a decimal", "+442079460958\t1.5", "[REDACTED_PHONE]"},
 		{"last groups joined by a dot", "+49 30123456 78.90", "[REDACTED_PHONE]"},
 		{"in JSON", `{"phone":"+44 20 7946 0958"}`, `{"phone":"[REDACTED_PHONE]"}`},
 		{"after an escape left in the text", `first\n+44 20 7946 0958`, `first\n[REDACTED_PHONE]`},
@@ -70,6 +77,7 @@ func TestDetectPII_InternationalPhones(t *testing.T) {
 		{"known limit: digits written one by one", "+2 0 0 0 1 0 0 0 1", "[REDACTED_PHONE]"},
 		{"known limit: date with dashes and a time", "+29-10-2024 12:30:00", "[REDACTED_PHONE]:30:00"},
 		{"known limit: signed integer", "max = +2147483647", "max = [REDACTED_PHONE]"},
+		{"known limit: numbers in aligned columns", "// +4        3  0123456789", "// [REDACTED_PHONE]"},
 	}
 	for _, tt := range redacted {
 		t.Run(tt.name, func(t *testing.T) {
@@ -87,6 +95,7 @@ func TestDetectPII_InternationalPhones(t *testing.T) {
 		{"IPv4 with nine digits", "+203.0.113.45"},
 		{"signed decimal", "lat +48.8566140"},
 		{"signed decimal and a number", "lat +48.8566140 2026"},
+		{"signed decimal and an aligned number", "lat +48.8566140    2026"},
 		{"IPv4 and a number", "+233.252.18.110 5555"},
 		{"long signed decimal", "$+281475245147134.9375"},
 		{"signed exponent", "8274307542972842p+726 2.92084e+234"},
