@@ -42,6 +42,11 @@ type RemoteInstallOptions struct {
 	// executing an unauthenticated binary is the supply-chain risk the
 	// checksum path exists to remove, so it takes an explicit opt-in.
 	AllowUnverified bool
+
+	// heldPluginLock names the plugin whose lock the caller already holds
+	// (UpgradeInstalledPlugin), so the install does not take it again: the
+	// lock is not reentrant.
+	heldPluginLock string
 }
 
 // RemoteInstallResult is what a successful remote install produced.
@@ -118,36 +123,19 @@ func installRepoAtTag(ctx context.Context, repoURL, expectedName, tag string, op
 	if err != nil {
 		return nil, err
 	}
-	// The installed name comes from the *remote* — entire-plugin.yml's name:,
-	// else the repo basename.
-	var name string
-	if meta != nil && meta.Name != "" {
-		name = meta.Name
-	} else if name, err = pluginNameFromRepoURL(repoURL); err != nil {
+	name, err := remotePluginName(meta, repoURL, expectedName)
+	if err != nil {
 		return nil, err
 	}
-
-	// Reconcile it with what the caller asked for. Unchecked, the remote chose
-	// the name unilaterally, which broke three things:
-	//
-	//  - `install <index-name>` could install something else entirely: the
-	//    index entry says "safe", the repo declares "hijack", and the user gets
-	//    entire-hijack on PATH with no prompt (index installs never prompt).
-	//  - --force escalated across plugins: the already-installed check below
-	//    tests the *remote-declared* name, so reinstalling A let A's repo
-	//    declare name: B and replace an unrelated installed B.
-	//  - A dependency installed under a different name never satisfied the
-	//    requirement, so dependencySatisfied/doctor reported it missing forever
-	//    and every future parent install re-attempted it.
-	//
-	// Fatal rather than a warning: every caller that sets ExpectedName has
-	// already made a trust decision about *that* name, and silently honoring a
-	// different one voids it. A legitimate rename is a catalog or requirement
-	// to fix, and the message says so.
-	if expectedName != "" && name != expectedName {
-		return nil, fmt.Errorf(
-			"%s declares plugin name %q but %q was requested; refusing to install under a name that was not asked for (update the plugin index entry or the requirement if the plugin was renamed)",
-			redactURL(repoURL), name, expectedName)
+	// Decide under the plugin's lock, and keep it through placement: the
+	// checks below would otherwise go stale during the download (a remove
+	// completing, another install landing first).
+	if opts.heldPluginLock != name {
+		release, err := lockPlugin(ctx, name, true)
+		if err != nil {
+			return nil, err
+		}
+		defer release()
 	}
 
 	existing, err := FindInstalledPlugin(name)
@@ -225,6 +213,46 @@ func installRepoAtTag(ctx context.Context, repoURL, expectedName, tag string, op
 		return nil, err
 	}
 	return &RemoteInstallResult{Installed: entry, Manifest: manifest, Metadata: meta, ReplacedFrom: replacedFrom}, nil
+}
+
+// remotePluginName is the name a remote install lands under, checked against
+// the name the caller committed to.
+func remotePluginName(meta *PluginMetadata, repoURL, expectedName string) (string, error) {
+	// The installed name comes from the *remote* — entire-plugin.yml's name:,
+	// else the repo basename.
+	var name string
+	if meta != nil && meta.Name != "" {
+		name = meta.Name
+	} else {
+		var err error
+		if name, err = pluginNameFromRepoURL(repoURL); err != nil {
+			return "", err
+		}
+	}
+
+	// Reconcile it with what the caller asked for. Unchecked, the remote chose
+	// the name unilaterally, which broke three things:
+	//
+	//  - `install <index-name>` could install something else entirely: the
+	//    index entry says "safe", the repo declares "hijack", and the user gets
+	//    entire-hijack on PATH with no prompt (index installs never prompt).
+	//  - --force escalated across plugins: the already-installed check below
+	//    tests the *remote-declared* name, so reinstalling A let A's repo
+	//    declare name: B and replace an unrelated installed B.
+	//  - A dependency installed under a different name never satisfied the
+	//    requirement, so dependencySatisfied/doctor reported it missing forever
+	//    and every future parent install re-attempted it.
+	//
+	// Fatal rather than a warning: every caller that sets ExpectedName has
+	// already made a trust decision about *that* name, and silently honoring a
+	// different one voids it. A legitimate rename is a catalog or requirement
+	// to fix, and the message says so.
+	if expectedName != "" && name != expectedName {
+		return "", fmt.Errorf(
+			"%s declares plugin name %q but %q was requested; refusing to install under a name that was not asked for (update the plugin index entry or the requirement if the plugin was renamed)",
+			redactURL(repoURL), name, expectedName)
+	}
+	return name, nil
 }
 
 // placeStagedBinary moves the extracted binary into pkg/<name>/, records
@@ -430,13 +458,25 @@ type UpgradeOutcome struct {
 // UpgradeInstalledPlugin re-resolves the newest tag for a remote-installed
 // plugin and reinstalls when it differs from the manifest's tag. Plugins
 // without a manifest (local-dev symlinks) are not upgradable.
+//
+// The plugin's lock is held from reading the manifest to the end of the
+// install, so the decision — still installed? pinned? which tag? — cannot be
+// overtaken by a concurrent `plugin remove` or `plugin install --pin`.
 func UpgradeInstalledPlugin(ctx context.Context, name string) (*UpgradeOutcome, error) {
+	release, err := lockPlugin(ctx, name, false)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("plugin %q is not installed", name)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	m, err := LoadPluginManifest(name)
 	if err != nil {
 		return nil, err
 	}
 	if m == nil {
-		return nil, fmt.Errorf("plugin %q has no install manifest (local-dev install?); reinstall it from its repository URL to make it upgradable", name)
+		return nil, noUpgradeManifestError(name)
 	}
 	if m.Pinned {
 		return &UpgradeOutcome{Name: name, Pinned: true}, nil
@@ -458,7 +498,7 @@ func UpgradeInstalledPlugin(ctx context.Context, name string) (*UpgradeOutcome, 
 	// installed unverified shouldn't start failing on upgrade, and one
 	// installed verified must not silently downgrade to unverified.
 	res, err := InstallPluginFromRepo(ctx, m.RepoURL, name, RemoteInstallOptions{
-		Force: true, AllowUnverified: m.Unverified,
+		Force: true, AllowUnverified: m.Unverified, heldPluginLock: name,
 	})
 	if err != nil {
 		return nil, err
@@ -470,6 +510,16 @@ func UpgradeInstalledPlugin(ctx context.Context, name string) (*UpgradeOutcome, 
 		return &UpgradeOutcome{Name: name, UpToDate: true}, nil
 	}
 	return &UpgradeOutcome{Name: name, FromTag: m.Tag, ToTag: res.Manifest.Tag}, nil
+}
+
+// noUpgradeManifestError explains why name, which has no install manifest,
+// cannot be upgraded: it is not installed at all (perhaps removed meanwhile),
+// or it is a local-dev install.
+func noUpgradeManifestError(name string) error {
+	if existing, err := FindInstalledPlugin(name); err == nil && existing == nil {
+		return fmt.Errorf("plugin %q is not installed", name)
+	}
+	return fmt.Errorf("plugin %q has no install manifest (local-dev install?); reinstall it from its repository URL to make it upgradable", name)
 }
 
 // replaceBinary moves src over dest atomically. On Windows, a running
@@ -554,6 +604,12 @@ func sweepAsideLeftovers(root *os.Root, dir string, isLeftover func(name string)
 // ctx bounds the wait for another install holding the plugin tree, and
 // carries the writer that wait is announced on (see lockPluginTree).
 func RemoveManagedPlugin(ctx context.Context, name string) error {
+	// Lock order: the plugin's own lock, then the tree's.
+	releasePlugin, err := lockPluginIfNamed(ctx, name, false)
+	if err != nil {
+		return err
+	}
+	defer releasePlugin()
 	release, err := lockPluginTree(ctx, false)
 	switch {
 	case err == nil:
