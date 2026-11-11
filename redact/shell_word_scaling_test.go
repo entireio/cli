@@ -150,7 +150,8 @@ func TestCredentialValueRegions_WordReadingCoversCaptured(t *testing.T) {
 }
 
 // FuzzCredentialValueRegions_WordReadingCoversCaptured explores the same
-// property; its seeds are inputs a differential fuzz once found leaking.
+// property; its seeds are inputs that leaked under an earlier design, found
+// by a differential fuzz or in review.
 func FuzzCredentialValueRegions_WordReadingCoversCaptured(f *testing.F) {
 	for _, seed := range []string{
 		"DB_PASSWORD=D=\nDB_PASSWORD=c= R= E= API_KEY=hunter2",
@@ -159,6 +160,7 @@ func FuzzCredentialValueRegions_WordReadingCoversCaptured(f *testing.F) {
 		`API_KEY=API_KEY= "API_KEY=":hunter2`,
 		`DB_PASSWORD=${'hunter2 '}`,
 		`API_KEY=a=;API_KEY=b= DB_USER= DB_NAME= API_KEY=hunter2`,
+		`API_KEY=''DB_USER= ""NOTE=API_KEY=hunter2xyz`,
 	} {
 		f.Add(seed)
 	}
