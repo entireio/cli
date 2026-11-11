@@ -174,6 +174,59 @@ func TestJSONLBytes_SelfDetectedArgvPasswordDoesNotRewriteSkippedFields(t *testi
 	}
 }
 
+// Renaming self-detected secret keys in the structural fallback keeps every
+// member of the object: a renamed key that meets a REDACTED key already
+// there, or another renamed one, is numbered, and the count matches the
+// placeholders the line gained.
+func TestJSONLBytes_RenamedSecretKeysKeepEveryMember(t *testing.T) {
+	t.Parallel()
+	tok := highEntropySecret
+	tok2 := "sk-ant-api03-pQ7wE2rT9yU4iO1aS6dF3gH8jK5lZ0xC"
+	cases := []struct {
+		name, in string
+		want     map[string]any
+	}{
+		{
+			"renamed key meets a REDACTED key",
+			`{"id":"` + tok + `","tokens":{"` + tok + `":{"scope":"repo"},"REDACTED":{"scope":"admin"}},"command":["docker","login","-u","me","-p","` + tok + `"]}`,
+			map[string]any{"REDACTED": map[string]any{"scope": "admin"}, "REDACTED_2": map[string]any{"scope": "repo"}},
+		},
+		{
+			"two renamed keys",
+			`{"id":"` + tok + `","tokens":{"` + tok + `":{"scope":"repo"},"` + tok2 + `":{"scope":"admin"}},"command":["docker","login","-p","` + tok + `"],"other":["docker","login","-p","` + tok2 + `"]}`,
+			map[string]any{"REDACTED": map[string]any{"scope": "admin"}, "REDACTED_2": map[string]any{"scope": "repo"}},
+		},
+		{
+			"renamed keys meet a numbered key",
+			`{"id":"` + tok + `","tokens":{"` + tok + `":{"scope":"repo"},"` + tok2 + `":{"scope":"admin"},"REDACTED_2":{"scope":"read"}},"command":["docker","login","-p","` + tok + `"],"other":["docker","login","-p","` + tok2 + `"]}`,
+			map[string]any{"REDACTED": map[string]any{"scope": "admin"}, "REDACTED_2": map[string]any{"scope": "read"}, "REDACTED_3": map[string]any{"scope": "repo"}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var first string
+			for range 20 {
+				got, err := JSONLBytes([]byte(tc.in + "\n"))
+				require.NoError(t, err)
+				out := string(got.Bytes())
+				if first == "" {
+					first = out
+				}
+				require.Equal(t, first, out, "the output must not depend on map order")
+				var obj map[string]any
+				require.NoError(t, json.Unmarshal([]byte(out), &obj))
+				require.Equal(t, tok, obj["id"], out)
+				require.Equal(t, tc.want, obj["tokens"], out)
+				require.NotContains(t, out, tok2, out)
+				require.NotNil(t, got.Counts())
+				added := strings.Count(out, RedactedPlaceholder) - strings.Count(tc.in, RedactedPlaceholder)
+				require.Equal(t, added, got.Counts().Replacements, out)
+			}
+		})
+	}
+}
+
 func TestJSONLBytes_FallbackStillHidesUnrelatedSecretInSkippedField(t *testing.T) {
 	t.Parallel()
 	a := highEntropySecret

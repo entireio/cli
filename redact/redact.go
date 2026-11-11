@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -2561,7 +2562,10 @@ func unkeyedNonArgvReplacements(repls []jsonReplacement) []jsonReplacement {
 func spliceHitsSkippedLeaf(parsed any, repls []jsonReplacement) bool {
 	redactable := make(map[string]int)
 	for _, r := range repls {
-		if r.key == "" && (r.valuesOnly || r.argv) {
+		if r.key != "" {
+			continue
+		}
+		if r.valuesOnly || r.argv {
 			redactable[r.original] = 0
 		}
 	}
@@ -2688,32 +2692,34 @@ func unkeyedSecretKeys(repls []jsonReplacement) map[string]string {
 }
 
 // renameJSONObjectKeys returns v with object keys renamed according to keys,
-// recursively, copy-on-write. Two keys that rename to the same string keep
-// one, as a map must. changed reports whether any key was renamed, so
-// callers do not compare maps or slices with ==. added is how many
-// placeholders the new keys added over the keys they replaced, so the
-// fallback can count them.
+// recursively, copy-on-write. No member is lost: a new name that another
+// key of the object already has gets a number (see objectKeyRenames).
+// changed reports whether any key was renamed, so callers do not compare
+// maps or slices with ==. added is how many placeholders the new keys
+// added over the keys they replaced, so the fallback can count them.
 func renameJSONObjectKeys(v any, keys map[string]string) (any, bool, int) {
 	switch val := v.(type) {
 	case map[string]any:
+		names := objectKeyRenames(val, keys)
 		var out map[string]any
+		if len(names) > 0 {
+			out = make(map[string]any, len(val))
+		}
 		added := 0
 		for k, child := range val {
 			newChild, childChanged, childAdded := renameJSONObjectKeys(child, keys)
 			added += childAdded
-			newKey := k
-			if r, ok := keys[k]; ok {
-				newKey = r
-			}
-			if !childChanged && newKey == k {
-				continue
+			newKey, renamed := names[k]
+			if !renamed {
+				newKey = k
+			} else {
+				added += strings.Count(newKey, RedactedPlaceholder) - strings.Count(k, RedactedPlaceholder)
 			}
 			if out == nil {
+				if !childChanged {
+					continue
+				}
 				out = maps.Clone(val)
-			}
-			if newKey != k {
-				delete(out, k)
-				added += strings.Count(newKey, RedactedPlaceholder) - strings.Count(k, RedactedPlaceholder)
 			}
 			out[newKey] = newChild
 		}
@@ -2743,6 +2749,47 @@ func renameJSONObjectKeys(v any, keys map[string]string) (any, bool, int) {
 	default:
 		return v, false, 0
 	}
+}
+
+// objectKeyRenames returns the new name of each key of obj that keys
+// renames. A new name that is already taken, by a key that stays or by
+// another renamed one (two secrets each hidden as REDACTED), gets the
+// first free number after an underscore (REDACTED_2), so the object keeps
+// every member. Keys are named in sorted order, so the names do not depend
+// on map order.
+func objectKeyRenames(obj map[string]any, keys map[string]string) map[string]string {
+	var names map[string]string
+	for k := range obj {
+		if _, ok := keys[k]; ok {
+			if names == nil {
+				names = make(map[string]string)
+			}
+			names[k] = ""
+		}
+	}
+	if names == nil {
+		return nil
+	}
+	taken := make(map[string]bool, len(obj))
+	for k := range obj {
+		if _, renamed := names[k]; !renamed {
+			taken[k] = true
+		}
+	}
+	next := make(map[string]int)
+	for _, k := range slices.Sorted(maps.Keys(names)) {
+		base := keys[k]
+		name := base
+		n := max(next[base], 2)
+		for taken[name] {
+			name = base + "_" + strconv.Itoa(n)
+			n++
+		}
+		next[base] = n
+		taken[name] = true
+		names[k] = name
+	}
+	return names
 }
 
 func reencodeRedactedApplyingKeys(content string, redactor leafRedactor, renamedKeys map[string]string) (string, error) {
