@@ -52,11 +52,11 @@ rules:
 	env.GitAdd("feature.txt")
 	env.GitCommit("rollout " + packTarget)
 
-	// Vector 3: identifier in a settings value. JSON entries take the
+	// Vector 3: identifiers in a settings value. JSON entries take the
 	// field-aware redactor rather than the byte-level one the vectors above
 	// go through, so the custom rules must reach that route too.
 	env.WriteFile(filepath.Join(".entire", "settings.local.json"),
-		`{"strategy_options": {"deploy_note": "rollout `+packTarget+`"}}`+"\n")
+		`{"strategy_options": {"deploy_note": "rollout `+packTarget+` with tag `+inlineTarget+`"}}`+"\n")
 
 	outZip := filepath.Join(t.TempDir(), "bundle.zip")
 	env.RunCLI("doctor", "bundle", "--out", outZip)
@@ -70,6 +70,7 @@ rules:
 		{"logs/entire.log", inlineTarget, "inline custom_redactions rule"},
 		{"git-log.txt", packTarget, "pack rule"},
 		{"settings/settings.local.json", packTarget, "pack rule"},
+		{"settings/settings.local.json", inlineTarget, "inline custom_redactions rule"},
 	} {
 		content := readBundleEntry(t, outZip, tc.entry)
 		if strings.Contains(content, tc.target) {
