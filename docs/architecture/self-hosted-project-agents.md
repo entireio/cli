@@ -67,8 +67,11 @@ claimed runs belonging to this account are recoverable from the server's job
 list. Transient requests receive bounded retries. Continuous workers wait for
 the poll interval and resume after transient polling or claim failures, without
 skipping an uncertain claim. `--once` returns the error after bounded retries.
-Authorization and invalid-claim errors stop the worker; an uncertain terminal
-submission also stops with a retained payload.
+Authorization and claim identity mismatches stop the worker without publishing
+against an unverified run. A matching run/project with an unsupported harness or
+missing deadline is never executed: the worker saves and submits a failure, then
+continues serving (`--once` returns the execution error). An uncertain terminal
+submission stops with a retained payload.
 
 Each run:
 

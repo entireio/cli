@@ -245,14 +245,23 @@ func (w *projectAgentWorker) run(ctx context.Context, job projectAgentJob) (bool
 		}
 		return false, err
 	}
-	if claim.RunID != job.RunID || claim.ProjectID != w.target.projectID || claim.Harness != activityAgentClaude || claim.DeadlineAt.IsZero() {
-		return false, errors.New("claim does not match the requested project, run or supported harness")
+	if claim.RunID != job.RunID || claim.ProjectID != w.target.projectID {
+		// Never publish a result against an identity we cannot verify.
+		return false, errors.New("claim does not match the requested project or run")
 	}
-	fmt.Fprintf(w.out, "Claimed %s; reviewing.\n", claim.RunID)
-	// Leave time for result publication before the server's deadline.
-	runCtx, cancel := context.WithDeadline(ctx, claim.DeadlineAt.Add(-5*time.Second))
-	result, runErr := w.execute(runCtx, claim)
-	cancel()
+	var result json.RawMessage
+	var runErr error
+	if claim.Harness != activityAgentClaude || claim.DeadlineAt.IsZero() {
+		// We own this run, but cannot execute its contract. Persist and report
+		// failure just like an execution error rather than recovering it forever.
+		runErr = errors.New("claim has an unsupported harness or missing deadline")
+	} else {
+		fmt.Fprintf(w.out, "Claimed %s; reviewing.\n", claim.RunID)
+		// Leave time for result publication before the server's deadline.
+		runCtx, cancel := context.WithDeadline(ctx, claim.DeadlineAt.Add(-5*time.Second))
+		result, runErr = w.execute(runCtx, claim)
+		cancel()
+	}
 	action := "complete"
 	body := any(map[string]any{"result": result, "harness": activityAgentClaude, "model": claim.Model})
 	if runErr != nil {
