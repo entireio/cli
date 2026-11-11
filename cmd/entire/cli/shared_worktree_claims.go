@@ -142,9 +142,9 @@ type namedFiles struct {
 	// ignoresNormalization reports whether the filesystem holding a name
 	// takes names in different Unicode normalization forms as one, as
 	// macOS's APFS and HFS+ do (worktreedir.IgnoresNormalization). A
-	// worktree can hold mounts of other filesystems, so it is asked for each
-	// name's directory. Only a deletion, which leaves no file to compare,
-	// asks.
+	// worktree can hold mounts of other filesystems, so it is asked for the
+	// directory of each component that composing changes. Only a deletion,
+	// which leaves no file to compare, asks.
 	ignoresNormalization func(name string) bool
 }
 
@@ -504,16 +504,31 @@ func (n namedFiles) deletedInOtherCase(file string, spellings []string) bool {
 }
 
 // sameDeletedEntry is CaseProbe.SameEntry, with names that differ in Unicode
-// normalization taken as one where the filesystem holding both ignores
-// normalization.
+// normalization taken as one where the filesystem holding each differing
+// component ignores normalization.
 func (n namedFiles) sameDeletedEntry(file, spelling string) bool {
-	compared, comparedSpelling := file, spelling
-	// The filesystem is asked only when a name is not composed already.
-	composedFile, composedSpelling := norm.NFC.String(file), norm.NFC.String(spelling)
-	if (composedFile != file || composedSpelling != spelling) && n.ignoresNormalization(file) && n.ignoresNormalization(spelling) {
-		compared, comparedSpelling = composedFile, composedSpelling
+	return n.cases.SameEntry(n.composedWhereIgnored(file), n.composedWhereIgnored(spelling))
+}
+
+// composedWhereIgnored returns name with each component composed (NFC) that
+// the filesystem holding it takes in either form. A worktree on APFS can hold
+// a mount that keeps the forms apart, and the other way round, so each
+// component that composing changes asks its own directory: in
+// cafe\u0301/mnt/x.txt it is the worktree's root, whatever mnt is. The
+// filesystem is asked only for a name that is not composed already.
+func (n namedFiles) composedWhereIgnored(name string) string {
+	if norm.NFC.IsNormalString(name) {
+		return name
 	}
-	return n.cases.SameEntry(compared, comparedSpelling)
+	parts := strings.Split(name, "/")
+	composed := make([]string, len(parts))
+	for i, part := range parts {
+		composed[i] = part
+		if c := norm.NFC.String(part); c != part && n.ignoresNormalization(strings.Join(parts[:i+1], "/")) {
+			composed[i] = c
+		}
+	}
+	return strings.Join(composed, "/")
 }
 
 // statusClaim returns the statusClaim for the turn this state began. A nil

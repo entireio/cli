@@ -387,6 +387,15 @@ func TestNamedFiles_DeletedInOtherNormalizationForm(t *testing.T) {
 	n = newNamedFiles(dir, []string{"mnt/cafe\u0301.txt"}, deleted)
 	n.ignoresNormalization = func(name string) bool { return path.Dir(name) != "mnt" }
 	require.Empty(t, n.only(deleted), "a directory that keeps the forms apart")
+
+	// The filesystem asked is the one holding the component that differs,
+	// not the leaf's: here café, in the worktree's root, above the mount.
+	deleted = []string{"caf\u00e9/mnt/x.txt"}
+	n = newNamedFiles(dir, []string{"cafe\u0301/mnt/x.txt"}, deleted)
+	n.ignoresNormalization = func(name string) bool { return path.Dir(name) == "." }
+	require.Equal(t, deleted, n.only(deleted), "the root ignores normalization, whatever the mount does")
+	n.ignoresNormalization = func(name string) bool { return path.Dir(name) != "." }
+	require.Empty(t, n.only(deleted), "the root keeps the forms apart, whatever the mount does")
 }
 
 // TestNamedFiles_OtherNormalizationForm covers a transcript that spells a
