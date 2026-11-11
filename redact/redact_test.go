@@ -1872,6 +1872,16 @@ func TestString_TrailingKeysCaughtWithoutScanners(t *testing.T) {
 			want:  `API_KEY=REDACTED"a= API_KEY=REDACTED`,
 		},
 		{
+			name:  "a credential after a value redacted inside its quotes, with a quote on the next line",
+			input: "API_KEY=\"\"'API_KEY=\"x'\"a= API_KEY=hunter2\n\"",
+			want:  "API_KEY=REDACTED\"a= API_KEY=REDACTED\n\"",
+		},
+		{
+			name:  "a credential whose value a shorter key that is not one read first",
+			input: `api_key="x=""API_KEY=aaa\"|hunter2"`,
+			want:  "api_key=REDACTED",
+		},
+		{
 			name:  "a credential read with the closing quote of a value redacted inside its quotes",
 			input: `API_KEY="x""|api_key="a"API_KEY=hunter2xyz`,
 			want:  `API_KEY=REDACTED"API_KEY=REDACTED`,
