@@ -1232,7 +1232,11 @@ type wordPiece struct {
 // and "hunter"'2' is hunter2. A pattern stops at the first closing quote, or,
 // for a bare value, at a blank inside a later quoted string (abc"d e"). It
 // returns the word's pieces and end, and false when the word is the capture
-// itself as a single piece. Quoted strings close on their own line.
+// itself as a single piece. Quoted strings close on their own line. A value
+// inside a double quoted string opened before its key, as in
+// echo "DB_PASSWORD=${PW}" "z", starts with the rest of that string: the
+// quote after the value closes it, and does not open "z" (see
+// enclosingStringEnd).
 func joinedShellWord(s string, start, end int) ([]wordPiece, int, bool) {
 	if start >= end {
 		return nil, end, false
@@ -1243,6 +1247,13 @@ func joinedShellWord(s string, start, end int) ([]wordPiece, int, bool) {
 	}
 	var pieces []wordPiece
 	i := start
+	if enclosed, closeAt := enclosingStringEnd(s, start); enclosed {
+		if closeAt < 0 {
+			return nil, end, false
+		}
+		pieces = append(pieces, wordPiece{start: start, end: closeAt, quote: '"'})
+		i, startsQuoted = closeAt+1, true
+	}
 	for i < len(s) {
 		bareStart := i
 		if c := s[i]; isQuoteByte(c) {
@@ -1270,6 +1281,24 @@ func joinedShellWord(s string, start, end int) ([]wordPiece, int, bool) {
 	}
 	markEnclosingString(s, pieces)
 	return pieces, i, true
+}
+
+// enclosingStringEnd reports whether s[start] sits inside a double quoted
+// string opened before it (see endsInDoubleQuotes), and the index of the
+// quote that closes that string right after the value. The index is -1 when
+// a blank ends the value first, as it ends a captured one
+// (echo "DB_PASSWORD=x more"), when the line ends first, or when a backslash
+// could escape a quote: the value is then read as captured.
+func enclosingStringEnd(s string, start int) (bool, int) {
+	if start > doubleQuoteContextLimit || !endsInDoubleQuotes(s[:start]) {
+		return false, -1
+	}
+	rest := s[start:min(len(s), start+doubleQuoteContextLimit)]
+	n := strings.IndexAny(rest, "\"\\\n\r \t")
+	if n < 0 || rest[n] != '"' {
+		return true, -1
+	}
+	return true, start + n
 }
 
 // markEnclosingString handles a word that ends in a quote that never closes,

@@ -117,6 +117,8 @@ func TestString_DoubleQuotedShellDefaultsPreserved(t *testing.T) {
 		`psql "postgres://app:${PW:-${F:-'$X'}}@db/app"`,
 		`echo 'it' "DB_PASSWORD=${PW:-'$FALLBACK'}"`,
 		`echo "x" 'y' "DB_PASSWORD=${PW:-'$FALLBACK'}" "z"`,
+		`echo "DB_PASSWORD=${PW}" "z"`,
+		`echo "API_KEY=$KEY" "--flag"`,
 		`printf '%s\n' "postgres://app:${PW:-'$FALLBACK'}@db/app"`,
 		"echo \"a\nDB_PASSWORD=${PW:-'$FALLBACK'} b\"",
 		`echo "API_KEY=${KEY:-'$FALLBACK'}"`,

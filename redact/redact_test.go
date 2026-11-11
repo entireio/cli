@@ -1643,9 +1643,11 @@ func TestString_ValuesPastRedactedWordsCaughtWithoutScanners(t *testing.T) {
 			want:  `API_KEY=REDACTED`,
 		},
 		{
-			name:  "a credential after a non-credential key that starts inside the captured value",
+			// Inside double quotes the single quotes are plain characters,
+			// so the first value runs to the closing quote and holds both.
+			name:  "a credential inside another credential's double-quoted value",
 			input: `echo "API_KEY='b='b'API_KEY=hunter2xyz"`,
-			want:  `echo "API_KEY=REDACTED'API_KEY=REDACTED`,
+			want:  `echo "API_KEY=REDACTED`,
 		},
 		{
 			name:  "a credential after a non-credential key that starts inside the captured double-quoted value",
