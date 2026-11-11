@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/execx"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/spf13/cobra"
 )
 
@@ -117,22 +119,31 @@ stops execution and attempts to report failure. No daemon is installed.`,
 					return nil
 				}
 			}
+			if err := journal.sweepWorkspaces(); err != nil {
+				logging.Warn(ctx, "sweep project agent workspaces", "error", err)
+			}
 			executor, err := newProjectAgentExecutor(ctx)
 			if err != nil {
 				return err
 			}
+			executor.workspace = journal.workspace
 			w.execute = executor.execute
-			err = w.serve(ctx, once, interval)
-			if errors.Is(err, context.Canceled) && !errors.Is(err, errAgentExecution) && ctx.Err() != nil {
-				fmt.Fprintln(cmd.ErrOrStderr(), "Worker stopped.")
-				return nil
-			}
-			return err
+			return projectAgentServeExit(ctx, cmd.ErrOrStderr(), w.serve(ctx, once, interval))
 		},
 	}
 	cmd.Flags().BoolVar(&once, "once", false, "Process at most one supported job; exit if none are available")
 	cmd.Flags().DurationVar(&interval, "poll-interval", 5*time.Second, "Delay between polls")
 	return cmd
+}
+
+// projectAgentServeExit treats an operator stop between jobs as success. An
+// interrupted run or any other failure keeps its error.
+func projectAgentServeExit(ctx context.Context, out io.Writer, err error) error {
+	if ctx.Err() != nil && errors.Is(err, context.Canceled) && !errors.Is(err, errAgentExecution) {
+		fmt.Fprintln(out, "Worker stopped.")
+		return nil
+	}
+	return err
 }
 
 func waitProjectAgent(ctx context.Context, d time.Duration) error {
@@ -173,7 +184,15 @@ func retryProjectAgent(err error) bool {
 	if errors.As(err, &h) {
 		return h.StatusCode == http.StatusTooManyRequests || h.StatusCode >= 500
 	}
-	return true
+	// *url.Error also wraps non-network failures, such as a refused ENTIRE_TOKEN
+	// secret; only connection failures are transient.
+	var u *url.Error
+	if !errors.As(err, &u) {
+		return false
+	}
+	var n net.Error
+	return errors.As(u.Err, &n) || errors.Is(u.Err, io.EOF) || errors.Is(u.Err, io.ErrUnexpectedEOF) ||
+		errors.Is(u.Err, syscall.ECONNRESET) || errors.Is(u.Err, syscall.ECONNREFUSED)
 }
 
 // projectAgentJobScan walks the job queue once, fetching pages lazily.
@@ -244,7 +263,7 @@ func (w *projectAgentWorker) serveScan(ctx context.Context, once bool) (bool, er
 			if !retryProjectAgent(err) || once {
 				return true, err
 			}
-			fmt.Fprintln(w.out, "Polling temporarily unavailable; retrying.")
+			fmt.Fprintf(w.out, "Polling temporarily unavailable; retrying: %v\n", err)
 			return false, nil
 		}
 		if job == nil {
@@ -252,7 +271,7 @@ func (w *projectAgentWorker) serveScan(ctx context.Context, once bool) (bool, er
 		}
 		processed, err := w.run(ctx, *job)
 		if !once && errors.Is(err, errAgentClaimRetry) {
-			fmt.Fprintln(w.out, "Claim temporarily unavailable; retrying.")
+			fmt.Fprintf(w.out, "Claim temporarily unavailable; retrying: %v\n", err)
 			return false, nil // Wait before polling again; do not skip an uncertain claim.
 		}
 		if err != nil && (once || !errors.Is(err, errAgentExecution)) {

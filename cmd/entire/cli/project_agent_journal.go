@@ -20,6 +20,9 @@ type projectAgentJournal struct {
 	root   *os.Root
 	name   string
 	unlock func()
+	// workspace is this worker's cache-relative review directory; the lock
+	// makes it safe to sweep.
+	workspace string
 }
 
 func openProjectAgentJournal(ctx context.Context, t *projectAgentTarget) (*projectAgentJournal, error) {
@@ -34,12 +37,25 @@ func openProjectAgentJournal(ctx context.Context, t *projectAgentTarget) (*proje
 	if err := osroot.MkdirAllNoSymlink(root, "agent-serve", 0o700); err != nil {
 		return nil, fmt.Errorf("create worker state directory: %w", err)
 	}
-	key := fmt.Sprintf("agent-serve/%x", sha256.Sum256([]byte(identity+"\n"+t.client.BaseURL()+"\n"+t.projectID)))
+	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(identity+"\n"+t.client.BaseURL()+"\n"+t.projectID)))
+	key := "agent-serve/" + hash
 	unlock, err := flock.AcquireContextIn(ctx, root, key+".lock")
 	if err != nil {
 		return nil, fmt.Errorf("lock worker state: %w", err)
 	}
-	return &projectAgentJournal{root: root, name: key + ".json", unlock: unlock}, nil
+	return &projectAgentJournal{root: root, name: key + ".json", unlock: unlock, workspace: "agent-work/" + hash}, nil
+}
+
+// sweepWorkspaces removes review clones left by a killed worker.
+func (j *projectAgentJournal) sweepWorkspaces() error {
+	root, err := userdirs.CacheRoot()
+	if err != nil {
+		return fmt.Errorf("open workspace cache: %w", err)
+	}
+	if err := osroot.RemoveAllNoSymlinks(root, j.workspace); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove stale review workspaces: %w", err)
+	}
+	return nil
 }
 
 // path is for operator diagnostics only; all I/O remains rooted.

@@ -32,9 +32,11 @@ var errProjectAgentOutputLimit = errors.New("output exceeds 8 MiB")
 var agentCommitPattern = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
 
 type projectAgentExecutor struct {
-	git    string
-	run    func(context.Context, string, string, []string, []string, string) ([]byte, error)
-	review func(context.Context, claudecode.RestrictedReview) (json.RawMessage, error)
+	// workspace is the cache-relative parent of per-run directories.
+	workspace string
+	git       string
+	run       func(context.Context, string, string, []string, []string, string) ([]byte, error)
+	review    func(context.Context, claudecode.RestrictedReview) (json.RawMessage, error)
 }
 
 func newProjectAgentExecutor(ctx context.Context) (*projectAgentExecutor, error) {
@@ -92,7 +94,11 @@ func (e *projectAgentExecutor) execute(ctx context.Context, c projectAgentClaim)
 	if err != nil {
 		return nil, fmt.Errorf("open workspace cache: %w", err)
 	}
-	work := "agent-work/" + uuid.NewString()
+	parent := e.workspace
+	if parent == "" {
+		parent = "agent-work"
+	}
+	work := parent + "/" + uuid.NewString()
 	if err := osroot.MkdirAllNoSymlink(root, work+"/review", 0o700); err != nil {
 		return nil, fmt.Errorf("create review directory: %w", err)
 	}

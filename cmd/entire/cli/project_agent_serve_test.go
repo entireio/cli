@@ -4,11 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -188,4 +192,80 @@ func TestProjectAgentServeOnceEmpty(t *testing.T) {
 	w := testAgentWorker(t, func(out http.ResponseWriter, _ *http.Request) { writeAgentTestResponse(t, out, `{"items":[]}`) })
 	w.wait = func(context.Context, time.Duration) error { t.Error("once must not wait when empty"); return nil }
 	require.NoError(t, w.serve(t.Context(), true, time.Second))
+}
+
+func TestProjectAgentServeExit(t *testing.T) {
+	t.Parallel()
+	job := `{"items":[{"run_id":"` + agentServeRunID + `","project_id":"project","harness":"claude"}]}`
+	for _, tc := range []struct {
+		name        string
+		stopInClaim bool
+		submitFails bool
+		wantStopped bool
+	}{
+		{name: "stop while polling", wantStopped: true},
+		{name: "stop during run keeps execution error", stopInClaim: true},
+		{name: "unsent submission keeps error", stopInClaim: true, submitFails: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			w := testAgentWorker(t, func(out http.ResponseWriter, r *http.Request) {
+				out.Header().Set("Content-Type", "application/json")
+				switch {
+				case r.Method == http.MethodGet:
+					writeAgentTestResponse(t, out, job)
+				case strings.HasSuffix(r.URL.Path, "/claim"):
+					assert.NoError(t, json.NewEncoder(out).Encode(agentServeClaim()))
+				case tc.submitFails:
+					out.WriteHeader(http.StatusUnprocessableEntity)
+				default:
+					writeAgentTestResponse(t, out, `{}`)
+				}
+			})
+			w.execute = func(ctx context.Context, _ projectAgentClaim) (json.RawMessage, error) {
+				cancel()
+				<-ctx.Done()
+				return nil, ctx.Err()
+			}
+			if !tc.stopInClaim {
+				w.wait = func(context.Context, time.Duration) error {
+					cancel()
+					return fmt.Errorf("worker stopped: %w", context.Canceled)
+				}
+				w.execute = func(context.Context, projectAgentClaim) (json.RawMessage, error) {
+					return json.RawMessage(`{}`), nil
+				}
+			}
+			var out strings.Builder
+			err := projectAgentServeExit(ctx, &out, w.serve(ctx, tc.stopInClaim, time.Second))
+			if tc.wantStopped {
+				require.NoError(t, err)
+				require.Contains(t, out.String(), "Worker stopped.")
+				return
+			}
+			require.Error(t, err)
+			require.NotContains(t, out.String(), "Worker stopped.")
+		})
+	}
+}
+
+func TestProjectAgentRetryClassification(t *testing.T) {
+	t.Parallel()
+	wrap := func(err error) error { return &url.Error{Op: "Get", URL: "https://example.com", Err: err} }
+	refused := errors.New("ENTIRE_TOKEN service account secret refused by core: HTTP 401")
+	for _, tc := range []struct {
+		err   error
+		retry bool
+	}{
+		{wrap(fmt.Errorf("resolve bearer: %w", refused)), false},
+		{refused, false},
+		{wrap(io.EOF), true},
+		{wrap(&net.OpError{Op: "dial", Err: syscall.ECONNREFUSED}), true},
+		{&api.HTTPError{StatusCode: http.StatusServiceUnavailable}, true},
+		{&api.HTTPError{StatusCode: http.StatusForbidden}, false},
+	} {
+		require.Equal(t, tc.retry, retryProjectAgent(tc.err), tc.err.Error())
+	}
 }

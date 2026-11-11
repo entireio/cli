@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
+	"github.com/entireio/cli/internal/entireclient/userdirs"
 	"github.com/stretchr/testify/require"
 )
 
@@ -66,4 +67,20 @@ func TestProjectAgentJournalRefusesCorruption(t *testing.T) {
 	require.ErrorContains(t, err, "decode pending result")
 	_, err = root.Stat("pending.json")
 	require.False(t, os.IsNotExist(err))
+}
+
+func TestProjectAgentJournalSweepsOnlyItsWorkspaces(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root, err := userdirs.CacheRoot()
+	require.NoError(t, err)
+	for _, dir := range []string{"agent-work/mine/stale/repo", "agent-work/other/active/repo"} {
+		require.NoError(t, osroot.MkdirAllNoSymlink(root, dir, 0o700))
+	}
+	j := &projectAgentJournal{workspace: "agent-work/mine"}
+	require.NoError(t, j.sweepWorkspaces())
+	require.NoError(t, j.sweepWorkspaces(), "sweeping an absent workspace is not an error")
+	_, err = root.Stat("agent-work/mine")
+	require.ErrorIs(t, err, os.ErrNotExist)
+	_, err = root.Stat("agent-work/other/active/repo")
+	require.NoError(t, err)
 }
