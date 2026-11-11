@@ -52,8 +52,17 @@ type Block struct {
 // ToolResult is the result inlined into the tool_use block that requested it.
 // Its JSON encoding is the stored "result" object.
 type ToolResult struct {
-	Output     string          `json:"output"`
-	Status     string          `json:"status"` // ToolStatusSuccess or ToolStatusError
+	Output string `json:"output"`
+	Status string `json:"status"` // ToolStatusSuccess or ToolStatusError
+	// ExitCode is the exit code of the command the call ran, when the agent
+	// records one. nil means unknown, never success.
+	ExitCode *int `json:"exitCode,omitempty"`
+	// Declined reports that the user declined the call, so it never ran.
+	// Its Status is ToolStatusError, as before the field existed.
+	Declined bool `json:"declined,omitempty"`
+	// CWD is the working directory of the call, as the agent records it:
+	// for a Codex command its own, for a Codex file change the turn's.
+	CWD        string          `json:"cwd,omitempty"`
 	File       *ToolResultFile `json:"file,omitempty"`
 	MatchCount int             `json:"matchCount,omitempty"`
 	// Agent identifies the subagent this tool call launched, when the agent
