@@ -151,20 +151,35 @@ func (s *ManualCommitStrategy) amendedCheckpoint(ctx context.Context, repo *git.
 	if !preexisting {
 		return amendedLink{}
 	}
+	replaced, moved := commitReplaced(ctx, commit)
+	if !moved {
+		return amendedLink{checkpointID: checkpointID}
+	}
+	if replaced.IsZero() {
+		return amendedLink{}
+	}
+	link := amendedLink{checkpointID: checkpointID}
+	if !s.commitLinksCheckpoint(ctx, repo, replaced, checkpointID) {
+		link.ownerBase = replaced.String()
+	}
+	return link
+}
+
+// commitReplaced reads the newest entry in HEAD's reflog that moved HEAD. It
+// returns the commit that entry replaced with commit, when it replaced one
+// instead of advancing to commit (an amend), or the zero hash, and whether the
+// reflog has such an entry at all.
+func commitReplaced(ctx context.Context, commit *object.Commit) (replaced plumbing.Hash, moved bool) {
 	for _, e := range headReflog(ctx) {
 		if e.oldHash.Equal(e.newHash) {
 			continue // HEAD did not move, as with another hook's `git reset HEAD`
 		}
 		if !e.newHash.Equal(commit.Hash) || e.oldHash.IsZero() || slices.ContainsFunc(commit.ParentHashes, e.oldHash.Equal) {
-			return amendedLink{}
+			return plumbing.ZeroHash, true
 		}
-		link := amendedLink{checkpointID: checkpointID}
-		if !s.commitLinksCheckpoint(ctx, repo, e.oldHash, checkpointID) {
-			link.ownerBase = e.oldHash.String()
-		}
-		return link
+		return e.oldHash, true
 	}
-	return amendedLink{checkpointID: checkpointID}
+	return plumbing.ZeroHash, false
 }
 
 // commitLinksCheckpoint reports whether the commit at hash links checkpointID:

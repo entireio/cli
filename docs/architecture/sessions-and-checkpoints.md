@@ -338,8 +338,9 @@ commit.
   as a message saved from that commit does (`carriedBefore`). The later
   commit's post-commit can reach the session first; it then waits, up to ten
   seconds, for the earlier one to condense the session
-  (`awaitEarlierCondensations`) rather than skip it. It never waits for a later
-  commit's reservation. Prepare writes the records and post-commit
+  (`awaitEarlierCondensations`) rather than skip it. An earlier commit is one
+  before it on its first parents or, for an amend, the commit it replaced
+  (read from HEAD's reflog). It never waits for a later commit's reservation. Prepare writes the records and post-commit
   takes them under `entire-stamp-records.lock` in the same dir, so hooks of
   overlapping commits in one worktree cannot lose each other's updates. Beside
   it, `entire-stamped-sessions.json` records the HEAD prepare stamped on and

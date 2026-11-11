@@ -201,8 +201,9 @@ func savedReservation(ctx context.Context, sessionID string) (id.CheckpointID, b
 
 // awaitEarlierCondensations waits while a session about to be condensed into
 // cpID, commit's checkpoint, still reserves another checkpoint ID that an
-// earlier commit carries, one before commit on its first parents whose
-// post-commit took the stamp and is still running. The two post-commits run
+// earlier commit carries (carriedByEarlierCommit: one before commit on its
+// first parents, or the commit an amend replaced) whose post-commit took the
+// stamp and is still running. The two post-commits run
 // side by side, and this one can reach the session first. It would skip the
 // session then (postCommitProcessSessionLocked keeps a reservation for its own
 // checkpoint), and with no other session condensing into cpID, the commit
@@ -244,10 +245,30 @@ func awaitEarlierCondensations(ctx context.Context, sessions []*SessionState, co
 }
 
 // carriedByEarlierCommit reports whether prepare recorded stamping reserved,
-// and a commit before commit made since carries it (carriedBefore).
+// and a commit made since that commit comes after carries it: one before
+// commit on its first parents (carriedBefore) or, when commit is an amend, the
+// commit it replaced or one before that (carriedByReplaced).
 func carriedByEarlierCommit(ctx context.Context, root *os.Root, commit *object.Commit, reserved id.CheckpointID) bool {
 	entry, ok := stampedSessionsEntry(readStampedSessionsIn(root), reserved)
-	return ok && carriedBefore(ctx, commit, entry.Head, reserved)
+	return ok && (carriedBefore(ctx, commit, entry.Head, reserved) || carriedByReplaced(ctx, commit, entry.Head, reserved))
+}
+
+// carriedByReplaced reports whether commit is an amend (commitReplaced) and
+// the commit it replaced, or one before that on its first parents made after
+// stampedOn, carries cpID (carriedSince). An amend does not descend from the
+// commit it replaces, so carriedBefore does not reach it. With no reflog to
+// tell, commit is not taken as an amend.
+func carriedByReplaced(ctx context.Context, commit *object.Commit, stampedOn string, cpID id.CheckpointID) bool {
+	replaced, _ := commitReplaced(ctx, commit)
+	if replaced.IsZero() {
+		return false
+	}
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		return false
+	}
+	defer repo.Close()
+	return carriedSince(repo, replaced, stampedOn, cpID)
 }
 
 // condensingElsewhere reports whether sessionID's saved state still reserves

@@ -323,17 +323,51 @@ func settleReservation() error {
 // a post-commit's snapshot holds it, and the two commits.
 func heldReservation(t *testing.T, dir string, reserved, next id.CheckpointID) (*SessionState, *object.Commit, *object.Commit) {
 	t.Helper()
+	first := takenReservation(t, dir, reserved)
+	require.True(t, recordStampedTrailer(context.Background(), next))
+	second := commitWith(t, dir, "second", next)
+	return reservedSnapshot(t), first, second
+}
+
+// takenReservation saves a session holding reserved and makes a commit
+// carrying it whose post-commit, this process, has taken its stamp.
+func takenReservation(t *testing.T, dir string, reserved id.CheckpointID) *object.Commit {
+	t.Helper()
 	ctx := context.Background()
-	s := NewManualCommitStrategy()
-	saveReservedSession(t, s, dir, reserved)
+	saveReservedSession(t, NewManualCommitStrategy(), dir, reserved)
 	require.True(t, recordStampedTrailer(ctx, reserved))
 	first := commitWith(t, dir, "first", reserved)
 	takeStampRecords(ctx, first)
-	require.True(t, recordStampedTrailer(ctx, next))
-	second := commitWith(t, dir, "second", next)
-	snapshot, err := s.loadSessionState(ctx, reservedSession)
+	return first
+}
+
+// reservedSnapshot loads reservedSession as a post-commit's snapshot holds it.
+func reservedSnapshot(t *testing.T) *SessionState {
+	t.Helper()
+	snapshot, err := NewManualCommitStrategy().loadSessionState(context.Background(), reservedSession)
 	require.NoError(t, err)
-	return snapshot, first, second
+	return snapshot
+}
+
+// assertWaitsUntilCondensed checks that commit's post-commit, about to
+// condense snapshot into cpID, waits until the session's reservation is
+// settled.
+func assertWaitsUntilCondensed(t *testing.T, snapshot *SessionState, commit *object.Commit, cpID id.CheckpointID) {
+	t.Helper()
+	ctx := context.Background()
+	const condenseAfter = 200 * time.Millisecond
+	condensed := make(chan error, 1)
+	go func() {
+		time.Sleep(condenseAfter)
+		condensed <- settleReservation()
+	}()
+	start := time.Now()
+	assert.True(t, awaitEarlierCondensations(ctx, []*SessionState{snapshot}, commit, cpID))
+	assert.GreaterOrEqual(t, time.Since(start), condenseAfter)
+	require.NoError(t, <-condensed)
+	now, read := savedReservation(ctx, reservedSession)
+	assert.True(t, read)
+	assert.True(t, now.IsEmpty(), "it returned once the session was condensed")
 }
 
 // A post-commit whose session still reserves the checkpoint ID an earlier
@@ -342,23 +376,27 @@ func heldReservation(t *testing.T, dir string, reserved, next id.CheckpointID) (
 func TestAwaitEarlierCondensations_UntilTheSessionIsCondensed(t *testing.T) {
 	dir := setupGitRepo(t)
 	t.Chdir(dir)
-	ctx := context.Background()
 	reserved, next := id.MustCheckpointID("a1b2c3d4e5f6"), id.MustCheckpointID("b1b2c3d4e5f6")
 	snapshot, _, second := heldReservation(t, dir, reserved, next)
 
-	const condenseAfter = 200 * time.Millisecond
-	condensed := make(chan error, 1)
-	go func() {
-		time.Sleep(condenseAfter)
-		condensed <- settleReservation()
-	}()
-	start := time.Now()
-	assert.True(t, awaitEarlierCondensations(ctx, []*SessionState{snapshot}, second, next))
-	assert.GreaterOrEqual(t, time.Since(start), condenseAfter)
-	require.NoError(t, <-condensed)
-	now, read := savedReservation(ctx, reservedSession)
-	assert.True(t, read)
-	assert.True(t, now.IsEmpty(), "it returned once the session was condensed")
+	assertWaitsUntilCondensed(t, snapshot, second, next)
+}
+
+// An amend replaces the commit it amends rather than descending from it.
+// `commit --amend -m` is prepared like any commit, so while the amended
+// commit's post-commit runs, the amend gets an ID of its own. Its post-commit
+// waits for the amended commit's, as for a commit before it.
+func TestAwaitEarlierCondensations_ForTheCommitAnAmendReplaced(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	reserved, next := id.MustCheckpointID("a1b2c3d4e5f6"), id.MustCheckpointID("b1b2c3d4e5f6")
+	first := takenReservation(t, dir, reserved)
+	require.True(t, recordStampedTrailer(context.Background(), next))
+	testutil.RunGit(t, dir, "commit", "--amend", "-q", "-m", addCheckpointTrailer("amended\n", next))
+	amend := headCommit(t, dir)
+	require.Equal(t, first.ParentHashes, amend.ParentHashes, "the amend replaced the first commit")
+
+	assertWaitsUntilCondensed(t, reservedSnapshot(t), amend, next)
 }
 
 // It never waits for its own checkpoint, or for a post-commit that has
