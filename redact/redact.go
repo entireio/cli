@@ -148,6 +148,11 @@ var (
 	// also names a secret (aws_access_key_id, api_token_id, secret_id) must
 	// never suppress entropy-layer redaction.
 	credentialWordInKeyRE = regexp.MustCompile(`(?:^|_)(?:key|token|secret|pass|passwd|password|pwd)(?:_|$)`)
+	// passwordStemInKeyRE spots a password stem inside a normalized key, where
+	// credentialWordInKeyRE needs a whole segment: userpassword, mypasswd,
+	// user_psw, and pw as a segment (db_pw). These are the keys under which
+	// betterleaks' generic-password rule reads a value as a password.
+	passwordStemInKeyRE = regexp.MustCompile(`passw|psw|pwd|(?:^|_)pw(?:_|$)`)
 )
 
 // entropyThreshold is the minimum Shannon entropy for a string to be considered
@@ -2545,27 +2550,28 @@ func shouldSkipJSONLObject(obj map[string]any) bool {
 // skipLeaf reports whether a string leaf is left unscanned: under a skip key,
 // or a whole-string inline image under a key that reveals no secret.
 func skipLeaf(skipStrings bool, key string, credentialContext bool, val string) bool {
-	return skipStrings || (isInlineImageDataURI(val) && !imageKeyRevealsSecret(key, credentialContext, val))
+	return skipStrings || (isInlineImageDataURI(val) && !imageKeyRevealsSecret(key, credentialContext))
 }
 
 // imageKeyRevealsSecret reports whether key marks an inline image value as a
 // possible secret, so the value is scanned like any other string. That is a
 // credential key, a key with a secret word segment such as a bare password,
 // secret or token (which outside a connection object is not a credential key),
-// or a key under which the key-context rule flags more of the value, such as
-// userpassword. Like isNonSecretIdentifierAssignment, this only decides
-// whether the scanners may skip a value, so failing closed costs an image
-// under such a key, not a leak.
-func imageKeyRevealsSecret(key string, credentialContext bool, val string) bool {
+// or a key with a password stem such as userpassword or db_pw. It reads the
+// key only: an image under a key that names no secret is preserved without
+// any scan of its bytes. Like isNonSecretIdentifierAssignment, this only
+// decides whether the scanners may skip a value, so failing closed costs an
+// image under such a key, not a leak.
+func imageKeyRevealsSecret(key string, credentialContext bool) bool {
 	if isCredentialJSONSecretKey(key, credentialContext) {
 		return true
 	}
 	for _, form := range credentialJSONKeyForms(key) {
-		if credentialWordInKeyRE.MatchString(form) {
+		if credentialWordInKeyRE.MatchString(form) || passwordStemInKeyRE.MatchString(form) {
 			return true
 		}
 	}
-	return keyContextFindsMore(key, val)
+	return false
 }
 
 // isInlineImageDataURI reports whether s is, in its entirety, a base64 image

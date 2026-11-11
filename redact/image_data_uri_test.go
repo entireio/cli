@@ -137,8 +137,8 @@ func TestJSONLContent_CredentialKeyOverridesImageDataURI(t *testing.T) {
 // Outside a connection object a bare password, secret or token key is not a
 // credential key, but it still names a secret, so an image-shaped value under
 // it is scanned and keeps the placeholder it had before the image rule. So is
-// one under a key the key-context rule reads as a secret's. A real image under
-// a key that names no secret is still preserved.
+// one under a key with a password stem. A real image under a key that names
+// no secret is still preserved.
 func TestJSONLContent_SecretKeyOverridesImageDataURI(t *testing.T) {
 	t.Parallel()
 	const secretShaped = "data:image/jpeg;base64,/9j/wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
@@ -171,9 +171,14 @@ func TestJSONLContent_SecretKeyOverridesImageDataURI(t *testing.T) {
 			want: `{"pwd":"data:image/jpeg;base64,REDACTED"}`,
 		},
 		{
-			name: "key-context only",
+			name: "password stem without a segment",
 			line: `{"userpassword":"` + secretShaped + `"}`,
 			want: `{"userpassword":"REDACTED"}`,
+		},
+		{
+			name: "pw segment",
+			line: `{"db_pw":"` + secretShaped + `"}`,
+			want: `{"db_pw":"REDACTED"}`,
 		},
 		{
 			name: "image under a key with a credential word but no secret segment",
@@ -182,6 +187,43 @@ func TestJSONLContent_SecretKeyOverridesImageDataURI(t *testing.T) {
 		},
 	}
 	assertJSONLFieldCases(t, tests)
+}
+
+// The image rule reads only the key, so a preserved image is never scanned to
+// decide it: keyContextFindsMore over a 1 MiB image took seconds.
+func TestImageKeyRevealsSecret(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		key  string
+		want bool
+	}{
+		{"password", true},
+		{"passwd", true},
+		{"pwd", true},
+		{"pass", true},
+		{"secret", true},
+		{"token", true},
+		{"key", true},
+		{"userpassword", true},
+		{"userPassword", true},
+		{"mypasswd", true},
+		{"user_psw", true},
+		{"db_pw", true},
+		{"api_key", true},
+		{"image_url", false},
+		{"url", false},
+		{"screenshot", false},
+		{"author_avatar", false},
+		{"keys", false},
+		{"passport_photo", false},
+		{"upward", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.key, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, imageKeyRevealsSecret(tt.key, false))
+		})
+	}
 }
 
 // Failing closed has a cost: a real image under a key that names a secret is
