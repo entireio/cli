@@ -403,6 +403,26 @@ func TestCarryForward_DropsACaseRenamedStagedAdditionWindows(t *testing.T) {
 	require.False(t, state.HasPendingFiles())
 }
 
+// TestCheckpointTouchesAny_MatchesACaseRenameWindows: after a commit of a
+// case-only rename of README.md to readme.md, the checkpoint lists the
+// README.md the session recorded, while a task that ran during the commit
+// names the readme.md git now tracks. Both open one file where the
+// filesystem ignores case, so the task's checkpoint is that one; a deleted
+// file matches once both spellings are gone. CI's Windows job runs it by its
+// name.
+func TestCheckpointTouchesAny_MatchesACaseRenameWindows(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	t.Cleanup(func() { osroot.Forget(dir) })
+	testutil.WriteFile(t, dir, "readme.md", "readme\n")
+	if !worktreedir.NewCaseProbe(dir).IgnoresCase(".") {
+		t.Skip("README.md and readme.md are two files on a case-sensitive filesystem")
+	}
+	require.True(t, checkpointTouchesAny(dir, []string{"README.md"}, []string{"readme.md"}), "both spellings open one file")
+	require.True(t, checkpointTouchesAny(dir, []string{"GONE.md"}, []string{"gone.md"}), "both spellings are gone")
+	require.False(t, checkpointTouchesAny(dir, []string{"other.md"}, []string{"readme.md"}), "another file")
+}
+
 // TestRespelled_DropsConflictingHashes: a session recorded readme.md with an
 // older hash and README.md with a newer one, and both now spell one file.
 // Neither hash can stand for it: kept, the older one could find older content
