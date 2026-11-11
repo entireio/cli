@@ -181,9 +181,10 @@ func (l *TokenLedger) childrenAtMark(o *TokenLedger, read *agent.TokenUsage) (un
 	return uncounted, counted
 }
 
-// unknownAtMark returns the subagents unknown to a mark whose reading could
-// not count uncounted and counted counted: those, and each of other's that
-// it did not count.
+// unknownAtMark keeps a subagent the losing side could not count unknown
+// unless the winning reading counted it, because otherwise the winning total
+// holds none of what it used, or only an earlier total, and the delta that
+// next counts it includes usage from before the mark.
 func unknownAtMark(uncounted, counted, other map[string]bool) map[string]bool {
 	unknown := maps.Clone(uncounted)
 	for id := range other {
