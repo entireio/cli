@@ -205,6 +205,10 @@ func installRepoAtTag(ctx context.Context, repoURL, expectedName, tag string, op
 	if meta != nil {
 		manifest.Requires = meta.Requires
 	}
+	// End the step before placement: it may wait for the plugin tree lock,
+	// which announces that wait on the same writer, and two spinners would
+	// take turns redrawing one terminal line. Placement itself is quick.
+	stopInstall()
 	if err := placeStagedBinary(ctx, stagingRoot, stagedName, manifest); err != nil {
 		return nil, err
 	}

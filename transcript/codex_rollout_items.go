@@ -109,6 +109,7 @@ type codexItemsConverter struct {
 	folder  *Folder
 	tracker *codexUsageTracker
 	model   string
+	cwd     string // the latest turn_context's working directory
 	// callAssistant is the last assistant message of the open call, and
 	// callItem the last item of any kind in it; both empty when no call is
 	// open.
@@ -152,7 +153,7 @@ func (c *codexItemsConverter) line(line []byte, n int) []Record {
 		if !ok {
 			return nil
 		}
-		records := codexItemRecords(it)
+		records := codexItemRecords(it, c.cwd)
 		if it.Kind == codexitem.KindUser {
 			// A user message ends the open call, as a user line does on the
 			// response_item path.
@@ -173,17 +174,26 @@ func (c *codexItemsConverter) line(line []byte, n int) []Record {
 }
 
 // turnContext reports whether line is a turn_context line, and takes the
-// model it names.
+// model and working directory it names. A cwd that isn't a string is ignored,
+// and the model is still read.
 func (c *codexItemsConverter) turnContext(line []byte) bool {
 	var cl codexLine
 	if json.Unmarshal(line, &cl) != nil || cl.Type != codexTypeTurnContext {
 		return false
 	}
 	var tc struct {
-		Model string `json:"model"`
+		Model string          `json:"model"`
+		CWD   json.RawMessage `json:"cwd"`
 	}
-	if json.Unmarshal(cl.Payload, &tc) == nil && tc.Model != "" {
+	if json.Unmarshal(cl.Payload, &tc) != nil {
+		return true
+	}
+	if tc.Model != "" {
 		c.model = tc.Model
+	}
+	var cwd string
+	if json.Unmarshal(tc.CWD, &cwd) == nil && cwd != "" {
+		c.cwd = codexitem.PathOfFileURI(cwd)
 	}
 	return true
 }
