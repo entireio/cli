@@ -1104,8 +1104,8 @@ type postCommitActionHandler struct {
 	repoDir                    string
 	committedFileSet           map[string]struct{}
 	hasNew                     bool
-	filesTouchedBefore         []string
-	touchedFileHashes          map[string]string // TouchedFileHashes before condensation cleared them
+	filesTouchedBefore         []string          // FilesTouched before condensation cleared it, spelled for the overlap gate (overlapSpelledAsCommitted)
+	touchedFileHashes          map[string]string // TouchedFileHashes before condensation cleared them, spelled the same way
 	sessionsWithCommittedFiles int               // number of processable sessions that have tracked files
 	// liveTaskClaimsCommit reports whether the session's in-flight subagents
 	// modified a committed file. Evaluated lazily: only the read-only gate
@@ -1920,33 +1920,34 @@ func (s *ManualCommitStrategy) postCommitFilesTouchedBefore(ctx context.Context,
 	return nil
 }
 
-// postCommitFilesBefore returns postCommitFilesTouchedBefore and a copy of
-// the session's TouchedFileHashes, with each file the commit holds in another
-// case spelled as the commit spells it (spelledAsCommitted) and its hash
-// under that spelling too. PrepareCommitMsg matched a session that no turn
-// end recorded so; the overlap gate and carry-forward must see the same
-// files, or its trailer would have no checkpoint.
-func (s *ManualCommitStrategy) postCommitFilesBefore(ctx context.Context, state *SessionState, foreign bool, committedFileSet map[string]struct{}) ([]string, map[string]string) {
-	before := s.postCommitFilesTouchedBefore(ctx, state, foreign)
-	hashes := maps.Clone(state.TouchedFileHashes)
-	spelled := spelledAsCommitted(sessionWorktreeRoot(ctx, state), before, committedFileSet)
-	files := make([]string, 0, len(spelled))
+// overlapSpelledAsCommitted returns files, the session's files before this
+// commit, and hashes, its recorded hashes, for the overlap gate: each file the
+// commit holds in another case spelled as the commit spells it
+// (spelledAsCommitted), its hash under that spelling too. PrepareCommitMsg
+// matched a session that no turn end recorded so, and the gate must see the
+// same files, or its trailer would have no checkpoint. Carry-forward keeps
+// the recorded spellings: after a staged rename of README.md to readme.md, a
+// commit of README.md leaves the rename staged, still the session's to commit.
+func overlapSpelledAsCommitted(repoRoot string, files []string, hashes map[string]string, committedFileSet map[string]struct{}) ([]string, map[string]string) {
+	spelled := spelledAsCommitted(repoRoot, files, committedFileSet)
+	if slices.Equal(spelled, files) {
+		return files, hashes
+	}
+	overlapHashes := maps.Clone(hashes)
+	overlapFiles := make([]string, 0, len(spelled))
 	seen := make(map[string]struct{}, len(spelled))
 	for i, file := range spelled {
-		if hash, ok := hashes[before[i]]; ok && file != before[i] {
-			if _, taken := hashes[file]; !taken {
-				hashes[file] = hash
+		if hash, ok := hashes[files[i]]; ok && file != files[i] {
+			if _, taken := overlapHashes[file]; !taken {
+				overlapHashes[file] = hash
 			}
 		}
 		if _, dup := seen[file]; !dup {
 			seen[file] = struct{}{}
-			files = append(files, file)
+			overlapFiles = append(overlapFiles, file)
 		}
 	}
-	if before == nil {
-		return nil, hashes
-	}
-	return files, hashes
+	return overlapFiles, overlapHashes
 }
 
 // postCommitProcessSessionLocked handles a single session within the PostCommit loop.
@@ -1997,9 +1998,11 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 	_, checkContentSpan := perf.Start(ctx, "check_session_content")
 	hasNew := s.postCommitHasNewContent(ctx, repo, state, committedFileSet)
 	transitionCtx.HasFilesTouched = len(state.FilesTouched) > 0
+	filesTouchedBefore := s.postCommitFilesTouchedBefore(ctx, state, foreign)
 	// Like FilesTouched, the recorded hashes are cleared by condensation but
 	// needed afterwards for the carry-forward decision.
-	filesTouchedBefore, touchedFileHashesBefore := s.postCommitFilesBefore(ctx, state, foreign, committedFileSet)
+	touchedFileHashesBefore := maps.Clone(state.TouchedFileHashes)
+	overlapFiles, overlapHashes := overlapSpelledAsCommitted(sessionWorktreeRoot(ctx, state), filesTouchedBefore, touchedFileHashesBefore, committedFileSet)
 	checkContentSpan.End()
 
 	logging.Debug(logCtx, "post-commit: carry-forward prep",
@@ -2023,8 +2026,8 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 		repoDir:                    repoDir,
 		committedFileSet:           committedFileSet,
 		hasNew:                     hasNew,
-		filesTouchedBefore:         filesTouchedBefore,
-		touchedFileHashes:          touchedFileHashesBefore,
+		filesTouchedBefore:         overlapFiles,
+		touchedFileHashes:          overlapHashes,
 		headTree:                   headTree,
 		parentTree:                 parentTree,
 		sessionsWithCommittedFiles: sessionsWithCommittedFiles,

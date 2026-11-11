@@ -11,7 +11,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 
@@ -209,30 +208,67 @@ func TestSessionHasNewContentFromLiveTranscript_SpellsAsTheCommitWindows(t *test
 	}
 }
 
-// TestPostCommitFilesBefore_SpellsAsTheCommitWindows is the post-commit side
-// of TestSessionHasNewContentFromLiveTranscript_SpellsAsTheCommitWindows: the
-// overlap gate and carry-forward must see the session's readme.md in the
-// commit of README.md too, with its recorded hash, or the trailer
-// PrepareCommitMsg added would have no checkpoint. CI's Windows job runs it
-// by its name.
-func TestPostCommitFilesBefore_SpellsAsTheCommitWindows(t *testing.T) {
+// TestOverlapSpelledAsCommittedWindows is the post-commit side of
+// TestSessionHasNewContentFromLiveTranscript_SpellsAsTheCommitWindows: the
+// overlap gate must see the session's readme.md in the commit of README.md
+// too, with its recorded hash, or the trailer PrepareCommitMsg added would
+// have no checkpoint. CI's Windows job runs it by its name.
+func TestOverlapSpelledAsCommittedWindows(t *testing.T) {
 	t.Parallel()
 	dir, _ := trackedCaseRepo(t)
 	testutil.RunGit(t, dir, "mv", "-f", "README.md", "readme.md")
-	s := &ManualCommitStrategy{}
-	state := &SessionState{
-		SessionID: "post-commit-spelled", WorktreePath: dir, Phase: session.PhaseIdle,
-		FilesTouched: []string{"readme.md", "src/App.go"}, TouchedFileHashes: map[string]string{"readme.md": "abc"},
-	}
-	files, hashes := s.postCommitFilesBefore(context.Background(), state, false, fileSet([]string{"README.md"}))
+	recorded := []string{"readme.md", "src/App.go"}
+	recordedHashes := map[string]string{"readme.md": "abc"}
+	files, hashes := overlapSpelledAsCommitted(dir, recorded, recordedHashes, fileSet([]string{"README.md"}))
 	if worktreedir.NewCaseProbe(dir).IgnoresCase(".") {
 		require.Equal(t, []string{"README.md", "src/App.go"}, files)
 		require.Equal(t, "abc", hashes["README.md"], "the hash recorded under the session's spelling")
 	} else {
-		require.Equal(t, []string{"readme.md", "src/App.go"}, files, "README.md is another file here")
+		require.Equal(t, recorded, files, "README.md is another file here")
 		require.NotContains(t, hashes, "README.md")
 	}
-	require.Equal(t, []string{"readme.md", "src/App.go"}, state.FilesTouched, "the session's own record is unchanged")
+	require.Equal(t, []string{"readme.md", "src/App.go"}, recorded, "the recorded files, which carry-forward uses, are unchanged")
+	require.Equal(t, map[string]string{"readme.md": "abc"}, recordedHashes, "and so are their hashes")
+}
+
+// TestCarryForward_KeepsAStagedCaseRenameWindows: after a staged rename of
+// README.md to readme.md that the session recorded, a commit of README.md
+// takes the edit and leaves the rename staged. The overlap gate counts the
+// session's readme.md in that commit, but carry-forward must keep it: the
+// next commit, of the rename, is still the session's. CI's Windows job runs
+// it by its name. Uses t.Chdir — do NOT add t.Parallel().
+func TestCarryForward_KeepsAStagedCaseRenameWindows(t *testing.T) {
+	dir := setupGitRepo(t)
+	if !worktreedir.NewCaseProbe(dir).IgnoresCase(".") {
+		t.Skip("a case-only rename is two files on a case-sensitive filesystem")
+	}
+	// As git init sets it on such a filesystem; go-git's init does not.
+	testutil.RunGit(t, dir, "config", "core.ignorecase", "true")
+	t.Chdir(dir)
+	s := &ManualCommitStrategy{}
+	sid := "2026-11-11-staged-case-rename"
+	ctx := context.Background()
+	testutil.WriteFile(t, dir, "README.md", "readme\n")
+	testutil.GitAdd(t, dir, "README.md")
+	testutil.GitCommit(t, dir, "Add README.md")
+
+	testutil.RunGit(t, dir, "mv", "-f", "README.md", "readme.md")
+	testutil.WriteFile(t, dir, "readme.md", "readme, edited\n")
+	saveTestStep(t, s, dir, sid, "readme.md")
+	commitPathsWithTrailer(t, dir, "c3c3c3c3c3c3", "README.md")
+	require.Equal(t, "R  README.md -> readme.md", strings.TrimSpace(testutil.RunGit(t, dir, "status", "--porcelain", "--", "README.md", "readme.md")),
+		"fixture: the commit took the edit and left the rename staged")
+	require.NoError(t, s.PostCommit(ctx))
+
+	state, err := s.loadSessionState(ctx, sid)
+	require.NoError(t, err)
+	require.Contains(t, testutil.RunGit(t, dir, "ls-tree", "-r", "--name-only", paths.MetadataBranchName), "c3c3c3c3c3",
+		"the commit of README.md condensed the session")
+	require.Contains(t, state.FilesTouched, "readme.md", "the staged rename is still the session's to commit")
+
+	testutil.RunGit(t, dir, "commit", "-q", "-m", "commit the rename")
+	require.True(t, filesOverlapWithContent(ctx, state.TouchedFileHashes, headCommit(t, dir), state.FilesTouched),
+		"the commit of the rename should link the session")
 }
 
 // On a case-sensitive filesystem FilterTrackableChanges keeps both
