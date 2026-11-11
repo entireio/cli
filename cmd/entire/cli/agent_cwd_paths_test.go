@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -171,6 +172,24 @@ func TestPhysicalAgentPath(t *testing.T) {
 	require.Equal(t, "real/file.txt", physicalAgentPath(root+"/alias/../file.txt", root))
 	require.Equal(t, "file.txt", physicalAgentPath(root+"/real/../file.txt", root))
 	require.Empty(t, physicalAgentPath(root+"/out/../file.txt", root), "the file is outside the worktree")
-	require.Equal(t, root+"/gone/../file.txt", physicalAgentPath(root+"/gone/../file.txt", root), "a directory that does not resolve is left to the lexical clean")
+	require.Equal(t, "real/file.txt", physicalAgentPath(root+"/alias/gone/../../file.txt", root), "a directory that no longer exists, after a link")
+	require.Equal(t, "file.txt", physicalAgentPath(root+"/gone/../file.txt", root), "a directory that no longer exists")
+	require.Empty(t, physicalAgentPath(root+"/out/gone/../../file.txt", root), "a directory that no longer exists, outside the worktree")
 	require.Equal(t, root+"/real/./file.txt", physicalAgentPath(root+"/real/./file.txt", root), "no .., nothing to resolve")
+}
+
+// TestNormalizeAgentPaths_RootedPathsWindows: a transcript can spell an
+// absolute path without its drive letter (/Users/...) or the MSYS way
+// (/c/Users/...). Neither is a name to place in the agent's directory.
+func TestNormalizeAgentPaths_RootedPathsWindows(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS != windowsGOOS {
+		t.Skip("drive letters are Windows paths")
+	}
+	root := t.TempDir()
+	slashed := filepath.ToSlash(root)
+	driveless := slashed[2:] + "/docs/red.md"
+	msys := "/" + strings.ToLower(slashed[:1]) + slashed[2:] + "/docs/red.md"
+	require.Equal(t, []string{"docs/red.md", "docs/red.md", "sub/docs/red.md"},
+		normalizeAgentPaths([]string{driveless, msys, "docs/red.md"}, filepath.Join(root, "sub"), root))
 }

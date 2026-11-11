@@ -480,6 +480,9 @@ func normalizeAgentPaths(files []string, eventCWD, repoRoot string) []string {
 		if f == "" {
 			continue
 		}
+		// An MSYS or drive-less path (/Users/...) is absolute on Windows
+		// too, not one to place in eventCWD.
+		f = paths.WithWindowsDrive(f, repoRoot)
 		if !filepath.IsAbs(f) {
 			if eventCWD == "" {
 				resolved = append(resolved, f)
@@ -500,10 +503,11 @@ func normalizeAgentPaths(files []string, eventCWD, repoRoot string) []string {
 // worktree-relative name of the file it opens when p has a ".." component
 // outside Windows: after a symlink to a directory, ".." leaves the link's
 // target (alias/../file.txt is real/file.txt for alias -> real/sub), which
-// the lexical clean in filepath.Rel cannot see. It returns "" when p's
-// directory resolves outside the worktree, and p itself when p has no ".."
-// or its directory does not resolve, which filepath.Rel then cleans. Windows
-// takes ".." lexically, before any link.
+// the lexical clean in filepath.Rel cannot see. A directory that no longer
+// exists (a deleted file's) is resolved from its deepest existing ancestor.
+// It returns "" when p's directory resolves outside the worktree, and p
+// itself when p has no ".." or its directory does not resolve, which
+// filepath.Rel then cleans. Windows takes ".." lexically, before any link.
 func physicalAgentPath(p, repoRoot string) string {
 	if runtime.GOOS == windowsGOOS || !slices.Contains(strings.Split(p, string(filepath.Separator)), "..") {
 		return p

@@ -322,15 +322,8 @@ func IsRelativeTraversal(rel string) bool {
 // ToRelativePath converts an absolute path to relative.
 // Returns empty string if the path is outside the working directory.
 func ToRelativePath(absPath, cwd string) string {
-	absPath = normalizeMSYSPath(absPath)
+	absPath = WithWindowsDrive(absPath, cwd)
 	cwd = normalizeMSYSPath(cwd)
-
-	// On Windows, MSYS/Git Bash sometimes omits the drive letter, producing
-	// paths like /Users/... that filepath.IsAbs doesn't recognize. Prepend
-	// the drive letter from cwd so filepath.Rel can match them.
-	if runtime.GOOS == osWindows && len(absPath) > 0 && absPath[0] == '/' && len(cwd) >= 2 && cwd[1] == ':' {
-		absPath = cwd[:2] + absPath
-	}
 
 	if !filepath.IsAbs(absPath) {
 		return absPath
@@ -341,6 +334,19 @@ func ToRelativePath(absPath, cwd string) string {
 	}
 
 	return relPath
+}
+
+// WithWindowsDrive returns p as filepath.IsAbs recognizes it on Windows: an
+// MSYS path (/c/Users/...) as C:/Users/..., and a path MSYS/Git Bash spelled
+// without its drive letter (/Users/...) on cwd's drive. On other platforms it
+// returns p.
+func WithWindowsDrive(p, cwd string) string {
+	p = normalizeMSYSPath(p)
+	cwd = normalizeMSYSPath(cwd)
+	if runtime.GOOS == osWindows && len(p) > 0 && p[0] == '/' && len(cwd) >= 2 && cwd[1] == ':' {
+		return cwd[:2] + p
+	}
+	return p
 }
 
 // normalizeMSYSPath converts MSYS/Git Bash-style paths (e.g., /c/Users/...)

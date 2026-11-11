@@ -251,9 +251,9 @@ var errOutsideWorktree = errors.New("directory resolves outside the worktree")
 // errOutsideWorktree when abs resolves outside the worktree, and with
 // another error when it does not resolve.
 func resolvedName(repoRoot, abs string) (string, error) {
-	target, err := filepath.EvalSymlinks(abs)
+	target, err := evalSymlinksOfExisting(abs)
 	if err != nil {
-		return "", fmt.Errorf("resolve %s: %w", abs, err)
+		return "", err
 	}
 	root, err := filepath.EvalSymlinks(repoRoot)
 	if err != nil {
@@ -267,6 +267,28 @@ func resolvedName(repoRoot, abs string) (string, error) {
 		return "", errOutsideWorktree
 	}
 	return name, nil
+}
+
+// evalSymlinksOfExisting is filepath.EvalSymlinks for a path whose end may
+// no longer exist, as a deleted file's directory: it resolves the deepest
+// ancestor that exists and applies the rest lexically, since an entry that
+// does not exist is no symlink. So with alias -> real/sub,
+// alias/gone/../../file.txt is real/file.txt, where a lexical clean of the
+// whole path gives the root's file.txt.
+func evalSymlinksOfExisting(abs string) (string, error) {
+	sep := string(filepath.Separator)
+	existing, rest := abs, ""
+	for {
+		target, err := filepath.EvalSymlinks(existing)
+		if err == nil {
+			return filepath.Join(target, rest), nil
+		}
+		i := strings.LastIndex(existing, sep)
+		if !errors.Is(err, fs.ErrNotExist) || i <= 0 {
+			return "", fmt.Errorf("resolve %s: %w", abs, err)
+		}
+		existing, rest = existing[:i], existing[i+1:]+sep+rest
+	}
 }
 
 // only returns the files of all the transcript names, in all's order and
