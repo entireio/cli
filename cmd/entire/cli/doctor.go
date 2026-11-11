@@ -1783,21 +1783,25 @@ func antigravityDoctorSubject(cmd *cobra.Command) (*antigravity.AntigravityAgent
 	return ag, true
 }
 
-// checkAntigravityTitleTee warns when Antigravity hooks are installed in this
-// repo but agy's global title slot — agy's only token-usage surface — is not
-// routed through Entire, which leaves token counts missing from checkpoints,
-// and when it is routed through a Windows tee an earlier version wrote, which
-// still looks for `entire` in the folder agy was opened in. Warn-only.
+// checkAntigravityTitleTee warns, from any repository, when agy's global title
+// slot is routed through a Windows tee an earlier version wrote, which still
+// looks for `entire` in the folder agy was opened in. Where Antigravity hooks
+// are installed in this repo, it also warns when the slot — agy's only
+// token-usage surface — is not routed through Entire, which leaves token
+// counts missing from checkpoints. Warn-only.
 func checkAntigravityTitleTee(cmd *cobra.Command) {
-	if _, ok := antigravityDoctorSubject(cmd); !ok {
-		return
-	}
 	w := cmd.OutOrStdout()
+	// The title command is global and runs in every folder agy opens, so an
+	// outdated one is reported from any repository, not only where
+	// Antigravity's hooks are enabled.
 	if antigravity.TitleTeeOutdated() {
 		fmt.Fprintln(w, "Antigravity title-tee: OUT OF DATE")
 		fmt.Fprintln(w, "  agy's title command was written by an earlier version and runs in every")
 		fmt.Fprintln(w, "  folder agy opens, looking for `entire` in that folder before PATH.")
 		fmt.Fprintln(w, "  Run `entire agent add antigravity` to update it.")
+		return
+	}
+	if _, ok := antigravityDoctorSubject(cmd); !ok {
 		return
 	}
 	if antigravity.TitleTeeInstalled() {

@@ -85,3 +85,40 @@ func TestCheckHookConfig_CurrentAfterInstall(t *testing.T) {
 		t.Fatalf("missing preCompact hook: CheckHookConfig = %v, want outdated", got)
 	}
 }
+
+// TestCheckHookConfig_OtherHostFormIsCurrentWindows pins that a hooks file
+// installed on the other OS (a teammate's committed file) reads as current,
+// and that the check never runs the sh probe, so a slow or failed probe cannot
+// flip a healthy install to out of date. Mutates the shared probe and the
+// working directory, so no t.Parallel().
+func TestCheckHookConfig_OtherHostFormIsCurrentWindows(t *testing.T) {
+	for _, tc := range []struct {
+		name, installOS, checkOS string
+		installSH                bool
+	}{
+		{"windows install checked on linux", "windows", "linux", false},
+		{"sh install checked on windows without sh", "linux", "windows", true},
+		{"windows sh install checked on windows without sh", "windows", "windows", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			t.Cleanup(osroot.ResetShared)
+			t.Chdir(tempDir)
+			ag := &CursorAgent{}
+
+			restore := agent.SetWindowsHookProbeForTesting(tc.installOS, func(context.Context, string) bool { return tc.installSH })
+			_, err := ag.InstallHooks(context.Background(), false)
+			restore()
+			if err != nil {
+				t.Fatalf("InstallHooks: %v", err)
+			}
+			t.Cleanup(agent.SetWindowsHookProbeForTesting(tc.checkOS, func(context.Context, string) bool {
+				t.Error("CheckHookConfig ran the sh probe")
+				return false
+			}))
+			if got := ag.CheckHookConfig(context.Background()); got != agent.HooksCurrent {
+				t.Fatalf("CheckHookConfig = %v, want current", got)
+			}
+		})
+	}
+}

@@ -105,3 +105,32 @@ func TestCheckHookConfig_TaskHookUnderOtherMatcherIsOutdated(t *testing.T) {
 		t.Fatalf("pre-tool-use under another matcher: CheckHookConfig = %v, want outdated", got)
 	}
 }
+
+// TestCheckHookConfig_OtherHostFormIsCurrentWindows pins that a settings file
+// installed on the other OS (a teammate's committed file) reads as current.
+// Mutates the shared host and the working directory, so no t.Parallel().
+func TestCheckHookConfig_OtherHostFormIsCurrentWindows(t *testing.T) {
+	for _, tc := range []struct{ installOS, checkOS string }{
+		{"windows", "linux"},
+		{"linux", "windows"},
+	} {
+		t.Run(tc.installOS+" install checked on "+tc.checkOS, func(t *testing.T) {
+			tempDir := t.TempDir()
+			t.Cleanup(osroot.ResetShared)
+			t.Chdir(tempDir)
+			ag := &FactoryAIDroidAgent{}
+			probe := func(context.Context, string) bool { return true }
+
+			restore := agentpkg.SetWindowsHookProbeForTesting(tc.installOS, probe)
+			_, err := ag.InstallHooks(context.Background(), false)
+			restore()
+			if err != nil {
+				t.Fatalf("InstallHooks: %v", err)
+			}
+			t.Cleanup(agentpkg.SetWindowsHookProbeForTesting(tc.checkOS, probe))
+			if got := ag.CheckHookConfig(context.Background()); got != agentpkg.HooksCurrent {
+				t.Fatalf("CheckHookConfig = %v, want current", got)
+			}
+		})
+	}
+}

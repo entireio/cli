@@ -335,12 +335,16 @@ var cursorHookTypes = []struct{ verb, key string }{
 	{HookNameSubagentStop, "subagentStop"},
 }
 
-// CheckHookConfig implements agent.HookFreshness: outdated when any Entire hook
-// in .cursor/hooks.json differs from the command InstallHooks writes on this
-// host, or one is missing. That includes a Windows wrapper written before
-// hooks resolved programs from PATH only, which keeps working but still
-// searches the folder Cursor was opened in. An absent, unreadable or malformed
-// file, or one holding no Entire hook, reads as absent.
+// CheckHookConfig implements agent.HookFreshness: outdated when Entire's hooks
+// in .cursor/hooks.json match neither form InstallHooks writes today, the sh
+// wrapper or the Windows cmd.exe wrapper, or one is missing. That includes a
+// Windows wrapper written before hooks resolved programs from PATH only, which
+// keeps working but still searches the folder Cursor was opened in. Either
+// current form counts, whichever host this runs on: a hooks file committed
+// from a teammate's other OS is not out of date, and skipping the sh probe
+// keeps a slow probe from flipping a healthy install to out of date. An
+// absent, unreadable or malformed file, or one holding no Entire hook, reads
+// as absent.
 func (c *CursorAgent) CheckHookConfig(ctx context.Context) agent.HookConfigState {
 	cfg, err := cursorHookConfig(ctx)
 	if err != nil {
@@ -364,17 +368,22 @@ func (c *CursorAgent) CheckHookConfig(ctx context.Context) agent.HookConfigState
 	if !owned {
 		return agent.HooksAbsent
 	}
-	// Decided only once Entire's hooks are known to be here: on Windows the
-	// decision runs the sh probe, which `entire status` should not pay for in
-	// every repository.
-	useWindowsHooks := agent.UseWindowsProductionHooks(ctx)
+	if cursorHooksCurrent(parsed, false) || cursorHooksCurrent(parsed, true) {
+		return agent.HooksCurrent
+	}
+	return agent.HooksOutdated
+}
+
+// cursorHooksCurrent reports whether every hook type holds exactly the command
+// InstallHooks writes in the sh form (windows false) or the Windows form.
+func cursorHooksCurrent(parsed [][]CursorHookEntry, windows bool) bool {
 	for i, ht := range cursorHookTypes {
-		want := agent.WrapProductionSilentHookCommandForOS("entire hooks cursor "+ht.verb, useWindowsHooks)
+		want := agent.WrapProductionSilentHookCommandForOS("entire hooks cursor "+ht.verb, windows)
 		if _, current := agent.ManagedHookListState(parsed[i], hookEntryCommand, []string{want}); !current {
-			return agent.HooksOutdated
+			return false
 		}
 	}
-	return agent.HooksCurrent
+	return true
 }
 
 // parseCursorHookType parses a specific hook type from rawHooks into the target slice.

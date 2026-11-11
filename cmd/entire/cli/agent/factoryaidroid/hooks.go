@@ -454,13 +454,15 @@ func (f *FactoryAIDroidAgent) AreHooksInstalled(ctx context.Context) (bool, erro
 	return hasEntireHook(settings.Hooks.Stop), nil
 }
 
-// CheckHookConfig implements agent.HookFreshness: outdated when any Entire hook
-// in .factory/settings.json differs from the command InstallHooks writes on
-// this host, or one is missing. That includes a Windows wrapper written before
-// hooks resolved programs from PATH only, which keeps working but still
-// searches the folder Droid was opened in. An absent, unreadable or malformed
-// file, or one with no Entire Stop hook (AreHooksInstalled's test), reads as
-// absent.
+// CheckHookConfig implements agent.HookFreshness: outdated when Entire's hooks
+// in .factory/settings.json match neither form InstallHooks writes today, the
+// sh wrapper or the Windows cmd.exe wrapper, or one is missing. That includes
+// a Windows wrapper written before hooks resolved programs from PATH only,
+// which keeps working but still searches the folder Droid was opened in.
+// Either current form counts, whichever host this runs on, so a settings file
+// committed from a teammate's other OS is not out of date. An absent,
+// unreadable or malformed file, or one with no Entire Stop hook
+// (AreHooksInstalled's test), reads as absent.
 func (f *FactoryAIDroidAgent) CheckHookConfig(ctx context.Context) agent.HookConfigState {
 	cfg, err := factoryHookConfig(ctx)
 	if err != nil {
@@ -475,11 +477,18 @@ func (f *FactoryAIDroidAgent) CheckHookConfig(ctx context.Context) agent.HookCon
 		return agent.HooksAbsent
 	}
 
-	windows := agent.HookHostIsWindows()
+	if droidHooksCurrent(settings.Hooks, false) || droidHooksCurrent(settings.Hooks, true) {
+		return agent.HooksCurrent
+	}
+	return agent.HooksOutdated
+}
+
+// droidHooksCurrent reports whether h holds exactly the hooks InstallHooks
+// writes in the sh form (windows false) or the Windows form.
+func droidHooksCurrent(h FactoryHooks, windows bool) bool {
 	userPromptSubmitCmd := silentHookCommand(HookNameUserPromptSubmit, windows)
 	preTaskCmd := silentHookCommand(HookNamePreToolUse, windows)
 	postTaskCmd := silentHookCommand(HookNamePostToolUse, windows)
-	h := settings.Hooks
 	// The same want sets InstallHooks drops stale hooks against.
 	lists := []struct {
 		matchers []FactoryHookMatcher
@@ -499,15 +508,12 @@ func (f *FactoryAIDroidAgent) CheckHookConfig(ctx context.Context) agent.HookCon
 			entries = append(entries, m.Hooks...)
 		}
 		if _, current := agent.ManagedHookListState(entries, hookEntryCommand, l.want); !current {
-			return agent.HooksOutdated
+			return false
 		}
 	}
 	// InstallHooks adds the task hooks under the "Task" matcher only.
-	if !taskHookCommandExists(h.PreToolUse, preTaskCmd) ||
-		!taskHookCommandExists(h.PostToolUse, postTaskCmd) {
-		return agent.HooksOutdated
-	}
-	return agent.HooksCurrent
+	return taskHookCommandExists(h.PreToolUse, preTaskCmd) &&
+		taskHookCommandExists(h.PostToolUse, postTaskCmd)
 }
 
 // Helper functions for hook management

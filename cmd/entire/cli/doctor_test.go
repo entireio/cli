@@ -1365,7 +1365,9 @@ func TestCheckAntigravityTitleTee_WarnsWhenNotConfigured(t *testing.T) {
 
 // TestCheckAntigravityTitleTee_WindowsWarnsWhenOutdated reports a title tee
 // an earlier version wrote on Windows, which still looks for `entire` in the
-// folder agy was opened in, and names the reinstall that rewrites it.
+// folder agy was opened in, and names the reinstall that rewrites it. The
+// title command is global, so the warning appears in a repository without
+// Antigravity hooks too.
 func TestCheckAntigravityTitleTee_WindowsWarnsWhenOutdated(t *testing.T) {
 	t.Cleanup(agent.SetWindowsHookProbeForTesting("windows", nil))
 	dir := setupGitRepoForPhaseTest(t)
@@ -1374,12 +1376,6 @@ func TestCheckAntigravityTitleTee_WindowsWarnsWhenOutdated(t *testing.T) {
 	// Registered after t.TempDir, so it runs before the removal.
 	t.Cleanup(osroot.ResetShared)
 	t.Chdir(dir)
-	stubAgyOnPath(t)
-
-	agentsDir := filepath.Join(dir, ".agents")
-	require.NoError(t, os.MkdirAll(agentsDir, 0o750))
-	require.NoError(t, os.WriteFile(filepath.Join(agentsDir, "hooks.json"),
-		[]byte(antigravityHooksJSON()), 0o600))
 
 	cfgDir := filepath.Join(t.TempDir(), "agy")
 	require.NoError(t, os.MkdirAll(cfgDir, 0o750))

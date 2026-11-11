@@ -181,7 +181,7 @@ func TestWindowsWrappers_DroidComposition(t *testing.T) {
 	const marker = "ENTIRE_HOOK_RAN"
 
 	t.Run("silent/present runs the command", func(t *testing.T) {
-		out, stderr, code := runDroidWrapper(t, WrapWindowsProductionSilentHookCommand("echo "+marker), true)
+		out, stderr, code := runDroidWrapper(t, WrapWindowsProductionSilentHookCommandForCmdHost("echo "+marker), true)
 		if !strings.Contains(out, marker) {
 			t.Fatalf("expected wrapped command to run; stdout=%q stderr=%q", out, stderr)
 		}
@@ -191,14 +191,14 @@ func TestWindowsWrappers_DroidComposition(t *testing.T) {
 	})
 
 	t.Run("silent/present propagates the command exit code", func(t *testing.T) {
-		_, stderr, code := runDroidWrapper(t, WrapWindowsProductionSilentHookCommand("cmd /c exit 7"), true)
+		_, stderr, code := runDroidWrapper(t, WrapWindowsProductionSilentHookCommandForCmdHost("cmd /c exit 7"), true)
 		if code != 7 {
 			t.Fatalf("expected wrapped command exit code 7 to propagate, got %d; stderr=%q", code, stderr)
 		}
 	})
 
 	t.Run("silent/absent skips the command and exits 0", func(t *testing.T) {
-		out, stderr, code := runDroidWrapper(t, WrapWindowsProductionSilentHookCommand("echo "+marker), false)
+		out, stderr, code := runDroidWrapper(t, WrapWindowsProductionSilentHookCommandForCmdHost("echo "+marker), false)
 		if strings.Contains(out, marker) {
 			t.Fatalf("wrapped command must NOT run when entire absent; stdout=%q stderr=%q", out, stderr)
 		}
