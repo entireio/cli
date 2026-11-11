@@ -779,7 +779,7 @@ func TestString_CommandLinePasswordsShellGrammarCases(t *testing.T) {
 		{name: "two digits after --pass", input: "redis-cli --pass 12", want: "redis-cli --pass REDACTED"},
 		{name: "two digits after curl --pass", input: "curl --pass 42 sftp://example.com", want: "curl --pass REDACTED sftp://example.com"},
 		{name: "long flag value of adjacent Python strings", input: `subprocess.run(["wget", "--password", "` + p[:3] + `" "` + p[3:] + `", url])`, want: `subprocess.run(["wget", "--password", "REDACTED", url])`},
-		{name: "long flag value after an empty adjacent Python string", input: `subprocess.run(["wget", "--password", "" "` + p + `", url])`, want: `subprocess.run(["wget", "--password", "REDACTED", url])`},
+		{name: "long flag value after an empty adjacent Python string", input: `subprocess.run(["wget", "--password", "" "` + p + `", url])`, want: `subprocess.run(["wget", "--password", "" "REDACTED", url])`},
 		{name: "short flag value of adjacent Python strings on two lines", input: "subprocess.run([\"redis-cli\", \"-a\", \"" + p[:3] + "\"\n    \"" + p[3:] + "\"])", want: `subprocess.run(["redis-cli", "-a", "REDACTED"])`},
 		{name: "quoted piece after a template", input: `tool --password={{ .Values.prefix }}"` + p + `"`, want: "tool --password=REDACTED"},
 		{name: "quoted piece after a template in an sh -c string", input: `sh -c "tool --password={{ .Values.prefix }}'` + p + `'"`, want: `sh -c "tool --password=REDACTED"`},
@@ -787,6 +787,8 @@ func TestString_CommandLinePasswordsShellGrammarCases(t *testing.T) {
 		{name: "netrc password that is a prose word ending the entry", input: "machine api.example.com login alice password first", want: "machine api.example.com login alice password REDACTED"},
 		{name: "netrc login that is a prose word", input: "machine api.example.com login the password " + p, want: "machine api.example.com login the password REDACTED"},
 		{name: "netrc password that ends in an escaped keyword", input: `machine db.internal login me password ` + p + `\nmachine`, want: "machine db.internal login me password REDACTED"},
+		{name: "netrc password holding an escaped keyword and a field outside a quoted string", input: `machine db.internal login me password ` + p + `\nmachine other`, want: "machine db.internal login me password REDACTED other"},
+		{name: "netrc password holding escaped fields outside a quoted string", input: `machine localhost login alice password ` + p + `\nlogin\tSecretSuffix`, want: "machine localhost login alice password REDACTED"},
 	})
 }
 
@@ -1250,6 +1252,7 @@ func TestString_CommandLinePasswordListAndQuotingNonSecretsPreserved(t *testing.
 		`{"command":"sh -c \"tool --password={{ .Values.password }}\""}`,
 		// adjacent empty strings in code
 		`subprocess.run(["wget", "--password", "" "", url])`,
+		`subprocess.run(["mongosh", "-p", "" "--host", "db"])`,
 		// prose with each keyword of an entry, whose login is a word that
 		// joins a sentence, or whose machine ends a clause
 		"Enter machine name, login and password below.",
