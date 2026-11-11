@@ -42,7 +42,7 @@ func TestProjectAgentServePagination(t *testing.T) {
 			writeAgentTestResponse(t, out, `{"items":[{"run_id":"`+agentServeRunID+`","project_id":"project","harness":"claude","state":"claimed"}]}`)
 		}
 	})
-	job, err := w.next(t.Context())
+	job, err := w.next(t.Context(), nil)
 	require.NoError(t, err)
 	require.Equal(t, agentServeRunID, job.RunID)
 	require.Equal(t, "claimed", job.State)

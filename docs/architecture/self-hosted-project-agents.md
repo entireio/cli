@@ -58,8 +58,11 @@ are left unclaimed. `--poll-interval` defaults to five seconds, minimum one seco
 `--once` exits when no supported job exists, or after one job/submission recovery.
 
 The saved setup connection (or project resolver) chooses the project's API cell. The worker walks all job
-pages, filters by project and Claude, and claims by run ID. Contended/stale claims
-are skipped; the same claim is retried after uncertain responses. Previously
+pages, filters by project and Claude, and claims by run ID. Claims refused with
+404/409 are skipped for the remainder of that queue scan, including across pages.
+`--once` exits if the scan has no remaining supported jobs. Continuous workers
+clear the skip list after processing a job or exhausting the scan, so a temporarily paused repository
+can become eligible again. The same claim is retried after uncertain responses. Previously
 claimed runs belonging to this account are recoverable from the server's job
 list. Transient requests receive bounded retries. Polling transient failures
 continue; an uncertain terminal submission stops with a retained payload.

@@ -159,7 +159,7 @@ func retryProjectAgent(err error) bool {
 	return true
 }
 
-func (w *projectAgentWorker) next(ctx context.Context) (*projectAgentJob, error) {
+func (w *projectAgentWorker) next(ctx context.Context, skipped map[string]bool) (*projectAgentJob, error) {
 	cursor := ""
 	seen := map[string]bool{}
 	for {
@@ -172,7 +172,7 @@ func (w *projectAgentWorker) next(ctx context.Context) (*projectAgentJob, error)
 			return nil, err
 		}
 		for _, job := range page.Items {
-			if job.ProjectID == w.target.projectID && job.Harness == activityAgentClaude {
+			if job.ProjectID == w.target.projectID && job.Harness == activityAgentClaude && !skipped[job.RunID] {
 				return &job, nil
 			}
 		}
@@ -188,9 +188,12 @@ func (w *projectAgentWorker) next(ctx context.Context) (*projectAgentJob, error)
 }
 
 func (w *projectAgentWorker) serve(ctx context.Context, once bool, interval time.Duration) error {
+	// A refused claim must not block later jobs, but must be eligible again
+	// after this scan (for example when its repository is unpaused).
+	skipped := map[string]bool{}
 	for {
 		fmt.Fprintln(w.out, "Waiting for Claude jobs...")
-		job, err := w.next(ctx)
+		job, err := w.next(ctx, skipped)
 		switch {
 		case err != nil:
 			if !retryProjectAgent(err) || once {
@@ -202,11 +205,19 @@ func (w *projectAgentWorker) serve(ctx context.Context, once bool, interval time
 			if err != nil && (once || !errors.Is(err, errAgentExecution)) {
 				return err
 			}
-			if once && processed {
+			if !processed {
+				skipped[job.RunID] = true
+				fmt.Fprintf(w.out, "Skipping refused claim %s for this scan.\n", job.RunID)
+				continue
+			}
+			if once {
 				return nil
 			}
+			clear(skipped)
 		case once:
 			return nil
+		default:
+			clear(skipped)
 		}
 		if err := w.wait(ctx, interval); err != nil {
 			return err
