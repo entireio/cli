@@ -546,8 +546,9 @@ const bareEntireHookCmd = "entire"
 
 // gitHookStateInHooksDir classifies the hooks in the given directory. A hook that
 // is present but in a shape we no longer write — a removed local-dev launcher,
-// an old pre-push, or a Trunk chain from before sourcing — reads Outdated, not
-// Current, so EnsureSetup reinstalls it rather than leaving a broken hook in place.
+// an old pre-push, or a Trunk chain that would still misroute the launcher —
+// reads Outdated, not Current, so EnsureSetup reinstalls it rather than leaving
+// a broken hook in place.
 func gitHookStateInHooksDir(hooksDir string) GitHookState {
 	// ForRemoval: this is a read, and reporting GitHooksAbsent for a symlinked
 	// hooks directory is what sent EnsureSetup to InstallGitHook on every agent
@@ -594,7 +595,7 @@ func hookStateIn(root *os.Root, hook string) GitHookState {
 		// Predates passing git's ref list to Entire.
 		return GitHooksOutdated
 	}
-	if isTrunkChainBeforeSourcing(root, hook, content) {
+	if isTrunkChainBeforeSourcing(root, hook, content) || isTrunkChainUsingGrep(root, hook, content) {
 		return GitHooksOutdated
 	}
 	return GitHooksCurrent
@@ -614,8 +615,23 @@ func isTrunkChainBeforeSourcing(root *os.Root, hook, content string) bool {
 	if !strings.Contains(content, "$_entire_hook_dir/"+backup) {
 		return false
 	}
-	// The sourcing branch greps for this exact quoted line.
+	// The sourcing branch names this exact quoted line.
 	if strings.Contains(content, shellQuote(trunkHookCallback)) {
+		return false
+	}
+	return backupHasTrunkCallback(root, hook)
+}
+
+// isTrunkChainUsingGrep reports whether hook is Entire's chain from when it
+// identified Trunk's launcher with grep -qxF. If grep is not on PATH, that
+// check fails and the chain executes the launcher as <hook>.pre-entire, which
+// Trunk refuses with exit 2.
+//
+// Same Trunk-only backup rule as isTrunkChainBeforeSourcing: a non-Trunk
+// backup must not read Outdated, or InstallGitHook would rewrite the hook
+// without a backup and discard lines the user added.
+func isTrunkChainUsingGrep(root *os.Root, hook, content string) bool {
+	if !strings.Contains(content, "grep -qxF "+shellQuote(trunkHookCallback)) {
 		return false
 	}
 	return backupHasTrunkCallback(root, hook)
@@ -627,8 +643,8 @@ func isTrunkChainBeforeSourcing(root *os.Root, hook, content string) bool {
 const maxTrunkCallbackBackup = 1 << 20
 
 // backupHasTrunkCallback reports whether <hook>.pre-entire contains
-// trunkHookCallback as a whole line, the same match the chain's grep -qxF
-// uses. A regular file in the hooks directory is read through the root,
+// trunkHookCallback as a whole line, the same match the chain uses. A
+// regular file in the hooks directory is read through the root,
 // no-follow. A symlink is followed only when its target is a regular file
 // no larger than maxTrunkCallbackBackup, which is how Trunk's shared
 // launcher (kept outside the hooks dir) is still recognized. A FIFO or
@@ -1285,7 +1301,9 @@ func generateChainedContent(baseContent, hookName string) string {
 // git command run by the chained hook does not chain that same hook again.
 //
 // A backup that is Trunk's launcher is sourced rather than executed; see
-// trunkHookCallback.
+// trunkHookCallback. The launcher is identified by a whole-line shell
+// comparison, not grep, so a PATH that lacks grep cannot fall through to
+// executing it as <hook>.pre-entire.
 func chainCall(hookName, redirect string) string {
 	backup := hookName + backupSuffix
 	keep := hookName + keepSuffix
@@ -1300,7 +1318,14 @@ if [ -z "${%s:-}" ]; then
             "$_entire_hook_dir/%s" "$@"%s
         fi
     elif [ -x "$_entire_hook_dir/%s" ]; then
-        if grep -qxF %s "$_entire_hook_dir/%s" 2>/dev/null; then
+        _entire_is_trunk=0
+        while IFS= read -r _entire_line || [ -n "$_entire_line" ]; do
+            if [ "$_entire_line" = %s ]; then
+                _entire_is_trunk=1
+                break
+            fi
+        done < "$_entire_hook_dir/%s"
+        if [ "$_entire_is_trunk" -eq 1 ]; then
             /bin/bash --norc -c '_entire_saved_hook=$1; shift; . "$_entire_saved_hook"' "$_entire_hook_dir/%s" "$_entire_hook_dir/%s" "$@"%s
         else
             "$_entire_hook_dir/%s" "$@"%s
