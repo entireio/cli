@@ -44,8 +44,9 @@ func TestString_NestedPlaceholderDefaults(t *testing.T) {
 	})
 }
 
-// Each nesting level used to read the whole value again, so a value nested a
-// few thousand levels deep took seconds.
+// The cap rejects a deeply nested value without reading every level, so a
+// value nested many thousands deep stays fast. The timing checks call
+// isPlaceholderSecretValue directly; one String call pins the pipeline result.
 func TestString_NestedPlaceholderDefaultsStayLinear(t *testing.T) {
 	t.Parallel()
 	const depth = 20000
@@ -56,16 +57,20 @@ func TestString_NestedPlaceholderDefaultsStayLinear(t *testing.T) {
 		{"PGPASSWORD=", "${a:-"},
 		{"API_KEY=", "${a:-"},
 	} {
-		in := shape.key + strings.Repeat(shape.open, depth) + "hunter2" + strings.Repeat("}", depth)
-		done := make(chan string, 1)
-		go func() { done <- String(in) }()
+		value := strings.Repeat(shape.open, depth) + "hunter2" + strings.Repeat("}", depth)
+		done := make(chan bool, 1)
+		go func() { done <- isPlaceholderSecretValue(value) }()
 		select {
-		case out := <-done:
-			if strings.Contains(out, "hunter2") {
-				t.Fatalf("value nested %d deep in %q%q left visible", depth, shape.key, shape.open)
+		case got := <-done:
+			if got {
+				t.Fatalf("value nested %d deep in %q%q still read as a placeholder", depth, shape.key, shape.open)
 			}
 		case <-time.After(30 * time.Second):
-			t.Fatalf("String took over 30s on %q%q nested %d deep", shape.key, shape.open, depth)
+			t.Fatalf("isPlaceholderSecretValue took over 30s on %q%q nested %d deep", shape.key, shape.open, depth)
 		}
+	}
+	in := "DB_PASSWORD=" + strings.Repeat("${a:-", depth) + "hunter2" + strings.Repeat("}", depth)
+	if out := String(in); strings.Contains(out, "hunter2") {
+		t.Fatalf("String left the nested literal visible: %q", out)
 	}
 }

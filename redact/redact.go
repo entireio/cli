@@ -1001,14 +1001,14 @@ func hasNonPlaceholderQuotedPasswordValue(value string, singleQuoted bool) bool 
 	return value != "" && !isPlaceholderSecretValueQuoted(value, singleQuoted)
 }
 
-// maxPlaceholderExpansions is the most ${…} expansions a value can hold and
-// still be read as a placeholder. isPlaceholderShellExpansion reads the word
-// of each ${NAME:-word} level whole, and that word can be another level, so a
-// value nested n deep cost n reads of itself: DB_PASSWORD=${a:-${a:-...x}}
-// nested 4000 deep took seconds. Real defaults nest a few levels
-// (${DB_PASSWORD:-${PGPASSWORD:-$FALLBACK}}). A value with more expansions is
-// not read as a placeholder, so it redacts, and each value is read at most
-// that many times.
+// maxPlaceholderExpansions is the most `${` a value can hold and still be
+// read as a placeholder. The cap counts `${` occurrences, not nesting
+// levels: eight defaults around $X stay visible, and eight around ${X}
+// redact, because the inner braces are one more `${`.
+// isPlaceholderShellExpansion reads the word of each ${NAME:-word} level
+// once, so a value is read at most maxPlaceholderExpansions times. A
+// value with more `${` is not a placeholder and redacts. Real defaults
+// nest a few levels (${DB_PASSWORD:-${PGPASSWORD:-$FALLBACK}}).
 const maxPlaceholderExpansions = 8
 
 // isPlaceholderSecretValue checks a bare scanner finding. It stays an exact
