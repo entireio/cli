@@ -646,7 +646,7 @@ func recheckBeforeRewrite(ctx context.Context, plan attachLinkPlan) error {
 		return nil
 	}
 	target := plan.target
-	if plan.holder != "" {
+	if plan.holder != "" || plan.goneFrom != "" {
 		branch, err := defaultBranchContaining(ctx, target, plan.checkedRemotes)
 		switch {
 		case err != nil:
@@ -663,6 +663,8 @@ func recheckBeforeRewrite(ctx context.Context, plan attachLinkPlan) error {
 			return fmt.Errorf("commit %s reached %s while attach was waiting, so it won't be rewritten; nothing was changed, run attach again", target.Hash.String()[:12], strings.Join(copies.others, ", "))
 		case len(copies.ahead) > 0:
 			return fmt.Errorf("%s got commits this branch doesn't have while attach was waiting, so commit %s won't be rewritten; nothing was changed. Pull them first, then run attach again", strings.Join(copies.ahead, ", "), target.Hash.String()[:12])
+		case copies.held && plan.goneFrom != "":
+			return fmt.Errorf("commit %s was pushed to %s while attach was waiting, so it won't be rewritten; nothing was changed, run attach again", target.Hash.String()[:12], plan.goneFrom)
 		}
 		return nil
 	}
@@ -745,6 +747,10 @@ type attachLinkPlan struct {
 	// holder is a remote whose branches hold target, empty when none does (or,
 	// when joining, none could be reached).
 	holder string
+	// goneFrom is the remote whose tracking refs alone still held target
+	// (attachAddTrailer only): its branch there is gone, deleted after a
+	// merge say, so the rewrite needs no force-push and holder is empty.
+	goneFrom string
 	// remote is where the checkpoint is pushed now: holder, or the branch's own
 	// remote when holder is an unrelated one. Empty when holder is, and for
 	// attachAddTrailer, whose checkpoint goes out with the next git push.
@@ -838,7 +844,7 @@ func planPushedCommitLink(ctx context.Context, repo *git.Repository, target, hea
 	case err != nil:
 		return attachLinkPlan{}, pushedCopiesUnknownRefusal(target, err)
 	case len(copies.others) > 0:
-		return attachLinkPlan{}, sharedBranchRefusal(target, copies.others)
+		return attachLinkPlan{}, sharedBranchRefusal(target, copies.others, readAttachBranch(ctx))
 	case len(copies.ahead) > 0:
 		return attachLinkPlan{}, ownCopyAheadRefusal(target, copies.ahead)
 	}
@@ -848,6 +854,11 @@ func planPushedCommitLink(ctx context.Context, repo *git.Repository, target, hea
 	}
 	plan.mode = attachAddTrailer
 	plan.rewrite = chain
+	if !copies.held {
+		// Only a stale tracking ref held it: nothing on the remote to
+		// replace, and a lease taken from that ref would be rejected.
+		plan.goneFrom, plan.holder = plan.holder, ""
+	}
 	// The checkpoint goes out with the force-push that replaces the commit.
 	plan.remote = ""
 	return plan, nil
@@ -917,6 +928,8 @@ type attachBranch struct {
 	// %(upstream:remotename) and %(push:remotename) (pushRemote, pushDefault,
 	// then the upstream's).
 	upstreamRemote, pushRemote string
+	// upstream is the branch it tracks as "<remote>/<branch>", "" when none.
+	upstream string
 	// push is the branch it pushes to as "<remote>/<branch>", "" when git
 	// can't resolve one (push.default=simple with a differently named
 	// upstream, say).
@@ -932,13 +945,13 @@ func readAttachBranch(ctx context.Context) attachBranch {
 	}
 	fullName := strings.TrimSpace(string(ref))
 	b := attachBranch{name: strings.TrimPrefix(fullName, "refs/heads/")}
-	out, err := exec.CommandContext(ctx, "git", "for-each-ref", "--format=%(upstream:remotename)%0a%(push:remotename)%0a%(push:short)", "--", fullName).Output()
+	out, err := exec.CommandContext(ctx, "git", "for-each-ref", "--format=%(upstream:remotename)%0a%(push:remotename)%0a%(push:short)%0a%(upstream:short)", "--", fullName).Output()
 	if err != nil {
 		return b
 	}
 	fields := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
-	fields = append(fields, make([]string, 3)...)
-	b.upstreamRemote, b.pushRemote, b.push = fields[0], fields[1], fields[2]
+	fields = append(fields, make([]string, 4)...)
+	b.upstreamRemote, b.pushRemote, b.push, b.upstream = fields[0], fields[1], fields[2], fields[3]
 	return b
 }
 

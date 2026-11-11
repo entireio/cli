@@ -1815,11 +1815,92 @@ func TestAttachCommit_SharedUpstreamHoldingTheCommitIsNotRewritten(t *testing.T)
 	testutil.RunGit(t, dir, "checkout", "-q", "-b", "feat", "--track", "origin/develop")
 
 	out, err := attachHeadless(t, "attach-upstream-develop", attachOptions{})
-	if err == nil || !strings.Contains(err.Error(), "is also on origin/develop") {
+	if err == nil || !strings.Contains(err.Error(), "is on origin/develop") {
 		t.Fatalf("err = %v, want a refusal because origin/develop holds the commit\n%s", err, out)
 	}
 	if got := headCommitOf(t); got.Hash != pushed.Hash {
 		t.Fatalf("a commit on the shared upstream was rewritten: %s", got.Hash)
+	}
+}
+
+// A branch pushed under another name ('git push -u origin feat:victor/feat')
+// doesn't push there by default, so its upstream may be its own copy or a
+// shared branch. The refusal says attach can't tell, rather than calling it
+// someone else's branch, and renaming the branch to match makes it the
+// branch's own copy.
+func TestAttachCommit_UpstreamUnderAnotherNameSaysItCantTell(t *testing.T) {
+	setupAttachTestRepo(t)
+	pushToOrigin(t)
+	dir := mustGetwd(t)
+	testutil.RunGit(t, dir, "checkout", "-q", "-b", "feat")
+	pushed := commitAt(t, "feat.txt")
+	testutil.RunGit(t, dir, "push", "-q", "-u", "origin", "feat:victor/feat")
+
+	out, err := attachHeadless(t, "attach-upstream-renamed", attachOptions{})
+	if err == nil {
+		t.Fatalf("attach rewrote a commit on an upstream it doesn't push to:\n%s", out)
+	}
+	for _, want := range []string{"origin/victor/feat, this branch's upstream under another name", "can't tell", "git branch -m victor/feat", "--link-without-trailer"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal should mention %q:\n%v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "is also on") {
+		t.Errorf("the upstream isn't known to be another branch:\n%v", err)
+	}
+	if got := headCommitOf(t); got.Hash != pushed.Hash {
+		t.Fatalf("HEAD was rewritten after the refusal: %s", got.Hash)
+	}
+
+	testutil.RunGit(t, dir, "branch", "-m", "victor/feat")
+	out, err = attachHeadless(t, "attach-upstream-renamed", attachOptions{})
+	if err != nil {
+		t.Fatalf("runAttach after renaming the branch: %v\n%s", err, out)
+	}
+	if got := headCommitOf(t); got.Hash == pushed.Hash || !strings.Contains(got.Message, "Entire-Checkpoint") {
+		t.Fatalf("HEAD was not rewritten with a trailer:\n%s", out)
+	}
+}
+
+// With a detached HEAD there is no branch to own a pushed copy, so the
+// refusal says so and points at checking the branch out.
+func TestAttachCommit_DetachedHeadSaysItCantTell(t *testing.T) {
+	setupAttachTestRepo(t)
+	pushed, _ := pushFeatureBranch(t)
+	testutil.RunGit(t, mustGetwd(t), "checkout", "-q", "--detach")
+
+	out, err := attachHeadless(t, "attach-detached", attachOptions{})
+	if err == nil {
+		t.Fatalf("attach rewrote a pushed commit from a detached HEAD:\n%s", out)
+	}
+	for _, want := range []string{"origin/feature, and HEAD is detached", "check out that branch", "--link-without-trailer"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal should mention %q:\n%v", want, err)
+		}
+	}
+	if got := headCommitOf(t); got.Hash != pushed.Hash {
+		t.Fatalf("HEAD was rewritten after the refusal: %s", got.Hash)
+	}
+}
+
+// After a squash-merge deletes the branch on the remote, only the stale
+// tracking ref still holds the commit. Nothing on the remote needs replacing,
+// so attach adds the trailer without the force-push wording: a lease taken from
+// that stale ref would be rejected.
+func TestAttachCommit_DeletedRemoteBranchNeedsNoForcePush(t *testing.T) {
+	setupAttachTestRepo(t)
+	pushed, remote := pushFeatureBranch(t)
+	testutil.RunGit(t, remote, "branch", "-D", "feature")
+
+	out, err := attachHeadless(t, "attach-deleted-branch", attachOptions{})
+	if err != nil {
+		t.Fatalf("runAttach: %v\n%s", err, out)
+	}
+	if got := headCommitOf(t); got.Hash == pushed.Hash || !strings.Contains(got.Message, "Entire-Checkpoint") {
+		t.Fatalf("HEAD was not rewritten with a trailer:\n%s", out)
+	}
+	if strings.Contains(out, "force-with-lease") || strings.Contains(out, "already pushed") {
+		t.Fatalf("attach asked for a force-push to a branch that is gone:\n%s", out)
 	}
 }
 

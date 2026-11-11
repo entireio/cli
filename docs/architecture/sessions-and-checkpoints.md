@@ -945,7 +945,14 @@ chooses a recorded link for the user.
   (`checkPushedCopies`, `sharedBranchRefusal`). The remotes the branch pushes
   to are asked directly with `ls-remote`, so a branch outside a narrowed
   fetch refspec still counts; other remotes count through their tracking
-  refs. A remote that can't answer refuses the rewrite;
+  refs. A remote that can't answer refuses the rewrite. With a detached HEAD,
+  or when the only other branch is an upstream of another name the branch
+  doesn't push to, attach can't tell whether it is the branch's own copy, and
+  the refusal says that rather than calling it someone else's branch;
+- a commit only a stale tracking ref holds, its remote branch deleted (after
+  a squash-merge, say), counts as unpushed: it is rewritten with no
+  force-push wording, since a lease from that ref would be rejected
+  (`pushedCopies.held`, `attachLinkPlan.goneFrom`);
 - a commit whose branch's own remote copy has commits HEAD lacks (pushed from
   another clone, or by a teammate on the same branch) is not rewritten either
   (`ownCopyAheadRefusal`): the force-push would drop them, and

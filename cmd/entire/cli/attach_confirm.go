@@ -155,6 +155,8 @@ func rewriteWarning(ctx context.Context, plan attachLinkPlan) []string {
 	switch {
 	case plan.holder != "":
 		lines = append(lines, pushedRewriteWarning(ctx, plan)...)
+	case plan.goneFrom != "":
+		lines = append(lines, fmt.Sprintf("Its branch on %s is gone (deleted after a merge, say); only stale tracking refs still hold it, so nothing there needs a force-push.", plan.goneFrom))
 	case len(plan.checkedRemotes) > 0:
 		lines = append(lines, fmt.Sprintf("It isn't on %s. If you pushed it somewhere else, rewriting it means a force-push there.", strings.Join(plan.checkedRemotes, ", ")))
 	}

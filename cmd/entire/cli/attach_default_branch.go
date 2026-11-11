@@ -42,13 +42,24 @@ func defaultBranchRefusal(target *object.Commit, branch string) error {
 
 // sharedBranchRefusal is the error for a pushed commit that branches other
 // than this one's own pushed copy hold: rewriting it would leave theirs
-// without the trailer, and force-pushing them is not this branch's call.
-func sharedBranchRefusal(target *object.Commit, others []string) error {
-	lines := []string{
-		fmt.Sprintf("commit %s is also on %s, not just this branch's own pushed copy, so attach won't rewrite it to add the Entire-Checkpoint trailer; nothing was changed.", describeCommit(target), strings.Join(others, ", ")),
-		"",
-		fmt.Sprintf("To link the session anyway, rerun with --%s. That records the commit's SHA in the checkpoint instead of a trailer in the commit, which is weaker:", linkWithoutTrailerFlag),
+// without the trailer, and force-pushing them is not this branch's call. Two
+// cases are only unknown, not shared, and say so: a detached HEAD has no
+// branch to own a copy, and an upstream under another name that the branch
+// doesn't push to may be its own copy or a shared branch like develop.
+func sharedBranchRefusal(target *object.Commit, others []string, b attachBranch) error {
+	on := strings.Join(others, ", ")
+	why := fmt.Sprintf("commit %s is also on %s, not just this branch's own pushed copy", describeCommit(target), on)
+	var instead []string
+	switch {
+	case b.name == "":
+		why = fmt.Sprintf("commit %s is on %s, and HEAD is detached, so attach can't tell whether that is this branch's own copy", describeCommit(target), on)
+		instead = []string{"If it is, check out that branch and run attach again."}
+	case b.push == "" && len(others) == 1 && others[0] == b.upstream:
+		why = fmt.Sprintf("commit %s is on %s, this branch's upstream under another name, which it doesn't push to, so attach can't tell whether that is this branch's own copy or a shared branch", describeCommit(target), on)
+		instead = []string{fmt.Sprintf("If it is this branch's own copy, rename the branch to match ('git branch -m %s') and run attach again.", strings.TrimPrefix(b.upstream, b.upstreamRemote+"/"))}
 	}
+	lines := append([]string{why + ", so attach won't rewrite it to add the Entire-Checkpoint trailer; nothing was changed.", ""}, instead...)
+	lines = append(lines, fmt.Sprintf("To link the session anyway, rerun with --%s. That records the commit's SHA in the checkpoint instead of a trailer in the commit, which is weaker:", linkWithoutTrailerFlag))
 	return errors.New(strings.Join(append(lines, recordedLinkCaveats()...), "\n"))
 }
 
@@ -122,6 +133,9 @@ type pushedCopies struct {
 	// ahead are the current branch's own copies holding commits HEAD lacks:
 	// the force-push after the rewrite would drop them.
 	ahead []string
+	// held is whether any remote branch still holds target. False when only
+	// a stale tracking ref did: its branch was deleted, after a merge say.
+	held bool
 }
 
 // checkPushedCopies finds the remote branches a rewrite of target up to head
@@ -141,6 +155,11 @@ func checkPushedCopies(ctx context.Context, target *object.Commit, head string, 
 		if err := fetchMissingTips(ctx, remote, branches, tips); err != nil {
 			return copies, err
 		}
+		on, err := reachableFromAny(ctx, target, tips)
+		if err != nil {
+			return copies, fmt.Errorf("couldn't check %s's branches: %w", remote, err)
+		}
+		copies.held = copies.held || on
 		var otherNames, otherTips []string
 		for i, ref := range branches {
 			name := remote + "/" + strings.TrimPrefix(ref, "refs/heads/")
@@ -151,6 +170,9 @@ func checkPushedCopies(ctx context.Context, target *object.Commit, head string, 
 			if tips[i] != head && exec.CommandContext(ctx, "git", "merge-base", "--is-ancestor", tips[i], head).Run() != nil {
 				copies.ahead = append(copies.ahead, name)
 			}
+		}
+		if !on {
+			continue
 		}
 		holding, err := tipsHolding(ctx, target, otherNames, otherTips)
 		if err != nil {
@@ -167,6 +189,7 @@ func checkPushedCopies(ctx context.Context, target *object.Commit, head string, 
 		short := strings.TrimPrefix(ref, "refs/remotes/")
 		if !slices.Contains(checked, trackingRefRemote(ref, all)) && !strings.HasSuffix(short, "/"+remoteHEADRef) {
 			copies.others = append(copies.others, short)
+			copies.held = true
 		}
 	}
 	return copies, nil
