@@ -91,6 +91,9 @@ func TestString_ShellParameterDefaultsCaughtWithoutScanners(t *testing.T) {
 		// A command substitution starts a new quoting context.
 		`echo "$(DB_PASSWORD=${PW:-'$S3CRET'} env)"`:  `echo "$(DB_PASSWORD=REDACTED env)"`,
 		"echo \"`DB_PASSWORD=${PW:-'$S3CRET'} env`\"": "echo \"`DB_PASSWORD=REDACTED env`\"",
+		// A case pattern's ) does not end the substitution.
+		`echo "$(case x in x) DB_PASSWORD=${PW:-'$S3CRET'} env;; esac)"`:             `echo "$(case x in x) DB_PASSWORD=REDACTED env;; esac)"`,
+		`echo "$(case x in x) psql postgres://app:${PW:-'$S3CRET'}@db/app ;; esac)"`: `echo "$(case x in x) psql REDACTED ;; esac)"`,
 	} {
 		cases = append(cases, stringRedactionCase{name: input, input: input, want: want})
 	}
