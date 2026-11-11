@@ -164,3 +164,32 @@ func TestCompact_OpenCodeV2Export(t *testing.T) {
 		t.Fatalf("Convert of the 2.x export:\n%s\nwant (normalized):\n%s", got, want)
 	}
 }
+
+// A failed tool keeps OpenCode's error message: 1.x records it in the state's
+// error, with no output, and the 2.x conversion carries it there too.
+func TestCompact_OpenCodeFailedToolKeepsError(t *testing.T) {
+	t.Parallel()
+
+	v1 := []byte(`{"info":{"id":"ses-1"},"messages":[
+		{"info":{"id":"msg-a1","role":"assistant","time":{"created":1700000001000}},
+		 "parts":[{"type":"tool","callID":"c1","tool":"read","state":{"status":"error","input":{"filePath":"/repo/missing.go"},"error":"File not found: /repo/missing.go","time":{"start":1700000001100,"end":1700000001200}}}]}
+	]}`)
+	v2 := []byte(`{"info":{"id":"ses_2","location":{"directory":"/repo"}},"messages":[
+	 {"id":"msg_u1","type":"user","text":"Read it.","files":[],"time":{"created":1700000000000}},
+	 {"id":"msg_a1","type":"assistant","agent":"build","model":{"id":"mock","providerID":"mock"},"time":{"created":1700000001000,"completed":1700000002000},
+	  "content":[{"type":"tool","id":"c1","name":"read","state":{"status":"error","input":{"path":"missing.go"},"content":[],"structured":{},"error":{"type":"unknown","message":"File not found: /repo/missing.go"}},"time":{"created":1700000001100,"ran":1700000001200,"completed":1700000001300}}]}
+	]}`)
+	for name, input := range map[string][]byte{"1.x": v1, "2.x": v2} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			result, err := Convert(input, agentOpts("opencode"))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			want := []byte(`"result":{"output":"File not found: /repo/missing.go","status":"error"}`)
+			if !bytes.Contains(result, want) {
+				t.Fatalf("failed tool's result lost its error message:\n%s", result)
+			}
+		})
+	}
+}
