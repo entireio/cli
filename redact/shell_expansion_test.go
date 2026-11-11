@@ -79,6 +79,15 @@ func TestString_ShellParameterDefaultsCaughtWithoutScanners(t *testing.T) {
 		"echo foo\\ #\"a\nx \"DB_PASSWORD=${PW:-'$S3CRET'}\" y\"": "echo foo\\ #\"a\nx \"DB_PASSWORD=REDACTED",
 		// A here-document body is text: its quote opens no string.
 		"cat <<EOF\nsay \"hi\nEOF\nDB_PASSWORD=${PW:-'$S3CRET'} cmd \"x\"": "cat <<EOF\nsay \"hi\nEOF\nDB_PASSWORD=REDACTED cmd \"x\"",
+		// A line continuation leaves a word start as it was, so # after it
+		// starts a comment.
+		"echo ok; \\\n# \"\nDB_PASSWORD=${PW:-'$S3CRET'} cmd \"x\"":                  "echo ok; \\\n# \"\nDB_PASSWORD=REDACTED cmd \"x\"",
+		"echo \\\n# note: \"\nDB_PASSWORD=${PW:-'$S3CRET'} printenv \"DB_PASSWORD\"": "echo \\\n# note: \"\nDB_PASSWORD=REDACTED printenv \"DB_PASSWORD\"",
+		// An unquoted here-document delimiter joins continued body lines.
+		"cat <<EOF\nfoo\\\nEOF\n\"\nEOF\nDB_PASSWORD=${PW:-'$S3CRET'} cmd \"x\"": "cat <<EOF\nfoo\\\nEOF\n\"\nEOF\nDB_PASSWORD=REDACTED cmd \"x\"",
+		// case is a reserved word only where a command starts.
+		`echo "$(echo case)" DB_PASSWORD=${PW:-'$S3CRET'} cmd "x"`:                   `echo "$(echo case)" DB_PASSWORD=REDACTED cmd "x"`,
+		`echo "$(printf case)"; DB_PASSWORD=${PW:-'$S3CRET'} printenv "DB_PASSWORD"`: `echo "$(printf case)"; DB_PASSWORD=REDACTED printenv "DB_PASSWORD"`,
 		// A command substitution starts a new quoting context.
 		`echo "$(DB_PASSWORD=${PW:-'$S3CRET'} env)"`:  `echo "$(DB_PASSWORD=REDACTED env)"`,
 		"echo \"`DB_PASSWORD=${PW:-'$S3CRET'} env`\"": "echo \"`DB_PASSWORD=REDACTED env`\"",
@@ -151,6 +160,8 @@ func TestString_DoubleQuotedShellDefaultsPreserved(t *testing.T) {
 		`echo $((1<<2)) "DB_PASSWORD=${PW:-'$FALLBACK'}"`,
 		"(( n << 2 ))\nDB_PASSWORD=\"${PW:-'$FALLBACK'}\"",
 		`echo "$(case $1 in a) echo "DB_PASSWORD=${PW:-'$FALLBACK'}" ;; esac)"`,
+		`echo "$(if true; then case $1 in a) echo hi ;; esac; fi) DB_PASSWORD=${PW:-'$FALLBACK'}"`,
+		"cat <<$'EOF'\nx\nEOF\nDB_PASSWORD=\"${PW:-'$FALLBACK'}\"",
 		// A here-document body's apostrophe opens no single quoted string.
 		"git commit -m \"$(cat <<'EOF'\nIt's done\nEOF\n)\" && DB_PASSWORD=\"${PW:-'$FALLBACK'}\" ./run",
 		`echo "API_KEY=${KEY:-'$FALLBACK'}"`,
@@ -244,6 +255,14 @@ func TestShellQuotes_DoubleQuotedAt(t *testing.T) {
 		`echo "$(case x in a) case y in b) ;; esac ;; esac) "`: false,
 		"(( x << 2 ))\nx=\"": true,
 		`echo "$(esac) `:     true,
+		// case and esac are reserved words only where a command starts.
+		`echo "$(echo case) `:                    true,
+		`echo "$(if x; then case y in a) echo "`: true,
+		`echo "$(x && case y in a) ;; esac) `:    true,
+		// A line continuation leaves a word start as it was.
+		"echo ok; \\\n# \"\n": false,
+		"echo \\\n# \"\n":     false,
+		`echo \#"`:            true,
 		// Here-document bodies are text, not shell quoting.
 		"cat <<EOF\nsay \"hi\nEOF\n":                                 false,
 		"cat <<'EOF'\nit's\nEOF\nx=\"":                               true,
@@ -253,6 +272,12 @@ func TestShellQuotes_DoubleQuotedAt(t *testing.T) {
 		"git commit -m \"$(cat <<'EOF'\nIt's done\nEOF\n)\" && x=\"": true,
 		"cat <<EOF\nnever closed \"\n":                               false,
 		"cat <<<\"x\" \"":                                            true,
+		"cat <<EOF\nfoo\\\nEOF\n\"\nEOF\nx=\"":                       true,
+		"cat <<'EOF'\nfoo\\\nEOF\nx=\"":                              true,
+		"cat <<$'EOF'\nit's\nEOF\nx=\"":                              true,
+		"cat <<$'E\\'F'\nit's\nE'F\nx=\"":                            true,
+		"cat <<EOF\r\nit's\r\nEOF\r\nx=\"":                           true,
+		"cat <<EOF\nit's\nEOF\r\n\"":                                 false,
 	} {
 		if got := newShellQuotes(prefix + "v").doubleQuotedAt(len(prefix)); got != want {
 			t.Errorf("doubleQuotedAt after %q = %v, want %v", prefix, got, want)

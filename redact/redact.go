@@ -618,9 +618,9 @@ func isSlashedBase64Secret(run string) bool {
 
 // uriPassword returns the password s[start:end] of the URI that starts at
 // s[uriStart], s being quotes.s, as the placeholder rules read it: for a URI
-// inside a double quoted string, as in
-// psql "postgres://app:${PW:-'$FALLBACK'}@db/app", it is read as double quotes
-// enclose it (see doubleQuotedText and insideDoubleQuotes).
+// inside a double quoted string, it is read as double quotes enclose it, so
+// a single quoted default in it stays a reference (see doubleQuotedText and
+// insideDoubleQuotes).
 func uriPassword(quotes *shellQuotes, uriStart, start, end int) string {
 	password := quotes.s[start:end]
 	if strings.Contains(password, "'") && insideDoubleQuotes(quotes, uriStart, end) {
@@ -660,19 +660,23 @@ func insideDoubleQuotes(quotes *shellQuotes, start, end int) bool {
 // increasing order, so that all its reads cost linear time together; asking
 // about an earlier position starts the reading over.
 //
-// Single quoted and $'...' strings, backslash escapes, comments and
-// here-document bodies are skipped as the shell skips them, so
+// Single quoted and $'...' strings, backslash escapes, line continuations,
+// comments and here-document bodies are skipped as the shell skips them, so
 // printf '%s\n' "x", echo \"x\", a # comment or a here-document holding a
 // quote read as they run. A command substitution, $(...) or backquoted,
 // starts a new quoting context inside it, so its own quotes pair there:
-// "$(DB_PASSWORD=${PW:-'$S3CRET'} env)" is outside double quotes.
+// "$(DB_PASSWORD=${PW:-'$S3CRET'} env)" is outside double quotes. Inside
+// $(...), parentheses, case patterns and arithmetic are matched, so it ends
+// where the shell ends it; case and esac count only where a command starts,
+// as reserved words do.
 type shellQuotes struct {
-	s         string
-	pos       int // the end of the text read so far
-	token     int // where the last token read starts
-	frames    []quoteFrame
-	heredocs  []heredoc // here-documents whose bodies start at the next newline
-	wordStart bool      // whether s[pos] starts a word
+	s            string
+	pos          int // the end of the text read so far
+	token        int // where the last token read starts
+	frames       []quoteFrame
+	heredocs     []heredoc // here-documents whose bodies start at the next newline
+	wordStart    bool      // whether s[pos] starts a word
+	commandStart bool      // whether a word at s[pos] is a command's first, where reserved words count
 }
 
 // quoteFrame is one quoting context: the top level, or a command substitution.
@@ -680,6 +684,7 @@ type quoteFrame struct {
 	closer     byte // ')' for $(...) and ((...)), '`' for a backquoted one, 0 at the top level
 	depth      int  // parentheses open inside a $(...)
 	cases      int  // case commands open inside a $(...), whose patterns end in )
+	caseHeader bool // a case command's in comes next
 	arithmetic bool // $((...)) or ((...)), where << shifts instead of starting a here-document
 	inDouble   bool
 }
@@ -687,10 +692,15 @@ type quoteFrame struct {
 type heredoc struct {
 	delimiter string
 	stripTabs bool // <<- strips leading tabs from the delimiter line
+	quoted    bool // a quoted delimiter leaves the body as it is; otherwise \ and a newline join lines
 }
 
+// commandListWords are the reserved words after which another command's
+// first word comes.
+var commandListWords = []string{"then", "do", "else", "elif", "if", "while", "until", "time", "!", "{"}
+
 func newShellQuotes(s string) *shellQuotes {
-	return &shellQuotes{s: s, frames: []quoteFrame{{}}, wordStart: true}
+	return &shellQuotes{s: s, frames: []quoteFrame{{}}, wordStart: true, commandStart: true}
 }
 
 // doubleQuotedAt reports whether s[at] sits inside a double quoted string of
@@ -712,21 +722,23 @@ func (q *shellQuotes) doubleQuotedAt(at int) bool {
 // piece, and returns where it ends.
 func (q *shellQuotes) read(i int) int {
 	s, frame := q.s, &q.frames[len(q.frames)-1]
-	wordStart := q.wordStart
-	q.wordStart = false
+	wordStart, commandStart := q.wordStart, q.commandStart
+	q.wordStart, q.commandStart = false, false
 	switch c := s[i]; {
+	case c == '\\' && strings.HasPrefix(s[i+1:], "\n"):
+		// The shell removes a line continuation before it reads words.
+		q.wordStart, q.commandStart = wordStart, commandStart
+		return i + 2
 	case c == '\\':
 		return min(len(s), i+2)
 	case c == '`' && frame.closer == '`':
 		q.frames = q.frames[:len(q.frames)-1]
 		return i + 1
 	case c == '`':
-		q.frames = append(q.frames, quoteFrame{closer: '`'})
-		q.wordStart = true
+		q.openSubstitution(quoteFrame{closer: '`'})
 		return i + 1
 	case c == '$' && strings.HasPrefix(s[i+1:], "("):
-		q.frames = append(q.frames, quoteFrame{closer: ')', arithmetic: strings.HasPrefix(s[i+2:], "(")})
-		q.wordStart = true
+		q.openSubstitution(quoteFrame{closer: ')', arithmetic: strings.HasPrefix(s[i+2:], "(")})
 		return i + 2
 	case c == '"':
 		frame.inDouble = !frame.inDouble
@@ -734,62 +746,121 @@ func (q *shellQuotes) read(i int) int {
 	case frame.inDouble:
 		return i + 1
 	}
-	return q.readUnquoted(i, wordStart)
+	return q.readUnquoted(i, wordStart, commandStart)
+}
+
+// openSubstitution starts the quoting context of a command substitution,
+// whose text starts with a command.
+func (q *shellQuotes) openSubstitution(frame quoteFrame) {
+	q.frames = append(q.frames, frame)
+	q.wordStart, q.commandStart = true, true
 }
 
 // readUnquoted reads the token at s[i] outside double quotes.
-func (q *shellQuotes) readUnquoted(i int, wordStart bool) int {
+func (q *shellQuotes) readUnquoted(i int, wordStart, commandStart bool) int {
 	s, frame := q.s, &q.frames[len(q.frames)-1]
+	if end := q.readReservedWord(i, wordStart, commandStart); end > i {
+		return end
+	}
 	switch c := s[i]; {
 	case c == '\'':
 		return singleQuotedEnd(s, i+1)
 	case c == '$' && strings.HasPrefix(s[i+1:], "'"):
 		return ansiCQuotedEnd(s, i+2)
 	case c == '#' && wordStart:
+		// The newline that ends the comment ends the command too.
+		q.wordStart, q.commandStart = wordStart, commandStart
 		return lineEnd(s, i)
 	case c == '\n' && len(q.heredocs) > 0:
 		end := heredocsEnd(s, i+1, q.heredocs)
 		q.heredocs = q.heredocs[:0]
-		q.wordStart = true
+		q.wordStart, q.commandStart = true, true
 		return end
 	case strings.HasPrefix(s[i:], "<<<"):
 		return i + 3
 	case strings.HasPrefix(s[i:], "<<") && !frame.arithmetic:
 		return q.readHeredocOperator(i + 2)
-	case wordStart && strings.HasPrefix(s[i:], "(("):
+	case commandStart && strings.HasPrefix(s[i:], "(("):
 		q.frames = append(q.frames, quoteFrame{closer: ')', depth: 1, arithmetic: true})
 		return i + 2
-	case wordStart && frame.closer == ')' && isShellWordAt(s, i, "case"):
-		frame.cases++
-		return i + len("case")
-	case wordStart && frame.cases > 0 && isShellWordAt(s, i, "esac"):
-		frame.cases--
-		return i + len("esac")
 	case c == '(' && frame.closer == ')':
 		frame.depth++
 	case c == ')' && frame.closer == ')':
-		q.closeParen(frame)
+		if q.closeParen(frame) {
+			// The substitution is part of a word.
+			return i + 1
+		}
 	}
-	q.wordStart = strings.IndexByte(" \t\n\r;&|()", s[i]) >= 0
+	q.readSeparator(s[i], commandStart)
 	return i + 1
 }
 
+// readSeparator sets what the byte c, read on its own, leaves for the next
+// byte: a blank or an operator ends a word, and an operator ends a command.
+func (q *shellQuotes) readSeparator(c byte, commandStart bool) {
+	q.wordStart = strings.IndexByte(" \t\n\r;&|()", c) >= 0
+	switch {
+	case strings.IndexByte(";&|()\n", c) >= 0:
+		q.commandStart = true
+	case c == ' ' || c == '\t' || c == '\r':
+		q.commandStart = commandStart
+	}
+}
+
+// readReservedWord reads a reserved word at s[i] that changes how the text
+// after it is read, and returns where it ends, or i when there is none: case
+// and esac open and close a case command, whose patterns end in ), its in
+// starts the patterns, and the words in commandListWords start a command.
+func (q *shellQuotes) readReservedWord(i int, wordStart, commandStart bool) int {
+	s, frame := q.s, &q.frames[len(q.frames)-1]
+	switch {
+	case !wordStart || frame.arithmetic:
+		return i
+	case frame.caseHeader && isShellWordAt(s, i, "in"):
+		frame.caseHeader = false
+		q.commandStart = true
+		return i + len("in")
+	case !commandStart:
+		return i
+	case isShellWordAt(s, i, "case"):
+		frame.cases++
+		frame.caseHeader = true
+		return i + len("case")
+	case frame.cases > 0 && isShellWordAt(s, i, "esac"):
+		frame.cases--
+		return i + len("esac")
+	}
+	for _, word := range commandListWords {
+		if isShellWordAt(s, i, word) {
+			q.commandStart = true
+			return i + len(word)
+		}
+	}
+	return i
+}
+
 // closeParen reads a ) inside a $(...) or ((...)): it closes a parenthesis
-// opened inside, ends a case pattern, or ends the substitution.
-func (q *shellQuotes) closeParen(frame *quoteFrame) {
+// opened inside, ends a case pattern, or ends the substitution, and it
+// reports whether it ended the substitution.
+func (q *shellQuotes) closeParen(frame *quoteFrame) bool {
 	switch {
 	case frame.depth > 0:
 		frame.depth--
 	case frame.cases == 0:
 		q.frames = q.frames[:len(q.frames)-1]
+		return true
 	}
+	return false
 }
 
 // isShellWordAt reports whether the word word stands at s[i] on its own, as
 // a reserved word does.
 func isShellWordAt(s string, i int, word string) bool {
+	if !strings.HasPrefix(s[i:], word) {
+		return false
+	}
 	end := i + len(word)
-	return strings.HasPrefix(s[i:], word) && (end == len(s) || strings.IndexByte(" \t\n\r;&|()<>", s[end]) >= 0)
+	return end == len(s) || strings.IndexByte(" \t\n\r;&|()<>", s[end]) >= 0
 }
 
 // readHeredocOperator reads the rest of a << or <<- operator from s[i], its
@@ -803,57 +874,106 @@ func (q *shellQuotes) readHeredocOperator(i int) int {
 	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
 		i++
 	}
-	delimiter, end := heredocDelimiter(s, i)
+	delimiter, end, quoted := heredocDelimiter(s, i)
 	if end > i {
-		q.heredocs = append(q.heredocs, heredoc{delimiter: delimiter, stripTabs: stripTabs})
+		q.heredocs = append(q.heredocs, heredoc{delimiter: delimiter, stripTabs: stripTabs, quoted: quoted})
 	}
 	return end
 }
 
 // heredocDelimiter reads the delimiter word at s[i] with its quotes removed,
-// and returns it with where the word ends.
-func heredocDelimiter(s string, i int) (string, int) {
+// and returns it with where the word ends and whether any of it was quoted.
+// A carriage return is part of the word, as the shell reads it, so the
+// delimiter of a script with CRLF line ends matches its own delimiter line.
+func heredocDelimiter(s string, i int) (string, int, bool) {
 	var word strings.Builder
-	for i < len(s) && strings.IndexByte(" \t\n\r;&|()<>", s[i]) < 0 {
-		switch s[i] {
-		case '\'', '"':
+	quoted := false
+	for i < len(s) && strings.IndexByte(" \t\n;&|()<>", s[i]) < 0 {
+		next := i + 1
+		switch {
+		case s[i] == '$' && strings.HasPrefix(s[i+1:], "'"):
+			next = appendANSICText(&word, s, i+2)
+		case s[i] == '\'' || s[i] == '"':
 			closing := strings.IndexByte(s[i+1:], s[i])
 			if closing < 0 {
 				closing = len(s) - i - 1
 			}
 			word.WriteString(s[i+1 : i+1+closing])
-			i += 2 + closing
-		case '\\':
+			next = i + 2 + closing
+		case s[i] == '\\':
 			word.WriteString(s[min(len(s), i+1):min(len(s), i+2)])
-			i += 2
+			next = i + 2
 		default:
 			word.WriteByte(s[i])
-			i++
 		}
+		quoted = quoted || next != i+1 || s[i] == '\\'
+		i = next
 	}
-	return word.String(), min(len(s), i)
+	return word.String(), min(len(s), i), quoted
+}
+
+// appendANSICText appends the text of the $'...' string whose text starts at
+// s[from] to word, each escaped byte as itself, and returns where the string
+// ends.
+func appendANSICText(word *strings.Builder, s string, from int) int {
+	for i := from; i < len(s); i++ {
+		switch s[i] {
+		case '\'':
+			return i + 1
+		case '\\':
+			i = min(len(s)-1, i+1)
+		}
+		word.WriteByte(s[i])
+	}
+	return len(s)
 }
 
 // heredocsEnd returns where the bodies of docs, starting at s[from], end:
 // after the line that closes the last of them, or at the end of s.
 func heredocsEnd(s string, from int, docs []heredoc) int {
 	for _, doc := range docs {
-		for from < len(s) {
-			line, next := s[from:], len(s)
-			if n := strings.IndexByte(line, '\n'); n >= 0 {
-				line, next = line[:n], from+n+1
-			}
-			line = strings.TrimSuffix(line, "\r")
-			if doc.stripTabs {
-				line = strings.TrimLeft(line, "\t")
-			}
-			from = next
-			if line == doc.delimiter {
-				break
-			}
-		}
+		from = heredocEnd(s, from, doc)
 	}
 	return from
+}
+
+// heredocEnd returns where the body of doc, starting at s[from], ends: after
+// its delimiter line, or at the end of s. A line must match the delimiter
+// exactly, as the shell matches it, so a carriage return before the newline
+// counts. With an unquoted delimiter, a line that ends in an unescaped
+// backslash goes on at the next one, as the shell joins them.
+func heredocEnd(s string, from int, doc heredoc) int {
+	var joined strings.Builder
+	for from < len(s) {
+		line, next := s[from:], len(s)
+		if n := strings.IndexByte(line, '\n'); n >= 0 {
+			line, next = line[:n], from+n+1
+		}
+		from = next
+		if !doc.quoted && endsInLineContinuation(line) {
+			joined.WriteString(line[:len(line)-1])
+			continue
+		}
+		if joined.Len() > 0 {
+			joined.WriteString(line)
+			line = joined.String()
+			joined.Reset()
+		}
+		if doc.stripTabs {
+			line = strings.TrimLeft(line, "\t")
+		}
+		if line == doc.delimiter {
+			return from
+		}
+	}
+	return len(s)
+}
+
+// endsInLineContinuation reports whether line ends in a backslash that no
+// other backslash escapes.
+func endsInLineContinuation(line string) bool {
+	trailing := len(line) - len(strings.TrimRight(line, `\`))
+	return trailing%2 == 1
 }
 
 // singleQuotedEnd returns where the single quoted string whose text starts at
