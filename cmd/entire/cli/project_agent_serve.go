@@ -218,7 +218,7 @@ func (w *projectAgentWorker) run(ctx context.Context, job projectAgentJob) (bool
 	var claim projectAgentClaim
 	err := w.request(ctx, http.MethodPost, agentJobsPath+"/"+url.PathEscape(job.RunID)+"/claim", nil, &claim)
 	if err != nil {
-		if api.IsHTTPErrorStatus(err, 404) || api.IsHTTPErrorStatus(err, 409) {
+		if api.IsHTTPErrorStatus(err, http.StatusNotFound) || api.IsHTTPErrorStatus(err, http.StatusConflict) {
 			return false, nil
 		}
 		return false, err
@@ -267,7 +267,7 @@ func (w *projectAgentWorker) submit(ctx context.Context, s projectAgentSubmissio
 	if err := w.request(ctx, http.MethodPost, path, s.Body, nil); err != nil {
 		// Terminal refusals must not block this machine forever. Validation errors
 		// and uncertain outcomes retain the exact payload for operator recovery.
-		if api.IsHTTPErrorStatus(err, 404) || api.IsHTTPErrorStatus(err, 409) {
+		if api.IsHTTPErrorStatus(err, http.StatusNotFound) || api.IsHTTPErrorStatus(err, http.StatusConflict) {
 			if clearErr := w.save(nil); clearErr != nil {
 				return clearErr
 			}
