@@ -677,9 +677,10 @@ type shellQuotes struct {
 
 // quoteFrame is one quoting context: the top level, or a command substitution.
 type quoteFrame struct {
-	closer     byte // ')' for $(...), '`' for a backquoted one, 0 at the top level
+	closer     byte // ')' for $(...) and ((...)), '`' for a backquoted one, 0 at the top level
 	depth      int  // parentheses open inside a $(...)
-	arithmetic bool // $((...)), where << shifts instead of starting a here-document
+	cases      int  // case commands open inside a $(...), whose patterns end in )
+	arithmetic bool // $((...)) or ((...)), where << shifts instead of starting a here-document
 	inDouble   bool
 }
 
@@ -755,15 +756,40 @@ func (q *shellQuotes) readUnquoted(i int, wordStart bool) int {
 		return i + 3
 	case strings.HasPrefix(s[i:], "<<") && !frame.arithmetic:
 		return q.readHeredocOperator(i + 2)
+	case wordStart && strings.HasPrefix(s[i:], "(("):
+		q.frames = append(q.frames, quoteFrame{closer: ')', depth: 1, arithmetic: true})
+		return i + 2
+	case wordStart && frame.closer == ')' && isShellWordAt(s, i, "case"):
+		frame.cases++
+		return i + len("case")
+	case wordStart && frame.cases > 0 && isShellWordAt(s, i, "esac"):
+		frame.cases--
+		return i + len("esac")
 	case c == '(' && frame.closer == ')':
 		frame.depth++
-	case c == ')' && frame.closer == ')' && frame.depth == 0:
-		q.frames = q.frames[:len(q.frames)-1]
 	case c == ')' && frame.closer == ')':
-		frame.depth--
+		q.closeParen(frame)
 	}
 	q.wordStart = strings.IndexByte(" \t\n\r;&|()", s[i]) >= 0
 	return i + 1
+}
+
+// closeParen reads a ) inside a $(...) or ((...)): it closes a parenthesis
+// opened inside, ends a case pattern, or ends the substitution.
+func (q *shellQuotes) closeParen(frame *quoteFrame) {
+	switch {
+	case frame.depth > 0:
+		frame.depth--
+	case frame.cases == 0:
+		q.frames = q.frames[:len(q.frames)-1]
+	}
+}
+
+// isShellWordAt reports whether the word word stands at s[i] on its own, as
+// a reserved word does.
+func isShellWordAt(s string, i int, word string) bool {
+	end := i + len(word)
+	return strings.HasPrefix(s[i:], word) && (end == len(s) || strings.IndexByte(" \t\n\r;&|()<>", s[end]) >= 0)
 }
 
 // readHeredocOperator reads the rest of a << or <<- operator from s[i], its
