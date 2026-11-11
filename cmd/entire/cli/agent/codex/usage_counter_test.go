@@ -165,3 +165,20 @@ func TestUsageCounter_FallbackPastDeclaredChildIsReadAgain(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 3, second.Children["child"].InputTokens, "the declared rollout is read once it can be")
 }
+
+// A child rollout path outside the trusted rollout roots is not looked at,
+// so the inventory is not cached.
+func TestChildFingerprint_PathOutsideRolloutRootsIsNotCached(t *testing.T) {
+	t.Parallel()
+	root, outside := t.TempDir(), t.TempDir()
+	path := filepath.Join(outside, "rollout.jsonl")
+	require.NoError(t, os.WriteFile(path, []byte("{}\n"), 0o600))
+	in := agent.CumulativeTokenInput{Subagents: []agent.SubagentReference{{AgentID: "child", DeclaredTranscriptPath: path}}}
+
+	_, _, ok := childFingerprint(in, []string{root})
+	require.False(t, ok)
+
+	_, preferred, ok := childFingerprint(in, []string{outside})
+	require.True(t, ok)
+	require.Equal(t, []string{path}, preferred)
+}

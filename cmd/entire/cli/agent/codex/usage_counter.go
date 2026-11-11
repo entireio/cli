@@ -12,6 +12,8 @@ import (
 	"io/fs"
 	"maps"
 	"os"
+	"path/filepath"
+	"slices"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 )
@@ -134,7 +136,7 @@ func (u *usageCounter) children(ctx context.Context, in agent.CumulativeTokenInp
 	if len(in.Subagents) == 0 {
 		return nil
 	}
-	key, preferred, cacheable := childFingerprint(in)
+	key, preferred, cacheable := childFingerprint(in, u.childRolloutRoots(in.Home))
 	if cacheable && key == u.ChildKey {
 		return maps.Clone(u.ChildTotals)
 	}
@@ -173,22 +175,37 @@ func readAsFingerprinted(child agent.SubagentAnalysis, preferred []string, index
 	return child.TokenUsage != nil && index < len(preferred) && child.ResolvedPath == preferred[index]
 }
 
+// childRolloutRoots are the trusted roots a child's rollout can be read
+// from: the agent's own, and the stores beneath the session's recorded home
+// when that home is trusted. A child's paths are looked at only inside them.
+func (u *usageCounter) childRolloutRoots(home string) []string {
+	roots := slices.Clone(u.agent.rolloutRoots())
+	if home == "" {
+		return roots
+	}
+	trusted, err := agent.ResolveTrustedHome(u.agent, home)
+	if err != nil {
+		return roots
+	}
+	return append(roots, codexHomeLayout().StoresUnder(trusted)...)
+}
+
 // childFingerprint identifies the inventory and, for each child, every path
 // its rollout is read from (declared, then resolved, as loadDirectRollout
 // tries them): a regular file's size and modification time, or that it is
 // missing, so one appearing changes the key. preferred holds each child's
 // first path that is a regular file, the one its cached total must come
 // from. A child with neither path a regular file is found by scanning, and a
-// path that is something else is left to the inventory's own checks, so
-// neither inventory is cached.
-func childFingerprint(in agent.CumulativeTokenInput) (key string, preferred []string, ok bool) {
+// path that is something else, or outside roots, is left to the inventory's
+// own checks, so neither inventory is cached.
+func childFingerprint(in agent.CumulativeTokenInput, roots []string) (key string, preferred []string, ok bool) {
 	h := sha256.New()
 	fmt.Fprintf(h, "%s\n", in.Home)
 	preferred = make([]string, len(in.Subagents))
 	for index, ref := range in.Subagents {
 		fmt.Fprintf(h, "%s", ref.AgentID)
 		for _, path := range []string{ref.DeclaredTranscriptPath, ref.ResolvedTranscriptPath} {
-			regular, pathOK := fingerprintPath(h, path)
+			regular, pathOK := fingerprintPath(h, roots, path)
 			if !pathOK {
 				return "", nil, false
 			}
@@ -206,13 +223,14 @@ func childFingerprint(in agent.CumulativeTokenInput) (key string, preferred []st
 
 // fingerprintPath writes path's part of a child fingerprint to w: its size
 // and modification time when it is a regular file (regular), a marker when
-// it is empty or missing. ok is false for anything else.
-func fingerprintPath(w io.Writer, path string) (regular, ok bool) {
+// it is empty or missing. ok is false for anything else, including a path
+// outside roots.
+func fingerprintPath(w io.Writer, roots []string, path string) (regular, ok bool) {
 	if path == "" {
 		fmt.Fprint(w, "\x00")
 		return false, true
 	}
-	info, err := os.Lstat(path)
+	info, err := lstatInRoots(roots, path)
 	switch {
 	case err == nil && info.Mode().IsRegular():
 		fmt.Fprintf(w, "\x00%s\x00%d\x00%d", path, info.Size(), info.ModTime().UnixNano())
@@ -223,4 +241,26 @@ func fingerprintPath(w io.Writer, path string) (regular, ok bool) {
 	default:
 		return false, false
 	}
+}
+
+// lstatInRoots is Lstat of path through the first of roots that holds it, as
+// openScopedRollout opens one. A path outside every root is not looked at.
+func lstatInRoots(roots []string, path string) (fs.FileInfo, error) {
+	for _, base := range roots {
+		rel, err := filepath.Rel(base, path)
+		if err != nil || !filepath.IsLocal(rel) {
+			continue
+		}
+		root, err := os.OpenRoot(base)
+		if err != nil {
+			return nil, fmt.Errorf("open rollout root: %w", err)
+		}
+		defer root.Close()
+		info, err := root.Lstat(rel)
+		if err != nil {
+			return nil, fmt.Errorf("lstat rollout: %w", err)
+		}
+		return info, nil
+	}
+	return nil, errors.New("rollout is outside configured roots")
 }
