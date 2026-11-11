@@ -220,8 +220,9 @@ type State struct {
 	LastInteractionTime *time.Time `json:"last_interaction_time,omitempty"`
 
 	// CaptureDegradedAt records when the session's most recent turn degraded
-	// capture because a bounded capture operation exceeded its budget. Set at
-	// turn end, cleared by the next healthy turn, and surfaced by `entire status`.
+	// capture: a bounded capture operation exceeded its budget, or turn-end
+	// finalize left checkpoints with their provisional transcripts. Set at turn
+	// end, cleared by the next healthy turn, and surfaced by `entire status`.
 	CaptureDegradedAt *time.Time `json:"capture_degraded_at,omitempty"`
 
 	// StepCount is the number of checkpoints/steps created in this session.
@@ -380,6 +381,12 @@ type State struct {
 	// a shrunk snapshot yields 0, never a negative or stale delta.
 	TokenUsage *agent.TokenUsage `json:"token_usage,omitempty"`
 
+	// TokenLedger, when set, is the source of this session's token usage:
+	// TokenUsage is its Total and a checkpoint stores its Pending. Only
+	// sessions this CLI started at a turn start have one; the others keep the
+	// per-turn accounting below until they end.
+	TokenLedger *TokenLedger `json:"token_ledger,omitempty"`
+
 	// CheckpointTokenUsage tracks hook-provided token usage since the last condensation.
 	// This is checkpoint-scoped; TokenUsage remains the session-wide total.
 	CheckpointTokenUsage *agent.TokenUsage `json:"checkpoint_token_usage,omitempty"`
@@ -516,6 +523,13 @@ type State struct {
 	// pointer ledger for subagent work. See TaskRecord.
 	TaskRecords []TaskRecord `json:"task_records,omitempty"`
 
+	// PendingTaskAttachments are completed task records whose write into an
+	// existing checkpoint failed at post-task (a foreground subagent that
+	// committed its own work). Each turn end retries them. They are not pending
+	// work: condensing one into another commit's checkpoint would misattribute
+	// it, so it is never materialized anywhere but its own checkpoint.
+	PendingTaskAttachments []TaskAttachment `json:"pending_task_attachments,omitempty"`
+
 	// SubagentInventory retains Codex child identities independently of task
 	// records so follow-up turns remain discoverable after materialization.
 	SubagentInventory []SubagentInventoryEntry `json:"subagent_inventory,omitempty"`
@@ -523,6 +537,14 @@ type State struct {
 	SubagentLedgerVersion uint64 `json:"subagent_ledger_version,omitempty"`
 	// SubagentInventoryComplete distinguishes exact empty from legacy unknown.
 	SubagentInventoryComplete *bool `json:"subagent_inventory_complete,omitempty"`
+}
+
+// TaskAttachment is a completed task record bound for an existing checkpoint.
+type TaskAttachment struct {
+	CheckpointID string     `json:"checkpoint_id"`
+	Record       TaskRecord `json:"record"`
+	// FailedRetries counts the turn ends whose write also failed.
+	FailedRetries int `json:"failed_retries,omitempty"`
 }
 
 type SubagentInventoryEntry struct {

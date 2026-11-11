@@ -122,6 +122,8 @@ func (s *gitRefsStore) Write(ctx context.Context, req WriteRequest) error {
 		return s.backfillTranscript(ctx, UpdateOptions(r))
 	case SessionSummary:
 		return s.backfillSummary(ctx, r.CheckpointID, r.Summary)
+	case Tasks:
+		return s.backfillTasks(ctx, r)
 	default:
 		return fmt.Errorf("checkpoint: unsupported write request %T", req)
 	}
@@ -314,6 +316,27 @@ func (s *gitRefsStore) backfillSummary(ctx context.Context, checkpointID id.Chec
 			}
 			authorName, authorEmail := GetGitAuthorFromRepo(s.repo)
 			commitMsg := fmt.Sprintf("Update summary for checkpoint %s (session: %s)", checkpointID, sessionID)
+			return CreateCommit(ctx, s.repo, checkpointSubtree, parentHash, commitMsg, authorName, authorEmail)
+		},
+	)
+}
+
+func (s *gitRefsStore) backfillTasks(ctx context.Context, req Tasks) error {
+	if err := ctx.Err(); err != nil {
+		return err //nolint:wrapcheck // Propagating context cancellation
+	}
+
+	return s.updateCheckpointRef(ctx, req.CheckpointID,
+		func() (plumbing.Hash, *object.Tree, error) {
+			return s.refBaseForBackfill(ctx, req.CheckpointID)
+		},
+		func(parentHash plumbing.Hash, existing *object.Tree) (plumbing.Hash, error) {
+			checkpointSubtree, err := s.applyTasksBackfill(ctx, existing, "", req.Tasks)
+			if err != nil {
+				return plumbing.ZeroHash, err
+			}
+			authorName, authorEmail := GetGitAuthorFromRepo(s.repo)
+			commitMsg := fmt.Sprintf("Add tasks to checkpoint %s", req.CheckpointID)
 			return CreateCommit(ctx, s.repo, checkpointSubtree, parentHash, commitMsg, authorName, authorEmail)
 		},
 	)

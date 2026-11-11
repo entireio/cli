@@ -900,29 +900,6 @@
         ],
         "type": "object"
       },
-      "CISetupBlock": {
-        "additionalProperties": true,
-        "properties": {
-          "content": {
-            "description": "The content itself, ready to use verbatim",
-            "type": "string"
-          },
-          "format": {
-            "description": "The content's syntax, for highlighting: yaml, json",
-            "type": "string"
-          },
-          "heading": {
-            "description": "Short instruction naming what to do with the content",
-            "type": "string"
-          }
-        },
-        "required": [
-          "heading",
-          "format",
-          "content"
-        ],
-        "type": "object"
-      },
       "CIWebhookAuditActor": {
         "additionalProperties": true,
         "properties": {
@@ -1106,33 +1083,6 @@
         },
         "required": [
           "needsOnboarding"
-        ],
-        "type": "object"
-      },
-      "ConnectOrgCIBuildkiteCredentialInputBody": {
-        "additionalProperties": true,
-        "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "/api/v1/schemas/ConnectOrgCIBuildkiteCredentialInputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
-          "bk_api_token": {
-            "minLength": 1,
-            "type": "string"
-          },
-          "bk_organization": {
-            "minLength": 1,
-            "type": "string"
-          }
-        },
-        "required": [
-          "bk_organization",
-          "bk_api_token"
         ],
         "type": "object"
       },
@@ -1373,6 +1323,10 @@
             "readOnly": true,
             "type": "string"
           },
+          "cell": {
+            "description": "Processing cell ID, not a cluster slug, e.g. aws-us-east-2. A visible cluster in region must serve it. Defaults to the region's default cell.",
+            "type": "string"
+          },
           "name": {
             "maxLength": 100,
             "minLength": 1,
@@ -1397,180 +1351,6 @@
           "name",
           "ownerType",
           "ownerId"
-        ],
-        "type": "object"
-      },
-      "CreateRepoCIWebhookBody": {
-        "additionalProperties": true,
-        "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "/api/v1/schemas/CreateRepoCIWebhookBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
-          "auth_plugin_ref": {
-            "description": "entire-core-auth Buildkite plugin ref this pipeline is built with: the registered cluster's override, else the pinned default; goes in the bootstrap config's plugins list",
-            "type": "string"
-          },
-          "automation_id": {
-            "description": "Automation (aut_<ulid>) the enrolled pipeline's builds exchange their OIDC token for; goes in the bootstrap config as the automation:<id> resource (ENTIRE_CORE_AUTH_RESOURCE)",
-            "type": "string"
-          },
-          "bk_organization": {
-            "type": "string"
-          },
-          "bk_pipeline": {
-            "type": "string"
-          },
-          "core_url": {
-            "description": "entire-core base URL the bootstrap auth plugin talks to; goes in the bootstrap config as ENTIRE_CORE_AUTH_URL",
-            "type": "string"
-          },
-          "created_at": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "display_name": {
-            "type": "string"
-          },
-          "enabled": {
-            "type": "boolean"
-          },
-          "events": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "id": {
-            "type": "string"
-          },
-          "provider": {
-            "type": "string"
-          },
-          "provider_account": {
-            "type": "string"
-          },
-          "publish_checks": {
-            "type": "boolean"
-          },
-          "ref_filter": {
-            "type": "string"
-          },
-          "repo_id": {
-            "type": "string"
-          },
-          "repo_write": {
-            "type": "boolean"
-          },
-          "setup": {
-            "$ref": "#/components/schemas/CISetupBlock",
-            "description": "What to do next, rendered ready to use. Present on a self-managed enrolment."
-          },
-          "target_ref": {
-            "type": "string"
-          },
-          "updated_at": {
-            "format": "date-time",
-            "type": "string"
-          }
-        },
-        "required": [
-          "automation_id",
-          "core_url",
-          "auth_plugin_ref",
-          "id",
-          "repo_id",
-          "provider",
-          "display_name",
-          "bk_organization",
-          "bk_pipeline",
-          "provider_account",
-          "target_ref",
-          "ref_filter",
-          "events",
-          "enabled",
-          "publish_checks",
-          "repo_write",
-          "created_at",
-          "updated_at"
-        ],
-        "type": "object"
-      },
-      "CreateRepoCIWebhookInputBody": {
-        "additionalProperties": true,
-        "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "/api/v1/schemas/CreateRepoCIWebhookInputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
-          "bk_cluster_id": {
-            "type": "string"
-          },
-          "bk_force_rescaffold": {
-            "description": "Overwrite an existing pipeline's configuration with the generated bootstrap step, DISCARDING manual edits. Repairs a pipeline left naming an automation that a teardown retired. Requires bk_provisioning_token; refused on a self-managed pipeline.",
-            "type": "boolean"
-          },
-          "bk_organization": {
-            "type": "string"
-          },
-          "bk_pipeline": {
-            "type": "string"
-          },
-          "bk_pipeline_self_managed": {
-            "description": "The customer created and maintains this Buildkite pipeline. entire never creates, reconciles or reads it, and bk_provisioning_token is neither required nor accepted.",
-            "type": "boolean"
-          },
-          "bk_provisioning_token": {
-            "description": "Transient Buildkite token (write_pipelines) to create the pipeline; write-only, never stored. Required on first enroll; omit on a routing-only re-enroll. Refused for an existing pipeline unless bk_force_rescaffold is also set.",
-            "type": "string"
-          },
-          "config": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "description": "Provider-specific values from the providers listing; opaque to core. For buildkite: cluster_id, provisioning_token, force_rescaffold.",
-            "type": "object"
-          },
-          "display_name": {
-            "type": "string"
-          },
-          "events": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "mode": {
-            "description": "How to enrol, from the chosen provider's modes. For buildkite: self_managed or provisioned.",
-            "type": "string"
-          },
-          "provider": {
-            "type": "string"
-          },
-          "provider_account": {
-            "description": "Vendor-side account to enrol against (for buildkite, the organization slug). Use with provider/mode/config; omit when sending the bk_* fields.",
-            "type": "string"
-          },
-          "ref_filter": {
-            "type": "string"
-          },
-          "target_ref": {
-            "description": "Vendor-side build target (for buildkite, the pipeline slug). Defaults to a slug derived from the repo.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "provider"
         ],
         "type": "object"
       },
@@ -1639,13 +1419,94 @@
             "type": "string"
           },
           "orgId": {
+            "description": "Optional. Must match the project's owning org.",
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          },
+          "project_id": {
+            "description": "Owning project. An org or an account owns it.",
             "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
             "type": "string"
           }
         },
         "required": [
-          "orgId",
+          "project_id",
           "name"
+        ],
+        "type": "object"
+      },
+      "CreateServiceAccountSecretBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/CreateServiceAccountSecretBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "expires_in_days": {
+            "description": "Lifetime in days. Defaults to 90.",
+            "format": "int64",
+            "maximum": 365,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "CreateServiceAccountSecretOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/CreateServiceAccountSecretOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "account_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "created_by": {
+            "description": "Empty once the creator's account is erased.",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "last_used_at": {
+            "description": "Last exchange, to the minute.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "last_used_user_agent": {
+            "description": "User-Agent of the last exchange.",
+            "type": "string"
+          },
+          "secret": {
+            "description": "The secret. Store it now: it is not shown again.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "secret",
+          "id",
+          "account_id",
+          "created_at",
+          "expires_at"
         ],
         "type": "object"
       },
@@ -3023,54 +2884,6 @@
         ],
         "type": "object"
       },
-      "ListOrgCIBuildkiteClustersOutputBody": {
-        "additionalProperties": true,
-        "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "/api/v1/schemas/ListOrgCIBuildkiteClustersOutputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
-          "clusters": {
-            "items": {
-              "$ref": "#/components/schemas/OrgCIBuildkiteClusterView"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "clusters"
-        ],
-        "type": "object"
-      },
-      "ListOrgCIBuildkiteCredentialsOutputBody": {
-        "additionalProperties": true,
-        "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "/api/v1/schemas/ListOrgCIBuildkiteCredentialsOutputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
-          "credentials": {
-            "items": {
-              "$ref": "#/components/schemas/OrgCIBuildkiteCredentialView"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "credentials"
-        ],
-        "type": "object"
-      },
       "ListOrgCIDepotOrganizationsOutputBody": {
         "additionalProperties": true,
         "properties": {
@@ -3622,6 +3435,34 @@
         },
         "required": [
           "grants"
+        ],
+        "type": "object"
+      },
+      "ListServiceAccountSecretsOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListServiceAccountSecretsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "next_cursor": {
+            "description": "Present only when more secrets remain.",
+            "type": "string"
+          },
+          "secrets": {
+            "items": {
+              "$ref": "#/components/schemas/ServiceAccountSecret"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "secrets"
         ],
         "type": "object"
       },
@@ -4209,10 +4050,23 @@
       "OIDCProvider": {
         "additionalProperties": true,
         "properties": {
+          "attributes": {
+            "description": "Attributes a binding filter can pin.",
+            "items": {
+              "$ref": "#/components/schemas/OIDCProviderAttribute"
+            },
+            "type": "array"
+          },
           "description": {
             "type": "string"
           },
           "displayName": {
+            "deprecated": true,
+            "description": "Deprecated: use name for the slug and label for the human label. Removal after 2027-05-01.",
+            "type": "string"
+          },
+          "docs_url": {
+            "description": "The provider's OIDC setup guide.",
             "type": "string"
           },
           "id": {
@@ -4220,11 +4074,57 @@
           },
           "issuer": {
             "type": "string"
+          },
+          "label": {
+            "description": "Human label, such as GitHub Actions.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Stable slug, such as github-actions.",
+            "type": "string"
+          },
+          "self_serve": {
+            "description": "True when a project manager can bind this provider.",
+            "type": "boolean"
           }
         },
         "required": [
           "id",
           "issuer"
+        ],
+        "type": "object"
+      },
+      "OIDCProviderAttribute": {
+        "additionalProperties": true,
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "exact": {
+            "description": "The value must not contain '*'.",
+            "type": "boolean"
+          },
+          "label": {
+            "type": "string"
+          },
+          "name": {
+            "description": "The attributeFilter key.",
+            "type": "string"
+          },
+          "pattern": {
+            "description": "RE2 expression the pinned value must match.",
+            "type": "string"
+          },
+          "required": {
+            "description": "Every filter must pin this attribute.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "label",
+          "required",
+          "exact"
         ],
         "type": "object"
       },
@@ -4265,122 +4165,6 @@
           "name",
           "region",
           "createdAt"
-        ],
-        "type": "object"
-      },
-      "OrgCIBuildkiteClusterView": {
-        "additionalProperties": true,
-        "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "/api/v1/schemas/OrgCIBuildkiteClusterView.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
-          "auth_plugin_ref": {
-            "type": "string"
-          },
-          "bk_cluster_id": {
-            "type": "string"
-          },
-          "bk_organization": {
-            "type": "string"
-          },
-          "created_at": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "label": {
-            "type": "string"
-          },
-          "owner": {
-            "type": "string"
-          },
-          "updated_at": {
-            "format": "date-time",
-            "type": "string"
-          }
-        },
-        "required": [
-          "bk_organization",
-          "owner",
-          "bk_cluster_id",
-          "label",
-          "auth_plugin_ref",
-          "created_at",
-          "updated_at"
-        ],
-        "type": "object"
-      },
-      "OrgCIBuildkiteCredentialView": {
-        "additionalProperties": true,
-        "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "/api/v1/schemas/OrgCIBuildkiteCredentialView.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
-          "bk_organization": {
-            "type": "string"
-          },
-          "cipher_version": {
-            "format": "int64",
-            "type": "integer"
-          },
-          "created_at": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "inbound_endpoint_id": {
-            "type": "string"
-          },
-          "inbound_endpoint_path": {
-            "type": "string"
-          },
-          "inbound_endpoint_url": {
-            "type": "string"
-          },
-          "inbound_secret": {
-            "type": "string"
-          },
-          "inbound_secret_issued_at": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "inbound_secret_set": {
-            "type": "boolean"
-          },
-          "owner": {
-            "type": "string"
-          },
-          "token_len": {
-            "format": "int64",
-            "type": "integer"
-          },
-          "updated_at": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "verified_at": {
-            "format": "date-time",
-            "type": "string"
-          }
-        },
-        "required": [
-          "bk_organization",
-          "owner",
-          "cipher_version",
-          "token_len",
-          "inbound_secret_set",
-          "created_at",
-          "updated_at"
         ],
         "type": "object"
       },
@@ -5046,39 +4830,6 @@
         "required": [
           "host",
           "project"
-        ],
-        "type": "object"
-      },
-      "RegisterOrgCIBuildkiteClusterInputBody": {
-        "additionalProperties": true,
-        "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "/api/v1/schemas/RegisterOrgCIBuildkiteClusterInputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
-          "auth_plugin_ref": {
-            "type": "string"
-          },
-          "bk_cluster_id": {
-            "minLength": 1,
-            "type": "string"
-          },
-          "bk_organization": {
-            "minLength": 1,
-            "type": "string"
-          },
-          "label": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "bk_organization",
-          "bk_cluster_id"
         ],
         "type": "object"
       },
@@ -6061,6 +5812,12 @@
             "type": "string"
           },
           "orgId": {
+            "deprecated": true,
+            "description": "Deprecated: use the project's owner. Removal after 2027-05-01.",
+            "type": "string"
+          },
+          "project_id": {
+            "description": "Owning project.",
             "type": "string"
           },
           "status": {
@@ -6073,7 +5830,6 @@
         "required": [
           "accountId",
           "name",
-          "orgId",
           "status",
           "systemManaged",
           "createdAt"
@@ -6103,6 +5859,45 @@
         ],
         "type": "object"
       },
+      "ServiceAccountSecret": {
+        "additionalProperties": true,
+        "properties": {
+          "account_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "created_by": {
+            "description": "Empty once the creator's account is erased.",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "last_used_at": {
+            "description": "Last exchange, to the minute.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "last_used_user_agent": {
+            "description": "User-Agent of the last exchange.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "account_id",
+          "created_at",
+          "expires_at"
+        ],
+        "type": "object"
+      },
       "ServiceAccountWithGrants": {
         "additionalProperties": true,
         "properties": {
@@ -6123,6 +5918,12 @@
             "type": "string"
           },
           "orgId": {
+            "deprecated": true,
+            "description": "Deprecated: use the project's owner. Removal after 2027-05-01.",
+            "type": "string"
+          },
+          "project_id": {
+            "description": "Owning project.",
             "type": "string"
           },
           "status": {
@@ -6136,10 +5937,64 @@
           "grants",
           "accountId",
           "name",
-          "orgId",
           "status",
           "systemManaged",
           "createdAt"
+        ],
+        "type": "object"
+      },
+      "SetDefaultBranchInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/SetDefaultBranchInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "branch": {
+            "description": "An existing branch: a short name (main) or a full ref (refs/heads/main).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "branch"
+        ],
+        "type": "object"
+      },
+      "SetDefaultBranchOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/SetDefaultBranchOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "branch": {
+            "type": "string"
+          },
+          "changed": {
+            "type": "boolean"
+          },
+          "previous": {
+            "type": "string"
+          },
+          "repo_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_id",
+          "branch",
+          "previous",
+          "changed"
         ],
         "type": "object"
       },
@@ -8064,404 +7919,6 @@
         "summary": "Get an organization",
         "tags": [
           "orgs"
-        ]
-      }
-    },
-    "/orgs/{orgId}/ci/buildkite/clusters": {
-      "get": {
-        "operationId": "listOrgCIBuildkiteClusters",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "orgId",
-            "required": true,
-            "schema": {
-              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
-              "type": "string"
-            }
-          },
-          {
-            "explode": false,
-            "in": "query",
-            "name": "bk_organization",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ListOrgCIBuildkiteClustersOutputBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          },
-          {
-            "sessionAuth": []
-          }
-        ],
-        "summary": "List an org's registered Buildkite clusters",
-        "tags": [
-          "org-ci-webhooks"
-        ]
-      },
-      "post": {
-        "operationId": "registerOrgCIBuildkiteCluster",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "orgId",
-            "required": true,
-            "schema": {
-              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/RegisterOrgCIBuildkiteClusterInputBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OrgCIBuildkiteClusterView"
-                }
-              }
-            },
-            "description": "Created"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          },
-          {
-            "sessionAuth": []
-          }
-        ],
-        "summary": "Register or update a Buildkite hosted cluster for an org",
-        "tags": [
-          "org-ci-webhooks"
-        ]
-      }
-    },
-    "/orgs/{orgId}/ci/buildkite/clusters/{bkOrg}/{bkClusterId}": {
-      "delete": {
-        "operationId": "deleteOrgCIBuildkiteCluster",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "orgId",
-            "required": true,
-            "schema": {
-              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
-              "type": "string"
-            }
-          },
-          {
-            "in": "path",
-            "name": "bkOrg",
-            "required": true,
-            "schema": {
-              "pattern": "^[a-z0-9][a-z0-9-]*$",
-              "type": "string"
-            }
-          },
-          {
-            "in": "path",
-            "name": "bkClusterId",
-            "required": true,
-            "schema": {
-              "minLength": 1,
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "No Content"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          },
-          {
-            "sessionAuth": []
-          }
-        ],
-        "summary": "Remove a registered Buildkite cluster from an org",
-        "tags": [
-          "org-ci-webhooks"
-        ]
-      }
-    },
-    "/orgs/{orgId}/ci/buildkite/credential": {
-      "post": {
-        "operationId": "connectOrgCIBuildkiteCredential",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "orgId",
-            "required": true,
-            "schema": {
-              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ConnectOrgCIBuildkiteCredentialInputBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OrgCIBuildkiteCredentialView"
-                }
-              }
-            },
-            "description": "Created"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          },
-          {
-            "sessionAuth": []
-          }
-        ],
-        "summary": "Connect or rotate an org's Buildkite API credential",
-        "tags": [
-          "org-ci-webhooks"
-        ]
-      }
-    },
-    "/orgs/{orgId}/ci/buildkite/credential/{bkOrg}": {
-      "delete": {
-        "operationId": "deleteOrgCIBuildkiteCredential",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "orgId",
-            "required": true,
-            "schema": {
-              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
-              "type": "string"
-            }
-          },
-          {
-            "in": "path",
-            "name": "bkOrg",
-            "required": true,
-            "schema": {
-              "pattern": "^[a-z0-9][a-z0-9-]*$",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "No Content"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          },
-          {
-            "sessionAuth": []
-          }
-        ],
-        "summary": "Delete an org's connected Buildkite credential",
-        "tags": [
-          "org-ci-webhooks"
-        ]
-      }
-    },
-    "/orgs/{orgId}/ci/buildkite/credential/{bkOrg}/inbound-secret": {
-      "put": {
-        "operationId": "rotateOrgCIBuildkiteInboundSecret",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "orgId",
-            "required": true,
-            "schema": {
-              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
-              "type": "string"
-            }
-          },
-          {
-            "in": "path",
-            "name": "bkOrg",
-            "required": true,
-            "schema": {
-              "pattern": "^[a-z0-9][a-z0-9-]*$",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OrgCIBuildkiteCredentialView"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          },
-          {
-            "sessionAuth": []
-          }
-        ],
-        "summary": "Rotate an org's inbound Buildkite webhook secret",
-        "tags": [
-          "org-ci-webhooks"
-        ]
-      }
-    },
-    "/orgs/{orgId}/ci/buildkite/credentials": {
-      "get": {
-        "operationId": "listOrgCIBuildkiteCredentials",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "orgId",
-            "required": true,
-            "schema": {
-              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ListOrgCIBuildkiteCredentialsOutputBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          },
-          {
-            "sessionAuth": []
-          }
-        ],
-        "summary": "List an org's connected Buildkite credentials",
-        "tags": [
-          "org-ci-webhooks"
         ]
       }
     },
@@ -12248,64 +11705,6 @@
         "tags": [
           "ci-webhooks"
         ]
-      },
-      "post": {
-        "operationId": "createRepoCIWebhook",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "repoId",
-            "required": true,
-            "schema": {
-              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateRepoCIWebhookInputBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CreateRepoCIWebhookBody"
-                }
-              }
-            },
-            "description": "Created"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          },
-          {
-            "sessionAuth": []
-          }
-        ],
-        "summary": "Enroll a repo into a CI webhook (Buildkite)",
-        "tags": [
-          "ci-webhooks"
-        ]
       }
     },
     "/repos/{repoId}/ci-webhooks/audit": {
@@ -12634,6 +12033,66 @@
           }
         ],
         "summary": "List repo collaborators",
+        "tags": [
+          "repos"
+        ]
+      }
+    },
+    "/repos/{repoId}/default-branch": {
+      "put": {
+        "operationId": "setDefaultBranch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetDefaultBranchInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetDefaultBranchOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Set repository default branch",
         "tags": [
           "repos"
         ]
@@ -13438,11 +12897,23 @@
             }
           },
           {
+            "description": "List the org's service accounts.",
             "explode": false,
             "in": "query",
             "name": "orgId",
-            "required": true,
             "schema": {
+              "description": "List the org's service accounts.",
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "List the project's service accounts.",
+            "explode": false,
+            "in": "query",
+            "name": "project_id",
+            "schema": {
+              "description": "List the project's service accounts.",
               "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
               "type": "string"
             }
@@ -13478,7 +12949,7 @@
             "sessionAuth": []
           }
         ],
-        "summary": "List service accounts in an org",
+        "summary": "List service accounts in an org or project",
         "tags": [
           "service-accounts"
         ]
@@ -13995,6 +13466,190 @@
           }
         ],
         "summary": "Revoke service account access",
+        "tags": [
+          "service-accounts"
+        ]
+      }
+    },
+    "/service-accounts/{accountId}/secrets": {
+      "get": {
+        "operationId": "listServiceAccountSecrets",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "accountId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's next_cursor.",
+            "explode": false,
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "description": "Opaque cursor from a previous response's next_cursor.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Secrets per page.",
+            "explode": false,
+            "in": "query",
+            "name": "per_page",
+            "schema": {
+              "default": 30,
+              "description": "Secrets per page.",
+              "format": "int64",
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListServiceAccountSecretsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List service account secrets",
+        "tags": [
+          "service-accounts"
+        ]
+      },
+      "post": {
+        "description": "Returns the secret once. Exchange it at /oauth/token for a short-lived service account token. Answers 421 with the home core URL outside the service account's jurisdiction.",
+        "operationId": "createServiceAccountSecret",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "accountId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateServiceAccountSecretBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateServiceAccountSecretOutputBody"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Create service account secret",
+        "tags": [
+          "service-accounts"
+        ]
+      }
+    },
+    "/service-accounts/{accountId}/secrets/{secret_id}": {
+      "delete": {
+        "operationId": "deleteServiceAccountSecret",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "accountId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "secret_id",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Delete service account secret",
         "tags": [
           "service-accounts"
         ]

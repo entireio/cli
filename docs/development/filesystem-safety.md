@@ -228,7 +228,8 @@ does not auto-fix: what occupies the path may be someone's data.
 
 Agents with a relocatable home (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
 `COPILOT_HOME`, `FACTORY_HOME_OVERRIDE`, `PI_CODING_AGENT_DIR`) implement
-`agent.HomeLayoutProvider`. Session initialization and every turn start set
+`agent.HomeLayoutProvider`, as does Antigravity, whose fixed `~/.gemini` home
+holds one brain per surface (CLI, IDE, 2.0 app). Session initialization and every turn start set
 `session.State.AgentHome` to the active home when one of its session stores
 holds the transcript, spelled as the environment sets it or in canonical form,
 whichever contains the transcript path. They keep a home set by an earlier turn
@@ -304,7 +305,7 @@ to `os.ReadFile`/`os.WriteFile`/`os.MkdirAll`/`os.ReadDir`/`filepath.Walk`.**
 | `.entire` | `entiredir` | worktree root (`paths.WorktreeRoot`), cwd only when there is provably no repo |
 | git common dir | `gitdir` | `git rev-parse --git-common-dir`, absolutized |
 | the working tree | `worktreedir` | worktree root |
-| an agent's hook config | `agent.HookConfigFile` | worktree root (`.claude/`, `.cursor/`, `.github/hooks/`, `.factory/`, `.codex/`, `.opencode/plugins/`, `.pi/extensions/entire/`, `.agents/`; also `.gemini/` for the retired Gemini CLI hook cleanup) |
+| an agent's hook config | `agent.HookConfigFile` | worktree root (`.claude/`, `.cursor/`, `.github/hooks/`, `.factory/`, `.codex/`, `.opencode/plugin/`, `.pi/extensions/entire/`, `.agents/`; also `.gemini/` for the retired Gemini CLI hook cleanup) |
 | an agent's session store | `agent.SessionStore` | the agent's own `GetSessionDir` |
 | the active git hooks dir | `strategy.hooksRootForInstall` / `ForRemoval` | `git rev-parse --git-path hooks`, absolutized |
 | per-user config / cache | `userdirs.ConfigRoot` / `CacheRoot` | `$ENTIRE_CONFIG_DIR` else `~/.config/entire`; `$XDG_CACHE_HOME/entire` else `~/.cache/entire` |

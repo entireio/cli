@@ -38,20 +38,6 @@ func encodeAddOrgMemberRequest(
 	return nil
 }
 
-func encodeConnectOrgCIBuildkiteCredentialRequest(
-	req *ConnectOrgCIBuildkiteCredentialInputBody,
-	r *http.Request,
-) error {
-	const contentType = "application/json"
-	e := new(jx.Encoder)
-	{
-		req.Encode(e)
-	}
-	encoded := e.Bytes()
-	ht.SetBody(r, bytes.NewReader(encoded), contentType)
-	return nil
-}
-
 func encodeConnectOrgCIDepotOrganizationRequest(
 	req *ConnectOrgCIDepotOrganizationInputBody,
 	r *http.Request,
@@ -178,8 +164,8 @@ func encodeCreateRepoRequest(
 	return nil
 }
 
-func encodeCreateRepoCIWebhookRequest(
-	req *CreateRepoCIWebhookInputBody,
+func encodeCreateServiceAccountRequest(
+	req *CreateServiceAccountInputBody,
 	r *http.Request,
 ) error {
 	const contentType = "application/json"
@@ -192,14 +178,20 @@ func encodeCreateRepoCIWebhookRequest(
 	return nil
 }
 
-func encodeCreateServiceAccountRequest(
-	req *CreateServiceAccountInputBody,
+func encodeCreateServiceAccountSecretRequest(
+	req OptCreateServiceAccountSecretBody,
 	r *http.Request,
 ) error {
 	const contentType = "application/json"
+	if !req.Set {
+		// Keep request with empty body if value is not set.
+		return nil
+	}
 	e := new(jx.Encoder)
 	{
-		req.Encode(e)
+		if req.Set {
+			req.Encode(e)
+		}
 	}
 	encoded := e.Bytes()
 	ht.SetBody(r, bytes.NewReader(encoded), contentType)
@@ -318,20 +310,6 @@ func encodePreviewInvitationRequest(
 	return nil
 }
 
-func encodeRegisterOrgCIBuildkiteClusterRequest(
-	req *RegisterOrgCIBuildkiteClusterInputBody,
-	r *http.Request,
-) error {
-	const contentType = "application/json"
-	e := new(jx.Encoder)
-	{
-		req.Encode(e)
-	}
-	encoded := e.Bytes()
-	ht.SetBody(r, bytes.NewReader(encoded), contentType)
-	return nil
-}
-
 func encodeResolveRepoIDsRequest(
 	req *ResolveRepoIDsInputBody,
 	r *http.Request,
@@ -376,6 +354,20 @@ func encodeResyncMirrorRequest(
 
 func encodeSetBranchProtectionRequest(
 	req *BranchProtection,
+	r *http.Request,
+) error {
+	const contentType = "application/json"
+	e := new(jx.Encoder)
+	{
+		req.Encode(e)
+	}
+	encoded := e.Bytes()
+	ht.SetBody(r, bytes.NewReader(encoded), contentType)
+	return nil
+}
+
+func encodeSetDefaultBranchRequest(
+	req *SetDefaultBranchInputBody,
 	r *http.Request,
 ) error {
 	const contentType = "application/json"

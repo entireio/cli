@@ -1733,7 +1733,9 @@ func parseSingleJSONValue(s string) (any, bool) {
 // concurrently. Measured on a 20MB Codex transcript: 43s sequential vs 2.1s
 // across 12 shards. Hence a byte-sized shard target rather than one shard per
 // core, with worker count bounding actual concurrency.
-const jsonlShardTargetBytes = 1 << 20 // 1MiB
+//
+// A var so TestMain can shrink it.
+var jsonlShardTargetBytes = 1 << 20 // 1MiB
 
 // redactJSONLLinesSharded splits lines into contiguous byte-balanced groups,
 // redacts them concurrently, and rejoins them in order. Output is byte-identical

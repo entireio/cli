@@ -226,6 +226,7 @@ func prepareTaskTranscriptForStorage(
 	state *SessionState,
 	path string,
 	raw []byte,
+	externalizeImages bool,
 ) (redacted redact.RedactedBytes, assets []cpkg.TranscriptAsset, tooLarge bool, err error) {
 	sanitized := agent.SanitizeTranscriptForStorage(ag, raw)
 	if len(sanitized) > agent.MaxChunkSize {
@@ -237,7 +238,10 @@ func prepareTaskTranscriptForStorage(
 			slog.Int("cap", agent.MaxChunkSize))
 		return redact.RedactedBytes{}, nil, true, nil
 	}
-	externalized, assets := externalizeSessionImages(ctx, logCtx, state, sanitized)
+	externalized := sanitized
+	if externalizeImages {
+		externalized, assets = externalizeSessionImages(ctx, logCtx, state, sanitized)
+	}
 	// nil repo declines prefix reuse: a subagent transcript is written once per
 	// task, not appended across checkpoints, so there is nothing to reuse.
 	redacted, _, err = redactSessionTranscript(logCtx, nil, "", externalized)
@@ -369,77 +373,230 @@ func (s *ManualCommitStrategy) materializeTaskRecords(
 	inventoryPaths := resolveInventoryTaskTranscripts(ctx, ag, state)
 	payloads := make([]cpkg.TaskPayload, 0, len(state.TaskRecords))
 	for _, record := range state.TaskRecords {
-		if record.ToolUseID == "" || validation.ValidateToolUseID(record.ToolUseID) != nil {
-			logging.Warn(logCtx, "skipping task record: unsafe or empty tool_use_id",
-				slog.String("session_id", state.SessionID),
-				slog.String("tool_use_id", record.ToolUseID),
-			)
+		payload, taskAssets, ok := taskPayload(ctx, logCtx, ag, state, record, inventoryPaths[record.AgentID], true)
+		if !ok {
 			continue
 		}
-		if record.AgentID == "" || validation.ValidateAgentID(record.AgentID) != nil {
-			logging.Warn(logCtx, "skipping task record: unsafe or missing agent_id",
-				slog.String("session_id", state.SessionID),
-				slog.String("tool_use_id", record.ToolUseID),
-			)
-			continue
-		}
-
-		payload := cpkg.TaskPayload{
-			ToolUseID:       record.ToolUseID,
-			AgentID:         record.AgentID,
-			SubagentType:    record.SubagentType,
-			TaskDescription: record.TaskDescription,
-			Files:           record.Files,
-			TokenUsage:      record.TokenUsage,
-			StartedAt:       record.StartedAt,
-			CompletedAt:     record.CompletedAt,
-		}
-		raw, transcriptPath, readErr := readTaskTranscript(ctx, logCtx, ag, state, record, inventoryPaths[record.AgentID])
-		if transcriptPath == "" && readErr == nil {
-			payload.TranscriptUnavailableReason = taskTranscriptReasonUnresolvable
-			payloads = append(payloads, payload)
-			continue
-		}
-		if readErr != nil {
-			logging.Warn(logCtx, "failed to read subagent transcript; storing task without it",
-				slog.String("session_id", state.SessionID),
-				slog.String("tool_use_id", record.ToolUseID),
-				slog.String("error", readErr.Error()),
-			)
-			payload.TranscriptUnavailableReason = taskTranscriptReasonUnreadable
-			payloads = append(payloads, payload)
-			continue
-		}
-		if len(raw) == 0 {
-			payload.TranscriptUnavailableReason = taskTranscriptReasonEmpty
-			payloads = append(payloads, payload)
-			continue
-		}
-		payload.TokenUsage = condensedTaskTokenUsage(ctx, ag, record, raw)
-
-		redacted, taskAssets, tooLarge, prepErr := prepareTaskTranscriptForStorage(ctx, logCtx, ag, state, transcriptPath, raw)
-		if tooLarge {
-			payload.TranscriptUnavailableReason = taskTranscriptReasonTooLarge
-			payloads = append(payloads, payload)
-			continue
-		}
-		if prepErr != nil {
-			logging.Warn(logCtx, "failed to redact subagent transcript; storing task without it",
-				slog.String("session_id", state.SessionID),
-				slog.String("tool_use_id", record.ToolUseID),
-				slog.String("error", prepErr.Error()),
-			)
-			payload.TranscriptUnavailableReason = taskTranscriptReasonRedactionFailed
-			payloads = append(payloads, payload)
-			continue
-		}
-
-		payload.Transcript = redacted
 		assets = append(assets, taskAssets...)
 		payloads = append(payloads, payload)
 	}
 
 	return payloads, assets
+}
+
+// taskPayload builds one task record's stored form; see materializeTaskRecords
+// for the rules. ok is false for a record with an unsafe or missing ToolUseID
+// or AgentID, which cannot be stored at all.
+func taskPayload(
+	ctx, logCtx context.Context,
+	ag agent.Agent,
+	state *SessionState,
+	record session.TaskRecord,
+	inventoryPath string,
+	externalizeImages bool,
+) (payload cpkg.TaskPayload, assets []cpkg.TranscriptAsset, ok bool) {
+	if record.ToolUseID == "" || validation.ValidateToolUseID(record.ToolUseID) != nil {
+		logging.Warn(logCtx, "skipping task record: unsafe or empty tool_use_id",
+			slog.String("session_id", state.SessionID),
+			slog.String("tool_use_id", record.ToolUseID),
+		)
+		return cpkg.TaskPayload{}, nil, false
+	}
+	if record.AgentID == "" || validation.ValidateAgentID(record.AgentID) != nil {
+		logging.Warn(logCtx, "skipping task record: unsafe or missing agent_id",
+			slog.String("session_id", state.SessionID),
+			slog.String("tool_use_id", record.ToolUseID),
+		)
+		return cpkg.TaskPayload{}, nil, false
+	}
+
+	payload = cpkg.TaskPayload{
+		ToolUseID:       record.ToolUseID,
+		AgentID:         record.AgentID,
+		SubagentType:    record.SubagentType,
+		TaskDescription: record.TaskDescription,
+		Files:           record.Files,
+		TokenUsage:      record.TokenUsage,
+		StartedAt:       record.StartedAt,
+		CompletedAt:     record.CompletedAt,
+	}
+	raw, transcriptPath, readErr := readTaskTranscript(ctx, logCtx, ag, state, record, inventoryPath)
+	if transcriptPath == "" && readErr == nil {
+		payload.TranscriptUnavailableReason = taskTranscriptReasonUnresolvable
+		return payload, nil, true
+	}
+	if readErr != nil {
+		logging.Warn(logCtx, "failed to read subagent transcript; storing task without it",
+			slog.String("session_id", state.SessionID),
+			slog.String("tool_use_id", record.ToolUseID),
+			slog.String("error", readErr.Error()),
+		)
+		payload.TranscriptUnavailableReason = taskTranscriptReasonUnreadable
+		return payload, nil, true
+	}
+	if len(raw) == 0 {
+		payload.TranscriptUnavailableReason = taskTranscriptReasonEmpty
+		return payload, nil, true
+	}
+	payload.TokenUsage = condensedTaskTokenUsage(ctx, ag, record, raw)
+
+	redacted, taskAssets, tooLarge, prepErr := prepareTaskTranscriptForStorage(ctx, logCtx, ag, state, transcriptPath, raw, externalizeImages)
+	if tooLarge {
+		payload.TranscriptUnavailableReason = taskTranscriptReasonTooLarge
+		return payload, nil, true
+	}
+	if prepErr != nil {
+		logging.Warn(logCtx, "failed to redact subagent transcript; storing task without it",
+			slog.String("session_id", state.SessionID),
+			slog.String("tool_use_id", record.ToolUseID),
+			slog.String("error", prepErr.Error()),
+		)
+		payload.TranscriptUnavailableReason = taskTranscriptReasonRedactionFailed
+		return payload, nil, true
+	}
+
+	payload.Transcript = redacted
+	return payload, taskAssets, true
+}
+
+// ErrTaskNotStorable reports a task record whose identity cannot be stored, so
+// writing it can never succeed.
+var ErrTaskNotStorable = errors.New("task record has no storable identity")
+
+// AttachTaskToCheckpoint stores a completed task record directly in an
+// existing checkpoint, for a foreground subagent whose own commit condensed the
+// session before its record existed. The record never enters state.TaskRecords:
+// the checkpoint holds it, so no later commit has anything to claim.
+//
+// Images stay inline in the stored transcript, as they do whenever image
+// externalization is off: a checkpoint's assets belong to its session, and
+// turn-end replaces them when it rewrites that session.
+func (s *ManualCommitStrategy) AttachTaskToCheckpoint(ctx context.Context, ag agent.Agent, state *SessionState, record session.TaskRecord, checkpointID id.CheckpointID) error {
+	logCtx := logging.WithComponent(ctx, "checkpoint")
+	ctx = agent.WithSubagentFetchBudget(ctx, agent.SubagentFetchBudget)
+	scoped := *state
+	scoped.TaskRecords = []session.TaskRecord{record}
+	inventoryPath := resolveInventoryTaskTranscripts(ctx, ag, &scoped)[record.AgentID]
+	payload, _, ok := taskPayload(ctx, logCtx, ag, state, record, inventoryPath, false)
+	if !ok {
+		return ErrTaskNotStorable
+	}
+
+	stores, closeRepo, err := s.openHookStores(ctx)
+	if err != nil {
+		return err
+	}
+	defer closeRepo()
+	if err := stores.Persistent.Write(ctx, cpkg.Tasks{
+		CheckpointID: checkpointID,
+		Tasks:        []cpkg.TaskPayload{payload},
+	}); err != nil {
+		return fmt.Errorf("add task to checkpoint %s: %w", checkpointID, err)
+	}
+	return nil
+}
+
+// TaskCheckpointForFiles picks which of candidates, newest first, holds a
+// commit carrying any of files: the first whose stored files touched include
+// one. When none matches and every candidate was readable, it returns the empty
+// ID. A candidate it cannot read could be the match, so then it returns the
+// newest candidate rather than drop the task.
+func (s *ManualCommitStrategy) TaskCheckpointForFiles(ctx context.Context, candidates []id.CheckpointID, files []string) id.CheckpointID {
+	if len(candidates) == 0 {
+		return id.EmptyCheckpointID
+	}
+	logCtx := logging.WithComponent(ctx, "checkpoint")
+	stores, closeRepo, err := s.openHookStores(ctx)
+	if err != nil {
+		logging.Warn(logCtx, "cannot check which checkpoint holds the task's commit; using the newest",
+			slog.Any("candidates", candidates),
+			slog.String("error", err.Error()))
+		return candidates[0]
+	}
+	defer closeRepo()
+	var unreadable []id.CheckpointID
+	var readErr error
+	for _, candidate := range candidates {
+		summary, err := cpkg.ReadCheckpoint(ctx, stores.Persistent, candidate)
+		if err != nil {
+			unreadable = append(unreadable, candidate)
+			readErr = err
+			continue
+		}
+		if slices.ContainsFunc(summary.FilesTouched, func(f string) bool { return slices.Contains(files, f) }) {
+			return candidate
+		}
+	}
+	if len(unreadable) > 0 {
+		logging.Warn(logCtx, "could not read every candidate checkpoint for the task's commit; using the newest",
+			slog.Any("candidates", candidates),
+			slog.Any("unreadable", unreadable),
+			slog.String("error", readErr.Error()))
+		return candidates[0]
+	}
+	return id.EmptyCheckpointID
+}
+
+// maxTaskAttachmentRetries bounds how many turn ends retry a pending task
+// attachment before it is dropped.
+const maxTaskAttachmentRetries = 3
+
+// retryPendingTaskAttachments writes each pending task attachment into its
+// checkpoint, keeping the ones that fail until maxTaskAttachmentRetries turn
+// ends have failed too.
+func (s *ManualCommitStrategy) retryPendingTaskAttachments(ctx context.Context, state *SessionState) {
+	if len(state.PendingTaskAttachments) == 0 {
+		return
+	}
+	logCtx := logging.WithComponent(ctx, "checkpoint")
+	ag, err := agent.GetByAgentType(state.AgentType)
+	if err != nil {
+		logging.Warn(logCtx, "cannot retry pending task attachments: unknown agent",
+			slog.String("session_id", state.SessionID),
+			slog.String("error", err.Error()))
+		return
+	}
+	var kept []session.TaskAttachment
+	for _, attachment := range state.PendingTaskAttachments {
+		attrs := []any{
+			slog.String("session_id", state.SessionID),
+			slog.String("tool_use_id", attachment.Record.ToolUseID),
+			slog.String("checkpoint_id", attachment.CheckpointID),
+		}
+		checkpointID, err := id.NewCheckpointID(attachment.CheckpointID)
+		if err == nil {
+			err = s.AttachTaskToCheckpoint(ctx, ag, state, attachment.Record, checkpointID)
+		}
+		if err == nil {
+			logging.Info(logCtx, "added pending task record to its checkpoint", attrs...)
+			continue
+		}
+		attachment.FailedRetries++
+		if errors.Is(err, ErrTaskNotStorable) || attachment.FailedRetries >= maxTaskAttachmentRetries {
+			logging.Warn(logCtx, "dropping task record that could not be added to its checkpoint",
+				append(attrs, slog.Int("failed_retries", attachment.FailedRetries), slog.String("error", err.Error()))...)
+			continue
+		}
+		logging.Warn(logCtx, "task record still not added to its checkpoint; will retry at the next turn end",
+			append(attrs, slog.Int("failed_retries", attachment.FailedRetries), slog.String("error", err.Error()))...)
+		kept = append(kept, attachment)
+	}
+	state.PendingTaskAttachments = kept
+}
+
+// openHookStores opens the checkpoint store with the git-hook envelope. The
+// returned func closes the repository.
+func (s *ManualCommitStrategy) openHookStores(ctx context.Context) (*cpkg.Stores, func(), error) {
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	stores, err := cpkg.Open(ctx, repo, s.hookCheckpointStoreOptions(ctx))
+	if err != nil {
+		_ = repo.Close()
+		return nil, nil, fmt.Errorf("open checkpoint store: %w", err)
+	}
+	return stores, func() { _ = repo.Close() }, nil
 }
 
 // readTaskTranscript reads a task record's transcript: the agent-declared
@@ -632,7 +789,15 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	extractSessionDataSpan.End()
 	extractDuration := time.Since(extractStart)
 
-	resolveCondensedTokenUsage(ctx, ag, state, sessionData)
+	// Read the live transcript now, so a commit in the middle of a turn
+	// stores everything used up to it.
+	if ObserveTokenLedger(ctx, state) {
+		// Child sessions' usage is credited outside the ledger; add it here as
+		// resolveCondensedTokenUsage does, and resetCheckpointWindow rebaselines it.
+		sessionData.TokenUsage = session.WithChildSessionTokens(state.TokenLedger.Pending(), state.PendingChildSessionTokens())
+	} else {
+		resolveCondensedTokenUsage(ctx, ag, state, sessionData)
+	}
 
 	// Backfill the model from the transcript for agents that don't report it via
 	// hooks (e.g., Pi records message.model but its hook events carry no model
@@ -702,6 +867,9 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	)
 	if o.recordedBranch != nil {
 		writeOpts.Branch = *o.recordedBranch
+	}
+	if commitSHA, ok := recordedCommitLink(ctx); ok {
+		writeOpts.LinkedCommits = []cpkg.LinkedCommit{{SHA: commitSHA}}
 	}
 
 	writeV1Start := time.Now()
@@ -815,6 +983,7 @@ func buildCondensationWriteOptions(
 		TranscriptIdentifierAtStart: state.TranscriptIdentifierAtStart,
 		CheckpointTranscriptStart:   state.CheckpointTranscriptStart,
 		TokenUsage:                  sessionData.TokenUsage,
+		SessionTokenUsage:           SessionTokenUsage(state),
 		SkillEvents:                 skillEvents,
 		SessionMetrics:              buildSessionMetrics(state),
 		Summary:                     summary,
@@ -1170,6 +1339,15 @@ func resolveCondensedTokenUsage(ctx context.Context, ag agent.Agent, state *Sess
 	sessionData.TokenUsage = session.WithChildSessionTokens(sessionData.TokenUsage, state.PendingChildSessionTokens())
 }
 
+// SessionTokenUsage is the session's running total a checkpoint records, for
+// token-ledger sessions; nil for the per-turn path, whose total is not one.
+func SessionTokenUsage(state *SessionState) *agent.TokenUsage {
+	if state == nil || !state.TokenLedger.IsActive() {
+		return nil
+	}
+	return state.TotalTokenUsage()
+}
+
 // AttachTokenUsage returns the tokens `entire session attach` stores for a
 // session's transcript and the transcript end position in the agent's offset
 // units. With existing state it counts only what no checkpoint has counted yet
@@ -1181,6 +1359,15 @@ func resolveCondensedTokenUsage(ctx context.Context, ag agent.Agent, state *Sess
 // that also moves state.TokenUsage's cumulative subagent total, which the
 // caller must keep so the re-baseline covers what this checkpoint stored.
 func AttachTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, transcript []byte, transcriptPath string) (*agent.TokenUsage, int) {
+	if state != nil && transcriptPath != "" {
+		// Read the transcript being attached; attach records it as the
+		// session's path when it saves.
+		state.TranscriptPath = transcriptPath
+	}
+	if ObserveTokenLedger(ctx, state) {
+		usage := session.WithChildSessionTokens(state.TokenLedger.Pending(), state.PendingChildSessionTokens())
+		return usage, countTranscriptItems(ag.Type(), string(transcript))
+	}
 	var usage *agent.TokenUsage
 	if state == nil {
 		usage = agent.CalculateTokenUsage(ctx, ag, transcript, 0, "")
@@ -1203,7 +1390,8 @@ func AttachTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, 
 }
 
 // ConsumeAttachTokenWindow marks the tokens an attach checkpoint stored as
-// counted: the token offset moves to pos and the pending window is reset, so
+// counted (a token ledger is marked by the caller, up to the reading attach
+// stored): the token offset moves to pos and the pending window is reset, so
 // the session's next checkpoint does not count them again. The displayed
 // transcript window (CheckpointTranscriptStart) is left alone.
 //

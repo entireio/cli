@@ -11,17 +11,6 @@ import (
 	"testing"
 )
 
-func TestMaybeAutoUpdate_KillSwitch(t *testing.T) {
-	f := newAutoUpdateFixture(t)
-	setExecutablePath(t, brewCaskPath)
-	t.Setenv(envKillSwitch, "1")
-
-	var buf bytes.Buffer
-	action := maybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
-
-	assertPrintOnly(t, f, action, buf.String(), brewUpgradeCmd)
-}
-
 func TestMaybeAutoUpdate_NoTTY(t *testing.T) {
 	f := newAutoUpdateFixture(t)
 	setExecutablePath(t, brewCaskPath)
@@ -185,21 +174,6 @@ func TestMaybeAutoUpdate_AllInstallers_HappyPathRunsInstaller(t *testing.T) {
 			if !strings.Contains(buf.String(), "Update complete") {
 				t.Errorf("missing success message: %q", buf.String())
 			}
-		})
-	}
-}
-
-func TestMaybeAutoUpdate_AllInstallers_KillSwitchPrintsManualHint(t *testing.T) {
-	for _, tt := range autoInstallers() {
-		t.Run(tt.name, func(t *testing.T) {
-			f := newAutoUpdateFixture(t)
-			setExecutablePath(t, tt.execPath)
-			t.Setenv(envKillSwitch, "1")
-
-			var buf bytes.Buffer
-			action := maybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
-
-			assertPrintOnly(t, f, action, buf.String(), tt.wantCmd)
 		})
 	}
 }

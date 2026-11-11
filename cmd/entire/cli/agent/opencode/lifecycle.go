@@ -1,6 +1,7 @@
 package opencode
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -16,10 +17,12 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
+	"github.com/entireio/cli/internal/transcript/opencodev2"
 )
 
 var runOpenCodeExportToFileFn = runOpenCodeExportToFile
@@ -362,10 +365,20 @@ func (a *OpenCodeAgent) fetchAndCacheExport(ctx context.Context, sessionID strin
 
 	// Integration test mode: use pre-written mock file without calling opencode export
 	if mockName, ok := mockExportName(sessionID); ok {
-		if _, err := root.Stat(mockName); err == nil {
-			return tmpFile, nil
+		data, err := entiredir.ReadFile(root, mockName)
+		if err != nil {
+			return "", fmt.Errorf("mock export file not found: %s (ENTIRE_TEST_OPENCODE_MOCK_EXPORT is set)", tmpFile)
 		}
-		return "", fmt.Errorf("mock export file not found: %s (ENTIRE_TEST_OPENCODE_MOCK_EXPORT is set)", tmpFile)
+		normalized, err := opencodev2.Normalize(data)
+		if err != nil {
+			return "", fmt.Errorf("convert the OpenCode 2 mock export: %w", err)
+		}
+		if !bytes.Equal(normalized, data) {
+			if err := jsonutil.WriteFileAtomicIn(root, mockName, normalized, 0o600); err != nil {
+				return "", fmt.Errorf("write normalized mock export: %w", err)
+			}
+		}
+		return tmpFile, nil
 	}
 
 	// Write export directly to temp file under .entire. Avoid stdout capture,
@@ -414,6 +427,20 @@ func (a *OpenCodeAgent) fetchAndCacheExport(ctx context.Context, sessionID strin
 		)
 		return "", &openCodeExportError{
 			message: fmt.Sprintf("OpenCode returned invalid transcript data for session %q. Try updating OpenCode and running the command again.", sessionID),
+		}
+	}
+
+	// OpenCode 2 exports are stored in the 1.x shape every reader expects.
+	normalized, err := opencodev2.Normalize(data)
+	if err != nil {
+		return "", fmt.Errorf("convert the OpenCode 2 export: %w", err)
+	}
+	if !bytes.Equal(normalized, data) {
+		if err := jsonutil.WriteFileAtomicIn(root, staged, normalized, 0o600); err != nil {
+			// The staged export is intact and valid; keep it, as the rename
+			// failure below does.
+			keepStaged = true
+			return "", fmt.Errorf("failed to write normalized export (export saved at %s): %w", stagedAbs, err)
 		}
 	}
 
