@@ -2548,9 +2548,37 @@ func shouldSkipJSONLObject(obj map[string]any) bool {
 }
 
 // skipLeaf reports whether a string leaf is left unscanned: under a skip key,
-// or a whole-string inline image under a key that reveals no secret.
+// or a whole-string inline image under a key that reveals no secret and that
+// no custom rule reads it under.
 func skipLeaf(skipStrings bool, key string, credentialContext bool, val string) bool {
-	return skipStrings || (isInlineImageDataURI(val) && !imageKeyRevealsSecret(key, credentialContext))
+	if skipStrings {
+		return true
+	}
+	if imageKeyRevealsSecret(key, credentialContext) || !isInlineImageDataURI(val) {
+		return false
+	}
+	return !customRuleReadsValue(key, val)
+}
+
+// customRuleReadsValue reports whether a configured custom rule matches any
+// part of val in the "key":"val" text the key-context rule scans. A rule
+// written for one field, such as "auth_blob":"[^"]+", then still redacts an
+// image under it, as it did before images were skipped. It runs only the
+// custom rules, and only when some are configured, so by default an image is
+// preserved without any scan of its bytes.
+func customRuleReadsValue(key, val string) bool {
+	cfg := getCustomRulesConfig()
+	if cfg == nil || len(cfg.rules) == 0 {
+		return false
+	}
+	prefix := `"` + key + `":"`
+	start, end := len(prefix), len(prefix)+len(val)
+	for _, r := range detectCustomRules(cfg, prefix+val+`"`) {
+		if r.start < end && r.end > start {
+			return true
+		}
+	}
+	return false
 }
 
 // imageKeyRevealsSecret reports whether key marks an inline image value as a
@@ -2584,11 +2612,12 @@ func imageKeyRevealsSecret(key string, credentialContext bool) bool {
 //
 // The check is per string rather than per object, so it hides no sibling
 // field. Only those four raster subtypes are accepted, and the decoded bytes
-// must start with one of their magic numbers, so base64 text under an image/
-// label and SVG (text that can carry secrets) stay on the scanned path. The
-// bytes need not match the label, which can be wrong: older Codex releases
-// took it from the file extension, and MCP tools declare their own. A data URI
-// embedded inside a longer string is still scanned.
+// must be framed as one whole image of one of them (see isFramedImage), so
+// base64 text under an image/ label, a token after an image signature, and
+// SVG (text that can carry secrets) stay on the scanned path. The bytes need
+// not match the label, which can be wrong: older Codex releases took it from
+// the file extension, and MCP tools declare their own. A data URI embedded
+// inside a longer string is still scanned.
 func isInlineImageDataURI(s string) bool {
 	rest, ok := strings.CutPrefix(s, "data:image/")
 	if !ok {
@@ -2609,10 +2638,7 @@ func isInlineImageDataURI(s string) bool {
 	if err != nil {
 		return false
 	}
-	return bytes.HasPrefix(raw, []byte("\x89PNG\r\n\x1a\n")) ||
-		bytes.HasPrefix(raw, []byte{0xFF, 0xD8, 0xFF}) ||
-		bytes.HasPrefix(raw, []byte("GIF87a")) || bytes.HasPrefix(raw, []byte("GIF89a")) ||
-		(len(raw) >= 12 && bytes.HasPrefix(raw, []byte("RIFF")) && bytes.Equal(raw[8:12], []byte("WEBP")))
+	return isFramedImage(raw)
 }
 
 func shannonEntropy(s string) float64 {

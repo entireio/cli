@@ -1,7 +1,13 @@
 package redact
 
 import (
+	"bytes"
 	"encoding/base64"
+	"encoding/binary"
+	"image"
+	"image/gif"
+	"image/jpeg"
+	"image/png"
 	"math/rand/v2"
 	"slices"
 	"testing"
@@ -10,17 +16,66 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fakeImageBase64 returns the base64 of magic followed by deterministic
-// pseudo-random bytes. Compressed image data looks like this to the scanners,
-// so without the data URI rule the entropy layer redacts it.
+// fakeImageBase64 returns the base64 of fakeImage(magic).
 func fakeImageBase64(magic []byte) string {
+	return base64.StdEncoding.EncodeToString(fakeImage(magic))
+}
+
+// fakeImage returns a whole image, in the format whose magic number is magic,
+// of deterministic noise. Compressed noise looks random to the scanners, so
+// without the data URI rule the entropy layer redacts it. A nil magic returns
+// noise bytes that are no image.
+func fakeImage(magic []byte) []byte {
 	r := rand.New(rand.NewChaCha8([32]byte{1}))
-	raw := make([]byte, 4096)
-	for i := range raw {
-		raw[i] = byte(r.Uint32())
+	if magic == nil {
+		raw := make([]byte, 4096)
+		for i := range raw {
+			raw[i] = byte(r.Uint32())
+		}
+		return raw
 	}
+	if bytes.HasPrefix(magic, riffTag) {
+		return fakeWebP(r)
+	}
+	img := image.NewNRGBA(image.Rect(0, 0, 48, 48))
+	for i := range img.Pix {
+		img.Pix[i] = byte(r.Uint32())
+	}
+	var buf bytes.Buffer
+	var err error
+	switch {
+	case bytes.Equal(magic, jpegMagic):
+		err = jpeg.Encode(&buf, img, &jpeg.Options{Quality: 90})
+	case bytes.Equal(magic, pngMagic):
+		err = png.Encode(&buf, img)
+	default: // GIF87a or GIF89a; the encoder writes GIF89a
+		err = gif.Encode(&buf, img, nil)
+	}
+	if err != nil {
+		panic(err)
+	}
+	raw := buf.Bytes()
 	copy(raw, magic)
-	return base64.StdEncoding.EncodeToString(raw)
+	return raw
+}
+
+// fakeWebP returns a lossless WebP container around noise: no decoder would
+// accept the bitstream, but its framing is whole.
+func fakeWebP(r *rand.Rand) []byte {
+	data := make([]byte, 4096)
+	for i := range data {
+		data[i] = byte(r.Uint32())
+	}
+	data[0] = 0x2F
+	raw := append([]byte("RIFF\x00\x00\x00\x00WEBPVP8L"), binary.LittleEndian.AppendUint32(nil, uint32(len(data)))...)
+	raw = append(raw, data...)
+	binary.LittleEndian.PutUint32(raw[4:8], uint32(len(raw)-8))
+	return raw
+}
+
+// withTokenAppended returns the base64 of raw with a token's bytes after it.
+func withTokenAppended(raw []byte) string {
+	return base64.StdEncoding.EncodeToString(append(slices.Clone(raw), highEntropySecret...))
 }
 
 var (
@@ -37,6 +92,7 @@ func TestIsInlineImageDataURI(t *testing.T) {
 	// continuation. The decoder skips \r and \n even in strict mode.
 	noPadding := jpeg[:len(jpeg)-4]
 	const base64ShapedSecret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+	pngSignatureThenToken := base64.StdEncoding.EncodeToString(append(slices.Clone(pngMagic), 'X')) + base64ShapedSecret
 	tests := []struct {
 		name string
 		s    string
@@ -63,6 +119,14 @@ func TestIsInlineImageDataURI(t *testing.T) {
 		{"secret on the next line", "data:image/jpeg;base64," + noPadding + "\n" + base64ShapedSecret, false},
 		{"secret on the next CRLF line", "data:image/jpeg;base64," + noPadding + "\r\n" + base64ShapedSecret, false},
 		{"non-image data URI", "data:text/plain;base64," + jpeg, false},
+		{"token after a jpeg signature", "data:image/jpeg;base64,/9j/" + base64ShapedSecret, false},
+		{"token after a png signature", "data:image/png;base64," + pngSignatureThenToken, false},
+		{"token appended to a png", "data:image/png;base64," + withTokenAppended(fakeImage(pngMagic)), false},
+		{"token appended to a jpeg", "data:image/jpeg;base64," + withTokenAppended(fakeImage(jpegMagic)), false},
+		{"token appended to a gif", "data:image/gif;base64," + withTokenAppended(fakeImage([]byte("GIF89a"))), false},
+		{"token appended to a webp", "data:image/webp;base64," + withTokenAppended(fakeImage(riffTag)), false},
+		{"png without its end chunk", "data:image/png;base64," + base64.StdEncoding.EncodeToString(fakeImage(pngMagic)[:len(fakeImage(pngMagic))-len(pngEnd)]), false},
+		{"jpeg without its end marker", "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(fakeImage(jpegMagic)[:len(fakeImage(jpegMagic))-len(jpegEnd)]), false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -122,64 +186,36 @@ func TestJSONLContent_ScansDataURIThatIsNotAnImage(t *testing.T) {
 	assert.Contains(t, got, "REDACTED")
 }
 
-// A credential key keeps its placeholder even when its value is shaped like an
-// image: the image rule exists for agent image fields, not for secrets.
+// A credential key keeps its value scanned even when it is a whole image: the
+// image rule exists for agent image fields, not for secrets.
 func TestJSONLContent_CredentialKeyOverridesImageDataURI(t *testing.T) {
 	t.Parallel()
-	const secret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
-	header := base64.StdEncoding.EncodeToString(append(slices.Clone(pngMagic), 'X'))
-	got, err := JSONLContent(`{"aws_secret_access_key":"data:image/png;base64,` + header + secret + `"}`)
+	uri := "data:image/png;base64," + fakeImageBase64(pngMagic)
+	got, err := JSONLContent(`{"aws_secret_access_key":"` + uri + `"}`)
 	require.NoError(t, err)
-	assert.NotContains(t, got, secret)
+	assert.NotContains(t, got, uri)
 	assert.Contains(t, got, "REDACTED")
 }
 
 // Outside a connection object a bare password, secret or token key is not a
-// credential key, but it still names a secret, so an image-shaped value under
-// it is scanned and keeps the placeholder it had before the image rule. So is
-// one under a key with a password stem. A real image under a key that names
-// no secret is still preserved.
+// credential key, but it still names a secret, so its value is scanned even
+// when it is a whole image, and so is one under a key with a password stem.
+// Failing closed has a cost: the image's compressed bytes look like a secret
+// to the entropy layer. Under a key that names no secret, the same image is
+// preserved.
 func TestJSONLContent_SecretKeyOverridesImageDataURI(t *testing.T) {
 	t.Parallel()
-	const secretShaped = "data:image/jpeg;base64,/9j/wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
-	require.True(t, isInlineImageDataURI(secretShaped))
 	uri := "data:image/jpeg;base64," + fakeImageBase64(jpegMagic)
+	for _, key := range []string{"password", "passwd", "pwd", "pass", "secret", "token", "userpassword", "db_pw"} {
+		t.Run(key, func(t *testing.T) {
+			t.Parallel()
+			got, err := JSONLContent(`{"` + key + `":"` + uri + `"}`)
+			require.NoError(t, err)
+			assert.NotContains(t, got, uri)
+			assert.Contains(t, got, "REDACTED")
+		})
+	}
 	tests := []jsonlFieldCase{
-		{
-			name: "password",
-			line: `{"password":"` + secretShaped + `"}`,
-			want: `{"password":"REDACTED"}`,
-		},
-		{
-			name: "passwd beside a preserved image",
-			line: `{"passwd":"` + secretShaped + `","image_url":"` + uri + `"}`,
-			want: `{"passwd":"REDACTED","image_url":"` + uri + `"}`,
-		},
-		{
-			name: "secret",
-			line: `{"secret":"` + secretShaped + `"}`,
-			want: `{"secret":"data:image/jpeg;base64,REDACTED"}`,
-		},
-		{
-			name: "token",
-			line: `{"token":"` + secretShaped + `"}`,
-			want: `{"token":"data:image/jpeg;base64,REDACTED"}`,
-		},
-		{
-			name: "pwd",
-			line: `{"pwd":"` + secretShaped + `"}`,
-			want: `{"pwd":"data:image/jpeg;base64,REDACTED"}`,
-		},
-		{
-			name: "password stem without a segment",
-			line: `{"userpassword":"` + secretShaped + `"}`,
-			want: `{"userpassword":"REDACTED"}`,
-		},
-		{
-			name: "pw segment",
-			line: `{"db_pw":"` + secretShaped + `"}`,
-			want: `{"db_pw":"REDACTED"}`,
-		},
 		{
 			name: "image under a key with a credential word but no secret segment",
 			line: `{"author_avatar":"` + uri + `"}`,
@@ -226,14 +262,65 @@ func TestImageKeyRevealsSecret(t *testing.T) {
 	}
 }
 
-// Failing closed has a cost: a real image under a key that names a secret is
-// scanned too, and its compressed bytes look like one to the entropy layer.
-func TestJSONLContent_ScansImageUnderSecretKey(t *testing.T) {
-	t.Parallel()
+// A custom rule written for one field still redacts an image under it. Custom
+// rules are process-wide, so this test does not run in parallel.
+//
+//nolint:paralleltest // configures the process-wide custom rules
+func TestJSONLContent_CustomRuleOverridesImageDataURI(t *testing.T) {
+	resetCustomRulesForTest(t)
+	ConfigureCustomRules(CustomRulesConfig{Inline: map[string]string{"blob": `"auth_blob":"[^"]+"`}})
 	uri := "data:image/jpeg;base64," + fakeImageBase64(jpegMagic)
-	got, err := JSONLContent(`{"token":"` + uri + `"}`)
+	got, err := JSONLContent(`{"auth_blob":"` + uri + `","image_url":"` + uri + `"}`)
 	require.NoError(t, err)
-	assert.NotContains(t, got, uri)
+	assert.Equal(t, `{"auth_blob":"REDACTED","image_url":"`+uri+`"}`, got)
+}
+
+// A token after an image signature is no image, so it is scanned under any
+// key and redacts as it did before the image rule: with the key-context
+// placeholder under a password key, and the entropy layer's elsewhere.
+func TestJSONLContent_ScansTokenAfterImageSignature(t *testing.T) {
+	t.Parallel()
+	const jpegShaped = "data:image/jpeg;base64,/9j/wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+	uri := "data:image/jpeg;base64," + fakeImageBase64(jpegMagic)
+	tests := []jsonlFieldCase{
+		{
+			name: "password",
+			line: `{"password":"` + jpegShaped + `"}`,
+			want: `{"password":"REDACTED"}`,
+		},
+		{
+			name: "passwd beside a preserved image",
+			line: `{"passwd":"` + jpegShaped + `","image_url":"` + uri + `"}`,
+			want: `{"passwd":"REDACTED","image_url":"` + uri + `"}`,
+		},
+		{
+			name: "secret",
+			line: `{"secret":"` + jpegShaped + `"}`,
+			want: `{"secret":"data:image/jpeg;base64,REDACTED"}`,
+		},
+		{
+			name: "image field",
+			line: `{"image_url":"` + jpegShaped + `"}`,
+			want: `{"image_url":"data:image/jpeg;base64,REDACTED"}`,
+		},
+		{
+			name: "text",
+			line: `{"text":"` + jpegShaped + `"}`,
+			want: `{"text":"data:image/jpeg;base64,REDACTED"}`,
+		},
+	}
+	assertJSONLFieldCases(t, tests)
+}
+
+// A token appended to a real image breaks its end marker, so the whole string
+// is scanned. The token redacts, and so does the image, as it did before the
+// image rule.
+func TestJSONLContent_ScansTokenAppendedToImage(t *testing.T) {
+	t.Parallel()
+	line := `{"image_url":"data:image/png;base64,` + withTokenAppended(fakeImage(pngMagic)) + `"}`
+	got, err := JSONLContent(line)
+	require.NoError(t, err)
+	assert.NotEqual(t, line, got)
 	assert.Contains(t, got, "REDACTED")
 }
 
