@@ -67,17 +67,18 @@ func TestClient_TrailRequestsUseSnakeCase(t *testing.T) {
 	defer server.Close()
 
 	client := NewClientWithBaseURL("tok", server.URL)
-	resp, err := client.Post(context.Background(), "/api/v1/trails/gh/acme/repo", TrailCreateRequest{
-		Title: "test", BranchName: "feature/test", BranchAction: "link",
+	ready := true
+	resp, err := client.Patch(context.Background(), "/api/v1/trails/gh/acme/repo/42", TrailUpdateRequest{
+		ReadyForReview: &ready,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if got["branch_name"] != "feature/test" || got["branch_action"] != "link" {
+	if got["ready_for_review"] != true {
 		t.Fatalf("body = %#v", got)
 	}
-	for _, key := range []string{"branchName", "branchAction"} {
+	for _, key := range []string{"readyForReview"} {
 		if _, ok := got[key]; ok {
 			t.Fatalf("body contains camelCase %q: %#v", key, got)
 		}
