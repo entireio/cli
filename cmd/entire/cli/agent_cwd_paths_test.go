@@ -168,6 +168,8 @@ func TestPhysicalAgentPath(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(outside, "sub"), 0o755))
 	require.NoError(t, os.Symlink(filepath.Join("real", "sub"), filepath.Join(root, "alias")))
 	require.NoError(t, os.Symlink(filepath.Join(outside, "sub"), filepath.Join(root, "out")))
+	require.NoError(t, os.Symlink(filepath.Join("real", "removed"), filepath.Join(root, "dangling")))
+	require.NoError(t, os.Symlink("loop", filepath.Join(root, "loop")))
 
 	require.Equal(t, "real/file.txt", physicalAgentPath(root+"/alias/../file.txt", root))
 	require.Equal(t, "file.txt", physicalAgentPath(root+"/real/../file.txt", root))
@@ -175,6 +177,8 @@ func TestPhysicalAgentPath(t *testing.T) {
 	require.Equal(t, "real/file.txt", physicalAgentPath(root+"/alias/gone/../../file.txt", root), "a directory that no longer exists, after a link")
 	require.Equal(t, "file.txt", physicalAgentPath(root+"/gone/../file.txt", root), "a directory that no longer exists")
 	require.Equal(t, "real/file.txt", physicalAgentPath(root+"/gone/../alias/../file.txt", root), "a link after a directory that no longer exists")
+	require.Equal(t, "real/file.txt", physicalAgentPath(root+"/dangling/../file.txt", root), "a link whose target is gone")
+	require.Equal(t, root+"/loop/../file.txt", physicalAgentPath(root+"/loop/../file.txt", root), "a link cycle does not resolve")
 	require.Empty(t, physicalAgentPath(root+"/out/gone/../../file.txt", root), "a directory that no longer exists, outside the worktree")
 	require.Equal(t, root+"/real/./file.txt", physicalAgentPath(root+"/real/./file.txt", root), "no .., nothing to resolve")
 }

@@ -304,6 +304,38 @@ func TestNamedFiles_ThroughFileLinkInOtherCase(t *testing.T) {
 	require.Equal(t, modified, newNamedFiles(dir, []string{"AGENTS.md"}, modified).only(modified))
 }
 
+// TestNamedFiles_ThroughListedLink: a write through a new or retargeted
+// AGENTS.md -> CLAUDE.md changes CLAUDE.md, which git status lists beside
+// the link itself.
+func TestNamedFiles_ThroughListedLink(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	forgetSharedRoot(t, dir)
+	testutil.WriteFile(t, dir, "CLAUDE.md", "edited through AGENTS.md\n")
+	if err := os.Symlink("CLAUDE.md", filepath.Join(dir, "AGENTS.md")); err != nil {
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
+	modified := []string{"AGENTS.md", "CLAUDE.md"}
+	require.Equal(t, modified, newNamedFiles(dir, []string{"AGENTS.md"}, modified).only(modified))
+}
+
+// TestNamedFiles_DeletedInOtherNormalizationForm: a deletion named
+// decomposed (cafe\u0301.txt) matches git's composed caf\u00e9.txt only
+// where the filesystem ignores normalization, as macOS's does; nothing is
+// left to compare.
+func TestNamedFiles_DeletedInOtherNormalizationForm(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	forgetSharedRoot(t, dir)
+	deleted := []string{"caf\u00e9.txt"}
+	n := newNamedFiles(dir, []string{"cafe\u0301.txt"}, deleted)
+	require.Equal(t, runtime.GOOS == "darwin", n.ignoresNormalization)
+	n.ignoresNormalization = false
+	require.Empty(t, n.only(deleted), "two names for two files")
+	n.ignoresNormalization = true
+	require.Equal(t, deleted, n.only(deleted))
+}
+
 // TestNamedFiles_OtherNormalizationForm covers a transcript that spells a
 // name decomposed (cafe\u0301.txt) where git status lists it composed
 // (caf\u00e9.txt), as git does on macOS, whose filesystem opens both as one

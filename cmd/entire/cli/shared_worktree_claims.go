@@ -134,6 +134,11 @@ type namedFiles struct {
 	// cases asks the worktree's directories about case, only for a
 	// deletion named in another case.
 	cases *worktreedir.CaseProbe
+	// ignoresNormalization holds where the worktree's filesystem takes
+	// names in different Unicode normalization forms as one, as macOS's
+	// APFS and HFS+ do. Only a deletion, which leaves no file to compare,
+	// needs it.
+	ignoresNormalization bool
 }
 
 // newNamedFiles matches named against the files git status lists.
@@ -149,6 +154,8 @@ func newNamedFiles(repoRoot string, named []string, listed ...[]string) namedFil
 		exact:    make(map[string]struct{}, len(named)),
 		folded:   make(map[string][]string),
 		cases:    worktreedir.NewCaseProbe(repoRoot),
+		// The filesystems macOS formats ignore normalization.
+		ignoresNormalization: runtime.GOOS == "darwin",
 	}
 	resolved := make(map[string]string)
 	for _, f := range named {
@@ -156,27 +163,25 @@ func newNamedFiles(repoRoot string, named []string, listed ...[]string) namedFil
 		if _, ok := inStatus[f]; !ok {
 			f = resolvedDir(repoRoot, f, resolved)
 		}
-		if _, ok := inStatus[f]; !ok {
-			target := linkTarget(repoRoot, f)
-			if _, ok := inStatus[target]; ok {
-				f = target
-			} else if target != f {
-				// A link to a listed file in another case or form,
-				// AGENTS.md -> claude.md for CLAUDE.md.
-				n.fold(target)
-			}
+		// A write through a link changes the file it leads to, which git
+		// status lists whether or not it lists the link too, as a new or
+		// retargeted one. The link may spell it in another case or form
+		// than git, AGENTS.md -> claude.md for CLAUDE.md.
+		if target, ok := linkTarget(repoRoot, f); ok {
+			n.add(target, inStatus)
 		}
-		if _, ok := inStatus[f]; ok {
-			n.exact[f] = struct{}{}
-		} else {
-			n.fold(f)
-		}
+		n.add(f, inStatus)
 	}
 	return n
 }
 
-// fold records name, which git status does not list, for namedInOtherCase.
-func (n namedFiles) fold(name string) {
+// add records name as exact when git status lists it, and else for
+// namedInOtherCase.
+func (n namedFiles) add(name string, inStatus map[string]struct{}) {
+	if _, ok := inStatus[name]; ok {
+		n.exact[name] = struct{}{}
+		return
+	}
 	key := caseFoldKey(name)
 	n.folded[key] = append(n.folded[key], name)
 }
@@ -227,18 +232,18 @@ func dirName(repoRoot, dir string) (string, bool) {
 	return name, err == nil
 }
 
-// linkTarget returns the worktree file that file, a symlink in the worktree,
-// leads to, or else file itself.
-func linkTarget(repoRoot, file string) string {
+// linkTarget returns the worktree file that file leads to, and false when
+// file is no symlink or leads outside the worktree.
+func linkTarget(repoRoot, file string) (string, bool) {
+	if info, err := lstatWorktreeFile(repoRoot, file); err != nil || info.Mode()&fs.ModeSymlink == 0 {
+		return "", false
+	}
 	root, err := filepath.Abs(repoRoot)
 	if err != nil {
-		return file
+		return "", false
 	}
 	name, err := resolvedName(root, filepath.Join(root, filepath.FromSlash(file)))
-	if err != nil {
-		return file
-	}
-	return name
+	return name, err == nil
 }
 
 // errOutsideWorktree is resolvedName's answer for a path that resolves
@@ -273,9 +278,10 @@ func resolvedName(repoRoot, abs string) (string, error) {
 // may no longer all exist, as a deleted file's directory. It resolves the
 // path one entry at a time: an entry that does not exist is no symlink, so a
 // ".." after one only steps back out of it, and resolution resumes from
-// there. So with alias -> real/sub, alias/gone/../../file.txt and
-// gone/../alias/../file.txt are both real/file.txt, where a lexical clean
-// gives the root's file.txt.
+// there. A link whose target is gone is still followed by name. So with
+// alias -> real/sub, alias/gone/../../file.txt and gone/../alias/../file.txt
+// are both real/file.txt, and so is alias/../file.txt once real/sub is
+// removed, where a lexical clean gives the root's file.txt.
 func evalSymlinksOfExisting(abs string) (string, error) {
 	target, err := filepath.EvalSymlinks(abs)
 	if !errors.Is(err, fs.ErrNotExist) {
@@ -285,7 +291,10 @@ func evalSymlinksOfExisting(abs string) (string, error) {
 	vol := filepath.VolumeName(abs)
 	resolved := vol + sep // a path without links, which exists
 	var missing []string  // names under resolved that do not exist
-	for _, part := range strings.Split(abs[len(vol):], sep) {
+	parts := strings.Split(abs[len(vol):], sep)
+	for links := 0; len(parts) > 0; {
+		part := parts[0]
+		parts = parts[1:]
 		switch {
 		case part == "" || part == ".":
 		case len(missing) > 0 && part == "..":
@@ -295,19 +304,35 @@ func evalSymlinksOfExisting(abs string) (string, error) {
 		case part == "..":
 			resolved = filepath.Dir(resolved)
 		default:
-			next, err := filepath.EvalSymlinks(resolved + sep + part)
-			switch {
-			case errors.Is(err, fs.ErrNotExist):
-				missing = append(missing, part)
-			case err != nil:
-				return "", wrapResolveErr(abs, err)
-			default:
+			entry := filepath.Join(resolved, part)
+			next, err := filepath.EvalSymlinks(entry)
+			if err == nil {
 				resolved = next
+				continue
 			}
+			if !errors.Is(err, fs.ErrNotExist) {
+				return "", wrapResolveErr(abs, err)
+			}
+			link, err := os.Readlink(entry)
+			if err != nil {
+				missing = append(missing, part)
+				continue
+			}
+			if links++; links > maxLinksFollowed {
+				return "", fmt.Errorf("resolve %s: too many links", abs)
+			}
+			if linkVol := filepath.VolumeName(link); filepath.IsAbs(link) {
+				resolved, link = linkVol+sep, link[len(linkVol):]
+			}
+			parts = append(strings.Split(link, sep), parts...)
 		}
 	}
 	return filepath.Join(append([]string{resolved}, missing...)...), nil
 }
+
+// maxLinksFollowed bounds evalSymlinksOfExisting on a link cycle, as the
+// kernel bounds a lookup.
+const maxLinksFollowed = 255
 
 // wrapResolveErr names abs in err, a failure to resolve it, or returns nil.
 func wrapResolveErr(abs string, err error) error {
@@ -380,7 +405,7 @@ func caseFoldKey(name string) string {
 // deletedInOtherCase is namedInOtherCase for a file the worktree lacks.
 func (n namedFiles) deletedInOtherCase(file string, spellings []string) bool {
 	for _, spelling := range spellings {
-		if !n.cases.SameEntry(file, spelling) {
+		if !n.sameDeletedEntry(file, spelling) {
 			continue
 		}
 		if _, err := lstatWorktreeFile(n.repoRoot, spelling); errors.Is(err, fs.ErrNotExist) {
@@ -388,6 +413,15 @@ func (n namedFiles) deletedInOtherCase(file string, spellings []string) bool {
 		}
 	}
 	return false
+}
+
+// sameDeletedEntry is CaseProbe.SameEntry, with names that differ in Unicode
+// normalization taken as one where the filesystem ignores normalization.
+func (n namedFiles) sameDeletedEntry(file, spelling string) bool {
+	if n.ignoresNormalization {
+		file, spelling = norm.NFC.String(file), norm.NFC.String(spelling)
+	}
+	return n.cases.SameEntry(file, spelling)
 }
 
 // statusClaim returns the statusClaim for the turn this state began. A nil
