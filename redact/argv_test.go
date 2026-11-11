@@ -64,6 +64,9 @@ func TestJSONLBytes_CommandLinePasswordsInArgvArrays(t *testing.T) {
 		// A .netrc password that starts with a dash and contains a blank
 		// is quoted whole, so the netrc reader does not stop at a bare option prefix.
 		{`{"command":["echo","machine","h","login","me","password","-hunter2 Summer2026"]}`, `{"command":["echo","machine","h","login","me","password","REDACTED"]}`},
+		// A login name that is itself "password" must not quote the later
+		// password keyword, or the netrc reader misses the entry.
+		{`{"command":["echo","machine","h","login","password","password","hunter2"]}`, `{"command":["echo","machine","h","login","password","password","REDACTED"]}`},
 		// A password that is also an object key leaves the key as it is, and
 		// one after an escaped quote inside another string leaves that
 		// string as it is. A key after a comma, or written with spaces

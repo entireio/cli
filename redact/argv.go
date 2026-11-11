@@ -203,10 +203,13 @@ func argvQuotesValue(args []string, i int) bool {
 		// layer reads it as one word, even when it looks like prose.
 		return args[i][0] != '-'
 	}
-	// A .netrc password is a value of its own, including one that starts
-	// with a dash. Otherwise appendArgvWord splits it as a bare option
-	// plus a quoted rest, and the netrc reader stops at the bare part.
-	return strings.EqualFold(args[i-1], "password")
+	// A .netrc password that starts with a dash would otherwise be split
+	// as a bare option plus a quoted rest, and the netrc reader would
+	// stop at the bare part. Only those values are quoted: quoting every
+	// word after "password" also quotes a later password keyword when the
+	// login name is itself "password", and the netrc reader then misses
+	// the entry.
+	return strings.EqualFold(args[i-1], "password") && args[i][0] == '-'
 }
 
 // wordEnd returns where the word of element k ends in a command line of
