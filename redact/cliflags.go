@@ -224,22 +224,25 @@ var cliPasswordFlags = []cliPasswordFlag{
 	// login must be the client's subcommand, after its global options
 	// (docker --config dir login, helm registry --debug login), so a
 	// container named login (docker run --name login -p 8080:80) is not.
+	// The shell removes the quotes of a quoted one (docker "login" -p x).
 	{
 		needles: []string{loginCommand},
-		command: regexp.MustCompile(`\b(?:docker|podman|nerdctl|buildah|skopeo|oras|helm)\b(?i:\.exe)?(?:["']?` + cliGlobalOptions + cliBlank + `(?:registry` + cliGlobalOptions + cliBlank + `)?|` + cliListOptions + cliListNext + `(?:registry` + cliListOptions + cliListNext + `)?)login\b`),
+		command: regexp.MustCompile(`\b(?:docker|podman|nerdctl|buildah|skopeo|oras|helm)\b(?i:\.exe)?(?:["']?` + cliGlobalOptions + cliBlank + `(?:` + cliSubcommand("registry") + cliGlobalOptions + cliBlank + `)?|` + cliListOptions + cliListNext + `(?:registry` + cliListOptions + cliListNext + `)?)` + cliSubcommand(loginCommand)),
 		flag:    regexp.MustCompile(cliShortFlag(`\s`, "p", `(?:`+cliBlank+`)?`)),
 	},
 	// az may be quoted with its path ("/usr/bin/az" login) and take
 	// global options before login (az --debug login).
 	{
 		needles: []string{loginCommand},
-		command: regexp.MustCompile(`\baz\b(?i:\.exe)?(?:["']?` + cliGlobalOptions + cliBlank + `|` + cliListOptions + cliListNext + `)login\b`),
+		command: regexp.MustCompile(`\baz\b(?i:\.exe)?(?:["']?` + cliGlobalOptions + cliBlank + `|` + cliListOptions + cliListNext + `)` + cliSubcommand(loginCommand)),
 		flag:    regexp.MustCompile(cliShortFlag(`\s`, "p", `(?:`+cliBlank+`)?`)),
 	},
+	// The mongo tools take -p's value after a blank, after "=" (mongodump
+	// -p=x, as they document it) or joined to it.
 	{
 		needles:     []string{"mongo"},
 		command:     regexp.MustCompile(`\b(?:mongosh|mongo|mongodump|mongorestore|mongoexport|mongoimport|mongostat|mongotop)\b`),
-		flag:        regexp.MustCompile(cliShortFlag(`\s`, "p", cliBlank)),
+		flag:        regexp.MustCompile(cliShortFlag(`\s`, "p", `(?:=|`+cliBlank+`)?`)),
 		optional:    true,
 		noValueLong: true,
 	},
@@ -309,6 +312,13 @@ func cliShortFlag(before, name, sep string) string {
 		quotedSep = `(?:,` + cliListGap + `|` + sep + `)`
 	}
 	return before + `(?:` + cliFlagQuote + `-` + name + cliFlagClose + quotedSep + `|-` + name + sep + `)(` + cliFlagValue + `)`
+}
+
+// cliSubcommand matches name as a client's subcommand, which may be quoted
+// ("login", 'login', or \"login\" in a double-quoted command), as the shell
+// passes it unquoted.
+func cliSubcommand(name string) string {
+	return `(?:\\?["'])?` + name + `\b(?:\\?["'])?`
 }
 
 // netrcValue is a .netrc token. A double-quoted one may hold escaped quotes
@@ -2160,10 +2170,11 @@ func (c *commandStart) word(word string) {
 		// others run none (docker logs mysql). Any other word comes
 		// before it: container, compose, or the value of a global option
 		// (kubectl --as alice exec).
-		switch {
-		case slices.Contains(containerRunSubcommands, word):
+		// The shell removes a quoted subcommand's quotes (docker "exec").
+		switch sub := unquotedWord(word); {
+		case slices.Contains(containerRunSubcommands, sub):
 			c.sub = true
-		case slices.Contains(containerTextSubcommands, word):
+		case slices.Contains(containerTextSubcommands, sub):
 			c.text, c.noRun = true, !c.optionUnknown
 		}
 	case hasDestination(c.wrapper) && !c.host:
@@ -2566,13 +2577,16 @@ func joinedFlagEnd(rest string, loc []int) int {
 // valueRegion returns the password of the flag that loc, a match of f.flag in
 // s from base, found. stringEnd and subs are as in appendFlags.
 func (f cliPasswordFlag) valueRegion(s string, base int, loc []int, stringEnd int, subs substitutionMemo) (taggedRegion, bool) {
-	if f.optional && (len(loc) < 8 || loc[2] < 0) && s[base+loc[len(loc)-2]] == '-' {
-		// The next flag of a client whose value is optional, whose word
-		// is not read (see appendLongPasswordFlags).
+	// A dash-led word after a blank is the next flag of a client whose
+	// value is optional; one after "=" is the value (mongodump -p=-x).
+	start := base + loc[len(loc)-2]
+	nextFlag := f.optional && s[start-1] != '='
+	if nextFlag && (len(loc) < 8 || loc[2] < 0) && s[start] == '-' {
+		// Its word is not read (see appendLongPasswordFlags).
 		return taggedRegion{}, false
 	}
 	v, ok := shortFlagValue(s, base, loc, stringEnd, subs)
-	if !ok || f.optional && isListFlag(s, base, loc) && strings.HasPrefix(s[v.start:v.end], "-") {
+	if !ok || nextFlag && isListFlag(s, base, loc) && strings.HasPrefix(s[v.start:v.end], "-") {
 		// The next element of a list is the next flag of such a client
 		// too (["mongosh", "-p", "--host", "db"]).
 		return taggedRegion{}, false
@@ -2583,7 +2597,7 @@ func (f cliPasswordFlag) valueRegion(s string, base int, loc []int, stringEnd in
 			return taggedRegion{}, false
 		}
 	}
-	return passwordValueRegion(s, v, stringEnd, subs, f.optional, false)
+	return passwordValueRegion(s, v, stringEnd, subs, nextFlag, false)
 }
 
 // shortFlagValue returns the value of the short password flag that loc, a
