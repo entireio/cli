@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,8 +43,15 @@ func TestOpenCodeSeedRepoPlantsDeps(t *testing.T) {
 		if err != nil {
 			t.Fatalf("seeded opencode.json missing: %v", err)
 		}
-		if !strings.Contains(string(cfg), `"model": "test"`) {
-			t.Errorf("seeded opencode.json does not select the model:\n%s", cfg)
+		// Report only the model: the config can carry ANTHROPIC_API_KEY.
+		var parsed struct {
+			Model string `json:"model"`
+		}
+		if err := json.Unmarshal(cfg, &parsed); err != nil {
+			t.Fatalf("seeded opencode.json is not valid JSON: %v", err)
+		}
+		if parsed.Model != "test" {
+			t.Errorf("seeded opencode.json selects model %q, want %q", parsed.Model, "test")
 		}
 		if _, err := os.Lstat(filepath.Join(dir, ".opencode")); !os.IsNotExist(err) {
 			t.Errorf("expected SeedRepo to plant nothing under .opencode for OpenCode 2, got err=%v", err)
