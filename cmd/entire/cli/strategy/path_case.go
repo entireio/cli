@@ -219,7 +219,10 @@ func agreedHash(hashes map[string]string, file string, from []string) (string, b
 	agreed, ok := hashes[file]
 	for _, spelling := range from {
 		hash, recorded := hashes[spelling]
-		if !recorded || ok && hash != agreed {
+		if !recorded {
+			return "", false
+		}
+		if ok && hash != agreed {
 			return "", false
 		}
 		agreed, ok = hash, true
