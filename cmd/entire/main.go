@@ -63,7 +63,8 @@ func main() {
 		}
 		cancel()
 		// Ending a running plugin first: once we exit, nothing else may.
-		cli.ForceQuitPlugins(<-sigChan)
+		// A third signal cuts short the wait for its own force quit.
+		cli.ForceQuitPlugins(<-sigChan, sigChan)
 		dieFromSignal(sig)
 	}()
 
@@ -167,7 +168,9 @@ func main() {
 // outright, skipping the cancel path that ends a running plugin).
 //
 // Each only if it was not ignored when we started (ignored is signal.Ignored,
-// which must be asked before any Notify for that signal). Notify un-ignores a
+// which must be asked before any Notify for that signal). In practice that
+// spares SIGINT and SIGHUP: the Go runtime keeps an inherited ignore only for
+// those two, so SIGTERM never reads as ignored. Notify un-ignores a
 // signal, which would defeat whoever ignored it: `nohup entire <plugin>` would
 // catch the terminal's SIGHUP it was meant to sleep through and take the
 // plugin down with it, and a background job in a non-interactive shell, which

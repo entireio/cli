@@ -141,7 +141,7 @@ func TestForceQuitPlugins_NonInterruptKillsAtOnce(t *testing.T) { //nolint:paral
 	var took time.Duration
 	code, sig := startPluginUntilReady(t, "trap '' INT TERM HUP\ntouch \"$READY\"\nexec sleep 30\n", func(context.CancelFunc) {
 		start := time.Now()
-		ForceQuitPlugins(syscall.SIGTERM)
+		ForceQuitPlugins(syscall.SIGTERM, nil)
 		took = time.Since(start)
 	})
 	if code != ExitPluginSignalled || sig != syscall.SIGKILL {
@@ -157,7 +157,7 @@ func TestForceQuitPlugins_NonInterruptKillsAtOnce(t *testing.T) { //nolint:paral
 // quit (entire-stream flushes its last records) instead of being killed.
 func TestForceQuitPlugins_InterruptLetsPluginFinish(t *testing.T) { //nolint:paralleltest // mutates env and seams
 	code, sig := startPluginUntilReady(t, "touch \"$READY\"\nsleep 0.5\nexit 3\n", func(context.CancelFunc) {
-		ForceQuitPlugins(os.Interrupt)
+		ForceQuitPlugins(os.Interrupt, nil)
 	})
 	if code != 3 || sig != nil {
 		t.Errorf("runPlugin = (%d, %v), want the plugin's own (3, nil)", code, sig)
@@ -171,10 +171,28 @@ func TestForceQuitPlugins_InterruptKillsAfterGrace(t *testing.T) { //nolint:para
 	pluginForceQuitGrace = 200 * time.Millisecond
 	t.Cleanup(func() { pluginForceQuitGrace = prev })
 	code, sig := startPluginUntilReady(t, "trap '' INT\ntouch \"$READY\"\nexec sleep 30\n", func(context.CancelFunc) {
-		ForceQuitPlugins(os.Interrupt)
+		ForceQuitPlugins(os.Interrupt, nil)
 	})
 	if code != ExitPluginSignalled || sig != syscall.SIGKILL {
 		t.Errorf("runPlugin = (%d, %v), want (%d, killed)", code, sig, ExitPluginSignalled)
+	}
+}
+
+// A third Ctrl-C during that grace kills at once rather than waiting it out.
+func TestForceQuitPlugins_FurtherSignalCutsGraceShort(t *testing.T) { //nolint:paralleltest // mutates env and seams
+	var took time.Duration
+	code, sig := startPluginUntilReady(t, "trap '' INT\ntouch \"$READY\"\nexec sleep 30\n", func(context.CancelFunc) {
+		more := make(chan os.Signal, 1)
+		more <- os.Interrupt
+		start := time.Now()
+		ForceQuitPlugins(os.Interrupt, more)
+		took = time.Since(start)
+	})
+	if code != ExitPluginSignalled || sig != syscall.SIGKILL {
+		t.Errorf("runPlugin = (%d, %v), want (%d, killed)", code, sig, ExitPluginSignalled)
+	}
+	if took > time.Second {
+		t.Errorf("ForceQuitPlugins with a further signal took %v, want an immediate kill", took)
 	}
 }
 

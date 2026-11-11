@@ -413,10 +413,11 @@ var pluginForceQuitGrace = pluginCancelGrace
 // cancel grace (configurePluginCancel) still fires on time, so on Unix a
 // second Ctrl-C four seconds after the first leaves about one second. That is
 // deliberate — a second Ctrl-C asks to quit sooner, never later — and the
-// plugin has been winding down since the first. Any other
-// signal (a second SIGTERM or SIGHUP) reached only this process, so the
-// plugins are killed at once.
-func ForceQuitPlugins(sig os.Signal) {
+// plugin has been winding down since the first. A further signal on more (a
+// third Ctrl-C) ends that window and kills at once. Any other second signal
+// (SIGTERM or SIGHUP) reached only this process, so the plugins are killed at
+// once.
+func ForceQuitPlugins(sig os.Signal, more <-chan os.Signal) {
 	runningPlugins.Lock()
 	pending := make(map[*os.Process]chan struct{}, len(runningPlugins.procs))
 	for proc, exited := range runningPlugins.procs {
@@ -424,7 +425,7 @@ func ForceQuitPlugins(sig os.Signal) {
 	}
 	runningPlugins.Unlock()
 	if sig == os.Interrupt {
-		awaitPluginExits(pending, pluginForceQuitGrace)
+		awaitPluginExits(pending, pluginForceQuitGrace, more)
 	}
 	for proc, exited := range pending {
 		select {
@@ -435,15 +436,17 @@ func ForceQuitPlugins(sig os.Signal) {
 	}
 }
 
-// awaitPluginExits waits until every plugin in pending has exited, or grace
-// has passed.
-func awaitPluginExits(pending map[*os.Process]chan struct{}, grace time.Duration) {
+// awaitPluginExits waits until every plugin in pending has exited, grace has
+// passed, or a signal arrives on more.
+func awaitPluginExits(pending map[*os.Process]chan struct{}, grace time.Duration, more <-chan os.Signal) {
 	deadline := time.NewTimer(grace)
 	defer deadline.Stop()
 	for _, exited := range pending {
 		select {
 		case <-exited:
 		case <-deadline.C:
+			return
+		case <-more:
 			return
 		}
 	}

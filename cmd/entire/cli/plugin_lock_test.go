@@ -261,3 +261,47 @@ func TestPluginLock_AbsentPluginLeavesNoLockFile(t *testing.T) { //nolint:parall
 		t.Errorf("ghost.lock after upgrade/remove of an absent plugin: %v, want none", err)
 	}
 }
+
+// `plugin remove` and a local-path install take the plugin's lock: each waits
+// while another command holds it, and completes once it is released.
+func TestPluginLock_RemoveAndLocalInstallWaitForThePluginLock(t *testing.T) { //nolint:paralleltest // mutates env
+	cases := []struct {
+		name string
+		// run gets newSrc, a fresh entire-foo source to install from.
+		run func(ctx context.Context, newSrc string) error
+	}{
+		{"remove", func(ctx context.Context, _ string) error {
+			return RemoveManagedPlugin(ctx, "foo")
+		}},
+		{"local install", func(ctx context.Context, newSrc string) error {
+			_, err := InstallPluginFromPath(ctx, InstallPluginOptions{SourcePath: newSrc, Force: true})
+			return err
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withPluginDir(t)
+			if _, err := InstallPluginFromPath(t.Context(), InstallPluginOptions{SourcePath: writePluginSource(t, "old")}); err != nil {
+				t.Fatal(err)
+			}
+			newSrc := writePluginSource(t, "new")
+			release := holdPluginLock(t, "foo")
+			w := newWaitNoticeWriter()
+			done := make(chan error, 1)
+			go func() { done <- tc.run(withPluginProgress(t.Context(), w), newSrc) }()
+			w.awaitWaiting(t)
+			if got := w.String(); !strings.Contains(got, `plugin "foo"`) {
+				t.Errorf("wait notice %q does not name foo's lock", got)
+			}
+			select {
+			case err := <-done:
+				t.Fatalf("%s finished (%v) while foo's lock was held", tc.name, err)
+			default:
+			}
+			release()
+			if err := receive(t, done); err != nil {
+				t.Errorf("%s after the lock was released: %v", tc.name, err)
+			}
+		})
+	}
+}

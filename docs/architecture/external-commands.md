@@ -245,8 +245,8 @@ External commands are arbitrary executables. No SDK, no protocol, no manifest. T
 - **Signals reach the child.** Terminal signals (Ctrl+C, a closed terminal's hangup) reach the child directly via the foreground process group; on Windows the console delivers Ctrl+C to it the same way. When the CLI itself is signalled:
   - **Unix:** it forwards the signal it received — `SIGINT`, `SIGTERM` or `SIGHUP`, as received, so a terminal Ctrl+C arrives twice — and sends `SIGKILL` 5 seconds later if the plugin has not exited.
   - **Windows:** nothing is forwarded (the console already delivered the Ctrl+C), and the plugin is killed 30 seconds later if it has not exited.
-  - **A second signal force-quits.** After a second Ctrl+C the plugin gets up to 5 more seconds to finish its own force-quit, but never past the deadline the first signal set; after any other second signal it is killed at once.
-  - A signal the CLI was started with ignored (for example under `nohup`) stays ignored and is never forwarded.
+  - **A second signal force-quits.** After a second Ctrl+C the plugin gets up to 5 more seconds to finish its own force-quit, but never past the deadline the first signal set; a third Ctrl+C, or any other second signal, kills it at once.
+  - `SIGINT` or `SIGHUP` the CLI was started with ignored (for example under `nohup`) stays ignored and is never forwarded. An ignored `SIGTERM` is not kept: the Go runtime resets it, so the CLI still handles and forwards it.
 
   Commands that need clean shutdown should handle `SIGINT`, `SIGTERM` and `SIGHUP` alike, and finish within 5 seconds. If the CLI is killed in a way it cannot catch (`SIGKILL`, the OOM killer, `taskkill /F`, a crash), the plugin keeps running: nothing ties its lifetime to the CLI's.
 - **Arguments after the command name pass through verbatim.** `entire pgr --help foo` invokes `entire-pgr` with argv `["--help", "foo"]`. Cobra's flag parsing does not run.
