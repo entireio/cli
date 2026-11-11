@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -169,9 +172,11 @@ func liveRecordPath(ctx context.Context, hookRoot string, live map[string]string
 // liveUnregisteredCheckout reports whether recorded, the path of a record under
 // the empty worktree ID, is still an unregistered checkout of hookRoot's
 // repository: its Git directory has no worktrees/<id> registration and shares
-// hookRoot's common directory through commondir. A path that is gone, or whose
-// Git metadata no longer resolves, can take no commit, so it is not. err is
-// set when hookRoot's own metadata can't be resolved, which says nothing about
+// hookRoot's common directory through commondir. Directories are compared by
+// identity, so a bind-mount alias of the common directory counts. A path that
+// is gone, or whose Git metadata is no longer a checkout's, can take no
+// commit, so it is not. err is set when that can't be told (a permission or
+// I/O failure reading either worktree's metadata), which says nothing about
 // the record.
 func liveUnregisteredCheckout(hookRoot, recorded string) (bool, error) {
 	if recorded == "" {
@@ -179,7 +184,10 @@ func liveUnregisteredCheckout(hookRoot, recorded string) (bool, error) {
 	}
 	checkout, err := gitrepo.ResolveWorktreeMetadata(recorded)
 	if err != nil {
-		return false, nil //nolint:nilerr // an unresolvable checkout is a removed one
+		if metadataReadFailed(err) {
+			return false, fmt.Errorf("resolve recorded checkout: %w", err)
+		}
+		return false, nil // removed, or no longer a checkout
 	}
 	if checkout.WorktreeID != "" {
 		return false, nil // a registered worktree now, which git lists
@@ -188,7 +196,25 @@ func liveUnregisteredCheckout(hookRoot, recorded string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("resolve hook worktree: %w", err)
 	}
-	return !sameDir(checkout.GitDir, checkout.CommonDir) && sameDir(checkout.CommonDir, hook.CommonDir), nil
+	return !sameDirIdentity(checkout.GitDir, checkout.CommonDir) && sameDirIdentity(checkout.CommonDir, hook.CommonDir), nil
+}
+
+// metadataReadFailed reports whether err, from resolving a worktree's Git
+// metadata, is a failure to read it (permission, I/O) rather than an answer:
+// a missing path or .git entry, a path component that is now a file, or
+// metadata that doesn't parse as a checkout's.
+func metadataReadFailed(err error) bool {
+	var pathErr *fs.PathError
+	return errors.As(err, &pathErr) &&
+		!errors.Is(err, fs.ErrNotExist) && !errors.Is(err, syscall.ENOTDIR) && !errors.Is(err, gitrepo.ErrWorktreeMetadataNotFound)
+}
+
+// sameDirIdentity reports whether a and b are the same directory on disk,
+// which also holds for two bind mounts of it, as gitrepo compares them.
+func sameDirIdentity(a, b string) bool {
+	aInfo, aErr := os.Stat(a)
+	bInfo, bErr := os.Stat(b)
+	return aErr == nil && bErr == nil && os.SameFile(aInfo, bInfo)
 }
 
 // sameDir reports whether a and b name the same directory once symlinks are
