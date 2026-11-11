@@ -12,13 +12,14 @@ import (
 // but only in international format: a + and a country code other than 1,
 // then the national number with the usual separators (+44 20 7946 0958,
 // +54 9 11 0000-0001, +33.1.99.00.12.34, +44 (0)20 7946 0958,
-// (+39) 347 000 0001). A national number without the + (020 7946 0958) is
-// left alone: in code it has the shape of counts, IDs and dates.
+// (+39) 347 000 0001, +49 30/23125678). A tab or no-break space works as a
+// space. A national number without the + (020 7946 0958) is left alone: in
+// code it has the shape of counts, IDs and dates.
 //
 // A + followed by digits also opens lines of diff output, signed numbers,
 // timezone offsets and semver build metadata, so the regex only finds the
 // shape and redactableIntlPhone decides.
-var intlPhoneRegex = regexp.MustCompile(`\+[2-9]\d*\)?(?:[-. ]?\(\d{1,4}\))?(?:[-. ]?\d+)*`)
+var intlPhoneRegex = regexp.MustCompile(`\+[2-9]\d*\)?(?:[-. \t/\x{a0}]?\(\d{1,4}\))?(?:[-. \t/\x{a0}]?\d+)*`)
 
 // Digit counts for an international number, country code included. E.164
 // allows at most 15; a country code and the 7 digits of the shortest common
@@ -30,7 +31,8 @@ const (
 
 // redactableIntlPhone reports whether the candidate s[start:end] is a phone
 // number in international format, and its bounds: a "(+39)" country code
-// starts one byte earlier, and digits past the 15th are left out.
+// starts one byte earlier, and trailing space-separated groups that take it
+// past 15 digits are left out.
 func redactableIntlPhone(s string, start, end int) (int, int, bool) {
 	// The byte before the + decides, before a "(" around the country code
 	// joins the match: the "(" is the boundary (Tel.(+44) 20 7946 0958).
@@ -65,8 +67,10 @@ func redactableIntlPhone(s string, start, end int) (int, int, bool) {
 	}
 	// The first group is the country code. Only a space may follow a longer
 	// one (+447700 900123, a national number with its 0 swapped for +44), so
-	// a date that starts with the year (+2026-11-06 19:24) never passes.
-	if cc > 3 && s[ccEnd] != ' ' {
+	// a date that starts with the year (+2026-11-06 19:24) never passes. One
+	// slash separates an area code (+49 30/23125678); two make a date
+	// (+31/12/2024 23:59).
+	if (cc > 3 && phoneSpaceAt(s, ccEnd) == 0) || strings.Count(s[ccEnd:end], "/") > 1 {
 		return 0, 0, false
 	}
 	return start, end, dottedReadsAsPhone(s, start, ccEnd, end)
@@ -80,7 +84,7 @@ func redactableIntlPhone(s string, start, end int) (int, int, bool) {
 func trimIntlPhone(s string, start, ccEnd, end int) (int, bool) {
 	digits := countDigits(s[start:end])
 	for digits > intlPhoneMaxDigits {
-		i := strings.LastIndexByte(s[ccEnd:end], ' ')
+		i := lastPhoneSpace(s[ccEnd:end])
 		if i < 0 {
 			return 0, false
 		}
@@ -91,15 +95,24 @@ func trimIntlPhone(s string, start, ccEnd, end int) (int, bool) {
 }
 
 // dotsReadAsPhone reports whether the dots in s[start:end], if any, separate
-// a phone number. Apart from a space after the country code, dots must be the
-// only separator, at least two of them, and the digits must not form an IPv4
-// address: +33.1.99.00.12.34 and +33 1.99.00.12.34 are numbers, while a
-// decimal (+48.8566140), +233.252.18.110 and +31.12.2024 23 are not.
+// a phone number. Apart from a space after the country code and the
+// parenthesized group, dots must be the only separator, at least two of them,
+// and the digits must not form an IPv4 address: +33.1.99.00.12.34,
+// +33 1.99.00.12.34, +33 (0)1.99.00.12.34 and (+33) 1.99.00.12.34 are
+// numbers, while a decimal (+48.8566140), +233.252.18.110 and
+// +31.12.2024 23 are not.
 func dotsReadAsPhone(s string, start, ccEnd, end int) bool {
+	i := ccEnd
+	if i < end && s[i] == ')' {
+		i++
+	}
+	if i < end {
+		i += phoneSpaceAt(s, i)
+	}
 	dots, other := 0, false
-	for i := ccEnd; i < end; i++ {
+	for ; i < end; i++ {
 		switch c := s[i]; {
-		case isDigit(c), i == ccEnd && c == ' ':
+		case isDigit(c), c == '(', c == ')':
 		case c == '.':
 			dots++
 		default:
@@ -124,7 +137,7 @@ func dotsReadAsPhone(s string, start, ccEnd, end int) bool {
 // number (+49 30123456 78.90), and trimIntlPhone has capped the digits.
 func dottedReadsAsPhone(s string, start, ccEnd, end int) bool {
 	for cut := end; !dotsReadAsPhone(s, start, ccEnd, cut); {
-		i := strings.LastIndexByte(s[ccEnd+1:cut], ' ')
+		i := lastPhoneSpace(s[ccEnd+1 : cut])
 		if i < 0 {
 			return false
 		}
@@ -149,13 +162,19 @@ func countDigits(s string) int {
 // intlPhoneStandsAlone reports whether the number starting at s[start] does
 // not continue a longer token: semver build metadata (1.2.3+20241029),
 // base64 (ab/+2345678901), or an identifier. A letter after a backslash
-// belongs to an escape left in the text (\n+44 20 7946 0958), not to a word.
+// belongs to an escape left in the text (\n+44 20 7946 0958), not to a word,
+// and a slash only ends a URI scheme (tel://+442079460958).
 func intlPhoneStandsAlone(s string, start int) bool {
 	if start == 0 {
 		return true
 	}
-	prev := s[start-1]
-	return (!isIPWordByte(prev) || followsEscape(s, start)) && prev != '.' && prev != '/'
+	switch prev := s[start-1]; {
+	case prev == '/':
+		return strings.HasSuffix(s[:start], "://")
+	case isIPWordByte(prev):
+		return followsEscape(s, start)
+	}
+	return true
 }
 
 // endIntlPhone returns where the number ending the candidate at end stops,
@@ -168,11 +187,29 @@ func endIntlPhone(s string, ccEnd, end int) (int, bool) {
 	if end == len(s) || !isIPWordByte(s[end]) || isPhoneExtension(s, end) {
 		return end, true
 	}
-	i := strings.LastIndexByte(s[ccEnd:end], ' ')
+	i := lastPhoneSpace(s[ccEnd:end])
 	if i < 0 {
 		return 0, false
 	}
 	return ccEnd + i, true
+}
+
+// phoneSpaceAt returns the length of the space, tab or no-break space at
+// s[i], or 0 when there is none.
+func phoneSpaceAt(s string, i int) int {
+	switch {
+	case s[i] == ' ' || s[i] == '\t':
+		return 1
+	case strings.HasPrefix(s[i:], "\u00a0"):
+		return len("\u00a0")
+	}
+	return 0
+}
+
+// lastPhoneSpace returns the index of the last space, tab or no-break space
+// in s, or -1 when there is none.
+func lastPhoneSpace(s string) int {
+	return strings.LastIndexFunc(s, func(r rune) bool { return r == ' ' || r == '\t' || r == '\u00a0' })
 }
 
 // isPhoneExtension reports whether s[i:] starts with an extension that ends
