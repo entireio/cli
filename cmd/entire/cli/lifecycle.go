@@ -500,16 +500,25 @@ func normalizeAgentPaths(files []string, eventCWD, repoRoot string) []string {
 }
 
 // physicalAgentPath returns p, an absolute path an agent named, as the
-// worktree-relative name of the file it opens when p has a ".." component
-// outside Windows: after a symlink to a directory, ".." leaves the link's
-// target (alias/../file.txt is real/file.txt for alias -> real/sub), which
-// the lexical clean in filepath.Rel cannot see. A directory that no longer
-// exists (a deleted file's) is resolved from its deepest existing ancestor.
-// It returns "" when p's directory resolves outside the worktree, and p
-// itself when p has no ".." or its directory does not resolve, which
-// filepath.Rel then cleans. Windows takes ".." lexically, before any link.
+// worktree-relative name of the file it opens, outside Windows, where the
+// lexical clean in filepath.Rel cannot see it:
+//   - when p has a ".." component: after a symlink to a directory, ".."
+//     leaves the link's target (alias/../file.txt is real/file.txt for
+//     alias -> real/sub);
+//   - when p lies outside the worktree as spelled: an agent whose working
+//     directory is a symlink to the worktree, or to a directory in it, names
+//     files through it (/alias/file.txt for /alias -> /repo).
+//
+// A directory that no longer exists (a deleted file's) is resolved from its
+// deepest existing ancestor. It returns "" when p's directory resolves
+// outside the worktree, and p itself when p needs neither or its directory
+// does not resolve, which filepath.Rel then cleans or drops. Windows takes
+// paths lexically, ".." before any link.
 func physicalAgentPath(p, repoRoot string) string {
-	if runtime.GOOS == windowsGOOS || !slices.Contains(strings.Split(p, string(filepath.Separator)), "..") {
+	if runtime.GOOS == windowsGOOS {
+		return p
+	}
+	if !slices.Contains(strings.Split(p, string(filepath.Separator)), "..") && paths.ToRelativePath(p, repoRoot) != "" {
 		return p
 	}
 	i := strings.LastIndex(p, string(filepath.Separator))

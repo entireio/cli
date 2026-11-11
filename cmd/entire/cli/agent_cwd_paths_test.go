@@ -181,6 +181,32 @@ func TestPhysicalAgentPath(t *testing.T) {
 	require.Equal(t, root+"/loop/../file.txt", physicalAgentPath(root+"/loop/../file.txt", root), "a link cycle does not resolve")
 	require.Empty(t, physicalAgentPath(root+"/out/gone/../../file.txt", root), "a directory that no longer exists, outside the worktree")
 	require.Equal(t, root+"/real/./file.txt", physicalAgentPath(root+"/real/./file.txt", root), "no .., nothing to resolve")
+
+	// An agent working in a link to the worktree, or to a directory in it,
+	// names files through the link.
+	require.NoError(t, os.Symlink(root, filepath.Join(outside, "repo")))
+	require.NoError(t, os.Symlink(filepath.Join(root, "real"), filepath.Join(outside, "real")))
+	require.Equal(t, "file.txt", physicalAgentPath(outside+"/repo/file.txt", root), "a link to the worktree")
+	require.Equal(t, "real/file.txt", physicalAgentPath(outside+"/real/file.txt", root), "a link to a directory in it")
+	require.Equal(t, "real/gone/file.txt", physicalAgentPath(outside+"/repo/real/gone/file.txt", root), "a directory that no longer exists, after a link")
+	require.Empty(t, physicalAgentPath(outside+"/sub/file.txt", root), "a file outside the worktree")
+}
+
+// TestNormalizeAgentPaths_AliasedWorkingDirectory: an agent whose working
+// directory is a link to the worktree names files through it, absolute or
+// relative to that directory. Dropped as outside the worktree, such a name
+// would leave a turn during an overlap without its own edit.
+func TestNormalizeAgentPaths_AliasedWorkingDirectory(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("Windows takes paths lexically")
+	}
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	alias := filepath.Join(t.TempDir(), "alias")
+	require.NoError(t, os.Symlink(root, alias))
+	require.Equal(t, []string{"file.txt", "docs/a.md"},
+		normalizeAgentPaths([]string{"file.txt", alias + "/docs/a.md"}, alias, root))
 }
 
 // TestNormalizeAgentPaths_RootedPathsWindows: a transcript can spell an
