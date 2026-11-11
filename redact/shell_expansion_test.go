@@ -1,6 +1,9 @@
 package redact
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // assertStringRedactionCasesWithoutScanners checks each case with only the
 // key/value rules on, then restores the default scanners. The scanner
@@ -121,6 +124,8 @@ func TestString_DoubleQuotedShellDefaultsPreserved(t *testing.T) {
 		`printf '%s\n' "postgres://app:${PW:-'$FALLBACK'}@db/app"`,
 		"echo \"a\nDB_PASSWORD=${PW:-'$FALLBACK'} b\"",
 		"# don't\nDB_PASSWORD=\"${PW:-'$FALLBACK'}\"",
+		// Past the first KiB of text, the value's own line is read.
+		strings.Repeat("echo ok\n", 200) + `DB_PASSWORD="${PW:-'$FALLBACK'}"`,
 		`echo "API_KEY=${KEY:-'$FALLBACK'}"`,
 		`psql "postgres://app:${PW:-'$FALLBACK'}@db/app"`,
 		`echo "DB_PASSWORD=${PW}"`,
