@@ -211,7 +211,9 @@ always runnable in every build.
   its own deadline (`logoutLoginTimeout`); a cancelled context stops the sweep
   with the unreached logins intact, and a failed local removal or an interrupt
   fails the command
-- `doctor`: bare runs the scan-and-fix flow, plus `trace`, `logs`, `bundle`
+- `doctor`: bare runs the scan-and-fix flow, plus `trace`, `logs`, `bundle` and
+  `migrate-checkpoints`, which is also where every message about a legacy
+  checkpoint whose `v1` copies diverged points
 - `cluster`: the control plane's data-plane cluster catalog — `list` only, since
   clusters are provisioned by Entire rather than by users. It renders `GET
   /clusters` (`coreapi.ListClusters`, the same call the mirror wizard and
@@ -246,7 +248,12 @@ always runnable in every build.
   project's existing agent of that preset to it (one agent per preset per
   project), refusing `--disabled`/`--environment` an existing agent cannot
   honor. Creates send a fresh `Idempotency-Key` and replaces the agent's
-  `If-Match` etag, as entire-api requires. Also
+  `If-Match` etag, as entire-api requires. `agent run`
+  (`list`/`show`/`cancel`/`retry`) reads and acts on the agents' runs through
+  `/{host}/{project}/runs`; `list` prints one page with its cursor, run IDs
+  must be ULIDs before any request, `retry` sends an `Idempotency-Key`, and
+  `--json` passes the server's runs through. What the agents did on one trail
+  change is `trail finding`, and `trail rerun-review` starts them. Also
   `grant` (`add`/`list`/`remove`): project access for a `provider:handle`
   grantee, roles reader/writer/admin; both `add` and `remove` take the grantee
   optionally (see the grant-subtree notes below). `create <name> --owner <ref>`
@@ -277,6 +284,33 @@ always runnable in every build.
   all under `ENTIRE_TOKEN`. An owner with no `--owner` spelling but its ULID
   (an account with no handle, an org sharing its name) gets no command in the
   summary, which says why
+- `service-account` (alias: `sa`): a project's service accounts — `create`,
+  `list`, `get`, `delete`, `grant`, `revoke`, `grants`, `providers`, `bind`,
+  `bindings`, `unbind`. A service account is addressed by its `svc_` ID or as
+  `<project>/<name>`. Names are unique per project only, so the name form lists
+  the project's accounts and matches exactly. Errors branch on core's RFC 9457
+  `type`, never on its prose (`coreapi.APIErrorType`). `grant` and `revoke`
+  take `--repo` or `--project`. A bare repo name resolves inside the account's
+  own project, because core refuses a grant outside it with 422. Like `repo
+  grant`, a bare value is always a name, never a ULID; a slash path goes
+  through the shared resolver, which suggests `/et/` for a forgeless one.
+  Nothing here is provider-specific: `providers` and `bind --provider <name>`
+  render core's provider descriptors from `GET /oidc-providers`. A provider is
+  matched by `name`, then by the deprecated `displayName` an older core sends.
+  Only `self_serve` providers are listed or bound. An older core sends no
+  `self_serve`, so the CLI lists every provider and core decides. `bind`
+  checks each `--pin` against the descriptor's attributes (unknown name, a
+  `*` in an exact attribute, a pattern mismatch, a missing required pin, a
+  value of only `*`) before it calls core. Prompted pins get the same checks
+  inside the form. Core stays the authority, so a provider without
+  attributes gets only the provider-independent only-`*` check. `unbind`
+  upper-cases an `eib_` ID, as lookups do for `svc_`: core answers 204 for an
+  unknown binding, so a lower-case ID would report a removal that never
+  happened. A terminal asks for missing required
+  pins. The `github-actions` success output adds a setup-entire workflow
+  snippet. `revoke` and `unbind` take an explicit target, so they never
+  prompt. A typed `grant remove` does not prompt either. `delete` confirms
+  like `project delete`.
 - `repo`: control-plane repository lifecycle — `create`, `list --project`,
   `view`, `edit`, `delete`, `clone`, `default-branch`, plus the `mirror`, `remote`,
   `visibility`, `protection` and `grant` subtrees (`repo grant` mirrors

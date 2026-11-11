@@ -29,3 +29,27 @@ func (c *Client) TrailsEnabled(ctx context.Context, forge, owner, repo string) (
 		return false, fmt.Errorf("probe trails enablement: unexpected status %s", resp.Status)
 	}
 }
+
+// RepoTrailsEnabled reads a repository's Trails setting from the cell that
+// holds it (GET /api/v1/repos/{repo_id}). known is false when the response
+// carries no setting, so callers can tell "off" from "not reported".
+func (c *Client) RepoTrailsEnabled(ctx context.Context, repoID string) (enabled, known bool, err error) {
+	resp, err := c.Get(ctx, "/api/v1/repos/"+url.PathEscape(repoID))
+	if err != nil {
+		return false, false, fmt.Errorf("read repository settings: %w", err)
+	}
+	defer resp.Body.Close()
+	if err := CheckResponse(resp); err != nil {
+		return false, false, fmt.Errorf("read repository settings: %w", err)
+	}
+	var repo struct {
+		TrailsEnabled *bool `json:"trails_enabled"`
+	}
+	if err := DecodeJSON(resp, &repo); err != nil {
+		return false, false, fmt.Errorf("decode repository settings: %w", err)
+	}
+	if repo.TrailsEnabled == nil {
+		return false, false, nil
+	}
+	return *repo.TrailsEnabled, true, nil
+}
