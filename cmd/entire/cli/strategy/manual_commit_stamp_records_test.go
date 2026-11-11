@@ -38,7 +38,8 @@ func commitOn(parent, message string) *object.Commit {
 }
 
 // commitWith commits the staged changes with message carrying cpIDs and
-// returns the commit, as post-commit reads it.
+// returns the commit, as post-commit reads it. It commits through git, which
+// writes HEAD's reflog as a real commit does.
 func commitWith(t *testing.T, dir, subject string, cpIDs ...id.CheckpointID) *object.Commit {
 	t.Helper()
 	msg := subject + "\n"
@@ -47,7 +48,7 @@ func commitWith(t *testing.T, dir, subject string, cpIDs ...id.CheckpointID) *ob
 	}
 	testutil.WriteFile(t, dir, subject+".txt", subject)
 	testutil.GitAdd(t, dir, subject+".txt")
-	testutil.GitCommit(t, dir, msg)
+	testutil.RunGit(t, dir, "commit", "-q", "-m", msg)
 	return headCommit(t, dir)
 }
 
@@ -263,6 +264,35 @@ func TestInheritedTrailersMarker_SurvivesCommitsLandedSince(t *testing.T) {
 	nextCommit := commitWith(t, dir, "next", nextSquashed)
 	assert.Empty(t, takeStampRecords(ctx, plainCommit).inherited, "a marker recorded on a later commit is not this one's")
 	assert.Equal(t, map[id.CheckpointID]bool{nextSquashed: true}, takeStampRecords(ctx, nextCommit).inherited, "it is the next squash's")
+}
+
+// A redo prepared on a commit's parent and then cancelled leaves a marker
+// recorded on that parent. Once HEAD is reset back onto the commit, the marker
+// looks like one the commit's own post-commit has yet to take, so an amend's
+// prepare kept it and the amend took it: its own checkpoint counted as
+// inherited and the amended work never reached it. HEAD's reflog shows the
+// reset, so the amend's prepare clears the marker, as it did before markers
+// could wait.
+func TestInheritedTrailersMarker_ClearedAfterACancelledRedo(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	ctx := context.Background()
+	checkpointed := id.MustCheckpointID("b8b8b8b8b8b8")
+
+	parent := commitWith(t, dir, "parent")
+	commit := commitWith(t, dir, "checkpointed", checkpointed)
+	testutil.RunGit(t, dir, "reset", "-q", "--soft", parent.Hash.String())
+	recordInheritedTrailers(ctx, []id.CheckpointID{checkpointed}) // the redo's prepare, then cancelled
+	testutil.RunGit(t, dir, "reset", "-q", "--soft", commit.Hash.String())
+
+	recordInheritedTrailers(ctx, nil) // the amend's prepare, which inherited nothing
+	_, ok := readInheritedMarkerIn(mustPerWorktreeGitRoot(t))
+	assert.False(t, ok, "the cancelled redo's marker is cleared")
+
+	testutil.WriteFile(t, dir, "amended.txt", "amended")
+	testutil.GitAdd(t, dir, "amended.txt")
+	testutil.RunGit(t, dir, "commit", "-q", "--amend", "--no-edit")
+	assert.Empty(t, takeStampRecords(ctx, headCommit(t, dir)).inherited, "the amend inherits nothing")
 }
 
 // Prepare's read-modify-write of the records and post-commit's take hold the

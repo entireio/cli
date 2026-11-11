@@ -10,6 +10,7 @@ import (
 	"maps"
 	"os"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/go-git/go-git/v6"
@@ -134,28 +135,34 @@ func stampedByAnotherCommit(ctx context.Context, checkpointID id.CheckpointID, s
 
 // amendedCheckpoint returns the link to checkpointID, a preexisting target,
 // when this commit is an amend: the newest entry in HEAD's reflog that moved
-// HEAD replaced it with this commit instead of advancing to it. An amend keeps
-// the amended commit's trailer, or restores its session's
-// (handleAmendCommitMsg), without stamping it, so post-commit condenses into
-// the existing checkpoint for the session that owns it (withAmendedCheckpoint).
-// A checkpoint the replaced commit does not link, by trailer or by the
-// checkpoint's record of it (LinkedCommits, for a stamped trailer moved out of
-// the final block), is kept only for an owner prepare would have restored it
-// for: `commit --amend -C <other>` keeps another commit's trailer, and its
-// owner was never linked to this one. A message
+// HEAD to this commit replaced the commit before it instead of advancing from
+// it. Entries for other commits are passed over, because a commit started
+// while this post-commit runs can land after it read HEAD, and its entry is
+// then the newest. An amend keeps the amended commit's trailer, or restores
+// its session's (handleAmendCommitMsg), without stamping it, so post-commit
+// condenses into the existing checkpoint for the session that owns it
+// (withAmendedCheckpoint). A checkpoint the replaced commit does not link, by
+// trailer or by the checkpoint's record of it (LinkedCommits, for a stamped
+// trailer moved out of the final block), is kept only for an owner prepare
+// would have restored it for: `commit --amend -C <other>` keeps another
+// commit's trailer, and its owner was never linked to this one. A message
 // reused with `commit -C` keeps a trailer the same way but advances HEAD: it
-// makes a new link. With no reflog to tell them apart
+// makes a new link. With no reflog entry for this commit to tell them apart
 // (core.logAllRefUpdates=false), it is taken as an amend, so the owner keeps
-// condensing into its checkpoint as it did before the idle check.
+// condensing into its checkpoint as it did before the idle check. Judged a new
+// link instead, the owner would be dropped, and the amend's work would never
+// reach the checkpoint its trailer names.
 func (s *ManualCommitStrategy) amendedCheckpoint(ctx context.Context, repo *git.Repository, commit *object.Commit, checkpointID id.CheckpointID, preexisting bool) amendedLink {
 	if !preexisting {
 		return amendedLink{}
 	}
 	for _, e := range headReflog(ctx) {
-		if e.oldHash.Equal(e.newHash) {
-			continue // HEAD did not move, as with another hook's `git reset HEAD`
+		if !e.newHash.Equal(commit.Hash) || e.oldHash.Equal(e.newHash) {
+			// A later commit, or an entry that did not move HEAD, as with
+			// another hook's `git reset HEAD`.
+			continue
 		}
-		if !e.newHash.Equal(commit.Hash) || e.oldHash.IsZero() || slices.ContainsFunc(commit.ParentHashes, e.oldHash.Equal) {
+		if e.oldHash.IsZero() || slices.ContainsFunc(commit.ParentHashes, e.oldHash.Equal) {
 			return amendedLink{}
 		}
 		link := amendedLink{checkpointID: checkpointID}
@@ -221,7 +228,7 @@ func (marker inheritedTrailers) recordedOn() string {
 // existing checkpoint, which may simply not be in this clone's store yet.
 // With nothing inherited it clears any marker a commit that never happened
 // left, but not one HEAD's commit, or a commit below it, may still be waiting
-// to take (markerAwaitsCommitOnHead).
+// to take (markerAwaitsCommitOnHead, which also reads HEAD's reflog).
 func recordInheritedTrailers(ctx context.Context, inherited []id.CheckpointID) {
 	recordInheritedMarker(ctx, inherited, nil)
 }
@@ -238,9 +245,10 @@ func recordInheritedMarker(ctx context.Context, inherited []id.CheckpointID, red
 			return // absent is the usual case
 		}
 		chain := headFirstParents(ctx, maxCommitsInFlight)
+		reflog := headReflog(ctx)
 		release := lockStampRecords(ctx, root)
 		defer release()
-		if !markerAwaitsCommitOnHead(root, chain) {
+		if !markerAwaitsCommitOnHead(root, chain, reflog) {
 			_ = osroot.RemoveNoSymlinks(root, inheritedTrailersFile) //nolint:errcheck // absent once post-commit took it
 		}
 		return
@@ -259,10 +267,14 @@ func recordInheritedMarker(ctx context.Context, inherited []id.CheckpointID, red
 // one that HEAD's commit, or a commit below it, recorded and whose post-commit
 // has not taken it yet: git runs post-commit after the commit is made, so the
 // next commit's prepare can run first. That is a marker for a commit on one of
-// HEAD's ancestors, recorded by a prepare that did not run on HEAD itself.
-// chain is HEAD and its first parents (headFirstParents). Callers hold the
+// HEAD's ancestors, recorded by a prepare that did not run on HEAD itself,
+// with only commits moving HEAD since one was made on the HEAD that prepare
+// ran on. A prepare whose commit was cancelled leaves a marker the same shape
+// once HEAD is reset back onto a commit on top of it, and an amend of that
+// commit would take it. chain is HEAD and its first parents
+// (headFirstParents), reflog is HEAD's reflog (headReflog). Callers hold the
 // stamp-records lock.
-func markerAwaitsCommitOnHead(root *os.Root, chain []string) bool {
+func markerAwaitsCommitOnHead(root *os.Root, chain []string, reflog []reflogEntry) bool {
 	if len(chain) < 2 {
 		return false
 	}
@@ -270,9 +282,30 @@ func markerAwaitsCommitOnHead(root *os.Root, chain []string) bool {
 	if !ok || marker.recordedOn() == chain[0] {
 		return false
 	}
-	return slices.ContainsFunc(marker.Parents, func(parent string) bool {
+	onHead := slices.ContainsFunc(marker.Parents, func(parent string) bool {
 		return slices.Contains(chain[1:], parent)
 	})
+	return onHead && committedOnSince(reflog, marker.recordedOn())
+}
+
+// committedOnSince reports whether HEAD's reflog, newest first, shows only
+// commits since a commit made on base. Resets that did not move HEAD are
+// skipped, as replacedCommits skips them. Any other entry, or a reflog that
+// does not reach such a commit (none kept, or GIT_REFLOG_ACTION renamed the
+// commits), says no, so the marker is cleared as it was before it could wait.
+func committedOnSince(reflog []reflogEntry, base string) bool {
+	for _, e := range reflog {
+		if strings.HasPrefix(e.msg, "reset:") && e.oldHash == e.newHash {
+			continue // unstaging or a stash: HEAD did not move
+		}
+		if !strings.HasPrefix(e.msg, "commit") {
+			return false
+		}
+		if e.oldHash.String() == base {
+			return true
+		}
+	}
+	return false
 }
 
 func readInheritedMarkerIn(root *os.Root) (inheritedTrailers, bool) {
@@ -354,8 +387,9 @@ type inFlight struct {
 	unknown bool
 }
 
-// mayBePending reports whether hash may be the commit or a commit on top of
-// it.
+// mayBePending reports whether a record prepared with HEAD at hash may be for
+// a commit whose post-commit has not run yet, so the take must leave it: hash
+// is the commit or one on top of it, or the walk could not tell.
 func (f inFlight) mayBePending(hash string) bool {
 	return f.unknown || f.commits[hash]
 }
