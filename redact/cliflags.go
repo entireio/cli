@@ -816,12 +816,11 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string, noVal
 	var entrypointStarts commandStart
 	var long, operands wrapperStarts
 	// A segment cut at a ")" (ssh $(mysql -Nse 'x') -p2222) goes on after
-	// it, to uncutEnds[closeAt], in a string that closes at closeAt (-1 for
-	// none); a command there starts a segment that ends there too, which is
-	// not found again, also after commands in other strings between them
-	// ()'sshpass )'sshpass ...).
+	// it, to where uncutEnds keeps for its string; a command there starts
+	// a segment that ends there too, which is not found again, also after
+	// commands in other strings between them ()'sshpass )'sshpass ...).
 	segmentEnd := 0
-	uncutEnds := map[int]int{}
+	uncutEnds := segmentEnds{}
 	// A name inside a password found before is part of that word
 	// (mysql -p$(printf x; mysql -py), and is not read again.
 	var found foundPasswords
@@ -843,11 +842,9 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string, noVal
 		switch {
 		case cmd[0] >= segmentEnd:
 			nested = newNestedScan(s, cmd[1], closeAt, stringEnd, reads)
-			uncutEnd, ok := uncutEnds[closeAt]
-			if !ok || cmd[1] >= uncutEnd {
-				uncutEnd = cmd[1] + len(f.segmentRest(s, &lines, &paths, reads, cmd, closeAt, stringEnd))
-				uncutEnds[closeAt] = uncutEnd
-			}
+			uncutEnd := uncutEnds.at(closeAt, cmd[1], func() int {
+				return cmd[1] + len(f.segmentRest(s, &lines, &paths, reads, cmd, closeAt, stringEnd))
+			})
 			rest = untilUnmatchedParen(s[cmd[1]:uncutEnd], closeAt-cmd[1], stringEnd-cmd[1], caseMemo{anyHeight: true, lines: reads, base: cmd[1]})
 			segmentEnd = cmd[1] + len(rest)
 		case f.leading:
@@ -884,6 +881,24 @@ func (f cliPasswordFlag) appendPasswords(regions []taggedRegion, s string, noVal
 		}
 	}
 	return regions
+}
+
+// segmentEnds keeps, for each string that commands are quoted in, by where
+// its closing quote starts (-1 for none), where the uncut segment of the
+// last command read in it ends.
+type segmentEnds map[int]int
+
+// at returns where the uncut segment of the command whose name ends at
+// from, in the string whose closing quote starts at closeAt, ends: the end
+// kept for that string when the name is before it, else the one read
+// returns, which is kept.
+func (e segmentEnds) at(closeAt, from int, read func() int) int {
+	if end, ok := e[closeAt]; ok && from < end {
+		return end
+	}
+	end := read()
+	e[closeAt] = end
+	return end
 }
 
 // runsOtherSubcommand reports whether cmd, a match of f.command, is a login
@@ -2629,7 +2644,10 @@ func isListFlag(s string, base int, loc []int) bool {
 // (a name, such as pw) or when the string is the key of an object, which
 // a colon follows ({"literal": "--password", "caseFold": true}). The
 // string may have a Python prefix (r"pass:x", see pythonStringPrefix),
-// which makes it literal: Python expands no $ (r"$ecret").
+// which makes it literal: Python expands no $ (r"$ecret"). Python and C
+// join the strings that follow it with only blanks between them into one
+// ("hun" "ter2", "" "hunter2"), and the value runs to the last one's
+// closing quote unless all of them are empty.
 func listElementValue(s string, open int) (cliValue, bool) {
 	prefix := pythonStringPrefix(s, open)
 	open += prefix
@@ -2641,10 +2659,28 @@ func listElementValue(s string, open int) (cliValue, bool) {
 			end, n = e, 1
 		}
 	}
-	if n == 0 || strings.HasPrefix(strings.TrimLeft(s[end:], " \t\r\n"), ":") {
+	if n == 0 {
 		return cliValue{}, false
 	}
-	return cliValue{start: open + n, end: end - n, quoted: true, singleQuoted: prefix > 0 || s[open] != '"' && s[open] != '\\'}, true
+	v := cliValue{start: open + n, end: end - n, quoted: true, singleQuoted: prefix > 0 || s[open] != '"' && s[open] != '\\'}
+	for empty := v.end == v.start; ; {
+		next := end + len(s[end:]) - len(strings.TrimLeft(s[end:], " \t\r\n"))
+		if next == end || next == len(s) {
+			break
+		}
+		pieceEnd, m := codeStringEnd(s, next+pythonStringPrefix(s, next))
+		if m == 0 {
+			break
+		}
+		if empty = empty && pieceEnd-m == next+pythonStringPrefix(s, next)+m; !empty {
+			v.end = pieceEnd - m
+		}
+		end = pieceEnd
+	}
+	if strings.HasPrefix(strings.TrimLeft(s[end:], " \t\r\n"), ":") {
+		return cliValue{}, false
+	}
+	return v, true
 }
 
 // pythonStringPrefix returns the length of the Python string prefix at
@@ -4777,14 +4813,15 @@ func isOperandOfCommand(s string, starts *wrapperStarts, from, start int) bool {
 }
 
 // runsOperands reports whether word, an argument of program, makes it run
-// the words after it: find's -exec family, or go run, which runs the
-// package it builds (go run ./cmd/mysql -ppw).
+// the words after it: find's -exec family, go run, which runs the package
+// it builds (go run ./cmd/mysql -ppw), and go tool, which runs the tool it
+// names (go tool mysql -ppw).
 func runsOperands(program, word string) bool {
 	switch program {
 	case "find":
 		return word == "-exec" || word == "-execdir" || word == "-ok" || word == "-okdir"
 	case "go":
-		return word == "run"
+		return word == "run" || word == "tool"
 	}
 	return false
 }
@@ -5131,7 +5168,7 @@ func (p netrcPattern) appendPassword(regions []taggedRegion, s string, lines *qu
 		login = s[loc[2*p.login]:loc[2*p.login+1]]
 	}
 	start, end := loc[2*p.value], loc[2*p.value+1]
-	if isNetrcDeclaration(s, loc[0], machine, login, s[start:end]) || isNetrcProse(machine, login, s[start:end]) {
+	if isNetrcDeclaration(s, loc[0], machine, login, s[start:end]) || isNetrcProse(s, machine, login, start, end) {
 		return regions
 	}
 	if p.login == 0 && !endsNetrcEntry(s, start, end) {
@@ -5154,15 +5191,16 @@ func (p netrcPattern) appendPassword(regions []taggedRegion, s string, lines *qu
 }
 
 // netrcTokenEnd returns where the .netrc token s[start:end] ends: before a
-// \n, \r or \t that a .netrc keyword follows, which printf writes as the
-// next field (printf "machine h login me password x\nmachine b ..."), or
-// at end.
+// \n, \r or \t that a .netrc keyword and another field follow, which printf
+// writes as the next entry or field (printf "machine h login me password
+// x\nmachine b ..."), or at end. A keyword that nothing follows is part of
+// the token (password x\nmachine), as no field shows that printf writes it.
 func netrcTokenEnd(s string, start, end int) int {
 	token := s[start:end]
 	for i := strings.IndexByte(token, '\\'); i >= 0 && i+1 < len(token); {
 		if c := token[i+1]; c == 'n' || c == 'r' || c == 't' {
 			word, _, _ := strings.Cut(token[i+2:], `\`)
-			if isNetrcKeyword(word) {
+			if isNetrcKeyword(word) && netrcFieldFollows(s, start+i+2+len(word)) {
 				return start + i
 			}
 		}
@@ -5175,18 +5213,45 @@ func netrcTokenEnd(s string, start, end int) int {
 	return end
 }
 
-// isNetrcProse reports whether the fields of a .netrc entry's match are
-// prose: a login or password that is a word joining a sentence ("login and
-// password below", "login then password then mfa"), or a machine name that
-// ends a clause ("machine name, login and password"). No file names a login
-// that way.
-func isNetrcProse(machine, login, password string) bool {
-	return strings.ContainsAny(machine[max(len(machine)-1, 0):], ",;") ||
-		slices.Contains(netrcProseWords, strings.ToLower(login)) || slices.Contains(netrcProseWords, strings.ToLower(strings.TrimRight(password, ".,;:")))
+// netrcFieldFollows reports whether a .netrc field starts at s[p], after
+// blanks and the \n, \r and \t that printf writes as them, before the text,
+// a line, a quoted string or a command ends.
+func netrcFieldFollows(s string, p int) bool {
+	for p < len(s) {
+		switch {
+		case s[p] == ' ' || s[p] == '\t':
+			p++
+		case s[p] == '\\' && p+1 < len(s) && (s[p+1] == 'n' || s[p+1] == 'r' || s[p+1] == 't'):
+			p += 2
+		default:
+			return strings.IndexByte("\r\n\"'`;|&)\\", s[p]) < 0
+		}
+	}
+	return false
 }
 
-// netrcProseWords join the words of a sentence.
-var netrcProseWords = strings.Fields("and or then with the is are to for from below above here first next")
+// isNetrcProse reports whether the fields of a .netrc entry's match, whose
+// password token is s[start:end], are prose: a login that joins the
+// keywords in a sentence ("login and password below", "login then password
+// then mfa"), a password that is a word joining one and more words follow
+// ("password is in the vault"), or a machine name that ends a clause
+// ("machine name, login and password"). No file names a login that way,
+// and a password that ends the entry's text is one (login alice password
+// first).
+func isNetrcProse(s, machine, login string, start, end int) bool {
+	password := strings.ToLower(strings.TrimRight(s[start:end], ".,;:"))
+	return strings.ContainsAny(machine[max(len(machine)-1, 0):], ",;") ||
+		slices.Contains(netrcLoginProseWords, strings.ToLower(login)) ||
+		slices.Contains(netrcProseWords, password) && !endsNetrcEntry(s, start, end)
+}
+
+// netrcLoginProseWords join the login keyword to the password keyword in a
+// sentence (login and password, login then password), and netrcProseWords
+// join the words of one.
+var (
+	netrcLoginProseWords = strings.Fields("and or then with to for from is are")
+	netrcProseWords      = strings.Fields("and or then with the is are to for from below above here first next")
+)
 
 // netrcTokenAfterComment matches the rest of a line that a comment ends,
 // the blank and comment lines after it, and the next .netrc token, group 1.
@@ -5263,13 +5328,18 @@ func passwordValueRegion(s string, v cliValue, stringEnd int, subs substitutionM
 		return taggedRegion{}, false
 	case strings.HasPrefix(value, "{{"):
 		// A template fills the value in, as ${...} would
-		// (--password {{ .Values.password }}); text joined after it is
-		// part of the password ({{ .Values.prefix }}x).
-		closeEnd, wordEnd, ok := templateWord(s, v.start)
-		if ok && closeEnd >= v.end && wordEnd == closeEnd {
-			return taggedRegion{}, false
-		}
-		if ok {
+		// (--password {{ .Values.password }}); text and quoted pieces
+		// joined after it are part of the password ({{ .Values.prefix }}x,
+		// {{ .Values.prefix }}"x"), but not the quote that closes the
+		// string holding the command (sh -c "tool --password={{ .Values.pw }}").
+		if closeEnd, ok := templateEnd(s, v.start); ok {
+			wordEnd := v.end
+			if !v.quoted && closeEnd >= v.end {
+				wordEnd = wordRestEnd(s, closeEnd, stringEnd, false, subs)
+			}
+			if closeEnd >= v.end && wordEnd <= closeEnd {
+				return taggedRegion{}, false
+			}
 			v.end = max(v.end, wordEnd)
 		}
 	case v.singleQuoted:
@@ -5305,39 +5375,46 @@ func passwordValueRegion(s string, v cliValue, stringEnd int, subs substitutionM
 }
 
 // isPasswordMetavar reports whether value is the name a help text gives a
-// password flag's value, in capitals (--password PASSWORD, -pPASSWORD,
-// --pass=DB_PASS).
+// password flag's value: words in capitals joined by '_', one of which
+// names a password (--password PASSWORD, -pPASSWORD, --pass=DB_PASS). A
+// word that only holds one (-pBYPASS, -pCOMPASS) is a password.
 func isPasswordMetavar(value string) bool {
-	return strings.Contains(value, "PASS") && strings.Trim(value, "ABCDEFGHIJKLMNOPQRSTUVWXYZ_") == ""
+	if value == "" || strings.Trim(value, "ABCDEFGHIJKLMNOPQRSTUVWXYZ_") != "" {
+		return false
+	}
+	return slices.ContainsFunc(strings.Split(value, "_"), func(word string) bool {
+		return slices.Contains(passwordMetavarWords, word)
+	})
 }
 
-// templateWord returns where the {{ ... }} template that starts at s[start]
-// closes on its line, within maxTemplateLen bytes, after its "}}", and where
-// the word it starts ends, with the text joined after it; ok is false when
-// none closes. The bound keeps a line of unclosed templates linear.
-func templateWord(s string, start int) (closeEnd, wordEnd int, ok bool) {
+// passwordMetavarWords are the words of a metavar that name a password.
+var passwordMetavarWords = strings.Fields("PASS PASSWD PASSWORD PASSPHRASE")
+
+// templateEnd returns where the {{ ... }} template that starts at s[start]
+// closes on its line, within maxTemplateLen bytes, after its "}}"; ok is
+// false when none closes. The bound keeps a line of unclosed templates
+// linear.
+func templateEnd(s string, start int) (closeEnd int, ok bool) {
 	line := s[start:min(len(s), start+maxTemplateLen)]
 	if k := strings.IndexAny(line, "\r\n"); k >= 0 {
 		line = line[:k]
 	}
 	closeAt := strings.Index(line, "}}")
 	if closeAt < 0 {
-		return 0, 0, false
+		return 0, false
 	}
-	closeEnd = start + closeAt + len("}}")
-	wordEnd = closeEnd
-	for wordEnd < len(s) && strings.IndexByte(" \t\r\n\"'`;,)]|&<>", s[wordEnd]) < 0 {
-		wordEnd++
-	}
-	return closeEnd, wordEnd, true
+	return start + closeAt + len("}}"), true
 }
 
 // maxTemplateLen is the longest {{ ... }} template read as one.
 const maxTemplateLen = 256
 
-// isPassNumber reports whether value numbers a pass, one or two digits.
+// isPassNumber reports whether value numbers a pass of a tool that runs
+// several, one digit (x264 --pass 2). A password of one digit has ten
+// values and hides nothing, while two or more may be a PIN (redis-cli
+// --pass 12, curl --pass 42).
 func isPassNumber(value string) bool {
-	return len(value) <= 2 && strings.Trim(value, "0123456789") == ""
+	return len(value) == 1 && value[0] >= '0' && value[0] <= '9'
 }
 
 // isRecipeSubstitution reports whether body, the text of a $(...), only
