@@ -368,6 +368,27 @@ func TestCarryForward_DropsACommittedCaseRenameWindows(t *testing.T) {
 	require.False(t, state.HasPendingFiles())
 }
 
+// TestRespelled_DropsConflictingHashes: a session recorded readme.md with an
+// older hash and README.md with a newer one, and both now spell one file.
+// Neither hash can stand for it: kept, the older one could find older content
+// committed and drop the newer edit. A hash moved without a conflict, or
+// recorded the same under both spellings, stays.
+func TestRespelled_DropsConflictingHashes(t *testing.T) {
+	t.Parallel()
+	files := []string{"readme.md", "README.md", "src/app.go", "NOTES.md", "notes.md"}
+	spelled := []string{"readme.md", "readme.md", "src/app.go", "notes.md", "notes.md"}
+	hashes := map[string]string{"readme.md": "older", "README.md": "newer", "src/app.go": "app", "NOTES.md": "same", "notes.md": "same"}
+	gotFiles, gotHashes := respelled(files, spelled, hashes)
+	require.Equal(t, []string{"readme.md", "src/app.go", "notes.md"}, gotFiles)
+	require.NotContains(t, gotHashes, "readme.md", "two hashes recorded for one file")
+	require.Equal(t, "app", gotHashes["src/app.go"])
+	require.Equal(t, "same", gotHashes["notes.md"], "one hash under both spellings")
+	require.Equal(t, "older", hashes["readme.md"], "the recorded hashes are unchanged")
+
+	_, moved := respelled([]string{"README.md"}, []string{"readme.md"}, map[string]string{"README.md": "abc"})
+	require.Equal(t, "abc", moved["readme.md"], "a hash moves to the new spelling")
+}
+
 // checkpointFilesTouched returns the files_touched the checkpoint
 // checkpointID recorded for its first session.
 func checkpointFilesTouched(t *testing.T, checkpointID string) []string {

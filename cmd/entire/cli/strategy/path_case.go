@@ -169,8 +169,16 @@ func removedInAnotherCase(repoRoot string, commitTree *object.Tree, files []stri
 
 // respelled returns files with each one replaced by spelled's entry at the
 // same place, once each, and hashes with each recorded hash also under its
-// file's new spelling, unless a hash is recorded under that spelling already.
-// hashes itself is not changed.
+// file's new spelling. hashes itself is not changed.
+//
+// Spellings that become one can carry different hashes: a session that
+// recorded readme.md, then README.md after a case-only rename and another
+// edit, holds an older hash under one and the newer under the other. Which
+// one the file's remaining work matches is unknown, so the new spelling keeps
+// no hash, and the file is judged as one recorded without one: by its name
+// for an overlap, by whether the worktree still differs from the commit for
+// carry-forward (filesWithRemainingAgentChanges). Keeping either hash could
+// find the older content committed and drop the newer edit.
 func respelled(files, spelled []string, hashes map[string]string) ([]string, map[string]string) {
 	if slices.Equal(spelled, files) {
 		return files, hashes
@@ -178,16 +186,22 @@ func respelled(files, spelled []string, hashes map[string]string) ([]string, map
 	spelledHashes := maps.Clone(hashes)
 	spelledFiles := make([]string, 0, len(spelled))
 	seen := make(map[string]struct{}, len(spelled))
+	var conflicting []string
 	for i, file := range spelled {
 		if hash, ok := hashes[files[i]]; ok && file != files[i] {
-			if _, taken := spelledHashes[file]; !taken {
+			if recorded, taken := spelledHashes[file]; !taken {
 				spelledHashes[file] = hash
+			} else if recorded != hash {
+				conflicting = append(conflicting, file)
 			}
 		}
 		if _, dup := seen[file]; !dup {
 			seen[file] = struct{}{}
 			spelledFiles = append(spelledFiles, file)
 		}
+	}
+	for _, file := range conflicting {
+		delete(spelledHashes, file)
 	}
 	return spelledFiles, spelledHashes
 }
