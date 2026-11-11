@@ -58,10 +58,12 @@ func decodesConfig(decode func(io.Reader) (image.Config, error), raw []byte) boo
 // marker, holds a frame header before its first scan: a run of marker
 // segments, each a 0xFF byte, a marker byte and a length that fits in raw,
 // with a start-of-frame segment (SOF0 to SOF15, but not DHT, JPG or DAC) of
-// a positive width before the start-of-scan segment. It reads the markers
-// only, so every JPEG coding process passes, including the lossless,
-// arithmetic-coded and 12-bit ones that Go's decoder does not read. A height
-// of 0 is valid (a DNL segment sets it later).
+// a positive width before the start-of-scan segment. The frame and scan
+// headers must each be as long as their component counts make them, so a
+// header cut short is no image. It reads the markers only, so every JPEG
+// coding process passes, including the lossless, arithmetic-coded and 12-bit
+// ones that Go's decoder does not read. A height of 0 is valid (a DNL segment
+// sets it later).
 func isJPEGHeader(raw []byte) bool {
 	frame := false
 	for i := len(jpegStart) - 1; i+2 <= len(raw); {
@@ -88,10 +90,13 @@ func isJPEGHeader(raw []byte) bool {
 		}
 		switch {
 		case marker == 0xDA: // SOS
-			return frame
+			// The component count, then two bytes per component and three
+			// bytes that close the header.
+			return frame && length >= 3 && raw[i+4] != 0 && length == 6+2*int(raw[i+4])
 		case marker >= 0xC0 && marker <= 0xCF && marker != 0xC4 && marker != 0xC8 && marker != 0xCC:
-			// Precision, then height and width, then the component count.
-			if length < 8 || raw[i+7]|raw[i+8] == 0 || raw[i+9] == 0 {
+			// Precision, then height and width, then the component count and
+			// three bytes per component.
+			if length < 8 || raw[i+7]|raw[i+8] == 0 || raw[i+9] == 0 || length != 8+3*int(raw[i+9]) {
 				return false
 			}
 			frame = true

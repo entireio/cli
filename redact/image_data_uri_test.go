@@ -87,12 +87,21 @@ var (
 // given marker and sample precision, with one scan of a few bytes. Go's
 // decoder reads only baseline and progressive 8-bit frames.
 func jpegWithFrame(marker, precision byte) string {
-	raw := []byte{0xFF, 0xD8}
-	raw = append(raw, 0xFF, 0xE0, 0x00, 0x10, 'J', 'F', 'I', 'F', 0, 1, 1, 0, 0, 1, 0, 1, 0, 0)
 	// Precision, height 16, width 16, one component with sampling 1x1 and
 	// quantization table 0.
-	raw = append(raw, 0xFF, marker, 0x00, 0x0B, precision, 0x00, 0x10, 0x00, 0x10, 0x01, 0x01, 0x11, 0x00)
-	raw = append(raw, 0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x01, 0x00, 0x00)
+	frame := []byte{0xFF, marker, 0x00, 0x0B, precision, 0x00, 0x10, 0x00, 0x10, 0x01, 0x01, 0x11, 0x00}
+	// One component with tables 0, then spectral selection and approximation.
+	scan := []byte{0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x01, 0x00, 0x00}
+	return jpegWithHeaders(frame, scan)
+}
+
+// jpegWithHeaders returns the base64 of a JPEG holding the given frame and
+// scan segments, a few bytes of scan data and the end marker.
+func jpegWithHeaders(frame, scan []byte) string {
+	raw := []byte{0xFF, 0xD8}
+	raw = append(raw, 0xFF, 0xE0, 0x00, 0x10, 'J', 'F', 'I', 'F', 0, 1, 1, 0, 0, 1, 0, 1, 0, 0)
+	raw = append(raw, frame...)
+	raw = append(raw, scan...)
 	raw = append(raw, 0x12, 0x34, 0x56, 0x78, 0xFF, 0xD9)
 	return base64.StdEncoding.EncodeToString(raw)
 }
@@ -144,6 +153,15 @@ func TestIsInlineImageDataURI(t *testing.T) {
 		{"12-bit jpeg", "data:image/jpeg;base64," + jpegWithFrame(0xC1, 12), true},
 		{"arithmetic-coded jpeg", "data:image/jpeg;base64," + jpegWithFrame(0xC9, 8), true},
 		{"jpeg markers without a frame header", "data:image/jpeg;base64," + jpegWithFrame(0xC4, 8), false},
+		{"jpeg frame header without its component", "data:image/jpeg;base64," + jpegWithHeaders(
+			[]byte{0xFF, 0xC0, 0x00, 0x08, 0x08, 0x00, 0x10, 0x00, 0x10, 0x01},
+			[]byte{0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x01, 0x00, 0x00}), false},
+		{"jpeg scan header cut short", "data:image/jpeg;base64," + jpegWithHeaders(
+			[]byte{0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x10, 0x00, 0x10, 0x01, 0x01, 0x11, 0x00},
+			[]byte{0xFF, 0xDA, 0x00, 0x02}), false},
+		{"jpeg scan header without components", "data:image/jpeg;base64," + jpegWithHeaders(
+			[]byte{0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x10, 0x00, 0x10, 0x01, 0x01, 0x11, 0x00},
+			[]byte{0xFF, 0xDA, 0x00, 0x06, 0x00, 0x00, 0x01, 0x00}), false},
 		{"jpeg without its end marker", "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(fakeImage(jpegMagic)[:len(fakeImage(jpegMagic))-len(jpegEnd)]), false},
 	}
 	for _, tt := range tests {
