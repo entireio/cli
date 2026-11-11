@@ -33,6 +33,23 @@ func TestOpenCodeSeedRepoPlantsDeps(t *testing.T) {
 		t.Fatalf("SeedRepo: %v", err)
 	}
 
+	// OpenCode 2 installs no plugin dependencies into .opencode, so SeedRepo
+	// writes only the root config, which must carry the model because the
+	// OpenCode 2 TUI has no --model flag.
+	if isOpenCode2() {
+		cfg, err := os.ReadFile(filepath.Join(dir, "opencode.json"))
+		if err != nil {
+			t.Fatalf("seeded opencode.json missing: %v", err)
+		}
+		if !strings.Contains(string(cfg), `"model": "test"`) {
+			t.Errorf("seeded opencode.json does not select the model:\n%s", cfg)
+		}
+		if _, err := os.Lstat(filepath.Join(dir, ".opencode")); !os.IsNotExist(err) {
+			t.Errorf("expected SeedRepo to plant nothing under .opencode for OpenCode 2, got err=%v", err)
+		}
+		return
+	}
+
 	// node_modules is the one that matters: opencode reinstalls without it.
 	//
 	// Windows asserts the documented degradation instead. linkFile copies there
