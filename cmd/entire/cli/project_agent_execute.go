@@ -18,6 +18,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 	"github.com/google/uuid"
@@ -25,6 +26,8 @@ import (
 
 const agentOutputLimit = 8 * 1024 * 1024
 const nativeCloneScheme = "entire"
+
+var errProjectAgentOutputLimit = errors.New("output exceeds 8 MiB")
 
 var agentCommitPattern = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
 
@@ -78,7 +81,7 @@ func validateProjectAgentClaim(c projectAgentClaim) error {
 	return nil
 }
 
-func (e *projectAgentExecutor) execute(ctx context.Context, c projectAgentClaim) (result json.RawMessage, retErr error) {
+func (e *projectAgentExecutor) execute(ctx context.Context, c projectAgentClaim) (json.RawMessage, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("review cancelled: %w", err)
 	}
@@ -95,7 +98,7 @@ func (e *projectAgentExecutor) execute(ctx context.Context, c projectAgentClaim)
 	}
 	defer func() {
 		if err := osroot.RemoveAllNoSymlinks(root, work); err != nil {
-			retErr = errors.Join(retErr, fmt.Errorf("remove review workspace: %w", err))
+			logging.Warn(ctx, "remove project agent review workspace", "workspace", work, "error", err)
 		}
 	}()
 	if err := osroot.MkdirAllNoSymlink(root, work+"/empty", 0o700); err != nil {
@@ -109,27 +112,70 @@ func (e *projectAgentExecutor) execute(ctx context.Context, c projectAgentClaim)
 	if _, err := e.run(ctx, e.git, dir, gitEnv, clone, ""); err != nil {
 		return nil, fmt.Errorf("clone failed: %w", err)
 	}
+	if err := e.ensureCommits(ctx, repo, gitEnv, gitArgs, c.BaseSHA, c.HeadSHA); err != nil {
+		return nil, err
+	}
 	checkout := append(append([]string{}, gitArgs...), "checkout", "--detach", c.HeadSHA, "--")
 	if _, err := e.run(ctx, e.git, repo, gitEnv, checkout, ""); err != nil {
 		return nil, fmt.Errorf("checkout failed: %w", err)
 	}
-	diffArgs := append(append([]string{}, gitArgs...), "diff-tree", "--no-commit-id", "-r", "--no-ext-diff", "--no-textconv", "--stat", "--patch", c.BaseSHA, c.HeadSHA, "--")
-	diff, err := e.run(ctx, e.git, repo, gitEnv, diffArgs, "")
+	diff, diffNote, err := e.diff(ctx, repo, gitEnv, gitArgs, c.BaseSHA, c.HeadSHA)
 	if err != nil {
-		return nil, fmt.Errorf("diff failed: %w", err)
+		return nil, err
 	}
 	if err := osroot.WriteFile(root, work+"/review/change.diff", diff, 0o600); err != nil {
 		return nil, fmt.Errorf("write review diff: %w", err)
 	}
 	reviewDir := filepath.Join(dir, "review")
-	prompt := c.Prompt + "\nThe diff is in " + filepath.Join(reviewDir, "change.diff") + ". You cannot run commands."
-	result, err = e.review(ctx, claudecode.RestrictedReview{
+	prompt := c.Prompt + "\nThe diff is in " + filepath.Join(reviewDir, "change.diff") + "." + diffNote + " You cannot run commands."
+	result, err := e.review(ctx, claudecode.RestrictedReview{
 		Directory: repo, ReadDir: reviewDir, Prompt: prompt, Model: c.Model, OutputSchema: c.OutputSchema,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("restricted review: %w", err)
 	}
 	return result, nil
+}
+
+// ensureCommits fetches pinned commits the clone refspec missed (e.g. fork heads).
+func (e *projectAgentExecutor) ensureCommits(ctx context.Context, repo string, env, gitArgs []string, shas ...string) error {
+	var missing []string
+	for _, sha := range shas {
+		probe := append(append([]string{}, gitArgs...), "cat-file", "-e", sha+"^{commit}")
+		if _, err := e.run(ctx, e.git, repo, env, probe, ""); err != nil {
+			if ctx.Err() != nil {
+				return fmt.Errorf("fetch pinned commits: %w", ctx.Err())
+			}
+			missing = append(missing, sha)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	fetch := append(append(append([]string{}, gitArgs...), "fetch", "--no-tags", "origin"), missing...)
+	if _, err := e.run(ctx, e.git, repo, env, fetch, ""); err != nil {
+		return fmt.Errorf("fetch pinned commits: %w", err)
+	}
+	return nil
+}
+
+// diff falls back to --stat when the patch exceeds the output bound.
+func (e *projectAgentExecutor) diff(ctx context.Context, repo string, env, gitArgs []string, base, head string) ([]byte, string, error) {
+	args := func(format ...string) []string {
+		a := append(append([]string{}, gitArgs...), "diff-tree", "--no-commit-id", "-r", "--no-ext-diff", "--no-textconv")
+		return append(append(a, format...), base, head, "--")
+	}
+	out, err := e.run(ctx, e.git, repo, env, args("--stat", "--patch"), "")
+	if errors.Is(err, errProjectAgentOutputLimit) {
+		out, err = e.run(ctx, e.git, repo, env, args("--stat"), "")
+		if err == nil {
+			return out, " The full patch exceeds 8 MiB, so the diff file only lists changed files; read them in the checkout.", nil
+		}
+	}
+	if err != nil {
+		return nil, "", fmt.Errorf("diff failed: %w", err)
+	}
+	return out, "", nil
 }
 
 // Bound output in memory and never surface raw subprocess diagnostics: clone and
@@ -147,17 +193,29 @@ func runProjectAgentProcess(ctx context.Context, binary, dir string, env, args [
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("review process cancelled: %w", ctx.Err())
 		}
+		if out.exceeded {
+			return nil, fmt.Errorf("subprocess failed: %w", errProjectAgentOutputLimit)
+		}
 		return nil, errors.New("subprocess failed (output withheld)")
 	}
 	return out.Bytes(), nil
 }
 
-type projectAgentLimitedBuffer struct{ bytes.Buffer }
+// Not embedded: a promoted ReadFrom would let io.Copy bypass Write's bound.
+type projectAgentLimitedBuffer struct {
+	buf      bytes.Buffer
+	exceeded bool
+}
 
 func (b *projectAgentLimitedBuffer) Write(p []byte) (int, error) {
-	if len(p) > agentOutputLimit-b.Len() {
-		return 0, errors.New("review output exceeds 8 MiB")
+	if len(p) > agentOutputLimit-b.buf.Len() {
+		b.exceeded = true
+		return 0, errProjectAgentOutputLimit
 	}
-	n, _ := b.Buffer.Write(p) // bytes.Buffer.Write always succeeds.
+	n, _ := b.buf.Write(p) // bytes.Buffer.Write always succeeds.
 	return n, nil
 }
+
+func (b *projectAgentLimitedBuffer) Bytes() []byte { return b.buf.Bytes() }
+
+func (b *projectAgentLimitedBuffer) Len() int { return b.buf.Len() }

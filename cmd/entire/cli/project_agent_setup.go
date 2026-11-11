@@ -42,7 +42,7 @@ change your active login or create an Agent.`,
 			opts.serviceAccount = strings.TrimSpace(opts.serviceAccount)
 			opts.name = strings.TrimSpace(opts.name)
 			if (opts.serviceAccount == "") == (opts.name == "") {
-				return errors.New("choose --service-account or --name")
+				return errors.New("choose exactly one of --service-account or --name")
 			}
 			t, err := resolveProjectAgentTarget(cmd)
 			if err != nil {
@@ -61,8 +61,6 @@ change your active login or create an Agent.`,
 	cmd.Flags().StringVar(&opts.name, "name", "", "Create a service account with this machine-specific name")
 	addYesFlag(cmd)
 	addJSONFlag(cmd)
-	cmd.MarkFlagsOneRequired("service-account", "name")
-	cmd.MarkFlagsMutuallyExclusive("service-account", "name")
 	return cmd
 }
 

@@ -99,6 +99,17 @@ func (r *RestrictedReviewer) Review(ctx context.Context, cfg RestrictedReview) (
 	return parseRestrictedReviewResponse(output)
 }
 
+// USER is required for Claude's macOS keychain login.
+var restrictedReviewEnvKeys = map[string]bool{
+	"HOME": true, "USER": true, "LOGNAME": true, "USERPROFILE": true,
+	"SystemRoot": true, "WINDIR": true, "TEMP": true, "TMP": true, "TMPDIR": true,
+	"LANG": true, "LC_ALL": true,
+	"ANTHROPIC_API_KEY": true, "CLAUDE_CODE_OAUTH_TOKEN": true,
+	"HTTPS_PROXY": true, "https_proxy": true, "HTTP_PROXY": true, "http_proxy": true,
+	"NO_PROXY": true, "no_proxy": true,
+	"NODE_EXTRA_CA_CERTS": true, "SSL_CERT_FILE": true, "SSL_CERT_DIR": true,
+}
+
 // Build from an allowlist rather than inheriting worker credentials, git config,
 // loader options or caller-session markers. Restricted mode confines file tools.
 func restrictedReviewEnv() ([]string, error) {
@@ -109,8 +120,7 @@ func restrictedReviewEnv() ([]string, error) {
 	env := []string{"PATH=" + strings.Join(execx.PathScanDirs(), string(os.PathListSeparator))}
 	for _, entry := range os.Environ() {
 		key, _, _ := strings.Cut(entry, "=")
-		switch key {
-		case "HOME", "USERPROFILE", "SystemRoot", "WINDIR", "TEMP", "TMP", "TMPDIR", "LANG", "LC_ALL", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN":
+		if restrictedReviewEnvKeys[key] {
 			env = append(env, entry)
 		}
 	}

@@ -15,11 +15,17 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/spf13/cobra"
 )
 
 const agentJobsPath = "/api/v1/self-hosted-runner/jobs"
 const agentSubmitFail = "fail"
+
+const agentReportTimeout = 15 * time.Second
+
+// Leave time to kill the harness and report before the server deadline.
+const agentDeadlineReserve = execx.KillWaitDelay + agentReportTimeout + 5*time.Second
 
 var (
 	errAgentExecution  = errors.New("agent execution failed")
@@ -85,6 +91,8 @@ stops execution and attempts to report failure. No daemon is installed.`,
 			}
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
+			// A second Ctrl-C force-quits.
+			context.AfterFunc(ctx, stop)
 			cmd.SetContext(ctx)
 			t, err := resolveProjectAgentServeTarget(cmd)
 			if err != nil {
@@ -114,7 +122,12 @@ stops execution and attempts to report failure. No daemon is installed.`,
 				return err
 			}
 			w.execute = executor.execute
-			return w.serve(ctx, once, interval)
+			err = w.serve(ctx, once, interval)
+			if errors.Is(err, context.Canceled) && !errors.Is(err, errAgentExecution) && ctx.Err() != nil {
+				fmt.Fprintln(cmd.ErrOrStderr(), "Worker stopped.")
+				return nil
+			}
+			return err
 		},
 	}
 	cmd.Flags().BoolVar(&once, "once", false, "Process at most one supported job; exit if none are available")
@@ -163,73 +176,92 @@ func retryProjectAgent(err error) bool {
 	return true
 }
 
-func (w *projectAgentWorker) next(ctx context.Context, skipped map[string]bool) (*projectAgentJob, error) {
-	cursor := ""
-	seen := map[string]bool{}
+// projectAgentJobScan walks the job queue once, fetching pages lazily.
+type projectAgentJobScan struct {
+	w         *projectAgentWorker
+	page      []projectAgentJob
+	cursor    string
+	exhausted bool
+	seen      map[string]bool
+}
+
+func (w *projectAgentWorker) scanJobs() *projectAgentJobScan {
+	return &projectAgentJobScan{w: w, seen: map[string]bool{}}
+}
+
+func (s *projectAgentJobScan) next(ctx context.Context) (*projectAgentJob, error) {
 	for {
-		path := agentJobsPath + "?per_page=100"
-		if cursor != "" {
-			path += "&cursor=" + url.QueryEscape(cursor)
-		}
-		var page api.ProjectConfigPage[projectAgentJob]
-		if err := w.request(ctx, http.MethodGet, path, nil, &page); err != nil {
-			return nil, err
-		}
-		for _, job := range page.Items {
-			if job.ProjectID == w.target.projectID && job.Harness == activityAgentClaude && !skipped[job.RunID] {
+		for len(s.page) > 0 {
+			job := s.page[0]
+			s.page = s.page[1:]
+			if job.ProjectID == s.w.target.projectID && job.Harness == activityAgentClaude {
 				return &job, nil
 			}
 		}
-		if page.NextCursor == nil || *page.NextCursor == "" {
+		if s.exhausted {
 			return nil, nil //nolint:nilnil // An empty queue is a successful poll, not an error.
 		}
-		cursor = *page.NextCursor
-		if seen[cursor] {
+		path := agentJobsPath + "?per_page=100"
+		if s.cursor != "" {
+			path += "&cursor=" + url.QueryEscape(s.cursor)
+		}
+		var page api.ProjectConfigPage[projectAgentJob]
+		if err := s.w.request(ctx, http.MethodGet, path, nil, &page); err != nil {
+			return nil, err
+		}
+		s.page = page.Items
+		if page.NextCursor == nil || *page.NextCursor == "" {
+			s.exhausted = true
+			continue
+		}
+		if s.seen[*page.NextCursor] {
 			return nil, errors.New("jobs API repeated its cursor")
 		}
-		seen[cursor] = true
+		s.seen[*page.NextCursor] = true
+		s.cursor = *page.NextCursor
 	}
 }
 
 func (w *projectAgentWorker) serve(ctx context.Context, once bool, interval time.Duration) error {
-	// A refused claim must not block later jobs, but must be eligible again
-	// after this scan (for example when its repository is unpaused).
-	skipped := map[string]bool{}
 	for {
 		fmt.Fprintln(w.out, "Waiting for Claude jobs...")
-		job, err := w.next(ctx, skipped)
-		switch {
-		case err != nil:
-			if !retryProjectAgent(err) || once {
-				return err
-			}
-			fmt.Fprintln(w.out, "Polling temporarily unavailable; retrying.")
-		case job != nil:
-			processed, err := w.run(ctx, *job)
-			if !once && errors.Is(err, errAgentClaimRetry) {
-				fmt.Fprintln(w.out, "Claim temporarily unavailable; retrying.")
-				break // Wait before polling again; do not skip an uncertain claim.
-			}
-			if err != nil && (once || !errors.Is(err, errAgentExecution)) {
-				return err
-			}
-			if !processed {
-				skipped[job.RunID] = true
-				fmt.Fprintf(w.out, "Skipping refused claim %s for this scan.\n", job.RunID)
-				continue
-			}
-			if once {
-				return nil
-			}
-			clear(skipped)
-		case once:
-			return nil
-		default:
-			clear(skipped)
+		stop, err := w.serveScan(ctx, once)
+		if err != nil || stop {
+			return err
 		}
 		if err := w.wait(ctx, interval); err != nil {
 			return err
 		}
+	}
+}
+
+// serveScan makes one pass over the queue; refused claims are retried next pass.
+func (w *projectAgentWorker) serveScan(ctx context.Context, once bool) (bool, error) {
+	jobs := w.scanJobs()
+	for {
+		job, err := jobs.next(ctx)
+		if err != nil {
+			if !retryProjectAgent(err) || once {
+				return true, err
+			}
+			fmt.Fprintln(w.out, "Polling temporarily unavailable; retrying.")
+			return false, nil
+		}
+		if job == nil {
+			return once, nil
+		}
+		processed, err := w.run(ctx, *job)
+		if !once && errors.Is(err, errAgentClaimRetry) {
+			fmt.Fprintln(w.out, "Claim temporarily unavailable; retrying.")
+			return false, nil // Wait before polling again; do not skip an uncertain claim.
+		}
+		if err != nil && (once || !errors.Is(err, errAgentExecution)) {
+			return true, err
+		}
+		if processed {
+			return once, nil
+		}
+		fmt.Fprintf(w.out, "Skipping refused claim %s for this scan.\n", job.RunID)
 	}
 }
 
@@ -258,7 +290,7 @@ func (w *projectAgentWorker) run(ctx context.Context, job projectAgentJob) (bool
 	} else {
 		fmt.Fprintf(w.out, "Claimed %s; reviewing.\n", claim.RunID)
 		// Leave time for result publication before the server's deadline.
-		runCtx, cancel := context.WithDeadline(ctx, claim.DeadlineAt.Add(-5*time.Second))
+		runCtx, cancel := context.WithDeadline(ctx, claim.DeadlineAt.Add(-agentDeadlineReserve))
 		result, runErr = w.execute(runCtx, claim)
 		cancel()
 	}
@@ -279,7 +311,7 @@ func (w *projectAgentWorker) run(ctx context.Context, job projectAgentJob) (bool
 		return true, fmt.Errorf("save submission before sending: %w", err)
 	}
 	// Ctrl-C must not prevent reporting that execution stopped.
-	reportCtx, reportCancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	reportCtx, reportCancel := context.WithTimeout(context.WithoutCancel(ctx), agentReportTimeout)
 	defer reportCancel()
 	if err := w.submit(reportCtx, pending); err != nil {
 		return true, err

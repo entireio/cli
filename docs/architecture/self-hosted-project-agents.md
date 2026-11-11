@@ -61,7 +61,7 @@ The saved setup connection (or project resolver) chooses the project's API cell.
 pages, filters by project and Claude, and claims by run ID. Claims refused with
 404/409 are skipped for the remainder of that queue scan, including across pages.
 `--once` exits if the scan has no remaining supported jobs. Continuous workers
-clear the skip list after processing a job or exhausting the scan, so a temporarily paused repository
+start a new scan after processing a job or exhausting the queue, so a temporarily paused repository
 can become eligible again. The same claim is retried after uncertain responses. Previously
 claimed runs belonging to this account are recoverable from the server's job
 list. Transient requests receive bounded retries. Continuous workers wait for
@@ -89,7 +89,7 @@ Each run:
    schema/model come from the claim. No shell or repository command is run by the
    model. Restricted mode confines file reads to the checkout and diff directory
    and ignores user/project/local settings. There is no unrestricted fallback.
-5. Stops execution five seconds before the server deadline, saves the completion
+5. Stops execution 30 seconds before the server deadline, saves the completion
    payload, and publishes the structured result. Failures publish a generic error
    rather than subprocess output. Output is bounded to 8 MiB. Workspaces are
    removed on normal return; abrupt termination may leave cache artifacts.

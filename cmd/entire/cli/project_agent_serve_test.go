@@ -42,7 +42,7 @@ func TestProjectAgentServePagination(t *testing.T) {
 			writeAgentTestResponse(t, out, `{"items":[{"run_id":"`+agentServeRunID+`","project_id":"project","harness":"claude","state":"claimed"}]}`)
 		}
 	})
-	job, err := w.next(t.Context(), nil)
+	job, err := w.scanJobs().next(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, agentServeRunID, job.RunID)
 	require.Equal(t, "claimed", job.State)
@@ -105,7 +105,7 @@ func TestProjectAgentServeRun(t *testing.T) {
 				}
 				deadline, ok := ctx.Deadline()
 				require.True(t, ok)
-				require.True(t, deadline.Before(claim.DeadlineAt))
+				require.False(t, deadline.After(claim.DeadlineAt.Add(-agentDeadlineReserve)))
 				if tc.fail {
 					return nil, errors.New("secret failure")
 				}

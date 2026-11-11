@@ -81,10 +81,15 @@ func TestRestrictedReviewCredentialBoundary(t *testing.T) {
 	t.Setenv("GIT_CONFIG_COUNT", "1")
 	t.Setenv("CLAUDECODE", "inherited-session")
 	t.Setenv("ANTHROPIC_API_KEY", "model-key")
+	t.Setenv("USER", "operator")
+	t.Setenv("HTTPS_PROXY", "http://proxy.internal:3128")
+	t.Setenv("NODE_EXTRA_CA_CERTS", "/etc/corp-ca.pem")
 	entries, err := restrictedReviewEnv()
 	require.NoError(t, err)
 	env := strings.Join(entries, "\n")
-	require.Contains(t, env, "ANTHROPIC_API_KEY=model-key")
+	for _, want := range []string{"ANTHROPIC_API_KEY=model-key", "USER=operator", "HTTPS_PROXY=http://proxy.internal:3128", "NODE_EXTRA_CA_CERTS=/etc/corp-ca.pem"} {
+		require.Contains(t, env, want)
+	}
 	for _, secret := range []string{"runner-secret", "other-secret", "NODE_OPTIONS=", "GIT_DIR=", "GIT_CONFIG_COUNT=", "CLAUDECODE="} {
 		require.NotContains(t, env, secret)
 	}

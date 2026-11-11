@@ -24,6 +24,17 @@ func TestProjectAgentSetupRequiresExplicitConsent(t *testing.T) {
 	require.ErrorContains(t, cmd.Execute(), "requires confirmation")
 }
 
+func TestProjectAgentSetupRequiresExactlyOneAccountFlag(t *testing.T) {
+	t.Parallel()
+	for _, args := range [][]string{{"--yes"}, {"--yes", "--name", " "}, {"--yes", "--name", "runner", "--service-account", "svc_x"}} {
+		cmd := newProjectAgentSetupCmd()
+		cmd.SetArgs(args)
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetErr(&bytes.Buffer{})
+		require.ErrorContains(t, cmd.Execute(), "choose exactly one of --service-account or --name", args)
+	}
+}
+
 func TestProjectAgentSetup(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {

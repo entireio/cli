@@ -30,11 +30,12 @@ func TestProjectAgentServeSkipsRefusedClaims(t *testing.T) {
 				blocked := agentServeClaim().projectAgentJob
 				later := agentServeClaim()
 				later.RunID = "01JABCDEFGHJKMNPQRSTVWXYZ1"
-				var refused, completed, executed atomic.Int32
+				var refused, completed, executed, pages atomic.Int32
 				w := testAgentWorker(t, func(out http.ResponseWriter, r *http.Request) {
 					out.Header().Set("Content-Type", "application/json")
 					switch {
 					case r.Method == http.MethodGet:
+						pages.Add(1)
 						page := api.ProjectConfigPage[projectAgentJob]{}
 						if r.URL.Query().Get("cursor") == "" {
 							cursor := "page-two"
@@ -68,6 +69,7 @@ func TestProjectAgentServeSkipsRefusedClaims(t *testing.T) {
 				}
 				require.NoError(t, w.serve(ctx, true, time.Second))
 				require.EqualValues(t, 1, refused.Load())
+				require.EqualValues(t, 2, pages.Load())
 				want := int32(0)
 				if laterJob {
 					want = 1
