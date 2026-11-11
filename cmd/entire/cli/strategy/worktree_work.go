@@ -2,9 +2,13 @@ package strategy
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"log/slog"
+	"os"
 	"path/filepath"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -108,8 +112,29 @@ func overlapsFiles(files []string, set map[string]struct{}) bool {
 // homes were recorded. It compares paths only, which holds for turn-end hooks
 // because turn start already followed a moved home and re-homed a session in
 // a worktree re-added at its home path (reconcileWorktreePathForResumedTurn).
+// A home moved mid-turn, after turn start, is homeMovedTo's case.
 func homedAt(state *SessionState, root string) bool {
 	return state.WorktreePath == "" || isSessionHomeWorktree(root, state) || sameDir(root, state.WorktreePath)
+}
+
+// homeMovedTo reports whether root is state's home moved there mid-turn,
+// before turn start could follow it (homedAt's path rule misses that). A
+// linked home is known by its marker (homeAt). The main worktree has none, so
+// it counts only when the recorded path is gone and root's Git directory is
+// the common directory itself: an unregistered checkout shares the main
+// worktree's empty ID but has a Git directory of its own.
+func homeMovedTo(ctx context.Context, state *SessionState, root string) bool {
+	if state.WorktreePath == "" || root == "" {
+		return false
+	}
+	if state.WorktreeID != "" {
+		return homeAt(ctx, state, root) == homeMovedHere
+	}
+	if _, err := os.Lstat(state.WorktreePath); !errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	metadata, err := gitrepo.ResolveWorktreeMetadata(root)
+	return err == nil && metadata.WorktreeID == "" && sameDir(metadata.GitDir, metadata.CommonDir)
 }
 
 // enterStepWorktree is enterWorktreeView for a turn-end step recorded in

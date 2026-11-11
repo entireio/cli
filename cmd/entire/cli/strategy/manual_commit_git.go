@@ -87,17 +87,8 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 					state.BaseCommit = head.Hash().String()
 				}
 			}
-		case !homedAt(state, worktreeRoot):
-			// Elsewhere, but with no entry of its own: the worktree could not
-			// be marked, or it shares the home's ID (an unregistered checkout
-			// sharing the repository through commondir has the main worktree's
-			// empty ID). Recording it as the home's would claim another tree's
-			// files and move the home's base to that tree's HEAD.
-			logging.Warn(logging.WithComponent(ctx, "checkpoint"), "turn-end step in another worktree has no record of its own; not recorded",
-				slog.String("session_id", sessionID),
-				slog.String("worktree", worktreeRoot),
-				slog.String("home", state.WorktreePath))
-			return ErrMutationSkip
+		case !homedAt(state, worktreeRoot) && !homeMovedTo(ctx, state, worktreeRoot):
+			return recordUnhomedStepTokens(ctx, state, step, worktreeRoot)
 		}
 		invalidateStaleSubagentSnapshot(&step, state)
 		if err := syncBaseCommitToHead(ctx, repo, state); err != nil {
@@ -154,6 +145,27 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 		return nil
 	}
 	return mutErr
+}
+
+// recordUnhomedStepTokens handles a turn-end step in a worktree other than
+// the session's home that has no entry of its own there: the worktree could
+// not be marked, it shares the home's ID (an unregistered checkout sharing the
+// repository through commondir has the main worktree's empty ID), or another
+// checkout holds that ID's one entry. Recording its files as the home's would
+// claim another tree's files and move the home's base to that tree's HEAD, so
+// they are not recorded. The turn's tokens are the session's wherever it ran,
+// so they are kept as for a turn that changed no files.
+func recordUnhomedStepTokens(ctx context.Context, state *SessionState, step StepContext, worktreeRoot string) error {
+	logging.Warn(logging.WithComponent(ctx, "checkpoint"), "turn-end step in another worktree has no record of its own; files not recorded",
+		slog.String("session_id", state.SessionID),
+		slog.String("worktree", worktreeRoot),
+		slog.String("home", state.WorktreePath))
+	invalidateStaleSubagentSnapshot(&step, state)
+	if step.TokenUsage == nil || state.TokenLedger.IsActive() {
+		return ErrMutationSkip
+	}
+	applyTurnTokenUsage(state, step.TokenUsage)
+	return nil
 }
 
 func invalidateStaleSubagentSnapshot(step *StepContext, state *SessionState) {

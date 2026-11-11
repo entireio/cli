@@ -13,6 +13,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
@@ -199,8 +200,9 @@ func mustEvalSymlinks(t *testing.T, path string) string {
 }
 
 // An unregistered checkout sharing the repository through commondir has the
-// main worktree's empty ID, so it cannot hold an OtherWorktrees entry of its
-// own. A guest turn ending there must not be recorded as the home's work.
+// main worktree's empty ID, so for a session homed in the main worktree it
+// cannot hold an OtherWorktrees entry of its own (the key is the home's). A
+// guest turn ending there must not be recorded as the home's work.
 func TestGuestTurnEnd_InUnregisteredCheckoutIsNotRecordedAsHome(t *testing.T) {
 	s := &ManualCommitStrategy{}
 	mainDir := setupGitRepo(t)
@@ -228,7 +230,8 @@ func TestGuestTurnEnd_InUnregisteredCheckoutIsNotRecordedAsHome(t *testing.T) {
 
 // A linked worktree whose marker cannot be created or read gets no record of
 // its own, and its step must not fall through to the home's record either:
-// that would claim another tree's files and move the home's base.
+// that would claim another tree's files and move the home's base. The turn's
+// tokens are still the session's, as for a turn that changed no files.
 func TestGuestTurnEnd_UnmarkableWorktreeIsNotRecordedAsHome(t *testing.T) {
 	s, mainDir, linkedDir := homedSession(t, "guest-unmarkable")
 	before := mustLoad(t, s, "guest-unmarkable")
@@ -239,7 +242,16 @@ func TestGuestTurnEnd_UnmarkableWorktreeIsNotRecordedAsHome(t *testing.T) {
 
 	chdirWorktree(t, linkedDir)
 	testutil.WriteFile(t, linkedDir, "guest.go", "package guest")
-	saveStepIn(t, s, "guest-unmarkable", []string{"guest.go"}, nil)
+	require.NoError(t, s.SaveStep(t.Context(), StepContext{
+		SessionID:     "guest-unmarkable",
+		NewFiles:      []string{"guest.go"},
+		MetadataDir:   paths.SessionMetadataDirFromSessionID("guest-unmarkable"),
+		CommitMessage: "Checkpoint",
+		AuthorName:    "Test",
+		AuthorEmail:   "test@test.com",
+		AgentType:     agent.AgentTypeClaudeCode,
+		TokenUsage:    &agent.TokenUsage{InputTokens: 1000, APICallCount: 1},
+	}))
 
 	after := mustLoad(t, s, "guest-unmarkable")
 	assert.Equal(t, []string{"home.go"}, after.FilesTouched, "another worktree's file was recorded as the home's")
@@ -247,6 +259,94 @@ func TestGuestTurnEnd_UnmarkableWorktreeIsNotRecordedAsHome(t *testing.T) {
 	assert.Equal(t, before.BaseCommit, after.BaseCommit, "the base moved to another worktree's HEAD")
 	assert.Empty(t, after.OtherWorktrees, "the unmarked worktree got a record that can never count")
 	assert.True(t, isSessionHomeWorktree(mustEvalSymlinks(t, mainDir), after), "the session left its home: %s", after.WorktreePath)
+	require.NotNil(t, after.TokenUsage, "the skipped step's tokens were dropped")
+	assert.Equal(t, 1000, after.TokenUsage.InputTokens, "the skipped step's tokens were dropped")
+	require.NotNil(t, after.CheckpointTokenUsage)
+	assert.Equal(t, 1000, after.CheckpointTokenUsage.InputTokens)
+}
+
+// A session homed in a linked worktree records the unregistered checkout
+// under the empty ID's key. That record is the checkout's alone: it doesn't
+// count in the main worktree (same key), and a step in the main worktree
+// neither replaces it nor merges into it.
+func TestGuestTurnEnd_EmptyIDEntryBelongsToOneCheckout(t *testing.T) {
+	const sid = "empty-id-entry"
+	s := &ManualCommitStrategy{}
+	mainDir := setupGitRepo(t)
+	linkedDir := filepath.Join(t.TempDir(), "linked")
+	testutil.RunGit(t, mainDir, "worktree", "add", linkedDir, "-b", "linked-branch")
+	checkout := unregisteredCheckoutOf(t, mainDir)
+
+	chdirWorktree(t, linkedDir)
+	testutil.WriteFile(t, linkedDir, "linked.go", "package linked")
+	saveStepIn(t, s, sid, []string{"linked.go"}, nil)
+
+	chdirWorktree(t, checkout)
+	testutil.WriteFile(t, checkout, "a.go", "package a // in the checkout")
+	saveStepIn(t, s, sid, []string{"a.go"}, nil)
+
+	state := mustLoad(t, s, sid)
+	entry := state.OtherWorktrees[session.WorktreeKey("")]
+	require.NotNil(t, entry, "the checkout's step wasn't recorded for it")
+	assert.Equal(t, []string{"a.go"}, entry.FilesTouched)
+	assert.True(t, sameDir(entry.Path, checkout), "entry path = %s", entry.Path)
+	assert.True(t, hasWorktreeEntry(t.Context(), state, checkout))
+	assert.False(t, hasWorktreeEntry(t.Context(), state, mainDir), "the checkout's record counts in the main worktree")
+
+	chdirWorktree(t, mainDir)
+	testutil.WriteFile(t, mainDir, "b.go", "package b // in the main worktree")
+	saveStepIn(t, s, sid, []string{"b.go"}, nil)
+
+	after := mustLoad(t, s, sid)
+	assert.Equal(t, []string{"linked.go"}, after.FilesTouched, "the home's record changed")
+	entry = after.OtherWorktrees[session.WorktreeKey("")]
+	require.NotNil(t, entry, "the main worktree's step replaced the checkout's record")
+	assert.Equal(t, []string{"a.go"}, entry.FilesTouched, "the main worktree's step merged into the checkout's record")
+	assert.True(t, sameDir(entry.Path, checkout), "entry path = %s", entry.Path)
+}
+
+// A home moved between two steps of one turn, before turn start could follow
+// it, is still the home: the step is recorded there, not skipped.
+func TestGuestTurnEnd_HomeMovedMidTurnIsStillHome(t *testing.T) {
+	t.Run("main worktree renamed", func(t *testing.T) {
+		const sid = "home-renamed"
+		s := &ManualCommitStrategy{}
+		mainDir := setupGitRepo(t)
+		chdirWorktree(t, mainDir)
+		testutil.WriteFile(t, mainDir, "home.go", "package home")
+		saveStepIn(t, s, sid, []string{"home.go"}, nil)
+
+		moved := mainDir + "-moved"
+		require.NoError(t, os.Rename(mainDir, moved))
+		chdirWorktree(t, moved)
+		testutil.WriteFile(t, moved, "later.go", "package later")
+		saveStepIn(t, s, sid, []string{"later.go"}, nil)
+
+		after := mustLoad(t, s, sid)
+		assert.Equal(t, []string{"home.go", "later.go"}, after.FilesTouched, "the moved home's step was dropped")
+		assert.Equal(t, 2, after.StepCount)
+	})
+	t.Run("linked home moved by git", func(t *testing.T) {
+		const sid = "home-moved"
+		s := &ManualCommitStrategy{}
+		mainDir := setupGitRepo(t)
+		linkedDir := filepath.Join(t.TempDir(), "linked")
+		testutil.RunGit(t, mainDir, "worktree", "add", linkedDir, "-b", "linked-branch")
+		chdirWorktree(t, linkedDir)
+		testutil.WriteFile(t, linkedDir, "home.go", "package home")
+		saveStepIn(t, s, sid, []string{"home.go"}, nil)
+
+		moved := filepath.Join(t.TempDir(), "linked-moved")
+		chdirWorktree(t, mainDir)
+		testutil.RunGit(t, mainDir, "worktree", "move", linkedDir, moved)
+		chdirWorktree(t, moved)
+		testutil.WriteFile(t, moved, "later.go", "package later")
+		saveStepIn(t, s, sid, []string{"later.go"}, nil)
+
+		after := mustLoad(t, s, sid)
+		assert.Equal(t, []string{"home.go", "later.go"}, after.FilesTouched, "the moved home's step was dropped")
+		assert.Equal(t, 2, after.StepCount)
+	})
 }
 
 // unregisteredCheckoutOf materializes a checkout of mainDir's current branch on

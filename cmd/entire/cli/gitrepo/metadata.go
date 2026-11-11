@@ -28,6 +28,10 @@ var ErrWorktreeMetadataNotFound = errors.New("worktree Git metadata not found")
 
 // WorktreeMetadata contains Git directory facts for one explicit worktree
 // root. Paths are cleaned and absolute but retain their lexical spelling.
+// WorktreeID is the <common>/worktrees registration name of a linked
+// worktree. It is empty for the main worktree and also for an unregistered
+// checkout, whose Git directory shares the repository through commondir
+// without a registration.
 type WorktreeMetadata struct {
 	GitDir     string
 	CommonDir  string
@@ -170,9 +174,9 @@ func resolveWorktreeID(gitDirPath, commonDir string) (string, error) {
 		return id, nil
 	}
 
-	// A Git directory that names the registration tree, by spelling or by
+	// A Git directory that lies in the registration tree, by spelling or by
 	// resolution, claims to be a linked worktree and must be a well-formed one.
-	claimsRegistration, err := namesRegistrationTree(gitDirPath, registrationPath, commonDir)
+	claimsRegistration, err := namesRegistrationTree(registrationRoot, gitDirPath, registrationPath)
 	if err != nil {
 		return "", fmt.Errorf("validate linked-worktree registration for %s: %w", gitDirPath, err)
 	}
@@ -196,37 +200,34 @@ func isImmediateRegistration(resolvedGitDir, registrationRoot string) (bool, err
 	return metadataDirectoriesIdentifySameFile(filepath.Dir(resolvedGitDir), registrationRoot)
 }
 
-// namesRegistrationTree reports whether the Git directory lies inside
-// <common>/worktrees by its spelling, by its spelling with only the parent
-// resolved, or by its resolved location. The parent-only form catches an
-// escaping registration symlink reached through an alias of the common
-// directory or of the registration tree: neither the alias spelling nor the
-// symlink's target names the real tree, but the symlink's own location does.
-func namesRegistrationTree(gitDirPath, resolvedGitDir, commonDir string) (bool, error) {
-	if pathWithin(filepath.Join(commonDir, "worktrees"), gitDirPath) {
-		return true, nil
+// namesRegistrationTree reports whether the Git directory's spelling or its
+// resolved location lies in registrationRoot (or is it). Ancestors are
+// compared by identity, not text, so every alias of the tree counts: a
+// symlink to the common directory or to the tree, a case variant on a
+// case-insensitive filesystem, or a bind mount. Walking the spelling stats
+// each prefix through its symlinks, which finds an escaping registration
+// symlink at its own location even though its target lies outside the tree.
+func namesRegistrationTree(registrationRoot, gitDirPath, resolvedGitDir string) (bool, error) {
+	rootInfo, err := os.Stat(registrationRoot)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
 	}
-	resolvedCommon, err := filepath.EvalSymlinks(commonDir)
 	if err != nil {
-		return false, fmt.Errorf("resolve common Git directory %s: %w", commonDir, err)
+		return false, fmt.Errorf("inspect %s: %w", registrationRoot, err)
 	}
-	resolvedRegistrationRoot := filepath.Join(resolvedCommon, "worktrees")
-	resolvedParent, err := filepath.EvalSymlinks(filepath.Dir(gitDirPath))
-	if err != nil {
-		return false, fmt.Errorf("resolve parent of Git directory %s: %w", gitDirPath, err)
+	for _, path := range []string{gitDirPath, resolvedGitDir} {
+		for cur := filepath.Clean(path); ; {
+			if info, err := os.Stat(cur); err == nil && os.SameFile(info, rootInfo) {
+				return true, nil
+			}
+			parent := filepath.Dir(cur)
+			if parent == cur {
+				break
+			}
+			cur = parent
+		}
 	}
-	if pathWithin(resolvedRegistrationRoot, filepath.Join(resolvedParent, filepath.Base(gitDirPath))) {
-		return true, nil
-	}
-	return pathWithin(resolvedRegistrationRoot, resolvedGitDir), nil
-}
-
-func pathWithin(base, target string) bool {
-	rel, err := filepath.Rel(filepath.Clean(base), filepath.Clean(target))
-	if err != nil {
-		return false
-	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	return false, nil
 }
 
 // readMetadataPointerFile reads a .git or commondir pointer file with git's own

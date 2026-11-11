@@ -287,6 +287,15 @@ func TestResolveWorktreeMetadata_RejectsRegistrationSymlinkEscapingCommonDir(t *
 			},
 			commondirVia: func(_ *testing.T, commonDir, _ string) string { return commonDir },
 		},
+		{
+			name: "gitdir through a case variant of the registration tree",
+			gitdirVia: func(t *testing.T, commonDir, tmp string) string {
+				t.Helper()
+				skipUnlessCaseInsensitive(t, tmp)
+				return filepath.Join(commonDir, "WORKTREES", "escaped")
+			},
+			commondirVia: func(_ *testing.T, commonDir, _ string) string { return commonDir },
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -595,6 +604,20 @@ func TestResolveWorktreeMetadata_MalformedMetadata(t *testing.T) {
 			},
 			want: "not an immediate child",
 		},
+		{
+			name: "nested registration through a case variant",
+			setup: func(t *testing.T) string {
+				root := t.TempDir()
+				skipUnlessCaseInsensitive(t, root)
+				common := filepath.Join(root, "store")
+				perWorktree := filepath.Join(common, "worktrees", "nested", "id")
+				require.NoError(t, os.MkdirAll(perWorktree, 0o750))
+				writeMetadataFile(t, filepath.Join(root, gitDir), "gitdir: "+filepath.Join(common, "Worktrees", "nested", "id")+"\n")
+				writeMetadataFile(t, filepath.Join(perWorktree, "commondir"), common+"\n")
+				return root
+			},
+			want: "not an immediate child",
+		},
 	}
 
 	for _, tt := range tests {
@@ -855,4 +878,15 @@ func writeMetadataFile(t *testing.T, path, content string) {
 	t.Helper()
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o750))
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+}
+
+// skipUnlessCaseInsensitive skips t when dir's filesystem tells names apart by
+// case, where a case variant names a different (here missing) directory.
+func skipUnlessCaseInsensitive(t *testing.T, dir string) {
+	t.Helper()
+	probe := filepath.Join(dir, "case-probe")
+	require.NoError(t, os.MkdirAll(probe, 0o750))
+	if _, err := os.Stat(filepath.Join(dir, "CASE-PROBE")); err != nil {
+		t.Skip("filesystem is case-sensitive")
+	}
 }
