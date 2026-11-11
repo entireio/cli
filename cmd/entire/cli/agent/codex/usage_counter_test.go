@@ -142,3 +142,26 @@ func TestUsageCounter_DeclaredChildChangeIsRead(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 13, second.Children["child"].InputTokens, "the declared rollout's change is read")
 }
+
+// A reading that could not read a child's declared rollout and fell back to
+// its resolved one is not cached: the declared file's size and time don't
+// change when it becomes readable again, so the next reading must try it.
+func TestUsageCounter_FallbackPastDeclaredChildIsReadAgain(t *testing.T) {
+	t.Parallel()
+	declaredRoot, resolvedRoot := t.TempDir(), t.TempDir()
+	declared := writeRollout(t, declaredRoot, "rollout-declared.jsonl", "child", childUsageEvents(5))
+	resolved := writeRollout(t, resolvedRoot, "rollout-resolved.jsonl", "child", childUsageEvents(9))
+	in := agent.CumulativeTokenInput{TranscriptPath: writeParentRollout(t, resolvedRoot), Subagents: []agent.SubagentReference{{
+		AgentID: "child", DeclaredTranscriptPath: declared, ResolvedTranscriptPath: resolved,
+	}}}
+
+	// The declared rollout is outside this agent's rollout roots, so its read
+	// fails and the child falls back to the resolved one.
+	first, _, err := agent.ReadCumulativeUsage(t.Context(), &CodexAgent{RolloutRoots: []string{resolvedRoot}}, in, nil)
+	require.NoError(t, err)
+	require.Equal(t, 7, first.Children["child"].InputTokens, "the resolved rollout is read")
+
+	second, _, err := agent.ReadCumulativeUsage(t.Context(), &CodexAgent{RolloutRoots: []string{declaredRoot, resolvedRoot}}, in, first.Cursor)
+	require.NoError(t, err)
+	require.Equal(t, 3, second.Children["child"].InputTokens, "the declared rollout is read once it can be")
+}

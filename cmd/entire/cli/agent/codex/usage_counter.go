@@ -134,7 +134,7 @@ func (u *usageCounter) children(ctx context.Context, in agent.CumulativeTokenInp
 	if len(in.Subagents) == 0 {
 		return nil
 	}
-	key, cacheable := childFingerprint(in)
+	key, preferred, cacheable := childFingerprint(in)
 	if cacheable && key == u.ChildKey {
 		return maps.Clone(u.ChildTotals)
 	}
@@ -144,9 +144,7 @@ func (u *usageCounter) children(ctx context.Context, in agent.CumulativeTokenInp
 	}
 	var children map[string]*agent.TokenUsage
 	for index, child := range extraction.Children {
-		if child.AgentID != "" && (child.TokenUsage == nil || !readFromOwnPath(in.Subagents, index, child.ResolvedPath)) {
-			// A child read without a total (a failed or canceled read) or
-			// found by scanning is read again next time, not cached.
+		if child.AgentID != "" && !readAsFingerprinted(child, preferred, index) {
 			cacheable = false
 		}
 		if child.AgentID == "" || child.TokenUsage == nil {
@@ -165,40 +163,45 @@ func (u *usageCounter) children(ctx context.Context, in agent.CumulativeTokenInp
 	return children
 }
 
-// readFromOwnPath reports whether the child at index was read from one of
-// its reference's own paths, which childFingerprint covers.
-func readFromOwnPath(refs []agent.SubagentReference, index int, path string) bool {
-	if index >= len(refs) || path == "" {
-		return false
-	}
-	return path == refs[index].DeclaredTranscriptPath || path == refs[index].ResolvedTranscriptPath
+// readAsFingerprinted reports whether the child at index came back with a
+// total read from preferred[index], the path childFingerprint expects it to
+// be read from. A failed or canceled read, a child found by scanning, and a
+// read that fell back past a preferred file it couldn't read (a transient
+// failure leaves the file's size and time alone) are read again next time,
+// not cached.
+func readAsFingerprinted(child agent.SubagentAnalysis, preferred []string, index int) bool {
+	return child.TokenUsage != nil && index < len(preferred) && child.ResolvedPath == preferred[index]
 }
 
 // childFingerprint identifies the inventory and, for each child, every path
 // its rollout is read from (declared, then resolved, as loadDirectRollout
 // tries them): a regular file's size and modification time, or that it is
-// missing, so one appearing changes the key. A child with neither path a
-// regular file is found by scanning, and a path that is something else is
-// left to the inventory's own checks, so neither inventory is cached.
-func childFingerprint(in agent.CumulativeTokenInput) (string, bool) {
+// missing, so one appearing changes the key. preferred holds each child's
+// first path that is a regular file, the one its cached total must come
+// from. A child with neither path a regular file is found by scanning, and a
+// path that is something else is left to the inventory's own checks, so
+// neither inventory is cached.
+func childFingerprint(in agent.CumulativeTokenInput) (key string, preferred []string, ok bool) {
 	h := sha256.New()
 	fmt.Fprintf(h, "%s\n", in.Home)
-	for _, ref := range in.Subagents {
+	preferred = make([]string, len(in.Subagents))
+	for index, ref := range in.Subagents {
 		fmt.Fprintf(h, "%s", ref.AgentID)
-		found := false
 		for _, path := range []string{ref.DeclaredTranscriptPath, ref.ResolvedTranscriptPath} {
-			regular, ok := fingerprintPath(h, path)
-			if !ok {
-				return "", false
+			regular, pathOK := fingerprintPath(h, path)
+			if !pathOK {
+				return "", nil, false
 			}
-			found = found || regular
+			if regular && preferred[index] == "" {
+				preferred[index] = path
+			}
 		}
-		if !found {
-			return "", false
+		if preferred[index] == "" {
+			return "", nil, false
 		}
 		fmt.Fprintln(h)
 	}
-	return hex.EncodeToString(h.Sum(nil)[:12]), true
+	return hex.EncodeToString(h.Sum(nil)[:12]), preferred, true
 }
 
 // fingerprintPath writes path's part of a child fingerprint to w: its size
