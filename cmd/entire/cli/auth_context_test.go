@@ -131,6 +131,32 @@ func TestResolveStatusTarget_UnreachableKeyringErrors(t *testing.T) {
 	}
 }
 
+// A saved login on a Linux keyring with no Secret Service provider is an
+// error carrying the fix, not the zero-token "Not logged in" target.
+func TestResolveStatusTarget_MissingSecretServiceErrors(t *testing.T) {
+	cfgDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
+	t.Setenv("ENTIRE_TOKEN_STORE", "")
+	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
+	t.Cleanup(restore)
+
+	exp := time.Now().Add(time.Hour).Unix()
+	stored := makeContextJWT(t, fmt.Sprintf(`{"iss":"`+testCoreURL+`","handle":"alice","exp":%d}`, exp))
+	if _, err := auth.RecordLoginContext(stored, "", true); err != nil {
+		t.Fatalf("record context: %v", err)
+	}
+	// The login is saved, but no Secret Service provider answers now.
+	t.Cleanup(tokenstore.UseMissingSecretServiceForTesting())
+
+	_, err := resolveStatusTarget(t.Context(), auth.Contexts, auth.RefreshedLoginToken)
+	if !errors.Is(err, tokenstore.ErrKeyringServiceMissing) {
+		t.Fatalf("resolveStatusTarget error = %v, want ErrKeyringServiceMissing", err)
+	}
+	if !strings.Contains(err.Error(), "ENTIRE_TOKEN_STORE=file entire login") {
+		t.Errorf("error does not carry the file-store remedy:\n%v", err)
+	}
+}
+
 // A genuine contexts.json read/parse error is surfaced by resolveStatusTarget,
 // symmetric with the control-plane commands. (A missing file reads as "no
 // contexts" and is not an error.)

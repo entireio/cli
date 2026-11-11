@@ -248,23 +248,25 @@ type keyringStore struct{}
 
 func (keyringStore) Get(service, user string) (string, error) {
 	// keyring.ErrNotFound propagates unchanged unless the keyring could not
-	// be searched at all; only a timeout wraps.
+	// be searched at all; a timeout wraps, and a missing Secret Service
+	// provider becomes ErrKeyringServiceMissing.
 	val, err := callKeyringWithTimeout("get", func() (string, error) {
-		return keyring.Get(service, user)
+		v, err := keyring.Get(service, user)
+		return v, classifyKeyringError(err)
 	})
 	return checkNotFound(val, err, keyringReachable)
 }
 
 func (keyringStore) Set(service, user, password string) error {
 	_, err := callKeyringWithTimeout("set", func() (string, error) {
-		return "", keyring.Set(service, user, password)
+		return "", classifyKeyringError(keyring.Set(service, user, password))
 	})
 	return err
 }
 
 func (keyringStore) Delete(service, user string) error {
 	_, err := callKeyringWithTimeout("delete", func() (string, error) {
-		return "", keyring.Delete(service, user)
+		return "", classifyKeyringError(keyring.Delete(service, user))
 	})
 	return err
 }

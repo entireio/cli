@@ -1,6 +1,9 @@
 package tokenstore
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // UseFileBackendForTesting points the package-level token store at a
 // per-test JSON file and returns a cleanup function that restores the
@@ -139,4 +142,14 @@ func (u unreachableKeyring) Set(service, user, password string) error {
 func (u unreachableKeyring) Delete(service, user string) error {
 	//nolint:wrapcheck // thin test wrapper; callers handle errors
 	return u.inner.Delete(service, user)
+}
+
+// UseMissingSecretServiceForTesting makes every store call fail the way a
+// Linux keyring does when no Secret Service provider is on the D-Bus session
+// bus: with ErrKeyringServiceMissing wrapping the bus daemon's reply text.
+// Returns a cleanup function.
+func UseMissingSecretServiceForTesting() func() {
+	//nolint:staticcheck // ST1005: the D-Bus daemon's reply text, verbatim
+	missing := &KeyringServiceMissingError{Cause: errors.New("The name org.freedesktop.secrets was not provided by any .service files")}
+	return installFaultStore(faultStore{inner: errStore{err: missing}})
 }

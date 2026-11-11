@@ -21,9 +21,11 @@ import (
 // class.
 func classifySearchError(err error) string {
 	switch {
-	case errors.Is(err, auth.ErrNotLoggedIn), errors.Is(err, tokenstore.ErrKeyringUnavailable):
-		// An unreadable keyring was reported as not-logged-in before it had
-		// its own error; keep it in the auth class so the series is continuous.
+	case errors.Is(err, auth.ErrNotLoggedIn), tokenstore.IsKeyringUnreadable(err):
+		// An unreadable keyring (macOS Keychain out of reach, or no Linux
+		// Secret Service provider) is an auth failure too. The macOS case was
+		// reported as not-logged-in before it had its own error, so this also
+		// keeps that series continuous.
 		return telemetry.SearchErrClassAuth
 	case errors.Is(err, auth.ErrNoCellForJurisdiction):
 		return telemetry.SearchErrClassCellSkip

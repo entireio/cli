@@ -187,6 +187,17 @@ func contextAuthError(c *contexts.Context, err error) error {
 		// because a keyring that could not be read makes any "expired" or
 		// "not logged in" conclusion in the same chain unreliable.
 		return fmt.Errorf("cannot read the saved login for %q (%s): %w", c.Name, coreURL, tokenstore.ErrKeyringUnavailable)
+	case errors.Is(err, tokenstore.ErrKeyringServiceMissing):
+		// Linux with no Secret Service provider on the session bus. Ahead of
+		// the re-login cases for the same reason as above; unlike it, the
+		// advice offers re-login with the file store, which does fix this.
+		// The keyring error is wrapped without the store-read chain around it.
+		var missing *tokenstore.KeyringServiceMissingError
+		cause := err
+		if errors.As(err, &missing) {
+			cause = missing
+		}
+		return fmt.Errorf("cannot read the saved login for %q (%s): %w%s", c.Name, coreURL, cause, KeyringServiceMissingAdvice(err))
 	case errors.Is(err, tokenmanager.ErrReauthRequired):
 		return &reauthError{
 			msg:      fmt.Sprintf("login session for %q (%s) expired; run `entire login` to re-authenticate", c.Name, coreURL),

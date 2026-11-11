@@ -128,3 +128,27 @@ func TestWithHeadlessStoreHint_BadConfig_NoHint(t *testing.T) {
 		t.Fatalf("bad config.json must not carry the headless hint, got:\n%s", got)
 	}
 }
+
+// A login write that fails because no Secret Service provider is reachable
+// gets the same two-way advice a later saved-login read shows.
+func TestWithHeadlessStoreHint_KeyringServiceMissing(t *testing.T) {
+	// Not parallel: mutates process-global env.
+	t.Setenv("ENTIRE_TOKEN_STORE", "")
+	t.Setenv("CI", "")
+	t.Setenv("PATH", t.TempDir())
+	missing := &tokenstore.KeyringServiceMissingError{Cause: errors.New("The name org.freedesktop.secrets was not provided by any .service files")}
+	err := fmt.Errorf("save login: %w", errors.Join(auth.ErrCredentialStoreWrite, missing))
+
+	got := withHeadlessStoreHint(err).Error()
+	for _, want := range []string{"install and start a Secret Service provider", "ENTIRE_TOKEN_STORE=file entire login", "ENTIRE_TOKEN_STORE_PATH"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("hint is missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "headless server") {
+		t.Errorf("generic headless hint added on top of the provider advice:\n%s", got)
+	}
+	if strings.Count(got, "=file entire login") != 1 {
+		t.Errorf("file-store steps repeated:\n%s", got)
+	}
+}

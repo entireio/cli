@@ -528,13 +528,20 @@ func loginCompleteLine(token, dialled string) string {
 // failures the file store wouldn't help with. The root guard checks
 // config.json before login starts, but the user can break it during the
 // browser or device wait.
+//
+// A Linux keyring with no Secret Service provider gets the same two-way
+// advice a saved-login read shows (auth.KeyringServiceMissingAdvice), so
+// login and every later command agree on the fix.
 func withHeadlessStoreHint(err error) error {
-	if !errors.Is(err, auth.ErrCredentialStoreWrite) || errors.Is(err, tokenstore.ErrBadConfig) || tokenstore.FileBackendSelected() {
+	if errors.Is(err, tokenstore.ErrKeyringServiceMissing) {
+		return fmt.Errorf("%w%s", err, auth.KeyringServiceMissingAdvice(err))
+	}
+	if !errors.Is(err, auth.ErrCredentialStoreWrite) || !auth.FileStoreCanHelp(err) {
 		return err
 	}
 
-	return fmt.Errorf("%w\n\nIf this machine has no usable OS keyring (headless server, container, CI), store tokens in a file instead:\n\n  %s=file entire login\n\nor, to make it stick, put {\"token_store\": \"file\"} in %s.\n\nTokens are then written with 0600 permissions to %s (override the location with %s)",
-		err, tokenstore.BackendEnvVar, tokenstore.ConfigFilePath(), tokenstore.FileBackendPath(), tokenstore.PathEnvVar)
+	return fmt.Errorf("%w\n\nIf this machine has no usable OS keyring (headless server, container, CI), store tokens in a file instead:\n\n%s",
+		err, auth.FileStoreSteps())
 }
 
 // validateReceivedToken runs minimum-trust checks on the access token
