@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"slices"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -15,6 +17,11 @@ import (
 // TestDieFromSignal_TerminatesBySignal exercises real process death without
 // killing the test runner itself.
 const dieFromSignalEnvVar = "ENTIRE_TEST_DIE_FROM_SIGNAL"
+
+// runMainEnvVar, when set on a re-executed test binary, makes TestMain run
+// main() with the variable's value as the command line (space-separated)
+// instead of the test suite.
+const runMainEnvVar = "ENTIRE_TEST_RUN_MAIN"
 
 func TestMain(m *testing.M) {
 	// Child mode: exercise dieFromSignal for the named signal and let it
@@ -27,6 +34,11 @@ func TestMain(m *testing.M) {
 		}
 		dieFromSignal(sig)
 		os.Exit(exitCodeForSignal(sig))
+	}
+	if line := os.Getenv(runMainEnvVar); line != "" {
+		os.Args = append([]string{"entire"}, strings.Fields(line)...)
+		main()
+		os.Exit(0)
 	}
 	os.Exit(m.Run())
 }
@@ -108,6 +120,35 @@ func TestExitCodeForSignal(t *testing.T) {
 			t.Parallel()
 			if got := exitCodeForSignal(tc.sig); got != tc.want {
 				t.Errorf("exitCodeForSignal(%v) = %d, want %d", tc.sig, got, tc.want)
+			}
+		})
+	}
+}
+
+// A signal ignored at startup stays ignored: Notify would un-ignore it.
+func TestShutdownSignals_SkipsSignalsIgnoredAtStartup(t *testing.T) {
+	t.Parallel()
+	none := func(os.Signal) bool { return false }
+	ignoring := func(ignored ...os.Signal) func(os.Signal) bool {
+		return func(sig os.Signal) bool { return slices.Contains(ignored, sig) }
+	}
+	tests := []struct {
+		name    string
+		goos    string
+		ignored func(os.Signal) bool
+		want    []os.Signal
+	}{
+		{"unix", "linux", none, []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP}},
+		{"unix under nohup", "linux", ignoring(syscall.SIGHUP), []os.Signal{os.Interrupt, syscall.SIGTERM}},
+		{"unix background job", "darwin", ignoring(os.Interrupt), []os.Signal{syscall.SIGTERM, syscall.SIGHUP}},
+		{"windows", "windows", none, []os.Signal{os.Interrupt}},
+		{"windows, SIGINT ignored", "windows", ignoring(os.Interrupt), []os.Signal{}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := shutdownSignals(tc.goos, tc.ignored); !slices.Equal(got, tc.want) {
+				t.Errorf("shutdownSignals(%s) = %v, want %v", tc.goos, got, tc.want)
 			}
 		})
 	}

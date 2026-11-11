@@ -38,13 +38,10 @@ func main() {
 
 	// Handle interrupt signals
 	sigChan := make(chan os.Signal, 1)
-	signals := []os.Signal{os.Interrupt}
-	if runtime.GOOS != "windows" {
-		// SIGHUP: a closed terminal. Uncaught, it kills this process
-		// outright, skipping the cancel path that ends a running plugin.
-		signals = append(signals, syscall.SIGTERM, syscall.SIGHUP)
+	if signals := shutdownSignals(runtime.GOOS, signal.Ignored); len(signals) > 0 {
+		// Never Notify with an empty list: that means every signal.
+		signal.Notify(sigChan, signals...)
 	}
-	signal.Notify(sigChan, signals...)
 	go func() {
 		// First signal: cancel the context so in-flight work unwinds
 		// cleanly. signal.Notify has disabled Go's default "signal
@@ -163,6 +160,30 @@ func main() {
 		os.Exit(1)
 	}
 	cancel() // Cleanup on successful exit
+}
+
+// shutdownSignals is the signals main's handler takes over: SIGINT, and on
+// Unix SIGTERM and SIGHUP (a closed terminal — uncaught, it kills this process
+// outright, skipping the cancel path that ends a running plugin).
+//
+// Each only if it was not ignored when we started (ignored is signal.Ignored,
+// which must be asked before any Notify for that signal). Notify un-ignores a
+// signal, which would defeat whoever ignored it: `nohup entire <plugin>` would
+// catch the terminal's SIGHUP it was meant to sleep through and take the
+// plugin down with it, and a background job in a non-interactive shell, which
+// starts with SIGINT ignored, would start reacting to Ctrl-C.
+func shutdownSignals(goos string, ignored func(os.Signal) bool) []os.Signal {
+	candidates := []os.Signal{os.Interrupt}
+	if goos != "windows" {
+		candidates = append(candidates, syscall.SIGTERM, syscall.SIGHUP)
+	}
+	signals := make([]os.Signal, 0, len(candidates))
+	for _, sig := range candidates {
+		if !ignored(sig) {
+			signals = append(signals, sig)
+		}
+	}
+	return signals
 }
 
 // exitWithPluginOutcome exits with a plugin's outcome: its exit code, or the
