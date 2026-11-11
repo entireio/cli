@@ -171,6 +171,34 @@ func TestJSONLBytes_SelfDetectedArgvPasswordDoesNotRewriteSkippedFields(t *testi
 	}
 }
 
+func TestJSONLBytes_FallbackStillHidesUnrelatedSecretInSkippedField(t *testing.T) {
+	t.Parallel()
+	a := highEntropySecret
+	b := githubPATFixture
+	// B sits in an ordinary array, so its replacement is unkeyed. The argv
+	// password A in id forces the structural fallback; that must still hide
+	// B in thinkingSignature, as the splice would have.
+	in := `{"id":"` + a + `","command":["docker","login","-p","` + a + `"],"thinkingSignature":"` + b + `","items":["` + b + `"]}`
+	got, err := JSONLBytes([]byte(in + "\n"))
+	require.NoError(t, err)
+	out := string(got.Bytes())
+	var obj map[string]any
+	require.NoError(t, json.Unmarshal([]byte(out), &obj))
+	require.Equal(t, a, obj["id"], out)
+	require.Equal(t, RedactedPlaceholder, obj["thinkingSignature"], out)
+	items, ok := obj["items"].([]any)
+	require.True(t, ok, out)
+	require.Equal(t, []any{RedactedPlaceholder}, items, out)
+	command, ok := obj["command"].([]any)
+	require.True(t, ok)
+	require.NotContains(t, command, a)
+	require.NotContains(t, out, b)
+	stored := strings.Count(out, RedactedPlaceholder)
+	require.Equal(t, 3, stored, out)
+	require.NotNil(t, got.Counts())
+	require.Equal(t, stored, got.Counts().Replacements)
+}
+
 func TestJSONLBytes_ArgvArraysWithoutPasswordsStayVisible(t *testing.T) {
 	t.Parallel()
 	for _, in := range []string{

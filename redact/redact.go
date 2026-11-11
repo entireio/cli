@@ -1631,6 +1631,14 @@ func (r leafRedactor) spliced(before tally, written int) {
 	}
 }
 
+// addReplacements adds n placeholders to the tally, for copies applied after
+// a recount (skipped-field leftovers of unkeyed non-argv secrets).
+func (r leafRedactor) addReplacements(n int) {
+	if r.counts != nil && n > 0 {
+		r.counts.replacements += n
+	}
+}
+
 // jsonlContentImpl is the body of JSONLContent parameterized by a per-leaf
 // redactor. JSONLContent passes the regex layers. The OPF-enabled flow uses
 // two passes: one with a collector that records leaves and finds nothing, one
@@ -2493,11 +2501,46 @@ func tokenStreamHasDuplicateKeys(dec *json.Decoder) bool {
 // The re-encode redacts every leaf again, so the counts roll back to before,
 // taken ahead of the collection pass, and each value is counted once.
 func ensureReplacementsLanded(parsed any, content, spliced string, repls []jsonReplacement, redactor leafRedactor, before tally) (string, error) {
-	if !spliceHitsSkippedLeaf(parsed, repls) && !spliceMissed(spliced, repls) {
+	hitSkipped := spliceHitsSkippedLeaf(parsed, repls)
+	if !hitSkipped && !spliceMissed(spliced, repls) {
 		return spliced, nil
 	}
 	redactor.rollback(before)
-	return reencodeRedactedApplyingKeys(content, redactor, unkeyedSecretKeys(repls))
+	out, err := reencodeRedactedApplyingKeys(content, redactor, unkeyedSecretKeys(repls))
+	if err != nil {
+		return "", err
+	}
+	if !hitSkipped {
+		return out, nil
+	}
+	// The splice would also have hidden unkeyed non-argv secrets in skipped
+	// fields — a GitHub token in thinkingSignature that also appears in a
+	// note. Structural re-encode leaves those fields alone, so those
+	// replacements are applied to the re-encoded line. The recount covers
+	// the redactable copies; addReplacements covers the skipped ones.
+	kept := unkeyedNonArgvReplacements(repls)
+	if len(kept) == 0 {
+		return out, nil
+	}
+	out, written, err := applyJSONReplacements(out, kept)
+	if err != nil {
+		return "", err
+	}
+	redactor.addReplacements(written)
+	return out, nil
+}
+
+// unkeyedNonArgvReplacements returns the unkeyed replacements that are not
+// argument-vector or values-only: secrets the splice would have hidden in
+// every copy, including skipped fields.
+func unkeyedNonArgvReplacements(repls []jsonReplacement) []jsonReplacement {
+	var kept []jsonReplacement
+	for _, r := range repls {
+		if r.key == "" && !r.valuesOnly && !r.argv && r.redacted != r.original {
+			kept = append(kept, r)
+		}
+	}
+	return kept
 }
 
 // spliceHitsSkippedLeaf reports whether an unkeyed argument-vector
