@@ -69,6 +69,16 @@ func TestString_ShellParameterDefaultsCaughtWithoutScanners(t *testing.T) {
 		`echo 'a"b' DB_PASSWORD=${PW:-'$S3CRET'}`:                           `echo 'a"b' DB_PASSWORD=REDACTED`,
 		"echo \"a\nx \"DB_PASSWORD=${PW:-'$S3CRET'}\" y":                    "echo \"a\nx \"DB_PASSWORD=REDACTED y",
 		"# note: \"\nDB_PASSWORD=${PW:-'$S3CRET'} printenv \"DB_PASSWORD\"": "# note: \"\nDB_PASSWORD=REDACTED printenv \"DB_PASSWORD\"",
+		// The quoting is read from the start of the text, however long.
+		strings.Repeat("echo ok\n", 200) + "echo \"a\nx \"DB_PASSWORD=${PW:-'$S3CRET'}\" y":                   strings.Repeat("echo ok\n", 200) + "echo \"a\nx \"DB_PASSWORD=REDACTED y",
+		"echo \"" + strings.Repeat("a", 1100) + "\nx\" DB_PASSWORD=${PW:-'$S3CRET'} printenv \"DB_PASSWORD\"": "echo \"" + strings.Repeat("a", 1100) + "\nx\" DB_PASSWORD=REDACTED printenv \"DB_PASSWORD\"",
+		strings.Repeat("echo ok\n", 200) + "echo \"a\nx \"postgres://app:${PW:-'$S3CRET'}@db/app \"y\"":       strings.Repeat("echo ok\n", 200) + "echo \"a\nx \"REDACTED \"y\"",
+		`printf '%s' ok; DB_PASSWORD=${PW:-'$S3CRET'}`:                                                        `printf '%s' ok; DB_PASSWORD=REDACTED`,
+		// An escaped blank does not end a word, so # after it starts no comment.
+		// The value is the whole word ${PW:-'$S3CRET'}" y".
+		"echo foo\\ #\"a\nx \"DB_PASSWORD=${PW:-'$S3CRET'}\" y\"": "echo foo\\ #\"a\nx \"DB_PASSWORD=REDACTED",
+		// A here-document body is text: its quote opens no string.
+		"cat <<EOF\nsay \"hi\nEOF\nDB_PASSWORD=${PW:-'$S3CRET'} cmd \"x\"": "cat <<EOF\nsay \"hi\nEOF\nDB_PASSWORD=REDACTED cmd \"x\"",
 		// A command substitution starts a new quoting context.
 		`echo "$(DB_PASSWORD=${PW:-'$S3CRET'} env)"`:  `echo "$(DB_PASSWORD=REDACTED env)"`,
 		"echo \"`DB_PASSWORD=${PW:-'$S3CRET'} env`\"": "echo \"`DB_PASSWORD=REDACTED env`\"",
@@ -127,8 +137,20 @@ func TestString_DoubleQuotedShellDefaultsPreserved(t *testing.T) {
 		`printf '%s\n' "postgres://app:${PW:-'$FALLBACK'}@db/app"`,
 		"echo \"a\nDB_PASSWORD=${PW:-'$FALLBACK'} b\"",
 		"# don't\nDB_PASSWORD=\"${PW:-'$FALLBACK'}\"",
-		// Past the first KiB of text, the value's own line is read.
+		// The quoting is read from the start of the text, however long.
 		strings.Repeat("echo ok\n", 200) + `DB_PASSWORD="${PW:-'$FALLBACK'}"`,
+		"echo \"a\n" + strings.Repeat("b\n", 600) + "DB_PASSWORD=${PW:-'$FALLBACK'} c\"",
+		`printf '%s' ok; DB_PASSWORD="${PW:-'$FALLBACK'}"`,
+		// Closed $'...' strings and command substitutions leave the quoting
+		// after them as it was.
+		`printf $'ok'; DB_PASSWORD="${PW:-'$FALLBACK'}"`,
+		`printf $'it\'s'; DB_PASSWORD="${PW:-'$FALLBACK'}"`,
+		`echo $(date); DB_PASSWORD="${PW:-'$FALLBACK'}"`,
+		"echo `date`; DB_PASSWORD=\"${PW:-'$FALLBACK'}\"",
+		`echo "$(echo "DB_PASSWORD=${PW:-'$FALLBACK'}" )"`,
+		`echo $((1<<2)) "DB_PASSWORD=${PW:-'$FALLBACK'}"`,
+		// A here-document body's apostrophe opens no single quoted string.
+		"git commit -m \"$(cat <<'EOF'\nIt's done\nEOF\n)\" && DB_PASSWORD=\"${PW:-'$FALLBACK'}\" ./run",
 		`echo "API_KEY=${KEY:-'$FALLBACK'}"`,
 		`psql "postgres://app:${PW:-'$FALLBACK'}@db/app"`,
 		`echo "DB_PASSWORD=${PW}"`,
@@ -181,30 +203,68 @@ func TestDoubleQuotedText(t *testing.T) {
 	}
 }
 
-func TestEndsInDoubleQuotes(t *testing.T) {
+// Each prefix is followed by a value; the reader reports whether the shell
+// reads that value inside double quotes.
+func TestShellQuotes_DoubleQuotedAt(t *testing.T) {
 	t.Parallel()
 	for prefix, want := range map[string]bool{
-		`echo "`:           true,
-		`echo "a" "`:       true,
-		`echo 'it' "`:      true,
-		`echo 'a"b' `:      false,
-		`echo \"`:          false,
-		`echo "x\"y `:      true,
-		"echo \"a\nb\" \"": true,
-		"echo \"a\nx \"":   false,
-		`echo "$(`:         false,
-		"echo \"`":         false,
-		`echo 'unclosed "`: false,
-		`echo "trailing \`: false,
-		`DB_PASSWORD=`:     false,
-		"# note: \"\n":     false,
-		"# don't\nx=\"":    true,
-		"echo $# \"":       true,
-		`echo a#"`:         true,
-		`echo $'it\'s' "`:  false,
+		`echo "`:            true,
+		`echo "a" "`:        true,
+		`echo 'it' "`:       true,
+		`echo 'a"b' `:       false,
+		`echo \"`:           false,
+		`echo "x\"y `:       true,
+		"echo \"a\nb\" \"":  true,
+		"echo \"a\nx \"":    false,
+		`echo 'unclosed "`:  false,
+		`echo "trailing \`:  false,
+		`DB_PASSWORD=`:      false,
+		"# note: \"\n":      false,
+		"# don't\nx=\"":     true,
+		"echo $# \"":        true,
+		`echo a#"`:          true,
+		`echo foo\ #"`:      true,
+		`echo $'it\'s' "`:   true,
+		`printf $'ok'; x="`: true,
+		`echo $'unclosed "`: false,
+		// A command substitution is a quoting context of its own.
+		`echo "$(`:                        false,
+		"echo \"`":                        false,
+		`echo "$(echo "`:                  true,
+		`echo "$(echo "a") `:              true,
+		`echo $(date) "`:                  true,
+		"echo `date` \"":                  true,
+		"echo \"`echo \"a\"` ":            true,
+		`echo "$(( (1+2) * 3 )) `:         true,
+		`echo $((1<<2)) "`:                true,
+		`echo "$(case x in (a) ;; esac) `: true,
+		// Here-document bodies are text, not shell quoting.
+		"cat <<EOF\nsay \"hi\nEOF\n":                                 false,
+		"cat <<'EOF'\nit's\nEOF\nx=\"":                               true,
+		"cat <<-\"EOF\"\n\tit's\n\tEOF\nx=\"":                        true,
+		"cat <<A <<B\n\"\nA\n'\nB\nx=\"":                             true,
+		"cat <<EOF # it's\n'\nEOF\nx=\"":                             true,
+		"git commit -m \"$(cat <<'EOF'\nIt's done\nEOF\n)\" && x=\"": true,
+		"cat <<EOF\nnever closed \"\n":                               false,
+		"cat <<<\"x\" \"":                                            true,
 	} {
-		if got := endsInDoubleQuotes(prefix); got != want {
-			t.Errorf("endsInDoubleQuotes(%q) = %v, want %v", prefix, got, want)
+		if got := newShellQuotes(prefix + "v").doubleQuotedAt(len(prefix)); got != want {
+			t.Errorf("doubleQuotedAt after %q = %v, want %v", prefix, got, want)
+		}
+	}
+}
+
+// A reader asked about an earlier position reads s again from its start.
+func TestShellQuotes_EarlierPositionRereads(t *testing.T) {
+	t.Parallel()
+	s := `a "b" c "d"`
+	quotes := newShellQuotes(s)
+	for _, tt := range []struct {
+		at   int
+		want bool
+	}{{9, true}, {3, true}, {6, false}, {6, false}, {9, true}, {0, false}} {
+		if got := quotes.doubleQuotedAt(tt.at); got != tt.want {
+			t.Errorf("doubleQuotedAt(%d) in %q = %v, want %v", tt.at, s, got, tt.want)
 		}
 	}
 }
