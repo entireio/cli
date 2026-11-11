@@ -29,9 +29,9 @@ type TrailResource struct {
 	Title              string                `json:"title"`
 	Body               string                `json:"body,omitempty"`
 	Status             string                `json:"status"`
+	ReadyForReview     *bool                 `json:"ready_for_review,omitempty"` // nil when the server omits it
 	Phase              string                `json:"phase,omitempty"`
 	Author             *trail.Author         `json:"author"`
-	Assignees          []string              `json:"assignees"`
 	Labels             []string              `json:"labels,omitempty"`
 	Priority           string                `json:"priority,omitempty"`
 	Type               string                `json:"type,omitempty"`
@@ -40,8 +40,6 @@ type TrailResource struct {
 	CreatedAt          time.Time             `json:"created_at"`
 	UpdatedAt          time.Time             `json:"updated_at"`
 	MergedAt           *time.Time            `json:"merged_at,omitempty"`
-	CommentCount       int                   `json:"comment_count,omitempty"`
-	UnresolvedCount    int                   `json:"unresolved_count,omitempty"`
 	CheckpointCount    int                   `json:"checkpoint_count,omitempty"`
 	CommitsAhead       int                   `json:"commits_ahead,omitempty"`
 	BodyDocument       *TrailBodyDocument    `json:"body_document,omitempty"`
@@ -51,28 +49,23 @@ type TrailResource struct {
 	// review-target resolution, ...) does not depend on the snapshot's shape;
 	// only `trail show` reads it, through DecodeMergeability.
 	Mergeability json.RawMessage `json:"mergeability,omitempty"`
+	// Agents is detail-only too, and raw for the same reason: `trail finding`
+	// passes it through to --json and reads it through DecodeAgents.
+	Agents json.RawMessage `json:"agents,omitempty"`
 	// FromDetail reports that the resource was decoded from the detail route
 	// rather than a list page. It is the reliable marker: body_document can be
 	// absent from a valid detail response.
 	FromDetail bool `json:"-"`
 }
 
-// TrailBodyDocument is the trail's description editor document. TextSnapshot
-// is the rendered plain text displayed by the CLI. The document is also what a
-// body write returns (see TrailBodyRequest), so both directions decode into this
-// type; the fields the CLI does not use (id, document_key, schema_version,
-// content_json, updated_at) are simply left out of it. ETag is populated on a
-// read as well as on a write response, and is what makes If-Match viable on
-// the next write (see sendTrailBody).
 type TrailBodyDocument struct {
 	TextSnapshot string `json:"text_snapshot"`
-	ETag         string `json:"etag,omitempty"`
 }
 
 // DecodeMergeability decodes the detail resource's mergeability snapshot. It
 // returns nil, nil when the snapshot is absent or null.
 func (r *TrailResource) DecodeMergeability() (*TrailMergeability, error) {
-	if len(r.Mergeability) == 0 || string(r.Mergeability) == "null" {
+	if RawJSONAbsent(r.Mergeability) {
 		return nil, nil //nolint:nilnil // nil, nil means "no snapshot served"
 	}
 	var m TrailMergeability
@@ -82,18 +75,21 @@ func (r *TrailResource) DecodeMergeability() (*TrailMergeability, error) {
 	return &m, nil
 }
 
+// RawJSONAbsent reports a detail-only field the read did not carry: missing
+// or null.
+func RawJSONAbsent(raw json.RawMessage) bool {
+	return len(raw) == 0 || string(raw) == "null"
+}
+
 // ToMetadata converts a TrailResource to display metadata.
 func (r *TrailResource) ToMetadata() *trail.Metadata {
 	m := &trail.Metadata{
 		Number: r.Number, TrailID: trail.ID(r.ID), URL: r.URL,
 		Branch: r.Branch, OriginalBranch: r.OriginalBranch, Base: r.Base, Title: r.Title, Body: r.Body,
 		Status: trail.Status(r.Status), Phase: r.Phase, Author: r.Author,
-		Assignees: r.Assignees, Labels: r.Labels, Type: trail.Type(r.Type),
+		Labels: r.Labels, Type: trail.Type(r.Type),
 		Priority: trail.Priority(r.Priority), Reviewers: r.Reviewers,
 		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, MergedAt: r.MergedAt,
-	}
-	if m.Assignees == nil {
-		m.Assignees = []string{}
 	}
 	if m.Labels == nil {
 		m.Labels = []string{}
@@ -104,67 +100,17 @@ func (r *TrailResource) ToMetadata() *trail.Metadata {
 	return m
 }
 
-// TrailCreateRequest is the body for POST /api/v1/trails/:host/:owner/:repo.
-type TrailCreateRequest struct {
-	Title        string   `json:"title"`
-	Body         string   `json:"body,omitempty"`
-	BranchName   string   `json:"branch_name,omitempty"`
-	BranchAction string   `json:"branch_action,omitempty"`
-	Base         string   `json:"base,omitempty"`
-	Status       string   `json:"status,omitempty"`
-	Assignees    []string `json:"assignees,omitempty"`
-	Priority     string   `json:"priority,omitempty"`
-	Type         string   `json:"type,omitempty"`
-}
-
-type TrailCreateResponse struct {
-	Trail TrailResource `json:"trail"`
-}
-
-// TrailUpdateRequest uses pointers to distinguish absent fields from clears.
-// There is deliberately no Labels field: the trails API does not accept label
-// writes, so `trail update` exposes no label flags (labels are read-only, see
-// TrailResource.Labels).
-//
-// There is deliberately no Body field either. The trails API does not serve
-// body writes on this route — it rejects a body field outright and names the
-// dedicated route to use instead — so the description has its own route and its
-// own request shape; see TrailBodyRequest. Do not reintroduce the field to save
-// a request: the rejection has been served as a redacted 5xx, which reads to
-// the caller as a flaky server rather than as the wrong route, and that is what
-// made this bug survive as long as it did.
 type TrailUpdateRequest struct {
-	Status             *string   `json:"status,omitempty"`
-	Title              *string   `json:"title,omitempty"`
-	Assignees          *[]string `json:"assignees,omitempty"`
-	RequestedReviewers *[]string `json:"requested_reviewers,omitempty"`
-	Type               *string   `json:"type,omitempty"`
-	Priority           *string   `json:"priority,omitempty"`
+	// ReadyForReview marks the change ready (true) or back to draft (false).
+	// The server keeps it false on a repository without an approval gate, but
+	// still applies the matching draft state to a backing pull request.
+	ReadyForReview *bool `json:"ready_for_review,omitempty"`
+	// Base retargets the change onto another base branch.
+	Base *string `json:"base,omitempty"`
 }
 
 type TrailUpdateResponse struct {
 	Trail TrailResource `json:"trail"`
-}
-
-// TrailBodyRequest is the body for PUT
-// /api/v1/trails/:host/:owner/:repo/:number/body, the only route that writes a
-// trail's description (see TrailUpdateRequest for why it is not PATCH). The
-// route answers with the resulting document, which decodes into
-// TrailBodyDocument.
-//
-// Markdown carries no omitempty: an empty string is how a description is
-// cleared, and the server distinguishes present-and-empty from absent — with
-// omitempty the field would vanish from the JSON and the request would be
-// rejected as "exactly one of markdown/content_json is required".
-//
-// The route also accepts content_json (ProseMirror JSON, written as-is) in place
-// of markdown; the CLI only ever writes Markdown, so content_json is not
-// modeled here. The route also accepts an If-Match header for optimistic
-// concurrency, populated from a prior read of TrailBodyDocument.ETag — see
-// sendTrailBody for the dispatch between If-Match and Overwrite.
-type TrailBodyRequest struct {
-	Markdown  string `json:"markdown"`
-	Overwrite bool   `json:"overwrite,omitempty"`
 }
 
 // TrailApproval is a single approval decision on a trail. Author is exposed as
@@ -196,7 +142,7 @@ func (a *TrailApproval) UnmarshalJSON(data []byte) error {
 	if wire.Body != nil {
 		a.Body = *wire.Body
 	}
-	if len(wire.Author) == 0 || string(wire.Author) == "null" {
+	if RawJSONAbsent(wire.Author) {
 		return nil
 	}
 	if err := json.Unmarshal(wire.Author, &a.Author); err == nil {

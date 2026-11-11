@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -16,7 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
 
-func TestConfigureOpenCodeSummaryAndRunner(t *testing.T) {
+func TestConfigureOpenCodeSummaryProvider(t *testing.T) {
 	// Changes CWD and the provider registry; must remain non-parallel.
 	catPath, err := exec.LookPath("cat")
 	if err != nil {
@@ -61,13 +60,9 @@ func TestConfigureOpenCodeSummaryAndRunner(t *testing.T) {
 			t.Fatalf("incorrect provider: %+v", provider)
 		}
 	}
-	root := setupRunnersDir(t)
-	writeRunner(t, filepath.Join(root, ".entire", "runners"), "trail-risk", "Evaluate {{ diff }}.")
-	runners, err := loadTuneRunners(root, "risk")
-	if err != nil {
-		t.Fatal(err)
-	}
-	response := `{"trail-risk":"Evaluate {{ diff }} and return a risk assessment."}`
+	// The configured provider generates text end to end: the saved model is
+	// forwarded to OpenCode and its text event comes back as the result.
+	response := "A generated summary."
 	event, err := json.Marshal(map[string]any{"type": "text", "part": map[string]string{"text": response}})
 	if err != nil {
 		t.Fatal(err)
@@ -83,29 +78,21 @@ func TestConfigureOpenCodeSummaryAndRunner(t *testing.T) {
 			}
 			i := slices.Index(args, "--model")
 			if i < 0 || args[i+1] != "openai/test" {
-				t.Fatalf("runner model not forwarded: %v", args)
+				t.Fatalf("summary model not forwarded: %v", args)
 			}
 			return exec.CommandContext(ctx, catPath, path)
 		}}
 	})
 	t.Cleanup(func() { agent.Register(agent.AgentNameOpenCode, opencode.NewOpenCodeAgent) })
-	var output bytes.Buffer
 	provider, err := resolveCheckpointSummaryProvider(t.Context(), io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
-	changes, skipped, err := runTuning(t.Context(), io.Discard, provider, runners, "synthetic tuning prompt", "")
+	out, err := provider.TextGenerator.GenerateText(t.Context(), "synthetic prompt", provider.Model)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := applyTunedRunners(&output, io.Discard, root, changes, skipped, nil); err != nil {
-		t.Fatal(err)
-	}
-	updated, err := loadTuneRunners(root, "risk")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if updated[0].Template != "Evaluate {{ diff }} and return a risk assessment." {
-		t.Fatalf("template = %q", updated[0].Template)
+	if out != response {
+		t.Fatalf("generated text = %q, want %q", out, response)
 	}
 }
