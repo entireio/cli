@@ -341,12 +341,12 @@ func ToRelativePath(absPath, cwd string) string {
 // without its drive letter (/Users/...) on cwd's drive. On other platforms it
 // returns p.
 func WithWindowsDrive(p, cwd string) string {
-	p = normalizeMSYSPath(p)
-	cwd = normalizeMSYSPath(cwd)
-	if runtime.GOOS == osWindows && len(p) > 0 && p[0] == '/' && len(cwd) >= 2 && cwd[1] == ':' {
-		return cwd[:2] + p
+	normalized := normalizeMSYSPath(p)
+	dir := normalizeMSYSPath(cwd)
+	if runtime.GOOS == osWindows && len(normalized) > 0 && normalized[0] == '/' && len(dir) >= 2 && dir[1] == ':' {
+		return dir[:2] + normalized
 	}
-	return p
+	return normalized
 }
 
 // normalizeMSYSPath converts MSYS/Git Bash-style paths (e.g., /c/Users/...)
