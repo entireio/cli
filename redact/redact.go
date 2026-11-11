@@ -976,16 +976,23 @@ func detectCredentialKeyCaptures(
 // still matched, so as with FindAll no match takes the last byte of its match
 // as the byte before a key: the closing quote there would make
 // ";client_secret=" the value of b and hide the client_secret. That holds
-// only for a match that starts where FindAll goes on, at or after the end of
-// the match the region was redacted for. One that starts before it, inside
-// the text that match took, as b='b' in API_KEY='b='b'API_KEY=hunter2xyz,
-// is one FindAll never finds, so the second API_KEY is still read. A later
+// only for a match FindAll finds, going on from the end of the match the
+// region was redacted for (see findAllChain). One that starts before that
+// end, inside the text that match took, as b='b' in
+// API_KEY='b='b'API_KEY=hunter2xyz, is one FindAll never finds, so the
+// second API_KEY is still read. So is one inside a match FindAll finds after
+// that end: in api_key="x""a=b="; note=" f=";client_secret="hunter2", FindAll
+// takes a=b=" whole, so b="; note=" sets no such end, and note=" f=" and then
+// client_secret are read as FindAll reads them. A later
 // match that starts inside such a match and whose value stays visible and
 // runs past it is cut back to its end, as for a rejected trailing key, so
 // FOO= in API_KEY="x""a=b"|FOO= API_KEY=hunter2, which a's value holds, does
 // not take API_KEY=hunter2.
 func forEachUncoveredMatch(s string, pattern *regexp.Regexp, valueGroup int, visit func(match []int, wholeWord bool) int) {
 	covered, atKey, unredactedEnd, rejectedEnd := 0, false, -1, -1
+	// trailing marks a search that starts again at a key that ends a
+	// redacted region.
+	trailing := false
 	// coveredMatchEnd is where the match that covered was redacted for ends,
 	// where FindAll goes on.
 	coveredMatchEnd := 0
@@ -997,7 +1004,8 @@ func forEachUncoveredMatch(s string, pattern *regexp.Regexp, valueGroup int, vis
 			// the key with it.
 			searchFrom--
 		}
-		match := nextMatch(s, pattern, searchFrom, len(s))
+		match := cursorMatch(s, pattern, valueGroup, searchFrom, from, trailing, &runs)
+		trailing = false
 		if match == nil {
 			return
 		}
@@ -1013,15 +1021,13 @@ func forEachUncoveredMatch(s string, pattern *regexp.Regexp, valueGroup int, vis
 			if valueStart < covered {
 				next = covered
 			} else if end := visit(match, true); end > 0 {
-				last, readEnd := visitStraddlingValues(s, pattern, valueGroup, visit, match, end, &runs)
+				coveredMatchEnd = findAllGoesOn(from, coveredMatchEnd, match[1])
+				last, readEnd := visitStraddlingValues(s, pattern, valueGroup, visit, match, end, coveredMatchEnd, &runs)
 				covered, unredactedEnd = max(covered, last.end), max(unredactedEnd, readEnd)
-				if from >= coveredMatchEnd {
-					coveredMatchEnd = match[1]
-				}
 				if keyStart := assignedKeyStart(s, last.start, last.end); keyStart >= valueStart && last.end >= next {
 					// FindAll goes on at match[1], so it reads a '_' there as
 					// the byte before the key.
-					next, atKey = keyStart, keyStart != match[1] || s[keyStart] != '_'
+					next, atKey, trailing = keyStart, keyStart != match[1] || s[keyStart] != '_', true
 				} else if keyStart < 0 {
 					next = max(next, last.end)
 				}
@@ -1036,6 +1042,27 @@ func forEachUncoveredMatch(s string, pattern *regexp.Regexp, valueGroup int, vis
 		}
 		from = next
 	}
+}
+
+// cursorMatch returns the match forEachUncoveredMatch reads from searchFrom:
+// for a search that starts again at the trailing key at from, the bounded
+// trailingKeyMatch, and otherwise nextMatch.
+func cursorMatch(s string, pattern *regexp.Regexp, valueGroup, searchFrom, from int, trailing bool, runs *valueRunEnd) []int {
+	if trailing {
+		return trailingKeyMatch(s, pattern, valueGroup, searchFrom, from, runs)
+	}
+	return nextMatch(s, pattern, searchFrom, len(s))
+}
+
+// findAllGoesOn returns where FindAll goes on after the match from a search
+// at from that ends at matchEnd, when it went on at findAllEnd before. A key
+// inside the text the last match took, read again because it ends a redacted
+// region, is one FindAll never reads, so FindAll still goes on at findAllEnd.
+func findAllGoesOn(from, findAllEnd, matchEnd int) int {
+	if from < findAllEnd {
+		return findAllEnd
+	}
+	return matchEnd
 }
 
 // endAtFindAllBoundary returns where the search goes on after a match from
@@ -1106,9 +1133,9 @@ func nextMatch(s string, pattern *regexp.Regexp, from, limit int) []int {
 // DB_PASSWORD=DB_PASSWORD=...hunter2, once for each key. runs finds where the
 // run of value bytes at a region's end ends (see valueRunEnd). It also returns
 // where the last match it read whose value stays visible ends, of those that
-// start at or after where match ends, or -1, since FindAll would go on from
+// FindAll finds going on at findAllFrom, or -1, since FindAll would go on from
 // there (see forEachUncoveredMatch).
-func visitStraddlingValues(s string, pattern *regexp.Regexp, valueGroup int, visit func(match []int, wholeWord bool) int, match []int, end int, runs *valueRunEnd) (region, int) {
+func visitStraddlingValues(s string, pattern *regexp.Regexp, valueGroup int, visit func(match []int, wholeWord bool) int, match []int, end, findAllFrom int, runs *valueRunEnd) (region, int) {
 	type straddled struct {
 		r        region
 		matchEnd int
@@ -1117,10 +1144,11 @@ func visitStraddlingValues(s string, pattern *regexp.Regexp, valueGroup int, vis
 	pending := []straddled{{last, matchEnd}}
 	read := map[int]bool{}
 	unredactedEnd := -1
+	findAll := findAllChain{from: findAllFrom, starts: map[int]bool{}}
 	readValue := func(match []int, wholeWord bool, inside region) {
 		valueEnd := visit(match, wholeWord)
 		if valueEnd <= 0 {
-			if match[0] >= matchEnd {
+			if findAll.holds(s, pattern, valueGroup, match[2*valueGroup], runs) {
 				unredactedEnd = max(unredactedEnd, match[1])
 			}
 			return
@@ -1257,6 +1285,64 @@ func nextValueMatch(s string, pattern *regexp.Regexp, valueGroup, from, end, lim
 		match[2*valueGroup+1], match[1] = limit, limit
 	}
 	return match
+}
+
+// findAllValueMatch is nextValueMatch for a search with no run end known,
+// whose match must end where FindAll's does: a bare value that runs past the
+// window ends where its run of value bytes does, and one that opens with a
+// quote is found again over the whole text.
+func findAllValueMatch(s string, pattern *regexp.Regexp, valueGroup, from, end int, runs *valueRunEnd) []int {
+	match := nextValueMatch(s, pattern, valueGroup, from, end, len(s))
+	valueStart, valueEnd, ok := captureRange(match, valueGroup)
+	if ok && valueStart < end && valueEnd == len(s) && !isQuoteByte(s[valueStart]) && pattern != shellStdinSecretPattern {
+		runEnd := runs.from(s, valueStart)
+		match[2*valueGroup+1], match[1] = runEnd, runEnd
+	}
+	return match
+}
+
+// trailingKeyMatch is nextMatch(s, pattern, from, len(s)) for the search
+// that starts again at a key that ends a redacted region (see
+// forEachUncoveredMatch). That key's bare value can run on to the end of a
+// line without blanks, as FOO's does in API_KEY="x"FOO=|API_KEY="x"FOO=|...,
+// and reading it for each word would read the rest of the line once per word.
+// So the search reads only a few bytes past where the value starts, and the
+// value ends where its run of value bytes does (see findAllValueMatch).
+func trailingKeyMatch(s string, pattern *regexp.Regexp, valueGroup, from, keyStart int, runs *valueRunEnd) []int {
+	if eq := strings.IndexByte(s[keyStart:], '='); eq >= 0 {
+		valueStart := len(s) - len(strings.TrimLeft(s[keyStart+eq+1:], " \t"))
+		match := findAllValueMatch(s, pattern, valueGroup, from, valueStart+1, runs)
+		if start, _, ok := captureRange(match, valueGroup); ok && start == valueStart {
+			return match
+		}
+	}
+	return nextMatch(s, pattern, from, len(s))
+}
+
+// findAllChain follows the matches FindAll finds after it goes on at from, as
+// far as it needs to tell whether one of them has a given value start.
+type findAllChain struct {
+	from int
+	// starts holds the value starts of the matches found so far; every match
+	// with a value start before reached has been found.
+	starts  map[int]bool
+	reached int
+}
+
+// holds reports whether the value that starts at valueStart is one of the
+// matches FindAll finds.
+func (c *findAllChain) holds(s string, pattern *regexp.Regexp, valueGroup, valueStart int, runs *valueRunEnd) bool {
+	for c.reached <= valueStart && c.from <= valueStart {
+		match := findAllValueMatch(s, pattern, valueGroup, c.from, valueStart+1, runs)
+		start, _, ok := captureRange(match, valueGroup)
+		if !ok || start > valueStart {
+			c.reached = valueStart + 1
+			break
+		}
+		c.starts[start], c.reached = true, start+1
+		c.from = max(match[1], c.from+1)
+	}
+	return c.starts[valueStart]
 }
 
 // valueRunStopBytes end a run of bare value bytes: blanks, line ends and the
