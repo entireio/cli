@@ -1316,13 +1316,13 @@ func joinedShellWord(s string, start, end int) ([]wordPiece, int, bool) {
 }
 
 // enclosingStringEnd reports whether s[start] sits inside a double quoted
-// string opened before it (see endsInDoubleQuotes), and the index of the
+// string opened before it (see inDoubleQuotesAt), and the index of the
 // quote that closes that string right after the value. The index is -1 when
 // a blank ends the value first, as it ends a captured one
 // (echo "DB_PASSWORD=x more"), when the line ends first, or when a backslash
 // could escape a quote: the value is then read as captured.
 func enclosingStringEnd(s string, start int) (bool, int) {
-	if start > doubleQuoteContextLimit || !endsInDoubleQuotes(s[:start]) {
+	if !inDoubleQuotesAt(s, start) {
 		return false, -1
 	}
 	rest := s[start:min(len(s), start+doubleQuoteContextLimit)]
