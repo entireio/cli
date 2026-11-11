@@ -628,43 +628,61 @@ func uriPassword(s string, uriStart, start, end int) string {
 	return password
 }
 
-// doubleQuoteContextLimit bounds how far before and after a value
-// insideDoubleQuotes reads its line, so that many values on one long line
-// cost linear time. A value further than that from its line's start, or from
-// the quote that closes its string, is read as unquoted.
+// doubleQuoteContextLimit bounds how far into s a value may start, and how
+// far after it the closing quote may be, for insideDoubleQuotes to read its
+// quoting, so that many values cost linear time. A value further in is read
+// as unquoted.
 const doubleQuoteContextLimit = 1024
 
-// insideDoubleQuotes reports whether s[start:end] sits inside one double
-// quoted string on its line, as a shell reads it: the line before it holds an
-// odd number of double quotes, so the last one opens a string, and that
-// string closes after it on the same line. A single quote, backslash or
-// backquote earlier on the line, or a double quote or backslash in the value,
-// can change which quotes pair (printf \"postgres://...\" quotes nothing), so
-// the value is then read as unquoted, which only ever redacts more: a single
-// quoted default is a literal there (see isPlaceholderShellExpansion). The
-// value may end with the quote that closes its string.
+// insideDoubleQuotes reports whether s[start:end] sits inside a double quoted
+// string, as a shell reads s from its start: endsInDoubleQuotes(s[:start]),
+// and the string closes after the value on the same line. A value holding a
+// double quote, backslash, backquote or $( can change which quotes pair or
+// start a new quoting context, so it is then read as unquoted, which only
+// ever redacts more: a single quoted default is a literal there (see
+// isPlaceholderShellExpansion). The value may end with the quote that closes
+// its string.
 func insideDoubleQuotes(s string, start, end int) bool {
-	from := max(0, start-doubleQuoteContextLimit)
-	lineStart := strings.LastIndexAny(s[from:start], "\n\r")
-	switch {
-	case lineStart >= 0:
-		lineStart += from + 1
-	case from > 0:
-		return false
-	default:
-		lineStart = 0
-	}
-	before := s[lineStart:start]
-	if strings.ContainsAny(before, "'\\`") || strings.Count(before, `"`)%2 == 0 {
+	if start > doubleQuoteContextLimit || !endsInDoubleQuotes(s[:start]) {
 		return false
 	}
 	value := strings.TrimSuffix(s[start:end], `"`)
-	if strings.ContainsAny(value, `"\`) {
+	if strings.ContainsAny(value, "\"\\`") || strings.Contains(value, "$(") {
 		return false
 	}
 	rest := s[start+len(value) : min(len(s), start+len(value)+doubleQuoteContextLimit)]
 	closing := strings.IndexAny(rest, "\"\n\r")
 	return closing >= 0 && rest[closing] == '"'
+}
+
+// endsInDoubleQuotes reports whether a shell reading prefix from its start
+// ends inside a double quoted string. Single quoted strings and backslash
+// escapes are skipped as the shell skips them, so printf '%s\n' "x" and
+// echo \"x\" read as they run. A command substitution or backquote starts a
+// new quoting context ("$(DB_PASSWORD=${PW:-'$S3CRET'} env)"), and an
+// unclosed single quote or a trailing backslash leaves the next byte's
+// meaning open, so they report false.
+func endsInDoubleQuotes(prefix string) bool {
+	inDouble := false
+	for i := 0; i < len(prefix); i++ {
+		switch c := prefix[i]; {
+		case c == '`' || c == '$' && strings.HasPrefix(prefix[i+1:], "("):
+			return false
+		case c == '\\':
+			if i++; i == len(prefix) {
+				return false
+			}
+		case c == '"':
+			inDouble = !inDouble
+		case c == '\'' && !inDouble:
+			closing := strings.IndexByte(prefix[i+1:], '\'')
+			if closing < 0 {
+				return false
+			}
+			i += 1 + closing
+		}
+	}
+	return inDouble
 }
 
 // detectDatabaseURIPasswords covers database URIs whose password contains a
