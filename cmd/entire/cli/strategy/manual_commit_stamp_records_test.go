@@ -92,7 +92,8 @@ func TestTakeStampRecords_KeepsTheNextCommitsStamp(t *testing.T) {
 	assert.Equal(t, map[id.CheckpointID]bool{second: true}, records.stamped, "the next commit's post-commit finds its stamp")
 	assert.Equal(t, []string{"sess-second"}, records.sessions[second].SessionIDs, "and the sessions its prepare linked")
 	assert.Empty(t, readStampedTrailers(ctx))
-	assert.Empty(t, readStampedSessionsIn(mustPerWorktreeGitRoot(t)))
+	releaseStampedSessions(ctx, records.sessions)
+	assert.Empty(t, readStampedSessionsIn(mustPerWorktreeGitRoot(t)), "released once post-commit is done")
 }
 
 // A post-commit can fall more than one commit behind: it reads its commit,
@@ -118,9 +119,11 @@ func TestTakeStampRecords_KeepsStampsOfCommitsLandedSince(t *testing.T) {
 
 	assert.Equal(t, map[id.CheckpointID]bool{second: true}, takeStampRecords(ctx, secondCommit).stamped)
 	thirdCommit := commitWith(t, dir, "third", third)
-	assert.Equal(t, map[id.CheckpointID]bool{third: true}, takeStampRecords(ctx, thirdCommit).stamped, "the third commit's post-commit finds its stamp")
+	records := takeStampRecords(ctx, thirdCommit)
+	assert.Equal(t, map[id.CheckpointID]bool{third: true}, records.stamped, "the third commit's post-commit finds its stamp")
 	assert.Empty(t, readStampedTrailers(ctx))
-	assert.Empty(t, readStampedSessionsIn(mustPerWorktreeGitRoot(t)))
+	releaseStampedSessions(ctx, records.sessions)
+	assert.Empty(t, readStampedSessionsIn(mustPerWorktreeGitRoot(t)), "released once post-commit is done")
 }
 
 // When more commits land than HEAD's walk reaches, post-commit cannot tell a

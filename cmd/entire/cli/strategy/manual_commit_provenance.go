@@ -462,7 +462,10 @@ func recordStampedTrailer(ctx context.Context, cpID id.CheckpointID) bool {
 // its trailer (a stamp an older binary wrote), post-commit matches afresh, as
 // before. The entry also names the linked sessions prepare stamped on their
 // shape alone (withTrustedSessions), which post-commit condenses without
-// overlap evidence however they have settled since.
+// overlap evidence however they have settled since. Post-commit leaves the
+// entries of the stamps it takes until it is done (releaseStampedSessions),
+// which is how a racing prepare knows a reserved ID is already another
+// commit's (reservationCarriedInFlight).
 const stampedSessionsFile = "entire-stamped-sessions.json"
 
 type stampedSessions struct {
@@ -643,7 +646,10 @@ type stampRecords struct {
 // takeStampRecords returns, for post-commit, what prepare-commit-msg recorded
 // for commit, and consumes it. It holds the stamp-records lock throughout, so
 // it takes every record in one step that a racing prepare or post-commit
-// cannot split.
+// cannot split. The sessions entries of the stamps it takes stay in place,
+// without their stamps, until post-commit is done with them
+// (releaseStampedSessions), so a prepare racing it can tell that its commit
+// carries a session's reserved ID (reservationCarriedInFlight).
 //
 // It consumes only what is the commit's. git lets the next commit start once
 // this one is made, before its post-commit runs, so later commits' prepares
@@ -678,8 +684,9 @@ func takeStampRecords(ctx context.Context, commit *object.Commit) stampRecords {
 
 // takeStampsIn takes the stamps and sessions entries of the trailers carried,
 // keeps the ones that may be stamped on a commit in pending, and drops the
-// rest. Callers
-// hold the stamp-records lock.
+// rest, including an entry left without its stamp by an earlier take. It
+// leaves the entries it takes in place, without their stamps, for
+// releaseStampedSessions. Callers hold the stamp-records lock.
 func takeStampsIn(ctx context.Context, root *os.Root, carried map[id.CheckpointID]bool, pending inFlight) (map[id.CheckpointID]bool, map[id.CheckpointID]stampedSessions) {
 	entries := readStampedSessionsIn(root)
 	stampedOn := make(map[id.CheckpointID]string, len(entries))
@@ -700,8 +707,9 @@ func takeStampsIn(ctx context.Context, root *os.Root, carried map[id.CheckpointI
 	var keptEntries []stampedSessions
 	for _, e := range entries {
 		switch {
-		case carried[e.CheckpointID]:
+		case stamped[e.CheckpointID]:
 			sessions[e.CheckpointID] = e
+			keptEntries = append(keptEntries, e)
 		case slices.Contains(kept, e.CheckpointID):
 			keptEntries = append(keptEntries, e)
 		}
@@ -715,6 +723,96 @@ func takeStampsIn(ctx context.Context, root *os.Root, carried map[id.CheckpointI
 		logging.Debug(logCtx, "post-commit: could not rewrite the stamped trailers", slog.String("error", err.Error()))
 	}
 	return stamped, sessions
+}
+
+// releaseStampedSessions removes the sessions entries takeStampRecords left
+// in place for the stamps post-commit took (taken), once post-commit is done
+// with them. An entry whose trailer has been stamped again since is a later
+// prepare's, and stays. If post-commit never gets here, the next post-commit's
+// take drops the entries, as it drops any entry without its stamp.
+func releaseStampedSessions(ctx context.Context, taken map[id.CheckpointID]stampedSessions) {
+	if len(taken) == 0 {
+		return
+	}
+	root, err := perWorktreeGitRoot(ctx)
+	if err != nil {
+		return
+	}
+	release := lockStampRecords(ctx, root)
+	defer release()
+	restamped := checkpointSet(readStampedTrailersIn(root))
+	entries := readStampedSessionsIn(root)
+	left := slices.DeleteFunc(slices.Clone(entries), func(e stampedSessions) bool {
+		_, took := taken[e.CheckpointID]
+		return took && !restamped[e.CheckpointID]
+	})
+	if len(left) == len(entries) {
+		return
+	}
+	if err := writeStampedSessionsIn(root, left); err != nil {
+		logging.Debug(logging.WithComponent(ctx, "checkpoint"), "post-commit: could not release the stamped sessions",
+			slog.String("error", err.Error()))
+	}
+}
+
+// reservationCarriedInFlight reports whether a commit already made carries
+// cpID, a session's reserved checkpoint ID, while its post-commit may not have
+// condensed the session into it yet. git lets the next commit start once one
+// is made, before its post-commit runs, and the session holds the reservation
+// until that post-commit condenses it, so a commit prepared in between must
+// not be given the same ID: it would name the other commit's checkpoint, and
+// its post-commit would write its own work over that checkpoint.
+//
+// Prepare recorded stamping cpID (stampedSessionsFile), and its post-commit
+// has not released the entry yet (releaseStampedSessions); a commit on HEAD's
+// first parents made since the HEAD that prepare stamped on carries cpID. A
+// stamp prepared on HEAD itself, as when a commit is tried again after its
+// first attempt was aborted, is the same commit's, so the retry keeps the
+// reservation. Once the post-commit is done, a session that still holds the
+// reservation was not condensed into it, and the next commit takes it, as
+// before.
+func reservationCarriedInFlight(ctx context.Context, cpID id.CheckpointID) bool {
+	root, err := perWorktreeGitRoot(ctx)
+	if err != nil {
+		return false
+	}
+	entries := readStampedSessionsIn(root)
+	i := slices.IndexFunc(entries, func(e stampedSessions) bool { return e.CheckpointID == cpID })
+	return i >= 0 && commitSinceCarries(ctx, entries[i].Head, cpID)
+}
+
+// commitSinceCarries reports whether a commit on HEAD's first parents, made
+// after stampedOn (any, when it is empty), carries cpID. It looks at most
+// maxCommitsInFlight commits back, and an unreadable HEAD or commit ends the
+// search.
+func commitSinceCarries(ctx context.Context, stampedOn string, cpID id.CheckpointID) bool {
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		return false
+	}
+	defer repo.Close()
+	head, err := repo.Head()
+	if err != nil {
+		return false
+	}
+	hash := head.Hash()
+	for range maxCommitsInFlight {
+		if hash.String() == stampedOn {
+			return false
+		}
+		commit, err := repo.CommitObject(hash)
+		if err != nil {
+			return false
+		}
+		if slices.Contains(trailers.ParseAllCheckpoints(commit.Message), cpID) {
+			return true
+		}
+		if len(commit.ParentHashes) == 0 {
+			return false
+		}
+		hash = commit.ParentHashes[0]
+	}
+	return false
 }
 
 // takeInheritedMarkerIn returns the trailers prepare-commit-msg recorded as

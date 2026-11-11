@@ -324,7 +324,13 @@ commit.
   start before a commit's post-commit runs, so post-commit takes only the
   stamps its commit carries, keeps the ones prepared on its commit or on a
   commit made on top of it since (up to HEAD) for their own post-commit, and
-  drops the rest, left by commits that never happened (`takeStampRecords`). Prepare writes the records and post-commit
+  drops the rest, left by commits that never happened (`takeStampRecords`).
+  A session's reserved ID goes to one commit: while a commit already made
+  carries it and that commit's post-commit is not done (post-commit leaves the
+  sessions entries of the stamps it took until it returns,
+  `releaseStampedSessions`), prepare gives the next commit an ID of its own
+  (`reservationCarriedInFlight`). A commit retried on the same HEAD after an
+  aborted attempt keeps the reservation. Prepare writes the records and post-commit
   takes them under `entire-stamp-records.lock` in the same dir, so hooks of
   overlapping commits in one worktree cannot lose each other's updates. Beside
   it, `entire-stamped-sessions.json` records the HEAD prepare stamped on and

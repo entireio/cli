@@ -1510,10 +1510,10 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	}
 
 	// Condense into the trailer prepare stamped, never into an inherited one.
-	// The records are taken in one step under their lock, so a later commit's
-	// prepare or post-commit racing this hook cannot split them, and this hook
-	// leaves that commit's own records in place.
+	// Only this commit's records are taken, in one step under their lock
+	// (takeStampRecords), and their sessions entries released on return.
 	records := takeStampRecords(ctx, commit)
+	defer releaseStampedSessions(ctx, records.sessions)
 	ids, moved := linkedTrailersOf(ctx, commit, records)
 	checkpointID, targetPreexisting, found := s.condensationTarget(ctx, repo, ids, records.stamped)
 	openRepoSpan.End()
@@ -3161,11 +3161,25 @@ func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, 
 	return nil
 }
 
+// checkpointIDForSessions returns the checkpoint ID for a commit linking
+// states: the first reserved ID among them that no commit already made still
+// waits to condense into (reservationCarriedInFlight), or a fresh one. A
+// reserved ID goes to one commit. Another commit prepared before that
+// commit's post-commit runs gets an ID of its own, and the session joins it
+// once that post-commit has condensed the reservation.
 func checkpointIDForSessions(ctx context.Context, states []*SessionState) (id.CheckpointID, error) {
 	for _, state := range states {
-		if checkpointID := state.PendingCondensationID(); checkpointID != id.EmptyCheckpointID {
-			return checkpointID, nil
+		checkpointID := state.PendingCondensationID()
+		if checkpointID == id.EmptyCheckpointID {
+			continue
 		}
+		if reservationCarriedInFlight(ctx, checkpointID) {
+			logging.Debug(logging.WithComponent(ctx, "checkpoint"), "prepare-commit-msg: reserved checkpoint ID already carried by a commit awaiting its post-commit",
+				slog.String("session_id", state.SessionID),
+				slog.String("reserved_checkpoint_id", checkpointID.String()))
+			continue
+		}
+		return checkpointID, nil
 	}
 	checkpointID, err := checkpoint.GenerateCheckpointID(ctx)
 	if err != nil {
