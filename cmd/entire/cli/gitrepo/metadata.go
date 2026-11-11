@@ -28,6 +28,10 @@ var ErrWorktreeMetadataNotFound = errors.New("worktree Git metadata not found")
 
 // WorktreeMetadata contains Git directory facts for one explicit worktree
 // root. Paths are cleaned and absolute but retain their lexical spelling.
+// WorktreeID is the <common>/worktrees registration name of a linked
+// worktree. It is empty for the main worktree and also for an unregistered
+// checkout, whose Git directory shares the repository through commondir
+// without a registration.
 type WorktreeMetadata struct {
 	GitDir     string
 	CommonDir  string
@@ -158,19 +162,72 @@ func resolveWorktreeID(gitDirPath, commonDir string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve linked-worktree registration %s: %w", gitDirPath, err)
 	}
-	same, err = metadataDirectoriesIdentifySameFile(filepath.Dir(registrationPath), registrationRoot)
+	registered, err := isImmediateRegistration(registrationPath, registrationRoot)
 	if err != nil {
 		return "", fmt.Errorf("validate linked-worktree registration for %s: %w", gitDirPath, err)
 	}
-	if !same {
+	if registered {
+		id := filepath.Base(registrationPath)
+		if id == "." || id == string(filepath.Separator) || id == "" {
+			return "", fmt.Errorf("git directory %s has no worktree registration name", gitDirPath)
+		}
+		return id, nil
+	}
+
+	// A Git directory that lies in the registration tree, by spelling or by
+	// resolution, claims to be a linked worktree and must be a well-formed one.
+	claimsRegistration, err := namesRegistrationTree(registrationRoot, gitDirPath, registrationPath)
+	if err != nil {
+		return "", fmt.Errorf("validate linked-worktree registration for %s: %w", gitDirPath, err)
+	}
+	if claimsRegistration {
 		return "", fmt.Errorf("git directory %s is not an immediate child of %s", gitDirPath, registrationRoot)
 	}
 
-	id := filepath.Base(registrationPath)
-	if id == "." || id == string(filepath.Separator) || id == "" {
-		return "", fmt.Errorf("git directory %s has no worktree registration name", gitDirPath)
+	// Git follows commondir without requiring registration, so a checkout-local
+	// Git directory that shares another's objects and refs through commondir is
+	// a valid unregistered checkout. It has no registration name, which matches
+	// paths.GetWorktreeID for a .git directory.
+	return "", nil
+}
+
+// isImmediateRegistration reports whether resolvedGitDir sits directly in
+// registrationRoot. A missing registration root means nothing is registered.
+func isImmediateRegistration(resolvedGitDir, registrationRoot string) (bool, error) {
+	if _, err := os.Stat(registrationRoot); errors.Is(err, fs.ErrNotExist) {
+		return false, nil
 	}
-	return id, nil
+	return metadataDirectoriesIdentifySameFile(filepath.Dir(resolvedGitDir), registrationRoot)
+}
+
+// namesRegistrationTree reports whether the Git directory's spelling or its
+// resolved location lies in registrationRoot (or is it). Ancestors are
+// compared by identity, not text, so every alias of the tree counts: a
+// symlink to the common directory or to the tree, a case variant on a
+// case-insensitive filesystem, or a bind mount. Walking the spelling stats
+// each prefix through its symlinks, which finds an escaping registration
+// symlink at its own location even though its target lies outside the tree.
+func namesRegistrationTree(registrationRoot, gitDirPath, resolvedGitDir string) (bool, error) {
+	rootInfo, err := os.Stat(registrationRoot)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect %s: %w", registrationRoot, err)
+	}
+	for _, path := range []string{gitDirPath, resolvedGitDir} {
+		for cur := filepath.Clean(path); ; {
+			if info, err := os.Stat(cur); err == nil && os.SameFile(info, rootInfo) {
+				return true, nil
+			}
+			parent := filepath.Dir(cur)
+			if parent == cur {
+				break
+			}
+			cur = parent
+		}
+	}
+	return false, nil
 }
 
 // readMetadataPointerFile reads a .git or commondir pointer file with git's own
