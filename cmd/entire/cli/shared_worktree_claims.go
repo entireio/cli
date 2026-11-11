@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -124,7 +125,9 @@ func (c statusClaim) withoutUnchangedDirty(files []string) []string {
 // status lists under the directory's own path, real/data.txt. Such a name is
 // matched as its directory resolves. A name that is itself a symlink to a
 // file git status lists (AGENTS.md -> CLAUDE.md) matches that file, also when
-// the link spells it in another case or form that opens the same file.
+// the link spells it in another case or form that opens the same file, unless
+// git status lists the link too: a new or retargeted link is the session's
+// change, and the file it leads to may be another session's.
 type namedFiles struct {
 	repoRoot string
 	exact    map[string]struct{}
@@ -134,11 +137,11 @@ type namedFiles struct {
 	// cases asks the worktree's directories about case, only for a
 	// deletion named in another case.
 	cases *worktreedir.CaseProbe
-	// ignoresNormalization holds where the worktree's filesystem takes
+	// ignoresNormalization reports whether the worktree's filesystem takes
 	// names in different Unicode normalization forms as one, as macOS's
-	// APFS and HFS+ do. Only a deletion, which leaves no file to compare,
-	// needs it.
-	ignoresNormalization bool
+	// APFS and HFS+ do (worktreedir.IgnoresNormalization). Only a deletion,
+	// which leaves no file to compare, asks, and only once.
+	ignoresNormalization func() bool
 }
 
 // newNamedFiles matches named against the files git status lists.
@@ -154,29 +157,35 @@ func newNamedFiles(repoRoot string, named []string, listed ...[]string) namedFil
 		exact:    make(map[string]struct{}, len(named)),
 		folded:   make(map[string][]string),
 		cases:    worktreedir.NewCaseProbe(repoRoot),
-		// The filesystems macOS formats ignore normalization.
-		ignoresNormalization: runtime.GOOS == "darwin",
+		ignoresNormalization: sync.OnceValue(func() bool {
+			root, err := worktreedir.OpenAt(repoRoot)
+			return err == nil && worktreedir.IgnoresNormalization(root)
+		}),
 	}
 	resolved := make(map[string]string)
 	for _, f := range named {
 		f = withoutDotComponents(f)
 		if _, ok := inStatus[f]; !ok {
 			f = resolvedDir(repoRoot, f, resolved)
-		}
-		// A write through a link changes the file it leads to, which git
-		// status lists whether or not it lists the link too, as a new or
-		// retargeted one. The link may spell it in another case or form
-		// than git, AGENTS.md -> claude.md for CLAUDE.md.
-		if target, ok := linkTarget(repoRoot, f); ok {
-			n.add(target, inStatus)
+			// A write through a link git status does not list changed
+			// the file it leads to, which the link may spell in another
+			// case or form than git, AGENTS.md -> claude.md for CLAUDE.md.
+			// A link git status lists changed itself, and the name is
+			// that change: whether the session also wrote through it, or
+			// another session wrote the file it now leads to, the name
+			// cannot tell.
+			if target, ok := linkTarget(repoRoot, f); ok {
+				n.add(target, inStatus)
+			}
 		}
 		n.add(f, inStatus)
 	}
 	return n
 }
 
-// add records name as exact when git status lists it, and else for
-// namedInOtherCase.
+// add records name as exact when git status lists it, where a lookup
+// suffices, and else under its fold key, so that namedInOtherCase can ask the
+// filesystem whether it opens a listed file of another case.
 func (n namedFiles) add(name string, inStatus map[string]struct{}) {
 	if _, ok := inStatus[name]; ok {
 		n.exact[name] = struct{}{}
@@ -256,13 +265,15 @@ var errOutsideWorktree = errors.New("directory resolves outside the worktree")
 // errOutsideWorktree when abs resolves outside the worktree, and with
 // another error when it does not resolve.
 func resolvedName(repoRoot, abs string) (string, error) {
-	target, err := evalSymlinksOfExisting(abs)
-	if err != nil {
-		return "", err
-	}
 	root, err := filepath.EvalSymlinks(repoRoot)
 	if err != nil {
 		return "", fmt.Errorf("resolve %s: %w", repoRoot, err)
+	}
+	target, err := evalSymlinksOfExisting(abs, func(entry string) (string, error) {
+		return readLink(repoRoot, root, entry)
+	})
+	if err != nil {
+		return "", err
 	}
 	if target == root {
 		return ".", nil
@@ -281,8 +292,9 @@ func resolvedName(repoRoot, abs string) (string, error) {
 // there. A link whose target is gone is still followed by name. So with
 // alias -> real/sub, alias/gone/../../file.txt and gone/../alias/../file.txt
 // are both real/file.txt, and so is alias/../file.txt once real/sub is
-// removed, where a lexical clean gives the root's file.txt.
-func evalSymlinksOfExisting(abs string) (string, error) {
+// removed, where a lexical clean gives the root's file.txt. readlink reads
+// such a link.
+func evalSymlinksOfExisting(abs string, readlink func(entry string) (string, error)) (string, error) {
 	target, err := filepath.EvalSymlinks(abs)
 	if !errors.Is(err, fs.ErrNotExist) {
 		return target, wrapResolveErr(abs, err)
@@ -313,7 +325,7 @@ func evalSymlinksOfExisting(abs string) (string, error) {
 			if !errors.Is(err, fs.ErrNotExist) {
 				return "", wrapResolveErr(abs, err)
 			}
-			link, err := os.Readlink(entry)
+			link, err := readlink(entry)
 			if err != nil {
 				missing = append(missing, part)
 				continue
@@ -330,9 +342,30 @@ func evalSymlinksOfExisting(abs string) (string, error) {
 	return filepath.Join(append([]string{resolved}, missing...)...), nil
 }
 
-// maxLinksFollowed bounds evalSymlinksOfExisting on a link cycle, as the
-// kernel bounds a lookup.
+// maxLinksFollowed bounds evalSymlinksOfExisting on a link cycle, as
+// filepath.EvalSymlinks bounds its own.
 const maxLinksFollowed = 255
+
+// readLink reads the link at entry, a path without links, through the
+// worktree's root when entry is in the worktree (resolvedRoot is the root's
+// own path without links). A resolution can pass through a link outside the
+// worktree, which no worktree anchor covers; that one is read where it is.
+// filepath.EvalSymlinks reads links the same way for resolvedName, since a
+// root refuses a link with an absolute target even inside the worktree
+// (worktreedir.NameFollowingLinks).
+func readLink(repoRoot, resolvedRoot, entry string) (string, error) {
+	name, err := worktreedir.Name(resolvedRoot, entry)
+	if err != nil {
+		link, err := os.Readlink(entry)
+		return link, wrapResolveErr(entry, err)
+	}
+	root, err := worktreedir.OpenAt(repoRoot)
+	if err != nil {
+		return "", fmt.Errorf("open worktree %s: %w", repoRoot, err)
+	}
+	link, err := root.Readlink(filepath.FromSlash(name))
+	return link, wrapResolveErr(entry, err)
+}
 
 // wrapResolveErr names abs in err, a failure to resolve it, or returns nil.
 func wrapResolveErr(abs string, err error) error {
@@ -418,8 +451,9 @@ func (n namedFiles) deletedInOtherCase(file string, spellings []string) bool {
 // sameDeletedEntry is CaseProbe.SameEntry, with names that differ in Unicode
 // normalization taken as one where the filesystem ignores normalization.
 func (n namedFiles) sameDeletedEntry(file, spelling string) bool {
-	if n.ignoresNormalization {
-		file, spelling = norm.NFC.String(file), norm.NFC.String(spelling)
+	// The filesystem is asked only when a name is not composed already.
+	if composedFile, composedSpelling := norm.NFC.String(file), norm.NFC.String(spelling); (composedFile != file || composedSpelling != spelling) && n.ignoresNormalization() {
+		file, spelling = composedFile, composedSpelling
 	}
 	return n.cases.SameEntry(file, spelling)
 }

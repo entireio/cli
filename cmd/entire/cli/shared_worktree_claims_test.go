@@ -304,24 +304,25 @@ func TestNamedFiles_ThroughFileLinkInOtherCase(t *testing.T) {
 	require.Equal(t, modified, newNamedFiles(dir, []string{"AGENTS.md"}, modified).only(modified))
 }
 
-// TestNamedFiles_ThroughListedLink: a write through a new or retargeted
-// AGENTS.md -> CLAUDE.md changes CLAUDE.md, which git status lists beside
-// the link itself.
-func TestNamedFiles_ThroughListedLink(t *testing.T) {
+// TestNamedFiles_ListedLinkClaimsOnlyItself: git status lists a new or
+// retargeted AGENTS.md -> CLAUDE.md beside CLAUDE.md. A session whose
+// transcript names AGENTS.md changed the link; it may have written CLAUDE.md
+// through it, or another session may have, so it claims only the link.
+func TestNamedFiles_ListedLinkClaimsOnlyItself(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	forgetSharedRoot(t, dir)
-	testutil.WriteFile(t, dir, "CLAUDE.md", "edited through AGENTS.md\n")
+	testutil.WriteFile(t, dir, "CLAUDE.md", "edited by another session\n")
 	if err := os.Symlink("CLAUDE.md", filepath.Join(dir, "AGENTS.md")); err != nil {
 		t.Skipf("cannot create a symlink here: %v", err)
 	}
 	modified := []string{"AGENTS.md", "CLAUDE.md"}
-	require.Equal(t, modified, newNamedFiles(dir, []string{"AGENTS.md"}, modified).only(modified))
+	require.Equal(t, []string{"AGENTS.md"}, newNamedFiles(dir, []string{"AGENTS.md"}, modified).only(modified))
 }
 
 // TestNamedFiles_DeletedInOtherNormalizationForm: a deletion named
 // decomposed (cafe\u0301.txt) matches git's composed caf\u00e9.txt only
-// where the filesystem ignores normalization, as macOS's does; nothing is
+// where the filesystem ignores normalization, as APFS and HFS+ do; nothing is
 // left to compare.
 func TestNamedFiles_DeletedInOtherNormalizationForm(t *testing.T) {
 	t.Parallel()
@@ -329,10 +330,12 @@ func TestNamedFiles_DeletedInOtherNormalizationForm(t *testing.T) {
 	forgetSharedRoot(t, dir)
 	deleted := []string{"caf\u00e9.txt"}
 	n := newNamedFiles(dir, []string{"cafe\u0301.txt"}, deleted)
-	require.Equal(t, runtime.GOOS == "darwin", n.ignoresNormalization)
-	n.ignoresNormalization = false
+	if runtime.GOOS != "darwin" {
+		require.False(t, n.ignoresNormalization(), "only APFS and HFS+ are known to ignore normalization")
+	}
+	n.ignoresNormalization = func() bool { return false }
 	require.Empty(t, n.only(deleted), "two names for two files")
-	n.ignoresNormalization = true
+	n.ignoresNormalization = func() bool { return true }
 	require.Equal(t, deleted, n.only(deleted))
 }
 
