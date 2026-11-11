@@ -3,9 +3,11 @@ package claudecode
 import (
 	"context"
 	"encoding/json"
-	"github.com/stretchr/testify/require"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestRestrictedReviewContract(t *testing.T) {
@@ -15,12 +17,16 @@ func TestRestrictedReviewContract(t *testing.T) {
 		calls++
 		require.Equal(t, "/trusted/claude", binary)
 		require.Contains(t, args, flagRestricted)
+		settingsIndex := slices.Index(args, flagSettingSources)
+		require.NotEqual(t, -1, settingsIndex)
+		require.Less(t, settingsIndex+1, len(args))
+		require.Empty(t, args[settingsIndex+1], "probe and review must disable all settings sources")
 		if calls == 1 {
 			require.Contains(t, args, "--help")
 			require.Empty(t, input)
 			_, ok := ctx.Deadline()
 			require.True(t, ok)
-			return []byte("--restricted --strict-mcp-config --json-schema"), nil
+			return []byte("--restricted --strict-mcp-config --json-schema --setting-sources"), nil
 		}
 		require.Equal(t, "/checkout", dir)
 		require.Equal(t, "review prompt", input)
@@ -49,7 +55,7 @@ func TestRestrictedReviewContract(t *testing.T) {
 
 func TestRestrictedReviewNoFallback(t *testing.T) {
 	t.Parallel()
-	for _, output := range []string{"--help", "--restricted", "--restricted --strict-mcp-config"} {
+	for _, output := range []string{"--help", "--restricted", "--restricted --strict-mcp-config", "--restricted --strict-mcp-config --json-schema"} {
 		t.Run(output, func(t *testing.T) {
 			t.Parallel()
 			calls := 0

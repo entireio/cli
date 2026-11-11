@@ -68,11 +68,11 @@ func prepareRestrictedReviewer(ctx context.Context, binary string, run Restricte
 	if err != nil {
 		return nil, err
 	}
-	out, err := run(probeCtx, binary, os.TempDir(), env, []string{flagRestricted, "--help"}, "")
+	out, err := run(probeCtx, binary, os.TempDir(), env, []string{flagRestricted, flagSettingSources, "", "--help"}, "")
 	if err != nil {
 		return nil, fmt.Errorf("check Claude capabilities: %w", err)
 	}
-	for _, flag := range []string{flagRestricted, flagStrictMCP, "--json-schema"} {
+	for _, flag := range []string{flagRestricted, flagStrictMCP, "--json-schema", flagSettingSources} {
 		if !bytes.Contains(out, []byte(flag)) {
 			return nil, fmt.Errorf("claude Code must support %s; update Claude before serving jobs (no unrestricted fallback)", flag)
 		}
@@ -82,7 +82,9 @@ func prepareRestrictedReviewer(ctx context.Context, binary string, run Restricte
 
 // Review returns the successful structured output, never raw Claude diagnostics.
 func (r *RestrictedReviewer) Review(ctx context.Context, cfg RestrictedReview) (json.RawMessage, error) {
-	args := []string{"-p", flagOutputFormat, "json", "--json-schema", string(cfg.OutputSchema), flagRestricted, flagStrictMCP, "--mcp-config", `{"mcpServers":{}}`, "--settings", `{"disableAllHooks":true}`, "--no-session-persistence", flagTools, "Read,Grep,Glob", "--add-dir", cfg.ReadDir}
+	// Explicitly disable settings sources as a second barrier alongside restricted
+	// mode. Never import user auth helpers or repository-supplied environment.
+	args := []string{"-p", flagOutputFormat, "json", "--json-schema", string(cfg.OutputSchema), flagRestricted, flagSettingSources, "", flagStrictMCP, "--mcp-config", `{"mcpServers":{}}`, "--settings", `{"disableAllHooks":true}`, "--no-session-persistence", flagTools, "Read,Grep,Glob", "--add-dir", cfg.ReadDir}
 	if cfg.Model != "" {
 		args = append(args, "--model", cfg.Model)
 	}

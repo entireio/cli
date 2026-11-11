@@ -74,7 +74,9 @@ Each run:
    initialized. A failed clone/checkout/diff prevents model execution.
 3. Writes the pinned base/head diff outside the untrusted checkout.
 4. Runs Claude with restricted Read/Grep/Glob tools, strict empty MCP configuration,
-   hooks explicitly disabled, and no session persistence. Prompt text is stdin;
+   hooks explicitly disabled, no settings sources (`--setting-sources ""`),
+   and no session persistence. The capability probe also disables settings sources.
+   Prompt text is stdin;
    schema/model come from the claim. No shell or repository command is run by the
    model. Restricted mode confines file reads to the checkout and diff directory
    and ignores user/project/local settings. There is no unrestricted fallback.
