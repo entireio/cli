@@ -2153,7 +2153,7 @@ func (c *commandStart) word(word string) {
 		option := unquotedWord(word)
 		c.optionArg = takesArgument(c.wrapper, option)
 		c.execArg = c.optionArg && runsArgument(c.wrapper, option)
-		c.optionUnknown = c.optionUnknown || isContainerClient(c.wrapper) && !c.sub && !c.optionArg && strings.HasPrefix(option, "--") && !strings.Contains(option, "=")
+		c.optionUnknown = c.optionUnknown || isContainerClient(c.wrapper) && !c.sub && !c.optionArg && mayTakeArgument(option)
 	case isContainerClient(c.wrapper) && !c.sub:
 		// The subcommand of a container client: exec and run run a
 		// command in a container (docker exec db mysql -pX), and the
@@ -2356,6 +2356,21 @@ var (
 		"add-host", "ansi", "attach", "cap-add", "cap-drop", "cgroupns", "cidfile", "cluster", "config", "container", "context", "cpu-shares", "cpus", "detach-keys", "device", "dns", "entrypoint", "env", "env-file", "file", "filename", "gpus", "hostname", "ip", "ipc", "kubeconfig", "label", "link", "log-driver", "log-level", "log-opt", "memory", "mount", "name", "namespace", "network", "network-alias", "parallel", "pid", "platform", "progress", "project-directory", "project-name", "publish", "pull", "restart", "runtime", "security-opt", "shm-size", "tmpfs", "ulimit", "volume", "volumes-from", "workdir",
 	}
 )
+
+// containerFlagOptions are the long options of container clients, before
+// their subcommand, known to take no value (kubectl --warnings-as-errors
+// patch, docker --debug logs).
+var containerFlagOptions = []string{
+	"add-dir-header", "all-resources", "alsologtostderr", "compatibility", "debug", "debug-full", "disable-compression", "dry-run", "experimental", "insecure-registry", "insecure-skip-tls-verify", "logtostderr", "match-server-version", "noout", "one-output", "remote", "skip-headers", "skip-log-headers", "syslog", "tls", "tlsverify", "verbose", "warnings-as-errors",
+}
+
+// mayTakeArgument reports whether option, a container client's option that
+// is not known to take an argument, may still take the next word: a long one
+// with no value joined to it, unless it is known to take none.
+func mayTakeArgument(option string) bool {
+	name, ok := strings.CutPrefix(option, "--")
+	return ok && !strings.Contains(name, "=") && !slices.Contains(containerFlagOptions, name)
+}
 
 // containerArgOptions are the short options of container clients, before
 // and after their subcommand, that take an argument (docker -H host,
