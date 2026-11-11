@@ -37,10 +37,11 @@ func TestCheckGitHookState_FIFOBackupDoesNotHang(t *testing.T) {
 	}
 }
 
-// The chain's grep for Trunk's callback must not open a FIFO left as a
-// backup: an executable FIFO passes [ -x ], and grep would block on it until
-// a writer appeared, hanging every commit or push. The chain only greps a
-// regular file, so this backup is executed as before (and fails on its own).
+// The chain must not open a FIFO left as a backup: an executable FIFO
+// passes [ -x ], and on macOS exec of that FIFO blocks waiting for a writer,
+// hanging every commit or push. Linux rejects the exec at once, so this was
+// green in CI and failed on macOS. The chain only runs a regular executable,
+// so this backup is skipped.
 func TestChainedHook_FIFOBackupDoesNotHang(t *testing.T) {
 	t.Parallel()
 	f := newHooksFixture(t)
@@ -64,5 +65,7 @@ func TestChainedHook_FIFOBackupDoesNotHang(t *testing.T) {
 	if ctx.Err() != nil {
 		t.Fatalf("post-commit hung on a FIFO backup:\n%s", out)
 	}
-	t.Logf("post-commit with a FIFO backup: err=%v\n%s", err, out)
+	if err != nil {
+		t.Fatalf("post-commit should skip a FIFO backup, got err=%v\n%s", err, out)
+	}
 }
