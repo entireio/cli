@@ -8,6 +8,8 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -145,8 +147,7 @@ func newNamedFiles(repoRoot string, named []string, listed ...[]string) namedFil
 	}
 	resolved := make(map[string]string)
 	for _, f := range named {
-		// git status never spells ./ or a/../ components; a transcript can.
-		f = path.Clean(f)
+		f = withoutDotComponents(f)
 		if _, ok := inStatus[f]; !ok {
 			f = resolvedDir(repoRoot, f, resolved)
 		}
@@ -160,14 +161,28 @@ func newNamedFiles(repoRoot string, named []string, listed ...[]string) namedFil
 	return n
 }
 
-// resolvedDir returns file with the symlinks in its directory resolved, when
-// they lead to a directory in the worktree, or else file itself. resolved
-// caches each directory's answer.
+// withoutDotComponents drops a name's "." components and repeated slashes,
+// which git status never spells and a transcript can (./notes.txt). Outside
+// Windows a name with a ".." component is left for resolvedDir: after a
+// symlink to a directory, ".." leaves the link's target, which a lexical
+// clean cannot see. Windows takes ".." lexically, before any link.
+func withoutDotComponents(name string) string {
+	if runtime.GOOS != "windows" && slices.Contains(strings.Split(name, "/"), "..") {
+		return name
+	}
+	return path.Clean(name)
+}
+
+// resolvedDir returns file with its directory resolved as the filesystem
+// resolves it, symlinks and ".." included, when that leads to a directory in
+// the worktree, or else file itself. resolved caches each directory's answer.
 func resolvedDir(repoRoot, file string, resolved map[string]string) string {
-	dir := path.Dir(file)
-	if dir == "." {
+	// Not path.Dir, which would clean ".." away before the filesystem sees it.
+	i := strings.LastIndex(file, "/")
+	if i < 0 {
 		return file
 	}
+	dir, base := file[:i], file[i+1:]
 	target, ok := resolved[dir]
 	if !ok {
 		target = dir
@@ -176,29 +191,31 @@ func resolvedDir(repoRoot, file string, resolved map[string]string) string {
 		}
 		resolved[dir] = target
 	}
-	return path.Join(target, path.Base(file))
+	return path.Join(target, base)
 }
 
-// dirName returns the worktree-relative name dir resolves to through its
-// symlinks, and false when it leaves the worktree or does not resolve. A link
-// to the worktree root itself, such as alias -> ., resolves to ".", which
-// NameFollowingLinks refuses as naming no file in the worktree.
+// dirName returns the worktree-relative name dir resolves to, "." for the
+// worktree root itself (a link such as alias -> .), and false when it leaves
+// the worktree or does not resolve.
 func dirName(repoRoot, dir string) (string, bool) {
-	if name, err := worktreedir.NameFollowingLinks(repoRoot, dir); err == nil {
-		return name, true
-	}
 	root, err := filepath.Abs(repoRoot)
 	if err != nil {
 		return "", false
 	}
-	target, err := filepath.EvalSymlinks(filepath.Join(root, filepath.FromSlash(dir)))
+	// Not filepath.Join, which would clean ".." away: EvalSymlinks takes it
+	// after the links before it.
+	target, err := filepath.EvalSymlinks(root + string(filepath.Separator) + filepath.FromSlash(dir))
 	if err != nil {
 		return "", false
 	}
-	if root, err = filepath.EvalSymlinks(root); err != nil || target != root {
+	if root, err = filepath.EvalSymlinks(root); err != nil {
 		return "", false
 	}
-	return ".", true
+	if target == root {
+		return ".", true
+	}
+	name, err := worktreedir.Name(root, target)
+	return name, err == nil
 }
 
 // only returns the files of all the transcript names, in all's order and

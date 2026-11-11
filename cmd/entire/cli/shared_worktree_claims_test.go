@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"testing"
@@ -256,14 +257,28 @@ func TestNamedFiles_ThroughDirectoryLink(t *testing.T) {
 }
 
 // TestNamedFiles_LexicalSpelling covers a transcript that names a file with
-// lexical components git status never shows, such as ./notes.txt.
+// components git status never shows, such as ./notes.txt. A ".." is taken as
+// the filesystem takes it: after a symlink to a directory, it leaves the
+// link's target, not the link's own directory.
 func TestNamedFiles_LexicalSpelling(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	forgetSharedRoot(t, dir)
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "src", "lib"), 0o755))
 	modified := []string{"notes.txt", "src/app.go"}
 	named := newNamedFiles(dir, []string{"./notes.txt", "src/./lib/../app.go"}, modified)
 	require.Equal(t, modified, named.only(modified))
+
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "real", "sub"), 0o755))
+	if err := os.Symlink(filepath.Join("real", "sub"), filepath.Join(dir, "alias")); err != nil {
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
+	both := []string{"file.txt", "real/file.txt"}
+	want := "real/file.txt" // alias/.. is real/, not the root
+	if runtime.GOOS == "windows" {
+		want = "file.txt" // Windows takes .. before the link
+	}
+	require.Equal(t, []string{want}, newNamedFiles(dir, []string{"alias/../file.txt"}, both).only(both))
 }
 
 func TestCaseFoldKey(t *testing.T) {
