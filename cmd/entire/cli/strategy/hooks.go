@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -620,17 +621,64 @@ func isTrunkChainBeforeSourcing(root *os.Root, hook, content string) bool {
 	return backupHasTrunkCallback(root, hook)
 }
 
+// maxTrunkCallbackBackup is well above Trunk's launcher (about 1.5KiB) and
+// bounds the classification read so a huge or growing file cannot exhaust
+// memory during CheckGitHookState.
+const maxTrunkCallbackBackup = 1 << 20
+
 // backupHasTrunkCallback reports whether <hook>.pre-entire contains
 // trunkHookCallback as a whole line, the same match the chain's grep -qxF
-// uses. The read follows a symlink, including a launcher kept outside the
-// hooks directory (Trunk's shared-launcher layout); os.Root would refuse that
-// escape, and ReadFileNoFollow would not see the file's contents.
+// uses. A regular file in the hooks directory is read through the root,
+// no-follow. A symlink is followed only when its target is a regular file
+// no larger than maxTrunkCallbackBackup, which is how Trunk's shared
+// launcher (kept outside the hooks dir) is still recognized. A FIFO or
+// device is not read, so it cannot hang an agent-turn setup check.
 func backupHasTrunkCallback(root *os.Root, hook string) bool {
-	//nolint:gosec // G304: hook is a managed git hook name; the path is inside the hooks directory already opened as root.
-	data, err := os.ReadFile(filepath.Join(root.Name(), hook+backupSuffix))
+	name := hook + backupSuffix
+	info, err := root.Lstat(name)
 	if err != nil {
 		return false
 	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return symlinkBackupHasTrunkCallback(root, name)
+	}
+	if !info.Mode().IsRegular() || info.Size() > maxTrunkCallbackBackup {
+		return false
+	}
+	data, err := osroot.ReadFileNoFollow(root, name)
+	if err != nil {
+		return false
+	}
+	return linesContainTrunkCallback(data)
+}
+
+func symlinkBackupHasTrunkCallback(root *os.Root, name string) bool {
+	path := filepath.Join(root.Name(), name)
+	target, err := os.Readlink(path)
+	if err != nil {
+		return false
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(root.Name(), target)
+	}
+	info, err := os.Stat(target)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > maxTrunkCallbackBackup {
+		return false
+	}
+	//nolint:gosec // G304: target was just Stat'ed as a regular file reached from a hooks backup symlink.
+	f, err := os.Open(target)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxTrunkCallbackBackup+1))
+	if err != nil || int64(len(data)) > maxTrunkCallbackBackup {
+		return false
+	}
+	return linesContainTrunkCallback(data)
+}
+
+func linesContainTrunkCallback(data []byte) bool {
 	for line := range strings.SplitSeq(string(data), "\n") {
 		if line == trunkHookCallback {
 			return true

@@ -10,7 +10,9 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -424,10 +426,36 @@ func TestCheckGitHookState_TrunkChainOutdatedIsSpecific(t *testing.T) {
 			}
 		}
 		if err := os.Symlink(launcher, filepath.Join(dir, prePushHook+backupSuffix)); err != nil {
-			t.Fatal(err)
+			t.Skipf("symlink not supported: %v", err)
 		}
 		if got := gitHookStateInHooksDir(dir); got != GitHooksOutdated {
 			t.Errorf("old chain to a symlinked Trunk launcher = %v, want GitHooksOutdated", got)
+		}
+	})
+
+	t.Run("FIFO backup does not hang", func(t *testing.T) {
+		t.Parallel()
+		if runtime.GOOS == "windows" {
+			t.Skip("named pipes are not POSIX FIFOs")
+		}
+		dir := t.TempDir()
+		writeOldChain(t, dir, prePushHook, "#!/bin/sh\necho user hook\n")
+		backup := filepath.Join(dir, prePushHook+backupSuffix)
+		if err := os.Remove(backup); err != nil {
+			t.Fatal(err)
+		}
+		if err := syscall.Mkfifo(backup, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan GitHookState, 1)
+		go func() { done <- gitHookStateInHooksDir(dir) }()
+		select {
+		case got := <-done:
+			if got != GitHooksCurrent {
+				t.Errorf("old chain to a FIFO backup = %v, want GitHooksCurrent", got)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("gitHookStateInHooksDir hung on a FIFO backup")
 		}
 	})
 }
