@@ -147,25 +147,69 @@ func TestCheckOuterPushOfHeldCommits_PackedRefs(t *testing.T) {
 	require.ErrorIs(t, err, ErrOuterPushCarriesHeldCheckpoints)
 }
 
-// The queued name resolves only through a case-insensitive filesystem, so the
-// push is refused exactly when that name reaches the ref.
-func TestCheckOuterPushOfHeldCommits_CaseFoldedShard(t *testing.T) {
-	workDir, _, _ := setupRepoWithCheckpointRefs(t)
-	t.Chdir(workDir)
+// foldedShardShapes are the states a ref stored under the other spelling of
+// its shard is checked in: loose and packed, on a queue looked up ref by ref
+// and on one long enough to list the namespace.
+var foldedShardShapes = []struct { //nolint:gochecknoglobals // shared test table
+	name           string
+	packed, listed bool
+}{
+	{"loose", false, false},
+	{"packed", true, false},
+	{"loose, listed queue", false, true},
+	{"packed, listed queue", true, true},
+}
+
+// setupFoldedShardQueue queues a checkpoint whose ref is stored under the other
+// spelling of its shard, and returns the queued name and the ref's tip.
+func setupFoldedShardQueue(t *testing.T, workDir string, packed, listed bool) (queued plumbing.ReferenceName, tip string) {
+	t.Helper()
+	if listed {
+		enqueueInRepoAt(t, workDir, createCheckpointRefs(t, workDir, checkpointRefListingMinQueue, revParse(t, workDir, "HEAD"))...)
+	}
 	testutil.RunGit(t, workDir, "commit", "--allow-empty", "-m", "folded checkpoint")
-	tip := revParse(t, workDir, "HEAD")
-	stored := checkpoint.CheckpointRefPrefix + "AB/0000000000ab"
-	testutil.RunGit(t, workDir, "update-ref", stored, tip)
-	queued := mustRefName(t, id.MustCheckpointID("0000000000ab"))
+	tip = revParse(t, workDir, "HEAD")
+	_, queued = foldedShardFixture(t, workDir, tip)
 	enqueueInRepoAt(t, workDir, queued)
-	folds := refPathFoldsCase(t, workDir, queued)
+	if packed {
+		testutil.RunGit(t, workDir, "pack-refs", "--all")
+	}
+	return queued, tip
+}
 
-	err := checkOuterPushOfHeldCommits(t.Context(), pushOfCommit(tip), "test holds it")
+// A waiting checkpoint is held whichever spelling of its shard the ref is
+// stored under, and still is once git packs the ref.
+func TestCheckOuterPushOfHeldCommits_CaseFoldedShard(t *testing.T) {
+	for _, shape := range foldedShardShapes {
+		t.Run(shape.name, func(t *testing.T) {
+			workDir, _, _ := setupRepoWithCheckpointRefs(t)
+			t.Chdir(workDir)
+			_, tip := setupFoldedShardQueue(t, workDir, shape.packed, shape.listed)
 
-	if folds {
-		require.ErrorIs(t, err, ErrOuterPushCarriesHeldCheckpoints)
-	} else {
-		require.NoError(t, err)
+			err := checkOuterPushOfHeldCommits(t.Context(), pushOfCommit(tip), "test holds it")
+
+			require.ErrorIs(t, err, ErrOuterPushCarriesHeldCheckpoints)
+		})
+	}
+}
+
+// The outgoing list names a checkpoint by its queued ref and reports the tip
+// of the ref it is stored under, loose or packed.
+func TestListOutgoingCheckpoints_CaseFoldedShard(t *testing.T) {
+	for _, shape := range foldedShardShapes {
+		t.Run(shape.name, func(t *testing.T) {
+			workDir, bareDir, _ := setupRepoWithCheckpointRefs(t)
+			prepareGitRefsPrePush(t, workDir, bareDir)
+			queued, tip := setupFoldedShardQueue(t, workDir, shape.packed, shape.listed)
+
+			out, err := ListOutgoingCheckpoints(t.Context())
+			require.NoError(t, err)
+
+			require.Equal(t, OutgoingCheckpoint{
+				CheckpointID: id.MustCheckpointID("0000000000ab"), Ref: queued, Commit: plumbing.NewHash(tip),
+			}, out.Checkpoints[len(out.Checkpoints)-1])
+			require.Zero(t, out.StaleQueueEntries)
+		})
 	}
 }
 
@@ -312,8 +356,8 @@ func TestListOutgoingCheckpoints_ListedQueue(t *testing.T) {
 }
 
 // Refs no listing names still get a tip lookup: a case-folded shard resolves
-// on a case-insensitive filesystem, and an unparsable ref stays outgoing with
-// no known tip.
+// to the ref stored under its other spelling, and an unparsable ref stays
+// outgoing with no known tip.
 func TestListOutgoingCheckpoints_UnlistedRefs(t *testing.T) {
 	workDir, bareDir, _ := setupRepoWithCheckpointRefs(t)
 	prepareGitRefsPrePush(t, workDir, bareDir)
@@ -323,14 +367,12 @@ func TestListOutgoingCheckpoints_UnlistedRefs(t *testing.T) {
 	garbage := mustRefName(t, id.MustCheckpointID("eeeeeeeeeee2"))
 	writeRefFile(t, workDir, garbage, "not a hash\n")
 	enqueueInRepoAt(t, workDir, folded, garbage)
-	folds := refPathFoldsCase(t, workDir, folded)
 
 	out, err := ListOutgoingCheckpoints(t.Context())
 	require.NoError(t, err)
 
-	want := []OutgoingCheckpoint{{CheckpointID: id.MustCheckpointID("eeeeeeeeeee2"), Ref: garbage}}
-	if folds {
-		want = append([]OutgoingCheckpoint{{CheckpointID: id.MustCheckpointID("0000000000ab"), Ref: folded, Commit: plumbing.NewHash(tip)}}, want...)
-	}
-	require.Equal(t, want, out.Checkpoints)
+	require.Equal(t, []OutgoingCheckpoint{
+		{CheckpointID: id.MustCheckpointID("0000000000ab"), Ref: folded, Commit: plumbing.NewHash(tip)},
+		{CheckpointID: id.MustCheckpointID("eeeeeeeeeee2"), Ref: garbage},
+	}, out.Checkpoints)
 }

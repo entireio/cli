@@ -72,14 +72,18 @@ func writeRefFile(t *testing.T, workDir string, ref plumbing.ReferenceName, cont
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
 }
 
-// refPathFoldsCase reports whether ref's loose file resolves although it is
-// stored under a differently-cased shard. macOS's default filesystem is
-// case-insensitive, so a macOS run covers the folded branch.
-func refPathFoldsCase(t *testing.T, workDir string, ref plumbing.ReferenceName) bool {
+// foldedShardFixture stores a checkpoint ref under the other spelling of its
+// shard, the way a case-insensitive filesystem does when that directory
+// already exists, and returns the stored name and the name the queue holds.
+// It plants the stored name instead of relying on the filesystem, so the
+// result is the same on a case-sensitive one.
+func foldedShardFixture(t *testing.T, workDir, tip string) (stored, queued plumbing.ReferenceName) {
 	t.Helper()
-	_, err := os.Stat(filepath.Join(workDir, ".git", filepath.FromSlash(ref.String())))
-	t.Logf("case-insensitive filesystem: %v", err == nil)
-	return err == nil
+	stored = plumbing.ReferenceName(checkpoint.CheckpointRefPrefix + "AB/0000000000ab")
+	queued = mustRefName(t, id.MustCheckpointID("0000000000ab"))
+	require.NotEqual(t, stored, queued)
+	testutil.RunGit(t, workDir, "update-ref", stored.String(), tip)
+	return stored, queued
 }
 
 func TestPartitionLocalRefsUsing(t *testing.T) {
@@ -130,26 +134,36 @@ func TestPartitionLocalRefsUsing(t *testing.T) {
 				gitFallback: true,
 			}
 		}},
-		// The listing reports the on-disk shard case, while a case-insensitive
-		// filesystem still resolves the queued name.
+		// The listing reports the on-disk shard case. The queued name is the
+		// pushable one whichever case the ref is stored under, and its tip is
+		// the stored ref's.
 		{"case-folded shard", func(t *testing.T) partitionScenario {
 			t.Helper()
 			workDir, _, refs := setupRepoWithCheckpointRefs(t)
-			stored := plumbing.ReferenceName(checkpoint.CheckpointRefPrefix + "AB/0000000000ab")
-			queued := mustRefName(t, id.MustCheckpointID("0000000000ab"))
-			require.NotEqual(t, stored, queued)
-			testutil.RunGit(t, workDir, "update-ref", stored.String(), "HEAD")
-			s := partitionScenario{
-				workDir: workDir,
-				queued:  []plumbing.ReferenceName{queued},
-				listed:  append([]plumbing.ReferenceName{stored}, refs...),
+			stored, queued := foldedShardFixture(t, workDir, "HEAD")
+			return partitionScenario{
+				workDir:  workDir,
+				queued:   []plumbing.ReferenceName{queued},
+				existing: []plumbing.ReferenceName{queued},
+				listed:   append([]plumbing.ReferenceName{stored}, refs...),
+				tips:     map[plumbing.ReferenceName]string{queued: stored.String()},
 			}
-			if refPathFoldsCase(t, workDir, queued) {
-				s.existing = []plumbing.ReferenceName{queued}
-			} else {
-				s.stale = []plumbing.ReferenceName{queued}
+		}},
+		// Packing ends the filesystem's case-insensitive lookup: packed-refs
+		// matches names exactly, so only the stored name resolves. The split
+		// must not change when git packs the ref.
+		{"packed case-folded shard", func(t *testing.T) partitionScenario {
+			t.Helper()
+			workDir, _, refs := setupRepoWithCheckpointRefs(t)
+			stored, queued := foldedShardFixture(t, workDir, "HEAD")
+			testutil.RunGit(t, workDir, "pack-refs", "--all")
+			return partitionScenario{
+				workDir:  workDir,
+				queued:   []plumbing.ReferenceName{queued},
+				existing: []plumbing.ReferenceName{queued},
+				listed:   append([]plumbing.ReferenceName{stored}, refs...),
+				tips:     map[plumbing.ReferenceName]string{queued: stored.String()},
 			}
-			return s
 		}},
 		// The go-git listing leaves a symbolic ref to the resolving lookup.
 		{"symbolic ref", func(t *testing.T) partitionScenario {

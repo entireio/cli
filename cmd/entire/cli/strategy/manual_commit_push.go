@@ -577,8 +577,7 @@ func partitionCheckpointRefPushes(
 		// name stops resolving. Classifying that as stale drops the entry and
 		// the checkpoint is then never pushed, silently and permanently — so
 		// resolve to the spelling that exists before deciding.
-		name := resolveQueuedCheckpointRef(repo, entry.Ref)
-		ref, err := repo.Reference(name, true)
+		name, tip, err := storedCheckpointRef(repo, nil, entry.Ref)
 		if errors.Is(err, plumbing.ErrReferenceNotFound) {
 			part.stale = append(part.stale, entry)
 			continue
@@ -592,7 +591,7 @@ func partitionCheckpointRefPushes(
 		// spelling the remote receives, and recoverCheckpointRef fetches it
 		// back by the same name. The queue entry is untouched — removal keys on
 		// token, so the original spelling is still what gets pruned.
-		candidate := checkpointRefPush{token: entry, name: name, hash: ref.Hash()}
+		candidate := checkpointRefPush{token: entry, name: name, hash: tip}
 		switch {
 		case !pin.IsZero() && pin != candidate.hash:
 			part.changed = append(part.changed, candidate)

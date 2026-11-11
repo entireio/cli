@@ -43,9 +43,9 @@ func (p checkpointRefPush) refSpec() string {
 	return p.hash.String() + ":" + p.name.String()
 }
 
-// resolveQueuedCheckpointRef returns the spelling a queued checkpoint ref is
-// actually stored under: the queued one when it resolves, otherwise its
-// case-folded alternate when THAT resolves.
+// storedCheckpointRef finds the ref a queued checkpoint name is stored under.
+// name is that ref's spelling and tip its commit; listed is the namespace
+// listing partitionLocalRefs returned, and may be nil.
 //
 // A checkpoint ref is written through its canonical name but stored under
 // whichever spelling already named its shard bucket, and on a case-insensitive
@@ -54,25 +54,66 @@ func (p checkpointRefPush) refSpec() string {
 // lookup is an exact string match and the queued name stops resolving. See
 // checkpoint.FoldedRefName for why one alternate is exhaustive.
 //
-// Only a definite ErrReferenceNotFound moves to the alternate. A transient
-// lookup failure returns the queued name unchanged, so a flaky read never
-// rewrites which ref a caller acts on.
-func resolveQueuedCheckpointRef(repo *git.Repository, ref plumbing.ReferenceName) plumbing.ReferenceName {
-	if _, err := repo.Reference(ref, false); !errors.Is(err, plumbing.ErrReferenceNotFound) {
-		return ref
+// name is for local git I/O only. Callers keep identifying the checkpoint by
+// the name they passed in, so what they report does not depend on the
+// filesystem or on whether git has packed the ref.
+//
+// Only a definite ErrReferenceNotFound moves to the other spelling. Any other
+// failure of the queued name is returned as it is, so a flaky read never
+// changes which ref a caller acts on. ErrReferenceNotFound is returned only
+// when neither spelling resolves.
+func storedCheckpointRef(
+	repo *git.Repository,
+	listed map[plumbing.ReferenceName]plumbing.Hash,
+	ref plumbing.ReferenceName,
+) (name plumbing.ReferenceName, tip plumbing.Hash, err error) {
+	if hash, ok := listed[ref]; ok {
+		return ref, hash, nil
 	}
+	other, hasOther := otherShardSpelling(ref)
+	if hash, ok := listed[other]; hasOther && ok {
+		return other, hash, nil
+	}
+	r, err := repo.Reference(ref, true)
+	if err == nil {
+		return ref, r.Hash(), nil
+	}
+	if !hasOther || !errors.Is(err, plumbing.ErrReferenceNotFound) {
+		return ref, plumbing.ZeroHash, err //nolint:wrapcheck // callers branch on plumbing.ErrReferenceNotFound
+	}
+	r, otherErr := repo.Reference(other, true)
+	switch {
+	case otherErr == nil:
+		return other, r.Hash(), nil
+	case errors.Is(otherErr, plumbing.ErrReferenceNotFound):
+		// Absent under both spellings: report the name the caller asked for.
+		return ref, plumbing.ZeroHash, err //nolint:wrapcheck // callers branch on plumbing.ErrReferenceNotFound
+	default:
+		return other, plumbing.ZeroHash, otherErr //nolint:wrapcheck // callers branch on plumbing.ErrReferenceNotFound
+	}
+}
+
+// otherShardSpelling returns the one other name ref's checkpoint can be stored
+// under: the case-folded spelling of a canonical name, and the canonical
+// spelling of a case-folded one. It reports false for a ref that names no
+// checkpoint and for a shard with a single spelling.
+func otherShardSpelling(ref plumbing.ReferenceName) (plumbing.ReferenceName, bool) {
 	cid, ok := checkpoint.ParseRef(ref)
 	if !ok {
-		return ref
+		return "", false
 	}
 	folded, ok := checkpoint.FoldedRefName(cid)
 	if !ok {
-		return ref
+		return "", false
 	}
-	if _, err := repo.Reference(folded, false); err == nil {
-		return folded
+	if folded != ref {
+		return folded, true
 	}
-	return ref
+	canonical, err := checkpoint.RefName(cid)
+	if err != nil {
+		return "", false
+	}
+	return canonical, true
 }
 
 // canonicalCheckpointRefKey returns the name a checkpoint ref is MATCHED by,
@@ -82,7 +123,7 @@ func resolveQueuedCheckpointRef(repo *git.Repository, ref plumbing.ReferenceName
 // the user names and the spelling a push reports back are not reliably equal.
 // Keying every comparison by the checkpoint's canonical ref name makes them
 // agree without a repository lookup, and without deciding anything about which
-// spelling git I/O should use — that stays with resolveQueuedCheckpointRef.
+// spelling git I/O should use — that stays with storedCheckpointRef.
 //
 // A ref that does not name a checkpoint is its own key.
 func canonicalCheckpointRefKey(ref plumbing.ReferenceName) plumbing.ReferenceName {
@@ -104,11 +145,11 @@ func canonicalCheckpointRefKey(ref plumbing.ReferenceName) plumbing.ReferenceNam
 // listing the checkpoint namespace; it is nil when the namespace was not
 // listed, and a ref missing from it has no known tip.
 //
-// A queued name is resolved through resolveQueuedCheckpointRef first, and the
-// resolved spelling is what is returned as pushable: without that, a ref stored
-// under its case-folded shard reads as absent and is dropped from the queue, so
-// the checkpoint is never pushed. The stale list keeps the name the caller
-// passed in, since that is the queue entry it has to prune.
+// A ref stored under the other spelling of its shard exists: without that, it
+// reads as absent once git packs it and is dropped from the queue, so the
+// checkpoint is never pushed. Both lists keep the names the caller passed in,
+// which are the queue entries; storedCheckpointRef and localTip find the ref
+// behind one.
 func partitionLocalRefs(
 	ctx context.Context,
 	repo *git.Repository,
@@ -125,9 +166,9 @@ const checkpointRefListingMinQueue = 16
 // partitionLocalRefsUsing is partitionLocalRefs with the choice of listing made
 // by the caller. One listing answers most refs, where a per-ref lookup costs a
 // packed-refs scan each. Refs the listing omits still get that lookup, because
-// the listings skip broken refs, the go-git one skips symbolic refs, and both
-// report the on-disk shard case, while a case-insensitive filesystem still
-// resolves the queued name.
+// the listings skip broken refs and the go-git one skips symbolic refs. Both
+// report the on-disk shard case, so a queued name is also matched under the
+// other spelling of its shard.
 func partitionLocalRefsUsing(
 	ctx context.Context,
 	repo *git.Repository,
@@ -150,17 +191,27 @@ func partitionLocalRefsUsing(
 		}
 	}
 	for _, ref := range refs {
-		resolved := ref
-		if _, ok := present[ref]; !ok {
-			resolved = resolveQueuedCheckpointRef(repo, ref)
-		}
-		if _, ok := present[resolved]; ok || localRefMayExist(repo, resolved) {
-			existing = append(existing, resolved)
+		if checkpointRefMayExist(repo, present, ref) {
+			existing = append(existing, ref)
 		} else {
 			stale = append(stale, ref)
 		}
 	}
 	return existing, stale, listed
+}
+
+// checkpointRefMayExist reports whether ref may still be present locally, under
+// its own name or the other spelling of its shard. present is a listing of the
+// checkpoint namespace and may be nil; a name it omits is looked up.
+func checkpointRefMayExist(repo *git.Repository, present map[plumbing.ReferenceName]plumbing.Hash, ref plumbing.ReferenceName) bool {
+	if _, ok := present[ref]; ok {
+		return true
+	}
+	other, hasOther := otherShardSpelling(ref)
+	if _, ok := present[other]; hasOther && ok {
+		return true
+	}
+	return localRefMayExist(repo, ref) || (hasOther && localRefMayExist(repo, other))
 }
 
 // localRefMayExist reports whether ref may still be present locally. Only a
@@ -172,17 +223,12 @@ func localRefMayExist(repo *git.Repository, ref plumbing.ReferenceName) bool {
 	return !errors.Is(err, plumbing.ErrReferenceNotFound)
 }
 
-// localTip is ref's commit: the listed tip when partitionLocalRefs listed it,
-// otherwise a resolving lookup. listed may be nil.
+// localTip is the commit of the ref a queued name is stored under: the listed
+// tip when partitionLocalRefs listed it, otherwise a resolving lookup. listed
+// may be nil.
 func localTip(repo *git.Repository, listed map[plumbing.ReferenceName]plumbing.Hash, ref plumbing.ReferenceName) (plumbing.Hash, error) {
-	if hash, ok := listed[ref]; ok {
-		return hash, nil
-	}
-	r, err := repo.Reference(ref, true)
-	if err != nil {
-		return plumbing.ZeroHash, err //nolint:wrapcheck // callers branch on plumbing.ErrReferenceNotFound
-	}
-	return r.Hash(), nil
+	_, tip, err := storedCheckpointRef(repo, listed, ref)
+	return tip, err
 }
 
 // listLocalCheckpointRefs maps every ref under the checkpoint namespace to its

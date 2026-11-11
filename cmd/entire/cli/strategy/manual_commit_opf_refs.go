@@ -83,7 +83,9 @@ func RewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repositor
 	// the queue belongs to the flush.
 	existing, _, listed := partitionLocalRefs(ctx, repo, queued)
 	for _, refName := range existing {
-		tip, refErr := localTip(repo, listed, refName)
+		// stored, not the queued name: the compare-and-swap below reads its
+		// expected value under the name it updates.
+		stored, tip, refErr := storedCheckpointRef(repo, listed, refName)
 		if refErr != nil {
 			if errors.Is(refErr, plumbing.ErrReferenceNotFound) {
 				continue
@@ -100,7 +102,7 @@ func RewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repositor
 		if len(chain) > bootstrapLimit {
 			return &BootstrapTooLargeError{Count: len(chain), Limit: bootstrapLimit}
 		}
-		pr := pendingRef{ref: refName, old: tip, base: base}
+		pr := pendingRef{ref: stored, old: tip, base: base}
 		for _, c := range chain {
 			tree, treeErr := repo.TreeObject(c.TreeHash)
 			if treeErr != nil {

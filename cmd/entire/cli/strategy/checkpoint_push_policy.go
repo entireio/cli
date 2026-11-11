@@ -180,13 +180,7 @@ func checkOuterPushOfHeldCommits(ctx context.Context, lines []PrePushRef, why st
 	}
 	tips := make(map[plumbing.Hash]plumbing.ReferenceName, len(waiting))
 	for ref := range waiting {
-		// waiting is keyed canonically; read the spelling the ref is stored
-		// under. A listed name needs no lookup to know it is the stored one.
-		stored := ref
-		if _, ok := listed[ref]; !ok {
-			stored = resolveQueuedCheckpointRef(repo, ref)
-		}
-		if hash, err := localTip(repo, listed, stored); err == nil {
+		if hash, err := localTip(repo, listed, ref); err == nil {
 			tips[hash] = ref
 		}
 	}
@@ -292,8 +286,7 @@ func CheckpointRefExists(ctx context.Context, checkpointID id.CheckpointID) (boo
 	defer repo.Close()
 	// The ref may be stored under its case-folded shard, which the canonical
 	// name stops resolving to once git packs it.
-	ref = resolveQueuedCheckpointRef(repo, ref)
-	if _, err := repo.Reference(ref, true); err != nil {
+	if _, _, err := storedCheckpointRef(repo, nil, ref); err != nil {
 		if errors.Is(err, plumbing.ErrReferenceNotFound) {
 			return false, nil
 		}
@@ -466,10 +459,10 @@ func PushCheckpoints(ctx context.Context, targets []CheckpointPushRequest) (Chec
 }
 
 // waitingCheckpointRefs is the set of queued refs present locally, keyed by
-// canonicalCheckpointRefKey: partitionLocalRefs reports the spelling each ref
-// is stored under, which is not necessarily the one the caller will look up.
-// listed maps refs to their tips, by stored name, when the namespace was
-// listed; it may be nil or omit a waiting ref, so read tips through localTip.
+// canonicalCheckpointRefKey: a ref can be queued under either spelling of its
+// shard, which is not necessarily the one the caller will look up. listed maps
+// refs to their tips, by stored name, when the namespace was listed; it may be
+// nil or omit a waiting ref, so read tips through localTip.
 func waitingCheckpointRefs(
 	ctx context.Context,
 	repo *git.Repository,
@@ -519,7 +512,7 @@ func missingCheckpointRefs(repo *git.Repository, targets []CheckpointPushRequest
 		if _, ok := waiting[key]; ok {
 			continue
 		}
-		if _, err := repo.Reference(resolveQueuedCheckpointRef(repo, target.Ref), true); errors.Is(err, plumbing.ErrReferenceNotFound) {
+		if _, _, err := storedCheckpointRef(repo, nil, target.Ref); errors.Is(err, plumbing.ErrReferenceNotFound) {
 			missing[key] = struct{}{}
 		}
 	}
