@@ -86,6 +86,7 @@ func TestTakeStampRecords_KeepsTheNextCommitsStamp(t *testing.T) {
 	assert.Equal(t, []string{"sess-first"}, records.sessions[first].SessionIDs)
 	assert.NotContains(t, records.sessions, second)
 	assert.Equal(t, map[id.CheckpointID]bool{second: true}, readStampedTrailers(ctx), "the next commit's stamp is kept, the abandoned one dropped")
+	releaseStampedSessions(ctx, records.sessions)
 
 	secondCommit := commitWith(t, dir, "second", second)
 	records = takeStampRecords(ctx, secondCommit)
@@ -114,12 +115,16 @@ func TestTakeStampRecords_KeepsStampsOfCommitsLandedSince(t *testing.T) {
 	secondCommit := commitWith(t, dir, "second", second)
 	require.True(t, recordStampedTrailer(ctx, third), "the third commit's prepare, on the second")
 
-	assert.Equal(t, map[id.CheckpointID]bool{first: true}, takeStampRecords(ctx, firstCommit).stamped)
+	records := takeStampRecords(ctx, firstCommit)
+	assert.Equal(t, map[id.CheckpointID]bool{first: true}, records.stamped)
 	assert.Equal(t, map[id.CheckpointID]bool{second: true, third: true}, readStampedTrailers(ctx), "the later commits' stamps are kept, the abandoned one dropped")
+	releaseStampedSessions(ctx, records.sessions)
 
-	assert.Equal(t, map[id.CheckpointID]bool{second: true}, takeStampRecords(ctx, secondCommit).stamped)
+	records = takeStampRecords(ctx, secondCommit)
+	assert.Equal(t, map[id.CheckpointID]bool{second: true}, records.stamped)
+	releaseStampedSessions(ctx, records.sessions)
 	thirdCommit := commitWith(t, dir, "third", third)
-	records := takeStampRecords(ctx, thirdCommit)
+	records = takeStampRecords(ctx, thirdCommit)
 	assert.Equal(t, map[id.CheckpointID]bool{third: true}, records.stamped, "the third commit's post-commit finds its stamp")
 	assert.Empty(t, readStampedTrailers(ctx))
 	releaseStampedSessions(ctx, records.sessions)

@@ -327,10 +327,16 @@ commit.
   drops the rest, left by commits that never happened (`takeStampRecords`).
   A session's reserved ID goes to one commit: while a commit already made
   carries it and that commit's post-commit is not done (post-commit leaves the
-  sessions entries of the stamps it took until it returns,
+  sessions entries of the stamps it took, marked as its own, until it returns,
   `releaseStampedSessions`), prepare gives the next commit an ID of its own
-  (`reservationCarriedInFlight`). A commit retried on the same HEAD after an
-  aborted attempt keeps the reservation. Prepare writes the records and post-commit
+  (`reservationCarriedInFlight`), and reads the reservation again after that
+  check, since the earlier post-commit may have condensed it in between. A
+  commit retried on the same HEAD after an aborted attempt keeps the
+  reservation. A later post-commit's take keeps an entry the earlier one marked
+  while that process runs (where proclive cannot tell, for a minute). The later
+  commit's post-commit can reach the session first; it then waits, up to ten
+  seconds, for the earlier one to condense the session
+  (`awaitEarlierCondensations`) rather than skip it. Prepare writes the records and post-commit
   takes them under `entire-stamp-records.lock` in the same dir, so hooks of
   overlapping commits in one worktree cannot lose each other's updates. Beside
   it, `entire-stamped-sessions.json` records the HEAD prepare stamped on and
