@@ -125,6 +125,25 @@ func TestTokenLedger(t *testing.T) {
 		assertSubagentsComplete(t, "pending", l.Pending(), true)
 	})
 
+	t.Run("attach's mark keeps a child the newer checkpoint never counted", func(t *testing.T) {
+		t.Parallel()
+		var l TokenLedger
+		l.Observe(reading(usage(10, 1, 1), map[string]*agent.TokenUsage{"a": usage(40, 4, 1)}))
+		l.MarkCheckpointed()
+		read := l.Clone()
+		// Attach's reading counts a and lists b, which it cannot read.
+		read.Observe(reading(usage(20, 2, 2), map[string]*agent.TokenUsage{"a": usage(50, 5, 2), "b": nil}))
+		// b's file is deleted; while attach waits, a hook counts a and
+		// checkpoints without listing b.
+		l.Observe(reading(usage(30, 3, 3), map[string]*agent.TokenUsage{"a": usage(60, 6, 3)}))
+		l.MarkCheckpointed()
+		l.MarkCheckpointedUpTo(read)
+		// b's total now includes what it used before the hook's checkpoint.
+		l.Observe(reading(usage(30, 3, 3), map[string]*agent.TokenUsage{"a": usage(60, 6, 3), "b": usage(7, 1, 1)}))
+		assertSubagentsComplete(t, "pending", l.Pending(), false)
+		assertSubagentsComplete(t, "cloned pending", l.Clone().Pending(), false)
+	})
+
 	t.Run("attach's mark keeps both uncounted sets when neither mark holds the other", func(t *testing.T) {
 		t.Parallel()
 		read := &TokenLedger{
