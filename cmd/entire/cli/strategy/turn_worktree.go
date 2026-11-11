@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -82,7 +83,9 @@ func SplitEditsByWorktree(ctx context.Context, hookRoot string, edited []string)
 // PruneRemovedWorktrees drops sessionID's records of edits in worktrees git
 // no longer lists (removed, or a subagent's throwaway worktree), or lists
 // under the same ID for a worktree added since: no commit can carry those
-// edits, and the session would otherwise stay pending forever.
+// edits, and the session would otherwise stay pending forever. git never
+// lists an unregistered checkout sharing the repository through commondir,
+// so a record made in one is kept while that checkout is still there.
 func PruneRemovedWorktrees(ctx context.Context, sessionID, hookRoot string) {
 	pruneRemovedWorktrees(ctx, sessionID, hookRoot, gitrepo.ListWorktreePaths)
 }
@@ -118,13 +121,7 @@ func pruneRemovedWorktrees(ctx context.Context, sessionID, hookRoot string, list
 		}
 		changed := false
 		for key, work := range state.OtherWorktrees {
-			path, ok := live[key]
-			if ok {
-				// Dropped only when known to be another worktree's: a
-				// check that failed says nothing about the record.
-				current, err := worktreeEntryCurrent(ctx, path, key, work)
-				ok = current || err != nil
-			}
+			path, ok := liveRecordPath(ctx, hookRoot, live, key, work)
 			switch {
 			case !ok:
 				delete(state.OtherWorktrees, key)
@@ -146,6 +143,52 @@ func pruneRemovedWorktrees(ctx context.Context, sessionID, hookRoot string, list
 		logging.Debug(logging.WithComponent(ctx, "session"), "could not prune records of removed worktrees",
 			slog.String("session_id", sessionID), slog.String("error", err.Error()))
 	}
+}
+
+// liveRecordPath reports whether work, a session's record keyed key, is still
+// a live worktree's, and the path that worktree is at now. live maps the keys
+// of the worktrees git lists to their paths.
+func liveRecordPath(ctx context.Context, hookRoot string, live map[string]string, key string, work *session.WorktreeWork) (string, bool) {
+	if path, listed := live[key]; listed {
+		// Dropped only when known to be another worktree's: a check that
+		// failed says nothing about the record.
+		if current, err := worktreeEntryCurrent(ctx, path, key, work); current || err != nil {
+			return path, true
+		}
+	}
+	if key != session.WorktreeKey("") {
+		return "", false
+	}
+	// The empty ID is the main worktree's and also every unregistered
+	// checkout's, which the listing leaves out, so the record is checked
+	// where it was made, and keeps its path.
+	checkout, err := liveUnregisteredCheckout(hookRoot, work.Path)
+	return work.Path, checkout || err != nil
+}
+
+// liveUnregisteredCheckout reports whether recorded, the path of a record under
+// the empty worktree ID, is still an unregistered checkout of hookRoot's
+// repository: its Git directory has no worktrees/<id> registration and shares
+// hookRoot's common directory through commondir. A path that is gone, or whose
+// Git metadata no longer resolves, can take no commit, so it is not. err is
+// set when hookRoot's own metadata can't be resolved, which says nothing about
+// the record.
+func liveUnregisteredCheckout(hookRoot, recorded string) (bool, error) {
+	if recorded == "" {
+		return false, nil
+	}
+	checkout, err := gitrepo.ResolveWorktreeMetadata(recorded)
+	if err != nil {
+		return false, nil //nolint:nilerr // an unresolvable checkout is a removed one
+	}
+	if checkout.WorktreeID != "" {
+		return false, nil // a registered worktree now, which git lists
+	}
+	hook, err := gitrepo.ResolveWorktreeMetadata(hookRoot)
+	if err != nil {
+		return false, fmt.Errorf("resolve hook worktree: %w", err)
+	}
+	return !sameDir(checkout.GitDir, checkout.CommonDir) && sameDir(checkout.CommonDir, hook.CommonDir), nil
 }
 
 // sameDir reports whether a and b name the same directory once symlinks are

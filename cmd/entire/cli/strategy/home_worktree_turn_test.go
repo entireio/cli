@@ -305,6 +305,42 @@ func TestGuestTurnEnd_EmptyIDEntryBelongsToOneCheckout(t *testing.T) {
 	assert.True(t, sameDir(entry.Path, checkout), "entry path = %s", entry.Path)
 }
 
+// git worktree list never shows an unregistered checkout, and lists the main
+// worktree under the same empty ID, so pruning (which runs at every turn end)
+// must check the checkout's record where it was made: kept while the checkout
+// is there, from any worktree's hook, and dropped once it is gone.
+func TestPruneRemovedWorktrees_KeepsUnregisteredCheckoutRecord(t *testing.T) {
+	const sid = "prune-unregistered"
+	s := &ManualCommitStrategy{}
+	mainDir := setupGitRepo(t)
+	linkedDir := filepath.Join(t.TempDir(), "linked")
+	testutil.RunGit(t, mainDir, "worktree", "add", linkedDir, "-b", "linked-branch")
+	checkout := unregisteredCheckoutOf(t, mainDir)
+
+	chdirWorktree(t, linkedDir)
+	testutil.WriteFile(t, linkedDir, "linked.go", "package linked")
+	saveStepIn(t, s, sid, []string{"linked.go"}, nil)
+	chdirWorktree(t, checkout)
+	testutil.WriteFile(t, checkout, "a.go", "package a // in the checkout")
+	saveStepIn(t, s, sid, []string{"a.go"}, nil)
+	require.NotNil(t, mustLoad(t, s, sid).OtherWorktrees[session.WorktreeKey("")], "precondition: the checkout's step was recorded for it")
+
+	for _, hookRoot := range []string{checkout, linkedDir, mainDir} {
+		PruneRemovedWorktrees(t.Context(), sid, hookRoot)
+		state := mustLoad(t, s, sid)
+		entry := state.OtherWorktrees[session.WorktreeKey("")]
+		require.NotNil(t, entry, "pruning from %s dropped the live checkout's record", hookRoot)
+		assert.Equal(t, []string{"a.go"}, entry.FilesTouched)
+		assert.True(t, sameDir(entry.Path, checkout), "pruning from %s moved the record to %s", hookRoot, entry.Path)
+		assert.True(t, hasWorktreeEntry(t.Context(), state, checkout), "a commit in the checkout can't link its record")
+	}
+
+	chdirWorktree(t, linkedDir)
+	require.NoError(t, os.RemoveAll(checkout))
+	PruneRemovedWorktrees(t.Context(), sid, linkedDir)
+	assert.Nil(t, mustLoad(t, s, sid).OtherWorktrees, "the removed checkout's record kept the session pending")
+}
+
 // A linked home moved between two steps of one turn, before turn start could
 // follow it, is still the home: its marker says so, and the step is recorded
 // there, not skipped.
