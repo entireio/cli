@@ -555,7 +555,8 @@ func checkpointTouchesAny(repoRoot string, filesTouched, files []string) bool {
 	for _, f := range filesTouched {
 		touched[f] = struct{}{}
 	}
-	return slices.ContainsFunc(spelledAsCommitted(repoRoot, files, touched), func(f string) bool {
+	spelled := spelledAsCommitted(repoRoot, files, touched)
+	return slices.ContainsFunc(spelled, func(f string) bool {
 		_, ok := touched[f]
 		return ok
 	})
