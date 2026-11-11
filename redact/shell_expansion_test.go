@@ -88,6 +88,7 @@ func TestString_ShellParameterDefaultsCaughtWithoutScanners(t *testing.T) {
 		// case is a reserved word only where a command starts.
 		`echo "$(echo case)" DB_PASSWORD=${PW:-'$S3CRET'} cmd "x"`:                   `echo "$(echo case)" DB_PASSWORD=REDACTED cmd "x"`,
 		`echo "$(printf case)"; DB_PASSWORD=${PW:-'$S3CRET'} printenv "DB_PASSWORD"`: `echo "$(printf case)"; DB_PASSWORD=REDACTED printenv "DB_PASSWORD"`,
+		`echo "$(echo case)"; psql postgres://app:${PW:-'$S3CRET'}@db/app "x"`:       `echo "$(echo case)"; psql REDACTED "x"`,
 		// A command substitution starts a new quoting context.
 		`echo "$(DB_PASSWORD=${PW:-'$S3CRET'} env)"`:  `echo "$(DB_PASSWORD=REDACTED env)"`,
 		"echo \"`DB_PASSWORD=${PW:-'$S3CRET'} env`\"": "echo \"`DB_PASSWORD=REDACTED env`\"",
@@ -113,6 +114,8 @@ func TestString_ShellParameterReferencesPreserved(t *testing.T) {
 		"${!ref}", "${!pre*}", "${!pw[@]}", "${pw[0]}", "${pw[@]}",
 		"${pw[idx[0]]}", "${pw[${idx[0]}]}", "${#pw[idx[0]]}", "${pw[idx[0]]:-$DEFAULT_PW}",
 		"${1:-''}", "${PW:-'changeme'}", "${PW:-'<password>'}",
+		// Empty quoted pieces around a reference leave it a reference.
+		"${PW:-''$FALLBACK''}",
 	} {
 		cases = append(cases, stringRedactionCase{
 			name:  value,
@@ -193,6 +196,8 @@ func TestIsPlaceholderShellExpansion_ParameterForms(t *testing.T) {
 		"${PW:-'$S3CRET'}":       false,
 		"${PW:-'changeme'}":      true,
 		"${PW:-$FALLBACK}":       true,
+		"${PW:-''$FALLBACK''}":   true,
+		"${PW:-'a'$X'b'}":        false,
 		// A subscript nested two levels deep is not read as a name, as before.
 		"${pw[a[b[0]]]:-hunter2}": true,
 	} {
