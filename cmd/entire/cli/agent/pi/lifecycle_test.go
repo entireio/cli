@@ -45,6 +45,24 @@ func TestParseHookEvent_BeforeAgentStart(t *testing.T) {
 	}
 }
 
+// TestParseHookEvent_AgentEndCarriesCwd: Pi's write and edit tools name files
+// relative to Pi's working directory, which the turn end needs to place them
+// in the repository.
+func TestParseHookEvent_AgentEndCarriesCwd(t *testing.T) {
+	t.Parallel()
+	stdin := strings.NewReader(`{"type":"agent_end","cwd":"/repo/sub","session_id":"abc-123"}`)
+	ev, err := (&PiAgent{}).ParseHookEvent(context.Background(), HookNameAgentEnd, stdin)
+	if err != nil {
+		t.Fatalf("ParseHookEvent: %v", err)
+	}
+	if ev.Type != agent.TurnEnd {
+		t.Errorf("Type = %v, want TurnEnd", ev.Type)
+	}
+	if ev.CWD != "/repo/sub" {
+		t.Errorf("CWD = %q, want /repo/sub", ev.CWD)
+	}
+}
+
 func TestParseHookEvent_DoesNotWriteActiveSessionCache(t *testing.T) {
 	tests := []struct {
 		name     string

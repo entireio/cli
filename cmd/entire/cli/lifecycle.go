@@ -438,9 +438,9 @@ func handleLifecycleToolUse(ctx context.Context, ag agent.Agent, event *agent.Ev
 		return nil
 	}
 
-	modified := normalizeToolUsePaths(event.ModifiedFiles, event.CWD, repoRoot)
-	added := normalizeToolUsePaths(event.NewFiles, event.CWD, repoRoot)
-	deleted := normalizeToolUsePaths(event.DeletedFiles, event.CWD, repoRoot)
+	modified := normalizeAgentPaths(event.ModifiedFiles, event.CWD, repoRoot)
+	added := normalizeAgentPaths(event.NewFiles, event.CWD, repoRoot)
+	deleted := normalizeAgentPaths(event.DeletedFiles, event.CWD, repoRoot)
 
 	modified, added, deleted = strategy.FilterTrackableChanges(ctx, repoRoot, modified, added, deleted)
 	if len(modified) == 0 && len(added) == 0 && len(deleted) == 0 {
@@ -463,10 +463,13 @@ func handleLifecycleToolUse(ctx context.Context, ag agent.Agent, event *agent.Ev
 	return nil
 }
 
-// normalizeToolUsePaths converts hook-payload paths to repo-root-relative form.
-// Codex apply_patch envelopes carry cwd-relative paths, so we join them against
-// eventCWD before FilterAndNormalizePaths rewrites against repoRoot.
-func normalizeToolUsePaths(files []string, eventCWD, repoRoot string) []string {
+// normalizeAgentPaths converts paths an agent reported, in a hook payload or
+// in its transcript, to repo-root-relative form. A relative path is relative
+// to the agent's working directory: Codex apply_patch envelopes and Pi's write
+// and edit tools name files that way, so it is joined to eventCWD before
+// FilterAndNormalizePaths rewrites against repoRoot. Without eventCWD a
+// relative path is taken as repo-root-relative.
+func normalizeAgentPaths(files []string, eventCWD, repoRoot string) []string {
 	if len(files) == 0 {
 		return nil
 	}
@@ -1021,7 +1024,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 
 	// Filter and normalize all paths
 	_, normalizeSpan := perf.Start(ctx, "filter_and_normalize_paths")
-	relModifiedFiles := FilterAndNormalizePaths(modifiedFiles, repoRoot)
+	relModifiedFiles := normalizeAgentPaths(modifiedFiles, event.CWD, repoRoot)
 	var statusModifiedFiles, relNewFiles, relDeletedFiles []string
 	if changes != nil {
 		relNewFiles = FilterAndNormalizePaths(changes.New, repoRoot)
@@ -2385,7 +2388,7 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 	// filterToUncommittedFiles is the same guard the turn-end path already applies
 	// for this exact reason; it fails open, so a git error keeps the list as-is
 	// rather than silently dropping a real checkpoint.
-	subagentFiles := FilterAndNormalizePaths(modifiedFiles, repoRoot)
+	subagentFiles := normalizeAgentPaths(modifiedFiles, event.CWD, repoRoot)
 	uncommittedSubagentFiles := filterToUncommittedFiles(logCtx, subagentFiles, repoRoot)
 	relModifiedFiles := uncommittedSubagentFiles
 	var relNewFiles, relDeletedFiles []string
