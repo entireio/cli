@@ -77,7 +77,10 @@ func DecodeSkills(encoded string) ([]string, error) {
 // On a Windows host it also sets NoDefaultCurrentDirectoryInExePath=1 (see
 // agent.AppendWindowsPathOnlyLookupEnv), so the hook shell the agent starts
 // resolves every program in a hook line from PATH, never from the reviewed
-// checkout.
+// checkout. The setting covers the whole agent process, not just its hooks: a
+// reviewer whose shell is cmd.exe can no longer run a checkout script such as
+// `gradlew` or `build.cmd` by bare name and must write `.\gradlew`, as
+// PowerShell already requires.
 func AppendReviewEnv(base []string, agentName string, cfg reviewtypes.RunConfig, prompt string) []string {
 	skillsJSON, _ := EncodeSkills(cfg.Skills) //nolint:errcheck // EncodeSkills only fails on json.Marshal([]string), which is infallible
 	out := make([]string, 0, len(base)+6)

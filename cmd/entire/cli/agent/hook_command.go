@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -233,11 +234,6 @@ const windowsEntireGuard = `pushd %SystemRoot%& where.exe entire >nul 2>nul & if
 // the hook's working directory.
 const windowsBranchStart = `popd& `
 
-// legacyWindowsEntireGuard is the guard written before windowsEntireGuard ran
-// where.exe from %SystemRoot%. Hooks carrying it must still be recognised so
-// the next install replaces them and disable removes them.
-const legacyWindowsEntireGuard = `where.exe entire >nul 2>nul & if errorlevel 1 `
-
 // windowsBareCmdLauncher and windowsSystemCmdLauncher open the nested form's
 // quoted cmd.exe block.
 //
@@ -252,15 +248,18 @@ const legacyWindowsEntireGuard = `where.exe entire >nul 2>nul & if errorlevel 1 
 //     and nothing is looked up in the working directory. Use it for hosts that
 //     hand the whole line to cmd.exe: Factory Droid.
 //   - windowsBareCmdLauncher is for hosts whose hook shell is or may be
-//     PowerShell. Cursor's desktop app runs hook commands through PowerShell
-//     on Windows (https://cursor.com/docs/hooks, "Command-Based Hooks"). Codex's
-//     hook shell is the session's
-//     shell (hooks/src/engine/command_runner.rs and core/src/shell.rs in
+//     PowerShell. Cursor runs hook commands through PowerShell on Windows: the
+//     desktop app per https://cursor.com/docs/hooks ("Command-Based Hooks"),
+//     the CLI as `powershell.exe -NonInteractive -File <temp>.ps1` (observed
+//     with Cursor CLI 2026.11.11). Codex's hook shell is the session's shell
+//     (hooks/src/engine/command_runner.rs and core/src/shell.rs in
 //     openai/codex): `powershell -NoProfile -Command <line>` for the default
-//     PowerShell user, `cmd.exe /c "<line>"` for a cmd.exe user, and
-//     `%COMSPEC% /C "<line>"` only when no shell was detected. PowerShell does
-//     not expand %SystemRoot% and never runs a program from the current
-//     directory, so the bare token is the one that works under both.
+//     PowerShell user, `cmd.exe /c "<line>"` for a cmd.exe user,
+//     `%COMSPEC% /C "<line>"` when no shell was detected, and a POSIX sh when
+//     the session runs under one. PowerShell does not expand %SystemRoot% and
+//     never runs a program from the current directory, so the bare token is
+//     the one that works under both; under a cmd.exe hook shell it is still
+//     looked up in the working directory first.
 const (
 	windowsBareCmdLauncher   = `cmd.exe /d /s /c "`
 	windowsSystemCmdLauncher = `%SystemRoot%\System32\cmd.exe /d /s /c "`
@@ -306,13 +305,12 @@ func windowsWarningBody(command, escapedWarning string) string {
 // Hence: Codex (PowerShell or cmd.exe, verbatim) and Cursor (PowerShell) use
 // the bare nested form; droid (cmd.exe, verbatim) uses the cmd-host nested
 // form; agy (cmd.exe, argument-quoted) uses the direct form.
-//
+
 // WrapWindowsProductionSilentHookCommand exits successfully without output when
 // the Entire CLI is missing from PATH. It avoids sh so Codex hooks still work
 // from native Windows shells. It nests a bare `cmd.exe` so the line also runs
-// under Codex's PowerShell hook shell; see windowsBareCmdLauncher. Hosts that
-// always run hooks through cmd.exe use
-// WrapWindowsProductionSilentHookCommandForCmdHost instead.
+// under a PowerShell hook shell; see windowsBareCmdLauncher and the selection
+// rules above.
 func WrapWindowsProductionSilentHookCommand(command string) string {
 	return windowsBareCmdLauncher + windowsSilentBody(command) + `"`
 }
@@ -375,22 +373,24 @@ func WrapProductionPlainTextWarningHookCommand(command string, format WarningFor
 
 const productionHookWrapperPrefix = `sh -c 'if ! command -v entire >/dev/null 2>&1; then `
 
+// windowsHookWrapperShape matches the head of any of Entire's Windows wrappers,
+// by structure rather than by exact prefix: an optional nested cmd.exe launcher
+// (bare, %SystemRoot%-relative or a full path), any number of `set …& ` and
+// `pushd …& ` segments, then the `where.exe entire` guard. Released CLIs matched
+// exact prefixes, so each wording change made the next version's hooks look
+// foreign to them; a structural match keeps a future setup segment or launcher
+// from repeating that. Wrappers older versions wrote (no PATH-only segment, the
+// legacy guard without pushd) match too, so the next install replaces them.
+var windowsHookWrapperShape = regexp.MustCompile(`^(?i:[^"&]*cmd\.exe /d /s /c ")?(?:(?:set|pushd) [^&]*& )*where\.exe entire >nul 2>nul & if errorlevel 1 `)
+
+// windowsBranchSetup matches the setup segments that open a wrapper branch
+// before the wrapped command (windowsBranchStart today).
+var windowsBranchSetup = regexp.MustCompile(`^(?:(?:popd|set [^&]*|pushd [^&]*)& )*`)
+
 // isWindowsProductionHookWrapper reports whether command has the shape of one
-// of Entire's Windows wrappers: an optional nested cmd.exe launcher, an
-// optional windowsPathOnlyLookup, and then windowsEntireGuard or
-// legacyWindowsEntireGuard. Wrappers written by older versions lack the lookup
-// prefix or carry the legacy guard; they must still be recognised so the next
-// install replaces them.
+// of Entire's Windows wrappers; see windowsHookWrapperShape.
 func isWindowsProductionHookWrapper(command string) bool {
-	body := command
-	for _, launcher := range []string{windowsBareCmdLauncher, windowsSystemCmdLauncher} {
-		if rest, ok := strings.CutPrefix(body, launcher); ok {
-			body = rest
-			break
-		}
-	}
-	body = strings.TrimPrefix(body, windowsPathOnlyLookup)
-	return strings.HasPrefix(body, windowsEntireGuard) || strings.HasPrefix(body, legacyWindowsEntireGuard)
+	return windowsHookWrapperShape.MatchString(command)
 }
 
 // DropStaleManagedHooks removes Entire-owned entries whose command is not one of
@@ -430,29 +430,22 @@ func DropStaleManagedHooks[E any](entries []E, commandOf func(E) string, want []
 }
 
 // ManagedHookListState is the read-only counterpart of DropStaleManagedHooks,
-// for HookFreshness implementations. owned reports whether entries hold any
-// command Entire wrote. current reports whether an install would leave them
-// alone: every Entire command in entries is in want, and every command in want
-// is present. A hook list an older version wrote, such as a Windows wrapper
-// from before the PATH-only setting, is owned but not current.
-func ManagedHookListState[E any](entries []E, commandOf func(E) string, want []string) (owned, current bool) {
-	current = true
+// for HookFreshness implementations. It reports whether an install would leave
+// entries alone: every Entire command in entries is in want, and every command
+// in want is present. A hook list an older version wrote, such as a Windows
+// wrapper from before the PATH-only setting, is not current.
+func ManagedHookListState[E any](entries []E, commandOf func(E) string, want []string) bool {
 	for _, entry := range entries {
-		cmd := commandOf(entry)
-		if !IsManagedHookCommand(cmd) {
-			continue
-		}
-		owned = true
-		if !slices.Contains(want, cmd) {
-			current = false
+		if cmd := commandOf(entry); IsManagedHookCommand(cmd) && !slices.Contains(want, cmd) {
+			return false
 		}
 	}
 	for _, w := range want {
 		if !slices.ContainsFunc(entries, func(e E) bool { return commandOf(e) == w }) {
-			current = false
+			return false
 		}
 	}
-	return owned, current
+	return true
 }
 
 // IsManagedHookCommand reports whether command is one Entire wrote: the current
@@ -486,7 +479,7 @@ func IsManagedHookCommand(command string) bool {
 		wrappedCommand := command[idx+len(elseMarker):]
 		wrappedCommand = strings.TrimSuffix(wrappedCommand, `"`)
 		wrappedCommand = strings.TrimSuffix(wrappedCommand, `)`)
-		wrappedCommand = strings.TrimPrefix(wrappedCommand, windowsBranchStart)
+		wrappedCommand = windowsBranchSetup.ReplaceAllString(wrappedCommand, "")
 		return hasManagedHookPrefix(wrappedCommand)
 	}
 	return false
@@ -629,15 +622,9 @@ func AppendWindowsPathOnlyLookupEnv(env []string) []string {
 //
 // Codex and Cursor keep UseWindowsProductionHooks because a Windows host may
 // hand their hooks to a real sh, not because their runners are known to avoid
-// cmd.exe. Codex runs a hook in the session's shell (hooks/src/engine/
-// command_runner.rs and core/src/shell.rs in openai/codex): PowerShell by
-// default, cmd.exe for a cmd.exe user, %COMSPEC% when no shell was detected,
-// and a POSIX sh when the session runs under one — and Codex demonstrably
-// passes the Windows nightly with the sh wrapper installed. Cursor's desktop
-// app runs hook commands through PowerShell on Windows (https://cursor.com/
-// docs/hooks); its Windows build is excluded from the Windows matrix (no
-// tmux), so nothing here has run under a real Cursor. The choice of Windows
-// wrapper for each runner is described above
+// cmd.exe; Codex demonstrably passes the Windows nightly with the sh wrapper
+// installed. Their hook shells are described at windowsBareCmdLauncher, and the
+// choice of Windows wrapper for each runner above
 // WrapWindowsProductionSilentHookCommand.
 func HookHostIsWindows() bool {
 	return hookCommandOS == hookWrapperOSWindows

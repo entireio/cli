@@ -379,7 +379,7 @@ func (c *CursorAgent) CheckHookConfig(ctx context.Context) agent.HookConfigState
 func cursorHooksCurrent(parsed [][]CursorHookEntry, windows bool) bool {
 	for i, ht := range cursorHookTypes {
 		want := agent.WrapProductionSilentHookCommandForOS("entire hooks cursor "+ht.verb, windows)
-		if _, current := agent.ManagedHookListState(parsed[i], hookEntryCommand, []string{want}); !current {
+		if current := agent.ManagedHookListState(parsed[i], hookEntryCommand, []string{want}); !current {
 			return false
 		}
 	}

@@ -469,6 +469,18 @@ func TestIsManagedHookCommand_WindowsWrapperMigration(t *testing.T) {
 		`%SystemRoot%\System32\cmd.exe /d /s /c "set NoDefaultCurrentDirectoryInExePath=1& where.exe entire >nul 2>nul & if errorlevel 1 (ver>nul) else (entire hooks codex stop)"`,
 		`set NoDefaultCurrentDirectoryInExePath=1& where.exe entire >nul 2>nul & if errorlevel 1 (ver>nul) else (entire hooks codex stop)`,
 	}
+	// Shapes no version writes yet, but a later one might: an extra setup
+	// segment, a full-path launcher, an extra branch segment. Matching by
+	// structure means they still read as Entire's.
+	future := []string{
+		`C:\Windows\system32\cmd.exe /d /s /c "set NoDefaultCurrentDirectoryInExePath=1& pushd %SystemRoot%& where.exe entire >nul 2>nul & if errorlevel 1 (popd& ver>nul) else (popd& entire hooks codex stop)"`,
+		`set ENTIRE_X=1& set NoDefaultCurrentDirectoryInExePath=1& pushd %SystemRoot%& where.exe entire >nul 2>nul & if errorlevel 1 (popd& ver>nul) else (popd& set ENTIRE_Y=1& entire hooks codex stop)`,
+	}
+	for _, command := range future {
+		if !IsManagedHookCommand(command) {
+			t.Errorf("IsManagedHookCommand(%q) = false, want true", command)
+		}
+	}
 	current := []string{
 		WrapWindowsProductionSilentHookCommand(hook),
 		WrapWindowsProductionSilentHookCommandForCmdHost(hook),
@@ -540,20 +552,19 @@ func TestManagedHookListState(t *testing.T) {
 	const foreign = "my-hook"
 	id := func(s string) string { return s }
 	for _, tc := range []struct {
-		name           string
-		entries, want  []string
-		owned, current bool
+		name          string
+		entries, want []string
+		current       bool
 	}{
-		{"empty", nil, []string{current}, false, false},
-		{"foreign only", []string{foreign}, []string{current}, false, false},
-		{"current", []string{foreign, current}, []string{current}, true, true},
-		{"legacy", []string{legacy}, []string{current}, true, false},
-		{"legacy beside current", []string{legacy, current}, []string{current}, true, false},
-		{"one of two wanted missing", []string{current}, []string{current, WrapWindowsProductionSilentHookCommand("entire hooks cursor session-start")}, true, false},
+		{"empty", nil, []string{current}, false},
+		{"foreign only", []string{foreign}, []string{current}, false},
+		{"current", []string{foreign, current}, []string{current}, true},
+		{"legacy", []string{legacy}, []string{current}, false},
+		{"legacy beside current", []string{legacy, current}, []string{current}, false},
+		{"one of two wanted missing", []string{current}, []string{current, WrapWindowsProductionSilentHookCommand("entire hooks cursor session-start")}, false},
 	} {
-		owned, cur := ManagedHookListState(tc.entries, id, tc.want)
-		if owned != tc.owned || cur != tc.current {
-			t.Errorf("%s: ManagedHookListState = (owned %v, current %v), want (%v, %v)", tc.name, owned, cur, tc.owned, tc.current)
+		if got := ManagedHookListState(tc.entries, id, tc.want); got != tc.current {
+			t.Errorf("%s: ManagedHookListState = %v, want %v", tc.name, got, tc.current)
 		}
 	}
 }

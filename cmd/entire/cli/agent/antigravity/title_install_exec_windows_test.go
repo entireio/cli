@@ -19,6 +19,15 @@ import (
 // never run, and the stub must.
 func TestWindowsTitleTeeCommand_IgnoresFolderPrograms(t *testing.T) {
 	// No t.Parallel — uses t.Setenv.
+	// Unset, not empty: Windows checks only whether the variable exists, so an
+	// inherited value of any kind would stop cmd.exe searching the folder and
+	// the test would pass whether or not the installed line sets it. t.Setenv
+	// registers the restore.
+	const key = "NoDefaultCurrentDirectoryInExePath"
+	t.Setenv(key, "")
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatalf("unset %s: %v", key, err)
+	}
 	t.Setenv(configDirEnv, t.TempDir())
 	if err := InstallTitleTee(); err != nil {
 		t.Fatalf("InstallTitleTee: %v", err)

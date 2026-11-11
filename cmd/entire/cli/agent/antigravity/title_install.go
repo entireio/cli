@@ -246,21 +246,8 @@ func InstallTitleTee() error {
 // leave token counts missing from checkpoints. A missing or unparseable
 // settings file reports false.
 func TitleTeeInstalled() bool {
-	rawFile, err := readAgySettings()
-	if err != nil {
-		return false
-	}
-
-	raw, ok := rawFile["title"]
-	if !ok {
-		return false
-	}
-
-	var existing titleConfig
-	if err := json.Unmarshal(raw, &existing); err != nil {
-		return false
-	}
-	return strings.Contains(existing.Command, titleTeeMarker)
+	command, ok := titleSlotCommand()
+	return ok && strings.Contains(command, titleTeeMarker)
 }
 
 // TitleTeeOutdated reports whether agy's global title command is a tee that
@@ -269,20 +256,30 @@ func TitleTeeInstalled() bool {
 // agy was opened in for `entire`. It is used by `entire doctor`. A missing or
 // unparseable settings file, a foreign command and a current tee report false.
 func TitleTeeOutdated() bool {
-	rawFile, err := readAgySettings()
-	if err != nil {
-		return false
-	}
-	raw, ok := rawFile["title"]
+	command, ok := titleSlotCommand()
 	if !ok {
 		return false
 	}
+	_, outdated := upgradedTitleTeeCommand(command)
+	return outdated
+}
+
+// titleSlotCommand returns the command in agy's global title slot; ok is false
+// when the settings file is missing or unparseable or the slot is unset.
+func titleSlotCommand() (string, bool) {
+	rawFile, err := readAgySettings()
+	if err != nil {
+		return "", false
+	}
+	raw, ok := rawFile["title"]
+	if !ok {
+		return "", false
+	}
 	var existing titleConfig
 	if err := json.Unmarshal(raw, &existing); err != nil {
-		return false
+		return "", false
 	}
-	_, outdated := upgradedTitleTeeCommand(existing.Command)
-	return outdated
+	return existing.Command, true
 }
 
 // UninstallTitleTee removes or restores the title entry in agy's global settings.json:
