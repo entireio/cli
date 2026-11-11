@@ -149,6 +149,8 @@ func TestString_DoubleQuotedShellDefaultsPreserved(t *testing.T) {
 		"echo `date`; DB_PASSWORD=\"${PW:-'$FALLBACK'}\"",
 		`echo "$(echo "DB_PASSWORD=${PW:-'$FALLBACK'}" )"`,
 		`echo $((1<<2)) "DB_PASSWORD=${PW:-'$FALLBACK'}"`,
+		"(( n << 2 ))\nDB_PASSWORD=\"${PW:-'$FALLBACK'}\"",
+		`echo "$(case $1 in a) echo "DB_PASSWORD=${PW:-'$FALLBACK'}" ;; esac)"`,
 		// A here-document body's apostrophe opens no single quoted string.
 		"git commit -m \"$(cat <<'EOF'\nIt's done\nEOF\n)\" && DB_PASSWORD=\"${PW:-'$FALLBACK'}\" ./run",
 		`echo "API_KEY=${KEY:-'$FALLBACK'}"`,
@@ -238,6 +240,10 @@ func TestShellQuotes_DoubleQuotedAt(t *testing.T) {
 		`echo "$(( (1+2) * 3 )) `:         true,
 		`echo $((1<<2)) "`:                true,
 		`echo "$(case x in (a) ;; esac) `: true,
+		`echo "$(case x in a) echo "`:     true,
+		`echo "$(case x in a) case y in b) ;; esac ;; esac) "`: false,
+		"(( x << 2 ))\nx=\"": true,
+		`echo "$(esac) `:     true,
 		// Here-document bodies are text, not shell quoting.
 		"cat <<EOF\nsay \"hi\nEOF\n":                                 false,
 		"cat <<'EOF'\nit's\nEOF\nx=\"":                               true,
