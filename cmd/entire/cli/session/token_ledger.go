@@ -173,14 +173,15 @@ func covers(a, b *agent.TokenUsage) bool {
 	if b == nil {
 		return true
 	}
-	if a == nil {
-		a = &agent.TokenUsage{}
+	have := a
+	if have == nil {
+		have = &agent.TokenUsage{}
 	}
-	return a.InputTokens >= b.InputTokens &&
-		a.CacheCreationTokens >= b.CacheCreationTokens &&
-		a.CacheReadTokens >= b.CacheReadTokens &&
-		a.OutputTokens >= b.OutputTokens &&
-		a.APICallCount >= b.APICallCount
+	return have.InputTokens >= b.InputTokens &&
+		have.CacheCreationTokens >= b.CacheCreationTokens &&
+		have.CacheReadTokens >= b.CacheReadTokens &&
+		have.OutputTokens >= b.OutputTokens &&
+		have.APICallCount >= b.APICallCount
 }
 
 // markedSince reports whether a checkpoint was marked on l after o, an
