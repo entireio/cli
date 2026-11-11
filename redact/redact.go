@@ -2535,7 +2535,7 @@ func shouldSkipJSONLField(key string) bool {
 	return false
 }
 
-// shouldSkipJSONLObject returns true if the object has "type":"image" or "type":"image_url".
+// shouldSkipJSONLObject returns true if the object's "type" starts with "image" or equals "base64".
 func shouldSkipJSONLObject(obj map[string]any) bool {
 	t, ok := obj["type"].(string)
 	return ok && (strings.HasPrefix(t, "image") || t == "base64")
