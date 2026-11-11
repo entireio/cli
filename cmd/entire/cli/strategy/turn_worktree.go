@@ -196,7 +196,11 @@ func liveUnregisteredCheckout(hookRoot, recorded string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("resolve hook worktree: %w", err)
 	}
-	return !sameDirIdentity(checkout.GitDir, checkout.CommonDir) && sameDirIdentity(checkout.CommonDir, hook.CommonDir), nil
+	isMain, err := sameDirIdentity(checkout.GitDir, checkout.CommonDir)
+	if err != nil || isMain {
+		return false, err
+	}
+	return sameDirIdentity(checkout.CommonDir, hook.CommonDir)
 }
 
 // metadataReadFailed reports whether err, from resolving a worktree's Git
@@ -210,11 +214,18 @@ func metadataReadFailed(err error) bool {
 }
 
 // sameDirIdentity reports whether a and b are the same directory on disk,
-// which also holds for two bind mounts of it, as gitrepo compares them.
-func sameDirIdentity(a, b string) bool {
-	aInfo, aErr := os.Stat(a)
-	bInfo, bErr := os.Stat(b)
-	return aErr == nil && bErr == nil && os.SameFile(aInfo, bInfo)
+// which also holds for two bind mounts of it, as gitrepo compares them. err is
+// set when either can't be inspected, which leaves the answer unknown.
+func sameDirIdentity(a, b string) (bool, error) {
+	aInfo, err := os.Stat(a)
+	if err != nil {
+		return false, fmt.Errorf("inspect %s: %w", a, err)
+	}
+	bInfo, err := os.Stat(b)
+	if err != nil {
+		return false, fmt.Errorf("inspect %s: %w", b, err)
+	}
+	return os.SameFile(aInfo, bInfo), nil
 }
 
 // sameDir reports whether a and b name the same directory once symlinks are
