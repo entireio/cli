@@ -290,50 +290,29 @@ func TestGitRefsStore_ListDedupesForkedShardSpellings(t *testing.T) {
 	assert.Len(t, summary.Sessions, 2)
 }
 
-// TestGitRefsStore_FetchesFoldedRefFromRemote covers the cross-machine half:
-// the checkpoint was written on a machine whose shard bucket was folded, so it
-// reached the remote under the folded spelling (batchPushRefs pushes
-// <ref>:<ref>). A clone with NEITHER spelling locally must ask the remote for
-// both before concluding the checkpoint does not exist.
-func TestGitRefsStore_FetchesFoldedRefFromRemote(t *testing.T) {
+// A checkpoint missing locally is asked of the remote once, by its canonical
+// name: that is the only name a push sends, so a second ask for the folded
+// spelling would add a round-trip to every genuine miss.
+func TestGitRefsStore_AsksTheRemoteForTheCanonicalNameOnly(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store := newRefsStore(t)
 	canonical := mustRefName(t, foldableULID)
-	foldedName, ok := FoldedRefName(foldableULID)
-	require.True(t, ok)
 
-	refsWrite(t, store, foldableULID, "sess-1", "transcript")
-	ref, err := store.repo.Reference(canonical, true)
-	require.NoError(t, err)
-	commitHash := ref.Hash()
-
-	// Drop every local spelling: this clone has only what it can fetch.
-	require.NoError(t, store.repo.Storer.RemoveReference(canonical))
-	_, err = store.repo.Reference(canonical, true)
-	require.ErrorIs(t, err, plumbing.ErrReferenceNotFound, "precondition: nothing resolves locally")
-
-	// A remote that holds the folded spelling and nothing else.
 	var asked []string
 	store.SetRefFetcher(func(_ context.Context, rn plumbing.ReferenceName) error {
 		asked = append(asked, rn.String())
-		if rn != foldedName {
-			return plumbing.ErrReferenceNotFound
-		}
-		return store.repo.Storer.SetReference(plumbing.NewHashReference(rn, commitHash))
+		return plumbing.ErrReferenceNotFound
 	})
 
 	summary, err := store.Read(ctx, foldableULID)
 	require.NoError(t, err)
-	require.NotNil(t, summary, "a checkpoint published under the folded spelling must still read")
-	assert.Equal(t, foldableULID, summary.CheckpointID)
-	assert.Equal(t, []string{canonical.String(), foldedName.String()}, asked,
-		"canonical first, folded only after the remote reports the canonical one absent")
+	assert.Nil(t, summary, "a checkpoint the remote lacks reads as absent")
+	assert.Equal(t, []string{canonical.String()}, asked)
 }
 
-// A transport failure must still return immediately rather than spending a
-// second round-trip on the other spelling: the memo exists so one outage is
-// paid once, and "the remote is unreachable" is not per-spelling news.
+// A transport failure ends the lookup after one ask: the memo exists so one
+// outage is paid once.
 func TestGitRefsStore_FetchFailureDoesNotRetryFoldedSpelling(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -350,7 +329,7 @@ func TestGitRefsStore_FetchFailureDoesNotRetryFoldedSpelling(t *testing.T) {
 	_, err := store.Read(ctx, foldableULID)
 	require.Error(t, err)
 	require.NotErrorIs(t, err, ErrCheckpointNotFound, "an outage must not be reported as absence")
-	assert.Equal(t, 1, asked, "a transport failure ends the lookup; it does not try the other spelling")
+	assert.Equal(t, 1, asked, "a transport failure ends the lookup")
 }
 
 // TestGitRefsStore_RemoteDiscoverySkipsForkedLocalCheckpoint pins the
@@ -397,8 +376,9 @@ func TestGitRefsStore_RemoteDiscoverySkipsForkedLocalCheckpoint(t *testing.T) {
 // that may exist only on the remote, so base() is refBaseForBackfill, which
 // fetches. writeRefName runs BEFORE that fetch, sees nothing locally, and picks
 // the canonical name — but the fetch then materializes the ref under the folded
-// spelling the remote uses, and base() hands back its tip. The CAS would target
-// a name the fetch did not populate, expecting a hash it can never match.
+// spelling the shard directory has on disk, and base() hands back its tip. The
+// CAS would target a name the fetch did not populate, expecting a hash it can
+// never match.
 func TestGitRefsStore_BackfillFetchedFoldedRefDoesNotFork(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -416,16 +396,17 @@ func TestGitRefsStore_BackfillFetchedFoldedRefDoesNotFork(t *testing.T) {
 	require.NoError(t, store.repo.Storer.RemoveReference(canonical))
 	require.NoError(t, os.RemoveAll(filepath.Join(repoDirOf(t, store), ".git", "refs", "entire", "checkpoints", foldableULID.ShardFor())))
 
-	// The remote publishes only the folded spelling. The fetch packs what it
-	// wrote, which is what makes this assert the same thing on both kinds of
-	// filesystem: on a case-SENSITIVE one the canonical name simply does not
-	// exist after this, while on a case-insensitive one a loose folded ref
-	// would still answer to the canonical name and hide the bug.
+	// The remote holds the canonical name, and the fetched ref lands under the
+	// folded spelling, as it does when that shard directory already exists on
+	// a case-insensitive filesystem. The fetch packs what it wrote, which is
+	// what makes this assert the same thing on both kinds of filesystem: a
+	// loose folded ref would still answer to the canonical name on a
+	// case-insensitive one and hide the bug.
 	store.SetRefFetcher(func(_ context.Context, rn plumbing.ReferenceName) error {
-		if rn != foldedName {
+		if rn != canonical {
 			return plumbing.ErrReferenceNotFound
 		}
-		if err := store.repo.Storer.SetReference(plumbing.NewHashReference(rn, commitHash)); err != nil {
+		if err := store.repo.Storer.SetReference(plumbing.NewHashReference(foldedName, commitHash)); err != nil {
 			return err
 		}
 		testutil.RunGit(t, repoDirOf(t, store), "pack-refs", "--all")

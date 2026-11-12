@@ -339,12 +339,7 @@ func TestGitRefsStore_FetchFailureMemoized(t *testing.T) {
 			})
 			require.ErrorIs(t, err, ErrCheckpointNotFound)
 		}
-		// Two asks per checkpoint — canonical, then the case-folded spelling
-		// the remote may hold instead (see resolveRefMaybeFetch) — so four for
-		// two checkpoints. The number still rules out what this subtest is
-		// about: a memoized absence would stop the second checkpoint fetching
-		// at all, leaving two.
-		assert.Equal(t, 4, calls, "absence is per-ref and must not suppress later fetches")
+		assert.Equal(t, 2, calls, "absence is per-ref and must not suppress later fetches")
 	})
 }
 
