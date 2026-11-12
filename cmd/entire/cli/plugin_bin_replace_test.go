@@ -561,3 +561,57 @@ func TestInstallPluginFromRepo_TreeLockWaitAnnouncedAndCancellable(t *testing.T)
 		t.Errorf("want the Installing step before the wait notice; progress = %q", out)
 	}
 }
+
+// If the previous manifest cannot be put back, restore leaves the new binary
+// too: the manifest still records the new tag, and pairing it with the old
+// binary would have `plugin upgrade` call that stale binary up to date.
+func TestPkgInstallBackup_ManifestRestoreFailureKeepsNewBinary(t *testing.T) { //nolint:paralleltest // mutates env
+	withPluginDir(t)
+	if _, err := EnsurePluginPkgDir("foo"); err != nil {
+		t.Fatal(err)
+	}
+	root, err := pluginRoot(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkgName, err := pluginPkgName("foo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binBase := pluginBinaryName("foo")
+	binName := pkgName + "/" + binBase
+	manifestName := pkgName + "/" + pluginManifestFileName
+	if err := writeExecutable(root, binName, strings.NewReader("previous")); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.WriteFile(manifestName, []byte("tag: v0.1.0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	b, err := stashPreviousPkgInstall(root, pkgName, binBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The failed install's state: new binary, and a manifest path the
+	// restore cannot write over (a non-empty directory).
+	if err := writeExecutable(root, binName, strings.NewReader("new")); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.Remove(manifestName); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.Mkdir(manifestName, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.WriteFile(manifestName+"/blocker", nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := b.restore(); err == nil {
+		t.Fatal("restore = nil, want the manifest restore error")
+	}
+	data, err := root.ReadFile(binName)
+	if err != nil || string(data) != "new" {
+		t.Errorf("pkg binary after a failed manifest restore = %q (%v), want new, matching the manifest's tag", data, err)
+	}
+}
