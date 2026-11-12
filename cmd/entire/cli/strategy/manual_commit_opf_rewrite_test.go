@@ -1144,3 +1144,22 @@ func TestPrePushCheckpointRefs_PackedFoldedShardRefIsOPFRewrittenBeforePush(t *t
 	require.NotContains(t, treeContents(t, remote, sent[0]), "PERSONABC")
 	require.Empty(t, queuedRefs(t, repo), "the pushed entry leaves the queue")
 }
+
+// A checkpoint queued under both spellings of its shard is one stored ref, so
+// it is rewritten once. Write, pack, write again queues both: the second write
+// goes through the folded name the pack left behind.
+func TestRewriteQueuedCheckpointRefsWithOPF_RewritesOnceWhenBothShardSpellingsAreQueued(t *testing.T) {
+	configureFakeOPF(t, &fakeOPFForRewrite{})
+	_, repo, refs := setupGitRefsOPFRepo(t, foldableCheckpointID)
+	repo, folded := storeUnderFoldedShardAndPack(t, repo, id.MustCheckpointID(foldableCheckpointID))
+	addGitRefsSession(t, repo, foldableCheckpointID, "sess-second")
+	require.ElementsMatch(t, append(refs, folded), queuedRefs(t, repo), "the queue holds both spellings")
+
+	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
+
+	after := refHashes(t, repo, []plumbing.ReferenceName{folded})[0]
+	commit, err := repo.CommitObject(after)
+	require.NoError(t, err)
+	require.True(t, trailers.HasOPFApplied(commit.Message))
+	require.NotContains(t, treeContents(t, repo, after), "PERSONABC")
+}

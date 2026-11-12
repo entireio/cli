@@ -65,7 +65,8 @@ func checkCheckpointRefShardCase(cmd *cobra.Command) {
 	}
 
 	// A split checkpoint has one ref per spelling. earlier lists the refs a
-	// later version replaced; diverged lists the pairs where neither did.
+	// later version replaced, each with the commit it holds; diverged lists the
+	// pairs where neither did.
 	var misfiled, split, earlier, diverged []string
 	for cid, found := range spellings {
 		canonical, err := checkpoint.RefName(cid)
@@ -86,9 +87,9 @@ func checkCheckpointRefShardCase(cmd *cobra.Command) {
 		split = append(split, pair)
 		switch {
 		case checkpoint.SupersededBy(repo, kept.Hash(), other.Hash()):
-			earlier = append(earlier, kept.Name().String())
+			earlier = append(earlier, kept.Name().String()+" "+kept.Hash().String())
 		case kept.Hash().Equal(other.Hash()), checkpoint.SupersededBy(repo, other.Hash(), kept.Hash()):
-			earlier = append(earlier, other.Name().String())
+			earlier = append(earlier, other.Name().String()+" "+other.Hash().String())
 		default:
 			diverged = append(diverged, pair)
 		}
@@ -118,12 +119,16 @@ func checkCheckpointRefShardCase(cmd *cobra.Command) {
 		printCappedList(w, split, func(name string) string { return name })
 	}
 	if len(earlier) > 0 {
-		fmt.Fprintln(w, "  Entire reads the later version. These refs hold an earlier one, are not")
-		fmt.Fprintln(w, "  read, and can be removed:")
-		printCappedList(w, earlier, func(name string) string { return "git update-ref -d " + name })
-		fmt.Fprintln(w, "  Run 'git pack-refs --all' first: while the refs are loose, a")
-		fmt.Fprintln(w, "  case-insensitive filesystem resolves both names to one file and the")
-		fmt.Fprintln(w, "  delete takes the wrong one.")
+		// The delete names the commit it expects. While the refs are loose a
+		// case-insensitive filesystem resolves both names to one file, the
+		// later version's, and git then refuses the delete.
+		fmt.Fprintln(w, "  Entire reads the later version. These refs hold an earlier one and are")
+		fmt.Fprintln(w, "  not read. To remove them, pack the refs, then delete each one by the")
+		fmt.Fprintln(w, "  commit it holds:")
+		fmt.Fprintln(w, "  git pack-refs --all")
+		printCappedList(w, earlier, func(ref string) string { return "git update-ref -d " + ref })
+		fmt.Fprintln(w, "  If git answers that a ref \"is at\" another commit, nothing was deleted:")
+		fmt.Fprintln(w, "  pack the refs and run the delete again.")
 	}
 	if len(diverged) > 0 {
 		fmt.Fprintln(w, "  These have histories that diverged, so each holds sessions the other")

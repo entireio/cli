@@ -1,9 +1,12 @@
 package cli
 
 import (
+	"os/exec"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -86,10 +89,42 @@ func TestCheckCheckpointRefShardCase_NamesTheEarlierRefOfASplit(t *testing.T) {
 			checkCheckpointRefShardCase(cmd)
 
 			output := stdout.String()
-			assert.Contains(t, output, "git update-ref -d "+tc.earlier)
+			assert.Contains(t, output, "git update-ref -d "+tc.earlier+" "+head,
+				"the delete must name the commit it expects to remove")
 			assert.NotContains(t, output, "update-ref -d "+tc.later)
+			assert.Less(t, strings.Index(output, "git pack-refs --all"), strings.Index(output, "git update-ref -d"),
+				"the pack step comes before the delete it makes safe")
 		})
 	}
+}
+
+// The delete is run exactly as printed, before any pack. While the later version
+// is a loose ref, a case-insensitive filesystem resolves the earlier ref's name
+// to that same file, so an unguarded delete removes the later version too.
+func TestCheckCheckpointRefShardCase_PrintedDeleteKeepsTheLaterVersion(t *testing.T) {
+	dir, head := shardCaseRepo(t)
+	testutil.GitUpdateRef(t, dir, shardCaseFoldedRef, head)
+	testutil.RunGit(t, dir, "pack-refs", "--all")
+	testutil.RunGit(t, dir, "commit", "--allow-empty", "-m", "later version")
+	later := testutil.RunGit(t, dir, "rev-parse", "HEAD")[:40]
+	testutil.GitUpdateRef(t, dir, shardCaseULIDRef, later)
+
+	cmd, stdout := newTestCmd(t)
+	checkCheckpointRefShardCase(cmd)
+
+	var printed []string
+	for line := range strings.SplitSeq(stdout.String(), "\n") {
+		if fields := strings.Fields(line); len(fields) > 2 && fields[1] == "update-ref" {
+			printed = fields[1:]
+		}
+	}
+	require.NotEmpty(t, printed, "the report must offer a delete for the earlier ref")
+	del := exec.CommandContext(t.Context(), "git", printed...)
+	del.Dir = dir
+	_ = del.Run() //nolint:errcheck // git refuses it while the refs are loose on a case-insensitive filesystem
+
+	assert.Equal(t, later, testutil.RunGit(t, dir, "rev-parse", shardCaseULIDRef)[:40],
+		"the later version must survive the printed delete")
 }
 
 // Refs whose histories diverged each hold sessions the other lacks, so the

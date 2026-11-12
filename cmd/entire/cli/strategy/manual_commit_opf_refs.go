@@ -82,6 +82,16 @@ func RewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repositor
 	// Stale entries (refs no longer present locally) are skipped, not pruned:
 	// the queue belongs to the flush.
 	existing, _, listed := partitionLocalRefs(ctx, repo, queued)
+	// A checkpoint queued under both spellings of its shard at one commit is
+	// rewritten once: while the ref is loose, a case-insensitive filesystem
+	// resolves both names to it, and the second compare-and-swap would miss
+	// the tip the first one moved. The stored name cannot tell the two entries
+	// apart there, so the checkpoint and its commit do.
+	type rewrite struct {
+		checkpoint plumbing.ReferenceName
+		tip        string
+	}
+	collected := make(map[rewrite]struct{}, len(existing))
 	for _, refName := range existing {
 		// stored, not the queued name: the compare-and-swap below reads its
 		// expected value under the name it updates.
@@ -92,6 +102,11 @@ func RewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repositor
 			}
 			return fmt.Errorf("resolve checkpoint ref %s: %w", refName, refErr)
 		}
+		key := rewrite{checkpoint: canonicalCheckpointRefKey(refName), tip: tip.String()}
+		if _, dup := collected[key]; dup {
+			continue
+		}
+		collected[key] = struct{}{}
 		chain, base, walkErr := unappliedAncestry(repo, tip)
 		if walkErr != nil {
 			return fmt.Errorf("walk ancestry of %s: %w", refName, walkErr)
