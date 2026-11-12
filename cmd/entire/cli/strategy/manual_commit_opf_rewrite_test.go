@@ -870,8 +870,10 @@ func addGitRefsSession(t *testing.T, repo *git.Repository, cpID, sessionID strin
 		AuthorName:   "Test",
 		AuthorEmail:  "test@test.com",
 	}))
-	_, refErr := repo.Reference(mustRefName(t, cid), true)
-	require.NoError(t, refErr, "git-refs write should have created the checkpoint ref")
+	// Either spelling: a write extends a ref already stored under the folded one.
+	exists, refErr := checkpoint.LocalRefExists(repo, cid)
+	require.NoError(t, refErr)
+	require.True(t, exists, "git-refs write should have created the checkpoint ref")
 }
 
 // walkRefAncestry returns every commit on a checkpoint ref, tip-first.
