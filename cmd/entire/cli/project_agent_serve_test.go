@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -268,6 +269,9 @@ func TestProjectAgentRetryClassification(t *testing.T) {
 		{wrap(&net.OpError{Op: "dial", Err: syscall.ECONNREFUSED}), true},
 		{&api.HTTPError{StatusCode: http.StatusServiceUnavailable}, true},
 		{&api.HTTPError{StatusCode: http.StatusForbidden}, false},
+		{wrap(fmt.Errorf("resolve bearer: %w", &auth.SecretExchangeError{StatusCode: http.StatusUnauthorized})), false},
+		{wrap(fmt.Errorf("resolve bearer: %w", &auth.SecretExchangeError{StatusCode: http.StatusServiceUnavailable})), true},
+		{wrap(fmt.Errorf("resolve bearer: %w", &auth.SecretExchangeError{StatusCode: http.StatusTooManyRequests})), true},
 	} {
 		require.Equal(t, tc.retry, retryProjectAgent(tc.err), tc.err.Error())
 	}
