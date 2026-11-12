@@ -53,6 +53,25 @@ func (f *fakeMirrorGetter) GetMirror(_ context.Context, _ coreapi.GetMirrorParam
 	return m, nil
 }
 
+// scriptedMirrorGetter scripts GetMirror per call index (0-based) when a
+// status sequence is not enough: calls that block until the deadline, or a
+// mirror with no status yet. awaitMirrorReady polls sequentially, so the
+// counter needs no lock.
+type scriptedMirrorGetter struct {
+	fn    func(ctx context.Context, call int) (*coreapi.Mirror, error)
+	calls int
+}
+
+func mirrorGetterFunc(fn func(ctx context.Context, call int) (*coreapi.Mirror, error)) *scriptedMirrorGetter {
+	return &scriptedMirrorGetter{fn: fn}
+}
+
+func (g *scriptedMirrorGetter) GetMirror(ctx context.Context, _ coreapi.GetMirrorParams) (*coreapi.Mirror, error) {
+	n := g.calls
+	g.calls++
+	return g.fn(ctx, n)
+}
+
 // TestAwaitMirrorReady covers the clone-status poll that replaced the info/refs
 // probe: terminal statuses resolve, processing keeps polling, and an exhausted
 // deadline reports a timeout.
@@ -95,10 +114,100 @@ func TestAwaitMirrorReady(t *testing.T) {
 		require.Equal(t, coreapi.MirrorStatusSuspended, status)
 	})
 
-	t.Run("never-ready times out", func(t *testing.T) {
+	// The server keeps cloning after the CLI stops waiting, so a deadline whose
+	// last answer was "processing" is a clone still running, not a failure.
+	t.Run("deadline while processing reports the clone still running", func(t *testing.T) {
 		f := &fakeMirrorGetter{statuses: []coreapi.MirrorStatus{coreapi.MirrorStatusProcessing}}
-		_, err := awaitMirrorReady(ctx, f, "m", 20*time.Millisecond)
+		status, err := awaitMirrorReady(ctx, f, "m", pollPhaseTimeout)
+		require.ErrorIs(t, err, errMirrorStillCloning)
+		require.NotErrorIs(t, err, context.DeadlineExceeded, "callers treat a bare deadline as a failure")
+		require.Equal(t, coreapi.MirrorStatusProcessing, status)
+	})
+
+	// The deadline usually lands while a GetMirror call is in flight; that
+	// call's own error must not hide the "processing" seen just before it.
+	t.Run("deadline during an in-flight poll after processing reports the clone still running", func(t *testing.T) {
+		f := mirrorGetterFunc(func(ctx context.Context, n int) (*coreapi.Mirror, error) {
+			if n == 0 {
+				return &coreapi.Mirror{Status: coreapi.NewOptMirrorStatus(coreapi.MirrorStatusProcessing)}, nil
+			}
+			<-ctx.Done()
+			return nil, ctx.Err()
+		})
+		status, err := awaitMirrorReady(ctx, f, "m", pollPhaseTimeout)
+		require.ErrorIs(t, err, errMirrorStillCloning)
+		require.Equal(t, coreapi.MirrorStatusProcessing, status)
+	})
+
+	t.Run("deadline before any status was observed is a timeout", func(t *testing.T) {
+		f := mirrorGetterFunc(func(context.Context, int) (*coreapi.Mirror, error) {
+			return &coreapi.Mirror{}, nil // no status field yet
+		})
+		status, err := awaitMirrorReady(ctx, f, "m", pollPhaseTimeout)
 		require.ErrorIs(t, err, context.DeadlineExceeded)
+		require.NotErrorIs(t, err, errMirrorStillCloning)
+		require.Empty(t, status)
+	})
+
+	// A poll that failed after the last "processing" means the CLI no longer
+	// knows the clone's state, so it must not vouch that it is still running.
+	t.Run("deadline after a failed poll is a timeout even if processing was seen", func(t *testing.T) {
+		f := mirrorGetterFunc(func(ctx context.Context, n int) (*coreapi.Mirror, error) {
+			switch n {
+			case 0:
+				return &coreapi.Mirror{Status: coreapi.NewOptMirrorStatus(coreapi.MirrorStatusProcessing)}, nil
+			case 1:
+				return nil, errors.New("transient: connection reset")
+			}
+			<-ctx.Done()
+			return nil, ctx.Err()
+		})
+		_, err := awaitMirrorReady(ctx, f, "m", pollPhaseTimeout)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		require.NotErrorIs(t, err, errMirrorStillCloning)
+	})
+
+	// "processing" is only as good as the answer that said it: a later answer
+	// without a status leaves the clone's state unknown.
+	t.Run("deadline after a status-less answer is a timeout even if processing was seen", func(t *testing.T) {
+		f := mirrorGetterFunc(func(_ context.Context, n int) (*coreapi.Mirror, error) {
+			if n == 0 {
+				return &coreapi.Mirror{Status: coreapi.NewOptMirrorStatus(coreapi.MirrorStatusProcessing)}, nil
+			}
+			return &coreapi.Mirror{}, nil
+		})
+		_, err := awaitMirrorReady(ctx, f, "m", pollPhaseTimeout)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		require.NotErrorIs(t, err, errMirrorStillCloning)
+	})
+
+	// A real error (the mirror deleted, a 5xx) that lands just as the deadline
+	// passes is still an error about the clone, not the deadline cutting a
+	// healthy poll short.
+	t.Run("a real poll error racing the deadline is a timeout", func(t *testing.T) {
+		f := mirrorGetterFunc(func(ctx context.Context, n int) (*coreapi.Mirror, error) {
+			if n == 0 {
+				return &coreapi.Mirror{Status: coreapi.NewOptMirrorStatus(coreapi.MirrorStatusProcessing)}, nil
+			}
+			<-ctx.Done()
+			return nil, errors.New("mirror not found")
+		})
+		_, err := awaitMirrorReady(ctx, f, "m", pollPhaseTimeout)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		require.NotErrorIs(t, err, errMirrorStillCloning)
+	})
+
+	t.Run("cancel while processing stays an interruption", func(t *testing.T) {
+		cctx, cancel := context.WithCancel(ctx)
+		f := mirrorGetterFunc(func(context.Context, int) (*coreapi.Mirror, error) {
+			cancel()
+			return &coreapi.Mirror{Status: coreapi.NewOptMirrorStatus(coreapi.MirrorStatusProcessing)}, nil
+		})
+		_, err := awaitMirrorReady(cctx, f, "m", time.Second)
+		require.ErrorIs(t, err, context.Canceled)
+		require.NotErrorIs(t, err, errMirrorStillCloning)
+		var silent *SilentError
+		require.ErrorAs(t, err, &silent)
 	})
 
 	t.Run("transient errors are tolerated, then ready", func(t *testing.T) {
@@ -236,6 +345,58 @@ func TestReportMirrorResults(t *testing.T) {
 		require.Contains(t, out.String(), mirrorStatusRegistered)
 		require.NotContains(t, out.String(), "git clone")
 		require.NotContains(t, out.String(), "entire repo remote add")
+	})
+
+	// A clone the wait gave up on is still running on the server: the row says
+	// so, the command does not fail, the URL is not offered yet (it does not
+	// work until the clone lands), and the reader is told how to check on it.
+	t.Run("a still-syncing row exits zero and names the command to check on it", func(t *testing.T) {
+		t.Parallel()
+		var out, errW bytes.Buffer
+		err := reportMirrorResults(&out, &errW, []mirrorResult{
+			{forge: mirrorCloneForge, owner: "octocat", repo: "hello-world", regionLabel: "eu-west-1", clusterHost: "eu-west-1.entire.io", status: mirrorStatusSyncing, cloneURL: mirrorURL},
+			{forge: mirrorCloneForge, owner: "octocat", repo: "hello-world", regionLabel: "aws-us-east-2", clusterHost: "aws-us-east-2.entire.io", status: mirrorStatusSyncing, cloneURL: "entire://aws-us-east-2.entire.io/gh/octocat/hello-world"},
+		})
+		require.NoError(t, err)
+		require.Contains(t, out.String(), mirrorStatusSyncing)
+		require.NotContains(t, out.String(), mirrorStatusTimedOut)
+		require.Contains(t, out.String(), "The initial clone is still running in the background")
+		require.Equal(t, 1, strings.Count(out.String(), "entire repo view /gh/octocat/hello-world\n"), "one check command per repo, not per cluster")
+		require.NotContains(t, out.String(), "git clone")
+		require.NotContains(t, out.String(), "entire repo remote add")
+		require.Empty(t, errW.String())
+	})
+
+	t.Run("several still-syncing repos each get a check command", func(t *testing.T) {
+		t.Parallel()
+		var out, errW bytes.Buffer
+		err := reportMirrorResults(&out, &errW, []mirrorResult{
+			{forge: mirrorCloneForge, owner: "octocat", repo: "hello-world", regionLabel: "eu-west-1", status: mirrorStatusSyncing, cloneURL: mirrorURL},
+			{forge: mirrorCloneForge, owner: "octocat", repo: "spoon-knife", regionLabel: "eu-west-1", status: mirrorStatusSyncing, cloneURL: "entire://eu-west-1.entire.io/gh/octocat/spoon-knife"},
+		})
+		require.NoError(t, err)
+		require.Contains(t, out.String(), "These initial clones are still running in the background")
+		require.Contains(t, out.String(), "entire repo view /gh/octocat/hello-world\n")
+		require.Contains(t, out.String(), "entire repo view /gh/octocat/spoon-knife\n")
+	})
+
+	// Still syncing is not a failure, but it must not mask one either: a
+	// failed row in the same run still fails the command, and only the failed
+	// row is named on stderr.
+	t.Run("a still-syncing row beside a failure still exits non-zero", func(t *testing.T) {
+		t.Parallel()
+		var out, errW bytes.Buffer
+		err := reportMirrorResults(&out, &errW, []mirrorResult{
+			{forge: mirrorCloneForge, owner: "octocat", repo: "hello-world", regionLabel: "eu-west-1", status: mirrorStatusSyncing, cloneURL: mirrorURL},
+			{forge: mirrorCloneForge, owner: "octocat", repo: "spoon-knife", regionLabel: "eu-west-1", status: mirrorStatusFailed, err: errors.New("the initial clone failed; contact support")},
+		})
+		var silent *SilentError
+		require.ErrorAs(t, err, &silent)
+		require.ErrorContains(t, err, "1 mirror(s) failed")
+		require.Contains(t, out.String(), "entire repo view /gh/octocat/hello-world\n")
+		require.NotContains(t, out.String(), "entire repo view /gh/octocat/spoon-knife")
+		require.Contains(t, errW.String(), "/gh/octocat/spoon-knife @ eu-west-1: the initial clone failed")
+		require.NotContains(t, errW.String(), "hello-world")
 	})
 
 	// One failure fails the command but must not hide the ones that worked:

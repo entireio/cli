@@ -289,10 +289,12 @@ func TestCreateAndAwaitMirror_AsyncTimeout(t *testing.T) {
 			}
 		})
 
-		_, err := addAndAwaitMirror(t.Context(), client, "owner", "repo", "cluster", mirrorAddOptions{
+		outcome, err := addAndAwaitMirror(t.Context(), client, "owner", "repo", "cluster", mirrorAddOptions{
 			timeout: pollPhaseTimeout,
 		})
-		require.ErrorContains(t, err, "timed out waiting for initial clone")
+		require.ErrorIs(t, err, errMirrorStillCloning, "a deadline while the clone is processing is not a timeout failure")
+		require.Equal(t, coreapi.MirrorStatusProcessing, outcome.status)
+		require.True(t, outcome.polled)
 	})
 
 	t.Run("operation timeout stops placement polling", func(t *testing.T) {
@@ -524,6 +526,108 @@ func TestCreateOneMirror_AsyncProgress(t *testing.T) {
 	require.Equal(t, mirrorStatusReady, result.status)
 	require.Equal(t, "entire://cluster/gh/owner/repo", result.cloneURL)
 	require.Equal(t, []string{"queued", "placing", "cloning", "ready"}, progress)
+}
+
+// TestCreateOneMirror_DeadlineWhileCloning pins the row a slow initial clone
+// gets when --timeout passes: "still syncing", not a failure, with the clone
+// URL kept and a successful final progress report, so the batch exits zero.
+// A deadline that passes before any clone status is seen stays "timed out", and
+// an interruption or persistent poll errors after "processing" stay errors.
+//
+// Not parallel: shortens the package-level mirrorPollInterval.
+func TestCreateOneMirror_DeadlineWhileCloning(t *testing.T) {
+	useFastMirrorPolling(t)
+
+	processing := func(t *testing.T, w http.ResponseWriter) {
+		t.Helper()
+		writeJSONResponse(t, w, http.StatusOK, &coreapi.Mirror{Status: coreapi.NewOptMirrorStatus(coreapi.MirrorStatusProcessing)})
+	}
+	// run serves one placement and hands the n-th (0-based) clone-status poll
+	// to poll, then returns the result and its final progress report.
+	run := func(t *testing.T, ctx context.Context, poll func(w http.ResponseWriter, r *http.Request, n int)) (mirrorResult, string, bool) {
+		t.Helper()
+		var polls atomic.Int32
+		client := newMirrorRequestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.URL.Path == mirrorRequestsAPIPath:
+				w.Header().Set("Location", mirrorRequestPath())
+				writeSuccessfulMirrorRequestWithStatus(t, w, http.StatusAccepted)
+			case strings.HasPrefix(r.URL.Path, "/api/v1/mirrors/"):
+				poll(w, r, int(polls.Add(1)-1))
+			default:
+				t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			}
+		})
+		var final string
+		var finalOK bool
+		target := mirrorTarget{forge: mirrorCloneForge, owner: "owner", repo: "repo", region: regionChoice{host: "cluster"}}
+		res := createOneMirror(ctx, target, client, nil, mirrorAddOptions{timeout: pollPhaseTimeout},
+			func(status string, isFinal, ok bool) {
+				if isFinal {
+					final, finalOK = status, ok
+				}
+			})
+		return res, final, finalOK
+	}
+
+	t.Run("processing at the deadline is still syncing", func(t *testing.T) {
+		res, final, finalOK := run(t, t.Context(), func(w http.ResponseWriter, _ *http.Request, _ int) { processing(t, w) })
+		require.Equal(t, mirrorStatusSyncing, res.status)
+		require.NoError(t, res.err, "a clone still running must not fail the batch")
+		require.Equal(t, "entire://cluster/gh/owner/repo", res.cloneURL)
+		require.Equal(t, mirrorStatusSyncing, final)
+		require.True(t, finalOK)
+	})
+
+	// The deadline usually cuts a real HTTP poll short; the client's error for
+	// that must still read as the deadline, not as a failed poll.
+	t.Run("a poll in flight at the deadline after processing is still syncing", func(t *testing.T) {
+		res, _, finalOK := run(t, t.Context(), func(w http.ResponseWriter, r *http.Request, n int) {
+			if n == 0 {
+				processing(t, w)
+				return
+			}
+			<-r.Context().Done()
+		})
+		require.Equal(t, mirrorStatusSyncing, res.status)
+		require.NoError(t, res.err)
+		require.True(t, finalOK)
+	})
+
+	t.Run("no status seen by the deadline is a timeout", func(t *testing.T) {
+		res, final, finalOK := run(t, t.Context(), func(w http.ResponseWriter, _ *http.Request, _ int) {
+			writeJSONResponse(t, w, http.StatusOK, &coreapi.Mirror{})
+		})
+		require.Equal(t, mirrorStatusTimedOut, res.status)
+		require.ErrorIs(t, res.err, context.DeadlineExceeded)
+		require.Equal(t, mirrorStatusTimedOut, final)
+		require.False(t, finalOK)
+	})
+
+	t.Run("cancel after processing stays an error", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		res, _, finalOK := run(t, ctx, func(w http.ResponseWriter, _ *http.Request, _ int) {
+			cancel()
+			processing(t, w)
+		})
+		require.Equal(t, mirrorStatusError, res.status)
+		require.ErrorIs(t, res.err, context.Canceled)
+		require.False(t, finalOK)
+	})
+
+	t.Run("persistent poll errors after processing stay an error", func(t *testing.T) {
+		res, _, finalOK := run(t, t.Context(), func(w http.ResponseWriter, _ *http.Request, n int) {
+			if n == 0 {
+				processing(t, w)
+				return
+			}
+			writeCoreProblem(t, w, http.StatusInternalServerError, "core unavailable")
+		})
+		require.Equal(t, mirrorStatusError, res.status)
+		require.ErrorContains(t, res.err, "core unavailable")
+		require.False(t, finalOK)
+	})
 }
 
 func TestCreateMirrors_AsyncKeepsConcurrencyAndFailuresIndependent(t *testing.T) {

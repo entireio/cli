@@ -38,8 +38,11 @@ const (
 	mirrorStatusRemoved    = "removed"    // the placement is gone
 	mirrorStatusSuspended  = "suspended"  // placement exists but the cluster won't serve it
 	mirrorStatusFailed     = "failed"     // initial clone reached the terminal failed status
-	mirrorStatusTimedOut   = "timed out"  // clone didn't finish within --timeout
-	mirrorStatusError      = "error"      // create or poll failed
+	mirrorStatusTimedOut   = "timed out"  // the wait ended before the operation finished
+	// mirrorStatusSyncing: the wait ended while the clone was still processing;
+	// the server carries on, so this is not a failure.
+	mirrorStatusSyncing = "still syncing"
+	mirrorStatusError   = "error" // create or poll failed
 )
 
 // regionChoice is one mirrorable region offered by the add wizard's region
@@ -317,7 +320,7 @@ type mirrorResult struct {
 	regionLabel string
 	clusterHost string // bare host, as `--cluster` takes it
 	cloneURL    string
-	status      string // ready | registered | empty | suspended | timed out | error
+	status      string // ready | registered | empty | suspended | still syncing | timed out | error
 	err         error
 }
 
@@ -647,12 +650,16 @@ func createOneMirror(ctx context.Context, t mirrorTarget, c *coreapi.Client, cli
 	switch outcome.status {
 	case coreapi.MirrorStatusReady:
 		res.status = mirrorStatusReady
+	case coreapi.MirrorStatusProcessing:
+		if errors.Is(err, errMirrorStillCloning) {
+			res.status = mirrorStatusSyncing
+			break
+		}
+		nonTerminal()
 	case coreapi.MirrorStatusSuspended:
 		res.status, res.err = mirrorStatusSuspended, errors.New("the mirror is suspended; contact support")
 	case coreapi.MirrorStatusFailed:
 		res.status, res.err = mirrorStatusFailed, errors.New("the initial clone failed; contact support")
-	case coreapi.MirrorStatusProcessing:
-		nonTerminal()
 	default:
 		nonTerminal()
 	}
@@ -778,9 +785,12 @@ func terminalIcon(ok bool) string {
 }
 
 // reportMirrorResults renders the results table, copy-pasteable git-clone and
-// `repo remote add` blocks for the ready mirrors, and per-failure detail. It
-// returns a SilentError (so the table isn't reprinted) when any mirror failed,
-// giving the command a non-zero exit while still showing what succeeded.
+// `repo remote add` blocks for the ready mirrors, a check-on-it command for
+// clones still running, and per-failure detail. It returns a SilentError (so
+// the table isn't reprinted) when any mirror failed, giving the command a
+// non-zero exit while still showing what succeeded. A clone still syncing is
+// not a failure, matching --no-wait's "registered": the placement exists and
+// the server finishes the clone on its own.
 func reportMirrorResults(outW, errW io.Writer, results []mirrorResult) error {
 	if len(results) == 0 {
 		return nil
@@ -833,6 +843,7 @@ func reportMirrorResults(outW, errW io.Writer, results []mirrorResult) error {
 			}
 		}
 	}
+	reportStillSyncing(outW, results)
 	if failures > 0 {
 		for _, r := range results {
 			if r.err != nil {
@@ -842,4 +853,30 @@ func reportMirrorResults(outW, errW io.Writer, results []mirrorResult) error {
 		return NewSilentError(fmt.Errorf("%d mirror(s) failed", failures))
 	}
 	return nil
+}
+
+// reportStillSyncing tells the reader which clones outlived the wait and how
+// to check on them: `repo view` shows each placement's status, so one line per
+// repo covers every cluster it is syncing to.
+func reportStillSyncing(outW io.Writer, results []mirrorResult) {
+	var refs []string
+	seen := make(map[string]bool)
+	for _, r := range results {
+		if r.status != mirrorStatusSyncing || seen[r.ref()] {
+			continue
+		}
+		seen[r.ref()] = true
+		refs = append(refs, r.ref())
+	}
+	if len(refs) == 0 {
+		return
+	}
+	header := "\nThe initial clone is still running in the background; the wait ended before it finished. Check on it with:"
+	if len(refs) > 1 {
+		header = "\nThese initial clones are still running in the background; the wait ended before they finished. Check on them with:"
+	}
+	fmt.Fprintln(outW, header)
+	for _, ref := range refs {
+		fmt.Fprintf(outW, "  entire repo view %s\n", strategy.ShellQuoteForDisplay(ref))
+	}
 }
