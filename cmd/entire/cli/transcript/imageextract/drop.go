@@ -66,7 +66,8 @@ func DropImages(transcript []byte) []byte {
 
 // dropImagesInJSON drops the images in content when it is exactly one JSON
 // value, keeping the whitespace around it. isJSON is false when it is not,
-// and content is returned as is when it holds no image.
+// and content is returned as is when it holds no image. If the value cannot
+// be written back, only that whitespace is returned.
 func dropImagesInJSON(content []byte) (out []byte, isJSON bool) {
 	trimmed := bytes.TrimSpace(content)
 	if len(trimmed) == 0 {
@@ -89,15 +90,18 @@ func dropImagesInJSON(content []byte) (out []byte, isJSON bool) {
 		return content, true
 	}
 
+	lead := content[:len(content)-len(bytes.TrimLeftFunc(content, unicode.IsSpace))]
+	trail := content[len(bytes.TrimRightFunc(content, unicode.IsSpace)):]
+	out = append(out, lead...)
+
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(dropped); err != nil {
-		return content, true
+		// Content known to hold an image is not stored as it was: its line is
+		// left blank, which JSONL readers skip.
+		return append(out, trail...), true
 	}
-	lead := content[:len(content)-len(bytes.TrimLeftFunc(content, unicode.IsSpace))]
-	trail := content[len(bytes.TrimRightFunc(content, unicode.IsSpace)):]
-	out = append(out, lead...)
 	out = append(out, bytes.TrimSuffix(buf.Bytes(), []byte("\n"))...)
 	return append(out, trail...), true
 }
