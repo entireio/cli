@@ -4,9 +4,15 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"os/signal"
+	"path/filepath"
 	"runtime"
+	"slices"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // dieFromSignalEnvVar, when set on a re-executed test binary, makes TestMain
@@ -15,6 +21,20 @@ import (
 // TestDieFromSignal_TerminatesBySignal exercises real process death without
 // killing the test runner itself.
 const dieFromSignalEnvVar = "ENTIRE_TEST_DIE_FROM_SIGNAL"
+
+// runMainEnvVar, when set on a re-executed test binary, makes TestMain run
+// main() with the variable's value as the command line (space-separated)
+// instead of the test suite.
+const runMainEnvVar = "ENTIRE_TEST_RUN_MAIN"
+
+// sigCountPlugin is the name under which the test binary, run as a plugin,
+// counts the SIGINTs it receives (runSigCountPlugin), writing the count to
+// the file named by sigCountEnvVar. Keyed on the name, not the variable,
+// because entire passes its ENTIRE_* environment on to the plugin.
+const (
+	sigCountPlugin = "entire-sigcount"
+	sigCountEnvVar = "ENTIRE_TEST_SIGCOUNT_FILE"
+)
 
 func TestMain(m *testing.M) {
 	// Child mode: exercise dieFromSignal for the named signal and let it
@@ -28,7 +48,42 @@ func TestMain(m *testing.M) {
 		dieFromSignal(sig)
 		os.Exit(exitCodeForSignal(sig))
 	}
+	// Before runMainEnvVar: a plugin inherits the ENTIRE_* environment.
+	if filepath.Base(os.Args[0]) == sigCountPlugin {
+		runSigCountPlugin(os.Getenv(sigCountEnvVar))
+	}
+	if line := os.Getenv(runMainEnvVar); line != "" {
+		os.Args = append([]string{"entire"}, strings.Fields(line)...)
+		main()
+		os.Exit(0)
+	}
 	os.Exit(m.Run())
+}
+
+// runSigCountPlugin is a plugin that marks path+".ready" once it is listening
+// for SIGINT, and after the first one counts every SIGINT that arrives within
+// the next 500ms, writes the count to path, and exits 0.
+func runSigCountPlugin(path string) {
+	sigs := make(chan os.Signal, 16)
+	signal.Notify(sigs, os.Interrupt)
+	if err := os.WriteFile(path+".ready", nil, 0o600); err != nil {
+		os.Exit(2)
+	}
+	<-sigs
+	n := 1
+	window := time.After(500 * time.Millisecond)
+	for counting := true; counting; {
+		select {
+		case <-sigs:
+			n++
+		case <-window:
+			counting = false
+		}
+	}
+	if err := os.WriteFile(path, []byte(strconv.Itoa(n)), 0o600); err != nil {
+		os.Exit(2)
+	}
+	os.Exit(0)
 }
 
 // nonNumericSignal is an os.Signal that isn't a syscall.Signal, exercising
@@ -108,6 +163,35 @@ func TestExitCodeForSignal(t *testing.T) {
 			t.Parallel()
 			if got := exitCodeForSignal(tc.sig); got != tc.want {
 				t.Errorf("exitCodeForSignal(%v) = %d, want %d", tc.sig, got, tc.want)
+			}
+		})
+	}
+}
+
+// A signal ignored at startup stays ignored: Notify would un-ignore it.
+func TestShutdownSignals_SkipsSignalsIgnoredAtStartup(t *testing.T) {
+	t.Parallel()
+	none := func(os.Signal) bool { return false }
+	ignoring := func(ignored ...os.Signal) func(os.Signal) bool {
+		return func(sig os.Signal) bool { return slices.Contains(ignored, sig) }
+	}
+	tests := []struct {
+		name    string
+		goos    string
+		ignored func(os.Signal) bool
+		want    []os.Signal
+	}{
+		{"unix", "linux", none, []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP}},
+		{"unix under nohup", "linux", ignoring(syscall.SIGHUP), []os.Signal{os.Interrupt, syscall.SIGTERM}},
+		{"unix background job", "darwin", ignoring(os.Interrupt), []os.Signal{syscall.SIGTERM, syscall.SIGHUP}},
+		{"windows", "windows", none, []os.Signal{os.Interrupt}},
+		{"windows, SIGINT ignored", "windows", ignoring(os.Interrupt), []os.Signal{}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := shutdownSignals(tc.goos, tc.ignored); !slices.Equal(got, tc.want) {
+				t.Errorf("shutdownSignals(%s) = %v, want %v", tc.goos, got, tc.want)
 			}
 		})
 	}
