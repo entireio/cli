@@ -338,11 +338,13 @@ func (a *AntigravityAgent) RepairHookTimeouts(ctx context.Context) (bool, error)
 }
 
 // CheckHookConfig implements agent.HookFreshness. It reports outdated when
-// RepairHookTimeouts has a Stop timeout to add, or when Entire's entry has no
+// RepairHookTimeouts has a Stop timeout to add, when Entire's entry has no
 // SessionStart hook (installs from before it was added), which leaves every
-// session idle until it is purged. `entire status` sends the user to `entire
-// doctor`, which repairs the timeout itself and for the missing hook tells the
+// session idle until it is purged, or when it holds a command of Entire's that
+// InstallHooks no longer writes on this host. `entire status` sends the user
+// to `entire doctor`, which repairs the timeout itself and otherwise tells the
 // user to run `entire agent add antigravity`; a user-disabled entry is current.
+// agy's global title command is checked separately (TitleTeeOutdated).
 func (a *AntigravityAgent) CheckHookConfig(ctx context.Context) agent.HookConfigState {
 	if installed, err := a.AreHooksInstalled(ctx); err != nil || !installed {
 		return agent.HooksAbsent
@@ -361,7 +363,36 @@ func (a *AntigravityAgent) CheckHookConfig(ctx context.Context) agent.HookConfig
 	if missingSessionStart(data) {
 		return agent.HooksOutdated
 	}
+	if hasStaleEntireCommand(cfg) {
+		return agent.HooksOutdated
+	}
 	return agent.HooksCurrent
+}
+
+// hasStaleEntireCommand reports whether Entire's enabled entry holds a command
+// of Entire's that InstallHooks no longer writes on this host, such as a
+// Windows command written before hooks resolved programs from PATH only. Only
+// Entire's commands are compared: the user's own handlers and timeouts inside
+// the entry are left to the checks above.
+func hasStaleEntireCommand(cfg *agent.HookConfigFile) bool {
+	existing, ok, err := readEntireEntry(cfg)
+	if err != nil || !ok {
+		return false
+	}
+	var existingCfg HookConfig
+	if err := json.Unmarshal(existing, &existingCfg); err != nil {
+		return false
+	}
+	if existingCfg.Enabled != nil && !*existingCfg.Enabled {
+		return false
+	}
+	want := hookCommands(buildEntireHookConfig())
+	for _, cmd := range hookCommands(existingCfg) {
+		if agent.IsManagedHookCommand(cmd) && !slices.Contains(want, cmd) {
+			return true
+		}
+	}
+	return false
 }
 
 // missingSessionStart reports whether Entire's enabled entry in hooks.json has

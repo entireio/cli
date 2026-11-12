@@ -886,7 +886,7 @@ func TestRepoProjectFlagRedundancyWarning(t *testing.T) {
 			"repo protection list":   newRepoProtectionListCmd,
 			"repo protection add":    newRepoProtectionAddCmd,
 			"repo protection remove": newRepoProtectionRemoveCmd,
-			"repo default-branch":    newDefaultBranchCmd,
+			"repo default-branch":    newRepoDefaultBranchCmd,
 		} {
 			cmd := newCmd()
 			require.NotNilf(t, cmd.Flags().Lookup("project"), "%s must bind --project", name)

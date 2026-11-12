@@ -691,8 +691,11 @@ type ResolveMirrorPlacementsParams struct {
 
 // ResolveProjectParams is parameters of resolveProject operation.
 type ResolveProjectParams struct {
-	Host    ResolveProjectHost
-	Project string
+	ForgePrefix ResolveProjectForgePrefix
+	Project     string
+	// Optional: live (default) checks GitHub namespace authority now. display may answer from a roster
+	// up to 70 minutes old; never use a display capability to authorize a write.
+	Capabilities OptResolveProjectCapabilities `json:",omitempty,omitzero"`
 }
 
 // RestorePluginInstallationRepositoryParams is parameters of restorePluginInstallationRepository operation.
