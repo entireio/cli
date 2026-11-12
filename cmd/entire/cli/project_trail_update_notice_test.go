@@ -36,7 +36,7 @@ func serveProjectTrailUpdate(t *testing.T, patched *bool) http.HandlerFunc {
 func serveWidgetChangeDetail(t *testing.T) http.HandlerFunc {
 	t.Helper()
 	return func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "/api/v1/trails/gh/acme/widget/7", r.URL.Path)
+		assert.Equal(t, "/api/v1/repos/repo-id/changes/7", r.URL.Path)
 		assert.NoError(t, json.NewEncoder(w).Encode(api.TrailResource{ID: projectTrailTestChange, Number: 7, Status: "open",
 			Parent: &api.TrailParentReference{ID: projectTrailTestID, Number: 42, ProjectID: projectTrailTestProject,
 				Host: "gh", Project: "acme", Path: projectTrailTestPath, Jurisdiction: "eu", PrimaryProcessingCell: "project-cell"}}))
@@ -83,9 +83,9 @@ func TestProjectTrailUpdateFollowingBranchNamesTheParent(t *testing.T) {
 	setupWorkingRepoClient(t, func(w http.ResponseWriter, r *http.Request) {
 		change := api.TrailResource{ID: projectTrailTestChange, Number: 7, Status: "open", Branch: "feature/work", Parent: parent}
 		switch r.URL.Path {
-		case "/api/v1/trails/gh/acme/widget":
+		case "/api/v1/repos/repo-id/changes":
 			assert.NoError(t, json.NewEncoder(w).Encode(api.TrailListResponse{Trails: []api.TrailResource{change}, Total: 1}))
-		case "/api/v1/trails/gh/acme/widget/7":
+		case "/api/v1/repos/repo-id/changes/7":
 			assert.NoError(t, json.NewEncoder(w).Encode(change))
 		default:
 			t.Errorf("unexpected repo request: %s %s", r.Method, r.URL.Path)

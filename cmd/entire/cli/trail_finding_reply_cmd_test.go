@@ -15,7 +15,7 @@ import (
 const (
 	findingReplyTestFinding    = "finding-one"
 	findingReplyTestDiscussion = "discussion-one"
-	findingReplyTestThreadPath = "/api/v1/trails/gh/acme/widget/7/discussions/" + findingReplyTestDiscussion
+	findingReplyTestThreadPath = "/api/v1/repos/repo-id/changes/7/discussions/" + findingReplyTestDiscussion
 )
 
 // setupFindingReplyTest serves change widget/7 of project trail 42 with one
@@ -47,13 +47,13 @@ func setupFindingReplyTestListing(t *testing.T, listed, full string, thread http
 	}
 	setupWorkingRepoClient(t, func(w http.ResponseWriter, r *http.Request) {
 		switch path := r.URL.Path; {
-		case r.Method == http.MethodGet && path == "/api/v1/trails/gh/acme/widget/7":
+		case r.Method == http.MethodGet && path == "/api/v1/repos/repo-id/changes/7":
 			assert.NoError(t, json.NewEncoder(w).Encode(api.TrailResource{ID: projectTrailTestChange, Number: 7, Status: "open",
 				Parent: &api.TrailParentReference{ID: projectTrailTestID, Number: 42, ProjectID: projectTrailTestProject,
 					Host: "gh", Project: "acme", Path: projectTrailTestPath, Jurisdiction: "eu", PrimaryProcessingCell: "project-cell"}}))
-		case r.Method == http.MethodGet && path == "/api/v1/trails/gh/acme/widget/7/reviews/comments":
+		case r.Method == http.MethodGet && path == "/api/v1/repos/repo-id/changes/7/reviews/comments":
 			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"comments": []any{finding(listed)}}))
-		case r.Method == http.MethodGet && path == "/api/v1/trails/gh/acme/widget/7/reviews/review-one":
+		case r.Method == http.MethodGet && path == "/api/v1/repos/repo-id/changes/7/reviews/review-one":
 			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"comments": []any{finding(full)}}))
 		case strings.HasPrefix(path, findingReplyTestThreadPath):
 			thread(w, r)

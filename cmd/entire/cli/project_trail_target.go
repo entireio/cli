@@ -401,9 +401,9 @@ func resolveBranchProjectTrail(cmd *cobra.Command, branch string) (_ *projectTra
 		return nil, renderDataAPIAuthError(ctx, cmd.ErrOrStderr(), owner+"/"+repo, err)
 	}
 	if trailRepoFlag(cmd) == "" {
-		defer func() { noteTrailCommandEnablement(ctx, client, err) }()
+		defer func() { noteTrailCommandEnablement(ctx, client, repoID, err) }()
 	}
-	base, err := trailRepoBasePath(forge, owner, repo, repoID)
+	base, err := trailRepoBasePath(repoID)
 	if err != nil {
 		return nil, err
 	}

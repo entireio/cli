@@ -46,9 +46,9 @@ func setupProjectTrailGatesTest(t *testing.T) (opens map[string]int, reads func(
 		seen = append(seen, r.URL.Path)
 		mu.Unlock()
 		switch r.URL.Path {
-		case "/api/v1/trails/gh/acme/widget/7", "/api/v1/trails/gh/acme/widget/8":
+		case "/api/v1/repos/repo-widget/changes/7", "/api/v1/repos/repo-widget/changes/8":
 			var n int
-			_, err := fmt.Sscanf(r.URL.Path, "/api/v1/trails/gh/acme/widget/%d", &n)
+			_, err := fmt.Sscanf(r.URL.Path, "/api/v1/repos/repo-widget/changes/%d", &n)
 			assert.NoError(t, err)
 			assert.NoError(t, json.NewEncoder(w).Encode(api.TrailResource{ID: "trail", Number: n, Mergeability: json.RawMessage(projectTrailGatesFixture)}))
 		default:
@@ -78,7 +78,7 @@ func TestProjectTrailShowJSONIncludesChangeGates(t *testing.T) {
 	out, errOut, err := executeProjectTrailTest(t, "show", "42", "--project", "gh/acme", "--json")
 	require.NoError(t, err)
 	assert.Equal(t, map[string]int{"widget": 1, "web": 1}, opens, "each repository opens once; a merged change's repository is not opened")
-	assert.NotContains(t, reads(), "/api/v1/trails/gh/acme/api/3")
+	assert.NotContains(t, reads(), "/api/v1/repos/repo-api/changes/3")
 	assert.Equal(t, "Warning: could not load merge gates for 1 change(s)\n", errOut)
 
 	var raw struct {
@@ -137,11 +137,11 @@ func TestProjectTrailShowCurrentMergedChangeGates(t *testing.T) {
 				Host: "gh", Project: "acme", Path: projectTrailTestPath, Jurisdiction: "eu", PrimaryProcessingCell: "project-cell"}
 			repoServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
-				case "/api/v1/trails/gh/acme/widget":
+				case "/api/v1/repos/repo-widget/changes":
 					assert.NoError(t, json.NewEncoder(w).Encode(api.TrailListResponse{Trails: []api.TrailResource{{
 						ID: projectTrailTestChange, Number: 7, Branch: "feature/a", Parent: parent,
 					}}}))
-				case "/api/v1/trails/gh/acme/widget/7":
+				case "/api/v1/repos/repo-widget/changes/7":
 					assert.NoError(t, json.NewEncoder(w).Encode(api.TrailResource{ID: projectTrailTestChange, Number: 7, Branch: "feature/a",
 						Parent: parent, Mergeability: json.RawMessage(projectTrailGatesFixture)}))
 				default:
@@ -228,7 +228,7 @@ func TestProjectTrailShowGatesCapKeepsCurrent(t *testing.T) {
 		assert.NoError(t, json.NewEncoder(w).Encode(item))
 	})
 	repoServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/trails/gh/acme/widget" {
+		if r.URL.Path == "/api/v1/repos/repo-widget/changes" {
 			assert.NoError(t, json.NewEncoder(w).Encode(api.TrailListResponse{Trails: []api.TrailResource{{
 				ID: projectTrailTestChange, Number: 7, Branch: "feature/a",
 				Parent: &api.TrailParentReference{ID: projectTrailTestID, Number: 42, ProjectID: projectTrailTestProject,
@@ -277,7 +277,7 @@ func TestProjectTrailShowServedNullGates(t *testing.T) {
 		assert.NoError(t, json.NewEncoder(w).Encode(item))
 	})
 	repoServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "/api/v1/trails/gh/acme/widget/7", r.URL.Path)
+		assert.Equal(t, "/api/v1/repos/repo-widget/changes/7", r.URL.Path)
 		assert.NoError(t, json.NewEncoder(w).Encode(api.TrailResource{ID: "trail", Number: 7, Mergeability: json.RawMessage("null")}))
 	}))
 	t.Cleanup(repoServer.Close)
