@@ -4,7 +4,9 @@ package integration
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,10 +38,23 @@ func writeLocalSettings(t *testing.T, env *TestEnv, content string) {
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
 }
 
-// testImage returns the base64 of a PNG-signed payload unique to tag.
+// testImage returns the base64 of a PNG-signed payload unique to tag. The
+// payload is random-looking, as compressed image data is, so redaction treats
+// it the way it treats a real image that was not dropped.
 func testImage(tag string) string {
-	return base64.StdEncoding.EncodeToString([]byte("\x89PNG\r\n\x1a\n" + strings.Repeat(tag+"-image-payload-", 6)))
+	raw := []byte("\x89PNG\r\n\x1a\n")
+	block := sha256.Sum256([]byte(tag))
+	for range 8 {
+		raw = append(raw, block[:]...)
+		block = sha256.Sum256(block[:])
+	}
+	return base64.StdEncoding.EncodeToString(raw)
 }
+
+// imageFragmentLen is the longest run of an image's base64 a stored file may
+// share with it. Redaction can cut an image it does not recognize into
+// pieces, so the whole value being absent does not show the image is gone.
+const imageFragmentLen = 24
 
 func claudeTranscriptWithImage(b64 string) string {
 	return strings.Join([]string{
@@ -52,7 +67,8 @@ func claudeTranscriptWithImage(b64 string) string {
 }
 
 // requireNoImageStored reads every file at the tip of the checkpoint branch
-// and fails if any holds the image or sits in an assets folder.
+// and fails if any holds the image, or a piece of it, or sits in an assets
+// folder.
 func requireNoImageStored(t *testing.T, env *TestEnv, b64 string) {
 	t.Helper()
 	require.True(t, env.BranchExists(paths.MetadataBranchName), "no checkpoint branch: nothing was stored")
@@ -62,7 +78,9 @@ func requireNoImageStored(t *testing.T, env *TestEnv, b64 string) {
 		require.NotContains(t, file, "/"+paths.AssetsDir, "an asset was stored while drop_images is on")
 		content, ok := env.ReadFileFromBranch(paths.MetadataBranchName, file)
 		require.True(t, ok, "cannot read %s", file)
-		require.NotContains(t, content, b64, "%s holds the image", file)
+		for i := 0; i+imageFragmentLen <= len(b64); i += imageFragmentLen {
+			require.NotContains(t, content, b64[i:i+imageFragmentLen], "%s holds part of the image", file)
+		}
 		require.NotContains(t, content, "entire-asset:", "%s holds an asset placeholder", file)
 	}
 }
@@ -160,6 +178,62 @@ func TestDropImages_CodexCommitAndTurnEnd(t *testing.T) {
 	full, ok := env.ReadFileFromBranch(paths.MetadataBranchName, SessionFilePath(cpID, paths.TranscriptFileName))
 	require.True(t, ok)
 	require.Contains(t, full, "data:image/png;base64,"+onePixelPNGPrefix, "the data URI should hold the 1x1 placeholder")
+}
+
+// OpenCode stores one JSON document, not JSONL: pretty-printed by OpenCode 1,
+// where an attached image is a data URI, and converted from OpenCode 2, where
+// it is bare base64 in a file part.
+func TestDropImages_OpenCodeCommitAndTurnEnd(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+	env.InitEntireWithAgent(agent.AgentNameOpenCode)
+	writeLocalSettings(t, env, dropImagesSettings)
+	dataURIImage := testImage("opencode-1-drop")
+	filePartImage := testImage("opencode-2-drop")
+
+	session := env.NewOpenCodeSession()
+	require.NoError(t, env.SimulateOpenCodeSessionStart(session.ID, session.TranscriptPath))
+	require.NoError(t, env.SimulateOpenCodeTurnStart(session.ID, session.TranscriptPath, "add a script and look at this"))
+	env.WriteFile("script.sh", "#!/bin/bash\necho hello")
+	session.CreateOpenCodeTranscript("add a script and look at this", []FileChange{{Path: "script.sh", Content: "#!/bin/bash\necho hello"}})
+
+	raw, err := os.ReadFile(session.TranscriptPath)
+	require.NoError(t, err)
+	var export struct {
+		Info     map[string]any   `json:"info"`
+		Messages []map[string]any `json:"messages"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &export))
+	parts, ok := export.Messages[0]["parts"].([]any)
+	require.True(t, ok, "the first message has no parts")
+	export.Messages[0]["parts"] = append(parts,
+		map[string]any{"type": "file", "mime": "image/png", "filename": "one.png", "url": "data:image/png;base64," + dataURIImage},
+		map[string]any{"type": "file", "mime": "image/png", "name": "two.png", "data": filePartImage},
+	)
+	pretty, err := json.MarshalIndent(export, "", "  ")
+	require.NoError(t, err)
+	require.Greater(t, strings.Count(string(pretty), "\n"), 10, "the export must span many lines")
+	require.NoError(t, os.WriteFile(session.TranscriptPath, pretty, 0o644))
+	env.CopyTranscriptToEntireTmp(session.ID, session.TranscriptPath)
+
+	env.GitCommitWithHooksAsAgent("add script", "script.sh")
+
+	cpID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
+	require.NotEmpty(t, cpID)
+	requireOpenCodeImagesDropped := func() {
+		t.Helper()
+		requireNoImageStored(t, env, dataURIImage)
+		requireNoImageStored(t, env, filePartImage)
+		full, ok := env.ReadFileFromBranch(paths.MetadataBranchName, SessionFilePath(cpID, paths.TranscriptFileName))
+		require.True(t, ok)
+		require.Equal(t, 2, strings.Count(full, onePixelPNGPrefix), "both images should be 1x1 placeholders")
+		require.Contains(t, full, "data:image/png;base64,"+onePixelPNGPrefix)
+	}
+	requireOpenCodeImagesDropped()
+
+	require.NoError(t, env.SimulateOpenCodeTurnEnd(session.ID, session.TranscriptPath))
+
+	requireOpenCodeImagesDropped()
 }
 
 func TestDropImages_WinsOverExternalize(t *testing.T) {

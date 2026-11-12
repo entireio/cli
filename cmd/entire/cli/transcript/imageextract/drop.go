@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
-	"sort"
+	"errors"
+	"io"
 	"strings"
+	"unicode"
 )
 
 // The 1x1 images a dropped image is replaced with, as standard base64. Each
@@ -24,74 +26,176 @@ const (
 //
 // It looks for every image shape any codec knows, whatever agent wrote the
 // transcript, and unlike ExtractImages it has no size limit and does not
-// require the value to be canonical base64: an image externalization would
-// leave inline must still not be stored. The output depends only on the
-// input, which the redaction prefix cache relies on, and dropping twice gives
-// the same bytes as dropping once.
+// require the value to be base64: an image externalization would leave inline
+// must still not be stored.
+//
+// An image is replaced in the decoded JSON, in the slot that holds it, and
+// the JSON that held it is written back. Searching the raw bytes for the
+// value instead would miss an image a serializer escaped differently and
+// would rewrite unrelated text that repeats it. A line without an image keeps
+// its bytes, a line with one comes back compact with sorted keys.
+//
+// Each line's output depends only on that line, which the redaction prefix
+// cache relies on, and dropping twice gives the same bytes as dropping once.
 func DropImages(transcript []byte) []byte {
-	replacements := map[string]string{}
-	for _, line := range bytes.Split(transcript, []byte("\n")) {
-		trimmed := bytes.TrimSpace(line)
-		if len(trimmed) == 0 || (trimmed[0] != '{' && trimmed[0] != '[') {
-			continue
-		}
-		var v any
-		if err := json.Unmarshal(trimmed, &v); err != nil {
-			continue
-		}
-		var hits []imgHit
-		collectClaudeImages(v, &hits)
-		collectPiImages(v, &hits)
-		collectCodexImages(v, &hits)
-		for _, h := range hits {
-			// Shorter values are never real images, and replacing one everywhere
-			// it occurs could rewrite unrelated text.
-			if len(h.data) < minExternalizedBase64Len {
-				continue
-			}
-			if placeholder := dropPlaceholder(h); placeholder != h.data {
-				replacements[h.data] = placeholder
-			}
-		}
-	}
-	if len(replacements) == 0 {
+	if !mayHoldImage(transcript) {
 		return transcript
 	}
-
-	// Longest first, so a value that contains another is replaced whole.
-	values := make([]string, 0, len(replacements))
-	for value := range replacements {
-		values = append(values, value)
+	// One JSON value spread over many lines, as OpenCode stores it, has no
+	// line that parses on its own.
+	if out, isJSON := dropImagesInJSON(transcript); isJSON {
+		return out
 	}
-	sort.Slice(values, func(i, j int) bool {
-		if len(values[i]) != len(values[j]) {
-			return len(values[i]) > len(values[j])
-		}
-		return values[i] < values[j]
-	})
 
-	out := transcript
-	for _, value := range values {
-		placeholder := []byte(replacements[value])
-		for _, written := range jsonSpellings(value) {
-			out = bytes.ReplaceAll(out, written, placeholder)
+	lines := bytes.Split(transcript, []byte("\n"))
+	changed := false
+	for i, line := range lines {
+		if !mayHoldImage(line) {
+			continue
+		}
+		if out, isJSON := dropImagesInJSON(line); isJSON && !bytes.Equal(out, line) {
+			lines[i] = out
+			changed = true
 		}
 	}
-	return out
+	if !changed {
+		return transcript
+	}
+	return bytes.Join(lines, []byte("\n"))
 }
 
-// dropPlaceholder picks the 1x1 image for a hit: the type its bytes show,
-// else the type it declares, else PNG. Keeping the type the provider already
-// accepted for this entry is what keeps the entry valid.
-func dropPlaceholder(h imgHit) string {
+// dropImagesInJSON drops the images in content when it is exactly one JSON
+// value, keeping the whitespace around it. isJSON is false when it is not,
+// and content is returned as is when it holds no image.
+func dropImagesInJSON(content []byte) (out []byte, isJSON bool) {
+	trimmed := bytes.TrimSpace(content)
+	if len(trimmed) == 0 {
+		return content, false
+	}
+	// Numbers stay as written, so an integer beyond float64 precision
+	// survives the round trip.
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	dec.UseNumber()
+	var value any
+	if err := dec.Decode(&value); err != nil {
+		return content, false
+	}
+	var rest json.RawMessage
+	if err := dec.Decode(&rest); !errors.Is(err, io.EOF) {
+		return content, false
+	}
+	dropped, changed := dropImagesInValue(value)
+	if !changed {
+		return content, true
+	}
+
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(dropped); err != nil {
+		return content, true
+	}
+	lead := content[:len(content)-len(bytes.TrimLeftFunc(content, unicode.IsSpace))]
+	trail := content[len(bytes.TrimRightFunc(content, unicode.IsSpace)):]
+	out = append(out, lead...)
+	out = append(out, bytes.TrimSuffix(buf.Bytes(), []byte("\n"))...)
+	return append(out, trail...), true
+}
+
+// mayHoldImage reports whether raw JSON can contain an image. Every shape
+// dropImagesInValue matches spells "image" in a type, a media type or a data
+// URI, and the only way JSON can write those letters differently is a \u00XX
+// escape. Skipping everything else spares decoding most of a large transcript.
+func mayHoldImage(raw []byte) bool {
+	return bytes.Contains(raw, []byte(blockTypeImage)) || bytes.Contains(raw, []byte(`\u00`))
+}
+
+// dropImagesInValue replaces every image in a decoded JSON value, in place,
+// and returns the value to store in its stead.
+func dropImagesInValue(v any) (any, bool) {
+	switch t := v.(type) {
+	case map[string]any:
+		changed := dropImageSlots(t)
+		for key, child := range t {
+			if dropped, ok := dropImagesInValue(child); ok {
+				t[key] = dropped
+				changed = true
+			}
+		}
+		return t, changed
+	case []any:
+		changed := false
+		for i, child := range t {
+			if dropped, ok := dropImagesInValue(child); ok {
+				t[i] = dropped
+				changed = true
+			}
+		}
+		return t, changed
+	case string:
+		// Codex and OpenCode 1 write an image as a data URI, alone or inside
+		// a longer string.
+		dropped := codexDataURIRe.ReplaceAllStringFunc(t, func(uri string) string {
+			m := codexDataURIRe.FindStringSubmatch(uri)
+			return strings.TrimSuffix(uri, m[2]) + dropPlaceholder(m[2], "image/"+m[1])
+		})
+		return dropped, dropped != t
+	default:
+		return v, false
+	}
+}
+
+// dropImageSlots replaces the image an object holds directly: a Claude Code
+// image block, a Pi image item, or the file part OpenCode 2 attaches an image
+// as.
+func dropImageSlots(obj map[string]any) bool {
+	switch obj["type"] {
+	case blockTypeImage:
+		changed := false
+		if source, ok := obj["source"].(map[string]any); ok && source["type"] == "base64" {
+			changed = dropSlot(source, "media_type")
+		}
+		return dropSlot(obj, "mimeType") || changed
+	case "file":
+		if mime, ok := obj["mime"].(string); ok && strings.HasPrefix(mime, "image/") {
+			return dropSlot(obj, "mime")
+		}
+	}
+	return false
+}
+
+// dropSlot replaces obj's "data" string with the placeholder for it, reading
+// the declared media type from typeKey.
+func dropSlot(obj map[string]any, typeKey string) bool {
+	data, ok := obj["data"].(string)
+	if !ok || data == "" {
+		return false
+	}
+	declared := ""
+	if mediaType, ok := obj[typeKey].(string); ok {
+		declared = mediaType
+	}
+	placeholder := dropPlaceholder(data, declared)
+	if placeholder == data {
+		return false
+	}
+	obj["data"] = placeholder
+	return true
+}
+
+// dropPlaceholder picks the 1x1 image for an image value: the type its bytes
+// show, else the type it declares, else PNG. Keeping the type the provider
+// already accepted for this entry is what keeps the entry valid.
+func dropPlaceholder(data, declared string) string {
 	// 16 base64 characters decode to the 12 bytes the longest signature needs,
 	// without decoding a multi-megabyte image or requiring valid padding.
+	// A shorter value is cut to whole 4-character groups.
 	mediaType := ""
-	if raw, err := base64.StdEncoding.DecodeString(h.data[:16]); err == nil {
+	if raw, err := base64.StdEncoding.DecodeString(data[:min(len(data), 16)&^3]); err == nil {
 		mediaType = detectMediaType(raw)
 	}
 	if mediaType == "" {
-		mediaType = strings.ToLower(h.mediaType)
+		mediaType = strings.ToLower(declared)
 	}
 	switch mediaType {
 	case mediaTypeJPEG, "image/jpg":
@@ -103,32 +207,4 @@ func dropPlaceholder(h imgHit) string {
 	default:
 		return placeholderPNG
 	}
-}
-
-// jsonSpellings returns the ways a string value can appear inside raw JSON:
-// as is, with Go's default escaping, without HTML escaping, and with the
-// optional "\/" escape some serializers use for the slashes in base64.
-func jsonSpellings(value string) [][]byte {
-	spellings := [][]byte{[]byte(value)}
-	add := func(b []byte) {
-		for _, seen := range spellings {
-			if bytes.Equal(seen, b) {
-				return
-			}
-		}
-		spellings = append(spellings, b)
-	}
-
-	if quoted, err := json.Marshal(value); err == nil {
-		add(quoted[1 : len(quoted)-1])
-	}
-	var plain bytes.Buffer
-	enc := json.NewEncoder(&plain)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(value); err == nil {
-		quoted := bytes.TrimSuffix(plain.Bytes(), []byte("\n"))
-		add(quoted[1 : len(quoted)-1])
-	}
-	add([]byte(strings.ReplaceAll(value, "/", `\/`)))
-	return spellings
 }
