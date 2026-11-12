@@ -84,6 +84,8 @@ type ProjectAgentPreset struct {
 
 // ProjectEnvironment is a project's saved sandbox environment.
 type ProjectEnvironment struct {
+	RunsOn      string     `json:"runs_on"`
+	Managed     bool       `json:"managed"`
 	ID          string     `json:"id"`
 	Name        string     `json:"name"`
 	Description string     `json:"description"`

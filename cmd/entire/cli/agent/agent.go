@@ -143,6 +143,12 @@ const (
 	// wrote a config that no longer matches the current one. Fix:
 	// `entire agent add <agent>`; add --force if that does not fix it.
 	HooksOutdated
+	// HooksForOtherHost means Entire's hooks are the form install writes on
+	// the other OS (sh or Windows), which this host's agent cannot run, so no
+	// hook fires here. Usually a hooks file committed from a teammate's
+	// checkout. Fix: `entire agent add <agent>`, which rewrites the file for
+	// this OS and, if it is committed, breaks it for the other OS.
+	HooksForOtherHost
 )
 
 // HookFreshness is implemented by hook-supporting agents that can report

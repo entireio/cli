@@ -37,6 +37,8 @@ type projectTrailTarget struct {
 	// Number is the project-local trail number when the resolution path
 	// learned it (a numeric selector or a parent reference); 0 otherwise.
 	Number int
+	// Jurisdiction is the project's region when resolved through Core.
+	Jurisdiction string
 	// Change is the change the trail was reached through (a branch or a
 	// <repo>/<number> selector); nil for a project trail selector.
 	Change *projectTrailCurrentChange
@@ -162,6 +164,7 @@ func resolveProjectTrailCollectionFor(ctx context.Context, host, project string,
 	if err != nil {
 		return nil, fmt.Errorf("open project trail cell: %w", err)
 	}
+	target.Jurisdiction = cell.Jurisdiction
 	return target, nil
 }
 

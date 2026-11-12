@@ -267,8 +267,10 @@ func OutdatedHookAgents(ctx context.Context) []types.AgentName {
 		if _, ownsDiagnostics := agent.AsEffectiveHookDiagnostics(ag); ownsDiagnostics {
 			continue
 		}
-		if hf, ok := agent.AsHookFreshness(ag); ok && hf.CheckHookConfig(ctx) == agent.HooksOutdated {
-			outdated = append(outdated, name)
+		if hf, ok := agent.AsHookFreshness(ag); ok {
+			if state := hf.CheckHookConfig(ctx); state == agent.HooksOutdated || state == agent.HooksForOtherHost {
+				outdated = append(outdated, name)
+			}
 		}
 	}
 	return outdated
