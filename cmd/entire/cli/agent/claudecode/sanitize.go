@@ -21,10 +21,36 @@ const (
 	recordTypeAttachment      = "attachment"
 	attachmentPromptSnapshot  = "prompt_snapshot"
 	attachmentInstructions    = "instructions"
-	// A prompt the developer typed while the agent was busy: conversation, so
-	// it is the one attachment kind kept as written.
-	attachmentQueuedCommand = "queued_command"
 )
+
+// keptAttachmentKinds hold what the developer shared in the conversation:
+// prompts queued while the agent worked, @-mentioned files, IDE selections, and
+// edits Claude Code reports back. They are conversation, and Claude Code does
+// not re-read them on resume, so they stay as written. Every other kind is
+// blanked, including kinds Claude Code adds later.
+var keptAttachmentKinds = map[string]bool{
+	"queued_command":         true,
+	"file":                   true,
+	"already_read_file":      true,
+	"at_mention_reference":   true,
+	"pdf_reference":          true,
+	"compact_file_reference": true,
+	"selected_lines_in_ide":  true,
+	"opened_file_in_ide":     true,
+	"edited_text_file":       true,
+	"edited_image_file":      true,
+}
+
+// structuralKeys survive blanking at any depth: a discriminator a reader
+// dispatches on, and file paths, which the record keeps like every other
+// blanked record does.
+var structuralKeys = map[string]bool{
+	"type":        true,
+	"path":        true,
+	"filePath":    true,
+	"filename":    true,
+	"displayPath": true,
+}
 
 // injectedRecordMarkers gate the per-line parse: a line naming none of these
 // record kinds cannot be one, so a byte search skips it. Over-broad on purpose
@@ -111,7 +137,11 @@ func blankAttachment(record map[string]json.RawMessage) bool {
 	if err := json.Unmarshal(record["attachment"], &attachment); err != nil {
 		return false
 	}
-	switch jsonString(attachment["type"]) {
+	kind := jsonString(attachment["type"])
+	if keptAttachmentKinds[kind] {
+		return false
+	}
+	switch kind {
 	case attachmentPromptSnapshot:
 		return blankFields(record, "attachment", "systemPrompt", "tools")
 	case attachmentInstructions:
@@ -126,10 +156,8 @@ func blankAttachment(record map[string]json.RawMessage) bool {
 		}
 		rendered := blankContentOfEach(record, "rendered")
 		return files || rendered
-	case attachmentQueuedCommand:
-		return false
 	default:
-		blanked := blankAllText(attachment, "type")
+		blanked := blankAllText(attachment)
 		if blanked {
 			encoded, err := jsonutil.MarshalWithNoHTMLEscape(attachment)
 			if err != nil {
@@ -143,12 +171,12 @@ func blankAttachment(record map[string]json.RawMessage) bool {
 }
 
 // blankAllText empties every string and array in object, at any depth, except
-// the top-level field named keep, and reports whether any of them held
-// something. Numbers, booleans and nulls stay: they carry no text.
-func blankAllText(object map[string]json.RawMessage, keep string) bool {
+// structuralKeys, and reports whether any of them held something. Numbers,
+// booleans and nulls stay: they carry no text.
+func blankAllText(object map[string]json.RawMessage) bool {
 	changed := false
 	for key, value := range object {
-		if key == keep {
+		if structuralKeys[key] {
 			continue
 		}
 		if blank, ok := blankText(value); ok {
@@ -165,7 +193,7 @@ func blankText(raw json.RawMessage) (json.RawMessage, bool) {
 		return blankValue(raw)
 	}
 	var object map[string]json.RawMessage
-	if err := json.Unmarshal(trimmed, &object); err != nil || !blankAllText(object, "") {
+	if err := json.Unmarshal(trimmed, &object); err != nil || !blankAllText(object) {
 		return nil, false
 	}
 	encoded, err := jsonutil.MarshalWithNoHTMLEscape(object)

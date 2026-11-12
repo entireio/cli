@@ -45,7 +45,7 @@ An agent's session file holds more than the conversation. It also records text t
 
 Entire blanks that text in the copy it stores, before redaction runs and with no setting to turn it off. Each record stays in place with its type, ids, hashes and file paths, so the transcript keeps its line numbering and its links. Only the text is emptied. The agent's own session file is never changed.
 
-- **Claude Code:** the request log (`api-request-blob` message content, `api-request-shape` system prompt and tool definitions), the system prompt snapshot (`prompt_snapshot`), the bodies of loaded instruction and memory files (`instructions` attachments), and the text of every other attachment except prompts you queued while it worked (`queued_command`). That covers session context such as your email address and git status, skill, agent, tool and MCP listings, and hook output, and also attachment kinds Claude Code adds later.
+- **Claude Code:** the request log (`api-request-blob` message content, `api-request-shape` system prompt and tool definitions), the system prompt snapshot (`prompt_snapshot`), the bodies of loaded instruction and memory files (`instructions` attachments), and the text of every other attachment except what you shared in the conversation: prompts you queued while it worked, files you @-mentioned, IDE selections, and edits Claude Code reports back. That covers session context such as your email address and git status, skill, agent, tool and MCP listings, and hook output, and also attachment kinds Claude Code adds later.
 - **Codex:** the base instructions in `session_meta` and the developer message that repeats them, the `AGENTS.md` text in `world_state`, and the `AGENTS.md` dumps in user messages and compacted history.
 - **Pi:** the `project_context` section of its system messages, which holds the instruction files it loaded, including the copy a compaction record keeps.
 
@@ -55,7 +55,7 @@ What this does not cover:
 
 - **Other agents.** No injected instruction text was found in Cursor or OpenCode session files. Copilot CLI, Factory AI Droid, Antigravity and external agents have not been examined.
 - **Pi's own system prompt.** Only the instruction files are blanked; the other sections of Pi's system message (its built-in prompt, tool list and working directory) are kept.
-- **Instruction files the agent reads or edits during a session.** A tool call that reads or changes `CLAUDE.md` or a memory file is part of the conversation, and its content is stored like any other tool result.
+- **Instruction files the agent reads or edits during a session, or that you @-mention.** A tool call that reads or changes `CLAUDE.md` or a memory file is part of the conversation, and its content is stored like any other tool result. The same goes for a file you @-mention or select in your IDE.
 - **Codex model switches.** The developer message Codex writes when the model changes carries the new model's built-in instructions and is kept.
 - **Checkpoints already written.** Checkpoints stored by an older CLI are not rewritten.
 

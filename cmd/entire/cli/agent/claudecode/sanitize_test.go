@@ -123,28 +123,50 @@ func TestSanitizeStoredTranscript_BlanksEveryOtherAttachmentKind(t *testing.T) {
 func TestSanitizeStoredTranscript_BlankedAttachmentKeepsShape(t *testing.T) {
 	t.Parallel()
 
-	line := `{"type":"attachment","uuid":"c1","parentUuid":"u1","attachment":{"type":"hook_success","stdout":"/home/dev/secret","content":"x","exitCode":0,"blocking":false,"nested":{"path":"/home/dev"},"lines":["a"]}}`
+	line := `{"type":"attachment","uuid":"c1","parentUuid":"u1","attachment":{"type":"nested_memory","path":"/home/dev/.claude/memory/clients.md","content":{"type":"text","text":"` + memoryNote + `","file":{"filePath":"/home/dev/notes.md"}},"exitCode":0,"blocking":false,"lines":["a"]}}`
 
 	got := string(SanitizeStoredTranscript([]byte(line)))
 
+	assert.NotContains(t, got, memoryNote)
+	// Discriminators and file paths are structure, not text: a reader that
+	// parses the record still needs them.
 	for _, kept := range []string{
-		`"uuid":"c1"`, `"parentUuid":"u1"`, `"type":"hook_success"`,
-		`"stdout":""`, `"content":""`, `"exitCode":0`, `"blocking":false`,
-		`"nested":{"path":""}`, `"lines":[]`,
+		`"uuid":"c1"`, `"parentUuid":"u1"`, `"type":"nested_memory"`,
+		`"path":"/home/dev/.claude/memory/clients.md"`, `"type":"text"`, `"filePath":"/home/dev/notes.md"`,
+		`"text":""`, `"exitCode":0`, `"blocking":false`, `"lines":[]`,
 	} {
 		assert.Contains(t, got, kept)
 	}
 }
 
-// A queued command is a prompt the developer typed while the agent was busy:
-// it is conversation, and stays as written.
-func TestSanitizeStoredTranscript_KeepsQueuedCommands(t *testing.T) {
+// What the developer shared in the conversation (prompts queued while the
+// agent worked, @-mentioned files, IDE selections, edits Claude Code reports
+// back) is conversation, and stays as written. Claude Code does not re-read
+// any of it on resume.
+func TestSanitizeStoredTranscript_KeepsWhatTheDeveloperShared(t *testing.T) {
 	t.Parallel()
 
-	line := `{"type":"attachment","uuid":"q1","attachment":{"type":"queued_command","prompt":"also update the docs","commandMode":"prompt"},"rendered":[{"content":"also update the docs"}]}`
-	input := []byte(userLine + "\n" + line + "\n")
+	tests := map[string]string{
+		"queued command":       `{"type":"attachment","uuid":"q1","attachment":{"type":"queued_command","prompt":"also update the docs","commandMode":"prompt"},"rendered":[{"content":"also update the docs"}]}`,
+		"at-mentioned file":    `{"type":"attachment","uuid":"f1","attachment":{"type":"file","filename":"/repo/main.go","content":{"type":"text","file":{"filePath":"/repo/main.go","content":"package main","numLines":1,"startLine":1,"totalLines":1}},"displayPath":"main.go"}}`,
+		"already read file":    `{"type":"attachment","uuid":"f2","attachment":{"type":"already_read_file","filename":"/repo/main.go","displayPath":"main.go","content":{"type":"text","file":{"filePath":"/repo/main.go","content":"package main"}}}}`,
+		"at-mention reference": `{"type":"attachment","uuid":"f3","attachment":{"type":"at_mention_reference","mentions":["/repo/big.log"],"unread":"too_large","fileSize":9000000,"displayPath":"big.log"}}`,
+		"pdf reference":        `{"type":"attachment","uuid":"f4","attachment":{"type":"pdf_reference","filename":"/repo/spec.pdf","pageCount":3,"displayPath":"spec.pdf"}}`,
+		"compact file ref":     `{"type":"attachment","uuid":"f5","attachment":{"type":"compact_file_reference","filename":"/repo/main.go","displayPath":"main.go"}}`,
+		"IDE selection":        `{"type":"attachment","uuid":"i1","attachment":{"type":"selected_lines_in_ide","ideName":"VS Code","lineStart":3,"lineEnd":5,"filename":"/repo/main.go","content":"func main() {}","displayPath":"main.go"}}`,
+		"file opened in IDE":   `{"type":"attachment","uuid":"i2","attachment":{"type":"opened_file_in_ide","filename":"/repo/main.go"}}`,
+		"edited text file":     `{"type":"attachment","uuid":"e1","attachment":{"type":"edited_text_file","filename":"/repo/main.go","snippet":"func main() {}"}}`,
+		"edited image file":    `{"type":"attachment","uuid":"e2","attachment":{"type":"edited_image_file","filename":"/repo/logo.png","content":{"type":"image","source":"x"}}}`,
+	}
+	for name, line := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 
-	assert.Equal(t, string(input), string(SanitizeStoredTranscript(input)))
+			input := []byte(userLine + "\n" + line + "\n")
+
+			assert.Equal(t, string(input), string(SanitizeStoredTranscript(input)))
+		})
+	}
 }
 
 func TestSanitizeStoredTranscript_PreservesBlankLinesAndMissingFinalNewline(t *testing.T) {
