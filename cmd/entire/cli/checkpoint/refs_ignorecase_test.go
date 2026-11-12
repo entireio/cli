@@ -1,11 +1,15 @@
 package checkpoint
 
 import (
+	"runtime"
 	"testing"
+	"weak"
 
 	git "github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/config"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/storage"
+	"github.com/go-git/go-git/v6/storage/filesystem"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -15,12 +19,13 @@ import (
 // countingRefStorer counts the ref reads a lookup makes.
 type countingRefStorer struct {
 	storage.Storer
+
 	reads int
 }
 
 func (c *countingRefStorer) Reference(name plumbing.ReferenceName) (*plumbing.Reference, error) {
 	c.reads++
-	return c.Storer.Reference(name) //nolint:wrapcheck // test pass-through
+	return c.Storer.Reference(name)
 }
 
 // shardSpellingRepo is a repository with core.ignorecase set to ignoreCase and
@@ -109,4 +114,74 @@ func TestStoredRef_CaseInsensitiveRepoUsesTheLaterVersion(t *testing.T) {
 
 	assert.Equal(t, folded, name)
 	assert.Equal(t, plumbing.NewHash(later), tip)
+}
+
+// configCountingStorer counts config reads on a filesystem storage.
+type configCountingStorer struct {
+	*filesystem.Storage
+
+	configReads int
+}
+
+func (c *configCountingStorer) Config() (*config.Config, error) {
+	c.configReads++
+	return c.Storage.Config()
+}
+
+func openConfigCountingRepo(t *testing.T, dir string) (*git.Repository, *configCountingStorer) {
+	t.Helper()
+	plain, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	fsStorage, ok := plain.Storer.(*filesystem.Storage)
+	require.True(t, ok)
+	counting := &configCountingStorer{Storage: fsStorage}
+	repo, err := git.Open(counting, nil)
+	require.NoError(t, err)
+	return repo, counting
+}
+
+// The setting is read once per repository directory, not once per opened
+// repository: commands open the same repository many times.
+func TestFoldsCase_ReadsTheConfigOncePerRepository(t *testing.T) {
+	t.Parallel()
+	dir, _, _ := shardSpellingRepo(t, "true")
+	first, _ := openConfigCountingRepo(t, dir)
+	second, counting := openConfigCountingRepo(t, dir)
+	counting.configReads = 0 // opening the repository reads its config
+
+	assert.True(t, foldsCase(first))
+	assert.True(t, foldsCase(second))
+	assert.Zero(t, counting.configReads, "a second opening of the same repository reuses the setting")
+}
+
+// A changed setting is read again rather than served from the cache.
+func TestFoldsCase_RereadsAChangedSetting(t *testing.T) {
+	t.Parallel()
+	dir, _, _ := shardSpellingRepo(t, "false")
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	require.False(t, foldsCase(repo))
+
+	testutil.RunGit(t, dir, "config", "core.ignorecase", "true")
+
+	assert.True(t, foldsCase(repo))
+}
+
+// Looking up a checkpoint must not keep its repository in memory.
+func TestStoredRef_DoesNotKeepTheRepositoryAlive(t *testing.T) {
+	t.Parallel()
+	dir, earlier, _ := shardSpellingRepo(t, "false")
+	canonical := mustRefName(t, foldableULID)
+	testutil.RunGit(t, dir, "update-ref", canonical.String(), earlier)
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	_, _, err = StoredRef(repo, nil, canonical)
+	require.NoError(t, err)
+	collected := weak.Make(repo)
+
+	repo = nil //nolint:ineffassign,wastedassign // drops the last strong reference
+	runtime.GC()
+	runtime.GC()
+
+	assert.Nil(t, collected.Value(), "the repository must be collectable after a lookup")
 }

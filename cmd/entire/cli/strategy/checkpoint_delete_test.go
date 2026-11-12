@@ -841,6 +841,7 @@ func TestCheckpointDelete_RemovesBothShardSpellings(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newDeleteFixture(t, "git-refs")
+			testutil.RunGit(t, f.workDir, "config", "core.ignorecase", "true")
 			f.writeCheckpoint(t, cid, "sess-1")
 			earlier := revParse(t, f.workDir, canonical.String())
 			f.writeCheckpoint(t, cid, "sess-2")

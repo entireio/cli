@@ -79,6 +79,9 @@ func writeRefFile(t *testing.T, workDir string, ref plumbing.ReferenceName, cont
 // result is the same on a case-sensitive one.
 func foldedShardFixture(t *testing.T, workDir, tip string) (stored, queued plumbing.ReferenceName) {
 	t.Helper()
+	// Where the folded spelling exists, git recorded a case-insensitive
+	// filesystem; set it so these tests read both spellings on every OS.
+	testutil.RunGit(t, workDir, "config", "core.ignorecase", "true")
 	stored = plumbing.ReferenceName(checkpoint.CheckpointRefPrefix + "AB/0000000000ab")
 	queued = mustRefName(t, id.MustCheckpointID("0000000000ab"))
 	require.NotEqual(t, stored, queued)

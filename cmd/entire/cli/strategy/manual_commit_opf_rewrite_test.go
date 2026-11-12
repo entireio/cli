@@ -1074,6 +1074,9 @@ func storeUnderFoldedShardAndPack(t *testing.T, repo *git.Repository, cid id.Che
 	wt, err := repo.Worktree()
 	require.NoError(t, err)
 	workDir := wt.Filesystem().Root()
+	// Where the folded spelling exists, git recorded a case-insensitive
+	// filesystem; set it so these tests read both spellings on every OS.
+	testutil.RunGit(t, workDir, "config", "core.ignorecase", "true")
 	canonical := mustRefName(t, cid)
 	folded, ok := checkpoint.FoldedRefName(cid)
 	require.True(t, ok, "the fixture needs an ID whose shard has two spellings")

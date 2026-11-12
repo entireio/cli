@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-git/go-billy/v6"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
@@ -262,28 +263,54 @@ func StoredRef(
 	}
 }
 
-// ignoreCase caches each repository's core.ignorecase: go-git rereads and
+// ignoreCase caches core.ignorecase by git directory: go-git rereads and
 // parses the config file on every Config call, which would cost more than the
-// ref read it saves.
+// ref read it saves. Keyed by path rather than by repository, so a repository
+// is not kept in memory, and checked against the config file's size and
+// modification time, so a changed setting is read again.
 var ignoreCase sync.Map //nolint:gochecknoglobals // per-repository config cache
+
+type ignoreCaseEntry struct {
+	modTime time.Time
+	size    int64
+	folds   bool
+}
 
 // foldsCase reports whether repo sits on a case-insensitive filesystem, as git
 // recorded in core.ignorecase when it created the repository. An unreadable
 // config reports true, which keeps both spellings in every lookup.
 func foldsCase(repo *git.Repository) bool {
-	if cached, ok := ignoreCase.Load(repo); ok {
-		return cached.(bool) //nolint:forcetypeassert // only bools are stored
+	fsStorer, ok := repo.Storer.(interface{ Filesystem() billy.Filesystem })
+	if !ok {
+		return readFoldsCase(repo)
 	}
-	folds := true
-	if cfg, err := repo.Config(); err == nil {
-		switch strings.ToLower(cfg.Raw.Section("core").Option("ignorecase")) {
-		case "true", "yes", "on", "1":
-		default:
-			folds = false
+	fs := fsStorer.Filesystem()
+	info, err := fs.Stat("config")
+	if err != nil {
+		return readFoldsCase(repo)
+	}
+	key := fs.Root()
+	if cached, ok := ignoreCase.Load(key); ok {
+		if entry, ok := cached.(ignoreCaseEntry); ok && entry.size == info.Size() && entry.modTime.Equal(info.ModTime()) {
+			return entry.folds
 		}
 	}
-	ignoreCase.Store(repo, folds)
+	folds := readFoldsCase(repo)
+	ignoreCase.Store(key, ignoreCaseEntry{modTime: info.ModTime(), size: info.Size(), folds: folds})
 	return folds
+}
+
+func readFoldsCase(repo *git.Repository) bool {
+	cfg, err := repo.Config()
+	if err != nil {
+		return true
+	}
+	switch strings.ToLower(cfg.Raw.Section("core").Option("ignorecase")) {
+	case "true", "yes", "on", "1":
+		return true
+	default:
+		return false
+	}
 }
 
 // OtherShardSpelling returns the one other name ref's checkpoint can be stored

@@ -100,6 +100,9 @@ func repoDirOf(t *testing.T, store *gitRefsStore) string {
 func foldShardRefAndPack(t *testing.T, store *gitRefsStore, cid id.CheckpointID) (*gitRefsStore, plumbing.ReferenceName) {
 	t.Helper()
 	dir := repoDirOf(t, store)
+	// Where the folded spelling exists, git recorded a case-insensitive
+	// filesystem; set it so these tests read both spellings on every OS.
+	testutil.RunGit(t, dir, "config", "core.ignorecase", "true")
 	canonical := mustRefName(t, cid)
 	folded, ok := FoldedRefName(cid)
 	require.True(t, ok, "test fixture must use an ID whose shard has two spellings")
@@ -174,8 +177,6 @@ func TestGitRefsStore_UsesTheNewerRefWhenBothShardSpellingsExist(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store := newRefsStore(t)
-	// A split forms only where git records a case-insensitive filesystem.
-	testutil.RunGit(t, repoDirOf(t, store), "config", "core.ignorecase", "true")
 	canonical := mustRefName(t, foldableLegacy)
 	refsWrite(t, store, foldableLegacy, "sess-1", "transcript one")
 	older, err := store.repo.Reference(canonical, true)
@@ -471,6 +472,7 @@ func TestGitRefsStore_WriteRetryFollowsTheStoredSpelling(t *testing.T) {
 	store := newRefsStore(t)
 	refsWrite(t, store, foldableULID, "sess-1", "transcript")
 	dir := repoDirOf(t, store)
+	testutil.RunGit(t, dir, "config", "core.ignorecase", "true")
 	canonical := mustRefName(t, foldableULID)
 	folded, ok := FoldedRefName(foldableULID)
 	require.True(t, ok)
