@@ -220,7 +220,9 @@ and turn-end pruning drops it.
 A worktree other than the home records only transcript-named files, never
 the rest of its status, so someone else's uncommitted work there is never
 claimed. One turn is one step and carries its tokens once, however many
-worktrees it touched.
+worktrees it touched. The step is counted at the first worktree that records
+files, so one that records none (its files are gone, or it gets no record,
+like an unregistered checkout) leaves the count to the next.
 
 At commit time a session is judged by its record of the committing worktree
 (`enterWorktreeView`): that entry stands in for the home's files, hashes and

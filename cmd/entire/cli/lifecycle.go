@@ -1173,26 +1173,8 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		SubagentLedgerVersion:    codexLedgerVersion,
 	}
 
-	// The hook's worktree, then each other worktree the turn edited: one
-	// step, counted once and carrying the turn's tokens once.
-	counted := false
-	if totalChanges > 0 {
-		if err := strat.SaveStep(ctx, stepCtx); err != nil {
-			return fmt.Errorf("failed to save step: %w", err)
-		}
-		counted = true
-	}
-	for _, root := range slices.Sorted(maps.Keys(elsewhere)) {
-		step := stepCtx
-		step.WorktreeRoot = root
-		step.ModifiedFiles, step.NewFiles, step.DeletedFiles = elsewhere[root], nil, nil
-		if counted {
-			step.SameTurn, step.TokenUsage = true, nil
-		}
-		if err := strat.SaveStep(ctx, step); err != nil {
-			return fmt.Errorf("failed to save step for %s: %w", root, err)
-		}
-		counted = true
+	if err := saveTurnSteps(ctx, strat, stepCtx, totalChanges > 0, elsewhere); err != nil {
+		return err
 	}
 	strategy.PruneRemovedWorktrees(ctx, sessionID, hookRoot)
 
@@ -1217,6 +1199,46 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	if cleanupErr := CleanupPrePromptState(ctx, sessionID); cleanupErr != nil {
 		logging.Warn(logCtx, "failed to cleanup pre-prompt state",
 			slog.String("error", cleanupErr.Error()))
+	}
+	return nil
+}
+
+// saveTurnSteps saves a turn's step in the hook's worktree (when it changed
+// files there), then in each other worktree the turn edited: one step, counted
+// at the first worktree that records files and carrying the turn's tokens once.
+// A worktree that gets no record of its own takes only the tokens, and one
+// whose files are all gone records nothing, so neither counts the step for the
+// worktrees after it.
+func saveTurnSteps(ctx context.Context, strat *strategy.ManualCommitStrategy, stepCtx strategy.StepContext, hookChanged bool, elsewhere map[string][]string) error {
+	var turn strategy.StepResult
+	save := func(step strategy.StepContext) error {
+		step.SameTurn = turn.FilesRecorded
+		if turn.TokensRecorded {
+			step.TokenUsage = nil
+		}
+		result, err := strat.SaveTurnStep(ctx, step)
+		if err != nil {
+			if step.WorktreeRoot != "" {
+				return fmt.Errorf("failed to save step for %s: %w", step.WorktreeRoot, err)
+			}
+			return fmt.Errorf("failed to save step: %w", err)
+		}
+		turn.FilesRecorded = turn.FilesRecorded || result.FilesRecorded
+		turn.TokensRecorded = turn.TokensRecorded || result.TokensRecorded
+		return nil
+	}
+	if hookChanged {
+		if err := save(stepCtx); err != nil {
+			return err
+		}
+	}
+	for _, root := range slices.Sorted(maps.Keys(elsewhere)) {
+		step := stepCtx
+		step.WorktreeRoot = root
+		step.ModifiedFiles, step.NewFiles, step.DeletedFiles = elsewhere[root], nil, nil
+		if err := save(step); err != nil {
+			return err
+		}
 	}
 	return nil
 }

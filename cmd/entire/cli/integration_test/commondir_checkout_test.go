@@ -120,27 +120,8 @@ func TestUnregisteredCommonDirCheckout_LinkedHomeTurnIsNotRecorded(t *testing.T)
 	t.Parallel()
 	parent := NewRepoWithCommit(t)
 	home := worktreeEnv(t, parent, "home")
-
-	base := t.TempDir()
-	if resolved, err := filepath.EvalSymlinks(base); err == nil {
-		base = resolved
-	}
-	checkoutDir := filepath.Join(base, "checkout")
-	gitOutput(t, parent.RepoDir, "branch", "checkout-branch")
-	if err := os.MkdirAll(filepath.Join(checkoutDir, ".git"), 0o755); err != nil {
-		t.Fatalf("mkdir checkout .git: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(checkoutDir, ".git", "HEAD"), []byte("ref: refs/heads/checkout-branch\n"), 0o644); err != nil {
-		t.Fatalf("write checkout HEAD: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(checkoutDir, ".git", "commondir"), []byte(filepath.Join(parent.RepoDir, ".git")+"\n"), 0o644); err != nil {
-		t.Fatalf("write checkout commondir: %v", err)
-	}
-	gitOutput(t, checkoutDir, "read-tree", "-u", "--reset", "HEAD")
-	checkoutEnv := *parent
-	checkoutEnv.RepoDir = checkoutDir
-	checkoutEnv.InitEntire()
-	checkout := &checkoutEnv
+	checkout := unregisteredCheckout(t, parent)
+	checkoutDir := checkout.RepoDir
 
 	sess := home.NewSession()
 	first := "Create the home file"
@@ -203,6 +184,89 @@ func TestUnregisteredCommonDirCheckout_LinkedHomeTurnIsNotRecorded(t *testing.T)
 	if !slices.Contains(state.FilesTouched, "home.go") {
 		t.Fatalf("the guest commit consumed the home's pending work: %v", state.FilesTouched)
 	}
+}
+
+// TestUnregisteredCommonDirCheckout_MixedTurnCountsHomeStep runs one turn in
+// an unregistered checkout that edits both the checkout and, by absolute path,
+// the session's linked home. The checkout's step records only the turn's
+// tokens, so the home's step is the turn's counted step: a session with no
+// steps since its last checkpoint must not hold recorded files at StepCount 0.
+func TestUnregisteredCommonDirCheckout_MixedTurnCountsHomeStep(t *testing.T) {
+	t.Parallel()
+	parent := NewRepoWithCommit(t)
+	home := worktreeEnv(t, parent, "home")
+	checkout := unregisteredCheckout(t, parent)
+
+	sess := home.NewSession()
+	first := "Create the home file"
+	if err := home.SimulateUserPromptSubmitWithPromptAndTranscriptPath(sess.ID, first, sess.TranscriptPath); err != nil {
+		t.Fatalf("user-prompt-submit at home: %v", err)
+	}
+	home.WriteFile("home.go", "package home\n")
+	sess.CreateTranscript(first, []FileChange{{Path: filepath.Join(home.RepoDir, "home.go"), Content: "package home\n"}})
+	if err := home.SimulateStop(sess.ID, sess.TranscriptPath); err != nil {
+		t.Fatalf("stop at home: %v", err)
+	}
+	home.GitCommitWithHooks("Add home file", "home.go")
+	condensed, err := parent.GetSessionState(sess.ID)
+	if err != nil || condensed == nil {
+		t.Fatalf("load session state after the home commit: %v", err)
+	}
+	if condensed.StepCount != 0 || len(condensed.FilesTouched) != 0 {
+		t.Fatalf("fixture: the home commit should leave no steps or files, got StepCount %d, FilesTouched %v", condensed.StepCount, condensed.FilesTouched)
+	}
+
+	second := "Edit the checkout and the home"
+	if err := checkout.SimulateUserPromptSubmitWithPromptAndTranscriptPath(sess.ID, second, sess.TranscriptPath); err != nil {
+		t.Fatalf("user-prompt-submit in the checkout: %v", err)
+	}
+	checkout.WriteFile("guest.go", "package guest\n")
+	home.WriteFile("home2.go", "package home\n")
+	sess.CreateTranscript(second, []FileChange{
+		{Path: filepath.Join(checkout.RepoDir, "guest.go"), Content: "package guest\n"},
+		{Path: filepath.Join(home.RepoDir, "home2.go"), Content: "package home\n"},
+	})
+	if err := checkout.SimulateStop(sess.ID, sess.TranscriptPath); err != nil {
+		t.Fatalf("stop in the checkout: %v", err)
+	}
+
+	state, err := parent.GetSessionState(sess.ID)
+	if err != nil || state == nil {
+		t.Fatalf("load session state: %v", err)
+	}
+	if !slices.Equal(state.FilesTouched, []string{"home2.go"}) {
+		t.Fatalf("the home's record should hold only its own edit, got %v", state.FilesTouched)
+	}
+	if state.StepCount != 1 {
+		t.Fatalf("the home's step was not counted: StepCount %d", state.StepCount)
+	}
+}
+
+// unregisteredCheckout makes a checkout of parent's repository on a branch of
+// its own, sharing parent's Git directory through commondir with no
+// <common>/worktrees registration, and returns an environment for it.
+func unregisteredCheckout(t *testing.T, parent *TestEnv) *TestEnv {
+	t.Helper()
+	base := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(base); err == nil {
+		base = resolved
+	}
+	checkoutDir := filepath.Join(base, "checkout")
+	gitOutput(t, parent.RepoDir, "branch", "checkout-branch")
+	if err := os.MkdirAll(filepath.Join(checkoutDir, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir checkout .git: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(checkoutDir, ".git", "HEAD"), []byte("ref: refs/heads/checkout-branch\n"), 0o644); err != nil {
+		t.Fatalf("write checkout HEAD: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(checkoutDir, ".git", "commondir"), []byte(filepath.Join(parent.RepoDir, ".git")+"\n"), 0o644); err != nil {
+		t.Fatalf("write checkout commondir: %v", err)
+	}
+	gitOutput(t, checkoutDir, "read-tree", "-u", "--reset", "HEAD")
+	checkout := *parent
+	checkout.RepoDir = checkoutDir
+	checkout.InitEntire()
+	return &checkout
 }
 
 func sameDir(t *testing.T, a, b string) bool {

@@ -277,8 +277,9 @@ func TestGuestTurnEnd_UnregisteredCheckoutIsSkippedForLinkedHome(t *testing.T) {
 
 	chdirWorktree(t, checkout)
 	testutil.WriteFile(t, checkout, "a.go", "package a // in the checkout")
-	saveStepWithTokens(t, s, sid, []string{"a.go"}, 1000)
+	result := saveStepWithTokens(t, s, sid, []string{"a.go"}, 1000)
 
+	assert.Equal(t, StepResult{TokensRecorded: true}, result, "the skipped step should take only the turn's tokens")
 	after := mustLoad(t, s, sid)
 	assert.Empty(t, after.OtherWorktrees, "the checkout's step was recorded")
 	assert.Equal(t, []string{"linked.go"}, after.FilesTouched, "the checkout's file was recorded as the home's")
@@ -299,6 +300,28 @@ func TestGuestTurnEnd_UnregisteredCheckoutIsSkippedForLinkedHome(t *testing.T) {
 	assert.True(t, sameDir(entry.Path, mainDir), "entry path = %s", entry.Path)
 	assert.True(t, hasWorktreeEntry(t.Context(), state, mainDir))
 	assert.False(t, hasWorktreeEntry(t.Context(), state, checkout), "the main worktree's record counts in the checkout")
+}
+
+// SaveTurnStep reports what a step recorded, so a turn spanning worktrees
+// counts its step where files were recorded and its tokens where they were
+// taken: a step whose files are all gone takes neither.
+func TestSaveTurnStep_ReportsWhatItRecorded(t *testing.T) {
+	const sid = "turn-step-result"
+	s := &ManualCommitStrategy{}
+	dir := setupGitRepo(t)
+	chdirWorktree(t, dir)
+
+	assert.Equal(t, StepResult{}, saveStepWithTokens(t, s, sid, []string{"gone.go"}, 500), "a step with no work recorded something")
+	state := mustLoad(t, s, sid)
+	assert.Zero(t, state.StepCount)
+	assert.Nil(t, state.TokenUsage)
+
+	testutil.WriteFile(t, dir, "a.go", "package a")
+	assert.Equal(t, StepResult{FilesRecorded: true, TokensRecorded: true}, saveStepWithTokens(t, s, sid, []string{"a.go"}, 500))
+	state = mustLoad(t, s, sid)
+	assert.Equal(t, 1, state.StepCount)
+	require.NotNil(t, state.TokenUsage)
+	assert.Equal(t, 500, state.TokenUsage.InputTokens)
 }
 
 // A linked home moved between two steps of one turn, before turn start could
@@ -360,9 +383,9 @@ func TestGuestTurnEnd_VanishedEmptyIDHomeIsNotAdopted(t *testing.T) {
 
 // saveStepWithTokens runs a turn-end step in the current directory that
 // creates newFiles and reports inputTokens of usage.
-func saveStepWithTokens(t *testing.T, s *ManualCommitStrategy, sessionID string, newFiles []string, inputTokens int) {
+func saveStepWithTokens(t *testing.T, s *ManualCommitStrategy, sessionID string, newFiles []string, inputTokens int) StepResult {
 	t.Helper()
-	require.NoError(t, s.SaveStep(t.Context(), StepContext{
+	result, err := s.SaveTurnStep(t.Context(), StepContext{
 		SessionID:     sessionID,
 		NewFiles:      newFiles,
 		MetadataDir:   paths.SessionMetadataDirFromSessionID(sessionID),
@@ -371,7 +394,9 @@ func saveStepWithTokens(t *testing.T, s *ManualCommitStrategy, sessionID string,
 		AuthorEmail:   "test@test.com",
 		AgentType:     agent.AgentTypeClaudeCode,
 		TokenUsage:    &agent.TokenUsage{InputTokens: inputTokens, APICallCount: 1},
-	}))
+	})
+	require.NoError(t, err)
+	return result
 }
 
 // unregisteredCheckoutOf materializes a checkout of mainDir's current branch on
