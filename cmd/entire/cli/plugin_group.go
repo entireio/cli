@@ -176,7 +176,7 @@ are listed and installed after a single confirmation (or with --yes);
 			}
 
 			if src.Kind == installFromPath {
-				p, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: src.Ref, Force: force})
+				p, err := InstallPluginFromPath(withPluginProgress(ctx, cmd.ErrOrStderr()), InstallPluginOptions{SourcePath: src.Ref, Force: force})
 				if err != nil {
 					return fmt.Errorf("install plugin: %w", err)
 				}
@@ -538,7 +538,7 @@ is refused unless --force is given.`,
 					return fmt.Errorf("plugin %q is required by %s; use --force to remove anyway", name, strings.Join(dependents, ", "))
 				}
 			}
-			if err := RemoveManagedPlugin(name); err != nil {
+			if err := RemoveManagedPlugin(withPluginProgress(cmd.Context(), cmd.ErrOrStderr()), name); err != nil {
 				return fmt.Errorf("remove plugin: %w", err)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Removed plugin %q\n", name)
