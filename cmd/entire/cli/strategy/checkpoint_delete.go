@@ -357,8 +357,9 @@ func notFoundError(plan *CheckpointDeletePlan, localOnly bool) error {
 	return fmt.Errorf("%w: %s is not in this repository or on any reachable checkpoint remote", ErrCheckpointDeleteNotFound, plan.CheckpointID)
 }
 
-// findLocalCheckpointRef lists refs/entire/checkpoints/*/<id> and matches with
-// ParseRef, so a ref stored under a differently-cased shard is still found.
+// findLocalCheckpointRefs lists refs/entire/checkpoints/*/<id> and returns
+// every ref ParseRef matches to cid: one per shard spelling, so a checkpoint
+// stored under a differently-cased shard, or under both, is found.
 func findLocalCheckpointRefs(ctx context.Context, root string, cid id.CheckpointID) ([]*plumbing.Reference, error) {
 	cmd := exec.CommandContext(ctx, "git", "for-each-ref", "--format=%(objectname) %(refname)",
 		checkpoint.CheckpointRefPrefix+"*/"+cid.String())

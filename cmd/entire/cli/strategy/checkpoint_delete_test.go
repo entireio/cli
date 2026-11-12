@@ -827,6 +827,17 @@ func TestCheckpointDelete_RemovesBothShardSpellings(t *testing.T) {
 			testutil.RunGit(t, dir, "update-ref", legacy.String(), earlier)
 			testutil.RunGit(t, dir, "update-ref", canonical.String(), later, earlier)
 		}},
+		// Both spellings at one commit, one packed and one loose. On a
+		// case-insensitive filesystem deleting the packed name passes its check
+		// against the loose file and removes both, so the second delete finds
+		// nothing left.
+		{"one packed, one loose, same commit", func(t *testing.T, dir, earlier, _ string) {
+			t.Helper()
+			testutil.RunGit(t, dir, "update-ref", canonical.String(), earlier)
+			testutil.RunGit(t, dir, "pack-refs", "--all")
+			testutil.RunGit(t, dir, "update-ref", legacy.String(), earlier)
+			testutil.RunGit(t, dir, "update-ref", folded.String(), earlier)
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newDeleteFixture(t, "git-refs")

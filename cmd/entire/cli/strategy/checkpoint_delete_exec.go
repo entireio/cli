@@ -376,7 +376,18 @@ func deleteLocalCheckpointRef(ctx context.Context, root string, repo *git.Reposi
 		pending = refused
 	}
 	if len(pending) > 0 {
-		return deleted, lastErr
+		// A refused ref can already be gone: when both spellings hold one
+		// commit and one is loose, deleting the other name removes both.
+		left, err := findLocalCheckpointRefs(ctx, root, plan.CheckpointID)
+		if err != nil {
+			return deleted, errors.Join(lastErr, err)
+		}
+		for _, ref := range pending {
+			if slices.ContainsFunc(left, func(l *plumbing.Reference) bool { return l.Name() == ref.Name() }) {
+				return deleted, lastErr
+			}
+		}
+		deleted = true
 	}
 	// A queue entry left behind is harmless: pre-push drops entries whose
 	// local ref is gone (partitionLocalRefs). So a queue failure is logged and
