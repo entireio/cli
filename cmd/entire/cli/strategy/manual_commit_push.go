@@ -535,7 +535,8 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 // failures: they are left out of retries, rotation and the pushed-of count.
 type checkpointRefPartition struct {
 	ready []checkpointRefPush
-	// waiting were not selected for this upload.
+	// waiting were not selected for this upload, or name a destination another
+	// ready ref takes in it at a different commit.
 	waiting []checkpoint.PushQueueEntry
 	// changed were selected with a pinned commit that is no longer the tip;
 	// each carries the current tip.
@@ -561,6 +562,14 @@ func partitionCheckpointRefPushes(
 		ready:    make([]checkpointRefPush, 0, len(entries)),
 		readErrs: make(map[plumbing.ReferenceName]error),
 	}
+	// placed locates the candidate holding each destination name, so a second
+	// queue entry for the same checkpoint joins it. git refuses a push that
+	// names one destination twice, and that takes the whole batch with it.
+	type place struct {
+		changed bool
+		index   int
+	}
+	placed := make(map[plumbing.ReferenceName]place, len(entries))
 	for _, entry := range entries {
 		// A ref the selection leaves out waits untouched: a push of named refs
 		// does not read, prune or report the others.
@@ -597,10 +606,27 @@ func partitionCheckpointRefPushes(
 		if stored != candidate.name {
 			candidate.stored = stored
 		}
+		if at, dup := placed[candidate.name]; dup {
+			first := &part.ready[at.index]
+			if at.changed {
+				first = &part.changed[at.index]
+			}
+			if first.hash.Equal(candidate.hash) {
+				first.also = append(first.also, entry)
+			} else {
+				// Two refs for one checkpoint at different commits: only one
+				// can take the destination in this upload. The other waits and
+				// is replayed onto it by a later push.
+				part.waiting = append(part.waiting, entry)
+			}
+			continue
+		}
 		switch {
 		case !pin.IsZero() && pin != candidate.hash:
+			placed[candidate.name] = place{changed: true, index: len(part.changed)}
 			part.changed = append(part.changed, candidate)
 		default:
+			placed[candidate.name] = place{index: len(part.ready)}
 			part.ready = append(part.ready, candidate)
 		}
 	}
@@ -624,6 +650,7 @@ func checkpointRefPushTokens(refs []checkpointRefPush) []checkpoint.PushQueueEnt
 	entries := make([]checkpoint.PushQueueEntry, 0, len(refs))
 	for _, ref := range refs {
 		entries = append(entries, ref.token)
+		entries = append(entries, ref.also...)
 	}
 	return entries
 }
@@ -1085,7 +1112,9 @@ func retryRefsIndividually(ctx, flushCtx context.Context, repo *git.Repository, 
 				slog.String("ref", ref.name.String()))
 			// Report the generation now waiting, so a caller has a commit to pin.
 			if current, readErr := repo.Reference(ref.localRef(), true); readErr == nil {
-				res.changed = append(res.changed, checkpointRefPush{token: ref.token, name: ref.name, stored: ref.stored, hash: current.Hash()})
+				waiting := ref
+				waiting.hash = current.Hash()
+				res.changed = append(res.changed, waiting)
 			} else {
 				res.errs[ref.name] = err
 			}

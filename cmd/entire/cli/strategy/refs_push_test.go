@@ -571,6 +571,91 @@ func TestPushQueuedCheckpointRefs_RemoteHoldingFoldedNameGainsCanonical(t *testi
 	assert.Equal(t, map[plumbing.ReferenceName]string{queued: newer, stored: older}, remoteCheckpointRefs(t, bareDir, cid))
 }
 
+// A queue can hold one checkpoint under both spellings of its shard, because
+// the spelling a write enqueues follows how the ref is stored at that moment.
+// Both entries name one destination, and git refuses a push that names a
+// destination twice, taking the other refs of the batch down with it.
+func TestPartitionCheckpointRefPushes_BothShardSpellingsQueuedMakeOnePush(t *testing.T) {
+	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+	stored, queued := foldedShardFixture(t, workDir, "HEAD")
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	entries := []checkpoint.PushQueueEntry{{Ref: refs[0]}, {Ref: queued}, {Ref: stored}}
+	part := partitionCheckpointRefPushes(repo, entries, checkpointRefSelection{})
+
+	require.NoError(t, batchPushCheckpointRefs(context.Background(), bareDir, part.ready),
+		"one batch must carry every queued checkpoint")
+	assert.ElementsMatch(t, entries, checkpointRefPushTokens(part.ready),
+		"both queue entries are delivered by the one push, so both must be dequeued")
+}
+
+func TestPushQueuedCheckpointRefs_BothShardSpellingsQueuedPushOnce(t *testing.T) {
+	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+	cid := id.MustCheckpointID("0000000000ab")
+	stored, queued := foldedShardFixture(t, workDir, "HEAD")
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	queue := enqueueRefs(t, repo, []plumbing.ReferenceName{refs[0], queued, stored})
+	pushed, _, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
+	require.NoError(t, err)
+
+	assert.Equal(t, 2, pushed, "two checkpoints are queued, one of them twice")
+	assert.Equal(t, map[plumbing.ReferenceName]string{queued: revParse(t, workDir, "HEAD")}, remoteCheckpointRefs(t, bareDir, cid))
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.Empty(t, remaining, "both spellings leave the queue")
+}
+
+// Both spellings can exist as separate refs at different commits. Only one can
+// take the destination in an upload; the other stays queued and lands on the
+// next one.
+func TestPushQueuedCheckpointRefs_ShardSpellingsAtDifferentCommitsPushInTurn(t *testing.T) {
+	workDir, bareDir, _ := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+	cid := id.MustCheckpointID("0000000000ab")
+	older := revParse(t, workDir, "HEAD")
+	stored, queued := foldedShardFixture(t, workDir, older)
+	// Packed between the two writes, so the second name is a ref of its own on
+	// a case-insensitive filesystem too.
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+	testutil.RunGit(t, workDir, "commit", "--allow-empty", "-m", "newer checkpoint version")
+	newer := revParse(t, workDir, "HEAD")
+	testutil.RunGit(t, workDir, "update-ref", queued.String(), newer)
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	queue := enqueueRefs(t, repo, []plumbing.ReferenceName{stored, queued})
+
+	pushed, _, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
+	require.NoError(t, err)
+	assert.Equal(t, 1, pushed)
+	assert.Equal(t, map[plumbing.ReferenceName]string{queued: older}, remoteCheckpointRefs(t, bareDir, cid))
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.Equal(t, []plumbing.ReferenceName{queued}, remaining, "the ref that did not go stays queued")
+
+	pushed, _, err = PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
+	require.NoError(t, err)
+	assert.Equal(t, 1, pushed)
+	assert.Equal(t, map[plumbing.ReferenceName]string{queued: newer}, remoteCheckpointRefs(t, bareDir, cid))
+	remaining, err = queue.Drain()
+	require.NoError(t, err)
+	assert.Empty(t, remaining)
+}
+
 func TestBatchPushCheckpointRefs(t *testing.T) {
 	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
 	t.Chdir(workDir)

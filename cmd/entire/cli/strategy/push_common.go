@@ -28,6 +28,9 @@ import (
 // the queue generation token that successful delivery may remove.
 type checkpointRefPush struct {
 	token checkpoint.PushQueueEntry
+	// also holds the other queue entries this push delivers: the same
+	// checkpoint at the same commit, queued under its other shard spelling.
+	also []checkpoint.PushQueueEntry
 	// name is the ref the remote receives and the one fetched back from it:
 	// the checkpoint's canonical name, which is the one other clones read.
 	name plumbing.ReferenceName
