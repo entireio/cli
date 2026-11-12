@@ -64,6 +64,55 @@ func TestCheckCheckpointRefShardCase_ReportsSplitCheckpoint(t *testing.T) {
 	assert.Contains(t, output, "git pack-refs --all", "the delete is unsafe without packing first")
 }
 
+// When one ref continues the other, the report names the earlier one as the
+// ref to remove, whichever spelling it has. A user told to pick could delete
+// the version Entire reads.
+func TestCheckCheckpointRefShardCase_NamesTheEarlierRefOfASplit(t *testing.T) {
+	for _, tc := range []struct {
+		name, earlier, later string
+	}{
+		{"folded is earlier", shardCaseFoldedRef, shardCaseULIDRef},
+		{"canonical is earlier", shardCaseULIDRef, shardCaseFoldedRef},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, head := shardCaseRepo(t)
+			testutil.GitUpdateRef(t, dir, tc.earlier, head)
+			testutil.RunGit(t, dir, "pack-refs", "--all")
+			testutil.RunGit(t, dir, "commit", "--allow-empty", "-m", "later version")
+			testutil.GitUpdateRef(t, dir, tc.later, "HEAD")
+			testutil.RunGit(t, dir, "pack-refs", "--all")
+
+			cmd, stdout := newTestCmd(t)
+			checkCheckpointRefShardCase(cmd)
+
+			output := stdout.String()
+			assert.Contains(t, output, "git update-ref -d "+tc.earlier)
+			assert.NotContains(t, output, "update-ref -d "+tc.later)
+		})
+	}
+}
+
+// Refs whose histories diverged each hold sessions the other lacks, so the
+// report offers no delete for either.
+func TestCheckCheckpointRefShardCase_OffersNoDeleteForDivergedRefs(t *testing.T) {
+	dir, head := shardCaseRepo(t)
+	testutil.RunGit(t, dir, "commit", "--allow-empty", "-m", "one side")
+	testutil.GitUpdateRef(t, dir, shardCaseFoldedRef, "HEAD")
+	testutil.RunGit(t, dir, "pack-refs", "--all")
+	testutil.GitReset(t, dir, head)
+	testutil.RunGit(t, dir, "commit", "--allow-empty", "-m", "other side")
+	testutil.GitUpdateRef(t, dir, shardCaseULIDRef, "HEAD")
+	testutil.RunGit(t, dir, "pack-refs", "--all")
+
+	cmd, stdout := newTestCmd(t)
+	checkCheckpointRefShardCase(cmd)
+
+	output := stdout.String()
+	assert.Contains(t, output, shardCaseFoldedRef)
+	assert.Contains(t, output, shardCaseULIDRef)
+	assert.NotContains(t, output, "update-ref -d")
+}
+
 func TestCheckCheckpointRefShardCase_SilentOnCanonicalRefs(t *testing.T) {
 	dir, head := shardCaseRepo(t)
 	testutil.GitUpdateRef(t, dir, shardCaseULIDRef, head)
