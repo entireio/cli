@@ -155,8 +155,9 @@ func (s *gitRefsStore) refBase(cid id.CheckpointID) (plumbing.Hash, *object.Tree
 	return s.refTip(cid, ref)
 }
 
-// resolveLocalRef resolves cid's checkpoint ref from LOCAL refs alone, trying
-// the canonical RefName spelling first and then the case-folded one.
+// resolveLocalRef resolves cid's checkpoint ref from LOCAL refs alone, under
+// the canonical RefName spelling or the case-folded one. When both exist it
+// returns the canonical ref unless the folded one supersedes it (SupersededBy).
 //
 // The fallback is not defensive tidying. On a case-insensitive-but-case-
 // preserving filesystem a ref is written THROUGH the canonical name but STORED
@@ -179,26 +180,58 @@ func (s *gitRefsStore) resolveLocalRef(cid id.CheckpointID) (*plumbing.Reference
 		return nil, err
 	}
 	ref, err := s.repo.Reference(refName, true)
-	if err == nil {
-		return ref, nil
-	}
-	if !errors.Is(err, plumbing.ErrReferenceNotFound) {
+	if err != nil && !errors.Is(err, plumbing.ErrReferenceNotFound) {
 		return nil, fmt.Errorf("resolve checkpoint ref %s: %w", refName, err)
 	}
 	folded, ok := FoldedRefName(cid)
 	if !ok {
-		return nil, err //nolint:wrapcheck // absent; caller distinguishes via errors.Is
+		return ref, err //nolint:wrapcheck // absent; caller distinguishes via errors.Is
 	}
 	foldedRef, foldedErr := s.repo.Reference(folded, true)
-	if foldedErr == nil {
+	switch {
+	case err == nil && foldedErr != nil:
+		// The canonical ref stands whatever became of the second lookup.
+		return ref, nil //nolint:nilerr // the folded spelling is absent or unreadable; the canonical ref resolved
+	case err == nil:
+		if SupersededBy(s.repo, ref.Hash(), foldedRef.Hash()) {
+			return foldedRef, nil
+		}
+		return ref, nil
+	case foldedErr == nil:
 		return foldedRef, nil
-	}
-	if !errors.Is(foldedErr, plumbing.ErrReferenceNotFound) {
+	case errors.Is(foldedErr, plumbing.ErrReferenceNotFound):
+		// Absent under both spellings: report the canonical miss, so the error
+		// names the ref the caller asked for.
+		return nil, err //nolint:wrapcheck // absent; caller distinguishes via errors.Is
+	default:
 		return nil, fmt.Errorf("resolve checkpoint ref %s: %w", folded, foldedErr)
 	}
-	// Absent under both spellings: report the canonical miss, so the error
-	// names the ref the caller asked for.
-	return nil, err //nolint:wrapcheck // absent; caller distinguishes via errors.Is
+}
+
+// SupersededBy reports whether the checkpoint version at other is a later
+// version of the one at tip: a different commit that has tip in its history.
+//
+// A checkpoint can hold a ref under each spelling of its shard at different
+// commits. On a case-insensitive filesystem, updating a packed ref writes the
+// new commit under whichever spelling the shard directory has on disk, and the
+// packed entry keeps the old commit under the other. Either spelling can end
+// up the stale one, so the name does not say which ref is the checkpoint; its
+// history does. Refs that share no such history are left to the caller's
+// choice by name.
+func SupersededBy(repo *git.Repository, tip, other plumbing.Hash) bool {
+	if tip.Equal(other) {
+		return false
+	}
+	older, err := repo.CommitObject(tip)
+	if err != nil {
+		return false
+	}
+	newer, err := repo.CommitObject(other)
+	if err != nil {
+		return false
+	}
+	descends, err := older.IsAncestor(newer)
+	return err == nil && descends
 }
 
 // refBaseForBackfill resolves like refBase, but a ref missing locally is

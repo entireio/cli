@@ -162,6 +162,43 @@ func TestGitRefsStore_ReadsPackedFoldedShardRef(t *testing.T) {
 	assert.Equal(t, foldableULID, infos[0].CheckpointID)
 }
 
+// On a case-insensitive filesystem git can leave a checkpoint with a ref under
+// each spelling: updating a packed ref writes the new commit under whichever
+// spelling the shard directory has on disk, and the packed entry keeps the old
+// one. Once packed again, the canonical name can be the stale one. The newer
+// version is the checkpoint: reads must return it and writes must build on it.
+func TestGitRefsStore_UsesTheNewerRefWhenBothShardSpellingsExist(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newRefsStore(t)
+	canonical := mustRefName(t, foldableLegacy)
+	refsWrite(t, store, foldableLegacy, "sess-1", "transcript one")
+	older, err := store.repo.Reference(canonical, true)
+	require.NoError(t, err)
+	refsWrite(t, store, foldableLegacy, "sess-2", "transcript two")
+
+	// Folded at the newer commit, then the canonical name at the older one.
+	// Packed between the two so each is a ref of its own on any filesystem.
+	folded, _ := foldShardRefAndPack(t, store, foldableLegacy)
+	dir := repoDirOf(t, folded)
+	testutil.RunGit(t, dir, "update-ref", canonical.String(), older.Hash().String())
+	testutil.RunGit(t, dir, "pack-refs", "--all")
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	both := newGitRefsStore(repo)
+	require.Len(t, checkpointRefNames(t, both), 2, "precondition: one ref under each spelling")
+
+	summary, err := both.Read(ctx, foldableLegacy)
+	require.NoError(t, err)
+	require.NotNil(t, summary)
+	require.Len(t, summary.Sessions, 2, "the read must return the newer version")
+
+	refsWrite(t, both, foldableLegacy, "sess-3", "transcript three")
+	summary, err = both.Read(ctx, foldableLegacy)
+	require.NoError(t, err)
+	require.Len(t, summary.Sessions, 3, "the write must build on the newer version")
+}
+
 // TestGitRefsStore_WriteExtendsFoldedRefInsteadOfForking is the regression for
 // the write half: with only a tolerant read, refBase finds the folded ref and
 // hands back its tip while the update creates a SECOND ref at the canonical

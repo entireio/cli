@@ -75,38 +75,52 @@ func (p checkpointRefPush) refSpec() string {
 // the name they passed in, so what they report does not depend on the
 // filesystem or on whether git has packed the ref.
 //
-// Only a definite ErrReferenceNotFound moves to the other spelling. Any other
-// failure of the queued name is returned as it is, so a flaky read never
-// changes which ref a caller acts on. ErrReferenceNotFound is returned only
+// When both spellings hold a ref, the result is the queued one unless the other
+// is a later version of it (checkpoint.SupersededBy).
+//
+// A failure of the queued name other than ErrReferenceNotFound is returned as
+// it is, so a flaky read never changes which ref a caller acts on, and a
+// failure of the other name never hides a queued one that resolved.
+// ErrReferenceNotFound is returned only
 // when neither spelling resolves.
 func storedCheckpointRef(
 	repo *git.Repository,
 	listed map[plumbing.ReferenceName]plumbing.Hash,
 	ref plumbing.ReferenceName,
 ) (name plumbing.ReferenceName, tip plumbing.Hash, err error) {
-	if hash, ok := listed[ref]; ok {
-		return ref, hash, nil
+	lookup := func(name plumbing.ReferenceName) (plumbing.Hash, error) {
+		if hash, ok := listed[name]; ok {
+			return hash, nil
+		}
+		r, err := repo.Reference(name, true)
+		if err != nil {
+			return plumbing.ZeroHash, err //nolint:wrapcheck // callers branch on plumbing.ErrReferenceNotFound
+		}
+		return r.Hash(), nil
 	}
+	tip, err = lookup(ref)
 	other, hasOther := otherShardSpelling(ref)
-	if hash, ok := listed[other]; hasOther && ok {
-		return other, hash, nil
+	if !hasOther || (err != nil && !errors.Is(err, plumbing.ErrReferenceNotFound)) {
+		return ref, tip, err
 	}
-	r, err := repo.Reference(ref, true)
-	if err == nil {
-		return ref, r.Hash(), nil
-	}
-	if !hasOther || !errors.Is(err, plumbing.ErrReferenceNotFound) {
-		return ref, plumbing.ZeroHash, err //nolint:wrapcheck // callers branch on plumbing.ErrReferenceNotFound
-	}
-	r, otherErr := repo.Reference(other, true)
+	otherTip, otherErr := lookup(other)
 	switch {
+	case err == nil && otherErr != nil:
+		// The queued name stands whatever became of the second lookup.
+		return ref, tip, nil //nolint:nilerr // the other spelling is absent or unreadable; the queued name resolved
+	case err == nil:
+		// Both spellings hold a ref. The later version is the checkpoint.
+		if checkpoint.SupersededBy(repo, tip, otherTip) {
+			return other, otherTip, nil
+		}
+		return ref, tip, nil
 	case otherErr == nil:
-		return other, r.Hash(), nil
+		return other, otherTip, nil
 	case errors.Is(otherErr, plumbing.ErrReferenceNotFound):
 		// Absent under both spellings: report the name the caller asked for.
-		return ref, plumbing.ZeroHash, err //nolint:wrapcheck // callers branch on plumbing.ErrReferenceNotFound
+		return ref, plumbing.ZeroHash, err
 	default:
-		return other, plumbing.ZeroHash, otherErr //nolint:wrapcheck // callers branch on plumbing.ErrReferenceNotFound
+		return other, plumbing.ZeroHash, otherErr
 	}
 }
 

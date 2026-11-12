@@ -614,9 +614,9 @@ func partitionCheckpointRefPushes(
 			if first.hash.Equal(candidate.hash) {
 				first.also = append(first.also, entry)
 			} else {
-				// Two refs for one checkpoint at different commits: only one
-				// can take the destination in this upload. The other waits and
-				// is replayed onto it by a later push.
+				// Two refs for one checkpoint whose histories diverged: only
+				// one can take the destination in this upload. The other waits
+				// and is replayed onto it by a later push.
 				part.waiting = append(part.waiting, entry)
 			}
 			continue

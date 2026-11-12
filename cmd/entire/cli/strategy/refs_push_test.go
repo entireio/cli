@@ -616,22 +616,58 @@ func TestPushQueuedCheckpointRefs_BothShardSpellingsQueuedPushOnce(t *testing.T)
 	assert.Empty(t, remaining, "both spellings leave the queue")
 }
 
-// Both spellings can exist as separate refs at different commits. Only one can
-// take the destination in an upload; the other stays queued and lands on the
-// next one.
-func TestPushQueuedCheckpointRefs_ShardSpellingsAtDifferentCommitsPushInTurn(t *testing.T) {
+// git can leave the canonical name at an older commit than the folded one
+// (see checkpoint.SupersededBy). The push sends the newer version.
+func TestPushQueuedCheckpointRefs_PushesTheNewerRefWhenBothShardSpellingsExist(t *testing.T) {
 	workDir, bareDir, _ := setupRepoWithCheckpointRefs(t)
 	t.Chdir(workDir)
 	paths.ClearWorktreeRootCache()
 	cid := id.MustCheckpointID("0000000000ab")
-	older := revParse(t, workDir, "HEAD")
-	stored, queued := foldedShardFixture(t, workDir, older)
-	// Packed between the two writes, so the second name is a ref of its own on
-	// a case-insensitive filesystem too.
+	stored := plumbing.ReferenceName(checkpoint.CheckpointRefPrefix + "AB/0000000000ab")
+	queued := mustRefName(t, cid)
+	testutil.RunGit(t, workDir, "update-ref", queued.String(), "HEAD")
 	testutil.RunGit(t, workDir, "pack-refs", "--all")
 	testutil.RunGit(t, workDir, "commit", "--allow-empty", "-m", "newer checkpoint version")
 	newer := revParse(t, workDir, "HEAD")
-	testutil.RunGit(t, workDir, "update-ref", queued.String(), newer)
+	testutil.RunGit(t, workDir, "update-ref", stored.String(), newer)
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	queue := enqueueRefs(t, repo, []plumbing.ReferenceName{queued})
+	pushed, _, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, pushed)
+	assert.Equal(t, map[plumbing.ReferenceName]string{queued: newer}, remoteCheckpointRefs(t, bareDir, cid))
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.Empty(t, remaining)
+}
+
+// Both spellings can hold refs whose histories diverged, so neither is a later
+// version of the other. Only one can take the destination in an upload; the
+// other stays queued and the next push replays it onto the first.
+func TestPushQueuedCheckpointRefs_DivergedShardSpellingsPushInTurn(t *testing.T) {
+	workDir, bareDir, _ := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+	cid := id.MustCheckpointID("0000000000ab")
+	base := revParse(t, workDir, "HEAD")
+	testutil.WriteFile(t, workDir, "b.txt", "b")
+	testutil.GitAdd(t, workDir, "b.txt")
+	testutil.GitCommit(t, workDir, "add b")
+	first := revParse(t, workDir, "HEAD")
+	stored, queued := foldedShardFixture(t, workDir, first)
+	// Packed between the two writes, so the second name is a ref of its own on
+	// a case-insensitive filesystem too.
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+	testutil.GitReset(t, workDir, base)
+	testutil.WriteFile(t, workDir, "c.txt", "c")
+	testutil.GitAdd(t, workDir, "c.txt")
+	testutil.GitCommit(t, workDir, "add c")
+	testutil.RunGit(t, workDir, "update-ref", queued.String(), "HEAD")
 	testutil.RunGit(t, workDir, "pack-refs", "--all")
 
 	repo, err := gitrepo.OpenPath(workDir)
@@ -642,7 +678,7 @@ func TestPushQueuedCheckpointRefs_ShardSpellingsAtDifferentCommitsPushInTurn(t *
 	pushed, _, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
 	require.NoError(t, err)
 	assert.Equal(t, 1, pushed)
-	assert.Equal(t, map[plumbing.ReferenceName]string{queued: older}, remoteCheckpointRefs(t, bareDir, cid))
+	assert.Equal(t, map[plumbing.ReferenceName]string{queued: first}, remoteCheckpointRefs(t, bareDir, cid))
 	remaining, err := queue.Drain()
 	require.NoError(t, err)
 	assert.Equal(t, []plumbing.ReferenceName{queued}, remaining, "the ref that did not go stays queued")
@@ -650,7 +686,9 @@ func TestPushQueuedCheckpointRefs_ShardSpellingsAtDifferentCommitsPushInTurn(t *
 	pushed, _, err = PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
 	require.NoError(t, err)
 	assert.Equal(t, 1, pushed)
-	assert.Equal(t, map[plumbing.ReferenceName]string{queued: newer}, remoteCheckpointRefs(t, bareDir, cid))
+	files := remoteRefFiles(t, bareDir, queued)
+	assert.Contains(t, files, "b.txt", "the first upload is kept")
+	assert.Contains(t, files, "c.txt", "the second is replayed on top")
 	remaining, err = queue.Drain()
 	require.NoError(t, err)
 	assert.Empty(t, remaining)
