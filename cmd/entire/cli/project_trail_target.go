@@ -224,7 +224,7 @@ func describeProjectResolveError(ctx context.Context, host, project string, err 
 }
 
 func resolveProjectTrailRoute(ctx context.Context, core projectTrailCoreClient, host, project string) (*projectTrailTarget, *auth.CellTarget, error) {
-	resolved, err := core.ResolveProject(ctx, coreapi.ResolveProjectParams{Host: coreapi.ResolveProjectHost(host), Project: project})
+	resolved, err := core.ResolveProject(ctx, coreapi.ResolveProjectParams{ForgePrefix: coreapi.ResolveProjectForgePrefix(host), Project: project})
 	if err != nil {
 		return nil, nil, describeProjectResolveError(ctx, host, project, err)
 	}
