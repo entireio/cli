@@ -560,6 +560,10 @@ const (
 	codexBaseInstructions = "You are Codex. Internal: staging db is at 10.20.30.40"
 	codexAgentsDump       = "# AGENTS.md instructions for /repo\n\n<INSTRUCTIONS>\nClient Acme Bank rollout notes\n</INSTRUCTIONS>"
 	codexAgentsState      = "Client Acme Bank rollout notes"
+	// Codex 0.132 and older repeat the developer's own AGENTS.md, then the
+	// repository's after a separator, in every turn_context record.
+	codexUserInstructions = "Alias prod-db to 10.9.8.7 for Globex\n\n--- project-doc ---\n\nRun the tests first."
+	codexAppContext       = "<app-context>Codex desktop context</app-context>"
 )
 
 func codexRolloutWithInstructions(t *testing.T) []byte {
@@ -578,6 +582,7 @@ func codexRolloutWithInstructions(t *testing.T) []byte {
 		`{"timestamp":"t5","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"please update AGENTS.md with the new rule"}]}}`,
 		`{"timestamp":"t6","type":"compacted","payload":{"message":"","replacement_history":[{"type":"message","role":"user","content":[{"type":"input_text","text":` + enc(codexAgentsDump) + `}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"earlier prompt"}]}]}}`,
 		`{"timestamp":"t7","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}`,
+		`{"timestamp":"t8","type":"turn_context","payload":{"cwd":"/repo","model":"gpt-5","user_instructions":` + enc(codexUserInstructions) + `,"developer_instructions":` + enc(codexAppContext) + `},"seq":7}`,
 	}, "\n") + "\n")
 }
 
@@ -588,6 +593,7 @@ func TestSanitizePortableTranscript_BlanksInjectedInstructionText(t *testing.T) 
 
 	require.NotContains(t, got, "10.20.30.40", "base instructions survived")
 	require.NotContains(t, got, "Acme Bank", "AGENTS.md text survived")
+	require.NotContains(t, got, "Globex", "turn_context user instructions survived")
 
 	// The records stay, and so does everything that is not instruction text.
 	require.Contains(t, got, `"base_instructions"`)
@@ -598,6 +604,44 @@ func TestSanitizePortableTranscript_BlanksInjectedInstructionText(t *testing.T) 
 	require.Contains(t, got, "please update AGENTS.md with the new rule", "a prompt that names AGENTS.md is the user's own text")
 	require.Contains(t, got, "earlier prompt")
 	require.Contains(t, got, `"text":"done"`)
+	require.Contains(t, got, `"user_instructions":""`)
+	require.Contains(t, got, codexAppContext, "Codex's built-in developer instructions are not the developer's text")
+	require.Contains(t, got, `"seq":7`, "unknown top-level keys survive the rewrite")
+}
+
+func TestSanitizePortableTranscript_KeepsLineStructure(t *testing.T) {
+	t.Parallel()
+
+	rollout := codexRolloutWithInstructions(t)
+	untouched := `{"timestamp":"t2","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<permissions instructions>sandbox</permissions instructions>"}]}}`
+	require.Contains(t, string(rollout), untouched)
+
+	tests := map[string][]byte{
+		"final newline":             rollout,
+		"no final newline":          bytes.TrimSuffix(rollout, []byte("\n")),
+		"blank lines":               bytes.Replace(rollout, []byte(untouched+"\n"), []byte(untouched+"\n\n   \n"), 1),
+		"crlf on an untouched line": bytes.Replace(rollout, []byte(untouched+"\n"), []byte(untouched+"\r\n"), 1),
+	}
+	for name, input := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			got := SanitizePortableTranscript(input)
+
+			require.NotEqual(t, string(input), string(got), "the fixture must be rewritten for this test to mean anything")
+			require.Equal(t, bytes.Count(input, []byte("\n")), bytes.Count(got, []byte("\n")), "line count changed")
+			require.Equal(t, bytes.HasSuffix(input, []byte("\n")), bytes.HasSuffix(got, []byte("\n")), "final newline changed")
+			inLines := bytes.Split(input, []byte("\n"))
+			gotLines := bytes.Split(got, []byte("\n"))
+			for i := range inLines {
+				if !bytes.Contains(inLines[i], []byte("base_instructions")) && !bytes.Contains(inLines[i], []byte("AGENTS.md")) &&
+					!bytes.Contains(inLines[i], []byte("agents_md")) && !bytes.Contains(inLines[i], []byte("user_instructions")) &&
+					!bytes.Contains(inLines[i], []byte(`"role":"developer","content":[{"type":"input_text","text":"You are Codex`)) {
+					require.Equal(t, string(inLines[i]), string(gotLines[i]), "line %d holds no instruction text and must keep its bytes", i)
+				}
+			}
+		})
+	}
 }
 
 func TestSanitizePortableTranscript_InstructionBlankingPreservesLineNumbering(t *testing.T) {

@@ -67,6 +67,7 @@ const (
 	rolloutLineTypeSessionMeta  = "session_meta"
 	rolloutLineTypeEventMsg     = "event_msg"
 	rolloutLineTypeWorldState   = "world_state"
+	rolloutLineTypeTurnContext  = "turn_context"
 	eventMsgTypeTokenCount      = "token_count"
 	// itemTypeAgentMessage is the type of a multi-agent message item, both as a
 	// rollout response_item payload and as a `codex exec --json` event item.
@@ -838,37 +839,31 @@ func SanitizePortableTranscript(data []byte) []byte {
 		return data
 	}
 
-	lines := splitJSONL(data)
-	if len(lines) == 0 {
-		return data
-	}
-
-	sanitized := make([][]byte, 0, len(lines))
+	// Rewrite lines in place and join them back exactly as they were split, so
+	// blank lines and the final newline survive: checkpoint offsets count lines,
+	// and the redaction cache only reuses content that ends in a newline.
+	lines := bytes.Split(data, []byte("\n"))
 	changed := false
 	var s rolloutSanitizer
-	for _, lineData := range lines {
-		updated, keep := s.sanitizeLine(lineData)
-		if !keep {
-			changed = true
+	for i, raw := range lines {
+		lineData := bytes.TrimSpace(raw)
+		if len(lineData) == 0 {
 			continue
 		}
-		if !bytes.Equal(updated, lineData) {
+		if updated := s.sanitizeLine(lineData); !bytes.Equal(updated, lineData) {
+			lines[i] = updated
 			changed = true
 		}
-		sanitized = append(sanitized, updated)
 	}
 
 	// Nothing to strip: hand back the original bytes rather than paying the
-	// reassembly copy. Callers rely on this being cheap — sanitization is
+	// join copy. Callers rely on this being cheap — sanitization is
 	// idempotent precisely so every storage path can call it without tracking
 	// whether an upstream path already did.
 	if !changed {
 		return data
 	}
-	if len(sanitized) == 0 {
-		return data
-	}
-	return agent.ReassembleJSONL(sanitized)
+	return bytes.Join(lines, []byte("\n"))
 }
 
 // sanitizeMarkers are the substrings that gate every transformation
@@ -888,6 +883,7 @@ var sanitizeMarkers = [][]byte{
 	[]byte("base_instructions"),
 	[]byte("agents_md"),
 	[]byte("AGENTS.md"),
+	[]byte("user_instructions"),
 }
 
 func mayNeedSanitizing(data []byte) bool {
@@ -916,31 +912,33 @@ type rolloutSanitizer struct {
 	baseInstructions string
 }
 
-func (s *rolloutSanitizer) sanitizeLine(lineData []byte) ([]byte, bool) {
+func (s *rolloutSanitizer) sanitizeLine(lineData []byte) []byte {
 	var line rolloutLine
 	if err := json.Unmarshal(lineData, &line); err != nil {
-		return lineData, true
+		return lineData
 	}
 	switch line.Type {
 	case "compacted":
 		return s.sanitizeCompactedLine(line)
 	case rolloutLineTypeSessionMeta:
-		return s.blankBaseInstructions(lineData, line), true
+		return s.blankBaseInstructions(lineData, line)
 	case rolloutLineTypeWorldState:
-		return blankAgentsMDState(lineData, line), true
+		return blankAgentsMDState(lineData, line)
+	case rolloutLineTypeTurnContext:
+		return blankTurnUserInstructions(lineData, line)
 	case rolloutLineTypeResponseItem:
 	default:
-		return lineData, true
+		return lineData
 	}
 
 	var payload map[string]any
 	if err := json.Unmarshal(line.Payload, &payload); err != nil {
-		return lineData, true
+		return lineData
 	}
 
 	itemType, ok := payload["type"].(string)
 	if !ok {
-		return lineData, true
+		return lineData
 	}
 	switch itemType {
 	case "reasoning", "compaction", "compaction_summary":
@@ -961,28 +959,28 @@ func (s *rolloutSanitizer) sanitizeLine(lineData []byte) ([]byte, bool) {
 		// only that part; the line and its readable parts stay, so line numbering
 		// is unchanged. Untouched lines keep their original bytes.
 		if !stripEncryptedContentParts(payload) {
-			return lineData, true
+			return lineData
 		}
 	case itemTypeMessage:
 		if !s.blankInstructionParts(payload) {
-			return lineData, true
+			return lineData
 		}
-		return rewriteRolloutPayload(lineData, payload), true
+		return rewriteRolloutPayload(lineData, payload)
 	default:
-		return lineData, true
+		return lineData
 	}
 
 	encodedPayload, err := json.Marshal(payload)
 	if err != nil {
-		return lineData, true
+		return lineData
 	}
 	line.Payload = encodedPayload
 
 	encodedLine, err := json.Marshal(line)
 	if err != nil {
-		return lineData, true
+		return lineData
 	}
-	return encodedLine, true
+	return encodedLine
 }
 
 // blankBaseInstructions empties session_meta's base_instructions text and
@@ -1002,6 +1000,23 @@ func (s *rolloutSanitizer) blankBaseInstructions(lineData []byte, line rolloutLi
 	}
 	s.baseInstructions = text
 	base["text"] = ""
+	return rewriteRolloutPayload(lineData, payload)
+}
+
+// blankTurnUserInstructions empties the user_instructions a turn_context line
+// repeats. Codex 0.132 and older record there the developer's own AGENTS.md
+// followed by the repository's. developer_instructions stays: it holds Codex's
+// built-in desktop context, not the developer's text.
+func blankTurnUserInstructions(lineData []byte, line rolloutLine) []byte {
+	var payload map[string]any
+	if err := json.Unmarshal(line.Payload, &payload); err != nil {
+		return lineData
+	}
+	text, ok := payload["user_instructions"].(string)
+	if !ok || text == "" {
+		return lineData
+	}
+	payload["user_instructions"] = ""
 	return rewriteRolloutPayload(lineData, payload)
 }
 
@@ -1079,15 +1094,15 @@ func rewriteRolloutPayload(lineData []byte, payload map[string]any) []byte {
 	return encodedLine
 }
 
-func (s *rolloutSanitizer) sanitizeCompactedLine(line rolloutLine) ([]byte, bool) {
+func (s *rolloutSanitizer) sanitizeCompactedLine(line rolloutLine) []byte {
 	var payload map[string]any
 	if err := json.Unmarshal(line.Payload, &payload); err != nil {
-		return mustMarshalRolloutLine(line), true
+		return mustMarshalRolloutLine(line)
 	}
 
 	replacementHistory, ok := payload["replacement_history"].([]any)
 	if !ok {
-		return mustMarshalRolloutLine(line), true
+		return mustMarshalRolloutLine(line)
 	}
 
 	sanitizedHistory := s.sanitizeHistoryItems(replacementHistory)
@@ -1095,11 +1110,11 @@ func (s *rolloutSanitizer) sanitizeCompactedLine(line rolloutLine) ([]byte, bool
 
 	encodedPayload, err := json.Marshal(payload)
 	if err != nil {
-		return mustMarshalRolloutLine(line), true
+		return mustMarshalRolloutLine(line)
 	}
 	line.Payload = encodedPayload
 
-	return mustMarshalRolloutLine(line), true
+	return mustMarshalRolloutLine(line)
 }
 
 func (s *rolloutSanitizer) sanitizeHistoryItems(items []any) []any {
