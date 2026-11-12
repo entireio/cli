@@ -38,11 +38,10 @@ func main() {
 
 	// Handle interrupt signals
 	sigChan := make(chan os.Signal, 1)
-	signals := []os.Signal{os.Interrupt}
-	if runtime.GOOS != "windows" {
-		signals = append(signals, syscall.SIGTERM)
+	if signals := shutdownSignals(runtime.GOOS, signal.Ignored); len(signals) > 0 {
+		// Never Notify with an empty list: that means every signal.
+		signal.Notify(sigChan, signals...)
 	}
-	signal.Notify(sigChan, signals...)
 	go func() {
 		// First signal: cancel the context so in-flight work unwinds
 		// cleanly. signal.Notify has disabled Go's default "signal
@@ -63,7 +62,9 @@ func main() {
 			fmt.Fprintln(os.Stderr, "\nReceived termination signal, shutting down… signal again to force quit.")
 		}
 		cancel()
-		<-sigChan
+		// Ending a running plugin first: once we exit, nothing else may.
+		// A third signal cuts short the wait for its own force quit.
+		cli.ForceQuitPlugins(<-sigChan, sigChan)
 		dieFromSignal(sig)
 	}()
 
@@ -162,6 +163,32 @@ func main() {
 	cancel() // Cleanup on successful exit
 }
 
+// shutdownSignals is the signals main's handler takes over: SIGINT, and on
+// Unix SIGTERM and SIGHUP (a closed terminal — uncaught, it kills this process
+// outright, skipping the cancel path that ends a running plugin).
+//
+// Each only if it was not ignored when we started (ignored is signal.Ignored,
+// which must be asked before any Notify for that signal). In practice that
+// spares SIGINT and SIGHUP: the Go runtime keeps an inherited ignore only for
+// those two, so SIGTERM never reads as ignored. Notify un-ignores a
+// signal, which would defeat whoever ignored it: `nohup entire <plugin>` would
+// catch the terminal's SIGHUP it was meant to sleep through and take the
+// plugin down with it, and a background job in a non-interactive shell, which
+// starts with SIGINT ignored, would start reacting to Ctrl-C.
+func shutdownSignals(goos string, ignored func(os.Signal) bool) []os.Signal {
+	candidates := []os.Signal{os.Interrupt}
+	if goos != "windows" {
+		candidates = append(candidates, syscall.SIGTERM, syscall.SIGHUP)
+	}
+	signals := make([]os.Signal, 0, len(candidates))
+	for _, sig := range candidates {
+		if !ignored(sig) {
+			signals = append(signals, sig)
+		}
+	}
+	return signals
+}
+
 // exitWithPluginOutcome exits with a plugin's outcome: its exit code, or the
 // signal that ended it re-raised. It never returns. Shared by the pre-Cobra
 // dispatcher and by built-ins that run a plugin (cli.PluginExitError).
@@ -181,12 +208,11 @@ func exitWithPluginOutcome(code int, killedBy os.Signal) {
 		case procsignal.Load() != nil:
 			// A signal we received outranks the child's, because when we
 			// were signalled the child's signal is usually OUR signal
-			// laundered — and laundered lossily. Cancelling the context
-			// makes runPlugin's cmd.Cancel send the child SIGINT whatever
-			// we got, so a supervisor's SIGTERM comes back as a SIGINT
-			// child and would report 130 for a shutdown that must report
-			// 143. That is the exact confusion dieFromSignal exists to
-			// prevent.
+			// laundered. Cancelling the context forwards our signal to
+			// the child, but on Windows nothing is forwarded, and a
+			// child killed after the grace period reports SIGKILL: a
+			// supervisor's SIGTERM must still report 143, not 137. That
+			// is the exact confusion dieFromSignal exists to prevent.
 			dieFromSignal(terminatingSignal())
 		case killedBy != nil:
 			// We were not signalled, so the child's signal is genuinely

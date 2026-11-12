@@ -224,7 +224,7 @@ func describeProjectResolveError(ctx context.Context, host, project string, err 
 }
 
 func resolveProjectTrailRoute(ctx context.Context, core projectTrailCoreClient, host, project string) (*projectTrailTarget, *auth.CellTarget, error) {
-	resolved, err := core.ResolveProject(ctx, coreapi.ResolveProjectParams{Host: coreapi.ResolveProjectHost(host), Project: project})
+	resolved, err := core.ResolveProject(ctx, coreapi.ResolveProjectParams{ForgePrefix: coreapi.ResolveProjectForgePrefix(host), Project: project})
 	if err != nil {
 		return nil, nil, describeProjectResolveError(ctx, host, project, err)
 	}
@@ -401,9 +401,9 @@ func resolveBranchProjectTrail(cmd *cobra.Command, branch string) (_ *projectTra
 		return nil, renderDataAPIAuthError(ctx, cmd.ErrOrStderr(), owner+"/"+repo, err)
 	}
 	if trailRepoFlag(cmd) == "" {
-		defer func() { noteTrailCommandEnablement(ctx, client, err) }()
+		defer func() { noteTrailCommandEnablement(ctx, client, repoID, err) }()
 	}
-	base, err := trailRepoBasePath(forge, owner, repo, repoID)
+	base, err := trailRepoBasePath(repoID)
 	if err != nil {
 		return nil, err
 	}
