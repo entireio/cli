@@ -13,7 +13,7 @@ import (
 
 func TestProjectAgentConnectionAllowsRepoOnlyIdentity(t *testing.T) {
 	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
-	target := &projectAgentTarget{client: api.NewClientWithBaseURL("admin-token", "https://cell.example.com"), host: "et", project: "acme", projectID: saTestProjectID}
+	target := &projectAgentTarget{client: api.NewClientWithBaseURL("admin-token", "https://cell.example.com"), host: "et", project: "acme", projectID: saTestProjectID, jurisdiction: "us"}
 	require.NoError(t, saveProjectAgentConnection(target))
 	c, err := loadProjectAgentConnection("et", "acme")
 	require.NoError(t, err)
@@ -32,6 +32,7 @@ func TestProjectAgentConnectionAllowsRepoOnlyIdentity(t *testing.T) {
 	newProjectTrailCellClient = func(_ context.Context, _ bool, cell *auth.CellTarget) (*api.Client, error) {
 		called = true
 		require.Equal(t, "https://cell.example.com", cell.BaseURL)
+		require.Equal(t, "us", cell.Jurisdiction, "service-account tokens have no home claim to route by")
 		return api.NewClientWithBaseURL("service-account-token", cell.BaseURL), nil
 	}
 	// No Core mock is supplied: resolving the project through Core would fail.
@@ -46,7 +47,7 @@ func TestProjectAgentConnectionAllowsRepoOnlyIdentity(t *testing.T) {
 
 func TestProjectAgentConnectionRejectsCorruption(t *testing.T) {
 	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
-	target := &projectAgentTarget{client: api.NewClientWithBaseURL("test", "https://cell.example.com"), host: "et", project: "acme", projectID: saTestProjectID}
+	target := &projectAgentTarget{client: api.NewClientWithBaseURL("test", "https://cell.example.com"), host: "et", project: "acme", projectID: saTestProjectID, jurisdiction: "us"}
 	require.NoError(t, saveProjectAgentConnection(target))
 	root, err := userdirs.ConfigRoot()
 	require.NoError(t, err)
@@ -54,7 +55,8 @@ func TestProjectAgentConnectionRejectsCorruption(t *testing.T) {
 	for _, body := range []string{
 		`{`,
 		`{"host":"gh","project":"acme","project_id":"` + saTestProjectID + `","api_url":"https://cell.example.com"}`,
-		`{"host":"et","project":"acme","project_id":"` + saTestProjectID + `","api_url":"https://secret@cell.example.com"}`,
+		`{"host":"et","project":"acme","project_id":"` + saTestProjectID + `","api_url":"https://secret@cell.example.com","jurisdiction":"us"}`,
+		`{"host":"et","project":"acme","project_id":"` + saTestProjectID + `","api_url":"https://cell.example.com"}`,
 	} {
 		require.NoError(t, osroot.WriteFile(root, name, []byte(body), 0o600))
 		_, err := loadProjectAgentConnection("et", "acme")

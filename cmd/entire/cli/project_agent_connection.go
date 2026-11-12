@@ -23,6 +23,8 @@ type projectAgentConnection struct {
 	Host      string `json:"host"`
 	Project   string `json:"project"`
 	APIURL    string `json:"api_url"`
+	// Jurisdiction is required: service-account tokens have no home claim.
+	Jurisdiction string `json:"jurisdiction"`
 }
 
 func projectAgentConnectionName(host, project string) string {
@@ -37,7 +39,7 @@ func saveProjectAgentConnection(t *projectAgentTarget) error {
 	if err := osroot.MkdirAllNoSymlink(root, "agent-serve/projects", 0o700); err != nil {
 		return fmt.Errorf("create connection configuration directory: %w", err)
 	}
-	c := projectAgentConnection{ProjectID: t.projectID, Host: t.host, Project: t.project, APIURL: t.client.BaseURL()}
+	c := projectAgentConnection{ProjectID: t.projectID, Host: t.host, Project: t.project, APIURL: t.client.BaseURL(), Jurisdiction: t.jurisdiction}
 	b, err := json.Marshal(c)
 	if err != nil {
 		return fmt.Errorf("encode connection: %w", err)
@@ -74,6 +76,9 @@ func loadProjectAgentConnection(host, project string) (*projectAgentConnection, 
 	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Scheme != schemeHTTPS && u.Scheme != schemeHTTP) {
 		return nil, errors.New("invalid saved API URL; rerun project agent setup")
 	}
+	if j, err := auth.NormalizeJurisdiction(c.Jurisdiction); err != nil || j == "" {
+		return nil, errors.New("saved connection has no valid jurisdiction; rerun project agent setup")
+	}
 	return &c, nil
 }
 
@@ -94,9 +99,9 @@ func resolveProjectAgentServeTarget(cmd *cobra.Command) (*projectAgentTarget, er
 		}
 		return t, nil
 	}
-	client, err := newProjectTrailCellClient(cmd.Context(), insecureHTTPRequested(cmd), &auth.CellTarget{BaseURL: c.APIURL})
+	client, err := newProjectTrailCellClient(cmd.Context(), insecureHTTPRequested(cmd), &auth.CellTarget{BaseURL: c.APIURL, Jurisdiction: c.Jurisdiction})
 	if err != nil {
 		return nil, fmt.Errorf("open saved worker connection: %w", err)
 	}
-	return &projectAgentTarget{client: client, projectID: c.ProjectID, host: host, project: project, base: "/api/v1/" + url.PathEscape(host) + "/" + url.PathEscape(project)}, nil
+	return &projectAgentTarget{client: client, projectID: c.ProjectID, host: host, project: project, jurisdiction: c.Jurisdiction, base: "/api/v1/" + url.PathEscape(host) + "/" + url.PathEscape(project)}, nil
 }

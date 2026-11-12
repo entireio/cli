@@ -60,6 +60,8 @@ type projectAgentTarget struct {
 	project   string
 	// base is /api/v1/{host}/{project}; agents and environments hang off it.
 	base string
+	// jurisdiction routes service-account tokens, which carry no home claim.
+	jurisdiction string
 	// repoForge/repoOwner/repoName are the repository the project was
 	// derived from; empty when --project named it and no repository was read.
 	repoForge, repoOwner, repoName string
@@ -98,7 +100,7 @@ var resolveProjectAgentTarget = func(cmd *cobra.Command) (*projectAgentTarget, e
 	if err != nil {
 		return nil, renderDataAPIAuthError(ctx, cmd.ErrOrStderr(), "", err)
 	}
-	t.client, t.projectID = resolved.Client, resolved.ProjectID
+	t.client, t.projectID, t.jurisdiction = resolved.Client, resolved.ProjectID, resolved.Jurisdiction
 	t.base = "/api/v1/" + url.PathEscape(t.host) + "/" + url.PathEscape(t.project)
 	return t, nil
 }

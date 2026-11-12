@@ -28,7 +28,7 @@ func projectAgentCommandFixture(t *testing.T, h http.HandlerFunc) (*projectAgent
 	t.Setenv("PATH", "")
 	server := httptest.NewServer(h)
 	t.Cleanup(server.Close)
-	target := &projectAgentTarget{client: api.NewClientWithBaseURL("test", server.URL), host: "et", project: "acme", projectID: saTestProjectID}
+	target := &projectAgentTarget{client: api.NewClientWithBaseURL("test", server.URL), host: "et", project: "acme", projectID: saTestProjectID, jurisdiction: "us"}
 	require.NoError(t, saveProjectAgentConnection(target))
 	old := newProjectTrailCellClient
 	t.Cleanup(func() { newProjectTrailCellClient = old })
