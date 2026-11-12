@@ -39,6 +39,26 @@ Entire automatically scans transcript and metadata content before writing it to 
 
 Detected secrets are replaced with `REDACTED` before the data is ever written to a git object. Of the seven secret-detection passes above, the scanner layer (pass 2) is configurable — see [Choosing secret-scanner engines](#choosing-secret-scanner-engines) below — while the other six are **always on** and cannot be disabled. User-defined rules (inline `custom_redactions` and rule packs) add an eighth secret-detection pass that only runs when configured.
 
+### What Entire leaves out: text the agent attaches to its requests
+
+An agent's session file holds more than the conversation. It also records text the agent attached to its model requests: its system prompt, the instruction files it loaded (`CLAUDE.md`, `AGENTS.md`), and your memory notes. Much of that lives outside the repository, and no redaction rule can recognise what it says, such as a client's name.
+
+Entire blanks that text in the copy it stores, before redaction runs and with no setting to turn it off. Each record stays in place with its type, ids, hashes and file paths, so the transcript keeps its line numbering and its links. Only the text is emptied. The agent's own session file is never changed.
+
+- **Claude Code:** the request log (`api-request-blob` message content, `api-request-shape` system prompt and tool definitions), the system prompt snapshot (`prompt_snapshot`), and the bodies of loaded instruction and memory files (`instructions` attachments).
+- **Codex:** the base instructions in `session_meta` and the developer message that repeats them, the `AGENTS.md` text in `world_state`, and the `AGENTS.md` dumps in user messages and compacted history.
+- **Pi:** the `project_context` section of its system messages, which holds the instruction files it loaded, including the copy a compaction record keeps.
+
+Resuming a restored session still works: the agent reads its instructions again from the machine it resumes on, so a session resumed elsewhere runs with that machine's instruction files and memory.
+
+What this does not cover:
+
+- **Other agents.** No injected instruction text was found in Cursor or OpenCode session files. Copilot CLI, Factory AI Droid, Antigravity and external agents have not been examined.
+- **Pi's own system prompt.** Only the instruction files are blanked; the other sections of Pi's system message (its built-in prompt, tool list and working directory) are kept.
+- **Instruction files the agent reads or edits during a session.** A tool call that reads or changes `CLAUDE.md` or a memory file is part of the conversation, and its content is stored like any other tool result.
+- **Codex model switches.** The developer message Codex writes when the model changes carries the new model's built-in instructions and is kept.
+- **Checkpoints already written.** Checkpoints stored by an older CLI are not rewritten.
+
 ### What Entire does NOT understand: pasted images and screenshots
 
 **Every layer described above — all nine passes, including the opt-in PII layer — reads transcript *text*. There is no OCR pass, no vision-model PII or secret scan, and no gate that holds an image back until someone reviews it. Nothing in Entire ever reads what an image depicts.**
@@ -151,7 +171,7 @@ If a custom pattern itself reveals sensitive structure (e.g. an internal ID form
 
 Two local copies of transcript content are never redacted and never reach the remote:
 
-`.entire/metadata/<session>/full.jsonl` is Entire's own local working copy of the transcript, written mode `0600`. It is *sanitized* (agent state that cannot be replayed out of a checkpoint is stripped) but **not redacted** — redaction happens on the way into a git object, not on this file. It is the input condensation reads from when the live agent transcript is no longer available.
+`.entire/metadata/<session>/full.jsonl` is Entire's own local working copy of the transcript, written mode `0600`. It is *sanitized* (agent state that cannot be replayed out of a checkpoint is stripped, and [the text the agent attaches to its requests](#what-entire-leaves-out-text-the-agent-attaches-to-its-requests) is blanked) but **not redacted** — redaction happens on the way into a git object, not on this file. It is the input condensation reads from when the live agent transcript is no longer available.
 
 The agent's own transcript is never modified at all. Entire reads from it and leaves it alone, because the agent is writing to it continuously and editing under the agent's feet would corrupt the session.
 

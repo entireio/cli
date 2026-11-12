@@ -6,7 +6,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/agent"
+	transcriptlib "github.com/entireio/cli/transcript"
 
 	"github.com/stretchr/testify/require"
 )
@@ -547,4 +552,108 @@ func TestSanitizePortableTranscript_IdempotentBytes(t *testing.T) {
 	if !bytes.Equal(once, twice) {
 		t.Errorf("not byte-idempotent:\n once=%s\ntwice=%s", once, twice)
 	}
+}
+
+// A Codex rollout carrying the instruction text Codex attaches to its model
+// requests, in the four places it writes it.
+const (
+	codexBaseInstructions = "You are Codex. Internal: staging db is at 10.20.30.40"
+	codexAgentsDump       = "# AGENTS.md instructions for /repo\n\n<INSTRUCTIONS>\nClient Acme Bank rollout notes\n</INSTRUCTIONS>"
+	codexAgentsState      = "Client Acme Bank rollout notes"
+)
+
+func codexRolloutWithInstructions(t *testing.T) []byte {
+	t.Helper()
+	enc := func(s string) string {
+		b, err := json.Marshal(s)
+		require.NoError(t, err)
+		return string(b)
+	}
+	return []byte(strings.Join([]string{
+		`{"timestamp":"t0","type":"session_meta","payload":{"id":"abc","cwd":"/repo","base_instructions":{"text":` + enc(codexBaseInstructions) + `}}}`,
+		`{"timestamp":"t1","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":` + enc(codexBaseInstructions) + `}]}}`,
+		`{"timestamp":"t2","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<permissions instructions>sandbox</permissions instructions>"}]}}`,
+		`{"timestamp":"t3","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":` + enc(codexAgentsDump) + `},{"type":"input_text","text":"<environment_context>cwd</environment_context>"}]}}`,
+		`{"timestamp":"t4","type":"world_state","payload":{"state":{"agents_md":{"text":` + enc(codexAgentsState) + `,"path":"/repo/AGENTS.md"},"cwd":"/repo"}}}`,
+		`{"timestamp":"t5","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"please update AGENTS.md with the new rule"}]}}`,
+		`{"timestamp":"t6","type":"compacted","payload":{"message":"","replacement_history":[{"type":"message","role":"user","content":[{"type":"input_text","text":` + enc(codexAgentsDump) + `}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"earlier prompt"}]}]}}`,
+		`{"timestamp":"t7","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}`,
+	}, "\n") + "\n")
+}
+
+func TestSanitizePortableTranscript_BlanksInjectedInstructionText(t *testing.T) {
+	t.Parallel()
+
+	got := string(SanitizePortableTranscript(codexRolloutWithInstructions(t)))
+
+	require.NotContains(t, got, "10.20.30.40", "base instructions survived")
+	require.NotContains(t, got, "Acme Bank", "AGENTS.md text survived")
+
+	// The records stay, and so does everything that is not instruction text.
+	require.Contains(t, got, `"base_instructions"`)
+	require.Contains(t, got, `"agents_md"`)
+	require.Contains(t, got, `"path":"/repo/AGENTS.md"`)
+	require.Contains(t, got, "<permissions instructions>sandbox</permissions instructions>")
+	require.Contains(t, got, "<environment_context>cwd</environment_context>")
+	require.Contains(t, got, "please update AGENTS.md with the new rule", "a prompt that names AGENTS.md is the user's own text")
+	require.Contains(t, got, "earlier prompt")
+	require.Contains(t, got, `"text":"done"`)
+}
+
+func TestSanitizePortableTranscript_InstructionBlankingPreservesLineNumbering(t *testing.T) {
+	t.Parallel()
+
+	input := codexRolloutWithInstructions(t)
+	rawLines := splitJSONL(input)
+	gotLines := splitJSONL(SanitizePortableTranscript(input))
+
+	require.Len(t, gotLines, len(rawLines))
+	for i := range rawLines {
+		var rawLine, gotLine rolloutLine
+		require.NoError(t, json.Unmarshal(rawLines[i], &rawLine))
+		require.NoError(t, json.Unmarshal(gotLines[i], &gotLine))
+		require.Equal(t, rawLine.Type, gotLine.Type, "line %d changed type", i)
+	}
+	for _, i := range []int{2, 5, 7} {
+		require.Equal(t, string(rawLines[i]), string(gotLines[i]), "line %d holds no instruction text and must keep its bytes", i)
+	}
+}
+
+func TestSanitizePortableTranscript_InstructionBlankingIsIdempotent(t *testing.T) {
+	t.Parallel()
+
+	once := SanitizePortableTranscript(codexRolloutWithInstructions(t))
+	twice := SanitizePortableTranscript(once)
+
+	require.Equal(t, string(once), string(twice))
+}
+
+func TestSanitizePortableTranscript_InstructionBlankingKeepsPromptsAndCompactOutput(t *testing.T) {
+	t.Parallel()
+
+	input := codexRolloutWithInstructions(t)
+	sanitized := SanitizePortableTranscript(input)
+	c := &CodexAgent{}
+
+	dir := t.TempDir()
+	rawPath := filepath.Join(dir, "raw.jsonl")
+	gotPath := filepath.Join(dir, "sanitized.jsonl")
+	require.NoError(t, os.WriteFile(rawPath, input, 0o600))
+	require.NoError(t, os.WriteFile(gotPath, sanitized, 0o600))
+
+	rawPrompts, err := c.ExtractPrompts(rawPath, 0)
+	require.NoError(t, err)
+	gotPrompts, err := c.ExtractPrompts(gotPath, 0)
+	require.NoError(t, err)
+	// The dump was never a prompt the user typed; every other entry stays.
+	wantPrompts := slices.DeleteFunc(slices.Clone(rawPrompts), transcriptlib.IsInstructionFileDump)
+	require.Equal(t, wantPrompts, gotPrompts)
+	require.Contains(t, gotPrompts, "please update AGENTS.md with the new rule")
+
+	opts := transcriptlib.Options{Agent: string(agent.AgentNameCodex), CLIVersion: "test"}
+	rawCompact, err := transcriptlib.Convert(input, opts)
+	require.NoError(t, err)
+	gotCompact, err := transcriptlib.Convert(sanitized, opts)
+	require.NoError(t, err)
+	require.Equal(t, string(rawCompact), string(gotCompact))
 }

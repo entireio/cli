@@ -392,7 +392,13 @@ type SidecarImageProvider interface {
 // TranscriptSanitizer is implemented by agents whose native transcript format
 // carries state that Entire must not keep in its own copy — e.g. Codex rollouts
 // embed encrypted reasoning payloads and compaction blobs that are bound to the
-// originating session and cannot be replayed out of a checkpoint.
+// originating session and cannot be replayed out of a checkpoint, and Claude
+// Code, Codex and Pi record the text they attach to their model requests
+// (system prompt, instruction files, memory notes), which comes from outside
+// the conversation.
+//
+// A sanitizer must not add or remove lines: checkpoint offsets count lines in
+// the agent's transcript and are applied to the stored copy.
 //
 // Entire always leaves the agent's own transcript untouched; this transform applies
 // only to the copy Entire stores. Sanitizing before redaction is what keeps
