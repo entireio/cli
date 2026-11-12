@@ -334,6 +334,7 @@ func placeStagedBinary(ctx context.Context, stagingRoot *os.Root, stagedName str
 	if err := SavePluginManifest(manifest); err != nil {
 		return err
 	}
+	prev.newManifestWritten = true
 
 	if _, err := placeManagedEntry(InstallPluginOptions{SourcePath: pkgBin, Force: true}); err != nil {
 		return err
@@ -354,6 +355,9 @@ type pkgInstallBackup struct {
 	linked       bool   // asideName is a second hard link, binName untouched by the stash
 	manifestName string
 	manifest     []byte // nil when there was no previous manifest
+	// newManifestWritten is set once the install has written its own
+	// manifest; until then the manifest on disk is still the previous one.
+	newManifestWritten bool
 }
 
 // pkgBackupLink creates the hard link stashPreviousPkgInstall prefers; a seam
@@ -400,11 +404,15 @@ func stashPreviousPkgInstall(root *os.Root, pkgName, binBase string) (*pkgInstal
 // failed install wrote. With no previous install, it removes the new ones so
 // a failed first install leaves no manifest claiming success.
 //
-// The manifest goes first, and the binary is only put back once it has: if
-// the manifest cannot be restored it still records the new tag, and pairing
-// that with the old binary is the mismatch the stash exists to prevent
-// (`plugin upgrade` would call the stale binary up to date). The new binary
-// under the new tag is consistent; the .old- copy is swept on a later install.
+// The manifest is only touched if the install wrote its own; before that the
+// one on disk is still the previous one. When it was written, it is restored
+// first and the binary put back only once that succeeded: a manifest that
+// could not be restored still records the new tag, and pairing that with the
+// old binary is the mismatch the stash exists to prevent (`plugin upgrade`
+// would call the stale binary up to date). The new binary under the new tag is
+// consistent; the .old- copy is swept on a later install. A failure before the
+// manifest was written always gets the previous binary back: returning early
+// there would strand it under its .old- name and leave the plugin unrunnable.
 func (b *pkgInstallBackup) restore() error {
 	untouched := b.binaryUntouched()
 	if untouched {
@@ -415,12 +423,10 @@ func (b *pkgInstallBackup) restore() error {
 		// the .old- link behind.
 		_ = b.root.Remove(b.asideName) //nolint:errcheck // swept on a later install
 	}
-	if b.manifest != nil {
-		if err := jsonutil.WriteFileAtomicIn(b.root, b.manifestName, b.manifest, 0o644); err != nil {
-			return fmt.Errorf("restore previous plugin manifest: %w", err)
+	if b.newManifestWritten {
+		if err := b.restoreManifest(); err != nil {
+			return err
 		}
-	} else if err := b.root.Remove(b.manifestName); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("remove plugin manifest: %w", err)
 	}
 	switch {
 	case untouched:
@@ -432,6 +438,21 @@ func (b *pkgInstallBackup) restore() error {
 		if err := b.root.Remove(b.binName); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("remove plugin binary: %w", err)
 		}
+	}
+	return nil
+}
+
+// restoreManifest puts the previous manifest back, or removes the failed
+// first install's.
+func (b *pkgInstallBackup) restoreManifest() error {
+	if b.manifest != nil {
+		if err := jsonutil.WriteFileAtomicIn(b.root, b.manifestName, b.manifest, 0o644); err != nil {
+			return fmt.Errorf("restore previous plugin manifest: %w", err)
+		}
+		return nil
+	}
+	if err := b.root.Remove(b.manifestName); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove plugin manifest: %w", err)
 	}
 	return nil
 }

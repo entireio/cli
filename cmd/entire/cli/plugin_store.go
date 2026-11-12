@@ -416,10 +416,10 @@ const pluginTreeLockName = ".plugins.lock"
 // pluginLocksDir holds each plugin's own lock, <name>.lock (lockPlugin).
 const pluginLocksDir = ".locks"
 
-// pluginTreeLockWait bounds how long a change waits for another holder of a
+// pluginLockWait bounds how long a change waits for another holder of a
 // plugin lock. Installs take seconds; this only stops a wedged holder from
 // hanging every later install forever.
-const pluginTreeLockWait = 10 * time.Minute
+const pluginLockWait = 10 * time.Minute
 
 // Plugin locks come in two kinds, always taken in this order:
 //
@@ -492,7 +492,7 @@ func lockPlugin(ctx context.Context, name string, create bool) (func(), error) {
 // announced, as waitNotice, on ctx's plugin progress writer
 // (withPluginProgress), so a user stuck behind a stalled install sees why. The wait ends when ctx does —
 // callers pass the command's context, so Ctrl-C stops it with an error
-// wrapping context.Canceled — and after pluginTreeLockWait at the latest.
+// wrapping context.Canceled — and after pluginLockWait at the latest.
 // (flock watches ctx only when it has a deadline; without one it makes a
 // blocking lock call, hence the ceiling doubles as the deadline.)
 func acquirePluginLockFile(ctx context.Context, root *os.Root, name, waitNotice string) (func(), error) {
@@ -504,7 +504,7 @@ func acquirePluginLockFile(ctx context.Context, root *os.Root, name, waitNotice 
 	defer stop()
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, pluginTreeLockWait)
+		ctx, cancel = context.WithTimeout(ctx, pluginLockWait)
 		defer cancel()
 	}
 	return flock.AcquireContextIn(ctx, root, name) //nolint:wrapcheck // callers name the lock

@@ -592,8 +592,9 @@ func TestPkgInstallBackup_ManifestRestoreFailureKeepsNewBinary(t *testing.T) { /
 		t.Fatal(err)
 	}
 
-	// The failed install's state: new binary, and a manifest path the
-	// restore cannot write over (a non-empty directory).
+	// The failed install's state: new binary and new manifest written, and
+	// a manifest path the restore cannot write over (a non-empty directory).
+	b.newManifestWritten = true
 	if err := writeExecutable(root, binName, strings.NewReader("new")); err != nil {
 		t.Fatal(err)
 	}
@@ -613,5 +614,57 @@ func TestPkgInstallBackup_ManifestRestoreFailureKeepsNewBinary(t *testing.T) { /
 	data, err := root.ReadFile(binName)
 	if err != nil || string(data) != "new" {
 		t.Errorf("pkg binary after a failed manifest restore = %q (%v), want new, matching the manifest's tag", data, err)
+	}
+}
+
+// A failure before the install wrote its manifest (disk full in
+// replaceBinary) leaves the previous manifest on disk, so restore must put the
+// previous binary back even where writing a manifest would fail too, as it
+// does on a full disk. Returning early stranded the binary under its .old-
+// name and left the plugin unrunnable.
+func TestPkgInstallBackup_FailureBeforeManifestRestoresBinary(t *testing.T) { //nolint:paralleltest // mutates env and seams
+	withPluginDir(t)
+	prevLink := pkgBackupLink
+	pkgBackupLink = func(*os.Root, string, string) error { return errors.New("no space left on device") }
+	t.Cleanup(func() { pkgBackupLink = prevLink })
+	if _, err := EnsurePluginPkgDir("foo"); err != nil {
+		t.Fatal(err)
+	}
+	root, err := pluginRoot(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkgName, err := pluginPkgName("foo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binBase := pluginBinaryName("foo")
+	binName := pkgName + "/" + binBase
+	manifestName := pkgName + "/" + pluginManifestFileName
+	if err := writeExecutable(root, binName, strings.NewReader("previous")); err != nil {
+		t.Fatal(err)
+	}
+	b, err := stashPreviousPkgInstall(root, pkgName, binBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.linked {
+		t.Fatal("stash linked the binary despite the failing link seam")
+	}
+	// replaceBinary failed, so binName is absent (moved aside) and no new
+	// manifest was written. Any manifest write would fail.
+	if err := root.Mkdir(manifestName, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.WriteFile(manifestName+"/blocker", nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := b.restore(); err != nil {
+		t.Fatalf("restore = %v, want nil: the manifest was never replaced", err)
+	}
+	data, err := root.ReadFile(binName)
+	if err != nil || string(data) != "previous" {
+		t.Errorf("pkg binary after restore = %q (%v), want previous", data, err)
 	}
 }
