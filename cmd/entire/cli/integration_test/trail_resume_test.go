@@ -184,7 +184,7 @@ func newTrailResumeIntegrationAPIServer(t *testing.T, trail api.TrailResource) *
 					},
 				},
 			})
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/resolve/gh/entireio":
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/project-resolver/gh/entireio":
 			writeTrailResumeIntegrationJSON(t, w, map[string]any{
 				"project": map[string]string{
 					"id": projectID, "name": "entireio", "region": "us", "ownerId": projectID,

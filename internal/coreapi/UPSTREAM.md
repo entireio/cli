@@ -165,6 +165,12 @@ The next full refresh carries them on its own, and this entry goes.
 (`SetDefaultBranchInputBody`, `SetDefaultBranchOutputBody`) are spliced the
 same way, verbatim from the published spec (entiredb#5136).
 
+`GET /project-resolver/{forge_prefix}/{project}` (`resolveProject`) replaces
+`GET /projects/resolve/{host}/{project}`, verbatim from the published spec
+except that its `automationToken` security alternative is dropped: the vendored
+spec does not define that scheme yet, and ogen aborts on a dangling one. Core
+still serves the old path.
+
 `CreateServiceAccountInputBody`, `ServiceAccount`, `ServiceAccountWithGrants`
 and `GET /service-accounts` are spliced verbatim from the published spec. They
 carry `project_id`: service accounts belong to a project, and `orgId` is
@@ -181,6 +187,12 @@ at the next spec refresh.
 https://entire.com/gh/entirehq/-/trails/23479. A core without it ignores the
 field and assigns the default cell, so `project create` prints the cell the
 server chose.
+
+The legacy Buildkite routes are spliced *out* the same way. Core no longer
+serves them (entiredb#4868, #4982). The splice removes the seven
+`/orgs/{orgId}/ci/buildkite/...` operations and
+`POST /repos/{repoId}/ci-webhooks` (`createRepoCIWebhook`). It also removes the
+schemas that only those operations referenced. The CLI never called them.
 
 **Workaround:** none in `normalize.go` beyond the `ResyncMirrorOutputBody.status`
 enum loosening. entiredb#4961 is on main and in prod, so any refresh from a
