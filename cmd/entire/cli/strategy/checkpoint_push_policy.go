@@ -286,7 +286,7 @@ func CheckpointRefExists(ctx context.Context, checkpointID id.CheckpointID) (boo
 	defer repo.Close()
 	// The ref may be stored under its case-folded shard, which the canonical
 	// name stops resolving to once git packs it.
-	if _, _, err := storedCheckpointRef(repo, nil, ref); err != nil {
+	if _, _, err := checkpoint.StoredRef(repo, nil, ref); err != nil {
 		if errors.Is(err, plumbing.ErrReferenceNotFound) {
 			return false, nil
 		}
@@ -512,7 +512,7 @@ func missingCheckpointRefs(repo *git.Repository, targets []CheckpointPushRequest
 		if _, ok := waiting[key]; ok {
 			continue
 		}
-		if _, _, err := storedCheckpointRef(repo, nil, target.Ref); errors.Is(err, plumbing.ErrReferenceNotFound) {
+		if _, _, err := checkpoint.StoredRef(repo, nil, target.Ref); errors.Is(err, plumbing.ErrReferenceNotFound) {
 			missing[key] = struct{}{}
 		}
 	}

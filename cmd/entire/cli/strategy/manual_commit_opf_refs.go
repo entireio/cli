@@ -85,7 +85,7 @@ func RewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repositor
 	for _, refName := range existing {
 		// stored, not the queued name: the compare-and-swap below reads its
 		// expected value under the name it updates.
-		stored, tip, refErr := storedCheckpointRef(repo, listed, refName)
+		stored, tip, refErr := checkpoint.StoredRef(repo, listed, refName)
 		if refErr != nil {
 			if errors.Is(refErr, plumbing.ErrReferenceNotFound) {
 				continue

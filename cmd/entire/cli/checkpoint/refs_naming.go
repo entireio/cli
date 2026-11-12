@@ -113,11 +113,3 @@ func foldedShard(shard string) (string, bool) {
 	}
 	return "", false
 }
-
-// isCanonicalRefName reports whether name is cid's canonical RefName spelling,
-// as opposed to the case-folded one FoldedRefName describes. An ID whose kind
-// RefName rejects has no canonical spelling and reports false.
-func isCanonicalRefName(cid id.CheckpointID, name plumbing.ReferenceName) bool {
-	canonical, err := RefName(cid)
-	return err == nil && canonical == name
-}

@@ -179,33 +179,103 @@ func (s *gitRefsStore) resolveLocalRef(cid id.CheckpointID) (*plumbing.Reference
 	if err != nil {
 		return nil, err
 	}
-	ref, err := s.repo.Reference(refName, true)
-	if err != nil && !errors.Is(err, plumbing.ErrReferenceNotFound) {
-		return nil, fmt.Errorf("resolve checkpoint ref %s: %w", refName, err)
+	name, tip, err := StoredRef(s.repo, nil, refName)
+	switch {
+	case err == nil:
+		return plumbing.NewHashReference(name, tip), nil
+	case errors.Is(err, plumbing.ErrReferenceNotFound):
+		return nil, err // absent; the caller distinguishes it with errors.Is
+	default:
+		return nil, fmt.Errorf("resolve checkpoint ref %s: %w", name, err)
+	}
+}
+
+// StoredRef finds the local ref a checkpoint is stored under, given either of
+// its two names. name is that ref's spelling and tip its commit. listed maps
+// ref names to tips for a caller that already listed the namespace, and may be
+// nil. It is the one place that decides which of a checkpoint's refs is used:
+// the store asks with the canonical name and pre-push with the queued one.
+//
+// A checkpoint ref is written through its canonical name but stored under
+// whichever spelling already named its shard bucket, and on a case-insensitive
+// filesystem those differ. They agree only while the ref is loose, because
+// there the filesystem resolves one onto the other; once git packs the ref,
+// lookup is an exact string match and the name asked for stops resolving. See
+// FoldedRefName for why one alternate is exhaustive.
+//
+// name is for local git I/O only. Callers keep identifying the checkpoint by
+// the name they passed in, so what they report does not depend on the
+// filesystem or on whether git has packed the ref.
+//
+// When both spellings hold a ref, the result is the one asked for unless the
+// other is a later version of it (SupersededBy).
+//
+// A failure of the name asked for other than ErrReferenceNotFound is returned
+// as it is, so a flaky read never changes which ref a caller acts on, and a
+// failure of the other name never hides one that resolved.
+// ErrReferenceNotFound is returned only when neither spelling resolves.
+func StoredRef(
+	repo *git.Repository,
+	listed map[plumbing.ReferenceName]plumbing.Hash,
+	ref plumbing.ReferenceName,
+) (name plumbing.ReferenceName, tip plumbing.Hash, err error) {
+	lookup := func(name plumbing.ReferenceName) (plumbing.Hash, error) {
+		if hash, ok := listed[name]; ok {
+			return hash, nil
+		}
+		r, err := repo.Reference(name, true)
+		if err != nil {
+			return plumbing.ZeroHash, err //nolint:wrapcheck // callers branch on plumbing.ErrReferenceNotFound
+		}
+		return r.Hash(), nil
+	}
+	tip, err = lookup(ref)
+	other, hasOther := OtherShardSpelling(ref)
+	if !hasOther || (err != nil && !errors.Is(err, plumbing.ErrReferenceNotFound)) {
+		return ref, tip, err
+	}
+	otherTip, otherErr := lookup(other)
+	switch {
+	case err == nil && otherErr != nil:
+		// The name asked for stands whatever became of the second lookup.
+		return ref, tip, nil //nolint:nilerr // the other spelling is absent or unreadable; the name asked for resolved
+	case err == nil:
+		// Both spellings hold a ref. The later version is the checkpoint.
+		if SupersededBy(repo, tip, otherTip) {
+			return other, otherTip, nil
+		}
+		return ref, tip, nil
+	case otherErr == nil:
+		return other, otherTip, nil
+	case errors.Is(otherErr, plumbing.ErrReferenceNotFound):
+		// Absent under both spellings: report the name the caller asked for.
+		return ref, plumbing.ZeroHash, err
+	default:
+		return other, plumbing.ZeroHash, otherErr
+	}
+}
+
+// OtherShardSpelling returns the one other name ref's checkpoint can be stored
+// under: the case-folded spelling of a canonical name, and the canonical
+// spelling of a case-folded one. It reports false for a ref that names no
+// checkpoint and for a shard with a single spelling.
+func OtherShardSpelling(ref plumbing.ReferenceName) (plumbing.ReferenceName, bool) {
+	cid, ok := ParseRef(ref)
+	if !ok {
+		return "", false
 	}
 	folded, ok := FoldedRefName(cid)
 	if !ok {
-		return ref, err //nolint:wrapcheck // absent; caller distinguishes via errors.Is
+		return "", false
 	}
-	foldedRef, foldedErr := s.repo.Reference(folded, true)
-	switch {
-	case err == nil && foldedErr != nil:
-		// The canonical ref stands whatever became of the second lookup.
-		return ref, nil //nolint:nilerr // the folded spelling is absent or unreadable; the canonical ref resolved
-	case err == nil:
-		if SupersededBy(s.repo, ref.Hash(), foldedRef.Hash()) {
-			return foldedRef, nil
-		}
-		return ref, nil
-	case foldedErr == nil:
-		return foldedRef, nil
-	case errors.Is(foldedErr, plumbing.ErrReferenceNotFound):
-		// Absent under both spellings: report the canonical miss, so the error
-		// names the ref the caller asked for.
-		return nil, err //nolint:wrapcheck // absent; caller distinguishes via errors.Is
-	default:
-		return nil, fmt.Errorf("resolve checkpoint ref %s: %w", folded, foldedErr)
+	if folded != ref {
+		return folded, true
 	}
+	canonical, err := RefName(cid)
+	if err != nil {
+		return "", false
+	}
+	return canonical, true
 }
 
 // SupersededBy reports whether the checkpoint version at other is a later
@@ -646,8 +716,8 @@ func (s *gitRefsStore) List(ctx context.Context) ([]CheckpointInfo, error) {
 	// indexByID's keys are exactly the checkpoint IDs in checkpoints, and its
 	// values index them. Both halves are relied on: the keys answer "is this
 	// checkpoint already listed" for the folded-spelling collapse below and for
-	// remote discovery, and the index lets a canonical ref replace the entry a
-	// folded one contributed. Keeping that in one map is deliberate — a
+	// remote discovery, and the index lets the ref a read resolves replace the
+	// entry the other spelling contributed. Keeping that in one map is deliberate — a
 	// separate presence set has to be written on exactly the paths that append,
 	// and the two drifting apart lists a checkpoint twice.
 	indexByID := make(map[id.CheckpointID]int)
@@ -656,15 +726,15 @@ func (s *gitRefsStore) List(ctx context.Context) ([]CheckpointInfo, error) {
 		if !ok {
 			return nil
 		}
-		// One checkpoint can be named by two refs — the canonical spelling and
-		// the case-folded one — in a repo a pre-fix CLI forked before
-		// resolveLocalRef and writeRefName existed. Both parse to this same ID,
-		// so list it once, preferring the canonical spelling because that is
-		// the one resolveLocalRef tries first: a listing that disagreed with
-		// the read would show one commit and explain another.
+		// One checkpoint can be named by two refs, the canonical spelling and
+		// the case-folded one. Both parse to this same ID, so list it once, from
+		// the ref resolveLocalRef returns: a listing that disagreed with the
+		// read would show one commit and explain another.
 		prior, dup := indexByID[cid]
-		if dup && !isCanonicalRefName(cid, ref.Name()) {
-			return nil
+		if dup {
+			if read, resolveErr := s.resolveLocalRef(cid); resolveErr != nil || !read.Hash().Equal(ref.Hash()) {
+				return nil //nolint:nilerr // keep the entry already listed for this checkpoint
+			}
 		}
 		commit, commitErr := s.repo.CommitObject(ref.Hash())
 		if commitErr != nil {

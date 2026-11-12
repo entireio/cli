@@ -586,7 +586,7 @@ func partitionCheckpointRefPushes(
 		// name stops resolving. Classifying that as stale drops the entry and
 		// the checkpoint is then never pushed, silently and permanently — so
 		// resolve to the spelling that exists before deciding.
-		stored, tip, err := storedCheckpointRef(repo, nil, entry.Ref)
+		stored, tip, err := checkpoint.StoredRef(repo, nil, entry.Ref)
 		if errors.Is(err, plumbing.ErrReferenceNotFound) {
 			part.stale = append(part.stale, entry)
 			continue

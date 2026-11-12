@@ -192,6 +192,10 @@ func TestGitRefsStore_UsesTheNewerRefWhenBothShardSpellingsExist(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, summary)
 	require.Len(t, summary.Sessions, 2, "the read must return the newer version")
+	infos, err := both.List(ctx)
+	require.NoError(t, err)
+	require.Len(t, infos, 1)
+	assert.Equal(t, 2, infos[0].SessionCount, "the listing must describe the version a read returns")
 
 	refsWrite(t, both, foldableLegacy, "sess-3", "transcript three")
 	summary, err = both.Read(ctx, foldableLegacy)
