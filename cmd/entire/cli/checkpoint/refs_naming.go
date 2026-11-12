@@ -39,14 +39,15 @@ func RefName(cid id.CheckpointID) (plumbing.ReferenceName, error) {
 // ParseRef extracts the checkpoint ID from a per-checkpoint ref name,
 // reporting whether name is a well-formed checkpoint ref. A ref is well-formed
 // when it has the CheckpointRefPrefix, exactly a <shard>/<id> tail, and the
-// shard case-insensitively matches the ID's own ShardFor — so refs the
+// shard is the ID's own ShardFor in one case throughout — so refs the
 // resolver did not write (mismatched shard, extra path segments) are rejected
 // rather than silently resolved to the wrong bucket. It does not require the
 // ID to be a recognized kind, so a future ID format still parses as long as it
 // shards consistently.
 //
-// The shard match is case-insensitive (strings.EqualFold) rather than exact,
-// because the on-disk directory name is not always byte-identical to a fresh
+// The shard may be either of its two spellings (see FoldedRefName) rather than
+// the exact one, because the on-disk directory name is not always
+// byte-identical to a fresh
 // ShardFor() computation: on a case-insensitive-but-case-preserving filesystem
 // (macOS APFS, Windows NTFS defaults), git resolves a new shard directory
 // against existing ones case-insensitively, so a ULID's uppercase shard (e.g.
@@ -70,8 +71,10 @@ func ParseRef(name plumbing.ReferenceName) (id.CheckpointID, bool) {
 		return id.EmptyCheckpointID, false
 	}
 	cid := id.CheckpointID(rest)
-	if !strings.EqualFold(cid.ShardFor(), shard) {
-		return id.EmptyCheckpointID, false
+	if want := cid.ShardFor(); shard != want {
+		if folded, ok := foldedShard(want); !ok || shard != folded {
+			return id.EmptyCheckpointID, false
+		}
 	}
 	return cid, true
 }
