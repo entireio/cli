@@ -399,30 +399,41 @@ func stashPreviousPkgInstall(root *os.Root, pkgName, binBase string) (*pkgInstal
 // restore puts the previous binary and manifest back, replacing whatever the
 // failed install wrote. With no previous install, it removes the new ones so
 // a failed first install leaves no manifest claiming success.
+//
+// The manifest goes first, and the binary is only put back once it has: if
+// the manifest cannot be restored it still records the new tag, and pairing
+// that with the old binary is the mismatch the stash exists to prevent
+// (`plugin upgrade` would call the stale binary up to date). The new binary
+// under the new tag is consistent; the .old- copy is swept on a later install.
 func (b *pkgInstallBackup) restore() error {
-	var errs []error
-	if b.binaryUntouched() {
+	untouched := b.binaryUntouched()
+	if untouched {
 		// The install failed before replacing binName, so it is still the
 		// previous binary: drop the extra link. Renaming the link back would
 		// fail on Windows while that binary runs ("Access is denied"), and
 		// on Unix renaming a link onto its own file is a no-op that leaves
 		// the .old- link behind.
 		_ = b.root.Remove(b.asideName) //nolint:errcheck // swept on a later install
-	} else if b.asideName != "" {
-		if err := b.root.Rename(b.asideName, b.binName); err != nil {
-			errs = append(errs, fmt.Errorf("restore previous plugin binary: %w", err))
-		}
-	} else if err := b.root.Remove(b.binName); err != nil && !errors.Is(err, os.ErrNotExist) {
-		errs = append(errs, fmt.Errorf("remove plugin binary: %w", err))
 	}
 	if b.manifest != nil {
 		if err := jsonutil.WriteFileAtomicIn(b.root, b.manifestName, b.manifest, 0o644); err != nil {
-			errs = append(errs, fmt.Errorf("restore previous plugin manifest: %w", err))
+			return fmt.Errorf("restore previous plugin manifest: %w", err)
 		}
 	} else if err := b.root.Remove(b.manifestName); err != nil && !errors.Is(err, os.ErrNotExist) {
-		errs = append(errs, fmt.Errorf("remove plugin manifest: %w", err))
+		return fmt.Errorf("remove plugin manifest: %w", err)
 	}
-	return errors.Join(errs...)
+	switch {
+	case untouched:
+	case b.asideName != "":
+		if err := b.root.Rename(b.asideName, b.binName); err != nil {
+			return fmt.Errorf("restore previous plugin binary: %w", err)
+		}
+	default:
+		if err := b.root.Remove(b.binName); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove plugin binary: %w", err)
+		}
+	}
+	return nil
 }
 
 // binaryUntouched reports whether binName is still the very file the stash
