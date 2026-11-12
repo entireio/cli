@@ -208,6 +208,22 @@ func TestRelaySingleACKRound(t *testing.T) {
 			want:   nak + ack + rawPack,
 		},
 		{
+			// The first ACK arrives with the pack, in the done round.
+			name:   "pack without side-band, first ACK in the done round",
+			rounds: []string{nak, ack + rawPack},
+			want:   nak + ack + rawPack,
+		},
+		{
+			// One ACK per request, repeated across rounds because every
+			// request repeats the haves. The done round still starts
+			// with a repeated ACK, then the raw pack.
+			name:   "pack without side-band, several ACKs before the pack",
+			rounds: []string{nak, ack, ack, ack + rawPack},
+			want:   nak + ack + rawPack,
+		},
+		{
+			// Already passed on main: the done round's NAK ends the loop
+			// before the pack header is peeked, and the copy takes the rest.
 			name:   "pack without side-band, nothing common",
 			rounds: []string{nak, nak + rawPack},
 			want:   nak + nak + rawPack,
@@ -352,6 +368,13 @@ func TestGitFetchConnectRounds(t *testing.T) {
 	var cases []fetchCase
 	for _, noSideBand := range []bool{false, true} {
 		for _, singleACK := range []bool{false, true} {
+			// With multi_ack the round is a plain io.Copy, so a no-side-band
+			// rerun never reaches the changed code. Those cases already pass
+			// on main and would only add runtime; the subtests cannot run
+			// in parallel.
+			if noSideBand && !singleACK {
+				continue
+			}
 			for _, strip := range []bool{true, false} {
 				for _, deepen := range []bool{false, true} {
 					tc := fetchCase{stripRoundNAK: strip, singleACK: singleACK, noSideBand: noSideBand}
