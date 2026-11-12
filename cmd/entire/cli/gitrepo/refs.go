@@ -31,12 +31,20 @@ func ListRefs(ctx context.Context, repoRoot, pattern string) (map[plumbing.Refer
 	return refs, nil
 }
 
-// PackRefs moves the loose refs matching pattern into packed-refs. It needs
-// git 2.42 or later, the first with pack-refs --include.
+// PackRefs moves the loose refs matching pattern into packed-refs. git before
+// 2.42, Apple's bundled git among them, has no pack-refs --include; there it
+// packs every loose ref instead, as git gc would.
 func PackRefs(ctx context.Context, repoRoot, pattern string) error {
-	cmd := worktreeGitCommand(ctx, repoRoot, "pack-refs", "--include", pattern)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git pack-refs --include %s: %w: %s", pattern, err, strings.TrimSpace(string(out)))
+	out, err := worktreeGitCommand(ctx, repoRoot, "pack-refs", "--include", pattern).CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	if ctx.Err() != nil {
+		return fmt.Errorf("git pack-refs --include %s: %w", pattern, ctx.Err())
+	}
+	if allOut, allErr := worktreeGitCommand(ctx, repoRoot, "pack-refs", "--all").CombinedOutput(); allErr != nil {
+		return fmt.Errorf("git pack-refs --include %s: %w: %s; git pack-refs --all: %w: %s",
+			pattern, err, strings.TrimSpace(string(out)), allErr, strings.TrimSpace(string(allOut)))
 	}
 	return nil
 }

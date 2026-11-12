@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -66,4 +67,29 @@ func TestListRefsAndPackRefs_StopOnACancelledContext(t *testing.T) {
 	_, err := ListRefs(ctx, dir, "refs/")
 	require.Error(t, err)
 	require.Error(t, PackRefs(ctx, dir, "refs/*"))
+}
+
+// git before 2.42 has no pack-refs --include; Apple's bundled git is older.
+// A stand-in git that rejects the option, as those versions do, and passes
+// everything else to the real git makes that case testable on any version.
+func TestPackRefs_PacksOnAGitWithoutInclude(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the stand-in git is a POSIX shell script")
+	}
+	// Not parallel: isolateGitConfig and the PATH override use t.Setenv.
+	isolateGitConfig(t)
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	shimDir := t.TempDir()
+	shim := "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = --include ]; then echo \"error: unknown option \\`include'\" >&2; exit 129; fi\ndone\nexec \"" + realGit + "\" \"$@\"\n"
+	require.NoError(t, os.WriteFile(filepath.Join(shimDir, "git"), []byte(shim), 0o700))
+	dir := initGitlinkRepo(t)
+	gitIn(t, dir, "commit", "-q", "--allow-empty", "-m", "one")
+	gitIn(t, dir, "update-ref", "refs/entire/checkpoints/ab/0000000000ab", headOf(t, dir).String())
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	require.NoError(t, PackRefs(t.Context(), dir, "refs/entire/checkpoints/*/0000000000ab"))
+
+	_, err = os.Stat(filepath.Join(dir, ".git", "refs", "entire", "checkpoints", "ab", "0000000000ab"))
+	require.ErrorIs(t, err, os.ErrNotExist, "the loose ref is packed")
 }
