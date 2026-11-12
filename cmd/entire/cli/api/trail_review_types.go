@@ -2,7 +2,7 @@ package api
 
 import "time"
 
-// TrailReviewStateResponse is returned by GET /api/v1/trails/{trail_id}/reviews/{id}.
+// TrailReviewStateResponse is returned by GET /api/v1/repos/{repo_id}/changes/{number}/reviews/{id}.
 type TrailReviewStateResponse struct {
 	Review      TrailReview            `json:"review"`
 	CodeVersion TrailReviewCodeVersion `json:"code_version"`
@@ -79,7 +79,7 @@ type TrailReviewComment struct {
 }
 
 // TrailReviewStartRequest starts a review session for a trail via
-// POST /api/v1/trails/{trail_id}/reviews. All fields are optional; the server
+// POST /api/v1/repos/{repo_id}/changes/{number}/reviews. All fields are optional; the server
 // resolves the code version (base/head) when they are omitted.
 type TrailReviewStartRequest struct {
 	HeadSHA *string `json:"head_sha,omitempty"`
@@ -88,7 +88,7 @@ type TrailReviewStartRequest struct {
 	HeadRef *string `json:"head_ref,omitempty"`
 }
 
-// TrailReviewStartResponse is returned by POST /api/v1/trails/{trail_id}/reviews.
+// TrailReviewStartResponse is returned by POST /api/v1/repos/{repo_id}/changes/{number}/reviews.
 type TrailReviewStartResponse struct {
 	ReviewID       string            `json:"review_id"`
 	TrailID        string            `json:"trail_id"`
@@ -108,7 +108,7 @@ type TrailReviewLimits struct {
 }
 
 // TrailReviewCommentBatchRequest posts a batch of findings to a review via
-// POST /api/v1/trails/{trail_id}/reviews/{id}/comments. The API requires at
+// POST /api/v1/repos/{repo_id}/changes/{number}/reviews/{id}/comments. The API requires at
 // least one comment and rejects batches larger than the review's
 // max_comments_per_batch limit.
 type TrailReviewCommentBatchRequest struct {

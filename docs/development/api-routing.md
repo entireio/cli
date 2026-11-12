@@ -132,6 +132,15 @@ uses the following routing shapes, mirroring the entire.io BFF:
   cell or loopback host (`auth.BaseURLOverridePinsCell`), wins; an override naming
   a BFF/apex still routes by catalog. Another cell answers a placement id it
   does not host with an error or, for the processing id, an empty result.
+- **Repository Changes → resolved repo ID in that cell**: all forges use
+  `/api/v1/repos/{repo_id}/changes` and `/{number}` plus subresources, where
+  `repo_id` is the resolved processing-placement ID, not the repository index
+  row ID or a name-derived ID. `api.RepoChangesPath` trims/escapes the ID and
+  rejects blanks; neither GitHub nor native repositories fall back to the
+  legacy forge/name Trail route. `Client.SetTrailRoute` maps transient
+  `/api/v1/trails/{id}/...` internal keys onto this Change route before sending
+  requests (including SSE). CLI Trail names, payloads, browser URLs, and the
+  project-scoped Trail APIs below are unchanged.
 - **Project-scoped trails → assigned project cell**:
   Core resolves the required `--project`; list uses
   `GET /api/v1/trails?projectId=<ID>` at its assigned API URL, and a numeric

@@ -847,12 +847,12 @@ cluster host rather than inventing a forge host. The legacy `/git/` prefix is
 excluded because `repo clone` cannot act on such a ref.
 
 **Being a forge token says nothing about which route accepts it** — the name
-says syntax on purpose. Trails are the current example: a mirror is addressed by
-`forge/owner/repo`, a native repo only by its ULID, so `trailRepoBasePath`
-switches on the forge *after* `IsForgePathToken` has answered yes, and a native
-ref with no resolved repo ID fails there rather than at the grammar. That
-narrowing has to cover *both* ways a forge reaches the API — named in `--repo`
-and inferred from the origin remote — and the inferred one is the common path.
+says syntax on purpose. Repository Changes are addressed by the resolved
+processing-placement ID for **both** GitHub and native repositories:
+`api.RepoChangesPath` builds `/api/v1/repos/{repo_id}/changes` and rejects a
+missing ID, never falling back to a forge/name route. Resolution covers both
+explicit `--repo` references and the origin remote. Project Trail APIs and
+browser URLs keep their separate routing conventions.
 
 Experimental commands (gated by the build version as described above — visible
 and grouped under "Experimental commands:" in developer/nightly builds, hidden

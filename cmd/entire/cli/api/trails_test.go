@@ -6,7 +6,47 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
+
+func TestRepoChangesPath(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, repoID, want string
+	}{
+		{"placement ID", "repo-placement-id", "/api/v1/repos/repo-placement-id/changes"},
+		{"trimmed and escaped", " \trepo/id?#frag \n", "/api/v1/repos/repo%2Fid%3F%23frag/changes"},
+		{"empty", "", ""},
+		{"whitespace", " \t\n", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			path, err := RepoChangesPath(tc.repoID)
+			if tc.want == "" {
+				require.ErrorContains(t, err, "resolve the repository's processing placement")
+			} else {
+				require.NoError(t, err)
+			}
+			require.Equal(t, tc.want, path)
+		})
+	}
+}
+
+func TestClient_TrailsEnabledMissingRepoIDMakesNoRequest(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("missing repository ID must not send a request")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	client := NewClientWithBaseURL("tok", server.URL)
+	for _, repoID := range []string{"", " \t\n"} {
+		enabled, err := client.TrailsEnabled(t.Context(), repoID)
+		require.ErrorContains(t, err, "repository ID is required")
+		require.False(t, enabled)
+	}
+}
 
 func TestClient_TrailsEnabledEscapesPathComponents(t *testing.T) {
 	t.Parallel()
@@ -21,14 +61,14 @@ func TestClient_TrailsEnabledEscapesPathComponents(t *testing.T) {
 
 	c := NewClientWithBaseURL("tok", server.URL)
 
-	ok, err := c.TrailsEnabled(context.Background(), "g/h", "acme?org", "repo#frag")
+	ok, err := c.TrailsEnabled(context.Background(), " \trepo/id?#frag \n")
 	if err != nil {
 		t.Fatalf("TrailsEnabled: %v", err)
 	}
 	if !ok {
 		t.Fatal("enabled = false, want true")
 	}
-	want := "/api/v1/trails/g%2Fh/acme%3Forg/repo%23frag?per_page=1"
+	want := "/api/v1/repos/repo%2Fid%3F%23frag/changes?per_page=1"
 	if gotURI != want {
 		t.Errorf("request URI = %q, want %q", gotURI, want)
 	}
@@ -44,13 +84,13 @@ func TestClient_RewritesResolvedTrailReviewRoute(t *testing.T) {
 	defer server.Close()
 
 	c := NewClientWithBaseURL("tok", server.URL)
-	c.SetTrailRoute("trl/one", "/api/v1/trails/gh/acme/repo/42")
+	c.SetTrailRoute("trl/one", "/api/v1/repos/repo-id/changes/42")
 	resp, err := c.Get(context.Background(), "/api/v1/trails/trl%2Fone/reviews/comments")
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if want := "/api/v1/trails/gh/acme/repo/42/reviews/comments"; got != want {
+	if want := "/api/v1/repos/repo-id/changes/42/reviews/comments"; got != want {
 		t.Fatalf("path = %q, want %q", got, want)
 	}
 }
@@ -68,7 +108,7 @@ func TestClient_TrailRequestsUseSnakeCase(t *testing.T) {
 
 	client := NewClientWithBaseURL("tok", server.URL)
 	ready := true
-	resp, err := client.Patch(context.Background(), "/api/v1/trails/gh/acme/repo/42", TrailUpdateRequest{
+	resp, err := client.Patch(context.Background(), "/api/v1/repos/repo-id/changes/42", TrailUpdateRequest{
 		ReadyForReview: &ready,
 	})
 	if err != nil {
@@ -97,6 +137,7 @@ func TestClient_TrailsEnabled(t *testing.T) {
 	}{
 		{"enabled (200)", http.StatusOK, `{"items":[],"next_cursor":null,"total_count":0}`, true, true},
 		{"enabled empty (200)", http.StatusOK, `{"items":[],"next_cursor":null,"total_count":0}`, true, true},
+		{"enabled no content (204)", http.StatusNoContent, "", true, true},
 		{"not enabled (404)", http.StatusNotFound, `{"error":"not found"}`, false, true},
 		{"forbidden (403)", http.StatusForbidden, `{"type":"https://example.test/problems/forbidden","title":"Forbidden","status":403,"detail":"No access","code":"forbidden","request_id":"request-example"}`, false, true},
 		{"gone (410)", http.StatusGone, `{"error":"gone"}`, false, true},
@@ -120,15 +161,15 @@ func TestClient_TrailsEnabled(t *testing.T) {
 
 			c := NewClientWithBaseURL("tok", server.URL)
 
-			ok, err := c.TrailsEnabled(context.Background(), "gh", "acme", "repo")
+			ok, err := c.TrailsEnabled(context.Background(), "repo-placement-id")
 			if (err == nil) != tt.wantErrNil {
 				t.Fatalf("err = %v, wantErrNil = %v", err, tt.wantErrNil)
 			}
 			if ok != tt.wantOK {
 				t.Errorf("enabled = %v, want %v", ok, tt.wantOK)
 			}
-			if gotPath != "/api/v1/trails/gh/acme/repo" {
-				t.Errorf("path = %q, want /api/v1/trails/gh/acme/repo", gotPath)
+			if gotPath != "/api/v1/repos/repo-placement-id/changes" {
+				t.Errorf("path = %q, want /api/v1/repos/repo-placement-id/changes", gotPath)
 			}
 			if gotQuery != "per_page=1" {
 				t.Errorf("query = %q, want per_page=1", gotQuery)
