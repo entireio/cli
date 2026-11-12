@@ -515,3 +515,70 @@ func TestGitRefsStore_WriteRetryFollowsTheStoredSpelling(t *testing.T) {
 		assert.True(t, contained, "%s at %s forks the checkpoint", name, tip)
 	}
 }
+
+// A rewrite or replay replaces a checkpoint's history: its new commit does not
+// contain the old one. On a case-insensitive filesystem, when the checkpoint's
+// ref is packed and its shard folder exists on disk in the other case, the
+// update lands under the other spelling and the packed entry keeps the old
+// commit. With no history linking the two, reads would fall back to the
+// canonical name, the old version. The update must not leave the old commit
+// behind under either spelling.
+func TestCASPersistentRef_RewriteLeavesNoOldVersionUnderTheOtherSpelling(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newRefsStore(t)
+	dir := repoDirOf(t, store)
+	testutil.RunGit(t, dir, "config", "core.ignorecase", "true")
+	canonical := mustRefName(t, foldableULID)
+	refsWrite(t, store, foldableULID, "sess-1", "one")
+	refsWrite(t, store, foldableULID, "sess-2", "two")
+	old := testutil.RunGit(t, dir, "rev-parse", canonical.String())[:40]
+	testutil.RunGit(t, dir, "pack-refs", "--all")
+	// A legacy checkpoint recreates the shard folder in the other case.
+	testutil.RunGit(t, dir, "update-ref", CheckpointRefPrefix+"6b/a1b2c3d4e56b", old)
+	tree := testutil.RunGit(t, dir, "rev-parse", old+"^{tree}")[:40]
+	rewritten := testutil.RunGit(t, dir, "commit-tree", tree, "-m", "rewritten")[:40]
+
+	require.NoError(t, CASPersistentRef(ctx, store.repo, canonical, plumbing.NewHash(rewritten), plumbing.NewHash(old)))
+	testutil.RunGit(t, dir, "pack-refs", "--all")
+
+	reopened, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	_, tip, err := StoredRef(reopened, nil, canonical)
+	require.NoError(t, err)
+	assert.Equal(t, rewritten, tip.String(), "reads return the rewritten version")
+	spellings := testutil.RunGit(t, dir, "for-each-ref", "--format=%(objectname)", CheckpointRefPrefix+"*/"+foldableULID.String())
+	assert.NotContains(t, spellings, old, "no spelling of the checkpoint keeps the replaced commit")
+}
+
+// A checkpoint already split across both spellings, the canonical one at the
+// earlier version, then rewritten on the later one. The earlier version is
+// part of the history the rewrite replaced, so it must not survive under the
+// canonical name, where reads would fall back to it.
+func TestCASPersistentRef_RewriteOfASplitLeavesNoEarlierVersion(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newRefsStore(t)
+	dir := repoDirOf(t, store)
+	canonical := mustRefName(t, foldableULID)
+	refsWrite(t, store, foldableULID, "sess-1", "one")
+	earlier := testutil.RunGit(t, dir, "rev-parse", canonical.String())[:40]
+	refsWrite(t, store, foldableULID, "sess-2", "two")
+	later := testutil.RunGit(t, dir, "rev-parse", canonical.String())[:40]
+	folded, foldedName := foldShardRefAndPack(t, store, foldableULID)
+	testutil.RunGit(t, dir, "update-ref", canonical.String(), earlier)
+	testutil.RunGit(t, dir, "pack-refs", "--all")
+	tree := testutil.RunGit(t, dir, "rev-parse", later+"^{tree}")[:40]
+	rewritten := testutil.RunGit(t, dir, "commit-tree", tree, "-m", "rewritten")[:40]
+
+	require.NoError(t, CASPersistentRef(ctx, folded.repo, foldedName, plumbing.NewHash(rewritten), plumbing.NewHash(later)))
+	testutil.RunGit(t, dir, "pack-refs", "--all")
+
+	reopened, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	_, tip, err := StoredRef(reopened, nil, canonical)
+	require.NoError(t, err)
+	assert.Equal(t, rewritten, tip.String(), "reads return the rewritten version")
+	spellings := testutil.RunGit(t, dir, "for-each-ref", "--format=%(objectname)", CheckpointRefPrefix+"*/"+foldableULID.String())
+	assert.NotContains(t, spellings, earlier, "no spelling keeps the earlier version")
+}

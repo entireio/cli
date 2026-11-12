@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -154,9 +155,104 @@ func CASPersistentRef(
 	if err != nil {
 		return fmt.Errorf("resolve repository root: %w", err)
 	}
-	return retryPersistentRefLockContention(ctx, refName, func() error {
+	if err := retryPersistentRefLockContention(ctx, refName, func() error {
 		return gitrepo.CompareAndSwapRef(ctx, repoRoot, refName, newHash, expectedHash)
-	})
+	}); err != nil {
+		return err
+	}
+	retireReplacedSpelling(ctx, repo, repoRoot, refName, newHash, expectedHash)
+	return nil
+}
+
+// retireReplacedSpelling removes the commit a checkpoint ref update replaced
+// when git left it behind under the other spelling of the shard.
+//
+// On a case-insensitive filesystem, updating a packed checkpoint ref whose
+// shard folder exists on disk in the other case writes the new commit there,
+// under the other spelling, and leaves the replaced commit in the packed entry.
+// After a fast-forward the two are linked by history and reads pick the later
+// one (SupersededBy). After a rewrite or replay they are not, and reads would
+// fall back to the canonical name, which can be the replaced commit, or an
+// earlier version when the checkpoint was already split.
+//
+// The stale entry can only be deleted once both are packed: while the new
+// commit is a loose file, both names resolve to it and a guarded delete of the
+// stale one is refused. So this packs the checkpoint's refs, then deletes the
+// other spelling, guarded by the commit it held. It is
+// cleanup after a successful update, so a failure is logged, not returned:
+// the split it leaves is the one reads already handle by history.
+func retireReplacedSpelling(ctx context.Context, repo *git.Repository, repoRoot string, refName plumbing.ReferenceName, newHash, replaced plumbing.Hash) {
+	if replaced.IsZero() || newHash.Equal(replaced) {
+		return
+	}
+	other, ok := OtherShardSpelling(refName)
+	if !ok || !foldsCase(repo) {
+		return
+	}
+	cid, _ := ParseRef(refName)
+	pattern := CheckpointRefPrefix + "*/" + cid.String()
+	tips, err := listCheckpointSpellings(ctx, repoRoot, pattern)
+	if err != nil {
+		logging.Debug(ctx, "checkpoint ref: could not list shard spellings after an update",
+			slog.String("ref", refName.String()), slog.String("error", err.Error()))
+		return
+	}
+	// The spelling that does not hold the new commit is stale when it holds
+	// the replaced commit or an earlier version of it: either way the update
+	// replaced that history.
+	var stale plumbing.ReferenceName
+	switch newHash.String() {
+	case tips[refName]:
+		stale = other
+	case tips[other]:
+		stale = refName
+	default:
+		return
+	}
+	staleTip, ok := tips[stale]
+	if !ok {
+		return
+	}
+	staleCommit := plumbing.NewHash(staleTip)
+	if !staleCommit.Equal(replaced) && !SupersededBy(repo, staleCommit, replaced) {
+		return
+	}
+	if out, err := plumbingGit(ctx, repoRoot, "pack-refs", "--include", pattern); err != nil {
+		logging.Warn(ctx, "checkpoint ref: could not pack refs to remove a replaced shard spelling",
+			slog.String("ref", stale.String()), slog.String("error", err.Error()), slog.String("output", out))
+		return
+	}
+	if err := gitrepo.CompareAndSwapRef(ctx, repoRoot, stale, plumbing.ZeroHash, staleCommit); err != nil {
+		logging.Warn(ctx, "checkpoint ref: could not remove a replaced shard spelling",
+			slog.String("ref", stale.String()), slog.String("error", err.Error()))
+	}
+}
+
+// listCheckpointSpellings maps each ref matching pattern to its commit, by the
+// exact name git stores it under.
+func listCheckpointSpellings(ctx context.Context, repoRoot, pattern string) (map[plumbing.ReferenceName]string, error) {
+	out, err := plumbingGit(ctx, repoRoot, "for-each-ref", "--format=%(objectname) %(refname)", pattern)
+	if err != nil {
+		return nil, err
+	}
+	tips := make(map[plumbing.ReferenceName]string)
+	for line := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
+		if oid, name, ok := strings.Cut(line, " "); ok {
+			tips[plumbing.ReferenceName(name)] = oid
+		}
+	}
+	return tips, nil
+}
+
+func plumbingGit(ctx context.Context, repoRoot string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = repoRoot
+	cmd.Env = append(gitrepo.EnvWithoutRepoOverrides(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return string(out), fmt.Errorf("git %s: %w", args[0], err)
+	}
+	return string(out), nil
 }
 
 func retryPersistentRefLockContention(
