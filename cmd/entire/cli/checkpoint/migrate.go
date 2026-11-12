@@ -316,7 +316,7 @@ func (v *legacyV1) refusedByWritePath(ctx context.Context, cid id.CheckpointID, 
 	// A checkpoint with its own ref is not this function's to resolve, so it
 	// is skipped whatever its v1 copies say, including when they cannot be
 	// read (a shallow or partial clone).
-	if exists, err := refExists(v.repo, refName); err != nil || exists {
+	if exists, err := LocalRefExists(v.repo, cid); err != nil || exists {
 		return pick, false, err
 	}
 	if !errors.Is(pick.err, ErrLegacyCheckpointDiverged) {
@@ -331,7 +331,7 @@ func (v *legacyV1) refusedByWritePath(ctx context.Context, cid id.CheckpointID, 
 		return pick, false, fmt.Errorf("couldn't reach the remote to check checkpoint %s for a ref another clone pushed, "+
 			"so nothing was changed; try again once it is reachable: %w", cid, err)
 	}
-	exists, err := refExists(v.repo, refName)
+	exists, err := LocalRefExists(v.repo, cid)
 	return pick, err == nil && !exists, err
 }
 
@@ -511,15 +511,19 @@ func (v *legacyV1) describeCopy(c *checkpointCopy) LegacyCheckpointCopy {
 	}
 }
 
-func refExists(repo *git.Repository, refName plumbing.ReferenceName) (bool, error) {
-	_, err := repo.Reference(refName, true)
+// LocalRefExists reports whether cid has its own ref in repo, under either
+// spelling of its shard (see resolveLocalRef). A caller that checked the
+// canonical name alone would take a ref stored folded for a missing one and
+// fetch or copy a second ref for the same checkpoint.
+func LocalRefExists(repo *git.Repository, cid id.CheckpointID) (bool, error) {
+	_, err := newGitRefsStore(repo).resolveLocalRef(cid)
 	switch {
 	case err == nil:
 		return true, nil
 	case errors.Is(err, plumbing.ErrReferenceNotFound):
 		return false, nil
 	default:
-		return false, fmt.Errorf("resolve checkpoint ref %s: %w", refName, err)
+		return false, err
 	}
 }
 
