@@ -53,7 +53,7 @@ func (f *fakeProjectTrailCore) ResolveProject(_ context.Context, params coreapi.
 	}{}
 	body := f.resolutionJSON
 	if body == "" {
-		body = fmt.Sprintf(`{"project":{"id":%q,"region":"eu","primaryProcessingCell":"project-cell","apiUrl":%q},"reference":{"host":%q,"project":%q}}`, projectTrailTestProject, f.apiURL, params.Host, params.Project)
+		body = fmt.Sprintf(`{"project":{"id":%q,"region":"eu","primaryProcessingCell":"project-cell","apiUrl":%q},"reference":{"host":%q,"project":%q}}`, projectTrailTestProject, f.apiURL, params.ForgePrefix, params.Project)
 	}
 	if err := json.Unmarshal([]byte(body), &resolved); err != nil {
 		return nil, err

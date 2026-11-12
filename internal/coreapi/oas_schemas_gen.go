@@ -15747,6 +15747,52 @@ func (o OptRepoReference) Or(d RepoReference) RepoReference {
 	return d
 }
 
+// NewOptResolveProjectCapabilities returns new OptResolveProjectCapabilities with value set to v.
+func NewOptResolveProjectCapabilities(v ResolveProjectCapabilities) OptResolveProjectCapabilities {
+	return OptResolveProjectCapabilities{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptResolveProjectCapabilities is optional ResolveProjectCapabilities.
+type OptResolveProjectCapabilities struct {
+	Value ResolveProjectCapabilities
+	Set   bool
+}
+
+// IsSet returns true if OptResolveProjectCapabilities was set.
+func (o OptResolveProjectCapabilities) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptResolveProjectCapabilities) Reset() {
+	var v ResolveProjectCapabilities
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptResolveProjectCapabilities) SetTo(v ResolveProjectCapabilities) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptResolveProjectCapabilities) Get() (v ResolveProjectCapabilities, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptResolveProjectCapabilities) Or(d ResolveProjectCapabilities) ResolveProjectCapabilities {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
 // NewOptString returns new OptString with value set to v.
 func NewOptString(v string) OptString {
 	return OptString{
@@ -20051,27 +20097,29 @@ func (s *ResolvePlacementsOutputBodyAdditional) init() ResolvePlacementsOutputBo
 	return m
 }
 
-type ResolveProjectHost string
+// Optional: live (default) checks GitHub namespace authority now. display may answer from a roster
+// up to 70 minutes old; never use a display capability to authorize a write.
+type ResolveProjectCapabilities string
 
 const (
-	ResolveProjectHostEt ResolveProjectHost = "et"
-	ResolveProjectHostGh ResolveProjectHost = "gh"
+	ResolveProjectCapabilitiesLive    ResolveProjectCapabilities = "live"
+	ResolveProjectCapabilitiesDisplay ResolveProjectCapabilities = "display"
 )
 
-// AllValues returns all ResolveProjectHost values.
-func (ResolveProjectHost) AllValues() []ResolveProjectHost {
-	return []ResolveProjectHost{
-		ResolveProjectHostEt,
-		ResolveProjectHostGh,
+// AllValues returns all ResolveProjectCapabilities values.
+func (ResolveProjectCapabilities) AllValues() []ResolveProjectCapabilities {
+	return []ResolveProjectCapabilities{
+		ResolveProjectCapabilitiesLive,
+		ResolveProjectCapabilitiesDisplay,
 	}
 }
 
 // MarshalText implements encoding.TextMarshaler.
-func (s ResolveProjectHost) MarshalText() ([]byte, error) {
+func (s ResolveProjectCapabilities) MarshalText() ([]byte, error) {
 	switch s {
-	case ResolveProjectHostEt:
+	case ResolveProjectCapabilitiesLive:
 		return []byte(s), nil
-	case ResolveProjectHostGh:
+	case ResolveProjectCapabilitiesDisplay:
 		return []byte(s), nil
 	default:
 		return nil, errors.Errorf("invalid value: %q", s)
@@ -20079,13 +20127,54 @@ func (s ResolveProjectHost) MarshalText() ([]byte, error) {
 }
 
 // UnmarshalText implements encoding.TextUnmarshaler.
-func (s *ResolveProjectHost) UnmarshalText(data []byte) error {
-	switch ResolveProjectHost(data) {
-	case ResolveProjectHostEt:
-		*s = ResolveProjectHostEt
+func (s *ResolveProjectCapabilities) UnmarshalText(data []byte) error {
+	switch ResolveProjectCapabilities(data) {
+	case ResolveProjectCapabilitiesLive:
+		*s = ResolveProjectCapabilitiesLive
 		return nil
-	case ResolveProjectHostGh:
-		*s = ResolveProjectHostGh
+	case ResolveProjectCapabilitiesDisplay:
+		*s = ResolveProjectCapabilitiesDisplay
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+type ResolveProjectForgePrefix string
+
+const (
+	ResolveProjectForgePrefixEt ResolveProjectForgePrefix = "et"
+	ResolveProjectForgePrefixGh ResolveProjectForgePrefix = "gh"
+)
+
+// AllValues returns all ResolveProjectForgePrefix values.
+func (ResolveProjectForgePrefix) AllValues() []ResolveProjectForgePrefix {
+	return []ResolveProjectForgePrefix{
+		ResolveProjectForgePrefixEt,
+		ResolveProjectForgePrefixGh,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s ResolveProjectForgePrefix) MarshalText() ([]byte, error) {
+	switch s {
+	case ResolveProjectForgePrefixEt:
+		return []byte(s), nil
+	case ResolveProjectForgePrefixGh:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *ResolveProjectForgePrefix) UnmarshalText(data []byte) error {
+	switch ResolveProjectForgePrefix(data) {
+	case ResolveProjectForgePrefixEt:
+		*s = ResolveProjectForgePrefixEt
+		return nil
+	case ResolveProjectForgePrefixGh:
+		*s = ResolveProjectForgePrefixGh
 		return nil
 	default:
 		return errors.Errorf("invalid value: %q", data)

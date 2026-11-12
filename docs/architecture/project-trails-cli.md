@@ -65,7 +65,7 @@ Selectors are project-local numbers or trail ULIDs, or `<repo>/<number>` for one
   Server pagination tokens pass through unchanged. A numeric selector is one
   `GET /{host}/{project}/trails/{number}` (the detail route accepts a
   project-local number); later requests use the returned ULID. JSON preserves counts, groups, jurisdiction, and capabilities.
-- Explicit selectors normally resolve through Core `/projects/resolve/{host}/{project}`.
+- Explicit selectors normally resolve through Core `/project-resolver/{forge_prefix}/{project}`.
   Creation and `link` instead use the destination repository's placement and
   ownership, so repo-only writers need no project inspection. Branch discovery
   follows the backing row's parent. None falls back to legacy semantics or

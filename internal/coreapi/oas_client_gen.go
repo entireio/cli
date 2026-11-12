@@ -674,12 +674,13 @@ type Invoker interface {
 	ResolveMirrorPlacements(ctx context.Context, params ResolveMirrorPlacementsParams) (*ResolvePlacementsOutputBody, error)
 	// ResolveProject invokes resolveProject operation.
 	//
+	// **Accepted credentials:** User token.
 	// Case-insensitive lookup by native project name (et) or GitHub owner namespace (gh). Uses project
 	// inspect permission, including platform administrators. An existing native (et) project the caller
 	// cannot inspect returns 403, so a creator can tell a taken name from a free one. Missing projects,
-	// and inaccessible GitHub (gh) namespaces, return 404.
+	// and inaccessible GitHub (gh) namespaces, return 404. An automation token always receives 404.
 	//
-	// GET /projects/resolve/{host}/{project}
+	// GET /project-resolver/{forge_prefix}/{project}
 	ResolveProject(ctx context.Context, params ResolveProjectParams) (*ResolveProjectOutputBody, error)
 	// ResolveRepoIDs invokes resolveRepoIDs operation.
 	//
@@ -12425,12 +12426,13 @@ func (c *Client) sendResolveMirrorPlacements(ctx context.Context, params Resolve
 
 // ResolveProject invokes resolveProject operation.
 //
+// **Accepted credentials:** User token.
 // Case-insensitive lookup by native project name (et) or GitHub owner namespace (gh). Uses project
 // inspect permission, including platform administrators. An existing native (et) project the caller
 // cannot inspect returns 403, so a creator can tell a taken name from a free one. Missing projects,
-// and inaccessible GitHub (gh) namespaces, return 404.
+// and inaccessible GitHub (gh) namespaces, return 404. An automation token always receives 404.
 //
-// GET /projects/resolve/{host}/{project}
+// GET /project-resolver/{forge_prefix}/{project}
 func (c *Client) ResolveProject(ctx context.Context, params ResolveProjectParams) (*ResolveProjectOutputBody, error) {
 	res, err := c.sendResolveProject(ctx, params)
 	return res, err
@@ -12440,16 +12442,16 @@ func (c *Client) sendResolveProject(ctx context.Context, params ResolveProjectPa
 
 	u := uri.Clone(c.requestURL(ctx))
 	var pathParts [4]string
-	pathParts[0] = "/projects/resolve/"
+	pathParts[0] = "/project-resolver/"
 	{
-		// Encode "host" parameter.
+		// Encode "forge_prefix" parameter.
 		e := uri.NewPathEncoder(uri.PathEncoderConfig{
-			Param:   "host",
+			Param:   "forge_prefix",
 			Style:   uri.PathStyleSimple,
 			Explode: false,
 		})
 		if err := func() error {
-			return e.EncodeValue(conv.StringToString(string(params.Host)))
+			return e.EncodeValue(conv.StringToString(string(params.ForgePrefix)))
 		}(); err != nil {
 			return res, errors.Wrap(err, "encode path")
 		}
@@ -12479,6 +12481,26 @@ func (c *Client) sendResolveProject(ctx context.Context, params ResolveProjectPa
 		pathParts[3] = encoded
 	}
 	uri.AddPathParts(u, pathParts[:]...)
+
+	q := uri.NewQueryEncoder()
+	{
+		// Encode "capabilities" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "capabilities",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.Capabilities.Get(); ok {
+				return e.EncodeValue(conv.StringToString(string(val)))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	u.RawQuery = q.Values().Encode()
 
 	r, err := ht.NewRequest(ctx, "GET", u)
 	if err != nil {

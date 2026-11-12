@@ -165,6 +165,12 @@ The next full refresh carries them on its own, and this entry goes.
 (`SetDefaultBranchInputBody`, `SetDefaultBranchOutputBody`) are spliced the
 same way, verbatim from the published spec (entiredb#5136).
 
+`GET /project-resolver/{forge_prefix}/{project}` (`resolveProject`) replaces
+`GET /projects/resolve/{host}/{project}`, verbatim from the published spec
+except that its `automationToken` security alternative is dropped: the vendored
+spec does not define that scheme yet, and ogen aborts on a dangling one. Core
+still serves the old path.
+
 `CreateServiceAccountInputBody`, `ServiceAccount`, `ServiceAccountWithGrants`
 and `GET /service-accounts` are spliced verbatim from the published spec. They
 carry `project_id`: service accounts belong to a project, and `orgId` is
