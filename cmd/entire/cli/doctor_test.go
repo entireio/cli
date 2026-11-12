@@ -19,6 +19,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/antigravity"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
+	"github.com/entireio/cli/cmd/entire/cli/agent/factoryaidroid"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
@@ -2208,6 +2210,32 @@ func TestCheckHookDrift_AntigravityWarnsWithoutSessionStart(t *testing.T) {
 	out := stdout.String()
 	require.Contains(t, out, "hooks: OUT OF DATE")
 	require.Contains(t, out, "Run `entire agent add antigravity` to update it.")
+}
+
+// TestCheckHookDrift_DroidWrittenForAnotherOS pins the doctor's report for a
+// hooks file installed on the other OS, such as one a teammate committed from
+// a Windows checkout: it names the cause and the reinstall, says what that
+// reinstall does to the committed file, and `entire status` still lists the
+// agent. Mutates the shared host and the working directory, so no t.Parallel().
+func TestCheckHookDrift_DroidWrittenForAnotherOS(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Cleanup(osroot.ResetShared)
+	t.Chdir(dir)
+	restore := agent.SetWindowsHookProbeForTesting("windows", nil)
+	_, err := (&factoryaidroid.FactoryAIDroidAgent{}).InstallHooks(context.Background(), false)
+	restore()
+	require.NoError(t, err)
+	t.Cleanup(agent.SetWindowsHookProbeForTesting("linux", nil))
+
+	cmd, stdout := newTestCmd(t)
+	checkHookDrift(cmd)
+
+	out := stdout.String()
+	require.Contains(t, out, "Factory AI Droid hooks: WRITTEN FOR ANOTHER OS")
+	require.Contains(t, out, "Run `entire agent add factoryai-droid` to rewrite it for this OS.")
+	require.Contains(t, out, "committed, that breaks it for teammates on the other OS.")
+	require.NotContains(t, out, "OUT OF DATE")
+	require.Contains(t, OutdatedHookAgents(context.Background()), types.AgentName("factoryai-droid"))
 }
 
 // oldEntirePrePushHook is the pre-push hook Entire wrote before it passed git's

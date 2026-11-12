@@ -103,7 +103,7 @@ func TestCheckHookConfig_HostFormWindows(t *testing.T) {
 		{"windows install checked on windows", "windows", "windows", false, agent.HooksCurrent},
 		{"sh install checked on windows without sh", "linux", "windows", true, agent.HooksCurrent},
 		{"windows sh install checked on windows without sh", "windows", "windows", true, agent.HooksCurrent},
-		{"windows install checked on linux", "windows", "linux", false, agent.HooksOutdated},
+		{"windows install checked on linux", "windows", "linux", false, agent.HooksForOtherHost},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tempDir := t.TempDir()

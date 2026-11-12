@@ -1422,6 +1422,13 @@ func checkHookDrift(cmd *cobra.Command) {
 			fmt.Fprintf(w, "  Run `entire agent add %s` to update it.\n", ag.Name())
 			fmt.Fprintln(w, "  If that does not fix it, add --force, which rebuilds Entire's hooks and")
 			fmt.Fprintln(w, "  drops any changes you made to them.")
+		case agent.HooksForOtherHost:
+			fmt.Fprintf(w, "%s hooks: WRITTEN FOR ANOTHER OS\n", displayName)
+			fmt.Fprintln(w, "  The installed hook commands are the ones Entire writes on another OS, and")
+			fmt.Fprintln(w, "  this OS cannot run them, so no hooks fire here. This usually means the")
+			fmt.Fprintln(w, "  hook config was committed from a teammate's checkout on that OS.")
+			fmt.Fprintf(w, "  Run `entire agent add %s` to rewrite it for this OS. If the file is\n", ag.Name())
+			fmt.Fprintln(w, "  committed, that breaks it for teammates on the other OS.")
 		}
 	}
 }

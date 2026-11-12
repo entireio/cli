@@ -386,13 +386,13 @@ func (f *FactoryAIDroidAgent) AreHooksInstalled(ctx context.Context) (bool, erro
 
 // CheckHookConfig implements agent.HookFreshness: outdated when Entire's hooks
 // in .factory/settings.json are not the form InstallHooks writes on this host,
-// or one is missing. Droid runs hooks under sh on macOS and Linux and under
-// cmd.exe on Windows, and neither runs the other's form, so a settings file
-// committed from a checkout on the other OS is outdated here. That includes a
-// Windows wrapper written before hooks resolved programs from PATH only, which
-// keeps working but still searches the folder Droid was opened in. An absent,
-// unreadable or malformed file, or one with no Entire Stop hook
-// (AreHooksInstalled's test), reads as absent.
+// or one is missing. That includes a Windows wrapper written before hooks
+// resolved programs from PATH only, which keeps working but still searches the
+// folder Droid was opened in. Droid runs hooks under sh on macOS and Linux and
+// under cmd.exe on Windows, and neither runs the other's form, so a settings
+// file holding the other OS's current form (usually committed from a checkout
+// there) reads as HooksForOtherHost. An absent, unreadable or malformed file,
+// or one with no Entire Stop hook (AreHooksInstalled's test), reads as absent.
 func (f *FactoryAIDroidAgent) CheckHookConfig(ctx context.Context) agent.HookConfigState {
 	cfg, err := factoryHookConfig(ctx)
 	if err != nil {
@@ -407,8 +407,12 @@ func (f *FactoryAIDroidAgent) CheckHookConfig(ctx context.Context) agent.HookCon
 		return agent.HooksAbsent
 	}
 
-	if droidHooksCurrent(settings.Hooks, agent.HookHostIsWindows()) {
+	windows := agent.HookHostIsWindows()
+	if droidHooksCurrent(settings.Hooks, windows) {
 		return agent.HooksCurrent
+	}
+	if droidHooksCurrent(settings.Hooks, !windows) {
+		return agent.HooksForOtherHost
 	}
 	return agent.HooksOutdated
 }

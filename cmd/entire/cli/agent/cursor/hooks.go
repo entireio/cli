@@ -303,14 +303,15 @@ func cursorHookCommand(verb string, windows bool) string {
 
 // CheckHookConfig implements agent.HookFreshness: outdated when Entire's hooks
 // in .cursor/hooks.json are not a form InstallHooks writes on this host, or one
-// is missing. The sh form counts on every host: Cursor's Windows hook shell
-// (PowerShell) runs it wherever sh is on PATH. The Windows form counts only on
-// Windows, since sh cannot run it, so a hooks file committed from a Windows
-// checkout is outdated on macOS and Linux. That includes a Windows wrapper
-// written before hooks resolved programs from PATH only, which keeps working
-// but still searches the folder Cursor was opened in. The sh probe is not run,
-// so a slow probe cannot flip a healthy install to outdated. An absent,
-// unreadable or malformed file, or one holding no Entire hook, reads as absent.
+// is missing. That includes a Windows wrapper written before hooks resolved
+// programs from PATH only, which keeps working but still searches the folder
+// Cursor was opened in. The sh form counts on every host: Cursor's Windows hook
+// shell (PowerShell) runs it wherever sh is on PATH. The Windows form counts
+// only on Windows, since sh cannot run it: on macOS and Linux a hooks file
+// holding it (usually committed from a Windows checkout) reads as
+// HooksForOtherHost. The sh probe is not run, so a slow probe cannot flip a
+// healthy install to outdated. An absent, unreadable or malformed file, or one
+// holding no Entire hook, reads as absent.
 func (c *CursorAgent) CheckHookConfig(ctx context.Context) agent.HookConfigState {
 	cfg, err := cursorHookConfig(ctx)
 	if err != nil {
@@ -334,8 +335,12 @@ func (c *CursorAgent) CheckHookConfig(ctx context.Context) agent.HookConfigState
 	if !owned {
 		return agent.HooksAbsent
 	}
-	if cursorHooksCurrent(parsed, false) || (agent.HookHostIsWindows() && cursorHooksCurrent(parsed, true)) {
+	windows := agent.HookHostIsWindows()
+	if cursorHooksCurrent(parsed, false) || (windows && cursorHooksCurrent(parsed, true)) {
 		return agent.HooksCurrent
+	}
+	if !windows && cursorHooksCurrent(parsed, true) {
+		return agent.HooksForOtherHost
 	}
 	return agent.HooksOutdated
 }

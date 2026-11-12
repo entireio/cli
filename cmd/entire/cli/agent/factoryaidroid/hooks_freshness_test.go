@@ -127,9 +127,9 @@ func TestCheckHookConfig_TaskHookUnderOtherMatcherIsOutdated(t *testing.T) {
 // TestCheckHookConfig_HostFormWindows pins that only this host's form is
 // current: droid runs hooks under sh on macOS and Linux and under cmd.exe on
 // Windows, and neither runs the other's form, so a settings file committed
-// from the other OS is outdated. Install-then-check on the same host also
-// keeps InstallHooks and CheckHookConfig from drifting apart. Mutates the
-// shared host and the working directory, so no t.Parallel().
+// from the other OS reads as HooksForOtherHost. Install-then-check on the same
+// host also keeps InstallHooks and CheckHookConfig from drifting apart. Mutates
+// the shared host and the working directory, so no t.Parallel().
 func TestCheckHookConfig_HostFormWindows(t *testing.T) {
 	for _, tc := range []struct {
 		installOS, checkOS string
@@ -137,8 +137,8 @@ func TestCheckHookConfig_HostFormWindows(t *testing.T) {
 	}{
 		{"linux", "linux", agentpkg.HooksCurrent},
 		{"windows", "windows", agentpkg.HooksCurrent},
-		{"windows", "linux", agentpkg.HooksOutdated},
-		{"linux", "windows", agentpkg.HooksOutdated},
+		{"windows", "linux", agentpkg.HooksForOtherHost},
+		{"linux", "windows", agentpkg.HooksForOtherHost},
 	} {
 		t.Run(tc.installOS+" install checked on "+tc.checkOS, func(t *testing.T) {
 			tempDir := t.TempDir()
