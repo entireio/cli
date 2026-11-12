@@ -235,8 +235,20 @@ func TestInstallPluginFromRepo_FallsBackPastAssetlessTag(t *testing.T) { //nolin
 
 func TestUpgradeInstalledPlugin_NoManifest(t *testing.T) { //nolint:paralleltest // mutates env
 	withIsolatedPluginEnv(t)
+	src := filepath.Join(t.TempDir(), pluginBinaryName("localdev"))
+	writeExecutableScript(t, src, "#!/bin/sh\n")
+	if _, err := InstallPluginFromPath(t.Context(), InstallPluginOptions{SourcePath: src}); err != nil {
+		t.Fatalf("local-dev install: %v", err)
+	}
 	if _, err := UpgradeInstalledPlugin(context.Background(), "localdev"); err == nil || !strings.Contains(err.Error(), "manifest") {
 		t.Errorf("err = %v, want no-manifest explanation", err)
+	}
+}
+
+func TestUpgradeInstalledPlugin_NotInstalled(t *testing.T) { //nolint:paralleltest // mutates env
+	withIsolatedPluginEnv(t)
+	if _, err := UpgradeInstalledPlugin(context.Background(), "ghost"); err == nil || !strings.Contains(err.Error(), "not installed") {
+		t.Errorf("err = %v, want not installed", err)
 	}
 }
 
