@@ -668,3 +668,26 @@ func TestSecretExchangeErrorRetryable(t *testing.T) {
 		})
 	}
 }
+
+// The message is what an operator sees: a refusal names Core's verdict (its
+// OAuth code when it sent one), an outage says the exchange was unavailable.
+func TestSecretExchangeErrorMessage(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		err  SecretExchangeError
+		want string
+	}{
+		{SecretExchangeError{Core: "https://core", StatusCode: http.StatusBadRequest, Code: "invalid_grant", Description: "secret revoked"},
+			"ENTIRE_TOKEN service account secret refused by https://core: invalid_grant: secret revoked"},
+		{SecretExchangeError{Core: "https://core", StatusCode: http.StatusUnauthorized},
+			"ENTIRE_TOKEN service account secret refused by https://core: HTTP 401"},
+		{SecretExchangeError{Core: "https://core", StatusCode: http.StatusServiceUnavailable, Code: "temporarily_unavailable"},
+			"ENTIRE_TOKEN service account secret exchange unavailable at https://core: HTTP 503"},
+		{SecretExchangeError{Core: "https://core", StatusCode: http.StatusTooManyRequests},
+			"ENTIRE_TOKEN service account secret exchange unavailable at https://core: HTTP 429"},
+	} {
+		if got := tc.err.Error(); got != tc.want {
+			t.Errorf("Error() = %q, want %q", got, tc.want)
+		}
+	}
+}
