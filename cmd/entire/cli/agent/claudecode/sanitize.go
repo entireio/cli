@@ -150,6 +150,9 @@ func blankAttachment(record map[string]json.RawMessage) bool {
 		return false
 	}
 	switch kind {
+	case attachmentBlankedPromptSnapshot:
+		// Already blanked by an earlier pass; leave it as that pass wrote it.
+		return false
 	case attachmentPromptSnapshot:
 		for _, field := range []string{"systemPrompt", "tools"} {
 			if blank, ok := blankValue(attachment[field]); ok {
