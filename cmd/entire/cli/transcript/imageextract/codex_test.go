@@ -26,6 +26,13 @@ func codexFunctionOutputLine(b64 string) string {
 		`"output":"here is the render: data:image/png;base64,` + b64 + ` done"}}`
 }
 
+// codexGeneratedImageLine is how Codex records an image it generated: bare
+// base64 in image_generation_call.result, with no declared media type.
+func codexGeneratedImageLine(b64 string) string {
+	return `{"type":"response_item","payload":{"type":"image_generation_call","id":"ig_1",` +
+		`"status":"completed","revised_prompt":"a mockup","result":"` + b64 + `"}}`
+}
+
 func codexPNG(payload string) string {
 	return base64.StdEncoding.EncodeToString([]byte("\x89PNG\r\n\x1a\n" + payload + strings.Repeat("-codex-image-bytes", 3)))
 }
@@ -95,6 +102,62 @@ func TestCodexCodec_FunctionOutputDataURIRoundTrips(t *testing.T) {
 	}
 	if string(restored) != orig {
 		t.Fatal("function_call_output round trip not byte-exact")
+	}
+}
+
+// An image Codex generated is externalized from result, typed from its bytes,
+// and round-trips byte-exactly.
+func TestCodexCodec_GeneratedImageRoundTrips(t *testing.T) {
+	t.Parallel()
+	c := CodecFor(agent.AgentTypeCodex)
+	b64 := codexPNG("generated")
+	orig := codexGeneratedImageLine(b64) + "\n"
+
+	rewritten, assets, err := c.ExtractImages([]byte(orig))
+	if err != nil {
+		t.Fatalf("ExtractImages: %v", err)
+	}
+	if len(assets) != 1 {
+		t.Fatalf("expected 1 asset, got %d", len(assets))
+	}
+	if assets[0].MediaType != mediaTypePNG || !strings.HasSuffix(assets[0].Name, ".png") {
+		t.Errorf("asset = %q (%s), want a .png typed from the bytes", assets[0].Name, assets[0].MediaType)
+	}
+	if !strings.Contains(string(rewritten), `"result":"`+placeholderPrefix+assets[0].Name+`"`) {
+		t.Errorf("expected result to hold the placeholder, got: %s", rewritten)
+	}
+	restored, err := c.ReinjectImages(rewritten, lookupFrom(assets))
+	if err != nil {
+		t.Fatalf("ReinjectImages: %v", err)
+	}
+	if string(restored) != orig {
+		t.Fatal("generated image round trip not byte-exact")
+	}
+}
+
+// A rollout holding both a pasted and a generated image externalizes both.
+func TestCodexCodec_PastedAndGeneratedImages(t *testing.T) {
+	t.Parallel()
+	c := CodecFor(agent.AgentTypeCodex)
+	pasted, generated := codexJPEG("pasted"), codexPNG("generated")
+	orig := codexImageLine(pasted) + "\n" + codexGeneratedImageLine(generated) + "\n"
+
+	rewritten, assets, err := c.ExtractImages([]byte(orig))
+	if err != nil {
+		t.Fatalf("ExtractImages: %v", err)
+	}
+	if len(assets) != 2 {
+		t.Fatalf("expected 2 assets, got %d", len(assets))
+	}
+	if strings.Contains(string(rewritten), pasted) || strings.Contains(string(rewritten), generated) {
+		t.Error("both images should be externalized")
+	}
+	restored, err := c.ReinjectImages(rewritten, lookupFrom(assets))
+	if err != nil {
+		t.Fatalf("ReinjectImages: %v", err)
+	}
+	if string(restored) != orig {
+		t.Fatal("round trip not byte-exact")
 	}
 }
 

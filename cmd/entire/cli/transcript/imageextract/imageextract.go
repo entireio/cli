@@ -271,7 +271,8 @@ func (claudeCodec) ReinjectImages(transcript []byte, lookup func(name string) (A
 
 // codexCodec handles OpenAI Codex rollout JSONL transcripts, which embed images
 // as base64 data-URIs (data:image/<type>;base64,<data>) — in input_image
-// image_url values, user messages, and function_call_output content alike.
+// image_url values, user messages, and function_call_output content alike —
+// and an image Codex generated as bare base64 in image_generation_call.result.
 type codexCodec struct{}
 
 func (codexCodec) ExtractImages(transcript []byte) ([]byte, []Asset, error) {
@@ -355,10 +356,17 @@ var codexDataURIRe = regexp.MustCompile(`data:image/([a-zA-Z0-9.+-]+);base64,([A
 
 // collectCodexImages walks any decoded JSON value and, for each string leaf,
 // gathers every image data-URI it contains (a leaf may be the URI itself, e.g.
-// input_image.image_url, or embed one inside larger tool output).
+// input_image.image_url, or embed one inside larger tool output). It also
+// gathers the bare base64 of each image_generation_call, which declares no
+// media type; the extraction engine detects it from the bytes.
 func collectCodexImages(v any, out *[]imgHit) {
 	switch t := v.(type) {
 	case map[string]any:
+		if t["type"] == "image_generation_call" {
+			if result, ok := t["result"].(string); ok && result != "" {
+				*out = append(*out, imgHit{data: result})
+			}
+		}
 		for _, vv := range t {
 			collectCodexImages(vv, out)
 		}
