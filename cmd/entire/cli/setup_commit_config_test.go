@@ -522,7 +522,9 @@ func TestOfferCommitConfig_LeavesFilesThatWereAlreadyDirtyOutOfTheCommit(t *test
 			if !slices.Equal(p.leftToReview, []string{tt.wantReview}) {
 				t.Errorf("left to review %v, want only %s", p.leftToReview, tt.wantReview)
 			}
-			assertOutput(t, p.render.String(), []string{"had uncommitted changes before this run", "  " + tt.wantReview + "\n"}, nil)
+			// The review list makes no claim that Entire needs each file: one
+			// may belong to an agent that is not enabled.
+			assertOutput(t, p.render.String(), []string{"had uncommitted changes before this run", "commit the ones that belong to your Entire setup", "  " + tt.wantReview + "\n"}, nil)
 			committed := strings.Fields(testutil.RunGit(t, dir, "show", "--name-only", "--format=", "HEAD"))
 			if !slices.Equal(committed, []string{EntireSettingsFile}) {
 				t.Errorf("HEAD committed %v, want %s alone", committed, EntireSettingsFile)
@@ -689,5 +691,38 @@ func TestSetupAgentHooksNonInteractive_OffersOnlyWhatItChanged(t *testing.T) {
 	}
 	if !slices.Contains(p.leftToReview, claudeSettings) {
 		t.Errorf("left to review %v, want %s", p.leftToReview, claudeSettings)
+	}
+}
+
+// Not parallel: chdirs and sets environment variables.
+func TestRunEnableInteractive_OffersOnlyWhatItChanged(t *testing.T) {
+	const claudeSettings = ".claude/settings.json"
+	dir := newCommitConfigRepo(t, false)
+	if err := os.Remove(EntireSettingsFile); err != nil {
+		t.Fatal(err)
+	}
+	testutil.WriteFile(t, dir, claudeSettings, "{}")
+	testutil.GitAdd(t, dir, claudeSettings)
+	testutil.GitCommit(t, dir, "claude settings")
+	testutil.WriteFile(t, dir, claudeSettings, `{"env":{"API_KEY":"local"}}`)
+	t.Setenv(interactive.EnvTestTTY, "1")
+	p := &promptedCommitConfig{render: &bytes.Buffer{}}
+	stubCommitConfig(t, p.prompt, nil)
+
+	ag, err := agent.Get(agent.AgentNameClaudeCode)
+	if err != nil {
+		t.Fatalf("get Claude Code agent: %v", err)
+	}
+	if err := runEnableInteractive(context.Background(), io.Discard, []agent.Agent{ag}, EnableOptions{}); err != nil {
+		t.Fatalf("runEnableInteractive() error = %v", err)
+	}
+	if !p.asked {
+		t.Fatal("expected the commit offer for the files setup created")
+	}
+	if !slices.Contains(p.files, EntireSettingsFile) || slices.Contains(p.files, claudeSettings) {
+		t.Errorf("offered to commit %v, want %s and not %s", p.files, EntireSettingsFile, claudeSettings)
+	}
+	if !slices.Equal(p.leftToReview, []string{claudeSettings}) {
+		t.Errorf("left to review %v, want only %s", p.leftToReview, claudeSettings)
 	}
 }

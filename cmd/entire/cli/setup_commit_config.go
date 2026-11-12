@@ -164,9 +164,10 @@ func printConfigToCommit(w io.Writer, files []string) {
 }
 
 // printConfigLeftToReview lists files, if any, that had uncommitted changes
-// before setup ran and so are never part of the commit setup offers.
+// before setup ran and so are never part of the commit setup offers. It does
+// not say Entire needs them: one may belong to an agent that is not enabled.
 func printConfigLeftToReview(w io.Writer, files []string) {
-	printConfigFiles(w, "These files had uncommitted changes before this run. Review them and commit them yourself so Entire works across worktrees and clones:", files)
+	printConfigFiles(w, "These files had uncommitted changes before this run, so they are left for you. Review them and commit the ones that belong to your Entire setup:", files)
 }
 
 func printConfigFiles(w io.Writer, heading string, files []string) {
