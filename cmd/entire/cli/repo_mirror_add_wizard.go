@@ -31,18 +31,16 @@ const mirrorCreateConcurrency = 8
 
 // Per-mirror outcome labels shown in the results table's STATUS column.
 const (
-	mirrorStatusReady      = "ready"      // clone landed, ready to use
-	mirrorStatusRegistered = "registered" // placement created, clone in progress (--no-wait)
-	mirrorStatusExists     = "exists"     // the placement was already there; this run created nothing
-	mirrorStatusRemoving   = "removing"   // teardown recorded, placement not gone yet
-	mirrorStatusRemoved    = "removed"    // the placement is gone
-	mirrorStatusSuspended  = "suspended"  // placement exists but the cluster won't serve it
-	mirrorStatusFailed     = "failed"     // initial clone reached the terminal failed status
-	mirrorStatusTimedOut   = "timed out"  // the wait ended before the operation finished
-	// mirrorStatusSyncing: the wait ended while the clone was still processing;
-	// the server carries on, so this is not a failure.
-	mirrorStatusSyncing = "still syncing"
-	mirrorStatusError   = "error" // create or poll failed
+	mirrorStatusReady      = "ready"         // clone landed, ready to use
+	mirrorStatusRegistered = "registered"    // placement created, clone in progress (--no-wait)
+	mirrorStatusExists     = "exists"        // the placement was already there; this run created nothing
+	mirrorStatusRemoving   = "removing"      // teardown recorded, placement not gone yet
+	mirrorStatusRemoved    = "removed"       // the placement is gone
+	mirrorStatusSuspended  = "suspended"     // placement exists but the cluster won't serve it
+	mirrorStatusFailed     = "failed"        // initial clone reached the terminal failed status
+	mirrorStatusTimedOut   = "timed out"     // the wait ended before the operation finished
+	mirrorStatusSyncing    = "still syncing" // wait ended while the clone was still processing; not a failure
+	mirrorStatusError      = "error"         // create or poll failed
 )
 
 // regionChoice is one mirrorable region offered by the add wizard's region
