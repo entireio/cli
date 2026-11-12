@@ -52,6 +52,17 @@ A single positional rule (independent of ID kind) keeps ref naming impossible to
 
 `ParseRef` validates that the shard in a ref name matches the ID's own `ShardFor()` and that the tail is exactly `<shard>/<id>` (no extra path segments), so a malformed or foreign ref is rejected rather than resolved to the wrong bucket. `RefName` errors on an empty or unrecognized ID rather than emitting `refs/entire/checkpoints//`.
 
+### Shard spelling on case-insensitive filesystems
+
+Hex IDs are lowercase and ULIDs are uppercase, so one shard can be spelled two ways (`6b` and `6B`). On a case-insensitive filesystem (the macOS and Windows defaults) git stores a ref under whichever spelling the shard directory already has. Once `git pack-refs` runs, a name is matched exactly, so the canonical name can stop resolving. These rules keep one checkpoint one checkpoint:
+
+- **Local lookup tries both spellings** (`resolveLocalRef`, `LocalRefExists`, and `storedCheckpointRef` on the push side). `ParseRef` accepts exactly those two spellings of a shard and no mix of them.
+- **A checkpoint can hold a ref under each spelling.** Updating a packed ref writes the new commit under the spelling the directory has on disk, and the packed entry keeps the earlier commit under the other. The ref whose history contains the other is the one used (`SupersededBy`). When the two diverged, reads take the canonical name and pre-push sends them in turn, replaying the second onto the first.
+- **Writes go to the ref the lookup found.** A checkpoint with no ref yet is written under its canonical name.
+- **The remote only receives the canonical name.** Pre-push sends `<commit>:<canonical name>` whatever spelling is stored or queued, and an on-demand fetch asks for the canonical name only.
+- **The push queue can hold both spellings of one checkpoint.** Pre-push sends it once and removes both entries, and `entire checkpoint list --outgoing` lists it once.
+- **`entire doctor` reports both conditions**: refs stored under the other spelling, which need no action, and checkpoints with two refs, where it names the earlier ref as the one that can be removed.
+
 > **Note:** this is the git-refs namespace only. The git-branch backend keeps its own independent **first-two-chars** tree layout (`<id[:2]>/<id[2:]>/`) inside the v1 branch. The two sharding schemes are deliberately different and do not interact.
 
 ## ID formats
