@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -234,6 +235,12 @@ func StoredRef(
 	if !hasOther || (err != nil && !errors.Is(err, plumbing.ErrReferenceNotFound)) {
 		return ref, tip, err
 	}
+	// Both spellings can only hold a ref where the filesystem folds case, so
+	// elsewhere a name that resolved is the checkpoint and the second read is
+	// skipped. A ref stored only under the other spelling is still found.
+	if err == nil && !foldsCase(repo) {
+		return ref, tip, nil
+	}
 	otherTip, otherErr := lookup(other)
 	switch {
 	case err == nil && otherErr != nil:
@@ -253,6 +260,30 @@ func StoredRef(
 	default:
 		return other, plumbing.ZeroHash, otherErr
 	}
+}
+
+// ignoreCase caches each repository's core.ignorecase: go-git rereads and
+// parses the config file on every Config call, which would cost more than the
+// ref read it saves.
+var ignoreCase sync.Map //nolint:gochecknoglobals // per-repository config cache
+
+// foldsCase reports whether repo sits on a case-insensitive filesystem, as git
+// recorded in core.ignorecase when it created the repository. An unreadable
+// config reports true, which keeps both spellings in every lookup.
+func foldsCase(repo *git.Repository) bool {
+	if cached, ok := ignoreCase.Load(repo); ok {
+		return cached.(bool) //nolint:forcetypeassert // only bools are stored
+	}
+	folds := true
+	if cfg, err := repo.Config(); err == nil {
+		switch strings.ToLower(cfg.Raw.Section("core").Option("ignorecase")) {
+		case "true", "yes", "on", "1":
+		default:
+			folds = false
+		}
+	}
+	ignoreCase.Store(repo, folds)
+	return folds
 }
 
 // OtherShardSpelling returns the one other name ref's checkpoint can be stored

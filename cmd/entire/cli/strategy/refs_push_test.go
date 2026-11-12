@@ -667,6 +667,8 @@ func TestPushQueuedCheckpointRefs_BothShardSpellingsQueuedPushOnce(t *testing.T)
 // (see checkpoint.SupersededBy). The push sends the newer version.
 func TestPushQueuedCheckpointRefs_PushesTheNewerRefWhenBothShardSpellingsExist(t *testing.T) {
 	workDir, bareDir, _ := setupRepoWithCheckpointRefs(t)
+	// A split forms only where git records a case-insensitive filesystem.
+	testutil.RunGit(t, workDir, "config", "core.ignorecase", "true")
 	t.Chdir(workDir)
 	paths.ClearWorktreeRootCache()
 	cid := id.MustCheckpointID("0000000000ab")

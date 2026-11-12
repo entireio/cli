@@ -174,6 +174,8 @@ func TestGitRefsStore_UsesTheNewerRefWhenBothShardSpellingsExist(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store := newRefsStore(t)
+	// A split forms only where git records a case-insensitive filesystem.
+	testutil.RunGit(t, repoDirOf(t, store), "config", "core.ignorecase", "true")
 	canonical := mustRefName(t, foldableLegacy)
 	refsWrite(t, store, foldableLegacy, "sess-1", "transcript one")
 	older, err := store.repo.Reference(canonical, true)
