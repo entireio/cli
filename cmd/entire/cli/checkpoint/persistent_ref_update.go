@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -191,7 +190,7 @@ func retireReplacedSpelling(ctx context.Context, repo *git.Repository, repoRoot 
 	}
 	cid, _ := ParseRef(refName)
 	pattern := CheckpointRefPrefix + "*/" + cid.String()
-	tips, err := listCheckpointSpellings(ctx, repoRoot, pattern)
+	tips, err := gitrepo.ListRefs(ctx, repoRoot, pattern)
 	if err != nil {
 		logging.Debug(ctx, "checkpoint ref: could not list shard spellings after an update",
 			slog.String("ref", refName.String()), slog.String("error", err.Error()))
@@ -201,58 +200,30 @@ func retireReplacedSpelling(ctx context.Context, repo *git.Repository, repoRoot 
 	// the replaced commit or an earlier version of it: either way the update
 	// replaced that history.
 	var stale plumbing.ReferenceName
-	switch newHash.String() {
-	case tips[refName]:
+	switch {
+	case tips[refName].Equal(newHash):
 		stale = other
-	case tips[other]:
+	case tips[other].Equal(newHash):
 		stale = refName
 	default:
 		return
 	}
-	staleTip, ok := tips[stale]
+	staleCommit, ok := tips[stale]
 	if !ok {
 		return
 	}
-	staleCommit := plumbing.NewHash(staleTip)
 	if !staleCommit.Equal(replaced) && !SupersededBy(repo, staleCommit, replaced) {
 		return
 	}
-	if out, err := plumbingGit(ctx, repoRoot, "pack-refs", "--include", pattern); err != nil {
+	if err := gitrepo.PackRefs(ctx, repoRoot, pattern); err != nil {
 		logging.Warn(ctx, "checkpoint ref: could not pack refs to remove a replaced shard spelling",
-			slog.String("ref", stale.String()), slog.String("error", err.Error()), slog.String("output", out))
+			slog.String("ref", stale.String()), slog.String("error", err.Error()))
 		return
 	}
 	if err := gitrepo.CompareAndSwapRef(ctx, repoRoot, stale, plumbing.ZeroHash, staleCommit); err != nil {
 		logging.Warn(ctx, "checkpoint ref: could not remove a replaced shard spelling",
 			slog.String("ref", stale.String()), slog.String("error", err.Error()))
 	}
-}
-
-// listCheckpointSpellings maps each ref matching pattern to its commit, by the
-// exact name git stores it under.
-func listCheckpointSpellings(ctx context.Context, repoRoot, pattern string) (map[plumbing.ReferenceName]string, error) {
-	out, err := plumbingGit(ctx, repoRoot, "for-each-ref", "--format=%(objectname) %(refname)", pattern)
-	if err != nil {
-		return nil, err
-	}
-	tips := make(map[plumbing.ReferenceName]string)
-	for line := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
-		if oid, name, ok := strings.Cut(line, " "); ok {
-			tips[plumbing.ReferenceName(name)] = oid
-		}
-	}
-	return tips, nil
-}
-
-func plumbingGit(ctx context.Context, repoRoot string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = repoRoot
-	cmd.Env = append(gitrepo.EnvWithoutRepoOverrides(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return string(out), fmt.Errorf("git %s: %w", args[0], err)
-	}
-	return string(out), nil
 }
 
 func retryPersistentRefLockContention(
