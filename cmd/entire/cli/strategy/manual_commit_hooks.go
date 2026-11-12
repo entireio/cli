@@ -38,6 +38,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
+	"github.com/entireio/cli/cmd/entire/cli/transcript/imageextract"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 	"github.com/entireio/cli/perf"
 	"github.com/entireio/cli/redact"
@@ -3797,7 +3798,7 @@ func prepareFinalizeImages(
 	if settings.IsImageDropEnabled(ctx) {
 		// Nothing to preserve: assets an earlier write stored must go when the
 		// transcript is rewritten.
-		return checkpoint.DropImagesIfEnabled(ctx, transcript), nil, false
+		return imageextract.DropImages(transcript), nil, false
 	}
 
 	// Externalize inline images BEFORE redaction, mirroring CondenseSession, so the

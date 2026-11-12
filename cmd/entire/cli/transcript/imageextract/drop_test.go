@@ -72,6 +72,12 @@ func TestDropImages_ReplacesEveryKnownShape(t *testing.T) {
 				return `{"type":"response_item","payload":{"type":"function_call_output","output":"screenshot: data:image/png;base64,` + b64 + ` (end)"}}`
 			},
 		},
+		{
+			name: "codex generated image",
+			line: func(b64 string) string {
+				return `{"type":"response_item","payload":{"type":"image_generation_call","id":"ig_1","status":"completed","revised_prompt":"a mockup","result":"` + b64 + `"}}`
+			},
+		},
 	}
 
 	for _, tt := range tests {

@@ -2017,7 +2017,7 @@ func IsImageExternalizationEnabled(ctx context.Context) bool {
 	}
 	if requested && IsImageDropEnabled(ctx) {
 		warnExternalizeIgnoredOnce.Do(func() {
-			slog.Warn("redaction.externalize_images is ignored while redaction.drop_images is on")
+			logging.Warn(ctx, "redaction.externalize_images is ignored while redaction.drop_images is on")
 		})
 		return false
 	}

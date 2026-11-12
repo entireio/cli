@@ -147,6 +147,8 @@ func TestDropImages_CodexCommitAndTurnEnd(t *testing.T) {
 	env := NewFeatureBranchEnv(t)
 	writeLocalSettings(t, env, dropImagesSettings)
 	b64 := testImage("codex-drop")
+	// Codex stores an image it generated as bare base64 in "result".
+	generated := testImage("codex-generated")
 
 	sessionID := "codex-drop-images"
 	transcriptPath := filepath.Join(env.RepoDir, ".entire", "tmp", "codex-rollout.jsonl")
@@ -157,6 +159,7 @@ func TestDropImages_CodexCommitAndTurnEnd(t *testing.T) {
 			`{"type":"input_image","image_url":"data:image/png;base64,` + b64 + `"}` +
 			`]}}`,
 		`{"timestamp":"2026-01-01T00:00:02Z","type":"response_item","payload":{"type":"function_call_output","call_id":"c0","output":"saved data:image/png;base64,` + b64 + ` to disk"}}`,
+		`{"timestamp":"2026-01-01T00:00:03Z","type":"response_item","payload":{"type":"image_generation_call","id":"ig_1","status":"completed","revised_prompt":"a mockup","result":"` + generated + `"}}`,
 		`{"timestamp":"2026-01-01T00:00:03Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}`,
 	}, "\n") + "\n"
 	require.NoError(t, os.MkdirAll(filepath.Dir(transcriptPath), 0o755))
@@ -171,13 +174,16 @@ func TestDropImages_CodexCommitAndTurnEnd(t *testing.T) {
 	cpID := env.GetLatestCheckpointIDFromHistory()
 	require.NotEmpty(t, cpID)
 	requireNoImageStored(t, env, b64)
+	requireNoImageStored(t, env, generated)
 
 	hook("stop", map[string]any{"hook_event_name": "Stop"})
 
 	requireNoImageStored(t, env, b64)
+	requireNoImageStored(t, env, generated)
 	full, ok := env.ReadFileFromBranch(paths.MetadataBranchName, SessionFilePath(cpID, paths.TranscriptFileName))
 	require.True(t, ok)
 	require.Contains(t, full, "data:image/png;base64,"+onePixelPNGPrefix, "the data URI should hold the 1x1 placeholder")
+	require.Contains(t, full, `"result":"`+onePixelPNGPrefix, "the generated image should be the 1x1 placeholder")
 }
 
 // OpenCode stores one JSON document, not JSONL: pretty-printed by OpenCode 1,
@@ -248,6 +254,38 @@ func TestDropImages_WinsOverExternalize(t *testing.T) {
 	require.NoError(t, env.SimulateStop(session.ID, session.TranscriptPath))
 	requireNoImageStored(t, env, b64)
 	requireStoredTranscriptHasOnePixelImage(t, env, SessionFilePath(env.GetLatestCheckpointIDFromHistory(), paths.TranscriptFileName))
+}
+
+// The warning that externalize_images is ignored goes to the log, not to the
+// terminal: git shows hook output to whoever runs `git commit`.
+func TestDropImages_IgnoredExternalizeWarningStaysOutOfHookOutput(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+	writeLocalSettings(t, env, dropAndExternalizeImageSettings)
+
+	session := env.NewSession()
+	require.NoError(t, os.WriteFile(session.TranscriptPath, []byte(claudeTranscriptWithImage(testImage("warn"))), 0o644))
+	require.NoError(t, env.SimulateUserPromptSubmitWithPromptAndTranscriptPath(session.ID, "add feature", session.TranscriptPath))
+	env.WriteFile("feature.go", "package main\n")
+	env.GitAdd("feature.go")
+
+	msgFile := env.commitMsgFile()
+	require.NoError(t, os.WriteFile(msgFile, []byte("add feature"), 0o644))
+	prepOut, err := env.prepareCommitMsgCmd(true, msgFile, "message").CombinedOutput()
+	require.NoError(t, err, string(prepOut))
+	commit := exec.CommandContext(t.Context(), "git", "commit", "--no-verify", "-F", msgFile)
+	commit.Dir = env.RepoDir
+	commit.Env = env.gitHookEnv()
+	commitOut, err := commit.CombinedOutput()
+	require.NoError(t, err, string(commitOut))
+	post := exec.CommandContext(t.Context(), getTestBinary(), "hooks", "git", "post-commit")
+	post.Dir = env.RepoDir
+	post.Env = env.gitHookEnv()
+	postOut, err := post.CombinedOutput()
+	require.NoError(t, err, string(postOut))
+
+	require.NotEmpty(t, env.GetLatestCheckpointIDFromHistory(), "the commit should have been condensed")
+	require.NotContains(t, string(prepOut)+string(postOut), "externalize_images")
 }
 
 // Assets a commit stored before the setting was turned on are cleared when

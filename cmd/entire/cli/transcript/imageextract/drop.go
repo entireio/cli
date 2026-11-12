@@ -150,28 +150,32 @@ func dropImagesInValue(v any) (any, bool) {
 }
 
 // dropImageSlots replaces the image an object holds directly: a Claude Code
-// image block, a Pi image item, or the file part OpenCode 2 attaches an image
-// as.
+// image block, a Pi image item, the file part OpenCode 2 attaches an image
+// as, or an image Codex generated.
 func dropImageSlots(obj map[string]any) bool {
 	switch obj["type"] {
 	case blockTypeImage:
 		changed := false
 		if source, ok := obj["source"].(map[string]any); ok && source["type"] == "base64" {
-			changed = dropSlot(source, "media_type")
+			changed = dropSlot(source, "data", "media_type")
 		}
-		return dropSlot(obj, "mimeType") || changed
+		return dropSlot(obj, "data", "mimeType") || changed
 	case "file":
 		if mime, ok := obj["mime"].(string); ok && strings.HasPrefix(mime, "image/") {
-			return dropSlot(obj, "mime")
+			return dropSlot(obj, "data", "mime")
 		}
+	case "image_generation_call":
+		// Codex stores an image it generated as bare base64 with no declared
+		// type; redaction skips this object because its type starts with "image".
+		return dropSlot(obj, "result", "")
 	}
 	return false
 }
 
-// dropSlot replaces obj's "data" string with the placeholder for it, reading
-// the declared media type from typeKey.
-func dropSlot(obj map[string]any, typeKey string) bool {
-	data, ok := obj["data"].(string)
+// dropSlot replaces obj's dataKey string with the placeholder for it, reading
+// the declared media type from typeKey when there is one.
+func dropSlot(obj map[string]any, dataKey, typeKey string) bool {
+	data, ok := obj[dataKey].(string)
 	if !ok || data == "" {
 		return false
 	}
@@ -183,7 +187,7 @@ func dropSlot(obj map[string]any, typeKey string) bool {
 	if placeholder == data {
 		return false
 	}
-	obj["data"] = placeholder
+	obj[dataKey] = placeholder
 	return true
 }
 
