@@ -2,13 +2,16 @@ package checkpoint
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	git "github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -427,4 +430,84 @@ func TestGitRefsStore_BackfillFetchedFoldedRefDoesNotFork(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []plumbing.Hash{commitHash}, commit.ParentHashes,
 		"the backfill commit parents on the fetched tip")
+}
+
+// A write reads its base, which can fetch, only once it holds the checkpoint's
+// writer lock. A writer that never gets the lock must not have fetched or
+// built anything.
+func TestGitRefsStore_WriteReadsItsBaseOnlyUnderTheLock(t *testing.T) {
+	t.Parallel()
+	store := newRefsStore(t)
+	refsWrite(t, store, foldableULID, "sess-1", "transcript")
+	_, commonDir, err := repositoryDirs(store.repo)
+	require.NoError(t, err)
+
+	baseCalls := 0
+	held := withPersistentRefFlock(t.Context(), commonDir, mustRefName(t, foldableULID), func() error {
+		ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+		defer cancel()
+		return store.updateCheckpointRef(ctx, foldableULID,
+			func() (plumbing.Hash, *object.Tree, error) {
+				baseCalls++
+				return store.refBase(foldableULID)
+			},
+			func(plumbing.Hash, *object.Tree) (plumbing.Hash, error) {
+				return plumbing.ZeroHash, errors.New("built without the lock")
+			})
+	})
+
+	require.ErrorIs(t, held, context.DeadlineExceeded, "the writer waits for the lock until its deadline")
+	assert.Zero(t, baseCalls, "the base is read under the lock, not before it")
+}
+
+// The spelling a checkpoint is stored under can change between two attempts of
+// one write: another writer moves it, and git packs it under the other
+// spelling. The retry writes to the spelling its own base came from.
+func TestGitRefsStore_WriteRetryFollowsTheStoredSpelling(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newRefsStore(t)
+	refsWrite(t, store, foldableULID, "sess-1", "transcript")
+	dir := repoDirOf(t, store)
+	canonical := mustRefName(t, foldableULID)
+	folded, ok := FoldedRefName(foldableULID)
+	require.True(t, ok)
+
+	var concurrent plumbing.Hash
+	builds := 0
+	err := store.updateCheckpointRef(ctx, foldableULID,
+		func() (plumbing.Hash, *object.Tree, error) { return store.refBase(foldableULID) },
+		func(parent plumbing.Hash, existing *object.Tree) (plumbing.Hash, error) {
+			builds++
+			if builds == 1 {
+				// After this attempt chose its name: another writer advances the
+				// checkpoint, and it ends up packed under the folded spelling.
+				concurrent = plumbing.NewHash(testutil.RunGit(t, dir, "commit-tree", existing.Hash.String(), "-p", parent.String(), "-m", "concurrent")[:40])
+				testutil.RunGit(t, dir, "update-ref", "-d", canonical.String())
+				require.NoError(t, os.RemoveAll(filepath.Join(dir, ".git", "refs", "entire", "checkpoints", foldableULID.ShardFor())))
+				testutil.RunGit(t, dir, "update-ref", folded.String(), concurrent.String())
+				testutil.RunGit(t, dir, "pack-refs", "--all")
+			}
+			return plumbing.NewHash(testutil.RunGit(t, dir, "commit-tree", existing.Hash.String(), "-p", parent.String(), "-m", "ours")[:40]), nil
+		})
+	require.NoError(t, err)
+
+	read, err := store.resolveLocalRef(foldableULID)
+	require.NoError(t, err)
+	parents := testutil.RunGit(t, dir, "rev-parse", read.Hash().String()+"^@")
+	assert.Equal(t, concurrent.String(), parents[:40], "the retry builds on the other writer's commit")
+	// On a case-insensitive filesystem the first attempt's failed update leaves
+	// the canonical shard directory behind, so the retry's write through the
+	// folded name lands there as a second, loose ref. That is the filesystem's
+	// split, which reads resolve by history; the write must not fork it.
+	readCommit, err := store.repo.CommitObject(read.Hash())
+	require.NoError(t, err)
+	for _, name := range checkpointRefNames(t, store) {
+		tip := plumbing.NewHash(strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", name)))
+		commit, err := store.repo.CommitObject(tip)
+		require.NoError(t, err)
+		contained, err := commit.IsAncestor(readCommit)
+		require.NoError(t, err)
+		assert.True(t, contained, "%s at %s forks the checkpoint", name, tip)
+	}
 }

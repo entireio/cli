@@ -86,27 +86,20 @@ func ListOutgoingCheckpoints(ctx context.Context) (OutgoingCheckpoints, error) {
 		Checkpoints:       make([]OutgoingCheckpoint, 0, len(existing)),
 		StaleQueueEntries: len(stale),
 	}
-	// A checkpoint queued under both spellings of its shard is sent once, so
-	// it is listed once, as the push partitions it: by destination and commit.
-	// The commit is keyed by its hex form: comparing hashes with == also
-	// compares their object format, which two readings of one commit need
-	// not share.
-	type upload struct {
-		destination plumbing.ReferenceName
-		commit      string
-	}
-	seen := make(map[upload]struct{}, len(existing))
-	for _, ref := range existing {
+	// A checkpoint queued under both spellings of its shard is sent once per
+	// push, so it is listed once, as the ref the push sends.
+	seen := make(map[plumbing.ReferenceName]struct{}, len(existing))
+	for _, ref := range canonicalSpellingFirst(existing, func(r plumbing.ReferenceName) plumbing.ReferenceName { return r }) {
+		destination := canonicalCheckpointRefKey(ref)
+		if _, dup := seen[destination]; dup {
+			continue
+		}
+		seen[destination] = struct{}{}
 		cid, _ := checkpoint.ParseRef(ref)
 		outgoing := OutgoingCheckpoint{CheckpointID: cid, Ref: ref}
 		if tip, err := localTip(repo, listed, ref); err == nil {
 			outgoing.Commit = tip
 		}
-		key := upload{destination: canonicalCheckpointRefKey(ref), commit: outgoing.Commit.String()}
-		if _, dup := seen[key]; dup {
-			continue
-		}
-		seen[key] = struct{}{}
 		out.Checkpoints = append(out.Checkpoints, outgoing)
 	}
 	return out, nil

@@ -394,3 +394,27 @@ func TestListOutgoingCheckpoints_BothShardSpellingsQueuedListOnce(t *testing.T) 
 		{CheckpointID: id.MustCheckpointID("0000000000ab"), Ref: queued, Commit: plumbing.NewHash(tip)},
 	}, out.Checkpoints)
 }
+
+// A pre-push sends one ref per checkpoint, so a checkpoint whose two spellings
+// diverged is listed once, as the ref the push sends: the one reads resolve to.
+func TestListOutgoingCheckpoints_DivergedShardSpellingsListOnce(t *testing.T) {
+	workDir, bareDir, _ := setupRepoWithCheckpointRefs(t)
+	prepareGitRefsPrePush(t, workDir, bareDir)
+	base := revParse(t, workDir, "HEAD")
+	testutil.RunGit(t, workDir, "commit", "--allow-empty", "-m", "one side")
+	stored, queued := foldedShardFixture(t, workDir, revParse(t, workDir, "HEAD"))
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+	testutil.GitReset(t, workDir, base)
+	testutil.RunGit(t, workDir, "commit", "--allow-empty", "-m", "other side")
+	canonicalTip := revParse(t, workDir, "HEAD")
+	testutil.RunGit(t, workDir, "update-ref", queued.String(), canonicalTip)
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+	enqueueInRepoAt(t, workDir, stored, queued)
+
+	out, err := ListOutgoingCheckpoints(t.Context())
+	require.NoError(t, err)
+
+	require.Equal(t, []OutgoingCheckpoint{
+		{CheckpointID: id.MustCheckpointID("0000000000ab"), Ref: queued, Commit: plumbing.NewHash(canonicalTip)},
+	}, out.Checkpoints)
+}

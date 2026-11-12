@@ -402,40 +402,29 @@ func (s *gitRefsStore) updateCheckpointRef(
 	base func() (plumbing.Hash, *object.Tree, error),
 	build func(parentHash plumbing.Hash, existing *object.Tree) (plumbing.Hash, error),
 ) error {
-	// base() can FETCH. The backfill paths pass refBaseForBackfill, which pulls
-	// a checkpoint that exists only on the remote and materializes its ref
-	// locally under whichever spelling the shard directory has on disk — so the
-	// write name has to be chosen AFTER it, not before. Chosen before, writeRefName finds
-	// nothing locally and picks the canonical spelling; the CAS then targets a
-	// name the fetch never populated while expecting the fetched ref's tip, so
-	// every retry misses and the backfill dies with the budget exhausted.
-	//
-	// The primed result is carried into the builder instead of re-read, so this
-	// costs no extra fetch — it matters because a genuinely absent checkpoint
-	// pays a remote probe, and re-reading would double it. Taking
-	// it before the lock is safe because the CAS is what makes it safe: a ref
-	// that moved in between fails the compare, and the retry re-reads under the
-	// lock like every attempt after the first.
-	primedHash, primedTree, err := base()
+	canonical, err := RefName(cid)
 	if err != nil {
 		return err
 	}
-	refName, err := s.writeRefName(cid)
-	if err != nil {
-		return err
-	}
-	primeUsed := false
-	err = updatePersistentRef(ctx, s.repo, refName, func() (plumbing.Hash, plumbing.Hash, error) {
-		parentHash, existing := primedHash, primedTree
-		if primeUsed {
-			var baseErr error
-			if parentHash, existing, baseErr = base(); baseErr != nil {
-				return plumbing.ZeroHash, plumbing.ZeroHash, baseErr
-			}
+	// One lock per checkpoint, under its canonical name, whichever spelling a
+	// writer updates. The base and the write name are read under it on every
+	// attempt, in that order: base() can fetch (refBaseForBackfill), and a
+	// fetched ref lands under whichever spelling the shard directory has on
+	// disk, so the name is only known after it. Between attempts the stored
+	// spelling can also change under a concurrent writer and a pack.
+	var refName plumbing.ReferenceName
+	err = updateNamedPersistentRef(ctx, s.repo, canonical, func() (plumbing.ReferenceName, plumbing.Hash, plumbing.Hash, error) {
+		parentHash, existing, baseErr := base()
+		if baseErr != nil {
+			return "", plumbing.ZeroHash, plumbing.ZeroHash, baseErr
 		}
-		primeUsed = true
+		name, nameErr := s.writeRefName(cid)
+		if nameErr != nil {
+			return "", plumbing.ZeroHash, plumbing.ZeroHash, nameErr
+		}
+		refName = name
 		newHash, buildErr := build(parentHash, existing)
-		return newHash, parentHash, buildErr
+		return name, newHash, parentHash, buildErr
 	})
 	if err != nil {
 		return err

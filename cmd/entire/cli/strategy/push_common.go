@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -80,6 +81,30 @@ func canonicalCheckpointRefKey(ref plumbing.ReferenceName) plumbing.ReferenceNam
 		return ref
 	}
 	return canonical
+}
+
+// canonicalSpellingFirst returns items with the canonical spelling of each
+// checkpoint ahead of its other spelling, every other item keeping its place.
+// Pre-push sends one ref per checkpoint, the first one queued, and for a
+// checkpoint whose two refs diverged the canonical name is the one reads
+// resolve to (checkpoint.StoredRef). Sending the other would leave the remote
+// on a version this clone does not read until a later push replays it.
+func canonicalSpellingFirst[T any](items []T, ref func(T) plumbing.ReferenceName) []T {
+	out := slices.Clone(items)
+	first := make(map[plumbing.ReferenceName]int, len(out))
+	for i, item := range out {
+		name := ref(item)
+		key := canonicalCheckpointRefKey(name)
+		at, seen := first[key]
+		if !seen {
+			first[key] = i
+			continue
+		}
+		if name == key && ref(out[at]) != key {
+			out[at], out[i] = out[i], out[at]
+		}
+	}
+	return out
 }
 
 // partitionLocalRefs splits refs into those that exist locally (pushable) and

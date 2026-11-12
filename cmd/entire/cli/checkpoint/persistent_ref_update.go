@@ -22,6 +22,10 @@ import (
 
 type persistentRefBuilder func() (newHash, expectedHash plumbing.Hash, err error)
 
+// namedPersistentRefBuilder is a persistentRefBuilder that also names the ref
+// each attempt updates.
+type namedPersistentRefBuilder func() (refName plumbing.ReferenceName, newHash, expectedHash plumbing.Hash, err error)
+
 // ErrRefBusy is returned when a checkpoint ref changed or its native Git lock
 // is held. Checkpoint writers retry with a fresh read.
 var ErrRefBusy = errors.New("checkpoint ref busy")
@@ -184,9 +188,19 @@ func retryPersistentRefLockContention(
 // retry for native Git or other external writers. build runs again after every
 // conflict, so each retry reconstructs its tree and commit from the fresh tip.
 func updatePersistentRef(ctx context.Context, repo *git.Repository, refName plumbing.ReferenceName, build persistentRefBuilder) error {
-	return withLockedPersistentRef(ctx, repo, refName, func(repoRoot, commonDir string) error {
+	return updateNamedPersistentRef(ctx, repo, refName, func() (plumbing.ReferenceName, plumbing.Hash, plumbing.Hash, error) {
+		newHash, expectedHash, err := build()
+		return refName, newHash, expectedHash, err
+	})
+}
+
+// updateNamedPersistentRef is updatePersistentRef for a writer whose ref name
+// can change between attempts. It holds the writer lock under lockName and
+// updates the ref each attempt names.
+func updateNamedPersistentRef(ctx context.Context, repo *git.Repository, lockName plumbing.ReferenceName, build namedPersistentRefBuilder) error {
+	return withLockedPersistentRef(ctx, repo, lockName, func(repoRoot, commonDir string) error {
 		for attempt := range refCASMaxRetries {
-			newHash, expectedHash, buildErr := build()
+			refName, newHash, expectedHash, buildErr := build()
 			if buildErr != nil {
 				return buildErr
 			}
@@ -209,9 +223,9 @@ func updatePersistentRef(ctx context.Context, repo *git.Repository, refName plum
 
 		logging.Warn(logging.WithComponent(ctx, "checkpoint"),
 			"persistent ref CAS retry budget exhausted",
-			slog.String("ref", refName.String()),
+			slog.String("ref", lockName.String()),
 			slog.Int("retries", refCASMaxRetries),
 		)
-		return fmt.Errorf("failed to update persistent ref %s after %d CAS retries: %w", refName, refCASMaxRetries, ErrRefBusy)
+		return fmt.Errorf("failed to update persistent ref %s after %d CAS retries: %w", lockName, refCASMaxRetries, ErrRefBusy)
 	})
 }

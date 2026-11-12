@@ -295,6 +295,9 @@ func printCheckpointDeletePlan(w io.Writer, plan *strategy.CheckpointDeletePlan,
 	if plan.LocalRef != "" {
 		fmt.Fprintf(w, "  ref %s\n", plan.LocalRef)
 	}
+	if plan.OtherLocalRef != "" {
+		fmt.Fprintf(w, "  ref %s\n", plan.OtherLocalRef)
+	}
 	if plan.LocalV1 {
 		fmt.Fprintf(w, "  %s branch\n", paths.MetadataBranchName)
 	}

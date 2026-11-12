@@ -792,3 +792,67 @@ func TestExecuteCheckpointDelete_KeepsRecordWhenAFailureIsAmbiguous(t *testing.T
 	require.NoError(t, err)
 	assert.True(t, deleted.Contains(cid), "an ambiguous failure keeps the record")
 }
+
+// A checkpoint can hold a ref under each spelling of its shard. A delete
+// removes both, or the one left behind is read and pushed as the checkpoint.
+func TestCheckpointDelete_RemovesBothShardSpellings(t *testing.T) {
+	cid := id.MustCheckpointID("01M2DCHJCHTR9T9MZTSB7WV76B")
+	canonical, err := checkpoint.RefName(cid)
+	require.NoError(t, err)
+	folded, ok := checkpoint.FoldedRefName(cid)
+	require.True(t, ok)
+	// A legacy checkpoint whose shard is the lowercase spelling of cid's.
+	legacy := plumbing.ReferenceName(checkpoint.CheckpointRefPrefix + "6b/0da4f302686b")
+
+	for _, tc := range []struct {
+		name  string
+		split func(t *testing.T, dir, earlier, later string)
+	}{
+		{"both packed", func(t *testing.T, dir, earlier, later string) {
+			t.Helper()
+			testutil.RunGit(t, dir, "update-ref", canonical.String(), later)
+			testutil.RunGit(t, dir, "pack-refs", "--all")
+			testutil.RunGit(t, dir, "update-ref", folded.String(), earlier)
+			testutil.RunGit(t, dir, "pack-refs", "--all")
+		}},
+		// How the split forms on a case-insensitive filesystem: the canonical
+		// ref is packed, a legacy ref recreates the shard directory in
+		// lowercase, and the next update lands there as a loose file. While it
+		// is loose, the packed name resolves to it too. On a case-sensitive
+		// filesystem this leaves one ref, which the delete must still remove.
+		{"one packed, one loose", func(t *testing.T, dir, earlier, later string) {
+			t.Helper()
+			testutil.RunGit(t, dir, "update-ref", canonical.String(), earlier)
+			testutil.RunGit(t, dir, "pack-refs", "--all")
+			testutil.RunGit(t, dir, "update-ref", legacy.String(), earlier)
+			testutil.RunGit(t, dir, "update-ref", canonical.String(), later, earlier)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newDeleteFixture(t, "git-refs")
+			f.writeCheckpoint(t, cid, "sess-1")
+			earlier := revParse(t, f.workDir, canonical.String())
+			f.writeCheckpoint(t, cid, "sess-2")
+			later := revParse(t, f.workDir, canonical.String())
+			testutil.RunGit(t, f.workDir, "update-ref", "-d", canonical.String())
+			tc.split(t, f.workDir, earlier, later)
+			enqueueInRepoAt(t, f.workDir, canonical, folded)
+
+			plan, err := PlanCheckpointDelete(t.Context(), cid, CheckpointDeletePlanOptions{LocalOnly: true})
+			require.NoError(t, err)
+			result, err := ExecuteCheckpointDelete(t.Context(), plan, CheckpointDeleteOptions{LocalOnly: true})
+			require.NoError(t, err)
+			assert.Equal(t, DeleteOutcomeDeleted, result.LocalRef)
+
+			repo, err := gitrepo.OpenPath(f.workDir)
+			require.NoError(t, err)
+			defer repo.Close()
+			exists, err := checkpoint.LocalRefExists(repo, cid)
+			require.NoError(t, err)
+			left := testutil.RunGit(t, f.workDir, "for-each-ref", "--format=%(refname)", checkpoint.CheckpointRefPrefix)
+			assert.False(t, exists, "no ref of the checkpoint may survive:\n%s", left)
+			assert.NotContains(t, left, cid.String())
+			assert.Empty(t, queuedRefs(t, repo), "both spellings leave the push queue")
+		})
+	}
+}

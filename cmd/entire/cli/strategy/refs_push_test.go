@@ -694,8 +694,9 @@ func TestPushQueuedCheckpointRefs_PushesTheNewerRefWhenBothShardSpellingsExist(t
 }
 
 // Both spellings can hold refs whose histories diverged, so neither is a later
-// version of the other. Only one can take the destination in an upload; the
-// other stays queued and the next push replays it onto the first.
+// version of the other. Only one can take the destination in an upload: the
+// one reads resolve to, whichever spelling was queued first. The other stays
+// queued and the next push replays it onto the first.
 func TestPushQueuedCheckpointRefs_DivergedShardSpellingsPushInTurn(t *testing.T) {
 	workDir, bareDir, _ := setupRepoWithCheckpointRefs(t)
 	t.Chdir(workDir)
@@ -722,20 +723,25 @@ func TestPushQueuedCheckpointRefs_DivergedShardSpellingsPushInTurn(t *testing.T)
 	defer repo.Close()
 	queue := enqueueRefs(t, repo, []plumbing.ReferenceName{stored, queued})
 
+	read, readTip, err := checkpoint.StoredRef(repo, nil, queued)
+	require.NoError(t, err)
+	require.Equal(t, queued, read, "reads resolve a diverged pair to the canonical name")
+
 	pushed, _, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
 	require.NoError(t, err)
 	assert.Equal(t, 1, pushed)
-	assert.Equal(t, map[plumbing.ReferenceName]string{queued: first}, remoteCheckpointRefs(t, bareDir, cid))
+	assert.Equal(t, map[plumbing.ReferenceName]string{queued: readTip.String()}, remoteCheckpointRefs(t, bareDir, cid),
+		"the remote receives the version local reads use")
 	remaining, err := queue.Drain()
 	require.NoError(t, err)
-	assert.Equal(t, []plumbing.ReferenceName{queued}, remaining, "the ref that did not go stays queued")
+	assert.Equal(t, []plumbing.ReferenceName{stored}, remaining, "the ref that did not go stays queued")
 
 	pushed, _, err = PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
 	require.NoError(t, err)
 	assert.Equal(t, 1, pushed)
 	files := remoteRefFiles(t, bareDir, queued)
-	assert.Contains(t, files, "b.txt", "the first upload is kept")
-	assert.Contains(t, files, "c.txt", "the second is replayed on top")
+	assert.Contains(t, files, "c.txt", "the first upload is kept")
+	assert.Contains(t, files, "b.txt", "the second is replayed on top")
 	remaining, err = queue.Drain()
 	require.NoError(t, err)
 	assert.Empty(t, remaining)

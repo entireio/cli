@@ -570,6 +570,7 @@ func partitionCheckpointRefPushes(
 		index   int
 	}
 	placed := make(map[plumbing.ReferenceName]place, len(entries))
+	entries = canonicalSpellingFirst(entries, func(e checkpoint.PushQueueEntry) plumbing.ReferenceName { return e.Ref })
 	for _, entry := range entries {
 		// A ref the selection leaves out waits untouched: a push of named refs
 		// does not read, prune or report the others.
