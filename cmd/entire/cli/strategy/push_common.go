@@ -28,8 +28,22 @@ import (
 // the queue generation token that successful delivery may remove.
 type checkpointRefPush struct {
 	token checkpoint.PushQueueEntry
-	name  plumbing.ReferenceName
-	hash  plumbing.Hash
+	// name is the ref the remote receives and the one fetched back from it:
+	// the checkpoint's canonical name, which is the one other clones read.
+	name plumbing.ReferenceName
+	// stored is the spelling the ref has in this repository when that is not
+	// name: on a case-insensitive filesystem a ref can sit under the other
+	// spelling of its shard. Empty when the two agree.
+	stored plumbing.ReferenceName
+	hash   plumbing.Hash
+}
+
+// localRef is the name this repository reads and updates the ref by.
+func (p checkpointRefPush) localRef() plumbing.ReferenceName {
+	if p.stored != "" {
+		return p.stored
+	}
+	return p.name
 }
 
 var checkpointRefRecoveryCAS = checkpoint.CASPersistentRef //nolint:gochecknoglobals // deterministic recovery-race test seam
@@ -517,7 +531,9 @@ func recoverCheckpointRef(
 	fetched := replay.repo
 	defer fetched.Close()
 	newTip, replayed := replay.tip, replay.replayed
-	if err := checkpointRefRecoveryCAS(ctx, fetched, candidate.name, newTip, candidate.hash); err != nil {
+	// The stored spelling, not the pushed one: the compare-and-swap reads its
+	// expected value under the name it updates.
+	if err := checkpointRefRecoveryCAS(ctx, fetched, candidate.localRef(), newTip, candidate.hash); err != nil {
 		// newTip has no unique writer data: it is derived entirely from the
 		// immutable candidate plus the fetched remote. On a CAS conflict the
 		// writer's winning generation remains the live ref and its queue entry

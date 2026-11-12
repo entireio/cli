@@ -278,9 +278,9 @@ func (s *gitRefsStore) enqueueForPush(ctx context.Context, refName plumbing.Refe
 // write: the checkpoint write is the operation that matters, and a real IO
 // problem resurfaces immediately in updatePersistentRef's CAS.
 //
-// The push queue is enqueued with the name this returns, which is deliberate:
-// it is the spelling that actually resolves locally, so the refspec works, and
-// another clone reads whichever spelling arrives back through the same fallback.
+// The push queue is enqueued with the name this returns. That is safe either
+// way: pre-push finds the stored ref from a queued name of either spelling,
+// and always sends the canonical name to the remote.
 func (s *gitRefsStore) writeRefName(cid id.CheckpointID) (plumbing.ReferenceName, error) {
 	canonical, err := RefName(cid)
 	if err != nil {

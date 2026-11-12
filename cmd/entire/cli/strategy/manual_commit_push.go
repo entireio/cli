@@ -577,7 +577,7 @@ func partitionCheckpointRefPushes(
 		// name stops resolving. Classifying that as stale drops the entry and
 		// the checkpoint is then never pushed, silently and permanently — so
 		// resolve to the spelling that exists before deciding.
-		name, tip, err := storedCheckpointRef(repo, nil, entry.Ref)
+		stored, tip, err := storedCheckpointRef(repo, nil, entry.Ref)
 		if errors.Is(err, plumbing.ErrReferenceNotFound) {
 			part.stale = append(part.stale, entry)
 			continue
@@ -587,11 +587,16 @@ func partitionCheckpointRefPushes(
 			part.readErrs[entry.Ref] = fmt.Errorf("read checkpoint ref: %w", err)
 			continue
 		}
-		// name, not entry.Ref: the push is <hash>:<name>, so this is also the
-		// spelling the remote receives, and recoverCheckpointRef fetches it
-		// back by the same name. The queue entry is untouched — removal keys on
-		// token, so the original spelling is still what gets pruned.
-		candidate := checkpointRefPush{token: entry, name: name, hash: tip}
+		// The push is <hash>:<name>, and the name is the canonical one whatever
+		// spelling was queued or stored. Sending the stored spelling named one
+		// checkpoint differently before and after git packed its ref, which a
+		// case-sensitive remote keeps as two refs and a case-insensitive one
+		// refuses. The queue entry is untouched: removal keys on token, so the
+		// original spelling is still what gets pruned.
+		candidate := checkpointRefPush{token: entry, name: canonicalCheckpointRefKey(entry.Ref), hash: tip}
+		if stored != candidate.name {
+			candidate.stored = stored
+		}
 		switch {
 		case !pin.IsZero() && pin != candidate.hash:
 			part.changed = append(part.changed, candidate)
@@ -1079,8 +1084,8 @@ func retryRefsIndividually(ctx, flushCtx context.Context, repo *git.Repository, 
 			logging.Info(ctx, "git-refs push: checkpoint ref changed during recovery; newer generation stays queued",
 				slog.String("ref", ref.name.String()))
 			// Report the generation now waiting, so a caller has a commit to pin.
-			if current, readErr := repo.Reference(ref.name, true); readErr == nil {
-				res.changed = append(res.changed, checkpointRefPush{token: ref.token, name: ref.name, hash: current.Hash()})
+			if current, readErr := repo.Reference(ref.localRef(), true); readErr == nil {
+				res.changed = append(res.changed, checkpointRefPush{token: ref.token, name: ref.name, stored: ref.stored, hash: current.Hash()})
 			} else {
 				res.errs[ref.name] = err
 			}
