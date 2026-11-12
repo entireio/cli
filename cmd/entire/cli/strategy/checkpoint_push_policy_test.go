@@ -376,3 +376,21 @@ func TestListOutgoingCheckpoints_UnlistedRefs(t *testing.T) {
 		{CheckpointID: id.MustCheckpointID("eeeeeeeeeee2"), Ref: garbage},
 	}, out.Checkpoints)
 }
+
+// One checkpoint queued under both spellings of its shard is one outgoing
+// checkpoint: the push sends it once, so the list and the count must agree.
+func TestListOutgoingCheckpoints_BothShardSpellingsQueuedListOnce(t *testing.T) {
+	workDir, bareDir, _ := setupRepoWithCheckpointRefs(t)
+	prepareGitRefsPrePush(t, workDir, bareDir)
+	tip := revParse(t, workDir, "HEAD")
+	stored, queued := foldedShardFixture(t, workDir, tip)
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+	enqueueInRepoAt(t, workDir, queued, stored)
+
+	out, err := ListOutgoingCheckpoints(t.Context())
+	require.NoError(t, err)
+
+	require.Equal(t, []OutgoingCheckpoint{
+		{CheckpointID: id.MustCheckpointID("0000000000ab"), Ref: queued, Commit: plumbing.NewHash(tip)},
+	}, out.Checkpoints)
+}
