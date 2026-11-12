@@ -84,19 +84,3 @@ func TestProjectAgentJournalSweepsOnlyItsWorkspaces(t *testing.T) {
 	_, err = root.Stat("agent-work/other/active/repo")
 	require.NoError(t, err)
 }
-
-// A service account's secret and a token exchanged from it share one lock.
-// Not parallel: sets ENTIRE_TOKEN.
-func TestProjectAgentWorkerIdentitySharedAcrossCredentialForms(t *testing.T) {
-	t.Setenv("ENTIRE_TOKEN", "ent_svc_us_01JABCDEFGHJKMNPQRSTVWXYZ0_01JZYXWVTSRQPNMKJHGFEDCBA9_aaaqeayeaudaocajbifqydiob4ibceqtcqkrmfyydenbwha5dypq3MriFT")
-	fromSecret, err := projectAgentWorkerIdentity()
-	require.NoError(t, err)
-	t.Setenv("ENTIRE_TOKEN", makeTestJWT(t, `{"sub":"svc_01JABCDEFGHJKMNPQRSTVWXYZ0","iss":"https://us.auth.entire.io","aud":["https://us.auth.entire.io/","entire-cli"]}`))
-	fromToken, err := projectAgentWorkerIdentity()
-	require.NoError(t, err)
-	require.Equal(t, fromSecret, fromToken)
-	t.Setenv("ENTIRE_TOKEN", makeTestJWT(t, `{"sub":"svc_01HZX7QABCDEFGHJKMNPQRSTSB","iss":"https://us.auth.entire.io","aud":"https://us.auth.entire.io"}`))
-	other, err := projectAgentWorkerIdentity()
-	require.NoError(t, err)
-	require.NotEqual(t, fromSecret, other)
-}

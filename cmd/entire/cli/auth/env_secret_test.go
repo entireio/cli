@@ -232,6 +232,11 @@ func TestLocalIdentityCacheKeyForSecret(t *testing.T) {
 	if n := core.exchanges.Load(); n != 0 {
 		t.Errorf("exchanges = %d, want 0", n)
 	}
+	// A token exchanged from the secret is the same identity.
+	t.Setenv(EnvTokenVar, makeJWT(t, `{"sub":"svc_01JABCDEFGHJKMNPQRSTVWXYZ0","iss":"https://us.auth.entire.io","aud":["https://us.auth.entire.io/","entire-cli"]}`))
+	if exchanged, err := LocalIdentityCacheKey(); err != nil || exchanged != got {
+		t.Errorf("exchanged token key = %q, %v; want %q", exchanged, err, got)
+	}
 }
 
 // ctx cancels an exchange in flight.

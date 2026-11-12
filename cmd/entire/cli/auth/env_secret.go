@@ -147,7 +147,30 @@ func serviceAccountSecretCacheKey(secret string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return strings.Join([]string{"env-sa", subj.core, subj.accountID}, "|"), nil
+	return serviceAccountIdentityKey(subj.core, subj.accountID), nil
+}
+
+func serviceAccountIdentityKey(core, accountID string) string {
+	return strings.Join([]string{"env-sa", core, accountID}, "|")
+}
+
+// exchangedServiceAccountKey is serviceAccountSecretCacheKey for a token
+// exchanged from a secret, so both forms of one account share local state.
+// It mirrors checkExchangedToken: a svc_ subject and exactly one URL audience.
+func exchangedServiceAccountKey(claims *tokens.UnverifiedClaims) (string, bool) {
+	if !strings.HasPrefix(claims.Subject, "svc_") {
+		return "", false
+	}
+	var cores []string
+	for _, aud := range claims.Audience {
+		if u, err := url.Parse(aud); err == nil && u.Scheme != "" {
+			cores = append(cores, strings.TrimRight(aud, "/"))
+		}
+	}
+	if len(cores) != 1 {
+		return "", false
+	}
+	return serviceAccountIdentityKey(cores[0], claims.Subject), true
 }
 
 // exchangeSubject is everything one service account token exchange needs. A
