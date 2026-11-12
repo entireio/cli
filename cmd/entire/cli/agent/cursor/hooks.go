@@ -100,30 +100,6 @@ func (c *CursorAgent) InstallHooks(ctx context.Context, force bool) (int, error)
 		rawHooks = make(map[string]json.RawMessage)
 	}
 
-	// Parse only the hook types we manage
-	var sessionStart, sessionEnd, beforeSubmitPrompt, stop, preCompact, subagentStart, subagentStop []CursorHookEntry
-	parseCursorHookType(rawHooks, "sessionStart", &sessionStart)
-	parseCursorHookType(rawHooks, "sessionEnd", &sessionEnd)
-	parseCursorHookType(rawHooks, "beforeSubmitPrompt", &beforeSubmitPrompt)
-	parseCursorHookType(rawHooks, "stop", &stop)
-	parseCursorHookType(rawHooks, "preCompact", &preCompact)
-	parseCursorHookType(rawHooks, "subagentStart", &subagentStart)
-	parseCursorHookType(rawHooks, "subagentStop", &subagentStop)
-
-	// If force is true, remove all existing Entire hooks first
-	if force {
-		sessionStart = removeEntireHooks(sessionStart)
-		sessionEnd = removeEntireHooks(sessionEnd)
-		beforeSubmitPrompt = removeEntireHooks(beforeSubmitPrompt)
-		stop = removeEntireHooks(stop)
-		preCompact = removeEntireHooks(preCompact)
-		subagentStart = removeEntireHooks(subagentStart)
-		subagentStop = removeEntireHooks(subagentStop)
-	}
-
-	// Define hook commands
-	const cmdPrefix = "entire hooks cursor "
-
 	// Cursor spawns hook commands through the native OS shell, which on
 	// Windows is PowerShell (https://cursor.com/docs/hooks), so a
 	// `sh -c '…'` wrapper silently fails to launch on a Windows host without
@@ -135,38 +111,27 @@ func (c *CursorAgent) InstallHooks(ctx context.Context, force bool) (int, error)
 	// form, not the cmd-host form droid uses: PowerShell does not expand its
 	// %SystemRoot%. See agent.WrapWindowsProductionSilentHookCommand.
 	useWindowsHooks := agent.UseWindowsProductionHooks(ctx)
-	sessionStartCmd := agent.WrapProductionSilentHookCommandForOS(cmdPrefix+HookNameSessionStart, useWindowsHooks)
-	sessionEndCmd := agent.WrapProductionSilentHookCommandForOS(cmdPrefix+HookNameSessionEnd, useWindowsHooks)
-	beforeSubmitPromptCmd := agent.WrapProductionSilentHookCommandForOS(cmdPrefix+HookNameBeforeSubmitPrompt, useWindowsHooks)
-	stopCmd := agent.WrapProductionSilentHookCommandForOS(cmdPrefix+HookNameStop, useWindowsHooks)
-	preCompactCmd := agent.WrapProductionSilentHookCommandForOS(cmdPrefix+HookNamePreCompact, useWindowsHooks)
-	subagentStartCmd := agent.WrapProductionSilentHookCommandForOS(cmdPrefix+HookNameSubagentStart, useWindowsHooks)
-	subagentEndCmd := agent.WrapProductionSilentHookCommandForOS(cmdPrefix+HookNameSubagentStop, useWindowsHooks)
 
+	// Sync each hook type we manage to its desired command. syncEntireHook
+	// replaces any stale-form Entire hook (e.g. an sh-wrapped entry from a
+	// previous install) with the current command even without --force, so a
+	// wrapper-form change — notably the sh↔cmd.exe migration driven by
+	// UseWindowsProductionHooks when a Windows host gains or loses a working
+	// POSIX sh — cleanly replaces rather than leaving a dead duplicate entry
+	// that could double-fire (issue #1424).
 	count := 0
-
-	// Sync each hook to its desired command. syncEntireHook replaces any
-	// stale-form Entire hook (e.g. an sh-wrapped entry from a previous install)
-	// with the current command even without --force, so a wrapper-form change —
-	// notably the sh↔cmd.exe migration driven by UseWindowsProductionHooks when
-	// a Windows host gains or loses a working POSIX sh — cleanly replaces rather
-	// than leaving a dead duplicate entry that could double-fire (issue #1424).
 	staleDropped := false
-	var dropped bool
-	sessionStart, count, dropped = syncEntireHook(sessionStart, sessionStartCmd, count)
-	staleDropped = staleDropped || dropped
-	sessionEnd, count, dropped = syncEntireHook(sessionEnd, sessionEndCmd, count)
-	staleDropped = staleDropped || dropped
-	beforeSubmitPrompt, count, dropped = syncEntireHook(beforeSubmitPrompt, beforeSubmitPromptCmd, count)
-	staleDropped = staleDropped || dropped
-	stop, count, dropped = syncEntireHook(stop, stopCmd, count)
-	staleDropped = staleDropped || dropped
-	preCompact, count, dropped = syncEntireHook(preCompact, preCompactCmd, count)
-	staleDropped = staleDropped || dropped
-	subagentStart, count, dropped = syncEntireHook(subagentStart, subagentStartCmd, count)
-	staleDropped = staleDropped || dropped
-	subagentStop, count, dropped = syncEntireHook(subagentStop, subagentEndCmd, count)
-	staleDropped = staleDropped || dropped
+	for _, ht := range cursorHookTypes {
+		var entries []CursorHookEntry
+		parseCursorHookType(rawHooks, ht.key, &entries)
+		if force {
+			entries = removeEntireHooks(entries)
+		}
+		var dropped bool
+		entries, count, dropped = syncEntireHook(entries, cursorHookCommand(ht.verb, useWindowsHooks), count)
+		staleDropped = staleDropped || dropped
+		marshalCursorHookType(rawHooks, ht.key, entries)
+	}
 
 	// staleDropped forces a write even when nothing was added: a config holding
 	// both a stale and a current hook adds nothing, and returning early here
@@ -174,15 +139,6 @@ func (c *CursorAgent) InstallHooks(ctx context.Context, force bool) (int, error)
 	if count == 0 && !staleDropped {
 		return 0, nil
 	}
-
-	// Marshal modified hook types back into rawHooks
-	marshalCursorHookType(rawHooks, "sessionStart", sessionStart)
-	marshalCursorHookType(rawHooks, "sessionEnd", sessionEnd)
-	marshalCursorHookType(rawHooks, "beforeSubmitPrompt", beforeSubmitPrompt)
-	marshalCursorHookType(rawHooks, "stop", stop)
-	marshalCursorHookType(rawHooks, "preCompact", preCompact)
-	marshalCursorHookType(rawHooks, "subagentStart", subagentStart)
-	marshalCursorHookType(rawHooks, "subagentStop", subagentStop)
 
 	// Marshal hooks and update raw file
 	hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
@@ -335,16 +291,26 @@ var cursorHookTypes = []struct{ verb, key string }{
 	{HookNameSubagentStop, "subagentStop"},
 }
 
+// cursorHookCommandPrefix is what every hook command Entire writes for Cursor
+// begins with; the verb is one of the HookName* constants.
+const cursorHookCommandPrefix = "entire hooks cursor "
+
+// cursorHookCommand is the command InstallHooks writes for verb, in the sh
+// form or (windows true) the Windows form.
+func cursorHookCommand(verb string, windows bool) string {
+	return agent.WrapProductionSilentHookCommandForOS(cursorHookCommandPrefix+verb, windows)
+}
+
 // CheckHookConfig implements agent.HookFreshness: outdated when Entire's hooks
-// in .cursor/hooks.json match neither form InstallHooks writes today, the sh
-// wrapper or the Windows cmd.exe wrapper, or one is missing. That includes a
-// Windows wrapper written before hooks resolved programs from PATH only, which
-// keeps working but still searches the folder Cursor was opened in. Either
-// current form counts, whichever host this runs on: a hooks file committed
-// from a teammate's other OS is not out of date, and skipping the sh probe
-// keeps a slow probe from flipping a healthy install to out of date. An
-// absent, unreadable or malformed file, or one holding no Entire hook, reads
-// as absent.
+// in .cursor/hooks.json are not a form InstallHooks writes on this host, or one
+// is missing. The sh form counts on every host: Cursor's Windows hook shell
+// (PowerShell) runs it wherever sh is on PATH. The Windows form counts only on
+// Windows, since sh cannot run it, so a hooks file committed from a Windows
+// checkout is outdated on macOS and Linux. That includes a Windows wrapper
+// written before hooks resolved programs from PATH only, which keeps working
+// but still searches the folder Cursor was opened in. The sh probe is not run,
+// so a slow probe cannot flip a healthy install to outdated. An absent,
+// unreadable or malformed file, or one holding no Entire hook, reads as absent.
 func (c *CursorAgent) CheckHookConfig(ctx context.Context) agent.HookConfigState {
 	cfg, err := cursorHookConfig(ctx)
 	if err != nil {
@@ -368,7 +334,7 @@ func (c *CursorAgent) CheckHookConfig(ctx context.Context) agent.HookConfigState
 	if !owned {
 		return agent.HooksAbsent
 	}
-	if cursorHooksCurrent(parsed, false) || cursorHooksCurrent(parsed, true) {
+	if cursorHooksCurrent(parsed, false) || (agent.HookHostIsWindows() && cursorHooksCurrent(parsed, true)) {
 		return agent.HooksCurrent
 	}
 	return agent.HooksOutdated
@@ -378,8 +344,8 @@ func (c *CursorAgent) CheckHookConfig(ctx context.Context) agent.HookConfigState
 // InstallHooks writes in the sh form (windows false) or the Windows form.
 func cursorHooksCurrent(parsed [][]CursorHookEntry, windows bool) bool {
 	for i, ht := range cursorHookTypes {
-		want := agent.WrapProductionSilentHookCommandForOS("entire hooks cursor "+ht.verb, windows)
-		if current := agent.ManagedHookListState(parsed[i], hookEntryCommand, []string{want}); !current {
+		want := []string{cursorHookCommand(ht.verb, windows)}
+		if !agent.ManagedHookListState(parsed[i], hookEntryCommand, want) {
 			return false
 		}
 	}

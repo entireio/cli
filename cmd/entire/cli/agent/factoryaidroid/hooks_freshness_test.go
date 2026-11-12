@@ -5,46 +5,29 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	agentpkg "github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 )
 
-// legacyDroidWindowsSettings is .factory/settings.json as a version from
-// before the PATH-only setting wrote it on Windows.
-func legacyDroidWindowsSettings(t *testing.T) []byte {
-	t.Helper()
-	legacy := func(verb string) []FactoryHookMatcher {
-		return []FactoryHookMatcher{{Hooks: []FactoryHookEntry{{
-			Type:    "command",
-			Command: `cmd.exe /d /s /c "where.exe entire >nul 2>nul & if errorlevel 1 (ver>nul) else (entire hooks factoryai-droid ` + verb + `)"`,
-		}}}}
-	}
-	task := func(verb string) []FactoryHookMatcher {
-		m := legacy(verb)
-		m[0].Matcher = "Task"
-		return m
-	}
-	data, err := json.Marshal(FactorySettings{Hooks: FactoryHooks{
-		SessionStart:     legacy(HookNameSessionStart),
-		SessionEnd:       legacy(HookNameSessionEnd),
-		UserPromptSubmit: legacy(HookNameUserPromptSubmit),
-		Stop:             legacy(HookNameStop),
-		PreToolUse:       task(HookNamePreToolUse),
-		PostToolUse:      task(HookNamePostToolUse),
-		PreCompact:       legacy(HookNamePreCompact),
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return data
+// legacyDroidCommand turns a current Windows command back into the form a
+// released version from before the PATH-only setting wrote: a bare cmd.exe
+// launcher, no `set …& pushd …& ` before the where.exe guard and no `popd& `
+// opening the branches.
+func legacyDroidCommand(command string) string {
+	command = strings.Replace(command, `%SystemRoot%\System32\cmd.exe /d /s /c "`, `cmd.exe /d /s /c "`, 1)
+	command = strings.Replace(command, "set NoDefaultCurrentDirectoryInExePath=1& pushd %SystemRoot%& ", "", 1)
+	return strings.ReplaceAll(command, "popd& ", "")
 }
 
 // TestCheckHookConfig_WindowsLegacyWrapperIsOutdated pins that `entire status`
 // and `entire doctor` flag Droid hooks written before the PATH-only setting,
-// and that the reinstall they point to clears the warning. Mutates the shared
-// probe and the working directory, so no t.Parallel().
+// and that the reinstall they point to replaces every one of them. The legacy
+// file is a Windows install with each command turned back into its released
+// form, so the hooks are all present and only the wrappers differ. Mutates the
+// shared host and the working directory, so no t.Parallel().
 func TestCheckHookConfig_WindowsLegacyWrapperIsOutdated(t *testing.T) {
 	t.Cleanup(agentpkg.SetWindowsHookProbeForTesting("windows", func(context.Context, string) bool {
 		return true
@@ -57,10 +40,30 @@ func TestCheckHookConfig_WindowsLegacyWrapperIsOutdated(t *testing.T) {
 	if got := ag.CheckHookConfig(context.Background()); got != agentpkg.HooksAbsent {
 		t.Fatalf("no settings file: CheckHookConfig = %v, want absent", got)
 	}
-	if err := os.MkdirAll(filepath.Join(tempDir, ".factory"), 0o750); err != nil {
+	if _, err := ag.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("InstallHooks: %v", err)
+	}
+	settings := readFactorySettings(t, tempDir)
+	wrappers := 0
+	for _, l := range droidHookLists(&settings.Hooks, droidHookCommands{}) {
+		for i := range *l.matchers {
+			for j := range (*l.matchers)[i].Hooks {
+				hook := &(*l.matchers)[i].Hooks[j]
+				legacy := legacyDroidCommand(hook.Command)
+				if legacy == hook.Command {
+					t.Fatalf("%s: %q is not a current Windows wrapper", l.key, hook.Command)
+				}
+				hook.Command = legacy
+				wrappers++
+			}
+		}
+	}
+	data, err := json.Marshal(settings)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(tempDir, ".factory", "settings.json"), legacyDroidWindowsSettings(t), 0o600); err != nil {
+	path := filepath.Join(tempDir, ".factory", "settings.json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if got := ag.CheckHookConfig(context.Background()); got != agentpkg.HooksOutdated {
@@ -71,6 +74,21 @@ func TestCheckHookConfig_WindowsLegacyWrapperIsOutdated(t *testing.T) {
 	}
 	if got := ag.CheckHookConfig(context.Background()); got != agentpkg.HooksCurrent {
 		t.Fatalf("after reinstall: CheckHookConfig = %v, want current", got)
+	}
+	settings = readFactorySettings(t, tempDir)
+	after := 0
+	for _, l := range droidHookLists(&settings.Hooks, droidHookCommands{}) {
+		for _, m := range *l.matchers {
+			for _, hook := range m.Hooks {
+				after++
+				if legacyDroidCommand(hook.Command) == hook.Command {
+					t.Errorf("%s: legacy wrapper survived the reinstall: %q", l.key, hook.Command)
+				}
+			}
+		}
+	}
+	if after != wrappers {
+		t.Errorf("after reinstall: %d hooks, want %d", after, wrappers)
 	}
 }
 
@@ -106,13 +124,21 @@ func TestCheckHookConfig_TaskHookUnderOtherMatcherIsOutdated(t *testing.T) {
 	}
 }
 
-// TestCheckHookConfig_OtherHostFormIsCurrentWindows pins that a settings file
-// installed on the other OS (a teammate's committed file) reads as current.
-// Mutates the shared host and the working directory, so no t.Parallel().
-func TestCheckHookConfig_OtherHostFormIsCurrentWindows(t *testing.T) {
-	for _, tc := range []struct{ installOS, checkOS string }{
-		{"windows", "linux"},
-		{"linux", "windows"},
+// TestCheckHookConfig_HostFormWindows pins that only this host's form is
+// current: droid runs hooks under sh on macOS and Linux and under cmd.exe on
+// Windows, and neither runs the other's form, so a settings file committed
+// from the other OS is outdated. Install-then-check on the same host also
+// keeps InstallHooks and CheckHookConfig from drifting apart. Mutates the
+// shared host and the working directory, so no t.Parallel().
+func TestCheckHookConfig_HostFormWindows(t *testing.T) {
+	for _, tc := range []struct {
+		installOS, checkOS string
+		want               agentpkg.HookConfigState
+	}{
+		{"linux", "linux", agentpkg.HooksCurrent},
+		{"windows", "windows", agentpkg.HooksCurrent},
+		{"windows", "linux", agentpkg.HooksOutdated},
+		{"linux", "windows", agentpkg.HooksOutdated},
 	} {
 		t.Run(tc.installOS+" install checked on "+tc.checkOS, func(t *testing.T) {
 			tempDir := t.TempDir()
@@ -128,8 +154,8 @@ func TestCheckHookConfig_OtherHostFormIsCurrentWindows(t *testing.T) {
 				t.Fatalf("InstallHooks: %v", err)
 			}
 			t.Cleanup(agentpkg.SetWindowsHookProbeForTesting(tc.checkOS, probe))
-			if got := ag.CheckHookConfig(context.Background()); got != agentpkg.HooksCurrent {
-				t.Fatalf("CheckHookConfig = %v, want current", got)
+			if got := ag.CheckHookConfig(context.Background()); got != tc.want {
+				t.Fatalf("CheckHookConfig = %v, want %v", got, tc.want)
 			}
 		})
 	}

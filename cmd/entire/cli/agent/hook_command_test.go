@@ -475,6 +475,7 @@ func TestIsManagedHookCommand_WindowsWrapperMigration(t *testing.T) {
 	future := []string{
 		`C:\Windows\system32\cmd.exe /d /s /c "set NoDefaultCurrentDirectoryInExePath=1& pushd %SystemRoot%& where.exe entire >nul 2>nul & if errorlevel 1 (popd& ver>nul) else (popd& entire hooks codex stop)"`,
 		`set ENTIRE_X=1& set NoDefaultCurrentDirectoryInExePath=1& pushd %SystemRoot%& where.exe entire >nul 2>nul & if errorlevel 1 (popd& ver>nul) else (popd& set ENTIRE_Y=1& entire hooks codex stop)`,
+		`"C:\Windows\System32\cmd.exe" /d /s /c "set NoDefaultCurrentDirectoryInExePath=1& pushd %SystemRoot%& where.exe entire >nul 2>nul & if errorlevel 1 (popd& ver>nul) else (popd& entire hooks codex stop)"`,
 	}
 	for _, command := range future {
 		if !IsManagedHookCommand(command) {
@@ -516,6 +517,22 @@ func TestIsManagedHookCommand_WindowsWrapperAroundForeignCommand(t *testing.T) {
 		WrapWindowsProductionSilentHookCommandForCmdHost("my-tool hooks stop"),
 		WrapWindowsProductionSilentHookCommandDirect("echo entire hooks"),
 		`%SystemRoot%\System32\cmd.exe /d /s /c "echo hi"`,
+	} {
+		if IsManagedHookCommand(command) {
+			t.Errorf("IsManagedHookCommand(%q) = true; it does not run an Entire hook", command)
+		}
+	}
+	// A user's own command chained in front of an Entire wrapper, or a
+	// launcher that is not cmd.exe, makes the whole line the user's: install
+	// and `entire disable` must leave it alone.
+	wrapper := WrapWindowsProductionSilentHookCommand("entire hooks cursor stop")
+	for _, command := range []string{
+		`C:\tools\notify.exe; ` + wrapper,
+		`C:\tools\notify.exe | ` + wrapper,
+		`C:\tools\notify.exe || ` + wrapper,
+		`C:\tools\notify.exe & ` + wrapper,
+		"evil" + wrapper,
+		`C:\tools\evilcmd.exe /d /s /c "` + strings.TrimPrefix(wrapper, `cmd.exe /d /s /c "`),
 	} {
 		if IsManagedHookCommand(command) {
 			t.Errorf("IsManagedHookCommand(%q) = true; it does not run an Entire hook", command)

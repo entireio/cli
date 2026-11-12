@@ -64,15 +64,20 @@ func TestCheckHookConfig_WindowsLegacyWrapperIsOutdated(t *testing.T) {
 		t.Fatal(err)
 	}
 	rewritten := 0
+	sessionStartRewritten := false
 	doc = rewriteStrings(doc, func(s string) string {
 		if legacy := legacyWindowsCommand(s); legacy != s {
 			rewritten++
+			sessionStartRewritten = sessionStartRewritten || strings.Contains(s, "entire hooks codex "+HookNameSessionStart)
 			return legacy
 		}
 		return s
 	})
 	if rewritten == 0 {
 		t.Fatal("no Windows wrapper found to rewrite; the install did not write the Windows form")
+	}
+	if !sessionStartRewritten {
+		t.Fatal("SessionStart's wrapper was not rewritten to its legacy form")
 	}
 	out, err := json.Marshal(doc)
 	if err != nil {
@@ -90,5 +95,25 @@ func TestCheckHookConfig_WindowsLegacyWrapperIsOutdated(t *testing.T) {
 	}
 	if got := ag.CheckHookConfig(ctx); got != agentpkg.HooksCurrent {
 		t.Fatalf("after reinstall: CheckHookConfig = %v, want current", got)
+	}
+	// The reinstall must have replaced every legacy wrapper, not added the
+	// current one beside it.
+	raw, err = os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	guards := 0
+	rewriteStrings(doc, func(s string) string {
+		guards += strings.Count(s, "where.exe entire")
+		if n := strings.Count(s, "pushd %SystemRoot%& where.exe entire"); n != strings.Count(s, "where.exe entire") {
+			t.Errorf("after reinstall, a legacy guard survived: %q", s)
+		}
+		return s
+	})
+	if guards != rewritten {
+		t.Errorf("after reinstall: %d where.exe guards, want %d (one per rewritten wrapper)", guards, rewritten)
 	}
 }

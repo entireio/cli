@@ -86,19 +86,24 @@ func TestCheckHookConfig_CurrentAfterInstall(t *testing.T) {
 	}
 }
 
-// TestCheckHookConfig_OtherHostFormIsCurrentWindows pins that a hooks file
-// installed on the other OS (a teammate's committed file) reads as current,
-// and that the check never runs the sh probe, so a slow or failed probe cannot
-// flip a healthy install to out of date. Mutates the shared probe and the
-// working directory, so no t.Parallel().
-func TestCheckHookConfig_OtherHostFormIsCurrentWindows(t *testing.T) {
+// TestCheckHookConfig_HostFormWindows installs each form and checks it on each
+// host. The sh form is current everywhere, since Cursor's PowerShell runs it
+// wherever sh is on PATH; the Windows form is current only on Windows, since sh
+// cannot run it. Install-then-check also keeps InstallHooks and CheckHookConfig
+// from drifting apart. The check must never run the sh probe, so a slow or
+// failed probe cannot flip a healthy install to out of date. Mutates the shared
+// probe and the working directory, so no t.Parallel().
+func TestCheckHookConfig_HostFormWindows(t *testing.T) {
 	for _, tc := range []struct {
 		name, installOS, checkOS string
 		installSH                bool
+		want                     agent.HookConfigState
 	}{
-		{"windows install checked on linux", "windows", "linux", false},
-		{"sh install checked on windows without sh", "linux", "windows", true},
-		{"windows sh install checked on windows without sh", "windows", "windows", true},
+		{"sh install checked on linux", "linux", "linux", true, agent.HooksCurrent},
+		{"windows install checked on windows", "windows", "windows", false, agent.HooksCurrent},
+		{"sh install checked on windows without sh", "linux", "windows", true, agent.HooksCurrent},
+		{"windows sh install checked on windows without sh", "windows", "windows", true, agent.HooksCurrent},
+		{"windows install checked on linux", "windows", "linux", false, agent.HooksOutdated},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tempDir := t.TempDir()
@@ -116,8 +121,8 @@ func TestCheckHookConfig_OtherHostFormIsCurrentWindows(t *testing.T) {
 				t.Error("CheckHookConfig ran the sh probe")
 				return false
 			}))
-			if got := ag.CheckHookConfig(context.Background()); got != agent.HooksCurrent {
-				t.Fatalf("CheckHookConfig = %v, want current", got)
+			if got := ag.CheckHookConfig(context.Background()); got != tc.want {
+				t.Fatalf("CheckHookConfig = %v, want %v", got, tc.want)
 			}
 		})
 	}

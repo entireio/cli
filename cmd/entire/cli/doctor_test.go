@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1367,29 +1368,44 @@ func TestCheckAntigravityTitleTee_WarnsWhenNotConfigured(t *testing.T) {
 // an earlier version wrote on Windows, which still looks for `entire` in the
 // folder agy was opened in, and names the reinstall that rewrites it. The
 // title command is global, so the warning appears in a repository without
-// Antigravity hooks too.
+// Antigravity hooks too. Without agy on PATH the install skips the title
+// command, so the warning would never clear and stays off.
 func TestCheckAntigravityTitleTee_WindowsWarnsWhenOutdated(t *testing.T) {
-	t.Cleanup(agent.SetWindowsHookProbeForTesting("windows", nil))
-	dir := setupGitRepoForPhaseTest(t)
-	// The check opens the worktree through the shared root registry, which
-	// keeps the directory open; Windows cannot remove it until that closes.
-	// Registered after t.TempDir, so it runs before the removal.
-	t.Cleanup(osroot.ResetShared)
-	t.Chdir(dir)
+	for _, agyOnPath := range []bool{true, false} {
+		t.Run("agy on PATH "+strconv.FormatBool(agyOnPath), func(t *testing.T) {
+			t.Cleanup(agent.SetWindowsHookProbeForTesting("windows", nil))
+			dir := setupGitRepoForPhaseTest(t)
+			// The check opens the worktree through the shared root registry,
+			// which keeps the directory open; Windows cannot remove it until
+			// that closes. Registered after t.TempDir, so it runs before the
+			// removal.
+			t.Cleanup(osroot.ResetShared)
+			t.Chdir(dir)
+			if agyOnPath {
+				stubAgyOnPath(t)
+			} else {
+				t.Setenv("PATH", t.TempDir())
+			}
 
-	cfgDir := filepath.Join(t.TempDir(), "agy")
-	require.NoError(t, os.MkdirAll(cfgDir, 0o750))
-	require.NoError(t, os.WriteFile(filepath.Join(cfgDir, "settings.json"),
-		[]byte(`{"title":{"type":"command","command":"entire hooks antigravity title-tee"}}`), 0o600))
-	t.Setenv("ENTIRE_ANTIGRAVITY_CONFIG_DIR", cfgDir)
+			cfgDir := filepath.Join(t.TempDir(), "agy")
+			require.NoError(t, os.MkdirAll(cfgDir, 0o750))
+			require.NoError(t, os.WriteFile(filepath.Join(cfgDir, "settings.json"),
+				[]byte(`{"title":{"type":"command","command":"entire hooks antigravity title-tee"}}`), 0o600))
+			t.Setenv("ENTIRE_ANTIGRAVITY_CONFIG_DIR", cfgDir)
 
-	cmd, stdout := newTestCmd(t)
-	checkAntigravityTitleTee(cmd)
+			cmd, stdout := newTestCmd(t)
+			checkAntigravityTitleTee(cmd)
 
-	out := stdout.String()
-	require.Contains(t, out, "Antigravity title-tee: OUT OF DATE")
-	require.Contains(t, out, "entire agent add antigravity")
-	require.NotContains(t, out, "✓ Antigravity title-tee: OK")
+			out := stdout.String()
+			if !agyOnPath {
+				require.Empty(t, out)
+				return
+			}
+			require.Contains(t, out, "Antigravity title-tee: OUT OF DATE")
+			require.Contains(t, out, "In a repository that uses Antigravity, run `entire agent add antigravity`")
+			require.NotContains(t, out, "✓ Antigravity title-tee: OK")
+		})
+	}
 }
 
 // TestConfirmDoctorFix_CancelledContext verifies that a cancelled command

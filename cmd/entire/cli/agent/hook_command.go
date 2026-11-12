@@ -198,24 +198,11 @@ func warningHookCommand(command, missing, failed string) string {
 //   - entire absent   → `where.exe` fails (errorlevel ≥ 1) → the if branch runs
 //     (silently via `ver>nul`, or echoing the warning) and the line exits 0.
 //
-// Every Windows wrapper body starts with windowsPathOnlyLookup. cmd.exe looks
-// for a bare program name in the current directory before PATH unless
-// NoDefaultCurrentDirectoryInExePath is set (see NeedCurrentDirectoryForExePathW),
-// and agents run hooks with the repository root as the working directory. Without
-// it, an `entire.cmd`, `entire.bat`, `entire.exe` or `where.exe` at the root of
-// whatever checkout the agent has open replaces the installed CLI on every hook.
-// The variable is set in the same cmd.exe that then resolves `where.exe` and
-// `entire`, and `entire` inherits it.
-//
-// `where.exe` itself also searches its working directory for its argument, and
-// NoDefaultCurrentDirectoryInExePath does not change that. windowsEntireGuard
-// therefore runs it from %SystemRoot% (pushd), and each branch returns to the
-// hook's directory (popd) before doing anything else, so a repository file named
-// `entire.*` cannot make the check report a CLI that `entire` then fails to find
-// on PATH. The usual way to keep `where` to PATH, `$PATH:entire`, is not usable:
-// PowerShell would expand it inside the Codex form's double-quoted block before
-// cmd.exe ever saw it. %SystemRoot% is left alone by PowerShell and expanded by
-// whichever cmd.exe parses the line.
+// Every Windows wrapper body starts with windowsPathOnlyLookup, so the cmd.exe
+// that parses it resolves `where.exe` and `entire` from PATH instead of the
+// hook's working directory (the repository root), and `entire` inherits the
+// setting. See "Hook Commands Resolve Programs from PATH" in
+// docs/development/git-safety.md.
 const windowsPathOnlyLookup = `set NoDefaultCurrentDirectoryInExePath=1& `
 
 // WindowsPathOnlyLookupPrefix is windowsPathOnlyLookup for a cmd.exe line Entire
@@ -225,9 +212,10 @@ const windowsPathOnlyLookup = `set NoDefaultCurrentDirectoryInExePath=1& `
 const WindowsPathOnlyLookupPrefix = windowsPathOnlyLookup
 
 // windowsEntireGuard is the PATH check every Windows wrapper body runs after
-// windowsPathOnlyLookup, up to the branch that handles a missing CLI. Both
-// branches must start with windowsBranchStart. The errorlevel test has to come
-// before popd, which is why popd sits inside the branches.
+// windowsPathOnlyLookup, up to the branch that handles a missing CLI. It runs
+// `where.exe` from %SystemRoot%, because `where.exe` searches its own working
+// directory whatever the PATH-only setting says. Both branches must start with
+// windowsBranchStart: the errorlevel test has to come before popd.
 const windowsEntireGuard = `pushd %SystemRoot%& where.exe entire >nul 2>nul & if errorlevel 1 `
 
 // windowsBranchStart opens both branches after windowsEntireGuard, returning to
@@ -235,31 +223,15 @@ const windowsEntireGuard = `pushd %SystemRoot%& where.exe entire >nul 2>nul & if
 const windowsBranchStart = `popd& `
 
 // windowsBareCmdLauncher and windowsSystemCmdLauncher open the nested form's
-// quoted cmd.exe block.
-//
-// The first program of a hook line is resolved by the agent's own hook shell
-// before anything in the line runs, and Entire cannot control how that shell
-// looks it up; the wrappers control everything after it. Where Entire starts
-// the agent itself (review runs), AppendWindowsPathOnlyLookupEnv puts
-// NoDefaultCurrentDirectoryInExePath in the agent's environment, which its hook
-// shell inherits. The two launchers differ in what the first program is:
-//   - windowsSystemCmdLauncher names cmd.exe by its full path. The agent's
-//     cmd.exe expands %SystemRoot% (so it works when Windows is not on C:),
-//     and nothing is looked up in the working directory. Use it for hosts that
-//     hand the whole line to cmd.exe: Factory Droid.
+// quoted cmd.exe block. The launcher is the line's first program, which the
+// agent's own hook shell resolves before the PATH-only setting applies:
+//   - windowsSystemCmdLauncher names cmd.exe by full path, for hosts that hand
+//     the whole line to cmd.exe, which expands %SystemRoot%: Factory Droid.
 //   - windowsBareCmdLauncher is for hosts whose hook shell is or may be
-//     PowerShell. Cursor runs hook commands through PowerShell on Windows: the
-//     desktop app per https://cursor.com/docs/hooks ("Command-Based Hooks"),
-//     the CLI as `powershell.exe -NonInteractive -File <temp>.ps1` (observed
-//     with Cursor CLI 2026.11.11). Codex's hook shell is the session's shell
-//     (hooks/src/engine/command_runner.rs and core/src/shell.rs in
-//     openai/codex): `powershell -NoProfile -Command <line>` for the default
-//     PowerShell user, `cmd.exe /c "<line>"` for a cmd.exe user,
-//     `%COMSPEC% /C "<line>"` when no shell was detected, and a POSIX sh when
-//     the session runs under one. PowerShell does not expand %SystemRoot% and
-//     never runs a program from the current directory, so the bare token is
-//     the one that works under both; under a cmd.exe hook shell it is still
-//     looked up in the working directory first.
+//     PowerShell, which does not expand %SystemRoot%: Cursor and Codex.
+//
+// Which shell each agent runs hooks in, and the case this leaves open, are in
+// docs/development/git-safety.md.
 const (
 	windowsBareCmdLauncher   = `cmd.exe /d /s /c "`
 	windowsSystemCmdLauncher = `%SystemRoot%\System32\cmd.exe /d /s /c "`
@@ -375,13 +347,17 @@ const productionHookWrapperPrefix = `sh -c 'if ! command -v entire >/dev/null 2>
 
 // windowsHookWrapperShape matches the head of any of Entire's Windows wrappers,
 // by structure rather than by exact prefix: an optional nested cmd.exe launcher
-// (bare, %SystemRoot%-relative or a full path), any number of `set …& ` and
-// `pushd …& ` segments, then the `where.exe entire` guard. Released CLIs matched
-// exact prefixes, so each wording change made the next version's hooks look
-// foreign to them; a structural match keeps a future setup segment or launcher
-// from repeating that. Wrappers older versions wrote (no PATH-only segment, the
-// legacy guard without pushd) match too, so the next install replaces them.
-var windowsHookWrapperShape = regexp.MustCompile(`^(?i:[^"&]*cmd\.exe /d /s /c ")?(?:(?:set|pushd) [^&]*& )*where\.exe entire >nul 2>nul & if errorlevel 1 `)
+// (bare `cmd.exe`, or one path to cmd.exe, quoted or not), any number of
+// `set …& ` and `pushd …& ` segments, then the `where.exe entire` guard.
+// Released CLIs matched exact prefixes, so each wording change made the next
+// version's hooks look foreign to them; this match also covers a later version
+// that changes the cmd.exe path or the set and pushd segments. A new kind of
+// segment would still look foreign. Wrappers older versions wrote (no PATH-only
+// segment, the legacy guard without pushd) match too, so the next install
+// replaces them. The launcher must be a single path ending in cmd.exe, so a
+// user's own command chained in front of a wrapper (`notify.exe; cmd.exe …`)
+// keeps the whole line the user's.
+var windowsHookWrapperShape = regexp.MustCompile(`^(?i:(?:"(?:[^"]*[\\/])?cmd\.exe"|(?:[^\s"&|;<>()]*[\\/])?cmd\.exe) /d /s /c ")?(?:(?:set|pushd) [^&]*& )*where\.exe entire >nul 2>nul & if errorlevel 1 `)
 
 // windowsBranchSetup matches the setup segments that open a wrapper branch
 // before the wrapped command (windowsBranchStart today).
