@@ -188,6 +188,10 @@ func retryProjectAgent(err error) bool {
 	if errors.As(err, &h) {
 		return h.StatusCode == http.StatusTooManyRequests || h.StatusCode >= 500
 	}
+	var exchange *auth.SecretExchangeError
+	if errors.As(err, &exchange) {
+		return exchange.Retryable()
+	}
 	// *url.Error is itself a net.Error but also wraps non-network failures, such
 	// as a refused ENTIRE_TOKEN secret; judge its cause instead.
 	var u *url.Error
