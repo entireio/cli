@@ -95,11 +95,16 @@ func TestClaudeCheckpoint_DoesNotStoreInjectedInstructionText(t *testing.T) {
 	for _, kept := range []string{
 		"add feature.txt", "Done!",
 		`"type":"instructions"`, `"path":"/home/dev/.claude/memory/clients.md"`,
-		`"type":"prompt_snapshot"`, `"hash":"blob-1"`, `"shapeHash":"shape-blob-1"`,
+		`"type":"entire_blanked_prompt_snapshot"`, `"hash":"blob-1"`, `"shapeHash":"shape-blob-1"`,
 	} {
 		if !strings.Contains(stored, kept) {
 			t.Errorf("stored transcript lost %q", kept)
 		}
+	}
+	// Claude Code resumes a recorded prompt_snapshot verbatim, so an emptied one
+	// left under that kind would resume the session with no system prompt.
+	if strings.Contains(stored, `"type":"prompt_snapshot"`) {
+		t.Error("the stored transcript keeps an emptied prompt_snapshot that Claude Code would resume with")
 	}
 	if got, want := countJSONLLines(stored), countJSONLLines(agentTranscript); got != want {
 		t.Errorf("stored transcript has %d lines, the agent's has %d: offsets into the stored copy will drift", got, want)

@@ -61,12 +61,33 @@ func TestSanitizeStoredTranscript_KeepsRecordsAndTheirIdentity(t *testing.T) {
 	for _, kept := range []string{
 		`"type":"instructions"`, `"uuid":"i1"`, `"parentUuid":"u1"`,
 		`"path":"/home/dev/.claude/memory/clients.md"`, `"path":"/home/dev/.claude/CLAUDE.md"`,
-		`"type":"prompt_snapshot"`, `"uuid":"p1"`, `"reminderFold":true`,
+		`"uuid":"p1"`, `"parentUuid":"i1"`, `"reminderFold":true`,
 		`"type":"api-request-shape"`, `"shapeHash":"shape-hash-1"`,
 		`"type":"api-request-blob"`, `"hash":"blob-hash-1"`, `"role":"user"`,
 	} {
 		assert.Contains(t, got, kept)
 	}
+}
+
+// Claude Code reuses a session's recorded prompt_snapshot verbatim on resume, so
+// an emptied snapshot would resume the session with no system prompt. The
+// blanked record must stop being a prompt_snapshot, so that Claude Code renders
+// a fresh one, while staying the same record in the parentUuid chain.
+func TestSanitizeStoredTranscript_BlankedSnapshotIsNoLongerASnapshot(t *testing.T) {
+	t.Parallel()
+
+	input := injectedTranscript()
+	got := SanitizeStoredTranscript(input)
+
+	gotLines := bytes.Split(got, []byte("\n"))
+	require.Len(t, gotLines, len(bytes.Split(input, []byte("\n"))), "line count changed: offsets into the stored transcript would drift")
+	snapshot := string(gotLines[2])
+	assert.NotContains(t, snapshot, `"prompt_snapshot"`, "Claude Code would resume with the emptied system prompt")
+	assert.Contains(t, snapshot, `"type":"`+attachmentBlankedPromptSnapshot+`"`)
+	for _, kept := range []string{`"type":"attachment"`, `"uuid":"p1"`, `"parentUuid":"i1"`, `"sessionId":"s1"`} {
+		assert.Contains(t, snapshot, kept)
+	}
+	assert.Equal(t, string(got), string(SanitizeStoredTranscript(got)), "a second pass must change nothing")
 }
 
 func TestSanitizeStoredTranscript_LeavesOtherLinesByteIdentical(t *testing.T) {

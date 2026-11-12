@@ -21,6 +21,12 @@ const (
 	recordTypeAttachment      = "attachment"
 	attachmentPromptSnapshot  = "prompt_snapshot"
 	attachmentInstructions    = "instructions"
+
+	// attachmentBlankedPromptSnapshot replaces a blanked snapshot's kind. Claude
+	// Code reuses a recorded prompt_snapshot verbatim on resume, even an empty
+	// one, so a stored transcript resumed with the original kind would run with
+	// no system prompt; under a kind it does not know, it renders a fresh one.
+	attachmentBlankedPromptSnapshot = "entire_blanked_prompt_snapshot"
 )
 
 // keptAttachmentKinds hold what the developer shared in the conversation:
@@ -75,7 +81,9 @@ func (c *ClaudeCodeAgent) SanitizeTranscriptForStorage(data []byte) []byte {
 // requests. That text comes from outside the conversation (the system prompt,
 // instruction files, the developer's memory notes, session context) and nothing
 // Entire stores a transcript for reads it; Claude Code re-reads its
-// instructions when it resumes a transcript without them. Attachments are
+// instruction files when it resumes a transcript without them, and renders a
+// fresh system prompt because the blanked snapshot no longer is one (see
+// attachmentBlankedPromptSnapshot). Attachments are
 // blanked unless kept on purpose, because Claude Code adds new kinds often.
 //
 // Each record stays, with its type, ids, hashes and file paths, and no line is
@@ -143,7 +151,18 @@ func blankAttachment(record map[string]json.RawMessage) bool {
 	}
 	switch kind {
 	case attachmentPromptSnapshot:
-		return blankFields(record, "attachment", "systemPrompt", "tools")
+		for _, field := range []string{"systemPrompt", "tools"} {
+			if blank, ok := blankValue(attachment[field]); ok {
+				attachment[field] = blank
+			}
+		}
+		attachment["type"] = json.RawMessage(`"` + attachmentBlankedPromptSnapshot + `"`)
+		encoded, err := jsonutil.MarshalWithNoHTMLEscape(attachment)
+		if err != nil {
+			return false
+		}
+		record["attachment"] = encoded
+		return true
 	case attachmentInstructions:
 		// The file bodies, and the same text as it was rendered into the request.
 		files := blankContentOfEach(attachment, "files")
