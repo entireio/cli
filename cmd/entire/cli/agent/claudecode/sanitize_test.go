@@ -82,6 +82,71 @@ func TestSanitizeStoredTranscript_LeavesOtherLinesByteIdentical(t *testing.T) {
 	}
 }
 
+// Claude Code adds attachment kinds often, so the sanitizer must blank any it
+// does not keep on purpose, including kinds it has never seen.
+func TestSanitizeStoredTranscript_BlanksEveryOtherAttachmentKind(t *testing.T) {
+	t.Parallel()
+
+	const (
+		email     = "dev@acme-bank.example"
+		gitStatus = "Current branch: acme-bank-migration"
+		skillDesc = "personal skill for the Globex Corp account"
+		futureTx  = "text from an attachment kind not yet invented"
+	)
+	tests := map[string]string{
+		"session context": `{"type":"attachment","uuid":"c1","attachment":{"type":"session_context","context":{"userEmail":"` + email + `","gitStatus":"` + gitStatus + `"}},"rendered":[{"content":"` + email + `"}],"sessionId":"s1"}`,
+		"skill listing":   `{"type":"attachment","uuid":"c2","attachment":{"type":"skill_listing","content":"` + skillDesc + `","names":["` + skillDesc + `"],"skillCount":1,"isInitial":true},"sessionId":"s1"}`,
+		"unknown kind":    `{"type":"attachment","uuid":"c3","attachment":{"type":"future_kind","nested":{"deeper":{"text":"` + futureTx + `"}},"items":[{"text":"` + futureTx + `"}],"exitCode":0},"sessionId":"s1"}`,
+	}
+	for name, line := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			input := []byte(userLine + "\n" + line + "\n" + assistantLine)
+			got := SanitizeStoredTranscript(input)
+
+			for _, private := range []string{email, gitStatus, skillDesc, futureTx} {
+				assert.NotContains(t, string(got), private)
+			}
+			gotLines := bytes.Split(got, []byte("\n"))
+			require.Len(t, gotLines, 3, "line count changed: offsets into the stored transcript would drift")
+			if string(gotLines[2]) != assistantLine {
+				t.Errorf("an untouched line must keep its exact bytes, got %s", gotLines[2])
+			}
+			assert.Contains(t, string(gotLines[1]), `"type":"attachment"`)
+			assert.Contains(t, string(gotLines[1]), `"sessionId":"s1"`)
+			assert.Equal(t, string(got), string(SanitizeStoredTranscript(got)), "a second pass must change nothing")
+		})
+	}
+}
+
+func TestSanitizeStoredTranscript_BlankedAttachmentKeepsShape(t *testing.T) {
+	t.Parallel()
+
+	line := `{"type":"attachment","uuid":"c1","parentUuid":"u1","attachment":{"type":"hook_success","stdout":"/home/dev/secret","content":"x","exitCode":0,"blocking":false,"nested":{"path":"/home/dev"},"lines":["a"]}}`
+
+	got := string(SanitizeStoredTranscript([]byte(line)))
+
+	for _, kept := range []string{
+		`"uuid":"c1"`, `"parentUuid":"u1"`, `"type":"hook_success"`,
+		`"stdout":""`, `"content":""`, `"exitCode":0`, `"blocking":false`,
+		`"nested":{"path":""}`, `"lines":[]`,
+	} {
+		assert.Contains(t, got, kept)
+	}
+}
+
+// A queued command is a prompt the developer typed while the agent was busy:
+// it is conversation, and stays as written.
+func TestSanitizeStoredTranscript_KeepsQueuedCommands(t *testing.T) {
+	t.Parallel()
+
+	line := `{"type":"attachment","uuid":"q1","attachment":{"type":"queued_command","prompt":"also update the docs","commandMode":"prompt"},"rendered":[{"content":"also update the docs"}]}`
+	input := []byte(userLine + "\n" + line + "\n")
+
+	assert.Equal(t, string(input), string(SanitizeStoredTranscript(input)))
+}
+
 func TestSanitizeStoredTranscript_PreservesBlankLinesAndMissingFinalNewline(t *testing.T) {
 	t.Parallel()
 
@@ -122,7 +187,6 @@ func TestSanitizeStoredTranscript_PassesThroughWhatItDoesNotRecognise(t *testing
 		"malformed line naming a record kind":  `{"type":"api-request-blob","message":{"content":[`,
 		"user prompt that mentions the kinds":  `{"type":"user","uuid":"u2","message":{"role":"user","content":"what are api-request-blob, prompt_snapshot and \"instructions\" lines?"}}`,
 		"tool result quoting an injected line": `{"type":"user","uuid":"u3","toolUseResult":{"stdout":"{\"type\":\"api-request-blob\",\"message\":{\"content\":[{\"text\":\"kept\"}]}}"}}`,
-		"unknown attachment":                   `{"type":"attachment","uuid":"x1","attachment":{"type":"skill_listing","content":"kept"}}`,
 		"record kind with an unexpected shape": `{"type":"api-request-blob","hash":"h","message":"not an object"}`,
 		"not a JSON object":                    `["api-request-blob"]`,
 	}

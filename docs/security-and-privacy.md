@@ -45,7 +45,7 @@ An agent's session file holds more than the conversation. It also records text t
 
 Entire blanks that text in the copy it stores, before redaction runs and with no setting to turn it off. Each record stays in place with its type, ids, hashes and file paths, so the transcript keeps its line numbering and its links. Only the text is emptied. The agent's own session file is never changed.
 
-- **Claude Code:** the request log (`api-request-blob` message content, `api-request-shape` system prompt and tool definitions), the system prompt snapshot (`prompt_snapshot`), and the bodies of loaded instruction and memory files (`instructions` attachments).
+- **Claude Code:** the request log (`api-request-blob` message content, `api-request-shape` system prompt and tool definitions), the system prompt snapshot (`prompt_snapshot`), the bodies of loaded instruction and memory files (`instructions` attachments), and the text of every other attachment except prompts you queued while it worked (`queued_command`). That covers session context such as your email address and git status, skill, agent, tool and MCP listings, and hook output, and also attachment kinds Claude Code adds later.
 - **Codex:** the base instructions in `session_meta` and the developer message that repeats them, the `AGENTS.md` text in `world_state`, and the `AGENTS.md` dumps in user messages and compacted history.
 - **Pi:** the `project_context` section of its system messages, which holds the instruction files it loaded, including the copy a compaction record keeps.
 

@@ -12,14 +12,18 @@ var _ agent.TranscriptSanitizer = (*ClaudeCodeAgent)(nil)
 
 // The records in which Claude Code writes the text it attaches to its model
 // requests: the request log (each request message and the system prompt with
-// its tool definitions), the system prompt snapshot, and the instruction files
-// it loaded (CLAUDE.md, AGENTS.md, memory notes).
+// its tool definitions) and attachments (the system prompt snapshot, the
+// instruction files it loaded, session context, skill and tool listings, hook
+// output, and more).
 const (
 	recordTypeAPIRequestBlob  = "api-request-blob"
 	recordTypeAPIRequestShape = "api-request-shape"
 	recordTypeAttachment      = "attachment"
 	attachmentPromptSnapshot  = "prompt_snapshot"
 	attachmentInstructions    = "instructions"
+	// A prompt the developer typed while the agent was busy: conversation, so
+	// it is the one attachment kind kept as written.
+	attachmentQueuedCommand = "queued_command"
 )
 
 // injectedRecordMarkers gate the per-line parse: a line naming none of these
@@ -28,8 +32,7 @@ const (
 var injectedRecordMarkers = [][]byte{
 	[]byte(`"` + recordTypeAPIRequestBlob + `"`),
 	[]byte(`"` + recordTypeAPIRequestShape + `"`),
-	[]byte(`"` + attachmentPromptSnapshot + `"`),
-	[]byte(`"` + attachmentInstructions + `"`),
+	[]byte(`"` + recordTypeAttachment + `"`),
 }
 
 var (
@@ -44,9 +47,10 @@ func (c *ClaudeCodeAgent) SanitizeTranscriptForStorage(data []byte) []byte {
 
 // SanitizeStoredTranscript blanks the text Claude Code attaches to its model
 // requests. That text comes from outside the conversation (the system prompt,
-// instruction files, the developer's memory notes) and nothing Entire stores a
-// transcript for reads it; Claude Code re-reads its instructions when it
-// resumes a transcript without them.
+// instruction files, the developer's memory notes, session context) and nothing
+// Entire stores a transcript for reads it; Claude Code re-reads its
+// instructions when it resumes a transcript without them. Attachments are
+// blanked unless kept on purpose, because Claude Code adds new kinds often.
 //
 // Each record stays, with its type, ids, hashes and file paths, and no line is
 // added or removed: checkpoint offsets count lines in this file. Lines it does
@@ -122,8 +126,53 @@ func blankAttachment(record map[string]json.RawMessage) bool {
 		}
 		rendered := blankContentOfEach(record, "rendered")
 		return files || rendered
+	case attachmentQueuedCommand:
+		return false
+	default:
+		blanked := blankAllText(attachment, "type")
+		if blanked {
+			encoded, err := jsonutil.MarshalWithNoHTMLEscape(attachment)
+			if err != nil {
+				return false
+			}
+			record["attachment"] = encoded
+		}
+		rendered := blankContentOfEach(record, "rendered")
+		return blanked || rendered
 	}
-	return false
+}
+
+// blankAllText empties every string and array in object, at any depth, except
+// the top-level field named keep, and reports whether any of them held
+// something. Numbers, booleans and nulls stay: they carry no text.
+func blankAllText(object map[string]json.RawMessage, keep string) bool {
+	changed := false
+	for key, value := range object {
+		if key == keep {
+			continue
+		}
+		if blank, ok := blankText(value); ok {
+			object[key] = blank
+			changed = true
+		}
+	}
+	return changed
+}
+
+func blankText(raw json.RawMessage) (json.RawMessage, bool) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return blankValue(raw)
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &object); err != nil || !blankAllText(object, "") {
+		return nil, false
+	}
+	encoded, err := jsonutil.MarshalWithNoHTMLEscape(object)
+	if err != nil {
+		return nil, false
+	}
+	return encoded, true
 }
 
 // blankFields empties the named fields of the object stored under key, and
