@@ -496,3 +496,19 @@ func TestParseURL_TrailingSeparatorsAreStrippedBeforeTheSuffix(t *testing.T) {
 		})
 	}
 }
+
+func TestRedactCredentialsInText(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ in, want string }{
+		{"fatal: unable to access 'https://bob:hunter2@git.example.com/x/': nope", "fatal: unable to access 'https://git.example.com/x/': nope"},
+		// An unencoded "@" in the password must not leave its tail behind.
+		{"https://u:p@ss@host/repo", "https://host/repo"},
+		{"ssh://git@github.com/o/r and https://t@h.example/x", "ssh://github.com/o/r and https://h.example/x"},
+		{"no url here", "no url here"},
+	}
+	for _, tt := range tests {
+		if got := RedactCredentialsInText(tt.in); got != tt.want {
+			t.Errorf("RedactCredentialsInText(%q) = %q; want %q", tt.in, got, tt.want)
+		}
+	}
+}

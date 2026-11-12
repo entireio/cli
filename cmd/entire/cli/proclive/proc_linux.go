@@ -48,6 +48,11 @@ func parseProcStat(content string) (ppid int, name, start string, err error) {
 	if len(rest) <= starttimeIdx {
 		return 0, "", "", errors.New("proclive: truncated /proc stat")
 	}
+	// A zombie (Z) or dead (X) process has exited; only its parent's reap is
+	// outstanding, so it is gone.
+	if rest[0] == "Z" || rest[0] == "X" {
+		return 0, "", "", errProcessGone
+	}
 	ppid, err = strconv.Atoi(rest[ppidIdx])
 	if err != nil {
 		return 0, "", "", fmt.Errorf("proclive: parse ppid: %w", err)

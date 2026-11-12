@@ -43,3 +43,7 @@ func detachBackgroundWorker(cmd *exec.Cmd) {
 // killProcessGroupOnCancel is a no-op on Windows: reliable tree-kill needs a Job
 // Object. The WaitDelay backstop still bounds the wait on a hung subprocess.
 func killProcessGroupOnCancel(_ *exec.Cmd) {}
+
+// markInheritedFDsCloseOnExec is a no-op on Windows: os/exec starts children
+// with an explicit handle list, so no other handle is inherited.
+func markInheritedFDsCloseOnExec() {}

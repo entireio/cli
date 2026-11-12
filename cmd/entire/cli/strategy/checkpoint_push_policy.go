@@ -444,6 +444,11 @@ func PushCheckpoints(ctx context.Context, targets []CheckpointPushRequest) (Chec
 		report.Outcomes = checkpointPushOutcomes(targets, waiting, missing, checkpointFlushResult{}, nil)
 		return report, nil
 	}
+	release, err := waitForBackgroundUpload(ctx, repo)
+	if err != nil {
+		return report, err
+	}
+	defer release()
 	if opfErr := opfGateForCheckpointRefs(ctx, repo); opfErr != nil {
 		return report, fmt.Errorf("checkpoint refs stay queued: %w", opfErr)
 	}

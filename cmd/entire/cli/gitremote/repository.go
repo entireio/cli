@@ -2,6 +2,7 @@ package gitremote
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"strings"
@@ -116,34 +117,66 @@ func resolveSSHHostname(ctx context.Context, dir string, env []string, host stri
 	return "", false
 }
 
-// EffectiveSSHCommand resolves the ssh invocation git itself would use, in
-// git's own precedence order: the GIT_SSH_COMMAND environment variable, then
-// the core.sshCommand git config value (read in dir when non-empty), then the
+// SSHInvocation is the ssh client git itself would run for a remote operation.
+type SSHInvocation struct {
+	// Command is a shell command line, ready to extend and set as
+	// GIT_SSH_COMMAND; a GIT_SSH program path is already shell-quoted.
+	Command string
+	// Program is the bare program path when Command came from GIT_SSH, which
+	// git runs without a shell; "" otherwise.
+	Program string
+	// Variant is GIT_SSH_VARIANT, else ssh.variant, when either is set
+	// (HasVariant); git detects the variant from the program name otherwise.
+	Variant    string
+	HasVariant bool
+}
+
+// ResolveSSH resolves the ssh invocation git itself would use, in git's own
+// precedence order: the GIT_SSH_COMMAND environment variable, then the
+// core.sshCommand git config value (read in dir when non-empty), then the
 // GIT_SSH environment variable, falling back to plain "ssh" when none are set.
 // A nil env reads the process environment.
 //
-// The result is a shell command, ready to extend and set as GIT_SSH_COMMAND.
-// git runs GIT_SSH as a bare program path but GIT_SSH_COMMAND through sh, so a
-// GIT_SSH path is shell-quoted when sh would otherwise mangle it, such as the
-// backslashes in a Windows path.
-func EffectiveSSHCommand(ctx context.Context, dir string, env []string) string {
+// ok is false when git config could not be read (as opposed to holding
+// nothing): the invocation is then resolved as if the config were empty, and a
+// caller that would replace the user's command must not trust it.
+func ResolveSSH(ctx context.Context, dir string, env []string) (inv SSHInvocation, ok bool) {
 	if env == nil {
 		env = os.Environ()
 	}
-	if v, ok := envLookup(env, "GIT_SSH_COMMAND"); ok {
+	configCmd, configVariant, hasConfigVariant, ok := gitConfigSSH(ctx, dir, env)
+	if v, found := envLookup(env, "GIT_SSH_VARIANT"); found {
+		inv.Variant, inv.HasVariant = v, true
+	} else if hasConfigVariant {
+		inv.Variant, inv.HasVariant = configVariant, true
+	}
+	if v, found := envLookup(env, "GIT_SSH_COMMAND"); found {
 		if trimmed := strings.TrimSpace(v); trimmed != "" {
-			return trimmed
+			inv.Command = trimmed
+			return inv, true
 		}
 	}
-	if v := gitConfigSSHCommand(ctx, dir, env); v != "" {
-		return v
+	if configCmd != "" {
+		inv.Command = configCmd
+		return inv, ok
 	}
-	if v, ok := envLookup(env, "GIT_SSH"); ok {
+	if v, found := envLookup(env, "GIT_SSH"); found {
 		if trimmed := strings.TrimSpace(v); trimmed != "" {
-			return shellQuoteProgram(trimmed)
+			inv.Command, inv.Program = shellQuoteProgram(trimmed), trimmed
+			return inv, ok
 		}
 	}
-	return "ssh"
+	inv.Command = "ssh"
+	return inv, ok
+}
+
+// EffectiveSSHCommand is ResolveSSH's command line. git runs GIT_SSH as a bare
+// program path but GIT_SSH_COMMAND through sh, so a GIT_SSH path is
+// shell-quoted when sh would otherwise mangle it, such as the backslashes in a
+// Windows path. Config that cannot be read is treated as unset.
+func EffectiveSSHCommand(ctx context.Context, dir string, env []string) string {
+	inv, _ := ResolveSSH(ctx, dir, env)
+	return inv.Command
 }
 
 // shellQuoteProgram single-quotes path for sh unless every rune is safe bare.
@@ -175,18 +208,30 @@ func envLookup(env []string, key string) (string, bool) {
 	return "", false
 }
 
-// gitConfigSSHCommand looks up core.sshCommand via `git config`, run with env
-// so the lookup honors any HOME/GIT_CONFIG_* overrides present in env (e.g. in
-// tests). Returns "" if unset or the lookup fails.
-func gitConfigSSHCommand(ctx context.Context, dir string, env []string) string {
-	cmd := exec.CommandContext(ctx, "git", "config", "--get", "core.sshCommand")
+// gitConfigSSH looks up core.sshCommand and ssh.variant in one `git config`
+// call, run with env so the lookup honors any HOME/GIT_CONFIG_* overrides
+// present in env (e.g. in tests). Unset values are "". ok is false when the
+// lookup itself failed, as opposed to finding nothing (git's exit status 1).
+func gitConfigSSH(ctx context.Context, dir string, env []string) (sshCommand, variant string, hasVariant, ok bool) {
+	cmd := exec.CommandContext(ctx, "git", "config", "--get-regexp", `^(core\.sshcommand|ssh\.variant)$`)
 	if dir != "" {
 		cmd.Dir = dir
 	}
 	cmd.Env = env
 	out, err := cmd.Output()
 	if err != nil {
-		return ""
+		var exitErr *exec.ExitError
+		return "", "", false, errors.As(err, &exitErr) && exitErr.ExitCode() == 1
 	}
-	return strings.TrimSpace(string(out))
+	// Last value wins, as for git's own single-valued lookups.
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		key, value, _ := strings.Cut(line, " ")
+		switch key {
+		case "core.sshcommand":
+			sshCommand = strings.TrimSpace(value)
+		case "ssh.variant":
+			variant, hasVariant = value, true
+		}
+	}
+	return sshCommand, variant, hasVariant, true
 }

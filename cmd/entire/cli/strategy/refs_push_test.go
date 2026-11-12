@@ -536,7 +536,8 @@ func TestPushCheckpointRefWithRecovery_MergesDivergedRef(t *testing.T) {
 	// pushes are rejected, then recovery replays C3's delta onto C2.
 	queue := enqueueRefs(t, repo, []plumbing.ReferenceName{ref})
 	restore := captureStderr(t)
-	pushed, pushErr := flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir}, batchWithinFlushBudget)
+	res, pushErr := flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir}, flushOptions{boundBatch: true})
+	pushed := res.pushed
 	output := restore()
 	require.NoError(t, pushErr, "diverged ref should be recovered by fetch+replay, not rejected")
 	assert.Equal(t, 1, pushed)
@@ -610,7 +611,8 @@ func TestPushCheckpointRefWithRecovery_PreservesConcurrentGenerationOnCASConflic
 	t.Cleanup(func() { checkpointRefRecoveryCAS = oldCAS })
 
 	restore := captureStderr(t)
-	pushed, pushErr := flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir}, batchUnbounded)
+	res, pushErr := flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir}, flushOptions{})
+	pushed := res.pushed
 	restore()
 	require.NoError(t, pushErr, "losing the CAS to a concurrent write is superseded, not a failed push")
 	assert.Zero(t, pushed)
@@ -629,7 +631,8 @@ func TestPushCheckpointRefWithRecovery_PreservesConcurrentGenerationOnCASConflic
 	// sources of data without keeping that stale intermediate under another ref.
 	checkpointRefRecoveryCAS = oldCAS
 	restore = captureStderr(t)
-	pushed, pushErr = flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir}, batchUnbounded)
+	res, pushErr = flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir}, flushOptions{})
+	pushed = res.pushed
 	restore()
 	require.NoError(t, pushErr)
 	assert.Equal(t, 1, pushed)
@@ -715,7 +718,8 @@ func TestFlushCheckpointRefsQueue_SupersededRecoveriesDoNotStopTheRetry(t *testi
 	})
 
 	restore := captureStderr(t)
-	pushed, pushErr := flushCheckpointRefsQueue(context.Background(), repo, pushSettings{remote: bareDir}, batchUnbounded)
+	res, pushErr := flushCheckpointRefsQueue(context.Background(), repo, pushSettings{remote: bareDir}, flushOptions{})
+	pushed := res.pushed
 	output := restore()
 	require.NoError(t, pushErr, output)
 	assert.Zero(t, pushed)
@@ -728,7 +732,8 @@ func TestFlushCheckpointRefsQueue_SupersededRecoveriesDoNotStopTheRetry(t *testi
 	// With no concurrent write, the next push delivers every superseded ref.
 	stubRecoveryCAS(t, checkpoint.CASPersistentRef)
 	restore = captureStderr(t)
-	pushed, pushErr = flushCheckpointRefsQueue(context.Background(), repo, pushSettings{remote: bareDir}, batchUnbounded)
+	res, pushErr = flushCheckpointRefsQueue(context.Background(), repo, pushSettings{remote: bareDir}, flushOptions{})
+	pushed = res.pushed
 	output = restore()
 	require.NoError(t, pushErr, output)
 	assert.Equal(t, n, pushed)
@@ -766,7 +771,8 @@ func TestFlushCheckpointRefsQueue_ReportsOnlyRealFailures(t *testing.T) {
 	})
 
 	restore := captureStderr(t)
-	pushed, pushErr := flushCheckpointRefsQueue(context.Background(), repo, pushSettings{remote: bareDir}, batchUnbounded)
+	res, pushErr := flushCheckpointRefsQueue(context.Background(), repo, pushSettings{remote: bareDir}, flushOptions{})
+	pushed := res.pushed
 	restore()
 	assert.Zero(t, pushed)
 	require.ErrorContains(t, pushErr, "1 of 3 attempted checkpoint refs failed to push")
@@ -818,7 +824,8 @@ func TestFlushCheckpointRefsQueue_RecoversARefFetchedIntoANewPack(t *testing.T) 
 	queue := enqueueRefs(t, repo, refs)
 
 	restore := captureStderr(t)
-	pushed, pushErr := flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir}, batchUnbounded)
+	res, pushErr := flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir}, flushOptions{})
+	pushed := res.pushed
 	output := restore()
 	require.NoError(t, pushErr, output)
 	assert.Equal(t, 2, pushed)
@@ -949,7 +956,8 @@ func TestFlushCheckpointRefsQueue_ManualPolicySendsNothing(t *testing.T) {
 	require.NoError(t, err)
 	queue := enqueueRefs(t, repo, refs)
 
-	pushed, err := flushCheckpointRefsQueue(context.Background(), repo, pushSettings{remote: bareDir}, batchUnbounded)
+	res, err := flushCheckpointRefsQueue(context.Background(), repo, pushSettings{remote: bareDir}, flushOptions{})
+	pushed := res.pushed
 	require.NoError(t, err)
 	assert.Equal(t, 0, pushed)
 
@@ -976,6 +984,33 @@ func TestPushQueuedCheckpointRefs_FailureLeavesRefsQueued(t *testing.T) {
 	remaining, err := queue.Drain()
 	require.NoError(t, err)
 	assert.ElementsMatch(t, refs, remaining, "failed push leaves refs queued")
+}
+
+// TestPushQueuedCheckpointRefs_EarlyStopIsAnError: the batch stops after
+// consecutive failed chunks and the per-ref fallback lands every ref it
+// retried, so the flush itself returns no error with refs never tried. The
+// explicit push reports success on a nil error, so it must return one.
+func TestPushQueuedCheckpointRefs_EarlyStopIsAnError(t *testing.T) {
+	shrinkRefPushChunkSize(t, 2)
+	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 8)
+	// Declines any push of more than one ref: every chunk fails, every per-ref
+	// retry lands.
+	hook := "#!/bin/sh\n[ \"$(wc -l)\" -gt 1 ] && exit 1\nexit 0\n"
+	require.NoError(t, os.WriteFile(filepath.Join(bareDir, "hooks", "pre-receive"), []byte(hook), 0o755))
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	queue := enqueueRefs(t, repo, refs)
+
+	pushed, _, err := PushQueuedCheckpointRefs(t.Context(), repo, bareDir)
+	require.ErrorIs(t, err, ErrCheckpointRefsStayQueued)
+	assert.Equal(t, 4, pushed, "precondition: the batch stopped after two failed chunks and the fallback landed them")
+
+	remaining, drainErr := queue.Drain()
+	require.NoError(t, drainErr)
+	assert.ElementsMatch(t, refs[4:], remaining, "untried refs stay queued")
 }
 
 // remoteRefFiles lists the files in the tree a ref points at on the bare remote.
@@ -1091,7 +1126,8 @@ func TestFlushCheckpointRefsQueue_UnreadableRefStaysQueuedAndIsReported(t *testi
 	queue := enqueueRefs(t, repo, refs)
 
 	restore := captureStderr(t)
-	pushed, pushErr := flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir}, batchUnbounded)
+	res, pushErr := flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir}, flushOptions{})
+	pushed := res.pushed
 	output := restore()
 
 	require.NoError(t, pushErr)
@@ -1108,7 +1144,8 @@ func TestFlushCheckpointRefsQueue_UnreadableRefStaysQueuedAndIsReported(t *testi
 	require.NoError(t, repo.Storer.RemoveReference(loop))
 	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(refs[0], head.Hash())))
 	restore = captureStderr(t)
-	pushed, pushErr = flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir}, batchUnbounded)
+	res, pushErr = flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir}, flushOptions{})
+	pushed = res.pushed
 	restore()
 	require.NoError(t, pushErr)
 	assert.Equal(t, 1, pushed)

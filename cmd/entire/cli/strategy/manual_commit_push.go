@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	git "github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -36,6 +37,10 @@ var ErrOPFAbortedByUser = errors.New("OPF prompt aborted by user; push cancelled
 // the clone's checkpoint push policy is manual: the refs stay queued for
 // `entire checkpoint push`, which is not the same as an empty queue.
 var ErrCheckpointPushHeldByPolicy = errors.New("checkpoint push policy is manual; refs stay queued")
+
+// ErrCheckpointRefsStayQueued is PushQueuedCheckpointRefs stopping early with
+// refs still queued. The flush has already printed why.
+var ErrCheckpointRefsStayQueued = errors.New("checkpoint refs stay queued")
 
 var opfPrePushProgressWriter io.Writer = os.Stderr
 
@@ -249,6 +254,14 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 // settings > prompt > non-TTY auto-run). Shared by both checkpoint backends so
 // the precedence cannot drift between them.
 func opfPrePushDecision(ctx context.Context) (OPFDecision, error) {
+	// The background upload worker acts on the decision the pushing hook made,
+	// where the user could still be asked; it never re-asks or reinterprets it.
+	switch carriedOPFDecision(ctx) {
+	case checkpoint.UploadOPFRun:
+		return OPFRun, nil
+	case checkpoint.UploadOPFSkip:
+		return OPFSkip, nil
+	}
 	cfg, _ := settings.Load(ctx) //nolint:errcheck // Load already failed at hook init; fall back to nil
 	var opfCfg *settings.OPFSettings
 	if cfg != nil && cfg.Redaction != nil {
@@ -323,7 +336,7 @@ func warnOPFCheckpointRefsWithheld(ctx context.Context, err error) {
 	logging.Warn(ctx, "checkpoint ref push withheld; refs left queued",
 		slog.String("error", err.Error()),
 	)
-	fmt.Fprintf(stderrWriter,
+	fmt.Fprintf(noticeWriter(ctx),
 		"[entire] Your checkpoint refs were not pushed and stay queued for the next push: %v\n", err)
 }
 
@@ -464,17 +477,92 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 		return nil
 	}
 
+	return uploadCheckpointRefsOnPrePush(ctx, repo, ps, pendingCapture)
+}
+
+// uploadCheckpointRefsOnPrePush is prePushCheckpointRefs once the policy allows
+// automatic delivery: it hands the queue to the background worker, records it
+// for the push's own caller, or uploads it inline.
+func uploadCheckpointRefsOnPrePush(ctx context.Context, repo *git.Repository, ps pushSettings, pendingCapture string) error {
+	coord, coordErr := checkpoint.UploadCoordinatorForRepo(repo)
+	if coordErr != nil {
+		logging.Debug(ctx, "git-refs pre-push: checkpoint upload state unavailable; uploading inline",
+			slog.String("error", coordErr.Error()))
+		coord = nil
+	}
+	background := coord != nil && backgroundCheckpointUploadEnabled(ctx)
+	reportBackgroundUpload(ctx, coord)
+
 	// OPF backend divergence: both paths fail closed, but this one does it
 	// without blocking the user. The v1 path aborts the user's git push; here a
 	// checkpoint-ref failure must never do that (see this function's doc), so
 	// failing closed means withholding the flush — nothing un-OPF'd ships, the
 	// refs stay queued, and the user's push proceeds.
+	//
+	// The decision is resolved before the upload lock is taken: it may prompt,
+	// and no other flush should wait on a user. The gate below and any
+	// background hand-off then act on it without asking again.
+	decision, opfErr := opfPrePushDecisionForHandOff(ctx)
+	if opfErr != nil {
+		warnOPFCheckpointRefsWithheld(ctx, opfErr)
+		return nil
+	}
+	ctx = withCarriedOPFDecision(ctx, decision)
+
+	req := checkpoint.UploadRequest{Remote: ps.remote, OPFDecision: decision, PendingCapture: pendingCapture}
+
+	// Pushing the queue here would land it just before git's own pack, and
+	// GitHub rejects the user's push when the two arrive back to back (see
+	// git_push_wait.go). So the hook only records the work; the upload runs
+	// after this push has exited.
+
+	// `entire trail create` uploads the request itself once its git push
+	// returns (UploadRequestedCheckpoints).
+	if coord != nil && os.Getenv(CheckpointUploadAfterPushEnv) == "1" {
+		// So that upload waits for this push to exit and settle, and so does a
+		// worker still uploading an earlier push's checkpoints.
+		noteUserPush(ctx, coord)
+		if has, err := queueHasRefs(ctx, repo); err == nil && has {
+			req.RequestedAt = time.Now()
+			if err := coord.Request(req); err != nil {
+				logging.Warn(ctx, "git-refs pre-push: record checkpoint upload request failed; refs left queued",
+					slog.String("error", err.Error()))
+			}
+		}
+		return nil
+	}
+
+	if background {
+		// Recorded even with nothing queued: a worker still uploading an
+		// earlier push's checkpoints must wait for this push too.
+		noteUserPush(ctx, coord)
+		has, err := queueHasRefs(ctx, repo)
+		if err != nil || !has {
+			return nil
+		}
+		if handOffCheckpointUpload(ctx, coord, req) {
+			fmt.Fprintln(os.Stderr, "[entire] Uploading checkpoints in the background.")
+		} else {
+			fmt.Fprintln(os.Stderr, "[entire] Checkpoints stay queued for the next push.")
+		}
+		return nil
+	}
+
+	// Inline (CI, the setting, harnesses): no process outlives the hook, so
+	// upload here. One flush of the queue at a time.
+	release, locked := lockQueueForFlush(ctx, coord, false)
+	if !locked {
+		fmt.Fprintln(os.Stderr, "[entire] Another checkpoint upload is in progress; checkpoints stay queued for the next push.")
+		return nil
+	}
+	defer releaseUploadLock(ctx, coord, release)
+
 	if opfErr := opfGateForCheckpointRefs(ctx, repo); opfErr != nil {
 		warnOPFCheckpointRefsWithheld(ctx, opfErr)
 		return nil
 	}
 
-	flushed, err := flushCheckpointRefsQueue(ctx, repo, ps, batchWithinFlushBudget)
+	res, err := flushCheckpointRefsQueue(ctx, repo, ps, flushOptions{boundBatch: true})
 	if err != nil {
 		// Fail-soft: a checkpoint-ref push failure must never block the user's
 		// git push. The refs stay queued for the next pre-push.
@@ -487,13 +575,58 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 	// queue pushed nothing, so it must not move the election or announce that
 	// it had, nor warn that checkpoints were misdirected (see
 	// warnIgnoredCheckpointRemote).
-	if flushed > 0 {
+	if res.pushed > 0 {
 		if pendingCapture != "" {
 			commitCapturedSyncRemote(ctx, pendingCapture)
 		}
 		warnIgnoredCheckpointRemote(ctx, ps)
+		// Give the remote time to settle before git sends the user's pack.
+		// Harnesses (CheckpointUploadForegroundEnv) push to local remotes,
+		// which never reject back-to-back pushes.
+		if os.Getenv(CheckpointUploadForegroundEnv) != "1" {
+			sleepCtx(ctx, inlineUploadSettle)
+		}
 	}
 	return nil
+}
+
+// inlineUploadSettle follows an inline upload that pushed refs, so the user's
+// push does not land right after it (see git_push_wait.go). Var for tests.
+var inlineUploadSettle = 1200 * time.Millisecond
+
+// queueHasRefs reports whether the push queue holds refs to upload.
+func queueHasRefs(ctx context.Context, repo *git.Repository) (bool, error) {
+	queue, err := checkpoint.PushQueueForRepo(ctx, repo)
+	if err != nil {
+		return false, fmt.Errorf("resolve push queue: %w", err)
+	}
+	refs, err := queue.Peek()
+	if err != nil {
+		return false, fmt.Errorf("read push queue: %w", err)
+	}
+	return len(refs) > 0, nil
+}
+
+// opfPrePushDecisionForHandOff resolves the OPF decision for a push whose
+// upload a running worker will carry out, without running OPF here: the worker
+// rewrites under the decision. Abort is returned as an error, like the gate.
+func opfPrePushDecisionForHandOff(ctx context.Context) (string, error) {
+	if !redact.OPFEnabled() {
+		return checkpoint.UploadOPFUnset, nil
+	}
+	decision, err := opfPrePushDecision(ctx)
+	if err != nil {
+		return checkpoint.UploadOPFUnset, err
+	}
+	switch decision {
+	case OPFAbort:
+		return checkpoint.UploadOPFUnset, ErrOPFAbortedByUser
+	case OPFSkip:
+		return checkpoint.UploadOPFSkip, nil
+	case OPFRun:
+		return checkpoint.UploadOPFRun, nil
+	}
+	return checkpoint.UploadOPFUnset, nil
 }
 
 // PushQueuedCheckpointRefs pushes any queued checkpoint refs to the configured
@@ -518,6 +651,11 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 	if ps.withheld != nil {
 		return 0, false, fmt.Errorf("checkpoint refs stay queued: %w", ps.withheld)
 	}
+	release, err := waitForBackgroundUpload(ctx, repo)
+	if err != nil {
+		return 0, false, err
+	}
+	defer release()
 	if opfErr := opfGateForCheckpointRefs(ctx, repo); opfErr != nil {
 		// Names no cause, matching flushCheckpointRefsQueue's retry message
 		// below: the gate fails on an unresolvable decision or a failed scan,
@@ -526,8 +664,17 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 		// wrong problem. The wrapped error says which it was.
 		return 0, false, fmt.Errorf("checkpoint refs stay queued: %w", opfErr)
 	}
-	pushed, err = flushCheckpointRefsQueue(ctx, repo, ps, batchUnbounded)
-	return pushed, false, err
+	res, err := flushCheckpointRefsQueue(ctx, repo, ps, flushOptions{})
+	if err == nil && res.remaining > 0 {
+		// The flush is fail-soft about an early stop, but this caller reports
+		// success on a nil error, so refs left behind must surface. A caller's
+		// cancellation stays recognisable through the wrap.
+		err = fmt.Errorf("%w (%d): %s", ErrCheckpointRefsStayQueued, res.remaining, res.failureLine(nil))
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			err = fmt.Errorf("%w: %w", err, ctxErr)
+		}
+	}
+	return res.pushed, false, err
 }
 
 // checkpointRefPartition sorts drained queue entries for one upload. Only
@@ -611,51 +758,69 @@ func checkpointRefPushTokens(refs []checkpointRefPush) []checkpoint.PushQueueEnt
 	return entries
 }
 
+// waitForBackgroundUpload takes the upload lock for an upload the user asked
+// for, waiting out a running background worker rather than pushing the same
+// refs alongside it: the user is waiting on this upload. The returned release
+// is never nil. Without upload state there is no worker to wait for.
+func waitForBackgroundUpload(ctx context.Context, repo *git.Repository) (func(), error) {
+	coord, coordErr := checkpoint.UploadCoordinatorForRepo(repo)
+	if coordErr != nil {
+		return func() {}, nil
+	}
+	release, ok, lockErr := coord.TryLockWorker(ctx)
+	if lockErr == nil && !ok {
+		fmt.Fprintln(os.Stderr, "[entire] Waiting for the background checkpoint upload to finish...")
+		waitCtx, cancel := context.WithTimeout(ctx, checkpointUploadDeliveryBudget)
+		defer cancel()
+		release, lockErr = coord.LockWorker(waitCtx)
+	}
+	if lockErr != nil {
+		return func() {}, fmt.Errorf("wait for background checkpoint upload: %w", lockErr)
+	}
+	return func() { releaseUploadLock(ctx, coord, release) }, nil
+}
+
 // flushCheckpointRefsQueue drains the push-discovery queue and batch-pushes the
 // recorded refs fast-forward-only, recovering a diverged ref by fetch+replay and
-// removing from the queue only the refs that land. It returns the number pushed.
+// removing from the queue only the refs that land.
 //
 // Shared by the git-refs pre-push path (which logs and ignores the error to
-// never block the user's push) and the migration command's opt-in push (which
-// surfaces it). bound says whether the batch push runs under
-// checkpointFlushBudget too (see checkpointBatchBound). Stale
-// entries — refs no longer present locally — are pruned so they don't block the
-// queue forever.
+// never block the user's push), the background upload worker, and the
+// migration command's opt-in push (which surfaces it). See flushOptions for how
+// each bounds it; an unbounded batch's per-ref fallback gets a fresh budget
+// after the batch. Stale entries — refs no longer present locally — are pruned so
+// they don't block the queue forever.
 //
 // This is automatic delivery, so it sends nothing unless the clone's policy is
 // automatic. The callers check first to skip OPF; the check is repeated here so
 // a new caller cannot upload under manual by forgetting it.
-func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps pushSettings, bound checkpointBatchBound) (int, error) {
+func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps pushSettings, opts flushOptions) (flushResult, error) {
 	automatic, err := automaticCheckpointDelivery(repo)
 	if err != nil {
-		return 0, err
+		return flushResult{}, err
 	}
 	if !automatic {
-		return 0, nil
+		return flushResult{}, nil
 	}
-	result, err := flushCheckpointRefsWith(ctx, repo, ps, checkpointRefSelection{}, bound)
-	return len(result.pushed), err
+	result, err := flushCheckpointRefsWith(ctx, repo, ps, checkpointRefSelection{}, opts)
+	return result.summary(), err
 }
-
-// checkpointBatchBound says whether a flush's batch push shares
-// checkpointFlushBudget with its per-ref fallback.
-type checkpointBatchBound bool
-
-const (
-	// batchWithinFlushBudget is the pre-push path: the whole flush, batch
-	// included, must not hold the user's git push past the budget.
-	batchWithinFlushBudget checkpointBatchBound = true
-	// batchUnbounded is the explicit pushes (migration, `entire checkpoint
-	// push`): the user asked for the upload and is waiting on it, so the batch
-	// runs to the end and the per-ref fallback gets a full budget after it.
-	batchUnbounded checkpointBatchBound = false
-)
 
 // checkpointFlushResult reports what one flush did with the refs it selected.
 type checkpointFlushResult struct {
 	pushed  []checkpointRefPush
 	changed []checkpointRefPush
 	failed  map[plumbing.ReferenceName]error
+	// bounds is how the flush stopped, when it did; its pushed count is unused
+	// (see summary).
+	bounds flushResult
+}
+
+// summary is the flushResult view of r.
+func (r *checkpointFlushResult) summary() flushResult {
+	s := r.bounds
+	s.pushed = len(r.pushed)
+	return s
 }
 
 // markUnsettled records cause for every ref of existing the flush neither
@@ -683,17 +848,16 @@ func (r *checkpointFlushResult) markUnsettled(existing []checkpointRefPush, caus
 // selection is the user naming what to send. The batch is unbounded: the user
 // asked for this upload and is waiting on it.
 func flushCheckpointRefs(ctx context.Context, repo *git.Repository, ps pushSettings, selection checkpointRefSelection) (checkpointFlushResult, error) {
-	return flushCheckpointRefsWith(ctx, repo, ps, selection, batchUnbounded)
+	return flushCheckpointRefsWith(ctx, repo, ps, selection, flushOptions{})
 }
 
-// flushCheckpointRefsWith is flushCheckpointRefs with the batch push bounded
-// as bound says.
+// flushCheckpointRefsWith is flushCheckpointRefs bounded by opts.
 func flushCheckpointRefsWith(
 	ctx context.Context,
 	repo *git.Repository,
 	ps pushSettings,
 	selection checkpointRefSelection,
-	bound checkpointBatchBound,
+	opts flushOptions,
 ) (checkpointFlushResult, error) {
 	// Callers check first; repeated so a new caller cannot hand a withheld
 	// store's checkpoints to the push remote.
@@ -749,52 +913,63 @@ func flushCheckpointRefsWith(
 	// One budget for the whole flush, opened before the batch: a backlog upload
 	// is as able to hang the user's push as a walk of per-ref retries. Bounded;
 	// see checkpointFlushBudget and maxConsecutiveRefPushFailures. An unbounded
-	// batch opens it after the batch instead, so its per-ref fallback is not left
-	// with a budget the batch already spent.
-	flushCtx, cancelFlush := context.WithTimeout(pushCtx, checkpointFlushBudget)
-	defer cancelFlush()
+	// batch opens it after the batch instead, so its fallback is not left with
+	// a budget the batch already spent.
+	budget := opts.budget
+	if budget <= 0 {
+		budget = checkpointFlushBudget
+	}
+	flushCtx, cancelFlush := context.WithTimeout(withFlushBudget(pushCtx, budget), budget)
 	batchCtx := flushCtx
-	if bound == batchUnbounded {
+	if !opts.boundBatch {
+		cancelFlush()
 		batchCtx = pushCtx
+	}
+	// The budget, not an interruption, ended the flush early.
+	budgetExhausted := func() bool {
+		return errors.Is(flushCtx.Err(), context.DeadlineExceeded) && pushCtx.Err() == nil
+	}
+	onLanded := func(landed []checkpointRefPush) {
+		result.pushed = append(result.pushed, landed...)
+		if removeErr := queue.RemoveEntries(checkpointRefPushTokens(landed)); removeErr != nil {
+			logging.Warn(ctx, "git-refs push: clear pushed refs from queue failed",
+				slog.String("error", removeErr.Error()))
+		}
 	}
 
 	// Fast path: push the refs a chunk per round-trip (fast-forward-only).
 	// The remembered size only fits a chunk to the flush budget, so an
 	// unbounded batch uses the full size and leaves the hint alone.
 	chunkSize := checkpointRefPushChunkSize
-	if bound == batchWithinFlushBudget {
+	if opts.boundBatch {
 		chunkSize = queue.ChunkSizeHint(checkpointRefPushChunkSize)
 	}
-	batch := pushRefChunks(batchCtx, dest.target, existing, chunkSize, func(landed []checkpointRefPush) {
-		result.pushed = append(result.pushed, landed...)
-		if removeErr := queue.RemoveEntries(checkpointRefPushTokens(landed)); removeErr != nil {
-			logging.Warn(ctx, "git-refs push: clear pushed refs from queue failed",
-				slog.String("error", removeErr.Error()))
-		}
-	})
-	// The budget, not an interruption, cut the batch.
-	budgetCut := bound == batchWithinFlushBudget &&
-		errors.Is(flushCtx.Err(), context.DeadlineExceeded) && pushCtx.Err() == nil
-	if bound == batchWithinFlushBudget {
+	batch := pushRefChunks(batchCtx, dest.target, existing, chunkSize, opts.chunkTimeout, opts.beforeChunk, onLanded)
+	if !opts.boundBatch {
+		flushCtx, cancelFlush = context.WithTimeout(withFlushBudget(pushCtx, budget), budget)
+	}
+	defer cancelFlush()
+	budgetCut := budgetExhausted()
+	if opts.boundBatch {
 		adaptChunkSize(ctx, queue, chunkSize, batch, budgetCut)
 	}
-	if budgetCut && len(batch.failed) > 0 && !batch.sshAuthFailed && batch.unreachable == "" {
-		// The budget ran out mid-chunk: the per-ref fallback would only fail
-		// its one guaranteed attempt on the spent budget. Stop as if between
-		// chunks, and send the cut chunk to the back of the queue.
-		stopOnBudgetCut(ctx, flushCtx, queue, batch, len(existing), stop)
-		result.markUnsettled(existing, fmt.Errorf("not attempted: %s", flushAbortReason(flushCtx, 0)))
-		return result, nil
+	// Stalled chunks stay queued like refs never tried, behind the rest of the
+	// queue so the next pass starts with refs that may move.
+	if len(batch.stalled) > 0 {
+		if err := queue.Rotate(checkpointRefPushTokens(batch.stalled)); err != nil {
+			logging.Warn(ctx, "git-refs push: rotate stalled refs to queue back failed",
+				slog.String("error", err.Error()))
+		}
+		batch.untried = append(batch.untried, batch.stalled...)
+		if batch.stopReason == "" {
+			batch.stopReason = fmt.Sprintf("%d checkpoint ref(s) stalled", len(batch.stalled))
+		}
 	}
-	if bound == batchUnbounded {
-		var cancelFallback context.CancelFunc
-		flushCtx, cancelFallback = context.WithTimeout(pushCtx, checkpointFlushBudget)
-		defer cancelFallback()
-	}
-	if done, err := settleBatchOnly(ctx, batch, len(existing), dest, stop); done {
+	if bounds, done, err := settleBatchOnly(ctx, flushCtx, queue, batch, len(existing), dest, stop, budgetCut); done {
+		result.bounds = bounds
 		cause := err
 		if cause == nil {
-			cause = fmt.Errorf("not attempted: %s", batch.stopReason)
+			cause = fmt.Errorf("not attempted: %s", bounds.failureLine(nil))
 		}
 		result.markUnsettled(existing, cause)
 		return result, err
@@ -804,145 +979,21 @@ func flushCheckpointRefsWith(
 	// same checkpoint re-written on another machine). Retry its refs one at a
 	// time with fetch+replay recovery, and remove from the queue only the refs
 	// that land (a genuine cherry-pick conflict leaves that ref queued for a
-	// later push, never force-overwriting the remote).
+	// later push, never force-overwriting the remote). Refs of the chunk that did
+	// land are cheap here: their push reports them up to date.
 	// Deliberately names no cause: the batch fails on divergence, but just as
 	// often on an unreachable or unauthorized destination. Telling a user with a
 	// dead remote that their refs "diverged" — or were "rejected", which equally
 	// implies the remote answered — sends them after the wrong problem.
 	fmt.Fprintf(os.Stderr, "[entire] Checkpoint ref push failed; retrying %d ref(s) individually...", len(batch.failed))
 	stop = startProgressDots(os.Stderr)
-	retry := retryRefsIndividually(ctx, flushCtx, repo, dest.target, batch.failed, len(existing))
-	return finishIndividualRetry(ctx, pushCtx, queue, existing, batch, retry, stop, result)
-}
-
-// stopOnBudgetCut reports and settles a batch the flush budget cut mid-chunk.
-func stopOnBudgetCut(ctx, flushCtx context.Context, queue *checkpoint.PushQueue, batch chunkPushResult, queued int, stop func(string)) {
-	stop(fmt.Sprintf(" pushed %d of %d", batch.landed, queued))
-	fmt.Fprintf(os.Stderr, "[entire] Stopped pushing: %s; %d checkpoint ref(s) stay queued for the next push.\n",
-		flushAbortReason(flushCtx, 0), queued-batch.landed)
-	logging.Warn(ctx, "git-refs push: batch push cut by the flush budget; remaining refs stay queued",
-		slog.Int("pushed", batch.landed), slog.Int("queued", queued))
-	// An earlier chunk may have been refused outright before the clock ran
-	// out. The fallback that would show why does not run on a spent budget,
-	// so show the remote's reason here: a ref blocked for its content would
-	// otherwise ride along with every budget cut without ever saying so.
-	if reason := checkpointRefRejectionReason(batch.firstErr); reason != "" {
-		fmt.Fprintf(os.Stderr, "[entire] Warning: the remote declined a checkpoint ref batch (showing one rejection):\n%s\n", reason)
-	}
-	// Fair scheduling, as after a fallback abort: a slow remote cuts the
-	// budget at the same place every push, so the cut chunk goes to the
-	// back rather than holding the head of the queue.
-	if err := queue.Rotate(checkpointRefPushTokens(batch.failed)); err != nil {
-		logging.Warn(ctx, "git-refs push: rotate cut chunk to queue back failed",
-			slog.String("error", err.Error()))
-	}
-}
-
-// adaptChunkSize updates the remembered chunk size after a batch. It is
-// quartered when the budget cut a chunk in flight and nothing landed — a link
-// too slow to land one chunk per budget would otherwise never move the head of
-// the queue, and each such cut costs a whole budget, hence the steep step. A
-// cut after chunks landed is a backlog draining as intended, not a chunk too
-// large, so the size is kept. It doubles back toward checkpointRefPushChunkSize
-// after any batch in which every chunk it attempted landed, even if the budget
-// or a stop left later chunks untried: a draining backlog may never empty the
-// queue in one flush, and one transient stall must not pin the size low.
-func adaptChunkSize(ctx context.Context, queue *checkpoint.PushQueue, size int, batch chunkPushResult, budgetCut bool) {
-	next := size
-	switch {
-	case batch.landed == 0 && budgetCut && len(batch.failed) > 0:
-		next = max(1, size/4)
-	case len(batch.failed) == 0 && batch.landed > 0:
-		next = min(checkpointRefPushChunkSize, size*2)
-	}
-	if next == size {
-		return
-	}
-	if err := queue.SetChunkSizeHint(next); err != nil {
-		logging.Debug(ctx, "git-refs push: remember chunk size failed", slog.String("error", err.Error()))
-	}
-}
-
-// settleBatchOnly finishes a flush whose batch phase decided its outcome on its
-// own — everything landed, the budget or an interruption stopped it with
-// nothing failed, or the destination refused the SSH key or the connection —
-// printing that outcome. done is false when failed chunks remain for the
-// per-ref fallback, which then owns the progress line.
-func settleBatchOnly(ctx context.Context, batch chunkPushResult, queued int, dest refsPushDestination, stop func(string)) (done bool, err error) {
-	if len(batch.failed) == 0 && len(batch.untried) == 0 {
-		stop(" done")
-		return true, nil
-	}
-	if len(batch.failed) == 0 {
-		// Every attempted chunk landed, but the budget ran out first. Nothing
-		// failed, so this is progress rather than an error.
-		stop(fmt.Sprintf(" pushed %d of %d", batch.landed, queued))
-		fmt.Fprintf(os.Stderr, "[entire] Stopped pushing: %s; %d checkpoint ref(s) stay queued for the next push.\n",
-			batch.stopReason, len(batch.untried))
-		logging.Warn(ctx, "git-refs push: batch push stopped early; remaining refs stay queued",
-			slog.String("reason", batch.stopReason), slog.Int("pushed", batch.landed),
-			slog.Int("queued", queued))
-		return true, nil
-	}
-	if batch.unreachable != "" {
-		stop(" failed")
-	} else {
-		stop("")
-	}
-	if reportUnpushableDestination(dest, batch, queued) {
-		return true, batch.firstErr
-	}
-	return false, nil
-}
-
-// reportUnpushableDestination prints the hint for a batch that failed because
-// the destination refused the SSH key or could not be reached, and reports
-// whether it was one of those: the per-ref fallback cannot fix either.
-func reportUnpushableDestination(dest refsPushDestination, batch chunkPushResult, queued int) bool {
-	// Non-interactive SSH auth failures cannot be fixed by per-ref
-	// fetch+replay. Surface the same actionable hint as the v1 doPushRef path
-	// (issue #1523) instead of only logging to .entire/logs/.
-	// Deliberately does not print the batch error: it carries git's own output,
-	// and this runs inside the user's `git push`. The hint below is the
-	// actionable part; the full error reaches .entire/logs via the caller, which
-	// logs the error this branch returns.
-	if batch.sshAuthFailed {
-		fmt.Fprintln(os.Stderr, "[entire] Warning: couldn't push checkpoint refs (SSH authentication failed).")
-		printNonInteractiveSSHAuthHint()
-		if dest.checkpointRemote {
-			printCheckpointRemoteHint(dest.target)
-		}
-		return true
-	}
-
-	// Nothing landed and git could not even connect: the per-ref fallback would
-	// fail the same way, one connect timeout per ref. Unlike the branch above,
-	// name the cause: it is one line from ssh or curl (credentials redacted, see
-	// remote.UnreachableRemoteLine), and without it the user sees a slow push
-	// fail with no reason. No rotation: no ref failed on its own account.
-	if batch.unreachable != "" {
-		fmt.Fprintf(os.Stderr, "[entire] Couldn't reach %s: %s\n", dest.display(), batch.unreachable)
-		fmt.Fprintf(os.Stderr, "[entire] %d checkpoint ref(s) stay queued for the next push.\n", queued)
-		if dest.checkpointRemote {
-			printCheckpointRemoteHint(dest.target)
-		}
-		return true
-	}
-	return false
-}
-
-// queuedRefWarning returns the line to print for a ref that stays queued, or ""
-// when the failure needs no warning.
-func queuedRefWarning(pushErr error, target string, ref plumbing.ReferenceName) string {
-	if reason := checkpointRefRejectionReason(pushErr); reason != "" {
-		return fmt.Sprintf("[entire] Warning: checkpoint ref %s remains queued (showing one rejection):\n%s", ref, reason)
-	}
-	if errors.Is(pushErr, errShallowHidesMergeBase) {
-		// Divergence alone stays quiet, but this one never clears on its own:
-		// every push would fetch and refuse again.
-		return fmt.Sprintf("[entire] Warning: checkpoint ref %s remains queued: %v (from %s)", ref, errShallowHidesMergeBase, displayPushTarget(target))
-	}
-	return ""
+	// A forge that declines a push declines all of it (a ruleset, push
+	// protection), so one bad ref fails its whole chunk. Halving the chunk
+	// isolates it in a handful of pushes, where walking a 200-ref chunk one ref
+	// at a time would spend several budgets to reach it.
+	split := splitFailedChunks(ctx, flushCtx, dest.target, batch.failed, chunkSize, onLanded)
+	retry := retryRefsIndividually(ctx, flushCtx, repo, dest.target, split.unresolved, len(existing))
+	return finishIndividualRetry(ctx, pushCtx, queue, existing, batch, retry, stop, budgetExhausted(), result)
 }
 
 // finishIndividualRetry reports and settles a flush after its per-ref fallback.
@@ -953,6 +1004,7 @@ func finishIndividualRetry(
 	batch chunkPushResult,
 	retry refRetryResult,
 	stop func(string),
+	budgetExhausted bool,
 	result checkpointFlushResult,
 ) (checkpointFlushResult, error) {
 	result.pushed = append(result.pushed, retry.pushed...)
@@ -965,15 +1017,19 @@ func finishIndividualRetry(
 	if abortReason == "" && len(batch.untried) > 0 {
 		abortReason = batch.stopReason
 	}
+	// Superseded refs stay queued under their newer generation, but nothing
+	// failed to deliver them, so they are not counted as left behind.
+	remaining := len(existing) - len(result.pushed) - len(retry.changed)
+	result.bounds = flushResult{remaining: remaining,
+		budgetExhausted: remaining > 0 && budgetExhausted, stopReason: abortReason}
 	// Printed before the rejection warning so the more specific reason lands
 	// closest to the prompt.
 	if abortReason != "" {
 		// Everything this flush did not land stays queued, not just the refs it
 		// never reached: only landed refs are removed, so the ones that were
-		// attempted and failed are still there too. Superseded refs stay queued
-		// under their newer generation, but nothing failed to deliver them.
+		// attempted and failed are still there too.
 		fmt.Fprintf(os.Stderr, "[entire] Stopped retrying: %s; %d checkpoint ref(s) stay queued for the next push.\n",
-			abortReason, len(existing)-len(result.pushed)-len(retry.changed))
+			abortReason, remaining)
 	}
 	// One actionable example per flush, after the progress line. Label it as
 	// such: other queued refs may have different causes (all are logged).
@@ -982,6 +1038,10 @@ func finishIndividualRetry(
 	// divergence.
 	if retry.rejectionWarning != "" {
 		fmt.Fprintln(os.Stderr, retry.rejectionWarning)
+	}
+	result.bounds.detail = retry.rejectionWarning
+	if retry.sshAuthFailed {
+		result.bounds.detail = strings.TrimSpace(result.bounds.detail + "\n" + nonInteractiveSSHAuthHint)
 	}
 	if err := queue.RemoveEntries(checkpointRefPushTokens(retry.pushed)); err != nil {
 		logging.Warn(ctx, "git-refs push: clear pushed refs from queue failed",
@@ -1024,6 +1084,196 @@ func finishIndividualRetry(
 	return result, nil
 }
 
+// settleBatchOnly finishes a flush whose batch phase decided its outcome on its
+// own — everything landed, the budget cut it, or the destination refused the
+// connection or the SSH key — printing that outcome. done is false when failed
+// chunks remain for the per-ref fallback, which then owns the progress line.
+func settleBatchOnly(ctx, flushCtx context.Context, queue *checkpoint.PushQueue, batch chunkPushResult, queued int, dest refsPushDestination,
+	stop func(string), budgetExhausted bool,
+) (res flushResult, done bool, err error) {
+	if len(batch.failed) == 0 && len(batch.untried) == 0 {
+		stop(" done")
+		return flushResult{pushed: batch.landed}, true, nil
+	}
+	if len(batch.failed) == 0 {
+		// Every attempted chunk landed, but the budget ran out first. Nothing
+		// failed, so this is progress rather than an error.
+		stop(fmt.Sprintf(" pushed %d of %d", batch.landed, queued))
+		res := flushResult{pushed: batch.landed, remaining: len(batch.untried),
+			budgetExhausted: budgetExhausted, stopReason: batch.stopReason}
+		fmt.Fprintf(os.Stderr, "[entire] Stopped pushing: %s; %d checkpoint ref(s) stay queued for the next push.\n",
+			batch.stopReason, len(batch.untried))
+		logging.Warn(ctx, "git-refs push: batch push stopped early; remaining refs stay queued",
+			slog.String("reason", batch.stopReason), slog.Int("pushed", batch.landed),
+			slog.Int("queued", queued))
+		return res, true, nil
+	}
+	// The budget ran out mid-chunk: the per-ref fallback would only fail its
+	// one guaranteed attempt on the spent budget, reporting a retry that never
+	// ran as a push failure: it is the same stop as running out between
+	// chunks. A destination that refused the key or the connection keeps its
+	// hint below instead.
+	if budgetExhausted && !batch.sshAuthFailed && batch.unreachable == "" {
+		detail := stopOnBudgetCut(ctx, flushCtx, queue, batch, queued, stop)
+		return flushResult{pushed: batch.landed, remaining: queued - batch.landed,
+			budgetExhausted: true, stopReason: flushAbortReason(flushCtx, 0), detail: detail}, true, nil
+	}
+	if batch.unreachable != "" {
+		stop(" failed")
+	} else {
+		stop("")
+	}
+	if detail, unpushable := reportUnpushableDestination(dest, batch, queued); unpushable {
+		res := flushResult{pushed: batch.landed, remaining: queued - batch.landed, detail: detail}
+		if batch.sshAuthFailed {
+			res.stopReason = "SSH authentication failed"
+		} else {
+			res.unreachable = fmt.Sprintf("couldn't reach %s: %s", dest.display(), batch.unreachable)
+		}
+		return res, true, batch.firstErr
+	}
+	return flushResult{}, false, nil
+}
+
+// flushOptions bounds one flushCheckpointRefsQueue.
+type flushOptions struct {
+	// budget bounds the per-ref fallback, and the batch too when boundBatch is
+	// set; 0 means checkpointFlushBudget.
+	budget     time.Duration
+	boundBatch bool
+	// chunkTimeout bounds each chunk push on its own (see pushRefChunks); 0
+	// leaves chunks bounded only by budget.
+	chunkTimeout time.Duration
+	// beforeChunk runs before every chunk after the first (see pushRefChunks).
+	beforeChunk func(context.Context)
+}
+
+// flushResult is what one flushCheckpointRefsQueue did, for callers that act on
+// or record it rather than only print it.
+type flushResult struct {
+	pushed    int
+	remaining int // refs the flush attempted or skipped that are still queued
+	// budgetExhausted: the flush stopped because its budget ran out, not
+	// because the caller was interrupted.
+	budgetExhausted bool
+	stopReason      string // bare phrase, as printed; "" when nothing stopped it
+	unreachable     string // "couldn't reach <dest>: <git line>" when git could not connect
+	// detail is the actionable text printed with the stop — the remote's
+	// rejection reason, or the SSH or checkpoint-remote hint — for a caller
+	// that could not show it live (the background worker).
+	detail string
+}
+
+// failureLine is a one-line account of a flush that left refs queued, or "".
+func (r flushResult) failureLine(err error) string {
+	switch {
+	case r.unreachable != "":
+		return r.unreachable
+	case r.stopReason != "":
+		return r.stopReason
+	case err != nil:
+		return "checkpoint ref push failed"
+	}
+	return ""
+}
+
+// reportUnpushableDestination prints the hint for a batch that failed because
+// the destination refused the SSH key or could not be reached, and reports
+// whether it was one of those: the per-ref fallback cannot fix either. detail
+// is the hint, for a caller that could not show it live.
+func reportUnpushableDestination(dest refsPushDestination, batch chunkPushResult, queued int) (detail string, unpushable bool) {
+	remoteHint := ""
+	if dest.checkpointRemote {
+		remoteHint = checkpointRemoteHint(dest.target)
+	}
+	// Non-interactive SSH auth failures cannot be fixed by per-ref
+	// fetch+replay. Surface the same actionable hint as the v1 doPushRef path
+	// (issue #1523) instead of only logging to .entire/logs/.
+	// Deliberately does not print the batch error: it carries git's own output,
+	// and this runs inside the user's `git push`. The hint below is the
+	// actionable part; the full error reaches .entire/logs via the caller, which
+	// logs the error this branch returns.
+	if batch.sshAuthFailed {
+		fmt.Fprintln(os.Stderr, "[entire] Warning: couldn't push checkpoint refs (SSH authentication failed).")
+		printNonInteractiveSSHAuthHint()
+		if remoteHint != "" {
+			fmt.Fprintln(os.Stderr, remoteHint)
+		}
+		return strings.TrimSpace(nonInteractiveSSHAuthHint + "\n" + remoteHint), true
+	}
+
+	// Nothing landed and git could not even connect: the per-ref fallback would
+	// fail the same way, one connect timeout per ref. Unlike the branches above,
+	// name the cause: it is one line from ssh or curl (credentials redacted, see
+	// remote.UnreachableRemoteLine), and without it the user sees a slow push
+	// fail with no reason. No rotation: no ref failed on its own account.
+	if batch.unreachable != "" {
+		fmt.Fprintf(os.Stderr, "[entire] Couldn't reach %s: %s\n", dest.display(), batch.unreachable)
+		fmt.Fprintf(os.Stderr, "[entire] %d checkpoint ref(s) stay queued for the next push.\n", queued)
+		if remoteHint != "" {
+			fmt.Fprintln(os.Stderr, remoteHint)
+		}
+		return remoteHint, true
+	}
+	return "", false
+}
+
+// stopOnBudgetCut reports and settles a batch the flush budget cut mid-chunk.
+// It returns the remote's rejection warning it printed, if any.
+func stopOnBudgetCut(ctx, flushCtx context.Context, queue *checkpoint.PushQueue, batch chunkPushResult, queued int, stop func(string)) (detail string) {
+	stop(fmt.Sprintf(" pushed %d of %d", batch.landed, queued))
+	fmt.Fprintf(os.Stderr, "[entire] Stopped pushing: %s; %d checkpoint ref(s) stay queued for the next push.\n",
+		flushAbortReason(flushCtx, 0), queued-batch.landed)
+	logging.Warn(ctx, "git-refs push: batch push cut by the flush budget; remaining refs stay queued",
+		slog.Int("pushed", batch.landed), slog.Int("queued", queued))
+	// An earlier chunk may have been refused outright before the clock ran
+	// out. The fallback that would show why does not run on a spent budget,
+	// so show the remote's reason here: a ref blocked for its content would
+	// otherwise ride along with every budget cut without ever saying so.
+	if reason := checkpointRefRejectionReason(batch.firstErr); reason != "" {
+		detail = "[entire] Warning: the remote declined a checkpoint ref batch (showing one rejection):\n" + reason
+		fmt.Fprintln(os.Stderr, detail)
+	}
+	// Fair scheduling, as after a fallback abort: a slow remote cuts the
+	// budget at the same place every push, so the cut chunk goes to the
+	// back rather than holding the head of the queue.
+	if err := queue.Rotate(checkpointRefPushTokens(batch.failed)); err != nil {
+		logging.Warn(ctx, "git-refs push: rotate cut chunk to queue back failed",
+			slog.String("error", err.Error()))
+	}
+	return detail
+}
+
+// adaptChunkSize updates the remembered chunk size after a batch. It is
+// quartered when the budget cut a chunk in flight and nothing landed — a link
+// too slow to land one chunk per budget would otherwise never move the head of
+// the queue, and each such cut costs a whole budget, hence the steep step. A
+// cut after chunks landed is a backlog draining as intended, not a chunk too
+// large, so the size is kept. It doubles back toward checkpointRefPushChunkSize
+// after any batch in which every chunk it attempted landed, even if the budget
+// left later chunks untried: a draining backlog may never empty the queue in
+// one flush, and one transient stall must not pin the size low. A stalled
+// chunk did not land, so it keeps the size. A batch that shrank its chunks after a stall keeps the
+// smaller size it ended with, so the next pass does not stall at the old one.
+func adaptChunkSize(ctx context.Context, queue *checkpoint.PushQueue, size int, batch chunkPushResult, budgetCut bool) {
+	next := size
+	switch {
+	case batch.landed == 0 && (budgetCut && len(batch.failed) > 0 || len(batch.stalled) > 0):
+		next = max(1, size/4)
+	case len(batch.failed) == 0 && len(batch.stalled) == 0 && batch.landed > 0:
+		next = min(checkpointRefPushChunkSize, size*2)
+	}
+	if batch.size > 0 && batch.size < size {
+		next = min(next, batch.size)
+	}
+	if next == size {
+		return
+	}
+	if err := queue.SetChunkSizeHint(next); err != nil {
+		logging.Debug(ctx, "git-refs push: remember chunk size failed", slog.String("error", err.Error()))
+	}
+}
+
 // refRetryResult is what the per-ref fallback of a flush left behind.
 type refRetryResult struct {
 	pushed []checkpointRefPush
@@ -1035,6 +1285,7 @@ type refRetryResult struct {
 	firstErr         error
 	abortReason      string
 	rejectionWarning string
+	sshAuthFailed    bool
 }
 
 // retryRefsIndividually pushes refs one at a time with fetch+replay recovery
@@ -1080,11 +1331,26 @@ func retryRefsIndividually(ctx, flushCtx context.Context, repo *git.Repository, 
 	return res
 }
 
+// queuedRefWarning returns the line to print for a ref that stays queued, or ""
+// when the failure needs no warning.
+func queuedRefWarning(pushErr error, target string, ref plumbing.ReferenceName) string {
+	if reason := checkpointRefRejectionReason(pushErr); reason != "" {
+		return fmt.Sprintf("[entire] Warning: checkpoint ref %s remains queued (showing one rejection):\n%s", ref, reason)
+	}
+	if errors.Is(pushErr, errShallowHidesMergeBase) {
+		// Divergence alone stays quiet, but this one never clears on its own:
+		// every push would fetch and refuse again.
+		return fmt.Sprintf("[entire] Warning: checkpoint ref %s remains queued: %v (from %s)", ref, errShallowHidesMergeBase, displayPushTarget(target))
+	}
+	return ""
+}
+
 // recordFailure notes one ref the fallback could not push.
 func (res *refRetryResult) recordFailure(ctx, flushCtx context.Context, target string, ref checkpointRefPush, err error) {
 	logging.Warn(ctx, "git-refs push: checkpoint ref push/sync failed; left queued, not overwritten",
 		slog.String("ref", ref.name.String()), slog.String("error", err.Error()))
 	if nonInteractiveSSHAuthFailure(flushCtx, err) {
+		res.sshAuthFailed = true
 		printNonInteractiveSSHAuthHint()
 	}
 	if res.rejectionWarning == "" {

@@ -15,6 +15,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/execx"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/internal/entireclient/contexts"
 )
@@ -61,6 +62,9 @@ func TestMain(m *testing.M) {
 		// security allowlist should not be widened for test convenience.
 		// testing.Testing() is false in the spawned binary, so it is told here.
 		"ENTIRE_TEST_ALLOW_FILE_REMOTES": "1",
+		// Keep checkpoint uploads inside the pre-push hook: a detached
+		// background upload would outlive the test and its temp remotes.
+		strategy.CheckpointUploadForegroundEnv: "1",
 	}
 	for k, v := range isolation {
 		if err := os.Setenv(k, v); err != nil {
