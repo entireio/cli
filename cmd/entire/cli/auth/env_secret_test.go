@@ -239,6 +239,23 @@ func TestLocalIdentityCacheKeyForSecret(t *testing.T) {
 	}
 }
 
+// Only a svc_ token with exactly one URL audience shares its secret's key.
+// Not parallel: sets process-wide environment.
+func TestLocalIdentityCacheKeyForExchangedToken(t *testing.T) {
+	for _, tc := range []struct{ claims, want string }{
+		{`{"sub":"svc_01JABCDEFGHJKMNPQRSTVWXYZ1","iss":"https://us.auth.entire.io","aud":"https://us.auth.entire.io"}`, "env-sa|https://us.auth.entire.io|svc_01JABCDEFGHJKMNPQRSTVWXYZ1"},
+		{`{"sub":"svc_01JABCDEFGHJKMNPQRSTVWXYZ0","iss":"https://us.auth.entire.io","aud":"entire-cli"}`, "env|https://us.auth.entire.io|svc_01JABCDEFGHJKMNPQRSTVWXYZ0||entire-cli"},
+		{`{"sub":"svc_01JABCDEFGHJKMNPQRSTVWXYZ0","iss":"https://us.auth.entire.io","aud":["https://us.auth.entire.io","https://eu.auth.entire.io"]}`, "env|https://us.auth.entire.io|svc_01JABCDEFGHJKMNPQRSTVWXYZ0||https://us.auth.entire.io,https://eu.auth.entire.io"},
+		{`{"sub":"user_1","iss":"https://us.auth.entire.io","aud":"https://us.auth.entire.io"}`, "env|https://us.auth.entire.io|user_1||https://us.auth.entire.io"},
+	} {
+		t.Setenv(EnvTokenVar, makeJWT(t, tc.claims))
+		got, err := LocalIdentityCacheKey()
+		if err != nil || got != tc.want {
+			t.Errorf("%s: key = %q, %v; want %q", tc.claims, got, err, tc.want)
+		}
+	}
+}
+
 // ctx cancels an exchange in flight.
 // Not parallel: sets process-wide environment.
 func TestResolveEnvTokenContextHonorsCancel(t *testing.T) {
