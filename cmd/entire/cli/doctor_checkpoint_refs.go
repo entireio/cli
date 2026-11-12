@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"log/slog"
 	"sort"
 
 	"github.com/go-git/go-git/v6/plumbing"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
@@ -42,6 +44,8 @@ func checkCheckpointRefShardCase(cmd *cobra.Command) {
 
 	refs, err := repo.References()
 	if err != nil {
+		logging.Warn(ctx, "doctor: cannot list refs; skipping the checkpoint shard spelling check",
+			slog.String("error", err.Error()))
 		return // the checkpoint checks below report an unreadable ref store
 	}
 	defer refs.Close()
@@ -55,6 +59,8 @@ func checkCheckpointRefShardCase(cmd *cobra.Command) {
 		spellings[cid] = append(spellings[cid], ref)
 		return nil
 	}); err != nil {
+		logging.Warn(ctx, "doctor: cannot read refs; skipping the checkpoint shard spelling check",
+			slog.String("error", err.Error()))
 		return
 	}
 
