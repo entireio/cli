@@ -540,6 +540,53 @@ func TestPushQueuedCheckpointRefs_FoldedShardRefRecoversOntoDivergedRemote(t *te
 		"the replayed tip is installed on the stored ref, and no second local ref appears")
 }
 
+// A session can write the checkpoint while recovery replays it. The flush then
+// reports the version now waiting, read from the ref this clone stores, under
+// the name the caller queued.
+func TestFlushCheckpointRefs_FoldedShardRefChangedDuringRecoveryIsReportedChanged(t *testing.T) {
+	workDir, bareDir, _ := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+	cid := id.MustCheckpointID("0000000000ab")
+	base := revParse(t, workDir, "HEAD")
+	queued := mustRefName(t, cid)
+
+	// The remote holds a sibling of this clone's version, so the push needs
+	// recovery. This clone's version is stored folded and packed.
+	testutil.WriteFile(t, workDir, "b.txt", "b")
+	testutil.GitAdd(t, workDir, "b.txt")
+	testutil.GitCommit(t, workDir, "add b")
+	testutil.RunGit(t, workDir, "push", bareDir, "HEAD:"+queued.String())
+	testutil.GitReset(t, workDir, base)
+	testutil.WriteFile(t, workDir, "c.txt", "c")
+	testutil.GitAdd(t, workDir, "c.txt")
+	testutil.GitCommit(t, workDir, "add c")
+	stored, _ := foldedShardFixture(t, workDir, "HEAD")
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+
+	// The concurrent write lands just before recovery installs its result, and
+	// is packed so the canonical name cannot answer for the folded ref.
+	stubRecoveryCAS(t, func(ctx context.Context, repo *git.Repository, refName plumbing.ReferenceName, newHash, expectedOld plumbing.Hash) error {
+		testutil.RunGit(t, workDir, "update-ref", refName.String(), base)
+		testutil.RunGit(t, workDir, "pack-refs", "--all")
+		return checkpoint.CASPersistentRef(ctx, repo, refName, newHash, expectedOld)
+	})
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	enqueueRefs(t, repo, []plumbing.ReferenceName{queued})
+	result, err := flushCheckpointRefs(context.Background(), repo, pushSettings{remote: bareDir}, checkpointRefSelection{})
+	require.NoError(t, err)
+
+	assert.Empty(t, result.failed, "a superseded recovery is not a failure")
+	assert.Empty(t, result.pushed)
+	require.Len(t, result.changed, 1)
+	assert.Equal(t, queued, result.changed[0].name)
+	assert.Equal(t, base, result.changed[0].hash.String(), "the version now waiting")
+	assert.Equal(t, map[plumbing.ReferenceName]string{stored: base}, remoteCheckpointRefs(t, workDir, cid))
+}
+
 // A remote that holds the folded name gains the canonical ref at the current
 // tip, and the folded one is left where it was: readers ask for the canonical
 // name first, and removing a remote ref is not the push's to do.
