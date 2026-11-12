@@ -261,6 +261,8 @@ func TestProjectAgentRetryClassification(t *testing.T) {
 	}{
 		{wrap(fmt.Errorf("resolve bearer: %w", refused)), false},
 		{refused, false},
+		{wrap(fmt.Errorf("resolve bearer: exchange: %w", context.DeadlineExceeded)), true},
+		{wrap(context.Canceled), false},
 		{wrap(io.EOF), true},
 		{fmt.Errorf("read response body: %w", io.ErrUnexpectedEOF), true},
 		{wrap(&net.OpError{Op: "dial", Err: syscall.ECONNREFUSED}), true},

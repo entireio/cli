@@ -181,7 +181,7 @@ func (w *projectAgentWorker) request(ctx context.Context, method, path string, b
 }
 
 func retryProjectAgent(err error) bool {
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(err, context.Canceled) {
 		return false
 	}
 	var h *api.HTTPError
