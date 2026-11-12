@@ -1173,7 +1173,8 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		SubagentLedgerVersion:    codexLedgerVersion,
 	}
 
-	if err := saveTurnSteps(ctx, strat, stepCtx, totalChanges > 0, elsewhere); err != nil {
+	turn, err := saveTurnSteps(ctx, strat, stepCtx, totalChanges > 0, elsewhere)
+	if err != nil {
 		return err
 	}
 	strategy.PruneRemovedWorktrees(ctx, sessionID, hookRoot)
@@ -1195,7 +1196,13 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		}
 	}
 	recordCaptureDegraded(ctx, sessionID, captureDegraded)
-	transitionSessionTurnEnd(ctx, sessionID, agentType, event, nil)
+	// A turn whose every step recorded nothing (its files are all gone) keeps
+	// its tokens as a turn that changed no files does.
+	var untakenUsage *checkpointlessTurnUsage
+	if !turn.TokensRecorded && tokenUsage != nil {
+		untakenUsage = &checkpointlessTurnUsage{usage: tokenUsage, ledgerVersion: codexLedgerVersion}
+	}
+	transitionSessionTurnEnd(ctx, sessionID, agentType, event, untakenUsage)
 	if cleanupErr := CleanupPrePromptState(ctx, sessionID); cleanupErr != nil {
 		logging.Warn(logCtx, "failed to cleanup pre-prompt state",
 			slog.String("error", cleanupErr.Error()))
@@ -1208,8 +1215,8 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 // at the first worktree that records files and carrying the turn's tokens once.
 // A worktree that gets no record of its own takes only the tokens, and one
 // whose files are all gone records nothing, so neither counts the step for the
-// worktrees after it.
-func saveTurnSteps(ctx context.Context, strat *strategy.ManualCommitStrategy, stepCtx strategy.StepContext, hookChanged bool, elsewhere map[string][]string) error {
+// worktrees after it. It returns what the turn's steps recorded between them.
+func saveTurnSteps(ctx context.Context, strat *strategy.ManualCommitStrategy, stepCtx strategy.StepContext, hookChanged bool, elsewhere map[string][]string) (strategy.StepResult, error) {
 	var turn strategy.StepResult
 	save := func(step strategy.StepContext) error {
 		step.SameTurn = turn.FilesRecorded
@@ -1229,7 +1236,7 @@ func saveTurnSteps(ctx context.Context, strat *strategy.ManualCommitStrategy, st
 	}
 	if hookChanged {
 		if err := save(stepCtx); err != nil {
-			return err
+			return turn, err
 		}
 	}
 	for _, root := range slices.Sorted(maps.Keys(elsewhere)) {
@@ -1237,10 +1244,10 @@ func saveTurnSteps(ctx context.Context, strat *strategy.ManualCommitStrategy, st
 		step.WorktreeRoot = root
 		step.ModifiedFiles, step.NewFiles, step.DeletedFiles = elsewhere[root], nil, nil
 		if err := save(step); err != nil {
-			return err
+			return turn, err
 		}
 	}
-	return nil
+	return turn, nil
 }
 
 // workerTurnTokenUsage returns a detached subagent session's usage for the
