@@ -6,9 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
+	"github.com/entireio/auth-go/tokens"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
@@ -26,7 +29,7 @@ type projectAgentJournal struct {
 }
 
 func openProjectAgentJournal(ctx context.Context, t *projectAgentTarget) (*projectAgentJournal, error) {
-	identity, err := auth.LocalIdentityCacheKey()
+	identity, err := projectAgentWorkerIdentity()
 	if err != nil {
 		return nil, fmt.Errorf("resolve worker identity: %w", err)
 	}
@@ -44,6 +47,34 @@ func openProjectAgentJournal(ctx context.Context, t *projectAgentTarget) (*proje
 		return nil, fmt.Errorf("lock worker state: %w", err)
 	}
 	return &projectAgentJournal{root: root, name: key + ".json", unlock: unlock, workspace: "agent-work/" + hash}, nil
+}
+
+// projectAgentWorkerIdentity keys a service account the same whether
+// ENTIRE_TOKEN holds its secret or a token exchanged from it, so both forms
+// share one lock and journal.
+func projectAgentWorkerIdentity() (string, error) {
+	identity, err := auth.LocalIdentityCacheKey()
+	if err != nil {
+		return "", err //nolint:wrapcheck // wrapped by the caller
+	}
+	raw := strings.TrimSpace(os.Getenv(auth.EnvTokenVar))
+	if raw == "" || auth.IsServiceAccountSecret(raw) {
+		return identity, nil
+	}
+	claims, err := tokens.ParseClaims(raw)
+	if err != nil || !strings.HasPrefix(claims.Subject, "svc_") {
+		return identity, nil //nolint:nilerr // LocalIdentityCacheKey already accepted it
+	}
+	var cores []string
+	for _, aud := range claims.Audience {
+		if u, err := url.Parse(aud); err == nil && u.Scheme != "" {
+			cores = append(cores, strings.TrimRight(aud, "/"))
+		}
+	}
+	if len(cores) != 1 {
+		return identity, nil
+	}
+	return "env-sa|" + cores[0] + "|" + claims.Subject, nil
 }
 
 // sweepWorkspaces removes review clones left by a killed worker.
