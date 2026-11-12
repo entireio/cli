@@ -54,11 +54,21 @@ const piVersionTimeout = 10 * time.Second
 func piVersion(ctx context.Context) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, piVersionTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "pi", "--version").CombinedOutput()
+	out, err := piVersionCmd(ctx).CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("pi --version: %w", err)
 	}
 	return string(out), nil
+}
+
+// piVersionCmd builds the `pi --version` probe. It runs in the reviewed
+// checkout, like the review itself: an npm-installed pi is a pi.cmd shim that
+// starts a bare `node`, which cmd.exe would otherwise look for in the checkout
+// first, so it gets the same PATH-only lookup on Windows.
+func piVersionCmd(ctx context.Context) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "pi", "--version")
+	cmd.Env = agent.AppendWindowsPathOnlyLookupEnv(os.Environ())
+	return cmd
 }
 
 // checkPiReviewVersion refuses a Pi too old to read the review prompt from
