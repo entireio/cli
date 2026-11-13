@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
@@ -109,9 +110,6 @@ func (c *CopilotCLIAgent) InstallHooks(ctx context.Context, force bool) (int, er
 		}
 	}
 
-	// Define command prefix
-	const cmdPrefix = "entire hooks copilot-cli "
-
 	count := 0
 
 	// Sync each hook to its desired command. Entire-owned entries carrying any
@@ -121,24 +119,31 @@ func (c *CopilotCLIAgent) InstallHooks(ctx context.Context, force bool) (int, er
 	// the working tree still runs on every agent turn.
 	staleDropped := false
 	for _, hookName := range c.HookNames() {
-		cmd := agent.WrapProductionSilentHookCommand(cmdPrefix + hookName)
+		bash, powershell := hookCommands(hookName)
 		entries := hookEntries[hookName]
 
 		// Keep the matching entry rather than remove-and-re-add: entry-level
 		// fields (cwd, timeoutSec, env) live on the existing entry and a freshly
 		// constructed one would discard them.
-		kept, dropped := agent.DropStaleManagedHooks(entries, hookEntryBash, []string{cmd})
+		kept, dropped := agent.DropStaleManagedHooks(entries, hookEntryCommand, []string{bash})
 		if dropped {
 			staleDropped = true
 		}
 		entries = kept
 
-		if !hookBashExists(entries, cmd) {
+		idx := slices.IndexFunc(entries, func(e CopilotHookEntry) bool { return e.Bash == bash })
+		switch {
+		case idx < 0:
 			entries = append(entries, CopilotHookEntry{
-				Type:    "command",
-				Bash:    cmd,
-				Comment: "Entire CLI",
+				Type:       "command",
+				Bash:       bash,
+				PowerShell: powershell,
+				Comment:    "Entire CLI",
 			})
+			count++
+		case entries[idx].PowerShell != powershell:
+			// An entry from a CLI that wrote bash only, or an older wrapper.
+			entries[idx].PowerShell = powershell
 			count++
 		}
 		hookEntries[hookName] = entries
@@ -310,14 +315,14 @@ func (c *CopilotCLIAgent) CheckHookConfig(ctx context.Context) agent.HookConfigS
 		if parseCopilotHookType(rawHooks, hookConfigKey[hookName], &entries) != nil {
 			return agent.HooksOutdated
 		}
-		desired := agent.WrapProductionSilentHookCommand("entire hooks copilot-cli " + hookName)
+		bash, powershell := hookCommands(hookName)
 		found := false
 		for _, entry := range entries {
-			if !isEntireHook(entry.Bash) {
+			if !isEntireHook(entry) {
 				continue
 			}
 			owned = true
-			if entry.Bash == desired {
+			if entry.Bash == bash && entry.PowerShell == powershell {
 				found = true
 			} else {
 				current = false
@@ -359,40 +364,42 @@ func marshalCopilotHookType(rawHooks map[string]json.RawMessage, hookType string
 	return nil
 }
 
-// hookBashExists checks if a hook with the given bash command already exists.
-func hookBashExists(entries []CopilotHookEntry, bash string) bool {
-	for _, entry := range entries {
-		if entry.Bash == bash {
-			return true
-		}
-	}
-	return false
+// hookCommands returns the two commands Entire writes for hookName. Copilot CLI
+// runs powershell on Windows and bash elsewhere, and entire.json is committed,
+// so every entry carries both whatever machine installed it. Without powershell,
+// Copilot on Windows runs the bash command, which goes to WSL when it is
+// installed. The powershell command is the nested cmd.exe wrapper, which runs
+// under PowerShell; see the wrapper selection rules in agent/hook_command.go.
+func hookCommands(hookName string) (bash, powershell string) {
+	command := "entire hooks copilot-cli " + hookName
+	return agent.WrapProductionSilentHookCommand(command), agent.WrapWindowsProductionSilentHookCommand(command)
 }
 
-// isEntireHook checks if a hook entry's bash command belongs to Entire.
-// hookEntryBash reads the command off a hook entry for the shared helpers.
-// Copilot CLI stores it under `bash`, not `command`.
-func hookEntryBash(e CopilotHookEntry) string { return e.Bash }
+// hookEntryCommand returns the command that decides whose entry e is, for the
+// shared helpers: bash, or powershell on an entry that has no bash. Copilot CLI
+// stores commands under these keys, not `command`.
+func hookEntryCommand(e CopilotHookEntry) string {
+	if e.Bash != "" {
+		return e.Bash
+	}
+	return e.PowerShell
+}
 
-func isEntireHook(bash string) bool {
-	return agent.IsManagedHookCommand(bash)
+// isEntireHook checks if a hook entry belongs to Entire.
+func isEntireHook(e CopilotHookEntry) bool {
+	return agent.IsManagedHookCommand(hookEntryCommand(e))
 }
 
 // hasEntireHook checks if any entry in the slice is an Entire hook.
 func hasEntireHook(entries []CopilotHookEntry) bool {
-	for _, entry := range entries {
-		if isEntireHook(entry.Bash) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(entries, isEntireHook)
 }
 
 // removeEntireHooks removes all Entire hooks from the slice.
 func removeEntireHooks(entries []CopilotHookEntry) []CopilotHookEntry {
 	result := make([]CopilotHookEntry, 0, len(entries))
 	for _, entry := range entries {
-		if !isEntireHook(entry.Bash) {
+		if !isEntireHook(entry) {
 			result = append(result, entry)
 		}
 	}
