@@ -2,10 +2,16 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -19,6 +25,7 @@ func TestDoctorCodexWarningsNamePathOwnershipAndUserRemedies(t *testing.T) {
 			&output,
 			"/repo-feature/.codex/hooks.json",
 			"/repo-main/.codex/hooks.json",
+			codexRemedyRoot{},
 		)
 
 		out := output.String()
@@ -26,12 +33,62 @@ func TestDoctorCodexWarningsNamePathOwnershipAndUserRemedies(t *testing.T) {
 		require.Contains(t, out, "/repo-feature/.codex/hooks.json")
 		require.Contains(t, out, "/repo-main/.codex/hooks.json")
 		require.Contains(t, out, "Codex will read the discovered file above, not the current-worktree file above")
+		require.Contains(t, out, "From a terminal, re-run `entire agent add codex` in this worktree and answer yes to install Entire's Codex hooks in /repo-main/.codex/hooks.json.")
 		require.Contains(t, out, ".codex/hooks.json is tracked — commit it and make sure the root worktree has it")
 		require.Contains(t, out, "(merge to the default branch, or check that branch out there).")
+		require.NotContains(t, out, "cd /repo-main")
 		require.NotContains(t, out, "If that root is a Git checkout")
 		require.NotContains(t, out, "In a .bare layout")
 		require.NotContains(t, out, "migrate")
 		require.NotContains(t, out, "synchronize")
+	})
+
+	t.Run("bare layout mismatch", func(t *testing.T) {
+		t.Parallel()
+		var output bytes.Buffer
+		writeCodexInactiveWorktreeWarning(
+			&output,
+			"/layout/feature/.codex/hooks.json",
+			"/layout/.codex/hooks.json",
+			codexRemedyRoot{dir: "/layout"},
+		)
+
+		out := output.String()
+		require.Contains(t, out, "re-run `entire agent add codex` in this worktree and answer yes to install Entire's Codex hooks in /layout/.codex/hooks.json.")
+		require.Contains(t, out, "Or apply the generated .codex/hooks.json change at /layout directly; that project root is not a worktree.")
+		require.NotContains(t, out, "commit it and make sure the root worktree has it")
+	})
+
+	t.Run("separate git dir storage parent", func(t *testing.T) {
+		t.Parallel()
+		var output bytes.Buffer
+		writeCodexInactiveWorktreeWarning(
+			&output,
+			"/repo/linked/.codex/hooks.json",
+			"/gitdirs/.codex/hooks.json",
+			codexRemedyRoot{dir: "/gitdirs", storageParent: true},
+		)
+
+		out := output.String()
+		require.Contains(t, out, "Entire does not write it. Add Entire's Codex hooks to /gitdirs/.codex/hooks.json yourself")
+		require.NotContains(t, out, "answer yes")
+		require.NotContains(t, out, "apply the generated .codex/hooks.json change at /gitdirs")
+	})
+
+	t.Run("setup would not offer", func(t *testing.T) {
+		t.Parallel()
+		var output bytes.Buffer
+		writeCodexInactiveWorktreeWarning(
+			&output,
+			"/repo-feature/.codex/hooks.json",
+			"/repo-main/.codex/hooks.json",
+			codexRemedyRoot{notOffered: true},
+		)
+
+		out := output.String()
+		require.Contains(t, out, "Setup will not install Entire's Codex hooks in /repo-main/.codex/hooks.json; add them there yourself.")
+		require.NotContains(t, out, "answer yes")
+		require.Contains(t, out, "commit it and make sure the root worktree has it")
 	})
 
 	t.Run("invalid discovered file", func(t *testing.T) {
@@ -104,8 +161,18 @@ func TestCodexStatusWarningBehavior(t *testing.T) {
 				State:          codexHookStateInactiveWorktreePath,
 				WorktreePath:   "/repo-feature/.codex/hooks.json",
 				DiscoveredPath: "/repo-main/.codex/hooks.json",
+				InstallOffered: true,
 			},
-			want: "not active in this worktree",
+			want: "not active in this worktree · re-run 'entire agent add codex' in a terminal and answer yes",
+		},
+		{
+			name: "linked worktree mismatch setup will not offer",
+			issue: &codexHookIssue{
+				State:          codexHookStateInactiveWorktreePath,
+				WorktreePath:   "/repo/linked/.codex/hooks.json",
+				DiscoveredPath: "/gitdirs/.codex/hooks.json",
+			},
+			want: "not active in this worktree · run 'entire doctor'",
 		},
 		{
 			name:  "malformed discovery",
@@ -181,4 +248,30 @@ func TestCodexHooksStatusJSONPreservesDiagnosticPaths(t *testing.T) {
 	require.Equal(t, "/repo-feature/.codex/hooks.json", status.WorktreePath)
 	require.Equal(t, "/repo-main/.codex/hooks.json", status.DiscoveredPath)
 	require.Equal(t, []string{"post_tool_use"}, status.MissingApprovals)
+}
+
+// A separate Git directory's storage parent is never offered, so status must
+// not tell the user to answer a prompt setup will not show.
+func TestInspectCodexHookIssue_SeparateGitDirStatusGivesManualGuidance(t *testing.T) {
+	tmp := t.TempDir()
+	mainRoot := filepath.Join(tmp, "main")
+	storageRoot := filepath.Join(tmp, "gitdirs", "main.git")
+	require.NoError(t, os.MkdirAll(filepath.Dir(storageRoot), 0o750))
+	testutil.RunGit(t, tmp, "init", "--separate-git-dir", storageRoot, mainRoot)
+	testutil.RunGit(t, mainRoot, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "--allow-empty", "-m", "init")
+	linkedRoot := filepath.Join(tmp, "linked")
+	testutil.RunGit(t, mainRoot, "worktree", "add", "-b", "feature", linkedRoot)
+	writeCodexHooksForDiagnosticTest(t, linkedRoot, canonicalCodexHooksJSON())
+	t.Chdir(linkedRoot)
+	paths.ClearWorktreeRootCache()
+	session.ClearGitCommonDirCache()
+	t.Setenv("CODEX_HOME", filepath.Join(tmp, "codex-home"))
+
+	issue := inspectCodexHookIssue(context.Background())
+	require.NotNil(t, issue)
+	require.Equal(t, codexHookStateInactiveWorktreePath, issue.State)
+	require.False(t, issue.InstallOffered)
+	warning := codexStatusWarning(issue)
+	require.Contains(t, warning, "run 'entire doctor'")
+	require.NotContains(t, warning, "answer yes")
 }

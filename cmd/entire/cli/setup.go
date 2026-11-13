@@ -757,9 +757,9 @@ func applyAgentChanges(ctx context.Context, w io.Writer, selectedAgentNames []st
 		}
 		return nil
 	}
-	successfullyAddedAgents, setupErrs := setupAgentHookSet(ctx, w, addedAgents, opts.ForceHooks)
+	successfullyAddedAgents, setupErrs := setupAgentHookSet(ctx, w, addedAgents, opts)
 	errs = append(errs, setupErrs...)
-	successfullyReinstalledAgents, setupErrs := setupAgentHookSet(ctx, w, reinstalledAgents, opts.ForceHooks)
+	successfullyReinstalledAgents, setupErrs := setupAgentHookSet(ctx, w, reinstalledAgents, opts)
 	errs = append(errs, setupErrs...)
 
 	var uninstalledAgents []agent.Agent
@@ -1458,11 +1458,7 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 		if pruned {
 			reportPrunedStaleHooks(w, ag)
 		}
-		warnCodexHooksAfterSetup(ctx, w, ag)
-		if err := setupOptionalSearchSkill(ctx, w, ag, opts); err != nil {
-			return err
-		}
-		if err := setupOptionalAgentHelpSkill(ctx, w, ag, opts); err != nil {
+		if err := finishAgentSetup(ctx, w, ag, opts); err != nil {
 			return err
 		}
 	}
@@ -1967,17 +1963,29 @@ func installAgentHooks(ctx context.Context, ag agent.Agent, forceHooks bool) (in
 	return installed, prunedStale, nil
 }
 
+// finishAgentSetup runs the per-agent steps that follow a successful hook
+// install in enable and agent add.
+func finishAgentSetup(ctx context.Context, w io.Writer, ag agent.Agent, opts EnableOptions) error {
+	if err := finishCodexHooksSetup(ctx, w, ag, canOfferCodexDiscoveredInstall(opts)); err != nil {
+		return err
+	}
+	if err := setupOptionalSearchSkill(ctx, w, ag, opts); err != nil {
+		return err
+	}
+	return setupOptionalAgentHelpSkill(ctx, w, ag, opts)
+}
+
 // reportPrunedStaleHooks tells the user an install removed or updated outdated
 // Entire hooks in ag's config.
 func reportPrunedStaleHooks(w io.Writer, ag agent.Agent) {
 	fmt.Fprintf(w, "  Updated outdated Entire hooks for %s\n", ag.Description())
 }
 
-func setupAgentHookSet(ctx context.Context, w io.Writer, agents []agent.Agent, forceHooks bool) ([]agent.Agent, []error) {
+func setupAgentHookSet(ctx context.Context, w io.Writer, agents []agent.Agent, opts EnableOptions) ([]agent.Agent, []error) {
 	var successful []agent.Agent
 	var errs []error
 	for _, ag := range agents {
-		_, pruned, err := installAgentHooks(ctx, ag, forceHooks)
+		_, pruned, err := installAgentHooks(ctx, ag, opts.ForceHooks)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err))
 			continue
@@ -1985,25 +1993,12 @@ func setupAgentHookSet(ctx context.Context, w io.Writer, agents []agent.Agent, f
 		if pruned {
 			reportPrunedStaleHooks(w, ag)
 		}
-		warnCodexHooksAfterSetup(ctx, w, ag)
+		if err := finishCodexHooksSetup(ctx, w, ag, canOfferCodexDiscoveredInstall(opts)); err != nil {
+			errs = append(errs, err)
+		}
 		successful = append(successful, ag)
 	}
 	return successful, errs
-}
-
-func warnCodexHooksAfterSetup(ctx context.Context, w io.Writer, ag agent.Agent) {
-	if ag.Name() != agent.AgentNameCodex {
-		return
-	}
-
-	diagnostics := codexagent.InspectHookDiagnosticsLightweight(ctx)
-	if !diagnostics.PathsDiffer() {
-		return
-	}
-	fmt.Fprintf(w, "  Codex reads hooks from: %s\n", diagnostics.Discovery.DiscoveredHooks.Path())
-	fmt.Fprintf(w, "  Entire configured this worktree at: %s\n", diagnostics.WorktreeHooks.Path())
-	fmt.Fprintln(w, "  Hooks in the current-worktree file will not run here.")
-	writeCodexPrimaryCheckoutRemedy(w)
 }
 
 func warnCodexHooksAfterRemoval(ctx context.Context, w io.Writer, ag agent.Agent) {
@@ -2237,11 +2232,7 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	if err != nil {
 		return fmt.Errorf("failed to setup %s hooks: %w", agentName, err)
 	}
-	warnCodexHooksAfterSetup(ctx, w, ag)
-	if err := setupOptionalSearchSkill(ctx, w, ag, opts); err != nil {
-		return err
-	}
-	if err := setupOptionalAgentHelpSkill(ctx, w, ag, opts); err != nil {
+	if err := finishAgentSetup(ctx, w, ag, opts); err != nil {
 		return err
 	}
 
