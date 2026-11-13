@@ -42,10 +42,10 @@ func TestTrailModeCommandSurface(t *testing.T) {
 			cmd := newTrailCmdForMode(project)
 			root.AddCommand(cmd)
 			names := commandNames(cmd.Commands())
-			for _, name := range []string{"list", "show", "create", "update", "comment", "finding", "approve", "approvals", "watch", "checkout", "resume"} {
+			for _, name := range []string{"list", "show", "comment", "finding", "approve", "approvals", "watch", "checkout", "resume"} {
 				require.Contains(t, names, name)
 			}
-			for _, name := range []string{"link", "unlink"} {
+			for _, name := range []string{"create", "update", "link", "unlink"} {
 				require.Equal(t, project, contains(names, name))
 			}
 			require.Contains(t, names, "merge")
@@ -98,21 +98,21 @@ func TestLegacyTrailRequestsDoNotResolveProject(t *testing.T) {
 				item := api.TrailResource{ID: projectTrailTestChange, Number: 7, Branch: "feature/work", Title: "Legacy work", Status: "open", Parent: &api.TrailParentReference{ID: projectTrailTestID, Number: 42}}
 				var payload any
 				switch r.Method + " " + r.URL.Path {
-				case "GET /api/v1/trails/gh/acme/widget":
+				case "GET /api/v1/repos/repo-id/changes":
 					payload = api.TrailListResponse{Trails: []api.TrailResource{item}}
-				case "GET /api/v1/trails/gh/acme/widget/7":
+				case "GET /api/v1/repos/repo-id/changes/7":
 					payload = item
-				case "GET /api/v1/trails/gh/acme/widget/7/body":
+				case "GET /api/v1/repos/repo-id/changes/7/body":
 					_, err := fmt.Fprint(w, "Description")
 					assert.NoError(t, err)
 					return
-				case "POST /api/v1/trails/gh/acme/widget/7/approvals", "GET /api/v1/trails/gh/acme/widget/7/approvals":
+				case "POST /api/v1/repos/repo-id/changes/7/approvals", "GET /api/v1/repos/repo-id/changes/7/approvals":
 					payload = map[string]any{"approvals": []any{}}
-				case "GET /api/v1/trails/gh/acme/widget/7/discussions":
+				case "GET /api/v1/repos/repo-id/changes/7/discussions":
 					payload = map[string]any{"discussions": []any{}}
-				case "GET /api/v1/trails/gh/acme/widget/7/reviews/comments":
+				case "GET /api/v1/repos/repo-id/changes/7/reviews/comments":
 					payload = map[string]any{"comments": []map[string]any{{"id": "finding-one", "review_id": "review-one", "status": "open"}}}
-				case "PATCH /api/v1/trails/gh/acme/widget/7/reviews/review-one/comments/finding-one":
+				case "PATCH /api/v1/repos/repo-id/changes/7/reviews/review-one/comments/finding-one":
 					payload = map[string]any{"id": "finding-one", "review_id": "review-one", "status": "resolved"}
 				default:
 					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
@@ -133,7 +133,7 @@ func TestLegacyTrailRequestsDoNotResolveProject(t *testing.T) {
 				require.Contains(t, out.String(), "showing trails in this repo")
 			}
 			if args[0] == "finding" && args[1] == "resolve" {
-				require.Contains(t, paths, "PATCH /api/v1/trails/gh/acme/widget/7/reviews/review-one/comments/finding-one")
+				require.Contains(t, paths, "PATCH /api/v1/repos/repo-id/changes/7/reviews/review-one/comments/finding-one")
 			}
 		})
 	}

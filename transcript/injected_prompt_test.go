@@ -56,3 +56,30 @@ func TestIsInjectedPrompt_RealRolloutShapes(t *testing.T) {
 		})
 	}
 }
+
+func TestIsInstructionFileDump(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		text string
+		want bool
+	}{
+		"AGENTS.md dump with path":   {"# AGENTS.md instructions for /repo\n\n<INSTRUCTIONS>\nfollow them\n</INSTRUCTIONS>", true},
+		"AGENTS.md dump bare":        {"# AGENTS.md\nThese are the project instructions.", true},
+		"instructions tag first":     {"<INSTRUCTIONS>\nAGENTS.md instructions follow\n</INSTRUCTIONS>", true},
+		"leading whitespace":         {"\n  # AGENTS.md instructions for /repo", true},
+		"environment context":        {"<environment_context>\n  <cwd>/repo</cwd>\n</environment_context>", false},
+		"permissions instructions":   {"<permissions instructions>\nYou are sandboxed.\n</permissions instructions>", false},
+		"prompt that names the file": {"please update AGENTS.md with the new rule", false},
+		"prompt about the tag":       {"<INSTRUCTIONS> is a tag, what does it do?", false},
+		"empty":                      {"", false},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if got := IsInstructionFileDump(tc.text); got != tc.want {
+				t.Errorf("IsInstructionFileDump(%q) = %v, want %v", tc.text, got, tc.want)
+			}
+		})
+	}
+}

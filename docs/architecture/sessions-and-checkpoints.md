@@ -220,7 +220,9 @@ and turn-end pruning drops it.
 A worktree other than the home records only transcript-named files, never
 the rest of its status, so someone else's uncommitted work there is never
 claimed. One turn is one step and carries its tokens once, however many
-worktrees it touched.
+worktrees it touched. The step is counted at the first worktree that records
+files, so one that records none (its files are gone, or it gets no record,
+like an unregistered checkout) leaves the count to the next.
 
 At commit time a session is judged by its record of the committing worktree
 (`enterWorktreeView`): that entry stands in for the home's files, hashes and
@@ -490,6 +492,10 @@ own transcript, but the copy it stores goes through the agent's optional
 in `lifecycle.go`, before `.entire/metadata/<session>/full.jsonl` is written). Codex
 implements it to strip encrypted reasoning payloads and compaction blobs, which are
 bound to the originating session and cannot be replayed out of a checkpoint.
+Claude Code, Codex and Pi also implement it to blank the text they attach to their
+model requests (system prompt, instruction files, memory notes), which comes from
+outside the conversation. A blanked record keeps its line, type, ids, hashes and file paths;
+see [Security and privacy](../security-and-privacy.md#what-entire-leaves-out-text-the-agent-attaches-to-its-requests).
 
 Sanitization always runs before redaction, but the paths differ in whether image externalization happens at all:
 
@@ -506,8 +512,9 @@ externalizing images out of items that are about to be discarded — that would 
 an asset whose referencing transcript line disappears moments later — and avoids
 redacting megabytes of ciphertext only to throw it away; base64 is the pathological
 input for the entropy layer, so a large Codex rollout otherwise costs tens of seconds
-per Stop *and* per commit. Externalizing before redaction is required because base64
-is high-entropy and redaction would otherwise flag and destroy it.
+per Stop *and* per commit. Externalizing before redaction is required because redaction
+would otherwise destroy base64 it does not recognize as a whole-string image, such as
+a data URI inside a longer string.
 
 The sanitize transform is idempotent, so a downstream write path can call it without
 knowing whether an upstream path already did (`checkpoint.sanitizeForAgentType` is

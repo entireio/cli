@@ -421,7 +421,7 @@ func (f *reviewPostTrailAPI) postedBatches() []api.TrailReviewCommentBatchReques
 func setupReviewPostTrail(t *testing.T) *reviewPostTrailAPI {
 	t.Helper()
 	const (
-		base     = "/api/v1/trails/gh/acme/app"
+		base     = "/api/v1/repos/repo-id/changes"
 		trailID  = "trl_cap"
 		reviewID = "rvw_1"
 		// The server's current per-batch limit.
@@ -470,7 +470,7 @@ func setupReviewPostTrail(t *testing.T) *reviewPostTrailAPI {
 
 	previous := newTrailAPIClient
 	newTrailAPIClient = func(context.Context, bool, string, string, string) (*api.Client, string, error) {
-		return api.NewClientWithBaseURL("tok", srv.URL), "", nil
+		return api.NewClientWithBaseURL("tok", srv.URL), trailTestRepoID, nil
 	}
 	t.Cleanup(func() { newTrailAPIClient = previous })
 	return fake

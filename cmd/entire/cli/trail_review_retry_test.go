@@ -56,7 +56,7 @@ func TestProjectTrailFindingAddRetryUsesSameReview(t *testing.T) {
 					http.NotFound(w, r)
 				}
 			})
-			const base = "/api/v1/trails/gh/acme/widget/7/reviews"
+			const base = "/api/v1/repos/repo-id/changes/7/reviews"
 			reviews := map[string]string{}
 			findings := map[string]api.TrailReviewComment{}
 			var reviewCount, batchCalls int

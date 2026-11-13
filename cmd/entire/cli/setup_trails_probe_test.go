@@ -17,8 +17,8 @@ import (
 
 // probeAndCacheTrailsEnablement must route the repo-scoped trails-enablement
 // probe through the entire-api cell that hosts THIS repo (trailRefreshAPIClient),
-// never through the generic data-API/BFF client — the BFF does not proxy
-// /api/v1/trails/... for bearer callers (COR-666).
+// never through the generic data-API/BFF client. The Changes probe must use
+// the processing placement ID resolved for that same cell.
 // probeAndCacheTrailsEnablement performs no cache lookup of its own — this
 // isolates saveTrailsEnabledForRemote/debug logging below from the developer's
 // real repo, since the probe always runs regardless of cwd.
@@ -29,9 +29,9 @@ func TestProbeAndCacheTrailsEnablement_RoutesThroughRepoCell(t *testing.T) {
 	previous := trailRefreshAPIClient
 	var gotForge, gotOwner, gotRepo string
 	wantErr := errors.New("cell client unavailable")
-	trailRefreshAPIClient = func(_ context.Context, _ bool, forge, owner, repo string) (*api.Client, error) {
+	trailRefreshAPIClient = func(_ context.Context, _ bool, forge, owner, repo string) (*api.Client, string, error) {
 		gotForge, gotOwner, gotRepo = forge, owner, repo
-		return nil, wantErr
+		return nil, "", wantErr
 	}
 	t.Cleanup(func() { trailRefreshAPIClient = previous })
 
@@ -52,14 +52,17 @@ func TestProbeAndCacheTrailsEnablement_CachesEnabledDecision(t *testing.T) {
 	testutil.InitRepo(t, repoDir)
 	t.Chdir(repoDir)
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.RequestURI != "/api/v1/repos/repo-placement-id/changes?per_page=1" {
+			t.Errorf("unexpected enablement probe: %s", r.RequestURI)
+		}
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(srv.Close)
 
 	previous := trailRefreshAPIClient
-	trailRefreshAPIClient = func(_ context.Context, _ bool, _, _, _ string) (*api.Client, error) {
-		return api.NewClientWithBaseURL("tok", srv.URL), nil
+	trailRefreshAPIClient = func(_ context.Context, _ bool, _, _, _ string) (*api.Client, string, error) {
+		return api.NewClientWithBaseURL("tok", srv.URL), "repo-placement-id", nil
 	}
 	t.Cleanup(func() { trailRefreshAPIClient = previous })
 
@@ -93,8 +96,8 @@ func TestProbeAndCacheTrailsEnablement_NotOnboardedSavesDisabledCache(t *testing
 	t.Chdir(repoDir)
 
 	previous := trailRefreshAPIClient
-	trailRefreshAPIClient = func(context.Context, bool, string, string, string) (*api.Client, error) {
-		return nil, fmt.Errorf("resolve the Entire cell for acme/widget: %w", errRepoNotOnboarded)
+	trailRefreshAPIClient = func(context.Context, bool, string, string, string) (*api.Client, string, error) {
+		return nil, "", fmt.Errorf("resolve the Entire cell for acme/widget: %w", errRepoNotOnboarded)
 	}
 	t.Cleanup(func() { trailRefreshAPIClient = previous })
 
@@ -124,9 +127,9 @@ func TestProbeAndCacheTrailsEnablement_AppliesItsOwnBudget(t *testing.T) {
 	previous := trailRefreshAPIClient
 	var deadline time.Time
 	var hasDeadline bool
-	trailRefreshAPIClient = func(ctx context.Context, _ bool, _, _, _ string) (*api.Client, error) {
+	trailRefreshAPIClient = func(ctx context.Context, _ bool, _, _, _ string) (*api.Client, string, error) {
 		deadline, hasDeadline = ctx.Deadline()
-		return nil, errors.New("stop before any network call")
+		return nil, "", errors.New("stop before any network call")
 	}
 	t.Cleanup(func() { trailRefreshAPIClient = previous })
 
@@ -156,8 +159,8 @@ func TestProbeAndCacheTrailsEnablement_CachesEvenWhenTheParentIsDone(t *testing.
 	t.Chdir(repoDir)
 
 	previous := trailRefreshAPIClient
-	trailRefreshAPIClient = func(context.Context, bool, string, string, string) (*api.Client, error) {
-		return nil, fmt.Errorf("resolve the Entire cell for acme/widget: %w", errRepoNotOnboarded)
+	trailRefreshAPIClient = func(context.Context, bool, string, string, string) (*api.Client, string, error) {
+		return nil, "", fmt.Errorf("resolve the Entire cell for acme/widget: %w", errRepoNotOnboarded)
 	}
 	t.Cleanup(func() { trailRefreshAPIClient = previous })
 

@@ -20,8 +20,8 @@ import (
 const (
 	trailMergeTestRepoID = "repo_example"
 	trailMergeTestHead   = "head-example"
-	trailMergeRepoPath   = "/api/v1/repos/" + trailMergeTestRepoID + "/trails/7"
-	trailMergeLookupBase = "/api/v1/repos/repo_example/trails"
+	trailMergeRepoPath   = "/api/v1/repos/" + trailMergeTestRepoID + "/changes/7"
+	trailMergeLookupBase = "/api/v1/repos/repo_example/changes"
 )
 
 // trailMergeability builds a mergeability body in the server's shape
@@ -64,7 +64,7 @@ func withField(key string, value any) func(map[string]any) {
 
 var (
 	blocked         = withField("mergeable", false)
-	baseChecksRed   = withGate(map[string]any{"gate_type": "base_checks", "gate_key": "base_checks", "blocking": true, "status": "failed", "state": "evaluated", "rationale": "trunk is red: acme/entire-api build #1234 failed", "value": map[string]any{"web_url": "https://buildkite.com/acme/entire-api/builds/1234", "build_number": 1234}})
+	baseChecksRed   = withGate(map[string]any{"gate_type": "base_checks", "gate_key": "base_checks", "blocking": true, "status": "failed", "state": "evaluated", "rationale": "trunk is red: acme/entire-api build #1234 failed", "value": map[string]any{"web_url": "https://ci.example.com/acme/entire-api/builds/1234", "build_number": 1234}})
 	findingsAdvisry = withGate(map[string]any{"gate_type": "findings", "gate_key": "findings", "blocking": false, "status": "failed", "state": "evaluated", "rationale": "advisory findings open"})
 )
 
@@ -188,7 +188,7 @@ func TestTrailMerge_BlockedWithoutForce(t *testing.T) {
 
 	require.Error(t, err)
 	require.Contains(t, out, "trunk is red: acme/entire-api build #1234 failed")
-	require.Contains(t, out, "https://buildkite.com/acme/entire-api/builds/1234")
+	require.Contains(t, out, "https://ci.example.com/acme/entire-api/builds/1234")
 	require.Contains(t, err.Error(), "trail #7 is not mergeable")
 	require.Contains(t, err.Error(), "--force")
 	require.Empty(t, stub.mergePosts(), "a blocked merge without --force must not POST")
@@ -247,7 +247,7 @@ func TestTrailMerge_FallbackBlockersReportCI(t *testing.T) {
 
 func TestTrailMerge_ForceSendsBypass(t *testing.T) {
 	for _, target := range []struct{ repo, lookupBase string }{
-		{"gh/acme/widget", "/api/v1/trails/gh/acme/widget"},
+		{"gh/acme/widget", "/api/v1/repos/repo_example/changes"},
 		{"et/acme/widget", trailMergeLookupBase},
 	} {
 		t.Run(target.repo, func(t *testing.T) {
@@ -367,7 +367,7 @@ func TestTrailMerge_ReportsBranchOutcome(t *testing.T) {
 // neither outcome, and the CLI prints none.
 func TestTrailMerge_GitHubTrailReportsNoBranchOutcome(t *testing.T) {
 	stub := &trailMergeStub{
-		t: t, lookupBase: "/api/v1/trails/gh/acme/widget", mergeability: trailMergeability(t, withField("delete_branch_on_merge", nil)),
+		t: t, lookupBase: "/api/v1/repos/repo_example/changes", mergeability: trailMergeability(t, withField("delete_branch_on_merge", nil)),
 		mergeBody: `{"ok":true,"mergeCommitSha":"merge-example","branchDeleted":false}`,
 	}
 	out, err := runTrailMergeTest(t, stub, "gh/acme/widget")
@@ -385,7 +385,7 @@ func TestTrailMerge_GitHubTrailReportsNoBranchOutcome(t *testing.T) {
 func TestTrailMerge_GitHubTrailRefusesDeleteBranchFlags(t *testing.T) {
 	for _, flag := range []string{"--delete-branch", "--no-delete-branch", "--delete-branch=false"} {
 		t.Run(flag, func(t *testing.T) {
-			stub := &trailMergeStub{t: t, lookupBase: "/api/v1/trails/gh/acme/widget", mergeability: trailMergeability(t), mergeBody: `{"ok":true}`}
+			stub := &trailMergeStub{t: t, lookupBase: "/api/v1/repos/repo_example/changes", mergeability: trailMergeability(t), mergeBody: `{"ok":true}`}
 			_, err := runTrailMergeTest(t, stub, "gh/acme/widget", flag)
 
 			require.ErrorContains(t, err, "--delete-branch and --no-delete-branch apply to native trails only")
@@ -747,7 +747,7 @@ func TestTrailMerge_JSON(t *testing.T) {
 		require.JSONEq(t, `{"number":7,"branch":"feature/example","base":"trunk","headSha":"head-example",
 			"mergeable":false,"conflictStatus":"clean","bypassPolicy":"admins",
 			"blockers":[{"gateKey":"base_checks","gateType":"base_checks","status":"failed",
-				"rationale":"trunk is red: acme/entire-api build #1234 failed","url":"https://buildkite.com/acme/entire-api/builds/1234"}],
+				"rationale":"trunk is red: acme/entire-api build #1234 failed","url":"https://ci.example.com/acme/entire-api/builds/1234"}],
 			"dryRun":true,"merged":false,"bypassed":false,"wouldBypass":false}`, out)
 		require.Empty(t, stub.mergePosts())
 	})
@@ -765,7 +765,7 @@ func TestTrailMerge_JSON(t *testing.T) {
 	})
 	t.Run("github trail omits the repo setting", func(t *testing.T) {
 		// The server reports null for a GitHub-backed repo, where GitHub decides.
-		stub := &trailMergeStub{t: t, lookupBase: "/api/v1/trails/gh/acme/widget", mergeability: trailMergeability(t, withField("delete_branch_on_merge", nil)),
+		stub := &trailMergeStub{t: t, lookupBase: "/api/v1/repos/repo_example/changes", mergeability: trailMergeability(t, withField("delete_branch_on_merge", nil)),
 			mergeBody: `{"ok":true,"mergeCommitSha":"merge-example","branchDeleted":false}`}
 		out, err := runTrailMergeTest(t, stub, "gh/acme/widget", "--json")
 

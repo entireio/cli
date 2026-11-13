@@ -39,21 +39,41 @@ Entire automatically scans transcript and metadata content before writing it to 
 
 Detected secrets are replaced with `REDACTED` before the data is ever written to a git object. Of the seven secret-detection passes above, the scanner layer (pass 2) is configurable — see [Choosing secret-scanner engines](#choosing-secret-scanner-engines) below — while the other six are **always on** and cannot be disabled. User-defined rules (inline `custom_redactions` and rule packs) add an eighth secret-detection pass that only runs when configured.
 
+### What Entire leaves out: text the agent attaches to its requests
+
+An agent's session file holds more than the conversation. It also records text the agent attached to its model requests: its system prompt, the instruction files it loaded (`CLAUDE.md`, `AGENTS.md`), and your memory notes. Much of that lives outside the repository, and no redaction rule can recognise what it says, such as a client's name.
+
+Entire blanks that text in the copy it stores, before redaction runs and with no setting to turn it off. Each record stays in place with its type, ids, hashes and file paths, so the transcript keeps its line numbering and its links. Only the text is emptied. The agent's own session file is never changed.
+
+- **Claude Code:** the request log (`api-request-blob` message content, `api-request-shape` system prompt and tool definitions), the system prompt snapshot (`prompt_snapshot`, also renamed so that a resumed session builds a fresh system prompt rather than reusing the empty one), the bodies of loaded instruction and memory files (`instructions` attachments), and the text of every other attachment except what you shared in the conversation: prompts you queued while it worked, files you @-mentioned, IDE selections, and edits Claude Code reports back. That covers session context such as your email address and git status, skill, agent, tool and MCP listings, and hook output, and also attachment kinds Claude Code adds later.
+- **Codex:** the base instructions in `session_meta` and the developer message that repeats them, the `AGENTS.md` text in `world_state`, the user instructions in `turn_context` (Codex 0.132 and older), and the `AGENTS.md` dumps in user messages and compacted history.
+- **Pi:** the `project_context` section of its system messages, which holds the instruction files it loaded, including the copy a compaction record keeps.
+
+Resuming a restored session still works: the agent reads its instructions again from the machine it resumes on, so a session resumed elsewhere runs with that machine's instruction files and memory.
+
+What this does not cover:
+
+- **Other agents.** No injected instruction text was found in Cursor or OpenCode session files. Copilot CLI, Factory AI Droid, Antigravity and external agents have not been examined.
+- **Pi's own system prompt.** Only the instruction files are blanked; the other sections of Pi's system message (its built-in prompt, tool list and working directory) are kept.
+- **Instruction files the agent reads or edits during a session, or that you @-mention.** A tool call that reads or changes `CLAUDE.md` or a memory file is part of the conversation, and its content is stored like any other tool result. The same goes for a file you @-mention or select in your IDE.
+- **Codex model switches.** The developer message Codex writes when the model changes carries the new model's built-in instructions and is kept.
+- **Checkpoints already written.** Checkpoints stored by an older CLI are not rewritten.
+
 ### What Entire does NOT understand: pasted images and screenshots
 
 **Every layer described above — all nine passes, including the opt-in PII layer — reads transcript *text*. There is no OCR pass, no vision-model PII or secret scan, and no gate that holds an image back until someone reviews it. Nothing in Entire ever reads what an image depicts.**
 
-What that means for an image you paste is **not uniform across agents**, because it depends on how the agent writes the image into its transcript. There are three outcomes, and only the first is an exposure:
+What that means for an image you paste is **not uniform across agents**, because it depends on how the agent writes the image into its transcript. There are three outcomes (stored, destroyed, or never stored), and only the first is an exposure:
 
 | Agent | Default | With `redaction.externalize_images` on |
 | --- | --- | --- |
 | Claude Code | **Stored unredacted**, inline in the transcript as base64. The text scanner skips it (the `type: image` / `type: base64` skip rule below) rather than scanning it. | **Stored unredacted** as a raw binary blob under the checkpoint's `assets/` folder. |
-| Codex | **Destroyed.** Codex writes images as `data:` URIs inside `image_url` and tool-output strings, which the skip rule does not match, so the entropy layer treats the base64 as a secret and replaces it. The stored transcript keeps the surrounding message; the image is gone. | **Stored unredacted** under `assets/` (externalization runs before redaction, which is what preserves it). |
+| Codex | **Stored unredacted**, inline in the transcript as base64. Codex writes images as `data:image/…;base64,` URIs (in `input_image` items, tool output, and metadata such as browser screenshots), which the data URI skip rule below matches. Sessions captured before that rule existed have the image destroyed instead: the entropy layer spliced `REDACTED` into the base64, and that cannot be undone. A data URI embedded inside a longer string is still scanned and still destroyed. | **Stored unredacted** under `assets/`. |
 | Cursor | **Not stored in the repository at all.** Cursor keeps images in its own per-session SQLite store, never in the transcript Entire reads. | **Stored unredacted** under `assets/`, captured from that store. |
 | Pi | **Stored unredacted**, inline in the transcript as base64. Pi writes images as `{"type": "image", "data": …}` items, which the same skip rule matches. | **Stored unredacted** under `assets/`. |
 | OpenCode, Copilot CLI, Factory Droid | Depends on the agent's own transcript shape; Entire has no image handling for these. Assume the Claude Code row unless you have checked. | Unchanged — the setting only affects the four agents above. |
 
-**Do not treat the Codex row as a protection.** It is a side effect of a skip rule not matching a shape, not a deliberate safeguard: it destroys data you may want, it does not apply to the `assets/` path, and a change to either the rule or Codex's format would flip it to the exposure case without notice.
+**Do not treat a destroyed image as a protection.** Where an image is destroyed, that is a side effect of a skip rule not matching a shape, not a deliberate safeguard: it destroys data you may want, and a change to either the rule or the agent's format flips it to the exposure case without notice.
 
 Where an image *is* stored, it is byte-for-byte what you pasted — completely unredacted — because byte-level regex and entropy redaction cannot inspect binary image data without corrupting it, so Entire does not attempt it. That is a deliberate design choice, not a bug.
 
@@ -151,7 +171,7 @@ If a custom pattern itself reveals sensitive structure (e.g. an internal ID form
 
 Two local copies of transcript content are never redacted and never reach the remote:
 
-`.entire/metadata/<session>/full.jsonl` is Entire's own local working copy of the transcript, written mode `0600`. It is *sanitized* (agent state that cannot be replayed out of a checkpoint is stripped) but **not redacted** — redaction happens on the way into a git object, not on this file. It is the input condensation reads from when the live agent transcript is no longer available.
+`.entire/metadata/<session>/full.jsonl` is Entire's own local working copy of the transcript, written mode `0600`. It is *sanitized* (agent state that cannot be replayed out of a checkpoint is stripped, and [the text the agent attaches to its requests](#what-entire-leaves-out-text-the-agent-attaches-to-its-requests) is blanked) but **not redacted** — redaction happens on the way into a git object, not on this file. It is the input condensation reads from when the live agent transcript is no longer available.
 
 The agent's own transcript is never modified at all. Entire reads from it and leaves it alone, because the agent is writing to it continuously and editing under the agent's feet would corrupt the session.
 
@@ -330,7 +350,7 @@ File an issue when the rule would benefit every Entire user (e.g., a major SaaS 
 
 - **Best-effort.** Novel or low-entropy secrets (short passwords, predictable tokens) may not be caught.
 - **Filenames and binary data.** Secrets in filenames, binary files, or deeply nested structures may not be detected.
-- **JSONL skip rules.** Entire skips scanning the string values of fields whose name *ends in* `signature` (so `thinkingSignature` too), fields ending in `id`/`ids`, and structural-path fields (`filepath`, `file_path`, `cwd`, `root`, `directory`, `dir`, `path`) to avoid false positives. That includes strings in an array under such a field; objects nested under one are still scanned. Because the rule matches by suffix, a string directly under an unrelated name such as `valid` or `android` is skipped too. Objects whose `type` starts with `image` or equals `base64` are also skipped — and that skip is what leaves a pasted image unredacted rather than merely unflagged. It matches some agents' image shapes and not others, which is why the outcome differs per agent: see [What Entire does NOT understand: pasted images and screenshots](#what-entire-does-not-understand-pasted-images-and-screenshots) above.
+- **JSONL skip rules.** Entire skips scanning the string values of fields whose name *ends in* `signature` (so `thinkingSignature` too), fields ending in `id`/`ids`, and structural-path fields (`filepath`, `file_path`, `cwd`, `root`, `directory`, `dir`, `path`) to avoid false positives. That includes strings in an array under such a field; objects nested under one are still scanned. Because the rule matches by suffix, a string directly under an unrelated name such as `valid` or `android` is skipped too. Objects whose `type` starts with `image` or equals `base64` are also skipped, as is any string that is exactly a `data:image/<png|jpeg|jpg|gif|webp>;base64,` URI (subtype case-insensitive) whose decoded bytes start with a PNG, JPEG, GIF or WebP signature, unless it sits under a credential key (the string only, not its siblings) — and those skips are what leave a pasted image unredacted rather than merely unflagged. It matches some agents' image shapes and not others, which is why the outcome differs per agent: see [What Entire does NOT understand: pasted images and screenshots](#what-entire-does-not-understand-pasted-images-and-screenshots) above.
 - **JSON keys are not scanned.** Only values are. A secret used as an object key, such as a token as a header name, is stored as written.
 - **A secret recognized only by its key is redacted only there.** A value such as a hex string under `api_key` is replaced where it sits. The same value elsewhere, in another field, in prose, or on another line, is redacted only if a detector flags it there on its own.
 - **Built-in PII patterns are US-centric.** `phone` matches North American (NANP) formats only — international formats, including E.164 numbers outside `+1`, are not detected. `address` matches the street line only; city, state, and ZIP/postcode are preserved. If you handle personal data from other regions, add `custom_patterns` for your locale rather than relying on the built-in categories alone.

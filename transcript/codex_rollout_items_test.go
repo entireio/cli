@@ -15,7 +15,7 @@ import (
 // path reads; the item path ignores it.
 const codexItemsRollout = `{"timestamp":"2030-01-01T00:00:00.000Z","type":"session_meta","payload":{"id":"s1"}}
 {"timestamp":"2030-01-01T00:00:01.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}
-{"timestamp":"2030-01-01T00:00:01.000Z","type":"turn_context","payload":{"turn_id":"t1","model":"test-model"}}
+{"timestamp":"2030-01-01T00:00:01.000Z","type":"turn_context","payload":{"turn_id":"t1","cwd":"/work","model":"test-model"}}
 {"timestamp":"2030-01-01T00:00:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"list the files"}]}}
 {"timestamp":"2030-01-01T00:00:02.000Z","type":"event_msg","payload":{"type":"item_completed","turn_id":"t1","item":{"type":"UserMessage","id":"u1","content":[{"type":"text","text":"list the files"}]}}}
 {"timestamp":"2030-01-01T00:00:03.000Z","type":"event_msg","payload":{"type":"item_completed","turn_id":"t1","item":{"type":"AgentMessage","id":"m1","content":[{"type":"Text","text":"Listing."}]}}}
@@ -60,7 +60,8 @@ func TestHasCodexItems(t *testing.T) {
 // Each call's usage is the difference between its closing snapshot and the
 // one before, on the call's last assistant line: the first call (m1, e1) gets
 // 100-60 = 40 fresh, 60 cached, 10 out, 4 reasoning on e1; the second (m2)
-// gets 150-100 = 50 fresh, 100 cached, 5 out, and no reasoning (4-4).
+// gets 150-100 = 50 fresh, 100 cached, 5 out, and no reasoning (4-4). The
+// command's result has its exit code and its own directory.
 func TestConvertCodexItems(t *testing.T) {
 	t.Parallel()
 	out, err := Convert([]byte(codexItemsRollout), codexItemsOpts)
@@ -69,7 +70,7 @@ func TestConvertCodexItems(t *testing.T) {
 	}
 	want := `{"v":1,"agent":"codex","cli_version":"0.5.1","type":"user","ts":"2030-01-01T00:00:02.000Z","id":"u1","content":[{"text":"list the files"}]}
 {"v":1,"agent":"codex","cli_version":"0.5.1","type":"assistant","ts":"2030-01-01T00:00:03.000Z","id":"m1","content":[{"type":"text","text":"Listing."}]}
-{"v":1,"agent":"codex","cli_version":"0.5.1","type":"assistant","ts":"2030-01-01T00:00:04.000Z","id":"e1","model":"test-model","input_tokens":40,"output_tokens":10,"cache_read_tokens":60,"reasoning_tokens":4,"content":[{"id":"e1","input":{"command":"ls"},"name":"Bash","result":{"output":"a.txt\n","status":"success"},"type":"tool_use"}]}
+{"v":1,"agent":"codex","cli_version":"0.5.1","type":"assistant","ts":"2030-01-01T00:00:04.000Z","id":"e1","model":"test-model","input_tokens":40,"output_tokens":10,"cache_read_tokens":60,"reasoning_tokens":4,"content":[{"id":"e1","input":{"command":"ls"},"name":"Bash","result":{"output":"a.txt\n","status":"success","exitCode":0,"cwd":"/work/repo"},"type":"tool_use"}]}
 {"v":1,"agent":"codex","cli_version":"0.5.1","type":"assistant","ts":"2030-01-01T00:00:06.000Z","id":"m2","model":"test-model","input_tokens":50,"output_tokens":5,"cache_read_tokens":100,"content":[{"type":"text","text":"Done."}]}
 `
 	if string(out) != want {
@@ -77,9 +78,37 @@ func TestConvertCodexItems(t *testing.T) {
 	}
 }
 
+// codexItemsTurnCWDRollout has a file change after its turn_context, so a
+// slice that starts after the turn_context must still give the change the
+// turn's directory.
+const codexItemsTurnCWDRollout = `{"timestamp":"2030-01-01T00:00:00.000Z","type":"session_meta","payload":{"id":"s1"}}
+{"timestamp":"2030-01-01T00:00:01.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}
+{"timestamp":"2030-01-01T00:00:01.000Z","type":"turn_context","payload":{"turn_id":"t1","cwd":"/work/repo","model":"test-model"}}
+{"timestamp":"2030-01-01T00:00:02.000Z","type":"event_msg","payload":{"type":"item_completed","turn_id":"t1","item":{"type":"UserMessage","id":"u1","content":[{"type":"text","text":"add a file"}]}}}
+{"timestamp":"2030-01-01T00:00:03.000Z","type":"event_msg","payload":{"type":"item_completed","turn_id":"t1","item":{"type":"AgentMessage","id":"m1","content":[{"type":"Text","text":"Adding."}]}}}
+{"timestamp":"2030-01-01T00:00:04.000Z","type":"event_msg","payload":{"type":"item_completed","turn_id":"t1","item":{"type":"FileChange","id":"f1","changes":{"/work/repo/a.txt":{"type":"add","content":"hi\n"}},"status":"completed"}}}
+{"timestamp":"2030-01-01T00:00:05.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":60,"output_tokens":10}}}}
+`
+
 func TestConvertWithBoundaryCodexItems(t *testing.T) {
 	t.Parallel()
-	content := []byte(codexItemsRollout)
+	full, err := Convert([]byte(codexItemsTurnCWDRollout), codexItemsOpts)
+	if err != nil {
+		t.Fatalf("Convert: %v", err)
+	}
+	const fileChange = `{"v":1,"agent":"codex","cli_version":"0.5.1","type":"assistant","ts":"2030-01-01T00:00:04.000Z","id":"f1","model":"test-model","input_tokens":40,"output_tokens":10,"cache_read_tokens":60,"content":[{"id":"f1","input":{"changes":[{"path":"/work/repo/a.txt","kind":"add","diff":"hi\n"}]},"name":"FileChange","result":{"output":"","status":"success","cwd":"/work/repo"},"type":"tool_use"}]}`
+	if !strings.Contains(string(full), fileChange+"\n") {
+		t.Errorf("Convert: no file change line with the turn's cwd\n got %s\nwant a line %s", full, fileChange)
+	}
+	for _, rollout := range []string{codexItemsRollout, codexItemsTurnCWDRollout} {
+		assertCodexItemsBoundary(t, []byte(rollout))
+	}
+}
+
+// assertCodexItemsBoundary checks every StartLine of a rollout: the full
+// output is Convert's, and the delta is its last lines from the boundary.
+func assertCodexItemsBoundary(t *testing.T, content []byte) {
+	t.Helper()
 	full, err := Convert(content, codexItemsOpts)
 	if err != nil {
 		t.Fatalf("Convert: %v", err)
@@ -107,6 +136,60 @@ func TestConvertWithBoundaryCodexItems(t *testing.T) {
 		if want := strings.Join(fullLines[boundary:], ""); string(delta) != want {
 			t.Errorf("StartLine %d: delta is not the full output's last %d lines\ngot:\n%s\nwant:\n%s", start, len(fullLines)-boundary, delta, want)
 		}
+	}
+}
+
+// A file change's result carries the directory of the turn it is in: each
+// turn_context replaces it, one without a string cwd keeps the last (and its
+// model is still read), and a file:// URI is read as its path. A declined
+// command is an error marked declined.
+func TestConvertCodexItemsTurnCWD(t *testing.T) {
+	t.Parallel()
+	fileChange := func(id, path string) string {
+		return `{"timestamp":"t","type":"event_msg","payload":{"type":"item_completed","turn_id":"t1","item":{"type":"FileChange","id":"` + id +
+			`","changes":{"` + path + `":{"type":"update","unified_diff":"@@ -1 +1 @@\n-a\n+b\n"}},"status":"completed"}}}` + "\n"
+	}
+	turn := func(payload string) string {
+		return `{"timestamp":"t","type":"turn_context","payload":` + payload + `}` + "\n"
+	}
+	usage := func(in int) string {
+		return fmt.Sprintf(`{"timestamp":"t","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":%d,"cached_input_tokens":0,"output_tokens":1}}}}`, in) + "\n"
+	}
+	content := `{"timestamp":"t","type":"session_meta","payload":{"id":"s1"}}
+{"timestamp":"t","type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}
+` + turn(`{"turn_id":"t1","cwd":"/work/repo","model":"m1"}`) + `{"timestamp":"t","type":"event_msg","payload":{"type":"item_completed","turn_id":"t1","item":{"type":"UserMessage","id":"u1","content":[{"type":"text","text":"hi"}]}}}
+` + fileChange("f1", "/work/repo/a.go") +
+		`{"timestamp":"t","type":"event_msg","payload":{"type":"item_completed","turn_id":"t1","item":{"type":"CommandExecution","id":"e1","command":["/bin/bash","-lc","rm -rf build"],"cwd":"file:///work/repo","status":"declined"}}}
+` + turn(`{"turn_id":"t2","cwd":"/work/other","model":"m2"}`) + fileChange("f2", "/work/other/b.go") +
+		turn(`{"turn_id":"t3","cwd":7,"model":"m3"}`) + fileChange("f3", "/work/other/c.go") + usage(10) +
+		turn(`{"turn_id":"t4","model":"m4"}`) + fileChange("f4", "/work/other/d.go") +
+		turn(`{"turn_id":"t5","cwd":"file:///C:/work/win","model":"m5"}`) + fileChange("f5", `C:\\work\\win\\e.go`) + usage(20)
+	out, err := Convert([]byte(content), codexItemsOpts)
+	if err != nil {
+		t.Fatalf("Convert: %v", err)
+	}
+	lines, err := Decode(out)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	got := map[string]*ToolResult{}
+	for _, l := range lines {
+		for _, b := range l.Blocks {
+			if b.Type == BlockToolUse {
+				got[b.ID] = b.Result
+			}
+		}
+		if want := map[string]string{"f3": "m3", "f5": "m5"}[l.ID]; want != "" && l.Model != want {
+			t.Errorf("%s: model = %q, want %s", l.ID, l.Model, want)
+		}
+	}
+	for id, cwd := range map[string]string{"f1": "/work/repo", "f2": "/work/other", "f3": "/work/other", "f4": "/work/other", "f5": "C:/work/win"} {
+		if r := got[id]; r == nil || r.CWD != cwd || r.Status != ToolStatusSuccess {
+			t.Errorf("%s: result %+v, want cwd %q", id, r, cwd)
+		}
+	}
+	if r := got["e1"]; r == nil || r.Status != ToolStatusError || !r.Declined || r.ExitCode != nil || r.CWD != "/work/repo" {
+		t.Errorf("declined command: result %+v", r)
 	}
 }
 
