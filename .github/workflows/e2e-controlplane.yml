@@ -22,7 +22,11 @@ permissions: {}
 jobs:
   controlplane:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Setup (~2m), the login retries (up to ~11m, spent in TestMain before
+    # go test's 20m -timeout starts counting), and the tests themselves. Keep
+    # this above their sum so the test timeout fires, and the report and
+    # login-attempt diagnoses print, before GitHub kills the job.
+    timeout-minutes: 40
     # Fork PRs get no secrets, and Dependabot-triggered runs get only
     # Dependabot secrets, so either could only fail at login. It runs for other
     # same-repo PRs, pushes to main, and manual dispatches.
