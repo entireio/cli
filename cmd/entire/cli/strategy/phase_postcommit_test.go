@@ -454,6 +454,47 @@ func TestPostCommit_LegacySession_NoTranscriptSize_Condenses(t *testing.T) {
 		"CheckpointTranscriptSize should be populated after condensation (self-healing)")
 }
 
+// TestPostCommit_BaselineLargerThanStoredTranscript_Condenses verifies that a
+// baseline recorded before the agent's sanitizer started removing more (so it
+// is larger than the stored transcript can currently be) does not hide the
+// session's new content. After condensation the baseline is back in the stored
+// transcript's coordinate.
+func TestPostCommit_BaselineLargerThanStoredTranscript_Condenses(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "test-postcommit-baseline-above-stored"
+
+	setupSessionWithCheckpoint(t, s, repo, dir, sessionID)
+
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	storedSize := mustStoredTranscriptSize(t, state.SessionID)
+	state.Phase = session.PhaseIdle
+	state.LastInteractionTime = nil
+	state.CheckpointTranscriptStart = 1
+	state.CheckpointTranscriptSize = storedSize + 1000
+	require.NoError(t, s.saveSessionState(context.Background(), state))
+
+	commitWithCheckpointTrailer(t, repo, dir, "b2c3d4e5f6a1")
+
+	err = s.PostCommit(context.Background())
+	require.NoError(t, err)
+
+	_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err,
+		"entire/checkpoints/v1 should exist: a baseline above the stored size cannot prove there is no new content")
+
+	state, err = s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	assert.Equal(t, storedSize, state.CheckpointTranscriptSize,
+		"CheckpointTranscriptSize should be re-based onto the stored transcript's size")
+}
+
 // TestPostCommit_EndedSession_FilesTouched_Condenses verifies that an ENDED
 // session with files touched and new content condenses on commit.
 func TestPostCommit_EndedSession_FilesTouched_Condenses(t *testing.T) {

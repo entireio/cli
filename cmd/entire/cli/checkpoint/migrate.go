@@ -150,7 +150,11 @@ func migrateBranchToRefs(
 	walkErr := v1.walk(ctx, false, func(cid id.CheckpointID) error {
 		result.Total++
 
-		refName, err := RefName(cid)
+		// Preserve the spelling of an existing folded ref. A migration can run
+		// again after a case-insensitive filesystem packed a ref under the
+		// alternate shard spelling; queuing the canonical name would leave an
+		// unpushable name.
+		refName, err := refsStore.writeRefName(cid)
 		if err != nil {
 			return fmt.Errorf("ref name for checkpoint %s: %w", cid, err)
 		}
@@ -312,7 +316,7 @@ func (v *legacyV1) refusedByWritePath(ctx context.Context, cid id.CheckpointID, 
 	// A checkpoint with its own ref is not this function's to resolve, so it
 	// is skipped whatever its v1 copies say, including when they cannot be
 	// read (a shallow or partial clone).
-	if exists, err := refExists(v.repo, refName); err != nil || exists {
+	if exists, err := LocalRefExists(v.repo, cid); err != nil || exists {
 		return pick, false, err
 	}
 	if !errors.Is(pick.err, ErrLegacyCheckpointDiverged) {
@@ -327,7 +331,7 @@ func (v *legacyV1) refusedByWritePath(ctx context.Context, cid id.CheckpointID, 
 		return pick, false, fmt.Errorf("couldn't reach the remote to check checkpoint %s for a ref another clone pushed, "+
 			"so nothing was changed; try again once it is reachable: %w", cid, err)
 	}
-	exists, err := refExists(v.repo, refName)
+	exists, err := LocalRefExists(v.repo, cid)
 	return pick, err == nil && !exists, err
 }
 
@@ -507,15 +511,19 @@ func (v *legacyV1) describeCopy(c *checkpointCopy) LegacyCheckpointCopy {
 	}
 }
 
-func refExists(repo *git.Repository, refName plumbing.ReferenceName) (bool, error) {
-	_, err := repo.Reference(refName, true)
+// LocalRefExists reports whether cid has its own ref in repo, under either
+// spelling of its shard (see resolveLocalRef). A caller that checked the
+// canonical name alone would take a ref stored folded for a missing one and
+// fetch or copy a second ref for the same checkpoint.
+func LocalRefExists(repo *git.Repository, cid id.CheckpointID) (bool, error) {
+	_, err := newGitRefsStore(repo).resolveLocalRef(cid)
 	switch {
 	case err == nil:
 		return true, nil
 	case errors.Is(err, plumbing.ErrReferenceNotFound):
 		return false, nil
 	default:
-		return false, fmt.Errorf("resolve checkpoint ref %s: %w", refName, err)
+		return false, err
 	}
 }
 
@@ -561,7 +569,10 @@ func importBranchCheckpoint(
 	if imported && mode != importChosenCopy {
 		return false, nil
 	}
-	refName, err := RefName(cid)
+	// The compare-and-swap resolves its expected value under the name being
+	// updated, so it has to name the spelling an existing folded ref is stored
+	// under: the canonical name holds nothing there once the ref is packed.
+	refName, err := refsStore.writeRefName(cid)
 	if err != nil {
 		return false, fmt.Errorf("ref name for checkpoint %s: %w", cid, err)
 	}
@@ -570,7 +581,7 @@ func importBranchCheckpoint(
 	if err := updateRef(ctx, repo, refName, func() (plumbing.Hash, plumbing.Hash, error) {
 		// Re-read the parent and idempotency state on every CAS retry so an
 		// import commit never overwrites a concurrently advanced ref.
-		parent, expected, err := importBase(repo, refsStore, cid)
+		parent, expected, err := importBase(refsStore, cid)
 		if err != nil {
 			return plumbing.ZeroHash, plumbing.ZeroHash, err
 		}
@@ -612,7 +623,7 @@ func importedTree(
 	if err != nil {
 		return plumbing.ZeroHash, false, fmt.Errorf("normalize checkpoint %s: %w", cid, err)
 	}
-	parent, _, err := importBase(repo, refsStore, cid)
+	parent, _, err := importBase(refsStore, cid)
 	if err != nil {
 		return plumbing.ZeroHash, false, err
 	}
@@ -623,19 +634,15 @@ func importedTree(
 // or zero when the ref is absent or its commit is unreadable, which an import
 // repairs with an orphan commit. expected is the ref's current hash, which the
 // import's compare-and-swap checks, so a concurrent repair wins cleanly.
-func importBase(repo *git.Repository, refsStore *gitRefsStore, cid id.CheckpointID) (parent, expected plumbing.Hash, err error) {
+func importBase(refsStore *gitRefsStore, cid id.CheckpointID) (parent, expected plumbing.Hash, err error) {
 	parent, _, err = refsStore.refBase(cid)
 	switch {
 	case err == nil:
 		return parent, parent, nil
 	case errors.Is(err, plumbing.ErrObjectNotFound):
-		refName, nameErr := RefName(cid)
-		if nameErr != nil {
-			return plumbing.ZeroHash, plumbing.ZeroHash, fmt.Errorf("ref name for checkpoint %s: %w", cid, nameErr)
-		}
-		ref, refErr := repo.Reference(refName, true)
+		ref, refErr := refsStore.resolveLocalRef(cid)
 		if refErr != nil {
-			return plumbing.ZeroHash, plumbing.ZeroHash, fmt.Errorf("resolve unreadable ref %s: %w", refName, refErr)
+			return plumbing.ZeroHash, plumbing.ZeroHash, fmt.Errorf("resolve unreadable ref for checkpoint %s: %w", cid, refErr)
 		}
 		return plumbing.ZeroHash, ref.Hash(), nil
 	default:

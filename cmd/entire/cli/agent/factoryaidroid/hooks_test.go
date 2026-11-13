@@ -779,7 +779,7 @@ func hooksInstalledNow(t *testing.T, ag interface {
 // is chosen, so sharing the selector would restate the implementation and pass
 // either way.
 func droidWindowsHookCommand(verb string) string {
-	return agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks factoryai-droid " + verb)
+	return agentpkg.WrapWindowsProductionSilentHookCommandForCmdHost("entire hooks factoryai-droid " + verb)
 }
 
 func droidWindowsStopHookCommand() string {

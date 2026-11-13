@@ -106,9 +106,9 @@ func resolveProjectTrailChange(cmd *cobra.Command, sel projectTrailChangeSelecto
 	// A change selector can name another repository even without --repo.
 	// Only a lookup proven to target this clone may update its enablement.
 	if localOnly || (cacheLocal && trailRepoFlag(cmd) == "") {
-		defer func() { noteTrailCommandEnablement(ctx, client, err) }()
+		defer func() { noteTrailCommandEnablement(ctx, client, repoID, err) }()
 	}
-	base, err := trailRepoBasePath(host, owner, sel.Repo, repoID)
+	base, err := trailRepoBasePath(repoID)
 	if err != nil {
 		return nil, err
 	}

@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/internal/entireclient/httpclient"
 )
@@ -560,5 +563,21 @@ func TestParseNotFoundRepos_MatchesAcrossForgeSpellings(t *testing.T) {
 	// A request never leaves the CLI bare, so a bare request matches nothing.
 	if got = parseNotFoundRepos("repository not found: gh/a/b, a/b", []string{"a/b"}); got != nil {
 		t.Fatalf("expected a bare request to match no echo, got %v", got)
+	}
+}
+
+// A refused ENTIRE_TOKEN secret also arrives as a *url.Error (the bearer is
+// resolved inside the transport), but repeating the poll is refused again; an
+// unavailable Core is worth repeating like any 5xx.
+func TestPollIsTransient_SecretExchange(t *testing.T) {
+	t.Parallel()
+	wrap := func(status int) error {
+		return &url.Error{Op: "Get", URL: "https://cell.example", Err: fmt.Errorf("resolve bearer: %w", &auth.SecretExchangeError{StatusCode: status})}
+	}
+	if pollIsTransient(wrap(http.StatusBadRequest)) {
+		t.Error("a refused secret must not be retried")
+	}
+	if !pollIsTransient(wrap(http.StatusServiceUnavailable)) {
+		t.Error("an unavailable Core must be retried")
 	}
 }

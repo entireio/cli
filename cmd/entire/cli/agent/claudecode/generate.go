@@ -20,6 +20,7 @@ const (
 	flagOutputFormat   = "--output-format"
 	flagSettingSources = "--setting-sources"
 	flagStrictMCP      = "--strict-mcp-config"
+	flagTools          = "--tools"
 	modelHaiku         = "haiku"
 )
 
@@ -66,7 +67,7 @@ func buildGenerateArgs(model, settingsPath string) []string {
 		"--print", flagOutputFormat, "json",
 		"--model", model,
 		flagSettingSources, "",
-		"--tools", "",
+		flagTools, "",
 		flagStrictMCP,
 	}
 	if settingsPath != "" {
@@ -88,7 +89,7 @@ func buildStreamingGenerateArgs(model, settingsPath string) []string {
 		"--verbose",
 		"--model", model,
 		flagSettingSources, "",
-		"--tools", "",
+		flagTools, "",
 		flagStrictMCP,
 	}
 	if settingsPath != "" {

@@ -276,6 +276,11 @@ func TestAgentPackages_NoForbiddenImports(t *testing.T) {
 	// every agent: it is one agent's answer to one agent's problem, and a
 	// second agent that wants it has to say so here first.
 	scopedPrefixes := map[string][]string{
+		"claudecode": {
+			// Restricted reviews construct an allowlisted subprocess environment;
+			// PATH must use the canonical absolute-directory filter, not a copy.
+			repoPrefix + "execx",
+		},
 		"antigravity": {
 			// Cross-process advisory locks. agy fires its title command on
 			// every state change without serializing, so the title-tee takes
