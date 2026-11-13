@@ -142,6 +142,38 @@ func TestJSONLBytesCounts_IP(t *testing.T) {
 	}
 }
 
+// A custom pattern named ip that matches inside a built-in IP match keeps its
+// own region, so the version-key rule can't expose it, but the address still
+// counts once. Other labels count every match, as they did before: a custom
+// email pattern inside a built-in email match counts as its own match.
+func TestJSONLBytesCounts_CustomPatternInsideBuiltInMatch(t *testing.T) {
+	tests := []struct {
+		name                 string
+		category             PIICategory
+		label, pattern, line string
+		wantPII              int
+		wantBuckets          map[string]int
+	}{
+		{"ip counts once", PIIIP, "ip", `10\.0\.0\.1`, "peer ::ffff:10.0.0.1", 1, map[string]int{"IP": 1}},
+		{"email counts each match", PIIEmail, "email", `alice`, "mail alice@corp-mail.org", 2, map[string]int{"EMAIL": 2}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ConfigurePII(PIIConfig{
+				Enabled:        true,
+				Categories:     map[PIICategory]bool{tt.category: true},
+				CustomPatterns: map[string]string{tt.label: tt.pattern},
+			})
+			t.Cleanup(resetPIIConfig)
+
+			got := countsOf(t, textLine(t, tt.line))
+			require.Equal(t, 1, got.Replacements)
+			require.Equal(t, tt.wantPII, got.Layers["pii"])
+			require.Equal(t, tt.wantBuckets, got.PII)
+		})
+	}
+}
+
 // A credential value replaced whole counts its placeholder, not the PII
 // matches inside it, which are not written.
 func TestJSONLBytesCounts_CredentialValueWithIP(t *testing.T) {

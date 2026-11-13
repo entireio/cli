@@ -581,7 +581,11 @@ func isVersionValue(key, val string) bool {
 
 // dropNestedIPRegions removes an IP region that lies inside another one, so
 // an address counts once: both IP rules match an IPv4-mapped address, the
-// IPv4 rule only its dotted tail (::ffff:10.0.0.1).
+// IPv4 rule only its dotted tail (::ffff:10.0.0.1). A custom pattern named ip
+// is never dropped for lying inside a built-in IP match: the version-key rule
+// can remove the built-in match afterwards, which would leave the custom
+// match's text visible ({"version":"::ffff:10.0.0.5"}). The tally still
+// counts the address once.
 func dropNestedIPRegions(regions []taggedRegion) []taggedRegion {
 	if len(regions) < 2 {
 		return regions
@@ -595,7 +599,7 @@ func dropNestedIPRegions(regions []taggedRegion) []taggedRegion {
 	kept := regions[:1]
 	for _, r := range regions[1:] {
 		last := kept[len(kept)-1]
-		if r.label == labelIP && last.label == labelIP && r.end <= last.end {
+		if r.label == labelIP && last.label == labelIP && r.builtinIP == last.builtinIP && r.end <= last.end {
 			continue
 		}
 		kept = append(kept, r)
