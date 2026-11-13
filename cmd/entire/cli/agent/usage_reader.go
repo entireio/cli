@@ -83,8 +83,12 @@ type UsageCounterSource interface {
 }
 
 // usageCursorVersion changes with the cursor's meaning; another version's
-// cursor is ignored.
-const usageCursorVersion = 4
+// cursor is ignored. Version 5 re-reads cursors so subagent usage cached
+// before subagent models were recorded is read again with its model. A
+// mismatched cursor is a fresh read, not a restart, and the ledger's
+// checkpointed marks are ledger fields, not cursor state, so nothing is
+// counted twice.
+const usageCursorVersion = 5
 
 // usageCursorCheckBytes is how many bytes before a file's offset a cursor
 // fingerprints to detect a rewrite.
