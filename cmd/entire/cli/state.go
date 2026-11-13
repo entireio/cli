@@ -73,7 +73,8 @@ type PrePromptState struct {
 	LastTranscriptLineCount int `json:"last_transcript_line_count,omitempty"`
 
 	// TokenBaseline is an opaque, agent-defined token position captured at turn
-	// start for OutOfBandTokenSource agents (currently Antigravity). At TurnEnd
+	// start for OutOfBandTokenSource agents (currently Antigravity, used when its
+	// transcript has no per-step usage). At TurnEnd
 	// the lifecycle passes it back to CalculateTokenUsageSince to compute the
 	// checkpoint-scoped token delta. Empty for agents with transcript-embedded
 	// token data.

@@ -434,11 +434,13 @@ type TokenCalculator interface {
 }
 
 // OutOfBandTokenSource provides token usage from a source other than the
-// transcript, for agents that never write token data into their transcript or
-// hook payloads. Antigravity's only surface is its title/statusline pipe,
-// captured to disk by `entire hooks antigravity title-tee` (see
-// agent/antigravity/statusline.go); Factory AI Droid keeps a running total in
-// the .settings.json beside each transcript (see agent/factoryaidroid/tokens.go).
+// transcript, for agents that write no token data into their transcript or
+// hook payloads. Older Antigravity's only surface is its title/statusline
+// pipe, captured to disk by `entire hooks antigravity title-tee` (see
+// agent/antigravity/statusline.go); current agy writes per-call usage into
+// the transcript, which its TokenCalculator reads first. Factory AI Droid
+// keeps a running total in the .settings.json beside each transcript (see
+// agent/factoryaidroid/tokens.go).
 //
 // Flow: the lifecycle calls SnapshotTokenBaseline at TurnStart and stores the
 // opaque baseline in PrePromptState; at TurnEnd (when transcript-based
@@ -771,6 +773,36 @@ type SubagentSessionResolver interface {
 	// Returns false for ordinary top-level sessions and whenever the link
 	// cannot be read — callers treat a failure as "not a subagent session".
 	ResolveSubagentSession(sessionRef string) (SubagentSessionLink, bool)
+}
+
+// SubagentReplyCounter is implemented by agents whose parent can stop while its
+// detached subagents still run and may not report its turn's end afterwards
+// (Antigravity: a fullyIdle=false Stop, then nothing). The lifecycle ends such a
+// turn itself once every subagent the turn involved has stopped, has taken in
+// every message the parent sent it, and every reply it sent has reached the
+// parent: a reply still in flight will wake the parent, and a message still in
+// flight will wake the subagent, so neither turn is over.
+type SubagentReplyCounter interface {
+	Agent
+
+	// TurnSubagents returns the subagent session IDs the parent's turn involved
+	// after fromOffset (launched, messaged, or heard from), each with the
+	// exchange the parent's whole transcript records with it.
+	TurnSubagents(parentRef string, fromOffset int) (map[string]SubagentExchange, error)
+
+	// ExchangeWithParent returns the exchange the subagent's transcript records
+	// with parentID.
+	ExchangeWithParent(subagentRef, parentID string) (SubagentExchange, error)
+}
+
+// SubagentExchange counts the messages between a parent and one subagent, as
+// one side's transcript records them.
+type SubagentExchange struct {
+	// Replies is the subagent's messages to the parent.
+	Replies int
+	// Messages is the parent's messages to the subagent, its launch prompt
+	// included.
+	Messages int
 }
 
 // SubagentAwareExtractor provides methods for extracting files and tokens including subagents.

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"sync"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -41,6 +42,11 @@ func (s *ManualCommitStrategy) findSessionsForCommitLinking(ctx context.Context,
 		// rescue this; report it to the caller (hooks log and skip).
 		return nil, err
 	}
+	// A subagent's own session never links a commit: its work is on its
+	// parent's task record. It must go before identity matching in particular,
+	// where a subagent sharing its parent's agent process ties with the parent
+	// and wins on recency.
+	allStates = slices.DeleteFunc(allStates, (*SessionState).IsSubagentSession)
 	sessions, ambiguous, fromFallback := s.findSessionsForWorktreeFromStates(ctx, allStates, worktreePath)
 	guest := s.findSessionByCommitAncestry(ctx, allStates)
 	if guest != nil && fromFallback {

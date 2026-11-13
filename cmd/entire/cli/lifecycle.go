@@ -111,6 +111,7 @@ func DispatchLifecycleEvent(ctx context.Context, ag agent.Agent, event *agent.Ev
 			logging.Info(logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name()),
 				"dropping conditional TurnStart for active session (follow-up invocation)",
 				slog.String("session_id", event.SessionID))
+			noteSubagentFollowUp(ctx, ag, event)
 			return nil
 		}
 	}
@@ -121,7 +122,7 @@ func DispatchLifecycleEvent(ctx context.Context, ag agent.Agent, event *agent.Ev
 	case agent.TurnStart:
 		return handleLifecycleTurnStart(ctx, ag, event)
 	case agent.TurnEnd:
-		return handleLifecycleTurnEnd(ctx, ag, event)
+		return dispatchTurnEnd(ctx, ag, event)
 	case agent.Compaction:
 		return handleLifecycleCompaction(ctx, ag, event)
 	case agent.SessionEnd:
@@ -438,6 +439,14 @@ func handleLifecycleToolUse(ctx context.Context, ag agent.Agent, event *agent.Ev
 		return nil
 	}
 
+	// Before any file filtering: a subagent's first tool call, of any kind, is
+	// the first point it can be marked, and a shell command can edit and commit
+	// without naming a file here.
+	target := event.SessionID
+	if link, isSubagent := markSubagentSession(ctx, ag, event.SessionID, event.SessionRef); isSubagent {
+		target = link.ParentSessionID
+	}
+
 	modified := normalizeToolUsePaths(event.ModifiedFiles, event.CWD, repoRoot)
 	added := normalizeToolUsePaths(event.NewFiles, event.CWD, repoRoot)
 	deleted := normalizeToolUsePaths(event.DeletedFiles, event.CWD, repoRoot)
@@ -454,9 +463,11 @@ func handleLifecycleToolUse(ctx context.Context, ag agent.Agent, event *agent.Ev
 		slog.Int("deleted", len(deleted)),
 	)
 
-	if err := strategy.RecordFilesTouched(ctx, event.SessionID, modified, added, deleted); err != nil {
+	// A subagent's own session records nothing: its changes are the parent's,
+	// recorded on the parent so a commit made while it runs links them there.
+	if err := strategy.RecordFilesTouched(ctx, target, modified, added, deleted); err != nil {
 		logging.Warn(logCtx, "tool-use: failed to record files touched",
-			slog.String("session_id", event.SessionID),
+			slog.String("session_id", target),
 			slog.String("error", err.Error()),
 		)
 	}
@@ -666,6 +677,9 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 	}
 	setupSpan.End()
 
+	// A new turn is not waiting on the previous one's subagents.
+	resetSubagentPause(ctx, logCtx, sessionID)
+
 	// Capture pre-prompt state (including transcript position via TranscriptAnalyzer)
 	_, captureSpan := perf.Start(ctx, "capture_pre_prompt_state")
 	if err := CapturePrePromptState(ctx, ag, sessionID, event.SessionRef); err != nil {
@@ -760,6 +774,11 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 			slog.String("error", mutErr.Error()))
 	}
 	initSpan.End()
+
+	// A subagent whose transcript already names its parent (a Droid Worker's
+	// session_start line) is marked now, before it can do any work. agy writes
+	// a subagent's transcript only after this, so its first ToolUse marks it.
+	markSubagentSession(ctx, ag, sessionID, event.SessionRef)
 
 	// Inject Entire's model-facing context (once per session) for agents whose
 	// transport supports it at TurnStart (e.g. Pi). Extension reads stdout.
@@ -1079,7 +1098,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// parent's next checkpoint. Its usage goes on that record and the parent's
 	// subagent total, never on the Worker's own session total, so it is
 	// counted once.
-	if link, isSubagent := resolveSubagentSessionLink(ctx, ag, transcriptRef); isSubagent {
+	if link, isSubagent := markSubagentSession(ctx, ag, sessionID, transcriptRef); isSubagent {
 		return saveSubagentSessionTaskStep(ctx, subagentSessionStep{
 			link:          link,
 			sessionID:     sessionID,
@@ -1119,7 +1138,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		// resolved and accounted exactly as SaveStep would. Otherwise the
 		// session total misses the turn, and so does the next checkpoint for
 		// agents whose transcript carries no usage (Cursor's stop payload,
-		// Antigravity's out-of-band pipe). An Antigravity turn that commits ALL
+		// older Antigravity's out-of-band pipe). An Antigravity turn that commits ALL
 		// its work mid-turn (its normal flow) lands here with a clean tree.
 		// The tokens are applied by the turn-end transition itself, so a
 		// repeated or concurrent Stop for the same turn adds nothing.
@@ -1287,13 +1306,14 @@ func turnTokenUsageWithoutLedger(ctx context.Context, ag agent.Agent, event *age
 // usage fields) take precedence; otherwise fall back to Codex's child ledger,
 // then to transcript-based computation from the turn's start offset (preferring
 // SubagentAwareExtractor to include subagent tokens), and last to the
-// out-of-band source: Antigravity exposes token usage only via its
-// title/statusline pipe (captured by the title-tee shim), never in the
+// out-of-band source: older Antigravity exposes token usage only via its
+// title/statusline pipe (captured by the title-tee shim), not in the
 // transcript, so its delta is the current cumulative totals minus the
-// TurnStart baseline stored in PrePromptState. Factory AI Droid is the same
-// shape: its transcript carries no usage, and its running total lives in the
-// session's .settings.json. Only one source is used, so a turn is never
-// counted twice.
+// TurnStart baseline stored in PrePromptState. Current agy writes per-call
+// usage into the transcript, which the transcript step reads first. Factory AI
+// Droid is the same shape: its transcript carries no usage, and its running
+// total lives in the session's .settings.json. Only one source is used, so a
+// turn is never counted twice.
 func resolveTurnTokenUsage(ctx context.Context, ag agent.Agent, event *agent.Event, sessionID string, preState *PrePromptState, transcriptData []byte, subagentsDir string, codexInventoryUsage *agent.TokenUsage) *agent.TokenUsage {
 	if event.TokenUsage != nil {
 		return event.TokenUsage
@@ -2860,6 +2880,7 @@ func saveSubagentSessionTaskStep(ctx context.Context, step subagentSessionStep) 
 		logging.Warn(logCtx, "failed to cleanup pre-prompt state",
 			slog.String("error", cleanupErr.Error()))
 	}
+	endParentTurnIfSubagentsDone(ctx, step.ag, step.link.ParentSessionID)
 	return nil
 }
 
@@ -3106,8 +3127,8 @@ func markSessionEnded(ctx context.Context, event *agent.Event, sessionID string,
 }
 
 // computeOutOfBandTokenUsage returns the turn's token delta for
-// OutOfBandTokenSource agents (e.g. Antigravity, whose only token surface is
-// the title/statusline pipe captured by the title-tee shim, and Factory AI
+// OutOfBandTokenSource agents (e.g. older Antigravity, whose only token surface
+// is the title/statusline pipe captured by the title-tee shim, and Factory AI
 // Droid, which keeps a running total beside its transcript): current
 // cumulative totals minus the TurnStart baseline stored in PrePromptState.
 // Returns nil for other agents, on error (logged), or when no data exists.
