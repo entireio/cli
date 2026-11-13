@@ -163,6 +163,9 @@ type userPromptSubmitRaw struct {
 	SessionID      string `json:"session_id"`
 	TranscriptPath string `json:"transcript_path"`
 	Prompt         string `json:"prompt"`
+	// PromptID is only logged. Kept raw so an unexpected type never fails
+	// the hook.
+	PromptID json.RawMessage `json:"prompt_id,omitempty"`
 }
 
 // taskHookInputRaw is the JSON structure from PreToolUse[Task] hook

@@ -40,6 +40,10 @@ type promptLine struct {
 	Message          json.RawMessage `json:"message"`
 }
 
+// taskNotificationPrefix opens the notice Claude Code injects as a user
+// message when a background task (agent, shell, workflow) finishes.
+const taskNotificationPrefix = "<task-notification>"
+
 // injectedUserPrefixes are leading markers of user-side text Claude Code writes
 // without the isMeta flag: background-task completion notices, the marker left
 // when the user interrupts a turn, and `!` bash-mode entries. Anchored on
@@ -51,7 +55,7 @@ type promptLine struct {
 // the user ran is not a prompt to the agent, and unwrapping `<bash-input>`
 // would publish commands like `! cat .env` as the checkpoint's intent.
 var injectedUserPrefixes = []string{
-	"<task-notification>",
+	taskNotificationPrefix,
 	"[Request interrupted by user",
 	"<bash-input>",
 	"<bash-stdout>",
@@ -143,4 +147,10 @@ func userPrompt(raw []byte) (string, bool) {
 		}
 	}
 	return text, true
+}
+
+// isTaskNotification reports whether prompt, ignoring surrounding whitespace,
+// is a background-task completion notice rather than text the user typed.
+func isTaskNotification(prompt string) bool {
+	return strings.HasPrefix(strings.TrimSpace(prompt), taskNotificationPrefix)
 }
