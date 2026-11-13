@@ -30,8 +30,9 @@ func TestClaudeForkedSkillAgent_GetsTaskRecordAndSubagentTokens(t *testing.T) {
 	env := NewFeatureBranchEnv(t)
 	session := env.NewSession()
 
-	writeForkedSkillParentTranscript(t, session.TranscriptPath)
+	// The prompt hook runs before Claude Code writes the turn's response.
 	require.NoError(t, env.SimulateUserPromptSubmitWithTranscriptPath(session.ID, session.TranscriptPath))
+	writeForkedSkillParentTranscript(t, session.TranscriptPath)
 	require.NoError(t, simulateSkillPostToolUse(env, session.ID, session.TranscriptPath, true))
 
 	state, err := env.GetSessionState(session.ID)

@@ -1142,7 +1142,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		// its work mid-turn (its normal flow) lands here with a clean tree.
 		// The tokens are applied by the turn-end transition itself, so a
 		// repeated or concurrent Stop for the same turn adds nothing.
-		turnUsage := resolveTurnTokenUsage(ctx, ag, event, sessionID, preState, transcriptData, subagentsDir, codexInventoryUsage)
+		turnUsage := turnTokenUsageWithoutLedger(ctx, ag, event, sessionID, preState, transcriptData, subagentsDir, codexInventoryUsage)
 		transitionSessionTurnEnd(ctx, sessionID, ag.Type(), event, &checkpointlessTurnUsage{usage: turnUsage, ledgerVersion: codexLedgerVersion})
 		if cleanupErr := CleanupPrePromptState(ctx, sessionID); cleanupErr != nil {
 			logging.Warn(logCtx, "failed to cleanup pre-prompt state",
@@ -1172,7 +1172,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		transcriptLinesAtStart = preState.TranscriptOffset
 	}
 
-	tokenUsage := resolveTurnTokenUsage(ctx, ag, event, sessionID, preState, transcriptData, subagentsDir, codexInventoryUsage)
+	tokenUsage := turnTokenUsageWithoutLedger(ctx, ag, event, sessionID, preState, transcriptData, subagentsDir, codexInventoryUsage)
 
 	// Build fully-populated step context and delegate to strategy
 	stepCtx := strategy.StepContext{
@@ -1192,26 +1192,9 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		SubagentLedgerVersion:    codexLedgerVersion,
 	}
 
-	// The hook's worktree, then each other worktree the turn edited: one
-	// step, counted once and carrying the turn's tokens once.
-	counted := false
-	if totalChanges > 0 {
-		if err := strat.SaveStep(ctx, stepCtx); err != nil {
-			return fmt.Errorf("failed to save step: %w", err)
-		}
-		counted = true
-	}
-	for _, root := range slices.Sorted(maps.Keys(elsewhere)) {
-		step := stepCtx
-		step.WorktreeRoot = root
-		step.ModifiedFiles, step.NewFiles, step.DeletedFiles = elsewhere[root], nil, nil
-		if counted {
-			step.SameTurn, step.TokenUsage = true, nil
-		}
-		if err := strat.SaveStep(ctx, step); err != nil {
-			return fmt.Errorf("failed to save step for %s: %w", root, err)
-		}
-		counted = true
+	turn, err := saveTurnSteps(ctx, strat, stepCtx, totalChanges > 0, elsewhere)
+	if err != nil {
+		return err
 	}
 	strategy.PruneRemovedWorktrees(ctx, sessionID, hookRoot)
 
@@ -1232,12 +1215,58 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		}
 	}
 	recordCaptureDegraded(ctx, sessionID, captureDegraded)
-	transitionSessionTurnEnd(ctx, sessionID, agentType, event, nil)
+	// A turn whose every step recorded nothing (its files are all gone) keeps
+	// its tokens as a turn that changed no files does.
+	var untakenUsage *checkpointlessTurnUsage
+	if !turn.TokensRecorded && tokenUsage != nil {
+		untakenUsage = &checkpointlessTurnUsage{usage: tokenUsage, ledgerVersion: codexLedgerVersion}
+	}
+	transitionSessionTurnEnd(ctx, sessionID, agentType, event, untakenUsage)
 	if cleanupErr := CleanupPrePromptState(ctx, sessionID); cleanupErr != nil {
 		logging.Warn(logCtx, "failed to cleanup pre-prompt state",
 			slog.String("error", cleanupErr.Error()))
 	}
 	return nil
+}
+
+// saveTurnSteps saves a turn's step in the hook's worktree (when it changed
+// files there), then in each other worktree the turn edited: one step, counted
+// at the first worktree that records files and carrying the turn's tokens once.
+// A worktree that gets no record of its own takes only the tokens, and one
+// whose files are all gone records nothing, so neither counts the step for the
+// worktrees after it. It returns what the turn's steps recorded between them.
+func saveTurnSteps(ctx context.Context, strat *strategy.ManualCommitStrategy, stepCtx strategy.StepContext, hookChanged bool, elsewhere map[string][]string) (strategy.StepResult, error) {
+	var turn strategy.StepResult
+	save := func(step strategy.StepContext) error {
+		step.SameTurn = turn.FilesRecorded
+		if turn.TokensRecorded {
+			step.TokenUsage = nil
+		}
+		result, err := strat.SaveTurnStep(ctx, step)
+		if err != nil {
+			if step.WorktreeRoot != "" {
+				return fmt.Errorf("failed to save step for %s: %w", step.WorktreeRoot, err)
+			}
+			return fmt.Errorf("failed to save step: %w", err)
+		}
+		turn.FilesRecorded = turn.FilesRecorded || result.FilesRecorded
+		turn.TokensRecorded = turn.TokensRecorded || result.TokensRecorded
+		return nil
+	}
+	if hookChanged {
+		if err := save(stepCtx); err != nil {
+			return turn, err
+		}
+	}
+	for _, root := range slices.Sorted(maps.Keys(elsewhere)) {
+		step := stepCtx
+		step.WorktreeRoot = root
+		step.ModifiedFiles, step.NewFiles, step.DeletedFiles = elsewhere[root], nil, nil
+		if err := save(step); err != nil {
+			return turn, err
+		}
+	}
+	return turn, nil
 }
 
 // workerTurnTokenUsage returns a detached subagent session's usage for the
@@ -1258,6 +1287,17 @@ func workerTurnTokenUsage(ctx context.Context, ag agent.Agent, event *agent.Even
 		return usage
 	}
 	return computeOutOfBandTokenUsage(ctx, ag, event.SessionID, event.SessionRef, preState)
+}
+
+// turnTokenUsageWithoutLedger returns resolveTurnTokenUsage, or nil when the
+// session's tokens come from its token ledger, which reads the agent's running
+// total itself: the per-turn usage would be computed (Claude Code: every
+// subagent transcript read) only to be discarded.
+func turnTokenUsageWithoutLedger(ctx context.Context, ag agent.Agent, event *agent.Event, sessionID string, preState *PrePromptState, transcriptData []byte, subagentsDir string, codexInventoryUsage *agent.TokenUsage) *agent.TokenUsage {
+	if state, err := strategy.LoadSessionState(ctx, sessionID); err == nil && state != nil && state.TokenLedger.IsActive() {
+		return nil
+	}
+	return resolveTurnTokenUsage(ctx, ag, event, sessionID, preState, transcriptData, subagentsDir, codexInventoryUsage)
 }
 
 // resolveTurnTokenUsage returns the token usage of the turn ending now.
@@ -1520,10 +1560,7 @@ func refreshCodexInventory(ctx context.Context, ag agent.Agent, sessionID string
 	if err != nil || state == nil || state.SubagentInventoryComplete == nil {
 		return nil, nil
 	}
-	refs := make([]agent.SubagentReference, 0, len(state.SubagentInventory))
-	for _, entry := range state.SubagentInventory {
-		refs = append(refs, agent.SubagentReference{ObservedTurnIDs: entry.ObservedTurnIDs, AgentID: entry.AgentID, DeclaredTranscriptPath: entry.DeclaredTranscriptPath, ResolvedTranscriptPath: entry.ResolvedTranscriptPath})
-	}
+	refs := strategy.SubagentReferences(state)
 	version := state.SubagentLedgerVersion
 	extraction, ok := agent.ExtractWithSubagentInventory(ctx, ag, parent, fromOffset, refs, state.AgentHome)
 	if !ok {
@@ -2926,7 +2963,10 @@ func transitionSessionTurnEnd(ctx context.Context, sessionID string, agentType t
 		// session already IDLE (this closure runs under the session lock), so
 		// it adds nothing.
 		wasActive = state.Phase.IsActive()
-		if turnUsage != nil && wasActive {
+		// A ledger session records the agent's running total, so every Stop
+		// can read it: a repeated one changes nothing.
+		ledgerActive := strategy.ObserveTokenLedger(ctx, state)
+		if !ledgerActive && turnUsage != nil && wasActive {
 			strategy.ApplyTurnTokenUsage(state, turnUsage.usage, turnUsage.ledgerVersion)
 		}
 		if err := strategy.TransitionAndLog(ctx, state, session.EventTurnEnd, session.TransitionContext{}, session.NoOpActionHandler{}); err != nil {
@@ -3058,6 +3098,10 @@ func markSessionEnded(ctx context.Context, event *agent.Event, sessionID string,
 		// LastInteractionTime with now — exactly the value endedWhenLastSeen
 		// needs, so reading it afterwards always yields "now".
 		endedAt := sessionEndedAt(state, when)
+		// A last reading: an agent can write usage after its final Stop
+		// (Copilot's shutdown totals), and an ended session may never be read
+		// again.
+		strategy.ObserveTokenLedger(ctx, state)
 		if transErr := strategy.TransitionAndLog(ctx, state, session.EventSessionStop, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
 			logging.Warn(logging.WithComponent(ctx, "lifecycle"), "session stop transition failed",
 				slog.String("error", transErr.Error()))

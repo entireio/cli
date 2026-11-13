@@ -45,11 +45,12 @@ Every agent must implement all 19 methods on the `Agent` interface:
 | Interface | Methods | When to implement |
 |-----------|---------|-------------------|
 | `HookSupport` | `InstallHooks`, `UninstallHooks`, `AreHooksInstalled` | Agent uses a config file for hook registration (e.g., `settings.json`) |
-| `HookFreshness` | `CheckHookConfig` | Agent can tell whether its installed hook config still matches what this CLI writes (read-only). `entire status` points drift at `entire doctor`, which names the fix: `entire agent add <agent>`, then `--force` if that does not fix it. Claude Code also warns in its SessionStart banner, but only when a hook this CLI requires is missing (`claudecode.MissingRequiredHooks`); stale commands, missing timeouts and every other agent's check (Codex, OpenCode, Pi, Copilot) stay out of the banner because they also fire when a teammate's newer CLI wrote the config. |
+| `HookFreshness` | `CheckHookConfig` | Agent can tell whether its installed hook config still matches what this CLI writes (read-only). `entire status` points drift at `entire doctor`, which names the fix: `entire agent add <agent>`, then `--force` if that does not fix it. Claude Code also warns in its SessionStart banner, but only when a hook this CLI requires is missing (`claudecode.MissingRequiredHooks`); stale commands, missing timeouts and every other agent's check (Codex, OpenCode, Pi, Copilot, Cursor, Factory Droid, Antigravity) stay out of the banner because they also fire when a teammate's newer CLI wrote the config. |
 | `HookHandler` | `GetHookNames` | **Required for CLI hook registration** — `entire hooks <agent> <verb>` subcommands are only created for agents implementing this interface. Typically delegates to `HookNames()`. |
 | `TranscriptAnalyzer` | `GetTranscriptPosition`, `ExtractModifiedFilesFromOffset` | You want richer checkpoints with transcript-derived file lists |
 | `TranscriptPreparer` | `PrepareTranscript` | Agent writes transcripts asynchronously and needs a flush/sync step |
 | `TokenCalculator` | `CalculateTokenUsage` | Agent's transcript contains token usage data |
+| `UsageCounterSource` | `NewUsageCounter` | Agent records token usage in files Entire can read (transcript, files beside it). Sessions of such agents count tokens with the token ledger; see below. Built-in agents only |
 | `OutOfBandTokenSource` | `SnapshotTokenBaseline`, `CalculateTokenUsageSince` | Agent keeps token usage only outside its transcript, as a running total: the lifecycle snapshots it at turn start and records the difference at turn end, falling back to it when the transcript reports no usage (Antigravity's title tee, Factory AI Droid's per-session `.settings.json`). Built-in agents only |
 | `SubagentAwareExtractor` | `ExtractAllModifiedFiles`, `CalculateTotalTokenUsage` | Agent spawns subagents (like Claude Code's Task tool) |
 | `SubagentSessionResolver` | `ResolveSubagentSession` | Agent runs subagents as **detached sessions of their own** rather than as a blocking tool call (Factory AI Droid's Workers, Antigravity's subagents) |
@@ -469,6 +470,8 @@ Windows — see `agent.HookHostIsWindows`'s doc comment for how its runner was
 read out of the shipped binaries, and for why codex and cursor are on the other
 gate for reasons of evidence rather than mechanism.
 
+Pick the silent selector by how the agent runs the line on Windows: factoryai-droid uses `WrapProductionSilentHookCommandForCmdHostOS`, codex and cursor use `WrapProductionSilentHookCommandForOS`, and antigravity uses `WrapWindowsProductionSilentHookCommandDirect`. The rules are in the comment above `WrapWindowsProductionSilentHookCommand`, and why every Windows wrapper sets `NoDefaultCurrentDirectoryInExePath` is in "Hook Commands Resolve Programs from PATH" in [Git and subprocess safety](../development/git-safety.md).
+
 Put a warning wrapper on one hook that fires every session (usually session
 start) so a broken install is visible. The sh-based warning wrappers warn both
 when `entire` is missing from PATH and when it is on PATH but `entire --version`
@@ -558,6 +561,19 @@ A launch-time `SubagentEnd` needs `ToolUseID`, and should carry `SubagentID` whe
 
 **Method:**
 - `CalculateTokenUsage(sessionRef, fromOffset) (*TokenUsage, error)` - Sum token usage from offset to end of transcript.
+
+### `UsageCounterSource`
+
+**What it enables:** The token ledger (`session.TokenLedger`, `strategy.ObserveTokenLedger`): the session's token usage is the agent's own running total, and each checkpoint stores what it grew by since the last checkpoint, instead of re-scoping each read to a transcript offset. Readings happen under the session lock at turn start, every Stop and every condensation, so a repeated Stop or a commit in the middle of a turn cannot count a call twice.
+
+**Implement when:** Your agent records usage in files Entire can read.
+
+**How:** `agent.ReadCumulativeUsage` owns the files: it reads only the bytes appended since the last reading, hands over complete lines, detects a rewritten transcript (and reports `Restarted`, which is how the ledger tells a rewrite from a stale copy), and refuses a symlink or FIFO beside the transcript. The agent supplies a `UsageCounter`, saved between readings as JSON:
+- `Files(in)` - the transcript first, then files beside it (subagent transcripts, a settings file). Mark a file rewritten rather than appended (`Whole`), such as an export, so it is re-read whole and never reported as a restart. It is called again after its files were read, so it can name files their lines revealed.
+- `Add(path, lines)` / `Reset(path)` - fold appended lines in; forget a file being read again.
+- `Totals(ctx, in)` - the main agent's total (no `SubagentTokens`) and each child's, keyed by a stable child ID; nil means no data.
+
+Build it from the shared parts in `agent/usage_counting.go`: `KeyedUsage` counts per-call records once per key, with the agent's rule for a repeated record (`KeepFirst` for replays, `KeepLast` for records re-written in place, `KeepMostOutput` for streamed messages) and per-child sums; `RunningTotal` sums running totals across counter restarts; `KeyedUsage.CoveredBy` combines the two where an agent writes both. Report `InputTokens` without cache shares and include reasoning in `OutputTokens`. Add a fixture to `cmd/entire/cli/testdata/usage/<agent>/`: `TestUsageCounters_Conformance` fails without one, and checks that reading it whole, in pieces cut anywhere, and after a rewrite all give its totals.
 
 ### `SubagentAwareExtractor`
 
@@ -830,11 +846,15 @@ Key differences from JSON config agents:
   auto-discovers this same extension, so the child would otherwise forward its own
   lifecycle as the user's session. Two independent guards:
 
-  1. **Extension**: sets `ENTIRE_PI_NESTED` on its process (inherited by any Pi it
-     spawns) and, when it is already set, registers only the `tool_call` bash
-     hardening and skips the lifecycle handlers. The hardening stays on purpose — a
-     nested Pi is non-interactive while inheriting the parent's TTY, and Entire's git
-     hooks fire from `.git/hooks` regardless of this extension. The marker is read
+  1. **Extension**: sets `ENTIRE_PI_NESTED` to its own PID on its process
+     (inherited by any Pi it spawns) and, when it is already set to a different
+     value, registers only the `tool_call` bash hardening and skips the lifecycle
+     handlers. Comparing against the PID keeps a top-level Pi forwarding after
+     `/reload`, `/new` or `/resume`, which build a new extension instance in the
+     same process; a nested Pi never overwrites the marker. The hardening stays on
+     purpose — a nested Pi is non-interactive while inheriting the parent's TTY, and
+     Entire's git hooks fire from `.git/hooks` regardless of this extension. The
+     marker is read
      **only** here: Entire's own hook subprocesses inherit it from the parent, so
      treating it as a skip signal in Go would disable tracking for everyone.
   2. **CLI**: `ParseHookEvent` skips any hook whose payload carries no resolvable

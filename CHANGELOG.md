@@ -5,6 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.13.3] - 2026-11-12
+
+### Added
+
+- `entire project agent setup` and `entire project agent serve` run a project's review agents on your own machine. `setup`, run as a project admin, binds a service account (existing, or created with `--name`) to the project's self-hosted environment and grants it read access to the current repository; it never creates secrets. `serve`, run with that account's secret in `ENTIRE_TOKEN`, polls for jobs and runs Claude Code reviews in the foreground (`--once`, `--poll-interval`). A Core outage or throttling during the token exchange is retried, while a refused secret stops `serve` ([#3118](https://github.com/entireio/cli/pull/3118), [#3146](https://github.com/entireio/cli/pull/3146))
+- Codex tool results in checkpoint transcripts carry `exitCode` for commands, `declined` for commands and file changes the user declined (their `status` stays `"error"`), and `cwd` for commands and file changes ([#3067](https://github.com/entireio/cli/pull/3067))
+
+### Changed
+
+- Checkpoints blank selected injected request text: Claude Code's recorded request logs, system prompt, loaded instruction files and memory notes; Codex's recorded base instructions and loaded user/repository instructions; and Pi's `project_context` section. Each record and the line count are kept. Pi's other system-message sections and Codex's built-in model-switch instructions remain stored. Claude Code attachments are blanked too, including `session_context`, which carried the developer's email, except queued prompts, shared files and IDE context ([#3145](https://github.com/entireio/cli/pull/3145))
+- On Windows, hook commands find `entire` on PATH only, not in the working directory. Run `entire enable --agent <agent>` in each repository to update installed hooks ([#3075](https://github.com/entireio/cli/pull/3075))
+- `entire enable` offers to commit only the configuration files this run changed. Files that already had uncommitted changes are listed for review and never committed, and `--local` only lists ([#3144](https://github.com/entireio/cli/pull/3144))
+- Plugins and signals: the signal Entire receives is forwarded as is (SIGTERM stays SIGTERM), SIGHUP is handled so closing the terminal winds a plugin down, and a second Ctrl-C gives a plugin up to 5s to finish before it is killed. A plugin that exits 0 after Ctrl-C keeps exit 0, and a signal ignored at startup stays ignored, so `nohup entire <plugin>` works. Plugin authors: see `docs/architecture/external-commands.md` ([#3074](https://github.com/entireio/cli/pull/3074), [#3117](https://github.com/entireio/cli/pull/3117))
+
+### Fixed
+
+- Plugins on Windows: `entire plugin upgrade` works while the plugin is running instead of failing with `Access is denied`, and Ctrl-C no longer fails with `exec: canceling Cmd: not supported by windows`. On every platform, a failed install rolls back to the previous version instead of recording the new one, and concurrent installs, upgrades and removals of one plugin wait for each other ([#3074](https://github.com/entireio/cli/pull/3074), [#3117](https://github.com/entireio/cli/pull/3117))
+- Entire works in a checkout whose `.git` directory shares another repository's objects and refs through a `commondir` file without being registered under `worktrees/`, as container launchers create them. Session start, `entire checkpoint list` and the commit hooks failed there with `validate linked-worktree registration`, and commits got no `Entire-Checkpoint` trailer. Note: files a session started in another checkout changes in such a checkout are not recorded; its tokens are. A turn spanning several worktrees also counts its step correctly when the first worktree recorded no files ([#3108](https://github.com/entireio/cli/pull/3108), [#3141](https://github.com/entireio/cli/pull/3141))
+- A checkpoint whose ref sits under the other-case spelling of its shard directory, which a case-insensitive filesystem can produce, is found after `git gc` packs refs (`entire checkpoint explain <id>` failed), extended instead of forked by later writes, listed once, and fetched from a remote that only has that spelling ([#2484](https://github.com/entireio/cli/pull/2484))
+- Images pasted into Codex are kept intact in checkpoints instead of being corrupted by redaction. They are stored unredacted, as images from other agents already are ([#2963](https://github.com/entireio/cli/pull/2963))
+- When Entire backs up an existing git hook by copying (filesystems without hard links, or taking a hook back from pre-commit or another hook manager), the copy keeps the hook's permissions, so a hook switched off with `chmod -x` stays off and a `0600` hook stays private ([#3072](https://github.com/entireio/cli/pull/3072))
+- Pi sessions keep being captured after `/reload`, `/new` and `/resume`, and a hook that exits before reading its input no longer crashes Pi. A committed `.pi/extensions/entire/index.ts` needs regenerating; `entire doctor` reports it as outdated ([#2950](https://github.com/entireio/cli/pull/2950))
+
+### Housekeeping
+
+- Go 1.27.4 and dependency updates, including betterleaks v1.10.0 ([#3114](https://github.com/entireio/cli/pull/3114))
+- Core API: project trails resolve through `/project-resolver`, repository-scoped trail requests use the repository-ID Change routes, and legacy Buildkite routes are dropped from the vendored Core spec ([#3136](https://github.com/entireio/cli/pull/3136), [#3123](https://github.com/entireio/cli/pull/3123), [#3026](https://github.com/entireio/cli/pull/3026))
+- Tests and cleanup: `entire doctor` bundle redaction of custom rules in settings JSON, the OpenCode 2 E2E seed test, and a `repo default-branch` constructor rename ([#3119](https://github.com/entireio/cli/pull/3119), [#3115](https://github.com/entireio/cli/pull/3115), [#2943](https://github.com/entireio/cli/pull/2943))
+
+### Thanks
+
+Thanks to @Beehtrix for keeping hook permissions on copied backups, for reporting how Windows hook commands looked up programs, adding exit codes, declined markers and working directories to Codex tool results, and keeping Pi capture alive across `/reload`, `/new` and `/resume`!
+
+## [0.13.2] - 2026-11-10
+
+### Added
+
+- `entire service-account secret create`, `list` and `delete` manage a service account's secrets. `create` prints only the secret on stdout so it redirects cleanly into a file or secret store; `--expires-in-days` takes 1 to 365 and otherwise Core's 90-day default applies. An `ENTIRE_TOKEN` starting with `ent_svc_` is exchanged for the service account's short-lived token, cached and renewed near expiry, including in `git-remote-entire` ([#3020](https://github.com/entireio/cli/pull/3020))
+- Each release also ships `git-remote-entire` on its own as a `git-remote-entire-<os>-<arch>` archive. The `entire_*` archive, Homebrew and Scoop still ship both binaries ([#3019](https://github.com/entireio/cli/pull/3019))
+- `entire rsl` offers to install the entire-rsl plugin when it is missing, like `entire graph`, `entire brain` and `entire investigate` ([#3076](https://github.com/entireio/cli/pull/3076))
+
+### Changed
+
+- Session and checkpoint tokens are counted from each agent's own running total instead of by slicing transcripts, for sessions started by this version with Claude Code, Codex, Copilot CLI, OpenCode, Pi, Factory Droid or Antigravity. Turns without file changes are no longer missed, and a repeated Stop, a commit in the middle of a turn or Copilot's cache no longer count twice. Checkpoint metadata adds `session_token_usage`, the session's total at that checkpoint ([#2782](https://github.com/entireio/cli/pull/2782))
+- Repository-scoped `entire trail create` and `entire trail update` are removed; assignees and editable descriptions live on project trails, whose `create` and `update` are unchanged. Repository-scoped trail output and `--json` no longer include assignees or the aggregate comment and unresolved counts ([#3089](https://github.com/entireio/cli/pull/3089))
+- OpenCode checkpoints: a tool still pending or running is no longer written as failed, an assistant message with only usage writes `"content":null` instead of `"content":[]`, and a raw OpenCode 2 export converts in full. Live OpenCode views hide messages you undid, as OpenCode does ([#3064](https://github.com/entireio/cli/pull/3064))
+
+### Fixed
+
+- Antigravity IDE and Antigravity 2.0 app sessions are captured: transcripts under `~/.gemini/antigravity/brain` and `~/.gemini/antigravity-ide/brain` are accepted, so a turn end no longer fails with `transcript file not found` and `entire session attach` finds those conversations ([#3061](https://github.com/entireio/cli/pull/3061))
+- `entire api` fills `{repo_id}` with the repository's processing placement and routes `--to cell` requests whose path contains `{repo_id}` to that placement's cell, except for `/me` paths or when `--jurisdiction` or a direct cell override selects the cell. `entire recap`'s repository scope uses the same lookup ([#2857](https://github.com/entireio/cli/pull/2857))
+- `install.sh` verifies the archive against its exact line in `checksums.txt` instead of a suffix match that could pick the wrong archive ([#3019](https://github.com/entireio/cli/pull/3019))
+
 ## [0.13.1] - 2026-11-06
 
 ### Added

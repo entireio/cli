@@ -100,7 +100,7 @@ func TestMaybeRunPlugin_InstallGraphAndRun(t *testing.T) { //nolint:paralleltest
 				if tc.installErr != nil {
 					return tc.installErr
 				}
-				_, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: source})
+				_, err := InstallPluginFromPath(t.Context(), InstallPluginOptions{SourcePath: source})
 				fmt.Fprintln(cmd.OutOrStdout(), "Installed graph")
 				return err
 			}
@@ -529,7 +529,7 @@ func TestMaybeRunPlugin_MissingInvestigateNonInteractive(t *testing.T) { //nolin
 // `entire <name>`.
 func TestOffersOnDemandInstall_IsNarrow(t *testing.T) {
 	t.Parallel()
-	for _, name := range []string{"graph", "brain", "investigate"} {
+	for _, name := range []string{"graph", "brain", "investigate", "rsl"} {
 		if !offersOnDemandInstall(name) {
 			t.Errorf("offersOnDemandInstall(%q) = false, want true", name)
 		}
@@ -591,7 +591,7 @@ func TestInstallMissingPlugin_RefreshesStaleIndexOnMiss(t *testing.T) { //nolint
 		if src.Resolved == nil || src.Resolved.RepoURL != "https://github.com/entireio/entire-investigate" {
 			t.Errorf("resolved source = %+v, want the freshly indexed repo", src.Resolved)
 		}
-		_, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: source})
+		_, err := InstallPluginFromPath(t.Context(), InstallPluginOptions{SourcePath: source})
 		return err
 	}
 	t.Cleanup(func() { onDemandPluginInstall = restore })

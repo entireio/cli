@@ -36,7 +36,6 @@ type trailResourceJSON struct {
 	Status             string                 `json:"status"`
 	Phase              string                 `json:"phase,omitempty"`
 	Author             *trail.Author          `json:"author"`
-	Assignees          []string               `json:"assignees"`
 	Labels             []string               `json:"labels,omitempty"`
 	Priority           string                 `json:"priority,omitempty"`
 	Type               string                 `json:"type,omitempty"`
@@ -45,8 +44,6 @@ type trailResourceJSON struct {
 	CreatedAt          time.Time              `json:"createdAt"`
 	UpdatedAt          time.Time              `json:"updatedAt"`
 	MergedAt           *time.Time             `json:"mergedAt,omitempty"`
-	CommentCount       int                    `json:"commentCount,omitempty"`
-	UnresolvedCount    int                    `json:"unresolvedCount,omitempty"`
 	CheckpointCount    int                    `json:"checkpointCount,omitempty"`
 	CommitsAhead       int                    `json:"commitsAhead,omitempty"`
 	BodyDocument       *trailBodyDocumentJSON `json:"bodyDocument,omitempty"`
@@ -65,7 +62,6 @@ func toTrailResourceJSON(v api.TrailResource) trailResourceJSON {
 		Status:             v.Status,
 		Phase:              v.Phase,
 		Author:             v.Author,
-		Assignees:          v.Assignees,
 		Labels:             v.Labels,
 		Priority:           v.Priority,
 		Type:               v.Type,
@@ -74,8 +70,6 @@ func toTrailResourceJSON(v api.TrailResource) trailResourceJSON {
 		CreatedAt:          v.CreatedAt,
 		UpdatedAt:          v.UpdatedAt,
 		MergedAt:           v.MergedAt,
-		CommentCount:       v.CommentCount,
-		UnresolvedCount:    v.UnresolvedCount,
 		CheckpointCount:    v.CheckpointCount,
 		CommitsAhead:       v.CommitsAhead,
 	}
@@ -88,7 +82,6 @@ func toTrailResourceJSON(v api.TrailResource) trailResourceJSON {
 
 type trailBodyDocumentJSON struct {
 	TextSnapshot string `json:"textSnapshot"`
-	ETag         string `json:"etag,omitempty"`
 }
 
 type trailApprovalsResponseJSON struct {

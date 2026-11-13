@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -97,7 +98,19 @@ func openWorktreeAdmin(ctx context.Context, root, worktreeID string) (admin *os.
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("open worktree admin dir: %w", err)
 	}
-	return admin, filepath.Join(commonPath, "worktrees", worktreeID), closeAdmin, nil
+	adminPath = filepath.Join(commonPath, "worktrees", worktreeID)
+	// worktreeID is parsed from the .git file's text, which can name a
+	// worktrees/<id> directory that is not root's Git directory (one in another
+	// repository whose commondir points here). That directory belongs to the
+	// real <id> worktree; reading or marking it for root would confuse the two.
+	if metadata, err := gitrepo.ResolveWorktreeMetadata(root); err != nil || !sameDir(metadata.GitDir, adminPath) {
+		closeAdmin()
+		if err == nil {
+			err = fmt.Errorf("%s is not the Git directory of %s", adminPath, root)
+		}
+		return nil, "", nil, fmt.Errorf("open worktree admin dir: %w", err)
+	}
+	return admin, adminPath, closeAdmin, nil
 }
 
 // installIncarnation writes marker unless admin already has one, in which
@@ -175,7 +188,12 @@ func worktreeEntryCurrent(ctx context.Context, root, key string, work *session.W
 		return false, nil
 	}
 	if key == session.WorktreeKey("") {
-		return true, nil
+		// The main worktree has no marker. An unregistered checkout sharing
+		// the repository through commondir has the same empty ID but never
+		// gets an entry, so the main worktree's record must not count in one:
+		// it is current only in the checkout it was made in. A record without
+		// a path predates both.
+		return work.Path == "" || sameDir(work.Path, root), nil
 	}
 	if work.Incarnation == "" {
 		return false, nil

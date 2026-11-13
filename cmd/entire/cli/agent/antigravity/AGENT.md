@@ -102,6 +102,32 @@ reads them). Captured fixtures in `testdata/`.
   `/tmp → /private/tmp` doesn't defeat repo-relative filtering.
 - `Stop`: `fullyIdle` (required).
 
+## Antigravity IDE and 2.0 App
+
+The Antigravity IDE and the Antigravity 2.0 app load the same
+`.agents/hooks.json` and send the same payloads, so `entire enable --agent
+antigravity` covers them too. Verified on the IDE 2.5.5 (2026-10-24) and 2.6.0
+(2026-11-09): all six hooks fire, `Stop` carries `fullyIdle: true`, and a
+commit gets a checkpoint with prompt, files and transcript. Differences from
+the CLI:
+
+- The brain directory is per surface: `~/.gemini/antigravity/brain` (2.0 app,
+  and the IDE from 2.6.0) and `~/.gemini/antigravity-ide/brain` (IDE through
+  2.5.x), beside the CLI's `~/.gemini/antigravity-cli/brain`. `transcriptPath`
+  points into the surface's brain; the transcript store accepts all three
+  (`brainDirs`), so the late-write placeholder works for every surface.
+  `HomeLayout` (home `~/.gemini`, stores `antigravity-cli/brain`,
+  `antigravity-ide/brain`, `antigravity/brain`) is the one list of them, and
+  `ResolveSessionFileCandidates` lets `entire attach` find IDE and app
+  conversations by ID.
+- The IDE writes the transcript incrementally (it already exists at `Stop`).
+- **No token usage recorded yet**: the title-slot tee is CLI-only. IDE 2.6.0
+  (like agy 1.4.x) writes `input_tokens`/`cache_read_tokens`/`output_tokens`
+  on `PLANNER_RESPONSE` transcript steps, which the integration does not read
+  yet.
+- A `PreToolUse` hook printing `{}` (no `decision`) denies the tool call on
+  IDE 2.6.0; Entire's hook prints nothing, which allows it.
+
 ## Transcript
 
 Written to

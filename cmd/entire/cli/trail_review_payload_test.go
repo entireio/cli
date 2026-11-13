@@ -17,54 +17,50 @@ import (
 
 func TestFindingWritesUseCellContract(t *testing.T) {
 	t.Parallel()
-	for _, base := range []string{"/api/v1/trails/gh/acme/widget/7", "/api/v1/repos/repo_example/trails/7"} {
-		t.Run(base, func(t *testing.T) {
-			t.Parallel()
-			var bodies []string
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				body, err := io.ReadAll(r.Body)
-				if err != nil {
-					t.Error(err)
-					w.WriteHeader(http.StatusBadRequest)
-					return
-				}
-				bodies = append(bodies, string(body))
-				w.Header().Set("Content-Type", "application/json")
-				switch r.Method + " " + r.URL.Path {
-				case "POST " + base + "/reviews":
-					if key := r.Header.Get("Idempotency-Key"); key != "review-retry-key" {
-						t.Errorf("Idempotency-Key = %q, want review-retry-key", key)
-					}
-					w.WriteHeader(http.StatusCreated)
-					_, _ = fmt.Fprint(w, `{"review_id":"review-example","repo_id":"repo_example","limits":{"max_comments_per_batch":10}}`)
-				case "POST " + base + "/reviews/review-example/comments":
-					_, _ = fmt.Fprint(w, `{"results":[{"client_id":"client-example","status":"created","comment":{"id":"comment-example","review_id":"review-example","status":"open","location":{"file_path":"example.go","start_line":2}}}]}`)
-				case "PATCH " + base + "/reviews/review-example/comments/comment-example":
-					_, _ = fmt.Fprint(w, `{"id":"comment-example","review_id":"review-example","status":"resolved","status_reason":"fixed"}`)
-				default:
-					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
-					w.WriteHeader(http.StatusNotFound)
-				}
-			}))
-			defer srv.Close()
-			client := api.NewClientWithBaseURL("tok", srv.URL)
-			client.SetTrailRoute("trail-example", base)
-			review, err := startTrailReview(t.Context(), client, "trail-example", "review-retry-key")
-			require.NoError(t, err)
-			file, line := "example.go", 2
-			comments, err := postTrailReviewFindingBatch(t.Context(), client, "trail-example", review.ReviewID, []api.TrailReviewCommentInput{{ClientID: "client-example", Location: api.TrailReviewLocationCreateRequest{Granularity: "line", FilePath: &file, StartLine: &line}}})
-			require.NoError(t, err)
-			require.Len(t, comments, 1)
-			require.Equal(t, "example.go", *comments[0].Location.FilePath)
-			updated, err := patchTrailReviewCommentStatus(t.Context(), client, "trail-example", comments[0], "resolved", "fixed")
-			require.NoError(t, err)
-			require.Equal(t, "fixed", *updated.StatusReason)
-			require.Len(t, bodies, 3)
-			require.JSONEq(t, `{}`, bodies[0])
-			require.JSONEq(t, `{"comments":[{"client_id":"client-example","location":{"granularity":"line","file_path":"example.go","start_line":2}}]}`, bodies[1])
-			require.JSONEq(t, `{"status":"resolved","status_reason":"fixed"}`, bodies[2])
-		})
-	}
+	const base = "/api/v1/repos/repo_example/changes/7"
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		bodies = append(bodies, string(body))
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "POST " + base + "/reviews":
+			if key := r.Header.Get("Idempotency-Key"); key != "review-retry-key" {
+				t.Errorf("Idempotency-Key = %q, want review-retry-key", key)
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = fmt.Fprint(w, `{"review_id":"review-example","repo_id":"repo_example","limits":{"max_comments_per_batch":10}}`)
+		case "POST " + base + "/reviews/review-example/comments":
+			_, _ = fmt.Fprint(w, `{"results":[{"client_id":"client-example","status":"created","comment":{"id":"comment-example","review_id":"review-example","status":"open","location":{"file_path":"example.go","start_line":2}}}]}`)
+		case "PATCH " + base + "/reviews/review-example/comments/comment-example":
+			_, _ = fmt.Fprint(w, `{"id":"comment-example","review_id":"review-example","status":"resolved","status_reason":"fixed"}`)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+	client.SetTrailRoute("trail-example", base)
+	review, err := startTrailReview(t.Context(), client, "trail-example", "review-retry-key")
+	require.NoError(t, err)
+	file, line := "example.go", 2
+	comments, err := postTrailReviewFindingBatch(t.Context(), client, "trail-example", review.ReviewID, []api.TrailReviewCommentInput{{ClientID: "client-example", Location: api.TrailReviewLocationCreateRequest{Granularity: "line", FilePath: &file, StartLine: &line}}})
+	require.NoError(t, err)
+	require.Len(t, comments, 1)
+	require.Equal(t, "example.go", *comments[0].Location.FilePath)
+	updated, err := patchTrailReviewCommentStatus(t.Context(), client, "trail-example", comments[0], "resolved", "fixed")
+	require.NoError(t, err)
+	require.Equal(t, "fixed", *updated.StatusReason)
+	require.Len(t, bodies, 3)
+	require.JSONEq(t, `{}`, bodies[0])
+	require.JSONEq(t, `{"comments":[{"client_id":"client-example","location":{"granularity":"line","file_path":"example.go","start_line":2}}]}`, bodies[1])
+	require.JSONEq(t, `{"status":"resolved","status_reason":"fixed"}`, bodies[2])
 }
 
 func TestFindingEmptyPageDisplaysNextCursor(t *testing.T) {
@@ -97,12 +93,14 @@ func TestFindingJSONPreservesKeysAndReturnsNextCursor(t *testing.T) {
 	t.Parallel()
 	var comment api.TrailReviewComment
 	require.NoError(t, json.Unmarshal([]byte(`{"id":"comment-example","repo_id":"repo_example","review_id":"review-example","discussion_id":"thread-example","discussion_message_count":2,"location":{"file_path":"example.go","start_line":2},"suggested_changes":[{"change_type":"manual_instruction","expected_file_path":"example.go"}],"outgoing_links":[{"source_comment_id":"comment-example","target_comment_id":"other-example","link_type":"related"}]}`), &comment))
-	target := trailReviewTarget{Trail: api.TrailResource{OriginalBranch: "feature/example", BodyDocument: &api.TrailBodyDocument{TextSnapshot: "Description"}}}
+	var resource api.TrailResource
+	require.NoError(t, json.Unmarshal([]byte(`{"original_branch":"feature/example","body_document":{"text_snapshot":"Description"},"checkpoint_count":3,"requested_reviewers":["alice"],"assignees":["retired"],"comment_count":4,"unresolved_count":2}`), &resource))
+	target := trailReviewTarget{Trail: resource}
 	for _, cursor := range []string{"opaque-next", ""} {
 		t.Run(cursor, func(t *testing.T) {
 			t.Parallel()
 			var out bytes.Buffer
-			require.NoError(t, encodeTrailReviewJSON(&out, target, []api.TrailReviewComment{comment}, cursor, trailReviewCommentCounts{}, nil))
+			require.NoError(t, encodeTrailReviewJSON(&out, target, []api.TrailReviewComment{comment}, cursor, trailReviewCommentCounts{Open: 2}, nil))
 			var got map[string]json.RawMessage
 			require.NoError(t, json.Unmarshal(out.Bytes(), &got))
 			if cursor != "" {
@@ -119,6 +117,16 @@ func TestFindingJSONPreservesKeysAndReturnsNextCursor(t *testing.T) {
 			requireCamelCaseKeys(t, got["trail"])
 			require.Contains(t, string(got["trail"]), `"originalBranch": "feature/example"`)
 			require.Contains(t, string(got["trail"]), `"textSnapshot": "Description"`)
+			var change map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(got["trail"], &change))
+			for _, retired := range []string{"assignees", "commentCount", "unresolvedCount"} {
+				require.NotContains(t, change, retired)
+			}
+			require.JSONEq(t, `3`, string(change["checkpointCount"]))
+			require.JSONEq(t, `["alice"]`, string(change["requestedReviewers"]))
+			var counts map[string]int
+			require.NoError(t, json.Unmarshal(got["counts"], &counts))
+			require.Equal(t, 2, counts["Open"])
 		})
 	}
 }
@@ -133,50 +141,46 @@ func TestFindingCommandsAcceptCursor(t *testing.T) {
 
 func TestFindingScansFollowCellCursor(t *testing.T) {
 	t.Parallel()
-	for _, base := range []string{"/api/v1/trails/gh/acme/widget/7", "/api/v1/repos/repo_example/trails/7"} {
-		t.Run(base, func(t *testing.T) {
+	const base = "/api/v1/repos/repo_example/changes/7"
+	for _, operation := range []string{"list", "lookup"} {
+		t.Run(operation, func(t *testing.T) {
 			t.Parallel()
-			for _, operation := range []string{"list", "lookup"} {
-				t.Run(operation, func(t *testing.T) {
-					t.Parallel()
-					requests := 0
-					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-						requests++
-						if r.URL.Path != base+"/reviews/comments" {
-							t.Errorf("path = %s", r.URL.Path)
-						}
-						q := r.URL.Query()
-						if q.Get("per_page") != "100" {
-							t.Errorf("query = %s", r.URL.RawQuery)
-						}
-						w.Header().Set("Content-Type", "application/json")
-						if requests == 1 {
-							if q.Get("stale") != "any" || q.Get("include_dismissed") != "true" {
-								t.Errorf("initial query = %s", r.URL.RawQuery)
-							}
-							_, _ = fmt.Fprint(w, `{"comments":[{"id":"comment-first","review_id":"review-example"}],"next_cursor":"opaque+/=page","event_cursor":"42"}`)
-						} else {
-							if requests != 2 || q.Get("cursor") != "opaque+/=page" || len(q) != 2 {
-								t.Errorf("continuation = %s", r.URL.RawQuery)
-							}
-							_, _ = fmt.Fprint(w, `{"comments":[{"id":"comment-second","review_id":"review-example"}],"event_cursor":"43"}`)
-						}
-					}))
-					defer srv.Close()
-					client := api.NewClientWithBaseURL("tok", srv.URL)
-					client.SetTrailRoute("trail-example", base)
-					if operation == "lookup" {
-						comment, err := resolveTrailReviewComment(t.Context(), client, "trail-example", "comment-second")
-						require.NoError(t, err)
-						require.Equal(t, "review-example", comment.ReviewID)
-					} else {
-						comments, err := fetchAllTrailReviewComments(t.Context(), client, "trail-example", trailReviewSummaryOptions())
-						require.NoError(t, err)
-						require.Len(t, comments, 2)
+			requests := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				if r.URL.Path != base+"/reviews/comments" {
+					t.Errorf("path = %s", r.URL.Path)
+				}
+				q := r.URL.Query()
+				if q.Get("per_page") != "100" {
+					t.Errorf("query = %s", r.URL.RawQuery)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				if requests == 1 {
+					if q.Get("stale") != "any" || q.Get("include_dismissed") != "true" {
+						t.Errorf("initial query = %s", r.URL.RawQuery)
 					}
-					require.Equal(t, 2, requests)
-				})
+					_, _ = fmt.Fprint(w, `{"comments":[{"id":"comment-first","review_id":"review-example"}],"next_cursor":"opaque+/=page","event_cursor":"42"}`)
+				} else {
+					if requests != 2 || q.Get("cursor") != "opaque+/=page" || len(q) != 2 {
+						t.Errorf("continuation = %s", r.URL.RawQuery)
+					}
+					_, _ = fmt.Fprint(w, `{"comments":[{"id":"comment-second","review_id":"review-example"}],"event_cursor":"43"}`)
+				}
+			}))
+			defer srv.Close()
+			client := api.NewClientWithBaseURL("tok", srv.URL)
+			client.SetTrailRoute("trail-example", base)
+			if operation == "lookup" {
+				comment, err := resolveTrailReviewComment(t.Context(), client, "trail-example", "comment-second")
+				require.NoError(t, err)
+				require.Equal(t, "review-example", comment.ReviewID)
+			} else {
+				comments, err := fetchAllTrailReviewComments(t.Context(), client, "trail-example", trailReviewSummaryOptions())
+				require.NoError(t, err)
+				require.Len(t, comments, 2)
 			}
+			require.Equal(t, 2, requests)
 		})
 	}
 }
