@@ -85,6 +85,8 @@ func getPIIConfig() *PIIConfig {
 // Pre-compiled builtin PII regexes.
 var (
 	emailRegex = regexp.MustCompile(`\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b`)
+	// phoneRegex matches North American numbers; intlPhoneRegex
+	// (pii_phone.go) the rest of the world's in international format.
 	// phoneRegex uses three branches to avoid false-positives on dotted-decimal
 	// strings like version numbers (1.234.567.8901) and IPs (192.168.001.0001).
 	// Dots are only allowed as separators when preceded by +1 (unambiguous intl prefix).
@@ -190,6 +192,7 @@ type builtinPIIPattern struct {
 var builtinPIIPatterns = []builtinPIIPattern{
 	{PIIEmail, labelEmail, emailRegex},
 	{PIIPhone, labelPhone, phoneRegex},
+	{PIIPhone, labelPhone, intlPhoneRegex},
 	{PIIAddress, labelAddress, addressRegex},
 	{PIIIP, labelIP, ipv4CandidateRegex},
 	{PIIIP, labelIP, ipv6CandidateRegex},
@@ -225,11 +228,12 @@ func detectPII(cfg *PIIConfig, s string) []taggedRegion {
 			if p.label == labelPhone && loc[1] < len(s) && s[loc[1]] >= '0' && s[loc[1]] <= '9' {
 				continue
 			}
-			// The built-in IP candidates are only shapes; redactableIP
-			// validates them and may trim the match. Matched by regex, not
-			// label, so a custom pattern named "ip" is left as written.
-			if builtinIP {
-				start, end, ok := redactableIP(s, loc[0], loc[1])
+			// The built-in IP and international phone candidates are only
+			// shapes; validateCandidate checks them and may move the match's
+			// bounds. Matched by regex, not label, so a custom pattern named
+			// "ip" or "phone" is left as written.
+			if builtinIP || p.regex == intlPhoneRegex {
+				start, end, ok := validateCandidate(p.regex, s, loc[0], loc[1])
 				if !ok {
 					continue
 				}
@@ -242,7 +246,57 @@ func detectPII(cfg *PIIConfig, s string) []taggedRegion {
 			})
 		}
 	}
-	return dropNestedIPRegions(regions)
+	return dropNestedPIIRegions(regions)
+}
+
+// dropNestedPIIRegions removes a region that lies inside an earlier one with
+// the same label, so a value counts once: the North American phone rule
+// matches the national part of +39 347 000 0001, and both IP rules match an
+// IPv4-mapped address, the IPv4 rule only its dotted tail (::ffff:10.0.0.1).
+// Regions are sorted by start, so a kept region with the same label that ends
+// at or after r contains it, even when a region with another label sorts
+// between them (a custom pattern matching the 39).
+//
+// An IP region keeps the rule it had and is compared only with the region
+// kept just before it. The version-key rule removes built-in IP matches
+// afterwards, so dropping more custom ip matches inside them would expose
+// their text ({"version":"::ffff:10.0.0.5"} with custom patterns matching
+// ffff and 0.0.5).
+func dropNestedPIIRegions(regions []taggedRegion) []taggedRegion {
+	if len(regions) < 2 {
+		return regions
+	}
+	slices.SortFunc(regions, func(a, b taggedRegion) int {
+		if a.start != b.start {
+			return a.start - b.start
+		}
+		return b.end - a.end
+	})
+	var ends []labelEnd
+	kept := regions[:0]
+	for _, r := range regions {
+		i := slices.IndexFunc(ends, func(e labelEnd) bool { return e.label == r.label })
+		if r.label == labelIP {
+			if n := len(kept); n > 0 && kept[n-1].label == labelIP && r.end <= kept[n-1].end {
+				continue
+			}
+		} else if i >= 0 && r.end <= ends[i].end {
+			continue
+		}
+		if i < 0 {
+			ends = append(ends, labelEnd{r.label, r.end})
+		} else {
+			ends[i].end = max(ends[i].end, r.end)
+		}
+		kept = append(kept, r)
+	}
+	return kept
+}
+
+// labelEnd is the furthest end of the kept regions with one label.
+type labelEnd struct {
+	label string
+	end   int
 }
 
 // compilePIIPatterns builds the pattern list from config.
@@ -270,6 +324,16 @@ func compilePIIPatterns(cfg *PIIConfig) []piiPattern {
 		patterns = append(patterns, piiPattern{regex: compiled, label: strings.ToUpper(label)})
 	}
 	return patterns
+}
+
+// validateCandidate runs the validator of a built-in pattern whose regex only
+// finds a shape: redactableIntlPhone for international phone numbers,
+// redactableIP for the IP candidates.
+func validateCandidate(re *regexp.Regexp, s string, start, end int) (int, int, bool) {
+	if re == intlPhoneRegex {
+		return redactableIntlPhone(s, start, end)
+	}
+	return redactableIP(s, start, end)
 }
 
 // replacementToken returns the redaction placeholder for a given label.
