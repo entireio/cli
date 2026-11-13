@@ -185,3 +185,47 @@ func TestStoredRef_DoesNotKeepTheRepositoryAlive(t *testing.T) {
 
 	assert.Nil(t, collected.Value(), "the repository must be collectable after a lookup")
 }
+
+// worktreeConfigRepo is shardSpellingRepo with extensions.worktreeConfig on and
+// a config.worktree holding a setting, the layout sparse checkout leaves. go-git
+// then merges the two files and returns a config whose Raw is nil (#3154).
+func worktreeConfigRepo(t *testing.T, ignoreCase string) (dir, earlier, later string) {
+	t.Helper()
+	dir, earlier, later = shardSpellingRepo(t, ignoreCase)
+	testutil.RunGit(t, dir, "config", "extensions.worktreeConfig", "true")
+	testutil.RunGit(t, dir, "config", "--worktree", "core.sparseCheckout", "true")
+	return dir, earlier, later
+}
+
+// core.ignorecase is still read from the repository config when a
+// config.worktree is merged over it, rather than panicking on the merged config.
+func TestFoldsCase_WorktreeConfig(t *testing.T) {
+	t.Parallel()
+	for _, ignoreCase := range []string{"true", "false"} {
+		t.Run(ignoreCase, func(t *testing.T) {
+			t.Parallel()
+			dir, _, _ := worktreeConfigRepo(t, ignoreCase)
+			repo, err := git.PlainOpen(dir)
+			require.NoError(t, err)
+
+			assert.Equal(t, ignoreCase == "true", foldsCase(repo))
+		})
+	}
+}
+
+// The pre-push path from #3154: resolving a checkpoint ref in a repository
+// with a config.worktree must not panic.
+func TestStoredRef_WorktreeConfig(t *testing.T) {
+	t.Parallel()
+	dir, earlier, _ := worktreeConfigRepo(t, "false")
+	canonical := mustRefName(t, foldableULID)
+	testutil.RunGit(t, dir, "update-ref", canonical.String(), earlier)
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	name, tip, err := StoredRef(repo, nil, canonical)
+	require.NoError(t, err)
+
+	assert.Equal(t, canonical, name)
+	assert.Equal(t, plumbing.NewHash(earlier), tip)
+}
