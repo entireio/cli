@@ -133,11 +133,28 @@ func Open(ctx context.Context, repo *git.Repository, opts OpenOptions) (*Stores,
 		return nil, err
 	}
 
+	omitPrompts, err := promptSyncDisabled(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Stores{
-		Persistent:    newKindRoutingStore(writer, branchStore, refsStore, primaryType, opts.LegacyCopyRefFetcher),
+		Persistent:    withPromptOmission(newKindRoutingStore(writer, branchStore, refsStore, primaryType, opts.LegacyCopyRefFetcher), omitPrompts),
 		refs:          refs,
 		primaryIsRefs: primaryType == BackendTypeGitRefs,
 	}, nil
+}
+
+// promptSyncDisabled resolves strategy_options.sync_prompts for the repository
+// Open serves (same context-based resolution as LoadCheckpointsConfig). Settings
+// it cannot interpret fail closed (prompts withheld); see
+// settings.LoadPromptSyncDisabled.
+func promptSyncDisabled(ctx context.Context) (bool, error) {
+	disabled, err := settings.LoadPromptSyncDisabled(ctx)
+	if err != nil {
+		return false, fmt.Errorf("resolve %s setting: %w", settings.SyncPromptsOptionKey, err)
+	}
+	return disabled, nil
 }
 
 // buildKindReadStores returns the git-branch and git-refs read stores used for
