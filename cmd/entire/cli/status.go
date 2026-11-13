@@ -66,6 +66,10 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 		return nil //nolint:nilerr // Not being in a git repo is a valid status, not an error
 	}
 
+	if err := settings.UserSettingsReadError(ctx); err != nil {
+		fmt.Fprintf(w, "  ignoring user settings: %v\n", err)
+	}
+
 	// Get absolute paths for settings files
 	settingsPath, err := paths.AbsPath(ctx, EntireSettingsFile)
 	if err != nil {
@@ -82,7 +86,7 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 		return err //nolint:wrapcheck // already contextual; a bare %w only changes the concrete type
 	}
 
-	if !projectExists && !localExists {
+	if !projectExists && !localExists && !userTierConfiguresWorktree(ctx) {
 		fmt.Fprintln(w, "○ not set up (run `entire enable` to get started)")
 		return nil
 	}
@@ -101,12 +105,32 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 
 	fmt.Fprintln(w, formatSettingsStatusShort(ctx, s, sty))
 	writeRefusedAgentHomes(w)
+	writeUserSettingsRejections(w, s)
 	if s.Enabled {
 		writeActiveSessions(ctx, w, sty)
 	}
 	writeAgentHelpHint(w, sty)
 
 	return nil
+}
+
+// userTierConfiguresWorktree reports whether the user settings file configures
+// this repository. Both .entire files live in the WORKTREE, so a repository
+// configured through the user settings file has neither in a freshly added
+// worktree, and answering from them alone reports "not set up" for a
+// repository whose hooks are installed and running.
+func userTierConfiguresWorktree(ctx context.Context) bool {
+	root, err := paths.WorktreeRoot(ctx)
+	return err == nil && settings.UserTierConfiguresRepo(ctx, root)
+}
+
+// writeUserSettingsRejections names each part of the user settings file that
+// was dropped. Nothing else says so, and the user can see the setting in their
+// own file.
+func writeUserSettingsRejections(w io.Writer, s *settings.EntireSettings) {
+	for _, reason := range s.UserLayerRejections() {
+		fmt.Fprintf(w, "  ignoring user setting: %s\n", reason)
+	}
 }
 
 // writeRefusedAgentHomes names every agent relocation variable Entire refuses.
@@ -142,6 +166,7 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 	}
 	fmt.Fprintln(w, formatSettingsStatusShort(ctx, effectiveSettings, sty))
 	writeRefusedAgentHomes(w)
+	writeUserSettingsRejections(w, effectiveSettings)
 	fmt.Fprintln(w) // blank line
 
 	// Show project settings if it exists
@@ -1171,6 +1196,9 @@ type statusJSON struct {
 	// CODEX_HOME, ...) set to a value Entire refuses, one message per variable.
 	// Resume and attach fail for that agent until it is fixed.
 	RefusedAgentHomes []string `json:"refused_agent_homes,omitempty"`
+	// UserSettingsIgnored lists the parts of the user settings file that were
+	// dropped, one message each.
+	UserSettingsIgnored []string `json:"user_settings_ignored,omitempty"`
 	// CodexHooks reports effective discovery/trust warnings separately from
 	// current-checkout installation and freshness semantics.
 	CodexHooks *codexHooksStatusJSON `json:"codex_hooks,omitempty"`
@@ -1287,7 +1315,7 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		return writeJSON(statusJSON{Error: presenceErr.Error()})
 	}
 
-	if !projectExists && !localExists {
+	if !projectExists && !localExists && !userTierConfiguresWorktree(ctx) {
 		return writeJSON(statusJSON{Error: "not set up"})
 	}
 
@@ -1301,6 +1329,9 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		Agents:         []string{},
 		ActiveSessions: []sessionBriefJSON{},
 		AgentHelp:      agentHelpCommand,
+		// Before the Enabled gate: a dropped `enabled` is one of the
+		// things a user would need to see.
+		UserSettingsIgnored: s.UserLayerRejections(),
 	}
 	for _, refusal := range agent.RefusedRelocationEnvVars() {
 		result.RefusedAgentHomes = append(result.RefusedAgentHomes, refusal.Error())
