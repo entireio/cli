@@ -464,8 +464,9 @@ func detectAllLayers(s string) []taggedRegion {
 	// 4. Credentialed URIs (secrets — always on). A URI whose password is a
 	// placeholder stays intact, like the connection strings in layer 5, unless
 	// its query carries a real password.
+	uriQuotes := newShellQuotes(s)
 	for _, loc := range credentialedURIPattern.FindAllStringSubmatchIndex(s, -1) {
-		if isPlaceholderSecretValue(s[loc[2]:loc[3]]) && !uriQueryHasPassword(s[loc[0]:loc[1]]) {
+		if isPlaceholderSecretValue(uriPassword(uriQuotes, loc[0], loc[2], loc[3])) && !uriQueryHasPassword(s[loc[0]:loc[1]]) {
 			continue
 		}
 		regions = append(regions, taggedRegion{region: region{loc[0], loc[1]}})
@@ -615,6 +616,401 @@ func isSlashedBase64Secret(run string) bool {
 	return shannonEntropy(run) > entropyThreshold
 }
 
+// uriPassword returns the password s[start:end] of the URI that starts at
+// s[uriStart], s being quotes.s, as the placeholder rules read it: for a URI
+// inside a double quoted string, it is read as double quotes enclose it, so
+// a single quoted default in it stays a reference (see doubleQuotedText and
+// insideDoubleQuotes).
+func uriPassword(quotes *shellQuotes, uriStart, start, end int) string {
+	password := quotes.s[start:end]
+	if strings.Contains(password, "'") && insideDoubleQuotes(quotes, uriStart, end) {
+		return doubleQuotedText(password)
+	}
+	return password
+}
+
+// doubleQuoteContextLimit bounds how far after a value insideDoubleQuotes
+// looks for the quote that closes its string, so that many values cost
+// linear time.
+const doubleQuoteContextLimit = 1024
+
+// insideDoubleQuotes reports whether s[start:end] sits inside a double quoted
+// string (see shellQuotes) that closes after the value on the same line. A
+// value holding a double quote, backslash, backquote or $( can change which
+// quotes pair or start a new quoting context, so it is then read as unquoted,
+// which only ever redacts more: a single quoted default is a literal there
+// (see isPlaceholderShellExpansion). The value may end with the quote that
+// closes its string.
+func insideDoubleQuotes(quotes *shellQuotes, start, end int) bool {
+	if !quotes.doubleQuotedAt(start) {
+		return false
+	}
+	s := quotes.s
+	value := strings.TrimSuffix(s[start:end], `"`)
+	if strings.ContainsAny(value, "\"\\`") || strings.Contains(value, "$(") {
+		return false
+	}
+	rest := s[start+len(value) : min(len(s), start+len(value)+doubleQuoteContextLimit)]
+	closing := strings.IndexAny(rest, "\"\n\r")
+	return closing >= 0 && rest[closing] == '"'
+}
+
+// shellQuotes reads the quoting of s as a shell does, from its start. A
+// detector makes one for its pass over s and asks about positions in
+// increasing order, so that all its reads cost linear time together; asking
+// about an earlier position starts the reading over.
+//
+// Single quoted and $'...' strings, backslash escapes, line continuations,
+// comments and here-document bodies are skipped as the shell skips them, so
+// printf '%s\n' "x", echo \"x\", a # comment or a here-document holding a
+// quote read as they run. A command substitution, $(...) or backquoted,
+// starts a new quoting context inside it, so its own quotes pair there:
+// "$(DB_PASSWORD=${PW:-'$S3CRET'} env)" is outside double quotes. Inside
+// $(...), parentheses, case patterns and arithmetic are matched, so it ends
+// where the shell ends it; case and esac count only where a command starts,
+// as reserved words do.
+type shellQuotes struct {
+	s            string
+	pos          int // the end of the text read so far
+	token        int // where the last token read starts
+	frames       []quoteFrame
+	heredocs     []heredoc // here-documents whose bodies start at the next newline
+	wordStart    bool      // whether s[pos] starts a word
+	commandStart bool      // whether a word at s[pos] is a command's first, where reserved words count
+}
+
+// quoteFrame is one quoting context: the top level, or a command substitution.
+type quoteFrame struct {
+	closer     byte // ')' for $(...) and ((...)), '`' for a backquoted one, 0 at the top level
+	depth      int  // parentheses open inside a $(...)
+	cases      int  // case commands open inside a $(...), whose patterns end in )
+	caseHeader bool // a case command's in comes next
+	arithmetic bool // $((...)) or ((...)), where << shifts instead of starting a here-document
+	inDouble   bool
+}
+
+type heredoc struct {
+	delimiter string
+	stripTabs bool // <<- strips leading tabs from the delimiter line
+	quoted    bool // a quoted delimiter leaves the body as it is; otherwise \ and a newline join lines
+}
+
+// commandListWords are the reserved words after which another command's
+// first word comes.
+var commandListWords = []string{"then", "do", "else", "elif", "if", "while", "until", "time", "!", "{"}
+
+func newShellQuotes(s string) *shellQuotes {
+	return &shellQuotes{s: s, frames: []quoteFrame{{}}, wordStart: true, commandStart: true}
+}
+
+// doubleQuotedAt reports whether s[at] sits inside a double quoted string of
+// its innermost quoting context. A position inside a single quoted or $'...'
+// string, a comment or a here-document body, or right after a backslash, is
+// not: the shell reads none of those as double quoted.
+func (q *shellQuotes) doubleQuotedAt(at int) bool {
+	if at < q.pos && at <= q.token {
+		*q = *newShellQuotes(q.s)
+	}
+	for q.pos < at {
+		q.token = q.pos
+		q.pos = q.read(q.pos)
+	}
+	return q.pos == at && q.frames[len(q.frames)-1].inDouble
+}
+
+// read reads the token at s[i], a byte or a run that the shell reads as one
+// piece, and returns where it ends. Reading whole tokens keeps a quote inside
+// one, as in 'it"s' or a comment, from changing the quoting after it, and lets
+// doubleQuotedAt tell a position inside a token from one between tokens.
+func (q *shellQuotes) read(i int) int {
+	s, frame := q.s, &q.frames[len(q.frames)-1]
+	wordStart, commandStart := q.wordStart, q.commandStart
+	q.wordStart, q.commandStart = false, false
+	switch c := s[i]; {
+	case c == '\\' && strings.HasPrefix(s[i+1:], "\n"):
+		// The shell removes a line continuation before it reads words.
+		q.wordStart, q.commandStart = wordStart, commandStart
+		return i + 2
+	case c == '\\':
+		return min(len(s), i+2)
+	case c == '`' && frame.closer == '`':
+		q.frames = q.frames[:len(q.frames)-1]
+		return i + 1
+	case c == '`':
+		q.openSubstitution(quoteFrame{closer: '`'})
+		return i + 1
+	case c == '$' && strings.HasPrefix(s[i+1:], "("):
+		q.openSubstitution(quoteFrame{closer: ')', arithmetic: strings.HasPrefix(s[i+2:], "(")})
+		return i + 2
+	case c == '"':
+		frame.inDouble = !frame.inDouble
+		return i + 1
+	case frame.inDouble:
+		return i + 1
+	}
+	return q.readUnquoted(i, wordStart, commandStart)
+}
+
+// openSubstitution starts the quoting context of a command substitution,
+// whose text starts with a command.
+func (q *shellQuotes) openSubstitution(frame quoteFrame) {
+	q.frames = append(q.frames, frame)
+	q.wordStart, q.commandStart = true, true
+}
+
+// readUnquoted reads the token at s[i] outside double quotes.
+func (q *shellQuotes) readUnquoted(i int, wordStart, commandStart bool) int {
+	s, frame := q.s, &q.frames[len(q.frames)-1]
+	if end := q.readReservedWord(i, wordStart, commandStart); end > i {
+		return end
+	}
+	switch c := s[i]; {
+	case c == '\'':
+		return singleQuotedEnd(s, i+1)
+	case c == '$' && strings.HasPrefix(s[i+1:], "'"):
+		return ansiCQuotedEnd(s, i+2)
+	case c == '#' && wordStart:
+		// The newline that ends the comment ends the command too.
+		q.wordStart, q.commandStart = wordStart, commandStart
+		return lineEnd(s, i)
+	case c == '\n' && len(q.heredocs) > 0:
+		end := heredocsEnd(s, i+1, q.heredocs)
+		q.heredocs = q.heredocs[:0]
+		q.wordStart, q.commandStart = true, true
+		return end
+	case strings.HasPrefix(s[i:], "<<<"):
+		return i + 3
+	case strings.HasPrefix(s[i:], "<<") && !frame.arithmetic:
+		return q.readHeredocOperator(i + 2)
+	case commandStart && strings.HasPrefix(s[i:], "(("):
+		q.frames = append(q.frames, quoteFrame{closer: ')', depth: 1, arithmetic: true})
+		return i + 2
+	case c == '(' && frame.closer == ')':
+		frame.depth++
+	case c == ')' && frame.closer == ')':
+		if q.closeParen(frame) {
+			// The substitution is part of a word.
+			return i + 1
+		}
+	}
+	q.readSeparator(s[i], commandStart)
+	return i + 1
+}
+
+// readSeparator sets what the byte c, read on its own, leaves for the next
+// byte: a blank or an operator ends a word, and an operator ends a command.
+func (q *shellQuotes) readSeparator(c byte, commandStart bool) {
+	q.wordStart = strings.IndexByte(" \t\n\r;&|()", c) >= 0
+	switch {
+	case strings.IndexByte(";&|()\n", c) >= 0:
+		q.commandStart = true
+	case c == ' ' || c == '\t' || c == '\r':
+		q.commandStart = commandStart
+	}
+}
+
+// readReservedWord reads a reserved word at s[i] that changes how the text
+// after it is read, and returns where it ends, or i when there is none: case
+// and esac open and close a case command, whose patterns end in ), its in
+// starts the patterns, and the words in commandListWords start a command.
+func (q *shellQuotes) readReservedWord(i int, wordStart, commandStart bool) int {
+	s, frame := q.s, &q.frames[len(q.frames)-1]
+	switch {
+	case !wordStart || frame.arithmetic:
+		return i
+	case frame.caseHeader && isShellWordAt(s, i, "in"):
+		frame.caseHeader = false
+		q.commandStart = true
+		return i + len("in")
+	case !commandStart:
+		return i
+	case isShellWordAt(s, i, "case"):
+		frame.cases++
+		frame.caseHeader = true
+		return i + len("case")
+	case frame.cases > 0 && isShellWordAt(s, i, "esac"):
+		frame.cases--
+		return i + len("esac")
+	}
+	for _, word := range commandListWords {
+		if isShellWordAt(s, i, word) {
+			q.commandStart = true
+			return i + len(word)
+		}
+	}
+	return i
+}
+
+// closeParen reads a ) inside a $(...) or ((...)): it closes a parenthesis
+// opened inside, ends a case pattern, or ends the substitution, and it
+// reports whether it ended the substitution.
+func (q *shellQuotes) closeParen(frame *quoteFrame) bool {
+	switch {
+	case frame.depth > 0:
+		frame.depth--
+	case frame.cases == 0:
+		q.frames = q.frames[:len(q.frames)-1]
+		return true
+	}
+	return false
+}
+
+// isShellWordAt reports whether the word word stands at s[i] on its own, as
+// a reserved word does.
+func isShellWordAt(s string, i int, word string) bool {
+	if !strings.HasPrefix(s[i:], word) {
+		return false
+	}
+	end := i + len(word)
+	return end == len(s) || strings.IndexByte(" \t\n\r;&|()<>", s[end]) >= 0
+}
+
+// readHeredocOperator reads the rest of a << or <<- operator from s[i], its
+// delimiter word included, and queues the here-document it starts.
+func (q *shellQuotes) readHeredocOperator(i int) int {
+	s := q.s
+	stripTabs := strings.HasPrefix(s[i:], "-")
+	if stripTabs {
+		i++
+	}
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+		i++
+	}
+	delimiter, end, quoted := heredocDelimiter(s, i)
+	if end > i {
+		q.heredocs = append(q.heredocs, heredoc{delimiter: delimiter, stripTabs: stripTabs, quoted: quoted})
+	}
+	return end
+}
+
+// heredocDelimiter reads the delimiter word at s[i] with its quotes removed,
+// and returns it with where the word ends and whether any of it was quoted.
+// A carriage return is part of the word, as the shell reads it, so the
+// delimiter of a script with CRLF line ends matches its own delimiter line.
+func heredocDelimiter(s string, i int) (string, int, bool) {
+	var word strings.Builder
+	quoted := false
+	for i < len(s) && strings.IndexByte(" \t\n;&|()<>", s[i]) < 0 {
+		next := i + 1
+		switch {
+		case s[i] == '$' && strings.HasPrefix(s[i+1:], "'"):
+			next = appendANSICText(&word, s, i+2)
+		case s[i] == '\'' || s[i] == '"':
+			closing := strings.IndexByte(s[i+1:], s[i])
+			if closing < 0 {
+				closing = len(s) - i - 1
+			}
+			word.WriteString(s[i+1 : i+1+closing])
+			next = i + 2 + closing
+		case s[i] == '\\':
+			word.WriteString(s[min(len(s), i+1):min(len(s), i+2)])
+			next = i + 2
+		default:
+			word.WriteByte(s[i])
+		}
+		quoted = quoted || next != i+1 || s[i] == '\\'
+		i = next
+	}
+	return word.String(), min(len(s), i), quoted
+}
+
+// appendANSICText appends the text of the $'...' string whose text starts at
+// s[from] to word, each escaped byte as itself, and returns where the string
+// ends.
+func appendANSICText(word *strings.Builder, s string, from int) int {
+	for i := from; i < len(s); i++ {
+		switch s[i] {
+		case '\'':
+			return i + 1
+		case '\\':
+			i = min(len(s)-1, i+1)
+		}
+		word.WriteByte(s[i])
+	}
+	return len(s)
+}
+
+// heredocsEnd returns where the bodies of docs, starting at s[from], end:
+// after the line that closes the last of them, or at the end of s.
+func heredocsEnd(s string, from int, docs []heredoc) int {
+	end := from
+	for _, doc := range docs {
+		end = heredocEnd(s, end, doc)
+	}
+	return end
+}
+
+// heredocEnd returns where the body of doc, starting at s[from], ends: after
+// its delimiter line, or at the end of s. A line must match the delimiter
+// exactly, as the shell matches it, so a carriage return before the newline
+// counts. With an unquoted delimiter, a line that ends in an unescaped
+// backslash goes on at the next one, as the shell joins them.
+func heredocEnd(s string, from int, doc heredoc) int {
+	var joined strings.Builder
+	for pos := from; pos < len(s); {
+		line, next := s[pos:], len(s)
+		if n := strings.IndexByte(line, '\n'); n >= 0 {
+			line, next = line[:n], pos+n+1
+		}
+		pos = next
+		if !doc.quoted && endsInLineContinuation(line) {
+			joined.WriteString(line[:len(line)-1])
+			continue
+		}
+		if joined.Len() > 0 {
+			joined.WriteString(line)
+			line = joined.String()
+			joined.Reset()
+		}
+		if doc.stripTabs {
+			line = strings.TrimLeft(line, "\t")
+		}
+		if line == doc.delimiter {
+			return pos
+		}
+	}
+	return len(s)
+}
+
+// endsInLineContinuation reports whether line ends in a backslash that no
+// other backslash escapes.
+func endsInLineContinuation(line string) bool {
+	trailing := len(line) - len(strings.TrimRight(line, `\`))
+	return trailing%2 == 1
+}
+
+// singleQuotedEnd returns where the single quoted string whose text starts at
+// s[from] ends: after its closing quote, or at the end of s.
+func singleQuotedEnd(s string, from int) int {
+	if closing := strings.IndexByte(s[from:], '\''); closing >= 0 {
+		return from + closing + 1
+	}
+	return len(s)
+}
+
+// ansiCQuotedEnd is singleQuotedEnd for a $'...' string, where a backslash
+// escapes the next byte.
+func ansiCQuotedEnd(s string, from int) int {
+	for i := from; i < len(s); i++ {
+		switch s[i] {
+		case '\\':
+			i++
+		case '\'':
+			return i + 1
+		}
+	}
+	return len(s)
+}
+
+// lineEnd returns the index of the first line break at or after s[from], or
+// len(s).
+func lineEnd(s string, from int) int {
+	if n := strings.IndexAny(s[from:], "\n\r"); n >= 0 {
+		return from + n
+	}
+	return len(s)
+}
+
 // detectDatabaseURIPasswords covers database URIs whose password contains a
 // character credentialedURIPattern stops at. Placeholder passwords stay
 // visible, as in every other credential layer.
@@ -623,8 +1019,9 @@ func detectDatabaseURIPasswords(s string) []taggedRegion {
 		return nil
 	}
 	var regions []taggedRegion
+	quotes := newShellQuotes(s)
 	for _, loc := range databaseURIPasswordPattern.FindAllStringSubmatchIndex(s, -1) {
-		password := s[loc[2]:loc[3]]
+		password := uriPassword(quotes, loc[0], loc[2], loc[3])
 		if uriPortPrefixPattern.MatchString(password) || !hasNonPlaceholderPasswordValue(password) {
 			continue
 		}
@@ -802,55 +1199,62 @@ func detectShellStdinSecrets(s string) []taggedRegion {
 	if !strings.ContainsRune(s, '|') || !containsFoldASCII(s, "printf") || !containsFoldASCII(s, "secret") {
 		return nil
 	}
-	return detectCredentialKeyCaptures(s, shellStdinSecretPattern, true, nil)
+	return detectCredentialKeyCaptures(s, shellStdinSecretPattern, true, nil, true)
 }
 
 func detectCredentialValues(s string) []taggedRegion {
+	return credentialValueRegions(s, true)
+}
+
+// credentialValueRegions is detectCredentialValues, where wholeWords also
+// reads each key/value match as its whole shell word (see forEachValueMatch).
+// Without it, each value is read only as the patterns captured it, which
+// tests compare against.
+func credentialValueRegions(s string, wholeWords bool) []taggedRegion {
 	// Authorization headers use ':', so they run before the '=' gate below.
 	regions := detectAuthorizationHeaders(s)
 	if !strings.ContainsRune(s, '=') {
 		return regions
 	}
-	for _, loc := range credentialValuePattern.FindAllStringSubmatchIndex(s, -1) {
-		if len(loc) < 6 || loc[4] < 0 || loc[5] < 0 {
-			continue
+	forEachValueMatch(s, credentialValuePattern, 2, wholeWords, func(loc []int, wholeWord bool, quotes *shellQuotes) int {
+		// The shared placeholder rules, except that a single-quoted value is
+		// a shell literal and only the literal placeholder words apply.
+		valueRegion := credentialValueRegion
+		if !wholeWord {
+			valueRegion = capturedValueRegion
 		}
-		start, end, singleQuoted := unquoteRangeQuoted(s, loc[4], loc[5])
-		if start == loc[4] {
-			end = extendPastValueSeparators(s, end)
-		}
-		// Main's shared placeholder rules, except that a single-quoted value
-		// is a shell literal and only the literal placeholder words apply.
-		isReal := hasNonPlaceholderPasswordValue(s[start:end])
-		if singleQuoted {
-			isReal = hasNonPlaceholderQuotedPasswordValue(s[start:end], true)
-		}
+		value, isReal := valueRegion(quotes, loc[4], loc[5], true, isRealPasswordPiece)
 		if isReal {
-			regions = append(regions, taggedRegion{region: region{start, end}})
+			regions = append(regions, taggedRegion{region: value})
 		}
-	}
+		return value.end
+	})
 	if strings.Contains(s, "sig=") {
 		for _, loc := range sasSignaturePattern.FindAllStringSubmatchIndex(s, -1) {
 			regions = append(regions, taggedRegion{region: region{loc[2], loc[3]}})
 		}
 	}
-	regions = append(regions, detectCredentialKeyCaptures(s, credentialAssignmentPattern, false, shouldPreserveCredentialCodeAssignment)...)
+	regions = append(regions, detectCredentialKeyCaptures(s, credentialAssignmentPattern, false, shouldPreserveCredentialCodeAssignment, wholeWords)...)
 	return regions
 }
 
+// detectCredentialKeyCaptures returns the regions to redact for the values
+// pattern captures under credential keys; wholeWords is as in
+// credentialValueRegions.
 func detectCredentialKeyCaptures(
 	s string,
 	pattern *regexp.Regexp,
 	genericPasswordContext bool,
 	shouldPreserve func(value, separator string) bool,
+	wholeWords bool,
 ) []taggedRegion {
 	valueGroup := pattern.SubexpIndex("value")
 	keyGroup := pattern.SubexpIndex("key")
 	var regions []taggedRegion
-	for _, match := range pattern.FindAllStringSubmatchIndex(s, -1) {
+	visit := func(match []int, wholeWord bool, quotes *shellQuotes) int {
 		keyStart, keyEnd, ok := captureRange(match, keyGroup)
 		if !ok {
-			continue
+			return 0
 		}
 		key := s[keyStart:keyEnd]
 		credentialContext := genericPasswordContext || key == "PASSWORD" || key == "PASSWD"
@@ -859,34 +1263,84 @@ func detectCredentialKeyCaptures(
 			// the key is called (STRIPE_KEY, DATABASE_URL); only a pure
 			// identifier key such as CLIENT_ID names a non-secret.
 			if isPureIdentifierKey(key) {
-				continue
+				return 0
 			}
 		} else if !isCredentialJSONSecretKey(key, credentialContext) {
+			return 0
+		}
+		valueStart, valueEnd, _ := captureRange(match, valueGroup)
+		judge := func(valueEnd int, wholeWord bool) (taggedRegion, bool) {
+			return assignedValueCapture(quotes, key, keyEnd, valueStart, valueEnd, wholeWord, shouldPreserve)
+		}
+		// The whole shell word is the value ("None"x is not None).
+		end, wordEnd, joined := valueEnd, valueEnd, false
+		if wholeWord {
+			_, wordEnd, joined = joinedShellWord(quotes, valueStart, valueEnd)
+		}
+		if joined {
+			end = wordEnd
+		}
+		captured, ok := judge(end, wholeWord)
+		if !ok {
+			return end
+		}
+		regions = append(regions, captured)
+		return max(end, captured.end)
+	}
+	forEachValueMatch(s, pattern, valueGroup, wholeWords, visit)
+	return regions
+}
+
+// assignedValueCapture returns the region to redact for the value at
+// s[valueStart:valueEnd], s being quotes.s, that key, which ends at keyEnd,
+// is assigned, when it is a real credential. wholeWord reads it as a shell word joined from
+// pieces (see nonPlaceholderCapture). shouldPreserve, nil for shell-stdin
+// literals, recognizes code assignments.
+func assignedValueCapture(quotes *shellQuotes, key string, keyEnd, valueStart, valueEnd int, wholeWord bool, shouldPreserve func(value, separator string) bool) (taggedRegion, bool) {
+	s := quotes.s
+	if isNonPasswordCodeLiteral(key, strings.Trim(s[valueStart:valueEnd], `"'`)) {
+		return taggedRegion{}, false
+	}
+	if shouldPreserve != nil && keyEnd <= valueStart && shouldPreserve(s[valueStart:valueEnd], s[keyEnd:valueStart]) {
+		return taggedRegion{}, false
+	}
+	captured, ok := nonPlaceholderCapture(quotes, key, valueStart, valueEnd, wholeWord, shouldPreserve != nil)
+	// Assignments get the same separator handling as the password pattern:
+	// "ab;cd" is one value. Shell-stdin literals stop at the pipe syntax
+	// their pattern already bounds. A word that starts with a quoted string
+	// ends where its quotes say; a quote that never closes ("abc;hunter2) is
+	// one more byte of the value.
+	if ok && shouldPreserve != nil && captured.start == valueStart && !startsWithQuotedString(s, valueStart) {
+		captured.end = extendPastValueSeparators(s, captured.end)
+	}
+	return captured, ok
+}
+
+// forEachValueMatch calls visit for each match of pattern in s that has a
+// value capture (group valueGroup), as FindAll finds them, left to right.
+// visit returns where the value it read ends, redacted or not. Each match is
+// read as captured (wholeWord false), so a value is never redacted less than
+// the pattern alone redacts it. With wholeWords, it is also read as its whole
+// shell word (wholeWord true), unless its value starts inside a word read so
+// far. A value inside a word, as the second one in
+// DB_PASSWORD=a" DB_PASSWORD=b", is part of that word: read on as a word from
+// there, a closing quote of the outer word would open a new string. Each word
+// is read once, so the passes stay linear. Each reading gets its own
+// shellQuotes, so that each reader is asked about positions in increasing
+// order.
+func forEachValueMatch(s string, pattern *regexp.Regexp, valueGroup int, wholeWords bool, visit func(match []int, wholeWord bool, quotes *shellQuotes) int) {
+	captured, words := newShellQuotes(s), newShellQuotes(s)
+	covered := 0
+	for _, match := range pattern.FindAllStringSubmatchIndex(s, -1) {
+		valueStart, _, ok := captureRange(match, valueGroup)
+		if !ok {
 			continue
 		}
-		if valueStart, valueEnd, valueOK := captureRange(match, valueGroup); valueOK &&
-			isNonPasswordCodeLiteral(key, strings.Trim(s[valueStart:valueEnd], `"'`)) {
-			continue
-		}
-		if shouldPreserve != nil {
-			valueStart, valueEnd, valueOK := captureRange(match, valueGroup)
-			if valueOK && keyEnd <= valueStart && shouldPreserve(s[valueStart:valueEnd], s[keyEnd:valueStart]) {
-				continue
-			}
-		}
-		if captured, ok := nonPlaceholderCapture(s, key, match, valueGroup); ok {
-			// Assignments get the same separator handling as the password
-			// pattern above: "ab;cd" is one value. Shell-stdin literals stop
-			// at the pipe syntax their pattern already bounds.
-			if shouldPreserve != nil {
-				if valueStart, _, _ := captureRange(match, valueGroup); captured.start == valueStart {
-					captured.end = extendPastValueSeparators(s, captured.end)
-				}
-			}
-			regions = append(regions, captured)
+		visit(match, false, captured)
+		if wholeWords && valueStart >= covered {
+			covered = max(covered, visit(match, true, words))
 		}
 	}
-	return regions
 }
 
 // extendPastValueSeparators continues an unquoted credential value across ',',
@@ -932,16 +1386,389 @@ func isCredentialCodeReference(value string) bool {
 	return isCredentialJSONSecretKey(value[memberStart:], false)
 }
 
-func nonPlaceholderCapture(s, key string, match []int, captureGroup int) (taggedRegion, bool) {
-	start, end, ok := captureRange(match, captureGroup)
-	if !ok {
+// nonPlaceholderCapture returns the value captured at s[start:end], s being
+// quotes.s, under key when it is a real credential. wholeWord reads it as a shell word joined
+// from pieces; otherwise it is read as captured. extendJoined judges a joined
+// word that starts as bare text after the separator extension its region gets
+// anyway, as the password pattern does, so ${A}"${B}",hunter2 is one value.
+func nonPlaceholderCapture(quotes *shellQuotes, key string, start, end int, wholeWord, extendJoined bool) (taggedRegion, bool) {
+	isReal := func(piece string, singleQuoted bool) bool {
+		return hasNonPlaceholderKeyValue(key, piece, singleQuoted)
+	}
+	value, secret, joined := region{}, false, false
+	if wholeWord {
+		value, secret, joined = joinedValueRegion(quotes, start, end, extendJoined, isReal)
+	}
+	if !joined {
+		value, secret = capturedValueRegion(quotes, start, end, false, isReal)
+	}
+	if !secret {
 		return taggedRegion{}, false
 	}
-	start, end, singleQuoted := unquoteRangeQuoted(s, start, end)
-	if !hasNonPlaceholderKeyValue(key, s[start:end], singleQuoted) {
-		return taggedRegion{}, false
+	return taggedRegion{region: value}, true
+}
+
+// isRealPasswordPiece applies the shared placeholder rules to a password
+// value, where single quotes leave only the literal placeholder words.
+func isRealPasswordPiece(value string, singleQuoted bool) bool {
+	if singleQuoted {
+		return hasNonPlaceholderQuotedPasswordValue(value, true)
 	}
-	return taggedRegion{region: region{start, end}}, true
+	return hasNonPlaceholderPasswordValue(value)
+}
+
+// credentialValueRegion returns the region to redact for the value a
+// key/value pattern captured at s[start:end], s being quotes.s, and whether
+// it holds a real secret. isReal judges one piece of the value: its text, and whether single
+// quotes made that text a literal. extend continues an unquoted value past
+// value separators before it is judged, so "changeme;hunter2" is one value.
+// A value that is one quoted string is redacted inside its quotes, and a
+// shell word joined from several pieces (""'$X', "hunter"'2') is redacted
+// whole and judged by isRealJoinedWord. A word that starts with a quoted
+// string was quoted on purpose, so a separator after it ends a command, not
+// the value ("x"'y';echo).
+func credentialValueRegion(quotes *shellQuotes, start, end int, extend bool, isReal func(piece string, singleQuoted bool) bool) (region, bool) {
+	if value, secret, joined := joinedValueRegion(quotes, start, end, extend, isReal); joined {
+		return value, secret
+	}
+	return capturedValueRegion(quotes, start, end, extend, isReal)
+}
+
+// joinedValueRegion is credentialValueRegion for a value whose shell word is
+// joined from several pieces, and joined is false for any other value.
+func joinedValueRegion(quotes *shellQuotes, start, end int, extend bool, isReal func(piece string, singleQuoted bool) bool) (value region, secret, joined bool) {
+	s := quotes.s
+	pieces, wordEnd, joined := joinedShellWord(quotes, start, end)
+	if !joined {
+		return region{}, false, false
+	}
+	if extend && !isQuoteByte(s[start]) {
+		if extended := extendPastValueSeparators(s, wordEnd); extended > wordEnd {
+			pieces = append(pieces, wordPiece{start: wordEnd, end: extended})
+			wordEnd = extended
+		}
+	}
+	return region{start, wordEnd}, isRealJoinedWord(s, pieces, isReal), true
+}
+
+// capturedValueRegion is credentialValueRegion for a value read as captured:
+// one quoted string is redacted inside its quotes, and a bare value is
+// extended past separators when extend is set. The value is judged as
+// capturedValueText reads it.
+func capturedValueRegion(quotes *shellQuotes, start, end int, extend bool, isReal func(piece string, singleQuoted bool) bool) (region, bool) {
+	s := quotes.s
+	valueStart, valueEnd, singleQuoted := unquoteRangeQuoted(s, start, end)
+	if extend && valueStart == start {
+		valueEnd = extendPastValueSeparators(s, valueEnd)
+	}
+	return region{valueStart, valueEnd}, isReal(capturedValueText(quotes, valueStart, valueEnd), singleQuoted)
+}
+
+// isRealJoinedWord reports whether a shell word joined from pieces holds a
+// real secret. Empty pieces hold nothing. A word with one piece of text is
+// judged by that piece under its own quotes: ""'$X' is the literal $X, and
+// ""'changeme' is a placeholder. The text of two or more pieces joins into a
+// new literal (changeme'example' is changemeexample), so the word is a
+// placeholder only when every piece is made of shell references that isReal
+// accepts as placeholders ("$A"${B}, "$A"${B}${C}; see isReferenceRun).
+func isRealJoinedWord(s string, pieces []wordPiece, isReal func(piece string, singleQuoted bool) bool) bool {
+	var text []wordPiece
+	for _, piece := range pieces {
+		if piece.end > piece.start {
+			text = append(text, piece)
+		}
+	}
+	switch len(text) {
+	case 0:
+		return false
+	case 1:
+		piece := s[text[0].start:text[0].end]
+		if text[0].quote == '"' {
+			piece = doubleQuotedText(piece)
+		}
+		return isReal(piece, text[0].quote == '\'')
+	}
+	for _, piece := range text {
+		if piece.quote == '\'' || !isReferenceRun(s[piece.start:piece.end], piece.quote == '"', isReal) {
+			return true
+		}
+	}
+	return false
+}
+
+// isReferenceRun reports whether text is a shell reference that isReal
+// accepts as a placeholder, or a run of such references with nothing between
+// them: $A, ${B} and ${B}${C}, but not ${B}x or ${B:-x}. doubleQuoted reads
+// each reference as double quotes enclose it (see doubleQuotedText).
+func isReferenceRun(text string, doubleQuoted bool, isReal func(piece string, singleQuoted bool) bool) bool {
+	if text == "" || text[0] != '$' {
+		return false
+	}
+	isPlaceholder := func(ref string) bool {
+		if doubleQuoted {
+			ref = doubleQuotedText(ref)
+		}
+		return !isReal(ref, false)
+	}
+	if isPlaceholder(text) {
+		return true
+	}
+	for i := 0; i < len(text); {
+		end := shellReferenceEnd(text, i)
+		if end < 0 || !isPlaceholder(text[i:end]) {
+			return false
+		}
+		i = end
+	}
+	return true
+}
+
+// shellReferenceEnd returns where the shell reference that starts at text[i]
+// ends: a ${...} that closes, a $NAME, or a $ and one digit or special
+// parameter. It returns -1 when text[i] does not start one.
+func shellReferenceEnd(text string, i int) int {
+	if text[i] != '$' || i+1 >= len(text) {
+		return -1
+	}
+	switch c := text[i+1]; {
+	case c == '{':
+		if closeAt := wordBraceExpansionEnd(text, i+1); closeAt >= 0 {
+			return closeAt + 1
+		}
+		return -1
+	case '0' <= c && c <= '9' || strings.IndexByte("@*#?$!-", c) >= 0:
+		return i + 2
+	case c == '_' || isASCIIAlnum(c):
+		end := i + 2
+		for end < len(text) && (text[end] == '_' || isASCIIAlnum(text[end])) {
+			end++
+		}
+		return end
+	}
+	return -1
+}
+
+func isQuoteByte(c byte) bool {
+	return c == '"' || c == '\''
+}
+
+// wordPiece is one quoted string or run of bare text in a shell word. Its
+// text is s[start:end], inside the quotes; quote is the quote byte, or 0.
+type wordPiece struct {
+	start, end int
+	quote      byte
+}
+
+// joinedShellWord reads on through the shell word whose value a key/value
+// pattern captured at s[start:end]. The shell joins quoted strings and bare
+// text with nothing between them into one value, so ""'$X' is the literal $X
+// and "hunter"'2' is hunter2. A pattern stops at the first closing quote, or,
+// for a bare value, at a blank inside a later quoted string (abc"d e"). It
+// returns the word's pieces and end, and false when the word is the capture
+// itself as a single piece. Quoted strings close on their own line. A value
+// inside a double quoted string opened before its key, as in
+// echo "DB_PASSWORD=${PW}" "z", starts with the rest of that string: the
+// quote after the value closes it, and does not open "z" (see
+// enclosingStringEnd).
+func joinedShellWord(quotes *shellQuotes, start, end int) ([]wordPiece, int, bool) {
+	s := quotes.s
+	if start >= end {
+		return nil, end, false
+	}
+	startsQuoted := isQuoteByte(s[start])
+	if !startsQuoted && !strings.ContainsAny(s[start:end], `"'`) {
+		return nil, end, false
+	}
+	var pieces []wordPiece
+	i := start
+	if enclosed, closeAt := enclosingStringEnd(quotes, start); enclosed {
+		if closeAt < 0 {
+			return nil, end, false
+		}
+		pieces = append(pieces, wordPiece{start: start, end: closeAt, quote: '"'})
+		i, startsQuoted = closeAt+1, true
+	}
+	for i < len(s) {
+		bareStart := i
+		if c := s[i]; isQuoteByte(c) {
+			if closeAt := quotedPieceEnd(s, i); closeAt >= 0 {
+				pieces = append(pieces, wordPiece{start: i + 1, end: closeAt, quote: c})
+				i = closeAt + 1
+				continue
+			}
+			// A quote that never closes ends a word that started quoted;
+			// in bare text it is one more byte, as the pattern read it.
+			if startsQuoted {
+				break
+			}
+			i++
+		}
+		bareEnd := bareWordTextEnd(s, i, startsQuoted)
+		if bareEnd == bareStart {
+			break
+		}
+		pieces = append(pieces, wordPiece{start: bareStart, end: bareEnd})
+		i = bareEnd
+	}
+	if i < end || len(pieces) < 2 && i == end {
+		return nil, end, false
+	}
+	markEnclosingString(s, pieces)
+	return pieces, i, true
+}
+
+// enclosingStringEnd reports whether s[start], s being quotes.s, sits inside
+// a double quoted string opened before it (see shellQuotes), and the index of
+// the quote that closes that string right after the value. The index is -1
+// when a blank ends the value first, as it ends a captured one
+// (echo "DB_PASSWORD=x more"), when the line ends first, or when a backslash
+// could escape a quote: the value is then read as captured.
+func enclosingStringEnd(quotes *shellQuotes, start int) (bool, int) {
+	if !quotes.doubleQuotedAt(start) {
+		return false, -1
+	}
+	s := quotes.s
+	rest := s[start:min(len(s), start+doubleQuoteContextLimit)]
+	n := strings.IndexAny(rest, "\"\\\n\r \t")
+	if n < 0 || rest[n] != '"' {
+		return true, -1
+	}
+	return true, start + n
+}
+
+// markEnclosingString handles a word that ends in a quote that never closes,
+// as the pattern read it: in echo "DB_PASSWORD=${PW}", the quote closes the
+// string the word sits in. That quote holds no text of the value, and when it
+// is a double quote, the bare text before it was inside double quotes, which
+// isRealJoinedWord needs to read "${PW:-'$FALLBACK'}" (see doubleQuotedText).
+func markEnclosingString(s string, pieces []wordPiece) {
+	last := &pieces[len(pieces)-1]
+	if last.quote != 0 || last.end-last.start != 1 || !isQuoteByte(s[last.start]) {
+		return
+	}
+	last.start = last.end
+	if s[last.end-1] != '"' {
+		return
+	}
+	for i := range pieces {
+		if pieces[i].quote == 0 {
+			pieces[i].quote = '"'
+		}
+	}
+}
+
+// startsWithQuotedString reports whether a quoted string that closes on its
+// line starts at s[i].
+func startsWithQuotedString(s string, i int) bool {
+	return isQuoteByte(s[i]) && quotedPieceEnd(s, i) >= 0
+}
+
+// quotedPieceEnd returns the index of the quote that closes the string opened
+// at s[open], or -1 when the line ends first.
+func quotedPieceEnd(s string, open int) int {
+	for i := open + 1; i < len(s); i++ {
+		switch s[i] {
+		case s[open]:
+			return i
+		case '\n', '\r':
+			return -1
+		}
+	}
+	return -1
+}
+
+// bareWordStopBytes end the bare text of any shell word: blanks, quotes,
+// value separators (, ; &) and the other shell operators (| < > ( ) and a
+// backtick), so printf v"x"|secrets keeps its pipe. An = is part of the word,
+// as in the shell: DB_PASSWORD=abc"d e"=hunter2 is the value abcd e=hunter2.
+const bareWordStopBytes = " \t\n\r\f\v\"',;&|<>()`"
+
+// codeAfterStringBytes also end the bare text of a word that started as a
+// quoted string. Right after a string they read as code or Markdown, not as
+// more of the value: "x".strip(), cond ? "x":"y", "x"+y, **"x"**, "x"[0],
+// and "x"\n in JSON-escaped text.
+const codeAfterStringBytes = ".:+*?[]{}\\"
+
+// escapedWordBytes are the bareWordStopBytes that a backslash makes part of
+// a word that started as bare text, as the shell reads them: the | in
+// a"b"\|c is text. Two backslashes are one literal backslash and escape
+// nothing, so the blank in a"b"\\ echo still ends the word. A backslash
+// before a quote is left as it is, because raw JSON text escapes quotes the
+// same way, and one before a line end continues the line rather than the
+// word.
+const escapedWordBytes = " \t,;&|<>()`"
+
+// bareWordTextEnd returns where the bare text of a shell word that starts at
+// s[i] ends: at one of bareWordStopBytes, unless a backslash escapes it in a
+// word that started as bare text (see escapedWordBytes). A ${...} expansion
+// closed on its line is read whole, quotes and all, so ${PW:-""} and "$A"${B}
+// are each one piece. In a word that started as a quoted string,
+// codeAfterStringBytes, a $( command substitution and a ${ that does not
+// close end it too.
+func bareWordTextEnd(s string, i int, startsQuoted bool) int {
+	for i < len(s) {
+		c := s[i]
+		if !startsQuoted && c == '\\' && i+1 < len(s) && (s[i+1] == '\\' || strings.IndexByte(escapedWordBytes, s[i+1]) >= 0) {
+			i += 2
+			continue
+		}
+		if strings.IndexByte(bareWordStopBytes, c) >= 0 {
+			return i
+		}
+		if c == '$' && i+1 < len(s) && s[i+1] == '{' {
+			if closeAt := wordBraceExpansionEnd(s, i+1); closeAt >= 0 {
+				i = closeAt + 1
+				continue
+			}
+			if startsQuoted {
+				return i
+			}
+		}
+		if startsQuoted && c == '$' && i+1 < len(s) && s[i+1] == '(' {
+			return i
+		}
+		if startsQuoted && strings.IndexByte(codeAfterStringBytes, c) >= 0 {
+			return i
+		}
+		i++
+	}
+	return i
+}
+
+// wordBraceExpansionEnd returns the index of the } that closes the ${ whose {
+// is at s[open], or -1 when a blank, a line end, a nested { or the end of s
+// comes first. Quoted strings inside it (${PW:-"x y"}) are skipped whole.
+// Stopping at nesting and blanks keeps each read to one expansion's text.
+func wordBraceExpansionEnd(s string, open int) int {
+	for i := open + 1; i < len(s); i++ {
+		switch c := s[i]; c {
+		case '}':
+			return i
+		case '"', '\'':
+			if i = quotedPieceEnd(s, i); i < 0 {
+				return -1
+			}
+		case '{', ' ', '\t', '\n', '\r', '\f', '\v':
+			return -1
+		}
+	}
+	return -1
+}
+
+// capturedValueText returns the value s[start:end] that a key/value pattern
+// captured, s being quotes.s, as the placeholder rules read it: inside a
+// double-quoted string (DB_PASSWORD="${PW:-'$FALLBACK'}",
+// echo "DB_PASSWORD=${PW:-'$FALLBACK'} done"), the shell reads it as
+// doubleQuotedText describes.
+func capturedValueText(quotes *shellQuotes, start, end int) string {
+	value := quotes.s[start:end]
+	if !strings.Contains(value, "'") || !insideDoubleQuotes(quotes, start, end) {
+		return value
+	}
+	if inner, ok := strings.CutSuffix(value, `"`); ok {
+		return doubleQuotedText(inner) + `"`
+	}
+	return doubleQuotedText(value)
 }
 
 func captureRange(match []int, captureGroup int) (int, int, bool) {
@@ -1163,31 +1990,76 @@ func isSecretRecipeCommand(cmd string) bool {
 	return ok
 }
 
+// shellParameterName matches the parameter a ${…} expansion names: a
+// variable or array element (${DB_PASSWORD}, ${pw[0]}), a positional
+// parameter (${1}, ${10}), or a special parameter (${@}, ${*}, ${#}, ${?},
+// ${-}, ${$}, ${!}), each optionally behind ! for indirection (${!ref}). An
+// array subscript may hold one more level of brackets (${pw[idx[0]]},
+// ${pw[${idx[0]}]}); a deeper one is not read as a parameter name.
+const shellParameterName = `!?(?:[A-Za-z_][A-Za-z0-9_]*(?:\[(?:[^\[\]]|\[[^\[\]]*\])*\])?|[0-9]+|[@*#?$!-])`
+
 // shellExpansionWordRE matches ${NAME<op>word}, whose word becomes the value
 // when NAME is unset (-, =) or set (+); with a colon, an empty NAME counts as
 // unset. ${NAME:?word} is left out: its word is an error message, never a
 // value.
-var shellExpansionWordRE = regexp.MustCompile(`^\$\{[A-Za-z_][A-Za-z0-9_]*:?[-=+](.*)\}$`)
+var shellExpansionWordRE = regexp.MustCompile(`^\$\{` + shellParameterName + `:?[-=+](.*)\}$`)
+
+// shellLengthRE matches ${#NAME}, the length of a parameter, which holds no
+// text of its own even when NAME is itself # (${##}).
+var shellLengthRE = regexp.MustCompile(`^\$\{#` + shellParameterName + `\}$`)
 
 // isPlaceholderShellExpansion reports whether a ${…} value is a placeholder:
 // one complete expression that is a plain reference, or one whose word is
-// itself empty or a placeholder, so ${DB_PASSWORD:-hunter2} and
-// ${A}hunter2${B} still count as secrets.
+// itself empty or a placeholder, so ${DB_PASSWORD:-hunter2},
+// ${1:-hunter2} and ${A}hunter2${B} still count as secrets. A single-quoted
+// word is a literal, so ${PW:-'$S3CRET'} is a secret too.
 func isPlaceholderShellExpansion(s string) bool {
 	if !isSingleBraceExpression(s) {
 		return false
 	}
+	if shellLengthRE.MatchString(s) {
+		return true
+	}
 	if m := shellExpansionWordRE.FindStringSubmatch(s); m != nil {
+		if word := m[1]; isSingleQuotedWord(word) {
+			return isPlaceholderSecretValueQuoted(word, true)
+		}
 		return isPlaceholderSecretValue(m[1])
 	}
 	return !shellTextOperatorRE.MatchString(s)
+}
+
+// isSingleQuotedWord reports whether word is one single quoted string, which
+// is literal text outside double quotes: ${PW:-'$S3CRET'} defaults to the
+// characters $S3CRET, not to a variable. A word joined from several pieces,
+// as in ${PW:-”$FALLBACK”}, is not one: its $FALLBACK is a reference.
+func isSingleQuotedWord(word string) bool {
+	return len(word) >= 2 && word[0] == '\'' && strings.IndexByte(word[1:], '\'') == len(word)-2
+}
+
+// singleQuotedDefaultRE matches a ${NAME<op>'word'} expansion whose word is
+// wrapped in single quotes and holds none.
+var singleQuotedDefaultRE = regexp.MustCompile(`\$\{(` + shellParameterName + `:?[-=+])'([^']*)'\}`)
+
+// doubleQuotedText returns text, which double quotes enclose, as the
+// placeholder rules read it. Inside double quotes a single quote is a plain
+// character: "${PW:-'$FALLBACK'}" expands $FALLBACK and puts apostrophes
+// around it, so each expansion whose word is all single-quoted, nested ones
+// included, is read without those quotes, as ${PW:-$FALLBACK}. Without double
+// quotes the same word is the literal text $FALLBACK, a secret (see
+// isPlaceholderShellExpansion).
+func doubleQuotedText(text string) string {
+	if !strings.Contains(text, "'") {
+		return text
+	}
+	return singleQuotedDefaultRE.ReplaceAllString(text, "$${${1}${2}}")
 }
 
 // shellTextOperatorRE matches ${NAME<op>...} for shell operators whose text can
 // carry a literal value: pattern substitution and removal (/ # %), case
 // changes (^ ,), and substrings (:offset). Non-shell forms such as ${var.x},
 // ${env:X} and ${{secrets.X}} do not match.
-var shellTextOperatorRE = regexp.MustCompile(`^\$\{[A-Za-z_][A-Za-z0-9_]*(?:[/#%^,]|:[-0-9 ])`)
+var shellTextOperatorRE = regexp.MustCompile(`^\$\{` + shellParameterName + `(?:[/#%^,]|:[-0-9 ])`)
 
 // isSingleBraceExpression reports whether the brace opened by the leading "${"
 // of s is closed by its final "}".

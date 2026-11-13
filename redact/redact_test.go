@@ -1335,6 +1335,426 @@ func TestString_ConnectionSecretsCaughtWithoutScanners(t *testing.T) {
 	}
 }
 
+// Shell parameter defaults and values joined from several quoted and bare
+// pieces must be caught by the key/value rules alone, with the scanners off.
+func TestString_ShellWordSecretsCaughtWithoutScanners(t *testing.T) {
+	assertStringRedactionCasesWithoutScanners(t, []stringRedactionCase{
+		{
+			name:  "nested defaults after a positional default",
+			input: "DB_PASSWORD=${1:-hunter2;${B:-${C:-x}}}",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "single-quoted literal after an empty string",
+			input: `DB_PASSWORD=""'$X'`,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "single-quoted literal after an empty string under another credential key",
+			input: `API_TOKEN=""'$uperSecret123'`,
+			want:  "API_TOKEN=REDACTED",
+		},
+		{
+			name:  "password joined from two quoted strings",
+			input: `DB_PASSWORD="hunter"'2'`,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "password joined from a quoted string and bare text",
+			input: `DB_PASSWORD="hunter"2xyz`,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "reference joined with a literal suffix",
+			input: `DB_PASSWORD="$BASE"_dev`,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "bare password whose quoted part holds a blank",
+			input: `DB_PASSWORD=abc"d e"`,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "an equals sign after the quoted blank is still the value",
+			input: `DB_PASSWORD=abc"d e"=hunter2`,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "an equals sign after a quoted password is still the value",
+			input: `DB_PASSWORD="d e"=hunter2`,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "an equals sign after the quoted blank of a credential",
+			input: `API_KEY=abc"d e"=hunter2xyz`,
+			want:  "API_KEY=REDACTED",
+		},
+		{
+			name:  "code literal joined with more text",
+			input: `API_KEY="None"realtoken`,
+			want:  "API_KEY=REDACTED",
+		},
+		{
+			name:  "placeholder head of a value that runs past a separator",
+			input: "DB_PASSWORD=changeme;hunter2",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "placeholder head of a value that runs past a comma",
+			input: "DB_PASSWORD=example,hunter2",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "quoted default holding a blank",
+			input: `DB_PASSWORD=${PW:-'x y'}`,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "literal default in a double-quoted piece of a joined word",
+			input: `DB_PASSWORD="$A""${PW:-'hunter2'}"`,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "unquoted single-quoted default after an empty string",
+			input: `DB_PASSWORD=""${PW:-'$S3CRET'}`,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "two joined placeholder words form a new literal",
+			input: `DB_PASSWORD=changeme'example'`,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "a joined quoted password stops at the command separator",
+			input: `DB_PASSWORD="hunter"'2';echo done`,
+			want:  "DB_PASSWORD=REDACTED;echo done",
+		},
+		{
+			name:  "a joined quoted credential stops at the command separator",
+			input: `API_KEY="hunter"'2abc';echo done`,
+			want:  "API_KEY=REDACTED;echo done",
+		},
+		{
+			name:  "a joined credential whose captured piece is a placeholder",
+			input: `API_KEY=changeme";hunter2"|cat`,
+			want:  "API_KEY=REDACTED|cat",
+		},
+		{
+			name:  "a joined credential whose captured piece is a code literal",
+			input: `API_KEY=None";hunter2"|cat`,
+			want:  "API_KEY=REDACTED|cat",
+		},
+	})
+}
+
+// A value that a quote or separator carries past the end of a redacted word,
+// and a key that such a word ends inside, must still be caught by the
+// key/value rules alone, with the scanners off.
+func TestString_ValuesPastRedactedWordsCaughtWithoutScanners(t *testing.T) {
+	assertStringRedactionCasesWithoutScanners(t, []stringRedactionCase{
+		{
+			name:  "a password after a key inside a redacted word",
+			input: `DB_PASSWORD=a" DB_PASSWORD=b";DB_PASSWORD=hunter2`,
+			want:  "DB_PASSWORD=REDACTED;DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "a credential after a key inside a redacted word",
+			input: `API_KEY=a" API_KEY=b";API_KEY=hunter2xyz`,
+			want:  "API_KEY=REDACTED;API_KEY=REDACTED",
+		},
+		{
+			name:  "a password after a word that ends inside another redacted word",
+			input: `DB_PASSWORD=c' DB_PASSWORD=d'|echo "safe" DB_PASSWORD="hunter'2 secretpart"`,
+			want:  `DB_PASSWORD=REDACTED "safe" DB_PASSWORD="REDACTED"`,
+		},
+		{
+			name:  "a credential after a word that ends inside another redacted word",
+			input: `API_KEY=c' API_KEY=d'|echo "safe" API_KEY="hunter'2 secretpart"`,
+			want:  `API_KEY=REDACTED "safe" API_KEY="REDACTED"`,
+		},
+		{
+			name:  "a quoted value whose opening quote follows an escaped quote",
+			input: `DB_PASSWORD=abc\" API_KEY="hunter2 secretpart"`,
+			want:  `DB_PASSWORD=REDACTED"`,
+		},
+		{
+			name:  "text joined after a quoted value whose opening quote follows an escaped quote",
+			input: `DB_PASSWORD=abc\" API_KEY="hunter2 secretpart"tail echo "safe"`,
+			want:  `DB_PASSWORD=REDACTED"tail echo "safe"`,
+		},
+		{
+			name:  "a bare value that runs past a word ending at a pipe",
+			input: `DB_PASSWORD=abc\" API_KEY=aaa\"|bbb echo "safe"`,
+			want:  `DB_PASSWORD=REDACTED echo "safe"`,
+		},
+		{
+			name:  "a password after a key that is the value of a key at the end of a redacted word",
+			input: `DB_PASSWORD="a"DB_PASSWORD = DB_PASSWORD = hunter2xyz`,
+			want:  `DB_PASSWORD=REDACTED = REDACTED = REDACTED`,
+		},
+		{
+			name:  "a credential after a non-credential quoted value that opens inside a joined word",
+			input: `api_key="x""a="+"b=";client_secret="hunter2"`,
+			want:  `api_key=REDACTED+"b=";client_secret="REDACTED"`,
+		},
+		{
+			name:  "a password whose quoted value opens inside a word and closes on the next line",
+			input: "PGPASSWORD=abc\\\" DB_PASSWORD=\"hunter2\nsecretpart\"",
+			want:  `PGPASSWORD=REDACTED"`,
+		},
+		{
+			name:  "a password after a chain of spaced keys",
+			input: `DB_PASSWORD = DB_PASSWORD = DB_PASSWORD = hunter2xyz`,
+			want:  `DB_PASSWORD = REDACTED = DB_PASSWORD = REDACTED`,
+		},
+		{
+			name:  "a credential after a non-credential key at the end of a redacted word",
+			input: `DB_PASSWORD="a"b= API_KEY=hunter2`,
+			want:  `DB_PASSWORD=REDACTED API_KEY=REDACTED`,
+		},
+		{
+			name:  "a credential after a spaced non-credential key at the end of a redacted word",
+			input: `DB_PASSWORD="a"b = API_KEY=hunter2`,
+			want:  `DB_PASSWORD=REDACTED = API_KEY=REDACTED`,
+		},
+		{
+			name:  "a credential after a key joined to a non-credential quoted value",
+			input: `FOO="x"b= API_KEY=hunter2`,
+			want:  `FOO="x"b= API_KEY=REDACTED`,
+		},
+		{
+			name:  "a joined reference word is judged with the text a separator joins to it",
+			input: `API_KEY=${A}"${B}",hunter2xyz`,
+			want:  `API_KEY=REDACTED`,
+		},
+		{
+			name:  "an escaped pipe is text inside a joined password",
+			input: `DB_PASSWORD=a"b;c"\|hunter2xyz`,
+			want:  `DB_PASSWORD=REDACTED`,
+		},
+		{
+			name:  "an escaped blank is text inside a joined password",
+			input: `DB_PASSWORD=a"b"\ hunter2xyz`,
+			want:  `DB_PASSWORD=REDACTED`,
+		},
+		{
+			name:  "an escaped blank after a literal backslash is text inside a joined password",
+			input: `DB_PASSWORD=a"b"\\\ hunter2xyz`,
+			want:  `DB_PASSWORD=REDACTED`,
+		},
+		{
+			name:  "a bare value past a quoted value that opens at an earlier value's closing quote",
+			input: `API_KEY="API_KEY="x API_KEY=aaa\"|bbb`,
+			want:  `API_KEY=REDACTED API_KEY=REDACTED`,
+		},
+		{
+			name:  "a piped literal after a piped literal whose word runs into its printf",
+			input: `printf aaa"|examplectl secrets put API_KEY; printf "hunter2 secretpart"|examplectl secrets put API_KEY`,
+			want:  `printf REDACTED"|examplectl secrets put API_KEY`,
+		},
+		{
+			name:  "a bare value past a word that holds a non-credential assignment",
+			input: `API_KEY=a=" API_KEY=aaa\"|bbb"`,
+			want:  `API_KEY=REDACTED`,
+		},
+		{
+			name:  "a value joined past a separator that ends a word holding its key",
+			input: `DB_PASSWORD="a\"b";API_KEY=a"b;c"hunter2xyz`,
+			want:  `DB_PASSWORD=REDACTED`,
+		},
+		{
+			name:  "a value that starts with a quote that never closes is extended past separators",
+			input: `GITHUB_CLIENT_SECRET="abc;hunter2xyz`,
+			want:  `GITHUB_CLIENT_SECRET=REDACTED`,
+		},
+		{
+			name:  "a spaced quoted value whose opening quote follows a stray quote",
+			input: `DB_PASSWORD=abc" API_KEY = "hunter2 secretpart"`,
+			want:  `DB_PASSWORD=REDACTED"`,
+		},
+		{
+			name:  "a quoted value that opens inside a single-quoted piece",
+			input: `DB_PASSWORD=abc' API_KEY="x' y"`,
+			want:  `DB_PASSWORD=REDACTED"`,
+		},
+		{
+			name:  "a quoted value that opens inside an expansion",
+			input: `DB_PASSWORD=abc${X:-" API_KEY="}hunter2 secretpart"`,
+			want:  `DB_PASSWORD=REDACTED"`,
+		},
+		{
+			name:  "quoted values that open inside joined words around a pipe",
+			input: `DB_PASSWORD=a" DB_PASSWORD="|DB_PASSWORD=c' DB_PASSWORD=d'|echo "safe" DB_PASSWORD="hunter'2 secretpart"`,
+			want:  `DB_PASSWORD=REDACTED"safe" DB_PASSWORD="REDACTED"`,
+		},
+		{
+			name:  "a quoted password piece holding a non-credential assignment stays whole",
+			input: `DB_PASSWORD=abc' FOO="hunter2 secretpart' echo "safe"`,
+			want:  `DB_PASSWORD=REDACTED echo "safe"`,
+		},
+		{
+			name:  "a joined password holding a non-credential key's quoted string stays whole",
+			input: `DB_PASSWORD=abc" note="hunter2" tail"`,
+			want:  `DB_PASSWORD=REDACTED`,
+		},
+		{
+			name:  "a password whose quoted value opens inside a word after other keys",
+			input: `DB_PASSWORD=a" FOO='v DB_PASSWORD=b DB_PASSWORD="hunter2 xyz' z"`,
+			want:  `DB_PASSWORD=REDACTED"`,
+		},
+		{
+			name:  "a spaced assignment whose key a separator extension took",
+			input: `connect(db_password=foo,client_secret = "hunter2")`,
+			want:  `connect(db_password=REDACTED = "REDACTED")`,
+		},
+		{
+			name:  "a spaced credential whose key a password value took",
+			input: `DB_PASSWORD=foo,API_KEY = hunter2xyz`,
+			want:  `DB_PASSWORD=REDACTED = REDACTED`,
+		},
+		{
+			name:  "a spaced password whose key a password value took",
+			input: `DB_PASSWORD=foo;DB_PASSWORD = hunter2`,
+			want:  `DB_PASSWORD=REDACTED = REDACTED`,
+		},
+		{
+			name:  "a credential that an escaped separator joins past a redacted word",
+			input: `DB_PASSWORD="a\"b";API_KEY=\;"a"hunter2xyz`,
+			want:  `DB_PASSWORD=REDACTED`,
+		},
+		{
+			name:  "a password that an escaped separator joins past a redacted word",
+			input: `DB_PASSWORD="a\"b";DB_PASSWORD=\;"a"hunter2`,
+			want:  `DB_PASSWORD=REDACTED`,
+		},
+		{
+			name:  "a credential after a non-credential key whose value a key inside it would take",
+			input: `API_KEY="x"=a=\b= API_KEY=hunter2`,
+			want:  `API_KEY=REDACTED\b= API_KEY=REDACTED`,
+		},
+		{
+			name:  "a credential after a placeholder inside a non-credential key's value",
+			input: `API_KEY="a"b= API_KEY=""|API_KEY=hunter2xyz`,
+			want:  `API_KEY=REDACTED API_KEY=""|API_KEY=REDACTED`,
+		},
+		{
+			name:  "a password key joined to a quoted value after an underscore",
+			input: `API_KEY="x"_PASSWORD=+hunter2`,
+			want:  `API_KEY=REDACTED`,
+		},
+		{
+			// Inside double quotes the single quotes are plain characters,
+			// so the first value runs to the closing quote and holds both.
+			name:  "a credential inside another credential's double-quoted value",
+			input: `echo "API_KEY='b='b'API_KEY=hunter2xyz"`,
+			want:  `echo "API_KEY=REDACTED`,
+		},
+		{
+			name:  "a credential after a non-credential key that starts inside the captured double-quoted value",
+			input: `API_KEY="b="b"API_KEY=hunter2xyz`,
+			want:  `API_KEY=REDACTED"API_KEY=REDACTED`,
+		},
+		{
+			name:  "a credential after a spaced non-credential key that starts inside a password's value",
+			input: `DB_PASSWORD=abc= DB_USER= DB_NAME= API_KEY=hunter2`,
+			want:  `DB_PASSWORD=REDACTED DB_USER= DB_NAME= API_KEY=REDACTED`,
+		},
+		{
+			name:  "a credential after a spaced key inside a non-credential value that runs past a joined word",
+			input: `API_KEY="x""a=b"|FOO= API_KEY=hunter2`,
+			want:  `API_KEY=REDACTED|FOO= API_KEY=REDACTED`,
+		},
+		{
+			name:  "a credential after spaced keys past a key inside a captured value",
+			input: `API_KEY=API_KEY= a= b= API_KEY=hunter2xyz`,
+			want:  `API_KEY=REDACTED a= b= API_KEY=REDACTED`,
+		},
+		{
+			name:  "a credential after a value read from a quote that closes a piece of the word",
+			input: `api_key="x""a=b="; note=" f=";client_secret="hunter2"`,
+			want:  `api_key=REDACTED; note=" f=";client_secret="REDACTED"`,
+		},
+		{
+			name:  "a password after spaced keys past a key inside a captured value",
+			input: `DB_PASSWORD=DB_PASSWORD= a= b= DB_PASSWORD=hunter2xyz`,
+			want:  `DB_PASSWORD=REDACTED a= b= DB_PASSWORD=REDACTED`,
+		},
+		{
+			name:  "a credential under the key FindAll reads when a longer key holds its value",
+			input: `API_KEY="x"_api_key=b=\hunter2xyz`,
+			want:  "API_KEY=REDACTED",
+		},
+		{
+			name:  "a credential under the key FindAll reads, joined past the word by a separator",
+			input: `API_KEY="x"_api_key=b=;hunter2xyz`,
+			want:  "API_KEY=REDACTED",
+		},
+		{
+			name:  "a password under the key FindAll reads when a longer key holds its value",
+			input: `API_KEY="a"x_PASSWORD=$A\hunter2xyz`,
+			want:  "API_KEY=REDACTED",
+		},
+	})
+}
+
+// TestString_TrailingKeysCaughtWithoutScanners covers a key that ends a
+// redacted word, read as FindAll reads it too, and the ends of the matches
+// FindAll takes, which no later key can start inside.
+func TestString_TrailingKeysCaughtWithoutScanners(t *testing.T) {
+	assertStringRedactionCasesWithoutScanners(t, []stringRedactionCase{
+		{
+			name:  "a credential after a joined key whose value is the next word, as FindAll reads it",
+			input: `API_KEY="x"FOO= DB_USER= DB_NAME= API_KEY=hunter2`,
+			want:  `API_KEY=REDACTED DB_USER= DB_NAME= API_KEY=REDACTED`,
+		},
+		{
+			name:  "a password under the shorter key FindAll reads at the end of a word",
+			input: `API_KEY="a"x_PASSWORD=+hunter2xyz`,
+			want:  "API_KEY=REDACTED",
+		},
+		{
+			name:  "a password after a blank under the shorter key FindAll reads",
+			input: `API_KEY="a"x_PASSWORD= hunter2xyz`,
+			want:  "API_KEY=REDACTED REDACTED",
+		},
+		{
+			name:  "a password under the shorter key FindAll reads after a single-quoted string",
+			input: `API_KEY='a'xx_PASSWORD=:hunter2xyz`,
+			want:  "API_KEY=REDACTED",
+		},
+		{
+			name:  "a password under the key FindAll reads after a match inside the word",
+			input: `API_KEY="x"api_key="a"_PASSWORD=?hunter2xyz`,
+			want:  "API_KEY=REDACTED",
+		},
+		{
+			name:  "a credential after a blank under the key FindAll reads after a match inside the word",
+			input: `api_key="a"api_key="a"_api_key= hunter2xyz`,
+			want:  "api_key=REDACTED REDACTED",
+		},
+		{
+			name:  "a credential after a value redacted inside the quotes its match ends with",
+			input: `API_KEY=""'API_KEY="x'"a= API_KEY=hunter2`,
+			want:  `API_KEY=REDACTED"a= API_KEY=REDACTED`,
+		},
+		{
+			name:  "a credential after a value redacted inside its quotes, with a quote on the next line",
+			input: "API_KEY=\"\"'API_KEY=\"x'\"a= API_KEY=hunter2\n\"",
+			want:  "API_KEY=REDACTED\"a= API_KEY=REDACTED\n\"",
+		},
+		{
+			name:  "a credential whose value a shorter key that is not one read first",
+			input: `api_key="x=""API_KEY=aaa\"|hunter2"`,
+			want:  "api_key=REDACTED",
+		},
+		{
+			name:  "a value after a key inside the text a match took is read only whole",
+			input: `api_key=xDB_PASSWORD= x`,
+			want:  "api_key=REDACTED x",
+		},
+	})
+}
+
 // Content digests (go.sum h1: hashes, Subresource Integrity values) are hashes
 // of public content. The entropy layer must leave them alone, but only when the
 // whole match is the digest.
@@ -2669,6 +3089,176 @@ func TestString_SingleQuotedDollarPasswordRedacted(t *testing.T) {
 			name:  "double-quoted $VAR stays a placeholder",
 			input: `DB_PASSWORD="$DB_PASS"`,
 			want:  `DB_PASSWORD="$DB_PASS"`,
+		},
+	})
+}
+
+// Inside double quotes a single quote is a plain character, so a default
+// such as ${PW:-'$FALLBACK'} in a double-quoted piece of a joined word
+// expands $FALLBACK and stays a reference.
+func TestString_DoubleQuotedJoinedShellDefaultsPreserved(t *testing.T) {
+	t.Parallel()
+	var cases []stringRedactionCase
+	for _, input := range []string{
+		`DB_PASSWORD="$A""${PW:-'$FALLBACK'}"`,
+		`DB_PASSWORD="""${PW:-'$FALLBACK'}"`,
+	} {
+		cases = append(cases, stringRedactionCase{name: input, input: input, want: input})
+	}
+	assertStringRedactionCases(t, cases)
+}
+
+// A key/value value is one shell word, joined from every quoted and bare piece
+// with nothing between them, and each piece keeps its own quoting: an empty
+// piece decides nothing, and a reference stays a placeholder. Text right
+// after a closing quote that reads as code or Markdown is not part of it.
+func TestString_JoinedShellWordValues(t *testing.T) {
+	t.Parallel()
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "password whose quoted piece holds a separator and a backslash before a quote",
+			input: `DB_PASSWORD=a"b;c\"d|hunter2xyz"`,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "credential whose quoted piece holds a separator and a backslash before a quote",
+			input: `API_KEY=a"b;c\"d|hunter2xyz"`,
+			want:  "API_KEY=REDACTED",
+		},
+		{
+			name:  "bare value read past a separator inside its quoted piece, as captured",
+			input: `DB_PASSWORD=a"b;c"d|echo done`,
+			want:  "DB_PASSWORD=REDACTED done",
+		},
+		{
+			name:  "single-quoted literal after an empty string",
+			input: `DB_PASSWORD=""'$uperSecret123'`,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "reference after an empty single-quoted string",
+			input: `DB_PASSWORD=''"$DB_PASS"`,
+			want:  `DB_PASSWORD=''"$DB_PASS"`,
+		},
+		{
+			name:  "two joined references",
+			input: `DB_PASSWORD="$DB_PASS"${DB_SUFFIX}`,
+			want:  `DB_PASSWORD="$DB_PASS"${DB_SUFFIX}`,
+		},
+		{
+			name:  "an empty quoted default",
+			input: `DB_PASSWORD=${PW:-""}`,
+			want:  `DB_PASSWORD=${PW:-""}`,
+		},
+		{
+			name:  "a quoted reference as the default",
+			input: `DB_PASSWORD=${PW:-"$FALLBACK"}`,
+			want:  `DB_PASSWORD=${PW:-"$FALLBACK"}`,
+		},
+		{
+			name:  "a reference joined to an empty quoted default",
+			input: `DB_PASSWORD="$DB_PASS"${DB_SUFFIX:-""}`,
+			want:  `DB_PASSWORD="$DB_PASS"${DB_SUFFIX:-""}`,
+		},
+		{
+			name:  "two joined quoted references",
+			input: `DB_PASSWORD="$DB_PASS""$DB_SUFFIX"`,
+			want:  `DB_PASSWORD="$DB_PASS""$DB_SUFFIX"`,
+		},
+		{
+			name:  "a run of references after a quoted reference",
+			input: `DB_PASSWORD="$PREFIX"${BASE}${SUFFIX}`,
+			want:  `DB_PASSWORD="$PREFIX"${BASE}${SUFFIX}`,
+		},
+		{
+			name:  "a run of bare references after a quoted reference",
+			input: `DB_PASSWORD="$PREFIX"$BASE$SUFFIX`,
+			want:  `DB_PASSWORD="$PREFIX"$BASE$SUFFIX`,
+		},
+		{
+			name:  "a literal default inside a run of references",
+			input: `DB_PASSWORD="$PREFIX"${BASE}${SUFFIX:-hunter2}`,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "a literal backslash before a blank ends a joined password",
+			input: `DB_PASSWORD=a"b"\\ echo safe`,
+			want:  "DB_PASSWORD=REDACTED echo safe",
+		},
+		{
+			name:  "placeholder after an empty string",
+			input: `DB_PASSWORD=""'changeme'`,
+			want:  `DB_PASSWORD=""'changeme'`,
+		},
+		{
+			name:  "only empty strings",
+			input: `DB_PASSWORD=""''`,
+			want:  `DB_PASSWORD=""''`,
+		},
+		{
+			name:  "a single-quoted literal joined to a reference",
+			input: `DB_PASSWORD="$DB_PASS"'$X'`,
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "a call's closing parenthesis",
+			input: `connect(db_password="hunter2")`,
+			want:  `connect(db_password="REDACTED")`,
+		},
+		{
+			name:  "string concatenation in code",
+			input: `client_secret="abc123xyz"+suffix`,
+			want:  `client_secret="REDACTED"+suffix`,
+		},
+		{
+			name:  "Markdown emphasis",
+			input: `**DB_PASSWORD="hunter2"**`,
+			want:  `**DB_PASSWORD="REDACTED"**`,
+		},
+		{
+			name:  "a command substitution after the string",
+			input: `DB_PASSWORD="hunter2"$(cat suffix)`,
+			want:  `DB_PASSWORD="REDACTED"$(cat suffix)`,
+		},
+		{
+			name:  "a value separator after the string",
+			input: `DB_PASSWORD="hunter2";DB_USER=app`,
+			want:  `DB_PASSWORD="REDACTED";DB_USER=app`,
+		},
+		{
+			name:  "a pipe after a bare word with a quoted part",
+			input: `printf v"x"|examplectl secrets put API_KEY`,
+			want:  `printf REDACTED|examplectl secrets put API_KEY`,
+		},
+		{
+			name:  "an assignment after a quoted blank is part of the value",
+			input: `DB_PASSWORD=a" "DB_USER=app`,
+			want:  `DB_PASSWORD=REDACTED`,
+		},
+		{
+			name:  "a key inside a redacted word is not read again",
+			input: `DB_PASSWORD=a"x DB_PASSWORD=b" echo "hi"`,
+			want:  `DB_PASSWORD=REDACTED echo "hi"`,
+		},
+		{
+			name:  "a credential key inside a redacted word is not read again",
+			input: `API_KEY=a"x API_KEY=b" echo "hi"`,
+			want:  `API_KEY=REDACTED echo "hi"`,
+		},
+		{
+			name:  "a placeholder after a key inside a redacted word",
+			input: `DB_PASSWORD=a" DB_PASSWORD=b";DB_PASSWORD=changeme`,
+			want:  `DB_PASSWORD=REDACTED;DB_PASSWORD=changeme`,
+		},
+		{
+			name:  "a closing quote inside a redacted word does not open a string",
+			input: `DB_PASSWORD=c' DB_PASSWORD=d'|echo "safe" DB_PASSWORD="hunter'2 secretpart"`,
+			want:  `DB_PASSWORD=REDACTED "safe" DB_PASSWORD="REDACTED"`,
+		},
+		{
+			name:  "a key inside a joined word whose quote opens no string stays in the word",
+			input: `DB_PASSWORD=abc" API_KEY="hunter2`,
+			want:  `DB_PASSWORD=REDACTED`,
 		},
 	})
 }
