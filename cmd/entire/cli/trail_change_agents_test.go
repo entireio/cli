@@ -50,9 +50,9 @@ func runTrailFindingDashboard(t *testing.T, project bool, agents string, args ..
 			http.NotFound(w, r)
 		case strings.HasSuffix(r.URL.Path, "/reviews/comments"):
 			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"comments": []any{}}))
-		case r.URL.Path == "/api/v1/trails/gh/acme/widget":
+		case r.URL.Path == "/api/v1/repos/repo-id/changes":
 			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"trails": []any{map[string]any{"id": projectTrailTestChange, "number": 7, "branch": "feature/work", "base": "main", "status": "open"}}}))
-		case r.URL.Path == "/api/v1/trails/gh/acme/widget/7":
+		case r.URL.Path == "/api/v1/repos/repo-id/changes/7":
 			detail := map[string]any{"id": projectTrailTestChange, "number": 7, "branch": "feature/work", "base": "main", "status": "open"}
 			if agents != "" {
 				detail["agents"] = json.RawMessage(agents)

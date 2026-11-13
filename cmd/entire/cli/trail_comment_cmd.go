@@ -61,7 +61,7 @@ func withNumberedTrail(cmd *cobra.Command, fn func(ctx context.Context, client *
 		if err != nil {
 			return err
 		}
-		basePath, err := trailRepoBasePath(forge, owner, repo, repoID)
+		basePath, err := trailRepoBasePath(repoID)
 		if err != nil {
 			return err
 		}

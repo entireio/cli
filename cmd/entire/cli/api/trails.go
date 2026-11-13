@@ -2,17 +2,31 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 )
+
+// RepoChangesPath returns the Changes collection route for a resolved repository ID.
+func RepoChangesPath(repoID string) (string, error) {
+	repoID = strings.TrimSpace(repoID)
+	if repoID == "" {
+		return "", errors.New("repository ID is required for Changes; resolve the repository's processing placement before requesting changes")
+	}
+	return "/api/v1/repos/" + url.PathEscape(repoID) + "/changes", nil
+}
 
 // TrailsEnabled probes trail availability: 2xx=true, 403/404/410=false,
 // everything else ambiguous.
-func (c *Client) TrailsEnabled(ctx context.Context, forge, owner, repo string) (bool, error) {
-	resp, err := c.Get(ctx, fmt.Sprintf("/api/v1/trails/%s/%s/%s?per_page=1",
-		url.PathEscape(forge), url.PathEscape(owner), url.PathEscape(repo)))
+func (c *Client) TrailsEnabled(ctx context.Context, repoID string) (bool, error) {
+	path, err := RepoChangesPath(repoID)
+	if err != nil {
+		return false, fmt.Errorf("probe trails enablement: %w", err)
+	}
+	resp, err := c.Get(ctx, path+"?per_page=1")
 	if err != nil {
 		return false, fmt.Errorf("probe trails enablement: %w", err)
 	}

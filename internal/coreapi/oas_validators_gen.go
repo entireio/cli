@@ -4896,7 +4896,18 @@ func (s *ResolvePlacementsOutputBody) Validate() error {
 	return nil
 }
 
-func (s ResolveProjectHost) Validate() error {
+func (s ResolveProjectCapabilities) Validate() error {
+	switch s {
+	case "live":
+		return nil
+	case "display":
+		return nil
+	default:
+		return errors.Errorf("invalid value: %v", s)
+	}
+}
+
+func (s ResolveProjectForgePrefix) Validate() error {
 	switch s {
 	case "et":
 		return nil

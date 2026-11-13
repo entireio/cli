@@ -30,13 +30,24 @@ const (
 // default, so a server without them would exercise only the refusal path.
 func pluginReleaseServer(t *testing.T, versions ...string) *httptest.Server {
 	t.Helper()
+	payloads := make(map[string][]byte, len(versions))
+	for _, v := range versions {
+		payloads[v] = []byte("payload-" + v)
+	}
+	return pluginReleaseServerWithPayloads(t, payloads)
+}
+
+// pluginReleaseServerWithPayloads is pluginReleaseServer with the binary
+// content chosen per version (keyed by version without the leading "v").
+func pluginReleaseServerWithPayloads(t *testing.T, payloads map[string][]byte) *httptest.Server {
+	t.Helper()
 	binName := pluginBinaryPrefix + "demo"
 	assets := map[string][]byte{}
 	// checksums.txt is per-tag, and the URL template routes by tag, so index
 	// the manifests by the version segment of the request path.
 	sumsByVersion := map[string][]byte{}
-	for _, v := range versions {
-		archive := makeTarGz(t, map[string][]byte{binName: []byte("payload-" + v)})
+	for v, payload := range payloads {
+		archive := makeTarGz(t, map[string][]byte{binName: payload})
 		asset := fmt.Sprintf("%s_%s_%s_%s.tar.gz", binName, v, runtime.GOOS, runtime.GOARCH)
 		assets[asset] = archive
 		sumsByVersion[v] = []byte(fmt.Sprintf("%x  %s\n", sha256.Sum256(archive), asset))
@@ -224,8 +235,20 @@ func TestInstallPluginFromRepo_FallsBackPastAssetlessTag(t *testing.T) { //nolin
 
 func TestUpgradeInstalledPlugin_NoManifest(t *testing.T) { //nolint:paralleltest // mutates env
 	withIsolatedPluginEnv(t)
+	src := filepath.Join(t.TempDir(), pluginBinaryName("localdev"))
+	writeExecutableScript(t, src, "#!/bin/sh\n")
+	if _, err := InstallPluginFromPath(t.Context(), InstallPluginOptions{SourcePath: src}); err != nil {
+		t.Fatalf("local-dev install: %v", err)
+	}
 	if _, err := UpgradeInstalledPlugin(context.Background(), "localdev"); err == nil || !strings.Contains(err.Error(), "manifest") {
 		t.Errorf("err = %v, want no-manifest explanation", err)
+	}
+}
+
+func TestUpgradeInstalledPlugin_NotInstalled(t *testing.T) { //nolint:paralleltest // mutates env
+	withIsolatedPluginEnv(t)
+	if _, err := UpgradeInstalledPlugin(context.Background(), "ghost"); err == nil || !strings.Contains(err.Error(), "not installed") {
+		t.Errorf("err = %v, want not installed", err)
 	}
 }
 
@@ -237,7 +260,7 @@ func TestRemoveManagedPlugin_CleansBinAndPkg(t *testing.T) { //nolint:parallelte
 	if _, err := InstallPluginFromRepo(ctx, repoURL, "", RemoteInstallOptions{}); err != nil {
 		t.Fatalf("install: %v", err)
 	}
-	if err := RemoveManagedPlugin("demo"); err != nil {
+	if err := RemoveManagedPlugin(t.Context(), "demo"); err != nil {
 		t.Fatalf("RemoveManagedPlugin: %v", err)
 	}
 	if p, err := FindInstalledPlugin("demo"); err != nil || p != nil {

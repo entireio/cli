@@ -295,6 +295,9 @@ func printCheckpointDeletePlan(w io.Writer, plan *strategy.CheckpointDeletePlan,
 	if plan.LocalRef != "" {
 		fmt.Fprintf(w, "  ref %s\n", plan.LocalRef)
 	}
+	if plan.OtherLocalRef != "" {
+		fmt.Fprintf(w, "  ref %s\n", plan.OtherLocalRef)
+	}
 	if plan.LocalV1 {
 		fmt.Fprintf(w, "  %s branch\n", paths.MetadataBranchName)
 	}
@@ -502,7 +505,11 @@ type checkpointDeleteJSON struct {
 type checkpointDeleteLocalJSON struct {
 	Ref    string `json:"ref,omitempty"`
 	RefOID string `json:"ref_oid,omitempty"`
-	V1     bool   `json:"v1"`
+	// OtherRef is the checkpoint's ref under the other spelling of its shard,
+	// when it has one there as well; the delete removes both.
+	OtherRef    string `json:"other_ref,omitempty"`
+	OtherRefOID string `json:"other_ref_oid,omitempty"`
+	V1          bool   `json:"v1"`
 	// TrackingV1 names remotes whose remote-tracking v1 ref holds it; each
 	// stays until that remote's copy is deleted.
 	TrackingV1 []string `json:"tracking_v1,omitempty"`
@@ -562,6 +569,10 @@ func buildCheckpointDeleteJSON(plan *strategy.CheckpointDeletePlan, targets []st
 	}
 	if !plan.LocalRefOID.IsZero() {
 		doc.Local.RefOID = plan.LocalRefOID.String()
+	}
+	if plan.OtherLocalRef != "" {
+		doc.Local.OtherRef = plan.OtherLocalRef.String()
+		doc.Local.OtherRefOID = plan.OtherLocalRefOID.String()
 	}
 	if result != nil {
 		doc.Local.RefResult = string(result.LocalRef)
