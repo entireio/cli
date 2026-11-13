@@ -830,6 +830,23 @@ func TestRenderAgentHelpJSON_CarriesAudienceWhereClassified(t *testing.T) {
 		}
 	}
 
+	// The push workflow has agents link a branch to a named trail, so trail
+	// link must stay task-driven; merge stays user-owned.
+	drill = drillJSON(t, projectTrailsHelpTestRoot(), "trail")
+	want = map[string]string{"link": "task-driven", "create": "task-driven", "merge": agentHelpUserOwnedSlug}
+	found := 0
+	for _, sub := range drill.Subcommands {
+		if w, ok := want[sub.Name]; ok {
+			found++
+			if sub.Audience != w {
+				t.Errorf("trail %s audience = %q, want %q", sub.Name, sub.Audience, w)
+			}
+		}
+	}
+	if found != len(want) {
+		t.Errorf("found %d of %d trail subcommands checked for audience", found, len(want))
+	}
+
 	drill = drillJSON(t, root, "org")
 	for _, sub := range drill.Subcommands {
 		if sub.Audience != "" {
@@ -1078,5 +1095,55 @@ func TestAgentHelpGuidance_InheritedByLeafCommands(t *testing.T) {
 	}
 	if got := agentHelpGuidanceFor(del); got != agentHelpGuidance["checkpoint delete"] {
 		t.Errorf("checkpoint delete guidance = %q, want only its own", got)
+	}
+}
+
+// The project-trail workflow guidance (guidance evals, November 2026) reaches
+// the commands agents open before acting, and the findings entry keeps the
+// reply rules the shared entry carries.
+func TestAgentHelpProjectTrailGuidance_TrailWorkflow(t *testing.T) {
+	t.Parallel()
+
+	root := projectTrailsHelpTestRoot()
+	trail := agentHelpFindChild(root, "trail")
+	for _, tc := range []struct {
+		cmd  string
+		want []string
+	}{
+		{"update", []string{"keep their text", shadowPRMarker, "give a\npull request URL only when the user asks for it",
+			"A bare number is a project trail number", "If trail N is not this branch's trail, do not\nchange it"}},
+		{"finding", []string{"After a push, run `entire trail finding`", "while any are open, the change is not\nready",
+			"Dismiss with -m only when the\nfinding is wrong", "Reply to a finding with `entire trail finding reply`"}},
+		{"merge", []string{"--dry-run only reports", "\"looks\ngood\" is not that", "never pass --force or --yes on your own"}},
+		{"create", []string{"so do not also\n`git push` or open a pull request", "ask the user first",
+			"If it\nfails, do not rerun it", "`git push` and then `entire trail link <P>` instead"}},
+		{"show", []string{"For questions about status, review, CI, or readiness, start here",
+			"with the change's full url", "Give pull request details only\nwhen the user asks for the pull request",
+			"find it with\n`gh pr view` rather than creating another"}},
+	} {
+		cmd := agentHelpFindChild(trail, tc.cmd)
+		if cmd == nil {
+			t.Fatalf("trail %s not found", tc.cmd)
+		}
+		got := agentHelpGuidanceFor(cmd)
+		for _, want := range tc.want {
+			if !strings.Contains(got, want) {
+				t.Errorf("trail %s guidance missing %q:\n%s", tc.cmd, want, got)
+			}
+		}
+		if strings.Contains(cmd.Long, "--dry-run only reports") || strings.Contains(cmd.Long, "keep their text") {
+			t.Errorf("trail %s workflow guidance leaked into its cobra help", tc.cmd)
+		}
+	}
+
+	legacy := &cobra.Command{Use: "entire"}
+	legacy.AddCommand(newTrailCmdForMode(false))
+	finding := agentHelpFindChild(agentHelpFindChild(legacy, "trail"), "finding")
+	if finding == nil {
+		t.Fatal("legacy trail finding not found")
+	}
+	got := agentHelpGuidanceFor(finding)
+	if !strings.Contains(got, "Reply to a finding with `entire trail finding reply`") || strings.Contains(got, "After a push") {
+		t.Errorf("legacy trail finding should keep only the shared reply rules:\n%s", got)
 	}
 }
