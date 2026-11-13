@@ -1039,7 +1039,7 @@ func (s *treeWriter) writeTranscript(ctx context.Context, opts WriteOptions, ses
 			// Sanitize BEFORE redacting, matching the pipeline order everywhere else:
 			// redaction must not scan ciphertext that sanitization is about to
 			// discard. This is the one path that reaches the store with raw bytes.
-			redacted, redactErr := redact.JSONLBytes(SanitizeTranscriptForAgentType(opts.Agent, rawData))
+			redacted, redactErr := redact.JSONLBytes(DropImagesIfEnabled(ctx, SanitizeTranscriptForAgentType(opts.Agent, rawData)))
 			if redactErr != nil {
 				return false, nil, nil, fmt.Errorf("failed to redact transcript from file: %w", redactErr)
 			}
