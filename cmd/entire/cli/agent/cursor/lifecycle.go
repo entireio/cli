@@ -58,7 +58,8 @@ func (c *CursorAgent) ReadTranscript(sessionRef string) ([]byte, error) {
 // --- Internal hook parsing functions ---
 
 // resolveTranscriptRef returns the transcript path from the hook input, or computes
-// it dynamically when the hook doesn't provide one (Cursor CLI pattern).
+// it dynamically when the hook doesn't provide one (Cursor sends null until the
+// transcript file exists).
 func (c *CursorAgent) resolveTranscriptRef(ctx context.Context, conversationID, rawPath string) string {
 	if rawPath != "" {
 		return rawPath
