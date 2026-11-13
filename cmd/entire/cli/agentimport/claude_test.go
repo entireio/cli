@@ -133,6 +133,65 @@ func TestClaudeSplitTurns_ExtractsCommitSHAs(t *testing.T) {
 	}
 }
 
+func TestCommitCommandPattern(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		command string
+		want    bool
+	}{
+		{"git commit -q -F - <<'EOF'\nfix: thing\nEOF", true},
+		{"cd x && git commit -am m", true},
+		{"git -C site commit", true},
+		{"git -c a=b commit", true},
+		{"git cherry-pick abc", true},
+		{"git --no-pager rebase main", true},
+		{"git commit-tree HEAD^{tree}", false},
+		{"git merge-base main HEAD", false},
+		{"git log --grep commit", false},
+	}
+	for _, tt := range tests {
+		if got := commitCommandPattern.MatchString(tt.command); got != tt.want {
+			t.Errorf("match %q = %v, want %v", tt.command, got, tt.want)
+		}
+	}
+}
+
+// TestClaudeSplitTurns_ExtractsCommitWindows proves a Bash call running a
+// commit-writing git command yields a window from the call, truncated to the
+// second, to its paired result. A git call that writes no commit yields none,
+// and so does a commit call whose result never arrives.
+func TestClaudeSplitTurns_ExtractsCommitWindows(t *testing.T) {
+	t.Parallel()
+	full := []byte(strings.Join([]string{
+		`{"type":"user","uuid":"u1","timestamp":"2026-06-20T00:00:00Z","message":{"role":"user","content":"commit it"}}`,
+		`{"type":"assistant","uuid":"a1","timestamp":"2026-06-20T00:00:10.600Z","message":{"id":"m1","content":[{"type":"tool_use","id":"t_log","name":"Bash","input":{"command":"git log --grep commit"}}],"usage":{"output_tokens":3}}}`,
+		`{"type":"user","uuid":"r1","timestamp":"2026-06-20T00:00:11Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t_log","content":""}]}}`,
+		`{"type":"assistant","uuid":"a2","timestamp":"2026-06-20T00:00:20.600Z","message":{"id":"m2","content":[{"type":"tool_use","id":"t_commit","name":"Bash","input":{"command":"git commit -q -m 'agent: quiet commit'"}}],"usage":{"output_tokens":3}}}`,
+		`{"type":"user","uuid":"r2","timestamp":"2026-06-20T00:00:21.250Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t_commit","content":""}]}}`,
+		`{"type":"assistant","uuid":"a3","timestamp":"2026-06-20T00:00:30Z","message":{"id":"m3","content":[{"type":"tool_use","id":"t_lost","name":"Bash","input":{"command":"git commit -q -m 'interrupted'"}}],"usage":{"output_tokens":3}}}`,
+		`{"type":"user","uuid":"u2","timestamp":"2026-06-20T00:01:00Z","message":{"role":"user","content":"next"}}`,
+	}, "\n") + "\n")
+
+	turns, err := claudeImporter{}.SplitTurns(SessionFile{Path: filepath.Join(t.TempDir(), "s.jsonl"), SessionID: "s"}, full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 2 {
+		t.Fatalf("want 2 turns, got %d", len(turns))
+	}
+	want := TimeWindow{
+		Start: time.Date(2026, 6, 20, 0, 0, 20, 0, time.UTC),
+		End:   time.Date(2026, 6, 20, 0, 0, 21, 250_000_000, time.UTC),
+	}
+	got := turns[0].CommitWindows
+	if len(got) != 1 || !got[0].Start.Equal(want.Start) || !got[0].End.Equal(want.End) {
+		t.Fatalf("turn0 CommitWindows = %v, want [%v]", got, want)
+	}
+	if len(turns[1].CommitWindows) != 0 {
+		t.Errorf("turn1 CommitWindows = %v, want empty", turns[1].CommitWindows)
+	}
+}
+
 func TestClaudeSplitTurns_ToolResultIsNotATurn(t *testing.T) {
 	t.Parallel()
 	full := []byte(strings.Join([]string{
