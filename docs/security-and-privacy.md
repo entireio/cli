@@ -395,6 +395,8 @@ Opt out via any one of:
 - `"telemetry": false` in `.entire/settings.json` or `.entire/settings.local.json`.
 - `ENTIRE_TELEMETRY_OPTOUT=1` in the environment.
 
+In a repository enabled only through [global enable](#global-enable-entire-enable---global), a committed `"telemetry": true` is ignored; a committed `false` still applies.
+
 ## Why `external_agents` is local-only
 
 `external_agents` turns on the `$PATH` scan that looks for `entire-agent-*`
@@ -466,6 +468,97 @@ against the locally installed set before spawning, so free text there fails the
 run rather than reaching an agent), `agent` and `model` (registry keys and
 routing hints, not instruction text), and `review_default_profile` (it only
 selects among profiles whose instruction content is itself gated).
+
+## Global enable (`entire enable --global`)
+
+`entire enable --global` sets `global_enable: true` in your user settings
+file (`~/.config/entire/settings.json`) and adds Entire's hooks to Claude
+Code's user-level settings. From then on, Entire records your Claude Code
+sessions in every git repository you work in, not only the ones you ran
+`entire enable` in. Other agents are recorded only in repositories enabled with
+`entire enable`.
+The first prompt in such a repository installs Entire's git hooks there and
+gives `.entire/` a `.gitignore` that keeps its local files out of git, and
+Entire contacts entire.io from that repository the way it does from any enabled
+one.
+
+**Consent.** The command explains this and asks you to confirm. `--yes` accepts
+without asking and prints what was accepted; without a terminal and without
+`--yes` it refuses and writes nothing. It refuses outright from a detected agent
+session (the same detection `entire trail comment` uses), `--yes` or not, and
+agents are told never to run it. Editing the user settings file by hand
+bypasses the prompt.
+
+**Pushes.** In a repository on only through global enable, session checkpoints
+are captured locally and **held**: a push sends none of them until you agree
+for that repository. A `git push` from a person at a terminal (not an agent
+session, whose shell can pass the terminal probe) asks once, naming the remote
+but never a URL; yes writes `"push_checkpoints": true` to the repository's
+`repos` entry in the user settings file, so every clone and worktree pushes from
+then on, and this push carries the held checkpoints. No, no answer within 60
+seconds, or no terminal keeps them queued and prints one line saying how many
+are held and how to release them; the git push itself never fails. `entire
+checkpoint push`, `entire session attach` and the migration push never ask: they
+report the hold. `push_checkpoints` is consent to push only; the repository
+stays on only through global enable, so the committed settings below stay
+ignored. Both checkpoint backends hold the same way, and held checkpoints go
+with the first push after you agree. `entire status` shows the state.
+
+**Owner list.** `entire enable --global --owner gh/entireio` (repeatable; it
+adds to `global_enable_owners` in the user settings file and asks for
+confirmation again) pushes checkpoints without asking from repositories whose
+checkpoint destinations ALL belong to a listed owner: every push URL of the
+remote checkpoints go to, or the `checkpoint_remote` URL when one is set. An
+entry is `<forge>/<owner>` in the form push URLs normalize to (`gh/…`, `et/…`,
+or `<host>/<owner>` for other hosts, with `github.com/…` stored as `gh/…`); a
+GitLab subgroup counts as its top-level group, and `--owner` refuses a subgroup,
+a repository or a wildcard. A URL that does not normalize (a local path,
+`file://`, a remote helper) matches no owner and is held. The first push from a
+clone that goes out because of the list prints one line naming the remote and
+how to stop. There is no removal command: edit the list in the user settings
+file. Agents that show a session banner also say, when a session is about to
+install the git hooks, that checkpoints stay local until you agree.
+
+**Known limitation.** A push that itself names Entire's refs — `git push
+--all` or `--mirror` on the git-branch backend sends `entire/checkpoints/v1`,
+and `--mirror` sends `refs/entire/*` on the git-refs backend — carries held
+checkpoints with it; the hold governs only what Entire pushes on its own.
+
+**Precedence.**
+
+- A committed `"enabled": false` in `.entire/settings.json` keeps Entire off.
+  Global enable turns on repositories nobody configured, not ones whose team
+  turned it off.
+- `entire disable` in a repository on only through global enable writes
+  `"enabled": false` to that repository's `repos` entry in the user settings
+  file, so every clone and worktree of it stays off. Elsewhere it writes
+  `.entire/settings.local.json` as before. `entire disable --global` turns the
+  flag off everywhere and then removes Entire's hooks from Claude Code's
+  user-level settings, under the lock the install takes (the install re-checks
+  the flag under it, so a concurrent command cannot put them back).
+  Repositories you enabled yourself stay enabled through their project hooks;
+  one enabled only by a hand-written `repos` entry needs `entire enable` there
+  to record Claude Code again.
+- `"push_checkpoints": true` in a `repos` entry, which the push prompt writes,
+  releases held pushes for that repository and nothing else; it is read only
+  per repository, never from `preferences`.
+- A `repos` entry for the repository in the user settings file applies to every
+  worktree of the clone, and one that sets `enabled` is the clone-wide way to
+  turn one repository on or off.
+- In a repository enabled only through global enable (no `repos` entry that
+  sets `enabled`, and no `enabled` key in an untracked
+  `.entire/settings.local.json`), the committed `strategy_options.summarize`,
+  `summary_generation`, `summary_timeout_seconds` and `"telemetry": true` are
+  ignored: you never opted into them there, and summarization sends
+  transcripts to a model provider. `entire status` names what was ignored.
+  Redaction settings are always honored.
+- Running `entire enable` in such a repository claims it: it writes
+  `"enabled": true` to the repository's `repos` entry (keyed by origin, or by
+  the main worktree's path when there is no usable origin), after which the
+  committed settings apply in full, in every clone and worktree, and the
+  global-enable notices stop. An agent session cannot claim a repository:
+  `entire enable` run by one still succeeds but leaves it on only through
+  global enable.
 
 ## Reporting a vulnerability
 

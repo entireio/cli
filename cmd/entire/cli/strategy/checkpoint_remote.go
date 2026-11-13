@@ -96,6 +96,16 @@ type pushSettings struct {
 	// checkpoints config (LoadCheckpointsConfig is uncached: two whole-file
 	// reads and JSON parses per call).
 	primaryIsRefs bool
+	// enabledOnlyByGlobal records that the repository is on only through
+	// global enable, and pushConsent that the developer agreed to push its
+	// checkpoints anyway, and owners the global_enable_owners list (see
+	// globalEnablePushConsent). consentAsked records that this push asked, so
+	// it asks nothing else; ownerListed that it pushes because of the list.
+	enabledOnlyByGlobal bool
+	pushConsent         bool
+	owners              []string
+	consentAsked        bool
+	ownerListed         bool
 }
 
 // pushTarget returns the target to use for git push/fetch commands for checkpoint branches.
@@ -130,9 +140,12 @@ func resolvePushSettings(ctx context.Context, pushRemoteName string) pushSetting
 	}
 
 	ps := pushSettings{
-		remote:        pushRemoteName,
-		pushDisabled:  s.IsPushSessionsDisabled(),
-		primaryIsRefs: primaryIsGitRefs(ctx),
+		remote:              pushRemoteName,
+		pushDisabled:        s.IsPushSessionsDisabled(),
+		primaryIsRefs:       primaryIsGitRefs(ctx),
+		enabledOnlyByGlobal: s.EnabledOnlyByGlobal(),
+		pushConsent:         s.RepoPushConsent(),
+		owners:              s.GlobalEnableOwners(),
 	}
 
 	config := s.GetCheckpointRemote()
@@ -626,13 +639,16 @@ func urlTargetsCheckpointRepo(url string, config *settings.CheckpointRemoteConfi
 // pushRemoteName — the checkpoint_remote URL when one is configured, otherwise
 // the remote itself — and whether push_sessions turns pushing off. Callers use
 // it to confirm delivery after a push, since PrePush is deliberately fail-soft.
-// It errors when PrePush withholds checkpoints because the configured
-// checkpoint_remote has no URL: there is no target to confirm against, and the
+// It errors when PrePush holds checkpoints for global-enable consent, or
+// withholds them because the configured checkpoint_remote has no URL: there is no target to confirm against, and the
 // push remote may hold a stale copy from before the store was configured.
 func CheckpointPushTarget(ctx context.Context, pushRemoteName string) (target string, disabled bool, err error) {
 	ps := resolvePushSettings(ctx, pushRemoteName)
 	if ps.withheld != nil {
 		return "", ps.pushDisabled, ps.withheld
+	}
+	if err := heldForGlobalEnableConsent(ctx, ps); err != nil {
+		return "", ps.pushDisabled, err
 	}
 	if ps.checkpointURL != "" {
 		return ps.checkpointURL, ps.pushDisabled, nil
