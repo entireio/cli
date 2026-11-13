@@ -235,6 +235,16 @@ type providerSource struct {
 	provide func(context.Context) (string, error)
 }
 
+// CredentialError identifies a failure obtaining the bearer token before a
+// request is sent. Its cause may have an independent deadline (e.g. keyring
+// lookup), so it must not be mistaken for cancellation of the HTTP request.
+type CredentialError struct {
+	Err error
+}
+
+func (e *CredentialError) Error() string { return e.Err.Error() }
+func (e *CredentialError) Unwrap() error { return e.Err }
+
 func (p *providerSource) BearerAuth(ctx context.Context, _ OperationName) (BearerAuth, error) {
 	token, err := p.provide(ctx)
 	if err != nil {
@@ -245,9 +255,9 @@ func (p *providerSource) BearerAuth(ctx context.Context, _ OperationName) (Beare
 		// self-descriptive. A bare ErrNotLoggedIn (no tailored text) gets the
 		// standard login hint as a backstop.
 		if errors.Is(err, auth.ErrNotLoggedIn) {
-			return BearerAuth{}, fmt.Errorf("not logged in — run 'entire login': %w", err)
+			return BearerAuth{}, &CredentialError{Err: fmt.Errorf("not logged in — run 'entire login': %w", err)}
 		}
-		return BearerAuth{}, err
+		return BearerAuth{}, &CredentialError{Err: err}
 	}
 	return BearerAuth{Token: token}, nil
 }

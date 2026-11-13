@@ -286,9 +286,11 @@ func awaitMirrorReady(ctx context.Context, c mirrorStatusGetter, mirrorID string
 		m, err := c.GetMirror(ctx, coreapi.GetMirrorParams{MirrorId: mirrorID})
 		switch {
 		case err != nil:
-			// A poll the context cut short says nothing about the clone; any
-			// other error does, even one that lands as the deadline passes.
-			if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+			// Preserve the last answer only when this wait's context ended
+			// and the poll error matches it. Credential failures are distinct:
+			// their own timeout can finish after this wait's deadline too.
+			var credentialErr *coreapi.CredentialError
+			if waitErr := ctx.Err(); waitErr == nil || !errors.Is(err, waitErr) || errors.As(err, &credentialErr) {
 				latestProcessing = false
 			}
 			if ctx.Err() != nil {
