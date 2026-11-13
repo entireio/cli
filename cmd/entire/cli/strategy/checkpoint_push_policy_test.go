@@ -193,6 +193,51 @@ func TestCheckOuterPushOfHeldCommits_CaseFoldedShard(t *testing.T) {
 	}
 }
 
+// A checkpoint can hold a ref under each spelling of its shard at commits on
+// different histories. Each is a version of the waiting checkpoint that a later
+// push sends, so a push of either commit under another name is refused,
+// whichever spelling is queued.
+func TestCheckOuterPushOfHeldCommits_DivergedShardSpellings(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		queue  func(stored, canonical plumbing.ReferenceName) []plumbing.ReferenceName
+		listed bool
+	}{
+		{"both queued", func(s, c plumbing.ReferenceName) []plumbing.ReferenceName { return []plumbing.ReferenceName{s, c} }, false},
+		{"canonical queued", func(_, c plumbing.ReferenceName) []plumbing.ReferenceName { return []plumbing.ReferenceName{c} }, false},
+		{"other spelling queued", func(s, _ plumbing.ReferenceName) []plumbing.ReferenceName { return []plumbing.ReferenceName{s} }, false},
+		{"both queued, listed queue", func(s, c plumbing.ReferenceName) []plumbing.ReferenceName { return []plumbing.ReferenceName{s, c} }, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workDir, _, _ := setupRepoWithCheckpointRefs(t)
+			t.Chdir(workDir)
+			base := revParse(t, workDir, "HEAD")
+			if tc.listed {
+				enqueueInRepoAt(t, workDir, createCheckpointRefs(t, workDir, checkpointRefListingMinQueue, base)...)
+			}
+			testutil.RunGit(t, workDir, "commit", "--allow-empty", "-m", "one side")
+			storedTip := revParse(t, workDir, "HEAD")
+			stored, canonical := foldedShardFixture(t, workDir, storedTip)
+			testutil.RunGit(t, workDir, "pack-refs", "--all")
+			testutil.GitReset(t, workDir, base)
+			testutil.RunGit(t, workDir, "commit", "--allow-empty", "-m", "other side")
+			canonicalTip := revParse(t, workDir, "HEAD")
+			testutil.RunGit(t, workDir, "update-ref", canonical.String(), canonicalTip)
+			testutil.RunGit(t, workDir, "pack-refs", "--all")
+			require.Equal(t, storedTip, revParse(t, workDir, stored.String()), "the split must survive packing")
+			enqueueInRepoAt(t, workDir, tc.queue(stored, canonical)...)
+
+			for _, tip := range []string{canonicalTip, storedTip} {
+				err := checkOuterPushOfHeldCommits(t.Context(), pushOfCommit(tip), "test holds it")
+				require.ErrorIs(t, err, ErrOuterPushCarriesHeldCheckpoints, "push of %s (canonical %s, stored %s)", tip, canonicalTip, storedTip)
+			}
+			testutil.RunGit(t, workDir, "commit", "--allow-empty", "-m", "unrelated")
+			require.NoError(t, checkOuterPushOfHeldCommits(t.Context(), pushOfCommit(revParse(t, workDir, "HEAD")), "test holds it"),
+				"a commit no spelling points at is not matched")
+		})
+	}
+}
+
 // The outgoing list names a checkpoint by its queued ref and reports the tip
 // of the ref it is stored under, loose or packed.
 func TestListOutgoingCheckpoints_CaseFoldedShard(t *testing.T) {

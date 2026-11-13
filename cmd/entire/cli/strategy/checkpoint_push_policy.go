@@ -180,7 +180,7 @@ func checkOuterPushOfHeldCommits(ctx context.Context, lines []PrePushRef, why st
 	}
 	tips := make(map[plumbing.Hash]plumbing.ReferenceName, len(waiting))
 	for ref := range waiting {
-		if hash, err := localTip(repo, listed, ref); err == nil {
+		for _, hash := range checkpointSpellingTips(repo, listed, ref) {
 			tips[hash] = ref
 		}
 	}
@@ -201,6 +201,29 @@ func checkOuterPushOfHeldCommits(ctx context.Context, lines []PrePushRef, why st
 		}
 	}
 	return nil
+}
+
+// checkpointSpellingTips is the tip of each ref ref's checkpoint holds, under
+// either spelling of its shard. localTip reports one of them, but a checkpoint
+// whose two refs diverged holds a version under each, and pushes send both.
+// listed may be nil or omit a name; that name is looked up. A spelling that
+// does not resolve contributes nothing.
+func checkpointSpellingTips(repo *git.Repository, listed map[plumbing.ReferenceName]plumbing.Hash, ref plumbing.ReferenceName) []plumbing.Hash {
+	names := []plumbing.ReferenceName{ref}
+	if other, ok := checkpoint.OtherShardSpelling(ref); ok {
+		names = append(names, other)
+	}
+	tips := make([]plumbing.Hash, 0, len(names))
+	for _, name := range names {
+		if hash, ok := listed[name]; ok {
+			tips = append(tips, hash)
+			continue
+		}
+		if r, err := repo.Reference(name, true); err == nil {
+			tips = append(tips, r.Hash())
+		}
+	}
+	return tips
 }
 
 // maxTagPeel bounds how many tag objects peelToCommit follows, so a cycle in a
