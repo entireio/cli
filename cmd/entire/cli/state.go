@@ -50,6 +50,15 @@ type PrePromptState struct {
 	// older versions, which then detect no such changes.
 	UntrackedFileStats map[string]UntrackedFileStat `json:"untracked_file_stats,omitempty"`
 
+	// DirtyTrackedFileStats records the stat of each tracked file git status
+	// reported as modified, added or deleted when the prompt started (the zero
+	// stat for one absent from the worktree). git status keeps listing such a
+	// file at turn end whether or not the turn touched it, so turn end leaves
+	// it out while its stat still matches (#3011). Absent in state written by
+	// older versions, and missing files the bounded stat pass left out; those
+	// count as changed, as before.
+	DirtyTrackedFileStats map[string]UntrackedFileStat `json:"dirty_tracked_file_stats,omitempty"`
+
 	// TranscriptOffset is the unified transcript position when this state was captured.
 	// For Claude Code (JSONL), this is the line count.
 	// For Gemini CLI (JSON), this is the message count.
@@ -95,10 +104,11 @@ func (s *PrePromptState) PreUntrackedFiles() []string {
 	return s.UntrackedFiles
 }
 
-// UntrackedFileStat is enough of an untracked file's metadata to tell whether
-// it changed, without hashing its content on every prompt: the stat fields
-// git's index compares for the same purpose. Inode and ChangeTime are zero
-// where the platform does not expose them (see fileChangeStamp).
+// UntrackedFileStat is enough of a file's metadata to tell whether it changed,
+// without hashing its content on every prompt: the stat fields git's index
+// compares for the same purpose. Inode and ChangeTime are zero where the
+// platform does not expose them (see fileChangeStamp). Recorded for untracked
+// files and for tracked files that were already dirty.
 type UntrackedFileStat struct {
 	Size       int64  `json:"size"`
 	ModTime    int64  `json:"mod_time_ns"`
@@ -106,11 +116,13 @@ type UntrackedFileStat struct {
 	ChangeTime int64  `json:"ctime_ns,omitempty"`
 }
 
-// Limits on the prompt-start stat pass, which runs inside UserPromptSubmit and
-// so delays every prompt. Above maxUntrackedFileStats files no stats are
-// recorded; past untrackedFileStatBudget the pass stops with what it has.
-// Either way turn end only loses detection of edits to the files left out, as
-// with state written before stats existed.
+// Limits on each prompt-start stat pass (untracked files, dirty tracked
+// files), which run inside UserPromptSubmit and so delay every prompt. Above
+// maxUntrackedFileStats files no stats are recorded; past
+// untrackedFileStatBudget a pass stops with what it has. Either way turn end
+// falls back, for the files left out, to what it did before stats existed:
+// it misses edits to such an untracked file, and counts such a tracked file
+// as changed.
 const (
 	maxUntrackedFileStats   = 10_000
 	untrackedFileStatBudget = 500 * time.Millisecond
@@ -120,40 +132,57 @@ const (
 // regular file in the worktree. Fails open: a file it cannot stat is left out
 // and simply never reports a change.
 func statUntrackedFiles(ctx context.Context, files []string) map[string]UntrackedFileStat {
+	return statFilesForState(ctx, "untracked", files, statWorktreeFile)
+}
+
+// statDirtyTrackedFiles records an UntrackedFileStat for each of files, the
+// tracked files git status reported dirty, with statTrackedFile. A file it
+// cannot stat is left out, and so counts as changed at turn end.
+func statDirtyTrackedFiles(ctx context.Context, files []string) map[string]UntrackedFileStat {
+	return statFilesForState(ctx, "dirty tracked", files, statTrackedFile)
+}
+
+// statFilesForState runs one bounded prompt-start stat pass over files (see
+// maxUntrackedFileStats). kind names the files in debug logs.
+func statFilesForState(ctx context.Context, kind string, files []string, stat worktreeFileStat) map[string]UntrackedFileStat {
 	if len(files) == 0 {
 		return nil
 	}
 	logCtx := logging.WithComponent(ctx, "state")
 	if len(files) > maxUntrackedFileStats {
-		logging.Debug(logCtx, "skipping untracked file stats: too many untracked files",
-			slog.Int("untracked_files", len(files)), slog.Int("limit", maxUntrackedFileStats))
+		logging.Debug(logCtx, "skipping file stats: too many files",
+			slog.String("kind", kind), slog.Int("files", len(files)), slog.Int("limit", maxUntrackedFileStats))
 		return nil
 	}
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
-		logging.Debug(logCtx, "skipping untracked file stats: no worktree root",
-			slog.String("error", err.Error()))
+		logging.Debug(logCtx, "skipping file stats: no worktree root",
+			slog.String("kind", kind), slog.String("error", err.Error()))
 		return nil
 	}
-	stats, complete := statFilesWithin(repoRoot, files, untrackedFileStatBudget)
+	stats, complete := statFilesWithin(repoRoot, files, untrackedFileStatBudget, stat)
 	if !complete {
-		logging.Debug(logCtx, "untracked file stats stopped at time budget",
-			slog.Int("untracked_files", len(files)), slog.Int("recorded", len(stats)))
+		logging.Debug(logCtx, "file stats stopped at time budget",
+			slog.String("kind", kind), slog.Int("files", len(files)), slog.Int("recorded", len(stats)))
 	}
 	return stats
 }
 
+// worktreeFileStat stats file, a repo-relative path, under repoRoot. ok is
+// false when it records nothing for the file.
+type worktreeFileStat func(repoRoot, file string) (stat UntrackedFileStat, ok bool)
+
 // statFilesWithin stats files until budget elapses. complete is false when it
 // stopped early; the stats gathered so far are still returned.
-func statFilesWithin(repoRoot string, files []string, budget time.Duration) (stats map[string]UntrackedFileStat, complete bool) {
+func statFilesWithin(repoRoot string, files []string, budget time.Duration, stat worktreeFileStat) (stats map[string]UntrackedFileStat, complete bool) {
 	deadline := time.Now().Add(budget)
 	stats = make(map[string]UntrackedFileStat, len(files))
 	for _, file := range files {
 		if time.Now().After(deadline) {
 			return stats, false
 		}
-		if stat, ok := statWorktreeFile(repoRoot, file); ok {
-			stats[file] = stat
+		if s, ok := stat(repoRoot, file); ok {
+			stats[file] = s
 		}
 	}
 	return stats, true
@@ -181,20 +210,54 @@ func (s *PrePromptState) ChangedUntrackedFiles(repoRoot string) []string {
 // statWorktreeFile stats file, a repo-relative path, through the worktree root
 // without following a final symlink. ok is false unless it is a regular file.
 func statWorktreeFile(repoRoot, file string) (UntrackedFileStat, bool) {
-	root, err := worktreedir.OpenAt(repoRoot)
-	if err != nil {
-		return UntrackedFileStat{}, false
-	}
-	name, err := worktreedir.Name(repoRoot, file)
-	if err != nil {
-		return UntrackedFileStat{}, false
-	}
-	info, err := root.Lstat(name)
+	info, err := lstatWorktreeFile(repoRoot, file)
 	if err != nil || !info.Mode().IsRegular() {
 		return UntrackedFileStat{}, false
 	}
+	return fileStatOf(info), true
+}
+
+// statTrackedFile is statWorktreeFile for a tracked file: a symlink counts too
+// (its own stat, not its target's), and a path absent from the worktree, a
+// deletion, gets the zero stat. ok is false when the path cannot be checked,
+// and for a directory (a submodule), whose own stat does not change when the
+// files in it do.
+func statTrackedFile(repoRoot, file string) (UntrackedFileStat, bool) {
+	info, err := lstatWorktreeFile(repoRoot, file)
+	if errors.Is(err, fs.ErrNotExist) {
+		return UntrackedFileStat{}, true
+	}
+	if err != nil || info.IsDir() {
+		return UntrackedFileStat{}, false
+	}
+	return fileStatOf(info), true
+}
+
+// errWorktreeFileUnchecked reports that lstatWorktreeFile could not reach the
+// file at all, as opposed to finding it absent.
+var errWorktreeFileUnchecked = errors.New("worktree file cannot be checked")
+
+// lstatWorktreeFile lstats file, a repo-relative path, through the worktree
+// root. Only a missing file yields an error matching fs.ErrNotExist.
+func lstatWorktreeFile(repoRoot, file string) (fs.FileInfo, error) {
+	root, err := worktreedir.OpenAt(repoRoot)
+	if err != nil {
+		return nil, errWorktreeFileUnchecked
+	}
+	name, err := worktreedir.Name(repoRoot, file)
+	if err != nil {
+		return nil, errWorktreeFileUnchecked
+	}
+	info, err := root.Lstat(name)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // callers test for fs.ErrNotExist
+	}
+	return info, nil
+}
+
+func fileStatOf(info fs.FileInfo) UntrackedFileStat {
 	inode, changeTime := fileChangeStamp(info)
-	return UntrackedFileStat{Size: info.Size(), ModTime: info.ModTime().UnixNano(), Inode: inode, ChangeTime: changeTime}, true
+	return UntrackedFileStat{Size: info.Size(), ModTime: info.ModTime().UnixNano(), Inode: inode, ChangeTime: changeTime}
 }
 
 // normalizePrePromptState migrates deprecated fields after loading from JSON.
@@ -243,11 +306,16 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 		return err
 	}
 
+	// Take the time before the status walk: turn end treats another session
+	// that interacted after it as overlapping, so a session whose turn ends
+	// during the walk must not fall before it.
+	capturedAt := time.Now().UTC()
+
 	// Get list of untracked files (excluding .entire directory itself).
 	// Fail open on error: hooks must never break the agent, and the rest of
 	// the snapshot (transcript position) is still worth capturing. The
 	// skipped-scan marker tells turn-end to disable new-file detection.
-	untrackedFiles, scanSkipped := untrackedFilesOrSkip(ctx)
+	untrackedFiles, dirtyTrackedFiles, scanSkipped := statusFilesOrSkip(ctx)
 
 	// Get transcript position using TranscriptAnalyzer if available
 	var transcriptOffset int
@@ -263,12 +331,13 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 
 	// Create state file using os.Root for traversal-resistant write
 	state := PrePromptState{
-		SessionID:            sessionID,
-		Timestamp:            time.Now().UTC().Format(time.RFC3339),
-		UntrackedFiles:       untrackedFiles,
-		UntrackedScanSkipped: scanSkipped,
-		UntrackedFileStats:   statUntrackedFiles(ctx, untrackedFiles),
-		TranscriptOffset:     transcriptOffset,
+		SessionID:             sessionID,
+		Timestamp:             capturedAt.Format(time.RFC3339Nano),
+		UntrackedFiles:        untrackedFiles,
+		UntrackedScanSkipped:  scanSkipped,
+		UntrackedFileStats:    statUntrackedFiles(ctx, untrackedFiles),
+		DirtyTrackedFileStats: statDirtyTrackedFiles(ctx, dirtyTrackedFiles),
+		TranscriptOffset:      transcriptOffset,
 	}
 
 	// Out-of-band token baseline: agents whose token usage lives outside the
@@ -655,7 +724,7 @@ func openTmpDir(ctx context.Context) (*os.Root, error) {
 	return root, nil
 }
 
-// untrackedFilesOrSkip runs the pre-prompt/pre-task untracked scan, degrading
+// statusFilesOrSkip runs the pre-prompt/pre-task untracked scan, degrading
 // instead of failing. Deliberately wider than the status-budget feature that
 // introduced it: EVERY scan error fails open — budget breach, repo-open
 // failure, corrupted .git, anything — because these captures run inside
@@ -665,14 +734,19 @@ func openTmpDir(ctx context.Context) (*os.Root, error) {
 // correct degrade is to warn, mark the scan skipped (the paired end-hook then
 // disables new-file detection for the turn), and let capture proceed with
 // transcript-derived data.
-func untrackedFilesOrSkip(ctx context.Context) (untrackedFiles []string, scanSkipped bool) {
-	untrackedFiles, err := getUntrackedFilesForState(ctx)
+//
+// The same walk lists the tracked files that are already dirty, the baseline
+// turn end uses to leave out files the turn did not change (#3011). A failed
+// scan records none, and turn end then counts every dirty tracked file, as
+// before that baseline existed.
+func statusFilesOrSkip(ctx context.Context) (untrackedFiles, dirtyTrackedFiles []string, scanSkipped bool) {
+	untrackedFiles, dirtyTrackedFiles, err := statusFilesForState(ctx)
 	if err != nil {
 		logStatusDegrade(logging.WithComponent(ctx, "state"),
 			"untracked-file scan failed; capture degraded: new-file detection disabled for this turn", err)
-		return nil, true
+		return nil, nil, true
 	}
-	return untrackedFiles, false
+	return untrackedFiles, dirtyTrackedFiles, false
 }
 
 // logStatusDegrade logs a status-derived degrade at the appropriate level:
@@ -689,30 +763,35 @@ func logStatusDegrade(ctx context.Context, msg string, err error) {
 	logging.Warn(ctx, msg, slog.String("error", err.Error()))
 }
 
-// getUntrackedFilesForState returns a list of untracked files using go-git
-// Excludes .entire directory
-func getUntrackedFilesForState(ctx context.Context) ([]string, error) {
+// statusFilesForState returns, from one git status walk, the untracked files
+// and the tracked files with staged or unstaged changes, excluding the
+// .entire directory and other paths sessions never track.
+func statusFilesForState(ctx context.Context) (untrackedFiles, dirtyTrackedFiles []string, err error) {
 	repo, err := openRepository(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer repo.Close()
 
 	status, err := gitrepo.StatusWithBudget(ctx, repo)
 	if err != nil {
-		return nil, err //nolint:wrapcheck // already present in codebase
+		return nil, nil, err //nolint:wrapcheck // already present in codebase
 	}
 
-	untrackedFiles := []string{}
+	untrackedFiles = []string{}
 	for file, st := range status {
-		if st.Worktree == git.Untracked {
-			if !shouldIgnoreSessionTrackingPath(file) {
-				untrackedFiles = append(untrackedFiles, file)
-			}
+		if shouldIgnoreSessionTrackingPath(file) {
+			continue
+		}
+		switch {
+		case st.Worktree == git.Untracked:
+			untrackedFiles = append(untrackedFiles, file)
+		case st.Worktree != git.Unmodified || st.Staging != git.Unmodified:
+			dirtyTrackedFiles = append(dirtyTrackedFiles, file)
 		}
 	}
 
-	return untrackedFiles, nil
+	return untrackedFiles, dirtyTrackedFiles, nil
 }
 
 // PreTaskState stores the state captured before a task execution
@@ -724,6 +803,10 @@ type PreTaskState struct {
 	// UntrackedScanSkipped mirrors PrePromptState.UntrackedScanSkipped for the
 	// subagent path: when set, subagent-end must skip new-file detection.
 	UntrackedScanSkipped bool `json:"untracked_scan_skipped,omitempty"`
+
+	// DirtyTrackedFileStats mirrors PrePromptState.DirtyTrackedFileStats for
+	// the subagent path, captured when the task launched.
+	DirtyTrackedFileStats map[string]UntrackedFileStat `json:"dirty_tracked_file_stats,omitempty"`
 
 	// TurnCheckpointIDs are the checkpoints the session's current turn had
 	// already condensed when the task started, so subagent-end can tell which
@@ -761,17 +844,23 @@ func CapturePreTaskState(ctx context.Context, sessionID, toolUseID string) error
 		return err
 	}
 
+	// Take the time before the status walk, as CapturePrePromptState does, so
+	// that a session whose turn ends during the walk still counts as
+	// overlapping the task.
+	capturedAt := time.Now().UTC()
+
 	// Get list of untracked files (excluding .entire directory itself).
 	// Fail open on error, same as CapturePrePromptState.
-	untrackedFiles, scanSkipped := untrackedFilesOrSkip(ctx)
+	untrackedFiles, dirtyTrackedFiles, scanSkipped := statusFilesOrSkip(ctx)
 
 	// Create state file using os.Root for traversal-resistant write
 	state := PreTaskState{
-		ToolUseID:            toolUseID,
-		Timestamp:            time.Now().UTC().Format(time.RFC3339),
-		UntrackedFiles:       untrackedFiles,
-		UntrackedScanSkipped: scanSkipped,
-		TurnCheckpointIDs:    turnCheckpointIDsAtTaskStart(ctx, sessionID),
+		ToolUseID:             toolUseID,
+		Timestamp:             capturedAt.Format(time.RFC3339Nano),
+		UntrackedFiles:        untrackedFiles,
+		UntrackedScanSkipped:  scanSkipped,
+		DirtyTrackedFileStats: statDirtyTrackedFiles(ctx, dirtyTrackedFiles),
+		TurnCheckpointIDs:     turnCheckpointIDsAtTaskStart(ctx, sessionID),
 	}
 
 	data, err := jsonutil.MarshalIndentWithNewline(state, "", "  ")

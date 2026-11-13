@@ -16,7 +16,9 @@ import (
 	"log/slog"
 	"maps"
 	"os"
+	"path"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -438,9 +440,9 @@ func handleLifecycleToolUse(ctx context.Context, ag agent.Agent, event *agent.Ev
 		return nil
 	}
 
-	modified := normalizeToolUsePaths(event.ModifiedFiles, event.CWD, repoRoot)
-	added := normalizeToolUsePaths(event.NewFiles, event.CWD, repoRoot)
-	deleted := normalizeToolUsePaths(event.DeletedFiles, event.CWD, repoRoot)
+	modified := normalizeAgentPaths(event.ModifiedFiles, event.CWD, repoRoot)
+	added := normalizeAgentPaths(event.NewFiles, event.CWD, repoRoot)
+	deleted := normalizeAgentPaths(event.DeletedFiles, event.CWD, repoRoot)
 
 	modified, added, deleted = strategy.FilterTrackableChanges(ctx, repoRoot, modified, added, deleted)
 	if len(modified) == 0 && len(added) == 0 && len(deleted) == 0 {
@@ -463,10 +465,13 @@ func handleLifecycleToolUse(ctx context.Context, ag agent.Agent, event *agent.Ev
 	return nil
 }
 
-// normalizeToolUsePaths converts hook-payload paths to repo-root-relative form.
-// Codex apply_patch envelopes carry cwd-relative paths, so we join them against
-// eventCWD before FilterAndNormalizePaths rewrites against repoRoot.
-func normalizeToolUsePaths(files []string, eventCWD, repoRoot string) []string {
+// normalizeAgentPaths converts paths an agent reported, in a hook payload or
+// in its transcript, to repo-root-relative form. A relative path is relative
+// to the agent's working directory: Codex apply_patch envelopes and Pi's write
+// and edit tools name files that way, so it is joined to eventCWD before
+// FilterAndNormalizePaths rewrites against repoRoot. Without eventCWD a
+// relative path is taken as repo-root-relative.
+func normalizeAgentPaths(files []string, eventCWD, repoRoot string) []string {
 	if len(files) == 0 {
 		return nil
 	}
@@ -475,13 +480,56 @@ func normalizeToolUsePaths(files []string, eventCWD, repoRoot string) []string {
 		if f == "" {
 			continue
 		}
-		if filepath.IsAbs(f) || eventCWD == "" {
-			resolved = append(resolved, f)
-			continue
+		// An MSYS or drive-less path (/Users/...) is absolute on Windows
+		// too, not one to place in eventCWD.
+		f = paths.WithWindowsDrive(f, repoRoot)
+		if !filepath.IsAbs(f) {
+			if eventCWD == "" {
+				resolved = append(resolved, f)
+				continue
+			}
+			// Not filepath.Join, which would clean ".." away before
+			// physicalAgentPath sees it.
+			f = eventCWD + string(filepath.Separator) + f
 		}
-		resolved = append(resolved, filepath.Join(eventCWD, f))
+		if f = physicalAgentPath(f, repoRoot); f != "" {
+			resolved = append(resolved, f)
+		}
 	}
 	return FilterAndNormalizePaths(resolved, repoRoot)
+}
+
+// physicalAgentPath returns p, an absolute path an agent named, as the
+// worktree-relative name of the file it opens, outside Windows, where the
+// lexical clean in filepath.Rel cannot see it:
+//   - when p has a ".." component: after a symlink to a directory, ".."
+//     leaves the link's target (alias/../file.txt is real/file.txt for
+//     alias -> real/sub);
+//   - when p lies outside the worktree as spelled: an agent whose working
+//     directory is a symlink to the worktree, or to a directory in it, names
+//     files through it (/alias/file.txt for /alias -> /repo).
+//
+// A directory that no longer exists (a deleted file's) is resolved from its
+// deepest existing ancestor. It returns "" when p's directory resolves
+// outside the worktree, and p itself when p needs neither or its directory
+// does not resolve, which filepath.Rel then cleans or drops. Windows takes
+// paths lexically, ".." before any link.
+func physicalAgentPath(p, repoRoot string) string {
+	if runtime.GOOS == windowsGOOS {
+		return p
+	}
+	if !slices.Contains(strings.Split(p, string(filepath.Separator)), "..") && paths.ToRelativePath(p, repoRoot) != "" {
+		return p
+	}
+	i := strings.LastIndex(p, string(filepath.Separator))
+	name, err := resolvedName(repoRoot, p[:i])
+	switch {
+	case errors.Is(err, errOutsideWorktree):
+		return ""
+	case err != nil:
+		return p
+	}
+	return path.Join(name, p[i+1:])
 }
 
 // entireContextInjection is the one-time, model-facing pointer Entire injects
@@ -1021,8 +1069,8 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 
 	// Filter and normalize all paths
 	_, normalizeSpan := perf.Start(ctx, "filter_and_normalize_paths")
-	relModifiedFiles := FilterAndNormalizePaths(modifiedFiles, repoRoot)
-	var relNewFiles, relDeletedFiles []string
+	relModifiedFiles := normalizeAgentPaths(modifiedFiles, event.CWD, repoRoot)
+	var statusModifiedFiles, relNewFiles, relDeletedFiles []string
 	if changes != nil {
 		relNewFiles = FilterAndNormalizePaths(changes.New, repoRoot)
 		relDeletedFiles = FilterAndNormalizePaths(changes.Deleted, repoRoot)
@@ -1031,12 +1079,18 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		// Transcript parsing is the primary source for modified files, but it can miss
 		// files if the agent uses an unrecognized tool or the transcript format changes.
 		// Git status catches any tracked file with working-tree changes.
-		relModifiedFiles = mergeUnique(relModifiedFiles, FilterAndNormalizePaths(changes.Modified, repoRoot))
+		statusModifiedFiles = FilterAndNormalizePaths(changes.Modified, repoRoot)
 	}
 	// Pre-existing untracked files the turn changed: git status lists them as
 	// untracked both before and after, so neither New nor Modified carries
 	// them, and a shell edit leaves no trace in the transcript.
-	relModifiedFiles = mergeUnique(relModifiedFiles, FilterAndNormalizePaths(preState.ChangedUntrackedFiles(repoRoot), repoRoot))
+	statusModifiedFiles = mergeUnique(statusModifiedFiles, FilterAndNormalizePaths(preState.ChangedUntrackedFiles(repoRoot), repoRoot))
+	// git status lists every dirty file in the worktree, including ones the
+	// turn did not change: see statusClaim.
+	subagentLink, isSubagentSession := resolveSubagentSessionLink(ctx, ag, transcriptRef)
+	statusModifiedFiles, relNewFiles, relDeletedFiles = preState.statusClaim(repoRoot, sessionID, relModifiedFiles, subagentLink.ParentSessionID).
+		narrow(ctx, statusModifiedFiles, relNewFiles, relDeletedFiles)
+	relModifiedFiles = mergeUnique(relModifiedFiles, statusModifiedFiles)
 
 	// Filter detected changes to exclude state already committed to HEAD.
 	// When an agent commits files mid-turn, those changes are condensed by
@@ -1079,9 +1133,9 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// parent's next checkpoint. Its usage goes on that record and the parent's
 	// subagent total, never on the Worker's own session total, so it is
 	// counted once.
-	if link, isSubagent := resolveSubagentSessionLink(ctx, ag, transcriptRef); isSubagent {
+	if isSubagentSession {
 		return saveSubagentSessionTaskStep(ctx, subagentSessionStep{
-			link:          link,
+			link:          subagentLink,
 			sessionID:     sessionID,
 			event:         event,
 			transcriptRef: transcriptRef,
@@ -2416,7 +2470,7 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 	// filterToUncommittedFiles is the same guard the turn-end path already applies
 	// for this exact reason; it fails open, so a git error keeps the list as-is
 	// rather than silently dropping a real checkpoint.
-	subagentFiles := FilterAndNormalizePaths(modifiedFiles, repoRoot)
+	subagentFiles := normalizeAgentPaths(modifiedFiles, event.CWD, repoRoot)
 	uncommittedSubagentFiles := filterToUncommittedFiles(logCtx, subagentFiles, repoRoot)
 	relModifiedFiles := uncommittedSubagentFiles
 	var relNewFiles, relDeletedFiles []string
@@ -2424,7 +2478,10 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 		// changes come from git status, so they are uncommitted by construction.
 		relNewFiles = FilterAndNormalizePaths(changes.New, repoRoot)
 		relDeletedFiles = FilterAndNormalizePaths(changes.Deleted, repoRoot)
-		relModifiedFiles = mergeUnique(relModifiedFiles, FilterAndNormalizePaths(changes.Modified, repoRoot))
+		var statusModifiedFiles []string
+		statusModifiedFiles, relNewFiles, relDeletedFiles = preState.statusClaim(repoRoot, event.SessionID, subagentFiles).
+			narrow(logCtx, FilterAndNormalizePaths(changes.Modified, repoRoot), relNewFiles, relDeletedFiles)
+		relModifiedFiles = mergeUnique(relModifiedFiles, statusModifiedFiles)
 	}
 	if opts.analyzerFilesOnly && opts.claimUnrecordedNewFiles {
 		relNewFiles = mergeUnique(relNewFiles, unrecordedNewFilesSinceLaunch(logCtx, event, repoRoot))
