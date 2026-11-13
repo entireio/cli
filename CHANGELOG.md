@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.13.4] - 2026-11-13
+
+### Added
+
+- `redaction.drop_images` setting (opt-in, off by default) keeps images out of checkpoints. Each image in a stored transcript is replaced with a 1x1 placeholder of the same type, on every storing path, including `entire session attach` and `entire import`. It covers Claude Code (including images read with the Read tool), Codex (including generated images and data URIs inside longer strings), Pi and OpenCode. Cursor's images are not captured. It is on when either settings file sets it, and it overrides `externalize_images`. Existing checkpoints are not changed. Note: older CLI versions reject a settings file that contains `drop_images` and write no checkpoints, so commit the setting only after the whole team has upgraded ([#3147](https://github.com/entireio/cli/pull/3147))
+
+### Changed
+
+- `entire repo mirror add`: if `--timeout` expires while the initial clone is still processing, the row reads `still syncing`, the command points to `entire repo view <repo>` and exits 0, like `--no-wait`. A keyring or token failure at the deadline still fails and is not reported as `still syncing` ([#3150](https://github.com/entireio/cli/pull/3150), [#3158](https://github.com/entireio/cli/pull/3158))
+
+### Fixed
+
+- The pre-push hook no longer panics on every push in a repository that has `extensions.worktreeConfig` and a `config.worktree` file. This was a regression in 0.13.3. Opening a bare repository with a `config.worktree` no longer panics either ([#3157](https://github.com/entireio/cli/pull/3157))
+
+### Thanks
+
+Thanks to @MuskanPaliwal for the opt-in `redaction.drop_images` setting that keeps images out of checkpoints, and for fixing the pre-push panic in repositories with a `config.worktree`!
+
 ## [0.13.3] - 2026-11-12
 
 ### Added
