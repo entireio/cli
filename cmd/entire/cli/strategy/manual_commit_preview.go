@@ -114,7 +114,7 @@ func previewPrompts(ctx context.Context, state *SessionState) []string {
 	var transcript []byte
 	var transcriptPath string
 	if state.TranscriptPath != "" {
-		if resolved, resolveErr := resolveTranscriptPath(state); resolveErr == nil {
+		if resolved, resolveErr := resolveTranscriptPath(ctx, state); resolveErr == nil {
 			if live, readErr := agent.ReadTranscriptFile(resolved); readErr == nil && len(live) > 0 {
 				transcript, transcriptPath = live, resolved
 			}
