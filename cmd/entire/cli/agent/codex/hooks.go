@@ -29,12 +29,14 @@ const defaultHookTimeoutSec = 30
 // HookEventSpec is the shared Codex event metadata used by installation,
 // trust inspection, and the Codex integration tests.
 type HookEventSpec struct {
-	Event       string
-	Label       string
-	Verb        string
-	Timeout     int
-	Managed     bool
-	Core        bool
+	Event   string
+	Label   string
+	Verb    string
+	Timeout int
+	Managed bool
+	Core    bool
+	// JSONWarning marks the hook that warns the user when the Entire CLI is
+	// missing (sh hosts only; see jsonWarningHookCommand).
 	JSONWarning bool
 }
 
@@ -80,9 +82,7 @@ func buildManagedHooks() []managedHook {
 		}
 		wrap := agent.WrapProductionSilentHookCommandForOS
 		if spec.JSONWarning {
-			wrap = func(cmd string, windows bool) string {
-				return agent.WrapProductionJSONWarningHookCommandForOS(cmd, agent.WarningFormatSingleLine, windows)
-			}
+			wrap = jsonWarningHookCommand
 		}
 		managed = append(managed, managedHook{
 			event: spec.Event, label: spec.Label, verb: spec.Verb,
@@ -93,6 +93,22 @@ func buildManagedHooks() []managedHook {
 }
 
 var managedHooks = buildManagedHooks()
+
+// jsonWarningHookCommand wraps a hook that tells the user, through a JSON
+// systemMessage, when the Entire CLI is missing. On a native Windows host it
+// is the silent nested wrapper instead: Codex's hook shell is the session
+// shell, PowerShell by default, and the JSON's quotes cannot sit inside the
+// nested `cmd.exe /d /s /c "…"` block PowerShell needs, while the unnested
+// cmd.exe line does not parse under PowerShell at all, so the hook never ran.
+// Codex shows a SessionStart message to the user only as JSON systemMessage
+// (plain stdout becomes model context), so there the hook skips silently like
+// Codex's other hooks.
+func jsonWarningHookCommand(cmd string, windows bool) string {
+	if windows {
+		return agent.WrapWindowsProductionSilentHookCommand(cmd)
+	}
+	return agent.WrapProductionJSONWarningHookCommand(cmd, agent.WarningFormatSingleLine)
+}
 
 // InstallHooks installs Codex hooks in .codex/hooks.json.
 func (c *CodexAgent) InstallHooks(ctx context.Context, force bool) (int, error) {

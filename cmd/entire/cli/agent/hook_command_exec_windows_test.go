@@ -3,7 +3,6 @@ package agent
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -123,51 +122,6 @@ func TestWindowsWrappers_Execution(t *testing.T) {
 		}
 	})
 
-	t.Run("json/absent emits valid JSON and skips the command", func(t *testing.T) {
-		out, stderr, code := runWindowsWrapper(t, WrapWindowsProductionJSONWarningHookCommand("echo "+marker, WarningFormatSingleLine), false)
-		if strings.Contains(out, marker) {
-			t.Fatalf("wrapped command must NOT run when entire absent; stdout=%q stderr=%q", out, stderr)
-		}
-		if code != 0 {
-			t.Fatalf("expected exit 0, got %d; stderr=%q", code, stderr)
-		}
-		var payload struct {
-			SystemMessage string `json:"systemMessage"`
-		}
-		if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &payload); err != nil {
-			t.Fatalf("expected valid JSON on stdout, got %q stderr=%q (err %v)", out, stderr, err)
-		}
-		if !strings.Contains(payload.SystemMessage, "Entire CLI") {
-			t.Fatalf("unexpected systemMessage: %q", payload.SystemMessage)
-		}
-	})
-
-	t.Run("json/present runs the command without a warning", func(t *testing.T) {
-		out, stderr, code := runWindowsWrapper(t, WrapWindowsProductionJSONWarningHookCommand("echo "+marker, WarningFormatSingleLine), true)
-		if !strings.Contains(out, marker) {
-			t.Fatalf("expected wrapped command to run; stdout=%q stderr=%q", out, stderr)
-		}
-		if strings.Contains(out, "systemMessage") {
-			t.Fatalf("warning must NOT be emitted when entire present; stdout=%q stderr=%q", out, stderr)
-		}
-		if code != 0 {
-			t.Fatalf("expected exit 0, got %d; stderr=%q", code, stderr)
-		}
-	})
-
-	t.Run("json/present propagates the command exit code", func(t *testing.T) {
-		out, stderr, code := runWindowsWrapper(
-			t,
-			WrapWindowsProductionJSONWarningHookCommand("cmd /c exit 7", WarningFormatSingleLine),
-			true,
-		)
-		if strings.Contains(out, "systemMessage") {
-			t.Fatalf("warning must NOT be emitted when entire present; stdout=%q stderr=%q", out, stderr)
-		}
-		if code != 7 {
-			t.Fatalf("expected wrapped command exit code 7 to propagate, got %d; stderr=%q", code, stderr)
-		}
-	})
 }
 
 // TestWindowsWrappers_DroidComposition runs the wrappers droid installs through
@@ -407,7 +361,7 @@ func TestWindowsWrappers_IgnoreRepositoryPrograms(t *testing.T) {
 
 	// warning is what the wrapper prints when the CLI is missing; empty for the
 	// silent forms, which print nothing.
-	const jsonWarning, plainWarning = `"systemMessage"`, "Entire CLI"
+	const plainWarning = "Entire CLI"
 	cases := []struct {
 		name    string
 		shell   hookShell
@@ -417,7 +371,6 @@ func TestWindowsWrappers_IgnoreRepositoryPrograms(t *testing.T) {
 	}{
 		{"codex/powershell/silent", powerShellShell, WrapWindowsProductionSilentHookCommand(hook), allExe, ""},
 		{"codex/cmd/silent", cmdQuotedShell, WrapWindowsProductionSilentHookCommand(hook), noCmdExe, ""},
-		{"codex/cmd/json", cmdQuotedShell, WrapWindowsProductionJSONWarningHookCommand(hook, WarningFormatSingleLine), allExe, jsonWarning},
 		{"cursor/powershell/silent", powerShellShell, WrapWindowsProductionSilentHookCommand(hook), allExe, ""},
 		{"droid/silent", droidShell, WrapWindowsProductionSilentHookCommandForCmdHost(hook), allExe, ""},
 		{"droid/plaintext", droidShell, WrapWindowsProductionPlainTextWarningHookCommand(hook, WarningFormatSingleLine), allExe, plainWarning},
