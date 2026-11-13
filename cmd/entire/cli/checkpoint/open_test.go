@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -26,10 +27,11 @@ import (
 func TestOpenOptionsLiteralsDeclareReadRemotes(t *testing.T) {
 	t.Parallel()
 
-	root, err := filepath.Abs(filepath.Join("..", "..", "..", ".."))
-	if err != nil {
-		t.Fatal(err)
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("could not resolve test source path via runtime.Caller")
 	}
+	root := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", "..", "..", ".."))
 	// Sanity-check the walk root so a layout change fails loudly instead of
 	// silently scanning nothing.
 	if _, err := os.Stat(filepath.Join(root, "cmd", "entire")); err != nil {
