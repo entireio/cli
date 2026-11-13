@@ -17,6 +17,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
@@ -305,7 +306,11 @@ func readFoldsCase(repo *git.Repository) bool {
 	if err != nil {
 		return true
 	}
-	switch strings.ToLower(cfg.Raw.Section("core").Option("ignorecase")) {
+	raw, err := gitrepo.RawConfig(repo, cfg)
+	if err != nil {
+		return true
+	}
+	switch strings.ToLower(raw.Section("core").Option("ignorecase")) {
 	case "true", "yes", "on", "1":
 		return true
 	default:
