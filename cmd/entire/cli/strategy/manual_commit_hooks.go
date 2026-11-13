@@ -2564,7 +2564,12 @@ func (s *ManualCommitStrategy) sessionHasNewContent(ctx context.Context, repo *g
 	var hasTranscriptGrowth bool
 	switch {
 	case state.CheckpointTranscriptSize > 0:
-		hasTranscriptGrowth = transcriptBlobSize > state.CheckpointTranscriptSize
+		// A stored transcript smaller than the baseline means the two are not
+		// in the same coordinate (the baseline predates a sanitizer that now
+		// removes more, or the transcript was rewritten), so the sizes cannot
+		// prove there is no new content. Assume growth, as for a legacy
+		// session; the next condensation re-bases the baseline.
+		hasTranscriptGrowth = transcriptBlobSize != state.CheckpointTranscriptSize
 	case state.CheckpointTranscriptStart > 0:
 		// Legacy session: condensed at least once (has line count) but no size tracking.
 		// Cannot safely compare sizes — conservatively assume growth so condensation

@@ -188,10 +188,11 @@ func worktreeEntryCurrent(ctx context.Context, root, key string, work *session.W
 		return false, nil
 	}
 	if key == session.WorktreeKey("") {
-		// The main worktree has no marker, and an unregistered checkout
-		// sharing the repository through commondir has the same empty ID, so
-		// the record is current only in the checkout it was made in. A record
-		// without a path predates both.
+		// The main worktree has no marker. An unregistered checkout sharing
+		// the repository through commondir has the same empty ID but never
+		// gets an entry, so the main worktree's record must not count in one:
+		// it is current only in the checkout it was made in. A record without
+		// a path predates both.
 		return work.Path == "" || sameDir(work.Path, root), nil
 	}
 	if work.Incarnation == "" {
