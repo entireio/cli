@@ -20,7 +20,7 @@ func codexImageLine(b64 string) string {
 }
 
 // codexFunctionOutputLine embeds a data-URI inside function_call_output text,
-// the way a screenshot/generated-image tool result appears in the rollout.
+// the way a screenshot tool result appears in the rollout.
 func codexFunctionOutputLine(b64 string) string {
 	return `{"type":"response_item","payload":{"type":"function_call_output","call_id":"call_1",` +
 		`"output":"here is the render: data:image/png;base64,` + b64 + ` done"}}`

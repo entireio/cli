@@ -19,11 +19,12 @@ import (
 // TestCodexImageExternalization_FullHookFlow is the Codex end-to-end proof: it
 // drives the real Codex hook binary (user-prompt-submit -> apply_patch
 // post-tool-use -> mid-turn commit condensation -> stop finalize) on a Codex
-// rollout transcript that embeds an image as a data-URI, with externalization
+// rollout transcript that embeds a pasted image as a data-URI and a generated
+// image as bare base64 in image_generation_call.result, with externalization
 // enabled via settings.local.json. It then asserts the actual
-// entire/checkpoints/v1 ref stores a placeholder (not the raw base64) that
-// survives Codex's SanitizePortableTranscript, writes the asset blob + manifest,
-// and that ReadSessionContent reinjects the image byte-exactly.
+// entire/checkpoints/v1 ref stores placeholders (not the raw base64) that
+// survive Codex's SanitizePortableTranscript, writes the asset blobs + manifest,
+// and that ReadSessionContent reinjects both images byte-exactly.
 func TestCodexImageExternalization_FullHookFlow(t *testing.T) {
 	env := NewFeatureBranchEnv(t)
 

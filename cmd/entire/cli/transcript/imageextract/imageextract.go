@@ -348,10 +348,11 @@ func collectClaudeImages(v any, out *[]imgHit) {
 }
 
 // codexDataURIRe matches an image data-URI and captures (media subtype, base64).
-// Codex serializes every inline image this way — input_image image_url values,
-// user-message content, and function_call_output payloads — so keying on the
-// data-URI (rather than a specific field) covers input and generated/tool images
-// uniformly. The captured group is the bare base64, which is what gets swapped.
+// Codex serializes input and tool-output images this way — input_image
+// image_url values, user-message content, and function_call_output payloads —
+// so keying on the data-URI (rather than a specific field) covers them
+// uniformly. Generated images are bare base64 and collectCodexImages finds them
+// separately. The captured group is the bare base64, which is what gets swapped.
 var codexDataURIRe = regexp.MustCompile(`data:image/([a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/]+={0,2})`)
 
 // collectCodexImages walks any decoded JSON value and, for each string leaf,
