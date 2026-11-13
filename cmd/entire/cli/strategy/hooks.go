@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -459,8 +460,9 @@ const (
 	// version writes.
 	GitHooksCurrent
 	// GitHooksOutdated means the hooks are ours but at least one is a shape we no
-	// longer write. Today that means running Entire from the working tree, which
-	// is broken as well as stale — the path it names is gone.
+	// longer write: a hook that still runs Entire from the working tree, an old
+	// pre-push that does not pass git's ref list, or a chain that still executes
+	// Trunk's launcher under the backup's name.
 	GitHooksOutdated
 )
 
@@ -543,9 +545,10 @@ var legacyGitHookLaunchers = []string{"scripts/entire-dev", "go run "}
 const bareEntireHookCmd = "entire"
 
 // gitHookStateInHooksDir classifies the hooks in the given directory. A hook that
-// is present but still invokes a removed local-dev launcher reads Outdated, not
-// Current, which is what makes EnsureSetup reinstall it rather than leaving a
-// broken hook in place forever.
+// is present but in a shape we no longer write — a removed local-dev launcher,
+// an old pre-push, or a Trunk chain that would still misroute the launcher —
+// reads Outdated, not Current, so EnsureSetup reinstalls it rather than leaving
+// a broken hook in place.
 func gitHookStateInHooksDir(hooksDir string) GitHookState {
 	// ForRemoval: this is a read, and reporting GitHooksAbsent for a symlinked
 	// hooks directory is what sent EnsureSetup to InstallGitHook on every agent
@@ -592,7 +595,117 @@ func hookStateIn(root *os.Root, hook string) GitHookState {
 		// Predates passing git's ref list to Entire.
 		return GitHooksOutdated
 	}
+	if isTrunkChainBeforeSourcing(root, hook, content) || isTrunkChainUsingGrep(root, hook, content) {
+		return GitHooksOutdated
+	}
 	return GitHooksCurrent
+}
+
+// isTrunkChainBeforeSourcing reports whether hook is Entire's chain from before
+// it sourced Trunk's launcher under the hook's own name. Those installs still
+// execute the launcher as <hook>.pre-entire, which Trunk refuses with exit 2,
+// aborting the commit or push.
+//
+// The check is Trunk-specific and only reads the backup for hooks that chain.
+// InstallGitHook rewrites a hook that carries Entire's marker without a backup,
+// so an old-format chain that is not Trunk must not read Outdated, or lines the
+// user added would be discarded.
+func isTrunkChainBeforeSourcing(root *os.Root, hook, content string) bool {
+	backup := hook + backupSuffix
+	if !strings.Contains(content, "$_entire_hook_dir/"+backup) {
+		return false
+	}
+	// The sourcing branch names this exact quoted line.
+	if strings.Contains(content, shellQuote(trunkHookCallback)) {
+		return false
+	}
+	return backupHasTrunkCallback(root, hook)
+}
+
+// isTrunkChainUsingGrep reports whether hook is Entire's chain from when it
+// identified Trunk's launcher with grep -qxF. If grep is not on PATH, that
+// check fails and the chain executes the launcher as <hook>.pre-entire, which
+// Trunk refuses with exit 2.
+//
+// Same Trunk-only backup rule as isTrunkChainBeforeSourcing: a non-Trunk
+// backup must not read Outdated, or InstallGitHook would rewrite the hook
+// without a backup and discard lines the user added.
+func isTrunkChainUsingGrep(root *os.Root, hook, content string) bool {
+	if !strings.Contains(content, "grep -qxF "+shellQuote(trunkHookCallback)) {
+		return false
+	}
+	return backupHasTrunkCallback(root, hook)
+}
+
+// maxTrunkCallbackBackup is well above Trunk's launcher (about 1.5KiB) and
+// bounds the classification read so a huge or growing file cannot exhaust
+// memory during CheckGitHookState.
+const maxTrunkCallbackBackup = 1 << 20
+
+// backupHasTrunkCallback reports whether <hook>.pre-entire contains
+// trunkHookCallback as a whole line, the same match the chain uses. A
+// regular file in the hooks directory is read through the root,
+// no-follow. A symlink is followed only when its target is a regular file
+// no larger than maxTrunkCallbackBackup, which is how Trunk's shared
+// launcher (kept outside the hooks dir) is still recognized. A FIFO or
+// device is not read, so it cannot hang an agent-turn setup check.
+func backupHasTrunkCallback(root *os.Root, hook string) bool {
+	name := hook + backupSuffix
+	info, err := root.Lstat(name)
+	if err != nil {
+		return false
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return symlinkBackupHasTrunkCallback(root, name)
+	}
+	if !info.Mode().IsRegular() || info.Size() > maxTrunkCallbackBackup {
+		return false
+	}
+	f, err := osroot.OpenNoFollow(root, name)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	return fileHasTrunkCallback(f)
+}
+
+func symlinkBackupHasTrunkCallback(root *os.Root, name string) bool {
+	path := filepath.Join(root.Name(), name)
+	target, err := os.Readlink(path)
+	if err != nil {
+		return false
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(root.Name(), target)
+	}
+	info, err := os.Stat(target)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > maxTrunkCallbackBackup {
+		return false
+	}
+	//nolint:gosec // G304: target was just Stat'ed as a regular file reached from a hooks backup symlink.
+	f, err := os.Open(target)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	return fileHasTrunkCallback(f)
+}
+
+func fileHasTrunkCallback(f *os.File) bool {
+	data, err := io.ReadAll(io.LimitReader(f, maxTrunkCallbackBackup+1))
+	if err != nil || int64(len(data)) > maxTrunkCallbackBackup {
+		return false
+	}
+	return linesContainTrunkCallback(data)
+}
+
+func linesContainTrunkCallback(data []byte) bool {
+	for line := range strings.SplitSeq(string(data), "\n") {
+		if line == trunkHookCallback {
+			return true
+		}
+	}
+	return false
 }
 
 // entireHookLineRunsFromWorkingTree reports whether the hook's OWN Entire
@@ -1186,6 +1299,13 @@ func generateChainedContent(baseContent, hookName string) string {
 // and runs it from its own wrapper becomes the backup on the next install, so
 // without the guard Entire -> wrapper -> Entire -> ... never ends. The cost: a
 // git command run by the chained hook does not chain that same hook again.
+//
+// A backup that is Trunk's launcher is sourced rather than executed; see
+// trunkHookCallback. The launcher is identified by a whole-line comparison
+// in /bin/bash, not grep, so a PATH that lacks grep cannot fall through to
+// executing it as <hook>.pre-entire. The scan reads at most 64KiB (Trunk's
+// launcher is under 2KiB) so a compiled or otherwise large backup is not
+// read to EOF before it runs.
 func chainCall(hookName, redirect string) string {
 	backup := hookName + backupSuffix
 	keep := hookName + keepSuffix
@@ -1200,11 +1320,48 @@ if [ -z "${%s:-}" ]; then
             "$_entire_hook_dir/%s" "$@"%s
         fi
     elif [ -x "$_entire_hook_dir/%s" ]; then
-        "$_entire_hook_dir/%s" "$@"%s
+        if /bin/bash --norc -c 'LC_ALL=C IFS= read -r -d "" -n 65536 _entire_data < "$1" || true
+            _entire_nl="
+"
+            if [ "${#_entire_data}" -eq 65536 ]; then
+                case "$_entire_data" in
+                *"$_entire_nl") ;;
+                *"$_entire_nl"*) _entire_data="${_entire_data%%"$_entire_nl"*}" ;;
+                *) exit 1 ;;
+                esac
+            fi
+            while IFS= read -r _entire_line || [ -n "$_entire_line" ]; do
+                if [ "$_entire_line" = "$2" ]; then
+                    exit 0
+                fi
+            done <<< "$_entire_data"
+            exit 1' bash "$_entire_hook_dir/%s" %s; then
+            /bin/bash --norc -c '_entire_saved_hook=$1; shift; . "$_entire_saved_hook"' "$_entire_hook_dir/%s" "$_entire_hook_dir/%s" "$@"%s
+        else
+            "$_entire_hook_dir/%s" "$@"%s
+        fi
     fi
 fi
-`, chainComment, guard, guard, guard, preCommitSignatures[0], backup, keep, keep, redirect, backup, backup, redirect)
+`, chainComment, guard, guard, guard, preCommitSignatures[0], backup, keep, keep, redirect,
+		backup, backup, shellQuote(trunkHookCallback), hookName, backup, redirect, backup, redirect)
 }
+
+// trunkHookCallback is the last line of the launcher Trunk writes for every git
+// hook it manages. The launcher tells Trunk which hook is running by its own
+// file name (${0##*/}), and finds Trunk's tools in the parent of the directory
+// it runs from (dirname "${BASH_SOURCE[0]}"/..).
+//
+// Executed as <hook>.pre-entire, it asks Trunk for a callback of that name,
+// which Trunk refuses with exit 2, aborting the commit or push. A link named
+// <hook> in another directory would fix the name but not the directory. So the
+// chain sources the launcher with $0 set to the hook's own path, in the
+// /bin/bash --norc its #! names (not bash from PATH, which a GUI git client may
+// not have): ${0##*/} is <hook>, BASH_SOURCE still names the backup in the
+// hooks directory, and the exit status and EXIT trap stay the launcher's.
+//
+// Only a backup with this exact line is sourced. Any other may be another
+// language or depend on its own path, so it is executed as before.
+const trunkHookCallback = `TRUNK_LAUNCHER_QUIET=true "${trunk}" git-hooks callback "${0##*/}" -- "$@"`
 
 func generatePostRewriteChainedContent(baseContent string) string {
 	const original = `hooks git post-rewrite "$1" 2>/dev/null || true`
