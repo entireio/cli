@@ -442,7 +442,8 @@ func resolveWorktreeCandidates(ctx context.Context, worktreePath string, candida
 		if isLinked {
 			linked = append(linked, state)
 		}
-		if isLinked || (state.LastInteractionTime != nil && state.LastInteractionTime.After(cutoff)) {
+		recentlyInteracted := state.LastInteractionTime != nil && state.LastInteractionTime.After(cutoff)
+		if isLinked || recentlyInteracted {
 			live = append(live, state)
 		}
 	}
