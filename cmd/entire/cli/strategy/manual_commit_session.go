@@ -419,7 +419,12 @@ const recentSessionWindow = 15 * time.Minute
 // Spanning several worktrees: filter to recently-interacting sessions and
 // link only if a single worktree remains — days-idle stragglers must not
 // veto the obviously-live session, but between two live worktrees there is
-// no safe guess. A refusal logs here and reports true, so the
+// no safe guess. A session this commit is already linked to
+// (linkedHoweverIdle) counts as recent, and when the recent ones still span
+// several worktrees, the linked ones decide if they share one: prepare chose
+// them and stamped its trailer, and judged afresh after a long TTY prompt or
+// editor wait, they would be dropped, leaving the trailer naming a checkpoint
+// that is never written. A refusal logs here and reports true, so the
 // commit-linking caller can announce it on stderr with the remedy (#1852:
 // silent loss of linkage) — but only after identity matching has also failed
 // to rescue the commit, and never on amend/post-rewrite.
@@ -431,14 +436,21 @@ func resolveWorktreeCandidates(ctx context.Context, worktreePath string, candida
 		return matches, false
 	}
 	cutoff := time.Now().Add(-recentSessionWindow)
-	var live []*SessionState
+	var live, linked []*SessionState
 	for _, state := range candidates {
-		if state.LastInteractionTime != nil && state.LastInteractionTime.After(cutoff) {
+		isLinked := linkedHoweverIdle(ctx, state)
+		if isLinked {
+			linked = append(linked, state)
+		}
+		if isLinked || (state.LastInteractionTime != nil && state.LastInteractionTime.After(cutoff)) {
 			live = append(live, state)
 		}
 	}
-	if len(live) > 0 {
-		if matches := sessionsFromSingleWorktree(live); matches != nil {
+	for _, set := range [][]*SessionState{live, linked} {
+		if len(set) == 0 {
+			continue
+		}
+		if matches := sessionsFromSingleWorktree(set); matches != nil {
 			return matches, false
 		}
 	}
@@ -458,10 +470,9 @@ func resolveWorktreeCandidates(ctx context.Context, worktreePath string, candida
 // Post-rewrite does not apply this at all.
 func withoutIdleSessions(ctx context.Context, worktreePath string, states []*SessionState) []*SessionState {
 	now := time.Now()
-	linked := linkedSessions(ctx)
 	var kept []*SessionState
 	for _, state := range states {
-		if !slices.Contains(linked, state.SessionID) && !ownsAmendedCheckpoint(ctx, state) && idleBeyondRecentWindow(state, now) {
+		if !linkedHoweverIdle(ctx, state) && idleBeyondRecentWindow(state, now) {
 			logging.Debug(logging.WithComponent(ctx, "checkpoint"),
 				"session matching: fallback session idle beyond the recent window; not linked",
 				slog.String("commit_worktree", worktreePath),
@@ -472,6 +483,14 @@ func withoutIdleSessions(ctx context.Context, worktreePath string, states []*Ses
 		kept = append(kept, state)
 	}
 	return kept
+}
+
+// linkedHoweverIdle reports whether this commit is already linked to state:
+// prepare-commit-msg linked it (withLinkedSessions), or, on an amend, it owns
+// the checkpoint the amended commit links (withAmendedCheckpoint). The idle
+// checks judge only new links.
+func linkedHoweverIdle(ctx context.Context, state *SessionState) bool {
+	return slices.Contains(linkedSessions(ctx), state.SessionID) || ownsAmendedCheckpoint(ctx, state)
 }
 
 // idleBeyondRecentWindow reports whether state last interacted before
@@ -495,7 +514,8 @@ func idleBeyondRecentWindow(state *SessionState, now time.Time) bool {
 type linkedSessionsKey struct{}
 
 // withLinkedSessions marks sessionIDs as the sessions prepare-commit-msg linked
-// the commit to, which withoutIdleSessions keeps however idle they are. Prepare
+// the commit to, which withoutIdleSessions and resolveWorktreeCandidates keep
+// however idle they are. Prepare
 // marks the sessions it links and records them with the trailer it stamps
 // (recordStampedTrailer); post-commit marks the ones recorded for its trailer,
 // so both hooks resolve the same sessions however long the commit took in

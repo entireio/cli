@@ -148,6 +148,69 @@ func TestCommitLinking_FallbackKeepsTheOwnerOfAnAmendedCheckpoint(t *testing.T) 
 	assert.Equal(t, []string{"owner"}, linkedSessionIDs(sessions))
 }
 
+// A commit from a worktree with no session of its own, with sessions homed in
+// two other worktrees, so the fallback judges the candidates by recency.
+// Prepare links the one recent session and stamps the trailer. The commit can
+// then wait on the TTY prompt or the message editor: by post-commit that
+// session has aged past recentSessionWindow, or the other worktree's session
+// has interacted since. Judged afresh, no session is recent, or two
+// worktrees' sessions are, so the fallback declines and the trailer names a
+// checkpoint that is never written. The session prepare linked counts as
+// recent, and decides when the recent ones span both worktrees.
+func TestCommitHooks_LinkedSiblingSessionCondensesAfterALongWaitAcrossWorktrees(t *testing.T) {
+	now := time.Now()
+	recent := now.Add(-recentSessionWindow + time.Minute)
+	justPast := now.Add(-recentSessionWindow - time.Minute)
+	dayAgo := now.Add(-24 * time.Hour)
+	for _, tt := range []struct {
+		name        string
+		otherAtPost *time.Time
+	}{
+		{name: "aged past the window", otherAtPost: &dayAgo},
+		{name: "the other worktree's session interacted since", otherAtPost: &now},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			homeDir, err := filepath.EvalSymlinks(setupGitRepo(t))
+			require.NoError(t, err, "the recorded home must match git's worktree list")
+			t.Chdir(homeDir)
+			s := NewManualCommitStrategy()
+			setupSessionWithCheckpointAndFile(t, s, homeDir, "sess-sibling", "notes.txt")
+			setLastInteraction := func(id string, last *time.Time) {
+				t.Helper()
+				state, err := s.loadSessionState(ctx, id)
+				require.NoError(t, err)
+				state.Phase = session.PhaseIdle
+				state.LastInteractionTime = last
+				require.NoError(t, s.saveSessionState(ctx, state))
+			}
+			setLastInteraction("sess-sibling", &recent)
+			otherDir := addSiblingWorktree(t, homeDir, "other-wt")
+			saveSiblingSession(t, s, otherDir, "sess-other", session.PhaseIdle, &dayAgo)
+
+			commitDir := addSiblingWorktree(t, homeDir, "commit-wt")
+			t.Chdir(commitDir)
+			testutil.WriteFile(t, commitDir, "notes.txt", "agent content for notes.txt")
+			testutil.GitAdd(t, commitDir, "notes.txt")
+			msg := prepareMessage(t, "add notes\n")
+			cps := checkpointIDs(msg)
+			require.Len(t, cps, 1, "prepare links the one recent session: %q", msg)
+
+			setLastInteraction("sess-sibling", &justPast)
+			setLastInteraction("sess-other", tt.otherAtPost)
+			testutil.GitCommit(t, commitDir, msg)
+			require.NoError(t, NewManualCommitStrategy().PostCommit(ctx))
+
+			state, err := s.loadSessionState(ctx, "sess-sibling")
+			require.NoError(t, err)
+			assert.Equal(t, cps[0], state.LastCheckpointID.String(), "post-commit condenses the session prepare linked")
+			other, err := s.loadSessionState(ctx, "sess-other")
+			require.NoError(t, err)
+			assert.True(t, other.LastCheckpointID.IsEmpty(), "the session prepare did not link is not condensed")
+		})
+	}
+}
+
 // Prepare links a sibling worktree's session that is not idle when it runs,
 // and stamps the trailer. The commit can then wait on the TTY prompt or the
 // message editor, and by post-commit the session looks idle: past
