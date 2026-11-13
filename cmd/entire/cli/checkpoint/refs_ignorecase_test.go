@@ -1,6 +1,7 @@
 package checkpoint
 
 import (
+	"path/filepath"
 	"runtime"
 	"testing"
 	"weak"
@@ -13,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
@@ -207,6 +209,28 @@ func TestFoldsCase_WorktreeConfig(t *testing.T) {
 			dir, _, _ := worktreeConfigRepo(t, ignoreCase)
 			repo, err := git.PlainOpen(dir)
 			require.NoError(t, err)
+
+			assert.Equal(t, ignoreCase == "true", foldsCase(repo))
+		})
+	}
+}
+
+// In a linked worktree the config.worktree sits in the worktree's own git
+// directory while core.ignorecase lives in the common config, which RawConfig
+// must still reach when go-git drops Raw. Opened as production opens it.
+func TestFoldsCase_LinkedWorktreeConfig(t *testing.T) {
+	t.Parallel()
+	for _, ignoreCase := range []string{"true", "false"} {
+		t.Run(ignoreCase, func(t *testing.T) {
+			t.Parallel()
+			dir, _, _ := shardSpellingRepo(t, ignoreCase)
+			linked := filepath.Join(t.TempDir(), "linked")
+			testutil.RunGit(t, dir, "worktree", "add", "-q", "-b", "linked", linked)
+			testutil.RunGit(t, linked, "config", "extensions.worktreeConfig", "true")
+			testutil.RunGit(t, linked, "config", "--worktree", "core.sparseCheckout", "true")
+			repo, err := gitrepo.OpenPath(linked)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = repo.Close() })
 
 			assert.Equal(t, ignoreCase == "true", foldsCase(repo))
 		})
