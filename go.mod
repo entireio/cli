@@ -9,7 +9,7 @@ require (
 	charm.land/huh/v2 v2.0.3
 	charm.land/lipgloss/v2 v2.1.0
 	github.com/atotto/clipboard v0.1.4
-	github.com/betterleaks/betterleaks v1.10.0
+	github.com/betterleaks/betterleaks v1.10.1
 	github.com/charmbracelet/x/ansi v0.11.9
 	github.com/creack/pty v1.1.24
 	github.com/denisbrodbeck/machineid v1.0.1
