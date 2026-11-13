@@ -186,7 +186,7 @@ I/O beneath it.** Read the filesystem reference before adding or changing I/O.
   Preserve resolution provenance; do not narrate worktree fallback or ambiguous
   matches as identified callers. `IsCaller()` excludes those guesses; consult
   the caller-resolution reference for current enforcement gaps.
-- Preserve sanitize → image externalization → redact ordering where all apply,
+- Preserve sanitize → image drop or externalization → redact ordering where all apply,
   fail-closed scanner behavior, and checkpoint-scoped token accounting. Read the
   implementation contracts before modifying any transcript/storage pipeline.
 - Control-plane precedence belongs to `coreapi`; display `client.CoreOrigin()`

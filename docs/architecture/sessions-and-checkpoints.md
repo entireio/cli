@@ -507,6 +507,8 @@ Sanitization always runs before redaction, but the paths differ in whether image
 
 **Image externalization runs only on the committed paths** (condensation and finalize). Assets and the `assets/manifest.json` index exist only under committed checkpoints.
 
+With `redaction.drop_images` on, the externalize step is replaced by a drop on every path that writes a transcript into a git object: each image becomes a 1x1 placeholder image and no assets are written. See [Dropping images](../security-and-privacy.md#dropping-images).
+
 Where all three steps run, each must precede the next. Sanitizing first avoids
 externalizing images out of items that are about to be discarded — that would store
 an asset whose referencing transcript line disappears moments later — and avoids

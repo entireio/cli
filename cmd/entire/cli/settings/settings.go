@@ -386,6 +386,12 @@ type RedactionSettings struct {
 	// them regardless of this flag.
 	ExternalizeImages bool `json:"externalize_images,omitempty"`
 
+	// DropImages opts into replacing every image in a stored transcript with a
+	// 1x1 placeholder image, so no image reaches the repository (off by
+	// default). On when either settings file enables it, and it takes
+	// precedence over ExternalizeImages.
+	DropImages bool `json:"drop_images,omitempty"`
+
 	// Betterleaks toggles the betterleaks scanner engine (layer 2 of the
 	// redaction stack). Omitted, or present with `enabled` omitted, means
 	// enabled. Honored from the committed settings file only; ignored in
@@ -1718,6 +1724,15 @@ func mergeRedaction(dst *RedactionSettings, data json.RawMessage) error {
 		}
 		dst.ExternalizeImages = v
 	}
+	if dropRaw, ok := raw["drop_images"]; ok {
+		var v bool
+		if err := json.Unmarshal(dropRaw, &v); err != nil {
+			return fmt.Errorf("parsing redaction.drop_images: %w", err)
+		}
+		// An override can turn the drop on but never off: a local file must
+		// not store images the committed settings keep out of the repository.
+		dst.DropImages = dst.DropImages || v
+	}
 
 	// Scanner engine selection affects everyone who reads the repo's
 	// checkpoints, so it is honored from the committed settings file only.
@@ -1990,15 +2005,55 @@ func IsSummarizeEnabled(ctx context.Context) bool {
 // lifted out of transcripts into the checkpoint asset store. Opt-in via
 // redaction.externalize_images, or the ENTIRE_EXTERNALIZE_IMAGES=1 env override
 // (handy for testing/rollout). Off by default.
+//
+// Always off while image dropping is on: a dropped image must not be stored as
+// an asset either.
 func IsImageExternalizationEnabled(ctx context.Context) bool {
+	requested := false
 	if v := os.Getenv("ENTIRE_EXTERNALIZE_IMAGES"); v == "1" || v == "true" {
-		return true
+		requested = true
+	} else if s, err := Load(ctx); err == nil {
+		requested = s.Redaction != nil && s.Redaction.ExternalizeImages
 	}
-	s, err := Load(ctx)
-	if err != nil {
+	if requested && IsImageDropEnabled(ctx) {
+		warnExternalizeIgnoredOnce.Do(func() {
+			logging.Warn(ctx, "redaction.externalize_images is ignored while redaction.drop_images is on")
+		})
 		return false
 	}
-	return s.Redaction != nil && s.Redaction.ExternalizeImages
+	return requested
+}
+
+var warnExternalizeIgnoredOnce sync.Once
+
+// IsImageDropEnabled reports whether images are replaced with a placeholder in
+// stored transcripts (redaction.drop_images, off by default). Settings that
+// fail to load count as enabled when either file declares a redaction block,
+// since that block could hold the setting.
+func IsImageDropEnabled(ctx context.Context) bool {
+	s, err := Load(ctx)
+	if err != nil {
+		return DeclaresRedaction(ctx)
+	}
+	return s.Redaction != nil && s.Redaction.DropImages
+}
+
+// DeclaresRedaction reports whether either settings file has a top-level
+// "redaction" key, read raw for callers whose typed load just failed.
+// Unreadable files count as declaring it: they could.
+func DeclaresRedaction(ctx context.Context) bool {
+	for _, load := range []func(context.Context) (string, map[string]json.RawMessage, bool, error){
+		LoadProjectRaw, LoadLocalRaw,
+	} {
+		_, raw, _, err := load(ctx)
+		if err != nil {
+			return true
+		}
+		if _, ok := raw["redaction"]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // IsSummarizeEnabled checks if auto-summarize is enabled in this settings instance.

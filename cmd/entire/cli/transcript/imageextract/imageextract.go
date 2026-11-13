@@ -123,6 +123,10 @@ func HasPlaceholders(transcript []byte) bool {
 // its declared media type (used only to pick the asset filename extension).
 type imgHit struct{ data, mediaType string }
 
+// blockTypeImage is the "type" of an inline image in Claude Code and Pi
+// transcripts.
+const blockTypeImage = "image"
+
 // extractImagesWith is the shared extraction engine. It parses each JSONL line,
 // gathers image hits via the per-agent collector, dedupes, decodes and re-encodes
 // to confirm the base64 is byte-exactly reversible, then swaps each value out for
@@ -301,7 +305,7 @@ func (piCodec) ReinjectImages(transcript []byte, lookup func(name string) (Asset
 func collectPiImages(v any, out *[]imgHit) {
 	switch t := v.(type) {
 	case map[string]any:
-		if t["type"] == "image" {
+		if t["type"] == blockTypeImage {
 			if data, ok := t["data"].(string); ok && data != "" {
 				var mediaType string
 				if mt, mok := t["mimeType"].(string); mok {
@@ -326,7 +330,7 @@ func collectPiImages(v any, out *[]imgHit) {
 func collectClaudeImages(v any, out *[]imgHit) {
 	switch t := v.(type) {
 	case map[string]any:
-		if t["type"] == "image" {
+		if t["type"] == blockTypeImage {
 			if src, ok := t["source"].(map[string]any); ok && src["type"] == "base64" {
 				if data, ok := src["data"].(string); ok && data != "" {
 					var mediaType string
