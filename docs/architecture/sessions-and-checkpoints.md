@@ -755,7 +755,7 @@ both the git-branch and git-refs backends (git-refs leaves its push queue
 intact for the next elected-remote push). The dedicated `checkpoint_remote`
 URL mode is exempt — it addresses a separate metadata store directly. `entire
 status` shows the sync destination and how many checkpoints have not reached
-it yet. Git-refs push failures never block the user's push: refs stay queued, and
+it yet. Checkpoint replay matches sessions by stable session ID, so independent appends survive numeric-slot collisions and are published together. Session paths are rebased and checkpoint totals are rebuilt from the merged sessions. Independent metadata fields merge; incompatible edits to the same transcript or metadata value are refused before moving local refs. Git-refs push failures never block the user's push: refs stay queued, and
 confirmed remote rejections show one bounded warning with the remote's reason
 rather than being mislabeled as divergence (see [pre-push flow](ref-checkpoint-backend.md#pre-push-flow)).
 
