@@ -155,6 +155,18 @@ func readRegularRolloutContext(ctx context.Context, roots []string, path string,
 // openScopedRollout accepts files only inside configured rollout roots. Root
 // operations retain containment across directory/symlink replacement races.
 func openScopedRollout(roots []string, path string) (*os.File, fs.FileInfo, error) {
+	root, rel, err := openRolloutRoot(roots, path)
+	if err != nil {
+		return nil, nil, err
+	}
+	file, info, err := openRolloutFile(root, rel)
+	_ = root.Close()
+	return file, info, err
+}
+
+// openRolloutRoot opens the first of roots that holds path and returns path
+// relative to it. A path outside every root is refused.
+func openRolloutRoot(roots []string, path string) (*os.Root, string, error) {
 	for _, base := range roots {
 		rel, err := filepath.Rel(base, path)
 		if err != nil || !filepath.IsLocal(rel) {
@@ -162,13 +174,11 @@ func openScopedRollout(roots []string, path string) (*os.File, fs.FileInfo, erro
 		}
 		root, err := os.OpenRoot(base)
 		if err != nil {
-			return nil, nil, fmt.Errorf("open rollout root: %w", err)
+			return nil, "", fmt.Errorf("open rollout root: %w", err)
 		}
-		file, info, err := openRolloutFile(root, rel)
-		_ = root.Close()
-		return file, info, err
+		return root, rel, nil
 	}
-	return nil, nil, errors.New("rollout is outside configured roots")
+	return nil, "", errors.New("rollout is outside configured roots")
 }
 
 func openRolloutFile(root *os.Root, name string) (*os.File, fs.FileInfo, error) {
