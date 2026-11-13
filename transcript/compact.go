@@ -608,7 +608,7 @@ func extractUserContent(contentRaw json.RawMessage) userContent {
 			}
 			uc.toolResults = append(uc.toolResults, toolResultEntry{
 				toolUseID: unquote(block["tool_use_id"]),
-				output:    unquote(block["content"]),
+				output:    toolResultOutput(block["content"]),
 				isError:   isErr,
 			})
 
@@ -625,6 +625,31 @@ func extractUserContent(contentRaw json.RawMessage) userContent {
 
 	uc.text = strings.TrimSpace(uc.text)
 	return uc
+}
+
+// toolResultOutput is a tool_result's content as output text. A string is
+// the output as is. An array of blocks, as MCP tools write, is its text
+// blocks' text joined line by line, as Pi tool output is; image blocks are
+// dropped so their bytes never reach the output.
+func toolResultOutput(contentRaw json.RawMessage) string {
+	var str string
+	if json.Unmarshal(contentRaw, &str) == nil {
+		return str
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(contentRaw, &blocks) != nil {
+		return ""
+	}
+	texts := make([]string, 0, len(blocks))
+	for _, b := range blocks {
+		if b.Type == ContentTypeText && b.Text != "" {
+			texts = append(texts, b.Text)
+		}
+	}
+	return strings.Join(texts, "\n")
 }
 
 // stripAssistantContent drops thinking blocks and trims tool_use blocks to
