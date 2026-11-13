@@ -2091,9 +2091,11 @@ func walkRedactableStrings(v any, transform func(key, spliceKey string, credenti
 				return v, false
 			}
 			childCredentialContext := credentialContext || isCredentialJSONObject(val)
+			generatedImage := val["type"] == imageGenerationCallType
 			var out map[string]any
 			for k, child := range val {
-				newChild, childChanged := walk(k, k, childCredentialContext, shouldSkipJSONLField(k), child)
+				skip := shouldSkipJSONLField(k) || (generatedImage && k == "result")
+				newChild, childChanged := walk(k, k, childCredentialContext, skip, child)
 				if !childChanged {
 					continue
 				}
@@ -2535,10 +2537,16 @@ func shouldSkipJSONLField(key string) bool {
 	return false
 }
 
-// shouldSkipJSONLObject returns true if the object's "type" starts with "image" or equals "base64".
+// imageGenerationCallType is the item Codex stores a generated image in: bare
+// base64 under "result", beside model-written text such as "revised_prompt".
+// Only its "result" is skipped; the rest is scanned.
+const imageGenerationCallType = "image_generation_call"
+
+// shouldSkipJSONLObject returns true if the object's "type" starts with "image"
+// or equals "base64", except for imageGenerationCallType.
 func shouldSkipJSONLObject(obj map[string]any) bool {
 	t, ok := obj["type"].(string)
-	return ok && (strings.HasPrefix(t, "image") || t == "base64")
+	return ok && t != imageGenerationCallType && (strings.HasPrefix(t, "image") || t == "base64")
 }
 
 // skipLeaf reports whether a string leaf is left unscanned: under a skip key,

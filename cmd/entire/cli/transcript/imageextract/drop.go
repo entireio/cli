@@ -171,7 +171,7 @@ func dropImageSlots(obj map[string]any) bool {
 		}
 	case "image_generation_call":
 		// Codex stores an image it generated as bare base64 with no declared
-		// type; redaction skips this object because its type starts with "image".
+		// type, and redaction skips this field.
 		return dropSlot(obj, "result", "")
 	}
 	return false
