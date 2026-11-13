@@ -110,6 +110,18 @@ func seedPiHome(home string) error {
 	return nil
 }
 
+func (p *Pi) NewHome(string) (string, error) {
+	home, _, err := piHome()
+	return home, err
+}
+
+func (p *Pi) HomeEnv(home string) []string { return []string{"PI_CODING_AGENT_DIR=" + home} }
+
+// piApproveFlag trusts project-local files for the run. Without it pi skips
+// the repo's .pi/extensions/entire extension, so no hook reaches Entire. The
+// isolated home holds no trust.json, and the test repo is one the harness made.
+const piApproveFlag = "--approve"
+
 func (p *Pi) RunPrompt(ctx context.Context, dir string, prompt string, opts ...Option) (Output, error) {
 	cfg := &runConfig{}
 	for _, o := range opts {
@@ -127,14 +139,22 @@ func (p *Pi) RunPrompt(ctx context.Context, dir string, prompt string, opts ...O
 		return Output{}, fmt.Errorf("%s not in PATH: %w", p.Binary(), err)
 	}
 
-	home, cleanup, err := piHome()
-	if err != nil {
-		return Output{}, fmt.Errorf("create pi home: %w", err)
+	home := cfg.Home
+	if home == "" {
+		var cleanup func()
+		home, cleanup, err = piHome()
+		if err != nil {
+			return Output{}, fmt.Errorf("create pi home: %w", err)
+		}
+		defer cleanup()
 	}
-	defer cleanup()
 
-	args := []string{"-p", prompt, "--no-skills", "--no-prompt-templates", "--no-themes"}
-	displayArgs := []string{"-p", fmt.Sprintf("%q", prompt), "--no-skills", "--no-prompt-templates", "--no-themes"}
+	args := []string{"-p", prompt, piApproveFlag, "--no-skills", "--no-prompt-templates", "--no-themes"}
+	displayArgs := []string{"-p", fmt.Sprintf("%q", prompt), piApproveFlag, "--no-skills", "--no-prompt-templates", "--no-themes"}
+	if cfg.ResumeSessionID != "" {
+		args = append(args, "--session", cfg.ResumeSessionID)
+		displayArgs = append(displayArgs, "--session", cfg.ResumeSessionID)
+	}
 
 	env := append(agentEnv(os.Environ(), "PI_CODING_AGENT_DIR"),
 		"PI_CODING_AGENT_DIR="+home,
@@ -177,7 +197,7 @@ func (p *Pi) StartSession(_ context.Context, dir string) (Session, error) {
 		return nil, fmt.Errorf("create pi home: %w", err)
 	}
 
-	s, err := p.startTmuxSession(name, dir, home, p.Binary())
+	s, err := p.startTmuxSession(name, dir, home, p.Binary(), piApproveFlag)
 	if err != nil {
 		cleanup()
 		return nil, err
