@@ -276,6 +276,18 @@ func TestFormatCheckpointSummaryError_Unknown(t *testing.T) {
 	}
 }
 
+// explainEnabledContext resolves settings from a temporary repository with
+// Entire enabled. explain returns before validating flags when Entire is
+// disabled, so flag-validation tests that read the developer's checkout pass or
+// fail depending on that checkout's local settings.
+func explainEnabledContext(t *testing.T) context.Context {
+	t.Helper()
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, ".entire/settings.json", `{"enabled": true}`)
+	return settings.WithWorktreeRoot(context.Background(), dir)
+}
+
 // TestExplainCmd_PositionalArgConflictsWithFlags verifies that combining a
 // positional target with --checkpoint, --commit, or --session is rejected.
 // The bare-positional happy path (auto-resolution to a checkpoint ID or commit
@@ -301,7 +313,7 @@ func TestExplainCmd_PositionalArgConflictsWithFlags(t *testing.T) {
 			cmd.SetErr(&stderr)
 			cmd.SetArgs(tt.args)
 
-			err := cmd.Execute()
+			err := cmd.ExecuteContext(explainEnabledContext(t))
 			if err == nil {
 				t.Fatalf("expected error when combining positional arg with flags, got nil")
 			}
@@ -366,7 +378,7 @@ func TestExplainCmd_SummaryTimeoutSecondsValidation(t *testing.T) {
 			cmd.SetErr(&stderr)
 			cmd.SetArgs(tt.args)
 
-			err := cmd.Execute()
+			err := cmd.ExecuteContext(explainEnabledContext(t))
 			if err == nil {
 				t.Fatalf("expected error, got nil (stdout=%q stderr=%q)", stdout.String(), stderr.String())
 			}
