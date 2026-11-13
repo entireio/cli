@@ -94,7 +94,7 @@ func TestMain(m *testing.M) {
 	gitenv.IsolateMain()
 
 	// Room for every attempt and the waits between them.
-	ctx, cancel := context.WithTimeout(context.Background(), loginAttempts*loginAttemptTimeout+(loginAttempts-1)*(loginRetryDelay+30*time.Second))
+	ctx, cancel := context.WithTimeout(context.Background(), loginAttempts*loginAttemptTimeout+(loginAttempts-1)*(loginRetryDelay+retryLogoutTimeout))
 	err = loginWithRetry(ctx, stateDir, runDir, username, password, totpSecret)
 	cancel()
 	if err != nil {

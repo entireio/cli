@@ -68,11 +68,15 @@ func deviceLogin(ctx context.Context, dir, username, password, totpSecret string
 	}
 	res := <-done
 	if approveErr != nil {
+		// Redact before truncating: a cut can split a secret into a fragment
+		// the redactor no longer recognizes.
+		diagnosis := truncateText(redact(pageDiagnosis), diagnosisLimit)
+		err := fmt.Errorf("browser approval: %s", redact(approveErr.Error()))
 		// Keep the permanent mark so the retry loop can stop on it.
 		if errors.Is(approveErr, errLoginPermanent) {
-			return redact(pageDiagnosis), fmt.Errorf("browser approval: %s: %w", redact(approveErr.Error()), errLoginPermanent)
+			err = permanent(err)
 		}
-		return redact(pageDiagnosis), fmt.Errorf("browser approval: %s", redact(approveErr.Error()))
+		return diagnosis, err
 	}
 	if res.err != nil {
 		return "", fmt.Errorf("entire login: %w\n%s", res.err, redact(res.output+stderr.String()))
@@ -241,7 +245,7 @@ func (a *approver) stepGitHub(current *url.URL) error {
 	}
 	if gitHubBadCredentials.MatchString(body) {
 		// Retrying a wrong password only risks locking the shared account.
-		return fmt.Errorf("GitHub rejected the username or password: %w", errLoginPermanent)
+		return permanent(errors.New("GitHub rejected the username or password"))
 	}
 	if strings.HasPrefix(current.Path, "/sessions/two-factor") {
 		return a.stepTwoFactor(body)

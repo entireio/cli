@@ -4,10 +4,8 @@ package controlplane
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -25,63 +23,39 @@ const (
 	// Long enough for a new TOTP window: GitHub refuses a code it has
 	// already accepted.
 	loginRetryDelay = 30 * time.Second
-	// The body text kept in a diagnosis, in bytes.
-	diagnosisBodyLimit = 4000
+	// The between-attempt logout's budget.
+	retryLogoutTimeout = 30 * time.Second
+	// The redacted diagnosis kept per attempt, in bytes.
+	diagnosisLimit = 6000
 )
 
-// errLoginPermanent marks a login failure that another attempt cannot fix.
-var errLoginPermanent = errors.New("not retried")
-
-// loginWithRetry runs deviceLogin up to loginAttempts times. Every failed
-// attempt that reached the browser leaves a description of the page it gave
-// up on in runDir/login-attempt-<n>.txt and on stderr.
+// loginWithRetry runs deviceLogin up to loginAttempts times; see retryLogin.
 func loginWithRetry(ctx context.Context, dir, runDir, username, password, totpSecret string) error {
-	var errs []error
-	for attempt := 1; attempt <= loginAttempts; attempt++ {
-		if attempt > 1 {
-			select {
-			case <-ctx.Done():
-				return errors.Join(append(errs, ctx.Err())...)
-			case <-time.After(loginRetryDelay):
-			}
-			// A failed attempt may still have stored a session (for example, a
-			// completion line the check did not recognize); revoke it rather
-			// than leave it live on the shared account.
-			logoutCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			logout := execx.NonInteractive(logoutCtx, entire.BinPath(), "logout")
-			logout.Dir = dir
-			_ = logout.Run()
-			cancel()
-		}
-
-		attemptCtx, cancel := context.WithTimeout(ctx, loginAttemptTimeout)
-		diagnosis, err := deviceLogin(attemptCtx, dir, username, password, totpSecret)
-		cancel()
-		if err == nil {
-			return nil
-		}
-		err = fmt.Errorf("attempt %d/%d: %w", attempt, loginAttempts, err)
-		errs = append(errs, err)
-		fmt.Fprintf(os.Stderr, "control-plane e2e: login %v\n", err)
-		if diagnosis != "" {
-			fmt.Fprintf(os.Stderr, "control-plane e2e: page at failure:\n%s\n", diagnosis)
-			path := filepath.Join(runDir, fmt.Sprintf("login-attempt-%d.txt", attempt))
-			if writeErr := os.WriteFile(path, []byte(err.Error()+"\n\n"+diagnosis), 0o644); writeErr != nil {
-				fmt.Fprintf(os.Stderr, "control-plane e2e: write %s: %v\n", path, writeErr)
-			}
-		}
-		if errors.Is(err, errLoginPermanent) {
-			break
+	policy := retryPolicy{attempts: loginAttempts, attemptTimeout: loginAttemptTimeout, delay: loginRetryDelay, runDir: runDir, log: os.Stderr}
+	login := func(ctx context.Context) (string, error) {
+		return deviceLogin(ctx, dir, username, password, totpSecret)
+	}
+	// A failed attempt may still have stored a session (for example, a
+	// completion line the check did not recognize); revoke it rather than
+	// leave it live on the shared account, and say so when that fails.
+	logout := func(ctx context.Context) {
+		logoutCtx, cancel := context.WithTimeout(ctx, retryLogoutTimeout)
+		defer cancel()
+		cmd := execx.NonInteractive(logoutCtx, entire.BinPath(), "logout")
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			fmt.Fprintf(os.Stderr, "control-plane e2e: logout before retry failed: %v\n%s", err, out)
 		}
 	}
-	return errors.Join(errs...)
+	return retryLogin(ctx, policy, login, logout)
 }
 
 // diagnose describes the page the approver gave up on: where the login went,
 // GitHub's alerts, the buttons on offer, embedded frames (a captcha loads in
 // one, outside the body text), and the visible text. It is text only: this
 // repository's CI artifacts are public and a screenshot cannot be redacted.
-// The result is unredacted; deviceLogin redacts it.
+// The result is unredacted and untruncated; deviceLogin redacts it, then
+// truncates it.
 func (a *approver) diagnose() string {
 	page := a.page
 	var b strings.Builder
@@ -104,9 +78,6 @@ func (a *approver) diagnose() string {
 	body, err := page.Locator("body").InnerText(playwright.LocatorInnerTextOptions{Timeout: playwright.Float(2000)})
 	if err != nil {
 		body = "(unreadable: " + err.Error() + ")"
-	}
-	if len(body) > diagnosisBodyLimit {
-		body = body[:diagnosisBodyLimit] + "\n[truncated]"
 	}
 	fmt.Fprintf(&b, "\nbody text:\n%s\n", body)
 	return b.String()
