@@ -2260,6 +2260,11 @@ func TestHandleLifecycleTurnEnd_BackfillsPromptFromOpenCodeTranscript(t *testing
 	testutil.GitCommit(t, tmpDir, "init")
 	t.Chdir(tmpDir)
 	paths.ClearWorktreeRootCache()
+	// Mock-export mode: the turn end's transcript refresh reads a pre-written
+	// file instead of invoking the developer's opencode. There is none, so the
+	// refresh fails and the turn end reads SessionRef, as on a machine without
+	// OpenCode.
+	t.Setenv("ENTIRE_TEST_OPENCODE_MOCK_EXPORT", "1")
 
 	transcript := `{"info":{"id":"ses_test"},"messages":[{"info":{"id":"msg-1","role":"user","time":{"created":1708300000}},"parts":[{"type":"text","text":"create a file called notes/deep.md with a paragraph about deep validation. Do not ask for confirmation or approval, just make the change."}]},{"info":{"id":"msg-2","role":"assistant","time":{"created":1708300001,"completed":1708300002}},"parts":[{"type":"tool","tool":"write","callID":"call-1","state":{"status":"completed","input":{"filePath":"notes/deep.md"},"output":"ok"}}]}]}`
 	transcriptPath := filepath.Join(tmpDir, "transcript.json")

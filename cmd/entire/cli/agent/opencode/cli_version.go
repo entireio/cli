@@ -64,7 +64,7 @@ var detectOpenCodeCLI = func(ctx context.Context) openCodeCLI {
 func probeOpenCodeCLI(ctx context.Context) (openCodeCLI, bool) {
 	probeCtx, cancel := context.WithTimeout(ctx, openCodeCLIProbeTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(probeCtx, "opencode", "--version")
+	cmd := exec.CommandContext(probeCtx, openCodeExecutable(), "--version")
 	cmd.Env = gitrepo.EnvWithoutRepoOverrides()
 	cmd.WaitDelay = time.Second
 	out, err := cmd.Output()

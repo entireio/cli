@@ -166,7 +166,13 @@ installed. On 0.15.31 and 1.0.0 the plugin loads and its hooks fire
 - **Export.** `opencode session export --standalone <id>` (without
   `--standalone` it would start or attach to the shared service). The CLI
   picks the command from `opencode --version`; only a readable 0.x/1.x version
-  selects 1.x commands. A 2.x export (flat, typed messages) is converted to
+  selects 1.x commands. Every OpenCode command, summary generation included,
+  runs the `opencode` on PATH, else `~/.opencode/bin/opencode`
+  (`agent.SummaryCLIPath`, which `IsSummaryCLIAvailable` also uses): the
+  install script adds that directory to PATH only in the shell's rc file, and
+  hooks run with the OpenCode process's environment, which lacks it when
+  OpenCode was not started from that shell (a desktop app, a systemd or launchd
+  service). A 2.x export (flat, typed messages) is converted to
   the 1.x shape at capture (`internal/transcript/opencodev2`, shared
   with `transcript.Convert` and the live stream's `transcript.OpenCodeAdapter`),
   so every reader and stored checkpoint sees one format: tool names map back (`subagent`→`task`,

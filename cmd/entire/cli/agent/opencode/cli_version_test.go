@@ -60,6 +60,17 @@ func TestProbeOpenCodeCLI(t *testing.T) {
 	}
 }
 
+// A 1.x answer can only come from the installed stub: a failed probe selects
+// the OpenCode 2 commands.
+func TestProbeOpenCodeCLI_InstalledOffPath(t *testing.T) {
+	// No t.Parallel: t.Setenv.
+	installOpenCode(t, "echo 1.18.33\n")
+	cli, cacheable := probeOpenCodeCLI(t.Context())
+	if !cli.legacy || cli.guessed || !cacheable {
+		t.Fatalf("probe = %+v, cacheable = %v; want the installed binary's 1.x version", cli, cacheable)
+	}
+}
+
 // OpenCode 2 exports with `session export --standalone`.
 func TestRunOpenCodeExportToFile_OpenCode2(t *testing.T) {
 	// No t.Parallel: t.Setenv.

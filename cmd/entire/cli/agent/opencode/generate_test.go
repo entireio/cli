@@ -155,6 +155,17 @@ func TestOpenCodeVersionProbeOmitsInlineConfig(t *testing.T) {
 	}
 }
 
+// Without a CommandRunner, generation and its version probe run the opencode
+// in OpenCode's install directory when PATH has none.
+func TestOpenCodeGenerateText_InstalledOffPath(t *testing.T) {
+	// No t.Parallel: t.Setenv.
+	installOpenCode(t, `if [ "$1" = --version ]; then echo 'opencode v2.2.6'; else echo '{"type":"text","part":{"text":"from the installed opencode"}}'; fi`+"\n")
+	got, err := (&OpenCodeAgent{}).GenerateText(t.Context(), "prompt", "")
+	if err != nil || got != "from the installed opencode" {
+		t.Fatalf("GenerateText = %q, %v", got, err)
+	}
+}
+
 func TestOpenCodeGenerateMissingBinary(t *testing.T) {
 	t.Parallel()
 	a := &OpenCodeAgent{CommandRunner: func(ctx context.Context, _ string, argv ...string) *exec.Cmd {

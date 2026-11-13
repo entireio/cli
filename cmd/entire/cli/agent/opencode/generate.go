@@ -57,7 +57,7 @@ func (a *OpenCodeAgent) GenerateText(ctx context.Context, prompt, model string) 
 	if model != "" {
 		args = append(args, "--model", model)
 	}
-	raw, stderr, stdoutBytes, err := agent.RunIsolatedTextGeneratorCLIIn(ctx, a.CommandRunner, dir, openCodeBinary, openCodeBinary, args, prompt,
+	raw, stderr, stdoutBytes, err := agent.RunIsolatedTextGeneratorCLIIn(ctx, a.commandRunner(), dir, openCodeBinary, openCodeBinary, args, prompt,
 		"OPENCODE_CONFIG_CONTENT="+config, "OPENCODE_AUTO_SHARE=false")
 	if err == nil {
 		raw, err = parseOpenCodeGeneration(raw)
@@ -76,11 +76,7 @@ func (a *OpenCodeAgent) GenerateText(ctx context.Context, prompt, model string) 
 func (a *OpenCodeAgent) openCodeNeedsStandalone(ctx context.Context, dir string) (bool, error) {
 	probeCtx, cancel := context.WithTimeout(ctx, openCodeVersionTimeout)
 	defer cancel()
-	runner := a.CommandRunner
-	if runner == nil {
-		runner = exec.CommandContext
-	}
-	cmd := runner(probeCtx, openCodeBinary, "--version")
+	cmd := a.commandRunner()(probeCtx, openCodeBinary, "--version")
 	cmd.Dir = dir
 	// --version reads no config; keep inline config (which may hold credentials) out of the probe.
 	cmd.Env = slices.DeleteFunc(agent.TextGenerationEnv(dir, os.Environ()), func(kv string) bool {
@@ -103,6 +99,14 @@ func (a *OpenCodeAgent) openCodeNeedsStandalone(ctx context.Context, dir string)
 		return true, nil
 	}
 	return semver.Major(version) != "v0" && semver.Major(version) != "v1", nil
+}
+
+// commandRunner returns CommandRunner, or openCodeCommand when it is unset.
+func (a *OpenCodeAgent) commandRunner() agent.TextCommandRunner {
+	if a.CommandRunner != nil {
+		return a.CommandRunner
+	}
+	return openCodeCommand
 }
 
 // openCodeVersion returns the first full x.y.z token as canonical semver:
