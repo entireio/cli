@@ -2441,14 +2441,22 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 		resetCheckpointWindow(state)
 		state.AdvanceCheckpointWindow(result.TotalTranscriptLines)
 		state.CheckpointTranscriptSize = result.TranscriptSizeBaseline
-		state.Phase = session.PhaseIdle
 		state.LastCheckpointID = result.CheckpointID
+		// An ENDED session stays ENDED and is marked FullyCondensed, as
+		// CondenseAndMarkFullyCondensed leaves it: commits skip only that
+		// pair, and only leaving ENDED clears EndedAt and FullyCondensed
+		// (ActionClearEndedAt). A session in any other phase becomes IDLE
+		// without FullyCondensed, which no turn start would clear.
+		if state.Phase == session.PhaseEnded {
+			state.FullyCondensed = true
+		} else {
+			state.Phase = session.PhaseIdle
+		}
 		// No commit carries this checkpoint, so the files it recorded will
-		// never be linked by one either. Clearing them (rather than marking the
-		// session FullyCondensed, which would also park it from a resumed turn)
-		// leaves an IDLE session with nothing pending: the sweep and doctor
-		// stop nominating it, `checkpoint list --pending` stops previewing it,
-		// and a resumed turn starts a fresh window.
+		// never be linked by one either. Clearing them leaves nothing pending:
+		// the sweep and doctor stop nominating the session, `checkpoint list
+		// --pending` stops previewing it, and a resumed turn starts a fresh
+		// window.
 		state.FilesTouched = nil
 		state.TouchedFileHashes = nil
 		state.OtherWorktrees = nil
@@ -2509,10 +2517,10 @@ func prepareEagerCondensation(state *SessionState) (shouldCondense bool, err err
 // FullyCondensed in one operation. Used by the session stop hook to eagerly
 // clean up sessions so PostCommit doesn't have to process them.
 //
-// This does NOT call CondenseSessionByID because that method has two behaviors
-// we don't want: (1) it calls clearSessionState when there is no pending work
-// (deletes the state file entirely), and (2) it sets Phase = IDLE. Instead,
-// we inline the condensation logic with ENDED-appropriate behavior.
+// This does NOT call CondenseSessionByID because that method calls
+// clearSessionState when there is no pending work (deletes the state file
+// entirely). Instead, we inline the condensation logic with ENDED-appropriate
+// behavior.
 //
 // Fail-open: if condensation fails, the session remains eligible for a later
 // retry with the same reserved checkpoint ID.
