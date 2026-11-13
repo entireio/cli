@@ -36,5 +36,13 @@ gotestsum --format dots --packages=./e2e/controlplane \
 go run ./e2e/cmd/testreport -color -o "$E2E_ARTIFACT_DIR/report.txt" "$E2E_ARTIFACT_DIR/test-events.json"
 echo ""
 cat "$E2E_ARTIFACT_DIR/entire-version.txt" 2>/dev/null
+# Failed login attempts describe the GitHub page they stopped on; show them
+# even when a later attempt succeeded and gotestsum hid TestMain's stderr.
+for f in "$E2E_ARTIFACT_DIR"/login-attempt-*.txt; do
+  [ -f "$f" ] || continue
+  echo ""
+  echo "── $(basename "$f") ──"
+  cat "$f"
+done
 echo "artifacts: $E2E_ARTIFACT_DIR"
 exit "${rc:-0}"

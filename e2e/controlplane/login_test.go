@@ -23,19 +23,20 @@ import (
 // the approval in a headless browser: GitHub on Entire's provider picker,
 // GitHub sign-in as the test user with its password and authenticator code,
 // then the Authorize button on Entire's device page. The login runs in dir, outside any repository checkout. The
-// returned error never carries the password, the TOTP secret, the device
-// code, or the approval URL.
-func deviceLogin(ctx context.Context, dir, username, password, totpSecret string) error {
+// returned error and diagnosis never carry the username, the password, the
+// TOTP secret, the device code, or the approval URL. The diagnosis describes
+// the page the browser gave up on and is empty when the browser did not fail.
+func deviceLogin(ctx context.Context, dir, username, password, totpSecret string) (diagnosis string, err error) {
 	cmd := execx.NonInteractive(ctx, entire.BinPath(), "login", "--device")
 	cmd.Dir = dir
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("stdout pipe: %w", err)
+		return "", fmt.Errorf("stdout pipe: %w", err)
 	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start entire login: %w", err)
+		return "", fmt.Errorf("start entire login: %w", err)
 	}
 
 	type result struct {
@@ -50,9 +51,9 @@ func deviceLogin(ctx context.Context, dir, username, password, totpSecret string
 	if err != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-		return fmt.Errorf("%w\nstderr:\n%s", err, stderr.String())
+		return "", fmt.Errorf("%w\nstderr:\n%s", err, stderr.String())
 	}
-	redact := strings.NewReplacer(code, "[device code]", approvalURL, "[approval url]", password, "[password]", totpSecret, "[totp secret]")
+	redact := newRedactor(username, password, totpSecret, code, approvalURL)
 
 	go func() {
 		// Drain before Wait: Wait closes the pipe.
@@ -61,25 +62,29 @@ func deviceLogin(ctx context.Context, dir, username, password, totpSecret string
 		close(exited)
 	}()
 
-	approveErr := approveInBrowser(ctx, exited, approvalURL, code, username, password, totpSecret)
+	pageDiagnosis, approveErr := approveInBrowser(ctx, exited, approvalURL, code, username, password, totpSecret)
 	if approveErr != nil {
 		_ = cmd.Process.Kill()
 	}
 	res := <-done
 	if approveErr != nil {
-		return fmt.Errorf("browser approval: %s", redact.Replace(approveErr.Error()))
+		// Keep the permanent mark so the retry loop can stop on it.
+		if errors.Is(approveErr, errLoginPermanent) {
+			return redact(pageDiagnosis), fmt.Errorf("browser approval: %s: %w", redact(approveErr.Error()), errLoginPermanent)
+		}
+		return redact(pageDiagnosis), fmt.Errorf("browser approval: %s", redact(approveErr.Error()))
 	}
 	if res.err != nil {
-		return fmt.Errorf("entire login: %w\n%s", res.err, redact.Replace(res.output+stderr.String()))
+		return "", fmt.Errorf("entire login: %w\n%s", res.err, redact(res.output+stderr.String()))
 	}
 	// The success mark shares its physical line with "Waiting for approval… ",
 	// and reads "Login complete (signed in at <core>)." when the login server
 	// dispatched to a regional core.
 	if !strings.Contains(res.output, "✓ Login complete") {
-		return fmt.Errorf("entire login exited 0 without reporting completion:\n%s", redact.Replace(res.output+stderr.String()))
+		return "", fmt.Errorf("entire login exited 0 without reporting completion:\n%s", redact(res.output+stderr.String()))
 	}
 	fmt.Println("control-plane e2e: logged in")
-	return nil
+	return "", nil
 }
 
 // readDevicePrompt reads the device code and the approval URL from the login
@@ -109,27 +114,36 @@ func readDevicePrompt(stdout *bufio.Reader) (code, approvalURL string, err error
 }
 
 // approveInBrowser drives the approval page until the login process exits.
-func approveInBrowser(ctx context.Context, exited <-chan struct{}, approvalURL, code, username, password, totpSecret string) error {
+// When it gives up on a page, it also returns an unredacted description of
+// that page; the caller redacts it.
+func approveInBrowser(ctx context.Context, exited <-chan struct{}, approvalURL, code, username, password, totpSecret string) (diagnosis string, err error) {
 	pw, err := playwright.Run()
 	if err != nil {
-		return fmt.Errorf("start playwright (install it with `go run github.com/mxschmitt/playwright-go/cmd/playwright install chromium`): %w", err)
+		return "", fmt.Errorf("start playwright (install it with `go run github.com/mxschmitt/playwright-go/cmd/playwright install chromium`): %w", err)
 	}
 	defer func() { _ = pw.Stop() }()
 	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{Headless: playwright.Bool(true)})
 	if err != nil {
-		return fmt.Errorf("launch chromium: %w", err)
+		return "", fmt.Errorf("launch chromium: %w", err)
 	}
 	defer func() { _ = browser.Close() }()
 	page, err := browser.NewPage()
 	if err != nil {
-		return fmt.Errorf("open page: %w", err)
+		return "", fmt.Errorf("open page: %w", err)
 	}
 	page.SetDefaultTimeout(10_000)
+	a := &approver{page: page, code: code, username: username, password: password, totpSecret: totpSecret, started: time.Now()}
+	// Describe the page while the browser is still open; the deferred
+	// closes above run after this.
+	defer func() {
+		if err != nil {
+			diagnosis = a.diagnose()
+		}
+	}()
 	if _, err := page.Goto(approvalURL, playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded}); err != nil {
-		return fmt.Errorf("open approval page: %w", err)
+		return "", fmt.Errorf("open approval page: %w", err)
 	}
 
-	a := &approver{page: page, code: code, username: username, password: password, totpSecret: totpSecret}
 	tick := time.NewTicker(750 * time.Millisecond)
 	defer tick.Stop()
 	// A page the stepper cannot advance (a sign-in form shown again, an
@@ -140,18 +154,19 @@ func approveInBrowser(ctx context.Context, exited <-chan struct{}, approvalURL, 
 	for {
 		select {
 		case <-exited:
-			return nil
+			return "", nil
 		case <-ctx.Done():
-			return fmt.Errorf("login did not complete: %w", ctx.Err())
+			return "", fmt.Errorf("login did not complete: %w", ctx.Err())
 		case <-tick.C:
 		}
 		if u := a.page.URL(); u != lastURL {
 			lastURL, lastChange = u, time.Now()
+			a.visited = append(a.visited, fmt.Sprintf("%6.1fs %s", time.Since(a.started).Seconds(), pageName(u)))
 		} else if time.Since(lastChange) > stallAfter {
-			return fmt.Errorf("login stalled on %s for %s", pageName(u), stallAfter)
+			return "", fmt.Errorf("login stalled on %s for %s", pageName(u), stallAfter)
 		}
 		if err := a.step(); err != nil {
-			return err
+			return "", err
 		}
 	}
 }
@@ -178,6 +193,8 @@ type approver struct {
 	username, password, totpSecret string
 	submitted, otpSubmitted        bool
 	chosenProvider, visitedGitHub  bool
+	started                        time.Time
+	visited                        []string // pages seen, for diagnose
 }
 
 var (
@@ -223,7 +240,8 @@ func (a *approver) stepGitHub(current *url.URL) error {
 		return err
 	}
 	if gitHubBadCredentials.MatchString(body) {
-		return errors.New("GitHub rejected the username or password")
+		// Retrying a wrong password only risks locking the shared account.
+		return fmt.Errorf("GitHub rejected the username or password: %w", errLoginPermanent)
 	}
 	if strings.HasPrefix(current.Path, "/sessions/two-factor") {
 		return a.stepTwoFactor(body)
