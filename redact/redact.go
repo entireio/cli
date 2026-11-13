@@ -2091,11 +2091,9 @@ func walkRedactableStrings(v any, transform func(key, spliceKey string, credenti
 				return v, false
 			}
 			childCredentialContext := credentialContext || isCredentialJSONObject(val)
-			generatedImage := val["type"] == imageGenerationCallType
 			var out map[string]any
 			for k, child := range val {
-				skip := shouldSkipJSONLField(k) || (generatedImage && k == "result")
-				newChild, childChanged := walk(k, k, childCredentialContext, skip, child)
+				newChild, childChanged := walk(k, k, childCredentialContext, shouldSkipJSONLFieldOf(val, k), child)
 				if !childChanged {
 					continue
 				}
@@ -2541,6 +2539,12 @@ func shouldSkipJSONLField(key string) bool {
 // base64 under "result", beside model-written text such as "revised_prompt".
 // Only its "result" is skipped; the rest is scanned.
 const imageGenerationCallType = "image_generation_call"
+
+// shouldSkipJSONLFieldOf reports whether key's string values in obj are left
+// unscanned: a skip key, or the image under an imageGenerationCallType's "result".
+func shouldSkipJSONLFieldOf(obj map[string]any, key string) bool {
+	return shouldSkipJSONLField(key) || (key == "result" && obj["type"] == imageGenerationCallType)
+}
 
 // shouldSkipJSONLObject returns true if the object's "type" starts with "image"
 // or equals "base64", except for imageGenerationCallType.

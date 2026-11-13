@@ -341,6 +341,23 @@ func TestClaudeCodec_LeavesNonBase64Inline(t *testing.T) {
 	}
 }
 
+// An image block with no declared type and bytes of no known image type gives
+// nothing to call an image, so it stays inline for every agent, not only Codex.
+func TestExtractImages_UntypedNonImageStaysInline(t *testing.T) {
+	t.Parallel()
+	c := CodecFor(agent.AgentTypeClaudeCode)
+	b64 := base64.StdEncoding.EncodeToString([]byte("not-a-known-image-format" + strings.Repeat("-claude-block-bytes", 3)))
+	orig := `{"type":"user","message":{"content":[{"type":"image","source":{"type":"base64","data":"` + b64 + `"}}]}}` + "\n"
+
+	rewritten, assets, err := c.ExtractImages([]byte(orig))
+	if err != nil {
+		t.Fatalf("ExtractImages: %v", err)
+	}
+	if len(assets) != 0 || string(rewritten) != orig {
+		t.Fatalf("expected the transcript unchanged with no assets, got %d assets:\n%s", len(assets), rewritten)
+	}
+}
+
 // Agents that don't inline images in the transcript have no codec (graceful
 // no-op upstream). Cursor is included deliberately: its images live in a separate
 // SQLite store, captured via the SidecarImageProvider path, not a transcript codec.

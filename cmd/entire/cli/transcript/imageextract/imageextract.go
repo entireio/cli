@@ -127,6 +127,46 @@ type imgHit struct{ data, mediaType string }
 // transcripts.
 const blockTypeImage = "image"
 
+// decodeImageHit returns the bytes and media type of a hit worth
+// externalizing, or ok=false to leave it inline.
+func decodeImageHit(h imgHit) (raw []byte, mediaType string, ok bool) {
+	if len(h.data) < minExternalizedBase64Len {
+		return nil, "", false // too small to be a real image; also keeps it out of placeholders
+	}
+	raw, err := base64.StdEncoding.DecodeString(h.data)
+	if err != nil {
+		return nil, "", false // not standard base64
+	}
+	// Only externalize if re-encoding reproduces the exact original string;
+	// otherwise the restore round-trip could not be byte-exact.
+	if base64.StdEncoding.EncodeToString(raw) != h.data {
+		return nil, "", false
+	}
+	// Leave oversized images inline. Each asset is stored as one git blob,
+	// and a blob over MaxChunkSize would be unpushable; the transcript, by
+	// contrast, is chunked under that limit, so keeping the image inline
+	// stays pushable (mirrors the Cursor sidecar guard).
+	if len(raw) > maxExternalizedImageBytes {
+		return nil, "", false
+	}
+	// Prefer the media type detected from the actual bytes over the declared
+	// one: agents mislabel it (real Codex data-URIs declare image/jpeg for
+	// PNG bytes), and the asset filename/manifest should reflect the content.
+	// This is metadata only — the transcript's declared type is untouched, so
+	// the round trip stays byte-exact.
+	mediaType = detectMediaType(raw)
+	if mediaType == "" {
+		mediaType = h.mediaType
+	}
+	// With neither a declared nor a detected type, nothing says the value
+	// is an image. Leave it inline: the swap replaces every copy of the
+	// value, so a copy elsewhere in the transcript would skip redaction.
+	if mediaType == "" {
+		return nil, "", false
+	}
+	return raw, mediaType, true
+}
+
 // extractImagesWith is the shared extraction engine. It parses each JSONL line,
 // gathers image hits via the per-agent collector, dedupes, decodes and re-encodes
 // to confirm the base64 is byte-exactly reversible, then swaps each value out for
@@ -156,41 +196,11 @@ func extractImagesWith(transcript []byte, collect func(v any, out *[]imgHit)) ([
 		var hits []imgHit
 		collect(v, &hits)
 		for _, h := range hits {
-			if len(h.data) < minExternalizedBase64Len {
-				continue // too small to be a real image; also keeps it out of placeholders
-			}
 			if _, ok := seen[h.data]; ok {
 				continue
 			}
-			raw, err := base64.StdEncoding.DecodeString(h.data)
-			if err != nil {
-				continue // not standard base64; leave inline
-			}
-			// Only externalize if re-encoding reproduces the exact original string;
-			// otherwise the restore round-trip could not be byte-exact.
-			if base64.StdEncoding.EncodeToString(raw) != h.data {
-				continue
-			}
-			// Leave oversized images inline. Each asset is stored as one git blob,
-			// and a blob over MaxChunkSize would be unpushable; the transcript, by
-			// contrast, is chunked under that limit, so keeping the image inline
-			// stays pushable (mirrors the Cursor sidecar guard).
-			if len(raw) > maxExternalizedImageBytes {
-				continue
-			}
-			// Prefer the media type detected from the actual bytes over the declared
-			// one: agents mislabel it (real Codex data-URIs declare image/jpeg for
-			// PNG bytes), and the asset filename/manifest should reflect the content.
-			// This is metadata only — the transcript's declared type is untouched, so
-			// the round trip stays byte-exact.
-			mediaType := detectMediaType(raw)
-			if mediaType == "" {
-				mediaType = h.mediaType
-			}
-			// With neither a declared nor a detected type, nothing says the value
-			// is an image. Leave it inline: the swap below replaces every copy of
-			// the value, so a copy elsewhere in the transcript would skip redaction.
-			if mediaType == "" {
+			raw, mediaType, ok := decodeImageHit(h)
+			if !ok {
 				continue
 			}
 			name, err := uniqueImageName(usedNames, mediaType)
