@@ -890,7 +890,7 @@ func TestPrintTrailReviewDashboard(t *testing.T) {
 		Status: "open",
 		Branch: "feat/token-refresh",
 		Base:   "main",
-	}}, comments, "", defaultTrailReviewListOptions(), countTrailReviewComments(comments), nil); err != nil {
+	}}, comments, "", defaultTrailReviewListOptions(), comments, nil); err != nil {
 		t.Fatal(err)
 	}
 	text := out.String()
@@ -913,10 +913,10 @@ func TestPrintTrailReviewDashboard(t *testing.T) {
 func TestPrintTrailReviewDashboard_UsesSeparateCountsWhenFilteredCommentsEmpty(t *testing.T) {
 	t.Parallel()
 	var out strings.Builder
-	counts := countTrailReviewComments([]api.TrailReviewComment{
+	summary := []api.TrailReviewComment{
 		{ID: "resolved-1", Status: trailReviewStatusResolved},
 		{ID: "dismissed-1", Status: trailReviewStatusDismissed, StaleOutcome: "stale"},
-	})
+	}
 	if err := printTrailReviewDashboard(&out, trailReviewTarget{Trail: api.TrailResource{
 		ID:     "trl_1",
 		Number: 42,
@@ -924,13 +924,13 @@ func TestPrintTrailReviewDashboard_UsesSeparateCountsWhenFilteredCommentsEmpty(t
 		Status: "open",
 		Branch: "feat/token-refresh",
 		Base:   "main",
-	}}, nil, "", defaultTrailReviewListOptions(), counts, nil); err != nil {
+	}}, nil, "", defaultTrailReviewListOptions(), summary, nil); err != nil {
 		t.Fatal(err)
 	}
 	text := out.String()
 	for _, want := range []string{
 		"Open findings: 0  high 0  medium 0  low 0",
-		"Resolved: 1        Dismissed: 1     Stale: 1",
+		"Resolved: 1        Dismissed: 1     Stale (all statuses): 1",
 		"No findings match the current filters.",
 	} {
 		if !strings.Contains(text, want) {
@@ -1256,5 +1256,67 @@ func TestTrailReviewCommentsPathContinuationOmitsFiltersTheCursorCarries(t *test
 	want := trailReviewListCommentsPath("trl_1") + "?cursor=c2&per_page=50"
 	if continuation != want {
 		t.Fatalf("continuation = %q, want %q (filters ride the cursor)", continuation, want)
+	}
+}
+
+// `finding list` fetches the trail's full findings only to name the open ones
+// its filters hide, and that request never fails the listing.
+func TestPrintTrailReviewListHiddenNote(t *testing.T) {
+	t.Parallel()
+	_, comments := trailReviewRenderFixture()
+	newServer := func(t *testing.T, fail bool) (*api.Client, *int) {
+		t.Helper()
+		requests := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests++
+			if fail {
+				http.Error(w, "unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			if got := r.URL.Query().Get("stale"); got != trailReviewFreshnessAny {
+				t.Errorf("summary query stale = %q, want any", got)
+			}
+			encodeTrailReviewTestJSON(t, w, api.TrailReviewCommentsResponse{Comments: comments})
+		}))
+		t.Cleanup(srv.Close)
+		return api.NewClientWithBaseURL("tok", srv.URL), &requests
+	}
+	run := func(client *api.Client, rows []api.TrailReviewComment, nextCursor string, opts trailReviewListOptions) string {
+		var out strings.Builder
+		printTrailReviewListHiddenNote(t.Context(), &out, client, "trl_1", rows, nextCursor, opts)
+		return out.String()
+	}
+
+	client, requests := newServer(t, false)
+	if got, want := run(client, comments[:1], "", defaultTrailReviewListOptions()), "+1 open finding not shown by the current filters — add --freshness any\n"; got != want {
+		t.Fatalf("note = %q, want %q", got, want)
+	}
+	if got := run(client, comments[:2], "", defaultTrailReviewListOptions()); got != "" {
+		t.Fatalf("every open finding shown, note = %q", got)
+	}
+	// --freshness stale hides the current open finding; the note says so.
+	opts := defaultTrailReviewListOptions()
+	opts.Freshness = trailReviewFreshnessStale
+	if got, want := run(client, comments[1:2], "", opts), "+1 open finding not shown by the current filters — add --freshness any\n"; got != want {
+		t.Fatalf("--freshness stale note = %q, want %q", got, want)
+	}
+	if *requests != 3 {
+		t.Fatalf("summary requests = %d, want 3", *requests)
+	}
+
+	// A paged view, or one without open findings, makes no extra request.
+	*requests = 0
+	if got := run(client, comments[:1], "next-1", defaultTrailReviewListOptions()); got != "" {
+		t.Fatalf("paged list note = %q", got)
+	}
+	opts = defaultTrailReviewListOptions()
+	opts.Status = trailReviewStatusResolved
+	if got := run(client, nil, "", opts); got != "" || *requests != 0 {
+		t.Fatalf("note = %q after %d requests; want none", got, *requests)
+	}
+
+	failing, _ := newServer(t, true)
+	if got := run(failing, comments[:1], "", defaultTrailReviewListOptions()); got != "" {
+		t.Fatalf("a failed summary request should drop the note, got %q", got)
 	}
 }

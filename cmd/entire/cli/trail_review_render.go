@@ -184,9 +184,10 @@ func trailReviewStatusFilterIncludes(filter, status string) bool {
 	return false
 }
 
-func renderTrailReviewDashboardStyled(w io.Writer, s trailReviewStyles, width int, target trailReviewTarget, comments []api.TrailReviewComment, nextCursor string, opts trailReviewListOptions, counts trailReviewCommentCounts, agents json.RawMessage) error {
+func renderTrailReviewDashboardStyled(w io.Writer, s trailReviewStyles, width int, target trailReviewTarget, comments []api.TrailReviewComment, nextCursor string, opts trailReviewListOptions, summary []api.TrailReviewComment, agents json.RawMessage) error {
+	counts := countTrailReviewComments(summary)
 	var b strings.Builder
-	b.WriteString(s.dashboardHeader(width, trailForDisplay(target.Trail), counts))
+	b.WriteString(s.dashboardHeader(width, trailForDisplay(target.Trail), counts, trailReviewOpenStaleCount(summary)))
 	// The change's project agents render as the plain view does; printTable
 	// colors its own header on a terminal.
 	fmt.Fprint(w, b.String())
@@ -195,7 +196,7 @@ func renderTrailReviewDashboardStyled(w io.Writer, s trailReviewStyles, width in
 		return err
 	}
 
-	b.WriteString(s.dashboardFindings(width, comments, nextCursor, opts, counts))
+	b.WriteString(s.dashboardFindings(width, comments, nextCursor, opts, summary))
 	if nextCursor != "" {
 		fmt.Fprintf(&b, "  %s\n\n", s.render(s.dim, fmt.Sprintf("More findings; sorted within this page only. Next page: --cursor %q", nextCursor)))
 	}
@@ -214,7 +215,7 @@ func renderTrailReviewDashboardStyled(w io.Writer, s trailReviewStyles, width in
 
 // dashboardHeader is the trail's identity, state, and finding totals, each
 // line fitted to width.
-func (s trailReviewStyles) dashboardHeader(width int, trail api.TrailResource, counts trailReviewCommentCounts) string {
+func (s trailReviewStyles) dashboardHeader(width int, trail api.TrailResource, counts trailReviewCommentCounts, openStale int) string {
 	var b strings.Builder
 	label := "Trail " + trailReviewCleanLine(trail.ID)
 	if trail.Number > 0 {
@@ -233,16 +234,21 @@ func (s trailReviewStyles) dashboardHeader(width int, trail api.TrailResource, c
 	}
 	meta = append(meta, s.render(s.dim, trailReviewCleanLine(trail.ID)))
 	fmt.Fprintf(&b, "  %s\n", tuiutil.TruncateDisplayWidth(strings.Join(meta, s.render(s.dim, " · ")), width-2))
+	open := fmt.Sprintf("%d open (%d high · %d medium · %d low", counts.Open, counts.OpenHigh, counts.OpenMedium, counts.OpenLow)
+	if openStale > 0 {
+		open += fmt.Sprintf("; %d stale", openStale)
+	}
+	// The stale section lists stale open findings; the all-status stale
+	// total stays in the plain view, where width is not a concern.
 	fmt.Fprintf(&b, "  %s\n\n", s.render(s.dim, tuiutil.TruncateDisplayWidth(fmt.Sprintf(
-		"%d open (%d high · %d medium · %d low) · %d stale · %d resolved · %d dismissed",
-		counts.Open, counts.OpenHigh, counts.OpenMedium, counts.OpenLow, counts.Stale, counts.Resolved, counts.Dismissed), width-2)))
+		"%s) · %d resolved · %d dismissed", open, counts.Resolved, counts.Dismissed), width-2)))
 	return b.String()
 }
 
 // dashboardFindings groups the returned findings into sections. The totals
 // line above already gives the trail-wide counts, so section titles count
 // only what this page shows.
-func (s trailReviewStyles) dashboardFindings(width int, comments []api.TrailReviewComment, nextCursor string, opts trailReviewListOptions, counts trailReviewCommentCounts) string {
+func (s trailReviewStyles) dashboardFindings(width int, comments []api.TrailReviewComment, nextCursor string, opts trailReviewListOptions, summary []api.TrailReviewComment) string {
 	groups := groupTrailReviewComments(comments)
 	// Any paged view, including the last page reached with --cursor, shows
 	// only part of the findings the totals count.
@@ -263,14 +269,26 @@ func (s trailReviewStyles) dashboardFindings(width int, comments []api.TrailRevi
 	if !trailReviewStatusFilterIncludes(opts.Status, trailReviewStatusOpen) {
 		return s.renderOtherAndDone(width, groups)
 	}
+	outside := trailReviewOpenOutsideRows(summary, comments, opts, trailReviewDashboardListsStale(opts, paged))
 	var b strings.Builder
 	b.WriteString(s.sectionRule(openTitle, width) + "\n")
 	if len(groups.open) == 0 {
-		fmt.Fprintf(&b, "  %s\n", s.render(s.dim, "No open findings match the current filters."))
+		empty := "No open findings match the current filters."
+		if len(outside.stale) > 0 {
+			empty = "No current open findings match the current filters."
+		}
+		fmt.Fprintf(&b, "  %s\n", s.render(s.dim, empty))
 	}
 	b.WriteString(s.renderCards(width, groups.open))
-	if hidden := counts.Open - len(groups.open); !paged && hidden > 0 {
-		fmt.Fprintf(&b, "  %s\n", s.render(s.yellow, trailReviewHiddenOpenNote(hidden, opts)))
+	if len(outside.stale) > 0 {
+		b.WriteString("\n" + s.sectionRule(fmt.Sprintf("Stale (%d)", len(outside.stale)), width) + "\n")
+		for _, line := range wrapTrailReviewText(trailReviewStaleSectionNote, width-2) {
+			fmt.Fprintf(&b, "  %s\n", s.render(s.dim, line))
+		}
+		b.WriteString(s.renderCards(width, groupTrailReviewComments(outside.stale).open))
+	}
+	if !paged && outside.hidden > 0 {
+		fmt.Fprintf(&b, "  %s\n", s.render(s.yellow, trailReviewHiddenOpenNote(outside)))
 	}
 	b.WriteString("\n")
 	b.WriteString(s.renderOtherAndDone(width, groups))
@@ -285,25 +303,125 @@ var trailReviewFooterActions = []string{
 	`entire trail finding dismiss <id> -m "…"`,
 }
 
-func trailReviewHiddenOpenNote(hidden int, opts trailReviewListOptions) string {
+// trailReviewStaleSectionNote explains the dashboard's stale section: a push
+// changed the code these findings point at, and the merge gate skips them.
+const trailReviewStaleSectionNote = "the code changed after these were raised, so they don't block the merge gate; re-check each one"
+
+// trailReviewOpenOutside is what happened to the trail's open findings that a
+// view's rows leave out: the dashboard lists stale ones in their own section,
+// and the rest are hidden by the filters.
+type trailReviewOpenOutside struct {
+	stale  []api.TrailReviewComment
+	hidden int
+	// byFreshness and bySeverity record which filters hide at least one of
+	// the hidden findings, so the note names only filters worth changing.
+	byFreshness bool
+	bySeverity  bool
+	// byBoth is set when some finding needs both filters changed to show.
+	byBoth bool
+}
+
+// trailReviewOpenStaleCount counts the open findings whose code has changed
+// since they were raised.
+func trailReviewOpenStaleCount(summary []api.TrailReviewComment) int {
+	n := 0
+	for _, comment := range summary {
+		if comment.Status == trailReviewStatusOpen && comment.StaleOutcome == trailReviewFreshnessStale {
+			n++
+		}
+	}
+	return n
+}
+
+// trailReviewDashboardListsStale reports whether the dashboard adds a stale
+// section: only on a full view whose rows hold open, current findings, since
+// any other freshness filter already decides what stale findings show.
+func trailReviewDashboardListsStale(opts trailReviewListOptions, paged bool) bool {
+	return !paged && opts.Freshness == trailReviewFreshnessCurrent &&
+		trailReviewStatusFilterIncludes(opts.Status, trailReviewStatusOpen)
+}
+
+// trailReviewOpenOutsideRows sorts the open findings in summary (every
+// finding on the trail) that rows leave out into the stale section, when the
+// view has one, and those the filters hide.
+func trailReviewOpenOutsideRows(summary, rows []api.TrailReviewComment, opts trailReviewListOptions, listStale bool) trailReviewOpenOutside {
+	shown := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		shown[row.ID] = true
+	}
+	var out trailReviewOpenOutside
+	for _, comment := range summary {
+		if comment.Status != trailReviewStatusOpen || shown[comment.ID] {
+			continue
+		}
+		stale := comment.StaleOutcome == trailReviewFreshnessStale
+		severityOK := trailReviewSeverityFilterIncludes(opts.Severity, comment.Severity)
+		if listStale && stale && severityOK {
+			out.stale = append(out.stale, comment)
+			continue
+		}
+		out.hidden++
+		// A stale section lists stale findings, so then only --severity hides them.
+		freshnessHides := (!listStale || !stale) && !trailReviewFreshnessFilterIncludes(opts.Freshness, stale)
+		out.byFreshness = out.byFreshness || freshnessHides
+		out.bySeverity = out.bySeverity || !severityOK
+		out.byBoth = out.byBoth || (freshnessHides && !severityOK)
+	}
+	return out
+}
+
+// trailReviewFreshnessFilterIncludes reports whether a normalized --freshness
+// filter selects a finding with the given staleness.
+func trailReviewFreshnessFilterIncludes(filter string, stale bool) bool {
+	switch filter {
+	case trailReviewFreshnessCurrent:
+		return !stale
+	case trailReviewFreshnessStale:
+		return stale
+	default:
+		return true
+	}
+}
+
+// trailReviewSeverityFilterIncludes reports whether a normalized --severity
+// filter selects a finding's severity; a filter never selects a finding
+// without one, as on the server.
+func trailReviewSeverityFilterIncludes(filter string, severity *string) bool {
+	if filter == "" {
+		return true
+	}
+	want := strings.ToLower(stringPtrValue(severity))
+	for part := range strings.SplitSeq(filter, ",") {
+		if want != "" && strings.TrimSpace(part) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func trailReviewHiddenOpenNote(outside trailReviewOpenOutside) string {
 	noun := "open finding"
-	if hidden != 1 {
+	if outside.hidden != 1 {
 		noun += "s"
 	}
-	note := fmt.Sprintf("+%d %s not shown by the current filters", hidden, noun)
-	// Either filter can hide open findings, and the counts do not say which,
-	// so name every one that is in effect.
+	note := fmt.Sprintf("+%d %s not shown by the current filters", outside.hidden, noun)
+	// Name every filter that hides any of them. When one finding is hidden by
+	// both, changing either alone would not show it, so ask for both.
 	var fixes []string
-	if opts.Freshness == trailReviewFreshnessCurrent {
+	if outside.byFreshness {
 		fixes = append(fixes, "add --freshness any")
 	}
-	if opts.Severity != "" {
+	if outside.bySeverity {
 		fixes = append(fixes, "drop --severity")
 	}
 	if len(fixes) == 0 {
 		return note
 	}
-	return note + " — " + strings.Join(fixes, " or ")
+	joiner := " or "
+	if outside.byBoth {
+		joiner = " and "
+	}
+	return note + " — " + strings.Join(fixes, joiner)
 }
 
 func renderTrailReviewCommentsStyled(w io.Writer, s trailReviewStyles, width int, comments []api.TrailReviewComment, nextCursor string) {
