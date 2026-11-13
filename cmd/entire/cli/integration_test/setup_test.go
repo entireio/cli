@@ -70,6 +70,21 @@ func TestMain(m *testing.M) {
 		}
 	}
 
+	// Block the session-home index in the shared cache: tests reuse session
+	// IDs, and the test binary owns every recorded session and is every hook's
+	// ancestor, so one test's session would claim another's commits. Recording
+	// fails here (best-effort); tests that need the index use their own cache.
+	sharedIndex := filepath.Join(tmpDir, "entire-cache", "entire", "session-homes")
+	err = os.MkdirAll(filepath.Dir(sharedIndex), 0o700)
+	if err == nil {
+		err = os.WriteFile(sharedIndex, nil, 0o400)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to block the shared session-home index: %v\n", err)
+		os.RemoveAll(tmpDir)
+		os.Exit(1)
+	}
+
 	// Unset the agents' caller-session variables, for the same reason as the
 	// config isolation above and with the same mechanism: the developer running
 	// `mise run test:integration` is usually inside an agent, that agent

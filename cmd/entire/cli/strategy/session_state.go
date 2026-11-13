@@ -596,14 +596,43 @@ func runPostSaveEffect(ctx context.Context, effect func()) {
 // announcement rather than duplicating one, and is inherent to nested frames
 // sharing a state pointer.
 func MutateSessionStateOnSaved(ctx context.Context, sessionID string, fn func(*SessionState) error, onSaved func()) error {
+	return mutateSessionStateIn(ctx, sessionID, sessionStateAccess{
+		lock: func() (stateLock, error) { return stateLockForSession(ctx, sessionID) },
+		load: LoadSessionState,
+		save: SaveSessionState,
+	}, fn, onSaved)
+}
+
+// sessionStateAccess is where a session state mutation takes its lock and
+// loads and saves the state: this repository's store by default, or another
+// repository's (mutateForeignSessionState).
+type sessionStateAccess struct {
+	lock func() (stateLock, error)
+	load func(context.Context, string) (*SessionState, error)
+	save func(context.Context, *SessionState) error
+	// outerOnly refuses a call nested in a mutation of the same session,
+	// whose state pointer came from a different store.
+	outerOnly bool
+}
+
+// errNestedSessionMutation is mutateSessionStateIn's refusal of a nested
+// call when outerOnly is set.
+var errNestedSessionMutation = errors.New("session state mutation nested in another store's")
+
+// mutateSessionStateIn is MutateSessionStateOnSaved over access.
+func mutateSessionStateIn(ctx context.Context, sessionID string, access sessionStateAccess, fn func(*SessionState) error, onSaved func()) error {
 	if sessionID == "" {
 		return ErrStateNotFound
 	}
-	gate, isOuter, release, err := acquireSessionGate(ctx, sessionID)
+	gate, isOuter, release, err := acquireSessionGateWith(ctx, sessionID, access.lock)
 	if err != nil {
 		return err
 	}
 
+	if !isOuter && access.outerOnly {
+		release()
+		return errNestedSessionMutation
+	}
 	if !isOuter {
 		defer release()
 		// Nested call: reuse the outer's state pointer. The outer save will
@@ -636,7 +665,7 @@ func MutateSessionStateOnSaved(ctx context.Context, sessionID string, fn func(*S
 		}
 	}()
 
-	state, err := LoadSessionState(ctx, sessionID)
+	state, err := access.load(ctx, sessionID)
 	if err != nil {
 		return fmt.Errorf("load session state: %w", err)
 	}
@@ -651,7 +680,7 @@ func MutateSessionStateOnSaved(ctx context.Context, sessionID string, fn func(*S
 		}
 		return err
 	}
-	if err := SaveSessionState(ctx, state); err != nil {
+	if err := access.save(ctx, state); err != nil {
 		return fmt.Errorf("save session state: %w", err)
 	}
 	// Copied out before the defer clears gate.afterSave, into a fresh slice so
@@ -682,6 +711,12 @@ func MutateSessionStateOnSaved(ctx context.Context, sessionID string, fn func(*S
 // why it now runs its callback on the caller's goroutine and gives the timer
 // the new one. Wrap the WAITING, never the locking.
 func acquireSessionGate(ctx context.Context, sessionID string) (gate *sessionGate, isOuter bool, release func(), err error) {
+	return acquireSessionGateWith(ctx, sessionID, func() (stateLock, error) { return stateLockForSession(ctx, sessionID) })
+}
+
+// acquireSessionGateWith is acquireSessionGate taking, on the outermost call,
+// the flock lockFor names.
+func acquireSessionGateWith(ctx context.Context, sessionID string, lockFor func() (stateLock, error)) (gate *sessionGate, isOuter bool, release func(), err error) {
 	val, _ := sessionMutationGate.LoadOrStore(sessionID, &sessionGate{})
 	gate, ok := val.(*sessionGate)
 	if !ok {
@@ -701,7 +736,7 @@ func acquireSessionGate(ctx context.Context, sessionID string) (gate *sessionGat
 	}
 	gate.mu.Unlock()
 
-	lock, err := stateLockForSession(ctx, sessionID)
+	lock, err := lockFor()
 	if err != nil {
 		return nil, false, nil, fmt.Errorf("resolve state lock path: %w", err)
 	}

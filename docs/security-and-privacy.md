@@ -226,6 +226,7 @@ If your AI sessions will touch sensitive data:
   git log --oneline entire/checkpoints/v1
   ```
 
+- **Agent commits in other repositories are off by default.** With `entire configure --cross-repo-commits on`, run in a clone by a person at an interactive terminal, outside an agent session (a guard, not a sandbox: an agent can strip the environment that identifies it, so the terminal check, which ignores the test-only terminal override, is the second signal, and an agent with a shell could still write the setting itself), an agent session started there that commits in another Entire-enabled repository links that commit there, which copies the session's whole transcript so far, earlier turns included, into that repository's checkpoints. It links only when that repository's checkpoints go to the same forge owner as your clone's `origin` and its redaction covers yours; same owner still does not mean same audience, so a private repository's transcript can land in a public one. See [Agent commits in another repository](architecture/sessions-and-checkpoints.md#agent-commits-in-another-repository).
 - **Know your push destination.** Checkpoint data syncs to exactly one elected remote; `entire status` names it and reports how many checkpoints are still unpushed, and on the git-refs backend `entire checkpoint list --outgoing` lists them. `entire enable` also names the destination every time it runs.
 
 ## What Gets Redacted
