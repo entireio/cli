@@ -73,6 +73,13 @@ func withHookSession(ctx context.Context) context.Context {
 	// agent triggered inherits that agent's session ID in its environment, so
 	// log lines get attributed to the session that actually ran the commit
 	// instead of whichever session in the shared store moved last.
+	//
+	// ResolvedSession.Incomplete is deliberately not consulted — the one
+	// consumer that ignores it. Nothing is selected or acted on here: the ID
+	// stamps a log field, and the store's own per-skip Warn already lands in
+	// the same log, which is where a reader would look for it. Refusing to
+	// log a session ID because a neighbouring state file is unreadable would
+	// cost the attribution this exists for and report nothing new.
 	ctx = logging.WithSessionID(ctx, strategy.ResolveCallerSession(ctx).SessionID)
 
 	// Hooks are the checkpoint-writing path, so this cannot be left to the root

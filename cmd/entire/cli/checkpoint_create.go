@@ -108,6 +108,16 @@ Examples:
 // checkpoint acts on a session, so only a resolution that identified the
 // caller (IsCaller) is accepted — the worktree and other-worktree tiers are
 // "most recent session" guesses that can name someone else's work.
+//
+// Identification is necessary and not sufficient: it also has to have been
+// made over a COMPLETE candidate set. IsCaller rests on "no session nearer
+// than this one exists", which is the one claim a candidate missing from the
+// listing invalidates, so an unreadable state file can let a different
+// session pass as the caller and the checkpoint land on it. That check is
+// ordered first, ahead of Found() as well: "no agent session is running this
+// command" over a store that could not be read fully is the misreading rather
+// than the answer. An explicit session ID stays available either way, which is
+// what keeps this a refusal and not a wall.
 func resolveCheckpointCreateSession(cmd *cobra.Command, args []string) (string, strategy.SessionResolution, error) {
 	if len(args) == 1 {
 		if err := validation.ValidateSessionID(args[0]); err != nil {
@@ -118,6 +128,10 @@ func resolveCheckpointCreateSession(cmd *cobra.Command, args []string) (string, 
 
 	resolved := strategy.ResolveCallerSession(cmd.Context())
 	switch {
+	case resolved.Incomplete != nil:
+		return "", resolved.Resolution, fmt.Errorf(
+			"%w, so the agent session running this command cannot be confirmed; pass your session's ID explicitly",
+			resolved.Incomplete)
 	case !resolved.Found():
 		return "", resolved.Resolution, errors.New("no agent session is running this command; pass a session ID")
 	case !resolved.Resolution.IsCaller():

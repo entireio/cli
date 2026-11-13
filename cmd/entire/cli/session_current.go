@@ -49,6 +49,15 @@ Examples:
 
 			machineReadable := jsonFlag || transcriptFlag
 			resolved := strategy.ResolveCallerSession(ctx)
+			// Independent of which tier answered, and printed ahead of the
+			// not-found branch on purpose: "no active session" over a store
+			// that could not be read fully is the same misreading as `session
+			// list`'s "No sessions.", and an answer we DO give may be missing
+			// the candidate that would have won. On stderr, so --json stdout
+			// stays a valid envelope.
+			if resolved.Incomplete != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "[entire] This answer may be missing a session: %s.\n", resolved.Incomplete)
+			}
 			if !resolved.Found() {
 				return reportNoSessionEnvelope(cmd, machineReadable,
 					errors.New("no active session found in this worktree"),

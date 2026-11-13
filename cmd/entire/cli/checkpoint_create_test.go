@@ -144,6 +144,69 @@ func TestCheckpointCreate_UntrackedCallerIsNotSubstituted(t *testing.T) {
 	}
 }
 
+// Identification over an incomplete candidate set does not authorize a
+// checkpoint. IsCaller rests on "no session nearer than this one exists", and
+// one unreadable state file is exactly the candidate that could have been the
+// nearer owner — so a bare environment claim wins uncontested and the
+// checkpoint would land on a session that is not the caller's.
+func TestCheckpointCreate_RefusesWhenTheStoreCannotBeReadCompletely(t *testing.T) {
+	// t.Chdir cannot coexist with t.Parallel; this test mutates process CWD.
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "test.txt", "initial")
+	testutil.GitAdd(t, dir, "test.txt")
+	testutil.GitCommit(t, dir, "initial")
+	t.Chdir(dir)
+	clearCallerSessionEnv(t)
+
+	sessionID := "2026-11-02-incomplete-store"
+	saveNoFileChangesSession(t, dir, sessionID,
+		`{"type":"human","message":{"content":"make a checkpoint"}}`+"\n"+
+			`{"type":"assistant","message":{"content":"done"}}`+"\n")
+	t.Setenv("CLAUDE_CODE_SESSION_ID", sessionID)
+	// Without this the same setup checkpoints successfully, which is what
+	// makes the unreadable file the only variable under test.
+	plantUnusableSessionState(t, dir, "unreadable-neighbour")
+
+	_, err := runCheckpointCreate(t)
+	if err == nil {
+		t.Fatal("checkpointed on a candidate set known to be missing entries")
+	}
+	if !strings.Contains(err.Error(), "could not be read") {
+		t.Errorf("error = %q, want it to say the store could not be read", err)
+	}
+	// The remedy has to be in the message: an agent that cannot checkpoint
+	// needs to know an explicit ID still works, or it reaches for --force-like
+	// guesses instead.
+	if !strings.Contains(err.Error(), "session's ID") {
+		t.Errorf("error = %q, want it to point at passing a session ID", err)
+	}
+}
+
+// The refusal is not a wall: the explicit argument bypasses caller resolution
+// entirely, so an operator who knows which session they mean is unaffected by
+// a neighbouring file they cannot fix.
+func TestCheckpointCreate_ExplicitSessionSurvivesAnIncompleteStore(t *testing.T) {
+	// t.Chdir cannot coexist with t.Parallel; this test mutates process CWD.
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "test.txt", "initial")
+	testutil.GitAdd(t, dir, "test.txt")
+	testutil.GitCommit(t, dir, "initial")
+	t.Chdir(dir)
+	clearCallerSessionEnv(t)
+
+	sessionID := "2026-11-02-explicit-over-incomplete"
+	saveNoFileChangesSession(t, dir, sessionID,
+		`{"type":"human","message":{"content":"make a checkpoint"}}`+"\n"+
+			`{"type":"assistant","message":{"content":"done"}}`+"\n")
+	plantUnusableSessionState(t, dir, "unreadable-neighbour")
+
+	if _, err := runCheckpointCreate(t, sessionID); err != nil {
+		t.Fatalf("explicit session ID refused over an incomplete store: %v", err)
+	}
+}
+
 func TestCheckpointCreate_ExplicitSessionErrors(t *testing.T) {
 	// t.Chdir cannot coexist with t.Parallel; this test mutates process CWD.
 	dir := t.TempDir()
