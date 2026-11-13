@@ -382,7 +382,12 @@ always runnable in every build.
   every named cluster in parallel through one engine — `mirrorTargets` →
   `createMirrors`/`removeMirrors` → a summary table — so a one-shot verb reports
   exactly like the wizard. A failure on one cluster never stops the others; the
-  command exits non-zero naming the ones that failed. `add` defaults to one
+  command exits non-zero naming the ones that failed. An `add` whose wait ends
+  while the latest poll still saw the initial clone `processing` (and no poll
+  failed since) is not a failure: the row reads `still syncing`, the command
+  names `entire repo view <repo>` to check on it, and it exits 0 like
+  `--no-wait`'s `registered`. A deadline in any other state stays `timed out`
+  and fails. `add` defaults to one
   fixed cluster without a terminal so scripts stay stable; `remove` has no
   default at all, because which clusters a repo is on is a property of the repo
   and guessing one would delete a copy nobody named — a terminal gets a

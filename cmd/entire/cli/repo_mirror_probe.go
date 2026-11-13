@@ -110,6 +110,11 @@ var (
 	// errMirrorSuspended reports the placement is suspended: registered, but the
 	// cluster won't serve it. Recovery is operator-side.
 	errMirrorSuspended = errors.New("mirror is suspended")
+	// errMirrorStillCloning reports the wait deadline passed while the latest
+	// poll still saw the initial clone processing. The server keeps cloning
+	// after the CLI stops waiting, so this is not a failure. It deliberately
+	// does not wrap context.DeadlineExceeded, which callers report as one.
+	errMirrorStillCloning = errors.New("initial clone still running")
 )
 
 // mirrorStatusGetter is the slice of *coreapi.Client that awaitMirrorReady
@@ -243,8 +248,11 @@ func mirrorRequestFailureError(request coreapi.MirrorRequest) error {
 //   - nil                     when ready (the repo is clonable)
 //   - errMirrorCloneFailed    when the initial clone failed
 //   - errMirrorSuspended      when the placement is suspended
-//   - a timeout/transport err when the wait deadline passed, or polls kept
-//     erroring past maxConsecutivePollErrors (transient glitches are retried)
+//   - errMirrorStillCloning   when the wait deadline passed and the most
+//     recent poll succeeded and answered "processing"
+//   - a timeout/transport err when the wait deadline passed in any other
+//     state, or polls kept erroring past maxConsecutivePollErrors (transient
+//     glitches are retried)
 //
 // "processing" keeps the loop running. This replaces the old smart-HTTP
 // info/refs probe: the control plane now reports clone readiness directly via
@@ -261,12 +269,30 @@ func awaitMirrorReady(ctx context.Context, c mirrorStatusGetter, mirrorID string
 
 	var last coreapi.MirrorStatus
 	var consecutiveErrs int
+	// latestProcessing is whether the most recent poll succeeded and answered
+	// "processing". A failed poll, or an answer with no status, clears it: the
+	// clone's state is then unknown, whatever `last` still says.
+	var latestProcessing bool
+	// stopped classifies the end of the wait. Only a deadline whose most recent
+	// answer was "processing" is a clone still running; cancellation is the
+	// user stopping the command, so it keeps its existing error.
+	stopped := func() error {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) && latestProcessing {
+			return errMirrorStillCloning
+		}
+		return classifyWaitContextErr(ctx.Err(), "waiting for initial clone")
+	}
 	for {
 		m, err := c.GetMirror(ctx, coreapi.GetMirrorParams{MirrorId: mirrorID})
 		switch {
 		case err != nil:
+			// A poll the context cut short says nothing about the clone; any
+			// other error does, even one that lands as the deadline passes.
+			if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+				latestProcessing = false
+			}
 			if ctx.Err() != nil {
-				return last, classifyWaitContextErr(ctx.Err(), "waiting for initial clone")
+				return last, stopped()
 			}
 			// Tolerate transient glitches: the clone may still be progressing,
 			// so retry on the next tick. Only give up once errors persist.
@@ -276,7 +302,9 @@ func awaitMirrorReady(ctx context.Context, c mirrorStatusGetter, mirrorID string
 			}
 		default:
 			consecutiveErrs = 0
-			if s, ok := m.Status.Get(); ok {
+			s, ok := m.Status.Get()
+			latestProcessing = ok && s == coreapi.MirrorStatusProcessing
+			if ok {
 				last = s
 				switch s {
 				case coreapi.MirrorStatusReady:
@@ -292,7 +320,7 @@ func awaitMirrorReady(ctx context.Context, c mirrorStatusGetter, mirrorID string
 		}
 		select {
 		case <-ctx.Done():
-			return last, classifyWaitContextErr(ctx.Err(), "waiting for initial clone")
+			return last, stopped()
 		case <-ticker.C:
 		}
 	}
