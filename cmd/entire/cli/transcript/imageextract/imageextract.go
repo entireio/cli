@@ -187,6 +187,12 @@ func extractImagesWith(transcript []byte, collect func(v any, out *[]imgHit)) ([
 			if mediaType == "" {
 				mediaType = h.mediaType
 			}
+			// With neither a declared nor a detected type, nothing says the value
+			// is an image. Leave it inline: the swap below replaces every copy of
+			// the value, so a copy elsewhere in the transcript would skip redaction.
+			if mediaType == "" {
+				continue
+			}
 			name, err := uniqueImageName(usedNames, mediaType)
 			if err != nil {
 				return transcript, nil, err

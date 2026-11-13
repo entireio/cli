@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/redact"
 )
 
 // codexImageLine returns a real-format Codex user message embedding one inline
@@ -135,9 +136,9 @@ func TestCodexCodec_GeneratedImageRoundTrips(t *testing.T) {
 	}
 }
 
-// A generated image whose bytes match no known type is still externalized, as
-// a .bin asset with no media type, and round-trips byte-exactly.
-func TestCodexCodec_GeneratedImageUnknownTypeRoundTrips(t *testing.T) {
+// A generated image declares no media type, so a result whose bytes match no
+// known image type stays inline.
+func TestCodexCodec_GeneratedResultOfUnknownTypeStaysInline(t *testing.T) {
 	t.Parallel()
 	c := CodecFor(agent.AgentTypeCodex)
 	b64 := base64.StdEncoding.EncodeToString([]byte("not-a-known-image-format" + strings.Repeat("-codex-image-bytes", 3)))
@@ -147,18 +148,33 @@ func TestCodexCodec_GeneratedImageUnknownTypeRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ExtractImages: %v", err)
 	}
-	if len(assets) != 1 {
-		t.Fatalf("expected 1 asset, got %d", len(assets))
+	if len(assets) != 0 || string(rewritten) != orig {
+		t.Fatalf("expected the transcript unchanged with no assets, got %d assets:\n%s", len(assets), rewritten)
 	}
-	if assets[0].MediaType != "" || !strings.HasSuffix(assets[0].Name, ".bin") {
-		t.Errorf("asset = %q (%q), want a .bin with no media type", assets[0].Name, assets[0].MediaType)
-	}
-	restored, err := c.ReinjectImages(rewritten, lookupFrom(assets))
+}
+
+// Externalizing swaps every copy of a value, so a non-image result must not be
+// externalized: a copy of it in user text would then never reach redaction.
+func TestCodexCodec_NonImageResultCopyStillRedacted(t *testing.T) {
+	t.Parallel()
+	c := CodecFor(agent.AgentTypeCodex)
+	b64 := base64.StdEncoding.EncodeToString([]byte("token aB3xK9mQ7pL2wR8tY4vN6cF1gH5jD0sZeW7uI2oP"))
+	orig := `{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"decode this: ` + b64 + `"}]}}` + "\n" +
+		codexGeneratedImageLine(b64) + "\n"
+
+	rewritten, assets, err := c.ExtractImages([]byte(orig))
 	if err != nil {
-		t.Fatalf("ReinjectImages: %v", err)
+		t.Fatalf("ExtractImages: %v", err)
 	}
-	if string(restored) != orig {
-		t.Fatal("unknown-type generated image round trip not byte-exact")
+	if len(assets) != 0 {
+		t.Fatalf("expected no assets, got %d", len(assets))
+	}
+	redacted, err := redact.JSONLContent(string(rewritten))
+	if err != nil {
+		t.Fatalf("JSONLContent: %v", err)
+	}
+	if !strings.Contains(redacted, `"text":"decode this: REDACTED"`) {
+		t.Errorf("the copy in user text should be redacted, got:\n%s", redacted)
 	}
 }
 
