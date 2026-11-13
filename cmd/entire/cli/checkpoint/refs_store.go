@@ -14,10 +14,10 @@ import (
 	"github.com/go-git/go-billy/v6"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
-	format "github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/object"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
@@ -296,42 +296,24 @@ func foldsCase(repo *git.Repository) bool {
 			return entry.folds
 		}
 	}
-	folds := readFoldsCaseFile(fs)
+	folds := readFoldsCase(repo)
 	ignoreCase.Store(key, ignoreCaseEntry{modTime: info.ModTime(), size: info.Size(), folds: folds})
 	return folds
 }
 
-// readFoldsCase reads the setting through go-git, when the config file cannot
-// be reached through the storer's filesystem. A config without raw sections, as
-// go-git returns for a worktreeConfig repository, reports true.
+// readFoldsCase reads core.ignorecase from the repository's shared config.
+// gitrepo.RawConfig parses the config file itself when go-git merged a
+// config.worktree in and dropped the raw sections; an override in
+// config.worktree or in global config is not seen.
 func readFoldsCase(repo *git.Repository) bool {
 	cfg, err := repo.Config()
-	if err != nil || cfg.Raw == nil {
-		return true
-	}
-	return ignoreCaseOn(cfg.Raw)
-}
-
-// readFoldsCaseFile reads core.ignorecase from the repository's config file
-// itself. repo.Config() cannot be used here: with the worktreeConfig extension
-// and a config.worktree file, go-git merges the two and drops the raw sections
-// that hold the setting. Only the shared config is read, where git records the
-// setting when it creates the repository; an override in config.worktree or in
-// global config is not seen.
-func readFoldsCaseFile(fs billy.Filesystem) bool {
-	f, err := fs.Open("config")
 	if err != nil {
 		return true
 	}
-	defer func() { _ = f.Close() }()
-	raw := format.New()
-	if err := format.NewDecoder(f).Decode(raw); err != nil {
+	raw, err := gitrepo.RawConfig(repo, cfg)
+	if err != nil {
 		return true
 	}
-	return ignoreCaseOn(raw)
-}
-
-func ignoreCaseOn(raw *format.Config) bool {
 	switch strings.ToLower(raw.Section("core").Option("ignorecase")) {
 	case "true", "yes", "on", "1":
 		return true
