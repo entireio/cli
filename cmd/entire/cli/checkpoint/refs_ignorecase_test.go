@@ -167,6 +167,25 @@ func TestFoldsCase_RereadsAChangedSetting(t *testing.T) {
 	assert.True(t, foldsCase(repo))
 }
 
+// With the worktreeConfig extension and a config.worktree file, go-git merges
+// the two configs into one without its raw sections. The setting must still be
+// read from the repository config rather than crash or be guessed.
+func TestFoldsCase_ReadsTheSettingWithAWorktreeConfig(t *testing.T) {
+	t.Parallel()
+	for _, ignoreCase := range []string{"true", "false"} {
+		t.Run(ignoreCase, func(t *testing.T) {
+			t.Parallel()
+			dir, _, _ := shardSpellingRepo(t, ignoreCase)
+			testutil.RunGit(t, dir, "config", "extensions.worktreeConfig", "true")
+			testutil.RunGit(t, dir, "config", "--worktree", "core.sparseCheckout", "true")
+			repo, err := git.PlainOpen(dir)
+			require.NoError(t, err)
+
+			assert.Equal(t, ignoreCase == "true", foldsCase(repo))
+		})
+	}
+}
+
 // Looking up a checkpoint must not keep its repository in memory.
 func TestStoredRef_DoesNotKeepTheRepositoryAlive(t *testing.T) {
 	t.Parallel()

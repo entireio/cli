@@ -14,6 +14,7 @@ import (
 	"github.com/go-git/go-billy/v6"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
+	format "github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/object"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
@@ -295,17 +296,38 @@ func foldsCase(repo *git.Repository) bool {
 			return entry.folds
 		}
 	}
-	folds := readFoldsCase(repo)
+	folds := readFoldsCaseFile(fs)
 	ignoreCase.Store(key, ignoreCaseEntry{modTime: info.ModTime(), size: info.Size(), folds: folds})
 	return folds
 }
 
 func readFoldsCase(repo *git.Repository) bool {
 	cfg, err := repo.Config()
+	if err != nil || cfg.Raw == nil {
+		return true
+	}
+	return ignoreCaseSet(cfg.Raw)
+}
+
+// readFoldsCaseFile reads core.ignorecase from the repository's config file
+// itself. repo.Config() cannot be used here: with the worktreeConfig extension
+// and a config.worktree file, go-git merges the two and drops the raw sections
+// that hold the setting.
+func readFoldsCaseFile(fs billy.Filesystem) bool {
+	f, err := fs.Open("config")
 	if err != nil {
 		return true
 	}
-	switch strings.ToLower(cfg.Raw.Section("core").Option("ignorecase")) {
+	defer func() { _ = f.Close() }()
+	raw := format.New()
+	if err := format.NewDecoder(f).Decode(raw); err != nil {
+		return true
+	}
+	return ignoreCaseSet(raw)
+}
+
+func ignoreCaseSet(raw *format.Config) bool {
+	switch strings.ToLower(raw.Section("core").Option("ignorecase")) {
 	case "true", "yes", "on", "1":
 		return true
 	default:
