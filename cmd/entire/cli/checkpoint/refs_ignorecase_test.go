@@ -186,6 +186,27 @@ func TestFoldsCase_ReadsTheSettingWithAWorktreeConfig(t *testing.T) {
 	}
 }
 
+// A storer without a filesystem can only read the merged config, which has no
+// raw sections in a worktreeConfig repository. The setting is then unknown, so
+// both spellings are read even though the repository does not fold case.
+func TestStoredRef_WorktreeConfigWithoutFilesystemReadsBothSpellings(t *testing.T) {
+	t.Parallel()
+	dir, earlier, _ := shardSpellingRepo(t, "false")
+	testutil.RunGit(t, dir, "config", "extensions.worktreeConfig", "true")
+	testutil.RunGit(t, dir, "config", "--worktree", "core.sparseCheckout", "true")
+	canonical := mustRefName(t, foldableULID)
+	testutil.RunGit(t, dir, "update-ref", canonical.String(), earlier)
+	repo, counting := openCountingRepo(t, dir)
+	counting.reads = 0 // opening the repository reads refs of its own
+
+	name, tip, err := StoredRef(repo, nil, canonical)
+	require.NoError(t, err)
+
+	assert.Equal(t, canonical, name)
+	assert.Equal(t, plumbing.NewHash(earlier), tip)
+	assert.Equal(t, 2, counting.reads, "an unknown setting reads both spellings")
+}
+
 // Looking up a checkpoint must not keep its repository in memory.
 func TestStoredRef_DoesNotKeepTheRepositoryAlive(t *testing.T) {
 	t.Parallel()
