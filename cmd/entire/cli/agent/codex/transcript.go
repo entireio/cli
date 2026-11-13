@@ -17,7 +17,9 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	transcriptlib "github.com/entireio/cli/transcript"
 )
 
 // Compile-time interface assertions.
@@ -64,11 +66,16 @@ const (
 	rolloutLineTypeResponseItem = "response_item"
 	rolloutLineTypeSessionMeta  = "session_meta"
 	rolloutLineTypeEventMsg     = "event_msg"
+	rolloutLineTypeWorldState   = "world_state"
 	rolloutLineTypeTurnContext  = "turn_context"
 	eventMsgTypeTokenCount      = "token_count"
 	// itemTypeAgentMessage is the type of a multi-agent message item, both as a
 	// rollout response_item payload and as a `codex exec --json` event item.
 	itemTypeAgentMessage = "agent_message"
+	itemTypeMessage      = "message"
+	messageRoleUser      = "user"
+	messageRoleDeveloper = "developer"
+	threadSourceUser     = "user"
 )
 
 // rolloutClassification identifies whether a rollout belongs to a root thread
@@ -139,7 +146,7 @@ func classifyRolloutDetailed(path string, roots []string) rolloutClassificationR
 	}
 
 	switch meta.ThreadSource {
-	case "user":
+	case threadSourceUser:
 		return rolloutClassificationResult{Classification: rolloutRoot}
 	case "subagent":
 		return rolloutClassificationResult{Classification: rolloutChild}
@@ -896,7 +903,7 @@ func (c *CodexAgent) ExtractPrompts(sessionRef string, fromOffset int) ([]string
 			continue
 		}
 
-		if payload.Type != "message" || payload.Role != "user" {
+		if payload.Type != itemTypeMessage || payload.Role != messageRoleUser {
 			continue
 		}
 
@@ -916,52 +923,50 @@ func (c *CodexAgent) ExtractPrompts(sessionRef string, fromOffset int) ([]string
 	return prompts, nil
 }
 
-// SanitizePortableTranscript strips encrypted history fragments that cannot be
-// replayed when Entire reconstructs a Codex rollout outside its original
-// session context.
+// SanitizePortableTranscript strips what Entire must not keep in its copy of a
+// Codex rollout: encrypted history fragments that cannot be replayed outside
+// their original session, and the instruction text Codex attaches to its model
+// requests (its base instructions and the AGENTS.md files it loads), which
+// comes from outside the conversation and can carry a developer's private
+// notes. Codex re-reads its instructions when it resumes a rollout without them.
 func SanitizePortableTranscript(data []byte) []byte {
 	if !mayNeedSanitizing(data) {
 		return data
 	}
 
-	lines := splitJSONL(data)
-	if len(lines) == 0 {
-		return data
-	}
-
-	sanitized := make([][]byte, 0, len(lines))
+	// Rewrite lines in place and join them back exactly as they were split, so
+	// blank lines and the final newline survive: checkpoint offsets count lines,
+	// and the redaction cache only reuses content that ends in a newline.
+	lines := bytes.Split(data, []byte("\n"))
 	changed := false
-	for _, lineData := range lines {
-		updated, keep := sanitizeRolloutLine(lineData)
-		if !keep {
-			changed = true
+	var s rolloutSanitizer
+	for i, raw := range lines {
+		lineData := bytes.TrimSpace(raw)
+		if len(lineData) == 0 {
 			continue
 		}
-		if !bytes.Equal(updated, lineData) {
+		if updated := s.sanitizeLine(lineData); !bytes.Equal(updated, lineData) {
+			lines[i] = updated
 			changed = true
 		}
-		sanitized = append(sanitized, updated)
 	}
 
 	// Nothing to strip: hand back the original bytes rather than paying the
-	// reassembly copy. Callers rely on this being cheap — sanitization is
+	// join copy. Callers rely on this being cheap — sanitization is
 	// idempotent precisely so every storage path can call it without tracking
 	// whether an upstream path already did.
 	if !changed {
 		return data
 	}
-	if len(sanitized) == 0 {
-		return data
-	}
-	return agent.ReassembleJSONL(sanitized)
+	return bytes.Join(lines, []byte("\n"))
 }
 
 // sanitizeMarkers are the substrings that gate every transformation
-// sanitizeRolloutLine performs: dropping "compaction"/"compaction_summary" items,
+// sanitizeLine performs: dropping "compaction"/"compaction_summary" items,
 // rewriting "compacted" lines, deleting "encrypted_content" from "reasoning"
-// items, and dropping "encrypted_content" parts from "agent_message" items. A
-// transcript containing none of them cannot be altered, so one scan lets us skip
-// unmarshalling every line.
+// items, dropping "encrypted_content" parts from "agent_message" items, and
+// blanking instruction text. A transcript containing none of them cannot be
+// altered, so one scan lets us skip unmarshalling every line.
 //
 // Deliberately over-broad ("compact" covers compacted/compaction/
 // compaction_summary): a false positive just falls through to the full pass, while
@@ -970,6 +975,10 @@ var sanitizeMarkers = [][]byte{
 	[]byte("encrypted_content"),
 	[]byte("compact"),
 	[]byte("reasoning"),
+	[]byte("base_instructions"),
+	[]byte("agents_md"),
+	[]byte("AGENTS.md"),
+	[]byte("user_instructions"),
 }
 
 func mayNeedSanitizing(data []byte) bool {
@@ -989,26 +998,42 @@ func (c *CodexAgent) SanitizeTranscriptForStorage(data []byte) []byte {
 	return SanitizePortableTranscript(data)
 }
 
-func sanitizeRolloutLine(lineData []byte) ([]byte, bool) {
+// rolloutSanitizer carries what one pass over a rollout has to remember between
+// lines.
+type rolloutSanitizer struct {
+	// baseInstructions is the text session_meta recorded before it was blanked.
+	// Codex repeats it verbatim as a developer message, which has no other mark
+	// telling it apart from the developer messages that must stay.
+	baseInstructions string
+}
+
+func (s *rolloutSanitizer) sanitizeLine(lineData []byte) []byte {
 	var line rolloutLine
 	if err := json.Unmarshal(lineData, &line); err != nil {
-		return lineData, true
+		return lineData
 	}
-	if line.Type == "compacted" {
-		return sanitizeCompactedLine(line)
-	}
-	if line.Type != rolloutLineTypeResponseItem {
-		return lineData, true
+	switch line.Type {
+	case "compacted":
+		return s.sanitizeCompactedLine(line)
+	case rolloutLineTypeSessionMeta:
+		return s.blankBaseInstructions(lineData, line)
+	case rolloutLineTypeWorldState:
+		return blankAgentsMDState(lineData, line)
+	case rolloutLineTypeTurnContext:
+		return blankTurnUserInstructions(lineData, line)
+	case rolloutLineTypeResponseItem:
+	default:
+		return lineData
 	}
 
 	var payload map[string]any
 	if err := json.Unmarshal(line.Payload, &payload); err != nil {
-		return lineData, true
+		return lineData
 	}
 
 	itemType, ok := payload["type"].(string)
 	if !ok {
-		return lineData, true
+		return lineData
 	}
 	switch itemType {
 	case "reasoning", "compaction", "compaction_summary":
@@ -1029,49 +1054,165 @@ func sanitizeRolloutLine(lineData []byte) ([]byte, bool) {
 		// only that part; the line and its readable parts stay, so line numbering
 		// is unchanged. Untouched lines keep their original bytes.
 		if !stripEncryptedContentParts(payload) {
-			return lineData, true
+			return lineData
 		}
+	case itemTypeMessage:
+		if !s.blankInstructionParts(payload) {
+			return lineData
+		}
+		return rewriteRolloutPayload(lineData, payload)
 	default:
-		return lineData, true
+		return lineData
 	}
 
 	encodedPayload, err := json.Marshal(payload)
 	if err != nil {
-		return lineData, true
+		return lineData
 	}
 	line.Payload = encodedPayload
 
 	encodedLine, err := json.Marshal(line)
 	if err != nil {
-		return lineData, true
+		return lineData
 	}
-	return encodedLine, true
+	return encodedLine
 }
 
-func sanitizeCompactedLine(line rolloutLine) ([]byte, bool) {
+// blankBaseInstructions empties session_meta's base_instructions text and
+// remembers it for the developer message that repeats it.
+func (s *rolloutSanitizer) blankBaseInstructions(lineData []byte, line rolloutLine) []byte {
 	var payload map[string]any
 	if err := json.Unmarshal(line.Payload, &payload); err != nil {
-		return mustMarshalRolloutLine(line), true
+		return lineData
+	}
+	base, ok := payload["base_instructions"].(map[string]any)
+	if !ok {
+		return lineData
+	}
+	text, ok := base["text"].(string)
+	if !ok || text == "" {
+		return lineData
+	}
+	s.baseInstructions = text
+	base["text"] = ""
+	return rewriteRolloutPayload(lineData, payload)
+}
+
+// blankTurnUserInstructions empties the user_instructions a turn_context line
+// repeats. Codex 0.132 and older record there the developer's own AGENTS.md
+// followed by the repository's. developer_instructions stays: it holds Codex's
+// built-in desktop context, not the developer's text.
+func blankTurnUserInstructions(lineData []byte, line rolloutLine) []byte {
+	var payload map[string]any
+	if err := json.Unmarshal(line.Payload, &payload); err != nil {
+		return lineData
+	}
+	text, ok := payload["user_instructions"].(string)
+	if !ok || text == "" {
+		return lineData
+	}
+	payload["user_instructions"] = ""
+	return rewriteRolloutPayload(lineData, payload)
+}
+
+// blankAgentsMDState empties the AGENTS.md text a world_state line snapshots.
+func blankAgentsMDState(lineData []byte, line rolloutLine) []byte {
+	var payload map[string]any
+	if err := json.Unmarshal(line.Payload, &payload); err != nil {
+		return lineData
+	}
+	state, ok := payload["state"].(map[string]any)
+	if !ok {
+		return lineData
+	}
+	agentsMD, ok := state["agents_md"].(map[string]any)
+	if !ok {
+		return lineData
+	}
+	text, ok := agentsMD["text"].(string)
+	if !ok || text == "" {
+		return lineData
+	}
+	agentsMD["text"] = ""
+	return rewriteRolloutPayload(lineData, payload)
+}
+
+// blankInstructionParts empties the text parts of a message item that hold
+// instruction text: an AGENTS.md dump in a user message, or the base
+// instructions repeated as a developer message. The item and its other parts
+// stay. It reports whether it changed anything.
+func (s *rolloutSanitizer) blankInstructionParts(item map[string]any) bool {
+	parts, ok := item["content"].([]any)
+	if !ok {
+		return false
+	}
+	role, ok := item["role"].(string)
+	if !ok {
+		return false
+	}
+	changed := false
+	for _, part := range parts {
+		partMap, ok := part.(map[string]any)
+		if !ok {
+			continue
+		}
+		text, ok := partMap["text"].(string)
+		if !ok || text == "" {
+			continue
+		}
+		repeatsBase := role == messageRoleDeveloper && s.baseInstructions != "" && text == s.baseInstructions
+		if repeatsBase || (role == messageRoleUser && transcriptlib.IsInstructionFileDump(text)) {
+			partMap["text"] = ""
+			changed = true
+		}
+	}
+	return changed
+}
+
+// rewriteRolloutPayload re-encodes lineData with its payload replaced, keeping
+// every other top-level field and writing kept text as it was (no HTML
+// escaping). It returns lineData unchanged if the line cannot be re-encoded.
+func rewriteRolloutPayload(lineData []byte, payload map[string]any) []byte {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(lineData, &fields); err != nil {
+		return lineData
+	}
+	encodedPayload, err := jsonutil.MarshalWithNoHTMLEscape(payload)
+	if err != nil {
+		return lineData
+	}
+	fields["payload"] = encodedPayload
+	encodedLine, err := jsonutil.MarshalWithNoHTMLEscape(fields)
+	if err != nil {
+		return lineData
+	}
+	return encodedLine
+}
+
+func (s *rolloutSanitizer) sanitizeCompactedLine(line rolloutLine) []byte {
+	var payload map[string]any
+	if err := json.Unmarshal(line.Payload, &payload); err != nil {
+		return mustMarshalRolloutLine(line)
 	}
 
 	replacementHistory, ok := payload["replacement_history"].([]any)
 	if !ok {
-		return mustMarshalRolloutLine(line), true
+		return mustMarshalRolloutLine(line)
 	}
 
-	sanitizedHistory := sanitizeHistoryItems(replacementHistory)
+	sanitizedHistory := s.sanitizeHistoryItems(replacementHistory)
 	payload["replacement_history"] = sanitizedHistory
 
 	encodedPayload, err := json.Marshal(payload)
 	if err != nil {
-		return mustMarshalRolloutLine(line), true
+		return mustMarshalRolloutLine(line)
 	}
 	line.Payload = encodedPayload
 
-	return mustMarshalRolloutLine(line), true
+	return mustMarshalRolloutLine(line)
 }
 
-func sanitizeHistoryItems(items []any) []any {
+func (s *rolloutSanitizer) sanitizeHistoryItems(items []any) []any {
 	sanitized := make([]any, 0, len(items))
 	for _, item := range items {
 		itemMap, ok := item.(map[string]any)
@@ -1090,6 +1231,8 @@ func sanitizeHistoryItems(items []any) []any {
 			delete(itemMap, "encrypted_content")
 		case itemTypeAgentMessage:
 			stripEncryptedContentParts(itemMap)
+		case itemTypeMessage:
+			s.blankInstructionParts(itemMap)
 		case "compaction", "compaction_summary":
 			continue
 		}

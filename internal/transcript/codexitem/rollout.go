@@ -127,7 +127,7 @@ func decodeRolloutBody(it *Item, head rolloutItem, raw json.RawMessage) bool {
 			return false
 		}
 		it.Kind, it.Status = KindCommand, status(c.Status, StatusCompleted)
-		it.Command, it.CWD = scriptOfArgv(c.Command), pathOfFileURI(c.CWD)
+		it.Command, it.CWD = scriptOfArgv(c.Command), PathOfFileURI(c.CWD)
 		it.Output, it.ExitCode = c.AggregatedOutput, c.ExitCode
 	case "FileChange":
 		var f rolloutFileChange
@@ -186,16 +186,21 @@ func decodeRolloutBody(it *Item, head rolloutItem, raw json.RawMessage) bool {
 	return true
 }
 
-// pathOfFileURI is the path of a file:// URI (the rollout's cwd), or s itself
-// when it isn't one.
-func pathOfFileURI(s string) string {
+// PathOfFileURI is the path of a file:// URI (the rollout's command cwd), or s
+// itself when it isn't one. Codex writes a Windows UNC path's server as the
+// URI's host, so a host other than localhost is kept: file://server/share/dir
+// is //server/share/dir.
+func PathOfFileURI(s string) string {
 	u, err := url.Parse(s)
 	if err != nil || u.Scheme != "file" {
 		return s
 	}
 	p := u.Path
-	// file:///C:/dir is the Windows path C:/dir.
-	if len(p) >= 3 && p[0] == '/' && p[2] == ':' {
+	switch {
+	case u.Host != "" && u.Host != "localhost":
+		return "//" + u.Host + p
+	case len(p) >= 3 && p[0] == '/' && p[2] == ':':
+		// file:///C:/dir is the Windows path C:/dir.
 		p = p[1:]
 	}
 	return p

@@ -154,7 +154,7 @@ func openTrailChangeRepo(ctx context.Context, open trailRepoClientOpener, target
 	if repoID != item.RepositoryID {
 		return nil, fmt.Errorf("repository %s/%s does not match the trail's change", target.Project, item.Repository)
 	}
-	base, err := trailRepoBasePath(target.Host, target.Project, item.Repository, repoID)
+	base, err := trailRepoBasePath(repoID)
 	if err != nil {
 		return nil, err
 	}

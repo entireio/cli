@@ -21,7 +21,9 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
+	"github.com/entireio/cli/cmd/entire/cli/agent/pi"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
@@ -759,6 +761,7 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 		TranscriptLinesAtStart:      opts.CheckpointTranscriptStart, //nolint:staticcheck // deliberate: written so older CLIs can still read the metadata
 		CompactTranscriptStart:      compactTranscriptStart,
 		TokenUsage:                  opts.TokenUsage,
+		SessionTokenUsage:           opts.SessionTokenUsage,
 		Redaction:                   redaction,
 		SkillEventsVersion:          skillEventsVersion(opts.SkillEvents),
 		SkillEvents:                 opts.SkillEvents,
@@ -984,7 +987,7 @@ func (s *treeWriter) readSummaryFromBlob(hash plumbing.Hash) (*CheckpointSummary
 	return readJSONFromBlob[CheckpointSummary](s.repo, hash)
 }
 
-// SanitizeTranscriptForAgentType strips non-portable agent state from a transcript
+// SanitizeTranscriptForAgentType strips what Entire must not keep from a transcript
 // about to be stored (see agent.TranscriptSanitizer). It exists for callers that work
 // from a types.AgentType rather than a live agent.Agent: the store itself, as a
 // last-resort safety net, and `entire import`, which reads raw third-party rollouts
@@ -1000,8 +1003,13 @@ func SanitizeTranscriptForAgentType(agentType types.AgentType, data []byte) []by
 	if len(data) == 0 {
 		return data
 	}
-	if agentType == agent.AgentTypeCodex {
+	switch agentType {
+	case agent.AgentTypeCodex:
 		return codex.SanitizePortableTranscript(data)
+	case agent.AgentTypeClaudeCode:
+		return claudecode.SanitizeStoredTranscript(data)
+	case agent.AgentTypePi:
+		return pi.SanitizeStoredTranscript(data)
 	}
 	return data
 }

@@ -12,13 +12,20 @@ that trail's sole open change, in whichever repository it is. To name one
 repository's work, pass `<repo>/<number>` (`cli/7`) with `--project` when the
 project is not origin's owner, or `--branch`.
 
+Change assignment and editable descriptions belong to the parent Trail. The
+legacy Change create/update commands and description PUT client are removed;
+parent `create`/`update` assignment and body flags remain. Change response/output
+contracts omit assignees and aggregate comment/unresolved counts. Legacy
+descriptions, checkpoints, reviewers, approvals, and finding-dashboard counts
+remain readable.
+
 ## Code layout
 
 The model is chosen in one place, `newTrailCmdForMode` (`trail_cmd.go`), and
 by the first-turn injection, both through `projectTrailsEnabled`.
 
 - Commands whose meaning differs are separate trees: legacy `show`, `list`,
-  `create`, `update`, `delete`, `comment` in `trail_*.go`; project `show`,
+  `delete`, `comment` in `trail_*.go`; project `show`,
   `list`, `create`, `update`, `link`, `unlink`, `comment` in
   `project_trail_*.go`.
 - Commands that act on one repository branch in both models (`checkout`,
@@ -58,7 +65,7 @@ Selectors are project-local numbers or trail ULIDs, or `<repo>/<number>` for one
   Server pagination tokens pass through unchanged. A numeric selector is one
   `GET /{host}/{project}/trails/{number}` (the detail route accepts a
   project-local number); later requests use the returned ULID. JSON preserves counts, groups, jurisdiction, and capabilities.
-- Explicit selectors normally resolve through Core `/projects/resolve/{host}/{project}`.
+- Explicit selectors normally resolve through Core `/project-resolver/{forge_prefix}/{project}`.
   Creation and `link` instead use the destination repository's placement and
   ownership, so repo-only writers need no project inspection. Branch discovery
   follows the backing row's parent. None falls back to legacy semantics or

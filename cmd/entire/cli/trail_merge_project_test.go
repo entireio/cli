@@ -33,7 +33,7 @@ type projectMergeRepos struct {
 	details []string
 }
 
-var projectMergeDetailPath = regexp.MustCompile(`^/api/v1/repos/([^/]+)/trails/([0-9]+)(/merge)?$`)
+var projectMergeDetailPath = regexp.MustCompile(`^/api/v1/repos/([^/]+)/changes/([0-9]+)(/merge)?$`)
 
 func setupProjectMergeRepos(t *testing.T, mergeability string, ids map[string]string) *projectMergeRepos {
 	t.Helper()
@@ -71,8 +71,9 @@ func (s *projectMergeRepos) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 		_, err = fmt.Fprint(w, `{"ok":true,"mergeCommitSha":"merge-example"}`)
 		assert.NoError(s.t, err)
-	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/trails/"):
-		// Trail lists: branch discovery, or a failed command re-probing enablement.
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/repos/") &&
+		(strings.HasSuffix(r.URL.Path, "/changes") || strings.HasSuffix(r.URL.Path, "/approvals")):
+		// Branch discovery, review summaries, or a failed command re-probing enablement.
 		http.NotFound(w, r)
 	default:
 		s.t.Errorf("unexpected repository request: %s %s", r.Method, r.URL.Path)
@@ -120,7 +121,7 @@ func TestProjectTrailMergeMergesTheSelectedChange(t *testing.T) {
 
 	out, _, err := executeProjectTrailTest(t, "merge", "42", "--repo", "gh/acme/widget")
 	require.NoError(t, err)
-	require.Equal(t, []string{"/api/v1/repos/repo-id/trails/7/merge"}, repos.mergePosts())
+	require.Equal(t, []string{"/api/v1/repos/repo-id/changes/7/merge"}, repos.mergePosts())
 	require.Contains(t, out, "Change widget/7 of trail #42 (feature/work → main)")
 	require.Contains(t, out, "Merged change widget/7 of trail #42 into main (merge-example)")
 	require.NotContains(t, out, "trail #7")
@@ -244,7 +245,7 @@ func TestProjectTrailMergeRoutesToTheChangesRepository(t *testing.T) {
 
 	out, _, err := executeProjectTrailTest(t, "merge", "42")
 	require.NoError(t, err)
-	require.Equal(t, []string{"/api/v1/repos/api-id/trails/9/merge"}, repos.mergePosts())
+	require.Equal(t, []string{"/api/v1/repos/api-id/changes/9/merge"}, repos.mergePosts())
 	require.Contains(t, out, "Merged change api/9 of trail #42 into main")
 }
 

@@ -71,9 +71,9 @@ func TestLegacyResumePreservesExpectedBranchAssertion(t *testing.T) {
 		t.Run(branch, func(t *testing.T) {
 			setupWorkingRepoClient(t, func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
-				case "/api/v1/trails/gh/acme/widget/7":
+				case "/api/v1/repos/repo-id/changes/7":
 					assert.NoError(t, json.NewEncoder(w).Encode(api.TrailResource{ID: projectTrailTestChange, Number: 7, Branch: "feature/work"}))
-				case "/api/v1/trails/gh/acme/widget/7/reviews/comments":
+				case "/api/v1/repos/repo-id/changes/7/reviews/comments":
 					assert.Equal(t, "feature/work", branch, "mismatched assertions stop before loading findings")
 					assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"comments": []any{}}))
 				default:
@@ -120,7 +120,7 @@ func TestTrailCheckoutPreservesBranchSelectionByMode(t *testing.T) {
 			}
 			setupWorkingRepoClient(t, func(w http.ResponseWriter, r *http.Request) {
 				assert.False(t, project, "project checkout reads the work through its owned route")
-				assert.Equal(t, "/api/v1/trails/gh/acme/widget", r.URL.Path)
+				assert.Equal(t, "/api/v1/repos/repo-id/changes", r.URL.Path)
 				assert.NoError(t, json.NewEncoder(w).Encode(api.TrailListResponse{Trails: []api.TrailResource{{ID: projectTrailTestChange, Number: 7, Branch: "feature/work"}}}))
 			})
 			cmd := newTrailCheckoutCmd(trailModeFor(project))
@@ -144,9 +144,9 @@ func TestLegacyResumeIgnoresDeprecatedRepoFlag(t *testing.T) {
 	setupTrailBranchSelectionTest(t)
 	setupWorkingRepoClient(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/trails/gh/acme/widget/7":
+		case "/api/v1/repos/repo-id/changes/7":
 			assert.NoError(t, json.NewEncoder(w).Encode(api.TrailResource{ID: projectTrailTestChange, Number: 7, Branch: "feature/work"}))
-		case "/api/v1/trails/gh/acme/widget/7/reviews/comments":
+		case "/api/v1/repos/repo-id/changes/7/reviews/comments":
 			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"comments": []any{}}))
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)

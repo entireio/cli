@@ -253,7 +253,13 @@ always runnable in every build.
   `/{host}/{project}/runs`; `list` prints one page with its cursor, run IDs
   must be ULIDs before any request, `retry` sends an `Idempotency-Key`, and
   `--json` passes the server's runs through. What the agents did on one trail
-  change is `trail finding`, and `trail rerun-review` starts them. Also
+  change is `trail finding`, and `trail rerun-review` starts them.
+  `agent setup` explicitly confirms a service-account repository grant and managed
+  self-hosted Environment binding; `agent serve` executes claimed jobs in the
+  foreground (`--once` processes at most one). These are user-owned commands,
+  separate from local `entire agent` integrations. See
+  [self-hosted project Agents](../architecture/self-hosted-project-agents.md)
+  for identity, isolation and recovery contracts. Also
   `grant` (`add`/`list`/`remove`): project access for a `provider:handle`
   grantee, roles reader/writer/admin; both `add` and `remove` take the grantee
   optionally (see the grant-subtree notes below). `create <name> --owner <ref>`
@@ -847,12 +853,12 @@ cluster host rather than inventing a forge host. The legacy `/git/` prefix is
 excluded because `repo clone` cannot act on such a ref.
 
 **Being a forge token says nothing about which route accepts it** — the name
-says syntax on purpose. Trails are the current example: a mirror is addressed by
-`forge/owner/repo`, a native repo only by its ULID, so `trailRepoBasePath`
-switches on the forge *after* `IsForgePathToken` has answered yes, and a native
-ref with no resolved repo ID fails there rather than at the grammar. That
-narrowing has to cover *both* ways a forge reaches the API — named in `--repo`
-and inferred from the origin remote — and the inferred one is the common path.
+says syntax on purpose. Repository Changes are addressed by the resolved
+processing-placement ID for **both** GitHub and native repositories:
+`api.RepoChangesPath` builds `/api/v1/repos/{repo_id}/changes` and rejects a
+missing ID, never falling back to a forge/name route. Resolution covers both
+explicit `--repo` references and the origin remote. Project Trail APIs and
+browser URLs keep their separate routing conventions.
 
 Experimental commands (gated by the build version as described above — visible
 and grouped under "Experimental commands:" in developer/nightly builds, hidden

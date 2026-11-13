@@ -416,7 +416,7 @@ func (c *legacyCopier) copyToRef(ctx context.Context, checkpointID id.Checkpoint
 	if err != nil {
 		return false, err
 	}
-	exists, err := c.localRefExists(refName)
+	exists, err := LocalRefExists(c.refs.repo, checkpointID)
 	if err != nil {
 		return false, err
 	}
@@ -433,7 +433,7 @@ func (c *legacyCopier) copyToRef(ctx context.Context, checkpointID id.Checkpoint
 	if err != nil && !diverged {
 		return false, fmt.Errorf("read checkpoint %s from %s: %w", checkpointID, c.branch.refs.Primary, err)
 	}
-	fetched, fetchErr := c.fetchRemoteRef(ctx, refName)
+	fetched, fetchErr := c.fetchRemoteRef(ctx, checkpointID, refName)
 	if fetchErr != nil {
 		return false, fetchErr
 	}
@@ -451,13 +451,9 @@ func (c *legacyCopier) copyToRef(ctx context.Context, checkpointID id.Checkpoint
 	return true, nil
 }
 
-func (c *legacyCopier) localRefExists(refName plumbing.ReferenceName) (bool, error) {
-	return refExists(c.refs.repo, refName)
-}
-
 // fetchRemoteRef asks the remote for refName and reports whether the ref now
 // exists locally. Without a refFetcher it reports false.
-func (c *legacyCopier) fetchRemoteRef(ctx context.Context, refName plumbing.ReferenceName) (bool, error) {
+func (c *legacyCopier) fetchRemoteRef(ctx context.Context, checkpointID id.CheckpointID, refName plumbing.ReferenceName) (bool, error) {
 	if c.refFetcher == nil {
 		return false, nil
 	}
@@ -468,7 +464,7 @@ func (c *legacyCopier) fetchRemoteRef(ctx context.Context, refName plumbing.Refe
 	if err != nil {
 		return false, fmt.Errorf("ask the remote for checkpoint ref %s before copying it from %s: %w", refName, c.branch.refs.Primary, err)
 	}
-	return c.localRefExists(refName)
+	return LocalRefExists(c.refs.repo, checkpointID)
 }
 
 func (c *legacyCopier) deleted(checkpointID id.CheckpointID) (bool, error) {

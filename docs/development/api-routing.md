@@ -132,12 +132,28 @@ uses the following routing shapes, mirroring the entire.io BFF:
   cell or loopback host (`auth.BaseURLOverridePinsCell`), wins; an override naming
   a BFF/apex still routes by catalog. Another cell answers a placement id it
   does not host with an error or, for the processing id, an empty result.
+- **Repository Changes → resolved repo ID in that cell**: all forges use
+  `/api/v1/repos/{repo_id}/changes` and `/{number}` plus subresources, where
+  `repo_id` is the resolved processing-placement ID, not the repository index
+  row ID or a name-derived ID. `api.RepoChangesPath` trims/escapes the ID and
+  rejects blanks; neither GitHub nor native repositories fall back to the
+  legacy forge/name Trail route. `Client.SetTrailRoute` maps transient
+  `/api/v1/trails/{id}/...` internal keys onto this Change route before sending
+  requests (including SSE). CLI Trail names, payloads, browser URLs, and the
+  project-scoped Trail APIs below are unchanged.
 - **Project-scoped trails → assigned project cell**:
   Core resolves the required `--project`; list uses
   `GET /api/v1/trails?projectId=<ID>` at its assigned API URL, and a numeric
   selector is one `GET /api/v1/{host}/{project}/trails/{number}` there. `--repo` only
   filters within that project. No fanout or fallback; server cursors pass through.
   See [Project trails CLI](../architecture/project-trails-cli.md).
+  Self-hosted `project agent serve` is an explicit exception to fresh project
+  discovery: `project agent setup` saves the administrator-resolved project ID
+  and cell URL in private user config. Repo-only service accounts cannot inspect
+  the project shell, so serve reuses that operator-approved route rather than
+  widening their grants. Missing configuration falls back to normal discovery;
+  malformed configuration fails closed. See
+  [self-hosted project Agents](../architecture/self-hosted-project-agents.md).
 - **User-scoped `/me` → home cell, never fan out**:
   `auth.NewEntireAPICellClient(ctx, insecure, nil)` routes by the
   `home_jurisdiction` JWT claim. Activity and recap use it with no data-API
