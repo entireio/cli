@@ -60,6 +60,11 @@ func claudeTranscriptWithImage(b64 string) string {
 	return strings.Join([]string{
 		`{"uuid":"u1","type":"user","message":{"role":"user","content":"add feature and look at this"},"timestamp":"2026-01-01T00:00:00Z"}`,
 		`{"uuid":"u2","type":"user","message":{"role":"user","content":[{"type":"text","text":"screenshot"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + b64 + `"}}]},"timestamp":"2026-01-01T00:00:01Z"}`,
+		// A Read of an image file: Claude Code writes the image twice, in the
+		// tool result and again in toolUseResult.file.base64.
+		`{"uuid":"a0","type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_0","name":"Read","input":{"file_path":"shot.png"}}]},"timestamp":"2026-01-01T00:00:01Z"}`,
+		`{"uuid":"u0","type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_0","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + b64 + `"}}]}]},` +
+			`"toolUseResult":{"type":"image","file":{"base64":"` + b64 + `","type":"image/png","originalSize":300,"dimensions":{"originalWidth":10,"originalHeight":10,"displayWidth":10,"displayHeight":10}}},"timestamp":"2026-01-01T00:00:01Z"}`,
 		`{"uuid":"a1","type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_1","name":"Write","input":{"file_path":"feature.go","content":"package main\n"}}]},"timestamp":"2026-01-01T00:00:02Z"}`,
 		`{"uuid":"u3","type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"Success"}]},"timestamp":"2026-01-01T00:00:03Z"}`,
 		`{"uuid":"a2","type":"assistant","message":{"content":[{"type":"text","text":"done"}]},"timestamp":"2026-01-01T00:00:04Z"}`,

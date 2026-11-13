@@ -73,6 +73,12 @@ func TestDropImages_ReplacesEveryKnownShape(t *testing.T) {
 			},
 		},
 		{
+			name: "claude read tool result",
+			line: func(b64 string) string {
+				return `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + b64 + `"}}]}]},"toolUseResult":{"type":"image","file":{"base64":"` + b64 + `","type":"image/png","originalSize":300}}}`
+			},
+		},
+		{
 			name: "codex generated image",
 			line: func(b64 string) string {
 				return `{"type":"response_item","payload":{"type":"image_generation_call","id":"ig_1","status":"completed","revised_prompt":"a mockup","result":"` + b64 + `"}}`

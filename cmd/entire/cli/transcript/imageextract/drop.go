@@ -150,14 +150,19 @@ func dropImagesInValue(v any) (any, bool) {
 }
 
 // dropImageSlots replaces the image an object holds directly: a Claude Code
-// image block, a Pi image item, the file part OpenCode 2 attaches an image
-// as, or an image Codex generated.
+// image block or Read result, a Pi image item, the file part OpenCode 2
+// attaches an image as, or an image Codex generated.
 func dropImageSlots(obj map[string]any) bool {
 	switch obj["type"] {
 	case blockTypeImage:
 		changed := false
 		if source, ok := obj["source"].(map[string]any); ok && source["type"] == "base64" {
 			changed = dropSlot(source, "data", "media_type")
+		}
+		// Claude Code's record of a Read of an image file repeats the image
+		// in toolUseResult as {"type":"image","file":{"base64":...,"type":...}}.
+		if file, ok := obj["file"].(map[string]any); ok {
+			changed = dropSlot(file, "base64", "type") || changed
 		}
 		return dropSlot(obj, "data", "mimeType") || changed
 	case "file":
