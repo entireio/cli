@@ -1415,6 +1415,10 @@ func checkHookDrift(cmd *cobra.Command) {
 			continue
 		}
 		displayName := string(ag.Type())
+		if err := checkClaudeHookVersion(ctx, ag.Name()); err != nil {
+			fmt.Fprintf(w, "%s hooks: VERSION CHECK FAILED\n  %v\n", displayName, err)
+			continue
+		}
 		switch hf.CheckHookConfig(ctx) {
 		case agent.HooksAbsent:
 			// Not installed in this repo — nothing to report.
