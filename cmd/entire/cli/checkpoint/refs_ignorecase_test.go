@@ -1,6 +1,7 @@
 package checkpoint
 
 import (
+	"path/filepath"
 	"runtime"
 	"testing"
 	"weak"
@@ -13,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
@@ -180,6 +182,27 @@ func TestFoldsCase_ReadsTheSettingWithAWorktreeConfig(t *testing.T) {
 			testutil.RunGit(t, dir, "config", "--worktree", "core.sparseCheckout", "true")
 			repo, err := git.PlainOpen(dir)
 			require.NoError(t, err)
+
+			assert.Equal(t, ignoreCase == "true", foldsCase(repo))
+		})
+	}
+}
+
+// A linked worktree with its own config.worktree, opened as commands open it,
+// reads the setting from the shared config of the main repository.
+func TestFoldsCase_ReadsTheSettingInALinkedWorktree(t *testing.T) {
+	t.Parallel()
+	for _, ignoreCase := range []string{"true", "false"} {
+		t.Run(ignoreCase, func(t *testing.T) {
+			t.Parallel()
+			dir, _, _ := shardSpellingRepo(t, ignoreCase)
+			testutil.RunGit(t, dir, "config", "extensions.worktreeConfig", "true")
+			linked := filepath.Join(t.TempDir(), "linked")
+			testutil.RunGit(t, dir, "worktree", "add", "-b", "linked", linked)
+			testutil.RunGit(t, linked, "config", "--worktree", "core.sparseCheckout", "true")
+			repo, err := gitrepo.OpenPath(linked)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = repo.Close() })
 
 			assert.Equal(t, ignoreCase == "true", foldsCase(repo))
 		})

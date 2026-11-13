@@ -301,18 +301,23 @@ func foldsCase(repo *git.Repository) bool {
 	return folds
 }
 
+// readFoldsCase reads the setting through go-git, when the config file cannot
+// be reached through the storer's filesystem. A config without raw sections, as
+// go-git returns for a worktreeConfig repository, reports true.
 func readFoldsCase(repo *git.Repository) bool {
 	cfg, err := repo.Config()
 	if err != nil || cfg.Raw == nil {
 		return true
 	}
-	return ignoreCaseSet(cfg.Raw)
+	return ignoreCaseOn(cfg.Raw)
 }
 
 // readFoldsCaseFile reads core.ignorecase from the repository's config file
 // itself. repo.Config() cannot be used here: with the worktreeConfig extension
 // and a config.worktree file, go-git merges the two and drops the raw sections
-// that hold the setting.
+// that hold the setting. Only the shared config is read, where git records the
+// setting when it creates the repository; an override in config.worktree or in
+// global config is not seen.
 func readFoldsCaseFile(fs billy.Filesystem) bool {
 	f, err := fs.Open("config")
 	if err != nil {
@@ -323,10 +328,10 @@ func readFoldsCaseFile(fs billy.Filesystem) bool {
 	if err := format.NewDecoder(f).Decode(raw); err != nil {
 		return true
 	}
-	return ignoreCaseSet(raw)
+	return ignoreCaseOn(raw)
 }
 
-func ignoreCaseSet(raw *format.Config) bool {
+func ignoreCaseOn(raw *format.Config) bool {
 	switch strings.ToLower(raw.Section("core").Option("ignorecase")) {
 	case "true", "yes", "on", "1":
 		return true
