@@ -139,7 +139,7 @@ func EnsureSetup(ctx context.Context) error {
 	}
 
 	// Install generic hooks (they delegate to strategy at runtime)
-	if !IsGitHookInstalled(ctx) {
+	if gitHooksNeedReinstall(ctx) {
 		if _, err := ReinstallGitHooks(ctx); err != nil {
 			return fmt.Errorf("failed to install git hooks: %w", err)
 		}
