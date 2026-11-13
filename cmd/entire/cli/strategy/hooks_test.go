@@ -1717,10 +1717,10 @@ func TestGenerateChainedContent(t *testing.T) {
 		t.Error("chained content should resolve hook directory from $0")
 	}
 
-	// Should check executable permission on backup
-	expectedCheck := `[ -x "$_entire_hook_dir/post-commit` + backupSuffix + `" ]`
+	// Should run the backup only when it is a regular executable
+	expectedCheck := `[ -f "$_entire_hook_dir/post-commit` + backupSuffix + `" ] && [ -x "$_entire_hook_dir/post-commit` + backupSuffix + `" ]`
 	if !strings.Contains(result, expectedCheck) {
-		t.Errorf("chained content should check -x on backup, got:\n%s", result)
+		t.Errorf("chained content should check -f and -x on backup, got:\n%s", result)
 	}
 
 	// Should forward all arguments with "$@"
