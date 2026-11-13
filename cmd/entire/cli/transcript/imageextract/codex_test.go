@@ -135,6 +135,33 @@ func TestCodexCodec_GeneratedImageRoundTrips(t *testing.T) {
 	}
 }
 
+// A generated image whose bytes match no known type is still externalized, as
+// a .bin asset with no media type, and round-trips byte-exactly.
+func TestCodexCodec_GeneratedImageUnknownTypeRoundTrips(t *testing.T) {
+	t.Parallel()
+	c := CodecFor(agent.AgentTypeCodex)
+	b64 := base64.StdEncoding.EncodeToString([]byte("not-a-known-image-format" + strings.Repeat("-codex-image-bytes", 3)))
+	orig := codexGeneratedImageLine(b64) + "\n"
+
+	rewritten, assets, err := c.ExtractImages([]byte(orig))
+	if err != nil {
+		t.Fatalf("ExtractImages: %v", err)
+	}
+	if len(assets) != 1 {
+		t.Fatalf("expected 1 asset, got %d", len(assets))
+	}
+	if assets[0].MediaType != "" || !strings.HasSuffix(assets[0].Name, ".bin") {
+		t.Errorf("asset = %q (%q), want a .bin with no media type", assets[0].Name, assets[0].MediaType)
+	}
+	restored, err := c.ReinjectImages(rewritten, lookupFrom(assets))
+	if err != nil {
+		t.Fatalf("ReinjectImages: %v", err)
+	}
+	if string(restored) != orig {
+		t.Fatal("unknown-type generated image round trip not byte-exact")
+	}
+}
+
 // A rollout holding both a pasted and a generated image externalizes both.
 func TestCodexCodec_PastedAndGeneratedImages(t *testing.T) {
 	t.Parallel()
