@@ -86,11 +86,14 @@ func (c *Claude) RunPrompt(ctx context.Context, dir string, prompt string, opts 
 	}
 	defer cancel()
 
-	configDir, err := cleanConfigDir()
-	if err != nil {
-		return Output{}, fmt.Errorf("create clean config dir: %w", err)
+	configDir := cfg.Home
+	if configDir == "" {
+		configDir, err = cleanConfigDir()
+		if err != nil {
+			return Output{}, fmt.Errorf("create clean config dir: %w", err)
+		}
+		defer func() { _ = os.RemoveAll(configDir) }()
 	}
-	defer func() { _ = os.RemoveAll(configDir) }()
 
 	env := append(cleanEnv(),
 		"ACCESSIBLE=1",
@@ -106,6 +109,10 @@ func (c *Claude) RunPrompt(ctx context.Context, dir string, prompt string, opts 
 
 	args := []string{"-p", prompt, "--model", cfg.Model, "--dangerously-skip-permissions"}
 	displayArgs := []string{"-p", fmt.Sprintf("%q", prompt), "--model", cfg.Model, "--dangerously-skip-permissions"}
+	if cfg.ResumeSessionID != "" {
+		args = append(args, "--resume", cfg.ResumeSessionID)
+		displayArgs = append(displayArgs, "--resume", cfg.ResumeSessionID)
+	}
 	cmd := exec.CommandContext(ctx, c.Binary(), args...)
 	cmd.Dir = dir
 	cmd.Stdin = nil
@@ -135,6 +142,10 @@ func (c *Claude) RunPrompt(ctx context.Context, dir string, prompt string, opts 
 		ExitCode: exitCode,
 	}, err
 }
+
+func (c *Claude) NewHome(string) (string, error) { return cleanConfigDir() }
+
+func (c *Claude) HomeEnv(home string) []string { return []string{"CLAUDE_CONFIG_DIR=" + home} }
 
 func (c *Claude) StartSession(ctx context.Context, dir string) (Session, error) {
 	if runtime.GOOS == "windows" {

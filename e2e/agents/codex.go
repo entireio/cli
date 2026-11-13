@@ -82,6 +82,13 @@ func codexHome() (string, func(), error) {
 	return dir, func() { _ = os.RemoveAll(dir) }, nil
 }
 
+func (c *Codex) NewHome(string) (string, error) {
+	home, _, err := codexHome()
+	return home, err
+}
+
+func (c *Codex) HomeEnv(home string) []string { return []string{"CODEX_HOME=" + home} }
+
 func (c *Codex) RunPrompt(ctx context.Context, dir string, prompt string, opts ...Option) (Output, error) {
 	cfg := &runConfig{}
 	for _, o := range opts {
@@ -95,11 +102,15 @@ func (c *Codex) RunPrompt(ctx context.Context, dir string, prompt string, opts .
 	promptCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	home, cleanup, err := codexHome()
-	if err != nil {
-		return Output{}, fmt.Errorf("create codex home: %w", err)
+	home := cfg.Home
+	if home == "" {
+		var cleanup func()
+		home, cleanup, err = codexHome()
+		if err != nil {
+			return Output{}, fmt.Errorf("create codex home: %w", err)
+		}
+		defer cleanup()
 	}
-	defer cleanup()
 
 	absDir, err := filepath.Abs(dir)
 	if err != nil {
@@ -109,9 +120,16 @@ func (c *Codex) RunPrompt(ctx context.Context, dir string, prompt string, opts .
 		return Output{}, fmt.Errorf("seed codex home: %w", err)
 	}
 
-	args := []string{"exec", "--dangerously-bypass-approvals-and-sandbox"}
+	args := []string{"exec"}
+	if cfg.ResumeSessionID != "" {
+		args = append(args, "resume")
+	}
+	args = append(args, "--dangerously-bypass-approvals-and-sandbox")
 	if cfg.Model != "" {
 		args = append(args, "-m", cfg.Model)
+	}
+	if cfg.ResumeSessionID != "" {
+		args = append(args, cfg.ResumeSessionID)
 	}
 	args = append(args, prompt)
 

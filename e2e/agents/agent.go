@@ -24,10 +24,35 @@ type runConfig struct {
 	Model          string
 	PermissionMode string
 	PromptTimeout  time.Duration
+	// Home and ResumeSessionID are honored only by HomedAgent runners and
+	// OpenCode, the agents whose resume after `entire resume` is covered.
+	Home            string
+	ResumeSessionID string
 }
 
 func WithPromptTimeout(d time.Duration) Option {
 	return func(c *runConfig) { c.PromptTimeout = d }
+}
+
+// WithHome runs the prompt in home, created by HomedAgent.NewHome, instead of
+// a throwaway home, so a later run can continue the session it records. The
+// caller removes home.
+func WithHome(home string) Option {
+	return func(c *runConfig) { c.Home = home }
+}
+
+// WithResume continues sessionID instead of starting a new session.
+func WithResume(sessionID string) Option {
+	return func(c *runConfig) { c.ResumeSessionID = sessionID }
+}
+
+// HomedAgent is implemented by an agent whose sessions live in a per-run home
+// directory. A test that resumes a session creates the home once, passes it
+// to every run with WithHome, and passes HomeEnv to `entire resume` so the
+// restored session lands where the agent will look for it.
+type HomedAgent interface {
+	NewHome(repoDir string) (string, error)
+	HomeEnv(home string) []string
 }
 
 // PromptTimeoutEnv is the environment variable that overrides every agent's
