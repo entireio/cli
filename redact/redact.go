@@ -148,6 +148,11 @@ var (
 	// also names a secret (aws_access_key_id, api_token_id, secret_id) must
 	// never suppress entropy-layer redaction.
 	credentialWordInKeyRE = regexp.MustCompile(`(?:^|_)(?:key|token|secret|pass|passwd|password|pwd)(?:_|$)`)
+	// passwordStemInKeyRE spots a password stem inside a normalized key, where
+	// credentialWordInKeyRE needs a whole segment: userpassword, mypasswd,
+	// user_psw, and pw as a segment (db_pw). These are the keys under which
+	// betterleaks' generic-password rule reads a value as a password.
+	passwordStemInKeyRE = regexp.MustCompile(`passw|psw|pwd|(?:^|_)pw(?:_|$)`)
 )
 
 // entropyThreshold is the minimum Shannon entropy for a string to be considered
@@ -2069,7 +2074,8 @@ func isSingleJSONValue(dec *json.Decoder) bool {
 // replaceKeyedJSONValue only finds a value written directly after its key.
 //
 // A string that is exactly an inline image data URI is preserved wherever it
-// appears, except under a credential key; see isInlineImageDataURI.
+// appears, except where its key reveals a secret; see imageKeyRevealsSecret
+// and isInlineImageDataURI.
 //
 // A skip key preserves its own string values, including the strings in its
 // arrays, but objects beneath it are walked with their own keys. The id rule
@@ -2542,9 +2548,71 @@ func shouldSkipJSONLObject(obj map[string]any) bool {
 }
 
 // skipLeaf reports whether a string leaf is left unscanned: under a skip key,
-// or a whole-string inline image outside a credential key.
+// or a whole-string inline image under a key that reveals no secret and that
+// no custom rule reads it under. The image check runs first: it rejects any
+// other string at its data:image/ prefix, so the key is classified only for
+// images.
 func skipLeaf(skipStrings bool, key string, credentialContext bool, val string) bool {
-	return skipStrings || (isInlineImageDataURI(val) && !isCredentialJSONSecretKey(key, credentialContext))
+	if skipStrings {
+		return true
+	}
+	if !isInlineImageDataURI(val) || imageKeyRevealsSecret(key, credentialContext) {
+		return false
+	}
+	return !customRuleReadsValue(key, val)
+}
+
+// customRuleReadsValue reports whether a configured custom rule matches any
+// part of val in the "key":"val" text the key-context rule scans. A rule
+// written for one field, such as "auth_blob":"[^"]+", then still redacts an
+// image under it, as it did before images were skipped. It runs only the
+// custom rules, and only when some are configured, so by default an image is
+// preserved without any scan of its bytes, and it stops at a rule's first
+// match in the value.
+func customRuleReadsValue(key, val string) bool {
+	cfg := getCustomRulesConfig()
+	if cfg == nil || len(cfg.rules) == 0 {
+		return false
+	}
+	prefix := `"` + key + `":"`
+	text := prefix + val + `"`
+	start, end := len(prefix), len(prefix)+len(val)
+	for _, rule := range cfg.rules {
+		// A rule's matches come in order and never overlap, so the first one
+		// that ends past the prefix decides. At most start+1 of them fit in
+		// the prefix, so a rule that matches every byte of an image still
+		// finds only a few.
+		for _, loc := range rule.regex.FindAllStringIndex(text, start+2) {
+			if loc[1] > start {
+				if loc[0] < end {
+					return true
+				}
+				break
+			}
+		}
+	}
+	return false
+}
+
+// imageKeyRevealsSecret reports whether key marks an inline image value as a
+// possible secret, so the value is scanned like any other string. That is a
+// credential key, a key with a secret word segment such as a bare password,
+// secret or token (which outside a connection object is not a credential key),
+// or a key with a password stem such as userpassword or db_pw. It reads the
+// key only: an image under a key that names no secret is preserved without
+// any scan of its bytes. Like isNonSecretIdentifierAssignment, this only
+// decides whether the scanners may skip a value, so failing closed costs an
+// image under such a key, not a leak.
+func imageKeyRevealsSecret(key string, credentialContext bool) bool {
+	if isCredentialJSONSecretKey(key, credentialContext) {
+		return true
+	}
+	for _, form := range credentialJSONKeyForms(key) {
+		if credentialWordInKeyRE.MatchString(form) || passwordStemInKeyRE.MatchString(form) {
+			return true
+		}
+	}
+	return false
 }
 
 // isInlineImageDataURI reports whether s is, in its entirety, a base64 image
@@ -2557,11 +2625,12 @@ func skipLeaf(skipStrings bool, key string, credentialContext bool, val string) 
 //
 // The check is per string rather than per object, so it hides no sibling
 // field. Only those four raster subtypes are accepted, and the decoded bytes
-// must start with one of their magic numbers, so base64 text under an image/
-// label and SVG (text that can carry secrets) stay on the scanned path. The
-// bytes need not match the label, which can be wrong: older Codex releases
-// took it from the file extension, and MCP tools declare their own. A data URI
-// embedded inside a longer string is still scanned.
+// must be framed as one whole image of one of them (see isFramedImage), so
+// base64 text under an image/ label, a token after an image signature, and
+// SVG (text that can carry secrets) stay on the scanned path. The bytes need
+// not match the label, which can be wrong: older Codex releases took it from
+// the file extension, and MCP tools declare their own. A data URI embedded
+// inside a longer string is still scanned.
 func isInlineImageDataURI(s string) bool {
 	rest, ok := strings.CutPrefix(s, "data:image/")
 	if !ok {
@@ -2582,10 +2651,7 @@ func isInlineImageDataURI(s string) bool {
 	if err != nil {
 		return false
 	}
-	return bytes.HasPrefix(raw, []byte("\x89PNG\r\n\x1a\n")) ||
-		bytes.HasPrefix(raw, []byte{0xFF, 0xD8, 0xFF}) ||
-		bytes.HasPrefix(raw, []byte("GIF87a")) || bytes.HasPrefix(raw, []byte("GIF89a")) ||
-		(len(raw) >= 12 && bytes.HasPrefix(raw, []byte("RIFF")) && bytes.Equal(raw[8:12], []byte("WEBP")))
+	return isFramedImage(raw)
 }
 
 func shannonEntropy(s string) float64 {
