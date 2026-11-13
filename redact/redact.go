@@ -2549,12 +2549,14 @@ func shouldSkipJSONLObject(obj map[string]any) bool {
 
 // skipLeaf reports whether a string leaf is left unscanned: under a skip key,
 // or a whole-string inline image under a key that reveals no secret and that
-// no custom rule reads it under.
+// no custom rule reads it under. The image check runs first: it rejects any
+// other string at its data:image/ prefix, so the key is classified only for
+// images.
 func skipLeaf(skipStrings bool, key string, credentialContext bool, val string) bool {
 	if skipStrings {
 		return true
 	}
-	if imageKeyRevealsSecret(key, credentialContext) || !isInlineImageDataURI(val) {
+	if !isInlineImageDataURI(val) || imageKeyRevealsSecret(key, credentialContext) {
 		return false
 	}
 	return !customRuleReadsValue(key, val)

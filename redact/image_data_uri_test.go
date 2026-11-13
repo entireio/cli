@@ -298,6 +298,20 @@ func TestImageKeyRevealsSecret(t *testing.T) {
 	}
 }
 
+// skipLeaf rejects a string that is no image at its prefix, before it reads
+// the key. Most leaves in a transcript are text, and reading every key made
+// about a fifth more allocations on a real one. AllocsPerRun sets GOMAXPROCS,
+// so this test does not run in parallel.
+func TestSkipLeaf_ReadsKeyOnlyForImages(t *testing.T) {
+	uri := "data:image/jpeg;base64," + fakeImageBase64(jpegMagic)
+	assert.False(t, skipLeaf(false, "userPassword", false, uri))
+	assert.True(t, skipLeaf(false, "authorAvatar", false, uri))
+	allocs := testing.AllocsPerRun(100, func() {
+		skipLeaf(false, "authorName", false, "Ada Lovelace")
+	})
+	assert.Zero(t, allocs)
+}
+
 // customRuleReadsValue stops at a rule's first match past the key, so a rule
 // that matches every byte of an image costs no more than one that matches
 // once, and a match in the key alone reads nothing of the value. Custom rules
