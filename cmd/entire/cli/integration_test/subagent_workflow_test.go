@@ -23,6 +23,7 @@ type workflowAgentFixture struct {
 	id    string
 	file  string
 	usage map[string]int
+	model string // message.model; "" writes none
 }
 
 // TestClaudeWorkflowAgents_GetTaskRecordsAndSubagentTokens is the #2685
@@ -41,9 +42,9 @@ func TestClaudeWorkflowAgents_GetTaskRecordsAndSubagentTokens(t *testing.T) {
 	session := env.NewSession()
 
 	agents := []workflowAgentFixture{
-		{id: "ae3d7b8f2930c8787", file: "a.txt", usage: map[string]int{"input_tokens": 2, "cache_creation_input_tokens": 24379, "cache_read_input_tokens": 0, "output_tokens": 169}},
-		{id: "ac82c55f48a03882b", file: "b.txt", usage: map[string]int{"input_tokens": 3, "cache_creation_input_tokens": 2674, "cache_read_input_tokens": 24379, "output_tokens": 145}},
-		{id: "a6d78754c07df829a", file: "c.txt", usage: map[string]int{"input_tokens": 5, "cache_creation_input_tokens": 100, "cache_read_input_tokens": 200, "output_tokens": 7}},
+		{id: "ae3d7b8f2930c8787", file: "a.txt", model: "claude-haiku-4-5", usage: map[string]int{"input_tokens": 2, "cache_creation_input_tokens": 24379, "cache_read_input_tokens": 0, "output_tokens": 169}},
+		{id: "ac82c55f48a03882b", file: "b.txt", model: "claude-haiku-4-5", usage: map[string]int{"input_tokens": 3, "cache_creation_input_tokens": 2674, "cache_read_input_tokens": 24379, "output_tokens": 145}},
+		{id: "a6d78754c07df829a", file: "c.txt", model: "claude-opus-4-8", usage: map[string]int{"input_tokens": 5, "cache_creation_input_tokens": 100, "cache_read_input_tokens": 200, "output_tokens": 7}},
 	}
 
 	if err := env.SimulateUserPromptSubmit(session.ID); err != nil {
@@ -119,11 +120,16 @@ func TestClaudeWorkflowAgents_GetTaskRecordsAndSubagentTokens(t *testing.T) {
 			InputTokens    int `json:"input_tokens"`
 			OutputTokens   int `json:"output_tokens"`
 			SubagentTokens *struct {
-				InputTokens         int `json:"input_tokens"`
-				CacheCreationTokens int `json:"cache_creation_tokens"`
-				CacheReadTokens     int `json:"cache_read_tokens"`
-				OutputTokens        int `json:"output_tokens"`
-				APICallCount        int `json:"api_call_count"`
+				InputTokens         int    `json:"input_tokens"`
+				CacheCreationTokens int    `json:"cache_creation_tokens"`
+				CacheReadTokens     int    `json:"cache_read_tokens"`
+				OutputTokens        int    `json:"output_tokens"`
+				APICallCount        int    `json:"api_call_count"`
+				Model               string `json:"model"`
+				ByModel             []struct {
+					Model       string `json:"model"`
+					InputTokens int    `json:"input_tokens"`
+				} `json:"by_model"`
 			} `json:"subagent_tokens"`
 		} `json:"token_usage"`
 	}
@@ -137,6 +143,14 @@ func TestClaudeWorkflowAgents_GetTaskRecordsAndSubagentTokens(t *testing.T) {
 	require.Equal(t, wantSubagent["cache_read_input_tokens"], sub.CacheReadTokens, raw)
 	require.Equal(t, wantSubagent["output_tokens"], sub.OutputTokens, raw)
 	require.Equal(t, len(agents), sub.APICallCount, raw)
+	// The agents ran on two models: the session's subagent tokens are split
+	// per model, not attributed to either.
+	require.Empty(t, sub.Model, raw)
+	require.Len(t, sub.ByModel, 2, raw)
+	require.Equal(t, "claude-haiku-4-5", sub.ByModel[0].Model, raw)
+	require.Equal(t, 5, sub.ByModel[0].InputTokens, raw)
+	require.Equal(t, "claude-opus-4-8", sub.ByModel[1].Model, raw)
+	require.Equal(t, 5, sub.ByModel[1].InputTokens, raw)
 }
 
 // TestClaudeWorkflowAgent_CommitWhileRunning_MaterializesRunTranscript covers
@@ -220,6 +234,7 @@ func writeWorkflowAgentTranscript(t *testing.T, runDir string, i int, a workflow
 			"content": []any{map[string]any{"type": "tool_use", "id": fmt.Sprintf("toolu_agent_%d", i), "name": "Write",
 				"input": map[string]any{"file_path": a.file, "content": fmt.Sprintf("line from agent %d\n", i+1)}}},
 			"usage": a.usage,
+			"model": a.model,
 		}},
 	)
 	meta := fmt.Sprintf(`{"agentType":"workflow-subagent","description":"agent %d","workflowPhase":"Append","spawnDepth":1}`, i+1)
@@ -253,8 +268,9 @@ func assertWorkflowTaskRecord(t *testing.T, env *TestEnv, checkpointID string, a
 		CompletedAt  string   `json:"completed_at"`
 		Files        []string `json:"files"`
 		TokenUsage   *struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
+			InputTokens  int    `json:"input_tokens"`
+			OutputTokens int    `json:"output_tokens"`
+			Model        string `json:"model"`
 		} `json:"token_usage"`
 	}
 	require.NoError(t, json.Unmarshal([]byte(raw), &task))
@@ -265,6 +281,7 @@ func assertWorkflowTaskRecord(t *testing.T, env *TestEnv, checkpointID string, a
 	require.NotNil(t, task.TokenUsage, "task token usage missing: %s", raw)
 	require.Equal(t, a.usage["input_tokens"], task.TokenUsage.InputTokens, raw)
 	require.Equal(t, a.usage["output_tokens"], task.TokenUsage.OutputTokens, raw)
+	require.Equal(t, a.model, task.TokenUsage.Model, "the task records the model its tokens ran on: %s", raw)
 
 	transcript, ok := env.ReadFileFromBranch(paths.MetadataBranchName,
 		CheckpointTaskFilePath(checkpointID, a.id, paths.AgentTranscriptFileName(a.id)))

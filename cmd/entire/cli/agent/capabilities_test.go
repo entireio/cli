@@ -675,6 +675,9 @@ func (m *mockLocatorAgent) DiscoverReviewSkills(context.Context) ([]DiscoveredSk
 func (m *mockLocatorAgent) ResolveRestoredSessionFile(string, string, []byte) (string, error) {
 	return "", nil
 }
+func (m *mockLocatorAgent) CalculateSubagentTokenUsage([]byte) (*TokenUsage, error) {
+	return nil, nil //nolint:nilnil // test stub
+}
 func (m *mockLocatorAgent) ProtectedFiles() []string                             { return nil }
 func (m *mockLocatorAgent) HookConfigRelPath() string                            { return "" }
 func (m *mockLocatorAgent) ResolveSessionFileCandidates(string, string) []string { return nil }
@@ -698,6 +701,10 @@ func TestUndeclaredCapabilityHelpers(t *testing.T) {
 		},
 		"AsRestoredSessionPathResolver": func(ag Agent) bool {
 			_, ok := AsRestoredSessionPathResolver(ag)
+			return ok
+		},
+		"AsSubagentTokenCalculator": func(ag Agent) bool {
+			_, ok := AsSubagentTokenCalculator(ag)
 			return ok
 		},
 		"AsProtectedFilesProvider": func(ag Agent) bool {

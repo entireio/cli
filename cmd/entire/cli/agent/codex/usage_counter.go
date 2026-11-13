@@ -40,6 +40,15 @@ func (u rolloutUsage) tokenUsage(calls int) agent.TokenUsage {
 	}
 }
 
+// sameSnapshot reports whether two token_count snapshots hold the same counts.
+// Snapshots carry no model, so comparing the counts is comparing the values;
+// TokenUsage itself is not comparable (its ByModel split is a slice).
+func sameSnapshot(a, b agent.TokenUsage) bool {
+	return a.InputTokens == b.InputTokens && a.CacheReadTokens == b.CacheReadTokens &&
+		a.CacheCreationTokens == b.CacheCreationTokens && a.OutputTokens == b.OutputTokens &&
+		a.APICallCount == b.APICallCount
+}
+
 // NewUsageCounter combines two lower bounds on the rollout's usage: per-call
 // token_usage_record lines, counted once per response_id (a replayed record
 // keeps its first copy; immune to a counter restarted on resume), and
@@ -104,7 +113,7 @@ func (u *usageCounter) Add(_ string, data []byte) {
 				return
 			}
 			snapshot := event.Info.TotalTokenUsage.tokenUsage(0)
-			if last := u.Snapshots.Last; last == nil || snapshot != *last {
+			if last := u.Snapshots.Last; last == nil || !sameSnapshot(snapshot, *last) {
 				u.Calls++
 			}
 			u.Snapshots.Add(&snapshot)

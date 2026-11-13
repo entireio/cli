@@ -377,6 +377,7 @@ func upsertTasks(stored []storedTask, payloads []cp.TaskPayload) []storedTask {
 				AgentID:                     p.AgentID,
 				SubagentType:                p.SubagentType,
 				TaskDescription:             redact.String(p.TaskDescription),
+				SubagentModel:               p.SubagentModel,
 				Files:                       p.Files,
 				TokenUsage:                  p.TokenUsage,
 				StartedAt:                   p.StartedAt,

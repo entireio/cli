@@ -11,13 +11,15 @@ import (
 )
 
 // A ledger reading counts an inventoried child with the inventory's own rule
-// (its last token_count), apart from the parent's total, on every reading.
+// (its last token_count) and labelled with its model, apart from the parent's
+// total, on every reading.
 func TestUsageCounter_InventoriedChild(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	ag := &CodexAgent{RolloutRoots: []string{root}}
 	child := writeRollout(t, root, "rollout-child.jsonl", "child", []json.RawMessage{
 		taskEvent("task_started", stringPointer("child-turn")),
+		turnContextEvent("gpt-5.6-sol"),
 		taskEvent("task_complete", stringPointer("child-turn")),
 		tokenCountEvent(map[string]any{"total_token_usage": map[string]any{"input_tokens": 5, "cached_input_tokens": 2, "output_tokens": 1}}),
 	})
@@ -31,7 +33,8 @@ func TestUsageCounter_InventoriedChild(t *testing.T) {
 	require.True(t, ok)
 	require.NoError(t, err)
 	require.Equal(t, 100, first.Total.InputTokens, "the child is not in the parent's total")
-	require.Equal(t, &agent.TokenUsage{InputTokens: 3, CacheReadTokens: 2, OutputTokens: 1, APICallCount: 1}, first.Children["child"])
+	require.Equal(t, &agent.TokenUsage{InputTokens: 3, CacheReadTokens: 2, OutputTokens: 1, APICallCount: 1, Model: "gpt-5.6-sol"}, first.Children["child"],
+		"the child records its turn_context model")
 
 	again, _, err := agent.ReadCumulativeUsage(t.Context(), ag, in, first.Cursor)
 	require.NoError(t, err)

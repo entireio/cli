@@ -28,7 +28,7 @@ func TestTokenScope_NestedSubagentCountedOnce(t *testing.T) {
 	childPath := filepath.Join(subagentsDir, paths.AgentTranscriptFileName(child))
 	usageLine := func(agentID, messageID string, tokens int) map[string]any {
 		return map[string]any{"type": "assistant", "isSidechain": true, "agentId": agentID, "message": map[string]any{
-			"id": messageID, "role": "assistant", "usage": map[string]int{"input_tokens": tokens, "output_tokens": tokens},
+			"id": messageID, "role": "assistant", "model": tokenTurnSubagentModel, "usage": map[string]int{"input_tokens": tokens, "output_tokens": tokens},
 		}}
 	}
 	launchLine := func(agentID, toolUseID, launched string) map[string]any {

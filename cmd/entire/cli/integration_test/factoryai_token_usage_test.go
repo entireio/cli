@@ -117,7 +117,7 @@ func TestFactoryDroidWorkerTokensComeFromItsOwnSettings(t *testing.T) {
 	require.NotNil(t, state)
 	rec := state.FindTaskRecord(toolUseID)
 	require.NotNil(t, rec, "the Worker's turn must be a task on the parent")
-	require.Equal(t, &agent.TokenUsage{InputTokens: 8612, OutputTokens: 109, CacheReadTokens: 8026, APICallCount: 1}, rec.TokenUsage)
+	require.Equal(t, &agent.TokenUsage{InputTokens: 8612, OutputTokens: 109, CacheReadTokens: 8026, APICallCount: 1, Model: "Gemini-2.5-Pro-0"}, rec.TokenUsage)
 
 	// The parent's own TokenUsage excludes the Worker, which counts in the task.
 	appendLines(t, parent.TranscriptPath,
@@ -135,4 +135,5 @@ func TestFactoryDroidWorkerTokensComeFromItsOwnSettings(t *testing.T) {
 	require.Equal(t, 8612, total.SubagentTokens.InputTokens)
 	require.Equal(t, 8026, total.SubagentTokens.CacheReadTokens)
 	require.Equal(t, 1, total.SubagentTokens.APICallCount)
+	require.Equal(t, "Gemini-2.5-Pro-0", total.SubagentTokens.Model, "the Worker's model reaches the parent's total")
 }

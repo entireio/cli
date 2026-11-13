@@ -20,6 +20,33 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// Per-step main-agent usage is summed through types.AddTokenUsage, so a
+// model split recorded on either side keeps summing to the accumulated totals
+// rather than going stale while the counts grow.
+func TestAccumulateTokenUsage_KeepsModelSplitConsistent(t *testing.T) {
+	t.Parallel()
+
+	split := types.AddTokenUsage(
+		&agent.TokenUsage{InputTokens: 4, APICallCount: 1, Model: "a"},
+		&agent.TokenUsage{InputTokens: 6, APICallCount: 1, Model: "b"},
+	)
+	got := accumulateTokenUsage(split, &agent.TokenUsage{InputTokens: 5, APICallCount: 1})
+	require.Equal(t, 15, got.InputTokens)
+	require.Equal(t, []agent.TokenUsage{
+		{InputTokens: 5, APICallCount: 1},
+		{InputTokens: 4, APICallCount: 1, Model: "a"},
+		{InputTokens: 6, APICallCount: 1, Model: "b"},
+	}, got.ByModel)
+
+	labelled := accumulateTokenUsage(nil, &agent.TokenUsage{InputTokens: 3, APICallCount: 1, Model: "a"})
+	labelled = accumulateTokenUsage(labelled, &agent.TokenUsage{InputTokens: 2, APICallCount: 1, Model: "b"})
+	require.Equal(t, 5, labelled.InputTokens)
+	require.Equal(t, []agent.TokenUsage{
+		{InputTokens: 3, APICallCount: 1, Model: "a"},
+		{InputTokens: 2, APICallCount: 1, Model: "b"},
+	}, labelled.ByModel)
+}
+
 // TestAccumulateTokenUsage_SubagentTokensReplacedNotSummed is a focused unit
 // test on accumulateTokenUsage: CalculateTotalTokenUsage (claudecode and
 // factoryaidroid) discovers subagent IDs from the full transcript and re-reads
