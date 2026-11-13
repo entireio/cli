@@ -23,17 +23,20 @@ const (
 	helperUploadPackEnv = "GITHELPER_TEST_UPLOAD_PACK_DIR"
 	helperStripNAKEnv   = "GITHELPER_TEST_STRIP_ROUND_NAK"
 	helperSingleACKEnv  = "GITHELPER_TEST_SINGLE_ACK"
+	helperNoSideBandEnv = "GITHELPER_TEST_NO_SIDE_BAND"
 )
 
 // execTransport answers the helper with `git upload-pack --stateless-rpc`
 // on a local repository, so a test needs no listener. stripRoundNAK drops
 // the NAK that ends a round without done, as a server that does not
 // follow Git's rule would. singleACK leaves multi_ack and
-// multi_ack_detailed out of the advertisement, so git asks for neither.
+// multi_ack_detailed out of the advertisement, so git asks for neither;
+// noSideBand leaves side-band and side-band-64k out, so the pack comes raw.
 type execTransport struct {
 	dir           string
 	stripRoundNAK bool
 	singleACK     bool
+	noSideBand    bool
 }
 
 func (e *execTransport) InfoRefs(ctx context.Context, service string) (io.ReadCloser, error) {
@@ -44,6 +47,9 @@ func (e *execTransport) InfoRefs(ctx context.Context, service string) (io.ReadCl
 	if e.singleACK {
 		out = withoutMultiACK(out)
 	}
+	if e.noSideBand {
+		out = withoutSideBand(out)
+	}
 	header := pktLine("# service="+service+"\n") + "0000"
 	return io.NopCloser(io.MultiReader(strings.NewReader(header), bytes.NewReader(out))), nil
 }
@@ -51,12 +57,22 @@ func (e *execTransport) InfoRefs(ctx context.Context, service string) (io.ReadCl
 // withoutMultiACK drops the multi_ack capabilities from the first line of
 // a ref advertisement.
 func withoutMultiACK(adv []byte) []byte {
+	return replaceFirstLine(adv, strings.NewReplacer(" multi_ack_detailed", "", " multi_ack", "", "\x00multi_ack_detailed ", "\x00", "\x00multi_ack ", "\x00"))
+}
+
+// withoutSideBand drops the side-band capabilities from the first line of a
+// ref advertisement.
+func withoutSideBand(adv []byte) []byte {
+	return replaceFirstLine(adv, strings.NewReplacer(" side-band-64k", "", " side-band", "", "\x00side-band-64k ", "\x00", "\x00side-band ", "\x00"))
+}
+
+// replaceFirstLine rewrites the first pkt-line of a ref advertisement.
+func replaceFirstLine(adv []byte, r *strings.Replacer) []byte {
 	n, err := strconv.ParseUint(string(adv[:4]), 16, 16)
 	if err != nil || n < 4 {
 		return adv
 	}
-	first := strings.NewReplacer(" multi_ack_detailed", "", " multi_ack", "", "\x00multi_ack_detailed ", "\x00", "\x00multi_ack ", "\x00").Replace(string(adv[4:n]))
-	return append([]byte(pktLine(first)), adv[n:]...)
+	return append([]byte(pktLine(r.Replace(string(adv[4:n])))), adv[n:]...)
 }
 
 func (e *execTransport) InfoRefsV2(context.Context) (io.ReadCloser, error) {
@@ -85,7 +101,7 @@ func (e *execTransport) ErrorBaseURL() string { return "file://" + e.dir }
 
 // uploadPackStub installs a git-remote-<scheme> that re-executes this test
 // binary as the helper with an execTransport on dir.
-func uploadPackStub(t *testing.T, scheme, dir string, stripRoundNAK, singleACK bool) string {
+func uploadPackStub(t *testing.T, scheme, dir string, stripRoundNAK, singleACK, noSideBand bool) string {
 	t.Helper()
 	exe, err := os.Executable()
 	if err != nil {
@@ -102,6 +118,7 @@ func uploadPackStub(t *testing.T, scheme, dir string, stripRoundNAK, singleACK b
 		helperUploadPackEnv + "='" + dir + "' " +
 		helperStripNAKEnv + "=" + flag(stripRoundNAK) + " " +
 		helperSingleACKEnv + "=" + flag(singleACK) + " " +
+		helperNoSideBandEnv + "=" + flag(noSideBand) + " " +
 		"exec '" + exe + "'\n"
 	if err := os.WriteFile(filepath.Join(stubDir, "git-remote-"+scheme), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
@@ -155,6 +172,7 @@ func TestRelaySingleACKRound(t *testing.T) {
 	ack := pktLine("ACK " + testHeadSHA + "\n")
 	pack := "000a\x01PACK" + "0000"
 	bigPack := pktLine("\x01PACK"+strings.Repeat("x", 60000)) + "0000"
+	rawPack := "PACK\x00\x00\x00\x02\x00\x00\x00\x00" + strings.Repeat("\xff", 20)
 	for _, tc := range []struct {
 		name   string
 		rounds []string // the last one is the done round
@@ -181,6 +199,34 @@ func TestRelaySingleACKRound(t *testing.T) {
 			name:   "large pack packet after the ACK",
 			rounds: []string{ack, ack + bigPack},
 			want:   ack + bigPack,
+		},
+		{
+			// Without side-band the pack follows the ACK raw: its header
+			// is no pkt-line.
+			name:   "pack without side-band after the ACK",
+			rounds: []string{nak, ack, ack + rawPack},
+			want:   nak + ack + rawPack,
+		},
+		{
+			// The first ACK arrives with the pack, in the done round.
+			name:   "pack without side-band, first ACK in the done round",
+			rounds: []string{nak, ack + rawPack},
+			want:   nak + ack + rawPack,
+		},
+		{
+			// One ACK per request, repeated across rounds because every
+			// request repeats the haves. The done round still starts
+			// with a repeated ACK, then the raw pack.
+			name:   "pack without side-band, several ACKs before the pack",
+			rounds: []string{nak, ack, ack, ack + rawPack},
+			want:   nak + ack + rawPack,
+		},
+		{
+			// Already passed on main: the done round's NAK ends the loop
+			// before the pack header is peeked, and the copy takes the rest.
+			name:   "pack without side-band, nothing common",
+			rounds: []string{nak, nak + rawPack},
+			want:   nak + nak + rawPack,
 		},
 		{
 			name:   "nothing common",
@@ -316,25 +362,38 @@ func TestGitFetchConnectRounds(t *testing.T) {
 		name          string
 		stripRoundNAK bool
 		singleACK     bool
+		noSideBand    bool
 		args          []string
 	}
 	var cases []fetchCase
-	for _, singleACK := range []bool{false, true} {
-		for _, strip := range []bool{true, false} {
-			for _, deepen := range []bool{false, true} {
-				tc := fetchCase{stripRoundNAK: strip, singleACK: singleACK}
-				tc.name = "server with round NAK"
-				if strip {
-					tc.name = "server without round NAK"
+	for _, noSideBand := range []bool{false, true} {
+		for _, singleACK := range []bool{false, true} {
+			// With multi_ack the round is a plain io.Copy, so a no-side-band
+			// rerun never reaches the changed code. Those cases already pass
+			// on main and would only add runtime; the subtests cannot run
+			// in parallel.
+			if noSideBand && !singleACK {
+				continue
+			}
+			for _, strip := range []bool{true, false} {
+				for _, deepen := range []bool{false, true} {
+					tc := fetchCase{stripRoundNAK: strip, singleACK: singleACK, noSideBand: noSideBand}
+					tc.name = "server with round NAK"
+					if strip {
+						tc.name = "server without round NAK"
+					}
+					if deepen {
+						tc.name += ", deepen"
+						tc.args = []string{"--depth=3"}
+					}
+					if singleACK {
+						tc.name += ", single ACK"
+					}
+					if noSideBand {
+						tc.name += ", no side-band"
+					}
+					cases = append(cases, tc)
 				}
-				if deepen {
-					tc.name += ", deepen"
-					tc.args = []string{"--depth=3"}
-				}
-				if singleACK {
-					tc.name += ", single ACK"
-				}
-				cases = append(cases, tc)
 			}
 		}
 	}
@@ -375,7 +434,7 @@ func TestGitFetchConnectRounds(t *testing.T) {
 			}
 
 			const scheme = "entiretest"
-			path := uploadPackStub(t, scheme, server, tc.stripRoundNAK, tc.singleACK)
+			path := uploadPackStub(t, scheme, server, tc.stripRoundNAK, tc.singleACK, tc.noSideBand)
 			run("remote", "add", "origin", scheme+"://host/repo")
 			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()

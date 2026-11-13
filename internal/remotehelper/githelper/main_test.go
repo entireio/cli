@@ -21,6 +21,7 @@ func TestMain(m *testing.M) {
 			dir:           dir,
 			stripRoundNAK: os.Getenv(helperStripNAKEnv) != "",
 			singleACK:     os.Getenv(helperSingleACKEnv) != "",
+			noSideBand:    os.Getenv(helperNoSideBandEnv) != "",
 		}
 		if err := Run(context.Background(), t, 0, os.Stdin, os.Stdout); err != nil {
 			fmt.Fprintf(os.Stderr, "test helper: %v\n", err)
