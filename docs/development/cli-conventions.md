@@ -387,7 +387,10 @@ always runnable in every build.
   failed since) is not a failure: the row reads `still syncing`, the command
   names `entire repo view <repo>` to check on it, and it exits 0 like
   `--no-wait`'s `registered`. A deadline in any other state stays `timed out`
-  and fails. `add` defaults to one
+  and fails. A poll interrupted by the wait's own deadline preserves the last
+  answer; a credential failure clears it even if its independent timeout returns
+  after the wait's deadline.
+  `add` defaults to one
   fixed cluster without a terminal so scripts stay stable; `remove` has no
   default at all, because which clusters a repo is on is a property of the repo
   and guessing one would delete a copy nobody named — a terminal gets a
