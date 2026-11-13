@@ -124,6 +124,22 @@ func TestTokenLedger_ClaudeCode_EachCallCountedOnce(t *testing.T) {
 			},
 		},
 		{
+			// Each checkpoint after the first measures from a mark that an
+			// earlier mark moved: the mark must keep the subagents' model.
+			name: "subagents in three successive checkpoints",
+			run: func(r *tokenTurnRun) {
+				r.start(10, 6, "a.txt")
+				r.stop()
+				r.commit("a.txt", "sub1.txt")
+				r.start(20, 4, "b.txt")
+				r.stop()
+				r.commit("b.txt", "sub2.txt")
+				r.start(30, 3, "c.txt")
+				r.stop()
+				r.commit("c.txt", "sub3.txt")
+			},
+		},
+		{
 			name: "a transcript rewritten to an older copy",
 			run: func(r *tokenTurnRun) {
 				r.start(10, 0, "a.txt")
