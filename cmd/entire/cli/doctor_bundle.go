@@ -148,6 +148,24 @@ func writeDoctorBundle(ctx context.Context, repoRoot, outPath string, raw bool) 
 			}
 		}
 	}
+	// A linked worktree with no local file of its own runs on the main
+	// worktree's, so the bundle carries that one, named as inherited.
+	if mainWorktree, inherited := settings.InheritedLocalSettingsRoot(settings.WithWorktreeRoot(ctx, repoRoot)); inherited {
+		inheritedName := path.Join("settings", "inherited-"+settings.SettingsLocalName)
+		mainEntire, err := entiredir.OpenAtForRead(mainWorktree)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+		case err != nil:
+			// A gap in the bundle beats no bundle; say why the file is missing.
+			if err := addStringToZip(zw, inheritedName, fmt.Sprintf("[error: open main worktree %s: %v]\n", paths.EntireDir, err), raw); err != nil {
+				return err
+			}
+		default:
+			if err := addFileToZip(zw, mainEntire, settings.SettingsLocalName, inheritedName, raw); err != nil {
+				return err
+			}
+		}
+	}
 
 	if err := addCommandOutput(ctx, zw, "git-status.txt", repoRoot, raw, "git", "--no-optional-locks", "status", "--short", "--branch"); err != nil {
 		return err
