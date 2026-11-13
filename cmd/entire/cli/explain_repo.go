@@ -326,14 +326,15 @@ func classifyCrossRepoTarget(opts crossRepoExplainOptions) (id.CheckpointID, str
 // readCrossRepoSessionContent reads the requested session, or the latest when
 // no explicit index was given.
 func readCrossRepoSessionContent(ctx context.Context, reader crossRepoReader, cid id.CheckpointID, summary *checkpoint.CheckpointSummary, sessionIndex int) (*checkpoint.SessionContent, error) {
+	sessions := transcriptOptionalReader{reader}
 	if sessionIndex < 0 {
-		content, err := checkpoint.ReadLatestSessionContent(ctx, reader, cid, summary)
+		content, err := checkpoint.ReadLatestSessionContent(ctx, sessions, cid, summary)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read checkpoint content for %s: %w", cid, err)
 		}
 		return content, nil
 	}
-	content, err := reader.ReadSessionContent(ctx, cid, sessionIndex)
+	content, err := sessions.ReadSessionContent(ctx, cid, sessionIndex)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read checkpoint content for %s: %w", cid, err)
 	}

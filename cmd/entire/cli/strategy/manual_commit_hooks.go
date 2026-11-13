@@ -1509,6 +1509,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 
 	// Condense into the trailer prepare stamped, never into an inherited one.
 	ids, stamped, redone, moved := linkedTrailersOf(ctx, commit)
+	agentStamps := takeAgentStamps(ctx)
 	checkpointID, targetPreexisting, found := s.condensationTarget(ctx, repo, ids, stamped)
 	openRepoSpan.End()
 
@@ -1527,6 +1528,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	if slices.Contains(moved, checkpointID) {
 		ctx = withRecordedCommitLink(ctx, head.Hash().String())
 	}
+	ctx = withAgentStampOf(ctx, checkpointID, stamped, agentStamps)
 
 	_, findSessionsSpan := perf.Start(ctx, "find_sessions_for_worktree")
 	worktreePath, err := paths.WorktreeRoot(ctx)
@@ -2099,6 +2101,18 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 	return handler.newSkillEvents, handler.condensedSignal, handler.condensed
 }
 
+// advanceWindowAfterCondense moves the session's checkpoint window past what
+// the condensation stored. A checkpoint the agent-commit fast path stamped for
+// this session but wrote without a transcript (agentStampedFor) stored none of
+// it, so the window stays put and the next checkpoint covers that transcript,
+// rather than restarting at 0 and re-covering earlier checkpoints.
+func advanceWindowAfterCondense(ctx context.Context, state *SessionState, result *CondenseResult) {
+	if result.TotalTranscriptLines == 0 && agentStampedFor(ctx, result.CheckpointID, state.SessionID) {
+		return
+	}
+	state.AdvanceCheckpointWindow(result.TotalTranscriptLines)
+}
+
 // condenseAndUpdateState runs condensation for a session and updates state afterward.
 // Returns whether condensation succeeded, plus the skill events it appended to
 // session state (for telemetry after the surrounding session gate releases).
@@ -2168,7 +2182,7 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 		// work was not. Keep its existing SaveStep count, which keeps the
 		// session pending (State.HasPendingWork) until a home commit consumes it.
 		state.StepCount = pendingStepCount
-		state.AdvanceCheckpointWindow(result.TotalTranscriptLines)
+		advanceWindowAfterCondense(ctx, state, result)
 		state.CheckpointTranscriptSize = result.TranscriptSizeBaseline
 		logging.Info(logCtx, "session guest-condensed from a sibling worktree; home worktree state untouched",
 			slog.String("strategy", "manual-commit"),
@@ -2183,7 +2197,7 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 	newHead := head.Hash().String()
 	state.BaseCommit = newHead
 	resetCheckpointWindow(state)
-	state.AdvanceCheckpointWindow(result.TotalTranscriptLines)
+	advanceWindowAfterCondense(ctx, state, result)
 	state.CheckpointTranscriptSize = result.TranscriptSizeBaseline
 	state.FilesTouched = nil
 	state.TouchedFileHashes = nil
@@ -3046,9 +3060,9 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 // writes its transcript file only AFTER the Stop hook, so mid-turn the
 // recorded path routinely points at a missing or still-empty file; only an
 // on-disk stat tells the truth. Other agents keep the cheap path-only check:
-// for them an empty transcript file at commit time is a transient write race,
-// and condensation errors-and-retries rather than skipping, so the trailer
-// heals on the next commit.
+// a transcript that turns out empty or unreadable at condensation does not
+// leave the trailer dangling, because the session the fast path stamped for
+// condenses without one (agentStampedFor).
 //
 // NOTE: conservative approximation of the skip gate in CondenseSession (which
 // checks extracted data, not raw state). Keep aligned.
@@ -3133,6 +3147,7 @@ func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, 
 	if !recordStampedTrailer(logCtx, cpID) {
 		return nil
 	}
+	recordAgentStamp(logCtx, cpID, state.SessionID)
 
 	logging.Info(logCtx, "prepare-commit-msg: agent commit trailer added",
 		slog.String("strategy", "manual-commit"),
