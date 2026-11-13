@@ -73,6 +73,7 @@ func TestJSONLBytesCounts_CreditsEachLayer(t *testing.T) {
 		{name: "credentialed uri", content: textLine(t, "cache at redis://:hunter2pass@10.0.0.5:6379/0"), layers: map[string]int{"credentialed_uri": 1, "betterleaks": 1}},
 		{name: "connection string", content: textLine(t, "Server=db;User Id=sa;Password=hunter2secret;Database=app"), layers: map[string]int{"connection_string": 1, "betterleaks": 1}},
 		{name: "credential value", content: textLine(t, "DB_PASSWORD=hunter2secret"), layers: map[string]int{"credential_value": 1, "betterleaks": 1}},
+		{name: "connection string from an argv array", content: `{"command":["mysql","-phunter2"]}` + "\n", layers: map[string]int{"connection_string": 1}},
 		{name: "custom rule", content: textLine(t, "ticket ACME-12345678 filed"), layers: map[string]int{"custom": 1}},
 		{name: "shell stdin", content: textLine(t, "printf 'hunter2secret' | gh secret set DB_PASSWORD"), layers: map[string]int{"shell_stdin": 1}},
 		{name: "pii email", content: textLine(t, "mail alice@corp-mail.org now"), layers: map[string]int{"pii": 1}, pii: map[string]int{"EMAIL": 1, "custom": 0}},

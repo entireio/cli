@@ -2460,20 +2460,20 @@ func TestJSONLContent_SecretsInContentStillCaught(t *testing.T) {
 	}
 }
 
-// Pins a known gap: shell shorthand `--password=...` is not redacted because
-// no detector matches `--password=` (no DB-prefix, no DSN structure, no URI).
-func TestString_MysqlShellShorthandIsNotRedacted(t *testing.T) {
+// Pins that shell shorthand `--password=...` is redacted by the command-line
+// layer even without a DB prefix, DSN structure, or URI.
+func TestString_MysqlShellShorthandIsRedacted(t *testing.T) {
 	t.Parallel()
 	assertStringRedactionCases(t, []stringRedactionCase{
 		{
 			name:  "mysql cli flag",
 			input: "mysql -u svc --password=hunter2 -h db.example.com app",
-			want:  "mysql -u svc --password=hunter2 -h db.example.com app",
+			want:  "mysql -u svc --password=REDACTED -h db.example.com app",
 		},
 		{
 			name:  "psql cli flag",
 			input: "psql --password=hunter2 -U svc -h db.example.com app",
-			want:  "psql --password=hunter2 -U svc -h db.example.com app",
+			want:  "psql --password=REDACTED -U svc -h db.example.com app",
 		},
 	})
 }
