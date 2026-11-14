@@ -39,7 +39,7 @@ func TestStampedTrailer_OnlyTrailersPrepareStamped(t *testing.T) {
 	assert.True(t, ok)
 	assert.Equal(t, fresh, got, "the stamp is the trailer prepare recorded, not the pasted one after it")
 
-	assert.Equal(t, map[id.CheckpointID]bool{fresh: true}, takeStampedTrailers(ctx))
+	assert.Equal(t, map[id.CheckpointID]bool{fresh: true}, takeStampRecords(ctx, commitOn("", msg)).stamped)
 	assert.Empty(t, readStampedTrailers(ctx), "post-commit consumes the record")
 }
 

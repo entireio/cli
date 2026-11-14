@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -443,6 +444,138 @@ func resolveWorktreeCandidates(ctx context.Context, worktreePath string, candida
 	}
 	warnAmbiguousWorktreeSessions(ctx, worktreePath, candidates)
 	return nil, true
+}
+
+// withoutIdleSessions drops, from the fallback's matches of a commit with no
+// session homed in its worktree, the sessions idle beyond recentSessionWindow:
+// they are no more likely to be this commit's than they are when the
+// candidates span several worktrees. When all candidates came from one
+// worktree, resolveWorktreeCandidates links them without that check, and
+// post-commit would condense a session idle for days into every commit made
+// here. Only new links are judged: a session prepare-commit-msg already linked
+// this commit to is kept (withLinkedSessions), and so is, on an amend, the
+// owner of the checkpoint the amended commit links (withAmendedCheckpoint).
+// Post-rewrite does not apply this at all.
+func withoutIdleSessions(ctx context.Context, worktreePath string, states []*SessionState) []*SessionState {
+	now := time.Now()
+	linked := linkedSessions(ctx)
+	var kept []*SessionState
+	for _, state := range states {
+		if !slices.Contains(linked, state.SessionID) && !ownsAmendedCheckpoint(ctx, state) && idleBeyondRecentWindow(state, now) {
+			logging.Debug(logging.WithComponent(ctx, "checkpoint"),
+				"session matching: fallback session idle beyond the recent window; not linked",
+				slog.String("commit_worktree", worktreePath),
+				slog.String("session_id", state.SessionID),
+				slog.String("session_worktree", state.WorktreePath))
+			continue
+		}
+		kept = append(kept, state)
+	}
+	return kept
+}
+
+// idleBeyondRecentWindow reports whether state last interacted before
+// recentSessionWindow and shows no other sign of still working. A session with
+// no recorded interaction is not: how long it has been idle is unknown.
+// LastInteractionTime only moves at turn boundaries, so a session mid-turn
+// (within activeSessionInteractionThreshold) or with a background subagent in
+// flight (hasFreshLiveTaskRecord) is not either: either may be making this
+// commit.
+func idleBeyondRecentWindow(state *SessionState, now time.Time) bool {
+	last := state.LastInteractionTime
+	if last == nil || last.After(now.Add(-recentSessionWindow)) {
+		return false
+	}
+	if state.Phase.IsActive() && isRecentInteraction(last) {
+		return false
+	}
+	return !hasFreshLiveTaskRecord(state, now)
+}
+
+type linkedSessionsKey struct{}
+
+// withLinkedSessions marks sessionIDs as the sessions prepare-commit-msg linked
+// the commit to, which withoutIdleSessions keeps however idle they are. Prepare
+// marks the sessions it links and records them with the trailer it stamps
+// (recordStampedTrailer); post-commit marks the ones recorded for its trailer,
+// so both hooks resolve the same sessions however long the commit took in
+// between. The TTY prompt or the commit-message editor can outlast
+// recentSessionWindow, or a session's background subagent can finish: judged
+// afresh, a session prepare linked would be dropped, and the commit would keep
+// a trailer naming a checkpoint that is never written.
+func withLinkedSessions(ctx context.Context, sessionIDs []string) context.Context {
+	if len(sessionIDs) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, linkedSessionsKey{}, slices.Clone(sessionIDs))
+}
+
+// linkedSessions returns the session IDs withLinkedSessions marked on ctx.
+func linkedSessions(ctx context.Context) []string {
+	if ids, ok := ctx.Value(linkedSessionsKey{}).([]string); ok {
+		return ids
+	}
+	return nil
+}
+
+type trustedSessionsKey struct{}
+
+// withTrustedSessions marks sessionIDs as the sessions prepare-commit-msg
+// stamped the commit's trailer for without overlap evidence
+// (trustedSessionIDs). Prepare records them with the trailer it stamps, and
+// post-commit marks the ones recorded for its trailer, which it then condenses
+// without overlap evidence (postCommitActionHandler.trustedByPrepare).
+func withTrustedSessions(ctx context.Context, sessionIDs []string) context.Context {
+	if len(sessionIDs) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, trustedSessionsKey{}, slices.Clone(sessionIDs))
+}
+
+// trustedSessions returns the session IDs withTrustedSessions marked on ctx.
+func trustedSessions(ctx context.Context) []string {
+	if ids, ok := ctx.Value(trustedSessionsKey{}).([]string); ok {
+		return ids
+	}
+	return nil
+}
+
+type amendedCheckpointKey struct{}
+
+// amendedLink is the existing checkpoint an amend links (amendedCheckpoint).
+// When the commit it replaced does not name the checkpoint, ownerBase is that
+// commit: prepare restores a trailer only for a session based on the commit
+// being amended (handleAmendCommitMsg), so only such an owner was linked by it.
+type amendedLink struct {
+	checkpointID id.CheckpointID
+	ownerBase    string
+}
+
+// withAmendedCheckpoint marks the existing checkpoint an amend keeps or
+// restores the trailer of. The session that owns it is linked to the commit by
+// that trailer already, so withoutIdleSessions keeps it however idle it is:
+// amend records no stamp, so withLinkedSessions has nothing for it.
+func withAmendedCheckpoint(ctx context.Context, link amendedLink) context.Context {
+	if link.checkpointID.IsEmpty() {
+		return ctx
+	}
+	return context.WithValue(ctx, amendedCheckpointKey{}, link)
+}
+
+// ownsAmendedCheckpoint reports whether state owns the checkpoint
+// withAmendedCheckpoint marked on ctx.
+func ownsAmendedCheckpoint(ctx context.Context, state *SessionState) bool {
+	link, ok := ctx.Value(amendedCheckpointKey{}).(amendedLink)
+	return ok && state.LastCheckpointID == link.checkpointID && (link.ownerBase == "" || state.BaseCommit == link.ownerBase)
+}
+
+// linkedSessionIDs returns the IDs of states, for withLinkedSessions.
+func linkedSessionIDs(states []*SessionState) []string {
+	ids := make([]string, 0, len(states))
+	for _, state := range states {
+		ids = append(ids, state.SessionID)
+	}
+	return ids
 }
 
 // warnAmbiguousWorktreeSessions surfaces refused fallback matches: live

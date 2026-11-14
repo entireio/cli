@@ -321,11 +321,51 @@ commit.
   them. An ID in that draft's final trailer block counts as already stamped
   (`stampedTrailer`) only when prepare recorded stamping it: each ID it stamps
   (one it generates, or a session's reserved one) goes into
-  `entire-stamped-trailers.json` in the per-worktree git dir until the next
-  post-commit, which consumes it. The trailer an amend restores names an
+  `entire-stamped-trailers.json` in the per-worktree git dir until the
+  post-commit of the commit that carries it takes it. git lets the next commit
+  start before a commit's post-commit runs, so post-commit takes only the
+  stamps its commit carries, keeps the ones prepared on its commit or on a
+  commit made on top of it since (up to HEAD) for their own post-commit, and
+  drops the rest, left by commits that never happened (`takeStampRecords`).
+  A session's reserved ID goes to one commit: while a commit already made
+  carries it and that commit's post-commit is not done (post-commit leaves the
+  sessions entries of the stamps it took, marked as its own, until it returns,
+  `releaseStampedSessions`; once taken, a stamp counts as carried while its
+  taker runs, even if the commit was amended away), prepare gives the next
+  commit an ID of its own (`stampCarriedInFlight`), and reads the reservation again after that
+  check, since the earlier post-commit may have condensed it in between. A
+  commit retried on the same HEAD after an aborted attempt keeps the
+  reservation. A later post-commit's take keeps an entry the earlier one marked
+  while that process runs (where proclive cannot tell, for a minute), and
+  leaves a stamp its commit carries for an earlier commit that carries it too,
+  as a message saved from that commit does (`carriedBefore`). A later
+  post-commit can reach the session first; it then waits, up to ten seconds,
+  for the post-commit that took the reservation's stamp to condense the
+  session (`awaitEarlierCondensations`) rather than skip it. It waits only for
+  a post-commit that took its stamps before its own take, so two never wait
+  for each other. Prepare writes the records and post-commit
+  takes them under `entire-stamp-records.lock` in the same dir, so hooks of
+  overlapping commits in one worktree cannot lose each other's updates. Beside
+  it, `entire-stamped-sessions.json` records the HEAD prepare stamped on and
+  the sessions it linked for each stamped ID, and post-commit
+  keeps them when it matches sessions again (`withLinkedSessions`): one that
+  looks idle by then, after a long prompt or editor wait, is still condensed
+  into the trailer prepare wrote. The entry also names the sessions prepare
+  stamped on their shape alone, ACTIVE mid-turn or IDLE with a running
+  subagent (`trustedSessionIDs`). In a commit no session's tracked files
+  claim, post-commit condenses those without overlap evidence
+  (`trustedByPrepare`) even once the subagent has finished or the turn has
+  ended, so a session with no tracked files still writes the checkpoint the
+  trailer names. A claimed commit is the claimant's, as before. The trailer an amend restores names an
   existing checkpoint and is not recorded: post-commit condenses into it for
-  its owner without a stamp, and a record a cancelled amend left would let a
-  later commit naming it skip its own trailer. Prepare writes a trailer only once
+  its owner without a stamp, keeping that owner however idle it looks
+  (`withAmendedCheckpoint`: its own entry in HEAD's reflog, past any later
+  commit's, shows it replaced, not advanced, and
+  the replaced commit links the checkpoint, by trailer or in its
+  `LinkedCommits`, or the owner is based on it; a
+  message reused with `commit -C`, or with `--amend -C` from another commit,
+  is a new link and gets no such pass), and a record a cancelled amend left
+  would let a later commit naming it skip its own trailer. Prepare writes a trailer only once
   its stamp is recorded (`recordStampedTrailer`). A draft that already names
   another ID (pasted into `-m`, `-F` or a template) gets prepare's own trailer
   after it.
@@ -657,7 +697,10 @@ forever. A completed record confers no trust: its subagent can no longer be
 the committer, and completion merged its files into `FilesTouched`, so the
 ordinary overlap check links a commit that carries them. Trusting completed
 records let a read-only reviewer's session condense into other sessions'
-commits. The same predicate feeds `shouldCondenseWithOverlapCheck`'s
+commits. The exception is the commit prepare stamped while the record was
+live: post-commit keeps prepare's trust for that trailer (`trustedByPrepare`),
+so a reviewer that finishes while the editor is open does not leave it
+dangling, and the read-only gate below still applies. The same predicate feeds `shouldCondenseWithOverlapCheck`'s
 overlap-check bypass, so the trigger and the condensation trust share one
 rule. The trailer's content guarantee is the materializer itself: the
 commit's condensation stores each record's transcript-so-far under the
