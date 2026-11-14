@@ -72,7 +72,7 @@ func runServer(ctx context.Context, opts Options) (*Dispatch, error) {
 
 		// The slug names the origin's forge (gh/ or et/), so a same-named
 		// repo on the other forge cannot answer for this checkout.
-		repoSlug, err := resolveOriginRepoSlug(ctx, repo)
+		repoSlug, err := resolveOriginRepoSlug(ctx, repo, repoRoot)
 		if err != nil {
 			return nil, fmt.Errorf("%w (or pass --repos %s to name the repo)", err, RepoSlugShapes)
 		}

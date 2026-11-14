@@ -1198,15 +1198,17 @@ func runEnableIdentityPreflight(ctx context.Context, cmd *cobra.Command, repoRoo
 // silent: enabling works offline, and every outcome (no origin remote, not
 // logged in, network error, probe failure) is swallowed.
 func cacheTrailsEnablementAfterEnable(ctx context.Context, insecureHTTPAuth bool) {
+	ctx, cancel := context.WithTimeout(ctx, enableTrailsProbeBudget)
+	defer cancel()
 	rawURL, err := gitremote.GetRemoteURL(ctx, "origin")
 	if err != nil || strings.TrimSpace(rawURL) == "" {
 		// Local-only repo with no origin yet — nothing to probe.
 		return
 	}
 
-	info, err := gitremote.ParseURL(rawURL)
+	info, err := gitremote.ResolveInfo(ctx, "", nil, rawURL)
 	if err != nil {
-		logging.Debug(ctx, "skipping trails enablement probe: unparseable origin remote", "error", err)
+		logging.Debug(ctx, "skipping trails enablement probe: unresolved origin identity", "error", err)
 		return
 	}
 	if info.Forge == "" {

@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -323,13 +324,19 @@ func resolveRemoteRepoRef(ctx context.Context, dir, remote, arg string) (mirrorR
 	// were tried and what was wrong with them, rather than a bare "not found".
 	var tried []string
 	for _, name := range candidates {
-		rawURL, gerr := gitremote.GetRemoteURLInDir(ctx, dir, name)
+		rawURL, gerr := gitremote.GetRemoteURLInDirEnv(ctx, dir, gitrepo.EnvWithoutRepoOverrides(), name)
 		if gerr != nil {
+			if ctx.Err() != nil {
+				return mirrorRepoRef{}, fmt.Errorf("resolve remote: %w", ctx.Err())
+			}
 			tried = append(tried, name+" (not configured)")
 			continue
 		}
-		info, perr := gitremote.ParseURL(rawURL)
+		info, perr := gitremote.ResolveInfoBestEffort(ctx, dir, gitrepo.EnvWithoutRepoOverrides(), rawURL)
 		if perr != nil {
+			if ctx.Err() != nil {
+				return mirrorRepoRef{}, fmt.Errorf("resolve remote identity: %w", ctx.Err())
+			}
 			tried = append(tried, name+" (unparseable URL)")
 			continue
 		}

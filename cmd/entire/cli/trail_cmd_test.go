@@ -384,6 +384,8 @@ func TestParseTrailRepoShape_RefusesNamesTheTrimManufactures(t *testing.T) {
 
 // Not parallel: uses t.Chdir() to point ResolveRemoteRepo at a fake repo.
 func TestResolveTrailRemote_RejectsUnsupportedForge(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	testutil.InstallFakeSSH(t, nil)
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)
 	testutil.RunGit(t, repoDir, "remote", "add", "origin", "git@gitlab.com:acme/my-app.git")

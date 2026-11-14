@@ -524,7 +524,7 @@ func TestDiscoverRepoSlug_NamesItsForge(t *testing.T) {
 			if tt.origin != "" {
 				runExpertsGit(t, dir, "remote", "add", "origin", tt.origin)
 			}
-			if got := discoverRepoSlug(dir); got != tt.want {
+			if got := discoverRepoSlug(t.Context(), dir); got != tt.want {
 				t.Fatalf("discoverRepoSlug() = %q, want %q", got, tt.want)
 			}
 		})

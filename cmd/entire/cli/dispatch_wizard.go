@@ -504,7 +504,7 @@ func discoverLocalRepoSlugs(ctx context.Context, currentRepo string) []string {
 	repoSlugs := make([]string, 0, len(repoRoots))
 	seenRepoSlugs := make(map[string]struct{}, len(repoRoots))
 	for _, repoRoot := range repoRoots {
-		repoSlug := discoverRepoSlug(repoRoot)
+		repoSlug := discoverRepoSlug(ctx, repoRoot)
 		if repoSlug == "" {
 			continue
 		}
@@ -526,7 +526,7 @@ func resolveGitTopLevel(ctx context.Context, path string) (string, error) {
 	return strings.TrimSpace(string(output)), nil
 }
 
-func discoverRepoSlug(repoRoot string) string {
+func discoverRepoSlug(ctx context.Context, repoRoot string) string {
 	repo, err := gitrepo.OpenPath(repoRoot)
 	if err != nil {
 		return ""
@@ -539,7 +539,7 @@ func discoverRepoSlug(repoRoot string) string {
 	}
 	// The slug names the origin's forge (gh/ or et/); a checkout on a host
 	// Entire does not serve is not offered.
-	slug, err := dispatchpkg.OriginRepoSlug(remote.Config().URLs[0])
+	slug, err := dispatchpkg.ResolveOriginRepoSlug(ctx, repoRoot, gitrepo.EnvWithoutRepoOverrides(), remote.Config().URLs[0])
 	if err != nil {
 		return ""
 	}

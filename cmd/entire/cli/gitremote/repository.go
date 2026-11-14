@@ -2,10 +2,14 @@ package gitremote
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 )
 
 // Repository identifies one repository on a known forge, whichever URL
@@ -49,71 +53,40 @@ func NamesGitHost(protocol string) bool {
 	}
 }
 
-// sshConfigTimeout bounds `ssh -G`, which reads config and never connects, so
-// it normally answers in milliseconds. The bound is generous because expiry
-// is not an error the user sees but a silent "no match" that gates the push,
-// and a loaded machine should not be enough to cause it.
+// sshConfigTimeout bounds the complete optional discovery attempt, including
+// git config. Keep this generous for checkpoint push matching: a timeout skips
+// synchronization. Session hooks supply their own shorter outer deadline.
 const sshConfigTimeout = 5 * time.Second
 
-// ResolveRepository is Info.Repository for a raw remote URL, additionally
-// resolving an SSH host alias (`git@github-work:o/r` with `Host github-work` /
-// `HostName github.com` in ~/.ssh/config) through `ssh -G`, which evaluates
-// the user's ssh config exactly as the push would, without connecting.
-//
-// The alias is resolved only when git would run plain `ssh` (see
-// EffectiveSSHCommand): a custom GIT_SSH_COMMAND, core.sshCommand, or GIT_SSH
-// may read a different config or not be OpenSSH at all, so its hostname is not
-// knowable here and the URL stays unresolved. Every failure — unparseable URL,
-// unknown forge, missing ssh, timeout — reports false.
-//
-// dir and env follow GetPushURLsInDir: pass the target worktree and
-// gitrepo.EnvWithoutRepoOverrides() from a hook, or "" and nil to use the
-// ambient repository and environment.
+// ResolveRepository resolves a known-forge identity for checkpoint matching.
+// It preserves Repository's normalization and transport restrictions and fails
+// closed on discovery errors. ResolveInfo documents the SSH support boundary.
 func ResolveRepository(ctx context.Context, dir string, env []string, rawURL string) (Repository, bool) {
-	info, err := ParseURL(rawURL)
+	info, err := ResolveInfo(ctx, dir, env, rawURL)
 	if err != nil {
 		return Repository{}, false
 	}
-	if r, ok := info.Repository(); ok {
-		return r, true
-	}
-	if info.Protocol != ProtocolSSH || info.Forge != "" {
-		return Repository{}, false
-	}
-	host, ok := resolveSSHHostname(ctx, dir, env, info.Host)
-	if !ok {
-		return Repository{}, false
-	}
-	resolved := *info
-	resolved.Host, resolved.Forge = host, hostToForge[host]
-	return resolved.Repository()
+	return info.Repository()
 }
 
-// resolveSSHHostname returns the HostName ssh would connect to for host.
-func resolveSSHHostname(ctx context.Context, dir string, env []string, host string) (string, bool) {
-	// A leading dash would be read as an option; git refuses such hosts too.
-	if host == "" || strings.HasPrefix(host, "-") {
-		return "", false
-	}
-	if EffectiveSSHCommand(ctx, dir, env) != "ssh" {
-		return "", false
-	}
-	ctx, cancel := context.WithTimeout(ctx, sshConfigTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "ssh", "-G", host)
-	cmd.Env = env
+// discoveryOutput bounds cleanup too: Match exec descendants may retain pipes.
+// Unix kills the process group; Windows currently kills only the direct child.
+// Escaped descendants cannot extend the wait by execx's default ten seconds.
+func discoveryOutput(cmd *exec.Cmd) ([]byte, error) {
+	execx.TerminateOnCancel(cmd)
+	cmd.WaitDelay = 25 * time.Millisecond
 	out, err := cmd.Output()
-	if err != nil {
-		return "", false
-	}
-	for _, line := range strings.Split(string(out), "\n") {
-		if v, ok := strings.CutPrefix(line, "hostname "); ok {
-			if v = strings.ToLower(strings.TrimSpace(v)); v != "" {
-				return v, true
-			}
+	if errors.Is(err, exec.ErrWaitDelay) {
+		// The parent can exit before cancellation while descendants keep its
+		// pipes open. Also terminate that group after the pipe backstop fires.
+		if cleanupErr := cmd.Cancel(); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrProcessDone) {
+			err = errors.Join(err, cleanupErr)
 		}
 	}
-	return "", false
+	if err != nil {
+		return nil, fmt.Errorf("SSH discovery subprocess: %w", err)
+	}
+	return out, nil
 }
 
 // EffectiveSSHCommand resolves the ssh invocation git itself would use, in
@@ -127,23 +100,30 @@ func resolveSSHHostname(ctx context.Context, dir string, env []string, host stri
 // GIT_SSH path is shell-quoted when sh would otherwise mangle it, such as the
 // backslashes in a Windows path.
 func EffectiveSSHCommand(ctx context.Context, dir string, env []string) string {
+	command, _ := effectiveSSHCommand(ctx, dir, env) //nolint:errcheck // transport retains its historical fallback on config lookup failure
+	return command
+}
+
+// Discovery must distinguish an absent setting from a failed config lookup.
+func effectiveSSHCommand(ctx context.Context, dir string, env []string) (string, error) {
 	if env == nil {
 		env = os.Environ()
 	}
 	if v, ok := envLookup(env, "GIT_SSH_COMMAND"); ok {
 		if trimmed := strings.TrimSpace(v); trimmed != "" {
-			return trimmed
+			return trimmed, nil
 		}
 	}
-	if v := gitConfigSSHCommand(ctx, dir, env); v != "" {
-		return v
+	v, err := gitConfigSSHCommand(ctx, dir, env)
+	if v != "" {
+		return v, err
 	}
 	if v, ok := envLookup(env, "GIT_SSH"); ok {
 		if trimmed := strings.TrimSpace(v); trimmed != "" {
-			return shellQuoteProgram(trimmed)
+			return shellQuoteProgram(trimmed), err
 		}
 	}
-	return "ssh"
+	return "ssh", err
 }
 
 // shellQuoteProgram single-quotes path for sh unless every rune is safe bare.
@@ -177,16 +157,23 @@ func envLookup(env []string, key string) (string, bool) {
 
 // gitConfigSSHCommand looks up core.sshCommand via `git config`, run with env
 // so the lookup honors any HOME/GIT_CONFIG_* overrides present in env (e.g. in
-// tests). Returns "" if unset or the lookup fails.
-func gitConfigSSHCommand(ctx context.Context, dir string, env []string) string {
+// tests). An unset key is a successful empty result; other failures are errors.
+func gitConfigSSHCommand(ctx context.Context, dir string, env []string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", "config", "--get", "core.sshCommand")
 	if dir != "" {
 		cmd.Dir = dir
 	}
 	cmd.Env = env
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
+	out, err := discoveryOutput(cmd)
+	if ctx.Err() != nil {
+		return "", fmt.Errorf("read SSH command configuration: %w", ctx.Err())
 	}
-	return strings.TrimSpace(string(out))
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return "", nil // git config --get: key absent
+		}
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }

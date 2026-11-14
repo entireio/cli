@@ -77,6 +77,7 @@ func TestExplainRepoRefIsForgeQualified(t *testing.T) {
 // Not parallel: uses t.Chdir.
 func TestExplainRepoIsCurrent(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
+	testutil.InstallFakeSSH(t, nil)
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 	t.Chdir(dir)

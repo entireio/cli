@@ -328,7 +328,7 @@ func TestResolveRemoteRepoRef(t *testing.T) {
 			name: "falls back to origin when the target remote names no Entire forge",
 			remotes: map[string]string{
 				"origin": "git@github.com:octocat/hello-world.git",
-				"weird":  "git@gitlab.com:acme/app.git",
+				"weird":  "https://gitlab.com/acme/app.git",
 			},
 			remote:    "weird",
 			wantOwner: "octocat", wantRepo: "hello-world",
@@ -359,7 +359,7 @@ func TestResolveRemoteRepoRef(t *testing.T) {
 		},
 		{
 			name:    "an origin on neither forge errors naming the reason",
-			remotes: map[string]string{"origin": "git@gitlab.com:acme/app.git"},
+			remotes: map[string]string{"origin": "https://gitlab.com/acme/app.git"},
 			wantErr: "not an Entire or GitHub repo",
 		},
 	}
