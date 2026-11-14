@@ -1,4 +1,4 @@
-//go:build linux || darwin
+//go:build linux || darwin || windows
 
 package strategy
 
@@ -6,6 +6,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
 
 	"github.com/stretchr/testify/assert"
@@ -20,6 +21,9 @@ func TestInitializeSession_CapturesOwner(t *testing.T) {
 	}
 
 	dir := setupGitRepo(t)
+	// Registered after the repo's TempDir, so it runs first: Windows can't
+	// remove a directory while a shared root still holds it open.
+	t.Cleanup(osroot.ResetShared)
 	t.Chdir(dir)
 
 	s := &ManualCommitStrategy{}

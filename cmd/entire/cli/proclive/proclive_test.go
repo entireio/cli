@@ -2,6 +2,7 @@ package proclive
 
 import (
 	"os"
+	"runtime"
 	"testing"
 )
 
@@ -40,6 +41,44 @@ func TestCheck_HostMismatchIsUnknown(t *testing.T) {
 	}
 }
 
+// Native Windows and WSL can share a hostname and a checkout, so each can read
+// owners the other recorded. The PIDs name different process tables, so an
+// identity recorded for another OS must never read as dead or alive.
+func TestCheck_OtherOSIsUnknown(t *testing.T) {
+	t.Parallel()
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		t.Skip("hostname unavailable")
+	}
+	// A start that can't match this process: on a platform proclive can
+	// introspect, Check reads it as a reused PID, so dead.
+	id := Identity{PID: os.Getpid(), Start: "not-this-process", Host: host}
+	if Check(Identity{PID: os.Getpid()}) != LivenessUnknown {
+		id.OS = runtime.GOOS
+		if got := Check(id); got != LivenessDead {
+			t.Fatalf("Check(same OS, wrong start) = %v, want dead", got)
+		}
+	}
+	id.OS = "not-" + runtime.GOOS
+	if got := Check(id); got != LivenessUnknown {
+		t.Errorf("Check(another OS) = %v, want unknown", got)
+	}
+}
+
+func TestAncestryDepth_RejectsAnotherOS(t *testing.T) {
+	t.Parallel()
+
+	ancestry := Ancestry{host: "host-a", chain: []Identity{{PID: 42, Start: "100"}}}
+	recorded := Identity{PID: 42, Start: "100", Host: "host-a", OS: runtime.GOOS}
+	if depth := ancestry.Depth(recorded); depth != 0 {
+		t.Fatalf("Depth(same OS) = %d, want 0", depth)
+	}
+	recorded.OS = "not-" + runtime.GOOS
+	if depth := ancestry.Depth(recorded); depth != -1 {
+		t.Fatalf("Depth(another OS) = %d, want -1", depth)
+	}
+}
+
 func TestAncestryDepth_MatchesWhenCurrentBootIDIsUnavailable(t *testing.T) {
 	t.Parallel()
 
@@ -56,12 +95,16 @@ func TestAncestryDepth_MatchesWhenCurrentBootIDIsUnavailable(t *testing.T) {
 
 func TestIsTransient(t *testing.T) {
 	t.Parallel()
-	for _, name := range []string{"entire", "sh", "bash", "ZSH", " dash ", "Fish", "go"} {
+	for _, name := range []string{
+		"entire", "sh", "bash", "ZSH", " dash ", "Fish", "go",
+		// Windows image names.
+		"entire.exe", "Bash.EXE", "cmd.exe", "powershell.exe", "pwsh.exe", "conhost.exe",
+	} {
 		if !isTransient(name) {
 			t.Errorf("isTransient(%q) = false, want true", name)
 		}
 	}
-	for _, name := range []string{"node", "bun", "claude", "cursor", "python3", ""} {
+	for _, name := range []string{"node", "bun", "claude", "cursor", "python3", "", "node.exe", "claude.exe", "codex.exe", ".exe", "exe"} {
 		if isTransient(name) {
 			t.Errorf("isTransient(%q) = true, want false", name)
 		}
@@ -127,6 +170,8 @@ func TestAncestryExcludes(t *testing.T) {
 		{"no host", complete, Identity{PID: 7, Start: "1"}, false},
 		{"another host", complete, Identity{PID: 7, Start: "1", Host: "host-b"}, false},
 		{"another boot", complete, Identity{PID: 7, Start: "1", Host: "host-a", Boot: "boot-b"}, false},
+		{"recorded for this OS", complete, Identity{PID: 7, Start: "1", Host: "host-a", OS: runtime.GOOS}, true},
+		{"recorded for another OS", complete, Identity{PID: 7, Start: "1", Host: "host-a", OS: "not-" + runtime.GOOS}, false},
 		{"zero identity", complete, Identity{}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
