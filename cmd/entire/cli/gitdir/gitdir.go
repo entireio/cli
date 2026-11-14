@@ -142,11 +142,11 @@ func OpenAt(commonDir string) (*os.Root, error) {
 // CommonDirForWorktree returns the absolute git common directory for the
 // repository at worktreeRoot, independent of the process's working directory.
 //
-// Callers acting on a repo passed as an argument (agent import, session adopt)
-// must use this rather than CommonDir: the cwd-resolved form answers for
-// whatever repo the process happens to be running in, which is how test
-// fixtures once leaked session state into a developer's real
-// .git/entire-sessions and hijacked commit linking.
+// Callers acting on a repo passed as an argument must use this rather than
+// CommonDir: the cwd-resolved form answers for whatever repo the process
+// happens to be running in, which is how test fixtures once leaked session
+// state into a developer's real .git/entire-sessions and hijacked commit
+// linking.
 //
 // Not cached: the per-cwd cache CommonDir keeps would be wrong here, since the
 // answer varies with the argument rather than with the process.
