@@ -9641,6 +9641,91 @@
         ]
       }
     },
+    "/project-resolver/{forge_prefix}/{project}": {
+      "get": {
+        "description": "**Accepted credentials:** User token.\n\nCase-insensitive lookup by native project name (et) or GitHub owner namespace (gh). Uses project inspect permission, including platform administrators. An existing native (et) project the caller cannot inspect returns 403, so a creator can tell a taken name from a free one. Missing projects, and inaccessible GitHub (gh) namespaces, return 404. An automation token always receives 404.",
+        "operationId": "resolveProject",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "forge_prefix",
+            "required": true,
+            "schema": {
+              "enum": [
+                "et",
+                "gh"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "maxLength": 39,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional: live (default) checks GitHub namespace authority now. display may answer from a roster up to 70 minutes old; never use a display capability to authorize a write.",
+            "explode": false,
+            "in": "query",
+            "name": "capabilities",
+            "schema": {
+              "description": "Optional: live (default) checks GitHub namespace authority now. display may answer from a roster up to 70 minutes old; never use a display capability to authorize a write.",
+              "enum": [
+                "live",
+                "display"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResolveProjectOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Resolve a canonical project reference",
+        "tags": [
+          "projects"
+        ],
+        "x-entire-audience": [
+          "user"
+        ],
+        "x-entire-credentials": [
+          "user-token"
+        ],
+        "x-entire-published": true
+      }
+    },
     "/projects": {
       "get": {
         "operationId": "listProjects",
@@ -9776,70 +9861,6 @@
           }
         ],
         "summary": "Create project",
-        "tags": [
-          "projects"
-        ]
-      }
-    },
-    "/projects/resolve/{host}/{project}": {
-      "get": {
-        "description": "Case-insensitive lookup by native project name (et) or GitHub owner namespace (gh). Uses project inspect permission, including platform administrators. An existing native (et) project the caller cannot inspect returns 403, so a creator can tell a taken name from a free one. Missing projects, and inaccessible GitHub (gh) namespaces, return 404.",
-        "operationId": "resolveProject",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "host",
-            "required": true,
-            "schema": {
-              "enum": [
-                "et",
-                "gh"
-              ],
-              "type": "string"
-            }
-          },
-          {
-            "in": "path",
-            "name": "project",
-            "required": true,
-            "schema": {
-              "maxLength": 39,
-              "minLength": 1,
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ResolveProjectOutputBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          },
-          {
-            "sessionAuth": []
-          }
-        ],
-        "summary": "Resolve a canonical project reference",
         "tags": [
           "projects"
         ]

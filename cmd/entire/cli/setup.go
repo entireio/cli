@@ -110,6 +110,9 @@ type EnableOptions struct {
 	// to commit it. Set by `entire agent add`, a targeted command that should
 	// not end in a prompt about files beyond the one agent it touched.
 	NoCommitOffer bool
+	// configCleanBefore is the shared config files that had no uncommitted
+	// changes before setup wrote anything; see snapshotCleanConfig.
+	configCleanBefore map[string]struct{}
 }
 
 // promptErrOut is the error stream prompts render on: the command's, when the
@@ -1236,7 +1239,7 @@ func probeAndCacheTrailsEnablement(ctx context.Context, insecureHTTPAuth bool, i
 	probeCtx, cancel := context.WithTimeout(ctx, enableTrailsProbeBudget)
 	defer cancel()
 
-	client, notOnboarded, err := trailsCellClient(probeCtx, insecureHTTPAuth, info.Forge, info.Owner, info.Repo)
+	client, repoID, notOnboarded, err := trailsCellClient(probeCtx, insecureHTTPAuth, info.Forge, info.Owner, info.Repo)
 	if notOnboarded {
 		if saveErr := saveTrailsEnabledForRemote(ctx, info.Forge, info.Owner, info.Repo, false); saveErr != nil {
 			logging.Debug(ctx, "failed to cache trails enablement", "error", saveErr)
@@ -1247,7 +1250,7 @@ func probeAndCacheTrailsEnablement(ctx context.Context, insecureHTTPAuth bool, i
 		logging.Debug(ctx, "trails enablement probe client unavailable", "error", err)
 		return
 	}
-	enabled, err := client.TrailsEnabled(probeCtx, info.Forge, info.Owner, info.Repo)
+	enabled, err := client.TrailsEnabled(probeCtx, repoID)
 	if err != nil {
 		logging.Debug(ctx, "trails enablement probe failed", "error", err)
 		return
@@ -1307,6 +1310,7 @@ was not fully uninstalled.`,
 
 func runEnableOnConfiguredRepoWithPreflight(ctx context.Context, cmd *cobra.Command, opts EnableOptions, preflight func() error) error {
 	w := cmd.OutOrStdout()
+	opts.snapshotCleanConfig(ctx)
 	runPreflight := func() error {
 		if preflight == nil {
 			return nil
@@ -1431,6 +1435,7 @@ func scopeExplicitlyDisabled(ctx context.Context, useProject bool) bool {
 // agents must be provided by the caller (via detectOrSelectAgent).
 func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent, opts EnableOptions) error {
 	// Agents have been chosen, but no setup settings or hooks have been changed.
+	opts.snapshotCleanConfig(ctx)
 	if err := opts.checkpointRemoteChoice.selectAfterAgents(ctx, opts, nil); err != nil {
 		return err
 	}
@@ -2215,6 +2220,7 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	// Capture first-run status before setupEntireDirectory/saveEnabledState make
 	// IsSetUpAny report true, so the import offer fires only on first enable.
 	firstRun := !settings.IsSetUpAny(ctx)
+	opts.snapshotCleanConfig(ctx)
 
 	agentName := ag.Name()
 	// Check if agent supports hooks

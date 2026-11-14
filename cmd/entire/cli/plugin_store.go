@@ -9,13 +9,16 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
@@ -383,37 +386,200 @@ type InstallPluginOptions struct {
 // is the same file as the would-be managed entry. The replace step is
 // atomic: the new entry is created under a temp name and renamed onto <dest>,
 // so a failed --force never leaves the previous install missing.
-func InstallPluginFromPath(opts InstallPluginOptions) (*InstalledPlugin, error) {
+//
+// ctx bounds the wait for another install holding the plugin tree, and
+// carries the writer that wait is announced on (see lockPluginTree).
+func InstallPluginFromPath(ctx context.Context, opts InstallPluginOptions) (*InstalledPlugin, error) {
+	// The plugin's own lock too, so this cannot interleave with a remote
+	// install or upgrade of the same name (lock order: plugin, then tree).
+	releasePlugin, err := lockPluginIfNamed(ctx, bareNameFromBinaryName(filepath.Base(opts.SourcePath)), true)
+	if err != nil {
+		return nil, err
+	}
+	defer releasePlugin()
+	release, err := lockPluginTree(ctx, true)
+	if err != nil {
+		return nil, err
+	}
+	bare, err := placeManagedEntry(opts)
+	release()
+	if err != nil {
+		return nil, err
+	}
+	return FindInstalledPlugin(bare)
+}
+
+// pluginTreeLockName is the advisory lock, at the top of the managed plugin
+// tree, that serialises every change to it: installs, upgrades and removals.
+const pluginTreeLockName = ".plugins.lock"
+
+// pluginLocksDir holds each plugin's own lock, <name>.lock (lockPlugin).
+const pluginLocksDir = ".locks"
+
+// pluginLockWait bounds how long a change waits for another holder of a
+// plugin lock. Installs take seconds; this only stops a wedged holder from
+// hanging every later install forever.
+const pluginLockWait = 10 * time.Minute
+
+// Plugin locks come in two kinds, always taken in this order:
+//
+//  1. lockPlugin(name), held across one whole operation on that plugin —
+//     deciding (installed? pinned? replacing what?), downloading, placing —
+//     so a decision is never acted on after another command changed it.
+//  2. lockPluginTree, held only around the placement itself, because every
+//     placement sweeps .old- leftovers shared by the whole tree.
+//
+// Never take a plugin lock while holding the tree lock, and never hold one
+// plugin's lock while installing another (dependencies install after their
+// parent's lock is released): either could deadlock two commands. Neither
+// lock is reentrant.
+
+// lockPluginTree takes the managed tree's lock and returns its release. The
+// rename-aside rollbacks need it: each install sweeps .old- leftovers from
+// bin/ and pkg/<name>/, and without the lock a concurrent install's sweep
+// could delete the backup another install is about to restore from.
+// Callers hold it across one placement; see the lock order above.
+func lockPluginTree(ctx context.Context, create bool) (func(), error) {
+	root, err := pluginRoot(create)
+	if err != nil {
+		return nil, err
+	}
+	release, err := acquirePluginLockFile(ctx, root, pluginTreeLockName, "Waiting for another plugin install to finish...")
+	if err != nil {
+		return nil, fmt.Errorf("lock plugin directory: %w", err)
+	}
+	return release, nil
+}
+
+// lockPlugin takes name's own lock and returns its release; see the lock
+// order above. Different plugins never wait for each other. With create
+// false, a missing plugin tree is reported as an error wrapping
+// os.ErrNotExist rather than created.
+func lockPlugin(ctx context.Context, name string, create bool) (func(), error) {
+	if err := validatePluginName(name); err != nil {
+		return nil, err
+	}
+	root, err := pluginRoot(create)
+	if err != nil {
+		return nil, err
+	}
+	if !create {
+		// Upgrade and remove need no lock for a plugin that is not there,
+		// and taking one would leave a lock file behind for a name that was
+		// never installed. A lock file outlives its plugin's removal, though:
+		// deleting one safely is racy against waiters (and impossible on
+		// Windows while anyone holds it open); it is empty and reused.
+		present, err := pluginPresent(root, name)
+		if err != nil {
+			return nil, err
+		}
+		if !present {
+			return nil, fmt.Errorf("plugin %q is not installed: %w", name, os.ErrNotExist)
+		}
+	}
+	if err := osroot.MkdirAllNoSymlink(root, pluginLocksDir, 0o750); err != nil {
+		return nil, fmt.Errorf("create plugin locks dir: %w", err)
+	}
+	release, err := acquirePluginLockFile(ctx, root, pluginLocksDir+"/"+name+".lock",
+		fmt.Sprintf("Waiting for another install, upgrade or removal of plugin %q to finish...", name))
+	if err != nil {
+		return nil, fmt.Errorf("lock plugin %q: %w", name, err)
+	}
+	return release, nil
+}
+
+// acquirePluginLockFile takes the lock file name inside root. A wait is
+// announced, as waitNotice, on ctx's plugin progress writer
+// (withPluginProgress), so a user stuck behind a stalled install sees why. The wait ends when ctx does —
+// callers pass the command's context, so Ctrl-C stops it with an error
+// wrapping context.Canceled — and after pluginLockWait at the latest.
+// (flock watches ctx only when it has a deadline; without one it makes a
+// blocking lock call, hence the ceiling doubles as the deadline.)
+func acquirePluginLockFile(ctx context.Context, root *os.Root, name, waitNotice string) (func(), error) {
+	release, err := flock.TryAcquireIn(root, name)
+	if !errors.Is(err, flock.ErrLocked) {
+		return release, err //nolint:wrapcheck // callers name the lock
+	}
+	stop := startPluginStep(ctx, waitNotice)
+	defer stop()
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, pluginLockWait)
+		defer cancel()
+	}
+	return flock.AcquireContextIn(ctx, root, name) //nolint:wrapcheck // callers name the lock
+}
+
+// pluginPresent reports whether name has anything in the managed tree: a bin/
+// entry or a pkg/ directory.
+func pluginPresent(root *os.Root, name string) (bool, error) {
+	if p, err := FindInstalledPlugin(name); err != nil || p != nil {
+		return p != nil, err
+	}
+	pkgName, err := pluginPkgName(name)
+	if err != nil {
+		return false, err
+	}
+	if _, err := root.Lstat(pkgName); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("stat plugin pkg dir: %w", err)
+	}
+	return true, nil
+}
+
+// lockPluginIfNamed takes name's lock when name is a valid plugin name, and
+// otherwise returns a no-op release, leaving the caller's own validation to
+// report the bad name as it always has. A missing plugin tree (create false)
+// is not an error either: there is nothing to serialise against yet.
+func lockPluginIfNamed(ctx context.Context, name string, create bool) (func(), error) {
+	if validatePluginName(name) != nil {
+		return func() {}, nil //nolint:nilerr // the caller reports the bad name
+	}
+	release, err := lockPlugin(ctx, name, create)
+	if errors.Is(err, os.ErrNotExist) {
+		return func() {}, nil
+	}
+	return release, err
+}
+
+// placeManagedEntry is InstallPluginFromPath up to and including the swap of
+// the bin/ entry, returning the installed bare name. Callers that must know
+// whether the entry was replaced (installRepoAtTag rolls pkg/ back unless it
+// was) use it directly, so a failure in the lookup that follows is never
+// mistaken for a failed swap.
+func placeManagedEntry(opts InstallPluginOptions) (string, error) {
 	src, err := filepath.Abs(opts.SourcePath)
 	if err != nil {
-		return nil, fmt.Errorf("resolve source path: %w", err)
+		return "", fmt.Errorf("resolve source path: %w", err)
 	}
 	srcInfo, err := os.Stat(src)
 	if err != nil {
-		return nil, fmt.Errorf("stat source: %w", err)
+		return "", fmt.Errorf("stat source: %w", err)
 	}
 	if srcInfo.IsDir() {
-		return nil, fmt.Errorf("source must be a file, got directory: %s", src)
+		return "", fmt.Errorf("source must be a file, got directory: %s", src)
 	}
 	base := filepath.Base(src)
 	bare := bareNameFromBinaryName(base)
 	if bare == "" {
-		return nil, fmt.Errorf("source basename %q must start with %q and have a runnable name", base, pluginBinaryPrefix)
+		return "", fmt.Errorf("source basename %q must start with %q and have a runnable name", base, pluginBinaryPrefix)
 	}
 	if err := validatePluginName(bare); err != nil {
-		return nil, fmt.Errorf("derived plugin name from %q is not dispatchable: %w", base, err)
+		return "", fmt.Errorf("derived plugin name from %q is not dispatchable: %w", base, err)
 	}
 	if runtime.GOOS != windowsGOOS && srcInfo.Mode()&0o111 == 0 {
-		return nil, fmt.Errorf("source %s is not executable (chmod +x)", src)
+		return "", fmt.Errorf("source %s is not executable (chmod +x)", src)
 	}
 
 	binDir, err := EnsurePluginBinDir()
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	root, err := pluginRoot(true)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	// dest stays absolute for the messages and the self-install check below;
 	// destName is the same entry addressed inside the managed tree's root,
@@ -431,7 +597,7 @@ func InstallPluginFromPath(opts InstallPluginOptions) (*InstalledPlugin, error) 
 	// install; SameFile would resolve dest through the symlink to src
 	// and falsely trip. Path equality is the precise risky case.
 	if filepath.Clean(src) == filepath.Clean(dest) {
-		return nil, fmt.Errorf("source %s is already the managed entry; nothing to install", src)
+		return "", fmt.Errorf("source %s is already the managed entry; nothing to install", src)
 	}
 
 	// Conflict check on the bare name (not the exact filename). On Windows,
@@ -442,10 +608,10 @@ func InstallPluginFromPath(opts InstallPluginOptions) (*InstalledPlugin, error) 
 	// any exist.
 	conflicts, err := installedVariantsByBareName(bare)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	if len(conflicts) > 0 && !opts.Force {
-		return nil, fmt.Errorf("plugin %q already installed at %s; use --force to replace", bare, conflicts[0].Path)
+		return "", fmt.Errorf("plugin %q already installed at %s; use --force to replace", bare, conflicts[0].Path)
 	}
 	// With --force, remove every variant other than the one we're about to
 	// atomically overwrite. The same-extension case is handled by the
@@ -455,14 +621,15 @@ func InstallPluginFromPath(opts InstallPluginOptions) (*InstalledPlugin, error) 
 			continue
 		}
 		if err := root.Remove(pluginBinName(filepath.Base(c.Path))); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("remove existing variant %s: %w", c.Path, err)
+			return "", fmt.Errorf("remove existing variant %s: %w", c.Path, err)
 		}
 	}
 
 	// Atomic replace via tmp + rename. Rename is atomic on POSIX and
 	// replaces an existing target on Windows (Go's os.Rename uses
-	// MoveFileEx with MOVEFILE_REPLACE_EXISTING). If linking or rename
-	// fails, the previously installed plugin (if any) is unaffected.
+	// MoveFileEx with MOVEFILE_REPLACE_EXISTING) unless that target is a
+	// running executable — replaceManagedEntry handles that case. If linking
+	// or rename fails, the previously installed plugin (if any) is unaffected.
 	//
 	// The tmp path uses a random suffix and a `.install-` prefix that does
 	// NOT match `entire-`. This protects against two distinct hazards:
@@ -473,16 +640,81 @@ func InstallPluginFromPath(opts InstallPluginOptions) (*InstalledPlugin, error) 
 	//      while the install is in progress.
 	tmpName, err := makeInstallTmpName()
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	if err := materializeManagedEntry(root, src, tmpName, srcInfo); err != nil {
-		return nil, fmt.Errorf("install plugin: %w", err)
+		return "", fmt.Errorf("install plugin: %w", err)
 	}
-	if err := root.Rename(tmpName, destName); err != nil {
+	sweepOldManagedEntries(root)
+	if err := replaceManagedEntry(root, tmpName, destName); err != nil {
 		_ = root.Remove(tmpName) //nolint:errcheck // best-effort cleanup; previous install is intact
-		return nil, fmt.Errorf("install plugin: %w", err)
+		return "", fmt.Errorf("install plugin: %w", err)
 	}
-	return FindInstalledPlugin(bare)
+	return bare, nil
+}
+
+// oldManagedEntryPrefix starts the name a replaced bin/ entry is moved aside
+// to. Like `.install-`, it deliberately does not start with
+// pluginBinaryPrefix: "entire-foo.exe.old-1a2b" would pass the `entire-`
+// filter in ListInstalledPlugins, list as plugin "foo.exe.old-1a2b", and be
+// dispatchable (Windows LookPath accepts any existing file whose name already
+// has an extension). A leading dot keeps the aside file out of both.
+const oldManagedEntryPrefix = ".old-"
+
+// Seams for replaceManagedEntry. renameAsideOnReplaceFailure is the Windows
+// running-executable fallback, on by default only there; managedEntryRename is
+// the rename itself, so tests on any platform can simulate the sharing
+// violation a running .exe produces.
+var (
+	renameAsideOnReplaceFailure = runtime.GOOS == windowsGOOS
+	managedEntryRename          = func(root *os.Root, from, to string) error { return root.Rename(from, to) }
+)
+
+// replaceManagedEntry renames tmpName onto destName (both names in root).
+//
+// On Windows the managed entry is a hardlink or copy of the plugin binary, and
+// a running executable cannot be replaced by a rename (MoveFileEx with
+// MOVEFILE_REPLACE_EXISTING fails with "Access is denied") although it can be
+// renamed itself. So when the replace fails, move the current entry aside to a
+// `.old-` name and retry — the trick replaceBinary uses for pkg/. If the retry
+// also fails, the entry is moved back so the previous install keeps working.
+// Leftovers are removed by sweepOldManagedEntries on a later install, once the
+// process holding them has exited.
+func replaceManagedEntry(root *os.Root, tmpName, destName string) error {
+	err := managedEntryRename(root, tmpName, destName)
+	if err == nil || !renameAsideOnReplaceFailure {
+		return err
+	}
+	aside := oldManagedEntryName(path.Base(destName))
+	if asideErr := managedEntryRename(root, destName, aside); asideErr != nil {
+		return errors.Join(err, fmt.Errorf("move existing entry aside: %w", asideErr))
+	}
+	retryErr := managedEntryRename(root, tmpName, destName)
+	if retryErr == nil {
+		// Best effort: succeeds when the old entry is not running after all.
+		_ = root.Remove(aside) //nolint:errcheck // swept on a later install
+		return nil
+	}
+	if restoreErr := managedEntryRename(root, aside, destName); restoreErr != nil {
+		return errors.Join(err, retryErr, fmt.Errorf("restore previous entry from %s: %w", aside, restoreErr))
+	}
+	return errors.Join(err, retryErr)
+}
+
+// oldManagedEntryName returns a unique bin/ name for moving base aside. The
+// suffix scheme of oldBinaryAsideName would not do here: the name must not
+// start with pluginBinaryPrefix (see oldManagedEntryPrefix).
+func oldManagedEntryName(base string) string {
+	return pluginBinName(oldManagedEntryPrefix + asideSuffix() + "-" + base)
+}
+
+// sweepOldManagedEntries best-effort removes entries replaceManagedEntry moved
+// aside. Matching on the prefix, not a substring as the pkg/ sweep does, so a
+// real plugin whose name merely contains ".old-" is never deleted.
+func sweepOldManagedEntries(root *os.Root) {
+	sweepAsideLeftovers(root, pluginManagedBinSubdir, func(name string) bool {
+		return strings.HasPrefix(name, oldManagedEntryPrefix)
+	})
 }
 
 // installedVariantsByBareName returns every managed entry whose bare name
@@ -602,6 +834,8 @@ func RemoveInstalledPlugin(name string) error {
 			return fmt.Errorf("remove plugin entry %s: %w", p.Path, err)
 		}
 	}
+	// No later install may come to sweep an upgrade's moved-aside entries.
+	sweepOldManagedEntries(root)
 	return nil
 }
 

@@ -142,7 +142,7 @@ func TestInstallPluginFromPath_SymlinksAndLists(t *testing.T) { //nolint:paralle
 		t.Fatalf("write src: %v", err)
 	}
 
-	p, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: src})
+	p, err := InstallPluginFromPath(t.Context(), InstallPluginOptions{SourcePath: src})
 	if err != nil {
 		t.Fatalf("InstallPluginFromPath: %v", err)
 	}
@@ -163,11 +163,11 @@ func TestInstallPluginFromPath_SymlinksAndLists(t *testing.T) { //nolint:paralle
 	}
 
 	// Re-install without --force fails.
-	if _, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: src}); err == nil {
+	if _, err := InstallPluginFromPath(t.Context(), InstallPluginOptions{SourcePath: src}); err == nil {
 		t.Errorf("expected error on re-install without --force")
 	}
 	// With --force succeeds.
-	if _, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: src, Force: true}); err != nil {
+	if _, err := InstallPluginFromPath(t.Context(), InstallPluginOptions{SourcePath: src, Force: true}); err != nil {
 		t.Errorf("InstallPluginFromPath --force: %v", err)
 	}
 
@@ -192,7 +192,7 @@ func TestInstallPluginFromPath_RejectsBadBasename(t *testing.T) { //nolint:paral
 	if err := os.WriteFile(src, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatalf("write src: %v", err)
 	}
-	if _, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: src}); err == nil {
+	if _, err := InstallPluginFromPath(t.Context(), InstallPluginOptions{SourcePath: src}); err == nil {
 		t.Errorf("expected error for non-prefixed basename")
 	}
 }
@@ -206,7 +206,7 @@ func TestInstallPluginFromPath_RejectsNonExecutable(t *testing.T) { //nolint:par
 	if err := os.WriteFile(src, []byte("#!/bin/sh\nexit 0\n"), 0o644); err != nil {
 		t.Fatalf("write src: %v", err)
 	}
-	if _, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: src}); err == nil {
+	if _, err := InstallPluginFromPath(t.Context(), InstallPluginOptions{SourcePath: src}); err == nil {
 		t.Errorf("expected error for non-executable source")
 	}
 }
@@ -284,7 +284,7 @@ func TestInstallPluginFromPath_RejectsAgentReservedName(t *testing.T) { //nolint
 	if err := os.WriteFile(src, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatalf("write src: %v", err)
 	}
-	if _, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: src}); err == nil {
+	if _, err := InstallPluginFromPath(t.Context(), InstallPluginOptions{SourcePath: src}); err == nil {
 		t.Errorf("expected error: agent-* basename is reserved")
 	}
 }
@@ -306,7 +306,7 @@ func TestInstallPluginFromPath_RejectsSelfInstall(t *testing.T) { //nolint:paral
 	if err := os.WriteFile(src, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatalf("write src: %v", err)
 	}
-	_, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: src, Force: true})
+	_, err := InstallPluginFromPath(t.Context(), InstallPluginOptions{SourcePath: src, Force: true})
 	if err == nil {
 		t.Fatalf("expected self-install rejection; got nil")
 	}
@@ -509,7 +509,7 @@ func TestInstallPluginFromPath_TmpDoesNotClobberDottedPlugin(t *testing.T) { //n
 	if err := os.WriteFile(src, []byte("#!/bin/sh\necho foo\n"), 0o755); err != nil {
 		t.Fatalf("write src: %v", err)
 	}
-	if _, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: src}); err != nil {
+	if _, err := InstallPluginFromPath(t.Context(), InstallPluginOptions{SourcePath: src}); err != nil {
 		t.Fatalf("InstallPluginFromPath: %v", err)
 	}
 
@@ -545,7 +545,7 @@ func TestInstallPluginFromPath_RequiresForceForSameBareName(t *testing.T) { //no
 	if err := os.WriteFile(srcA, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatalf("write src A: %v", err)
 	}
-	if _, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: srcA}); err != nil {
+	if _, err := InstallPluginFromPath(t.Context(), InstallPluginOptions{SourcePath: srcA}); err != nil {
 		t.Fatalf("first install: %v", err)
 	}
 
@@ -556,10 +556,10 @@ func TestInstallPluginFromPath_RequiresForceForSameBareName(t *testing.T) { //no
 	if err := os.WriteFile(srcB, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
 		t.Fatalf("write src B: %v", err)
 	}
-	if _, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: srcB}); err == nil {
+	if _, err := InstallPluginFromPath(t.Context(), InstallPluginOptions{SourcePath: srcB}); err == nil {
 		t.Errorf("expected error: bare name %q already installed", "foo")
 	}
-	if _, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: srcB, Force: true}); err != nil {
+	if _, err := InstallPluginFromPath(t.Context(), InstallPluginOptions{SourcePath: srcB, Force: true}); err != nil {
 		t.Errorf("force install: %v", err)
 	}
 }
@@ -620,7 +620,7 @@ func TestInstallPluginFromPath_AtomicForceReplace(t *testing.T) { //nolint:paral
 	if err := os.WriteFile(src, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatalf("write src: %v", err)
 	}
-	if _, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: src}); err != nil {
+	if _, err := InstallPluginFromPath(t.Context(), InstallPluginOptions{SourcePath: src}); err != nil {
 		t.Fatalf("first install: %v", err)
 	}
 	binDir, err := PluginBinDir()
@@ -634,7 +634,7 @@ func TestInstallPluginFromPath_AtomicForceReplace(t *testing.T) { //nolint:paral
 
 	// Force-install from the same source. The replace should succeed and
 	// the previous symlink remains valid throughout.
-	if _, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: src, Force: true}); err != nil {
+	if _, err := InstallPluginFromPath(t.Context(), InstallPluginOptions{SourcePath: src, Force: true}); err != nil {
 		t.Errorf("force replace: %v", err)
 	}
 	if _, err := os.Lstat(dest); err != nil {

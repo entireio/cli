@@ -41,7 +41,7 @@ func resolveReviewTarget(ctx context.Context, _, errOut io.Writer, selector stri
 			return cliReview.ResolvedTarget{}, normalizeErr
 		}
 		err = runAuthenticatedTrailAPI(ctx, errOut, false, "", func(ctx context.Context, client *api.Client, repoID string) error {
-			basePath, pathErr := trailRepoBasePath(forge, owner, repo, repoID)
+			basePath, pathErr := trailRepoBasePath(repoID)
 			if pathErr != nil {
 				return pathErr
 			}
