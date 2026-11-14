@@ -42,6 +42,9 @@ func (s *ManualCommitStrategy) findSessionsForCommitLinking(ctx context.Context,
 		return nil, err
 	}
 	sessions, ambiguous, fromFallback := s.findSessionsForWorktreeFromStates(ctx, allStates, worktreePath)
+	if fromFallback {
+		sessions = withoutIdleSessions(ctx, worktreePath, sessions)
+	}
 	guest := s.findSessionByCommitAncestry(ctx, allStates)
 	if guest != nil && fromFallback {
 		// No session is homed here and ancestry names the committer: the
