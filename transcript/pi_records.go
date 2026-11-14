@@ -46,8 +46,8 @@ import (
 // re-read as the entry it names, which keeps its first position.
 // Records carry no redaction: redact the transcript before feeding it.
 type PiAdapter struct {
-	pending []byte // bytes after the last newline fed; see piPendingKeep
-	line    int    // source lines consumed so far
+	lines lineSplitter
+	line  int // source lines consumed so far
 
 	parent   map[string]string // every entry's parentId
 	hasTree  bool              // some entry has a non-empty parentId
@@ -74,11 +74,6 @@ type PiAdapter struct {
 	// reconcile for a message under an entry it forgot.
 	above map[string]bool
 }
-
-// piPendingKeep is the most capacity Feed keeps in pending once a line it
-// held is read: a longer line's buffer is let go rather than kept for the
-// adapter's lifetime.
-const piPendingKeep = 1 << 20
 
 // piMessage is one decoded message entry, with what reconcile needs of it
 // worked out once.
@@ -123,25 +118,10 @@ func (a *PiAdapter) Lines() int {
 // later chunk completes it, or until Flush.
 func (a *PiAdapter) Feed(chunk []byte) []Record {
 	var out []Record
-	for len(chunk) > 0 {
-		i := bytes.IndexByte(chunk, '\n')
-		if i < 0 {
-			a.pending = append(a.pending, chunk...)
-			break
-		}
-		line := chunk[:i]
-		if len(a.pending) > 0 {
-			a.pending = append(a.pending, line...)
-			line = a.pending
-		}
-		out = a.consumeLine(line, out)
-		if cap(a.pending) > piPendingKeep {
-			a.pending = nil
-		} else {
-			a.pending = a.pending[:0]
-		}
-		chunk = chunk[i+1:]
-	}
+	a.lines.feed(chunk, func(line []byte) bool {
+		out = a.consumeLine(bytes.TrimSuffix(line, []byte("\n")), out)
+		return true
+	})
 	return out
 }
 
@@ -149,11 +129,10 @@ func (a *PiAdapter) Feed(chunk []byte) []Record {
 // transcript is final; while Pi is still writing, a partial line is usually
 // an unfinished write.
 func (a *PiAdapter) Flush() []Record {
-	if len(a.pending) == 0 {
+	line := a.lines.flush()
+	if line == nil {
 		return nil
 	}
-	line := a.pending
-	a.pending = nil
 	return a.consumeLine(line, nil)
 }
 
