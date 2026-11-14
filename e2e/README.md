@@ -195,3 +195,11 @@ unauthenticated GitHub API rate limits. Windows also keeps npm for Codex,
 Copilot, and OpenCode rather than using Unix shell installers.
 
 The E2E workflow bootstraps agents before testing. `ci.yml` covers both checkpoint backends with the free canary on Linux, and runs the Vogon canary on Windows in three shards (`test-canary-windows` via `mise run test:ci:canary:shard -- <n> 3`; roger-roger stays Linux-only); `nightly-e2e.yml` checks the published nightly installation.
+
+### Empty and incomplete test selections
+
+The E2E mise tasks fail when the regex selects no top-level tests, and when a test starts but never reaches a terminal event. Reports are still written and show `NO TESTS RAN` or `INCOMPLETE`. Named tests that skip remain successful; a regex matching a parent but no subtests is not treated as an empty selection.
+
+The reporter's `-fail-on-incomplete` flag enables this exit status. Without it, the reporter still renders empty or incomplete event files for diagnosis. Only parent tests with a terminal pass, fail, or skip event count as completed, and a retry needs its own terminal event to count again. A run with both failures and incomplete tests reports `FAILED`, because the failure is the more actionable of the two.
+
+Nightly retains its existing report check because it runs the test tasks from the installed tag, which may predate this flag.
