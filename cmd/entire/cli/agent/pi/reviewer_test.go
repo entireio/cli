@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 
@@ -465,5 +466,17 @@ func TestPiReviewer_ParseRecoveredLengthStopSucceeds(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// TestPiVersionCmd_WindowsPathOnlyLookup pins that the `pi --version` probe,
+// which runs in the reviewed checkout before the review starts, gets the same
+// PATH-only lookup as the review: pi.cmd starts a bare `node`. Mutates the
+// shared hook host, so no t.Parallel().
+func TestPiVersionCmd_WindowsPathOnlyLookup(t *testing.T) {
+	t.Cleanup(agent.SetWindowsHookProbeForTesting("windows", nil))
+	cmd := piVersionCmd(t.Context())
+	if !slices.Contains(cmd.Env, "NoDefaultCurrentDirectoryInExePath=1") {
+		t.Fatalf("pi --version environment must set NoDefaultCurrentDirectoryInExePath=1, got %q", cmd.Env)
 	}
 }

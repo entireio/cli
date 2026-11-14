@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ogen-go/ogen/ogenerrors"
 
@@ -206,6 +207,37 @@ func TestProviderSource_BearerAuth(t *testing.T) {
 			t.Fatalf("error = %v, want the provider message surfaced verbatim", err)
 		}
 	})
+}
+
+func TestGetMirror_CredentialTimeout(t *testing.T) {
+	t.Parallel()
+	for _, afterDeadline := range []bool{false, true} {
+		t.Run(fmt.Sprintf("after_wait_deadline=%t", afterDeadline), func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				t.Error("credential failure must prevent the mirror request")
+				w.WriteHeader(http.StatusInternalServerError)
+			}))
+			defer server.Close()
+			src := &providerSource{provide: func(ctx context.Context) (string, error) {
+				if afterDeadline {
+					<-ctx.Done()
+				}
+				return "", fmt.Errorf("keyring timed out: %w", context.DeadlineExceeded)
+			}}
+			client, err := NewClient(server.URL, src, WithClient(server.Client()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+			defer cancel()
+			_, err = client.GetMirror(ctx, GetMirrorParams{MirrorId: "mirror-1"})
+			var credentialErr *CredentialError
+			if !errors.As(err, &credentialErr) || !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("credential provenance and deadline must survive the generated client: %v", err)
+			}
+		})
+	}
 }
 
 // providerSource must skip SessionAuth so no Cookie header is added — same

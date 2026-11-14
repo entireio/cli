@@ -742,6 +742,12 @@ func assertMetadataMatchesGit(t *testing.T, root, wantID string) WorktreeMetadat
 	require.True(t, filepath.IsAbs(metadata.CommonDir))
 	requireSameDirectory(t, metadata.GitDir, runMetadataGit(t, root, "rev-parse", "--absolute-git-dir"))
 	requireSameDirectory(t, metadata.CommonDir, runMetadataGit(t, root, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+	gitDirInfo, err := os.Stat(metadata.GitDir)
+	require.NoError(t, err)
+	commonDirInfo, err := os.Stat(metadata.CommonDir)
+	require.NoError(t, err)
+	wantUnregistered := wantID == "" && !os.SameFile(gitDirInfo, commonDirInfo)
+	require.Equal(t, wantUnregistered, metadata.Unregistered, "unregistered: only an ID-less Git directory other than the common directory")
 	return metadata
 }
 

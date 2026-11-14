@@ -5,6 +5,57 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.13.4] - 2026-11-13
+
+### Added
+
+- `redaction.drop_images` setting (opt-in, off by default) keeps images out of checkpoints. Each image in a stored transcript is replaced with a 1x1 placeholder of the same type, on every storing path, including `entire session attach` and `entire import`. It covers Claude Code (including images read with the Read tool), Codex (including generated images and data URIs inside longer strings), Pi and OpenCode. Cursor's images are not captured. It is on when either settings file sets it, and it overrides `externalize_images`. Existing checkpoints are not changed. Note: older CLI versions reject a settings file that contains `drop_images` and write no checkpoints, so commit the setting only after the whole team has upgraded ([#3147](https://github.com/entireio/cli/pull/3147))
+
+### Changed
+
+- `entire repo mirror add`: if `--timeout` expires while the initial clone is still processing, the row reads `still syncing`, the command points to `entire repo view <repo>` and exits 0, like `--no-wait`. A keyring or token failure at the deadline still fails and is not reported as `still syncing` ([#3150](https://github.com/entireio/cli/pull/3150), [#3158](https://github.com/entireio/cli/pull/3158))
+
+### Fixed
+
+- The pre-push hook no longer panics on every push in a repository that has `extensions.worktreeConfig` and a `config.worktree` file. This was a regression in 0.13.3. Opening a bare repository with a `config.worktree` no longer panics either ([#3157](https://github.com/entireio/cli/pull/3157))
+
+### Thanks
+
+Thanks to @MuskanPaliwal for the opt-in `redaction.drop_images` setting that keeps images out of checkpoints, and for fixing the pre-push panic in repositories with a `config.worktree`!
+
+## [0.13.3] - 2026-11-12
+
+### Added
+
+- `entire project agent setup` and `entire project agent serve` run a project's review agents on your own machine. `setup`, run as a project admin, binds a service account (existing, or created with `--name`) to the project's self-hosted environment and grants it read access to the current repository; it never creates secrets. `serve`, run with that account's secret in `ENTIRE_TOKEN`, polls for jobs and runs Claude Code reviews in the foreground (`--once`, `--poll-interval`). A Core outage or throttling during the token exchange is retried, while a refused secret stops `serve` ([#3118](https://github.com/entireio/cli/pull/3118), [#3146](https://github.com/entireio/cli/pull/3146))
+- Codex tool results in checkpoint transcripts carry `exitCode` for commands, `declined` for commands and file changes the user declined (their `status` stays `"error"`), and `cwd` for commands and file changes ([#3067](https://github.com/entireio/cli/pull/3067))
+
+### Changed
+
+- Checkpoints blank selected injected request text: Claude Code's recorded request logs, system prompt, loaded instruction files and memory notes; Codex's recorded base instructions and loaded user/repository instructions; and Pi's `project_context` section. Each record and the line count are kept. Pi's other system-message sections and Codex's built-in model-switch instructions remain stored. Claude Code attachments are blanked too, including `session_context`, which carried the developer's email, except queued prompts, shared files and IDE context ([#3145](https://github.com/entireio/cli/pull/3145))
+- On Windows, hook commands find `entire` on PATH only, not in the working directory. Run `entire enable --agent <agent>` in each repository to update installed hooks ([#3075](https://github.com/entireio/cli/pull/3075))
+- `entire enable` offers to commit only the configuration files this run changed. Files that already had uncommitted changes are listed for review and never committed, and `--local` only lists ([#3144](https://github.com/entireio/cli/pull/3144))
+- Plugins and signals: the signal Entire receives is forwarded as is (SIGTERM stays SIGTERM), SIGHUP is handled so closing the terminal winds a plugin down, and a second Ctrl-C gives a plugin up to 5s to finish before it is killed. A plugin that exits 0 after Ctrl-C keeps exit 0, and a signal ignored at startup stays ignored, so `nohup entire <plugin>` works. Plugin authors: see `docs/architecture/external-commands.md` ([#3074](https://github.com/entireio/cli/pull/3074), [#3117](https://github.com/entireio/cli/pull/3117))
+
+### Fixed
+
+- Plugins on Windows: `entire plugin upgrade` works while the plugin is running instead of failing with `Access is denied`, and Ctrl-C no longer fails with `exec: canceling Cmd: not supported by windows`. On every platform, a failed install rolls back to the previous version instead of recording the new one, and concurrent installs, upgrades and removals of one plugin wait for each other ([#3074](https://github.com/entireio/cli/pull/3074), [#3117](https://github.com/entireio/cli/pull/3117))
+- Entire works in a checkout whose `.git` directory shares another repository's objects and refs through a `commondir` file without being registered under `worktrees/`, as container launchers create them. Session start, `entire checkpoint list` and the commit hooks failed there with `validate linked-worktree registration`, and commits got no `Entire-Checkpoint` trailer. Note: files a session started in another checkout changes in such a checkout are not recorded; its tokens are. A turn spanning several worktrees also counts its step correctly when the first worktree recorded no files ([#3108](https://github.com/entireio/cli/pull/3108), [#3141](https://github.com/entireio/cli/pull/3141))
+- A checkpoint whose ref sits under the other-case spelling of its shard directory, which a case-insensitive filesystem can produce, is found after `git gc` packs refs (`entire checkpoint explain <id>` failed), extended instead of forked by later writes, listed once, and fetched from a remote that only has that spelling ([#2484](https://github.com/entireio/cli/pull/2484))
+- Images pasted into Codex are kept intact in checkpoints instead of being corrupted by redaction. They are stored unredacted, as images from other agents already are ([#2963](https://github.com/entireio/cli/pull/2963))
+- When Entire backs up an existing git hook by copying (filesystems without hard links, or taking a hook back from pre-commit or another hook manager), the copy keeps the hook's permissions, so a hook switched off with `chmod -x` stays off and a `0600` hook stays private ([#3072](https://github.com/entireio/cli/pull/3072))
+- Pi sessions keep being captured after `/reload`, `/new` and `/resume`, and a hook that exits before reading its input no longer crashes Pi. A committed `.pi/extensions/entire/index.ts` needs regenerating; `entire doctor` reports it as outdated ([#2950](https://github.com/entireio/cli/pull/2950))
+
+### Housekeeping
+
+- Go 1.27.4 and dependency updates, including betterleaks v1.10.0 ([#3114](https://github.com/entireio/cli/pull/3114))
+- Core API: project trails resolve through `/project-resolver`, repository-scoped trail requests use the repository-ID Change routes, and legacy Buildkite routes are dropped from the vendored Core spec ([#3136](https://github.com/entireio/cli/pull/3136), [#3123](https://github.com/entireio/cli/pull/3123), [#3026](https://github.com/entireio/cli/pull/3026))
+- Tests and cleanup: `entire doctor` bundle redaction of custom rules in settings JSON, the OpenCode 2 E2E seed test, and a `repo default-branch` constructor rename ([#3119](https://github.com/entireio/cli/pull/3119), [#3115](https://github.com/entireio/cli/pull/3115), [#2943](https://github.com/entireio/cli/pull/2943))
+
+### Thanks
+
+Thanks to @Beehtrix for keeping hook permissions on copied backups, for reporting how Windows hook commands looked up programs, adding exit codes, declined markers and working directories to Codex tool results, and keeping Pi capture alive across `/reload`, `/new` and `/resume`!
+
 ## [0.13.2] - 2026-11-10
 
 ### Added

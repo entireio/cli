@@ -334,6 +334,37 @@ func TestOpenPath_SeparatesBareRepositoriesFromWorktreeMetadata(t *testing.T) {
 		require.ErrorContains(t, err, "is not a bare repository")
 		require.Nil(t, storageRepo)
 	})
+
+	// With extensions.worktreeConfig and a config.worktree, go-git returns the
+	// merged config with a nil Raw (#3154). core.bare is then read from the
+	// repository's own config file, in both directions.
+	t.Run("bare repository with config.worktree", func(t *testing.T) {
+		t.Parallel()
+		root := filepath.Join(t.TempDir(), "bare.git")
+		runMetadataGit(t, filepath.Dir(root), "init", "--bare", root)
+		runMetadataGit(t, root, "config", "extensions.worktreeConfig", "true")
+		runMetadataGit(t, root, "config", "--worktree", "core.sparseCheckout", "true")
+		require.FileExists(t, filepath.Join(root, "config.worktree"))
+
+		repo, err := OpenPath(root)
+		require.NoError(t, err)
+		require.NoError(t, repo.Close())
+	})
+
+	t.Run("separate Git directory with config.worktree is not a bare repository", func(t *testing.T) {
+		t.Parallel()
+		tmp := t.TempDir()
+		root := filepath.Join(tmp, "checkout")
+		storage := filepath.Join(tmp, "storage")
+		runMetadataGit(t, tmp, "init", "--separate-git-dir", storage, root)
+		runMetadataGit(t, root, "config", "extensions.worktreeConfig", "true")
+		runMetadataGit(t, root, "config", "--worktree", "core.sparseCheckout", "true")
+		require.FileExists(t, filepath.Join(storage, "config.worktree"))
+
+		storageRepo, err := OpenPath(storage)
+		require.ErrorContains(t, err, "is not a bare repository")
+		require.Nil(t, storageRepo)
+	})
 }
 
 func TestOpenPath_DoesNotDowngradeSpecializedStorageFailures(t *testing.T) {

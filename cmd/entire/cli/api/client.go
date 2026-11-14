@@ -253,7 +253,8 @@ func (c *Client) Request(ctx context.Context, method, path string, headers http.
 
 // SetTrailRoute registers the entire-api base path for a resolved trail, so
 // later requests spelled with the trail's ID are rewritten onto its
-// forge/owner/repo/number route (see rewriteTrailRoute).
+// /api/v1/repos/{repo_id}/changes/{number} route (see rewriteTrailRoute).
+// The ID-based paths are internal rewrite keys, not outgoing wire routes.
 func (c *Client) SetTrailRoute(trailID, path string) {
 	trailID = strings.TrimSpace(trailID)
 	path = strings.TrimRight(strings.TrimSpace(path), "/")
