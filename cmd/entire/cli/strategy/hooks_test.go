@@ -2262,6 +2262,83 @@ func TestInstallGitHook_SymlinkedHookIsBackedUpNotFollowed(t *testing.T) {
 	assert.Contains(t, string(content), "pre-push"+backupSuffix, "the chain call should invoke the preserved link")
 }
 
+// TestInstallGitHook_SymlinkedHookWithExistingBackupIsNotFollowed reproduces
+// #2410: a symlinked hook together with a pre-existing <hook>.pre-entire backup
+// that resolves to the same target (the second-enable path). classifyExistingHook
+// sees a foreign hook, so installHooks calls prepareHookBackup, which finds the
+// existing backup identical to the hook and returns backupReplacedSame, leaving
+// that backup in place; writeHookFile then installs over the symlink still
+// sitting at the hook path.
+//
+// What this adds over the neighbouring symlink tests is the os.SameFile check
+// below (no self-chaining) and the case where an identical backup symlink is
+// already present: SymlinkedHookIsBackedUpNotFollowed starts from a symlinked
+// hook with no backup at all.
+//
+// InstallGitHook must replace the link at the hook path rather than write
+// through it. Writing through it had two consequences the reporter hit: the
+// symlink's target (a version-controlled script) was overwritten, and <hook>
+// and <hook>.pre-entire were left resolving to the same file, so the wrapper's
+// chain call re-executed itself without bound. The backup survives here only
+// because it is identical to the hook (backupReplacedSame); a backup resolving
+// to a different target would instead be rotated aside, as
+// TestInstallGitHook_WarnsWhenRotatingExistingBackup covers.
+func TestInstallGitHook_SymlinkedHookWithExistingBackupIsNotFollowed(t *testing.T) {
+	_, hooksDir := initHooksTestRepo(t)
+	require.NoError(t, os.MkdirAll(hooksDir, 0o750))
+
+	// A version-controlled script the repo manages its hooks through.
+	scriptsDir := t.TempDir()
+	target := filepath.Join(scriptsDir, "post-commit.sh")
+	const targetContent = "#!/bin/sh\necho \"PROJECT HOOK RAN\"\n"
+	require.NoError(t, os.WriteFile(target, []byte(targetContent), 0o755))
+
+	hookPath := filepath.Join(hooksDir, "post-commit")
+	backupPath := hookPath + backupSuffix
+
+	// The state a previous enable leaves behind: both the hook and its backup
+	// are symlinks to that same repo-managed script.
+	if err := os.Symlink(target, hookPath); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	require.NoError(t, os.Symlink(target, backupPath))
+
+	_, err := InstallGitHook(context.Background(), true, false)
+	require.NoError(t, err)
+
+	// Consequence 1 (data loss): the symlink target must not be written through.
+	after, err := os.ReadFile(target)
+	require.NoError(t, err)
+	assert.Equal(t, targetContent, string(after), "the symlink target must not be written through")
+
+	// The installed hook is a regular file, not the symlink.
+	installed, err := os.Lstat(hookPath)
+	require.NoError(t, err)
+	assert.Zero(t, installed.Mode()&os.ModeSymlink, "the installed hook must be a regular file, not the symlink")
+
+	// The pre-existing backup is left untouched: it resolves to the same target
+	// as the hook, so prepareHookBackup takes the backupReplacedSame path and
+	// keeps the existing link rather than rotating it.
+	backupInfo, err := os.Lstat(backupPath)
+	require.NoError(t, err)
+	assert.NotZero(t, backupInfo.Mode()&os.ModeSymlink, "the existing backup symlink must be preserved")
+
+	// Consequence 2 (recursion): <hook> and <hook>.pre-entire must not resolve
+	// to the same file, or the chain call re-executes itself forever.
+	hookResolved, err := os.Stat(hookPath)
+	require.NoError(t, err)
+	backupResolved, err := os.Stat(backupPath)
+	require.NoError(t, err)
+	assert.False(t, os.SameFile(hookResolved, backupResolved),
+		"hook and backup must not resolve to the same file (self-chaining recursion)")
+
+	// The installed wrapper still chains to the preserved backup.
+	content, err := os.ReadFile(hookPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(content), entireHookMarker)
+	assert.Contains(t, string(content), "post-commit"+backupSuffix, "the chain call should invoke the preserved backup")
+}
+
 // The hooks directory is git's answer to core.hooksPath, and Entire will not
 // write its hooks through a link to somewhere it cannot verify. The error has to
 // name the setting, because nothing else in the message would tell the user
