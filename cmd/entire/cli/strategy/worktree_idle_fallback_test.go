@@ -289,13 +289,12 @@ func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
 		// laterCommit lands another commit after the amend, before its
 		// post-commit reads HEAD's reflog.
 		laterCommit bool
-		// dropEntry removes the commit's own entry from HEAD's reflog,
-		// leaving only older ones.
-		dropEntry bool
-		// expireBefore leaves only the commit's own entry, listed by git with
-		// no old HEAD, as a reftable reflog is once older entries expire.
-		expireBefore bool
-		condensed    bool
+		// editReflog changes HEAD's reflog after the commit, before its
+		// post-commit: dropNewestReflogEntry removes the commit's own entry,
+		// leaving only older ones, and expireReflogBeforeNewest leaves only
+		// that entry, with no old HEAD.
+		editReflog func(t *testing.T, dir string)
+		condensed  bool
 	}{
 		{name: "amend", commitArgs: []string{"--amend"}, condensed: true},
 		{name: "message reused with commit -C", condensed: false},
@@ -306,8 +305,8 @@ func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
 		{name: "amend of a commit whose trailer was moved", commitArgs: []string{"--amend"}, movedTrailer: true, condensed: true},
 		{name: "amend, then another commit lands before post-commit reads the reflog", commitArgs: []string{"--amend"}, laterCommit: true, condensed: true},
 		{name: "commit -C, then another commit lands before post-commit reads the reflog", laterCommit: true, condensed: false},
-		{name: "amend with no reflog entry of its own", commitArgs: []string{"--amend"}, dropEntry: true, condensed: true},
-		{name: "amend whose reflog entry has no older one to read its old HEAD from", commitArgs: []string{"--amend"}, expireBefore: true, condensed: true},
+		{name: "amend with no reflog entry of its own", commitArgs: []string{"--amend"}, editReflog: dropNewestReflogEntry, condensed: true},
+		{name: "amend whose reflog entry has no older one to read its old HEAD from", commitArgs: []string{"--amend"}, editReflog: expireReflogBeforeNewest, condensed: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -338,9 +337,9 @@ func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
 			if tt.movedTrailer {
 				committed = msg + "\nA note written after the trailer.\n"
 			}
-			if tt.dropEntry {
-				// Through git, so HEAD's reflog keeps an older entry that moved
-				// HEAD once the amend's own is gone.
+			if tt.editReflog != nil {
+				// Through git, so HEAD's reflog holds an entry older than the
+				// amend's for editReflog to work on.
 				testutil.RunGit(t, siblingDir, "commit", "-q", "-m", committed)
 			} else {
 				testutil.GitCommit(t, siblingDir, committed)
@@ -410,11 +409,8 @@ func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
 				// does not move HEAD.
 				testutil.RunGit(t, siblingDir, "reset", "-q", "HEAD")
 			}
-			if tt.dropEntry {
-				dropNewestReflogEntry(t, siblingDir)
-			}
-			if tt.expireBefore {
-				expireReflogBeforeNewest(t, siblingDir)
+			if tt.editReflog != nil {
+				tt.editReflog(t, siblingDir)
 			}
 			if tt.laterCommit {
 				// The next commit lands after post-commit has read HEAD (still
