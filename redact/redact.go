@@ -1001,6 +1001,16 @@ func hasNonPlaceholderQuotedPasswordValue(value string, singleQuoted bool) bool 
 	return value != "" && !isPlaceholderSecretValueQuoted(value, singleQuoted)
 }
 
+// maxPlaceholderExpansions is the most `${` a value can hold and still be
+// read as a placeholder. The cap counts `${` occurrences, not nesting
+// levels: eight defaults around $X stay visible, and eight around ${X}
+// redact, because the inner braces are one more `${`.
+// isPlaceholderShellExpansion reads the word of each ${NAME:-word} level
+// once, so a value is read at most maxPlaceholderExpansions times. A
+// value with more `${` is not a placeholder and redacts. Real defaults
+// nest a few levels (${DB_PASSWORD:-${PGPASSWORD:-$FALLBACK}}).
+const maxPlaceholderExpansions = 8
+
 // isPlaceholderSecretValue checks a bare scanner finding. It stays an exact
 // match on known placeholder shapes: a finding is already a scanner's claim
 // that the span is a secret, and the key/value rules below (ellipses, shell
@@ -1015,6 +1025,9 @@ func isPlaceholderSecretValue(value string) bool {
 		return true
 	}
 	if strings.HasPrefix(trimmed, "${") && strings.HasSuffix(trimmed, "}") {
+		if strings.Count(trimmed, "${") > maxPlaceholderExpansions {
+			return false
+		}
 		return isPlaceholderShellExpansion(trimmed)
 	}
 	if templatePlaceholderRE.MatchString(trimmed) {
