@@ -35,11 +35,19 @@ Git hooks use `#!/bin/sh` shebangs with POSIX shell syntax. Git for Windows exec
 
 ### Agent Hooks
 
-Agent-specific hooks (Claude Code, Cursor, OpenCode) are JSON configuration — the agents themselves handle execution. The hooks call `entire.exe` directly via `exec.Command`, not through a shell.
+Agent hooks are command lines stored in each agent's own configuration, and the agent runs them through its own hook shell. The default form is an `sh -c` wrapper, which needs a POSIX `sh` the agent can find. Codex, Cursor, Factory AI Droid and Antigravity can get a `cmd.exe` wrapper on Windows instead. Which form each agent gets, and why, is in [Hook Commands Resolve Programs from PATH](docs/development/git-safety.md#hook-commands-resolve-programs-from-path-not-the-working-directory) and the wrapper selection rules in `cmd/entire/cli/agent/hook_command.go`.
 
 ## Testing
 
 ### Unit + Integration Tests
+
+On a Windows host, run the tests CI runs there: the ones whose top-level name contains `Windows` or `MSYS`.
+
+```bash
+go test ./cmd/entire/cli/... -run '(Windows|MSYS)' -count=1
+```
+
+A test that must run on real Windows needs one of those words in its name, or CI's `test-windows` job will not select it. The rest of the unit and integration suites use POSIX-only harnesses and are not expected to pass on a Windows host; run them on Linux, macOS or WSL:
 
 ```bash
 go test ./...                                          # unit tests
@@ -70,7 +78,7 @@ The E2E test infrastructure uses native PTY (ConPTY on Windows, creack/pty on Un
 - **Interactive integration tests** that use PTY (`resume_interactive_test.go`) are skipped on Windows (guarded with `//go:build unix`).
 - **File permissions** (0o755, 0o644) are set but ignored by Windows — Windows uses ACLs instead.
 - **Symlinks** in E2E tests require Windows Developer Mode or admin privileges.
-- **OpenCode plugin** uses `Bun.spawnSync(["sh", "-c", ...])` which won't work on Windows unless Bun supports it. OpenCode Windows support is pending.
+- **OpenCode plugin** runs its hooks with `spawnSync("sh", ["-c", ...])`, which needs a POSIX `sh` on `PATH`. OpenCode Windows support is pending.
 
 ## Smoke Test Checklist
 
