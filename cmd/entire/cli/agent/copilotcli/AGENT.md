@@ -27,7 +27,7 @@ Copilot CLI has a complete hook system with 9 hook types, JSONL transcripts, and
 - Config file: `.github/hooks/*.json` (all JSON files in directory are auto-discovered)
 - Our file: `.github/hooks/entire.json` (dedicated file, avoids conflicts)
 - Config format: JSON
-- Hook registration: Array of hook entries per event name, each with `type: "command"` and `bash` field
+- Hook registration: Array of hook entries per event name, each with `type: "command"` and a `bash` and a `powershell` command
 
 ### Hook Config Format
 
@@ -38,14 +38,15 @@ Copilot CLI has a complete hook system with 9 hook types, JSONL transcripts, and
     "hookName": [
       {
         "type": "command",
-        "bash": "entire hooks copilot-cli hook-name"
+        "bash": "entire hooks copilot-cli hook-name",
+        "powershell": "entire hooks copilot-cli hook-name"
       }
     ]
   }
 }
 ```
 
-Note: Uses `bash` key (not `command` like Claude Code/Cursor). Also supports `powershell` for Windows. Each entry can have optional `cwd`, `timeoutSec` (default 30), `env`, and `comment` fields.
+Note: Uses `bash` and `powershell` keys (not `command` like Claude Code/Cursor). Copilot CLI runs `powershell` on Windows and `bash` elsewhere. Entire writes both on every install, each inside its missing-CLI wrapper, because `entire.json` is committed and read on every platform. With no `powershell` key, Copilot on Windows runs the `bash` command, which goes to WSL when WSL is installed, so the session is recorded under `/mnt/c/...` paths and commits get no `Entire-Checkpoint` trailer. Each entry can have optional `cwd`, `timeoutSec` (default 30), `env`, and `comment` fields.
 
 ### Hook Names and Event Mapping
 
