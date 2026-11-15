@@ -188,6 +188,19 @@ https://entire.com/gh/entirehq/-/trails/23479. A core without it ignores the
 field and assigns the default cell, so `project create` prints the cell the
 server chose.
 
+The three add operations, `POST /orgs/{orgId}/members` (`addOrgMember`),
+`POST /projects/{projectId}/grants` (`grantProjectAccess`) and
+`POST /repos/{repoId}/grants` (`grantRepoAccess`), are spliced *ahead* of the
+deployed spec from the ENT-2652 branch of entiredb#5546: the whole `post`
+operation of each, the `allow_invitation` property of `AddOrgMemberInputBody`
+and `GrantAccessBody`, and the new `AccountInvited` schema (the 202 body). The
+421 responses reference `JurisdictionRedirectError`, which the deployed spec
+already has, so it is copied verbatim. Every piece is the branch's generated
+`/api/v1/openapi.json`, not hand-written. Core answers the old 201 to a request
+that carries `allow_invitation`, so the client works on either side of the
+deploy. Once entiredb#5546 ships, a normal refresh reproduces these parts; drop
+this paragraph then.
+
 The legacy Buildkite routes are spliced *out* the same way. Core no longer
 serves them (entiredb#4868, #4982). The splice removes the seven
 `/orgs/{orgId}/ci/buildkite/...` operations and

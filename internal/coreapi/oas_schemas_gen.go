@@ -257,6 +257,119 @@ func (s *AccountIdentityAdditional) init() AccountIdentityAdditional {
 	return m
 }
 
+// Ref: #/components/schemas/AccountInvited
+type AccountInvited struct {
+	// A URL to the JSON Schema for this object.
+	Schema OptURI `json:"$schema"`
+	// When the invitation stops being valid.
+	ExpiresAt time.Time `json:"expires_at"`
+	// The open invitation for the account.
+	InvitationID string `json:"invitation_id"`
+	// Always invited.
+	Status          AccountInvitedStatus `json:"status"`
+	AdditionalProps AccountInvitedAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *AccountInvited) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetExpiresAt returns the value of ExpiresAt.
+func (s *AccountInvited) GetExpiresAt() time.Time {
+	return s.ExpiresAt
+}
+
+// GetInvitationID returns the value of InvitationID.
+func (s *AccountInvited) GetInvitationID() string {
+	return s.InvitationID
+}
+
+// GetStatus returns the value of Status.
+func (s *AccountInvited) GetStatus() AccountInvitedStatus {
+	return s.Status
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *AccountInvited) GetAdditionalProps() AccountInvitedAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *AccountInvited) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetExpiresAt sets the value of ExpiresAt.
+func (s *AccountInvited) SetExpiresAt(val time.Time) {
+	s.ExpiresAt = val
+}
+
+// SetInvitationID sets the value of InvitationID.
+func (s *AccountInvited) SetInvitationID(val string) {
+	s.InvitationID = val
+}
+
+// SetStatus sets the value of Status.
+func (s *AccountInvited) SetStatus(val AccountInvitedStatus) {
+	s.Status = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *AccountInvited) SetAdditionalProps(val AccountInvitedAdditional) {
+	s.AdditionalProps = val
+}
+
+func (*AccountInvited) addOrgMemberRes()       {}
+func (*AccountInvited) grantProjectAccessRes() {}
+func (*AccountInvited) grantRepoAccessRes()    {}
+
+type AccountInvitedAdditional map[string]jx.Raw
+
+func (s *AccountInvitedAdditional) init() AccountInvitedAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Always invited.
+type AccountInvitedStatus string
+
+const (
+	AccountInvitedStatusInvited AccountInvitedStatus = "invited"
+)
+
+// AllValues returns all AccountInvitedStatus values.
+func (AccountInvitedStatus) AllValues() []AccountInvitedStatus {
+	return []AccountInvitedStatus{
+		AccountInvitedStatusInvited,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s AccountInvitedStatus) MarshalText() ([]byte, error) {
+	switch s {
+	case AccountInvitedStatusInvited:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *AccountInvitedStatus) UnmarshalText(data []byte) error {
+	switch AccountInvitedStatus(data) {
+	case AccountInvitedStatusInvited:
+		*s = AccountInvitedStatusInvited
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
 // Ref: #/components/schemas/AccountProfile
 type AccountProfile struct {
 	// A URL to the JSON Schema for this object.
@@ -486,9 +599,14 @@ func (s *AccountProfileOrganizationAdditional) init() AccountProfileOrganization
 // Ref: #/components/schemas/AddOrgMemberInputBody
 type AddOrgMemberInputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema         OptURI `json:"$schema"`
-	Provider       string `json:"provider"`
-	ProviderUserId string `json:"providerUserId"`
+	Schema OptURI `json:"$schema"`
+	// Set true to let the add invite an account that is outside the organization. The add then answers
+	// 202 with an invitation. Without it, that add answers 409 with type https://entire.
+	// com/errors/invitation/required and writes nothing. The platform-admin routes ignore it: they
+	// always add directly.
+	AllowInvitation OptBool `json:"allow_invitation"`
+	Provider        string  `json:"provider"`
+	ProviderUserId  string  `json:"providerUserId"`
 	// Role at the org; defaults to member.
 	Role            OptAddOrgMemberInputBodyRole `json:"role"`
 	AdditionalProps AddOrgMemberInputBodyAdditional
@@ -497,6 +615,11 @@ type AddOrgMemberInputBody struct {
 // GetSchema returns the value of Schema.
 func (s *AddOrgMemberInputBody) GetSchema() OptURI {
 	return s.Schema
+}
+
+// GetAllowInvitation returns the value of AllowInvitation.
+func (s *AddOrgMemberInputBody) GetAllowInvitation() OptBool {
+	return s.AllowInvitation
 }
 
 // GetProvider returns the value of Provider.
@@ -522,6 +645,11 @@ func (s *AddOrgMemberInputBody) GetAdditionalProps() AddOrgMemberInputBodyAdditi
 // SetSchema sets the value of Schema.
 func (s *AddOrgMemberInputBody) SetSchema(val OptURI) {
 	s.Schema = val
+}
+
+// SetAllowInvitation sets the value of AllowInvitation.
+func (s *AddOrgMemberInputBody) SetAllowInvitation(val OptBool) {
+	s.AllowInvitation = val
 }
 
 // SetProvider sets the value of Provider.
@@ -7198,8 +7326,13 @@ type GrantAccessBody struct {
 	Schema OptURI `json:"$schema"`
 	// Entire account ULID to grant directly. Mutually exclusive with provider/providerUserId; the
 	// account must exist.
-	AccountId   OptString                     `json:"accountId"`
-	GranteeType OptGrantAccessBodyGranteeType `json:"granteeType"`
+	AccountId OptString `json:"accountId"`
+	// Set true to let the grant invite an account that is outside the parent scope. The grant then
+	// answers 202 with an invitation. Without it, that grant answers 409 with type https://entire.
+	// com/errors/invitation/required and writes nothing. The platform-admin routes ignore it: they
+	// always grant directly.
+	AllowInvitation OptBool                       `json:"allow_invitation"`
+	GranteeType     OptGrantAccessBodyGranteeType `json:"granteeType"`
 	// Legacy identity selector; requires providerUserId and must not be combined with accountId.
 	Provider OptString `json:"provider"`
 	// Legacy provider user ID; requires provider and must not be combined with accountId.
@@ -7216,6 +7349,11 @@ func (s *GrantAccessBody) GetSchema() OptURI {
 // GetAccountId returns the value of AccountId.
 func (s *GrantAccessBody) GetAccountId() OptString {
 	return s.AccountId
+}
+
+// GetAllowInvitation returns the value of AllowInvitation.
+func (s *GrantAccessBody) GetAllowInvitation() OptBool {
+	return s.AllowInvitation
 }
 
 // GetGranteeType returns the value of GranteeType.
@@ -7251,6 +7389,11 @@ func (s *GrantAccessBody) SetSchema(val OptURI) {
 // SetAccountId sets the value of AccountId.
 func (s *GrantAccessBody) SetAccountId(val OptString) {
 	s.AccountId = val
+}
+
+// SetAllowInvitation sets the value of AllowInvitation.
+func (s *GrantAccessBody) SetAllowInvitation(val OptBool) {
+	s.AllowInvitation = val
 }
 
 // SetGranteeType sets the value of GranteeType.
@@ -7409,6 +7552,8 @@ func (s *GrantProjectAccessOutputBody) SetAdditionalProps(val GrantProjectAccess
 	s.AdditionalProps = val
 }
 
+func (*GrantProjectAccessOutputBody) grantProjectAccessRes() {}
+
 type GrantProjectAccessOutputBodyAdditional map[string]jx.Raw
 
 func (s *GrantProjectAccessOutputBodyAdditional) init() GrantProjectAccessOutputBodyAdditional {
@@ -7457,6 +7602,8 @@ func (s *GrantRepoAccessOutputBody) SetStatus(val string) {
 func (s *GrantRepoAccessOutputBody) SetAdditionalProps(val GrantRepoAccessOutputBodyAdditional) {
 	s.AdditionalProps = val
 }
+
+func (*GrantRepoAccessOutputBody) grantRepoAccessRes() {}
 
 type GrantRepoAccessOutputBodyAdditional map[string]jx.Raw
 
@@ -11749,6 +11896,8 @@ func (s *Membership) SetWorkosOrgMembershipId(val OptString) {
 func (s *Membership) SetAdditionalProps(val MembershipAdditional) {
 	s.AdditionalProps = val
 }
+
+func (*Membership) addOrgMemberRes() {}
 
 type MembershipAdditional map[string]jx.Raw
 

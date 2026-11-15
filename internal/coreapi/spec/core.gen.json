@@ -73,6 +73,42 @@
         ],
         "type": "object"
       },
+      "AccountInvited": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/AccountInvited.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "expires_at": {
+            "description": "When the invitation stops being valid.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "invitation_id": {
+            "description": "The open invitation for the account.",
+            "type": "string"
+          },
+          "status": {
+            "description": "Always invited.",
+            "enum": [
+              "invited"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "invitation_id",
+          "expires_at"
+        ],
+        "type": "object"
+      },
       "AccountProfile": {
         "additionalProperties": true,
         "properties": {
@@ -161,6 +197,10 @@
             "format": "uri",
             "readOnly": true,
             "type": "string"
+          },
+          "allow_invitation": {
+            "description": "Set true to let the add invite an account that is outside the organization. The add then answers 202 with an invitation. Without it, that add answers 409 with type https://entire.com/errors/invitation/required and writes nothing. The platform-admin routes ignore it: they always add directly.",
+            "type": "boolean"
           },
           "provider": {
             "minLength": 1,
@@ -2465,6 +2505,10 @@
             "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
             "type": "string"
           },
+          "allow_invitation": {
+            "description": "Set true to let the grant invite an account that is outside the parent scope. The grant then answers 202 with an invitation. Without it, that grant answers 409 with type https://entire.com/errors/invitation/required and writes nothing. The platform-admin routes ignore it: they always grant directly.",
+            "type": "boolean"
+          },
           "granteeType": {
             "default": "account",
             "enum": [
@@ -2669,6 +2713,34 @@
           "invitedBy",
           "createdAt",
           "expiresAt"
+        ],
+        "type": "object"
+      },
+      "JurisdictionRedirectError": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/JurisdictionRedirectError.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "home_core_url": {
+            "type": "string"
+          },
+          "jurisdiction": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error",
+          "home_core_url"
         ],
         "type": "object"
       },
@@ -8463,6 +8535,7 @@
         ]
       },
       "post": {
+        "description": "The add is direct, and answers 201, when no invitation is needed. On /api/v1 no add to an organization is direct. Any other account is outside this organization and joins only by an invitation that it accepts. Set allow_invitation to create that invitation: the add then answers 202 with invitation_id and expires_at, and the account holds no access until it accepts. Without allow_invitation, that add answers 409 with type https://entire.com/errors/invitation/required and writes nothing. 201 never carries an invitation. A repeat add reuses an open invitation for the same role and sends no second mail; another role answers 409 with type https://entire.com/errors/invitation/role-mismatch until the invitation is revoked. An organization that enforces single sign-on admits no account by invitation: an add that would invite into it answers 403 with type https://entire.com/errors/invitation/sso-required, and the account joins by signing in through that single sign-on. Invitation mail to one account is limited: 429 carries Retry-After. The invitation is created on the organization's home core: another core answers 421.",
         "operationId": "addOrgMember",
         "parameters": [
           {
@@ -8494,7 +8567,17 @@
                 }
               }
             },
-            "description": "Created"
+            "description": "Granted. The body is unchanged from before invitations existed."
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountInvited"
+                }
+              }
+            },
+            "description": "Invited. Only a request that sets allow_invitation receives this."
           },
           "default": {
             "content": {
@@ -8515,7 +8598,7 @@
             "sessionAuth": []
           }
         ],
-        "summary": "Add a member to an organization",
+        "summary": "Add a member to an organization, or invite the account",
         "tags": [
           "orgs"
         ]
@@ -10070,6 +10153,7 @@
     },
     "/projects/{projectId}/grants": {
       "post": {
+        "description": "The add is direct, and answers 201, when no invitation is needed. On /api/v1 the grant is direct for an active member of the owning organization, an account that already holds a grant on the project, and a service account. Any other account is outside this project and joins only by an invitation that it accepts. Set allow_invitation to create that invitation: the add then answers 202 with invitation_id and expires_at, and the account holds no access until it accepts. Without allow_invitation, that add answers 409 with type https://entire.com/errors/invitation/required and writes nothing. 201 never carries an invitation. A repeat add reuses an open invitation for the same role and sends no second mail; another role answers 409 with type https://entire.com/errors/invitation/role-mismatch until the invitation is revoked. An organization that enforces single sign-on admits no account by invitation: an add that would invite into it answers 403 with type https://entire.com/errors/invitation/sso-required, and the account joins by signing in through that single sign-on. Invitation mail to one account is limited: 429 carries Retry-After. The invitation is created on the project's home core: another core answers 421.",
         "operationId": "grantProjectAccess",
         "parameters": [
           {
@@ -10101,7 +10185,17 @@
                 }
               }
             },
-            "description": "Created"
+            "description": "Granted. The body is unchanged from before invitations existed."
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountInvited"
+                }
+              }
+            },
+            "description": "Invited. Only a request that sets allow_invitation receives this."
           },
           "default": {
             "content": {
@@ -10122,7 +10216,7 @@
             "sessionAuth": []
           }
         ],
-        "summary": "Grant project access to an identity",
+        "summary": "Grant project access to an account, or invite the account",
         "tags": [
           "projects"
         ]
@@ -12302,6 +12396,7 @@
         ]
       },
       "post": {
+        "description": "The add is direct, and answers 201, when no invitation is needed. On /api/v1 the grant is direct for an account with a grant on the owning project, an active member of the owning organization, an account that already holds a grant on the repository, and a service account. Any other account is outside this repository and joins only by an invitation that it accepts. Set allow_invitation to create that invitation: the add then answers 202 with invitation_id and expires_at, and the account holds no access until it accepts. Without allow_invitation, that add answers 409 with type https://entire.com/errors/invitation/required and writes nothing. 201 never carries an invitation. A repeat add reuses an open invitation for the same role and sends no second mail; another role answers 409 with type https://entire.com/errors/invitation/role-mismatch until the invitation is revoked. An organization that enforces single sign-on admits no account by invitation: an add that would invite into it answers 403 with type https://entire.com/errors/invitation/sso-required, and the account joins by signing in through that single sign-on. Invitation mail to one account is limited: 429 carries Retry-After. The invitation is created on the repository's home core: another core answers 421.",
         "operationId": "grantRepoAccess",
         "parameters": [
           {
@@ -12333,7 +12428,17 @@
                 }
               }
             },
-            "description": "Created"
+            "description": "Granted. The body is unchanged from before invitations existed."
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountInvited"
+                }
+              }
+            },
+            "description": "Invited. Only a request that sets allow_invitation receives this."
           },
           "default": {
             "content": {
@@ -12354,7 +12459,7 @@
             "sessionAuth": []
           }
         ],
-        "summary": "Grant repo access to an identity",
+        "summary": "Grant repo access to an account, or invite the account",
         "tags": [
           "repos"
         ]

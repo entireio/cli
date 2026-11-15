@@ -67,6 +67,38 @@ func (s *AccountIdentity) Validate() error {
 	return nil
 }
 
+func (s *AccountInvited) Validate() error {
+	if s == nil {
+		return validate.ErrNilPointer
+	}
+
+	var failures []validate.FieldError
+	if err := func() error {
+		if err := s.Status.Validate(); err != nil {
+			return err
+		}
+		return nil
+	}(); err != nil {
+		failures = append(failures, validate.FieldError{
+			Name:  "status",
+			Error: err,
+		})
+	}
+	if len(failures) > 0 {
+		return &validate.Error{Fields: failures}
+	}
+	return nil
+}
+
+func (s AccountInvitedStatus) Validate() error {
+	switch s {
+	case "invited":
+		return nil
+	default:
+		return errors.Errorf("invalid value: %v", s)
+	}
+}
+
 func (s *AccountProfile) Validate() error {
 	if s == nil {
 		return validate.ErrNilPointer

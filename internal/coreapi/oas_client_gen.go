@@ -29,10 +29,21 @@ type Invoker interface {
 	AcceptInvitation(ctx context.Context, request *AcceptInvitationInputBody) (AcceptInvitationRes, error)
 	// AddOrgMember invokes addOrgMember operation.
 	//
-	// Add a member to an organization.
+	// The add is direct, and answers 201, when no invitation is needed. On /api/v1 no add to an
+	// organization is direct. Any other account is outside this organization and joins only by an
+	// invitation that it accepts. Set allow_invitation to create that invitation: the add then answers
+	// 202 with invitation_id and expires_at, and the account holds no access until it accepts. Without
+	// allow_invitation, that add answers 409 with type https://entire.com/errors/invitation/required and
+	// writes nothing. 201 never carries an invitation. A repeat add reuses an open invitation for the
+	// same role and sends no second mail; another role answers 409 with type https://entire.
+	// com/errors/invitation/role-mismatch until the invitation is revoked. An organization that enforces
+	// single sign-on admits no account by invitation: an add that would invite into it answers 403 with
+	// type https://entire.com/errors/invitation/sso-required, and the account joins by signing in
+	// through that single sign-on. Invitation mail to one account is limited: 429 carries Retry-After.
+	// The invitation is created on the organization's home core: another core answers 421.
 	//
 	// POST /orgs/{orgId}/members
-	AddOrgMember(ctx context.Context, request *AddOrgMemberInputBody, params AddOrgMemberParams) (*Membership, error)
+	AddOrgMember(ctx context.Context, request *AddOrgMemberInputBody, params AddOrgMemberParams) (AddOrgMemberRes, error)
 	// BeginPluginInstallationDeletion invokes beginPluginInstallationDeletion operation.
 	//
 	// Requires org#manage on the installation's org. New provider access is denied before the response.
@@ -353,16 +364,41 @@ type Invoker interface {
 	GetVersion(ctx context.Context) (*GetVersionOutputBody, error)
 	// GrantProjectAccess invokes grantProjectAccess operation.
 	//
-	// Grant project access to an identity.
+	// The add is direct, and answers 201, when no invitation is needed. On /api/v1 the grant is direct
+	// for an active member of the owning organization, an account that already holds a grant on the
+	// project, and a service account. Any other account is outside this project and joins only by an
+	// invitation that it accepts. Set allow_invitation to create that invitation: the add then answers
+	// 202 with invitation_id and expires_at, and the account holds no access until it accepts. Without
+	// allow_invitation, that add answers 409 with type https://entire.com/errors/invitation/required and
+	// writes nothing. 201 never carries an invitation. A repeat add reuses an open invitation for the
+	// same role and sends no second mail; another role answers 409 with type https://entire.
+	// com/errors/invitation/role-mismatch until the invitation is revoked. An organization that enforces
+	// single sign-on admits no account by invitation: an add that would invite into it answers 403 with
+	// type https://entire.com/errors/invitation/sso-required, and the account joins by signing in
+	// through that single sign-on. Invitation mail to one account is limited: 429 carries Retry-After.
+	// The invitation is created on the project's home core: another core answers 421.
 	//
 	// POST /projects/{projectId}/grants
-	GrantProjectAccess(ctx context.Context, request *GrantAccessBody, params GrantProjectAccessParams) (*GrantProjectAccessOutputBody, error)
+	GrantProjectAccess(ctx context.Context, request *GrantAccessBody, params GrantProjectAccessParams) (GrantProjectAccessRes, error)
 	// GrantRepoAccess invokes grantRepoAccess operation.
 	//
-	// Grant repo access to an identity.
+	// The add is direct, and answers 201, when no invitation is needed. On /api/v1 the grant is direct
+	// for an account with a grant on the owning project, an active member of the owning organization, an
+	// account that already holds a grant on the repository, and a service account. Any other account is
+	// outside this repository and joins only by an invitation that it accepts. Set allow_invitation to
+	// create that invitation: the add then answers 202 with invitation_id and expires_at, and the
+	// account holds no access until it accepts. Without allow_invitation, that add answers 409 with type
+	// https://entire.com/errors/invitation/required and writes nothing. 201 never carries an invitation.
+	// A repeat add reuses an open invitation for the same role and sends no second mail; another role
+	// answers 409 with type https://entire.com/errors/invitation/role-mismatch until the invitation is
+	// revoked. An organization that enforces single sign-on admits no account by invitation: an add that
+	// would invite into it answers 403 with type https://entire.com/errors/invitation/sso-required, and
+	// the account joins by signing in through that single sign-on. Invitation mail to one account is
+	// limited: 429 carries Retry-After. The invitation is created on the repository's home core: another
+	// core answers 421.
 	//
 	// POST /repos/{repoId}/grants
-	GrantRepoAccess(ctx context.Context, request *GrantAccessBody, params GrantRepoAccessParams) (*GrantRepoAccessOutputBody, error)
+	GrantRepoAccess(ctx context.Context, request *GrantAccessBody, params GrantRepoAccessParams) (GrantRepoAccessRes, error)
 	// GrantServiceAccountAccess invokes grantServiceAccountAccess operation.
 	//
 	// Grant service account access on a repo or project.
@@ -917,15 +953,26 @@ func (c *Client) sendAcceptInvitation(ctx context.Context, request *AcceptInvita
 
 // AddOrgMember invokes addOrgMember operation.
 //
-// Add a member to an organization.
+// The add is direct, and answers 201, when no invitation is needed. On /api/v1 no add to an
+// organization is direct. Any other account is outside this organization and joins only by an
+// invitation that it accepts. Set allow_invitation to create that invitation: the add then answers
+// 202 with invitation_id and expires_at, and the account holds no access until it accepts. Without
+// allow_invitation, that add answers 409 with type https://entire.com/errors/invitation/required and
+// writes nothing. 201 never carries an invitation. A repeat add reuses an open invitation for the
+// same role and sends no second mail; another role answers 409 with type https://entire.
+// com/errors/invitation/role-mismatch until the invitation is revoked. An organization that enforces
+// single sign-on admits no account by invitation: an add that would invite into it answers 403 with
+// type https://entire.com/errors/invitation/sso-required, and the account joins by signing in
+// through that single sign-on. Invitation mail to one account is limited: 429 carries Retry-After.
+// The invitation is created on the organization's home core: another core answers 421.
 //
 // POST /orgs/{orgId}/members
-func (c *Client) AddOrgMember(ctx context.Context, request *AddOrgMemberInputBody, params AddOrgMemberParams) (*Membership, error) {
+func (c *Client) AddOrgMember(ctx context.Context, request *AddOrgMemberInputBody, params AddOrgMemberParams) (AddOrgMemberRes, error) {
 	res, err := c.sendAddOrgMember(ctx, request, params)
 	return res, err
 }
 
-func (c *Client) sendAddOrgMember(ctx context.Context, request *AddOrgMemberInputBody, params AddOrgMemberParams) (res *Membership, err error) {
+func (c *Client) sendAddOrgMember(ctx context.Context, request *AddOrgMemberInputBody, params AddOrgMemberParams) (res AddOrgMemberRes, err error) {
 
 	u := uri.Clone(c.requestURL(ctx))
 	var pathParts [3]string
@@ -5879,15 +5926,27 @@ func (c *Client) sendGetVersion(ctx context.Context) (res *GetVersionOutputBody,
 
 // GrantProjectAccess invokes grantProjectAccess operation.
 //
-// Grant project access to an identity.
+// The add is direct, and answers 201, when no invitation is needed. On /api/v1 the grant is direct
+// for an active member of the owning organization, an account that already holds a grant on the
+// project, and a service account. Any other account is outside this project and joins only by an
+// invitation that it accepts. Set allow_invitation to create that invitation: the add then answers
+// 202 with invitation_id and expires_at, and the account holds no access until it accepts. Without
+// allow_invitation, that add answers 409 with type https://entire.com/errors/invitation/required and
+// writes nothing. 201 never carries an invitation. A repeat add reuses an open invitation for the
+// same role and sends no second mail; another role answers 409 with type https://entire.
+// com/errors/invitation/role-mismatch until the invitation is revoked. An organization that enforces
+// single sign-on admits no account by invitation: an add that would invite into it answers 403 with
+// type https://entire.com/errors/invitation/sso-required, and the account joins by signing in
+// through that single sign-on. Invitation mail to one account is limited: 429 carries Retry-After.
+// The invitation is created on the project's home core: another core answers 421.
 //
 // POST /projects/{projectId}/grants
-func (c *Client) GrantProjectAccess(ctx context.Context, request *GrantAccessBody, params GrantProjectAccessParams) (*GrantProjectAccessOutputBody, error) {
+func (c *Client) GrantProjectAccess(ctx context.Context, request *GrantAccessBody, params GrantProjectAccessParams) (GrantProjectAccessRes, error) {
 	res, err := c.sendGrantProjectAccess(ctx, request, params)
 	return res, err
 }
 
-func (c *Client) sendGrantProjectAccess(ctx context.Context, request *GrantAccessBody, params GrantProjectAccessParams) (res *GrantProjectAccessOutputBody, err error) {
+func (c *Client) sendGrantProjectAccess(ctx context.Context, request *GrantAccessBody, params GrantProjectAccessParams) (res GrantProjectAccessRes, err error) {
 
 	u := uri.Clone(c.requestURL(ctx))
 	var pathParts [3]string
@@ -5983,15 +6042,28 @@ func (c *Client) sendGrantProjectAccess(ctx context.Context, request *GrantAcces
 
 // GrantRepoAccess invokes grantRepoAccess operation.
 //
-// Grant repo access to an identity.
+// The add is direct, and answers 201, when no invitation is needed. On /api/v1 the grant is direct
+// for an account with a grant on the owning project, an active member of the owning organization, an
+// account that already holds a grant on the repository, and a service account. Any other account is
+// outside this repository and joins only by an invitation that it accepts. Set allow_invitation to
+// create that invitation: the add then answers 202 with invitation_id and expires_at, and the
+// account holds no access until it accepts. Without allow_invitation, that add answers 409 with type
+// https://entire.com/errors/invitation/required and writes nothing. 201 never carries an invitation.
+// A repeat add reuses an open invitation for the same role and sends no second mail; another role
+// answers 409 with type https://entire.com/errors/invitation/role-mismatch until the invitation is
+// revoked. An organization that enforces single sign-on admits no account by invitation: an add that
+// would invite into it answers 403 with type https://entire.com/errors/invitation/sso-required, and
+// the account joins by signing in through that single sign-on. Invitation mail to one account is
+// limited: 429 carries Retry-After. The invitation is created on the repository's home core: another
+// core answers 421.
 //
 // POST /repos/{repoId}/grants
-func (c *Client) GrantRepoAccess(ctx context.Context, request *GrantAccessBody, params GrantRepoAccessParams) (*GrantRepoAccessOutputBody, error) {
+func (c *Client) GrantRepoAccess(ctx context.Context, request *GrantAccessBody, params GrantRepoAccessParams) (GrantRepoAccessRes, error) {
 	res, err := c.sendGrantRepoAccess(ctx, request, params)
 	return res, err
 }
 
-func (c *Client) sendGrantRepoAccess(ctx context.Context, request *GrantAccessBody, params GrantRepoAccessParams) (res *GrantRepoAccessOutputBody, err error) {
+func (c *Client) sendGrantRepoAccess(ctx context.Context, request *GrantAccessBody, params GrantRepoAccessParams) (res GrantRepoAccessRes, err error) {
 
 	u := uri.Clone(c.requestURL(ctx))
 	var pathParts [3]string
