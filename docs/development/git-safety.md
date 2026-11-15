@@ -456,25 +456,37 @@ a short timeout can silently suppress synchronization. Both subprocesses use
 ten seconds. Unix cancellation kills the process group; escaped descendants
 may survive, and Windows currently kills only the direct child. The backstop
 bounds waiting on inherited pipes on both platforms, not descendant lifetime.
+A successful parent exit with inherited pipes returns its captured output;
+pipe cleanup alone does not kill helpers that the command left running.
 
 A parsed `Info` plus an error means lookup did not establish an identity; it
 must not be saved as an unsupported/disabled decision. Successful unknown
-hosts and unsupported custom commands return empty Forge without an error.
+hosts, unavailable plain SSH executables, and unsupported custom commands
+return empty Forge without an error.
 `ResolveInfoBestEffort`/`ResolveRemoteRepo` preserve parsed coordinates on
 optional failure, while returning caller cancellation/deadline errors. Push
 matching still returns false on failure. Trail enablement uses strict
-`ResolveInfo`: failed scope lookup leaves the cache unknown. SessionStart's
-one-second scope/refresh budget remains shared; TurnStart reads the saved
-session scope hint and does not resolve SSH. An old unqualified cache key
-cannot match a newly forge-qualified key.
+`ResolveInfo`: failed scope lookup leaves the cache unknown. SessionStart
+allows five seconds for scope discovery, then a separate one-second budget
+for scheduling the detached refresh; TurnStart reads the saved session scope
+hint and does not resolve SSH. Enable setup separately budgets discovery and
+the network probe at three seconds each, retaining the caller context for saves.
+An old unqualified cache key cannot match a newly forge-qualified key.
 
 The command root starts an operation-local `WithResolutionCache`; push identity
-matching reuses it (or starts one for a standalone library call). Discovery is shared by host/user/port/directory and
-child environment, including transient outcomes, without global or persistent
-caching. Start a new operation after CWD or Git/SSH configuration changes.
+matching reuses it (or starts one for a standalone library call). Discovery is
+shared by host/user/port/directory and
+child environment without global or persistent caching. Context cancellation
+and deadline failures are evicted so a healthy caller can retry; other errors
+retain their distinction. The full environment and directory matter because
+Git config and Match exec can depend on them. Start a new operation after CWD
+or Git/SSH configuration changes.
 Search passes its resolved coordinates into code-search options and skips
-origin discovery entirely for explicit scope. Targeted dispatch/wizard and
-mirror inference pass the worktree directory and a repository-override-free
+origin discovery entirely for explicit scope. TUI re-searches retain command
+flags but drop removed inline filters, resolving the current repo lazily for
+both checkpoint and code search when no explicit scope remains. Local wizard
+repository discovery has a five-second total budget. Targeted dispatch/wizard
+and mirror inference pass the worktree directory and a repository-override-free
 environment; ambient `ResolveRemoteRepo` intentionally passes `""`/`nil`.
 
 Callers retaining their existing fallbacks include attach link metadata,

@@ -166,12 +166,11 @@ type searchModel struct {
 	// TUI search shares the invocation's discovery cache.
 	semanticSearch semanticSearcher
 
-	// fallbackRepos is the startup repo scope to reuse for re-searches that
-	// carry no inline repo: override when searchCfg names no current repo
-	// (origin unreadable, explicit --repo given). Without it a plain query
-	// after an override would clear Repos and leave semantic search with no
-	// scope at all, while code search keeps its startup scope.
-	fallbackRepos []string
+	// Re-search defaults are separate from the initial query's inline scope.
+	// The command sets these from persistent flags and lazily resolves origin
+	// when a removed inline filter leaves no explicit scope.
+	fallbackRepos      []string
+	codeSearchDefaults *codeSearchOpts
 
 	// warning is the current search's completeness note (partial cell
 	// failure, truncated repo index), shown in the status row — the TUI
@@ -492,12 +491,15 @@ func (m searchModel) updateSearchMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 		if codeQuery != "" {
 			willFireCodeSearch = true
 			opts := m.codeSearchOpts
+			if m.codeSearchDefaults != nil {
+				opts = *m.codeSearchDefaults
+			}
 			opts.query = codeQuery
 			// Always reset to the model's default repo scope, then apply
 			// inline overrides. This prevents a stale repo list from a
 			// previous query leaking into the next one.
-			opts.repoFilters = m.codeSearchOpts.repoFilters
 			if len(inlineRepos) > 0 {
+				opts.resolveRepos = nil
 				if hasAllReposFilter(inlineRepos) {
 					opts.repoFilters = nil
 				} else {
@@ -703,6 +705,13 @@ func (m searchModel) performSearch(cfg search.Config) tea.Cmd {
 
 func performCodeSearch(opts codeSearchOpts, gen uint64) tea.Cmd {
 	return func() tea.Msg {
+		if opts.resolveRepos != nil {
+			repos, err := opts.resolveRepos()
+			if err != nil {
+				return codeSearchResultsMsg{err: err, gen: gen}
+			}
+			opts.repoFilters = repos
+		}
 		resp, err := searchAllCells(context.Background(), opts)
 		return codeSearchResultsMsg{resp: resp, err: err, gen: gen}
 	}

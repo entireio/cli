@@ -332,12 +332,16 @@ func resolveRemoteRepoRef(ctx context.Context, dir, remote, arg string) (mirrorR
 			tried = append(tried, name+" (not configured)")
 			continue
 		}
-		info, perr := gitremote.ResolveInfoBestEffort(ctx, dir, gitrepo.EnvWithoutRepoOverrides(), rawURL)
+		info, perr := gitremote.ResolveInfo(ctx, dir, gitrepo.EnvWithoutRepoOverrides(), rawURL)
 		if perr != nil {
 			if ctx.Err() != nil {
 				return mirrorRepoRef{}, fmt.Errorf("resolve remote identity: %w", ctx.Err())
 			}
-			tried = append(tried, name+" (unparseable URL)")
+			if info != nil {
+				tried = append(tried, name+" (identity lookup failed; retry)")
+			} else {
+				tried = append(tried, name+" (unparseable URL)")
+			}
 			continue
 		}
 		switch info.Forge {

@@ -76,12 +76,10 @@ func discoveryOutput(cmd *exec.Cmd) ([]byte, error) {
 	execx.TerminateOnCancel(cmd)
 	cmd.WaitDelay = 25 * time.Millisecond
 	out, err := cmd.Output()
-	if errors.Is(err, exec.ErrWaitDelay) {
-		// The parent can exit before cancellation while descendants keep its
-		// pipes open. Also terminate that group after the pipe backstop fires.
-		if cleanupErr := cmd.Cancel(); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrProcessDone) {
-			err = errors.Join(err, cleanupErr)
-		}
+	if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.Success() {
+		// The command succeeded; only a descendant's inherited pipe remains.
+		// Keep the captured output and leave that unrelated helper running.
+		err = nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("SSH discovery subprocess: %w", err)

@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"charm.land/huh/v2"
 	dispatchpkg "github.com/entireio/cli/cmd/entire/cli/dispatch"
@@ -500,10 +501,15 @@ func discoverLocalRepoRoots(ctx context.Context, currentRepo string) []string {
 }
 
 func discoverLocalRepoSlugs(ctx context.Context, currentRepo string) []string {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
 	repoRoots := discoverLocalRepoRoots(ctx, currentRepo)
 	repoSlugs := make([]string, 0, len(repoRoots))
 	seenRepoSlugs := make(map[string]struct{}, len(repoRoots))
 	for _, repoRoot := range repoRoots {
+		if ctx.Err() != nil {
+			break
+		}
 		repoSlug := discoverRepoSlug(ctx, repoRoot)
 		if repoSlug == "" {
 			continue

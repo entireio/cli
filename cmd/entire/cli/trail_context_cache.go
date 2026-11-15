@@ -29,6 +29,9 @@ import (
 )
 
 const (
+	// Identity discovery has its own budget before the network refresh.
+	trailEnablementScopeDiscoveryTimeout = 5 * time.Second
+
 	trailEnablementCacheTTL                   = time.Hour
 	agentHelpTrailsRefreshFailureBackoff      = 5 * time.Minute
 	trailEnablementSessionStartRefreshTimeout = time.Second

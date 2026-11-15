@@ -145,6 +145,9 @@ func resolveSSHHostname(ctx context.Context, dir string, env []string, target ss
 	if ctx.Err() != nil {
 		return "", fmt.Errorf("resolve SSH hostname: %w", ctx.Err())
 	}
+	if errors.Is(err, exec.ErrNotFound) {
+		return "", nil // plain SSH is unavailable; discovery is unsupported
+	}
 	if err != nil {
 		return "", err
 	}
@@ -183,7 +186,7 @@ type resolutionCache struct {
 // WithResolutionCache starts one operation's SSH discovery cache. It is never
 // global or persisted. Start a fresh operation after changing CWD or Git/SSH
 // config. Environment, explicit directory, user, port and host are in the key;
-// paths on the same endpoint share discovery. Errors retain their distinction.
+// paths on the same endpoint share discovery. Context failures are not cached.
 func WithResolutionCache(ctx context.Context) context.Context {
 	return context.WithValue(ctx, resolutionCacheKey{}, &resolutionCache{results: make(map[sshLookupKey]*sshLookupResult)})
 }
@@ -213,6 +216,11 @@ func cachedSSHHostname(ctx context.Context, dir string, env []string, target ssh
 	cache.mu.Unlock()
 	if !found {
 		result.host, result.err = resolveSSHHostname(ctx, dir, env, target)
+		if errors.Is(result.err, context.Canceled) || errors.Is(result.err, context.DeadlineExceeded) {
+			cache.mu.Lock()
+			delete(cache.results, key)
+			cache.mu.Unlock()
+		}
 		close(result.ready)
 	}
 	select {

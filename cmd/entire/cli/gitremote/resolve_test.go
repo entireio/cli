@@ -19,15 +19,15 @@ import (
 // Nonparallel: fake executables and git configuration are process-scoped.
 func TestResolveInfoAliases(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
-	calls := testutil.InstallFakeSSHWithCalls(t, map[string]string{"github-personal.com": "GitHub.com"})
+	calls := testutil.InstallFakeSSHWithCalls(t, map[string]string{"github_personal.com": "GitHub.com"})
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 	ctx := WithResolutionCache(t.Context())
 	for _, raw := range []string{
-		"git@github-personal.com:Acme/Widgets.git",
-		"ssh://git@github-personal.com/Acme/Widgets.git",
-		"git+ssh://git@github-personal.com/Acme/Widgets.git",
-		"ssh+git://git@github-personal.com/Acme/Widgets.git",
+		"git@github_personal.com:Acme/Widgets.git",
+		"ssh://git@github_personal.com/Acme/Widgets.git",
+		"git+ssh://git@github_personal.com/Acme/Widgets.git",
+		"ssh+git://git@github_personal.com/Acme/Widgets.git",
 	} {
 		parsed, err := ParseURL(raw)
 		require.NoError(t, err)
@@ -41,16 +41,16 @@ func TestResolveInfoAliases(t *testing.T) {
 		assert.Equal(t, Repository{ForgeGitHub, "acme", "widgets"}, repo)
 	}
 	require.Len(t, calls(), 1, "all equivalent endpoints share one operation lookup")
-	assert.Equal(t, []string{"-G", "-l", "git", "github-personal.com"}, calls()[0].Args)
+	assert.Equal(t, []string{"-G", "-l", "git", "github_personal.com"}, calls()[0].Args)
 	actualDir, err := filepath.EvalSymlinks(dir)
 	require.NoError(t, err)
 	assert.Equal(t, actualDir, calls()[0].Dir)
 
-	raw := "ssh://another@github-personal.com:2222/Acme/Widgets.git"
+	raw := "ssh://another_user@github_personal.com:2222/Acme/Widgets.git"
 	info, err := ResolveInfo(ctx, dir, nil, raw)
 	require.NoError(t, err)
-	assert.Equal(t, "github-personal.com:2222", info.HostPort())
-	assert.Equal(t, []string{"-G", "-l", "another", "-p", "2222", "github-personal.com"}, calls()[1].Args)
+	assert.Equal(t, "github_personal.com:2222", info.HostPort())
+	assert.Equal(t, []string{"-G", "-l", "another_user", "-p", "2222", "github_personal.com"}, calls()[1].Args)
 	testutil.AddRemote(t, dir, "origin", raw)
 	t.Chdir(dir)
 	forge, owner, repo, err := ResolveRemoteRepo(t.Context(), "origin")
@@ -69,10 +69,10 @@ func TestResolveInfoNoDiscovery(t *testing.T) {
 		"https://github.com/Acme/Widgets.git",
 		"entire://cell/gh/Acme/Widgets",
 		"entire://cell/et/Acme/Widgets",
-		"https://github-personal.com/Acme/Widgets.git",
-		"bogus+ssh://github-personal.com/Acme/Widgets.git",
+		"https://github_personal.com/Acme/Widgets.git",
+		"bogus+ssh://github_personal.com/Acme/Widgets.git",
 		"bogus+ssh://github.com/Acme/Widgets.git",
-		"helper::github-personal.com/Acme/Widgets.git",
+		"helper::github_personal.com/Acme/Widgets.git",
 	} {
 		parsed, err := ParseURL(raw)
 		require.NoError(t, err)
@@ -183,7 +183,7 @@ func TestResolveInfoMissingSSH(t *testing.T) {
 	t.Setenv("GIT_SSH_COMMAND", "ssh") // bypass git config so this tests missing SSH specifically
 	t.Setenv("PATH", t.TempDir())
 	info, err := ResolveInfo(t.Context(), "", nil, "git@alias:acme/widgets")
-	require.ErrorIs(t, err, exec.ErrNotFound)
+	require.NoError(t, err)
 	assert.Empty(t, info.Forge)
 }
 
@@ -227,12 +227,12 @@ func TestResolveInfoOwnBudgetAndRetry(t *testing.T) {
 	elapsed := time.Since(start)
 	assert.GreaterOrEqual(t, elapsed, 4*time.Second, "push discovery retains a generous budget")
 	assert.Less(t, elapsed, 7*time.Second)
-	// A retry in this operation retains the transient outcome without rerunning.
-	_, err = ResolveInfo(ctx, "", nil, "git@alias:acme/widgets")
-	require.ErrorIs(t, err, context.DeadlineExceeded)
-	// Bypassing config now is a distinct environment; a later operation succeeds.
-	t.Setenv("GIT_SSH_COMMAND", "ssh")
-	info, err = ResolveInfo(WithResolutionCache(t.Context()), "", nil, "git@alias:acme/widgets")
+	// Replace the timed-out fixture with an absent-config result, keeping the
+	// same environment and operation. A healthy retry must run discovery again.
+	git, err := exec.LookPath("git")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(git, []byte("#!/bin/sh\nexit 1\n"), 0o700))
+	info, err = ResolveInfo(ctx, "", nil, "git@alias:acme/widgets")
 	require.NoError(t, err)
 	assert.Equal(t, ForgeGitHub, info.Forge)
 }
@@ -288,10 +288,24 @@ func TestResolveInfoGitConfigFailure(t *testing.T) {
 func TestResolveInfoExitedParentWithInheritedPipes(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 	testutil.InstallFakeSSH(t, nil)
-	installDiscoveryProgram(t, "ssh", "sleep 30 &\necho hostname github.com\n")
+	installDiscoveryProgram(t, "ssh", "sleep 1 &\necho hostname github.com\n")
 	started := time.Now()
 	info, err := ResolveInfo(t.Context(), "", nil, "git@alias:a/b")
-	require.ErrorIs(t, err, exec.ErrWaitDelay)
-	assert.Empty(t, info.Forge)
+	require.NoError(t, err)
+	assert.Equal(t, ForgeGitHub, info.Forge)
 	assert.Less(t, time.Since(started), 2*time.Second)
+}
+
+func TestResolveInfoCallerDeadlineDoesNotPoisonCache(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	testutil.InstallFakeSSH(t, nil)
+	installDiscoveryProgram(t, "ssh", "sleep 0.2\necho hostname github.com\n")
+	operation := WithResolutionCache(t.Context())
+	lookup, cancel := context.WithTimeout(operation, 50*time.Millisecond)
+	defer cancel()
+	_, err := ResolveInfo(lookup, "", nil, "git@alias:acme/widgets")
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	info, err := ResolveInfo(operation, "", nil, "git@alias:acme/widgets")
+	require.NoError(t, err)
+	assert.Equal(t, ForgeGitHub, info.Forge)
 }

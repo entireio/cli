@@ -2,15 +2,20 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/api"
 	dispatchpkg "github.com/entireio/cli/cmd/entire/cli/dispatch"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/search"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/assert"
@@ -155,18 +160,11 @@ func TestSSHIdentityTimedOutLookupCannotBecomeDisabled(t *testing.T) {
 	defer cancel()
 	_, err = currentTrailEnablementScope(lookup)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
-	// The outer operation is still live. Reusing the failed lookup must carry
-	// its transient error, not turn empty Forge into an unsupported scope.
-	_, err = currentTrailEnablementScope(operation)
-	require.ErrorIs(t, err, context.DeadlineExceeded)
-	require.NoError(t, runTrailEnablementRefresh(operation))
-	enabled, err := refreshTrailsEnabledCache(operation, nil, "unused")
-	require.ErrorIs(t, err, context.DeadlineExceeded)
-	assert.False(t, enabled)
-	cacheTrailsEnablementAfterEnable(operation, false)
-	prefs, err := settings.LoadClonePreferences(t.Context())
+	// The outer operation is still live; a healthy retry discovers the scope.
+	require.NoError(t, os.WriteFile(fakeSSH, []byte("#!/bin/sh\necho hostname github.com\n"), 0o700))
+	scope, err := currentTrailEnablementScope(operation)
 	require.NoError(t, err)
-	assert.Nil(t, prefs.TrailsEnabled)
+	assert.True(t, scope.Supported)
 }
 
 func TestSSHIdentityTurnStartUsesSavedScope(t *testing.T) {
@@ -184,4 +182,88 @@ func TestSSHIdentityTurnStartUsesSavedScope(t *testing.T) {
 	runContextInjectionTurn(t, ag, sessionID)
 	runContextInjectionTurn(t, ag, sessionID)
 	assert.Len(t, calls(), 1, "prompt handling must use the saved scope, not run SSH")
+}
+
+func TestSSHIdentityMirrorReportsDiscoveryFailure(t *testing.T) {
+	dir, _ := setupSSHIdentityRepo(t, "github.com extra")
+	_, err := resolveRemoteRepoRef(t.Context(), dir, "origin", "")
+	require.ErrorContains(t, err, "identity lookup failed; retry")
+	assert.NotContains(t, err.Error(), "not an Entire or GitHub repo")
+}
+
+// Exercises the command's explicit-scope initialization and TUI resubmission.
+func TestSSHIdentitySearchInlineScopeRemoval(t *testing.T) {
+	for _, initial := range []string{"gh/acme/other", "*"} {
+		t.Run(initial, func(t *testing.T) {
+			_, calls := setupSSHIdentityRepo(t, "github.com")
+			ctx := gitremote.WithResolutionCache(t.Context())
+			forge, owner, repo, err := resolveDefaultSearchRepo(ctx, true)
+			require.NoError(t, err)
+			cfg := search.Config{Forge: forge, Owner: owner, Repo: repo, Repos: []string{initial}, AllRepos: initial == "*"}
+			opts := buildCodeSearchOpts("entire search", forge, owner, repo, cfg.Repos, cfg.AllRepos, false)
+			m := newSearchModel(nil, "auth", 0, cfg, statusStyles{width: 100}, opts)
+			var searched search.Config
+			m.semanticSearch = func(_ context.Context, cfg search.Config) (*search.Response, error) {
+				searched = cfg
+				return &search.Response{}, nil
+			}
+			configureSearchModelScope(ctx, &m, nil, false)
+			assert.Empty(t, calls(), "explicit startup scope must not discover origin")
+			m.mode = modeSearch
+			m.input.SetValue("login")
+			m = updateModel(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+			msg := m.performSearch(m.searchCfg)()
+			result, ok := msg.(searchResultsMsg)
+			require.True(t, ok)
+			require.NoError(t, result.err)
+			slugs, all := searched.ScopeSlugs()
+			assert.False(t, all)
+			assert.Equal(t, []string{"gh/Acme/Widgets"}, slugs)
+			require.NotNil(t, m.codeSearchDefaults.resolveRepos)
+			codeRepos, err := m.codeSearchDefaults.resolveRepos()
+			require.NoError(t, err)
+			assert.Equal(t, slugs, codeRepos)
+			assert.Len(t, calls(), 1, "code and checkpoint searches share discovery")
+		})
+	}
+}
+
+func TestSSHIdentitySlowDiscoveryKeepsSeparateNetworkBudget(t *testing.T) {
+	for _, sessionStart := range []bool{true, false} {
+		name := "enable"
+		if sessionStart {
+			name = "session start"
+		}
+		t.Run(name, func(t *testing.T) {
+			setupSSHIdentityRepo(t, "github.com")
+			fakeSSH, err := exec.LookPath("ssh")
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(fakeSSH, []byte("#!/bin/sh\nsleep 1.2\necho hostname github.com\n"), 0o700))
+			var spawned bool
+			previousSpawn := trailRefreshSpawn
+			trailRefreshSpawn = func(string) { spawned = true }
+			t.Cleanup(func() { trailRefreshSpawn = previousSpawn })
+			var remaining time.Duration
+			previous := trailRefreshAPIClient
+			trailRefreshAPIClient = func(ctx context.Context, _ bool, _, _, _ string) (*api.Client, string, error) {
+				deadline, ok := ctx.Deadline()
+				require.True(t, ok)
+				remaining = time.Until(deadline)
+				return nil, "", errors.New("stop before network")
+			}
+			t.Cleanup(func() { trailRefreshAPIClient = previous })
+			if sessionStart {
+				const sessionID = "slow-ssh-discovery"
+				require.NoError(t, handleLifecycleSessionStart(t.Context(), newMockAgent(), &agent.Event{Type: agent.SessionStart, SessionID: sessionID}))
+				scope, found, err := loadTrailEnablementScopeHint(t.Context(), sessionID)
+				require.NoError(t, err)
+				require.True(t, found)
+				assert.Equal(t, "gh/Acme/Widgets", scope.RepoKey)
+				assert.True(t, spawned, "slow discovery must still schedule the detached refresh")
+			} else {
+				cacheTrailsEnablementAfterEnable(t.Context(), false)
+				assert.Greater(t, remaining, 2800*time.Millisecond)
+			}
+		})
+	}
 }

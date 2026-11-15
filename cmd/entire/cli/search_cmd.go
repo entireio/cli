@@ -232,6 +232,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 				styles := newStatusStyles(w)
 				model := newSearchModel(nil, "", 0, searchCfg, styles, buildCodeSearchOpts(cmd.CommandPath(), forge, owner, repoName, nil, false, insecureHTTPAuth))
 				model.semanticSearch = searcher
+				configureSearchModelScope(ctx, &model, repoFlags, allReposFlag)
 				model.mode = modeSearch
 				model.input.Focus()
 				model.codeLoading = false // don't fetch until a query is entered
@@ -297,6 +298,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 			}
 			model := newSearchModel(resp.Results, query, resp.Total, searchCfg, styles, codeOpts)
 			model.semanticSearch = searcher
+			configureSearchModelScope(ctx, &model, repoFlags, allReposFlag)
 			model.warning = strings.Join(resp.Warnings, "; ")
 			// The initial response's counts metadata must reach the model the
 			// same way a re-search's does, or the tab counts and their
@@ -353,6 +355,39 @@ func resolveDefaultSearchRepo(ctx context.Context, explicitScope bool) (forge, o
 	return forge, owner, repo, nil
 }
 
+// configureSearchModelScope separates persistent command flags from removable
+// inline filters. Origin discovery stays lazy until a search needs the default.
+func configureSearchModelScope(ctx context.Context, model *searchModel, repoFlags []string, allRepos bool) {
+	model.fallbackRepos = repoFlags
+	model.searchCfg.AllRepos = allRepos || hasAllReposFilter(repoFlags)
+	cfg := model.searchCfg
+	defaults := buildCodeSearchOpts(model.codeSearchOpts.commandPath, cfg.Forge, cfg.Owner, cfg.Repo, repoFlags, model.searchCfg.AllRepos, model.codeSearchOpts.insecureHTTP)
+	model.codeSearchDefaults = defaults
+	if model.searchCfg.AllRepos || len(repoFlags) > 0 || (cfg.Owner != "" && cfg.Repo != "") {
+		return
+	}
+	resolve := func() ([]string, error) {
+		forge, owner, repo, err := resolveDefaultSearchRepo(ctx, false)
+		if err != nil {
+			return nil, err
+		}
+		slugs, _ := (search.Config{Forge: forge, Owner: owner, Repo: repo}).ScopeSlugs()
+		return slugs, nil
+	}
+	defaults.resolveRepos = resolve
+	searcher := model.semanticSearch
+	model.semanticSearch = func(searchCtx context.Context, cfg search.Config) (*search.Response, error) {
+		if !cfg.AllRepos && len(cfg.Repos) == 0 {
+			repos, err := resolve()
+			if err != nil {
+				return nil, err
+			}
+			cfg.Repos = repos
+		}
+		return searcher(searchCtx, cfg)
+	}
+}
+
 // completeRepoFlag returns shell-completion suggestions for the search
 // command's --repo flag. "*" is always offered so the wildcard works
 // regardless of auth state. Errors are swallowed (rather than surfaced via
@@ -373,6 +408,8 @@ func completeRepoFlag(cmd *cobra.Command, _ []string, toComplete string) ([]stri
 }
 
 type codeSearchOpts struct {
+	// resolveRepos lazily supplies the current repo after an inline scope is removed.
+	resolveRepos    func() ([]string, error)
 	query           string
 	repoFilters     []string
 	resolvedRepoIDs []string // ULIDs resolved from repoFilters via repo index
