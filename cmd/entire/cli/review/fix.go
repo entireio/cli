@@ -262,10 +262,15 @@ func reviewManifestHandles(manifest LocalReviewManifest) []string {
 	}
 	if !manifest.CreatedAt.IsZero() {
 		handles = append(handles, reviewManifestTimeHandle(manifest.CreatedAt))
+		// Older versions exposed timestamps rounded to seconds.
+		handles = append(handles, manifest.CreatedAt.UTC().Format("20060102T150405"))
 	}
 	return dedupeStrings(handles)
 }
 
 func reviewManifestTimeHandle(t time.Time) string {
-	return t.UTC().Format("20060102T150405")
+	if t.Nanosecond() == 0 {
+		return t.UTC().Format("20060102T150405")
+	}
+	return t.UTC().Format("20060102T150405.000000000")
 }

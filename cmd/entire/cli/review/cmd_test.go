@@ -663,6 +663,48 @@ func TestDispatchFork_TwoLaunchableNoOverride(t *testing.T) {
 	}
 }
 
+func TestReviewCommand_ManifestWriteFailureReturnsSilentError(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		agents    map[string]settings.ReviewConfig
+		installed []types.AgentName
+	}{
+		{name: "single reviewer", agents: map[string]settings.ReviewConfig{"claude-code": {Prompt: "review"}}, installed: []types.AgentName{"claude-code"}},
+		{name: "multiple reviewers", agents: map[string]settings.ReviewConfig{"agent-a": {Prompt: "review"}, "agent-b": {Prompt: "review"}}, installed: []types.AgentName{"agent-a", "agent-b"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			setupCmdTestRepo(t)
+			if err := seedReviewConfig(context.Background(), tt.agents); err != nil {
+				t.Fatal(err)
+			}
+			// Prevent creation of the manifest directory, even when tests run as root.
+			if err := os.WriteFile(filepath.Join(".git", "entire-review"), []byte("not a directory"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			names := make([]string, 0, len(tt.installed))
+			for _, name := range tt.installed {
+				names = append(names, string(name))
+			}
+			deps := newDispatchTestDeps(t, tt.installed, names)
+			deps.NewSilentError = func(err error) error { return cli.NewSilentError(err) }
+			var out, errOut bytes.Buffer
+			cmd := review.NewCommand(deps)
+			cmd.SetOut(&out)
+			cmd.SetErr(&errOut)
+			cmd.SetArgs([]string{"general"})
+
+			err := cmd.Execute()
+			var silent *cli.SilentError
+			if !errors.As(err, &silent) || !strings.Contains(err.Error(), "persist review findings") {
+				t.Fatalf("command error = %v, want silent persistence error\noutput: %s\nstderr: %s", err, out.String(), errOut.String())
+			}
+			if strings.Count(out.String(), "findings were not persisted") != 1 || !strings.Contains(out.String(), "write to disk failed") {
+				t.Fatalf("expected one actionable persistence warning, got:\n%s\nstderr: %s", out.String(), errOut.String())
+			}
+		})
+	}
+}
+
 func TestDispatchFork_MultiAgentIgnoresFailedSiblingWhenAnotherSucceeds(t *testing.T) {
 	setupCmdTestRepo(t)
 
