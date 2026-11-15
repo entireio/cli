@@ -828,3 +828,40 @@ func TestMkdirAllNoSymlink_RejectsBackslashSeparatedName(t *testing.T) {
 		t.Fatalf("nothing may be created for a refused name, found %v", entries)
 	}
 }
+
+func TestForgetTree(t *testing.T) {
+	// Not parallel: manipulates shared root registry.
+	osroot.ResetShared()
+
+	parentDir := t.TempDir()
+	childDir := filepath.Join(parentDir, "child")
+	require.NoError(t, os.MkdirAll(childDir, 0o755))
+
+	unrelatedDir := t.TempDir()
+
+	// Ensure shared roots are reset after this test before temp directories are cleaned up.
+	t.Cleanup(osroot.ResetShared)
+
+	parentRoot, err := osroot.Shared(parentDir)
+	require.NoError(t, err)
+	childRoot, err := osroot.Shared(childDir)
+	require.NoError(t, err)
+	unrelatedRoot, err := osroot.Shared(unrelatedDir)
+	require.NoError(t, err)
+
+	// ForgetTree on parentDir should drop both parent and child, but leave unrelated.
+	osroot.ForgetTree(parentDir)
+
+	// Opening parent and child again should produce brand new *os.Root instances.
+	newParent, err := osroot.Shared(parentDir)
+	require.NoError(t, err)
+	assert.NotSame(t, parentRoot, newParent, "parent root should have been re-opened")
+
+	newChild, err := osroot.Shared(childDir)
+	require.NoError(t, err)
+	assert.NotSame(t, childRoot, newChild, "child root should have been re-opened")
+
+	newUnrelated, err := osroot.Shared(unrelatedDir)
+	require.NoError(t, err)
+	assert.Same(t, unrelatedRoot, newUnrelated, "unrelated root should remain cached")
+}

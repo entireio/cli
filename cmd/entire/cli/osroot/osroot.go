@@ -702,6 +702,39 @@ func Forget(dir string) {
 	}
 }
 
+// ForgetTree closes and drops any cached root whose path is dir or a descendant
+// of dir. It is idempotent and safe to call concurrently.
+//
+// Call it before deleting or replacing a directory tree (such as in test
+// cleanup). On Windows, open directory handles prevent removal of the directory
+// and its ancestors.
+func ForgetTree(dir string) {
+	if !filepath.IsAbs(dir) {
+		return
+	}
+	cleaned := filepath.Clean(dir)
+
+	sharedMu.Lock()
+	defer sharedMu.Unlock()
+	for key, root := range sharedRoots {
+		if isSameOrDescendant(cleaned, key) {
+			_ = root.Close()
+			delete(sharedRoots, key)
+		}
+	}
+}
+
+func isSameOrDescendant(base, target string) bool {
+	if strings.EqualFold(base, target) {
+		return true
+	}
+	rel, err := filepath.Rel(base, target)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
 // ResetShared closes and forgets every root Shared handed out. Call it after
 // deleting or replacing a directory a root was held on: a root that outlives its
 // directory is a handle to an unlinked inode, so writes through it succeed and
