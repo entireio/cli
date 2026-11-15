@@ -267,3 +267,23 @@ func TestSSHIdentitySlowDiscoveryKeepsSeparateNetworkBudget(t *testing.T) {
 		})
 	}
 }
+
+func TestSSHIdentitySessionStartBoundsHungDiscovery(t *testing.T) {
+	setupSSHIdentityRepo(t, "github.com")
+	fakeSSH, err := exec.LookPath("ssh")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(fakeSSH, []byte("#!/bin/sh\nsleep 30 &\nwait\n"), 0o700))
+	var spawned bool
+	previousSpawn := trailRefreshSpawn
+	trailRefreshSpawn = func(string) { spawned = true }
+	t.Cleanup(func() { trailRefreshSpawn = previousSpawn })
+	const sessionID = "hung-ssh-discovery"
+	started := time.Now()
+	require.NoError(t, handleLifecycleSessionStart(t.Context(), newMockAgent(), &agent.Event{Type: agent.SessionStart, SessionID: sessionID}))
+	// Generous cleanup slack, but still below the former five-second lookup.
+	assert.Less(t, time.Since(started), 4*time.Second)
+	_, found, err := loadTrailEnablementScopeHint(t.Context(), sessionID)
+	require.NoError(t, err)
+	assert.False(t, found, "a timed-out identity must not be saved as unsupported")
+	assert.False(t, spawned)
+}

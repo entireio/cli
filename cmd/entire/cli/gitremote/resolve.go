@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // ResolveInfo parses a configured remote and discovers the forge for unknown
@@ -51,7 +52,7 @@ func ResolveInfo(ctx context.Context, dir string, env []string, rawURL string) (
 	if env == nil {
 		env = os.Environ()
 	}
-	host, err := cachedSSHHostname(ctx, dir, env, target)
+	host, err := cachedSSHHostname(ctx, dir, env, target, sshConfigTimeout)
 	if ctx.Err() != nil {
 		return info, fmt.Errorf("resolve remote identity: %w", ctx.Err())
 	}
@@ -121,8 +122,8 @@ func safeSSHValue(value string) bool {
 	return true
 }
 
-func resolveSSHHostname(ctx context.Context, dir string, env []string, target sshTarget) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, sshConfigTimeout)
+func resolveSSHHostname(ctx context.Context, dir string, env []string, target sshTarget, budget time.Duration) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	command, err := effectiveSSHCommand(ctx, dir, env)
 	if err != nil {
@@ -201,32 +202,47 @@ func EnsureResolutionCache(ctx context.Context) context.Context {
 	return WithResolutionCache(ctx)
 }
 
-func cachedSSHHostname(ctx context.Context, dir string, env []string, target sshTarget) (string, error) {
+func cachedSSHHostname(ctx context.Context, dir string, env []string, target sshTarget, budget time.Duration) (string, error) {
 	cache, ok := ctx.Value(resolutionCacheKey{}).(*resolutionCache)
 	if !ok {
-		return resolveSSHHostname(ctx, dir, env, target)
+		return resolveSSHHostname(ctx, dir, env, target, budget)
 	}
 	key := sshLookupKey{target: target, dir: dir, env: strings.Join(env, "\x00")}
-	cache.mu.Lock()
-	result, found := cache.results[key]
-	if !found {
-		result = &sshLookupResult{ready: make(chan struct{})}
-		cache.results[key] = result
-	}
-	cache.mu.Unlock()
-	if !found {
-		result.host, result.err = resolveSSHHostname(ctx, dir, env, target)
-		if errors.Is(result.err, context.Canceled) || errors.Is(result.err, context.DeadlineExceeded) {
-			cache.mu.Lock()
-			delete(cache.results, key)
-			cache.mu.Unlock()
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", fmt.Errorf("resolve SSH hostname: %w", err)
 		}
-		close(result.ready)
+		cache.mu.Lock()
+		result, found := cache.results[key]
+		if !found {
+			result = &sshLookupResult{ready: make(chan struct{})}
+			cache.results[key] = result
+		}
+		cache.mu.Unlock()
+		if !found {
+			result.host, result.err = resolveSSHHostname(ctx, dir, env, target, budget)
+			if sshLookupContextError(result.err) {
+				cache.mu.Lock()
+				delete(cache.results, key)
+				cache.mu.Unlock()
+			}
+			close(result.ready)
+			// An owner returns its own failure, including its discovery budget.
+			// Only waiters retry another caller's interrupted attempt.
+			return result.host, result.err
+		}
+		select {
+		case <-ctx.Done():
+			return "", fmt.Errorf("resolve SSH hostname: %w", ctx.Err())
+		case <-result.ready:
+			if sshLookupContextError(result.err) {
+				continue
+			}
+			return result.host, result.err
+		}
 	}
-	select {
-	case <-ctx.Done():
-		return "", fmt.Errorf("resolve SSH hostname: %w", ctx.Err())
-	case <-result.ready:
-		return result.host, result.err
-	}
+}
+
+func sshLookupContextError(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }

@@ -467,7 +467,7 @@ return empty Forge without an error.
 optional failure, while returning caller cancellation/deadline errors. Push
 matching still returns false on failure. Trail enablement uses strict
 `ResolveInfo`: failed scope lookup leaves the cache unknown. SessionStart
-allows five seconds for scope discovery, then a separate one-second budget
+allows two seconds for scope discovery, then a separate one-second budget
 for scheduling the detached refresh; TurnStart reads the saved session scope
 hint and does not resolve SSH. Enable setup separately budgets discovery and
 the network probe at three seconds each, retaining the caller context for saves.
@@ -477,7 +477,8 @@ The command root starts an operation-local `WithResolutionCache`; push identity
 matching reuses it (or starts one for a standalone library call). Discovery is
 shared by host/user/port/directory and
 child environment without global or persistent caching. Context cancellation
-and deadline failures are evicted so a healthy caller can retry; other errors
+and deadline failures are evicted; healthy concurrent waiters retry the
+interrupted lookup rather than inheriting its context error. Other errors
 retain their distinction. The full environment and directory matter because
 Git config and Match exec can depend on them. Start a new operation after CWD
 or Git/SSH configuration changes.

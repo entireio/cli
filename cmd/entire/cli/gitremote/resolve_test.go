@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -215,26 +216,26 @@ func TestResolveInfoDeadlineIncludesConfigAndDescendants(t *testing.T) {
 	}
 }
 
-func TestResolveInfoOwnBudgetAndRetry(t *testing.T) {
+func TestCachedSSHHostnameOwnBudgetAndRetry(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 	testutil.InstallFakeSSH(t, map[string]string{"alias": "github.com"})
 	installDiscoveryProgram(t, "git", "sleep 30 &\nwait\n")
 	ctx := WithResolutionCache(t.Context())
-	start := time.Now()
-	info, err := ResolveInfo(ctx, "", nil, "git@alias:acme/widgets")
+	target := sshTarget{host: "alias", user: "git"}
+	// Use the same production timeout path with a short internal budget;
+	// the operation itself stays live, so expiry must evict the cache entry.
+	host, err := cachedSSHHostname(ctx, "", os.Environ(), target, 50*time.Millisecond)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
-	assert.Empty(t, info.Forge)
-	elapsed := time.Since(start)
-	assert.GreaterOrEqual(t, elapsed, 4*time.Second, "push discovery retains a generous budget")
-	assert.Less(t, elapsed, 7*time.Second)
+	assert.Empty(t, host)
+	require.NoError(t, ctx.Err())
 	// Replace the timed-out fixture with an absent-config result, keeping the
 	// same environment and operation. A healthy retry must run discovery again.
 	git, err := exec.LookPath("git")
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(git, []byte("#!/bin/sh\nexit 1\n"), 0o700))
-	info, err = ResolveInfo(ctx, "", nil, "git@alias:acme/widgets")
+	host, err = cachedSSHHostname(ctx, "", os.Environ(), target, sshConfigTimeout)
 	require.NoError(t, err)
-	assert.Equal(t, ForgeGitHub, info.Forge)
+	assert.Equal(t, "github.com", host)
 }
 
 func TestResolveInfoCacheWaitHonorsCancellation(t *testing.T) {
@@ -246,7 +247,7 @@ func TestResolveInfoCacheWaitHonorsCancellation(t *testing.T) {
 	cache.results[sshLookupKey{target: target, env: strings.Join([]string{"A=B"}, "\x00")}] = &sshLookupResult{ready: make(chan struct{})}
 	ctx, cancel := context.WithCancel(ctx)
 	cancel()
-	_, err := cachedSSHHostname(ctx, "", []string{"A=B"}, target)
+	_, err := cachedSSHHostname(ctx, "", []string{"A=B"}, target, sshConfigTimeout)
 	require.ErrorIs(t, err, context.Canceled)
 }
 
@@ -308,4 +309,53 @@ func TestResolveInfoCallerDeadlineDoesNotPoisonCache(t *testing.T) {
 	info, err := ResolveInfo(operation, "", nil, "git@alias:acme/widgets")
 	require.NoError(t, err)
 	assert.Equal(t, ForgeGitHub, info.Forge)
+}
+
+// doneObservedContext signals after a waiter has loaded the shared cache entry
+// and reached its select, so canceling that entry needs no scheduler sleeps.
+type doneObservedContext struct {
+	context.Context
+
+	once    sync.Once
+	waiting chan struct{}
+}
+
+func (c *doneObservedContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.waiting) })
+	return c.Context.Done()
+}
+
+func TestCachedSSHHostnameWaiterRetriesInterruptedLookup(t *testing.T) {
+	for _, interrupted := range []error{context.Canceled, context.DeadlineExceeded} {
+		t.Run(interrupted.Error(), func(t *testing.T) {
+			testutil.IsolateGitConfigEnv(t)
+			calls := testutil.InstallFakeSSH(t, map[string]string{"alias": "github.com"})
+			ctx, cancel := context.WithCancel(WithResolutionCache(t.Context()))
+			defer cancel()
+			cache, ok := ctx.Value(resolutionCacheKey{}).(*resolutionCache)
+			require.True(t, ok)
+			target := sshTarget{host: "alias", user: "git"}
+			env := os.Environ()
+			key := sshLookupKey{target: target, env: strings.Join(env, "\x00")}
+			result := &sshLookupResult{ready: make(chan struct{})}
+			cache.results[key] = result
+			waiter := &doneObservedContext{Context: ctx, waiting: make(chan struct{})}
+			finished := make(chan sshLookupResult, 1)
+			go func() {
+				host, err := cachedSSHHostname(waiter, "", env, target, sshConfigTimeout)
+				finished <- sshLookupResult{host: host, err: err}
+			}()
+			<-waiter.waiting
+			// Complete the first caller's canceled lookup as the owner does.
+			cache.mu.Lock()
+			delete(cache.results, key)
+			cache.mu.Unlock()
+			result.err = interrupted
+			close(result.ready)
+			got := <-finished
+			require.NoError(t, got.err)
+			assert.Equal(t, "github.com", got.host)
+			assert.Len(t, calls(), 1)
+		})
+	}
 }

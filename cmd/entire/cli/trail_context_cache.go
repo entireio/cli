@@ -29,8 +29,9 @@ import (
 )
 
 const (
-	// Identity discovery has its own budget before the network refresh.
-	trailEnablementScopeDiscoveryTimeout = 5 * time.Second
+	// Keep session startup bounded while allowing alias discovery more time
+	// than the separate one-second refresh-scheduling budget.
+	trailEnablementScopeDiscoveryTimeout = 2 * time.Second
 
 	trailEnablementCacheTTL                   = time.Hour
 	agentHelpTrailsRefreshFailureBackoff      = 5 * time.Minute

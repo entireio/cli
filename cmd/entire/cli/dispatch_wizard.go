@@ -27,6 +27,8 @@ var runDispatchWizardForm = func(form *huh.Form) error { return form.Run() }
 
 const (
 	dispatchWizardRepoDiscoveryConcurrencyLimit = 8
+	// Bound the complete local repository scan, including SSH alias discovery.
+	dispatchWizardRepoDiscoveryTimeout = 5 * time.Second
 
 	dispatchWizardModeLocal  = "local"
 	dispatchWizardModeServer = "server"
@@ -501,7 +503,7 @@ func discoverLocalRepoRoots(ctx context.Context, currentRepo string) []string {
 }
 
 func discoverLocalRepoSlugs(ctx context.Context, currentRepo string) []string {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, dispatchWizardRepoDiscoveryTimeout)
 	defer cancel()
 	repoRoots := discoverLocalRepoRoots(ctx, currentRepo)
 	repoSlugs := make([]string, 0, len(repoRoots))

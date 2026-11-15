@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/execx"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
 
 // Repository identifies one repository on a known forge, whichever URL
@@ -98,7 +99,10 @@ func discoveryOutput(cmd *exec.Cmd) ([]byte, error) {
 // GIT_SSH path is shell-quoted when sh would otherwise mangle it, such as the
 // backslashes in a Windows path.
 func EffectiveSSHCommand(ctx context.Context, dir string, env []string) string {
-	command, _ := effectiveSSHCommand(ctx, dir, env) //nolint:errcheck // transport retains its historical fallback on config lookup failure
+	command, err := effectiveSSHCommand(ctx, dir, env)
+	if err != nil {
+		logging.Debug(ctx, "SSH command configuration unavailable; using transport fallback", "error", err.Error())
+	}
 	return command
 }
 
