@@ -498,14 +498,21 @@ func (s *ManualCommitStrategy) AttachTaskToCheckpoint(ctx context.Context, ag ag
 
 // TaskCheckpointForFiles picks which of candidates, newest first, holds a
 // commit carrying any of files: the first whose stored files touched include
-// one. When none matches and every candidate was readable, it returns the empty
-// ID. A candidate it cannot read could be the match, so then it returns the
-// newest candidate rather than drop the task.
+// one, in the checkpoint's spelling (checkpointTouchesAny). When none matches
+// and every candidate was readable, it returns the empty ID. A candidate it
+// cannot read could be the match, so then it returns the newest candidate
+// rather than drop the task.
 func (s *ManualCommitStrategy) TaskCheckpointForFiles(ctx context.Context, candidates []id.CheckpointID, files []string) id.CheckpointID {
 	if len(candidates) == 0 {
 		return id.EmptyCheckpointID
 	}
 	logCtx := logging.WithComponent(ctx, "checkpoint")
+	// The task's files are spelled as this worktree's index spells them.
+	// Without its root they are matched as they are spelled.
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		repoRoot = ""
+	}
 	stores, closeRepo, err := s.openHookStores(ctx)
 	if err != nil {
 		logging.Warn(logCtx, "cannot check which checkpoint holds the task's commit; using the newest",
@@ -523,7 +530,7 @@ func (s *ManualCommitStrategy) TaskCheckpointForFiles(ctx context.Context, candi
 			readErr = err
 			continue
 		}
-		if slices.ContainsFunc(summary.FilesTouched, func(f string) bool { return slices.Contains(files, f) }) {
+		if checkpointTouchesAny(repoRoot, summary.FilesTouched, files) {
 			return candidate
 		}
 	}
@@ -535,6 +542,24 @@ func (s *ManualCommitStrategy) TaskCheckpointForFiles(ctx context.Context, candi
 		return candidates[0]
 	}
 	return id.EmptyCheckpointID
+}
+
+// checkpointTouchesAny reports whether filesTouched, a checkpoint's files,
+// include one of files once each is spelled as the checkpoint spells it
+// (spelledAsCommitted). A commit of a case-only rename of README.md to
+// readme.md changes both spellings, and its checkpoint lists the README.md
+// the session recorded, while a task that ran during it names the readme.md
+// git now tracks.
+func checkpointTouchesAny(repoRoot string, filesTouched, files []string) bool {
+	touched := make(map[string]struct{}, len(filesTouched))
+	for _, f := range filesTouched {
+		touched[f] = struct{}{}
+	}
+	spelled := spelledAsCommitted(repoRoot, files, touched)
+	return slices.ContainsFunc(spelled, func(f string) bool {
+		_, ok := touched[f]
+		return ok
+	})
 }
 
 // maxTaskAttachmentRetries bounds how many turn ends retry a pending task
@@ -813,6 +838,11 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		return skipped, nil
 	}
 
+	// The session's files are spelled as an index spelled them when they were
+	// recorded or extracted, which the commit can spell otherwise; filtered
+	// as they are, a file the overlap gate found in the commit would be
+	// missing from the checkpoint (overlapSpelledAsCommitted).
+	sessionData.FilesTouched, _ = overlapSpelledAsCommitted(sessionWorktreeRoot(ctx, state), sessionData.FilesTouched, nil, committedFiles)
 	filterFilesTouched(sessionData, committedFiles, state)
 
 	// sessionData.Transcript is left as the raw transcript; only the sanitized,
