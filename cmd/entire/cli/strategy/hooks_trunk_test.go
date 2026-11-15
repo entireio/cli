@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -258,10 +257,13 @@ func TestInstallHooks_ChainedTrunkLauncherNeedsNoGrepOnPath(t *testing.T) {
 	}
 }
 
-// A large compiled-like backup must still run promptly. The chain used to
-// identify Trunk's launcher by reading the backup to EOF, which took several
-// seconds on a 15MB executable; the scan is now capped at 64KiB.
-func TestInstallHooks_ChainedLargeBackupRunsPromptly(t *testing.T) {
+// A large compiled-like backup must not be read to EOF before it runs. The
+// chain used to scan the whole backup for Trunk's callback, which took several
+// seconds on a 15MB executable; the scan now stops at 64KiB. A callback placed
+// past that cap is therefore not seen, and the backup runs as its own program.
+// This checks the cap itself rather than a wall-clock bound, which a busy
+// runner could miss.
+func TestInstallHooks_ChainedBackupScanStopsAt64KiB(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("runs POSIX shell hooks")
@@ -271,22 +273,19 @@ func TestInstallHooks_ChainedLargeBackupRunsPromptly(t *testing.T) {
 	log := filepath.Join(t.TempDir(), "log")
 	writeExec(t, filepath.Join(bin, "entire"), "#!/bin/sh\n")
 	hook := filepath.Join(f.dir, "post-commit")
-	writeExec(t, hook, "#!/bin/sh\necho ran >> "+log+"\nexit 0\n")
+	writeExec(t, hook, "#!/bin/sh\necho \"$0\" >> "+log+"\nexit 0\n")
 	pad, err := os.OpenFile(hook, os.O_APPEND|os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	chunk := strings.Repeat("A", 1<<20)
-	for range 8 {
-		if _, err := pad.WriteString(chunk); err != nil {
-			t.Fatal(err)
-		}
+	if _, err := pad.WriteString(strings.Repeat("A", 1<<20) + "\n" + trunkHookCallback + "\n"); err != nil {
+		t.Fatal(err)
 	}
 	if err := pad.Close(); err != nil {
 		t.Fatal(err)
 	}
 	f.installExecutable(specFor(t, "post-commit"))
-	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), hookRunTimeout)
 	defer cancel()
 	if out, err := runHook(ctx, bin, filepath.Join(f.dir, "post-commit")); err != nil {
 		t.Fatalf("post-commit: %v\n%s", err, out)
@@ -295,8 +294,8 @@ func TestInstallHooks_ChainedLargeBackupRunsPromptly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.TrimSpace(string(data)); got != "ran" {
-		t.Errorf("backup ran %q, want ran", got)
+	if got, want := strings.TrimSpace(string(data)), filepath.Join(f.dir, "post-commit"+backupSuffix); got != want {
+		t.Errorf("backup ran as %s, want %s: the scan read past 64KiB and found the callback", got, want)
 	}
 }
 
