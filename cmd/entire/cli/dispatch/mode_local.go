@@ -176,7 +176,7 @@ func enumerateRepoCandidates(ctx context.Context, repoRoot string, opts Options,
 	}
 	defer repo.Close()
 
-	repoSlug, err := resolveOriginRepoSlug(ctx, repo)
+	repoSlug, err := resolveOriginRepoSlug(ctx, repo, repoRoot)
 	if err != nil {
 		return nil, fmt.Errorf("resolve repo name for %s: %w", repoRoot, err)
 	}
@@ -473,7 +473,7 @@ func runGitOutput(ctx context.Context, repoRoot string, args ...string) (string,
 //
 // Errors name no flag: local mode refuses --repos, so the hint to pass it
 // belongs to the cloud caller alone.
-func resolveOriginRepoSlug(ctx context.Context, repo *git.Repository) (string, error) {
+func resolveOriginRepoSlug(ctx context.Context, repo *git.Repository, repoRoot string) (string, error) {
 	remote, err := repo.Remote("origin")
 	if err != nil {
 		logging.Warn(ctx, "dispatch repo resolution failed", "step", "origin_remote", "error", err)
@@ -483,7 +483,7 @@ func resolveOriginRepoSlug(ctx context.Context, repo *git.Repository) (string, e
 		return "", errors.New("dispatch needs an origin remote URL on GitHub or Entire")
 	}
 
-	slug, err := OriginRepoSlug(remote.Config().URLs[0])
+	slug, err := ResolveOriginRepoSlug(ctx, repoRoot, gitrepo.EnvWithoutRepoOverrides(), remote.Config().URLs[0])
 	if err != nil {
 		logging.Warn(ctx, "dispatch repo resolution failed", "step", "parse_origin_remote", "error", err)
 		return "", fmt.Errorf("dispatch cannot address this checkout's origin: %w", err)

@@ -180,6 +180,7 @@ func checkpointSyncAllowedForRemote(ctx context.Context, pushRemote, pendingCapt
 // Entire-native repos, and multi-URL remotes that fan out to different
 // repositories all fail the match, leaving the gate as strict as before.
 func pushesToSameForgeRepository(ctx context.Context, pushRemote, elected string) bool {
+	ctx = gitremote.EnsureResolutionCache(ctx)
 	if !isCheckpointSyncRemoteEligible(ctx, pushRemote) || !isCheckpointSyncRemoteEligible(ctx, elected) {
 		return false
 	}

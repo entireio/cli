@@ -39,6 +39,7 @@ const (
 // URLs (entire://host/<forge>/owner/repo) and from a hostname lookup on
 // direct git URLs (github.com → "gh"). It is empty for direct git URLs to
 // unrecognized hosts, and for entire:// URLs without a forge segment.
+// ResolveInfo may additionally identify an SSH alias by enriching Forge only.
 type Info struct {
 	Protocol string
 	Host     string
@@ -170,7 +171,9 @@ func ForgePathLabels(forge string) string {
 
 // CanonicalHost returns the canonical public host of the upstream forge.
 //
-// For direct git URLs this is just Host. For entire:// remotes — whose Host is
+// For direct git URLs parsed by ParseURL this is Host. After ResolveInfo it
+// may name the identified forge rather than the SSH alias: this is identity,
+// not a transport endpoint. For entire:// remotes — whose Host is
 // the Entire cluster (e.g. aws-us-east-2.entire.io) rather than the forge — it
 // maps the forge prefix back to the forge's host (gh → github.com). Falls back
 // to Host when the forge is unknown (e.g. a self-hosted GitHub Enterprise),
@@ -230,6 +233,9 @@ func GetRemoteURLInDirEnv(ctx context.Context, dir string, env []string, remoteN
 		cmd.Env = env
 	}
 	output, err := cmd.Output()
+	if ctx.Err() != nil {
+		return "", fmt.Errorf("get remote URL: %w", ctx.Err())
+	}
 	if err != nil {
 		return "", fmt.Errorf("remote %q not found", remoteName)
 	}
@@ -411,15 +417,17 @@ func RedactURLOrPath(remote string) string {
 // given git remote. The forge is the short id used by the trails API ("gh",
 // "et", ...); it is derived from the hostname for direct git URLs or from the
 // path prefix on entire:// URLs. It is empty for unrecognized hosts.
+// Unknown direct SSH hosts also get optional alias discovery (ResolveInfo).
+// Discovery failures retain the parsed identity; caller cancellation is returned.
 // For example, git@github.com:org/my-repo.git returns ("gh", "org", "my-repo").
 func ResolveRemoteRepo(ctx context.Context, remoteName string) (forge, owner, repo string, err error) {
 	rawURL, err := GetRemoteURL(ctx, remoteName)
 	if err != nil {
 		return "", "", "", fmt.Errorf("get remote URL for %q: %w", remoteName, err)
 	}
-	info, err := ParseURL(rawURL)
+	info, err := ResolveInfoBestEffort(ctx, "", nil, rawURL)
 	if err != nil {
-		return "", "", "", fmt.Errorf("parse remote URL: %w", err)
+		return "", "", "", fmt.Errorf("resolve remote URL: %w", err)
 	}
 	return info.Forge, info.Owner, info.Repo, nil
 }

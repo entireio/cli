@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"charm.land/huh/v2"
 	dispatchpkg "github.com/entireio/cli/cmd/entire/cli/dispatch"
@@ -26,6 +27,8 @@ var runDispatchWizardForm = func(form *huh.Form) error { return form.Run() }
 
 const (
 	dispatchWizardRepoDiscoveryConcurrencyLimit = 8
+	// Bound the complete local repository scan, including SSH alias discovery.
+	dispatchWizardRepoDiscoveryTimeout = 5 * time.Second
 
 	dispatchWizardModeLocal  = "local"
 	dispatchWizardModeServer = "server"
@@ -500,11 +503,16 @@ func discoverLocalRepoRoots(ctx context.Context, currentRepo string) []string {
 }
 
 func discoverLocalRepoSlugs(ctx context.Context, currentRepo string) []string {
+	ctx, cancel := context.WithTimeout(ctx, dispatchWizardRepoDiscoveryTimeout)
+	defer cancel()
 	repoRoots := discoverLocalRepoRoots(ctx, currentRepo)
 	repoSlugs := make([]string, 0, len(repoRoots))
 	seenRepoSlugs := make(map[string]struct{}, len(repoRoots))
 	for _, repoRoot := range repoRoots {
-		repoSlug := discoverRepoSlug(repoRoot)
+		if ctx.Err() != nil {
+			break
+		}
+		repoSlug := discoverRepoSlug(ctx, repoRoot)
 		if repoSlug == "" {
 			continue
 		}
@@ -526,7 +534,7 @@ func resolveGitTopLevel(ctx context.Context, path string) (string, error) {
 	return strings.TrimSpace(string(output)), nil
 }
 
-func discoverRepoSlug(repoRoot string) string {
+func discoverRepoSlug(ctx context.Context, repoRoot string) string {
 	repo, err := gitrepo.OpenPath(repoRoot)
 	if err != nil {
 		return ""
@@ -539,7 +547,7 @@ func discoverRepoSlug(repoRoot string) string {
 	}
 	// The slug names the origin's forge (gh/ or et/); a checkout on a host
 	// Entire does not serve is not offered.
-	slug, err := dispatchpkg.OriginRepoSlug(remote.Config().URLs[0])
+	slug, err := dispatchpkg.ResolveOriginRepoSlug(ctx, repoRoot, gitrepo.EnvWithoutRepoOverrides(), remote.Config().URLs[0])
 	if err != nil {
 		return ""
 	}

@@ -1644,6 +1644,40 @@ func TestSearchModel_NewSearchKeepsStartupScopeWithoutCurrentRepo(t *testing.T) 
 	}
 }
 
+func TestSearchModel_CommandFlagsSurviveInlineScopeRemoval(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		repos    []string
+		allRepos bool
+	}{
+		{name: "repo flag", repos: []string{"et/project/repo"}},
+		{name: "all repos flag", allRepos: true},
+		{name: "wildcard repo flag", repos: []string{"*"}, allRepos: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := search.Config{Repos: []string{"gh/acme/inline"}}
+			opts := buildCodeSearchOpts("entire search", "", "", "", cfg.Repos, false, false)
+			m := newSearchModel(nil, "auth", 0, cfg, statusStyles{width: 100}, opts)
+			configureSearchModelScope(t.Context(), &m, tc.repos, tc.allRepos)
+			m.mode = modeSearch
+			m.input.SetValue("login")
+			m = updateModel(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+			slugs, all := m.searchCfg.ScopeSlugs()
+			if all != tc.allRepos || (!all && strings.Join(slugs, ",") != strings.Join(tc.repos, ",")) {
+				t.Fatalf("scope = (%v, %v), want flags (%v, %v)", slugs, all, tc.repos, tc.allRepos)
+			}
+			if m.codeSearchDefaults.resolveRepos != nil {
+				t.Fatal("persistent explicit scope must not discover origin")
+			}
+			if strings.Join(slugs, ",") != strings.Join(m.codeSearchDefaults.repoFilters, ",") {
+				t.Fatal("checkpoint and code search defaults differ")
+			}
+		})
+	}
+}
+
 // TestSearchModel_NewSearchClearsExplicitRepoFiltersWithCurrentRepo pins
 // that the startup-scope fallback only applies when there is no current repo:
 // with one, a plain query still returns to the current-repo default.

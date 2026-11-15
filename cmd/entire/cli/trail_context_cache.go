@@ -29,6 +29,10 @@ import (
 )
 
 const (
+	// Keep session startup bounded while allowing alias discovery more time
+	// than the separate one-second refresh-scheduling budget.
+	trailEnablementScopeDiscoveryTimeout = 2 * time.Second
+
 	trailEnablementCacheTTL                   = time.Hour
 	agentHelpTrailsRefreshFailureBackoff      = 5 * time.Minute
 	trailEnablementSessionStartRefreshTimeout = time.Second
@@ -101,9 +105,9 @@ func currentTrailEnablementScope(ctx context.Context) (trailEnablementScope, err
 	if strings.TrimSpace(rawURL) == "" {
 		return trailEnablementScope{}, errors.New("get origin remote: empty URL")
 	}
-	info, err := gitremote.ParseURL(rawURL)
+	info, err := gitremote.ResolveInfo(ctx, "", nil, rawURL)
 	if err != nil {
-		return trailEnablementScope{}, fmt.Errorf("parse origin remote: %w", err)
+		return trailEnablementScope{}, fmt.Errorf("resolve origin identity: %w", err)
 	}
 	authKey, err := auth.LocalIdentityCacheKey()
 	if err != nil {
@@ -514,6 +518,9 @@ func refreshTrailsEnabledCache(ctx context.Context, client *api.Client, repoID s
 }
 
 func refreshTrailsEnabledCacheForScope(ctx context.Context, client *api.Client, repoID string, scope trailEnablementScope) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, fmt.Errorf("refresh trails enablement: %w", err)
+	}
 	if !scope.Supported {
 		if err := saveTrailsEnabledForScope(ctx, scope, false, time.Now()); err != nil {
 			return false, err

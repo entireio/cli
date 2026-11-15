@@ -6,6 +6,7 @@ import (
 	"runtime"
 
 	"github.com/entireio/cli/cmd/entire/cli/experimental"
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	cliReview "github.com/entireio/cli/cmd/entire/cli/review"
@@ -119,6 +120,7 @@ func NewRootCmd() *cobra.Command {
 		// cobra.EnableTraverseRunHooks (set in init) runs parent hooks before
 		// child ones, so this fires ahead of the group pre-runs and every RunE.
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			cmd.SetContext(gitremote.WithResolutionCache(cmd.Context()))
 			if isShellCompletion(cmd) {
 				return nil
 			}
