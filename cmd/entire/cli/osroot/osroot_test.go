@@ -274,7 +274,9 @@ func TestSymlinkTraversal_ReadBlocked(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(outsideDir, "secret.txt"), []byte("secret"), 0o644))
 
 	// Create a symlink inside the root that points outside
-	require.NoError(t, os.Symlink(outsideDir, filepath.Join(dir, "escape")))
+	if err := os.Symlink(outsideDir, filepath.Join(dir, "escape")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
 
 	root, err := os.OpenRoot(dir)
 	require.NoError(t, err)
@@ -292,7 +294,9 @@ func TestSymlinkTraversal_WriteBlocked(t *testing.T) {
 	outsideDir := t.TempDir()
 
 	// Create a symlink inside the root that points outside
-	require.NoError(t, os.Symlink(outsideDir, filepath.Join(dir, "escape")))
+	if err := os.Symlink(outsideDir, filepath.Join(dir, "escape")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
 
 	root, err := os.OpenRoot(dir)
 	require.NoError(t, err)
