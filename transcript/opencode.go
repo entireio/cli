@@ -243,6 +243,11 @@ func openCodeToolResult(tool string, state map[string]json.RawMessage) json.RawM
 	}
 	if s := unquote(state["status"]); s != "" && s != "completed" {
 		r.Status = ToolStatusError
+		// A failed tool's message is its state's error, not output (1.x
+		// ToolStateError, and the 2.x conversion), as Codex's MCP calls do.
+		if r.Output == "" {
+			r.Output = unquote(state["error"])
+		}
 	}
 	// The task tool records the subagent's session once it starts. Other
 	// tools' metadata is not theirs to interpret.
