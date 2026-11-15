@@ -1045,6 +1045,21 @@ func staleHookSpecs(root *os.Root, specs []hookSpec) []hookSpec {
 	return stale
 }
 
+// installedHookContent is the hook installHooks writes for spec: the
+// installed hook with only its outdated Trunk chain replaced when spec carries
+// one, else spec's hook chained to the backup, unless the backup is Entire's
+// own hook, which would call itself.
+func installedHookContent(root *os.Root, spec hookSpec) string {
+	if migrated, ok := migrateTrunkChain(root, spec); ok {
+		return migrated
+	}
+	backupName := spec.name + backupSuffix
+	if hookFileExists(root, backupName) && !carriesEntireMarker(root, backupName) {
+		return generateChainedContent(spec.content, spec.name)
+	}
+	return spec.content
+}
+
 func installHooks(ctx context.Context, lockRoot, root *os.Root, hooksDir string, specs []hookSpec, now time.Time) (int, error) {
 	release, err := acquireHooksLock(ctx, lockRoot, hooksDir)
 	switch {
@@ -1123,14 +1138,7 @@ func installHooks(ctx context.Context, lockRoot, root *os.Root, hooksDir string,
 			logging.Info(ctx, "updated moved copies of Entire's git hook", slog.String("hook", spec.name), slog.String("copies", strings.Join(moved, ",")))
 		}
 
-		// Chain to the backup, unless it is Entire's own hook, which would call itself.
-		content := spec.content
-		if hookFileExists(root, backupName) && !carriesEntireMarker(root, backupName) {
-			content = generateChainedContent(spec.content, spec.name)
-		}
-		if migrated, ok := migrateTrunkChain(root, spec); ok {
-			content = migrated
-		}
+		content := installedHookContent(root, spec)
 
 		afterHookBackup(spec.name)
 		if !hookUnchanged(root, spec.name, class) {
