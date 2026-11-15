@@ -26,6 +26,13 @@ const projectTrailGatesFixture = `{"head_sha":"abc1234def","mergeable":false,"co
 // client opens and the repository trail paths read.
 func setupProjectTrailGatesTest(t *testing.T) (opens map[string]int, reads func() []string) {
 	t.Helper()
+	return setupProjectTrailGatesTestWith(t, nil)
+}
+
+// setupProjectTrailGatesTestWith is setupProjectTrailGatesTest with edit, when
+// set, applied to each widget change's repository trail before it is served.
+func setupProjectTrailGatesTestWith(t *testing.T, edit func(*api.TrailResource)) (opens map[string]int, reads func() []string) {
+	t.Helper()
 	setupProjectTrailTest(t, func(w http.ResponseWriter, _ *http.Request) {
 		item := projectTrailTestResource()
 		item.URL = "https://entire.io/gh/acme/-/trails/42"
@@ -50,7 +57,11 @@ func setupProjectTrailGatesTest(t *testing.T) (opens map[string]int, reads func(
 			var n int
 			_, err := fmt.Sscanf(r.URL.Path, "/api/v1/repos/repo-widget/changes/%d", &n)
 			assert.NoError(t, err)
-			assert.NoError(t, json.NewEncoder(w).Encode(api.TrailResource{ID: "trail", Number: n, Mergeability: json.RawMessage(projectTrailGatesFixture)}))
+			resource := api.TrailResource{ID: "trail", Number: n, Mergeability: json.RawMessage(projectTrailGatesFixture)}
+			if edit != nil {
+				edit(&resource)
+			}
+			assert.NoError(t, json.NewEncoder(w).Encode(resource))
 		default:
 			http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 		}
@@ -88,6 +99,7 @@ func TestProjectTrailShowJSONIncludesChangeGates(t *testing.T) {
 	require.Len(t, raw.Changes, 4)
 	for i, c := range raw.Changes {
 		require.Contains(t, c, "mergeability", "change %d always carries the key", i)
+		require.NotContains(t, c, "readyForReview", "change %d has no approvals gate, so readiness is unknown", i)
 	}
 	for _, i := range []int{0, 1} {
 		var mg trailMergeabilityJSON
@@ -301,4 +313,85 @@ func TestProjectTrailShowServedNullGates(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, errOut)
 	assert.Contains(t, out, "  Gates for widget/7:\n    Mergeable: unknown\n")
+}
+
+// Readiness is only recorded behind an approvals gate, so `trail show`
+// reports it for a change with that gate and leaves it out otherwise, where
+// a stored false would wrongly read as a draft.
+func TestReadTrailChangeStateReadinessNeedsApprovalsGate(t *testing.T) {
+	t.Parallel()
+	const withApprovals = `{"mergeable":false,"conflict_status":"clean","checks":{"availability":"available","runs":[]},` +
+		`"gates":[{"gate_key":"approvals","status":"failed","blocking":true,"rationale":"No reviewers have approved this trail"}]}`
+	draft, ready := false, true
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resource := api.TrailResource{ID: "trail", ReadyForReview: &draft, Mergeability: json.RawMessage(withApprovals)}
+		switch r.URL.Path {
+		case "/api/v1/trails/gh/acme/widget/1":
+			resource.Number = 1
+		case "/api/v1/trails/gh/acme/widget/2":
+			resource.Number, resource.ReadyForReview = 2, &ready
+		case "/api/v1/trails/gh/acme/widget/3":
+			resource.Number, resource.Mergeability = 3, json.RawMessage(projectTrailGatesFixture)
+		default:
+			http.Error(w, "unexpected", http.StatusNotFound)
+			return
+		}
+		assert.NoError(t, json.NewEncoder(w).Encode(resource))
+	}))
+	t.Cleanup(srv.Close)
+	access := &trailRepoAccess{Client: api.NewClientWithBaseURL("tok", srv.URL), BasePath: "/api/v1/trails/gh/acme/widget"}
+
+	for number, want := range map[int]*bool{1: &draft, 2: &ready, 3: nil} {
+		state, err := readTrailChangeState(t.Context(), access, number)
+		require.NoError(t, err)
+		require.NotNil(t, state.mergeability, "change %d", number)
+		assert.Equal(t, want, state.readyForReview, "change %d", number)
+	}
+}
+
+func TestProjectTrailShowTextPrintsReadiness(t *testing.T) {
+	t.Parallel()
+	draft, ready := false, true
+	render := func(readiness *bool) string {
+		var out bytes.Buffer
+		changes := []projectTrailChangeJSON{{
+			ChangeSummary:  api.ChangeSummary{ID: "c1", Repository: "widget", Number: 7, Branch: "feature/a", Status: "open"},
+			ReadyForReview: readiness, selector: "widget/7", gatesLoaded: true,
+		}}
+		printProjectTrailDetails(&out, projectTrailTestResource(), changes)
+		return out.String()
+	}
+	require.Contains(t, render(&draft), "  Gates for widget/7:\n    Review:    draft\n    Mergeable: unknown\n")
+	require.Contains(t, render(&ready), "    Review:    ready for review\n")
+	require.NotContains(t, render(nil), "Review:")
+}
+
+// Through the whole command: a change with an approvals gate carries its
+// readiness in --json, one without leaves the key out.
+func TestProjectTrailShowJSONIncludesReadiness(t *testing.T) {
+	const withApprovals = `{"mergeable":false,"conflict_status":"clean","checks":{"availability":"available","runs":[]},` +
+		`"gates":[{"gate_key":"approvals","status":"failed","blocking":true,"rationale":"No reviewers have approved this trail"}]}`
+	draft := false
+	setupProjectTrailGatesTestWith(t, func(resource *api.TrailResource) {
+		resource.ReadyForReview = &draft
+		if resource.Number == 7 {
+			resource.Mergeability = json.RawMessage(withApprovals)
+		}
+	})
+
+	out, _, err := executeProjectTrailTest(t, "show", "42", "--project", "gh/acme", "--json")
+	require.NoError(t, err)
+	var raw struct {
+		Changes []map[string]json.RawMessage `json:"changes"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(out), &raw))
+	require.Len(t, raw.Changes, 4)
+	require.Contains(t, raw.Changes[0], "readyForReview", "widget/7 has an approvals gate")
+	assert.JSONEq(t, "false", string(raw.Changes[0]["readyForReview"]), "a draft is false, not omitted")
+	assert.NotContains(t, raw.Changes[1], "readyForReview", "widget/8 has no approvals gate")
+
+	text, _, err := executeProjectTrailTest(t, "show", "42", "--project", "gh/acme")
+	require.NoError(t, err)
+	require.Contains(t, text, "  Gates for widget/7:\n    Review:    draft\n")
+	require.NotRegexp(t, `Gates for widget/8:\n    Review:`, text)
 }
