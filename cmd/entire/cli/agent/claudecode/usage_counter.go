@@ -40,10 +40,12 @@ type usageCounter struct {
 	RunIDs   []string `json:"run_ids,omitempty"`
 	// dir is the session's subagents directory and agents maps each subagent
 	// transcript Files returned to its agent ID: both rebuilt each reading.
-	// runs caches each Workflow run's agents for the reading.
+	// runs caches each Workflow run's agents for the reading, and unread
+	// holds the subagent transcripts it could not read.
 	dir    string
 	agents map[string]string
 	runs   map[string]map[string]string
+	unread map[string]bool
 }
 
 func (u *usageCounter) Files(in agent.CumulativeTokenInput) []agent.UsageFile {
@@ -129,6 +131,32 @@ func (u *usageCounter) Add(path string, data []byte) {
 
 func (u *usageCounter) Reset(path string) { u.Calls.ResetChild(u.agents[path]) }
 
+// Unread records a subagent transcript this reading could not read: a total
+// counted from it earlier may be short of what the subagent has used since.
+func (u *usageCounter) Unread(path string) {
+	if u.unread == nil {
+		u.unread = make(map[string]bool)
+	}
+	u.unread[path] = true
+}
+
 func (u *usageCounter) Totals(context.Context, agent.CumulativeTokenInput) (*agent.TokenUsage, map[string]*agent.TokenUsage) {
-	return u.Calls.Sum(""), u.Calls.Children()
+	counted := u.Calls.Children()
+	// Only the subagent transcripts this reading listed: one no longer
+	// listed (a Workflow agent's deleted file) was not read, so the ledger
+	// keeps its last total. One listed but not read, or that counted
+	// nothing, is a nil entry: the children's total lacks it, or has only
+	// what an earlier reading counted.
+	var children map[string]*agent.TokenUsage
+	for path, agentID := range u.agents {
+		if children == nil {
+			children = make(map[string]*agent.TokenUsage, len(u.agents))
+		}
+		if total, ok := counted[agentID]; ok && !u.unread[path] {
+			children[agentID] = total
+			continue
+		}
+		children[agentID] = nil
+	}
+	return u.Calls.Sum(""), children
 }
