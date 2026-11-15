@@ -491,7 +491,7 @@ func stageBlobAt(t *testing.T, root, repoPath string) {
 	require.NoError(t, os.WriteFile(scratch, []byte("{}"), 0o644))
 	blob := strings.TrimSpace(testutil.RunGit(t, root, "hash-object", "-w", scratch))
 	require.NoError(t, os.Remove(scratch))
-	testutil.RunGit(t, root, "update-index", "--add", "--cacheinfo", "100644,"+blob+","+repoPath)
+	testutil.RunGit(t, root, "-c", "core.protectNTFS=false", "update-index", "--add", "--cacheinfo", "100644,"+blob+","+repoPath)
 }
 
 // commitIndexAndClear commits whatever is staged, then empties the index, so a
