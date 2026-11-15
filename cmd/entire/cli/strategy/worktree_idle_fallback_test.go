@@ -266,11 +266,12 @@ func TestPostRewrite_StillRemapsAnIdleSiblingSession(t *testing.T) {
 // trailer never linked the owner to the commit being amended. A trailer prepare
 // restores for a session based on that commit does link it, as does one the
 // checkpoint records the amended commit for (moved out of its final trailer
-// block, then put back by the amend). Without a reflog
-// to tell an amend from a new commit, the owner is kept, as it was before the
-// idle check. A commit started while the amend's post-commit runs can land
-// between post-commit reading HEAD and reading HEAD's reflog: its entry is
-// then the newest, and the amend is still told by its own entry.
+// block, then put back by the amend). Without a reflog to tell an amend from
+// a new commit, the owner is kept, as it was before the idle check, and so it
+// is when git lists the amend's entry with no older one to read its old HEAD
+// from. A commit started while the amend's post-commit runs can land between
+// post-commit reading HEAD and reading HEAD's reflog: its entry is then the
+// newest, and the amend is still told by its own entry.
 func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
 	for _, tt := range []struct {
 		name       string
@@ -291,7 +292,10 @@ func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
 		// dropEntry removes the commit's own entry from HEAD's reflog,
 		// leaving only older ones.
 		dropEntry bool
-		condensed bool
+		// expireBefore leaves only the commit's own entry, listed by git with
+		// no old HEAD, as a reftable reflog is once older entries expire.
+		expireBefore bool
+		condensed    bool
 	}{
 		{name: "amend", commitArgs: []string{"--amend"}, condensed: true},
 		{name: "message reused with commit -C", condensed: false},
@@ -303,6 +307,7 @@ func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
 		{name: "amend, then another commit lands before post-commit reads the reflog", commitArgs: []string{"--amend"}, laterCommit: true, condensed: true},
 		{name: "commit -C, then another commit lands before post-commit reads the reflog", laterCommit: true, condensed: false},
 		{name: "amend with no reflog entry of its own", commitArgs: []string{"--amend"}, dropEntry: true, condensed: true},
+		{name: "amend whose reflog entry has no older one to read its old HEAD from", commitArgs: []string{"--amend"}, expireBefore: true, condensed: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -408,6 +413,9 @@ func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
 			if tt.dropEntry {
 				dropNewestReflogEntry(t, siblingDir)
 			}
+			if tt.expireBefore {
+				expireReflogBeforeNewest(t, siblingDir)
+			}
 			if tt.laterCommit {
 				// The next commit lands after post-commit has read HEAD (still
 				// this commit) and before it reads HEAD's reflog, whose newest
@@ -466,4 +474,27 @@ func dropNewestReflogEntry(t *testing.T, dir string) {
 		"sanity: no entry names the commit")
 	require.True(t, slices.ContainsFunc(entries, func(e reflogEntry) bool { return !e.oldHash.Equal(e.newHash) }),
 		"sanity: an older entry that moved HEAD is left")
+}
+
+// expireReflogBeforeNewest leaves HEAD's reflog with only its newest entry, as
+// a reftable reflog is once older entries expire: git lists it with no entry
+// before it, so its old HEAD is unknown. The files backend stands in for
+// reftable here: without logs/HEAD, headReflog asks git, which lists the
+// branch's reflog, cut to its newest entry.
+func expireReflogBeforeNewest(t *testing.T, dir string) {
+	t.Helper()
+	gitDir := strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", "--path-format=absolute", "--absolute-git-dir"))
+	require.NoError(t, os.Remove(filepath.Join(gitDir, "logs", "HEAD")))
+	commonDir := strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+	branch := strings.TrimSpace(testutil.RunGit(t, dir, "symbolic-ref", "HEAD"))
+	logPath := filepath.Join(commonDir, "logs", filepath.FromSlash(branch))
+	data, err := os.ReadFile(logPath)
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	require.NoError(t, os.WriteFile(logPath, []byte(lines[len(lines)-1]+"\n"), 0o600))
+	head := strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", "HEAD"))
+	entries := headReflog(context.Background())
+	require.Len(t, entries, 1, "sanity: only the newest entry is left")
+	require.Equal(t, head, entries[0].newHash.String(), "sanity: the entry names the commit")
+	require.True(t, entries[0].oldUnknown, "sanity: git gives no old HEAD for it")
 }

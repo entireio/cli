@@ -135,10 +135,11 @@ func stampedByAnotherCommit(ctx context.Context, checkpointID id.CheckpointID, s
 // commit's trailer, and its owner was never linked to this one. A message
 // reused with `commit -C` keeps a trailer the same way but advances HEAD: it
 // makes a new link. With no reflog entry for this commit to tell them apart
-// (core.logAllRefUpdates=false), it is taken as an amend, so the owner keeps
-// condensing into its checkpoint as it did before the idle check. Judged a new
-// link instead, the owner would be dropped, and the amend's work would never
-// reach the checkpoint its trailer names.
+// (core.logAllRefUpdates=false), or only one whose old HEAD is unknown (a
+// reftable reflog whose older entries expired), it is taken as an amend, so the
+// owner keeps condensing into its checkpoint as it did before the idle check.
+// Judged a new link instead, the owner would be dropped, and the amend's work
+// would never reach the checkpoint its trailer names.
 func (s *ManualCommitStrategy) amendedCheckpoint(ctx context.Context, repo *git.Repository, commit *object.Commit, checkpointID id.CheckpointID, preexisting bool) amendedLink {
 	if !preexisting {
 		return amendedLink{}
@@ -148,6 +149,11 @@ func (s *ManualCommitStrategy) amendedCheckpoint(ctx context.Context, repo *git.
 			// A later commit, or an entry that did not move HEAD, as with
 			// another hook's `git reset HEAD`.
 			continue
+		}
+		if e.oldUnknown {
+			// Nothing shows where HEAD was before it (headReflogFromGit):
+			// taken as an amend, as with no entry for this commit.
+			return amendedLink{checkpointID: checkpointID}
 		}
 		if e.oldHash.IsZero() || slices.ContainsFunc(commit.ParentHashes, e.oldHash.Equal) {
 			return amendedLink{}

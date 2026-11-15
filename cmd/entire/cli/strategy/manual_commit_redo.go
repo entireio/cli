@@ -357,6 +357,10 @@ func replacedCommits(ctx context.Context, repo *git.Repository) (*object.Commit,
 type reflogEntry struct {
 	oldHash, newHash plumbing.Hash
 	msg              string
+	// oldUnknown marks an entry git listed with no entry before it
+	// (headReflogFromGit): its oldHash is zero, as for a commit on an unborn
+	// HEAD, but HEAD may have been anywhere.
+	oldUnknown bool
 }
 
 // maxReflogBytes bounds how much of HEAD's reflog a commit hook reads, and
@@ -432,10 +436,10 @@ func headReflogFromGit(ctx context.Context) []reflogEntry {
 		if !ok || !plumbing.IsHash(hash) {
 			continue
 		}
-		e := reflogEntry{newHash: plumbing.NewHash(hash), msg: msg}
+		e := reflogEntry{newHash: plumbing.NewHash(hash), msg: msg, oldUnknown: true}
 		if i+1 < len(lines) {
 			if older, _, ok := strings.Cut(lines[i+1], "\t"); ok && plumbing.IsHash(older) {
-				e.oldHash = plumbing.NewHash(older)
+				e.oldHash, e.oldUnknown = plumbing.NewHash(older), false
 			}
 		}
 		entries = append(entries, e)
