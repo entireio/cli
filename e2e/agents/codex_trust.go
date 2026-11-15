@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,11 +29,32 @@ type codexHookGroup struct {
 }
 
 type codexHookHandlers struct {
-	Type          string  `json:"type"`
-	Command       string  `json:"command"`
-	Timeout       *uint64 `json:"timeout"`
-	Async         bool    `json:"async"`
-	StatusMessage *string `json:"statusMessage"`
+	Type    string `json:"type"`
+	Command string `json:"command"`
+	// CommandWindows replaces Command when Codex runs on Windows, under either
+	// spelling (serde rename plus alias), and the hash is taken over the command
+	// Codex selected.
+	CommandWindows      *string `json:"commandWindows"`
+	CommandWindowsAlias *string `json:"command_windows"`
+	Timeout             *uint64 `json:"timeout"`
+	Async               bool    `json:"async"`
+	StatusMessage       *string `json:"statusMessage"`
+}
+
+// selectedCommand is the command Codex runs, and so hashes, on goos:
+// commandWindows.unwrap_or(command) on Windows, command everywhere else
+// (append_matcher_groups in codex-rs/hooks/src/engine/discovery.rs).
+func (h codexHookHandlers) selectedCommand(goos string) string {
+	if goos != "windows" {
+		return h.Command
+	}
+	if h.CommandWindows != nil {
+		return *h.CommandWindows
+	}
+	if h.CommandWindowsAlias != nil {
+		return *h.CommandWindowsAlias
+	}
+	return h.Command
 }
 
 // codexHookTrustState reads .codex/hooks.json from projectDir and returns the
@@ -86,7 +108,7 @@ func codexHookTrustState(projectDir string) (string, error) {
 				if timeoutSec < 1 {
 					timeoutSec = 1
 				}
-				hash := codexCommandHookHash(ev.Label, group.Matcher, handler.Command, timeoutSec, handler.Async, handler.StatusMessage)
+				hash := codexCommandHookHash(ev.Label, group.Matcher, handler.selectedCommand(runtime.GOOS), timeoutSec, handler.Async, handler.StatusMessage)
 				key := fmt.Sprintf("%s:%s:%d:%d", hooksPath, ev.Label, groupIdx, handlerIdx)
 				fmt.Fprintf(&sb, "[hooks.state.%q]\ntrusted_hash = %q\n\n", key, hash)
 			}

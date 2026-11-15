@@ -224,6 +224,73 @@ func TestTrustInventory_CodexHooksAndConfig(t *testing.T) {
 	}
 }
 
+// Codex on Windows runs commandWindows instead of command, so a branch could
+// pair Entire's own command with a Windows command of its own and have the hook
+// pass as Entire's. The Windows command, under either spelling, is part of what
+// makes a hook Entire's, and a different one is listed to the reviewer.
+func TestTrustInventory_CodexWindowsCommandIsPartOfTheHook(t *testing.T) {
+	t.Parallel()
+	stop := codex.EntireHookCommands()["Stop"]
+	if len(stop) < 2 {
+		t.Fatalf("EntireHookCommands()[Stop] = %v, want command and commandWindows", stop)
+	}
+	posix, windows := stop[0], stop[1]
+	hook := func(fields map[string]string) map[string]any {
+		out := map[string]any{"type": "command"}
+		for k, v := range fields {
+			out[k] = v
+		}
+		return out
+	}
+	hooks := []any{
+		hook(map[string]string{"command": posix, "commandWindows": windows}),
+		hook(map[string]string{"command": posix, "commandWindows": "powershell -c evil"}),
+		hook(map[string]string{"command": posix, "command_windows": "evil.cmd"}),
+		hook(map[string]string{"command": "make lint", "commandWindows": "lint.cmd"}),
+		// No command to show: Command falls back to the hook's JSON, which
+		// the confirm shortens, so the Windows command needs its own line.
+		hook(map[string]string{"command": "", "commandWindows": "empty.cmd", "statusMessage": strings.Repeat("x", 200)}),
+		hook(map[string]string{"command_windows": "missing.cmd"}),
+	}
+	data, err := json.Marshal(map[string]any{"hooks": map[string]any{"Stop": []any{map[string]any{"hooks": hooks}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := newTrustInventoryRepo(t, map[string]string{".codex/hooks.json": string(data)})
+	inv := trustInventoryBoth(t, dir, "codex")
+	var entire, branch []string
+	for _, e := range inv.Entries {
+		if e.Kind != cliReview.TrustKindHook {
+			continue
+		}
+		if e.Entire {
+			if e.CommandWindows != "" {
+				t.Errorf("Entire hook %q has CommandWindows %q; its Windows command is canonical", e.Command, e.CommandWindows)
+			}
+			entire = append(entire, e.Command)
+		} else {
+			command := e.Command
+			if strings.HasPrefix(command, "{") {
+				command = "(json)"
+			}
+			branch = append(branch, command+" | "+e.CommandWindows)
+		}
+	}
+	if !slices.Equal(entire, []string{posix}) {
+		t.Errorf("Entire hooks = %q, want only the installed pair", entire)
+	}
+	wantBranch := []string{
+		posix + " | powershell -c evil",
+		posix + " | evil.cmd",
+		"make lint | lint.cmd",
+		"(json) | empty.cmd",
+		"(json) | missing.cmd",
+	}
+	if !slices.Equal(branch, wantBranch) {
+		t.Errorf("branch hooks = %q, want %q", branch, wantBranch)
+	}
+}
+
 func TestTrustInventory_PiExtensions(t *testing.T) {
 	t.Parallel()
 	dir := newTrustInventoryRepo(t, map[string]string{

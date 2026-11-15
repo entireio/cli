@@ -7,6 +7,7 @@
           {
             "type": "command",
             "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks codex post-tool-use'",
+            "commandWindows": "cmd.exe /d /s /c \"set NoDefaultCurrentDirectoryInExePath=1& pushd %SystemRoot%& where.exe entire >nul 2>nul & if errorlevel 1 (popd& ver>nul) else (popd& entire hooks codex post-tool-use)\"",
             "timeout": 30
           }
         ]
@@ -19,6 +20,7 @@
           {
             "type": "command",
             "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks codex session-end'",
+            "commandWindows": "cmd.exe /d /s /c \"set NoDefaultCurrentDirectoryInExePath=1& pushd %SystemRoot%& where.exe entire >nul 2>nul & if errorlevel 1 (popd& ver>nul) else (popd& entire hooks codex session-end)\"",
             "timeout": 3
           }
         ]
@@ -31,6 +33,7 @@
           {
             "type": "command",
             "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then printf \"%s\\n\" \"{\\\"systemMessage\\\":\\\"Entire CLI is enabled but not installed or not on PATH. Installation guide: https://docs.entire.io/cli/installation#installation-methods\\\"}\"; exit 0; fi; if ! entire --version </dev/null >/dev/null 2>&1; then printf \"%s\\n\" \"{\\\"systemMessage\\\":\\\"Entire CLI is enabled, but the entire command on PATH failed to run, so this session may not be captured. Check that entire --version works in this shell. Installation guide: https://docs.entire.io/cli/installation#installation-methods\\\"}\"; exit 0; fi; exec entire hooks codex session-start'",
+            "commandWindows": "cmd.exe /d /s /c \"set NoDefaultCurrentDirectoryInExePath=1& pushd %SystemRoot%& where.exe entire >nul 2>nul & if errorlevel 1 (popd& echo Entire CLI is enabled but not installed or not on PATH. Installation guide: https://docs.entire.io/cli/installation#installation-methods) else (popd& entire --version <nul >nul 2>nul & if errorlevel 1 (echo Entire CLI is enabled, but the entire command on PATH failed to run, so this session may not be captured. Check that entire --version works in this shell. Installation guide: https://docs.entire.io/cli/installation#installation-methods) else (entire hooks codex session-start))\"",
             "timeout": 30
           }
         ]
@@ -43,6 +46,7 @@
           {
             "type": "command",
             "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks codex stop'",
+            "commandWindows": "cmd.exe /d /s /c \"set NoDefaultCurrentDirectoryInExePath=1& pushd %SystemRoot%& where.exe entire >nul 2>nul & if errorlevel 1 (popd& ver>nul) else (popd& entire hooks codex stop)\"",
             "timeout": 30
           }
         ]
@@ -55,6 +59,7 @@
           {
             "type": "command",
             "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks codex subagent-start'",
+            "commandWindows": "cmd.exe /d /s /c \"set NoDefaultCurrentDirectoryInExePath=1& pushd %SystemRoot%& where.exe entire >nul 2>nul & if errorlevel 1 (popd& ver>nul) else (popd& entire hooks codex subagent-start)\"",
             "timeout": 30
           }
         ]
@@ -67,6 +72,7 @@
           {
             "type": "command",
             "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks codex subagent-stop'",
+            "commandWindows": "cmd.exe /d /s /c \"set NoDefaultCurrentDirectoryInExePath=1& pushd %SystemRoot%& where.exe entire >nul 2>nul & if errorlevel 1 (popd& ver>nul) else (popd& entire hooks codex subagent-stop)\"",
             "timeout": 30
           }
         ]
@@ -79,6 +85,7 @@
           {
             "type": "command",
             "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks codex user-prompt-submit'",
+            "commandWindows": "cmd.exe /d /s /c \"set NoDefaultCurrentDirectoryInExePath=1& pushd %SystemRoot%& where.exe entire >nul 2>nul & if errorlevel 1 (popd& ver>nul) else (popd& entire hooks codex user-prompt-submit)\"",
             "timeout": 30
           }
         ]

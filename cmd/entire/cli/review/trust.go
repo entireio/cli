@@ -52,8 +52,11 @@ type TrustEntry struct {
 	Kind    string `json:"kind"`
 	Name    string `json:"name"`
 	Command string `json:"command"`
-	Source  string `json:"source"`
-	Entire  bool   `json:"entire"`
+	// CommandWindows is what the agent runs in place of Command on Windows,
+	// when the two differ (Codex's commandWindows).
+	CommandWindows string `json:"commandWindows,omitempty"`
+	Source         string `json:"source"`
+	Entire         bool   `json:"entire"`
 }
 
 // TrustAgent is a reviewer agent whose checkout config the gate inspects.
@@ -435,6 +438,9 @@ const trustConfirmVisible = 3
 // trustDisplayWidth caps each author-controlled value in the confirm.
 const trustDisplayWidth = 80
 
+// trustWindowsLabel names the line showing an entry's CommandWindows.
+const trustWindowsLabel = "(Windows)"
+
 func trustConfirmText(subject TrustSubject, inv TrustInventory, command string) (string, string) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s @ %s by %s (%s)\n",
@@ -471,6 +477,12 @@ func trustConfirmText(subject TrustSubject, inv TrustInventory, command string) 
 		fmt.Fprintf(&b, "  %-9s  %-14s  %s\n", e.Kind,
 			truncateDisplay(sanitizeDisplay(e.Name), 30),
 			truncateDisplay(sanitizeDisplay(e.Command), trustDisplayWidth))
+		// On its own line, truncated on its own, so neither a long Command
+		// nor the entry limit can hide what runs on Windows.
+		if e.CommandWindows != "" {
+			fmt.Fprintf(&b, "  %-9s  %-14s  %s\n", "", trustWindowsLabel,
+				truncateDisplay(sanitizeDisplay(e.CommandWindows), trustDisplayWidth))
+		}
 	}
 	return title, strings.TrimRight(b.String(), "\n")
 }
@@ -631,6 +643,9 @@ func printTrustConfig(out io.Writer, subject TrustSubject, inv TrustInventory, a
 			continue
 		}
 		fmt.Fprintf(out, "%-9s  %-14s  %s  (%s)\n", e.Kind, sanitizeDisplay(e.Name), sanitizeDisplay(e.Command), sanitizeDisplay(e.Source))
+		if e.CommandWindows != "" {
+			fmt.Fprintf(out, "%-9s  %-14s  %s\n", "", trustWindowsLabel, sanitizeDisplay(e.CommandWindows))
+		}
 	}
 	for _, e := range entries {
 		if !e.Entire {

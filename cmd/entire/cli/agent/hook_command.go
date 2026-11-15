@@ -279,10 +279,10 @@ func windowsWarningBody(command, escapedWarning string) string {
 // form; agy (cmd.exe, argument-quoted) uses the direct form.
 
 // WrapWindowsProductionSilentHookCommand exits successfully without output when
-// the Entire CLI is missing from PATH. It avoids sh so Codex hooks still work
-// from native Windows shells. It nests a bare `cmd.exe` so the line also runs
+// the Entire CLI is missing from PATH. It avoids sh so hooks still work from
+// native Windows shells. It nests a bare `cmd.exe` so the line also runs
 // under a PowerShell hook shell; see windowsBareCmdLauncher and the selection
-// rules above.
+// rules above. Codex writes it as a hook's commandWindows.
 func WrapWindowsProductionSilentHookCommand(command string) string {
 	return windowsBareCmdLauncher + windowsSilentBody(command) + `"`
 }
@@ -306,18 +306,20 @@ func WrapWindowsProductionSilentHookCommandForCmdHost(command string) string {
 // >nul 2>nul & …"' is not recognized as an internal or external command) — and
 // the sh wrapper fails too, because cmd.exe reads its `>/dev/null` as a redirect
 // to a nonexistent path. Both were observed on Windows 11 with agy 1.2.7; only
-// this shape produced a tracked session. Same distinction
-// WrapWindowsProductionJSONWarningHookCommand draws for Codex.
+// this shape produced a tracked session. WrapWindowsProductionJSONWarningHookCommand
+// is the warning counterpart of this direct form.
 func WrapWindowsProductionSilentHookCommandDirect(command string) string {
 	return windowsSilentBody(command)
 }
 
 // WrapWindowsProductionJSONWarningHookCommand emits a JSON hook response with a
 // systemMessage field on stdout when the Entire CLI is missing from PATH. It
-// avoids sh so Codex hooks still work from native Windows shells. It is the
-// direct form, with no nested cmd.exe, so it only runs when the hook shell is
-// cmd.exe (Codex's cmd.exe and %COMSPEC% hook shells; see
-// windowsBareCmdLauncher).
+// avoids sh. It is the direct form, with no nested cmd.exe, so the JSON's
+// quotes need only one quote-parsing layer, and it only runs when the hook
+// shell is cmd.exe. Codex wrote it into `command` before Entire wrote a
+// commandWindows; Codex's default PowerShell hook shell cannot parse it. A
+// host that may run the command through PowerShell needs
+// WrapWindowsProductionNestedPlainTextWarningHookCommand.
 func WrapWindowsProductionJSONWarningHookCommand(command string, format WarningFormat) string {
 	payload, err := jsonutil.MarshalWithNoHTMLEscape(struct {
 		SystemMessage string `json:"systemMessage,omitempty"`
@@ -329,6 +331,35 @@ func WrapWindowsProductionJSONWarningHookCommand(command string, format WarningF
 	}
 
 	return windowsWarningBody(command, escapeWindowsCMD(string(payload)))
+}
+
+// WrapWindowsProductionNestedPlainTextWarningHookCommand is the warning
+// counterpart of WrapWindowsProductionSilentHookCommand, for a host whose
+// Windows hook shell may be PowerShell or cmd.exe: Codex runs a hook's
+// commandWindows through PowerShell (`-NoProfile -Command`) when its session
+// has a shell, which is the default, and through %COMSPEC% /C otherwise. It
+// nests a bare `cmd.exe` (windowsBareCmdLauncher) around the PATH-only warning
+// body, so both shells read the line the same way: everything after `/c` is
+// one double-quoted string with no `"`, `$` or backtick inside it, which
+// PowerShell passes to cmd.exe as a single literal argument and the outer
+// cmd.exe leaves alone because its metacharacters are all quoted.
+//
+// Like the POSIX warningHookCommand it prints the missing-CLI warning when
+// entire is not on PATH, the failed-CLI warning when `entire --version` fails
+// (a version-manager shim with no version selected passes where.exe), and
+// otherwise runs command; it exits 0 in both warning cases. The probe reads
+// nul so the hook payload on stdin reaches command.
+//
+// The warnings are plain text. A JSON warning cannot be written this way: its
+// quotes would end PowerShell's string, and the escape PowerShell needs for
+// them is a different one from cmd.exe's. Codex treats plain stdout from a
+// start hook as context it shows and passes to the model, so the warning still
+// surfaces.
+func WrapWindowsProductionNestedPlainTextWarningHookCommand(command string, format WarningFormat) string {
+	failedCheck := `entire --version <nul >nul 2>nul & if errorlevel 1 (echo ` +
+		escapeWindowsCMD(windowsPlainText(FailedEntireWarning(format))) + `) else (` + command + `)`
+	missing := escapeWindowsCMD(windowsPlainText(MissingEntireWarning(format)))
+	return windowsBareCmdLauncher + windowsWarningBody(failedCheck, missing) + `"`
 }
 
 // WrapWindowsProductionPlainTextWarningHookCommand is the direct-shell fallback
@@ -501,7 +532,12 @@ func escapeWindowsCMD(s string) string {
 }
 
 func windowsPlainTextWarning(format WarningFormat) string {
-	return strings.Join(strings.Fields(MissingEntireWarning(format)), " ")
+	return windowsPlainText(MissingEntireWarning(format))
+}
+
+// windowsPlainText puts a warning on one line for cmd.exe's echo.
+func windowsPlainText(warning string) string {
+	return strings.Join(strings.Fields(warning), " ")
 }
 
 const hookWrapperOSWindows = "windows"
@@ -524,8 +560,8 @@ var (
 // is true only on Windows when the sh-based wrapper does not actually run on
 // this host. This lives in the shared agent layer so every agent that wraps
 // hooks for production inherits the same Windows fallback decision rather than
-// re-implementing the probe and selection (codex is the first adopter; the
-// other agents can switch to these helpers without new logic).
+// re-implementing the probe and selection (cursor uses it; codex did until it
+// moved to Codex's own commandWindows, see HookHostIsWindows).
 //
 // The probe runs once per InstallHooks call (not memoized): InstallHooks is
 // invoked once per `entire enable`, and not caching is what lets a host that
@@ -549,7 +585,7 @@ func defaultSHHookWrapperWorks(ctx context.Context, command string) bool {
 
 // shHookWrapperProbe builds the probe process. The probe must find sh where a
 // hook would, on PATH, and never in the directory `entire` was started from:
-// `entire enable` and Codex review setup run from the repository, and a
+// `entire enable` runs from the repository, and a
 // repository `sh.bat` or `sh.cmd` would otherwise both run during the probe and
 // decide which wrapper form gets installed. NoDefaultCurrentDirectoryInExePath
 // stops cmd.exe searching its working directory; running from the temp
@@ -596,12 +632,25 @@ func AppendWindowsPathOnlyLookupEnv(env []string) []string {
 // wrapper, which is full of `>` and `&`, is still cut apart by cmd.exe before
 // any sh sees it.
 //
-// Codex and Cursor keep UseWindowsProductionHooks because a Windows host may
-// hand their hooks to a real sh, not because their runners are known to avoid
-// cmd.exe; Codex demonstrably passes the Windows nightly with the sh wrapper
-// installed. Their hook shells are described at windowsBareCmdLauncher, and the
-// choice of Windows wrapper for each runner above
-// WrapWindowsProductionSilentHookCommand.
+// Cursor keeps UseWindowsProductionHooks because a Windows host may hand its
+// hooks to a real sh, not because its runner is known to avoid cmd.exe.
+//
+// Codex needs neither gate. Its hooks.json takes a commandWindows beside
+// command, and Codex itself runs the one for the platform it is on, so Entire
+// writes both and decides nothing at install time. Reading its runner
+// (codex-rs/hooks/src/engine/command_runner.rs) also showed why the probe was
+// the wrong question there: on Windows Codex runs a hook through PowerShell
+// whenever the session has a shell, and through %COMSPEC% /C only otherwise.
+// That is the likeliest reason the Windows nightly passed with the sh wrapper
+// installed (the runner has Git's sh on PATH, and PowerShell hands the wrapper
+// to it as one argument), and it means the direct cmd.exe form a failed probe
+// chose for SessionStart could not even parse there. Even the sh wrapper holds
+// only while it has no double quotes in it: Windows PowerShell 5.1 does not
+// escape them when it passes an argument to a native program, so SessionStart's
+// JSON-warning sh wrapper reaches sh cut short and fails to parse.
+//
+// The hook shells are described at windowsBareCmdLauncher, and the choice of
+// Windows wrapper for each runner above WrapWindowsProductionSilentHookCommand.
 func HookHostIsWindows() bool {
 	return hookCommandOS == hookWrapperOSWindows
 }
