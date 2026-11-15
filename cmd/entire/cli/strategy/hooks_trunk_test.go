@@ -382,8 +382,8 @@ func plantPre3051TrunkChain(t *testing.T, tf *trunkFixture) {
 }
 
 // grepTrunkChainCall is the chain Entire wrote when it identified Trunk's
-// launcher with grep -qxF. Frozen so this test still plants that text if
-// chainCall changes again.
+// launcher with grep -qxF (#3051's final form, which also tests [ -f ]).
+// Frozen so this test still plants that text if chainCall changes again.
 func grepTrunkChainCall(hookName, redirect string) string {
 	backup := hookName + backupSuffix
 	keep := hookName + keepSuffix
@@ -397,7 +397,7 @@ if [ -z "${%s:-}" ]; then
         if [ -x "$_entire_hook_dir/%s" ]; then
             "$_entire_hook_dir/%s" "$@"%s
         fi
-    elif [ -x "$_entire_hook_dir/%s" ]; then
+    elif [ -f "$_entire_hook_dir/%s" ] && [ -x "$_entire_hook_dir/%s" ]; then
         if grep -qxF %s "$_entire_hook_dir/%s" 2>/dev/null; then
             /bin/bash --norc -c '_entire_saved_hook=$1; shift; . "$_entire_saved_hook"' "$_entire_hook_dir/%s" "$_entire_hook_dir/%s" "$@"%s
         else
@@ -406,7 +406,7 @@ if [ -z "${%s:-}" ]; then
     fi
 fi
 `, chainComment, guard, guard, guard, preCommitSignatures[0], backup, keep, keep, redirect,
-		backup, shellQuote(trunkHookCallback), backup, hookName, backup, redirect, backup, redirect)
+		backup, backup, shellQuote(trunkHookCallback), backup, hookName, backup, redirect, backup, redirect)
 }
 
 func grepTrunkChainedContent(baseContent, hookName string) string {
@@ -440,18 +440,20 @@ func plantGrepTrunkChain(t *testing.T, tf *trunkFixture) {
 	}
 }
 
-func writeGrepChain(t *testing.T, dir, hook, backup string) {
+// writeGrepChain writes the managed hooks into dir with pre-push on the
+// grep-based chain, and backup as pre-push's saved hook.
+func writeGrepChain(t *testing.T, dir, backup string) {
 	t.Helper()
 	for _, spec := range buildHookSpecs(bareEntireHookCmd) {
 		content := spec.content
-		if spec.name == hook {
+		if spec.name == prePushHook {
 			content = grepTrunkChainedContent(spec.content, spec.name)
 		}
 		if err := os.WriteFile(filepath.Join(dir, spec.name), []byte(content), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(dir, hook+backupSuffix), []byte(backup), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, prePushHook+backupSuffix), []byte(backup), 0o755); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -521,18 +523,40 @@ func TestReinstallGitHooks_GrepTrunkChainIsOutdated(t *testing.T) {
 	}
 }
 
-func writeOldChain(t *testing.T, dir, hook, backup string) {
+// With Trunk's hooks symlinked to one launcher, the backups are links out of
+// the hooks dir, which the Outdated check does not follow. Such an install
+// keeps the old chain until entire enable, which rewrites every hook.
+func TestInstallGitHook_Pre3051TrunkChainToSymlinkedLauncher(t *testing.T) {
+	tf := newTrunkFixture(t, true, 0)
+	plantPre3051TrunkChain(t, tf)
+	tf.useAsGitHooks(t)
+
+	if got := CheckGitHookState(t.Context()); got != GitHooksCurrent {
+		t.Fatalf("CheckGitHookState = %v, want GitHooksCurrent (symlinked backups are not read)", got)
+	}
+	if _, err := InstallGitHook(t.Context(), true, false); err != nil {
+		t.Fatalf("InstallGitHook: %v", err)
+	}
+	const refs = "refs/heads/main 1111111111111111111111111111111111111111 refs/heads/main 2222222222222222222222222222222222222222"
+	if code, got := tf.run("pre-push", refs+"\n", "origin", "url"); code != 0 || !strings.Contains(got, "trunk pre-push origin url") {
+		t.Errorf("pre-push exited %d after running:\n%s\nwant Trunk to run as pre-push", code, got)
+	}
+}
+
+// writeOldChain writes the managed hooks into dir with pre-push still on the
+// pre-sourcing chain, and backup as pre-push's saved hook.
+func writeOldChain(t *testing.T, dir, backup string) {
 	t.Helper()
 	for _, spec := range buildHookSpecs(bareEntireHookCmd) {
 		content := spec.content
-		if spec.name == hook {
+		if spec.name == prePushHook {
 			content = pre3051ChainedContent(spec.content, spec.name)
 		}
 		if err := os.WriteFile(filepath.Join(dir, spec.name), []byte(content), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(dir, hook+backupSuffix), []byte(backup), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, prePushHook+backupSuffix), []byte(backup), 0o755); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -546,7 +570,7 @@ func TestCheckGitHookState_TrunkChainOutdatedIsSpecific(t *testing.T) {
 	t.Run("ordinary backup", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
-		writeOldChain(t, dir, prePushHook, "#!/bin/sh\necho user hook\n")
+		writeOldChain(t, dir, "#!/bin/sh\necho user hook\n")
 		if got := gitHookStateInHooksDir(dir); got != GitHooksCurrent {
 			t.Errorf("old chain to a non-Trunk backup = %v, want GitHooksCurrent", got)
 		}
@@ -555,7 +579,7 @@ func TestCheckGitHookState_TrunkChainOutdatedIsSpecific(t *testing.T) {
 	t.Run("callback only in a comment", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
-		writeOldChain(t, dir, prePushHook, "#!/bin/sh\n# "+trunkHookCallback+"\n")
+		writeOldChain(t, dir, "#!/bin/sh\n# "+trunkHookCallback+"\n")
 		if got := gitHookStateInHooksDir(dir); got != GitHooksCurrent {
 			t.Errorf("backup that only mentions the callback in a comment = %v, want GitHooksCurrent", got)
 		}
@@ -584,22 +608,73 @@ func TestCheckGitHookState_TrunkChainOutdatedIsSpecific(t *testing.T) {
 	t.Run("grep chain with Trunk backup", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
-		writeGrepChain(t, dir, prePushHook, trunkHookLauncher)
+		writeGrepChain(t, dir, trunkHookLauncher)
 		if got := gitHookStateInHooksDir(dir); got != GitHooksOutdated {
 			t.Errorf("grep chain to a Trunk backup = %v, want GitHooksOutdated", got)
+		}
+	})
+
+	t.Run("grep chain edited by hand", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		writeGrepChain(t, dir, trunkHookLauncher)
+		hook := filepath.Join(dir, prePushHook)
+		data, err := os.ReadFile(hook)
+		if err != nil {
+			t.Fatal(err)
+		}
+		probe := grepTrunkProbe(prePushHook + backupSuffix)
+		edited := strings.Replace(string(data), probe, strings.Replace(probe, "grep -qxF", "grep -qF", 1), 1)
+		if edited == string(data) {
+			t.Fatal("grep chain does not contain the generated probe")
+		}
+		if err := os.WriteFile(hook, []byte(edited), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if got := gitHookStateInHooksDir(dir); got != GitHooksCurrent {
+			t.Errorf("grep chain the user edited = %v, want GitHooksCurrent", got)
 		}
 	})
 
 	t.Run("grep chain with ordinary backup", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
-		writeGrepChain(t, dir, prePushHook, "#!/bin/sh\necho user hook\n")
+		writeGrepChain(t, dir, "#!/bin/sh\necho user hook\n")
 		if got := gitHookStateInHooksDir(dir); got != GitHooksCurrent {
 			t.Errorf("grep chain to a non-Trunk backup = %v, want GitHooksCurrent", got)
 		}
 	})
 
-	t.Run("symlinked Trunk launcher", func(t *testing.T) {
+	t.Run("chain repaired by hand", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		writeOldChain(t, dir, trunkHookLauncher)
+		hook := filepath.Join(dir, prePushHook)
+		data, err := os.ReadFile(hook)
+		if err != nil {
+			t.Fatal(err)
+		}
+		backup := prePushHook + backupSuffix
+		// What a user might have written to get past #2673 before this fix:
+		// source the launcher with $0 set, no grep probe.
+		repaired := strings.Replace(string(data), preSourcingBackupCall(backup),
+			`    elif [ -x "$_entire_hook_dir/`+backup+`" ]; then
+        /bin/bash -c '. "$1"' "$_entire_hook_dir/`+prePushHook+`" "$_entire_hook_dir/`+backup+`" "$@"`, 1)
+		if repaired == string(data) {
+			t.Fatal("old chain does not contain the pre-sourcing backup call")
+		}
+		if err := os.WriteFile(hook, []byte(repaired), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if got := gitHookStateInHooksDir(dir); got != GitHooksCurrent {
+			t.Errorf("chain the user edited to source Trunk's launcher = %v, want GitHooksCurrent", got)
+		}
+	})
+
+	// The backup is not followed out of the hooks dir to read the launcher it
+	// links to: git hooks are not a symlink exception. That install picks up
+	// the sourcing chain on entire enable instead.
+	t.Run("symlinked Trunk launcher is not followed", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		launcher := filepath.Join(t.TempDir(), "launcher")
@@ -618,8 +693,8 @@ func TestCheckGitHookState_TrunkChainOutdatedIsSpecific(t *testing.T) {
 		if err := os.Symlink(launcher, filepath.Join(dir, prePushHook+backupSuffix)); err != nil {
 			t.Skipf("symlink not supported: %v", err)
 		}
-		if got := gitHookStateInHooksDir(dir); got != GitHooksOutdated {
-			t.Errorf("old chain to a symlinked Trunk launcher = %v, want GitHooksOutdated", got)
+		if got := gitHookStateInHooksDir(dir); got != GitHooksCurrent {
+			t.Errorf("old chain to a symlinked Trunk launcher = %v, want GitHooksCurrent", got)
 		}
 	})
 }
