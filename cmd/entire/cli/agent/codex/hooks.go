@@ -107,6 +107,13 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, force bool) (int, error) 
 	if err != nil {
 		return 0, err
 	}
+	return installHooksInto(ctx, cfg, func() error { return validateMutableHookTarget(worktreeHooks) }, force)
+}
+
+// installHooksInto merges Entire's managed hooks into cfg, preserving every
+// other hook and top-level key. revalidate re-checks the target immediately
+// before the write, after the read and merge.
+func installHooksInto(ctx context.Context, cfg *agent.HookConfigFile, revalidate func() error, force bool) (int, error) {
 	existingData, exists, err := readHooksFileForMutation(cfg)
 	if err != nil {
 		return 0, err
@@ -157,19 +164,23 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, force bool) (int, error) 
 	if exists {
 		_ = json.Unmarshal(existingData, &topLevel) //nolint:errcheck // parsed above
 	}
+	if topLevel == nil {
+		// A file holding JSON null decodes to a nil map.
+		topLevel = make(map[string]json.RawMessage)
+	}
 	hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
 	if err != nil {
 		return 0, fmt.Errorf("failed to marshal hooks: %w", err)
 	}
 	topLevel["hooks"] = hooksJSON
-	if err := validateMutableHookTarget(worktreeHooks); err != nil {
+	if err := revalidate(); err != nil {
 		return 0, err
 	}
 	output, err := jsonutil.MarshalIndentWithNewline(topLevel, "", "  ")
 	if err != nil {
 		return 0, fmt.Errorf("failed to marshal hooks.json: %w", err)
 	}
-	// Write creates .codex with MkdirAllNoSymlink, anchored on the worktree
+	// Write creates .codex with MkdirAllNoSymlink, anchored on the project
 	// root rather than on .codex itself.
 	if err := cfg.Write(output, 0o600); err != nil {
 		return 0, err //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
@@ -696,14 +707,44 @@ func hookCommandExists(groups []MatcherGroup, command string, timeoutSec int) bo
 	return false
 }
 
-// syncHookCommand ensures groups contains exactly the requested Entire hook and
-// removes stale commands left by an older install.
+// syncHookCommand ensures groups contains exactly one copy of the requested
+// Entire hook and removes stale commands left by an older install.
 func syncHookCommand(groups []MatcherGroup, command string, timeoutSec int) ([]MatcherGroup, bool) {
 	groups, dropped := dropStaleEntireHooks(groups, command, timeoutSec)
+	groups, deduped := dropDuplicateHook(groups, command)
 	if hookCommandExists(groups, command, timeoutSec) {
-		return groups, dropped
+		return groups, dropped || deduped
 	}
 	return addHook(groups, command, timeoutSec), true
+}
+
+// dropDuplicateHook keeps the first entry running command and removes the
+// rest; managedHookIsCurrent counts duplicates as drift.
+func dropDuplicateHook(groups []MatcherGroup, command string) ([]MatcherGroup, bool) {
+	seen := false
+	dropped := false
+	result := make([]MatcherGroup, 0, len(groups))
+	for _, group := range groups {
+		kept := make([]HookEntry, 0, len(group.Hooks))
+		for _, hook := range group.Hooks {
+			if hook.Command == command {
+				if seen {
+					dropped = true
+					continue
+				}
+				seen = true
+			}
+			kept = append(kept, hook)
+		}
+		if len(kept) > 0 {
+			group.Hooks = kept
+			result = append(result, group)
+		}
+	}
+	if !dropped {
+		return groups, false
+	}
+	return result, true
 }
 
 func dropStaleEntireHooks(groups []MatcherGroup, command string, timeoutSec int) ([]MatcherGroup, bool) {

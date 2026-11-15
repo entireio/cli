@@ -55,8 +55,35 @@ The checkout where a command runs is the write boundary because worktrees share
 Git objects, not working-tree state. Another checkout may be on a different
 branch or have uncommitted changes. `entire enable`, agent removal, and
 `entire clean` may update the current checkout because the user explicitly ran
-a mutating command there. They must not dirty another checkout. Doctor, status,
-SessionStart, and discovery never write hook configuration.
+a mutating command there. They must not dirty another checkout without consent
+(the one exception is below). Doctor, status, SessionStart, and discovery never
+write hook configuration.
+
+**Consent exception.** When `entire enable` or `entire agent add codex` has
+installed the current checkout's hooks and Codex discovers a different file
+that is absent, user-only, or carries outdated Entire hooks, setup asks
+(default No) whether to install Entire's hooks there too
+(`HookDiagnostics.DiscoveredInstallCandidate`, `InstallDiscoveredHooks`). Only
+an explicit yes writes, and only when the user can be asked: `--yes`, no TTY,
+CI, agent subprocesses, and any session `review.DetectAgentSession` recognizes
+never write, and print the remedy instead. The answer is read from the
+controlling terminal, never piped stdin (`ENTIRE_TEST_TTY=1` is the explicit
+test path). The write
+target is the root `resolveHookDiscovery` recorded from Git metadata on
+`DiscoveredHooksPath`, never `filepath.Dir` of the path; discovery is re-resolved
+right before the write and must still name the consented path. It merges into an
+existing file like the current-checkout install, keeping hook fields Entire does
+not model (`timeoutSec`, `async`, `statusMessage`, ...) and collapsing duplicate
+Entire hooks, refuses a malformed file, a
+symlinked `.codex`, or a symlinked `hooks.json`, and never follows vouched
+directories (those are keyed to the current checkout). Codex trust is keyed to
+the discovered path, so the user then approves the hooks in `/hooks`. Doctor,
+including `--force`, never performs this write; it only names the remedy.
+
+Removal stays current-checkout only: `entire disable` and agent removal never
+edit the discovered file. Leftover hooks there fail closed in checkouts where
+Entire is not enabled, and removal warns that the tracked file still carries
+them.
 
 `ResolveHookDiscovery` reuses the shared `.git` and `commondir` path resolvers,
 then applies Codex-specific checks for linked-worktree registration and hook
@@ -69,12 +96,11 @@ Git metadata is submodule-owned. If the Git metadata cannot be resolved or
 would point at a user-wide root, Entire reports discovery as unresolved rather
 than guessing.
 
-Discovery never supplies a mutation, migration, cleanup, or lock target. Entire
-does not create or rewrite another checkout's `.codex` directory, migrate a
-worktree-local file, or remove a discovered file owned elsewhere. Mutating
-commands continue to operate only on the current checkout's hook file and warn
-when Codex discovers a different path. Doctor, status, SessionStart, and
-discovery never write hook configuration.
+Discovery alone never supplies a mutation, migration, cleanup, or lock target;
+only a consented, re-resolved path does (see the consent exception above).
+Entire does not migrate a worktree-local file or remove a discovered file owned
+elsewhere. Doctor, status, SessionStart, and discovery never write hook
+configuration.
 
 Read-only inspection opens only the resolved `.codex` directory, rejects
 redirected or non-regular files, caps `hooks.json` at 1 MiB, reads one extra
@@ -88,10 +114,13 @@ the same structured mismatch in `codex_hooks`; SessionStart appends a bounded,
 read-only warning. Entire never computes or copies Codex trust hashes.
 
 When the two paths differ, status and doctor report that the current-worktree
-file is not active and identify the discovered project root. If that root is a
-normal Git checkout, the user can run `entire enable` there; in a `.bare`
-layout, the project root is not a worktree, so the generated `.codex/hooks.json`
-change must be applied there directly. Malformed or unavailable discovered files
+file is not active and identify the discovered project root. The remedy is to
+re-run `entire agent add codex` from a terminal in the worktree and answer yes.
+The alternatives: for a normal Git checkout, commit `.codex/hooks.json` and make
+sure that checkout has it; in a `.bare` layout, whose project root is not a
+worktree, apply the generated `.codex/hooks.json` change there directly. The
+remedy never suggests `cd <primary> && entire agent add codex`, which would
+enable Entire in the primary checkout. Malformed or unavailable discovered files
 take priority over local shadows. An unsupported layout remains
 `discovery_unresolved`.
 

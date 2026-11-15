@@ -11,22 +11,24 @@ func validateWorktreeHookTarget(hooks WorktreeHooksPath) (string, error) {
 	if hooks.worktreeRoot == "" || hooks.path == "" {
 		return "", errors.New("invalid empty worktree Codex hooks path")
 	}
-	rootInfo, err := os.Stat(hooks.worktreeRoot)
+	return validateProjectHookTarget(hooks.worktreeRoot, hooks.path, "worktree")
+}
+
+// validateProjectHookTarget checks that path is exactly root/.codex/hooks.json
+// for an existing root directory and returns the .codex directory path.
+func validateProjectHookTarget(root, path, kind string) (string, error) {
+	rootInfo, err := os.Stat(root)
 	if err != nil {
 		return "", fmt.Errorf("inspect Codex hooks checkout: %w", err)
 	}
 	if !rootInfo.IsDir() {
-		return "", fmt.Errorf("codex hooks checkout %q is not a directory", hooks.worktreeRoot)
+		return "", fmt.Errorf("codex hooks checkout %q is not a directory", root)
 	}
 
-	projectDir := filepath.Join(hooks.worktreeRoot, ".codex")
+	projectDir := filepath.Join(root, ".codex")
 	expectedPath := filepath.Join(projectDir, HooksFileName)
-	if hooks.path != expectedPath {
-		return "", fmt.Errorf(
-			"invalid worktree Codex hooks path %q: expected %q",
-			hooks.path,
-			expectedPath,
-		)
+	if path != expectedPath {
+		return "", fmt.Errorf("invalid %s Codex hooks path %q: expected %q", kind, path, expectedPath)
 	}
 	return projectDir, nil
 }
@@ -38,11 +40,29 @@ func validateMutableHookTarget(hooks WorktreeHooksPath) error {
 	if err != nil {
 		return err
 	}
+	return validateMutableHooksFile(projectDir, hooks.Path())
+}
+
+// validateMutableDiscoveredHookTarget applies the same checks to the
+// Codex-discovered file, using the root resolveHookDiscovery recorded rather
+// than one derived from the path. Only a consented install reaches it.
+func validateMutableDiscoveredHookTarget(hooks DiscoveredHooksPath) error {
+	if hooks.root == "" || hooks.path == "" {
+		return errors.New("invalid empty discovered Codex hooks path")
+	}
+	projectDir, err := validateProjectHookTarget(hooks.root, hooks.path, "Codex-discovered")
+	if err != nil {
+		return err
+	}
+	return validateMutableHooksFile(projectDir, hooks.path)
+}
+
+func validateMutableHooksFile(projectDir, hooksPath string) error {
 	if err := validateExistingProjectDir(projectDir); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 
-	info, err := os.Lstat(hooks.Path())
+	info, err := os.Lstat(hooksPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -50,7 +70,7 @@ func validateMutableHookTarget(hooks WorktreeHooksPath) error {
 		return fmt.Errorf("inspect Codex hooks file: %w", err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return fmt.Errorf("codex hooks path %q is not a regular file", hooks.Path())
+		return fmt.Errorf("codex hooks path %q is not a regular file", hooksPath)
 	}
 	return nil
 }
