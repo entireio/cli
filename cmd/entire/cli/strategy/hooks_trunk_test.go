@@ -533,6 +533,59 @@ func TestReinstallGitHooks_Pre3051TrunkChainIsOutdated(t *testing.T) {
 	}
 }
 
+// Lines the user added to Entire's own hook, before or after the chain, must
+// survive the upgrade: ReinstallGitHooks replaces only the outdated chain
+// block, since a hook carrying Entire's marker is otherwise rewritten without
+// a backup.
+func TestReinstallGitHooks_OutdatedTrunkChainKeepsUserLines(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		plant func(*testing.T, *trunkFixture)
+	}{
+		{"pre-sourcing chain", plantPre3051TrunkChain},
+		{"grep chain", plantGrepTrunkChain},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tf := newTrunkFixture(t, false, 0)
+			tc.plant(t, tf)
+			hook := filepath.Join(tf.dir, prePushHook)
+			data, err := os.ReadFile(hook)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := "echo user-before >> " + tf.log + "\n"
+			after := "echo user-after >> " + tf.log + "\n"
+			shebang, rest, _ := strings.Cut(string(data), "\n")
+			writeExec(t, hook, shebang+"\n"+before+rest+after)
+			tf.useAsGitHooks(t)
+
+			if got := CheckGitHookState(t.Context()); got != GitHooksOutdated {
+				t.Fatalf("CheckGitHookState = %s, want GitHooksOutdated", hookStateName(got))
+			}
+			if _, err := ReinstallGitHooks(t.Context()); err != nil {
+				t.Fatalf("ReinstallGitHooks: %v", err)
+			}
+			if got := CheckGitHookState(t.Context()); got != GitHooksCurrent {
+				t.Fatalf("after ReinstallGitHooks, CheckGitHookState = %s, want GitHooksCurrent", hookStateName(got))
+			}
+			data, err = os.ReadFile(hook)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range []string{before, after, chainCall(prePushHook, "")} {
+				if !strings.Contains(string(data), want) {
+					t.Fatalf("pre-push after ReinstallGitHooks lacks %q:\n%s", want, data)
+				}
+			}
+			const refs = "refs/heads/main 1111111111111111111111111111111111111111 refs/heads/main 2222222222222222222222222222222222222222"
+			code, got := tf.run("pre-push", refs+"\n", "origin", "url")
+			if code != 0 || !strings.Contains(got, "user-before") || !strings.Contains(got, "trunk pre-push origin url") || !strings.Contains(got, "user-after") {
+				t.Errorf("pre-push exited %d after running:\n%s\nwant the user's lines and Trunk as pre-push", code, got)
+			}
+		})
+	}
+}
+
 // An existing install that still identifies Trunk's launcher with grep -qxF
 // must read Outdated so ReinstallGitHooks rewrites it. After the rewrite,
 // pre-push reaches Trunk as pre-push even when grep is not on PATH.

@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -60,6 +59,10 @@ func ManagedGitHookNames() []string {
 type hookSpec struct {
 	name    string
 	content string
+	// outdatedTrunkChain, when set, is an earlier chain block in the installed
+	// hook and the only thing stale in it. installHooks then replaces just that
+	// block, so lines the user added to Entire's hook survive the upgrade.
+	outdatedTrunkChain string
 }
 
 // GetGitDir returns the actual git directory path by delegating to git itself.
@@ -461,8 +464,8 @@ const (
 	GitHooksCurrent
 	// GitHooksOutdated means the hooks are ours but at least one is a shape we no
 	// longer write: a hook that still runs Entire from the working tree, an old
-	// pre-push that does not pass git's ref list, or a chain that still executes
-	// Trunk's launcher under the backup's name.
+	// pre-push that does not pass git's ref list, or a chain to Trunk's launcher
+	// that still executes it under the backup's name or needs grep to avoid that.
 	GitHooksOutdated
 )
 
@@ -577,75 +580,105 @@ func gitHookStateInHooksDir(hooksDir string) GitHookState {
 // hookStateIn classifies one managed hook in root, as gitHookStateInHooksDir
 // does for the set.
 func hookStateIn(root *os.Root, hook string) GitHookState {
+	state, _ := classifyEntireHook(root, hook)
+	return state
+}
+
+// classifyEntireHook is hookStateIn, and also returns the outdated Trunk chain
+// block when that block is the only thing stale in the hook, so
+// ReinstallGitHooks can replace just the block.
+func classifyEntireHook(root *os.Root, hook string) (GitHookState, string) {
 	// NoFollow: a hook that is a symlink is not one Entire wrote, whatever is at
 	// the far end. Reporting Absent is what sends EnsureSetup to InstallGitHook,
 	// which backs the link up and chains to it.
 	data, err := osroot.ReadFileNoFollow(root, hook)
 	if err != nil {
-		return GitHooksAbsent
+		return GitHooksAbsent, ""
 	}
 	content := string(data)
 	if !strings.Contains(content, entireHookMarker) {
-		return GitHooksAbsent
+		return GitHooksAbsent, ""
 	}
 	if entireHookLineRunsFromWorkingTree(content) {
-		return GitHooksOutdated
+		return GitHooksOutdated, ""
 	}
 	if hook == prePushHook && isPrePushBeforeRefList(content) {
 		// Predates passing git's ref list to Entire.
-		return GitHooksOutdated
+		return GitHooksOutdated, ""
 	}
-	if isTrunkChainBeforeSourcing(root, hook, content) || isTrunkChainUsingGrep(root, hook, content) {
-		return GitHooksOutdated
+	if block := outdatedTrunkChain(root, hook, content); block != "" {
+		return GitHooksOutdated, block
 	}
-	return GitHooksCurrent
+	return GitHooksCurrent, ""
 }
 
-// isTrunkChainBeforeSourcing reports whether hook is Entire's chain from before
-// it sourced Trunk's launcher under the hook's own name. Those installs still
-// execute the launcher as <hook>.pre-entire, which Trunk refuses with exit 2,
-// aborting the commit or push.
+// outdatedTrunkChain returns the chain block in content that an earlier
+// version wrote and that runs Trunk's launcher wrongly, when <hook>.pre-entire
+// is Trunk's launcher; otherwise "". Those chains either execute the launcher
+// as <hook>.pre-entire, which Trunk refuses with exit 2, aborting the commit
+// or push, or need grep on PATH to avoid that.
 //
-// The check is Trunk-specific and only reads the backup for hooks that still
-// carry the old generated call. InstallGitHook rewrites a hook that carries
-// Entire's marker without a backup, so a chain that is not Trunk's, or one the
-// user changed by hand (say, to source the backup themselves), must not read
-// Outdated, or lines the user wrote would be discarded.
-func isTrunkChainBeforeSourcing(root *os.Root, hook, content string) bool {
-	if !strings.Contains(content, preSourcingBackupCall(hook+backupSuffix)) {
-		return false
+// The check is Trunk-specific and only reads the backup for a hook that holds
+// one of those blocks exactly as generated, once. A chain that is not Trunk's,
+// or one the user changed by hand (say, to source the backup themselves),
+// stays Current. Lines the user added outside the block are kept:
+// ReinstallGitHooks replaces only the block (see migrateTrunkChain).
+func outdatedTrunkChain(root *os.Root, hook, content string) string {
+	for _, block := range legacyTrunkChainCalls(hook) {
+		if strings.Count(content, block) != 1 {
+			continue
+		}
+		if backupHasTrunkCallback(root, hook) {
+			return block
+		}
+		return ""
 	}
-	return backupHasTrunkCallback(root, hook)
+	return ""
+}
+
+// legacyTrunkChainCalls are the chain blocks earlier versions wrote for hook.
+// They differ from chainCall only in the branch that runs the backup outside
+// pre-commit's legacy pass: the first executes the backup directly, the
+// second identifies Trunk's launcher with grep -qxF.
+func legacyTrunkChainCalls(hook string) []string {
+	redirect := chainRedirect(hook)
+	backup := hook + backupSuffix
+	return []string{
+		chainCallWith(hook, redirect, preSourcingBackupCall(backup)+redirect+"\n"),
+		chainCallWith(hook, redirect, regularExecutableBackup(backup)+grepTrunkProbe(backup)+"\n"+sourceOrRunBackup(hook, redirect)),
+	}
 }
 
 // preSourcingBackupCall is the branch chainCall wrote before it sourced
 // Trunk's launcher, exactly as generated: the elif that executes the backup
-// directly. Later chains test [ -f ] first and probe for Trunk's callback
-// between those two lines, so they never match.
+// directly, without its redirect.
 func preSourcingBackupCall(backup string) string {
 	return fmt.Sprintf("    elif [ -x \"$_entire_hook_dir/%[1]s\" ]; then\n        \"$_entire_hook_dir/%[1]s\" \"$@\"", backup)
-}
-
-// isTrunkChainUsingGrep reports whether hook is Entire's chain from when it
-// identified Trunk's launcher with grep -qxF. If grep is not on PATH, that
-// check fails and the chain executes the launcher as <hook>.pre-entire, which
-// Trunk refuses with exit 2.
-//
-// Like isTrunkChainBeforeSourcing, it matches the probe exactly as generated
-// and only then reads the backup, so a chain the user edited by hand, or one
-// whose backup is not Trunk's launcher, stays Current: InstallGitHook would
-// rewrite it without a backup and discard what the user wrote.
-func isTrunkChainUsingGrep(root *os.Root, hook, content string) bool {
-	if !strings.Contains(content, grepTrunkProbe(hook+backupSuffix)) {
-		return false
-	}
-	return backupHasTrunkCallback(root, hook)
 }
 
 // grepTrunkProbe is the line the grep-based chain used to identify Trunk's
 // launcher, exactly as generated.
 func grepTrunkProbe(backup string) string {
 	return "        if grep -qxF " + shellQuote(trunkHookCallback) + ` "$_entire_hook_dir/` + backup + `" 2>/dev/null; then`
+}
+
+// migrateTrunkChain returns the installed hook with spec's outdated Trunk
+// chain block replaced by the current chain, leaving every other line as it
+// is. It reports false when spec carries no such block or the hook no longer
+// holds it exactly once; installHooks then writes the hook it generates.
+func migrateTrunkChain(root *os.Root, spec hookSpec) (string, bool) {
+	if spec.outdatedTrunkChain == "" {
+		return "", false
+	}
+	data, err := osroot.ReadFileNoFollow(root, spec.name)
+	if err != nil {
+		return "", false
+	}
+	content := string(data)
+	if strings.Count(content, spec.outdatedTrunkChain) != 1 {
+		return "", false
+	}
+	return strings.Replace(content, spec.outdatedTrunkChain, chainCall(spec.name, chainRedirect(spec.name)), 1), true
 }
 
 // maxTrunkCallbackBackup is well above Trunk's launcher (about 1.5KiB) and
@@ -974,9 +1007,7 @@ func installGitHooks(ctx context.Context, silent, absolutePath, onlyStale bool) 
 
 	specs := buildHookSpecs(cmdPrefix)
 	if onlyStale {
-		specs = slices.DeleteFunc(specs, func(spec hookSpec) bool {
-			return hookStateIn(root, spec.name) == GitHooksCurrent
-		})
+		specs = staleHookSpecs(root, specs)
 	}
 	installedCount, err := installHooks(ctx, lockRoot, root, hooksDir, specs, time.Now())
 	if err != nil {
@@ -998,6 +1029,22 @@ func installGitHooks(ctx context.Context, silent, absolutePath, onlyStale bool) 
 // directory before the lock existed, so a lock that cannot be used at all (nil
 // lockRoot, or a lock file that will not open) is warned about and skipped, as
 // in removeHooks. A lock another Entire process HOLDS still stops it.
+// staleHookSpecs keeps the specs whose installed hooks are not Current. A
+// hook that is stale only through an outdated Trunk chain keeps the rest of
+// its file: its spec carries the chain block, which installHooks replaces.
+func staleHookSpecs(root *os.Root, specs []hookSpec) []hookSpec {
+	stale := make([]hookSpec, 0, len(specs))
+	for _, spec := range specs {
+		state, block := classifyEntireHook(root, spec.name)
+		if state == GitHooksCurrent {
+			continue
+		}
+		spec.outdatedTrunkChain = block
+		stale = append(stale, spec)
+	}
+	return stale
+}
+
 func installHooks(ctx context.Context, lockRoot, root *os.Root, hooksDir string, specs []hookSpec, now time.Time) (int, error) {
 	release, err := acquireHooksLock(ctx, lockRoot, hooksDir)
 	switch {
@@ -1080,6 +1127,9 @@ func installHooks(ctx context.Context, lockRoot, root *os.Root, hooksDir string,
 		content := spec.content
 		if hookFileExists(root, backupName) && !carriesEntireMarker(root, backupName) {
 			content = generateChainedContent(spec.content, spec.name)
+		}
+		if migrated, ok := migrateTrunkChain(root, spec); ok {
+			content = migrated
 		}
 
 		afterHookBackup(spec.name)
@@ -1294,6 +1344,30 @@ func generateChainedContent(baseContent, hookName string) string {
 // or otherwise large backup is not read to EOF before it runs.
 func chainCall(hookName, redirect string) string {
 	backup := hookName + backupSuffix
+	return chainCallWith(hookName, redirect, regularExecutableBackup(backup)+`        if /bin/bash --norc -c 'LC_ALL=C IFS= read -r -d "" -n 65536 _entire_data < "$1" || true
+            _entire_nl="
+"
+            if [ "${#_entire_data}" -eq 65536 ]; then
+                case "$_entire_data" in
+                *"$_entire_nl") ;;
+                *"$_entire_nl"*) _entire_data="${_entire_data%"$_entire_nl"*}" ;;
+                *) exit 1 ;;
+                esac
+            fi
+            while IFS= read -r _entire_line || [ -n "$_entire_line" ]; do
+                if [ "$_entire_line" = "$2" ]; then
+                    exit 0
+                fi
+            done <<< "$_entire_data"
+            exit 1' bash "$_entire_hook_dir/`+backup+`" `+shellQuote(trunkHookCallback)+`; then
+`+sourceOrRunBackup(hookName, redirect))
+}
+
+// chainCallWith is the chain block with branch as the elif that runs the
+// backup outside pre-commit's legacy pass. Earlier versions differ from
+// chainCall only in that branch; see legacyTrunkChainCalls.
+func chainCallWith(hookName, redirect, branch string) string {
+	backup := hookName + backupSuffix
 	keep := hookName + keepSuffix
 	guard := "ENTIRE_CHAINING_" + strings.ToUpper(strings.ReplaceAll(hookName, "-", "_"))
 	return fmt.Sprintf(`%s
@@ -1305,31 +1379,27 @@ if [ -z "${%s:-}" ]; then
         if [ -x "$_entire_hook_dir/%s" ]; then
             "$_entire_hook_dir/%s" "$@"%s
         fi
-    elif [ -f "$_entire_hook_dir/%s" ] && [ -x "$_entire_hook_dir/%s" ]; then
-        if /bin/bash --norc -c 'LC_ALL=C IFS= read -r -d "" -n 65536 _entire_data < "$1" || true
-            _entire_nl="
-"
-            if [ "${#_entire_data}" -eq 65536 ]; then
-                case "$_entire_data" in
-                *"$_entire_nl") ;;
-                *"$_entire_nl"*) _entire_data="${_entire_data%%"$_entire_nl"*}" ;;
-                *) exit 1 ;;
-                esac
-            fi
-            while IFS= read -r _entire_line || [ -n "$_entire_line" ]; do
-                if [ "$_entire_line" = "$2" ]; then
-                    exit 0
-                fi
-            done <<< "$_entire_data"
-            exit 1' bash "$_entire_hook_dir/%s" %s; then
-            /bin/bash --norc -c '_entire_saved_hook=$1; shift; . "$_entire_saved_hook"' "$_entire_hook_dir/%s" "$_entire_hook_dir/%s" "$@"%s
+%s    fi
+fi
+`, chainComment, guard, guard, guard, preCommitSignatures[0], backup, keep, keep, redirect, branch)
+}
+
+// regularExecutableBackup opens the branch that runs the backup, entered only
+// for a regular executable file, so an executable FIFO cannot hang the hook.
+func regularExecutableBackup(backup string) string {
+	return fmt.Sprintf("    elif [ -f \"$_entire_hook_dir/%[1]s\" ] && [ -x \"$_entire_hook_dir/%[1]s\" ]; then\n", backup)
+}
+
+// sourceOrRunBackup closes the branch that runs the backup: Trunk's launcher
+// is sourced under the hook's own name, and any other backup runs as its own
+// program.
+func sourceOrRunBackup(hookName, redirect string) string {
+	backup := hookName + backupSuffix
+	return fmt.Sprintf(`            /bin/bash --norc -c '_entire_saved_hook=$1; shift; . "$_entire_saved_hook"' "$_entire_hook_dir/%s" "$_entire_hook_dir/%s" "$@"%s
         else
             "$_entire_hook_dir/%s" "$@"%s
         fi
-    fi
-fi
-`, chainComment, guard, guard, guard, preCommitSignatures[0], backup, keep, keep, redirect,
-		backup, backup, backup, shellQuote(trunkHookCallback), hookName, backup, redirect, backup, redirect)
+`, hookName, backup, redirect, backup, redirect)
 }
 
 // trunkHookCallback is the last line of the launcher Trunk writes for every git
@@ -1349,6 +1419,15 @@ fi
 // language or depend on its own path, so it is executed as before.
 const trunkHookCallback = `TRUNK_LAUNCHER_QUIET=true "${trunk}" git-hooks callback "${0##*/}" -- "$@"`
 
+// chainRedirect is what hook's chain feeds the backup on stdin: post-rewrite
+// replays the stdin it saved, and every other hook passes its own through.
+func chainRedirect(hook string) string {
+	if hook == postRewriteHook {
+		return ` < "$_entire_stdin"`
+	}
+	return ""
+}
+
 func generatePostRewriteChainedContent(baseContent string) string {
 	const original = `hooks git post-rewrite "$1" 2>/dev/null || true`
 	const replacement = `hooks git post-rewrite "$1" < "$_entire_stdin" 2>/dev/null || true`
@@ -1362,7 +1441,7 @@ trap 'rm -f "$_entire_stdin"' EXIT
 	body := strings.TrimPrefix(baseContent, "#!/bin/sh\n")
 	body = strings.Replace(body, original, replacement, 1)
 
-	return replayPrefix + body + "\n" + chainCall(postRewriteHook, ` < "$_entire_stdin"`)
+	return replayPrefix + body + "\n" + chainCall(postRewriteHook, chainRedirect(postRewriteHook))
 }
 
 // PrePushStdinRefsEnv, set to 1, tells `entire hooks git pre-push` to read the
