@@ -528,7 +528,7 @@ func TestExplainCmd_RepoFlagValidation(t *testing.T) {
 			root.SetArgs(tc.args)
 			root.SetOut(io.Discard)
 			root.SetErr(io.Discard)
-			err := root.Execute()
+			err := root.ExecuteContext(explainEnabledContext(t))
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.wantErr)
 		})
