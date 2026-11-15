@@ -8,6 +8,7 @@ import (
 	"maps"
 	"os"
 	"slices"
+	"strings"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -134,12 +135,14 @@ func stampedByAnotherCommit(ctx context.Context, checkpointID id.CheckpointID, s
 // would have restored it for: `commit --amend -C <other>` keeps another
 // commit's trailer, and its owner was never linked to this one. A message
 // reused with `commit -C` keeps a trailer the same way but advances HEAD: it
-// makes a new link. With no reflog entry for this commit to tell them apart
-// (core.logAllRefUpdates=false), or only one whose old HEAD is unknown (a
-// reftable reflog whose older entries expired), it is taken as an amend, so the
-// owner keeps condensing into its checkpoint as it did before the idle check.
-// Judged a new link instead, the owner would be dropped, and the amend's work
-// would never reach the checkpoint its trailer names.
+// makes a new link. When this commit's entry has no old HEAD (a reftable
+// reflog whose older entries expired), the message `git commit` wrote for it
+// decides. With no reflog entry for this commit to tell them apart
+// (core.logAllRefUpdates=false), or only one another command wrote, it is
+// taken as an amend, so the owner keeps condensing into its checkpoint as it
+// did before the idle check. Judged a new link instead, the owner would be
+// dropped, and the amend's work would never reach the checkpoint its trailer
+// names.
 func (s *ManualCommitStrategy) amendedCheckpoint(ctx context.Context, repo *git.Repository, commit *object.Commit, checkpointID id.CheckpointID, preexisting bool) amendedLink {
 	if !preexisting {
 		return amendedLink{}
@@ -151,8 +154,11 @@ func (s *ManualCommitStrategy) amendedCheckpoint(ctx context.Context, repo *git.
 			continue
 		}
 		if e.oldUnknown {
-			// Nothing shows where HEAD was before it (headReflogFromGit):
-			// taken as an amend, as with no entry for this commit.
+			// Nothing shows where HEAD was before it (headReflogFromGit), so
+			// only git's message for the entry tells them apart.
+			if newCommitReflogMessage(e.msg) {
+				return amendedLink{}
+			}
 			return amendedLink{checkpointID: checkpointID}
 		}
 		if e.oldHash.IsZero() || slices.ContainsFunc(commit.ParentHashes, e.oldHash.Equal) {
@@ -165,6 +171,17 @@ func (s *ManualCommitStrategy) amendedCheckpoint(ctx context.Context, repo *git.
 		return link
 	}
 	return amendedLink{checkpointID: checkpointID}
+}
+
+// newCommitReflogMessage reports whether msg is the reflog message `git commit`
+// writes for a commit that advances HEAD: "commit: <subject>", or with a reason
+// such as "commit (initial): ". An amend's is "commit (amend): ", and other
+// commands write their own ("rebase (pick): ", "cherry-pick: ").
+func newCommitReflogMessage(msg string) bool {
+	if strings.HasPrefix(msg, "commit: ") {
+		return true
+	}
+	return strings.HasPrefix(msg, "commit (") && !strings.HasPrefix(msg, "commit (amend)")
 }
 
 // commitLinksCheckpoint reports whether the commit at hash links checkpointID:

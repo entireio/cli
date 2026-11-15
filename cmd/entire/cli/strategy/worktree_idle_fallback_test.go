@@ -267,9 +267,9 @@ func TestPostRewrite_StillRemapsAnIdleSiblingSession(t *testing.T) {
 // restores for a session based on that commit does link it, as does one the
 // checkpoint records the amended commit for (moved out of its final trailer
 // block, then put back by the amend). Without a reflog to tell an amend from
-// a new commit, the owner is kept, as it was before the idle check, and so it
-// is when git lists the amend's entry with no older one to read its old HEAD
-// from. A commit started while the amend's post-commit runs can land between
+// a new commit, the owner is kept, as it was before the idle check. When git
+// lists the commit's entry with no older one to read its old HEAD from, git's
+// message for it still tells an amend from `commit -C`. A commit started while the amend's post-commit runs can land between
 // post-commit reading HEAD and reading HEAD's reflog: its entry is then the
 // newest, and the amend is still told by its own entry.
 func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
@@ -307,6 +307,7 @@ func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
 		{name: "commit -C, then another commit lands before post-commit reads the reflog", laterCommit: true, condensed: false},
 		{name: "amend with no reflog entry of its own", commitArgs: []string{"--amend"}, editReflog: dropNewestReflogEntry, condensed: true},
 		{name: "amend whose reflog entry has no older one to read its old HEAD from", commitArgs: []string{"--amend"}, editReflog: expireReflogBeforeNewest, condensed: true},
+		{name: "commit -C whose reflog entry has no older one to read its old HEAD from", editReflog: expireReflogBeforeNewest, condensed: false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
