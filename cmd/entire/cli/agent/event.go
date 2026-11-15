@@ -228,7 +228,8 @@ type Event struct {
 	DeletedFiles []string
 
 	// CWD is the working directory the agent was running in when the event fired.
-	// Set on ToolUse so cwd-relative payload paths can be resolved before
+	// Set on ToolUse, and on TurnEnd and SubagentEnd by agents whose transcripts
+	// name files relative to it, so cwd-relative paths can be resolved before
 	// repo-root normalization.
 	CWD string
 
