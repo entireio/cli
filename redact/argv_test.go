@@ -174,6 +174,31 @@ func TestJSONLBytes_SelfDetectedArgvPasswordDoesNotRewriteSkippedFields(t *testi
 	}
 }
 
+// A password a credential field flags on its own is hidden in object keys as
+// well, even when another copy of it is found only through an argument
+// vector. The walk visits object members in random order, so each line runs
+// many times: the first copy reached used to set the scope for every copy.
+func TestJSONLBytes_SelfDetectedCopyWidensArgvPasswordScope(t *testing.T) {
+	t.Parallel()
+	cases := []struct{ in, want string }{
+		{`{"db_password":["hunter2"],"command":["wget","--password","hunter2"],"hunter2":"x"}`, `{"db_password":["REDACTED"],"command":["wget","--password","REDACTED"],"REDACTED":"x"}`},
+		{`{"hunter2":"x","command":["wget","--password","hunter2"],"db_password":["hunter2"]}`, `{"REDACTED":"x","command":["wget","--password","REDACTED"],"db_password":["REDACTED"]}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			t.Parallel()
+			for range 200 {
+				got, err := JSONLBytes([]byte(tc.in + "\n"))
+				require.NoError(t, err)
+				require.Equal(t, tc.want+"\n", string(got.Bytes()))
+				content, err := JSONLContent(tc.in)
+				require.NoError(t, err)
+				require.Equal(t, tc.want, content)
+			}
+		})
+	}
+}
+
 // Renaming self-detected secret keys in the structural fallback keeps every
 // member of the object: a renamed key that meets a REDACTED key already
 // there, or another renamed one, is numbered, and the count matches the

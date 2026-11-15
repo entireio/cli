@@ -2367,12 +2367,20 @@ func collectJSONLReplacements(v any, redactor leafRedactor) []jsonReplacement {
 			if i, ok := seen[k]; !ok {
 				seen[k] = len(repls)
 				repls = append(repls, repl)
-			} else if hidesMore(redacted, repls[i].redacted) {
-				// The same text can redact differently under another key: an
-				// address under a network key, a password under a credential
-				// key. The splice writes one result into every copy, so keep
-				// the one that hides more.
-				repls[i] = repl
+			} else {
+				// One copy's own detectors can flag text that another copy
+				// hides only through an argument vector. The splice writes
+				// one replacement for every copy, so it keeps the wider
+				// scope, whichever copy the walk reaches first.
+				valuesOnly := repls[i].valuesOnly && repl.valuesOnly
+				argv := repls[i].argv || repl.argv
+				if hidesMore(redacted, repls[i].redacted) {
+					// The same text can redact differently under another
+					// key: an address under a network key, a password under
+					// a credential key. Keep the result that hides more.
+					repls[i] = repl
+				}
+				repls[i].valuesOnly, repls[i].argv = valuesOnly, argv
 			}
 		}
 		// Collection only. The fast path splices the raw text, so the tree is
