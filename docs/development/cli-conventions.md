@@ -240,7 +240,8 @@ always runnable in every build.
   server-side does — and hidden or decommissioned clusters never reach it.
 - `org`: control-plane organization management — `create`, `list`, `get`, `delete`,
   plus `grant` (`add`/`list`/`remove`): org membership for a `provider:handle`
-  grantee, roles owner/admin/member (default member)
+  grantee, roles owner/admin/member (default member); `add` invites an account
+  that is not a member yet (see the grant-subtree notes below)
 - `project`: control-plane project management — `create`, `list`, `get`, `delete`,
   plus `agent` (`list`/`add`): the project's review agents, configured in
   entire-api rather than repository files (they replaced the trail runners).
@@ -727,6 +728,20 @@ always runnable in every build.
   row was a possible silent role change — `grant add` **upserts**, which is why
   a direct holder has nothing to add and why changing a role is the typed form's
   job.
+
+  **An add can invite instead of grant** (ENT-2652). Core grants directly only
+  to an account already inside the parent scope (an active member of the
+  owning org, or a project grant for a repo); any other account, and on
+  `org grant add` every non-member, gets an invitation it must accept. All
+  three adds send `allow_invitation: true`, so Core answers 202 with
+  `AccountInvited` rather than refusing with the `invitation/required` 409.
+  The text line then says `Invited … No access until they accept` with the
+  invitation id and expiry, and `--json` emits the 202 body (`status:
+  "invited"`, `invitation_id`, `expires_at`) where a grant emits its 201 body.
+  An invitation is a success for the exit code; a picker run ends with a
+  `N granted, N invited` tally that says so. Refusals (open invitation with
+  another role, SSO-only org, invitation mail cooldown, already a member) are
+  Core's problem `detail`, prefixed with the grantee in a picker run.
 
   **`org grant add` has no picker** (`candidates` is nil, which also keeps it at
   two required args): everyone eligible is by definition absent from the only

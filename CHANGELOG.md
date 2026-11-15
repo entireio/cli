@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- `entire org grant add`, `entire project grant add` and `entire repo grant add` handle invitations. Once Core requires consent, an account outside the organization (or, for a project or repo, outside its organization and project) is invited instead of granted: the command prints `✓ Invited … No access until they accept` with the invitation ID and expiry date, and `--json` prints `{"status":"invited","invitation_id":…,"expires_at":…}`. An invitation counts as success for the exit code, and a run that adds several grantees ends with a count of how many were granted and how many invited. Older CLI versions get an error for such an account once Core ships the change, so upgrade to add people from outside the organization (ENT-2652)
+
 ## [0.13.4] - 2026-11-13
 
 ### Added
