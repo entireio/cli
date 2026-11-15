@@ -69,7 +69,8 @@ type UsageCounter interface {
 	// Reset forgets what was read from path: it is read again from its start.
 	Reset(path string)
 	// Totals returns the main agent's total and each child's (Codex reads its
-	// children from the subagent inventory here).
+	// children from the subagent inventory here). It runs before the counter
+	// is saved, so what it keeps for the next reading is saved with it.
 	Totals(ctx context.Context, in CumulativeTokenInput) (total *TokenUsage, children map[string]*TokenUsage)
 }
 
@@ -179,6 +180,9 @@ func ReadCumulativeUsage(ctx context.Context, ag Agent, in CumulativeTokenInput,
 		}
 	}
 
+	// Totals runs before the counter is saved: it can keep what it read for
+	// the next reading (Codex's child totals).
+	obs.Total, obs.Children = counter.Totals(ctx, in)
 	state, err := json.Marshal(counter)
 	if err != nil {
 		return CumulativeObservation{}, true, fmt.Errorf("encode token counter: %w", err)
@@ -187,7 +191,6 @@ func ReadCumulativeUsage(ctx context.Context, ag Agent, in CumulativeTokenInput,
 	if err != nil {
 		return CumulativeObservation{}, true, fmt.Errorf("encode token cursor: %w", err)
 	}
-	obs.Total, obs.Children = counter.Totals(ctx, in)
 	obs.Cursor = next
 	return obs, true, nil
 }
