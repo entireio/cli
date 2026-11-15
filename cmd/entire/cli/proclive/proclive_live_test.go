@@ -5,6 +5,7 @@ package proclive
 import (
 	"os"
 	"os/exec"
+	"runtime"
 	"testing"
 )
 
@@ -104,6 +105,9 @@ func TestResolveOwner_ReturnsSomething(t *testing.T) {
 	}
 	if id.PID <= 0 {
 		t.Errorf("resolved PID = %d, want > 0", id.PID)
+	}
+	if id.OS != runtime.GOOS {
+		t.Errorf("resolved OS = %q, want %q", id.OS, runtime.GOOS)
 	}
 	if got := Check(id); got != LivenessAlive {
 		t.Errorf("resolved owner Check = %v, want alive", got)
