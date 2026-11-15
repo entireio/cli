@@ -444,6 +444,43 @@ func TestRunExplainAuto_CommitRefWithCheckpointTrailer(t *testing.T) {
 	require.Contains(t, out.String(), cpID.String(), "expected checkpoint header resolved via trailer")
 }
 
+// A checkpoint written without a transcript (the transcript could not be read
+// at commit, so condensation stored files and prompts only) is still
+// explained, from its metadata and prompts.
+func TestRunExplainAuto_CheckpointWithoutTranscript(t *testing.T) {
+	repo, _ := runExplainAutoTestRepo(t)
+	ctx := context.Background()
+
+	cpID := id.MustCheckpointID("cafe0000beef")
+	require.NoError(t, checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()).Write(ctx, checkpoint.Session{
+		CheckpointID: cpID,
+		SessionID:    "session-no-transcript",
+		Strategy:     "manual-commit",
+		Agent:        agent.AgentTypeOpenCode,
+		Prompts:      []string{"Create hello.txt and commit it"},
+		FilesTouched: []string{"hello.txt"},
+		AuthorName:   "Test",
+		AuthorEmail:  "test@example.com",
+	}))
+
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(wt.Filesystem().Root(), "hello.txt"), []byte("hello"), 0o644))
+	_, err = wt.Add("hello.txt")
+	require.NoError(t, err)
+	commitHash, err := wt.Commit(trailers.AppendCheckpointTrailer("Add hello", cpID.String()), &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	var out, errOut bytes.Buffer
+	err = runExplainAuto(ctx, &out, &errOut, commitHash.String(), true, false, false, false, false, false, false, 0)
+	require.NoError(t, err, errOut.String())
+	require.Contains(t, out.String(), cpID.String())
+	require.Contains(t, out.String(), "Create hello.txt and commit it")
+	require.Contains(t, out.String(), "hello.txt")
+}
+
 // --generate writes a summary into the checkpoint it resolves, so a checkpoint
 // ID mentioned only in the commit body must not reach it. git log still shows
 // that line, so the error names it.
