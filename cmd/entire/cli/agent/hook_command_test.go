@@ -76,31 +76,6 @@ func TestWrapProductionPlainTextWarningHookCommand(t *testing.T) {
 	}
 }
 
-func TestWrapWindowsProductionJSONWarningHookCommand(t *testing.T) {
-	t.Parallel()
-
-	command := WrapWindowsProductionJSONWarningHookCommand("entire hooks codex session-start", WarningFormatSingleLine)
-
-	if command == "entire hooks codex session-start" {
-		t.Fatal("expected wrapped command, got raw command")
-	}
-	if strings.Contains(command, "sh -c") {
-		t.Fatalf("windows wrapper should not use sh, got %q", command)
-	}
-	if strings.HasPrefix(command, "cmd.exe ") {
-		t.Fatalf("windows JSON wrapper should use Codex's existing cmd.exe shell, got %q", command)
-	}
-	if !strings.Contains(command, "where.exe entire") {
-		t.Fatalf("windows wrapper missing PATH guard, got %q", command)
-	}
-	if !strings.Contains(command, "^\"systemMessage^\"") {
-		t.Fatalf("windows wrapper missing escaped systemMessage JSON, got %q", command)
-	}
-	if !strings.Contains(command, "entire hooks codex session-start") {
-		t.Fatalf("windows wrapper missing hook target, got %q", command)
-	}
-}
-
 func TestWrapWindowsProductionSilentHookCommand(t *testing.T) {
 	t.Parallel()
 
@@ -188,8 +163,10 @@ func TestIsManagedHookCommand_WrappedPrefix(t *testing.T) {
 	if !IsManagedHookCommand(WrapWindowsProductionSilentHookCommand("entire hooks codex stop")) {
 		t.Fatal("expected windows wrapped silent command to match")
 	}
-	if !IsManagedHookCommand(WrapWindowsProductionJSONWarningHookCommand("entire hooks codex session-start", WarningFormatSingleLine)) {
-		t.Fatal("expected windows wrapped json warning command to match")
+	// The direct JSON-warning form Codex's SessionStart got on Windows before it
+	// moved to the silent nested form; installs must still replace it.
+	if !IsManagedHookCommand(`set NoDefaultCurrentDirectoryInExePath=1& pushd %SystemRoot%& where.exe entire >nul 2>nul & if errorlevel 1 (popd& echo {^"systemMessage^":^"Entire CLI is enabled but not installed or not on PATH.^"}) else (popd& entire hooks codex session-start)`) {
+		t.Fatal("expected the earlier windows json warning command to match")
 	}
 	nestedWindowsWrapper := `cmd.exe /d /s /c "where.exe entire >nul 2>nul & if errorlevel 1 (ver>nul) else (entire hooks codex stop)"`
 	if !IsManagedHookCommand(nestedWindowsWrapper) {
@@ -436,9 +413,6 @@ func TestWindowsWrappers_ExactForms(t *testing.T) {
 			t.Errorf("%s:\n got %q\nwant %q", tc.name, tc.got, tc.want)
 		}
 	}
-	if json := WrapWindowsProductionJSONWarningHookCommand(hook, WarningFormatSingleLine); !strings.HasPrefix(json, body+`(popd& echo {^"systemMessage^":`) {
-		t.Errorf("JSON warning wrapper must start with the path-only body, got %q", json)
-	}
 }
 
 func TestWrapProductionSilentHookCommandForCmdHostOS(t *testing.T) {
@@ -468,6 +442,7 @@ func TestIsManagedHookCommand_WindowsWrapperMigration(t *testing.T) {
 		`cmd.exe /d /s /c "set NoDefaultCurrentDirectoryInExePath=1& where.exe entire >nul 2>nul & if errorlevel 1 (ver>nul) else (entire hooks codex stop)"`,
 		`%SystemRoot%\System32\cmd.exe /d /s /c "set NoDefaultCurrentDirectoryInExePath=1& where.exe entire >nul 2>nul & if errorlevel 1 (ver>nul) else (entire hooks codex stop)"`,
 		`set NoDefaultCurrentDirectoryInExePath=1& where.exe entire >nul 2>nul & if errorlevel 1 (ver>nul) else (entire hooks codex stop)`,
+		`set NoDefaultCurrentDirectoryInExePath=1& pushd %SystemRoot%& where.exe entire >nul 2>nul & if errorlevel 1 (popd& echo {^"systemMessage^":^"Entire CLI is enabled but not installed or not on PATH.^"}) else (popd& entire hooks codex stop)`,
 	}
 	// Shapes no version writes yet, but a later one might: an extra setup
 	// segment, a full-path launcher, an extra branch segment. Matching by
@@ -486,7 +461,6 @@ func TestIsManagedHookCommand_WindowsWrapperMigration(t *testing.T) {
 		WrapWindowsProductionSilentHookCommand(hook),
 		WrapWindowsProductionSilentHookCommandForCmdHost(hook),
 		WrapWindowsProductionSilentHookCommandDirect(hook),
-		WrapWindowsProductionJSONWarningHookCommand(hook, WarningFormatSingleLine),
 		WrapWindowsProductionPlainTextWarningHookCommand(hook, WarningFormatSingleLine),
 	}
 	id := func(s string) string { return s }
