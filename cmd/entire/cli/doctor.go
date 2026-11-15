@@ -708,11 +708,13 @@ func checkGitHooks(cmd *cobra.Command, force bool) error {
 		// Actionable whatever the settings say: a hook carrying Entire's marker
 		// means this repo opted in at some point. A working-tree launcher can
 		// reject `git push`; an old pre-push hook still works but does not pass
-		// git's ref list.
+		// git's ref list; a moved copy that chains without the guard recurses.
 		fmt.Fprintln(w, "Git hooks: OUT OF DATE")
 		fmt.Fprintln(w, "  A hook is in a shape this version replaces. Either it runs Entire from the")
 		fmt.Fprintln(w, "  working tree, which can reject `git push` once that path is gone, or it is a")
-		fmt.Fprintln(w, "  pre-push hook from before Entire read the refs `git push` sends.")
+		fmt.Fprintln(w, "  pre-push hook from before Entire read the refs `git push` sends. Or it is a")
+		fmt.Fprintln(w, "  copy of Entire's hook that another hook manager moved aside, whose old chain")
+		fmt.Fprintln(w, "  back to that manager's hook can keep `git commit` or `git push` from finishing.")
 	}
 	fmt.Fprintln(w, "  Fix: reinstall the missing or out-of-date git hooks (any non-Entire hook is backed up).")
 

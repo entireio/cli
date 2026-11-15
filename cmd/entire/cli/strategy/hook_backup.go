@@ -576,8 +576,15 @@ func isFileNameByte(b byte) bool {
 // It also repairs what earlier releases left when Entire already chains to
 // the wrapper: the moved copy is Entire's hook again, run a second time. The
 // user's hook those releases rotated away cannot be told from any other older
-// copy, so it stays where it is. Reports the moved copies it changed.
-func reclaimFromWrappers(root *os.Root, hook string) (wrapperReclaim, error) {
+// copy, so it stays where it is. With staleOnly, which the per-turn reinstall
+// passes for a hook that is current, it takes back only stale copies: the
+// install runs because of them, and a current copy may hold lines the user
+// added. Reports the moved copies it changed.
+func reclaimFromWrappers(root *os.Root, hook string, staleOnly bool) (wrapperReclaim, error) {
+	// The caller decided staleOnly before taking the lock, which a hook manager
+	// does not take. If one has since moved Entire's hook aside and put its
+	// wrapper in the hook's place, every moved copy is that manager's again.
+	staleOnly = staleOnly && ownHookStateIn(root, hook) == GitHooksCurrent
 	var reclaimed wrapperReclaim
 	moved, err := movedHookCopies(root, hook)
 	if err != nil {
@@ -589,6 +596,9 @@ func reclaimFromWrappers(root *os.Root, hook string) (wrapperReclaim, error) {
 			if err := refreshKeepCopy(root, m); err != nil {
 				return reclaimed, err
 			}
+			continue
+		}
+		if staleOnly && !isStaleMovedEntireHook(root, hook, m) {
 			continue
 		}
 		var userHookInBackup bool
@@ -661,20 +671,22 @@ func olderCopiesOf(root *os.Root, hook string) []string {
 // than the backup and its older copies) to content, which never chains. A
 // manager's wrapper that runs such a copy becomes Entire's backup on the next
 // install, and a copy written before the chain guard existed chains straight
-// back to that backup, so commits would recurse forever. It reports the names
-// it rewrote.
-func refreshMovedEntireHooks(root *os.Root, hook, content string) ([]string, error) {
+// back to that backup, so commits would recurse forever. With staleOnly it
+// rewrites only copies in a shape this version replaces (movedEntireHookOutdated)
+// and leaves current ones, which may hold lines the user added, as they are. It
+// reports the names it rewrote.
+func refreshMovedEntireHooks(root *os.Root, hook, content string, staleOnly bool) ([]string, error) {
 	names, err := hookDirNames(root)
 	if err != nil {
 		return nil, err
 	}
-	backup := hook + backupSuffix
 	var rewritten []string
 	for _, n := range names {
-		if !strings.HasPrefix(n, hook+".") || n == backup || strings.HasPrefix(n, backup+".") {
+		if !isMovedHookName(n, hook) {
 			continue
 		}
-		if !carriesEntireMarker(root, n) {
+		ours, stale := movedEntireHook(root, hook, n)
+		if !ours || staleOnly && !stale {
 			continue
 		}
 		written, err := writeHookFile(root, n, content)
@@ -686,6 +698,87 @@ func refreshMovedEntireHooks(root *os.Root, hook, content string) ([]string, err
 		}
 	}
 	return rewritten, nil
+}
+
+// isMovedHookName: n is a name refreshMovedEntireHooks looks at for hook,
+// <hook>.<suffix> other than the backup and its older copies.
+func isMovedHookName(n, hook string) bool {
+	backup := hook + backupSuffix
+	return strings.HasPrefix(n, hook+".") && n != backup && !strings.HasPrefix(n, backup+".")
+}
+
+// hasStaleMovedEntireHook reports whether hook has a copy of Entire's hook that
+// a hook manager moved aside (see refreshMovedEntireHooks) in a shape this
+// version replaces. Only an install rewrites those copies, and the per-turn
+// install skips a hook that reads current, so without this a stale copy stays
+// for good: the manager's wrapper in the backup runs it from behind Entire's
+// current hook. A hooks directory that cannot be listed reports none.
+func hasStaleMovedEntireHook(root *os.Root, hook string) bool {
+	names, err := hookDirNames(root)
+	if err != nil {
+		return false
+	}
+	for _, n := range names {
+		if !isMovedHookName(n, hook) {
+			continue
+		}
+		if isStaleMovedEntireHook(root, hook, n) {
+			return true
+		}
+	}
+	return false
+}
+
+// isStaleMovedEntireHook: n carries Entire's marker and is a copy this version
+// replaces (movedEntireHookOutdated).
+func isStaleMovedEntireHook(root *os.Root, hook, n string) bool {
+	_, stale := movedEntireHook(root, hook, n)
+	return stale
+}
+
+// movedEntireHook reads n, a moved hook name for hook: ours when it carries
+// Entire's marker, and stale when it is also a copy this version replaces.
+func movedEntireHook(root *os.Root, hook, n string) (ours, stale bool) {
+	data, err := osroot.ReadFileNoFollow(root, n)
+	if err != nil || !bytes.Contains(data, []byte(entireHookMarker)) {
+		return false, false
+	}
+	return true, movedEntireHookOutdated(hook, string(data))
+}
+
+// movedEntireHookOutdated reports whether content, a moved copy of Entire's
+// hook, is a shape ownHookStateIn reads as Outdated at the hook's own name, or
+// chains back to the backup without the guard chainCall sets. The wrapper that
+// runs the copy is that backup, so an unguarded chain calls it again and the
+// commit or push never finishes. What refreshMovedEntireHooks writes has no
+// chain and is current, so one install clears every case. Only lines that run
+// count: a copy that names the backup or a launcher in a comment does not run
+// it, and reading it stale would rewrite a current copy the user may have added
+// to. The pre-push texts are matched whole, comments included.
+func movedEntireHookOutdated(hook, content string) bool {
+	code := shellCode(content)
+	if entireHookLineRunsFromWorkingTree(code) || (hook == prePushHook && isPrePushBeforeRefList(content)) {
+		return true
+	}
+	return namesFile([]byte(code), hook+backupSuffix) && !strings.Contains(code, chainGuard(hook))
+}
+
+// shellCode is content without its comment lines.
+func shellCode(content string) string {
+	var b strings.Builder
+	for line := range strings.SplitSeq(content, "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(line), "#") {
+			b.WriteString(line)
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
+}
+
+// chainGuard names the variable chainCall sets while it runs hookName's
+// backup. Installed hooks test it by this name, so it must not change.
+func chainGuard(hookName string) string {
+	return "ENTIRE_CHAINING_" + strings.ToUpper(strings.ReplaceAll(hookName, "-", "_"))
 }
 
 // restoreMovedHooks undoes, on uninstall, what hook managers and Entire's
