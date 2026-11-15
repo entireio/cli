@@ -77,6 +77,12 @@ func TestDetectPII_EuropeanAddresses(t *testing.T) {
 		// No house number ends a French name, so title-case words after it
 		// on the same line are replaced with it.
 		{"12 rue de la Paix Paris France", "[REDACTED_ADDRESS]"},
+		// A word that runs on into digits or an underscore is not part of
+		// the name, so the street line before it is still replaced.
+		{"12 rue de la Paix Ref123", "[REDACTED_ADDRESS] Ref123"},
+		{"12 rue de la Paix Ref123, 75002 Paris", "[REDACTED_ADDRESS] Ref123, 75002 Paris"},
+		{"12 rue de la Liberté Café2", "[REDACTED_ADDRESS] Café2"},
+		{"12 rue de la Paix Ref_1", "[REDACTED_ADDRESS] Ref_1"},
 
 		// German
 		{"Karl-Marx-Straße 5", "[REDACTED_ADDRESS]"},
@@ -153,6 +159,8 @@ func TestDetectPII_EuropeanAddressLookalikes(t *testing.T) {
 		"Hauptstraße 12345",
 		"Hauptstraße 12px",
 		"Via Roma 12345",
+		"12 rue de la Paix123",
+		"12 rue Ref123",
 		// A suffix only counts on a title-case street word.
 		"String 12",
 		"Weg 5",

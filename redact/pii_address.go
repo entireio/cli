@@ -254,11 +254,34 @@ func hasStreetKeyword(s string, k streetKeyword) bool {
 func europeanAddressMatches(re *regexp.Regexp, s string) [][]int {
 	var locs [][]int
 	for _, m := range re.FindAllStringSubmatchIndex(s, -1) {
-		if endsStreetLine(s, m[3]) {
-			locs = append(locs, m[2:4])
+		if loc := streetLineOf(re, s, m); loc != nil {
+			locs = append(locs, loc)
 		}
 	}
 	return locs
+}
+
+// streetLineOf returns the street line of m, a match of re in s, or nil.
+// When m ends inside a longer word or number, it drops m's last word and
+// matches again from the same start. A French name has nothing after it to
+// end it, so a reference after it on the same line becomes its last word
+// (12 rue de la Paix Ref123): RE2 commits to that longer match, which
+// endsStreetLine rejects, and the street line before it would otherwise be
+// left visible. Each retry ends before the last, so the loop stops.
+func streetLineOf(re *regexp.Regexp, s string, m []int) []int {
+	start, end := m[2], m[3]
+	for !endsStreetLine(s, end) {
+		cut := strings.LastIndexAny(s[start:end], " \t")
+		if cut < 0 {
+			return nil
+		}
+		retry := re.FindStringSubmatchIndex(s[m[0] : start+cut])
+		if retry == nil || m[0]+retry[2] != start {
+			return nil
+		}
+		end = m[0] + retry[3]
+	}
+	return []int{start, end}
 }
 
 // endsStreetLine reports whether a European street line ending at s[end] ends
