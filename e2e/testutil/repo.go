@@ -764,6 +764,13 @@ func ReadSessionMetadata(t *testing.T, dir string, checkpointID string, sessionI
 	return meta
 }
 
+// ReadCheckpointTranscript reads a session's stored transcript, the copy
+// `entire resume` restores, for the given checkpoint ID and session index.
+func ReadCheckpointTranscript(t *testing.T, dir string, checkpointID string, sessionIndex int) string {
+	t.Helper()
+	return GitOutput(t, dir, "show", checkpointBlobSpec(checkpointID, fmt.Sprintf("%d/full.jsonl", sessionIndex)))
+}
+
 // WaitForSessionMetadata polls until session metadata exists on the checkpoint
 // branch for the given checkpoint ID and session index, then returns it.
 // This handles the race where the checkpoint branch advances before session

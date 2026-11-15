@@ -372,11 +372,12 @@ func (a *openCodeAgent) SeedRepo(dir string) error {
 	// Written before the tree is resolved, so a repo still gets a usable config
 	// when the pre-build failed and opencode falls back to installing for itself.
 	//
-	// opencode's non-interactive mode auto-rejects the external_directory
-	// permission, since there is no user to prompt.
-	cfg := `{"$schema": "https://opencode.ai/config.json", "permission": {"external_directory": "allow"}}`
+	// opencode's non-interactive mode auto-rejects any permission set to ask,
+	// since there is no user to prompt: external_directory asks by default, and
+	// a developer's global config can make edit ask too.
+	cfg := `{"$schema": "https://opencode.ai/config.json", "permission": {"external_directory": "allow", "edit": "allow"}}`
 	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
-		cfg = fmt.Sprintf(`{"$schema": "https://opencode.ai/config.json", "permission": {"external_directory": "allow"}, "provider": {"anthropic": {"options": {"apiKey": %q}}}}`, key)
+		cfg = fmt.Sprintf(`{"$schema": "https://opencode.ai/config.json", "permission": {"external_directory": "allow", "edit": "allow"}, "provider": {"anthropic": {"options": {"apiKey": %q}}}}`, key)
 	}
 	if isOpenCode2() && a.model != "" {
 		// The OpenCode 2 TUI has no --model flag; the config selects it.
@@ -443,6 +444,9 @@ func (a *openCodeAgent) RunPrompt(ctx context.Context, dir string, prompt string
 	}
 	if model != "" {
 		args = append(args, "--model", model)
+	}
+	if cfg.ResumeSessionID != "" {
+		args = append(args, "--session", cfg.ResumeSessionID)
 	}
 	args = append(args, prompt)
 
