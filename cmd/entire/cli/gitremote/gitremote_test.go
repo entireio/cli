@@ -40,6 +40,16 @@ func TestParseURL(t *testing.T) {
 			wantInfo: &Info{Protocol: ProtocolHTTPS, Host: "github.com", Forge: "gh", Owner: "org", Repo: "repo"},
 		},
 		{
+			name:     "HTTPS GitHub host lookup is case insensitive",
+			url:      "https://GitHub.COM/org/repo.git",
+			wantInfo: &Info{Protocol: ProtocolHTTPS, Host: "GitHub.COM", Forge: "gh", Owner: "org", Repo: "repo"},
+		},
+		{
+			name:     "SCP GitHub host lookup is case insensitive",
+			url:      "git@GitHub.COM:org/repo.git",
+			wantInfo: &Info{Protocol: ProtocolSSH, Host: "GitHub.COM", Forge: "gh", Owner: "org", Repo: "repo"},
+		},
+		{
 			name:     "SSH protocol format",
 			url:      "ssh://git@github.com/org/repo.git",
 			wantInfo: &Info{Protocol: ProtocolSSH, Host: "github.com", Forge: "gh", Owner: "org", Repo: "repo"},
