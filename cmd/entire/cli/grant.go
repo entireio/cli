@@ -317,9 +317,12 @@ func grantEach[Row any](ctx context.Context, cmd *cobra.Command, c *coreapi.Clie
 		outcome, err := grantOne(ctx, c, t, id, p)
 		if err != nil {
 			if single {
-				return errors.Join(err, emitGrantJSON(cmd, wires, single))
+				return errors.Join(withRoleMismatchHint(t, pt, err), emitGrantJSON(cmd, wires, single))
 			}
 			fmt.Fprintf(cmd.ErrOrStderr(), "✗ %s was not added to %s: %v\n", displayGranteeName(p.handle), pt.describe(), renderCoreError(err))
+			if hint := roleMismatchHint(t, pt, err); hint != "" {
+				fmt.Fprintln(cmd.ErrOrStderr(), "  "+hint)
+			}
 			if grantFailureIsFatal(err) {
 				tally.failed, tally.skipped = 1, len(picked)-i-1
 				break
@@ -356,6 +359,31 @@ func grantOne[Row any](ctx context.Context, c *coreapi.Client, t grantTarget[Row
 		return grantOutcome{}, err
 	}
 	return t.grant(ctx, c, id, provider, providerUserID, p.role)
+}
+
+// problemTypeRoleMismatch is Core's 409 for an add whose account already has
+// an open invitation to the scope with another role. Its detail says to revoke
+// that invitation first.
+const problemTypeRoleMismatch = "https://entire.com/errors/invitation/role-mismatch"
+
+// roleMismatchHint names the commands that find and revoke the invitation a
+// role-mismatch refusal is about, or "" for any other failure.
+func roleMismatchHint[Row any](t grantTarget[Row], pt grantPickerTarget, err error) string {
+	if coreapi.APIErrorType(err) != problemTypeRoleMismatch {
+		return ""
+	}
+	return inviteHint(t.noun, pt.ref)
+}
+
+// withRoleMismatchHint is a typed grantee's error: Core's reason, and on the
+// next line the hint when there is one. The hint has to be in the error itself,
+// because main prints the error last, after anything written before it.
+func withRoleMismatchHint[Row any](t grantTarget[Row], pt grantPickerTarget, err error) error {
+	hint := roleMismatchHint(t, pt, err)
+	if hint == "" {
+		return err
+	}
+	return errors.New(renderCoreError(err).Error() + "\n" + hint)
 }
 
 // problemTypeSSORequired is Core's 403 for an invitation into an organization

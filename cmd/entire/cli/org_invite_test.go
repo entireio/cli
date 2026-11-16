@@ -42,7 +42,7 @@ const testInviteEmail = "dev@example.com"
 func testInvitation(role, status string) *coreapi.Invitation {
 	return &coreapi.Invitation{
 		ID:        testInvitationULID,
-		Email:     testInviteEmail,
+		Email:     coreapi.NewOptString(testInviteEmail),
 		Role:      role,
 		Status:    status,
 		InvitedBy: testDeleteULID,
@@ -195,7 +195,7 @@ func TestOrgInviteList_ListsAndFiltersByStatus(t *testing.T) {
 	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "list", testOrgULID)
 	require.NoError(t, err)
 	assert.Equal(t, "open", gotStatus, "the default listing is the open invitations")
-	assert.Contains(t, out, "EMAIL")
+	assert.Contains(t, out, "INVITEE")
 	assert.Contains(t, out, testInvitationULID, "the ID is what `invite revoke` takes")
 	assert.Contains(t, out, testInviteEmail)
 	assert.Contains(t, out, "admin")
@@ -348,14 +348,14 @@ func TestOrgInvite_UnknownOrgNameHintsAtNamesOnly(t *testing.T) {
 }
 
 // Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
-func TestOrgInvite_SendAndRevokeRequireEmail(t *testing.T) {
+func TestOrgInvite_SendRequiresEmailAndRevokeAnInvitation(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		t.Error("a missing --email must be refused before any request")
+		t.Error("a missing --email or --id must be refused before any request")
 	}))
 	t.Cleanup(srv.Close)
 
-	for _, verb := range []string{"send", "revoke"} {
-		_, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", verb, testOrgULID)
-		require.ErrorContains(t, err, `required flag(s) "email" not set`, verb)
-	}
+	_, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "send", testOrgULID)
+	require.ErrorContains(t, err, `required flag(s) "email" not set`)
+	_, _, err = runCoreCmd(t, newOrgCmd, srv.URL, "invite", "revoke", testOrgULID)
+	require.ErrorContains(t, err, "at least one of the flags in the group [id email] is required")
 }

@@ -241,7 +241,8 @@ always runnable in every build.
 - `org`: control-plane organization management — `create`, `list`, `get`, `delete`,
   plus `grant` (`add`/`list`/`remove`): org membership for a `provider:handle`
   grantee, roles owner/admin/member (default member); `add` invites an account
-  that is not a member yet (see the grant-subtree notes below)
+  that is not a member yet (see the grant-subtree notes below). `invite`
+  (`send`/`list`/`revoke`) manages the org's invitations
 - `project`: control-plane project management — `create`, `list`, `get`, `delete`,
   plus `agent` (`list`/`add`): the project's review agents, configured in
   entire-api rather than repository files (they replaced the trail runners).
@@ -263,7 +264,8 @@ always runnable in every build.
   for identity, isolation and recovery contracts. Also
   `grant` (`add`/`list`/`remove`): project access for a `provider:handle`
   grantee, roles reader/writer/admin; both `add` and `remove` take the grantee
-  optionally (see the grant-subtree notes below). `create <name> --owner <ref>`
+  optionally (see the grant-subtree notes below), and `invite` (`list`/`revoke`)
+  for the project's invitations. `create <name> --owner <ref>`
   creates without prompting even in a terminal, leaving an omitted `--region`
   to the server's jurisdiction. Without `--owner`, `--owner-type` or
   `--region` (bare, or with just the name as the name field's starting text),
@@ -320,9 +322,9 @@ always runnable in every build.
   like `project delete`.
 - `repo`: control-plane repository lifecycle — `create`, `list --project`,
   `view`, `edit`, `delete`, `clone`, `default-branch`, plus the `mirror`, `remote`,
-  `visibility`, `protection` and `grant` subtrees (`repo grant` mirrors
-  `project grant`, addressing the repo by its `/et/<project>/<repo>` path;
-  `grant list` alone also takes a `/gh/` mirror ref). Verb names follow the GitHub CLI where the job is the same (`view`,
+  `visibility`, `protection`, `grant` and `invite` subtrees (`repo grant` and
+  `repo invite` mirror their `project` counterparts, addressing the repo by its
+  `/et/<project>/<repo>` path; `grant list` alone also takes a `/gh/` mirror ref). Verb names follow the GitHub CLI where the job is the same (`view`,
   `edit --visibility`, `auth switch`), per the unified-repo-commands proto.
   Git content operations (log, diff, …) are intentionally out of scope.
   **A targeting `--cluster` names a cluster by its public host**
@@ -749,7 +751,17 @@ always runnable in every build.
   transport failure). It ends with a `N granted, N invited, N refused` tally
   (`N failed, N not attempted` after a fatal failure) and exits 1 unless
   everyone was granted or invited. `--json` prints the array of what landed;
-  refusals and the tally go to stderr.
+  refusals and the tally go to stderr. The role-mismatch refusal is followed by
+  a line naming `entire <noun> invite list <ref>` and `entire <noun> invite
+  revoke <ref> --id <id>`.
+
+  **`invite list` and `invite revoke`** are one builder over three scopes
+  (`invite_scope.go`), as the grant subtrees are. A listing's INVITEE is the
+  email address, or for an account-targeted invitation the account's primary
+  handle from `inviteeIdentity`, or its `inviteeAccountId` when Core resolved
+  no identity. `revoke` takes `--id` (what `invite list` and the `✓ Invited …
+  (<id>)` line print) or `--email`, exactly one; an email is matched only
+  against open email invitations.
 
   **`org grant add` has no picker** (`candidates` is nil, which also keeps it at
   two required args): everyone eligible is by definition absent from the only

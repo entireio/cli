@@ -202,7 +202,8 @@ func TestGrantAdd_JSONSaysWhichOutcome(t *testing.T) {
 
 // TestGrantAdd_RefusalsAreCoresReasonOnOneLine: each refusal the invitation
 // contract adds reaches the user as Core's detail, alone, on one line, and
-// nothing reads as a grant or an invitation.
+// nothing reads as a grant or an invitation. The role mismatch alone is
+// followed by a hint line.
 //
 // Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
 func TestGrantAdd_RefusalsAreCoresReasonOnOneLine(t *testing.T) {
@@ -222,7 +223,13 @@ func TestGrantAdd_RefusalsAreCoresReasonOnOneLine(t *testing.T) {
 					Detail string `json:"detail"`
 				}
 				require.NoError(t, json.Unmarshal([]byte(rep.body), &problem))
-				require.Equal(t, problem.Detail, err.Error())
+				first, hint, _ := strings.Cut(err.Error(), "\n")
+				require.Equal(t, problem.Detail, first, "Core's reason, alone")
+				if name == "role mismatch" {
+					require.Contains(t, hint, "invite revoke", "TestGrantAdd_RoleMismatchNamesTheInviteCommands pins the hint")
+				} else {
+					require.Empty(t, hint, "one line")
+				}
 				require.Empty(t, out)
 			})
 		}
@@ -318,6 +325,7 @@ func TestGrantPicker_RefusalsDoNotStopTheSet(t *testing.T) {
 	}, "\n")+"\n", out)
 	require.True(t, strings.HasPrefix(errOut, strings.Join([]string{
 		"✗ github:carol was not added to " + project + ": " + roleMismatchDetail,
+		"  " + inviteHint("project", pickerProjULID),
 		"✗ github:erin was not added to " + project + ": already a member",
 	}, "\n")+"\n"), errOut)
 }
