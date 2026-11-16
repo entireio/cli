@@ -125,7 +125,14 @@ func TestEntireContextInjection_TrailsParagraphOnlyWhenEnabled(t *testing.T) {
 	if pointer < 0 || trail < 0 || commits < 0 || pointer >= trail || trail >= commits {
 		t.Errorf("want agent-help pointer, then trails, then commits:\n%s", with)
 	}
-	for _, want := range []string{"`entire trail update`", "`--project <forge>/<owner>`", "include its full URL", "findings (`entire trail finding`), never as trail comments"} {
+	for _, want := range []string{
+		"`entire trail update`", "`--project <forge>/<owner>`", "include its full URL",
+		"findings (`entire trail finding`), never as trail comments",
+		"the trail, not the pull request, is the record of the work", "keep others' text", "`entire trail create --title",
+		"ask the user before creating a trail", "the change's full URL", "answer with the pull request only, without trail links",
+		"otherwise open one as usual with `gh pr create`, not `entire trail create`",
+		"name the trail, not only the pull request",
+	} {
 		if !strings.Contains(with, want) {
 			t.Errorf("trails paragraph missing %q:\n%s", want, with)
 		}

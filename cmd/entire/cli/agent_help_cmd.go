@@ -139,10 +139,12 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"trail finding":   {agentHelpAudienceTaskDriven, false},
 	"trail merge":     {agentHelpAudienceUserOwned, false},
 	"trail resume":    {agentHelpAudienceTaskDriven, false},
-	"trail link":      {agentHelpAudienceUserOwned, false},
-	"trail unlink":    {agentHelpAudienceUserOwned, false},
-	"trail ready":     {agentHelpAudienceUserOwned, false},
-	"trail retarget":  {agentHelpAudienceUserOwned, false},
+	// The push workflow links a branch to the trail the user named, and
+	// trail create prints a link retry when its own linking fails.
+	"trail link":     {agentHelpAudienceTaskDriven, false},
+	"trail unlink":   {agentHelpAudienceUserOwned, false},
+	"trail ready":    {agentHelpAudienceUserOwned, false},
+	"trail retarget": {agentHelpAudienceUserOwned, false},
 	// Each acts on shared state or spends the repository's agent budget.
 	"trail update-branch": {agentHelpAudienceUserOwned, false},
 	"trail ci-pr":         {agentHelpAudienceUserOwned, false},
@@ -267,10 +269,7 @@ var agentHelpGuidance = map[string]string{
 		"review findings, questions, and follow-ups, including when asked to\n" +
 		"\"comment\" on a trail. Comment writes refuse in agent sessions.",
 
-	"trail finding": "Reply to a finding with `entire trail finding reply` to answer or question\n" +
-		"it. Edit or delete only replies you wrote; a reply by anyone else stays as\n" +
-		"it is. `delete-reply` asks for confirmation; pass --force only when the user\n" +
-		"asked you to delete that reply.",
+	"trail finding": trailFindingReplyGuidance,
 
 	"trail attachment": "To show an image in a trail's description, upload it with\n" +
 		"`entire trail attachment add <file>` and put the printed\n" +
@@ -314,10 +313,59 @@ var agentHelpProjectTrailGuidance = map[string]string{
 		"  <forge>/<project>/<repo>/trails/<n>                change <repo>/<n>\n" +
 		"  <forge>/<project>/-/trails/<P>                     project trail <P>\n" +
 		"Add --project <forge>/<project> unless <project> is origin's owner.\n" +
-		"To link a trail or change, use the url `entire trail show` prints.",
+		"To link a trail or change, use the url `entire trail show` prints.\n" +
+		"A bare number is a project trail number, never a change or pull request\n" +
+		"number. When the user names \"trail N\", run `entire trail show` without\n" +
+		"a selector first; if this branch's change or pull request is N, act\n" +
+		"without a selector. If trail N is not this branch's trail, do not\n" +
+		"change it: ask the user which trail they meant.",
+	// Pushing a branch with no trail opens one, so work is tracked as trails
+	// rather than pull requests (guidance evals, November 2026).
+	"trail create": "Use this when asked to push a feature branch that `entire trail show`\n" +
+		"reports has no trail: it pushes the branch (git push -u), so do not also\n" +
+		"`git push` or open a pull request. --title is required; give --body a\n" +
+		"short description. On the default branch it would create and push a new\n" +
+		"branch instead: ask the user first. Do not pass --checkout, --repo or\n" +
+		"--branch-action create on your own. Give the change url it prints. If it\n" +
+		"fails, do not rerun it: when the error prints an `entire trail link`\n" +
+		"retry, run that once; otherwise report the error. If the user named an\n" +
+		"existing trail, `git push` and then `entire trail link <P>` instead.",
+	// Updates through a change write the shared parent trail, and agents
+	// otherwise edit only the pull request (guidance evals, November 2026).
+	"trail update": "Without a selector this updates the checked-out branch's trail. Its fields\n" +
+		"apply to the whole trail, which other changes and people share: edit the\n" +
+		"body read from `entire trail show --json` and keep their text. Then update\n" +
+		"the pull request body if there is one, keeping any\n" +
+		"`" + shadowPRMarker + "` marker. Share the trail or change URL; give a\n" +
+		"pull request URL only when the user asks for it.",
+	// The project tree replaces the shared entry, so it repeats the reply rules.
+	"trail finding": trailFindingReplyGuidance + "\n\n" +
+		"After a push, run `entire trail finding` (the dashboard): each agent's\n" +
+		"HEAD shows whether it has reviewed the pushed commit yet, and \"No\n" +
+		"findings\" for an older head means not reviewed yet. It also counts open\n" +
+		"findings the default filters hide: while any are open, the change is not\n" +
+		"ready, whatever the gates say; list them with --freshness any. For\n" +
+		"each open finding: if your pushed fix addresses it, resolve it with -m\n" +
+		"naming the fixing commit; otherwise fix it. Dismiss with -m only when the\n" +
+		"finding is wrong, and tell the user. Agent readings (e.g. Drift, Slop)\n" +
+		"are in the dashboard's Agents section; --json has each one's rationale.",
+	"trail merge": "--dry-run only reports: whether the change is mergeable and which gates\n" +
+		"block it. To answer \"is it ready?\", run it and `entire trail finding`;\n" +
+		"open findings hidden by the default filters also mean not ready. Never merge\n" +
+		"unless the user asks to merge this change in this conversation (\"looks\n" +
+		"good\" is not that), and never pass --force or --yes on your own.",
 	// Inherits the group's URL mapping above, so an agent that goes straight
 	// to `agent-help trail show` still gets it.
-	"trail show": "To list a project trail's changes, run `entire trail show <P>\n" +
+	"trail show": "For questions about status, review, CI, or readiness, start here: the text\n" +
+		"view prints the trail URL and each change's gates and CI checks. Pair it\n" +
+		"with `entire trail finding` for findings and agent readings. Report these\n" +
+		"trail values with the change's full url (the changes[] entry with\n" +
+		"current: true), not only the trail's. Give pull request details only\n" +
+		"when the user asks for the pull request. On a GitHub repository Entire\n" +
+		"already opened a draft pull request for the trail: find it with\n" +
+		"`gh pr view` rather than creating another. Entire-native repositories\n" +
+		"have none; say so and give the change's url.\n" +
+		"To list a project trail's changes, run `entire trail show <P>\n" +
 		"--project <forge>/<project> --json`; each changes[] entry is the change\n" +
 		"<repository>/<number> with its own url and base (the branch it merges\n" +
 		"into). When show reaches the trail through a change (the current\n" +
@@ -335,6 +383,19 @@ var agentHelpProjectTrailGuidance = map[string]string{
 		"failed read prints a warning on stderr. Null is unknown, never\n" +
 		"mergeable.",
 }
+
+// shadowPRMarker is the hidden line entire-api writes into the draft pull
+// requests it opens to back a trail (internal/changeforge/github.go,
+// shadowPRMarker); it closes those pull requests by it, so agents editing such
+// a body must keep it. The two repositories share no module, so keep this
+// string equal to the server's by hand.
+const shadowPRMarker = "<!-- entire-shadow-pr -->"
+
+// trailFindingReplyGuidance is shared by both trail models' finding entries.
+const trailFindingReplyGuidance = "Reply to a finding with `entire trail finding reply` to answer or question\n" +
+	"it. Edit or delete only replies you wrote; a reply by anyone else stays as\n" +
+	"it is. `delete-reply` asks for confirmation; pass --force only when the user\n" +
+	"asked you to delete that reply."
 
 // agentHelpTrailSandboxGuidance is shared by both trail models. Agent sandboxes
 // commonly block network and keyring access, and the failure reads like an auth

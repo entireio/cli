@@ -506,7 +506,14 @@ func normalizeToolUsePaths(files []string, eventCWD, repoRoot string) []string {
 // sometimes-appropriate query as an always-do step. Which commands suit a given
 // task is agent-help's job, where it is pulled on demand and grouped by who
 // should initiate the command (see agentHelpAudience); this string carries only
-// invariants that hold on every turn of every session.
+// invariants that hold on every turn of every session. The exception is the
+// trail being the work's record, with the steps that make it so: publishing an
+// untracked branch with `trail create` when asked to push, reporting status
+// with the change URL, and answering pull request requests with the pull
+// request only. Agents otherwise open pull requests, edit only their bodies and
+// share their URLs, and they rarely open agent-help at those moments, so the
+// steps are worth their first-turn tokens (guidance evals, November 2026).
+// Details stay in agent-help for trail show/create/update/finding/merge.
 func entireContextInjection(scope trailEnablementScope, base, trails bool) string {
 	var b strings.Builder
 	if base {
@@ -516,7 +523,13 @@ func entireContextInjection(scope trailEnablementScope, base, trails bool) strin
 	if trails {
 		b.WriteString("A Trail is a project-level work item that can contain multiple changes from different repositories and branches. ")
 		b.WriteString("Inside a checkout, `entire trail` infers the repository. Outside one, pass `--project <forge>/<owner>`, plus `--repo` and `--branch` when needed. ")
-		b.WriteString("If it's unclear whether work belongs on an existing trail or a new one, ask the user. Keep a trail's description current with `entire trail update`. ")
+		b.WriteString("Work is tracked as trails: the trail, not the pull request, is the record of the work. ")
+		b.WriteString("When asked to push a feature branch, first run `entire trail show`: if the branch has a trail, push as usual; if it has none, publish with `entire trail create --title … --body …` instead of `git push` and a pull request (it pushes the branch); if the user named a trail, `git push` then `entire trail link <P>`. ")
+		b.WriteString("On the default branch, ask the user before creating a trail. If `entire trail create` fails, do not rerun it; report its message. ")
+		b.WriteString("For status or links, run `entire trail show` (URL, gates, CI checks) and `entire trail finding` (findings, agent readings), and report them with the change's full URL (…/trails/<P>/changes/<repo>/<n>), not only the trail's. ")
+		b.WriteString("When the work changes, edit the trail's description with `entire trail update` (read the current body first and keep others' text). ")
+		b.WriteString("When saying what a push or publish will open or has opened, name the trail, not only the pull request. ")
+		b.WriteString("When the user asks for a pull request (to open one, or for its link or status), answer with the pull request only, without trail links: on a branch with a trail, Entire already opened a draft pull request, so find it with `gh pr view`; otherwise open one as usual with `gh pr create`, not `entire trail create`. ")
 		b.WriteString("When referencing a trail or change, include its full URL. ")
 		b.WriteString("Post feedback on a trail as findings (`entire trail finding`), never as trail comments; comments are for people. ")
 	}
