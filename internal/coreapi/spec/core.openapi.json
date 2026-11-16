@@ -2650,7 +2650,7 @@
             "type": "string"
           },
           "email": {
-            "description": "The invited address, normalized to lowercase.",
+            "description": "The invited address, normalized to lowercase. Empty for an account-targeted invitation.",
             "type": "string"
           },
           "expiresAt": {
@@ -2667,6 +2667,14 @@
           "invitedByIdentity": {
             "$ref": "#/components/schemas/AccountIdentity",
             "description": "Resolved identity for InvitedBy. Absent when it cannot be resolved."
+          },
+          "inviteeAccountId": {
+            "description": "The invited account. Empty for an email invitation.",
+            "type": "string"
+          },
+          "inviteeIdentity": {
+            "$ref": "#/components/schemas/AccountIdentity",
+            "description": "Resolved identity for InviteeAccountID. Absent when it cannot be resolved."
           },
           "revokedAt": {
             "format": "date-time",
@@ -2694,7 +2702,6 @@
         },
         "required": [
           "id",
-          "email",
           "role",
           "status",
           "invitedBy",
@@ -3467,6 +3474,34 @@
           "repos",
           "truncated",
           "candidatesIncomplete"
+        ],
+        "type": "object"
+      },
+      "ListResourceInvitationsOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListResourceInvitationsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "invitations": {
+            "items": {
+              "$ref": "#/components/schemas/ResourceInvitation"
+            },
+            "type": "array"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "invitations"
         ],
         "type": "object"
       },
@@ -5665,6 +5700,112 @@
         "required": [
           "mirrorId",
           "clusterHost"
+        ],
+        "type": "object"
+      },
+      "ResourceInvitation": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ResourceInvitation.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "acceptedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "acceptedBy": {
+            "description": "Account ID that used the token. Empty until the invitation is accepted.",
+            "type": "string"
+          },
+          "acceptedByIdentity": {
+            "$ref": "#/components/schemas/AccountIdentity",
+            "description": "Resolved identity for AcceptedBy. Absent when it cannot be resolved."
+          },
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "declinedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "email": {
+            "description": "The invited address, normalized to lowercase. Empty for an account-targeted invitation.",
+            "type": "string"
+          },
+          "expiresAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "invitedBy": {
+            "description": "Account ID of the manager who created the invitation. Empty when that account has been erased.",
+            "type": "string"
+          },
+          "invitedByIdentity": {
+            "$ref": "#/components/schemas/AccountIdentity",
+            "description": "Resolved identity for InvitedBy. Absent when it cannot be resolved."
+          },
+          "inviteeAccountId": {
+            "description": "The invited account. Empty for an email invitation.",
+            "type": "string"
+          },
+          "inviteeIdentity": {
+            "$ref": "#/components/schemas/AccountIdentity",
+            "description": "Resolved identity for InviteeAccountID. Absent when it cannot be resolved."
+          },
+          "revokedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "reader",
+              "writer",
+              "admin"
+            ],
+            "type": "string"
+          },
+          "scope": {
+            "enum": [
+              "project",
+              "repo"
+            ],
+            "type": "string"
+          },
+          "scopeId": {
+            "description": "Project ID or repository ID.",
+            "type": "string"
+          },
+          "status": {
+            "description": "Derived from the outcome columns at read time.",
+            "enum": [
+              "open",
+              "accepted",
+              "revoked",
+              "expired",
+              "declined"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "scope",
+          "scopeId",
+          "role",
+          "status",
+          "invitedBy",
+          "createdAt",
+          "expiresAt"
         ],
         "type": "object"
       },
@@ -14383,6 +14524,358 @@
         ]
       }
     },
+    "/projects/{projectId}/invitations": {
+      "get": {
+        "operationId": "listProjectInvitations",
+        "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Lifecycle state to return; all returns every state.",
+            "explode": false,
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "default": "open",
+              "description": "Lifecycle state to return; all returns every state.",
+              "enum": [
+                "open",
+                "accepted",
+                "revoked",
+                "expired",
+                "declined",
+                "all"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListResourceInvitationsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "421": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Misdirected Request"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          }
+        },
+        "security": [
+          {
+            "oauth2": []
+          },
+          {
+            "oidc": []
+          },
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List a project's invitations",
+        "tags": [
+          "projects"
+        ]
+      }
+    },
+    "/projects/{projectId}/invitations/{id}": {
+      "delete": {
+        "operationId": "revokeProjectInvitation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "detail": {
+                      "description": "A human-readable explanation specific to this occurrence of the problem.",
+                      "examples": [
+                        "Property foo is required but is missing."
+                      ],
+                      "type": "string"
+                    },
+                    "errors": {
+                      "description": "Optional list of individual error details",
+                      "items": {
+                        "$ref": "#/components/schemas/ErrorDetail"
+                      },
+                      "type": "array"
+                    },
+                    "instance": {
+                      "description": "A URI reference that identifies the specific occurrence of the problem.",
+                      "examples": [
+                        "https://example.com/error-log/abc123"
+                      ],
+                      "format": "uri",
+                      "type": "string"
+                    },
+                    "reason": {
+                      "description": "accepted: the invitation was accepted; revoke the access instead. Absent for other conflicts.",
+                      "enum": [
+                        "accepted"
+                      ],
+                      "type": "string"
+                    },
+                    "status": {
+                      "description": "HTTP status code",
+                      "examples": [
+                        400
+                      ],
+                      "format": "int64",
+                      "type": "integer"
+                    },
+                    "title": {
+                      "description": "A short, human-readable summary of the problem type. This value should not change between occurrences of the error.",
+                      "examples": [
+                        "Bad Request"
+                      ],
+                      "type": "string"
+                    },
+                    "type": {
+                      "default": "about:blank",
+                      "description": "A URI reference to human-readable documentation for the error.",
+                      "examples": [
+                        "https://example.com/errors/example"
+                      ],
+                      "format": "uri",
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "421": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Misdirected Request"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          }
+        },
+        "security": [
+          {
+            "oauth2": []
+          },
+          {
+            "oidc": []
+          },
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Revoke a project invitation",
+        "tags": [
+          "projects"
+        ]
+      }
+    },
     "/projects/{projectId}/members": {
       "get": {
         "operationId": "listProjectMembers",
@@ -18455,6 +18948,358 @@
           }
         ],
         "summary": "Revoke repo access by grantee id",
+        "tags": [
+          "repos"
+        ]
+      }
+    },
+    "/repos/{repoId}/invitations": {
+      "get": {
+        "operationId": "listRepoInvitations",
+        "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Lifecycle state to return; all returns every state.",
+            "explode": false,
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "default": "open",
+              "description": "Lifecycle state to return; all returns every state.",
+              "enum": [
+                "open",
+                "accepted",
+                "revoked",
+                "expired",
+                "declined",
+                "all"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListResourceInvitationsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "421": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Misdirected Request"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          }
+        },
+        "security": [
+          {
+            "oauth2": []
+          },
+          {
+            "oidc": []
+          },
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List a repository's invitations",
+        "tags": [
+          "repos"
+        ]
+      }
+    },
+    "/repos/{repoId}/invitations/{id}": {
+      "delete": {
+        "operationId": "revokeRepoInvitation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "detail": {
+                      "description": "A human-readable explanation specific to this occurrence of the problem.",
+                      "examples": [
+                        "Property foo is required but is missing."
+                      ],
+                      "type": "string"
+                    },
+                    "errors": {
+                      "description": "Optional list of individual error details",
+                      "items": {
+                        "$ref": "#/components/schemas/ErrorDetail"
+                      },
+                      "type": "array"
+                    },
+                    "instance": {
+                      "description": "A URI reference that identifies the specific occurrence of the problem.",
+                      "examples": [
+                        "https://example.com/error-log/abc123"
+                      ],
+                      "format": "uri",
+                      "type": "string"
+                    },
+                    "reason": {
+                      "description": "accepted: the invitation was accepted; revoke the access instead. Absent for other conflicts.",
+                      "enum": [
+                        "accepted"
+                      ],
+                      "type": "string"
+                    },
+                    "status": {
+                      "description": "HTTP status code",
+                      "examples": [
+                        400
+                      ],
+                      "format": "int64",
+                      "type": "integer"
+                    },
+                    "title": {
+                      "description": "A short, human-readable summary of the problem type. This value should not change between occurrences of the error.",
+                      "examples": [
+                        "Bad Request"
+                      ],
+                      "type": "string"
+                    },
+                    "type": {
+                      "default": "about:blank",
+                      "description": "A URI reference to human-readable documentation for the error.",
+                      "examples": [
+                        "https://example.com/errors/example"
+                      ],
+                      "format": "uri",
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "421": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Misdirected Request"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          }
+        },
+        "security": [
+          {
+            "oauth2": []
+          },
+          {
+            "oidc": []
+          },
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Revoke a repository invitation",
         "tags": [
           "repos"
         ]

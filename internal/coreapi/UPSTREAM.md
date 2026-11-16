@@ -201,6 +201,18 @@ that carries `allow_invitation`, so the client works on either side of the
 deploy. Once entiredb#5546 ships, a normal refresh reproduces these parts; drop
 this paragraph then.
 
+`GET /projects/{projectId}/invitations` (`listProjectInvitations`),
+`DELETE /projects/{projectId}/invitations/{id}` (`revokeProjectInvitation`),
+`GET /repos/{repoId}/invitations` (`listRepoInvitations`) and
+`DELETE /repos/{repoId}/invitations/{id}` (`revokeRepoInvitation`), with
+`ListResourceInvitationsOutputBody` and `ResourceInvitation`, are spliced
+verbatim from the published spec for `project invite` and `repo invite`. So is
+its `Invitation`, which makes `email` optional and adds `inviteeAccountId` and
+`inviteeIdentity`: Core lists account-targeted invitations with no email, and
+the older schema required one, so `org invite list` failed to decode them. The
+create operations on those two paths are not spliced; the CLI does not call
+them. A normal refresh carries all of it.
+
 The legacy Buildkite routes are spliced *out* the same way. Core no longer
 serves them (entiredb#4868, #4982). The splice removes the seven
 `/orgs/{orgId}/ci/buildkite/...` operations and
