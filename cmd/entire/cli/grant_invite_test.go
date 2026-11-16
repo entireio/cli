@@ -208,10 +208,12 @@ func TestGrantAdd_JSONSaysWhichOutcome(t *testing.T) {
 // Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
 func TestGrantAdd_RefusalsAreCoresReasonOnOneLine(t *testing.T) {
 	refusals := map[string]addReply{
-		"role mismatch":     replyProblem(http.StatusConflict, "https://entire.com/errors/invitation/role-mismatch", "an invitation with another role is open; revoke it first"),
-		"already a member":  replyProblem(http.StatusConflict, "", "already a member"),
-		"single sign-on":    replyProblem(http.StatusForbidden, "https://entire.com/errors/invitation/sso-required", "the organization requires single sign-on; this account cannot join by invitation and must sign in through the organization's single sign-on"),
-		"invitation resent": withHeader(replyProblem(http.StatusTooManyRequests, "", "invitation was sent recently; wait before resending"), "Retry-After", "300"),
+		"role mismatch":    replyProblem(http.StatusConflict, "https://entire.com/errors/invitation/role-mismatch", "an invitation with another role is open; revoke it first"),
+		"already a member": replyProblem(http.StatusConflict, "", "already a member"),
+		"single sign-on":   replyProblem(http.StatusForbidden, "https://entire.com/errors/invitation/sso-required", "the organization requires single sign-on; this account cannot join by invitation and must sign in through the organization's single sign-on"),
+		// Core states the wait in the detail; the CLI cannot read Retry-After
+		// from a problem response, so the detail is what tells the user.
+		"invitation resent": withHeader(replyProblem(http.StatusTooManyRequests, "", "invitation was sent recently; wait 4 minutes before resending"), "Retry-After", "240"),
 	}
 	for _, tc := range addTargets() {
 		for name, rep := range refusals {
