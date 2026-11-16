@@ -303,23 +303,23 @@ func isAncestorOrSelf(ctx context.Context, repoPath string, ancestor, descendant
 	return err == nil && base.Equal(ancestor)
 }
 
-// replayOnto cherry-picks replay onto base and drops the checkpoint's subtree
-// again should a replayed commit have written under its ID.
+// replayOnto preserves local changes outside the deleted checkpoint.
 func replayOnto(ctx context.Context, repo *git.Repository, repoPath string, cid id.CheckpointID, base plumbing.Hash, replay []*object.Commit) (plumbing.Hash, error) {
 	shallow, err := loadShallowHashes(ctx, repoPath)
 	if err != nil {
 		return plumbing.ZeroHash, err
 	}
-	newTip, err := cherryPickOnto(ctx, repo, base, replay, shallow)
-	if err != nil {
-		return plumbing.ZeroHash, err
+	withoutDeleted := func(tree plumbing.Hash) (plumbing.Hash, error) {
+		if tree.IsZero() {
+			return tree, nil
+		}
+		filtered, _, err := checkpoint.RemoveCheckpointSubtree(repo, tree, cid)
+		if err != nil {
+			return plumbing.ZeroHash, fmt.Errorf("exclude deleted checkpoint %s from replay: %w", cid, err)
+		}
+		return filtered, nil
 	}
-	if again, err := buildCheckpointRemovalCommit(ctx, repo, newTip, cid); err == nil {
-		return again, nil
-	} else if !errors.Is(err, errNothingToRemove) {
-		return plumbing.ZeroHash, err
-	}
-	return newTip, nil
+	return cherryPickOntoFiltered(ctx, repo, base, replay, shallow, withoutDeleted)
 }
 
 func checkpointRemovalMessage(cid id.CheckpointID) string {
