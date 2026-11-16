@@ -35,7 +35,7 @@ func newOrgInviteSendCmd() *cobra.Command {
 			"With --email, the address receives a link to accept; inviting an address that already has an open invitation sends the mail again and keeps the role the invitation was created with. " +
 			"With --account (a provider-qualified handle, e.g. github:alice), the existing account is invited and has no access until it accepts; the command prints the invitation and when it expires. " +
 			"Inviting an account that already has an open invitation with the same role reports that invitation without a second mail, and one with another role is refused until the open one is revoked. " +
-			"An account that is already a member is refused. `entire org grant add` does the same as --account.",
+			"An account that is already a member is refused.",
 		Example: "  entire org invite send acme --email dev@example.com --role admin\n" +
 			"  entire org invite send acme --account github:alice",
 		Args: cobra.ExactArgs(1),
@@ -127,7 +127,7 @@ func sendEmailInvitation(ctx context.Context, c *coreapi.Client, orgRef, orgID, 
 }
 
 // sendAccountInvitation invites an existing account. It is the org add with
-// the invitation allowed — the call `org grant add` makes — so the outcome
+// the invitation allowed — the call the hidden `org grant add` makes — so the outcome
 // and its wording are grant add's: Core answers 202 with the invitation, or,
 // before it requires consent, 201 with the membership it wrote, which is
 // reported as the grant it is.

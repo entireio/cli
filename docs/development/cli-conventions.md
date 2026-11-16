@@ -239,16 +239,19 @@ always runnable in every build.
   row. The catalog carries no health, capacity or usage data — nothing
   server-side does — and hidden or decommissioned clusters never reach it.
 - `org`: control-plane organization management — `create`, `list`, `get`, `delete`,
-  plus `grant` (`add`/`list`/`remove`): org membership for a `provider:handle`
-  grantee, roles owner/admin/member (default member); `add` invites an account
-  that is not a member yet (see the grant-subtree notes below). `invite`
+  plus `grant` (`list`/`remove`): org membership for a `provider:handle`
+  grantee, roles owner/admin/member (default member). `invite`
   (`send`/`list`/`revoke`) manages the org's invitations. `send` takes
   `--email <address>` or `--account <provider:handle>`, exactly one: the
-  account form is the org add with the invitation allowed, the same call as
-  `org grant add`. On the customer API no org add is direct (a non-member is
-  invited, a member refused), so `invite send --account` is the documented
-  verb; `org grant add` keeps its arguments, output and exit codes for
-  scripts, and its help says it invites and points at `invite send`
+  account form is the org add with the invitation allowed. On the customer API
+  no org add is direct (a non-member is invited, a member refused), so
+  `invite send --account` is the one documented way to add someone. `org grant
+  add` makes the same call and is a **hidden** spelling of it
+  (`grantTarget.addDocumentedAs`, cobra `Hidden`): it keeps its arguments,
+  output lines and exit codes for scripts, is absent from `org grant --help`,
+  completions and `agent-help`, and its own help and the `org grant` help name
+  `invite send`. The repo has no alias helper; a compatibility spelling is a
+  hidden command, as `trail delete` is
 - `project`: control-plane project management — `create`, `list`, `get`, `delete`,
   plus `agent` (`list`/`add`): the project's review agents, configured in
   entire-api rather than repository files (they replaced the trail runners).
@@ -739,9 +742,9 @@ always runnable in every build.
 
   **An add can invite instead of grant** (ENT-2652). Core grants directly only
   to an account already inside the parent scope (an active member of the
-  owning org, or a project grant for a repo); any other account, and on
-  `org grant add` every non-member, gets an invitation it must accept. All
-  three adds send `allow_invitation: true`, so Core answers 202 with
+  owning org, or a project grant for a repo); any other account, and on the
+  org add (`org invite send --account`, or the hidden `org grant add`) every
+  non-member, gets an invitation it must accept. All three adds send `allow_invitation: true`, so Core answers 202 with
   `AccountInvited` rather than refusing with the `invitation/required` 409.
   The text line then says `Invited … No access until they accept` with the
   invitation id and expiry, and `--json` emits the 202 body (`status:
@@ -769,7 +772,8 @@ always runnable in every build.
   (<id>)` line print) or `--email`, exactly one; an email is matched only
   against open email invitations.
 
-  **`org grant add` has no picker** (`candidates` is nil, which also keeps it at
+  **The org add has no picker** (it never had one, so hiding `org grant add`
+  removed no way to reach one) (`candidates` is nil, which also keeps it at
   two required args): everyone eligible is by definition absent from the only
   list there is. `org grant remove` does have one, because the members to remove
   ARE that list. There is no user search or global account listing in the API —

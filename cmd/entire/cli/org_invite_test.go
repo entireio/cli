@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -445,14 +446,53 @@ func TestOrgInviteSend_EmailAndAccountCannotBeConfused(t *testing.T) {
 	}
 }
 
-// TestOrgGrantAdd_HelpSaysItInvites: `org grant add` keeps its shape, and its
-// help says what it does on Entire's API and names the verb for it.
-func TestOrgGrantAdd_HelpSaysItInvites(t *testing.T) {
-	t.Parallel()
-	add, _, err := newOrgGrantCmd().Find([]string{"add"})
+// TestOrgGrantAdd_IsAHiddenSpellingOfInviteSend: `org invite send --account`
+// is the documented way to invite an existing account. `org grant add` makes
+// the same call and stays runnable for scripts, with the same arguments,
+// request and output, but is hidden from `org grant --help`, whose help points
+// at `invite send` instead. Project and repo `grant add` stay visible: they
+// grant directly to an account inside the parent scope.
+//
+// Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
+func TestOrgGrantAdd_IsAHiddenSpellingOfInviteSend(t *testing.T) {
+	group := newOrgGrantCmd()
+	add, _, err := group.Find([]string{"add"})
 	require.NoError(t, err)
+	require.True(t, add.Hidden)
 	require.Equal(t, "add <org> <grantee>", add.Use)
-	require.Contains(t, add.Short, "Invite")
-	require.Contains(t, add.Long, "invited rather than added")
-	require.Contains(t, add.Long, "entire org invite send <org> --account <provider:handle>")
+	require.Contains(t, add.Long, "`entire org invite send <org> --account <provider:handle>` is the documented command")
+	require.Contains(t, group.Long, "entire org invite send <org> --account <provider:handle>")
+
+	var help strings.Builder
+	group.SetOut(&help)
+	group.SetArgs([]string{"--help"})
+	require.NoError(t, group.Execute())
+	require.NotRegexp(t, `(?m)^\s+add\s`, help.String(), "add is not listed")
+	require.Regexp(t, `(?m)^\s+list\s`, help.String())
+	require.Regexp(t, `(?m)^\s+remove\s`, help.String())
+
+	for name, newCmd := range map[string]func() *cobra.Command{"project": newProjectGrantCmd, "repo": newRepoGrantCmd} {
+		visible, _, err := newCmd().Find([]string{"add"})
+		require.NoError(t, err)
+		require.False(t, visible.Hidden, name)
+	}
+
+	// The hidden spelling makes the call `invite send --account` makes and
+	// prints the same line.
+	core, srv := newAddCore(t, func(string) addReply { return replyJSON(http.StatusAccepted, invitedBody) })
+	viaGrant, _, err := runCoreCmd(t, newOrgGrantCmd, srv.URL, "add", testOrgULID, "github:alice")
+	require.NoError(t, err)
+	viaInvite, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "send", testOrgULID, "--account", "github:alice")
+	require.NoError(t, err)
+	require.Equal(t, viaInvite, viaGrant)
+	require.Equal(t, "✓ Invited github:alice to org "+testOrgULID+" as member ("+inviteID+"). No access until they accept; the invitation expires 2026-11-20.\n", viaGrant)
+	paths, bodies := core.recorded()
+	require.Equal(t, paths[0], paths[1])
+	// Without --role, grant add leaves the role to the server's default
+	// (member) and invite send sends its flag's default, member: the same
+	// request otherwise.
+	require.NotContains(t, bodies[0], "role")
+	require.Equal(t, "member", bodies[1]["role"])
+	delete(bodies[1], "role")
+	require.Equal(t, bodies[0], bodies[1])
 }

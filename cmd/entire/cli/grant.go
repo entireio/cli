@@ -39,11 +39,13 @@ type grantTarget[Row any] struct {
 	leastRole   string   // the least-privileged of roles; help order runs least-first for access but most-first for org, so it is named rather than indexed
 	defaultRole string   // "" means --role is required; else the server default applied when --role is omitted
 	outsider    string   // who `add` invites rather than grants, for Long: reads after "An account that is"
-	// addShort and addLong replace the add verb's generated help where the
-	// target's add is in practice something else: on org, an invitation.
-	addShort, addLong string
-	columns           []string
-	row               func(Row) []string
+	// addDocumentedAs, when set, hides the add verb: another command is the
+	// documented way to make the same call, and this spelling stays runnable,
+	// with the same arguments, output and exit codes, only for scripts. The
+	// group's help and the verb's own help name that command.
+	addDocumentedAs string
+	columns         []string
+	row             func(Row) []string
 
 	// resolve turns the user's target ref into its ULID. project and repo wrap
 	// theirs because those resolvers take an interface, not *coreapi.Client.
@@ -111,6 +113,9 @@ func newGrantSubtreeCmd[Row any](t grantTarget[Row]) *cobra.Command {
 		Use:   cmdGrant,
 		Short: "Manage " + t.noun + " access",
 	}
+	if t.addDocumentedAs != "" {
+		cmd.Long = fmt.Sprintf("List and remove %s access. To give someone access, invite them with `%s`.", t.noun, t.addDocumentedAs)
+	}
 	cmd.AddCommand(newGrantAddCmd(t), newGrantListCmd(t), newGrantRemoveCmd(t))
 	return requireSubcommand(cmd)
 }
@@ -137,14 +142,14 @@ func newGrantAddCmd[Row any](t grantTarget[Row]) *cobra.Command {
 		long += fmt.Sprintf(" Omit the grantee on a terminal to choose from the members of the owning org who do not have %s access yet, and set a role for each.", t.noun)
 		args = cobra.RangeArgs(1, 2)
 	}
-	short := fmt.Sprintf("Grant a user %s access", t.noun)
-	if t.addShort != "" {
-		short, long = t.addShort, t.addLong
+	if t.addDocumentedAs != "" {
+		long += fmt.Sprintf(" This spelling is kept for scripts; `%s` is the documented command.", t.addDocumentedAs)
 	}
 	cmd := &cobra.Command{
 		Use:     use,
-		Short:   short,
+		Short:   fmt.Sprintf("Grant a user %s access", t.noun),
 		Long:    long,
+		Hidden:  t.addDocumentedAs != "",
 		Example: example,
 		Args:    args,
 		PreRunE: refuseUnwritableRef(t),
@@ -841,17 +846,12 @@ var orgGrantTarget = grantTarget[coreapi.OrgMemberListItem]{
 	defaultRole: orgRoleMember,
 	outsider:    "not a member of the org yet",
 	// On the customer API no org add is direct: a non-member is invited and a
-	// member is refused, so "Granted" never prints here. The command keeps its
-	// name, arguments and output for scripts; its help says what it does and
-	// points at the verb named for it.
-	addShort: "Invite a user to an org (as `org invite send --account`)",
-	addLong: "Add a user (addressed as provider:handle, e.g. github:alice) to an org. The org is addressed by name or ULID. " +
-		"An account that is not a member of the org yet is invited rather than added: it has no access until it accepts, and the command prints the invitation and when it expires. " +
-		"On Entire's API that is every account this command can add, because an existing member is refused as already a member. " +
-		"`entire org invite send <org> --account <provider:handle>` makes the same call and is the documented way to invite an existing account.",
-	columns: orgMemberColumns,
-	row:     orgMemberRow,
-	resolve: resolveOrgRef,
+	// member is refused. `org invite send --account` makes the same call under
+	// the name for what it does, so this add is its hidden spelling.
+	addDocumentedAs: "entire org invite send <org> --account <provider:handle>",
+	columns:         orgMemberColumns,
+	row:             orgMemberRow,
+	resolve:         resolveOrgRef,
 	grant: func(ctx context.Context, c *coreapi.Client, id, provider, providerUserID, role string) (grantOutcome, error) {
 		body := &coreapi.AddOrgMemberInputBody{Provider: provider, ProviderUserId: providerUserID, AllowInvitation: coreapi.NewOptBool(true)}
 		if role != "" {
