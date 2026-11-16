@@ -3,8 +3,10 @@ package opencode
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -495,8 +497,10 @@ func TestCalculateTokenUsage(t *testing.T) {
 	if usage.InputTokens != 350 {
 		t.Errorf("expected 350 input tokens, got %d", usage.InputTokens)
 	}
-	if usage.OutputTokens != 180 {
-		t.Errorf("expected 180 output tokens, got %d", usage.OutputTokens)
+	// The fixture's messages carry reasoning but no total, so reasoning is
+	// counted once on top of output (see Tokens.OutputWithReasoning).
+	if usage.OutputTokens != 195 {
+		t.Errorf("expected 195 output tokens, got %d", usage.OutputTokens)
 	}
 	if usage.CacheReadTokens != 15 {
 		t.Errorf("expected 15 cache read tokens, got %d", usage.CacheReadTokens)
@@ -520,12 +524,93 @@ func TestCalculateTokenUsage_FromOffset(t *testing.T) {
 	if usage.InputTokens != 200 {
 		t.Errorf("expected 200 input tokens, got %d", usage.InputTokens)
 	}
-	if usage.OutputTokens != 100 {
-		t.Errorf("expected 100 output tokens, got %d", usage.OutputTokens)
+	if usage.OutputTokens != 105 {
+		t.Errorf("expected 105 output tokens, got %d", usage.OutputTokens)
 	}
 	if usage.APICallCount != 1 {
 		t.Errorf("expected 1 API call, got %d", usage.APICallCount)
 	}
+}
+
+// reasoningExport builds an export in the layout `opencode export` writes: a
+// user prompt before each assistant message, which carries the given tokens
+// object verbatim.
+func reasoningExport(assistantTokens ...string) []byte {
+	msgs := make([]string, 0, 2*len(assistantTokens))
+	for i, tokens := range assistantTokens {
+		msgs = append(msgs,
+			fmt.Sprintf(`{"info":{"id":"msg_u%d","role":"user","time":{"created":%d}},"parts":[{"type":"text","text":"Synthetic prompt"}]}`, i, 10*i),
+			fmt.Sprintf(`{"info":{"id":"msg_a%d","role":"assistant","time":{"created":%d,"completed":%d},"tokens":%s},"parts":[{"type":"text","text":"Synthetic reply"}]}`, i, 10*i+1, 10*i+2, tokens),
+		)
+	}
+	return []byte(`{"info":{"id":"ses_test"},"messages":[` + strings.Join(msgs, ",") + `]}`)
+}
+
+// TestCalculateTokenUsage_Reasoning pins that reasoning reaches the output
+// total exactly once, whichever way OpenCode stored it.
+func TestCalculateTokenUsage_Reasoning(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		tokens string
+		want   agent.TokenUsage
+	}{
+		{
+			name:   "stored apart from output (1.3.16 and later)",
+			tokens: `{"total":9552,"input":12,"output":200,"reasoning":40,"cache":{"read":9000,"write":300}}`,
+			want:   agent.TokenUsage{InputTokens: 12, OutputTokens: 240, CacheReadTokens: 9000, CacheCreationTokens: 300, APICallCount: 1},
+		},
+		{
+			name:   "already inside output (before 1.3.16)",
+			tokens: `{"total":9512,"input":12,"output":200,"reasoning":40,"cache":{"read":9000,"write":300}}`,
+			want:   agent.TokenUsage{InputTokens: 12, OutputTokens: 200, CacheReadTokens: 9000, CacheCreationTokens: 300, APICallCount: 1},
+		},
+		{
+			name:   "total matching neither layout",
+			tokens: `{"total":9999,"input":12,"output":200,"reasoning":40,"cache":{"read":9000,"write":300}}`,
+			want:   agent.TokenUsage{InputTokens: 12, OutputTokens: 240, CacheReadTokens: 9000, CacheCreationTokens: 300, APICallCount: 1},
+		},
+		{
+			name:   "no reasoning, total present",
+			tokens: `{"total":9175,"input":9130,"output":45,"reasoning":0,"cache":{"read":0,"write":0}}`,
+			want:   agent.TokenUsage{InputTokens: 9130, OutputTokens: 45, APICallCount: 1},
+		},
+		{
+			name:   "reasoning without total",
+			tokens: `{"input":12,"output":200,"reasoning":40,"cache":{"read":9000,"write":300}}`,
+			want:   agent.TokenUsage{InputTokens: 12, OutputTokens: 240, CacheReadTokens: 9000, CacheCreationTokens: 300, APICallCount: 1},
+		},
+		{
+			name:   "zero usage without total",
+			tokens: `{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}`,
+			want:   agent.TokenUsage{APICallCount: 1},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			usage, err := (&OpenCodeAgent{}).CalculateTokenUsage(reasoningExport(tt.tokens), 0)
+			require.NoError(t, err)
+			require.Equal(t, &tt.want, usage)
+		})
+	}
+}
+
+// TestCalculateTokenUsage_ReasoningFromOffset pins that a later slice counts
+// only its own messages' reasoning.
+func TestCalculateTokenUsage_ReasoningFromOffset(t *testing.T) {
+	t.Parallel()
+
+	export := reasoningExport(
+		`{"total":9552,"input":12,"output":200,"reasoning":40,"cache":{"read":9000,"write":300}}`,
+		`{"total":1235,"input":1000,"output":150,"reasoning":25,"cache":{"read":50,"write":10}}`,
+	)
+	usage, err := (&OpenCodeAgent{}).CalculateTokenUsage(export, 2)
+	require.NoError(t, err)
+	require.Equal(t, &agent.TokenUsage{
+		InputTokens: 1000, OutputTokens: 175, CacheReadTokens: 50, CacheCreationTokens: 10, APICallCount: 1,
+	}, usage)
 }
 
 func TestCalculateTokenUsage_EmptyData(t *testing.T) {
