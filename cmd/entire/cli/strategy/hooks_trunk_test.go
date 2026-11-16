@@ -548,15 +548,7 @@ func TestReinstallGitHooks_OutdatedTrunkChainKeepsUserLines(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			tf := newTrunkFixture(t, false, 0)
 			tc.plant(t, tf)
-			hook := filepath.Join(tf.dir, prePushHook)
-			data, err := os.ReadFile(hook)
-			if err != nil {
-				t.Fatal(err)
-			}
-			before := "echo user-before >> " + tf.log + "\n"
-			after := "echo user-after >> " + tf.log + "\n"
-			shebang, rest, _ := strings.Cut(string(data), "\n")
-			writeExec(t, hook, shebang+"\n"+before+rest+after)
+			before, after := addUserLines(t, tf)
 			tf.useAsGitHooks(t)
 
 			if got := CheckGitHookState(t.Context()); got != GitHooksOutdated {
@@ -568,21 +560,65 @@ func TestReinstallGitHooks_OutdatedTrunkChainKeepsUserLines(t *testing.T) {
 			if got := CheckGitHookState(t.Context()); got != GitHooksCurrent {
 				t.Fatalf("after ReinstallGitHooks, CheckGitHookState = %s, want GitHooksCurrent", hookStateName(got))
 			}
-			data, err = os.ReadFile(hook)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, want := range []string{before, after, chainCall(prePushHook, "")} {
-				if !strings.Contains(string(data), want) {
-					t.Fatalf("pre-push after ReinstallGitHooks lacks %q:\n%s", want, data)
-				}
-			}
-			const refs = "refs/heads/main 1111111111111111111111111111111111111111 refs/heads/main 2222222222222222222222222222222222222222"
-			code, got := tf.run("pre-push", refs+"\n", "origin", "url")
-			if code != 0 || !strings.Contains(got, "user-before") || !strings.Contains(got, "trunk pre-push origin url") || !strings.Contains(got, "user-after") {
-				t.Errorf("pre-push exited %d after running:\n%s\nwant the user's lines and Trunk as pre-push", code, got)
-			}
+			wantUserLinesKept(t, tf, before, after)
 		})
+	}
+}
+
+// Two setups can both find the chain outdated before either takes the hooks
+// lock. The one that runs second must find the hook already upgraded and
+// leave it alone, not rewrite it from scratch and drop the lines the first
+// one kept.
+func TestInstallHooks_QueuedTrunkUpgradeKeepsAnEarlierUpgrade(t *testing.T) {
+	tf := newTrunkFixture(t, false, 0)
+	plantPre3051TrunkChain(t, tf)
+	before, after := addUserLines(t, tf)
+	tf.useAsGitHooks(t)
+
+	specs := staleHookSpecs(tf.root, buildHookSpecs(bareEntireHookCmd))
+	for range 2 {
+		if _, err := installHooks(t.Context(), tf.lockRoot, tf.root, tf.dir, specs, backupClock); err != nil {
+			t.Fatalf("installHooks: %v", err)
+		}
+	}
+	wantUserLinesKept(t, tf, before, after)
+}
+
+// addUserLines adds a line to Entire's pre-push hook before the chain and
+// another after it, each logging to tf's log, and returns both.
+func addUserLines(t *testing.T, tf *trunkFixture) (before, after string) {
+	t.Helper()
+	hook := filepath.Join(tf.dir, prePushHook)
+	data, err := os.ReadFile(hook)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before = "echo user-before >> " + tf.log + "\n"
+	after = "echo user-after >> " + tf.log + "\n"
+	shebang, rest, _ := strings.Cut(string(data), "\n")
+	writeExec(t, hook, shebang+"\n"+before+rest+after)
+	return before, after
+}
+
+// wantUserLinesKept checks that pre-push still holds the user's lines around
+// the current chain, and that running it runs them and Trunk as pre-push.
+func wantUserLinesKept(t *testing.T, tf *trunkFixture, before, after string) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(tf.dir, prePushHook))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{before, after, chainCall(prePushHook, "")} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("pre-push lacks %q:\n%s", want, data)
+		}
+	}
+	const refs = "refs/heads/main 1111111111111111111111111111111111111111 refs/heads/main 2222222222222222222222222222222222222222"
+	code, got := tf.run("pre-push", refs+"\n", "origin", "url")
+	for _, want := range []string{"user-before", "trunk pre-push origin url", "user-after"} {
+		if code != 0 || !strings.Contains(got, want) {
+			t.Fatalf("pre-push exited %d after running:\n%s\nwant the user's lines and Trunk as pre-push", code, got)
+		}
 	}
 }
 
