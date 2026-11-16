@@ -24,10 +24,14 @@ import (
 )
 
 // agy's title/statusline hook pipes a state JSON to the configured command on
-// every agent state change. The context_window object is the ONLY surface
-// where agy exposes token usage — it never appears in transcripts or
-// lifecycle hook payloads. AppendStatusSnapshot persists those snapshots so
-// the lifecycle can compute per-checkpoint deltas later.
+// every agent state change. On older agy the context_window object is the only
+// surface where agy exposes token usage; it never appears in lifecycle hook
+// payloads. AppendStatusSnapshot persists those snapshots so the
+// lifecycle can compute per-checkpoint deltas later. Current agy (verified on 1.4.2) writes each
+// call's usage into the transcript (see tokens.go), which is read first: the
+// snapshot for a turn's last call can land after Stop, and total_input_tokens
+// tracks how full the context is rather than a running total. This source is
+// the fallback for transcripts without per-step usage.
 //
 // Totals are cumulative per conversation; current_usage is the latest API call.
 
