@@ -59,10 +59,11 @@ func ManagedGitHookNames() []string {
 type hookSpec struct {
 	name    string
 	content string
-	// outdatedTrunkChain, when set, is an earlier chain block in the installed
-	// hook and the only thing stale in it. installHooks then replaces just that
-	// block, so lines the user added to Entire's hook survive the upgrade.
-	outdatedTrunkChain string
+	// upgradeTrunkChain is set when the installed hook was stale only through
+	// an outdated Trunk chain. installHooks then checks the hook again under
+	// the hooks lock and replaces just that chain, so lines the user added to
+	// Entire's hook survive the upgrade.
+	upgradeTrunkChain bool
 }
 
 // GetGitDir returns the actual git directory path by delegating to git itself.
@@ -594,7 +595,12 @@ func classifyEntireHook(root *os.Root, hook string) (GitHookState, string) {
 	if err != nil {
 		return GitHooksAbsent, ""
 	}
-	content := string(data)
+	return classifyEntireHookContent(root, hook, string(data))
+}
+
+// classifyEntireHookContent is classifyEntireHook for content already read
+// from hook.
+func classifyEntireHookContent(root *os.Root, hook, content string) (GitHookState, string) {
 	if !strings.Contains(content, entireHookMarker) {
 		return GitHooksAbsent, ""
 	}
@@ -621,7 +627,7 @@ func classifyEntireHook(root *os.Root, hook string) (GitHookState, string) {
 // that block exactly as generated, once. A chain that is not Trunk's, or one
 // the user changed by hand (say, to source the backup themselves), stays
 // Current. Lines the user added outside the block are kept: ReinstallGitHooks
-// replaces only the block (see migrateTrunkChain).
+// replaces only the block (see trunkChainUpgrade).
 func outdatedTrunkChain(root *os.Root, hook, content string) string {
 	for _, block := range legacyTrunkChainCalls(hook) {
 		if strings.Count(content, block) != 1 {
@@ -658,23 +664,26 @@ func grepTrunkProbe(backup string) string {
 	return "        if grep -qxF " + shellQuote(trunkHookCallback) + ` "$_entire_hook_dir/` + backup + `" 2>/dev/null; then`
 }
 
-// migrateTrunkChain returns the installed hook with spec's outdated Trunk
-// chain block replaced by the current chain, leaving every other line as it
-// is. It reports false when spec carries no such block or the hook no longer
-// holds it exactly once; installHooks then writes the hook it generates.
-func migrateTrunkChain(root *os.Root, spec hookSpec) (string, bool) {
-	if spec.outdatedTrunkChain == "" {
-		return "", false
-	}
-	data, err := osroot.ReadFileNoFollow(root, spec.name)
+// trunkChainUpgrade reads hook again, under the hooks lock, and returns what
+// installHooks should write to upgrade its Trunk chain: the hook with its
+// outdated chain block replaced by the current chain and every other line
+// kept, or the hook unchanged when it is already Current, as when another
+// setup upgraded it first. It reports false when the hook is now stale for
+// another reason, and installHooks then writes the hook it generates.
+func trunkChainUpgrade(root *os.Root, hook string) (string, bool) {
+	data, err := osroot.ReadFileNoFollow(root, hook)
 	if err != nil {
 		return "", false
 	}
 	content := string(data)
-	if strings.Count(content, spec.outdatedTrunkChain) != 1 {
-		return "", false
+	state, block := classifyEntireHookContent(root, hook, content)
+	switch {
+	case block != "":
+		return strings.Replace(content, block, chainCall(hook, chainRedirect(hook)), 1), true
+	case state == GitHooksCurrent:
+		return content, true
 	}
-	return strings.Replace(content, spec.outdatedTrunkChain, chainCall(spec.name, chainRedirect(spec.name)), 1), true
+	return "", false
 }
 
 // maxTrunkCallbackBackup is well above Trunk's launcher (about 1.5KiB) and
@@ -1027,7 +1036,7 @@ func installGitHooks(ctx context.Context, silent, absolutePath, onlyStale bool) 
 // in removeHooks. A lock another Entire process HOLDS still stops it.
 // staleHookSpecs keeps the specs whose installed hooks are not Current. A
 // hook that is stale only through an outdated Trunk chain keeps the rest of
-// its file: its spec carries the chain block, which installHooks replaces.
+// its file: its spec is marked, and installHooks replaces just the chain.
 func staleHookSpecs(root *os.Root, specs []hookSpec) []hookSpec {
 	stale := make([]hookSpec, 0, len(specs))
 	for _, spec := range specs {
@@ -1035,19 +1044,21 @@ func staleHookSpecs(root *os.Root, specs []hookSpec) []hookSpec {
 		if state == GitHooksCurrent {
 			continue
 		}
-		spec.outdatedTrunkChain = block
+		spec.upgradeTrunkChain = block != ""
 		stale = append(stale, spec)
 	}
 	return stale
 }
 
 // installedHookContent is the hook installHooks writes for spec: the
-// installed hook with only its outdated Trunk chain replaced when spec carries
-// one, else spec's hook chained to the backup, unless the backup is Entire's
-// own hook, which would call itself.
+// installed hook with only its outdated Trunk chain replaced when spec is
+// marked for that, else spec's hook chained to the backup, unless the backup
+// is Entire's own hook, which would call itself.
 func installedHookContent(root *os.Root, spec hookSpec) string {
-	if migrated, ok := migrateTrunkChain(root, spec); ok {
-		return migrated
+	if spec.upgradeTrunkChain {
+		if content, ok := trunkChainUpgrade(root, spec.name); ok {
+			return content
+		}
 	}
 	backupName := spec.name + backupSuffix
 	if hookFileExists(root, backupName) && !carriesEntireMarker(root, backupName) {
