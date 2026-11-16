@@ -20,7 +20,9 @@ import (
 type HookRunner struct {
 	RepoDir          string
 	ClaudeProjectDir string
-	T                interface {
+	// Env is appended to the environment of the Claude hooks it runs.
+	Env []string
+	T   interface {
 		Helper()
 		Fatalf(format string, args ...interface{})
 		Logf(format string, args ...interface{})
@@ -314,6 +316,7 @@ func (r *HookRunner) runHookInRepoDirWithExtraEnv(hookName string, inputJSON []b
 	cmd.Env = append(testutil.GitIsolatedEnv(),
 		"ENTIRE_TEST_CLAUDE_PROJECT_DIR="+r.ClaudeProjectDir,
 	)
+	cmd.Env = append(cmd.Env, r.Env...)
 	cmd.Env = append(cmd.Env, extraEnv...)
 
 	output, err := cmd.CombinedOutput()

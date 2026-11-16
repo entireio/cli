@@ -97,6 +97,11 @@ tier 1 passes, and then only when it resolves to `caller-env` or `ancestry`.
 
 **`IsCaller()` guards one command so far, and `session adopt` is the open half of this work.** The hidden `entire checkpoint create`, run without a session ID, acts only on a caller-identified session and refuses every other tier without naming the guess, since a printed ID would be fed straight back as an explicit one. `session adopt` — the command whose damage motivated the tiering, since it moves a session and resets its checkpoint bookkeeping — does not consult it. Its own checks are narrower than a most-recent guess (an explicit `--from`, and auto-selection scoped to that worktree's recent adoptable sessions) but none of them asks "is this session mine": `sessionBelongsToSourceWorktree` only checks that the ID and the worktree agree with each other, which the weak tiers' output satisfies by construction. Reaching it does not even need `session current`, since `adopt --from <path>` with one recent session there auto-adopts. Wiring the guard is a separate change with its own question to settle — what "mine" means for a `--from` on another machine, where ancestry cannot apply.
 
+**Commit hooks consult it for agent commits in another repository**
+(`resolveForeignCallerSession`): indexed foreign sessions are ranked together
+with the committing repository's own, and only an `IsCaller()`, tracked
+foreign winner links.
+
 **Tier 1 is per-agent and declarative.** An agent implements
 `agent.CallerSessionIdentifier` by naming the variable it publishes
 (`CallerSessionEnvVar`), and the `agent` package does the reading and

@@ -78,6 +78,17 @@ func TestNewStateStoreForWorktree_RefusesUnisolatedAndEmptyRoots(t *testing.T) {
 	require.Error(t, err, "an empty root silently resolves from CWD — the exact leak shape")
 }
 
+func TestNewStateStoreForCommonDir_RefusesUnusableDirs(t *testing.T) {
+	t.Parallel()
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	unclean := t.TempDir() + string(filepath.Separator) + "a" + string(filepath.Separator) + ".." + string(filepath.Separator) + ".git"
+	for _, dir := range []string{"", ".git", unclean, filepath.Join(cwd, ".git")} {
+		_, err := NewStateStoreForCommonDir(dir)
+		require.Error(t, err, "common dir %q must be refused", dir)
+	}
+}
+
 func TestState_CondensationAttemptLifecycle(t *testing.T) {
 	t.Parallel()
 
@@ -1374,6 +1385,30 @@ func TestState_HasPendingWork(t *testing.T) {
 			assert.Equal(t, tt.want, tt.state.HasPendingWork())
 		})
 	}
+}
+
+func TestStateStore_LoadReadOnly_KeepsStaleRecord(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	interacted := time.Now().Add(-2 * StaleSessionThreshold)
+	stale := &State{
+		SessionID:           "stale-session",
+		BaseCommit:          "def456",
+		StartedAt:           time.Now().Add(-3 * StaleSessionThreshold),
+		LastInteractionTime: &interacted,
+	}
+	require.True(t, stale.IsStale(), "Load would delete this record")
+	stateDir := filepath.Join(t.TempDir(), "entire-sessions")
+	require.NoError(t, os.MkdirAll(stateDir, 0o750))
+	store := NewStateStoreWithDir(stateDir)
+	require.NoError(t, store.Save(ctx, stale))
+	loaded, err := store.LoadReadOnly(ctx, "stale-session")
+	require.NoError(t, err)
+	require.NotNil(t, loaded, "LoadReadOnly should return the stale record")
+	assert.Equal(t, "stale-session", loaded.SessionID)
+	_, err = os.Stat(filepath.Join(stateDir, "stale-session.json"))
+	assert.NoError(t, err, "LoadReadOnly must not delete the stale record")
 }
 
 func TestClaimChildCallCredit(t *testing.T) {

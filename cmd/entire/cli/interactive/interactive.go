@@ -46,6 +46,22 @@ func CanPromptInteractively() bool {
 	if testing.Testing() {
 		return false
 	}
+	return canPromptWithoutOverride()
+}
+
+// PersonAtTerminal is CanPromptInteractively for a gate that grants trust,
+// such as an opt-in an agent must not give itself. Outside tests it ignores
+// EnvTestTTY: any caller can set that variable, so honoring it in a release
+// binary would let one walk straight past the terminal check.
+func PersonAtTerminal() bool {
+	if testing.Testing() {
+		return CanPromptInteractively()
+	}
+	return canPromptWithoutOverride()
+}
+
+// canPromptWithoutOverride is CanPromptInteractively from step 3 on.
+func canPromptWithoutOverride() bool {
 	if isAgentSubprocessEnv() {
 		return false
 	}

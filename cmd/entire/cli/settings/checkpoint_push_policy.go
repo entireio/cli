@@ -60,7 +60,7 @@ func LoadCheckpointPushPolicy(ctx context.Context) (CheckpointPushPolicy, error)
 // does not recognize is an error so callers can fail closed: it may be a
 // stricter policy written by a newer binary.
 func LoadCheckpointPushPolicyAt(commonDir string) (CheckpointPushPolicy, error) {
-	root, name, filePath, err := checkpointPushPolicyRoot(commonDir)
+	root, name, filePath, err := cloneFileRoot(commonDir, CheckpointPushPolicyFile)
 	if err != nil {
 		return "", fmt.Errorf("read checkpoint push policy: %w", err)
 	}
@@ -109,17 +109,11 @@ func CheckpointPushPolicyStored(ctx context.Context) (bool, error) {
 }
 
 func checkpointPushPolicyStoredAt(commonDir string) (bool, error) {
-	root, name, _, err := checkpointPushPolicyRoot(commonDir)
+	stored, err := cloneFileStored(commonDir, CheckpointPushPolicyFile)
 	if err != nil {
 		return false, fmt.Errorf("read checkpoint push policy: %w", err)
 	}
-	if _, err := root.Lstat(name); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return false, nil
-		}
-		return false, fmt.Errorf("read checkpoint push policy: %w", err)
-	}
-	return true, nil
+	return stored, nil
 }
 
 func saveCheckpointPushPolicyAt(commonDir string, policy CheckpointPushPolicy) error {
@@ -135,35 +129,61 @@ func writeCheckpointPushPolicy(commonDir string, policy CheckpointPushPolicy, on
 	if _, err := ParseCheckpointPushPolicy(string(policy)); err != nil {
 		return false, err
 	}
-	root, name, _, err := checkpointPushPolicyRoot(commonDir)
+	wrote, err := writeCloneFile(commonDir, CheckpointPushPolicyFile, []byte(string(policy)+"\n"), onlyIfUnset)
 	if err != nil {
 		return false, fmt.Errorf("save checkpoint push policy: %w", err)
 	}
-	if err := osroot.MkdirAllNoSymlink(root, path.Dir(name), 0o750); err != nil {
-		return false, fmt.Errorf("save checkpoint push policy: create directory: %w", err)
-	}
-	release, err := flock.AcquireIn(root, name+".lock")
-	if err != nil {
-		return false, fmt.Errorf("save checkpoint push policy: lock: %w", err)
-	}
-	defer release()
-	if onlyIfUnset {
-		stored, err := checkpointPushPolicyStoredAt(commonDir)
-		if err != nil || stored {
-			return false, err
-		}
-	}
-	if err := jsonutil.WriteFileAtomicIn(root, name, []byte(string(policy)+"\n"), 0o644); err != nil {
-		return false, fmt.Errorf("save checkpoint push policy: %w", err)
-	}
-	return true, nil
+	return wrote, nil
 }
 
-func checkpointPushPolicyRoot(commonDir string) (*os.Root, string, string, error) {
-	filePath := filepath.Join(commonDir, CheckpointPushPolicyFile)
+// cloneFileRoot opens the git common dir for rel, one of the clone's own
+// files kept outside settings (see CheckpointPushPolicyFile).
+func cloneFileRoot(commonDir, rel string) (*os.Root, string, string, error) {
+	filePath := filepath.Join(commonDir, rel)
 	root, name, err := gitdir.OpenPathIn(commonDir, filePath)
 	if err != nil {
 		return nil, "", "", fmt.Errorf("open git common dir: %w", err)
 	}
 	return root, name, filePath, nil
+}
+
+func cloneFileStored(commonDir, rel string) (bool, error) {
+	root, name, _, err := cloneFileRoot(commonDir, rel)
+	if err != nil {
+		return false, err
+	}
+	if _, err := root.Lstat(name); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, err //nolint:wrapcheck // callers name the file
+	}
+	return true, nil
+}
+
+// writeCloneFile replaces rel with data under rel's lock, or, with
+// onlyIfUnset, leaves an existing file alone and reports false.
+func writeCloneFile(commonDir, rel string, data []byte, onlyIfUnset bool) (bool, error) {
+	root, name, _, err := cloneFileRoot(commonDir, rel)
+	if err != nil {
+		return false, err
+	}
+	if err := osroot.MkdirAllNoSymlink(root, path.Dir(name), 0o750); err != nil {
+		return false, fmt.Errorf("create directory: %w", err)
+	}
+	release, err := flock.AcquireIn(root, name+".lock")
+	if err != nil {
+		return false, fmt.Errorf("lock: %w", err)
+	}
+	defer release()
+	if onlyIfUnset {
+		stored, err := cloneFileStored(commonDir, rel)
+		if err != nil || stored {
+			return false, err
+		}
+	}
+	if err := jsonutil.WriteFileAtomicIn(root, name, data, 0o644); err != nil {
+		return false, err //nolint:wrapcheck // callers name the file
+	}
+	return true, nil
 }
