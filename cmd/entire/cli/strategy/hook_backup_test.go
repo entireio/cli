@@ -80,7 +80,12 @@ type hooksFixture struct {
 
 func newHooksFixture(t *testing.T) *hooksFixture {
 	t.Helper()
-	dir := t.TempDir()
+	return newHooksFixtureAt(t, t.TempDir())
+}
+
+// newHooksFixtureAt is newHooksFixture for a hooks dir the test laid out.
+func newHooksFixtureAt(t *testing.T, dir string) *hooksFixture {
+	t.Helper()
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -599,10 +604,20 @@ func TestChainedPrePush_EntireFailureAbortsPush(t *testing.T) {
 // the kernel refuses to exec the file until that child execs. os/exec does not
 // retry, so without this the race reads as a failed hook.
 func runHook(ctx context.Context, bin, hook string, args ...string) ([]byte, error) {
+	return runHookIn(ctx, "", "", bin+string(os.PathListSeparator)+os.Getenv("PATH"), hook, args...)
+}
+
+// runHookIn is runHook from working directory dir (the test's own when empty),
+// with stdin as git would pass it (none when empty) and path as the whole PATH.
+func runHookIn(ctx context.Context, dir, stdin, path, hook string, args ...string) ([]byte, error) {
 	for attempt := 1; ; attempt++ {
 		cmd := exec.CommandContext(ctx, hook, args...)
+		cmd.Dir = dir
+		if stdin != "" {
+			cmd.Stdin = strings.NewReader(stdin)
+		}
 		cmd.WaitDelay = time.Second
-		cmd.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+		cmd.Env = append(os.Environ(), "PATH="+path)
 		out, err := cmd.CombinedOutput()
 		if !errors.Is(err, syscall.ETXTBSY) || attempt == 5 {
 			return out, err
