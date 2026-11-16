@@ -347,6 +347,49 @@ func TestReinstallGitHooks_Pre3051TrunkChainIsOutdated(t *testing.T) {
 	}
 }
 
+// Lines the user added to Entire's own hook, before or after the chain, must
+// survive the upgrade: ReinstallGitHooks replaces only the outdated chain
+// block, since a hook carrying Entire's marker is otherwise rewritten without
+// a backup.
+func TestReinstallGitHooks_OutdatedTrunkChainKeepsUserLines(t *testing.T) {
+	tf := newTrunkFixture(t, false, 0)
+	plantPre3051TrunkChain(t, tf)
+	hook := filepath.Join(tf.dir, prePushHook)
+	data, err := os.ReadFile(hook)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := "echo user-before >> " + tf.log + "\n"
+	after := "echo user-after >> " + tf.log + "\n"
+	shebang, rest, _ := strings.Cut(string(data), "\n")
+	writeExec(t, hook, shebang+"\n"+before+rest+after)
+	tf.useAsGitHooks(t)
+
+	if got := CheckGitHookState(t.Context()); got != GitHooksOutdated {
+		t.Fatalf("CheckGitHookState = %v, want GitHooksOutdated", got)
+	}
+	if _, err := ReinstallGitHooks(t.Context()); err != nil {
+		t.Fatalf("ReinstallGitHooks: %v", err)
+	}
+	if got := CheckGitHookState(t.Context()); got != GitHooksCurrent {
+		t.Fatalf("after ReinstallGitHooks, CheckGitHookState = %v, want GitHooksCurrent", got)
+	}
+	data, err = os.ReadFile(hook)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{before, after, chainCall(prePushHook, "")} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("pre-push after ReinstallGitHooks lacks %q:\n%s", want, data)
+		}
+	}
+	const refs = "refs/heads/main 1111111111111111111111111111111111111111 refs/heads/main 2222222222222222222222222222222222222222"
+	code, got := tf.run("pre-push", refs+"\n", "origin", "url")
+	if code != 0 || !strings.Contains(got, "user-before") || !strings.Contains(got, "trunk pre-push origin url") || !strings.Contains(got, "user-after") {
+		t.Errorf("pre-push exited %d after running:\n%s\nwant the user's lines and Trunk as pre-push", code, got)
+	}
+}
+
 // With Trunk's hooks symlinked to one launcher, the backups are links out of
 // the hooks dir, which the Outdated check does not follow. Such an install
 // keeps the old chain until entire enable, which rewrites every hook.
