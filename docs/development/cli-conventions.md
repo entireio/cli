@@ -738,10 +738,18 @@ always runnable in every build.
   The text line then says `Invited … No access until they accept` with the
   invitation id and expiry, and `--json` emits the 202 body (`status:
   "invited"`, `invitation_id`, `expires_at`) where a grant emits its 201 body.
-  An invitation is a success for the exit code; a picker run ends with a
-  `N granted, N invited` tally that says so. Refusals (open invitation with
+  An invitation is a success for the exit code. Refusals (open invitation with
   another role, SSO-only org, invitation mail cooldown, already a member) are
-  Core's problem `detail`, prefixed with the grantee in a picker run.
+  Core's problem `detail`. A typed grantee's refusal is the command's error. A
+  picker run **continues past a refusal**, because each is a condition of that
+  person: it prints `✗ <grantee> was not added to <scope>: <detail>` on stderr
+  and moves on. It stops only at a failure that would repeat for every grantee
+  (`grantFailureIsFatal`: 401, a 403 other than `sso-required`, an unfollowed
+  421, 5xx, and anything that is not a Core problem response, such as a
+  transport failure). It ends with a `N granted, N invited, N refused` tally
+  (`N failed, N not attempted` after a fatal failure) and exits 1 unless
+  everyone was granted or invited. `--json` prints the array of what landed;
+  refusals and the tally go to stderr.
 
   **`org grant add` has no picker** (`candidates` is nil, which also keeps it at
   two required args): everyone eligible is by definition absent from the only

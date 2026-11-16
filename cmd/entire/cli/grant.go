@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"strings"
 
@@ -295,26 +296,36 @@ func unexpectedGrantResponse(res any) error {
 	return fmt.Errorf("unexpected response %T from the control plane", res)
 }
 
-// grantEach grants every pair in turn. On a failure it stops and returns,
-// having reported the grants that already landed: those are real, and the CLI
-// cannot undo them, so the user needs to know which ones to skip on a retry.
+// grantEach grants every pair in turn. A typed grantee is one add, and its
+// failure is the command's error as for any other mutation.
+//
+// A set (the picker) continues past a grantee Core refuses: already a member,
+// another role's invitation open, single sign-on required, an invitation sent
+// too recently — conditions of that person, which say nothing about the next
+// one. Each refusal is named on its own line, with Core's reason. The set
+// stops only at a failure that would repeat for every grantee (see
+// grantFailureIsFatal), and the tally counts who was not attempted.
 //
 // An invitation is a success: the add did what it could, and the account gets
-// access once it accepts. Only a refused or failed add makes the command fail.
-// A run of several also ends with a tally, which says so.
+// access once it accepts. The command fails when any grantee was refused or a
+// failure stopped the set; the lines already printed are its report, so the
+// returned error is silent.
 func grantEach[Row any](ctx context.Context, cmd *cobra.Command, c *coreapi.Client, t grantTarget[Row], pt grantPickerTarget, id string, picked []grantSelection, single bool) error {
 	wires := make([]any, 0, len(picked))
 	var tally grantTally
 	for i, p := range picked {
 		outcome, err := grantOne(ctx, c, t, id, p)
 		if err != nil {
-			if !single {
-				// A set needs to say which grantee failed; Core's reason alone does not.
-				err = fmt.Errorf("%s was not added to %s: %w", displayGranteeName(p.handle), pt.describe(), renderCoreError(err))
-				tally.refused, tally.skipped = 1, len(picked)-i-1
-				tally.report(cmd)
+			if single {
+				return errors.Join(err, emitGrantJSON(cmd, wires, single))
 			}
-			return errors.Join(err, emitGrantJSON(cmd, wires, single))
+			fmt.Fprintf(cmd.ErrOrStderr(), "✗ %s was not added to %s: %v\n", displayGranteeName(p.handle), pt.describe(), renderCoreError(err))
+			if grantFailureIsFatal(err) {
+				tally.failed, tally.skipped = 1, len(picked)-i-1
+				break
+			}
+			tally.refused++
+			continue
 		}
 		wires = append(wires, outcome.wire)
 		if outcome.invited != nil {
@@ -326,10 +337,17 @@ func grantEach[Row any](ctx context.Context, cmd *cobra.Command, c *coreapi.Clie
 			fmt.Fprintln(cmd.OutOrStdout(), grantOutcomeLine(p.handle, pt, outcome))
 		}
 	}
-	if !single {
-		tally.report(cmd)
+	if single {
+		return emitGrantJSON(cmd, wires, single)
 	}
-	return emitGrantJSON(cmd, wires, single)
+	tally.report(cmd)
+	if err := emitGrantJSON(cmd, wires, single); err != nil {
+		return err
+	}
+	if tally.refused+tally.failed > 0 {
+		return NewSilentError(fmt.Errorf("%d of %d grantees were not added to %s", tally.refused+tally.failed+tally.skipped, len(picked), pt.describe()))
+	}
+	return nil
 }
 
 func grantOne[Row any](ctx context.Context, c *coreapi.Client, t grantTarget[Row], id string, p grantSelection) (grantOutcome, error) {
@@ -338,6 +356,43 @@ func grantOne[Row any](ctx context.Context, c *coreapi.Client, t grantTarget[Row
 		return grantOutcome{}, err
 	}
 	return t.grant(ctx, c, id, provider, providerUserID, p.role)
+}
+
+// problemTypeSSORequired is Core's 403 for an invitation into an organization
+// that admits accounts only through its single sign-on.
+const problemTypeSSORequired = "https://entire.com/errors/invitation/sso-required"
+
+// grantFailureIsFatal reports a failed add that would fail the same way for
+// every other grantee in the set, so trying them only repeats it:
+//
+//   - 401: the caller is not authenticated;
+//   - 403 without the sso-required type: the caller may not manage the scope
+//     (or the caller itself is outside the org's single sign-on);
+//   - 421: the scope lives on another core and the redirect was not followed;
+//   - 5xx: Core or the authorization service is failing;
+//   - any failure that is not a Core problem response: transport, credentials,
+//     a cancelled context, an error body that does not decode (a text/plain
+//     rate limit, or a 5xx with no body), or a response the client does not
+//     model.
+//
+// Everything else is about the grantee: 400 and 422, 404 (the scope was
+// resolved just before the set began, so a 404 here is the grantee's account
+// or identity), 409 (already a member, another role's invitation open), 429
+// (invitation mail to that account is cooling down), the sso-required 403
+// (that account cannot be invited), and a handle that names no identity.
+func grantFailureIsFatal(err error) bool {
+	status := coreapi.APIErrorStatus(err)
+	switch {
+	case status == 0:
+		var unresolved *granteeUnresolvedError
+		return !errors.As(err, &unresolved)
+	case status == http.StatusUnauthorized, status == http.StatusMisdirectedRequest, status >= http.StatusInternalServerError:
+		return true
+	case status == http.StatusForbidden:
+		return coreapi.APIErrorType(err) != problemTypeSSORequired
+	default:
+		return false
+	}
 }
 
 // grantOutcomeLine is the text line for one add. An invitation is worded so it
@@ -353,8 +408,10 @@ func grantOutcomeLine(handle string, pt grantPickerTarget, o grantOutcome) strin
 }
 
 // grantTally counts a set's outcomes for the closing line of a picker run.
+// failed is the one failure that stopped the set, and skipped the grantees
+// after it.
 type grantTally struct {
-	granted, invited, refused, skipped int
+	granted, invited, refused, failed, skipped int
 }
 
 // report writes the tally where the per-grantee lines went, or to stderr under
@@ -366,7 +423,10 @@ func (g grantTally) report(cmd *cobra.Command) {
 	}
 	line := fmt.Sprintf("%d granted, %d invited", g.granted, g.invited)
 	if g.refused > 0 {
-		line += fmt.Sprintf(", %d failed, %d not attempted", g.refused, g.skipped)
+		line += fmt.Sprintf(", %d refused", g.refused)
+	}
+	if g.failed > 0 {
+		line += fmt.Sprintf(", %d failed, %d not attempted", g.failed, g.skipped)
 	}
 	if g.invited > 0 {
 		line += " (an invitation counts as done: access starts when it is accepted)"

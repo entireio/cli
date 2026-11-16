@@ -501,8 +501,11 @@ func TestGrantPicker_FixedRoleIsNotPrompted(t *testing.T) {
 }
 
 // TestGrantPicker_PartialFailureStopsAndReports: a failure part-way through
-// leaves the earlier grants in place and says so, rather than rolling back a
-// server-side change the CLI cannot undo or swallowing the error.
+// that would repeat for every grantee (a 500 with no problem body) stops the
+// set, leaves the earlier grants in place and says so, rather than rolling
+// back a server-side change the CLI cannot undo or swallowing the error. A
+// refusal about one grantee does not stop it: see
+// TestGrantPicker_RefusalsDoNotStopTheSet.
 //
 // Not parallel: swaps the activeCoreClient and grantPicker seams.
 func TestGrantPicker_PartialFailureStopsAndReports(t *testing.T) {

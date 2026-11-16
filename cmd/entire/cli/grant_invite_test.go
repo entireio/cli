@@ -1,11 +1,14 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -231,80 +234,212 @@ func withHeader(r addReply, key, value string) addReply {
 	return r
 }
 
-// TestGrantPicker_MixedOutcomes: a picker run whose grantees are granted,
-// invited and refused reports each, names the refused grantee, tallies the
-// set, and fails because of the refusal alone. A run that only grants and
-// invites succeeds.
+// pickerAddServer serves a project picker run whose pool is members, and
+// answers each grantee's add with reply, keyed by provider user id
+// ("uid-<handle>"). It returns the server and the adds' recorder.
+func pickerAddServer(t *testing.T, members []coreapi.OrgMemberListItem, reply func(providerUserID string) addReply) (*httptest.Server, *addCore) {
+	t.Helper()
+	var unused []string
+	pool := pickerServer(t, pickerFixture{members: members}, &unused, nil)
+	t.Cleanup(pool.Close)
+	core, adds := newAddCore(t, reply)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost || strings.Contains(r.URL.Path, "/identity/handles/") {
+			adds.Config.Handler.ServeHTTP(w, r)
+			return
+		}
+		pool.Config.Handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, core
+}
+
+// pickAll answers the picker with every handle, each as reader.
+func pickAll(t *testing.T, handles ...string) {
+	t.Helper()
+	capturePicker(t, func([]grantCandidate, []string, string) ([]grantSelection, error) {
+		sel := make([]grantSelection, 0, len(handles))
+		for _, h := range handles {
+			sel = append(sel, grantSelection{handle: h, role: "reader"})
+		}
+		return sel, nil
+	})
+}
+
+func pickerMembers(handles ...string) []coreapi.OrgMemberListItem {
+	out := make([]coreapi.OrgMemberListItem, 0, len(handles))
+	for _, h := range handles {
+		out = append(out, member(h, "acct-"+h))
+	}
+	return out
+}
+
+const (
+	roleMismatchType   = "https://entire.com/errors/invitation/role-mismatch"
+	roleMismatchDetail = "an invitation with another role is open; revoke it first"
+)
+
+// TestGrantPicker_RefusalsDoNotStopTheSet: a picker run attempts every
+// grantee. Each one Core refuses is named on stderr with its reason, the
+// others are granted or invited, the tally counts all four outcomes, and the
+// command fails because someone was refused.
 //
 // Not parallel: swaps the activeCoreClient and grantPicker seams.
-func TestGrantPicker_MixedOutcomes(t *testing.T) {
+func TestGrantPicker_RefusalsDoNotStopTheSet(t *testing.T) {
+	reply := func(uid string) addReply {
+		switch uid {
+		case "uid-bob":
+			return replyJSON(http.StatusAccepted, invitedBody)
+		case "uid-carol":
+			return replyProblem(http.StatusConflict, roleMismatchType, roleMismatchDetail)
+		case "uid-erin":
+			return replyProblem(http.StatusConflict, "", "already a member")
+		default:
+			return replyJSON(http.StatusCreated, grantedBody)
+		}
+	}
+	handles := []string{"github:alice", "github:bob", "github:carol", "github:dave", "github:erin"}
+	srv, core := pickerAddServer(t, pickerMembers(handles...), reply)
+	pickAll(t, handles...)
+	project := "project " + pickerProjULID
+
+	out, errOut, err := runPickerCmd(t, newProjectGrantCmd, srv.URL, pickerProjULID)
+
+	var silent *SilentError
+	require.ErrorAs(t, err, &silent, "the lines already printed are the report")
+	require.EqualError(t, err, "2 of 5 grantees were not added to "+project)
+	paths, _ := core.recorded()
+	require.Len(t, paths, 5, "every grantee is attempted")
+	require.Equal(t, strings.Join([]string{
+		"✓ Granted github:alice reader access to " + project,
+		"✓ Invited github:bob to " + project + " as reader (" + inviteID + "). No access until they accept; the invitation expires 2026-11-20.",
+		"✓ Granted github:dave reader access to " + project,
+		"2 granted, 1 invited, 2 refused (an invitation counts as done: access starts when it is accepted)",
+	}, "\n")+"\n", out)
+	require.True(t, strings.HasPrefix(errOut, strings.Join([]string{
+		"✗ github:carol was not added to " + project + ": " + roleMismatchDetail,
+		"✗ github:erin was not added to " + project + ": already a member",
+	}, "\n")+"\n"), errOut)
+}
+
+// TestGrantPicker_FatalFailureStopsTheSet: a failure that would repeat for
+// every grantee (here the caller may not manage the project) stops the set,
+// and the tally counts who was not attempted.
+//
+// Not parallel: swaps the activeCoreClient and grantPicker seams.
+func TestGrantPicker_FatalFailureStopsTheSet(t *testing.T) {
 	reply := func(uid string) addReply {
 		switch uid {
 		case "uid-alice":
 			return replyJSON(http.StatusCreated, grantedBody)
 		case "uid-bob":
-			return replyJSON(http.StatusAccepted, invitedBody)
+			return replyProblem(http.StatusConflict, "", "already a member")
 		default:
-			return replyProblem(http.StatusConflict, "https://entire.com/errors/invitation/role-mismatch", "an invitation with another role is open; revoke it first")
+			return replyProblem(http.StatusForbidden, "", "permission denied")
 		}
 	}
-	members := []coreapi.OrgMemberListItem{
-		member("github:alice", "acct-a"), member("github:bob", "acct-b"),
-		member("github:carol", "acct-c"), member("github:dave", "acct-d"),
-	}
-	run := func(t *testing.T, picked []string, extra ...string) (string, string, []string, error) {
-		t.Helper()
-		var unused []string
-		pool := pickerServer(t, pickerFixture{members: members}, &unused, nil)
-		t.Cleanup(pool.Close)
-		core, adds := newAddCore(t, reply)
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method == http.MethodPost || strings.Contains(r.URL.Path, "/identity/handles/") {
-				adds.Config.Handler.ServeHTTP(w, r)
-				return
-			}
-			pool.Config.Handler.ServeHTTP(w, r)
-		}))
-		t.Cleanup(srv.Close)
-		capturePicker(t, func([]grantCandidate, []string, string) ([]grantSelection, error) {
-			sel := make([]grantSelection, 0, len(picked))
-			for _, h := range picked {
-				sel = append(sel, grantSelection{handle: h, role: "reader"})
-			}
-			return sel, nil
-		})
-		out, errOut, err := runPickerCmd(t, newProjectGrantCmd, srv.URL, pickerProjULID, extra...)
-		paths, _ := core.recorded()
-		return out, errOut, paths, err
-	}
+	handles := []string{"github:alice", "github:bob", "github:carol", "github:dave", "github:erin"}
+	srv, core := pickerAddServer(t, pickerMembers(handles...), reply)
+	pickAll(t, handles...)
 	project := "project " + pickerProjULID
 
-	t.Run("granted, invited, refused, not attempted", func(t *testing.T) {
-		out, _, paths, err := run(t, []string{"github:alice", "github:bob", "github:carol", "github:dave"})
-		require.EqualError(t, err, "github:carol was not added to "+project+": an invitation with another role is open; revoke it first")
-		require.Len(t, paths, 3, "the walk stops at the refusal")
-		require.Equal(t, strings.Join([]string{
-			"✓ Granted github:alice reader access to " + project,
-			"✓ Invited github:bob to " + project + " as reader (" + inviteID + "). No access until they accept; the invitation expires 2026-11-20.",
-			"1 granted, 1 invited, 1 failed, 1 not attempted (an invitation counts as done: access starts when it is accepted)",
-		}, "\n")+"\n", out)
-	})
+	out, errOut, err := runPickerCmd(t, newProjectGrantCmd, srv.URL, pickerProjULID)
 
-	t.Run("granted and invited succeed", func(t *testing.T) {
-		out, _, _, err := run(t, []string{"github:alice", "github:bob"})
-		require.NoError(t, err)
-		require.True(t, strings.HasSuffix(out, "1 granted, 1 invited (an invitation counts as done: access starts when it is accepted)\n"), out)
-	})
+	require.EqualError(t, err, "4 of 5 grantees were not added to "+project)
+	paths, _ := core.recorded()
+	require.Len(t, paths, 3, "the set stops at the 403")
+	require.Equal(t, "✓ Granted github:alice reader access to "+project+"\n1 granted, 0 invited, 1 refused, 1 failed, 2 not attempted\n", out)
+	require.Contains(t, errOut, "✗ github:bob was not added to "+project+": already a member\n✗ github:carol was not added to "+project+": permission denied\n")
+}
 
-	t.Run("--json keeps the tally off stdout", func(t *testing.T) {
-		out, errOut, _, err := run(t, []string{"github:alice", "github:bob", "github:carol"}, "--json")
-		require.Error(t, err)
-		var got []map[string]any
-		require.NoError(t, json.Unmarshal([]byte(out), &got), out)
-		require.Len(t, got, 2)
-		require.Equal(t, "granted", got[0]["status"])
-		require.Equal(t, "invited", got[1]["status"])
-		require.Equal(t, inviteID, got[1]["invitation_id"])
-		require.Contains(t, errOut, fmt.Sprintf("%d granted, %d invited, %d failed", 1, 1, 1))
-	})
+// TestGrantPicker_GrantedAndInvitedSucceed: an invitation is a success, so a
+// set that only grants and invites exits 0.
+//
+// Not parallel: swaps the activeCoreClient and grantPicker seams.
+func TestGrantPicker_GrantedAndInvitedSucceed(t *testing.T) {
+	reply := func(uid string) addReply {
+		if uid == "uid-bob" {
+			return replyJSON(http.StatusAccepted, invitedBody)
+		}
+		return replyJSON(http.StatusCreated, grantedBody)
+	}
+	srv, _ := pickerAddServer(t, pickerMembers("github:alice", "github:bob"), reply)
+	pickAll(t, "github:alice", "github:bob")
+
+	out, errOut, err := runPickerCmd(t, newProjectGrantCmd, srv.URL, pickerProjULID)
+	require.NoError(t, err)
+	require.Empty(t, errOut)
+	require.True(t, strings.HasSuffix(out, "1 granted, 1 invited (an invitation counts as done: access starts when it is accepted)\n"), out)
+}
+
+// TestGrantPicker_MixedOutcomesInJSON: --json prints the array of what landed
+// (grants and invitations, told apart by status) on stdout; refusals and the
+// tally go to stderr; the exit still reports the refusal.
+//
+// Not parallel: swaps the activeCoreClient and grantPicker seams.
+func TestGrantPicker_MixedOutcomesInJSON(t *testing.T) {
+	reply := func(uid string) addReply {
+		switch uid {
+		case "uid-alice":
+			return replyJSON(http.StatusCreated, grantedBody)
+		case "uid-carol":
+			return replyJSON(http.StatusAccepted, invitedBody)
+		default:
+			return replyProblem(http.StatusConflict, "", "already a member")
+		}
+	}
+	srv, _ := pickerAddServer(t, pickerMembers("github:alice", "github:bob", "github:carol"), reply)
+	pickAll(t, "github:alice", "github:bob", "github:carol")
+
+	out, errOut, err := runPickerCmd(t, newProjectGrantCmd, srv.URL, pickerProjULID, "--json")
+	require.Error(t, err)
+	var got []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
+	require.Len(t, got, 2)
+	require.Equal(t, "granted", got[0]["status"])
+	require.Equal(t, "invited", got[1]["status"])
+	require.Equal(t, inviteID, got[1]["invitation_id"])
+	require.Contains(t, errOut, "✗ github:bob was not added to project "+pickerProjULID+": already a member\n")
+	require.Contains(t, errOut, "1 granted, 1 invited, 1 refused")
+}
+
+func TestGrantFailureIsFatal(t *testing.T) {
+	t.Parallel()
+	problem := func(status int, problemType string) error {
+		e := &coreapi.ErrorModelStatusCode{StatusCode: status}
+		if problemType != "" {
+			u, err := url.Parse(problemType)
+			if err != nil {
+				t.Fatal(err)
+			}
+			e.Response.Type = coreapi.NewOptURI(*u)
+		}
+		return e
+	}
+	for name, tc := range map[string]struct {
+		err   error
+		fatal bool
+	}{
+		"401 not authenticated":        {problem(http.StatusUnauthorized, ""), true},
+		"403 no permission":            {problem(http.StatusForbidden, ""), true},
+		"403 sso-required":             {problem(http.StatusForbidden, problemTypeSSORequired), false},
+		"404 grantee account":          {problem(http.StatusNotFound, ""), false},
+		"409 already a member":         {problem(http.StatusConflict, ""), false},
+		"409 role mismatch":            {problem(http.StatusConflict, roleMismatchType), false},
+		"421 not followed":             {problem(http.StatusMisdirectedRequest, ""), true},
+		"422 invalid":                  {problem(http.StatusUnprocessableEntity, ""), false},
+		"429 cooldown":                 {problem(http.StatusTooManyRequests, ""), false},
+		"500":                          {problem(http.StatusInternalServerError, ""), true},
+		"503":                          {problem(http.StatusServiceUnavailable, ""), true},
+		"transport":                    {&url.Error{Op: "Post", URL: "https://core", Err: errors.New("connection refused")}, true},
+		"undecodable error body":       {errors.New("decode response: default (code 502): invalid content type"), true},
+		"cancelled":                    {context.Canceled, true},
+		"handle names no identity":     {&granteeUnresolvedError{errors.New(`no github identity for handle "ghost"`)}, false},
+		"wrapped grantee API conflict": {fmt.Errorf("add: %w", problem(http.StatusConflict, "")), false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tc.fatal, grantFailureIsFatal(tc.err))
+		})
+	}
 }
