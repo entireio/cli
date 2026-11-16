@@ -420,6 +420,9 @@ func PushCheckpoints(ctx context.Context, targets []CheckpointPushRequest) (Chec
 	if ps.withheld != nil {
 		return CheckpointPushReport{}, fmt.Errorf("checkpoint refs stay queued: %w", ps.withheld)
 	}
+	if err := heldForGlobalEnableConsent(ctx, ps); err != nil {
+		return CheckpointPushReport{}, err
+	}
 	// OPF reads redaction config that only this sets; see opfGateForCheckpointRefs.
 	if err := EnsureRedactionConfigured(ctx); err != nil {
 		return CheckpointPushReport{}, fmt.Errorf("configure redaction before pushing: %w", err)

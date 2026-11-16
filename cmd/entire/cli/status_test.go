@@ -1335,7 +1335,7 @@ func TestFormatSettingsStatusShort_Enabled(t *testing.T) {
 		Enabled: true,
 	}
 
-	result := formatSettingsStatusShort(context.Background(), s, sty)
+	result := formatSettingsStatusShort(context.Background(), s, nil, sty)
 
 	if !strings.Contains(result, "●") {
 		t.Errorf("Enabled status should have green dot, got: %q", result)
@@ -1353,7 +1353,7 @@ func TestFormatSettingsStatusShort_Disabled(t *testing.T) {
 		Enabled: false,
 	}
 
-	result := formatSettingsStatusShort(context.Background(), s, sty)
+	result := formatSettingsStatusShort(context.Background(), s, nil, sty)
 
 	if !strings.Contains(result, "○") {
 		t.Errorf("Disabled status should have open dot, got: %q", result)
