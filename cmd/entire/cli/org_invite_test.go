@@ -348,14 +348,111 @@ func TestOrgInvite_UnknownOrgNameHintsAtNamesOnly(t *testing.T) {
 }
 
 // Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
-func TestOrgInvite_SendRequiresEmailAndRevokeAnInvitation(t *testing.T) {
+func TestOrgInvite_SendAndRevokeRequireATarget(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Error("a missing --email or --id must be refused before any request")
 	}))
 	t.Cleanup(srv.Close)
 
 	_, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "send", testOrgULID)
-	require.ErrorContains(t, err, `required flag(s) "email" not set`)
+	require.ErrorContains(t, err, "at least one of the flags in the group [email account] is required")
 	_, _, err = runCoreCmd(t, newOrgCmd, srv.URL, "invite", "revoke", testOrgULID)
 	require.ErrorContains(t, err, "at least one of the flags in the group [id email] is required")
+}
+
+// TestOrgInviteSend_AccountInvitesThroughTheOrgAdd: --account invites an
+// existing account with the org add and the invitation allowed — the call
+// `org grant add` makes — and reports the invitation as grant add does.
+//
+// Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
+func TestOrgInviteSend_AccountInvitesThroughTheOrgAdd(t *testing.T) {
+	core, srv := newAddCore(t, func(string) addReply { return replyJSON(http.StatusAccepted, invitedBody) })
+	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "send", testOrgULID, "--account", "github:alice", "--role", "admin")
+	require.NoError(t, err)
+	require.Equal(t, "✓ Invited github:alice to org "+testOrgULID+" as admin ("+inviteID+"). No access until they accept; the invitation expires 2026-11-20.\n", out)
+	paths, bodies := core.recorded()
+	require.Equal(t, []string{"/api/v1/orgs/" + testOrgULID + "/members"}, paths)
+	require.Equal(t, true, bodies[0]["allow_invitation"])
+	require.Equal(t, "admin", bodies[0]["role"])
+	require.Equal(t, "uid-alice", bodies[0]["providerUserId"])
+}
+
+// TestOrgInviteSend_AccountJSON: --json is the add's own body, as for grant add.
+//
+// Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
+func TestOrgInviteSend_AccountJSON(t *testing.T) {
+	_, srv := newAddCore(t, func(string) addReply { return replyJSON(http.StatusAccepted, invitedBody) })
+	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "send", testOrgULID, "--account", "github:alice", "--json")
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
+	require.Equal(t, "invited", got["status"])
+	require.Equal(t, inviteID, got["invitation_id"])
+}
+
+// TestOrgInviteSend_AccountOnACoreThatGrants: a core that does not require
+// consent yet adds the account directly, and the command says so rather than
+// calling a membership an invitation.
+//
+// Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
+func TestOrgInviteSend_AccountOnACoreThatGrants(t *testing.T) {
+	_, srv := newAddCore(t, func(string) addReply { return replyJSON(http.StatusCreated, membershipBody) })
+	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "send", testOrgULID, "--account", "github:alice")
+	require.NoError(t, err)
+	require.Equal(t, "✓ Granted github:alice member access to org "+testOrgULID+"\n", out)
+}
+
+// TestOrgInviteSend_AccountRefusals: Core's reason, and the revoke hint on a
+// role mismatch.
+//
+// Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
+func TestOrgInviteSend_AccountRefusals(t *testing.T) {
+	_, srv := newAddCore(t, func(string) addReply { return replyProblem(http.StatusConflict, "", "already a member") })
+	_, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "send", testOrgULID, "--account", "github:alice")
+	require.EqualError(t, err, "already a member")
+
+	_, srv = newAddCore(t, func(string) addReply {
+		return replyProblem(http.StatusConflict, roleMismatchType, roleMismatchDetail)
+	})
+	_, _, err = runCoreCmd(t, newOrgCmd, srv.URL, "invite", "send", testOrgULID, "--account", "github:alice")
+	require.EqualError(t, err, roleMismatchDetail+"\n"+inviteHint(cmdOrg, testOrgULID))
+}
+
+// TestOrgInviteSend_EmailAndAccountCannotBeConfused: each form is its own
+// flag; giving both, neither, or a value that belongs to the other flag is
+// refused before any request.
+//
+// Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
+func TestOrgInviteSend_EmailAndAccountCannotBeConfused(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+	t.Cleanup(srv.Close)
+	for name, tc := range map[string]struct {
+		args []string
+		want string
+	}{
+		"both":                 {[]string{"--email", "dev@example.com", "--account", "github:alice"}, "none of the others can be"},
+		"handle in --email":    {[]string{"--email", "github:alice"}, `invalid --email "github:alice": that is an account handle; invite it with --account github:alice`},
+		"address in --account": {[]string{"--account", "dev@example.com"}, `invalid --account "dev@example.com": that is an email address; invite it with --email dev@example.com`},
+		"ULID in --account":    {[]string{"--account", wiringGranteeULID}, "provider-qualified handle"},
+		"bare name":            {[]string{"--account", "alice"}, "provider-qualified handle"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _, err := runCoreCmd(t, newOrgCmd, srv.URL, append([]string{"invite", "send", testOrgULID}, tc.args...)...)
+			require.ErrorContains(t, err, tc.want)
+		})
+	}
+}
+
+// TestOrgGrantAdd_HelpSaysItInvites: `org grant add` keeps its shape, and its
+// help says what it does on Entire's API and names the verb for it.
+func TestOrgGrantAdd_HelpSaysItInvites(t *testing.T) {
+	t.Parallel()
+	add, _, err := newOrgGrantCmd().Find([]string{"add"})
+	require.NoError(t, err)
+	require.Equal(t, "add <org> <grantee>", add.Use)
+	require.Contains(t, add.Short, "Invite")
+	require.Contains(t, add.Long, "invited rather than added")
+	require.Contains(t, add.Long, "entire org invite send <org> --account <provider:handle>")
 }

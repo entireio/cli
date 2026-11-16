@@ -242,7 +242,13 @@ always runnable in every build.
   plus `grant` (`add`/`list`/`remove`): org membership for a `provider:handle`
   grantee, roles owner/admin/member (default member); `add` invites an account
   that is not a member yet (see the grant-subtree notes below). `invite`
-  (`send`/`list`/`revoke`) manages the org's invitations
+  (`send`/`list`/`revoke`) manages the org's invitations. `send` takes
+  `--email <address>` or `--account <provider:handle>`, exactly one: the
+  account form is the org add with the invitation allowed, the same call as
+  `org grant add`. On the customer API no org add is direct (a non-member is
+  invited, a member refused), so `invite send --account` is the documented
+  verb; `org grant add` keeps its arguments, output and exit codes for
+  scripts, and its help says it invites and points at `invite send`
 - `project`: control-plane project management — `create`, `list`, `get`, `delete`,
   plus `agent` (`list`/`add`): the project's review agents, configured in
   entire-api rather than repository files (they replaced the trail runners).

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `entire org invite send <org> --account <provider:handle>` invites an existing account, next to `--email` for an address. The account has no access until it accepts; the command prints the invitation ID and expiry date. `entire org grant add` makes the same call and keeps working as before; its help now says that it invites an account that is not a member yet, which on Entire's API is every account it can add (ENT-2652)
 - `entire project invite list|revoke` and `entire repo invite list|revoke` show and revoke a project's or repository's invitations, as `entire org invite list|revoke` does for an organization. `invite revoke` takes `--id <invitation>` (the ID `invite list` and `grant add` print) as well as `--email`. Every `invite list` shows an invitation to an existing account by the account's handle (or account ID) instead of an email address, and `org invite list` no longer fails on such invitations. When `grant add` is refused because an invitation with another role is open, it names the commands that find and revoke it (ENT-2652)
 
 ### Changed

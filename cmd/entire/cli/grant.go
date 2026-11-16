@@ -39,8 +39,11 @@ type grantTarget[Row any] struct {
 	leastRole   string   // the least-privileged of roles; help order runs least-first for access but most-first for org, so it is named rather than indexed
 	defaultRole string   // "" means --role is required; else the server default applied when --role is omitted
 	outsider    string   // who `add` invites rather than grants, for Long: reads after "An account that is"
-	columns     []string
-	row         func(Row) []string
+	// addShort and addLong replace the add verb's generated help where the
+	// target's add is in practice something else: on org, an invitation.
+	addShort, addLong string
+	columns           []string
+	row               func(Row) []string
 
 	// resolve turns the user's target ref into its ULID. project and repo wrap
 	// theirs because those resolvers take an interface, not *coreapi.Client.
@@ -134,9 +137,13 @@ func newGrantAddCmd[Row any](t grantTarget[Row]) *cobra.Command {
 		long += fmt.Sprintf(" Omit the grantee on a terminal to choose from the members of the owning org who do not have %s access yet, and set a role for each.", t.noun)
 		args = cobra.RangeArgs(1, 2)
 	}
+	short := fmt.Sprintf("Grant a user %s access", t.noun)
+	if t.addShort != "" {
+		short, long = t.addShort, t.addLong
+	}
 	cmd := &cobra.Command{
 		Use:     use,
-		Short:   fmt.Sprintf("Grant a user %s access", t.noun),
+		Short:   short,
 		Long:    long,
 		Example: example,
 		Args:    args,
@@ -833,9 +840,18 @@ var orgGrantTarget = grantTarget[coreapi.OrgMemberListItem]{
 	leastRole:   orgRoleMember,
 	defaultRole: orgRoleMember,
 	outsider:    "not a member of the org yet",
-	columns:     orgMemberColumns,
-	row:         orgMemberRow,
-	resolve:     resolveOrgRef,
+	// On the customer API no org add is direct: a non-member is invited and a
+	// member is refused, so "Granted" never prints here. The command keeps its
+	// name, arguments and output for scripts; its help says what it does and
+	// points at the verb named for it.
+	addShort: "Invite a user to an org (as `org invite send --account`)",
+	addLong: "Add a user (addressed as provider:handle, e.g. github:alice) to an org. The org is addressed by name or ULID. " +
+		"An account that is not a member of the org yet is invited rather than added: it has no access until it accepts, and the command prints the invitation and when it expires. " +
+		"On Entire's API that is every account this command can add, because an existing member is refused as already a member. " +
+		"`entire org invite send <org> --account <provider:handle>` makes the same call and is the documented way to invite an existing account.",
+	columns: orgMemberColumns,
+	row:     orgMemberRow,
+	resolve: resolveOrgRef,
 	grant: func(ctx context.Context, c *coreapi.Client, id, provider, providerUserID, role string) (grantOutcome, error) {
 		body := &coreapi.AddOrgMemberInputBody{Provider: provider, ProviderUserId: providerUserID, AllowInvitation: coreapi.NewOptBool(true)}
 		if role != "" {
