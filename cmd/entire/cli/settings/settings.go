@@ -972,12 +972,33 @@ func LoadFromBytes(data []byte) (*EntireSettings, error) {
 	if err := dec.Decode(s); err != nil {
 		return nil, fmt.Errorf("parsing settings: %w", err)
 	}
+	if err := errOnTrailingJSON(dec); err != nil {
+		return nil, fmt.Errorf("parsing settings: %w", err)
+	}
 	if s.Redaction != nil {
 		if err := validateOPFSettings(s.Redaction.OpenAIPrivacyFilter); err != nil {
 			return nil, err
 		}
 	}
 	return s, nil
+}
+
+// errOnTrailingJSON reports an error when dec has more than one top-level JSON
+// value. encoding/json's Decoder.Decode reads a single value and stops, so
+// anything after the first object — a concatenated second object (for example
+// from a merge conflict resolved by keeping both sides) or stray bytes — is
+// otherwise silently dropped, even with DisallowUnknownFields set, because that
+// option only rejects unknown keys inside the object. A settings file is a
+// single object, so trailing data always means the file is malformed and some
+// of its intended values would be ignored without warning. Trailing whitespace
+// is fine: Decoder.More skips it and returns false. (settings.local.json
+// already rejects trailing data via mergeJSON's json.Unmarshal; this keeps the
+// base settings.json consistent with it.)
+func errOnTrailingJSON(dec *json.Decoder) error {
+	if dec.More() {
+		return errors.New("unexpected data after top-level JSON object")
+	}
+	return nil
 }
 
 // readConfined reads filePath through an os.Root, refusing outright to read it
@@ -1163,6 +1184,9 @@ func loadFromFile(filePath string) (*EntireSettings, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(settings); err != nil {
+		return nil, fmt.Errorf("parsing settings file: %w", err)
+	}
+	if err := errOnTrailingJSON(dec); err != nil {
 		return nil, fmt.Errorf("parsing settings file: %w", err)
 	}
 
