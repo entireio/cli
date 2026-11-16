@@ -41,6 +41,10 @@ type TaskPayload struct {
 	SubagentType    string
 	TaskDescription string
 
+	// SubagentModel is the model the subagent ran on, when the agent names it
+	// apart from any token usage (see session.TaskRecord.SubagentModel).
+	SubagentModel string
+
 	// Transcript is the subagent's transcript content, already run through
 	// the sanitize -> externalize -> redact pipeline (the same one the
 	// session transcript gets — see redact.RedactedBytes for why callers
@@ -84,6 +88,7 @@ type TaskRecord struct {
 	AgentID         string            `json:"agent_id,omitempty"`
 	SubagentType    string            `json:"subagent_type,omitempty"`
 	TaskDescription string            `json:"task_description,omitempty"`
+	SubagentModel   string            `json:"subagent_model,omitempty"`
 	Files           []string          `json:"files,omitempty"`
 	TokenUsage      *types.TokenUsage `json:"token_usage,omitempty"`
 	// StartedAt/CompletedAt use omitzero (not omitempty, which classic

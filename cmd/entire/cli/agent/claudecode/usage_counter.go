@@ -85,6 +85,14 @@ func (u *usageCounter) Add(path string, data []byte) {
 		return
 	}
 	child := u.agents[path]
+	// A subagent's calls carry their model so its tokens can be split by
+	// model (TokenUsage.ByModel); only subagent usage records a model, so the
+	// main agent's calls stay unlabelled.
+	var models map[string]string
+	if child != "" {
+		models = make(map[string]string)
+		addModelsByMessageID(models, lines)
+	}
 	for _, line := range lines {
 		if line.Type != envelopeTypeAssistant {
 			continue
@@ -101,6 +109,7 @@ func (u *usageCounter) Add(path string, data []byte) {
 			CacheReadTokens:     msg.Usage.CacheReadInputTokens,
 			OutputTokens:        msg.Usage.OutputTokens,
 			APICallCount:        1,
+			Model:               models[msg.ID],
 		})
 	}
 	if child != "" {

@@ -703,3 +703,108 @@ func TestExactTokenUsage_MalformedTokenEnvelopeClearsSnapshot(t *testing.T) {
 func analyzeRollout(data []byte) rolloutAnalysis {
 	return analyzeRolloutForTurns(context.Background(), data, nil)
 }
+
+func turnContextEvent(model string) json.RawMessage {
+	data, err := json.Marshal(map[string]any{"type": "turn_context", "payload": map[string]any{"model": model}})
+	if err != nil {
+		panic(err)
+	}
+	return data
+}
+
+func totalUsageEvent(input, cached, output int) json.RawMessage {
+	return tokenCountEvent(map[string]any{"total_token_usage": map[string]any{
+		"input_tokens": input, "cached_input_tokens": cached, "output_tokens": output,
+	}})
+}
+
+// A child's usage records the model its turn_context names, so its tokens can
+// be priced at its own rate rather than the parent's.
+func TestExactTokenUsage_RecordsChildModel(t *testing.T) {
+	t.Parallel()
+
+	usage := analyzeRollout(rolloutData(t, "child", []json.RawMessage{
+		turnContextEvent("gpt-6-luna"),
+		totalUsageEvent(10, 4, 2),
+		turnContextEvent("gpt-6-luna"),
+		totalUsageEvent(30, 20, 5),
+	})).ExactTokenUsage
+	require.Equal(t, &agent.TokenUsage{InputTokens: 10, CacheReadTokens: 20, OutputTokens: 5, APICallCount: 2, Model: "gpt-6-luna"}, usage)
+}
+
+// A child that switches model mid-run is split at the switch: each model gets
+// the growth of the cumulative snapshot while it was current. The split sums
+// to the child's exact total.
+func TestExactTokenUsage_SplitsChildModelSwitch(t *testing.T) {
+	t.Parallel()
+
+	usage := analyzeRollout(rolloutData(t, "child", []json.RawMessage{
+		turnContextEvent("gpt-5.6-sol"),
+		totalUsageEvent(10, 4, 2),
+		totalUsageEvent(25, 10, 3),
+		turnContextEvent("gpt-6-luna"),
+		totalUsageEvent(55, 30, 7),
+	})).ExactTokenUsage
+	require.NotNil(t, usage)
+	require.Empty(t, usage.Model, "a mixed child must not carry one model")
+	require.Equal(t, []agent.TokenUsage{
+		{InputTokens: 15, CacheReadTokens: 10, OutputTokens: 3, APICallCount: 2, Model: "gpt-5.6-sol"},
+		{InputTokens: 10, CacheReadTokens: 20, OutputTokens: 4, APICallCount: 1, Model: "gpt-6-luna"},
+	}, usage.ByModel)
+	require.Equal(t, 25, usage.InputTokens)
+	require.Equal(t, 30, usage.CacheReadTokens)
+	require.Equal(t, 7, usage.OutputTokens)
+	require.Equal(t, 3, usage.APICallCount)
+}
+
+// When the cumulative snapshot shrinks across a switch, the growth per model
+// is unknown: the total stays exact and is recorded with no model rather than
+// attributed to either.
+func TestExactTokenUsage_NonMonotonicSwitchIsUnattributed(t *testing.T) {
+	t.Parallel()
+
+	usage := analyzeRollout(rolloutData(t, "child", []json.RawMessage{
+		turnContextEvent("gpt-5.6-sol"),
+		totalUsageEvent(50, 10, 5),
+		turnContextEvent("gpt-6-luna"),
+		totalUsageEvent(20, 10, 2),
+	})).ExactTokenUsage
+	require.Equal(t, &agent.TokenUsage{InputTokens: 10, CacheReadTokens: 10, OutputTokens: 2, APICallCount: 2}, usage)
+}
+
+// A child that never switched model keeps its model even when its cumulative
+// snapshot shrinks: the exact total is the last snapshot, and only one model
+// can have produced it.
+func TestExactTokenUsage_ShrinkingSingleModelKeepsModel(t *testing.T) {
+	t.Parallel()
+
+	usage := analyzeRollout(rolloutData(t, "child", []json.RawMessage{
+		turnContextEvent("gpt-6-luna"),
+		totalUsageEvent(50, 10, 5),
+		turnContextEvent("gpt-6-luna"),
+		totalUsageEvent(20, 10, 2),
+	})).ExactTokenUsage
+	require.Equal(t, &agent.TokenUsage{InputTokens: 10, CacheReadTokens: 10, OutputTokens: 2, APICallCount: 2, Model: "gpt-6-luna"}, usage)
+}
+
+// A paginated fork copies the parent's history, turn_context included; only a
+// turn_context at or after the start ordinal names the child's model.
+func TestExactTokenUsage_ForkIgnoresInheritedModel(t *testing.T) {
+	t.Parallel()
+
+	lines := []map[string]any{
+		{"ordinal": 0, "type": "session_meta", "payload": map[string]any{"id": "child", "subagent_history_start_ordinal": 10}},
+		{"ordinal": 1, "type": "turn_context", "payload": map[string]any{"model": "gpt-5.6-sol"}},
+		{"ordinal": 2, "type": "event_msg", "payload": map[string]any{"type": "token_count", "info": map[string]any{"total_token_usage": map[string]any{"input_tokens": 99, "cached_input_tokens": 50, "output_tokens": 9}}}},
+		{"ordinal": 11, "type": "turn_context", "payload": map[string]any{"model": "gpt-6-luna"}},
+		{"ordinal": 12, "type": "event_msg", "payload": map[string]any{"type": "token_count", "info": map[string]any{"total_token_usage": map[string]any{"input_tokens": 5, "cached_input_tokens": 2, "output_tokens": 1}}}},
+	}
+	encoded := make([][]byte, 0, len(lines))
+	for _, line := range lines {
+		data, err := json.Marshal(line)
+		require.NoError(t, err)
+		encoded = append(encoded, data)
+	}
+	usage := analyzeRollout(append([]byte(joinLines(encoded)), '\n')).ExactTokenUsage
+	require.Equal(t, &agent.TokenUsage{InputTokens: 3, CacheReadTokens: 2, OutputTokens: 1, APICallCount: 1, Model: "gpt-6-luna"}, usage)
+}

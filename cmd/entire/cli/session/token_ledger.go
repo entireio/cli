@@ -3,6 +3,7 @@ package session
 import (
 	"bytes"
 	"encoding/json"
+	"slices"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -99,15 +100,38 @@ func (l *TokenLedger) Activate(mainCheckpointed, childrenCheckpointed *agent.Tok
 // MarkCheckpointed records that a checkpoint holds everything observed. The
 // mark never moves back.
 func (l *TokenLedger) MarkCheckpointed() {
-	l.Checkpointed = agent.MaxTokenUsage(l.Checkpointed, l.mainTotal())
-	l.CheckpointedChildren = agent.MaxTokenUsage(l.CheckpointedChildren, l.childrenTotal())
+	l.Checkpointed = advanceMark(l.Checkpointed, l.mainTotal())
+	l.CheckpointedChildren = advanceMark(l.CheckpointedChildren, l.childrenTotal())
 }
 
 // MarkCheckpointedUpTo marks only what o, an earlier copy of this ledger,
 // had read: readings made since stay pending.
 func (l *TokenLedger) MarkCheckpointedUpTo(o *TokenLedger) {
-	l.Checkpointed = agent.MaxTokenUsage(l.Checkpointed, o.mainTotal())
-	l.CheckpointedChildren = agent.MaxTokenUsage(l.CheckpointedChildren, o.childrenTotal())
+	l.Checkpointed = advanceMark(l.Checkpointed, o.mainTotal())
+	l.CheckpointedChildren = advanceMark(l.CheckpointedChildren, o.childrenTotal())
+}
+
+// advanceMark moves a checkpointed mark up to total, never back
+// (agent.MaxTokenUsage). A total at or above the mark on every count is the
+// new mark as it is, model labels included, so the next checkpoint's delta
+// can be split by model (types.SubtractTokenUsage leaves a delta unlabelled
+// when its baseline is not). A total below the mark on any count keeps the
+// per-field maximum, which has no label. The counts are the same either way.
+func advanceMark(mark, total *agent.TokenUsage) *agent.TokenUsage {
+	if mark == nil || total == nil || !coversCounts(total, mark) {
+		return agent.MaxTokenUsage(mark, total)
+	}
+	next := *total
+	next.ByModel = slices.Clone(total.ByModel)
+	next.SubagentTokens, next.SubagentTokensComplete = nil, nil
+	return &next
+}
+
+// coversCounts reports whether a is at least b on every count.
+func coversCounts(a, b *agent.TokenUsage) bool {
+	return a.InputTokens >= b.InputTokens && a.CacheCreationTokens >= b.CacheCreationTokens &&
+		a.CacheReadTokens >= b.CacheReadTokens && a.OutputTokens >= b.OutputTokens &&
+		a.APICallCount >= b.APICallCount
 }
 
 // Clone returns a deep copy.

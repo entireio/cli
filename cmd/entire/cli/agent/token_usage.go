@@ -65,6 +65,22 @@ func homeScopedInventoryExtractor(ctx context.Context, ag Agent, home string) (H
 	return scoped, home, true
 }
 
+// CalculateSubagentTokenUsage calculates a subagent's own token usage from its
+// transcript, with the model recorded when the agent is a
+// SubagentTokenCalculator, and otherwise as CalculateTokenUsage does (no
+// subagents of its own). Returns nil when unavailable, like CalculateTokenUsage.
+func CalculateSubagentTokenUsage(ctx context.Context, ag Agent, transcriptData []byte) *TokenUsage {
+	if calc, ok := AsSubagentTokenCalculator(ag); ok {
+		usage, err := calc.CalculateSubagentTokenUsage(transcriptData)
+		if err != nil {
+			logging.Debug(ctx, "failed subagent token extraction", slog.String("error", err.Error()))
+			return nil
+		}
+		return usage
+	}
+	return CalculateTokenUsage(ctx, ag, transcriptData, 0, "")
+}
+
 // CalculateTokenUsage calculates token usage from transcript data.
 // Returns nil if the agent doesn't support token calculation or on error.
 // Errors are debug-logged because callers treat nil token usage as "no data available".

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -206,8 +207,21 @@ func (c *CursorAgent) parseSubagentStart(stdin io.Reader) (*agent.Event, error) 
 		ToolUseID:       raw.SubagentID,
 		SubagentType:    raw.SubagentType,
 		TaskDescription: raw.Task,
+		SubagentModel:   namedSubagentModel(raw.SubagentModel),
 		Timestamp:       time.Now(),
 	}, nil
+}
+
+// namedSubagentModel returns subagentStart's subagent_model when it names a
+// model, or "" for a placeholder ("auto", "default") that leaves the choice
+// to Cursor and so says nothing about what the subagent ran on.
+func namedSubagentModel(raw string) string {
+	model := strings.TrimSpace(raw)
+	switch strings.ToLower(model) {
+	case "auto", "default":
+		return ""
+	}
+	return model
 }
 
 func (c *CursorAgent) parseSubagentStop(stdin io.Reader) (*agent.Event, error) {
