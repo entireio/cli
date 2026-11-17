@@ -32,7 +32,37 @@ func TestCompact_OpenCodeTokenUsage(t *testing.T) {
 
 	expected := []string{
 		`{"v":1,"agent":"opencode","cli_version":"0.5.1","type":"user","ts":"2023-11-14T22:13:20Z","content":[{"text":"hello"}]}`,
-		`{"v":1,"agent":"opencode","cli_version":"0.5.1","type":"assistant","ts":"2023-11-14T22:13:21Z","id":"msg-a1","input_tokens":150,"output_tokens":90,"content":[{"type":"text","text":"Hi there!"}]}`,
+		`{"v":1,"agent":"opencode","cli_version":"0.5.1","type":"assistant","ts":"2023-11-14T22:13:21Z","id":"msg-a1","input_tokens":150,"output_tokens":90,"cache_read_tokens":100,"cache_write_tokens":160,"content":[{"type":"text","text":"Hi there!"}]}`,
+	}
+
+	result, err := Convert(input, agentOpts("opencode"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertJSONLines(t, result, expected)
+}
+
+// The compact usage line must keep everything the export reports, and count
+// reasoning once: 1.3.16+ stores it apart from output, while a total of
+// input + output + cache marks messages that already include it in output.
+func TestCompact_OpenCodeUsageKeepsCacheReasoningAndModel(t *testing.T) {
+	t.Parallel()
+
+	input := []byte(`{
+		"info":{"id":"ses-1"},
+		"messages":[
+			{"info":{"id":"msg-a1","role":"assistant","time":{"created":1700000001000},"modelID":"claude-sonnet-4",
+			  "tokens":{"input":10,"output":80,"reasoning":40,"cache":{"read":5,"write":2}}},
+			 "parts":[{"type":"text","text":"reasoning stored apart"}]},
+			{"info":{"id":"msg-a2","role":"assistant","time":{"created":1700000002000},"modelID":"claude-sonnet-4",
+			  "tokens":{"total":107,"input":10,"output":90,"reasoning":40,"cache":{"read":5,"write":2}}},
+			 "parts":[{"type":"text","text":"reasoning already inside output"}]}
+		]
+	}`)
+
+	expected := []string{
+		`{"v":1,"agent":"opencode","cli_version":"0.5.1","type":"assistant","ts":"2023-11-14T22:13:21Z","id":"msg-a1","model":"claude-sonnet-4","input_tokens":10,"output_tokens":120,"cache_read_tokens":5,"cache_write_tokens":2,"reasoning_tokens":40,"content":[{"text":"reasoning stored apart","type":"text"}]}`,
+		`{"v":1,"agent":"opencode","cli_version":"0.5.1","type":"assistant","ts":"2023-11-14T22:13:22Z","id":"msg-a2","model":"claude-sonnet-4","input_tokens":10,"output_tokens":90,"cache_read_tokens":5,"cache_write_tokens":2,"reasoning_tokens":40,"content":[{"text":"reasoning already inside output","type":"text"}]}`,
 	}
 
 	result, err := Convert(input, agentOpts("opencode"))
