@@ -53,9 +53,9 @@ func (p *Proxy) InfoRefsV2(ctx context.Context) (io.ReadCloser, error) {
 // InfoRefs and InfoRefsV2. label only differentiates log and error text.
 func (p *Proxy) infoRefs(ctx context.Context, label, suffix string, setHeaders func(*http.Request)) (io.ReadCloser, error) {
 	var warmErr error
-	switch {
-	case len(p.nodes) > 0:
-		debuglog.Printf("%s warm path: trying %d cached replicas %v", label, len(p.nodes), p.nodes)
+	switch nodes := p.replicaSet(); {
+	case len(nodes) > 0:
+		debuglog.Printf("%s warm path: trying %d cached replicas %v", label, len(nodes), nodes)
 		resp, err := p.doWithFailover(ctx, suffix, http.MethodGet, nil, setHeaders)
 		if err == nil {
 			return p.handleInfoRefsResponse(resp)
@@ -122,7 +122,7 @@ func (p *Proxy) coldInfoRefs(ctx context.Context, suffix string, setHeaders func
 	}
 
 	debuglog.Printf("entry domain redirected with %d replicas %v; failing over instead of following", len(rs), rs)
-	p.nodes = rs
+	p.setReplicaSet(rs)
 
 	viaReplicas, err := p.doWithFailover(ctx, suffix, http.MethodGet, nil, setHeaders)
 	if err == nil {

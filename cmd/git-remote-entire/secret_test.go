@@ -127,7 +127,7 @@ func TestResolveCreds_ServiceAccountSecretReexchangesAfter401(t *testing.T) {
 		t.Fatalf("second request: token changed or %d exchanges; want the cached token", exchanges)
 	}
 
-	onUnauthorized()
+	onUnauthorized(first)
 	retried, err := creds(t.Context())
 	if err != nil {
 		t.Fatal(err)
@@ -168,7 +168,7 @@ func TestResolveCreds_ServiceAccountSecret401KeepsReplacement(t *testing.T) {
 		t.Fatalf("setup: %d exchanges, replacement unchanged=%v", exchanges, replacement == first)
 	}
 
-	onUnauthorized() // the 401 was for first, not the replacement
+	onUnauthorized(first) // the 401 was for first, not the replacement
 	retried, err := creds(t.Context())
 	if err != nil {
 		t.Fatal(err)

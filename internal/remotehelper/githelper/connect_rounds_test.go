@@ -81,6 +81,10 @@ func (e *execTransport) ServiceRPC(ctx context.Context, service string, body io.
 	return io.NopCloser(bytes.NewReader(out)), nil
 }
 
+func (e *execTransport) Do(context.Context, string, string, io.ReadSeeker, func(*http.Request)) (*http.Response, error) {
+	return nil, errors.New("execTransport speaks git only")
+}
+
 func (e *execTransport) ErrorBaseURL() string { return "file://" + e.dir }
 
 // uploadPackStub installs a git-remote-<scheme> that re-executes this test

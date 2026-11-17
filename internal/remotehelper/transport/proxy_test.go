@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1453,7 +1454,7 @@ func TestColdPathRefusesOutOfClusterLocationSalvage(t *testing.T) {
 // 403 (valid credential, authorization denied) must not invalidate.
 func TestUnauthorizedObserver(t *testing.T) {
 	t.Parallel()
-	fired := 0
+	var fired []string
 	inner := roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		status := http.StatusForbidden
 		if req.URL.Path == "/unauth" {
@@ -1461,21 +1462,22 @@ func TestUnauthorizedObserver(t *testing.T) {
 		}
 		return &http.Response{StatusCode: status, Body: http.NoBody}, nil
 	})
-	rt := &unauthorizedObserver{next: inner, fn: func() { fired++ }}
+	rt := &unauthorizedObserver{next: inner, fn: func(bearer string) { fired = append(fired, bearer) }}
 
-	for _, path := range []string{"/forbidden", "/unauth", "/unauth"} {
+	for i, path := range []string{"/forbidden", "/unauth", "/unauth"} {
 		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://node.example"+path, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
+		req.Header.Set("Authorization", "Bearer tok-"+strconv.Itoa(i))
 		resp, err := rt.RoundTrip(req)
 		if err != nil {
 			t.Fatal(err)
 		}
 		_ = resp.Body.Close()
 	}
-	if fired != 2 {
-		t.Fatalf("hook fired %d times, want 2 (401s only)", fired)
+	if want := []string{"tok-1", "tok-2"}; !slices.Equal(fired, want) {
+		t.Fatalf("hook fired with %q, want %q (401s only, with the rejected bearer)", fired, want)
 	}
 }
 
@@ -1536,7 +1538,7 @@ func authRetryProxy(t *testing.T, serverURL string, src *fakeTokenSource) *Proxy
 			req.Header.Set("Authorization", "Bearer "+tok)
 			return nil
 		},
-		OnUnauthorized: src.Invalidate,
+		OnUnauthorized: func(string) { src.Invalidate() },
 	})
 }
 
