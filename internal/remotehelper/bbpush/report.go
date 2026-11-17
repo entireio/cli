@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"github.com/go-git/go-git/v6/plumbing/format/pktline"
+
+	"github.com/entireio/cli/internal/remotehelper/gitproto"
 )
 
 // commandSection returns the commands of the request as send-pack writes
@@ -185,9 +187,8 @@ func (rep *report) missingXorb() bool {
 	return missingXorbRE.MatchString(rep.unpack)
 }
 
-// Sanitize returns server text as git writes it to a terminal: a control
-// byte other than tab and newline becomes ^X (DEL becomes ^?), and a colour
-// sequence (ESC [ digits m) passes. See git's sideband.c.
+// Sanitize returns server text as git writes it to a terminal. See
+// gitproto.AppendSanitized.
 func Sanitize(s string) string {
 	var b bytes.Buffer
 	sanitize(&b, []byte(s))
@@ -195,42 +196,7 @@ func Sanitize(s string) string {
 }
 
 func sanitize(b *bytes.Buffer, p []byte) {
-	for i := 0; i < len(p); i++ {
-		c := p[i]
-		switch {
-		case c >= 0x20 && c != 0x7f, c == '\t', c == '\n':
-			b.WriteByte(c)
-		case c == 0x1b:
-			if n := colourSequence(p[i:]); n > 0 {
-				b.Write(p[i : i+n])
-				i += n - 1
-				continue
-			}
-			b.WriteString("^[")
-		case c == 0x7f:
-			b.WriteString("^?")
-		default:
-			b.WriteByte('^')
-			b.WriteByte(0x40 + c)
-		}
-	}
-}
-
-// colourSequence returns the length of the SGR sequence at the start of p,
-// or 0.
-func colourSequence(p []byte) int {
-	if len(p) < 3 || p[0] != 0x1b || p[1] != '[' {
-		return 0
-	}
-	for i := 2; i < len(p); i++ {
-		switch c := p[i]; {
-		case c == 'm':
-			return i + 1
-		case (c < '0' || c > '9') && c != ';' && c != ':':
-			return 0
-		}
-	}
-	return 0
+	b.Write(gitproto.AppendSanitized(b.AvailableBuffer(), p))
 }
 
 // writeStatus writes the helper status lines that `git send-pack

@@ -83,7 +83,7 @@ func AppendEntry(dst []byte, oid []byte, r *Recipe) ([]byte, error) {
 	if len(payload) > MaxPayloadSize {
 		return dst, fmt.Errorf("bbchunk: entry payload is %d bytes, over the %d-byte limit", len(payload), MaxPayloadSize)
 	}
-	dst = appendObjectHeader(dst, ExternalObject, r.Size)
+	dst = AppendObjectHeader(dst, ExternalObject, r.Size)
 	dst = append(dst, MetaClientChunked)
 	dst = binary.AppendUvarint(dst, uint64(len(payload)))
 	return append(dst, payload...), nil
@@ -133,8 +133,9 @@ func checkRecipe(r *Recipe) error {
 	return nil
 }
 
-// appendObjectHeader appends the type+size varint of a pack entry to dst.
-func appendObjectHeader(dst []byte, typ byte, size int64) []byte {
+// AppendObjectHeader appends the type+size varint of a pack entry of type
+// typ and size size to dst.
+func AppendObjectHeader(dst []byte, typ byte, size int64) []byte {
 	c := (typ&7)<<4 | byte(size&0x0f)
 	size >>= 4
 	for size > 0 {
