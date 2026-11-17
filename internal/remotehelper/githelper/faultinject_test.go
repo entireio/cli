@@ -40,6 +40,10 @@ func (f *fakeTransport) InfoRefs(_ context.Context, _ string) (io.ReadCloser, er
 	return f.infoRefsResp()
 }
 
+func (f *fakeTransport) InfoRefsForPush(ctx context.Context) (io.ReadCloser, error) {
+	return f.InfoRefs(ctx, serviceReceivePack)
+}
+
 func (f *fakeTransport) InfoRefsV2(_ context.Context) (io.ReadCloser, error) {
 	if f.infoRefsV2Resp == nil {
 		return nil, errors.New("fakeTransport: no v2 info/refs handler")
@@ -72,6 +76,8 @@ func (f *fakeTransport) ServiceRPC(ctx context.Context, service string, body io.
 func (f *fakeTransport) Do(context.Context, string, string, io.ReadSeeker, func(*http.Request)) (*http.Response, error) {
 	return nil, errors.New("fakeTransport: no Do handler")
 }
+
+func (f *fakeTransport) RepoLocation() (string, string) { return "https://test.invalid", "/repo" }
 
 func (f *fakeTransport) ErrorBaseURL() string { return "https://test.invalid/repo" }
 
