@@ -55,6 +55,19 @@ Codex, item path (current rollouts; see Blocks): one line per item, not per call
 
 Pi, one native message per call (no fragments to merge): `model` is `message.model`, and Pi's `input` is used as `input_tokens` unchanged, since the backends that report cached tokens already exclude them from it (a backend that folds cache reads into `input` cannot be told apart per call). `cache_write_1h_tokens` is Pi's `cacheWrite1h` and `cache_write_5m_tokens` the rest of `cacheWrite` (clamped at 0 if 1h exceeds it), only when Pi reports `cacheWrite1h`. `reasoning_tokens` is Pi's `reasoning` when reported. An assistant message with no visible content but non-zero usage (thinking-only, aborted) gets a line with `"content":null` (`"content":[]` before Pi went through the fold), so per-line usage sums to the session totals; one with zero usage gets none. Abandoned branches are excluded. Read per-call usage from the full converted transcript. Pi user `image` items pass through verbatim in Pi's native shape (`data`, `mimeType`) and in source order, so an image-only user message still has a line; `data` is the inline base64, or an `entire-asset:assets/…` placeholder when image externalization (`redaction.externalize_images`) moved the image to the checkpoint's assets.
 
+OpenCode: one assistant message per call. `model` is the source's `modelID`
+(OpenCode 2's `model.id` after normalization); cache reads and writes come from
+`tokens.cache`, and `reasoning_tokens` from `tokens.reasoning`. Output follows
+the agent's existing `Tokens.OutputWithReasoning` rule: when a positive
+`total` equals input + output + cache read + cache write, reasoning is already
+included; otherwise it is added to output. A missing total uses that same
+fallback. Older messages whose output includes reasoning can therefore be
+counted twice after migration into OpenCode 2, which drops total. The converter
+retains the existing fallback rather than guessing version history. A message
+without visible content still gets a `"content":null` line when any input,
+output or cache count is non-zero. Snapshot updates replace the whole usage
+record, including zeros; re-exporting unchanged usage does not count it again.
+
 ### Blocks
 
 - User text: `{"id"?: string, "text": string}`. There is no `type` field (a v1 quirk).

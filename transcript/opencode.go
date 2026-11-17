@@ -71,9 +71,11 @@ type openCodeMsgCache struct {
 	Write int `json:"write"`
 }
 
-// outputWithReasoning counts reasoning once, by the same total identity the
-// OpenCode agent uses: total == input + output + cache means reasoning is
-// already inside output. Any other total (or none) stores it apart.
+// outputWithReasoning follows the OpenCode agent's total-aware accounting:
+// total == input + output + cache means reasoning is
+// already inside output. Any other total (or none) is assumed to store it
+// apart. Older messages migrated into OpenCode 2 lose total, so that fallback
+// can double-count reasoning that was already included in output.
 func (t openCodeMsgToken) outputWithReasoning() int {
 	if t.Total > 0 && t.Total == t.Input+t.Output+t.Cache.Read+t.Cache.Write {
 		return t.Output
@@ -157,7 +159,8 @@ func openCodeRecord(key string, msg openCodeMessage) (Record, bool) {
 			r.Usage.ReasoningTokens = int64(t.Reasoning)
 		}
 		blocks := openCodeAssistantBlocks(msg)
-		if len(blocks) == 0 && (r.Usage.InputTokens != 0 || r.Usage.OutputTokens != 0) {
+		if len(blocks) == 0 && (r.Usage.InputTokens != 0 || r.Usage.OutputTokens != 0 ||
+			r.Usage.CacheReadTokens != 0 || r.Usage.CacheWriteTokens != 0) {
 			return r, true
 		}
 		content, err := json.Marshal(blocks)
