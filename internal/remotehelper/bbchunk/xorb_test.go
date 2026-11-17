@@ -80,7 +80,7 @@ func TestSealIngestRoundTrip(t *testing.T) {
 	in, err := xorb.IngestNetwork(x.Network, x.Hash)
 	require.NoError(t, err)
 	require.Equal(t, x.Hash, in.Hash)
-	require.Equal(t, xorb.AppendFooter(bytes.Clone(x.Network), x.Footer), in.Complete)
+	require.Equal(t, x.Complete(), in.Complete)
 
 	dec, err := xorb.Decode(x.Network)
 	require.NoError(t, err)
