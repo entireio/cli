@@ -170,6 +170,8 @@ Installs from a Git host are verified against the release's `checksums.txt`. See
 
 ## Security & Privacy
 
+Set `strategy_options.sync_prompts` to `false` to keep prompts, transcripts, and summaries out of new checkpoints while retaining metadata and metrics. See [Keeping prompts out of checkpoints](docs/security-and-privacy.md#keeping-prompts-out-of-checkpoints).
+
 **Session transcripts are pushed to your Git remote** — as checkpoint refs, not commits on your branch. If that repository is public, anyone can read them. Entire redacts detected secrets before writing a checkpoint, but redaction is best effort; `entire checkpoint list --outgoing` shows what your next push will upload, and `entire checkpoint explain <id>` shows a checkpoint's contents.
 
 To keep transcripts out of a public repository, upload them to a separate private repository (`entire configure --local --checkpoint-remote github:<owner>/<repo>`) or stop uploading them (`entire configure --local --skip-push-sessions`). `entire enable` names the checkpoint destination every time it runs. See [Security](https://docs.entire.com/security) for redaction, scanners, deleting checkpoints, and cleaning up data from older versions.
