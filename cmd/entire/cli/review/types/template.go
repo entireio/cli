@@ -16,13 +16,22 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/procutil"
 )
 
-const maxProcessStderrBytes = 64 * 1024
+const (
+	maxProcessStderrBytes = 64 * 1024
+
+	// stderrDrainTimeout bounds how long Wait keeps reading stderr after the
+	// agent exits. A grandchild may inherit the pipe and outlive the agent; the
+	// diagnostic is worth a short grace period, not an unbounded hang.
+	stderrDrainTimeout = 250 * time.Millisecond
+)
 
 // ReviewerTemplate implements AgentReviewer for agents whose only per-agent
 // quirks are argv/env construction and stdout parsing. Both fields must be
@@ -112,13 +121,20 @@ func (t *ReviewerTemplate) Start(ctx context.Context, cfg RunConfig) (Process, e
 	if err != nil {
 		return nil, fmt.Errorf("%s: stdout pipe: %w", t.AgentName, err)
 	}
-	stderr, err := cmd.StderrPipe()
+	// Own the stderr pipe rather than using cmd.StderrPipe: cmd.Wait closes the
+	// read end as soon as the agent exits, which would discard stderr the
+	// capture goroutine has not read yet. Keeping the read end lets Wait drain
+	// it for a bounded time even when a grandchild holds the write end open.
+	stderr, stderrWriter, err := os.Pipe()
 	if err != nil {
 		return nil, fmt.Errorf("%s: stderr pipe: %w", t.AgentName, err)
 	}
+	cmd.Stderr = stderrWriter
 	if err := cmd.Start(); err != nil {
+		_ = stderr.Close()
 		return nil, fmt.Errorf("%s: start: %w", t.AgentName, err)
 	}
+	_ = stderrWriter.Close() // the child holds the only write end now
 	started = true
 	p := &templateProcess{
 		cleanup:    cleanup,
@@ -127,6 +143,7 @@ func (t *ReviewerTemplate) Start(ctx context.Context, cfg RunConfig) (Process, e
 		cmd:        cmd,
 		events:     make(chan Event, 32),
 		stderr:     &boundedStderrBuffer{limit: maxProcessStderrBytes},
+		stderrPipe: stderr,
 		stderrDone: make(chan struct{}),
 	}
 	go p.run(stdout, t.Parser)
@@ -149,6 +166,7 @@ type templateProcess struct {
 	cmd        *exec.Cmd
 	events     chan Event
 	stderr     *boundedStderrBuffer
+	stderrPipe io.ReadCloser
 	stderrDone chan struct{}
 }
 
@@ -162,10 +180,25 @@ func (p *templateProcess) Events() <-chan Event { return p.events }
 // with stderr; other types for I/O or pipe failures. ProcessError implements
 // Unwrap so callers can use errors.As and errors.Is to classify.
 func (p *templateProcess) Wait() error {
-	if p.stderrDone != nil {
-		<-p.stderrDone
-	}
+	// Reap first. cmd.Wait only closes pipes it created; stderr is ours, so it
+	// stays readable while the capture goroutine drains what the agent wrote.
 	err := p.cmd.Wait()
+	if p.stderrDone != nil {
+		select {
+		case <-p.stderrDone:
+		case <-time.After(stderrDrainTimeout):
+			// A grandchild inherited stderr and outlived the agent. Close our
+			// read end so the capture goroutine finishes instead of hanging the
+			// review; whatever it already copied remains the diagnostic.
+			if p.stderrPipe != nil {
+				_ = p.stderrPipe.Close()
+			}
+			<-p.stderrDone
+		}
+		if p.stderrPipe != nil {
+			_ = p.stderrPipe.Close()
+		}
+	}
 	if p.cleanup != nil {
 		p.cleanup()
 		p.cleanup = nil

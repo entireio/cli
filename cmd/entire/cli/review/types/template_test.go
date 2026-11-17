@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Compile-time interface check.
@@ -185,6 +186,51 @@ func TestReviewerTemplate_WaitIncludesStderrOnFailure(t *testing.T) {
 	}
 	if !strings.Contains(waitErr.Error(), "auth failed: login required") {
 		t.Fatalf("Wait() error missing stderr diagnostics: %v", waitErr)
+	}
+}
+
+// TestReviewerTemplate_WaitDoesNotBlockOnInheritedStderr covers an agent that
+// exits while a grandchild it spawned still holds stderr open (a language
+// server, an MCP helper). Wait must return when the agent exits instead of
+// blocking on a stderr EOF that may never come.
+func TestReviewerTemplate_WaitDoesNotBlockOnInheritedStderr(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses POSIX shell")
+	}
+	t.Parallel()
+
+	tmpl := &ReviewerTemplate{
+		AgentName: "grandchild-agent",
+		BuildCmd: func(ctx context.Context, _ RunConfig) *exec.Cmd {
+			// The background sleep inherits stderr and keeps it open outliving
+			// the shell, which exits 0 immediately.
+			return exec.CommandContext(ctx, "sh", "-c", "sleep 5 >/dev/null & exit 0")
+		},
+		Parser: func(_ io.Reader) <-chan Event {
+			ch := make(chan Event, 1)
+			ch <- Finished{Success: true}
+			close(ch)
+			return ch
+		},
+	}
+
+	proc, err := tmpl.Start(context.Background(), RunConfig{})
+	if err != nil {
+		t.Fatalf("Start() error: %v", err)
+	}
+	for ev := range proc.Events() {
+		_ = ev
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- proc.Wait() }()
+	select {
+	case waitErr := <-done:
+		if waitErr != nil {
+			t.Fatalf("Wait() error: %v", waitErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Wait() blocked on stderr held by a grandchild after the agent exited")
 	}
 }
 
