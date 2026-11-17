@@ -37,6 +37,9 @@ const (
 	// Purely derived data -- it is rebuilt on the next checkpoint -- so it is
 	// removed wholesale rather than per entry.
 	CleanupTypeRedactCache CleanupType = "redact-cache"
+	// CleanupTypeXorbStore is git-remote-entire's local BB xorb store in the
+	// git common dir. Every entry is a cache, so it is removed wholesale.
+	CleanupTypeXorbStore CleanupType = "xorb-store"
 )
 
 // cleanAllReason marks an item discovered by the unfiltered sweep, as opposed
@@ -60,6 +63,8 @@ type CleanupResult struct {
 	FailedStates      []string // Session states that failed to delete
 	FailedCheckpoints []string // Checkpoints that failed to delete
 	FailedRedactCache []string // Redaction caches that failed to delete
+	XorbStores        []string // Deleted BB xorb store directories
+	FailedXorbStore   []string // BB xorb stores that failed to delete
 }
 
 // legacyShadowBranchPattern matches the shadow branch names older CLIs wrote,
@@ -353,6 +358,18 @@ func ListAllItems(ctx context.Context) ([]CleanupItem, error) {
 		}
 	}
 
+	// The xorb store holds whole xorbs of pushed large blobs, up to its size
+	// cap per repo, and nothing but a clean removes the directory.
+	if commonDir, err := session.GetGitCommonDir(ctx); err == nil {
+		if _, statErr := os.Stat(filepath.Join(commonDir, gitdir.XorbStoreDirName)); statErr == nil {
+			cleanupItems = append(cleanupItems, CleanupItem{
+				Type:   CleanupTypeXorbStore,
+				ID:     gitdir.XorbStoreDirName,
+				Reason: cleanAllReason,
+			})
+		}
+	}
+
 	return cleanupItems, nil
 }
 
@@ -379,7 +396,7 @@ func DeleteAllCleanupItems(ctx context.Context, items []CleanupItem) (*CleanupRe
 	}
 
 	// Group items by type
-	var branches, states, checkpoints, redactCaches []string
+	var branches, states, checkpoints, redactCaches, xorbStores []string
 	for _, item := range items {
 		switch item.Type {
 		case CleanupTypeShadowBranch:
@@ -388,25 +405,17 @@ func DeleteAllCleanupItems(ctx context.Context, items []CleanupItem) (*CleanupRe
 			states = append(states, item.ID)
 		case CleanupTypeRedactCache:
 			redactCaches = append(redactCaches, item.ID)
+		case CleanupTypeXorbStore:
+			xorbStores = append(xorbStores, item.ID)
 		case CleanupTypeCheckpoint:
 			checkpoints = append(checkpoints, item.ID)
 		}
 	}
 
-	// Remove the redaction prefix cache. Derived data, so a failure is recorded
-	// but never blocks the rest of the cleanup.
-	if len(redactCaches) > 0 {
-		if err := deleteRedactCache(ctx); err != nil {
-			result.FailedRedactCache = redactCaches
-			logging.Warn(logCtx, "failed to delete redaction cache",
-				slog.String("type", string(CleanupTypeRedactCache)),
-				slog.String("error", err.Error()))
-		} else {
-			result.RedactCaches = redactCaches
-			logging.Info(logCtx, "deleted redaction cache",
-				slog.String("type", string(CleanupTypeRedactCache)))
-		}
-	}
+	// Remove the caches. Derived data, so a failure is recorded but never
+	// blocks the rest of the cleanup.
+	result.RedactCaches, result.FailedRedactCache = deleteCacheItems(ctx, logCtx, CleanupTypeRedactCache, "redaction cache", redactCaches, deleteRedactCache)
+	result.XorbStores, result.FailedXorbStore = deleteCacheItems(ctx, logCtx, CleanupTypeXorbStore, "xorb store", xorbStores, deleteXorbStore)
 
 	// Delete legacy shadow branches
 	if len(branches) > 0 {
@@ -503,6 +512,22 @@ func DeleteAllCleanupItems(ctx context.Context, items []CleanupItem) (*CleanupRe
 	return result, nil
 }
 
+// deleteCacheItems removes the cache that ids name with del, and returns ids
+// as deleted or as failed. It removes nothing when ids is empty.
+func deleteCacheItems(ctx, logCtx context.Context, typ CleanupType, what string, ids []string, del func(context.Context) error) (deleted, failed []string) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	if err := del(ctx); err != nil {
+		logging.Warn(logCtx, "failed to delete "+what,
+			slog.String("type", string(typ)),
+			slog.String("error", err.Error()))
+		return nil, ids
+	}
+	logging.Info(logCtx, "deleted "+what, slog.String("type", string(typ)))
+	return ids, nil
+}
+
 // deleteRedactCache removes the redaction prefix cache directory. Every entry is
 // derived data rebuilt on the next checkpoint, so removing the whole directory is
 // always safe; a missing directory is not an error.
@@ -517,6 +542,20 @@ func deleteRedactCache(ctx context.Context) error {
 	}
 	if err := root.RemoveAll(checkpoint.RedactCacheDirName); err != nil {
 		return fmt.Errorf("remove redaction cache %s: %w", dir, err)
+	}
+	return nil
+}
+
+// deleteXorbStore removes git-remote-entire's xorb store directory. Every
+// entry is a cache, so removing it costs at most new uploads; a missing
+// directory is not an error.
+func deleteXorbStore(ctx context.Context) error {
+	root, err := gitdir.Open(ctx)
+	if err != nil {
+		return fmt.Errorf("open git common dir: %w", err)
+	}
+	if err := root.RemoveAll(gitdir.XorbStoreDirName); err != nil {
+		return fmt.Errorf("remove xorb store %s: %w", gitdir.XorbStoreDirName, err)
 	}
 	return nil
 }

@@ -387,7 +387,7 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 	}
 
 	// Group items by type for display
-	var branches, states, checkpoints, redactCaches []strategy.CleanupItem
+	var branches, states, checkpoints, redactCaches, xorbStores []strategy.CleanupItem
 	for _, item := range items {
 		switch item.Type {
 		case strategy.CleanupTypeShadowBranch:
@@ -398,6 +398,8 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 			checkpoints = append(checkpoints, item)
 		case strategy.CleanupTypeRedactCache:
 			redactCaches = append(redactCaches, item)
+		case strategy.CleanupTypeXorbStore:
+			xorbStores = append(xorbStores, item)
 		}
 	}
 
@@ -410,6 +412,7 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 		printSection(w, "Session states", cleanupItemIDs(states))
 		printSection(w, "Checkpoint metadata", cleanupItemIDs(checkpoints))
 		printSection(w, "Redaction cache", cleanupItemIDs(redactCaches))
+		printSection(w, "Large blob upload cache", cleanupItemIDs(xorbStores))
 		printSection(w, "Temp files", tempFiles)
 		printSection(w, "Stray agent temp files", orphanTemps)
 		printUnscannedNote(w, unscanned)
@@ -451,8 +454,8 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 	failedTempFiles = append(failedTempFiles, failedOrphans...)
 
 	// Report results
-	totalDeleted := len(result.ShadowBranches) + len(result.SessionStates) + len(result.Checkpoints) + len(deletedTempFiles)
-	totalFailed := len(result.FailedBranches) + len(result.FailedStates) + len(result.FailedCheckpoints) + len(failedTempFiles)
+	totalDeleted := len(result.ShadowBranches) + len(result.SessionStates) + len(result.Checkpoints) + len(result.XorbStores) + len(deletedTempFiles)
+	totalFailed := len(result.FailedBranches) + len(result.FailedStates) + len(result.FailedCheckpoints) + len(result.FailedXorbStore) + len(failedTempFiles)
 
 	if totalDeleted > 0 {
 		fmt.Fprintf(w, "✓ Deleted %d %s:\n", totalDeleted, itemWord(totalDeleted))
@@ -460,6 +463,7 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 		printResultSection(w, "Legacy shadow branches", result.ShadowBranches)
 		printResultSection(w, "Session states", result.SessionStates)
 		printResultSection(w, "Checkpoints", result.Checkpoints)
+		printResultSection(w, "Large blob upload cache", result.XorbStores)
 
 		printResultSection(w, "Temp files", deletedTempFiles)
 		printResultSection(w, "Stray agent temp files", deletedOrphans)
@@ -472,6 +476,7 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 		printResultSection(errW, "Legacy shadow branches", result.FailedBranches)
 		printResultSection(errW, "Session states", result.FailedStates)
 		printResultSection(errW, "Checkpoints", result.FailedCheckpoints)
+		printResultSection(errW, "Large blob upload cache", result.FailedXorbStore)
 
 		if len(failedTempFiles) > 0 {
 			fmt.Fprintf(errW, "\nTemp files:\n")

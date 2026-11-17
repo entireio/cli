@@ -2,10 +2,11 @@
 // checkout, and the main repository's .git when running from a linked worktree.
 //
 // Entire keeps a lot of state there, deliberately: session state, advisory
-// locks, the checkpoint push queue, the redaction prefix cache, investigation
-// runs, review manifests, and the captured checkpoint-sync election all live in
-// the common dir rather than under .entire, because they are per-clone and must
-// not be committed or walked into a checkpoint tree. That makes this directory
+// locks, the checkpoint push queue, the redaction prefix cache, the remote
+// helper's xorb store, investigation runs, review manifests, and the captured
+// checkpoint-sync election all live in the common dir rather than under
+// .entire, because they are per-clone and must not be committed or walked into
+// a checkpoint tree. That makes this directory
 // the same kind of trust surface .entire is, and it gets the same treatment: one
 // *os.Root per common dir, opened once and shared, with every read and write
 // resolved as a name inside it.
@@ -41,6 +42,14 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
+
+// XorbStoreDirName is the directory in the common dir that holds the local
+// BB xorb store of git-remote-entire, with one subdirectory per server and
+// repo. Every entry is a cache, so `entire clean` may delete the whole
+// directory at any time. The name is here, not in the store package, so that
+// `entire clean` can name it without linking the remote helper's
+// dependencies.
+const XorbStoreDirName = "entire-xorbs"
 
 var (
 	// resolveMu guards the resolved-path cache, which is keyed by the working
