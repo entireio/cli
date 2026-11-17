@@ -117,6 +117,9 @@ func (t *ReviewerTemplate) Start(ctx context.Context, cfg RunConfig) (Process, e
 	// stdout pipe open after the agent is killed, so reading Events to EOF blocks
 	// forever (Ctrl+C never completes).
 	procutil.TerminateOnCancel(cmd)
+	if cmd.Stderr != nil {
+		return nil, fmt.Errorf("%s: stderr pipe: exec: Stderr already set", t.AgentName)
+	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, fmt.Errorf("%s: stdout pipe: %w", t.AgentName, err)
@@ -130,11 +133,14 @@ func (t *ReviewerTemplate) Start(ctx context.Context, cfg RunConfig) (Process, e
 		return nil, fmt.Errorf("%s: stderr pipe: %w", t.AgentName, err)
 	}
 	cmd.Stderr = stderrWriter
-	if err := cmd.Start(); err != nil {
+	startErr := cmd.Start()
+	// Start duplicates the writer into the child on success. On failure there
+	// is no child to own it; either way, release our copy before returning.
+	_ = stderrWriter.Close()
+	if startErr != nil {
 		_ = stderr.Close()
-		return nil, fmt.Errorf("%s: start: %w", t.AgentName, err)
+		return nil, fmt.Errorf("%s: start: %w", t.AgentName, startErr)
 	}
-	_ = stderrWriter.Close() // the child holds the only write end now
 	started = true
 	p := &templateProcess{
 		cleanup:    cleanup,
