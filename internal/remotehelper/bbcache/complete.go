@@ -31,6 +31,39 @@ func (s *Store) HasComplete(h xethash.Hash) bool {
 	return true
 }
 
+// ReleaseComplete unpins the complete xorbs hs, so the next Trim may remove
+// them. A fetch calls it when its pack is done.
+func (s *Store) ReleaseComplete(hs []xethash.Hash) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, h := range hs {
+		delete(s.pinned, s.name(completeDir, h.String()))
+	}
+}
+
+// CheckWritable checks that the store can take a downloaded xorb: it creates
+// and removes a temp file where PutComplete writes. A fetch opts in to
+// chunked recipes only when the check passes.
+func (s *Store) CheckWritable() error {
+	parent, leaf, closeParent, err := osroot.OpenParentNoSymlinks(s.root, s.name(completeDir, "probe"))
+	if err != nil {
+		return fmt.Errorf("bbcache: check writable: %w", err)
+	}
+	defer closeParent()
+	tmp, tmpName, err := jsonutil.CreateTempIn(parent, leaf)
+	if err != nil {
+		return fmt.Errorf("bbcache: check writable: %w", err)
+	}
+	closeErr := tmp.Close()
+	if err := parent.Remove(tmpName); err != nil {
+		return fmt.Errorf("bbcache: check writable: %w", err)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("bbcache: check writable: %w", closeErr)
+	}
+	return nil
+}
+
 // PutComplete stores the complete xorb h. It calls fill with a writer to a
 // temp file in the store. fill writes the whole xorb and returns its footer,
 // which it has checked against h. PutComplete then renames the file into

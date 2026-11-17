@@ -78,6 +78,11 @@ type fakeBB struct {
 	bbAdvertised int
 	// bbReceives counts the receive-pack requests that echo entire-bb.
 	bbReceives int
+	// dedupAnchors and dedupXorbs hold the lists of each dedup query.
+	dedupAnchors [][]xethash.Hash
+	dedupXorbs   [][]xethash.Hash
+
+	fetch fakeFetch
 }
 
 type fakeXorb struct {
@@ -85,6 +90,10 @@ type fakeXorb struct {
 	footer    []map[string]any
 	hashes    []xethash.Hash
 	permanent bool
+	// network is the uploaded body, and storedEnds the end of each chunk in
+	// it. A download serves both as the complete xorb.
+	network    []byte
+	storedEnds []uint32
 }
 
 func newFakeBB(t *testing.T, backend http.Handler, advertise bool) *fakeBB {
@@ -97,6 +106,7 @@ func newFakeBB(t *testing.T, backend http.Handler, advertise bool) *fakeBB {
 		footerCap: 64,
 		advertise: advertise,
 		xorbs:     map[xethash.Hash]*fakeXorb{},
+		fetch:     fakeFetch{recipes: map[string]*clientEntry{}},
 	}
 }
 
@@ -110,6 +120,12 @@ func (f *fakeBB) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.serveDedup(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == f.repoPath+"/"+serviceReceivePack:
 		f.serveReceive(w, r)
+	case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/info/refs") && r.URL.Query().Get("service") == serviceUploadPack:
+		f.serveUploadAdvertisement(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == f.repoPath+"/"+serviceUploadPack:
+		f.serveUploadPack(w, r)
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, f.repoPath+"/bb/xorbs/"):
+		f.serveDownload(w, r)
 	default:
 		f.backend.ServeHTTP(w, r)
 	}
@@ -220,10 +236,11 @@ func (f *fakeBB) servePut(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	x := &fakeXorb{}
+	x := &fakeXorb{network: body}
 	for i, c := range in.Chunks {
 		x.chunks = append(x.chunks, obj.Chunks[i].Data)
 		x.hashes = append(x.hashes, c.Hash)
+		x.storedEnds = append(x.storedEnds, c.SerializedOffset+c.SerializedLength)
 		x.footer = append(x.footer, map[string]any{
 			"hash":         c.Hash.String(),
 			"unpacked_end": c.UncompressedOffset + c.UncompressedLength,
@@ -284,6 +301,8 @@ func (f *fakeBB) serveDedup(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.dedups++
+	f.dedupAnchors = append(f.dedupAnchors, anchors)
+	f.dedupXorbs = append(f.dedupXorbs, xorbs)
 	hits := []any{}
 	footers := map[string]any{}
 	truncated := false
@@ -494,6 +513,7 @@ func (f *fakeBB) convertPack(req *receiveRequest) (string, error) {
 	off := 12
 	firstChunked := -1
 	var blobs [][]byte
+	var entries []*clientEntry
 	named := map[xethash.Hash]bool{}
 	for range count {
 		start := off
@@ -529,6 +549,7 @@ func (f *fakeBB) convertPack(req *receiveRequest) (string, error) {
 			return refusal, nil
 		}
 		blobs = append(blobs, blob)
+		entries = append(entries, e)
 	}
 	if off != len(objects) {
 		return "", fmt.Errorf("%d bytes after the last object", len(objects)-off)
@@ -536,6 +557,9 @@ func (f *fakeBB) convertPack(req *receiveRequest) (string, error) {
 	f.mu.Lock()
 	for x := range named {
 		f.xorbs[x].permanent = true
+	}
+	for _, e := range entries {
+		f.fetch.recipes[hex.EncodeToString(e.oid)] = e
 	}
 	f.chunkedEntries += len(blobs)
 	f.mu.Unlock()
@@ -549,7 +573,7 @@ func (f *fakeBB) convertPack(req *receiveRequest) (string, error) {
 	out.Write(binary.BigEndian.AppendUint32(nil, count))
 	out.Write(objects[12:firstChunked])
 	for _, b := range blobs {
-		out.Write(objectHeader(3, int64(len(b))))
+		out.Write(bbchunk.AppendObjectHeader(nil, 3, int64(len(b))))
 		zw := zlib.NewWriter(&out)
 		if _, err := zw.Write(b); err != nil {
 			return "", fmt.Errorf("compress blob: %w", err)
@@ -790,18 +814,6 @@ func readObjectHeader(b []byte) (typ int, size int64, n int, err error) {
 		shift += 7
 	}
 	return typ, size, n, nil
-}
-
-func objectHeader(typ byte, size int64) []byte {
-	c := typ<<4 | byte(size&0x0f)
-	size >>= 4
-	var out []byte
-	for size > 0 {
-		out = append(out, c|0x80)
-		c = byte(size & 0x7f)
-		size >>= 7
-	}
-	return append(out, c)
 }
 
 // skipObject returns the end of the zlib data of a whole or delta object

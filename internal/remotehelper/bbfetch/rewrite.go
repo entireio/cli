@@ -3,6 +3,8 @@
 // type-5 entries that hold blob recipes (meta 0x02) instead of blobs. The
 // Rewriter forwards every other entry to git as it arrives, keeps the
 // recipes, and lets the caller append each blob in place of its recipe.
+// RewritePack drives a Rewriter for the helper: it gets the xorbs of the
+// recipes into the local cache and rebuilds each blob from them.
 //
 // The pack contract is in entiredb's docs/specs/client-chunked-fetch.md.
 package bbfetch
