@@ -43,11 +43,14 @@ type openCodeMessage struct {
 	Parts []map[string]json.RawMessage `json:"parts"`
 }
 
+// openCodeMessageInfo is an assistant message's metadata. Tokens and ModelID
+// are what its usage line carries; the rest is conversation structure.
 type openCodeMessageInfo struct {
-	ID     string            `json:"id"`
-	Role   string            `json:"role"`
-	Time   openCodeMsgTime   `json:"time"`
-	Tokens *openCodeMsgToken `json:"tokens"`
+	ID      string            `json:"id"`
+	Role    string            `json:"role"`
+	Time    openCodeMsgTime   `json:"time"`
+	Tokens  *openCodeMsgToken `json:"tokens"`
+	ModelID string            `json:"modelID"`
 }
 
 type openCodeMsgTime struct {
@@ -56,8 +59,26 @@ type openCodeMsgTime struct {
 }
 
 type openCodeMsgToken struct {
-	Input  int `json:"input"`
-	Output int `json:"output"`
+	Input     int              `json:"input"`
+	Output    int              `json:"output"`
+	Reasoning int              `json:"reasoning"`
+	Cache     openCodeMsgCache `json:"cache"`
+	Total     int              `json:"total"`
+}
+
+type openCodeMsgCache struct {
+	Read  int `json:"read"`
+	Write int `json:"write"`
+}
+
+// outputWithReasoning counts reasoning once, by the same total identity the
+// OpenCode agent uses: total == input + output + cache means reasoning is
+// already inside output. Any other total (or none) stores it apart.
+func (t openCodeMsgToken) outputWithReasoning() int {
+	if t.Total > 0 && t.Total == t.Input+t.Output+t.Cache.Read+t.Cache.Write {
+		return t.Output
+	}
+	return t.Output + t.Reasoning
 }
 
 // OpenCode part types this package reads beyond text.
@@ -127,10 +148,13 @@ func openCodeRecord(key string, msg openCodeMessage) (Record, bool) {
 		r.Content = content
 	case TypeAssistant:
 		r.SourceID = msg.Info.ID
-		r.Usage = &CallUsage{}
+		r.Usage = &CallUsage{Model: msg.Info.ModelID}
 		if t := msg.Info.Tokens; t != nil {
 			r.Usage.InputTokens = int64(t.Input)
-			r.Usage.OutputTokens = int64(t.Output)
+			r.Usage.OutputTokens = int64(t.outputWithReasoning())
+			r.Usage.CacheReadTokens = int64(t.Cache.Read)
+			r.Usage.CacheWriteTokens = int64(t.Cache.Write)
+			r.Usage.ReasoningTokens = int64(t.Reasoning)
 		}
 		blocks := openCodeAssistantBlocks(msg)
 		if len(blocks) == 0 && (r.Usage.InputTokens != 0 || r.Usage.OutputTokens != 0) {
