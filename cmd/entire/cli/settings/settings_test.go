@@ -111,6 +111,60 @@ func TestLoad_RejectsUnknownKeys(t *testing.T) {
 	}
 }
 
+func TestLoad_RejectsTrailingDataAfterObject(t *testing.T) {
+	// A settings.json whose first object is followed by a second object — the
+	// shape a merge conflict resolved by keeping both sides produces. Decoder
+	// stops after the first value, so without the trailing-data guard the second
+	// object (here flipping enabled and telemetry) is silently dropped. The
+	// loader must reject it rather than apply only the first object.
+	tmpDir := t.TempDir()
+
+	entireDir := filepath.Join(tmpDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0755); err != nil {
+		t.Fatalf("failed to create .entire directory: %v", err)
+	}
+
+	settingsFile := filepath.Join(entireDir, "settings.json")
+	content := "{\"enabled\": true}\n{\"enabled\": false, \"telemetry\": true}\n"
+	if err := os.WriteFile(settingsFile, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write settings file: %v", err)
+	}
+
+	testutil.InitRepo(t, tmpDir)
+	t.Chdir(tmpDir)
+
+	if _, err := Load(context.Background()); err == nil {
+		t.Error("expected error for trailing data after the settings object, got nil")
+	}
+}
+
+func TestLoad_AcceptsTrailingWhitespace(t *testing.T) {
+	// A single object followed by only whitespace must still parse: the
+	// trailing-data guard must not misfire on an ordinary trailing newline.
+	tmpDir := t.TempDir()
+
+	entireDir := filepath.Join(tmpDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0755); err != nil {
+		t.Fatalf("failed to create .entire directory: %v", err)
+	}
+
+	settingsFile := filepath.Join(entireDir, "settings.json")
+	if err := os.WriteFile(settingsFile, []byte("{\"enabled\": false}\n\n  \t\n"), 0644); err != nil {
+		t.Fatalf("failed to write settings file: %v", err)
+	}
+
+	testutil.InitRepo(t, tmpDir)
+	t.Chdir(tmpDir)
+
+	s, err := Load(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if s.Enabled {
+		t.Error("expected enabled to be false")
+	}
+}
+
 func TestLoad_AcceptsValidKeys(t *testing.T) {
 	// Create a temporary directory
 	tmpDir := t.TempDir()
@@ -995,6 +1049,20 @@ func TestLoadFromBytes_CustomRedactions(t *testing.T) {
 	}
 	if want, have := "ACME_TOKEN_[A-Za-z0-9]{20,}", got.Redaction.CustomRedactions["acme_token"]; want != have {
 		t.Errorf("CustomRedactions[acme_token]: want %q, have %q", want, have)
+	}
+}
+
+func TestLoadFromBytes_RejectsTrailingData(t *testing.T) {
+	t.Parallel()
+
+	if _, err := LoadFromBytes([]byte(`{"enabled": true} {"enabled": false}`)); err == nil {
+		t.Error("expected error for a trailing second object, got nil")
+	}
+	if _, err := LoadFromBytes([]byte(`{"enabled": true} trailing-garbage`)); err == nil {
+		t.Error("expected error for trailing garbage, got nil")
+	}
+	if _, err := LoadFromBytes([]byte("{\"enabled\": true}\n\t ")); err != nil {
+		t.Errorf("unexpected error for trailing whitespace: %v", err)
 	}
 }
 
