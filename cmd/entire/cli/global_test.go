@@ -30,6 +30,10 @@ func TestMain(m *testing.M) {
 	// auth subpackage's TestMain.
 	keyring.MockInit()
 
+	// Hook setup must not execute the developer's installed Claude. Tests of
+	// the probe call it directly; compatibility tests supply explicit versions.
+	installedClaudeHookVersion = func(context.Context) (string, error) { return minimumClaudeHookVersion, nil }
+
 	// Trail creation asks origin for its default branch. Test repos point origin
 	// at made-up GitHub URLs, so the real lookup would reach the network; report
 	// "unknown" instead. Tests of remoteDefaultBranch call it directly.
