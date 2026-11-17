@@ -297,6 +297,48 @@ func TestCheckoutBranch(t *testing.T) {
 	})
 }
 
+func TestCheckoutBranch_RefusesToOverwriteIgnoredFile(t *testing.T) {
+	repoDir := t.TempDir()
+	t.Chdir(repoDir)
+
+	testutil.InitRepo(t, repoDir)
+	testutil.WriteFile(t, repoDir, ".gitignore", "local-only.env\n")
+	testutil.WriteFile(t, repoDir, "README.md", "source branch\n")
+	testutil.GitAdd(t, repoDir, ".gitignore", "README.md")
+	testutil.GitCommit(t, repoDir, "source branch")
+	sourceBranch := strings.TrimSpace(testutil.RunGit(t, repoDir, "branch", "--show-current"))
+
+	testutil.GitCheckoutNewBranch(t, repoDir, "target")
+	testutil.WriteFile(t, repoDir, "local-only.env", "tracked target content\n")
+	testutil.GitAddForce(t, repoDir, "local-only.env")
+	testutil.GitCommit(t, repoDir, "track ignored file on target")
+	testutil.RunGit(t, repoDir, "checkout", sourceBranch)
+
+	const localContent = "local credentials must survive\n"
+	testutil.WriteFile(t, repoDir, "local-only.env", localContent)
+	dirty, err := HasUncommittedChanges(context.Background())
+	if err != nil {
+		t.Fatalf("HasUncommittedChanges() error = %v", err)
+	}
+	if dirty {
+		t.Fatal("HasUncommittedChanges() = true, want ignored file to remain eligible for resume")
+	}
+
+	if err := CheckoutBranch(context.Background(), "target"); err == nil {
+		t.Fatal("CheckoutBranch() = nil, want checkout to refuse overwriting ignored file")
+	}
+	if branch := strings.TrimSpace(testutil.RunGit(t, repoDir, "branch", "--show-current")); branch != sourceBranch {
+		t.Errorf("current branch = %q, want %q after refused checkout", branch, sourceBranch)
+	}
+	content, err := os.ReadFile(filepath.Join(repoDir, "local-only.env"))
+	if err != nil {
+		t.Fatalf("read ignored file: %v", err)
+	}
+	if string(content) != localContent {
+		t.Errorf("ignored file content = %q, want %q", content, localContent)
+	}
+}
+
 func TestResumeFromCurrentBranch_NoCheckpoint(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
