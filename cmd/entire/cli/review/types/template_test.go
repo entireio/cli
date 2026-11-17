@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Compile-time interface check.
@@ -185,6 +188,168 @@ func TestReviewerTemplate_WaitIncludesStderrOnFailure(t *testing.T) {
 	}
 	if !strings.Contains(waitErr.Error(), "auth failed: login required") {
 		t.Fatalf("Wait() error missing stderr diagnostics: %v", waitErr)
+	}
+}
+
+// TestReviewerTemplate_WaitDoesNotBlockOnInheritedStderr covers an agent that
+// exits while a grandchild it spawned still holds stderr open (a language
+// server, an MCP helper). Wait must return when the agent exits instead of
+// blocking on a stderr EOF that may never come.
+func TestReviewerTemplate_WaitDoesNotBlockOnInheritedStderr(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses POSIX shell and inherited file descriptors")
+	}
+	t.Parallel()
+
+	releaseReader, releaseWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = releaseReader.Close(); _ = releaseWriter.Close() })
+	tmpl := &ReviewerTemplate{
+		AgentName: "grandchild-agent",
+		BuildCmd: func(ctx context.Context, _ RunConfig) *exec.Cmd {
+			// The helper holds stderr until the test closes releaseWriter. Unlike
+			// a timed sleep, it cannot exit early on a slow CI worker.
+			cmd := exec.CommandContext(ctx, "sh", "-c", "cat <&3 >/dev/null & exit 0")
+			cmd.ExtraFiles = []*os.File{releaseReader}
+			return cmd
+		},
+		Parser: func(stdout io.Reader) <-chan Event {
+			if _, err := io.Copy(io.Discard, stdout); err != nil {
+				t.Errorf("draining reviewer stdout: %v", err)
+			}
+			ch := make(chan Event, 1)
+			ch <- Finished{Success: true}
+			close(ch)
+			return ch
+		},
+	}
+	proc, err := tmpl.Start(t.Context(), RunConfig{})
+	if err != nil {
+		t.Fatalf("Start() error: %v", err)
+	}
+	_ = releaseReader.Close()
+	for range proc.Events() {
+	}
+	done := make(chan struct{})
+	var waitErr error
+	go func() { waitErr = proc.Wait(); close(done) }()
+	t.Cleanup(func() {
+		_ = releaseWriter.Close()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("Wait did not finish after releasing inherited stderr")
+		}
+	})
+	select {
+	case <-done:
+		if waitErr != nil {
+			t.Fatalf("Wait() error: %v", waitErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Wait() blocked on stderr held by a grandchild after the agent exited")
+	}
+}
+
+func TestReviewerTemplate_StartFailureClosesStderr(t *testing.T) {
+	t.Parallel()
+
+	var cmd *exec.Cmd
+	cleaned := false
+	tmpl := &ReviewerTemplate{
+		AgentName: "missing-agent",
+		Prepare: func(_ context.Context, cfg RunConfig) (RunConfig, func(), error) {
+			return cfg, func() { cleaned = true }, nil
+		},
+		BuildCmd: func(ctx context.Context, _ RunConfig) *exec.Cmd {
+			cmd = exec.CommandContext(ctx, filepath.Join(t.TempDir(), "missing-agent"))
+			return cmd
+		},
+		Parser: func(_ io.Reader) <-chan Event {
+			t.Error("parser called after failed Start")
+			return nil
+		},
+	}
+	proc, err := tmpl.Start(t.Context(), RunConfig{})
+	if err == nil || proc != nil {
+		t.Fatalf("Start() = (%v, %v), want nil process and launch error", proc, err)
+	}
+	if !cleaned {
+		t.Error("Start did not release prepared resources")
+	}
+	writer, ok := cmd.Stderr.(*os.File)
+	if !ok {
+		t.Fatalf("stderr writer = %T, want *os.File", cmd.Stderr)
+	}
+	t.Cleanup(func() { _ = writer.Close() })
+	if _, err := writer.Stat(); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("stderr writer remains open after failed Start: %v", err)
+	}
+}
+
+func TestReviewerTemplate_StartRejectsConfiguredStderr(t *testing.T) {
+	t.Parallel()
+
+	var cmd *exec.Cmd
+	tmpl := &ReviewerTemplate{
+		AgentName: "configured-stderr",
+		BuildCmd: func(ctx context.Context, _ RunConfig) *exec.Cmd {
+			cmd = exec.CommandContext(ctx, filepath.Join(t.TempDir(), "missing-agent"))
+			cmd.Stderr = io.Discard
+			return cmd
+		},
+		Parser: func(_ io.Reader) <-chan Event {
+			t.Error("parser called for a rejected command")
+			return nil
+		},
+	}
+	proc, err := tmpl.Start(t.Context(), RunConfig{})
+	if proc != nil || err == nil || !strings.Contains(err.Error(), "Stderr already set") {
+		t.Fatalf("Start() = (%v, %v), want configured-stderr error", proc, err)
+	}
+	if cmd.Stderr != io.Discard || cmd.Process != nil {
+		t.Fatal("Start changed or launched the rejected command")
+	}
+}
+
+func TestReviewerTemplate_WaitDrainsLargeStderr(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses POSIX shell")
+	}
+	t.Parallel()
+
+	// More than a pipe buffer: the capture must drain concurrently, preserve
+	// the bounded diagnostic and join before Wait exposes its contents.
+	diagnostic := strings.Repeat("x", maxProcessStderrBytes+4096)
+	tmpl := &ReviewerTemplate{
+		AgentName: "verbose-agent",
+		BuildCmd: func(ctx context.Context, _ RunConfig) *exec.Cmd {
+			return exec.CommandContext(ctx, "sh", "-c", `printf '%s' "$1" >&2; exit 7`, "agent", diagnostic)
+		},
+		Parser: func(stdout io.Reader) <-chan Event {
+			if _, err := io.Copy(io.Discard, stdout); err != nil {
+				t.Errorf("draining reviewer stdout: %v", err)
+			}
+			ch := make(chan Event)
+			close(ch)
+			return ch
+		},
+	}
+	proc, err := tmpl.Start(t.Context(), RunConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range proc.Events() {
+	}
+	var processErr *ProcessError
+	if err := proc.Wait(); !errors.As(err, &processErr) {
+		t.Fatalf("Wait() = %v, want ProcessError", err)
+	}
+	want := diagnostic[:maxProcessStderrBytes] + "\n[stderr truncated]"
+	if processErr.Stderr != want {
+		t.Fatalf("stderr: got %d bytes, want %d bytes including truncation marker", len(processErr.Stderr), len(want))
 	}
 }
 
