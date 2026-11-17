@@ -101,10 +101,11 @@ func DispatchLifecycleEvent(ctx context.Context, ag agent.Agent, event *agent.Ev
 		}
 	}
 
-	// Conditional TurnStart (e.g. Antigravity's per-invocation PreInvocation):
-	// drop it when a turn is already active so a mid-turn follow-up model call
-	// doesn't clobber the pre-prompt baseline. A resumed turn (session idle,
-	// ended, condensed, or absent) falls through and is tracked.
+	// Conditional TurnStart (Antigravity's per-invocation PreInvocation, Claude
+	// Code's background-task <task-notification>): drop it when a turn is
+	// already active so a mid-turn follow-up model call or injected notice
+	// doesn't clobber the running turn's pre-prompt baseline. A resumed turn
+	// (session idle, ended, condensed, or absent) falls through and is tracked.
 	if event.Type == agent.TurnStart && event.SuppressIfSessionActive {
 		state, _ := strategy.LoadSessionState(ctx, event.SessionID) //nolint:errcheck // a load failure means treat as no active session and let TurnStart proceed
 		if shouldSuppressConditionalTurnStart(event, state) {
