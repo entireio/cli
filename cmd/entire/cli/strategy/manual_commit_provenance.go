@@ -156,15 +156,8 @@ func (s *ManualCommitStrategy) amendedCheckpoint(ctx context.Context, repo *git.
 			// another hook's `git reset HEAD`.
 			continue
 		}
-		if e.oldInferred {
-			switch {
-			case newCommitReflogMessage(e.msg):
-				return amendedLink{}
-			case e.oldHash.IsZero(), strings.HasPrefix(e.msg, "commit (amend)") && !sameParents(repo, e.oldHash, commit):
-				// No entry is listed before it, or the one listed is not
-				// what an amend replaced: what HEAD was is unknown.
-				return amendedLink{checkpointID: checkpointID}
-			}
+		if link, ok := inferredAmendLink(repo, e, commit, checkpointID); ok {
+			return link
 		}
 		if e.oldHash.IsZero() || slices.ContainsFunc(commit.ParentHashes, e.oldHash.Equal) {
 			return amendedLink{}
@@ -176,6 +169,23 @@ func (s *ManualCommitStrategy) amendedCheckpoint(ctx context.Context, repo *git.
 		return link
 	}
 	return amendedLink{checkpointID: checkpointID}
+}
+
+// inferredAmendLink decides for an entry read through git (oldInferred), whose
+// old HEAD may be missing or another commit: git's message tells a new commit
+// from an amend, and an amend keeps its owner when no entry is listed before
+// it, or the one listed is not what it replaced. ok is false when the listed
+// old HEAD can be judged as the files backend's is.
+func inferredAmendLink(repo *git.Repository, e reflogEntry, commit *object.Commit, checkpointID id.CheckpointID) (link amendedLink, ok bool) {
+	switch {
+	case !e.oldInferred:
+		return amendedLink{}, false
+	case newCommitReflogMessage(e.msg):
+		return amendedLink{}, true
+	case e.oldHash.IsZero(), strings.HasPrefix(e.msg, "commit (amend)") && !sameParents(repo, e.oldHash, commit):
+		return amendedLink{checkpointID: checkpointID}, true
+	}
+	return amendedLink{}, false
 }
 
 // newCommitReflogMessage reports whether msg is the reflog message `git commit`
