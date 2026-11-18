@@ -55,6 +55,10 @@ const (
 	// euSpace separates the parts of a street line: spaces or tabs, never a
 	// line break.
 	euSpace = `[ \t]+`
+	// euOptionalSpace is where a street line may have a space or not
+	// (n. 12 or n.12, 3/A or 3 / A, C/Mayor or C/ Mayor). Like euSpace it
+	// takes a run, so a doubled space does not leave the line visible.
+	euOptionalSpace = `[ \t]*`
 	// euHouseNumber is the number that ends an Italian or Spanish street
 	// line, optionally after n., n.º, nº or n°, with an optional letter or
 	// sub-number (3/A, 12b, 7/2, 12/14A, 12/bis). A sub-number is digits with
@@ -65,7 +69,7 @@ const (
 	// four-digit house number (Via XX Settembre 1234, 20121 Milano), the
 	// regex reads 1234 as the house number instead of returning a match that
 	// ends inside the postal code.
-	euHouseNumber = `(?:n(?:\.[°º]?|[°º])[ \t]?)?\d{1,4}(?:[ \t]?/[ \t]?(?:bis|ter|[0-9]{1,3}[A-Za-z]?|[A-Za-z])|[A-Za-z])?\b`
+	euHouseNumber = `(?:n(?:\.[°º]?|[°º])` + euOptionalSpace + `)?\d{1,4}(?:` + euOptionalSpace + `/` + euOptionalSpace + `(?:bis|ter|[0-9]{1,3}[A-Za-z]?|[A-Za-z])|[A-Za-z])?\b`
 	// euGermanAdjective may come before a German street's name: Alte
 	// Schönhauser Straße, Große Hamburger Straße, Alter Postweg.
 	euGermanAdjective = `(?:Alt|Neu|Gro(?:ß|ss)|Klein|Ober|Unter|Mittler|Vorder|Hinter|Hoh|Lang|Breit)e[nrs]?`
@@ -156,7 +160,7 @@ var (
 	// spanishSlashAddressRegex: C/ Mayor 5, C/Mayor 5. Not right after a
 	// slash, where C/ is part of a path (docs/C/Readme 2).
 	spanishSlashAddressRegex = euStreetLineAfter(euSlashTypeLeftEdge,
-		`C/[ \t]?`+spanishNameAndNumber)
+		`C/`+euOptionalSpace+spanishNameAndNumber)
 
 	spanishNameAndNumber = euStreetName(`de|del|la|las|los|el|y`) + `,?` + euSpace + euHouseNumber
 
@@ -164,7 +168,7 @@ var (
 	// 12 B rue de la Paix. The street type may be capitalized (12 Rue de la
 	// Paix).
 	frenchAddressRegex = euStreetLine(
-		`\d{1,4}(?:[ \t]?(?:bis|ter)\b|[ \t]?[A-D]\b|[a-d]\b)?,?` + euSpace +
+		`\d{1,4}(?:` + euOptionalSpace + `(?:bis|ter)\b|` + euOptionalSpace + `[A-D]\b|[a-d]\b)?,?` + euSpace +
 			euAlternation(slices.Concat(frenchStreetTypes, capitalized(frenchStreetTypes))) + euSpace +
 			euStreetName(`de|du|des|la|le|les|aux|au|sur`))
 

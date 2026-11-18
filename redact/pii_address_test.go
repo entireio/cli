@@ -37,6 +37,9 @@ func TestDetectPII_EuropeanAddresses(t *testing.T) {
 		{"Viale dell'Indipendenza 8", "[REDACTED_ADDRESS]"},
 		{"Largo Sant'Ambrogio 2", "[REDACTED_ADDRESS]"},
 		{"Via Roma n. 12", "[REDACTED_ADDRESS]"},
+		// Where a space is optional, a doubled one counts too.
+		{"Via Roma n.  12", "[REDACTED_ADDRESS]"},
+		{"Via Verdi 12  /  14", "[REDACTED_ADDRESS]"},
 		{"Via XX Settembre 20", "[REDACTED_ADDRESS]"},
 		{"Via XXVIII Aprile 12", "[REDACTED_ADDRESS]"},
 		{"Via 20 Settembre 97", "[REDACTED_ADDRESS]"},
@@ -52,6 +55,7 @@ func TestDetectPII_EuropeanAddresses(t *testing.T) {
 		{"Paseo de la Castellana 259", "[REDACTED_ADDRESS]"},
 		{"C/ Mayor 5", "[REDACTED_ADDRESS]"},
 		{"C/Mayor 5", "[REDACTED_ADDRESS]"},
+		{"C/  Mayor 5", "[REDACTED_ADDRESS]"},
 		{"Plaza Mayor nº 1", "[REDACTED_ADDRESS]"},
 		{"Avda. Diagonal 640", "[REDACTED_ADDRESS]"},
 		{"Calle Mayor n.º 1", "[REDACTED_ADDRESS]"},
@@ -70,6 +74,8 @@ func TestDetectPII_EuropeanAddresses(t *testing.T) {
 		{"12 rue du Château-d’Eau, 75010 Paris", "[REDACTED_ADDRESS], 75010 Paris"},
 		{"12 Rue du Faubourg Saint-Honoré", "[REDACTED_ADDRESS]"},
 		{"12 B rue de la Paix", "[REDACTED_ADDRESS]"},
+		{"12  B rue de la Paix", "[REDACTED_ADDRESS]"},
+		{"12\t\tbis rue de la Paix", "[REDACTED_ADDRESS]"},
 		{"12 rue du 8 Mai 1945, 75000 Paris", "[REDACTED_ADDRESS], 75000 Paris"},
 		{"12 rue du 8 Mai 75000 Paris", "[REDACTED_ADDRESS] 75000 Paris"},
 		// A word in capitals after the name is not a roman numeral, so the
