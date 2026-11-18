@@ -135,14 +135,17 @@ func stampedByAnotherCommit(ctx context.Context, checkpointID id.CheckpointID, s
 // would have restored it for: `commit --amend -C <other>` keeps another
 // commit's trailer, and its owner was never linked to this one. A message
 // reused with `commit -C` keeps a trailer the same way but advances HEAD: it
-// makes a new link. When this commit's entry has no old HEAD (a reftable
-// reflog whose older entries expired), the message `git commit` wrote for it
-// decides. With no reflog entry for this commit to tell them apart
-// (core.logAllRefUpdates=false), or only one another command wrote, it is
-// taken as an amend, so the owner keeps condensing into its checkpoint as it
-// did before the idle check. Judged a new link instead, the owner would be
-// dropped, and the amend's work would never reach the checkpoint its trailer
-// names.
+// makes a new link. Read through git, as a reftable reflog is, an entry's old
+// HEAD is only the new HEAD of the entry listed before it: missing, or another
+// commit, once entries between them expire. There the message `git commit`
+// wrote decides, and an amend whose old HEAD is missing, or has other parents
+// than the amend (an amend keeps the parents of the commit it replaces), keeps
+// its owner, though what it replaced is unknown. With no reflog entry for
+// this commit to tell them apart (core.logAllRefUpdates=false), or only one
+// another command wrote, with no old HEAD, it is taken as an amend, so the
+// owner keeps condensing into its checkpoint as it did before the idle check.
+// Judged a new link instead, the owner would be dropped, and the amend's work
+// would never reach the checkpoint its trailer names.
 func (s *ManualCommitStrategy) amendedCheckpoint(ctx context.Context, repo *git.Repository, commit *object.Commit, checkpointID id.CheckpointID, preexisting bool) amendedLink {
 	if !preexisting {
 		return amendedLink{}
@@ -153,13 +156,15 @@ func (s *ManualCommitStrategy) amendedCheckpoint(ctx context.Context, repo *git.
 			// another hook's `git reset HEAD`.
 			continue
 		}
-		if e.oldUnknown {
-			// Nothing shows where HEAD was before it (headReflogFromGit), so
-			// only git's message for the entry tells them apart.
-			if newCommitReflogMessage(e.msg) {
+		if e.oldInferred {
+			switch {
+			case newCommitReflogMessage(e.msg):
 				return amendedLink{}
+			case e.oldHash.IsZero(), strings.HasPrefix(e.msg, "commit (amend)") && !sameParents(repo, e.oldHash, commit):
+				// No entry is listed before it, or the one listed is not
+				// what an amend replaced: what HEAD was is unknown.
+				return amendedLink{checkpointID: checkpointID}
 			}
-			return amendedLink{checkpointID: checkpointID}
 		}
 		if e.oldHash.IsZero() || slices.ContainsFunc(commit.ParentHashes, e.oldHash.Equal) {
 			return amendedLink{}
@@ -182,6 +187,13 @@ func newCommitReflogMessage(msg string) bool {
 		return true
 	}
 	return strings.HasPrefix(msg, "commit (") && !strings.HasPrefix(msg, "commit (amend)")
+}
+
+// sameParents reports whether the commit at hash has commit's parents, as the
+// commit an amend replaced has.
+func sameParents(repo *git.Repository, hash plumbing.Hash, commit *object.Commit) bool {
+	c, err := repo.CommitObject(hash)
+	return err == nil && slices.EqualFunc(c.ParentHashes, commit.ParentHashes, plumbing.Hash.Equal)
 }
 
 // commitLinksCheckpoint reports whether the commit at hash links checkpointID:

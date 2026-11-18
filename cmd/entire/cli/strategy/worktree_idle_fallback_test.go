@@ -291,8 +291,10 @@ func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
 		laterCommit bool
 		// editReflog changes HEAD's reflog after the commit, before its
 		// post-commit: dropNewestReflogEntry removes the commit's own entry,
-		// leaving only older ones, and expireReflogBeforeNewest leaves only
-		// that entry, with no old HEAD.
+		// leaving only older ones. The others have it read through git, as
+		// for reftable: readReflogThroughGit as it is, expireReflogBeforeNewest
+		// with only that entry left, and expireReplacedReflogEntry without the
+		// entry of the commit an amend replaced.
 		editReflog func(t *testing.T, dir string)
 		condensed  bool
 	}{
@@ -308,6 +310,9 @@ func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
 		{name: "amend with no reflog entry of its own", commitArgs: []string{"--amend"}, editReflog: dropNewestReflogEntry, condensed: true},
 		{name: "amend whose reflog entry has no older one to read its old HEAD from", commitArgs: []string{"--amend"}, editReflog: expireReflogBeforeNewest, condensed: true},
 		{name: "commit -C whose reflog entry has no older one to read its old HEAD from", editReflog: expireReflogBeforeNewest, condensed: false},
+		{name: "amend, reflog read through git", commitArgs: []string{"--amend"}, editReflog: readReflogThroughGit, condensed: true},
+		{name: "amend of another commit reusing the message, reflog read through git", commitArgs: []string{"--amend"}, amendOther: true, editReflog: readReflogThroughGit, condensed: false},
+		{name: "amend whose replaced commit's reflog entry expired", commitArgs: []string{"--amend"}, editReflog: expireReplacedReflogEntry, condensed: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -473,12 +478,53 @@ func dropNewestReflogEntry(t *testing.T, dir string) {
 		"sanity: an older entry that moved HEAD is left")
 }
 
+// readReflogThroughGit has headReflog read HEAD's reflog through git, as it
+// does for the reftable backend, which keeps no logs/HEAD: the files backend
+// stands in for reftable here. Without logs/HEAD, git lists the branch's
+// reflog, and each entry's old HEAD is read from the entry listed before it.
+func readReflogThroughGit(t *testing.T, dir string) {
+	t.Helper()
+	editReflogReadThroughGit(t, dir, func(lines []string) []string { return lines })
+	entries := headReflog(context.Background())
+	require.NotEmpty(t, entries, "sanity: git lists the entries")
+	require.True(t, entries[0].oldInferred, "sanity: the old HEAD is read from the entry before")
+}
+
 // expireReflogBeforeNewest leaves HEAD's reflog with only its newest entry, as
 // a reftable reflog is once older entries expire: git lists it with no entry
-// before it, so its old HEAD is unknown. The files backend stands in for
-// reftable here: without logs/HEAD, headReflog asks git, which lists the
-// branch's reflog, cut to its newest entry.
+// before it, so its old HEAD is unknown.
 func expireReflogBeforeNewest(t *testing.T, dir string) {
+	t.Helper()
+	editReflogReadThroughGit(t, dir, func(lines []string) []string { return lines[len(lines)-1:] })
+	head := strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", "HEAD"))
+	entries := headReflog(context.Background())
+	require.Len(t, entries, 1, "sanity: only the newest entry is left")
+	require.Equal(t, head, entries[0].newHash.String(), "sanity: the entry names the commit")
+	require.True(t, entries[0].oldInferred && entries[0].oldHash.IsZero(), "sanity: git gives no old HEAD for it")
+}
+
+// expireReplacedReflogEntry removes the entry of the commit the amend
+// replaced, as `git reflog expire --expire-unreachable` does once the amend
+// leaves that commit unreachable, and keeps the entries before it, which are
+// still reachable. Read through git, the amend's old HEAD is then the
+// replaced commit's parent.
+func expireReplacedReflogEntry(t *testing.T, dir string) {
+	t.Helper()
+	editReflogReadThroughGit(t, dir, func(lines []string) []string {
+		require.Greater(t, len(lines), 2, "sanity: an entry is left before the replaced one")
+		return append(lines[:len(lines)-2:len(lines)-2], lines[len(lines)-1])
+	})
+	head := strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", "HEAD"))
+	parent := strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", "HEAD^"))
+	entries := headReflog(context.Background())
+	require.Equal(t, head, entries[0].newHash.String(), "sanity: the newest entry names the amend")
+	require.Equal(t, parent, entries[0].oldHash.String(), "sanity: git's listing gives the amend's parent as its old HEAD")
+}
+
+// editReflogReadThroughGit removes logs/HEAD, so headReflog reads HEAD's reflog
+// through git, which then lists the branch's reflog, and rewrites that log with
+// the entries keep returns, oldest first.
+func editReflogReadThroughGit(t *testing.T, dir string, keep func(lines []string) []string) {
 	t.Helper()
 	gitDir := strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", "--path-format=absolute", "--absolute-git-dir"))
 	require.NoError(t, os.Remove(filepath.Join(gitDir, "logs", "HEAD")))
@@ -487,11 +533,6 @@ func expireReflogBeforeNewest(t *testing.T, dir string) {
 	logPath := filepath.Join(commonDir, "logs", filepath.FromSlash(branch))
 	data, err := os.ReadFile(logPath)
 	require.NoError(t, err)
-	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
-	require.NoError(t, os.WriteFile(logPath, []byte(lines[len(lines)-1]+"\n"), 0o600))
-	head := strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", "HEAD"))
-	entries := headReflog(context.Background())
-	require.Len(t, entries, 1, "sanity: only the newest entry is left")
-	require.Equal(t, head, entries[0].newHash.String(), "sanity: the entry names the commit")
-	require.True(t, entries[0].oldUnknown, "sanity: git gives no old HEAD for it")
+	lines := keep(strings.Split(strings.TrimSuffix(string(data), "\n"), "\n"))
+	require.NoError(t, os.WriteFile(logPath, []byte(strings.Join(lines, "\n")+"\n"), 0o600))
 }
