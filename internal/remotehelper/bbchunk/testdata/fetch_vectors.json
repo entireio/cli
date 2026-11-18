@@ -1,0 +1,654 @@
+{
+  "notes": [
+    "Golden vectors for the stored meta 0x02 entries of a client-chunked fetch. The contract is docs/specs/client-chunked-fetch.md in entiredb. Generator: internal/xet/fetch_vectors_test.go.",
+    "input names an input of client_vectors.json. Each xorb of an entry is a xorb of that file: an input xorb, or the new xorb of the dedup entry for the same input. A client can rebuild the input from them.",
+    "Xet hashes (file, xorb) are in Xet text form, as in client_vectors.json. Entry hex holds the raw 32 bytes.",
+    "entries: complete stored pack entries (type 5 header with the logical size, meta byte 0x02, payload size uvarint, payload) and their parsed fields. The payload is the blob OID, the file hash, the xorb count and hashes, the term count, and six uvarints for each term: xorb index, chunk start, chunk end (half-open), unpacked bytes, first byte, last byte.",
+    "first_byte and last_byte are the inclusive range of the term's chunks in the stored xorb: first_byte is the stored end of chunk chunk_start-1 (0 for chunk 0), and last_byte is the stored end of chunk chunk_end-1, minus 1. Stored ends are the stored_ends of the xorb in client_vectors.json.",
+    "Recipe \"xorbs of the input\" has one term for each input xorb. Recipe \"dedup against <base>\" is the recipe of the client entry of the same name in client_vectors.json, with byte ranges.",
+    "invalid_entries: complete entries that entiredb refuses as a stored chunked entry. error is a substring of entiredb's error text. A client refuses each of them too."
+  ],
+  "entries": [
+    {
+      "name": "one-byte/sha1",
+      "input": "one-byte",
+      "recipe": "xorbs of the input",
+      "object_format": "sha1",
+      "size": 1,
+      "hex": "51025c2e65efe2a145dda7ee51d1741299f848e5bf752e0941f3f5faffa7491e543e7f7591a1d415830e1ecd7d4326be56787503a554340151feb2fc80edd4a4906f3e1d3259fc7730588da4353ef2fa8a17343f07bf143101000001010008",
+      "oid": "2e65efe2a145dda7ee51d1741299f848e5bf752e",
+      "file_hash": "49a7fffaf5f34109d4a191757f3e541e26437dcd1e0e83153454a503757856be",
+      "xorbs": [
+        "a4d4ed80fcb2fe5177fc59321d3e6f90faf23e35a48d58303114bf073f34178a"
+      ],
+      "terms": [
+        {
+          "xorb": 0,
+          "chunk_start": 0,
+          "chunk_end": 1,
+          "unpacked_bytes": 1,
+          "first_byte": 0,
+          "last_byte": 8
+        }
+      ]
+    },
+    {
+      "name": "random-min/sha1",
+      "input": "random-min",
+      "recipe": "xorbs of the input",
+      "object_format": "sha1",
+      "size": 8192,
+      "hex": "d08004025eb2119664891e6de5281f44e2e9394ab23d3170134228de2adf49250928bc95883426f8aa407a850715a66e1dae601e9d13fa9f650127e3faf987c0e4d402e6f1a41c8e2644d6442e29a38a9a78169b3486cbf7d31c010000018040008740",
+      "oid": "b2119664891e6de5281f44e2e9394ab23d317013",
+      "file_hash": "092549df2ade2842aaf826348895bc281d6ea61507857a40659ffa139d1e60ae",
+      "xorbs": [
+        "d4e4c087f9fae32744268e1ca4f1e602789a8aa3292e44d61cd3f7cb86349b16"
+      ],
+      "terms": [
+        {
+          "xorb": 0,
+          "chunk_start": 0,
+          "chunk_end": 1,
+          "unpacked_bytes": 8192,
+          "first_byte": 0,
+          "last_byte": 8199
+        }
+      ]
+    },
+    {
+      "name": "zeros-max-plus-one/sha1",
+      "input": "zeros-max-plus-one",
+      "recipe": "xorbs of the input",
+      "object_format": "sha1",
+      "size": 131073,
+      "hex": "d18040025fe0bf9f064da0b1c195fcaea1185fe89c133e4560b51073dc8af4f883cd24ca56b295827485c9797645ac2ace8af588039ea1e326014d61e110884e7733374b2799939f2558c15c1f0cca5ec85924b960b8b285d2250100000281800800b704",
+      "oid": "e0bf9f064da0b1c195fcaea1185fe89c133e4560",
+      "file_hash": "83f8f48adc7310b5748295b256ca24cdce2aac457679c98526e3a19e0388f58a",
+      "xorbs": [
+        "33774e8810e1614d58259f9399274b3759c85eca0c1f5cc125d285b2b860b924"
+      ],
+      "terms": [
+        {
+          "xorb": 0,
+          "chunk_start": 0,
+          "chunk_end": 2,
+          "unpacked_bytes": 131073,
+          "first_byte": 0,
+          "last_byte": 567
+        }
+      ]
+    },
+    {
+      "name": "random-4MiB/sha1",
+      "input": "random-4MiB",
+      "recipe": "xorbs of the input",
+      "object_format": "sha1",
+      "size": 4194304,
+      "hex": "d08080100262664542cf98ef38e4965e29472fc72de556bae7ddf0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9015c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e01000043808080020097848002",
+      "oid": "664542cf98ef38e4965e29472fc72de556bae7dd",
+      "file_hash": "bf117c6fa805dcf0ba2c13562896a6dcdec02b36a6312728f9d2e887c1bf4696",
+      "xorbs": [
+        "8cc679091a4c8c5c1d40081625716979b02ca96bca44c9ac9e4478acf4e15b67"
+      ],
+      "terms": [
+        {
+          "xorb": 0,
+          "chunk_start": 0,
+          "chunk_end": 67,
+          "unpacked_bytes": 4194304,
+          "first_byte": 0,
+          "last_byte": 4194839
+        }
+      ]
+    },
+    {
+      "name": "random-4MiB/sha256",
+      "input": "random-4MiB",
+      "recipe": "xorbs of the input",
+      "object_format": "sha256",
+      "size": 4194304,
+      "hex": "d0808010026ef01b19ef1cadf74dcf505ad03e4ec066a9455fd72060e2c502f608235a4f52d3f0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9015c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e01000043808080020097848002",
+      "oid": "f01b19ef1cadf74dcf505ad03e4ec066a9455fd72060e2c502f608235a4f52d3",
+      "file_hash": "bf117c6fa805dcf0ba2c13562896a6dcdec02b36a6312728f9d2e887c1bf4696",
+      "xorbs": [
+        "8cc679091a4c8c5c1d40081625716979b02ca96bca44c9ac9e4478acf4e15b67"
+      ],
+      "terms": [
+        {
+          "xorb": 0,
+          "chunk_start": 0,
+          "chunk_end": 67,
+          "unpacked_bytes": 4194304,
+          "first_byte": 0,
+          "last_byte": 4194839
+        }
+      ]
+    },
+    {
+      "name": "zeros-xorb-split/sha1",
+      "input": "zeros-xorb-split",
+      "recipe": "xorbs of the input",
+      "object_format": "sha1",
+      "size": 67108865,
+      "hex": "d1808080020288014d38bbd52d336b129cf35f58f8af683f6134ad0d5e98523ed7497d4673e46c76b29263111142e62374af541abf7578205ce83d36021a6da9f4073261c9fbeaf9c7954ef19e4c967c55432cc380d9c009f6fece5905d57cf6db8c2993dfcfc090628dd2ae0729a6df88aaa09a7f1094658086f9fccf02000080048080802000ffbb11010001010008",
+      "oid": "4d38bbd52d336b129cf35f58f8af683f6134ad0d",
+      "file_hash": "467d49d73e52985e116392b2766ce4731a54af7423e64211363de85c207875bf",
+      "xorbs": [
+        "c9613207f4a96d1a9ef14e95c7f9eafb80c32c43557c964c0559cefef609c0d9",
+        "df93298cdbf67cd507aed28d6290c0cf7f9aa0aa88dfa629cffcf98680659410"
+      ],
+      "terms": [
+        {
+          "xorb": 0,
+          "chunk_start": 0,
+          "chunk_end": 512,
+          "unpacked_bytes": 67108864,
+          "first_byte": 0,
+          "last_byte": 286207
+        },
+        {
+          "xorb": 1,
+          "chunk_start": 0,
+          "chunk_end": 1,
+          "unpacked_bytes": 1,
+          "first_byte": 0,
+          "last_byte": 8
+        }
+      ]
+    },
+    {
+      "name": "edit-overwrite/sha1",
+      "input": "edit-overwrite",
+      "recipe": "dedup against random-4MiB",
+      "object_format": "sha1",
+      "size": 4194304,
+      "hex": "d0808010029801e2daf3949565805314b54eaa65b99900bf755fe04c0ea4af27d167ffbc6453b10318a8f58f7936c90e851e774238f2e5408ba4e8025c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e164070c0e734c6211d57b84f4713a25f7984817061b558967791d2f0c17324d7030000108fa63e008ea73e010001a2e40300a9e403001143cff5bd01b98b4297848002",
+      "oid": "e2daf3949565805314b54eaa65b99900bf755fe0",
+      "file_hash": "ff67d127afa40e4cf5a81803b15364bc771e850ec936798fe8a48b40e5f23842",
+      "xorbs": [
+        "8cc679091a4c8c5c1d40081625716979b02ca96bca44c9ac9e4478acf4e15b67",
+        "21c634e7c07040165fa213474fb8571d9658b56170818479d72473c1f0d29177"
+      ],
+      "terms": [
+        {
+          "xorb": 0,
+          "chunk_start": 0,
+          "chunk_end": 16,
+          "unpacked_bytes": 1020687,
+          "first_byte": 0,
+          "last_byte": 1020814
+        },
+        {
+          "xorb": 1,
+          "chunk_start": 0,
+          "chunk_end": 1,
+          "unpacked_bytes": 61986,
+          "first_byte": 0,
+          "last_byte": 61993
+        },
+        {
+          "xorb": 0,
+          "chunk_start": 17,
+          "chunk_end": 67,
+          "unpacked_bytes": 3111631,
+          "first_byte": 1082809,
+          "last_byte": 4194839
+        }
+      ]
+    },
+    {
+      "name": "edit-insert/sha1",
+      "input": "edit-insert",
+      "recipe": "dedup against random-4MiB",
+      "object_format": "sha1",
+      "size": 4199304,
+      "hex": "d8b88210029801613cf475149b38a46593cee6da1c3bf1f597116959d7a8561291071d6345f7a630674c095cb4be020bad12bfb51af05d021186da025c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449eaf599f167d15376e9804c8eaef31d60d57207fc5bb3a8b1f2e6237a1439bf55803000021bb837900c285790100029c920c00ab920c002343b1917be7f0840197848002",
+      "oid": "613cf475149b38a46593cee6da1c3bf1f5971169",
+      "file_hash": "1d07911256a8d759094c6730a6f74563bf12ad0b02beb45cda8611025df01ab5",
+      "xorbs": [
+        "8cc679091a4c8c5c1d40081625716979b02ca96bca44c9ac9e4478acf4e15b67",
+        "6e37157d169f59af0dd631efeac804981f8b3abbc57f205758f59b43a137622e"
+      ],
+      "terms": [
+        {
+          "xorb": 0,
+          "chunk_start": 0,
+          "chunk_end": 33,
+          "unpacked_bytes": 1982907,
+          "first_byte": 0,
+          "last_byte": 1983170
+        },
+        {
+          "xorb": 1,
+          "chunk_start": 0,
+          "chunk_end": 2,
+          "unpacked_bytes": 198940,
+          "first_byte": 0,
+          "last_byte": 198955
+        },
+        {
+          "xorb": 0,
+          "chunk_start": 35,
+          "chunk_end": 67,
+          "unpacked_bytes": 2017457,
+          "first_byte": 2177127,
+          "last_byte": 4194839
+        }
+      ]
+    },
+    {
+      "name": "edit-delete/sha1",
+      "input": "edit-delete",
+      "recipe": "dedup against random-4MiB",
+      "object_format": "sha1",
+      "size": 4181959,
+      "hex": "d7fcf90f029a0133453c041e41930a6934a9111743f5ce0443894482fb49c9bd36a1da80bf72999544e9731dcd5a407853792b5c3f8998cb8fb870025c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e0515ccbcc1c921c613194d608a46c956ff8c00b5c97c38ec503707894134a1ab03000031f4a6bf0100fba9bf01010001ade30100b4e301003243a6953eeaedc10197848002",
+      "oid": "33453c041e41930a6934a9111743f5ce04438944",
+      "file_hash": "daa136bdc949fb8273e944959972bf802b795378405acd1d70b88fcb98893f5c",
+      "xorbs": [
+        "8cc679091a4c8c5c1d40081625716979b02ca96bca44c9ac9e4478acf4e15b67",
+        "c621c9c1bccc150556c9468a604d1913ec387cc9b5008cffaba1344189073750"
+      ],
+      "terms": [
+        {
+          "xorb": 0,
+          "chunk_start": 0,
+          "chunk_end": 49,
+          "unpacked_bytes": 3134324,
+          "first_byte": 0,
+          "last_byte": 3134715
+        },
+        {
+          "xorb": 1,
+          "chunk_start": 0,
+          "chunk_end": 1,
+          "unpacked_bytes": 29101,
+          "first_byte": 0,
+          "last_byte": 29108
+        },
+        {
+          "xorb": 0,
+          "chunk_start": 50,
+          "chunk_end": 67,
+          "unpacked_bytes": 1018534,
+          "first_byte": 3176170,
+          "last_byte": 4194839
+        }
+      ]
+    },
+    {
+      "name": "edit-prepend/sha1",
+      "input": "edit-prepend",
+      "recipe": "dedup against random-4MiB",
+      "object_format": "sha1",
+      "size": 4194305,
+      "hex": "d1808010028e011d941ab601730476c2b63644c8d265770f34faacf244a60043c612bd236800f96d757ebd90e71a7705c6c6c8d1badf4c30d3337702c038f75492c0ebe613e47a747c1d04eff5f4535c7d07493cecf3b6b6d35f111d5c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e0200000189bb030090bb03010143f8c4fc0190bb0397848002",
+      "oid": "1d941ab601730476c2b63644c8d265770f34faac",
+      "file_hash": "bd12c64300a644f2bd7e756df9006823c8c6c605771ae7907733d3304cdfbad1",
+      "xorbs": [
+        "e6ebc09254f738c0ef041d7c747ae4133c49077d5c53f4f51d115fd3b6b6f3ec",
+        "8cc679091a4c8c5c1d40081625716979b02ca96bca44c9ac9e4478acf4e15b67"
+      ],
+      "terms": [
+        {
+          "xorb": 0,
+          "chunk_start": 0,
+          "chunk_end": 1,
+          "unpacked_bytes": 56713,
+          "first_byte": 0,
+          "last_byte": 56720
+        },
+        {
+          "xorb": 1,
+          "chunk_start": 1,
+          "chunk_end": 67,
+          "unpacked_bytes": 4137592,
+          "first_byte": 56720,
+          "last_byte": 4194839
+        }
+      ]
+    },
+    {
+      "name": "edit-append/sha1",
+      "input": "edit-append",
+      "recipe": "dedup against random-4MiB",
+      "object_format": "sha1",
+      "size": 4264304,
+      "hex": "d097a210028c014f64c70761898d97c5d27af890c47ccad26163475921756f4ed4f8ab517d14f8aec0fc5a721fcebe5f9620686e013f5cbe028859025c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e6aebde0b95db5baeddb07ff34aef3a5914a5894ffdd1ea11c2b6f02b25d144d702000042f3bffe010082c4fe01010001fde2050084e305",
+      "oid": "4f64c70761898d97c5d27af890c47ccad2616347",
+      "file_hash": "abf8d44e6f7521595afcc0aef8147d516820965fbece1f72598802be5c3f016e",
+      "xorbs": [
+        "8cc679091a4c8c5c1d40081625716979b02ca96bca44c9ac9e4478acf4e15b67",
+        "ae5bdb950bdeeb6a593aef4af37fb0dd11ead1fd4f89a514d744d1252bf0b6c2"
+      ],
+      "terms": [
+        {
+          "xorb": 0,
+          "chunk_start": 0,
+          "chunk_end": 66,
+          "unpacked_bytes": 4169715,
+          "first_byte": 0,
+          "last_byte": 4170242
+        },
+        {
+          "xorb": 1,
+          "chunk_start": 0,
+          "chunk_end": 1,
+          "unpacked_bytes": 94589,
+          "first_byte": 0,
+          "last_byte": 94596
+        }
+      ]
+    }
+  ],
+  "invalid_entries": [
+    {
+      "name": "not type 5",
+      "object_format": "sha1",
+      "size": 4194304,
+      "hex": "b08080100262664542cf98ef38e4965e29472fc72de556bae7ddf0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9015c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e01000043808080020097848002",
+      "error": "entry type 3, want 5"
+    },
+    {
+      "name": "whole-blob kind 0x01",
+      "object_format": "sha1",
+      "size": 4194304,
+      "hex": "d08080100114664542cf98ef38e4965e29472fc72de556bae7dd",
+      "error": "kind 0x1, want 0x2"
+    },
+    {
+      "name": "client kind 0x03",
+      "object_format": "sha1",
+      "size": 4194304,
+      "hex": "d0808010035e664542cf98ef38e4965e29472fc72de556bae7ddf0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9015c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e010000438080800200",
+      "error": "kind 0x3, want 0x2"
+    },
+    {
+      "name": "unknown kind 0x04",
+      "object_format": "sha1",
+      "size": 4194304,
+      "hex": "d08080100462664542cf98ef38e4965e29472fc72de556bae7ddf0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9015c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e01000043808080020097848002",
+      "error": "kind 0x4, want 0x2"
+    },
+    {
+      "name": "payload over 1 MiB",
+      "object_format": "sha1",
+      "size": 4194304,
+      "hex": "d080801002818040",
+      "error": "over 1048576"
+    },
+    {
+      "name": "payload size past the entry",
+      "object_format": "sha1",
+      "size": 4194304,
+      "hex": "d08080100263664542cf98ef38e4965e29472fc72de556bae7ddf0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9015c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e01000043808080020097848002",
+      "error": "payload is 99 bytes, have 98"
+    },
+    {
+      "name": "bytes after the payload",
+      "object_format": "sha1",
+      "size": 4194304,
+      "hex": "d08080100262664542cf98ef38e4965e29472fc72de556bae7ddf0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9015c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e0100004380808002009784800200",
+      "error": "1 bytes after the payload"
+    },
+    {
+      "name": "no xorbs",
+      "object_format": "sha1",
+      "size": 4194304,
+      "hex": "d08080100242664542cf98ef38e4965e29472fc72de556bae7ddf0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f90001000043808080020097848002",
+      "error": "no xorbs"
+    },
+    {
+      "name": "truncated file hash",
+      "object_format": "sha1",
+      "size": 4194304,
+      "hex": "d08080100224664542cf98ef38e4965e29472fc72de556bae7ddf0dc05a86f7c11bfdca6962856132cba",
+      "error": "truncated file hash"
+    },
+    {
+      "name": "no terms",
+      "object_format": "sha1",
+      "size": 4194304,
+      "hex": "d08080100256664542cf98ef38e4965e29472fc72de556bae7ddf0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9015c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e00",
+      "error": "no terms"
+    },
+    {
+      "name": "term count past the payload",
+      "object_format": "sha1",
+      "size": 4194304,
+      "hex": "d08080100257664542cf98ef38e4965e29472fc72de556bae7ddf0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9015c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449ee807",
+      "error": "1000 terms do not fit in"
+    },
+    {
+      "name": "duplicate xorb",
+      "object_format": "sha1",
+      "size": 4194304,
+      "hex": "d0808010028801664542cf98ef38e4965e29472fc72de556bae7ddf0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9025c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e5c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e02000001010000010143ffffff010197848002",
+      "error": "is listed more than once"
+    },
+    {
+      "name": "xorb index out of range",
+      "object_format": "sha1",
+      "size": 4194304,
+      "hex": "d08080100262664542cf98ef38e4965e29472fc72de556bae7ddf0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9015c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e01010043808080020097848002",
+      "error": "xorb index 1, table has 1"
+    },
+    {
+      "name": "empty chunk range",
+      "object_format": "sha1",
+      "size": 4194304,
+      "hex": "d08080100262664542cf98ef38e4965e29472fc72de556bae7ddf0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9015c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e01000303808080020097848002",
+      "error": "chunk range [3, 3) is empty"
+    },
+    {
+      "name": "chunk end over 8192",
+      "object_format": "sha1",
+      "size": 4194304,
+      "hex": "d08080100263664542cf98ef38e4965e29472fc72de556bae7ddf0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9015c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e0100008140808080020097848002",
+      "error": "chunk end 8193 is over the 8192 chunks of a xorb"
+    },
+    {
+      "name": "zero unpacked bytes",
+      "object_format": "sha1",
+      "size": 4194304,
+      "hex": "d08080100268664542cf98ef38e4965e29472fc72de556bae7ddf0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9015c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e02000001000000000043808080020097848002",
+      "error": "unpacked bytes is 0"
+    },
+    {
+      "name": "first byte after last byte",
+      "object_format": "sha1",
+      "size": 4194304,
+      "hex": "d0808010025f664542cf98ef38e4965e29472fc72de556bae7ddf0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9015c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e01000043808080020a09",
+      "error": "first byte 10 is after last byte 9"
+    },
+    {
+      "name": "last byte past a xorb",
+      "object_format": "sha1",
+      "size": 4194304,
+      "hex": "d08080100262664542cf98ef38e4965e29472fc72de556bae7ddf0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9015c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e01000043808080020080808420",
+      "error": "last byte 67174400 is past the 67174400 stored bytes of a xorb"
+    },
+    {
+      "name": "terms short of the size",
+      "object_format": "sha1",
+      "size": 4194305,
+      "hex": "d18080100262664542cf98ef38e4965e29472fc72de556bae7ddf0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9015c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e01000043808080020097848002",
+      "error": "terms unpack to 4194304 bytes, logical size is 4194305"
+    },
+    {
+      "name": "terms past the size",
+      "object_format": "sha1",
+      "size": 4194303,
+      "hex": "dfffff0f0262664542cf98ef38e4965e29472fc72de556bae7ddf0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9015c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e01000043808080020097848002",
+      "error": "terms unpack to more than the logical size"
+    },
+    {
+      "name": "unused xorb",
+      "object_format": "sha1",
+      "size": 4194304,
+      "hex": "d0808010028201664542cf98ef38e4965e29472fc72de556bae7ddf0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9025c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e49f84acb9a391348dee2f7dc21e50f61fcd576977ba7e1106887719a4a7b66a701000043808080020097848002",
+      "error": "no term uses xorb 1"
+    },
+    {
+      "name": "byte after the last term",
+      "object_format": "sha1",
+      "size": 4194304,
+      "hex": "d08080100263664542cf98ef38e4965e29472fc72de556bae7ddf0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9015c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e0100004380808002009784800200",
+      "error": "1 bytes after the last term"
+    },
+    {
+      "name": "not type 5",
+      "object_format": "sha256",
+      "size": 4194304,
+      "hex": "b0808010026ef01b19ef1cadf74dcf505ad03e4ec066a9455fd72060e2c502f608235a4f52d3f0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9015c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e01000043808080020097848002",
+      "error": "entry type 3, want 5"
+    },
+    {
+      "name": "whole-blob kind 0x01",
+      "object_format": "sha256",
+      "size": 4194304,
+      "hex": "d08080100120f01b19ef1cadf74dcf505ad03e4ec066a9455fd72060e2c502f608235a4f52d3",
+      "error": "kind 0x1, want 0x2"
+    },
+    {
+      "name": "client kind 0x03",
+      "object_format": "sha256",
+      "size": 4194304,
+      "hex": "d0808010036af01b19ef1cadf74dcf505ad03e4ec066a9455fd72060e2c502f608235a4f52d3f0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9015c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e010000438080800200",
+      "error": "kind 0x3, want 0x2"
+    },
+    {
+      "name": "unknown kind 0x04",
+      "object_format": "sha256",
+      "size": 4194304,
+      "hex": "d0808010046ef01b19ef1cadf74dcf505ad03e4ec066a9455fd72060e2c502f608235a4f52d3f0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9015c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e01000043808080020097848002",
+      "error": "kind 0x4, want 0x2"
+    },
+    {
+      "name": "payload over 1 MiB",
+      "object_format": "sha256",
+      "size": 4194304,
+      "hex": "d080801002818040",
+      "error": "over 1048576"
+    },
+    {
+      "name": "payload size past the entry",
+      "object_format": "sha256",
+      "size": 4194304,
+      "hex": "d0808010026ff01b19ef1cadf74dcf505ad03e4ec066a9455fd72060e2c502f608235a4f52d3f0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9015c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e01000043808080020097848002",
+      "error": "payload is 111 bytes, have 110"
+    },
+    {
+      "name": "bytes after the payload",
+      "object_format": "sha256",
+      "size": 4194304,
+      "hex": "d0808010026ef01b19ef1cadf74dcf505ad03e4ec066a9455fd72060e2c502f608235a4f52d3f0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9015c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e0100004380808002009784800200",
+      "error": "1 bytes after the payload"
+    },
+    {
+      "name": "no xorbs",
+      "object_format": "sha256",
+      "size": 4194304,
+      "hex": "d0808010024ef01b19ef1cadf74dcf505ad03e4ec066a9455fd72060e2c502f608235a4f52d3f0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f90001000043808080020097848002",
+      "error": "no xorbs"
+    },
+    {
+      "name": "truncated file hash",
+      "object_format": "sha256",
+      "size": 4194304,
+      "hex": "d08080100230f01b19ef1cadf74dcf505ad03e4ec066a9455fd72060e2c502f608235a4f52d3f0dc05a86f7c11bfdca6962856132cba",
+      "error": "truncated file hash"
+    },
+    {
+      "name": "no terms",
+      "object_format": "sha256",
+      "size": 4194304,
+      "hex": "d08080100262f01b19ef1cadf74dcf505ad03e4ec066a9455fd72060e2c502f608235a4f52d3f0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9015c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e00",
+      "error": "no terms"
+    },
+    {
+      "name": "term count past the payload",
+      "object_format": "sha256",
+      "size": 4194304,
+      "hex": "d08080100263f01b19ef1cadf74dcf505ad03e4ec066a9455fd72060e2c502f608235a4f52d3f0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9015c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449ee807",
+      "error": "1000 terms do not fit in"
+    },
+    {
+      "name": "duplicate xorb",
+      "object_format": "sha256",
+      "size": 4194304,
+      "hex": "d0808010029401f01b19ef1cadf74dcf505ad03e4ec066a9455fd72060e2c502f608235a4f52d3f0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9025c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e5c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e02000001010000010143ffffff010197848002",
+      "error": "is listed more than once"
+    },
+    {
+      "name": "xorb index out of range",
+      "object_format": "sha256",
+      "size": 4194304,
+      "hex": "d0808010026ef01b19ef1cadf74dcf505ad03e4ec066a9455fd72060e2c502f608235a4f52d3f0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9015c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e01010043808080020097848002",
+      "error": "xorb index 1, table has 1"
+    },
+    {
+      "name": "empty chunk range",
+      "object_format": "sha256",
+      "size": 4194304,
+      "hex": "d0808010026ef01b19ef1cadf74dcf505ad03e4ec066a9455fd72060e2c502f608235a4f52d3f0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9015c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e01000303808080020097848002",
+      "error": "chunk range [3, 3) is empty"
+    },
+    {
+      "name": "chunk end over 8192",
+      "object_format": "sha256",
+      "size": 4194304,
+      "hex": "d0808010026ff01b19ef1cadf74dcf505ad03e4ec066a9455fd72060e2c502f608235a4f52d3f0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9015c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e0100008140808080020097848002",
+      "error": "chunk end 8193 is over the 8192 chunks of a xorb"
+    },
+    {
+      "name": "zero unpacked bytes",
+      "object_format": "sha256",
+      "size": 4194304,
+      "hex": "d08080100274f01b19ef1cadf74dcf505ad03e4ec066a9455fd72060e2c502f608235a4f52d3f0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9015c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e02000001000000000043808080020097848002",
+      "error": "unpacked bytes is 0"
+    },
+    {
+      "name": "first byte after last byte",
+      "object_format": "sha256",
+      "size": 4194304,
+      "hex": "d0808010026bf01b19ef1cadf74dcf505ad03e4ec066a9455fd72060e2c502f608235a4f52d3f0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9015c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e01000043808080020a09",
+      "error": "first byte 10 is after last byte 9"
+    },
+    {
+      "name": "last byte past a xorb",
+      "object_format": "sha256",
+      "size": 4194304,
+      "hex": "d0808010026ef01b19ef1cadf74dcf505ad03e4ec066a9455fd72060e2c502f608235a4f52d3f0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9015c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e01000043808080020080808420",
+      "error": "last byte 67174400 is past the 67174400 stored bytes of a xorb"
+    },
+    {
+      "name": "terms short of the size",
+      "object_format": "sha256",
+      "size": 4194305,
+      "hex": "d1808010026ef01b19ef1cadf74dcf505ad03e4ec066a9455fd72060e2c502f608235a4f52d3f0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9015c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e01000043808080020097848002",
+      "error": "terms unpack to 4194304 bytes, logical size is 4194305"
+    },
+    {
+      "name": "terms past the size",
+      "object_format": "sha256",
+      "size": 4194303,
+      "hex": "dfffff0f026ef01b19ef1cadf74dcf505ad03e4ec066a9455fd72060e2c502f608235a4f52d3f0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9015c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e01000043808080020097848002",
+      "error": "terms unpack to more than the logical size"
+    },
+    {
+      "name": "unused xorb",
+      "object_format": "sha256",
+      "size": 4194304,
+      "hex": "d0808010028e01f01b19ef1cadf74dcf505ad03e4ec066a9455fd72060e2c502f608235a4f52d3f0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9025c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e49f84acb9a391348dee2f7dc21e50f61fcd576977ba7e1106887719a4a7b66a701000043808080020097848002",
+      "error": "no term uses xorb 1"
+    },
+    {
+      "name": "byte after the last term",
+      "object_format": "sha256",
+      "size": 4194304,
+      "hex": "d0808010026ff01b19ef1cadf74dcf505ad03e4ec066a9455fd72060e2c502f608235a4f52d3f0dc05a86f7c11bfdca6962856132cba282731a6362bc0de9646bfc187e8d2f9015c8c4c1a0979c68c796971251608401dacc944ca6ba92cb0675be1f4ac78449e0100004380808002009784800200",
+      "error": "1 bytes after the last term"
+    }
+  ]
+}

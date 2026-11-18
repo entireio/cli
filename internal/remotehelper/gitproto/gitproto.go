@@ -10,6 +10,8 @@
 //     (ReadPostServiceAdvertisement, backed by packp.SmartReply)
 //   - reading the receive-pack request body the helper relays
 //   - reading the send-pack stateless-rpc outer framing
+//   - reading a v2 fetch response and re-muxing its pack data
+//     (FetchResponseReader, CopyFetchResponse, SidebandWriter)
 //
 // Everything here is pure Git protocol — no Entire-specific knowledge.
 package gitproto
