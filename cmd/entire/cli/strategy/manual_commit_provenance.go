@@ -137,11 +137,11 @@ func stampedByAnotherCommit(ctx context.Context, checkpointID id.CheckpointID, s
 // reused with `commit -C` keeps a trailer the same way but advances HEAD: it
 // makes a new link. Read through git, as a reftable reflog is, an entry's old
 // HEAD is only the new HEAD of the entry listed before it: missing, or another
-// commit, once entries between them expire. There the message `git commit`
-// wrote decides, and an amend whose old HEAD is missing, or has other parents
-// than the amend (an amend keeps the parents of the commit it replaces), keeps
-// its owner, though what it replaced is unknown, unless the commit listed
-// links the checkpoint itself (inferredAmendLink). With no reflog entry for
+// commit, once entries between them expire. An old HEAD with the commit's
+// parents is still what an amend replaced (an amend keeps them), and is judged
+// as above. Otherwise the message `git commit` wrote decides, and an amend
+// keeps its owner, though what it replaced is unknown, unless the commit
+// listed links the checkpoint itself (inferredAmendLink). With no reflog entry for
 // this commit to tell them apart (core.logAllRefUpdates=false), or only one
 // another command wrote, with no old HEAD, it is taken as an amend, so the
 // owner keeps condensing into its checkpoint as it did before the idle check.
@@ -173,22 +173,23 @@ func (s *ManualCommitStrategy) amendedCheckpoint(ctx context.Context, repo *git.
 }
 
 // inferredAmendLink decides for an entry read through git (oldInferred), whose
-// old HEAD may be missing or another commit: git's message tells a new commit
-// from an amend, and an amend keeps its owner when no entry is listed before
-// it, or the one listed is not what it replaced (an entry between them
-// expired), unless that one, an ancestor, links the checkpoint itself: then
-// the amend copied its trailer, as `commit --amend -C <it>` does, and gets no
-// pass. ok is false when the listed old HEAD can be judged as the files
-// backend's is.
+// old HEAD may be missing or another commit. A listed old HEAD with the
+// commit's parents is what an amend replaced, and is judged as the files
+// backend's is (ok false), whatever the message says (GIT_REFLOG_ACTION can
+// set it). Otherwise git's message tells a new commit from an amend, and an
+// amend keeps its owner when no entry is listed before it, or the one listed
+// is not what it replaced (an entry between them expired), unless that one, an
+// ancestor, links the checkpoint itself: then the amend copied its trailer, as
+// `commit --amend -C <it>` does, and gets no pass.
 func (s *ManualCommitStrategy) inferredAmendLink(ctx context.Context, repo *git.Repository, e reflogEntry, commit *object.Commit, checkpointID id.CheckpointID) (link amendedLink, ok bool) {
 	switch {
-	case !e.oldInferred:
+	case !e.oldInferred, sameParents(repo, e.oldHash, commit):
 		return amendedLink{}, false
 	case newCommitReflogMessage(e.msg):
 		return amendedLink{}, true
 	case e.oldHash.IsZero():
 		return amendedLink{checkpointID: checkpointID}, true
-	case !strings.HasPrefix(e.msg, "commit (amend)") || sameParents(repo, e.oldHash, commit):
+	case !strings.HasPrefix(e.msg, "commit (amend)"):
 		return amendedLink{}, false
 	case s.commitLinksCheckpoint(ctx, repo, e.oldHash, checkpointID):
 		return amendedLink{}, true

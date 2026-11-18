@@ -293,8 +293,9 @@ func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
 		// post-commit: dropNewestReflogEntry removes the commit's own entry,
 		// leaving only older ones. The others have it read through git, as
 		// for reftable: readReflogThroughGit as it is, expireReflogBeforeNewest
-		// with only that entry left, and expireReplacedReflogEntry without the
-		// entry of the commit an amend replaced.
+		// with only that entry left, expireReplacedReflogEntry without the
+		// entry of the commit an amend replaced, and relabelAmendAsCommit with
+		// the amend's entry saying "commit: ".
 		editReflog func(t *testing.T, dir string)
 		condensed  bool
 	}{
@@ -314,6 +315,7 @@ func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
 		{name: "amend of another commit reusing the message, reflog read through git", commitArgs: []string{"--amend"}, amendOther: true, editReflog: readReflogThroughGit, condensed: false},
 		{name: "amend whose replaced commit's reflog entry expired", commitArgs: []string{"--amend"}, editReflog: expireReplacedReflogEntry, condensed: true},
 		{name: "amend of another commit reusing the message, whose reflog entry expired", commitArgs: []string{"--amend"}, amendOther: true, editReflog: expireReplacedReflogEntry, condensed: false},
+		{name: "amend whose reflog message GIT_REFLOG_ACTION set, reflog read through git", commitArgs: []string{"--amend"}, editReflog: relabelAmendAsCommit, condensed: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -520,6 +522,21 @@ func expireReplacedReflogEntry(t *testing.T, dir string) {
 	entries := headReflog(context.Background())
 	require.Equal(t, head, entries[0].newHash.String(), "sanity: the newest entry names the amend")
 	require.Equal(t, parent, entries[0].oldHash.String(), "sanity: git's listing gives the amend's parent as its old HEAD")
+}
+
+// relabelAmendAsCommit gives the amend's reflog entry the message
+// `GIT_REFLOG_ACTION=commit git commit --amend` writes, "commit: " for
+// "commit (amend): ", and has it read through git with the entries before it.
+func relabelAmendAsCommit(t *testing.T, dir string) {
+	t.Helper()
+	editReflogReadThroughGit(t, dir, func(lines []string) []string {
+		last := &lines[len(lines)-1]
+		require.Contains(t, *last, "\tcommit (amend): ", "sanity: the newest entry is the amend's")
+		*last = strings.Replace(*last, "\tcommit (amend): ", "\tcommit: ", 1)
+		return lines
+	})
+	entries := headReflog(context.Background())
+	require.True(t, entries[0].oldInferred && strings.HasPrefix(entries[0].msg, "commit: "), "sanity: git lists the amend as %q", entries[0].msg)
 }
 
 // editReflogReadThroughGit removes logs/HEAD, so headReflog reads HEAD's reflog
