@@ -364,3 +364,18 @@ func TestReadSendPackRequest_ChunkPerPacket(t *testing.T) {
 		}
 	}
 }
+
+func TestRequestBody_AppendFollowsReadFrom(t *testing.T) {
+	t.Parallel()
+
+	b := &RequestBody{}
+	b.Append([]byte("head "))
+	if _, err := b.ReadFrom(strings.NewReader("middle")); err != nil {
+		t.Fatal(err)
+	}
+	b.Append(nil)
+	b.Append([]byte(" tail"))
+	if got := bodyString(t, b); got != "head middle tail" {
+		t.Fatalf("body = %q", got)
+	}
+}

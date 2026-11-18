@@ -1,7 +1,9 @@
 package githelper
 
 import (
+	"errors"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -43,6 +45,12 @@ func TestOptions_SetAndSendPackArgs(t *testing.T) {
 			commands:  [][2]string{{"push-cert", "if-asked"}},
 			wantReply: []string{"ok"},
 			wantArgs:  []string{"--signed=if-asked"},
+		},
+		{
+			name:      "pushcert, git's option name",
+			commands:  [][2]string{{"pushcert", "true"}},
+			wantReply: []string{"ok"},
+			wantArgs:  []string{"--signed=true"},
 		},
 		{
 			name:      "push-option and cas accumulate",
@@ -91,6 +99,12 @@ func TestOptions_SetAndSendPackArgs(t *testing.T) {
 			commands:  [][2]string{{"push-option", `"bad\q"`}, {"push-option", "ok"}},
 			wantReply: []string{"error invalid value", "ok"},
 			wantArgs:  []string{"--push-option=ok"},
+		},
+		{
+			name:      "verbosity is accepted and not forwarded",
+			commands:  [][2]string{{"verbosity", "0"}, {"verbosity", "2"}},
+			wantReply: []string{"ok", "ok"},
+			wantArgs:  nil,
 		},
 		{
 			name:      "unknown option → unsupported",
@@ -154,5 +168,50 @@ func TestUnquoteOptionValue(t *testing.T) {
 				t.Errorf("unquoteOptionValue(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+// Only send-pack signs a push, so a signed push keeps to the send-pack path.
+// A push signed "if-asked" and force-if-includes stay on the client-chunked
+// path: bbpush checks whether the remote asks for a signature, and git checks
+// force-if-includes before it runs the helper.
+func TestOptions_BBPushOptions(t *testing.T) {
+	t.Parallel()
+
+	o := &Options{}
+	for _, kv := range [][2]string{{"dry-run", "true"}, {"atomic", "true"}, {"push-option", "ci.skip"}, {"cas", "refs/heads/main:" + strings.Repeat("a", 40)}, {"force-if-includes", "true"}} {
+		o.Set(kv[0], kv[1])
+	}
+	got, err := o.bbPushOptions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.DryRun || !got.Atomic || !slices.Equal(got.PushOptions, []string{"ci.skip"}) || len(got.CAS) != 1 || got.PushCertIfAsked {
+		t.Fatalf("bbPushOptions = %+v", got)
+	}
+
+	// transport-helper sends verbosity 0 for git push -q, 1 by default and
+	// 2 or more for -v.
+	for value, quiet := range map[string]bool{"0": true, "1": false, "2": false} {
+		o := &Options{}
+		o.Set("verbosity", value)
+		got, err := o.bbPushOptions()
+		if err != nil || got.Quiet != quiet {
+			t.Errorf("verbosity %s: options %+v, err %v; want Quiet %v", value, got, err, quiet)
+		}
+	}
+
+	for _, name := range []string{"pushcert", "push-cert"} {
+		o := &Options{}
+		o.Set(name, "true")
+		if _, err := o.bbPushOptions(); !errors.Is(err, errBBUnsupportedOption) {
+			t.Errorf("%s=true: err = %v, want errBBUnsupportedOption", name, err)
+		}
+		o = &Options{}
+		o.Set(name, "if-asked")
+		got, err := o.bbPushOptions()
+		if err != nil || !got.PushCertIfAsked {
+			t.Errorf("%s=if-asked: options %+v, err %v; want PushCertIfAsked", name, got, err)
+		}
 	}
 }

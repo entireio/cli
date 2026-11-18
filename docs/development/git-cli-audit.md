@@ -210,7 +210,8 @@ worktree `git diff`'s index refresh. See [Git safety](git-safety.md).
 | `git_operations.go:259`; `trail_cmd.go:2469,2564,2588,2606` | ls-remote, fetch, push/upstream setup, branch deletion. Preserve auth, push hooks (where enabled), tracking config, multi-URL behavior, and transport support. |
 | `repo_clone.go:953` | Interactive native clone, including `entire://` helper routing. `PlainCloneContext` alone does not provide native external-remote-helper behavior. |
 | `plugin_gitremote.go:119,296,353`; `plugin_index.go:254,273` | Bounded ls-remote and shallow clone/fetch. Technically feasible with `Remote.ListContext`, clone/fetch options. Need auth compatibility, URL allowlists, no-prompt behavior, deadlines, response/metadata bounds. Better pilot than user clone if transport scope is explicitly restricted. |
-| `internal/remotehelper/githelper/push.go:79` (repo-root-relative) | `send-pack --stateless-rpc --helper-status --stdin`. This is a protocol engine inside a native remote helper, not a regular `repo.Push` call. Keep. |
+| `internal/remotehelper/githelper/push.go:100` (repo-root-relative) | `send-pack --stateless-rpc --helper-status --stdin`. This is a protocol engine inside a native remote helper, not a regular `repo.Push` call. Keep. |
+| `internal/remotehelper/bbpush/git.go` (`gitCommand`) | The client-chunked push: `rev-parse`, `version`, `cat-file --batch-check` / `--batch`, `merge-base --is-ancestor`, `rev-list --objects --filter=blob:limit=<n>`, `pack-objects --revs --filter=blob:limit=<n>`. It must send the object set and pack that send-pack would send, minus the large blobs. go-git has no blob-size filter for pack encoding. Every process runs with `GIT_NO_LAZY_FETCH=1`, so a partial clone does not fetch during the scan. Keep. |
 
 ### Hook-running mutations and human diagnostics
 

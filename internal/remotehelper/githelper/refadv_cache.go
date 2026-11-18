@@ -40,7 +40,13 @@ func (c *refAdvCache) infoRefs(ctx context.Context, t Transport, service string)
 	if c.cached {
 		return io.NopCloser(bytes.NewReader(c.receivePack)), nil
 	}
-	rc, err := t.InfoRefs(ctx, service)
+	// The advertisement feeds both push paths. git send-pack ignores the
+	// entire-bb capability; the helper-built push needs it.
+	fetch := t.InfoRefsForPush
+	if helperChunkingOff() {
+		fetch = func(ctx context.Context) (io.ReadCloser, error) { return t.InfoRefs(ctx, service) }
+	}
+	rc, err := fetch(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("fetch %s advertisement: %w", service, err)
 	}

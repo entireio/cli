@@ -36,3 +36,24 @@ func (p *Proxy) Do(ctx context.Context, method, suffix string, body io.ReadSeeke
 	}
 	return resp, nil
 }
+
+// RepoLocation returns the cluster entry URL and the repo path. Unlike the
+// node URLs, they stay the same across replica failover and between runs,
+// so they key local per-repo state such as the xorb store.
+func (p *Proxy) RepoLocation() (entryURL, repoPath string) {
+	return p.entryURL, p.path
+}
+
+// HeaderBB asks entiredb to advertise entire-bb on receive-pack info/refs.
+// The server advertises the capability only to a client that sends it,
+// because some git clients refuse an unknown capability with a value.
+const HeaderBB = "X-Entire-Bb"
+
+// InfoRefsForPush is InfoRefs for git-receive-pack with HeaderBB, for a
+// push that the helper may build itself. Every attempt of the failover,
+// cold-path and redirect sequence carries the header.
+func (p *Proxy) InfoRefsForPush(ctx context.Context) (io.ReadCloser, error) {
+	return p.infoRefs(ctx, "info/refs", "/info/refs?service=git-receive-pack", func(req *http.Request) {
+		req.Header.Set(HeaderBB, "1")
+	})
+}

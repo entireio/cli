@@ -211,3 +211,50 @@ func TestDoConcurrent(t *testing.T) {
 	require.Equal(t, int32(n), hits.Load())
 	require.Equal(t, srv.URL, p.stickyNode)
 }
+
+// The entry domain redirects to a replica without a replica set, so the
+// helper probes it, then follows the redirect. Every hop carries the BB
+// header, and so does a warm request to the cached replica. Plain InfoRefs
+// does not send it.
+func TestInfoRefsForPushSendsBBHeader(t *testing.T) {
+	t.Parallel()
+	var replicaURL string
+	var mu sync.Mutex
+	var seen []string
+	record := func(who string, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, who+" "+r.URL.Query().Get("service")+" "+r.Header.Get(HeaderBB))
+		mu.Unlock()
+	}
+	replica := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		record("replica", r)
+		w.Header().Set("X-Entire-Replicas", buildReplicasHeader(replicaURL))
+		_, _ = w.Write([]byte("refs")) //nolint:errcheck // test
+	}))
+	defer replica.Close()
+	replicaURL = replica.URL
+	entry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		record("entry", r)
+		http.Redirect(w, r, replicaURL+r.URL.RequestURI(), http.StatusTemporaryRedirect)
+	}))
+	defer entry.Close()
+	p := proxyWithClient(nil, "/et/alice/repo", entry.URL, "127.0.0.1", nil)
+	p.client = &http.Client{CheckRedirect: p.checkRedirect}
+
+	for range 2 {
+		body, err := p.InfoRefsForPush(t.Context())
+		require.NoError(t, err)
+		require.NoError(t, body.Close())
+	}
+	body, err := p.InfoRefs(t.Context(), "git-receive-pack")
+	require.NoError(t, err)
+	require.NoError(t, body.Close())
+
+	require.Equal(t, []string{
+		"entry git-receive-pack 1",
+		"entry git-receive-pack 1",
+		"replica git-receive-pack 1",
+		"replica git-receive-pack 1",
+		"replica git-receive-pack ",
+	}, seen)
+}
