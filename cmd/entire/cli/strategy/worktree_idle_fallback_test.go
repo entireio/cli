@@ -1,0 +1,645 @@
+package strategy
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/cmd/entire/cli/trailers"
+)
+
+// Uses t.Chdir — do NOT add t.Parallel().
+
+// saveSiblingSession saves a session homed in dir with the given phase, last
+// interaction and task records.
+func saveSiblingSession(t *testing.T, s *ManualCommitStrategy, dir, id string, phase session.Phase, last *time.Time, tasks ...session.TaskRecord) {
+	t.Helper()
+	ctx := context.Background()
+	state := &SessionState{SessionID: id, WorktreePath: dir, LastInteractionTime: last, TaskRecords: tasks}
+	saveSessionMatchState(ctx, t, s, dir, state)
+	state.Phase = phase
+	require.NoError(t, s.saveSessionState(ctx, state))
+}
+
+// A commit from a worktree with no session of its own falls back to the
+// sessions of a sibling worktree. One whose last interaction is older than
+// recentSessionWindow is not plausibly the commit's session, so it is not
+// linked: post-commit would otherwise condense its whole transcript into every
+// commit made here (cli issue 2979). Kept: a session with no recorded
+// interaction, as before, one mid-turn whose turn started within
+// activeSessionInteractionThreshold, and one whose background subagent is
+// still running.
+func TestCommitLinking_FallbackSkipsSiblingSessionsIdleBeyondTheWindow(t *testing.T) {
+	now := time.Now()
+	twoDaysAgo := now.Add(-48 * time.Hour)
+	dayAgo := now.Add(-24 * time.Hour)
+	justPast := now.Add(-recentSessionWindow - time.Minute)
+	recent := now.Add(-time.Minute)
+	type sess struct {
+		phase session.Phase
+		last  *time.Time
+		tasks []session.TaskRecord
+	}
+	inFlight := []session.TaskRecord{{ToolUseID: "call_bg", AgentID: "child", StartedAt: justPast}}
+	finished := []session.TaskRecord{{ToolUseID: "call_bg", AgentID: "child", StartedAt: dayAgo, CompletedAt: justPast}}
+	for _, tt := range []struct {
+		name     string
+		sessions map[string]sess
+		want     []string
+	}{
+		{name: "idle for a day", sessions: map[string]sess{"stale": {session.PhaseIdle, &dayAgo, nil}}},
+		{name: "idle just past the window", sessions: map[string]sess{"stale": {session.PhaseIdle, &justPast, nil}}},
+		{name: "recent", sessions: map[string]sess{"recent": {session.PhaseIdle, &recent, nil}}, want: []string{"recent"}},
+		{name: "no recorded interaction", sessions: map[string]sess{"undated": {session.PhaseIdle, nil, nil}}, want: []string{"undated"}},
+		{name: "mid-turn past the window", sessions: map[string]sess{"long-turn": {session.PhaseActive, &justPast, nil}}, want: []string{"long-turn"}},
+		{name: "left active for two days", sessions: map[string]sess{"abandoned": {session.PhaseActive, &twoDaysAgo, nil}}},
+		{name: "idle with a subagent in flight", sessions: map[string]sess{"bg": {session.PhaseIdle, &dayAgo, inFlight}}, want: []string{"bg"}},
+		{name: "idle with a finished subagent", sessions: map[string]sess{"bg": {session.PhaseIdle, &dayAgo, finished}}},
+		{
+			name: "stale beside recent and undated",
+			sessions: map[string]sess{
+				"stale":   {session.PhaseIdle, &dayAgo, nil},
+				"recent":  {session.PhaseIdle, &recent, nil},
+				"undated": {session.PhaseIdle, nil, nil},
+			},
+			want: []string{"recent", "undated"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			mainDir, linkedDir := twoWorktrees(t)
+			s := &ManualCommitStrategy{}
+			for id, st := range tt.sessions {
+				saveSiblingSession(t, s, mainDir, id, st.phase, st.last, st.tasks...)
+			}
+			assert.ElementsMatch(t, tt.want, linkingIDs(t, linkedDir))
+		})
+	}
+}
+
+// An idle sibling session that recorded edits in the committing worktree still
+// joins the commit, held to those edits: the idle check only narrows the
+// fallback, not the sessions that edited this worktree from elsewhere.
+func TestCommitLinking_IdleSiblingSessionThatEditedHereStillJoins(t *testing.T) {
+	mainDir, linkedDir := twoWorktrees(t)
+	ctx := context.Background()
+	s := &ManualCommitStrategy{}
+	dayAgo := time.Now().Add(-24 * time.Hour)
+	saveSessionMatchState(ctx, t, s, mainDir, &SessionState{
+		SessionID:           "edited-here",
+		WorktreePath:        mainDir,
+		LastInteractionTime: &dayAgo,
+		OtherWorktrees: map[string]*session.WorktreeWork{
+			linkedKey(t, linkedDir): {Path: linkedDir, FilesTouched: []string{"feature.go"}, Incarnation: mark(t, linkedDir)},
+		},
+	})
+
+	linked := linkingSessions(t, linkedDir)
+	require.Contains(t, linked, "edited-here")
+	assert.True(t, linked["edited-here"].LinkedByWorktreeEntry, "held to the edits it recorded here")
+}
+
+// A session prepare-commit-msg linked is kept by the idle check however idle
+// it has become since; the other fallback sessions are still judged.
+func TestCommitLinking_FallbackKeepsTheSessionsPrepareLinked(t *testing.T) {
+	mainDir, linkedDir := twoWorktrees(t)
+	s := &ManualCommitStrategy{}
+	dayAgo := time.Now().Add(-24 * time.Hour)
+	saveSiblingSession(t, s, mainDir, "linked", session.PhaseIdle, &dayAgo)
+	saveSiblingSession(t, s, mainDir, "stale", session.PhaseIdle, &dayAgo)
+
+	t.Chdir(linkedDir)
+	clearSessionMatchCaches()
+	sessions, err := s.findSessionsForCommitLinking(withLinkedSessions(context.Background(), []string{"linked"}), linkedDir)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"linked"}, linkedSessionIDs(sessions))
+}
+
+// On an amend, the owner of the checkpoint the amended commit links is kept by
+// the idle check however idle it is; the other fallback sessions are still
+// judged.
+func TestCommitLinking_FallbackKeepsTheOwnerOfAnAmendedCheckpoint(t *testing.T) {
+	mainDir, linkedDir := twoWorktrees(t)
+	ctx := context.Background()
+	s := &ManualCommitStrategy{}
+	dayAgo := time.Now().Add(-24 * time.Hour)
+	target := id.MustCheckpointID("a1b2c3d4e5f6")
+	saveSiblingSession(t, s, mainDir, "owner", session.PhaseIdle, &dayAgo)
+	saveSiblingSession(t, s, mainDir, "stale", session.PhaseIdle, &dayAgo)
+	owner, err := s.loadSessionState(ctx, "owner")
+	require.NoError(t, err)
+	owner.LastCheckpointID = target
+	require.NoError(t, s.saveSessionState(ctx, owner))
+
+	t.Chdir(linkedDir)
+	clearSessionMatchCaches()
+	sessions, err := s.findSessionsForCommitLinking(withAmendedCheckpoint(ctx, amendedLink{checkpointID: target}), linkedDir)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"owner"}, linkedSessionIDs(sessions))
+}
+
+// Prepare links a sibling worktree's session that is not idle when it runs,
+// and stamps the trailer. The commit can then wait on the TTY prompt or the
+// message editor, and by post-commit the session looks idle: past
+// recentSessionWindow, or with its background subagent finished. Post-commit
+// keeps the sessions prepare recorded for the trailer, so it still condenses
+// that session into the stamped checkpoint. Judged afresh, it dropped the
+// session and left the trailer naming a checkpoint that is never written.
+func TestCommitHooks_LinkedSiblingSessionCondensesAfterALongWait(t *testing.T) {
+	now := time.Now()
+	recent := now.Add(-recentSessionWindow + time.Minute)
+	justPast := now.Add(-recentSessionWindow - time.Minute)
+	dayAgo := now.Add(-24 * time.Hour)
+	for _, tt := range []struct {
+		name             string
+		atPrepare        func(*SessionState)
+		beforePostCommit func(*SessionState)
+	}{
+		{
+			name:             "aged past the window",
+			atPrepare:        func(st *SessionState) { st.LastInteractionTime = &recent },
+			beforePostCommit: func(st *SessionState) { st.LastInteractionTime = &justPast },
+		},
+		{
+			name: "its subagent finished",
+			atPrepare: func(st *SessionState) {
+				st.LastInteractionTime = &dayAgo
+				st.TaskRecords = []session.TaskRecord{{ToolUseID: "call_bg", AgentID: "child", StartedAt: justPast}}
+			},
+			beforePostCommit: func(st *SessionState) { st.TaskRecords[0].CompletedAt = time.Now() },
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			homeDir, err := filepath.EvalSymlinks(setupGitRepo(t))
+			require.NoError(t, err, "the recorded home must match git's worktree list")
+			t.Chdir(homeDir)
+			s := NewManualCommitStrategy()
+			setupSessionWithCheckpointAndFile(t, s, homeDir, "sess-sibling", "notes.txt")
+			updateSession := func(change func(*SessionState)) *SessionState {
+				t.Helper()
+				state, err := s.loadSessionState(ctx, "sess-sibling")
+				require.NoError(t, err)
+				state.WorktreePath = homeDir
+				state.Phase = session.PhaseIdle
+				change(state)
+				require.NoError(t, s.saveSessionState(ctx, state))
+				return state
+			}
+			updateSession(tt.atPrepare)
+
+			siblingDir := addSiblingWorktree(t, homeDir, "commit-wt")
+			t.Chdir(siblingDir)
+			testutil.WriteFile(t, siblingDir, "notes.txt", "agent content for notes.txt")
+			testutil.GitAdd(t, siblingDir, "notes.txt")
+			msg := prepareMessage(t, "add notes\n")
+			cps := checkpointIDs(msg)
+			require.Len(t, cps, 1, "prepare links the session, not idle when it runs: %q", msg)
+
+			state := updateSession(tt.beforePostCommit)
+			require.True(t, idleBeyondRecentWindow(state, time.Now()), "sanity: by post-commit the session looks idle")
+			testutil.GitCommit(t, siblingDir, msg)
+			require.NoError(t, NewManualCommitStrategy().PostCommit(ctx))
+
+			state, err = s.loadSessionState(ctx, "sess-sibling")
+			require.NoError(t, err)
+			assert.Equal(t, cps[0], state.LastCheckpointID.String(), "post-commit condenses the session prepare linked")
+		})
+	}
+}
+
+// Post-commit reads the sessions prepare recorded for the trailer it condenses
+// into, and consumes the record with the stamp record.
+func TestStampedSessions_RecordedWithTheTrailerAndTakenOnce(t *testing.T) {
+	t.Chdir(setupGitRepo(t))
+	reserved, other := id.MustCheckpointID("a1b2c3d4e5f6"), id.MustCheckpointID("b1b2c3d4e5f6")
+	require.True(t, recordStampedTrailer(withLinkedSessions(context.Background(), []string{"first"}), reserved))
+	require.True(t, recordStampedTrailer(withLinkedSessions(context.Background(), []string{"second", "third"}), reserved),
+		"a later prepare stamping the same reservation")
+	require.True(t, recordStampedTrailer(context.Background(), other), "a stamp with no linked sessions records none")
+
+	assert.Equal(t, map[id.CheckpointID][]string{reserved: {"second", "third"}}, takeStampedSessions(context.Background()))
+	assert.Empty(t, takeStampedSessions(context.Background()), "post-commit consumes the record")
+}
+
+// The idle check is for linking new commits only. Post-rewrite in the
+// worktree still finds an idle sibling session and remaps its BaseCommit, as
+// it keeps an existing link rather than making a new one.
+func TestPostRewrite_StillRemapsAnIdleSiblingSession(t *testing.T) {
+	mainDir, linkedDir := twoWorktrees(t)
+	ctx := context.Background()
+	s := &ManualCommitStrategy{}
+	dayAgo := time.Now().Add(-24 * time.Hour)
+	saveSiblingSession(t, s, mainDir, "idle", session.PhaseIdle, &dayAgo)
+	before, err := s.loadSessionState(ctx, "idle")
+	require.NoError(t, err)
+	newSHA := strings.Repeat("b", 40)
+
+	t.Chdir(linkedDir)
+	clearSessionMatchCaches()
+	require.NoError(t, s.PostRewrite(ctx, "amend", strings.NewReader(before.BaseCommit+" "+newSHA+"\n")))
+
+	after, err := s.loadSessionState(ctx, "idle")
+	require.NoError(t, err)
+	assert.Equal(t, newSHA, after.BaseCommit)
+}
+
+// An amend keeps the amended commit's trailer and stamps nothing, so
+// post-commit condenses the amended-in work into that existing checkpoint for
+// the session that owns it. From a worktree with no session of its own, the
+// owner is kept however idle it has become: the trailer already links it, and
+// the idle check only narrows new links. Judged as a new link, the owner was
+// dropped and its work never reached the checkpoint. A message reused with
+// `commit -C` keeps the trailer the same way, but makes a new commit: there
+// the idle owner is still dropped, and the old checkpoint is left as it was.
+// So is it when an amend of a later commit reuses the first one's message: that
+// trailer never linked the owner to the commit being amended. A trailer prepare
+// restores for a session based on that commit does link it, as does one the
+// checkpoint records the amended commit for (moved out of its final trailer
+// block, then put back by the amend). Without a reflog to tell an amend from
+// a new commit, the owner is kept, as it was before the idle check. When git
+// lists the commit's entry with no older one to read its old HEAD from, git's
+// message for it still tells an amend from `commit -C`. A commit started while the amend's post-commit runs can land between
+// post-commit reading HEAD and reading HEAD's reflog: its entry is then the
+// newest, and the amend is still told by its own entry.
+func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		commitArgs []string
+		noReflog   bool
+		resetAfter bool
+		// amendOther amends a later commit with the first one's message.
+		amendOther bool
+		// restore edits the trailer out, and bases the session on the commit
+		// being amended, for prepare to restore its trailer.
+		restore bool
+		// movedTrailer commits the first commit with its trailer moved out of
+		// the final trailer block, and the amend puts it back.
+		movedTrailer bool
+		// laterCommit lands another commit after the amend, before its
+		// post-commit reads HEAD's reflog.
+		laterCommit bool
+		// editReflog changes HEAD's reflog after the commit, before its
+		// post-commit: dropNewestReflogEntry removes the commit's own entry,
+		// leaving only older ones. The others have it read through git, as
+		// for reftable: readReflogThroughGit as it is, expireReflogBeforeNewest
+		// with only that entry left, expireReplacedReflogEntry without the
+		// entry of the commit an amend replaced, and relabelAmendAsCommit with
+		// the amend's entry saying "commit: ".
+		editReflog func(t *testing.T, dir string)
+		condensed  bool
+	}{
+		{name: "amend", commitArgs: []string{"--amend"}, condensed: true},
+		{name: "message reused with commit -C", condensed: false},
+		{name: "amend without a reflog", commitArgs: []string{"--amend"}, noReflog: true, condensed: true},
+		{name: "commit -C, then a hook's git reset HEAD", resetAfter: true, condensed: false},
+		{name: "amend of another commit reusing the message", commitArgs: []string{"--amend"}, amendOther: true, condensed: false},
+		{name: "amend restoring the trailer of a session based on it", commitArgs: []string{"--amend"}, amendOther: true, restore: true, condensed: true},
+		{name: "amend of a commit whose trailer was moved", commitArgs: []string{"--amend"}, movedTrailer: true, condensed: true},
+		{name: "amend, then another commit lands before post-commit reads the reflog", commitArgs: []string{"--amend"}, laterCommit: true, condensed: true},
+		{name: "commit -C, then another commit lands before post-commit reads the reflog", laterCommit: true, condensed: false},
+		{name: "amend with no reflog entry of its own", commitArgs: []string{"--amend"}, editReflog: dropNewestReflogEntry, condensed: true},
+		{name: "amend whose reflog entry has no older one to read its old HEAD from", commitArgs: []string{"--amend"}, editReflog: expireReflogBeforeNewest, condensed: true},
+		{name: "commit -C whose reflog entry has no older one to read its old HEAD from", editReflog: expireReflogBeforeNewest, condensed: false},
+		{name: "amend, reflog read through git", commitArgs: []string{"--amend"}, editReflog: readReflogThroughGit, condensed: true},
+		{name: "amend of another commit reusing the message, reflog read through git", commitArgs: []string{"--amend"}, amendOther: true, editReflog: readReflogThroughGit, condensed: false},
+		{name: "amend whose replaced commit's reflog entry expired", commitArgs: []string{"--amend"}, editReflog: expireReplacedReflogEntry, condensed: true},
+		// What the amend replaced is unknown, so it is taken as an amend, as
+		// with no reflog entry for it.
+		{name: "amend of another commit reusing the message, whose reflog entry expired", commitArgs: []string{"--amend"}, amendOther: true, editReflog: expireReplacedReflogEntry, condensed: true},
+		{name: "amend restoring the trailer of a session based on it, whose reflog entry expired", commitArgs: []string{"--amend"}, amendOther: true, restore: true, editReflog: expireReplacedReflogEntry, condensed: true},
+		{name: "amend whose reflog message GIT_REFLOG_ACTION set, reflog read through git", commitArgs: []string{"--amend"}, editReflog: relabelAmendAsCommit, condensed: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			homeDir, err := filepath.EvalSymlinks(setupGitRepo(t))
+			require.NoError(t, err, "the recorded home must match git's worktree list")
+			t.Chdir(homeDir)
+			s := NewManualCommitStrategy()
+			setupSessionWithCheckpointAndFile(t, s, homeDir, "sess-sibling", "notes.txt")
+			setLastInteraction := func(last time.Time) {
+				t.Helper()
+				state, err := s.loadSessionState(ctx, "sess-sibling")
+				require.NoError(t, err)
+				state.WorktreePath = homeDir
+				state.Phase = session.PhaseIdle
+				state.LastInteractionTime = &last
+				require.NoError(t, s.saveSessionState(ctx, state))
+			}
+			setLastInteraction(time.Now().Add(-time.Minute))
+
+			siblingDir := addSiblingWorktree(t, homeDir, "commit-wt")
+			t.Chdir(siblingDir)
+			testutil.WriteFile(t, siblingDir, "notes.txt", "agent content for notes.txt")
+			testutil.GitAdd(t, siblingDir, "notes.txt")
+			msg := prepareMessage(t, "add notes\n")
+			cps := checkpointIDs(msg)
+			require.Len(t, cps, 1, "prepare links the recent sibling session: %q", msg)
+			committed := msg
+			if tt.movedTrailer {
+				committed = msg + "\nA note written after the trailer.\n"
+			}
+			if tt.editReflog != nil {
+				// Through git, so HEAD's reflog holds an entry older than the
+				// amend's for editReflog to work on.
+				testutil.RunGit(t, siblingDir, "commit", "-q", "-m", committed)
+			} else {
+				testutil.GitCommit(t, siblingDir, committed)
+			}
+			require.NoError(t, NewManualCommitStrategy().PostCommit(ctx))
+			state, err := s.loadSessionState(ctx, "sess-sibling")
+			require.NoError(t, err)
+			require.Equal(t, cps[0], state.LastCheckpointID.String(), "sanity: the session owns the commit's checkpoint")
+			if tt.movedTrailer {
+				head := strings.TrimSpace(testutil.RunGit(t, siblingDir, "log", "-1", "--format=%B"))
+				require.Empty(t, LinkedCheckpoints(ctx, head), "sanity: the commit's final trailer block names no checkpoint")
+			}
+
+			// The agent's next turn adds more.txt; then the session sits idle
+			// for a day before a commit naming the checkpoint takes it in.
+			t.Chdir(homeDir)
+			metadataDir := paths.EntireMetadataDir + "/sess-sibling"
+			testutil.WriteFile(t, homeDir, "more.txt", "agent content for more.txt")
+			testutil.WriteFile(t, homeDir, filepath.Join(metadataDir, paths.TranscriptFileName),
+				testTranscriptPromptResponse+`{"type":"human","message":{"content":"add more"}}`+"\n")
+			require.NoError(t, s.SaveStep(ctx, StepContext{
+				SessionID:     "sess-sibling",
+				NewFiles:      []string{"more.txt"},
+				MetadataDir:   metadataDir,
+				CommitMessage: "Checkpoint 2",
+				AuthorName:    "Test",
+				AuthorEmail:   "test@test.com",
+			}))
+			setLastInteraction(time.Now().Add(-24 * time.Hour))
+			t.Chdir(siblingDir)
+			if tt.amendOther {
+				testutil.WriteFile(t, siblingDir, "other.txt", "work of no session")
+				testutil.GitAdd(t, siblingDir, "other.txt")
+				testutil.RunGit(t, siblingDir, "commit", "-q", "-m", "other work")
+				require.NoError(t, NewManualCommitStrategy().PostCommit(ctx))
+			}
+			testutil.WriteFile(t, siblingDir, "more.txt", "agent content for more.txt")
+			testutil.GitAdd(t, siblingDir, "more.txt")
+			// git reports source "commit" for both `--amend` and `-C <rev>`.
+			draft := msg
+			if tt.restore {
+				draft = "add notes\n"
+				state, err := s.loadSessionState(ctx, "sess-sibling")
+				require.NoError(t, err)
+				state.BaseCommit = strings.TrimSpace(testutil.RunGit(t, siblingDir, "rev-parse", "HEAD"))
+				require.NoError(t, s.saveSessionState(ctx, state))
+			}
+			msgFile := filepath.Join(t.TempDir(), "COMMIT_EDITMSG")
+			require.NoError(t, os.WriteFile(msgFile, []byte(draft), 0o600))
+			require.NoError(t, NewManualCommitStrategy().PrepareCommitMsg(ctx, msgFile, "commit"))
+			kept, err := os.ReadFile(msgFile)
+			require.NoError(t, err)
+			require.Equal(t, cps, checkpointIDs(string(kept)), "prepare keeps or restores the trailer")
+			if tt.noReflog {
+				testutil.RunGit(t, siblingDir, "config", "core.logAllRefUpdates", "false")
+				for _, dirFlag := range []string{"--absolute-git-dir", "--git-common-dir"} {
+					gitDir := strings.TrimSpace(testutil.RunGit(t, siblingDir, "rev-parse", "--path-format=absolute", dirFlag))
+					require.NoError(t, os.RemoveAll(filepath.Join(gitDir, "logs")))
+				}
+			}
+			testutil.RunGit(t, siblingDir, append([]string{"commit", "-q", "-F", msgFile}, tt.commitArgs...)...)
+			if tt.noReflog {
+				require.Empty(t, headReflog(ctx), "sanity: the amend left no reflog")
+			}
+			if tt.resetAfter {
+				// An earlier post-commit hook's reset records an entry that
+				// does not move HEAD.
+				testutil.RunGit(t, siblingDir, "reset", "-q", "HEAD")
+			}
+			if tt.editReflog != nil {
+				tt.editReflog(t, siblingDir)
+			}
+			if tt.laterCommit {
+				// The next commit lands after post-commit has read HEAD (still
+				// this commit) and before it reads HEAD's reflog, whose newest
+				// entry is then that commit's.
+				landLaterCommitInReflog(t, siblingDir)
+			}
+			require.NoError(t, NewManualCommitStrategy().PostCommit(ctx))
+
+			repo, err := OpenRepository(ctx)
+			require.NoError(t, err)
+			defer repo.Close()
+			store, err := s.getPersistentStore(ctx, repo)
+			require.NoError(t, err)
+			summary, err := store.Read(ctx, id.MustCheckpointID(cps[0]))
+			require.NoError(t, err)
+			require.NotNil(t, summary)
+			if tt.condensed {
+				assert.Contains(t, summary.FilesTouched, "more.txt", "the amend's agent work reaches the existing checkpoint")
+			} else {
+				assert.NotContains(t, summary.FilesTouched, "more.txt", "a new commit does not fold the idle session's work into the old checkpoint")
+			}
+		})
+	}
+}
+
+// TestAmendedCheckpoint_RootCommitReadThroughGit covers a root commit whose
+// reflog git lists after another root's entry, as for reftable. Every root
+// commit has a root's parents, so only git's message tells a new root from an
+// amend of the one listed.
+func TestAmendedCheckpoint_RootCommitReadThroughGit(t *testing.T) {
+	cp := id.MustCheckpointID("a1b2c3d4e5f6")
+	trailer := "\n\n" + trailers.CheckpointTrailerKey + ": " + cp.String()
+	amend := func(msg string) func(t *testing.T, dir, first string) {
+		return func(t *testing.T, dir, _ string) {
+			t.Helper()
+			testutil.WriteFile(t, dir, "more.txt", "more work")
+			testutil.RunGit(t, dir, "add", "more.txt")
+			testutil.RunGit(t, dir, "commit", "-q", "--amend", "-m", msg)
+		}
+	}
+	throughGit := func(t *testing.T, dir, _ string) { t.Helper(); readReflogThroughGit(t, dir) }
+	relabeled := func(t *testing.T, dir, _ string) { t.Helper(); relabelAmendAsCommit(t, dir) }
+	for _, tt := range []struct {
+		name  string
+		first string
+		// second makes the root commit post-commit judges, and editReflog
+		// leaves HEAD's reflog read through git with first's entry before it.
+		second, editReflog func(t *testing.T, dir, first string)
+		// link: an amend link to the checkpoint; ownedByBase: only for an
+		// owner based on the first root, which does not link it.
+		link, ownedByBase bool
+	}{
+		{name: "new root on an orphan branch reusing a root's message", first: "root work" + trailer, second: orphanRootReusing, editReflog: listRootBefore},
+		{name: "amend of a root", first: "root work" + trailer, second: amend("root work, amended" + trailer), editReflog: throughGit, link: true},
+		{name: "amend of a root whose reflog message GIT_REFLOG_ACTION set", first: "root work" + trailer, second: amend("root work, amended" + trailer), editReflog: relabeled, link: true},
+		{name: "amend of a root taking another commit's trailer", first: "root work", second: amend("root work" + trailer), editReflog: throughGit, link: true, ownedByBase: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			dir := t.TempDir()
+			testutil.InitRepo(t, dir)
+			t.Chdir(dir)
+			testutil.RunGit(t, dir, "commit", "-q", "--allow-empty", "-m", tt.first)
+			first := strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", "HEAD"))
+			tt.second(t, dir, first)
+			tt.editReflog(t, dir, first)
+			require.Equal(t, first, headReflog(ctx)[0].oldHash.String(), "sanity: git lists the first root before the commit")
+
+			repo, err := OpenRepository(ctx)
+			require.NoError(t, err)
+			defer repo.Close()
+			head, err := repo.Head()
+			require.NoError(t, err)
+			commit, err := repo.CommitObject(head.Hash())
+			require.NoError(t, err)
+			require.Empty(t, commit.ParentHashes, "sanity: the commit is a root")
+			require.NotEqual(t, first, commit.Hash.String(), "sanity: the commit is not the first root")
+			var want amendedLink
+			if tt.link {
+				want.checkpointID = cp
+			}
+			if tt.ownedByBase {
+				want.ownerBase = first
+			}
+			assert.Equal(t, want, NewManualCommitStrategy().amendedCheckpoint(ctx, repo, commit, cp, true))
+		})
+	}
+}
+
+// orphanRootReusing commits a root on an orphan branch with `-C first`.
+func orphanRootReusing(t *testing.T, dir, first string) {
+	t.Helper()
+	testutil.RunGit(t, dir, "checkout", "-q", "--orphan", "other")
+	testutil.WriteFile(t, dir, "other.txt", "other work")
+	testutil.RunGit(t, dir, "add", "other.txt")
+	testutil.RunGit(t, dir, "commit", "-q", "-C", first)
+}
+
+// listRootBefore has HEAD's reflog read through git, with an entry for the
+// root first listed before the branch's own, as HEAD's reftable reflog lists
+// the branch HEAD was on before an orphan branch.
+func listRootBefore(t *testing.T, dir, first string) {
+	t.Helper()
+	editReflogReadThroughGit(t, dir, func(lines []string) []string {
+		listed := fmt.Sprintf("%s %s Test <test@test.com> %d +0000\tcommit (initial): root work", plumbing.ZeroHash, first, time.Now().Unix())
+		return append([]string{listed}, lines...)
+	})
+}
+
+// landLaterCommitInReflog records in HEAD's reflog a commit on top of HEAD, as
+// git does once that commit lands, but leaves HEAD where it is: what a hook
+// that read HEAD just before sees when it reads the reflog.
+func landLaterCommitInReflog(t *testing.T, dir string) {
+	t.Helper()
+	head := strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", "HEAD"))
+	next := strings.TrimSpace(testutil.RunGit(t, dir, "commit-tree", "-p", head, "-m", "next commit", head+"^{tree}"))
+	gitDir := strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", "--path-format=absolute", "--absolute-git-dir"))
+	logFile, err := os.OpenFile(filepath.Join(gitDir, "logs", "HEAD"), os.O_APPEND|os.O_WRONLY, 0)
+	require.NoError(t, err)
+	defer logFile.Close()
+	_, err = fmt.Fprintf(logFile, "%s %s Test <test@test.com> %d +0000\tcommit: next commit\n", head, next, time.Now().Unix())
+	require.NoError(t, err)
+	require.Equal(t, next, headReflog(context.Background())[0].newHash.String(), "sanity: the later commit's entry is the newest")
+}
+
+// dropNewestReflogEntry removes the newest entry of HEAD's reflog, leaving
+// HEAD as it is.
+func dropNewestReflogEntry(t *testing.T, dir string) {
+	t.Helper()
+	gitDir := strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", "--path-format=absolute", "--absolute-git-dir"))
+	logPath := filepath.Join(gitDir, "logs", "HEAD")
+	data, err := os.ReadFile(logPath)
+	require.NoError(t, err)
+	lines := strings.SplitAfter(strings.TrimSuffix(string(data), "\n"), "\n")
+	require.Greater(t, len(lines), 1, "sanity: older entries stay")
+	require.NoError(t, os.WriteFile(logPath, []byte(strings.Join(lines[:len(lines)-1], "")), 0o600))
+	head := strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", "HEAD"))
+	entries := headReflog(context.Background())
+	require.False(t, slices.ContainsFunc(entries, func(e reflogEntry) bool { return e.newHash.String() == head }),
+		"sanity: no entry names the commit")
+	require.True(t, slices.ContainsFunc(entries, func(e reflogEntry) bool { return !e.oldHash.Equal(e.newHash) }),
+		"sanity: an older entry that moved HEAD is left")
+}
+
+// readReflogThroughGit has headReflog read HEAD's reflog through git, as it
+// does for the reftable backend, which keeps no logs/HEAD: the files backend
+// stands in for reftable here. Without logs/HEAD, git lists the branch's
+// reflog, and each entry's old HEAD is read from the entry listed before it.
+func readReflogThroughGit(t *testing.T, dir string) {
+	t.Helper()
+	editReflogReadThroughGit(t, dir, func(lines []string) []string { return lines })
+	entries := headReflog(context.Background())
+	require.NotEmpty(t, entries, "sanity: git lists the entries")
+	require.True(t, entries[0].oldInferred, "sanity: the old HEAD is read from the entry before")
+}
+
+// expireReflogBeforeNewest leaves HEAD's reflog with only its newest entry, as
+// a reftable reflog is once older entries expire: git lists it with no entry
+// before it, so its old HEAD is unknown.
+func expireReflogBeforeNewest(t *testing.T, dir string) {
+	t.Helper()
+	editReflogReadThroughGit(t, dir, func(lines []string) []string { return lines[len(lines)-1:] })
+	head := strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", "HEAD"))
+	entries := headReflog(context.Background())
+	require.Len(t, entries, 1, "sanity: only the newest entry is left")
+	require.Equal(t, head, entries[0].newHash.String(), "sanity: the entry names the commit")
+	require.True(t, entries[0].oldInferred && entries[0].oldHash.IsZero(), "sanity: git gives no old HEAD for it")
+}
+
+// expireReplacedReflogEntry removes the entry of the commit the amend
+// replaced, as `git reflog expire --expire-unreachable` does once the amend
+// leaves that commit unreachable, and keeps the entries before it, which are
+// still reachable. Read through git, the amend's old HEAD is then the
+// replaced commit's parent.
+func expireReplacedReflogEntry(t *testing.T, dir string) {
+	t.Helper()
+	editReflogReadThroughGit(t, dir, func(lines []string) []string {
+		require.Greater(t, len(lines), 2, "sanity: an entry is left before the replaced one")
+		return append(lines[:len(lines)-2:len(lines)-2], lines[len(lines)-1])
+	})
+	head := strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", "HEAD"))
+	parent := strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", "HEAD^"))
+	entries := headReflog(context.Background())
+	require.Equal(t, head, entries[0].newHash.String(), "sanity: the newest entry names the amend")
+	require.Equal(t, parent, entries[0].oldHash.String(), "sanity: git's listing gives the amend's parent as its old HEAD")
+}
+
+// relabelAmendAsCommit gives the amend's reflog entry the message
+// `GIT_REFLOG_ACTION=commit git commit --amend` writes, "commit: " for
+// "commit (amend): ", and has it read through git with the entries before it.
+func relabelAmendAsCommit(t *testing.T, dir string) {
+	t.Helper()
+	editReflogReadThroughGit(t, dir, func(lines []string) []string {
+		last := &lines[len(lines)-1]
+		require.Contains(t, *last, "\tcommit (amend): ", "sanity: the newest entry is the amend's")
+		*last = strings.Replace(*last, "\tcommit (amend): ", "\tcommit: ", 1)
+		return lines
+	})
+	entries := headReflog(context.Background())
+	require.True(t, entries[0].oldInferred && strings.HasPrefix(entries[0].msg, "commit: "), "sanity: git lists the amend as %q", entries[0].msg)
+}
+
+// editReflogReadThroughGit removes logs/HEAD, so headReflog reads HEAD's reflog
+// through git, which then lists the branch's reflog, and rewrites that log with
+// the entries keep returns, oldest first.
+func editReflogReadThroughGit(t *testing.T, dir string, keep func(lines []string) []string) {
+	t.Helper()
+	gitDir := strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", "--path-format=absolute", "--absolute-git-dir"))
+	require.NoError(t, os.Remove(filepath.Join(gitDir, "logs", "HEAD")))
+	commonDir := strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+	branch := strings.TrimSpace(testutil.RunGit(t, dir, "symbolic-ref", "HEAD"))
+	logPath := filepath.Join(commonDir, "logs", filepath.FromSlash(branch))
+	data, err := os.ReadFile(logPath)
+	require.NoError(t, err)
+	lines := keep(strings.Split(strings.TrimSuffix(string(data), "\n"), "\n"))
+	require.NoError(t, os.WriteFile(logPath, []byte(strings.Join(lines, "\n")+"\n"), 0o600))
+}

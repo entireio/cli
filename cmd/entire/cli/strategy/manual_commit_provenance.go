@@ -8,8 +8,10 @@ import (
 	"maps"
 	"os"
 	"slices"
+	"strings"
 
 	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
@@ -117,6 +119,117 @@ func stampedByAnotherCommit(ctx context.Context, checkpointID id.CheckpointID, s
 		return false
 	}
 	return checkpointID != state.LastCheckpointID && checkpointID != state.PendingCondensationID()
+}
+
+// amendedCheckpoint returns the link to checkpointID, a preexisting target,
+// when this commit is an amend: the newest entry in HEAD's reflog that moved
+// HEAD to this commit replaced the commit before it instead of advancing from
+// it. Entries for other commits are passed over, because a commit started
+// while this post-commit runs can land after it read HEAD, and its entry is
+// then the newest. An amend keeps the amended commit's trailer, or restores
+// its session's (handleAmendCommitMsg), without stamping it, so post-commit
+// condenses into the existing checkpoint for the session that owns it
+// (withAmendedCheckpoint). A checkpoint the replaced commit does not link, by
+// trailer or by the checkpoint's record of it (LinkedCommits, for a stamped
+// trailer moved out of the final block), is kept only for an owner prepare
+// would have restored it for: `commit --amend -C <other>` keeps another
+// commit's trailer, and its owner was never linked to this one. A message
+// reused with `commit -C` keeps a trailer the same way but advances HEAD: it
+// makes a new link. Read through git, as a reftable reflog is, an entry's old
+// HEAD is only the new HEAD of the entry listed before it: missing, or another
+// commit, once entries between them expire. An old HEAD with the commit's
+// parents is still what an amend replaced (an amend keeps them), and is judged
+// as above. Otherwise the message `git commit` wrote decides, and an amend
+// keeps its owner, though what it replaced is unknown (inferredAmendLink).
+// With no reflog entry for this commit to tell them apart
+// (core.logAllRefUpdates=false), or only one another command wrote, with no
+// old HEAD, it is taken as an amend, so the owner keeps condensing into its
+// checkpoint as it did before the idle check.
+// Judged a new link instead, the owner would be dropped, and the amend's work
+// would never reach the checkpoint its trailer names.
+func (s *ManualCommitStrategy) amendedCheckpoint(ctx context.Context, repo *git.Repository, commit *object.Commit, checkpointID id.CheckpointID, preexisting bool) amendedLink {
+	if !preexisting {
+		return amendedLink{}
+	}
+	for _, e := range headReflog(ctx) {
+		if !e.newHash.Equal(commit.Hash) || e.oldHash.Equal(e.newHash) {
+			// A later commit, or an entry that did not move HEAD, as with
+			// another hook's `git reset HEAD`.
+			continue
+		}
+		if link, ok := inferredAmendLink(repo, e, commit, checkpointID); ok {
+			return link
+		}
+		if e.oldHash.IsZero() || slices.ContainsFunc(commit.ParentHashes, e.oldHash.Equal) {
+			return amendedLink{}
+		}
+		link := amendedLink{checkpointID: checkpointID}
+		if !s.commitLinksCheckpoint(ctx, repo, e.oldHash, checkpointID) {
+			link.ownerBase = e.oldHash.String()
+		}
+		return link
+	}
+	return amendedLink{checkpointID: checkpointID}
+}
+
+// inferredAmendLink decides for an entry read through git (oldInferred), whose
+// old HEAD may be missing or another commit. A listed old HEAD with the
+// commit's parents is what an amend replaced, and is judged as the files
+// backend's is (ok false), whatever the message says (GIT_REFLOG_ACTION can
+// set it). That excepts a root commit made with no HEAD to replace ("commit
+// (initial)"), though every root has a root's parents. Otherwise git's message
+// tells a new commit from an amend, and an amend whose old HEAD is missing,
+// or is not what it replaced (an entry between them expired), keeps its
+// owner, as one with no reflog entry does: what it replaced, and whether that
+// linked the checkpoint, is unknown.
+func inferredAmendLink(repo *git.Repository, e reflogEntry, commit *object.Commit, checkpointID id.CheckpointID) (link amendedLink, ok bool) {
+	switch {
+	case !e.oldInferred:
+		return amendedLink{}, false
+	case strings.HasPrefix(e.msg, "commit (initial)"):
+		return amendedLink{}, true
+	case sameParents(repo, e.oldHash, commit):
+		return amendedLink{}, false
+	case newCommitReflogMessage(e.msg):
+		return amendedLink{}, true
+	case e.oldHash.IsZero(), strings.HasPrefix(e.msg, "commit (amend)"):
+		return amendedLink{checkpointID: checkpointID}, true
+	}
+	return amendedLink{}, false
+}
+
+// newCommitReflogMessage reports whether msg is the reflog message `git commit`
+// writes for a commit that advances HEAD: "commit: <subject>", or with a reason
+// such as "commit (initial): ". An amend's is "commit (amend): ", and other
+// commands write their own ("rebase (pick): ", "cherry-pick: ").
+func newCommitReflogMessage(msg string) bool {
+	if strings.HasPrefix(msg, "commit: ") {
+		return true
+	}
+	return strings.HasPrefix(msg, "commit (") && !strings.HasPrefix(msg, "commit (amend)")
+}
+
+// sameParents reports whether the commit at hash has commit's parents, as the
+// commit an amend replaced has.
+func sameParents(repo *git.Repository, hash plumbing.Hash, commit *object.Commit) bool {
+	c, err := repo.CommitObject(hash)
+	return err == nil && slices.EqualFunc(c.ParentHashes, commit.ParentHashes, plumbing.Hash.Equal)
+}
+
+// commitLinksCheckpoint reports whether the commit at hash links checkpointID:
+// its final trailer block names it, or the checkpoint records the commit.
+func (s *ManualCommitStrategy) commitLinksCheckpoint(ctx context.Context, repo *git.Repository, hash plumbing.Hash, checkpointID id.CheckpointID) bool {
+	if c, err := repo.CommitObject(hash); err == nil && slices.Contains(LinkedCheckpoints(ctx, c.Message), checkpointID) {
+		return true
+	}
+	store, err := s.getPersistentStore(ctx, repo)
+	if err != nil {
+		return false
+	}
+	summary, err := store.Read(ctx, checkpointID)
+	return err == nil && summary != nil && slices.ContainsFunc(summary.LinkedCommits, func(l checkpoint.LinkedCommit) bool {
+		return l.SHA == hash.String()
+	})
 }
 
 func checkpointExists(ctx context.Context, store checkpoint.PersistentStore, checkpointID id.CheckpointID) bool {
@@ -273,8 +386,85 @@ func recordStampedTrailer(ctx context.Context, cpID id.CheckpointID) bool {
 		logging.Warn(logging.WithComponent(ctx, "checkpoint"), "prepare-commit-msg: could not record the stamped trailer, leaving the commit unlinked",
 			slog.String("checkpoint_id", cpID.String()),
 			slog.String("error", err.Error()))
+		return false
 	}
-	return err == nil
+	recordStampedSessions(ctx, cpID)
+	return true
+}
+
+// stampedSessionsFile records, for each trailer prepare-commit-msg stamped,
+// the sessions it linked the commit to (withLinkedSessions). Post-commit keeps
+// those sessions in its own matching, so it condenses into the trailer the
+// sessions prepare linked. It sits beside stampedTrailersFile, not in it, so a
+// binary that reads that file as a list of IDs is unaffected. Prepare writes
+// it after the stamp and post-commit takes it before the stamps, so a
+// post-commit that finds its stamp finds the entry too, even with another
+// commit's prepare racing it. With no entry for its trailer, post-commit
+// matches afresh, as before.
+const stampedSessionsFile = "entire-stamped-sessions.json"
+
+type stampedSessions struct {
+	CheckpointID id.CheckpointID `json:"checkpoint_id"`
+	SessionIDs   []string        `json:"session_ids"`
+}
+
+// recordStampedSessions records the sessions ctx marks as linked for cpID,
+// replacing an earlier entry for it (a reservation stamped again by a later
+// prepare). Best effort: without the entry post-commit matches afresh.
+func recordStampedSessions(ctx context.Context, cpID id.CheckpointID) {
+	sessionIDs := linkedSessions(ctx)
+	if len(sessionIDs) == 0 {
+		return
+	}
+	if err := writeStampedSessions(ctx, stampedSessions{CheckpointID: cpID, SessionIDs: sessionIDs}); err != nil {
+		logging.Debug(logging.WithComponent(ctx, "checkpoint"), "prepare-commit-msg: could not record the sessions linked to the trailer",
+			slog.String("checkpoint_id", cpID.String()),
+			slog.String("error", err.Error()))
+	}
+}
+
+func writeStampedSessions(ctx context.Context, entry stampedSessions) error {
+	root, err := perWorktreeGitRoot(ctx)
+	if err != nil {
+		return err
+	}
+	entries := slices.DeleteFunc(readStampedSessionsIn(root), func(e stampedSessions) bool {
+		return e.CheckpointID == entry.CheckpointID
+	})
+	data, err := json.Marshal(append(entries, entry))
+	if err != nil {
+		return fmt.Errorf("encode stamped sessions: %w", err)
+	}
+	return jsonutil.WriteFileAtomicIn(root, stampedSessionsFile, data, 0o600) //nolint:wrapcheck // recordStampedSessions logs it with context
+}
+
+// takeStampedSessions returns the sessions prepare-commit-msg linked to each
+// trailer it stamped since the last post-commit, by checkpoint ID, and
+// consumes the record.
+func takeStampedSessions(ctx context.Context) map[id.CheckpointID][]string {
+	root, err := perWorktreeGitRoot(ctx)
+	if err != nil {
+		return nil
+	}
+	entries := readStampedSessionsIn(root)
+	_ = osroot.RemoveNoSymlinks(root, stampedSessionsFile) //nolint:errcheck // absent when prepare stamped nothing
+	linked := make(map[id.CheckpointID][]string, len(entries))
+	for _, e := range entries {
+		linked[e.CheckpointID] = e.SessionIDs
+	}
+	return linked
+}
+
+func readStampedSessionsIn(root *os.Root) []stampedSessions {
+	data, err := osroot.ReadFileNoFollow(root, stampedSessionsFile)
+	if err != nil {
+		return nil
+	}
+	var entries []stampedSessions
+	if json.Unmarshal(data, &entries) != nil {
+		return nil
+	}
+	return entries
 }
 
 func writeStampedTrailer(ctx context.Context, cpID id.CheckpointID) error {
