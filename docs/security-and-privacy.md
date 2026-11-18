@@ -148,12 +148,22 @@ Built-in categories (when `enabled` is `true`):
 |---|---|---|
 | `email` | on | `[REDACTED_EMAIL]` |
 | `phone` (North American / NANP formats) | on | `[REDACTED_PHONE]` |
-| `address` (US street addresses) | off (more false-positive prone) | `[REDACTED_ADDRESS]` |
+| `address` (US, Italian, Spanish, French and German street lines, see below) | off (more false-positive prone) | `[REDACTED_ADDRESS]` |
 | `ip` (IPv4 and IPv6 addresses, see below) | on | `[REDACTED_IP]` |
 
 Common bot/CI email addresses are not redacted (`noreply@*`, `actions@*`, `*@users.noreply.github.com`, `*@noreply.github.com`), and neither is the `git@` login of a git remote: a remote URL (`ssh://git@host/org/repo`), an scp-style remote whose path contains `/` or ends in `.git` (`git@host:org/repo.git`), or a bare `git@` on GitHub, GitLab, Bitbucket, Codeberg, or Azure DevOps (`ssh -T git@github.com`). Any other `git@` address, such as `git@company.com` in prose or `ssh -T git@gitlab.company.com`, is redacted like any other email.
 
 Phone and address matches must stand on their own: digits that are part of a longer number (`2024-123-4567890`) are not a phone number, and a street suffix must be a whole word, so `Plan` or `Started` does not end an address.
+
+Besides the US shape (`123 Main St`), `address` matches European street lines built on a fixed list of street types, with a house number:
+
+- Italian and Spanish: the street type, a title-case name, then the number (`Via Roma 12`, `Piazza del Duomo 1`, `Calle de Alcalá, 42`, `C/ Mayor 5`, `Calle Mayor n.º 1`). Types: `Via`, `Viale`, `Piazza`, `Piazzale`, `Corso`, `Largo`, `Vicolo`, `Strada`, `Calle`, `C/`, `Avenida`, `Avda.`, `Plaza`, `Paseo`, `Camino`, `Ronda`, `Rambla`.
+- French: the number, the street type, then the name (`12 rue de la Paix`, `8 bis boulevard Saint-Germain`, `12 B rue de la Paix`). Types: `rue`, `avenue`, `boulevard`, `place`, `chemin`, `allée`, `impasse`, `quai`, lowercase or capitalized.
+- German: a street word ending in `straße`, `strasse`, `str.`, `weg`, `platz`, `allee` or `gasse`, or one of those as its own word after another (`Hauptstraße 12`, `Karl-Marx-Straße 5`, `Berliner Str. 5`), then the number. An adjective such as `Alte` or `Große` may come first (`Alte Jakobstraße 5`, `Große Hamburger Straße 7`).
+
+A name may start with a date, the day in digits or roman numerals followed by a month (`Via XX Settembre 20`, `12 rue du 8 Mai 1945`, `Avenida 9 de Julio 1000`).
+
+As with US addresses only the street line is replaced, so `Via Roma 12, 20121 Milano` becomes `[REDACTED_ADDRESS], 20121 Milano`. A French name has no house number after it to end it, so title-case words that follow it on the same line are replaced with it (`12 rue de la Paix Paris France` is replaced whole); a comma, a postcode or a word in capitals ends it (`12 rue de la Paix, 75002 Paris`, `12 rue de la Paix VERSAILLES`). A name in capitals (`Via SSH 22`), a number that continues as a decimal (`Via Node 18.2`), and an Italian or Spanish street type written in lowercase (`in via Roma 12`) are not matched, so English prose such as `installed via Python 3` stays. `C/` right after a slash is part of a path and is not matched (`docs/C/Readme 2`), but in prose before a title-case word and a number it is (`written in C/Python 3`).
 
 IP addresses are redacted when they look like an address in use, because version numbers (`1.17.2.3`) and user agents (`Chrome/154.0.0.0`) share the dotted-quad shape. An address is redacted when any of these hold:
 
@@ -379,7 +389,7 @@ File an issue when the rule would benefit every Entire user (e.g., a major SaaS 
 - **JSONL skip rules.** Entire skips scanning the string values of fields whose name *ends in* `signature` (so `thinkingSignature` too), fields ending in `id`/`ids`, and structural-path fields (`filepath`, `file_path`, `cwd`, `root`, `directory`, `dir`, `path`) to avoid false positives. That includes strings in an array under such a field; objects nested under one are still scanned. Because the rule matches by suffix, a string directly under an unrelated name such as `valid` or `android` is skipped too. Objects whose `type` starts with `image` or equals `base64` are also skipped, as is any string that is exactly a `data:image/<png|jpeg|jpg|gif|webp>;base64,` URI (subtype case-insensitive) whose decoded bytes start with a PNG, JPEG, GIF or WebP signature, unless it sits under a credential key (the string only, not its siblings) — and those skips are what leave a pasted image unredacted rather than merely unflagged. It matches some agents' image shapes and not others, which is why the outcome differs per agent: see [What Entire does NOT understand: pasted images and screenshots](#what-entire-does-not-understand-pasted-images-and-screenshots) above.
 - **JSON keys are not scanned.** Only values are. A secret used as an object key, such as a token as a header name, is stored as written.
 - **A secret recognized only by its key is redacted only there.** A value such as a hex string under `api_key` is replaced where it sits. The same value elsewhere, in another field, in prose, or on another line, is redacted only if a detector flags it there on its own.
-- **Built-in PII patterns are US-centric.** `phone` matches North American (NANP) formats only — international formats, including E.164 numbers outside `+1`, are not detected. `address` matches the street line only; city, state, and ZIP/postcode are preserved. If you handle personal data from other regions, add `custom_patterns` for your locale rather than relying on the built-in categories alone.
+- **Built-in PII patterns are US-centric.** `phone` matches North American (NANP) formats only — international formats, including E.164 numbers outside `+1`, are not detected. `address` matches US, Italian, Spanish, French and German street lines only, and only the street line; city, state, and ZIP/postcode are preserved, except that a French street line also takes title-case words that follow it on the same line. If you handle personal data from other regions, add `custom_patterns` for your locale rather than relying on the built-in categories alone.
 - **Custom PII patterns are user-authored.** Teams own the correctness of their `custom_patterns`. An invalid regex, or one that can match the empty string, is logged and skipped, not enforced.
 - **Users are ultimately responsible** for reviewing what they commit and push. Redaction is a safety net, not a guarantee.
 
