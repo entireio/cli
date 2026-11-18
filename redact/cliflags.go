@@ -394,6 +394,10 @@ const (
 	// the ones a pattern reads, each any number of times, as a client
 	// reads the last of each (machine h login old login me password x).
 	netrcFields = `(?:` + netrcSep + `(?i:account|login)` + netrcValueSep + `(?:` + netrcName + `))*`
+	// netrcMorePasswords are the password fields that may follow the first
+	// one before the login (machine h password old password x login me),
+	// as an entry may give its password again. appendPassword hides them.
+	netrcMorePasswords = `(?:` + netrcAccount + netrcSep + `(?i:password)` + netrcValueSep + `(?:` + netrcValue + `))*`
 )
 
 // netrcPasswordPatterns match the password of a .netrc entry that also names
@@ -430,7 +434,7 @@ var netrcDefaultPatterns = []netrcPattern{
 // after its machine, in either order.
 const (
 	netrcLoginPassword = netrcFields + netrcSep + `(?i:login)` + netrcValueSep + `(` + netrcName + `)` + netrcFields + netrcSep + `(?i:password)` + netrcValueSep + `(` + netrcValue + `)`
-	netrcPasswordLogin = netrcAccount + netrcSep + `(?i:password)` + netrcValueSep + `(` + netrcValue + `)` + netrcAccount + netrcSep + `(?i:login)` + netrcValueSep + `(` + netrcName + `)`
+	netrcPasswordLogin = netrcAccount + netrcSep + `(?i:password)` + netrcValueSep + `(` + netrcValue + `)` + netrcMorePasswords + netrcAccount + netrcSep + `(?i:login)` + netrcValueSep + `(` + netrcName + `)`
 )
 
 // netrcPattern is a .netrc entry pattern, whose group 1 is the machine, and
@@ -5181,15 +5185,19 @@ func appendNetrcEntries(regions []taggedRegion, s, written string) []taggedRegio
 	for _, p := range netrcPasswordPatterns {
 		lines := quoteScan{s: s, prose: true}
 		for _, loc := range p.pattern.FindAllStringSubmatchIndex(s, -1) {
-			regions = p.appendPassword(regions, s, written, &lines, loc)
+			var fieldsEnd int
+			regions, fieldsEnd = p.appendPassword(regions, s, written, &lines, loc)
+			// A default entry may follow on the same line, after the
+			// fields the entry gave again.
+			after := max(loc[1], fieldsEnd)
 			for _, d := range netrcDefaultPatterns {
-				if dloc := d.pattern.FindStringSubmatchIndex(s[loc[1]:]); dloc != nil {
+				if dloc := d.pattern.FindStringSubmatchIndex(s[after:]); dloc != nil {
 					for k := range dloc {
 						if dloc[k] >= 0 {
-							dloc[k] += loc[1]
+							dloc[k] += after
 						}
 					}
-					regions = d.appendPassword(regions, s, written, &lines, dloc)
+					regions, _ = d.appendPassword(regions, s, written, &lines, dloc)
 					break
 				}
 			}
@@ -5199,8 +5207,10 @@ func appendNetrcEntries(regions []taggedRegion, s, written string) []taggedRegio
 }
 
 // appendPassword adds the password of the .netrc entry that loc, a match of
-// p in s, found. written is as for appendNetrcEntries.
-func (p netrcPattern) appendPassword(regions []taggedRegion, s, written string, lines *quoteScan, loc []int) []taggedRegion {
+// p in s, found, and every password the entry gives again in the fields
+// after it (see appendMoreNetrcPasswords), which end at fieldsEnd. written
+// is as for appendNetrcEntries.
+func (p netrcPattern) appendPassword(regions []taggedRegion, s, written string, lines *quoteScan, loc []int) (_ []taggedRegion, fieldsEnd int) {
 	machine := ""
 	if loc[2] >= 0 {
 		machine = s[loc[2]:loc[3]]
@@ -5211,15 +5221,16 @@ func (p netrcPattern) appendPassword(regions []taggedRegion, s, written string, 
 	}
 	start, end := loc[2*p.value], loc[2*p.value+1]
 	if isNetrcDeclaration(s, loc[0], machine, login, s[start:end]) || isNetrcProse(s, machine, login, start, end) {
-		return regions
+		return regions, loc[1]
 	}
 	if p.login == 0 && !endsNetrcEntry(s, start, end) {
 		// Prose about a machine's password, which names no login either
 		// and goes on after the word (machine example.com password is
 		// in the vault).
-		return regions
+		return regions, loc[1]
 	}
 	regions = appendNetrcValue(regions, s, lines, start, netrcTokenEnd(s, written, start, end))
+	regions, fieldsEnd = appendMoreNetrcPasswords(regions, s, written, lines, end)
 	if s[start] == '#' {
 		// curl reads a token that starts with # as a comment that runs to
 		// the end of its line, and the next token as the password
@@ -5229,7 +5240,39 @@ func (p netrcPattern) appendPassword(regions []taggedRegion, s, written string, 
 			regions = appendNetrcValue(regions, s, lines, end+next[2], end+next[3])
 		}
 	}
-	return regions
+	return regions, fieldsEnd
+}
+
+// netrcNextField matches the .netrc field right after a token: group 1 is
+// its keyword and group 2 its token.
+var netrcNextField = regexp.MustCompile(`^` + netrcSep + `((?i:account|login|password))` + netrcValueSep + `(` + netrcValue + `)`)
+
+// appendMoreNetrcPasswords adds every password that the fields after the
+// .netrc token ending at end give again, as an entry may give its password,
+// or another login and password, more than once (machine h password old
+// password x login me, machine h login a password x login b password y).
+// A client reads the last, or the one that matches its login, so each is
+// hidden. The fields stop at any other token, and at a login or password
+// that is a prose word (see isNetrcProse). It returns where they end.
+func appendMoreNetrcPasswords(regions []taggedRegion, s, written string, lines *quoteScan, end int) ([]taggedRegion, int) {
+	for {
+		m := netrcNextField.FindStringSubmatchIndex(s[end:])
+		if m == nil {
+			return regions, end
+		}
+		start, next := end+m[4], end+m[5]
+		if !strings.EqualFold(s[end+m[2]:end+m[3]], "password") {
+			if slices.Contains(netrcLoginProseWords, strings.ToLower(s[start:next])) {
+				return regions, end
+			}
+		} else {
+			if isNetrcProse(s, "", "", start, next) {
+				return regions, end
+			}
+			regions = appendNetrcValue(regions, s, lines, start, netrcTokenEnd(s, written, start, next))
+		}
+		end = next
+	}
 }
 
 // netrcTokenEnd returns where the .netrc token s[start:end] ends: before a
