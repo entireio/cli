@@ -1,15 +1,16 @@
 // Package bbcache keeps git-remote-entire's local state for client-chunked
-// pushes of one repo: the xorbs that it built, and what the server said about
-// each xorb. A push uses it to skip uploads that an earlier push did, and to
-// resume after a failed push.
+// pushes and fetches of one repo: the xorbs that it built, the complete
+// xorbs that it downloaded, and what the server said about each xorb. A
+// push uses it to skip uploads that an earlier push did, and to resume after
+// a failed push. A fetch rebuilds blobs from its complete xorbs.
 //
 // The store lives in the git common dir at
 // <common dir>/entire-xorbs/<repo key>/, with the repo key derived from the
 // server URL and the repo path. Deduplication on the server is per repo, so a
-// record of one repo is never used for another. Every file is a cache: a
-// missing, short or stale file only costs a new upload, so eviction and
-// `entire clean` are always safe. A push trims the store to its size cap
-// once, when it ends.
+// record or xorb of one repo is never used for another. Every file is a
+// cache: a missing, short or stale file only costs a new upload or download,
+// so eviction and `entire clean` are always safe. A push trims the store to
+// its size cap once, when it ends.
 package bbcache
 
 import (
@@ -47,15 +48,20 @@ const (
 )
 
 const (
-	xorbsDir   = "xorbs"
-	recordsDir = "records"
+	xorbsDir    = "xorbs"
+	completeDir = "complete"
+	recordsDir  = "records"
 	// staleTemp is the age after which eviction removes a temp file that a
 	// killed writer left. A younger one can belong to a write in progress.
-	staleTemp     = time.Hour
-	recordVersion = 1
+	staleTemp = time.Hour
+	// recentComplete is the time since its last use for which eviction
+	// keeps a complete xorb. A fetch in another process can be reading it,
+	// and the pins of that process are not visible here.
+	recentComplete = 30 * time.Minute
+	recordVersion  = 1
 )
 
-var subdirs = []string{xorbsDir, recordsDir}
+var subdirs = []string{xorbsDir, completeDir, recordsDir}
 
 // Record is what the server last said about a xorb.
 type Record struct {
@@ -76,9 +82,13 @@ type Store struct {
 	maxBytes int64
 	now      func() time.Time
 
+	// rename renames a file within a directory. Tests replace it.
+	rename func(dir *os.Root, oldname, newname string) error
+
 	mu sync.Mutex
-	// pinned holds the files that this Store wrote. Trim keeps them: the
-	// push that opened the Store may still upload them again.
+	// pinned holds the files that this Store wrote, and the complete xorbs
+	// that the fetch which opened it needs. Trim keeps them: the push may
+	// still upload them again, and the fetch may still read them.
 	pinned map[string]bool
 }
 
@@ -114,6 +124,7 @@ func Open(commonDir, serverURL, repoPath string, opts ...option) (*Store, error)
 		base:     gitdir.XorbStoreDirName + "/" + repoKey(serverURL, repoPath),
 		maxBytes: defaultMaxBytes,
 		now:      time.Now,
+		rename:   (*os.Root).Rename,
 		pinned:   map[string]bool{},
 	}
 	for _, opt := range opts {
@@ -154,7 +165,7 @@ func (s *Store) Xorb(h xethash.Hash) (*bbchunk.Xorb, bool) {
 		s.remove(name)
 		return nil, false
 	}
-	return &bbchunk.Xorb{Hash: h, Network: body, Footer: footer}, true
+	return &bbchunk.Xorb{Hash: h, Network: body, Footer: (*bbchunk.Footer)(footer)}, true
 }
 
 type recordFile struct {
@@ -337,14 +348,18 @@ func decodeRecord(data []byte) (Record, error) {
 // checks pins and removes files, so a file pinned before its rename is never
 // removed by this Store.
 func (s *Store) write(name string, data []byte) error {
-	s.mu.Lock()
-	s.pinned[name] = true
-	s.mu.Unlock()
+	s.pin(name)
 	if err := jsonutil.WriteFileAtomicIn(s.root, name, data, 0o600); err != nil {
 		return err //nolint:wrapcheck // callers name the file
 	}
 	s.touch(name)
 	return nil
+}
+
+func (s *Store) pin(name string) {
+	s.mu.Lock()
+	s.pinned[name] = true
+	s.mu.Unlock()
 }
 
 // read reads a file and marks it as used for eviction. Any failure is a
@@ -380,14 +395,17 @@ type storedFile struct {
 	name  string
 	size  int64
 	mtime time.Time
+	// recent is set for a complete xorb that eviction keeps.
+	recent bool
 }
 
 // Trim removes the least recently used files until the store's files fit in
-// its size cap. It keeps the files that this Store wrote, so a push that
+// its size cap. It keeps the files that this Store pinned, so a push that
 // writes more than the cap goes over it until the next push trims. It also
-// removes temp files older than staleTemp. A push calls Trim once, when it
-// ends. Trim is best effort: a failure leaves the store over its cap until
-// the next push.
+// keeps every complete xorb used in the last 30 minutes, which another
+// process can be reading. It removes temp files older than staleTemp. A
+// push calls Trim once, when it ends. Trim is best effort: a failure leaves
+// the store over its cap until the next push.
 func (s *Store) Trim() {
 	now := s.now()
 	var files []storedFile
@@ -410,7 +428,8 @@ func (s *Store) Trim() {
 				}
 				continue
 			}
-			files = append(files, storedFile{name: name, size: info.Size(), mtime: info.ModTime()})
+			recent := sub == completeDir && now.Sub(info.ModTime()) < recentComplete
+			files = append(files, storedFile{name: name, size: info.Size(), mtime: info.ModTime(), recent: recent})
 			total += info.Size()
 		}
 	}
@@ -424,7 +443,7 @@ func (s *Store) Trim() {
 		if total <= s.maxBytes {
 			break
 		}
-		if s.pinned[f.name] {
+		if s.pinned[f.name] || f.recent {
 			continue
 		}
 		s.remove(f.name)

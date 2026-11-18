@@ -21,7 +21,7 @@ type Xorb struct {
 	Network []byte
 	// Footer is the chunk table of the xorb: the V1 footer that the server
 	// adds, with a zero nonce. Footer.XorbHash is Hash.
-	Footer *xorb.Footer
+	Footer *Footer
 }
 
 // Seal seals the xorb in b and empties b. The xorb owns its memory. Seal
@@ -31,5 +31,12 @@ func Seal(b *xorb.Builder) (*Xorb, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bbchunk: %w", err)
 	}
-	return &Xorb{Hash: f.XorbHash, Network: body, Footer: f}, nil
+	return &Xorb{Hash: f.XorbHash, Network: body, Footer: (*Footer)(f)}, nil
+}
+
+// Complete returns the complete form of x: its network form and its footer,
+// as entiredb stores it.
+func (x *Xorb) Complete() []byte {
+	out := make([]byte, 0, len(x.Network)+xorb.FooterSize(x.Footer.Chunks()))
+	return xorb.AppendFooter(append(out, x.Network...), (*xorb.Footer)(x.Footer))
 }

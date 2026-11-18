@@ -1,6 +1,7 @@
 // Package bbclient talks to the BB endpoints of entiredb's client-chunked
-// push: the xorb upload and the dedup query. entiredb's
-// docs/specs/client-chunked-push.md is the contract. The package checks
+// push and fetch: the xorb upload, the dedup query and the xorb download.
+// entiredb's docs/specs/client-chunked-push.md and
+// docs/specs/client-chunked-fetch.md are the contracts. The package checks
 // every footer that the server returns against its xorb hash, so a recipe
 // never names chunks that the server did not prove it holds.
 package bbclient
@@ -122,6 +123,7 @@ type Client struct {
 	maxBackoff    time.Duration
 	maxRetryAfter time.Duration
 	sleep         func(context.Context, time.Duration) error
+	now           func() time.Time
 }
 
 // New returns a Client that sends its requests through d.
@@ -133,6 +135,7 @@ func New(d Doer) *Client {
 		maxBackoff:    defaultMaxBackoff,
 		maxRetryAfter: defaultMaxRetryAft,
 		sleep:         sleepContext,
+		now:           time.Now,
 	}
 }
 
@@ -190,19 +193,26 @@ func (e *retryableError) Unwrap() error { return e.StatusError }
 func (c *Client) answer(resp *http.Response, method, suffix string, maxResponse int64, out any) (int, error) {
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		msg, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorMessage)) //nolint:errcheck // the message is best effort
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))    //nolint:errcheck // drain for connection reuse
-		se := &StatusError{Method: method, Suffix: suffix, StatusCode: resp.StatusCode, Message: string(bytes.TrimSpace(msg))}
-		if retryableStatus(resp.StatusCode) {
-			return resp.StatusCode, &retryableError{StatusError: se, wait: retryAfter(resp.Header.Get("Retry-After"))}
-		}
-		return resp.StatusCode, se
+		return resp.StatusCode, statusError(resp, method, suffix)
 	}
 	dec := json.NewDecoder(io.LimitReader(resp.Body, maxResponse))
 	if err := dec.Decode(out); err != nil {
 		return resp.StatusCode, fmt.Errorf("%s %s: decode response: %w", method, suffix, err)
 	}
 	return resp.StatusCode, nil
+}
+
+// statusError reads the start of the body of a refusal and returns it as a
+// *StatusError, or as a *retryableError for a status that may succeed when
+// sent again. The caller closes the body.
+func statusError(resp *http.Response, method, suffix string) error {
+	msg, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorMessage)) //nolint:errcheck // the message is best effort
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))    //nolint:errcheck // drain for connection reuse
+	se := &StatusError{Method: method, Suffix: suffix, StatusCode: resp.StatusCode, Message: string(bytes.TrimSpace(msg))}
+	if retryableStatus(resp.StatusCode) {
+		return &retryableError{StatusError: se, wait: retryAfter(resp.Header.Get("Retry-After"))}
+	}
+	return se
 }
 
 // retryableStatus reports whether an answer may succeed when sent again.

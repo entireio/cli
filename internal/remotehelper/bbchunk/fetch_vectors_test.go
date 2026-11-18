@@ -1,6 +1,7 @@
 package bbchunk
 
 import (
+	"bytes"
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/binary"
@@ -8,10 +9,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/jmwoliver/xet-go/xethash"
+	"github.com/jmwoliver/xet-go/xorb"
 	"github.com/stretchr/testify/require"
 )
 
@@ -167,4 +172,73 @@ func checkFetchEntry(t *testing.T, e fetchEntry) *ChunkedPayload {
 		}, got.Terms[i], "term %d", i)
 	}
 	return got
+}
+
+// TestFetchVectorsRebuild rebuilds the blob of each valid vector from the
+// xorbs of the client vectors, as a fetch does: each term's byte range comes
+// from the xorb's footer, and the blob must hash to the recipe's object ID.
+func TestFetchVectorsRebuild(t *testing.T) {
+	t.Parallel()
+	v := loadFetchVectors(t)
+	cv := loadClientVectors(t)
+
+	needed := map[string]bool{}
+	for _, e := range v.Entries {
+		needed[e.Input] = true
+		if base, ok := strings.CutPrefix(e.Recipe, "dedup against "); ok {
+			needed[base] = true
+		}
+	}
+	data := materialize(t, cv.Inputs)
+	xorbs := map[xethash.Hash]*Xorb{}
+	for _, in := range cv.Inputs {
+		if !needed[in.Name] {
+			continue
+		}
+		_, sealed := chunkBlob(t, data[in.Name])
+		for _, x := range sealed {
+			xorbs[x.Hash] = x
+		}
+	}
+	for _, ce := range cv.Entries {
+		chunks := splitAll(t, bytes.NewReader(data[ce.Input]))
+		for _, nx := range ce.NewXorbs {
+			var b xorb.Builder
+			for _, i := range nx.InputChunks {
+				_, err := b.AddHashed(chunks[i].Data, chunks[i].Hash, xorb.Auto)
+				require.NoError(t, err)
+			}
+			x, err := Seal(&b)
+			require.NoError(t, err)
+			xorbs[x.Hash] = x
+		}
+	}
+
+	for _, e := range v.Entries {
+		t.Run(e.Name, func(t *testing.T) {
+			t.Parallel()
+			got := checkFetchEntry(t, e)
+			var blob []byte
+			for i, term := range got.Terms {
+				x, ok := xorbs[got.Xorbs[term.Xorb]]
+				require.True(t, ok, "term %d: xorb %s is in no client vector", i, got.Xorbs[term.Xorb])
+				f := x.Footer
+				first, last, err := f.StoredRange(int(term.ChunkStart), int(term.ChunkEnd))
+				require.NoError(t, err)
+				require.Equal(t, [2]uint64{term.FirstByte, term.LastByte}, [2]uint64{first, last}, "term %d byte range", i)
+				r, err := NewTermReader(bytes.NewReader(x.Complete()), f, int(term.ChunkStart), int(term.ChunkEnd))
+				require.NoError(t, err)
+				part, err := io.ReadAll(r)
+				require.NoError(t, err)
+				require.Len(t, part, int(term.UnpackedBytes), "term %d", i)
+				blob = append(blob, part...)
+			}
+			require.True(t, bytes.Equal(data[e.Input], blob), "the rebuilt blob differs from input %s", e.Input)
+			h := sha1.New()
+			if len(got.OID) == sha256.Size {
+				h = sha256.New()
+			}
+			require.Equal(t, e.OID, gitBlobID(h, blob))
+		})
+	}
 }

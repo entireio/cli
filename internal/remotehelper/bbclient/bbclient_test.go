@@ -36,14 +36,23 @@ func testClient(t *testing.T, srv *httptest.Server) (*Client, *[]time.Duration) 
 	return withSleepRecorder(New(p))
 }
 
+// withSleepRecorder makes c record its sleeps instead of sleeping. Its
+// clock moves on by each sleep.
 func withSleepRecorder(c *Client) (*Client, *[]time.Duration) {
 	var mu sync.Mutex
 	var slept []time.Duration
+	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
 	c.sleep = func(_ context.Context, d time.Duration) error {
 		mu.Lock()
 		slept = append(slept, d)
+		now = now.Add(d)
 		mu.Unlock()
 		return nil
+	}
+	c.now = func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return now
 	}
 	return c, &slept
 }
