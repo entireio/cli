@@ -136,8 +136,8 @@ func TestInstallPluginFromRepo_EndToEnd(t *testing.T) { //nolint:paralleltest //
 	}
 
 	// New tag + new asset → upgrade replaces the binary.
-	srv2 := pluginReleaseServer(t, "0.1.0", "0.2.0", "0.3.0")
-	updateRepoMetadata(t, repoURL, fmt.Sprintf("name: demo\ndescription: Plays demo sessions\ndownload_url: \"%s/dl/{tag}/{asset}\"\n", srv2.URL))
+	srv2 := pluginReleaseServer(t, "0.1.0", "0.2.0", "0.3.0", "0.4.0")
+	updateRepoMetadata(t, repoURL, fmt.Sprintf("name: demo\ndescription: Plays demo sessions\nagent_help: true\ndownload_url: \"%s/dl/{tag}/{asset}\"\n", srv2.URL))
 	gitTag(t, repoURL, "v0.3.0")
 	o, err = UpgradeInstalledPlugin(ctx, "demo")
 	if err != nil {
@@ -149,13 +149,33 @@ func TestInstallPluginFromRepo_EndToEnd(t *testing.T) { //nolint:paralleltest //
 	if got := installedPayload(t); got != "payload-0.3.0" {
 		t.Errorf("post-upgrade payload = %q, want payload-0.3.0", got)
 	}
-	// The manifest keeps the installed tag's description (agent-help lists it);
-	// the first install's metadata had none.
-	if res.Manifest.Description != "" {
-		t.Errorf("first install description = %q, want none", res.Manifest.Description)
+	// The manifest keeps the installed tag's description and agent_help
+	// declaration (agent-help lists them); the first install's metadata had
+	// neither.
+	if res.Manifest.Description != "" || res.Manifest.AgentHelp {
+		t.Errorf("first install description = %q, agent_help = %v; want neither", res.Manifest.Description, res.Manifest.AgentHelp)
 	}
-	if m, err := LoadPluginManifest("demo"); err != nil || m == nil || m.Description != "Plays demo sessions" {
-		t.Errorf("post-upgrade manifest = %+v, %v; want description %q", m, err, "Plays demo sessions")
+	if m, err := LoadPluginManifest("demo"); err != nil || m == nil || m.Description != "Plays demo sessions" || !m.AgentHelp {
+		t.Errorf("post-upgrade manifest = %+v, %v; want description %q and agent_help", m, err, "Plays demo sessions")
+	}
+	// The bin entry a real install places is the release binary, so the
+	// top-level agent-help trusts the manifest and points at the plugin.
+	if got := agentHelpInstalledPlugins(NewRootCmd()).Plugins; len(got) != 1 || got[0].Help != "entire agent-help demo" || got[0].Description != "Plays demo sessions" {
+		t.Errorf("agent-help listing after the upgrade = %+v, want demo with its description and pointer", got)
+	}
+
+	// A later tag that no longer declares agent_help takes it away again: the
+	// manifest records each installed tag's metadata, not the union.
+	updateRepoMetadata(t, repoURL, fmt.Sprintf("name: demo\ndescription: Plays demo sessions\ndownload_url: \"%s/dl/{tag}/{asset}\"\n", srv2.URL))
+	gitTag(t, repoURL, "v0.4.0")
+	if _, err := UpgradeInstalledPlugin(ctx, "demo"); err != nil {
+		t.Fatalf("UpgradeInstalledPlugin to v0.4.0: %v", err)
+	}
+	if m, err := LoadPluginManifest("demo"); err != nil || m == nil || m.AgentHelp || m.Tag != "v0.4.0" {
+		t.Errorf("manifest after dropping agent_help = %+v, %v; want v0.4.0 without agent_help", m, err)
+	}
+	if got := agentHelpInstalledPlugins(NewRootCmd()).Plugins; len(got) != 1 || got[0].Help != "" {
+		t.Errorf("agent-help listing after dropping agent_help = %+v, want demo without a pointer", got)
 	}
 }
 

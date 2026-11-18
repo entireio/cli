@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
@@ -35,17 +36,26 @@ const (
 var agentHelpPluginNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 // agentHelpPlugin is one installed plugin as the top-level agent-help lists
-// it. A plugin documents itself (what it is for, which of its commands are
-// safe to run) through `entire agent-help <name>`; the listing only lets an
-// agent find it.
+// it. A plugin whose entire-plugin.yml declares agent_help documents itself
+// (what it is for, which of its commands are safe to run) through
+// `entire agent-help <name>`; for the others the listing only names them,
+// since that command runs the plugin and implementing it is opt-in.
 type agentHelpPlugin struct {
 	Name string `json:"name"`
 	// Description is the one-line summary recorded at install, from the
 	// plugin's entire-plugin.yml. Empty when there is none: a local install
-	// usually has no manifest, and an older manifest predates the field.
+	// has no manifest, and an older manifest predates the field.
 	Description string `json:"description,omitempty"`
-	// Help is the command that prints the plugin's own agent-help.
-	Help string `json:"help"`
+	// Help is the command that prints the plugin's own agent-help, set only
+	// when the plugin declared agent_help.
+	Help string `json:"help,omitempty"`
+}
+
+// agentHelpPluginInfo is what the listing takes from a plugin's install
+// manifest.
+type agentHelpPluginInfo struct {
+	Description string
+	AgentHelp   bool
 }
 
 // agentHelpPluginListing is the installed plugins the top level lists: at
@@ -66,7 +76,7 @@ func agentHelpInstalledPlugins(rootCmd *cobra.Command) agentHelpPluginListing {
 	if err != nil {
 		return agentHelpPluginListing{}
 	}
-	return agentHelpSelectPlugins(rootCmd, installed, agentHelpPluginRunnable, agentHelpManifestDescription)
+	return agentHelpSelectPlugins(rootCmd, installed, agentHelpPluginRunnable, agentHelpManifestInfo)
 }
 
 // agentHelpSelectPlugins picks the listed plugins from installed (sorted by
@@ -74,8 +84,9 @@ func agentHelpInstalledPlugins(rootCmd *cobra.Command) agentHelpPluginListing {
 // (agentHelpPluginName), not shadowed by a built-in (built-ins win, as in the
 // dispatcher), and that runnable says can be run, each name once (on Windows
 // entire-foo.exe and entire-foo.cmd are both "foo"). It keeps the first
-// agentHelpPluginsMax and counts the rest.
-func agentHelpSelectPlugins(rootCmd *cobra.Command, installed []*InstalledPlugin, runnable func(path string) bool, description func(name string) string) agentHelpPluginListing {
+// agentHelpPluginsMax and counts the rest. info supplies each one's
+// description and whether it declared agent_help.
+func agentHelpSelectPlugins(rootCmd *cobra.Command, installed []*InstalledPlugin, runnable func(path string) bool, info func(*InstalledPlugin) agentHelpPluginInfo) agentHelpPluginListing {
 	var listing agentHelpPluginListing
 	seen := map[string]bool{}
 	for _, p := range installed {
@@ -87,11 +98,12 @@ func agentHelpSelectPlugins(rootCmd *cobra.Command, installed []*InstalledPlugin
 		if len(listing.Plugins) == agentHelpPluginsMax {
 			continue
 		}
-		listing.Plugins = append(listing.Plugins, agentHelpPlugin{
-			Name:        p.Name,
-			Description: description(p.Name),
-			Help:        "entire " + agentHelpCmdName + " " + p.Name,
-		})
+		in := info(p)
+		entry := agentHelpPlugin{Name: p.Name, Description: in.Description}
+		if in.AgentHelp {
+			entry.Help = "entire " + agentHelpCmdName + " " + p.Name
+		}
+		listing.Plugins = append(listing.Plugins, entry)
 	}
 	return listing
 }
@@ -121,14 +133,36 @@ func agentHelpPluginRunnable(path string) bool {
 	return runtime.GOOS == windowsGOOS || info.Mode().Perm()&0o111 != 0
 }
 
-// agentHelpManifestDescription is name's description from its install
-// manifest, made safe for the listing, or "" when there is none.
-func agentHelpManifestDescription(name string) string {
-	m, err := LoadPluginManifest(name)
-	if err != nil || m == nil {
-		return ""
+// agentHelpManifestInfo is p's description (made safe for the listing) and
+// agent_help declaration from its install manifest, zero when it has none.
+// The manifest describes the release binary in pkg/<name>/, so it is trusted
+// only while the bin entry is that binary (a symlink or hardlink to it, which
+// os.SameFile settles without reading it). A local `plugin install <path>
+// --force` over a release keeps the release's manifest (`plugin doctor` notes
+// the replaced entry), and the local build may not answer agent-help.
+// `plugin doctor` also accepts a byte-identical copy; the listing doesn't
+// hash binaries, so a copy is listed without them.
+func agentHelpManifestInfo(p *InstalledPlugin) agentHelpPluginInfo {
+	m, err := LoadPluginManifest(p.Name)
+	if err != nil || m == nil || !agentHelpEntryIsRelease(p) {
+		return agentHelpPluginInfo{}
 	}
-	return agentHelpPluginDescription(m.Description)
+	return agentHelpPluginInfo{Description: agentHelpPluginDescription(m.Description), AgentHelp: m.AgentHelp}
+}
+
+// agentHelpEntryIsRelease reports whether p's bin entry is the release binary
+// its manifest describes, pkg/<name>/entire-<name>.
+func agentHelpEntryIsRelease(p *InstalledPlugin) bool {
+	dir, err := PluginPkgDir(p.Name)
+	if err != nil {
+		return false
+	}
+	release, err := os.Stat(filepath.Join(dir, pluginBinaryName(p.Name)))
+	if err != nil {
+		return false
+	}
+	entry, err := os.Stat(p.Path)
+	return err == nil && os.SameFile(entry, release)
 }
 
 // agentHelpPluginDescription makes an author's description safe for the
@@ -164,25 +198,39 @@ func agentHelpDescriptionRuneRefused(r rune) bool {
 }
 
 // renderAgentHelpPlugins renders the installed-plugins section of the
-// top-level text, or "" when there are none.
+// top-level text, or "" when there are none: first the plugins that declared
+// agent_help, which an agent should read before using, then the others, which
+// carry no agent guidance and so are the user's to run.
 func renderAgentHelpPlugins(listing agentHelpPluginListing) string {
 	if len(listing.Plugins) == 0 {
 		return ""
 	}
 	// Names are ASCII (agentHelpPluginNameRE), so their length is their width.
 	width := 10
+	var guided, other []agentHelpPlugin
 	for _, p := range listing.Plugins {
 		width = max(width, len(p.Name))
+		if p.Help != "" {
+			guided = append(guided, p)
+		} else {
+			other = append(other, p)
+		}
 	}
 	width = min(width, agentHelpPluginColumnMax)
 	var b strings.Builder
-	b.WriteString("\nInstalled plugins — each says what it is for and which of its commands are safe to run:\n")
-	for _, p := range listing.Plugins {
-		fmt.Fprintf(&b, "  %s\n", strings.TrimRight(fmt.Sprintf("%-*s  %s", width, p.Name, p.Description), " "))
+	group := func(header string, plugins []agentHelpPlugin) {
+		if len(plugins) == 0 {
+			return
+		}
+		b.WriteString(header)
+		for _, p := range plugins {
+			fmt.Fprintf(&b, "  %s\n", strings.TrimRight(fmt.Sprintf("%-*s  %s", width, p.Name, p.Description), " "))
+		}
 	}
+	group("\nInstalled plugins with agent guidance — read one before using it: entire agent-help <plugin>\n", guided)
+	group("\nOther installed plugins — no agent guidance; the user's — suggest, don't run:\n", other)
 	if more := listing.Total - len(listing.Plugins); more > 0 {
 		fmt.Fprintf(&b, "  …and %d more\n", more)
 	}
-	b.WriteString("  Read one before using it:  entire agent-help <plugin>\n")
 	return b.String()
 }
