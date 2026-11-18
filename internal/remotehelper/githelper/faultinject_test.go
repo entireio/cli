@@ -51,6 +51,14 @@ func (f *fakeTransport) InfoRefsV2(_ context.Context) (io.ReadCloser, error) {
 	return f.infoRefsV2Resp()
 }
 
+func (f *fakeTransport) InfoRefsV2ForFetch(ctx context.Context) (io.ReadCloser, error) {
+	return f.InfoRefsV2(ctx)
+}
+
+func (f *fakeTransport) UploadPackChunked(ctx context.Context, body io.ReadSeeker, extraHeaders ...func(*http.Request)) (io.ReadCloser, error) {
+	return f.ServiceRPC(ctx, serviceUploadPack, body, extraHeaders...)
+}
+
 func (f *fakeTransport) ServiceRPC(ctx context.Context, service string, body io.ReadSeeker, extraHeaders ...func(*http.Request)) (io.ReadCloser, error) {
 	var buf []byte
 	if body != nil {

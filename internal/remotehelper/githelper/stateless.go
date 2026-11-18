@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net/http"
 
 	"github.com/entireio/cli/internal/remotehelper/debuglog"
 	"github.com/entireio/cli/internal/remotehelper/gitproto"
@@ -28,7 +27,11 @@ func handleStatelessConnect(ctx context.Context, t Transport, service string, st
 		return nil
 	}
 
-	refs, err := t.InfoRefsV2(ctx)
+	infoRefs := t.InfoRefsV2ForFetch
+	if helperChunkingOff() {
+		infoRefs = t.InfoRefsV2
+	}
+	refs, err := infoRefs(ctx)
 	if err != nil {
 		return fmt.Errorf("stateless-connect v2 info/refs: %w", err)
 	}
@@ -60,6 +63,13 @@ func handleStatelessConnect(ctx context.Context, t Transport, service string, st
 	if err != nil {
 		return fmt.Errorf("stateless-connect: strip ref-in-want: %w", err)
 	}
+	chunked := newChunkedFetch(t, advertisement)
+	defer chunked.close()
+	// The helper speaks entire-bb-fetch for git, which has no use for it.
+	advertisement, err = gitproto.RemoveV2FetchFeature(advertisement, featureBBFetch)
+	if err != nil {
+		return fmt.Errorf("stateless-connect: strip %s: %w", featureBBFetch, err)
+	}
 
 	fmt.Fprintln(stdout)
 	if _, err := stdout.Write(advertisement); err != nil {
@@ -78,46 +88,57 @@ func handleStatelessConnect(ctx context.Context, t Transport, service string, st
 		if err != nil {
 			return fmt.Errorf("stateless-connect: amend agent: %w", err)
 		}
-		command := gitproto.V2Command(reqBody)
-		if command != "" {
-			debuglog.Printf("v2 command: %s", command)
-		}
-
-		resp, err := t.ServiceRPC(ctx, service, bytes.NewReader(reqBody), func(req *http.Request) {
-			req.Header.Set("Git-Protocol", "version=2")
-		})
-		if err != nil {
-			return fmt.Errorf("stateless-connect: POST: %w", err)
-		}
-
-		if command == "bundle-uri" {
-			respBody, readErr := io.ReadAll(resp)
-			if readErr != nil {
-				_ = resp.Close()
-				return fmt.Errorf("reading bundle-uri response: %w", readErr)
-			}
-			if err := resp.Close(); err != nil {
-				return fmt.Errorf("closing bundle-uri response: %w", err)
-			}
-			if len(respBody) == 0 {
-				debuglog.Printf("bundle-uri response was empty; synthesizing flush packet")
-				respBody = []byte("0000")
-			}
-			if _, err := stdout.Write(respBody); err != nil {
-				return fmt.Errorf("streaming bundle-uri response: %w", err)
-			}
-		} else {
-			if _, err := io.Copy(stdout, resp); err != nil {
-				_ = resp.Close()
-				return fmt.Errorf("streaming stateless response: %w", err)
-			}
-			if err := resp.Close(); err != nil {
-				return fmt.Errorf("closing stateless response: %w", err)
-			}
-		}
-
-		if _, err := stdout.Write([]byte("0002")); err != nil {
-			return fmt.Errorf("writing response-end packet: %w", err)
+		if err := relayV2Request(ctx, t, service, chunked, reqBody, stdout); err != nil {
+			return err
 		}
 	}
+}
+
+// relayV2Request sends one v2 command request and copies its response to
+// stdout, followed by the response-end packet.
+func relayV2Request(ctx context.Context, t Transport, service string, chunked *chunkedFetch, reqBody []byte, stdout io.Writer) error {
+	command := gitproto.V2Command(reqBody)
+	if command != "" {
+		debuglog.Printf("v2 command: %s", command)
+	}
+	var err error
+	if chunked.handles(ctx, command) {
+		err = chunked.fetch(ctx, reqBody, stdout)
+	} else {
+		err = relayPlain(ctx, t, service, command, reqBody, stdout)
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := stdout.Write([]byte("0002")); err != nil {
+		return fmt.Errorf("writing response-end packet: %w", err)
+	}
+	return nil
+}
+
+// relayPlain sends a request as it is and copies the response to stdout.
+func relayPlain(ctx context.Context, t Transport, service, command string, reqBody []byte, stdout io.Writer) error {
+	resp, err := t.ServiceRPC(ctx, service, bytes.NewReader(reqBody), protocolV2Header)
+	if err != nil {
+		return fmt.Errorf("stateless-connect: POST: %w", err)
+	}
+	if command != "bundle-uri" {
+		return copyResponse(stdout, resp)
+	}
+	respBody, readErr := io.ReadAll(resp)
+	if readErr != nil {
+		_ = resp.Close()
+		return fmt.Errorf("reading bundle-uri response: %w", readErr)
+	}
+	if err := resp.Close(); err != nil {
+		return fmt.Errorf("closing bundle-uri response: %w", err)
+	}
+	if len(respBody) == 0 {
+		debuglog.Printf("bundle-uri response was empty; synthesizing flush packet")
+		respBody = []byte("0000")
+	}
+	if _, err := stdout.Write(respBody); err != nil {
+		return fmt.Errorf("streaming bundle-uri response: %w", err)
+	}
+	return nil
 }

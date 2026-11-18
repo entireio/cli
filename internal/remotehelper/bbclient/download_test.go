@@ -172,6 +172,24 @@ func TestDownloadNotFound(t *testing.T) {
 	require.Equal(t, int32(1), requests.Load())
 }
 
+// The server's text reaches the terminal through git, so control bytes in
+// it are sanitized.
+func TestStatusErrorIsSanitized(t *testing.T) {
+	t.Parallel()
+	x := testXorb(t, 314)
+	srv, _ := downloadServer(t, nil, func(w http.ResponseWriter, _ *http.Request) bool {
+		http.Error(w, "not found\x1b]0;owned\x07", http.StatusNotFound)
+		return true
+	})
+	defer srv.Close()
+	c, _ := testClient(t, srv)
+
+	err := c.Download(t.Context(), x.Hash, newMemSink())
+	var se *StatusError
+	require.ErrorAs(t, err, &se)
+	require.Equal(t, "not found^[]0;owned^G", se.Message)
+}
+
 // A 500 means that the stored xorb is too large or corrupt. Another try
 // gets the same answer.
 func TestDownloadServerErrorIsFinal(t *testing.T) {

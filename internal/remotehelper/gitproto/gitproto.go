@@ -12,6 +12,8 @@
 //   - reading the send-pack stateless-rpc outer framing
 //   - reading a v2 fetch response and re-muxing its pack data
 //     (FetchResponseReader, CopyFetchResponse, SidebandWriter)
+//   - reading and amending a v2 command request (ParseV2Request,
+//     AddV2Argument, HasV2FetchFeature)
 //
 // Everything here is pure Git protocol — no Entire-specific knowledge.
 package gitproto

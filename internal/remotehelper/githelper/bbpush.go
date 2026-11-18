@@ -17,14 +17,15 @@ import (
 	"github.com/entireio/cli/internal/remotehelper/gitproto"
 )
 
-// helperChunkingEnv turns the client-chunked push off when it holds a false
-// value ("0", "false"). The push then always runs git send-pack, and the
-// server chunks the large blobs. entiredb's ENTIRE_BB_CLIENT_CHUNKING is the
+// helperChunkingEnv turns the client-chunked push and the chunked fetch off
+// when it holds a false value ("0", "false"). The push then always runs git
+// send-pack, and the server chunks the large blobs. A fetch does not ask for
+// recipes and gets whole blobs. entiredb's ENTIRE_BB_CLIENT_CHUNKING is the
 // server's switch; the helper never reads it.
 const helperChunkingEnv = "ENTIRE_HELPER_CHUNKING"
 
 // helperChunkingOff reports whether helperChunkingEnv turns the
-// client-chunked push off.
+// client-chunked push and the chunked fetch off.
 func helperChunkingOff() bool {
 	v, ok := os.LookupEnv(helperChunkingEnv)
 	if !ok {

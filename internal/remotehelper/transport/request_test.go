@@ -258,3 +258,128 @@ func TestInfoRefsForPushSendsBBHeader(t *testing.T) {
 		"replica git-receive-pack ",
 	}, seen)
 }
+
+func TestInfoRefsV2ForFetchSendsBBHeader(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, r.URL.Query().Get("service")+" "+r.Header.Get("Git-Protocol")+" "+r.Header.Get(HeaderBB))
+		mu.Unlock()
+		_, _ = w.Write([]byte("caps")) //nolint:errcheck // test
+	}))
+	defer srv.Close()
+	p := testProxy(srv)
+	body, err := p.InfoRefsV2ForFetch(t.Context())
+	require.NoError(t, err)
+	require.NoError(t, body.Close())
+	body, err = p.InfoRefsV2(t.Context())
+	require.NoError(t, err)
+	require.NoError(t, body.Close())
+	require.Equal(t, []string{"git-upload-pack version=2 1", "git-upload-pack version=2 "}, seen)
+}
+
+// A node from before the fetch spec refuses entire-bb-fetch with HTTP 500.
+// The answer comes back at once and the node stays, so the request can go
+// again without the argument. Another 5xx fails over as for ServiceRPC.
+func TestUploadPackChunked(t *testing.T) {
+	t.Parallel()
+	var status atomic.Int32
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if r.Header.Get("Content-Type") != "application/x-git-upload-pack-request" || r.Header.Get("Git-Protocol") != "version=2" {
+			http.Error(w, "bad headers", http.StatusBadRequest)
+			return
+		}
+		if s := int(status.Load()); s != 0 {
+			http.Error(w, "refused", s)
+			return
+		}
+		_, _ = w.Write([]byte("0000")) //nolint:errcheck // test
+	}))
+	defer srv.Close()
+	p := testProxy(srv)
+	post := func() (io.ReadCloser, error) {
+		return p.UploadPackChunked(t.Context(), bytes.NewReader([]byte("0000")), func(r *http.Request) {
+			r.Header.Set("Git-Protocol", "version=2")
+		})
+	}
+
+	status.Store(http.StatusInternalServerError)
+	_, err := post()
+	var se *HTTPStatusError
+	require.ErrorAs(t, err, &se)
+	require.Equal(t, http.StatusInternalServerError, se.StatusCode)
+	require.Equal(t, int32(1), hits.Load(), "no retry")
+	require.Equal(t, []string{srv.URL}, p.replicaSet(), "the node stays")
+
+	status.Store(0)
+	body, err := post()
+	require.NoError(t, err)
+	got, err := io.ReadAll(body)
+	require.NoError(t, err)
+	require.NoError(t, body.Close())
+	require.Equal(t, "0000", string(got))
+
+	status.Store(http.StatusBadGateway)
+	hits.Store(0)
+	_, err = post()
+	require.ErrorAs(t, err, &se)
+	require.Equal(t, http.StatusBadGateway, se.StatusCode)
+	require.Equal(t, int32(1), hits.Load(), "one try for each node")
+	require.Equal(t, []string{srv.URL}, p.replicaSet(), "a 5xx answer does not drop the node")
+}
+
+// Another 5xx goes to the next replica, without the failover that marks
+// nodes failed. A 500 from any node comes back at once.
+func TestUploadPackChunkedTriesEachReplica(t *testing.T) {
+	t.Parallel()
+	var statuses [2]atomic.Int32
+	var hits [2]atomic.Int32
+	servers := make([]*httptest.Server, 2)
+	for i := range servers {
+		servers[i] = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			hits[i].Add(1)
+			if s := int(statuses[i].Load()); s != 0 {
+				http.Error(w, "refused", s)
+				return
+			}
+			_, _ = w.Write([]byte("0000")) //nolint:errcheck // test
+		}))
+		defer servers[i].Close()
+	}
+	nodes := []string{servers[0].URL, servers[1].URL}
+	p := proxyWithClient(nodes, "/et/alice/repo", "", "", &http.Client{})
+	post := func() (io.ReadCloser, error) {
+		return p.UploadPackChunked(t.Context(), bytes.NewReader([]byte("0000")))
+	}
+	total := func() int32 { return hits[0].Load() + hits[1].Load() }
+
+	statuses[0].Store(http.StatusServiceUnavailable)
+	statuses[1].Store(http.StatusServiceUnavailable)
+	_, err := post()
+	var se *HTTPStatusError
+	require.ErrorAs(t, err, &se)
+	require.Equal(t, http.StatusServiceUnavailable, se.StatusCode)
+	require.Equal(t, int32(1), hits[0].Load())
+	require.Equal(t, int32(1), hits[1].Load())
+	require.ElementsMatch(t, nodes, p.replicaSet(), "both nodes stay")
+
+	statuses[1].Store(0)
+	for range 4 {
+		body, err := post()
+		require.NoError(t, err)
+		require.NoError(t, body.Close())
+	}
+
+	statuses[0].Store(http.StatusInternalServerError)
+	statuses[1].Store(http.StatusInternalServerError)
+	before := total()
+	_, err = post()
+	require.ErrorAs(t, err, &se)
+	require.Equal(t, http.StatusInternalServerError, se.StatusCode)
+	require.Equal(t, before+1, total(), "a 500 comes back without another try")
+	require.ElementsMatch(t, nodes, p.replicaSet())
+}

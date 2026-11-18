@@ -22,6 +22,7 @@ import (
 	"github.com/jmwoliver/xet-go/xorb"
 
 	"github.com/entireio/cli/internal/entireclient/httpclient"
+	"github.com/entireio/cli/internal/remotehelper/gitproto"
 	"github.com/entireio/cli/internal/remotehelper/transport"
 )
 
@@ -103,7 +104,8 @@ type StatusError struct {
 	Method     string
 	Suffix     string
 	StatusCode int
-	// Message is the start of the response body.
+	// Message is the start of the response body, sanitized for a
+	// terminal: git shows it.
 	Message string
 }
 
@@ -208,7 +210,8 @@ func (c *Client) answer(resp *http.Response, method, suffix string, maxResponse 
 func statusError(resp *http.Response, method, suffix string) error {
 	msg, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorMessage)) //nolint:errcheck // the message is best effort
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))    //nolint:errcheck // drain for connection reuse
-	se := &StatusError{Method: method, Suffix: suffix, StatusCode: resp.StatusCode, Message: string(bytes.TrimSpace(msg))}
+	msg = gitproto.AppendSanitized(nil, bytes.TrimSpace(msg))
+	se := &StatusError{Method: method, Suffix: suffix, StatusCode: resp.StatusCode, Message: string(msg)}
 	if retryableStatus(resp.StatusCode) {
 		return &retryableError{StatusError: se, wait: retryAfter(resp.Header.Get("Retry-After"))}
 	}

@@ -239,6 +239,21 @@ func TestTrimKeepsTheXorbsOfTheFetch(t *testing.T) {
 	}
 }
 
+// After ReleaseComplete, Trim may remove the xorbs that the fetch used.
+func TestReleaseCompleteLetsTrimRemove(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s, clock := openStore(t, dir, withMaxBytes(1))
+	x := testXorb(t, 73)
+	putComplete(t, s, x)
+	clock.advance(recentComplete)
+	s.Trim()
+	require.FileExists(t, s.completePath(dir, x.Hash), "pinned")
+	s.ReleaseComplete([]xethash.Hash{x.Hash})
+	s.Trim()
+	require.NoFileExists(t, s.completePath(dir, x.Hash))
+}
+
 // Trim keeps a complete xorb used in the last 30 minutes, which a fetch in
 // another process can be reading, and removes it once it is older.
 func TestTrimKeepsRecentCompleteXorbs(t *testing.T) {
@@ -294,4 +309,22 @@ func TestPutCompleteAcceptsAXorbThatAnotherProcessStored(t *testing.T) {
 	})
 	require.ErrorIs(t, err, refused, "without the xorb in place, the failure stays")
 	require.False(t, s.HasComplete(y.Hash))
+}
+
+func TestCheckWritable(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s, _ := openStore(t, dir)
+	require.NoError(t, s.CheckWritable())
+	entries, err := os.ReadDir(filepath.Join(dir, filepath.FromSlash(s.base), completeDir))
+	require.NoError(t, err)
+	require.Empty(t, entries, "the check leaves no file")
+
+	if os.Getuid() == 0 {
+		t.Skip("root writes to a read-only directory")
+	}
+	ro := filepath.Join(dir, filepath.FromSlash(s.base), completeDir)
+	require.NoError(t, os.Chmod(ro, 0o500))
+	t.Cleanup(func() { require.NoError(t, os.Chmod(ro, 0o700)) })
+	require.Error(t, s.CheckWritable())
 }
