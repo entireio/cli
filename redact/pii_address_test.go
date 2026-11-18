@@ -83,7 +83,10 @@ func TestDetectPII_EuropeanAddresses(t *testing.T) {
 		{"12 rue du 14 Juillet\t1234 rue Victor Hugo", "[REDACTED_ADDRESS]\t[REDACTED_ADDRESS]"},
 		{"12 rue du 14 Juillet 1234 bis rue Victor Hugo", "[REDACTED_ADDRESS] [REDACTED_ADDRESS]"},
 		{"1 rue du 14 Juillet 1234 rue du 8 Mai 1945 rue de la Paix", "[REDACTED_ADDRESS] [REDACTED_ADDRESS] [REDACTED_ADDRESS]"},
+		{"12 rue du 14 Juillet 1234 rue Victor Hugo Ref123", "[REDACTED_ADDRESS] [REDACTED_ADDRESS] Ref123"},
+		// A year stays with its date unless a whole street line follows.
 		{"12 rue du 8 Mai 1945 rue piétonne", "[REDACTED_ADDRESS] rue piétonne"},
+		{"12 rue du 8 Mai 1945 rue Ref123", "[REDACTED_ADDRESS] rue Ref123"},
 		// A word in capitals after the name is not a roman numeral, so the
 		// street line still ends at the name.
 		{"12 rue de la Paix ID: 7", "[REDACTED_ADDRESS] ID: 7"},

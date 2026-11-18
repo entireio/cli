@@ -297,14 +297,15 @@ func europeanAddressMatches(re *regexp.Regexp, s string) [][]int {
 // pastWord returns the index of the first rune at or after i that is not
 // part of a word.
 func pastWord(s string, i int) int {
-	for i < len(s) {
-		r, n := utf8.DecodeRuneInString(s[i:])
+	end := i
+	for end < len(s) {
+		r, n := utf8.DecodeRuneInString(s[end:])
 		if !isAddressWordRune(r) {
 			break
 		}
-		i += n
+		end += n
 	}
-	return i
+	return end
 }
 
 // streetLineOf returns the street line of m, a match of re in s, or nil.
@@ -313,31 +314,65 @@ func pastWord(s string, i int) int {
 // end it, so a reference after it on the same line becomes its last word
 // (12 rue de la Paix Ref123): RE2 commits to that longer match, which
 // endsStreetLine rejects, and the street line before it would otherwise be
-// left visible. A French line's last word is also dropped when it starts
-// the next French street line: the year of a date there is that line's
-// house number (12 rue du 14 Juillet 1234 rue Victor Hugo). Each retry ends
-// before the last, so the loop stops.
+// left visible. A French line also drops a last word that starts the next
+// French street line (endsFrenchStreetLine).
 func streetLineOf(re *regexp.Regexp, s string, m []int) []int {
+	ends := endsAnyStreetLine
+	if re == frenchAddressRegex {
+		ends = endsFrenchStreetLine
+	}
+	if end := streetLineEnd(re, s, m, ends); end >= 0 {
+		return []int{m[2], end}
+	}
+	return nil
+}
+
+// streetLineEnd returns where the street line of m ends: at m's end if ends
+// accepts it, or else at the first end it accepts as m's last word is
+// dropped and re matches again from the same start. It returns -1 when no
+// such end is left. Each retry ends before the last, so the loop stops.
+func streetLineEnd(re *regexp.Regexp, s string, m []int, ends func(s string, start, end int) bool) int {
 	start, end := m[2], m[3]
-	for !endsStreetLine(s, end) || (re == frenchAddressRegex && lastWordStartsFrenchLine(s, start, end)) {
+	for !ends(s, start, end) {
 		cut := strings.LastIndexAny(s[start:end], " \t")
 		if cut < 0 {
-			return nil
+			return -1
 		}
 		retry := re.FindStringSubmatchIndex(s[m[0] : start+cut])
 		if retry == nil || m[0]+retry[2] != start {
-			return nil
+			return -1
 		}
 		end = m[0] + retry[3]
 	}
-	return []int{start, end}
+	return end
 }
 
-// lastWordStartsFrenchLine reports whether the last word of s[start:end]
-// starts a French street line.
-func lastWordStartsFrenchLine(s string, start, end int) bool {
+// endsAnyStreetLine is endsStreetLine in the form streetLineEnd takes.
+func endsAnyStreetLine(s string, _, end int) bool {
+	return endsStreetLine(s, end)
+}
+
+// endsFrenchStreetLine is endsStreetLine for a French street line
+// s[start:end], which also must not end in a word that starts the next
+// one: a date's year there is that line's house number (12 rue du 14
+// Juillet 1234 rue Victor Hugo). The next line counts only as a whole
+// street line, so a year stays with its date before 1945 rue Ref123.
+func endsFrenchStreetLine(s string, start, end int) bool {
+	if !endsStreetLine(s, end) {
+		return false
+	}
 	cut := strings.LastIndexAny(s[start:end], " \t")
-	return cut >= 0 && frenchStreetLineStart.MatchString(s[start+cut+1:])
+	if cut < 0 {
+		return true
+	}
+	w := start + cut + 1
+	next := frenchStreetLineStart.FindStringIndex(s[w:])
+	if next == nil {
+		return true
+	}
+	// s[w-1] is the space or tab before the word, the next line's left edge.
+	m := []int{w - 1, w + next[1], w, w + next[1]}
+	return streetLineEnd(frenchAddressRegex, s, m, endsAnyStreetLine) < 0
 }
 
 // endsStreetLine reports whether a European street line ending at s[end] ends
