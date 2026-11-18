@@ -176,14 +176,19 @@ func (s *ManualCommitStrategy) amendedCheckpoint(ctx context.Context, repo *git.
 // old HEAD may be missing or another commit. A listed old HEAD with the
 // commit's parents is what an amend replaced, and is judged as the files
 // backend's is (ok false), whatever the message says (GIT_REFLOG_ACTION can
-// set it); every root commit has a root's parents, so that does not hold for
-// one. Otherwise git's message tells a new commit from an amend, and an amend
-// whose old HEAD is missing, or is not what it replaced (an entry between
-// them expired), keeps its owner, as one with no reflog entry does: what it
-// replaced, and whether that linked the checkpoint, is unknown.
+// set it). That excepts a root commit made with no HEAD to replace ("commit
+// (initial)"), though every root has a root's parents. Otherwise git's message
+// tells a new commit from an amend, and an amend whose old HEAD is missing,
+// or is not what it replaced (an entry between them expired), keeps its
+// owner, as one with no reflog entry does: what it replaced, and whether that
+// linked the checkpoint, is unknown.
 func inferredAmendLink(repo *git.Repository, e reflogEntry, commit *object.Commit, checkpointID id.CheckpointID) (link amendedLink, ok bool) {
 	switch {
-	case !e.oldInferred, len(commit.ParentHashes) > 0 && sameParents(repo, e.oldHash, commit):
+	case !e.oldInferred:
+		return amendedLink{}, false
+	case strings.HasPrefix(e.msg, "commit (initial)"):
+		return amendedLink{}, true
+	case sameParents(repo, e.oldHash, commit):
 		return amendedLink{}, false
 	case newCommitReflogMessage(e.msg):
 		return amendedLink{}, true

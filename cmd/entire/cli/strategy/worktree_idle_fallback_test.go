@@ -453,43 +453,46 @@ func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
 
 // TestAmendedCheckpoint_RootCommitReadThroughGit covers a root commit whose
 // reflog git lists after another root's entry, as for reftable. Every root
-// commit has a root's parents, so they do not show what an amend replaced.
+// commit has a root's parents, so only git's message tells a new root from an
+// amend of the one listed.
 func TestAmendedCheckpoint_RootCommitReadThroughGit(t *testing.T) {
+	cp := id.MustCheckpointID("a1b2c3d4e5f6")
+	trailer := "\n\n" + trailers.CheckpointTrailerKey + ": " + cp.String()
+	amend := func(msg string) func(t *testing.T, dir, first string) {
+		return func(t *testing.T, dir, _ string) {
+			t.Helper()
+			testutil.WriteFile(t, dir, "more.txt", "more work")
+			testutil.RunGit(t, dir, "add", "more.txt")
+			testutil.RunGit(t, dir, "commit", "-q", "--amend", "-m", msg)
+		}
+	}
+	throughGit := func(t *testing.T, dir, _ string) { t.Helper(); readReflogThroughGit(t, dir) }
+	relabeled := func(t *testing.T, dir, _ string) { t.Helper(); relabelAmendAsCommit(t, dir) }
 	for _, tt := range []struct {
-		name string
-		// orphan commits the second root on an orphan branch, with the first
-		// one's entry listed before its own; otherwise it amends the first.
-		orphan bool
-		amend  bool
+		name  string
+		first string
+		// second makes the root commit post-commit judges, and editReflog
+		// leaves HEAD's reflog read through git with first's entry before it.
+		second, editReflog func(t *testing.T, dir, first string)
+		// link: an amend link to the checkpoint; ownedByBase: only for an
+		// owner based on the first root, which does not link it.
+		link, ownedByBase bool
 	}{
-		{name: "new root on an orphan branch reusing a root's message", orphan: true, amend: false},
-		{name: "amend of a root", amend: true},
+		{name: "new root on an orphan branch reusing a root's message", first: "root work" + trailer, second: orphanRootReusing, editReflog: listRootBefore},
+		{name: "amend of a root", first: "root work" + trailer, second: amend("root work, amended" + trailer), editReflog: throughGit, link: true},
+		{name: "amend of a root whose reflog message GIT_REFLOG_ACTION set", first: "root work" + trailer, second: amend("root work, amended" + trailer), editReflog: relabeled, link: true},
+		{name: "amend of a root taking another commit's trailer", first: "root work", second: amend("root work" + trailer), editReflog: throughGit, link: true, ownedByBase: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
 			dir := t.TempDir()
 			testutil.InitRepo(t, dir)
 			t.Chdir(dir)
-			cp := id.MustCheckpointID("a1b2c3d4e5f6")
-			testutil.RunGit(t, dir, "commit", "-q", "--allow-empty", "-m", "root work\n\n"+trailers.CheckpointTrailerKey+": "+cp.String())
+			testutil.RunGit(t, dir, "commit", "-q", "--allow-empty", "-m", tt.first)
 			first := strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", "HEAD"))
-			if tt.orphan {
-				testutil.RunGit(t, dir, "checkout", "-q", "--orphan", "other")
-				testutil.WriteFile(t, dir, "other.txt", "other work")
-				testutil.RunGit(t, dir, "add", "other.txt")
-				testutil.RunGit(t, dir, "commit", "-q", "-C", first)
-				editReflogReadThroughGit(t, dir, func(lines []string) []string {
-					listed := fmt.Sprintf("%s %s Test <test@test.com> %d +0000\tcommit (initial): root work", plumbing.ZeroHash, first, time.Now().Unix())
-					return append([]string{listed}, lines...)
-				})
-			} else {
-				testutil.WriteFile(t, dir, "more.txt", "more work")
-				testutil.RunGit(t, dir, "add", "more.txt")
-				testutil.RunGit(t, dir, "commit", "-q", "--amend", "--no-edit")
-				readReflogThroughGit(t, dir)
-			}
-			entries := headReflog(ctx)
-			require.Equal(t, first, entries[0].oldHash.String(), "sanity: git lists the first root before the commit")
+			tt.second(t, dir, first)
+			tt.editReflog(t, dir, first)
+			require.Equal(t, first, headReflog(ctx)[0].oldHash.String(), "sanity: git lists the first root before the commit")
 
 			repo, err := OpenRepository(ctx)
 			require.NoError(t, err)
@@ -500,10 +503,36 @@ func TestAmendedCheckpoint_RootCommitReadThroughGit(t *testing.T) {
 			require.NoError(t, err)
 			require.Empty(t, commit.ParentHashes, "sanity: the commit is a root")
 			require.NotEqual(t, first, commit.Hash.String(), "sanity: the commit is not the first root")
-			link := NewManualCommitStrategy().amendedCheckpoint(ctx, repo, commit, cp, true)
-			assert.Equal(t, tt.amend, link.checkpointID == cp, "amend link: %+v", link)
+			var want amendedLink
+			if tt.link {
+				want.checkpointID = cp
+			}
+			if tt.ownedByBase {
+				want.ownerBase = first
+			}
+			assert.Equal(t, want, NewManualCommitStrategy().amendedCheckpoint(ctx, repo, commit, cp, true))
 		})
 	}
+}
+
+// orphanRootReusing commits a root on an orphan branch with `-C first`.
+func orphanRootReusing(t *testing.T, dir, first string) {
+	t.Helper()
+	testutil.RunGit(t, dir, "checkout", "-q", "--orphan", "other")
+	testutil.WriteFile(t, dir, "other.txt", "other work")
+	testutil.RunGit(t, dir, "add", "other.txt")
+	testutil.RunGit(t, dir, "commit", "-q", "-C", first)
+}
+
+// listRootBefore has HEAD's reflog read through git, with an entry for the
+// root first listed before the branch's own, as HEAD's reftable reflog lists
+// the branch HEAD was on before an orphan branch.
+func listRootBefore(t *testing.T, dir, first string) {
+	t.Helper()
+	editReflogReadThroughGit(t, dir, func(lines []string) []string {
+		listed := fmt.Sprintf("%s %s Test <test@test.com> %d +0000\tcommit (initial): root work", plumbing.ZeroHash, first, time.Now().Unix())
+		return append([]string{listed}, lines...)
+	})
 }
 
 // landLaterCommitInReflog records in HEAD's reflog a commit on top of HEAD, as
