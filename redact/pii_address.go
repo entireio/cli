@@ -164,13 +164,17 @@ var (
 
 	spanishNameAndNumber = euStreetName(`de|del|la|las|los|el|y`) + `,?` + euSpace + euHouseNumber
 
-	// frenchAddressRegex: 12 rue de la Paix, 8 bis boulevard Saint-Germain,
+	// frenchStreetLine: 12 rue de la Paix, 8 bis boulevard Saint-Germain,
 	// 12 B rue de la Paix. The street type may be capitalized (12 Rue de la
 	// Paix).
-	frenchAddressRegex = euStreetLine(
-		`\d{1,4}(?:` + euOptionalSpace + `(?:bis|ter)\b|` + euOptionalSpace + `[A-D]\b|[a-d]\b)?,?` + euSpace +
-			euAlternation(slices.Concat(frenchStreetTypes, capitalized(frenchStreetTypes))) + euSpace +
-			euStreetName(`de|du|des|la|le|les|aux|au|sur`))
+	frenchStreetLine = `\d{1,4}(?:` + euOptionalSpace + `(?:bis|ter)\b|` + euOptionalSpace + `[A-D]\b|[a-d]\b)?,?` + euSpace +
+		euAlternation(slices.Concat(frenchStreetTypes, capitalized(frenchStreetTypes))) + euSpace +
+		euStreetName(`de|du|des|la|le|les|aux|au|sur`)
+	frenchAddressRegex = euStreetLine(frenchStreetLine)
+	// frenchStreetLineStart matches a French street line at the start of a
+	// string, for streetLineOf to tell whether one starts where another
+	// ends.
+	frenchStreetLineStart = regexp.MustCompile(`^(?:` + frenchStreetLine + `)`)
 
 	// germanAddressRegex: Hauptstraße 12, Karl-Marx-Straße 5, Berliner Str. 5,
 	// Lindenallee 4a. The type is a suffix of the street's last word
@@ -263,14 +267,44 @@ func hasStreetKeyword(s string, k streetKeyword) bool {
 
 // europeanAddressMatches returns the street lines re, a European address
 // pattern, finds in s, without the left edge it matches before each one.
+// It searches on from the end of each street line rather than of re's
+// match, since streetLineOf may give back the end of a match, and the next
+// street line can start there (12 rue du 14 Juillet 1234 rue Victor Hugo).
+// Every search starts where no street line can (after a street line, or
+// after the word a rejected match ends in), so the ^ in euLeftEdge only
+// ever matches the real start of s.
 func europeanAddressMatches(re *regexp.Regexp, s string) [][]int {
 	var locs [][]int
-	for _, m := range re.FindAllStringSubmatchIndex(s, -1) {
-		if loc := streetLineOf(re, s, m); loc != nil {
-			locs = append(locs, loc)
+	for from := 0; from < len(s); {
+		m := re.FindStringSubmatchIndex(s[from:])
+		if m == nil {
+			break
 		}
+		for i := range m {
+			m[i] += from
+		}
+		loc := streetLineOf(re, s, m)
+		if loc == nil {
+			from = pastWord(s, m[1])
+			continue
+		}
+		locs = append(locs, loc)
+		from = loc[1]
 	}
 	return locs
+}
+
+// pastWord returns the index of the first rune at or after i that is not
+// part of a word.
+func pastWord(s string, i int) int {
+	for i < len(s) {
+		r, n := utf8.DecodeRuneInString(s[i:])
+		if !isAddressWordRune(r) {
+			break
+		}
+		i += n
+	}
+	return i
 }
 
 // streetLineOf returns the street line of m, a match of re in s, or nil.
@@ -279,10 +313,13 @@ func europeanAddressMatches(re *regexp.Regexp, s string) [][]int {
 // end it, so a reference after it on the same line becomes its last word
 // (12 rue de la Paix Ref123): RE2 commits to that longer match, which
 // endsStreetLine rejects, and the street line before it would otherwise be
-// left visible. Each retry ends before the last, so the loop stops.
+// left visible. A French line's last word is also dropped when it starts
+// the next French street line: the year of a date there is that line's
+// house number (12 rue du 14 Juillet 1234 rue Victor Hugo). Each retry ends
+// before the last, so the loop stops.
 func streetLineOf(re *regexp.Regexp, s string, m []int) []int {
 	start, end := m[2], m[3]
-	for !endsStreetLine(s, end) {
+	for !endsStreetLine(s, end) || (re == frenchAddressRegex && lastWordStartsFrenchLine(s, start, end)) {
 		cut := strings.LastIndexAny(s[start:end], " \t")
 		if cut < 0 {
 			return nil
@@ -294,6 +331,13 @@ func streetLineOf(re *regexp.Regexp, s string, m []int) []int {
 		end = m[0] + retry[3]
 	}
 	return []int{start, end}
+}
+
+// lastWordStartsFrenchLine reports whether the last word of s[start:end]
+// starts a French street line.
+func lastWordStartsFrenchLine(s string, start, end int) bool {
+	cut := strings.LastIndexAny(s[start:end], " \t")
+	return cut >= 0 && frenchStreetLineStart.MatchString(s[start+cut+1:])
 }
 
 // endsStreetLine reports whether a European street line ending at s[end] ends
