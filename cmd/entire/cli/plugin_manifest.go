@@ -107,6 +107,10 @@ type PluginManifest struct {
 	// Requires is the dependency list from the plugin's entire-plugin.yml
 	// at the installed tag.
 	Requires []PluginRequirement `yaml:"requires,omitempty"`
+	// Description is the one-line summary from the plugin's entire-plugin.yml
+	// at the installed tag, kept so `entire agent-help` can say what an
+	// installed plugin is for without running it or reading the index.
+	Description string `yaml:"description,omitempty"`
 }
 
 // PluginRequirement declares a dependency on another plugin. Shared between

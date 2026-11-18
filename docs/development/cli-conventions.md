@@ -928,6 +928,14 @@ current flags; `--json` emits structured output. It is the single source of
 truth the first-turn context injection and the `--agent-help-skill` skill point
 agents at, instead of enumerating a surface that goes stale.
 
+The bare listing also names the installed plugins (the managed plugin dir, minus
+names a built-in shadows), each with the one-line description recorded in its
+install manifest, and points at `entire agent-help <plugin>`, where the plugin
+documents itself; `--json` carries them as `plugins`. It reads only the managed
+tree: it never runs a plugin, reads the index, or touches the network, so a
+local install (no manifest) is listed by name only. See
+[external commands](../architecture/external-commands.md).
+
 When trails are enabled, the first-turn injection introduces a trail as
 project-level intent across repositories and branches. It asks agents to inspect
 the current branch's trail, reuse intent where appropriate, and keep the trail's

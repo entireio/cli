@@ -137,7 +137,7 @@ func TestInstallPluginFromRepo_EndToEnd(t *testing.T) { //nolint:paralleltest //
 
 	// New tag + new asset → upgrade replaces the binary.
 	srv2 := pluginReleaseServer(t, "0.1.0", "0.2.0", "0.3.0")
-	updateRepoMetadata(t, repoURL, fmt.Sprintf("name: demo\ndownload_url: \"%s/dl/{tag}/{asset}\"\n", srv2.URL))
+	updateRepoMetadata(t, repoURL, fmt.Sprintf("name: demo\ndescription: Plays demo sessions\ndownload_url: \"%s/dl/{tag}/{asset}\"\n", srv2.URL))
 	gitTag(t, repoURL, "v0.3.0")
 	o, err = UpgradeInstalledPlugin(ctx, "demo")
 	if err != nil {
@@ -148,6 +148,14 @@ func TestInstallPluginFromRepo_EndToEnd(t *testing.T) { //nolint:paralleltest //
 	}
 	if got := installedPayload(t); got != "payload-0.3.0" {
 		t.Errorf("post-upgrade payload = %q, want payload-0.3.0", got)
+	}
+	// The manifest keeps the installed tag's description (agent-help lists it);
+	// the first install's metadata had none.
+	if res.Manifest.Description != "" {
+		t.Errorf("first install description = %q, want none", res.Manifest.Description)
+	}
+	if m, err := LoadPluginManifest("demo"); err != nil || m == nil || m.Description != "Plays demo sessions" {
+		t.Errorf("post-upgrade manifest = %+v, %v; want description %q", m, err, "Plays demo sessions")
 	}
 }
 

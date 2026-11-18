@@ -374,7 +374,7 @@ func TestRunAgentHelp_DrillRejectsUnadvertisedCommands(t *testing.T) {
 func TestRenderAgentHelpTop_DisabledExampleIsNonTrail(t *testing.T) {
 	t.Parallel()
 
-	out := renderAgentHelpTop(NewRootCmd(), agentHelpTestRepo, false)
+	out := renderAgentHelpTop(NewRootCmd(), agentHelpTestRepo, false, nil)
 	if !strings.Contains(out, "entire agent-help checkpoint") {
 		t.Errorf("disabled top should use checkpoint as the drill example:\n%s", out)
 	}
@@ -464,7 +464,7 @@ func TestRenderAgentHelpCommand_RendersExample(t *testing.T) {
 
 	root := &cobra.Command{Use: "entire"}
 	root.AddCommand(cmd)
-	jsonOut, err := renderAgentHelpJSON(root, cmd, agentHelpTestRepo, true)
+	jsonOut, err := renderAgentHelpJSON(root, cmd, agentHelpTestRepo, true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -483,7 +483,7 @@ func TestRenderAgentHelpTop_ListsCommandsRepoAndRule(t *testing.T) {
 	t.Parallel()
 
 	root := NewRootCmd()
-	out := renderAgentHelpTop(root, agentHelpTestRepo, true)
+	out := renderAgentHelpTop(root, agentHelpTestRepo, true, nil)
 
 	for _, want := range []string{
 		"trail",             // visible
@@ -724,7 +724,7 @@ func TestAgentHelpClassification_GroupAudienceMatchesUnanimousChildren(t *testin
 func TestRenderAgentHelpTop_ListsCuratedSubsetWithInlineAudience(t *testing.T) {
 	t.Parallel()
 
-	out := renderAgentHelpTop(NewRootCmd(), agentHelpTestRepo, true)
+	out := renderAgentHelpTop(NewRootCmd(), agentHelpTestRepo, true, nil)
 
 	// Listed commands appear with their audience.
 	for _, want := range []string{
@@ -794,7 +794,7 @@ func TestRenderAgentHelpJSON_CarriesAudienceWhereClassified(t *testing.T) {
 	t.Parallel()
 
 	root := NewRootCmd()
-	raw, err := renderAgentHelpJSON(root, root, agentHelpTestRepo, true)
+	raw, err := renderAgentHelpJSON(root, root, agentHelpTestRepo, true, nil)
 	if err != nil {
 		t.Fatalf("render top json: %v", err)
 	}
@@ -845,7 +845,7 @@ func drillJSON(t *testing.T, root *cobra.Command, name string) agentHelpJSON {
 	if child == nil {
 		t.Fatalf("%s command not found", name)
 	}
-	raw, err := renderAgentHelpJSON(root, child, agentHelpTestRepo, true)
+	raw, err := renderAgentHelpJSON(root, child, agentHelpTestRepo, true, nil)
 	if err != nil {
 		t.Fatalf("render %s drill json: %v", name, err)
 	}
@@ -991,7 +991,7 @@ func TestAgentHelpProjectTrailGuidance_OnlyInProjectTree(t *testing.T) {
 	if strings.Count(text, urlLine) != 1 {
 		t.Errorf("URL guidance should appear exactly once on `trail show`:\n%s", text)
 	}
-	js, err := renderAgentHelpJSON(project, show, "", true)
+	js, err := renderAgentHelpJSON(project, show, "", true, nil)
 	if err != nil {
 		t.Fatalf("renderAgentHelpJSON: %v", err)
 	}
@@ -1063,7 +1063,7 @@ func TestAgentHelpGuidance_InheritedByLeafCommands(t *testing.T) {
 	if text := renderAgentHelpCommand(leaf, "", true); !strings.Contains(text, trailFirstLine) {
 		t.Errorf("text agent-help for %q is missing trail's guidance:\n%s", agentHelpPath(leaf), text)
 	}
-	js, err := renderAgentHelpJSON(root, leaf, "", true)
+	js, err := renderAgentHelpJSON(root, leaf, "", true, nil)
 	if err != nil {
 		t.Fatalf("renderAgentHelpJSON: %v", err)
 	}
