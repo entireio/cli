@@ -23,16 +23,24 @@ const (
 	// euLetter is a letter or a combining mark, so a name written in
 	// decomposed form (e followed by U+0301 for é) is still one word.
 	euLetter = `[\p{L}\p{M}]`
-	// euNameWord is one title-case word, optionally hyphenated
-	// (Saint-Germain, Champs-Élysées) or elided onto an article (l'Église,
+	// euElision is an article or Sant elided onto the word after it (l'Église,
 	// dell'Indipendenza, Sant'Ambrogio).
-	euNameWord = `(?:(?:[dDlL]|[Dd]ell|[Aa]ll|[Ss]ant)['’])?\p{Lu}\p{M}*\p{Ll}` + euLetter + `*(?:-` + euLetter + `+)*`
+	euElision = `(?:[dDlL]|[Dd]ell|[Aa]ll|[Ss]ant)['’]`
+	// euNameWord is one title-case word, optionally elided onto an article
+	// and optionally hyphenated (Saint-Germain, Champs-Élysées). A part after
+	// a hyphen may be elided too (Jeanne-d'Arc, Château-d'Eau), so the
+	// apostrophe does not end the street line before the rest of the name.
+	euNameWord = `(?:` + euElision + `)?\p{Lu}\p{M}*\p{Ll}` + euLetter + `*(?:-(?:` + euElision + `)?` + euLetter + `+)*`
 	// euRomanNumeral may follow a name word (Vittorio Emanuele II). It cannot
 	// start a name on its own, so an acronym such as CLI after Via does not
 	// count. It must be a whole word, so the start of a word in capitals
 	// after a French name (12 rue de la Paix VERSAILLES) is not read as a
 	// numeral that endsStreetLine would then reject with the whole match.
 	euRomanNumeral = `[IVX]{1,5}\b`
+	// euRomanDay is a day of the month in roman numerals, I to XXXI. It is
+	// spelled out rather than bounded by length, since XXVIII (28) has six
+	// characters.
+	euRomanDay = `(?:XXXI?|X{1,2}|X{0,2}(?:I{1,3}|IV|VI{0,3}|IX))\b`
 	// euMonth is a month in Italian, Spanish or French, in either case. An
 	// accented French month also matches in decomposed form.
 	euMonth = `(?i:gennaio|febbraio|marzo|aprile|maggio|giugno|luglio|agosto|settembre|ottobre|novembre|dicembre` +
@@ -43,7 +51,7 @@ const (
 	// counts only before a month, so a number or acronym alone still does not
 	// start a name. The year must be a whole number, so it never takes the
 	// first digits of a postal code (rue du 8 Mai 75000 Paris).
-	euDateName = `(?:\d{1,2}|` + euRomanNumeral + `)` + euSpace + `(?:de` + euSpace + `)?` + euMonth + `(?:` + euSpace + `\d{4}\b)?`
+	euDateName = `(?:\d{1,2}|` + euRomanDay + `)` + euSpace + `(?:de` + euSpace + `)?` + euMonth + `(?:` + euSpace + `\d{4}\b)?`
 	// euSpace separates the parts of a street line: spaces or tabs, never a
 	// line break.
 	euSpace = `[ \t]+`
