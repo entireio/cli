@@ -630,7 +630,7 @@ func runAgentHelpListing(rootCmd *cobra.Command, args []string, repoLine string,
 	}
 	// Only the top level lists installed plugins: a command's drill-in is
 	// about that command.
-	var plugins []agentHelpPlugin
+	var plugins agentHelpPluginListing
 	if listPlugins && target == rootCmd {
 		plugins = agentHelpInstalledPlugins(rootCmd)
 	}
@@ -749,12 +749,16 @@ type agentHelpJSON struct {
 	Subcommands []agentHelpSubcommandJSON `json:"subcommands,omitempty"`
 	// Plugins lists the installed plugins, at the top level only. Each one's
 	// own agent-help (Help) says what it is for and which commands are safe.
-	Plugins []agentHelpPlugin `json:"plugins,omitempty"`
+	// At most agentHelpPluginsMax are listed: PluginsTotal counts them all and
+	// PluginsTruncated says some were left out.
+	Plugins          []agentHelpPlugin `json:"plugins,omitempty"`
+	PluginsTotal     int               `json:"plugins_total,omitempty"`
+	PluginsTruncated bool              `json:"plugins_truncated,omitempty"`
 }
 
 // renderAgentHelpJSON renders the structured form of a command node, with
 // plugins (the installed plugins, top level only).
-func renderAgentHelpJSON(rootCmd, target *cobra.Command, repoLine string, trailsEnabled bool, plugins []agentHelpPlugin) (string, error) {
+func renderAgentHelpJSON(rootCmd, target *cobra.Command, repoLine string, trailsEnabled bool, plugins agentHelpPluginListing) (string, error) {
 	doc := agentHelpJSON{
 		Command:  target.CommandPath(),
 		Short:    target.Short,
@@ -762,7 +766,11 @@ func renderAgentHelpJSON(rootCmd, target *cobra.Command, repoLine string, trails
 		Guidance: agentHelpGuidanceFor(target),
 		Example:  strings.TrimSpace(target.Example),
 		Repo:     repoLine,
-		Plugins:  plugins,
+	}
+	if plugins.Total > 0 {
+		doc.Plugins = plugins.Plugins
+		doc.PluginsTotal = plugins.Total
+		doc.PluginsTruncated = plugins.Total > len(plugins.Plugins)
 	}
 	if target != rootCmd {
 		collect := func(fs *flag.FlagSet) {
@@ -908,7 +916,7 @@ func renderAgentHelpCommand(cmd *cobra.Command, repoLine string, trailsEnabled b
 // past a certain length it stops being read at all. Everything omitted stays
 // resolvable through `agent-help <command>` and is named in the footer, so this
 // trades default visibility, never availability.
-func renderAgentHelpTop(rootCmd *cobra.Command, repoLine string, trailsEnabled bool, plugins []agentHelpPlugin) string {
+func renderAgentHelpTop(rootCmd *cobra.Command, repoLine string, trailsEnabled bool, plugins agentHelpPluginListing) string {
 	var b strings.Builder
 	b.WriteString(agentHelpOverview)
 	if trailCmd, _, err := rootCmd.Find([]string{"trail"}); err == nil && usesProjectTrails(trailCmd) {

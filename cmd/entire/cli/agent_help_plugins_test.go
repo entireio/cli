@@ -2,7 +2,10 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
+	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -94,6 +97,9 @@ func TestAgentHelpTopListsInstalledPlugins(t *testing.T) { //nolint:paralleltest
 	if !slices.Equal(doc.Plugins, want) {
 		t.Errorf("json plugins = %+v, want %+v", doc.Plugins, want)
 	}
+	if doc.PluginsTotal != len(want) || doc.PluginsTruncated {
+		t.Errorf("json plugins_total = %d, truncated = %v; want %d, false", doc.PluginsTotal, doc.PluginsTruncated, len(want))
+	}
 
 	// The MCP agent_help tool can't hand off to a plugin, so it lists none.
 	mcp, err := runAgentHelp(NewRootCmd(), nil, agentHelpTestRepo, true, true)
@@ -153,6 +159,14 @@ func TestAgentHelpPluginDescription(t *testing.T) {
 		{"bidi override dropped", "safe \u202edesrever", ""},
 		{"zero-width dropped", "zero\u200bwidth", ""},
 		{"line separator dropped", "one\u2028two", ""},
+		{"variation selector dropped", "star\ufe0f", ""},
+		{"supplementary variation selector dropped", "a\U000E0100b", ""},
+		{"hangul filler dropped", "blank\u3164here", ""},
+		{"private use dropped", "a\ue000b", ""},
+		{"unassigned dropped", "a\u0378b", ""},
+		{"combining mark dropped", "cafe\u0301", ""},
+		{"no-break space dropped", "a\u00a0b", ""},
+		{"letters, symbols and punctuation kept", "Café ✓ — v2.0 (beta): 100%", "Café ✓ — v2.0 (beta): 100%"},
 		{"long cut to one line", long, strings.Repeat("a", agentHelpPluginDescriptionMax-1) + "…"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -161,5 +175,130 @@ func TestAgentHelpPluginDescription(t *testing.T) {
 				t.Errorf("agentHelpPluginDescription(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+// writeBinEntry writes a managed bin entry for a test: content with mode, or,
+// when content is empty, an empty file.
+func writeBinEntry(t *testing.T, binDir, name, content string, mode os.FileMode) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(binDir, pluginBinaryPrefix+name), []byte(content), mode); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Only plugins the dispatcher would run, under a name that is safe to paste
+// into a shell, are listed: the listing hands each name to agents inside a
+// command (`entire agent-help <name>`). A name with shell metacharacters,
+// spaces or format characters, an overlong name, a dangling symlink, a
+// directory, an empty file and a file without an executable bit are all left
+// out.
+func TestAgentHelpListsOnlySafeRunnablePlugins(t *testing.T) { //nolint:paralleltest // mutates ENTIRE_PLUGIN_DIR via t.Setenv
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("executable bits and symlinks are Unix-only here")
+	}
+	dir := withPluginDir(t)
+	binDir := filepath.Join(dir, pluginManagedBinSubdir)
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const script = "#!/bin/sh\nexit 0\n"
+	writeBinEntry(t, binDir, "ok", script, 0o755)
+	for _, name := range []string{
+		"semi;touch PWNED",
+		"has space",
+		"dollar$x",
+		"back`tick`",
+		"pipe|cat",
+		"zero\u200bwidth",
+		"-dash",
+		strings.Repeat("n", agentHelpPluginNameMax+1),
+	} {
+		writeBinEntry(t, binDir, name, script, 0o755)
+	}
+	writeBinEntry(t, binDir, "noexec", script, 0o644)
+	writeBinEntry(t, binDir, "empty", "", 0o755)
+	if err := os.Mkdir(filepath.Join(binDir, pluginBinaryPrefix+"adir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(t.TempDir(), "gone"), filepath.Join(binDir, pluginBinaryPrefix+"dangling")); err != nil {
+		t.Fatal(err)
+	}
+
+	listing := agentHelpInstalledPlugins(NewRootCmd())
+	var names []string
+	for _, p := range listing.Plugins {
+		names = append(names, p.Name)
+	}
+	if !slices.Equal(names, []string{"ok"}) || listing.Total != 1 {
+		t.Errorf("listed %q (total %d), want only [ok]", names, listing.Total)
+	}
+}
+
+// installedAt is an InstalledPlugin list for agentHelpSelectPlugins, in the
+// sorted order ListInstalledPlugins returns.
+func installedAt(names ...string) []*InstalledPlugin {
+	out := make([]*InstalledPlugin, 0, len(names))
+	for i, n := range names {
+		out = append(out, &InstalledPlugin{Name: n, Path: fmt.Sprintf("/bin/%d/%s", i, n)})
+	}
+	return out
+}
+
+// On Windows entire-foo.exe and entire-foo.cmd both become "foo": it is listed
+// once, from the first entry that runs, and counted once.
+func TestAgentHelpSelectPluginsListsEachNameOnce(t *testing.T) {
+	t.Parallel()
+	installed := installedAt("foo", "foo", "zed")
+	runs := func(path string) bool { return path != installed[0].Path }
+	listing := agentHelpSelectPlugins(NewRootCmd(), installed, runs, func(string) string { return "" })
+	if len(listing.Plugins) != 2 || listing.Total != 2 || listing.Plugins[0].Name != "foo" || listing.Plugins[1].Name != "zed" {
+		t.Errorf("listing = %+v, want foo and zed once each", listing)
+	}
+}
+
+// The listing names at most agentHelpPluginsMax plugins and counts the rest,
+// in text ("…and N more") and JSON (plugins_total, plugins_truncated).
+func TestAgentHelpPluginListingIsCapped(t *testing.T) {
+	t.Parallel()
+	var names []string
+	for i := range agentHelpPluginsMax + 3 {
+		names = append(names, fmt.Sprintf("p%03d", i))
+	}
+	listing := agentHelpSelectPlugins(NewRootCmd(), installedAt(names...), func(string) bool { return true }, func(string) string { return "" })
+	if len(listing.Plugins) != agentHelpPluginsMax || listing.Total != agentHelpPluginsMax+3 {
+		t.Fatalf("listed %d of %d, want %d of %d", len(listing.Plugins), listing.Total, agentHelpPluginsMax, agentHelpPluginsMax+3)
+	}
+	if text := renderAgentHelpPlugins(listing); !strings.Contains(text, "\n  …and 3 more\n") {
+		t.Errorf("text has no overflow line:\n%s", text)
+	}
+	root := NewRootCmd()
+	raw, err := renderAgentHelpJSON(root, root, agentHelpTestRepo, true, listing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc agentHelpJSON
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Plugins) != agentHelpPluginsMax || doc.PluginsTotal != agentHelpPluginsMax+3 || !doc.PluginsTruncated {
+		t.Errorf("json: %d plugins, total %d, truncated %v", len(doc.Plugins), doc.PluginsTotal, doc.PluginsTruncated)
+	}
+}
+
+// One long name doesn't push every description right: the name column is
+// capped at agentHelpPluginColumnMax.
+func TestAgentHelpPluginColumnIsCapped(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat("l", agentHelpPluginNameMax)
+	text := renderAgentHelpPlugins(agentHelpPluginListing{Total: 2, Plugins: []agentHelpPlugin{
+		{Name: "a", Description: "short name"},
+		{Name: long, Description: "long name"},
+	}})
+	if want := "\n  a" + strings.Repeat(" ", agentHelpPluginColumnMax-1) + "  short name\n"; !strings.Contains(text, want) {
+		t.Errorf("short name not padded to the capped column %d:\n%s", agentHelpPluginColumnMax, text)
+	}
+	if !strings.Contains(text, "\n  "+long+"  long name\n") {
+		t.Errorf("long name line:\n%s", text)
 	}
 }
