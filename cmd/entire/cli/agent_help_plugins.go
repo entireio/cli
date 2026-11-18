@@ -104,14 +104,18 @@ func agentHelpPluginName(name string) bool {
 	return len(name) <= agentHelpPluginNameMax && agentHelpPluginNameRE.MatchString(name) && validatePluginName(name) == nil
 }
 
-// agentHelpPluginRunnable reports whether the managed bin entry at path is
-// something the dispatcher would run: following symlinks, a regular, non-empty
-// file, executable on Unix. A dangling symlink, a directory, a FIFO or a file
-// without an executable bit is left out of the listing; `entire plugin doctor`
-// reports those.
+// agentHelpPluginRunnable reports whether the managed bin entry at path is one
+// the listing may name. It starts from checkManagedPluginRunnable, the rule
+// `plugin doctor` and on-demand repair share (no dangling or unfollowable
+// symlink, directory or empty file), and adds what that rule leaves to the
+// exec, since the listing tells agents to run the entry before any exec has
+// tried it: a regular file (not, say, a FIFO), executable on Unix.
 func agentHelpPluginRunnable(path string) bool {
+	if _, err := checkManagedPluginRunnable(path); err != nil {
+		return false
+	}
 	info, err := os.Stat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
+	if err != nil || !info.Mode().IsRegular() {
 		return false
 	}
 	return runtime.GOOS == windowsGOOS || info.Mode().Perm()&0o111 != 0
