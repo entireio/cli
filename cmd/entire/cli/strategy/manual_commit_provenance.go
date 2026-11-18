@@ -140,8 +140,7 @@ func stampedByAnotherCommit(ctx context.Context, checkpointID id.CheckpointID, s
 // commit, once entries between them expire. An old HEAD with the commit's
 // parents is still what an amend replaced (an amend keeps them), and is judged
 // as above. Otherwise the message `git commit` wrote decides, and an amend
-// keeps its owner, though what it replaced is unknown, unless the commit
-// listed links the checkpoint itself (inferredAmendLink). With no reflog entry for
+// keeps its owner, though what it replaced is unknown (inferredAmendLink). With no reflog entry for
 // this commit to tell them apart (core.logAllRefUpdates=false), or only one
 // another command wrote, with no old HEAD, it is taken as an amend, so the
 // owner keeps condensing into its checkpoint as it did before the idle check.
@@ -157,7 +156,7 @@ func (s *ManualCommitStrategy) amendedCheckpoint(ctx context.Context, repo *git.
 			// another hook's `git reset HEAD`.
 			continue
 		}
-		if link, ok := s.inferredAmendLink(ctx, repo, e, commit, checkpointID); ok {
+		if link, ok := inferredAmendLink(repo, e, commit, checkpointID); ok {
 			return link
 		}
 		if e.oldHash.IsZero() || slices.ContainsFunc(commit.ParentHashes, e.oldHash.Equal) {
@@ -176,25 +175,21 @@ func (s *ManualCommitStrategy) amendedCheckpoint(ctx context.Context, repo *git.
 // old HEAD may be missing or another commit. A listed old HEAD with the
 // commit's parents is what an amend replaced, and is judged as the files
 // backend's is (ok false), whatever the message says (GIT_REFLOG_ACTION can
-// set it). Otherwise git's message tells a new commit from an amend, and an
-// amend keeps its owner when no entry is listed before it, or the one listed
-// is not what it replaced (an entry between them expired), unless that one, an
-// ancestor, links the checkpoint itself: then the amend copied its trailer, as
-// `commit --amend -C <it>` does, and gets no pass.
-func (s *ManualCommitStrategy) inferredAmendLink(ctx context.Context, repo *git.Repository, e reflogEntry, commit *object.Commit, checkpointID id.CheckpointID) (link amendedLink, ok bool) {
+// set it); every root commit has a root's parents, so that does not hold for
+// one. Otherwise git's message tells a new commit from an amend, and an amend
+// whose old HEAD is missing, or is not what it replaced (an entry between
+// them expired), keeps its owner, as one with no reflog entry does: what it
+// replaced, and whether that linked the checkpoint, is unknown.
+func inferredAmendLink(repo *git.Repository, e reflogEntry, commit *object.Commit, checkpointID id.CheckpointID) (link amendedLink, ok bool) {
 	switch {
-	case !e.oldInferred, sameParents(repo, e.oldHash, commit):
+	case !e.oldInferred, len(commit.ParentHashes) > 0 && sameParents(repo, e.oldHash, commit):
 		return amendedLink{}, false
 	case newCommitReflogMessage(e.msg):
 		return amendedLink{}, true
-	case e.oldHash.IsZero():
+	case e.oldHash.IsZero(), strings.HasPrefix(e.msg, "commit (amend)"):
 		return amendedLink{checkpointID: checkpointID}, true
-	case !strings.HasPrefix(e.msg, "commit (amend)"):
-		return amendedLink{}, false
-	case s.commitLinksCheckpoint(ctx, repo, e.oldHash, checkpointID):
-		return amendedLink{}, true
 	}
-	return amendedLink{checkpointID: checkpointID}, true
+	return amendedLink{}, false
 }
 
 // newCommitReflogMessage reports whether msg is the reflog message `git commit`

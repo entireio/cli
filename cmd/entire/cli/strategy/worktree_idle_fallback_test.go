@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/cmd/entire/cli/trailers"
 )
 
 // Uses t.Chdir — do NOT add t.Parallel().
@@ -314,7 +316,10 @@ func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
 		{name: "amend, reflog read through git", commitArgs: []string{"--amend"}, editReflog: readReflogThroughGit, condensed: true},
 		{name: "amend of another commit reusing the message, reflog read through git", commitArgs: []string{"--amend"}, amendOther: true, editReflog: readReflogThroughGit, condensed: false},
 		{name: "amend whose replaced commit's reflog entry expired", commitArgs: []string{"--amend"}, editReflog: expireReplacedReflogEntry, condensed: true},
-		{name: "amend of another commit reusing the message, whose reflog entry expired", commitArgs: []string{"--amend"}, amendOther: true, editReflog: expireReplacedReflogEntry, condensed: false},
+		// What the amend replaced is unknown, so it is taken as an amend, as
+		// with no reflog entry for it.
+		{name: "amend of another commit reusing the message, whose reflog entry expired", commitArgs: []string{"--amend"}, amendOther: true, editReflog: expireReplacedReflogEntry, condensed: true},
+		{name: "amend restoring the trailer of a session based on it, whose reflog entry expired", commitArgs: []string{"--amend"}, amendOther: true, restore: true, editReflog: expireReplacedReflogEntry, condensed: true},
 		{name: "amend whose reflog message GIT_REFLOG_ACTION set, reflog read through git", commitArgs: []string{"--amend"}, editReflog: relabelAmendAsCommit, condensed: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -442,6 +447,61 @@ func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
 			} else {
 				assert.NotContains(t, summary.FilesTouched, "more.txt", "a new commit does not fold the idle session's work into the old checkpoint")
 			}
+		})
+	}
+}
+
+// TestAmendedCheckpoint_RootCommitReadThroughGit covers a root commit whose
+// reflog git lists after another root's entry, as for reftable. Every root
+// commit has a root's parents, so they do not show what an amend replaced.
+func TestAmendedCheckpoint_RootCommitReadThroughGit(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		// orphan commits the second root on an orphan branch, with the first
+		// one's entry listed before its own; otherwise it amends the first.
+		orphan bool
+		amend  bool
+	}{
+		{name: "new root on an orphan branch reusing a root's message", orphan: true, amend: false},
+		{name: "amend of a root", amend: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			dir := t.TempDir()
+			testutil.InitRepo(t, dir)
+			t.Chdir(dir)
+			cp := id.MustCheckpointID("a1b2c3d4e5f6")
+			testutil.RunGit(t, dir, "commit", "-q", "--allow-empty", "-m", "root work\n\n"+trailers.CheckpointTrailerKey+": "+cp.String())
+			first := strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", "HEAD"))
+			if tt.orphan {
+				testutil.RunGit(t, dir, "checkout", "-q", "--orphan", "other")
+				testutil.WriteFile(t, dir, "other.txt", "other work")
+				testutil.RunGit(t, dir, "add", "other.txt")
+				testutil.RunGit(t, dir, "commit", "-q", "-C", first)
+				editReflogReadThroughGit(t, dir, func(lines []string) []string {
+					listed := fmt.Sprintf("%s %s Test <test@test.com> %d +0000\tcommit (initial): root work", plumbing.ZeroHash, first, time.Now().Unix())
+					return append([]string{listed}, lines...)
+				})
+			} else {
+				testutil.WriteFile(t, dir, "more.txt", "more work")
+				testutil.RunGit(t, dir, "add", "more.txt")
+				testutil.RunGit(t, dir, "commit", "-q", "--amend", "--no-edit")
+				readReflogThroughGit(t, dir)
+			}
+			entries := headReflog(ctx)
+			require.Equal(t, first, entries[0].oldHash.String(), "sanity: git lists the first root before the commit")
+
+			repo, err := OpenRepository(ctx)
+			require.NoError(t, err)
+			defer repo.Close()
+			head, err := repo.Head()
+			require.NoError(t, err)
+			commit, err := repo.CommitObject(head.Hash())
+			require.NoError(t, err)
+			require.Empty(t, commit.ParentHashes, "sanity: the commit is a root")
+			require.NotEqual(t, first, commit.Hash.String(), "sanity: the commit is not the first root")
+			link := NewManualCommitStrategy().amendedCheckpoint(ctx, repo, commit, cp, true)
+			assert.Equal(t, tt.amend, link.checkpointID == cp, "amend link: %+v", link)
 		})
 	}
 }
