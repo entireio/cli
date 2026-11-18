@@ -596,10 +596,10 @@ func agentHelpRepoContextWithRefresh(
 	return repoLine, cachedTrailsEnablementForScope(ctx, scope, time.Now()) == trailEnablementCacheEnabled
 }
 
-// runAgentHelp resolves args to a command node and renders it. It is pure (no
-// git / IO): the caller passes the already-resolved repoLine and trailsEnabled.
-// runAgentHelp answers the MCP agent_help tool: like the CLI command, without
-// the installed plugins, since the tool can't hand off to them.
+// runAgentHelp resolves args to a command node and renders it for the MCP
+// agent_help tool: like the CLI command, without the installed plugins, since
+// the tool can't hand off to them. It is pure (no git / IO): the caller passes
+// the already-resolved repoLine and trailsEnabled.
 func runAgentHelp(rootCmd *cobra.Command, args []string, repoLine string, asJSON, trailsEnabled bool) (string, error) {
 	return runAgentHelpListing(rootCmd, args, repoLine, asJSON, trailsEnabled, false)
 }
@@ -607,6 +607,8 @@ func runAgentHelp(rootCmd *cobra.Command, args []string, repoLine string, asJSON
 // runAgentHelpListing renders agent-help for args. listPlugins adds the
 // installed plugins to the top level; only the CLI command sets it, because
 // only it delegates `agent-help <plugin>` (see maybeDelegateAgentHelpToPlugin).
+// With listPlugins it reads the managed plugin directory (entries and install
+// manifests); otherwise it does no git or IO.
 func runAgentHelpListing(rootCmd *cobra.Command, args []string, repoLine string, asJSON, trailsEnabled, listPlugins bool) (string, error) {
 	target := rootCmd
 	for _, name := range args {
