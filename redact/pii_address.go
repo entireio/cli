@@ -23,24 +23,16 @@ const (
 	// euLetter is a letter or a combining mark, so a name written in
 	// decomposed form (e followed by U+0301 for é) is still one word.
 	euLetter = `[\p{L}\p{M}]`
-	// euElision is an article or Sant elided onto the word after it (l'Église,
+	// euNameWord is one title-case word, optionally hyphenated
+	// (Saint-Germain, Champs-Élysées) or elided onto an article (l'Église,
 	// dell'Indipendenza, Sant'Ambrogio).
-	euElision = `(?:[dDlL]|[Dd]ell|[Aa]ll|[Ss]ant)['’]`
-	// euNameWord is one title-case word, optionally elided onto an article
-	// and optionally hyphenated (Saint-Germain, Champs-Élysées). A part after
-	// a hyphen may be elided too (Jeanne-d'Arc, Château-d'Eau), so the
-	// apostrophe does not end the street line before the rest of the name.
-	euNameWord = `(?:` + euElision + `)?\p{Lu}\p{M}*\p{Ll}` + euLetter + `*(?:-(?:` + euElision + `)?` + euLetter + `+)*`
+	euNameWord = `(?:(?:[dDlL]|[Dd]ell|[Aa]ll|[Ss]ant)['’])?\p{Lu}\p{M}*\p{Ll}` + euLetter + `*(?:-` + euLetter + `+)*`
 	// euRomanNumeral may follow a name word (Vittorio Emanuele II). It cannot
 	// start a name on its own, so an acronym such as CLI after Via does not
 	// count. It must be a whole word, so the start of a word in capitals
 	// after a French name (12 rue de la Paix VERSAILLES) is not read as a
 	// numeral that endsStreetLine would then reject with the whole match.
 	euRomanNumeral = `[IVX]{1,5}\b`
-	// euRomanDay is a day of the month in roman numerals, I to XXXI. It is
-	// spelled out rather than bounded by length, since XXVIII (28) has six
-	// characters.
-	euRomanDay = `(?:XXXI?|X{1,2}|X{0,2}(?:I{1,3}|IV|VI{0,3}|IX))\b`
 	// euMonth is a month in Italian, Spanish or French, in either case. An
 	// accented French month also matches in decomposed form.
 	euMonth = `(?i:gennaio|febbraio|marzo|aprile|maggio|giugno|luglio|agosto|settembre|ottobre|novembre|dicembre` +
@@ -51,14 +43,10 @@ const (
 	// counts only before a month, so a number or acronym alone still does not
 	// start a name. The year must be a whole number, so it never takes the
 	// first digits of a postal code (rue du 8 Mai 75000 Paris).
-	euDateName = `(?:\d{1,2}|` + euRomanDay + `)` + euSpace + `(?:de` + euSpace + `)?` + euMonth + `(?:` + euSpace + `\d{4}\b)?`
+	euDateName = `(?:\d{1,2}|` + euRomanNumeral + `)` + euSpace + `(?:de` + euSpace + `)?` + euMonth + `(?:` + euSpace + `\d{4}\b)?`
 	// euSpace separates the parts of a street line: spaces or tabs, never a
 	// line break.
 	euSpace = `[ \t]+`
-	// euOptionalSpace is where a street line may have a space or not
-	// (n. 12 or n.12, 3/A or 3 / A, C/Mayor or C/ Mayor). Like euSpace it
-	// takes a run, so a doubled space does not leave the line visible.
-	euOptionalSpace = `[ \t]*`
 	// euHouseNumber is the number that ends an Italian or Spanish street
 	// line, optionally after n., n.º, nº or n°, with an optional letter or
 	// sub-number (3/A, 12b, 7/2, 12/14A, 12/bis). A sub-number is digits with
@@ -69,7 +57,7 @@ const (
 	// four-digit house number (Via XX Settembre 1234, 20121 Milano), the
 	// regex reads 1234 as the house number instead of returning a match that
 	// ends inside the postal code.
-	euHouseNumber = `(?:n(?:\.[°º]?|[°º])` + euOptionalSpace + `)?\d{1,4}(?:` + euOptionalSpace + `/` + euOptionalSpace + `(?:bis|ter|[0-9]{1,3}[A-Za-z]?|[A-Za-z])|[A-Za-z])?\b`
+	euHouseNumber = `(?:n(?:\.[°º]?|[°º])[ \t]?)?\d{1,4}(?:[ \t]?/[ \t]?(?:bis|ter|[0-9]{1,3}[A-Za-z]?|[A-Za-z])|[A-Za-z])?\b`
 	// euGermanAdjective may come before a German street's name: Alte
 	// Schönhauser Straße, Große Hamburger Straße, Alter Postweg.
 	euGermanAdjective = `(?:Alt|Neu|Gro(?:ß|ss)|Klein|Ober|Unter|Mittler|Vorder|Hinter|Hoh|Lang|Breit)e[nrs]?`
@@ -160,21 +148,17 @@ var (
 	// spanishSlashAddressRegex: C/ Mayor 5, C/Mayor 5. Not right after a
 	// slash, where C/ is part of a path (docs/C/Readme 2).
 	spanishSlashAddressRegex = euStreetLineAfter(euSlashTypeLeftEdge,
-		`C/`+euOptionalSpace+spanishNameAndNumber)
+		`C/[ \t]?`+spanishNameAndNumber)
 
 	spanishNameAndNumber = euStreetName(`de|del|la|las|los|el|y`) + `,?` + euSpace + euHouseNumber
 
-	// frenchStreetLine: 12 rue de la Paix, 8 bis boulevard Saint-Germain,
+	// frenchAddressRegex: 12 rue de la Paix, 8 bis boulevard Saint-Germain,
 	// 12 B rue de la Paix. The street type may be capitalized (12 Rue de la
 	// Paix).
-	frenchStreetLine = `\d{1,4}(?:` + euOptionalSpace + `(?:bis|ter)\b|` + euOptionalSpace + `[A-D]\b|[a-d]\b)?,?` + euSpace +
-		euAlternation(slices.Concat(frenchStreetTypes, capitalized(frenchStreetTypes))) + euSpace +
-		euStreetName(`de|du|des|la|le|les|aux|au|sur`)
-	frenchAddressRegex = euStreetLine(frenchStreetLine)
-	// frenchStreetLineStart matches a French street line at the start of a
-	// string, for streetLineOf to tell whether one starts where another
-	// ends.
-	frenchStreetLineStart = regexp.MustCompile(`^(?:` + frenchStreetLine + `)`)
+	frenchAddressRegex = euStreetLine(
+		`\d{1,4}(?:[ \t]?(?:bis|ter)\b|[ \t]?[A-D]\b|[a-d]\b)?,?` + euSpace +
+			euAlternation(slices.Concat(frenchStreetTypes, capitalized(frenchStreetTypes))) + euSpace +
+			euStreetName(`de|du|des|la|le|les|aux|au|sur`))
 
 	// germanAddressRegex: Hauptstraße 12, Karl-Marx-Straße 5, Berliner Str. 5,
 	// Lindenallee 4a. The type is a suffix of the street's last word
@@ -267,112 +251,14 @@ func hasStreetKeyword(s string, k streetKeyword) bool {
 
 // europeanAddressMatches returns the street lines re, a European address
 // pattern, finds in s, without the left edge it matches before each one.
-// It searches on from the end of each street line rather than of re's
-// match, since streetLineOf may give back the end of a match, and the next
-// street line can start there (12 rue du 14 Juillet 1234 rue Victor Hugo).
-// Every search starts where no street line can (after a street line, or
-// after the word a rejected match ends in), so the ^ in euLeftEdge only
-// ever matches the real start of s.
 func europeanAddressMatches(re *regexp.Regexp, s string) [][]int {
 	var locs [][]int
-	for from := 0; from < len(s); {
-		m := re.FindStringSubmatchIndex(s[from:])
-		if m == nil {
-			break
+	for _, m := range re.FindAllStringSubmatchIndex(s, -1) {
+		if endsStreetLine(s, m[3]) {
+			locs = append(locs, m[2:4])
 		}
-		for i := range m {
-			m[i] += from
-		}
-		loc := streetLineOf(re, s, m)
-		if loc == nil {
-			from = pastWord(s, m[1])
-			continue
-		}
-		locs = append(locs, loc)
-		from = loc[1]
 	}
 	return locs
-}
-
-// pastWord returns the index of the first rune at or after i that is not
-// part of a word.
-func pastWord(s string, i int) int {
-	end := i
-	for end < len(s) {
-		r, n := utf8.DecodeRuneInString(s[end:])
-		if !isAddressWordRune(r) {
-			break
-		}
-		end += n
-	}
-	return end
-}
-
-// streetLineOf returns the street line of m, a match of re in s, or nil.
-// When m ends inside a longer word or number, it drops m's last word and
-// matches again from the same start. A French name has nothing after it to
-// end it, so a reference after it on the same line becomes its last word
-// (12 rue de la Paix Ref123): RE2 commits to that longer match, which
-// endsStreetLine rejects, and the street line before it would otherwise be
-// left visible. A French line also drops a last word that starts the next
-// French street line (endsFrenchStreetLine).
-func streetLineOf(re *regexp.Regexp, s string, m []int) []int {
-	ends := endsAnyStreetLine
-	if re == frenchAddressRegex {
-		ends = endsFrenchStreetLine
-	}
-	if end := streetLineEnd(re, s, m, ends); end >= 0 {
-		return []int{m[2], end}
-	}
-	return nil
-}
-
-// streetLineEnd returns where the street line of m ends: at m's end if ends
-// accepts it, or else at the first end it accepts as m's last word is
-// dropped and re matches again from the same start. It returns -1 when no
-// such end is left. Each retry ends before the last, so the loop stops.
-func streetLineEnd(re *regexp.Regexp, s string, m []int, ends func(s string, start, end int) bool) int {
-	start, end := m[2], m[3]
-	for !ends(s, start, end) {
-		cut := strings.LastIndexAny(s[start:end], " \t")
-		if cut < 0 {
-			return -1
-		}
-		retry := re.FindStringSubmatchIndex(s[m[0] : start+cut])
-		if retry == nil || m[0]+retry[2] != start {
-			return -1
-		}
-		end = m[0] + retry[3]
-	}
-	return end
-}
-
-// endsAnyStreetLine is endsStreetLine in the form streetLineEnd takes.
-func endsAnyStreetLine(s string, _, end int) bool {
-	return endsStreetLine(s, end)
-}
-
-// endsFrenchStreetLine is endsStreetLine for a French street line
-// s[start:end], which also must not end in a word that starts the next
-// one: a date's year there is that line's house number (12 rue du 14
-// Juillet 1234 rue Victor Hugo). The next line counts only as a whole
-// street line, so a year stays with its date before 1945 rue Ref123.
-func endsFrenchStreetLine(s string, start, end int) bool {
-	if !endsStreetLine(s, end) {
-		return false
-	}
-	cut := strings.LastIndexAny(s[start:end], " \t")
-	if cut < 0 {
-		return true
-	}
-	w := start + cut + 1
-	next := frenchStreetLineStart.FindStringIndex(s[w:])
-	if next == nil {
-		return true
-	}
-	// s[w-1] is the space or tab before the word, the next line's left edge.
-	m := []int{w - 1, w + next[1], w, w + next[1]}
-	return streetLineEnd(frenchAddressRegex, s, m, endsAnyStreetLine) < 0
 }
 
 // endsStreetLine reports whether a European street line ending at s[end] ends
