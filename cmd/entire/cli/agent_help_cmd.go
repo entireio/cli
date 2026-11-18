@@ -505,7 +505,7 @@ high-level map of when to use entire and which subcommand; pass a command path
 			// Resolve the origin remote once and derive both the repo line and the
 			// trails-enablement check from it (avoids two git subprocesses per run).
 			repoLine, trailsEnabled := agentHelpRepoContext(c.Context())
-			out, err := runAgentHelp(rootCmd, args, repoLine, asJSON, trailsEnabled)
+			out, err := runAgentHelpListing(rootCmd, args, repoLine, asJSON, trailsEnabled, true)
 			if err != nil {
 				return err
 			}
@@ -598,7 +598,16 @@ func agentHelpRepoContextWithRefresh(
 
 // runAgentHelp resolves args to a command node and renders it. It is pure (no
 // git / IO): the caller passes the already-resolved repoLine and trailsEnabled.
+// runAgentHelp answers the MCP agent_help tool: like the CLI command, without
+// the installed plugins, since the tool can't hand off to them.
 func runAgentHelp(rootCmd *cobra.Command, args []string, repoLine string, asJSON, trailsEnabled bool) (string, error) {
+	return runAgentHelpListing(rootCmd, args, repoLine, asJSON, trailsEnabled, false)
+}
+
+// runAgentHelpListing renders agent-help for args. listPlugins adds the
+// installed plugins to the top level; only the CLI command sets it, because
+// only it delegates `agent-help <plugin>` (see maybeDelegateAgentHelpToPlugin).
+func runAgentHelpListing(rootCmd *cobra.Command, args []string, repoLine string, asJSON, trailsEnabled, listPlugins bool) (string, error) {
 	target := rootCmd
 	for _, name := range args {
 		child := agentHelpFindChild(target, name)
@@ -620,7 +629,7 @@ func runAgentHelp(rootCmd *cobra.Command, args []string, repoLine string, asJSON
 	// Only the top level lists installed plugins: a command's drill-in is
 	// about that command.
 	var plugins []agentHelpPlugin
-	if target == rootCmd {
+	if listPlugins && target == rootCmd {
 		plugins = agentHelpInstalledPlugins(rootCmd)
 	}
 	if asJSON {

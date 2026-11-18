@@ -931,7 +931,8 @@ agents at, instead of enumerating a surface that goes stale.
 The bare listing also names the installed plugins (the managed plugin dir, minus
 names a built-in shadows), each with the one-line description recorded in its
 install manifest, and points at `entire agent-help <plugin>`, where the plugin
-documents itself; `--json` carries them as `plugins`. It reads only the managed
+documents itself; `--json` carries them as `plugins`. The MCP `agent_help` tool
+leaves them out, since it can't hand off to a plugin. It reads only the managed
 tree: it never runs a plugin, reads the index, or touches the network, so a
 local install (no manifest) is listed by name only. See
 [external commands](../architecture/external-commands.md).

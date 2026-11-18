@@ -56,11 +56,15 @@ func agentHelpInstalledPlugins(rootCmd *cobra.Command) []agentHelpPlugin {
 
 // agentHelpPluginDescription makes an author's description safe for the
 // listing: one trimmed line, at most agentHelpPluginDescriptionMax runes, and
-// nothing at all when it carries control characters (newlines, ANSI escapes),
-// which would let a plugin write its own lines into the agent's context.
+// nothing at all when it carries a character that could shape what the agent
+// or user sees beyond the text itself: control characters (newlines, ANSI
+// escapes) and bidi controls (hasTerminalControlChars), format characters
+// (zero-width characters and the like) and line or paragraph separators.
 func agentHelpPluginDescription(s string) string {
 	s = strings.TrimSpace(s)
-	if strings.IndexFunc(s, unicode.IsControl) >= 0 {
+	if hasTerminalControlChars(s) || strings.ContainsFunc(s, func(r rune) bool {
+		return unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp)
+	}) {
 		return ""
 	}
 	if r := []rune(s); len(r) > agentHelpPluginDescriptionMax {
