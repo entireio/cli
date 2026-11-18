@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/auth"
@@ -209,6 +210,7 @@ func TestHTTPUserAgent_ReachesServer(t *testing.T) {
 
 func TestGitActionFromRequest(t *testing.T) {
 	t.Parallel()
+	const xorbHex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	tests := []struct {
 		name   string
 		method string
@@ -223,11 +225,47 @@ func TestGitActionFromRequest(t *testing.T) {
 		{"info/refs no service", http.MethodGet, "/et/p/r/info/refs", "", ""},
 		{"unrelated GET", http.MethodGet, "/et/p/r/objects/info/packs", "", ""},
 		{"unrelated POST", http.MethodPost, "/et/p/r/whatever", "", ""},
+
+		{"bb xorb upload", http.MethodPut, "/et/p/r/bb/xorbs/" + xorbHex, "", "push"},
+		{"bb xorb upload, short repo path", http.MethodPut, "/r/bb/xorbs/" + xorbHex, "", "push"},
+		{"bb dedup", http.MethodPost, "/et/p/r/bb/dedup", "", "push"},
+		{"bb xorb upload by POST", http.MethodPost, "/et/p/r/bb/xorbs/" + xorbHex, "", ""},
+		{"bb xorb upload by GET", http.MethodGet, "/et/p/r/bb/xorbs/" + xorbHex, "", ""},
+		{"bb xorb upload by DELETE", http.MethodDelete, "/et/p/r/bb/xorbs/" + xorbHex, "", ""},
+		{"bb dedup by PUT", http.MethodPut, "/et/p/r/bb/dedup", "", ""},
+		{"bb dedup by GET", http.MethodGet, "/et/p/r/bb/dedup", "", ""},
+		{"bb xorb list", http.MethodPut, "/et/p/r/bb/xorbs/", "", ""},
+		{"bb xorb hash uppercase", http.MethodPut, "/et/p/r/bb/xorbs/" + strings.ToUpper(xorbHex), "", ""},
+		{"bb xorb hash short", http.MethodPut, "/et/p/r/bb/xorbs/" + xorbHex[1:], "", ""},
+		{"bb xorb hash long", http.MethodPut, "/et/p/r/bb/xorbs/" + xorbHex + "0", "", ""},
+		{"bb xorb hash not hex", http.MethodPut, "/et/p/r/bb/xorbs/" + strings.Repeat("g", 64), "", ""},
+		{"bb xorb extra segment", http.MethodPut, "/et/p/r/bb/xorbs/" + xorbHex + "/x", "", ""},
+		{"bb xorb trailing slash", http.MethodPut, "/et/p/r/bb/xorbs/" + xorbHex + "/", "", ""},
+		{"bb xorb nested segment", http.MethodPut, "/et/p/r/bb/xorbs/x/" + xorbHex, "", ""},
+		{"bb dedup extra segment", http.MethodPost, "/et/p/r/bb/dedup/x", "", ""},
+		{"bb dedup trailing slash", http.MethodPost, "/et/p/r/bb/dedup/", "", ""},
+		{"bb dedup other suffix", http.MethodPost, "/et/p/r/bb/deduplicate", "", ""},
+		{"bb other endpoint", http.MethodPost, "/et/p/r/bb/other", "", ""},
+		{"bb dedup without repo", http.MethodPost, "/bb/dedup", "", ""},
+		{"bb xorb without repo", http.MethodPut, "/bb/xorbs/" + xorbHex, "", ""},
+		{"bb dedup traversal", http.MethodPost, "/et/p/../r/bb/dedup", "", ""},
+		{"bb xorb traversal", http.MethodPut, "/et/../bb/xorbs/" + xorbHex, "", ""},
+		{"bb dedup dot segment", http.MethodPost, "/et/./r/bb/dedup", "", ""},
+		{"bb dedup empty segment", http.MethodPost, "/et//r/bb/dedup", "", ""},
+		{"bb dedup escaped slash", http.MethodPost, "/et/p/r/bb%2Fdedup", "", ""},
+		{"bb xorb escaped traversal", http.MethodPut, "/et/%2e%2e/bb/xorbs/" + xorbHex, "", ""},
+		{"bb dedup with query", http.MethodPost, "/et/p/r/bb/dedup", "service=git-receive-pack", ""},
+		{"bb xorb with query", http.MethodPut, "/et/p/r/bb/xorbs/" + xorbHex, "x=1", ""},
+		{"bb dedup with empty query", http.MethodPost, "/et/p/r/bb/dedup?", "", ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			req := httptest.NewRequestWithContext(context.Background(), tc.method, "https://host"+tc.path+"?"+tc.query, nil)
+			target := "https://host" + tc.path
+			if tc.query != "" {
+				target += "?" + tc.query
+			}
+			req := httptest.NewRequestWithContext(context.Background(), tc.method, target, nil)
 			if got := gitActionFromRequest(req); got != tc.want {
 				t.Fatalf("gitActionFromRequest(%s %s?%s) = %q, want %q", tc.method, tc.path, tc.query, got, tc.want)
 			}
@@ -604,29 +642,41 @@ func TestSetAuthWithProvider_ResolvesCredentialPerRequest(t *testing.T) {
 	}
 }
 
+// fakeRefreshableCredential models auth-go's token manager: Token returns the
+// stored token, and ForceRefresh mints a new one only while the store still
+// holds the stale token, so concurrent callers share one mint.
 type fakeRefreshableCredential struct {
-	token       string
-	forcedToken string
-	tokenCalls  int
-	forceCalls  int
-	forcedStale string
+	mu     sync.Mutex
+	token  string
+	tokens []string // the tokens that each mint stores, in order
+	mints  int
 }
 
 func (f *fakeRefreshableCredential) Token(context.Context) (string, error) {
-	f.tokenCalls++
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return f.token, nil
 }
 
 func (f *fakeRefreshableCredential) ForceRefresh(_ context.Context, staleToken string) (string, error) {
-	f.forceCalls++
-	f.forcedStale = staleToken
-	f.token = f.forcedToken
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.token == staleToken {
+		f.token = f.tokens[f.mints]
+		f.mints++
+	}
 	return f.token, nil
+}
+
+func (f *fakeRefreshableCredential) mintCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.mints
 }
 
 func TestRefreshingProvider_ForceRefreshesAfterUnauthorized(t *testing.T) {
 	t.Parallel()
-	source := &fakeRefreshableCredential{token: "rejected-jwt", forcedToken: "refreshed-jwt"}
+	source := &fakeRefreshableCredential{token: "rejected-jwt", tokens: []string{"refreshed-jwt"}}
 	provider, onUnauthorized := refreshingProvider(source)
 
 	got, err := provider(t.Context())
@@ -637,7 +687,7 @@ func TestRefreshingProvider_ForceRefreshesAfterUnauthorized(t *testing.T) {
 		t.Fatalf("initial token = %q, want rejected-jwt", got)
 	}
 
-	onUnauthorized()
+	onUnauthorized("rejected-jwt")
 	got, err = provider(t.Context())
 	if err != nil {
 		t.Fatalf("provider after 401: %v", err)
@@ -645,8 +695,35 @@ func TestRefreshingProvider_ForceRefreshesAfterUnauthorized(t *testing.T) {
 	if got != "refreshed-jwt" {
 		t.Fatalf("token after 401 = %q, want refreshed-jwt", got)
 	}
-	if source.forceCalls != 1 || source.forcedStale != "rejected-jwt" {
-		t.Fatalf("ForceRefresh calls = %d with stale %q, want 1 with rejected-jwt", source.forceCalls, source.forcedStale)
+	if n := source.mintCount(); n != 1 {
+		t.Fatalf("mints = %d, want 1", n)
+	}
+}
+
+// Uploads run in parallel, so several requests can get a 401 for the same
+// bearer. A 401 that arrives after another request's retry refreshed the
+// token must not mark the refreshed token stale: every retry gets the one
+// refreshed token, and the credential mints once.
+func TestRefreshingProvider_InterleavedUnauthorized(t *testing.T) {
+	t.Parallel()
+	source := &fakeRefreshableCredential{token: "jwt-a", tokens: []string{"jwt-b", "jwt-c"}}
+	provider, onUnauthorized := refreshingProvider(source)
+
+	const requests = 4
+	for range requests {
+		if got, err := provider(t.Context()); err != nil || got != "jwt-a" {
+			t.Fatalf("first token = %q, %v; want jwt-a", got, err)
+		}
+	}
+	for i := range requests {
+		onUnauthorized("jwt-a")
+		got, err := provider(t.Context())
+		if err != nil || got != "jwt-b" {
+			t.Fatalf("retry %d token = %q, %v; want jwt-b", i, got, err)
+		}
+	}
+	if n := source.mintCount(); n != 1 {
+		t.Fatalf("mints = %d, want 1", n)
 	}
 }
 

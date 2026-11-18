@@ -25,6 +25,10 @@ type Transport interface {
 	// ServiceRPC sends a request to /<service> and returns the
 	// response. extraHeaders runs on each request before send.
 	ServiceRPC(ctx context.Context, service string, body io.ReadSeeker, extraHeaders ...func(*http.Request)) (io.ReadCloser, error)
+	// Do sends a request that is not a git request, such as a BB xorb
+	// upload, to suffix under the repo path. It returns the response for
+	// the caller to read and close. It is safe for concurrent use.
+	Do(ctx context.Context, method, suffix string, body io.ReadSeeker, setHeaders func(*http.Request)) (*http.Response, error)
 	// ErrorBaseURL is embedded into helper-status error messages and
 	// passed to send-pack as the remote URL.
 	ErrorBaseURL() string
