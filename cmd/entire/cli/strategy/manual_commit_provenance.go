@@ -140,10 +140,11 @@ func stampedByAnotherCommit(ctx context.Context, checkpointID id.CheckpointID, s
 // commit, once entries between them expire. An old HEAD with the commit's
 // parents is still what an amend replaced (an amend keeps them), and is judged
 // as above. Otherwise the message `git commit` wrote decides, and an amend
-// keeps its owner, though what it replaced is unknown (inferredAmendLink). With no reflog entry for
-// this commit to tell them apart (core.logAllRefUpdates=false), or only one
-// another command wrote, with no old HEAD, it is taken as an amend, so the
-// owner keeps condensing into its checkpoint as it did before the idle check.
+// keeps its owner, though what it replaced is unknown (inferredAmendLink).
+// With no reflog entry for this commit to tell them apart
+// (core.logAllRefUpdates=false), or only one another command wrote, with no
+// old HEAD, it is taken as an amend, so the owner keeps condensing into its
+// checkpoint as it did before the idle check.
 // Judged a new link instead, the owner would be dropped, and the amend's work
 // would never reach the checkpoint its trailer names.
 func (s *ManualCommitStrategy) amendedCheckpoint(ctx context.Context, repo *git.Repository, commit *object.Commit, checkpointID id.CheckpointID, preexisting bool) amendedLink {
