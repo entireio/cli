@@ -313,6 +313,7 @@ func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
 		{name: "amend, reflog read through git", commitArgs: []string{"--amend"}, editReflog: readReflogThroughGit, condensed: true},
 		{name: "amend of another commit reusing the message, reflog read through git", commitArgs: []string{"--amend"}, amendOther: true, editReflog: readReflogThroughGit, condensed: false},
 		{name: "amend whose replaced commit's reflog entry expired", commitArgs: []string{"--amend"}, editReflog: expireReplacedReflogEntry, condensed: true},
+		{name: "amend of another commit reusing the message, whose reflog entry expired", commitArgs: []string{"--amend"}, amendOther: true, editReflog: expireReplacedReflogEntry, condensed: false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
