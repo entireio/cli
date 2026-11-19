@@ -28,6 +28,12 @@ const (
 	agentHelpPluginColumnMax = 24
 )
 
+// agentHelpGuidedPluginsHeading heads the plugins that declared agent_help.
+// It asks the agent to read the guidance that may bear on its task rather than
+// "before using" the plugin: a live run showed an agent skip stream's check
+// before an edit because it wasn't using the plugin.
+const agentHelpGuidedPluginsHeading = "Installed plugins with agent guidance — read the ones that may bear on your task: entire agent-help <plugin>"
+
 // agentHelpPluginNameRE is the conservative shape a plugin name must have to
 // be listed. validatePluginName accepts more (spaces, shell metacharacters,
 // format characters); the listing hands each name to agents inside a command
@@ -199,8 +205,10 @@ func agentHelpDescriptionRuneRefused(r rune) bool {
 
 // renderAgentHelpPlugins renders the installed-plugins section of the
 // top-level text, or "" when there are none: first the plugins that declared
-// agent_help, which an agent should read before using, then the others, which
-// carry no agent guidance and so are the user's to run.
+// agent_help, whose guidance an agent should read when it may bear on its task
+// (a plugin's guidance can be about the agent's own work, such as stream's
+// check before editing a file, not only about using the plugin), then the
+// others, which carry no agent guidance and so are the user's to run.
 func renderAgentHelpPlugins(listing agentHelpPluginListing) string {
 	if len(listing.Plugins) == 0 {
 		return ""
@@ -227,7 +235,7 @@ func renderAgentHelpPlugins(listing agentHelpPluginListing) string {
 			fmt.Fprintf(&b, "  %s\n", strings.TrimRight(fmt.Sprintf("%-*s  %s", width, p.Name, p.Description), " "))
 		}
 	}
-	group("\nInstalled plugins with agent guidance — read one before using it: entire agent-help <plugin>\n", guided)
+	group("\n"+agentHelpGuidedPluginsHeading+"\n", guided)
 	group("\nOther installed plugins — no agent guidance; the user's — suggest, don't run:\n", other)
 	if more := listing.Total - len(listing.Plugins); more > 0 {
 		fmt.Fprintf(&b, "  …and %d more\n", more)

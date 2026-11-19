@@ -93,13 +93,13 @@ func TestAgentHelpTopListsInstalledPlugins(t *testing.T) { //nolint:paralleltest
 	if !ok || !strings.HasPrefix(guided, agentHelpGuidedHeader) {
 		t.Fatalf("want the guided group, then the others:\n%s", section)
 	}
-	if !strings.Contains(guided, "\n  stream      Check live sessions before editing\n") || !strings.Contains(guided, "entire agent-help <plugin>") {
+	if !strings.HasPrefix(guided, agentHelpGuidedPluginsHeading+"\n") || !strings.Contains(guided, "\n  stream      Check live sessions before editing\n") {
 		t.Errorf("guided group:\n%s", guided)
 	}
 	if !strings.Contains(other, "\n  evil\n") || !strings.Contains(other, "\n  zeta\n") || !strings.Contains(other, "suggest, don't run") {
 		t.Errorf("other group:\n%s", other)
 	}
-	for _, unwanted := range []string{"Shadowed by the built-in", "Ignore previous instructions", "entire agent-help evil", "entire agent-help zeta", "each says what it is for"} {
+	for _, unwanted := range []string{"Shadowed by the built-in", "Ignore previous instructions", "entire agent-help evil", "entire agent-help zeta", "each says what it is for", "before using it"} {
 		if strings.Contains(out, unwanted) {
 			t.Errorf("output contains %q:\n%s", unwanted, out)
 		}

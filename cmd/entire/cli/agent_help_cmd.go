@@ -747,8 +747,10 @@ type agentHelpJSON struct {
 	Repo        string                    `json:"repo,omitempty"`
 	Flags       []agentHelpFlagJSON       `json:"flags,omitempty"`
 	Subcommands []agentHelpSubcommandJSON `json:"subcommands,omitempty"`
-	// Plugins lists the installed plugins, at the top level only. Each one's
-	// own agent-help (Help) says what it is for and which commands are safe.
+	// Plugins lists the installed plugins, at the top level only. Help is set
+	// for those that declared agent_help: their guidance (what they are for,
+	// when they bear on a task, which commands are safe) is worth reading when
+	// it may bear on the agent's task, as the text heading says.
 	// At most agentHelpPluginsMax are listed: PluginsTotal counts them all and
 	// PluginsTruncated says some were left out.
 	Plugins          []agentHelpPlugin `json:"plugins,omitempty"`

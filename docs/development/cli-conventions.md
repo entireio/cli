@@ -932,7 +932,8 @@ The bare listing also names the installed plugins it could hand off to (at most
 50, each name once), each with the one-line description recorded in its install
 manifest. It points at `entire agent-help <plugin>` only for plugins whose
 `entire-plugin.yml` declares `agent_help: true`, since implementing it is
-opt-in and the command runs the plugin; the others are listed apart as the
+opt-in and the command runs the plugin, under a heading that asks the agent to
+read the ones that may bear on its task; the others are listed apart as the
 user's to run. `--json` carries them as `plugins` (`help` only when declared),
 with `plugins_total` and `plugins_truncated`. The MCP `agent_help` tool leaves
 them out, since it can't hand off to a plugin. It reads only the managed tree:
