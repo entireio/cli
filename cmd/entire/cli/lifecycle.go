@@ -797,7 +797,14 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 
 	transcriptRef := event.SessionRef
 	if transcriptRef == "" {
-		return errors.New("transcript file not specified")
+		// Runtimes that import Claude-format hooks but cannot supply a
+		// transcript path (e.g. agents that only export their own format
+		// after the hook returns) have nothing to condense — skip with a
+		// warning instead of failing the hook every turn end. A
+		// specified-but-missing path still fails below.
+		logging.Warn(logCtx, "turn-end skipped: no transcript path in event",
+			slog.String("session_id", sessionID))
+		return nil
 	}
 
 	// If agent implements TranscriptPreparer, materialize the transcript file.
