@@ -127,6 +127,45 @@ func TestMCPServer_InitializeBadProtocolType(t *testing.T) {
 	}
 }
 
+// server/discover (SEP-2575) returns supportedVersions, capabilities, and the
+// serverInfo stamp in _meta so probing clients skip the -32601 fallback.
+func TestMCPServer_ServerDiscover(t *testing.T) {
+	t.Parallel()
+	resps := driveMCP(t, `{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}`)
+	if len(resps) != 1 || resps[0].Error != nil {
+		t.Fatalf("server/discover should return one non-error response, got %+v", resps)
+	}
+	var res struct {
+		ResultType        string                     `json:"resultType"`
+		SupportedVersions []string                   `json:"supportedVersions"`
+		Capabilities      map[string]json.RawMessage `json:"capabilities"`
+		Meta              struct {
+			ServerInfo struct {
+				Name    string `json:"name"`
+				Version string `json:"version"`
+			} `json:"io.modelcontextprotocol/serverInfo"`
+		} `json:"_meta"`
+	}
+	if err := json.Unmarshal(resps[0].Result, &res); err != nil {
+		t.Fatalf("unmarshal discover result: %v", err)
+	}
+	if res.ResultType != "complete" {
+		t.Errorf("resultType = %q, want complete", res.ResultType)
+	}
+	if len(res.SupportedVersions) != 1 || res.SupportedVersions[0] != mcpProtocolVersion {
+		t.Errorf("supportedVersions = %v, want [%s]", res.SupportedVersions, mcpProtocolVersion)
+	}
+	if _, ok := res.Capabilities["tools"]; !ok {
+		t.Errorf("discover result should advertise the tools capability, got %v", res.Capabilities)
+	}
+	if res.Meta.ServerInfo.Name != mcpServerName {
+		t.Errorf("serverInfo.name = %q, want %q", res.Meta.ServerInfo.Name, mcpServerName)
+	}
+	if res.Meta.ServerInfo.Version == "" {
+		t.Error("serverInfo.version should be populated")
+	}
+}
+
 func TestMCPServer_Ping(t *testing.T) {
 	t.Parallel()
 	resps := driveMCP(t, `{"jsonrpc":"2.0","id":8,"method":"ping"}`)
