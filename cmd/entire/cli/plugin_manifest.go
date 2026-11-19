@@ -107,6 +107,14 @@ type PluginManifest struct {
 	// Requires is the dependency list from the plugin's entire-plugin.yml
 	// at the installed tag.
 	Requires []PluginRequirement `yaml:"requires,omitempty"`
+	// Description is the one-line summary from the plugin's entire-plugin.yml
+	// at the installed tag, kept so `entire agent-help` can say what an
+	// installed plugin is for without running it or reading the index.
+	Description string `yaml:"description,omitempty"`
+	// AgentHelp records entire-plugin.yml's agent_help at the installed tag:
+	// the plugin answers `entire-<name> agent-help`, so `entire agent-help`
+	// may point agents at it.
+	AgentHelp bool `yaml:"agent_help,omitempty"`
 }
 
 // PluginRequirement declares a dependency on another plugin. Shared between
@@ -142,8 +150,14 @@ type PluginMetadata struct {
 	// Name is the bare plugin name. When empty, derived from the repo URL
 	// basename (entire-run → run).
 	Name string `yaml:"name,omitempty"`
-	// Description is a one-line summary shown by info/search.
+	// Description is a one-line summary shown by info/search, and by
+	// `entire agent-help` once installed.
 	Description string `yaml:"description,omitempty"`
+	// AgentHelp declares that the plugin implements the `agent-help` verb
+	// (see docs/architecture/external-commands.md), so `entire agent-help`
+	// points agents at `entire agent-help <name>`. Opt-in: that command runs
+	// the plugin, so it is only advertised for plugins that say they answer it.
+	AgentHelp bool `yaml:"agent_help,omitempty"`
 	// DownloadURL overrides the per-forge release-asset URL convention.
 	// Template placeholders: {name} {tag} {version} {os} {arch} {asset}.
 	// When {asset} is present, candidate asset filenames are substituted;

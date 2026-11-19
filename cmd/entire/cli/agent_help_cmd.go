@@ -505,7 +505,7 @@ high-level map of when to use entire and which subcommand; pass a command path
 			// Resolve the origin remote once and derive both the repo line and the
 			// trails-enablement check from it (avoids two git subprocesses per run).
 			repoLine, trailsEnabled := agentHelpRepoContext(c.Context())
-			out, err := runAgentHelp(rootCmd, args, repoLine, asJSON, trailsEnabled)
+			out, err := runAgentHelpListing(rootCmd, args, repoLine, asJSON, trailsEnabled, true)
 			if err != nil {
 				return err
 			}
@@ -596,9 +596,20 @@ func agentHelpRepoContextWithRefresh(
 	return repoLine, cachedTrailsEnablementForScope(ctx, scope, time.Now()) == trailEnablementCacheEnabled
 }
 
-// runAgentHelp resolves args to a command node and renders it. It is pure (no
-// git / IO): the caller passes the already-resolved repoLine and trailsEnabled.
+// runAgentHelp resolves args to a command node and renders it for the MCP
+// agent_help tool: like the CLI command, without the installed plugins, since
+// the tool can't hand off to them. It is pure (no git / IO): the caller passes
+// the already-resolved repoLine and trailsEnabled.
 func runAgentHelp(rootCmd *cobra.Command, args []string, repoLine string, asJSON, trailsEnabled bool) (string, error) {
+	return runAgentHelpListing(rootCmd, args, repoLine, asJSON, trailsEnabled, false)
+}
+
+// runAgentHelpListing renders agent-help for args. listPlugins adds the
+// installed plugins to the top level; only the CLI command sets it, because
+// only it delegates `agent-help <plugin>` (see maybeDelegateAgentHelpToPlugin).
+// With listPlugins it reads the managed plugin directory (entries and install
+// manifests); otherwise it does no git or IO.
+func runAgentHelpListing(rootCmd *cobra.Command, args []string, repoLine string, asJSON, trailsEnabled, listPlugins bool) (string, error) {
 	target := rootCmd
 	for _, name := range args {
 		child := agentHelpFindChild(target, name)
@@ -617,11 +628,17 @@ func runAgentHelp(rootCmd *cobra.Command, args []string, repoLine string, asJSON
 		}
 		target = child
 	}
+	// Only the top level lists installed plugins: a command's drill-in is
+	// about that command.
+	var plugins agentHelpPluginListing
+	if listPlugins && target == rootCmd {
+		plugins = agentHelpInstalledPlugins(rootCmd)
+	}
 	if asJSON {
-		return renderAgentHelpJSON(rootCmd, target, repoLine, trailsEnabled)
+		return renderAgentHelpJSON(rootCmd, target, repoLine, trailsEnabled, plugins)
 	}
 	if target == rootCmd {
-		return renderAgentHelpTop(rootCmd, repoLine, trailsEnabled), nil
+		return renderAgentHelpTop(rootCmd, repoLine, trailsEnabled, plugins), nil
 	}
 	return renderAgentHelpCommand(target, repoLine, trailsEnabled), nil
 }
@@ -730,10 +747,20 @@ type agentHelpJSON struct {
 	Repo        string                    `json:"repo,omitempty"`
 	Flags       []agentHelpFlagJSON       `json:"flags,omitempty"`
 	Subcommands []agentHelpSubcommandJSON `json:"subcommands,omitempty"`
+	// Plugins lists the installed plugins, at the top level only. Help is set
+	// for those that declared agent_help: their guidance (what they are for,
+	// when they bear on a task, which commands are safe) is worth reading when
+	// it may bear on the agent's task, as the text heading says.
+	// At most agentHelpPluginsMax are listed: PluginsTotal counts them all and
+	// PluginsTruncated says some were left out.
+	Plugins          []agentHelpPlugin `json:"plugins,omitempty"`
+	PluginsTotal     int               `json:"plugins_total,omitempty"`
+	PluginsTruncated bool              `json:"plugins_truncated,omitempty"`
 }
 
-// renderAgentHelpJSON renders the structured form of a command node.
-func renderAgentHelpJSON(rootCmd, target *cobra.Command, repoLine string, trailsEnabled bool) (string, error) {
+// renderAgentHelpJSON renders the structured form of a command node, with
+// plugins (the installed plugins, top level only).
+func renderAgentHelpJSON(rootCmd, target *cobra.Command, repoLine string, trailsEnabled bool, plugins agentHelpPluginListing) (string, error) {
 	doc := agentHelpJSON{
 		Command:  target.CommandPath(),
 		Short:    target.Short,
@@ -741,6 +768,11 @@ func renderAgentHelpJSON(rootCmd, target *cobra.Command, repoLine string, trails
 		Guidance: agentHelpGuidanceFor(target),
 		Example:  strings.TrimSpace(target.Example),
 		Repo:     repoLine,
+	}
+	if plugins.Total > 0 {
+		doc.Plugins = plugins.Plugins
+		doc.PluginsTotal = plugins.Total
+		doc.PluginsTruncated = plugins.Total > len(plugins.Plugins)
 	}
 	if target != rootCmd {
 		collect := func(fs *flag.FlagSet) {
@@ -878,14 +910,15 @@ func renderAgentHelpCommand(cmd *cobra.Command, repoLine string, trailsEnabled b
 
 // renderAgentHelpTop renders the top-level agent-facing overview: the curated
 // intro + rule, the auto-detected repo line, the LISTED commands with their
-// audience, a compact index of everything else, and the drill-down pointer.
+// audience, a compact index of everything else, the installed plugins, and the
+// drill-down pointer.
 //
 // It shows a curated subset rather than the whole tree. An exhaustive listing
 // answers "what exists?", which is not the question an agent mid-task has, and
 // past a certain length it stops being read at all. Everything omitted stays
 // resolvable through `agent-help <command>` and is named in the footer, so this
 // trades default visibility, never availability.
-func renderAgentHelpTop(rootCmd *cobra.Command, repoLine string, trailsEnabled bool) string {
+func renderAgentHelpTop(rootCmd *cobra.Command, repoLine string, trailsEnabled bool, plugins agentHelpPluginListing) string {
 	var b strings.Builder
 	b.WriteString(agentHelpOverview)
 	if trailCmd, _, err := rootCmd.Find([]string{"trail"}); err == nil && usesProjectTrails(trailCmd) {
@@ -941,6 +974,7 @@ func renderAgentHelpTop(rootCmd *cobra.Command, repoLine string, trailsEnabled b
 			b.WriteString(wrapIndented(strings.Join(names, " · "), "    ", 76))
 		}
 	}
+	b.WriteString(renderAgentHelpPlugins(plugins))
 	// Use an example command that is actually advertised here (trail is gated on
 	// trails being enabled), so we never point at a command the agent can't use.
 	example := cmdCheckpoint
