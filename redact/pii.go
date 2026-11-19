@@ -104,6 +104,49 @@ var (
 	// addressRegex is word-bounded at both ends so a suffix such as St or Pl
 	// cannot match the start of a longer word (Started, Plan).
 	addressRegex = regexp.MustCompile(`\b\d{1,5}\s+[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*\s+(?:St(?:reet)?|Ave(?:nue)?|Blvd|Boulevard|Dr(?:ive)?|Ln|Lane|Rd|Road|Ct|Court|Pl(?:ace)?|Way|Cir(?:cle)?|Ter(?:race)?|Pkwy|Parkway)\b\.?`)
+
+	// The addressTail* patterns extend a street-line match through the
+	// locality that follows it: an optional USPS directional, ", City" (one
+	// to three Capitalized words), and a region — US "ST 12345[-6789]" or a
+	// UK postcode. They are anchored at the start of the text after the
+	// street match and only consulted when addressRegex matched, so a
+	// ", City, ST ZIP" in prose is never claimed on its own. A city word
+	// allows interior '.'/'-' and an apostrophe only before a capital
+	// (O'Fallon, but not the possessive 's); a trailing '.' is trimmed by
+	// the caller as sentence punctuation.
+	addressDirPrefix = `(?:[ \t]+(?:NE|NW|SE|SW|N|S|E|W)\b)?[ \t]*,`
+	addressCityWords = `[A-Z][A-Za-z.-]*(?:'[A-Z][A-Za-z.-]*)*` +
+		`(?:[ \t]+[A-Z][A-Za-z.-]*(?:'[A-Z][A-Za-z.-]*)*){0,2}`
+	addressUSRegion  = `[A-Z]{2}[ \t]+\d{5}(?:-\d{4})?`
+	addressUKRegion  = `[A-Z]{1,2}\d[A-Z\d]?[ \t]+\d[A-Z]{2}`
+	addressRegionSep = `(?:,[ \t]*|[ \t]+)`
+	// A secondary-unit designator plus its identifier and trailing comma,
+	// e.g. "Unit 12," — only valid inside a region-anchored span.
+	addressUnitPrefix = `(?:` +
+		`(?:Suite|Ste|Unit|Apt|Apartment|Floor|Fl|Room|Rm|Dept|Department|` +
+		`Building|Bldg|Bldng|Lot|Space|Box|Po|Pmb|Hangar|Hanger|Slip|Trlr|` +
+		`Trailer|Camp|Pier|Dock|Berth)[ \t]+[A-Za-z0-9][A-Za-z0-9-]*[ \t]*,[ \t]*` +
+		`)?`
+
+	// City plus a required region: the postcode vouches for the whole span,
+	// so a secondary-unit segment may precede the city.
+	addressTailFull = regexp.MustCompile(
+		`^` + addressDirPrefix + `[ \t]*` + addressUnitPrefix + addressCityWords +
+			addressRegionSep + `(?:` + addressUSRegion + `|` + addressUKRegion + `)\b`)
+	// Region with no city: ", OR 97477" or ", NW1 6XE".
+	addressTailRegion = regexp.MustCompile(
+		`^` + addressDirPrefix + `[ \t]*` + `(?:` + addressUSRegion + `|` + addressUKRegion + `)\b`)
+	// City alone: ", Springfield" or ", St. Louis". Rejected in code when
+	// the first word is a secondary-unit designator.
+	addressTailCity = regexp.MustCompile(`^` + addressDirPrefix + `[ \t]*` + addressCityWords)
+	// Directional alone: " NW" after the street suffix.
+	addressDirOnly = regexp.MustCompile(`^[ \t]+(?:NE|NW|SE|SW|N|S|E|W)\b`)
+	// First-word check for the city-only extension.
+	addressUnitDesignator = regexp.MustCompile(
+		`(?i)^[ \t]*(?:[ \t]+(?:NE|NW|SE|SW|N|S|E|W)\b)?[ \t]*,[ \t]*` +
+			`(?:Suite|Ste|Unit|Apt|Apartment|Floor|Fl|Room|Rm|Dept|Department|` +
+			`Building|Bldg|Bldng|Lot|Space|Box|Po|Pmb|Hangar|Hanger|Slip|Trlr|` +
+			`Trailer|Camp|Pier|Dock|Berth)\b`)
 )
 
 // emailAllowPatterns are email patterns that should NOT be treated as PII.
@@ -215,6 +258,7 @@ func detectPII(cfg *PIIConfig, s string) []taggedRegion {
 			continue
 		}
 		builtinIP := p.regex == ipv4CandidateRegex || p.regex == ipv6CandidateRegex
+		builtinAddress := p.regex == addressRegex
 		for _, loc := range p.regex.FindAllStringIndex(s, -1) {
 			// Skip allowlisted email addresses (noreply, bot accounts, etc.)
 			// and the git login of a remote.
@@ -235,6 +279,9 @@ func detectPII(cfg *PIIConfig, s string) []taggedRegion {
 				}
 				loc[0], loc[1] = start, end
 			}
+			if builtinAddress {
+				loc[1] = extendAddressLocality(s, loc[1])
+			}
 			regions = append(regions, taggedRegion{
 				region:    region{loc[0], loc[1]},
 				label:     p.label,
@@ -243,6 +290,38 @@ func detectPII(cfg *PIIConfig, s string) []taggedRegion {
 		}
 	}
 	return dropNestedIPRegions(regions)
+}
+
+// extendAddressLocality returns the end offset of a street-line match
+// extended through the locality that follows it. Patterns are tried from
+// most to least anchored: city+region, region alone, city alone, then a
+// bare directional. A city-only span whose first word is a secondary-unit
+// designator (Suite, Unit, ...) is address grammar rather than a locality
+// and is rejected; a region-anchored span is always taken because the
+// postcode vouches for it.
+func extendAddressLocality(s string, end int) int {
+	rest := s[end:]
+	for _, re := range []*regexp.Regexp{addressTailFull, addressTailRegion, addressTailCity} {
+		m := re.FindString(rest)
+		if m == "" {
+			continue
+		}
+		if re == addressTailCity && addressUnitDesignator.MatchString(m) {
+			break
+		}
+		m = strings.TrimSuffix(m, ".")
+		pos := end + len(m)
+		// A '-' + digit right after a ZIP means a truncated ZIP+4; refuse
+		// the partial region rather than leak the remainder.
+		if pos < len(s) && s[pos] == '-' && pos+1 < len(s) && s[pos+1] >= '0' && s[pos+1] <= '9' {
+			return end
+		}
+		return pos
+	}
+	if m := addressDirOnly.FindString(rest); m != "" {
+		return end + len(m)
+	}
+	return end
 }
 
 // compilePIIPatterns builds the pattern list from config.
