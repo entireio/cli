@@ -34,13 +34,16 @@ type Invoker interface {
 	// invitation that it accepts. Set allow_invitation to create that invitation: the add then answers
 	// 202 with invitation_id and expires_at, and the account holds no access until it accepts. Without
 	// allow_invitation, that add answers 409 with type https://entire.com/errors/invitation/required and
-	// writes nothing. 201 never carries an invitation. A repeat add reuses an open invitation for the
-	// same role and sends no second mail; another role answers 409 with type https://entire.
-	// com/errors/invitation/role-mismatch until the invitation is revoked. An organization that enforces
-	// single sign-on admits no account by invitation: an add that would invite into it answers 403 with
-	// type https://entire.com/errors/invitation/sso-required, and the account joins by signing in
-	// through that single sign-on. Invitation mail to one account is limited: 429 carries Retry-After.
-	// The invitation is created on the organization's home core: another core answers 421.
+	// writes nothing. The add checks allow_invitation before the refusals that apply only to an
+	// invitation. A retry with allow_invitation therefore invites the account unless this organization
+	// refuses invitations; the sentences below name those refusals. 201 never carries an invitation. A
+	// repeat add reuses an open invitation for the same role and sends no second mail; another role
+	// answers 409 with type https://entire.com/errors/invitation/role-mismatch until the invitation is
+	// revoked. An organization that enforces single sign-on admits no account by invitation: an add that
+	// would invite into it answers 403 with type https://entire.com/errors/invitation/sso-required, and
+	// the account joins by signing in through that single sign-on. Invitation mail to one account is
+	// limited: 429 carries Retry-After. The invitation is created on the organization's home core:
+	// another core answers 421.
 	//
 	// POST /orgs/{orgId}/members
 	AddOrgMember(ctx context.Context, request *AddOrgMemberInputBody, params AddOrgMemberParams) (AddOrgMemberRes, error)
@@ -370,13 +373,16 @@ type Invoker interface {
 	// invitation that it accepts. Set allow_invitation to create that invitation: the add then answers
 	// 202 with invitation_id and expires_at, and the account holds no access until it accepts. Without
 	// allow_invitation, that add answers 409 with type https://entire.com/errors/invitation/required and
-	// writes nothing. 201 never carries an invitation. A repeat add reuses an open invitation for the
-	// same role and sends no second mail; another role answers 409 with type https://entire.
-	// com/errors/invitation/role-mismatch until the invitation is revoked. An organization that enforces
-	// single sign-on admits no account by invitation: an add that would invite into it answers 403 with
-	// type https://entire.com/errors/invitation/sso-required, and the account joins by signing in
-	// through that single sign-on. Invitation mail to one account is limited: 429 carries Retry-After.
-	// The invitation is created on the project's home core: another core answers 421.
+	// writes nothing. The add checks allow_invitation before the refusals that apply only to an
+	// invitation. A retry with allow_invitation therefore invites the account unless this project
+	// refuses invitations; the sentences below name those refusals. 201 never carries an invitation. A
+	// repeat add reuses an open invitation for the same role and sends no second mail; another role
+	// answers 409 with type https://entire.com/errors/invitation/role-mismatch until the invitation is
+	// revoked. An organization that enforces single sign-on admits no account by invitation: an add that
+	// would invite into it answers 403 with type https://entire.com/errors/invitation/sso-required, and
+	// the account joins by signing in through that single sign-on. Invitation mail to one account is
+	// limited: 429 carries Retry-After. The invitation is created on the project's home core: another
+	// core answers 421.
 	//
 	// POST /projects/{projectId}/grants
 	GrantProjectAccess(ctx context.Context, request *GrantAccessBody, params GrantProjectAccessParams) (GrantProjectAccessRes, error)
@@ -388,14 +394,18 @@ type Invoker interface {
 	// outside this repository and joins only by an invitation that it accepts. Set allow_invitation to
 	// create that invitation: the add then answers 202 with invitation_id and expires_at, and the
 	// account holds no access until it accepts. Without allow_invitation, that add answers 409 with type
-	// https://entire.com/errors/invitation/required and writes nothing. 201 never carries an invitation.
-	// A repeat add reuses an open invitation for the same role and sends no second mail; another role
-	// answers 409 with type https://entire.com/errors/invitation/role-mismatch until the invitation is
-	// revoked. An organization that enforces single sign-on admits no account by invitation: an add that
-	// would invite into it answers 403 with type https://entire.com/errors/invitation/sso-required, and
-	// the account joins by signing in through that single sign-on. Invitation mail to one account is
-	// limited: 429 carries Retry-After. The invitation is created on the repository's home core: another
-	// core answers 421.
+	// https://entire.com/errors/invitation/required and writes nothing. The add checks allow_invitation
+	// before the refusals that apply only to an invitation. A retry with allow_invitation therefore
+	// invites the account unless this repository refuses invitations; the sentences below name those
+	// refusals. 201 never carries an invitation. A repeat add reuses an open invitation for the same
+	// role and sends no second mail; another role answers 409 with type https://entire.
+	// com/errors/invitation/role-mismatch until the invitation is revoked. An organization that enforces
+	// single sign-on admits no account by invitation: an add that would invite into it answers 403 with
+	// type https://entire.com/errors/invitation/sso-required, and the account joins by signing in
+	// through that single sign-on. The add also answers 409, with no type, for a repository of an
+	// organization linked to GitHub or outside its project's region: such a repository admits no account
+	// by invitation. Invitation mail to one account is limited: 429 carries Retry-After. The invitation
+	// is created on the repository's home core: another core answers 421.
 	//
 	// POST /repos/{repoId}/grants
 	GrantRepoAccess(ctx context.Context, request *GrantAccessBody, params GrantRepoAccessParams) (GrantRepoAccessRes, error)
@@ -982,13 +992,16 @@ func (c *Client) sendAcceptInvitation(ctx context.Context, request *AcceptInvita
 // invitation that it accepts. Set allow_invitation to create that invitation: the add then answers
 // 202 with invitation_id and expires_at, and the account holds no access until it accepts. Without
 // allow_invitation, that add answers 409 with type https://entire.com/errors/invitation/required and
-// writes nothing. 201 never carries an invitation. A repeat add reuses an open invitation for the
-// same role and sends no second mail; another role answers 409 with type https://entire.
-// com/errors/invitation/role-mismatch until the invitation is revoked. An organization that enforces
-// single sign-on admits no account by invitation: an add that would invite into it answers 403 with
-// type https://entire.com/errors/invitation/sso-required, and the account joins by signing in
-// through that single sign-on. Invitation mail to one account is limited: 429 carries Retry-After.
-// The invitation is created on the organization's home core: another core answers 421.
+// writes nothing. The add checks allow_invitation before the refusals that apply only to an
+// invitation. A retry with allow_invitation therefore invites the account unless this organization
+// refuses invitations; the sentences below name those refusals. 201 never carries an invitation. A
+// repeat add reuses an open invitation for the same role and sends no second mail; another role
+// answers 409 with type https://entire.com/errors/invitation/role-mismatch until the invitation is
+// revoked. An organization that enforces single sign-on admits no account by invitation: an add that
+// would invite into it answers 403 with type https://entire.com/errors/invitation/sso-required, and
+// the account joins by signing in through that single sign-on. Invitation mail to one account is
+// limited: 429 carries Retry-After. The invitation is created on the organization's home core:
+// another core answers 421.
 //
 // POST /orgs/{orgId}/members
 func (c *Client) AddOrgMember(ctx context.Context, request *AddOrgMemberInputBody, params AddOrgMemberParams) (AddOrgMemberRes, error) {
@@ -5956,13 +5969,16 @@ func (c *Client) sendGetVersion(ctx context.Context) (res *GetVersionOutputBody,
 // invitation that it accepts. Set allow_invitation to create that invitation: the add then answers
 // 202 with invitation_id and expires_at, and the account holds no access until it accepts. Without
 // allow_invitation, that add answers 409 with type https://entire.com/errors/invitation/required and
-// writes nothing. 201 never carries an invitation. A repeat add reuses an open invitation for the
-// same role and sends no second mail; another role answers 409 with type https://entire.
-// com/errors/invitation/role-mismatch until the invitation is revoked. An organization that enforces
-// single sign-on admits no account by invitation: an add that would invite into it answers 403 with
-// type https://entire.com/errors/invitation/sso-required, and the account joins by signing in
-// through that single sign-on. Invitation mail to one account is limited: 429 carries Retry-After.
-// The invitation is created on the project's home core: another core answers 421.
+// writes nothing. The add checks allow_invitation before the refusals that apply only to an
+// invitation. A retry with allow_invitation therefore invites the account unless this project
+// refuses invitations; the sentences below name those refusals. 201 never carries an invitation. A
+// repeat add reuses an open invitation for the same role and sends no second mail; another role
+// answers 409 with type https://entire.com/errors/invitation/role-mismatch until the invitation is
+// revoked. An organization that enforces single sign-on admits no account by invitation: an add that
+// would invite into it answers 403 with type https://entire.com/errors/invitation/sso-required, and
+// the account joins by signing in through that single sign-on. Invitation mail to one account is
+// limited: 429 carries Retry-After. The invitation is created on the project's home core: another
+// core answers 421.
 //
 // POST /projects/{projectId}/grants
 func (c *Client) GrantProjectAccess(ctx context.Context, request *GrantAccessBody, params GrantProjectAccessParams) (GrantProjectAccessRes, error) {
@@ -6072,14 +6088,18 @@ func (c *Client) sendGrantProjectAccess(ctx context.Context, request *GrantAcces
 // outside this repository and joins only by an invitation that it accepts. Set allow_invitation to
 // create that invitation: the add then answers 202 with invitation_id and expires_at, and the
 // account holds no access until it accepts. Without allow_invitation, that add answers 409 with type
-// https://entire.com/errors/invitation/required and writes nothing. 201 never carries an invitation.
-// A repeat add reuses an open invitation for the same role and sends no second mail; another role
-// answers 409 with type https://entire.com/errors/invitation/role-mismatch until the invitation is
-// revoked. An organization that enforces single sign-on admits no account by invitation: an add that
-// would invite into it answers 403 with type https://entire.com/errors/invitation/sso-required, and
-// the account joins by signing in through that single sign-on. Invitation mail to one account is
-// limited: 429 carries Retry-After. The invitation is created on the repository's home core: another
-// core answers 421.
+// https://entire.com/errors/invitation/required and writes nothing. The add checks allow_invitation
+// before the refusals that apply only to an invitation. A retry with allow_invitation therefore
+// invites the account unless this repository refuses invitations; the sentences below name those
+// refusals. 201 never carries an invitation. A repeat add reuses an open invitation for the same
+// role and sends no second mail; another role answers 409 with type https://entire.
+// com/errors/invitation/role-mismatch until the invitation is revoked. An organization that enforces
+// single sign-on admits no account by invitation: an add that would invite into it answers 403 with
+// type https://entire.com/errors/invitation/sso-required, and the account joins by signing in
+// through that single sign-on. The add also answers 409, with no type, for a repository of an
+// organization linked to GitHub or outside its project's region: such a repository admits no account
+// by invitation. Invitation mail to one account is limited: 429 carries Retry-After. The invitation
+// is created on the repository's home core: another core answers 421.
 //
 // POST /repos/{repoId}/grants
 func (c *Client) GrantRepoAccess(ctx context.Context, request *GrantAccessBody, params GrantRepoAccessParams) (GrantRepoAccessRes, error) {

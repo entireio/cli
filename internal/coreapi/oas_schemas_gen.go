@@ -601,9 +601,9 @@ type AddOrgMemberInputBody struct {
 	// A URL to the JSON Schema for this object.
 	Schema OptURI `json:"$schema"`
 	// Set true to let the add invite an account that is outside the organization. The add then answers
-	// 202 with an invitation. Without it, that add answers 409 with type https://entire.
-	// com/errors/invitation/required and writes nothing. The platform-admin routes ignore it: they
-	// always add directly.
+	// 202 with an invitation, unless the organization refuses invitations; the operation names that
+	// refusal. Without it, that add answers 409 with type https://entire.com/errors/invitation/required
+	// and writes nothing. The platform-admin routes ignore it: they always add directly.
 	AllowInvitation OptBool `json:"allow_invitation"`
 	Provider        string  `json:"provider"`
 	ProviderUserId  string  `json:"providerUserId"`
@@ -7328,7 +7328,8 @@ type GrantAccessBody struct {
 	// account must exist.
 	AccountId OptString `json:"accountId"`
 	// Set true to let the grant invite an account that is outside the parent scope. The grant then
-	// answers 202 with an invitation. Without it, that grant answers 409 with type https://entire.
+	// answers 202 with an invitation, unless the scope refuses invitations; the operation names those
+	// refusals. Without it, that grant answers 409 with type https://entire.
 	// com/errors/invitation/required and writes nothing. The platform-admin routes ignore it: they
 	// always grant directly.
 	AllowInvitation OptBool                       `json:"allow_invitation"`

@@ -191,7 +191,8 @@ server chose.
 The three add operations, `POST /orgs/{orgId}/members` (`addOrgMember`),
 `POST /projects/{projectId}/grants` (`grantProjectAccess`) and
 `POST /repos/{repoId}/grants` (`grantRepoAccess`), are spliced *ahead* of the
-deployed spec from the ENT-2652 branch of entiredb#5546: the whole `post`
+deployed spec from the ENT-2652 branch of entiredb#5546 at
+`77278396ace5e41f97e8955d21fcbc39ca63850d`: the whole `post`
 operation of each, the `allow_invitation` property of `AddOrgMemberInputBody`
 and `GrantAccessBody`, and the new `AccountInvited` schema (the 202 body). The
 421 responses reference `JurisdictionRedirectError`, which the deployed spec
