@@ -509,6 +509,58 @@ func TestDetectPII_AddressWordBoundaries(t *testing.T) {
 	}
 }
 
+// A street-line match extends through the locality that follows it: the
+// reporter's cases from #3143 plus secondary-unit and boundary lookalikes.
+func TestDetectPII_AddressLocalityTail(t *testing.T) {
+	t.Parallel()
+	cfg := &PIIConfig{
+		Enabled:    true,
+		Categories: map[PIICategory]bool{PIIAddress: true},
+	}
+	tests := []struct{ input, want string }{
+		// City + US region: the whole address collapses to one token.
+		{"Ship to 742 Evergreen Terrace, Springfield, OR 97477 by Friday",
+			"Ship to [REDACTED_ADDRESS] by Friday"},
+		{"1600 Pennsylvania Avenue NW, Washington, DC 20500",
+			"[REDACTED_ADDRESS]"},
+		{"1 Microsoft Way, Redmond, WA 98052-6399",
+			"[REDACTED_ADDRESS]"},
+		{"5 Main St, OR 97477", "[REDACTED_ADDRESS]"},
+		// Directional after the street suffix.
+		{"221 Baker Street NW, London", "[REDACTED_ADDRESS]"},
+		// City only.
+		{"Office: 221 Baker Street, London", "Office: [REDACTED_ADDRESS]"},
+		{"Deliver to 10 Downing Street, London by Friday",
+			"Deliver to [REDACTED_ADDRESS] by Friday"},
+		// UK postcode region.
+		{"221 Baker Street, London NW1 6XE", "[REDACTED_ADDRESS]"},
+		{"5 Main St, NW1 6XE", "[REDACTED_ADDRESS]"},
+		// Multi-word and punctuated cities.
+		{"9 Salt Lake City Rd, Salt Lake City, UT 84101",
+			"[REDACTED_ADDRESS]"},
+		{"3 Main St, St. Louis, MO 63101", "[REDACTED_ADDRESS]"},
+		// Sentence punctuation after the locality is preserved.
+		{"Live at 5 Main St, Springfield.", "Live at [REDACTED_ADDRESS]."},
+		// Secondary-unit designators are not localities on their own: the
+		// suite stays when no region vouches for the span, but a full
+		// "Street, Unit, City, ST ZIP" collapses to one token.
+		{"456 Oak Ave, Suite 5", "[REDACTED_ADDRESS], Suite 5"},
+		{"456 Oak Ave, Unit 12, Springfield, IL 62701", "[REDACTED_ADDRESS]"},
+		{"5 Main St, Suite 5, Meeting at noon", "[REDACTED_ADDRESS], Suite 5, Meeting at noon"},
+		{"Room 12, Building C", "Room 12, Building C"},
+		// A truncated ZIP+4 is refused rather than partially extended.
+		{"5 Main St, Springfield, IL 62701-12", "[REDACTED_ADDRESS], Springfield, IL 62701-12"},
+		// No street line, no claim: locality text alone is untouched.
+		{"Springfield, OR 97477", "Springfield, OR 97477"},
+		{"meet in, Room 4", "meet in, Room 4"},
+	}
+	for _, tt := range tests {
+		if got := redactPIIOnly(cfg, tt.input); got != tt.want {
+			t.Errorf("redactPIIOnly(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
 func TestDetectPII_PhoneDigitBoundaries(t *testing.T) {
 	t.Parallel()
 	cfg := &PIIConfig{
