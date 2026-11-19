@@ -38,6 +38,10 @@ const maxMCPMessageBytes = 1 << 20
 // mcpServerName is the MCP serverInfo name advertised at initialize.
 const mcpServerName = "entire"
 
+// mcpResultTypeComplete is the SEP-2575 DiscoverResult resultType for a fully
+// resolved discovery response.
+const mcpResultTypeComplete = "complete"
+
 func newMCPCmd(rootCmd *cobra.Command) *cobra.Command {
 	return &cobra.Command{
 		Use:   "mcp",
@@ -202,7 +206,7 @@ func mcpServerCapabilities() map[string]any {
 // lifecycle (no -32022 version errors, no subscriptions/listen).
 func mcpDiscoverResult() map[string]any {
 	return map[string]any{
-		"resultType":        "complete",
+		"resultType":        mcpResultTypeComplete,
 		"supportedVersions": []string{mcpProtocolVersion},
 		"capabilities":      mcpServerCapabilities(),
 		"_meta": map[string]any{
