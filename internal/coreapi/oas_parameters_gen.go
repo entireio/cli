@@ -402,6 +402,17 @@ type ListProjectCollaboratorsParams struct {
 	Search OptString `json:",omitempty,omitzero"`
 }
 
+// ListProjectInvitationsParams is parameters of listProjectInvitations operation.
+type ListProjectInvitationsParams struct {
+	// Maximum entries to return; server may cap further.
+	PageSize OptInt32 `json:",omitempty,omitzero"`
+	// Opaque cursor from a previous response's nextPageToken.
+	PageToken OptString `json:",omitempty,omitzero"`
+	ProjectId string
+	// Lifecycle state to return; all returns every state.
+	Status OptListProjectInvitationsStatus `json:",omitempty,omitzero"`
+}
+
 // ListProjectMembersParams is parameters of listProjectMembers operation.
 type ListProjectMembersParams struct {
 	// Maximum entries to return; server may cap further.
@@ -511,6 +522,17 @@ type ListRepoGrantsParams struct {
 	// Opaque cursor from a previous response's nextPageToken.
 	PageToken OptString `json:",omitempty,omitzero"`
 	RepoId    string
+}
+
+// ListRepoInvitationsParams is parameters of listRepoInvitations operation.
+type ListRepoInvitationsParams struct {
+	// Maximum entries to return; server may cap further.
+	PageSize OptInt32 `json:",omitempty,omitzero"`
+	// Opaque cursor from a previous response's nextPageToken.
+	PageToken OptString `json:",omitempty,omitzero"`
+	RepoId    string
+	// Lifecycle state to return; all returns every state.
+	Status OptListRepoInvitationsStatus `json:",omitempty,omitzero"`
 }
 
 // ListRepoLanguageFacetsParams is parameters of listRepoLanguageFacets operation.
@@ -728,6 +750,12 @@ type RevokeProjectAccessByProviderParams struct {
 	ProviderUserId string
 }
 
+// RevokeProjectInvitationParams is parameters of revokeProjectInvitation operation.
+type RevokeProjectInvitationParams struct {
+	ProjectId string
+	ID        string
+}
+
 // RevokeRepoAccessParams is parameters of revokeRepoAccess operation.
 type RevokeRepoAccessParams struct {
 	RepoId      string
@@ -740,6 +768,12 @@ type RevokeRepoAccessByProviderParams struct {
 	RepoId         string
 	Provider       string
 	ProviderUserId string
+}
+
+// RevokeRepoInvitationParams is parameters of revokeRepoInvitation operation.
+type RevokeRepoInvitationParams struct {
+	RepoId string
+	ID     string
 }
 
 // RevokeServiceAccountAccessParams is parameters of revokeServiceAccountAccess operation.
