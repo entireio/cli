@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -154,6 +155,16 @@ var summaryProviderBinaries = map[types.AgentName]string{
 	AgentNameOpenCode:    openCodeBinary,
 }
 
+// summaryProviderInstallDirs names, relative to the user's home, where an
+// agent's own installer puts its CLI without putting it on every process's
+// PATH. OpenCode's install script adds ~/.opencode/bin to PATH only in the
+// shell's rc file, so an OpenCode started without that shell (a desktop app,
+// a systemd or launchd service) runs Entire's hooks, and the git hooks its
+// agent's commits fire, without it.
+var summaryProviderInstallDirs = map[types.AgentName]string{
+	AgentNameOpenCode: filepath.Join(".opencode", "bin"),
+}
+
 // SummaryCLIBinaryName returns the CLI binary name for a summary-capable
 // agent (e.g. "claude" for ClaudeCode, "agent" for Cursor). Returns "" for
 // agents that are not summary-capable; callers should treat that as "we
@@ -162,18 +173,49 @@ func SummaryCLIBinaryName(name types.AgentName) string {
 	return summaryProviderBinaries[name]
 }
 
-// IsSummaryCLIAvailable reports whether the CLI binary for a summary-capable
-// agent is on PATH. This is distinct from DetectPresence, which checks
-// repo-level agent configuration — a repo configured with Claude Code for
-// development can still use Codex or Pi for summary generation as long
-// as the binary is installed.
-func IsSummaryCLIAvailable(name types.AgentName) bool {
+// SummaryCLIPath returns the executable for a summary-capable agent's CLI: the
+// binary on PATH, else the one in the agent's install directory
+// (summaryProviderInstallDirs). The OpenCode integration runs every opencode
+// command through it, so availability, generation and transcript export
+// resolve the same binary.
+//
+// A relative home is not used: the path would resolve against the working
+// directory, which inside a hook is the repository, and run a file committed
+// there.
+func SummaryCLIPath(name types.AgentName) (string, bool) {
 	binary := SummaryCLIBinaryName(name)
 	if binary == "" {
-		return false
+		return "", false
 	}
-	_, err := exec.LookPath(binary)
-	return err == nil
+	if path, err := exec.LookPath(binary); err == nil {
+		return path, true
+	}
+	dir, ok := summaryProviderInstallDirs[name]
+	if !ok {
+		return "", false
+	}
+	// Agent's $HOME, not Entire's; see userdirs.Home.
+	home, err := os.UserHomeDir()
+	if err != nil || !filepath.IsAbs(home) {
+		return "", false
+	}
+	// Given a path, LookPath checks only that file: it must exist and be
+	// executable (on Windows, carry a PATHEXT extension).
+	if path, err := exec.LookPath(filepath.Join(home, dir, binary)); err == nil {
+		return path, true
+	}
+	return "", false
+}
+
+// IsSummaryCLIAvailable reports whether the CLI binary for a summary-capable
+// agent is installed, on PATH or in its install directory (SummaryCLIPath).
+// This is distinct from DetectPresence, which checks repo-level agent
+// configuration — a repo configured with Claude Code for development can
+// still use Codex or Pi for summary generation as long as the binary is
+// installed.
+func IsSummaryCLIAvailable(name types.AgentName) bool {
+	_, ok := SummaryCLIPath(name)
+	return ok
 }
 
 // StripGitEnv removes every GIT_* variable. The match ignores case because

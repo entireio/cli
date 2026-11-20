@@ -92,7 +92,7 @@ func runOpenCodeExportToFile(ctx context.Context, root *os.Root, sessionID, outp
 // runOpenCodeExport runs one `opencode` export command with stdout to file
 // and returns its stderr and error.
 func runOpenCodeExport(ctx context.Context, file *os.File, args []string) (string, error) {
-	cmd := exec.CommandContext(ctx, "opencode", args...)
+	cmd := exec.CommandContext(ctx, openCodeExecutable(), args...)
 	// The npm launcher runs the real binary as a child that inherits stderr;
 	// killing only the launcher would leave Run waiting on that pipe past the
 	// deadline, and a commit's fetch budget depends on this cut-off. The new
@@ -201,7 +201,7 @@ func runOpenCodeSessionDelete(ctx context.Context, sessionID string) error {
 	ctx, cancel := context.WithTimeout(ctx, openCodeCommandTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "opencode", "session", "delete", sessionID)
+	cmd := exec.CommandContext(ctx, openCodeExecutable(), "session", "delete", sessionID)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return fmt.Errorf("opencode session delete timed out after %s", openCodeCommandTimeout)
@@ -223,7 +223,7 @@ func runOpenCodeImport(ctx context.Context, exportFilePath string) error {
 	ctx, cancel := context.WithTimeout(ctx, openCodeCommandTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "opencode", "import", exportFilePath)
+	cmd := exec.CommandContext(ctx, openCodeExecutable(), "import", exportFilePath)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return fmt.Errorf("opencode import timed out after %s", openCodeCommandTimeout)
@@ -240,7 +240,7 @@ func openCodeSessionExists(ctx context.Context, sessionID string) (bool, error) 
 	ctx, cancel := context.WithTimeout(ctx, openCodeCommandTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "opencode", detectOpenCodeCLI(ctx).exportArgs(sessionID)...)
+	cmd := exec.CommandContext(ctx, openCodeExecutable(), detectOpenCodeCLI(ctx).exportArgs(sessionID)...)
 	execx.TerminateOnCancel(cmd)
 	cmd.Env = gitrepo.EnvWithoutRepoOverrides()
 	var stderr bytes.Buffer
@@ -263,7 +263,7 @@ func runOpenCodeSessionImport(ctx context.Context, exportFilePath, dir string) e
 	ctx, cancel := context.WithTimeout(ctx, openCodeCommandTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "opencode", "session", "import", "--standalone", exportFilePath)
+	cmd := exec.CommandContext(ctx, openCodeExecutable(), "session", "import", "--standalone", exportFilePath)
 	execx.TerminateOnCancel(cmd)
 	cmd.Dir = dir
 	cmd.Env = gitrepo.EnvWithoutRepoOverrides()

@@ -98,8 +98,10 @@ func TestRunOpenCodeExportToFile_MissingBinary(t *testing.T) {
 	root := mustOpenRoot(t, t.TempDir())
 	const staged = ".export-ses_cached.json-1"
 
-	// Empty PATH makes the export fail deterministically without an opencode binary.
+	// Empty PATH and a home without OpenCode's install directory make the
+	// export fail deterministically without an opencode binary.
 	t.Setenv("PATH", "")
+	useHome(t, t.TempDir())
 
 	err := runOpenCodeExportToFile(context.Background(), root, "ses_cached", staged)
 	if err == nil {
@@ -131,6 +133,29 @@ func TestRunOpenCodeExportToFile_WritesStdoutToPath(t *testing.T) {
 		t.Fatalf("runOpenCodeExportToFile failed: %v", err)
 	}
 
+	got, err := os.ReadFile(filepath.Join(dir, staged))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != export {
+		t.Fatalf("exported transcript = %q, want %q", string(got), export)
+	}
+}
+
+// TestRunOpenCodeExportToFile_InstalledOffPath pins that a hook whose PATH
+// lacks OpenCode's install directory still exports the session.
+func TestRunOpenCodeExportToFile_InstalledOffPath(t *testing.T) {
+	// No t.Parallel: t.Setenv.
+	useOpenCodeCLI(t, false)
+	dir := t.TempDir()
+	root := mustOpenRoot(t, dir)
+	const staged = ".export-ses_off_path.json-1"
+	const export = `{"info":{"id":"ses_off_path"},"messages":[]}`
+	installOpenCode(t, "printf '%s' '"+export+"'\n")
+
+	if err := runOpenCodeExportToFile(t.Context(), root, "ses_off_path", staged); err != nil {
+		t.Fatalf("runOpenCodeExportToFile failed: %v", err)
+	}
 	got, err := os.ReadFile(filepath.Join(dir, staged))
 	if err != nil {
 		t.Fatal(err)
