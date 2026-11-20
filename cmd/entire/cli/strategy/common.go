@@ -459,24 +459,6 @@ func RedactionRulesUnloaded() error {
 	return errRedactionRulesUnloaded
 }
 
-// settingsDeclareRedaction reports whether either settings file has a top-level
-// "redaction" key, read raw because the typed load just failed. Unreadable
-// files count as declaring it: they could.
-func settingsDeclareRedaction(ctx context.Context) bool {
-	for _, load := range []func(context.Context) (string, map[string]json.RawMessage, bool, error){
-		settings.LoadProjectRaw, settings.LoadLocalRaw,
-	} {
-		_, raw, _, err := load(ctx)
-		if err != nil {
-			return true
-		}
-		if _, ok := raw["redaction"]; ok {
-			return true
-		}
-	}
-	return false
-}
-
 // EnsureRedactionConfigured loads redaction settings and configures the
 // redact package: scanner engines, PII detection (opt-in), inline
 // custom_redactions, and rule packs auto-discovered from .entire/redactors/.
@@ -518,7 +500,7 @@ func EnsureRedactionConfigured(ctx context.Context) error {
 			// rules or PII that now will not apply. Anything else (an
 			// unknown key from a newer CLI, an unrelated invalid field)
 			// leaves the built-ins and packs, which still load below.
-			if settingsDeclareRedaction(ctx) {
+			if settings.DeclaresRedaction(ctx) {
 				errRedactionRulesUnloaded = fmt.Errorf("load settings: %w", err)
 			}
 			s = &settings.EntireSettings{}

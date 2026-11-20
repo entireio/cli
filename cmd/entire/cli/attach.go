@@ -389,7 +389,7 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 	}
 
 	_, redactSpan := perf.Start(ctx, "redact_transcript")
-	redactedTranscript, redactErr := redact.JSONLBytes(transcriptData)
+	redactedTranscript, redactErr := redact.JSONLBytes(cpkg.DropImagesIfEnabled(ctx, transcriptData))
 	redactSpan.End()
 	if redactErr != nil {
 		return fmt.Errorf("failed to redact transcript: %w", redactErr)
