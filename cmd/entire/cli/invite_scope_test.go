@@ -197,7 +197,7 @@ func TestInviteRevoke_ByIDNotFound(t *testing.T) {
 			_, srv := newInviteCore(t, `{"invitations":[]}`, http.StatusNotFound)
 			out, _, err := runCoreCmd(t, tc.newCmd, srv.URL, "invite", "revoke", tc.ref, "--id", accountInviteULID)
 			require.NoError(t, err)
-			require.Equal(t, "the invitation "+accountInviteULID+" to "+tc.name+" "+tc.ref+": no such grant; nothing to revoke\n", out)
+			require.Equal(t, "the invitation "+accountInviteULID+" to "+tc.name+" "+tc.ref+": no such invitation; nothing to revoke\n", out)
 		})
 	}
 }

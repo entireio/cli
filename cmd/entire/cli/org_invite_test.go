@@ -324,7 +324,7 @@ func TestOrgInviteRevoke_IsIdempotentOnAMissingInvitation(t *testing.T) {
 
 	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "revoke", testOrgULID, "--email", testInviteEmail)
 	require.NoError(t, err)
-	assert.Contains(t, out, "no such grant; nothing to revoke")
+	assert.Contains(t, out, "no such invitation; nothing to revoke")
 }
 
 // The invite commands document the org by name only, so an unknown name must

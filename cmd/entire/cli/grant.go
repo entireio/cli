@@ -39,10 +39,7 @@ type grantTarget[Row any] struct {
 	leastRole   string   // the least-privileged of roles; help order runs least-first for access but most-first for org, so it is named rather than indexed
 	defaultRole string   // "" means --role is required; else the server default applied when --role is omitted
 	outsider    string   // who `add` invites rather than grants, for Long: reads after "An account that is"
-	// addDocumentedAs, when set, hides the add verb: another command is the
-	// documented way to make the same call, and this spelling stays runnable,
-	// with the same arguments, output and exit codes, only for scripts. The
-	// group's help and the verb's own help name that command.
+	// Keep add runnable for scripts, but point help to this command.
 	addDocumentedAs string
 	columns         []string
 	row             func(Row) []string
@@ -279,49 +276,27 @@ func reportNothingToAdd(cmd *cobra.Command, reason string) {
 	fmt.Fprintln(w, reason)
 }
 
-// grantOutcome is what one add did. invited is nil when access was granted;
-// otherwise the account was only invited and holds no access until it
-// accepts. role is the effective role: the server's for a grant left to the
-// default, the requested one (or the default) for an invitation, whose body
-// does not echo it. wire is the response body for --json.
 type grantOutcome struct {
 	role    string
 	invited *coreapi.AccountInvited
 	wire    any
 }
 
-// grantedOutcome and invitedOutcome build the two outcomes from a response.
 func grantedOutcome(role string, wire any) grantOutcome {
 	return grantOutcome{role: role, wire: wire}
 }
 
 func invitedOutcome(role string, inv *coreapi.AccountInvited) grantOutcome {
-	// Same defense as org invite send: ogen round-trips undeclared response
-	// properties into --json, so nothing the contract does not name is passed on.
+	// Keep undeclared invitation fields out of --json.
 	inv.AdditionalProps = nil
 	return grantOutcome{role: role, invited: inv, wire: inv}
 }
 
-// unexpectedGrantResponse covers the default arm of a switch over a generated
-// sum type; the decoder never returns another type.
 func unexpectedGrantResponse(res any) error {
 	return fmt.Errorf("unexpected response %T from the control plane", res)
 }
 
-// grantEach grants every pair in turn. A typed grantee is one add, and its
-// failure is the command's error as for any other mutation.
-//
-// A set (the picker) continues past a grantee Core refuses: already a member,
-// another role's invitation open, single sign-on required, an invitation sent
-// too recently — conditions of that person, which say nothing about the next
-// one. Each refusal is named on its own line, with Core's reason. The set
-// stops only at a failure that would repeat for every grantee (see
-// grantFailureIsFatal), and the tally counts who was not attempted.
-//
-// An invitation is a success: the add did what it could, and the account gets
-// access once it accepts. The command fails when any grantee was refused or a
-// failure stopped the set; the lines already printed are its report, so the
-// returned error is silent.
+// A refusal for one account fails the command but doesn't stop the batch.
 func grantEach[Row any](ctx context.Context, cmd *cobra.Command, c *coreapi.Client, t grantTarget[Row], pt grantPickerTarget, id string, picked []grantSelection, single bool) error {
 	wires := make([]any, 0, len(picked))
 	var tally grantTally
@@ -373,13 +348,8 @@ func grantOne[Row any](ctx context.Context, c *coreapi.Client, t grantTarget[Row
 	return t.grant(ctx, c, id, provider, providerUserID, p.role)
 }
 
-// problemTypeRoleMismatch is Core's 409 for an add whose account already has
-// an open invitation to the scope with another role. Its detail says to revoke
-// that invitation first.
 const problemTypeRoleMismatch = "https://entire.com/errors/invitation/role-mismatch"
 
-// roleMismatchHint names the commands that find and revoke the invitation a
-// role-mismatch refusal is about, or "" for any other failure.
 func roleMismatchHint[Row any](t grantTarget[Row], pt grantPickerTarget, err error) string {
 	if coreapi.APIErrorType(err) != problemTypeRoleMismatch {
 		return ""
@@ -387,9 +357,6 @@ func roleMismatchHint[Row any](t grantTarget[Row], pt grantPickerTarget, err err
 	return inviteHint(t.noun, pt.ref)
 }
 
-// withRoleMismatchHint is a typed grantee's error: Core's reason, and on the
-// next line the hint when there is one. The hint has to be in the error itself,
-// because main prints the error last, after anything written before it.
 func withRoleMismatchHint[Row any](t grantTarget[Row], pt grantPickerTarget, err error) error {
 	hint := roleMismatchHint(t, pt, err)
 	if hint == "" {
@@ -398,28 +365,9 @@ func withRoleMismatchHint[Row any](t grantTarget[Row], pt grantPickerTarget, err
 	return errors.New(renderCoreError(err).Error() + "\n" + hint)
 }
 
-// problemTypeSSORequired is Core's 403 for an invitation into an organization
-// that admits accounts only through its single sign-on.
 const problemTypeSSORequired = "https://entire.com/errors/invitation/sso-required"
 
-// grantFailureIsFatal reports a failed add that would fail the same way for
-// every other grantee in the set, so trying them only repeats it:
-//
-//   - 401: the caller is not authenticated;
-//   - 403 without the sso-required type: the caller may not manage the scope
-//     (or the caller itself is outside the org's single sign-on);
-//   - 421: the scope lives on another core and the redirect was not followed;
-//   - 5xx: Core or the authorization service is failing;
-//   - any failure that is not a Core problem response: transport, credentials,
-//     a cancelled context, an error body that does not decode (a text/plain
-//     rate limit, or a 5xx with no body), or a response the client does not
-//     model.
-//
-// Everything else is about the grantee: 400 and 422, 404 (the scope was
-// resolved just before the set began, so a 404 here is the grantee's account
-// or identity), 409 (already a member, another role's invitation open), 429
-// (invitation mail to that account is cooling down), the sso-required 403
-// (that account cannot be invited), and a handle that names no identity.
+// The scope was already resolved: a 404 here is about the grantee, not the scope.
 func grantFailureIsFatal(err error) bool {
 	status := coreapi.APIErrorStatus(err)
 	switch {
@@ -435,9 +383,6 @@ func grantFailureIsFatal(err error) bool {
 	}
 }
 
-// grantOutcomeLine is the text line for one add. An invitation is worded so it
-// cannot be read as access: it names the invitation and says the account has
-// none until it accepts, in org invite send's vocabulary and date format.
 func grantOutcomeLine(handle string, pt grantPickerTarget, o grantOutcome) string {
 	name := displayGranteeName(handle)
 	if o.invited == nil {
@@ -447,9 +392,6 @@ func grantOutcomeLine(handle string, pt grantPickerTarget, o grantOutcome) strin
 		name, pt.describe(), o.role, o.invited.InvitationID, o.invited.ExpiresAt.Format("2006-01-02"))
 }
 
-// grantTally counts a set's outcomes for the closing line of a picker run.
-// failed is the one failure that stopped the set, and skipped the grantees
-// after it.
 type grantTally struct {
 	granted, invited, refused, failed, skipped int
 }
@@ -732,9 +674,14 @@ func validateChoice(flag, value string, allowed []string) error {
 // as a no-op rather than surfaced as a raw error, matching runControlPlaneDelete.
 // subject describes the grant, e.g. "github:alice from repo /et/acme/web".
 func revokeGrant(cmd *cobra.Command, subject string, revoke func() error) error {
+	return revokeResource(cmd, subject, "grant", revoke)
+}
+
+// revokeResource reports a missing grant or invitation as a successful no-op.
+func revokeResource(cmd *cobra.Command, subject, kind string, revoke func() error) error {
 	if err := revoke(); err != nil {
 		if isCoreNotFound(err) {
-			fmt.Fprintf(cmd.OutOrStdout(), "%s: no such grant; nothing to revoke\n", subject)
+			fmt.Fprintf(cmd.OutOrStdout(), "%s: no such %s; nothing to revoke\n", subject, kind)
 			return nil
 		}
 		return err

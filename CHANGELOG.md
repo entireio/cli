@@ -5,17 +5,6 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
-
-### Added
-
-- `entire org invite send <org> --account <provider:handle>` invites an existing account, next to `--email` for an address. The account has no access until it accepts; the command prints the invitation ID and expiry date. It is the one documented way to add someone to an organization: on Entire's API an organization add invites every account that is not a member yet. `entire org grant add` makes the same call and keeps working for scripts, with the same arguments and output, but it is no longer listed in `entire org grant --help`, which now points at `org invite send` (ENT-2652)
-- `entire project invite list|revoke` and `entire repo invite list|revoke` show and revoke a project's or repository's invitations, as `entire org invite list|revoke` does for an organization. `invite revoke` takes `--id <invitation>` (the ID `invite list` and `grant add` print) as well as `--email`. Every `invite list` shows an invitation to an existing account by the account's handle (or account ID) instead of an email address, and `org invite list` no longer fails on such invitations. When `grant add` is refused because an invitation with another role is open, it names the commands that find and revoke it (ENT-2652)
-
-### Changed
-
-- `entire project grant add`, `entire repo grant add` and the organization add (`entire org invite send --account`, and the now hidden `entire org grant add`) handle invitations. Once Core requires consent, an account outside the organization (or, for a project or repo, outside its organization and project) is invited instead of granted: the command prints `✓ Invited … No access until they accept` with the invitation ID and expiry date, and `--json` prints `{"status":"invited","invitation_id":…,"expires_at":…}`. An invitation counts as success for the exit code. When you pick several grantees, a refusal for one of them (already a member, an open invitation with another role, single sign-on required, an invitation sent too recently) is printed with its reason and the others are still added; only a failure that would repeat for everyone (not signed in, no permission, Core unavailable) stops the run. The run ends with a count of how many were granted, invited and refused, and exits 1 if anyone was not added. Older CLI versions get an error for such an account once Core ships the change, so upgrade to add people from outside the organization (ENT-2652)
-
 ## [0.13.4] - 2026-11-13
 
 ### Added

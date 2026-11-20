@@ -11,21 +11,7 @@ import (
 	"github.com/entireio/cli/internal/coreapi"
 )
 
-// The `invite list` and `invite revoke` verbs of an org, a project and a repo:
-// one builder, three scopes, as the `grant` subtrees are. Org invitations and
-// project/repo invitations are different wire types (Invitation and
-// ResourceInvitation), so an inviteScope reads its own type through invitee,
-// which brings every invitation to the fields the verbs show and match on.
-//
-// An invitation is addressed to an email address or, since ENT-2652, to an
-// existing account: a grant add for an account outside the scope invites it.
-// The listing shows the address, or the account's handle where Core resolved
-// one, or else the bare account ID. `revoke` takes the invitation by --id,
-// which `invite list` and the `✓ Invited … (<id>)` line of `grant add` both
-// print, or by --email for an email invitation.
-
-// inviteScope describes one scope's invitations. Inv is the wire type of one
-// listing entry.
+// Org invitations and resource invitations have different wire types.
 type inviteScope[Inv any] struct {
 	noun       string // "org" | "project" | "repo": in Use, help and messages
 	prose      string // the noun in a sentence: "organization", "project", "repository"
@@ -51,8 +37,6 @@ type invitationView struct {
 	expiresAt        time.Time
 }
 
-// invitee is the INVITEE column: the address, or the account's handle, or its
-// ID when Core resolved no handle for it.
 func (v invitationView) invitee() string {
 	if v.email != "" {
 		return v.email
@@ -65,7 +49,6 @@ func (v invitationView) invitee() string {
 	return orDash(v.accountID)
 }
 
-// primaryHandle is the handle marked primary, else the first.
 func primaryHandle(handles []coreapi.AccountProfileHandle) (coreapi.AccountProfileHandle, bool) {
 	for _, h := range handles {
 		if h.IsPrimary {
@@ -78,8 +61,6 @@ func primaryHandle(handles []coreapi.AccountProfileHandle) (coreapi.AccountProfi
 	return handles[0], true
 }
 
-// invitationColumns leads with the invitation ULID, the handle `invite revoke
-// --id` takes.
 var invitationColumns = []string{"ID", "INVITEE", colHeaderRole, colHeaderStatus, "EXPIRES"}
 
 func (v invitationView) row() []string {
@@ -120,10 +101,7 @@ func newInviteListCmd[Inv any](s inviteScope[Inv]) *cobra.Command {
 	return cmd
 }
 
-// listAll reads every page of the scope's invitations in status, with the
-// undeclared response properties dropped: an invitation is the one object
-// with an accept token, and ogen round-trips any property the schema does not
-// declare verbatim into --json output.
+// Drop undeclared fields so --json cannot expose an acceptance token.
 func (s inviteScope[Inv]) listAll(ctx context.Context, c *coreapi.Client, id, status string) ([]Inv, error) {
 	invitations, err := fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]Inv, string, error) {
 		return s.list(ctx, c, id, status, cursor)
@@ -160,7 +138,7 @@ func newInviteRevokeCmd[Inv any](s inviteScope[Inv]) *cobra.Command {
 				}
 				target := s.noun + " " + args[0]
 				if invitationID != "" {
-					return revokeGrant(cmd, "the invitation "+invitationID+" to "+target, func() error {
+					return revokeResource(cmd, "the invitation "+invitationID+" to "+target, "invitation", func() error {
 						return s.revoke(ctx, c, id, invitationID)
 					})
 				}
@@ -175,7 +153,7 @@ func newInviteRevokeCmd[Inv any](s inviteScope[Inv]) *cobra.Command {
 					fmt.Fprintf(cmd.OutOrStdout(), "%s: no open invitation; nothing to revoke\n", subject)
 					return nil
 				}
-				return revokeGrant(cmd, subject, func() error {
+				return revokeResource(cmd, subject, "invitation", func() error {
 					return s.revoke(ctx, c, id, found)
 				})
 			})
@@ -188,11 +166,7 @@ func newInviteRevokeCmd[Inv any](s inviteScope[Inv]) *cobra.Command {
 	return cmd
 }
 
-// openInvitationIDForEmail finds the open invitation for an address, or ""
-// when the scope has none. The revoke route takes a ULID, so an email is
-// resolved through the listing. Only open invitations are searched: re-revoking
-// an accepted or revoked one is not what the user asked for. The server stores
-// the address lowercased, so the match folds case.
+// Core revokes by ID, so resolve --email against open invitations.
 func (s inviteScope[Inv]) openInvitationIDForEmail(ctx context.Context, c *coreapi.Client, id, email string) (string, error) {
 	invitations, err := s.listAll(ctx, c, id, "open")
 	if err != nil {
@@ -206,8 +180,6 @@ func (s inviteScope[Inv]) openInvitationIDForEmail(ctx context.Context, c *corea
 	return "", nil
 }
 
-// inviteHint names the commands that find and revoke an open invitation on
-// the scope ref addresses, for the refusal that says to revoke one first.
 func inviteHint(noun, ref string) string {
 	return fmt.Sprintf("Find the open invitation with `entire %s invite list %s`, then revoke it with `entire %s invite revoke %s --id <id>`.", noun, ref, noun, ref)
 }
@@ -225,11 +197,8 @@ func newScopeInviteCmd[Inv any](s inviteScope[Inv], extra ...*cobra.Command) *co
 func newProjectInviteCmd() *cobra.Command { return newScopeInviteCmd(projectInviteScope) }
 func newRepoInviteCmd() *cobra.Command    { return newScopeInviteCmd(repoInviteScope) }
 
-// orgInviteRefUsage is how the invite verbs address an org: by name only.
 const orgInviteRefUsage = "name"
 
-// orgInviteScope is the org's invitations. The invite verbs address an org by
-// name only, so resolveInviteOrg gives a miss that names only that way out.
 var orgInviteScope = inviteScope[coreapi.Invitation]{
 	noun:       cmdOrg,
 	prose:      "organization",
@@ -257,8 +226,6 @@ var orgInviteScope = inviteScope[coreapi.Invitation]{
 	scrub: func(i *coreapi.Invitation) { i.AdditionalProps = nil },
 }
 
-// projectInviteScope is a project's invitations, on a project addressed as
-// `project grant` addresses it.
 var projectInviteScope = inviteScope[coreapi.ResourceInvitation]{
 	noun:       projectGrantTarget.noun,
 	prose:      projectGrantTarget.noun,
@@ -284,8 +251,6 @@ var projectInviteScope = inviteScope[coreapi.ResourceInvitation]{
 	scrub: scrubResourceInvitation,
 }
 
-// repoInviteScope is a repo's invitations, on a repo addressed by its
-// /et/<project>/<repo> path as `repo grant` addresses it.
 var repoInviteScope = inviteScope[coreapi.ResourceInvitation]{
 	noun:       cmdRepo,
 	prose:      "repository",
