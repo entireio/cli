@@ -327,7 +327,7 @@ func grantEach[Row any](ctx context.Context, cmd *cobra.Command, c *coreapi.Clie
 			fmt.Fprintln(cmd.OutOrStdout(), grantOutcomeLine(p.handle, pt, outcome))
 		}
 	}
-	if single {
+	if single || len(picked) == 0 {
 		return emitGrantJSON(cmd, wires, single)
 	}
 	tally.report(cmd)

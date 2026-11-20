@@ -394,6 +394,7 @@ func TestGrantPicker_EmptyPoolWithJSONStaysParseable(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(out), &arr))
 	require.Empty(t, arr)
 	require.Contains(t, errOut, "already has a grant on it")
+	require.NotContains(t, errOut, "0 granted")
 }
 
 // TestGrantPicker_SelectingNobodyIsACleanStop: confirming an empty selection is
@@ -411,10 +412,11 @@ func TestGrantPicker_SelectingNobodyIsACleanStop(t *testing.T) {
 		return nil, nil
 	})
 
-	out, _, err := runPickerCmd(t, newProjectGrantCmd, srv.URL, pickerProjULID)
+	out, errOut, err := runPickerCmd(t, newProjectGrantCmd, srv.URL, pickerProjULID)
 	require.NoError(t, err)
 	require.Empty(t, grants)
-	require.NotContains(t, out, "✓")
+	require.Empty(t, out)
+	require.Empty(t, errOut)
 }
 
 // TestGrantPicker_UngrantableMembersAreDropped: a member with no handle or one
