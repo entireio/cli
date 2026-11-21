@@ -11,6 +11,7 @@ on:
           - ''
           - claude-code
           - opencode
+          - opencode-2
           - antigravity
           - factoryai-droid
           - cursor-cli
@@ -60,7 +61,7 @@ jobs:
             # always fetches the latest release, which has executed them since
             # 1.1.25. With the optional ANTIGRAVITY_GOOGLE_APPLICATION_CREDENTIALS_JSON
             # secret the leg runs on ADC instead.
-            echo 'agents=["claude-code","opencode","factoryai-droid","cursor-cli","copilot-cli","roger-roger","codex","antigravity"]' >> "$GITHUB_OUTPUT"
+            echo 'agents=["claude-code","opencode","opencode-2","factoryai-droid","cursor-cli","copilot-cli","roger-roger","codex","antigravity"]' >> "$GITHUB_OUTPUT"
           fi
 
   e2e-tests:
@@ -140,6 +141,9 @@ jobs:
           case "${{ matrix.agent }}" in
             claude-code) retry 'curl -fsSL --compressed https://claude.ai/install.sh | bash' ;;
             opencode)    retry 'curl -fsSL --compressed https://opencode.ai/install | bash' ;;
+            # OpenCode 2 ships only as @opencode/cli; pinned so a 2.x release
+            # cannot change this leg under unrelated PRs.
+            opencode-2)  retry 'npm install -g @opencode/cli@2.1.1' ;;
             antigravity)
               # Deliberately NOT pinned, because pinning agy does not work.
               # agy self-updates IN PLACE — the updater replaces the executable
@@ -199,6 +203,20 @@ jobs:
           printf '%s' "$ANTIGRAVITY_GOOGLE_APPLICATION_CREDENTIALS_JSON" > "$creds"
           echo "GOOGLE_APPLICATION_CREDENTIALS=$creds" >> "$GITHUB_ENV"
 
+      # The opencode leg's installer floats; if upstream ever points it at
+      # OpenCode 2, that leg would silently stop covering OpenCode 1.
+      - name: Check OpenCode major version
+        if: matrix.agent == 'opencode' || matrix.agent == 'opencode-2'
+        env:
+          LEG: ${{ matrix.agent }}
+        run: |
+          v=$(opencode --version)
+          echo "opencode --version: $v"
+          case "$LEG:$v" in
+            opencode:1.*|"opencode-2:opencode v2."*) ;;
+            *) echo "::error::the $LEG leg installed OpenCode $v"; exit 1 ;;
+          esac
+
       - name: Bootstrap agent
         if: matrix.agent != 'roger-roger'
         env:
@@ -233,7 +251,8 @@ jobs:
           if [ "${{ matrix.agent }}" = "roger-roger" ]; then
             mise run test:e2e:roger-roger "${TEST_FILTER:-TestExternalAgent}"
           else
-            mise run test:e2e --agent ${{ matrix.agent }} "$TEST_FILTER"
+            # opencode-2 is the opencode runner driving OpenCode 2.
+            mise run test:e2e --agent ${{ matrix.agent == 'opencode-2' && 'opencode' || matrix.agent }} "$TEST_FILTER"
           fi
 
       # opencode writes nothing to stdout or stderr while it stalls during
@@ -243,7 +262,7 @@ jobs:
       # waiting on, so fold it into the artifact tree. Best-effort: a leg that
       # never got as far as writing logs must not fail here.
       - name: Collect opencode logs
-        if: always() && matrix.agent == 'opencode'
+        if: always() && (matrix.agent == 'opencode' || matrix.agent == 'opencode-2')
         run: |
           mkdir -p e2e/artifacts/opencode-logs
           cp -R "$HOME/.local/share/opencode/log/." e2e/artifacts/opencode-logs/ || true

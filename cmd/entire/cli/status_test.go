@@ -3027,6 +3027,31 @@ func TestRunStatus_CheckpointSyncFailClosed(t *testing.T) {
 	}
 }
 
+// TestRunStatus_CheckpointSyncUnroutableStore: a checkpoint_remote the
+// developer owns (local settings) but no URL can be built for is withheld by
+// pre-push, so status must say checkpoints are not syncing rather than name
+// the elected remote as their destination.
+func TestRunStatus_CheckpointSyncUnroutableStore(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled": true}`)
+	writeLocalSettings(t, `{"strategy_options": {"checkpoint_remote": {"provider": "entire", "repo": "org/checkpoints"}}}`)
+	testutil.AddRemote(t, ".", originRemoteName, "https://github.com/org/repo.git")
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Checkpoints NOT syncing:") || !strings.Contains(out, `provider "entire"`) {
+		t.Errorf("expected not-syncing line naming the provider, got:\n%s", out)
+	}
+	if strings.Contains(out, "Checkpoints sync to:") {
+		t.Errorf("a withheld store must not report a destination, got:\n%s", out)
+	}
+}
+
 func TestRunStatus_CheckpointSyncHiddenWhenNoRemotes(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 	setupTestRepo(t)

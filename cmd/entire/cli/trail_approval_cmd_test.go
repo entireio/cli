@@ -36,7 +36,7 @@ func TestTrailRequestChangesIsRemoved(t *testing.T) {
 
 func TestTrailApprovalsPath(t *testing.T) {
 	t.Parallel()
-	const basePath = "/api/v1/repos/native-repo-id/trails"
+	const basePath = "/api/v1/repos/native-repo-id/changes"
 	got := trailApprovalsPath(basePath, 7)
 	if got != basePath+"/7/approvals" {
 		t.Fatalf("path = %q, want %q", got, basePath+"/7/approvals")

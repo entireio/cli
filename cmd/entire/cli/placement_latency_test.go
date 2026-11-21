@@ -252,11 +252,10 @@ func TestDialLatencies(t *testing.T) {
 
 	t.Run("omits a host that refuses the connection", func(t *testing.T) {
 		t.Parallel()
-		// A listener closed before the probe leaves a port nothing answers on,
-		// which is the reachable-then-gone case the ordering must survive.
-		ln := listenLoopback(t)
-		dead := ln.Addr().String()
-		require.NoError(t, ln.Close())
+		// Port 0 can never have a listener, so the dial fails at once. A
+		// closed listener's port is not safe: a parallel test can bind it
+		// before the probe, and the "dead" host then answers.
+		const dead = "127.0.0.1:0"
 
 		live := listen(t)
 		got := dialLatencies(t.Context(), []string{live, dead})

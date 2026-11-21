@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +19,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/antigravity"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
+	"github.com/entireio/cli/cmd/entire/cli/agent/factoryaidroid"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
@@ -1275,6 +1278,10 @@ func stubAgyOnPath(t *testing.T) {
 	t.Helper()
 	binDir := t.TempDir()
 	stub := filepath.Join(binDir, "agy")
+	if runtime.GOOS == "windows" {
+		// exec.LookPath on Windows finds only names with a PATHEXT extension.
+		stub += ".bat"
+	}
 	require.NoError(t, os.WriteFile(stub, []byte("#!/bin/sh\nexit 0\n"), 0o755))
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
@@ -1357,6 +1364,50 @@ func TestCheckAntigravityTitleTee_WarnsWhenNotConfigured(t *testing.T) {
 	require.Contains(t, out, "Antigravity title-tee: NOT CONFIGURED")
 	require.Contains(t, out, "token counts")
 	require.Contains(t, out, "entire agent add antigravity")
+}
+
+// TestCheckAntigravityTitleTee_WindowsWarnsWhenOutdated reports a title tee
+// an earlier version wrote on Windows, which still looks for `entire` in the
+// folder agy was opened in, and names the reinstall that rewrites it. The
+// title command is global, so the warning appears in a repository without
+// Antigravity hooks too. Without agy on PATH the install skips the title
+// command, so the warning would never clear and stays off.
+func TestCheckAntigravityTitleTee_WindowsWarnsWhenOutdated(t *testing.T) {
+	for _, agyOnPath := range []bool{true, false} {
+		t.Run("agy on PATH "+strconv.FormatBool(agyOnPath), func(t *testing.T) {
+			t.Cleanup(agent.SetWindowsHookProbeForTesting("windows", nil))
+			dir := setupGitRepoForPhaseTest(t)
+			// The check opens the worktree through the shared root registry,
+			// which keeps the directory open; Windows cannot remove it until
+			// that closes. Registered after t.TempDir, so it runs before the
+			// removal.
+			t.Cleanup(osroot.ResetShared)
+			t.Chdir(dir)
+			if agyOnPath {
+				stubAgyOnPath(t)
+			} else {
+				t.Setenv("PATH", t.TempDir())
+			}
+
+			cfgDir := filepath.Join(t.TempDir(), "agy")
+			require.NoError(t, os.MkdirAll(cfgDir, 0o750))
+			require.NoError(t, os.WriteFile(filepath.Join(cfgDir, "settings.json"),
+				[]byte(`{"title":{"type":"command","command":"entire hooks antigravity title-tee"}}`), 0o600))
+			t.Setenv("ENTIRE_ANTIGRAVITY_CONFIG_DIR", cfgDir)
+
+			cmd, stdout := newTestCmd(t)
+			checkAntigravityTitleTee(cmd)
+
+			out := stdout.String()
+			if !agyOnPath {
+				require.Empty(t, out)
+				return
+			}
+			require.Contains(t, out, "Antigravity title-tee: OUT OF DATE")
+			require.Contains(t, out, "In a repository that uses Antigravity, run `entire agent add antigravity`")
+			require.NotContains(t, out, "✓ Antigravity title-tee: OK")
+		})
+	}
 }
 
 // TestConfirmDoctorFix_CancelledContext verifies that a cancelled command
@@ -1628,7 +1679,7 @@ func TestCheckAgentDirSymlinks_ReportsIntermediateHookConfigDirs(t *testing.T) {
 		link   string
 	}{
 		{parent: ".pi", link: ".pi/extensions"},
-		{parent: ".opencode", link: ".opencode/plugins"},
+		{parent: ".opencode", link: ".opencode/plugin"},
 	} {
 		t.Run(tc.link, func(t *testing.T) {
 			dir := setupGitRepoForPhaseTest(t)
@@ -2161,6 +2212,32 @@ func TestCheckHookDrift_AntigravityWarnsWithoutSessionStart(t *testing.T) {
 	require.Contains(t, out, "Run `entire agent add antigravity` to update it.")
 }
 
+// TestCheckHookDrift_DroidWrittenForAnotherOS pins the doctor's report for a
+// hooks file installed on the other OS, such as one a teammate committed from
+// a Windows checkout: it names the cause and the reinstall, says what that
+// reinstall does to the committed file, and `entire status` still lists the
+// agent. Mutates the shared host and the working directory, so no t.Parallel().
+func TestCheckHookDrift_DroidWrittenForAnotherOS(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Cleanup(osroot.ResetShared)
+	t.Chdir(dir)
+	restore := agent.SetWindowsHookProbeForTesting("windows", nil)
+	_, err := (&factoryaidroid.FactoryAIDroidAgent{}).InstallHooks(context.Background(), false)
+	restore()
+	require.NoError(t, err)
+	t.Cleanup(agent.SetWindowsHookProbeForTesting("linux", nil))
+
+	cmd, stdout := newTestCmd(t)
+	checkHookDrift(cmd)
+
+	out := stdout.String()
+	require.Contains(t, out, "Factory AI Droid hooks: WRITTEN FOR ANOTHER OS")
+	require.Contains(t, out, "Run `entire agent add factoryai-droid` to rewrite it for this OS.")
+	require.Contains(t, out, "committed, that breaks it for teammates on the other OS.")
+	require.NotContains(t, out, "OUT OF DATE")
+	require.Contains(t, OutdatedHookAgents(context.Background()), types.AgentName("factoryai-droid"))
+}
+
 // oldEntirePrePushHook is the pre-push hook Entire wrote before it passed git's
 // ref list, exactly as the release generated it.
 const oldEntirePrePushHook = "#!/bin/sh\n# Entire CLI hooks\n# Pre-push hook: push session logs alongside user's push\n" +
@@ -2192,4 +2269,52 @@ func TestCheckGitHooks_PrePushBeforeRefList(t *testing.T) {
 	data, err := os.ReadFile(prePush)
 	require.NoError(t, err)
 	require.Equal(t, edited, string(data), "doctor --force must keep the user's own lines")
+}
+
+// A --depth=1 fetch of the remote metadata tip hides the real merge base, so
+// doctor sees DISCONNECTED. Its repair must deepen that branch and reconcile
+// again rather than refuse.
+func TestCheckDisconnectedMetadata_DeepFetchesWhenShallowHistoryHidesTheMergeBase(t *testing.T) {
+	// Cannot use t.Parallel(): t.Chdir and IsolateGitConfigEnv (t.Setenv)
+	// modify process-global state.
+	testutil.IsolateGitConfigEnv(t)
+	source := setupGitRepoForPhaseTest(t)
+	testutil.WriteFile(t, source, "f.txt", "init")
+	testutil.GitAdd(t, source, "f.txt")
+	testutil.GitCommit(t, source, "init")
+	defaultBranch := strings.TrimSpace(testutil.RunGit(t, source, "rev-parse", "--abbrev-ref", "HEAD"))
+	testutil.RunGit(t, source, "checkout", "--orphan", paths.MetadataBranchName)
+	testutil.RunGit(t, source, "rm", "-rf", ".")
+	commitMetadata := func(content, message string) {
+		testutil.WriteFile(t, source, "metadata.json", content)
+		testutil.GitAdd(t, source, "metadata.json")
+		testutil.GitCommit(t, source, message)
+	}
+	commitMetadata(`{"v":1}`, "Checkpoint: base")
+	testutil.RunGit(t, source, "checkout", defaultBranch)
+
+	dir := filepath.Join(t.TempDir(), "clone")
+	testutil.RunGit(t, source, "clone", source, dir)
+	trackingRef := "refs/remotes/origin/" + paths.MetadataBranchName
+	testutil.RunGit(t, dir, "update-ref", "refs/heads/"+paths.MetadataBranchName, trackingRef)
+	base := strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", trackingRef))
+
+	testutil.RunGit(t, source, "checkout", paths.MetadataBranchName)
+	commitMetadata(`{"v":2}`, "Checkpoint: teammate 1")
+	commitMetadata(`{"v":3}`, "Checkpoint: teammate 2")
+	testutil.RunGit(t, source, "checkout", defaultBranch)
+	testutil.RunGit(t, dir, "fetch", "--depth=1", "origin", "+refs/heads/"+paths.MetadataBranchName+":"+trackingRef)
+	t.Chdir(dir)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+
+	require.NoError(t, checkDisconnectedMetadata(cmd, true), stderr.String())
+
+	assert.Contains(t, stdout.String(), "Metadata branches: DISCONNECTED")
+	assert.Contains(t, stdout.String(), "Fixed")
+	testutil.RunGit(t, dir, "merge-base", "--is-ancestor", base, trackingRef)
 }

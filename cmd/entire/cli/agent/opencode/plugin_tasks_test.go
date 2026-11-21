@@ -16,7 +16,9 @@ const pluginTaskDriver = `
 import { pathToFileURL } from "node:url"
 import { readFileSync } from "node:fs"
 
-const { EntirePlugin } = await import(pathToFileURL(process.argv[2]).href)
+// OPENCODE=1 is set as OpenCode 1 sets it, so the default export is the
+// OpenCode 1 plugin.
+const { default: EntirePlugin } = await import(pathToFileURL(process.argv[2]).href)
 const handlers = await EntirePlugin({ directory: process.cwd() })
 for (const step of JSON.parse(readFileSync(process.argv[3], "utf8"))) {
   if (step.before) await handlers["tool.execute.before"](step.before, { args: {} })
@@ -71,7 +73,7 @@ func runPluginTaskScenario(t *testing.T, steps []map[string]any) []taskHook {
 	cmd := exec.CommandContext(t.Context(), "node", "--experimental-strip-types",
 		filepath.Join(dir, "driver.mjs"), pluginPath, filepath.Join(dir, "steps.json"))
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"), "OPENCODE=1")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("node driver failed: %v\n%s", err, out)
 	}

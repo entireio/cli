@@ -92,7 +92,7 @@ func FuzzReadSendPackRequest(f *testing.F) {
 	f.Add([]byte("0003"))
 
 	f.Fuzz(func(_ *testing.T, in []byte) {
-		var out bytes.Buffer
+		var out RequestBody
 		_ = ReadSendPackRequest(bufio.NewReader(bytes.NewReader(in)), &out) //nolint:errcheck // fuzz
 	})
 }

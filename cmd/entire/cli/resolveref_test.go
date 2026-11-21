@@ -1059,6 +1059,9 @@ func TestLooksLikeULID(t *testing.T) {
 		{in: "01J0ABCDEFGHLKMNPQRSTVWXYZ", want: false}, // contains L
 		{in: "01J0ABCDEFGHOKMNPQRSTVWXYZ", want: false}, // contains O
 		{in: "01J0ABCDEFGHUKMNPQRSTVWXYZ", want: false}, // contains U
+		{in: "71J0ABCDEFGHJKMNPQRSTVWXYZ", want: true},  // largest leading character
+		{in: "81ARZ3NDEKTSV4RRFFQ69G5RAA", want: false}, // overflows 128 bits
+		{in: "Z1J0ABCDEFGHJKMNPQRSTVWXYZ", want: false}, // overflows 128 bits
 	}
 	for _, tt := range tests {
 		t.Run(tt.in, func(t *testing.T) {

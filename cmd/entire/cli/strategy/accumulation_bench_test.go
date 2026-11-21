@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 
@@ -62,6 +63,7 @@ func TestPostCommit_Issue591_SubagentScaleRegression(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "test.txt"), []byte("session work"), 0o644))
 	_, err = wt.Add("test.txt")
 	require.NoError(t, err)
+	recordStampedTrailer(context.Background(), id.MustCheckpointID("a1b2c3d4e5f6"))
 	_, err = wt.Commit("commit session work\n\nEntire-Checkpoint: a1b2c3d4e5f6\n", &git.CommitOptions{
 		Author: &object.Signature{Name: "User", Email: "user@test.com", When: time.Now()},
 	})
@@ -76,6 +78,7 @@ func TestPostCommit_Issue591_SubagentScaleRegression(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "unrelated.txt"), []byte("unrelated"), 0o644))
 	_, err = wt.Add("unrelated.txt")
 	require.NoError(t, err)
+	recordStampedTrailer(context.Background(), id.MustCheckpointID("b1b2b3b4b5b6"))
 	_, err = wt.Commit("unrelated work\n\nEntire-Checkpoint: b1b2b3b4b5b6\n", &git.CommitOptions{
 		Author: &object.Signature{Name: "User", Email: "user@test.com", When: time.Now()},
 	})

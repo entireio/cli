@@ -26,12 +26,17 @@ func TestParsePrePushRefs(t *testing.T) {
 			"malformed line\n" +
 			"\n" +
 			v1 + " " + testSHA1 + " " + v1 + " " + zeroSHA + "\n" +
-			"(delete) " + zeroSHA + " refs/entire/checkpoints/ab/cdef " + testSHA2 + "\n"))
+			"(delete) " + zeroSHA + " refs/entire/checkpoints/ab/cdef " + testSHA2 + "\n" +
+			testSHA1 + " " + testSHA1 + " refs/heads/copy " + zeroSHA + "\n" +
+			"HEAD " + testSHA2 + " refs/heads/main " + testSHA1 + "\n"))
 	require.NoError(t, err)
 	require.Equal(t, []PrePushRef{
+		{LocalRef: "refs/heads/main", LocalSHA: testSHA1, RemoteRef: "refs/heads/main", RemoteSHA: testSHA2},
 		{LocalRef: v1, LocalSHA: testSHA1, RemoteRef: v1, RemoteSHA: zeroSHA},
 		{LocalRef: "(delete)", LocalSHA: zeroSHA, RemoteRef: "refs/entire/checkpoints/ab/cdef", RemoteSHA: testSHA2},
-	}, refs, "only lines that touch checkpoint refs are kept")
+		{LocalRef: testSHA1, LocalSHA: testSHA1, RemoteRef: "refs/heads/copy", RemoteSHA: zeroSHA},
+		{LocalRef: "HEAD", LocalSHA: testSHA2, RemoteRef: "refs/heads/main", RemoteSHA: testSHA1},
+	}, refs, "every line is kept: any ref, branch or tag can point at a waiting checkpoint's commit")
 }
 
 // A `--mirror` of a repository with many tags sends a long ref list; the v1
@@ -47,8 +52,10 @@ func TestParsePrePushRefs_LongListKeepsTheLastLine(t *testing.T) {
 
 	refs, err := ParsePrePushRefs(strings.NewReader(b.String()))
 	require.NoError(t, err)
-	require.Len(t, refs, 1)
-	require.Equal(t, testSHA2, refs[0].LocalSHA)
+	require.NotEmpty(t, refs)
+	last := refs[len(refs)-1]
+	require.Equal(t, v1, last.LocalRef)
+	require.Equal(t, testSHA2, last.LocalSHA)
 }
 
 // One line with an oversized ref name must not make the whole list unknown. A
@@ -91,8 +98,10 @@ func TestParsePrePushRefs_OversizedRefName(t *testing.T) {
 			t.Parallel()
 			refs, err := ParsePrePushRefs(strings.NewReader(tc.input))
 			require.NoError(t, err)
-			require.Len(t, refs, 1)
-			got := refs[0]
+			require.NotEmpty(t, refs)
+			// The line under test is the last one: lines before it must not
+			// hide it.
+			got := refs[len(refs)-1]
 			require.Equal(t, tc.want.LocalSHA, got.LocalSHA)
 			require.Equal(t, tc.want.RemoteSHA, got.RemoteSHA)
 			require.Equal(t, tc.want.Truncated, got.Truncated, "a line is marked when a field was cut short")
@@ -110,17 +119,11 @@ type failingReader struct{}
 
 func (failingReader) Read([]byte) (int, error) { return 0, errors.New("stdin went away") }
 
-// prePushRefsRecorded reports whether ctx carries a ref list, empty or not.
-func prePushRefsRecorded(ctx context.Context) bool {
-	_, ok := ctx.Value(prePushRefsKey{}).([]PrePushRef)
-	return ok
-}
-
 // A ref list that cannot be read leaves the refs unknown, as an old hook does,
 // rather than failing the user's push over it.
 func TestWithPrePushRefsFrom_UnreadableListIsUnknown(t *testing.T) {
 	t.Parallel()
-	require.False(t, prePushRefsRecorded(WithPrePushRefsFrom(context.Background(), failingReader{})))
-	require.True(t, prePushRefsRecorded(WithPrePushRefsFrom(context.Background(),
+	require.False(t, prePushRefsKnown(WithPrePushRefsFrom(context.Background(), failingReader{})))
+	require.True(t, prePushRefsKnown(WithPrePushRefsFrom(context.Background(),
 		strings.NewReader("refs/heads/main "+testSHA1+" refs/heads/main "+testSHA2+"\n"))))
 }

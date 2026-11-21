@@ -1221,7 +1221,7 @@ func TestSpawnedAgentIDs_StructuredIDWinsOverText(t *testing.T) {
 		"aold00000000001":    "toolu_old",
 		"aodd00000000001":    "toolu_odd",
 		"alate0000000001":    "toolu_late",
-	}, spawnedAgentIDs(data, parsed))
+	}, spawnedAgentIDs(data, parsed, readAnyResultText))
 }
 
 // An agent named only in the structured tool result — a forked skill's, or

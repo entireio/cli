@@ -15,7 +15,9 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
@@ -297,6 +299,21 @@ type ClonePreferences struct {
 	TrailsAgentHelpFailureRepoKey  string     `json:"trails_agent_help_failure_repo_key,omitempty"`
 	TrailsAgentHelpFailureAPIBase  string     `json:"trails_agent_help_failure_api_base,omitempty"`
 	TrailsAgentHelpFailureAuthKey  string     `json:"trails_agent_help_failure_auth_key,omitempty"`
+
+	// CheckpointPushQuestionBackoffUntil postpones the first-push policy
+	// question after it went unanswered, as an RFC 3339 time. A string rather
+	// than a time so a malformed value only brings the question back: a decode
+	// error would fail every clone-preferences read and turn Entire's git hooks
+	// off.
+	CheckpointPushQuestionBackoffUntil string `json:"checkpoint_push_question_backoff_until,omitempty"`
+
+	// OPFDeprecationNoticeShown records that pre-push told this clone OPF is
+	// deprecated, in place of the policy question.
+	OPFDeprecationNoticeShown bool `json:"opf_deprecation_notice_shown,omitempty"`
+
+	// unknown holds keys this binary does not model, written back unchanged so
+	// a rewrite by one version does not delete another version's preferences.
+	unknown map[string]json.RawMessage
 }
 
 // SummaryGenerationSettings configures provider selection for on-demand
@@ -368,6 +385,12 @@ type RedactionSettings struct {
 	// into the checkpoint's assets/ store (off by default). Restore re-injects
 	// them regardless of this flag.
 	ExternalizeImages bool `json:"externalize_images,omitempty"`
+
+	// DropImages opts into replacing every image in a stored transcript with a
+	// 1x1 placeholder image, so no image reaches the repository (off by
+	// default). On when either settings file enables it, and it takes
+	// precedence over ExternalizeImages.
+	DropImages bool `json:"drop_images,omitempty"`
 
 	// Betterleaks toggles the betterleaks scanner engine (layer 2 of the
 	// redaction stack). Omitted, or present with `enabled` omitted, means
@@ -1183,17 +1206,57 @@ func loadClonePreferencesFromFile(filePath string) (*ClonePreferences, error) {
 	//      typo-silently-ignored downside is theoretical here.
 	// EntireSettings stays strict because it's committed and team-edited,
 	// where unknown keys usually mean typos worth surfacing immediately.
-	if err := json.Unmarshal(data, prefs); err != nil {
+	//
+	// Unknown keys are kept, not dropped, so saving them back is lossless.
+	// Only exact known keys reach the struct: encoding/json matches field
+	// names case-insensitively, so decoding the whole object would let a case
+	// variant set a field and also be kept as unknown.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("parsing preferences file: %w", err)
+	}
+	knownKeys := clonePreferencesJSONKeys()
+	known := make(map[string]json.RawMessage, len(raw))
+	for key, value := range raw {
+		if _, ok := knownKeys[key]; ok {
+			known[key] = value
+			continue
+		}
+		if prefs.unknown == nil {
+			prefs.unknown = make(map[string]json.RawMessage)
+		}
+		prefs.unknown[key] = value
+	}
+	knownData, err := json.Marshal(known)
+	if err != nil {
+		return nil, fmt.Errorf("parsing preferences file: %w", err)
+	}
+	if err := json.Unmarshal(knownData, prefs); err != nil {
 		return nil, fmt.Errorf("parsing preferences file: %w", err)
 	}
 	return prefs, nil
 }
 
+// clonePreferencesJSONKeys holds the JSON key of every ClonePreferences
+// field, so a new field is recognized without a second list to update.
+var clonePreferencesJSONKeys = sync.OnceValue(func() map[string]struct{} {
+	t := reflect.TypeFor[ClonePreferences]()
+	keys := make(map[string]struct{}, t.NumField())
+	for field := range t.Fields() {
+		name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		if !field.IsExported() || name == "" || name == "-" {
+			continue
+		}
+		keys[name] = struct{}{}
+	}
+	return keys
+})
+
 func saveClonePreferencesToFile(prefs *ClonePreferences, filePath string) error {
 	if prefs == nil {
 		prefs = &ClonePreferences{}
 	}
-	data, err := jsonutil.MarshalIndentWithNewline(prefs, "", "  ")
+	data, err := marshalClonePreferences(prefs)
 	if err != nil {
 		return fmt.Errorf("marshaling preferences: %w", err)
 	}
@@ -1202,6 +1265,27 @@ func saveClonePreferencesToFile(prefs *ClonePreferences, filePath string) error 
 		return fmt.Errorf("writing preferences file: %w", err)
 	}
 	return nil
+}
+
+// marshalClonePreferences writes the modeled fields and then the unknown keys
+// loaded with them. Loading never keeps a modeled key as unknown, so the two
+// sets cannot collide.
+func marshalClonePreferences(prefs *ClonePreferences) ([]byte, error) {
+	if len(prefs.unknown) == 0 {
+		return jsonutil.MarshalIndentWithNewline(prefs, "", "  ") //nolint:wrapcheck // caller wraps
+	}
+	modeled, err := json.Marshal(prefs)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // caller wraps
+	}
+	merged := make(map[string]json.RawMessage, len(prefs.unknown))
+	if err := json.Unmarshal(modeled, &merged); err != nil {
+		return nil, err //nolint:wrapcheck // caller wraps
+	}
+	for key, value := range prefs.unknown {
+		merged[key] = value
+	}
+	return jsonutil.MarshalIndentWithNewline(merged, "", "  ") //nolint:wrapcheck // caller wraps
 }
 
 // mergeReviewProfiles overlays src review profiles onto base by name, returning
@@ -1217,7 +1301,7 @@ func saveClonePreferencesToFile(prefs *ClonePreferences, filePath string) error 
 // result is always a fresh, non-nil map (empty when both inputs are empty), so
 // callers never receive nil from a non-nil input.
 func mergeReviewProfiles(base, src map[string]ReviewProfileConfig) map[string]ReviewProfileConfig {
-	out := make(map[string]ReviewProfileConfig, len(base)+len(src))
+	out := make(map[string]ReviewProfileConfig, len(base))
 	for name, cfg := range base {
 		out[name] = cfg
 	}
@@ -1640,6 +1724,15 @@ func mergeRedaction(dst *RedactionSettings, data json.RawMessage) error {
 		}
 		dst.ExternalizeImages = v
 	}
+	if dropRaw, ok := raw["drop_images"]; ok {
+		var v bool
+		if err := json.Unmarshal(dropRaw, &v); err != nil {
+			return fmt.Errorf("parsing redaction.drop_images: %w", err)
+		}
+		// An override can turn the drop on but never off: a local file must
+		// not store images the committed settings keep out of the repository.
+		dst.DropImages = dst.DropImages || v
+	}
 
 	// Scanner engine selection affects everyone who reads the repo's
 	// checkpoints, so it is honored from the committed settings file only.
@@ -1912,15 +2005,55 @@ func IsSummarizeEnabled(ctx context.Context) bool {
 // lifted out of transcripts into the checkpoint asset store. Opt-in via
 // redaction.externalize_images, or the ENTIRE_EXTERNALIZE_IMAGES=1 env override
 // (handy for testing/rollout). Off by default.
+//
+// Always off while image dropping is on: a dropped image must not be stored as
+// an asset either.
 func IsImageExternalizationEnabled(ctx context.Context) bool {
+	requested := false
 	if v := os.Getenv("ENTIRE_EXTERNALIZE_IMAGES"); v == "1" || v == "true" {
-		return true
+		requested = true
+	} else if s, err := Load(ctx); err == nil {
+		requested = s.Redaction != nil && s.Redaction.ExternalizeImages
 	}
-	s, err := Load(ctx)
-	if err != nil {
+	if requested && IsImageDropEnabled(ctx) {
+		warnExternalizeIgnoredOnce.Do(func() {
+			logging.Warn(ctx, "redaction.externalize_images is ignored while redaction.drop_images is on")
+		})
 		return false
 	}
-	return s.Redaction != nil && s.Redaction.ExternalizeImages
+	return requested
+}
+
+var warnExternalizeIgnoredOnce sync.Once
+
+// IsImageDropEnabled reports whether images are replaced with a placeholder in
+// stored transcripts (redaction.drop_images, off by default). Settings that
+// fail to load count as enabled when either file declares a redaction block,
+// since that block could hold the setting.
+func IsImageDropEnabled(ctx context.Context) bool {
+	s, err := Load(ctx)
+	if err != nil {
+		return DeclaresRedaction(ctx)
+	}
+	return s.Redaction != nil && s.Redaction.DropImages
+}
+
+// DeclaresRedaction reports whether either settings file has a top-level
+// "redaction" key, read raw for callers whose typed load just failed.
+// Unreadable files count as declaring it: they could.
+func DeclaresRedaction(ctx context.Context) bool {
+	for _, load := range []func(context.Context) (string, map[string]json.RawMessage, bool, error){
+		LoadProjectRaw, LoadLocalRaw,
+	} {
+		_, raw, _, err := load(ctx)
+		if err != nil {
+			return true
+		}
+		if _, ok := raw["redaction"]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // IsSummarizeEnabled checks if auto-summarize is enabled in this settings instance.

@@ -125,6 +125,7 @@ func TestReviewInteractivityHardDisabled(t *testing.T) {
 		{name: "test override disables", testTTY: "0", want: true},
 		{name: "CI disables", ci: "true", want: true},
 		{name: "CI false does not disable", ci: "false", want: false},
+		{name: "CI 0 does not disable", ci: "0", want: false},
 		{name: "normal process", want: false},
 	}
 	for _, tt := range tests {

@@ -213,6 +213,8 @@ type fakeProjectCore struct {
 	created  *coreapi.CreateProjectInputBody
 	// omitOwnerName leaves the optional ownerName out of the create response.
 	omitOwnerName bool
+	// ignoreCell answers like a core that predates the cell field.
+	ignoreCell bool
 }
 
 func (f *fakeProjectCore) handler(t *testing.T) http.HandlerFunc {
@@ -257,6 +259,7 @@ func (f *fakeProjectCore) handler(t *testing.T) http.HandlerFunc {
 			}
 			reply(`{"id":"01HZX7QPR0JECT000000000000","name":"` + body.Name + `","ownerId":"` + body.OwnerId + `",` +
 				ownerField + `"ownerType":"` + string(body.OwnerType) + `","region":"` + body.Region.Or("us") +
+				`","primaryProcessingCell":"` + f.respondedCell(body) +
 				`","createdAt":"2026-01-01T00:00:00Z"}`)
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
@@ -361,6 +364,7 @@ func TestProjectCreate_FlagsNeverSeedTheWizard(t *testing.T) {
 		{"--owner-type", "account", "--region", "us"},
 		{"--owner", ""},
 		{"widgets", "--region", ""},
+		{"widgets", "--cell", "aws-us-east-2"},
 	} {
 		_, err := execProjectCreate(t, args...)
 		require.ErrorContains(t, err, "required:\n  entire project create <name> --owner <org>", args)
@@ -816,5 +820,47 @@ func TestProjectCreateState_WizardLowercasesTypedNames(t *testing.T) {
 	require.EqualError(t, s.validateName("WIDGETS"), `Acme already has a project named "widgets"`, "checked as lowercased")
 	for _, id := range []string{testWizardAcmeULID, strings.ToLower(testWizardAcmeULID)} {
 		require.EqualError(t, s.validateName(id), projectNameNotID, id)
+	}
+}
+
+// --cell is sent as given and the server's chosen cell is echoed back.
+func TestProjectCreate_CellFlagIsSent(t *testing.T) {
+	fake := newProjectCoreFixture(t)
+	out, err := execProjectCreate(t, "widgets", "--owner", "acme", "--region", "us", "--cell", "aws-us-east-2")
+	require.NoError(t, err)
+	require.NotNil(t, fake.created)
+	assert.Equal(t, "aws-us-east-2", fake.created.Cell.Or(""))
+	assert.Equal(t, "✓ Created project widgets in us, cell aws-us-east-2\n", out)
+}
+
+// An omitted --cell stays omitted so the server picks the default cell.
+func TestProjectCreate_NoCellFlagOmitsCell(t *testing.T) {
+	fake := newProjectCoreFixture(t)
+	_, err := execProjectCreate(t, "widgets", "--owner", "acme")
+	require.NoError(t, err)
+	require.NotNil(t, fake.created)
+	assert.False(t, fake.created.Cell.IsSet(), "the server picks the cell")
+}
+
+func (f *fakeProjectCore) respondedCell(body coreapi.CreateProjectInputBody) string {
+	if f.ignoreCell {
+		return ""
+	}
+	return body.Cell.Or("")
+}
+
+// A core that ignores --cell still creates the project, so the command
+// reports the project and then fails, under --json too.
+func TestProjectCreate_IgnoredCellFails(t *testing.T) {
+	for _, asJSON := range []bool{false, true} {
+		fake := newProjectCoreFixture(t)
+		fake.ignoreCell = true
+		args := []string{"widgets", "--owner", "acme", "--cell", "aws-us-east-2"}
+		if asJSON {
+			args = append(args, "--json")
+		}
+		out, err := execProjectCreate(t, args...)
+		require.ErrorContains(t, err, "project widgets was created in no cell, not aws-us-east-2; the server ignored --cell")
+		assert.Contains(t, out, "widgets", "the created project is still reported")
 	}
 }

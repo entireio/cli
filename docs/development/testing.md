@@ -38,6 +38,10 @@ not part of `check`). On a fresh machine run
 the current user and, on Windows PowerShell 5.1, the NuGet package provider
 that `Install-Module` needs there.
 
+### Commit Signing Tests
+
+The `session attach` signing tests (`cmd/entire/cli/attach_signing_test.go`) run once per git signing format: SSH (`ssh-keygen`), OpenPGP (`gpg`) and X.509 (`gpgsm`). Each makes throwaway keys in a per-test `GNUPGHOME` or temp directory, never your own keyring. A format whose tool isn't on `PATH` is skipped, so macOS without GnuPG runs only SSH. CI installs all three and sets `ENTIRE_TEST_REQUIRE_COMMIT_SIGNERS=1`, which turns a skip into a failure. To run every format locally without installing GnuPG, run the tests in a Debian container: `golang:<version>-bookworm` ships all three tools.
+
 ### Running All Tests (CI)
 
 ```bash

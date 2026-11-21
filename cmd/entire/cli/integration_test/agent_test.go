@@ -749,7 +749,7 @@ func TestOpenCodeHookInstallation(t *testing.T) {
 		}
 
 		// Verify plugin file was created
-		pluginPath := filepath.Join(env.RepoDir, ".opencode", "plugins", "entire.ts")
+		pluginPath := filepath.Join(env.RepoDir, ".opencode", "plugin", "entire.ts")
 		if _, err := os.Stat(pluginPath); os.IsNotExist(err) {
 			t.Error("entire.ts plugin was not created")
 		}

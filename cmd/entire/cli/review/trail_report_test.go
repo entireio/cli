@@ -49,7 +49,7 @@ func postedTrailReport(t *testing.T, summary reviewtypes.RunSummary, aggregate s
 		got = report
 		return nil
 	}}
-	maybePostReviewToTrail(context.Background(), &out, deps, ReviewOutputTrail, "general", summary, aggregate)
+	maybePostReviewToTrail(context.Background(), &out, deps, ReviewOutputTrail, "general", TrailScope{}, summary, aggregate)
 	return got, called, out.String()
 }
 

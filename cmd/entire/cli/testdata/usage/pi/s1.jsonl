@@ -1,0 +1,4 @@
+{"type":"session","id":"s1"}
+{"type":"message","id":"m1","message":{"role":"user","content":[{"type":"text","text":"go"}]}}
+{"type":"message","id":"m2","parentId":"m1","message":{"role":"assistant","content":[],"usage":{"input":100,"output":50,"cacheRead":10,"cacheWrite":5}}}
+{"type":"message","id":"m3","parentId":"m1","message":{"role":"assistant","content":[],"usage":{"input":30,"output":20,"cacheRead":110,"cacheWrite":0}}}

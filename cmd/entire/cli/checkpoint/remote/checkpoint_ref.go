@@ -401,6 +401,20 @@ func HookCheckpointRefFetcher() func(context.Context, plumbing.ReferenceName) er
 	}
 }
 
+// HookCheckpointRefFetcherFrom is HookCheckpointRefFetcher over the
+// read-candidate chain (see FetchCheckpointRefFrom), with the whole chain under
+// one write-probe budget. A hook about to seed a local checkpoint ref from v1
+// needs the elected remote to prove the ref absent: once checkpoint_push_remote
+// elects a remote other than origin, the single-target probe asks origin, which
+// cannot certify absence, and the hook would never go ahead.
+func HookCheckpointRefFetcherFrom(readRemotes []string, electionErr error) func(context.Context, plumbing.ReferenceName) error {
+	return func(ctx context.Context, ref plumbing.ReferenceName) error {
+		ctx, cancel := context.WithTimeout(WithNonInteractiveSSH(ctx), WriteProbeFetchBudget)
+		defer cancel()
+		return fetchCheckpointRefFrom(ctx, ref, readRemotes, WriteProbeFetchBudget, WriteProbeFetchBudget, electionErr)
+	}
+}
+
 // BoundedCheckpointRefFetcher returns a RefFetchFunc-shaped fetcher whose
 // per-call budget is capped at d, for wiring into write-path checkpoint
 // stores (see WriteProbeFetchBudget).

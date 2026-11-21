@@ -17,6 +17,7 @@ package userdirs
 import (
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
 	"runtime"
 
@@ -108,6 +109,37 @@ func CacheDirChecked() (string, error) {
 	return cacheDir()
 }
 
+// geteuid is swapped out by tests.
+var geteuid = os.Geteuid
+
+// Home returns the home directory for Entire's own files: config, cache,
+// and managed plugins.
+//
+// Entire's own files follow Entire's home: passwd for root, like ssh. Files
+// written by other programs (agent transcripts, agent hooks, shell rc files)
+// follow that program's home, because that's where they are. Those programs
+// read $HOME, so their lookups use os.UserHomeDir, not this; see
+// agent.ResolveHome.
+//
+// Why root ignores $HOME: under `sudo -E`, or anything else that keeps the
+// caller's environment, $HOME is chosen by a non-root user. Following it
+// would make root read its config and credentials from, and write
+// root-owned files into, a directory that user controls. The passwd entry
+// is root-owned, so it can't be redirected that way. Without $HOME at all
+// (systemd system units, bare containers) passwd is the only sound answer too.
+//
+// Everyone else keeps $HOME, so HOME-based isolation still works.
+// ENTIRE_CONFIG_DIR and the other explicit overrides beat this. Windows uses
+// os.UserHomeDir unchanged.
+func Home() (string, error) {
+	if runtime.GOOS != "windows" && (geteuid() == 0 || os.Getenv("HOME") == "") {
+		if u, err := user.Current(); err == nil && u.HomeDir != "" {
+			return u.HomeDir, nil
+		}
+	}
+	return os.UserHomeDir() //nolint:wrapcheck // callers wrap or fall back
+}
+
 // configDir is Config with the override check, for the callers that can report.
 func configDir() (string, error) {
 	if dir := os.Getenv(EnvConfigDir); dir != "" {
@@ -116,7 +148,7 @@ func configDir() (string, error) {
 	if dir, ok := testdirs.Dir("config"); ok {
 		return dir, nil
 	}
-	home, err := os.UserHomeDir()
+	home, err := Home()
 	if err != nil {
 		// nil error deliberately: a machine with no resolvable home is not a
 		// user error to report, and ownFallbackDir returns something usable.
@@ -140,7 +172,7 @@ func cacheDir() (string, error) {
 	if dir, ok := testdirs.Dir("cache"); ok {
 		return filepath.Join(dir, "entire"), nil
 	}
-	home, err := os.UserHomeDir()
+	home, err := Home()
 	if err != nil {
 		// See configDir: the fallback is usable, so there is nothing to report.
 		return ownFallbackDir(".cache", "entire"), nil //nolint:nilerr // see ownFallbackDir
@@ -149,7 +181,7 @@ func cacheDir() (string, error) {
 }
 
 // ownFallbackDir builds the home-relative default for a machine where
-// os.UserHomeDir fails, resolved to an absolute path.
+// Home fails, resolved to an absolute path.
 //
 // The absolutization is the point, and it belongs HERE rather than at each
 // consumer, because this is the only place that still knows the difference

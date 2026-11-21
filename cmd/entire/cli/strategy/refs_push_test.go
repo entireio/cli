@@ -17,7 +17,9 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 )
@@ -44,10 +46,710 @@ func TestPartitionLocalRefs(t *testing.T) {
 	require.NoError(t, err)
 
 	stale := mustRefName(t, id.MustCheckpointID("ffffffffffff"))
-	existing, missing := partitionLocalRefs(repo, append([]plumbing.ReferenceName{stale}, refs...))
+	existing, missing, _ := partitionLocalRefs(t.Context(), repo, append([]plumbing.ReferenceName{stale}, refs...))
 
 	assert.ElementsMatch(t, refs, existing, "local refs are pushable")
 	assert.Equal(t, []plumbing.ReferenceName{stale}, missing, "absent ref is stale")
+}
+
+// partitionScenario is a repository and a queue to split. listed names every
+// ref the namespace listing must report, by its on-disk name. tips maps refs to
+// the revision localTip must resolve them to.
+type partitionScenario struct {
+	workDir                         string
+	queued, existing, stale, listed []plumbing.ReferenceName
+	tips                            map[plumbing.ReferenceName]string
+	// gitFallback marks a repo whose go-git walk fails, so the listing only
+	// decides existence and exposes no tips.
+	gitFallback bool
+}
+
+// writeRefFile writes content as ref's loose file, bypassing git's checks.
+func writeRefFile(t *testing.T, workDir string, ref plumbing.ReferenceName, content string) {
+	t.Helper()
+	path := filepath.Join(workDir, ".git", filepath.FromSlash(ref.String()))
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+}
+
+// foldedShardFixture stores a checkpoint ref under the other spelling of its
+// shard, the way a case-insensitive filesystem does when that directory
+// already exists, and returns the stored name and the name the queue holds.
+// It plants the stored name instead of relying on the filesystem, so the
+// result is the same on a case-sensitive one.
+func foldedShardFixture(t *testing.T, workDir, tip string) (stored, queued plumbing.ReferenceName) {
+	t.Helper()
+	// Where the folded spelling exists, git recorded a case-insensitive
+	// filesystem; set it so these tests read both spellings on every OS.
+	testutil.RunGit(t, workDir, "config", "core.ignorecase", "true")
+	stored = plumbing.ReferenceName(checkpoint.CheckpointRefPrefix + "AB/0000000000ab")
+	queued = mustRefName(t, id.MustCheckpointID("0000000000ab"))
+	require.NotEqual(t, stored, queued)
+	testutil.RunGit(t, workDir, "update-ref", stored.String(), tip)
+	return stored, queued
+}
+
+func TestPartitionLocalRefsUsing(t *testing.T) {
+	t.Parallel()
+	stale := mustRefName(t, id.MustCheckpointID("ffffffffffff"))
+	scenarios := []struct {
+		name  string
+		build func(t *testing.T) partitionScenario
+	}{
+		{"keeps queue order", func(t *testing.T) partitionScenario {
+			t.Helper()
+			workDir, _, refs := setupRepoWithCheckpointRefs(t)
+			return partitionScenario{
+				workDir:  workDir,
+				queued:   []plumbing.ReferenceName{refs[1], stale, refs[0]},
+				existing: []plumbing.ReferenceName{refs[1], refs[0]},
+				stale:    []plumbing.ReferenceName{stale},
+				listed:   refs,
+			}
+		}},
+		{"packed refs", func(t *testing.T) partitionScenario {
+			t.Helper()
+			workDir, _, refs := setupRepoWithCheckpointRefs(t)
+			testutil.RunGit(t, workDir, "pack-refs", "--all")
+			return partitionScenario{
+				workDir:  workDir,
+				queued:   append([]plumbing.ReferenceName{stale}, refs...),
+				existing: refs,
+				stale:    []plumbing.ReferenceName{stale},
+				listed:   refs,
+			}
+		}},
+		// The empty file aborts the go-git walk, and git for-each-ref skips both
+		// broken files. go-git reads an empty ref file as absent and an
+		// unparsable one as an error, which keeps it queued.
+		{"broken ref files", func(t *testing.T) partitionScenario {
+			t.Helper()
+			workDir, _, refs := setupRepoWithCheckpointRefs(t)
+			empty := mustRefName(t, id.MustCheckpointID("eeeeeeeeeee1"))
+			garbage := mustRefName(t, id.MustCheckpointID("eeeeeeeeeee2"))
+			writeRefFile(t, workDir, empty, "")
+			writeRefFile(t, workDir, garbage, "not a hash\n")
+			return partitionScenario{
+				workDir:     workDir,
+				queued:      append([]plumbing.ReferenceName{empty, garbage}, refs...),
+				existing:    append([]plumbing.ReferenceName{garbage}, refs...),
+				stale:       []plumbing.ReferenceName{empty},
+				gitFallback: true,
+			}
+		}},
+		// The listing reports the on-disk shard case. The queued name is the
+		// pushable one whichever case the ref is stored under, and its tip is
+		// the stored ref's.
+		{"case-folded shard", func(t *testing.T) partitionScenario {
+			t.Helper()
+			workDir, _, refs := setupRepoWithCheckpointRefs(t)
+			stored, queued := foldedShardFixture(t, workDir, "HEAD")
+			return partitionScenario{
+				workDir:  workDir,
+				queued:   []plumbing.ReferenceName{queued},
+				existing: []plumbing.ReferenceName{queued},
+				listed:   append([]plumbing.ReferenceName{stored}, refs...),
+				tips:     map[plumbing.ReferenceName]string{queued: stored.String()},
+			}
+		}},
+		// Packing ends the filesystem's case-insensitive lookup: packed-refs
+		// matches names exactly, so only the stored name resolves. The split
+		// must not change when git packs the ref.
+		{"packed case-folded shard", func(t *testing.T) partitionScenario {
+			t.Helper()
+			workDir, _, refs := setupRepoWithCheckpointRefs(t)
+			stored, queued := foldedShardFixture(t, workDir, "HEAD")
+			testutil.RunGit(t, workDir, "pack-refs", "--all")
+			return partitionScenario{
+				workDir:  workDir,
+				queued:   []plumbing.ReferenceName{queued},
+				existing: []plumbing.ReferenceName{queued},
+				listed:   append([]plumbing.ReferenceName{stored}, refs...),
+				tips:     map[plumbing.ReferenceName]string{queued: stored.String()},
+			}
+		}},
+		// The go-git listing leaves a symbolic ref to the resolving lookup.
+		{"symbolic ref", func(t *testing.T) partitionScenario {
+			t.Helper()
+			workDir, _, refs := setupRepoWithCheckpointRefs(t)
+			symbolic := mustRefName(t, id.MustCheckpointID("0000000000aa"))
+			testutil.RunGit(t, workDir, "commit", "--allow-empty", "-m", "symbolic target")
+			testutil.RunGit(t, workDir, "update-ref", "refs/heads/target", "HEAD")
+			testutil.RunGit(t, workDir, "symbolic-ref", symbolic.String(), "refs/heads/target")
+			return partitionScenario{
+				workDir:  workDir,
+				queued:   []plumbing.ReferenceName{symbolic, refs[0]},
+				existing: []plumbing.ReferenceName{symbolic, refs[0]},
+				listed:   refs,
+				tips:     map[plumbing.ReferenceName]string{symbolic: "refs/heads/target", refs[0]: refs[0].String()},
+			}
+		}},
+		{"SHA-256 repository", func(t *testing.T) partitionScenario {
+			t.Helper()
+			workDir := t.TempDir()
+			testutil.RunGit(t, workDir, "init", "--object-format=sha256")
+			testutil.RunGit(t, workDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "init")
+			ref := mustRefName(t, id.MustCheckpointID("000000000001"))
+			testutil.RunGit(t, workDir, "update-ref", ref.String(), "HEAD")
+			return partitionScenario{
+				workDir:  workDir,
+				queued:   []plumbing.ReferenceName{stale, ref},
+				existing: []plumbing.ReferenceName{ref},
+				stale:    []plumbing.ReferenceName{stale},
+				listed:   []plumbing.ReferenceName{ref},
+			}
+		}},
+	}
+	paths := []struct {
+		name       string
+		useListing bool
+	}{
+		{"per-ref lookups", false},
+		{"namespace listing", true},
+	}
+	for _, sc := range scenarios {
+		t.Run(sc.name, func(t *testing.T) {
+			t.Parallel()
+			s := sc.build(t)
+			wantListed := make(map[plumbing.ReferenceName]plumbing.Hash, len(s.listed))
+			for _, ref := range s.listed {
+				wantListed[ref] = plumbing.NewHash(revParse(t, s.workDir, ref.String()))
+			}
+			for _, p := range paths {
+				t.Run(p.name, func(t *testing.T) {
+					t.Parallel()
+					repo, err := gitrepo.OpenPath(s.workDir)
+					require.NoError(t, err)
+					defer repo.Close()
+
+					existing, missing, listed := partitionLocalRefsUsing(t.Context(), repo, s.queued, p.useListing)
+
+					assert.Equal(t, s.existing, existing, "pushable refs, in queue order")
+					assert.Equal(t, s.stale, missing, "stale refs, in queue order")
+					if p.useListing && !s.gitFallback {
+						assert.Equal(t, wantListed, listed, "every listed ref maps to its tip")
+					} else {
+						assert.Nil(t, listed)
+					}
+					for ref, rev := range s.tips {
+						tip, err := localTip(repo, listed, ref)
+						require.NoError(t, err)
+						assert.Equal(t, revParse(t, s.workDir, rev), tip.String(), "tip of %s", ref)
+					}
+				})
+			}
+		})
+	}
+}
+
+// revParsedTips maps each ref to its tip as git resolves it.
+func revParsedTips(t *testing.T, workDir string, refs []plumbing.ReferenceName) map[plumbing.ReferenceName]plumbing.Hash {
+	t.Helper()
+	tips := make(map[plumbing.ReferenceName]plumbing.Hash, len(refs))
+	for _, ref := range refs {
+		tips[ref] = plumbing.NewHash(revParse(t, workDir, ref.String()))
+	}
+	return tips
+}
+
+// Both listers must agree with git on every storage shape, including a loose
+// ref that shadows a stale packed entry for the same name.
+func TestCheckpointRefListers(t *testing.T) {
+	t.Parallel()
+	scenarios := []struct {
+		name  string
+		build func(t *testing.T) (string, []plumbing.ReferenceName)
+	}{
+		{"loose", func(t *testing.T) (string, []plumbing.ReferenceName) {
+			t.Helper()
+			workDir, _, refs := setupRepoWithCheckpointRefs(t)
+			return workDir, refs
+		}},
+		{"packed", func(t *testing.T) (string, []plumbing.ReferenceName) {
+			t.Helper()
+			workDir, _, refs := setupRepoWithCheckpointRefs(t)
+			testutil.RunGit(t, workDir, "pack-refs", "--all")
+			return workDir, refs
+		}},
+		{"loose over packed", func(t *testing.T) (string, []plumbing.ReferenceName) {
+			t.Helper()
+			workDir, _, refs := setupRepoWithCheckpointRefs(t)
+			testutil.RunGit(t, workDir, "pack-refs", "--all")
+			testutil.RunGit(t, workDir, "commit", "--allow-empty", "-m", "newer checkpoint version")
+			testutil.RunGit(t, workDir, "update-ref", refs[1].String(), "HEAD")
+			return workDir, refs
+		}},
+		{"SHA-256 repository", func(t *testing.T) (string, []plumbing.ReferenceName) {
+			t.Helper()
+			workDir := t.TempDir()
+			testutil.RunGit(t, workDir, "init", "--object-format=sha256")
+			testutil.RunGit(t, workDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "init")
+			ref := mustRefName(t, id.MustCheckpointID("000000000001"))
+			testutil.RunGit(t, workDir, "update-ref", ref.String(), "HEAD")
+			return workDir, []plumbing.ReferenceName{ref}
+		}},
+	}
+	listers := []struct {
+		name string
+		list func(context.Context, *git.Repository) (map[plumbing.ReferenceName]plumbing.Hash, error)
+	}{
+		{"go-git", listCheckpointRefsWithGoGit},
+		{"git for-each-ref", listCheckpointRefsWithGit},
+	}
+	for _, sc := range scenarios {
+		t.Run(sc.name, func(t *testing.T) {
+			t.Parallel()
+			workDir, refs := sc.build(t)
+			want := revParsedTips(t, workDir, refs)
+			for _, l := range listers {
+				t.Run(l.name, func(t *testing.T) {
+					t.Parallel()
+					repo, err := gitrepo.OpenPath(workDir)
+					require.NoError(t, err)
+					defer repo.Close()
+
+					listed, err := l.list(t.Context(), repo)
+
+					require.NoError(t, err)
+					assert.Equal(t, want, listed)
+				})
+			}
+		})
+	}
+}
+
+// One empty loose ref anywhere under refs/ aborts go-git's walk; git
+// for-each-ref skips it, so the namespace is still listed in full.
+func TestListLocalCheckpointRefs_FallsBackToGit(t *testing.T) {
+	t.Parallel()
+	workDir, _, refs := setupRepoWithCheckpointRefs(t)
+	writeRefFile(t, workDir, "refs/heads/broken", "")
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+
+	_, goGitErr := listCheckpointRefsWithGoGit(t.Context(), repo)
+	listed, tipsMatchLookup, err := listLocalCheckpointRefs(t.Context(), repo)
+
+	require.Error(t, goGitErr, "go-git aborts on the empty ref file")
+	require.NoError(t, err)
+	assert.False(t, tipsMatchLookup, "git's tips only show which refs exist")
+	assert.Equal(t, revParsedTips(t, workDir, refs), listed)
+}
+
+// git for-each-ref reads a ref file with trailing data as its hash, where
+// go-git reads it as the zero hash. Tips must stay the go-git ones whichever
+// listing ran, so the fallback listing only decides existence.
+func TestPartitionLocalRefsUsing_TrailingDataTipMatchesLookup(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name            string
+		breakGoGitWalk  bool
+		wantListedNames bool
+	}{
+		{name: "go-git listing", wantListedNames: true},
+		{name: "for-each-ref fallback", breakGoGitWalk: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			workDir, _, refs := setupRepoWithCheckpointRefs(t)
+			junk := mustRefName(t, id.MustCheckpointID("aaaaaaaaaaa3"))
+			writeRefFile(t, workDir, junk, revParse(t, workDir, "HEAD")+" junk\n")
+			if tc.breakGoGitWalk {
+				writeRefFile(t, workDir, "refs/heads/broken", "")
+			}
+			repo, err := gitrepo.OpenPath(workDir)
+			require.NoError(t, err)
+			defer repo.Close()
+			lookup, err := repo.Reference(junk, true)
+			require.NoError(t, err)
+
+			queued := append([]plumbing.ReferenceName{junk}, refs...)
+			existing, missing, listed := partitionLocalRefsUsing(t.Context(), repo, queued, true)
+			tip, err := localTip(repo, listed, junk)
+
+			assert.Equal(t, queued, existing)
+			assert.Empty(t, missing)
+			require.NoError(t, err)
+			assert.Equal(t, lookup.Hash(), tip)
+			if tc.wantListedNames {
+				assert.Equal(t, revParsedTips(t, workDir, refs), listed)
+			} else {
+				assert.Nil(t, listed)
+			}
+		})
+	}
+}
+
+// With both listings failing, the split is the per-ref one and nothing is listed.
+func TestPartitionLocalRefsUsing_NoListing(t *testing.T) {
+	t.Parallel()
+	workDir, _, refs := setupRepoWithCheckpointRefs(t)
+	writeRefFile(t, workDir, "refs/heads/broken", "")
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	stale := mustRefName(t, id.MustCheckpointID("ffffffffffff"))
+	queued := []plumbing.ReferenceName{refs[1], stale, refs[0]}
+	wantExisting, wantStale, _ := partitionLocalRefsUsing(t.Context(), repo, queued, false)
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	_, _, listErr := listLocalCheckpointRefs(cancelled, repo)
+	existing, missing, listed := partitionLocalRefsUsing(cancelled, repo, queued, true)
+
+	require.Error(t, listErr, "both listings fail")
+	assert.Equal(t, wantExisting, existing)
+	assert.Equal(t, wantStale, missing)
+	assert.Nil(t, listed)
+}
+
+// remoteCheckpointRefs maps every ref the remote holds for cid to its tip, by
+// exact name, so two spellings of one checkpoint show up as two entries.
+func remoteCheckpointRefs(t *testing.T, bareDir string, cid id.CheckpointID) map[plumbing.ReferenceName]string {
+	t.Helper()
+	out := testutil.RunGit(t, bareDir, "for-each-ref", "--format=%(refname) %(objectname)", checkpoint.CheckpointRefPrefix)
+	refs := make(map[plumbing.ReferenceName]string)
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		name, hash, ok := strings.Cut(line, " ")
+		if !ok {
+			continue
+		}
+		if got, parsed := checkpoint.ParseRef(plumbing.ReferenceName(name)); parsed && got == cid {
+			refs[plumbing.ReferenceName(name)] = hash
+		}
+	}
+	return refs
+}
+
+// TestPushQueuedCheckpointRefs_PushesFoldedShardRef covers a queue entry whose
+// ref is stored under its case-folded shard spelling: the queued name no longer
+// resolves once git has packed the ref, so partitionCheckpointRefPushes used to
+// classify it stale, prune it, and leave the checkpoint unpushed forever. The
+// remote receives the canonical name: the stored spelling is this clone's
+// filesystem accident, and other clones read the canonical one.
+func TestPushQueuedCheckpointRefs_PushesFoldedShardRef(t *testing.T) {
+	workDir, bareDir, _ := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	cid := id.MustCheckpointID("01M2DCHJCHTR9T9MZTSB7WV76B")
+	canonical := mustRefName(t, cid)
+	folded, ok := checkpoint.FoldedRefName(cid)
+	require.True(t, ok)
+	head, err := repo.Head()
+	require.NoError(t, err)
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(folded, head.Hash())))
+	// Packing is what removes the filesystem's case-insensitive rescue, so the
+	// canonical name stops resolving on every platform rather than only on a
+	// case-sensitive one.
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+
+	// Reopen after packing: this models a later pre-push process holding only
+	// the canonical spelling in its queue.
+	repo, err = git.PlainOpen(workDir)
+	require.NoError(t, err)
+	queue := enqueueRefs(t, repo, []plumbing.ReferenceName{canonical})
+
+	pushed, pushDisabled, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
+	require.NoError(t, err)
+	assert.False(t, pushDisabled)
+	assert.Equal(t, 1, pushed)
+	assert.Equal(t, map[plumbing.ReferenceName]string{canonical: head.Hash().String()}, remoteCheckpointRefs(t, bareDir, cid),
+		"the checkpoint reaches the remote under its canonical name only")
+
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.Empty(t, remaining, "a pushed entry is pruned by its token, whatever spelling resolved")
+}
+
+// A checkpoint pushed while its ref is loose and again after git packs it must
+// land on one remote ref. Pushing the stored spelling sent it as one name
+// before packing and another after, leaving two refs with different tips on a
+// case-sensitive remote.
+func TestPushQueuedCheckpointRefs_FoldedShardRefKeepsItsRemoteNameAcrossPacking(t *testing.T) {
+	workDir, bareDir, _ := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+	cid := id.MustCheckpointID("0000000000ab")
+	stored, queued := foldedShardFixture(t, workDir, "HEAD")
+	push := func() {
+		t.Helper()
+		repo, err := gitrepo.OpenPath(workDir)
+		require.NoError(t, err)
+		defer repo.Close()
+		enqueueRefs(t, repo, []plumbing.ReferenceName{queued})
+		pushed, _, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
+		require.NoError(t, err)
+		require.Equal(t, 1, pushed)
+	}
+
+	push()
+	require.Equal(t, map[plumbing.ReferenceName]string{queued: revParse(t, workDir, "HEAD")}, remoteCheckpointRefs(t, bareDir, cid))
+
+	testutil.RunGit(t, workDir, "commit", "--allow-empty", "-m", "newer checkpoint version")
+	newer := revParse(t, workDir, "HEAD")
+	testutil.RunGit(t, workDir, "update-ref", stored.String(), newer)
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+	push()
+
+	require.Equal(t, map[plumbing.ReferenceName]string{queued: newer}, remoteCheckpointRefs(t, bareDir, cid),
+		"the newer version must advance the same remote ref")
+}
+
+// Recovery fetches the canonical name from the remote and installs the replayed
+// tip on the ref this clone stores, whatever its spelling.
+func TestPushQueuedCheckpointRefs_FoldedShardRefRecoversOntoDivergedRemote(t *testing.T) {
+	workDir, bareDir, _ := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+	cid := id.MustCheckpointID("0000000000ab")
+	c1 := revParse(t, workDir, "HEAD")
+	queued := mustRefName(t, cid)
+
+	// The remote holds the canonical name at C2, a child of C1 adding b.txt.
+	testutil.WriteFile(t, workDir, "b.txt", "b")
+	testutil.GitAdd(t, workDir, "b.txt")
+	testutil.GitCommit(t, workDir, "add b")
+	testutil.RunGit(t, workDir, "push", bareDir, "HEAD:"+queued.String())
+
+	// This clone holds C3, a sibling of C2 adding c.txt, stored folded and packed.
+	testutil.GitReset(t, workDir, c1)
+	testutil.WriteFile(t, workDir, "c.txt", "c")
+	testutil.GitAdd(t, workDir, "c.txt")
+	testutil.GitCommit(t, workDir, "add c")
+	stored, _ := foldedShardFixture(t, workDir, "HEAD")
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	queue := enqueueRefs(t, repo, []plumbing.ReferenceName{queued})
+	pushed, pushErr := flushCheckpointRefsQueue(context.Background(), repo, pushSettings{remote: bareDir}, batchWithinFlushBudget)
+	require.NoError(t, pushErr)
+	require.Equal(t, 1, pushed)
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.Empty(t, remaining)
+
+	files := remoteRefFiles(t, bareDir, queued)
+	assert.Contains(t, files, "b.txt", "the remote's change is kept")
+	assert.Contains(t, files, "c.txt", "the local change is replayed on top")
+	remoteRefs := remoteCheckpointRefs(t, bareDir, cid)
+	require.Len(t, remoteRefs, 1, "recovery must not add a second remote ref")
+	assert.Equal(t, map[plumbing.ReferenceName]string{stored: remoteRefs[queued]}, remoteCheckpointRefs(t, workDir, cid),
+		"the replayed tip is installed on the stored ref, and no second local ref appears")
+}
+
+// A session can write the checkpoint while recovery replays it. The flush then
+// reports the version now waiting, read from the ref this clone stores, under
+// the name the caller queued.
+func TestFlushCheckpointRefs_FoldedShardRefChangedDuringRecoveryIsReportedChanged(t *testing.T) {
+	workDir, bareDir, _ := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+	cid := id.MustCheckpointID("0000000000ab")
+	base := revParse(t, workDir, "HEAD")
+	queued := mustRefName(t, cid)
+
+	// The remote holds a sibling of this clone's version, so the push needs
+	// recovery. This clone's version is stored folded and packed.
+	testutil.WriteFile(t, workDir, "b.txt", "b")
+	testutil.GitAdd(t, workDir, "b.txt")
+	testutil.GitCommit(t, workDir, "add b")
+	testutil.RunGit(t, workDir, "push", bareDir, "HEAD:"+queued.String())
+	testutil.GitReset(t, workDir, base)
+	testutil.WriteFile(t, workDir, "c.txt", "c")
+	testutil.GitAdd(t, workDir, "c.txt")
+	testutil.GitCommit(t, workDir, "add c")
+	stored, _ := foldedShardFixture(t, workDir, "HEAD")
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+
+	// The concurrent write lands just before recovery installs its result, and
+	// is packed so the canonical name cannot answer for the folded ref.
+	stubRecoveryCAS(t, func(ctx context.Context, repo *git.Repository, refName plumbing.ReferenceName, newHash, expectedOld plumbing.Hash) error {
+		testutil.RunGit(t, workDir, "update-ref", refName.String(), base)
+		testutil.RunGit(t, workDir, "pack-refs", "--all")
+		return checkpoint.CASPersistentRef(ctx, repo, refName, newHash, expectedOld)
+	})
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	enqueueRefs(t, repo, []plumbing.ReferenceName{queued})
+	result, err := flushCheckpointRefs(context.Background(), repo, pushSettings{remote: bareDir}, checkpointRefSelection{})
+	require.NoError(t, err)
+
+	assert.Empty(t, result.failed, "a superseded recovery is not a failure")
+	assert.Empty(t, result.pushed)
+	require.Len(t, result.changed, 1)
+	assert.Equal(t, queued, result.changed[0].name)
+	assert.Equal(t, base, result.changed[0].hash.String(), "the version now waiting")
+	assert.Equal(t, map[plumbing.ReferenceName]string{stored: base}, remoteCheckpointRefs(t, workDir, cid))
+}
+
+// A remote that holds the folded name gains the canonical ref at the current
+// tip, and the folded one is left where it was: readers ask for the canonical
+// name first, and removing a remote ref is not the push's to do.
+func TestPushQueuedCheckpointRefs_RemoteHoldingFoldedNameGainsCanonical(t *testing.T) {
+	workDir, bareDir, _ := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+	cid := id.MustCheckpointID("0000000000ab")
+	older := revParse(t, workDir, "HEAD")
+	stored, queued := foldedShardFixture(t, workDir, older)
+	testutil.RunGit(t, workDir, "push", bareDir, older+":"+stored.String())
+	// Packed, so a case-insensitive filesystem under the remote cannot answer
+	// to the canonical name with the folded ref's file.
+	testutil.RunGit(t, bareDir, "pack-refs", "--all")
+
+	testutil.RunGit(t, workDir, "commit", "--allow-empty", "-m", "newer checkpoint version")
+	newer := revParse(t, workDir, "HEAD")
+	testutil.RunGit(t, workDir, "update-ref", stored.String(), newer)
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	enqueueRefs(t, repo, []plumbing.ReferenceName{queued})
+	pushed, _, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
+	require.NoError(t, err)
+	require.Equal(t, 1, pushed)
+
+	assert.Equal(t, map[plumbing.ReferenceName]string{queued: newer, stored: older}, remoteCheckpointRefs(t, bareDir, cid))
+}
+
+// A queue can hold one checkpoint under both spellings of its shard, because
+// the spelling a write enqueues follows how the ref is stored at that moment.
+// Both entries name one destination, and git refuses a push that names a
+// destination twice, taking the other refs of the batch down with it.
+func TestPartitionCheckpointRefPushes_BothShardSpellingsQueuedMakeOnePush(t *testing.T) {
+	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+	stored, queued := foldedShardFixture(t, workDir, "HEAD")
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	entries := []checkpoint.PushQueueEntry{{Ref: refs[0]}, {Ref: queued}, {Ref: stored}}
+	part := partitionCheckpointRefPushes(repo, entries, checkpointRefSelection{})
+
+	require.NoError(t, batchPushCheckpointRefs(context.Background(), bareDir, part.ready),
+		"one batch must carry every queued checkpoint")
+	assert.ElementsMatch(t, entries, checkpointRefPushTokens(part.ready),
+		"both queue entries are delivered by the one push, so both must be dequeued")
+}
+
+func TestPushQueuedCheckpointRefs_BothShardSpellingsQueuedPushOnce(t *testing.T) {
+	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+	cid := id.MustCheckpointID("0000000000ab")
+	stored, queued := foldedShardFixture(t, workDir, "HEAD")
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	queue := enqueueRefs(t, repo, []plumbing.ReferenceName{refs[0], queued, stored})
+	pushed, _, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
+	require.NoError(t, err)
+
+	assert.Equal(t, 2, pushed, "two checkpoints are queued, one of them twice")
+	assert.Equal(t, map[plumbing.ReferenceName]string{queued: revParse(t, workDir, "HEAD")}, remoteCheckpointRefs(t, bareDir, cid))
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.Empty(t, remaining, "both spellings leave the queue")
+}
+
+// git can leave the canonical name at an older commit than the folded one
+// (see checkpoint.SupersededBy). The push sends the newer version.
+func TestPushQueuedCheckpointRefs_PushesTheNewerRefWhenBothShardSpellingsExist(t *testing.T) {
+	workDir, bareDir, _ := setupRepoWithCheckpointRefs(t)
+	// A split forms only where git records a case-insensitive filesystem.
+	testutil.RunGit(t, workDir, "config", "core.ignorecase", "true")
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+	cid := id.MustCheckpointID("0000000000ab")
+	stored := plumbing.ReferenceName(checkpoint.CheckpointRefPrefix + "AB/0000000000ab")
+	queued := mustRefName(t, cid)
+	testutil.RunGit(t, workDir, "update-ref", queued.String(), "HEAD")
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+	testutil.RunGit(t, workDir, "commit", "--allow-empty", "-m", "newer checkpoint version")
+	newer := revParse(t, workDir, "HEAD")
+	testutil.RunGit(t, workDir, "update-ref", stored.String(), newer)
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	queue := enqueueRefs(t, repo, []plumbing.ReferenceName{queued})
+	pushed, _, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, pushed)
+	assert.Equal(t, map[plumbing.ReferenceName]string{queued: newer}, remoteCheckpointRefs(t, bareDir, cid))
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.Empty(t, remaining)
+}
+
+// Both spellings can hold refs whose histories diverged, so neither is a later
+// version of the other. Only one can take the destination in an upload: the
+// one reads resolve to, whichever spelling was queued first. The other stays
+// queued and the next push replays it onto the first.
+func TestPushQueuedCheckpointRefs_DivergedShardSpellingsPushInTurn(t *testing.T) {
+	workDir, bareDir, _ := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+	cid := id.MustCheckpointID("0000000000ab")
+	base := revParse(t, workDir, "HEAD")
+	testutil.WriteFile(t, workDir, "b.txt", "b")
+	testutil.GitAdd(t, workDir, "b.txt")
+	testutil.GitCommit(t, workDir, "add b")
+	first := revParse(t, workDir, "HEAD")
+	stored, queued := foldedShardFixture(t, workDir, first)
+	// Packed between the two writes, so the second name is a ref of its own on
+	// a case-insensitive filesystem too.
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+	testutil.GitReset(t, workDir, base)
+	testutil.WriteFile(t, workDir, "c.txt", "c")
+	testutil.GitAdd(t, workDir, "c.txt")
+	testutil.GitCommit(t, workDir, "add c")
+	testutil.RunGit(t, workDir, "update-ref", queued.String(), "HEAD")
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	queue := enqueueRefs(t, repo, []plumbing.ReferenceName{stored, queued})
+
+	read, readTip, err := checkpoint.StoredRef(repo, nil, queued)
+	require.NoError(t, err)
+	require.Equal(t, queued, read, "reads resolve a diverged pair to the canonical name")
+
+	pushed, _, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
+	require.NoError(t, err)
+	assert.Equal(t, 1, pushed)
+	assert.Equal(t, map[plumbing.ReferenceName]string{queued: readTip.String()}, remoteCheckpointRefs(t, bareDir, cid),
+		"the remote receives the version local reads use")
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.Equal(t, []plumbing.ReferenceName{stored}, remaining, "the ref that did not go stays queued")
+
+	pushed, _, err = PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
+	require.NoError(t, err)
+	assert.Equal(t, 1, pushed)
+	files := remoteRefFiles(t, bareDir, queued)
+	assert.Contains(t, files, "c.txt", "the first upload is kept")
+	assert.Contains(t, files, "b.txt", "the second is replayed on top")
+	remaining, err = queue.Drain()
+	require.NoError(t, err)
+	assert.Empty(t, remaining)
 }
 
 func TestBatchPushCheckpointRefs(t *testing.T) {
@@ -199,7 +901,7 @@ func TestPushCheckpointRefWithRecovery_MergesDivergedRef(t *testing.T) {
 	// pushes are rejected, then recovery replays C3's delta onto C2.
 	queue := enqueueRefs(t, repo, []plumbing.ReferenceName{ref})
 	restore := captureStderr(t)
-	pushed, pushErr := flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir})
+	pushed, pushErr := flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir}, batchWithinFlushBudget)
 	output := restore()
 	require.NoError(t, pushErr, "diverged ref should be recovered by fetch+replay, not rejected")
 	assert.Equal(t, 1, pushed)
@@ -273,7 +975,7 @@ func TestPushCheckpointRefWithRecovery_PreservesConcurrentGenerationOnCASConflic
 	t.Cleanup(func() { checkpointRefRecoveryCAS = oldCAS })
 
 	restore := captureStderr(t)
-	pushed, pushErr := flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir})
+	pushed, pushErr := flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir}, batchUnbounded)
 	restore()
 	require.NoError(t, pushErr, "losing the CAS to a concurrent write is superseded, not a failed push")
 	assert.Zero(t, pushed)
@@ -292,7 +994,7 @@ func TestPushCheckpointRefWithRecovery_PreservesConcurrentGenerationOnCASConflic
 	// sources of data without keeping that stale intermediate under another ref.
 	checkpointRefRecoveryCAS = oldCAS
 	restore = captureStderr(t)
-	pushed, pushErr = flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir})
+	pushed, pushErr = flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir}, batchUnbounded)
 	restore()
 	require.NoError(t, pushErr)
 	assert.Equal(t, 1, pushed)
@@ -378,7 +1080,7 @@ func TestFlushCheckpointRefsQueue_SupersededRecoveriesDoNotStopTheRetry(t *testi
 	})
 
 	restore := captureStderr(t)
-	pushed, pushErr := flushCheckpointRefsQueue(context.Background(), repo, pushSettings{remote: bareDir})
+	pushed, pushErr := flushCheckpointRefsQueue(context.Background(), repo, pushSettings{remote: bareDir}, batchUnbounded)
 	output := restore()
 	require.NoError(t, pushErr, output)
 	assert.Zero(t, pushed)
@@ -391,13 +1093,29 @@ func TestFlushCheckpointRefsQueue_SupersededRecoveriesDoNotStopTheRetry(t *testi
 	// With no concurrent write, the next push delivers every superseded ref.
 	stubRecoveryCAS(t, checkpoint.CASPersistentRef)
 	restore = captureStderr(t)
-	pushed, pushErr = flushCheckpointRefsQueue(context.Background(), repo, pushSettings{remote: bareDir})
+	pushed, pushErr = flushCheckpointRefsQueue(context.Background(), repo, pushSettings{remote: bareDir}, batchUnbounded)
 	output = restore()
 	require.NoError(t, pushErr, output)
 	assert.Equal(t, n, pushed)
 	queued, err = queue.PeekEntries()
 	require.NoError(t, err)
 	assert.Empty(t, queued)
+}
+
+// A selected ref superseded during recovery is reported as changed with the
+// commit now waiting, so a caller has the version to pin next.
+func TestFlushCheckpointRefs_SupersededSelectedRefReportsItsNewTip(t *testing.T) {
+	repo, bareDir, refs, base, _ := divergeCheckpointRefs(t, 1)
+	stubRecoveryCAS(t, loseRecoveryCAS(t, base))
+	selection := checkpointRefSelection{refs: map[plumbing.ReferenceName]plumbing.Hash{refs[0]: plumbing.ZeroHash}}
+
+	restore := captureStderr(t)
+	result, err := flushCheckpointRefs(context.Background(), repo, pushSettings{remote: bareDir}, selection)
+	restore()
+	require.NoError(t, err)
+	require.Len(t, result.changed, 1)
+	assert.Equal(t, refs[0], result.changed[0].name)
+	assert.Equal(t, base, result.changed[0].hash, "the commit the concurrent write left waiting")
 }
 
 // Superseded refs were attempted but did not fail, so the flush error counts
@@ -413,7 +1131,7 @@ func TestFlushCheckpointRefsQueue_ReportsOnlyRealFailures(t *testing.T) {
 	})
 
 	restore := captureStderr(t)
-	pushed, pushErr := flushCheckpointRefsQueue(context.Background(), repo, pushSettings{remote: bareDir})
+	pushed, pushErr := flushCheckpointRefsQueue(context.Background(), repo, pushSettings{remote: bareDir}, batchUnbounded)
 	restore()
 	assert.Zero(t, pushed)
 	require.ErrorContains(t, pushErr, "1 of 3 attempted checkpoint refs failed to push")
@@ -465,7 +1183,7 @@ func TestFlushCheckpointRefsQueue_RecoversARefFetchedIntoANewPack(t *testing.T) 
 	queue := enqueueRefs(t, repo, refs)
 
 	restore := captureStderr(t)
-	pushed, pushErr := flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir})
+	pushed, pushErr := flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir}, batchUnbounded)
 	output := restore()
 	require.NoError(t, pushErr, output)
 	assert.Equal(t, 2, pushed)
@@ -555,6 +1273,55 @@ func TestPushQueuedCheckpointRefs_PushDisabled(t *testing.T) {
 	remaining, err := queue.Drain()
 	require.NoError(t, err)
 	assert.ElementsMatch(t, refs, remaining, "disabled push leaves refs queued")
+}
+
+// Under manual, the queue is held, not empty: the caller must be able to tell
+// the two apart to report why nothing was pushed.
+func TestPushQueuedCheckpointRefs_ManualPolicyHoldsRefs(t *testing.T) {
+	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+	policyFile := filepath.Join(workDir, ".git", filepath.FromSlash(settings.CheckpointPushPolicyFile))
+	require.NoError(t, os.MkdirAll(filepath.Dir(policyFile), 0o755))
+	require.NoError(t, os.WriteFile(policyFile, []byte("manual\n"), 0o600))
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	queue := enqueueRefs(t, repo, refs)
+
+	pushed, pushDisabled, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
+	require.ErrorIs(t, err, ErrCheckpointPushHeldByPolicy)
+	assert.False(t, pushDisabled)
+	assert.Equal(t, 0, pushed)
+
+	assert.Empty(t, strings.TrimSpace(testutil.RunGit(t, bareDir, "for-each-ref", "refs/entire/")), "manual must not push")
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.ElementsMatch(t, refs, remaining, "held refs stay queued")
+}
+
+// flushCheckpointRefsQueue checks the policy itself, so a new caller that
+// forgets to cannot upload under manual.
+func TestFlushCheckpointRefsQueue_ManualPolicySendsNothing(t *testing.T) {
+	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+	policyFile := filepath.Join(workDir, ".git", filepath.FromSlash(settings.CheckpointPushPolicyFile))
+	require.NoError(t, os.MkdirAll(filepath.Dir(policyFile), 0o755))
+	require.NoError(t, os.WriteFile(policyFile, []byte("manual\n"), 0o600))
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	queue := enqueueRefs(t, repo, refs)
+
+	pushed, err := flushCheckpointRefsQueue(context.Background(), repo, pushSettings{remote: bareDir}, batchUnbounded)
+	require.NoError(t, err)
+	assert.Equal(t, 0, pushed)
+
+	assert.Empty(t, strings.TrimSpace(testutil.RunGit(t, bareDir, "for-each-ref", "refs/entire/")), "manual must not push")
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.ElementsMatch(t, refs, remaining, "held refs stay queued")
 }
 
 func TestPushQueuedCheckpointRefs_FailureLeavesRefsQueued(t *testing.T) {
@@ -651,6 +1418,28 @@ func TestPushQueuedCheckpointRefs_OPFFailureWithholdsPush(t *testing.T) {
 	assertRefsAbsentFromRemote(t, bareDir, refs, "withheld push must not reach the remote")
 }
 
+// A push of named refs must not read, warn about or fail on refs it was not
+// asked to send.
+func TestPartitionCheckpointRefPushes_UnnamedUnreadableRefWaits(t *testing.T) {
+	workDir, _, refs := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	loop := plumbing.ReferenceName("refs/entire/loop")
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewSymbolicReference(refs[0], loop)))
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewSymbolicReference(loop, refs[0])))
+	entries := []checkpoint.PushQueueEntry{{Ref: refs[0]}, {Ref: refs[1]}}
+
+	part := partitionCheckpointRefPushes(repo, entries,
+		checkpointRefSelection{refs: map[plumbing.ReferenceName]plumbing.Hash{refs[1]: plumbing.ZeroHash}})
+
+	assert.Empty(t, part.unreadable, "a ref nobody named is not read")
+	require.Len(t, part.waiting, 1)
+	assert.Equal(t, refs[0], part.waiting[0].Ref)
+	require.Len(t, part.ready, 1)
+	assert.Equal(t, refs[1], part.ready[0].name)
+}
+
 // A queued ref that cannot be read (here a symbolic-ref loop, which fails with
 // something other than not-found) has no tip to pin. It must still stay queued
 // and be reported, not be withheld silently or pruned as stale.
@@ -667,7 +1456,7 @@ func TestFlushCheckpointRefsQueue_UnreadableRefStaysQueuedAndIsReported(t *testi
 	queue := enqueueRefs(t, repo, refs)
 
 	restore := captureStderr(t)
-	pushed, pushErr := flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir})
+	pushed, pushErr := flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir}, batchUnbounded)
 	output := restore()
 
 	require.NoError(t, pushErr)
@@ -684,7 +1473,7 @@ func TestFlushCheckpointRefsQueue_UnreadableRefStaysQueuedAndIsReported(t *testi
 	require.NoError(t, repo.Storer.RemoveReference(loop))
 	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(refs[0], head.Hash())))
 	restore = captureStderr(t)
-	pushed, pushErr = flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir})
+	pushed, pushErr = flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir}, batchUnbounded)
 	restore()
 	require.NoError(t, pushErr)
 	assert.Equal(t, 1, pushed)
@@ -692,4 +1481,41 @@ func TestFlushCheckpointRefsQueue_UnreadableRefStaysQueuedAndIsReported(t *testi
 	remaining, err = queue.Drain()
 	require.NoError(t, err)
 	assert.Empty(t, remaining)
+}
+
+// TestCheckpointWaitingAndRefExists_FoldedShardRef pins the two reads that
+// drive `entire session attach`'s report. A checkpoint ref stored under its
+// case-folded shard and then packed does not answer to its canonical name, so
+// both reads said the checkpoint did not exist and attach told the user to run
+// a command that could never find it.
+func TestCheckpointWaitingAndRefExists_FoldedShardRef(t *testing.T) {
+	workDir, _, _ := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	cid := id.MustCheckpointID("01M2DCHJCHTR9T9MZTSB7WV76B")
+	canonical := mustRefName(t, cid)
+	folded, ok := checkpoint.FoldedRefName(cid)
+	require.True(t, ok)
+	head, err := repo.Head()
+	require.NoError(t, err)
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(folded, head.Hash())))
+	// Packing removes the filesystem's case-insensitive rescue, so the canonical
+	// name stops resolving on a case-insensitive platform too.
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+
+	repo, err = git.PlainOpen(workDir)
+	require.NoError(t, err)
+	_ = enqueueRefs(t, repo, []plumbing.ReferenceName{canonical})
+
+	ctx := context.Background()
+	exists, err := CheckpointRefExists(ctx, cid)
+	require.NoError(t, err)
+	assert.True(t, exists, "a checkpoint stored under its folded shard still exists")
+
+	waiting, err := CheckpointWaiting(ctx, cid)
+	require.NoError(t, err)
+	assert.True(t, waiting, "its queue entry is still waiting to be pushed")
 }

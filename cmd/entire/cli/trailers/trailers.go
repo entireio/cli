@@ -75,7 +75,9 @@ func ParseSession(commitMessage string) (string, bool) {
 	return "", false
 }
 
-// ParseCheckpoint extracts the checkpoint ID from a commit message.
+// ParseCheckpoint discovers the first checkpoint ID anywhere in a commit
+// message, squash history included. Code deciding which checkpoint to create,
+// join or write into reads only the final trailer block (strategy.LinkedCheckpoints).
 // Returns the CheckpointID and true if found, empty ID and false otherwise.
 func ParseCheckpoint(commitMessage string) (checkpointID.CheckpointID, bool) {
 	matches := checkpointTrailerRegex.FindStringSubmatch(commitMessage)
@@ -93,6 +95,7 @@ func ParseCheckpoint(commitMessage string) (checkpointID.CheckpointID, bool) {
 // Returns a slice of CheckpointIDs (may be empty if none found).
 // Duplicate IDs are deduplicated while preserving order.
 // This is useful for squash merge commits that contain multiple Entire-Checkpoint trailers.
+// Like ParseCheckpoint, it discovers IDs; it does not tell which one the commit links.
 func ParseAllCheckpoints(commitMessage string) []checkpointID.CheckpointID {
 	matches := checkpointTrailerRegex.FindAllStringSubmatch(commitMessage, -1)
 	if len(matches) == 0 {
@@ -115,6 +118,38 @@ func ParseAllCheckpoints(commitMessage string) []checkpointID.CheckpointID {
 	return ids
 }
 
+// ParseAllCheckpointsFromFinalTrailerBlock extracts checkpoint IDs from the
+// final trailer block, deduplicating them while preserving order. Lines
+// starting with commentPrefix are skipped, as git's trailer grammar does; an
+// empty commentPrefix reads every line as written.
+func ParseAllCheckpointsFromFinalTrailerBlock(commitMessage, commentPrefix string) []checkpointID.CheckpointID {
+	lines := finalTrailerBlock(commitMessage, commentPrefix)
+	if len(lines) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]bool)
+	ids := make([]checkpointID.CheckpointID, 0, len(lines))
+	for _, line := range lines {
+		cpID, ok := checkpointFromTrailerLine(line)
+		if !ok || seen[cpID.String()] {
+			continue
+		}
+		seen[cpID.String()] = true
+		ids = append(ids, cpID)
+	}
+	return ids
+}
+
+func checkpointFromTrailerLine(line string) (checkpointID.CheckpointID, bool) {
+	match := checkpointTrailerLineRegex.FindStringSubmatch(line)
+	if match == nil {
+		return checkpointID.EmptyCheckpointID, false
+	}
+	cpID, err := checkpointID.NewCheckpointID(match[1])
+	return cpID, err == nil
+}
+
 // checkpointTrailerLineRegex matches one whole Entire-Checkpoint trailer line,
 // however the separator is spaced ("Entire-Checkpoint:<id>", a tab).
 var checkpointTrailerLineRegex = regexp.MustCompile(`^` + CheckpointTrailerKey + `:\s*(` + checkpointID.CheckpointPattern + `)\s*$`)
@@ -122,6 +157,210 @@ var checkpointTrailerLineRegex = regexp.MustCompile(`^` + CheckpointTrailerKey +
 // scissorsMarker is the core of git's scissors line ("# ---- >8 ----"); with
 // `commit -v` everything below it is the diff, which git discards.
 const scissorsMarker = "------------------------ >8 ------------------------"
+
+// DefaultCommentPrefix is git's comment prefix when core.commentChar is unset.
+const DefaultCommentPrefix = "#"
+
+// autoCommentCandidates are the prefixes git tries, in order, for
+// core.commentChar=auto.
+const autoCommentCandidates = "#;@!$%^&|:"
+
+// isScissorsLine reports whether line is git's scissors line for commentPrefix.
+// Git cuts only at that exact line, ended by "\n" alone: never at prose that
+// mentions the marker, nor at the line an editor saved with CRLF.
+func isScissorsLine(line, commentPrefix string) bool {
+	return line == commentPrefix+" "+scissorsMarker
+}
+
+// StripEditorComments returns an editor-written commit message without the
+// lines git's default cleanup drops before the commit is recorded: everything
+// from the scissors line down, and every line starting with commentPrefix. An
+// empty commentPrefix, for a -m or -F message whose lines git keeps as
+// written, returns message unchanged.
+func StripEditorComments(message, commentPrefix string) string {
+	if commentPrefix == "" {
+		return message
+	}
+	lines := strings.Split(CutAtScissors(message, commentPrefix), "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if !strings.HasPrefix(line, commentPrefix) {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "\n")
+}
+
+// EditorCommentBlockStart returns the index of the line where the comment
+// block git appends to a message it opens in the editor starts. Git writes a
+// blank line and then only comment lines, ending the message or, with
+// `commit -v`, the part above the scissors line; under commit.cleanup=scissors
+// the scissors line can start the block itself. So the block is the run of
+// commentPrefix lines that ends the message, or ends it above the scissors
+// line, with a blank line right above it, else the scissors line. It returns -1
+// when there is neither, or commentPrefix is empty: comment lines joined to the
+// paragraph above them, or making up the whole message, are the user's.
+func EditorCommentBlockStart(lines []string, commentPrefix string) int {
+	if commentPrefix == "" {
+		return -1
+	}
+	scissors := ScissorsLineIndex(lines, commentPrefix)
+	if start := commentRunStart(lines, commentPrefix, scissors); start > 0 && isBlankLine(lines[start-1]) {
+		return start
+	}
+	return scissors
+}
+
+// commentRunStart returns the index of the first line of the run of
+// commentPrefix lines that ends the message, ignoring trailing blank lines, or
+// that ends right above the scissors line at index scissors (-1 for none). It
+// returns -1 when no comment line ends there.
+func commentRunStart(lines []string, commentPrefix string, scissors int) int {
+	end := scissors
+	if end < 0 {
+		end = len(lines)
+		for end > 0 && isBlankLine(lines[end-1]) {
+			end--
+		}
+	}
+	start := end
+	for start > 0 && isCommentLine(lines[start-1], commentPrefix) {
+		start--
+	}
+	if start == end {
+		return -1
+	}
+	return start
+}
+
+// ScissorsLineIndex returns the index of git's scissors line for
+// commentPrefix in lines, or -1.
+func ScissorsLineIndex(lines []string, commentPrefix string) int {
+	return slices.IndexFunc(lines, func(line string) bool { return isScissorsLine(line, commentPrefix) })
+}
+
+// CutAtScissors returns message without git's scissors line for commentPrefix
+// and everything below it, which git discards from a `commit -v` message. An
+// empty commentPrefix returns message unchanged.
+func CutAtScissors(message, commentPrefix string) string {
+	if commentPrefix == "" {
+		return message
+	}
+	lines := strings.Split(message, "\n")
+	if i := ScissorsLineIndex(lines, commentPrefix); i >= 0 {
+		return strings.Join(lines[:i], "\n")
+	}
+	return message
+}
+
+// AutoRule is how a git version picks the character for core.commentChar=auto.
+type AutoRule int
+
+const (
+	// AutoSkipsTrailingComments is git's rule since 2.51: the empty and "#"
+	// lines that end the message, and an old "Conflicts:" block, do not
+	// count, as when git places a sign-off (ignored_log_message_bytes).
+	AutoSkipsTrailingComments AutoRule = iota
+	// AutoCountsEveryLine is git's rule before 2.51.
+	AutoCountsEveryLine
+)
+
+// AutoCommentPrefix returns the prefix git chose for core.commentChar=auto: the
+// first of autoCommentCandidates that starts no line of the message, by rule,
+// picked before git adds its comment block. When git may have written that block
+// (mayHaveBlock: commit.status is on), its lines start with the choice, so it is
+// read back from them: the scissors line if there is one, else the run of lines
+// ending the message, below at least one other line, that start with the
+// prefix git would pick for the lines above them. No blank line is needed
+// above that run: git writes its block right below a message that lacks a
+// final newline, and no line above the block can start with git's choice. A
+// message without one was not opened in the editor.
+func AutoCommentPrefix(message string, mayHaveBlock bool, rule AutoRule) string {
+	if mayHaveBlock {
+		lines := strings.Split(message, "\n")
+		for _, line := range lines {
+			for _, candidate := range autoCommentCandidates {
+				if isScissorsLine(line, string(candidate)) {
+					return string(candidate)
+				}
+			}
+		}
+		for i := range len(autoCommentCandidates) {
+			candidate := autoCommentCandidates[i : i+1]
+			if start := commentRunStart(lines, candidate, -1); start > 0 && autoCommentChoice(strings.Join(lines[:start], "\n"), rule) == candidate {
+				return candidate
+			}
+		}
+	}
+	return autoCommentChoice(message, rule)
+}
+
+// autoCommentChoice is git's core.commentChar=auto rule for message: the
+// first candidate no line starts with. The first line always counts; the
+// lines rule skips do not.
+func autoCommentChoice(message string, rule AutoRule) string {
+	starts := make(map[byte]bool)
+	if message != "" {
+		starts[message[0]] = true
+	}
+	counted := message
+	if rule == AutoSkipsTrailingComments {
+		counted = message[:len(message)-trailingCommentBytes(message)]
+	}
+	// Git treats a CR as a line start too.
+	for _, line := range strings.FieldsFunc(counted, func(r rune) bool { return r == '\n' || r == '\r' }) {
+		starts[line[0]] = true
+	}
+	for i := range len(autoCommentCandidates) {
+		if !starts[autoCommentCandidates[i]] {
+			return autoCommentCandidates[i : i+1]
+		}
+	}
+	return DefaultCommentPrefix
+}
+
+// trailingCommentBytes returns how many bytes end message as git's sign-off
+// placement ignores them (ignored_log_message_bytes, with "#" as the comment
+// prefix): everything from the "#" scissors line down, and the run of empty
+// and "#" lines that ends the part above it, or an old "Conflicts:" block
+// with its tab-indented paths.
+func trailingCommentBytes(message string) int {
+	scissors := DefaultCommentPrefix + " " + scissorsMarker + "\n"
+	cutoff := len(message)
+	if strings.HasPrefix(message, scissors) {
+		cutoff = 0
+	} else if i := strings.Index(message, "\n"+scissors); i >= 0 {
+		cutoff = i + 1
+	}
+	boc, inConflicts := 0, false
+	for bol := 0; bol < cutoff; {
+		next := strings.IndexByte(message[bol:], '\n')
+		if next < 0 {
+			next = len(message)
+		} else {
+			next += bol + 1
+		}
+		switch {
+		case strings.HasPrefix(message[bol:cutoff], DefaultCommentPrefix) || message[bol] == '\n':
+			if boc == 0 {
+				boc = bol
+			}
+		case strings.HasPrefix(message[bol:], "Conflicts:\n"):
+			inConflicts = true
+			if boc == 0 {
+				boc = bol
+			}
+		case inConflicts && message[bol] == '\t':
+		case boc != 0:
+			boc, inConflicts = 0, false
+		}
+		bol = next
+	}
+	if boc != 0 {
+		return len(message) - boc
+	}
+	return len(message) - cutoff
+}
 
 // RemoveCheckpointTrailers removes every whole Entire-Checkpoint trailer line
 // whose ID drop selects, anywhere between the subject paragraph and a scissors
@@ -224,8 +463,12 @@ func FormatCheckpoint(message string, cpID checkpointID.CheckpointID) string {
 	return fmt.Sprintf("%s\n\n%s: %s\n", message, CheckpointTrailerKey, cpID.String())
 }
 
-// trailerLineRe matches git trailer format: "Key-Name: value" (no spaces before colon).
-var trailerLineRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9-]*: `)
+// trailerLineRe matches git trailer format: a key of letters, digits and
+// dashes at the start of the line, then optional spaces or tabs and the colon
+// ("Reviewed-by : Bob"). Like git, it accepts any separator after the colon
+// ("Key:value", a tab), which also makes a line starting with a URL
+// ("https://...") trailer-shaped.
+var trailerLineRe = regexp.MustCompile(`^[A-Za-z0-9-]+[ \t]*:`)
 
 // IsTrailerLine reports whether a line matches git trailer format.
 func IsTrailerLine(line string) bool {
@@ -233,48 +476,37 @@ func IsTrailerLine(line string) bool {
 }
 
 // appendTrailerLine appends a single pre-formatted trailer line (e.g. "Key: value")
-// to message in trailer-block-aware format. If the message already ends with a
-// trailer paragraph the line is joined directly to it; otherwise a blank line is
-// inserted first to start a new trailer block.
+// to message in trailer-block-aware format: it is joined to a final paragraph
+// that is a trailer block (see isTrailerBlock), and otherwise starts a new block
+// after a blank line.
 func appendTrailerLine(message, trailerLine string) string {
 	trimmed := strings.TrimRight(message, "\n")
 
+	// Collect the final paragraph. Joining also requires a blank line above
+	// the paragraph so a trailer-shaped subject line (e.g. "fix: bug") never
+	// has the trailer glued onto it.
 	lines := strings.Split(trimmed, "\n")
-	i := len(lines) - 1
-	for i >= 0 && strings.HasPrefix(strings.TrimSpace(lines[i]), "#") {
-		i--
-	}
-
-	hasTrailerBlock := false
-	if i >= 0 {
-		last := strings.TrimSpace(lines[i])
-		if last != "" && IsTrailerLine(last) {
-			for i > 0 {
-				i--
-				above := strings.TrimSpace(lines[i])
-				if strings.HasPrefix(above, "#") {
-					continue
-				}
-				if above == "" {
-					hasTrailerBlock = true
-					break
-				}
-				if !IsTrailerLine(above) {
-					break
-				}
-			}
+	start := len(lines)
+	separated := false
+	for start > 0 {
+		if strings.TrimSpace(lines[start-1]) == "" {
+			separated = true
+			break
 		}
+		start--
 	}
 
-	if hasTrailerBlock {
+	// Join only a block read as one without a comment prefix: every reader
+	// accepts it whatever prefix it skips, and a new paragraph would push the
+	// block's trailers out of the final block.
+	if separated && isTrailerBlock(lines[start:], "") {
 		return trimmed + "\n" + trailerLine + "\n"
 	}
 	return trimmed + "\n\n" + trailerLine + "\n"
 }
 
-// AppendCheckpointTrailer appends Entire-Checkpoint in trailer-aware format.
-// If the message already ends with a trailer paragraph, append directly to it;
-// otherwise add a blank line before starting a new trailer block.
+// AppendCheckpointTrailer appends Entire-Checkpoint in trailer-aware format
+// (see appendTrailerLine).
 func AppendCheckpointTrailer(message, checkpointID string) string {
 	trailer := fmt.Sprintf("%s: %s", CheckpointTrailerKey, checkpointID)
 	return appendTrailerLine(message, trailer)
@@ -287,9 +519,11 @@ func AppendCheckpointTrailer(message, checkpointID string) string {
 // "true" — rather than just trailer presence — prevents a future
 // "Entire-OPF-Applied: false" or "skipped" from accidentally meaning
 // "yes, applied."
+//
+// The trailer marks commits Entire rewrites, not user commits, so a message
+// that is only a trailer block counts too.
 func HasOPFApplied(commitMessage string) bool {
-	for _, line := range finalTrailerBlock(commitMessage) {
-		line = strings.TrimSpace(line)
+	for _, line := range lastTrailerBlock(commitMessage, "", true) {
 		key, value, ok := strings.Cut(line, ":")
 		if !ok || key != OPFAppliedTrailerKey {
 			continue
@@ -301,28 +535,70 @@ func HasOPFApplied(commitMessage string) bool {
 	return false
 }
 
-func finalTrailerBlock(message string) []string {
-	trimmed := strings.TrimRight(message, "\n")
-	if trimmed == "" {
+// finalTrailerBlock returns the trailer and continuation lines of message's
+// final trailer block, skipping lines that start with commentPrefix as git's
+// trailer grammar does, or nil when the final paragraph is not a trailer block.
+func finalTrailerBlock(message, commentPrefix string) []string {
+	return lastTrailerBlock(message, commentPrefix, false)
+}
+
+// lastTrailerBlock is finalTrailerBlock that, with subjectMayBeTrailers, also
+// reads a message of one paragraph as a trailer block.
+func lastTrailerBlock(message, commentPrefix string, subjectMayBeTrailers bool) []string {
+	lines := strings.Split(message, "\n")
+	// Git ignores the blank and comment lines that end a message.
+	end := len(lines)
+	for end > 0 && (isBlankLine(lines[end-1]) || isCommentLine(lines[end-1], commentPrefix)) {
+		end--
+	}
+	start := end
+	for start > 0 && !isBlankLine(lines[start-1]) {
+		start--
+	}
+	// Git reads the first paragraph as the subject, never as trailers.
+	if start == 0 && !subjectMayBeTrailers || !isTrailerBlock(lines[start:end], commentPrefix) {
 		return nil
 	}
-	lines := strings.Split(trimmed, "\n")
-	i := len(lines) - 1
-	for i >= 0 && strings.TrimSpace(lines[i]) == "" {
-		i--
+	return slices.DeleteFunc(lines[start:end], func(line string) bool { return isCommentLine(line, commentPrefix) })
+}
+
+// gitGeneratedPrefixes start the lines git itself adds to a trailer block
+// (`commit -s`, `cherry-pick -x`).
+var gitGeneratedPrefixes = []string{"Signed-off-by: ", "(cherry picked from commit "}
+
+// isTrailerBlock reports whether lines form a trailer block by git's rule: at
+// least one trailer line, with every other line an indented continuation of a
+// trailer's value or a line starting with commentPrefix, which git skips. A
+// block holding a line git generates may also hold other lines, as long as
+// they are at most three times its trailer lines.
+func isTrailerBlock(lines []string, commentPrefix string) bool {
+	trailerLines, otherLines := 0, 0
+	generated, continuable := false, false
+	for _, line := range lines {
+		switch {
+		case isCommentLine(line, commentPrefix):
+			// Git skips the line, and an indented line after it continues
+			// nothing.
+			continuable = false
+		case slices.ContainsFunc(gitGeneratedPrefixes, func(prefix string) bool { return strings.HasPrefix(line, prefix) }):
+			trailerLines++
+			generated, continuable = true, true
+		case IsTrailerLine(line):
+			trailerLines++
+			continuable = true
+		case continuable && (strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t")):
+			// Git treats an indented line after a trailer as a continuation
+			// of that trailer's value, never as a new trailer.
+		default:
+			otherLines++
+			continuable = false
+		}
 	}
-	end := i + 1
-	for i >= 0 && IsTrailerLine(strings.TrimSpace(lines[i])) {
-		i--
-	}
-	start := i + 1
-	if start == end {
-		return nil
-	}
-	if i >= 0 && strings.TrimSpace(lines[i]) != "" {
-		return nil
-	}
-	return lines[start:end]
+	return trailerLines > 0 && (otherLines == 0 || generated && trailerLines*3 >= otherLines)
+}
+
+func isCommentLine(line, commentPrefix string) bool {
+	return commentPrefix != "" && strings.HasPrefix(line, commentPrefix)
 }
 
 // AppendOPFAppliedTrailer appends `Entire-OPF-Applied: true` in

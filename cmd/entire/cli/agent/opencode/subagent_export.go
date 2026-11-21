@@ -17,6 +17,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
+	"github.com/entireio/cli/internal/transcript/opencodev2"
 )
 
 // exportSubagent exports a child session and returns the transcript for one
@@ -155,7 +156,7 @@ func isCallPrompt(info MessageInfo, parts []Part) bool {
 		return false
 	}
 	for _, part := range parts {
-		if part.Type == "compaction" {
+		if part.Type == partTypeCompaction {
 			return false
 		}
 	}
@@ -194,6 +195,9 @@ func (a *OpenCodeAgent) LiveSubagentModifiedFiles(ctx context.Context, childID, 
 	if err != nil {
 		return nil, err
 	}
+	if data, err = opencodev2.Normalize(data); err != nil {
+		return nil, fmt.Errorf("convert the OpenCode 2 export: %w", err)
+	}
 	scoped, _, err := scopeExportToCall(data, since, time.Time{})
 	if err != nil {
 		return nil, err
@@ -213,7 +217,7 @@ func completedToolParts(msgs []ExportMessage) []ExportMessage {
 	for i, msg := range msgs {
 		kept[i] = ExportMessage{Info: msg.Info}
 		for _, part := range msg.Parts {
-			if part.Type == "tool" && (part.State == nil || part.State.Status != "completed") {
+			if part.Type == partTypeTool && (part.State == nil || part.State.Status != "completed") {
 				continue
 			}
 			kept[i].Parts = append(kept[i].Parts, part)

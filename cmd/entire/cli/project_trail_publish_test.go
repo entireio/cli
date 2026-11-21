@@ -38,7 +38,9 @@ func TestProjectTrailCreatePublishesBeforePOSTWithoutCommitting(t *testing.T) {
 	var publishedAtPOST []byte
 	handler := repositoryTrailCreationHandler(t, "gh", func(change api.ChangeCreateRequest) {
 		assert.Equal(t, "start-work", change.BranchName)
-		assert.Equal(t, "main", change.Base)
+		// origin has no HEAD here and the remote lookup is stubbed to unknown,
+		// so no base is sent and the server applies the repo's default branch.
+		assert.Empty(t, change.Base)
 		assert.Equal(t, "link", change.BranchAction)
 	})
 	setupRepositoryTrailCreation(t, "gh", func(w http.ResponseWriter, r *http.Request) {

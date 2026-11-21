@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1397,5 +1398,90 @@ func TestDispatchFork_AllWorkersInvalidStillFails(t *testing.T) {
 
 	if err := cmd.Execute(); err == nil {
 		t.Fatal("expected an error when every worker fails skill validation")
+	}
+}
+
+// writeFileReviewer writes files in the worktree when it starts, as an agent
+// running tests or shell commands during the review might.
+type writeFileReviewer struct {
+	name   string
+	paths  []string
+	events []reviewtypes.Event
+}
+
+func (r *writeFileReviewer) Name() string { return r.name }
+func (r *writeFileReviewer) Start(context.Context, reviewtypes.RunConfig) (reviewtypes.Process, error) {
+	for _, p := range r.paths {
+		if err := os.WriteFile(p, []byte("API_KEY=copied"), 0o600); err != nil {
+			return nil, err
+		}
+	}
+	return &scriptedDispatchProcess{events: r.events}, nil
+}
+
+// The files a trail finding may quote, and their contents, are fixed before
+// the reviewer runs, so a file the reviewer writes or rewrites during the run
+// cannot be quoted.
+func TestRunReview_TrailQuotesOnlyFilesPresentBeforeTheReview(t *testing.T) {
+	setupCmdTestRepo(t)
+	ctx := context.Background()
+	if err := seedReviewConfig(ctx, map[string]settings.ReviewConfig{"claude-code": {Prompt: "review"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := settings.ModifyClonePreferences(ctx, func(p *settings.ClonePreferences) error {
+		profile := p.ReviewProfiles[review.DefaultProfileName]
+		profile.Output = review.ReviewOutputTrail
+		p.ReviewProfiles[review.DefaultProfileName] = profile
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	testutil.WriteFile(t, ".", "wip.go", "package main")
+	testutil.WriteFile(t, ".", "kept.go", "package main")
+
+	reviewer := &writeFileReviewer{
+		name:  "claude-code",
+		paths: []string{"notes.txt", "wip.go"},
+		events: []reviewtypes.Event{
+			reviewtypes.Started{},
+			reviewtypes.AssistantText{Text: "- [high] notes.txt:1 leaks a key"},
+			reviewtypes.Finished{Success: true},
+		},
+	}
+	var posted *review.TrailReport
+	deps := review.Deps{
+		GetAgentsWithHooksInstalled: func(context.Context) []types.AgentName {
+			return []types.AgentName{"claude-code"}
+		},
+		NewSilentError:          func(err error) error { return err },
+		HeadHasReviewCheckpoint: func(context.Context) (bool, string) { return false, "" },
+		ReviewerFor: func(string) reviewtypes.AgentReviewer {
+			return reviewer
+		},
+		PostReviewToTrail: func(_ context.Context, _ io.Writer, _ string, report review.TrailReport) error {
+			posted = &report
+			return nil
+		},
+	}
+
+	out := &bytes.Buffer{}
+	cmd := review.NewCommand(deps)
+	cmd.SetOut(out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"general"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("review: %v\n%s", err, out.String())
+	}
+	if posted == nil {
+		t.Fatalf("nothing was posted to the trail:\n%s", out.String())
+	}
+	if !posted.Scope.CanQuote("kept.go") {
+		t.Error("kept.go is not quotable, though it was uncommitted before the review and left alone")
+	}
+	if posted.Scope.CanQuote("wip.go") {
+		t.Error("wip.go is quotable, though the reviewer rewrote it during the run")
+	}
+	if posted.Scope.CanQuote("notes.txt") || posted.Scope.Covers("notes.txt") {
+		t.Error("notes.txt is in the scope, though the reviewer wrote it during the run")
 	}
 }

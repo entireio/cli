@@ -320,3 +320,24 @@ func TestTokenScope_AttachDuringActiveTurnConsumesTokensOnly(t *testing.T) {
 	require.NotNil(t, u3)
 	require.Equal(t, 3, u3.OutputTokens, "the turn's checkpoint counts only what attach didn't store")
 }
+
+// TestTokenScope_TurnWithOnlyGoneFilesKeepsTokens: a turn whose every changed
+// path is gone by turn end (the agent wrote a file and removed it) records no
+// step, but its tokens are the session's, as for a turn that changed nothing.
+func TestTokenScope_TurnWithOnlyGoneFilesKeepsTokens(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+	s := env.NewSession()
+
+	require.NoError(t, env.SimulateUserPromptSubmit(s.ID))
+	appendUsageMessage(s, "msg-1", 40)
+	s.CreateTranscript("write and remove a scratch file", []FileChange{{Path: "gone.txt", Content: "scratch"}})
+	require.NoError(t, env.SimulateStop(s.ID, s.TranscriptPath))
+
+	state, err := env.GetSessionState(s.ID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Zero(t, state.StepCount, "a turn whose files are all gone recorded a step")
+	require.NotNil(t, state.TokenUsage, "the turn's tokens were dropped")
+	require.Equal(t, 40, state.TokenUsage.OutputTokens, "the turn's tokens were dropped")
+}

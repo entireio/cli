@@ -163,9 +163,9 @@ func SetupRepo(t *testing.T, agent agents.Agent) *RepoState {
 	// commit links must come from the hook deciding nobody can answer, not from
 	// a setting that skips the decision. Every E2E commit is made by an agent or
 	// the harness, so a prompt shown is always a failure; see
-	// failIfCommitLinkingPrompted.
+	// failIfPrompted.
 	PatchSettings(t, dir, map[string]any{"log_level": "debug"})
-	t.Cleanup(func() { failIfCommitLinkingPrompted(t, dir) })
+	t.Cleanup(func() { failIfPrompted(t, dir) })
 
 	// Agents that need files planted before their first run in a repo get them
 	// here — after `entire enable` has written the agent's own config, so a

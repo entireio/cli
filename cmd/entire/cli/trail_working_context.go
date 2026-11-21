@@ -73,11 +73,11 @@ func resolveProjectTrailWorkingContext(cmd *cobra.Command, selector, branch stri
 	if repoOverride == "" {
 		defer func() {
 			if !foreign {
-				noteTrailCommandEnablement(ctx, client, err)
+				noteTrailCommandEnablement(ctx, client, repoID, err)
 			}
 		}()
 	}
-	base, err := trailRepoBasePath(host, owner, repo, repoID)
+	base, err := trailRepoBasePath(repoID)
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +93,7 @@ func resolveProjectTrailWorkingContext(cmd *cobra.Command, selector, branch stri
 		if err != nil {
 			return nil, err
 		}
-		target, err = openTrailParentTarget(cmd, work, repo, fmt.Sprintf("branch %q", branch))
+		target, err = openTrailParentTarget(cmd, work, repo, trailRepoAccess{Client: client, BasePath: base, RepoID: repoID}, fmt.Sprintf("branch %q", branch))
 		if err != nil {
 			return nil, err
 		}
@@ -147,7 +147,11 @@ func resolveProjectTrailWorkingContext(cmd *cobra.Command, selector, branch stri
 // trailChangeWriteCommands act on the selected change itself, so a trail with
 // several changes must be disambiguated explicitly rather than by whichever
 // branch happens to be checked out.
-var trailChangeWriteCommands = map[string]bool{"approve": true, "unlink": true, "merge": true}
+var trailChangeWriteCommands = map[string]bool{
+	"approve": true, "unlink": true, "merge": true,
+	"ready": true, "retarget": true,
+	"update-branch": true, "ci-pr": true, "rerun-review": true,
+}
 
 // finishForeignTrailWorkingContext opens the repository a sole change in
 // another repository belongs to. Repository is the server's basename in the
@@ -164,7 +168,7 @@ func finishForeignTrailWorkingContext(cmd *cobra.Command, target *projectTrailTa
 	if repoID != selected.RepositoryID {
 		return nil, fmt.Errorf("repository %s/%s does not match the trail's change", target.Project, selected.Repository)
 	}
-	base, err := trailRepoBasePath(target.Host, target.Project, selected.Repository, repoID)
+	base, err := trailRepoBasePath(repoID)
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +184,7 @@ func resolveProjectTrailChangeContext(cmd *cobra.Command, sel projectTrailChange
 	if err != nil {
 		return nil, err
 	}
-	target, err := openTrailParentTarget(cmd, change.Work, change.Repo, "change "+sel.String())
+	target, err := openTrailParentTarget(cmd, change.Work, change.Repo, change.access(), "change "+sel.String())
 	if err != nil {
 		return nil, err
 	}

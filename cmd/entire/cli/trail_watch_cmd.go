@@ -60,11 +60,11 @@ parent is used. --repo and --branch select the working context; this does not
 aggregate streams from every repository.`) + `
 
 This command resolves the trail's id internally and streams
-GET /api/v1/trails/<id>/events with Accept: text/event-stream.
+GET /api/v1/repos/<repo_id>/changes/<number>/events with Accept: text/event-stream.
 
 Events emitted by the server:
   ready              initial frame, includes trail and cursor
-  <event_type>       trail domain event (reviews, findings, runners, monitors, ...)
+  <event_type>       trail domain event (reviews, findings, agent runs, monitors, ...)
   reconnect          server cap reached; re-establishing
   forbidden          access was revoked; stream ends
   error              server-side error; treated as reconnect`,

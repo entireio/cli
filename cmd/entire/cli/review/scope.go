@@ -10,12 +10,15 @@ package review
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitexec"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
+	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 )
@@ -237,6 +240,154 @@ func countFilesChanged(ctx context.Context, repoRoot, baseRef string) (int, erro
 		return 0, nil
 	}
 	return len(strings.Split(trimmed, "\n")), nil
+}
+
+// listFilesChanged returns the repo-relative paths HEAD adds or modifies
+// since its merge base with baseRef. Deleted paths are left out.
+func listFilesChanged(ctx context.Context, repoRoot, baseRef string) ([]string, error) {
+	out, err := runGit(ctx, repoRoot, "diff", "--name-only", "-z", "--diff-filter=d", baseRef+"...HEAD")
+	if err != nil {
+		return nil, fmt.Errorf("git diff --name-only: %w", err)
+	}
+	return splitNUL(out), nil
+}
+
+// listUncommitted returns the repo-relative paths of every staged, unstaged,
+// and untracked (but not ignored) file, listing files inside untracked
+// directories individually, and separately the paths the uncommitted changes
+// remove: deletions and the origins of renames.
+func listUncommitted(ctx context.Context, repoRoot string) (changed, removed []string, err error) {
+	out, err := runGit(ctx, repoRoot, "--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all")
+	if err != nil {
+		return nil, nil, fmt.Errorf("git status: %w", err)
+	}
+	codes := make(map[string]string)
+	removed = gitrepo.ParsePorcelainV1Z([]byte(out), codes)
+	for file, code := range codes {
+		if strings.Contains(code, "D") {
+			removed = append(removed, file)
+		} else {
+			changed = append(changed, file)
+		}
+	}
+	return changed, removed, nil
+}
+
+// listTracked returns every path in the index, and separately those marked
+// skip-worktree or assume-unchanged, whose worktree text git hides from the
+// change.
+func listTracked(ctx context.Context, repoRoot string) (tracked, hidden map[string]struct{}, err error) {
+	out, err := runGit(ctx, repoRoot, "ls-files", "-z", "-v", "--cached")
+	if err != nil {
+		return nil, nil, fmt.Errorf("git ls-files: %w", err)
+	}
+	tracked = make(map[string]struct{})
+	hidden = make(map[string]struct{})
+	for _, record := range splitNUL(out) {
+		tag, file, ok := strings.Cut(record, " ")
+		if !ok {
+			continue
+		}
+		tracked[file] = struct{}{}
+		if tag == "S" || tag != strings.ToUpper(tag) {
+			hidden[file] = struct{}{}
+		}
+	}
+	return tracked, hidden, nil
+}
+
+func splitNUL(out string) []string {
+	out = strings.TrimRight(out, "\x00")
+	if out == "" {
+		return nil
+	}
+	return strings.Split(out, "\x00")
+}
+
+// TrailScope is what a trail-mode review's findings may anchor to, fixed
+// before any reviewer runs. A finding quotes worktree lines only from a
+// Quotable file whose contents are unchanged since then; a finding on any
+// other covered file posts against that file without a quote. The zero value
+// covers nothing.
+type TrailScope struct {
+	// Root is the worktree the scope was read from.
+	Root string
+	// Quotable maps each file the reviewed change adds or modifies to the
+	// SHA-256 of its contents when the review started.
+	Quotable map[string][sha256.Size]byte
+	// Tracked holds every path in the index.
+	Tracked map[string]struct{}
+}
+
+// CanQuote reports whether a finding may quote lines of the repo-relative
+// path: the reviewed change adds or modifies it, and its contents are those
+// the review started with.
+func (s TrailScope) CanQuote(path string) bool {
+	want, ok := s.Quotable[path]
+	if !ok {
+		return false
+	}
+	got, ok := hashWorktreeFile(s.Root, path)
+	return ok && got == want
+}
+
+// Covers reports whether a finding may name the repo-relative path without
+// quoting it.
+func (s TrailScope) Covers(path string) bool {
+	_, quotable := s.Quotable[path]
+	_, tracked := s.Tracked[path]
+	return quotable || tracked
+}
+
+func hashWorktreeFile(root, path string) ([sha256.Size]byte, bool) {
+	data, err := worktreedir.ReadFileNoFollow(root, path)
+	if err != nil {
+		return [sha256.Size]byte{}, false
+	}
+	return sha256.Sum256(data), true
+}
+
+// trailScope computes the TrailScope of a review scoped to baseRef. Quotable
+// files are those added or modified on the branch since it diverged from
+// baseRef, plus every uncommitted change, except paths the uncommitted
+// changes remove and paths whose local text git hides: an ignored local file
+// can sit at a path the branch diff still lists. With no baseRef only
+// uncommitted files are quotable.
+func trailScope(ctx context.Context, repoRoot, baseRef string) (TrailScope, error) {
+	if repoRoot == "" {
+		return TrailScope{}, errors.New("no worktree root")
+	}
+	var changed []string
+	if baseRef != "" {
+		branch, err := listFilesChanged(ctx, repoRoot, baseRef)
+		if err != nil {
+			return TrailScope{}, err
+		}
+		changed = branch
+	}
+	uncommitted, removed, err := listUncommitted(ctx, repoRoot)
+	if err != nil {
+		return TrailScope{}, err
+	}
+	changed = append(changed, uncommitted...)
+	tracked, hidden, err := listTracked(ctx, repoRoot)
+	if err != nil {
+		return TrailScope{}, err
+	}
+	excluded := hidden
+	for _, file := range removed {
+		excluded[file] = struct{}{}
+	}
+	scope := TrailScope{Root: repoRoot, Quotable: make(map[string][sha256.Size]byte, len(changed)), Tracked: tracked}
+	for _, file := range changed {
+		if _, ok := excluded[file]; ok {
+			continue
+		}
+		if sum, ok := hashWorktreeFile(repoRoot, file); ok {
+			scope.Quotable[file] = sum
+		}
+	}
+	return scope, nil
 }
 
 // countUncommitted returns the number of lines in `git status --porcelain`

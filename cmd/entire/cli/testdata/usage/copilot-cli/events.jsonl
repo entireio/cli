@@ -1,0 +1,7 @@
+{"type":"session.start","data":{"sessionId":"s"}}
+{"type":"session.usage_record","data":{"usage":{"model":"m","inputTokens":1000,"outputTokens":50,"cacheReadTokens":800,"cacheWriteTokens":0,"reasoningTokens":0,"apiCallId":"c1"}}}
+{"type":"session.usage_record","agentId":"sub-1","data":{"usage":{"model":"m","inputTokens":300,"outputTokens":30,"cacheReadTokens":0,"cacheWriteTokens":0,"reasoningTokens":0,"apiCallId":"c2"}}}
+{"type":"session.usage_record","data":{"usage":{"model":"m","inputTokens":500,"outputTokens":20,"cacheReadTokens":400,"cacheWriteTokens":0,"reasoningTokens":0,"apiCallId":"c3"}}}
+{"type":"session.usage_record","data":{"usage":{"model":"m","inputTokens":500,"outputTokens":25,"cacheReadTokens":400,"cacheWriteTokens":0,"reasoningTokens":0,"apiCallId":"c3"}}}
+{"type":"session.shutdown","data":{"modelMetrics":{"m":{"requests":{"count":3},"usage":{"inputTokens":1800,"outputTokens":105,"cacheReadTokens":1200,"cacheWriteTokens":0}}}}}
+{"type":"session.usage_record","data":{"usage":{"model":"m","inputTokens":100,"outputTokens":5,"cacheReadTokens":0,"cacheWriteTokens":0,"reasoningTokens":0,"apiCallId":"c4"}}}

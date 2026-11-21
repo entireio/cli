@@ -333,6 +333,7 @@ func (c *enableCheckpointRemoteChoice) report(ctx context.Context, w io.Writer, 
 		fmt.Fprintln(w, checkpointRedactionNotice)
 		return
 	}
+	policy, policyErr := enableCheckpointPushPolicy(ctx)
 	resolved, err := strategy.ResolveCheckpointSyncRemote(ctx)
 	if err != nil {
 		dedicated := false
@@ -348,8 +349,10 @@ func (c *enableCheckpointRemoteChoice) report(ctx context.Context, w io.Writer, 
 		}
 		if dedicated {
 			c.reportUnchangedDestination(w)
-			fmt.Fprintf(w, "Cannot resolve checkpoint remote selection: %v. Dedicated checkpoint uploads can still proceed.\n", err)
-			printCheckpointPrivacyNotice(w, false)
+			fmt.Fprintln(w, uploadPromise(policyErr,
+				fmt.Sprintf("Cannot resolve checkpoint remote selection: %v. Dedicated checkpoint uploads can still proceed.", err),
+				fmt.Sprintf("Cannot resolve checkpoint remote selection: %v. Checkpoints go to the dedicated destination", err)))
+			printCheckpointPrivacyNotice(w, false, policy, policyErr)
 			return
 		}
 		fmt.Fprintf(w, "Checkpoint sync remains disabled: %v\n", err)
@@ -359,8 +362,14 @@ func (c *enableCheckpointRemoteChoice) report(ctx context.Context, w io.Writer, 
 	}
 	if resolved.Name == "" {
 		c.reportUnchangedDestination(w)
-		fmt.Fprintln(w, "No Git remotes configured. Once you add one, checkpoints will be uploaded when you push to it.")
-		printCheckpointPrivacyNotice(w, true)
+		if policy == settings.CheckpointPushPolicyManual {
+			fmt.Fprintln(w, "No Git remotes configured. Once you add one, `entire checkpoint push` will upload checkpoints to it.")
+		} else {
+			fmt.Fprintln(w, uploadPromise(policyErr,
+				"No Git remotes configured. Once you add one, checkpoints will be uploaded when you push to it.",
+				"No Git remotes configured. Once you add one, checkpoints go to it"))
+		}
+		printCheckpointPrivacyNotice(w, true, policy, policyErr)
 		return
 	}
 	// Resolve a possible local claim before computing the destination summary.
@@ -418,12 +427,41 @@ func (c *enableCheckpointRemoteChoice) report(ctx context.Context, w io.Writer, 
 			}
 		}
 	}
-	if dedicated {
-		fmt.Fprintf(w, "Checkpoint uploads use the dedicated destination: %s.\n", destination)
-	} else {
-		fmt.Fprintf(w, "Checkpoints will be uploaded when you push to %s.\n", resolved.Name)
+	switch {
+	case dedicated:
+		fmt.Fprintln(w, uploadPromise(policyErr,
+			fmt.Sprintf("Checkpoint uploads use the dedicated destination: %s.", destination),
+			"Checkpoints go to the dedicated destination "+destination))
+	case policy == settings.CheckpointPushPolicyManual:
+		fmt.Fprintf(w, "Checkpoints will be uploaded to %s when you run `entire checkpoint push`.\n", resolved.Name)
+	default:
+		fmt.Fprintln(w, uploadPromise(policyErr,
+			fmt.Sprintf("Checkpoints will be uploaded when you push to %s.", resolved.Name),
+			"Checkpoints go to "+resolved.Name))
 	}
-	printCheckpointPrivacyNotice(w, !dedicated)
+	printCheckpointPrivacyNotice(w, !dedicated, policy, policyErr)
+}
+
+// enableCheckpointPushPolicy is the clone's checkpoint push policy where it
+// applies, the git-refs backend; empty when it does not apply. The error says
+// why a policy that applies cannot be read.
+func enableCheckpointPushPolicy(ctx context.Context) (settings.CheckpointPushPolicy, error) {
+	if refs, err := primaryBackendIsRefsAfter(ctx, ""); err == nil && refs {
+		return settings.LoadCheckpointPushPolicy(ctx) //nolint:wrapcheck // already names the file and the problem
+	}
+	return "", nil
+}
+
+// uploadPromise is promise unless the checkpoint push policy cannot be read.
+// git push then uploads nothing, to any destination, so the line names where
+// checkpoints go (destination) and why git push sends none. An explicit
+// `entire checkpoint push` does not read the policy and still uploads.
+func uploadPromise(policyErr error, promise, destination string) string {
+	if policyErr == nil {
+		return promise
+	}
+	return destination + ", but git push uploads none of them until the checkpoint push policy can be read: " +
+		tuiutil.SanitizeDisplayText(policyErr.Error())
 }
 
 // reportUnchangedDestination announces the absence of a change only when one
@@ -439,13 +477,22 @@ const checkpointRedactionNotice = "  Secret redaction is best effort, not bullet
 // printCheckpointPrivacyNotice must directly follow the line saying where
 // checkpoints go, which its first line refers back to.
 // offerPrivateRepo is false when checkpoints already go to a dedicated repo.
-func printCheckpointPrivacyNotice(w io.Writer, offerPrivateRepo bool) {
+// policy is the clone's checkpoint push policy, empty where it does not apply;
+// policyErr says why it cannot be read.
+func printCheckpointPrivacyNotice(w io.Writer, offerPrivateRepo bool, policy settings.CheckpointPushPolicy, policyErr error) {
 	fmt.Fprintln(w, "  They contain your agent transcripts. If that repo is public, anyone can read them.")
 	fmt.Fprintln(w, checkpointRedactionNotice)
 	// Clone-local, because the project file can lose: a local push_sessions
 	// overrides it, and a checkpoint_remote there owned by someone other than
 	// origin's owner is ignored, leaving uploads on the public remote.
 	fmt.Fprintf(w, "  To stop uploads: `entire configure --local --%s`\n", flagSkipPushSessions)
+	if policyErr != nil {
+		fmt.Fprintf(w, "  To replace the unreadable checkpoint push policy: `entire configure --%s <%s|%s>`\n",
+			flagCheckpointPushPolicy, settings.CheckpointPushPolicyAutomatic, settings.CheckpointPushPolicyManual)
+	}
+	if policy == settings.CheckpointPushPolicyAutomatic {
+		fmt.Fprintf(w, "  To upload only the checkpoints you choose: `entire configure --%s %s`\n", flagCheckpointPushPolicy, settings.CheckpointPushPolicyManual)
+	}
 	if offerPrivateRepo {
 		fmt.Fprintf(w, "  To use a separate private repo: `entire configure --local --%s github:<owner>/<repo>`\n", flagCheckpointRemote)
 	}

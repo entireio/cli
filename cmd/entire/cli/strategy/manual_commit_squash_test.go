@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -59,8 +58,9 @@ func TestPrepareCommitMsg_SquashWithCustomMessageInheritsBranchTrailers(t *testi
 	require.Equal(t, branchCheckpoint, ids[0].String(), "inherited trailers come first; the stamp is appended")
 }
 
-// Editor flow: the seeded message already carries the trailer; keep it once.
-func TestPrepareCommitMsg_SquashDefaultMessageKeepsInheritedTrailerOnce(t *testing.T) {
+// Editor flow: the seeded message lists the squashed commit's trailer indented
+// in its body, where git reads no trailer; the final block must name it, once.
+func TestPrepareCommitMsg_SquashDefaultMessageLinksInheritedTrailerInTheFinalBlock(t *testing.T) {
 	dir, branchCheckpoint := squashFixture(t)
 	squashMsg, err := os.ReadFile(filepath.Join(dir, ".git", "SQUASH_MSG"))
 	require.NoError(t, err)
@@ -74,8 +74,17 @@ func TestPrepareCommitMsg_SquashDefaultMessageKeepsInheritedTrailerOnce(t *testi
 
 	got, err := os.ReadFile(msgFile)
 	require.NoError(t, err)
-	require.Equal(t, 1, strings.Count(string(got), "Entire-Checkpoint:"))
-	require.Contains(t, string(got), branchCheckpoint)
+	recorded := trailers.StripEditorComments(string(got), trailers.DefaultCommentPrefix)
+	require.Equal(t, []string{branchCheckpoint}, finalBlockIDs(recorded), "%q", got)
+}
+
+// finalBlockIDs returns the checkpoint IDs in message's final trailer block.
+func finalBlockIDs(message string) []string {
+	var out []string
+	for _, cpID := range trailers.ParseAllCheckpointsFromFinalTrailerBlock(message, trailers.DefaultCommentPrefix) {
+		out = append(out, cpID.String())
+	}
+	return out
 }
 
 // No trailers to inherit: ordinary matching must run.

@@ -60,6 +60,11 @@ type projectTrailChange struct {
 	Work              *api.TrailResource
 }
 
+// access is the repository client the change was found through.
+func (c *projectTrailChange) access() trailRepoAccess {
+	return trailRepoAccess{Client: c.Client, BasePath: c.BasePath, RepoID: c.RepoID}
+}
+
 // resolveProjectTrailChange looks the change up by its repository-local
 // number, in the project named by --project or, without it, origin's owner.
 // localOnly callers (checkout, resume) act on this clone, so the change must
@@ -101,9 +106,9 @@ func resolveProjectTrailChange(cmd *cobra.Command, sel projectTrailChangeSelecto
 	// A change selector can name another repository even without --repo.
 	// Only a lookup proven to target this clone may update its enablement.
 	if localOnly || (cacheLocal && trailRepoFlag(cmd) == "") {
-		defer func() { noteTrailCommandEnablement(ctx, client, err) }()
+		defer func() { noteTrailCommandEnablement(ctx, client, repoID, err) }()
 	}
-	base, err := trailRepoBasePath(host, owner, sel.Repo, repoID)
+	base, err := trailRepoBasePath(repoID)
 	if err != nil {
 		return nil, err
 	}

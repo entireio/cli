@@ -17,7 +17,7 @@ import (
 func TestOpenCodeSummaryCapability(t *testing.T) {
 	t.Parallel()
 	if _, ok := agent.AsTextGenerator(NewOpenCodeAgent()); !ok {
-		t.Fatal("OpenCode must support text generation for summaries and runner setup")
+		t.Fatal("OpenCode must support text generation for summaries")
 	}
 	if got := agent.SummaryCLIBinaryName(agent.AgentNameOpenCode); got != openCodeBinary {
 		t.Fatalf("summary binary = %q, want opencode", got)

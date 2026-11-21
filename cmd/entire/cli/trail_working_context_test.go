@@ -212,13 +212,13 @@ func TestWorkingTrailWriteListsChangesInsteadOfGuessing(t *testing.T) {
 			return
 		}
 		switch r.URL.Path {
-		case "/api/v1/trails/gh/acme/widget/7/approvals":
+		case "/api/v1/repos/repo-id/changes/7/approvals":
 			// alice requested changes, then approved: her latest decision counts.
 			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"approvals": []map[string]any{
 				{"id": "1", "author": "alice", "event": "request_changes", "created_at": "2026-10-20T10:00:00Z"},
 				{"id": "2", "author": "alice", "event": "approve", "created_at": "2026-10-20T11:00:00Z"},
 			}}))
-		case "/api/v1/trails/gh/acme/api/9/approvals":
+		case "/api/v1/repos/api-id/changes/9/approvals":
 			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"approvals": []any{}}))
 		default:
 			// The failed command also re-probes enablement.
@@ -231,11 +231,41 @@ func TestWorkingTrailWriteListsChangesInsteadOfGuessing(t *testing.T) {
 		return api.NewClientWithBaseURL("repo-token", server.URL), map[string]string{"widget": "repo-id", "api": "api-id"}[repo], nil
 	}
 	t.Cleanup(func() { newTrailAPIClient = old })
+	// Other repositories' reviews are read through one shared-login opener
+	// (docs/development/api-routing.md), not a login per repository.
+	var (
+		openers int
+		shared  []string
+	)
+	setupOpener := newTrailRepoClientOpener
+	newTrailRepoClientOpener = func(insecure bool) trailRepoClientOpener {
+		openers++
+		open := setupOpener(insecure)
+		return func(ctx context.Context, forge, owner, repo string) (*api.Client, string, error) {
+			shared = append(shared, repo)
+			return open(ctx, forge, owner, repo)
+		}
+	}
+	t.Cleanup(func() { newTrailRepoClientOpener = setupOpener })
 
 	_, _, err := executeProjectTrailTest(t, "approve", "42")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "trail #42 has 2 open changes; choose one:\n  widget/7 - Widget work (approved by alice)\n  api/9 - API work (no reviews yet)")
 	require.Contains(t, err.Error(), "Run, for example: trail approve api/9")
+	assert.Equal(t, 1, openers)
+	assert.Equal(t, []string{"api"}, shared, "this clone's repository reuses its client; only api is opened")
+
+	// Every other command that changes the change it selects, or spends its
+	// agent budget, asks the same way.
+	for _, args := range [][]string{
+		{"ready", "42"}, {"retarget", "42", "--base", "main"},
+		{"update-branch", "42"}, {"ci-pr", "42"}, {"rerun-review", "42"},
+	} {
+		_, _, err := executeProjectTrailTest(t, args...)
+		require.Error(t, err, args[0])
+		require.Contains(t, err.Error(), "trail #42 has 2 open changes; choose one:", args[0])
+		require.Contains(t, err.Error(), "Run, for example: trail "+args[0]+" ", args[0])
+	}
 }
 
 // A trail whose only open change lives in another repository acts on that
@@ -282,7 +312,7 @@ func TestWorkingTrailSoleChangeInAnotherRepository(t *testing.T) {
 	out, _, err := executeProjectTrailTest(t, "approve", "42")
 	require.NoError(t, err)
 	require.Equal(t, []string{"gh/acme/widget", "gh/acme/api"}, opened)
-	require.Equal(t, []string{"POST /api/v1/trails/gh/acme/api/9/approvals"}, writes)
+	require.Equal(t, []string{"POST /api/v1/repos/api-id/changes/9/approvals"}, writes)
 	require.Contains(t, out, "gh/acme/api / feature/api")
 	// Nothing about widget was read, so its trails enablement stays unknown.
 	scope, err := currentTrailEnablementScope(t.Context())
@@ -375,7 +405,7 @@ func TestWorkingTrailCommandsKeepProjectAndRepoNumbersSeparate(t *testing.T) {
 			setupWorkingRepoClient(t, func(w http.ResponseWriter, r *http.Request) {
 				calls++
 				assert.Equal(t, tt.method, r.Method)
-				assert.Equal(t, "/api/v1/trails/gh/acme/widget/7"+tt.suffix, r.URL.Path)
+				assert.Equal(t, "/api/v1/repos/repo-id/changes/7"+tt.suffix, r.URL.Path)
 				if tt.event != "" {
 					var request api.TrailApprovalRequest
 					assert.NoError(t, json.NewDecoder(r.Body).Decode(&request))
@@ -411,11 +441,11 @@ func TestWorkingTrailFindingResolveUsesReviewIDFromCellPayload(t *testing.T) {
 		paths = append(paths, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 		switch r.Method + " " + r.URL.Path {
-		case "GET /api/v1/trails/gh/acme/widget/7/reviews/comments":
+		case "GET /api/v1/repos/repo-id/changes/7/reviews/comments":
 			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{
 				"comments": []map[string]any{{"id": "finding-one", "review_id": "review-one", "status": "open"}},
 			}))
-		case "PATCH /api/v1/trails/gh/acme/widget/7/reviews/review-one/comments/finding-one":
+		case "PATCH /api/v1/repos/repo-id/changes/7/reviews/review-one/comments/finding-one":
 			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{
 				"id": "finding-one", "review_id": "review-one", "status": "resolved",
 			}))
@@ -428,8 +458,8 @@ func TestWorkingTrailFindingResolveUsesReviewIDFromCellPayload(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, out, "open → resolved")
 	require.Equal(t, []string{
-		"GET /api/v1/trails/gh/acme/widget/7/reviews/comments",
-		"PATCH /api/v1/trails/gh/acme/widget/7/reviews/review-one/comments/finding-one",
+		"GET /api/v1/repos/repo-id/changes/7/reviews/comments",
+		"PATCH /api/v1/repos/repo-id/changes/7/reviews/review-one/comments/finding-one",
 	}, paths)
 }
 
@@ -466,7 +496,7 @@ func TestWorkingTrailBranchDiscoveryDoesNotRequireProjectEnumeration(t *testing.
 			setupWorkingRepoClient(t, func(w http.ResponseWriter, r *http.Request) {
 				if r.Method == http.MethodPost {
 					writes++
-					assert.Equal(t, "/api/v1/trails/gh/acme/widget/7/approvals", r.URL.Path)
+					assert.Equal(t, "/api/v1/repos/repo-id/changes/7/approvals", r.URL.Path)
 					w.WriteHeader(http.StatusCreated)
 					return
 				}
@@ -584,5 +614,5 @@ func TestWorkingTrailBranchDiscoveryIgnoresSameBranchElsewhere(t *testing.T) {
 
 	_, _, err := executeProjectTrailTest(t, "approve")
 	require.NoError(t, err)
-	require.Equal(t, []string{"/api/v1/trails/gh/acme/widget/7/approvals"}, writes)
+	require.Equal(t, []string{"/api/v1/repos/repo-id/changes/7/approvals"}, writes)
 }

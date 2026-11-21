@@ -191,3 +191,23 @@ func TestCheckpointDestinationNote_ExplicitSelection(t *testing.T) {
 		})
 	}
 }
+
+// TestInspectRemoteTopology_UnroutableStorePins: pre-push withholds
+// checkpoints for a remote whose owned checkpoint_remote has no URL, so that
+// remote is not a candidate in the sync-remote election and must not be
+// counted toward the multi-remote ambiguity note.
+func TestInspectRemoteTopology_UnroutableStorePins(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled": true}`)
+	writeLocalSettings(t, `{"strategy_options": {"checkpoint_remote": {"provider": "entire", "repo": "org/checkpoints"}}}`)
+	testutil.AddRemote(t, ".", originRemoteName, "https://github.com/org/repo.git")
+
+	topology := inspectRemoteTopology(t.Context())
+	if len(topology.destinations) != 1 {
+		t.Fatalf("destinations = %+v, want origin only", topology.destinations)
+	}
+	if !topology.destinations[0].pinned {
+		t.Error("origin should be pinned: its checkpoints are withheld, not elected")
+	}
+}

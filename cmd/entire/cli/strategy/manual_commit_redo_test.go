@@ -254,6 +254,15 @@ func TestPrepareCommitMsg_RedoKeepsAnAlreadyPresentTrailerOnce(t *testing.T) {
 	require.Equal(t, []string{redoCheckpointOne, redoCheckpointTwo}, checkpointIDs(got), "%q", got)
 }
 
+// A message that quotes a redone commit's trailer indented in its body still
+// gets that trailer in its final block: git reads no trailer in the body.
+func TestPrepareCommitMsg_RedoTrailerQuotedInTheBodyLinksInTheFinalBlock(t *testing.T) {
+	dir := redoFixture(t)
+	testutil.RunGit(t, dir, "reset", "-q", "--soft", "HEAD~2")
+	got := prepareMessage(t, "feat: the feature\n\nRedoes:\n\n    agent: part one\n\n    Entire-Checkpoint: "+redoCheckpointOne+"\n")
+	require.Equal(t, []string{redoCheckpointOne, redoCheckpointTwo}, finalBlockIDs(got), "%q", got)
+}
+
 // A redo split into several commits keeps inheriting: the reset is still the
 // latest ref operation while those commits land.
 func TestPrepareCommitMsg_RedoSecondCommitStillInherits(t *testing.T) {
