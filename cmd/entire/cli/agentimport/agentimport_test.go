@@ -402,6 +402,69 @@ func TestRun_AnchorsQuietCommitByCommitWindow(t *testing.T) {
 	}
 }
 
+// TestRun_UnconfiguredGitEmailFallsBackInsteadOfMatchingDefaultEmail proves
+// that when the repo has no configured git email, Run passes an empty email to
+// turnAnchorResolver rather than checkpoint.DefaultGitAuthorEmail
+// ("unknown@local"). A historical commit whose committer email happens to be
+// "unknown@local" inside the commit window must not be adopted.
+func TestRun_UnconfiguredGitEmailFallsBackInsteadOfMatchingDefaultEmail(t *testing.T) {
+	// Cannot use t.Parallel(): isolates git config resolution via t.Setenv.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	gitenv.UnsetGlobalConfig(t)
+
+	repoDir := t.TempDir()
+	repo, err := git.PlainInit(repoDir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeAndCommitAsAt(t, wt, repoDir, "init", "init", "seed@test.com", fixtureU1At.Add(-time.Minute))
+	writeAndCommitAsAt(t, wt, repoDir, "y", "default-email commit", cp.DefaultGitAuthorEmail, fixtureU1At.Add(30*time.Second))
+	writeAndCommitAsAt(t, wt, repoDir, "z", "later tip", "other@example.com", fixtureU1At.Add(2*time.Minute))
+	tipSHA := repoHeadSHA(t, repo)
+
+	claudeDir := t.TempDir()
+	content := strings.Join([]string{
+		`{"type":"user","uuid":"u1","cwd":` + fixtureCwdJSON(t, repoDir) + `,"timestamp":"2026-06-20T00:00:00Z","message":{"role":"user","content":"first"}}`,
+		`{"type":"assistant","uuid":"a1","timestamp":"2026-06-20T00:00:29.700Z","message":{"id":"m1","model":"claude-x","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"git commit -q -am 'agent: quiet commit'"}}],"usage":{"output_tokens":5}}}`,
+		`{"type":"user","uuid":"r1","timestamp":"2026-06-20T00:00:30.400Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":""}]}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(claudeDir, "sess-noemail.jsonl"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Run(context.Background(), repo, claudeImporter{}, Options{
+		RepoRoot: repoDir, OverridePath: claudeDir,
+		Now:           time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
+		LinkCommitSHA: tipSHA,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.TurnsImported != 1 {
+		t.Fatalf("want 1 imported, got %+v", res)
+	}
+
+	stores, err := cp.Open(context.Background(), repo, cp.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cid := importedCheckpointID(t, stores, "sess-noemail", Turn{UUID: "u1", CreatedAt: fixtureU1At})
+	md, err := stores.Persistent.ReadSessionMetadata(context.Background(), cid, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if md.CommitSHA != tipSHA {
+		t.Fatalf("turn1 CommitSHA = %q, want fallback tip %q when importer git email is unconfigured", md.CommitSHA, tipSHA)
+	}
+}
+
 // TestRun_AppliesConfiguredCustomRedaction proves imported transcripts honor
 // repo/user-configured custom_redactions (loaded at the command via
 // strategy.EnsureRedactionConfigured), not just always-on secret scanning.

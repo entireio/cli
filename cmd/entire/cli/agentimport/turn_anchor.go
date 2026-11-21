@@ -112,7 +112,8 @@ func newTurnAnchorResolver(repo *git.Repository, fallback, committerEmail string
 // fallback unchanged. Run rejects an empty fallback before constructing this
 // resolver.
 func (r *turnAnchorResolver) resolve(ctx context.Context, candidates []string, windows []TimeWindow) (anchor string, fromCandidate bool) {
-	if r.fallback == "" || (len(candidates) == 0 && len(windows) == 0) {
+	usableWindows := len(windows) > 0 && r.committerEmail != ""
+	if r.fallback == "" || (len(candidates) == 0 && !usableWindows) {
 		return r.fallback, false
 	}
 	if r.ancestors == nil {
