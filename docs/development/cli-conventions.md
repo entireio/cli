@@ -494,6 +494,10 @@ always runnable in every build.
   selection and catalog joins, with no additional requests. Both are omitted
   when coordinates cannot resolve, so an unready repo remains inspectable.
   Consumers must require both fields before making a repo-scoped API call.
+  `repo view --web` opens `<web-origin>/<forge>/<owner>/<repo>` (`repoWebURL`)
+  without a control-plane read; the origin is the active login's
+  (`auth.WebBaseURL`), also for an `entire://` URL naming another federation's
+  cluster, and `--authoritative` is noted as ignored.
   `remote add` and `clone` choose a placement through the shared
   `selectPlacement` picker, each passing its own `placementPicker` wording. The
   picker matches on the cluster host, which is what `--cluster` takes, and both
@@ -982,6 +986,24 @@ stdio server for MCP-host agents).
 Diagnostic subcommands live alongside `doctor.go` as `doctor_logs.go` and
 `doctor_bundle.go`. Group roots and noun-group children live in files
 named `<noun>_group.go` and `<noun>_<verb>.go` respectively.
+
+### `--web` on view and show commands
+
+A `view` / `show` command that has a page in the Entire web app takes
+`--web` / `-w`, as `gh repo view --web` does. The helper lives in
+`cmd/entire/cli/web_open.go`:
+
+- `addWebFlag(cmd)` registers the flag. Call it after `addJSONFlag`: when the
+  command has `--json`, the two are marked mutually exclusive.
+- `webRequested(cmd)` reads it, mirroring `jsonRequested`.
+- `openInWeb(cmd, url)` prints the URL on its own line to stdout, then opens
+  the browser. A browser that cannot be launched is a stderr note and exit 0,
+  since the URL was delivered; an empty URL is an error.
+
+Build the URL from `auth.WebBaseURL()` with path-escaped segments, and prefer
+resolving it without an API call when the reference already names the page.
+Tests stub the package-level `webOpenURL` seam and so must not be parallel.
+`--web` is for people: do not add it to `agentHelpGuidance`.
 
 ### Error Handling
 
