@@ -460,7 +460,8 @@ flock-serialized marker in the git common dir) that finalizes/condenses them
 using the same engines as `entire doctor --force`, condense-only: the sweep
 has no interactive condense deadline and never initiates a discard — ended
 sessions with nothing pending (`State.HasPendingWork`) are left to `entire doctor`
-(and the existing orphan cleanup). The 7-day stale-session
+(and the existing orphan cleanup). A condensed ENDED session stays ENDED and
+is marked `FullyCondensed`, so later commits skip it. The 7-day stale-session
 purge bounds the sweep's window: a zombie that stays unfixed past 7 days is
 removed by the purge, not the sweep. See `cmd/entire/cli/session_sweep.go`.
 

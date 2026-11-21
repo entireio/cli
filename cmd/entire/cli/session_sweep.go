@@ -42,10 +42,10 @@ func isSweepableZombie(st *session.State, now time.Time) bool {
 	if !st.IsEnded() {
 		return st.OwnerExited()
 	}
-	// FullyCondensed sessions are excluded outright, as before: condensing one
-	// again resets its phase to IDLE while FullyCondensed and EndedAt stay set,
-	// so PostCommit's FullyCondensed+ENDED skip stops matching and the dead
-	// session is re-evaluated on every commit.
+	// FullyCondensed sessions are excluded outright, as before: a task record
+	// still in flight survives condensation (removeCompletedTaskRecords), so
+	// the session would keep its pending work and nominate a sweep on every
+	// session start.
 	if st.Phase != session.PhaseEnded || st.FullyCondensed || !st.HasPendingWork() {
 		return false
 	}
