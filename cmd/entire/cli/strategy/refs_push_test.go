@@ -72,14 +72,21 @@ func writeRefFile(t *testing.T, workDir string, ref plumbing.ReferenceName, cont
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
 }
 
-// refPathFoldsCase reports whether ref's loose file resolves although it is
-// stored under a differently-cased shard. macOS's default filesystem is
-// case-insensitive, so a macOS run covers the folded branch.
-func refPathFoldsCase(t *testing.T, workDir string, ref plumbing.ReferenceName) bool {
+// foldedShardFixture stores a checkpoint ref under the other spelling of its
+// shard, the way a case-insensitive filesystem does when that directory
+// already exists, and returns the stored name and the name the queue holds.
+// It plants the stored name instead of relying on the filesystem, so the
+// result is the same on a case-sensitive one.
+func foldedShardFixture(t *testing.T, workDir, tip string) (stored, queued plumbing.ReferenceName) {
 	t.Helper()
-	_, err := os.Stat(filepath.Join(workDir, ".git", filepath.FromSlash(ref.String())))
-	t.Logf("case-insensitive filesystem: %v", err == nil)
-	return err == nil
+	// Where the folded spelling exists, git recorded a case-insensitive
+	// filesystem; set it so these tests read both spellings on every OS.
+	testutil.RunGit(t, workDir, "config", "core.ignorecase", "true")
+	stored = plumbing.ReferenceName(checkpoint.CheckpointRefPrefix + "AB/0000000000ab")
+	queued = mustRefName(t, id.MustCheckpointID("0000000000ab"))
+	require.NotEqual(t, stored, queued)
+	testutil.RunGit(t, workDir, "update-ref", stored.String(), tip)
+	return stored, queued
 }
 
 func TestPartitionLocalRefsUsing(t *testing.T) {
@@ -130,26 +137,36 @@ func TestPartitionLocalRefsUsing(t *testing.T) {
 				gitFallback: true,
 			}
 		}},
-		// The listing reports the on-disk shard case, while a case-insensitive
-		// filesystem still resolves the queued name.
+		// The listing reports the on-disk shard case. The queued name is the
+		// pushable one whichever case the ref is stored under, and its tip is
+		// the stored ref's.
 		{"case-folded shard", func(t *testing.T) partitionScenario {
 			t.Helper()
 			workDir, _, refs := setupRepoWithCheckpointRefs(t)
-			stored := plumbing.ReferenceName(checkpoint.CheckpointRefPrefix + "AB/0000000000ab")
-			queued := mustRefName(t, id.MustCheckpointID("0000000000ab"))
-			require.NotEqual(t, stored, queued)
-			testutil.RunGit(t, workDir, "update-ref", stored.String(), "HEAD")
-			s := partitionScenario{
-				workDir: workDir,
-				queued:  []plumbing.ReferenceName{queued},
-				listed:  append([]plumbing.ReferenceName{stored}, refs...),
+			stored, queued := foldedShardFixture(t, workDir, "HEAD")
+			return partitionScenario{
+				workDir:  workDir,
+				queued:   []plumbing.ReferenceName{queued},
+				existing: []plumbing.ReferenceName{queued},
+				listed:   append([]plumbing.ReferenceName{stored}, refs...),
+				tips:     map[plumbing.ReferenceName]string{queued: stored.String()},
 			}
-			if refPathFoldsCase(t, workDir, queued) {
-				s.existing = []plumbing.ReferenceName{queued}
-			} else {
-				s.stale = []plumbing.ReferenceName{queued}
+		}},
+		// Packing ends the filesystem's case-insensitive lookup: packed-refs
+		// matches names exactly, so only the stored name resolves. The split
+		// must not change when git packs the ref.
+		{"packed case-folded shard", func(t *testing.T) partitionScenario {
+			t.Helper()
+			workDir, _, refs := setupRepoWithCheckpointRefs(t)
+			stored, queued := foldedShardFixture(t, workDir, "HEAD")
+			testutil.RunGit(t, workDir, "pack-refs", "--all")
+			return partitionScenario{
+				workDir:  workDir,
+				queued:   []plumbing.ReferenceName{queued},
+				existing: []plumbing.ReferenceName{queued},
+				listed:   append([]plumbing.ReferenceName{stored}, refs...),
+				tips:     map[plumbing.ReferenceName]string{queued: stored.String()},
 			}
-			return s
 		}},
 		// The go-git listing leaves a symbolic ref to the resolving lookup.
 		{"symbolic ref", func(t *testing.T) partitionScenario {
@@ -385,6 +402,354 @@ func TestPartitionLocalRefsUsing_NoListing(t *testing.T) {
 	assert.Equal(t, wantExisting, existing)
 	assert.Equal(t, wantStale, missing)
 	assert.Nil(t, listed)
+}
+
+// remoteCheckpointRefs maps every ref the remote holds for cid to its tip, by
+// exact name, so two spellings of one checkpoint show up as two entries.
+func remoteCheckpointRefs(t *testing.T, bareDir string, cid id.CheckpointID) map[plumbing.ReferenceName]string {
+	t.Helper()
+	out := testutil.RunGit(t, bareDir, "for-each-ref", "--format=%(refname) %(objectname)", checkpoint.CheckpointRefPrefix)
+	refs := make(map[plumbing.ReferenceName]string)
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		name, hash, ok := strings.Cut(line, " ")
+		if !ok {
+			continue
+		}
+		if got, parsed := checkpoint.ParseRef(plumbing.ReferenceName(name)); parsed && got == cid {
+			refs[plumbing.ReferenceName(name)] = hash
+		}
+	}
+	return refs
+}
+
+// TestPushQueuedCheckpointRefs_PushesFoldedShardRef covers a queue entry whose
+// ref is stored under its case-folded shard spelling: the queued name no longer
+// resolves once git has packed the ref, so partitionCheckpointRefPushes used to
+// classify it stale, prune it, and leave the checkpoint unpushed forever. The
+// remote receives the canonical name: the stored spelling is this clone's
+// filesystem accident, and other clones read the canonical one.
+func TestPushQueuedCheckpointRefs_PushesFoldedShardRef(t *testing.T) {
+	workDir, bareDir, _ := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	cid := id.MustCheckpointID("01M2DCHJCHTR9T9MZTSB7WV76B")
+	canonical := mustRefName(t, cid)
+	folded, ok := checkpoint.FoldedRefName(cid)
+	require.True(t, ok)
+	head, err := repo.Head()
+	require.NoError(t, err)
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(folded, head.Hash())))
+	// Packing is what removes the filesystem's case-insensitive rescue, so the
+	// canonical name stops resolving on every platform rather than only on a
+	// case-sensitive one.
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+
+	// Reopen after packing: this models a later pre-push process holding only
+	// the canonical spelling in its queue.
+	repo, err = git.PlainOpen(workDir)
+	require.NoError(t, err)
+	queue := enqueueRefs(t, repo, []plumbing.ReferenceName{canonical})
+
+	pushed, pushDisabled, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
+	require.NoError(t, err)
+	assert.False(t, pushDisabled)
+	assert.Equal(t, 1, pushed)
+	assert.Equal(t, map[plumbing.ReferenceName]string{canonical: head.Hash().String()}, remoteCheckpointRefs(t, bareDir, cid),
+		"the checkpoint reaches the remote under its canonical name only")
+
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.Empty(t, remaining, "a pushed entry is pruned by its token, whatever spelling resolved")
+}
+
+// A checkpoint pushed while its ref is loose and again after git packs it must
+// land on one remote ref. Pushing the stored spelling sent it as one name
+// before packing and another after, leaving two refs with different tips on a
+// case-sensitive remote.
+func TestPushQueuedCheckpointRefs_FoldedShardRefKeepsItsRemoteNameAcrossPacking(t *testing.T) {
+	workDir, bareDir, _ := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+	cid := id.MustCheckpointID("0000000000ab")
+	stored, queued := foldedShardFixture(t, workDir, "HEAD")
+	push := func() {
+		t.Helper()
+		repo, err := gitrepo.OpenPath(workDir)
+		require.NoError(t, err)
+		defer repo.Close()
+		enqueueRefs(t, repo, []plumbing.ReferenceName{queued})
+		pushed, _, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
+		require.NoError(t, err)
+		require.Equal(t, 1, pushed)
+	}
+
+	push()
+	require.Equal(t, map[plumbing.ReferenceName]string{queued: revParse(t, workDir, "HEAD")}, remoteCheckpointRefs(t, bareDir, cid))
+
+	testutil.RunGit(t, workDir, "commit", "--allow-empty", "-m", "newer checkpoint version")
+	newer := revParse(t, workDir, "HEAD")
+	testutil.RunGit(t, workDir, "update-ref", stored.String(), newer)
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+	push()
+
+	require.Equal(t, map[plumbing.ReferenceName]string{queued: newer}, remoteCheckpointRefs(t, bareDir, cid),
+		"the newer version must advance the same remote ref")
+}
+
+// Recovery fetches the canonical name from the remote and installs the replayed
+// tip on the ref this clone stores, whatever its spelling.
+func TestPushQueuedCheckpointRefs_FoldedShardRefRecoversOntoDivergedRemote(t *testing.T) {
+	workDir, bareDir, _ := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+	cid := id.MustCheckpointID("0000000000ab")
+	c1 := revParse(t, workDir, "HEAD")
+	queued := mustRefName(t, cid)
+
+	// The remote holds the canonical name at C2, a child of C1 adding b.txt.
+	testutil.WriteFile(t, workDir, "b.txt", "b")
+	testutil.GitAdd(t, workDir, "b.txt")
+	testutil.GitCommit(t, workDir, "add b")
+	testutil.RunGit(t, workDir, "push", bareDir, "HEAD:"+queued.String())
+
+	// This clone holds C3, a sibling of C2 adding c.txt, stored folded and packed.
+	testutil.GitReset(t, workDir, c1)
+	testutil.WriteFile(t, workDir, "c.txt", "c")
+	testutil.GitAdd(t, workDir, "c.txt")
+	testutil.GitCommit(t, workDir, "add c")
+	stored, _ := foldedShardFixture(t, workDir, "HEAD")
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	queue := enqueueRefs(t, repo, []plumbing.ReferenceName{queued})
+	pushed, pushErr := flushCheckpointRefsQueue(context.Background(), repo, pushSettings{remote: bareDir}, batchWithinFlushBudget)
+	require.NoError(t, pushErr)
+	require.Equal(t, 1, pushed)
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.Empty(t, remaining)
+
+	files := remoteRefFiles(t, bareDir, queued)
+	assert.Contains(t, files, "b.txt", "the remote's change is kept")
+	assert.Contains(t, files, "c.txt", "the local change is replayed on top")
+	remoteRefs := remoteCheckpointRefs(t, bareDir, cid)
+	require.Len(t, remoteRefs, 1, "recovery must not add a second remote ref")
+	assert.Equal(t, map[plumbing.ReferenceName]string{stored: remoteRefs[queued]}, remoteCheckpointRefs(t, workDir, cid),
+		"the replayed tip is installed on the stored ref, and no second local ref appears")
+}
+
+// A session can write the checkpoint while recovery replays it. The flush then
+// reports the version now waiting, read from the ref this clone stores, under
+// the name the caller queued.
+func TestFlushCheckpointRefs_FoldedShardRefChangedDuringRecoveryIsReportedChanged(t *testing.T) {
+	workDir, bareDir, _ := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+	cid := id.MustCheckpointID("0000000000ab")
+	base := revParse(t, workDir, "HEAD")
+	queued := mustRefName(t, cid)
+
+	// The remote holds a sibling of this clone's version, so the push needs
+	// recovery. This clone's version is stored folded and packed.
+	testutil.WriteFile(t, workDir, "b.txt", "b")
+	testutil.GitAdd(t, workDir, "b.txt")
+	testutil.GitCommit(t, workDir, "add b")
+	testutil.RunGit(t, workDir, "push", bareDir, "HEAD:"+queued.String())
+	testutil.GitReset(t, workDir, base)
+	testutil.WriteFile(t, workDir, "c.txt", "c")
+	testutil.GitAdd(t, workDir, "c.txt")
+	testutil.GitCommit(t, workDir, "add c")
+	stored, _ := foldedShardFixture(t, workDir, "HEAD")
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+
+	// The concurrent write lands just before recovery installs its result, and
+	// is packed so the canonical name cannot answer for the folded ref.
+	stubRecoveryCAS(t, func(ctx context.Context, repo *git.Repository, refName plumbing.ReferenceName, newHash, expectedOld plumbing.Hash) error {
+		testutil.RunGit(t, workDir, "update-ref", refName.String(), base)
+		testutil.RunGit(t, workDir, "pack-refs", "--all")
+		return checkpoint.CASPersistentRef(ctx, repo, refName, newHash, expectedOld)
+	})
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	enqueueRefs(t, repo, []plumbing.ReferenceName{queued})
+	result, err := flushCheckpointRefs(context.Background(), repo, pushSettings{remote: bareDir}, checkpointRefSelection{})
+	require.NoError(t, err)
+
+	assert.Empty(t, result.failed, "a superseded recovery is not a failure")
+	assert.Empty(t, result.pushed)
+	require.Len(t, result.changed, 1)
+	assert.Equal(t, queued, result.changed[0].name)
+	assert.Equal(t, base, result.changed[0].hash.String(), "the version now waiting")
+	assert.Equal(t, map[plumbing.ReferenceName]string{stored: base}, remoteCheckpointRefs(t, workDir, cid))
+}
+
+// A remote that holds the folded name gains the canonical ref at the current
+// tip, and the folded one is left where it was: readers ask for the canonical
+// name first, and removing a remote ref is not the push's to do.
+func TestPushQueuedCheckpointRefs_RemoteHoldingFoldedNameGainsCanonical(t *testing.T) {
+	workDir, bareDir, _ := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+	cid := id.MustCheckpointID("0000000000ab")
+	older := revParse(t, workDir, "HEAD")
+	stored, queued := foldedShardFixture(t, workDir, older)
+	testutil.RunGit(t, workDir, "push", bareDir, older+":"+stored.String())
+	// Packed, so a case-insensitive filesystem under the remote cannot answer
+	// to the canonical name with the folded ref's file.
+	testutil.RunGit(t, bareDir, "pack-refs", "--all")
+
+	testutil.RunGit(t, workDir, "commit", "--allow-empty", "-m", "newer checkpoint version")
+	newer := revParse(t, workDir, "HEAD")
+	testutil.RunGit(t, workDir, "update-ref", stored.String(), newer)
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	enqueueRefs(t, repo, []plumbing.ReferenceName{queued})
+	pushed, _, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
+	require.NoError(t, err)
+	require.Equal(t, 1, pushed)
+
+	assert.Equal(t, map[plumbing.ReferenceName]string{queued: newer, stored: older}, remoteCheckpointRefs(t, bareDir, cid))
+}
+
+// A queue can hold one checkpoint under both spellings of its shard, because
+// the spelling a write enqueues follows how the ref is stored at that moment.
+// Both entries name one destination, and git refuses a push that names a
+// destination twice, taking the other refs of the batch down with it.
+func TestPartitionCheckpointRefPushes_BothShardSpellingsQueuedMakeOnePush(t *testing.T) {
+	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+	stored, queued := foldedShardFixture(t, workDir, "HEAD")
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	entries := []checkpoint.PushQueueEntry{{Ref: refs[0]}, {Ref: queued}, {Ref: stored}}
+	part := partitionCheckpointRefPushes(repo, entries, checkpointRefSelection{})
+
+	require.NoError(t, batchPushCheckpointRefs(context.Background(), bareDir, part.ready),
+		"one batch must carry every queued checkpoint")
+	assert.ElementsMatch(t, entries, checkpointRefPushTokens(part.ready),
+		"both queue entries are delivered by the one push, so both must be dequeued")
+}
+
+func TestPushQueuedCheckpointRefs_BothShardSpellingsQueuedPushOnce(t *testing.T) {
+	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+	cid := id.MustCheckpointID("0000000000ab")
+	stored, queued := foldedShardFixture(t, workDir, "HEAD")
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	queue := enqueueRefs(t, repo, []plumbing.ReferenceName{refs[0], queued, stored})
+	pushed, _, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
+	require.NoError(t, err)
+
+	assert.Equal(t, 2, pushed, "two checkpoints are queued, one of them twice")
+	assert.Equal(t, map[plumbing.ReferenceName]string{queued: revParse(t, workDir, "HEAD")}, remoteCheckpointRefs(t, bareDir, cid))
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.Empty(t, remaining, "both spellings leave the queue")
+}
+
+// git can leave the canonical name at an older commit than the folded one
+// (see checkpoint.SupersededBy). The push sends the newer version.
+func TestPushQueuedCheckpointRefs_PushesTheNewerRefWhenBothShardSpellingsExist(t *testing.T) {
+	workDir, bareDir, _ := setupRepoWithCheckpointRefs(t)
+	// A split forms only where git records a case-insensitive filesystem.
+	testutil.RunGit(t, workDir, "config", "core.ignorecase", "true")
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+	cid := id.MustCheckpointID("0000000000ab")
+	stored := plumbing.ReferenceName(checkpoint.CheckpointRefPrefix + "AB/0000000000ab")
+	queued := mustRefName(t, cid)
+	testutil.RunGit(t, workDir, "update-ref", queued.String(), "HEAD")
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+	testutil.RunGit(t, workDir, "commit", "--allow-empty", "-m", "newer checkpoint version")
+	newer := revParse(t, workDir, "HEAD")
+	testutil.RunGit(t, workDir, "update-ref", stored.String(), newer)
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	queue := enqueueRefs(t, repo, []plumbing.ReferenceName{queued})
+	pushed, _, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, pushed)
+	assert.Equal(t, map[plumbing.ReferenceName]string{queued: newer}, remoteCheckpointRefs(t, bareDir, cid))
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.Empty(t, remaining)
+}
+
+// Both spellings can hold refs whose histories diverged, so neither is a later
+// version of the other. Only one can take the destination in an upload: the
+// one reads resolve to, whichever spelling was queued first. The other stays
+// queued and the next push replays it onto the first.
+func TestPushQueuedCheckpointRefs_DivergedShardSpellingsPushInTurn(t *testing.T) {
+	workDir, bareDir, _ := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+	cid := id.MustCheckpointID("0000000000ab")
+	base := revParse(t, workDir, "HEAD")
+	testutil.WriteFile(t, workDir, "b.txt", "b")
+	testutil.GitAdd(t, workDir, "b.txt")
+	testutil.GitCommit(t, workDir, "add b")
+	first := revParse(t, workDir, "HEAD")
+	stored, queued := foldedShardFixture(t, workDir, first)
+	// Packed between the two writes, so the second name is a ref of its own on
+	// a case-insensitive filesystem too.
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+	testutil.GitReset(t, workDir, base)
+	testutil.WriteFile(t, workDir, "c.txt", "c")
+	testutil.GitAdd(t, workDir, "c.txt")
+	testutil.GitCommit(t, workDir, "add c")
+	testutil.RunGit(t, workDir, "update-ref", queued.String(), "HEAD")
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	queue := enqueueRefs(t, repo, []plumbing.ReferenceName{stored, queued})
+
+	read, readTip, err := checkpoint.StoredRef(repo, nil, queued)
+	require.NoError(t, err)
+	require.Equal(t, queued, read, "reads resolve a diverged pair to the canonical name")
+
+	pushed, _, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
+	require.NoError(t, err)
+	assert.Equal(t, 1, pushed)
+	assert.Equal(t, map[plumbing.ReferenceName]string{queued: readTip.String()}, remoteCheckpointRefs(t, bareDir, cid),
+		"the remote receives the version local reads use")
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.Equal(t, []plumbing.ReferenceName{stored}, remaining, "the ref that did not go stays queued")
+
+	pushed, _, err = PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
+	require.NoError(t, err)
+	assert.Equal(t, 1, pushed)
+	files := remoteRefFiles(t, bareDir, queued)
+	assert.Contains(t, files, "c.txt", "the first upload is kept")
+	assert.Contains(t, files, "b.txt", "the second is replayed on top")
+	remaining, err = queue.Drain()
+	require.NoError(t, err)
+	assert.Empty(t, remaining)
 }
 
 func TestBatchPushCheckpointRefs(t *testing.T) {
@@ -1116,4 +1481,41 @@ func TestFlushCheckpointRefsQueue_UnreadableRefStaysQueuedAndIsReported(t *testi
 	remaining, err = queue.Drain()
 	require.NoError(t, err)
 	assert.Empty(t, remaining)
+}
+
+// TestCheckpointWaitingAndRefExists_FoldedShardRef pins the two reads that
+// drive `entire session attach`'s report. A checkpoint ref stored under its
+// case-folded shard and then packed does not answer to its canonical name, so
+// both reads said the checkpoint did not exist and attach told the user to run
+// a command that could never find it.
+func TestCheckpointWaitingAndRefExists_FoldedShardRef(t *testing.T) {
+	workDir, _, _ := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	cid := id.MustCheckpointID("01M2DCHJCHTR9T9MZTSB7WV76B")
+	canonical := mustRefName(t, cid)
+	folded, ok := checkpoint.FoldedRefName(cid)
+	require.True(t, ok)
+	head, err := repo.Head()
+	require.NoError(t, err)
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(folded, head.Hash())))
+	// Packing removes the filesystem's case-insensitive rescue, so the canonical
+	// name stops resolving on a case-insensitive platform too.
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+
+	repo, err = git.PlainOpen(workDir)
+	require.NoError(t, err)
+	_ = enqueueRefs(t, repo, []plumbing.ReferenceName{canonical})
+
+	ctx := context.Background()
+	exists, err := CheckpointRefExists(ctx, cid)
+	require.NoError(t, err)
+	assert.True(t, exists, "a checkpoint stored under its folded shard still exists")
+
+	waiting, err := CheckpointWaiting(ctx, cid)
+	require.NoError(t, err)
+	assert.True(t, waiting, "its queue entry is still waiting to be pushed")
 }

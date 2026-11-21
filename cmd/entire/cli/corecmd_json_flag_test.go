@@ -34,8 +34,10 @@ func TestControlPlaneJSONFlag_OnlyOnHonoringCommands(t *testing.T) {
 		"project get":    true,
 		"project delete": false,
 		// list and add render the agents.
-		"project agent list": true,
-		"project agent add":  true,
+		"project agent list":  true,
+		"project agent add":   true,
+		"project agent setup": true,  // prints binding IDs, never credentials
+		"project agent serve": false, // foreground progress, not a JSON document
 		// each prints the run the server returns, or a page of runs.
 		"project agent run list":   true,
 		"project agent run show":   true,

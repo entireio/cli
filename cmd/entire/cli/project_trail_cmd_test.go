@@ -145,7 +145,7 @@ func TestProjectTrailShowFollowsParentAcrossCells(t *testing.T) {
 		assert.NoError(t, json.NewEncoder(w).Encode(item))
 	})
 	repoServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "/api/v1/trails/gh/acme/widget", r.URL.Path)
+		assert.Equal(t, "/api/v1/repos/repo-id/changes", r.URL.Path)
 		assert.NoError(t, json.NewEncoder(w).Encode(api.TrailListResponse{Trails: []api.TrailResource{{
 			ID: projectTrailTestChange, Number: 7, Branch: "feature/a", Title: "Code work",
 			Parent: &api.TrailParentReference{ID: projectTrailTestID, Number: 42, ProjectID: projectTrailTestProject,
@@ -239,7 +239,7 @@ func TestProjectTrailShowSelectorWithBranchMarksCurrent(t *testing.T) {
 		}
 	})
 	setupWorkingRepoClient(t, func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "/api/v1/trails/gh/acme/widget", r.URL.Path)
+		assert.Equal(t, "/api/v1/repos/repo-id/changes", r.URL.Path)
 		assert.NoError(t, json.NewEncoder(w).Encode(api.TrailListResponse{Trails: []api.TrailResource{{
 			ID: projectTrailTestChange, Number: 7, Branch: "feature/work",
 			Parent: &api.TrailParentReference{ID: projectTrailTestID, Number: 42, ProjectID: projectTrailTestProject,

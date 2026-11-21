@@ -39,19 +39,39 @@ Entire automatically scans transcript and metadata content before writing it to 
 
 Detected secrets are replaced with `REDACTED` before the data is ever written to a git object. Of the seven secret-detection passes above, the scanner layer (pass 2) is configurable — see [Choosing secret-scanner engines](#choosing-secret-scanner-engines) below — while the other six are **always on** and cannot be disabled. User-defined rules (inline `custom_redactions` and rule packs) add an eighth secret-detection pass that only runs when configured.
 
+### What Entire leaves out: text the agent attaches to its requests
+
+An agent's session file holds more than the conversation. It also records text the agent attached to its model requests: its system prompt, the instruction files it loaded (`CLAUDE.md`, `AGENTS.md`), and your memory notes. Much of that lives outside the repository, and no redaction rule can recognise what it says, such as a client's name.
+
+Entire blanks that text in the copy it stores, before redaction runs and with no setting to turn it off. Each record stays in place with its type, ids, hashes and file paths, so the transcript keeps its line numbering and its links. Only the text is emptied. The agent's own session file is never changed.
+
+- **Claude Code:** the request log (`api-request-blob` message content, `api-request-shape` system prompt and tool definitions), the system prompt snapshot (`prompt_snapshot`, also renamed so that a resumed session builds a fresh system prompt rather than reusing the empty one), the bodies of loaded instruction and memory files (`instructions` attachments), and the text of every other attachment except what you shared in the conversation: prompts you queued while it worked, files you @-mentioned, IDE selections, and edits Claude Code reports back. That covers session context such as your email address and git status, skill, agent, tool and MCP listings, and hook output, and also attachment kinds Claude Code adds later.
+- **Codex:** the base instructions in `session_meta` and the developer message that repeats them, the `AGENTS.md` text in `world_state`, the user instructions in `turn_context` (Codex 0.132 and older), and the `AGENTS.md` dumps in user messages and compacted history.
+- **Pi:** the `project_context` section of its system messages, which holds the instruction files it loaded, including the copy a compaction record keeps.
+
+Resuming a restored session still works: the agent reads its instructions again from the machine it resumes on, so a session resumed elsewhere runs with that machine's instruction files and memory.
+
+What this does not cover:
+
+- **Other agents.** No injected instruction text was found in Cursor or OpenCode session files. Copilot CLI, Factory AI Droid, Antigravity and external agents have not been examined.
+- **Pi's own system prompt.** Only the instruction files are blanked; the other sections of Pi's system message (its built-in prompt, tool list and working directory) are kept.
+- **Instruction files the agent reads or edits during a session, or that you @-mention.** A tool call that reads or changes `CLAUDE.md` or a memory file is part of the conversation, and its content is stored like any other tool result. The same goes for a file you @-mention or select in your IDE.
+- **Codex model switches.** The developer message Codex writes when the model changes carries the new model's built-in instructions and is kept.
+- **Checkpoints already written.** Checkpoints stored by an older CLI are not rewritten.
+
 ### What Entire does NOT understand: pasted images and screenshots
 
 **Every layer described above — all nine passes, including the opt-in PII layer — reads transcript *text*. There is no OCR pass, no vision-model PII or secret scan, and no gate that holds an image back until someone reviews it. Nothing in Entire ever reads what an image depicts.**
 
 What that means for an image you paste is **not uniform across agents**, because it depends on how the agent writes the image into its transcript. There are three outcomes (stored, destroyed, or never stored), and only the first is an exposure:
 
-| Agent | Default | With `redaction.externalize_images` on |
-| --- | --- | --- |
-| Claude Code | **Stored unredacted**, inline in the transcript as base64. The text scanner skips it (the `type: image` / `type: base64` skip rule below) rather than scanning it. | **Stored unredacted** as a raw binary blob under the checkpoint's `assets/` folder. |
-| Codex | **Stored unredacted**, inline in the transcript as base64. Codex writes images as `data:image/…;base64,` URIs (in `input_image` items, tool output, and metadata such as browser screenshots), which the data URI skip rule below matches. Sessions captured before that rule existed have the image destroyed instead: the entropy layer spliced `REDACTED` into the base64, and that cannot be undone. A data URI embedded inside a longer string is still scanned and still destroyed. | **Stored unredacted** under `assets/`. |
-| Cursor | **Not stored in the repository at all.** Cursor keeps images in its own per-session SQLite store, never in the transcript Entire reads. | **Stored unredacted** under `assets/`, captured from that store. |
-| Pi | **Stored unredacted**, inline in the transcript as base64. Pi writes images as `{"type": "image", "data": …}` items, which the same skip rule matches. | **Stored unredacted** under `assets/`. |
-| OpenCode, Copilot CLI, Factory Droid | Depends on the agent's own transcript shape; Entire has no image handling for these. Assume the Claude Code row unless you have checked. | Unchanged — the setting only affects the four agents above. |
+| Agent | Default | With `redaction.externalize_images` on | With `redaction.drop_images` on |
+| --- | --- | --- | --- |
+| Claude Code | **Stored unredacted**, inline in the transcript as base64. The text scanner skips it (the `type: image` / `type: base64` skip rule below) rather than scanning it. | **Stored unredacted** as a raw binary blob under the checkpoint's `assets/` folder. | **Not stored.** Replaced with a 1x1 placeholder image. |
+| Codex | **Stored unredacted**, inline in the transcript as base64. Codex writes images as `data:image/…;base64,` URIs (in `input_image` items, tool output, and metadata such as browser screenshots), which the data URI skip rule below matches. Sessions captured before that rule existed have the image destroyed instead: the entropy layer spliced `REDACTED` into the base64, and that cannot be undone. A data URI embedded inside a longer string is still scanned and still destroyed. | **Stored unredacted** under `assets/`. | **Not stored.** Replaced with a 1x1 placeholder image, including a data URI embedded inside a longer string and an image Codex generated. |
+| Cursor | **Not stored in the repository at all.** Cursor keeps images in its own per-session SQLite store, never in the transcript Entire reads. | **Stored unredacted** under `assets/`, captured from that store. | **Not stored.** The images in Cursor's store are not captured. |
+| Pi | **Stored unredacted**, inline in the transcript as base64. Pi writes images as `{"type": "image", "data": …}` items, which the same skip rule matches. | **Stored unredacted** under `assets/`. | **Not stored.** Replaced with a 1x1 placeholder image. |
+| OpenCode, Copilot CLI, Factory Droid | Depends on the agent's own transcript shape; Entire has no image handling for these. Assume the Claude Code row unless you have checked. | Unchanged — the setting only affects the four agents above. | **Not stored** when the agent writes images in one of the shapes listed under [Dropping images](#dropping-images). Those cover an image attached in OpenCode 1 and OpenCode 2. Any other shape is stored as in the Default column. |
 
 **Do not treat a destroyed image as a protection.** Where an image is destroyed, that is a side effect of a skip rule not matching a shape, not a deliberate safeguard: it destroys data you may want, and a change to either the rule or the agent's format flips it to the exposure case without notice.
 
@@ -62,7 +82,31 @@ Two things about *when* those bytes reach git:
 - **A checkpoint's copy** lands on `entire/checkpoints/v1` (or the equivalent per-checkpoint ref on the `git-refs` backend). Like all checkpoint data it is written locally and pushed separately, so it reaches your remote only when checkpoint data is pushed — see the **Review before pushing** bullet under [Recommendations](#recommendations).
 - **Before you commit**, the image exists only in the agent's own transcript and in Entire's local sanitized copy (`.entire/metadata/<session>/full.jsonl`); nothing is written to git at turn end.
 
-**If you would not commit an image to your repository unredacted, do not paste it into an agent conversation.** This applies equally to a private repository — anyone with read access to checkpoint data can see it — and especially to a public one.
+**If you would not commit an image to your repository unredacted, do not paste it into an agent conversation.** This applies equally to a private repository — anyone with read access to checkpoint data can see it — and especially to a public one. To keep images out of checkpoints altogether, turn on [`redaction.drop_images`](#dropping-images).
+
+### Dropping images
+
+`redaction.drop_images` is an **opt-in** setting, off by default, that keeps images out of stored transcripts. It exists because no redaction layer reads image content, so a screenshot that shows personal data or a secret is otherwise stored as pasted.
+
+```json
+{
+  "redaction": {
+    "drop_images": true
+  }
+}
+```
+
+When it is on, every image Entire finds in a transcript is replaced with a 1x1 placeholder image of the same type (PNG, JPEG, GIF or WebP) before the transcript is redacted and written to a git object. The entry stays a valid image, so a 1x1 image in a stored transcript marks where an image was dropped. No `assets/` folder is written.
+
+- **Where it applies.** Every path that stores a transcript: checkpoints written at commit, the turn-end rewrite of those checkpoints, subagent transcripts, `entire session attach`, and `entire import`.
+- **Which images.** Six shapes, looked for in every agent's transcript: an object with `"type": "image"` and base64 under `source.data` (Claude Code), an object with `"type": "image"` and base64 under `file.base64` (Claude Code's record of reading an image file), an object with `"type": "image"` and base64 under `data` (Pi), an object with `"type": "file"`, an `image/` type under `mime` and base64 under `data` (OpenCode 2), an object with `"type": "image_generation_call"` and base64 under `result` (an image Codex generated), and any `data:image/<type>;base64,` URI, on its own or inside a longer string (Codex, OpenCode 1). An image is dropped whatever its size or type, however its JSON is escaped, and whether or not its base64 decodes. An agent that writes images in any other shape is not covered, and a transcript line that is not valid JSON is left as it is. Cursor's images, which live outside its transcript, are not captured.
+- **What else changes.** Only the image. It is replaced in the slot that holds it, so text elsewhere that repeats the same characters is kept. A transcript line that held an image is stored as compact JSON with its keys sorted, and so is a transcript that is one JSON document, as OpenCode's is. Their content is otherwise the same.
+- **Which file.** It is on when either `.entire/settings.json` or `.entire/settings.local.json` sets it to `true`. A `false` in the local file does not turn off a `true` in the committed file.
+- **With `externalize_images`.** `drop_images` wins: images are dropped, nothing is stored under `assets/`, and Entire logs a warning that `externalize_images` is ignored.
+- **Not retroactive.** Checkpoints written before the setting was on keep their images, locally and on the remote. To remove one, delete that checkpoint (see **Deleting a checkpoint is not a full purge** under [Recommendations](#recommendations)). If the setting is turned on in the middle of a turn, the turn-end rewrite replaces that turn's checkpoints, and assets already stored for them are removed when their transcript changes.
+- **Local copies keep the image.** The agent's own transcript and `.entire/metadata/<session>/full.jsonl` are not changed (see [Local copies of transcript content](#local-copies-of-transcript-content)). Neither reaches git.
+- **Resuming a session.** A session restored from a checkpoint shows the agent the 1x1 placeholder, not the original image. Claude Code and Codex accept a 1x1 PNG as a new image; resuming a restored session that contains placeholders has not been tested with either agent.
+- **Older CLI versions** reject a settings file that contains `drop_images`, and then do nothing in that repository: their hooks exit without writing a checkpoint, and `entire status` reports the settings error. A teammate on an older CLI gets no checkpoints, and no warning from the hooks, until they upgrade. Set it in a committed `.entire/settings.json` only after everyone on the team has upgraded.
 
 ### Choosing secret-scanner engines
 
@@ -95,6 +139,8 @@ Omitting either key, or the key's `enabled` field, keeps that engine at its defa
 ### Optional PII redaction
 
 PII redaction is a separate, **opt-in** layer that runs in addition to the always-on secret detection. Disabled by default. Configured under `redaction.pii` in `.entire/settings.json` (team-shared) or `.entire/settings.local.json` (personal, gitignored).
+
+PII redaction does not cover images. It reads transcript text only, so personal data shown in a pasted screenshot is stored as pasted. To keep images out of checkpoints, turn on [`redaction.drop_images`](#dropping-images).
 
 Built-in categories (when `enabled` is `true`):
 
@@ -151,7 +197,7 @@ If a custom pattern itself reveals sensitive structure (e.g. an internal ID form
 
 Two local copies of transcript content are never redacted and never reach the remote:
 
-`.entire/metadata/<session>/full.jsonl` is Entire's own local working copy of the transcript, written mode `0600`. It is *sanitized* (agent state that cannot be replayed out of a checkpoint is stripped) but **not redacted** — redaction happens on the way into a git object, not on this file. It is the input condensation reads from when the live agent transcript is no longer available.
+`.entire/metadata/<session>/full.jsonl` is Entire's own local working copy of the transcript, written mode `0600`. It is *sanitized* (agent state that cannot be replayed out of a checkpoint is stripped, and [the text the agent attaches to its requests](#what-entire-leaves-out-text-the-agent-attaches-to-its-requests) is blanked) but **not redacted** — redaction happens on the way into a git object, not on this file. It is the input condensation reads from when the live agent transcript is no longer available.
 
 The agent's own transcript is never modified at all. Entire reads from it and leaves it alone, because the agent is writing to it continuously and editing under the agent's feet would corrupt the session.
 
@@ -163,7 +209,7 @@ If your AI sessions will touch sensitive data:
 - **Keep checkpoints out of a public repository.** If the code must stay public, upload checkpoints to a separate private repository with `entire configure --local --checkpoint-remote github:<owner>/<repo>` (`strategy_options.checkpoint_remote`, see [Store Checkpoints in Another Repository](https://docs.entire.com/guides/checkpoints/store-checkpoints-in-another-repo)), or stop uploading them with `entire configure --local --skip-push-sessions` (`strategy_options.push_sessions: false`). `--local` makes the setting take effect for your clone: a project `checkpoint_remote` owned by a different account than `origin` is ignored, and a local `push_sessions` overrides the project one.
 - **Deleting a checkpoint is not a full purge.** `entire checkpoint delete <id>` deletes a checkpoint locally and from every checkpoint remote that holds it. On the legacy `entire/checkpoints/v1` branch it removes the checkpoint from the branch tip only, so the branch's history still contains it, and other checkpoints from the same session each carry that session's full transcript and are not deleted.
 - **Avoid passing sensitive files to your agent.** Content that never enters the agent conversation never appears in transcripts.
-- **Never paste a screenshot or image containing secrets or personal data.** Nothing in Entire reads what an image depicts, and on most agents the image is stored unredacted — see [What Entire does NOT understand: pasted images and screenshots](#what-entire-does-not-understand-pasted-images-and-screenshots).
+- **Never paste a screenshot or image containing secrets or personal data.** Nothing in Entire reads what an image depicts, and on most agents the image is stored unredacted — see [What Entire does NOT understand: pasted images and screenshots](#what-entire-does-not-understand-pasted-images-and-screenshots). Turning on [`redaction.drop_images`](#dropping-images) keeps images out of new checkpoints.
 - **Review before pushing.** Checkpoints are written locally — at commit time, or when a session with no file changes is snapshotted with the hidden `entire checkpoint create` — and pushed separately, so there is always a window to inspect them:
 
   ```fish

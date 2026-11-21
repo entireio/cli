@@ -197,7 +197,7 @@ func prepareTranscriptForStorage(
 	raw []byte,
 ) (externalized []byte, assets []cpkg.TranscriptAsset, sanitizedSize int64) {
 	sanitized := agent.SanitizeTranscriptForStorage(ag, raw)
-	externalized, assets = externalizeSessionImages(ctx, logCtx, state, sanitized)
+	externalized, assets = externalizeSessionImages(ctx, logCtx, state, cpkg.DropImagesIfEnabled(ctx, sanitized))
 	return externalized, assets, int64(len(sanitized))
 }
 
@@ -228,7 +228,7 @@ func prepareTaskTranscriptForStorage(
 	raw []byte,
 	externalizeImages bool,
 ) (redacted redact.RedactedBytes, assets []cpkg.TranscriptAsset, tooLarge bool, err error) {
-	sanitized := agent.SanitizeTranscriptForStorage(ag, raw)
+	sanitized := cpkg.DropImagesIfEnabled(ctx, agent.SanitizeTranscriptForStorage(ag, raw))
 	if len(sanitized) > agent.MaxChunkSize {
 		logging.Warn(logCtx, "subagent transcript exceeds the blob size cap; storing task without it",
 			slog.String("session_id", state.SessionID),
