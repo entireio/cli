@@ -19,6 +19,7 @@ const (
 	agentRunTestID      = "01ARZ3NDEKTSV4RRFFQ69G5RAA"
 	agentRunTestRetryID = "01ARZ3NDEKTSV4RRFFQ69G5RTY"
 	agentRunTestAgentID = "01ARZ3NDEKTSV4RRFFQ69G5AGT"
+	agentRunTestTrailID = "01ARZ3NDEKTSV4RRFFQ69G5TRA"
 )
 
 type agentRunRequest struct {
@@ -144,6 +145,99 @@ func TestProjectAgentRunShow_PrintsTheRun(t *testing.T) {
 	} {
 		assert.Contains(t, out, want)
 	}
+}
+
+// stubProjectAgentRunWeb serves run on the run route and trail on its trail's
+// route, for `run show --web`.
+func stubProjectAgentRunWeb(t *testing.T, run, trail map[string]any) *[]agentRunRequest {
+	t.Helper()
+	return stubProjectAgentRuns(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case agentTestBase + "/runs/" + agentRunTestID:
+			assert.NoError(t, json.NewEncoder(w).Encode(run))
+		case agentTestBase + "/trails/" + agentRunTestTrailID:
+			assert.NoError(t, json.NewEncoder(w).Encode(trail))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	})
+}
+
+func agentRunTestWithTarget() map[string]any {
+	run := agentRunTestJSON(agentRunTestID, "succeeded")
+	delete(run, "trail_id")
+	run["target"] = map[string]any{"trail_id": agentRunTestTrailID, "change_id": "01ARZ3NDEKTSV4RRFFQ69G5CHG", "ref": "feature/work"}
+	return run
+}
+
+func TestProjectAgentRunShow_WebOpensTheRunsTrail(t *testing.T) {
+	// Serial: replaces the project agent target and the webOpenURL seam.
+	const trailURL = "https://web.example/gh/acme/trails/7"
+	for _, flag := range []string{"--web", "-w"} {
+		opened := stubWebOpenURL(t, nil)
+		requests := stubProjectAgentRunWeb(t, agentRunTestWithTarget(), map[string]any{"id": agentRunTestTrailID, "number": 7, "url": trailURL})
+		out, errOut, err := executeProjectAgent(t, "run", "show", agentRunTestID, flag)
+		require.NoError(t, err)
+		assert.Equal(t, trailURL+"\n", out)
+		assert.Empty(t, errOut)
+		assert.Equal(t, []string{trailURL}, *opened)
+		assert.Equal(t, []agentRunRequest{
+			{Method: http.MethodGet, Path: agentTestBase + "/runs/" + agentRunTestID},
+			{Method: http.MethodGet, Path: agentTestBase + "/trails/" + agentRunTestTrailID},
+		}, *requests)
+	}
+}
+
+func TestProjectAgentRunShow_WebWithoutATrailPageIsAnError(t *testing.T) {
+	// Serial: replaces the project agent target and the webOpenURL seam.
+	noTrail := agentRunTestJSON(agentRunTestID, "succeeded")
+	delete(noTrail, "trail_id")
+	for name, tc := range map[string]struct {
+		run, trail map[string]any
+		want       string
+		reads      int
+	}{
+		"run without a trail": {noTrail, nil, "belongs to no trail", 1},
+		"trail without a url": {agentRunTestWithTarget(), map[string]any{"id": agentRunTestTrailID, "number": 7}, "no web page is available", 2},
+	} {
+		opened := stubWebOpenURL(t, nil)
+		requests := stubProjectAgentRunWeb(t, tc.run, tc.trail)
+		out, _, err := executeProjectAgent(t, "run", "show", agentRunTestID, "--web")
+		require.ErrorContains(t, err, tc.want, name)
+		require.ErrorContains(t, err, "run "+agentRunTestID, name)
+		assert.Empty(t, out, name)
+		assert.Empty(t, *opened, name)
+		assert.Len(t, *requests, tc.reads, name)
+	}
+}
+
+func TestProjectAgentRunShow_WebStillRefusesAnUnreadableRun(t *testing.T) {
+	// Serial: replaces the project agent target and the webOpenURL seam.
+	opened := stubWebOpenURL(t, nil)
+	requests := stubProjectAgentRuns(t, func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) })
+	out, _, err := executeProjectAgent(t, "run", "show", agentRunTestID, "--web")
+	require.ErrorContains(t, err, "read run "+agentRunTestID)
+	assert.Empty(t, out)
+	assert.Empty(t, *opened)
+	assert.Len(t, *requests, 1)
+
+	_, _, err = executeProjectAgent(t, "run", "show", "run-1", "--web")
+	require.ErrorContains(t, err, "expected a run ID")
+	assert.Len(t, *requests, 1)
+}
+
+func TestProjectAgentRunShow_WebAndJSONAreExclusive(t *testing.T) {
+	// Serial: replaces the project agent target and the webOpenURL seam.
+	opened := stubWebOpenURL(t, nil)
+	requests := stubProjectAgentRuns(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		http.NotFound(w, r)
+	})
+	_, _, err := executeProjectAgent(t, "run", "show", agentRunTestID, "--web", "--json")
+	require.ErrorContains(t, err, "none of the others can be")
+	assert.Empty(t, *opened)
+	assert.Empty(t, *requests)
 }
 
 func TestProjectAgentRunCancel(t *testing.T) {
