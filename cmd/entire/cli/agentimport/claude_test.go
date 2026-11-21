@@ -133,25 +133,53 @@ func TestClaudeSplitTurns_ExtractsCommitSHAs(t *testing.T) {
 	}
 }
 
-func TestCommitCommandPattern(t *testing.T) {
+func TestRunsCommitGitCommand(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		command string
 		want    bool
 	}{
 		{"git commit -q -F - <<'EOF'\nfix: thing\nEOF", true},
+		{"git commit -q -m \"$(cat <<'EOF'\nfix: thing\nEOF\n)\"", true},
 		{"cd x && git commit -am m", true},
 		{"git -C site commit", true},
+		{`git -C "my repo" commit -q`, true},
 		{"git -c a=b commit", true},
+		{"git --git-dir /tmp/repo.git commit -q", true},
 		{"git cherry-pick abc", true},
 		{"git --no-pager rebase main", true},
+		{"GIT_AUTHOR_NAME=x git commit -q", true},
+		{"env FOO=1 git commit -q", true},
+		{"command git commit -q", true},
+		{"(cd x && git commit -q)", true},
+		{"{ git commit -q; }", true},
+		{"if true; then git commit -q; fi", true},
+		{"2>/dev/null git commit -q 2>&1", true},
+		{"/usr/bin/git commit -q", true},
+		{"cat <<'EOF' > msg.txt && git commit -q -F msg.txt\nhello\nEOF", true},
+		{"cat <<'EOF'\nnot commit\nEOF\ngit commit -q -m msg", true},
+		{"git \\\n  commit -q", true},
 		{"git commit-tree HEAD^{tree}", false},
 		{"git merge-base main HEAD", false},
 		{"git log --grep commit", false},
+		{`git log --grep "git commit -q"`, false},
+		{`echo "git commit -q"`, false},
+		{`echo 'git commit -q'`, false},
+		{"echo git commit -q", false},
+		{"rg 'git commit -q' .", false},
+		{"# git commit -q", false},
+		{"git status # git commit -q", false},
+		{"cat <<'EOF'\ngit commit -q -m msg\nEOF", false},
+		{"cat <<-EOF\n\tgit commit -q\n\tEOF", false},
+		{`cat <<< "git commit -q"`, false},
+		{"command -v git commit", false},
+		{"echo hi \\\n  git commit -q", false},
+		{`echo "unterminated git commit -q`, false},
+		{"git -- commit", false},
 	}
 	for _, tt := range tests {
-		if got := commitCommandPattern.MatchString(tt.command); got != tt.want {
-			t.Errorf("match %q = %v, want %v", tt.command, got, tt.want)
+		if got := runsCommitGitCommand(tt.command); got != tt.want {
+			t.Errorf("runsCommitGitCommand(%q) = %v, want %v", tt.command, got, tt.want)
 		}
 	}
 }

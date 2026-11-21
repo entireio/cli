@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -134,13 +133,6 @@ func commitSHAsInRange(rawLines [][]byte, start, end int) []string {
 	return shas
 }
 
-// commitCommandPattern matches a shell command that runs git, any global
-// options (-C dir, -c key=val, --no-pager, ...), then a subcommand that writes
-// commits onto the current branch. Merge, cherry-pick, revert, rebase and am
-// count alongside commit because agents land commits through them too. The
-// subcommand must end there, so commit-tree and merge-base don't match.
-var commitCommandPattern = regexp.MustCompile(`\bgit(?:\s+-[Cc]\s+\S+|\s+--?[A-Za-z][\w-]*(?:=\S+)?)*\s+(?:commit|cherry-pick|revert|merge|rebase|am)(?:\s|[;&|)]|$)`)
-
 // The closing quote keeps toolUseToken from matching "tool_use_id", which
 // every tool_result line carries.
 var (
@@ -149,13 +141,13 @@ var (
 )
 
 // commitWindowsInRange returns the spans of the Bash calls within [start, end)
-// whose command matches commitCommandPattern, in result order. Each runs from
-// the line holding the tool_use to the line holding its tool_result, so a
-// commit made by the call has a committer time inside it. The start is
-// truncated to the second because git's committer time has second precision.
-// A call with no result in the turn has no end and is skipped. A background
-// call's result arrives before its command finishes, so its commit lands
-// after the span and the turn falls back.
+// that execute a commit-writing git command (see runsCommitGitCommand), in
+// result order. Each runs from the line holding the tool_use to the line
+// holding its tool_result, so a commit made by the call has a committer time
+// inside it. The start is truncated to the second because git's committer time
+// has second precision. A call with no result in the turn has no end and is
+// skipped. A background call's result arrives before its command finishes, so
+// its commit lands after the span and the turn falls back.
 func commitWindowsInRange(rawLines [][]byte, start, end int) []TimeWindow {
 	var windows []TimeWindow
 	calls := make(map[string]time.Time) // tool_use id -> call time
@@ -193,7 +185,7 @@ func commitWindowsInRange(rawLines [][]byte, start, end int) []TimeWindow {
 			case rec.Type == transcriptlib.TypeAssistant && block.Type == transcriptlib.ContentTypeToolUse &&
 				block.Name == "Bash" && block.ID != "":
 				var input transcript.ToolInput
-				if json.Unmarshal(block.Input, &input) == nil && commitCommandPattern.MatchString(input.Command) {
+				if json.Unmarshal(block.Input, &input) == nil && runsCommitGitCommand(input.Command) {
 					calls[block.ID] = at.Truncate(time.Second)
 				}
 			case rec.Type == transcriptlib.TypeUser && block.Type == "tool_result":
