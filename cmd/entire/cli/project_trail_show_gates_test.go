@@ -302,3 +302,89 @@ func TestProjectTrailShowServedNullGates(t *testing.T) {
 	assert.Empty(t, errOut)
 	assert.Contains(t, out, "  Gates for widget/7:\n    Mergeable: unknown\n")
 }
+
+// Not parallel: swaps the package-level webOpenURL seam and client constructors.
+func TestProjectTrailShow_Web(t *testing.T) {
+	const page = "https://entire.io/gh/acme/-/trails/42"
+
+	t.Run("a trail selected directly opens the trail page", func(t *testing.T) {
+		opens, reads := setupProjectTrailGatesTest(t)
+		opened := stubWebOpenURL(t, nil)
+		out, errOut, err := executeProjectTrailTest(t, "show", "42", "--project", "gh/acme", "--web")
+		require.NoError(t, err)
+		assert.Equal(t, page+"\n", out)
+		assert.Empty(t, errOut)
+		assert.Equal(t, []string{page}, *opened)
+		assert.Empty(t, opens, "--web opens no repository to read merge gates")
+		assert.Empty(t, reads(), "--web reads no merge gates")
+	})
+
+	t.Run("a trail reached through a change opens the change page", func(t *testing.T) {
+		setupProjectTrailTest(t, func(w http.ResponseWriter, _ *http.Request) {
+			item := projectTrailTestResource()
+			item.URL = page + "/"
+			// The repository name is known only from how the change was reached.
+			item.Changes[0].Repository, item.Changes[0].RepositoryID = "", "repo-widget"
+			assert.NoError(t, json.NewEncoder(w).Encode(item))
+		})
+		repoServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Only the list the branch resolves through; the change's detail
+			// is the merge gates read --web skips.
+			if r.URL.Path != "/api/v1/repos/repo-widget/changes" {
+				t.Errorf("trail show --web must not request %s", r.URL.Path)
+				http.NotFound(w, r)
+				return
+			}
+			assert.NoError(t, json.NewEncoder(w).Encode(api.TrailListResponse{Trails: []api.TrailResource{{
+				ID: projectTrailTestChange, Number: 7, Branch: "feature/a",
+				Parent: &api.TrailParentReference{ID: projectTrailTestID, Number: 42, ProjectID: projectTrailTestProject,
+					Host: "gh", Project: "acme", Path: projectTrailTestPath, Jurisdiction: "eu", PrimaryProcessingCell: "project-cell"},
+			}}}))
+		}))
+		t.Cleanup(repoServer.Close)
+		old := newTrailAPIClient
+		newTrailAPIClient = func(context.Context, bool, string, string, string) (*api.Client, string, error) {
+			return api.NewClientWithBaseURL("repo-token", repoServer.URL), "repo-widget", nil
+		}
+		t.Cleanup(func() { newTrailAPIClient = old })
+		opened := stubWebOpenURL(t, nil)
+
+		out, errOut, err := executeProjectTrailTest(t, "show", "--repo", "gh/acme/widget", "--branch", "feature/a", "-w")
+		require.NoError(t, err)
+		assert.Equal(t, page+"/changes/widget/7\n", out)
+		assert.Empty(t, errOut)
+		assert.Equal(t, []string{page + "/changes/widget/7"}, *opened)
+	})
+
+	t.Run("json is refused", func(t *testing.T) {
+		opens, _ := setupProjectTrailGatesTest(t)
+		opened := stubWebOpenURL(t, nil)
+		_, _, err := executeProjectTrailTest(t, "show", "42", "--project", "gh/acme", "--web", "--json")
+		require.ErrorContains(t, err, "none of the others can be")
+		assert.Empty(t, *opened)
+		assert.Empty(t, opens)
+	})
+}
+
+func TestProjectTrailWebURL(t *testing.T) {
+	t.Parallel()
+	const page = "https://entire.io/gh/acme/-/trails/42"
+	item := api.ProjectTrail{URL: page, Changes: []api.ChangeSummary{
+		{ID: "named", Repository: "widget", Number: 7},
+		{ID: "unnumbered", Repository: "widget"},
+	}}
+	for name, tc := range map[string]struct {
+		current *projectTrailCurrentChange
+		want    string
+	}{
+		"no current change":            {nil, page},
+		"current change":               {&projectTrailCurrentChange{ID: "named"}, page + "/changes/widget/7"},
+		"change without a number yet":  {&projectTrailCurrentChange{ID: "unnumbered", Repo: "widget"}, page},
+		"change missing from the list": {&projectTrailCurrentChange{ID: "gone", Repo: "widget"}, page},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, projectTrailWebURL(item, tc.current))
+		})
+	}
+}

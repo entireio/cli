@@ -2,8 +2,13 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
+	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 )
@@ -104,4 +109,51 @@ func TestTrailCommentDiscussionHelp(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Not parallel: swaps the package-level webOpenURL and newTrailAPIClient seams.
+func TestTrailCommentShow_Web(t *testing.T) {
+	const page = "https://entire.io/gh/acme/widget/trails/7"
+	discussions := 0
+	setupWorkingRepoClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/repos/repo-id/changes/7":
+			assert.NoError(t, json.NewEncoder(w).Encode(api.TrailResource{ID: projectTrailTestChange, Number: 7, URL: page, Branch: "feature/work"}))
+		case "/api/v1/repos/repo-id/changes/7/discussions/discussion-one":
+			discussions++
+			assert.NoError(t, json.NewEncoder(w).Encode(api.TrailDiscussionDetailResponse{}))
+		case "/api/v1/repos/repo-id/changes/7/discussions/no-such-discussion":
+			http.NotFound(w, r)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	})
+	args := []string{"comment", "show", "discussion-one", "--trail", "7", "--repo", "gh/acme/widget"}
+
+	t.Run("opens the trail page", func(t *testing.T) {
+		opened := stubWebOpenURL(t, nil)
+		stdout, stderr, err := executeLegacyTrailTest(t, append(args, "--web")...)
+		require.NoError(t, err)
+		assert.Equal(t, page+"\n", stdout)
+		assert.Empty(t, stderr)
+		assert.Equal(t, []string{page}, *opened)
+		assert.Equal(t, 1, discussions, "the discussion is still looked up, so a bad ID errors")
+	})
+
+	t.Run("json is refused", func(t *testing.T) {
+		opened := stubWebOpenURL(t, nil)
+		stdout, _, err := executeLegacyTrailTest(t, append(args, "--web", "--json")...)
+		require.ErrorContains(t, err, "none of the others can be")
+		assert.NotContains(t, stdout, page)
+		assert.Empty(t, *opened)
+	})
+
+	t.Run("an unknown discussion still errors", func(t *testing.T) {
+		opened := stubWebOpenURL(t, nil)
+		stdout, _, err := executeLegacyTrailTest(t, "comment", "show", "no-such-discussion", "--trail", "7", "--repo", "gh/acme/widget", "--web")
+		require.Error(t, err)
+		assert.Empty(t, stdout)
+		assert.Empty(t, *opened)
+	})
 }

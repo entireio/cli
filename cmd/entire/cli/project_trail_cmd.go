@@ -39,7 +39,7 @@ func addProjectTrailSelectorFlags(cmd *cobra.Command) {
 func newProjectTrailShowCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use: "show [<trail>]", Short: "Show trail intent and its repositories and branches",
-		Long: "Show a project trail by its project-local number or ULID, or the trail of <repo>/<number> branch work. Without a selector, follow the current branch's parent. Use --branch to follow another branch's parent. Open changes, and the change the trail was reached through, show their merge gates (the first 20 changes).",
+		Long: "Show a project trail by its project-local number or ULID, or the trail of <repo>/<number> branch work. Without a selector, follow the current branch's parent. Use --branch to follow another branch's parent. Open changes, and the change the trail was reached through, show their merge gates (the first 20 changes). With --web, open the trail's page in the browser instead, or the change's page when the trail was reached through a change.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			target, err := resolveProjectTrail(cmd, projectTrailSelector(args))
@@ -50,12 +50,39 @@ func newProjectTrailShowCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if webRequested(cmd) {
+				return openInWeb(cmd, projectTrailWebURL(out, target.Change))
+			}
 			return printProjectTrail(cmd, out, target.Change, lookupProjectTrailGates(cmd, target, out))
 		},
 	}
 	addProjectTrailSelectorFlags(cmd)
 	addJSONFlag(cmd)
+	addWebFlag(cmd)
 	return cmd
+}
+
+// projectTrailWebURL is the page `trail show --web` opens: the page of the
+// change the trail was reached through when that change can be named as
+// <repo>/<number>, otherwise the trail's own page.
+func projectTrailWebURL(item api.ProjectTrail, current *projectTrailCurrentChange) string {
+	if current == nil {
+		return item.URL
+	}
+	for _, c := range item.Changes {
+		if c.ID != current.ID {
+			continue
+		}
+		if c.Repository == "" {
+			c.Repository = current.Repo
+		}
+		selector, _ := trailChangeSelectorFor(c)
+		if u := projectTrailChangeURL(item.URL, selector); u != "" {
+			return u
+		}
+		break
+	}
+	return item.URL
 }
 
 // lookupProjectTrailGates reads the mergeability snapshot of each open change,
