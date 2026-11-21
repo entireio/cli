@@ -167,6 +167,9 @@ type trailShowOptions struct {
 	Repo         string
 	JSON         bool
 	InsecureHTTP bool
+	// Web is set for --web: it receives the trail's browser URL in place of
+	// rendering the trail, and the detail fetch is skipped. Nil renders.
+	Web func(url string) error
 }
 
 func newTrailShowCmd() *cobra.Command {
@@ -181,7 +184,9 @@ func newTrailShowCmd() *cobra.Command {
 		Long: `Show a trail.
 
 If <trail> is omitted, shows the trail for the current branch (or --branch).
-Otherwise, <trail> may be a trail number, id, or branch in the target repo.`,
+Otherwise, <trail> may be a trail number, id, or branch in the target repo.
+
+With --web, open the trail's page in the browser instead of printing it.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			selector := ""
@@ -198,11 +203,15 @@ Otherwise, <trail> may be a trail number, id, or branch in the target repo.`,
 			opts.Branch = trailBranchFlag(cmd)
 			opts.Repo = trailRepoFlag(cmd)
 			opts.InsecureHTTP = trailInsecureHTTP(cmd)
+			if webRequested(cmd) {
+				opts.Web = func(url string) error { return openInWeb(cmd, url) }
+			}
 			return runTrailShow(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), opts)
 		},
 	}
 	cmd.Flags().StringVar(&branchFlag, "branch", "", "Show the trail for this branch instead of the current branch; cannot be combined with a trail selector")
 	cmd.Flags().BoolVar(&opts.JSON, "json", false, "Output the trail as JSON (one entry of 'trail list --json' plus a mergeability snapshot, null when unknown)")
+	addWebFlag(cmd)
 	return cmd
 }
 
@@ -238,6 +247,10 @@ func runTrailShowWithClientAtPath(ctx context.Context, w, errW io.Writer, client
 	// mergeability unknown, and warns rather than failing.
 	m := found.ToMetadata()
 	m.URL = trailDisplayURL(*found, forge, owner, repo)
+	if opts.Web != nil {
+		// The page shows the description and mergeability itself.
+		return opts.Web(m.URL)
+	}
 	// Seed the description from the list body so a failed (or skipped)
 	// detail fetch still shows something; a successful detail fetch
 	// supersedes it with the richer body_document text below.

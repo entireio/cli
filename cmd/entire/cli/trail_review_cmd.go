@@ -212,7 +212,11 @@ func newTrailReviewShowCmd(targetOpts *trailReviewTargetOptions) *cobra.Command 
 	cmd := &cobra.Command{
 		Use:   "show [<trail>] <finding-id>",
 		Short: "Show a finding",
-		Args:  cobra.RangeArgs(1, 2),
+		Long: `Show a finding and its replies.
+
+With --web, open the finding's trail in the browser instead of printing the
+finding. A finding has no page of its own, so this is the trail's page.`,
+		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			selector, commentID, err := parseTrailSelectorAndCommentID(args, targetOpts.Selector)
 			if err != nil {
@@ -221,6 +225,7 @@ func newTrailReviewShowCmd(targetOpts *trailReviewTargetOptions) *cobra.Command 
 			return runTrailReviewShow(cmd, targetOpts.Mode, selector, commentID)
 		},
 	}
+	addWebFlag(cmd)
 	return cmd
 }
 
@@ -407,6 +412,13 @@ func runTrailReviewShow(cmd *cobra.Command, mode *trailMode, selector string, co
 	comment, err := resolveTrailReviewComment(cmd.Context(), client, target.Trail.ID, commentID)
 	if err != nil {
 		return err
+	}
+	if webRequested(cmd) {
+		url := strings.TrimSpace(target.Trail.URL)
+		if url == "" {
+			url = trailReviewWebURL(target)
+		}
+		return openInWeb(cmd, url)
 	}
 	if hydrated, _, hydrateErr := hydrateTrailReviewCommentWithState(cmd.Context(), client, target.Trail.ID, comment); hydrateErr == nil {
 		comment = hydrated

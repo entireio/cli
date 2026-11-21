@@ -250,3 +250,32 @@ func TestTrailFindingShow_DoesNotReadAThreadIDThatIsNotOnePathSegment(t *testing
 		assert.Contains(t, errOut, "invalid reply thread ID", "thread %q", id)
 	}
 }
+
+// Not parallel: sets ENTIRE_WEB_BASE_URL and swaps the package-level
+// webOpenURL seam and client constructors.
+func TestTrailFindingShow_Web(t *testing.T) {
+	t.Setenv(api.WebBaseURLEnvVar, "https://web.example")
+	setupFindingReplyTest(t, findingReplyTestDiscussion, func(_ http.ResponseWriter, r *http.Request) {
+		t.Errorf("finding show --web must not read replies: %s %s", r.Method, r.URL.Path)
+	})
+
+	t.Run("opens the trail page", func(t *testing.T) {
+		// The fixture's trail carries no server URL, so this is the page
+		// trailReviewWebURL builds from the change's number and branch.
+		const page = "https://web.example/gh/acme/widget/trails/7/feature/work"
+		opened := stubWebOpenURL(t, nil)
+		out, errOut, err := executeProjectTrailTest(t, "finding", "show", "widget/7", findingReplyTestFinding, "--project", "gh/acme", "--web")
+		require.NoError(t, err)
+		assert.Equal(t, page+"\n", out)
+		assert.Empty(t, errOut)
+		assert.Equal(t, []string{page}, *opened)
+	})
+
+	t.Run("an unknown finding still errors", func(t *testing.T) {
+		opened := stubWebOpenURL(t, nil)
+		out, _, err := executeProjectTrailTest(t, "finding", "show", "widget/7", "no-such-finding", "--project", "gh/acme", "--web")
+		require.Error(t, err)
+		assert.Empty(t, out)
+		assert.Empty(t, *opened)
+	})
+}
