@@ -1074,12 +1074,23 @@ func TestHandleLifecycleTurnEnd_EmptyTranscriptRef(t *testing.T) {
 	}
 
 	err := handleLifecycleTurnEnd(context.Background(), ag, event)
-	if err == nil {
-		t.Error("expected error for empty transcript ref, got nil")
+	require.NoError(t, err)
+}
+
+func TestHandleLifecycleTurnEnd_ClaudeCode_EmptyTranscriptRef(t *testing.T) {
+	t.Parallel()
+
+	ag, err := agent.Get(agent.AgentNameClaudeCode)
+	require.NoError(t, err)
+
+	event := &agent.Event{
+		Type:       agent.TurnEnd,
+		SessionID:  "test-claude-session",
+		SessionRef: "", // Empty transcript path from Devin/compat runtimes
 	}
-	if !strings.Contains(err.Error(), "transcript file not specified") {
-		t.Errorf("expected error about transcript file, got: %v", err)
-	}
+
+	err = handleLifecycleTurnEnd(context.Background(), ag, event)
+	require.NoError(t, err)
 }
 
 func TestHandleLifecycleTurnEnd_NonexistentTranscript(t *testing.T) {
@@ -1645,11 +1656,10 @@ func TestDispatchLifecycleEvent_RoutesToCorrectHandler(t *testing.T) {
 			errorSubstr: "no session_id",
 		},
 		{
-			name:        "TurnEnd with empty transcript",
+			name:        "TurnEnd with empty transcript is no-op",
 			eventType:   agent.TurnEnd,
 			sessionID:   "test",
-			expectError: true,
-			errorSubstr: "transcript file not specified",
+			expectError: false,
 		},
 		{
 			name:        "Compaction with empty transcript is no-op",

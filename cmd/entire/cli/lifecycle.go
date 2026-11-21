@@ -797,7 +797,9 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 
 	transcriptRef := event.SessionRef
 	if transcriptRef == "" {
-		return errors.New("transcript file not specified")
+		logging.Warn(logCtx, "transcript file not specified, skipping turn-end processing",
+			slog.String("session_id", sessionID))
+		return nil
 	}
 
 	// If agent implements TranscriptPreparer, materialize the transcript file.
