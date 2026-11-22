@@ -175,16 +175,16 @@ Hook queries reading only the hook's own refs or reflog may strip selectors and
 resolve from `paths.WorktreeRoot`. User-invoked commands acting on the current
 repository also honor the user's repository selectors.
 
-#### go-git v5 Bugs - Use CLI Instead
+#### go-git Checkout and Hard Reset - Use CLI Instead
 
-**Do NOT use go-git v5 for `checkout` or `reset --hard` operations.**
+**Do NOT use go-git for `checkout` or `reset --hard` operations.**
 
-go-git v5 has a bug where `worktree.Reset()` with `git.HardReset` and `worktree.Checkout()` incorrectly delete untracked directories even when they're listed in `.gitignore`. This would destroy `.entire/` and `.worktrees/` directories.
+Historically, go-git v5 had a bug where `worktree.Reset()` with `git.HardReset` and `worktree.Checkout()` deleted untracked directories even when they were listed in `.gitignore` (which would destroy `.entire/` and `.worktrees/` directories). Although the repository now uses `go-git/v6`, direct go-git `Reset` and `Checkout` remain forbidden by `.golangci.yaml` (`forbidigo`) until parity is separately safety-reviewed (see [git-cli-audit.md](git-cli-audit.md#checkout-and-hard-reset)).
 
 Use the git CLI instead:
 
 ```go
-// WRONG - go-git deletes ignored directories
+// WRONG - forbidden by forbidigo; use the git CLI instead
 worktree.Reset(&git.ResetOptions{
     Commit: hash,
     Mode:   git.HardReset,
@@ -214,7 +214,7 @@ cwd, _ := os.Getwd()  // e.g., /repo/frontend
 absPath := filepath.Join(cwd, file)  // file="api/src/types.ts" → /repo/frontend/api/src/types.ts (WRONG)
 
 // CORRECT - use repo root
-repoRoot, _ := paths.WorktreeRoot()
+repoRoot, _ := paths.WorktreeRoot(ctx)
 absPath := filepath.Join(repoRoot, file)  // → /repo/api/src/types.ts (CORRECT)
 ```
 
@@ -226,7 +226,7 @@ cwd, _ := os.Getwd()  // /repo/frontend
 relPath := paths.ToRelativePath("/repo/api/file.ts", cwd)  // returns "" (filtered out as "../api/file.ts")
 
 // CORRECT - keeps all repo files
-repoRoot, _ := paths.WorktreeRoot()
+repoRoot, _ := paths.WorktreeRoot(ctx)
 relPath := paths.ToRelativePath("/repo/api/file.ts", repoRoot)  // returns "api/file.ts"
 ```
 
