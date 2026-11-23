@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/url"
 	"os/exec"
+	"regexp"
 	"strings"
 	"unicode"
 )
@@ -152,11 +153,9 @@ var pathForges = map[string]string{
 // The name says syntax deliberately: this is NOT a capability check, and it
 // once was one (it read the upstream-host map, so it answered `{gh}`). Widening
 // it to the real path tokens is what a URL needs, but it means a caller after a
-// capability still has to narrow afterwards. Trails are the worked example: a
-// native repo is reachable there, but only by ULID rather than by the
-// forge/owner/repo path a mirror uses, so trailRepoBasePath routes on the forge
-// after this has answered yes. A caller that treats this as the capability gets
-// a token it says yes to and a route that does not exist.
+// capability still has to resolve it afterwards. Repository Changes, for
+// example, require a resolved processing-placement ID for both GitHub and
+// native repositories; accepting the forge token alone cannot address them.
 func IsForgePathToken(forge string) bool {
 	_, ok := pathForges[forge]
 	return ok
@@ -381,6 +380,15 @@ func RedactURL(rawURL string) string {
 	u.User = nil
 	u.RawQuery = ""
 	return u.Scheme + "://" + u.Host + u.Path
+}
+
+// credentialInURL matches the scheme and userinfo of a URL embedded in text.
+var credentialInURL = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@\s]*@`)
+
+// RedactCredentialsInText removes userinfo from any URL appearing in free text,
+// for git's output where we do not know which URL was echoed.
+func RedactCredentialsInText(text string) string {
+	return credentialInURL.ReplaceAllString(text, "${1}")
 }
 
 // RedactURLOrPath renders a remote for display with any credentials removed,

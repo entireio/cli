@@ -102,3 +102,28 @@ func TestAcquireIn_RefusesASymlinkedLockPath(t *testing.T) {
 		})
 	}
 }
+
+// TryAcquireIn takes a free lock, and reports a held one as ErrLocked without
+// waiting for it.
+func TestTryAcquireIn_TakesAFreeLockAndReportsAHeldOne(t *testing.T) {
+	t.Parallel()
+	root, err := os.OpenRoot(t.TempDir()) //nolint:noinlineerr // test fixture: the root's base is the temp dir itself
+	if err != nil {
+		t.Fatalf("OpenRoot() error = %v", err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+
+	release, err := TryAcquireIn(root, "state.lock")
+	if err != nil {
+		t.Fatalf("TryAcquireIn() on a free lock error = %v", err)
+	}
+	if _, err := TryAcquireIn(root, "state.lock"); !errors.Is(err, ErrLocked) {
+		t.Errorf("TryAcquireIn() on a held lock error = %v, want ErrLocked", err)
+	}
+	release()
+	release, err = TryAcquireIn(root, "state.lock")
+	if err != nil {
+		t.Fatalf("TryAcquireIn() after release error = %v", err)
+	}
+	release()
+}

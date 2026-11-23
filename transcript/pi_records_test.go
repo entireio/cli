@@ -254,17 +254,17 @@ func TestPiDecodeMessage_EmptyAgreesWithRecord(t *testing.T) {
 
 func TestPiAdapter_LongPendingLineIsReleased(t *testing.T) {
 	t.Parallel()
-	long := piUser("u1", "", strings.Repeat("x", 2*piPendingKeep))
+	long := piUser("u1", "", strings.Repeat("x", 2*lineSplitterKeep))
 	a := NewPiAdapter()
 	a.Feed([]byte(piHdr + "\n" + long[:len(long)/2]))
 	a.Feed([]byte(long[len(long)/2:] + "\n"))
-	if c := cap(a.pending); c > piPendingKeep {
+	if c := cap(a.lines.pending); c > lineSplitterKeep {
 		t.Fatalf("pending keeps %d bytes after the long line was read", c)
 	}
 	short := piUser("u2", "u1", "y")
 	a.Feed([]byte(short[:10]))
 	a.Feed([]byte(short[10:] + "\n"))
-	if c := cap(a.pending); c == 0 {
+	if c := cap(a.lines.pending); c == 0 {
 		t.Fatal("pending let a short line's buffer go")
 	}
 }

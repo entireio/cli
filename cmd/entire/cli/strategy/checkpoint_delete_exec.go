@@ -351,10 +351,41 @@ func sessionsHoldingCheckpoint(ctx context.Context, plan *CheckpointDeletePlan) 
 // ref was deleted. The queue entry goes even when the ref is already absent,
 // so a stale entry cannot linger.
 func deleteLocalCheckpointRef(ctx context.Context, root string, repo *git.Repository, plan *CheckpointDeletePlan) (bool, error) {
-	deleted := false
+	var pending []*plumbing.Reference
 	if plan.LocalRef != "" {
-		if err := gitrepo.CompareAndSwapRef(ctx, root, plan.LocalRef, plumbing.ZeroHash, plan.LocalRefOID); err != nil {
-			return false, fmt.Errorf("delete local ref %s: %w", plan.LocalRef, err)
+		pending = append(pending, plumbing.NewHashReference(plan.LocalRef, plan.LocalRefOID))
+	}
+	if plan.OtherLocalRef != "" {
+		pending = append(pending, plumbing.NewHashReference(plan.OtherLocalRef, plan.OtherLocalRefOID))
+	}
+	// Each delete is guarded by the commit the plan saw. A ref git refuses is
+	// retried once after the other: on a case-insensitive filesystem, while one
+	// spelling is a loose file, the other spelling's name resolves to that file
+	// too, so its delete is refused until the loose one is gone.
+	deleted := false
+	var lastErr error
+	for range 2 {
+		var refused []*plumbing.Reference
+		for _, ref := range pending {
+			if err := gitrepo.CompareAndSwapRef(ctx, root, ref.Name(), plumbing.ZeroHash, ref.Hash()); err != nil {
+				refused, lastErr = append(refused, ref), fmt.Errorf("delete local ref %s: %w", ref.Name(), err)
+				continue
+			}
+			deleted = true
+		}
+		pending = refused
+	}
+	if len(pending) > 0 {
+		// A refused ref can already be gone: when both spellings hold one
+		// commit and one is loose, deleting the other name removes both.
+		left, err := findLocalCheckpointRefs(ctx, root, plan.CheckpointID)
+		if err != nil {
+			return deleted, errors.Join(lastErr, err)
+		}
+		for _, ref := range pending {
+			if slices.ContainsFunc(left, func(l *plumbing.Reference) bool { return l.Name() == ref.Name() }) {
+				return deleted, lastErr
+			}
 		}
 		deleted = true
 	}
@@ -367,12 +398,13 @@ func deleteLocalCheckpointRef(ctx context.Context, root string, repo *git.Reposi
 			slog.String("checkpoint_id", plan.CheckpointID.String()), slog.String("error", err.Error()))
 		return deleted, nil
 	}
-	refs := []plumbing.ReferenceName{}
-	if plan.LocalRef != "" {
-		refs = append(refs, plan.LocalRef)
-	}
-	if canonical, nameErr := checkpoint.RefName(plan.CheckpointID); nameErr == nil && canonical != plan.LocalRef {
+	// Every name the checkpoint can be queued under: either spelling.
+	var refs []plumbing.ReferenceName
+	if canonical, nameErr := checkpoint.RefName(plan.CheckpointID); nameErr == nil {
 		refs = append(refs, canonical)
+		if other, ok := checkpoint.OtherShardSpelling(canonical); ok {
+			refs = append(refs, other)
+		}
 	}
 	if err := queue.Remove(refs); err != nil {
 		logging.Warn(ctx, "checkpoint delete: could not remove the checkpoint from the push queue",

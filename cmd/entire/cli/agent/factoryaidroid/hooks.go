@@ -18,6 +18,7 @@ var (
 	_ agent.HookSupport           = (*FactoryAIDroidAgent)(nil)
 	_ agent.HookConfigLocator     = (*FactoryAIDroidAgent)(nil)
 	_ agent.PermissionConfigOwner = (*FactoryAIDroidAgent)(nil)
+	_ agent.HookFreshness         = (*FactoryAIDroidAgent)(nil)
 )
 
 // Factory AI Droid hook names - these become subcommands under `entire hooks factoryai-droid`
@@ -75,7 +76,10 @@ const hookCommandPrefix = "entire hooks factoryai-droid "
 // Unlike Codex and Cursor the choice is NOT gated on
 // agent.UseWindowsProductionHooks: droid never hands a hook to sh on Windows,
 // so whether a working sh exists there changes nothing. See
-// agent.HookHostIsWindows.
+// agent.HookHostIsWindows. Because droid's own cmd.exe resolves the first
+// token of the line, the silent wrapper is the cmd-host form, which names the
+// nested cmd.exe as %SystemRoot%\System32\cmd.exe rather than leaving cmd.exe
+// to look in the repository first.
 //
 // Scope: this fixes droid 0.178.0 and later, the two compositions verified end
 // to end on Windows. 0.109.1 spawned `cmd.exe /c <H>` WITHOUT
@@ -88,7 +92,7 @@ const hookCommandPrefix = "entire hooks factoryai-droid "
 // is not taken here because it would trade the shape actually verified on
 // current droid for one that is not.
 func silentHookCommand(verb string, useWindows bool) string {
-	return agent.WrapProductionSilentHookCommandForOS(hookCommandPrefix+verb, useWindows)
+	return agent.WrapProductionSilentHookCommandForCmdHostOS(hookCommandPrefix+verb, useWindows)
 }
 
 // stopHookCommand is silentHookCommand for the Stop hook, which carries the
@@ -142,94 +146,29 @@ func (f *FactoryAIDroidAgent) InstallHooks(ctx context.Context, force bool) (int
 		rawPermissions = make(map[string]json.RawMessage)
 	}
 
-	// Parse only the hook types we need to modify
-	var sessionStart, sessionEnd, stop, userPromptSubmit, preToolUse, postToolUse, preCompact []FactoryHookMatcher
-	parseHookType(rawHooks, "SessionStart", &sessionStart)
-	parseHookType(rawHooks, "SessionEnd", &sessionEnd)
-	parseHookType(rawHooks, "Stop", &stop)
-	parseHookType(rawHooks, "UserPromptSubmit", &userPromptSubmit)
-	parseHookType(rawHooks, "PreToolUse", &preToolUse)
-	parseHookType(rawHooks, "PostToolUse", &postToolUse)
-	parseHookType(rawHooks, "PreCompact", &preCompact)
-
-	// If force is true, remove all existing Entire hooks first
-	if force {
-		sessionStart = removeEntireHooks(sessionStart)
-		sessionEnd = removeEntireHooks(sessionEnd)
-		stop = removeEntireHooks(stop)
-		userPromptSubmit = removeEntireHooks(userPromptSubmit)
-		preToolUse = removeEntireHooks(preToolUse)
-		postToolUse = removeEntireHooks(postToolUse)
-		preCompact = removeEntireHooks(preCompact)
-	}
-
 	// Wrapper form is host-dependent; see silentHookCommand.
-	useWindowsHooks := agent.HookHostIsWindows()
-	sessionStartCmd := silentHookCommand(HookNameSessionStart, useWindowsHooks)
-	sessionEndCmd := silentHookCommand(HookNameSessionEnd, useWindowsHooks)
-	stopCmd := stopHookCommand(useWindowsHooks)
-	userPromptSubmitCmd := silentHookCommand(HookNameUserPromptSubmit, useWindowsHooks)
-	preTaskCmd := silentHookCommand(HookNamePreToolUse, useWindowsHooks)
-	postTaskCmd := silentHookCommand(HookNamePostToolUse, useWindowsHooks)
-	preCompactCmd := silentHookCommand(HookNamePreCompact, useWindowsHooks)
-
-	// Drop Entire hooks left by older versions before adding the current ones,
-	// so a stale command (e.g. the removed local-dev launcher) does not survive
-	// alongside them. Unconditional: a plain `entire enable` must migrate too.
-	staleDropped := false
-	drop := func(matchers []FactoryHookMatcher, want ...string) []FactoryHookMatcher {
-		out, dropped := dropStaleEntireHooks(matchers, want...)
-		if dropped {
-			staleDropped = true
-		}
-		return out
-	}
-	sessionStart = drop(sessionStart, sessionStartCmd, userPromptSubmitCmd)
-	sessionEnd = drop(sessionEnd, sessionEndCmd)
-	stop = drop(stop, stopCmd)
-	userPromptSubmit = drop(userPromptSubmit, userPromptSubmitCmd)
-	preToolUse = drop(preToolUse, preTaskCmd)
-	postToolUse = drop(postToolUse, postTaskCmd)
-	preCompact = drop(preCompact, preCompactCmd)
-
+	var hooks FactoryHooks
+	lists := droidHookLists(&hooks, newDroidHookCommands(agent.HookHostIsWindows()))
 	count := 0
-
-	// Add hooks if they don't exist
-	if !hookCommandExists(sessionStart, sessionStartCmd) {
-		sessionStart = addHookToMatcher(sessionStart, "", sessionStartCmd)
-		count++
-	}
-	// Also install user-prompt-submit on SessionStart to ensure TurnStart fires
-	// even when UserPromptSubmit doesn't (e.g., droid exec mode).
-	// The user-prompt-submit handler gracefully handles SessionStart's stdin format
-	// (userPromptSubmitRaw is a superset of sessionInfoRaw; Prompt defaults to "").
-	if !hookCommandExists(sessionStart, userPromptSubmitCmd) {
-		sessionStart = addHookToMatcher(sessionStart, "", userPromptSubmitCmd)
-		count++
-	}
-	if !hookCommandExists(sessionEnd, sessionEndCmd) {
-		sessionEnd = addHookToMatcher(sessionEnd, "", sessionEndCmd)
-		count++
-	}
-	if !hookCommandExists(stop, stopCmd) {
-		stop = addHookToMatcher(stop, "", stopCmd)
-		count++
-	}
-	if !hookCommandExists(userPromptSubmit, userPromptSubmitCmd) {
-		userPromptSubmit = addHookToMatcher(userPromptSubmit, "", userPromptSubmitCmd)
-		count++
-	}
-	if !hookCommandExistsWithMatcher(preToolUse, "Task", preTaskCmd) {
-		preToolUse = addHookToMatcher(preToolUse, "Task", preTaskCmd)
-		count++
-	}
-	if !hookCommandExistsWithMatcher(postToolUse, "Task", postTaskCmd) {
-		postToolUse = addHookToMatcher(postToolUse, "Task", postTaskCmd)
-		count++
-	}
-	if !hookCommandExists(preCompact, preCompactCmd) {
-		preCompact = addHookToMatcher(preCompact, "", preCompactCmd)
-		count++
+	staleDropped := false
+	for _, l := range lists {
+		parseHookType(rawHooks, l.key, l.matchers)
+		if force {
+			*l.matchers = removeEntireHooks(*l.matchers)
+		}
+		// Drop Entire hooks left by older versions before adding the current
+		// ones, so a stale command (e.g. the removed local-dev launcher) does
+		// not survive alongside them. Unconditional: a plain `entire enable`
+		// must migrate too.
+		out, dropped := dropStaleEntireHooks(*l.matchers, l.want...)
+		*l.matchers = out
+		staleDropped = staleDropped || dropped
+		for _, command := range l.want {
+			if !l.has(command) {
+				*l.matchers = addHookToMatcher(*l.matchers, l.matcher, command)
+				count++
+			}
+		}
 	}
 
 	// Unconditional, like the stale-hook migration above: a plain
@@ -247,14 +186,9 @@ func (f *FactoryAIDroidAgent) InstallHooks(ctx context.Context, force bool) (int
 		return 0, nil // All hooks and permissions already installed
 	}
 
-	// Marshal modified hook types back to rawHooks
-	marshalHookType(rawHooks, "SessionStart", sessionStart)
-	marshalHookType(rawHooks, "SessionEnd", sessionEnd)
-	marshalHookType(rawHooks, "Stop", stop)
-	marshalHookType(rawHooks, "UserPromptSubmit", userPromptSubmit)
-	marshalHookType(rawHooks, "PreToolUse", preToolUse)
-	marshalHookType(rawHooks, "PostToolUse", postToolUse)
-	marshalHookType(rawHooks, "PreCompact", preCompact)
+	for _, l := range lists {
+		marshalHookType(rawHooks, l.key, *l.matchers)
+	}
 
 	// Marshal hooks and update raw settings
 	hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
@@ -450,6 +384,114 @@ func (f *FactoryAIDroidAgent) AreHooksInstalled(ctx context.Context) (bool, erro
 	return hasEntireHook(settings.Hooks.Stop), nil
 }
 
+// CheckHookConfig implements agent.HookFreshness: outdated when Entire's hooks
+// in .factory/settings.json are not the form InstallHooks writes on this host,
+// or one is missing. That includes a Windows wrapper written before hooks
+// resolved programs from PATH only, which keeps working but still searches the
+// folder Droid was opened in. Droid runs hooks under sh on macOS and Linux and
+// under cmd.exe on Windows, and neither runs the other's form, so a settings
+// file holding the other OS's current form (usually committed from a checkout
+// there) reads as HooksForOtherHost. An absent, unreadable or malformed file,
+// or one with no Entire Stop hook (AreHooksInstalled's test), reads as absent.
+func (f *FactoryAIDroidAgent) CheckHookConfig(ctx context.Context) agent.HookConfigState {
+	cfg, err := factoryHookConfig(ctx)
+	if err != nil {
+		return agent.HooksAbsent
+	}
+	data, err := cfg.Read()
+	if err != nil {
+		return agent.HooksAbsent
+	}
+	var settings FactorySettings
+	if json.Unmarshal(data, &settings) != nil || !hasEntireHook(settings.Hooks.Stop) {
+		return agent.HooksAbsent
+	}
+
+	windows := agent.HookHostIsWindows()
+	if droidHooksCurrent(settings.Hooks, windows) {
+		return agent.HooksCurrent
+	}
+	if droidHooksCurrent(settings.Hooks, !windows) {
+		return agent.HooksForOtherHost
+	}
+	return agent.HooksOutdated
+}
+
+// droidHooksCurrent reports whether h holds exactly the hooks InstallHooks
+// writes, in the sh form (windows false) or the Windows form.
+func droidHooksCurrent(h FactoryHooks, windows bool) bool {
+	for _, l := range droidHookLists(&h, newDroidHookCommands(windows)) {
+		var entries []FactoryHookEntry
+		for _, m := range *l.matchers {
+			entries = append(entries, m.Hooks...)
+		}
+		if !agent.ManagedHookListState(entries, hookEntryCommand, l.want) {
+			return false
+		}
+		for _, command := range l.want {
+			if !l.has(command) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// droidHookCommands holds the command InstallHooks writes for each hook.
+type droidHookCommands struct {
+	sessionStart, sessionEnd, stop, userPromptSubmit, preTask, postTask, preCompact string
+}
+
+func newDroidHookCommands(windows bool) droidHookCommands {
+	return droidHookCommands{
+		sessionStart:     silentHookCommand(HookNameSessionStart, windows),
+		sessionEnd:       silentHookCommand(HookNameSessionEnd, windows),
+		stop:             stopHookCommand(windows),
+		userPromptSubmit: silentHookCommand(HookNameUserPromptSubmit, windows),
+		preTask:          silentHookCommand(HookNamePreToolUse, windows),
+		postTask:         silentHookCommand(HookNamePostToolUse, windows),
+		preCompact:       silentHookCommand(HookNamePreCompact, windows),
+	}
+}
+
+// droidHookList is one of h's hook lists: the settings key it is stored under,
+// the matcher InstallHooks adds Entire's commands under, and those commands.
+type droidHookList struct {
+	key      string
+	matchers *[]FactoryHookMatcher
+	matcher  string
+	want     []string
+}
+
+// has reports whether command is installed where InstallHooks puts it: under
+// the "Task" matcher for the task hooks, under any matcher otherwise.
+func (l droidHookList) has(command string) bool {
+	if l.matcher == taskMatcher {
+		return taskHookCommandExists(*l.matchers, command)
+	}
+	return hookCommandExists(*l.matchers, command)
+}
+
+// taskMatcher is the matcher the task hooks are installed under.
+const taskMatcher = "Task"
+
+// droidHookLists is the one definition of the Entire hooks droid gets:
+// InstallHooks parses, drops, adds and writes each list from it, and
+// CheckHookConfig compares with it. SessionStart also carries
+// user-prompt-submit, so TurnStart fires even when UserPromptSubmit does not
+// (droid exec mode); its handler accepts SessionStart's payload.
+func droidHookLists(h *FactoryHooks, c droidHookCommands) []droidHookList {
+	return []droidHookList{
+		{"SessionStart", &h.SessionStart, "", []string{c.sessionStart, c.userPromptSubmit}},
+		{"SessionEnd", &h.SessionEnd, "", []string{c.sessionEnd}},
+		{"Stop", &h.Stop, "", []string{c.stop}},
+		{"UserPromptSubmit", &h.UserPromptSubmit, "", []string{c.userPromptSubmit}},
+		{"PreToolUse", &h.PreToolUse, taskMatcher, []string{c.preTask}},
+		{"PostToolUse", &h.PostToolUse, taskMatcher, []string{c.postTask}},
+		{"PreCompact", &h.PreCompact, "", []string{c.preCompact}},
+	}
+}
+
 // Helper functions for hook management
 
 func hookCommandExists(matchers []FactoryHookMatcher, command string) bool {
@@ -474,9 +516,11 @@ func hasEntireHook(matchers []FactoryHookMatcher) bool {
 	return false
 }
 
-func hookCommandExistsWithMatcher(matchers []FactoryHookMatcher, matcherName, command string) bool {
+// taskHookCommandExists reports whether command is installed under the "Task"
+// matcher, the only place InstallHooks puts the task hooks.
+func taskHookCommandExists(matchers []FactoryHookMatcher, command string) bool {
 	for _, matcher := range matchers {
-		if matcher.Matcher == matcherName {
+		if matcher.Matcher == taskMatcher {
 			for _, hook := range matcher.Hooks {
 				if hook.Command == command {
 					return true

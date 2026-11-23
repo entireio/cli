@@ -9,10 +9,12 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/redact"
 	"github.com/stretchr/testify/require"
 )
 
@@ -124,4 +126,91 @@ func TestSaveAttachSessionState_KeepsTokenOffsetMovedMeanwhile(t *testing.T) {
 			require.NotNil(t, got.TokenUsage.SubagentTokens, tc.name)
 		}
 	}
+}
+
+// On a ledger session, attach's checkpoint stored what its own reading of the
+// ledger had grown by. Saving marks exactly that as checkpointed: a Stop that
+// read further while attach waited keeps its tokens pending, and a session
+// whose hooks have not activated the ledger yet takes attach's reading.
+func TestSaveAttachSessionState_LedgerMarksOnlyWhatAttachRead(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	t.Chdir(dir)
+	ctx := context.Background()
+
+	store, err := session.NewStateStore(ctx)
+	require.NoError(t, err)
+	cpID := id.MustCheckpointID("a1b2c3d4e5f6")
+
+	ledgerAt := func(output int) *session.TokenLedger {
+		l := &session.TokenLedger{}
+		l.Activate(nil, nil)
+		l.Observe(agent.CumulativeObservation{Total: &agent.TokenUsage{OutputTokens: output, APICallCount: 1}})
+		return l
+	}
+
+	for _, tc := range []struct {
+		name        string
+		onDisk      *session.TokenLedger // nil: no state on disk
+		wantTotal   int
+		wantPending int
+	}{
+		{name: "a Stop read further while attach waited", onDisk: ledgerAt(150), wantTotal: 150, wantPending: 50},
+		{name: "unchanged since attach read", onDisk: ledgerAt(100), wantTotal: 100},
+		{name: "hooks have not activated the ledger", onDisk: &session.TokenLedger{}, wantTotal: 100},
+		{name: "no state on disk", wantTotal: 100},
+	} {
+		sessionID := "attach-ledger-" + strings.ReplaceAll(tc.name, " ", "-")
+		loaded := &session.State{SessionID: sessionID, AgentType: agent.AgentTypeClaudeCode, TokenLedger: ledgerAt(100)}
+		if tc.onDisk != nil {
+			now := time.Now()
+			require.NoError(t, store.Save(ctx, &session.State{
+				SessionID:            sessionID,
+				AgentType:            agent.AgentTypeClaudeCode,
+				Phase:                session.PhaseActive,
+				StartedAt:            now,
+				LastInteractionTime:  &now,
+				TokenLedger:          tc.onDisk,
+				CheckpointTokenUsage: &agent.TokenUsage{OutputTokens: 3},
+			}))
+		}
+
+		require.NoError(t, saveAttachSessionState(ctx, nil, loaded, sessionID, agent.AgentTypeClaudeCode,
+			"/t.jsonl", "", cpID, transcriptMetadata{}, loaded.TokenLedger.Total(), 4, 7, attachOptions{}, nil, false), tc.name)
+
+		got, err := store.Load(ctx, sessionID)
+		require.NoError(t, err)
+		require.True(t, got.TokenLedger.IsActive(), tc.name)
+		require.Equal(t, tc.wantTotal, got.TokenUsage.OutputTokens, tc.name)
+		if tc.wantPending == 0 {
+			require.False(t, got.TokenLedger.HasPending(), tc.name)
+		} else {
+			require.NotNil(t, got.TokenLedger.Pending(), tc.name)
+			require.Equal(t, tc.wantPending, got.TokenLedger.Pending().OutputTokens, tc.name)
+		}
+		if tc.onDisk != nil && !tc.onDisk.IsActive() {
+			require.Nil(t, got.CheckpointTokenUsage, "%s: the per-turn window hands over to the ledger", tc.name)
+		}
+	}
+}
+
+// An attach checkpoint records the session's running total for a ledger
+// session, like a condensed one, and none for a per-turn or new session.
+func TestAttachWriteOptions_SessionTokenUsage(t *testing.T) {
+	t.Parallel()
+	ledger := &session.TokenLedger{}
+	ledger.Activate(nil, nil)
+	ledger.Observe(agent.CumulativeObservation{Total: &agent.TokenUsage{OutputTokens: 40, APICallCount: 1}})
+	opts := func(state *session.State) *agent.TokenUsage {
+		return attachWriteOptions(context.Background(), attachLinkPlan{}, id.MustCheckpointID("a1b2c3d4e5f6"), false, "s",
+			&claudecode.ClaudeCodeAgent{}, redact.RedactedBytes{}, transcriptMetadata{}, attachTranscriptWindow{}, &GitAuthor{}, nil, state, attachOptions{}, nil).SessionTokenUsage
+	}
+	got := opts(&session.State{TokenLedger: ledger, TokenUsage: ledger.Total()})
+	require.NotNil(t, got)
+	require.Equal(t, 40, got.OutputTokens)
+	require.Nil(t, opts(&session.State{TokenUsage: &agent.TokenUsage{OutputTokens: 40}}), "per-turn session")
+	require.Nil(t, opts(nil), "new session")
 }

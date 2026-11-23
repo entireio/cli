@@ -307,6 +307,42 @@ func TestRunAuthStatusJSON_EnvTokenHasNoSessions(t *testing.T) {
 	}
 }
 
+// credential_source tells an exchanged service account secret from a raw
+// ENTIRE_TOKEN bearer and from a stored login; env_token keeps its meaning,
+// "ENTIRE_TOKEN supplied it", for both env credentials.
+func TestRunAuthStatusJSON_CredentialSource(t *testing.T) {
+	t.Parallel()
+	none := func(context.Context, string, string) ([]api.AuthSession, error) { return nil, nil }
+	for _, tc := range []struct {
+		name     string
+		target   statusTarget
+		want     string
+		envToken bool
+	}{
+		{"stored login", statusTarget{coreURL: testCoreURL, token: "tok", activeContext: "work", totalContexts: 1}, "context", false},
+		{"raw env bearer", statusTarget{coreURL: testCoreURL, token: "tok", envToken: true, credential: auth.CredentialFromEnvToken}, "env_token", true},
+		{"service account secret", statusTarget{coreURL: testCoreURL, token: "tok", envToken: true, credential: auth.CredentialFromServiceAccountSecret}, "sa_secret", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := decodeAuthStatusJSON(t, okProfile, none, tc.target, authStatusOptions{})
+			if got.CredentialSource != tc.want || got.EnvToken != tc.envToken {
+				t.Errorf("credential_source=%q env_token=%v, want %q/%v", got.CredentialSource, got.EnvToken, tc.want, tc.envToken)
+			}
+		})
+	}
+}
+
+func TestEnvTokenCredential(t *testing.T) {
+	t.Parallel()
+	if got := auth.EnvTokenCredential("  ent_svc_us_x \n"); got != auth.CredentialFromServiceAccountSecret {
+		t.Errorf("secret = %q, want sa_secret", got)
+	}
+	if got := auth.EnvTokenCredential("a.jwt.token"); got != auth.CredentialFromEnvToken {
+		t.Errorf("bearer = %q, want env_token", got)
+	}
+}
+
 // The context row names the login server only when the context name does not
 // The host joins the row only when the saved logins are spread across servers,
 // and only when the context name does not already spell it. Logins that all sit

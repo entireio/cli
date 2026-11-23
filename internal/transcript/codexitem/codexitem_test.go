@@ -163,3 +163,21 @@ func show(v any) string {
 	}
 	return fmt.Sprintf("%#v", v)
 }
+
+func TestPathOfFileURI(t *testing.T) {
+	t.Parallel()
+	cases := []struct{ in, want string }{
+		{"file:///work/my%20repo", "/work/my repo"},
+		{"file:///C:/work/repo", "C:/work/repo"},
+		{"file://server/share/repo", "//server/share/repo"},
+		{"file://localhost/work/repo", "/work/repo"},
+		{"/work/repo", "/work/repo"},
+		{`C:\work\repo`, `C:\work\repo`},
+		{`\\server\share\repo`, `\\server\share\repo`},
+	}
+	for _, c := range cases {
+		if got := PathOfFileURI(c.in); got != c.want {
+			t.Errorf("PathOfFileURI(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}

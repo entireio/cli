@@ -256,6 +256,9 @@ var readModelEnumFields = map[string][]string{
 	"RepoIndexEntry":     {"permission", "provider"},
 	"RepoReference":      {"provider"},
 	"RepoResolution":     {"provider"},
+	// `project invite list` and `repo invite list` display these, as `org
+	// invite list` displays Invitation's.
+	"ResourceInvitation": {"role", "scope", "status"},
 	// `repo mirror resync` prints the status verbatim; "queued" is the only
 	// value today and a second one must not fail the request that carried it.
 	"ResyncMirrorOutputBody": {"status"},

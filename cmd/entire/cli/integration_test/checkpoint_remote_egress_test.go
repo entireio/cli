@@ -235,6 +235,41 @@ func TestCheckpointRemoteEgress(t *testing.T) {
 		})
 	})
 
+	// A push to a raw URL is a one-off, so checkpoint sync skips it: nothing
+	// goes to the URL, origin, or the store, and the checkpoint stays queued
+	// for the next push to a named remote.
+	for name, url := range map[string]string{
+		"code repo":        "git@github.com:alice/app.git",
+		"checkpoint store": "git@github.com:alice/app-checkpoints.git",
+		"unrelated repo":   "git@github.com:alice/other.git",
+	} {
+		t.Run("a push to the "+name+" url carries no checkpoints", func(t *testing.T) {
+			t.Parallel()
+			ForEachBackend(t, func(t *testing.T, backend string) {
+				env := NewFeatureBranchEnv(t)
+				env.CheckpointStore = backend
+				ft := newForgeTransport(t, env)
+				origin := ft.Bare(t, "github.com", "alice/app")
+				store := ft.Bare(t, "github.com", "alice/app-checkpoints")
+				other := ft.Bare(t, "github.com", "alice/other")
+				addForgeRemote(t, env, "origin", "git@github.com:alice/app.git")
+				setCheckpointRemote(t, env, paths.SettingsFileName, "github", "alice/app-checkpoints")
+
+				id := createCheckpointedCommit(t, env, "Add e", "e.go", "package e", "Add e")
+				pushWithHooksOutput(t, env, url)
+
+				require.False(t, env.CheckpointExistsOnRemote(origin, id))
+				require.False(t, env.CheckpointExistsOnRemote(store, id))
+				require.False(t, env.CheckpointExistsOnRemote(other, id))
+
+				pushWithHooksOutput(t, env, "origin")
+
+				require.True(t, env.CheckpointExistsOnRemote(store, id))
+				require.False(t, env.CheckpointExistsOnRemote(origin, id))
+			})
+		})
+	}
+
 	// Guards the helper, not the product: a failing wrapper would make every
 	// NotContains above pass trivially.
 	t.Run("transport records connections", func(t *testing.T) {

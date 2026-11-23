@@ -197,6 +197,10 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"project":   {agentHelpAudienceUserOwned, false},
 	"repo":      {agentHelpAudienceUserOwned, false},
 	"review":    {agentHelpAudienceUserOwned, false},
+	// Mints credentials and grants access.
+	"service-account":     {agentHelpAudienceUserOwned, false},
+	"project agent setup": {agentHelpAudienceUserOwned, false},
+	"project agent serve": {agentHelpAudienceUserOwned, false},
 }
 
 // agentHelpGuidance is agent-only advice about WHEN to reach for a command,
@@ -536,7 +540,7 @@ func refreshAgentHelpTrailsEnabledCacheIfStaleForScope(ctx context.Context, scop
 	if !scope.Supported {
 		return saveTrailsEnabledForScope(ctx, scope, false, time.Now())
 	}
-	client, notOnboarded, err := trailsCellClient(ctx, false, scope.Forge, scope.Owner, scope.Repo)
+	client, repoID, notOnboarded, err := trailsCellClient(ctx, false, scope.Forge, scope.Owner, scope.Repo)
 	if notOnboarded {
 		// Definitive negative: cache it for trailEnablementCacheTTL rather than
 		// falling into the short refresh-failure backoff, which would re-pay the
@@ -547,7 +551,7 @@ func refreshAgentHelpTrailsEnabledCacheIfStaleForScope(ctx context.Context, scop
 	if err != nil {
 		return err
 	}
-	_, err = refreshTrailsEnabledCacheForScope(ctx, client, scope)
+	_, err = refreshTrailsEnabledCacheForScope(ctx, client, repoID, scope)
 	return err
 }
 
