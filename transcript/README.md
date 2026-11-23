@@ -107,6 +107,12 @@ rollouts whose first turn has its prompt only as a `response_item` (a
 guardian sub-session, whose agent message is an item) and thread_spawn
 sub-agent rollouts (no items in the first turn, the task prompt as a
 `response_item`).
+A rollout takes the item path when its first turn (to its `task_complete`
+or `turn_aborted`, or the next `task_started`) has a user message item.
+`NewCodexRolloutAdapter` streams an item-path rollout with the same
+mapping, and `CodexItemRolloutDecider`, fed the rollout as it grows, tells a
+live reader when it can: a rollout still undecided once final takes the
+`response_item` path.
 `CodexNotificationRecords` maps a Codex app-server `item/started` or
 `item/completed` notification to records with the same mapping, so a live
 stream of a Codex session shows a completed item exactly as it is stored.

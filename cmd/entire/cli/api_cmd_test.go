@@ -260,8 +260,8 @@ func TestIsRepoScopedAPIPath(t *testing.T) {
 		path string
 		want bool
 	}{
-		{"/api/v1/repos/{repo_id}/trails", true},
-		{"/api/v1/repos/{repo_id}/trails?limit=1", true},
+		{"/api/v1/repos/{repo_id}/changes", true},
+		{"/api/v1/repos/{repo_id}/changes?limit=1", true},
 		{"/api/v1/me/recap?repo={repo_id}", false},
 		{"/api/v1/me/{repo_id}", false},
 		{"/api/v1/me", false},
@@ -329,7 +329,7 @@ func setupAPIPlaceholderRepo(t *testing.T, originURL string) (backend *apiBacken
 func TestResolveAPIClientAndPath_RepoScopedCellRequestUsesPlacementCell(t *testing.T) {
 	backend, trailCalled, placementClient := setupAPIPlaceholderRepo(t, "https://github.com/entirehq/entire.io.git")
 
-	client, path, err := resolveAPIClientAndPath(t.Context(), apiTargetCell, "", false, "/api/v1/repos/{repo_id}/trails")
+	client, path, err := resolveAPIClientAndPath(t.Context(), apiTargetCell, "", false, "/api/v1/repos/{repo_id}/changes")
 	if err != nil {
 		t.Fatalf("resolveAPIClientAndPath: %v", err)
 	}
@@ -342,7 +342,7 @@ func TestResolveAPIClientAndPath_RepoScopedCellRequestUsesPlacementCell(t *testi
 	if client != placementClient {
 		t.Error("request did not use the placement cell's client")
 	}
-	if want := "/api/v1/repos/mirror-us/trails"; path != want {
+	if want := "/api/v1/repos/mirror-us/changes"; path != want {
 		t.Errorf("path = %q, want %q", path, want)
 	}
 }
@@ -360,7 +360,7 @@ func TestResolveAPIClientAndPath_ProcessingPlacementIDOffTheRepoCell(t *testing.
 		},
 		{
 			name: "explicit jurisdiction wins", to: apiTargetCell, jurisdiction: "eu",
-			path: "/api/v1/repos/{repo_id}/trails", wantPath: "/api/v1/repos/mirror-us/trails",
+			path: "/api/v1/repos/{repo_id}/changes", wantPath: "/api/v1/repos/mirror-us/changes",
 		},
 		{
 			name: "core", to: apiTargetCore,
@@ -429,7 +429,7 @@ func TestResolveAPIClientAndPath_PlacementLookupFailureIsAnError(t *testing.T) {
 func TestResolveAPIClientAndPath_RepoIDNeedsSupportedForge(t *testing.T) {
 	_, trailCalled, _ := setupAPIPlaceholderRepo(t, "https://gitlab.com/acme/widget.git")
 
-	_, _, err := resolveAPIClientAndPath(t.Context(), apiTargetCell, "", false, "/api/v1/repos/{repo_id}/trails")
+	_, _, err := resolveAPIClientAndPath(t.Context(), apiTargetCell, "", false, "/api/v1/repos/{repo_id}/changes")
 	if err == nil || !strings.Contains(err.Error(), "needs a GitHub or Entire repo") {
 		t.Fatalf("err = %v, want the unsupported-forge message", err)
 	}
@@ -447,7 +447,7 @@ func TestResolveAPIClientAndPath_BaseURLOverrideKeepsItsHost(t *testing.T) {
 		clusters: clustersWithSlugs(),
 	})
 
-	_, path, err := resolveAPIClientAndPath(t.Context(), apiTargetCell, "", false, "/api/v1/repos/{repo_id}/trails")
+	_, path, err := resolveAPIClientAndPath(t.Context(), apiTargetCell, "", false, "/api/v1/repos/{repo_id}/changes")
 	if err != nil {
 		t.Fatalf("resolveAPIClientAndPath: %v", err)
 	}
@@ -457,7 +457,7 @@ func TestResolveAPIClientAndPath_BaseURLOverrideKeepsItsHost(t *testing.T) {
 	if !backend.called || backend.to != apiTargetCell {
 		t.Errorf("backend = %+v, want the --to cell client that honors the override", backend)
 	}
-	if want := "/api/v1/repos/mirror-us/trails"; path != want {
+	if want := "/api/v1/repos/mirror-us/changes"; path != want {
 		t.Errorf("path = %q, want %q", path, want)
 	}
 }
@@ -470,14 +470,14 @@ func TestResolveAPIClientAndPath_ApexBaseURLOverrideStillRoutesToRepoCell(t *tes
 	backend, trailCalled, placementClient := setupAPIPlaceholderRepo(t, "https://github.com/entirehq/entire.io.git")
 	t.Setenv(api.BaseURLEnvVar, "https://partial.to")
 
-	client, path, err := resolveAPIClientAndPath(t.Context(), apiTargetCell, "", false, "/api/v1/repos/{repo_id}/trails")
+	client, path, err := resolveAPIClientAndPath(t.Context(), apiTargetCell, "", false, "/api/v1/repos/{repo_id}/changes")
 	if err != nil {
 		t.Fatalf("resolveAPIClientAndPath: %v", err)
 	}
 	if !*trailCalled || backend.called || client != placementClient {
 		t.Errorf("trail client called=%v backend=%+v; want the repo's placement cell", *trailCalled, backend)
 	}
-	if want := "/api/v1/repos/mirror-us/trails"; path != want {
+	if want := "/api/v1/repos/mirror-us/changes"; path != want {
 		t.Errorf("path = %q, want %q", path, want)
 	}
 }

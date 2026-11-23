@@ -19,11 +19,12 @@ import (
 // TestCodexImageExternalization_FullHookFlow is the Codex end-to-end proof: it
 // drives the real Codex hook binary (user-prompt-submit -> apply_patch
 // post-tool-use -> mid-turn commit condensation -> stop finalize) on a Codex
-// rollout transcript that embeds an image as a data-URI, with externalization
+// rollout transcript that embeds a pasted image as a data-URI and a generated
+// image as bare base64 in image_generation_call.result, with externalization
 // enabled via settings.local.json. It then asserts the actual
-// entire/checkpoints/v1 ref stores a placeholder (not the raw base64) that
-// survives Codex's SanitizePortableTranscript, writes the asset blob + manifest,
-// and that ReadSessionContent reinjects the image byte-exactly.
+// entire/checkpoints/v1 ref stores placeholders (not the raw base64) that
+// survive Codex's SanitizePortableTranscript, writes the asset blobs + manifest,
+// and that ReadSessionContent reinjects both images byte-exactly.
 func TestCodexImageExternalization_FullHookFlow(t *testing.T) {
 	env := NewFeatureBranchEnv(t)
 
@@ -35,6 +36,8 @@ func TestCodexImageExternalization_FullHookFlow(t *testing.T) {
 	// A real, minimal PNG padded past the externalization length threshold.
 	imgBytes := []byte("\x89PNG\r\n\x1a\n" + strings.Repeat("codex-real-e2e-image-payload-", 4))
 	b64 := base64.StdEncoding.EncodeToString(imgBytes)
+	// Codex stores an image it generated as bare base64 in "result".
+	generated := base64.StdEncoding.EncodeToString([]byte("\x89PNG\r\n\x1a\n" + strings.Repeat("codex-generated-image-payload-", 4)))
 
 	sessionID := "codex-image-e2e"
 	transcriptPath := filepath.Join(env.RepoDir, ".entire", "tmp", "codex-rollout.jsonl")
@@ -47,6 +50,7 @@ func TestCodexImageExternalization_FullHookFlow(t *testing.T) {
 			`{"type":"input_text","text":"add feature.txt and look at this screenshot"},` +
 			`{"type":"input_image","image_url":"data:image/png;base64,` + b64 + `"}` +
 			`]}}`,
+		`{"timestamp":"2026-01-01T00:00:02Z","type":"response_item","payload":{"type":"image_generation_call","id":"ig_1","status":"completed","revised_prompt":"a mockup","result":"` + generated + `"}}`,
 		`{"timestamp":"2026-01-01T00:00:02Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}`,
 	}, "\n") + "\n"
 	if err := os.MkdirAll(filepath.Dir(transcriptPath), 0o755); err != nil {
@@ -90,6 +94,12 @@ func TestCodexImageExternalization_FullHookFlow(t *testing.T) {
 	if !strings.Contains(full, "data:image/png;base64,entire-asset:assets/") {
 		t.Error("expected the placeholder inside the data-URI (prefix preserved)")
 	}
+	if strings.Contains(full, generated) {
+		t.Error("stored full.jsonl still contains the generated image's raw base64")
+	}
+	if !strings.Contains(full, `"result":"entire-asset:assets/`) {
+		t.Error("expected the generated image's result to hold a placeholder")
+	}
 	if _, ok := env.ReadFileFromBranch(paths.MetadataBranchName, sessionPath+paths.AssetsManifestFile); !ok {
 		t.Error("assets/manifest.json missing")
 	}
@@ -117,5 +127,8 @@ func TestCodexImageExternalization_FullHookFlow(t *testing.T) {
 	}
 	if !strings.Contains(string(content.Transcript), b64) {
 		t.Error("restored transcript is missing the reinjected base64 image")
+	}
+	if !strings.Contains(string(content.Transcript), `"result":"`+generated+`"`) {
+		t.Error("restored transcript is missing the reinjected generated image")
 	}
 }

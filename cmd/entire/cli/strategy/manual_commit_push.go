@@ -535,7 +535,8 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 // failures: they are left out of retries, rotation and the pushed-of count.
 type checkpointRefPartition struct {
 	ready []checkpointRefPush
-	// waiting were not selected for this upload.
+	// waiting were not selected for this upload, or name a destination another
+	// ready ref takes in it at a different commit.
 	waiting []checkpoint.PushQueueEntry
 	// changed were selected with a pinned commit that is no longer the tip;
 	// each carries the current tip.
@@ -561,15 +562,32 @@ func partitionCheckpointRefPushes(
 		ready:    make([]checkpointRefPush, 0, len(entries)),
 		readErrs: make(map[plumbing.ReferenceName]error),
 	}
+	// placed locates the candidate holding each destination name, so a second
+	// queue entry for the same checkpoint joins it. git refuses a push that
+	// names one destination twice, and that takes the whole batch with it.
+	type place struct {
+		changed bool
+		index   int
+	}
+	placed := make(map[plumbing.ReferenceName]place, len(entries))
+	entries = canonicalSpellingFirst(entries, func(e checkpoint.PushQueueEntry) plumbing.ReferenceName { return e.Ref })
 	for _, entry := range entries {
 		// A ref the selection leaves out waits untouched: a push of named refs
 		// does not read, prune or report the others.
-		pin, selected := selection.pin(entry.Ref)
+		// Keyed canonically: the selection was built from the names the caller
+		// asked for, which need not be the spelling this entry was queued under.
+		pin, selected := selection.pin(canonicalCheckpointRefKey(entry.Ref))
 		if !selected {
 			part.waiting = append(part.waiting, entry)
 			continue
 		}
-		ref, err := repo.Reference(entry.Ref, true)
+		// The queued spelling is not always the one the ref is stored under: on
+		// a case-insensitive filesystem a checkpoint ref lands in whichever
+		// shard directory already existed, and once git packs it the queued
+		// name stops resolving. Classifying that as stale drops the entry and
+		// the checkpoint is then never pushed, silently and permanently — so
+		// resolve to the spelling that exists before deciding.
+		stored, tip, err := checkpoint.StoredRef(repo, nil, entry.Ref)
 		if errors.Is(err, plumbing.ErrReferenceNotFound) {
 			part.stale = append(part.stale, entry)
 			continue
@@ -579,11 +597,37 @@ func partitionCheckpointRefPushes(
 			part.readErrs[entry.Ref] = fmt.Errorf("read checkpoint ref: %w", err)
 			continue
 		}
-		candidate := checkpointRefPush{token: entry, name: entry.Ref, hash: ref.Hash()}
+		// The push is <hash>:<name>, and the name is the canonical one whatever
+		// spelling was queued or stored. Sending the stored spelling named one
+		// checkpoint differently before and after git packed its ref, which a
+		// case-sensitive remote keeps as two refs and a case-insensitive one
+		// refuses. The queue entry is untouched: removal keys on token, so the
+		// original spelling is still what gets pruned.
+		candidate := checkpointRefPush{token: entry, name: canonicalCheckpointRefKey(entry.Ref), hash: tip}
+		if stored != candidate.name {
+			candidate.stored = stored
+		}
+		if at, dup := placed[candidate.name]; dup {
+			first := &part.ready[at.index]
+			if at.changed {
+				first = &part.changed[at.index]
+			}
+			if first.hash.Equal(candidate.hash) {
+				first.also = append(first.also, entry)
+			} else {
+				// Two refs for one checkpoint whose histories diverged: only
+				// one can take the destination in this upload. The other waits
+				// and is replayed onto it by a later push.
+				part.waiting = append(part.waiting, entry)
+			}
+			continue
+		}
 		switch {
 		case !pin.IsZero() && pin != candidate.hash:
+			placed[candidate.name] = place{changed: true, index: len(part.changed)}
 			part.changed = append(part.changed, candidate)
 		default:
+			placed[candidate.name] = place{index: len(part.ready)}
 			part.ready = append(part.ready, candidate)
 		}
 	}
@@ -607,6 +651,7 @@ func checkpointRefPushTokens(refs []checkpointRefPush) []checkpoint.PushQueueEnt
 	entries := make([]checkpoint.PushQueueEntry, 0, len(refs))
 	for _, ref := range refs {
 		entries = append(entries, ref.token)
+		entries = append(entries, ref.also...)
 	}
 	return entries
 }
@@ -1067,8 +1112,10 @@ func retryRefsIndividually(ctx, flushCtx context.Context, repo *git.Repository, 
 			logging.Info(ctx, "git-refs push: checkpoint ref changed during recovery; newer generation stays queued",
 				slog.String("ref", ref.name.String()))
 			// Report the generation now waiting, so a caller has a commit to pin.
-			if current, readErr := repo.Reference(ref.name, true); readErr == nil {
-				res.changed = append(res.changed, checkpointRefPush{token: ref.token, name: ref.name, hash: current.Hash()})
+			if current, readErr := repo.Reference(ref.localRef(), true); readErr == nil {
+				waiting := ref
+				waiting.hash = current.Hash()
+				res.changed = append(res.changed, waiting)
 			} else {
 				res.errs[ref.name] = err
 			}
