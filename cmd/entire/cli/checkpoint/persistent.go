@@ -1126,14 +1126,25 @@ func (s *treeWriter) writeTranscript(ctx context.Context, opts WriteOptions, ses
 	return true, compactStart, redaction, nil
 }
 
-// compactAgentName resolves the agent slug used in compact transcript lines
-// (e.g. "claude-code"). Falls back to the raw agent type string when the
+// compactFields resolves the agent slug used in compact transcript lines
+// (e.g. "claude-code") and the native format the agent declares, if any.
+// Falls back to the raw agent type string, and format detection, when the
 // agent type is not registered.
-func compactAgentName(agentType types.AgentType) string {
-	if ag, err := agent.GetByAgentType(agentType); err == nil {
-		return string(ag.Name())
+func compactFields(agentType types.AgentType, startLine int) transcriptcompact.MetadataFields {
+	fields := transcriptcompact.MetadataFields{
+		Agent:      string(agentType),
+		CLIVersion: versioninfo.Version,
+		StartLine:  startLine,
 	}
-	return string(agentType)
+	ag, err := agent.GetByAgentType(agentType)
+	if err != nil {
+		return fields
+	}
+	fields.Agent = string(ag.Name())
+	if fp, ok := agent.AsTranscriptFormatProvider(ag); ok {
+		fields.Format = fp.TranscriptFormat()
+	}
+	return fields
 }
 
 // writeCompactTranscript converts the pre-redacted full transcript into the
@@ -1156,11 +1167,7 @@ func (s *treeWriter) writeCompactTranscript(ctx context.Context, agentType types
 	compacted, boundary, usedAgent := compactWithAgent(compactCtx, agentType, startLine, transcriptBytes)
 	var err error
 	if !usedAgent {
-		compacted, boundary, err = transcriptcompact.FullWithBoundary(redact.AlreadyRedacted(transcriptBytes), transcriptcompact.MetadataFields{
-			Agent:      compactAgentName(agentType),
-			CLIVersion: versioninfo.Version,
-			StartLine:  startLine,
-		})
+		compacted, boundary, err = transcriptcompact.FullWithBoundary(redact.AlreadyRedacted(transcriptBytes), compactFields(agentType, startLine))
 	}
 	if err != nil {
 		compactSpan.RecordError(err)

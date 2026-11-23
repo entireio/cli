@@ -240,8 +240,11 @@ func (c *codexConverter) responseItem(cl codexLine) {
 	switch typ {
 	case codexTypeFunctionCallOutput, codexTypeCustomToolCallOutput:
 		if slot, ok := c.tools[callID]; ok && slot.outputType == typ {
-			output := codexToolOutputText(cl.Payload, typ)
-			slot.block["result"] = buildToolResult(toolResultEntry{output: output, agentID: c.subagents[callID]})
+			entry := toolResultEntry{output: codexToolOutputText(cl.Payload, typ), agentID: c.subagents[callID]}
+			if typ == codexTypeFunctionCallOutput {
+				unwrapCodexExecOutput(&entry)
+			}
+			slot.block["result"] = buildToolResult(entry)
 			if !c.snapshots && c.open == slot.call {
 				c.open = nil
 			}
@@ -490,6 +493,31 @@ func codexToolUseBlock(p codexPayload) map[string]json.RawMessage {
 	}
 
 	return block
+}
+
+// unwrapCodexExecOutput reads the exit code out of the JSON envelope older
+// Codex shell tools (and forks built on them, such as Sarvam Code) write as a
+// function_call_output: {"output":"...","metadata":{"exit_code":N,...}}. The
+// envelope's output becomes the result's output, and a non-zero exit code
+// marks the call failed. Any other output, including JSON without an integer
+// metadata.exit_code, is left as it is.
+func unwrapCodexExecOutput(entry *toolResultEntry) {
+	if !strings.HasPrefix(entry.output, "{") {
+		return
+	}
+	var envelope struct {
+		Output   *string `json:"output"`
+		Metadata *struct {
+			ExitCode *int `json:"exit_code"`
+		} `json:"metadata"`
+	}
+	if json.Unmarshal([]byte(entry.output), &envelope) != nil ||
+		envelope.Output == nil || envelope.Metadata == nil || envelope.Metadata.ExitCode == nil {
+		return
+	}
+	entry.output = *envelope.Output
+	entry.exitCode = envelope.Metadata.ExitCode
+	entry.isError = *envelope.Metadata.ExitCode != 0
 }
 
 // codexToolOutputText extracts the output text from a tool call output payload.

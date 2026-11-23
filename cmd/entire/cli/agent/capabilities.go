@@ -54,6 +54,7 @@ type CapabilityDeclarer interface {
 //   - TaskTranscriptMatcher
 //   - ToolInvocationScanner
 //   - TranscriptFetcher
+//   - TranscriptFormatProvider
 //   - TranscriptSanitizer
 //   - TurnEndHookTimeouter
 //   - UsageCounterSource (refuses CapabilityDeclarer agents)
@@ -175,6 +176,14 @@ func AsSidecarImageProvider(ag Agent) (SidecarImageProvider, bool) {
 // DeclaredCaps gate.
 func AsProtectedFilesProvider(ag Agent) (ProtectedFilesProvider, bool) {
 	return builtinCapability[ProtectedFilesProvider](ag)
+}
+
+// AsTranscriptFormatProvider returns the agent as TranscriptFormatProvider if
+// it implements the interface. External agents declare their format in their
+// info response, which the external adapter forwards, so there is no
+// DeclaredCaps gate.
+func AsTranscriptFormatProvider(ag Agent) (TranscriptFormatProvider, bool) {
+	return builtinCapability[TranscriptFormatProvider](ag)
 }
 
 // AsRestoredSessionPathResolver returns the agent as RestoredSessionPathResolver

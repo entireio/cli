@@ -1351,3 +1351,47 @@ esac
 		t.Fatalf("transcript length = %d, want 9000000", len(got.Transcript))
 	}
 }
+
+func TestWrap_TranscriptFormat(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	tests := []struct {
+		name     string
+		declared string
+		want     string
+	}{
+		{name: "known format", declared: `"transcript_format": "codex",`, want: "codex"},
+		{name: "unknown format is ignored", declared: `"transcript_format": "from-a-newer-cli",`, want: ""},
+		{name: "not declared", declared: "", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			infoJSON := `{
+  "protocol_version": 1,
+  "name": "codex-fork",
+  "type": "Codex Fork",
+  "description": "Agent writing Codex rollouts",
+  ` + tt.declared + `
+  "protected_dirs": [],
+  "hook_names": [],
+  "capabilities": {}
+}`
+			wrapped, err := Wrap(newExternalAgent(t, testBinaryDir(t, mockInfoScript(infoJSON))))
+			if err != nil {
+				t.Fatalf("Wrap: %v", err)
+			}
+			fp, ok := agent.AsTranscriptFormatProvider(wrapped)
+			if !ok {
+				t.Fatal("wrapped agent does not implement TranscriptFormatProvider")
+			}
+			if got := fp.TranscriptFormat(); got != tt.want {
+				t.Errorf("TranscriptFormat() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

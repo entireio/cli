@@ -78,6 +78,8 @@ The `capabilities` object determines which optional subcommands the CLI will cal
 
 Optional: `"caller_env_vars": ["MYAGENT_SESSION_ID"]` lists environment variables the agent sets for the commands it runs (uppercase names only). `entire review` uses them to recognise the agent as the caller, so it refuses to approve reviews of someone else's code on the user's behalf and names the agent when one passes `--trust-target`. Agents that set the cross-tool `AI_AGENT` variable are recognised without declaring it.
 
+Optional: `"transcript_format": "codex"` declares that the agent's native transcript is written in a format the CLI already converts, so the CLI's built-in compactor builds its `transcript.jsonl` (see [`compact_transcript`](#capability-compact_transcript)). Use it when the agent is a fork of, or writes the same transcript as, a built-in agent. Values: `claude-code`, `cursor`, `codex`, `copilot-cli`, `factoryai-droid`, `gemini`, `opencode` (an export), `opencode-messages` (one OpenCode `{"info","parts"}` message per line), `pi`. A value this CLI does not know is ignored, and the format is detected from the transcript.
+
 #### `detect`
 
 Checks whether the agent is present/usable in the current environment.
@@ -338,6 +340,8 @@ Prepares/processes a transcript file (e.g., converting from raw format).
 ### Capability: `compact_transcript`
 
 Required when `capabilities.compact_transcript` is `true`.
+
+Leave this capability off when the agent's transcript is in a format the CLI converts: declare `transcript_format` in `info` instead. The built-in compactor then converts it, writes the agent's `name` on every line, and computes per-call model and usage where that format records them. Without this capability or `transcript_format`, the CLI detects the format from the transcript's content, and converts unrecognized JSONL as Claude-style lines without per-call usage.
 
 #### `compact-transcript --session-ref <path>`
 

@@ -77,8 +77,11 @@ Pi, one native message per call (no fragments to merge): `model` is `message.mod
   working directory of the call as the agent records it. Only the Codex
   item path writes these three: a command's exit code and own `cwd`, and
   for a file change (whose paths are absolute) the `cwd` of its turn, from
-  the rollout's latest `turn_context`. Older lines and other agents' lines
-  have none of them.
+  the rollout's latest `turn_context`. The Codex `response_item` path also
+  writes `exitCode` when a `function_call_output` is the JSON envelope older
+  shell tools write, `{"output":…,"metadata":{"exit_code":N}}`: the
+  envelope's `output` becomes the result's output, and a non-zero code sets
+  `status` to `error`. Older lines and other agents' lines have none of them.
 - Image: passed through from the source verbatim. The image source is either
   inline base64 or an `entire-asset:assets/…` placeholder left by image
   externalization.
@@ -182,6 +185,26 @@ the options are ignored. Anything else is converted first.
 
 ```go
 lines, err := transcript.Parse(native, transcript.Options{Agent: "claude-code", CLIVersion: "0.5.1"})
+```
+
+Converting detects the native format from the content. `Options.Format`
+names it instead, as one of the `Format` constants (`KnownFormat` checks a
+value); an unknown value is an error. A declared format converts exactly as
+detection does for that format, with three differences:
+
+- `FormatClaudeCode` selects Claude Code's per-call usage whatever `Agent` is.
+- `FormatPi` converts a Pi session whose header is not its first line (Oh My
+  Pi writes a title slot first), which detection does not recognize.
+- `FormatOpenCodeMessages`, one OpenCode `{"info":{...},"parts":[...]}`
+  message per line as `OpenCodeSnapshotLines` splits an export, is never
+  detected. It converts as the export the lines came from, with `StartLine`
+  counting messages.
+
+External agents whose transcript is a built-in agent's format declare it this
+way, for example a Codex fork:
+
+```go
+lines, err := transcript.Parse(native, transcript.Options{Agent: "sarvam", CLIVersion: "0.5.1", Format: transcript.FormatCodex})
 ```
 
 To get one checkpoint's portion of a session, convert with the boundary and

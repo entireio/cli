@@ -23,6 +23,11 @@ type Options struct {
 	Agent      string
 	CLIVersion string // e.g. "0.42.0"
 	StartLine  int    // checkpoint_transcript_start (0 = no truncation)
+	// Format names the native format of the transcript (one of the Format
+	// constants). Empty detects it from the content. A set Format also
+	// decides the JSONL accounting, so a non-Claude agent writing Claude
+	// Code's format gets Claude Code's per-call usage.
+	Format string
 }
 
 // transcriptLine is the uniform output format for every line in transcript.jsonl.
@@ -82,45 +87,15 @@ type userTextBlock struct {
 //
 //	{"v":1,"agent":"claude-code","cli_version":"0.42.0","type":"user","ts":"...","content":"..."}
 //	{"v":1,"agent":"claude-code","cli_version":"0.42.0","type":"assistant","ts":"...","id":"msg_xxx","content":[{"type":"text","text":"..."},{"type":"tool_use","id":"...","name":"...","input":{...},"result":{"output":"...","status":"..."}}]}
+//
+// opts.Format selects the converter; when it is empty the format is detected
+// from the content. An unknown Format is an error.
 func Convert(content []byte, opts Options) ([]byte, error) {
-	// Formats that need detection on raw content before line truncation:
-	// - Single-object formats (OpenCode, Gemini): SliceFromLine would cut
-	//   a JSON object mid-value. They handle StartLine as a message-index offset.
-	// - Codex: session_meta header is only on the first line, and the choice
-	//   between its item and response_item paths is made on the whole
-	//   rollout. Codex slices by physical line itself, after seeding its usage
-	//   baseline from the skipped lines.
-	if isOpenCodeFormat(content) {
-		return compactOpenCode(content, opts)
+	format := opts.Format
+	if format == "" {
+		format = detectFormat(content, opts)
 	}
-
-	if isGeminiFormat(content) {
-		return compactGemini(content, opts)
-	}
-
-	// pi: detect on the raw header line. compactPi handles StartLine itself.
-	if isPiFormat(content) {
-		return compactPi(content, opts)
-	}
-
-	if isCodexFormat(content) {
-		return compactCodex(content, opts)
-	}
-
-	truncated := SliceFromLine(content, opts.StartLine)
-	if truncated == nil {
-		truncated = []byte{}
-	}
-
-	if isCopilotFormat(truncated) {
-		return compactCopilot(truncated, opts)
-	}
-
-	if isDroidFormat(truncated) {
-		return compactDroid(truncated, opts)
-	}
-
-	return compactJSONL(truncated, opts)
+	return convertAs(content, format, opts)
 }
 
 // ConvertWithBoundary compacts the entire transcript — ignoring opts.StartLine for
@@ -394,6 +369,7 @@ func toolResult(tr toolResultEntry) *ToolResult {
 		Output:     tr.output,
 		Status:     ToolStatusSuccess,
 		MatchCount: tr.matchCount,
+		ExitCode:   tr.exitCode,
 	}
 	if tr.isError {
 		r.Status = ToolStatusError
@@ -478,6 +454,7 @@ type toolResultEntry struct {
 	file       *toolResultFile // Read/Edit: file path and line count
 	matchCount int             // Grep: number of matching files
 	agentID    string          // the subagent the call launched
+	exitCode   *int            // the command's exit code, when recorded
 }
 
 // toolResultFile carries structured file metadata from Read/Edit tool results.

@@ -230,6 +230,17 @@ type ProtectedFilesProvider interface {
 	ProtectedFiles() []string
 }
 
+// TranscriptFormatProvider is implemented by agents whose native transcript is
+// written in a format the built-in converter knows under another agent's name
+// (an external agent forked from Codex, for example).
+type TranscriptFormatProvider interface {
+	Agent
+
+	// TranscriptFormat returns one of the transcript.Format constants, or ""
+	// to detect the format from the transcript's content.
+	TranscriptFormat() string
+}
+
 // TranscriptAnalyzer provides format-specific transcript parsing.
 // Agents that implement this get richer checkpoints (transcript-derived file lists,
 // prompts, summaries). Agents that don't still participate in the checkpoint lifecycle

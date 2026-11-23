@@ -18,6 +18,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
+	transcriptlib "github.com/entireio/cli/transcript"
 )
 
 // defaultRunTimeout is the maximum time an external binary call may take when
@@ -94,6 +95,16 @@ func (e *Agent) ProtectedDirs() []string {
 
 func (e *Agent) ProtectedFiles() []string {
 	return e.info.ProtectedFiles
+}
+
+// TranscriptFormat returns the declared native transcript format, or "" when
+// none is declared or this CLI does not know it (a binary built for a newer
+// CLI), in which case the format is detected from the transcript.
+func (e *Agent) TranscriptFormat() string {
+	if !transcriptlib.KnownFormat(e.info.TranscriptFormat) {
+		return ""
+	}
+	return e.info.TranscriptFormat
 }
 
 // --- Agent interface: Transcript Storage ---
