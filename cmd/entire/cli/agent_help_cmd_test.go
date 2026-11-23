@@ -223,8 +223,8 @@ func TestAgentHelpRepoContext_SkipsRefreshWithoutLocalIdentity(t *testing.T) {
 
 // refreshAgentHelpTrailsEnabledCacheIfStaleForScope must route the repo-scoped
 // trails-enablement probe through the entire-api cell that hosts THIS repo
-// (trailRefreshAPIClient), never through the generic data-API/BFF client — the
-// BFF does not proxy /api/v1/trails/... for bearer callers (COR-666).
+// (trailRefreshAPIClient), never through the generic data-API/BFF client.
+// The probe uses that same cell's resolved processing placement ID.
 // Not parallel: changes the process working directory.
 func TestRefreshAgentHelpTrailsEnabledCacheIfStaleForScope_RoutesThroughRepoCell(t *testing.T) {
 	// A non-repo cwd makes the shared cache lookup return "unknown", so the
@@ -234,9 +234,9 @@ func TestRefreshAgentHelpTrailsEnabledCacheIfStaleForScope_RoutesThroughRepoCell
 	previous := trailRefreshAPIClient
 	var gotForge, gotOwner, gotRepo string
 	wantErr := errors.New("cell client unavailable")
-	trailRefreshAPIClient = func(_ context.Context, _ bool, forge, owner, repo string) (*api.Client, error) {
+	trailRefreshAPIClient = func(_ context.Context, _ bool, forge, owner, repo string) (*api.Client, string, error) {
 		gotForge, gotOwner, gotRepo = forge, owner, repo
-		return nil, wantErr
+		return nil, "", wantErr
 	}
 	t.Cleanup(func() { trailRefreshAPIClient = previous })
 
@@ -274,8 +274,8 @@ func TestRefreshAgentHelpTrailsEnabledCacheIfStaleForScope_NotOnboardedSavesDisa
 	runGitInDir(t, ".", "remote", "add", "origin", "https://github.com/acme/widget.git")
 
 	previous := trailRefreshAPIClient
-	trailRefreshAPIClient = func(context.Context, bool, string, string, string) (*api.Client, error) {
-		return nil, fmt.Errorf("resolve the Entire cell for acme/widget: %w", errRepoNotOnboarded)
+	trailRefreshAPIClient = func(context.Context, bool, string, string, string) (*api.Client, string, error) {
+		return nil, "", fmt.Errorf("resolve the Entire cell for acme/widget: %w", errRepoNotOnboarded)
 	}
 	t.Cleanup(func() { trailRefreshAPIClient = previous })
 

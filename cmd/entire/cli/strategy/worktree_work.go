@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"path/filepath"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -108,15 +109,31 @@ func overlapsFiles(files []string, set map[string]struct{}) bool {
 // homes were recorded. It compares paths only, which holds for turn-end hooks
 // because turn start already followed a moved home and re-homed a session in
 // a worktree re-added at its home path (reconcileWorktreePathForResumedTurn).
+// A home moved mid-turn, after turn start, is homeMovedTo's case.
 func homedAt(state *SessionState, root string) bool {
 	return state.WorktreePath == "" || isSessionHomeWorktree(root, state) || sameDir(root, state.WorktreePath)
 }
 
+// homeMovedTo reports whether root is state's linked home moved there
+// mid-turn by `git worktree move`, before turn start could follow it
+// (homedAt's path rule misses that); its marker says so (homeAt). A home with
+// the empty ID has no marker, and a renamed main worktree can't be told from
+// an unregistered checkout (same empty ID) whose path is gone, which is
+// common for a container's path seen from the host, so neither counts: a step
+// is better skipped than recorded as another checkout's.
+func homeMovedTo(ctx context.Context, state *SessionState, root string) bool {
+	if state.WorktreePath == "" || root == "" || state.WorktreeID == "" {
+		return false
+	}
+	return homeAt(ctx, state, root) == homeMovedHere
+}
+
 // enterStepWorktree is enterWorktreeView for a turn-end step recorded in
 // root, creating root's entry when the session has none yet, or only one
-// left from an earlier worktree git gave root's ID to. A session with
-// no recorded home is first homed in the hook's worktree, so a step elsewhere
-// can't make that worktree its home by default.
+// left from an earlier worktree git gave root's ID to. An unregistered
+// checkout gets no entry (its step is skipped, see recordUnhomedStepTokens).
+// A session with no recorded home is first homed in the hook's worktree, so a
+// step elsewhere can't make that worktree its home by default.
 func enterStepWorktree(ctx context.Context, state *SessionState, root string) (leave func(), ok bool) {
 	if state.WorktreePath == "" {
 		hookRoot, err := paths.WorktreeRoot(ctx)
@@ -134,6 +151,22 @@ func enterStepWorktree(ctx context.Context, state *SessionState, root string) (l
 	worktreeID, err := paths.GetWorktreeID(root)
 	if err != nil {
 		return nil, false
+	}
+	if worktreeID == "" {
+		// The main worktree and every unregistered checkout sharing the
+		// repository through commondir have the empty ID. Only the main
+		// worktree gets the entry under it: git never lists such a checkout,
+		// so pruning would drop its record in the same hook, and nothing could
+		// tell a checkout from a later one at the same path.
+		metadata, metaErr := gitrepo.ResolveWorktreeMetadata(root)
+		if metaErr != nil {
+			logging.Debug(logging.WithComponent(ctx, "session"), "could not resolve worktree metadata; its edits are not recorded",
+				slog.String("worktree", root), slog.String("error", metaErr.Error()))
+			return nil, false
+		}
+		if metadata.Unregistered {
+			return nil, false
+		}
 	}
 	key := session.WorktreeKey(worktreeID)
 	if state.OtherWorktrees == nil {

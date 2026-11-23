@@ -171,7 +171,7 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 // checkpoint would store the earlier turns a second time.
 func isOrphanedSessionState(state *SessionState) bool {
 	return isEndedWithoutContent(state) &&
-		!HasTokenUsageData(state.CheckpointTokenUsage) && !HasTokenUsageData(state.SubagentTokensBaseline) &&
+		!HasTokenUsageData(state.CheckpointTokenUsage) && !HasTokenUsageData(state.SubagentTokensBaseline) && !state.TokenLedger.HasPending() &&
 		state.TokenStart() == 0 && state.CheckpointTranscriptStart == 0
 }
 
@@ -783,6 +783,7 @@ func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.
 		TranscriptPath:        transcriptPath,
 		LastPrompt:            truncatePromptForStorage(userPrompt),
 	}
+	state.TokenLedger = newTokenLedger(ctx, agentType, sessionID, transcriptPath)
 	if agentType == agent.AgentTypeCodex {
 		complete := true
 		state.SubagentInventoryComplete = &complete

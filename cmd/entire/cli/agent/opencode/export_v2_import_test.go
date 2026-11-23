@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/internal/transcript/opencodev2"
 	"github.com/entireio/cli/redact"
 )
 
@@ -21,7 +22,7 @@ func TestOpenCodeV2ImportPayload_DropsAttachmentsTheRedactorReplaced(t *testing.
 	image := base64.StdEncoding.EncodeToString(random)
 	user := `{"id":"msg_u","type":"user","text":"see","time":{"created":1},"files":[{"data":"` + image + `","mime":"image/png","source":{"type":"uri","uri":"a.png"}}]}`
 	export := `{"info":{"id":"ses_x","location":{"directory":"/a"}},"messages":[` + user + `]}`
-	stored, err := normalizeOpenCodeExport([]byte(export))
+	stored, err := opencodev2.Normalize([]byte(export))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +59,7 @@ func TestOpenCodeV2ImportPayload_RestoresOnlySafeSessionInfo(t *testing.T) {
 		`"location":{"directory":"/a"},"permissions":[{"permission":"*","pattern":"*","action":"allow"}],` +
 		`"agent":"evil","metadata":{"k":"v"},"parentID":"ses_p","revert":{"messageID":"m"}},` +
 		`"messages":[{"id":"msg_u","type":"user","text":"hi","time":{"created":1}}]}`
-	stored, err := normalizeOpenCodeExport([]byte(export))
+	stored, err := opencodev2.Normalize([]byte(export))
 	if err != nil {
 		t.Fatal(err)
 	}

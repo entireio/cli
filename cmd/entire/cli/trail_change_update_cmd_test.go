@@ -26,10 +26,10 @@ func runTrailChangeUpdate(t *testing.T, project bool, args []string, respond fun
 	}
 	setupWorkingRepoClient(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method + " " + r.URL.Path {
-		case "GET /api/v1/trails/gh/acme/widget/7":
+		case "GET /api/v1/repos/repo-id/changes/7":
 			assert.False(t, project, "project mode must resolve through its owned route")
 			assert.NoError(t, json.NewEncoder(w).Encode(api.TrailResource{ID: projectTrailTestChange, Number: 7, Branch: "feature/work"}))
-		case "PATCH /api/v1/trails/gh/acme/widget/7":
+		case "PATCH /api/v1/repos/repo-id/changes/7":
 			var request map[string]any
 			assert.NoError(t, json.NewDecoder(r.Body).Decode(&request))
 			patches = append(patches, request)
