@@ -82,14 +82,12 @@ func RewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repositor
 	// Stale entries (refs no longer present locally) are skipped, not pruned:
 	// the queue belongs to the flush.
 	existing, _, listed := partitionLocalRefs(ctx, repo, queued)
-	for _, refName := range existing {
-		tip, refErr := localTip(repo, listed, refName)
-		if refErr != nil {
-			if errors.Is(refErr, plumbing.ErrReferenceNotFound) {
-				continue
-			}
-			return fmt.Errorf("resolve checkpoint ref %s: %w", refName, refErr)
-		}
+	rewrites, err := queuedRewriteTargets(repo, listed, existing)
+	if err != nil {
+		return err
+	}
+	for _, target := range rewrites {
+		refName, stored, tip := target.queued, target.stored, target.tip
 		chain, base, walkErr := unappliedAncestry(repo, tip)
 		if walkErr != nil {
 			return fmt.Errorf("walk ancestry of %s: %w", refName, walkErr)
@@ -100,7 +98,7 @@ func RewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repositor
 		if len(chain) > bootstrapLimit {
 			return &BootstrapTooLargeError{Count: len(chain), Limit: bootstrapLimit}
 		}
-		pr := pendingRef{ref: refName, old: tip, base: base}
+		pr := pendingRef{ref: stored, old: tip, base: base}
 		for _, c := range chain {
 			tree, treeErr := repo.TreeObject(c.TreeHash)
 			if treeErr != nil {
@@ -198,4 +196,48 @@ func unappliedAncestry(repo *git.Repository, tip plumbing.Hash) ([]*object.Commi
 	}
 	slices.Reverse(chain)
 	return chain, base, nil
+}
+
+// queuedRewriteTarget is a queued checkpoint ref resolved to the ref it is
+// stored under, whose name the compare-and-swap updates, and that ref's tip.
+type queuedRewriteTarget struct {
+	queued, stored plumbing.ReferenceName
+	tip            plumbing.Hash
+}
+
+// queuedRewriteTargets resolves each queued ref to the ref it is stored under,
+// skipping refs gone locally.
+//
+// A checkpoint queued under both spellings of its shard at one commit is
+// listed once: while the ref is loose, a case-insensitive filesystem resolves
+// both names to it, and the second compare-and-swap would miss the tip the
+// first one moved. The stored name cannot tell the two entries apart there, so
+// the checkpoint and its commit do.
+func queuedRewriteTargets(
+	repo *git.Repository,
+	listed map[plumbing.ReferenceName]plumbing.Hash,
+	queued []plumbing.ReferenceName,
+) ([]queuedRewriteTarget, error) {
+	type rewrite struct {
+		checkpoint plumbing.ReferenceName
+		tip        string
+	}
+	seen := make(map[rewrite]struct{}, len(queued))
+	targets := make([]queuedRewriteTarget, 0, len(queued))
+	for _, refName := range queued {
+		stored, tip, err := checkpoint.StoredRef(repo, listed, refName)
+		if errors.Is(err, plumbing.ErrReferenceNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("resolve checkpoint ref %s: %w", refName, err)
+		}
+		key := rewrite{checkpoint: canonicalCheckpointRefKey(refName), tip: tip.String()}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		targets = append(targets, queuedRewriteTarget{queued: refName, stored: stored, tip: tip})
+	}
+	return targets, nil
 }

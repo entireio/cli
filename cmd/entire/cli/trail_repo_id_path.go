@@ -1,20 +1,27 @@
 package cli
 
 import (
-	"errors"
-	"net/url"
-	"strings"
+	"fmt"
+
+	"github.com/entireio/cli/cmd/entire/cli/api"
 )
 
-// trailRepoIDNumberPath is a change on the repository-ID route
-// (/repos/{repo_id}/trails/{number}). Some change actions and reads are served
-// only there, not on the forge/owner/repo route.
-func trailRepoIDNumberPath(repoID string, number int) (string, error) {
-	repoID = strings.TrimSpace(repoID)
-	if repoID == "" {
-		return "", errors.New("cannot address this trail without its repository ID")
+func trailRepoBasePath(repoID string) (string, error) {
+	path, err := api.RepoChangesPath(repoID)
+	if err != nil {
+		return "", fmt.Errorf("resolve Change route: %w", err)
 	}
-	return trailNumberPathForBase("/api/v1/repos/"+url.PathEscape(repoID)+"/trails", number), nil
+	return path, nil
+}
+
+// trailRepoIDNumberPath is a change on the repository-ID route
+// (/repos/{repo_id}/changes/{number}), shared by all forges.
+func trailRepoIDNumberPath(repoID string, number int) (string, error) {
+	base, err := trailRepoBasePath(repoID)
+	if err != nil {
+		return "", err
+	}
+	return trailNumberPathForBase(base, number), nil
 }
 
 // trailRepoIDPath is a subresource of the selected change on the

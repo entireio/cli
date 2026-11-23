@@ -132,6 +132,9 @@ func (f *CellClientFactory) ClientFor(ctx context.Context, target *CellTarget) (
 	if err != nil {
 		return nil, err
 	}
+	if f.subject.source != nil {
+		return api.NewClientWithTokenSource(f.subject.source, cellBaseURL), nil
+	}
 	return api.NewClientWithBaseURL(f.subject.loginJWT, cellBaseURL), nil
 }
 
@@ -144,7 +147,11 @@ func (f *CellClientFactory) HomeJurisdiction() (string, error) {
 // cellBaseURLFor resolves the cell origin ClientFor dials for target, checked
 // safe to send the login JWT to.
 func (f *CellClientFactory) cellBaseURLFor(ctx context.Context, target *CellTarget) (string, error) {
-	jurisdiction, err := targetJurisdiction(target, f.subject.loginJWT)
+	loginJWT, err := f.subject.currentLoginJWT(ctx)
+	if err != nil {
+		return "", err
+	}
+	jurisdiction, err := targetJurisdiction(target, loginJWT)
 	if err != nil {
 		return "", err
 	}
@@ -152,7 +159,7 @@ func (f *CellClientFactory) cellBaseURLFor(ctx context.Context, target *CellTarg
 	// The catalog fallback lists clusters with loginJWT, which is signed by the
 	// subject's login core — so list there, not at the templated jurisdiction
 	// core, which in a multi-core setup could differ and reject the token.
-	cellBaseURL, err := resolveTargetCellBaseURL(ctx, target, f.subject.dataHost, jurisdiction, f.subject.discoveredCore, f.subject.loginJWT, f.subject.httpClient)
+	cellBaseURL, err := resolveTargetCellBaseURL(ctx, target, f.subject.dataHost, jurisdiction, f.subject.discoveredCore, loginJWT, f.subject.httpClient)
 	if err != nil {
 		return "", err
 	}
@@ -175,6 +182,23 @@ type cellSubject struct {
 	// it fronts.
 	dataHost   string
 	httpClient *http.Client
+	// source, when set, renews the cell bearer per request (EnvTokenSource);
+	// loginJWT is then its value at resolution time, which routing reads.
+	source api.TokenSource
+}
+
+// currentLoginJWT is the bearer for routing requests (the cluster catalog):
+// a fresh one from source when the subject renews, so a factory reused past
+// the exchanged token's expiry still lists clusters; otherwise loginJWT.
+func (s cellSubject) currentLoginJWT(ctx context.Context) (string, error) {
+	if s.source == nil {
+		return s.loginJWT, nil
+	}
+	token, err := s.source.Token(ctx)
+	if err != nil {
+		return "", fmt.Errorf("renew %s for cell routing: %w", EnvTokenVar, err)
+	}
+	return token, nil
 }
 
 // resolveActiveContextCellSubject builds the subject from the selected stored
@@ -333,6 +357,7 @@ func resolveEnvTokenCellSubject(raw string, insecureHTTP bool) (cellSubject, err
 		loginJWT:       token,
 		discoveredCore: core,
 		httpClient:     cellExchangeHTTPClient(core),
+		source:         EnvTokenSource(raw),
 	}, nil
 }
 
@@ -441,6 +466,16 @@ func isLoopbackOrigin(origin string) bool {
 		return false
 	}
 	return isLoopbackHost(strings.ToLower(u.Hostname()))
+}
+
+// BaseURLOverridePinsCell reports whether ENTIRE_API_BASE_URL names the one
+// cell to talk to: a direct entire-api cell or a loopback dev host, which cell
+// clients dial verbatim. An unset override, or one naming a BFF/apex such as
+// the staging apex, still resolves cells from the catalog, so callers may
+// route to another cell as they would without it.
+func BaseURLOverridePinsCell() bool {
+	dataURL, overridden := api.BaseURLOverride()
+	return overridden && !isBFFOrigin(api.OriginOnly(dataURL))
 }
 
 // isBFFOrigin reports whether origin is a BFF / apex host that fronts multiple

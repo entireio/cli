@@ -394,6 +394,7 @@ func TestGrantPicker_EmptyPoolWithJSONStaysParseable(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(out), &arr))
 	require.Empty(t, arr)
 	require.Contains(t, errOut, "already has a grant on it")
+	require.NotContains(t, errOut, "0 granted")
 }
 
 // TestGrantPicker_SelectingNobodyIsACleanStop: confirming an empty selection is
@@ -411,10 +412,11 @@ func TestGrantPicker_SelectingNobodyIsACleanStop(t *testing.T) {
 		return nil, nil
 	})
 
-	out, _, err := runPickerCmd(t, newProjectGrantCmd, srv.URL, pickerProjULID)
+	out, errOut, err := runPickerCmd(t, newProjectGrantCmd, srv.URL, pickerProjULID)
 	require.NoError(t, err)
 	require.Empty(t, grants)
-	require.NotContains(t, out, "✓")
+	require.Empty(t, out)
+	require.Empty(t, errOut)
 }
 
 // TestGrantPicker_UngrantableMembersAreDropped: a member with no handle or one
@@ -501,8 +503,11 @@ func TestGrantPicker_FixedRoleIsNotPrompted(t *testing.T) {
 }
 
 // TestGrantPicker_PartialFailureStopsAndReports: a failure part-way through
-// leaves the earlier grants in place and says so, rather than rolling back a
-// server-side change the CLI cannot undo or swallowing the error.
+// that would repeat for every grantee (a 500 with no problem body) stops the
+// set, leaves the earlier grants in place and says so, rather than rolling
+// back a server-side change the CLI cannot undo or swallowing the error. A
+// refusal about one grantee does not stop it: see
+// TestGrantPicker_RefusalsDoNotStopTheSet.
 //
 // Not parallel: swaps the activeCoreClient and grantPicker seams.
 func TestGrantPicker_PartialFailureStopsAndReports(t *testing.T) {

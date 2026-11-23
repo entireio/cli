@@ -40,7 +40,7 @@ func NewAuthenticatedAPIClient(ctx context.Context, insecureHTTP bool) (*api.Cli
 	// the credential is in hand would be too late to matter anyway — the point of
 	// the gate is to run before discovery and refresh dial the host.
 	// TestNewAuthenticatedAPIClient_RejectsInsecureOverrideBeforeResolving pins it.
-	return api.NewClientWithBaseURL(target.Token, target.BaseURL), nil
+	return target.Client(), nil
 }
 
 // insecureDataOverrideNote describes a rejected http ENTIRE_API_BASE_URL for a
@@ -78,7 +78,7 @@ func requireSecureDataOverride() error {
 }
 
 // newTrailAPIClient dials the entire-api cell that owns the forge-qualified
-// repository and returns its repo_id for repo-addressed trail reads. It is a
+// repository and returns its repo_id for repository Change requests. It is a
 // package seam so tests can substitute a client pointed at a stub server.
 var newTrailAPIClient = func(ctx context.Context, insecureHTTP bool, forge, owner, repo string) (*api.Client, string, error) {
 	return openTrailRepoClient(ctx, forge, owner, repo, func() (cellClientBuilder, error) {

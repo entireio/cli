@@ -171,9 +171,14 @@ func (f *saFakeCore) serve(w http.ResponseWriter, r *http.Request) {
 		writeJSONResponse(t, w, http.StatusCreated, &binding)
 	case "GET " + saBase + "/" + saTestID + "/bindings":
 		writeJSONResponse(t, w, http.StatusOK, &coreapi.ListBindingsOutputBody{Bindings: []coreapi.Binding{binding}})
+	case "POST " + saBase + "/" + saTestID + "/secrets":
+		writeJSONResponse(t, w, http.StatusCreated, saTestCreatedSecret())
+	case "GET " + saBase + "/" + saTestID + "/secrets":
+		writeJSONResponse(t, w, http.StatusOK, saTestSecretPage(r.URL.Query().Get("cursor")))
 	case "DELETE " + saBase + "/" + saTestID,
 		"DELETE " + saBase + "/" + saTestID + "/grants/repo/" + saTestRepoID,
-		"DELETE " + saBase + "/" + saTestID + "/bindings/" + saTestBindingID:
+		"DELETE " + saBase + "/" + saTestID + "/bindings/" + saTestBindingID,
+		"DELETE " + saBase + "/" + saTestID + "/secrets/" + saTestSecretID:
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		t.Errorf("unexpected %s", route)
