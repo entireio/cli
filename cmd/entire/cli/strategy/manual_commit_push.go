@@ -433,6 +433,9 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 		return nil
 	}
 	defer repo.Close()
+	// Deferred so it runs after any flush and also on the paths that send
+	// nothing (a manual policy, a withheld OPF rewrite). Runs before Close.
+	defer renameUppercaseShardRefs(ctx, repo)
 
 	if fromGitHook {
 		answer, saved := askCheckpointPushPolicyOnFirstPush(ctx, repo)
@@ -494,6 +497,26 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 		warnIgnoredCheckpointRemote(ctx, ps)
 	}
 	return nil
+}
+
+// renameUppercaseShardRefs moves this clone's checkpoint refs to their
+// lowercase-shard names when pre-push finishes (see
+// checkpoint.NormalizeShardSpelling), so the rename never delays a checkpoint
+// upload. A failure is logged and never returned: the refs keep working under
+// the names they have, and the next push tries again.
+func renameUppercaseShardRefs(ctx context.Context, repo *git.Repository) {
+	result, err := checkpoint.NormalizeShardSpelling(ctx, repo)
+	if err != nil {
+		logging.Warn(ctx, "git-refs pre-push: could not rename checkpoint refs to lowercase shards",
+			slog.Int("renamed", result.Renamed), slog.String("error", err.Error()))
+	} else if result.Renamed > 0 {
+		logging.Info(ctx, "git-refs pre-push: renamed checkpoint refs to lowercase shards",
+			slog.Int("renamed", result.Renamed))
+	}
+	if len(result.Diverged) > 0 {
+		logging.Warn(ctx, "git-refs pre-push: checkpoints with diverged refs under both shard spellings; see entire doctor",
+			slog.Int("checkpoints", len(result.Diverged)))
+	}
 }
 
 // PushQueuedCheckpointRefs pushes any queued checkpoint refs to the configured

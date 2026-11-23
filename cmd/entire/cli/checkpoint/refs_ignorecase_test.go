@@ -248,3 +248,52 @@ func TestStoredRef_DoesNotKeepTheRepositoryAlive(t *testing.T) {
 
 	assert.Nil(t, collected.Value(), "the repository must be collectable after a lookup")
 }
+
+// A write from a linked worktree whose repository uses per-worktree config,
+// the layout bare-clone workflows create, picks its shard spelling from the
+// common config's core.ignorecase.
+func TestRefsWrite_LinkedWorktreeWithWorktreeConfigUsesTheCommonSetting(t *testing.T) {
+	t.Parallel()
+	for _, ignoreCase := range []string{"true", "false"} {
+		t.Run("ignorecase="+ignoreCase, func(t *testing.T) {
+			t.Parallel()
+			main := t.TempDir()
+			testutil.InitRepo(t, main)
+			testutil.RunGit(t, main, "commit", "--allow-empty", "-m", "init")
+			testutil.RunGit(t, main, "config", "core.ignorecase", ignoreCase)
+			testutil.RunGit(t, main, "config", "extensions.worktreeConfig", "true")
+			linked := filepath.Join(t.TempDir(), "linked")
+			testutil.RunGit(t, main, "worktree", "add", "-q", "-b", "linked", linked)
+			testutil.RunGit(t, linked, "config", "--worktree", "user.name", "Worktree User")
+
+			repo, err := gitrepo.OpenPath(linked)
+			require.NoError(t, err)
+			defer repo.Close()
+
+			assert.Equal(t, ignoreCase == "true", foldsCase(repo))
+			store := newGitRefsStore(repo)
+			refsWrite(t, store, foldableULID, "sess-1", "transcript")
+			want := mustRefName(t, foldableULID).String()
+			if ignoreCase == "true" {
+				want = "refs/entire/checkpoints/6b/" + foldableULID.String()
+			}
+			assert.Equal(t, want+"\n", testutil.RunGit(t, linked, "for-each-ref", "--format=%(refname)", CheckpointRefPrefix))
+		})
+	}
+}
+
+// Reftable stores refs in tables under their exact names, never as files, so
+// nothing folds even where git recorded a case-insensitive filesystem, and refs
+// keep their canonical names.
+func TestFoldsCase_ReftableRepositoryNeverFolds(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	testutil.RunGit(t, dir, "init", "-q", "--ref-format=reftable")
+	testutil.RunGit(t, dir, "config", "core.ignorecase", "true")
+
+	repo, err := gitrepo.OpenPath(dir)
+	require.NoError(t, err)
+	defer repo.Close()
+
+	assert.False(t, foldsCase(repo))
+}

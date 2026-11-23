@@ -54,14 +54,22 @@ A single positional rule (independent of ID kind) keeps ref naming impossible to
 
 ### Shard spelling on case-insensitive filesystems
 
-Hex IDs are lowercase and ULIDs are uppercase, so one shard can be spelled two ways (`6b` and `6B`). On a case-insensitive filesystem (the macOS and Windows defaults) git stores a ref under whichever spelling the shard directory already has. Once `git pack-refs` runs, a name is matched exactly, so the canonical name can stop resolving. These rules keep one checkpoint one checkpoint:
+Hex IDs are lowercase and ULIDs are uppercase, so one shard can be spelled two ways (`6b` and `6B`). On a case-insensitive filesystem (the macOS and Windows defaults) git stores a ref under whichever spelling the shard directory already has. Once `git pack-refs` runs, a name is matched exactly, so the canonical name can stop resolving, and an update through the other spelling can leave a checkpoint with a ref under each.
+
+**Each shard has one local spelling.** Where git recorded `core.ignorecase=true`, a clone stores every checkpoint ref under its lowercase shard (`LocalRefName`, e.g. `6b/<ULID>`), so legacy and ULID refs share one directory name and nothing can fold. Only the local name changes: `RefName` (the ID's own case) stays the name remotes, entire.io, entire-api, entire-search and other clones know the checkpoint by. Where `core.ignorecase=false`, or the repository stores refs in reftable (exact names, no files), nothing folds, and refs keep `RefName`. Writes and fetches share that rule (`LocalRefNameIn`). `core.ignorecase` is read from the shared `config` file through `gitrepo.RawConfig`, so a `config.worktree` override is not seen; reftable is detected when `gitrepo` opens the repository (`gitrepo.UsesReftable`).
+
+- **New refs are written lowercase.** A checkpoint with no ref yet is written under `LocalRefName` (`writeRefName`, through `localRefNameIn`).
+- **Fetches store lowercase.** An on-demand fetch asks the remote for the canonical name and stores it under the local one (`+<canonical>:<local>`, `remote.localCheckpointRefName`), named by the same rule as writes.
+- **Existing refs are renamed.** `NormalizeShardSpelling` (`checkpoint/refs_shard_normalize.go`) renames refs outside their lowercase shard. Pre-push runs it as it finishes, whether or not it sent anything, logging and never returning a failure, and `entire doctor` offers it. Renaming is only safe while refs are packed: on a case-insensitive filesystem both spellings of a loose ref name one file, so create-then-delete deletes the checkpoint. It packs, creates every lowercase name in one transaction, packs again, confirms each lowercase name is its own ref at the expected commit, then deletes the uppercase names in a second transaction guarded by the commits they held. A split keeps the later version; a diverged split is left alone and reported.
+
+The rules below still apply, because refs written by older CLIs, by an older CLI on the same machine, or before the rename keep the other spelling until the next rename:
 
 - **Local lookup tries both spellings.** `StoredRef` is the one resolver: the store asks it with the canonical name (`resolveLocalRef`, `LocalRefExists`) and pre-push with the queued name. `ParseRef` accepts exactly those two spellings of a shard and no mix of them. Where git recorded `core.ignorecase=false`, a checkpoint cannot hold a ref under each spelling, so a name that resolves is used without reading the other; the other spelling is read only when the name asked for is absent. The setting is read once per repository.
 - **A checkpoint can hold a ref under each spelling.** Updating a packed ref writes the new commit under the spelling the directory has on disk, and the packed entry keeps the earlier commit under the other. The ref whose history contains the other is the one used (`SupersededBy`), for reads, writes, listing and pushes alike. When the two diverged, reads take the canonical name and pre-push sends them in turn, replaying the second onto the first.
-- **Writes go to the ref the lookup found.** A checkpoint with no ref yet is written under its canonical name.
-- **The remote only receives the canonical name.** Pre-push sends `<commit>:<canonical name>` whatever spelling is stored or queued, and an on-demand fetch asks for the canonical name only.
+- **Writes go to the ref the lookup found.** A checkpoint with no ref yet is written under its local name (above).
+- **The remote only receives the canonical name.** Pre-push sends `<commit>:<canonical name>` whatever spelling is stored or queued, and an on-demand fetch asks for the canonical name only. A remote on a case-insensitive disk (a bare repository on a Mac) still holds both spellings and can fold.
 - **The push queue can hold both spellings of one checkpoint.** Pre-push sends it once and removes both entries, and `entire checkpoint list --outgoing` lists it once.
-- **`entire doctor` reports both conditions**: refs stored under the other spelling, which need no action, and checkpoints with two refs, where it names the earlier ref as the one that can be removed.
+- **`entire doctor` reports both conditions.** Where `core.ignorecase=true` it lists refs outside their lowercase shard and renames them (`--force`, or after a prompt), and lists diverged splits to compare by hand. Elsewhere it reports refs stored under the other spelling, which need no action, and checkpoints with two refs, naming the earlier ref as the one that can be removed.
 
 > **Note:** this is the git-refs namespace only. The git-branch backend keeps its own independent **first-two-chars** tree layout (`<id[:2]>/<id[2:]>/`) inside the v1 branch. The two sharding schemes are deliberately different and do not interact.
 
@@ -315,7 +323,8 @@ Before copying, the write asks the remote whether the checkpoint already has a r
 |------|----------------|
 | `checkpoint/registry.go` | Backend registry, `gitBacked` capability, built-in `git-branch`/`git-refs` |
 | `checkpoint/open.go` | `Open` topology resolution, `PrimaryIsRefs`, `kindRoutingStore` wiring |
-| `checkpoint/refs_naming.go` | `RefName` / `ParseRef`, `CheckpointRefPrefix` |
+| `checkpoint/refs_naming.go` | `RefName` / `LocalRefName` / `ParseRef`, `CheckpointRefPrefix` |
+| `checkpoint/refs_shard_normalize.go` | `NormalizeShardSpelling` — renames refs to their lowercase shard on a case-insensitive filesystem |
 | `checkpoint/refs_store.go` | `gitRefsStore` — per-checkpoint write/read, on-demand fetch |
 | `checkpoint/pushqueue.go` | Flock JSONL push-discovery queue |
 | `checkpoint/routing_store.go` | `kindRoutingStore` — id-kind read, backfill and reserved-write routing across both backends; copies a `v1`-only hex checkpoint into its ref on write |
