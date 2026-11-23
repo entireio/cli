@@ -21,7 +21,9 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
+	"github.com/entireio/cli/cmd/entire/cli/agent/pi"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
@@ -984,7 +986,7 @@ func (s *treeWriter) readSummaryFromBlob(hash plumbing.Hash) (*CheckpointSummary
 	return readJSONFromBlob[CheckpointSummary](s.repo, hash)
 }
 
-// SanitizeTranscriptForAgentType strips non-portable agent state from a transcript
+// SanitizeTranscriptForAgentType strips what Entire must not keep from a transcript
 // about to be stored (see agent.TranscriptSanitizer). It exists for callers that work
 // from a types.AgentType rather than a live agent.Agent: the store itself, as a
 // last-resort safety net, and `entire import`, which reads raw third-party rollouts
@@ -1000,8 +1002,13 @@ func SanitizeTranscriptForAgentType(agentType types.AgentType, data []byte) []by
 	if len(data) == 0 {
 		return data
 	}
-	if agentType == agent.AgentTypeCodex {
+	switch agentType {
+	case agent.AgentTypeCodex:
 		return codex.SanitizePortableTranscript(data)
+	case agent.AgentTypeClaudeCode:
+		return claudecode.SanitizeStoredTranscript(data)
+	case agent.AgentTypePi:
+		return pi.SanitizeStoredTranscript(data)
 	}
 	return data
 }
@@ -1032,7 +1039,7 @@ func (s *treeWriter) writeTranscript(ctx context.Context, opts WriteOptions, ses
 			// Sanitize BEFORE redacting, matching the pipeline order everywhere else:
 			// redaction must not scan ciphertext that sanitization is about to
 			// discard. This is the one path that reaches the store with raw bytes.
-			redacted, redactErr := redact.JSONLBytes(SanitizeTranscriptForAgentType(opts.Agent, rawData))
+			redacted, redactErr := redact.JSONLBytes(DropImagesIfEnabled(ctx, SanitizeTranscriptForAgentType(opts.Agent, rawData)))
 			if redactErr != nil {
 				return false, nil, nil, fmt.Errorf("failed to redact transcript from file: %w", redactErr)
 			}

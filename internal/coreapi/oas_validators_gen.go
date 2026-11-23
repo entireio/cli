@@ -67,6 +67,38 @@ func (s *AccountIdentity) Validate() error {
 	return nil
 }
 
+func (s *AccountInvited) Validate() error {
+	if s == nil {
+		return validate.ErrNilPointer
+	}
+
+	var failures []validate.FieldError
+	if err := func() error {
+		if err := s.Status.Validate(); err != nil {
+			return err
+		}
+		return nil
+	}(); err != nil {
+		failures = append(failures, validate.FieldError{
+			Name:  "status",
+			Error: err,
+		})
+	}
+	if len(failures) > 0 {
+		return &validate.Error{Fields: failures}
+	}
+	return nil
+}
+
+func (s AccountInvitedStatus) Validate() error {
+	switch s {
+	case "invited":
+		return nil
+	default:
+		return errors.Errorf("invalid value: %v", s)
+	}
+}
+
 func (s *AccountProfile) Validate() error {
 	if s == nil {
 		return validate.ErrNilPointer
@@ -2265,6 +2297,24 @@ func (s *Invitation) Validate() error {
 			Error: err,
 		})
 	}
+	if err := func() error {
+		if value, ok := s.InviteeIdentity.Get(); ok {
+			if err := func() error {
+				if err := value.Validate(); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return err
+			}
+		}
+		return nil
+	}(); err != nil {
+		failures = append(failures, validate.FieldError{
+			Name:  "inviteeIdentity",
+			Error: err,
+		})
+	}
 	if len(failures) > 0 {
 		return &validate.Error{Fields: failures}
 	}
@@ -2953,6 +3003,25 @@ func (s *ListProjectCollaboratorsOutputBodyHeaders) Validate() error {
 	return nil
 }
 
+func (s ListProjectInvitationsStatus) Validate() error {
+	switch s {
+	case "open":
+		return nil
+	case "accepted":
+		return nil
+	case "revoked":
+		return nil
+	case "expired":
+		return nil
+	case "declined":
+		return nil
+	case "all":
+		return nil
+	default:
+		return errors.Errorf("invalid value: %v", s)
+	}
+}
+
 func (s *ListProjectMembersOutputBody) Validate() error {
 	if s == nil {
 		return validate.ErrNilPointer
@@ -3382,6 +3451,25 @@ func (s *ListRepoGrantsOutputBody) Validate() error {
 	return nil
 }
 
+func (s ListRepoInvitationsStatus) Validate() error {
+	switch s {
+	case "open":
+		return nil
+	case "accepted":
+		return nil
+	case "revoked":
+		return nil
+	case "expired":
+		return nil
+	case "declined":
+		return nil
+	case "all":
+		return nil
+	default:
+		return errors.Errorf("invalid value: %v", s)
+	}
+}
+
 func (s ListRepoPeopleOrder) Validate() error {
 	switch s {
 	case "asc":
@@ -3546,6 +3634,46 @@ func (s ListReposVisibility) Validate() error {
 	default:
 		return errors.Errorf("invalid value: %v", s)
 	}
+}
+
+func (s *ListResourceInvitationsOutputBody) Validate() error {
+	if s == nil {
+		return validate.ErrNilPointer
+	}
+
+	var failures []validate.FieldError
+	if err := func() error {
+		if s.Invitations == nil {
+			return errors.New("nil is invalid value")
+		}
+		var failures []validate.FieldError
+		for i, elem := range s.Invitations {
+			if err := func() error {
+				if err := elem.Validate(); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				failures = append(failures, validate.FieldError{
+					Name:  fmt.Sprintf("[%d]", i),
+					Error: err,
+				})
+			}
+		}
+		if len(failures) > 0 {
+			return &validate.Error{Fields: failures}
+		}
+		return nil
+	}(); err != nil {
+		failures = append(failures, validate.FieldError{
+			Name:  "invitations",
+			Error: err,
+		})
+	}
+	if len(failures) > 0 {
+		return &validate.Error{Fields: failures}
+	}
+	return nil
 }
 
 func (s *ListServiceAccountGrantsOutputBody) Validate() error {
@@ -4896,7 +5024,18 @@ func (s *ResolvePlacementsOutputBody) Validate() error {
 	return nil
 }
 
-func (s ResolveProjectHost) Validate() error {
+func (s ResolveProjectCapabilities) Validate() error {
+	switch s {
+	case "live":
+		return nil
+	case "display":
+		return nil
+	default:
+		return errors.Errorf("invalid value: %v", s)
+	}
+}
+
+func (s ResolveProjectForgePrefix) Validate() error {
 	switch s {
 	case "et":
 		return nil
@@ -5121,6 +5260,72 @@ func (s *ResolveReposResponse) Validate() error {
 	}(); err != nil {
 		failures = append(failures, validate.FieldError{
 			Name:  "resolutions",
+			Error: err,
+		})
+	}
+	if len(failures) > 0 {
+		return &validate.Error{Fields: failures}
+	}
+	return nil
+}
+
+func (s *ResourceInvitation) Validate() error {
+	if s == nil {
+		return validate.ErrNilPointer
+	}
+
+	var failures []validate.FieldError
+	if err := func() error {
+		if value, ok := s.AcceptedByIdentity.Get(); ok {
+			if err := func() error {
+				if err := value.Validate(); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return err
+			}
+		}
+		return nil
+	}(); err != nil {
+		failures = append(failures, validate.FieldError{
+			Name:  "acceptedByIdentity",
+			Error: err,
+		})
+	}
+	if err := func() error {
+		if value, ok := s.InvitedByIdentity.Get(); ok {
+			if err := func() error {
+				if err := value.Validate(); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return err
+			}
+		}
+		return nil
+	}(); err != nil {
+		failures = append(failures, validate.FieldError{
+			Name:  "invitedByIdentity",
+			Error: err,
+		})
+	}
+	if err := func() error {
+		if value, ok := s.InviteeIdentity.Get(); ok {
+			if err := func() error {
+				if err := value.Validate(); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return err
+			}
+		}
+		return nil
+	}(); err != nil {
+		failures = append(failures, validate.FieldError{
+			Name:  "inviteeIdentity",
 			Error: err,
 		})
 	}

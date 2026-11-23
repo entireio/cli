@@ -213,7 +213,7 @@ func runTrailShow(ctx context.Context, w, errW io.Writer, opts trailShowOptions)
 		if err != nil {
 			return err
 		}
-		basePath, err := trailRepoBasePath(forge, owner, repo, repoID)
+		basePath, err := trailRepoBasePath(repoID)
 		if err != nil {
 			return err
 		}
@@ -506,7 +506,7 @@ func runTrailListAllWithClient(ctx context.Context, w io.Writer, client *api.Cli
 	// many pages as needed for --limit. Author login is filtered client-side:
 	// the new backend's author query is account-ID based, while the CLI's public
 	// flag has always accepted GitHub logins.
-	basePath, err := trailRepoBasePath(forge, owner, repo, repoID)
+	basePath, err := trailRepoBasePath(repoID)
 	if err != nil {
 		return err
 	}
@@ -1274,27 +1274,6 @@ func findTrailAtPath(ctx context.Context, client *api.Client, basePath string, m
 	return nil, nil //nolint:nilnil // nil, nil means "not found" — callers check both
 }
 
-// trailsBasePath returns the API path prefix for trails endpoints
-// (e.g., "/api/v1/trails/gh/org/repo").
-func trailsBasePath(forge, owner, repo string) string {
-	return fmt.Sprintf("/api/v1/trails/%s/%s/%s", url.PathEscape(forge), url.PathEscape(owner), url.PathEscape(repo))
-}
-
-// trailRepoBasePath selects the repo-addressed route for Entire-native
-// repositories. The host-addressed API deliberately cannot resolve et repos by
-// name because the cell's full_name index has no forge discriminator; the
-// opaque repo ID is unambiguous. GitHub repos retain the legacy route.
-func trailRepoBasePath(forge, owner, repo, repoID string) (string, error) {
-	if forge != nativeCloneForge {
-		return trailsBasePath(forge, owner, repo), nil
-	}
-	repoID = strings.TrimSpace(repoID)
-	if repoID == "" {
-		return "", errors.New("cannot access trails for an Entire-native repo without its repo ID")
-	}
-	return "/api/v1/repos/" + url.PathEscape(repoID) + "/trails", nil
-}
-
 // trailNumberPathForBase returns the single-trail API path keyed by integer
 // trail number. The server validates an integer here and rejects the trail UUID,
 // so callers must pass Number, not ID.
@@ -1317,8 +1296,8 @@ func resolveTrailRemote(ctx context.Context) (forge, owner, repo string, err err
 	return forge, owner, repo, nil
 }
 
-// resolveTrailRepoOrRemote resolves the forge/owner/repo triple used to build
-// trail API paths. An explicit --repo override (repoOverride) wins; otherwise
+// resolveTrailRepoOrRemote resolves the forge/owner/repo triple used for cell
+// placement lookup and browser URLs. An explicit --repo override wins; otherwise
 // it derives the triple from the origin remote of the current clone.
 func resolveTrailRepoOrRemote(ctx context.Context, repoOverride string) (forge, owner, repo string, err error) {
 	if repoOverride != "" {

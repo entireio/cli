@@ -25,12 +25,33 @@ import (
 // and accumulates token usage. Nothing is written to git — the transcript and
 // files are read from disk again when a commit condenses the session.
 func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) error {
+	_, err := s.SaveTurnStep(ctx, step)
+	return err
+}
+
+// StepResult is what SaveTurnStep recorded of a turn-end step.
+type StepResult struct {
+	// FilesRecorded: the step's files were recorded, and the step counted
+	// (StepCount) unless it was SameTurn.
+	FilesRecorded bool
+	// TokensRecorded: the step's tokens were recorded, or are the token
+	// ledger's to record at the turn-end transition.
+	TokensRecorded bool
+}
+
+// SaveTurnStep is SaveStep, reporting what it recorded. A step in a worktree
+// that gets no record (recordUnhomedStepTokens) records only its tokens, and
+// one with no work records nothing, so a turn spanning worktrees counts its
+// step at the first worktree that records files and passes its tokens to the
+// first that takes them.
+func (s *ManualCommitStrategy) SaveTurnStep(ctx context.Context, step StepContext) (StepResult, error) {
+	var result StepResult
 	_, openRepoSpan := perf.Start(ctx, "open_repository")
 	repo, err := OpenRepository(ctx)
 	if err != nil {
 		openRepoSpan.RecordError(err)
 		openRepoSpan.End()
-		return fmt.Errorf("failed to open git repository: %w", err)
+		return result, fmt.Errorf("failed to open git repository: %w", err)
 	}
 	defer repo.Close()
 	openRepoSpan.End()
@@ -42,7 +63,7 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 	// missing state — initialization establishes the file the helper will
 	// then mutate under lock.
 	if err := s.ensureSessionInitialized(ctx, repo, sessionID, step.AgentType); err != nil {
-		return err
+		return result, err
 	}
 
 	// Hash the step's files before taking the session lock: it is a git
@@ -50,13 +71,13 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 	worktreeRoot := step.WorktreeRoot
 	if worktreeRoot == "" {
 		if worktreeRoot, err = paths.WorktreeRoot(ctx); err != nil {
-			return fmt.Errorf("failed to get worktree root: %w", err)
+			return result, fmt.Errorf("failed to get worktree root: %w", err)
 		}
 	} else {
 		// The base comes from that worktree's HEAD, not the hook's.
 		stepRepo, openErr := gitrepo.OpenPath(worktreeRoot)
 		if openErr != nil {
-			return fmt.Errorf("failed to open the step's worktree: %w", openErr)
+			return result, fmt.Errorf("failed to open the step's worktree: %w", openErr)
 		}
 		defer stepRepo.Close()
 		repo = stepRepo
@@ -76,6 +97,7 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 	recordedDeletions := withoutPaths(step.DeletedFiles, stagedOnlyDeletions(ctx, worktreeRoot, step.DeletedFiles))
 
 	mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+		result = StepResult{}
 		// A step in a worktree other than the session's home records into
 		// that worktree's entry (see enterWorktreeView), never the home's.
 		leave, inView := enterStepWorktree(ctx, state, worktreeRoot)
@@ -88,6 +110,7 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 				}
 			}
 		case !homedAt(state, worktreeRoot) && !homeMovedTo(ctx, state, worktreeRoot):
+			result.TokensRecorded = step.TokenUsage != nil
 			return recordUnhomedStepTokens(ctx, state, step, worktreeRoot)
 		}
 		invalidateStaleSubagentSnapshot(&step, state)
@@ -114,6 +137,7 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 		// LastCheckpointID is intentionally NOT cleared here. It is set during
 		// condensation and used by handleAmendCommitMsg to restore checkpoint
 		// trailers on amend operations.
+		result = StepResult{FilesRecorded: true, TokensRecorded: true}
 		if !step.SameTurn {
 			state.StepCount++
 		}
@@ -142,19 +166,22 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 		return nil
 	})
 	if errors.Is(mutErr, ErrStateNotFound) {
-		return nil
+		return StepResult{}, nil
 	}
-	return mutErr
+	if mutErr != nil {
+		return StepResult{}, mutErr
+	}
+	return result, nil
 }
 
 // recordUnhomedStepTokens handles a turn-end step in a worktree other than
 // the session's home that has no entry of its own there: the worktree could
-// not be marked, it shares the home's ID (an unregistered checkout sharing the
-// repository through commondir has the main worktree's empty ID), or another
-// checkout holds that ID's one entry. Recording its files as the home's would
-// claim another tree's files and move the home's base to that tree's HEAD, so
-// they are not recorded. The turn's tokens are the session's wherever it ran,
-// so they are kept as for a turn that changed no files.
+// not be marked, it shares the home's ID, or it is an unregistered checkout
+// sharing the repository through commondir (git never lists one, so only the
+// main worktree gets the empty ID's entry). Recording its files as the home's
+// would claim another tree's files and move the home's base to that tree's
+// HEAD, so they are not recorded. The turn's tokens are the session's wherever
+// it ran, so they are kept as for a turn that changed no files.
 func recordUnhomedStepTokens(ctx context.Context, state *SessionState, step StepContext, worktreeRoot string) error {
 	logging.Warn(logging.WithComponent(ctx, "checkpoint"), "turn-end step in another worktree has no record of its own; files not recorded",
 		slog.String("session_id", state.SessionID),

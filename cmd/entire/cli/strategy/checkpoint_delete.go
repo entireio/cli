@@ -132,6 +132,12 @@ type CheckpointDeletePlan struct {
 	// LocalRef is the local per-checkpoint ref ("" when absent).
 	LocalRef    plumbing.ReferenceName
 	LocalRefOID plumbing.Hash
+	// OtherLocalRef is the checkpoint's ref under the other spelling of its
+	// shard, when it has one there as well ("" otherwise). On a
+	// case-insensitive filesystem git can leave a checkpoint with a ref under
+	// each spelling, and reads fall back to whichever one is left.
+	OtherLocalRef    plumbing.ReferenceName
+	OtherLocalRefOID plumbing.Hash
 	// LocalV1 reports a copy on the local entire/checkpoints/v1 branch.
 	LocalV1 bool
 	// TrackingV1 lists remote names whose remote-tracking v1 ref holds it.
@@ -288,9 +294,15 @@ func PlanCheckpointDelete(ctx context.Context, cid id.CheckpointID, opts Checkpo
 		plan.PushSessionsDisabled = s.IsPushSessionsDisabled()
 	}
 
-	plan.LocalRef, plan.LocalRefOID, err = findLocalCheckpointRef(ctx, root, cid)
+	local, err := findLocalCheckpointRefs(ctx, root, cid)
 	if err != nil {
 		return nil, err
+	}
+	if len(local) > 0 {
+		plan.LocalRef, plan.LocalRefOID = local[0].Name(), local[0].Hash()
+	}
+	if len(local) > 1 {
+		plan.OtherLocalRef, plan.OtherLocalRefOID = local[1].Name(), local[1].Hash()
 	}
 	// Any ID kind: a git-branch mirror writes ULID checkpoints to v1 too.
 	plan.LocalV1 = commitHasCheckpoint(repo, refTip(repo, v1BranchRef), cid)
@@ -345,16 +357,18 @@ func notFoundError(plan *CheckpointDeletePlan, localOnly bool) error {
 	return fmt.Errorf("%w: %s is not in this repository or on any reachable checkpoint remote", ErrCheckpointDeleteNotFound, plan.CheckpointID)
 }
 
-// findLocalCheckpointRef lists refs/entire/checkpoints/*/<id> and matches with
-// ParseRef, so a ref stored under a differently-cased shard is still found.
-func findLocalCheckpointRef(ctx context.Context, root string, cid id.CheckpointID) (plumbing.ReferenceName, plumbing.Hash, error) {
+// findLocalCheckpointRefs lists refs/entire/checkpoints/*/<id> and returns
+// every ref ParseRef matches to cid: one per shard spelling, so a checkpoint
+// stored under a differently-cased shard, or under both, is found.
+func findLocalCheckpointRefs(ctx context.Context, root string, cid id.CheckpointID) ([]*plumbing.Reference, error) {
 	cmd := exec.CommandContext(ctx, "git", "for-each-ref", "--format=%(objectname) %(refname)",
 		checkpoint.CheckpointRefPrefix+"*/"+cid.String())
 	cmd.Dir = root
 	out, err := cmd.Output()
 	if err != nil {
-		return "", plumbing.ZeroHash, fmt.Errorf("list local checkpoint refs: %w", err)
+		return nil, fmt.Errorf("list local checkpoint refs: %w", err)
 	}
+	var refs []*plumbing.Reference
 	for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
 		oid, name, ok := strings.Cut(strings.TrimSpace(line), " ")
 		if !ok {
@@ -362,10 +376,10 @@ func findLocalCheckpointRef(ctx context.Context, root string, cid id.CheckpointI
 		}
 		ref := plumbing.ReferenceName(name)
 		if parsed, valid := checkpoint.ParseRef(ref); valid && parsed == cid {
-			return ref, plumbing.NewHash(oid), nil
+			refs = append(refs, plumbing.NewHashReference(ref, plumbing.NewHash(oid)))
 		}
 	}
-	return "", plumbing.ZeroHash, nil
+	return refs, nil
 }
 
 func refTip(repo *git.Repository, name plumbing.ReferenceName) plumbing.Hash {
