@@ -81,6 +81,11 @@ func TestControlPlaneJSONFlag_OnlyOnHonoringCommands(t *testing.T) {
 		"repo grant add":       true,
 		"repo grant list":      true,
 		"repo grant remove":    false,
+		// project and repo invite mirror org invite's list and revoke.
+		"project invite list":   true,
+		"project invite revoke": false,
+		"repo invite list":      true,
+		"repo invite revoke":    false,
 	}
 
 	got := map[string]bool{}
