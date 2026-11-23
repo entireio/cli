@@ -1,6 +1,7 @@
 package checkpoint
 
 import (
+	"path/filepath"
 	"runtime"
 	"testing"
 	"weak"
@@ -13,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
@@ -165,6 +167,67 @@ func TestFoldsCase_RereadsAChangedSetting(t *testing.T) {
 	testutil.RunGit(t, dir, "config", "core.ignorecase", "true")
 
 	assert.True(t, foldsCase(repo))
+}
+
+// With the worktreeConfig extension and a config.worktree file, go-git merges
+// the two configs into one without its raw sections. The setting must still be
+// read from the repository config rather than crash or be guessed.
+func TestFoldsCase_ReadsTheSettingWithAWorktreeConfig(t *testing.T) {
+	t.Parallel()
+	for _, ignoreCase := range []string{"true", "false"} {
+		t.Run(ignoreCase, func(t *testing.T) {
+			t.Parallel()
+			dir, _, _ := shardSpellingRepo(t, ignoreCase)
+			testutil.RunGit(t, dir, "config", "extensions.worktreeConfig", "true")
+			testutil.RunGit(t, dir, "config", "--worktree", "core.sparseCheckout", "true")
+			repo, err := git.PlainOpen(dir)
+			require.NoError(t, err)
+
+			assert.Equal(t, ignoreCase == "true", foldsCase(repo))
+		})
+	}
+}
+
+// A linked worktree with its own config.worktree, opened as commands open it,
+// reads the setting from the shared config of the main repository.
+func TestFoldsCase_ReadsTheSettingInALinkedWorktree(t *testing.T) {
+	t.Parallel()
+	for _, ignoreCase := range []string{"true", "false"} {
+		t.Run(ignoreCase, func(t *testing.T) {
+			t.Parallel()
+			dir, _, _ := shardSpellingRepo(t, ignoreCase)
+			testutil.RunGit(t, dir, "config", "extensions.worktreeConfig", "true")
+			linked := filepath.Join(t.TempDir(), "linked")
+			testutil.RunGit(t, dir, "worktree", "add", "-b", "linked", linked)
+			testutil.RunGit(t, linked, "config", "--worktree", "core.sparseCheckout", "true")
+			repo, err := gitrepo.OpenPath(linked)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = repo.Close() })
+
+			assert.Equal(t, ignoreCase == "true", foldsCase(repo))
+		})
+	}
+}
+
+// A storer without a filesystem can only read the merged config, which has no
+// raw sections in a worktreeConfig repository. The setting is then unknown, so
+// both spellings are read even though the repository does not fold case.
+func TestStoredRef_WorktreeConfigWithoutFilesystemReadsBothSpellings(t *testing.T) {
+	t.Parallel()
+	dir, earlier, _ := shardSpellingRepo(t, "false")
+	testutil.RunGit(t, dir, "config", "extensions.worktreeConfig", "true")
+	testutil.RunGit(t, dir, "config", "--worktree", "core.sparseCheckout", "true")
+	canonical := mustRefName(t, foldableULID)
+	testutil.RunGit(t, dir, "update-ref", canonical.String(), earlier)
+	repo, counting := openCountingRepo(t, dir)
+	counting.reads = 0 // opening the repository reads refs of its own
+
+	name, tip, err := StoredRef(repo, nil, canonical)
+	require.NoError(t, err)
+
+	assert.Equal(t, canonical, name)
+	assert.Equal(t, plumbing.NewHash(earlier), tip)
+	assert.Equal(t, 2, counting.reads, "an unknown setting reads both spellings")
 }
 
 // Looking up a checkpoint must not keep its repository in memory.

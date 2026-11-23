@@ -17,6 +17,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
@@ -300,12 +301,20 @@ func foldsCase(repo *git.Repository) bool {
 	return folds
 }
 
+// readFoldsCase reads core.ignorecase from the repository's shared config.
+// gitrepo.RawConfig parses the config file itself when go-git merged a
+// config.worktree in and dropped the raw sections; an override in
+// config.worktree or in global config is not seen.
 func readFoldsCase(repo *git.Repository) bool {
 	cfg, err := repo.Config()
 	if err != nil {
 		return true
 	}
-	switch strings.ToLower(cfg.Raw.Section("core").Option("ignorecase")) {
+	raw, err := gitrepo.RawConfig(repo, cfg)
+	if err != nil {
+		return true
+	}
+	switch strings.ToLower(raw.Section("core").Option("ignorecase")) {
 	case "true", "yes", "on", "1":
 		return true
 	default:
