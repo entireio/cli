@@ -461,6 +461,9 @@ func (a *openCodeAgent) RunPrompt(ctx context.Context, dir string, prompt string
 	cmd := exec.CommandContext(ctx, a.Binary(), args...)
 	cmd.Dir = dir
 	cmd.Env = openCodePromptEnv(os.Environ(), dir)
+	if cfg.Home != "" {
+		cmd.Env = append(cmd.Env, a.HomeEnv(cfg.Home)...)
+	}
 	setupProcessGroup(cmd)
 	cmd.WaitDelay = 5 * time.Second
 
@@ -487,6 +490,13 @@ func (a *openCodeAgent) RunPrompt(ctx context.Context, dir string, prompt string
 
 	return out, nil
 }
+
+// NewHome returns a directory for XDG_DATA_HOME, where OpenCode keeps its
+// sessions. Its auth.json starts empty, so the run authenticates only through
+// the API key SeedRepo writes into the repo's opencode.json.
+func (a *openCodeAgent) NewHome(string) (string, error) { return os.MkdirTemp("", "opencode-data-*") }
+
+func (a *openCodeAgent) HomeEnv(home string) []string { return []string{"XDG_DATA_HOME=" + home} }
 
 // openCodePromptEnv builds the child environment for a headless `opencode run`.
 // cmd.Dir chdirs the child but does NOT update the inherited PWD env var, which

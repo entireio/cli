@@ -24,8 +24,8 @@ type runConfig struct {
 	Model          string
 	PermissionMode string
 	PromptTimeout  time.Duration
-	// Home and ResumeSessionID are honored only by HomedAgent runners and
-	// OpenCode, the agents whose resume after `entire resume` is covered.
+	// Home and ResumeSessionID are honored only by HomedAgent runners, the
+	// agents whose resume after `entire resume` is covered.
 	Home            string
 	ResumeSessionID string
 }

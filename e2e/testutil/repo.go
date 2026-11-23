@@ -504,8 +504,15 @@ func (s *RepoState) logPromptResult(out agents.Output) {
 // Git runs a git command in the repo and logs it to ConsoleLog.
 func (s *RepoState) Git(t *testing.T, args ...string) {
 	t.Helper()
+	s.GitEnv(t, nil, args...)
+}
+
+// GitEnv is Git with env added to the command's environment, for a commit
+// whose hooks must find the agent's per-run home.
+func (s *RepoState) GitEnv(t *testing.T, env []string, args ...string) {
+	t.Helper()
 	s.ConsoleLog.WriteString("> git " + strings.Join(args, " ") + "\n")
-	Git(t, s.Dir, args...)
+	gitEnv(t, s.Dir, env, args...)
 }
 
 // StartSession starts an interactive session and registers it for pane
@@ -629,12 +636,17 @@ func EmptyDir(t *testing.T) string {
 // returns a non-zero exit code.
 func Git(t *testing.T, dir string, args ...string) {
 	t.Helper()
+	gitEnv(t, dir, nil, args...)
+}
+
+func gitEnv(t *testing.T, dir string, env []string, args ...string) {
+	t.Helper()
 
 	cmd := execx.NonInteractive(context.Background(), "git", args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	cmd.Env = os.Environ()
+	cmd.Env = append(os.Environ(), env...)
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {

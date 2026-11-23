@@ -42,14 +42,23 @@ type sampleImage struct {
 func TestResumeRestoredSessionWithDroppedImages(t *testing.T) {
 	agentNames := []string{"claude-code", "codex", "pi", "opencode"}
 	testutil.ForEachNamedAgent(t, 6*time.Minute, agentNames, func(t *testing.T, s *testutil.RepoState, ctx context.Context) {
-		var opts []agents.Option
-		var homeEnv []string
+		// The resumed session runs in a second, empty home, as on a machine
+		// that never had it, so it can only come from the checkpoint. An agent
+		// that still had the original session could resume that instead.
+		var opts, resumeOpts []agents.Option
+		var homeEnv, resumeEnv []string
 		if homed, ok := s.Agent.(agents.HomedAgent); ok {
-			home, err := homed.NewHome(s.Dir)
-			require.NoError(t, err)
-			t.Cleanup(func() { _ = os.RemoveAll(home) })
+			newHome := func() string {
+				home, err := homed.NewHome(s.Dir)
+				require.NoError(t, err)
+				t.Cleanup(func() { _ = os.RemoveAll(home) })
+				return home
+			}
+			home, resumeHome := newHome(), newHome()
 			opts = append(opts, agents.WithHome(home))
 			homeEnv = homed.HomeEnv(home)
+			resumeOpts = append(resumeOpts, agents.WithHome(resumeHome))
+			resumeEnv = homed.HomeEnv(resumeHome)
 		}
 
 		testutil.PatchSettings(t, s.Dir, map[string]any{
@@ -75,7 +84,7 @@ func TestResumeRestoredSessionWithDroppedImages(t *testing.T) {
 		testutil.AssertFileExists(t, s.Dir, "colors.md")
 
 		s.Git(t, "add", "colors.md")
-		s.Git(t, "commit", "-m", "Add colors")
+		s.GitEnv(t, homeEnv, "commit", "-m", "Add colors")
 		testutil.WaitForSessionIdle(t, s.Dir, 15*time.Second)
 		testutil.WaitForCheckpoint(t, s, 30*time.Second)
 
@@ -83,13 +92,13 @@ func TestResumeRestoredSessionWithDroppedImages(t *testing.T) {
 		assertImagesDropped(t, s, testutil.ReadCheckpointTranscript(t, s.Dir, checkpointID, 0), images)
 
 		s.Git(t, "checkout", mainBranch)
-		resumeOut, err := entire.ResumeWithEnv(s.Dir, "feature", homeEnv)
+		resumeOut, err := entire.ResumeWithEnv(s.Dir, "feature", resumeEnv)
 		require.NoError(t, err, "entire resume failed: %s", resumeOut)
 		sessionID := resumedSessionID(t, s.Agent.Name(), resumeOut)
 
 		out, err = s.RunPrompt(t, ctx,
 			"Reply with exactly the word RESUMED and nothing else. Do not use any tools.",
-			append(opts, agents.WithResume(sessionID))...)
+			append(resumeOpts, agents.WithResume(sessionID))...)
 		require.NoError(t, err, "resumed prompt failed\nstdout: %s\nstderr: %s", out.Stdout, out.Stderr)
 		require.Contains(t, out.Stdout, "RESUMED", "resumed session should answer\nstderr: %s", out.Stderr)
 	})
@@ -137,8 +146,9 @@ func writeSampleImages(t *testing.T, dir string) []sampleImage {
 	return images
 }
 
-// assertImagesDropped fails unless the stored transcript holds no sample image
-// and at least one placeholder, so a pass means placeholders were replayed.
+// assertImagesDropped fails unless every image in the stored transcript is a
+// placeholder and at least one is there, so a pass means placeholders were
+// replayed.
 // Agents may re-encode an image before storing it, so which placeholder types
 // appear is logged rather than required.
 func assertImagesDropped(t *testing.T, s *testutil.RepoState, transcript string, images []sampleImage) {
@@ -162,6 +172,12 @@ func assertImagesDropped(t *testing.T, s *testutil.RepoState, transcript string,
 			present = append(present, img.mediaType)
 		}
 		seen[ph] = true
+	}
+	// The search above misses an image the agent re-encoded or a serializer
+	// escaped. DropImages decodes the JSON and changes only an image that is
+	// not yet a placeholder, so a transcript it leaves alone holds none.
+	if string(imageextract.DropImages([]byte(transcript))) != transcript {
+		t.Fatalf("stored transcript holds an image that is not a placeholder; see stored-transcript.jsonl in the artifacts")
 	}
 	require.NotEmpty(t, present, "stored transcript holds no image placeholder; the agent never stored an image")
 	t.Logf("placeholders in stored transcript: %s", strings.Join(present, ", "))
