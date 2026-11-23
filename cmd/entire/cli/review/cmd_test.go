@@ -1099,8 +1099,8 @@ func TestComposeSinks_TUIWritersRunBeforePostRunWriters(t *testing.T) {
 	if !ok {
 		t.Fatalf("multi sink[2] = %T, want SynthesisSink", multi[2])
 	}
-	if multiSynth.RenderWriter != multiOut {
-		t.Fatalf("multi SynthesisSink RenderWriter = %T, want output writer", multiSynth.RenderWriter)
+	if multiSynth.Render == nil {
+		t.Fatal("multi SynthesisSink Render is nil; the TTY verdict must render from the dashboard's background answer, not by querying the terminal")
 	}
 
 	singleOut := &bytes.Buffer{}
