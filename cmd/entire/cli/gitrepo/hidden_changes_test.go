@@ -149,7 +149,8 @@ func TestHiddenWorktreeChanges_NoneHidden(t *testing.T) {
 // its own settings keep from git status, in nested submodules too. A
 // submodule that is not checked out, or that a sparse checkout left out, has
 // nothing to hide.
-// Not parallel: isolates the environment.
+//
+//nolint:tparallel // Parent isolates the environment with t.Setenv, which prevents t.Parallel(); each subtest builds its own repositories
 func TestHiddenWorktreeChanges_Submodules(t *testing.T) {
 	gitenv.IsolateRepository(t)
 	inner := t.TempDir()
@@ -222,6 +223,7 @@ func TestHiddenWorktreeChanges_Submodules(t *testing.T) {
 		}, nil},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			dir := t.TempDir()
 			testutil.InitRepo(t, dir)
 			testutil.RunGit(t, dir, "commit", "--allow-empty", "-m", "init")
