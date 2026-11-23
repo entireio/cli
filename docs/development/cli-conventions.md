@@ -239,8 +239,19 @@ always runnable in every build.
   row. The catalog carries no health, capacity or usage data — nothing
   server-side does — and hidden or decommissioned clusters never reach it.
 - `org`: control-plane organization management — `create`, `list`, `get`, `delete`,
-  plus `grant` (`add`/`list`/`remove`): org membership for a `provider:handle`
-  grantee, roles owner/admin/member (default member)
+  plus `grant` (`list`/`remove`): org membership for a `provider:handle`
+  grantee, roles owner/admin/member (default member). `invite`
+  (`send`/`list`/`revoke`) manages the org's invitations. `send` takes
+  `--email <address>` or `--account <provider:handle>`, exactly one: the
+  account form is the org add with the invitation allowed. On the customer API
+  no org add is direct (a non-member is invited, a member refused), so
+  `invite send --account` is the one documented way to add someone. `org grant
+  add` makes the same call and is a **hidden** spelling of it
+  (`grantTarget.addDocumentedAs`, cobra `Hidden`): it keeps its arguments,
+  output lines and exit codes for scripts, is absent from `org grant --help`,
+  completions and `agent-help`, and its own help and the `org grant` help name
+  `invite send`. The repo has no alias helper; a compatibility spelling is a
+  hidden command, as `trail delete` is
 - `project`: control-plane project management — `create`, `list`, `get`, `delete`,
   plus `agent` (`list`/`add`): the project's review agents, configured in
   entire-api rather than repository files (they replaced the trail runners).
@@ -262,7 +273,8 @@ always runnable in every build.
   for identity, isolation and recovery contracts. Also
   `grant` (`add`/`list`/`remove`): project access for a `provider:handle`
   grantee, roles reader/writer/admin; both `add` and `remove` take the grantee
-  optionally (see the grant-subtree notes below). `create <name> --owner <ref>`
+  optionally (see the grant-subtree notes below), and `invite` (`list`/`revoke`)
+  for the project's invitations. `create <name> --owner <ref>`
   creates without prompting even in a terminal, leaving an omitted `--region`
   to the server's jurisdiction. Without `--owner`, `--owner-type` or
   `--region` (bare, or with just the name as the name field's starting text),
@@ -319,9 +331,9 @@ always runnable in every build.
   like `project delete`.
 - `repo`: control-plane repository lifecycle — `create`, `list --project`,
   `view`, `edit`, `delete`, `clone`, `default-branch`, plus the `mirror`, `remote`,
-  `visibility`, `protection` and `grant` subtrees (`repo grant` mirrors
-  `project grant`, addressing the repo by its `/et/<project>/<repo>` path;
-  `grant list` alone also takes a `/gh/` mirror ref). Verb names follow the GitHub CLI where the job is the same (`view`,
+  `visibility`, `protection`, `grant` and `invite` subtrees (`repo grant` and
+  `repo invite` mirror their `project` counterparts, addressing the repo by its
+  `/et/<project>/<repo>` path; `grant list` alone also takes a `/gh/` mirror ref). Verb names follow the GitHub CLI where the job is the same (`view`,
   `edit --visibility`, `auth switch`), per the unified-repo-commands proto.
   Git content operations (log, diff, …) are intentionally out of scope.
   **A targeting `--cluster` names a cluster by its public host**
@@ -387,7 +399,10 @@ always runnable in every build.
   failed since) is not a failure: the row reads `still syncing`, the command
   names `entire repo view <repo>` to check on it, and it exits 0 like
   `--no-wait`'s `registered`. A deadline in any other state stays `timed out`
-  and fails. `add` defaults to one
+  and fails. A poll interrupted by the wait's own deadline preserves the last
+  answer; a credential failure clears it even if its independent timeout returns
+  after the wait's deadline.
+  `add` defaults to one
   fixed cluster without a terminal so scripts stay stable; `remove` has no
   default at all, because which clusters a repo is on is a property of the repo
   and guessing one would delete a copy nobody named — a terminal gets a
@@ -725,7 +740,40 @@ always runnable in every build.
   a direct holder has nothing to add and why changing a role is the typed form's
   job.
 
-  **`org grant add` has no picker** (`candidates` is nil, which also keeps it at
+  **An add can invite instead of grant** (ENT-2652). Core grants directly only
+  to an account already inside the parent scope (an active member of the
+  owning org, or a project grant for a repo); any other account, and on the
+  org add (`org invite send --account`, or the hidden `org grant add`) every
+  non-member, gets an invitation it must accept. All three adds send `allow_invitation: true`, so Core answers 202 with
+  `AccountInvited` rather than refusing with the `invitation/required` 409.
+  The text line then says `Invited … No access until they accept` with the
+  invitation id and expiry, and `--json` emits the 202 body (`status:
+  "invited"`, `invitation_id`, `expires_at`) where a grant emits its 201 body.
+  An invitation is a success for the exit code. Refusals (open invitation with
+  another role, SSO-only org, invitation mail cooldown, already a member) are
+  Core's problem `detail`. A typed grantee's refusal is the command's error. A
+  picker run **continues past a refusal**, because each is a condition of that
+  person: it prints `✗ <grantee> was not added to <scope>: <detail>` on stderr
+  and moves on. It stops only at a failure that would repeat for every grantee
+  (`grantFailureIsFatal`: 401, a 403 other than `sso-required`, an unfollowed
+  421, 5xx, and anything that is not a Core problem response, such as a
+  transport failure). It ends with a `N granted, N invited, N refused` tally
+  (`N failed, N not attempted` after a fatal failure) and exits 1 unless
+  everyone was granted or invited. `--json` prints the array of what landed;
+  refusals and the tally go to stderr. The role-mismatch refusal is followed by
+  a line naming `entire <noun> invite list <ref>` and `entire <noun> invite
+  revoke <ref> --id <id>`.
+
+  **`invite list` and `invite revoke`** are one builder over three scopes
+  (`invite_scope.go`), as the grant subtrees are. A listing's INVITEE is the
+  email address, or for an account-targeted invitation the account's primary
+  handle from `inviteeIdentity`, or its `inviteeAccountId` when Core resolved
+  no identity. `revoke` takes `--id` (what `invite list` and the `✓ Invited …
+  (<id>)` line print) or `--email`, exactly one; an email is matched only
+  against open email invitations.
+
+  **The org add has no picker** (it never had one, so hiding `org grant add`
+  removed no way to reach one) (`candidates` is nil, which also keeps it at
   two required args): everyone eligible is by definition absent from the only
   list there is. `org grant remove` does have one, because the members to remove
   ARE that list. There is no user search or global account listing in the API —

@@ -24,6 +24,11 @@ Control-plane commands dial one of three cores: the active context's
 `NewForCluster`). This precedence lives **only** inside `coreapi`; nothing else
 re-derives it.
 
+Bearer-provider failures carry `coreapi.CredentialError`, preserving the original
+message and error chain. Pollers must not interpret a credential timeout as proof
+that their HTTP request was interrupted by their own deadline: keyring lookup has
+an independent timeout and can finish after the caller's context has expired.
+
 **To display which core a request uses, ask the client: `client.CoreOrigin()`.**
 It returns whatever was actually wired in, so the shown core can never diverge
 from where the request goes. **Do NOT** re-resolve with

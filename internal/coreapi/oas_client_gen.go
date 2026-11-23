@@ -29,10 +29,24 @@ type Invoker interface {
 	AcceptInvitation(ctx context.Context, request *AcceptInvitationInputBody) (AcceptInvitationRes, error)
 	// AddOrgMember invokes addOrgMember operation.
 	//
-	// Add a member to an organization.
+	// The add is direct, and answers 201, when no invitation is needed. On /api/v1 no add to an
+	// organization is direct. Any other account is outside this organization and joins only by an
+	// invitation that it accepts. Set allow_invitation to create that invitation: the add then answers
+	// 202 with invitation_id and expires_at, and the account holds no access until it accepts. Without
+	// allow_invitation, that add answers 409 with type https://entire.com/errors/invitation/required and
+	// writes nothing. The add checks allow_invitation before the refusals that apply only to an
+	// invitation. A retry with allow_invitation therefore invites the account unless this organization
+	// refuses invitations; the sentences below name those refusals. 201 never carries an invitation. A
+	// repeat add reuses an open invitation for the same role and sends no second mail; another role
+	// answers 409 with type https://entire.com/errors/invitation/role-mismatch until the invitation is
+	// revoked. An organization that enforces single sign-on admits no account by invitation: an add that
+	// would invite into it answers 403 with type https://entire.com/errors/invitation/sso-required, and
+	// the account joins by signing in through that single sign-on. Invitation mail to one account is
+	// limited: 429 carries Retry-After. The invitation is created on the organization's home core:
+	// another core answers 421.
 	//
 	// POST /orgs/{orgId}/members
-	AddOrgMember(ctx context.Context, request *AddOrgMemberInputBody, params AddOrgMemberParams) (*Membership, error)
+	AddOrgMember(ctx context.Context, request *AddOrgMemberInputBody, params AddOrgMemberParams) (AddOrgMemberRes, error)
 	// BeginPluginInstallationDeletion invokes beginPluginInstallationDeletion operation.
 	//
 	// Requires org#manage on the installation's org. New provider access is denied before the response.
@@ -353,16 +367,48 @@ type Invoker interface {
 	GetVersion(ctx context.Context) (*GetVersionOutputBody, error)
 	// GrantProjectAccess invokes grantProjectAccess operation.
 	//
-	// Grant project access to an identity.
+	// The add is direct, and answers 201, when no invitation is needed. On /api/v1 the grant is direct
+	// for an active member of the owning organization, an account that already holds a grant on the
+	// project, and a service account. Any other account is outside this project and joins only by an
+	// invitation that it accepts. Set allow_invitation to create that invitation: the add then answers
+	// 202 with invitation_id and expires_at, and the account holds no access until it accepts. Without
+	// allow_invitation, that add answers 409 with type https://entire.com/errors/invitation/required and
+	// writes nothing. The add checks allow_invitation before the refusals that apply only to an
+	// invitation. A retry with allow_invitation therefore invites the account unless this project
+	// refuses invitations; the sentences below name those refusals. 201 never carries an invitation. A
+	// repeat add reuses an open invitation for the same role and sends no second mail; another role
+	// answers 409 with type https://entire.com/errors/invitation/role-mismatch until the invitation is
+	// revoked. An organization that enforces single sign-on admits no account by invitation: an add that
+	// would invite into it answers 403 with type https://entire.com/errors/invitation/sso-required, and
+	// the account joins by signing in through that single sign-on. Invitation mail to one account is
+	// limited: 429 carries Retry-After. The invitation is created on the project's home core: another
+	// core answers 421.
 	//
 	// POST /projects/{projectId}/grants
-	GrantProjectAccess(ctx context.Context, request *GrantAccessBody, params GrantProjectAccessParams) (*GrantProjectAccessOutputBody, error)
+	GrantProjectAccess(ctx context.Context, request *GrantAccessBody, params GrantProjectAccessParams) (GrantProjectAccessRes, error)
 	// GrantRepoAccess invokes grantRepoAccess operation.
 	//
-	// Grant repo access to an identity.
+	// The add is direct, and answers 201, when no invitation is needed. On /api/v1 the grant is direct
+	// for an account with a grant on the owning project, an active member of the owning organization, an
+	// account that already holds a grant on the repository, and a service account. Any other account is
+	// outside this repository and joins only by an invitation that it accepts. Set allow_invitation to
+	// create that invitation: the add then answers 202 with invitation_id and expires_at, and the
+	// account holds no access until it accepts. Without allow_invitation, that add answers 409 with type
+	// https://entire.com/errors/invitation/required and writes nothing. The add checks allow_invitation
+	// before the refusals that apply only to an invitation. A retry with allow_invitation therefore
+	// invites the account unless this repository refuses invitations; the sentences below name those
+	// refusals. 201 never carries an invitation. A repeat add reuses an open invitation for the same
+	// role and sends no second mail; another role answers 409 with type https://entire.
+	// com/errors/invitation/role-mismatch until the invitation is revoked. An organization that enforces
+	// single sign-on admits no account by invitation: an add that would invite into it answers 403 with
+	// type https://entire.com/errors/invitation/sso-required, and the account joins by signing in
+	// through that single sign-on. The add also answers 409, with no type, for a repository of an
+	// organization linked to GitHub or outside its project's region: such a repository admits no account
+	// by invitation. Invitation mail to one account is limited: 429 carries Retry-After. The invitation
+	// is created on the repository's home core: another core answers 421.
 	//
 	// POST /repos/{repoId}/grants
-	GrantRepoAccess(ctx context.Context, request *GrantAccessBody, params GrantRepoAccessParams) (*GrantRepoAccessOutputBody, error)
+	GrantRepoAccess(ctx context.Context, request *GrantAccessBody, params GrantRepoAccessParams) (GrantRepoAccessRes, error)
 	// GrantServiceAccountAccess invokes grantServiceAccountAccess operation.
 	//
 	// Grant service account access on a repo or project.
@@ -487,6 +533,12 @@ type Invoker interface {
 	//
 	// GET /projects/{projectId}/collaborators
 	ListProjectCollaborators(ctx context.Context, params ListProjectCollaboratorsParams) (*ListProjectCollaboratorsOutputBodyHeaders, error)
+	// ListProjectInvitations invokes listProjectInvitations operation.
+	//
+	// List a project's invitations.
+	//
+	// GET /projects/{projectId}/invitations
+	ListProjectInvitations(ctx context.Context, params ListProjectInvitationsParams) (*ListResourceInvitationsOutputBody, error)
 	// ListProjectMembers invokes listProjectMembers operation.
 	//
 	// List project members and their roles.
@@ -567,6 +619,12 @@ type Invoker interface {
 	//
 	// GET /repos/{repoId}/grants
 	ListRepoGrants(ctx context.Context, params ListRepoGrantsParams) (*ListRepoGrantsOutputBody, error)
+	// ListRepoInvitations invokes listRepoInvitations operation.
+	//
+	// List a repository's invitations.
+	//
+	// GET /repos/{repoId}/invitations
+	ListRepoInvitations(ctx context.Context, params ListRepoInvitationsParams) (*ListResourceInvitationsOutputBody, error)
 	// ListRepoLanguageFacets invokes listRepoLanguageFacets operation.
 	//
 	// List repository language facets.
@@ -725,6 +783,12 @@ type Invoker interface {
 	//
 	// DELETE /projects/{projectId}/grants/account/{provider}/{providerUserId}
 	RevokeProjectAccessByProvider(ctx context.Context, params RevokeProjectAccessByProviderParams) error
+	// RevokeProjectInvitation invokes revokeProjectInvitation operation.
+	//
+	// Revoke a project invitation.
+	//
+	// DELETE /projects/{projectId}/invitations/{id}
+	RevokeProjectInvitation(ctx context.Context, params RevokeProjectInvitationParams) error
 	// RevokeRepoAccess invokes revokeRepoAccess operation.
 	//
 	// Revoke repo access by grantee id.
@@ -737,6 +801,12 @@ type Invoker interface {
 	//
 	// DELETE /repos/{repoId}/grants/account/{provider}/{providerUserId}
 	RevokeRepoAccessByProvider(ctx context.Context, params RevokeRepoAccessByProviderParams) error
+	// RevokeRepoInvitation invokes revokeRepoInvitation operation.
+	//
+	// Revoke a repository invitation.
+	//
+	// DELETE /repos/{repoId}/invitations/{id}
+	RevokeRepoInvitation(ctx context.Context, params RevokeRepoInvitationParams) error
 	// RevokeServiceAccountAccess invokes revokeServiceAccountAccess operation.
 	//
 	// Revoke service account access.
@@ -917,15 +987,29 @@ func (c *Client) sendAcceptInvitation(ctx context.Context, request *AcceptInvita
 
 // AddOrgMember invokes addOrgMember operation.
 //
-// Add a member to an organization.
+// The add is direct, and answers 201, when no invitation is needed. On /api/v1 no add to an
+// organization is direct. Any other account is outside this organization and joins only by an
+// invitation that it accepts. Set allow_invitation to create that invitation: the add then answers
+// 202 with invitation_id and expires_at, and the account holds no access until it accepts. Without
+// allow_invitation, that add answers 409 with type https://entire.com/errors/invitation/required and
+// writes nothing. The add checks allow_invitation before the refusals that apply only to an
+// invitation. A retry with allow_invitation therefore invites the account unless this organization
+// refuses invitations; the sentences below name those refusals. 201 never carries an invitation. A
+// repeat add reuses an open invitation for the same role and sends no second mail; another role
+// answers 409 with type https://entire.com/errors/invitation/role-mismatch until the invitation is
+// revoked. An organization that enforces single sign-on admits no account by invitation: an add that
+// would invite into it answers 403 with type https://entire.com/errors/invitation/sso-required, and
+// the account joins by signing in through that single sign-on. Invitation mail to one account is
+// limited: 429 carries Retry-After. The invitation is created on the organization's home core:
+// another core answers 421.
 //
 // POST /orgs/{orgId}/members
-func (c *Client) AddOrgMember(ctx context.Context, request *AddOrgMemberInputBody, params AddOrgMemberParams) (*Membership, error) {
+func (c *Client) AddOrgMember(ctx context.Context, request *AddOrgMemberInputBody, params AddOrgMemberParams) (AddOrgMemberRes, error) {
 	res, err := c.sendAddOrgMember(ctx, request, params)
 	return res, err
 }
 
-func (c *Client) sendAddOrgMember(ctx context.Context, request *AddOrgMemberInputBody, params AddOrgMemberParams) (res *Membership, err error) {
+func (c *Client) sendAddOrgMember(ctx context.Context, request *AddOrgMemberInputBody, params AddOrgMemberParams) (res AddOrgMemberRes, err error) {
 
 	u := uri.Clone(c.requestURL(ctx))
 	var pathParts [3]string
@@ -5879,15 +5963,30 @@ func (c *Client) sendGetVersion(ctx context.Context) (res *GetVersionOutputBody,
 
 // GrantProjectAccess invokes grantProjectAccess operation.
 //
-// Grant project access to an identity.
+// The add is direct, and answers 201, when no invitation is needed. On /api/v1 the grant is direct
+// for an active member of the owning organization, an account that already holds a grant on the
+// project, and a service account. Any other account is outside this project and joins only by an
+// invitation that it accepts. Set allow_invitation to create that invitation: the add then answers
+// 202 with invitation_id and expires_at, and the account holds no access until it accepts. Without
+// allow_invitation, that add answers 409 with type https://entire.com/errors/invitation/required and
+// writes nothing. The add checks allow_invitation before the refusals that apply only to an
+// invitation. A retry with allow_invitation therefore invites the account unless this project
+// refuses invitations; the sentences below name those refusals. 201 never carries an invitation. A
+// repeat add reuses an open invitation for the same role and sends no second mail; another role
+// answers 409 with type https://entire.com/errors/invitation/role-mismatch until the invitation is
+// revoked. An organization that enforces single sign-on admits no account by invitation: an add that
+// would invite into it answers 403 with type https://entire.com/errors/invitation/sso-required, and
+// the account joins by signing in through that single sign-on. Invitation mail to one account is
+// limited: 429 carries Retry-After. The invitation is created on the project's home core: another
+// core answers 421.
 //
 // POST /projects/{projectId}/grants
-func (c *Client) GrantProjectAccess(ctx context.Context, request *GrantAccessBody, params GrantProjectAccessParams) (*GrantProjectAccessOutputBody, error) {
+func (c *Client) GrantProjectAccess(ctx context.Context, request *GrantAccessBody, params GrantProjectAccessParams) (GrantProjectAccessRes, error) {
 	res, err := c.sendGrantProjectAccess(ctx, request, params)
 	return res, err
 }
 
-func (c *Client) sendGrantProjectAccess(ctx context.Context, request *GrantAccessBody, params GrantProjectAccessParams) (res *GrantProjectAccessOutputBody, err error) {
+func (c *Client) sendGrantProjectAccess(ctx context.Context, request *GrantAccessBody, params GrantProjectAccessParams) (res GrantProjectAccessRes, err error) {
 
 	u := uri.Clone(c.requestURL(ctx))
 	var pathParts [3]string
@@ -5983,15 +6082,32 @@ func (c *Client) sendGrantProjectAccess(ctx context.Context, request *GrantAcces
 
 // GrantRepoAccess invokes grantRepoAccess operation.
 //
-// Grant repo access to an identity.
+// The add is direct, and answers 201, when no invitation is needed. On /api/v1 the grant is direct
+// for an account with a grant on the owning project, an active member of the owning organization, an
+// account that already holds a grant on the repository, and a service account. Any other account is
+// outside this repository and joins only by an invitation that it accepts. Set allow_invitation to
+// create that invitation: the add then answers 202 with invitation_id and expires_at, and the
+// account holds no access until it accepts. Without allow_invitation, that add answers 409 with type
+// https://entire.com/errors/invitation/required and writes nothing. The add checks allow_invitation
+// before the refusals that apply only to an invitation. A retry with allow_invitation therefore
+// invites the account unless this repository refuses invitations; the sentences below name those
+// refusals. 201 never carries an invitation. A repeat add reuses an open invitation for the same
+// role and sends no second mail; another role answers 409 with type https://entire.
+// com/errors/invitation/role-mismatch until the invitation is revoked. An organization that enforces
+// single sign-on admits no account by invitation: an add that would invite into it answers 403 with
+// type https://entire.com/errors/invitation/sso-required, and the account joins by signing in
+// through that single sign-on. The add also answers 409, with no type, for a repository of an
+// organization linked to GitHub or outside its project's region: such a repository admits no account
+// by invitation. Invitation mail to one account is limited: 429 carries Retry-After. The invitation
+// is created on the repository's home core: another core answers 421.
 //
 // POST /repos/{repoId}/grants
-func (c *Client) GrantRepoAccess(ctx context.Context, request *GrantAccessBody, params GrantRepoAccessParams) (*GrantRepoAccessOutputBody, error) {
+func (c *Client) GrantRepoAccess(ctx context.Context, request *GrantAccessBody, params GrantRepoAccessParams) (GrantRepoAccessRes, error) {
 	res, err := c.sendGrantRepoAccess(ctx, request, params)
 	return res, err
 }
 
-func (c *Client) sendGrantRepoAccess(ctx context.Context, request *GrantAccessBody, params GrantRepoAccessParams) (res *GrantRepoAccessOutputBody, err error) {
+func (c *Client) sendGrantRepoAccess(ctx context.Context, request *GrantAccessBody, params GrantRepoAccessParams) (res GrantRepoAccessRes, err error) {
 
 	u := uri.Clone(c.requestURL(ctx))
 	var pathParts [3]string
@@ -8502,6 +8618,161 @@ func (c *Client) sendListProjectCollaborators(ctx context.Context, params ListPr
 	return result, nil
 }
 
+// ListProjectInvitations invokes listProjectInvitations operation.
+//
+// List a project's invitations.
+//
+// GET /projects/{projectId}/invitations
+func (c *Client) ListProjectInvitations(ctx context.Context, params ListProjectInvitationsParams) (*ListResourceInvitationsOutputBody, error) {
+	res, err := c.sendListProjectInvitations(ctx, params)
+	return res, err
+}
+
+func (c *Client) sendListProjectInvitations(ctx context.Context, params ListProjectInvitationsParams) (res *ListResourceInvitationsOutputBody, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [3]string
+	pathParts[0] = "/projects/"
+	{
+		// Encode "projectId" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "projectId",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.ProjectId))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/invitations"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	q := uri.NewQueryEncoder()
+	{
+		// Encode "pageSize" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "pageSize",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.PageSize.Get(); ok {
+				return e.EncodeValue(conv.Int32ToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "pageToken" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "pageToken",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.PageToken.Get(); ok {
+				return e.EncodeValue(conv.StringToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "status" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "status",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.Status.Get(); ok {
+				return e.EncodeValue(conv.StringToString(string(val)))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	u.RawQuery = q.Values().Encode()
+
+	r, err := ht.NewRequest(ctx, "GET", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, ListProjectInvitationsOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, ListProjectInvitationsOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeListProjectInvitationsResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
 // ListProjectMembers invokes listProjectMembers operation.
 //
 // List project members and their roles.
@@ -10138,6 +10409,161 @@ func (c *Client) sendListRepoGrants(ctx context.Context, params ListRepoGrantsPa
 	defer body.Close()
 
 	result, err := decodeListRepoGrantsResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// ListRepoInvitations invokes listRepoInvitations operation.
+//
+// List a repository's invitations.
+//
+// GET /repos/{repoId}/invitations
+func (c *Client) ListRepoInvitations(ctx context.Context, params ListRepoInvitationsParams) (*ListResourceInvitationsOutputBody, error) {
+	res, err := c.sendListRepoInvitations(ctx, params)
+	return res, err
+}
+
+func (c *Client) sendListRepoInvitations(ctx context.Context, params ListRepoInvitationsParams) (res *ListResourceInvitationsOutputBody, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [3]string
+	pathParts[0] = "/repos/"
+	{
+		// Encode "repoId" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "repoId",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.RepoId))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/invitations"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	q := uri.NewQueryEncoder()
+	{
+		// Encode "pageSize" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "pageSize",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.PageSize.Get(); ok {
+				return e.EncodeValue(conv.Int32ToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "pageToken" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "pageToken",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.PageToken.Get(); ok {
+				return e.EncodeValue(conv.StringToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "status" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "status",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.Status.Get(); ok {
+				return e.EncodeValue(conv.StringToString(string(val)))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	u.RawQuery = q.Values().Encode()
+
+	r, err := ht.NewRequest(ctx, "GET", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, ListRepoInvitationsOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, ListRepoInvitationsOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeListRepoInvitationsResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}
@@ -13356,6 +13782,125 @@ func (c *Client) sendRevokeProjectAccessByProvider(ctx context.Context, params R
 	return result, nil
 }
 
+// RevokeProjectInvitation invokes revokeProjectInvitation operation.
+//
+// Revoke a project invitation.
+//
+// DELETE /projects/{projectId}/invitations/{id}
+func (c *Client) RevokeProjectInvitation(ctx context.Context, params RevokeProjectInvitationParams) error {
+	_, err := c.sendRevokeProjectInvitation(ctx, params)
+	return err
+}
+
+func (c *Client) sendRevokeProjectInvitation(ctx context.Context, params RevokeProjectInvitationParams) (res *RevokeProjectInvitationNoContent, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [4]string
+	pathParts[0] = "/projects/"
+	{
+		// Encode "projectId" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "projectId",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.ProjectId))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/invitations/"
+	{
+		// Encode "id" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "id",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.ID))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[3] = encoded
+	}
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "DELETE", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, RevokeProjectInvitationOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, RevokeProjectInvitationOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeRevokeProjectInvitationResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
 // RevokeRepoAccess invokes revokeRepoAccess operation.
 //
 // Revoke repo access by grantee id.
@@ -13625,6 +14170,125 @@ func (c *Client) sendRevokeRepoAccessByProvider(ctx context.Context, params Revo
 	defer body.Close()
 
 	result, err := decodeRevokeRepoAccessByProviderResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// RevokeRepoInvitation invokes revokeRepoInvitation operation.
+//
+// Revoke a repository invitation.
+//
+// DELETE /repos/{repoId}/invitations/{id}
+func (c *Client) RevokeRepoInvitation(ctx context.Context, params RevokeRepoInvitationParams) error {
+	_, err := c.sendRevokeRepoInvitation(ctx, params)
+	return err
+}
+
+func (c *Client) sendRevokeRepoInvitation(ctx context.Context, params RevokeRepoInvitationParams) (res *RevokeRepoInvitationNoContent, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [4]string
+	pathParts[0] = "/repos/"
+	{
+		// Encode "repoId" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "repoId",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.RepoId))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/invitations/"
+	{
+		// Encode "id" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "id",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.ID))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[3] = encoded
+	}
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "DELETE", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, RevokeRepoInvitationOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, RevokeRepoInvitationOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeRevokeRepoInvitationResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}

@@ -151,20 +151,51 @@ func TestAwaitMirrorReady(t *testing.T) {
 
 	// A poll that failed after the last "processing" means the CLI no longer
 	// knows the clone's state, so it must not vouch that it is still running.
-	t.Run("deadline after a failed poll is a timeout even if processing was seen", func(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"transport error", errors.New("transient: connection reset")},
+		{"credential deadline", fmt.Errorf("load token: keyring timed out: %w", context.DeadlineExceeded)},
+		{"independent cancellation", fmt.Errorf("load token: %w", context.Canceled)},
+	} {
+		t.Run("deadline after a failed poll/"+tc.name, func(t *testing.T) {
+			// Not parallel: the parent changes mirrorPollInterval.
+			f := mirrorGetterFunc(func(ctx context.Context, n int) (*coreapi.Mirror, error) {
+				switch n {
+				case 0:
+					return &coreapi.Mirror{Status: coreapi.NewOptMirrorStatus(coreapi.MirrorStatusProcessing)}, nil
+				case 1:
+					require.NoError(t, ctx.Err(), "the poll failure precedes the wait deadline")
+					return nil, tc.err
+				}
+				<-ctx.Done()
+				return nil, ctx.Err()
+			})
+			_, err := awaitMirrorReady(ctx, f, "m", pollPhaseTimeout)
+			require.ErrorIs(t, err, context.DeadlineExceeded)
+			require.NotErrorIs(t, err, errMirrorStillCloning)
+			require.GreaterOrEqual(t, f.calls, 2, "must observe the independent poll failure")
+		})
+	}
+
+	t.Run("credential timeout after the wait deadline is still a failure", func(t *testing.T) {
+		// Not parallel: the parent changes mirrorPollInterval.
 		f := mirrorGetterFunc(func(ctx context.Context, n int) (*coreapi.Mirror, error) {
-			switch n {
-			case 0:
+			if n == 0 {
 				return &coreapi.Mirror{Status: coreapi.NewOptMirrorStatus(coreapi.MirrorStatusProcessing)}, nil
-			case 1:
-				return nil, errors.New("transient: connection reset")
 			}
+			// Keyring reads do not receive the request context. Their own
+			// timeout can return after the mirror wait has already expired.
 			<-ctx.Done()
-			return nil, ctx.Err()
+			return nil, fmt.Errorf("security BearerAuth: %w", &coreapi.CredentialError{
+				Err: fmt.Errorf("keyring timed out: %w", context.DeadlineExceeded),
+			})
 		})
 		_, err := awaitMirrorReady(ctx, f, "m", pollPhaseTimeout)
 		require.ErrorIs(t, err, context.DeadlineExceeded)
 		require.NotErrorIs(t, err, errMirrorStillCloning)
+		require.Equal(t, 2, f.calls)
 	})
 
 	// "processing" is only as good as the answer that said it: a later answer
