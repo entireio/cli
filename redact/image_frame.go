@@ -30,8 +30,9 @@ var (
 // their decoders, a JPEG's by its markers (see isJPEGHeader). A magic number alone let
 // any bytes after it pass as an image, such as a token after
 // data:image/png;base64,iVBORw0KGgo, and so would bytes appended after a real
-// image. Bytes placed inside an image's own segments or chunks still pass:
-// they have to be put there on purpose, and nothing here reads image content.
+// image's end. Bytes between the header and the end still pass, inside the
+// image's own segments or chunks or loose before a copied end marker: they
+// have to be put there on purpose, and nothing here reads image content.
 //
 // The checks read the header and the last bytes only, so a large image costs
 // no more than its base64 decode.
