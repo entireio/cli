@@ -2575,12 +2575,13 @@ func skipLeaf(skipStrings bool, key string, credentialContext bool, val string) 
 }
 
 // customRuleReadsValue reports whether a configured custom rule matches any
-// part of val in the "key":"val" text the key-context rule scans. A rule
-// written for one field, such as "auth_blob":"[^"]+", then still redacts an
-// image under it, as it did before images were skipped. It runs only the
-// custom rules, and only when some are configured, so by default an image is
-// preserved without any scan of its bytes, and it stops at a rule's first
-// match in the value.
+// part of val, either in val alone, as the redactor scans it, or in the
+// "key":"val" text the key-context rule scans. An anchored rule such as
+// ^data:image/.*$ and a rule written for one field, such as
+// "auth_blob":"[^"]+", then still redact an image, as they did before images
+// were skipped. It runs only the custom rules, and only when some are
+// configured, so by default an image is preserved without any scan of its
+// bytes, and it stops at a rule's first match in the value.
 func customRuleReadsValue(key, val string) bool {
 	cfg := getCustomRulesConfig()
 	if cfg == nil || len(cfg.rules) == 0 {
@@ -2590,6 +2591,9 @@ func customRuleReadsValue(key, val string) bool {
 	text := prefix + val + `"`
 	start, end := len(prefix), len(prefix)+len(val)
 	for _, rule := range cfg.rules {
+		if rule.regex.MatchString(val) {
+			return true
+		}
 		// A rule's matches come in order and never overlap, so the first one
 		// that ends past the prefix decides. At most start+1 of them fit in
 		// the prefix, so a rule that matches every byte of an image still

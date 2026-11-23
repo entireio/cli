@@ -323,6 +323,8 @@ func TestCustomRuleReadsValue(t *testing.T) {
 	assert.True(t, customRuleReadsValue("image_url", uri))
 	ConfigureCustomRules(CustomRulesConfig{Inline: map[string]string{"key": `image_url`}})
 	assert.False(t, customRuleReadsValue("image_url", uri))
+	ConfigureCustomRules(CustomRulesConfig{Inline: map[string]string{"anchored": `^data:image/`}})
+	assert.True(t, customRuleReadsValue("image_url", uri))
 }
 
 // A custom rule written for one field still redacts an image under it.
@@ -333,6 +335,18 @@ func TestJSONLContent_CustomRuleOverridesImageDataURI(t *testing.T) {
 	got, err := JSONLContent(`{"auth_blob":"` + uri + `","image_url":"` + uri + `"}`)
 	require.NoError(t, err)
 	assert.Equal(t, `{"auth_blob":"REDACTED","image_url":"`+uri+`"}`, got)
+}
+
+// A rule anchored to the value matches it alone, not in the "key":"val" text,
+// and the redactor scans the value alone, so the image is not skipped.
+func TestJSONLContent_AnchoredCustomRuleOverridesImageDataURI(t *testing.T) {
+	resetCustomRulesForTest(t)
+	ConfigureCustomRules(CustomRulesConfig{Inline: map[string]string{"images": `^data:image/jpeg;base64,.+$`}})
+	uri := "data:image/jpeg;base64," + fakeImageBase64(jpegMagic)
+	png := "data:image/png;base64," + fakeImageBase64(pngMagic)
+	got, err := JSONLContent(`{"image_url":"` + uri + `","screenshot":"` + png + `"}`)
+	require.NoError(t, err)
+	assert.Equal(t, `{"image_url":"REDACTED","screenshot":"`+png+`"}`, got)
 }
 
 // A token after an image signature is no image, so it is scanned under any
