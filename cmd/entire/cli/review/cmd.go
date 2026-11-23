@@ -82,6 +82,12 @@ type Deps struct {
 	// nil when --trail is unavailable (e.g. tests).
 	ResolveTrail func(cmd *cobra.Command, selector string) (TrailPoster, error)
 
+	// TrailFindings splits a saved run's report into the findings a trail
+	// post of it would send, for `--findings <handle> --json`. Injected from
+	// the cli package, where posting splits a prose report into findings.
+	// nil when unavailable (e.g. tests).
+	TrailFindings func(report TrailReport) []Finding
+
 	// ResolveTarget resolves a branch, trail ID, or trail URL to a local branch
 	// and pins its head without checking anything out.
 	ResolveTarget func(ctx context.Context, out, errOut io.Writer, selector string) (ResolvedTarget, error)
@@ -186,7 +192,9 @@ Flags:
                  the reviewed checkout's hooks, MCP servers and extensions; the
                  checkout's skills still load. Saved to clone-local preferences.
   --edit         re-open the advanced profile skill picker
-  --findings     browse local findings; pass a handle to print one saved run
+  --findings     browse local findings; pass a handle to print one saved run.
+                 With --json, print that run's findings as JSON, as a trail
+                 post of the run would send them
   --agent NAME   run only one reviewer from the selected profile
   --list         list configured review profiles (their reviewers and judge)
   --agents       list the reviewer agents you can pass to --agent for the profile
@@ -367,7 +375,7 @@ func NewCommand(deps Deps) *cobra.Command {
 				return RunReviewProfileConfigPicker(ctx, cmd.OutOrStdout(), deps.GetAgentsWithHooksInstalled, profileName)
 			}
 			if findings {
-				return runReviewFindings(ctx, cmd, positionalArg, deps.NewSilentError)
+				return runReviewFindings(ctx, cmd, reviewFindingsRequest{Handle: positionalArg, JSON: showConfigJSON}, deps)
 			}
 			// The flag flows through unmapped: RunConfig.ReviewerTimeout is
 			// two-state (positive = hard cap, anything else = no cap), so the
@@ -390,7 +398,7 @@ func NewCommand(deps Deps) *cobra.Command {
 	cmd.Flags().StringArrayVar(&setSlots, "set-slot", nil, "with --configure: a reviewer slot as agent[=model] (repeatable; same agent/model may repeat)")
 	cmd.Flags().StringArrayVar(&setConfigs, "set-config", nil, "with --configure: a reviewer's own agent config as reviewer=<config.json|isolated|none> (repeatable; saved to clone-local preferences)")
 	cmd.Flags().BoolVar(&edit, "edit", false, "re-open the advanced review profile skill picker")
-	cmd.Flags().BoolVar(&findings, "findings", false, "browse local review findings; pass a handle to print one saved run")
+	cmd.Flags().BoolVar(&findings, "findings", false, "browse local review findings; pass a handle to print one saved run (with --json, its findings as JSON)")
 	cmd.Flags().BoolVar(&listAgents, "agents", false, "list the reviewer agents you can pass to --agent for the selected profile")
 	cmd.Flags().BoolVar(&listModels, "models", false, "list the models each review agent advertises (optionally filtered by --agent)")
 	cmd.Flags().BoolVar(&listProfiles, "list", false, "list configured review profiles (reviewers and judge)")
@@ -2029,12 +2037,12 @@ func maybePostReviewToTrail(
 		return trailNotPosted(deps, errReviewCancelled)
 	}
 	notices := deps.trailNotices(out)
-	report, post := trailReportFor(summary, aggregateOutput)
-	if !post && deps.trail != nil && strings.TrimSpace(aggregateOutput) == "" && len(usableAgentRuns(summary)) == 0 {
+	report, outcome := readTrailReport(summary, aggregateOutput)
+	if outcome == reportNoOutput && deps.trail != nil {
 		fmt.Fprintln(notices, "The review produced no output, so nothing was posted to the trail.")
 		return trailNotPosted(deps, errors.New("the review produced no output"))
 	}
-	if !post {
+	if outcome == reportNoOutput || outcome == reportNothingToReport {
 		// A clean --trail run succeeds, which says the reviewed commit is
 		// clean only if the reviewers read nothing else.
 		if err := deps.recheckTrail(ctx, headSHA); err != nil {
@@ -2045,7 +2053,7 @@ func maybePostReviewToTrail(
 		deps.settleTrail()
 		return nil
 	}
-	if len(report.Comments) == 0 && strings.TrimSpace(report.Prose) == "" {
+	if outcome == reportUnreadable {
 		fmt.Fprintln(notices, "The review produced no readable report, so nothing was posted to the trail.")
 		return trailNotPosted(deps, errors.New("the review produced no readable report"))
 	}
@@ -2172,14 +2180,13 @@ func writePostReviewManifest(
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
 
-	manifest, states, err := localReviewManifestFromCurrentState(ctx, worktreeRoot, headSHA, summary, aggregateOutput)
+	manifest, states, err := localReviewManifestFromCurrentState(ctx, worktreeRoot, headSHA, summary, aggregateOutput, trailFindingsJSON)
 	if err != nil {
 		logging.Debug(ctx, "review manifest not written", slog.String("error", err.Error()))
 		warnManifestNotWritten(out, "could not load session state: "+err.Error())
 		return
 	}
 	manifest.WorktreePath = reviewManifestWorktreePath(worktreeRoot)
-	manifest.TrailFindingsJSON = trailFindingsJSON
 	if len(manifest.Sources) == 0 {
 		reason, sentinel := explainEmptyManifest(worktreeRoot, headSHA, summary, states)
 		if sentinel {

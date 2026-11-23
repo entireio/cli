@@ -3,6 +3,7 @@ package review
 import (
 	"context"
 	"io"
+	"strings"
 	"time"
 
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
@@ -13,6 +14,30 @@ import (
 // Only compiled during `go test`.
 func ExposedComposeSynthesisPrompt(summary reviewtypes.RunSummary, perRunPrompt string) string {
 	return composeSynthesisPrompt(summary, synthesisPromptOptions{perRunPrompt: perRunPrompt})
+}
+
+// ExposedSaveReviewRun saves summary as a finished run's manifest, one
+// source per agent run (session "<name>-session"), so package-external
+// tests can read it back through `entire review --findings`.
+// askedForTrailJSON is whether the run asked for the trail JSON line, as a
+// trail-mode run does.
+func ExposedSaveReviewRun(ctx context.Context, createdAt time.Time, headSHA string, summary reviewtypes.RunSummary, aggregateOutput string, askedForTrailJSON bool) error {
+	manifest := LocalReviewManifest{
+		CreatedAt:         createdAt,
+		StartingSHA:       headSHA,
+		TrailFindingsJSON: askedForTrailJSON,
+		AggregateOutput:   strings.TrimSpace(aggregateOutput),
+		Report:            manifestReportFor(summary, aggregateOutput, askedForTrailJSON),
+	}
+	for _, run := range summary.AgentRuns {
+		manifest.Sources = append(manifest.Sources, ManifestSource{
+			SessionID: run.Name + "-session",
+			Agent:     run.Name,
+			Label:     run.Name,
+			Output:    agentRunOutput(run),
+		})
+	}
+	return writeLocalReviewManifest(ctx, manifest)
 }
 
 // SinkComposeInputs is the test-facing alias for multiAgentSinkInputs.

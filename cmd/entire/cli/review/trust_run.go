@@ -21,11 +21,30 @@ import (
 func registerTrustFlags(cmd *cobra.Command, trustTarget *string, showConfig, showConfigJSON *bool) {
 	cmd.Flags().StringVar(trustTarget, "trust-target", "", "approve reviewing code by someone else at this commit SHA (the review loads the checkout's hooks, MCP servers, and settings)")
 	cmd.Flags().BoolVar(showConfig, "show-config", false, "list what the review would run (hooks, MCP servers, settings) and exit without running it")
-	cmd.Flags().BoolVar(showConfigJSON, "json", false, "with --show-config: print JSON")
+	cmd.Flags().BoolVar(showConfigJSON, "json", false, "with --show-config or --findings <handle>: print JSON")
 	// Validate before any mode runs, so no mode silently ignores these flags.
-	cmd.PreRunE = func(*cobra.Command, []string) error {
-		return reviewGateOptions{TrustTarget: *trustTarget, ShowConfig: *showConfig, ShowConfigJSON: *showConfigJSON}.validate()
+	cmd.PreRunE = func(cmd *cobra.Command, args []string) error {
+		opts := reviewGateOptions{TrustTarget: *trustTarget, ShowConfig: *showConfig, ShowConfigJSON: *showConfigJSON}
+		findingsJSON, err := findingsJSONRequested(cmd, args, *showConfigJSON)
+		if err != nil {
+			return err
+		}
+		// --json with --findings selects the findings' format, not the gate's.
+		opts.ShowConfigJSON = opts.ShowConfigJSON && !findingsJSON
+		return opts.validate()
 	}
+}
+
+// findingsJSONRequested reports whether --json asks for one saved run's
+// findings, which needs the run's handle.
+func findingsJSONRequested(cmd *cobra.Command, args []string, jsonFlag bool) (bool, error) {
+	if f := cmd.Flags().Lookup("findings"); !jsonFlag || f == nil || f.Value.String() != "true" {
+		return false, nil
+	}
+	if len(args) == 0 || strings.TrimSpace(args[0]) == "" {
+		return false, errors.New("--findings --json needs a handle; run 'entire review --findings' to list saved reviews")
+	}
+	return true, nil
 }
 
 // validate rejects malformed gate flags.
@@ -34,7 +53,7 @@ func (o reviewGateOptions) validate() error {
 		return err
 	}
 	if o.ShowConfigJSON && !o.ShowConfig {
-		return errors.New("--json requires --show-config")
+		return errors.New("--json requires --show-config or --findings <handle>")
 	}
 	return nil
 }

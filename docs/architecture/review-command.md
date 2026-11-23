@@ -13,6 +13,7 @@ entire review --agent <name>    # run one reviewer from the profile
 entire review --target <ref>    # review a branch/trail in a managed worktree
 entire review --trail <trail>   # post the findings to a named trail
 entire review --findings        # view local findings
+entire review --findings <handle> --json  # one saved run's findings as JSON
 entire review --show-config     # list what the review would run, then exit
 ```
 
@@ -96,6 +97,39 @@ through `entire review --findings`. A run with nothing to report posts nothing a
 `--show-config`). With
 `--target`, the flag is passed on to the re-run in the worktree.
 
+`entire review --findings <handle> --json` prints one saved run's findings
+for a script, such as one that posts them with `entire trail finding add`
+where the review could not post. It prints the run's `handle` (the one the
+completion footer prints, or one that selects only this run when two runs
+started in the same second), `created_at`, the commit checked out for the
+review as `head_sha`, and `findings`: one object per finding,
+the findings a trail post of the run would send, whatever the profile's
+`output` was. Each key is named after the `entire trail finding add` flag
+that posts it: `body`, and when the finding gives them `severity` (high,
+medium or low), `confidence`, `file`, `line` and `end_line`. Structured
+comments map directly; a report without the JSON line is split by top-level
+item, with the severity and location its text gives. The post's cap, the
+profile line it puts before a finding split from prose, and its check of
+each location against the reviewed change are left out: that check reads
+the worktree as the review found it. A review also reads uncommitted
+changes, as a post does, so `head_sha` does not show that a finding's line
+is in that commit. The run records what a post would read from it (the
+manifest's `report`). A run that did not ask for the JSON line, such as a
+`local` profile's, records its report as prose instead, without reading a
+trailing JSON block as the line: the judge's verdict when one ran, otherwise
+each reviewer's text after its last tool call when that text opens with a
+verdict line, as the output format asks, leaving out exploration narration.
+All of a reviewer's text is its report when the last text does not open with
+a verdict, or when earlier text has a severity marker or feedback verdict.
+A report, or one reviewer's part of it, that is only an approving verdict
+line (`approve`, not `approve with nits`) is nothing to report; anything
+more, such as a paragraph after the approval, is a finding. A trail-mode run
+without its line still counts its prose as findings, as posting treats it. A run with nothing to report prints an
+empty list; one that produced no output or no readable report, or that was
+saved before runs kept their report, prints nothing to stdout and exits
+non-zero, saying why on stderr. A handle is required; `entire review
+--findings` lists them.
+
 ## Profiles
 
 Profiles live in:
@@ -143,7 +177,7 @@ The profile-level `task` is the shared work item. Each `agents` map entry is a w
   - `"comments":[]` posts nothing, unless the prose has a list item, a severity marker, a feedback label such as `Nits:` or `Findings:`, or a non-approving verdict such as `request changes`, `approve with nits`, or `needs changes` (also when labeled `Verdict:` or `Verdict -`).
   - Comments post as native findings with their severity and location; entries without a body are dropped. When the prose has more severity-marked findings than the line has comments, the line is incomplete and the prose is posted instead, since it normally repeats every comment. When a judge runs, its line alone decides what is posted. Without a judge, each reviewer's report (the last text between tool calls that ends with a valid line) is read separately and the comments are merged; earlier narration cannot contradict it. A reviewer whose report contradicts its line posts that report; one without a valid line posts its whole narrative. Either is posted alongside the other reviewers' structured comments.
   - A missing or malformed line (no `comments` array) posts the prose, with a trailing `summary`/`comments` object removed, split into findings by top-level bullet. Other trailing JSON, such as a quoted config snippet, stays. A JSON-only reply posts its `summary`, or the reviewers' narratives when it has none; when neither has text, nothing is posted and the run says so.
-  - The line is kept in the saved manifest and hidden when results are displayed.
+  - The line is kept in the saved manifest and hidden when results are displayed. The manifest also keeps the report as posting reads it, for `--findings <handle> --json`.
   - Posting keeps at most `maxPostedReviewFindings` findings, most severe first (high, medium, low, then unrated) and in their original order, and cuts a body over `maxPostedReviewFindingRunes` characters on a character boundary with a note, closing any code fence the cut leaves open (`review_bridge.go`). Both stay under the server's per-batch and per-body limits, so a capped review posts in one request and one long finding cannot fail the batch. The command says how many findings it left out or shortened. A line or range finding's `selected_text` is capped at the same length in `prepareTrailReviewLocationForCreate`, which `entire trail finding add` also goes through: a worktree span over the cap posts at file granularity. `entire trail finding add` does not cap the body.
   - A line or range location, from a comment or inferred from prose such as `path/file.go:12`, keeps its lines only when the scope lets its file be quoted and the span is at most `maxReviewTrailAnchorLines` (`review_bridge.go`). Otherwise a file the scope covers is posted against that file, and any other file against the whole change. Posted paths are cleaned. The quoted snippet is always read from the worktree at those lines; a model-supplied `selected_text` is ignored.
   - The scope (`TrailScope`, `review/scope.go`) is computed before any reviewer runs. Quotable files are those the branch adds or modifies since the scope base, plus staged, unstaged, and untracked files that are not ignored. Paths the uncommitted changes delete or rename away are left out, since an ignored local file can sit at one, and so are skip-worktree and assume-unchanged files, whose local text git hides. Each quotable file is hashed then; a file whose contents changed by posting time, such as one a reviewer rewrote, is posted against that file without a quote. Every tracked file is covered at file level. An untracked file that is not ignored, such as a new `.env`, is quotable. Without a scope base only uncommitted files are quotable, and the run says so; if git fails the scope is empty, the run says so, and every line location is posted against the whole change.

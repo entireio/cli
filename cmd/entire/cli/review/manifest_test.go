@@ -494,7 +494,7 @@ func TestBuildLocalReviewManifestFromSummary_GroupsAgentSessionsAndAggregate(t *
 		},
 	}
 
-	manifest := buildLocalReviewManifestFromSummary("/repo", "abc123", summary, states, "Aggregate finding")
+	manifest := buildLocalReviewManifestFromSummary("/repo", "abc123", summary, states, "Aggregate finding", false)
 
 	if len(manifest.Sources) != 2 {
 		t.Fatalf("sources = %d, want 2", len(manifest.Sources))
@@ -550,7 +550,7 @@ func TestBuildLocalReviewManifestFromSummary_DisambiguatesSameAgentByModel(t *te
 		},
 	}
 
-	manifest := buildLocalReviewManifestFromSummary("/repo", "abc123", summary, states, "")
+	manifest := buildLocalReviewManifestFromSummary("/repo", "abc123", summary, states, "", false)
 
 	if len(manifest.Sources) != 2 {
 		t.Fatalf("sources = %d, want 2: %#v", len(manifest.Sources), manifest.Sources)
@@ -918,7 +918,7 @@ func TestBuildLocalReviewManifestFromSummary_PartialMatch_NoWarning(t *testing.T
 			AgentType:    agenttypes.AgentType("Claude Code"),
 		},
 	}
-	manifest := buildLocalReviewManifestFromSummary("/repo", "abc123", summary, states, "")
+	manifest := buildLocalReviewManifestFromSummary("/repo", "abc123", summary, states, "", false)
 	if len(manifest.Sources) != 1 {
 		t.Fatalf("expected partial-success manifest with 1 source; got %d", len(manifest.Sources))
 	}
@@ -1300,7 +1300,7 @@ func TestBuildLocalReviewManifestFromSummary_DisambiguatesSameModelDifferentThin
 		},
 	}
 
-	manifest := buildLocalReviewManifestFromSummary("/repo", "abc123", summary, states, "")
+	manifest := buildLocalReviewManifestFromSummary("/repo", "abc123", summary, states, "", false)
 
 	if len(manifest.Sources) != 2 {
 		t.Fatalf("sources = %d, want 2 (each reviewer linked to a session)", len(manifest.Sources))
@@ -1361,7 +1361,7 @@ func TestBuildLocalReviewManifestFromSummary_ExplicitModelClaimedBeforeDefault(t
 		},
 	}
 
-	manifest := buildLocalReviewManifestFromSummary("/repo", "abc123", summary, states, "")
+	manifest := buildLocalReviewManifestFromSummary("/repo", "abc123", summary, states, "", false)
 
 	if len(manifest.Sources) != 2 {
 		t.Fatalf("sources = %d, want 2", len(manifest.Sources))
@@ -1412,7 +1412,7 @@ func TestBuildLocalReviewManifestFromSummary_ExplicitModelWithoutMatchingSession
 		},
 	}
 
-	manifest := buildLocalReviewManifestFromSummary("/repo", "abc123", summary, states, "")
+	manifest := buildLocalReviewManifestFromSummary("/repo", "abc123", summary, states, "", false)
 
 	if len(manifest.Sources) != 1 {
 		t.Fatalf("sources = %d, want 1 (opus reviewer unmatched, not misattributed)", len(manifest.Sources))
@@ -1479,7 +1479,7 @@ func TestBuildLocalReviewManifestFromSummary_ExplicitEmptyModelIsDefault(t *test
 		},
 	}
 
-	manifest := buildLocalReviewManifestFromSummary("/repo", "abc123", summary, states, "")
+	manifest := buildLocalReviewManifestFromSummary("/repo", "abc123", summary, states, "", false)
 
 	if len(manifest.Sources) != 2 {
 		t.Fatalf("sources = %d, want 2", len(manifest.Sources))

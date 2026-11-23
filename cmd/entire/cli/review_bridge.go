@@ -54,6 +54,7 @@ func buildReviewDeps() cliReview.Deps {
 		ReviewerFor:             launchableReviewerFor,
 		PostReviewToTrail:       postReviewToTrail,
 		ResolveTrail:            resolveReviewTrail,
+		TrailFindings:           reviewTrailFindings,
 		ResolveTarget:           resolveReviewTarget,
 		CheckoutTarget:          checkoutReviewTarget,
 		InspectTrust:            inspectReviewTrust,
@@ -322,18 +323,55 @@ func openCodeFence(text string) string {
 	return open
 }
 
-// reviewTrailFindingInputs turns a trail report into trail findings.
-// Structured comments map directly; prose falls back to splitting top-level
-// markdown bullets, which keeps custom judge prompts that ignore the JSON
-// contract structurally correct. Every line or range location is then
-// restricted to report.Scope by restrictReviewTrailLocation.
+// reviewTrailFindingInputs turns a trail report into trail findings
+// (reportTrailFindingInputs), then restricts every line or range location to
+// report.Scope with restrictReviewTrailLocation.
 func reviewTrailFindingInputs(profileName string, report cliReview.TrailReport) []api.TrailReviewCommentInput {
-	inputs := reviewTrailFindingInputsFromComments(report.Comments)
-	inputs = append(inputs, reviewTrailFindingInputsFromProse(profileName, report.Prose)...)
+	inputs := reportTrailFindingInputs(profileName, report)
 	for i := range inputs {
 		inputs[i].Location = restrictReviewTrailLocation(inputs[i].Location, report.Scope)
 	}
 	return inputs
+}
+
+// reportTrailFindingInputs splits a trail report into findings. Structured
+// comments map directly; prose falls back to splitting top-level markdown
+// bullets, which keeps custom judge prompts that ignore the JSON contract
+// structurally correct.
+func reportTrailFindingInputs(profileName string, report cliReview.TrailReport) []api.TrailReviewCommentInput {
+	inputs := reviewTrailFindingInputsFromComments(report.Comments)
+	return append(inputs, reviewTrailFindingInputsFromProse(profileName, report.Prose)...)
+}
+
+// reviewTrailFindings implements `entire review --findings <handle> --json`:
+// the findings a trail post of a saved run's report would send. It leaves
+// out the post's cap and its check of each location against the reviewed
+// change, which reads the worktree as the review found it, and the profile
+// line a post puts before a finding split from prose.
+func reviewTrailFindings(report cliReview.TrailReport) []cliReview.Finding {
+	inputs := reportTrailFindingInputs("", report)
+	findings := make([]cliReview.Finding, 0, len(inputs))
+	for _, input := range inputs {
+		finding := cliReview.Finding{
+			Severity:   derefOr(input.Severity, ""),
+			Confidence: input.Confidence,
+			Body:       derefOr(input.Body, ""),
+		}
+		if loc := input.Location; loc.FilePath != nil {
+			finding.File = normalizeFindingPath(*loc.FilePath)
+			finding.Line = derefIntOrZero(loc.StartLine)
+			finding.EndLine = derefIntOrZero(loc.EndLine)
+		}
+		findings = append(findings, finding)
+	}
+	return findings
+}
+
+func derefIntOrZero(n *int) int {
+	if n == nil {
+		return 0
+	}
+	return *n
 }
 
 func reviewTrailFindingInputsFromProse(profileName, verdict string) []api.TrailReviewCommentInput {
