@@ -324,7 +324,7 @@ func TestJSONLAdapter_UserMessagesHaveDerivedKeysOnly(t *testing.T) {
 func TestJSONLAdapter_EmptyAssistantBeforeConsumedUserTextIsSkipped(t *testing.T) {
 	t.Parallel()
 
-	out, err := compactJSONL([]byte(jsonlEdgeCases["empty assistant before consumed user text"]), defaultOpts)
+	out, err := convertAs([]byte(jsonlEdgeCases["empty assistant before consumed user text"]), jsonlFormat(defaultOpts.Agent), defaultOpts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -401,7 +401,7 @@ func convertJSONL(input []byte, opts Options, preprocess linePreprocessor) ([]by
 	if preprocess != nil {
 		return compactDroid(input, opts)
 	}
-	return compactJSONL(input, opts)
+	return convertAs(input, jsonlFormat(opts.Agent), opts)
 }
 
 func withoutUsageFields(t *testing.T, out []byte) []byte {

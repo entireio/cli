@@ -51,7 +51,16 @@ func detectFormat(content []byte, opts Options) string {
 		return FormatCopilot
 	case isDroidFormat(truncated):
 		return FormatDroid
-	case opts.Agent == agentClaudeCode:
+	}
+	return jsonlFormat(opts.Agent)
+}
+
+// jsonlFormat picks the accounting for undeclared Claude-style JSONL. Claude
+// Code and Cursor share a line format, so the agent name decides: Claude
+// Code's per-call usage for "claude-code", Cursor's per-message counts for
+// anything else.
+func jsonlFormat(agent string) string {
+	if agent == agentClaudeCode {
 		return FormatClaudeCode
 	}
 	return FormatCursor

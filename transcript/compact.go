@@ -216,17 +216,6 @@ type parsedEntry struct {
 	toolResults  []toolResultEntry // user tool_result entries
 }
 
-// compactJSONL converts JSONL transcripts (Claude Code, Cursor) into the
-// transcript.jsonl format.
-// Claude Code and Cursor share a line format, so opts.Agent picks the adapter.
-func compactJSONL(content []byte, opts Options) ([]byte, error) {
-	a := NewCursorAdapter()
-	if opts.Agent == agentClaudeCode {
-		a = NewClaudeAdapter()
-	}
-	return foldJSONL(content, opts, a)
-}
-
 // foldJSONL runs a over the whole transcript and folds the records. Taking the
 // adapter from the exported constructors keeps checkpoints and live streams on
 // one adapter and one fold.
