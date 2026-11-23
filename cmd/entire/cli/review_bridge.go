@@ -27,6 +27,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	cliReview "github.com/entireio/cli/cmd/entire/cli/review"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
+
+	"github.com/spf13/cobra"
 )
 
 const (
@@ -51,6 +53,7 @@ func buildReviewDeps() cliReview.Deps {
 		ReviewCheckpointContext: reviewCheckpointContext,
 		ReviewerFor:             launchableReviewerFor,
 		PostReviewToTrail:       postReviewToTrail,
+		ResolveTrail:            resolveReviewTrail,
 		ResolveTarget:           resolveReviewTarget,
 		CheckoutTarget:          checkoutReviewTarget,
 		InspectTrust:            inspectReviewTrust,
@@ -63,38 +66,139 @@ func buildReviewDeps() cliReview.Deps {
 // destination. It lives in the cli package because the data API client and
 // auth flow do.
 func postReviewToTrail(ctx context.Context, out io.Writer, profileName string, report cliReview.TrailReport) error {
-	if len(report.Comments) == 0 && strings.TrimSpace(report.Prose) == "" {
-		return errors.New("no review output to post")
+	post, err := newReviewTrailPost(profileName, report)
+	if err != nil {
+		return err
 	}
-	inputs, leftOut, shortened := capReviewTrailFindingInputs(reviewTrailFindingInputs(profileName, report))
 	return runAuthenticatedTrailAPI(ctx, out, false, "", func(ctx context.Context, client *api.Client, repoID string) error {
 		target, err := resolveTrailReviewTarget(ctx, client, repoID, "", "", "")
 		if err != nil {
 			return err
 		}
-		if _, err := createTrailReviewFindings(ctx, client, target.Trail.ID, inputs); err != nil {
+		return post.send(ctx, out, client, target)
+	})
+}
+
+// resolveReviewTrail resolves `entire review --trail` before any reviewer
+// runs. The returned poster resolves the trail again once the review is done,
+// so a long review does not post with the login it started with, and posts
+// only when the trail's head is the reviewed commit: findings carry no commit
+// of their own, and the server attaches them to the trail's head.
+func resolveReviewTrail(cmd *cobra.Command, selector string) (cliReview.TrailPoster, error) {
+	_, target, err := resolveReviewTrailTarget(cmd, selector)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Findings will be posted to %s.\n", trailReviewCleanLine(trailReviewTargetDisplay(target)))
+	return func(ctx context.Context, out io.Writer, profileName string, report cliReview.TrailReport) error {
+		post, err := newReviewTrailPost(profileName, report)
+		if err != nil {
 			return err
 		}
-		findingWord := "findings"
-		if len(inputs) == 1 {
-			findingWord = "finding"
+		if post.headSHA = strings.TrimSpace(report.HeadSHA); post.headSHA == "" {
+			return errors.New("the reviewed commit is unknown, so it cannot be matched to the trail's head")
 		}
-		if target.Trail.Number > 0 {
-			fmt.Fprintf(out, "Posted the review verdict to trail #%d as %d %s.\n", target.Trail.Number, len(inputs), findingWord)
-		} else {
-			fmt.Fprintf(out, "Posted the review verdict to the trail as %d %s.\n", len(inputs), findingWord)
+		// Resolve again for a client whose credentials are fresh after a long
+		// review, but post only to the change announced before it, still on
+		// the trail announced: the trail's changes may have been linked or
+		// unlinked meanwhile, and a change may have moved to another trail.
+		client, current, err := resolveReviewTrailTarget(cmd, selector)
+		if err != nil {
+			return err
 		}
-		if leftOut > 0 {
-			fmt.Fprintf(out, "Left out %d of %d findings: a review posts at most %d, most severe first.\n", leftOut, len(inputs)+leftOut, maxPostedReviewFindings)
+		if current.Trail.ID != target.Trail.ID || trailParentID(current.Trail) != trailParentID(target.Trail) {
+			return fmt.Errorf("--trail %s now resolves to %s, not %s as it did before the review, so the findings were not posted",
+				trailReviewCleanLine(selector), trailReviewCleanLine(trailReviewTargetDisplay(current)), trailReviewCleanLine(trailReviewTargetDisplay(target)))
 		}
-		if shortened > 0 {
-			fmt.Fprintf(out, "Shortened %s longer than %d characters.\n", pluralCount(shortened, "finding", "findings"), maxPostedReviewFindingRunes)
-		}
-		if link := trailReviewWebURL(target); link != "" {
-			fmt.Fprintf(out, "View the trail: %s\n", link)
-		}
-		return nil
-	})
+		return post.send(ctx, out, client, current)
+	}, nil
+}
+
+// trailParentID is the ID of the project trail a change belongs to, or ""
+// for a trail that is not a project trail's change.
+func trailParentID(trail api.TrailResource) string {
+	if trail.Parent == nil {
+		return ""
+	}
+	return trail.Parent.ID
+}
+
+// resolveReviewTrailTarget resolves a --trail selector to this clone's change
+// on that trail, the way `entire trail finding add --trail` does: a project
+// trail number or ID, or <repo>/<number>. Anything else is a branch name, as
+// `entire trail finding add --branch` takes it. Only this clone's repository
+// is considered, since the findings quote this worktree.
+func resolveReviewTrailTarget(cmd *cobra.Command, selector string) (*api.Client, trailReviewTarget, error) {
+	branch := ""
+	if reviewTrailSelectorIsBranch(selector) {
+		selector, branch = "", selector
+	}
+	selected, err := resolveProjectTrailWorkingContext(cmd, selector, branch, true)
+	if err != nil {
+		return nil, trailReviewTarget{}, err
+	}
+	return selected.Client, trailReviewTarget{Host: selected.Host, Owner: selected.Owner, Repo: selected.Repo, Trail: selected.Work}, nil
+}
+
+// reviewTrailSelectorIsBranch reports whether a --trail value is none of the
+// trail selector forms. A positive integer always means a trail number, as
+// for --target, so a branch named "42" is selected by its trail instead.
+func reviewTrailSelectorIsBranch(selector string) bool {
+	if looksLikeULID(selector) {
+		return false
+	}
+	if _, ok := parseTrailNumberSelector(selector); ok {
+		return false
+	}
+	_, ok := parseProjectTrailChangeSelector(selector)
+	return !ok
+}
+
+// reviewTrailPost is a review's findings, capped for posting.
+type reviewTrailPost struct {
+	inputs    []api.TrailReviewCommentInput
+	leftOut   int
+	shortened int
+	// headSHA, when set, is the reviewed commit; the findings are posted only
+	// if the trail's head is that commit.
+	headSHA string
+}
+
+func newReviewTrailPost(profileName string, report cliReview.TrailReport) (reviewTrailPost, error) {
+	if len(report.Comments) == 0 && strings.TrimSpace(report.Prose) == "" {
+		return reviewTrailPost{}, errors.New("no review output to post")
+	}
+	inputs, leftOut, shortened := capReviewTrailFindingInputs(reviewTrailFindingInputs(profileName, report))
+	return reviewTrailPost{inputs: inputs, leftOut: leftOut, shortened: shortened}, nil
+}
+
+// send posts the findings to target and says what it posted.
+func (p reviewTrailPost) send(ctx context.Context, out io.Writer, client *api.Client, target trailReviewTarget) error {
+	if _, err := createTrailReviewFindingsAt(ctx, client, target.Trail.ID, p.inputs, p.headSHA); err != nil {
+		return err
+	}
+	findingWord := "findings"
+	if len(p.inputs) == 1 {
+		findingWord = "finding"
+	}
+	switch {
+	case target.Trail.Parent != nil:
+		fmt.Fprintf(out, "Posted the review verdict to %s as %d %s.\n", trailReviewCleanLine(describeTrailRef(&target.Trail)), len(p.inputs), findingWord)
+	case target.Trail.Number > 0:
+		fmt.Fprintf(out, "Posted the review verdict to trail #%d as %d %s.\n", target.Trail.Number, len(p.inputs), findingWord)
+	default:
+		fmt.Fprintf(out, "Posted the review verdict to the trail as %d %s.\n", len(p.inputs), findingWord)
+	}
+	if p.leftOut > 0 {
+		fmt.Fprintf(out, "Left out %d of %d findings: a review posts at most %d, most severe first.\n", p.leftOut, len(p.inputs)+p.leftOut, maxPostedReviewFindings)
+	}
+	if p.shortened > 0 {
+		fmt.Fprintf(out, "Shortened %s longer than %d characters.\n", pluralCount(p.shortened, "finding", "findings"), maxPostedReviewFindingRunes)
+	}
+	if link := trailReviewWebURL(target); link != "" {
+		fmt.Fprintf(out, "View the trail: %s\n", link)
+	}
+	return nil
 }
 
 const (

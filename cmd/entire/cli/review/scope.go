@@ -13,6 +13,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -256,8 +257,9 @@ func listFilesChanged(ctx context.Context, repoRoot, baseRef string) ([]string, 
 // and untracked (but not ignored) file, listing files inside untracked
 // directories individually, and separately the paths the uncommitted changes
 // remove: deletions and the origins of renames.
-func listUncommitted(ctx context.Context, repoRoot string) (changed, removed []string, err error) {
-	out, err := runGit(ctx, repoRoot, "--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all")
+func listUncommitted(ctx context.Context, repoRoot string, statusArgs ...string) (changed, removed []string, err error) {
+	args := append([]string{"--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all"}, statusArgs...)
+	out, err := runGit(ctx, repoRoot, args...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("git status: %w", err)
 	}
@@ -289,11 +291,39 @@ func listTracked(ctx context.Context, repoRoot string) (tracked, hidden map[stri
 			continue
 		}
 		tracked[file] = struct{}{}
-		if tag == "S" || tag != strings.ToUpper(tag) {
+		if gitrepo.HiddenFromStatus(tag) {
 			hidden[file] = struct{}{}
 		}
 	}
 	return tracked, hidden, nil
+}
+
+// countWorktreeChanges returns how many paths differ between the worktree and
+// HEAD: staged, unstaged and untracked files, even when
+// status.showUntrackedFiles hides them, submodules with changes, even when
+// their ignore setting hides them, plus the paths marked assume-unchanged or
+// skip-worktree that git status does not report, in submodules too, which are
+// also counted in hidden.
+func countWorktreeChanges(ctx context.Context, repoRoot string) (paths, hidden int, err error) {
+	changed, removed, err := listUncommitted(ctx, repoRoot, "--ignore-submodules=none")
+	if err != nil {
+		return 0, 0, err
+	}
+	edited, err := gitrepo.HiddenWorktreeChanges(ctx, repoRoot)
+	if err != nil {
+		return 0, 0, fmt.Errorf("compare files git treats as unchanged: %w", err)
+	}
+	seen := make(map[string]bool)
+	for _, file := range slices.Concat(changed, removed) {
+		seen[file] = true
+	}
+	for _, file := range edited {
+		if !seen[file] {
+			seen[file] = true
+			hidden++
+		}
+	}
+	return len(seen), hidden, nil
 }
 
 func splitNUL(out string) []string {

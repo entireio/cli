@@ -46,6 +46,8 @@ type TrailReport struct {
 	Prose    string
 	// Scope is what the findings may anchor to; see TrailScope.
 	Scope TrailScope
+	// HeadSHA is the commit the review ran on.
+	HeadSHA string
 }
 
 // trailReportFor decides what a trail-mode run posts. It returns post=false

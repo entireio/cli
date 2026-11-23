@@ -45,6 +45,7 @@ const plainReviewLabel = "HEAD"
 type reviewGateOptions struct {
 	TrustTarget    string
 	Command        string
+	InspectCommand string
 	AgentOverride  string
 	ShowConfig     bool
 	ShowConfigJSON bool
@@ -151,13 +152,14 @@ func inspectReview(ctx context.Context, repoRoot, head string, source TrustSourc
 
 func runTrustGate(ctx context.Context, cmd *cobra.Command, opts reviewGateOptions, subject TrustSubject, inv TrustInventory, deps Deps) error {
 	gate := trustGate{
-		Subject:     subject,
-		Inventory:   inv,
-		TrustTarget: opts.TrustTarget,
-		Command:     opts.Command,
-		Interactive: reviewCommandIsInteractive(cmd),
-		AgentCaller: detectAgentCaller(),
-		Confirm:     confirmTrustOnTerminal,
+		Subject:        subject,
+		Inventory:      inv,
+		TrustTarget:    opts.TrustTarget,
+		Command:        opts.Command,
+		InspectCommand: opts.InspectCommand,
+		Interactive:    reviewCommandIsInteractive(cmd),
+		AgentCaller:    detectAgentCaller(),
+		Confirm:        confirmTrustOnTerminal,
 	}
 	err := gate.run(ctx, cmd.ErrOrStderr())
 	if errors.Is(err, errTrustRefused) {
@@ -203,18 +205,32 @@ func runReviewShowConfig(ctx context.Context, cmd *cobra.Command, profileName st
 
 // reviewInvocationFlags are kept when echoing the command in hints; --prompt
 // and the gate's own flags are left out.
-var reviewInvocationFlags = []string{"target", "profile", "agent", reviewFlagModel, "base", "timeout"}
+var reviewInvocationFlags = []string{"target", "profile", "agent", reviewFlagModel, "base", "timeout", "trail"}
+
+// reviewInspectFlags are kept in a --show-config hint, which cannot take
+// --trail.
+var reviewInspectFlags = slices.DeleteFunc(slices.Clone(reviewInvocationFlags), func(flag string) bool { return flag == "trail" })
 
 const reviewFlagModel = "model"
 
 // reviewInvocation rebuilds the user's command for hints.
 func reviewInvocation(cmd *cobra.Command, positional []string) string {
+	return reviewInvocationWith(cmd, positional, reviewInvocationFlags)
+}
+
+// reviewInspectInvocation rebuilds the user's command for a --show-config
+// hint.
+func reviewInspectInvocation(cmd *cobra.Command, positional []string) string {
+	return reviewInvocationWith(cmd, positional, reviewInspectFlags)
+}
+
+func reviewInvocationWith(cmd *cobra.Command, positional, kept []string) string {
 	parts := []string{"entire", cmd.Name()}
 	for _, arg := range positional {
 		parts = append(parts, shellQuoteArg(arg))
 	}
 	cmd.Flags().Visit(func(flag *pflag.Flag) {
-		if !slices.Contains(reviewInvocationFlags, flag.Name) {
+		if !slices.Contains(kept, flag.Name) {
 			return
 		}
 		parts = append(parts, "--"+flag.Name, shellQuoteArg(flag.Value.String()))

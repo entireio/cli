@@ -2,6 +2,7 @@ package review
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/gitexec"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
 
 const envReviewFindingsWorktree = "ENTIRE_REVIEW_FINDINGS_WORKTREE"
@@ -25,6 +27,19 @@ const envReviewFindingsWorktree = "ENTIRE_REVIEW_FINDINGS_WORKTREE"
 // the environment is readable only by the same user. The child honors it only
 // alongside envReviewFindingsWorktree, which marks a target child.
 const envReviewTargetPrompt = "ENTIRE_REVIEW_TARGET_PROMPT"
+
+// envReviewTargetProfile carries, as JSON, the default profile a first
+// --target --trail parent used without saving it, so its re-run runs the
+// reviewers the parent's trust gate inspected instead of building a default
+// from the branch's own hooks. Like envReviewTargetPrompt, the child honors it
+// only alongside envReviewFindingsWorktree.
+const envReviewTargetProfile = "ENTIRE_REVIEW_TARGET_PROFILE"
+
+// targetChildProfile is what envReviewTargetProfile holds.
+type targetChildProfile struct {
+	Name    string                       `json:"name"`
+	Profile settings.ReviewProfileConfig `json:"profile"`
+}
 
 // TargetWorktree describes the checkout prepared for a targeted review.
 // Created is false when the branch was already checked out and that existing
@@ -60,7 +75,11 @@ type targetReviewRequest struct {
 	Gate         reviewGateOptions
 }
 
-func runTargetReview(ctx context.Context, cmd *cobra.Command, req targetReviewRequest, deps Deps) error {
+func runTargetReview(ctx context.Context, cmd *cobra.Command, req targetReviewRequest, deps Deps) (err error) {
+	// The re-run in the worktree posts and enforces --trail; this run fails
+	// when it ends before starting that re-run.
+	deps, result := trackExplicitTrail(cmd, cmd.Flags().Changed("trail"), deps)
+	defer func() { err = result(err) }()
 	if req.ModeSelected {
 		return errors.New("--target can only be used when running a review")
 	}
@@ -81,13 +100,15 @@ func runTargetReview(ctx context.Context, cmd *cobra.Command, req targetReviewRe
 		profileName = req.Positional[0]
 	}
 	var agents []TrustAgent
+	var selection reviewProfileSelection
 	forwardProfile := ""
 	if req.ShowConfig {
 		agents = showConfigAgents(ctx, profileName, req.Gate.AgentOverride)
 	} else {
 		// Resolve the profile in the user's checkout, never the branch's worktree;
 		// the gate also needs its agents.
-		selection, selErr := resolveReviewProfile(ctx, cmd, profileName, req.Gate.AgentOverride, deps)
+		var selErr error
+		selection, selErr = resolveReviewProfile(ctx, cmd, profileName, req.Gate.AgentOverride, deps)
 		if selErr != nil || selection.done {
 			return selErr
 		}
@@ -149,11 +170,12 @@ func runTargetReview(ctx context.Context, cmd *cobra.Command, req targetReviewRe
 		return wrapReviewSilentError(deps.NewSilentError, errors.New("review target moved"))
 	}
 
-	env := reviewTargetChildEnv(cmd, callerWorktree)
+	env := reviewTargetChildEnv(cmd, callerWorktree, selection)
 	childArgs := reviewTargetChildArgs(cmd, req.Positional, resolved.HeadSHA, forwardProfile)
 	if err := runReviewInWorktree(ctx, deps.RunInWorktree, prepared.Path, childArgs, env, cmd.InOrStdin(), cmd.OutOrStdout(), errOut); err != nil {
 		return wrapReviewSilentError(deps.NewSilentError, err)
 	}
+	deps.settleTrail()
 	return finishTargetReview(ctx, cmd, prepared, req.CleanupWorktree, deps.RemoveTarget)
 }
 
@@ -161,13 +183,39 @@ func runTargetReview(ctx context.Context, cmd *cobra.Command, req targetReviewRe
 // prompt, which reaches the child through envReviewTargetPrompt.
 var reviewTargetChildFlagsDropped = []string{"target", "cleanup-worktree", "show-config", "json", "trust-target", "prompt"}
 
-// reviewTargetChildEnv is the environment added for the child review.
-func reviewTargetChildEnv(cmd *cobra.Command, callerWorktree string) []string {
+// reviewTargetChildEnv is the environment added for the child review,
+// including the profile selection used unsaved, if it was. A profile that
+// does not encode is left out, and the child then refuses to run.
+func reviewTargetChildEnv(cmd *cobra.Command, callerWorktree string, selection reviewProfileSelection) []string {
 	env := []string{envReviewFindingsWorktree + "=" + callerWorktree}
 	if flag := cmd.Flags().Lookup("prompt"); flag != nil && flag.Changed {
 		env = append(env, envReviewTargetPrompt+"="+flag.Value.String())
 	}
+	if selection.unsaved != nil {
+		if raw, err := json.Marshal(targetChildProfile{Name: selection.name, Profile: *selection.unsaved}); err == nil {
+			env = append(env, envReviewTargetProfile+"="+string(raw))
+		}
+	}
 	return env
+}
+
+// useTargetChildProfile gives a --target re-run that finds no saved profile
+// the one its parent used unsaved and passed through envReviewTargetProfile,
+// and unsets the variable so reviewer agents don't inherit it. Outside a
+// target child the variable is ignored.
+func useTargetChildProfile(s *settings.EntireSettings) {
+	raw, ok := os.LookupEnv(envReviewTargetProfile)
+	if !ok {
+		return
+	}
+	_ = os.Unsetenv(envReviewTargetProfile)
+	var passed targetChildProfile
+	if os.Getenv(envReviewFindingsWorktree) == "" || len(nonZeroProfiles(s.ReviewProfiles)) > 0 ||
+		json.Unmarshal([]byte(raw), &passed) != nil || passed.Name == "" {
+		return
+	}
+	s.ReviewProfiles = map[string]settings.ReviewProfileConfig{passed.Name: passed.Profile}
+	s.ReviewDefaultProfile = passed.Name
 }
 
 // takeTargetChildPrompt returns the --prompt a --target parent passed through

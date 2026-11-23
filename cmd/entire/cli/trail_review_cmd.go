@@ -1048,6 +1048,14 @@ func createTrailReviewFinding(ctx context.Context, client *api.Client, trailID s
 // createTrailReviewFindings posts findings through one trail review session,
 // chunking by the server-advertised batch limit when present.
 func createTrailReviewFindings(ctx context.Context, client *api.Client, trailID string, inputs []api.TrailReviewCommentInput) ([]api.TrailReviewComment, error) {
+	return createTrailReviewFindingsAt(ctx, client, trailID, inputs, "")
+}
+
+// createTrailReviewFindingsAt is createTrailReviewFindings for findings read
+// from one commit. When headSHA is set, nothing is posted unless the review
+// the server opens covers that commit: a finding carries no commit of its
+// own, and the server attaches the review to the trail's head.
+func createTrailReviewFindingsAt(ctx context.Context, client *api.Client, trailID string, inputs []api.TrailReviewCommentInput, headSHA string) ([]api.TrailReviewComment, error) {
 	if len(inputs) == 0 {
 		return nil, errors.New("create finding: no findings to post")
 	}
@@ -1063,6 +1071,11 @@ func createTrailReviewFindings(ctx context.Context, client *api.Client, trailID 
 	review, err := startTrailReview(ctx, client, trailID, key)
 	if err != nil {
 		return nil, err
+	}
+	if headSHA != "" {
+		if err := checkTrailReviewHead(review, headSHA); err != nil {
+			return nil, err
+		}
 	}
 	limit := review.Limits.MaxCommentsPerBatch
 	if limit <= 0 || limit > len(inputs) {
@@ -1113,6 +1126,20 @@ func postTrailReviewFindingBatch(ctx context.Context, client *api.Client, trailI
 		findings = append(findings, *result.Comment)
 	}
 	return findings, nil
+}
+
+// checkTrailReviewHead refuses a review session whose head is not headSHA,
+// the commit the findings were read from.
+func checkTrailReviewHead(review api.TrailReviewStartResponse, headSHA string) error {
+	head := strings.TrimSpace(stringPtrValue(review.HeadSHA))
+	if head == "" {
+		return fmt.Errorf("the trail did not report its head commit, so findings read from %s were not posted", shortSHA(headSHA))
+	}
+	if !strings.EqualFold(head, headSHA) {
+		return fmt.Errorf("the trail's head is %s, not the reviewed commit %s, so the findings were not posted (they would attach to the trail's head); push the reviewed commit to the trail's branch or review its head",
+			trailReviewCleanLine(shortSHA(head)), shortSHA(headSHA))
+	}
+	return nil
 }
 
 // startTrailReview opens a review session for a trail. The body is left empty

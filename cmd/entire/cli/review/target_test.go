@@ -3,12 +3,14 @@ package review
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/spf13/cobra"
 )
 
@@ -32,7 +34,7 @@ func TestReviewTargetChildArgsUsesParsedCommandFlags(t *testing.T) {
 		t.Fatalf("reviewTargetChildArgs() = %q, want %q", got, want)
 	}
 	wantEnv := []string{envReviewFindingsWorktree + "=/caller", envReviewTargetPrompt + "=focus here"}
-	if got := reviewTargetChildEnv(cmd, "/caller"); !reflect.DeepEqual(got, wantEnv) {
+	if got := reviewTargetChildEnv(cmd, "/caller", reviewProfileSelection{}); !reflect.DeepEqual(got, wantEnv) {
 		t.Fatalf("reviewTargetChildEnv() = %q, want %q", got, wantEnv)
 	}
 }
@@ -43,8 +45,30 @@ func TestReviewTargetChildEnvOmitsUnsetPrompt(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.Flags().String("prompt", "", "")
 	want := []string{envReviewFindingsWorktree + "=/caller"}
-	if got := reviewTargetChildEnv(cmd, "/caller"); !reflect.DeepEqual(got, want) {
+	if got := reviewTargetChildEnv(cmd, "/caller", reviewProfileSelection{}); !reflect.DeepEqual(got, want) {
 		t.Fatalf("reviewTargetChildEnv() = %q, want %q", got, want)
+	}
+}
+
+// A profile the parent used unsaved travels to the re-run as JSON; a saved
+// one is not passed, since the re-run reads it from the branch's settings.
+func TestReviewTargetChildEnvPassesTheUnsavedProfile(t *testing.T) {
+	t.Parallel()
+
+	cmd := &cobra.Command{}
+	cmd.Flags().String("prompt", "", "")
+	profile := settings.ReviewProfileConfig{Agents: map[string]settings.ReviewConfig{"claude-code": {Prompt: "review"}}}
+	raw, err := json.Marshal(targetChildProfile{Name: "general", Profile: profile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{envReviewFindingsWorktree + "=/caller", envReviewTargetProfile + "=" + string(raw)}
+	if got := reviewTargetChildEnv(cmd, "/caller", reviewProfileSelection{name: "general", profile: profile, unsaved: &profile}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("reviewTargetChildEnv() = %q, want %q", got, want)
+	}
+	saved := []string{envReviewFindingsWorktree + "=/caller"}
+	if got := reviewTargetChildEnv(cmd, "/caller", reviewProfileSelection{name: "general", profile: profile}); !reflect.DeepEqual(got, saved) {
+		t.Fatalf("reviewTargetChildEnv() with a saved profile = %q, want %q", got, saved)
 	}
 }
 

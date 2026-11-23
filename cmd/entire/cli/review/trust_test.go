@@ -178,6 +178,42 @@ func TestTrustGate(t *testing.T) {
 	}
 }
 
+// A --trail review's approval re-runs it with --trail, but its --show-config
+// hints leave --trail out, since --show-config cannot take it.
+func TestTrustGateInspectHintsLeaveOutTrail(t *testing.T) {
+	t.Parallel()
+	cmd := NewCommand(Deps{})
+	if err := cmd.ParseFlags([]string{"--timeout", "5m", "--trail", "42"}); err != nil {
+		t.Fatal(err)
+	}
+	command := reviewInvocation(cmd, []string{"general"})
+	inspect := reviewInspectInvocation(cmd, []string{"general"})
+	if command != "entire review general --timeout 5m0s --trail 42" || inspect != "entire review general --timeout 5m0s" {
+		t.Fatalf("command %q, inspect %q", command, inspect)
+	}
+	for _, tt := range []struct {
+		trust string
+		want  []string
+	}{
+		{"", []string{"(" + inspect + " --show-config lists them)", "  " + command + " --trust-target " + trustTestHead}},
+		{strings.Repeat("c", 40), []string{"Check again: " + inspect + " --show-config"}},
+	} {
+		gate := trustGate{Subject: foreignSubject(), Inventory: trustTestInventory(), TrustTarget: tt.trust, Command: command, InspectCommand: inspect}
+		var errOut bytes.Buffer
+		if err := gate.run(t.Context(), &errOut); !errors.Is(err, errTrustRefused) {
+			t.Fatalf("run() error = %v, want the refusal", err)
+		}
+		for _, want := range tt.want {
+			if !strings.Contains(errOut.String(), want) {
+				t.Errorf("output missing %q:\n%s", want, errOut.String())
+			}
+		}
+		if strings.Contains(errOut.String(), "--trail 42 --show-config") {
+			t.Errorf("a --show-config hint keeps --trail:\n%s", errOut.String())
+		}
+	}
+}
+
 func TestTrustInventoryWhat(t *testing.T) {
 	t.Parallel()
 

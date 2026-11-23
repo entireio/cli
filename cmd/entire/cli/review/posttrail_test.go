@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
@@ -54,7 +56,9 @@ func TestMaybePostReviewToTrail(t *testing.T) {
 			called = true
 			return nil
 		}}
-		maybePostReviewToTrail(context.Background(), &out, deps, ReviewOutputLocal, "general", TrailScope{}, postTrailSummary("a finding"), "")
+		if err := maybePostReviewToTrail(context.Background(), &out, deps, ReviewOutputLocal, "general", TrailScope{}, "", postTrailSummary("a finding"), ""); err != nil {
+			t.Fatalf("maybePostReviewToTrail: %v", err)
+		}
 		if called {
 			t.Error("local mode must not post to the trail")
 		}
@@ -73,7 +77,9 @@ func TestMaybePostReviewToTrail(t *testing.T) {
 			fmt.Fprintln(w, "View the trail: https://entire.io/gh/o/r/trails/1/b")
 			return nil
 		}}
-		maybePostReviewToTrail(context.Background(), &out, deps, ReviewOutputTrail, "general", TrailScope{}, postTrailSummary("real finding"), "the verdict")
+		if err := maybePostReviewToTrail(context.Background(), &out, deps, ReviewOutputTrail, "general", TrailScope{}, "", postTrailSummary("real finding"), "the verdict"); err != nil {
+			t.Fatalf("maybePostReviewToTrail: %v", err)
+		}
 		if gotVerdict != "the verdict" {
 			t.Errorf("verdict passed to hook = %q, want %q", gotVerdict, "the verdict")
 		}
@@ -92,7 +98,9 @@ func TestMaybePostReviewToTrail(t *testing.T) {
 			return nil
 		}}
 		// Empty aggregate and a reviewer that produced no narrative => nothing to report.
-		maybePostReviewToTrail(context.Background(), &out, deps, ReviewOutputTrail, "general", TrailScope{}, postTrailSummary(""), "")
+		if err := maybePostReviewToTrail(context.Background(), &out, deps, ReviewOutputTrail, "general", TrailScope{}, "", postTrailSummary(""), ""); err != nil {
+			t.Fatalf("maybePostReviewToTrail: %v", err)
+		}
 		if called {
 			t.Error("must not post when there is nothing to report")
 		}
@@ -115,7 +123,9 @@ func TestMaybePostReviewToTrail(t *testing.T) {
 			got = report
 			return nil
 		}}
-		maybePostReviewToTrail(context.Background(), &out, deps, ReviewOutputTrail, "general", reviewTrailScope(t.Context(), io.Discard, ReviewOutputTrail, dir, defaultBranchName), postTrailSummary("a finding"), "the verdict")
+		if err := maybePostReviewToTrail(context.Background(), &out, deps, ReviewOutputTrail, "general", reviewTrailScope(t.Context(), io.Discard, ReviewOutputTrail, dir, defaultBranchName), "", postTrailSummary("a finding"), "the verdict"); err != nil {
+			t.Fatalf("maybePostReviewToTrail: %v", err)
+		}
 		requireFileSet(t, got.Scope.Quotable, []string{"feat.go"}, []string{"root.go"})
 		requireFileSet(t, got.Scope.Tracked, []string{"root.go"}, nil)
 	})
@@ -126,7 +136,9 @@ func TestMaybePostReviewToTrail(t *testing.T) {
 		deps := Deps{PostReviewToTrail: func(context.Context, io.Writer, string, TrailReport) error {
 			return errors.New("boom")
 		}}
-		maybePostReviewToTrail(context.Background(), &out, deps, ReviewOutputTrail, "general", TrailScope{}, postTrailSummary("a finding"), "")
+		if err := maybePostReviewToTrail(context.Background(), &out, deps, ReviewOutputTrail, "general", TrailScope{}, "", postTrailSummary("a finding"), ""); err != nil {
+			t.Fatalf("maybePostReviewToTrail: %v", err)
+		}
 		if !strings.Contains(out.String(), "Could not post the review to the trail") {
 			t.Errorf("expected an error confirmation, got %q", out.String())
 		}
@@ -139,7 +151,9 @@ func TestMaybePostReviewToTrail(t *testing.T) {
 			fmt.Fprintln(w, "Not logged in. Run 'entire login' to authenticate.")
 			return postTrailAlreadyPrintedError{err: errors.New("not logged in")}
 		}}
-		maybePostReviewToTrail(context.Background(), &out, deps, ReviewOutputTrail, "general", TrailScope{}, postTrailSummary("a finding"), "")
+		if err := maybePostReviewToTrail(context.Background(), &out, deps, ReviewOutputTrail, "general", TrailScope{}, "", postTrailSummary("a finding"), ""); err != nil {
+			t.Fatalf("maybePostReviewToTrail: %v", err)
+		}
 		got := out.String()
 		if strings.Count(got, "Not logged in") != 1 {
 			t.Fatalf("login hint count in output = %d, want 1; output: %q", strings.Count(got, "Not logged in"), got)
@@ -154,7 +168,9 @@ func TestMaybePostReviewToTrail(t *testing.T) {
 		var out bytes.Buffer
 		summary := postTrailSummary("a finding")
 		summary.Cancelled = true
-		maybePostReviewToTrail(context.Background(), &out, Deps{}, ReviewOutputTrail, "general", TrailScope{}, summary, "verdict")
+		if err := maybePostReviewToTrail(context.Background(), &out, Deps{}, ReviewOutputTrail, "general", TrailScope{}, "", summary, "verdict"); err != nil {
+			t.Fatalf("maybePostReviewToTrail: %v", err)
+		}
 		if out.Len() != 0 {
 			t.Errorf("cancelled run should print nothing, got %q", out.String())
 		}
@@ -163,6 +179,62 @@ func TestMaybePostReviewToTrail(t *testing.T) {
 
 // A trail-mode run that cannot anchor findings to lines says so once, so a
 // finding posted against its file or the whole change is not a surprise.
+// A --trail run fails whenever its report is not posted, including when it
+// was cancelled, while a profile's output: trail keeps the run's result.
+func TestMaybePostReviewToTrailRequiredByTrailFlag(t *testing.T) {
+	t.Parallel()
+	silent := func(err error) error { return postTrailAlreadyPrintedError{err: err} }
+	failing := func(context.Context, io.Writer, string, TrailReport) error { return errors.New("head moved on") }
+	cancelled := postTrailSummary("a finding")
+	cancelled.Cancelled = true
+	for _, tt := range []struct {
+		name    string
+		deps    Deps
+		summary reviewtypes.RunSummary
+		wantErr string
+		printed bool
+	}{
+		{"post fails", Deps{PostReviewToTrail: failing}, postTrailSummary("a finding"), "head moved on", true},
+		{"no poster", Deps{}, postTrailSummary("a finding"), "trail output is not available", true},
+		{"cancelled", Deps{PostReviewToTrail: failing}, cancelled, "the review was cancelled", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var out bytes.Buffer
+			deps := tt.deps
+			deps.NewSilentError = silent
+			if err := maybePostReviewToTrail(context.Background(), &out, deps, ReviewOutputTrail, "general", TrailScope{}, "abc", tt.summary, ""); err != nil {
+				t.Fatalf("a profile's output: trail failed the run: %v", err)
+			}
+			deps.trail = &explicitTrailRun{}
+			err := maybePostReviewToTrail(context.Background(), &out, deps, ReviewOutputTrail, "general", TrailScope{}, "abc", tt.summary, "")
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("err = %v, want %q", err, tt.wantErr)
+			}
+			if got := userMessageAlreadyPrinted(err); got != tt.printed {
+				t.Errorf("already printed = %v, want %v (%v)", got, tt.printed, err)
+			}
+		})
+	}
+}
+
+// A --trail run that ends before settling its report, as at a declined
+// prompt, fails; one that posted or had nothing to report keeps its result.
+func TestTrailRunResult(t *testing.T) {
+	t.Parallel()
+	cmd := &cobra.Command{}
+	failed := errors.New("review run failed")
+	if err := trailRunResult(cmd, &explicitTrailRun{}, nil); err == nil || !strings.Contains(err.Error(), "the review did not run") {
+		t.Errorf("unsettled run: err = %v", err)
+	}
+	if err := trailRunResult(cmd, &explicitTrailRun{settled: true}, nil); err != nil {
+		t.Errorf("settled run: err = %v", err)
+	}
+	if err := trailRunResult(cmd, &explicitTrailRun{}, failed); !errors.Is(err, failed) {
+		t.Errorf("failed run: err = %v, want its own error", err)
+	}
+}
+
 func TestReviewTrailScopeSaysWhenLineAnchorsAreLimited(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
