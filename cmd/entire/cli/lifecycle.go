@@ -768,6 +768,8 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 	return nil
 }
 
+const devinAgentType types.AgentType = "Devin"
+
 // handleLifecycleTurnEnd handles turn end: validates transcript, extracts metadata,
 // detects file changes, saves step + checkpoint, transitions phase.
 //
@@ -805,12 +807,23 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// via `opencode export`, so the file doesn't exist until PrepareTranscript creates it.
 	// Claude Code's PrepareTranscript just flushes (always succeeds). Agents without
 	// TranscriptPreparer (e.g. Droid) are unaffected.
+	isDevin := ag.Type() == devinAgentType
 	_, prepareSpan := perf.Start(ctx, "prepare_and_validate_transcript")
 	if preparer, ok := agent.AsTranscriptPreparer(ag); ok {
 		if err := preparer.PrepareTranscript(ctx, transcriptRef); err != nil {
 			logging.Warn(logCtx, "failed to prepare transcript",
 				slog.String("error", err.Error()))
+			if isDevin {
+				prepareSpan.RecordError(err)
+				prepareSpan.End()
+				return fmt.Errorf("failed to prepare transcript: %w", err)
+			}
 		}
+	} else if isDevin {
+		err := errors.New("devin agent does not support transcript preparation")
+		prepareSpan.RecordError(err)
+		prepareSpan.End()
+		return err
 	}
 
 	if !fileExists(transcriptRef) {
@@ -872,6 +885,12 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		copySpan.RecordError(err)
 		copySpan.End()
 		return fmt.Errorf("failed to read transcript: %w", err)
+	}
+	if isDevin && len(transcriptData) == 0 {
+		err := errors.New("devin transcript is empty")
+		copySpan.RecordError(err)
+		copySpan.End()
+		return err
 	}
 	// Sanitize before writing: this copy is what condensation falls back to when
 	// the live transcript is unreadable, and its size is the growth baseline's
@@ -2878,7 +2897,9 @@ func recordCaptureDegraded(ctx context.Context, sessionID string, degraded bool)
 		if !degraded && state.CaptureDegradedAt == nil {
 			return strategy.ErrMutationSkip
 		}
-		state.CaptureDegradedAt = nil
+		if degraded || len(state.CaptureRepairCheckpointIDs) == 0 {
+			state.CaptureDegradedAt = nil
+		}
 		if degraded {
 			now := time.Now().UTC()
 			state.CaptureDegradedAt = &now

@@ -51,6 +51,12 @@ type CondenseResult struct {
 	TotalTranscriptLines int      // Total transcript units after this condensation (JSONL line count or message count by agent format)
 	Skipped              bool     // True if condensation was skipped (no transcript or files to condense)
 
+	// CaptureUnavailable is true when the checkpoint was written without a
+	// transcript because capture failed (Devin fail-closed path). The
+	// checkpoint ID is recorded in SessionState.CaptureRepairCheckpointIDs
+	// for in-place repair.
+	CaptureUnavailable bool
+
 	// SearchProbe records whether the session invoked Entire's history search
 	// and how that was determined. Telemetry only; see detectSearchUsage for why
 	// "could not tell" is a distinct state from "did not search".
@@ -91,4 +97,10 @@ type ExtractedSessionData struct {
 	// condenseOpts.searchProbeAllowed, so every result path carries the same
 	// value and ungated paths never pay the scan.
 	SearchProbe searchProbe
+
+	// CaptureStatus and CaptureReason carry the transcript-capture outcome
+	// for checkpoints written without a transcript: "unavailable" plus a
+	// fixed reason. Empty for normal captures.
+	CaptureStatus string
+	CaptureReason string
 }

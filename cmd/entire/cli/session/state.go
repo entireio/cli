@@ -214,6 +214,14 @@ type State struct {
 	//   - Cleared when session is reset (ResetSession deletes the state file entirely)
 	TurnCheckpointIDs []string `json:"turn_checkpoint_ids,omitempty"`
 
+	// CaptureRepairCheckpointIDs lists checkpoint IDs written without a
+	// transcript because capture failed (Devin fail-closed condensation).
+	// A later successful capture repairs each in place via a SessionTranscript
+	// update; IDs are removed as their repair write succeeds. Unlike
+	// TurnCheckpointIDs it is NOT cleared at turn start — the repair debt
+	// survives across turns until the transcript can be captured again.
+	CaptureRepairCheckpointIDs []string `json:"capture_repair_checkpoint_ids,omitempty"`
+
 	// LastInteractionTime is updated on agent-interaction events (TurnStart,
 	// TurnEnd, SessionStop, Compaction) but NOT on git commit hooks.
 	// Used for stale session detection in "entire doctor".

@@ -879,6 +879,11 @@ func loadCheckpointForExplain(ctx context.Context, lookup *explainCheckpointLook
 	}
 	content, contentErr := checkpoint.ReadLatestSessionContent(ctx, store, cpID, summary)
 	if contentErr != nil {
+		if errors.Is(contentErr, checkpoint.ErrNoTranscript) && len(summary.Sessions) > 0 {
+			if meta, metaErr := store.ReadSessionMetadata(ctx, cpID, len(summary.Sessions)-1); metaErr == nil {
+				return summary, &checkpoint.SessionContent{Metadata: *meta}, nil
+			}
+		}
 		return nil, nil, fmt.Errorf("failed to read checkpoint content for %s: %w", cpID, contentErr)
 	}
 	return summary, content, nil
@@ -1967,6 +1972,13 @@ func formatCheckpointOutput(ctx context.Context, summary *checkpoint.CheckpointS
 	sb.WriteString(formatCheckpointHeader(summary, meta, checkpointID, associatedCommits, author, styles))
 	sb.WriteString(styles.horizontalRule(styles.width))
 	sb.WriteString("\n")
+
+	switch meta.TranscriptCaptureStatus {
+	case "unavailable":
+		fmt.Fprintf(&sb, "Transcript: capture unavailable (%s) — conversation was not recorded for this commit\n", meta.TranscriptCaptureReason)
+	case "repaired":
+		sb.WriteString("Transcript: captured after commit (repaired)\n")
+	}
 
 	if meta.Summary != nil {
 		md := buildSummaryMarkdown(meta.Summary)

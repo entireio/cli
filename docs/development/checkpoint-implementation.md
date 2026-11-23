@@ -154,6 +154,8 @@ The phase state machine, metadata directory layout, sharded checkpoint format, m
 - [Checkpoint Scenarios](../architecture/checkpoint-scenarios.md) - phase state machine and worked condensation scenarios
 - [Ref-Based Checkpoint Backend](../architecture/ref-checkpoint-backend.md) - git-refs backend: primary/mirror taxonomy, ref layout + sharding, push-discovery queue, read routing, config + rollout
 
+- **Unavailable transcript capture (Devin)** - when a Devin session's transcript cannot be captured at condensation time (prepare failure, missing preparer/path, unreadable or empty snapshot), the checkpoint is still written — with prompts, files, and task records but no transcript — and its session metadata records `transcript_capture_status: "unavailable"` plus a fixed path-free `transcript_capture_reason` (`prepare_failed`, `no_preparer`, `no_transcript_path`, `snapshot_unreadable`, `snapshot_empty`). The checkpoint ID is appended to the session state's `capture_repair_checkpoint_ids` (deduped, not cleared at turn start). A later successful capture repairs each listed checkpoint in place via a `SessionTranscript` update that writes the transcript and sets `transcript_capture_status: "repaired"`; IDs also pending turn-end finalize are repaired by finalize instead (which clears the status). `entire checkpoint explain` prints the capture status above the transcript section.
+
 #### When Modifying the Strategy
 
 - Adding a method to `*ManualCommitStrategy` is enough — there is no interface to satisfy, and no second implementation to keep in step

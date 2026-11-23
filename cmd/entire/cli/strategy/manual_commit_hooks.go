@@ -2162,13 +2162,17 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 	if !isHome {
 		state.LastCheckpointID = result.CheckpointID
 		pendingStepCount := state.StepCount
-		resetCheckpointWindow(state)
-		// The checkpoint window was consumed, but the home worktree's pending
-		// work was not. Keep its existing SaveStep count, which keeps the
-		// session pending (State.HasPendingWork) until a home commit consumes it.
-		state.StepCount = pendingStepCount
-		state.AdvanceCheckpointWindow(result.TotalTranscriptLines)
-		state.CheckpointTranscriptSize = result.TranscriptSizeBaseline
+		if result.CaptureUnavailable {
+			state.ClearCondensationAttempt()
+			removeCompletedTaskRecords(state)
+			state.CaptureRepairCheckpointIDs = appendRepairCheckpointID(state.CaptureRepairCheckpointIDs, result.CheckpointID.String())
+			markFinalizeIncomplete(state)
+		} else {
+			resetCheckpointWindow(state)
+			state.StepCount = pendingStepCount
+			state.AdvanceCheckpointWindow(result.TotalTranscriptLines)
+			state.CheckpointTranscriptSize = result.TranscriptSizeBaseline
+		}
 		logging.Info(logCtx, "session guest-condensed from a sibling worktree; home worktree state untouched",
 			slog.String("strategy", "manual-commit"),
 			slog.String("session_id", state.SessionID),
@@ -2181,9 +2185,17 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 	// Update session state for the new base commit
 	newHead := head.Hash().String()
 	state.BaseCommit = newHead
-	resetCheckpointWindow(state)
-	state.AdvanceCheckpointWindow(result.TotalTranscriptLines)
-	state.CheckpointTranscriptSize = result.TranscriptSizeBaseline
+	if result.CaptureUnavailable {
+		state.StepCount = 0
+		state.ClearCondensationAttempt()
+		removeCompletedTaskRecords(state)
+		state.CaptureRepairCheckpointIDs = appendRepairCheckpointID(state.CaptureRepairCheckpointIDs, result.CheckpointID.String())
+		markFinalizeIncomplete(state)
+	} else {
+		resetCheckpointWindow(state)
+		state.AdvanceCheckpointWindow(result.TotalTranscriptLines)
+		state.CheckpointTranscriptSize = result.TranscriptSizeBaseline
+	}
 	state.FilesTouched = nil
 	state.TouchedFileHashes = nil
 
@@ -2795,6 +2807,9 @@ func (s *ManualCommitStrategy) hasNewTranscriptWork(ctx context.Context, state *
 					slog.String("transcript_path", state.TranscriptPath),
 					slog.Any("error", prepErr),
 				)
+				if state.AgentType == devinAgentType {
+					return false
+				}
 			}
 		}
 	}
@@ -3689,6 +3704,9 @@ func (s *ManualCommitStrategy) HandleTurnEnd(ctx context.Context, state *Session
 			slog.Int("error_count", errCount),
 		)
 	}
+	if state.AgentType == devinAgentType {
+		s.repairUnavailableCaptures(ctx, state)
+	}
 
 	// Advance CheckpointTranscriptStart to the actual transcript end after
 	// mid-turn commits. When an agent commits mid-turn (e.g., Codex "commit/push"),
@@ -3842,6 +3860,105 @@ var errTurnEndDeadline = errors.New("turn-end finalize deadline exceeded")
 // transcript, and a failed write leaves its own checkpoint so. Both record
 // capture degradation and keep the affected TurnCheckpointIDs: a repeated
 // Stop in the same turn retries them, and turn start clears them.
+func appendRepairCheckpointID(ids []string, checkpointID string) []string {
+	for _, existing := range ids {
+		if existing == checkpointID {
+			return ids
+		}
+	}
+	return append(ids, checkpointID)
+}
+
+func (s *ManualCommitStrategy) prepareFinalizeTranscript(ctx context.Context, logCtx context.Context, repo *git.Repository, ag agent.Agent, state *SessionState, fullTranscript []byte) (redact.RedactedBytes, []checkpoint.TranscriptAsset, bool, bool) {
+	fullTranscript = agent.SanitizeTranscriptForStorage(ag, fullTranscript)
+
+	var finalizeAssets []checkpoint.TranscriptAsset
+	externalizationRan := false
+	if settings.IsImageExternalizationEnabled(ctx) {
+		rewritten, assets, exErr := extractSessionImages(state.AgentType, fullTranscript)
+		if exErr != nil {
+			logging.Warn(logCtx, "finalize: image externalization failed; leaving transcript inline",
+				slog.String("session_id", state.SessionID),
+				slog.String("error", exErr.Error()),
+			)
+		} else {
+			fullTranscript = rewritten
+			finalizeAssets = assets
+			externalizationRan = true
+		}
+	}
+	finalizeAssets = append(finalizeAssets, sidecarSessionImages(ctx, logCtx, ag, state)...)
+	_, sidecarCapable := agent.AsSidecarImageProvider(ag)
+
+	redactedTranscript, redactOK := redactFinalizedTranscript(logCtx, repo, state.SessionID, fullTranscript)
+	if !redactOK {
+		return redact.RedactedBytes{}, nil, false, false
+	}
+	return redactedTranscript, finalizeAssets, sidecarCapable || !externalizationRan, true
+}
+
+func (s *ManualCommitStrategy) repairUnavailableCaptures(ctx context.Context, state *SessionState) {
+	if state.AgentType != devinAgentType || len(state.CaptureRepairCheckpointIDs) == 0 {
+		return
+	}
+	logCtx := logging.WithComponent(ctx, "checkpoint")
+	ag, agErr := agent.GetByAgentType(state.AgentType)
+	if agErr != nil {
+		ag = nil
+	}
+	fullTranscript, _, devinErr := devinCondensationTranscript(ctx, ag, state)
+	if devinErr != nil || len(fullTranscript) == 0 {
+		return
+	}
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		return
+	}
+	defer repo.Close()
+	redactedTranscript, assets, preserveAssets, ok := s.prepareFinalizeTranscript(ctx, logCtx, repo, ag, state, fullTranscript)
+	if !ok {
+		return
+	}
+	stores, err := checkpoint.Open(ctx, repo, s.hookCheckpointStoreOptions(ctx))
+	if err != nil {
+		return
+	}
+	store := stores.Persistent
+	inTurn := make(map[string]bool, len(state.TurnCheckpointIDs))
+	for _, turnID := range state.TurnCheckpointIDs {
+		inTurn[turnID] = true
+	}
+	kept := make([]string, 0, len(state.CaptureRepairCheckpointIDs))
+	for _, cpIDStr := range state.CaptureRepairCheckpointIDs {
+		if inTurn[cpIDStr] {
+			kept = append(kept, cpIDStr)
+			continue
+		}
+		cpID, err := id.NewCheckpointID(cpIDStr)
+		if err != nil {
+			kept = append(kept, cpIDStr)
+			continue
+		}
+		writeErr := store.Write(ctx, checkpoint.SessionTranscript(checkpoint.UpdateOptions{
+			CheckpointID:            cpID,
+			SessionID:               state.SessionID,
+			Transcript:              redactedTranscript,
+			Assets:                  assets,
+			PreserveAssetsWhenEmpty: preserveAssets,
+			Agent:                   state.AgentType,
+			TranscriptCaptureStatus: "repaired",
+		}))
+		if writeErr != nil {
+			kept = append(kept, cpIDStr)
+			continue
+		}
+		logging.Info(logCtx, "repaired unavailable transcript capture",
+			slog.String("session_id", state.SessionID),
+			slog.String("checkpoint_id", cpIDStr))
+	}
+	state.CaptureRepairCheckpointIDs = kept
+}
+
 func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, state *SessionState, deadline time.Time) int {
 	if len(state.TurnCheckpointIDs) == 0 {
 		return 0 // No mid-turn commits to finalize
@@ -3870,55 +3987,70 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 
 	// Read full transcript from live transcript file, re-resolving the path if the
 	// agent relocated it mid-session (e.g., Cursor CLI flat → nested layout change).
-	if state.TranscriptPath == "" {
-		logging.Warn(logCtx, "finalize: no transcript path, skipping",
-			slog.String("session_id", state.SessionID),
-		)
-		markFinalizeIncomplete(state)
-		return 1
-	}
-
-	transcriptPath, resolveErr := resolveTranscriptPath(state)
-	if resolveErr != nil {
-		logging.Warn(logCtx, "finalize: transcript path resolution failed, skipping",
-			slog.String("session_id", state.SessionID),
-			slog.Any("error", resolveErr),
-		)
-		markFinalizeIncomplete(state)
-		return 1
-	}
-
 	ag, _ := agent.GetByAgentType(state.AgentType) //nolint:errcheck // ag may be nil for unknown agent types; ExtractSkillEvents handles nil
 
-	fullTranscript, err := agent.ReadTranscriptFile(transcriptPath)
-	if err != nil || len(fullTranscript) == 0 {
-		// A late-transcript agent (agy) writes its transcript AFTER the Stop
-		// hook, so an empty file here is the placeholder PrepareTranscript
-		// materialised when the flush lost the race, not a read failure.
-		// Keeping TurnCheckpointIDs lets another Stop in this turn finalize
-		// them, but agy usually sends only one, so the checkpoints normally
-		// keep their provisional transcripts and the turn reports degraded
-		// capture.
-		if _, late := agent.AsLateTranscriptWriter(ag); late && err == nil {
-			logging.Info(logCtx, "finalize: late-transcript agent has not flushed yet, deferring",
+	var fullTranscript []byte
+	if state.AgentType == devinAgentType {
+		var devinErr error
+		fullTranscript, _, devinErr = devinCondensationTranscript(ctx, ag, state)
+		if devinErr != nil || len(fullTranscript) == 0 {
+			logging.Warn(logCtx, "finalize: devin transcript unavailable, skipping",
 				slog.String("session_id", state.SessionID),
-				slog.String("transcript_path", state.TranscriptPath),
-				slog.Int("checkpoint_count", len(state.TurnCheckpointIDs)),
+				slog.Any("error", devinErr),
 			)
 			markFinalizeIncomplete(state)
 			return 1
 		}
-		msg := "finalize: empty transcript, skipping"
-		if err != nil {
-			msg = "finalize: failed to read transcript, skipping"
+	} else {
+		if state.TranscriptPath == "" {
+			logging.Warn(logCtx, "finalize: no transcript path, skipping",
+				slog.String("session_id", state.SessionID),
+			)
+			markFinalizeIncomplete(state)
+			return 1
 		}
-		logging.Warn(logCtx, msg,
-			slog.String("session_id", state.SessionID),
-			slog.String("transcript_path", state.TranscriptPath),
-			slog.Any("error", err),
-		)
-		markFinalizeIncomplete(state)
-		return 1
+
+		transcriptPath, resolveErr := resolveTranscriptPath(state)
+		if resolveErr != nil {
+			logging.Warn(logCtx, "finalize: transcript path resolution failed, skipping",
+				slog.String("session_id", state.SessionID),
+				slog.Any("error", resolveErr),
+			)
+			markFinalizeIncomplete(state)
+			return 1
+		}
+
+		var readErr error
+		fullTranscript, readErr = agent.ReadTranscriptFile(transcriptPath)
+		if readErr != nil || len(fullTranscript) == 0 {
+			// A late-transcript agent (agy) writes its transcript AFTER the Stop
+			// hook, so an empty file here is the placeholder PrepareTranscript
+			// materialised when the flush lost the race, not a read failure.
+			// Keeping TurnCheckpointIDs lets another Stop in this turn finalize
+			// them, but agy usually sends only one, so the checkpoints normally
+			// keep their provisional transcripts and the turn reports degraded
+			// capture.
+			if _, late := agent.AsLateTranscriptWriter(ag); late && readErr == nil {
+				logging.Info(logCtx, "finalize: late-transcript agent has not flushed yet, deferring",
+					slog.String("session_id", state.SessionID),
+					slog.String("transcript_path", state.TranscriptPath),
+					slog.Int("checkpoint_count", len(state.TurnCheckpointIDs)),
+				)
+				markFinalizeIncomplete(state)
+				return 1
+			}
+			msg := "finalize: empty transcript, skipping"
+			if readErr != nil {
+				msg = "finalize: failed to read transcript, skipping"
+			}
+			logging.Warn(logCtx, msg,
+				slog.String("session_id", state.SessionID),
+				slog.String("transcript_path", state.TranscriptPath),
+				slog.Any("error", readErr),
+			)
+			markFinalizeIncomplete(state)
+			return 1
+		}
 	}
 
 	// Open repository (needed for the checkpoint store)
@@ -3942,64 +4074,7 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 	// handler, which snapshots state.SkillEvents growth around HandleTurnEnd.
 	_, skillEvents := persistNewSkillEvents(state, agent.ExtractSkillEvents(ctx, ag, fullTranscript, 0))
 
-	// Sanitize before externalizing and redacting, matching CondenseSession's
-	// sanitize -> externalize -> redact order. Skill events above are extracted from
-	// the pre-sanitization bytes because they are session telemetry rather than
-	// stored transcript content.
-	fullTranscript = agent.SanitizeTranscriptForStorage(ag, fullTranscript)
-
-	// Redact secrets before writing. Checkpoint store methods require
-	// pre-redacted in-memory transcript content from callers. The live
-	// transcript on disk is still treated as raw/untrusted input, so redact it
-	// here before anything is persisted to the metadata branch.
-	//
-	// On failure: drop the transcript but continue writing checkpoint metadata
-	// (files touched, prompts). Hooks run without user interaction
-	// so there is no retry path — preserving partial metadata is better than
-	// losing everything. Persisting an unredacted transcript would be worse.
-	// Run the regex-only pipeline over the transcript — OPF runs later in
-	// the pre-push rewrite path, which re-redacts these regex-only blobs
-	// and produces OPF-applied (9-layer) commits before the push goes out.
-	// Externalize inline images BEFORE redaction, mirroring CondenseSession, so the
-	// finalized (authoritative, full-session) transcript keeps its placeholders and
-	// matching assets instead of re-inlining what condensation lifted out. Opt-in;
-	// a no-codec agent or a transcript with no images is a no-op.
-	var finalizeAssets []checkpoint.TranscriptAsset
-	// Whether externalization actually RAN at finalize. When it did not (flag
-	// off here even though it may have been on at condensation — e.g. an
-	// ENTIRE_EXTERNALIZE_IMAGES env override not inherited by the hook
-	// process, or settings toggled mid-session), an empty finalizeAssets means
-	// "extraction didn't run", NOT "the transcript has no images" — clearing
-	// the previously-stored assets would permanently lose them (the re-inlined
-	// base64 is destroyed by redaction below).
-	externalizationRan := false
-	if settings.IsImageExternalizationEnabled(ctx) {
-		rewritten, assets, exErr := extractSessionImages(state.AgentType, fullTranscript)
-		if exErr != nil {
-			logging.Warn(logCtx, "finalize: image externalization failed; leaving transcript inline",
-				slog.String("session_id", state.SessionID),
-				slog.String("error", exErr.Error()),
-			)
-		} else {
-			fullTranscript = rewritten
-			finalizeAssets = assets
-			externalizationRan = true
-		}
-	}
-	// Re-capture sidecar images (e.g. Cursor's SQLite store) so a finalize that
-	// rewrites the transcript re-writes them too. When the full transcript differs
-	// from the stored (mid-turn) one, writeAssets clears the whole assets/ folder
-	// and re-writes only these assets — omitting the sidecar images here would drop
-	// what CondenseSession captured. Content-hash names make this idempotent with
-	// condensation's write; when the transcript is unchanged, writeAssets is not
-	// called and condensation's assets are left intact.
-	finalizeAssets = append(finalizeAssets, sidecarSessionImages(ctx, logCtx, ag, state)...)
-	// Sidecar capture is best-effort: a transient miss here (sqlite3 locked/timed
-	// out) yields no assets. For a sidecar-capable agent, preserve the assets a
-	// prior condensation stored rather than letting an empty set clear them.
-	_, sidecarCapable := agent.AsSidecarImageProvider(ag)
-
-	redactedTranscript, redactOK := redactFinalizedTranscript(logCtx, repo, state.SessionID, fullTranscript)
+	redactedTranscript, finalizeAssets, preserveAssetsWhenEmpty, redactOK := s.prepareFinalizeTranscript(ctx, logCtx, repo, ag, state, fullTranscript)
 	if !redactOK {
 		markFinalizeIncomplete(state)
 		return 1
@@ -4046,7 +4121,7 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 		SessionID:               state.SessionID,
 		Transcript:              redactedTranscript,
 		Assets:                  finalizeAssets,
-		PreserveAssetsWhenEmpty: sidecarCapable || !externalizationRan,
+		PreserveAssetsWhenEmpty: preserveAssetsWhenEmpty,
 		Prompts:                 prompts,
 		Agent:                   state.AgentType,
 		SkillEvents:             skillEvents,
@@ -4069,7 +4144,21 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 	// transcript lines when condensing, and carryForwardRemainingFiles resets it to 0
 	// when carry-forward is active. Overwriting here would break carry-forward by making
 	// sessionHasNewContent think the transcript is fully consumed (no growth).
+	finalizedIDs := append([]string(nil), state.TurnCheckpointIDs...)
 	state.TurnCheckpointIDs = nil
+	if len(state.CaptureRepairCheckpointIDs) > 0 {
+		finalized := make(map[string]bool, len(finalizedIDs))
+		for _, finalizedID := range finalizedIDs {
+			finalized[finalizedID] = true
+		}
+		kept := make([]string, 0, len(state.CaptureRepairCheckpointIDs))
+		for _, repairID := range state.CaptureRepairCheckpointIDs {
+			if !finalized[repairID] {
+				kept = append(kept, repairID)
+			}
+		}
+		state.CaptureRepairCheckpointIDs = kept
+	}
 
 	return errCount
 }

@@ -461,6 +461,15 @@ func (s *treeWriter) applyTranscriptBackfill(ctx context.Context, opts UpdateOpt
 		}
 	}
 
+	if _, hasSessionMetadata := entries[checkpointSubtreePath(sessionDir, paths.MetadataFileName)]; hasSessionMetadata {
+		if err := s.updateSessionMetadata(sessionDir, entries, func(metadata *Metadata) {
+			metadata.TranscriptCaptureStatus = opts.TranscriptCaptureStatus
+			metadata.TranscriptCaptureReason = opts.TranscriptCaptureReason
+		}); err != nil {
+			return plumbing.ZeroHash, fmt.Errorf("failed to update transcript capture status: %w", err)
+		}
+	}
+
 	return s.buildCheckpointSubtree(ctx, entries, basePath)
 }
 
@@ -769,6 +778,8 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 		ReviewPrompt:                redact.String(opts.ReviewPrompt),
 		InvestigateRunID:            opts.InvestigateRunID,
 		InvestigateTopic:            redact.String(opts.InvestigateTopic),
+		TranscriptCaptureStatus:     opts.TranscriptCaptureStatus,
+		TranscriptCaptureReason:     opts.TranscriptCaptureReason,
 		LegacyInitialAttribution:    legacyInitialAttribution,
 		LegacyPromptAttributions:    legacyPromptAttributions,
 	}
