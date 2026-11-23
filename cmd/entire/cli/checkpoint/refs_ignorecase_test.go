@@ -54,6 +54,77 @@ func openCountingRepo(t *testing.T, dir string) (*git.Repository, *countingRefSt
 	return repo, counting
 }
 
+// SpellingTips reports each distinct tip under the spellings that hold a ref,
+// asked by either name. It reads both even where git recorded a case-sensitive
+// filesystem: a caller that must not miss a version of the checkpoint cannot
+// rely on that setting.
+func TestSpellingTips(t *testing.T) {
+	t.Parallel()
+	canonical := mustRefName(t, foldableULID)
+	folded, ok := FoldedRefName(foldableULID)
+	require.True(t, ok)
+
+	t.Run("both spellings", func(t *testing.T) {
+		t.Parallel()
+		dir, earlier, later := shardSpellingRepo(t, "false")
+		testutil.RunGit(t, dir, "update-ref", canonical.String(), earlier)
+		testutil.RunGit(t, dir, "pack-refs", "--all")
+		testutil.RunGit(t, dir, "update-ref", folded.String(), later)
+		testutil.RunGit(t, dir, "pack-refs", "--all")
+		repo, err := git.PlainOpen(dir)
+		require.NoError(t, err)
+
+		want := []plumbing.Hash{plumbing.NewHash(earlier), plumbing.NewHash(later)}
+		assert.ElementsMatch(t, want, SpellingTips(repo, nil, canonical))
+		assert.ElementsMatch(t, want, SpellingTips(repo, nil, folded))
+	})
+
+	t.Run("other spelling only", func(t *testing.T) {
+		t.Parallel()
+		dir, earlier, _ := shardSpellingRepo(t, "false")
+		testutil.RunGit(t, dir, "update-ref", folded.String(), earlier)
+		testutil.RunGit(t, dir, "pack-refs", "--all")
+		repo, err := git.PlainOpen(dir)
+		require.NoError(t, err)
+
+		assert.Equal(t, []plumbing.Hash{plumbing.NewHash(earlier)}, SpellingTips(repo, nil, canonical))
+	})
+
+	// On a case-insensitive filesystem both names resolve to one loose ref.
+	t.Run("one loose ref", func(t *testing.T) {
+		t.Parallel()
+		dir, earlier, _ := shardSpellingRepo(t, "false")
+		testutil.RunGit(t, dir, "update-ref", canonical.String(), earlier)
+		repo, err := git.PlainOpen(dir)
+		require.NoError(t, err)
+
+		assert.Equal(t, []plumbing.Hash{plumbing.NewHash(earlier)}, SpellingTips(repo, nil, canonical))
+	})
+
+	t.Run("neither spelling", func(t *testing.T) {
+		t.Parallel()
+		dir, _, _ := shardSpellingRepo(t, "false")
+		repo, err := git.PlainOpen(dir)
+		require.NoError(t, err)
+
+		assert.Empty(t, SpellingTips(repo, nil, canonical))
+	})
+
+	t.Run("listed tips", func(t *testing.T) {
+		t.Parallel()
+		dir, earlier, _ := shardSpellingRepo(t, "false")
+		testutil.RunGit(t, dir, "update-ref", canonical.String(), earlier)
+		testutil.RunGit(t, dir, "pack-refs", "--all")
+		repo, err := git.PlainOpen(dir)
+		require.NoError(t, err)
+		listedTip := plumbing.NewHash("1111111111111111111111111111111111111111")
+
+		got := SpellingTips(repo, map[plumbing.ReferenceName]plumbing.Hash{canonical: listedTip}, canonical)
+
+		assert.Equal(t, []plumbing.Hash{listedTip}, got, "a listed tip is used as it is")
+	})
+}
+
 // Splits only form on a case-insensitive filesystem, where git sets
 // core.ignorecase. Elsewhere a lookup whose canonical name resolves reads one
 // ref, not two.

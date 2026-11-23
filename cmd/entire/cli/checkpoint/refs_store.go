@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -222,17 +223,7 @@ func StoredRef(
 	listed map[plumbing.ReferenceName]plumbing.Hash,
 	ref plumbing.ReferenceName,
 ) (name plumbing.ReferenceName, tip plumbing.Hash, err error) {
-	lookup := func(name plumbing.ReferenceName) (plumbing.Hash, error) {
-		if hash, ok := listed[name]; ok {
-			return hash, nil
-		}
-		r, err := repo.Reference(name, true)
-		if err != nil {
-			return plumbing.ZeroHash, err //nolint:wrapcheck // callers branch on plumbing.ErrReferenceNotFound
-		}
-		return r.Hash(), nil
-	}
-	tip, err = lookup(ref)
+	tip, err = lookupRefTip(repo, listed, ref)
 	other, hasOther := OtherShardSpelling(ref)
 	if !hasOther || (err != nil && !errors.Is(err, plumbing.ErrReferenceNotFound)) {
 		return ref, tip, err
@@ -243,7 +234,7 @@ func StoredRef(
 	if err == nil && !foldsCase(repo) {
 		return ref, tip, nil
 	}
-	otherTip, otherErr := lookup(other)
+	otherTip, otherErr := lookupRefTip(repo, listed, other)
 	switch {
 	case err == nil && otherErr != nil:
 		// The name asked for stands whatever became of the second lookup.
@@ -320,6 +311,39 @@ func readFoldsCase(repo *git.Repository) bool {
 	default:
 		return false
 	}
+}
+
+// lookupRefTip is the tip of name: its listed tip when listed has one,
+// otherwise a resolving lookup. listed may be nil.
+func lookupRefTip(repo *git.Repository, listed map[plumbing.ReferenceName]plumbing.Hash, name plumbing.ReferenceName) (plumbing.Hash, error) {
+	if hash, ok := listed[name]; ok {
+		return hash, nil
+	}
+	r, err := repo.Reference(name, true)
+	if err != nil {
+		return plumbing.ZeroHash, err //nolint:wrapcheck // callers branch on plumbing.ErrReferenceNotFound
+	}
+	return r.Hash(), nil
+}
+
+// SpellingTips is each distinct tip of the refs ref's checkpoint holds, under
+// either spelling of its shard, read the way StoredRef reads them. StoredRef picks
+// one; a checkpoint whose two refs diverged holds a version under each, so a
+// caller that must account for every version uses this instead. Unlike
+// StoredRef it reads both names whatever core.ignorecase says. A name that
+// does not resolve contributes nothing.
+func SpellingTips(repo *git.Repository, listed map[plumbing.ReferenceName]plumbing.Hash, ref plumbing.ReferenceName) []plumbing.Hash {
+	names := []plumbing.ReferenceName{ref}
+	if other, ok := OtherShardSpelling(ref); ok {
+		names = append(names, other)
+	}
+	tips := make([]plumbing.Hash, 0, len(names))
+	for _, name := range names {
+		if tip, err := lookupRefTip(repo, listed, name); err == nil && !slices.Contains(tips, tip) {
+			tips = append(tips, tip)
+		}
+	}
+	return tips
 }
 
 // OtherShardSpelling returns the one other name ref's checkpoint can be stored
