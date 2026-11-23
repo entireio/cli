@@ -81,7 +81,9 @@ Pi, one native message per call (no fragments to merge): `model` is `message.mod
   writes `exitCode` when a `function_call_output` is the JSON envelope older
   shell tools write, `{"output":…,"metadata":{"exit_code":N}}`: the
   envelope's `output` becomes the result's output, and a non-zero code sets
-  `status` to `error`. Older lines and other agents' lines have none of them.
+  `status` to `error`. Only an object with exactly those two keys is read
+  this way, and never the output of an MCP tool (a name containing `__`),
+  whose schema is its own. Older lines and other agents' lines have none of them.
 - Image: passed through from the source verbatim. The image source is either
   inline base64 or an `entire-asset:assets/…` placeholder left by image
   externalization.

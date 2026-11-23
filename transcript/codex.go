@@ -98,6 +98,7 @@ type codexToolSlot struct {
 	call       *codexCall
 	block      map[string]json.RawMessage
 	outputType string
+	name       string
 }
 
 type codexConverter struct {
@@ -241,7 +242,7 @@ func (c *codexConverter) responseItem(cl codexLine) {
 	case codexTypeFunctionCallOutput, codexTypeCustomToolCallOutput:
 		if slot, ok := c.tools[callID]; ok && slot.outputType == typ {
 			entry := toolResultEntry{output: codexToolOutputText(cl.Payload, typ), agentID: c.subagents[callID]}
-			if typ == codexTypeFunctionCallOutput {
+			if typ == codexTypeFunctionCallOutput && !isCodexMCPTool(slot.name) {
 				unwrapCodexExecOutput(&entry)
 			}
 			slot.block["result"] = buildToolResult(entry)
@@ -290,7 +291,7 @@ func (c *codexConverter) toolCall(ts string, p codexPayload, block map[string]js
 	call := c.openCall(ts)
 	call.tools = append(call.tools, block)
 	if p.CallID != "" {
-		c.tools[p.CallID] = codexToolSlot{call: call, block: block, outputType: outputType}
+		c.tools[p.CallID] = codexToolSlot{call: call, block: block, outputType: outputType, name: p.Name}
 	}
 }
 
@@ -495,14 +496,26 @@ func codexToolUseBlock(p codexPayload) map[string]json.RawMessage {
 	return block
 }
 
+// isCodexMCPTool reports whether name is an MCP tool, which Codex names
+// "server__tool" (newer versions "mcp__server__tool"). MCP tools return their
+// own schemas, so their output is never read as a Codex exec envelope.
+func isCodexMCPTool(name string) bool {
+	return strings.Contains(name, "__")
+}
+
 // unwrapCodexExecOutput reads the exit code out of the JSON envelope older
-// Codex shell tools (and forks built on them, such as Sarvam Code) write as a
-// function_call_output: {"output":"...","metadata":{"exit_code":N,...}}. The
-// envelope's output becomes the result's output, and a non-zero exit code
-// marks the call failed. Any other output, including JSON without an integer
-// metadata.exit_code, is left as it is.
+// Codex shell tools (and forks built on them, such as Sarvam Code, which wrap
+// every built-in tool's result) write as a function_call_output:
+// {"output":"...","metadata":{"exit_code":N,...}}. The envelope's output
+// becomes the result's output, and a non-zero exit code marks the call failed.
+// Only an object whose keys are exactly output and metadata, with an integer
+// metadata.exit_code, is unwrapped; any other output is left as it is.
 func unwrapCodexExecOutput(entry *toolResultEntry) {
 	if !strings.HasPrefix(entry.output, "{") {
+		return
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal([]byte(entry.output), &fields) != nil || len(fields) != 2 {
 		return
 	}
 	var envelope struct {

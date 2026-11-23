@@ -12,6 +12,7 @@ func TestCompact_CodexExecOutputEnvelope(t *testing.T) {
 
 	tests := []struct {
 		name   string
+		tool   string
 		output string
 		result string
 	}{
@@ -31,6 +32,23 @@ func TestCompact_CodexExecOutputEnvelope(t *testing.T) {
 			result: `{"output":"{\"output\":\"x\",\"metadata\":{}}","status":"success"}`,
 		},
 		{
+			name:   "a non-shell built-in tool's envelope is unwrapped",
+			tool:   "write_file",
+			output: `{"output":"Success","metadata":{"exit_code":0}}`,
+			result: `{"output":"Success","status":"success","exitCode":0}`,
+		},
+		{
+			name:   "an MCP tool returning the same shape is left as is",
+			tool:   "mcp__ci__run",
+			output: `{"output":"","metadata":{"exit_code":1}}`,
+			result: `{"output":"{\"output\":\"\",\"metadata\":{\"exit_code\":1}}","status":"success"}`,
+		},
+		{
+			name:   "an object with keys beyond output and metadata is left as is",
+			output: `{"output":"","metadata":{"exit_code":1},"job":"j1"}`,
+			result: `{"output":"{\"output\":\"\",\"metadata\":{\"exit_code\":1},\"job\":\"j1\"}","status":"success"}`,
+		},
+		{
 			name:   "plain text is left as is",
 			output: "Process exited with code 1",
 			result: `{"output":"Process exited with code 1","status":"success"}`,
@@ -39,9 +57,13 @@ func TestCompact_CodexExecOutputEnvelope(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			call := cxCall("t1", "c1")
+			if tt.tool != "" {
+				call = strings.Replace(call, `"name":"exec_command"`, `"name":"`+tt.tool+`"`, 1)
+			}
 			input := cxJoin(
 				`{"timestamp":"t0","type":"session_meta","payload":{"id":"s1"}}`,
-				cxCall("t1", "c1"),
+				call,
 				cxOutput("t2", "c1", tt.output),
 			)
 			out, err := Convert(input, agentOpts("codex"))
