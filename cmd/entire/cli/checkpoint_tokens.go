@@ -554,24 +554,24 @@ func writeCheckpointTokensText(w io.Writer, report checkpointTokensReport) {
 	case report.SessionCount > 1:
 		fmt.Fprintf(w, "Sessions:   %d\n", report.SessionCount)
 		if len(report.Agents) > 0 {
-			fmt.Fprintf(w, "Agents:     %s\n", strings.Join(report.Agents, ", "))
+			fmt.Fprintf(w, "Agents:     %s\n", terminalField(strings.Join(report.Agents, ", ")))
 		}
 		if len(report.Models) > 0 {
-			fmt.Fprintf(w, "Models:     %s\n", strings.Join(report.Models, ", "))
+			fmt.Fprintf(w, "Models:     %s\n", terminalField(strings.Join(report.Models, ", ")))
 		}
 	case report.SessionID != "":
-		fmt.Fprintf(w, "Session:    %s\n", report.SessionID)
+		fmt.Fprintf(w, "Session:    %s\n", terminalField(report.SessionID))
 		if report.Agent != "" {
-			fmt.Fprintf(w, "Agent:      %s\n", report.Agent)
+			fmt.Fprintf(w, "Agent:      %s\n", terminalField(report.Agent))
 		}
 		if report.Model != "" {
-			fmt.Fprintf(w, "Model:      %s\n", report.Model)
+			fmt.Fprintf(w, "Model:      %s\n", terminalField(report.Model))
 		}
 	case report.Agent != "":
-		fmt.Fprintf(w, "Agent:      %s\n", report.Agent)
+		fmt.Fprintf(w, "Agent:      %s\n", terminalField(report.Agent))
 	}
 	if report.Branch != "" {
-		fmt.Fprintf(w, "Branch:     %s\n", report.Branch)
+		fmt.Fprintf(w, "Branch:     %s\n", terminalField(report.Branch))
 	}
 
 	writeTokenUsageSection(w, report.Tokens)
