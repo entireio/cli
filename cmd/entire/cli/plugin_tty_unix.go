@@ -12,8 +12,9 @@ import "golang.org/x/sys/unix"
 // force-quits on a second Ctrl-C would do so on the first, dropping what it
 // had not flushed. A `kill -INT` sent to this process alone while it runs in
 // the foreground is indistinguishable and is not forwarded either; the plugin
-// is then killed after pluginCancelGrace. False when there is no controlling
-// terminal or it cannot be queried.
+// then runs on, unsignalled, until a second signal force-quits it
+// (ForceQuitPlugins). False when there is no controlling terminal or it
+// cannot be queried.
 func terminalSentInterrupt(pid int) bool {
 	tty, err := unix.Open("/dev/tty", unix.O_RDONLY|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
 	if err != nil {
