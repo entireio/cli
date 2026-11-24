@@ -107,6 +107,11 @@ type PluginManifest struct {
 	// Requires is the dependency list from the plugin's entire-plugin.yml
 	// at the installed tag.
 	Requires []PluginRequirement `yaml:"requires,omitempty"`
+	// Description is the one-line summary from the plugin's entire-plugin.yml
+	// at the installed tag. Root help lists a plugin only when this is set (see
+	// pluginHelpEntries), so it is recorded here to keep `entire --help`
+	// offline and free of plugin execution.
+	Description string `yaml:"description,omitempty"`
 }
 
 // PluginRequirement declares a dependency on another plugin. Shared between
@@ -142,7 +147,8 @@ type PluginMetadata struct {
 	// Name is the bare plugin name. When empty, derived from the repo URL
 	// basename (entire-run → run).
 	Name string `yaml:"name,omitempty"`
-	// Description is a one-line summary shown by info/search.
+	// Description is a one-line summary shown by info/search, and in root
+	// help once installed (copied into PluginManifest.Description).
 	Description string `yaml:"description,omitempty"`
 	// DownloadURL overrides the per-forge release-asset URL convention.
 	// Template placeholders: {name} {tag} {version} {os} {arch} {asset}.

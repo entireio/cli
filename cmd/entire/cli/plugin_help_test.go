@@ -1,0 +1,146 @@
+package cli
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// seedHelpPlugin writes a manifest for name and, when linked, a bin/ entry the
+// dispatcher would find. The bin entry is a stub: root help must never run it.
+func seedHelpPlugin(t *testing.T, pluginDir, name, description string, linked bool) {
+	t.Helper()
+	if err := SavePluginManifest(&PluginManifest{
+		Name:        name,
+		RepoURL:     "https://example.com/entire-" + name,
+		Tag:         "v1.0.0",
+		Description: description,
+	}); err != nil {
+		t.Fatalf("SavePluginManifest(%s): %v", name, err)
+	}
+	if !linked {
+		return
+	}
+	binDir := filepath.Join(pluginDir, pluginManagedBinSubdir)
+	if err := os.MkdirAll(binDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	// A stub that would fail loudly if help ever executed it.
+	if err := os.WriteFile(filepath.Join(binDir, pluginBinaryName(name)), []byte("#!/bin/sh\nexit 99\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func rootHelpOutput(t *testing.T, args ...string) string {
+	t.Helper()
+	root := NewRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs(args)
+	if err := root.Execute(); err != nil {
+		t.Fatalf("entire %v: %v", args, err)
+	}
+	return out.String()
+}
+
+func TestRootHelp_ListsOnlyDescribedLinkedPlugins(t *testing.T) { //nolint:paralleltest // mutates ENTIRE_PLUGIN_DIR
+	dir := withPluginDir(t)
+	seedHelpPlugin(t, dir, "zz-valid", "Does valid things", true)
+	seedHelpPlugin(t, dir, "aa-valid", "Comes first by name", true)
+	seedHelpPlugin(t, dir, "nodesc", "", true)
+	seedHelpPlugin(t, dir, "blank", "   ", true)
+	seedHelpPlugin(t, dir, "status", "Shadowed by the built-in", true)
+	seedHelpPlugin(t, dir, "cp", "Shadowed by a built-in alias", true)
+	seedHelpPlugin(t, dir, "ctrl", "evil\x1b[2Jrepaint", true)
+	seedHelpPlugin(t, dir, "bidi", "spoof\u202e", true)
+	seedHelpPlugin(t, dir, "long", strings.Repeat("x", maxPluginHelpDescriptionLen+1), true)
+	seedHelpPlugin(t, dir, "nolink", "Manifest without a bin entry", false)
+
+	for _, args := range [][]string{{"--help"}, {"help"}} {
+		out := rootHelpOutput(t, args...)
+		section := pluginHelpSection(t, out)
+		lines := strings.Split(strings.TrimSpace(section), "\n")
+		if len(lines) != 2 {
+			t.Fatalf("entire %v: plugin section = %q, want exactly the two valid plugins", args, section)
+		}
+		if !strings.HasPrefix(strings.TrimSpace(lines[0]), "aa-valid") || !strings.HasSuffix(lines[0], " Comes first by name") {
+			t.Errorf("entire %v: first plugin line = %q, want aa-valid sorted first", args, lines[0])
+		}
+		if !strings.HasPrefix(strings.TrimSpace(lines[1]), "zz-valid") || !strings.HasSuffix(lines[1], " Does valid things") {
+			t.Errorf("entire %v: second plugin line = %q", args, lines[1])
+		}
+		for _, hidden := range []string{"nodesc", "blank", "Shadowed", "evil", "spoof", "xxxx", "nolink"} {
+			if strings.Contains(section, hidden) {
+				t.Errorf("entire %v: plugin section lists %q:\n%s", args, hidden, section)
+			}
+		}
+	}
+}
+
+// pluginHelpSection returns the lines between the "Plugin Commands:" header and
+// the next section, failing when the header is absent or misplaced.
+func pluginHelpSection(t *testing.T, out string) string {
+	t.Helper()
+	const header = "\nPlugin Commands:\n"
+	start := strings.Index(out, header)
+	if start < 0 {
+		t.Fatalf("root help has no Plugin Commands section:\n%s", out)
+	}
+	if addl := strings.Index(out, "\nAdditional Commands:\n"); addl < 0 || addl > start {
+		t.Errorf("Plugin Commands should follow the built-in command groups:\n%s", out)
+	}
+	flags := strings.Index(out, "\nFlags:\n")
+	if flags < start {
+		t.Fatalf("Plugin Commands should precede Flags:\n%s", out)
+	}
+	return out[start+len(header) : flags]
+}
+
+func TestRootHelp_NoPluginSectionWithoutDescribedPlugins(t *testing.T) { //nolint:paralleltest // mutates ENTIRE_PLUGIN_DIR
+	dir := withPluginDir(t)
+	seedHelpPlugin(t, dir, "nodesc", "", true)
+	if out := rootHelpOutput(t, "--help"); strings.Contains(out, "Plugin Commands") {
+		t.Errorf("root help shows an empty Plugin Commands section:\n%s", out)
+	}
+}
+
+func TestSubcommandHelp_OmitsPluginSection(t *testing.T) { //nolint:paralleltest // mutates ENTIRE_PLUGIN_DIR
+	dir := withPluginDir(t)
+	seedHelpPlugin(t, dir, "valid", "Does valid things", true)
+	for _, args := range [][]string{{"plugin", "--help"}, {"help", "status"}} {
+		out := rootHelpOutput(t, args...)
+		if strings.Contains(out, "Plugin Commands") || strings.Contains(out, "Does valid things") {
+			t.Errorf("entire %v lists plugins; only root help should:\n%s", args, out)
+		}
+		if !strings.Contains(out, "Usage:") {
+			t.Errorf("entire %v lost its usage section:\n%s", args, out)
+		}
+	}
+}
+
+func TestInstallPluginFromRepo_CopiesDescription(t *testing.T) { //nolint:paralleltest // mutates env
+	withIsolatedPluginEnv(t)
+	srv := pluginReleaseServer(t, "0.1.0")
+	meta := fmt.Sprintf("name: demo\ndescription: Demo plugin for tests\ndownload_url: \"%s/dl/{tag}/{asset}\"\n", srv.URL)
+	repoURL := newTaggedPluginRepo(t, meta, remoteTestTagOld)
+
+	res, err := InstallPluginFromRepo(context.Background(), repoURL, "", RemoteInstallOptions{})
+	if err != nil {
+		t.Fatalf("InstallPluginFromRepo: %v", err)
+	}
+	if res.Manifest.Description != "Demo plugin for tests" {
+		t.Errorf("result manifest description = %q", res.Manifest.Description)
+	}
+	saved, err := LoadPluginManifest("demo")
+	if err != nil || saved == nil {
+		t.Fatalf("LoadPluginManifest: %v, %v", saved, err)
+	}
+	if saved.Description != "Demo plugin for tests" {
+		t.Errorf("saved manifest description = %q, want it copied from %s", saved.Description, pluginMetadataFileName)
+	}
+}

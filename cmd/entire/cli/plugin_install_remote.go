@@ -204,6 +204,7 @@ func installRepoAtTag(ctx context.Context, repoURL, expectedName, tag string, op
 	}
 	if meta != nil {
 		manifest.Requires = meta.Requires
+		manifest.Description = meta.Description
 	}
 	// End the step before placement: it may wait for the plugin tree lock,
 	// which announces that wait on the same writer, and two spinners would

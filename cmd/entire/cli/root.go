@@ -239,6 +239,9 @@ func NewRootCmd() *cobra.Command {
 
 	cmd.SetVersionTemplate(versionString())
 
+	// List described managed plugins in root help only (see plugin_help.go).
+	usePluginCommandsInRootHelp(cmd)
+
 	// Replace default help command with custom one that supports -t flag
 	cmd.SetHelpCommand(exemptFromConfigCheck(NewHelpCmd(cmd)))
 
