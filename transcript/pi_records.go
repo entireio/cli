@@ -292,8 +292,8 @@ func piAssistantCalls(raw json.RawMessage) (calls []string, visible bool) {
 	if pijsonl.DecodeStringContent(raw) != "" {
 		return nil, true
 	}
-	var items []pijsonl.ContentItem
-	if json.Unmarshal(raw, &items) != nil {
+	items, ok := piContentItems(raw)
+	if !ok {
 		return nil, false
 	}
 	for _, it := range items {
