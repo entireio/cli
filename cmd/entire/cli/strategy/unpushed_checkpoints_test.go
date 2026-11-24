@@ -23,11 +23,11 @@ func initCountTestRepo(t *testing.T) (dir, first, second string) {
 	testutil.InitRepo(t, dir)
 	testutil.WriteFile(t, dir, "f.txt", "one")
 	testutil.GitAdd(t, dir, "f.txt")
-	testutil.GitCommit(t, dir, "first")
+	testutil.GitCommit(t, dir, "Checkpoint: a1b2c3d4e5f6")
 	first = testutil.GetHeadHash(t, dir)
 	testutil.WriteFile(t, dir, "f.txt", "two")
 	testutil.GitAdd(t, dir, "f.txt")
-	testutil.GitCommit(t, dir, "second")
+	testutil.GitCommit(t, dir, "Checkpoint: b1b2c3d4e5f6")
 	second = testutil.GetHeadHash(t, dir)
 	return dir, first, second
 }
@@ -84,6 +84,31 @@ func TestCountUnpushedCheckpoints_GitBranch_TrackingRefAbsentCountsAll(t *testin
 	got, err := CountUnpushedCheckpoints(context.Background(), "origin")
 	require.NoError(t, err)
 	assert.Equal(t, 2, got, "absent tracking ref counts every v1 commit (deferred-publish reading)")
+}
+
+// Not parallel: uses t.Chdir()
+func TestCountUnpushedCheckpoints_GitBranch_SkipsNonCheckpointCommits(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	commit := func(subject string) {
+		testutil.WriteFile(t, dir, "f.txt", subject)
+		testutil.GitAdd(t, dir, "f.txt")
+		testutil.GitCommit(t, dir, subject)
+	}
+	t.Chdir(dir)
+	count := func() int {
+		testutil.GitUpdateRef(t, dir, v1LocalRef, testutil.GetHeadHash(t, dir))
+		got, err := CountUnpushedCheckpoints(context.Background(), "origin")
+		require.NoError(t, err)
+		return got
+	}
+
+	commit("Initialize metadata ref")
+	assert.Equal(t, 0, count(), "the initialize root commit carries no checkpoint")
+
+	commit("Checkpoint: a1b2c3d4e5f6")
+	commit("Finalize transcript for Checkpoint: a1b2c3d4e5f6")
+	assert.Equal(t, 1, count(), "a checkpoint and its finalize commit count once")
 }
 
 // Not parallel: uses t.Chdir()

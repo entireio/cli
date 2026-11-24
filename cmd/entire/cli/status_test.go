@@ -2911,7 +2911,7 @@ func checkpointSyncTestCommit(t *testing.T, name, content string) string {
 	t.Helper()
 	testutil.WriteFile(t, ".", name, content)
 	testutil.GitAdd(t, ".", name)
-	testutil.GitCommit(t, ".", "commit "+name)
+	testutil.GitCommit(t, ".", "Checkpoint: "+name) // v1 counts checkpoint subjects
 	return testutil.GetHeadHash(t, ".")
 }
 
