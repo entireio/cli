@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -14,9 +15,10 @@ import (
 type helpPluginBin int
 
 const (
-	binNone  helpPluginBin = iota // manifest only, nothing dispatchable
-	binPkg                        // hardlink to pkg/<name>/entire-<name>, as a release install leaves it
-	binOther                      // an unrelated file, as a local --force install over a release leaves it
+	binNone       helpPluginBin = iota // manifest only, nothing dispatchable
+	binPkg                             // hardlink to pkg/<name>/entire-<name>, a release install's fallback
+	binPkgSymlink                      // symlink to pkg/<name>/entire-<name>, what a release install leaves on Unix
+	binOther                           // an unrelated file, as a local --force install over a release leaves it
 )
 
 // seedHelpPlugin writes a manifest and pkg/ binary for name, plus a bin/ entry
@@ -45,6 +47,12 @@ func seedHelpPlugin(t *testing.T, pluginDir, name, description string, bin helpP
 		t.Fatal(err)
 	}
 	entry := filepath.Join(binDir, pluginBinaryName(name))
+	if bin == binPkgSymlink {
+		if err := os.Symlink(pkgBin, entry); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
 	if bin == binPkg {
 		if err := os.Link(pkgBin, entry); err != nil {
 			t.Fatal(err)
@@ -122,6 +130,21 @@ func pluginHelpSection(t *testing.T, out string) string {
 		t.Fatalf("Plugin Commands should precede Flags:\n%s", out)
 	}
 	return out[start+len(header) : flags]
+}
+
+// A release install on Unix links bin/ to pkg/ with a symlink first, so the
+// identity check must follow it. Pins that against a later switch to Lstat or
+// a no-symlink read, which would silently empty the section.
+func TestRootHelp_ListsSymlinkedReleaseInstall(t *testing.T) { //nolint:paralleltest // mutates ENTIRE_PLUGIN_DIR
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("release installs never symlink on Windows (see plugin_store_windows.go)")
+	}
+	dir := withPluginDir(t)
+	seedHelpPlugin(t, dir, "linked", "Symlinked release install", binPkgSymlink)
+	section := pluginHelpSection(t, rootHelpOutput(t, "--help"))
+	if !strings.Contains(section, "linked") || !strings.Contains(section, "Symlinked release install") {
+		t.Errorf("symlinked release install not listed:\n%s", section)
+	}
 }
 
 func TestRootHelp_NoPluginSectionWithoutDescribedPlugins(t *testing.T) { //nolint:paralleltest // mutates ENTIRE_PLUGIN_DIR
