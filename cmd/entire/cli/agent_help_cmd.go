@@ -340,9 +340,10 @@ var agentHelpProjectTrailGuidance = map[string]string{
 		"pull request URL only when the user asks for it.",
 	// The project tree replaces the shared entry, so it repeats the reply rules.
 	"trail finding": trailFindingReplyGuidance + "\n\n" +
-		"After a push, run `entire trail finding` (the dashboard): each agent's\n" +
-		"HEAD shows whether it has reviewed the pushed commit yet, and \"No\n" +
-		"findings\" for an older head means not reviewed yet. It also counts open\n" +
+		"After a push, run `entire trail finding` (the dashboard): an agent has\n" +
+		"reviewed the pushed commit only when its HEAD is that commit and its\n" +
+		"STATUS is succeeded; a queued, running, or failed run, or an older\n" +
+		"head, means not reviewed yet, whatever the findings show. It also counts open\n" +
 		"findings the default filters hide: while any are open, the change is not\n" +
 		"ready, whatever the gates say; list them with --freshness any. For\n" +
 		"each open finding: if your pushed fix addresses it, resolve it with -m\n" +
