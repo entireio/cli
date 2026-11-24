@@ -109,6 +109,7 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 	writeUserSettingsRejections(w, s)
 	writeCommittedKeysIgnoredForGlobalEnable(w, s)
 	writeGlobalEnablePushes(w, pushes)
+	writeOlderProjectHooks(ctx, w)
 	if s.Enabled {
 		writeActiveSessions(ctx, w, sty)
 	}

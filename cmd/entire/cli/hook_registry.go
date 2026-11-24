@@ -4,9 +4,11 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
@@ -110,6 +112,12 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 		return nil
 	}
 
+	if userScopeStepsAside(cmd, agentName) {
+		logging.Debug(cmd.Context(), "user-level hook stepping aside for the project install",
+			slog.String("agent", string(agentName)), slog.String("hook", hookName))
+		return nil
+	}
+
 	if stampSession {
 		cmd.SetContext(withHookSession(cmd.Context()))
 	}
@@ -199,6 +207,9 @@ func newAgentHookVerbCmdWithLogging(agentName types.AgentName, hookName string) 
 			if !settings.IsSetUpAndEnabled(cmd.Context()) {
 				return
 			}
+			if userScopeStepsAside(cmd, agentName) {
+				return
+			}
 			// SetContext hands the session-stamped context straight to this
 			// command's RunE via cmd.Context().
 			cmd.SetContext(withHookSession(cmd.Context()))
@@ -207,4 +218,35 @@ func newAgentHookVerbCmdWithLogging(agentName types.AgentName, hookName string) 
 			return executeAgentHook(cmd, agentName, hookName, false)
 		},
 	}
+}
+
+// hooksScopeFlag is the hidden --scope flag on `entire hooks`. A user-level
+// hook command carries --scope=user/v<N> (see codex.UserScopePrefix); a
+// project hook command carries none.
+const hooksScopeFlag = "scope"
+
+// userScopeSteppedAsideKey caches userScopeStepsAside's answer for the rest
+// of the command, so the verb's PersistentPreRun and RunE ask once.
+type userScopeSteppedAsideKey struct{}
+
+// userScopeStepsAside reports whether this hook invocation comes from the
+// agent's user-level config while the checkout has its own Entire install
+// for the agent, which then handles the event alone. The check is fresh per
+// event and stateless, so a project install added or removed mid-session
+// takes effect at the next event.
+func userScopeStepsAside(cmd *cobra.Command, agentName types.AgentName) bool {
+	ctx := cmd.Context()
+	if cached, ok := ctx.Value(userScopeSteppedAsideKey{}).(bool); ok {
+		return cached
+	}
+	stepAside := false
+	if flag := cmd.Flag(hooksScopeFlag); flag != nil && strings.HasPrefix(flag.Value.String(), "user") {
+		if ag, err := agent.Get(agentName); err == nil {
+			if installer, ok := agent.AsUserHookInstaller(ag); ok {
+				stepAside = installer.ProjectHooksSupersede(ctx)
+			}
+		}
+	}
+	cmd.SetContext(context.WithValue(ctx, userScopeSteppedAsideKey{}, stepAside))
+	return stepAside
 }

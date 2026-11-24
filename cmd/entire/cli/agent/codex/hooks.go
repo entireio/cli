@@ -502,7 +502,16 @@ func readHooksDocument(path string) (*hooksDocument, error) {
 	if len(data) > maxHooksFileBytes {
 		return nil, fmt.Errorf("codex hooks file %q exceeds %d bytes", path, maxHooksFileBytes)
 	}
-	document.exists = true
+	return decodeHooksDocument(path, data)
+}
+
+// decodeHooksDocument parses hooks.json content read from path.
+func decodeHooksDocument(path string, data []byte) (*hooksDocument, error) {
+	document := &hooksDocument{
+		topLevel: make(map[string]json.RawMessage),
+		rawHooks: make(map[string]json.RawMessage),
+		exists:   true,
+	}
 	if err := json.Unmarshal(data, &document.topLevel); err != nil {
 		return nil, fmt.Errorf("failed to parse existing hooks.json %q: %w", path, err)
 	}

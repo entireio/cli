@@ -207,6 +207,9 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 	// Agent-specific: Codex hook trust state.
 	checkCodexHookTrust(cmd)
 
+	// Global enable: every agent's user-level hooks.
+	checkUserLevelHooks(cmd)
+
 	// Agent-specific: Antigravity title-tee (token-usage surface).
 	checkAntigravityTitleTee(cmd)
 

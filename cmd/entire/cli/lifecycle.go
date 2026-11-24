@@ -241,6 +241,8 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 	if ag.Name() == agent.AgentNameCodex {
 		if warning := codexSessionStartWarning(inspectCodexSessionStartHookIssue(ctx)); warning != "" {
 			message += " " + warning
+		} else if warning := userLevelHookSessionStartWarning(ctx, ag); warning != "" {
+			message += " " + warning
 		}
 	}
 

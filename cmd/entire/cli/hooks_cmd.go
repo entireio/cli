@@ -67,6 +67,11 @@ func newHooksCmd() *cobra.Command {
 		},
 	}
 
+	// Hook commands in an agent's user-level config say so, for
+	// userScopeStepsAside. Hidden: only Entire's installers write it.
+	cmd.PersistentFlags().String(hooksScopeFlag, "", "where the hook command is configured (user-level hooks set user/v<N>)")
+	_ = cmd.PersistentFlags().MarkHidden(hooksScopeFlag) //nolint:errcheck // the flag was just defined
+
 	// Git hooks are strategy-level (not agent-specific)
 	cmd.AddCommand(newHooksGitCmd())
 
