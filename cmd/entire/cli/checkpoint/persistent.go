@@ -1158,10 +1158,10 @@ func compactTranscript(ctx context.Context, agentType types.AgentType, startLine
 		if compacted, boundary, ok := compactWithAgent(ctx, agentType, startLine, transcriptBytes); ok {
 			return compacted, boundary, nil
 		}
-		return transcriptcompact.FullWithBoundary(redact.AlreadyRedacted(transcriptBytes), fields)
+		return compactBuiltin(transcriptBytes, fields)
 	}
 
-	compacted, boundary, err := transcriptcompact.FullWithBoundary(redact.AlreadyRedacted(transcriptBytes), fields)
+	compacted, boundary, err := compactBuiltin(transcriptBytes, fields)
 	switch {
 	case err != nil:
 		logging.Warn(ctx, "declared transcript format conversion failed, trying the agent's compactor",
@@ -1181,6 +1181,15 @@ func compactTranscript(ctx context.Context, agentType types.AgentType, startLine
 		return agentCompacted, agentBoundary, nil
 	}
 	return compacted, boundary, err
+}
+
+// compactBuiltin runs the built-in compactor on already-redacted bytes.
+func compactBuiltin(transcriptBytes []byte, fields transcriptcompact.MetadataFields) ([]byte, int, error) {
+	compacted, boundary, err := transcriptcompact.FullWithBoundary(redact.AlreadyRedacted(transcriptBytes), fields)
+	if err != nil {
+		return nil, 0, fmt.Errorf("built-in compactor: %w", err)
+	}
+	return compacted, boundary, nil
 }
 
 // writeCompactTranscript converts the pre-redacted full transcript into the
