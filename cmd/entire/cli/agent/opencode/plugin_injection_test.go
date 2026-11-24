@@ -18,8 +18,9 @@ func v1Event(eventType string, properties map[string]any) map[string]any {
 	return map[string]any{"event": map[string]any{"type": eventType, "properties": properties}}
 }
 
-func userMessage(sessionID, messageID string) map[string]any {
-	return v1Event("message.updated", map[string]any{"info": map[string]any{"id": messageID, "sessionID": sessionID, "role": "user"}})
+// userMessage is a new user message in ses_a.
+func userMessage(messageID string) map[string]any {
+	return v1Event("message.updated", map[string]any{"info": map[string]any{"id": messageID, "sessionID": "ses_a", "role": "user"}})
 }
 
 func idle(sessionID string) map[string]any {
@@ -35,7 +36,7 @@ func hasContext(system []string) bool { return slices.Contains(system, testConte
 func TestPlugin_InjectionLastsForTheTurn(t *testing.T) {
 	t.Parallel()
 	_, out := runPluginV1(t, []map[string]any{
-		userMessage("ses_a", "msg_1"),
+		userMessage("msg_1"),
 		v1Event("session.created", map[string]any{"info": map[string]any{"id": "ses_child", "parentID": "ses_a"}}),
 		transform("ses_a"), // title generator
 		transform("ses_a"),
@@ -65,7 +66,7 @@ func TestPlugin_InjectionLastsForTheTurn(t *testing.T) {
 func TestPlugin_UnusedInjectionSurvivesIdle(t *testing.T) {
 	t.Parallel()
 	_, out := runPluginV1(t, []map[string]any{
-		userMessage("ses_a", "msg_1"),
+		userMessage("msg_1"),
 		idle("ses_a"),
 		transform("ses_a"),
 	}, testContext)
@@ -80,9 +81,9 @@ func TestPlugin_UnusedInjectionSurvivesIdle(t *testing.T) {
 func TestPlugin_UnusedInjectionJoinsTheNextTurns(t *testing.T) {
 	t.Parallel()
 	_, out := runPluginV1(t, []map[string]any{
-		userMessage("ses_a", "msg_1"),
+		userMessage("msg_1"),
 		idle("ses_a"),
-		userMessage("ses_a", "msg_2"),
+		userMessage("msg_2"),
 		transform("ses_a"),
 	}, testContext)
 	prompts := systemPrompts(t, out)
