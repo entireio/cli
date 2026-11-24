@@ -65,6 +65,13 @@ Selectors are project-local numbers or trail ULIDs, or `<repo>/<number>` for one
   Server pagination tokens pass through unchanged. A numeric selector is one
   `GET /{host}/{project}/trails/{number}` (the detail route accepts a
   project-local number); later requests use the returned ULID. JSON preserves counts, groups, jurisdiction, and capabilities.
+- `--project` takes `gh/<owner>`, `et/<project>`, or a project ID (the ID and
+  REF columns of `entire project list`). An ID is read with Core
+  `GET /projects/{id}`, turned into its reference (`gh/<owner>` for a
+  `gh:mirrors:` project, `et/<name>` otherwise), and accepted only if that
+  reference still resolves to the same ID. A bare name is refused, naming
+  `et/<x>` and `gh/<x>`: they are different projects. Against a branch's
+  parent, an ID compares with the parent's project ID directly.
 - Explicit selectors normally resolve through Core `/project-resolver/{forge_prefix}/{project}`.
   Creation and `link` instead use the destination repository's placement and
   ownership, so repo-only writers need no project inspection. Branch discovery

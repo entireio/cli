@@ -341,7 +341,7 @@ func newProjectTrailListCmd() *cobra.Command {
 				}
 				return printMyProjectTrails(cmd.OutOrStdout(), out)
 			}
-			page, err := listProjectTrails(cmd, status, pageSize, cursor)
+			page, project, err := listProjectTrails(cmd, status, pageSize, cursor)
 			if err != nil {
 				return err
 			}
@@ -349,7 +349,6 @@ func newProjectTrailListCmd() *cobra.Command {
 			if jsonRequested(cmd) {
 				return printJSON(cmd.OutOrStdout(), page)
 			}
-			project := projectTrailProjectFlag(cmd)
 			if err := printTable(cmd.OutOrStdout(), []string{colHeaderProject, "NUMBER", "ID", colHeaderStatus, "PHASE", colHeaderTitle}, items, func(t api.ProjectTrail) []string {
 				return []string{tuiutil.SanitizeTerminalLabel(project), strconv.Itoa(t.Number), t.ID, tuiutil.SanitizeTerminalLabel(t.Status), trailPhaseDisplay(tuiutil.SanitizeTerminalLabel(t.Phase)), tuiutil.SanitizeTerminalLabel(t.Title)}
 			}); err != nil {

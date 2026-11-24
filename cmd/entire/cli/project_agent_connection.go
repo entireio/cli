@@ -83,6 +83,11 @@ func loadProjectAgentConnection(host, project string) (*projectAgentConnection, 
 }
 
 func resolveProjectAgentServeTarget(cmd *cobra.Command) (*projectAgentTarget, error) {
+	// A worker's saved connection is keyed by gh/<owner> or et/<project>, and
+	// turning an ID into one needs project inspect, which a worker may lack.
+	if ref := projectAgentProjectFlag(cmd); looksLikeULID(ref) {
+		return nil, errors.New("project agent serve needs --project as gh/<owner> or et/<project>, not a project ID (see the REF column of 'entire project list')")
+	}
 	host, project, err := resolveTrailProjectReference(cmd)
 	if err != nil {
 		return nil, err

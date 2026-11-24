@@ -32,10 +32,28 @@ type fakeProjectTrailCore struct {
 	resolutionJSON string
 	clusters       []coreapi.Cluster
 	resolveErr     error
+	// projects answers GetProject by ID; an absent ID is Core's 404.
+	projects map[string]coreapi.Project
+	getCalls int
+	getErr   error
+	resolved []string // host/project of each ResolveProject call
+}
+
+func (f *fakeProjectTrailCore) GetProject(_ context.Context, params coreapi.GetProjectParams) (*coreapi.Project, error) {
+	f.getCalls++
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
+	p, ok := f.projects[params.ProjectId]
+	if !ok {
+		return nil, &coreapi.ErrorModelStatusCode{StatusCode: http.StatusNotFound}
+	}
+	return &p, nil
 }
 
 func (f *fakeProjectTrailCore) ResolveProject(_ context.Context, params coreapi.ResolveProjectParams) (*coreapi.ResolveProjectOutputBody, error) {
 	f.resolveCalls++
+	f.resolved = append(f.resolved, string(params.ForgePrefix)+"/"+params.Project)
 	if f.resolveErr != nil {
 		return nil, f.resolveErr
 	}

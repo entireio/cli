@@ -75,7 +75,7 @@ func resolveProjectTrailChange(cmd *cobra.Command, sel projectTrailChangeSelecto
 	cacheLocal := localOnly
 	if ref := projectTrailProjectFlag(cmd); ref != "" {
 		var err error
-		if host, owner, err = parseTrailProjectRef(ref); err != nil {
+		if host, owner, err = parseTrailProjectFlagFor(cmd, ref); err != nil {
 			return nil, err
 		}
 	}

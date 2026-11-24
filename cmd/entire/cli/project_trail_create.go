@@ -167,9 +167,17 @@ func resolveRepositoryProjectTrailTarget(cmd *cobra.Command) (*projectTrailTarge
 	if err != nil {
 		return nil, "", err
 	}
-	host, project, err := trailProjectReferenceOr(cmd, forge, owner)
-	if err != nil {
-		return nil, "", err
+	// A project ID is checked against the repository's owning project below,
+	// so repository writers need no project inspection for it either.
+	projectID := projectTrailProjectFlag(cmd)
+	if !looksLikeULID(projectID) {
+		projectID = ""
+	}
+	host, project := forge, owner
+	if projectID == "" {
+		if host, project, err = trailProjectReferenceOr(cmd, forge, owner); err != nil {
+			return nil, "", err
+		}
 	}
 	if host != forge || !strings.EqualFold(project, owner) {
 		return nil, "", errors.New("--project must match the scoped repository's namespace")
@@ -188,6 +196,9 @@ func resolveRepositoryProjectTrailTarget(cmd *cobra.Command) (*projectTrailTarge
 	}
 	if repository == nil || repository.Response.ID != repoID || !looksLikeULID(repoID) {
 		return nil, "", errors.New("repository response identity does not match the request")
+	}
+	if projectID != "" && !strings.EqualFold(repository.Response.OwningProjectId, projectID) {
+		return nil, "", errors.New("--project must match the scoped repository's project")
 	}
 	target, err := projectTrailTargetForReference(api.TrailParentReference{
 		ProjectID: repository.Response.OwningProjectId, Host: host, Project: project,

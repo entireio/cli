@@ -20,6 +20,7 @@ import (
 
 type projectTrailCoreClient interface {
 	ResolveProject(ctx context.Context, params coreapi.ResolveProjectParams) (*coreapi.ResolveProjectOutputBody, error)
+	GetProject(ctx context.Context, params coreapi.GetProjectParams) (*coreapi.Project, error)
 	ListClusters(ctx context.Context) (*coreapi.ListClustersOutputBody, error)
 }
 
@@ -69,7 +70,7 @@ func projectTrailProjectFlag(cmd *cobra.Command) string {
 func parseTrailProjectRef(ref string) (string, string, error) {
 	host, project, ok := strings.Cut(ref, "/")
 	if !ok || (host != mirrorCloneForge && host != nativeCloneForge) || project == "" || strings.ContainsAny(project, "/\\?#%") || project == "." || project == ".." {
-		return "", "", fmt.Errorf("invalid project %q: use gh/<owner> or et/<project>", ref)
+		return "", "", fmt.Errorf("invalid project %q: use gh/<owner>, et/<project>, or a project ID", ref)
 	}
 	for _, c := range project {
 		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '-' {
@@ -77,6 +78,77 @@ func parseTrailProjectRef(ref string) (string, string, error) {
 		}
 	}
 	return host, strings.ToLower(project), nil
+}
+
+// parseTrailProjectFlag reads a --project value a person typed: gh/<owner>,
+// et/<project>, or a project ID (the ID column of `entire project list`),
+// which Core turns into the project's reference. A bare name is refused with
+// the references it could mean: et/<x> and gh/<x> are different projects, and
+// guessing could put a trail in someone else's.
+func parseTrailProjectFlag(ctx context.Context, ref string) (string, string, error) {
+	if looksLikeULID(ref) {
+		return resolveTrailProjectID(ctx, strings.ToUpper(ref))
+	}
+	if !strings.Contains(ref, "/") {
+		return "", "", bareProjectNameError(ref)
+	}
+	return parseTrailProjectRef(ref)
+}
+
+func bareProjectNameError(ref string) error {
+	if strings.HasPrefix(ref, mirrorProjectNamePrefix) {
+		return fmt.Errorf("invalid project %q: that is a GitHub mirror project's internal name; pass gh/<owner> (the REF column of 'entire project list')", ref)
+	}
+	if _, _, err := parseTrailProjectRef(nativeCloneForge + "/" + ref); err != nil {
+		return fmt.Errorf("invalid project %q: use gh/<owner>, et/<project>, or a project ID", ref)
+	}
+	return fmt.Errorf("invalid project %q: use %s/%s for the Entire project named %s, or %s/%s for the GitHub owner %s ('entire project list' shows each project's REF)",
+		ref, nativeCloneForge, ref, ref, mirrorCloneForge, ref, ref)
+}
+
+// resolveTrailProjectID turns a project ID into its gh/<owner> or et/<project>
+// reference, then checks that the reference still resolves to that project: a
+// renamed GitHub owner, or a re-created mirror project, can leave the reference
+// naming another one.
+func resolveTrailProjectID(ctx context.Context, id string) (string, string, error) {
+	ctx, cancel := context.WithTimeout(ctx, requiredCellResolveTimeout)
+	defer cancel()
+	core, err := newProjectTrailCoreClient()
+	if err != nil {
+		return "", "", fmt.Errorf("project control plane: %w", err)
+	}
+	p, err := core.GetProject(ctx, coreapi.GetProjectParams{ProjectId: id})
+	switch status := coreapi.APIErrorStatus(err); {
+	case err == nil:
+	case status == http.StatusNotFound:
+		return "", "", &projectResolveError{
+			msg:      fmt.Sprintf("project %s does not exist or is not visible to your login; check that 'entire auth status' shows the account that can open it on the web", id),
+			sentinel: errProjectTrailProjectNotFound, cause: err,
+		}
+	case status == http.StatusForbidden:
+		return "", "", &projectResolveError{
+			msg:      "your login does not have access to project " + id,
+			sentinel: errProjectTrailProjectForbidden, cause: err,
+		}
+	default:
+		return "", "", fmt.Errorf("get project %s: %w", id, err)
+	}
+	ref := projectRef(*p)
+	if ref == "" {
+		return "", "", fmt.Errorf("project %s has no gh/<owner> or et/<project> reference; pass the reference instead of the ID", id)
+	}
+	host, project, err := parseTrailProjectRef(ref)
+	if err != nil {
+		return "", "", err
+	}
+	resolved, err := core.ResolveProject(ctx, coreapi.ResolveProjectParams{ForgePrefix: coreapi.ResolveProjectForgePrefix(host), Project: project})
+	if err != nil {
+		return "", "", fmt.Errorf("project %s: %w", id, describeProjectResolveError(ctx, host, project, err))
+	}
+	if !strings.EqualFold(resolved.Project.ID, p.ID) {
+		return "", "", fmt.Errorf("project %s is %s, but %s now resolves to a different project; pass the reference instead of the ID", id, ref, ref)
+	}
+	return host, project, nil
 }
 
 // projectTrailCellTarget never falls back to a repo or jurisdiction-default
@@ -273,9 +345,19 @@ func projectTrailResolvedCellTarget(apiURL, cell, jurisdiction string) (*auth.Ce
 	return &auth.CellTarget{BaseURL: strings.TrimSuffix(apiURL, "/"), Jurisdiction: region}, nil
 }
 
+// parseTrailProjectFlagFor is parseTrailProjectFlag for a command, rendering
+// a missing login or a cancelled lookup the way other project reads do.
+func parseTrailProjectFlagFor(cmd *cobra.Command, ref string) (string, string, error) {
+	host, project, err := parseTrailProjectFlag(cmd.Context(), ref)
+	if err != nil {
+		return "", "", renderDataAPIAuthError(cmd.Context(), cmd.ErrOrStderr(), "", err)
+	}
+	return host, project, nil
+}
+
 func resolveTrailProjectReference(cmd *cobra.Command) (string, string, error) {
 	if ref := projectTrailProjectFlag(cmd); ref != "" {
-		return parseTrailProjectRef(ref)
+		return parseTrailProjectFlagFor(cmd, ref)
 	}
 	host, owner, _, err := resolveTrailRepoOrRemote(cmd.Context(), trailRepoFlag(cmd))
 	return host, owner, err
@@ -285,7 +367,7 @@ func resolveTrailProjectReference(cmd *cobra.Command) (string, string, error) {
 // repository namespace: a repo's own project is the default collection.
 func trailProjectReferenceOr(cmd *cobra.Command, host, project string) (string, string, error) {
 	if ref := projectTrailProjectFlag(cmd); ref != "" {
-		return parseTrailProjectRef(ref)
+		return parseTrailProjectFlagFor(cmd, ref)
 	}
 	return host, project, nil
 }
@@ -424,16 +506,23 @@ func resolveBranchProjectTrail(cmd *cobra.Command, branch string) (_ *projectTra
 // repo is the repository the work was found in, and access its client.
 func openTrailParentTarget(cmd *cobra.Command, change *api.TrailResource, repo string, access trailRepoAccess, subject string) (*projectTrailTarget, error) {
 	if change == nil || change.Parent == nil || !looksLikeULID(change.Parent.ID) {
-		return nil, fmt.Errorf("%s has no discoverable project trail; pass a project trail ID with --project (a missing parent may be inaccessible or unresolved)", subject)
+		return nil, fmt.Errorf("%s has no discoverable project trail; pass the project trail's ID or number as the trail argument, with --project naming its project (a missing parent may be inaccessible or unresolved)", subject)
 	}
 	parent := *change.Parent
 	if ref := projectTrailProjectFlag(cmd); ref != "" {
-		host, project, err := parseTrailProjectRef(ref)
-		if err != nil {
-			return nil, err
-		}
-		if parent.Host != host || !strings.EqualFold(parent.Project, project) {
-			return nil, errors.New("branch's parent does not belong to --project")
+		// A project ID compares against the parent's directly, with no lookup.
+		if looksLikeULID(ref) {
+			if !strings.EqualFold(parent.ProjectID, ref) {
+				return nil, errors.New("branch's parent does not belong to --project")
+			}
+		} else {
+			host, project, err := parseTrailProjectFlag(cmd.Context(), ref)
+			if err != nil {
+				return nil, err
+			}
+			if parent.Host != host || !strings.EqualFold(parent.Project, project) {
+				return nil, errors.New("branch's parent does not belong to --project")
+			}
 		}
 	}
 	core, err := newProjectTrailCoreClient()
