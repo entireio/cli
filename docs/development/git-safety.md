@@ -85,7 +85,7 @@ process fail fast rather than re-entering the walk. The first-checkpoint
 `StatusWalkBudget` (a killed child, not an abandoned goroutine) and reports the
 same sentinel; the lifecycle handlers warn-and-skip the checkpoint on it. Turn
 end persists whether the turn degraded (`SessionState.CaptureDegradedAt` — set
-on breach, cleared by the next healthy turn) so `entire status` surfaces the
+when a status scan fails or breaches its budget, cleared by the next healthy turn) so `entire status` surfaces the
 degradation instead of it living only in `.entire/logs`. Paths
 where a user is actively waiting on a command (review, and `session adopt`
 via `detectFileChangesUnbounded`) keep the unbounded
