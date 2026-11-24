@@ -371,9 +371,10 @@ func TestProjectTrailShowTextPrintsReadiness(t *testing.T) {
 func TestProjectTrailShowJSONIncludesReadiness(t *testing.T) {
 	const withApprovals = `{"mergeable":false,"conflict_status":"clean","checks":{"availability":"available","runs":[]},` +
 		`"gates":[{"gate_key":"approvals","status":"failed","blocking":true,"rationale":"No reviewers have approved this trail"}]}`
-	draft := false
+	stored := false // the change's readiness; set to true below
 	setupProjectTrailGatesTestWith(t, func(resource *api.TrailResource) {
-		resource.ReadyForReview = &draft
+		ready := stored
+		resource.ReadyForReview = &ready
 		if resource.Number == 7 {
 			resource.Mergeability = json.RawMessage(withApprovals)
 		}
@@ -394,4 +395,14 @@ func TestProjectTrailShowJSONIncludesReadiness(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, text, "  Gates for widget/7:\n    Review:    draft\n")
 	require.NotRegexp(t, `Gates for widget/8:\n    Review:`, text)
+
+	// Once marked ready, the same change reads true.
+	stored = true
+	out, _, err = executeProjectTrailTest(t, "show", "42", "--project", "gh/acme", "--json")
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal([]byte(out), &raw))
+	assert.JSONEq(t, "true", string(raw.Changes[0]["readyForReview"]), "a ready change is true")
+	text, _, err = executeProjectTrailTest(t, "show", "42", "--project", "gh/acme")
+	require.NoError(t, err)
+	require.Contains(t, text, "  Gates for widget/7:\n    Review:    ready for review\n")
 }
