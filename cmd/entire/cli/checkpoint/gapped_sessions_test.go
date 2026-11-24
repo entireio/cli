@@ -280,3 +280,26 @@ func TestSessionFolder(t *testing.T) {
 		})
 	}
 }
+
+// When metadata.json is in the tree but its blob cannot be read (a partial
+// clone whose fetch failed), the session lookup must fail rather than fall back
+// to position: on a gapped checkpoint that fallback silently reads the wrong
+// session.
+func TestSessionTreeAt_UnreadableMetadataDoesNotFallBackToPosition(t *testing.T) {
+	t.Parallel()
+	repo := newRefsStore(t).repo
+	emptyTree, err := storeTree(repo, nil)
+	require.NoError(t, err)
+	missingBlob := plumbing.NewHash("1111111111111111111111111111111111111111")
+	treeHash, err := storeTree(repo, []object.TreeEntry{
+		{Name: "0", Mode: filemode.Dir, Hash: emptyTree},
+		{Name: paths.MetadataFileName, Mode: filemode.Regular, Hash: missingBlob},
+	})
+	require.NoError(t, err)
+	tree, err := repo.TreeObject(treeHash)
+	require.NoError(t, err)
+
+	_, err = sessionTreeAt(NewFetchingTree(context.Background(), tree, repo.Storer, nil), 0)
+	require.Error(t, err, "an unreadable metadata.json must not resolve session 0 by position")
+	assert.Contains(t, err.Error(), paths.MetadataFileName)
+}

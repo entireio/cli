@@ -1366,7 +1366,29 @@ func readSummaryFromCheckpointTree(checkpointTree *FetchingTree) (*CheckpointSum
 	if err != nil {
 		return nil, nil //nolint:nilnil,nilerr // metadata.json not found
 	}
+	return parseSummaryFile(metadataFile)
+}
 
+// readSummaryForSessionLookup returns (nil, nil) only when metadata.json is
+// absent from the tree. Unlike readSummaryFromCheckpointTree, a metadata.json
+// that exists but cannot be read (a failed blob fetch) is an error: the session
+// lookup would otherwise fall back to position and, on a checkpoint with gapped
+// session folders, silently read the wrong session.
+func readSummaryForSessionLookup(checkpointTree *FetchingTree) (*CheckpointSummary, error) {
+	if _, err := checkpointTree.inner.FindEntry(paths.MetadataFileName); err != nil {
+		if errors.Is(err, object.ErrEntryNotFound) {
+			return nil, nil //nolint:nilnil // metadata.json absent
+		}
+		return nil, fmt.Errorf("failed to look up %s: %w", paths.MetadataFileName, err)
+	}
+	metadataFile, err := checkpointTree.File(paths.MetadataFileName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read %s: %w", paths.MetadataFileName, err)
+	}
+	return parseSummaryFile(metadataFile)
+}
+
+func parseSummaryFile(metadataFile *object.File) (*CheckpointSummary, error) {
 	content, err := metadataFile.Contents()
 	if err != nil {
 		return nil, fmt.Errorf("failed to read metadata.json: %w", err)
@@ -1398,7 +1420,7 @@ func (s *GitStore) getSessionTree(ctx context.Context, checkpointID id.Checkpoin
 // sessionTreeAt resolves the session at position sessionIndex of the
 // checkpoint's sessions list. Shared by both persistent backends.
 func sessionTreeAt(checkpointTree *FetchingTree, sessionIndex int) (*FetchingTree, error) {
-	summary, err := readSummaryFromCheckpointTree(checkpointTree)
+	summary, err := readSummaryForSessionLookup(checkpointTree)
 	if err != nil {
 		return nil, err
 	}
