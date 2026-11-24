@@ -48,3 +48,32 @@ func PackRefs(ctx context.Context, repoRoot, pattern string) error {
 	}
 	return nil
 }
+
+// RefUpdate is one change in an UpdateRefs transaction. A zero New deletes the
+// ref; a zero Old requires that the ref does not exist yet. Otherwise the ref
+// must hold Old.
+type RefUpdate struct {
+	Name     plumbing.ReferenceName
+	New, Old plumbing.Hash
+}
+
+// UpdateRefs applies updates in one native git transaction: either every
+// update lands or none does, and each is checked against its Old value.
+func UpdateRefs(ctx context.Context, repoRoot string, updates []RefUpdate) error {
+	if len(updates) == 0 {
+		return nil
+	}
+	var stdin strings.Builder
+	for _, u := range updates {
+		fmt.Fprintf(&stdin, "update %s %s %s\n", u.Name, u.New, u.Old)
+	}
+	cmd := worktreeGitCommand(ctx, repoRoot, "update-ref", "--stdin")
+	cmd.Stdin = strings.NewReader(stdin.String())
+	if out, err := cmd.CombinedOutput(); err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("git update-ref --stdin: %w", ctx.Err())
+		}
+		return fmt.Errorf("git update-ref --stdin (%d updates): %w: %s", len(updates), err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}

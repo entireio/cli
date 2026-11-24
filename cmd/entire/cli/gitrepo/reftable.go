@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/storer"
 	gogitstorage "github.com/go-git/go-git/v6/storage"
@@ -60,6 +61,13 @@ func inspectRepoUsesReftable(dotGitPath, commonGitPath string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// UsesReftable reports whether repo, opened through this package, stores its
+// refs in reftable.
+func UsesReftable(repo *git.Repository) bool {
+	_, ok := repo.Storer.(*reftableStorer)
+	return ok
 }
 
 // reftableStorer adapts a filesystem-backed go-git storage so it can open and
