@@ -1392,12 +1392,48 @@ func (s *GitStore) getSessionTree(ctx context.Context, checkpointID id.Checkpoin
 	if err != nil {
 		return nil, ErrCheckpointNotFound
 	}
+	return sessionTreeAt(checkpointTree, sessionIndex)
+}
 
-	sessionTree, err := checkpointTree.Tree(strconv.Itoa(sessionIndex))
+// sessionTreeAt resolves the session at position sessionIndex of the
+// checkpoint's sessions list. Shared by both persistent backends.
+func sessionTreeAt(checkpointTree *FetchingTree, sessionIndex int) (*FetchingTree, error) {
+	summary, err := readSummaryFromCheckpointTree(checkpointTree)
 	if err != nil {
-		return nil, fmt.Errorf("%w: session %d not found: %w", ErrCheckpointNotFound, sessionIndex, err)
+		return nil, err
+	}
+	folder, err := sessionFolder(summary, sessionIndex)
+	if err != nil {
+		return nil, err
+	}
+	sessionTree, err := checkpointTree.Tree(folder)
+	if err != nil {
+		return nil, fmt.Errorf("%w: session %d (folder %s) not found: %w", ErrCheckpointNotFound, sessionIndex, folder, err)
 	}
 	return sessionTree, nil
+}
+
+// sessionFolder names the folder that holds the session at position
+// sessionIndex. Folders can have gaps (some older checkpoints hold 0, 2, 3), so
+// the folder comes from the sessions[] entry's metadata path, not the position.
+// A missing summary or an entry without a metadata path has nothing to follow
+// and falls back to the position.
+func sessionFolder(summary *CheckpointSummary, sessionIndex int) (string, error) {
+	if summary == nil {
+		return strconv.Itoa(sessionIndex), nil
+	}
+	if sessionIndex < 0 || sessionIndex >= len(summary.Sessions) {
+		return "", fmt.Errorf("%w: session %d not found: checkpoint lists %d session(s)", ErrCheckpointNotFound, sessionIndex, len(summary.Sessions))
+	}
+	metadataPath := summary.Sessions[sessionIndex].Metadata
+	if metadataPath == "" {
+		return strconv.Itoa(sessionIndex), nil
+	}
+	folder := path.Base(path.Dir(metadataPath))
+	if path.Base(metadataPath) != paths.MetadataFileName || folder == "." || folder == ".." || folder == "/" {
+		return "", fmt.Errorf("%w: session %d has an invalid metadata path %q", ErrCheckpointNotFound, sessionIndex, metadataPath)
+	}
+	return folder, nil
 }
 
 // ReadSessionMetadata reads only the metadata.json for a specific session within a checkpoint.
@@ -1616,7 +1652,11 @@ func readCommittedInfoFromCheckpointTree(checkpointID id.CheckpointID, checkpoin
 	info.LinkedCommits = summary.LinkedCommits
 
 	for i := range summary.Sessions {
-		sessionMetadata, ok := readCommittedMetadataFromCheckpointTree(checkpointTree, i)
+		folder, folderErr := sessionFolder(&summary, i)
+		if folderErr != nil {
+			continue
+		}
+		sessionMetadata, ok := readCommittedMetadataFromCheckpointTree(checkpointTree, folder)
 		if !ok {
 			continue
 		}
@@ -1635,8 +1675,8 @@ func readCommittedInfoFromCheckpointTree(checkpointID id.CheckpointID, checkpoin
 	return info
 }
 
-func readCommittedMetadataFromCheckpointTree(checkpointTree *object.Tree, sessionIndex int) (Metadata, bool) {
-	sessionTree, treeErr := checkpointTree.Tree(strconv.Itoa(sessionIndex))
+func readCommittedMetadataFromCheckpointTree(checkpointTree *object.Tree, sessionFolder string) (Metadata, bool) {
+	sessionTree, treeErr := checkpointTree.Tree(sessionFolder)
 	if treeErr != nil {
 		return Metadata{}, false
 	}
