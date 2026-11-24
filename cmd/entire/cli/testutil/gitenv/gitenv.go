@@ -87,8 +87,8 @@ func emptyConfigPath() string {
 //
 // Every inherited GIT_CONFIG_* entry is filtered out — including
 // GIT_CONFIG_PARAMETERS and the indexed KEY_/VALUE_ pairs that can inject
-// `git -c` overrides — so our explicit isolation overrides take effect
-// regardless of parent env.
+// `git -c` overrides — and so is the legacy GIT_CONFIG, so our explicit
+// isolation overrides take effect regardless of parent env.
 func Isolated() []string {
 	env := os.Environ()
 	filtered := make([]string, 0, len(env)+2)
@@ -109,9 +109,15 @@ func Isolated() []string {
 // git with os.Environ(). All inherited GIT_CONFIG_* variables are cleared
 // before the isolation overrides are set, so values such as
 // GIT_CONFIG_PARAMETERS or indexed KEY_/VALUE_ overrides cannot leak into
-// child git invocations.
+// child git invocations. The legacy GIT_CONFIG is removed as well (see
+// legacyConfigEnv).
 func IsolateProcess(t *testing.T) {
 	t.Helper()
+
+	t.Setenv(legacyConfigEnv, "") // register restoration before unsetting
+	if err := os.Unsetenv(legacyConfigEnv); err != nil {
+		t.Fatalf("unset %s: %v", legacyConfigEnv, err)
+	}
 
 	for _, e := range os.Environ() {
 		key, _, ok := strings.Cut(e, "=")
@@ -153,8 +159,12 @@ func IsolateRepository(t *testing.T) {
 // restore through: the isolation is set process-wide for the whole run via
 // os.Setenv and inherited by every spawned binary and git hook. Inherited
 // GIT_CONFIG_* overrides are neutralized (GIT_CONFIG_COUNT=0 disables the
-// indexed KEY_/VALUE_ pairs) rather than unset.
+// indexed KEY_/VALUE_ pairs) rather than unset; the legacy GIT_CONFIG is
+// unset, because emptying it is not neutral (see legacyConfigEnv).
 func IsolateMain() {
+	if err := os.Unsetenv(legacyConfigEnv); err != nil {
+		panic("unset " + legacyConfigEnv + ": " + err.Error())
+	}
 	for k, v := range map[string]string{
 		"GIT_CONFIG_GLOBAL":     emptyConfigPath(),
 		"GIT_CONFIG_SYSTEM":     emptyConfigPath(),
@@ -213,6 +223,14 @@ func UnsetGlobalConfig(t *testing.T) {
 	}
 }
 
+// legacyConfigEnv is the pre-GIT_CONFIG_GLOBAL override that only `git config`
+// reads: it names the one file that command uses instead of the
+// system/global/repo chain, so an inherited value hands the developer's file to
+// production `git config --get` reads under test. The GIT_CONFIG_ prefix does
+// not match it. It must be removed rather than emptied: an empty value makes
+// `git config` read an empty file and lose the repository's own config too.
+const legacyConfigEnv = "GIT_CONFIG"
+
 func isGitConfigEnv(e string) bool {
-	return strings.HasPrefix(e, "GIT_CONFIG_")
+	return strings.HasPrefix(e, "GIT_CONFIG_") || strings.HasPrefix(e, legacyConfigEnv+"=")
 }

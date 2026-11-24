@@ -280,8 +280,8 @@ func trailDetailServerWithMergeability(t *testing.T, mergeability string) *httpt
 	return srv
 }
 
-// Every numeric selector resolves through the detail route — approve,
-// request-changes, resume, update, and review-target resolution included —
+// Every numeric selector resolves through the detail route — approve, resume,
+// update, and review-target resolution included —
 // and none of them read mergeability, so a snapshot the CLI cannot decode
 // must not break the lookup.
 func TestFindTrailByNumberToleratesMalformedMergeability(t *testing.T) {

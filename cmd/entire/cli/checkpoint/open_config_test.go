@@ -3,14 +3,17 @@ package checkpoint
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 
+	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
@@ -50,6 +53,36 @@ func TestOpen_DefaultIsGitPrimaryNoMirrors(t *testing.T) {
 	assert.True(t, isRouting, "default persistent store should be the kind-routing store")
 	_, isAuthor := stores.Persistent.(AuthorReader)
 	assert.True(t, isAuthor, "routing store should preserve the git primary's AuthorReader")
+}
+
+// Under a git-refs primary, a write to a hex checkpoint still on v1 copies it
+// into its own ref. The copy needs the router to hold the built-in git stores
+// and the caller's remote probe; without them those writes silently go back to
+// v1, which git-refs never pushes.
+// Not parallel: uses t.Chdir so settings resolve to the test repo.
+func TestOpen_RefsPrimaryRouterCopiesLegacyCheckpoints(t *testing.T) {
+	dir, repo, _ := newTestRepo(t)
+	t.Chdir(dir)
+	ctx := context.Background()
+	cid := id.MustCheckpointID(legacyCopyID)
+	writeRoutingCheckpoint(t, NewGitStore(repo, DefaultV1Refs()), cid, "before-switch")
+	writeRawSettings(t, dir, `{"enabled": true, "checkpoints": {"primary": {"type": "`+BackendTypeGitRefs+`"}}}`)
+	var probed []plumbing.ReferenceName
+
+	stores, err := Open(ctx, repo, OpenOptions{
+		LegacyCopyRefFetcher: func(_ context.Context, ref plumbing.ReferenceName) error {
+			probed = append(probed, ref)
+			return fmt.Errorf("probe remote: %w", plumbing.ErrReferenceNotFound)
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, stores.Persistent.Write(ctx, afterSwitchSession(cid)))
+
+	refName, err := RefName(cid)
+	require.NoError(t, err)
+	assert.Equal(t, []plumbing.ReferenceName{refName}, probed, "the copy must ask the remote with the caller's probe")
+	_, err = repo.Reference(refName, true)
+	require.NoError(t, err, "the write must copy the v1-only checkpoint into its own ref")
 }
 
 func TestOpen_RejectsNonGitBackedPrimary(t *testing.T) {

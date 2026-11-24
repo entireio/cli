@@ -23,6 +23,8 @@ var homeLayoutEnv = map[types.AgentType]struct {
 	home      string
 	overrides []string
 }{
+	// agy has no relocation variable: its home is ~/.gemini under $HOME.
+	agent.AgentTypeAntigravity:    {home: "HOME", overrides: []string{"ENTIRE_TEST_ANTIGRAVITY_BRAIN_DIR"}},
 	agent.AgentTypeClaudeCode:     {home: "CLAUDE_CONFIG_DIR", overrides: []string{"ENTIRE_TEST_CLAUDE_PROJECT_DIR"}},
 	agent.AgentTypeCodex:          {home: "CODEX_HOME", overrides: []string{"ENTIRE_TEST_CODEX_SESSION_DIR"}},
 	agent.AgentTypeCopilotCLI:     {home: "COPILOT_HOME", overrides: []string{"ENTIRE_TEST_COPILOT_SESSION_DIR"}},
@@ -134,6 +136,32 @@ func TestResolveAndValidateTranscript_FindsArchivedCodexRollout(t *testing.T) {
 			}
 			if got != archived {
 				t.Fatalf("transcript = %q, want the archived rollout %q", got, archived)
+			}
+		})
+	}
+}
+
+func TestResolveAndValidateTranscript_FindsAntigravityIDEAndAppConversations(t *testing.T) {
+	const sessionID = "b4d54c70-6cb0-46da-8479-9160f0dec490"
+	// The IDE through 2.5.x, and the 2.0 app (and the IDE from 2.6.0), keep
+	// their brains beside the agy CLI's.
+	for _, surface := range []string{"antigravity-ide", "antigravity"} {
+		t.Run(surface, func(t *testing.T) {
+			setupAttachTestRepo(t)
+			home := relocateAgentHome(t, agent.AgentTypeAntigravity)
+			transcript := filepath.Join(home, ".gemini", surface, "brain", sessionID, ".system_generated", "logs", "transcript_full.jsonl")
+			writeTranscriptFile(t, transcript)
+			ag, err := agent.Get(agent.AgentNameAntigravity)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			got, err := resolveAndValidateTranscript(context.Background(), sessionID, ag, lookupLocalOnly)
+			if err != nil {
+				t.Fatalf("resolveAndValidateTranscript: %v", err)
+			}
+			if got != transcript {
+				t.Fatalf("transcript = %q, want the %s conversation %q", got, surface, transcript)
 			}
 		})
 	}

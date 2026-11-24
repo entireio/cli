@@ -90,6 +90,11 @@ func NewFetchingTree(ctx context.Context, tree *object.Tree, s storer.EncodedObj
 	}
 }
 
+// Hash returns the hash of the wrapped tree.
+func (t *FetchingTree) Hash() plumbing.Hash {
+	return t.inner.Hash
+}
+
 // File returns the file at the given path. Resolution order:
 //  1. go-git's storer (fast path, in-memory).
 //  2. `git cat-file -p` against the on-disk object store (handles

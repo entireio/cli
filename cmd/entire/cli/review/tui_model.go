@@ -93,6 +93,9 @@ type reviewTUIModel struct {
 	termWidth  int
 	termHeight int
 
+	// trailFindingsJSON hides the trail findings JSON line the run asked for.
+	trailFindingsJSON bool
+
 	finished bool
 	// finishedAt drives the finalize footer's elapsed timer.
 	finishedAt time.Time
@@ -298,7 +301,7 @@ func (m reviewTUIModel) refreshDetailContentWithAutoTail(wasAtBottom bool) revie
 		m.detail.SetContentLines(nil)
 		return m
 	}
-	lines := buildEventLines(m.rows[m.detailIdx].buffer, m.detailViewportWidth())
+	lines := buildEventLines(m.rows[m.detailIdx].buffer, m.detailViewportWidth(), m.trailFindingsJSON)
 	m.detail.SetContentLines(lines)
 	if wasAtBottom {
 		m.detail.GotoBottom()

@@ -84,17 +84,6 @@ func TestTrailResume_UsesCheckpointSessionsWhenLocalStateIsMissing(t *testing.T)
 	defer server.Close()
 	configureTrailResumeIntegrationAuth(t, env, server.URL)
 
-	legacyOutput := env.RunCLI("trail", "--insecure-http-auth", "resume", "7", "--no-resume")
-	for _, want := range []string{"Trail #7", firstSession.ID, secondSession.ID, checkpointID, "entire trail finding 7 --json"} {
-		if !strings.Contains(legacyOutput, want) {
-			t.Fatalf("legacy resume output missing %q:\n%s", want, legacyOutput)
-		}
-	}
-	if strings.Contains(legacyOutput, "--project") {
-		t.Fatalf("legacy resume must not suggest project commands:\n%s", legacyOutput)
-	}
-
-	env.ExtraEnv = append(env.ExtraEnv, "ENTIRE_PROJECT_TRAILS=1")
 	contextOutput := env.RunCLI("trail", "--insecure-http-auth", "resume", "321", "--no-resume")
 	for _, want := range []string{
 		"Trail #321",
@@ -104,9 +93,9 @@ func TestTrailResume_UsesCheckpointSessionsWhenLocalStateIsMissing(t *testing.T)
 		checkpointID,
 		"Create hello method",
 		"Create goodbye method",
-		"entire trail resume 321 --project gh/entireio --repo gh/entireio/cli --branch feature/test-branch --session " + firstSession.ID,
-		"entire trail resume 321 --project gh/entireio --repo gh/entireio/cli --branch feature/test-branch --session " + secondSession.ID,
-		"entire trail finding 321 --project gh/entireio --repo gh/entireio/cli --branch feature/test-branch --json",
+		"entire trail resume 321 --project gh/entireio --branch feature/test-branch --session " + firstSession.ID,
+		"entire trail resume 321 --project gh/entireio --branch feature/test-branch --session " + secondSession.ID,
+		"entire trail finding 321 --project gh/entireio --branch feature/test-branch --json",
 	} {
 		if !strings.Contains(contextOutput, want) {
 			t.Fatalf("trail resume --no-resume output missing %q:\n%s", want, contextOutput)
@@ -195,7 +184,7 @@ func newTrailResumeIntegrationAPIServer(t *testing.T, trail api.TrailResource) *
 					},
 				},
 			})
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/resolve/gh/entireio":
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/project-resolver/gh/entireio":
 			writeTrailResumeIntegrationJSON(t, w, map[string]any{
 				"project": map[string]string{
 					"id": projectID, "name": "entireio", "region": "us", "ownerId": projectID,
@@ -208,14 +197,14 @@ func newTrailResumeIntegrationAPIServer(t *testing.T, trail api.TrailResource) *
 			writeTrailResumeIntegrationJSON(t, w, parent)
 		case r.Method == http.MethodGet && r.URL.Path == parentPath+"/changes/"+trail.ID:
 			writeTrailResumeIntegrationJSON(t, w, api.ChangeResource{TrailResource: trail, TrailID: parentID, RepositoryID: "placement-primary"})
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/trails/gh/entireio/cli":
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/placement-primary/changes":
 			writeTrailResumeIntegrationJSON(t, w, api.TrailListResponse{
 				Trails: []api.TrailResource{trail},
 				Total:  1,
 			})
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/trails/gh/entireio/cli/7":
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/placement-primary/changes/7":
 			writeTrailResumeIntegrationJSON(t, w, trail)
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/trails/gh/entireio/cli/7/reviews/comments":
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/placement-primary/changes/7/reviews/comments":
 			writeTrailResumeIntegrationJSON(t, w, map[string]any{
 				"comments": []any{},
 				"hasMore":  false,
@@ -282,7 +271,6 @@ func configureTrailResumeIntegrationAuth(t *testing.T, env *TestEnv, coreURL str
 	}
 
 	env.ExtraEnv = append(env.ExtraEnv,
-		"ENTIRE_PROJECT_TRAILS=0",
 		"ENTIRE_API_BASE_URL="+coreURL,
 		"ENTIRE_CONFIG_DIR="+configDir,
 		"XDG_CACHE_HOME="+xdgCacheHome,

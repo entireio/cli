@@ -7,12 +7,14 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
 	"github.com/entireio/cli/internal/entireclient/contexts"
+	"github.com/entireio/cli/internal/entireclient/httpclient"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
@@ -46,6 +48,18 @@ func SetResolveContextForAPIForTest(t interface{ Helper() }, fn resolveContextFu
 type DataAPI struct {
 	BaseURL string
 	Token   string
+	// Source, when set, renews the bearer per request (EnvTokenSource);
+	// Token is then only its value at resolution time.
+	Source api.TokenSource
+}
+
+// Client returns an API client for d, renewing the bearer from Source when
+// one is set.
+func (d DataAPI) Client() *api.Client {
+	if d.Source != nil {
+		return api.NewClientWithTokenSource(d.Source, d.BaseURL)
+	}
+	return api.NewClientWithBaseURL(d.Token, d.BaseURL)
 }
 
 // ResolveDataAPI picks the data API and bearer for this command.
@@ -107,14 +121,15 @@ func envTokenDataAPI(raw, dataURL string, overridden bool) (DataAPI, error) {
 	if err != nil {
 		return DataAPI{}, err
 	}
+	source := EnvTokenSource(raw)
 	if overridden {
-		return DataAPI{BaseURL: dataURL, Token: token}, nil
+		return DataAPI{BaseURL: dataURL, Token: token, Source: source}, nil
 	}
 	baseURL, err := dataBaseURLForCore(core)
 	if err != nil {
 		return DataAPI{}, err
 	}
-	return DataAPI{BaseURL: baseURL, Token: token}, nil
+	return DataAPI{BaseURL: baseURL, Token: token, Source: source}, nil
 }
 
 // DataBaseURL is the web/data API origin for the acting login, without a
@@ -125,7 +140,7 @@ func DataBaseURL() (string, error) {
 		return dataURL, nil
 	}
 	if raw, ok := os.LookupEnv(EnvTokenVar); ok {
-		core, _, err := ParseEnvToken(raw)
+		core, err := EnvTokenCoreURL(raw)
 		if err != nil {
 			return "", err
 		}
@@ -139,6 +154,38 @@ func DataBaseURL() (string, error) {
 		return "", errNoLogin()
 	}
 	return dataBaseURLForCore(c.CoreURL)
+}
+
+// WebBaseURL is the browser origin for links into the Entire web app for the
+// acting login. It is not the API origin: production serves the web app from
+// entire.com while the API stays on entire.io. ENTIRE_WEB_BASE_URL wins;
+// otherwise the data host's site picks the web origin, and a data host outside
+// a known site is used as-is.
+func WebBaseURL() (string, error) {
+	if webURL, ok := api.WebBaseURLOverride(); ok {
+		return webURL, nil
+	}
+	base, err := DataBaseURL()
+	if err != nil {
+		return "", err
+	}
+	if web := WebOrigin(base); web != "" {
+		return web, nil
+	}
+	return strings.TrimRight(base, "/"), nil
+}
+
+// WebOrigin maps a data host to its site's web app origin, or "" for loopback
+// and custom hosts.
+func WebOrigin(dataBaseURL string) string {
+	switch EntireSite(dataBaseURL) {
+	case siteEntire:
+		return api.DefaultWebBaseURL
+	case sitePartial:
+		return "https://" + sitePartial
+	default:
+		return ""
+	}
 }
 
 // dataBaseURLForCore maps a login server to the site it serves: the apex for
@@ -193,11 +240,20 @@ func dataAPIContext(ctx context.Context, dataBaseURL string) (*contexts.Context,
 	return selected, nil
 }
 
+// dataAPIHTTPDiscoveryTransport sends requests for the plain-HTTP data origin
+// over HTTP. Only that host is rewritten: the same client later lists clusters
+// at the discovered core with the login JWT, and a blanket rewrite would send
+// that token in plaintext beneath the redirect policy, which only sees HTTPS.
 type dataAPIHTTPDiscoveryTransport struct {
+	host string
 	base http.RoundTripper
 }
 
 func (t dataAPIHTTPDiscoveryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if !strings.EqualFold(req.URL.Host, t.host) {
+		//nolint:wrapcheck // passthrough - wrapping would change error semantics
+		return t.base.RoundTrip(req)
+	}
 	clone := req.Clone(req.Context())
 	clone.URL.Scheme = schemeHTTP
 	resp, err := t.base.RoundTrip(clone)
@@ -208,12 +264,16 @@ func (t dataAPIHTTPDiscoveryTransport) RoundTrip(req *http.Request) (*http.Respo
 }
 
 func dataAPIDiscoveryClient(dataOrigin string) *http.Client {
-	client := &http.Client{Timeout: dataAPIDiscoveryTimeout, Transport: versioninfo.WrapTransport(nil)}
+	client := httpclient.New(httpclient.Options{Timeout: dataAPIDiscoveryTimeout, Transport: versioninfo.WrapTransport(nil)})
 	if !shouldUsePlainHTTPDiscovery(dataOrigin) {
 		return client
 	}
 
-	client.Transport = dataAPIHTTPDiscoveryTransport{base: client.Transport}
+	host, ok := hostOf(dataOrigin)
+	if !ok {
+		return client
+	}
+	client.Transport = dataAPIHTTPDiscoveryTransport{host: host, base: client.Transport}
 	return client
 }
 

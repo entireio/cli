@@ -15,7 +15,7 @@ import (
 func TestSubmitTrailApprovalUsesHTTPStatusNotResponseBody(t *testing.T) {
 	// Serial: replaces global clients.
 	for _, project := range []bool{false, true} {
-		for _, verb := range []string{"approve", "request-changes"} {
+		for _, verb := range []string{"approve"} {
 			for _, response := range []struct {
 				name   string
 				status int
@@ -38,18 +38,14 @@ func TestSubmitTrailApprovalUsesHTTPStatusNotResponseBody(t *testing.T) {
 					posts := 0
 					setupWorkingRepoClient(t, func(w http.ResponseWriter, r *http.Request) {
 						switch r.Method + " " + r.URL.Path {
-						case "GET /api/v1/trails/gh/acme/widget/7":
+						case "GET /api/v1/repos/repo-id/changes/7":
 							assert.False(t, project, "project mode must resolve through its owned route")
 							assert.NoError(t, json.NewEncoder(w).Encode(api.TrailResource{ID: projectTrailTestChange, Number: 7, Branch: "feature/work"}))
-						case "POST /api/v1/trails/gh/acme/widget/7/approvals":
+						case "POST /api/v1/repos/repo-id/changes/7/approvals":
 							posts++
 							var request api.TrailApprovalRequest
 							assert.NoError(t, json.NewDecoder(r.Body).Decode(&request))
-							event := "approve"
-							if verb == "request-changes" {
-								event = "request_changes"
-							}
-							assert.Equal(t, event, request.Event)
+							assert.Equal(t, "approve", request.Event)
 							w.WriteHeader(response.status)
 							_, err := fmt.Fprint(w, response.body)
 							assert.NoError(t, err)

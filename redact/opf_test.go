@@ -332,6 +332,37 @@ func TestShellOut_RedactBatchSanitizesSeparatorCollisions(t *testing.T) {
 	}
 }
 
+func TestShellOut_RedactBatchSanitizesCarriageReturns(t *testing.T) {
+	t.Parallel()
+	capture := filepath.Join(t.TempDir(), "stdin")
+	rt := &shellOut{
+		command:        "opf",
+		timeoutSeconds: 5,
+		commandRunner: func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+			return exec.CommandContext(ctx, "sh", "-c", `cat > "$1"; printf '{"detected_spans":[]}'`, "sh", capture)
+		},
+	}
+
+	_, err := rt.RedactBatch(context.Background(),
+		[]string{"left\r\nright", "bare\rcr"},
+		[]string{"private_person"},
+	)
+	if err != nil {
+		t.Fatalf("RedactBatch: %v", err)
+	}
+	data, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatalf("read captured stdin: %v", err)
+	}
+	got := string(data)
+	if strings.Contains(got, "\r") {
+		t.Fatalf("batched stdin must not contain a bare carriage return, got %q", got)
+	}
+	if !strings.Contains(got, "left  right") || !strings.Contains(got, "bare cr") {
+		t.Fatalf("CRLF and bare CR should each be replaced with a space per byte, got %q", got)
+	}
+}
+
 func TestShellOut_RedactBatchRejectsOversizedInputBeforeCommand(t *testing.T) {
 	t.Parallel()
 	called := false

@@ -132,6 +132,11 @@ var safeGitDiffCalls = []safeGitDiffCall{
 		reason:   "compares the index to HEAD and never reads the worktree",
 	},
 	{
+		path:     "internal/transcript/codexitem/daemon.go",
+		fragment: "`json:\"diff\"`",
+		reason:   "a JSON tag of Codex's file change notification, not a Git invocation",
+	},
+	{
 		path:     "cmd/entire/cli/review/scope.go",
 		fragment: `baseRef+"...HEAD"`,
 		reason:   "compares two commits and never reads the worktree",

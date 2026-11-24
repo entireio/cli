@@ -30,6 +30,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
+	"github.com/entireio/cli/internal/entireclient/userconfig"
 
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/spf13/cobra"
@@ -44,37 +45,42 @@ func newDoctorCmd() *cobra.Command {
 		Long: `Scan for session issues and offer to fix them.
 
 Checks performed:
-  1. Disconnected metadata branches: detects when local and remote
+  1. Per-user config: report an invalid config.json, which makes most
+     commands refuse to run. Doctor exits non-zero until it is fixed or
+     removed.
+
+  2. Disconnected metadata branches: detects when local and remote
      entire/checkpoints/v1 branches share no common ancestor (caused by a
      previous bug). Fixes by cherry-picking local checkpoints onto remote tip.
 
-  2. Operational logs: warn when .entire/logs cannot be written. Every other
+  3. Operational logs: warn when .entire/logs cannot be written. Every other
      diagnostic is delivered by writing there, and that write is silent about
      its own failure, so an unwritable log directory looks exactly like a repo
      where nothing ran.
 
   When Codex hooks are installed:
-  3. Codex hook trust: warn when hooks declared in .codex/hooks.json
+  4. Codex hook trust: warn when hooks declared in .codex/hooks.json
      lack a trusted_hash entry in the user's Codex config (i.e. /hooks
      review hasn't run yet on this machine, or a newer entire release
      added a hook the user hasn't approved yet).
 
   For each installed agent that reports hook-config drift:
-  4. Hook config: warn when the installed hooks no longer match what this
+  5. Hook config: warn when the installed hooks no longer match what this
      CLI writes (e.g. an older release wrote Claude Code tool matchers that
-     no longer fire, or a committed Pi/OpenCode extension has gone stale).
-     Fix by re-running 'entire enable --force'.
+     no longer fire, a committed Pi/OpenCode extension has gone stale, or a
+     Windows hook was written before hooks resolved programs from PATH only).
+     Fix by running 'entire agent add <agent>' (add --force if that does
+     not fix it).
 
-  5. Retired Gemini CLI hooks: remove Entire hook entries left in
+  6. Retired Gemini CLI hooks: remove Entire hook entries left in
      .gemini/settings.json. Gemini CLI support was removed; the entries now do
      nothing but run a no-op on every Gemini event.
 
-  6. Summary provider: warn when summary_generation.provider names a registered
+  7. Summary provider: warn when summary_generation.provider names a registered
      agent that cannot generate text (e.g. factoryai-droid), which makes
-     'entire checkpoint explain --generate', 'entire dispatch' and
-     'entire runner setup' fail. Reports the file to change; does not rewrite it.
+     'entire checkpoint explain --generate' and 'entire dispatch' fail. Reports the file to change; does not rewrite it.
 
-  7. Legacy shadow branches: report entire/<commit>-<worktree> branches older
+  8. Legacy shadow branches: report entire/<commit>-<worktree> branches older
      versions wrote at every turn. They hold full snapshots of the working
      tree and nothing reads them anymore. Fix with 'entire doctor --force',
      which deletes only the branches; a later 'git gc' frees the space once
@@ -84,7 +90,7 @@ Checks performed:
      checked out in a worktree is left alone. Bare entire/<commit> branches
      are only pointed at ('entire clean --all --dry-run'), never deleted.
 
-  8. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
+  9. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
 
 A session is considered stuck if:
   - It is in ACTIVE phase with no interaction for over 1 hour
@@ -142,10 +148,30 @@ type stuckSession struct {
 	FilesTouchedCount int
 }
 
+// checkUserConfig reports an unusable config.json.
+// Doctor skips the root guard, so it reports here, whatever ENTIRE_TOKEN says.
+func checkUserConfig(cmd *cobra.Command) error {
+	err := userconfig.Check()
+	if err == nil {
+		return nil
+	}
+	w := cmd.OutOrStdout()
+	fmt.Fprintln(w, "Per-user config: INVALID")
+	fmt.Fprintf(w, "  %v\n", err)
+	fmt.Fprintln(w, "  Most entire commands refuse to run until it is fixed.")
+	fmt.Fprintln(w)
+	return err //nolint:wrapcheck // already names the file
+}
+
 func runSessionsFix(cmd *cobra.Command, force bool) error {
 	var finalErr error
 
-	// Check 1: Disconnected metadata branches
+	// First: other commands refuse to run.
+	if err := checkUserConfig(cmd); err != nil {
+		finalErr = NewSilentError(err)
+	}
+
+	// Check 2: Disconnected metadata branches
 	metadataErr := checkDisconnectedMetadata(cmd, force)
 	if metadataErr != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Error: metadata check failed: %v\n", metadataErr)
@@ -187,6 +213,13 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 	// Agent-specific: does agy actually load the workspace hooks?
 	checkAntigravityHooksLoaded(cmd)
 
+	// Hook timeouts that configs from older CLIs lack. Fixes rather than only
+	// reporting: it only fills in a timeout on a hook Entire wrote. Runs before
+	// the drift check, which counts a missing timeout as drift, so that check
+	// reports on the repaired config instead of telling the user to run
+	// `entire agent add` for something doctor just fixed.
+	checkHookTimeouts(cmd)
+
 	// Agent-specific: Claude Code hook config drift.
 	checkHookDrift(cmd)
 
@@ -202,6 +235,11 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 	// checks: it breaks three commands, not capture, so it is the milder fault.
 	checkSummaryProvider(cmd)
 
+	// Checkpoint refs whose shard directory case-collided. Before the
+	// destination note because it is about checkpoints already written here,
+	// not about where the next ones go.
+	checkCheckpointRefShardCase(cmd, force)
+
 	// Where checkpoints land, when the repo's remotes make that ambiguous.
 	printCheckpointDestinationNote(ctx, cmd.OutOrStdout(), "Checkpoint destination: REVIEW")
 
@@ -210,6 +248,10 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Error: legacy shadow branch check failed: %v\n", legacyErr)
 		finalErr = NewSilentError(fmt.Errorf("legacy shadow branch check failed: %w", legacyErr))
 	}
+
+	// Ahead of stuck sessions: a session refused on one of these can show as
+	// stuck below, and this names the cause and the fix.
+	checkDivergedLegacyCheckpoints(cmd)
 
 	// Stuck sessions
 	// Load all session states
@@ -338,7 +380,7 @@ func classifySession(state *strategy.SessionState, now time.Time) *stuckSession 
 			State:             state,
 			Reason:            reason,
 			CheckpointCount:   state.StepCount + len(state.TaskRecords),
-			FilesTouchedCount: len(state.FilesTouched),
+			FilesTouchedCount: state.PendingFileCount(),
 		}
 	}
 
@@ -553,11 +595,30 @@ func checkDisconnectedMetadata(cmd *cobra.Command, force bool) error {
 		}
 	}
 
-	if fixErr := strategy.ReconcileDisconnectedMetadataRef(ctx, repo, refs.Primary, remoteRefName, cmd.ErrOrStderr()); fixErr != nil {
+	// When shallow history hides the merge base, deepen only the metadata
+	// branch from the elected remote and reconcile once more. Each attempt
+	// opens the repository afresh so objects from that fetch are visible.
+	fixErr := strategy.RetryAfterDeepFetch(
+		func() error { return reconcileMetadataFromFreshRepo(cmd, refs.Primary, remoteRefName) },
+		func() error { return fetchMetadataFromRemote(ctx, remoteName, true, false) },
+	)
+	if fixErr != nil {
 		return fmt.Errorf("failed to reconcile metadata branches: %w", fixErr)
 	}
 
 	fmt.Fprintln(w, "  ✓ Fixed: metadata branches reconciled")
+	return nil
+}
+
+func reconcileMetadataFromFreshRepo(cmd *cobra.Command, primary, remoteRefName plumbing.ReferenceName) error {
+	repo, err := openRepository(cmd.Context())
+	if err != nil {
+		return fmt.Errorf("failed to open repository: %w", err)
+	}
+	defer repo.Close()
+	if err := strategy.ReconcileDisconnectedMetadataRef(cmd.Context(), repo, primary, remoteRefName, cmd.ErrOrStderr()); err != nil {
+		return fmt.Errorf("reconcile %s with %s: %w", primary, remoteRefName, err)
+	}
 	return nil
 }
 
@@ -608,7 +669,8 @@ func confirmDoctorFix(ctx context.Context, w io.Writer, title string) (bool, err
 // looks installed while naming a launcher inside the working tree that no longer
 // exists — and because that shape got no availability guard while pre-push
 // deliberately propagates exit codes, the symptom a user actually sees is `git
-// push` being rejected.
+// push` being rejected. Entire's own pre-push hook from before it passed git's
+// ref list is out of date too: it still runs, but does not pass that list.
 //
 // Unlike the agent hook checks this one repairs rather than only warning: the
 // reinstall is content-idempotent, backs up any foreign hook it displaces, and
@@ -644,13 +706,15 @@ func checkGitHooks(cmd *cobra.Command, force bool) error {
 
 	case strategy.GitHooksOutdated:
 		// Actionable whatever the settings say: a hook carrying Entire's marker
-		// means this repo opted in at some point, and a stale one is actively
-		// broken rather than merely missing.
+		// means this repo opted in at some point. A working-tree launcher can
+		// reject `git push`; an old pre-push hook still works but does not pass
+		// git's ref list.
 		fmt.Fprintln(w, "Git hooks: OUT OF DATE")
-		fmt.Fprintln(w, "  A hook still runs Entire from the working tree instead of the installed")
-		fmt.Fprintln(w, "  binary. This can reject `git push`, because the path it names is gone.")
+		fmt.Fprintln(w, "  A hook is in a shape this version replaces. Either it runs Entire from the")
+		fmt.Fprintln(w, "  working tree, which can reject `git push` once that path is gone, or it is a")
+		fmt.Fprintln(w, "  pre-push hook from before Entire read the refs `git push` sends.")
 	}
-	fmt.Fprintln(w, "  Fix: reinstall the managed git hooks (any non-Entire hook is backed up).")
+	fmt.Fprintln(w, "  Fix: reinstall the missing or out-of-date git hooks (any non-Entire hook is backed up).")
 
 	if !force {
 		// Degrade to warn-only when there is nobody to ask. An agent or CI run
@@ -1330,7 +1394,10 @@ func checkLogSink(cmd *cobra.Command) {
 // checkHookDrift warns when an installed agent's Entire hook config is out of
 // date — an older release wrote Claude Code tool matchers that no longer fire,
 // or a repo committed a Pi/OpenCode extension that the template has since moved
-// past. Read-only; the fix is `entire enable --force`. Stays silent for agents
+// past. Read-only; the fix is `entire agent add <agent>`, which installs
+// without --force so the timeouts and fields the user set on Entire's hooks
+// survive. A bare `entire enable` would not do: on a repo that is already
+// enabled it returns without reinstalling agent hooks. Stays silent for agents
 // that aren't installed here or don't implement a drift check.
 func checkHookDrift(cmd *cobra.Command) {
 	ctx := cmd.Context()
@@ -1355,9 +1422,18 @@ func checkHookDrift(cmd *cobra.Command) {
 			fmt.Fprintf(w, "✓ %s hook config: OK\n", displayName)
 		case agent.HooksOutdated:
 			fmt.Fprintf(w, "%s hooks: OUT OF DATE\n", displayName)
-			fmt.Fprintln(w, "  The installed hook config no longer matches what this CLI writes,")
-			fmt.Fprintln(w, "  so some or all hooks may silently not fire.")
-			fmt.Fprintln(w, "  Run `entire enable --force` to update it.")
+			fmt.Fprintln(w, "  The installed hook config no longer matches what this CLI writes, so")
+			fmt.Fprintln(w, "  some hooks may not fire, or may block the agent if `entire` stalls on launch.")
+			fmt.Fprintf(w, "  Run `entire agent add %s` to update it.\n", ag.Name())
+			fmt.Fprintln(w, "  If that does not fix it, add --force, which rebuilds Entire's hooks and")
+			fmt.Fprintln(w, "  drops any changes you made to them.")
+		case agent.HooksForOtherHost:
+			fmt.Fprintf(w, "%s hooks: WRITTEN FOR ANOTHER OS\n", displayName)
+			fmt.Fprintln(w, "  The installed hook commands are the ones Entire writes on another OS, and")
+			fmt.Fprintln(w, "  this OS cannot run them, so no hooks fire here. This usually means the")
+			fmt.Fprintln(w, "  hook config was committed from a teammate's checkout on that OS.")
+			fmt.Fprintf(w, "  Run `entire agent add %s` to rewrite it for this OS. If the file is\n", ag.Name())
+			fmt.Fprintln(w, "  committed, that breaks it for teammates on the other OS.")
 		}
 	}
 }
@@ -1368,7 +1444,7 @@ func checkHookDrift(cmd *cobra.Command) {
 // under the repo root need manual approval, which defeats unattended permission
 // modes, and it guarded a staging buffer rather than the durable copy.
 //
-// This is the one doctor check that repairs without asking, and the reason is
+// It repairs without asking, as checkHookTimeouts does, and the reason is
 // ownership: it deletes only a rule byte-identical to the string Entire itself
 // wrote, so nothing the user chose is touched. `entire enable` performs the same
 // removal; this exists because a user who has already enabled Entire has no
@@ -1379,6 +1455,56 @@ func checkHookDrift(cmd *cobra.Command) {
 // left visible rather than hidden: the message says the file changed so the user
 // can commit or revert it.
 func checkRetiredDenyRule(cmd *cobra.Command) {
+	// A repair error is logged rather than printed. An agent whose config will
+	// not parse never reaches here — AreHooksInstalled fails on it, so
+	// GetAgentsWithHooksInstalled leaves it out — which leaves only write
+	// failures, and printing "stale rule" for those would name the wrong
+	// problem. (That a broken config goes unreported at all is a separate,
+	// pre-existing gap: agentHookState.unchecked has no consumer.)
+	repairInstalledAgents(cmd, "could not remove retired deny rule",
+		// One pass: Repair reports whether it found the rule, so a separate
+		// detect call would only read and parse the same file twice.
+		agent.RepairRetiredMetadataDenyRule,
+		func(w io.Writer, ag agent.Agent) {
+			fmt.Fprintf(w, "%s permissions: STALE RULE\n", ag.Type())
+			fmt.Fprintf(w, "  A retired Entire deny rule (%s) was still present.\n", agent.MetadataDenyRule)
+			fmt.Fprintln(w, "  It makes ordinary commands (a recursive grep from the repo root, or any")
+			fmt.Fprintln(w, "  command naming that path) need manual approval, and it no longer protects")
+			fmt.Fprintln(w, "  anything: the file it guarded is removed once a session is condensed.")
+			fmt.Fprintln(w, "  ✓ Fixed: rule removed (your other deny rules are untouched).")
+		})
+}
+
+// checkHookTimeouts gives Entire's hooks the timeouts a config written by an
+// older CLI lacks, so the agent's own default does not apply instead: a longer
+// one lets a stalled `entire` launch block the agent, and a shorter one (agy's
+// on Stop) kills a turn-end hook before it saves session state. It repairs
+// without asking for the reason checkRetiredDenyRule does: it only sets a
+// timeout on a hook Entire wrote that has none, so nothing the user chose is
+// touched. As there, a repair error is logged rather than printed.
+func checkHookTimeouts(cmd *cobra.Command) {
+	repairInstalledAgents(cmd, "could not add missing hook timeouts",
+		func(ctx context.Context, ag agent.Agent) (bool, error) {
+			repairer, ok := agent.AsHookTimeoutRepairer(ag)
+			if !ok {
+				return false, nil
+			}
+			return repairer.RepairHookTimeouts(ctx)
+		},
+		func(w io.Writer, ag agent.Agent) {
+			fmt.Fprintf(w, "%s hooks: MISSING TIMEOUTS\n", ag.Type())
+			fmt.Fprintln(w, "  Some Entire hooks had no timeout, so the agent applied its own default,")
+			fmt.Fprintln(w, "  which can block the agent too long or stop a hook before it finishes.")
+			fmt.Fprintln(w, "  ✓ Fixed: timeouts added (your own hooks and timeouts are untouched).")
+		})
+}
+
+// repairInstalledAgents runs repair, which fixes an agent's config without
+// asking, on every agent with hooks installed here. For each config it changed,
+// report says what was fixed, and the user is told the settings file changed:
+// it is usually tracked in git, so they can commit or revert it. A repair error
+// is logged rather than printed, under failure.
+func repairInstalledAgents(cmd *cobra.Command, failure string, repair func(context.Context, agent.Agent) (bool, error), report func(io.Writer, agent.Agent)) {
 	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
 	for _, name := range GetAgentsWithHooksInstalled(ctx) {
@@ -1386,31 +1512,16 @@ func checkRetiredDenyRule(cmd *cobra.Command) {
 		if err != nil {
 			continue
 		}
-		// One pass: Repair reports whether it found the rule, so a separate
-		// detect call would only read and parse the same file twice.
-		//
-		// A repair error is logged rather than printed. An agent whose config
-		// will not parse never reaches here — AreHooksInstalled fails on it, so
-		// GetAgentsWithHooksInstalled leaves it out — which leaves only write
-		// failures, and printing "stale rule" for those would name the wrong
-		// problem. (That a broken config goes unreported at all is a separate,
-		// pre-existing gap: agentHookState.unchecked has no consumer.)
-		changed, repairErr := agent.RepairRetiredMetadataDenyRule(ctx, ag)
+		changed, repairErr := repair(ctx, ag)
 		if repairErr != nil {
-			logging.Warn(ctx, "could not remove retired deny rule",
+			logging.Warn(ctx, failure,
 				slog.String("agent", string(ag.Type())),
 				slog.String("error", repairErr.Error()))
 			continue
 		}
 		if changed {
-			displayName := string(ag.Type())
-			fmt.Fprintf(w, "%s permissions: STALE RULE\n", displayName)
-			fmt.Fprintf(w, "  A retired Entire deny rule (%s) was still present.\n", agent.MetadataDenyRule)
-			fmt.Fprintln(w, "  It makes ordinary commands (a recursive grep from the repo root, or any")
-			fmt.Fprintln(w, "  command naming that path) need manual approval, and it no longer protects")
-			fmt.Fprintln(w, "  anything: the file it guarded is removed once a session is condensed.")
-			fmt.Fprintln(w, "  ✓ Fixed: rule removed (your other deny rules are untouched).")
-			fmt.Fprintln(w, "  The settings file changed — commit or revert it as you prefer.")
+			report(w, ag)
+			fmt.Fprintln(w, "  The settings file changed. Commit or revert it as you prefer.")
 		}
 	}
 }
@@ -1449,7 +1560,7 @@ func checkRetiredGeminiHooks(cmd *cobra.Command) {
 // Worth a check of its own because nothing else says a word about it: the
 // settings loader validates only model-without-provider, `entire status` never
 // mentions summary generation, and the resolver's error surfaces at
-// `checkpoint explain --generate` / `dispatch` / `runner setup` — commands a
+// `checkpoint explain --generate` / `dispatch` — commands a
 // user may not run for weeks after the edit, by which time the cause is not in
 // view. Read-only; the remedy is the user's choice of provider, and the value
 // may live in a committed settings.json where a rewrite changes everyone's.
@@ -1491,8 +1602,8 @@ func checkSummaryProvider(cmd *cobra.Command) {
 	} else {
 		fmt.Fprintf(w, "  summary_generation.provider is %q in %s, which cannot generate text.\n", name, sourceFile)
 	}
-	fmt.Fprintln(w, "  `entire checkpoint explain --generate`, `entire dispatch`, and")
-	fmt.Fprintln(w, "  `entire runner setup` all fail while it is set.")
+	fmt.Fprintln(w, "  `entire checkpoint explain --generate` and `entire dispatch`")
+	fmt.Fprintln(w, "  both fail while it is set.")
 	// The command names an INSTALLED provider, not merely a capable one.
 	// summaryCapableProviderNames is deliberately unfiltered by $PATH — it
 	// answers "what does this field accept" — but a command built from its
@@ -1617,7 +1728,8 @@ func checkCodexHookTrust(cmd *cobra.Command) {
 		if diagnostics.PathsDiffer() {
 			writeCodexPrimaryCheckoutRemedy(w)
 		} else {
-			fmt.Fprintln(w, "  Run `entire enable --force` from this worktree to refresh it.")
+			fmt.Fprintln(w, "  Run `entire agent add codex` from this worktree to refresh it.")
+			fmt.Fprintln(w, "  If that does not fix it, add --force.")
 		}
 	case codexHookStateTrustReview:
 		writeCodexInstalledAndTrust(w, diagnostics)
@@ -1683,15 +1795,30 @@ func antigravityDoctorSubject(cmd *cobra.Command) (*antigravity.AntigravityAgent
 	return ag, true
 }
 
-// checkAntigravityTitleTee warns when Antigravity hooks are installed in this
-// repo but agy's global title slot — agy's only token-usage surface — is not
-// routed through Entire, which leaves token counts missing from checkpoints.
-// Warn-only.
+// checkAntigravityTitleTee warns, from any repository, when agy's global title
+// slot is routed through a Windows tee an earlier version wrote, which still
+// looks for `entire` in the folder agy was opened in. Where Antigravity hooks
+// are installed in this repo, it also warns when the slot — agy's only
+// token-usage surface — is not routed through Entire, which leaves token
+// counts missing from checkpoints. Both need agy on PATH, as the install that
+// rewrites the slot does. Warn-only.
 func checkAntigravityTitleTee(cmd *cobra.Command) {
+	w := cmd.OutOrStdout()
+	// The title command is global and runs in every folder agy opens, so an
+	// outdated one is reported from any repository, not only where
+	// Antigravity's hooks are enabled. The remedy installs Antigravity's hooks
+	// in the repository it runs in, so it names one that uses Antigravity.
+	if _, err := exec.LookPath("agy"); err == nil && antigravity.TitleTeeOutdated() {
+		fmt.Fprintln(w, "Antigravity title-tee: OUT OF DATE")
+		fmt.Fprintln(w, "  agy's title command was written by an earlier version and runs in every")
+		fmt.Fprintln(w, "  folder agy opens, looking for `entire` in that folder before PATH.")
+		fmt.Fprintln(w, "  In a repository that uses Antigravity, run `entire agent add antigravity`")
+		fmt.Fprintln(w, "  to update it.")
+		return
+	}
 	if _, ok := antigravityDoctorSubject(cmd); !ok {
 		return
 	}
-	w := cmd.OutOrStdout()
 	if antigravity.TitleTeeInstalled() {
 		fmt.Fprintln(w, "✓ Antigravity title-tee: OK")
 		return
@@ -1725,7 +1852,7 @@ func checkAntigravityHooksLoaded(cmd *cobra.Command) {
 	}
 	w := cmd.OutOrStdout()
 
-	if installed, current, err := ag.HooksEntryMatchesHost(cmd.Context()); err == nil && installed && !current {
+	if wrongHost, err := ag.HooksEntryWrongHost(cmd.Context()); err == nil && wrongHost {
 		fmt.Fprintln(w, "Antigravity hooks: STALE FOR THIS HOST")
 		fmt.Fprintln(w, "  The \"entire\" entry in .agents/hooks.json is not the command this host")
 		fmt.Fprintln(w, "  needs (agy runs hooks through cmd.exe on Windows and sh elsewhere), so")
@@ -1779,7 +1906,7 @@ func writeCodexWorktreeInspectionWarning(w io.Writer, worktreePath string, state
 		fmt.Fprintf(w, "  Current-worktree hooks: %s\n", worktreePath)
 	}
 	fmt.Fprintf(w, "  Error: %v\n", err)
-	fmt.Fprintln(w, "  Fix the current-worktree .codex path or hooks.json file, then run `entire enable --force`.")
+	fmt.Fprintln(w, "  Fix the current-worktree .codex path or hooks.json file, then run `entire agent add codex`.")
 	fmt.Fprintln(w, "  This may not be the file Codex reads. If Codex discovers another project root, apply/merge the generated .codex/hooks.json change there too.")
 	fmt.Fprintln(w, "  .codex/hooks.json is tracked — commit it and make sure the discovered project root has it too.")
 }
@@ -1801,7 +1928,7 @@ func writeCodexMissingProjectLayerWarning(w io.Writer, projectLayerPath, discove
 	fmt.Fprintf(w, "  Current-worktree project layer: %s (missing)\n", projectLayerPath)
 	fmt.Fprintf(w, "  Codex-discovered hooks: %s\n", discoveredPath)
 	fmt.Fprintln(w, "  Current Codex needs the local .codex project layer before it loads the discovered file.")
-	fmt.Fprintln(w, "  Run `entire enable` from this worktree to create the local layer.")
+	fmt.Fprintln(w, "  Run `entire agent add codex` from this worktree to create the local layer.")
 	writeCodexTrackedHooksRemedy(w)
 }
 

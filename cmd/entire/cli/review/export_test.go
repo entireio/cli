@@ -12,7 +12,7 @@ import (
 // package-external tests (synthesis_prompt_test.go, synthesis_sink_test.go).
 // Only compiled during `go test`.
 func ExposedComposeSynthesisPrompt(summary reviewtypes.RunSummary, perRunPrompt string) string {
-	return composeSynthesisPrompt(summary, perRunPrompt, "", "")
+	return composeSynthesisPrompt(summary, synthesisPromptOptions{perRunPrompt: perRunPrompt})
 }
 
 // SinkComposeInputs is the test-facing alias for multiAgentSinkInputs.
@@ -74,3 +74,12 @@ func ExposedIsTUIPostRunCompleteSink(s reviewtypes.Sink) bool {
 	_, ok := s.(tuiPostRunCompleteSink)
 	return ok
 }
+
+// ExposedComposeTrailSynthesisPrompt composes the judge prompt for a run whose
+// output is posted to the trail.
+func ExposedComposeTrailSynthesisPrompt(summary reviewtypes.RunSummary, perRunPrompt string) string {
+	return composeSynthesisPrompt(summary, synthesisPromptOptions{perRunPrompt: perRunPrompt, trailFindingsJSON: true})
+}
+
+// ExposedTrailFindingsJSONInstructions is the JSON contract appended in trail mode.
+const ExposedTrailFindingsJSONInstructions = trailFindingsJSONInstructions

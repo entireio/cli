@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -764,17 +765,11 @@ func CellV4(ctx context.Context, client *api.Client, cfg Config, repoIDs []strin
 	}
 	addCommonSearchParams(q, cfg)
 
-	resp, err := client.Get(ctx, v4ServicePath+"?"+q.Encode())
+	status, body, err := getWithBackoff(ctx, client, v4ServicePath+"?"+q.Encode())
 	if err != nil {
-		return nil, fmt.Errorf("calling search service: %w", err)
+		return nil, err
 	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return nil, fmt.Errorf("reading response: %w", err)
-	}
-	if resp.StatusCode == http.StatusNotFound {
+	if status == http.StatusNotFound {
 		// Two distinct 404s share this status. A JSON error body is
 		// query-serve answering through the gateway: the route exists but the
 		// repo filter matched nothing because query-serve has not indexed it.
@@ -795,7 +790,75 @@ func CellV4(ctx context.Context, client *api.Client, cfg Config, repoIDs []strin
 		}
 		return nil, ErrCellUnavailable
 	}
-	return parseSearchResponse(resp.StatusCode, body)
+	return parseSearchResponse(status, body)
+}
+
+// Shed-retry policy for a 429 from query-serve's admission gate (entire-search
+// trail 208). The gate sheds a search only when the pod's in-flight budget has
+// stayed full past its own two-second wait, or the caller already holds its
+// per-account share — the shape of an agent's parallel fan-out, which is what
+// this client is to the server. A couple of short, bounded retries ride out
+// the burst; anything longer belongs to the caller. The cell gateway forwards
+// the 429 and its Retry-After verbatim.
+const (
+	shedMaxRetries      = 2
+	shedRetryAfterLimit = 5 // seconds; larger server hints are capped, not obeyed
+)
+
+// shedBackoffUnit is one second of Retry-After; tests shrink it.
+var shedBackoffUnit = time.Second
+
+// getWithBackoff issues the GET, retrying a 429 up to shedMaxRetries times
+// after sleeping for the server's Retry-After (capped) or one backoff unit,
+// within ctx. It returns the final status and the body read in full (bounded)
+// so the caller can classify any status. Statuses other than 429 are returned
+// on the first attempt.
+func getWithBackoff(ctx context.Context, client *api.Client, path string) (status int, body []byte, err error) {
+	for attempt := 0; ; attempt++ {
+		resp, err := client.Get(ctx, path)
+		if err != nil {
+			return 0, nil, fmt.Errorf("calling search service: %w", err)
+		}
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		_ = resp.Body.Close()
+		if err != nil {
+			return 0, nil, fmt.Errorf("reading response: %w", err)
+		}
+		if resp.StatusCode != http.StatusTooManyRequests || attempt >= shedMaxRetries {
+			return resp.StatusCode, body, nil
+		}
+		timer := time.NewTimer(jitter(shedBackoff(resp.Header.Get("Retry-After"))))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return 0, nil, fmt.Errorf("calling search service: %w", ctx.Err())
+		case <-timer.C:
+		}
+	}
+}
+
+// shedBackoff turns a Retry-After header (seconds; the only form query-serve
+// sends) into a wait, defaulting when absent or unparsable and capping a
+// server hint so a misconfigured gate cannot park the CLI for a minute.
+func shedBackoff(retryAfter string) time.Duration {
+	secs, err := strconv.Atoi(strings.TrimSpace(retryAfter))
+	if err != nil || secs < 1 {
+		return shedBackoffUnit
+	}
+	if secs > shedRetryAfterLimit {
+		secs = shedRetryAfterLimit
+	}
+	return time.Duration(secs) * shedBackoffUnit
+}
+
+// jitter spreads d uniformly over [d/2, 3d/2): an agent's parallel fan-out is
+// shed in one burst, and identical waits would bring every retry back in one
+// burst too.
+func jitter(d time.Duration) time.Duration {
+	if d <= 0 {
+		return d
+	}
+	return d/2 + rand.N(d) //nolint:gosec // jitter, not security-sensitive
 }
 
 // addCommonSearchParams sets the query params other than the repo scoping

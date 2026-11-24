@@ -257,7 +257,7 @@ func AllHookConfigRelPaths() []string {
 	seen := make(map[string]struct{})
 	var out []string
 	for _, factory := range factories {
-		locator, ok := factory().(HookConfigLocator)
+		locator, ok := AsHookConfigLocator(factory())
 		if !ok {
 			continue
 		}
@@ -288,7 +288,7 @@ func AllProtectedFiles() []string {
 	seen := make(map[string]struct{})
 	var files []string
 	for _, factory := range factories {
-		pf, ok := factory().(ProtectedFilesProvider)
+		pf, ok := AsProtectedFilesProvider(factory())
 		if !ok {
 			continue
 		}

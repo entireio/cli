@@ -34,10 +34,14 @@ func init() {
 	Register(&openCodeAgent{model: model, timeout: 2 * time.Minute})
 }
 
-func (a *openCodeAgent) Name() string               { return "opencode" }
-func (a *openCodeAgent) Binary() string             { return openCodeBinary }
-func (a *openCodeAgent) EntireAgent() string        { return "opencode" }
-func (a *openCodeAgent) PromptPattern() string      { return `(Ask anything|▣)` }
+func (a *openCodeAgent) Name() string        { return "opencode" }
+func (a *openCodeAgent) Binary() string      { return openCodeBinary }
+func (a *openCodeAgent) EntireAgent() string { return "opencode" }
+
+// PromptPattern matches the TUI ready for input: the empty input's
+// placeholder, or a finished turn's footer (OpenCode 1 marks it with ▣;
+// OpenCode 2 ends it with the turn's throughput, "· 1.9s · 83.6 tok/s").
+func (a *openCodeAgent) PromptPattern() string      { return `(Ask anything|▣|[0-9] tok/s)` }
 func (a *openCodeAgent) TimeoutMultiplier() float64 { return 2.0 }
 
 func (a *openCodeAgent) IsTransientError(out Output, _ error) bool {
@@ -337,12 +341,29 @@ func openCodeVersion() (string, error) {
 		return "", fmt.Errorf("opencode --version: %w", err)
 	}
 	version, _, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
-	version = strings.TrimSpace(version)
+	// OpenCode 1 prints "1.18.33", OpenCode 2 "opencode v2.1.1".
+	version = strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(version), "opencode "), "v")
 	if !openCodeVersionRe.MatchString(version) {
 		return "", fmt.Errorf("opencode --version printed %q, which is not a version", version)
 	}
 	return version, nil
 }
+
+// isOpenCode2 reports whether the installed opencode is OpenCode 2, which
+// changes how it is driven: `run` and the TUI attach to a shared background
+// service unless passed --standalone (and that service would outlive the
+// test), the TUI takes no --model flag, and it installs no plugin
+// dependencies into .opencode.
+var isOpenCode2 = sync.OnceValue(func() bool {
+	version, err := openCodeVersion()
+	if err != nil {
+		// Driving OpenCode 2 as 1.x would leave a background service behind
+		// and skip --standalone, so say which way this run went.
+		fmt.Fprintf(os.Stderr, "opencode: version unknown (%v); driving it as OpenCode 1\n", err)
+		return false
+	}
+	return strings.HasPrefix(version, "2.")
+})
 
 // SeedRepo prepares a directory opencode is about to run in: its config file,
 // plus the pre-built dependency tree so opencode's own blocking install never
@@ -351,14 +372,22 @@ func (a *openCodeAgent) SeedRepo(dir string) error {
 	// Written before the tree is resolved, so a repo still gets a usable config
 	// when the pre-build failed and opencode falls back to installing for itself.
 	//
-	// opencode's non-interactive mode auto-rejects the external_directory
-	// permission, since there is no user to prompt.
-	cfg := `{"$schema": "https://opencode.ai/config.json", "permission": {"external_directory": "allow"}}`
+	// opencode's non-interactive mode auto-rejects any permission set to ask,
+	// since there is no user to prompt: external_directory asks by default, and
+	// a developer's global config can make edit ask too.
+	cfg := `{"$schema": "https://opencode.ai/config.json", "permission": {"external_directory": "allow", "edit": "allow"}}`
 	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
-		cfg = fmt.Sprintf(`{"$schema": "https://opencode.ai/config.json", "permission": {"external_directory": "allow"}, "provider": {"anthropic": {"options": {"apiKey": %q}}}}`, key)
+		cfg = fmt.Sprintf(`{"$schema": "https://opencode.ai/config.json", "permission": {"external_directory": "allow", "edit": "allow"}, "provider": {"anthropic": {"options": {"apiKey": %q}}}}`, key)
+	}
+	if isOpenCode2() && a.model != "" {
+		// The OpenCode 2 TUI has no --model flag; the config selects it.
+		cfg = strings.TrimSuffix(cfg, "}") + fmt.Sprintf(", %q: %q}", "model", a.model)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "opencode.json"), []byte(cfg+"\n"), 0o644); err != nil {
 		return fmt.Errorf("write opencode.json: %w", err)
+	}
+	if isOpenCode2() {
+		return nil // OpenCode 2 installs no plugin dependencies here
 	}
 
 	deps, err := openCodePluginDeps()
@@ -410,8 +439,14 @@ func (a *openCodeAgent) RunPrompt(ctx context.Context, dir string, prompt string
 	}
 
 	args := []string{"run"}
+	if isOpenCode2() {
+		args = append(args, "--standalone")
+	}
 	if model != "" {
 		args = append(args, "--model", model)
+	}
+	if cfg.ResumeSessionID != "" {
+		args = append(args, "--session", cfg.ResumeSessionID)
 	}
 	args = append(args, prompt)
 
@@ -426,6 +461,9 @@ func (a *openCodeAgent) RunPrompt(ctx context.Context, dir string, prompt string
 	cmd := exec.CommandContext(ctx, a.Binary(), args...)
 	cmd.Dir = dir
 	cmd.Env = openCodePromptEnv(os.Environ(), dir)
+	if cfg.Home != "" {
+		cmd.Env = append(cmd.Env, a.HomeEnv(cfg.Home)...)
+	}
 	setupProcessGroup(cmd)
 	cmd.WaitDelay = 5 * time.Second
 
@@ -453,6 +491,13 @@ func (a *openCodeAgent) RunPrompt(ctx context.Context, dir string, prompt string
 	return out, nil
 }
 
+// NewHome returns a directory for XDG_DATA_HOME, where OpenCode keeps its
+// sessions. Its auth.json starts empty, so the run authenticates only through
+// the API key SeedRepo writes into the repo's opencode.json.
+func (a *openCodeAgent) NewHome(string) (string, error) { return os.MkdirTemp("", "opencode-data-*") }
+
+func (a *openCodeAgent) HomeEnv(home string) []string { return []string{"XDG_DATA_HOME=" + home} }
+
 // openCodePromptEnv builds the child environment for a headless `opencode run`.
 // cmd.Dir chdirs the child but does NOT update the inherited PWD env var, which
 // still points at the `go test` package dir. opencode (Node) resolves its
@@ -472,7 +517,11 @@ func (a *openCodeAgent) StartSession(ctx context.Context, dir string) (Session, 
 	for attempt := range 2 {
 		name := fmt.Sprintf("opencode-test-%d", time.Now().UnixNano())
 		var err error
-		s, err = NewTmuxSession(name, dir, nil, a.Binary(), "--model", a.model)
+		tuiArgs := []string{"--model", a.model}
+		if isOpenCode2() {
+			tuiArgs = []string{"--standalone"} // model comes from SeedRepo's config
+		}
+		s, err = NewTmuxSession(name, dir, nil, a.Binary(), tuiArgs...)
 		if err != nil {
 			return nil, err
 		}

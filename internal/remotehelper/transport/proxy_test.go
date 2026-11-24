@@ -38,6 +38,11 @@ func testProxy(server *httptest.Server) *Proxy {
 }
 
 func proxyWithClient(nodes []string, path, entryURL, clusterHost string, client *http.Client) *Proxy {
+	// Test-only HTTP loopback compatibility: production replicas.Resolve
+	// always supplies HTTPS. These fixtures exercise failover without TLS.
+	if entryURL == "" && len(nodes) > 0 {
+		entryURL = nodes[0]
+	}
 	p := New(Config{
 		Nodes: replicas.NodeConfig{
 			InitialNodes: nodes,
@@ -370,6 +375,7 @@ func TestOnNodeFailedCalledOnConnectionError(t *testing.T) {
 	p := New(Config{
 		Nodes: replicas.NodeConfig{
 			InitialNodes: []string{down},
+			EntryURL:     down,
 			ClusterHost:  mustHost(t, down),
 		},
 		Path:         "/et/alice/repo",
@@ -396,6 +402,7 @@ func TestOnNodeFailedCalledOn5xx(t *testing.T) {
 	p := New(Config{
 		Nodes: replicas.NodeConfig{
 			InitialNodes: []string{bad.URL},
+			EntryURL:     bad.URL,
 			ClusterHost:  mustHost(t, bad.URL),
 		},
 		Path:         "/et/alice/repo",
@@ -446,7 +453,7 @@ func TestFailoverAll5xx(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when all nodes return 5xx")
 	}
-	if !strings.Contains(err.Error(), "all 2 nodes failed") {
+	if !strings.Contains(err.Error(), "all 2 attempted nodes failed") {
 		t.Errorf("error = %v", err)
 	}
 }
@@ -460,14 +467,8 @@ func TestNoFailoverOn401(t *testing.T) {
 	defer server.Close()
 
 	var failedCalled bool
-	p := New(Config{
-		Nodes: replicas.NodeConfig{
-			InitialNodes: []string{server.URL},
-			ClusterHost:  mustHost(t, server.URL),
-		},
-		Path:         "/et/alice/repo",
-		OnNodeFailed: func(string) { failedCalled = true },
-	})
+	p := testProxy(server)
+	p.onNodeFailed = func(string) { failedCalled = true }
 
 	_, err := p.InfoRefs(context.Background(), "git-upload-pack")
 	if err == nil {
@@ -490,14 +491,8 @@ func TestNoFailoverOn404(t *testing.T) {
 	defer server.Close()
 
 	var failedCalled bool
-	p := New(Config{
-		Nodes: replicas.NodeConfig{
-			InitialNodes: []string{server.URL},
-			ClusterHost:  mustHost(t, server.URL),
-		},
-		Path:         "/et/alice/repo",
-		OnNodeFailed: func(string) { failedCalled = true },
-	})
+	p := testProxy(server)
+	p.onNodeFailed = func(string) { failedCalled = true }
 
 	_, err := p.InfoRefs(context.Background(), "git-upload-pack")
 	if err == nil {
@@ -682,7 +677,7 @@ func TestInfoRefsWarmPathRefreshesCache(t *testing.T) {
 	newReplica = brandNew.URL
 
 	entryHost := mustHost(t, old.URL)
-	p := proxyWithClient([]string{old.URL}, "/et/alice/repo", "http://unused.example", entryHost, old.Client())
+	p := proxyWithClient([]string{old.URL}, "/et/alice/repo", "http://127.0.0.1:1", entryHost, old.Client())
 
 	body, err := p.InfoRefs(context.Background(), "git-upload-pack")
 	if err != nil {
@@ -999,7 +994,7 @@ func TestColdPathRedirectAllReplicasFail(t *testing.T) {
 
 	_, err := p.InfoRefs(context.Background(), "git-upload-pack")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "all 2 nodes failed")
+	assert.Contains(t, err.Error(), "all 2 attempted nodes failed")
 	assert.Contains(t, err.Error(), "after entry-domain redirect")
 }
 
@@ -1278,7 +1273,9 @@ func TestNoRedirectClientShareTransport(t *testing.T) {
 	if got.CheckRedirect == nil {
 		t.Fatal("NoRedirectClient must set CheckRedirect")
 	}
-	if err := got.CheckRedirect(nil, nil); !errors.Is(err, http.ErrUseLastResponse) {
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://cluster.example", nil)
+	require.NoError(t, err)
+	if err := got.CheckRedirect(req, nil); !errors.Is(err, http.ErrUseLastResponse) {
 		t.Errorf("CheckRedirect returned %v, want http.ErrUseLastResponse", err)
 	}
 }
@@ -1309,7 +1306,7 @@ func TestInfoRefsWarmAndColdBothFailSurfacesBoth(t *testing.T) {
 	require.Error(t, err)
 	msg := err.Error()
 	assert.Contains(t, msg, "cached replicas")
-	assert.Contains(t, msg, "all 2 nodes failed")
+	assert.Contains(t, msg, "all 2 attempted nodes failed")
 	assert.Contains(t, msg, "entry domain")
 }
 
@@ -1527,6 +1524,7 @@ func authRetryProxy(t *testing.T, serverURL string, src *fakeTokenSource) *Proxy
 	return New(Config{
 		Nodes: replicas.NodeConfig{
 			InitialNodes: []string{serverURL},
+			EntryURL:     serverURL,
 			ClusterHost:  mustHost(t, serverURL),
 		},
 		Path: "/et/alice/repo",

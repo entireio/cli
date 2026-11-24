@@ -15,24 +15,21 @@ import (
 )
 
 // GenerateText submits a non-interactive prompt to the Antigravity CLI. The
-// binary is `agy`; -p is the short alias for --print (single-prompt mode).
+// binary is `agy`; --print is single-prompt mode.
 //
-// The prompt travels in argv. Earlier releases accepted it on stdin behind a
-// single-space -p placeholder (the Gemini CLI convention, verified on agy
-// 1.0.16), but agy 1.2.7 ignores stdin in print mode: `-p " "` fails with
-// "Error: empty prompt", and `-p -` is answered as the literal message "-"
-// (both observed live, trail 444, 2026-09-22), which is how
-// `entire dispatch --local --agent antigravity` came to hand agy an empty
-// prompt. argv is the only documented route ("Usage: agy --print 'your
-// prompt here'").
-//
-// That makes prompt size this agent's problem in a way it is not for agents
-// that use RunIsolatedTextGeneratorCLI's stdin. Linux caps a SINGLE argument
-// at MAX_ARG_STRLEN (128 KiB) however large the total ARG_MAX is, so an
-// unbounded prompt fails with E2BIG. summarize.maxCondensedTranscriptBytes is
-// what keeps summary prompts inside it. Windows' ~32 KiB whole-command-line
-// limit is tighter than any useful transcript budget and is not covered; a
-// long enough prompt still fails there, loudly.
+// The prompt travels on stdin as one stream-json message, never in argv: it
+// carries condensed transcript content, and argv is readable by other local
+// users through the process table (ps, /proc/<pid>/cmdline) for the life of
+// the run. Earlier releases accepted stdin behind a single-space -p
+// placeholder (verified on agy 1.0.16), but agy 1.2.7 ignores stdin in text
+// print mode: `-p " "` fails with "Error: empty prompt" and
+// `-p -` is answered as the literal message "-" (trail 444, 2026-09-22).
+// `--input-format stream-json` (agy 1.1.15+) reads NDJSON messages from stdin
+// instead; it requires `--output-format stream-json`, and the empty
+// `--print=` is how print mode is selected without a command-line prompt,
+// which that mode rejects (observed live on agy 1.3.3). stdin also removes the
+// per-argument (Linux 128 KiB) and command-line (Windows ~32 KiB) size limits
+// the argv prompt was subject to.
 //
 // agy also runs with a home directory of its own (isolatedHomeEnv). It reads
 // its window-title command (~/.gemini/antigravity-cli/settings.json), its
@@ -43,9 +40,14 @@ import (
 // so a summary run, whose prompt carries untrusted transcript content, would
 // otherwise execute whatever the user's global configuration names.
 func (a *AntigravityAgent) GenerateText(ctx context.Context, prompt string, model string) (string, error) {
-	args := []string{"-p", prompt}
+	args := []string{"--input-format", "stream-json", "--output-format", "stream-json"}
 	if model != "" {
 		args = append(args, "--model", model)
+	}
+	args = append(args, "--print=")
+	input, err := streamUserMessage(prompt)
+	if err != nil {
+		return "", fmt.Errorf("antigravity text generation failed: %w", err)
 	}
 	home, cleanup, err := agent.NewTextGenerationDir()
 	if err != nil {
@@ -61,10 +63,20 @@ func (a *AntigravityAgent) GenerateText(ctx context.Context, prompt string, mode
 	if err != nil {
 		return "", fmt.Errorf("antigravity text generation failed: %w", err)
 	}
-	result, capturedStderr, stdoutBytes, err := agent.RunIsolatedTextGeneratorCLI(ctx, a.CommandRunner, "agy", "antigravity", args, "", env...)
+	output, capturedStderr, stdoutBytes, err := agent.RunIsolatedTextGeneratorCLI(ctx, a.CommandRunner, "agy", "antigravity", args, input, env...)
+	if err == nil {
+		output, err = streamResultResponse(output)
+	}
 	if err != nil {
-		if strings.Contains(capturedStderr, "Authentication required") {
+		// A sign-in failure shows on stderr ("Authentication required" in text
+		// mode, lowercase in stream-json) and in the result event's error
+		// ("authentication failed or timed out"), which only err carries.
+		failure := strings.ToLower(capturedStderr + "\n" + err.Error())
+		switch {
+		case strings.Contains(failure, "authentication required"), strings.Contains(failure, "authentication failed"):
 			err = fmt.Errorf("%w: agy runs summaries with an isolated home so your agy settings, hooks, and MCP servers are not loaded; only its sign-in is carried over (the OS keyring, its file token, application-default credentials, or Gemini API-key mode), and none of them authenticated. Run `agy` to sign in again, or choose another summary provider", err)
+		case strings.Contains(capturedStderr, "input-format"):
+			err = fmt.Errorf("%w: summaries need agy 1.1.15 or newer, which reads the prompt from stdin (--input-format stream-json); run `agy update`", err)
 		}
 		return "", &agent.TextGenerationError{
 			Err:         fmt.Errorf("antigravity text generation failed: %w", err),
@@ -72,7 +84,64 @@ func (a *AntigravityAgent) GenerateText(ctx context.Context, prompt string, mode
 			StdoutBytes: stdoutBytes,
 		}
 	}
-	return result, nil
+	return output, nil
+}
+
+// streamInputMessage is one line of agy's `--input-format stream-json` input.
+type streamInputMessage struct {
+	Event   string             `json:"event"`
+	Message streamInputContent `json:"message"`
+}
+
+type streamInputContent struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// streamUserMessage encodes prompt as the single user turn agy reads from
+// stdin. json.Marshal escapes newlines, so the message stays on one line.
+func streamUserMessage(prompt string) (string, error) {
+	line, err := json.Marshal(streamInputMessage{
+		Event:   "user",
+		Message: streamInputContent{Role: "user", Content: prompt},
+	})
+	if err != nil {
+		return "", fmt.Errorf("encode stream-json prompt: %w", err)
+	}
+	return string(line) + "\n", nil
+}
+
+// streamResultResponse extracts the reply from agy's `--output-format
+// stream-json` output: init and step_update events, then a final result event
+// whose status is SUCCESS or ERROR.
+func streamResultResponse(output string) (string, error) {
+	type resultEvent struct {
+		Event  string `json:"event"`
+		Result *struct {
+			Status   string `json:"status"`
+			Response string `json:"response"`
+			Error    string `json:"error"`
+		} `json:"result"`
+	}
+	var final *resultEvent
+	for line := range strings.Lines(output) {
+		var ev resultEvent
+		if json.Unmarshal([]byte(line), &ev) != nil || ev.Event != "result" || ev.Result == nil {
+			continue
+		}
+		final = &ev
+	}
+	if final == nil {
+		return "", errors.New("agy printed no stream-json result event")
+	}
+	if final.Result.Status != "SUCCESS" {
+		return "", fmt.Errorf("agy run ended with status %q: %s", final.Result.Status, final.Result.Error)
+	}
+	response := strings.TrimSpace(final.Result.Response)
+	if response == "" {
+		return "", errors.New("agy returned an empty response")
+	}
+	return response, nil
 }
 
 // textGenerationAuth names the authentication sources for one generation run.

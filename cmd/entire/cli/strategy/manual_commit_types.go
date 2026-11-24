@@ -81,7 +81,7 @@ type ExtractedSessionData struct {
 	FullTranscriptLines int      // Total line count in full transcript
 	Prompts             []string // User prompts from the current checkpoint portion
 	FilesTouched        []string
-	TokenUsage          *agent.TokenUsage // Token usage calculated from transcript (since CheckpointTranscriptStart)
+	TokenUsage          *agent.TokenUsage // Token usage calculated from transcript (since the token offset, TokenStart)
 	// SkillEvents are this condensation's extracted events. Transient — the
 	// durable ledger, and the per-hook cost of carrying it, is
 	// session.SessionState.SkillEvents; see its size note.

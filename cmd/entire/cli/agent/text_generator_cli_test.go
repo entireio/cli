@@ -87,6 +87,26 @@ func TestRunIsolatedTextGeneratorCLI_NonZeroExitFallsBackToStdout(t *testing.T) 
 	}
 }
 
+// A caller that parses a successful exit's output can still find a failure in
+// it (a JSON error result), and needs whatever the CLI printed to stderr.
+func TestRunIsolatedTextGeneratorCLI_SuccessKeepsStderr(t *testing.T) {
+	t.Parallel()
+
+	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sh", "-c", "echo 'quota warning' >&2; echo 'result'")
+	}
+	result, capturedStderr, _, err := RunIsolatedTextGeneratorCLI(context.Background(), runner, "test", "myagent", nil, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "result" {
+		t.Fatalf("result = %q, want %q", result, "result")
+	}
+	if capturedStderr != "quota warning" {
+		t.Fatalf("capturedStderr = %q, want %q", capturedStderr, "quota warning")
+	}
+}
+
 func TestRunIsolatedTextGeneratorCLI_BinaryNotFound(t *testing.T) {
 	t.Parallel()
 

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	transcriptlib "github.com/entireio/cli/transcript"
 )
 
 func TestParseFromBytes_ValidJSONL(t *testing.T) {
@@ -22,7 +24,7 @@ func TestParseFromBytes_ValidJSONL(t *testing.T) {
 		t.Fatalf("expected 2 lines, got %d", len(lines))
 	}
 
-	if lines[0].Type != TypeUser || lines[0].UUID != "u1" {
+	if lines[0].Type != transcriptlib.TypeUser || lines[0].UUID != "u1" {
 		t.Errorf("unexpected first line: %+v", lines[0])
 	}
 
@@ -149,7 +151,7 @@ func TestSliceFromLine_SkipsFirstNLines(t *testing.T) {
 `)
 
 	// Skip first 2 lines, should get lines 3-5
-	sliced := SliceFromLine(content, 2)
+	sliced := transcriptlib.SliceFromLine(content, 2)
 
 	lines, err := ParseFromBytes(sliced)
 	if err != nil {
@@ -176,7 +178,7 @@ func TestSliceFromLine_ZeroReturnsAll(t *testing.T) {
 {"type":"user","uuid":"u2","message":{"content":"prompt 2"}}
 `)
 
-	sliced := SliceFromLine(content, 0)
+	sliced := transcriptlib.SliceFromLine(content, 0)
 
 	lines, err := ParseFromBytes(sliced)
 	if err != nil {
@@ -193,7 +195,7 @@ func TestSliceFromLine_SkipMoreThanExists(t *testing.T) {
 `)
 
 	// Skip more lines than exist
-	sliced := SliceFromLine(content, 10)
+	sliced := transcriptlib.SliceFromLine(content, 10)
 
 	if len(sliced) != 0 {
 		t.Errorf("expected empty slice when skipping more lines than exist, got %d bytes", len(sliced))
@@ -201,7 +203,7 @@ func TestSliceFromLine_SkipMoreThanExists(t *testing.T) {
 }
 
 func TestSliceFromLine_EmptyContent(t *testing.T) {
-	sliced := SliceFromLine([]byte{}, 5)
+	sliced := transcriptlib.SliceFromLine([]byte{}, 5)
 
 	if len(sliced) != 0 {
 		t.Errorf("expected empty slice for empty content, got %d bytes", len(sliced))
@@ -213,7 +215,7 @@ func TestSliceFromLine_NoTrailingNewline(t *testing.T) {
 	content := []byte(`{"type":"user","uuid":"u1","message":{"content":"prompt 1"}}
 {"type":"user","uuid":"u2","message":{"content":"prompt 2"}}`)
 
-	sliced := SliceFromLine(content, 1)
+	sliced := transcriptlib.SliceFromLine(content, 1)
 
 	lines, err := ParseFromBytes(sliced)
 	if err != nil {
@@ -259,13 +261,13 @@ func TestParseFromFileAtLine_ValidMixedMessages(t *testing.T) {
 		t.Fatalf("expected 3 lines, got %d", len(lines))
 	}
 
-	if lines[0].Type != TypeUser || lines[0].UUID != "user-1" {
+	if lines[0].Type != transcriptlib.TypeUser || lines[0].UUID != "user-1" {
 		t.Errorf("first line mismatch: got type=%s uuid=%s", lines[0].Type, lines[0].UUID)
 	}
-	if lines[1].Type != TypeAssistant || lines[1].UUID != "asst-1" {
+	if lines[1].Type != transcriptlib.TypeAssistant || lines[1].UUID != "asst-1" {
 		t.Errorf("second line mismatch: got type=%s uuid=%s", lines[1].Type, lines[1].UUID)
 	}
-	if lines[2].Type != TypeUser || lines[2].UUID != "user-2" {
+	if lines[2].Type != transcriptlib.TypeUser || lines[2].UUID != "user-2" {
 		t.Errorf("third line mismatch: got type=%s uuid=%s", lines[2].Type, lines[2].UUID)
 	}
 }
@@ -457,15 +459,15 @@ func TestParseFromBytes_NormalizesRoleToType(t *testing.T) {
 	}
 
 	// Type should be populated from Role
-	if lines[0].Type != TypeUser {
-		t.Errorf("line 0: Type = %q, want %q (normalized from role)", lines[0].Type, TypeUser)
+	if lines[0].Type != transcriptlib.TypeUser {
+		t.Errorf("line 0: Type = %q, want %q (normalized from role)", lines[0].Type, transcriptlib.TypeUser)
 	}
 	if lines[0].Role != "user" {
 		t.Errorf("line 0: Role = %q, want 'user' (preserved)", lines[0].Role)
 	}
 
-	if lines[1].Type != TypeAssistant {
-		t.Errorf("line 1: Type = %q, want %q (normalized from role)", lines[1].Type, TypeAssistant)
+	if lines[1].Type != transcriptlib.TypeAssistant {
+		t.Errorf("line 1: Type = %q, want %q (normalized from role)", lines[1].Type, transcriptlib.TypeAssistant)
 	}
 	if lines[1].Role != "assistant" {
 		t.Errorf("line 1: Role = %q, want 'assistant' (preserved)", lines[1].Role)
@@ -488,8 +490,8 @@ func TestParseFromBytes_TypeTakesPrecedenceOverRole(t *testing.T) {
 		t.Fatalf("expected 1 line, got %d", len(lines))
 	}
 
-	if lines[0].Type != TypeUser {
-		t.Errorf("Type = %q, want %q (type should take precedence over role)", lines[0].Type, TypeUser)
+	if lines[0].Type != transcriptlib.TypeUser {
+		t.Errorf("Type = %q, want %q (type should take precedence over role)", lines[0].Type, transcriptlib.TypeUser)
 	}
 }
 
@@ -511,11 +513,11 @@ func TestParseFromFileAtLine_NormalizesRoleToType(t *testing.T) {
 		t.Fatalf("expected 2 lines, got %d", len(lines))
 	}
 
-	if lines[0].Type != TypeUser {
-		t.Errorf("line 0: Type = %q, want %q (normalized from role)", lines[0].Type, TypeUser)
+	if lines[0].Type != transcriptlib.TypeUser {
+		t.Errorf("line 0: Type = %q, want %q (normalized from role)", lines[0].Type, transcriptlib.TypeUser)
 	}
-	if lines[1].Type != TypeAssistant {
-		t.Errorf("line 1: Type = %q, want %q (normalized from role)", lines[1].Type, TypeAssistant)
+	if lines[1].Type != transcriptlib.TypeAssistant {
+		t.Errorf("line 1: Type = %q, want %q (normalized from role)", lines[1].Type, transcriptlib.TypeAssistant)
 	}
 }
 
@@ -538,10 +540,10 @@ func TestParseFromFileAtLine_NormalizesRoleWithOffset(t *testing.T) {
 		t.Fatalf("expected 2 lines, got %d", len(lines))
 	}
 
-	if lines[0].Type != TypeAssistant {
-		t.Errorf("line 0: Type = %q, want %q", lines[0].Type, TypeAssistant)
+	if lines[0].Type != transcriptlib.TypeAssistant {
+		t.Errorf("line 0: Type = %q, want %q", lines[0].Type, transcriptlib.TypeAssistant)
 	}
-	if lines[1].Type != TypeUser {
-		t.Errorf("line 1: Type = %q, want %q", lines[1].Type, TypeUser)
+	if lines[1].Type != transcriptlib.TypeUser {
+		t.Errorf("line 1: Type = %q, want %q", lines[1].Type, transcriptlib.TypeUser)
 	}
 }

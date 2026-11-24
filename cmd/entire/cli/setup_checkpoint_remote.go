@@ -295,14 +295,19 @@ func (c *enableCheckpointRemoteChoice) report(ctx context.Context, w io.Writer, 
 		}
 		return
 	}
+	// Every successful run ends by naming where checkpoints go and what that
+	// exposes: enable is the last step before transcripts start travelling with
+	// the user's pushes. A destination that cannot be resolved or confirmed is
+	// reported in place of that notice, on every run, unless a dedicated
+	// checkpoint_remote still receives uploads.
+	fmt.Fprintln(w)
 	if c.changed {
 		fmt.Fprintf(w, "Checkpoint destination set to: %s\n", c.name)
 		fmt.Fprintln(w, "Saved to .entire/settings.local.json for this clone.")
 	}
-	// A healthy destination nobody asked about is not reported: the command
-	// ends at "Ready." and the multi-remote note covers the ambiguous repos. A
-	// broken destination is reported on every run, because the user cannot
-	// otherwise learn that checkpoint sync is off.
+	// How the destination was chosen, and the alternatives, are reported only
+	// when the user touched it, and ahead of the destination line so the
+	// notice stays last; the multi-remote note covers ambiguous repos.
 	touched := c.name != "" || c.offered || c.dedicatedRequested
 	s, err := settings.Load(ctx)
 	if err != nil {
@@ -322,9 +327,13 @@ func (c *enableCheckpointRemoteChoice) report(ctx context.Context, w io.Writer, 
 		if touched {
 			c.reportUnchangedDestination(w)
 			fmt.Fprintln(w, "Checkpoint pushing remains disabled.")
+		} else {
+			fmt.Fprintln(w, "Checkpoint uploads are off (push_sessions: false). Checkpoints stay in this clone.")
 		}
+		fmt.Fprintln(w, checkpointRedactionNotice)
 		return
 	}
+	policy, policyErr := enableCheckpointPushPolicy(ctx)
 	resolved, err := strategy.ResolveCheckpointSyncRemote(ctx)
 	if err != nil {
 		dedicated := false
@@ -339,8 +348,11 @@ func (c *enableCheckpointRemoteChoice) report(ctx context.Context, w io.Writer, 
 			}
 		}
 		if dedicated {
-			fmt.Fprintf(w, "Cannot resolve checkpoint remote selection: %v. Dedicated checkpoint uploads can still proceed.\n", err)
 			c.reportUnchangedDestination(w)
+			fmt.Fprintln(w, uploadPromise(policyErr,
+				fmt.Sprintf("Cannot resolve checkpoint remote selection: %v. Dedicated checkpoint uploads can still proceed.", err),
+				fmt.Sprintf("Cannot resolve checkpoint remote selection: %v. Checkpoints go to the dedicated destination", err)))
+			printCheckpointPrivacyNotice(w, false, policy, policyErr)
 			return
 		}
 		fmt.Fprintf(w, "Checkpoint sync remains disabled: %v\n", err)
@@ -349,10 +361,15 @@ func (c *enableCheckpointRemoteChoice) report(ctx context.Context, w io.Writer, 
 		return
 	}
 	if resolved.Name == "" {
-		if touched {
-			fmt.Fprintln(w, "No Git remotes configured. Checkpoints stay local until a remote is configured.")
-			c.reportUnchangedDestination(w)
+		c.reportUnchangedDestination(w)
+		if policy == settings.CheckpointPushPolicyManual {
+			fmt.Fprintln(w, "No Git remotes configured. Once you add one, `entire checkpoint push` will upload checkpoints to it.")
+		} else {
+			fmt.Fprintln(w, uploadPromise(policyErr,
+				"No Git remotes configured. Once you add one, checkpoints will be uploaded when you push to it.",
+				"No Git remotes configured. Once you add one, checkpoints go to it"))
 		}
+		printCheckpointPrivacyNotice(w, true, policy, policyErr)
 		return
 	}
 	// Resolve a possible local claim before computing the destination summary.
@@ -383,39 +400,68 @@ func (c *enableCheckpointRemoteChoice) report(ctx context.Context, w io.Writer, 
 		}
 	}
 
-	if !touched {
-		return
-	}
-	if !c.changed && !c.dedicatedRequested {
+	if touched && !c.changed && !c.dedicatedRequested {
 		fmt.Fprintf(w, "Keeping checkpoint destination: %s (%s)\n", destination, checkpointRemoteSourceLabel(resolved.Source))
 	}
 	c.reportUnchangedDestination(w)
-	if dedicated {
-		fmt.Fprintf(w, "Checkpoint uploads use the dedicated destination: %s.\n", destination)
-	} else {
-		fmt.Fprintf(w, "Checkpoints will be uploaded when you push to %s.\n", resolved.Name)
-	}
-	topology := inspectRemoteTopology(ctx)
-	for _, d := range topology.destinations {
-		if !dedicated && d.pinned {
-			url, effective, err := remote.PushURL(ctx, d.name)
-			if err == nil && effective {
-				fmt.Fprintf(w, "Pushes to %s still upload checkpoints to the dedicated destination: %s\n", d.name, gitremote.RedactURLOrPath(url))
-			}
-		}
-		if d.name != resolved.Name || !d.fansOut() {
-			continue
-		}
-		remoteTopology{destinations: []remoteDestination{d}, primaryIsRefs: topology.primaryIsRefs}.describeFanout(w)
-	}
-	if !dedicated && c.name == "" && resolved.Source != strategy.SyncRemoteSourceConfig {
+	if touched {
+		topology := inspectRemoteTopology(ctx)
 		for _, d := range topology.destinations {
-			if d.name != resolved.Name && !d.pinned && validateCheckpointPushRemote(ctx, root, d.name) == nil {
-				fmt.Fprintf(w, "To choose another destination for this clone, run `entire enable --%s <name>`.\n", flagCheckpointPushRemote)
-				break
+			if !dedicated && d.pinned {
+				url, effective, err := remote.PushURL(ctx, d.name)
+				if err == nil && effective {
+					fmt.Fprintf(w, "Pushes to %s still upload checkpoints to the dedicated destination: %s\n", d.name, gitremote.RedactURLOrPath(url))
+				}
+			}
+			if d.name != resolved.Name || !d.fansOut() {
+				continue
+			}
+			remoteTopology{destinations: []remoteDestination{d}, primaryIsRefs: topology.primaryIsRefs}.describeFanout(w)
+		}
+		if !dedicated && c.name == "" && resolved.Source != strategy.SyncRemoteSourceConfig {
+			for _, d := range topology.destinations {
+				if d.name != resolved.Name && !d.pinned && validateCheckpointPushRemote(ctx, root, d.name) == nil {
+					fmt.Fprintf(w, "To choose another destination for this clone, run `entire enable --%s <name>`.\n", flagCheckpointPushRemote)
+					break
+				}
 			}
 		}
 	}
+	switch {
+	case dedicated:
+		fmt.Fprintln(w, uploadPromise(policyErr,
+			fmt.Sprintf("Checkpoint uploads use the dedicated destination: %s.", destination),
+			"Checkpoints go to the dedicated destination "+destination))
+	case policy == settings.CheckpointPushPolicyManual:
+		fmt.Fprintf(w, "Checkpoints will be uploaded to %s when you run `entire checkpoint push`.\n", resolved.Name)
+	default:
+		fmt.Fprintln(w, uploadPromise(policyErr,
+			fmt.Sprintf("Checkpoints will be uploaded when you push to %s.", resolved.Name),
+			"Checkpoints go to "+resolved.Name))
+	}
+	printCheckpointPrivacyNotice(w, !dedicated, policy, policyErr)
+}
+
+// enableCheckpointPushPolicy is the clone's checkpoint push policy where it
+// applies, the git-refs backend; empty when it does not apply. The error says
+// why a policy that applies cannot be read.
+func enableCheckpointPushPolicy(ctx context.Context) (settings.CheckpointPushPolicy, error) {
+	if refs, err := primaryBackendIsRefsAfter(ctx, ""); err == nil && refs {
+		return settings.LoadCheckpointPushPolicy(ctx) //nolint:wrapcheck // already names the file and the problem
+	}
+	return "", nil
+}
+
+// uploadPromise is promise unless the checkpoint push policy cannot be read.
+// git push then uploads nothing, to any destination, so the line names where
+// checkpoints go (destination) and why git push sends none. An explicit
+// `entire checkpoint push` does not read the policy and still uploads.
+func uploadPromise(policyErr error, promise, destination string) string {
+	if policyErr == nil {
+		return promise
+	}
+	return destination + ", but git push uploads none of them until the checkpoint push policy can be read: " +
+		tuiutil.SanitizeDisplayText(policyErr.Error())
 }
 
 // reportUnchangedDestination announces the absence of a change only when one
@@ -423,6 +469,32 @@ func (c *enableCheckpointRemoteChoice) report(ctx context.Context, w io.Writer, 
 func (c *enableCheckpointRemoteChoice) reportUnchangedDestination(w io.Writer) {
 	if c.name != "" && !c.changed {
 		fmt.Fprintln(w, "No checkpoint destination settings changed.")
+	}
+}
+
+const checkpointRedactionNotice = "  Secret redaction is best effort, not bulletproof. Review with `entire checkpoint explain`."
+
+// printCheckpointPrivacyNotice must directly follow the line saying where
+// checkpoints go, which its first line refers back to.
+// offerPrivateRepo is false when checkpoints already go to a dedicated repo.
+// policy is the clone's checkpoint push policy, empty where it does not apply;
+// policyErr says why it cannot be read.
+func printCheckpointPrivacyNotice(w io.Writer, offerPrivateRepo bool, policy settings.CheckpointPushPolicy, policyErr error) {
+	fmt.Fprintln(w, "  They contain your agent transcripts. If that repo is public, anyone can read them.")
+	fmt.Fprintln(w, checkpointRedactionNotice)
+	// Clone-local, because the project file can lose: a local push_sessions
+	// overrides it, and a checkpoint_remote there owned by someone other than
+	// origin's owner is ignored, leaving uploads on the public remote.
+	fmt.Fprintf(w, "  To stop uploads: `entire configure --local --%s`\n", flagSkipPushSessions)
+	if policyErr != nil {
+		fmt.Fprintf(w, "  To replace the unreadable checkpoint push policy: `entire configure --%s <%s|%s>`\n",
+			flagCheckpointPushPolicy, settings.CheckpointPushPolicyAutomatic, settings.CheckpointPushPolicyManual)
+	}
+	if policy == settings.CheckpointPushPolicyAutomatic {
+		fmt.Fprintf(w, "  To upload only the checkpoints you choose: `entire configure --%s %s`\n", flagCheckpointPushPolicy, settings.CheckpointPushPolicyManual)
+	}
+	if offerPrivateRepo {
+		fmt.Fprintf(w, "  To use a separate private repo: `entire configure --local --%s github:<owner>/<repo>`\n", flagCheckpointRemote)
 	}
 }
 

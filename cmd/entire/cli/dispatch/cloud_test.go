@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -13,7 +15,9 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
+	"github.com/entireio/cli/internal/entireclient/httpclient"
 )
 
 const testDispatchRunID = "01KDISPATCHRUN0000000000000"
@@ -227,6 +231,39 @@ func TestCloudClient_CreateDispatch_RetriesTransientPollFailures(t *testing.T) {
 	}
 	if run.GeneratedMarkdown != "done" {
 		t.Fatalf("GeneratedMarkdown = %q, want done", run.GeneratedMarkdown)
+	}
+}
+
+// TestCloudClient_CreateDispatch_PolicyRefusalEndsPoll: a status poll whose
+// redirect the client refuses fails at once with the policy error instead of
+// retrying until the budget reports the run as still generating.
+func TestCloudClient_CreateDispatch_PolicyRefusalEndsPoll(t *testing.T) {
+	t.Parallel()
+
+	var reads atomic.Int32
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			run := testDispatchRun("")
+			run["status"] = dispatchStatusGenerating
+			writeDispatchRun(t, w, http.StatusAccepted, run)
+			return
+		}
+		reads.Add(1)
+		http.Redirect(w, r, "http://"+r.Host+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	defer srv.Close()
+
+	client := NewCloudClient(api.NewClientWithTransport("t", srv.URL, srv.Client().Transport))
+	client.pollInterval = time.Millisecond
+	_, err := client.CreateDispatch(context.Background(), CreateDispatchRequest{Repos: []string{testRepoSlug}}, "")
+	if !errors.Is(err, httpclient.ErrInsecureRedirect) {
+		t.Fatalf("expected the insecure-redirect error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "dispatch "+testDispatchRunID) {
+		t.Fatalf("expected the error to name the run, got %v", err)
+	}
+	if got := reads.Load(); got != 1 {
+		t.Fatalf("status polls = %d, want 1", got)
 	}
 }
 
@@ -526,5 +563,21 @@ func TestParseNotFoundRepos_MatchesAcrossForgeSpellings(t *testing.T) {
 	// A request never leaves the CLI bare, so a bare request matches nothing.
 	if got = parseNotFoundRepos("repository not found: gh/a/b, a/b", []string{"a/b"}); got != nil {
 		t.Fatalf("expected a bare request to match no echo, got %v", got)
+	}
+}
+
+// A refused ENTIRE_TOKEN secret also arrives as a *url.Error (the bearer is
+// resolved inside the transport), but repeating the poll is refused again; an
+// unavailable Core is worth repeating like any 5xx.
+func TestPollIsTransient_SecretExchange(t *testing.T) {
+	t.Parallel()
+	wrap := func(status int) error {
+		return &url.Error{Op: "Get", URL: "https://cell.example", Err: fmt.Errorf("resolve bearer: %w", &auth.SecretExchangeError{StatusCode: status})}
+	}
+	if pollIsTransient(wrap(http.StatusBadRequest)) {
+		t.Error("a refused secret must not be retried")
+	}
+	if !pollIsTransient(wrap(http.StatusServiceUnavailable)) {
+		t.Error("an unavailable Core must be retried")
 	}
 }

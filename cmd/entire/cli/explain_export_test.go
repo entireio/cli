@@ -599,6 +599,31 @@ func TestRunExplainExport_PositionalCommitSHAFallback(t *testing.T) {
 	require.Equal(t, cpID.String(), envelope.CheckpointID)
 }
 
+// A squash's final block lists its inherited trailers before the one prepare
+// stamped. The export reads the commit as --generate and attach do: the last.
+func TestRunExplainExport_CommitExportsItsLastFinalTrailer(t *testing.T) {
+	repo := setupExportRepo(t)
+	inherited, stamped := id.MustCheckpointID("aaaaaaaaaaaa"), id.MustCheckpointID("bbbbbbbbbbbb")
+	for _, cpID := range []id.CheckpointID{inherited, stamped} {
+		writeCheckpointForExport(t, repo, cpID, checkpoint.WriteOptions{
+			SessionID:  "session-" + cpID.String(),
+			Transcript: redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"hi"}]}}` + "\n")),
+		})
+	}
+	commitHash := commitExplainMessage(t, repo, "Squash feature\n\nEntire-Checkpoint: "+inherited.String()+"\nEntire-Checkpoint: "+stamped.String()+"\n")
+
+	var stdout, stderr bytes.Buffer
+	require.NoError(t, runExplainExport(context.Background(), &stdout, &stderr, explainExportOptions{
+		commitRef:    commitHash.String(),
+		json:         true,
+		sessionIndex: -1,
+	}))
+
+	var envelope checkpointExportJSON
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &envelope))
+	require.Equal(t, stamped.String(), envelope.CheckpointID)
+}
+
 func TestExplainCmd_SessionIndexRequiresTranscriptFlag(t *testing.T) {
 	setupExportRepo(t)
 

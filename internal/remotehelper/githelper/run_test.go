@@ -17,11 +17,15 @@ import (
 // testTransport builds a transport.Proxy pointed at a single test
 // server for /et/owner/repo.
 func testTransport(server *httptest.Server) *transport.Proxy {
+	return testTransportURL(server.URL)
+}
+
+func testTransportURL(serverURL string) *transport.Proxy {
 	return transport.New(transport.Config{
 		Nodes: replicas.NodeConfig{
-			InitialNodes: []string{server.URL},
-			EntryURL:     server.URL,
-			ClusterHost:  hostOf(server.URL),
+			InitialNodes: []string{serverURL},
+			EntryURL:     serverURL,
+			ClusterHost:  hostOf(serverURL),
 			RepoPath:     "owner/repo",
 		},
 		Path: "/et/owner/repo",

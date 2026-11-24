@@ -71,9 +71,10 @@ type repoRefClient interface {
 // The check is shape-only and case-insensitive on the alphabet; it never hits
 // the network. A name that happened to be 26 valid base32 characters would be
 // misread as an id, but real org/project names don't take that form, and the
-// user can always fall back to the explicit ULID.
+// user can always fall back to the explicit ULID. The first character is at
+// most 7: 26 base32 characters carry 130 bits, and a ULID is 128.
 func looksLikeULID(s string) bool {
-	if len(s) != 26 {
+	if len(s) != 26 || s[0] < '0' || s[0] > '7' {
 		return false
 	}
 	for _, r := range strings.ToUpper(s) {
@@ -183,21 +184,21 @@ func resolveGranteeProvider(ctx context.Context, c *coreapi.Client, ref string) 
 	// a message that points at the form this command actually wants, rather than
 	// letting parseQualifiedHandle dangle a "(or a ULID)" hint that doesn't apply.
 	if err := ensureGranteeIsHandle(ref); err != nil {
-		return "", "", err
+		return "", "", &granteeUnresolvedError{err}
 	}
 	p, handle, err := parseGranteeHandle(ref)
 	if err != nil {
-		return "", "", err
+		return "", "", &granteeUnresolvedError{err}
 	}
 	id, err := c.ResolveHandle(ctx, coreapi.ResolveHandleParams{Provider: p, Handle: handle})
 	if err != nil {
 		if isCoreNotFound(err) {
-			return "", "", fmt.Errorf("no %s identity for handle %q", p, identityFor(p).displayHandle(handle))
+			return "", "", &granteeUnresolvedError{fmt.Errorf("no %s identity for handle %q", p, identityFor(p).displayHandle(handle))}
 		}
 		return "", "", err
 	}
 	if id.ProviderUserId == "" {
-		return "", "", fmt.Errorf("handle %q resolved to no provider user id", ref)
+		return "", "", &granteeUnresolvedError{fmt.Errorf("handle %q resolved to no provider user id", ref)}
 	}
 	// Prefer the server-normalized provider over the raw prefix, falling back to
 	// the input when the response omits it.
@@ -206,6 +207,14 @@ func resolveGranteeProvider(ctx context.Context, c *coreapi.Client, ref string) 
 	}
 	return p, id.ProviderUserId, nil
 }
+
+// granteeUnresolvedError is a grantee handle that names no usable provider
+// identity. It is a fact about that grantee, not about the request, which is
+// what lets a batch of grants move on to the next one (grantFailureIsFatal).
+type granteeUnresolvedError struct{ err error }
+
+func (e *granteeUnresolvedError) Error() string { return e.err.Error() }
+func (e *granteeUnresolvedError) Unwrap() error { return e.err }
 
 // ensureGranteeIsHandle rejects an account ULID as a grantee. A grantee is a
 // provider-qualified handle and nothing else: the by-provider routes cannot be
@@ -449,6 +458,36 @@ func noProjectNamedErr(name, alternative string) error {
 func noRepoAtPathErr(project, repoName string) error {
 	msg := fmt.Sprintf("repo /%s/%s/%s not found or not shared with you", nativeCloneForge, project, repoName)
 	return &namedRefNotFoundError{message: msg + gitSuffixMissHint(repoName)}
+}
+
+// resolveRepoInProject resolves a bare repo name inside an already-resolved
+// project ULID, for `service-account grant --repo`, whose bare value is a name
+// in the account's own project. No `entire repo` verb takes a bare name. Like
+// the org/project endpoints, a name-filtered list returns the single match
+// under the response's singular `repo` field (the plural `repos` is only
+// populated for an unfiltered page) — reading `repos` here was the COR-699 bug.
+func resolveRepoInProject(ctx context.Context, c repoRefClient, name, projID string) (resolvedRef, error) {
+	out, err := c.ListProjectRepos(ctx, coreapi.ListProjectReposParams{ProjectId: projID, Name: coreapi.NewOptString(name)})
+	if err != nil {
+		if isCoreNotFound(err) {
+			return resolvedRef{}, noRepoNamedErr(name)
+		}
+		return resolvedRef{}, fmt.Errorf("list project repos: %w", err)
+	}
+	repo, ok := out.Repo.Get()
+	if !ok {
+		return resolvedRef{}, noRepoNamedErr(name)
+	}
+	name = repo.Name
+	if path, ok := repo.Path.Get(); ok && strings.TrimSpace(path) != "" {
+		name = path
+	}
+	return resolvedRef{ID: repo.ID, Name: name}, nil
+}
+
+func noRepoNamedErr(name string) error {
+	msg := fmt.Sprintf("no repo named %q in that project (run `entire repo list --project %s/<project>` to see names)", name, nativeCloneForge)
+	return &namedRefNotFoundError{message: msg + gitSuffixMissHint(name)}
 }
 
 // gitSuffixMissHint explains a lookup miss on a name ending in `.git`, or

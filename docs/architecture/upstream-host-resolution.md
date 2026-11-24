@@ -102,9 +102,14 @@ the host), else the selected login (its refreshed JWT as the bearer, its login
 server's site as the host) — `us.auth.partial.to` → `https://partial.to`,
 `*.entire.io` → `https://entire.io`. A login server outside those, a loopback
 dev core included (the web app runs on its own port, and a core is not a
-cell), is an error naming `ENTIRE_API_BASE_URL`. Printed web links (`trail`
-URLs, `experts` session links) use the same origin (`auth.DataBaseURL`). There
-is no ambient production default: a staging login never has its request sent
+cell), is an error naming `ENTIRE_API_BASE_URL`. Printed web links use the
+site's web origin instead (`auth.WebOrigin`): `entire.io` → `https://entire.com`,
+`partial.to` unchanged, and `ENTIRE_WEB_BASE_URL` overrides it (e.g. a local
+frontend on its own port). For any other data host the two link kinds differ:
+`trail` URLs and `review` trail links (`auth.WebBaseURL`) use that host as-is,
+because its trail numbers only resolve there, while `experts` session links
+(`expertsWebBaseURL`) fall back to `https://entire.com`. There is no ambient
+production default: a staging login never has its request sent
 to, or its identity swapped for, entire.io.
 
 `ENTIRE_API_BASE_URL` is the exception and names the host explicitly.

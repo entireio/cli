@@ -17,7 +17,7 @@ Copilot CLI exposes two different kinds of token data in `events.jsonl`:
 
 That means Entire must treat the same transcript in two different ways:
 
-- Checkpoint metadata must stay scoped to `CheckpointTranscriptStart`
+- Checkpoint metadata must stay scoped to the token offset (`SessionState.TokenStart()`), which starts where the previous checkpoint's tokens ended
 - Session state for `entire status` should use the full-session aggregate once `session.shutdown` exists
 
 If this logic regresses, earlier checkpoints can suddenly show the same token count as the whole session.

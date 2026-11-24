@@ -176,7 +176,7 @@ Note: IDE also sends `composer_mode: "agent"` — CLI omits this field.
 {"role":"assistant","message":{"content":[{"type":"text","text":"Created the file."}]}}
 ```
 
-- Cursor may prepend a `<timestamp>...</timestamp>` line inside the text before `<user_query>`; both are stripped by `textutil.StripIDEContextTags`. The timestamp strip is anchored to the start of the message so `<timestamp>` elements in pasted user content survive.
+- Cursor may prepend a `<timestamp>...</timestamp>` line inside the text before `<user_query>`; both are stripped by `transcript.StripIDEContextTags` (root `transcript` package). The timestamp strip is anchored to the start of the message so `<timestamp>` elements in pasted user content survive.
 - Transcript DOES contain `tool_use` content blocks, in the same shape as Claude Code: `message.content[i].type == "tool_use"` with `name` and `input`. Verified against a real session captured 2026-08-24 and pinned by `testdata/real_session_tool_use.jsonl` (`TestCursorAgent_RealSessionContainsToolUseBlocks`). Observed tools and their input keys:
 
   | Tool | Input keys | Modifies files |

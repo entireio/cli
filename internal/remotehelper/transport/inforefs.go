@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/internal/entireclient/discovery"
+	"github.com/entireio/cli/internal/entireclient/httpclient"
 	"github.com/entireio/cli/internal/remotehelper/debuglog"
 )
 
@@ -59,6 +60,10 @@ func (p *Proxy) infoRefs(ctx context.Context, label, suffix string, setHeaders f
 		if err == nil {
 			return p.handleInfoRefsResponse(resp)
 		}
+		// Fall back even after a policy rejection: the entry URL is HTTPS,
+		// derived from the user's remote, and every hop from it passes the
+		// same redirect policy. Refusing would pin a stale cached replica
+		// until the cache expires.
 		if p.entryURL == "" {
 			return nil, fmt.Errorf("fetching %s: %w", label, err)
 		}
@@ -72,7 +77,11 @@ func (p *Proxy) infoRefs(ctx context.Context, label, suffix string, setHeaders f
 
 	body, err := p.coldInfoRefs(ctx, suffix, setHeaders)
 	if err != nil && warmErr != nil {
-		return nil, errors.Join(fmt.Errorf("cached replicas: %w", warmErr), err)
+		// Only the fallback's error is wrapped. It is the latest answer for
+		// this repository, so it decides how the failure is classified. A
+		// stale cached replica's 503 must not mask the entry URL's 404. The
+		// cached failure stays in the text for the debug trace.
+		return nil, fmt.Errorf("%w (cached replicas: %v)", err, warmErr) //nolint:errorlint // warmErr is context only and must not match errors.Is/As
 	}
 	return body, err
 }
@@ -120,7 +129,7 @@ func (p *Proxy) coldInfoRefs(ctx context.Context, suffix string, setHeaders func
 		return p.handleInfoRefsResponse(viaReplicas)
 	}
 
-	if location == "" {
+	if location == "" || errors.Is(err, httpclient.ErrRequestPolicy) {
 		return nil, fmt.Errorf("fetching info/refs after entry-domain redirect: %w", err)
 	}
 	// The Location target is server-controlled. Salvaging the request means
@@ -133,7 +142,7 @@ func (p *Proxy) coldInfoRefs(ctx context.Context, suffix string, setHeaders func
 	debuglog.Printf("all advertised replicas failed; trying redirect Location %s as last-ditch fallback: %v", location, err)
 	locResp, locErr := p.doGet(ctx, location, p.client, setHeaders)
 	if locErr != nil {
-		return nil, fmt.Errorf("fetching info/refs after entry-domain redirect: %w", errors.Join(err, locErr))
+		return nil, fmt.Errorf("fetching info/refs after entry-domain redirect: %w; %w", err, locErr)
 	}
 	return p.handleInfoRefsResponse(locResp)
 }
@@ -154,7 +163,7 @@ func (p *Proxy) handleInfoRefsResponse(resp *http.Response) (io.ReadCloser, erro
 // dropping HTML bodies (they're LB/proxy noise, not a server message).
 // Closes resp.Body.
 func (p *Proxy) httpError(resp *http.Response) error {
-	return HTTPErrorMessage(resp.StatusCode, readErrorMessage(resp), p.ErrorBaseURL())
+	return newHTTPStatusError(resp.StatusCode, readErrorMessage(resp), p.ErrorBaseURL())
 }
 
 // readErrorMessage drains up to 1KB of an error body as the server's message,
@@ -254,29 +263,41 @@ func newPushTooLargeError(serverMsg string) *PushTooLargeError {
 	return e
 }
 
-// HTTPErrorMessage returns a user-friendly error for non-200 HTTP
-// responses. Exposed so handlers outside the transport package can
-// produce the same shape.
-func HTTPErrorMessage(statusCode int, serverMsg, baseURL string) error {
-	switch statusCode {
+// HTTPStatusError is a non-2xx answer the helper has no more specific type
+// for. Error keeps the transport-level wording. Callers that render user-facing
+// text match on StatusCode instead of parsing the string.
+type HTTPStatusError struct {
+	StatusCode int
+	ServerMsg  string
+	BaseURL    string
+}
+
+func (e *HTTPStatusError) Error() string {
+	switch e.StatusCode {
 	case http.StatusUnauthorized:
-		if serverMsg != "" {
-			return fmt.Errorf("authentication failed: %s", serverMsg)
+		if e.ServerMsg != "" {
+			return "authentication failed: " + e.ServerMsg
 		}
 		// Reaching here means the transport already re-minted and retried once
 		// (see retryOn401) and the fresh credential was still rejected.
-		return errors.New("authentication failed even after refreshing credentials - run 'entire login' if this persists")
+		return "authentication failed even after refreshing credentials - run 'entire login' if this persists"
 	case http.StatusNotFound:
-		if serverMsg != "" {
-			return errors.New(serverMsg)
+		if e.ServerMsg != "" {
+			return e.ServerMsg
 		}
-		return fmt.Errorf("repository not found: %s", baseURL)
-	case http.StatusInsufficientStorage:
-		return &InsufficientStorageError{ServerMsg: serverMsg}
+		return "repository not found: " + e.BaseURL
 	default:
-		if serverMsg != "" {
-			return fmt.Errorf("server error (HTTP %d): %s", statusCode, serverMsg)
+		if e.ServerMsg != "" {
+			return fmt.Sprintf("server error (HTTP %d): %s", e.StatusCode, e.ServerMsg)
 		}
-		return fmt.Errorf("server error (HTTP %d)", statusCode)
+		return fmt.Sprintf("server error (HTTP %d)", e.StatusCode)
 	}
+}
+
+// newHTTPStatusError returns the typed error for a non-200 HTTP response.
+func newHTTPStatusError(statusCode int, serverMsg, baseURL string) error {
+	if statusCode == http.StatusInsufficientStorage {
+		return &InsufficientStorageError{ServerMsg: serverMsg}
+	}
+	return &HTTPStatusError{StatusCode: statusCode, ServerMsg: serverMsg, BaseURL: baseURL}
 }

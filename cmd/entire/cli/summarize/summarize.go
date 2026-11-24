@@ -19,6 +19,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/transcript/compact"
 	"github.com/entireio/cli/cmd/entire/cli/transcript/geminilegacy"
 	"github.com/entireio/cli/redact"
+	transcriptlib "github.com/entireio/cli/transcript"
 )
 
 // GenerateFromTranscript generates a summary from pre-redacted transcript bytes.
@@ -314,6 +315,10 @@ func buildCondensedTranscriptFromOpenCode(redacted redact.RedactedBytes) ([]Entr
 	for _, msg := range session.Messages {
 		switch msg.Info.Role {
 		case "user":
+			// A background task's injected result is OpenCode's, not the user's.
+			if opencode.OnlySyntheticText(msg.Parts) {
+				continue
+			}
 			text := opencode.ExtractTextFromParts(msg.Parts)
 			if text != "" {
 				entries = append(entries, Entry{
@@ -377,7 +382,7 @@ func buildCondensedTranscriptFromCodex(content redact.RedactedBytes) ([]Entry, e
 		}
 
 		switch line.Type {
-		case transcript.TypeUser:
+		case transcriptlib.TypeUser:
 			var blocks []compactUserTextBlock
 			if err := json.Unmarshal(line.Content, &blocks); err != nil {
 				continue
@@ -390,21 +395,21 @@ func buildCondensedTranscriptFromCodex(content redact.RedactedBytes) ([]Entry, e
 					})
 				}
 			}
-		case transcript.TypeAssistant:
+		case transcriptlib.TypeAssistant:
 			var blocks []compactAssistantBlock
 			if err := json.Unmarshal(line.Content, &blocks); err != nil {
 				continue
 			}
 			for _, block := range blocks {
 				switch block.Type {
-				case transcript.ContentTypeText:
+				case transcriptlib.ContentTypeText:
 					if block.Text != "" {
 						entries = append(entries, Entry{
 							Type:    EntryTypeAssistant,
 							Content: block.Text,
 						})
 					}
-				case transcript.ContentTypeToolUse:
+				case transcriptlib.ContentTypeToolUse:
 					var input map[string]interface{}
 					if err := json.Unmarshal(block.Input, &input); err != nil {
 						input = nil
@@ -475,11 +480,11 @@ func BuildCondensedTranscript(lines []transcript.Line) []Entry {
 
 	for _, line := range lines {
 		switch line.Type {
-		case transcript.TypeUser:
+		case transcriptlib.TypeUser:
 			if entry := extractUserEntry(line); entry != nil {
 				entries = append(entries, *entry)
 			}
-		case transcript.TypeAssistant:
+		case transcriptlib.TypeAssistant:
 			assistantEntries := extractAssistantEntries(line)
 			entries = append(entries, assistantEntries...)
 		}
@@ -526,14 +531,14 @@ func extractAssistantEntries(line transcript.Line) []Entry {
 
 	for _, block := range msg.Content {
 		switch block.Type {
-		case transcript.ContentTypeText:
+		case transcriptlib.ContentTypeText:
 			if block.Text != "" {
 				entries = append(entries, Entry{
 					Type:    EntryTypeAssistant,
 					Content: block.Text,
 				})
 			}
-		case transcript.ContentTypeToolUse:
+		case transcriptlib.ContentTypeToolUse:
 			var input transcript.ToolInput
 			_ = json.Unmarshal(block.Input, &input) //nolint:errcheck // Best-effort parsing
 
@@ -655,26 +660,18 @@ func formatCondensedTranscript(input Input, bounded bool) string {
 }
 
 // maxCondensedTranscriptBytes bounds the transcript text a summary prompt
-// carries. Two independent reasons, and the tighter one sets the number:
+// carries. Every byte here becomes prompt tokens, on every provider, on every
+// checkpoint; long sessions were previously unbounded.
 //
-//   - Cost. Every byte here becomes prompt tokens, on every provider, on every
-//     checkpoint. Long sessions were previously unbounded.
-//   - argv. Antigravity takes its prompt as a single argv element, because agy
-//     ignores stdin in print mode (see antigravity.GenerateText). Linux caps a
-//     SINGLE argument at MAX_ARG_STRLEN — 128 KiB — regardless of the much
-//     larger total ARG_MAX, so an unbounded transcript fails with E2BIG on
-//     exactly the long sessions a summary is most wanted for. macOS's ~1 MiB
-//     total is permissive enough to hide this in local testing.
-//
-// 96 KiB, plus maxCondensedFilesBytes for the file list, keeps the whole prompt
-// inside that 128 KiB once buildSummarizationPrompt's wrapper is added. It does NOT rescue Windows,
-// which caps an entire command line near 32 KiB; that limit is narrower than
-// any transcript budget worth having and needs a different fix.
+// The number was originally sized to keep Antigravity's prompt, then a single
+// argv element, inside Linux's 128 KiB MAX_ARG_STRLEN. Antigravity now reads
+// the prompt from stdin (see antigravity.GenerateText); the budget stays as a
+// cost bound.
 const maxCondensedTranscriptBytes = 96 * 1024
 
 // maxCondensedFilesBytes bounds the [Files Modified] list that follows the
 // transcript. 16 KiB is a few hundred paths; past that a summary needs the
-// count, not the names, and the total stays inside the argv ceiling above.
+// count, not the names.
 const maxCondensedFilesBytes = 16 * 1024
 
 // formatFilesList renders the [Files Modified] section. When bounded, it

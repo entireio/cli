@@ -6,6 +6,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
+	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 
 	"github.com/stretchr/testify/require"
 )
@@ -27,6 +28,8 @@ func TestTaskUsageRecountable(t *testing.T) {
 		{name: "Claude Code usage from the transcript", ag: claudecode.NewClaudeCodeAgent(), want: true},
 		{name: "usage the event reported", ag: claudecode.NewClaudeCodeAgent(), event: agent.Event{TokenUsage: reported}},
 		{name: "Codex child without usage", ag: codex.NewCodexAgent()},
+		// Credited to the parent at completion; the task entry keeps that figure.
+		{name: "OpenCode child session", ag: opencode.NewOpenCodeAgent()},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

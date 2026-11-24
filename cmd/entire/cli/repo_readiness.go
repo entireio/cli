@@ -71,7 +71,12 @@ type repoLifecycleGetter interface {
 // last observed snapshot, retaining creation coordinates omitted by enrichment.
 // Only provisioning warrants polling; foreign, missing or unknown state cannot
 // confirm readiness. onPoll, when non-nil, runs once just before polling starts.
-func awaitRepoActive(ctx context.Context, c repoLifecycleGetter, result *coreapi.Repo, onPoll func()) error {
+//
+// commitToken is the create's commit token, sent on every read so the core
+// answers from a snapshot that holds the creator's grant: without it a regional
+// authz follower that has not caught up denies the read (403), which spends the
+// 4xx budget on a repo that is fine. Empty leaves the parameter unset.
+func awaitRepoActive(ctx context.Context, c repoLifecycleGetter, result *coreapi.Repo, commitToken string, onPoll func()) error {
 	timer := time.NewTimer(repoPollInterval)
 	defer timer.Stop()
 
@@ -118,7 +123,11 @@ func awaitRepoActive(ctx context.Context, c repoLifecycleGetter, result *coreapi
 		if failures.last != nil {
 			pollCtx, cancel = context.WithDeadline(ctx, failures.deadline)
 		}
-		snapshot, err := c.GetRepo(pollCtx, coreapi.GetRepoParams{RepoId: result.ID, Authoritative: coreapi.NewOptBool(true)})
+		params := coreapi.GetRepoParams{RepoId: result.ID, Authoritative: coreapi.NewOptBool(true)}
+		if commitToken != "" {
+			params.CommitToken = coreapi.NewOptString(commitToken)
+		}
+		snapshot, err := c.GetRepo(pollCtx, params)
 		cancel()
 		switch {
 		case err != nil:

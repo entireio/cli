@@ -22,6 +22,10 @@ import (
 
 type persistentRefBuilder func() (newHash, expectedHash plumbing.Hash, err error)
 
+// namedPersistentRefBuilder is a persistentRefBuilder that also names the ref
+// each attempt updates.
+type namedPersistentRefBuilder func() (refName plumbing.ReferenceName, newHash, expectedHash plumbing.Hash, err error)
+
 // ErrRefBusy is returned when a checkpoint ref changed or its native Git lock
 // is held. Checkpoint writers retry with a fresh read.
 var ErrRefBusy = errors.New("checkpoint ref busy")
@@ -150,9 +154,76 @@ func CASPersistentRef(
 	if err != nil {
 		return fmt.Errorf("resolve repository root: %w", err)
 	}
-	return retryPersistentRefLockContention(ctx, refName, func() error {
+	if err := retryPersistentRefLockContention(ctx, refName, func() error {
 		return gitrepo.CompareAndSwapRef(ctx, repoRoot, refName, newHash, expectedHash)
-	})
+	}); err != nil {
+		return err
+	}
+	retireReplacedSpelling(ctx, repo, repoRoot, refName, newHash, expectedHash)
+	return nil
+}
+
+// retireReplacedSpelling removes the commit a checkpoint ref update replaced
+// when git left it behind under the other spelling of the shard.
+//
+// On a case-insensitive filesystem, updating a packed checkpoint ref whose
+// shard folder exists on disk in the other case writes the new commit there,
+// under the other spelling, and leaves the replaced commit in the packed entry.
+// After a fast-forward the two are linked by history and reads pick the later
+// one (SupersededBy). After a rewrite or replay they are not, and reads would
+// fall back to the canonical name, which can be the replaced commit, or an
+// earlier version when the checkpoint was already split.
+//
+// The stale entry can only be deleted once both are packed: while the new
+// commit is a loose file, both names resolve to it and a guarded delete of the
+// stale one is refused. So this packs the checkpoint's refs, then deletes the
+// other spelling, guarded by the commit it held. It is
+// cleanup after a successful update, so a failure is logged, not returned:
+// the split it leaves is the one reads already handle by history.
+func retireReplacedSpelling(ctx context.Context, repo *git.Repository, repoRoot string, refName plumbing.ReferenceName, newHash, replaced plumbing.Hash) {
+	if replaced.IsZero() || newHash.Equal(replaced) {
+		return
+	}
+	other, ok := OtherShardSpelling(refName)
+	if !ok || !foldsCase(repo) {
+		return
+	}
+	cid, _ := ParseRef(refName)
+	pattern := CheckpointRefPrefix + "*/" + cid.String()
+	tips, err := gitrepo.ListRefs(ctx, repoRoot, pattern)
+	if err != nil {
+		logging.Debug(ctx, "checkpoint ref: could not list shard spellings after an update",
+			slog.String("ref", refName.String()), slog.String("error", err.Error()))
+		return
+	}
+	// The spelling that does not hold the new commit is stale when it holds
+	// the replaced commit or an earlier version of it: either way the update
+	// replaced that history.
+	var stale plumbing.ReferenceName
+	switch {
+	case tips[refName].Equal(newHash):
+		stale = other
+	case tips[other].Equal(newHash):
+		stale = refName
+	default:
+		return
+	}
+	staleCommit, ok := tips[stale]
+	if !ok {
+		return
+	}
+	if !staleCommit.Equal(replaced) && !SupersededBy(repo, staleCommit, replaced) {
+		return
+	}
+	if err := gitrepo.PackRefs(ctx, repoRoot, pattern); err != nil {
+		logging.Warn(ctx, "checkpoint ref: could not pack refs to remove a replaced shard spelling",
+			slog.String("ref", stale.String()), slog.String("error", err.Error()))
+		return
+	}
+	if err := gitrepo.CompareAndSwapRef(ctx, repoRoot, stale, plumbing.ZeroHash, staleCommit); err != nil {
+		logging.Warn(ctx, "checkpoint ref: could not remove a replaced shard spelling",
+			slog.String("ref", stale.String()), slog.String("error", err.Error()))
+	}
 }
 
 func retryPersistentRefLockContention(
@@ -184,9 +255,19 @@ func retryPersistentRefLockContention(
 // retry for native Git or other external writers. build runs again after every
 // conflict, so each retry reconstructs its tree and commit from the fresh tip.
 func updatePersistentRef(ctx context.Context, repo *git.Repository, refName plumbing.ReferenceName, build persistentRefBuilder) error {
-	return withLockedPersistentRef(ctx, repo, refName, func(repoRoot, commonDir string) error {
+	return updateNamedPersistentRef(ctx, repo, refName, func() (plumbing.ReferenceName, plumbing.Hash, plumbing.Hash, error) {
+		newHash, expectedHash, err := build()
+		return refName, newHash, expectedHash, err
+	})
+}
+
+// updateNamedPersistentRef is updatePersistentRef for a writer whose ref name
+// can change between attempts. It holds the writer lock under lockName and
+// updates the ref each attempt names.
+func updateNamedPersistentRef(ctx context.Context, repo *git.Repository, lockName plumbing.ReferenceName, build namedPersistentRefBuilder) error {
+	return withLockedPersistentRef(ctx, repo, lockName, func(repoRoot, commonDir string) error {
 		for attempt := range refCASMaxRetries {
-			newHash, expectedHash, buildErr := build()
+			refName, newHash, expectedHash, buildErr := build()
 			if buildErr != nil {
 				return buildErr
 			}
@@ -209,9 +290,9 @@ func updatePersistentRef(ctx context.Context, repo *git.Repository, refName plum
 
 		logging.Warn(logging.WithComponent(ctx, "checkpoint"),
 			"persistent ref CAS retry budget exhausted",
-			slog.String("ref", refName.String()),
+			slog.String("ref", lockName.String()),
 			slog.Int("retries", refCASMaxRetries),
 		)
-		return fmt.Errorf("failed to update persistent ref %s after %d CAS retries: %w", refName, refCASMaxRetries, ErrRefBusy)
+		return fmt.Errorf("failed to update persistent ref %s after %d CAS retries: %w", lockName, refCASMaxRetries, ErrRefBusy)
 	})
 }

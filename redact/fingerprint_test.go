@@ -50,6 +50,31 @@ func TestConfigFingerprint_MultipleRulesOrderIndependent(t *testing.T) {
 	}
 }
 
+// Enabling goredact adds coverage, so a prefix redacted without it must not be
+// reused once it is on, nor the reverse.
+func TestConfigFingerprint_ChangesWithScannerSelection(t *testing.T) {
+	t.Cleanup(func() {
+		require.NoError(t, ConfigureScanners(ScannersConfig{Betterleaks: true}))
+	})
+
+	selections := []ScannersConfig{
+		{Betterleaks: true},
+		{Betterleaks: true, Goredact: true},
+		{Goredact: true},
+	}
+	seen := make(map[string]ScannersConfig, len(selections))
+	for _, sel := range selections {
+		require.NoError(t, ConfigureScanners(sel))
+		fp := ConfigFingerprint()
+		prev, dup := seen[fp]
+		require.False(t, dup, "%+v and %+v share a fingerprint", prev, sel)
+		seen[fp] = sel
+
+		require.NoError(t, ConfigureScanners(sel))
+		require.Equal(t, fp, ConfigFingerprint(), "re-applying %+v must reproduce its fingerprint", sel)
+	}
+}
+
 func TestConfigFingerprint_ChangesWithPIIConfig(t *testing.T) {
 	t.Cleanup(func() { ConfigurePII(PIIConfig{}) })
 

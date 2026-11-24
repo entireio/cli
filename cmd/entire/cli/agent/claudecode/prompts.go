@@ -9,8 +9,8 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
-	"github.com/entireio/cli/cmd/entire/cli/textutil"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
+	transcriptlib "github.com/entireio/cli/transcript"
 )
 
 var (
@@ -88,7 +88,7 @@ func (c *ClaudeCodeAgent) ExtractPromptsFromTranscript(content []byte, fromOffse
 // Dropped: tool results (user entries whose content carries no text block),
 // isMeta, isCompactSummary and isSidechain entries, injected task
 // notifications, interruption markers and `!` bash-mode entries,
-// agent-injected preambles (textutil.IsInjectedPrompt), and entries left
+// agent-injected preambles (transcriptlib.IsInjectedPrompt), and entries left
 // empty once system and IDE tags (<system-reminder>,
 // <command-name>, <local-command-stdout>, ...) are stripped.
 func extractPromptsFromContent(data []byte, fromOffset int) []string {
@@ -127,13 +127,13 @@ func userPrompt(raw []byte) (string, bool) {
 	if typ == "" {
 		typ = line.Role
 	}
-	if typ != transcript.TypeUser || line.IsMeta || line.IsCompactSummary || line.IsSidechain {
+	if typ != transcriptlib.TypeUser || line.IsMeta || line.IsCompactSummary || line.IsSidechain {
 		return "", false
 	}
 	// ExtractUserContent keeps only text blocks (tool_result content is
 	// dropped) and strips system and IDE context tags.
 	text := transcript.ExtractUserContent(line.Message)
-	if text == "" || textutil.IsInjectedPrompt(text) {
+	if text == "" || transcriptlib.IsInjectedPrompt(text) {
 		return "", false
 	}
 	trimmed := strings.TrimSpace(text)

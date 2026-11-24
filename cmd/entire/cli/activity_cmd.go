@@ -31,36 +31,40 @@ const (
 // map, the values knownAgents normalizes onto, and the render order all draw
 // from this one set.
 const (
-	activityAgentClaude   = "claude"
-	activityAgentGemini   = "gemini"
-	activityAgentAmp      = "amp"
-	activityAgentCodex    = "codex"
-	activityAgentOpencode = "opencode"
-	activityAgentCopilot  = "copilot"
-	activityAgentPi       = "pi"
-	activityAgentCursor   = "cursor"
-	activityAgentDroid    = "droid"
-	activityAgentKiro     = "kiro"
-	activityAgentUnknown  = "unknown"
+	activityAgentClaude      = "claude"
+	activityAgentGemini      = "gemini"
+	activityAgentAmp         = "amp"
+	activityAgentCodex       = "codex"
+	activityAgentOpencode    = "opencode"
+	activityAgentCopilot     = "copilot"
+	activityAgentPi          = "pi"
+	activityAgentCursor      = "cursor"
+	activityAgentDroid       = "droid"
+	activityAgentKiro        = "kiro"
+	activityAgentAntigravity = "antigravity"
+	activityAgentGoose       = "goose"
+	activityAgentUnknown     = "unknown"
 )
 
 // knownAgents maps normalized agent strings from the API to display IDs.
 // Used for the commit list, where per-checkpoint agent strings are free-form.
 // The /me/activity endpoint returns already-normalized canonical IDs.
 var knownAgents = map[string]string{
-	"claude":     activityAgentClaude,
-	"claudecode": activityAgentClaude,
-	"gemini":     activityAgentGemini,
-	"geminicli":  activityAgentGemini,
-	"amp":        activityAgentAmp,
-	"codex":      activityAgentCodex,
-	"opencode":   activityAgentOpencode,
-	"copilot":    activityAgentCopilot,
-	"copilotcli": activityAgentCopilot,
-	"pi":         activityAgentPi,
-	"cursor":     activityAgentCursor,
-	"droid":      activityAgentDroid,
-	"kiro":       activityAgentKiro,
+	"claude":      activityAgentClaude,
+	"claudecode":  activityAgentClaude,
+	"gemini":      activityAgentGemini,
+	"geminicli":   activityAgentGemini,
+	"amp":         activityAgentAmp,
+	"codex":       activityAgentCodex,
+	"opencode":    activityAgentOpencode,
+	"copilot":     activityAgentCopilot,
+	"copilotcli":  activityAgentCopilot,
+	"pi":          activityAgentPi,
+	"cursor":      activityAgentCursor,
+	"droid":       activityAgentDroid,
+	"kiro":        activityAgentKiro,
+	"antigravity": activityAgentAntigravity,
+	"goose":       activityAgentGoose,
 }
 
 func newActivityCmd() *cobra.Command {
@@ -69,7 +73,7 @@ func newActivityCmd() *cobra.Command {
 		Use:   "activity",
 		Short: "Show your activity overview",
 		Long: "Display your activity overview, repository breakdown, and recent sessions from entire.io.\n\n" +
-			"The recent list shows your sessions by default, matching the entire.io Overview page. " +
+			"The recent list shows your sessions by default, matching the Overview page on entire.com. " +
 			"Pass --commits to show recent commits instead.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runActivity(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), showCommits)

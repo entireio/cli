@@ -1,7 +1,9 @@
 package userdirs
 
 import (
+	"os/user"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -54,4 +56,48 @@ func TestRelativeUserOverridesAreStillRefused(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Root and unset HOME resolve via passwd.
+func TestHome_PasswdForRootOrUnsetHome(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("windows keeps os.UserHomeDir")
+	}
+	u, err := user.Current()
+	if err != nil || u.HomeDir == "" {
+		t.Skipf("no passwd entry: %v", err)
+	}
+	elsewhere := t.TempDir()
+
+	t.Run("user keeps HOME", func(t *testing.T) {
+		setEuid(t, 1000)
+		t.Setenv("HOME", elsewhere)
+		got, err := Home()
+		if err != nil || got != elsewhere {
+			t.Errorf("Home() = %q, %v; want %q", got, err, elsewhere)
+		}
+	})
+	t.Run("unset HOME uses passwd", func(t *testing.T) {
+		setEuid(t, 1000)
+		t.Setenv("HOME", "")
+		got, err := Home()
+		if err != nil || got != u.HomeDir {
+			t.Errorf("Home() = %q, %v; want %q", got, err, u.HomeDir)
+		}
+	})
+	t.Run("root ignores HOME", func(t *testing.T) {
+		setEuid(t, 0)
+		t.Setenv("HOME", elsewhere)
+		got, err := Home()
+		if err != nil || got != u.HomeDir {
+			t.Errorf("Home() = %q, %v; want %q", got, err, u.HomeDir)
+		}
+	})
+}
+
+func setEuid(t *testing.T, uid int) {
+	t.Helper()
+	orig := geteuid
+	geteuid = func() int { return uid }
+	t.Cleanup(func() { geteuid = orig })
 }

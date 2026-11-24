@@ -15,9 +15,9 @@ Entire integrates with Claude Code through these hooks that fire at different po
 | `PostToolUse[Agent]`     | Subagent finishes              | Complete the subagent's task record            |
 | `PostToolUse[Skill]`     | A skill runs                   | Record the agent a `context: fork` skill runs in |
 
-> **Tool matcher note.** Claude Code's subagent dispatch tool is `Agent` (there was never a `Task` tool). Older CLI versions installed the subagent hooks under `Task`, where they silently never fired; re-run `entire enable --force` to strip the stale entries and reinstall under the matchers above. See [tools-reference](https://code.claude.com/docs/en/tools-reference.md) and [hooks matcher rules](https://code.claude.com/docs/en/hooks.md).
+> **Tool matcher note.** Claude Code's subagent dispatch tool is `Agent` (there was never a `Task` tool). Older CLI versions installed the subagent hooks under `Task`, where they silently never fired; run `entire agent add claude-code --force` to strip the stale entries and reinstall under the matchers above. See [tools-reference](https://code.claude.com/docs/en/tools-reference.md) and [hooks matcher rules](https://code.claude.com/docs/en/hooks.md).
 >
-> Older CLI versions also installed a `post-todo` hook under `TodoWrite` and later `TaskCreate|TaskUpdate`, which wrote incremental subagent checkpoints to a shadow branch. It is no longer installed: any install (`entire enable`, with or without `--force`) prunes it as a stale managed hook. The `entire hooks claude-code post-todo` subcommand stays registered and only reads its input, so configs that still carry the hook keep working until then.
+> Older CLI versions also installed a `post-todo` hook under `TodoWrite` and later `TaskCreate|TaskUpdate`, which wrote incremental subagent checkpoints to a shadow branch. It is no longer installed: any Claude Code hook install (`entire agent add claude-code`, with or without `--force`, or the first `entire enable`) prunes it as a stale managed hook. The `entire hooks claude-code post-todo` subcommand stays registered and only reads its input, so configs that still carry the hook keep working until then.
 
 ### Critical Capabilities
 

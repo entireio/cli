@@ -16,15 +16,9 @@ func trailApprovalsPath(basePath string, number int) string {
 	return trailNumberPathForBase(basePath, number) + "/approvals"
 }
 
-// buildApprovalRequest validates and constructs an approval request. A
-// request_changes decision requires a non-empty message; the server enforces
-// this too, but a client-side check gives a clearer error before the round trip.
-func buildApprovalRequest(event, message string) (api.TrailApprovalRequest, error) {
-	msg := strings.TrimSpace(message)
-	if event == "request_changes" && msg == "" {
-		return api.TrailApprovalRequest{}, errors.New("--message is required when requesting changes")
-	}
-	return api.TrailApprovalRequest{Event: event, Body: msg}, nil
+// buildApprovalRequest constructs an approval request with a trimmed comment.
+func buildApprovalRequest(event, message string) api.TrailApprovalRequest {
+	return api.TrailApprovalRequest{Event: event, Body: strings.TrimSpace(message)}
 }
 
 // resolveNumberedTrail resolves a trail by optional selector, falling back to
@@ -69,24 +63,25 @@ not every repository on the trail. The branch work must be open.`),
 	return cmd
 }
 
-func newTrailRequestChangesCmd(mode *trailMode) *cobra.Command {
-	var message, branch string
+// newTrailRequestChangesCmd keeps the removed command's name so scripts and
+// agents learn it was removed rather than seeing "unknown command".
+func newTrailRequestChangesCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "request-changes [<trail>]",
-		Short: "Request changes on a trail",
-		Long: "Request changes on a trail.\n\n" + mode.help(`If <trail> is omitted, targets the trail for the current branch (or --branch).
-A reason (--message) is required. The trail must be open and have a linked branch.`, `<trail> is a project trail number, ID, or <repo>/<number>. Without one, follow the current branch's
-parent. --repo and --branch select a working context. A reason (--message) is
-required. The decision applies only to the selected branch.`),
-		Args: cobra.MaximumNArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return submitWorkingTrailApproval(cmd, mode, selectorFromArgs(args), branch, "request_changes", message, "Requested changes on")
+		Use:    "request-changes [<trail>]",
+		Short:  "Removed from the CLI",
+		Args:   cobra.MaximumNArgs(1),
+		Hidden: true,
+		RunE: func(*cobra.Command, []string) error {
+			return errTrailRequestChangesRemoved
 		},
 	}
-	cmd.Flags().StringVarP(&message, "message", "m", "", "Reason for requesting changes (required)")
-	cmd.Flags().StringVar(&branch, "branch", "", mode.help("Branch of the trail (defaults to current); cannot be combined with a trail selector", "Select a repository branch within the trail"))
+	cmd.Flags().StringP("message", "m", "", "Unused")
+	cmd.Flags().String("branch", "", "Unused")
 	return cmd
 }
+
+var errTrailRequestChangesRemoved = errors.New(
+	"trail request-changes was removed from the CLI")
 
 func newTrailApprovalsCmd(mode *trailMode) *cobra.Command {
 	var branch string

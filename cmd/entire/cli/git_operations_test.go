@@ -835,11 +835,7 @@ func TestListCheckpointRefsOnRemote_CandidateFailureDoesNotBlockOthers(t *testin
 	require.Len(t, names, 1)
 	assert.Equal(t, originRef, names[0].String())
 
-	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
-		<-request.Context().Done()
-	}))
-	t.Cleanup(server.Close)
-	gitRun(t, dir, "remote", "set-url", "upstream", server.URL+"/repo.git")
+	gitRun(t, dir, "remote", "set-url", "upstream", newStalledGitServer(t))
 
 	names, err = listCheckpointRefsOnRemote(context.Background(), time.Second)
 	require.NoError(t, err, "a slow candidate must not consume origin's discovery budget")
@@ -922,6 +918,82 @@ func TestListCheckpointRefsOnRemote_HonorsCanceledContext(t *testing.T) {
 
 	_, err := ListCheckpointRefsOnRemote(ctx)
 	require.Error(t, err, "canceled context must reach ls-remote (regression: deleting WithTimeout would still pass a constant-only test)")
+}
+
+// newStalledGitServer returns the URL of an HTTP git remote that never answers:
+// each request blocks until git gives up on it, so only the caller's ls-remote
+// budget decides how long a listing against it takes.
+func newStalledGitServer(t *testing.T) string {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		<-request.Context().Done()
+	}))
+	t.Cleanup(server.Close)
+	return server.URL + "/repo.git"
+}
+
+// TestListCheckpointRefsOnRemote_ConfiguredTimeoutBoundsEachCandidate: the
+// per-candidate ls-remote budget comes from
+// strategy_options.checkpoint_ref_list_timeout_seconds when it is set. The
+// elected remote never answers and the injected default (a minute) is far
+// longer than the configured second, so finishing quickly proves the setting,
+// not the default, bounded the stalled candidate.
+// Not parallel: uses t.Chdir.
+func TestListCheckpointRefsOnRemote_ConfiguredTimeoutBoundsEachCandidate(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	originBare := t.TempDir()
+	gitRun(t, originBare, "init", "--bare", "-q", originBare)
+
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	head := gitOutput(t, dir, "rev-parse", "HEAD")
+	gitRun(t, dir, "remote", "add", "origin", originBare)
+	gitRun(t, dir, "remote", "add", "upstream", newStalledGitServer(t))
+	gitRun(t, dir, "push", "-q", "origin", head+":"+testCheckpointRefZN)
+	testutil.WriteFile(t, dir, ".entire/settings.json",
+		`{"enabled":true,"strategy_options":{"checkpoint_push_remote":"upstream","checkpoint_ref_list_timeout_seconds":1}}`)
+	t.Chdir(dir)
+
+	start := time.Now()
+	names, err := listCheckpointRefsOnRemote(context.Background(), time.Minute)
+	elapsed := time.Since(start)
+
+	require.NoError(t, err, "origin answered, so discovery succeeds without the stalled candidate")
+	require.Len(t, names, 1)
+	assert.Equal(t, testCheckpointRefZN, names[0].String())
+	assert.Less(t, elapsed, 20*time.Second,
+		"the configured 1s budget, not the injected 1m default, must bound the stalled candidate (elapsed %s)", elapsed)
+}
+
+// TestListCheckpointRefsOnRemote_ConfiguredTimeoutBoundsDedicatedRemote: the
+// same setting bounds the single ls-remote against a dedicated
+// checkpoint_remote, and the timeout comes back as the error that makes List
+// warn and stay local-only.
+// Not parallel: uses t.Chdir.
+func TestListCheckpointRefsOnRemote_ConfiguredTimeoutBoundsDedicatedRemote(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	gitRun(t, dir, "remote", "add", "origin", newStalledGitServer(t))
+	// provider "local" is unknown to providerHost → FetchURL falls back to
+	// origin, which here is the stalled server.
+	testutil.WriteFile(t, dir, ".entire/settings.json",
+		`{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"local","repo":"org/checkpoints"},"checkpoint_ref_list_timeout_seconds":1}}`)
+	t.Chdir(dir)
+
+	start := time.Now()
+	_, err := listCheckpointRefsOnRemote(context.Background(), time.Minute)
+	elapsed := time.Since(start)
+
+	require.ErrorContains(t, err, "deadline exceeded")
+	assert.Less(t, elapsed, 20*time.Second,
+		"the configured 1s budget, not the injected 1m default, must bound the dedicated remote (elapsed %s)", elapsed)
 }
 
 // TestFetchBlobsByHash_ChainBudgetBoundsTheWholeOperation pins the ceiling that

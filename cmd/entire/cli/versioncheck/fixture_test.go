@@ -10,6 +10,7 @@ import (
 // autoUpdateFixture wires the test seams for maybeAutoUpdate.
 type autoUpdateFixture struct {
 	installCalls int
+	chooseCalls  int
 	installErr   error
 	lastCommand  string
 	chooseValue  AutoUpdateAction
@@ -34,6 +35,7 @@ func newAutoUpdateFixture(t *testing.T) *autoUpdateFixture {
 	}
 	origChoose := chooseUpdate
 	chooseUpdate = func(_ context.Context, _, _, cmdStr string) (AutoUpdateAction, error) {
+		f.chooseCalls++
 		f.lastCmdStr = cmdStr
 		return f.chooseValue, f.chooseErr
 	}

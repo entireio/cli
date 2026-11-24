@@ -33,7 +33,7 @@ func finishAndDismissTUI(t *testing.T, sink *TUISink, summary reviewtypes.RunSum
 func TestTUISink_StartIsIdempotent(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	sink := NewTUISink([]string{"agent-a"}, func() {}, &buf, bytes.NewReader(nil))
+	sink := NewTUISink([]string{"agent-a"}, func() {}, &buf, bytes.NewReader(nil), false)
 
 	// Start twice — the second call must be a no-op (no panic, no deadlock).
 	sink.Start()
@@ -62,7 +62,7 @@ func TestTUISink_StartIsIdempotent(t *testing.T) {
 func TestTUIPostRunCompleteSinkFlushesAfterExit(t *testing.T) {
 	t.Parallel()
 	var tuiOut bytes.Buffer
-	sink := NewTUISink([]string{"agent-a"}, func() {}, &tuiOut, bytes.NewReader(nil))
+	sink := NewTUISink([]string{"agent-a"}, func() {}, &tuiOut, bytes.NewReader(nil), false)
 	sink.Start()
 	sink.RunFinished(reviewtypes.RunSummary{})
 
@@ -112,7 +112,7 @@ func TestTUISink_PostRunCompleteDoesNotHangWhenProgramNeverConsumesQuit(t *testi
 func TestTUISink_WaitBeforeStart_IsNoOp(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	sink := NewTUISink([]string{"agent-a"}, func() {}, &buf, bytes.NewReader(nil))
+	sink := NewTUISink([]string{"agent-a"}, func() {}, &buf, bytes.NewReader(nil), false)
 
 	done := make(chan struct{})
 	go func() {
@@ -133,7 +133,7 @@ func TestTUISink_WaitBeforeStart_IsNoOp(t *testing.T) {
 func TestTUISink_AgentEvent_BeforeStart_IsNoOp(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	sink := NewTUISink([]string{"agent-a"}, func() {}, &buf, bytes.NewReader(nil))
+	sink := NewTUISink([]string{"agent-a"}, func() {}, &buf, bytes.NewReader(nil), false)
 
 	// Must not panic.
 	sink.AgentEvent("agent-a", reviewtypes.Started{})
@@ -145,7 +145,7 @@ func TestTUISink_AgentEvent_BeforeStart_IsNoOp(t *testing.T) {
 func TestTUISink_RunFinished_EventuallyUnblocks(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	sink := NewTUISink([]string{"agent-a"}, func() {}, &buf, bytes.NewReader(nil))
+	sink := NewTUISink([]string{"agent-a"}, func() {}, &buf, bytes.NewReader(nil), false)
 	sink.Start()
 
 	// Send some events before finishing.
@@ -165,7 +165,7 @@ func TestTUISink_RunFinished_EventuallyUnblocks(t *testing.T) {
 func TestTUISink_RunFinished_AfterSecondCall_IsNoOp(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	sink := NewTUISink([]string{"agent-a"}, func() {}, &buf, bytes.NewReader(nil))
+	sink := NewTUISink([]string{"agent-a"}, func() {}, &buf, bytes.NewReader(nil), false)
 	sink.Start()
 
 	// First RunFinished should unblock the program.
@@ -191,7 +191,7 @@ func TestTUISink_RunFinished_AfterSecondCall_IsNoOp(t *testing.T) {
 func TestTUISink_ImplementsSink(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	var _ reviewtypes.Sink = NewTUISink(nil, func() {}, &buf, bytes.NewReader(nil))
+	var _ reviewtypes.Sink = NewTUISink(nil, func() {}, &buf, bytes.NewReader(nil), false)
 }
 
 // fakeFDWriter implements fdWriter with a controllable Fd, letting us drive

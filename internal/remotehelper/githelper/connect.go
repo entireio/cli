@@ -7,8 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/go-git/go-git/v6/plumbing/format/pktline"
@@ -49,19 +47,16 @@ func handleConnect(ctx context.Context, t Transport, service string, stdin io.Re
 	if err != nil {
 		return fmt.Errorf("reading git request: %w", err)
 	}
-	reqBody, err = gitproto.AppendAgentToReceivePackRequest(reqBody, Agent)
-	if err != nil {
+	if err := gitproto.AppendAgentToReceivePackBody(reqBody, Agent); err != nil {
 		return fmt.Errorf("amending receive-pack agent: %w", err)
 	}
-	debuglog.Printf("git request: %d bytes", len(reqBody))
+	debuglog.Printf("git request: %d bytes", reqBody.Len())
 
-	if len(reqBody) == 0 {
+	if reqBody.Len() == 0 {
 		return nil
 	}
 
-	resp, err := t.ServiceRPC(ctx, service, bytes.NewReader(reqBody), func(req *http.Request) {
-		req.Header.Set("X-Entire-Push-Size", strconv.Itoa(len(reqBody)))
-	})
+	resp, err := t.ServiceRPC(ctx, service, reqBody.Reader(), receivePackHeaders(reqBody))
 	if err != nil {
 		return fmt.Errorf("connect %s POST: %w", service, err)
 	}
@@ -106,6 +101,7 @@ func handleFetch(ctx context.Context, t Transport, stdin io.Reader, stdout io.Wr
 	pastWants := false
 	deepenSeen := false
 	roundNumber := 0
+	var acks ackState
 
 	for {
 		_, err := io.ReadFull(stdin, lenBuf)
@@ -142,7 +138,7 @@ func handleFetch(ctx context.Context, t Transport, stdin io.Reader, stdout io.Wr
 			// End of a have batch. POST wants + cumulative haves +
 			// terminating flush so the server can compute ACKs.
 			roundNumber++
-			if err := postRound(ctx, t, stdout, &wantsBuf, &havesBuf, false, deepenSeen, roundNumber); err != nil {
+			if err := postRound(ctx, t, stdout, &wantsBuf, &havesBuf, &acks, false, deepenSeen, roundNumber); err != nil {
 				return err
 			}
 			continue
@@ -186,7 +182,7 @@ func handleFetch(ctx context.Context, t Transport, stdin io.Reader, stdout io.Wr
 			// Final round: server returns ACK/NAK + pack data.
 			roundNumber++
 			debuglog.Printf("done line received, sending final request (round %d)", roundNumber)
-			return postRound(ctx, t, stdout, &wantsBuf, &havesBuf, true, deepenSeen, roundNumber)
+			return postRound(ctx, t, stdout, &wantsBuf, &havesBuf, &acks, true, deepenSeen, roundNumber)
 		}
 	}
 }
@@ -219,10 +215,11 @@ func postShallowProbe(ctx context.Context, t Transport, stdout io.Writer, wantsB
 
 // postRound assembles one stateless-RPC request body from the
 // buffered wants and cumulative haves, posts it to /git-upload-pack,
-// and streams the response back to git on stdout. Non-final rounds
-// synthesize a trailing NAK pktline so canonical git in connect
-// (stateful) mode doesn't hang waiting for the round-end marker that
-// the HTTP wire drops implicitly.
+// and streams the response back to git on stdout. Canonical git in
+// connect (stateful) mode reads each non-final round until NAK. Older
+// servers end such a round without one, so postRound adds it then. A
+// second NAK would end the next round early and leave ACK/NAK lines
+// in front of the pack ("protocol error: bad band").
 //
 // When stripShallow is true, the helper consumes the duplicate
 // shallow/unshallow + flush prefix the server emits on every round
@@ -232,7 +229,7 @@ func postShallowProbe(ctx context.Context, t Transport, stdout io.Writer, wantsB
 // shallow response (fetch-pack.c:453-481); subsequent rounds enter
 // the ACK/NAK loop directly, where a leftover "shallow X" pktline
 // kills get_ack (fetch-pack.c:253: `expected ACK/NAK, got '%s'`).
-func postRound(ctx context.Context, t Transport, stdout io.Writer, wantsBuf, havesBuf *bytes.Buffer, final, stripShallow bool, roundNumber int) error {
+func postRound(ctx context.Context, t Transport, stdout io.Writer, wantsBuf, havesBuf *bytes.Buffer, acks *ackState, final, stripShallow bool, roundNumber int) error {
 	body := make([]byte, 0, wantsBuf.Len()+havesBuf.Len()+pktline.LenSize)
 	body = append(body, wantsBuf.Bytes()...)
 	body = append(body, havesBuf.Bytes()...)
@@ -259,12 +256,131 @@ func postRound(ctx context.Context, t Transport, stdout io.Writer, wantsBuf, hav
 		}
 	}
 
-	if _, err := io.Copy(stdout, src); err != nil {
+	if !wantsMultiACK(wantsBuf.Bytes()) {
+		if err := relaySingleACKRound(stdout, src, acks, final); err != nil {
+			return fmt.Errorf("streaming round %d response: %w", roundNumber, err)
+		}
+		return nil
+	}
+
+	var tail roundTail
+	if _, err := io.Copy(io.MultiWriter(stdout, &tail), src); err != nil {
 		return fmt.Errorf("streaming round %d response: %w", roundNumber, err)
 	}
-	if !final {
-		if _, err := stdout.Write([]byte("0008NAK\n")); err != nil {
+	if !final && !tail.endsWithNAK() {
+		if _, err := stdout.Write([]byte(nakPkt)); err != nil {
 			return fmt.Errorf("writing NAK terminator for round %d: %w", roundNumber, err)
+		}
+	}
+	return nil
+}
+
+const nakPkt = "0008NAK\n"
+
+// roundTail keeps the last bytes of a streamed round response. The server
+// sets the response size, so the helper does not buffer the round.
+type roundTail struct {
+	b [len(nakPkt)]byte
+	n int
+}
+
+func (t *roundTail) Write(p []byte) (int, error) {
+	if len(p) >= len(t.b) {
+		copy(t.b[:], p[len(p)-len(t.b):])
+		t.n = len(t.b)
+		return len(p), nil
+	}
+	keep := min(t.n, len(t.b)-len(p))
+	copy(t.b[:keep], t.b[t.n-keep:t.n])
+	copy(t.b[keep:], p)
+	t.n = keep + len(p)
+	return len(p), nil
+}
+
+// endsWithNAK reports whether the round ended with a NAK pkt-line. No ACK
+// line can end with these bytes.
+func (t *roundTail) endsWithNAK() bool {
+	return string(t.b[:t.n]) == nakPkt
+}
+
+// ackState carries what git has seen across the rounds of one fetch.
+type ackState struct {
+	// acked is set once git has received the ACK of a single-ACK fetch.
+	acked bool
+}
+
+// wantsMultiACK reports whether git asked for multi_ack or
+// multi_ack_detailed on its first want line.
+func wantsMultiACK(wants []byte) bool {
+	_, payload, err := pktline.ReadLine(bytes.NewReader(wants))
+	if err != nil {
+		return false
+	}
+	for _, f := range bytes.Fields(payload) {
+		if string(f) == "multi_ack" || string(f) == "multi_ack_detailed" {
+			return true
+		}
+	}
+	return false
+}
+
+// relaySingleACKRound relays a round of a fetch without multi_ack. Git's
+// upload-pack then answers each round with NAK until the first common
+// have, ACKs that have once, and sends nothing more before the pack
+// (upload-pack.c, get_common_commits). Every request repeats all haves,
+// so the server ACKs the common have again in later rounds. Git reads
+// those repeated ACKs as pack data, so they are dropped here.
+func relaySingleACKRound(w io.Writer, r io.Reader, acks *ackState, final bool) error {
+	// PeekLine peeks a whole pkt-line, and side-band-64k pack packets
+	// reach pktline.MaxSize.
+	br := bufio.NewReaderSize(r, pktline.MaxSize)
+	for {
+		l, payload, err := pktline.PeekLine(br)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		var errLine *pktline.ErrorLine
+		if errors.As(err, &errLine) {
+			// Pass the server's ERR to git, which reports it and stops.
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("peeking pkt-line: %w", err)
+		}
+		line := string(bytes.TrimSuffix(payload, []byte("\n")))
+		isACK := strings.HasPrefix(line, "ACK ")
+		if final && !isACK {
+			// The pack follows the negotiation lines.
+			break
+		}
+		n := max(l, pktline.LenSize)
+		raw, err := br.Peek(n)
+		if err != nil {
+			return fmt.Errorf("reading pkt-line: %w", err)
+		}
+		switch {
+		case isACK && acks.acked:
+		case isACK:
+			if _, err := w.Write(raw); err != nil {
+				return fmt.Errorf("writing ACK: %w", err)
+			}
+			acks.acked = true
+		case line == "NAK":
+		default:
+			if _, err := w.Write(raw); err != nil {
+				return fmt.Errorf("writing pkt-line: %w", err)
+			}
+		}
+		if _, err := br.Discard(n); err != nil {
+			return fmt.Errorf("discarding pkt-line: %w", err)
+		}
+	}
+	if _, err := io.Copy(w, br); err != nil {
+		return fmt.Errorf("copying response: %w", err)
+	}
+	if !final && !acks.acked {
+		if _, err := w.Write([]byte(nakPkt)); err != nil {
+			return fmt.Errorf("writing NAK: %w", err)
 		}
 	}
 	return nil

@@ -141,8 +141,14 @@ const (
 	HooksCurrent
 	// HooksOutdated means Entire hooks are installed but stale — an older CLI
 	// wrote a config that no longer matches the current one. Fix:
-	// `entire enable --force`.
+	// `entire agent add <agent>`; add --force if that does not fix it.
 	HooksOutdated
+	// HooksForOtherHost means Entire's hooks are the form install writes on
+	// the other OS (sh or Windows), which this host's agent cannot run, so no
+	// hook fires here. Usually a hooks file committed from a teammate's
+	// checkout. Fix: `entire agent add <agent>`, which rewrites the file for
+	// this OS and, if it is committed, breaks it for the other OS.
+	HooksForOtherHost
 )
 
 // HookFreshness is implemented by hook-supporting agents that can report
@@ -167,16 +173,30 @@ type HookFreshness interface {
 }
 
 // StaleHookReporter is implemented by hook-supporting agents whose install
-// also prunes Entire hooks that older CLIs wrote and this one no longer does
-// (for Claude Code, the retired post-todo hook). `entire enable` asks before
-// installing, so it can say it removed them instead of reporting the hooks as
+// also rewrites Entire hooks that older CLIs wrote: pruning ones this CLI no
+// longer writes (for Claude Code, the retired post-todo hook) or updating ones
+// whose shape changed (Claude Code's hook timeouts). `entire enable` asks before
+// installing, so it can say it updated them instead of reporting the hooks as
 // already installed. Implementations must be read-only.
 type StaleHookReporter interface {
 	Agent
 
 	// HasStaleManagedHooks reports whether the agent's hook config holds
-	// Entire hooks the next install will remove.
+	// Entire hooks the next install will remove or update.
 	HasStaleManagedHooks(ctx context.Context) bool
+}
+
+// HookTimeoutRepairer is implemented by agents whose Entire hooks carry
+// timeouts that configs written by older CLIs lack. `entire doctor` runs the
+// repair without asking, because a user who already enabled Entire has no
+// reason to run enable again. The repair must only give Entire's own hooks a
+// missing timeout and leave everything the user chose as it is.
+type HookTimeoutRepairer interface {
+	Agent
+
+	// RepairHookTimeouts adds the missing timeouts and reports whether it
+	// rewrote the hook config. An absent config is not an error.
+	RepairHookTimeouts(ctx context.Context) (bool, error)
 }
 
 // EffectiveHookDiagnostics marks agents whose effective hook state is reported
@@ -313,6 +333,54 @@ type TranscriptFetcher interface {
 	FetchTranscript(ctx context.Context, sessionID string) (string, error)
 }
 
+// SubagentTranscriptFetcher is implemented by agents whose subagents are
+// sessions the agent can still export after the fact, keyed by the task
+// record's AgentID (OpenCode: the child session ID). Condensation calls it for
+// a completed task record whose transcript was never declared or can no
+// longer be read (a subagent-stop whose export failed), so a transcript that
+// still exists in the agent's store is not recorded as unavailable. Callers go
+// through FetchSubagentTranscript, which honours WithSubagentFetchBudget. Agents whose AgentID is not a fetchable session
+// (Claude Code's agent IDs) must not implement it.
+type SubagentTranscriptFetcher interface {
+	Agent
+
+	// FetchSubagentTranscript writes the transcript of the task call
+	// toolUseID, run by subagent agentID between startedAt and completedAt
+	// (either zero when unknown or still running), to the agent's cache
+	// location and returns its path. The window matters when one subagent
+	// backs several calls: a re-export after a later call must not carry it.
+	FetchSubagentTranscript(ctx context.Context, agentID, toolUseID string, startedAt, completedAt time.Time) (string, error)
+}
+
+// LiveSubagentFileReporter is implemented by agents that can report what a
+// still-running subagent call has modified so far (OpenCode: by exporting the
+// child session). The co-authorship check in post-commit uses it for a live
+// task record, which has no transcript on disk until its stop hook runs. It
+// must not write anything a task record declares or a later capture reads: a
+// report that lands after the call's stop must not replace its transcript.
+type LiveSubagentFileReporter interface {
+	Agent
+
+	// LiveSubagentModifiedFiles returns the files the task call toolUseID,
+	// run by subagent agentID since startedAt (zero when unknown), has
+	// modified so far.
+	LiveSubagentModifiedFiles(ctx context.Context, agentID, toolUseID string, startedAt time.Time) ([]string, error)
+}
+
+// ChildSessionSubagents is implemented by agents whose subagents run as
+// sessions of their own (OpenCode child sessions): a child's token usage is
+// recorded only in its own session, never in the parent's transcript or its
+// subagent snapshot. The completion that claims a child's task record, whether
+// a real stop or the SessionEnd sweep, credits that usage to the parent
+// session's total, once per call. Do not implement it when the parent's
+// transcript already counts its children, or each child would count twice.
+type ChildSessionSubagents interface {
+	Agent
+
+	// SubagentUsageOutsideParent marks the capability; it does nothing.
+	SubagentUsageOutsideParent()
+}
+
 // SidecarImageProvider is implemented by agents that keep images OUTSIDE the
 // transcript Entire condenses — e.g. Cursor stores pasted images in a per-session
 // SQLite blob store, not the JSONL transcript. The strategy layer calls this
@@ -330,7 +398,13 @@ type SidecarImageProvider interface {
 // TranscriptSanitizer is implemented by agents whose native transcript format
 // carries state that Entire must not keep in its own copy — e.g. Codex rollouts
 // embed encrypted reasoning payloads and compaction blobs that are bound to the
-// originating session and cannot be replayed out of a checkpoint.
+// originating session and cannot be replayed out of a checkpoint, and Claude
+// Code, Codex and Pi record the text they attach to their model requests
+// (system prompt, instruction files, memory notes), which comes from outside
+// the conversation.
+//
+// A sanitizer must not add or remove lines: checkpoint offsets count lines in
+// the agent's transcript and are applied to the stored copy.
 //
 // Entire always leaves the agent's own transcript untouched; this transform applies
 // only to the copy Entire stores. Sanitizing before redaction is what keeps
@@ -360,10 +434,11 @@ type TokenCalculator interface {
 }
 
 // OutOfBandTokenSource provides token usage from a source other than the
-// transcript. Antigravity is the only agent that needs this: agy never writes
-// token data into its transcript or hook payloads — its title/statusline pipe
-// is the only surface, captured to disk by `entire hooks antigravity
-// title-tee` (see agent/antigravity/statusline.go).
+// transcript, for agents that never write token data into their transcript or
+// hook payloads. Antigravity's only surface is its title/statusline pipe,
+// captured to disk by `entire hooks antigravity title-tee` (see
+// agent/antigravity/statusline.go); Factory AI Droid keeps a running total in
+// the .settings.json beside each transcript (see agent/factoryaidroid/tokens.go).
 //
 // Flow: the lifecycle calls SnapshotTokenBaseline at TurnStart and stores the
 // opaque baseline in PrePromptState; at TurnEnd (when transcript-based
@@ -374,14 +449,16 @@ type OutOfBandTokenSource interface {
 	Agent
 
 	// SnapshotTokenBaseline returns an opaque, agent-defined marker of the
-	// current cumulative token position for the session. A nil baseline with
-	// nil error means "no usage observed yet" (delta will count from zero).
-	SnapshotTokenBaseline(ctx context.Context, sessionID string) (json.RawMessage, error)
+	// current cumulative token position for the session. sessionRef is the
+	// hook's transcript path and may be empty. A nil baseline with nil error
+	// means "no usage observed yet" (delta will count from zero), unless the
+	// agent defines a nil baseline as "position unknown".
+	SnapshotTokenBaseline(ctx context.Context, sessionID, sessionRef string) (json.RawMessage, error)
 
 	// CalculateTokenUsageSince computes usage between the baseline and now.
 	// A nil result with nil error means no data is available (degrade to no
 	// token counts, never to an error).
-	CalculateTokenUsageSince(ctx context.Context, sessionID string, baseline json.RawMessage) (*TokenUsage, error)
+	CalculateTokenUsageSince(ctx context.Context, sessionID, sessionRef string, baseline json.RawMessage) (*TokenUsage, error)
 }
 
 // SubagentReference is the authoritative record of one spawned agent supplied
@@ -563,6 +640,30 @@ type SessionEndBudgeter interface {
 	// hook invocation, measured from process start. A non-positive value means
 	// no budget applies.
 	SessionEndBudget() time.Duration
+}
+
+// TurnEndHookTimeouter is implemented by agents whose host bounds the hook that
+// ends a turn. Entire derives a finalize budget from the timeout with
+// TurnEndBudgetWithin and bounds the network-bound part of turn-end checkpoint
+// finalization by it, so a slow remote makes Entire give up on the remaining
+// checkpoints instead of the host killing the hook before the session state is
+// saved. Agents that do not implement it get a conservative default.
+type TurnEndHookTimeouter interface {
+	Agent
+
+	// TurnEndHookTimeout returns how long the host lets the turn-end hook run
+	// before killing it: the host's own limit, not a budget. A non-positive
+	// value is treated as unknown, and the default applies.
+	TurnEndHookTimeout() time.Duration
+}
+
+// TurnEndBudgetWithin returns the turn-end budget for a host hook timeout. It
+// keeps a fifth of the timeout, between 2s and 10s, for what the hook does
+// after finalization (saving session state) and for the shell wrapper and
+// binary load that run before Entire's clock starts.
+func TurnEndBudgetWithin(hookTimeout time.Duration) time.Duration {
+	headroom := min(max(hookTimeout/5, 2*time.Second), 10*time.Second)
+	return max(hookTimeout-headroom, 0)
 }
 
 // RestoredSessionPathResolver is implemented by agents that need a

@@ -117,6 +117,13 @@ func runGitQuiet(ctx context.Context, maxOutput int64, args ...string) ([]byte, 
 	ctx, cancel := context.WithTimeout(ctx, pluginGitTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", args...)
+	// The deadline kill reaches only git itself, but stdout/stderr are Go-side
+	// writers, so exec copies them through OS pipes that git's children
+	// (git-remote-https, ssh) inherit and keep open past the kill. Without a
+	// WaitDelay, Run would block until those orphans exit on their own network
+	// timeouts — which matters most for the post-run plugin update check,
+	// whose 2s budget must actually bind.
+	cmd.WaitDelay = time.Second
 	env := append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "LANG=C")
 	// Only supply a batch-mode ssh when the user has not configured one. A
 	// blanket GIT_SSH_COMMAND would override both the env var and
@@ -173,10 +180,8 @@ func redactURL(raw string) string {
 
 // redactCredentials removes userinfo from any URL appearing in free text, for
 // git's stderr where we do not know which URL was echoed.
-var credentialInURL = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@\s]*@`)
-
 func redactCredentials(text string) string {
-	return credentialInURL.ReplaceAllString(text, "${1}")
+	return gitremote.RedactCredentialsInText(text)
 }
 
 // gitURLSchemes are the transports a plugin or index repository URL may use in

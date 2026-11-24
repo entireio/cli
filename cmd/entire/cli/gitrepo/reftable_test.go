@@ -288,7 +288,9 @@ func TestReference_ClassifiesLookupFailures(t *testing.T) {
 			switch args[0] {
 			case gitSymbolicRef:
 				return "", nil, realExitError(t)
-			case gitRevParse:
+			case gitRevParse, gitForEachRef:
+				// refs/ names are looked up with for-each-ref; both paths
+				// must classify failures the same way.
 				return revParseOut, revParseStderr, revParseErr
 			default:
 				return "", nil, nil
@@ -702,4 +704,27 @@ func TestInspectRepoUsesReftable_ReportsInspectionFailure(t *testing.T) {
 	usesReftable, err := inspectRepoUsesReftable("invalid\x00gitdir", "")
 	require.ErrorContains(t, err, "inspect reftable directory")
 	require.False(t, usesReftable)
+}
+
+// A full ref name is looked up exactly, as the files backend does: a tag named
+// "refs/remotes/origin/main" (stored as refs/tags/refs/remotes/origin/main)
+// must not answer for a missing refs/remotes/origin/main.
+func TestReftableStorer_FullRefNameIsExact(t *testing.T) {
+	t.Parallel()
+	repoDir, headHash := initReftableRepo(t, "file.txt", "hello\n")
+	gitenv.Run(t, repoDir, "tag", "refs/remotes/origin/main", headHash)
+	gitenv.Run(t, repoDir, "tag", "refs/remotes/origin/HEAD", headHash)
+	gitenv.Run(t, repoDir, "branch", "refs/remotes/origin/master", headHash)
+
+	repo, err := OpenPath(repoDir)
+	require.NoError(t, err)
+	defer repo.Close()
+
+	for _, name := range []plumbing.ReferenceName{"refs/remotes/origin/HEAD", "refs/remotes/origin/main", "refs/remotes/origin/master"} {
+		_, err := repo.Storer.Reference(name)
+		require.ErrorIs(t, err, plumbing.ErrReferenceNotFound, "%s resolved through a lookalike ref", name)
+	}
+	got, err := repo.Storer.Reference("refs/heads/main")
+	require.NoError(t, err)
+	require.Equal(t, plumbing.NewHash(headHash), got.Hash())
 }

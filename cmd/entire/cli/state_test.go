@@ -268,7 +268,7 @@ func TestFilterAndNormalizePaths_SiblingDirectories(t *testing.T) {
 			name: "agent-owned opencode paths are filtered",
 			files: []string{
 				"/repo/src/file.ts",
-				"/repo/.opencode/plugins/entire.ts",
+				"/repo/.opencode/plugin/entire.ts",
 				"/repo/opencode.json",
 			},
 			basePath: "/repo",
@@ -792,10 +792,10 @@ func TestDetectFileChanges_IgnoresOpenCodeAgentFiles(t *testing.T) {
 		t.Fatalf("failed to modify tracked file: %v", err)
 	}
 
-	if err := os.MkdirAll(filepath.Join(tmpDir, ".opencode", "plugins"), 0o755); err != nil {
-		t.Fatalf("failed to create .opencode/plugins: %v", err)
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".opencode", "plugin"), 0o755); err != nil {
+		t.Fatalf("failed to create .opencode/plugin: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(tmpDir, ".opencode", "plugins", "entire.ts"), []byte("// plugin"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(tmpDir, ".opencode", "plugin", "entire.ts"), []byte("// plugin"), 0o644); err != nil {
 		t.Fatalf("failed to write opencode plugin: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(tmpDir, "opencode.json"), []byte("{}\n"), 0o644); err != nil {

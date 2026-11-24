@@ -79,6 +79,16 @@ var (
 // process tree can never loop or hang.
 const maxAncestorDepth = 12
 
+// maxAncestryDepth bounds the CurrentAncestry walk. It is deeper than
+// maxAncestorDepth because Excludes trusts only a walk that reached init, and
+// a commit hook's chain (hook managers, pre-commit, mise or direnv shims,
+// nested agents) can run past 12 before reaching the agent and the terminal.
+const maxAncestryDepth = 64
+
+// statFunc is procStat's shape; walkAncestry takes it so tests can supply a
+// process tree.
+type statFunc func(pid int) (ppid int, name, start string, err error)
+
 // transientNames are process names that are never the long-lived session owner:
 // our own hook binary, the shells agents commonly use to exec hooks, and the Go
 // toolchain (a `go run`-launched hook has a short-lived `go` parent that would
@@ -222,13 +232,14 @@ func IdentityOf(pid int) (Identity, bool) {
 // hostname read, one boot-id read, and one proc walk, instead of repeating
 // all three per candidate. Snapshot then match with Depth.
 type Ancestry struct {
-	host  string
-	boot  string
-	chain []Identity // nearest-first, excluding the current process
+	host     string
+	boot     string
+	chain    []Identity // nearest-first, excluding the current process
+	complete bool       // the walk reached init, so the chain is every ancestor
 }
 
 // CurrentAncestry fingerprints the current process's ancestors (nearest
-// first, up to maxAncestorDepth, stopping at init or on any introspection
+// first, up to maxAncestryDepth, stopping at init or on any introspection
 // failure). Returns ok=false when the platform cannot introspect processes
 // or the host is unknown — callers then skip identity matching entirely,
 // the same fallback a false HasAncestor provides.
@@ -241,23 +252,53 @@ func CurrentAncestry() (Ancestry, bool) {
 	if err != nil {
 		boot = ""
 	}
-	candidate, _, _, err := procStat(os.Getpid())
+	parent, _, _, err := procStat(os.Getpid())
 	if err != nil {
 		return Ancestry{}, false
 	}
-	ancestry := Ancestry{host: host, boot: boot}
-	for range maxAncestorDepth {
+	chain, complete := walkAncestry(procStat, parent, boot, host, maxAncestryDepth)
+	return Ancestry{host: host, boot: boot, chain: chain, complete: complete}, true
+}
+
+// walkAncestry fingerprints first and its ancestors, nearest first, for at
+// most limit processes. complete reports that the walk reached init (PID 1)
+// rather than stopping on the limit or a failed lookup. A parent PID of 0 is
+// not init: on Linux it means the parent lies outside this PID namespace, so
+// the chain is cut off there.
+func walkAncestry(stat statFunc, first int, boot, host string, limit int) (chain []Identity, complete bool) {
+	candidate := first
+	for range limit {
 		if candidate <= 1 {
 			break
 		}
-		parent, name, start, err := procStat(candidate)
+		parent, name, start, err := stat(candidate)
 		if err != nil {
-			break
+			return chain, false
 		}
-		ancestry.chain = append(ancestry.chain, Identity{PID: candidate, Start: start, Boot: boot, Host: host, Name: name})
+		chain = append(chain, Identity{PID: candidate, Start: start, Boot: boot, Host: host, Name: name})
 		candidate = parent
 	}
-	return ancestry, true
+	return chain, candidate == 1
+}
+
+// Complete reports whether the snapshot holds every ancestor up to init.
+func (a Ancestry) Complete() bool {
+	return a.complete
+}
+
+// Excludes reports whether id is provably not an ancestor of the current
+// process. Depth(id) < 0 also covers "cannot tell"; Excludes is true only
+// when the walk reached init and id is an identity Depth can judge (same
+// host, a start fingerprint, and the same boot when both sides know it) that
+// appears nowhere in the chain.
+func (a Ancestry) Excludes(id Identity) bool {
+	if !a.complete || id.PID <= 0 || id.Start == "" || id.Host == "" || id.Host != a.host {
+		return false
+	}
+	if id.Boot != "" && a.boot != "" && a.boot != id.Boot {
+		return false
+	}
+	return a.Depth(id) < 0
 }
 
 // Depth returns id's position in the snapshot chain — 0 is the nearest

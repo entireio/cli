@@ -19,6 +19,7 @@ import (
 // a no-op `entire` subprocess on every completed tool call and model
 // invocation.
 const (
+	HookNameSessionStart  = "session-start"
 	HookNamePreToolUse    = "pre-tool-use"
 	HookNamePreInvocation = "pre-invocation"
 	HookNameStop          = "stop"
@@ -28,6 +29,7 @@ const (
 // These become subcommands: entire hooks antigravity <verb>
 func (a *AntigravityAgent) HookNames() []string {
 	return []string{
+		HookNameSessionStart,
 		HookNamePreToolUse,
 		HookNamePreInvocation,
 		HookNameStop,
@@ -38,6 +40,8 @@ func (a *AntigravityAgent) HookNames() []string {
 // Returns nil if the hook has no lifecycle significance.
 func (a *AntigravityAgent) ParseHookEvent(_ context.Context, hookName string, stdin io.Reader) (*agent.Event, error) {
 	switch hookName {
+	case HookNameSessionStart:
+		return parseSessionStart(stdin)
 	case HookNamePreInvocation:
 		return parsePreInvocation(stdin)
 	case HookNameStop:
@@ -47,6 +51,30 @@ func (a *AntigravityAgent) ParseHookEvent(_ context.Context, hookName string, st
 	default:
 		return nil, nil //nolint:nilnil // Unknown hooks have no lifecycle action
 	}
+}
+
+// parseSessionStart handles the SessionStart hook (agy 1.1.1+), which fires
+// once per new conversation before its first model invocation — not on
+// `agy --conversation` resumes. Real captured stdin from agy 1.3.4 carries only
+// the common fields plus modelName.
+//
+// AntigravityAgent intentionally does not implement HookResponseWriter, so the
+// dispatcher writes nothing to stdout and agy shows no "tracked by entire"
+// banner, matching the Cursor/OpenCode/Copilot/Pi pattern of silent session
+// tracking. agy only logs an error for a SessionStart hook's non-JSON stdout or
+// nonzero exit; the run continues.
+func parseSessionStart(stdin io.Reader) (*agent.Event, error) {
+	raw, err := agent.ReadAndParseHookInput[SessionStartPayload](stdin)
+	if err != nil {
+		return nil, err
+	}
+	return &agent.Event{
+		Type:       agent.SessionStart,
+		SessionID:  raw.ConversationID,
+		SessionRef: raw.TranscriptPath,
+		Model:      raw.ModelName,
+		Timestamp:  time.Now(),
+	}, nil
 }
 
 // parsePreInvocation handles the PreInvocation hook.
@@ -82,10 +110,8 @@ func (a *AntigravityAgent) ParseHookEvent(_ context.Context, hookName string, st
 // turn (state condensed/idle/absent) is tracked, while a genuine follow-up
 // (state active mid-turn) is dropped without clobbering the baseline.
 //
-// Antigravity has no SessionStart hook surface, so there is no path to display
-// a "tracked by entire" banner in the agy UI for v1. AntigravityAgent
-// intentionally does not implement HookResponseWriter, matching the
-// Cursor/OpenCode/Copilot/Pi pattern of silent session tracking.
+// SessionStart creates no session state, so the invocationNum == 0 TurnStart
+// is still the one that initializes the session.
 func parsePreInvocation(stdin io.Reader) (*agent.Event, error) {
 	raw, err := agent.ReadAndParseHookInput[InvocationPayload](stdin)
 	if err != nil {

@@ -3,6 +3,7 @@ package cli
 import (
 	"archive/zip"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -10,6 +11,9 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/redact"
 )
@@ -334,5 +338,153 @@ func TestRedactBundleEntry_WithholdsJSONWhenScannerDegraded(t *testing.T) {
 	}
 	if strings.Contains(got, "hello") {
 		t.Fatalf("withheld entry must not carry the original content, got %q", got)
+	}
+}
+
+// Runs through the doctor parent so pre-run inheritance is exercised. Only the
+// redacted bundle consults redaction settings: an invalid scanner config must
+// fail it (the archive leaves the machine) but must not block --raw or the
+// read-only migrate report, which are how a user diagnoses that same setup.
+func TestDoctorSubcommands_InvalidScannerConfigBlocksOnlyRedactedBundle(t *testing.T) {
+	// Cannot use t.Parallel(): t.Chdir and the process-wide redaction Once.
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	// Both scanners off — settings.Load fails with ErrScannerConfig.
+	testutil.WriteFile(t, dir, ".entire/settings.json",
+		`{"enabled": true, "redaction": {"betterleaks": {"enabled": false}, "goredact": {"enabled": false}}}`)
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+
+	run := func(args ...string) error {
+		strategy.ResetRedactionConfiguredForTest()
+		t.Cleanup(strategy.ResetRedactionConfiguredForTest)
+		cmd := newDoctorCmd()
+		var out strings.Builder
+		cmd.SetOut(&out)
+		cmd.SetErr(&out)
+		cmd.SetArgs(args)
+		cmd.SetContext(context.Background())
+		return cmd.Execute()
+	}
+
+	outZip := filepath.Join(t.TempDir(), "bundle.zip")
+	if err := run("bundle", "--raw", "--out", outZip); err != nil {
+		t.Errorf("doctor bundle --raw must not consult redaction settings: %v", err)
+	}
+	if err := run("migrate-checkpoints", "--dry-run"); err != nil {
+		t.Errorf("doctor migrate-checkpoints --dry-run must not consult redaction settings: %v", err)
+	}
+	if err := run("bundle", "--out", outZip); !errors.Is(err, settings.ErrScannerConfig) {
+		t.Errorf("redacted doctor bundle must fail closed on invalid scanner config, got: %v", err)
+	}
+}
+
+// Settings that fail to load leave hooks on the built-in layers, but a
+// redacted bundle must refuse rather than ship without the user's own rules.
+func TestDoctorBundle_RefusesWhenCustomRulesFailToLoad(t *testing.T) {
+	// Cannot use t.Parallel(): t.Chdir and the process-wide redaction Once.
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	testutil.WriteFile(t, dir, ".entire/settings.json", `{"enabled": true, "redaction": {`)
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+
+	run := func(args ...string) error {
+		strategy.ResetRedactionConfiguredForTest()
+		t.Cleanup(strategy.ResetRedactionConfiguredForTest)
+		cmd := newDoctorCmd()
+		var out strings.Builder
+		cmd.SetOut(&out)
+		cmd.SetErr(&out)
+		cmd.SetArgs(args)
+		cmd.SetContext(context.Background())
+		return cmd.Execute()
+	}
+
+	outZip := filepath.Join(t.TempDir(), "bundle.zip")
+	err := run("bundle", "--out", outZip)
+	if err == nil || !strings.Contains(err.Error(), "refusing to write a bundle without your custom redaction rules") {
+		t.Fatalf("redacted bundle must refuse when settings fail to load, got: %v", err)
+	}
+	if _, statErr := os.Stat(outZip); !os.IsNotExist(statErr) {
+		t.Errorf("refused bundle must not leave an archive behind (stat err: %v)", statErr)
+	}
+	if err := run("bundle", "--raw", "--out", outZip); err != nil {
+		t.Errorf("doctor bundle --raw must still work: %v", err)
+	}
+}
+
+// runDoctorInRepo runs a doctor subcommand through the doctor parent in a
+// fresh repo whose .entire holds files, resetting the process-wide redaction
+// Once around it.
+func runDoctorInRepo(t *testing.T, files map[string]string, args ...string) error {
+	t.Helper()
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	for name, content := range files {
+		testutil.WriteFile(t, dir, name, content)
+	}
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	strategy.ResetRedactionConfiguredForTest()
+	t.Cleanup(strategy.ResetRedactionConfiguredForTest)
+
+	cmd := newDoctorCmd()
+	var out strings.Builder
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs(args)
+	cmd.SetContext(context.Background())
+	return cmd.Execute()
+}
+
+// A rule the user wrote that silently does not apply is the original leak, so
+// a skipped pack file or an inline regex that fails to compile must stop a
+// redacted bundle too. Settings that fail to load without declaring redaction
+// (e.g. an unknown key from a newer CLI) hold no such rules: the bundle falls
+// back to the built-ins rather than pushing the user to --raw.
+func TestDoctorBundle_RefusesOnlyWhenUserRulesMayBeMissing(t *testing.T) {
+	// Cannot use t.Parallel(): t.Chdir and the process-wide redaction Once.
+	for _, tc := range []struct {
+		name    string
+		files   map[string]string
+		refuses bool
+	}{
+		{
+			name:    "invalid pack file",
+			files:   map[string]string{".entire/redactors/acme.yaml": "name: acme\nrules:\n - id: x\n  regex: 'ACME_[A-Z]{6}'\n"},
+			refuses: true,
+		},
+		{
+			name:    "inline rule that fails to compile",
+			files:   map[string]string{".entire/settings.json": `{"enabled": true, "redaction": {"custom_redactions": {"broken": "INLINE_[A-Z0-9"}}}`},
+			refuses: true,
+		},
+		{
+			name:    "unknown settings key without redaction",
+			files:   map[string]string{".entire/settings.json": `{"enabled": true, "future_feature": true}`},
+			refuses: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			outZip := filepath.Join(t.TempDir(), "bundle.zip")
+			err := runDoctorInRepo(t, tc.files, "bundle", "--out", outZip)
+			refused := err != nil && strings.Contains(err.Error(), "refusing to write a bundle without your custom redaction rules")
+			if refused != tc.refuses {
+				t.Fatalf("refused = %v, want %v (err: %v)", refused, tc.refuses, err)
+			}
+			if !tc.refuses && err != nil {
+				t.Fatalf("bundle should fall back to built-in redaction: %v", err)
+			}
+		})
 	}
 }

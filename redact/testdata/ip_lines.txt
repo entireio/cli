@@ -1,0 +1,111 @@
+# Lines for TestIPLines, shaped like tool output that agent transcripts carry,
+# grouped by ecosystem. They are written for this table, not copied from
+# anyone's transcripts.
+#
+# «addr» marks an address in use on a network (a host, subnet, or gateway),
+# which must be redacted. Everything else must stay: versions, OIDs, code,
+# loopback and unspecified addresses, documentation addresses (RFC 5737,
+# RFC 3849, RFC 9637), and the range constants that name the private blocks
+# (10.0.0.0/8). \n stands for a line break inside one transcript string.
+#
+# "limit: " tags a line the detector gets wrong today. The test counts it in
+# the rates and fails when an untagged line is wrong or a tagged line becomes
+# right, so the tags stay accurate.
+
+## .NET
+System.Runtime, Version=10.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a
+   at Contoso.Api.Startup.Configure(IApplicationBuilder app) [Microsoft.AspNetCore.Http, Version=10.0.0.0, Culture=neutral]
+<PackageReference Include="Contoso.Client" Version="10.0.0.1" />
+[assembly: AssemblyVersion("10.1.2.3")]
+Microsoft Windows [Version 10.0.26100.4061]
+net use Z: \\«10.24.3.17»\c$ /persistent:yes
+info: Microsoft.Hosting.Lifetime[14] Now listening on: http://«10.0.4.12»:5000
+System.Net.Http.HttpRequestException: Connection refused («10.0.4.17»:5432)
+limit: Updated Contoso.Sdk from 10.2.0.0 to 10.3.0.0 in Directory.Packages.props
+
+## JVM
+Caused by: java.net.ConnectException: Connection refused: /«10.12.0.8»:9092
+limit: [Consumer clientId=consumer-1] Connection to node 1 (kafka-1/«10.12.0.9»:9092) could not be established.
+org.postgresql.util.PSQLException: Connection to «10.12.3.4»:5432 refused.
+Downloading https://repo.maven.apache.org/maven2/com/google/protobuf/protobuf-java/3.25.5/protobuf-java-3.25.5.pom
+
+## Python
+('3.13.10.14', 800), ('1.17.2.3', 143)
+psycopg2.OperationalError: connection to server at "«10.20.1.5»", port 5432 failed: Connection refused
+requests.exceptions.ConnectionError: HTTPSConnectionPool(host='«52.66.93.46»', port=443): Max retries exceeded
+ * Running on http://«192.168.1.23»:5000
+ * Running on http://127.0.0.1:5000
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+
+## Node and browsers
+User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36
+Error: connect ECONNREFUSED «10.0.3.15»:6379
+  ➜  Network: http://«192.168.68.104»:5173/
+set-cookie: __cf_bm=m7jX1KNtrO52BdjsrcqI-1774601477.4207962-1.0.1.1-2Lh07.T55FPwGd4wDvv; path=/; HttpOnly
+
+## Go
+dial tcp «52.66.93.46»:443: i/o timeout
+Get "https://«140.82.113.25»/": dial tcp «140.82.113.25»:443: connect: connection refused
+listen tcp 0.0.0.0:8080: bind: address already in use
+for _, cidr := range []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"} {
+cgnat := netip.MustParsePrefix("100.64.0.0/10")
+ula, linkLocal := netip.MustParsePrefix("fc00::/7"), netip.MustParsePrefix("fe80::/10")
+
+## Kubernetes
+api-7d9f8b6c5-x2kqp   1/1   Running   0   3d   «10.244.1.17»   ip-10-0-1-23.ec2.internal
+web   LoadBalancer   «10.96.143.7»   «34.117.59.81»   80:31380/TCP   5d
+  podIP: «10.244.1.17»
+Endpoints:         «10.244.2.31»:8080,«10.244.3.12»:8080
+Readiness probe failed: Get "http://«10.244.2.31»:8080/healthz": context deadline exceeded
+--service-cluster-ip-range=«10.96.0.0»/12
+
+## Docker
+"IPAddress": "«172.17.0.2»",
+"Subnet": "«172.18.0.0»/16",
+Bind for 0.0.0.0:8080 failed: port is already allocated.
+
+## AWS and Terraform
+ssh -i ~/.ssh/deploy.pem ec2-user@«52.66.93.46»
+curl http://«169.254.169.254»/latest/meta-data/local-ipv4
+"PrivateIpAddress": "«10.0.1.23»",
+limit: "PublicIpAddress": "«52.66.93.46»",
+cidr_block = "«10.24.0.0»/16"
+limit:   + public_ip  = "«13.234.90.180»"
+limit: «52.66.93.46»  «13.234.90.180»  «3.6.118.20»
+
+## Linux networking
+    inet «10.0.1.23»/24 brd «10.0.1.255» scope global dynamic eth0
+    inet6 «fe80::4a1:2bff:fe3c:9d1e»/64 scope link
+    inet 127.0.0.1/8 scope host lo
+	inet «192.168.1.42» netmask 0xffffff00 broadcast «192.168.1.255»
+tcp   LISTEN 0  4096   0.0.0.0:22   0.0.0.0:*
+node  48213 me  23u  IPv4 0x8c1d  0t0  TCP «192.168.26.92»:59027->«140.82.113.25»:443 (ESTABLISHED)
+limit: github.com.  60  IN  A  «140.82.113.4»
+limit: nameserver «8.8.8.8»
+64 bytes from «10.0.5.12»: icmp_seq=1 ttl=63 time=0.412 ms
+dial tcp [«2600:1f18:4c2:9300::7»]:443: connect: connection refused
+
+## SSH and Git
+ssh: connect to host «52.66.93.46» port 22: Connection timed out
+debug1: Server host key: ecdsa-sha2-nistp256 MD5:12:f8:7e:78:61:b4:bf:e2:de:24:15:96:4e:d4:72:53
+limit: Warning: Permanently added '«52.66.93.46»' (ED25519) to the list of known hosts.
+To ssh://git@«10.0.8.4»:2222/platform/api.git
+
+## Logs
+time=2026-10-22T05:04:26Z level=info msg=request remote_addr=«73.15.204.88»:51234 method=GET
+limit: «73.15.204.88» - - [22/Oct/2026:05:04:26 +0000] "GET /api/health HTTP/1.1" 200 2 "-" "curl/8.7.1"
+limit: X-Forwarded-For: «73.15.204.88», «10.0.1.5»
+
+## Documentation examples
+curl https://203.0.113.9/health
+ssh deploy@198.51.100.7
+Set the server address to 192.0.2.10 in config.yaml.
+ping 2001:db8::8a2e:370:7334
+
+## Versions and code
+git remote -v\nbumped protobuf to 3.21.12.1
+server version 4.12.1.3
+limit: connect timeout; falling back to lib 2.10.4.1
+oid 1.3.6.1.4.1.311.21.7
+u64::from(x) and i32::MAX; a[1::2]; std::vector<int>
+ether aa:bb:cc:dd:ee:ff at 12:30:45, main.go:12:34

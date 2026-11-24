@@ -226,6 +226,7 @@ func TestPostCommit_PartialCommit_TrailerIsClaimed(t *testing.T) {
 	require.NoError(t, err)
 	_, err = wt.Add("B.txt")
 	require.NoError(t, err)
+	recordStampedTrailer(context.Background(), id.MustCheckpointID("cf1cf2cf3cf4"))
 	_, err = wt.Commit(
 		"commit A and B\n\n"+trailers.CheckpointTrailerKey+": cf1cf2cf3cf4\n",
 		&git.CommitOptions{Author: &object.Signature{

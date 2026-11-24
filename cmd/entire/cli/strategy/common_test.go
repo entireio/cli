@@ -1104,13 +1104,26 @@ func TestEnsurePrimaryRef_SeedsV1FromRemote(t *testing.T) {
 // and returns the clone path and a git runner function.
 func cloneWithConfig(t *testing.T, bareDir string) (string, func(args ...string)) {
 	t.Helper()
+	return cloneSourceWithConfig(t, bareDir)
+}
+
+// shallowCloneWithConfig is cloneWithConfig with --depth=1. A file:// URL is
+// required: git ignores --depth for a plain local path.
+func shallowCloneWithConfig(t *testing.T, bareDir string) (string, func(args ...string)) {
+	t.Helper()
+	return cloneSourceWithConfig(t, "file://"+bareDir, "--depth=1")
+}
+
+func cloneSourceWithConfig(t *testing.T, source string, cloneArgs ...string) (string, func(args ...string)) {
+	t.Helper()
 	cloneDir := filepath.Join(t.TempDir(), "clone")
 	// GitIsolatedEnv on every invocation, matching initBareWithMetadataBranch:
 	// without it these commands inherit the developer's or CI's global git
 	// config, and a global gc.autoDetach=true lets a background `git gc` write
 	// .git/objects after the test returns and race t.TempDir() cleanup. Per-command
 	// env rather than t.Setenv, so callers can still use t.Parallel().
-	cmd := exec.CommandContext(context.Background(), "git", "clone", bareDir, cloneDir)
+	args := append(append([]string{"clone"}, cloneArgs...), source, cloneDir)
+	cmd := exec.CommandContext(context.Background(), "git", args...)
 	cmd.Env = testutil.GitIsolatedEnv()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("clone failed: %v\n%s", err, out)
@@ -1271,70 +1284,18 @@ func TestSafelyAdvanceLocalRef_DoesNotAdvanceOnRefReadError(t *testing.T) {
 func TestSafelyAdvanceLocalRef_DoesNotReplayDisconnectedChainWhenTargetIsShallow(t *testing.T) {
 	t.Parallel()
 
-	ctx := context.Background()
-	bareDir := t.TempDir()
-	setupDir := t.TempDir()
-	cloneDir := filepath.Join(t.TempDir(), "clone")
-	require.NoError(t, os.MkdirAll(cloneDir, 0o755))
-
-	run := func(dir string, args ...string) {
-		t.Helper()
-		testutil.RunGit(t, dir, args...)
-	}
-
-	run(bareDir, "init", "--bare", "-b", "main")
-	run(setupDir, "clone", bareDir, ".")
-	run(setupDir, "config", "user.email", "test@test.com")
-	run(setupDir, "config", "user.name", "Test User")
-	run(setupDir, "config", "commit.gpgsign", "false")
-	require.NoError(t, os.WriteFile(filepath.Join(setupDir, "README.md"), []byte("# Test"), 0o644))
-	run(setupDir, "add", ".")
-	run(setupDir, "commit", "-m", "init")
-	run(setupDir, "push", "origin", "main")
-
-	run(setupDir, "checkout", "--orphan", paths.MetadataBranchName)
-	run(setupDir, "rm", "-rf", ".")
-	localOnlyDir := filepath.Join(setupDir, "aa", "aaaaaaaaaa")
-	require.NoError(t, os.MkdirAll(localOnlyDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(localOnlyDir, "metadata.json"), []byte(`{"checkpoint_id":"aaaaaaaaaaaa"}`), 0o644))
-	run(setupDir, "add", ".")
-	run(setupDir, "commit", "-m", "Checkpoint: aaaaaaaaaaaa")
-	run(setupDir, "push", "origin", paths.MetadataBranchName)
-
-	run(cloneDir, "clone", bareDir, ".")
-	run(cloneDir, "config", "user.email", "test@test.com")
-	run(cloneDir, "config", "user.name", "Test User")
-	run(cloneDir, "config", "commit.gpgsign", "false")
-	run(cloneDir, "branch", paths.MetadataBranchName, "origin/"+paths.MetadataBranchName)
-
-	run(setupDir, "rm", "-rf", "aa")
-	remoteOnlyDir := filepath.Join(setupDir, "bb", "bbbbbbbbbb")
-	require.NoError(t, os.MkdirAll(remoteOnlyDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(remoteOnlyDir, "metadata.json"), []byte(`{"checkpoint_id":"bbbbbbbbbbbb"}`), 0o644))
-	run(setupDir, "add", ".")
-	run(setupDir, "commit", "-m", "Checkpoint: bbbbbbbbbbbb")
-	run(setupDir, "push", "origin", paths.MetadataBranchName)
-
-	run(cloneDir, "fetch", "--depth=1", "origin", "+refs/heads/"+paths.MetadataBranchName+":refs/remotes/origin/"+paths.MetadataBranchName)
-
+	cloneDir := cloneWithShallowHiddenMergeBase(t)
 	repo, err := git.PlainOpen(cloneDir)
 	require.NoError(t, err)
-	localRefName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
-	localBefore, err := repo.Reference(localRefName, true)
+	localBefore, err := repo.Reference(metadataLocalRef(), true)
 	require.NoError(t, err)
-	targetRef, err := repo.Reference(plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName), true)
+	targetRef, err := repo.Reference(metadataOriginRemoteRef(), true)
 	require.NoError(t, err)
 
-	_, mergeBaseErr := getMergeBase(ctx, cloneDir, localBefore.Hash().String(), targetRef.Hash().String())
-	require.ErrorIs(t, mergeBaseErr, errNoMergeBase)
+	err = SafelyAdvanceLocalRef(context.Background(), repo, metadataLocalRef(), targetRef.Hash())
 
-	err = SafelyAdvanceLocalRef(ctx, repo, localRefName, targetRef.Hash())
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "reachable shallow history")
-	assert.Contains(t, err.Error(), "entire doctor")
-	assert.Contains(t, err.Error(), "git fetch --unshallow")
-
-	localAfter, err := repo.Reference(localRefName, true)
+	requireShallowRefusal(t, err)
+	localAfter, err := repo.Reference(metadataLocalRef(), true)
 	require.NoError(t, err)
 	assert.Equal(t, localBefore.Hash(), localAfter.Hash())
 }
@@ -1791,5 +1752,41 @@ func TestEnsureRedactionConfigured_NarrowedScanners(t *testing.T) {
 	}
 	if !info2.ModTime().Equal(info.ModTime()) {
 		t.Fatal("marker rewritten on re-run; narrowed-coverage notice re-emitted")
+	}
+}
+
+func TestPIIConfigFromSettings_CategoryDefaults(t *testing.T) {
+	t.Parallel()
+	off := false
+	on := true
+	tests := []struct {
+		name string
+		pii  settings.PIISettings
+		want map[redact.PIICategory]bool
+	}{
+		{
+			name: "unset categories use defaults",
+			pii:  settings.PIISettings{Enabled: true},
+			want: map[redact.PIICategory]bool{redact.PIIEmail: true, redact.PIIPhone: true, redact.PIIAddress: false, redact.PIIIP: true},
+		},
+		{
+			name: "explicit values win",
+			pii:  settings.PIISettings{Enabled: true, Email: &off, Phone: &off, Address: &on, IP: &off},
+			want: map[redact.PIICategory]bool{redact.PIIEmail: false, redact.PIIPhone: false, redact.PIIAddress: true, redact.PIIIP: false},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := piiConfigFromSettings(&tt.pii, nil)
+			if !got.Enabled {
+				t.Error("Enabled = false, want true")
+			}
+			for category, want := range tt.want {
+				if got.Categories[category] != want {
+					t.Errorf("Categories[%s] = %v, want %v", category, got.Categories[category], want)
+				}
+			}
+		})
 	}
 }

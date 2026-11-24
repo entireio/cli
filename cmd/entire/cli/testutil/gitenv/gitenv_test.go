@@ -2,6 +2,7 @@ package gitenv
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -50,5 +51,30 @@ func TestUnsetGlobalConfig_LeavesTheVariableAbsent(t *testing.T) {
 	// later test in this process inherits the hole this one punched.
 	if value, ok := os.LookupEnv("GIT_CONFIG_GLOBAL"); !ok || value != emptyConfigPath() {
 		t.Fatalf("GIT_CONFIG_GLOBAL = %q (set=%t) after cleanup, want %q", value, ok, emptyConfigPath())
+	}
+}
+
+// TestIsolation_RemovesLegacyGitConfig pins that GIT_CONFIG, which the
+// GIT_CONFIG_ prefix does not match, is removed rather than emptied (see
+// legacyConfigEnv) and restored afterwards.
+func TestIsolation_RemovesLegacyGitConfig(t *testing.T) {
+	// Cannot t.Parallel(): mutates GIT_CONFIG process-wide via t.Setenv.
+	t.Setenv("GIT_CONFIG", "/inherited/gitconfig")
+
+	for _, e := range Isolated() {
+		if strings.HasPrefix(e, "GIT_CONFIG=") {
+			t.Errorf("Isolated() kept %q", e)
+		}
+	}
+
+	t.Run("IsolateProcess", func(t *testing.T) {
+		IsolateProcess(t)
+		if value, ok := os.LookupEnv("GIT_CONFIG"); ok {
+			t.Fatalf("GIT_CONFIG = %q, want absent", value)
+		}
+	})
+
+	if value := os.Getenv("GIT_CONFIG"); value != "/inherited/gitconfig" {
+		t.Fatalf("GIT_CONFIG = %q after cleanup, want the inherited value", value)
 	}
 }

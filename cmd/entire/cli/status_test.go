@@ -1939,7 +1939,47 @@ func TestRunStatusJSON_SecretScanners(t *testing.T) {
 func TestRunStatusJSON_HooksOutdated(t *testing.T) {
 	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
+	writeOutdatedClaudeHooks(t)
 
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	var result statusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if !slices.Contains(result.HooksOutdated, "claude-code") {
+		t.Errorf("Expected hooks_outdated to contain 'claude-code', got %v", result.HooksOutdated)
+	}
+}
+
+// TestRunStatus_HooksOutdatedPointsToDoctor: `entire enable --force` rebuilds
+// every Entire hook and drops the timeouts and fields the user set on them, while
+// doctor repairs what it can in place and names the fix for the rest.
+func TestRunStatus_HooksOutdatedPointsToDoctor(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	writeOutdatedClaudeHooks(t)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "hooks out of date · run 'entire doctor'") {
+		t.Errorf("status output does not point outdated hooks to doctor:\n%s", out)
+	}
+	if strings.Contains(out, "enable --force") {
+		t.Errorf("status output suggests enable --force:\n%s", out)
+	}
+}
+
+// writeOutdatedClaudeHooks writes Claude Code hooks under the retired
+// Task/TodoWrite matchers.
+func writeOutdatedClaudeHooks(t *testing.T) {
+	t.Helper()
 	if err := os.MkdirAll(".claude", 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
@@ -1955,19 +1995,6 @@ func TestRunStatusJSON_HooksOutdated(t *testing.T) {
 }`
 	if err := os.WriteFile(".claude/settings.json", []byte(stale), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
-	}
-
-	var stdout bytes.Buffer
-	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
-		t.Fatalf("runStatus() error = %v", err)
-	}
-
-	var result statusJSON
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		t.Fatalf("json.Unmarshal() error = %v", err)
-	}
-	if !slices.Contains(result.HooksOutdated, "claude-code") {
-		t.Errorf("Expected hooks_outdated to contain 'claude-code', got %v", result.HooksOutdated)
 	}
 }
 
@@ -2649,7 +2676,9 @@ func TestRunStatus_CheckpointPushDisabledDestinations(t *testing.T) {
 				queue := checkpoint.NewPushQueue(filepath.Join(cwd, ".git"))
 				if backend == "git-refs" {
 					for _, ref := range []string{"refs/entire/checkpoints/aa/bb0000000001", "refs/entire/checkpoints/aa/bb0000000002"} {
-						if err := queue.Enqueue(plumbing.ReferenceName(ref)); err != nil {
+						// Only refs that exist locally count: the push drops the rest.
+						testutil.GitUpdateRef(t, ".", ref, head)
+						if err := queue.EnqueueEntry(checkpoint.PushQueueEntry{Ref: plumbing.ReferenceName(ref)}); err != nil {
 							t.Fatal(err)
 						}
 					}
@@ -2998,6 +3027,31 @@ func TestRunStatus_CheckpointSyncFailClosed(t *testing.T) {
 	}
 }
 
+// TestRunStatus_CheckpointSyncUnroutableStore: a checkpoint_remote the
+// developer owns (local settings) but no URL can be built for is withheld by
+// pre-push, so status must say checkpoints are not syncing rather than name
+// the elected remote as their destination.
+func TestRunStatus_CheckpointSyncUnroutableStore(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled": true}`)
+	writeLocalSettings(t, `{"strategy_options": {"checkpoint_remote": {"provider": "entire", "repo": "org/checkpoints"}}}`)
+	testutil.AddRemote(t, ".", originRemoteName, "https://github.com/org/repo.git")
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Checkpoints NOT syncing:") || !strings.Contains(out, `provider "entire"`) {
+		t.Errorf("expected not-syncing line naming the provider, got:\n%s", out)
+	}
+	if strings.Contains(out, "Checkpoints sync to:") {
+		t.Errorf("a withheld store must not report a destination, got:\n%s", out)
+	}
+}
+
 func TestRunStatus_CheckpointSyncHiddenWhenNoRemotes(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 	setupTestRepo(t)
@@ -3048,6 +3102,9 @@ func TestRunStatus_CheckpointSyncCounter_GitBranchAhead(t *testing.T) {
 	out := stdout.String()
 	if !strings.Contains(out, "2 checkpoints not yet on origin — they sync with your next 'git push origin'") {
 		t.Errorf("expected unpushed counter line, got:\n%s", out)
+	}
+	if strings.Contains(out, "checkpoint list --outgoing") {
+		t.Errorf("git-branch: --outgoing is git-refs only, so the counter must not point at it, got:\n%s", out)
 	}
 }
 
@@ -3106,18 +3163,20 @@ func TestRunStatus_CheckpointSyncDedicated_GitRefs_QueueCounter(t *testing.T) {
 	setupTestRepo(t)
 	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}, "checkpoints": {"primary": {"type": "git-refs"}}}`)
 	testutil.AddRemote(t, ".", originRemoteName, "https://github.com/org/repo.git")
-	checkpointSyncTestCommit(t, "a.txt", "one")
+	head := checkpointSyncTestCommit(t, "a.txt", "one")
+	testutil.GitUpdateRef(t, ".", "refs/entire/checkpoints/aa/bb0000000001", head)
+	testutil.GitUpdateRef(t, ".", "refs/entire/checkpoints/aa/bb0000000002", head)
 
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("Getwd: %v", err)
 	}
 	queue := checkpoint.NewPushQueue(filepath.Join(cwd, ".git"))
-	if err := queue.Enqueue("refs/entire/checkpoints/aa/bb0000000001"); err != nil {
-		t.Fatalf("Enqueue: %v", err)
+	if err := queue.EnqueueEntry(checkpoint.PushQueueEntry{Ref: "refs/entire/checkpoints/aa/bb0000000001"}); err != nil {
+		t.Fatalf("EnqueueEntry: %v", err)
 	}
-	if err := queue.Enqueue("refs/entire/checkpoints/aa/bb0000000002"); err != nil {
-		t.Fatalf("Enqueue: %v", err)
+	if err := queue.EnqueueEntry(checkpoint.PushQueueEntry{Ref: "refs/entire/checkpoints/aa/bb0000000002"}); err != nil {
+		t.Fatalf("EnqueueEntry: %v", err)
 	}
 
 	var stdout bytes.Buffer
@@ -3130,8 +3189,8 @@ func TestRunStatus_CheckpointSyncDedicated_GitRefs_QueueCounter(t *testing.T) {
 		t.Errorf("expected dedicated destination line, got:\n%s", out)
 	}
 	// Dedicated mode has no remote name to phrase the counter around.
-	if !strings.Contains(out, "2 checkpoints not yet pushed") {
-		t.Errorf("expected queue-length counter without a remote name, got:\n%s", out)
+	if !strings.Contains(out, "2 checkpoints not yet pushed · see 'entire checkpoint list --outgoing'") {
+		t.Errorf("expected queue counter without a remote name, pointing at the listing, got:\n%s", out)
 	}
 	if strings.Contains(out, "not yet on") {
 		t.Errorf("dedicated counter must not name a git remote, got:\n%s", out)

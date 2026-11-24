@@ -87,7 +87,7 @@ func TestHandleLifecycleSubagentEnd_DropsIgnoredFiles(t *testing.T) {
 	transcriptPath := filepath.Join(dir, "transcript.jsonl")
 	require.NoError(t, os.WriteFile(transcriptPath, []byte(`{"type":"user","message":"test"}`+"\n"), 0o600))
 
-	require.NoError(t, CapturePreTaskState(ctx, toolUseID))
+	require.NoError(t, CapturePreTaskState(ctx, "", toolUseID))
 	writeAgentFiles(t, dir)
 	require.NoError(t, handleLifecycleSubagentEnd(ctx, ag, &agent.Event{
 		Type: agent.SubagentEnd, SessionID: sessionID, SessionRef: transcriptPath, ToolUseID: toolUseID, Timestamp: time.Now(),
@@ -191,7 +191,7 @@ func TestHandleLifecycleSubagentEnd_DropsSubmoduleGitlink(t *testing.T) {
 	transcriptPath := filepath.Join(dir, "transcript.jsonl")
 	require.NoError(t, os.WriteFile(transcriptPath, []byte(`{"type":"user","message":"test"}`+"\n"), 0o600))
 
-	require.NoError(t, CapturePreTaskState(ctx, toolUseID))
+	require.NoError(t, CapturePreTaskState(ctx, "", toolUseID))
 	testutil.WriteFile(t, sub, "lib.txt", "v2\n")
 	testutil.RunGit(t, sub, "-c", "user.useConfigOnly=true", "commit", "-q", "-am", "lib v2") // useConfigOnly: never fall back to a host-derived identity
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "agent.txt"), []byte("agent"), 0o600))

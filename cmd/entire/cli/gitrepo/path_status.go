@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strings"
 )
 
 // PathStatuses returns the porcelain v1 status code ("XY", e.g. " M", "A ",
@@ -32,15 +33,18 @@ func PathStatuses(ctx context.Context, repoRoot string, paths []string) (map[str
 		if err != nil {
 			return found, fmt.Errorf("git status: %w", err)
 		}
-		parsePorcelainV1Z(out, found)
+		ParsePorcelainV1Z(out, found)
 	}
 	return found, nil
 }
 
-// parsePorcelainV1Z adds each "XY <path>" record of NUL-terminated porcelain v1
-// output to found. A rename or copy record is followed by its origin path,
-// which is skipped (--no-renames should make that unreachable).
-func parsePorcelainV1Z(out []byte, found map[string]string) {
+// ParsePorcelainV1Z adds each "XY <path>" record of `git status
+// --porcelain=v1 -z` output to found, which must be non-nil, keyed by path
+// with its "XY" code. Records shorter than "XY <path>" are ignored. A rename
+// or copy record is followed by its origin path, which is not added; the
+// origins of renames are returned, since those paths no longer hold the file
+// git tracked there.
+func ParsePorcelainV1Z(out []byte, found map[string]string) (renamedFrom []string) {
 	records := bytes.Split(out, []byte{0})
 	for i := 0; i < len(records); i++ {
 		record := records[i]
@@ -49,8 +53,12 @@ func parsePorcelainV1Z(out []byte, found map[string]string) {
 		}
 		code := string(record[:2])
 		found[string(record[3:])] = code
-		if code[0] == 'R' || code[0] == 'C' {
-			i++ // origin path
+		if strings.ContainsAny(code, "RC") && i+1 < len(records) {
+			i++
+			if strings.Contains(code, "R") && len(records[i]) > 0 {
+				renamedFrom = append(renamedFrom, string(records[i]))
+			}
 		}
 	}
+	return renamedFrom
 }

@@ -33,6 +33,7 @@ func TestRepoCommands_TakePathsOnly(t *testing.T) {
 	}{
 		{name: "repo delete", newCmd: newRepoDeleteCmd, args: []string{"--force"}},
 		{name: "repo edit", newCmd: newRepoEditCmd, args: []string{"--visibility", "private"}},
+		{name: "repo default-branch", newCmd: newRepoDefaultBranchCmd, args: []string{"main"}},
 		{name: "repo visibility get", newCmd: newRepoVisibilityGetCmd},
 		{name: "repo protection list", newCmd: newRepoProtectionListCmd, mirror: true},
 		{name: "repo protection add", newCmd: newRepoProtectionAddCmd, args: []string{"main"}, mirror: true},

@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"golang.org/x/term"
+
+	"github.com/entireio/cli/cmd/entire/cli/envflag"
 )
 
 // EnvTestTTY is the env-var name for the force-interactive test override.
@@ -30,7 +32,7 @@ const EnvTestTTY = "ENTIRE_TEST_TTY"
 //     don't hang on developer terminals that have a real controlling terminal.
 //     Subprocess tests must spawn via execx.NonInteractive (or set EnvTestTTY).
 //  3. Agent sentinels — vendor-set by agent subprocesses.
-//  4. CI=<non-empty-non-false> — de-facto CI convention.
+//  4. CI set and not "0"/"false" (envflag.Truthy) — de-facto CI convention.
 //  5. A Windows console with no window (a desktop app's hidden shell): see
 //     console_windows.go.
 //  6. Platform-specific controlling-terminal probe, plus its terminal mode on
@@ -50,9 +52,9 @@ func CanPromptInteractively() bool {
 	// CI=<non-empty> is the de-facto CI-provider convention (GitHub Actions,
 	// CircleCI, GitLab, Travis, Buildkite). Self-hosted runners expose /dev/tty,
 	// so the probe below isn't enough — an interactive prompt on CI hangs.
-	// CI=false is the `is-ci` escape hatch for developers who need to override
-	// an inherited value.
-	if v := os.Getenv("CI"); v != "" && v != "false" {
+	// CI=false (or CI=0) is the `is-ci` escape hatch for developers who need
+	// to override an inherited value.
+	if envflag.Enabled("CI") {
 		return false
 	}
 	// A Windows console without a window opens and reads like any other, but

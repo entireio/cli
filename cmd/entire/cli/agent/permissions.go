@@ -129,8 +129,7 @@ type PermissionConfigOwner interface {
 // AsPermissionConfigOwner returns ag as a PermissionConfigOwner when it keeps a
 // permissions block Entire may have written into.
 func AsPermissionConfigOwner(ag Agent) (PermissionConfigOwner, bool) {
-	owner, ok := ag.(PermissionConfigOwner)
-	return owner, ok
+	return builtinCapability[PermissionConfigOwner](ag)
 }
 
 // HasRetiredMetadataDenyRule reports whether ag's config still carries the

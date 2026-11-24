@@ -13,20 +13,22 @@ import (
 // bearer for control-plane and git data-plane requests. This is the CI /
 // workload-identity path — a runner injects a short-lived login or sa-session
 // JWT and clones without an interactive `entire login`. `entire auth token`
-// prints the value verbatim.
+// prints the value verbatim. A service account secret (ent_svc_) is the one
+// exception: ResolveEnvToken exchanges it, and the exchanged JWT is the bearer.
 const EnvTokenVar = "ENTIRE_TOKEN"
 
 // ParseEnvToken is the single owner of the ENTIRE_TOKEN validation sequence
 // shared by coreapi.New's bypass and `entire auth status`: it trims the raw
-// value, enforces fail-closed that it is non-blank, and derives the control-
+// value, enforces fail-closed that it is non-blank, exchanges a service account
+// secret through ResolveEnvToken, and derives the control-
 // plane core origin from its aud via CoreURLFromEnvToken. Callers pass the raw
 // env value (presence is the caller's LookupEnv decision) and send the returned
 // token verbatim as the bearer to coreURL. A blank or aud-less value is an
 // error, never a silent fall-back to context resolution.
 func ParseEnvToken(raw string) (coreURL, token string, err error) {
-	token = strings.TrimSpace(raw)
-	if token == "" {
-		return "", "", fmt.Errorf("%s is set but blank", EnvTokenVar)
+	token, err = ResolveEnvToken(raw)
+	if err != nil {
+		return "", "", err
 	}
 	coreURL, err = CoreURLFromEnvToken(token)
 	if err != nil {

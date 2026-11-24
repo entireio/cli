@@ -38,7 +38,6 @@ func TestProjectTrailRepoAuthErrorsAreActionable(t *testing.T) {
 				repo string
 			}{
 				{[]string{"approve", "42", "--repo", "gh/acme/foreign"}, "foreign"},
-				{[]string{"request-changes", "42", "--repo", "gh/acme/foreign", "-m", "Fix it"}, "foreign"},
 				{[]string{"approvals", "42", "--repo", "gh/acme/foreign"}, "foreign"},
 				{[]string{"finding", "list", "42", "--repo", "gh/acme/foreign"}, "foreign"},
 				{[]string{"watch", "42", "--repo", "gh/acme/foreign"}, "foreign"},
@@ -138,11 +137,11 @@ func TestProjectTrailEnablementCacheOnlyTracksLocalRepository(t *testing.T) {
 					Parent: &api.TrailParentReference{ID: projectTrailTestID, Number: 42, ProjectID: projectTrailTestProject,
 						Host: "gh", Project: "acme", Path: projectTrailTestPath, Jurisdiction: "eu", PrimaryProcessingCell: "project-cell"}}
 				switch r.URL.Path {
-				case "/api/v1/trails/gh/acme/widget":
+				case "/api/v1/repos/repo-id/changes":
 					assert.NoError(t, json.NewEncoder(w).Encode(api.TrailListResponse{Trails: []api.TrailResource{work}}))
-				case "/api/v1/trails/gh/acme/widget/7", "/api/v1/trails/gh/acme/other/7":
+				case "/api/v1/repos/repo-id/changes/7":
 					assert.NoError(t, json.NewEncoder(w).Encode(work))
-				case "/api/v1/trails/gh/acme/widget/7/approvals", "/api/v1/trails/gh/acme/other/7/approvals":
+				case "/api/v1/repos/repo-id/changes/7/approvals":
 					assert.NoError(t, json.NewEncoder(w).Encode(api.TrailApprovalsResponse{}))
 				default:
 					t.Errorf("unexpected repository request: %s %s", r.Method, r.URL.Path)

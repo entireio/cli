@@ -406,17 +406,20 @@ func TestDetectAgentCaller(t *testing.T) {
 			t.Setenv(name, "")
 		}
 	}
+	// session is DetectAgentSession's answer; the trust gate's detectAgentCaller
+	// additionally holds GIT_TERMINAL_PROMPT=0 callers, which name no agent.
 	tests := []struct {
-		env  map[string]string
-		want string
+		env           map[string]string
+		want, session string
 	}{
-		{nil, ""},
-		{map[string]string{"CLAUDECODE": "1"}, "a Claude Code session"},
-		{map[string]string{"ANTIGRAVITY_AGENT": "1"}, "an Antigravity session"},
-		{map[string]string{"FACTORY_ENV": "production"}, "a Factory Droid session"},
-		{map[string]string{"AI_AGENT": "devin@1"}, "a devin@1 session (AI_AGENT)"},
-		{map[string]string{"GIT_TERMINAL_PROMPT": "0"}, "an agent or CI (GIT_TERMINAL_PROMPT=0)"},
-		{map[string]string{"GIT_TERMINAL_PROMPT": "1"}, ""},
+		{nil, "", ""},
+		{map[string]string{"CLAUDECODE": "1"}, "a Claude Code session", "a Claude Code session"},
+		{map[string]string{"ANTIGRAVITY_AGENT": "1"}, "an Antigravity session", "an Antigravity session"},
+		{map[string]string{"FACTORY_ENV": "production"}, "a Factory Droid session", "a Factory Droid session"},
+		{map[string]string{"AI_AGENT": "devin@1"}, "a devin@1 session (AI_AGENT)", "a devin@1 session (AI_AGENT)"},
+		{map[string]string{"GIT_TERMINAL_PROMPT": "0"}, "an agent or CI (GIT_TERMINAL_PROMPT=0)", ""},
+		{map[string]string{"GIT_TERMINAL_PROMPT": "1"}, "", ""},
+		{map[string]string{"GIT_TERMINAL_PROMPT": "0", "CLAUDECODE": "1"}, "a Claude Code session", "a Claude Code session"},
 	}
 	for _, tt := range tests {
 		clearEnv()
@@ -425,6 +428,9 @@ func TestDetectAgentCaller(t *testing.T) {
 		}
 		if got := detectAgentCaller(); got != tt.want {
 			t.Errorf("detectAgentCaller() with %v = %q, want %q", tt.env, got, tt.want)
+		}
+		if got := DetectAgentSession(); got != tt.session {
+			t.Errorf("DetectAgentSession() with %v = %q, want %q", tt.env, got, tt.session)
 		}
 	}
 }

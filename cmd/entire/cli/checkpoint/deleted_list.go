@@ -68,7 +68,9 @@ func DeletedCheckpointsForRepo(repo *git.Repository) (*DeletedCheckpoints, error
 
 // LoadDeletedCheckpoints reads the list for the repository ctx resolves to.
 // Callers on hook paths treat an error as "nothing deleted": the list only
-// narrows what a hook writes, so failing open keeps the hook working.
+// narrows what a hook writes, so failing open keeps the hook working. The
+// exception is condensation copying a pre-switch checkpoint from v1 into its
+// own ref: that path fails closed, so a deleted checkpoint cannot come back.
 func LoadDeletedCheckpoints(ctx context.Context) (DeletedCheckpointSet, error) {
 	dir, err := gitdir.CommonDir(ctx)
 	if err != nil {
@@ -77,7 +79,10 @@ func LoadDeletedCheckpoints(ctx context.Context) (DeletedCheckpointSet, error) {
 	return NewDeletedCheckpoints(dir).Load()
 }
 
-func loadDeletedForRepo(repo *git.Repository) (DeletedCheckpointSet, error) {
+// LoadDeletedForRepo returns the deleted-checkpoints list in repo's git common
+// dir. Unlike LoadDeletedCheckpoints, which resolves the common dir from ctx,
+// it works from an opened repository.
+func LoadDeletedForRepo(repo *git.Repository) (DeletedCheckpointSet, error) {
 	list, err := DeletedCheckpointsForRepo(repo)
 	if err != nil {
 		return nil, err

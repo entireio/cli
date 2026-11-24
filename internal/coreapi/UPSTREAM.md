@@ -60,9 +60,12 @@ by `TestListProjectRepos_UnknownEnumValuesPassThrough`,
 `TestListOrgMembers_UnknownEnumValuesPassThrough` in `client_test.go`.
 
 The detach result is the same shape: `entire repo mirror detach` displays each
-`DetachPrecondition.precondition` slug, each `DetachAccessEntry`'s `source` and
-`subjectType`, and `DetachRepoResult.status` and `RepoDetachState.status`, and the server documents both the
-precondition list and the status set as growing. Locked in by
+`DetachPrecondition.precondition` slug, and `DetachRepoResult.status` and
+`RepoDetachState.status`, and the server documents both the
+precondition list and the status set as growing. The CLI no longer reads
+`DetachAccessEntry`, but its `source` and `subjectType` stay loosened while
+core still sends `access`: a new value would otherwise fail the whole result.
+Locked in by
 `TestDetachRepo_UnknownEnumValuesPassThrough` and
 `TestGetRepoDetach_UnknownStatusPassesThrough`.
 Retire the allowlist entries as upstream loosens the corresponding fields.
@@ -100,6 +103,10 @@ consumer: the consolidated index is what `resolveRepoCellTarget` routes with
 and what `search`, `repo mirror` and the dispatch wizard page through, so a
 decode failure there takes out cell routing and search together rather than
 one command.
+
+`DetachRepoResult.access` is on the same list for the opposite reason: core
+drops the field, and the CLI no longer reads it. Locked in by
+`TestDetachRepo_UnsentAccessDecodes`.
 
 ## 2c. Nullable objects are typed as the object alone
 
@@ -142,6 +149,80 @@ shape; a device-code or authorize endpoint added upstream would, and it is
 the only failure mode here that would not announce itself (a requirement
 mixing `oauth2` with `bearerAuth` survives whole and makes ogen abort at
 generate time on the now-dangling scheme).
+
+## 4. Hand-spliced ahead of a full refresh: ENT-3417 sync block and resync
+
+**Symptom:** the control plane has moved well past the vendored spec (new
+security schemes, dozens of new operations), and a full `curl` refresh no
+longer compiles without unrelated client work. `core.openapi.json` carries
+the ENT-3417 contract spliced in from the live spec: `MirrorSyncBlock`,
+`Mirror.syncBlock`, and `POST /mirrors/resync` with its two bodies.
+
+**Fix upstream:** nothing — the pieces are verbatim from the published spec.
+The next full refresh carries them on its own, and this entry goes.
+
+`PUT /repos/{repoId}/default-branch` (`setDefaultBranch`) and its two bodies
+(`SetDefaultBranchInputBody`, `SetDefaultBranchOutputBody`) are spliced the
+same way, verbatim from the published spec (entiredb#5136).
+
+`GET /project-resolver/{forge_prefix}/{project}` (`resolveProject`) replaces
+`GET /projects/resolve/{host}/{project}`, verbatim from the published spec
+except that its `automationToken` security alternative is dropped: the vendored
+spec does not define that scheme yet, and ogen aborts on a dangling one. Core
+still serves the old path.
+
+`CreateServiceAccountInputBody`, `ServiceAccount`, `ServiceAccountWithGrants`
+and `GET /service-accounts` are spliced verbatim from the published spec. They
+carry `project_id`: service accounts belong to a project, and `orgId` is
+deprecated and optional.
+
+`OIDCProvider` (`name`, `label`, `docs_url`, `self_serve`, `attributes`) and
+`OIDCProviderAttribute` are written by hand from `api/corev1/identity.go`
+(https://entire.com/gh/entirehq/-/trails/23562, entiredb#5327). That change is
+merged and prod US serves these fields. Every new field is optional, so a core
+that predates them still decodes. Replace both schemas with the published ones
+at the next spec refresh.
+
+`CreateProjectInputBody.cell` is spliced from the entiredb change in
+https://entire.com/gh/entirehq/-/trails/23479. A core without it ignores the
+field and assigns the default cell, so `project create` prints the cell the
+server chose.
+
+The three add operations, `POST /orgs/{orgId}/members` (`addOrgMember`),
+`POST /projects/{projectId}/grants` (`grantProjectAccess`) and
+`POST /repos/{repoId}/grants` (`grantRepoAccess`), are spliced *ahead* of the
+deployed spec from the ENT-2652 branch of entiredb#5546 at
+`77278396ace5e41f97e8955d21fcbc39ca63850d`: the whole `post`
+operation of each, the `allow_invitation` property of `AddOrgMemberInputBody`
+and `GrantAccessBody`, and the new `AccountInvited` schema (the 202 body). The
+421 responses reference `JurisdictionRedirectError`, which the deployed spec
+already has, so it is copied verbatim. Every piece is the branch's generated
+`/api/v1/openapi.json`, not hand-written. Core answers the old 201 to a request
+that carries `allow_invitation`, so the client works on either side of the
+deploy. Once entiredb#5546 ships, a normal refresh reproduces these parts; drop
+this paragraph then.
+
+`GET /projects/{projectId}/invitations` (`listProjectInvitations`),
+`DELETE /projects/{projectId}/invitations/{id}` (`revokeProjectInvitation`),
+`GET /repos/{repoId}/invitations` (`listRepoInvitations`) and
+`DELETE /repos/{repoId}/invitations/{id}` (`revokeRepoInvitation`), with
+`ListResourceInvitationsOutputBody` and `ResourceInvitation`, are spliced
+verbatim from the published spec for `project invite` and `repo invite`. So is
+its `Invitation`, which makes `email` optional and adds `inviteeAccountId` and
+`inviteeIdentity`: Core lists account-targeted invitations with no email, and
+the older schema required one, so `org invite list` failed to decode them. The
+create operations on those two paths are not spliced; the CLI does not call
+them. A normal refresh carries all of it.
+
+The legacy Buildkite routes are spliced *out* the same way. Core no longer
+serves them (entiredb#4868, #4982). The splice removes the seven
+`/orgs/{orgId}/ci/buildkite/...` operations and
+`POST /repos/{repoId}/ci-webhooks` (`createRepoCIWebhook`). It also removes the
+schemas that only those operations referenced. The CLI never called them.
+
+**Workaround:** none in `normalize.go` beyond the `ResyncMirrorOutputBody.status`
+enum loosening. entiredb#4961 is on main and in prod, so any refresh from a
+current core keeps the three schemas and the route.
 
 <!-- Resolved upstream and removed:
   - Nullable arrays (`"type": ["array","null"]`) — entiredb now emits

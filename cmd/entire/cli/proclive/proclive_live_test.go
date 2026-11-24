@@ -191,3 +191,26 @@ func TestCurrentAncestry_DepthAndGuards(t *testing.T) {
 		t.Fatalf("the chain must start at the parent, got %+v", chain)
 	}
 }
+
+func TestCurrentAncestry_ExcludesALiveNonAncestor(t *testing.T) {
+	t.Parallel()
+	ancestry, ok := CurrentAncestry()
+	if !ok {
+		t.Fatal("CurrentAncestry should resolve on a supported platform")
+	}
+	if !ancestry.Complete() {
+		t.Fatalf("a test process's walk should reach init, chain: %+v", ancestry.Chain())
+	}
+	_, child := startSleeper(t)
+	child.Host = ancestry.host
+	if !ancestry.Excludes(child) {
+		t.Error("a child process is not an ancestor and must be excluded")
+	}
+	parent, ok := IdentityOf(os.Getppid())
+	if !ok {
+		t.Fatal("IdentityOf(parent) should resolve")
+	}
+	if ancestry.Excludes(parent) {
+		t.Error("the parent is an ancestor and must not be excluded")
+	}
+}

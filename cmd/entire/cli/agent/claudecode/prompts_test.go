@@ -13,7 +13,7 @@ import (
 // realTranscriptFixture is a real Claude Code session transcript shared with
 // the compactor tests: string prompts, tool_result user entries, assistant
 // turns, and "[Request interrupted by user]" markers.
-const realTranscriptFixture = "../../transcript/compact/testdata/claude_full2.jsonl"
+const realTranscriptFixture = "../../../../../transcript/testdata/claude_full2.jsonl"
 
 func TestExtractPromptsFromTranscript_RealTranscript(t *testing.T) {
 	t.Parallel()

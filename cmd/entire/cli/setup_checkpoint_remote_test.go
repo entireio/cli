@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -320,38 +321,97 @@ func TestEnableCheckpointPushRemote_ExplicitSameLocalDoesNotWrite(t *testing.T) 
 	require.Equal(t, []byte(local), after) //nolint:testifylint // Idempotence must preserve bytes and formatting, not merely equivalent JSON.
 }
 
-// A healthy destination nobody asked about is not reported, so an ordinary
-// enable ends at "Ready."; a broken one is reported on every run; and "No
-// checkpoint destination settings changed." appears only when a change was
-// asked for and turned out to be a no-op.
+// Every successful enable ends by naming where checkpoints go, then saying
+// what they contain and that redaction is best effort. A destination that
+// cannot be resolved is reported instead, and the notice follows only when a
+// dedicated checkpoint_remote still receives uploads. "No checkpoint
+// destination settings changed." appears only when a change was asked for and
+// turned out to be a no-op.
 func TestEnableCheckpointPushRemote_Report(t *testing.T) {
-	const dedicatedURL = "https://github.com/org/checkpoints.git"
+	const (
+		dedicatedURL = "https://github.com/org/checkpoints.git"
+		uploadsTo    = "Checkpoints will be uploaded when you push to origin.\n"
+		privacy      = "  They contain your agent transcripts. If that repo is public, anyone can read them.\n" +
+			"  Secret redaction is best effort, not bulletproof. Review with `entire checkpoint explain`.\n" +
+			"  To stop uploads: `entire configure --local --skip-push-sessions`\n"
+		privateRepo = "  To use a separate private repo: `entire configure --local --checkpoint-remote github:<owner>/<repo>`\n"
+		redaction   = "  Secret redaction is best effort, not bulletproof. Review with `entire checkpoint explain`.\n"
+	)
 	for _, tc := range []struct {
-		name, config, want string
-		choice             enableCheckpointRemoteChoice
-		wantUnchangedLine  bool
+		name, config string
+		choice       enableCheckpointRemoteChoice
+		noRemote     bool
+		git          [][]string
+		setupErr     error
+		// exact makes want the whole expected output. Otherwise want is a
+		// substring, notice must end the output, an empty notice means no
+		// privacy notice may be printed at all, and each before line must
+		// print ahead of the destination line.
+		exact             bool
+		want, notice      string
+		before            []string
+		wantUnchangedLine bool
 	}{
-		{name: "ordinary untouched", config: `{"enabled":true}`},
-		{name: "ordinary offered", config: `{"enabled":true}`, choice: enableCheckpointRemoteChoice{offered: true}, want: "Keeping checkpoint destination: origin (automatic)"},
-		{name: "explicit already set", config: `{"enabled":true,"strategy_options":{"checkpoint_push_remote":"origin"}}`, choice: enableCheckpointRemoteChoice{name: "origin"}, want: "Keeping checkpoint destination: origin (configured)", wantUnchangedLine: true},
+		{name: "ordinary untouched", config: `{"enabled":true}`, exact: true, want: "\n" + uploadsTo + privacy + privateRepo},
+		{name: "ordinary offered", config: `{"enabled":true}`, choice: enableCheckpointRemoteChoice{offered: true}, want: "Keeping checkpoint destination: origin (automatic)", notice: uploadsTo + privacy + privateRepo},
+		{name: "explicit already set", config: `{"enabled":true,"strategy_options":{"checkpoint_push_remote":"origin"}}`, choice: enableCheckpointRemoteChoice{name: "origin"}, want: "Keeping checkpoint destination: origin (configured)", notice: uploadsTo + privacy + privateRepo, wantUnchangedLine: true},
+		{name: "offered with fan-out and an alternative", config: `{"enabled":true}`, choice: enableCheckpointRemoteChoice{offered: true},
+			git: [][]string{
+				{"remote", "set-url", "--add", "--push", "origin", "https://github.com/org/repo.git"},
+				{"remote", "set-url", "--add", "--push", "origin", "https://github.com/org/mirror.git"},
+				{"remote", "add", "fork", "https://github.com/me/repo.git"},
+			},
+			want: "Keeping checkpoint destination: origin (automatic)", notice: uploadsTo + privacy + privateRepo,
+			before: []string{`Remote "origin" pushes to 2 URLs:`, "To choose another destination for this clone"}},
 		{name: "invalid", config: `{"strategy_options":{"checkpoint_push_remote":"missing"}}`, want: "Checkpoint sync remains disabled:"},
-		{name: "dedicated untouched", config: `{"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"org/checkpoints"}}}`},
-		{name: "dedicated requested", config: `{"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"org/checkpoints"}}}`, choice: enableCheckpointRemoteChoice{dedicatedRequested: true}, want: dedicatedURL},
-		{name: "invalid with dedicated", config: `{"strategy_options":{"checkpoint_push_remote":"missing","checkpoint_remote":{"provider":"github","repo":"org/checkpoints"}}}`, want: "Dedicated checkpoint destination for pushes to origin: " + dedicatedURL},
+		{name: "dedicated untouched", config: `{"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"org/checkpoints"}}}`, exact: true, want: "\nCheckpoint uploads use the dedicated destination: " + dedicatedURL + ".\n" + privacy},
+		{name: "dedicated requested", config: `{"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"org/checkpoints"}}}`, choice: enableCheckpointRemoteChoice{dedicatedRequested: true}, want: dedicatedURL, notice: "Checkpoint uploads use the dedicated destination: " + dedicatedURL + ".\n" + privacy},
+		// The broken selection stops ordinary checkpoint sync, but pushes to
+		// origin still upload to the dedicated store, so the notice stays.
+		{name: "invalid with dedicated", config: `{"strategy_options":{"checkpoint_push_remote":"missing","checkpoint_remote":{"provider":"github","repo":"org/checkpoints"}}}`, want: "Dedicated checkpoint destination for pushes to origin: " + dedicatedURL, notice: "Dedicated checkpoint uploads can still proceed.\n" + privacy},
+		{name: "push disabled untouched", config: `{"enabled":true,"strategy_options":{"push_sessions":false}}`, exact: true, want: "\nCheckpoint uploads are off (push_sessions: false). Checkpoints stay in this clone.\n" + redaction},
+		{name: "push disabled requested", config: `{"enabled":true,"strategy_options":{"push_sessions":false,"checkpoint_push_remote":"origin"}}`, choice: enableCheckpointRemoteChoice{name: "origin"}, want: "Checkpoint pushing remains disabled.\n" + redaction, notice: redaction, wantUnchangedLine: true},
+		{name: "no remotes", config: `{"enabled":true}`, noRemote: true, exact: true, want: "\nNo Git remotes configured. Once you add one, checkpoints will be uploaded when you push to it.\n" + privacy + privateRepo},
+		// A named choice cannot reach either branch below today, but if one
+		// does, its unchanged line must not land after the notice.
+		{name: "no remotes with a named choice", config: `{"enabled":true}`, noRemote: true, choice: enableCheckpointRemoteChoice{name: "origin"}, want: "No checkpoint destination settings changed.", notice: "No Git remotes configured. Once you add one, checkpoints will be uploaded when you push to it.\n" + privacy + privateRepo, wantUnchangedLine: true},
+		{name: "invalid with dedicated and a named choice", config: `{"strategy_options":{"checkpoint_push_remote":"missing","checkpoint_remote":{"provider":"github","repo":"org/checkpoints"}}}`, choice: enableCheckpointRemoteChoice{name: "origin"}, want: "Dedicated checkpoint destination for pushes to origin: " + dedicatedURL, notice: "Dedicated checkpoint uploads can still proceed.\n" + privacy, wantUnchangedLine: true},
+		{name: "setup failed", config: `{"enabled":true}`, setupErr: errors.New("hooks failed"), exact: true, want: ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := setupTestRepo(t)
-			testutil.RunGit(t, dir, "remote", "add", "origin", "https://github.com/org/repo.git")
+			if !tc.noRemote {
+				testutil.RunGit(t, dir, "remote", "add", "origin", "https://github.com/org/repo.git")
+			}
+			for _, args := range tc.git {
+				testutil.RunGit(t, dir, args...)
+			}
 			writeSettings(t, tc.config)
 			var output bytes.Buffer
 			choice := tc.choice
-			choice.report(t.Context(), &output, nil)
-			if tc.want == "" {
-				require.Empty(t, output.String())
+			choice.report(t.Context(), &output, tc.setupErr)
+			if tc.exact {
+				require.Equal(t, tc.want, output.String())
 				return
 			}
 			require.Contains(t, output.String(), tc.want)
 			require.Equal(t, tc.wantUnchangedLine, strings.Contains(output.String(), "No checkpoint destination settings changed."))
+			if tc.notice == "" {
+				require.NotContains(t, output.String(), "best effort")
+			} else {
+				require.True(t, strings.HasSuffix(output.String(), tc.notice), "notice should end the output; got:\n%s", output.String())
+			}
+			for _, line := range tc.before {
+				require.Contains(t, output.String(), line)
+				require.Less(t, strings.Index(output.String(), line), strings.Index(output.String(), uploadsTo), "%q should precede the destination line; got:\n%s", line, output.String())
+			}
+			if strings.Contains(tc.name, "dedicated") || strings.Contains(tc.name, "push disabled") {
+				require.NotContains(t, output.String(), "--checkpoint-remote")
+			}
+			if strings.Contains(tc.name, "push disabled") {
+				require.NotContains(t, output.String(), "Checkpoint uploads are off")
+				require.NotContains(t, output.String(), "anyone can read them")
+			}
 			if tc.name == "invalid with dedicated" {
 				require.NotContains(t, output.String(), "sync remains disabled")
 			}

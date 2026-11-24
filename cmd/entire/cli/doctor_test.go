@@ -3,11 +3,14 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +19,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/antigravity"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
+	"github.com/entireio/cli/cmd/entire/cli/agent/factoryaidroid"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
@@ -1168,13 +1173,54 @@ func TestCheckHookDrift_ClaudeCodeWarnsWhenOutdated(t *testing.T) {
 
 	out := stdout.String()
 	require.Contains(t, out, "Claude Code hooks: OUT OF DATE")
-	require.Contains(t, out, "entire enable --force")
+	require.Contains(t, out, "Run `entire agent add claude-code` to update it.")
+}
+
+// TestCheckHookTimeouts_RestoresWhatEnableWrites — a Claude Code config from
+// before hook timeouts existed is repaired to exactly what `entire enable`
+// writes today, and a repaired config is left alone on the next run.
+func TestCheckHookTimeouts_RestoresWhatEnableWrites(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+
+	if _, err := (&claudecode.ClaudeCodeAgent{}).InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+	settingsPath := filepath.Join(dir, claudeDirName, claudecode.ClaudeSettingsFileName)
+	want, err := os.ReadFile(settingsPath)
+	require.NoError(t, err)
+
+	untimed := regexp.MustCompile(`,\s*"timeout": \d+`).ReplaceAll(want, nil)
+	require.NotEqual(t, want, untimed, "fixture should have had timeouts to strip")
+	require.NoError(t, os.WriteFile(settingsPath, untimed, 0o600))
+
+	cmd, stdout := newTestCmd(t)
+	checkHookDrift(cmd)
+	require.Contains(t, stdout.String(), "Claude Code hooks: OUT OF DATE")
+
+	cmd, stdout = newTestCmd(t)
+	checkHookTimeouts(cmd)
+	out := stdout.String()
+	require.Contains(t, out, "Claude Code hooks: MISSING TIMEOUTS")
+	require.Contains(t, out, "✓ Fixed: timeouts added (your own hooks and timeouts are untouched).")
+
+	got, err := os.ReadFile(settingsPath)
+	require.NoError(t, err)
+	require.Equal(t, string(want), string(got))
+
+	cmd, stdout = newTestCmd(t)
+	checkHookTimeouts(cmd)
+	require.Empty(t, stdout.String())
+
+	cmd, stdout = newTestCmd(t)
+	checkHookDrift(cmd)
+	require.Contains(t, stdout.String(), "Claude Code hook config: OK")
 }
 
 // TestCheckCodexHookTrust_FlagsStaleHooksFile — user enabled Codex on
 // an older release that didn't ship PostToolUse. Their hooks.json has
 // only the three legacy events. Doctor must surface the gap and tell
-// them to re-run `entire enable`.
+// them to run `entire agent add codex`.
 func TestCheckCodexHookTrust_FlagsStaleHooksFile(t *testing.T) {
 	dir := setupGitRepoForPhaseTest(t)
 	t.Chdir(dir)
@@ -1214,7 +1260,7 @@ trusted_hash = "sha256:ccc"
 	require.Contains(t, out, "Codex hooks: OUT OF DATE")
 	require.Contains(t, out, "- session_end")
 	require.Contains(t, out, "- post_tool_use")
-	require.Contains(t, out, "entire enable")
+	require.Contains(t, out, "Run `entire agent add codex` from this worktree")
 	// Trust stays quiet: every event the stale file actually declares is trusted,
 	// so only the out-of-date finding should fire.
 	require.NotContains(t, out, "Codex hook trust: REVIEW NEEDED")
@@ -1232,6 +1278,10 @@ func stubAgyOnPath(t *testing.T) {
 	t.Helper()
 	binDir := t.TempDir()
 	stub := filepath.Join(binDir, "agy")
+	if runtime.GOOS == "windows" {
+		// exec.LookPath on Windows finds only names with a PATHEXT extension.
+		stub += ".bat"
+	}
 	require.NoError(t, os.WriteFile(stub, []byte("#!/bin/sh\nexit 0\n"), 0o755))
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
@@ -1314,6 +1364,50 @@ func TestCheckAntigravityTitleTee_WarnsWhenNotConfigured(t *testing.T) {
 	require.Contains(t, out, "Antigravity title-tee: NOT CONFIGURED")
 	require.Contains(t, out, "token counts")
 	require.Contains(t, out, "entire agent add antigravity")
+}
+
+// TestCheckAntigravityTitleTee_WindowsWarnsWhenOutdated reports a title tee
+// an earlier version wrote on Windows, which still looks for `entire` in the
+// folder agy was opened in, and names the reinstall that rewrites it. The
+// title command is global, so the warning appears in a repository without
+// Antigravity hooks too. Without agy on PATH the install skips the title
+// command, so the warning would never clear and stays off.
+func TestCheckAntigravityTitleTee_WindowsWarnsWhenOutdated(t *testing.T) {
+	for _, agyOnPath := range []bool{true, false} {
+		t.Run("agy on PATH "+strconv.FormatBool(agyOnPath), func(t *testing.T) {
+			t.Cleanup(agent.SetWindowsHookProbeForTesting("windows", nil))
+			dir := setupGitRepoForPhaseTest(t)
+			// The check opens the worktree through the shared root registry,
+			// which keeps the directory open; Windows cannot remove it until
+			// that closes. Registered after t.TempDir, so it runs before the
+			// removal.
+			t.Cleanup(osroot.ResetShared)
+			t.Chdir(dir)
+			if agyOnPath {
+				stubAgyOnPath(t)
+			} else {
+				t.Setenv("PATH", t.TempDir())
+			}
+
+			cfgDir := filepath.Join(t.TempDir(), "agy")
+			require.NoError(t, os.MkdirAll(cfgDir, 0o750))
+			require.NoError(t, os.WriteFile(filepath.Join(cfgDir, "settings.json"),
+				[]byte(`{"title":{"type":"command","command":"entire hooks antigravity title-tee"}}`), 0o600))
+			t.Setenv("ENTIRE_ANTIGRAVITY_CONFIG_DIR", cfgDir)
+
+			cmd, stdout := newTestCmd(t)
+			checkAntigravityTitleTee(cmd)
+
+			out := stdout.String()
+			if !agyOnPath {
+				require.Empty(t, out)
+				return
+			}
+			require.Contains(t, out, "Antigravity title-tee: OUT OF DATE")
+			require.Contains(t, out, "In a repository that uses Antigravity, run `entire agent add antigravity`")
+			require.NotContains(t, out, "✓ Antigravity title-tee: OK")
+		})
+	}
 }
 
 // TestConfirmDoctorFix_CancelledContext verifies that a cancelled command
@@ -1585,7 +1679,7 @@ func TestCheckAgentDirSymlinks_ReportsIntermediateHookConfigDirs(t *testing.T) {
 		link   string
 	}{
 		{parent: ".pi", link: ".pi/extensions"},
-		{parent: ".opencode", link: ".opencode/plugins"},
+		{parent: ".opencode", link: ".opencode/plugin"},
 	} {
 		t.Run(tc.link, func(t *testing.T) {
 			dir := setupGitRepoForPhaseTest(t)
@@ -2034,14 +2128,14 @@ func TestCheckAntigravityHooksLoaded_ProbeIsOptIn(t *testing.T) {
 }
 
 // The zero-cost check that replaces the probe by default: an installed entry
-// that is not what this host needs (here a bare command with no wrapper at all)
-// is reported with the reinstall remedy, and a freshly installed one is not.
+// carrying the other host family's wrapper is reported with the reinstall
+// remedy, and a freshly installed one is not.
 func TestCheckAntigravityHooksLoaded_ReportsAnEntryStaleForThisHost(t *testing.T) {
 	dir := setupGitRepoForPhaseTest(t)
 	t.Chdir(dir)
 	t.Setenv("ENTIRE_ANTIGRAVITY_CONFIG_DIR", t.TempDir())
 	stubAgyOnPath(t)
-	writeAntigravityHooksForDoctor(t, dir)
+	writeAntigravityPreInvocationEntryForDoctor(t, dir, !agent.HookHostIsWindows())
 
 	cmd, stdout := newTestCmd(t)
 	checkAntigravityHooksLoaded(cmd)
@@ -2054,6 +2148,37 @@ func TestCheckAntigravityHooksLoaded_ReportsAnEntryStaleForThisHost(t *testing.T
 	cmd, stdout = newTestCmd(t)
 	checkAntigravityHooksLoaded(cmd)
 	require.NotContains(t, stdout.String(), "STALE FOR THIS HOST")
+}
+
+// An entry written for this host by an older release (no session-start) still
+// tracks here, so it must not be reported as stale for this host.
+func TestCheckAntigravityHooksLoaded_OutdatedEntryIsNotStaleForThisHost(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	t.Setenv("ENTIRE_ANTIGRAVITY_CONFIG_DIR", t.TempDir())
+	stubAgyOnPath(t)
+	writeAntigravityPreInvocationEntryForDoctor(t, dir, agent.HookHostIsWindows())
+
+	cmd, stdout := newTestCmd(t)
+	checkAntigravityHooksLoaded(cmd)
+	require.NotContains(t, stdout.String(), "STALE FOR THIS HOST")
+}
+
+// writeAntigravityPreInvocationEntryForDoctor writes an "entire" entry holding
+// only the pre-invocation hook, wrapped as InstallHooks wraps it for a Windows
+// or POSIX host.
+func writeAntigravityPreInvocationEntryForDoctor(t *testing.T, dir string, windowsHost bool) {
+	t.Helper()
+	command := agent.WrapProductionSilentHookCommand("entire hooks antigravity pre-invocation")
+	if windowsHost {
+		command = agent.WrapWindowsProductionSilentHookCommandDirect("entire hooks antigravity pre-invocation")
+	}
+	entry, err := json.Marshal(map[string]any{"entire": map[string]any{
+		"PreInvocation": []map[string]string{{"type": "command", "command": command}},
+	}})
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".agents"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".agents", "hooks.json"), entry, 0o600))
 }
 
 // A version string semver cannot parse is not "too old": the agy may be newer
@@ -2070,4 +2195,126 @@ func TestCheckAntigravityHooksLoaded_UnparseableVersionSkipsProbeWithoutUpgradeA
 	require.Contains(t, stdout.String(), "could not determine the agy version")
 	require.NotContains(t, stdout.String(), "agy update")
 	require.NotContains(t, stdout.String(), "LOADED by agy")
+}
+
+// An agy entry from before the SessionStart hook leaves sessions idle until
+// they are purged; doctor reports it and names the reinstall that fixes it.
+func TestCheckHookDrift_AntigravityWarnsWithoutSessionStart(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	writeAntigravityPreInvocationEntryForDoctor(t, dir, agent.HookHostIsWindows())
+
+	cmd, stdout := newTestCmd(t)
+	checkHookDrift(cmd)
+
+	out := stdout.String()
+	require.Contains(t, out, "hooks: OUT OF DATE")
+	require.Contains(t, out, "Run `entire agent add antigravity` to update it.")
+}
+
+// TestCheckHookDrift_DroidWrittenForAnotherOS pins the doctor's report for a
+// hooks file installed on the other OS, such as one a teammate committed from
+// a Windows checkout: it names the cause and the reinstall, says what that
+// reinstall does to the committed file, and `entire status` still lists the
+// agent. Mutates the shared host and the working directory, so no t.Parallel().
+func TestCheckHookDrift_DroidWrittenForAnotherOS(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Cleanup(osroot.ResetShared)
+	t.Chdir(dir)
+	restore := agent.SetWindowsHookProbeForTesting("windows", nil)
+	_, err := (&factoryaidroid.FactoryAIDroidAgent{}).InstallHooks(context.Background(), false)
+	restore()
+	require.NoError(t, err)
+	t.Cleanup(agent.SetWindowsHookProbeForTesting("linux", nil))
+
+	cmd, stdout := newTestCmd(t)
+	checkHookDrift(cmd)
+
+	out := stdout.String()
+	require.Contains(t, out, "Factory AI Droid hooks: WRITTEN FOR ANOTHER OS")
+	require.Contains(t, out, "Run `entire agent add factoryai-droid` to rewrite it for this OS.")
+	require.Contains(t, out, "committed, that breaks it for teammates on the other OS.")
+	require.NotContains(t, out, "OUT OF DATE")
+	require.Contains(t, OutdatedHookAgents(context.Background()), types.AgentName("factoryai-droid"))
+}
+
+// oldEntirePrePushHook is the pre-push hook Entire wrote before it passed git's
+// ref list, exactly as the release generated it.
+const oldEntirePrePushHook = "#!/bin/sh\n# Entire CLI hooks\n# Pre-push hook: push session logs alongside user's push\n" +
+	"# $1 is the remote name (e.g., \"origin\")\n" +
+	"if command -v entire >/dev/null 2>&1; then entire hooks git pre-push \"$1\"; else :; fi\n"
+
+// Entire's old pre-push hook is out of date for a reason of its own, so doctor
+// must not describe it as the working-tree launcher that used to be the only
+// cause. A hook the user edited is not out of date at all: --force leaves it,
+// and the lines the user added, alone.
+func TestCheckGitHooks_PrePushBeforeRefList(t *testing.T) {
+	dir := setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	_, err := strategy.InstallGitHook(context.Background(), true, false)
+	require.NoError(t, err)
+	prePush := filepath.Join(dir, ".git", "hooks", "pre-push")
+
+	require.NoError(t, os.WriteFile(prePush, []byte(oldEntirePrePushHook), 0o755))
+	cmd, stdout := newTestCmd(t)
+	require.NoError(t, checkGitHooks(cmd, false))
+	require.Contains(t, stdout.String(), "Git hooks: OUT OF DATE")
+	require.Contains(t, stdout.String(), "pre-push hook from before Entire read the refs `git push` sends")
+
+	edited := oldEntirePrePushHook + "git lfs pre-push \"$@\"\n"
+	require.NoError(t, os.WriteFile(prePush, []byte(edited), 0o755))
+	cmd, stdout = newTestCmd(t)
+	require.NoError(t, checkGitHooks(cmd, true))
+	require.Contains(t, stdout.String(), "✓ Git hooks: OK")
+	data, err := os.ReadFile(prePush)
+	require.NoError(t, err)
+	require.Equal(t, edited, string(data), "doctor --force must keep the user's own lines")
+}
+
+// A --depth=1 fetch of the remote metadata tip hides the real merge base, so
+// doctor sees DISCONNECTED. Its repair must deepen that branch and reconcile
+// again rather than refuse.
+func TestCheckDisconnectedMetadata_DeepFetchesWhenShallowHistoryHidesTheMergeBase(t *testing.T) {
+	// Cannot use t.Parallel(): t.Chdir and IsolateGitConfigEnv (t.Setenv)
+	// modify process-global state.
+	testutil.IsolateGitConfigEnv(t)
+	source := setupGitRepoForPhaseTest(t)
+	testutil.WriteFile(t, source, "f.txt", "init")
+	testutil.GitAdd(t, source, "f.txt")
+	testutil.GitCommit(t, source, "init")
+	defaultBranch := strings.TrimSpace(testutil.RunGit(t, source, "rev-parse", "--abbrev-ref", "HEAD"))
+	testutil.RunGit(t, source, "checkout", "--orphan", paths.MetadataBranchName)
+	testutil.RunGit(t, source, "rm", "-rf", ".")
+	commitMetadata := func(content, message string) {
+		testutil.WriteFile(t, source, "metadata.json", content)
+		testutil.GitAdd(t, source, "metadata.json")
+		testutil.GitCommit(t, source, message)
+	}
+	commitMetadata(`{"v":1}`, "Checkpoint: base")
+	testutil.RunGit(t, source, "checkout", defaultBranch)
+
+	dir := filepath.Join(t.TempDir(), "clone")
+	testutil.RunGit(t, source, "clone", source, dir)
+	trackingRef := "refs/remotes/origin/" + paths.MetadataBranchName
+	testutil.RunGit(t, dir, "update-ref", "refs/heads/"+paths.MetadataBranchName, trackingRef)
+	base := strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", trackingRef))
+
+	testutil.RunGit(t, source, "checkout", paths.MetadataBranchName)
+	commitMetadata(`{"v":2}`, "Checkpoint: teammate 1")
+	commitMetadata(`{"v":3}`, "Checkpoint: teammate 2")
+	testutil.RunGit(t, source, "checkout", defaultBranch)
+	testutil.RunGit(t, dir, "fetch", "--depth=1", "origin", "+refs/heads/"+paths.MetadataBranchName+":"+trackingRef)
+	t.Chdir(dir)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+
+	require.NoError(t, checkDisconnectedMetadata(cmd, true), stderr.String())
+
+	assert.Contains(t, stdout.String(), "Metadata branches: DISCONNECTED")
+	assert.Contains(t, stdout.String(), "Fixed")
+	testutil.RunGit(t, dir, "merge-base", "--is-ancestor", base, trackingRef)
 }

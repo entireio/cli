@@ -66,15 +66,6 @@ func TestValidateTrailResumeOptions(t *testing.T) {
 			name: "json no resume accepted",
 			opts: trailResumeOptions{JSON: true, NoResume: true},
 		},
-		{
-			name:    "invalid repo assertion",
-			opts:    trailResumeOptions{ExpectedRepo: "not a repo"},
-			wantErr: "validate --repo",
-		},
-		{
-			name: "repo assertion accepted",
-			opts: trailResumeOptions{ExpectedRepo: "entireio/cli"},
-		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -90,29 +81,6 @@ func TestValidateTrailResumeOptions(t *testing.T) {
 				t.Fatalf("validateTrailResumeOptions() = %v, want %q", err, tc.wantErr)
 			}
 		})
-	}
-}
-
-func TestValidateTrailResumeExpectedRepo(t *testing.T) {
-	t.Parallel()
-
-	current := trailResumeRepository{Forge: "gh", Owner: "EntireIO", Repo: "CLI"}
-	expected := trailResumeRepository{Forge: "gh", Owner: "entireio", Repo: "cli"}
-	if err := validateTrailResumeExpectedRepo(current, expected); err != nil {
-		t.Fatalf("validateTrailResumeExpectedRepo() matching repo = %v, want nil", err)
-	}
-	if err := validateTrailResumeExpectedRepo(current, trailResumeRepository{}); err != nil {
-		t.Fatalf("validateTrailResumeExpectedRepo() empty expected repo = %v, want nil", err)
-	}
-
-	err := validateTrailResumeExpectedRepo(current, trailResumeRepository{Forge: "gh", Owner: "entireio", Repo: "entire.io"})
-	if err == nil {
-		t.Fatal("validateTrailResumeExpectedRepo() mismatch = nil, want error")
-	}
-	for _, want := range []string{"targets repository entireio/entire.io", "current checkout is EntireIO/CLI"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("error = %q, want it to mention %q", err, want)
-		}
 	}
 }
 
@@ -166,7 +134,7 @@ func TestBuildTrailResumeContextSortsCheckpointSessions(t *testing.T) {
 
 	now := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
 	const newSessionID = "new-session"
-	ctx := buildTrailResumeContextForRepoWithSkipped(api.TrailResource{
+	ctx := buildTrailResumeContext(api.TrailResource{
 		ID:     "trl_1",
 		Number: 575,
 		Title:  "Add trail resume",
@@ -188,7 +156,7 @@ func TestBuildTrailResumeContextSortsCheckpointSessions(t *testing.T) {
 			LastActive:   now,
 			CheckpointID: "aaaaaaaaaaaa",
 		},
-	}, "", 0, trailResumeFindingsContext{}, "")
+	}, "", 0, trailResumeFindingsContext{})
 
 	if len(ctx.Sessions) != 2 {
 		t.Fatalf("sessions len = %d, want 2: %#v", len(ctx.Sessions), ctx.Sessions)
@@ -208,30 +176,6 @@ func TestBuildTrailResumeContextSortsCheckpointSessions(t *testing.T) {
 		"entire trail resume 575 --branch feature/trail-resume --checkpoint aaaaaaaaaaaa",
 		"entire trail resume 575 --branch feature/trail-resume --session new-session",
 		"entire trail resume 575 --branch feature/trail-resume --session old-session",
-	}
-	if len(ctx.Commands) != len(wantCommands) {
-		t.Fatalf("commands len = %d, want %d: %#v", len(ctx.Commands), len(wantCommands), ctx.Commands)
-	}
-	for i, want := range wantCommands {
-		if ctx.Commands[i] != want {
-			t.Fatalf("commands[%d] = %q, want %q", i, ctx.Commands[i], want)
-		}
-	}
-}
-
-func TestBuildTrailResumeContextWithRepoIncludesRepoInResumeCommands(t *testing.T) {
-	t.Parallel()
-
-	ctx := buildTrailResumeContextForRepoWithSkipped(api.TrailResource{
-		ID:     "trl_1",
-		Number: 575,
-		Title:  "Add trail resume",
-		Branch: "feature/trail-resume",
-	}, nil, "", 0, trailResumeFindingsContext{}, "gh/entireio/cli")
-
-	wantCommands := []string{
-		"entire trail finding 575 --json",
-		"entire trail resume 575 --repo gh/entireio/cli --branch feature/trail-resume",
 	}
 	if len(ctx.Commands) != len(wantCommands) {
 		t.Fatalf("commands len = %d, want %d: %#v", len(ctx.Commands), len(wantCommands), ctx.Commands)

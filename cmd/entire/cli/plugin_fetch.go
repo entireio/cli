@@ -24,6 +24,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
+	"github.com/entireio/cli/internal/entireclient/httpclient"
 )
 
 // Release-asset download. The one irreducibly forge-specific piece of the
@@ -96,7 +97,7 @@ const maxAssetRedirects = 10
 // redirects *across schemes* and only the initial URL was ever validated, so an
 // https:// entry point could deliver both the asset and its checksums.txt over
 // plaintext — exactly the outcome requireSecureAssetURL exists to prevent.
-var pluginHTTPClient = &http.Client{
+var pluginHTTPClient = httpclient.New(httpclient.Options{
 	Timeout:   5 * time.Minute,
 	Transport: versioninfo.WrapTransport(nil),
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -105,7 +106,7 @@ var pluginHTTPClient = &http.Client{
 		}
 		return requireSecureAssetURL(req.URL.String())
 	},
-}
+})
 
 // maxPluginAssetSize caps a downloaded asset. Real plugin binaries are tens
 // of MB; the cap exists so a misconfigured URL serving an endless stream

@@ -231,7 +231,7 @@ func TestControlPlane_NativeMirrorLifecycle(t *testing.T) {
 	// After a failed phase the mirror may still exist and the server refuses to
 	// delete its primary, so this skips and the cleanups tear down in order.
 	phase("the three delete in reverse", func(t *testing.T) {
-		assertDeleted(t, dir, "repo", created.ID)
+		assertDeleted(t, dir, "repo", ref)
 		assertDeleted(t, dir, "project", project.ID)
 		assertDeleted(t, dir, "org", org.ID)
 	})

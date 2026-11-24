@@ -99,6 +99,25 @@ func TestRestoredPromptPreviewFallsBackInOrder(t *testing.T) {
 	}
 }
 
+// An external agent that implements ExtractPrompts but did not declare
+// transcript_analyzer must not have its prompts extracted.
+func TestRestoredPromptPreviewHonorsDeclaredTranscriptAnalyzer(t *testing.T) {
+	t.Parallel()
+
+	undeclared := &declaringRestoreAgent{restoreLogsOnlyAgent: restoreLogsOnlyAgent{extractedPrompts: []string{"from transcript"}}}
+	if got := restoredPromptPreview(undeclared, "", []byte("transcript"), ""); got != "" {
+		t.Fatalf("undeclared transcript_analyzer preview = %q, want empty", got)
+	}
+
+	declared := &declaringRestoreAgent{
+		restoreLogsOnlyAgent: restoreLogsOnlyAgent{extractedPrompts: []string{"from transcript"}},
+		caps:                 agent.DeclaredCaps{TranscriptAnalyzer: true},
+	}
+	if got := restoredPromptPreview(declared, "", []byte("transcript"), ""); got != "from transcript" {
+		t.Fatalf("declared transcript_analyzer preview = %q, want from transcript", got)
+	}
+}
+
 func TestFirstDisplayPrompt(t *testing.T) {
 	t.Parallel()
 
@@ -276,6 +295,16 @@ func (a *restoreLogsOnlyAgent) FormatResumeCommand(sessionID string) string {
 func (a *restoreLogsOnlyAgent) ExtractPrompts(string, int) ([]string, error) {
 	return a.extractedPrompts, nil
 }
+
+// declaringRestoreAgent is restoreLogsOnlyAgent as an external agent that
+// declares its capabilities.
+type declaringRestoreAgent struct {
+	restoreLogsOnlyAgent
+
+	caps agent.DeclaredCaps
+}
+
+func (a *declaringRestoreAgent) DeclaredCapabilities() agent.DeclaredCaps { return a.caps }
 
 // fakeExternalAgent is a minimal Agent implementation for testing dynamic registration.
 // It simulates an external agent that was discovered and registered at runtime.

@@ -2,8 +2,9 @@ package cli
 
 // API response types for the /api/v1/me/* endpoints used by `entire activity`.
 
-// activityAgentCounts maps the 11 canonical agent IDs to counts.
-// The API always populates every key (zero for absent agents).
+// activityAgentCounts maps agent keys to counts: canonical IDs for built-in
+// agents, which the API populates with zero when absent, plus any other key it
+// sends (e.g. an external agent's name). Zero counts are not rendered.
 type activityAgentCounts map[string]int
 
 // userActivityResponse is the API response for GET /api/v1/me/activity.
@@ -70,7 +71,7 @@ type contributionStats struct {
 }
 
 // repoContribution matches the API's `repos[]` shape. Agents is keyed by the
-// canonical agent ID (claude, gemini, …, unknown) with all 11 keys populated.
+// canonical agent ID (claude, gemini, …, unknown) with every key populated.
 type repoContribution struct {
 	Repo   string              `json:"repo"`
 	Total  int                 `json:"total"`

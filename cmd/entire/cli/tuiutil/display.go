@@ -37,6 +37,19 @@ func SanitizeDisplayText(s string) string {
 	}, stripped)
 }
 
+// SanitizeDisplayLine is SanitizeDisplayText for server text shown inline in
+// a one-line message: it also drops bidi controls (U+202A–U+202E,
+// U+2066–U+2069, and the other Bidi_Control runes), which are format
+// characters rather than controls and could visually reorder the line.
+func SanitizeDisplayLine(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Bidi_Control, r) {
+			return -1
+		}
+		return r
+	}, SanitizeDisplayText(s))
+}
+
 // SanitizeTerminalText strips ANSI escape sequences and non-printable runes
 // from multi-line terminal output while preserving tabs and newlines. Unlike
 // SanitizeDisplayText, which flattens text into a single table cell, this

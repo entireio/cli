@@ -16,11 +16,23 @@ export default function (pi: ExtensionAPI) {
   // extension), so it would otherwise forward its own lifecycle as the user's
   // session. Mark this process so any Pi it spawns knows it is nested.
   //
+  // The marker holds the PID of the top-level Pi that set it. Pi builds a new
+  // extension instance in the same process on /reload, /new and /resume, and that
+  // instance must still forward lifecycle, so a marker naming this process is not
+  // nesting. A nested Pi leaves the marker as it found it, so its own replacement
+  // instances and any Pi it spawns stay nested. Any other value, including the
+  // "1" older versions of this extension set, means a parent Pi spawned us.
+  //
   // WARNING: Entire's own hook subprocesses inherit this marker from the parent, so
   // the CLI side must never treat it as a skip signal — it would disable tracking
   // for everyone. See docs/architecture/agent-guide.md.
-  const nested = Boolean(process.env.ENTIRE_PI_NESTED);
-  process.env.ENTIRE_PI_NESTED = "1";
+  const marker = process.env.ENTIRE_PI_NESTED;
+  // A leftover "1" counts as nested on purpose: an older extension instance in
+  // this same process may have set it, and that is indistinguishable from "1"
+  // inherited from an older parent Pi, so such a session stays untracked until
+  // Pi restarts.
+  const nested = Boolean(marker) && marker !== String(process.pid);
+  if (!marker) process.env.ENTIRE_PI_NESTED = String(process.pid);
 
   const ENTIRE_CMD = '__ENTIRE_CMD__';
   let pendingSkillEvents: Array<{ skill_name: string; invocation: string; timestamp: string }> = [];
@@ -37,6 +49,10 @@ export default function (pi: ExtensionAPI) {
           { timeout: 10000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 },
           (_err, stdout) => resolve(typeof stdout === "string" ? stdout : ""),
         );
+        // A hook that exits without reading its payload (or a missing `entire`)
+        // fails this write with EPIPE, emitted asynchronously as a stream error
+        // that the try/catch cannot see. Unhandled, it would crash Pi.
+        child.stdin?.on("error", () => {});
         child.stdin?.end(JSON.stringify(data));
       } catch {
         // best effort — never block the agent on a hook failure

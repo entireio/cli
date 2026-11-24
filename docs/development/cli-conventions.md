@@ -11,15 +11,18 @@ top-level verbs. The groups are the canonical home for each verb. Newer
 experimental command families are discoverable through `entire labs` and
 their canonical paths are always runnable.
 
-Experimental commands are gated by a build-time visibility flag (the
+Experimental commands are gated by the build's version (the
 `cmd/entire/cli/experimental` package): they are shown — grouped under an
 "Experimental commands:" help section — in developer and nightly builds, and
-hidden in stable release builds. Visibility is toggled by `experimental.Visible`
-(default `"true"`), which GoReleaser stamps `"false"` only on stable tags
-(`.Prerelease` empty); nightly (`vX.Y.Z-nightly.*`) and local builds leave it at
-the default. Register a command as experimental with `experimental.Register(parent,
-child)` instead of `parent.AddCommand(child)`. Gating only controls visibility —
-the commands are always runnable in every build.
+hidden in stable release builds. `experimental.IsVisible()` derives this from
+`versioninfo.Version` after `versioninfo.Load()`: a plain semver release
+(`X.Y.Z`, no prerelease, no build metadata) hides them; `dev`, nightly
+(`X.Y.Z-nightly.*`), and commit-stamped (`0.0.0+<commit>`) builds show them.
+There is no separate ldflag, so any packager that stamps the version (GoReleaser,
+nixpkgs, `go install @<tag>`) gets release behavior. Register a command as
+experimental with `experimental.Register(parent, child)` instead of
+`parent.AddCommand(child)`. Gating only controls visibility — the commands are
+always runnable in every build.
 
 - `session` (alias: `sessions`): `list`, `info`, `tokens`, `stop`, `attach`, `adopt`, `resume`, `current`.
   `resume` with a branch arg switches to it and resumes its session; with no arg
@@ -59,6 +62,10 @@ the commands are always runnable in every build.
   transcript; both read through `checkpoint.TaskReader`. The cell does not
   serve task records, so under `--repo` the `tasks` key is omitted (not
   reported empty) and `--task` fails with `ErrTaskRecordsUnsupported`.
+  `list --outgoing` lists what the next push sends, from local state only: the
+  git-refs push queue, minus refs missing locally, which pre-push drops
+  (`strategy.ListOutgoingCheckpoints`). It refuses the git-branch backend, whose
+  push sends `entire/checkpoints/v1` as one branch rather than per checkpoint.
 - `agent`: bare opens the interactive agent selector, plus `list`, `add`, `remove`
 - `configure`: bare prints help and a hint pointing at `entire agent`; flags
   manage non-agent settings (telemetry, git-hook installation mode, strategy
@@ -204,7 +211,9 @@ the commands are always runnable in every build.
   its own deadline (`logoutLoginTimeout`); a cancelled context stops the sweep
   with the unreached logins intact, and a failed local removal or an interrupt
   fails the command
-- `doctor`: bare runs the scan-and-fix flow, plus `trace`, `logs`, `bundle`
+- `doctor`: bare runs the scan-and-fix flow, plus `trace`, `logs`, `bundle` and
+  `migrate-checkpoints`, which is also where every message about a legacy
+  checkpoint whose `v1` copies diverged points
 - `cluster`: the control plane's data-plane cluster catalog — `list` only, since
   clusters are provisioned by Entire rather than by users. It renders `GET
   /clusters` (`coreapi.ListClusters`, the same call the mirror wizard and
@@ -230,12 +239,42 @@ the commands are always runnable in every build.
   row. The catalog carries no health, capacity or usage data — nothing
   server-side does — and hidden or decommissioned clusters never reach it.
 - `org`: control-plane organization management — `create`, `list`, `get`, `delete`,
-  plus `grant` (`add`/`list`/`remove`): org membership for a `provider:handle`
-  grantee, roles owner/admin/member (default member)
+  plus `grant` (`list`/`remove`): org membership for a `provider:handle`
+  grantee, roles owner/admin/member (default member). `invite`
+  (`send`/`list`/`revoke`) manages the org's invitations. `send` takes
+  `--email <address>` or `--account <provider:handle>`, exactly one: the
+  account form is the org add with the invitation allowed. On the customer API
+  no org add is direct (a non-member is invited, a member refused), so
+  `invite send --account` is the one documented way to add someone. `org grant
+  add` makes the same call and is a **hidden** spelling of it
+  (`grantTarget.addDocumentedAs`, cobra `Hidden`): it keeps its arguments,
+  output lines and exit codes for scripts, is absent from `org grant --help`,
+  completions and `agent-help`, and its own help and the `org grant` help name
+  `invite send`. The repo has no alias helper; a compatibility spelling is a
+  hidden command, as `trail delete` is
 - `project`: control-plane project management — `create`, `list`, `get`, `delete`,
-  plus `grant` (`add`/`list`/`remove`): project access for a `provider:handle`
+  plus `agent` (`list`/`add`): the project's review agents, configured in
+  entire-api rather than repository files (they replaced the trail runners).
+  `add` creates a preset agent for the current repository, or extends the
+  project's existing agent of that preset to it (one agent per preset per
+  project), refusing `--disabled`/`--environment` an existing agent cannot
+  honor. Creates send a fresh `Idempotency-Key` and replaces the agent's
+  `If-Match` etag, as entire-api requires. `agent run`
+  (`list`/`show`/`cancel`/`retry`) reads and acts on the agents' runs through
+  `/{host}/{project}/runs`; `list` prints one page with its cursor, run IDs
+  must be ULIDs before any request, `retry` sends an `Idempotency-Key`, and
+  `--json` passes the server's runs through. What the agents did on one trail
+  change is `trail finding`, and `trail rerun-review` starts them.
+  `agent setup` explicitly confirms a service-account repository grant and managed
+  self-hosted Environment binding; `agent serve` executes claimed jobs in the
+  foreground (`--once` processes at most one). These are user-owned commands,
+  separate from local `entire agent` integrations. See
+  [self-hosted project Agents](../architecture/self-hosted-project-agents.md)
+  for identity, isolation and recovery contracts. Also
+  `grant` (`add`/`list`/`remove`): project access for a `provider:handle`
   grantee, roles reader/writer/admin; both `add` and `remove` take the grantee
-  optionally (see the grant-subtree notes below). `create <name> --owner <ref>`
+  optionally (see the grant-subtree notes below), and `invite` (`list`/`revoke`)
+  for the project's invitations. `create <name> --owner <ref>`
   creates without prompting even in a terminal, leaving an omitted `--region`
   to the server's jurisdiction. Without `--owner`, `--owner-type` or
   `--region` (bare, or with just the name as the name field's starting text),
@@ -263,13 +302,39 @@ the commands are always runnable in every build.
   all under `ENTIRE_TOKEN`. An owner with no `--owner` spelling but its ULID
   (an account with no handle, an org sharing its name) gets no command in the
   summary, which says why
+- `service-account` (alias: `sa`): a project's service accounts — `create`,
+  `list`, `get`, `delete`, `grant`, `revoke`, `grants`, `providers`, `bind`,
+  `bindings`, `unbind`. A service account is addressed by its `svc_` ID or as
+  `<project>/<name>`. Names are unique per project only, so the name form lists
+  the project's accounts and matches exactly. Errors branch on core's RFC 9457
+  `type`, never on its prose (`coreapi.APIErrorType`). `grant` and `revoke`
+  take `--repo` or `--project`. A bare repo name resolves inside the account's
+  own project, because core refuses a grant outside it with 422. Like `repo
+  grant`, a bare value is always a name, never a ULID; a slash path goes
+  through the shared resolver, which suggests `/et/` for a forgeless one.
+  Nothing here is provider-specific: `providers` and `bind --provider <name>`
+  render core's provider descriptors from `GET /oidc-providers`. A provider is
+  matched by `name`, then by the deprecated `displayName` an older core sends.
+  Only `self_serve` providers are listed or bound. An older core sends no
+  `self_serve`, so the CLI lists every provider and core decides. `bind`
+  checks each `--pin` against the descriptor's attributes (unknown name, a
+  `*` in an exact attribute, a pattern mismatch, a missing required pin, a
+  value of only `*`) before it calls core. Prompted pins get the same checks
+  inside the form. Core stays the authority, so a provider without
+  attributes gets only the provider-independent only-`*` check. `unbind`
+  upper-cases an `eib_` ID, as lookups do for `svc_`: core answers 204 for an
+  unknown binding, so a lower-case ID would report a removal that never
+  happened. A terminal asks for missing required
+  pins. The `github-actions` success output adds a setup-entire workflow
+  snippet. `revoke` and `unbind` take an explicit target, so they never
+  prompt. A typed `grant remove` does not prompt either. `delete` confirms
+  like `project delete`.
 - `repo`: control-plane repository lifecycle — `create`, `list --project
   et/<project>` (the project spelling `entire trail --project` takes, leading
-  slash optional),
-  `view`, `edit`, `delete`, `clone`, plus the `mirror`, `remote`,
-  `visibility`, `protection` and `grant` subtrees (`repo grant` mirrors
-  `project grant`, addressing the repo by its `/et/<project>/<repo>` path;
-  `grant list` alone also takes a `/gh/` mirror ref). Verb names follow the GitHub CLI where the job is the same (`view`,
+  slash optional), `view`, `edit`, `delete`, `clone`, `default-branch`, plus the `mirror`, `remote`,
+  `visibility`, `protection`, `grant` and `invite` subtrees (`repo grant` and
+  `repo invite` mirror their `project` counterparts, addressing the repo by its
+  `/et/<project>/<repo>` path; `grant list` alone also takes a `/gh/` mirror ref). Verb names follow the GitHub CLI where the job is the same (`view`,
   `edit --visibility`, `auth switch`), per the unified-repo-commands proto.
   Git content operations (log, diff, …) are intentionally out of scope.
   **A targeting `--cluster` names a cluster by its public host**
@@ -318,13 +383,25 @@ the commands are always runnable in every build.
   server keeps an existing rule's level when it is absent, so re-adding a
   branch without the flag never lowers it and `--server-side-merge-only=false`
   is the explicit way down. A short branch name expands to `refs/heads/`,
-  `HEAD` and `refs/...` pass through. The `mirror` subtree is
+  `HEAD` and `refs/...` pass through.
+  `default-branch <repo> <branch>` is one PUT to core's
+  `/repos/{repoId}/default-branch`. It sends the branch as typed; the server
+  accepts a short name or a `refs/heads/` ref. A 409 on a GitHub mirror reads
+  as a plain message; any other 409 keeps the server's detail. The `mirror` subtree is
   server-side (`add`, `list`, `remove`; `add` and `remove` name clusters
   with `--cluster <host>`, repeatable or comma-separated, and place or tear down
   every named cluster in parallel through one engine — `mirrorTargets` →
   `createMirrors`/`removeMirrors` → a summary table — so a one-shot verb reports
   exactly like the wizard. A failure on one cluster never stops the others; the
-  command exits non-zero naming the ones that failed. `add` defaults to one
+  command exits non-zero naming the ones that failed. An `add` whose wait ends
+  while the latest poll still saw the initial clone `processing` (and no poll
+  failed since) is not a failure: the row reads `still syncing`, the command
+  names `entire repo view <repo>` to check on it, and it exits 0 like
+  `--no-wait`'s `registered`. A deadline in any other state stays `timed out`
+  and fails. A poll interrupted by the wait's own deadline preserves the last
+  answer; a credential failure clears it even if its independent timeout returns
+  after the wait's deadline.
+  `add` defaults to one
   fixed cluster without a terminal so scripts stay stable; `remove` has no
   default at all, because which clusters a repo is on is a property of the repo
   and guessing one would delete a copy nobody named — a terminal gets a
@@ -349,19 +426,40 @@ the commands are always runnable in every build.
   native-mirror routes are home-core-scoped and answer 421 for a repo in another
   jurisdiction, which `coreapi`'s transport follows and re-authenticates on its
   own, so they run on the plain active-context client with no cluster-fronting
-  detour. `mirror detach <repo> --into /et/<project>/<repo>` serves
+  detour. `mirror resync <repo>` (`/gh/` only, `POST /mirrors/resync`) queues one
+  publish that fans out to every placement, and doubles as the check after an
+  org fixes a GitHub-side block: the server probes GitHub first and answers
+  409 with the reason at `errors[].location == "body.owner"` while the block
+  holds, which `resyncError` renders with the same wording `repo view` uses.
+  That block (`Mirror.syncBlock`: an org IP allow list, or a suspension core
+  hit while minting a token — a suspension GitHub reports by webhook is NOT
+  a block, it is placement status `suspended`) is per GitHub installation
+  and the `/repos` placements do not carry it, so only `repo view` reads it,
+  with one exact read scoped to the repo (`lookupMirrorSyncBlock`:
+  `GET /mirrors/{id}` by the entry's own `id`, its canonical home-jurisdiction
+  placement, falling back to the first placement ID — not `/mirrors/placements`,
+  which is pull-gated and would withhold the block from a metadata-only
+  viewer), and prints a `Sync:` section with the fix and the resync command;
+  `--json` adds `syncBlock` on the row, or `syncStatus: "unavailable"` when
+  the read failed. `mirror list` shows
+  no block: a per-repo read per row is too much for a directory, and
+  `GET /mirrors` cannot answer "mirrors of owner X" cheaply (core applies its
+  owner filter *after* cutting the page from the caller's whole visible set).
+  Revisit when core puts `syncBlock` on `RepoPlacement`. A failed read is a
+  stderr note, never a failed view — except a cancelled context, which
+  `noteSyncStatusUnavailable` returns so an interrupted command still exits as
+  interrupted.
+  `mirror detach <repo> --into /et/<project>/<repo>` serves
   `/gh/` refs only and is the one mirror verb that converts rather than places:
   it turns the mirror's sole placement into the native repo `--into` names
   (one native ref instead of `--project`/`--name`: its project is resolved
   by name, its repo is the name the detach is asked to use). It is
   keyed by the placement ID from `/mirrors/placements`, and with several
   placements it sends the first so the server's `single-placement`
-  precondition explains the refusal. Every run asks for the dry-run plan first,
-  and tables show its access split into who loses and who keeps it, in the
-  grant tables' layout, accounts named by handle and display name from one
-  best-effort `GET
-  /repos/{repoId}/people` read before the write (the API names subjects by ID
-  only; `--json` keeps the IDs and skips the read);
+  precondition explains the refusal. Every run asks for the dry-run plan first
+  and shows its preconditions. It shows no access list: after the detach only
+  the target project grants member access, and the plan, the prompt and the
+  help say so. `--json` still prints any `access` an older core sends;
   an ineligible plan stops before the write with the failed precondition slugs
   (under `--json`, after printing the plan). A real detach is confirmed through
   `confirmPrompt` (shared with `grant remove`'s revoke prompt), which writes the
@@ -398,8 +496,15 @@ the commands are always runnable in every build.
   its only record. Saving it under a second remote the caller never named was
   the previous design, and its failure mode was a name collision that reported
   a clean ✓ over a URL that had left git config for good.
-  There is no URL-printing verb: `repo view` already lists a clone URL per
-  cluster for both forges, in a table and in `--json`.
+  `repo view [repo]` lists a clone URL per cluster for both forges, in a table
+  and in `--json`. Without an argument it resolves `origin`; an Entire clone
+  URL retains its cluster's login-server routing. JSON also carries top-level
+  `repoId` and `apiUrl` for the responsible API cell. For GitHub repos these
+  come from the processing placement; for native repos they are the repo ID
+  and its home cluster's API URL. The fields use the shared routing resolver's
+  selection and catalog joins, with no additional requests. Both are omitted
+  when coordinates cannot resolve, so an unready repo remains inspectable.
+  Consumers must require both fields before making a repo-scoped API call.
   `remote add` and `clone` choose a placement through the shared
   `selectPlacement` picker, each passing its own `placementPicker` wording. The
   picker matches on the cluster host, which is what `--cluster` takes, and both
@@ -515,8 +620,10 @@ the commands are always runnable in every build.
   The native `/et/<project>/<repo>` path is **not** clone-only: it is the
   `path` the API returns, and the one spelling every command that takes a repo
   ref accepts — `view`, `edit`, `delete`, and the `visibility`, `protection`
-  and `grant` subtrees (COR-1632) — with no `--project`, no bare name and no
-  ULID, refused before any request. They all resolve through
+  and `grant` subtrees and `default-branch` (COR-1632) — with no `--project`,
+  no bare name and no ULID, refused before any request. Outside `entire repo`,
+  `service-account grant --repo` keeps a bare name, resolved inside the
+  account's own project (`resolveRepoInProject`). They all resolve through
   `resolveRepoPathResolved`, which parses with `parseNativeCloneRef` and
   resolves both segments by name only (a project or repo can be *named* like a
   ULID, so path segments never touch the `looksLikeULID` passthrough). The
@@ -594,9 +701,7 @@ the commands are always runnable in every build.
   `entire://` URL, an `/et/` or `/gh/` ref, an API argument and anything the CLI
   echoes back are all suffix-free — appending stays correct only on a
   third-party forge clone URL, where it is that host's convention (the
-  checkpoint-remote URL builders, and `cleanRemoteURLForReport`, which reports
-  nothing at all for a remote with no upstream forge rather than synthesizing a
-  URL that addresses nothing). And `repo create` refuses a name ending in it,
+  checkpoint-remote URL builders). And `repo create` refuses a name ending in it,
   bare or in a path, rather than creating the repo under a name nobody typed.
   `/et/p/foo` and `/et/p/foo.git` therefore address one repository, spelled `foo`.
   Order matters where a URL is parsed: `splitOwnerRepo` strips trailing
@@ -634,7 +739,40 @@ the commands are always runnable in every build.
   a direct holder has nothing to add and why changing a role is the typed form's
   job.
 
-  **`org grant add` has no picker** (`candidates` is nil, which also keeps it at
+  **An add can invite instead of grant** (ENT-2652). Core grants directly only
+  to an account already inside the parent scope (an active member of the
+  owning org, or a project grant for a repo); any other account, and on the
+  org add (`org invite send --account`, or the hidden `org grant add`) every
+  non-member, gets an invitation it must accept. All three adds send `allow_invitation: true`, so Core answers 202 with
+  `AccountInvited` rather than refusing with the `invitation/required` 409.
+  The text line then says `Invited … No access until they accept` with the
+  invitation id and expiry, and `--json` emits the 202 body (`status:
+  "invited"`, `invitation_id`, `expires_at`) where a grant emits its 201 body.
+  An invitation is a success for the exit code. Refusals (open invitation with
+  another role, SSO-only org, invitation mail cooldown, already a member) are
+  Core's problem `detail`. A typed grantee's refusal is the command's error. A
+  picker run **continues past a refusal**, because each is a condition of that
+  person: it prints `✗ <grantee> was not added to <scope>: <detail>` on stderr
+  and moves on. It stops only at a failure that would repeat for every grantee
+  (`grantFailureIsFatal`: 401, a 403 other than `sso-required`, an unfollowed
+  421, 5xx, and anything that is not a Core problem response, such as a
+  transport failure). It ends with a `N granted, N invited, N refused` tally
+  (`N failed, N not attempted` after a fatal failure) and exits 1 unless
+  everyone was granted or invited. `--json` prints the array of what landed;
+  refusals and the tally go to stderr. The role-mismatch refusal is followed by
+  a line naming `entire <noun> invite list <ref>` and `entire <noun> invite
+  revoke <ref> --id <id>`.
+
+  **`invite list` and `invite revoke`** are one builder over three scopes
+  (`invite_scope.go`), as the grant subtrees are. A listing's INVITEE is the
+  email address, or for an account-targeted invitation the account's primary
+  handle from `inviteeIdentity`, or its `inviteeAccountId` when Core resolved
+  no identity. `revoke` takes `--id` (what `invite list` and the `✓ Invited …
+  (<id>)` line print) or `--email`, exactly one; an email is matched only
+  against open email invitations.
+
+  **The org add has no picker** (it never had one, so hiding `org grant add`
+  removed no way to reach one) (`candidates` is nil, which also keeps it at
   two required args): everyone eligible is by definition absent from the only
   list there is. `org grant remove` does have one, because the members to remove
   ARE that list. There is no user search or global account listing in the API —
@@ -767,17 +905,17 @@ cluster host rather than inventing a forge host. The legacy `/git/` prefix is
 excluded because `repo clone` cannot act on such a ref.
 
 **Being a forge token says nothing about which route accepts it** — the name
-says syntax on purpose. Trails are the current example: a mirror is addressed by
-`forge/owner/repo`, a native repo only by its ULID, so `trailRepoBasePath`
-switches on the forge *after* `IsForgePathToken` has answered yes, and a native
-ref with no resolved repo ID fails there rather than at the grammar. That
-narrowing has to cover *both* ways a forge reaches the API — named in `--repo`
-and inferred from the origin remote — and the inferred one is the common path.
+says syntax on purpose. Repository Changes are addressed by the resolved
+processing-placement ID for **both** GitHub and native repositories:
+`api.RepoChangesPath` builds `/api/v1/repos/{repo_id}/changes` and rejects a
+missing ID, never falling back to a forge/name route. Resolution covers both
+explicit `--repo` references and the origin remote. Project Trail APIs and
+browser URLs keep their separate routing conventions.
 
-Experimental commands (gated by the build-time visibility flag above — visible
+Experimental commands (gated by the build version as described above — visible
 and grouped under "Experimental commands:" in developer/nightly builds, hidden
 in stable releases, always runnable): `tokens`, `import`, `review`,
-`blame`, `why`, `experts`, and `runner`.
+`blame`, `why`, and `experts`.
 `tokens` is also advertised through `entire labs`.
 
 Top-level lifecycle and standalone commands: `enable`, `disable`, `status`,
@@ -863,7 +1001,7 @@ classified; a read-only group contains no writing subcommand; guidance text
 never appears in a command's `Short`/`Long`.
 
 Hidden commands opt into being advertised here by setting
-`Annotations[agentHelpAnnotation] = "true"` (e.g. `trail`). Because `agent-help`
+`Annotations[agentHelpAnnotation] = "true"` (e.g. `why`). Because `agent-help`
 renders live and lists non-hidden commands, the experimental commands appear in
 `agent-help` in developer/nightly builds and are absent in stable releases — the
 advertised surface is build-dependent, matching what `entire help` shows.
@@ -881,7 +1019,7 @@ unsupported and points the agent at this passive path instead.
 Cobra-native aliases (no hint): `sessions` → `session`, `cp`/`checkpoints` →
 `checkpoint`.
 
-Hidden infrastructure commands: `hooks`, `trail`,
+Hidden infrastructure commands: `hooks`,
 `curl-bash-post-install`, `__send_analytics`, `__sweep_sessions`, `mcp` (MCP
 stdio server for MCP-host agents).
 

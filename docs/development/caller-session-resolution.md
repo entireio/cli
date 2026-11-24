@@ -14,6 +14,13 @@ identify the caller. Tiers, strongest first, each reported back as
 1. **Identification** — the environment and process ancestry ranked
    *together*, reporting `caller-env`, `ancestry`, or `caller-ambiguous`.
 2. **`worktree`** — the most recently active session recorded in this worktree.
+   Recorded means by path (`sessionStatesForCurrentWorktree`), not by home
+   marker: a linked worktree git removed and re-added at the same path still
+   finds the removed one's sessions here until one of them is resumed there
+   (turn start re-homes it) or they age out, and a moved home appears once
+   its next turn starts. This tier only names a session; commit linking and
+   other hooks that act judge the home by its marker (see
+   [domain model](../architecture/sessions-and-checkpoints.md)).
 3. **`other-worktree`** — this worktree has no sessions at all, so the most
    recent one from anywhere in the shared store.
 

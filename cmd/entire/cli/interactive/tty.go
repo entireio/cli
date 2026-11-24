@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 )
 
 // PromptTTY is the platform's controlling terminal, opened for prompt input and
@@ -35,6 +36,16 @@ func (t *PromptTTY) Write(p []byte) (int, error) {
 		return n, fmt.Errorf("write prompt terminal: %w", err)
 	}
 	return n, nil
+}
+
+// SetReadDeadline bounds reads from the prompt input, so a prompt that times
+// out leaves no read pending on the terminal. It fails where the input cannot
+// take a deadline (a Windows console).
+func (t *PromptTTY) SetReadDeadline(d time.Time) error {
+	if err := t.in.SetReadDeadline(d); err != nil {
+		return fmt.Errorf("set prompt terminal read deadline: %w", err)
+	}
+	return nil
 }
 
 // Output returns the terminal output handle. Callers that hand terminal output

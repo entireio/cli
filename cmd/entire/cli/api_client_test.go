@@ -5,10 +5,16 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/internal/coreapi"
 	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
 	"github.com/entireio/cli/internal/entireclient/contexts"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
@@ -88,4 +94,78 @@ func TestNewAuthenticatedAPIClient_InsecureFlagAllowsHTTPOverride(t *testing.T) 
 	if !discovered {
 		t.Fatal("discovery did not run: the http override was rejected despite the opt-in")
 	}
+}
+
+type countingTrailCellFactory struct {
+	mu      sync.Mutex
+	targets []string
+}
+
+func (f *countingTrailCellFactory) ClientFor(_ context.Context, target *auth.CellTarget) (*api.Client, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.targets = append(f.targets, target.BaseURL)
+	return api.NewClientWithBaseURL("login-jwt", target.BaseURL), nil
+}
+
+// One opener resolves the login once however many repositories it opens
+// (docs/development/api-routing.md: one CellClientFactory per operation).
+// Not parallel: it swaps the control-plane and login seams.
+func TestTrailRepoClientOpenerSharesOneLogin(t *testing.T) {
+	const nativeID = "01NATIVEREPOSITORY00000000"
+	resolution := nativeResolution("entirehq/marvin", nativeID)
+	resolution.Resolutions = append(resolution.Resolutions, nativeResolution("entirehq/zaphod", nativeID).Resolutions...)
+	withFakeCellCore(t, &fakeCellCore{
+		resolution: resolution,
+		repo:       &coreapi.Repo{ID: nativeID, Name: "marvin", ClusterHost: coreapi.NewOptString("eu.entire.io")},
+		clusters:   euClusters(),
+	})
+	factory := &countingTrailCellFactory{}
+	var logins atomic.Int32
+	old := newCellClientBuilder
+	newCellClientBuilder = func(context.Context, bool) (cellClientBuilder, error) {
+		logins.Add(1)
+		return factory, nil
+	}
+	t.Cleanup(func() { newCellClientBuilder = old })
+
+	open := newTrailRepoClientOpener(false)
+	var wg sync.WaitGroup
+	for _, repo := range []string{"marvin", "zaphod"} {
+		wg.Go(func() {
+			client, repoID, err := open(t.Context(), nativeCloneForge, "entirehq", repo)
+			if assert.NoError(t, err) {
+				assert.NotNil(t, client)
+				assert.Equal(t, nativeID, repoID)
+			}
+		})
+	}
+	wg.Wait()
+	assert.Equal(t, int32(1), logins.Load(), "the login is resolved once for both repositories")
+	assert.Equal(t, []string{euCellAPIURL, euCellAPIURL}, factory.targets, "each repository dials its own cell")
+}
+
+// A failed login is resolved once too, and every repository the opener is
+// asked for reports it as not logged in rather than opening without a login.
+func TestTrailRepoClientOpenerReportsLoginFailure(t *testing.T) {
+	const nativeID = "01NATIVEREPOSITORY00000000"
+	withFakeCellCore(t, &fakeCellCore{
+		resolution: nativeResolution("entirehq/marvin", nativeID),
+		repo:       &coreapi.Repo{ID: nativeID, Name: "marvin", ClusterHost: coreapi.NewOptString("eu.entire.io")},
+		clusters:   euClusters(),
+	})
+	var logins atomic.Int32
+	old := newCellClientBuilder
+	newCellClientBuilder = func(context.Context, bool) (cellClientBuilder, error) {
+		logins.Add(1)
+		return nil, clusterdiscovery.ErrNoAuthContext
+	}
+	t.Cleanup(func() { newCellClientBuilder = old })
+
+	open := newTrailRepoClientOpener(false)
+	for range 2 {
+		_, _, err := open(t.Context(), nativeCloneForge, "entirehq", "marvin")
+		require.ErrorIs(t, err, auth.ErrNotLoggedIn)
+	}
+	assert.Equal(t, int32(1), logins.Load())
 }

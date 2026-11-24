@@ -13,7 +13,7 @@ import (
 
 // committedHookConfigAgents are the agents whose Entire hook config this repo
 // commits: .claude/settings.json, .codex/hooks.json,
-// .opencode/plugins/entire.ts, and .pi/extensions/entire/index.ts. Each must be
+// .opencode/plugin/entire.ts, and .pi/extensions/entire/index.ts. Each must be
 // found and current. The path travels with the agent name so the test can copy
 // that exact committed config into its isolated repository.
 //
@@ -26,7 +26,7 @@ var committedHookConfigAgents = []struct {
 }{
 	{name: "claude-code", path: ".claude/settings.json"},
 	{name: "codex", path: ".codex/hooks.json"},
-	{name: "opencode", path: ".opencode/plugins/entire.ts"},
+	{name: "opencode", path: ".opencode/plugin/entire.ts"},
 	{name: "pi", path: ".pi/extensions/entire/index.ts"},
 }
 
@@ -47,8 +47,8 @@ var committedHookConfigAgents = []struct {
 // only whoever happened to run `entire doctor` would see it. Running it here
 // fails the next template edit in CI instead of on a teammate's machine.
 //
-// When this fails: run `entire enable --force` at the repo root and commit the
-// regenerated files.
+// When this fails: run `entire agent add <agent>` at the repo root for each
+// stale agent and commit the regenerated files.
 func TestCommittedHookConfigsAreCurrent(t *testing.T) {
 	// t.Chdir is process-global, so this test must not be parallel. It is needed
 	// because CheckHookConfig resolves the config paths from the working
@@ -83,8 +83,8 @@ func TestCommittedHookConfigsAreCurrent(t *testing.T) {
 		checked[string(name)] = state
 		if state == agent.HooksOutdated {
 			t.Errorf("committed %s hook config is stale: it no longer matches what "+
-				"InstallHooks writes today. Regenerate with `entire enable --force` "+
-				"at the repo root and commit the result.", ag.Type())
+				"InstallHooks writes today. Regenerate with `entire agent add %s` "+
+				"at the repo root and commit the result.", ag.Type(), name)
 		}
 	}
 

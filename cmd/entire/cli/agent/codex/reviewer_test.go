@@ -79,6 +79,34 @@ func TestCodexReviewer_EnvVarsSet(t *testing.T) {
 	}
 }
 
+// TestCodexReviewer_WindowsLaunchEnvResolvesFromPath pins that a review run on
+// a Windows host starts codex with NoDefaultCurrentDirectoryInExePath=1. Codex
+// replays its own environment into every hook shell (hooks/src/registry.rs and
+// engine/command_runner.rs in openai/codex), so cmd.exe there resolves each
+// program in a hook line from PATH, not from the reviewed checkout. An
+// inherited value is overridden; other hosts get no entry from Entire.
+func TestCodexReviewer_WindowsLaunchEnvResolvesFromPath(t *testing.T) {
+	// No t.Parallel(): mutates the shared hook-host probe and uses t.Setenv.
+	const key = "NoDefaultCurrentDirectoryInExePath"
+	t.Setenv(key, "") // an inherited value the launch must not keep on Windows
+
+	for _, tc := range []struct {
+		goos string
+		want string
+	}{
+		{goos: "windows", want: "1"},
+		{goos: "linux", want: ""},
+	} {
+		t.Run(tc.goos, func(t *testing.T) {
+			withCodexHookEnvironment(t, tc.goos, false)
+			cmd := buildCodexReviewCmd(context.Background(), reviewtypes.RunConfig{StartingSHA: "deadbeef1234"})
+			if got := envToMap(cmd.Env)[key]; got != tc.want {
+				t.Errorf("%s = %q in the codex launch environment, want %q", key, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestCodexReviewer_ArgvShape(t *testing.T) {
 	t.Parallel()
 	cfg := reviewtypes.RunConfig{Skills: []string{"/skill"}}
@@ -564,5 +592,21 @@ func TestBuildCodexReviewCmd_PromptOverrideVerbatim(t *testing.T) {
 	}
 	if got := string(stdin); got != "/review exactly as written" {
 		t.Errorf("PromptOverride modified: %q", got)
+	}
+}
+
+// An MCP call exec mode refused for approval is reported as blocked.
+func TestParseCodexOutput_ReportsToolBlockedForApproval(t *testing.T) {
+	t.Parallel()
+	stream := `{"type":"item.completed","item":{"type":"mcp_tool_call","server":"docs","tool":"search","status":"failed","error":{"message":"MCP tool call requires approval, but approval policy is never"}}}` + "\n" +
+		`{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}` + "\n"
+	var blocked []string
+	for ev := range parseCodexOutput(strings.NewReader(stream)) {
+		if e, ok := ev.(reviewtypes.ToolsBlocked); ok {
+			blocked = append(blocked, e.Names...)
+		}
+	}
+	if strings.Join(blocked, ",") != "docs.search" {
+		t.Fatalf("blocked = %v", blocked)
 	}
 }

@@ -225,7 +225,7 @@ func buildSessionTokensReport(state *strategy.SessionState, status string) sessi
 		Source:    "session_state",
 	}
 
-	if tokens := buildSessionTokensUsage(state.TokenUsage); tokens != nil {
+	if tokens := buildSessionTokensUsage(state.TotalTokenUsage()); tokens != nil {
 		report.Tokens = tokens
 		if tokens.SubagentTotal > 0 {
 			report.Contributors = append(report.Contributors, sessionTokensContributor{

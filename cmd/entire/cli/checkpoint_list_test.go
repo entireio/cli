@@ -159,7 +159,8 @@ func TestCheckpointListCmd_Routing(t *testing.T) {
 // seedPendingPreviewSession records a session in the current worktree with
 // turn-end work (two turns, two files, one running task record on HEAD) and
 // two prompts in prompt.txt, the state `checkpoint list --pending` previews.
-func seedPendingPreviewSession(t *testing.T, repoDir string) {
+// It returns the session's last interaction time, the row's date.
+func seedPendingPreviewSession(t *testing.T, repoDir string) time.Time {
 	t.Helper()
 	ctx := context.Background()
 	worktree, err := paths.WorktreeRoot(ctx)
@@ -169,7 +170,9 @@ func seedPendingPreviewSession(t *testing.T, repoDir string) {
 	head, err := repo.Head()
 	require.NoError(t, err)
 
-	started := time.Date(2026, 10, 7, 9, 0, 0, 0, time.UTC)
+	// Relative to now: a fixed date ages past session.StaleSessionThreshold and
+	// the pending preview then drops the session.
+	started := time.Now().Add(-time.Hour).UTC()
 	last := started.Add(30 * time.Minute)
 	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
 		SessionID:           "2026-10-07-preview",
@@ -190,6 +193,7 @@ func seedPendingPreviewSession(t *testing.T, repoDir string) {
 	require.NoError(t, os.MkdirAll(promptDir, 0o750))
 	require.NoError(t, os.WriteFile(filepath.Join(promptDir, paths.PromptFileName),
 		[]byte("implement the parser\n\n---\n\nadd the tests"), 0o600))
+	return last
 }
 
 // TestCheckpointListPending_PreviewText pins the human view of the
@@ -216,7 +220,7 @@ func TestCheckpointListPending_PreviewText(t *testing.T) {
 // Uses t.Chdir — do NOT add t.Parallel().
 func TestCheckpointListPending_PreviewJSON(t *testing.T) {
 	_, dir := setupCheckpointListRepo(t)
-	seedPendingPreviewSession(t, dir)
+	last := seedPendingPreviewSession(t, dir)
 
 	out := runListCmd(t, "--pending", "--json")
 	var rows []map[string]any
@@ -232,7 +236,7 @@ func TestCheckpointListPending_PreviewJSON(t *testing.T) {
 	require.Equal(t, false, row["is_task_checkpoint"])
 	require.Equal(t, false, row["is_logs_only"])
 	require.Equal(t, "Next checkpoint: 2 turns, 2 files, 1 task", row["message"])
-	require.Equal(t, "2026-10-07T09:30:00Z", row["date"])
+	require.Equal(t, last.Format(time.RFC3339), row["date"])
 	require.Equal(t, "2026-10-07-preview", row["session_id"])
 	require.Equal(t, "add the tests", row["session_prompt"])
 	require.Equal(t, paths.SessionMetadataDirFromSessionID("2026-10-07-preview"), row["metadata_dir"])
@@ -262,7 +266,7 @@ func TestCheckpointListPending_PreviewEmptyArraysPresent(t *testing.T) {
 		AgentType:    agent.AgentTypeClaudeCode,
 		WorktreePath: worktree,
 		Phase:        session.PhaseIdle,
-		StartedAt:    time.Date(2026, 10, 7, 9, 0, 0, 0, time.UTC),
+		StartedAt:    time.Now().Add(-time.Hour).UTC(),
 		StepCount:    1,
 	}))
 
@@ -284,6 +288,29 @@ func TestCheckpointListCmd_SessionWithPendingErrors(t *testing.T) {
 	err := cmd.Execute()
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "--session cannot be combined with --pending")
+}
+
+// TestCheckpointListCmd_OutgoingRejectsOtherDatasets: --outgoing is its own
+// dataset, so the flags that select or filter the other datasets are refused
+// rather than silently ignored. Uses t.Chdir — do NOT add t.Parallel.
+func TestCheckpointListCmd_OutgoingRejectsOtherDatasets(t *testing.T) {
+	setupCheckpointListRepo(t)
+
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{args: []string{"--outgoing", "--pending"}, want: "--outgoing cannot be combined with --pending"},
+		{args: []string{"--outgoing", "--session", "abc"}, want: "--session cannot be combined with --outgoing"},
+	} {
+		cmd := newCheckpointListCmd()
+		cmd.SetArgs(tc.args)
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetErr(&bytes.Buffer{})
+		err := cmd.Execute()
+		require.Error(t, err, "checkpoint list %v", tc.args)
+		require.Contains(t, err.Error(), tc.want)
+	}
 }
 
 // runListCmd executes `checkpoint list <args>` via the real cobra command and
@@ -370,5 +397,19 @@ func TestRenderPendingPoints_LogsOnlyRowsHaveHeading(t *testing.T) {
 	}
 	if !strings.HasPrefix(text, "Resume points") {
 		t.Fatalf("heading must come before the rows:\n%s", text)
+	}
+}
+
+// TestRenderOutgoingListing_EmptyQueueClaimsNothingAboutTheRemote: an empty
+// queue means nothing is waiting to be sent. It does not mean the remote holds
+// every local checkpoint: a newly elected remote, or one pushing has never
+// reached, can be missing all of them.
+func TestRenderOutgoingListing_EmptyQueueClaimsNothingAboutTheRemote(t *testing.T) {
+	t.Parallel()
+	for _, pushDisabled := range []bool{false, true} {
+		var out bytes.Buffer
+		renderOutgoingListing(&out, outgoingListing{sync: checkpointSyncInfo{Remote: "origin", PushDisabled: pushDisabled}})
+		require.Contains(t, out.String(), "No checkpoints are queued for origin.", "push disabled: %v", pushDisabled)
+		require.NotContains(t, out.String(), "has every", "push disabled: %v", pushDisabled)
 	}
 }

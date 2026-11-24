@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ogen-go/ogen/ogenerrors"
 
@@ -133,6 +134,34 @@ func TestAPIError(t *testing.T) {
 	}
 }
 
+// The type survives the generated decoder.
+func TestAPIErrorType(t *testing.T) {
+	t.Parallel()
+
+	const quota = "https://entire.com/errors/service-account/quota-reached"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusConflict)
+		fmt.Fprintf(w, `{"status":409,"detail":"service account limit reached","type":%q}`, quota)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := NewWithBearer(srv.URL, "tok")
+	if err != nil {
+		t.Fatalf("NewWithBearer: %v", err)
+	}
+	_, err = c.CreateServiceAccount(t.Context(), &CreateServiceAccountInputBody{ProjectID: "01HZX7QABCDEFGHJKMNPQRSTVW", Name: "ci"})
+	if got := APIErrorType(err); got != quota {
+		t.Errorf("APIErrorType() = %q, want %q (err %v)", got, quota, err)
+	}
+	if got := APIErrorType(errors.New("dial tcp: refused")); got != "" {
+		t.Errorf("APIErrorType(non-API) = %q, want empty", got)
+	}
+	untyped := &ErrorModelStatusCode{StatusCode: 409, Response: ErrorModel{Detail: NewOptString("x")}}
+	if got := APIErrorType(untyped); got != "" {
+		t.Errorf("APIErrorType(untyped) = %q, want empty", got)
+	}
+}
+
 // TestProviderSource_BearerAuth covers the three branches of the
 // token-provider SecuritySource New() builds: a token passes through, a
 // not-logged-in error gets the login hint, and any other error surfaces
@@ -178,6 +207,37 @@ func TestProviderSource_BearerAuth(t *testing.T) {
 			t.Fatalf("error = %v, want the provider message surfaced verbatim", err)
 		}
 	})
+}
+
+func TestGetMirror_CredentialTimeout(t *testing.T) {
+	t.Parallel()
+	for _, afterDeadline := range []bool{false, true} {
+		t.Run(fmt.Sprintf("after_wait_deadline=%t", afterDeadline), func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				t.Error("credential failure must prevent the mirror request")
+				w.WriteHeader(http.StatusInternalServerError)
+			}))
+			defer server.Close()
+			src := &providerSource{provide: func(ctx context.Context) (string, error) {
+				if afterDeadline {
+					<-ctx.Done()
+				}
+				return "", fmt.Errorf("keyring timed out: %w", context.DeadlineExceeded)
+			}}
+			client, err := NewClient(server.URL, src, WithClient(server.Client()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+			defer cancel()
+			_, err = client.GetMirror(ctx, GetMirrorParams{MirrorId: "mirror-1"})
+			var credentialErr *CredentialError
+			if !errors.As(err, &credentialErr) || !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("credential provenance and deadline must survive the generated client: %v", err)
+			}
+		})
+	}
 }
 
 // providerSource must skip SessionAuth so no Cookie header is added — same
@@ -479,8 +539,9 @@ func rawJSONClient(t *testing.T, body string) *Client {
 }
 
 // TestDetachRepo_UnknownEnumValuesPassThrough: the detach result's precondition
-// slugs, access source/subject type, and status are documented as growing sets
-// that `entire repo mirror detach` prints, so a new value must decode.
+// slugs and status are documented as growing sets that `entire repo mirror
+// detach` prints, so a new value must decode. Access source and subject type
+// must decode too: an older core still sends them, and `--json` prints them.
 func TestDetachRepo_UnknownEnumValuesPassThrough(t *testing.T) {
 	t.Parallel()
 
@@ -498,6 +559,23 @@ func TestDetachRepo_UnknownEnumValuesPassThrough(t *testing.T) {
 	}
 	if got := out.Status.Or(""); got != "queued" {
 		t.Errorf("Status = %q, want the unknown value passed through", got)
+	}
+}
+
+// TestDetachRepo_UnsentAccessDecodes: the CLI no longer shows the detach's
+// access list, and core drops it after this release, so a result without
+// `access` must decode.
+func TestDetachRepo_UnsentAccessDecodes(t *testing.T) {
+	t.Parallel()
+
+	c := rawJSONClient(t, `{"dryRun":true,"eligible":true,"requestedBy":"01H0000000000000000000000A","targetProject":"01H000000000000000000000P1","name":"web","preconditions":[{"precondition":"single-placement","passed":true}]}`)
+
+	out, err := c.DetachRepo(context.Background(), &DetachRepoBody{TargetProject: "01H000000000000000000000P1"}, DetachRepoParams{RepoId: "01H0000000000000000000000R"})
+	if err != nil {
+		t.Fatalf("DetachRepo without access must decode, got: %v", err)
+	}
+	if !out.Eligible {
+		t.Errorf("Eligible = false, want true")
 	}
 }
 

@@ -163,9 +163,9 @@ func SetupRepo(t *testing.T, agent agents.Agent) *RepoState {
 	// commit links must come from the hook deciding nobody can answer, not from
 	// a setting that skips the decision. Every E2E commit is made by an agent or
 	// the harness, so a prompt shown is always a failure; see
-	// failIfCommitLinkingPrompted.
+	// failIfPrompted.
 	PatchSettings(t, dir, map[string]any{"log_level": "debug"})
-	t.Cleanup(func() { failIfCommitLinkingPrompted(t, dir) })
+	t.Cleanup(func() { failIfPrompted(t, dir) })
 
 	// Agents that need files planted before their first run in a repo get them
 	// here — after `entire enable` has written the agent's own config, so a
@@ -504,8 +504,15 @@ func (s *RepoState) logPromptResult(out agents.Output) {
 // Git runs a git command in the repo and logs it to ConsoleLog.
 func (s *RepoState) Git(t *testing.T, args ...string) {
 	t.Helper()
+	s.GitEnv(t, nil, args...)
+}
+
+// GitEnv is Git with env added to the command's environment, for a commit
+// whose hooks must find the agent's per-run home.
+func (s *RepoState) GitEnv(t *testing.T, env []string, args ...string) {
+	t.Helper()
 	s.ConsoleLog.WriteString("> git " + strings.Join(args, " ") + "\n")
-	Git(t, s.Dir, args...)
+	gitEnv(t, s.Dir, env, args...)
 }
 
 // StartSession starts an interactive session and registers it for pane
@@ -629,12 +636,17 @@ func EmptyDir(t *testing.T) string {
 // returns a non-zero exit code.
 func Git(t *testing.T, dir string, args ...string) {
 	t.Helper()
+	gitEnv(t, dir, nil, args...)
+}
+
+func gitEnv(t *testing.T, dir string, env []string, args ...string) {
+	t.Helper()
 
 	cmd := execx.NonInteractive(context.Background(), "git", args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	cmd.Env = os.Environ()
+	cmd.Env = append(os.Environ(), env...)
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -762,6 +774,13 @@ func ReadSessionMetadata(t *testing.T, dir string, checkpointID string, sessionI
 	}
 
 	return meta
+}
+
+// ReadCheckpointTranscript reads a session's stored transcript, the copy
+// `entire resume` restores, for the given checkpoint ID and session index.
+func ReadCheckpointTranscript(t *testing.T, dir string, checkpointID string, sessionIndex int) string {
+	t.Helper()
+	return GitOutput(t, dir, "show", checkpointBlobSpec(checkpointID, fmt.Sprintf("%d/full.jsonl", sessionIndex)))
 }
 
 // WaitForSessionMetadata polls until session metadata exists on the checkpoint

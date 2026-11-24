@@ -63,7 +63,7 @@ func TestControlPlane_CreateCloneDelete(t *testing.T) {
 	assert.Contains(t, remotes, "origin\t"+remote+" (push)")
 
 	// The server refuses to delete a project with repos or an org with projects.
-	assertDeleted(t, dir, "repo", repo.ID)
+	assertDeleted(t, dir, "repo", repoRef)
 	assertDeleted(t, dir, "project", project.ID)
 	assertDeleted(t, dir, "org", org.ID)
 }

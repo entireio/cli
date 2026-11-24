@@ -3,9 +3,13 @@ package cli
 import (
 	"bytes"
 	"os"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
+
+	"charm.land/lipgloss/v2"
 )
 
 const activityTestAgentClaude = "claude"
@@ -72,6 +76,177 @@ func TestUniqueCommitAgents_Empty(t *testing.T) {
 	agents := uniqueCommitAgents(c)
 	if len(agents) != 0 {
 		t.Errorf("got %v, want empty", agents)
+	}
+}
+
+// External agents keep their own name instead of all folding into "Unknown".
+func TestUniqueCommitAgents_KeepsExternalAgentName(t *testing.T) {
+	t.Parallel()
+	c := userCommit{
+		Checkpoints: []userCommitCheckpoint{
+			{Agents: []string{"Claude Code", "Grok Bot"}},
+			{Agents: []string{"Qwen Coder (PC)"}},
+		},
+	}
+	got := uniqueCommitAgents(c)
+	want := []string{"Grok Bot", "Qwen Coder (PC)", activityTestAgentClaude}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// External agent names are self-reported; escape sequences must not reach the
+// terminal.
+func TestAgentKey_StripsControlCharacters(t *testing.T) {
+	t.Parallel()
+	if got := agentKey("Grok\x1b[2J Bot\u202e\n"); got != "Grok[2J Bot" {
+		t.Errorf("agentKey = %q, want %q", got, "Grok[2J Bot")
+	}
+	if got := agentKey("\x1b\x07"); got != agentUnknown {
+		t.Errorf("agentKey of only control characters = %q, want %q", got, agentUnknown)
+	}
+	if got := agentDisplayFor("Grok\x1b[2J Bot").Label; got != "Grok[2J Bot" {
+		t.Errorf("agentDisplayFor label = %q, want %q", got, "Grok[2J Bot")
+	}
+}
+
+func TestAgentDisplayFor_TruncatesLongExternalName(t *testing.T) {
+	t.Parallel()
+	label := agentDisplayFor(strings.Repeat("界", 40)).Label
+	if w := lipgloss.Width(label); w > maxExternalAgentLabelWidth {
+		t.Errorf("label width = %d, want <= %d (%q)", w, maxExternalAgentLabelWidth, label)
+	}
+	if !strings.HasPrefix(label, "界界") || !strings.HasSuffix(label, "…") {
+		t.Errorf("label = %q, want the name's start cut with …", label)
+	}
+}
+
+// A huge self-reported name is capped before it is measured, so rendering
+// stays fast and the label stays within its width.
+func TestAgentDisplayFor_HugeNameIsCappedBeforeMeasuring(t *testing.T) {
+	t.Parallel()
+	name := strings.Repeat("a", 23) + strings.Repeat("\u0301", 100_000) + "bb"
+	start := time.Now()
+	label := agentDisplayFor(agentKey(name)).Label
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("label took %v, want under 2s", elapsed)
+	}
+	if label == "" || lipgloss.Width(label) > maxExternalAgentLabelWidth {
+		t.Errorf("label = %q (width %d), want non-empty and <= %d", label, lipgloss.Width(label), maxExternalAgentLabelWidth)
+	}
+}
+
+// Invisible format characters are stripped, as on the web and in the API, so
+// a name cannot pass as another one.
+func TestAgentKey_StripsInvisibleFormatCharacters(t *testing.T) {
+	t.Parallel()
+	for raw, want := range map[string]string{
+		"Foo\u200b":                      "Foo",
+		"\ufeffGrok\u2060 Bot":           "Grok Bot",
+		"Ro\u00adger":                    "Roger",
+		"\u200dFoo\u200d":                "Foo",
+		"\U0001F469\u200d\U0001F4BB Dev": "\U0001F469\u200d\U0001F4BB Dev",
+	} {
+		if got := agentKey(raw); got != want {
+			t.Errorf("agentKey(%q) = %q, want %q", raw, got, want)
+		}
+	}
+}
+
+// Goose and Antigravity are built-in agents in entire-api, so they get their
+// own label rather than being shown as an external agent's raw id.
+func TestAgentKey_GooseAndAntigravityAreBuiltIn(t *testing.T) {
+	t.Parallel()
+	for raw, want := range map[string]string{"goose": activityAgentGoose, "Antigravity": activityAgentAntigravity} {
+		if got := agentKey(raw); got != want {
+			t.Errorf("agentKey(%q) = %q, want built-in %q", raw, got, want)
+		}
+	}
+}
+
+func TestRenderSessionRow_AgentLabel(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		agent *string
+		want  string
+	}{
+		"built-in": {strPtr("claude_code"), "Claude Code"},
+		"external": {strPtr("Grok Bot"), "Grok Bot"},
+		"missing":  {nil, "Unknown"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			var buf bytes.Buffer
+			renderSessionRow(&buf, activityStyles{width: 120}, userSession{DisplayName: "s", Agent: tc.agent})
+			if !strings.Contains(buf.String(), tc.want) {
+				t.Errorf("row = %q, want agent %q", buf.String(), tc.want)
+			}
+		})
+	}
+}
+
+// Repo bars and the legend list external agents after the built-ins and
+// before Unknown, instead of dropping them.
+func TestAgentRenderOrder_IncludesExternalAgents(t *testing.T) {
+	t.Parallel()
+	got := agentRenderOrder(map[string]int{
+		activityAgentUnknown:    1,
+		"Grok Bot":              2,
+		activityTestAgentClaude: 3,
+		"Aider":                 4,
+		activityAgentCodex:      0,
+	})
+	want := []string{activityTestAgentClaude, "Aider", "Grok Bot", activityAgentUnknown}
+	if !slices.Equal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestRenderDotChart_LegendNamesExternalAgent(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	repos := []repoContribution{{Repo: "r", Total: 4, Agents: map[string]int{activityTestAgentClaude: 1, "Grok Bot": 3}}}
+	hourly := []hourlyPoint{{Date: "2026-04-01", Hour: 12, Value: 4, AgentID: activityTestAgentClaude}}
+	renderDotChart(&buf, activityStyles{width: 200}, hourly, repos)
+	if !strings.Contains(buf.String(), "Grok Bot 75%") {
+		t.Errorf("legend missing external agent:\n%s", buf.String())
+	}
+}
+
+// Raw names that clean to the same agent are one legend entry, and an empty
+// name is Unknown.
+func TestRenderDotChart_LegendMergesCleanedNames(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	repos := []repoContribution{{Repo: "r", Total: 12, Agents: map[string]int{"Grok": 5, "Grok\x1b": 5, "": 2}}}
+	hourly := []hourlyPoint{{Date: "2026-04-01", Hour: 12, Value: 12, AgentID: "Grok"}}
+	renderDotChart(&buf, activityStyles{width: 200}, hourly, repos)
+	out := buf.String()
+	if strings.Count(out, "Grok") != 1 || !strings.Contains(out, "Grok 83%") || !strings.Contains(out, "Unknown 17%") {
+		t.Errorf("legend should list Grok once at 83%% and Unknown at 17%%:\n%s", out)
+	}
+
+	buf.Reset()
+	repos = []repoContribution{
+		{Repo: "a", Total: 3, Agents: map[string]int{"Grok Bot": 3}},
+		{Repo: "b", Total: 1, Agents: map[string]int{"grok bot": 1}},
+	}
+	renderDotChart(&buf, activityStyles{width: 200}, hourly, repos)
+	if out := buf.String(); !strings.Contains(out, "Grok Bot 100%") || strings.Contains(out, "grok bot") {
+		t.Errorf("legend should merge one agent's spellings across repos:\n%s", out)
+	}
+}
+
+// Without colour, an external agent's share must not look like the empty
+// track.
+func TestRenderAgentBar_ExternalAgentDiffersFromEmptyTrack(t *testing.T) {
+	t.Parallel()
+	bar := renderAgentBar(activityStyles{width: 120}, map[string]int{"Grok": 5, activityTestAgentClaude: 3}, 10, 20)
+	if got := strings.Count(bar, string(externalAgentBarChar)); got != 10 {
+		t.Errorf("bar = %q, want 10 external cells", bar)
+	}
+	if got := strings.Count(bar, "░"); got != 4 {
+		t.Errorf("bar = %q, want 4 empty-track cells", bar)
 	}
 }
 
@@ -374,5 +549,42 @@ func TestRunStatsTUI_NoColorStyleFlag(t *testing.T) {
 	}
 	if m.sty.colorEnabled {
 		t.Fatal("expected stats TUI styles to disable colors")
+	}
+}
+
+// The CLI records an unidentified agent as "Unknown" (agent.AgentTypeUnknown);
+// it must share the canonical unknown bucket, not become an external agent.
+func TestAgentKey_CapitalizedUnknownIsUnknown(t *testing.T) {
+	t.Parallel()
+	if got := agentKey("Unknown"); got != activityAgentUnknown {
+		t.Errorf("agentKey(%q) = %q, want %q", "Unknown", got, activityAgentUnknown)
+	}
+	counts := agentCounts(map[string]int{"unknown": 2, "Unknown": 3, "UNKNOWN": 1})
+	if len(counts) != 1 || counts[activityAgentUnknown] != 6 {
+		t.Errorf("agentCounts = %v, want {%s:6}", counts, activityAgentUnknown)
+	}
+	c := userCommit{Checkpoints: []userCommitCheckpoint{{Agents: []string{"Unknown"}}, {Agents: []string{"unknown"}}}}
+	if got := uniqueCommitAgents(c); len(got) != 1 || got[0] != activityAgentUnknown {
+		t.Errorf("uniqueCommitAgents = %v, want a single unknown badge", got)
+	}
+}
+
+func TestAgentCounts_MergesExternalCaseVariants(t *testing.T) {
+	t.Parallel()
+	counts := agentCounts(map[string]int{"Grok Bot": 3, "grok bot": 1, activityTestAgentClaude: 2})
+	if len(counts) != 2 || counts["Grok Bot"] != 4 || counts[activityTestAgentClaude] != 2 {
+		t.Errorf("agentCounts = %v, want {Grok Bot:4 claude:2}", counts)
+	}
+	tied := agentCounts(map[string]int{"grok bot": 1, "Grok Bot": 1})
+	if len(tied) != 1 || tied["Grok Bot"] != 2 {
+		t.Errorf("tied spellings = %v, want the smaller spelling {Grok Bot:2}", tied)
+	}
+	kelvin := agentCounts(map[string]int{"\u212airo": 5, activityAgentKiro: 2})
+	if len(kelvin) != 2 || kelvin[activityAgentKiro] != 2 || kelvin["\u212airo"] != 5 {
+		t.Errorf("Kelvin-sign Kiro = %v, want it kept apart from the built-in kiro", kelvin)
+	}
+	c := userCommit{Checkpoints: []userCommitCheckpoint{{Agents: []string{"grok bot"}}, {Agents: []string{"Grok Bot", "Grok Bot"}}}}
+	if got := uniqueCommitAgents(c); len(got) != 1 || got[0] != "Grok Bot" {
+		t.Errorf("uniqueCommitAgents = %v, want one Grok Bot badge", got)
 	}
 }
