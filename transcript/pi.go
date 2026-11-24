@@ -234,9 +234,10 @@ func piEmitAssistantContent(raw json.RawMessage, results map[string]piCompactToo
 	return blocks
 }
 
-// piContentItems decodes a Pi content array block by block, skipping a block
-// that is not a content object, so one malformed block does not cost the
-// whole message. ok is false when raw is not an array.
+// piContentItems decodes a Pi message's content array block by block,
+// skipping a block that is not a content object, so one malformed block does
+// not cost the whole message. ok is false when raw is not an array. Tool
+// results do not use it: piDecodeResultOutput keeps such a result whole.
 func piContentItems(raw json.RawMessage) ([]pijsonl.ContentItem, bool) {
 	var rawItems []json.RawMessage
 	if json.Unmarshal(raw, &rawItems) != nil {
@@ -274,7 +275,11 @@ func piDecodeResultOutput(raw json.RawMessage) string {
 	if text := pijsonl.DecodeStringContent(raw); text != "" {
 		return text
 	}
-	if items, ok := piContentItems(raw); ok {
+	// Decode the whole array, not block by block as messages do: a result
+	// with a block that is not a content object is kept whole as JSON below,
+	// rather than reduced to its readable text.
+	var items []pijsonl.ContentItem
+	if err := json.Unmarshal(raw, &items); err == nil {
 		texts := make([]string, 0, len(items))
 		for _, item := range items {
 			if item.Type == pijsonl.ContentTypeText && item.Text != "" {
