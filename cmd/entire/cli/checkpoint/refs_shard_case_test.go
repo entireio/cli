@@ -528,10 +528,14 @@ func TestCASPersistentRef_RewriteLeavesNoOldVersionUnderTheOtherSpelling(t *test
 	ctx := context.Background()
 	store := newRefsStore(t)
 	dir := repoDirOf(t, store)
-	testutil.RunGit(t, dir, "config", "core.ignorecase", "true")
 	canonical := mustRefName(t, foldableULID)
+	// Written before git records a case-insensitive filesystem, so the ref
+	// sits under its uppercase shard the way a clone made by an earlier CLI
+	// has it.
+	testutil.RunGit(t, dir, "config", "core.ignorecase", "false")
 	refsWrite(t, store, foldableULID, "sess-1", "one")
 	refsWrite(t, store, foldableULID, "sess-2", "two")
+	testutil.RunGit(t, dir, "config", "core.ignorecase", "true")
 	old := testutil.RunGit(t, dir, "rev-parse", canonical.String())[:40]
 	testutil.RunGit(t, dir, "pack-refs", "--all")
 	// A legacy checkpoint recreates the shard folder in the other case.

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 
@@ -335,8 +336,9 @@ func fetchCheckpointRefFrom(
 }
 
 // probeAndFetchCheckpointRef runs the ls-remote existence probe and, on a hit,
-// fetches ref from fetchTarget into the local ref of the same name. It carries
-// FetchCheckpointRef's absence-vs-failure contract for a single target.
+// fetches ref from fetchTarget into the name this clone stores it under (see
+// localCheckpointRefName). It carries FetchCheckpointRef's absence-vs-failure
+// contract for a single target.
 func probeAndFetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName, fetchTarget string, authoritative bool) error {
 	out, err := LsRemoteInDir(ctx, "", fetchTarget, ref.String())
 	if err != nil {
@@ -356,7 +358,7 @@ func probeAndFetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName,
 		return fmt.Errorf("checkpoint ref %s not found on %s: %w", ref, RedactURLOrPath(fetchTarget), plumbing.ErrReferenceNotFound)
 	}
 
-	refSpec := "+" + ref.String() + ":" + ref.String()
+	refSpec := "+" + ref.String() + ":" + localCheckpointRefName(ctx, ref).String()
 	if fetchOut, err := Fetch(ctx, FetchOptions{
 		Remote:   fetchTarget,
 		RefSpecs: []string{refSpec},
@@ -373,6 +375,28 @@ func probeAndFetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName,
 		return fmt.Errorf("fetch checkpoint ref %s from %s: %w", ref, safeTarget, err)
 	}
 	return nil
+}
+
+// localCheckpointRefName returns the name a fetched checkpoint ref is stored
+// under locally, by the same rule as the store's writes
+// (checkpoint.LocalRefNameIn). The remote keeps the canonical name. The
+// repository is the current directory's, where Fetch writes. A repository that
+// cannot be opened keeps ref, the name every earlier CLI fetched into.
+func localCheckpointRefName(ctx context.Context, ref plumbing.ReferenceName) plumbing.ReferenceName {
+	cid, ok := checkpoint.ParseRef(ref)
+	if !ok {
+		return ref
+	}
+	repo, err := openRepoAt(ctx, "")
+	if err != nil {
+		return ref
+	}
+	defer repo.Close()
+	local, err := checkpoint.LocalRefNameIn(repo, cid)
+	if err != nil {
+		return ref
+	}
+	return local
 }
 
 // repoHasNoRemotes reports whether the repository at the current directory
