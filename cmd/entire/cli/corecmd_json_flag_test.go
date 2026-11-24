@@ -34,8 +34,10 @@ func TestControlPlaneJSONFlag_OnlyOnHonoringCommands(t *testing.T) {
 		"project get":    true,
 		"project delete": false,
 		// list and add render the agents.
-		"project agent list": true,
-		"project agent add":  true,
+		"project agent list":  true,
+		"project agent add":   true,
+		"project agent setup": true,  // prints binding IDs, never credentials
+		"project agent serve": false, // foreground progress, not a JSON document
 		// each prints the run the server returns, or a page of runs.
 		"project agent run list":   true,
 		"project agent run show":   true,
@@ -79,6 +81,11 @@ func TestControlPlaneJSONFlag_OnlyOnHonoringCommands(t *testing.T) {
 		"repo grant add":       true,
 		"repo grant list":      true,
 		"repo grant remove":    false,
+		// project and repo invite mirror org invite's list and revoke.
+		"project invite list":   true,
+		"project invite revoke": false,
+		"repo invite list":      true,
+		"repo invite revoke":    false,
 	}
 
 	got := map[string]bool{}

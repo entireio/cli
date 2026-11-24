@@ -144,7 +144,6 @@ type Metadata struct {
 	Status          Status     `json:"status"`
 	Phase           string     `json:"phase,omitempty"`
 	Author          *Author    `json:"author"`
-	Assignees       []string   `json:"assignees"`
 	Labels          []string   `json:"labels"`
 	Type            Type       `json:"type,omitempty"`
 	Priority        Priority   `json:"priority,omitempty"`

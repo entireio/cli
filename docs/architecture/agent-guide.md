@@ -45,7 +45,7 @@ Every agent must implement all 19 methods on the `Agent` interface:
 | Interface | Methods | When to implement |
 |-----------|---------|-------------------|
 | `HookSupport` | `InstallHooks`, `UninstallHooks`, `AreHooksInstalled` | Agent uses a config file for hook registration (e.g., `settings.json`) |
-| `HookFreshness` | `CheckHookConfig` | Agent can tell whether its installed hook config still matches what this CLI writes (read-only). `entire status` points drift at `entire doctor`, which names the fix: `entire agent add <agent>`, then `--force` if that does not fix it. Claude Code also warns in its SessionStart banner, but only when a hook this CLI requires is missing (`claudecode.MissingRequiredHooks`); stale commands, missing timeouts and every other agent's check (Codex, OpenCode, Pi, Copilot) stay out of the banner because they also fire when a teammate's newer CLI wrote the config. |
+| `HookFreshness` | `CheckHookConfig` | Agent can tell whether its installed hook config still matches what this CLI writes (read-only). `entire status` points drift at `entire doctor`, which names the fix: `entire agent add <agent>`, then `--force` if that does not fix it. Claude Code also warns in its SessionStart banner, but only when a hook this CLI requires is missing (`claudecode.MissingRequiredHooks`); stale commands, missing timeouts and every other agent's check (Codex, OpenCode, Pi, Copilot, Cursor, Factory Droid, Antigravity) stay out of the banner because they also fire when a teammate's newer CLI wrote the config. |
 | `HookHandler` | `GetHookNames` | **Required for CLI hook registration** — `entire hooks <agent> <verb>` subcommands are only created for agents implementing this interface. Typically delegates to `HookNames()`. |
 | `TranscriptAnalyzer` | `GetTranscriptPosition`, `ExtractModifiedFilesFromOffset` | You want richer checkpoints with transcript-derived file lists |
 | `TranscriptPreparer` | `PrepareTranscript` | Agent writes transcripts asynchronously and needs a flush/sync step |
@@ -469,6 +469,8 @@ Windows — see `agent.HookHostIsWindows`'s doc comment for how its runner was
 read out of the shipped binaries, and for why codex and cursor are on the other
 gate for reasons of evidence rather than mechanism.
 
+Pick the silent selector by how the agent runs the line on Windows: factoryai-droid uses `WrapProductionSilentHookCommandForCmdHostOS`, codex and cursor use `WrapProductionSilentHookCommandForOS`, and antigravity uses `WrapWindowsProductionSilentHookCommandDirect`. The rules are in the comment above `WrapWindowsProductionSilentHookCommand`, and why every Windows wrapper sets `NoDefaultCurrentDirectoryInExePath` is in "Hook Commands Resolve Programs from PATH" in [Git and subprocess safety](../development/git-safety.md).
+
 Put a warning wrapper on one hook that fires every session (usually session
 start) so a broken install is visible. The sh-based warning wrappers warn both
 when `entire` is missing from PATH and when it is on PATH but `entire --version`
@@ -830,11 +832,15 @@ Key differences from JSON config agents:
   auto-discovers this same extension, so the child would otherwise forward its own
   lifecycle as the user's session. Two independent guards:
 
-  1. **Extension**: sets `ENTIRE_PI_NESTED` on its process (inherited by any Pi it
-     spawns) and, when it is already set, registers only the `tool_call` bash
-     hardening and skips the lifecycle handlers. The hardening stays on purpose — a
-     nested Pi is non-interactive while inheriting the parent's TTY, and Entire's git
-     hooks fire from `.git/hooks` regardless of this extension. The marker is read
+  1. **Extension**: sets `ENTIRE_PI_NESTED` to its own PID on its process
+     (inherited by any Pi it spawns) and, when it is already set to a different
+     value, registers only the `tool_call` bash hardening and skips the lifecycle
+     handlers. Comparing against the PID keeps a top-level Pi forwarding after
+     `/reload`, `/new` or `/resume`, which build a new extension instance in the
+     same process; a nested Pi never overwrites the marker. The hardening stays on
+     purpose — a nested Pi is non-interactive while inheriting the parent's TTY, and
+     Entire's git hooks fire from `.git/hooks` regardless of this extension. The
+     marker is read
      **only** here: Entire's own hook subprocesses inherit it from the parent, so
      treating it as a skip signal in Go would disable tracking for everyone.
   2. **CLI**: `ParseHookEvent` skips any hook whose payload carries no resolvable

@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	trailActionTestRepoRoute = "/api/v1/repos/repo-id/trails/7"
+	trailActionTestRepoRoute = "/api/v1/repos/repo-id/changes/7"
 	trailActionTestAgentID   = "01ARZ3NDEKTSV4RRFFQ69G5FAA"
 )
 
@@ -44,7 +44,7 @@ func runTrailChangeAction(t *testing.T, project bool, repo string, args []string
 	detail.ID, detail.Number, detail.Branch = projectTrailTestChange, 7, "feature/work"
 	setupWorkingRepoClient(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && (r.URL.Path == "/api/v1/trails/gh/acme/widget/7" || r.URL.Path == trailActionTestRepoRoute):
+		case r.Method == http.MethodGet && r.URL.Path == trailActionTestRepoRoute:
 			assert.NoError(t, json.NewEncoder(w).Encode(detail))
 		case strings.HasPrefix(r.URL.Path, trailActionTestRepoRoute+"/"):
 			requests = append(requests, r.Method+" "+strings.TrimPrefix(r.URL.Path, trailActionTestRepoRoute))

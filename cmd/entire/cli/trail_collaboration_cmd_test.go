@@ -43,7 +43,7 @@ func TestPrintTrailDiscussionDetail_ShowsMessageIDs(t *testing.T) {
 
 func TestTrailDiscussionPathBuilders(t *testing.T) {
 	t.Parallel()
-	for _, basePath := range []string{"/api/v1/repos/native-repo-id/trails", "/api/v1/trails/gh/acme/widget"} {
+	for _, basePath := range []string{"/api/v1/repos/native-repo-id/changes", "/api/v1/repos/repo-id/changes"} {
 		t.Run(basePath, func(t *testing.T) {
 			t.Parallel()
 			if got := trailDiscussionsPath(basePath, 7); got != basePath+"/7/discussions" {

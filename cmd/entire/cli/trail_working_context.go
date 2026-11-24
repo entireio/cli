@@ -73,11 +73,11 @@ func resolveProjectTrailWorkingContext(cmd *cobra.Command, selector, branch stri
 	if repoOverride == "" {
 		defer func() {
 			if !foreign {
-				noteTrailCommandEnablement(ctx, client, err)
+				noteTrailCommandEnablement(ctx, client, repoID, err)
 			}
 		}()
 	}
-	base, err := trailRepoBasePath(host, owner, repo, repoID)
+	base, err := trailRepoBasePath(repoID)
 	if err != nil {
 		return nil, err
 	}
@@ -168,7 +168,7 @@ func finishForeignTrailWorkingContext(cmd *cobra.Command, target *projectTrailTa
 	if repoID != selected.RepositoryID {
 		return nil, fmt.Errorf("repository %s/%s does not match the trail's change", target.Project, selected.Repository)
 	}
-	base, err := trailRepoBasePath(target.Host, target.Project, selected.Repository, repoID)
+	base, err := trailRepoBasePath(repoID)
 	if err != nil {
 		return nil, err
 	}

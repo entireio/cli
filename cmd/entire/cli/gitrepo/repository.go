@@ -132,7 +132,12 @@ func openBareRepository(repoRoot string) (*git.Repository, error) {
 		_ = repo.Close()
 		return nil, fmt.Errorf("validate bare repository config: %w", err)
 	}
-	if config.Raw.Section("core").HasOption("bare") && !config.Core.IsBare {
+	raw, err := RawConfig(repo, config)
+	if err != nil {
+		_ = repo.Close()
+		return nil, fmt.Errorf("validate bare repository config: %w", err)
+	}
+	if raw.Section("core").HasOption("bare") && !config.Core.IsBare {
 		_ = repo.Close()
 		return nil, fmt.Errorf("path %s has no worktree metadata and is not a bare repository", repoRoot)
 	}

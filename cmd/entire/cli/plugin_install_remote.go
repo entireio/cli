@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"golang.org/x/mod/semver"
 )
@@ -41,6 +42,11 @@ type RemoteInstallOptions struct {
 	// executing an unauthenticated binary is the supply-chain risk the
 	// checksum path exists to remove, so it takes an explicit opt-in.
 	AllowUnverified bool
+
+	// heldPluginLock names the plugin whose lock the caller already holds
+	// (UpgradeInstalledPlugin), so the install does not take it again: the
+	// lock is not reentrant.
+	heldPluginLock string
 }
 
 // RemoteInstallResult is what a successful remote install produced.
@@ -117,36 +123,19 @@ func installRepoAtTag(ctx context.Context, repoURL, expectedName, tag string, op
 	if err != nil {
 		return nil, err
 	}
-	// The installed name comes from the *remote* — entire-plugin.yml's name:,
-	// else the repo basename.
-	var name string
-	if meta != nil && meta.Name != "" {
-		name = meta.Name
-	} else if name, err = pluginNameFromRepoURL(repoURL); err != nil {
+	name, err := remotePluginName(meta, repoURL, expectedName)
+	if err != nil {
 		return nil, err
 	}
-
-	// Reconcile it with what the caller asked for. Unchecked, the remote chose
-	// the name unilaterally, which broke three things:
-	//
-	//  - `install <index-name>` could install something else entirely: the
-	//    index entry says "safe", the repo declares "hijack", and the user gets
-	//    entire-hijack on PATH with no prompt (index installs never prompt).
-	//  - --force escalated across plugins: the already-installed check below
-	//    tests the *remote-declared* name, so reinstalling A let A's repo
-	//    declare name: B and replace an unrelated installed B.
-	//  - A dependency installed under a different name never satisfied the
-	//    requirement, so dependencySatisfied/doctor reported it missing forever
-	//    and every future parent install re-attempted it.
-	//
-	// Fatal rather than a warning: every caller that sets ExpectedName has
-	// already made a trust decision about *that* name, and silently honoring a
-	// different one voids it. A legitimate rename is a catalog or requirement
-	// to fix, and the message says so.
-	if expectedName != "" && name != expectedName {
-		return nil, fmt.Errorf(
-			"%s declares plugin name %q but %q was requested; refusing to install under a name that was not asked for (update the plugin index entry or the requirement if the plugin was renamed)",
-			redactURL(repoURL), name, expectedName)
+	// Decide under the plugin's lock, and keep it through placement: the
+	// checks below would otherwise go stale during the download (a remove
+	// completing, another install landing first).
+	if opts.heldPluginLock != name {
+		release, err := lockPlugin(ctx, name, true)
+		if err != nil {
+			return nil, err
+		}
+		defer release()
 	}
 
 	existing, err := FindInstalledPlugin(name)
@@ -202,23 +191,123 @@ func installRepoAtTag(ctx context.Context, repoURL, expectedName, tag string, op
 		return nil, err
 	}
 
-	pkgDir, err := EnsurePluginPkgDir(name)
+	// BinarySHA256 is filled in by placeStagedBinary once the binary is placed.
+	manifest := &PluginManifest{
+		Name:        name,
+		RepoURL:     repoURL,
+		Tag:         tag,
+		Asset:       asset.Asset,
+		SHA256:      asset.SHA256,
+		Unverified:  !asset.Verified,
+		Pinned:      opts.Pin != "",
+		InstalledAt: time.Now().UTC(),
+	}
+	if meta != nil {
+		manifest.Requires = meta.Requires
+	}
+	// End the step before placement: it may wait for the plugin tree lock,
+	// which announces that wait on the same writer, and two spinners would
+	// take turns redrawing one terminal line. Placement itself is quick.
+	stopInstall()
+	if err := placeStagedBinary(ctx, stagingRoot, stagedName, manifest); err != nil {
+		return nil, err
+	}
+	entry, err := FindInstalledPlugin(name)
 	if err != nil {
 		return nil, err
+	}
+	return &RemoteInstallResult{Installed: entry, Manifest: manifest, Metadata: meta, ReplacedFrom: replacedFrom}, nil
+}
+
+// remotePluginName is the name a remote install lands under, checked against
+// the name the caller committed to.
+func remotePluginName(meta *PluginMetadata, repoURL, expectedName string) (string, error) {
+	// The installed name comes from the *remote* — entire-plugin.yml's name:,
+	// else the repo basename.
+	var name string
+	if meta != nil && meta.Name != "" {
+		name = meta.Name
+	} else {
+		var err error
+		if name, err = pluginNameFromRepoURL(repoURL); err != nil {
+			return "", err
+		}
+	}
+
+	// Reconcile it with what the caller asked for. Unchecked, the remote chose
+	// the name unilaterally, which broke three things:
+	//
+	//  - `install <index-name>` could install something else entirely: the
+	//    index entry says "safe", the repo declares "hijack", and the user gets
+	//    entire-hijack on PATH with no prompt (index installs never prompt).
+	//  - --force escalated across plugins: the already-installed check below
+	//    tests the *remote-declared* name, so reinstalling A let A's repo
+	//    declare name: B and replace an unrelated installed B.
+	//  - A dependency installed under a different name never satisfied the
+	//    requirement, so dependencySatisfied/doctor reported it missing forever
+	//    and every future parent install re-attempted it.
+	//
+	// Fatal rather than a warning: every caller that sets ExpectedName has
+	// already made a trust decision about *that* name, and silently honoring a
+	// different one voids it. A legitimate rename is a catalog or requirement
+	// to fix, and the message says so.
+	if expectedName != "" && name != expectedName {
+		return "", fmt.Errorf(
+			"%s declares plugin name %q but %q was requested; refusing to install under a name that was not asked for (update the plugin index entry or the requirement if the plugin was renamed)",
+			redactURL(repoURL), name, expectedName)
+	}
+	return name, nil
+}
+
+// placeStagedBinary moves the extracted binary into pkg/<name>/, records
+// manifest (setting its BinarySHA256) and swaps the bin/ entry onto it. It
+// either completes or leaves the previous install in place, holding the
+// plugin tree's lock throughout so no concurrent install sweeps its backup.
+func placeStagedBinary(ctx context.Context, stagingRoot *os.Root, stagedName string, manifest *PluginManifest) (retErr error) {
+	release, err := lockPluginTree(ctx, true)
+	if err != nil {
+		return err
+	}
+	defer release()
+	name := manifest.Name
+	binBase := pluginBinaryName(name)
+	pkgDir, err := EnsurePluginPkgDir(name)
+	if err != nil {
+		return err
 	}
 	pkgName, err := pluginPkgName(name)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	pluginTreeRoot, err := pluginRoot(true)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	sweepOldBinaries(pluginTreeRoot, pkgName)
 	pkgBinName := pkgName + "/" + binBase
 	pkgBin := filepath.Join(pkgDir, binBase)
+	// pkg/<name>/ is what upgrade compares against, so it must not record the
+	// new tag unless the bin/ entry — what actually runs — moved to it too.
+	// Otherwise a failed bin/ swap (a running .exe on Windows) leaves the
+	// manifest on the new tag and the entry on the old one, and every later
+	// `plugin upgrade` reports "up to date" over a stale binary. Keep the
+	// previous binary and manifest restorable until the swap has succeeded.
+	prev, err := stashPreviousPkgInstall(pluginTreeRoot, pkgName, binBase)
+	if err != nil {
+		return err
+	}
+	installed := false
+	defer func() {
+		if installed {
+			prev.discard()
+			return
+		}
+		if rbErr := prev.restore(); rbErr != nil {
+			retErr = errors.Join(retErr, rbErr)
+		}
+	}()
 	if err := replaceBinary(stagingRoot, stagedName, pluginTreeRoot, pkgBinName); err != nil {
-		return nil, fmt.Errorf("place plugin binary: %w", err)
+		return fmt.Errorf("place plugin binary: %w", err)
 	}
 
 	// Digest the binary we actually placed, not just the archive it came from.
@@ -227,23 +316,10 @@ func installRepoAtTag(ctx context.Context, repoURL, expectedName, tag string, op
 	// tampering. binDigest is what `plugin doctor` re-checks.
 	binDigest, err := fileSHA256(pkgBin)
 	if err != nil {
-		return nil, fmt.Errorf("hash installed plugin binary: %w", err)
+		return fmt.Errorf("hash installed plugin binary: %w", err)
 	}
 
-	manifest := &PluginManifest{
-		Name:         name,
-		RepoURL:      repoURL,
-		Tag:          tag,
-		Asset:        asset.Asset,
-		SHA256:       asset.SHA256,
-		BinarySHA256: binDigest,
-		Unverified:   !asset.Verified,
-		Pinned:       opts.Pin != "",
-		InstalledAt:  time.Now().UTC(),
-	}
-	if meta != nil {
-		manifest.Requires = meta.Requires
-	}
+	manifest.BinarySHA256 = binDigest
 	// The manifest is written before the bin/ link, immediately after the
 	// binary swap. Ordering matters because replaceBinary has already mutated
 	// pkg/<name>/: until the manifest catches up, it records the *previous*
@@ -252,19 +328,156 @@ func installRepoAtTag(ctx context.Context, repoURL, expectedName, tag string, op
 	// alarm on a perfectly good install. Writing it here leaves only the local
 	// re-hash above in that window.
 	//
-	// If the bin/ link then fails, the manifest is still accurate and doctor
-	// reports the real problem ("has an install manifest but no entry in the
-	// managed bin dir") with a fix that works, instead of accusing the user of
-	// tampering.
+	// If the bin/ link then fails, the deferred restore puts the previous
+	// binary and manifest back together, so pkg/ and bin/ agree on the old
+	// version and the next upgrade retries.
 	if err := SavePluginManifest(manifest); err != nil {
-		return nil, err
+		return err
 	}
+	prev.newManifestWritten = true
 
-	installed, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: pkgBin, Force: true})
-	if err != nil {
-		return nil, err
+	if _, err := placeManagedEntry(InstallPluginOptions{SourcePath: pkgBin, Force: true}); err != nil {
+		return err
 	}
-	return &RemoteInstallResult{Installed: installed, Manifest: manifest, Metadata: meta, ReplacedFrom: replacedFrom}, nil
+	// The bin/ entry now runs the new binary: from here on pkg/ must stay on
+	// the new version too, whatever else fails.
+	installed = true
+	return nil
+}
+
+// pkgInstallBackup is the previous contents of pkg/<name>/ held during a
+// remote install: the binary moved aside to a .old- name, and the manifest's
+// bytes. Both are nil/empty when there was nothing to keep.
+type pkgInstallBackup struct {
+	root         *os.Root
+	binName      string
+	asideName    string // "" when there was no previous binary
+	linked       bool   // asideName is a second hard link, binName untouched by the stash
+	manifestName string
+	manifest     []byte // nil when there was no previous manifest
+	// newManifestWritten is set once the install has written its own
+	// manifest; until then the manifest on disk is still the previous one.
+	newManifestWritten bool
+}
+
+// pkgBackupLink creates the hard link stashPreviousPkgInstall prefers; a seam
+// so tests can force the rename fallback used where hard links are unavailable.
+var pkgBackupLink = func(root *os.Root, oldName, newName string) error { return root.Link(oldName, newName) }
+
+// stashPreviousPkgInstall keeps the current pkg binary under a .old- name and
+// reads the current manifest so restore can put both back. The binary gets a
+// second hard link under that name, so it stays in place — and the Unix bin/ symlink to it
+// stays valid — until replaceBinary swaps it atomically. Where hardlinks are
+// unavailable it is moved instead, which also works on Windows while the
+// binary runs: a running executable can be renamed, just not replaced.
+func stashPreviousPkgInstall(root *os.Root, pkgName, binBase string) (*pkgInstallBackup, error) {
+	b := &pkgInstallBackup{
+		root:         root,
+		binName:      pkgName + "/" + binBase,
+		manifestName: pkgName + "/" + pluginManifestFileName,
+	}
+	data, err := readFileLimitedIn(root, b.manifestName, maxPluginManifestSize)
+	switch {
+	case err == nil:
+		b.manifest = data
+	case !errors.Is(err, os.ErrNotExist):
+		return nil, fmt.Errorf("read previous plugin manifest: %w", err)
+	}
+	aside := oldBinaryAsideName(b.binName)
+	if _, err := root.Lstat(b.binName); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return b, nil
+		}
+		return nil, fmt.Errorf("stat previous plugin binary: %w", err)
+	}
+	b.linked = pkgBackupLink(root, b.binName, aside) == nil
+	if !b.linked {
+		if err := root.Rename(b.binName, aside); err != nil {
+			return nil, fmt.Errorf("move previous plugin binary aside: %w", err)
+		}
+	}
+	b.asideName = aside
+	return b, nil
+}
+
+// restore puts the previous binary and manifest back, replacing whatever the
+// failed install wrote. With no previous install, it removes the new ones so
+// a failed first install leaves no manifest claiming success.
+//
+// The manifest is only touched if the install wrote its own; before that the
+// one on disk is still the previous one. When it was written, it is restored
+// first and the binary put back only once that succeeded: a manifest that
+// could not be restored still records the new tag, and pairing that with the
+// old binary is the mismatch the stash exists to prevent (`plugin upgrade`
+// would call the stale binary up to date). The new binary under the new tag is
+// consistent; the .old- copy is swept on a later install. A failure before the
+// manifest was written always gets the previous binary back: returning early
+// there would strand it under its .old- name and leave the plugin unrunnable.
+func (b *pkgInstallBackup) restore() error {
+	untouched := b.binaryUntouched()
+	if untouched {
+		// The install failed before replacing binName, so it is still the
+		// previous binary: drop the extra link. Renaming the link back would
+		// fail on Windows while that binary runs ("Access is denied"), and
+		// on Unix renaming a link onto its own file is a no-op that leaves
+		// the .old- link behind.
+		_ = b.root.Remove(b.asideName) //nolint:errcheck // swept on a later install
+	}
+	if b.newManifestWritten {
+		if err := b.restoreManifest(); err != nil {
+			return err
+		}
+	}
+	switch {
+	case untouched:
+	case b.asideName != "":
+		if err := b.root.Rename(b.asideName, b.binName); err != nil {
+			return fmt.Errorf("restore previous plugin binary: %w", err)
+		}
+	default:
+		if err := b.root.Remove(b.binName); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove plugin binary: %w", err)
+		}
+	}
+	return nil
+}
+
+// restoreManifest puts the previous manifest back, or removes the failed
+// first install's.
+func (b *pkgInstallBackup) restoreManifest() error {
+	if b.manifest != nil {
+		if err := jsonutil.WriteFileAtomicIn(b.root, b.manifestName, b.manifest, 0o644); err != nil {
+			return fmt.Errorf("restore previous plugin manifest: %w", err)
+		}
+		return nil
+	}
+	if err := b.root.Remove(b.manifestName); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove plugin manifest: %w", err)
+	}
+	return nil
+}
+
+// binaryUntouched reports whether binName is still the very file the stash
+// hard-linked aside, i.e. nothing replaced it.
+func (b *pkgInstallBackup) binaryUntouched() bool {
+	if !b.linked {
+		return false
+	}
+	aside, err := b.root.Lstat(b.asideName)
+	if err != nil {
+		return false
+	}
+	cur, err := b.root.Lstat(b.binName)
+	return err == nil && os.SameFile(aside, cur)
+}
+
+// discard drops the previous binary once the new install is complete. On
+// Windows it fails while the old version still runs; sweepOldBinaries removes
+// it on a later install.
+func (b *pkgInstallBackup) discard() {
+	if b.asideName != "" {
+		_ = b.root.Remove(b.asideName) //nolint:errcheck // swept on a later install
+	}
 }
 
 // UpgradeOutcome describes what UpgradeInstalledPlugin did.
@@ -281,13 +494,25 @@ type UpgradeOutcome struct {
 // UpgradeInstalledPlugin re-resolves the newest tag for a remote-installed
 // plugin and reinstalls when it differs from the manifest's tag. Plugins
 // without a manifest (local-dev symlinks) are not upgradable.
+//
+// The plugin's lock is held from reading the manifest to the end of the
+// install, so the decision — still installed? pinned? which tag? — cannot be
+// overtaken by a concurrent `plugin remove` or `plugin install --pin`.
 func UpgradeInstalledPlugin(ctx context.Context, name string) (*UpgradeOutcome, error) {
+	release, err := lockPlugin(ctx, name, false)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("plugin %q is not installed", name)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	m, err := LoadPluginManifest(name)
 	if err != nil {
 		return nil, err
 	}
 	if m == nil {
-		return nil, fmt.Errorf("plugin %q has no install manifest (local-dev install?); reinstall it from its repository URL to make it upgradable", name)
+		return nil, noUpgradeManifestError(name)
 	}
 	if m.Pinned {
 		return &UpgradeOutcome{Name: name, Pinned: true}, nil
@@ -309,7 +534,7 @@ func UpgradeInstalledPlugin(ctx context.Context, name string) (*UpgradeOutcome, 
 	// installed unverified shouldn't start failing on upgrade, and one
 	// installed verified must not silently downgrade to unverified.
 	res, err := InstallPluginFromRepo(ctx, m.RepoURL, name, RemoteInstallOptions{
-		Force: true, AllowUnverified: m.Unverified,
+		Force: true, AllowUnverified: m.Unverified, heldPluginLock: name,
 	})
 	if err != nil {
 		return nil, err
@@ -321,6 +546,16 @@ func UpgradeInstalledPlugin(ctx context.Context, name string) (*UpgradeOutcome, 
 		return &UpgradeOutcome{Name: name, UpToDate: true}, nil
 	}
 	return &UpgradeOutcome{Name: name, FromTag: m.Tag, ToTag: res.Manifest.Tag}, nil
+}
+
+// noUpgradeManifestError explains why name, which has no install manifest,
+// cannot be upgraded: it is not installed at all (perhaps removed meanwhile),
+// or it is a local-dev install.
+func noUpgradeManifestError(name string) error {
+	if existing, err := FindInstalledPlugin(name); err == nil && existing == nil {
+		return fmt.Errorf("plugin %q is not installed", name)
+	}
+	return fmt.Errorf("plugin %q has no install manifest (local-dev install?); reinstall it from its repository URL to make it upgradable", name)
 }
 
 // replaceBinary moves src over dest atomically. On Windows, a running
@@ -366,30 +601,59 @@ func replaceBinary(srcRoot *os.Root, srcName string, destRoot *os.Root, destName
 // oldBinaryAsideName returns a unique .old- sibling name for the rename-aside
 // trick. Random suffix so concurrent upgrades can't collide.
 func oldBinaryAsideName(destName string) string {
+	return destName + ".old-" + asideSuffix()
+}
+
+// asideSuffix is the random part of a rename-aside name, shared by the pkg/
+// (oldBinaryAsideName) and bin/ (oldManagedEntryName) schemes.
+func asideSuffix() string {
 	var b [4]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		return destName + ".old-fallback"
+		return "fallback"
 	}
-	return destName + ".old-" + hex.EncodeToString(b[:])
+	return hex.EncodeToString(b[:])
 }
 
 // sweepOldBinaries best-effort removes .old-* leftovers from the Windows
-// rename-aside fallback. Failures are ignored — the files are inert.
+// rename-aside fallback in a pkg dir.
 func sweepOldBinaries(root *os.Root, pkgName string) {
-	entries, err := osroot.ReadDirNoSymlinks(root, pkgName)
+	sweepAsideLeftovers(root, pkgName, func(name string) bool { return strings.Contains(name, ".old-") })
+}
+
+// sweepAsideLeftovers best-effort removes the entries of dir that isLeftover
+// matches. Failures are ignored: the files are inert, and one still held by a
+// running process on Windows is swept again on the next install.
+func sweepAsideLeftovers(root *os.Root, dir string, isLeftover func(name string) bool) {
+	entries, err := osroot.ReadDirNoSymlinks(root, dir)
 	if err != nil {
 		return
 	}
 	for _, e := range entries {
-		if strings.Contains(e.Name(), ".old-") {
-			_ = root.Remove(pkgName + "/" + e.Name()) //nolint:errcheck // inert leftovers; swept again next install
+		if isLeftover(e.Name()) {
+			_ = root.Remove(dir + "/" + e.Name()) //nolint:errcheck // inert leftovers; swept again next install
 		}
 	}
 }
 
 // RemoveManagedPlugin removes a plugin's bin entries and its pkg dir.
 // The dependency guard lives in the command layer so --force can bypass it.
-func RemoveManagedPlugin(name string) error {
+// ctx bounds the wait for another install holding the plugin tree, and
+// carries the writer that wait is announced on (see lockPluginTree).
+func RemoveManagedPlugin(ctx context.Context, name string) error {
+	// Lock order: the plugin's own lock, then the tree's.
+	releasePlugin, err := lockPluginIfNamed(ctx, name, false)
+	if err != nil {
+		return err
+	}
+	defer releasePlugin()
+	release, err := lockPluginTree(ctx, false)
+	switch {
+	case err == nil:
+		defer release()
+	case !errors.Is(err, os.ErrNotExist):
+		return err
+	}
+	// No plugin tree at all: RemoveInstalledPlugin reports "not installed".
 	if err := RemoveInstalledPlugin(name); err != nil {
 		return err
 	}
