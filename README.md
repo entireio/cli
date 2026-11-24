@@ -82,7 +82,7 @@ Entire hosts Git repositories on clusters in several regions, so agents can clon
 
 - **Region** — where an organization's or project's data stays: a jurisdiction such as `us` or `eu`, set with `--region` when you create it.
 - **Cluster** — an Entire Git host, such as `aws-eu-central-1.entire.io`. `entire cluster list` shows them; a repository can have copies on several.
-- **Project** — holds Entire-native repositories and belongs to an organization or a personal account. Repository and project commands take its plain name (`--project acme`); Trail commands take `et/<project>`, and treat a GitHub owner as the project for its mirrors (`gh/<owner>`).
+- **Project** — holds Entire-native repositories and belongs to an organization or a personal account. Repository and project commands take its name (`--project acme` or `--project et/acme`); Trail commands take `et/<project>`, and treat a GitHub owner as the project for its mirrors (`gh/<owner>`).
 - **Mirror** — a copy of a repository on one cluster. GitHub repositories are mirrored from their GitHub upstream, and native repositories can be mirrored to more clusters. `entire repo mirror` manages both.
 
 Repository references name their forge: `/et/<project>/<repo>` for an Entire-native repository, `/gh/<owner>/<repo>` for a GitHub mirror, or a full `entire://<cluster>/…` clone URL.

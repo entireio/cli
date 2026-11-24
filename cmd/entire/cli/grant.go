@@ -831,10 +831,10 @@ var orgGrantTarget = grantTarget[coreapi.OrgMemberListItem]{
 }
 
 // projectGrantTarget is project access: roles reader/writer/admin, required,
-// on a project addressed by name or ULID.
+// on a project addressed by name, et/<name>, or ULID.
 var projectGrantTarget = grantTarget[coreapi.ProjectGrant]{
 	noun:       "project",
-	refUsage:   "name or ULID",
+	refUsage:   "name, et/<name>, or ULID",
 	exampleRef: "widgets",
 	roles:      accessRoles,
 	leastRole:  leastAccessRole,

@@ -286,6 +286,13 @@ func TestSAListGetDelete(t *testing.T) {
 		require.Contains(t, out, saTestProjectID)
 	})
 
+	t.Run("get by et/project/name", func(t *testing.T) {
+		_, srv := newSAFakeCore(t)
+		out, err := runSA(t, srv.URL, "get", "et/acme/ci")
+		require.NoError(t, err)
+		require.Contains(t, out, saTestProjectID)
+	})
+
 	t.Run("get misses an unknown name", func(t *testing.T) {
 		_, srv := newSAFakeCore(t)
 		_, err := runSA(t, srv.URL, "get", "acme/deploy")

@@ -31,7 +31,8 @@ func newServiceAccountCmd() *cobra.Command {
 			"such as GitHub Actions or Buildkite, so its jobs act as the account " +
 			"without a stored secret. Anywhere else, create a secret and set it as " +
 			"ENTIRE_TOKEN.\n\n" +
-			"Commands address a service account by its svc_ ID or as <project>/<name>.",
+			"Commands address a service account by its svc_ ID or as <project>/<name>, " +
+			"where <project> may also be written et/<project>.",
 	}
 	addControlPlaneFlags(cmd)
 	cmd.AddCommand(
@@ -120,13 +121,22 @@ func canonicalPrefixedULID(prefix, s string) (string, bool) {
 	return prefix + strings.ToUpper(id), true
 }
 
-// parseSAPath splits <project>/<name>.
+// parseSAPath splits <project>/<name>, where the project may also be written
+// et/<project> (or gh/<owner>, which resolveProjectRefResolved then refuses).
+// "et" and "gh" cannot be project names (names are at least three characters).
 func parseSAPath(ref string) (project, name string, err error) {
-	project, name, ok := strings.Cut(ref, "/")
+	prefix, rest := "", ref
+	for _, forge := range []string{nativeCloneForge, mirrorCloneForge} {
+		if r, ok := strings.CutPrefix(ref, forge+"/"); ok {
+			prefix, rest = forge+"/", r
+			break
+		}
+	}
+	project, name, ok := strings.Cut(rest, "/")
 	if !ok || project == "" || name == "" {
 		return "", "", fmt.Errorf("service account %q: use svc_<id> or <project>/<name>", ref)
 	}
-	return project, name, nil
+	return prefix + project, name, nil
 }
 
 func listProjectSAs(ctx context.Context, c *coreapi.Client, projectID string) ([]coreapi.ServiceAccountWithGrants, error) {

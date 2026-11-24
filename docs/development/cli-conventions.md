@@ -671,6 +671,13 @@ always runnable in every build.
   path form, `--project` is checked for agreement: a name compares
   case-insensitively before any request, a ULID against the resolved repo's
   owning project at the cost of one `GetRepo`.
+  Every control-plane project input (positional or `--project`) also takes
+  `et/<name>`, the form trail commands take (`parseControlPlaneProject`).
+  It is always a name, even one shaped like a ULID. `gh/<owner>` is refused
+  (`mirrorProjectRefError`): a GitHub owner's mirror project holds no native
+  repositories, grants, invitations or service accounts, and `repo list` points
+  at `entire repo mirror list --owner` instead. `project get` alone takes it,
+  through Core's project resolver. Error text quotes `--project` as typed.
   Native names are validated client-side against the server's own rules
   (`nativeProjectRe`/`nativeRepoRe`, mirroring `normalizeName` in entiredb
   `core/resource/project_name.go`); those bounds are server parity only and buy

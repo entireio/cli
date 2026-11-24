@@ -283,11 +283,11 @@ func listAllProjects(ctx context.Context, c *coreapi.Client) ([]coreapi.Project,
 func newProjectGetCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "get <project>",
-		Short: "Show a project by name or ULID",
+		Short: "Show a project by name, et/<name>, gh/<owner>, or ULID",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runCoreObject(cmd, projectColumns, projectRow, func(ctx context.Context, c *coreapi.Client) (*coreapi.Project, error) {
-				projID, err := resolveProjectRef(ctx, c, args[0])
+				projID, err := resolveProjectGetRef(ctx, c, args[0])
 				if err != nil {
 					return nil, err
 				}
@@ -302,7 +302,7 @@ func newProjectGetCmd() *cobra.Command {
 func newProjectDeleteCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "delete <project>",
-		Short: "Delete a project by name or ULID",
+		Short: "Delete a project by name, et/<name>, or ULID",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runControlPlaneDelete(cmd, "project", args[0],
