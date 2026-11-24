@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -82,24 +83,80 @@ func agentHelpInstalledPlugins(rootCmd *cobra.Command) agentHelpPluginListing {
 	if err != nil {
 		return agentHelpPluginListing{}
 	}
+	installed = agentHelpDispatchOrder(installed, runtime.GOOS, os.Getenv("PATHEXT"))
 	return agentHelpSelectPlugins(rootCmd, installed, agentHelpPluginRunnable, agentHelpManifestInfo)
+}
+
+// agentHelpDispatchOrder puts installed (sorted by name) in the order the
+// dispatcher would pick each name's entry, so the listing names, and trusts
+// the manifest of, the entry `entire <name>` runs. The dispatcher finds a
+// plugin with exec.LookPath in the managed bin dir, which main.go puts first
+// on PATH. On Unix a name has one entry, so the order is unchanged. On
+// Windows LookPath tries the extensions in PATHEXT in order (".COM;.EXE;
+// .BAT;.CMD" when unset), so the entries of one name are ordered by that, and
+// an entry whose extension isn't in PATHEXT, or that has none, is left out:
+// LookPath never finds it under the bare name.
+func agentHelpDispatchOrder(installed []*InstalledPlugin, goos, pathext string) []*InstalledPlugin {
+	if goos != windowsGOOS {
+		return installed
+	}
+	if strings.TrimSpace(pathext) == "" {
+		pathext = ".COM;.EXE;.BAT;.CMD"
+	}
+	rank := map[string]int{}
+	for _, e := range strings.Split(strings.ToLower(pathext), ";") {
+		if e = strings.TrimSpace(e); e != "" {
+			if _, dup := rank[e]; !dup {
+				rank[e] = len(rank)
+			}
+		}
+	}
+	type ranked struct {
+		p    *InstalledPlugin
+		rank int
+	}
+	var kept []ranked
+	for _, p := range installed {
+		ext := strings.ToLower(filepath.Ext(p.Path))
+		r, ok := rank[ext]
+		if !ok || ext == "" {
+			continue
+		}
+		kept = append(kept, ranked{p, r})
+	}
+	slices.SortStableFunc(kept, func(a, b ranked) int {
+		if c := strings.Compare(a.p.Name, b.p.Name); c != 0 {
+			return c
+		}
+		return a.rank - b.rank
+	})
+	out := make([]*InstalledPlugin, len(kept))
+	for i, k := range kept {
+		out[i] = k.p
+	}
+	return out
 }
 
 // agentHelpSelectPlugins picks the listed plugins from installed (sorted by
 // name, as ListInstalledPlugins returns them): those with a listable name
 // (agentHelpPluginName), not shadowed by a built-in (built-ins win, as in the
 // dispatcher), and that runnable says can be run, each name once (on Windows
-// entire-foo.exe and entire-foo.cmd are both "foo"). It keeps the first
+// entire-foo.exe and entire-foo.cmd are both "foo": the first is the one
+// the dispatcher runs, see agentHelpDispatchOrder, and when it can't be run
+// the name is left out rather than another entry named). It keeps the first
 // agentHelpPluginsMax and counts the rest. info supplies each one's
 // description and whether it declared agent_help.
 func agentHelpSelectPlugins(rootCmd *cobra.Command, installed []*InstalledPlugin, runnable func(path string) bool, info func(*InstalledPlugin) agentHelpPluginInfo) agentHelpPluginListing {
 	var listing agentHelpPluginListing
 	seen := map[string]bool{}
 	for _, p := range installed {
-		if seen[p.Name] || !agentHelpPluginName(p.Name) || agentHelpFindChild(rootCmd, p.Name) != nil || !runnable(p.Path) {
+		if seen[p.Name] {
 			continue
 		}
 		seen[p.Name] = true
+		if !agentHelpPluginName(p.Name) || agentHelpFindChild(rootCmd, p.Name) != nil || !runnable(p.Path) {
+			continue
+		}
 		listing.Total++
 		if len(listing.Plugins) == agentHelpPluginsMax {
 			continue

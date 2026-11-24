@@ -273,14 +273,58 @@ func installedAt(names ...string) []*InstalledPlugin {
 }
 
 // On Windows entire-foo.exe and entire-foo.cmd both become "foo": it is listed
-// once, from the first entry that runs, and counted once.
+// once and counted once, from its first entry, the one the dispatcher runs
+// (agentHelpDispatchOrder). When that entry can't be run, the name is left
+// out rather than another entry named, which `entire foo` would never run.
 func TestAgentHelpSelectPluginsListsEachNameOnce(t *testing.T) {
 	t.Parallel()
 	installed := installedAt("foo", "foo", "zed")
-	runs := func(path string) bool { return path != installed[0].Path }
-	listing := agentHelpSelectPlugins(NewRootCmd(), installed, runs, func(*InstalledPlugin) agentHelpPluginInfo { return agentHelpPluginInfo{} })
+	none := func(*InstalledPlugin) agentHelpPluginInfo { return agentHelpPluginInfo{} }
+	listing := agentHelpSelectPlugins(NewRootCmd(), installed, func(string) bool { return true }, none)
 	if len(listing.Plugins) != 2 || listing.Total != 2 || listing.Plugins[0].Name != "foo" || listing.Plugins[1].Name != "zed" {
 		t.Errorf("listing = %+v, want foo and zed once each", listing)
+	}
+	firstBroken := func(path string) bool { return path != installed[0].Path }
+	listing = agentHelpSelectPlugins(NewRootCmd(), installed, firstBroken, none)
+	if len(listing.Plugins) != 1 || listing.Total != 1 || listing.Plugins[0].Name != "zed" {
+		t.Errorf("listing = %+v, want only zed: foo's dispatched entry can't run", listing)
+	}
+}
+
+// On Windows the entries of one name are put in PATHEXT's order, the order
+// exec.LookPath tries them, whatever order they were listed in; an entry
+// whose extension isn't in PATHEXT (or has none) is dropped, since LookPath
+// never finds it under the bare name. Elsewhere nothing changes.
+func TestAgentHelpDispatchOrder(t *testing.T) {
+	t.Parallel()
+	at := func(name, file string) *InstalledPlugin {
+		return &InstalledPlugin{Name: name, Path: `C:\\bin\\` + file}
+	}
+	installed := []*InstalledPlugin{
+		at("foo", "entire-foo.cmd"), at("foo", "entire-foo.EXE"), at("foo", "entire-foo.com"),
+		at("foo", "entire-foo"), at("foo.ps1", "entire-foo.ps1"), at("zed", "entire-zed.bat"),
+	}
+	paths := func(ps []*InstalledPlugin) []string {
+		var out []string
+		for _, p := range ps {
+			out = append(out, p.Path[len(`C:\\bin\\`):])
+		}
+		return out
+	}
+	for _, c := range []struct {
+		pathext string
+		want    []string
+	}{
+		{"", []string{"entire-foo.com", "entire-foo.EXE", "entire-foo.cmd", "entire-zed.bat"}},
+		{".EXE;.CMD", []string{"entire-foo.EXE", "entire-foo.cmd"}},
+		{".cmd;.exe;.bat", []string{"entire-foo.cmd", "entire-foo.EXE", "entire-zed.bat"}},
+	} {
+		if got := paths(agentHelpDispatchOrder(installed, windowsGOOS, c.pathext)); !slices.Equal(got, c.want) {
+			t.Errorf("PATHEXT %q: order %q, want %q", c.pathext, got, c.want)
+		}
+	}
+	if got := agentHelpDispatchOrder(installed, "linux", ""); len(got) != len(installed) || got[0] != installed[0] {
+		t.Errorf("linux: order changed: %q", paths(got))
 	}
 }
 
