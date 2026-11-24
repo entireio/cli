@@ -243,3 +243,40 @@ func TestSessionsEntryWithoutMetadataPath_FallsBackToPosition(t *testing.T) {
 		})
 	}
 }
+
+func TestSessionFolder(t *testing.T) {
+	t.Parallel()
+	withPath := func(metadata string) *CheckpointSummary {
+		return &CheckpointSummary{Sessions: []SessionFilePaths{{Metadata: "/ab/cdef12345678/0/metadata.json"}, {Metadata: metadata}}}
+	}
+	tests := []struct {
+		name    string
+		summary *CheckpointSummary
+		index   int
+		want    string
+		wantErr bool
+	}{
+		{name: "nil summary falls back to position", summary: nil, index: 3, want: "3"},
+		{name: "empty path falls back to position", summary: withPath(""), index: 1, want: "1"},
+		{name: "position past the end", summary: withPath("/ab/cdef12345678/2/metadata.json"), index: 2, wantErr: true},
+		{name: "negative position", summary: withPath("/ab/cdef12345678/2/metadata.json"), index: -1, wantErr: true},
+		{name: "sharded absolute path", summary: withPath("/ab/cdef12345678/2/metadata.json"), index: 1, want: "2"},
+		{name: "path relative to the checkpoint", summary: withPath("2/metadata.json"), index: 1, want: "2"},
+		{name: "bare metadata.json", summary: withPath("metadata.json"), index: 1, wantErr: true},
+		{name: "not a metadata file", summary: withPath("/ab/cdef12345678/2/full.jsonl"), index: 1, wantErr: true},
+		{name: "parent directory", summary: withPath("../metadata.json"), index: 1, wantErr: true},
+		{name: "root directory", summary: withPath("/metadata.json"), index: 1, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := sessionFolder(tt.summary, tt.index)
+			if tt.wantErr {
+				require.ErrorIs(t, err, ErrCheckpointNotFound)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
