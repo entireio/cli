@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -103,7 +104,69 @@ func removeLegacyPlugin(ctx context.Context) (bool, error) {
 // that shelled out to a path inside the working tree would run whatever the
 // checked-out branch contains.
 func renderPlugin() string {
-	return pluginTemplate
+	return renderPluginFor(false)
+}
+
+// User-level placeholders: each is a whole template line, removed from the
+// project render (which stays byte-identical to what earlier CLIs wrote) and
+// replaced in the user-level one.
+const (
+	userLevelImportsLine     = "//__ENTIRE_USER_LEVEL_IMPORTS__\n"
+	userLevelStepAsideV1Line = "  //__ENTIRE_USER_LEVEL_STEP_ASIDE_V1__\n"
+	userLevelStepAsideV2Line = "  //__ENTIRE_USER_LEVEL_STEP_ASIDE_V2__\n"
+)
+
+// renderPluginFor renders the plugin, the user-level variant when userLevel.
+//
+// The user-level variant does nothing where OpenCode also loads a project's
+// own Entire plugin: OpenCode finds .opencode directories by searching up
+// from the directory it serves to the repository root, so the same search
+// runs here, per plugin instance (OpenCode 1) or location (OpenCode 2).
+//
+// Seam for later work: a stored injection (a Pi-style session message rather
+// than the system-prompt transform both variants use today) belongs in the
+// shared hook code, so both variants get it; nothing here is user-level only
+// beyond the step-aside.
+func renderPluginFor(userLevel bool) string {
+	imports, v1, v2 := "", "", ""
+	if userLevel {
+		imports = userLevelPluginPrelude()
+		v1 = "  if (userLevelSteppedAside(directory)) return {}\n"
+		v2 = "  if (userLevelSteppedAside(ctx.location.directory)) return\n"
+	}
+	out := strings.Replace(pluginTemplate, userLevelImportsLine, imports, 1)
+	out = strings.Replace(out, userLevelStepAsideV1Line, v1, 1)
+	return strings.Replace(out, userLevelStepAsideV2Line, v2, 1)
+}
+
+func userLevelPluginPrelude() string {
+	return `import { existsSync } from "node:fs"
+import { dirname, join } from "node:path"
+
+// Entire user-level plugin, hook version ` + strconv.Itoa(userHooksVersion) + `, installed by
+// ` + "`entire enable --global`" + `. A project with its own Entire plugin decides for
+// itself (its settings, its version), so this copy steps aside there.
+function userLevelSteppedAside(start: string): boolean {
+  let self = ""
+  try {
+    self = fileURLToPath(import.meta.url)
+  } catch {}
+  let dir = start
+  for (;;) {
+    for (const sub of ["plugin", "plugins"]) {
+      const candidate = join(dir, ".opencode", sub, "entire.ts")
+      if (candidate === self) continue
+      try {
+        if (readFileSync(candidate, "utf8").includes("` + entireMarker + `")) return true
+      } catch {}
+    }
+    if (existsSync(join(dir, ".git"))) return false
+    const parent = dirname(dir)
+    if (parent === dir) return false
+    dir = parent
+  }
+}
+`
 }
 
 // InstallHooks writes the Entire plugin file to .opencode/plugin/entire.ts,

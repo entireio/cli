@@ -19,7 +19,9 @@ import (
 
 // userTierEnv points the spawned binary at a private user settings file and a
 // private Claude config dir, and returns the env to set plus the Claude dir.
-// The suite-wide ENTIRE_CONFIG_DIR is shared, so each test gets its own.
+// The suite-wide ENTIRE_CONFIG_DIR is shared, so each test gets its own. Codex,
+// Pi and OpenCode homes point at directories that do not exist, so global
+// enable never reaches the developer's real agent config.
 func userTierEnv(t *testing.T, userSettings string) (extraEnv []string, claudeDir string) {
 	t.Helper()
 	entireDir := t.TempDir()
@@ -27,7 +29,13 @@ func userTierEnv(t *testing.T, userSettings string) (extraEnv []string, claudeDi
 	if err := os.WriteFile(filepath.Join(entireDir, usersettings.FileName), []byte(userSettings), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return []string{"ENTIRE_CONFIG_DIR=" + entireDir, "CLAUDE_CONFIG_DIR=" + claudeDir}, claudeDir
+	absent := filepath.Join(t.TempDir(), "absent")
+	return []string{
+		"ENTIRE_CONFIG_DIR=" + entireDir, "CLAUDE_CONFIG_DIR=" + claudeDir,
+		"CODEX_HOME=" + filepath.Join(absent, "codex"),
+		"PI_CODING_AGENT_DIR=" + filepath.Join(absent, "pi"),
+		"XDG_CONFIG_HOME=" + filepath.Join(absent, "xdg"),
+	}, claudeDir
 }
 
 // newNeverEnabledRepo is a feature-branch repo with a commit and no .entire

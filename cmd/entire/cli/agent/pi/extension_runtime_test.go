@@ -55,6 +55,12 @@ type driverConfig struct {
 	Instances  int         `json:"instances"`
 	Fire       []fireEvent `json:"fire,omitempty"`
 	SpawnChild bool        `json:"spawnChild,omitempty"`
+
+	// userLevel loads the user-level render instead of the project one.
+	userLevel bool
+	// projectExtension, when set, is written to .pi/extensions/entire/index.ts
+	// in the directory Pi runs in.
+	projectExtension string
 }
 
 type fireEvent struct {
@@ -87,10 +93,18 @@ func runExtension(t *testing.T, cfg driverConfig, entireScript string, env ...st
 		t.Fatal(err)
 	}
 	logPath := filepath.Join(dir, "hooks.log")
-	for path, content := range map[string]string{
-		filepath.Join(dir, "index.ts"):   renderExtension(),
+	files := map[string]string{
+		filepath.Join(dir, "index.ts"):   renderExtensionFor(cfg.userLevel),
 		filepath.Join(dir, "driver.mjs"): extensionDriver,
-	} {
+	}
+	if cfg.projectExtension != "" {
+		projectDir := filepath.Join(dir, ".pi", "extensions", "entire")
+		if err := os.MkdirAll(projectDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		files[filepath.Join(projectDir, "index.ts")] = cfg.projectExtension
+	}
+	for path, content := range files {
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -200,5 +214,30 @@ func TestExtension_HookStdinErrorDoesNotCrash(t *testing.T) {
 	}, "#!/bin/sh\nexit 0\n")
 	if len(res.Instances) != 1 {
 		t.Fatalf("instances = %v, want 1", res.Instances)
+	}
+}
+
+// The user-level extension registers nothing where Pi also loads this
+// project's own Entire extension, even an older render of it, and handles
+// the session where there is none, or only someone else's file.
+func TestExtension_UserLevelStepsAsideForTheProjectExtension(t *testing.T) {
+	t.Parallel()
+	stale := strings.Replace(renderExtension(), "fireHook", "fireHookOld", 1)
+	for name, tc := range map[string]struct {
+		project  string
+		stepAway bool
+	}{
+		"no project extension":    {},
+		"project extension":       {project: renderExtension(), stepAway: true},
+		"older project extension": {project: stale, stepAway: true},
+		"someone else's index.ts": {project: "export default function () {}\n"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			res := runExtension(t, driverConfig{Instances: 1, userLevel: true, projectExtension: tc.project}, recordingEntire)
+			if registered := len(res.Instances[0]) > 0; registered == tc.stepAway {
+				t.Errorf("user-level extension registered handlers = %v (%v), want %v", registered, res.Instances[0], !tc.stepAway)
+			}
+		})
 	}
 }

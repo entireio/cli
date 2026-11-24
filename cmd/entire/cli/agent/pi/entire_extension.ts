@@ -9,8 +9,10 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { execFile } from "node:child_process";
+//__ENTIRE_USER_LEVEL_IMPORTS__
 
 export default function (pi: ExtensionAPI) {
+  //__ENTIRE_USER_LEVEL_STEP_ASIDE__
   // A Pi subagent is a nested `pi` process (subagent extensions spawn one per task
   // with cwd inside the project, where Pi auto-discovers this same project-local
   // extension), so it would otherwise forward its own lifecycle as the user's

@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
@@ -164,7 +165,9 @@ func runGlobalCmdAs(t *testing.T, withClaude bool, userSettings, agentVar string
 	testutil.InitRepo(t, repo)
 	t.Setenv(userdirs.EnvConfigDir, entireDir)
 	t.Setenv("CLAUDE_CONFIG_DIR", claudeDir)
-	isolateAgentUserHomes(t)
+	if os.Getenv("CODEX_HOME") == "" { // a test may have set the homes up itself
+		isolateAgentUserHomes(t)
+	}
 	clearAgentCallerEnv(t)
 	if agentVar != "" {
 		t.Setenv(agentVar, "1")
@@ -334,6 +337,36 @@ func TestDisableGlobal_RemovesTheUserLevelClaudeHooks(t *testing.T) {
 	assert.NotContains(t, readUserSettingsRaw(t, hooksPath), "entire hooks claude-code")
 	assert.Contains(t, buf.String(), "Removed Entire's hooks from Claude Code's user settings")
 	assert.Contains(t, buf.String(), "repos entry")
+}
+
+// enable --global installs every in-use agent's user-level hooks, skips the
+// ones not in use, and disable --global removes them all.
+func TestGlobal_InstallsAndRemovesEveryAgentsUserLevelHooks(t *testing.T) {
+	homes := isolateAgentUserHomes(t)
+	for _, dir := range []string{homes.codex, homes.pi, filepath.Join(homes.xdgConfig, "opencode")} {
+		require.NoError(t, os.MkdirAll(dir, 0o750))
+	}
+	codexHooks := filepath.Join(homes.codex, "hooks.json")
+	piExtension := filepath.Join(homes.pi, "extensions", "entire", "index.ts")
+	openCodePlugin := filepath.Join(homes.xdgConfig, "opencode", "plugin", "entire.ts")
+
+	_, _, _, out, err := runGlobalCmd(t, true, "", "enable", "--global", "--yes")
+	require.NoError(t, err, out)
+	assert.Contains(t, readUserSettingsRaw(t, codexHooks), "--scope=user/v1")
+	assert.FileExists(t, piExtension)
+	assert.FileExists(t, openCodePlugin)
+	assert.Contains(t, out, "Added Entire's hooks to Codex's user settings")
+	assert.Contains(t, out, "open /hooks in Codex", "Codex needs the hooks approved")
+
+	root := NewRootCmd()
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetArgs([]string{"disable", "--global"})
+	require.NoError(t, root.Execute(), buf.String())
+	assert.NotContains(t, readUserSettingsRaw(t, codexHooks), "entire hooks codex")
+	assert.NoFileExists(t, piExtension)
+	assert.NoFileExists(t, openCodePlugin)
 }
 
 func readUserSettingsRaw(t *testing.T, path string) string {

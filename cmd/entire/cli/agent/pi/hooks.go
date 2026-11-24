@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -78,7 +79,49 @@ func extensionConfig(ctx context.Context) (*agent.HookConfigFile, error) {
 // extension that shells out to a path inside the working tree would run
 // whatever the checked-out branch contains.
 func renderExtension() string {
-	return strings.ReplaceAll(extensionTemplate, entireCmdPlaceholder, "entire")
+	return renderExtensionFor(false)
+}
+
+// User-level placeholders: each is a whole template line, removed from the
+// project render (which stays byte-identical to what earlier CLIs wrote) and
+// replaced in the user-level one.
+const (
+	userLevelImportsLine   = "//__ENTIRE_USER_LEVEL_IMPORTS__\n"
+	userLevelStepAsideLine = "  //__ENTIRE_USER_LEVEL_STEP_ASIDE__\n"
+)
+
+// userLevelImports and userLevelStepAside make the user-level extension do
+// nothing where Pi also loads this project's own Entire extension. Pi 0.70
+// discovers project extensions only in <cwd>/.pi/extensions (no upward
+// search), so that is the one place to look. Checked once per load: /reload,
+// /new and /resume build a new instance and look again.
+const userLevelImports = `import { readFileSync } from "node:fs";
+import { join } from "node:path";
+`
+
+func userLevelStepAside() string {
+	return `  // Entire user-level extension, hook version ` + strconv.Itoa(userHooksVersion) + `, installed by
+  // ` + "`entire enable --global`" + `. A project with its own Entire extension decides
+  // for itself (its settings, its version), so this copy steps aside there.
+  try {
+    const project = readFileSync(join(process.cwd(), ".pi", "extensions", "entire", "index.ts"), "utf8");
+    if (project.includes("` + entireMarker + `")) return;
+  } catch {
+    // no project extension: this copy handles the session
+  }
+`
+}
+
+// renderExtensionFor renders the extension, the user-level variant when
+// userLevel.
+func renderExtensionFor(userLevel bool) string {
+	imports, stepAside := "", ""
+	if userLevel {
+		imports, stepAside = userLevelImports, userLevelStepAside()
+	}
+	out := strings.ReplaceAll(extensionTemplate, entireCmdPlaceholder, "entire")
+	out = strings.Replace(out, userLevelImportsLine, imports, 1)
+	return strings.Replace(out, userLevelStepAsideLine, stepAside, 1)
 }
 
 // InstallHooks writes the Entire pi extension to .pi/extensions/entire/index.ts.

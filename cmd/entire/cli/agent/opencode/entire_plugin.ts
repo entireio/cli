@@ -16,6 +16,7 @@ import { spawn, spawnSync } from "node:child_process"
 import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import type { Plugin } from "@opencode-ai/plugin"
+//__ENTIRE_USER_LEVEL_IMPORTS__
 
 /**
  * Build the shell command for a hook invocation.
@@ -67,6 +68,7 @@ function shadowedByLegacyCopy(): boolean {
 // OpenCode 1 plugin.
 const EntirePlugin: Plugin = async ({ directory }) => {
   if (shadowedByLegacyCopy()) return {}
+  //__ENTIRE_USER_LEVEL_STEP_ASIDE_V1__
   // Track seen user messages to fire turn-start only once per message
   const seenUserMessages = new Set<string>()
   // Track current session ID for message events (which don't include sessionID)
@@ -649,6 +651,7 @@ const v2RepoSelectorEnv = ["GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_IN
 
 async function entireSetup(ctx: any) {
   if (!(ctx?.session?.hook && ctx?.tool?.hook && ctx?.event?.subscribe && ctx?.location?.directory)) return
+  //__ENTIRE_USER_LEVEL_STEP_ASIDE_V2__
   const directory: string = ctx.location.directory
   const hookEnv: Record<string, string | undefined> = { ...process.env }
   for (const key of v2RepoSelectorEnv) delete hookEnv[key]
