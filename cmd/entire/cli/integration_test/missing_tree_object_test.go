@@ -37,10 +37,16 @@ func TestMissingSubtreeObject_HooksDoNotBlockCommit(t *testing.T) {
 		check.Env = testutil.GitIsolatedEnv()
 		require.Error(t, check.Run(), "src tree %s must be absent", srcTree)
 	}
-	deleteLooseObject()
 
+	// The tree goes missing mid-turn: the turn-start scan succeeds, so only
+	// the turn-end status walk fails, and that failure alone must mark
+	// capture degraded.
 	readOnly := env.NewSession()
 	require.NoError(t, env.SimulateUserPromptSubmit(readOnly.ID))
+	prePrompt, err := os.ReadFile(filepath.Join(env.RepoDir, ".entire", "tmp", "pre-prompt-"+readOnly.ID+".json"))
+	require.NoError(t, err)
+	require.NotContains(t, string(prePrompt), "untracked_scan_skipped", "the turn-start scan must succeed so only turn end fails")
+	deleteLooseObject()
 	readOnly.TranscriptBuilder.AddUserMessage("Summarize src")
 	readOnly.TranscriptBuilder.AddAssistantMessage("src defines A and nested.B.")
 	require.NoError(t, readOnly.TranscriptBuilder.WriteToFile(readOnly.TranscriptPath))
@@ -48,6 +54,8 @@ func TestMissingSubtreeObject_HooksDoNotBlockCommit(t *testing.T) {
 	roState, err := env.GetSessionState(readOnly.ID)
 	require.NoError(t, err)
 	require.Empty(t, roState.FilesTouched, "an unreadable tree must not make a read-only turn touch files")
+	require.NotNil(t, roState.CaptureDegradedAt, "a failed turn-end status walk must mark capture degraded")
+	require.Contains(t, env.RunCLI("status"), "a git status scan failed or ran out of time")
 
 	coding := env.NewSession()
 	require.NoError(t, env.SimulateUserPromptSubmitWithTranscriptPath(coding.ID, coding.TranscriptPath))
