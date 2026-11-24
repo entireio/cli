@@ -70,7 +70,7 @@ func EnsureUserHooksWhile(ctx context.Context, wanted func(context.Context) bool
 				slog.String("error", stampErr.Error()))
 		}
 	}
-	return n, path, err
+	return n, path, err //nolint:wrapcheck // the error names the file or its lock
 }
 
 // dryRunInstallCount reports 1 when the install merge would write cfg, else 0.

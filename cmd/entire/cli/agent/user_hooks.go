@@ -203,7 +203,7 @@ type UserConfigFile struct{ Path string }
 
 // Read returns the file's content. Callers classify fs.ErrNotExist.
 func (u UserConfigFile) Read() ([]byte, error) {
-	return os.ReadFile(u.Path) //nolint:wrapcheck,gosec // callers classify not-exist; the path is the user's own agent config
+	return os.ReadFile(u.Path) //nolint:wrapcheck // callers classify not-exist
 }
 
 // Write replaces the file's content atomically, through a symlink, keeping
@@ -242,8 +242,11 @@ func (u UserConfigFile) Remove() error {
 // symlink there, refusing a link that does not resolve.
 func (u UserConfigFile) resolve() (string, error) {
 	info, err := os.Lstat(u.Path)
-	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+	if errors.Is(err, os.ErrNotExist) || (err == nil && info.Mode()&os.ModeSymlink == 0) {
 		return u.Path, nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("inspect %s: %w", u.Path, err)
 	}
 	resolved, err := filepath.EvalSymlinks(u.Path)
 	if err != nil {

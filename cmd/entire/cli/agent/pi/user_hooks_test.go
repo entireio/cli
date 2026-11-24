@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -91,5 +90,5 @@ func TestRenderExtension_ProjectRenderHasNoUserLevelCode(t *testing.T) {
 	project := renderExtension()
 	assert.NotContains(t, project, "__ENTIRE_USER_LEVEL")
 	assert.NotContains(t, project, "user-level extension")
-	assert.True(t, strings.Contains(renderExtensionFor(true), "process.cwd()"))
+	assert.Contains(t, renderExtensionFor(true), "process.cwd()")
 }

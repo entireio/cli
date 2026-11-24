@@ -92,10 +92,8 @@ func (g GeneratedUserFile) Remove(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	if g.RemoveDir {
-		// Fails, as intended, while anything else is in the directory. The
-		// lock file goes first; it is recreated on the next install.
-		_ = os.Remove(g.Path + ".lock")     //nolint:errcheck // best effort
-		_ = os.Remove(filepath.Dir(g.Path)) //nolint:errcheck // keeps a directory still in use
+		// Fails, as intended, while anything else is in the directory.
+		_ = os.Remove(filepath.Dir(g.Path))
 	}
 	return true, nil
 }

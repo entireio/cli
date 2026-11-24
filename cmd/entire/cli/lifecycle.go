@@ -239,9 +239,7 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 
 	// Codex-only: append a bounded, read-only discovery or trust warning.
 	if ag.Name() == agent.AgentNameCodex {
-		if warning := codexSessionStartWarning(inspectCodexSessionStartHookIssue(ctx)); warning != "" {
-			message += " " + warning
-		} else if warning := userLevelHookSessionStartWarning(ctx, ag); warning != "" {
+		if warning := codexSessionStartNotice(ctx, ag); warning != "" {
 			message += " " + warning
 		}
 	}
@@ -336,6 +334,33 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 	maybeSpawnSessionSweep(ctx)
 
 	return nil
+}
+
+// codexSessionStartNotice is the Codex SessionStart warning: a project hook
+// discovery or trust problem, else user-level hooks awaiting approval.
+func codexSessionStartNotice(ctx context.Context, ag agent.Agent) string {
+	if warning := codexSessionStartWarning(inspectCodexSessionStartHookIssue(ctx)); warning != "" {
+		return warning
+	}
+	return userLevelHookSessionStartWarning(ctx, ag)
+}
+
+// initializeTurnSession starts the session's turn for this prompt and
+// reports whether it repeats one already handled: a second Entire install
+// (user-level beside project hooks) fired for it, and the first turn-start
+// does the rest. Any other failure is logged; it must not block the prompt.
+func initializeTurnSession(ctx, logCtx context.Context, strat *strategy.ManualCommitStrategy, ag agent.Agent, event *agent.Event) bool {
+	err := strat.InitializeSessionForPrompt(ctx, event.SessionID, ag.Type(), event.SessionRef, event.Prompt, event.Model, event.TurnID)
+	if errors.Is(err, strategy.ErrDuplicateTurnStart) {
+		logging.Info(logCtx, "skipping repeated turn-start for a prompt already handled",
+			slog.String("session_id", event.SessionID))
+		return true
+	}
+	if err != nil {
+		logging.Warn(logCtx, "failed to initialize session state",
+			slog.String("error", err.Error()))
+	}
+	return false
 }
 
 // globalEnableBannerLines tell the developer, in the session that is about to
@@ -740,17 +765,9 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 	// Initialize session (setup already ran above, before the first status read)
 	_, initSpan := perf.Start(ctx, "init_session")
 	strat := GetStrategy(ctx)
-	if err := strat.InitializeSessionForPrompt(ctx, sessionID, ag.Type(), event.SessionRef, event.Prompt, event.Model, event.TurnID); err != nil {
-		if errors.Is(err, strategy.ErrDuplicateTurnStart) {
-			// A second Entire install (user-level beside project hooks)
-			// fired for a prompt already handled; that turn-start does the rest.
-			logging.Info(logCtx, "skipping repeated turn-start for a prompt already handled",
-				slog.String("session_id", sessionID))
-			initSpan.End()
-			return nil
-		}
-		logging.Warn(logCtx, "failed to initialize session state",
-			slog.String("error", err.Error()))
+	if repeated := initializeTurnSession(ctx, logCtx, strat, ag, event); repeated {
+		initSpan.End()
+		return nil
 	}
 
 	// Append prompt to prompt.txt on filesystem so it's available for
@@ -777,7 +794,6 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 			}
 		}
 	}
-
 
 	// Best-effort: adopt ENTIRE_REVIEW_* / ENTIRE_INVESTIGATE_* env vars set
 	// by `entire review` / `entire investigate` on the spawned agent process.

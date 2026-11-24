@@ -88,9 +88,9 @@ func (c *CodexAgent) EnsureUserHooks(ctx context.Context, wanted func(context.Co
 		if err != nil || count == 0 || !write {
 			return count, err
 		}
-		return count, file.Write(output, 0o600) //nolint:wrapcheck // names the file
+		return count, file.Write(output, 0o600)
 	})
-	return n, path, err
+	return n, path, err //nolint:wrapcheck // the error names the file or its lock
 }
 
 // RemoveUserHooks implements agent.UserHookInstaller.

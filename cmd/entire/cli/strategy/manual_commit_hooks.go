@@ -3435,82 +3435,12 @@ func (s *ManualCommitStrategy) initializeTurn(ctx context.Context, sessionID str
 	var remember string
 	var homeAgentType types.AgentType
 	turnStartErr := MutateSessionStateOnSaved(ctx, sessionID, func(state *SessionState) error {
-		if state.BaseCommit == "" {
-			return errPartialState
-		}
-		if state.AdoptedIntoWorktreePath != "" {
-			logging.Info(logging.WithComponent(ctx, "hooks"), "skipping adopted-away source session",
-				slog.String("session_id", sessionID),
-				slog.String("adopted_into_worktree", state.AdoptedIntoWorktreePath))
-			return ErrMutationSkip
-		}
-		now := time.Now()
-		if isRepeatedTurnStart(state, dedupeKey, now) {
-			return ErrDuplicateTurnStart
-		}
-		recordTurnStart(state, dedupeKey, now)
-		if transErr := TransitionAndLog(ctx, state, session.EventTurnStart, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
-			logging.Warn(logging.WithComponent(ctx, "hooks"), "turn start transition failed",
-				slog.String("session_id", sessionID),
-				slog.String("error", transErr.Error()))
-		}
-
-		turnID, err := id.Generate()
-		if err != nil {
-			return fmt.Errorf("failed to generate turn ID: %w", err)
-		}
-		state.TurnID = turnID.String()
-
-		// A transcript path is stronger evidence than both a stored owner and
-		// the current hook. Apply transcript-proven corrections first, including
-		// the empty-owner case, so a Codex correction can initialize all of its
-		// child-accounting markers atomically.
-		if corrected, changed := correctSessionAgentType(ctx, state.AgentType, transcriptPath); changed {
-			logging.Info(logging.WithComponent(ctx, "hooks"), "corrected session agent type from transcript path",
-				slog.String("session_id", sessionID),
-				slog.String("from", string(state.AgentType)),
-				slog.String("to", string(corrected)),
-				slog.String("transcript_path", transcriptPath))
-			if corrected == agent.AgentTypeCodex && state.AgentType != agent.AgentTypeCodex {
-				transitionSessionToCodex(state)
-			}
-			state.AgentType = corrected
-			// The recorded home belonged to the previous agent's layout.
-			state.AgentHome = ""
-		} else if state.AgentType == "" && resolvedAgentType != "" {
-			state.AgentType = resolvedAgentType
-		}
-		if model != "" {
-			state.ModelName = model
-		}
-		if userPrompt != "" {
-			state.LastPrompt = truncatePromptForStorage(userPrompt)
-		}
-		if transcriptPath != "" && state.TranscriptPath != transcriptPath {
-			state.TranscriptPath = transcriptPath
-		}
-		// Read before the turn's calls: a transcript rewritten since the last
-		// reading (a resume restoring an older copy) still reads lower than
-		// the session's total, which is how the ledger tells it apart.
-		ObserveTokenLedger(ctx, state)
-		remember = updateSessionAgentHome(ctx, state)
-		homeAgentType = state.AgentType
-		captureSessionOwner(state)
-		reconcileWorktreePathForResumedTurn(ctx, state)
-
-		// A turn resumed in another worktree leaves the session's branch and
-		// base where its home has them (see hookInSessionHome).
-		// An unresolvable worktree counts as home, as before this check.
-		if worktreeRoot, wtErr := paths.WorktreeRoot(ctx); wtErr != nil || hookInSessionHome(worktreeRoot, state) {
-			captureSessionBranch(repo, state)
-			if err := syncBaseCommitToHead(ctx, repo, state); err != nil {
-				return err
-			}
-		}
-
-		state.LastCheckpointID = ""
-		state.TurnCheckpointIDs = nil
-		return nil
+		out, err := startTurnOnExistingState(ctx, repo, state, turnStartInput{
+			sessionID: sessionID, transcriptPath: transcriptPath, userPrompt: userPrompt,
+			model: model, dedupeKey: dedupeKey, resolvedAgentType: resolvedAgentType,
+		})
+		remember, homeAgentType = out.remember, out.homeAgentType
+		return err
 	}, func() { rememberAgentHome(ctx, homeAgentType, remember) })
 	if turnStartErr == nil {
 		return nil
@@ -3547,6 +3477,105 @@ func (s *ManualCommitStrategy) initializeTurn(ctx context.Context, sessionID str
 	logging.Info(logging.WithComponent(ctx, "hooks"), "initialized session",
 		slog.String("session_id", sessionID))
 	return nil
+}
+
+// turnStartInput is what startTurnOnExistingState needs from the hook.
+type turnStartInput struct {
+	sessionID, transcriptPath, userPrompt, model, dedupeKey string
+	resolvedAgentType                                       types.AgentType
+}
+
+// turnStartOutput carries the agent home to remember once the state is saved.
+type turnStartOutput struct {
+	remember      string
+	homeAgentType types.AgentType
+}
+
+// startTurnOnExistingState applies a turn start to an existing session's
+// state, under its lock. It returns errPartialState for a state without a
+// base commit, ErrMutationSkip for an adopted-away session, and
+// ErrDuplicateTurnStart for a repeat of the prompt the running turn started
+// from.
+func startTurnOnExistingState(ctx context.Context, repo *git.Repository, state *SessionState, in turnStartInput) (turnStartOutput, error) {
+	var out turnStartOutput
+	sessionID, transcriptPath, userPrompt, model, dedupeKey, resolvedAgentType :=
+		in.sessionID, in.transcriptPath, in.userPrompt, in.model, in.dedupeKey, in.resolvedAgentType
+	if state.BaseCommit == "" {
+		return out, errPartialState
+	}
+	if state.AdoptedIntoWorktreePath != "" {
+		logging.Info(logging.WithComponent(ctx, "hooks"), "skipping adopted-away source session",
+			slog.String("session_id", sessionID),
+			slog.String("adopted_into_worktree", state.AdoptedIntoWorktreePath))
+		return out, ErrMutationSkip
+	}
+	now := time.Now()
+	if isRepeatedTurnStart(state, dedupeKey, now) {
+		return out, ErrDuplicateTurnStart
+	}
+	recordTurnStart(state, dedupeKey, now)
+	if transErr := TransitionAndLog(ctx, state, session.EventTurnStart, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
+		logging.Warn(logging.WithComponent(ctx, "hooks"), "turn start transition failed",
+			slog.String("session_id", sessionID),
+			slog.String("error", transErr.Error()))
+	}
+
+	turnID, err := id.Generate()
+	if err != nil {
+		return out, fmt.Errorf("failed to generate turn ID: %w", err)
+	}
+	state.TurnID = turnID.String()
+
+	// A transcript path is stronger evidence than both a stored owner and
+	// the current hook. Apply transcript-proven corrections first, including
+	// the empty-owner case, so a Codex correction can initialize all of its
+	// child-accounting markers atomically.
+	if corrected, changed := correctSessionAgentType(ctx, state.AgentType, transcriptPath); changed {
+		logging.Info(logging.WithComponent(ctx, "hooks"), "corrected session agent type from transcript path",
+			slog.String("session_id", sessionID),
+			slog.String("from", string(state.AgentType)),
+			slog.String("to", string(corrected)),
+			slog.String("transcript_path", transcriptPath))
+		if corrected == agent.AgentTypeCodex && state.AgentType != agent.AgentTypeCodex {
+			transitionSessionToCodex(state)
+		}
+		state.AgentType = corrected
+		// The recorded home belonged to the previous agent's layout.
+		state.AgentHome = ""
+	} else if state.AgentType == "" && resolvedAgentType != "" {
+		state.AgentType = resolvedAgentType
+	}
+	if model != "" {
+		state.ModelName = model
+	}
+	if userPrompt != "" {
+		state.LastPrompt = truncatePromptForStorage(userPrompt)
+	}
+	if transcriptPath != "" && state.TranscriptPath != transcriptPath {
+		state.TranscriptPath = transcriptPath
+	}
+	// Read before the turn's calls: a transcript rewritten since the last
+	// reading (a resume restoring an older copy) still reads lower than
+	// the session's total, which is how the ledger tells it apart.
+	ObserveTokenLedger(ctx, state)
+	remember := updateSessionAgentHome(ctx, state)
+	out.remember, out.homeAgentType = remember, state.AgentType
+	captureSessionOwner(state)
+	reconcileWorktreePathForResumedTurn(ctx, state)
+
+	// A turn resumed in another worktree leaves the session's branch and
+	// base where its home has them (see hookInSessionHome).
+	// An unresolvable worktree counts as home, as before this check.
+	if worktreeRoot, wtErr := paths.WorktreeRoot(ctx); wtErr != nil || hookInSessionHome(worktreeRoot, state) {
+		captureSessionBranch(repo, state)
+		if err := syncBaseCommitToHead(ctx, repo, state); err != nil {
+			return out, err
+		}
+	}
+
+	state.LastCheckpointID = ""
+	state.TurnCheckpointIDs = nil
+	return out, nil
 }
 
 // captureSessionBranch records the branch HEAD currently points at into the
