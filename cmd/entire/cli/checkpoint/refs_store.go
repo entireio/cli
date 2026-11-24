@@ -346,6 +346,36 @@ func SpellingTips(repo *git.Repository, listed map[plumbing.ReferenceName]plumbi
 	return tips
 }
 
+// ListShardSpellings lists, with git, the ref under each spelling of the shard
+// of every checkpoint refs name, for SpellingTips to read as its listing. On a
+// case-insensitive filesystem a lookup under either spelling reads the loose
+// ref first, so a packed entry under the other spelling is seen only by a
+// listing. Where the filesystem does not fold case, each name is looked up as
+// itself, and this returns an empty listing without running git.
+func ListShardSpellings(ctx context.Context, repo *git.Repository, refs []plumbing.ReferenceName) (map[plumbing.ReferenceName]plumbing.Hash, error) {
+	if !foldsCase(repo) {
+		return map[plumbing.ReferenceName]plumbing.Hash{}, nil
+	}
+	patterns := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		if cid, ok := ParseRef(ref); ok {
+			patterns = append(patterns, CheckpointRefPrefix+"*/"+cid.String())
+		}
+	}
+	if len(patterns) == 0 {
+		return map[plumbing.ReferenceName]plumbing.Hash{}, nil
+	}
+	commonDir, err := RepositoryCommonDir(repo)
+	if err != nil {
+		return nil, fmt.Errorf("resolve git common dir: %w", err)
+	}
+	listed, err := gitrepo.ListRefs(ctx, commonDir, patterns...)
+	if err != nil {
+		return nil, fmt.Errorf("list checkpoint shard spellings: %w", err)
+	}
+	return listed, nil
+}
+
 // OtherShardSpelling returns the one other name ref's checkpoint can be stored
 // under: the case-folded spelling of a canonical name, and the canonical
 // spelling of a case-folded one. It reports false for a ref that names no

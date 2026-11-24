@@ -8,15 +8,15 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 )
 
-// ListRefs maps every ref matching pattern to its commit, by the exact name
+// ListRefs maps every ref matching any of patterns to its commit, by the exact name
 // git stores it under. On a case-insensitive filesystem that name can differ
 // in case from the one a lookup resolves, which is what callers comparing ref
 // spellings need to see.
-func ListRefs(ctx context.Context, repoRoot, pattern string) (map[plumbing.ReferenceName]plumbing.Hash, error) {
-	cmd := worktreeGitCommand(ctx, repoRoot, "for-each-ref", "--format=%(objectname) %(refname)", "--end-of-options", pattern)
-	out, err := cmd.Output()
+func ListRefs(ctx context.Context, repoRoot string, patterns ...string) (map[plumbing.ReferenceName]plumbing.Hash, error) {
+	args := append([]string{"for-each-ref", "--format=%(objectname) %(refname)", "--end-of-options"}, patterns...)
+	out, err := worktreeGitCommand(ctx, repoRoot, args...).Output()
 	if err != nil {
-		return nil, fmt.Errorf("git for-each-ref %s: %w", pattern, err)
+		return nil, fmt.Errorf("git for-each-ref %s: %w", strings.Join(patterns, " "), err)
 	}
 	refs := make(map[plumbing.ReferenceName]plumbing.Hash)
 	for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {

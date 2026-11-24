@@ -202,11 +202,18 @@ func TestCheckOuterPushOfHeldCommits_DivergedShardSpellings(t *testing.T) {
 		name   string
 		queue  func(stored, canonical plumbing.ReferenceName) []plumbing.ReferenceName
 		listed bool
+		// loose leaves the later update a loose ref beside the packed entry
+		// of the other spelling, the state an update on a case-insensitive
+		// disk leaves behind until something packs it.
+		loose bool
 	}{
-		{"both queued", func(s, c plumbing.ReferenceName) []plumbing.ReferenceName { return []plumbing.ReferenceName{s, c} }, false},
-		{"canonical queued", func(_, c plumbing.ReferenceName) []plumbing.ReferenceName { return []plumbing.ReferenceName{c} }, false},
-		{"other spelling queued", func(s, _ plumbing.ReferenceName) []plumbing.ReferenceName { return []plumbing.ReferenceName{s} }, false},
-		{"both queued, listed queue", func(s, c plumbing.ReferenceName) []plumbing.ReferenceName { return []plumbing.ReferenceName{s, c} }, true},
+		{"both queued", func(s, c plumbing.ReferenceName) []plumbing.ReferenceName { return []plumbing.ReferenceName{s, c} }, false, false},
+		{"canonical queued", func(_, c plumbing.ReferenceName) []plumbing.ReferenceName { return []plumbing.ReferenceName{c} }, false, false},
+		{"other spelling queued", func(s, _ plumbing.ReferenceName) []plumbing.ReferenceName { return []plumbing.ReferenceName{s} }, false, false},
+		{"both queued, listed queue", func(s, c plumbing.ReferenceName) []plumbing.ReferenceName { return []plumbing.ReferenceName{s, c} }, true, false},
+		{"canonical loose, other spelling packed", func(s, c plumbing.ReferenceName) []plumbing.ReferenceName { return []plumbing.ReferenceName{s, c} }, false, true},
+		{"canonical loose, other spelling packed, one queued", func(_, c plumbing.ReferenceName) []plumbing.ReferenceName { return []plumbing.ReferenceName{c} }, false, true},
+		{"canonical loose, other spelling packed, listed queue", func(s, c plumbing.ReferenceName) []plumbing.ReferenceName { return []plumbing.ReferenceName{s, c} }, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			workDir, _, _ := setupRepoWithCheckpointRefs(t)
@@ -223,8 +230,13 @@ func TestCheckOuterPushOfHeldCommits_DivergedShardSpellings(t *testing.T) {
 			testutil.RunGit(t, workDir, "commit", "--allow-empty", "-m", "other side")
 			canonicalTip := revParse(t, workDir, "HEAD")
 			testutil.RunGit(t, workDir, "update-ref", canonical.String(), canonicalTip)
-			testutil.RunGit(t, workDir, "pack-refs", "--all")
-			require.Equal(t, storedTip, revParse(t, workDir, stored.String()), "the split must survive packing")
+			if !tc.loose {
+				testutil.RunGit(t, workDir, "pack-refs", "--all")
+			}
+			// for-each-ref, not rev-parse: on a case-insensitive disk a loose
+			// ref answers a lookup under either spelling.
+			require.Contains(t, testutil.RunGit(t, workDir, "for-each-ref", "--format=%(objectname) %(refname)", stored.String()),
+				storedTip+" "+stored.String(), "the split must survive")
 			enqueueInRepoAt(t, workDir, tc.queue(stored, canonical)...)
 
 			for _, tip := range []string{canonicalTip, storedTip} {
