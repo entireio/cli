@@ -16,9 +16,10 @@ import (
 	"github.com/entireio/cli/redact"
 )
 
-// installFormatExternalAgent registers a mock external agent with no
-// compactor whose info declares transcriptFormat ("" declares none).
-func installFormatExternalAgent(t *testing.T, name, agentType, transcriptFormat string) {
+// installFormatExternalAgent registers a mock external agent whose info
+// declares transcriptFormat ("" declares none). With compactor, it also has a
+// compact-transcript that writes one "own-compactor" line.
+func installFormatExternalAgent(t *testing.T, name, agentType, transcriptFormat string, compactor bool) {
 	t.Helper()
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not available")
@@ -29,12 +30,22 @@ func installFormatExternalAgent(t *testing.T, name, agentType, transcriptFormat 
 	if transcriptFormat != "" {
 		format = `"transcript_format":"` + transcriptFormat + `",`
 	}
+	caps := `{}`
+	compact := ""
+	if compactor {
+		caps = `{"compact_transcript":true}`
+		line := `{"v":1,"agent":"` + name + `","type":"assistant","content":[{"type":"text","text":"own-compactor"}]}`
+		compact = `  compact-transcript)
+    printf '{"transcript":"%s"}' "$(printf '%s\n' '` + line + `' | base64 | tr -d '\n')"
+    ;;
+`
+	}
 	script := `#!/bin/sh
 case "$1" in
   info)
-    echo '{"protocol_version":1,"name":"` + name + `","type":"` + agentType + `","description":"format test agent",` + format + `"protected_dirs":[],"hook_names":[],"capabilities":{}}'
+    echo '{"protocol_version":1,"name":"` + name + `","type":"` + agentType + `","description":"format test agent",` + format + `"protected_dirs":[],"hook_names":[],"capabilities":` + caps + `}'
     ;;
-esac
+` + compact + `esac
 `
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "entire-agent-"+name), []byte(script), 0o755); err != nil {
@@ -82,7 +93,7 @@ func writeModelTranscriptCheckpoint(t *testing.T, agentType types.AgentType) str
 // named claude-code with Cursor's accounting, which records no model.
 func TestWriteCommitted_ExternalAgentDeclaredTranscriptFormat(t *testing.T) {
 	// Cannot use t.Parallel: mutates $PATH and the agent registry.
-	installFormatExternalAgent(t, "fmtdeclared", "Format Declared", "claude-code")
+	installFormatExternalAgent(t, "fmtdeclared", "Format Declared", "claude-code", false)
 	compact := writeModelTranscriptCheckpoint(t, "Format Declared")
 	if !strings.Contains(compact, `"agent":"fmtdeclared"`) || !strings.Contains(compact, `"model":"claude-test"`) {
 		t.Fatalf("transcript.jsonl was not converted as the declared format:\n%s", compact)
@@ -91,9 +102,41 @@ func TestWriteCommitted_ExternalAgentDeclaredTranscriptFormat(t *testing.T) {
 
 func TestWriteCommitted_ExternalAgentWithoutTranscriptFormatDetects(t *testing.T) {
 	// Cannot use t.Parallel: mutates $PATH and the agent registry.
-	installFormatExternalAgent(t, "fmtnone", "Format None", "")
+	installFormatExternalAgent(t, "fmtnone", "Format None", "", false)
 	compact := writeModelTranscriptCheckpoint(t, "Format None")
 	if !strings.Contains(compact, "reply one") || strings.Contains(compact, `"model"`) {
 		t.Fatalf("transcript.jsonl should be the detected (Cursor-accounting) conversion:\n%s", compact)
+	}
+}
+
+// A declared format takes precedence over the agent's own compactor, so an
+// agent can keep its compactor for older CLIs that ignore the declaration.
+func TestWriteCommitted_DeclaredTranscriptFormatBeatsAgentCompactor(t *testing.T) {
+	// Cannot use t.Parallel: mutates $PATH and the agent registry.
+	installFormatExternalAgent(t, "fmtboth", "Format Both", "claude-code", true)
+	compact := writeModelTranscriptCheckpoint(t, "Format Both")
+	if strings.Contains(compact, "own-compactor") || !strings.Contains(compact, `"model":"claude-test"`) {
+		t.Fatalf("transcript.jsonl should be the declared format's built-in conversion:\n%s", compact)
+	}
+}
+
+// When the declared format converts the transcript to nothing, the agent's own
+// compactor still gets a turn.
+func TestWriteCommitted_DeclaredTranscriptFormatEmptyFallsBackToAgentCompactor(t *testing.T) {
+	// Cannot use t.Parallel: mutates $PATH and the agent registry.
+	installFormatExternalAgent(t, "fmtwrong", "Format Wrong", "codex", true)
+	compact := writeModelTranscriptCheckpoint(t, "Format Wrong")
+	if !strings.Contains(compact, "own-compactor") {
+		t.Fatalf("transcript.jsonl should come from the agent's compactor:\n%s", compact)
+	}
+}
+
+// Without a declared format, the agent's own compactor still runs first.
+func TestWriteCommitted_AgentCompactorWithoutDeclaredFormat(t *testing.T) {
+	// Cannot use t.Parallel: mutates $PATH and the agent registry.
+	installFormatExternalAgent(t, "fmtown", "Format Own", "", true)
+	compact := writeModelTranscriptCheckpoint(t, "Format Own")
+	if !strings.Contains(compact, "own-compactor") {
+		t.Fatalf("transcript.jsonl should come from the agent's compactor:\n%s", compact)
 	}
 }

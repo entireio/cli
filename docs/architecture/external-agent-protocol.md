@@ -341,7 +341,7 @@ Prepares/processes a transcript file (e.g., converting from raw format).
 
 Required when `capabilities.compact_transcript` is `true`.
 
-Leave this capability off when the agent's transcript is in a format the CLI converts: declare `transcript_format` in `info` instead. The built-in compactor then converts it, writes the agent's `name` on every line, and computes per-call model and usage where that format records them. Without this capability or `transcript_format`, the CLI detects the format from the transcript's content, and converts unrecognized JSONL as Claude-style lines without per-call usage.
+When the agent's transcript is in a format the CLI converts, declare `transcript_format` in `info`. The built-in compactor then converts it, writes the agent's `name` on every line, and computes per-call model and usage where that format records them. A declared format takes precedence over this capability: the CLI runs `compact-transcript` only when the built-in conversion fails or comes out empty. An agent can therefore keep this capability for CLIs that predate `transcript_format`, which ignore the field. Without this capability or `transcript_format`, the CLI detects the format from the transcript's content, and converts unrecognized JSONL as Claude-style lines without per-call usage.
 
 #### `compact-transcript --session-ref <path>`
 

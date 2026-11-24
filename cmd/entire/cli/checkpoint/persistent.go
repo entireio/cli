@@ -1147,6 +1147,30 @@ func compactFields(agentType types.AgentType, startLine int) transcriptcompact.M
 	return fields
 }
 
+// compactTranscript picks the compactor for transcript.jsonl. An agent that
+// declares a transcript format gets the built-in converter for it, and its own
+// compactor only if that conversion fails or comes out empty, so an agent can
+// keep its compactor for CLIs that predate the declaration. Otherwise the
+// agent's own compactor runs first and the built-in one is the fallback.
+func compactTranscript(ctx context.Context, agentType types.AgentType, startLine int, transcriptBytes []byte) ([]byte, int, error) {
+	fields := compactFields(agentType, startLine)
+	if fields.Format == "" {
+		if compacted, boundary, ok := compactWithAgent(ctx, agentType, startLine, transcriptBytes); ok {
+			return compacted, boundary, nil
+		}
+		return transcriptcompact.FullWithBoundary(redact.AlreadyRedacted(transcriptBytes), fields)
+	}
+
+	compacted, boundary, err := transcriptcompact.FullWithBoundary(redact.AlreadyRedacted(transcriptBytes), fields)
+	if err == nil && len(bytes.TrimSpace(compacted)) > 0 {
+		return compacted, boundary, nil
+	}
+	if agentCompacted, agentBoundary, ok := compactWithAgent(ctx, agentType, startLine, transcriptBytes); ok {
+		return agentCompacted, agentBoundary, nil
+	}
+	return compacted, boundary, err
+}
+
 // writeCompactTranscript converts the pre-redacted full transcript into the
 // compact transcript.jsonl format and records it under sessionDir in the tree.
 // The whole session is compacted (so each checkpoint is self-contained); the
@@ -1164,11 +1188,7 @@ func (s *treeWriter) writeCompactTranscript(ctx context.Context, agentType types
 	compactCtx, compactSpan := perf.Start(ctx, "write_compact_transcript")
 	defer compactSpan.End()
 
-	compacted, boundary, usedAgent := compactWithAgent(compactCtx, agentType, startLine, transcriptBytes)
-	var err error
-	if !usedAgent {
-		compacted, boundary, err = transcriptcompact.FullWithBoundary(redact.AlreadyRedacted(transcriptBytes), compactFields(agentType, startLine))
-	}
+	compacted, boundary, err := compactTranscript(compactCtx, agentType, startLine, transcriptBytes)
 	if err != nil {
 		compactSpan.RecordError(err)
 		logging.Warn(compactCtx, "compact transcript generation failed, skipping transcript.jsonl",
