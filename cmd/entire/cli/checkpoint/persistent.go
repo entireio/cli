@@ -1162,7 +1162,19 @@ func compactTranscript(ctx context.Context, agentType types.AgentType, startLine
 	}
 
 	compacted, boundary, err := transcriptcompact.FullWithBoundary(redact.AlreadyRedacted(transcriptBytes), fields)
-	if err == nil && len(bytes.TrimSpace(compacted)) > 0 {
+	switch {
+	case err != nil:
+		logging.Warn(ctx, "declared transcript format conversion failed, trying the agent's compactor",
+			slog.String("agent", string(agentType)),
+			slog.String("format", fields.Format),
+			slog.String("error", err.Error()),
+		)
+	case len(bytes.TrimSpace(compacted)) == 0:
+		logging.Debug(ctx, "declared transcript format converted to nothing, trying the agent's compactor",
+			slog.String("agent", string(agentType)),
+			slog.String("format", fields.Format),
+		)
+	default:
 		return compacted, boundary, nil
 	}
 	if agentCompacted, agentBoundary, ok := compactWithAgent(ctx, agentType, startLine, transcriptBytes); ok {
