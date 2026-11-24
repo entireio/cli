@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -3359,6 +3361,57 @@ func explicitlyIncomplete(complete *bool) bool {
 // userPrompt is the user's prompt text (stored truncated as LastPrompt for display).
 // model is the LLM model identifier (e.g., "claude-sonnet-4-20250514"); empty if unknown.
 func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID string, agentType types.AgentType, transcriptPath string, userPrompt string, model string) error {
+	return s.initializeTurn(ctx, sessionID, agentType, transcriptPath, userPrompt, model, "")
+}
+
+// ErrDuplicateTurnStart is InitializeSessionForPrompt finding that this
+// session already handled the same prompt in the turn still running: a
+// second Entire install fired for it. The caller skips the rest of the
+// prompt's handling.
+var ErrDuplicateTurnStart = errors.New("turn start already handled for this prompt")
+
+// turnStartDedupeWindow bounds how long a handled prompt counts as a repeat.
+// Two installs fire for one prompt within moments of each other.
+const turnStartDedupeWindow = time.Minute
+
+// InitializeSessionForPrompt is InitializeSession for a UserPromptSubmit,
+// which also skips a repeat of the prompt it handled last: the same session,
+// prompt text and agent turn ID (agentTurnID, when the agent sends one),
+// within turnStartDedupeWindow, while that turn is still active. The check
+// and the record happen under the session lock, before a turn ID is
+// generated. Returns ErrDuplicateTurnStart for a repeat.
+func (s *ManualCommitStrategy) InitializeSessionForPrompt(ctx context.Context, sessionID string, agentType types.AgentType, transcriptPath, userPrompt, model, agentTurnID string) error {
+	return s.initializeTurn(ctx, sessionID, agentType, transcriptPath, userPrompt, model, TurnStartKey(sessionID, userPrompt, agentTurnID))
+}
+
+// TurnStartKey is the dedupe key of a prompt, or "" when there is nothing to
+// tell two prompts apart by (no prompt text and no agent turn ID).
+func TurnStartKey(sessionID, userPrompt, agentTurnID string) string {
+	if userPrompt == "" && agentTurnID == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(sessionID + "\x00" + userPrompt + "\x00" + agentTurnID))
+	return hex.EncodeToString(sum[:])
+}
+
+// isRepeatedTurnStart reports whether key repeats the prompt state handled
+// last, in a turn that is still running.
+func isRepeatedTurnStart(state *SessionState, key string, now time.Time) bool {
+	return key != "" && state.LastTurnStartKey == key &&
+		state.LastTurnStartAt != nil && now.Sub(*state.LastTurnStartAt) < turnStartDedupeWindow &&
+		state.Phase.IsActive()
+}
+
+// recordTurnStart remembers key as the prompt this session handled last.
+func recordTurnStart(state *SessionState, key string, now time.Time) {
+	if key == "" {
+		return
+	}
+	state.LastTurnStartKey = key
+	state.LastTurnStartAt = &now
+}
+
+func (s *ManualCommitStrategy) initializeTurn(ctx context.Context, sessionID string, agentType types.AgentType, transcriptPath, userPrompt, model, dedupeKey string) error {
 	// Concurrent calls for the same session_id are accepted; convergence on
 	// AgentType is via correctSessionAgentType on the next turn.
 	repo, err := OpenRepository(ctx)
@@ -3391,6 +3444,11 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 				slog.String("adopted_into_worktree", state.AdoptedIntoWorktreePath))
 			return ErrMutationSkip
 		}
+		now := time.Now()
+		if isRepeatedTurnStart(state, dedupeKey, now) {
+			return ErrDuplicateTurnStart
+		}
+		recordTurnStart(state, dedupeKey, now)
 		if transErr := TransitionAndLog(ctx, state, session.EventTurnStart, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
 			logging.Warn(logging.WithComponent(ctx, "hooks"), "turn start transition failed",
 				slog.String("session_id", sessionID),
@@ -3457,6 +3515,9 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 	if turnStartErr == nil {
 		return nil
 	}
+	if errors.Is(turnStartErr, ErrDuplicateTurnStart) {
+		return ErrDuplicateTurnStart
+	}
 	if !errors.Is(turnStartErr, ErrStateNotFound) && !errors.Is(turnStartErr, errPartialState) {
 		return fmt.Errorf("failed to update session state: %w", turnStartErr)
 	}
@@ -3469,6 +3530,7 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 	}
 
 	mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+		recordTurnStart(state, dedupeKey, time.Now())
 		if transErr := TransitionAndLog(ctx, state, session.EventTurnStart, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
 			logging.Warn(logging.WithComponent(ctx, "hooks"), "turn start transition failed",
 				slog.String("session_id", sessionID),

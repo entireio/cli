@@ -7,10 +7,12 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 )
 
@@ -360,5 +362,41 @@ func TestEnsureUserHooksWhile_InstallsNothingOnceUnwanted(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(userDir, ClaudeSettingsFileName)); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("settings written although unwanted (stat err = %v)", err)
+	}
+}
+
+// The user-level hook version lives in Entire's side file, never in the hook
+// commands, which stay byte-identical to the project ones (see
+// TestEnsureUserHooks_WritesTheSameHooksEnableWrites); inspect reads it back.
+func TestEnsureUserHooks_StampsTheVersionInASideFile(t *testing.T) {
+	userDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", userDir)
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	ag := &ClaudeCodeAgent{}
+
+	_, _, err := ag.EnsureUserHooks(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("EnsureUserHooks() error = %v", err)
+	}
+	if got := agent.ReadUserHookStamp(agent.AgentNameClaudeCode); got != userHooksVersion {
+		t.Errorf("stamp = %d, want %d", got, userHooksVersion)
+	}
+	data, err := os.ReadFile(filepath.Join(userDir, ClaudeSettingsFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "--scope") || strings.Contains(string(data), "user/v") {
+		t.Errorf("user-level commands carry a version:\n%s", data)
+	}
+	report := ag.InspectUserHooks(context.Background())
+	if report.State != agent.UserHooksCurrent || report.Version != userHooksVersion {
+		t.Errorf("InspectUserHooks() = %+v, want current at version %d", report, userHooksVersion)
+	}
+
+	if _, _, err := ag.RemoveUserHooks(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := agent.ReadUserHookStamp(agent.AgentNameClaudeCode); got != 0 {
+		t.Errorf("stamp after removal = %d, want 0", got)
 	}
 }

@@ -223,7 +223,7 @@ func askGlobalEnablePushConsentTTY(destination string) bool {
 		destination, globalEnablePushConsentTimeout)
 	line, err := readPromptAnswer(tty, globalEnablePushConsentTimeout)
 	if errors.Is(err, errPromptTimedOut) {
-		fmt.Fprintln(tty, "\nNo answer; the checkpoints stay on this machine.")
+		fmt.Fprintln(tty, "\nNo answer; the checkpoints were not pushed.")
 		return false
 	}
 	answer := strings.ToLower(strings.TrimSpace(line))

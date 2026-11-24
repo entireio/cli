@@ -342,7 +342,7 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 // install Entire's git hooks, that global enable is the only reason.
 var globalEnableBannerLines = []string{
 	"Entire is on in this repository through global enable (you have not run `entire enable` here).",
-	"It installs its git hooks here and keeps session checkpoints on this machine until you agree, at a git push from a terminal, to push them.",
+	"It installs its git hooks here. Checkpoints are not pushed to this repository's remote until you agree, at a git push from a terminal.",
 	"Run `entire disable` here to stop.",
 }
 
@@ -737,8 +737,25 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 	}
 	captureSpan.End()
 
+	// Initialize session (setup already ran above, before the first status read)
+	_, initSpan := perf.Start(ctx, "init_session")
+	strat := GetStrategy(ctx)
+	if err := strat.InitializeSessionForPrompt(ctx, sessionID, ag.Type(), event.SessionRef, event.Prompt, event.Model, event.TurnID); err != nil {
+		if errors.Is(err, strategy.ErrDuplicateTurnStart) {
+			// A second Entire install (user-level beside project hooks)
+			// fired for a prompt already handled; that turn-start does the rest.
+			logging.Info(logCtx, "skipping repeated turn-start for a prompt already handled",
+				slog.String("session_id", sessionID))
+			initSpan.End()
+			return nil
+		}
+		logging.Warn(logCtx, "failed to initialize session state",
+			slog.String("error", err.Error()))
+	}
+
 	// Append prompt to prompt.txt on filesystem so it's available for
-	// mid-turn commits and condensation. It goes to the session's home
+	// mid-turn commits and condensation. After InitializeSessionForPrompt, so
+	// a repeated turn-start does not append the prompt twice. It goes to the session's home
 	// worktree, where its other prompts are (see OpenSessionEntireDir).
 	// Prompts are separated by "\n\n---\n\n" to support multiple turns.
 	if event.Prompt != "" {
@@ -761,13 +778,6 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 		}
 	}
 
-	// Initialize session (setup already ran above, before the first status read)
-	_, initSpan := perf.Start(ctx, "init_session")
-	strat := GetStrategy(ctx)
-	if err := strat.InitializeSession(ctx, sessionID, ag.Type(), event.SessionRef, event.Prompt, event.Model); err != nil {
-		logging.Warn(logCtx, "failed to initialize session state",
-			slog.String("error", err.Error()))
-	}
 
 	// Best-effort: adopt ENTIRE_REVIEW_* / ENTIRE_INVESTIGATE_* env vars set
 	// by `entire review` / `entire investigate` on the spawned agent process.
