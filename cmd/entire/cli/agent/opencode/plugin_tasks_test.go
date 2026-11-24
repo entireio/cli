@@ -11,7 +11,8 @@ import (
 )
 
 // pluginTaskDriver loads the plugin under Node and replays a scenario of
-// tool.execute.before/after calls and events, in order.
+// tool.execute.before/after calls, events, and system-prompt transforms, in
+// order. Each transform prints the resulting system prompt as a SYSTEM line.
 const pluginTaskDriver = `
 import { pathToFileURL } from "node:url"
 import { readFileSync } from "node:fs"
@@ -24,6 +25,11 @@ for (const step of JSON.parse(readFileSync(process.argv[3], "utf8"))) {
   if (step.before) await handlers["tool.execute.before"](step.before, { args: {} })
   if (step.after) await handlers["tool.execute.after"](step.after.input, step.after.output ?? undefined)
   if (step.event) await handlers.event({ event: step.event })
+  if (step.transform) {
+    const out = { system: ["base"] }
+    await handlers["experimental.chat.system.transform"](step.transform, out)
+    console.log("SYSTEM " + JSON.stringify(out.system))
+  }
 }
 `
 
@@ -38,9 +44,18 @@ type taskHook struct {
 func (h taskHook) key() string { return h.Hook + ":" + h.ToolUseID }
 
 // runPluginTaskScenario replays steps against the plugin and returns the
-// subagent hooks it fired, in order. A fake `entire` on PATH records each
-// hook name and its stdin payload.
+// subagent hooks it fired, in order.
 func runPluginTaskScenario(t *testing.T, steps []map[string]any) []taskHook {
+	t.Helper()
+	logPath, _ := runPluginV1(t, steps, "")
+	return readTaskHooks(t, logPath)
+}
+
+// runPluginV1 replays steps against the OpenCode 1 plugin and returns the
+// hook log's path and the driver's output. A fake `entire` on PATH records
+// each hook name and its stdin payload; when inject is set, its turn-start
+// also prints inject as Entire's context-injection envelope.
+func runPluginV1(t *testing.T, steps []map[string]any, inject string) (string, []byte) {
 	t.Helper()
 	if _, err := exec.LookPath("node"); err != nil {
 		t.Skip("node not installed")
@@ -65,7 +80,7 @@ func runPluginTaskScenario(t *testing.T, steps []map[string]any) []taskHook {
 			t.Fatal(err)
 		}
 	}
-	script := "#!/bin/sh\nprintf '%s\\t' \"$3\" >> " + logPath + "\ncat >> " + logPath + "\n"
+	script := "#!/bin/sh\nprintf '%s\\t' \"$3\" >> " + logPath + "\ncat >> " + logPath + "\n" + injectContextLine
 	if err := os.WriteFile(filepath.Join(binDir, "entire"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -73,11 +88,38 @@ func runPluginTaskScenario(t *testing.T, steps []map[string]any) []taskHook {
 	cmd := exec.CommandContext(t.Context(), "node", "--experimental-strip-types",
 		filepath.Join(dir, "driver.mjs"), pluginPath, filepath.Join(dir, "steps.json"))
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"), "OPENCODE=1")
-	if out, err := cmd.CombinedOutput(); err != nil {
+	cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"), "OPENCODE=1", "INJECT_CONTEXT="+inject)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
 		t.Fatalf("node driver failed: %v\n%s", err, out)
 	}
+	return logPath, out
+}
 
+// injectContextLine makes the fake `entire` print Entire's context-injection
+// envelope from turn-start when INJECT_CONTEXT is set.
+const injectContextLine = "[ \"$3\" = turn-start ] && [ -n \"$INJECT_CONTEXT\" ] && printf '{\"inject_context\":\"%s\"}\\n' \"$INJECT_CONTEXT\"\n"
+
+// systemPrompts returns the system prompts the driver printed, in order.
+func systemPrompts(t *testing.T, out []byte) [][]string {
+	t.Helper()
+	var prompts [][]string
+	for line := range strings.Lines(string(out)) {
+		body, ok := strings.CutPrefix(strings.TrimSpace(line), "SYSTEM ")
+		if !ok {
+			continue
+		}
+		var system []string
+		if err := json.Unmarshal([]byte(body), &system); err != nil {
+			t.Fatalf("bad SYSTEM line %q: %v", line, err)
+		}
+		prompts = append(prompts, system)
+	}
+	return prompts
+}
+
+func readTaskHooks(t *testing.T, logPath string) []taskHook {
+	t.Helper()
 	f, err := os.Open(logPath)
 	if os.IsNotExist(err) {
 		return nil

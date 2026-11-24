@@ -75,9 +75,14 @@ const EntirePlugin: Plugin = async ({ directory }) => {
   let currentModel: string | null = null
   // In-memory store for message metadata (role, tokens, etc.)
   const messageStore = new Map<string, any>()
-  // One-time model-context injection captured from the turn-start hook's stdout,
-  // applied on the next LLM call via experimental.chat.system.transform.
-  let pendingInjection: string | null = null
+  // Model context captured from the turn-start hook's stdout, for the session
+  // whose turn emitted it. experimental.chat.system.transform adds it to every
+  // LLM call of that session until the turn ends: OpenCode rebuilds the system
+  // prompt on each step and keeps none of it in history, and the session's
+  // first call may be the title generator. Cleared at the turn's idle once
+  // applied; kept for the next turn when no call used it (the turn ended
+  // before reaching the model), since Entire does not send it again.
+  let pendingInjection: { sessionID: string; text: string; applied: boolean } | null = null
   // Child (subagent) sessions. OpenCode's task tool runs each subagent as a
   // real session, so without this set a child would register as the user's
   // session: its write would take the checkpoint and the parent would log
@@ -182,8 +187,9 @@ const EntirePlugin: Plugin = async ({ directory }) => {
 
   // fireTurnStart fires turn-start synchronously (state must be ready before
   // mid-turn commits) and stashes any model-context injection emitted on stdout
-  // for experimental.chat.system.transform to apply. Entire emits the injection
-  // at most once per session, so pendingInjection is set on the first turn only.
+  // for experimental.chat.system.transform to apply. Entire emits context on the
+  // turns that need it (the base context once per session, more on a later turn
+  // when that applies), so most turns set nothing.
   function fireTurnStart(payload: Record<string, unknown>) {
     try {
       const json = JSON.stringify(payload)
@@ -196,7 +202,8 @@ const EntirePlugin: Plugin = async ({ directory }) => {
       })
       const out = typeof proc.stdout === "string" ? proc.stdout : ""
       const injected = parseInjectedContext(out)
-      if (injected) pendingInjection = injected
+      const sessionID = typeof payload.session_id === "string" ? payload.session_id : ""
+      if (injected && sessionID) pendingInjection = { sessionID, text: injected, applied: false }
     } catch {
       // Silently ignore — plugin failures must not crash OpenCode
     }
@@ -355,13 +362,14 @@ const EntirePlugin: Plugin = async ({ directory }) => {
   }
 
   return {
-    // Apply the one-time Entire context injection captured at turn-start by
-    // appending it to the system prompt for this LLM call.
+    // Apply the Entire context captured at turn-start by appending it to the
+    // system prompt of each of the session's LLM calls until the turn ends.
     "experimental.chat.system.transform": async (input: { sessionID?: string }, output: { system: string[] }) => {
       if (input?.sessionID && childSessions.has(input.sessionID)) return
-      if (pendingInjection && Array.isArray(output.system)) {
-        output.system.push(pendingInjection)
-        pendingInjection = null
+      const injection = pendingInjection
+      if (injection && input?.sessionID === injection.sessionID && Array.isArray(output.system)) {
+        output.system.push(injection.text)
+        injection.applied = true
       }
     },
     // Subagent call start. No child ID exists yet, so this only records the
@@ -540,6 +548,9 @@ const EntirePlugin: Plugin = async ({ directory }) => {
             if (props?.status?.type !== "idle") break
             const sessionID = props?.sessionID ?? currentSessionID
             if (!sessionID) break
+            // The turn's context is done once a call used it; a turn that
+            // never reached the model keeps it for the next one.
+            if (pendingInjection?.sessionID === sessionID && pendingInjection.applied) pendingInjection = null
             // Use sync variant: `opencode run` exits on the same idle event,
             // so an async hook would be killed before completing.
             callHookSync("turn-end", {
@@ -661,9 +672,9 @@ async function entireSetup(ctx: any) {
   const activeTurns = new Set<string>()
   // Session -> model ID of its latest LLM call (from the context hook).
   const models = new Map<string, string>()
-  // Session -> one-time context injection from turn-start, applied on the
-  // session's next LLM call.
-  const pendingInjection = new Map<string, string>()
+  // Session -> context from turn-start, applied on each of the session's LLM
+  // calls until the turn ends (see the OpenCode 1 plugin's pendingInjection).
+  const pendingInjection = new Map<string, { text: string; applied: boolean }>()
   // Session -> its detached hooks still running (turn-end, session-end,
   // compaction, held subagent stops). Each new detached hook waits for these
   // by PID (it may outlive this process) and the next turn-start awaits them,
@@ -826,11 +837,12 @@ async function entireSetup(ctx: any) {
     }
     const out = await runHook("turn-start", { session_id: sessionID, prompt, model: models.get(sessionID) ?? "" })
     const injected = parseInjectedContext(out)
-    if (injected) pendingInjection.set(sessionID, injected)
+    if (injected) pendingInjection.set(sessionID, { text: injected, applied: false })
   }
 
   function endTurn(sessionID: string) {
     if (!activeTurns.delete(sessionID)) return
+    if (pendingInjection.get(sessionID)?.applied) pendingInjection.delete(sessionID)
     runDetached(sessionID, "turn-end", { session_id: sessionID, model: models.get(sessionID) ?? "" })
   }
 
@@ -972,8 +984,8 @@ async function entireSetup(ctx: any) {
       if (typeof e?.model?.id === "string") models.set(sessionID, e.model.id)
       const injection = pendingInjection.get(sessionID)
       if (injection && Array.isArray(e.system)) {
-        e.system.push({ type: "text", text: injection })
-        pendingInjection.delete(sessionID)
+        e.system.push({ type: "text", text: injection.text })
+        injection.applied = true
       }
     } catch {
       // Silently ignore — plugin failures must not crash OpenCode
