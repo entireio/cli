@@ -544,11 +544,18 @@ func (s *treeWriter) writeTaskRecordEntry(task TaskPayload, basePath string, ent
 }
 
 // checkpointLsTreeCommand returns the `git ls-tree` invocation that shows
-// checkpointID's stored tree: its own ref for the per-checkpoint-ref store
-// (anchored at basePath ""), else its sharded directory on the v1 branch.
-func checkpointLsTreeCommand(checkpointID id.CheckpointID, basePath string) string {
+// checkpointID's tree: its ref in the refs store (empty basePath), or its
+// sharded directory on the v1 branch. In the refs store it names the ref that
+// holds the checkpoint, which after a rename to the lowercase shard is not
+// RefName.
+func (s *treeWriter) checkpointLsTreeCommand(checkpointID id.CheckpointID, basePath string) string {
 	if basePath == "" {
 		if refName, err := RefName(checkpointID); err == nil {
+			if s.repo != nil {
+				if stored, _, err := StoredRef(s.repo, nil, refName); err == nil {
+					refName = stored
+				}
+			}
 			return "git ls-tree " + refName.String()
 		}
 	}
@@ -607,7 +614,7 @@ func (s *treeWriter) writeStandardCheckpointEntries(ctx context.Context, opts Wr
 					slog.Bool("existing_summary_nil", existingSummary == nil))
 				return fmt.Errorf(
 					"refusing to overwrite session 0 of checkpoint %s: existing session ID %q differs from write session ID %q. The checkpoint tree is inconsistent (session 0 belongs to a different session than this write claims). No automated repair exists for this shape — please report it along with the output of `%s`",
-					opts.CheckpointID, existingMeta.SessionID, opts.SessionID, checkpointLsTreeCommand(opts.CheckpointID, basePath),
+					opts.CheckpointID, existingMeta.SessionID, opts.SessionID, s.checkpointLsTreeCommand(opts.CheckpointID, basePath),
 				)
 			}
 		}
