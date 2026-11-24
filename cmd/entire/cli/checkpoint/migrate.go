@@ -500,7 +500,7 @@ func (v *legacyV1) describeCopy(c *checkpointCopy) LegacyCheckpointCopy {
 		return described
 	}
 	for i := 0; ; i++ {
-		meta, ok := readCommittedMetadataFromCheckpointTree(tree, i)
+		meta, ok := readCommittedMetadataFromCheckpointTree(tree, strconv.Itoa(i))
 		if !ok {
 			return described
 		}

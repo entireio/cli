@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -707,11 +706,7 @@ func (s *gitRefsStore) sessionTree(ctx context.Context, cid id.CheckpointID, ses
 	if err != nil {
 		return nil, err
 	}
-	sessionTree, err := ct.Tree(strconv.Itoa(sessionIndex))
-	if err != nil {
-		return nil, fmt.Errorf("%w: session %d not found: %w", ErrCheckpointNotFound, sessionIndex, err)
-	}
-	return sessionTree, nil
+	return sessionTreeAt(ct, sessionIndex)
 }
 
 // Read returns the checkpoint summary, or (nil, nil) when the checkpoint's ref
