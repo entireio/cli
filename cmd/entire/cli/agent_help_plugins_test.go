@@ -298,19 +298,21 @@ func TestAgentHelpSelectPluginsListsEachNameOnce(t *testing.T) {
 // order), and a name LookPath finds nothing for is left out. Order is kept.
 func TestAgentHelpDispatchedKeepsTheEntryLookPathRuns(t *testing.T) {
 	t.Parallel()
-	dir := `C:\\plugins\\bin`
-	at := func(name, file string) *InstalledPlugin { return &InstalledPlugin{Name: name, Path: dir + `\\` + file} }
+	dir := filepath.Join("plugins", "bin")
+	at := func(name, file string) *InstalledPlugin {
+		return &InstalledPlugin{Name: name, Path: filepath.Join(dir, file)}
+	}
 	installed := []*InstalledPlugin{
 		at("foo", "entire-foo.cmd"), at("foo", "entire-foo.EXE"), at("gone", "entire-gone.ps1"), at("zed", "entire-zed.bat"),
 	}
-	runs := map[string]string{ // what LookPath(dir\entire-<name>) finds, spelled as PATHEXT does
-		dir + `\\entire-foo`: dir + `\\entire-foo.exe`,
-		dir + `\\entire-zed`: dir + `\\entire-zed.bat`,
+	runs := map[string]string{ // what LookPath(dir/entire-<name>) finds, spelled as PATHEXT does
+		filepath.Join(dir, "entire-foo"): filepath.Join(dir, "entire-foo.exe"),
+		filepath.Join(dir, "entire-zed"): filepath.Join(dir, "entire-zed.bat"),
 	}
 	var asked []string
 	lookPath := func(p string) (string, error) {
 		asked = append(asked, p)
-		if r, ok := runs[strings.ReplaceAll(p, "/", `\\`)]; ok {
+		if r, ok := runs[p]; ok {
 			return r, nil
 		}
 		return "", exec.ErrNotFound
@@ -321,6 +323,31 @@ func TestAgentHelpDispatchedKeepsTheEntryLookPathRuns(t *testing.T) {
 	}
 	if len(asked) != 3 {
 		t.Errorf("LookPath asked %d times (%q), want once per name", len(asked), asked)
+	}
+}
+
+// On Windows, with the real exec.LookPath: of entire-foo.cmd and
+// entire-foo.exe the .exe is kept (PATHEXT's default order puts .EXE before
+// .CMD), the file `entire foo` runs. CI's Windows job runs tests named
+// Windows.
+func TestAgentHelpDispatchedWindowsLookPath(t *testing.T) {
+	if runtime.GOOS != windowsGOOS {
+		t.Skip("Windows lookup")
+	}
+	t.Setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+	dir := t.TempDir()
+	for _, name := range []string{"entire-foo.cmd", "entire-foo.exe"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	installed := []*InstalledPlugin{
+		{Name: "foo", Path: filepath.Join(dir, "entire-foo.cmd")},
+		{Name: "foo", Path: filepath.Join(dir, "entire-foo.exe")},
+	}
+	got := agentHelpDispatched(installed, dir, exec.LookPath)
+	if len(got) != 1 || got[0] != installed[1] {
+		t.Errorf("kept %+v, want only entire-foo.exe", got)
 	}
 }
 
