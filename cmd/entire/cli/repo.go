@@ -319,7 +319,7 @@ and recovery instructions go to stderr.`,
 	// "(required)" stays in the text although the flag is not cobra-required
 	// (the wizard asks for it): agents read this list and never have a
 	// terminal, so it is the only place they learn it.
-	cmd.Flags().StringVar(&projectRef, projectFlagName, "", "Owning project (by name) (required; run in a terminal without --project, --visibility or --object-format to be asked instead)")
+	cmd.Flags().StringVar(&projectRef, projectFlagName, "", "Owning project (name, et/<name>, or ULID) (required; run in a terminal without --project, --visibility or --object-format to be asked instead)")
 	cmd.Flags().StringVar(&objectFormat, repoCreateFlagObjectFormat, "", "Git object format for the repository: sha1 or sha256 (defaults to the server default)")
 	cmd.Flags().StringVar(&visibility, repoCreateFlagVisibility, "", "Visibility to set after creation: public or private (new repositories are private)")
 	addJSONFlag(cmd)
@@ -333,7 +333,7 @@ func newRepoListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   cmdList,
 		Short: "List repositories in a project",
-		Long: "List repositories in the project named by --project (name or ULID).\n\n" +
+		Long: "List repositories in the project named by --project (name, et/<name>, or ULID).\n\n" +
 			"By default at most " + strconv.Itoa(coreListFetchBudget) + " repositories are fetched; when the project " +
 			"has more, a note on stderr says so — pass --all to fetch everything, or " +
 			"--limit N for exactly the first N (rows come in server order; this list " +
@@ -431,7 +431,7 @@ func newRepoListCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&project, projectFlagName, "", "Project to list (name or ULID) (required)")
+	cmd.Flags().StringVar(&project, projectFlagName, "", "Project to list (name, et/<name>, or ULID) (required)")
 	markRequired(cmd, projectFlagName)
 	cmd.Flags().IntVar(&limit, "limit", 0, "Fetch and show only the first N repositories (0 uses the default fetch budget)")
 	cmd.Flags().BoolVar(&all, "all", false, "Fetch every repository instead of the first "+strconv.Itoa(coreListFetchBudget)+" (slower on large projects)")
@@ -691,7 +691,7 @@ const projectFlagName = "project"
 // wrong project was accepted in silence; warnRedundantProjectFlag is what ends
 // that.
 func bindRepoProjectFlag(cmd *cobra.Command, project *string) {
-	cmd.Flags().StringVar(project, projectFlagName, "", "Owning project (name or ULID); required when <repo> is a bare name, redundant with a /"+nativeCloneForge+"/<project>/<repo> path or a ULID")
+	cmd.Flags().StringVar(project, projectFlagName, "", "Owning project (name, et/<name>, or ULID); required when <repo> is a bare name, redundant with a /"+nativeCloneForge+"/<project>/<repo> path or a ULID")
 	warnRedundantProjectFlag(cmd, project)
 }
 

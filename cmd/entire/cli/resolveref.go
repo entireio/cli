@@ -265,21 +265,95 @@ func formatQualifiedHandle(provider, handle string) string {
 	return provider + ":" + handle
 }
 
-// resolveProjectRefResolved is resolveProjectRef plus the server's name.
-func resolveProjectRefResolved(ctx context.Context, c projectRefClient, ref string) (resolvedRef, error) {
-	if looksLikeULID(ref) {
-		return resolvedRef{ID: ref}, nil
-	}
-	return resolveProjectByName(ctx, c, ref)
+// controlPlaneProject is a project reference as typed (raw) and as looked up
+// (value). An et/<name> reference (the form trail commands take) is always a name, even one shaped like a
+// ULID: project names may be 26 base32 characters, and reading such a name as
+// an ID is what the et/ form exists to rule out.
+type controlPlaneProject struct {
+	raw, value string
+	isName     bool
 }
 
-// resolveProjectRef turns a project reference (ULID or name) into its ULID. A
-// ULID is returned unchanged; a name is resolved via the server's
+// isID reports whether the reference is a project ULID rather than a name.
+func (p controlPlaneProject) isID() bool { return !p.isName && looksLikeULID(p.value) }
+
+// mirrorProjectRefError refuses gh/<owner> where a command needs an Entire
+// project: a GitHub owner's mirror project holds no native repositories,
+// grants, invitations or service accounts of its own, and deleting it would
+// target a container Entire manages.
+type mirrorProjectRefError struct{ owner string }
+
+func (e *mirrorProjectRefError) Error() string {
+	return fmt.Sprintf("%s/%s is the GitHub owner %s's mirror project; this command works on Entire projects (%s/<name>)", mirrorCloneForge, e.owner, e.owner, nativeCloneForge)
+}
+
+// parseControlPlaneProject reads a project reference for a control-plane
+// command: a name or ULID as before, or et/<name>, the reference trail
+// commands take. gh/<owner> is refused with mirrorProjectRefError, and
+// any other slash form is invalid.
+func parseControlPlaneProject(ref string) (controlPlaneProject, error) {
+	host, rest, ok := strings.Cut(ref, "/")
+	if !ok {
+		return controlPlaneProject{raw: ref, value: ref}, nil
+	}
+	_, _, err := parseTrailProjectRef(ref)
+	switch {
+	case err == nil && host == nativeCloneForge:
+		return controlPlaneProject{raw: ref, value: rest, isName: true}, nil
+	case err == nil && host == mirrorCloneForge:
+		return controlPlaneProject{}, &mirrorProjectRefError{owner: rest}
+	case err != nil && host == nativeCloneForge && rest != "" && !strings.ContainsAny(rest, "/\\?#%"):
+		// One segment with a bad character: the parser's reason says which.
+		return controlPlaneProject{}, err
+	}
+	return controlPlaneProject{}, fmt.Errorf("invalid project %q: use a project name, %s/<name>, or a ULID", ref, nativeCloneForge)
+}
+
+// resolveProjectRefResolved is resolveProjectRef plus the server's name.
+func resolveProjectRefResolved(ctx context.Context, c projectRefClient, ref string) (resolvedRef, error) {
+	p, err := parseControlPlaneProject(ref)
+	if err != nil {
+		return resolvedRef{}, err
+	}
+	if p.isID() {
+		return resolvedRef{ID: p.value}, nil
+	}
+	return resolveProjectByName(ctx, c, p.value)
+}
+
+// resolveProjectRef turns a project reference (ULID, name, or et/<name>) into
+// its ULID. A ULID is returned unchanged; a name is resolved via the server's
 // case-insensitive by-name lookup (the same call `entire project list --name`
 // uses). Project names are globally unique, so a name maps to at most one project.
 func resolveProjectRef(ctx context.Context, c projectRefClient, ref string) (string, error) {
 	r, err := resolveProjectRefResolved(ctx, c, ref)
 	return r.ID, err
+}
+
+// resolveProjectGetRef is resolveProjectRef for `project get`, which also
+// takes gh/<owner>: a GitHub owner's mirror project is worth looking at (its ID
+// is what trail commands take), and Core's project resolver answers it.
+func resolveProjectGetRef(ctx context.Context, c *coreapi.Client, ref string) (string, error) {
+	host, owner, err := parseTrailProjectRef(ref)
+	if err != nil || host != mirrorCloneForge {
+		return resolveProjectRef(ctx, c, ref)
+	}
+	out, err := c.ResolveProject(ctx, coreapi.ResolveProjectParams{ForgePrefix: coreapi.ResolveProjectForgePrefix(host), Project: owner})
+	// Plain errors for 404 and 403: control-plane commands render a wrapped
+	// Core error as Core's own detail, which would drop the reference.
+	switch coreapi.APIErrorStatus(err) {
+	case http.StatusNotFound:
+		return "", fmt.Errorf("project %s does not exist or is not visible to your login; check that the GitHub owner is connected to Entire", ref)
+	case http.StatusForbidden:
+		return "", fmt.Errorf("your login does not have access to project %s", ref)
+	}
+	if err != nil {
+		return "", fmt.Errorf("resolve project %s: %w", ref, err)
+	}
+	if string(out.Reference.Host) != host || !strings.EqualFold(out.Reference.Project, owner) {
+		return "", errors.New("core returned a different project reference")
+	}
+	return out.Project.ID, nil
 }
 
 // resolveProjectRefNamed resolves a project ref to its id AND its name, for
@@ -292,15 +366,23 @@ func resolveProjectRef(ctx context.Context, c projectRefClient, ref string) (str
 // column that a reader can act on; a path that appears for some inputs and not
 // others would be worse than none.
 func resolveProjectRefNamed(ctx context.Context, c projectNameClient, ref string) (id, name string, err error) {
-	if !looksLikeULID(ref) {
+	p, err := parseControlPlaneProject(ref)
+	if mirror := (*mirrorProjectRefError)(nil); errors.As(err, &mirror) {
+		// Its repositories are mirrors, which have their own listing.
+		return "", "", fmt.Errorf("%w; list its repositories with 'entire repo mirror list --owner %s'", err, mirror.owner)
+	}
+	if err != nil {
+		return "", "", err
+	}
+	if !p.isID() {
 		// The by-name lookup already answers with the server's own spelling,
 		// which is what belongs in a printed path — not the caller's casing.
-		resolved, rerr := resolveProjectByName(ctx, c, ref)
+		resolved, rerr := resolveProjectByName(ctx, c, p.value)
 		return resolved.ID, resolved.Name, rerr
 	}
-	project, err := c.GetProject(ctx, coreapi.GetProjectParams{ProjectId: ref})
+	project, err := c.GetProject(ctx, coreapi.GetProjectParams{ProjectId: p.value})
 	if err != nil {
-		return "", "", fmt.Errorf("get project %s: %w", ref, err)
+		return "", "", fmt.Errorf("get project %s: %w", p.value, err)
 	}
 	return project.ID, project.Name, nil
 }
@@ -329,7 +411,7 @@ func resolveProjectByName(ctx context.Context, c projectRefClient, name string) 
 // server's name for whatever it resolved to. A ULID passes through. A native
 // path ref (`/et/<project>/<repo>`, the `path` the API returns and
 // `repo clone` accepts) carries its own project scope. A bare name requires a
-// project scope (projectRef, itself a name or ULID) because repo names are
+// project scope (projectRef, itself a name, et/<name>, or ULID) because repo names are
 // unique only within a project. Either way the repo is resolved via the
 // server's case-insensitive by-name lookup, scoped to that project.
 //
@@ -342,22 +424,31 @@ func resolveRepoRefResolved(ctx context.Context, c repoRefClient, ref, projectRe
 	if looksLikeULID(ref) {
 		return resolvedRef{ID: ref}, nil
 	}
+	// After the ULID passthrough: a repo ULID ignores --project (with a warning,
+	// see warnRedundantProjectFlag), so even an unusable one must not fail it.
+	var project controlPlaneProject
+	if projectRef != "" {
+		var err error
+		if project, err = parseControlPlaneProject(projectRef); err != nil {
+			return resolvedRef{}, err
+		}
+	}
 	// Dispatch on the ref as given, not on trimRefPrefix's output: trimming
 	// first would let `/web` (leading slash, one segment) slip through to the
 	// by-name lookup with the slash still in it — a guaranteed server 404,
 	// since names can never contain '/'.
 	if strings.Contains(strings.TrimSpace(ref), "/") {
-		return resolveRepoPathRef(ctx, c, ref, projectRef)
+		return resolveRepoPathRef(ctx, c, ref, project)
 	}
 	if projectRef == "" {
-		return resolvedRef{}, fmt.Errorf("repo %q is a name; pass --project <name|ULID> to resolve it, use its /%s/<project>/<repo> path, or a repo ULID", ref, nativeCloneForge)
+		return resolvedRef{}, fmt.Errorf("repo %q is a name; pass --project <name|%s/<name>|ULID> to resolve it, use its /%s/<project>/<repo> path, or a repo ULID", ref, nativeCloneForge, nativeCloneForge)
 	}
 	// The path lookup takes names only. A project ULID has no name route, so
 	// it stays on the project-scoped listing.
-	if !looksLikeULID(projectRef) {
-		return resolveNativeRepoByPath(ctx, c, projectRef, ref)
+	if !project.isID() {
+		return resolveNativeRepoByPath(ctx, c, project.value, ref)
 	}
-	return resolveRepoInProject(ctx, c, ref, projectRef)
+	return resolveRepoInProject(ctx, c, ref, project.value)
 }
 
 // resolveNativeRepoByPath resolves <project>/<repo> through POST /repos/resolve,
@@ -423,7 +514,7 @@ func resolveRepoRef(ctx context.Context, c repoRefClient, ref, projectRef string
 // ignored: a name compares case-insensitively (the server matches lower(name)
 // and project names are globally unique) before any request; a ULID compares
 // against the resolved repo's owning project, which costs one GetRepo.
-func resolveRepoPathRef(ctx context.Context, c repoRefClient, ref, projectRef string) (resolvedRef, error) {
+func resolveRepoPathRef(ctx context.Context, c repoRefClient, ref string, projectFlag controlPlaneProject) (resolvedRef, error) {
 	// The refusal is about the ref SHAPE, not about the command. Several
 	// commands sharing this resolver DO address mirror repos by ULID — `repo
 	// protection list` has a purpose-built mirror branch (protectionMirrorNote)
@@ -456,27 +547,27 @@ func resolveRepoPathRef(ctx context.Context, c repoRefClient, ref, projectRef st
 			// on the command line would fail the agreement check below on the
 			// very next run. Say so here rather than making them find out.
 			drop := ""
-			if projectRef != "" {
-				drop = fmt.Sprintf(" (and drop --project %q, which the path supplies)", projectRef)
+			if projectFlag.raw != "" {
+				drop = fmt.Sprintf(" (and drop --project %q, which the path supplies)", projectFlag.raw)
 			}
 			return resolvedRef{}, fmt.Errorf("repo ref %q must name its forge — did you mean %s?%s", ref, native, drop)
 		}
 		return resolvedRef{}, fmt.Errorf("invalid repo ref %q: expected /%s/<project>/<repo>, a repo name with --project, or a repo ULID", ref, nativeCloneForge)
 	}
-	if projectRef != "" && !looksLikeULID(projectRef) && !strings.EqualFold(projectRef, project) {
-		return resolvedRef{}, projectMismatchErr(projectRef, project, ref)
+	if projectFlag.raw != "" && !projectFlag.isID() && !strings.EqualFold(projectFlag.value, project) {
+		return resolvedRef{}, projectMismatchErr(projectFlag.raw, project, ref)
 	}
 	resolved, err := resolveNativeRepoByPath(ctx, c, project, repoName)
 	if err != nil {
 		return resolvedRef{}, err
 	}
-	if projectRef != "" && looksLikeULID(projectRef) {
+	if projectFlag.isID() {
 		repo, err := c.GetRepo(ctx, coreapi.GetRepoParams{RepoId: resolved.ID})
 		if err != nil {
 			return resolvedRef{}, fmt.Errorf("get repo: %w", err)
 		}
-		if !strings.EqualFold(projectRef, repo.Response.OwningProjectId) {
-			return resolvedRef{}, projectMismatchErr(projectRef, project, ref)
+		if !strings.EqualFold(projectFlag.value, repo.Response.OwningProjectId) {
+			return resolvedRef{}, projectMismatchErr(projectFlag.raw, project, ref)
 		}
 	}
 	return resolved, nil
