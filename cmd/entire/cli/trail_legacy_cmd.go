@@ -47,7 +47,7 @@ func resolveLegacyTrailContext(cmd *cobra.Command, selector, branch string, loca
 		if err != nil {
 			return err
 		}
-		base, err := trailRepoBasePath(forge, owner, repo, repoID)
+		base, err := trailRepoBasePath(repoID)
 		if err != nil {
 			return err
 		}

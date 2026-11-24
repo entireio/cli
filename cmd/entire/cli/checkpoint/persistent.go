@@ -21,7 +21,9 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
+	"github.com/entireio/cli/cmd/entire/cli/agent/pi"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
@@ -542,11 +544,18 @@ func (s *treeWriter) writeTaskRecordEntry(task TaskPayload, basePath string, ent
 }
 
 // checkpointLsTreeCommand returns the `git ls-tree` invocation that shows
-// checkpointID's stored tree: its own ref for the per-checkpoint-ref store
-// (anchored at basePath ""), else its sharded directory on the v1 branch.
-func checkpointLsTreeCommand(checkpointID id.CheckpointID, basePath string) string {
+// checkpointID's tree: its ref in the refs store (empty basePath), or its
+// sharded directory on the v1 branch. In the refs store it names the ref that
+// holds the checkpoint, which after a rename to the lowercase shard is not
+// RefName.
+func (s *treeWriter) checkpointLsTreeCommand(checkpointID id.CheckpointID, basePath string) string {
 	if basePath == "" {
 		if refName, err := RefName(checkpointID); err == nil {
+			if s.repo != nil {
+				if stored, _, err := StoredRef(s.repo, nil, refName); err == nil {
+					refName = stored
+				}
+			}
 			return "git ls-tree " + refName.String()
 		}
 	}
@@ -605,7 +614,7 @@ func (s *treeWriter) writeStandardCheckpointEntries(ctx context.Context, opts Wr
 					slog.Bool("existing_summary_nil", existingSummary == nil))
 				return fmt.Errorf(
 					"refusing to overwrite session 0 of checkpoint %s: existing session ID %q differs from write session ID %q. The checkpoint tree is inconsistent (session 0 belongs to a different session than this write claims). No automated repair exists for this shape — please report it along with the output of `%s`",
-					opts.CheckpointID, existingMeta.SessionID, opts.SessionID, checkpointLsTreeCommand(opts.CheckpointID, basePath),
+					opts.CheckpointID, existingMeta.SessionID, opts.SessionID, s.checkpointLsTreeCommand(opts.CheckpointID, basePath),
 				)
 			}
 		}
@@ -984,7 +993,7 @@ func (s *treeWriter) readSummaryFromBlob(hash plumbing.Hash) (*CheckpointSummary
 	return readJSONFromBlob[CheckpointSummary](s.repo, hash)
 }
 
-// SanitizeTranscriptForAgentType strips non-portable agent state from a transcript
+// SanitizeTranscriptForAgentType strips what Entire must not keep from a transcript
 // about to be stored (see agent.TranscriptSanitizer). It exists for callers that work
 // from a types.AgentType rather than a live agent.Agent: the store itself, as a
 // last-resort safety net, and `entire import`, which reads raw third-party rollouts
@@ -1000,8 +1009,13 @@ func SanitizeTranscriptForAgentType(agentType types.AgentType, data []byte) []by
 	if len(data) == 0 {
 		return data
 	}
-	if agentType == agent.AgentTypeCodex {
+	switch agentType {
+	case agent.AgentTypeCodex:
 		return codex.SanitizePortableTranscript(data)
+	case agent.AgentTypeClaudeCode:
+		return claudecode.SanitizeStoredTranscript(data)
+	case agent.AgentTypePi:
+		return pi.SanitizeStoredTranscript(data)
 	}
 	return data
 }
@@ -1032,7 +1046,7 @@ func (s *treeWriter) writeTranscript(ctx context.Context, opts WriteOptions, ses
 			// Sanitize BEFORE redacting, matching the pipeline order everywhere else:
 			// redaction must not scan ciphertext that sanitization is about to
 			// discard. This is the one path that reaches the store with raw bytes.
-			redacted, redactErr := redact.JSONLBytes(SanitizeTranscriptForAgentType(opts.Agent, rawData))
+			redacted, redactErr := redact.JSONLBytes(DropImagesIfEnabled(ctx, SanitizeTranscriptForAgentType(opts.Agent, rawData)))
 			if redactErr != nil {
 				return false, nil, nil, fmt.Errorf("failed to redact transcript from file: %w", redactErr)
 			}
@@ -1359,7 +1373,29 @@ func readSummaryFromCheckpointTree(checkpointTree *FetchingTree) (*CheckpointSum
 	if err != nil {
 		return nil, nil //nolint:nilnil,nilerr // metadata.json not found
 	}
+	return parseSummaryFile(metadataFile)
+}
 
+// readSummaryForSessionLookup returns (nil, nil) only when metadata.json is
+// absent from the tree. Unlike readSummaryFromCheckpointTree, a metadata.json
+// that exists but cannot be read (a failed blob fetch) is an error: the session
+// lookup would otherwise fall back to position and, on a checkpoint with gapped
+// session folders, silently read the wrong session.
+func readSummaryForSessionLookup(checkpointTree *FetchingTree) (*CheckpointSummary, error) {
+	if _, err := checkpointTree.inner.FindEntry(paths.MetadataFileName); err != nil {
+		if errors.Is(err, object.ErrEntryNotFound) {
+			return nil, nil //nolint:nilnil // metadata.json absent
+		}
+		return nil, fmt.Errorf("failed to look up %s: %w", paths.MetadataFileName, err)
+	}
+	metadataFile, err := checkpointTree.File(paths.MetadataFileName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read %s: %w", paths.MetadataFileName, err)
+	}
+	return parseSummaryFile(metadataFile)
+}
+
+func parseSummaryFile(metadataFile *object.File) (*CheckpointSummary, error) {
 	content, err := metadataFile.Contents()
 	if err != nil {
 		return nil, fmt.Errorf("failed to read metadata.json: %w", err)
@@ -1385,12 +1421,48 @@ func (s *GitStore) getSessionTree(ctx context.Context, checkpointID id.Checkpoin
 	if err != nil {
 		return nil, ErrCheckpointNotFound
 	}
+	return sessionTreeAt(checkpointTree, sessionIndex)
+}
 
-	sessionTree, err := checkpointTree.Tree(strconv.Itoa(sessionIndex))
+// sessionTreeAt resolves the session at position sessionIndex of the
+// checkpoint's sessions list. Shared by both persistent backends.
+func sessionTreeAt(checkpointTree *FetchingTree, sessionIndex int) (*FetchingTree, error) {
+	summary, err := readSummaryForSessionLookup(checkpointTree)
 	if err != nil {
-		return nil, fmt.Errorf("%w: session %d not found: %w", ErrCheckpointNotFound, sessionIndex, err)
+		return nil, err
+	}
+	folder, err := sessionFolder(summary, sessionIndex)
+	if err != nil {
+		return nil, err
+	}
+	sessionTree, err := checkpointTree.Tree(folder)
+	if err != nil {
+		return nil, fmt.Errorf("%w: session %d (folder %s) not found: %w", ErrCheckpointNotFound, sessionIndex, folder, err)
 	}
 	return sessionTree, nil
+}
+
+// sessionFolder names the folder that holds the session at position
+// sessionIndex. Folders can have gaps (some older checkpoints hold 0, 2, 3), so
+// the folder comes from the sessions[] entry's metadata path, not the position.
+// A missing summary or an entry without a metadata path has nothing to follow
+// and falls back to the position.
+func sessionFolder(summary *CheckpointSummary, sessionIndex int) (string, error) {
+	if summary == nil {
+		return strconv.Itoa(sessionIndex), nil
+	}
+	if sessionIndex < 0 || sessionIndex >= len(summary.Sessions) {
+		return "", fmt.Errorf("%w: session %d not found: checkpoint lists %d session(s)", ErrCheckpointNotFound, sessionIndex, len(summary.Sessions))
+	}
+	metadataPath := summary.Sessions[sessionIndex].Metadata
+	if metadataPath == "" {
+		return strconv.Itoa(sessionIndex), nil
+	}
+	folder := path.Base(path.Dir(metadataPath))
+	if path.Base(metadataPath) != paths.MetadataFileName || folder == "." || folder == ".." || folder == "/" {
+		return "", fmt.Errorf("%w: session %d has an invalid metadata path %q", ErrCheckpointNotFound, sessionIndex, metadataPath)
+	}
+	return folder, nil
 }
 
 // ReadSessionMetadata reads only the metadata.json for a specific session within a checkpoint.
@@ -1609,7 +1681,11 @@ func readCommittedInfoFromCheckpointTree(checkpointID id.CheckpointID, checkpoin
 	info.LinkedCommits = summary.LinkedCommits
 
 	for i := range summary.Sessions {
-		sessionMetadata, ok := readCommittedMetadataFromCheckpointTree(checkpointTree, i)
+		folder, folderErr := sessionFolder(&summary, i)
+		if folderErr != nil {
+			continue
+		}
+		sessionMetadata, ok := readCommittedMetadataFromCheckpointTree(checkpointTree, folder)
 		if !ok {
 			continue
 		}
@@ -1628,8 +1704,8 @@ func readCommittedInfoFromCheckpointTree(checkpointID id.CheckpointID, checkpoin
 	return info
 }
 
-func readCommittedMetadataFromCheckpointTree(checkpointTree *object.Tree, sessionIndex int) (Metadata, bool) {
-	sessionTree, treeErr := checkpointTree.Tree(strconv.Itoa(sessionIndex))
+func readCommittedMetadataFromCheckpointTree(checkpointTree *object.Tree, sessionFolder string) (Metadata, bool) {
+	sessionTree, treeErr := checkpointTree.Tree(sessionFolder)
 	if treeErr != nil {
 		return Metadata{}, false
 	}

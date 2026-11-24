@@ -74,6 +74,12 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	// non-interactive SSH helper).
 	ctx = checkpointremote.WithNonInteractiveSSH(ctx)
 
+	// Deferred so it runs after any checkpoint push, and also on every path
+	// that sends none: push_sessions off, a remote other than the elected
+	// one, a manual policy, a withheld OPF rewrite. It only renames refs in
+	// this clone.
+	defer renameUppercaseShardRefs(ctx)
+
 	// Before push_sessions and the sync-remote gate: those decide what Entire
 	// sends, while this is about what the user's own push sends, to any remote.
 	if err := CheckOuterPushHeldCheckpoints(ctx); err != nil {
@@ -514,6 +520,33 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 	return nil
 }
 
+// renameUppercaseShardRefs moves this clone's checkpoint refs to their
+// lowercase-shard names when pre-push finishes (see
+// checkpoint.NormalizeShardSpelling), so the rename never delays a checkpoint
+// upload. A failure is logged and never returned: the refs keep working under
+// the names they have, and the next push tries again.
+func renameUppercaseShardRefs(ctx context.Context) {
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		logging.Warn(ctx, "pre-push: open repo failed; skipping the checkpoint shard rename",
+			slog.String("error", err.Error()))
+		return
+	}
+	defer repo.Close()
+	result, err := checkpoint.NormalizeShardSpelling(ctx, repo)
+	if err != nil {
+		logging.Warn(ctx, "pre-push: could not rename checkpoint refs to lowercase shards",
+			slog.Int("renamed", result.Renamed), slog.String("error", err.Error()))
+	} else if result.Renamed > 0 {
+		logging.Info(ctx, "pre-push: renamed checkpoint refs to lowercase shards",
+			slog.Int("renamed", result.Renamed))
+	}
+	if len(result.Diverged) > 0 {
+		logging.Warn(ctx, "pre-push: checkpoints with diverged refs under both shard spellings; see entire doctor",
+			slog.Int("checkpoints", len(result.Diverged)))
+	}
+}
+
 // PushQueuedCheckpointRefs pushes any queued checkpoint refs to the configured
 // checkpoint remote, surfacing errors (unlike the fail-soft pre-push path); the
 // caller owns the repo. It returns the number of refs pushed and whether
@@ -557,7 +590,8 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 // failures: they are left out of retries, rotation and the pushed-of count.
 type checkpointRefPartition struct {
 	ready []checkpointRefPush
-	// waiting were not selected for this upload.
+	// waiting were not selected for this upload, or name a destination another
+	// ready ref takes in it at a different commit.
 	waiting []checkpoint.PushQueueEntry
 	// changed were selected with a pinned commit that is no longer the tip;
 	// each carries the current tip.
@@ -583,15 +617,32 @@ func partitionCheckpointRefPushes(
 		ready:    make([]checkpointRefPush, 0, len(entries)),
 		readErrs: make(map[plumbing.ReferenceName]error),
 	}
+	// placed locates the candidate holding each destination name, so a second
+	// queue entry for the same checkpoint joins it. git refuses a push that
+	// names one destination twice, and that takes the whole batch with it.
+	type place struct {
+		changed bool
+		index   int
+	}
+	placed := make(map[plumbing.ReferenceName]place, len(entries))
+	entries = canonicalSpellingFirst(entries, func(e checkpoint.PushQueueEntry) plumbing.ReferenceName { return e.Ref })
 	for _, entry := range entries {
 		// A ref the selection leaves out waits untouched: a push of named refs
 		// does not read, prune or report the others.
-		pin, selected := selection.pin(entry.Ref)
+		// Keyed canonically: the selection was built from the names the caller
+		// asked for, which need not be the spelling this entry was queued under.
+		pin, selected := selection.pin(canonicalCheckpointRefKey(entry.Ref))
 		if !selected {
 			part.waiting = append(part.waiting, entry)
 			continue
 		}
-		ref, err := repo.Reference(entry.Ref, true)
+		// The queued spelling is not always the one the ref is stored under: on
+		// a case-insensitive filesystem a checkpoint ref lands in whichever
+		// shard directory already existed, and once git packs it the queued
+		// name stops resolving. Classifying that as stale drops the entry and
+		// the checkpoint is then never pushed, silently and permanently — so
+		// resolve to the spelling that exists before deciding.
+		stored, tip, err := checkpoint.StoredRef(repo, nil, entry.Ref)
 		if errors.Is(err, plumbing.ErrReferenceNotFound) {
 			part.stale = append(part.stale, entry)
 			continue
@@ -601,11 +652,37 @@ func partitionCheckpointRefPushes(
 			part.readErrs[entry.Ref] = fmt.Errorf("read checkpoint ref: %w", err)
 			continue
 		}
-		candidate := checkpointRefPush{token: entry, name: entry.Ref, hash: ref.Hash()}
+		// The push is <hash>:<name>, and the name is the canonical one whatever
+		// spelling was queued or stored. Sending the stored spelling named one
+		// checkpoint differently before and after git packed its ref, which a
+		// case-sensitive remote keeps as two refs and a case-insensitive one
+		// refuses. The queue entry is untouched: removal keys on token, so the
+		// original spelling is still what gets pruned.
+		candidate := checkpointRefPush{token: entry, name: canonicalCheckpointRefKey(entry.Ref), hash: tip}
+		if stored != candidate.name {
+			candidate.stored = stored
+		}
+		if at, dup := placed[candidate.name]; dup {
+			first := &part.ready[at.index]
+			if at.changed {
+				first = &part.changed[at.index]
+			}
+			if first.hash.Equal(candidate.hash) {
+				first.also = append(first.also, entry)
+			} else {
+				// Two refs for one checkpoint whose histories diverged: only
+				// one can take the destination in this upload. The other waits
+				// and is replayed onto it by a later push.
+				part.waiting = append(part.waiting, entry)
+			}
+			continue
+		}
 		switch {
 		case !pin.IsZero() && pin != candidate.hash:
+			placed[candidate.name] = place{changed: true, index: len(part.changed)}
 			part.changed = append(part.changed, candidate)
 		default:
+			placed[candidate.name] = place{index: len(part.ready)}
 			part.ready = append(part.ready, candidate)
 		}
 	}
@@ -629,6 +706,7 @@ func checkpointRefPushTokens(refs []checkpointRefPush) []checkpoint.PushQueueEnt
 	entries := make([]checkpoint.PushQueueEntry, 0, len(refs))
 	for _, ref := range refs {
 		entries = append(entries, ref.token)
+		entries = append(entries, ref.also...)
 	}
 	return entries
 }
@@ -1089,8 +1167,10 @@ func retryRefsIndividually(ctx, flushCtx context.Context, repo *git.Repository, 
 			logging.Info(ctx, "git-refs push: checkpoint ref changed during recovery; newer generation stays queued",
 				slog.String("ref", ref.name.String()))
 			// Report the generation now waiting, so a caller has a commit to pin.
-			if current, readErr := repo.Reference(ref.name, true); readErr == nil {
-				res.changed = append(res.changed, checkpointRefPush{token: ref.token, name: ref.name, hash: current.Hash()})
+			if current, readErr := repo.Reference(ref.localRef(), true); readErr == nil {
+				waiting := ref
+				waiting.hash = current.Hash()
+				res.changed = append(res.changed, waiting)
 			} else {
 				res.errs[ref.name] = err
 			}

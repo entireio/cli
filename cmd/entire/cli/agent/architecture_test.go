@@ -276,17 +276,20 @@ func TestAgentPackages_NoForbiddenImports(t *testing.T) {
 	// every agent: it is one agent's answer to one agent's problem, and a
 	// second agent that wants it has to say so here first.
 	scopedPrefixes := map[string][]string{
+		"claudecode": {
+			// Restricted reviews construct an allowlisted subprocess environment;
+			// PATH must use the canonical absolute-directory filter, not a copy.
+			repoPrefix + "execx",
+			// Cross-process advisory locks. With global_enable every
+			// Entire process (including parallel hooks) may add hooks to the
+			// user-level settings.json, so the read-merge-write is locked.
+			repoPrefix + "internal/flock",
+		},
 		"antigravity": {
 			// Cross-process advisory locks. agy fires its title command on
 			// every state change without serializing, so the title-tee takes
 			// a per-conversation flock around its dedup-and-append. No other
 			// agent's transport has that shape.
-			repoPrefix + "internal/flock",
-		},
-		"claudecode": {
-			// Cross-process advisory locks. With global_enable every
-			// Entire process (including parallel hooks) may add hooks to the
-			// user-level settings.json, so the read-merge-write is locked.
 			repoPrefix + "internal/flock",
 		},
 		"opencode": {

@@ -64,7 +64,7 @@ func globalOnlyRefsRepo(t *testing.T) (workDir, bareDir string) {
 	return workDir, bareDir
 }
 
-func remoteCheckpointRefs(t *testing.T, bareDir string) string {
+func remoteConsentCheckpointRefs(t *testing.T, bareDir string) string {
 	t.Helper()
 	return strings.TrimSpace(testutil.RunGit(t, bareDir, "for-each-ref", "refs/entire/"))
 }
@@ -83,7 +83,7 @@ func TestGlobalEnableConsent_HoldsWithoutATerminal(t *testing.T) {
 	stderr := captureStderrWriter(t)
 
 	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
-	assert.Empty(t, remoteCheckpointRefs(t, bareDir))
+	assert.Empty(t, remoteConsentCheckpointRefs(t, bareDir))
 	assert.Contains(t, stderr.String(), "holding session checkpoints")
 	outgoing, err := ListOutgoingCheckpoints(t.Context())
 	require.NoError(t, err)
@@ -100,7 +100,7 @@ func TestGlobalEnableConsent_YesRecordsAndPushes(t *testing.T) {
 	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
 	assert.Equal(t, 1, *asked)
 	assert.Zero(t, *policyAsked, "one question per push")
-	assert.NotEmpty(t, remoteCheckpointRefs(t, bareDir))
+	assert.NotEmpty(t, remoteConsentCheckpointRefs(t, bareDir))
 	assert.Contains(t, userSettingsFile(t), `"push_checkpoints": true`)
 
 	s, err := settings.Load(t.Context())
@@ -117,7 +117,7 @@ func TestGlobalEnableConsent_NoHolds(t *testing.T) {
 	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
 	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
 	assert.Equal(t, 2, *asked)
-	assert.Empty(t, remoteCheckpointRefs(t, bareDir))
+	assert.Empty(t, remoteConsentCheckpointRefs(t, bareDir))
 	assert.Contains(t, stderr.String(), "holding session checkpoints")
 }
 
@@ -131,7 +131,7 @@ func TestGlobalEnableConsent_AgentSessionIsNotAsked(t *testing.T) {
 
 	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
 	assert.Zero(t, *asked)
-	assert.Empty(t, remoteCheckpointRefs(t, bareDir))
+	assert.Empty(t, remoteConsentCheckpointRefs(t, bareDir))
 }
 
 // Once agreed, every push carries checkpoints without asking.
@@ -144,7 +144,7 @@ func TestGlobalEnableConsent_AgreedPushesWithoutAsking(t *testing.T) {
 
 	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
 	assert.Zero(t, *asked)
-	assert.NotEmpty(t, remoteCheckpointRefs(t, bareDir))
+	assert.NotEmpty(t, remoteConsentCheckpointRefs(t, bareDir))
 }
 
 // The explicit pushes never ask; they report the hold, and the checkpoints
@@ -164,7 +164,7 @@ func TestGlobalEnableConsent_ExplicitPushesReportTheHold(t *testing.T) {
 	report, err := PushCheckpoints(t.Context(), nil)
 	require.ErrorIs(t, err, ErrCheckpointPushHeldForConsent)
 	assert.Empty(t, report.Outcomes)
-	assert.Empty(t, remoteCheckpointRefs(t, bareDir))
+	assert.Empty(t, remoteConsentCheckpointRefs(t, bareDir))
 }
 
 // The git-branch backend is held and released the same way: its v1 branch

@@ -11,7 +11,7 @@ import (
 	"github.com/entireio/cli/internal/coreapi"
 )
 
-func newDefaultBranchCmd() *cobra.Command {
+func newRepoDefaultBranchCmd() *cobra.Command {
 	var project string
 	cmd := &cobra.Command{
 		Use:   "default-branch <repo> <branch>",
