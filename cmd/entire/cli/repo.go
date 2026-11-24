@@ -377,14 +377,7 @@ func newRepoListCmd() *cobra.Command {
 							return err
 						}
 						projectName = resolved.Name
-						params := coreapi.ListProjectReposParams{ProjectId: resolved.ID}
-						if pageToken != "" {
-							params.PageToken = coreapi.NewOptString(pageToken)
-						}
-						if pageSize > 0 {
-							params.PageSize = coreapi.NewOptInt32(int32(pageSize)) //nolint:gosec // G115: validatePageSize bounds it
-						}
-						out, err := c.ListProjectRepos(ctx, params)
+						out, err := listProjectReposPage(ctx, c, resolved.ID, pageToken, pageSize)
 						if err != nil {
 							return err
 						}
@@ -399,44 +392,7 @@ func newRepoListCmd() *cobra.Command {
 						return nil, err
 					}
 					projectName = resolved.Name
-					projID := resolved.ID
-					// Rows render in server order with no local filters or
-					// sort, so --limit bounds the fetch directly; without it
-					// the default budget bounds the walk instead.
-					budget := coreListFetchBudget
-					switch {
-					case all:
-						budget = 0 // unbounded
-					case limit > 0:
-						budget = limit
-					}
-					repos, partial, err := fetchPagesBounded(ctx, budget, func(ctx context.Context, cursor string) ([]coreapi.Repo, string, error) {
-						params := coreapi.ListProjectReposParams{ProjectId: projID}
-						if cursor != "" {
-							params.PageToken = coreapi.NewOptString(cursor)
-						}
-						out, err := c.ListProjectRepos(ctx, params)
-						if err != nil {
-							return nil, "", err
-						}
-						return out.Repos, out.NextPageToken.Or(""), nil
-					})
-					if err != nil {
-						return nil, err
-					}
-					// An explicit --limit is not a surprise, so only the
-					// default budget's stop is disclosed. Printed for --json
-					// too: a script acting on silently partial data is the
-					// worst outcome, and stderr never corrupts the stdout JSON.
-					if partial && limit == 0 {
-						fmt.Fprintf(cmd.ErrOrStderr(),
-							"Note: the project has more repositories; showing the first %d fetched — pass --all to fetch everything.\n",
-							len(repos))
-					}
-					if limit > 0 && len(repos) > limit {
-						repos = repos[:limit] // trim a page overshoot
-					}
-					return repos, nil
+					return fetchProjectRepos(ctx, cmd, c, resolved.ID, limit, all)
 				})
 			})
 		},
@@ -457,6 +413,56 @@ func newRepoListCmd() *cobra.Command {
 		flagGroup{name: flagGroupFormatting},
 	)
 	return cmd
+}
+
+// listProjectReposPage is `repo list` page mode: exactly one page of the
+// project's repos, from pageToken, of pageSize when it is set.
+func listProjectReposPage(ctx context.Context, c *coreapi.Client, projID, pageToken string, pageSize int) (*coreapi.ListProjectReposOutputBody, error) {
+	params := coreapi.ListProjectReposParams{ProjectId: projID}
+	if pageToken != "" {
+		params.PageToken = coreapi.NewOptString(pageToken)
+	}
+	if pageSize > 0 {
+		params.PageSize = coreapi.NewOptInt32(int32(pageSize)) //nolint:gosec // G115: validatePageSize bounds it
+	}
+	return c.ListProjectRepos(ctx, params)
+}
+
+// fetchProjectRepos is `repo list`'s bounded walk over the project's repos.
+// Rows render in server order with no local filters or sort, so --limit bounds
+// the fetch directly; without it the default budget bounds the walk instead,
+// and --all lifts it.
+func fetchProjectRepos(ctx context.Context, cmd *cobra.Command, c *coreapi.Client, projID string, limit int, all bool) ([]coreapi.Repo, error) {
+	budget := coreListFetchBudget
+	switch {
+	case all:
+		budget = 0 // unbounded
+	case limit > 0:
+		budget = limit
+	}
+	repos, partial, err := fetchPagesBounded(ctx, budget, func(ctx context.Context, cursor string) ([]coreapi.Repo, string, error) {
+		out, err := listProjectReposPage(ctx, c, projID, cursor, 0)
+		if err != nil {
+			return nil, "", err
+		}
+		return out.Repos, out.NextPageToken.Or(""), nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	// An explicit --limit is not a surprise, so only the default budget's
+	// stop is disclosed. Printed for --json too: a script acting on silently
+	// partial data is the worst outcome, and stderr never corrupts the
+	// stdout JSON.
+	if partial && limit == 0 {
+		fmt.Fprintf(cmd.ErrOrStderr(),
+			"Note: the project has more repositories; showing the first %d fetched — pass --all to fetch everything.\n",
+			len(repos))
+	}
+	if limit > 0 && len(repos) > limit {
+		repos = repos[:limit] // trim a page overshoot
+	}
+	return repos, nil
 }
 
 // parseRepoListProject reads `repo list --project`, spelled et/<project> as

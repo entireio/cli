@@ -90,7 +90,14 @@ func TestControlPlane_NativeMirrorLifecycle(t *testing.T) {
 	projectRef = project.ID
 
 	stdout, _ = mustRunEntire(t, dir, "repo", "create", ref, "--json")
-	t.Cleanup(func() { deleteResource(t, dir, "repo", ref) })
+	// Deleted by path, which errors once the repo is gone: skip the cleanup
+	// after the body's own delete.
+	repoDeleted := false
+	t.Cleanup(func() {
+		if !repoDeleted {
+			deleteResource(t, dir, "repo", ref)
+		}
+	})
 	created := decodeJSON[repoJSON](t, stdout)
 	require.NotEmpty(t, created.ID)
 
@@ -232,6 +239,7 @@ func TestControlPlane_NativeMirrorLifecycle(t *testing.T) {
 	// delete its primary, so this skips and the cleanups tear down in order.
 	phase("the three delete in reverse", func(t *testing.T) {
 		assertDeleted(t, dir, "repo", ref)
+		repoDeleted = true
 		assertDeleted(t, dir, "project", project.ID)
 		assertDeleted(t, dir, "org", org.ID)
 	})

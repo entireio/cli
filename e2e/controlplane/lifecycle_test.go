@@ -49,7 +49,15 @@ func TestControlPlane_CreateCloneDelete(t *testing.T) {
 	// create was given rather than by the ULID it returns.
 	repoRef := "/et/" + name + "/" + name
 	stdout, _ = mustRunEntire(t, dir, "repo", "create", repoRef, "--json")
-	t.Cleanup(func() { deleteResource(t, dir, "repo", repoRef) })
+	// A repo is addressed by path, and a path that no longer resolves is
+	// an error rather than an idempotent miss, so the cleanup skips a repo
+	// the body already deleted.
+	repoDeleted := false
+	t.Cleanup(func() {
+		if !repoDeleted {
+			deleteResource(t, dir, "repo", repoRef)
+		}
+	})
 	created := decodeJSON[repoJSON](t, stdout)
 	require.NotEmpty(t, created.ID)
 	repo := waitForRepoClonable(t, dir, "/et/"+name+"/"+name)
@@ -64,6 +72,7 @@ func TestControlPlane_CreateCloneDelete(t *testing.T) {
 
 	// The server refuses to delete a project with repos or an org with projects.
 	assertDeleted(t, dir, "repo", repoRef)
+	repoDeleted = true
 	assertDeleted(t, dir, "project", project.ID)
 	assertDeleted(t, dir, "org", org.ID)
 }
@@ -143,7 +152,9 @@ func assertDeleted(t *testing.T, dir, noun, id string) {
 }
 
 // deleteResource is the cleanup for a resource the test body normally deletes
-// itself; the CLI exits 0 on an already-deleted ID.
+// itself. An org or project delete exits 0 on an already-deleted ID; a repo is
+// deleted by path, which no longer resolves once the repo is gone, so callers
+// skip the repo cleanup after the body has deleted it.
 func deleteResource(t *testing.T, dir, noun, id string) {
 	t.Helper()
 	if _, stderr, err := runEntireWithTimeout(t, dir, 30*time.Second, noun, "delete", id, "--force"); err != nil {
