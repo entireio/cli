@@ -22,6 +22,26 @@ import (
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
+// agentUserHomes are the user-level config directories the global-enable
+// tests point Codex, Pi and OpenCode at. None exists unless a test creates
+// it, so an agent a test does not set up is not in use, and nothing reaches
+// the developer's real agent config.
+type agentUserHomes struct{ codex, pi, xdgConfig string }
+
+func isolateAgentUserHomes(t *testing.T) agentUserHomes {
+	t.Helper()
+	base := t.TempDir()
+	homes := agentUserHomes{
+		codex:     filepath.Join(base, "codex"),
+		pi:        filepath.Join(base, "pi", "agent"),
+		xdgConfig: filepath.Join(base, "xdg"),
+	}
+	t.Setenv("CODEX_HOME", homes.codex)
+	t.Setenv("PI_CODING_AGENT_DIR", homes.pi)
+	t.Setenv("XDG_CONFIG_HOME", homes.xdgConfig)
+	return homes
+}
+
 // runVersionWithUserFlag runs `entire version` outside any repository with
 // the given user settings file, and returns the isolated Claude config dir.
 // t.Setenv/t.Chdir make these tests process-global, so no t.Parallel.
@@ -31,6 +51,7 @@ func runVersionWithUserFlag(t *testing.T, userSettings string) (claudeDir, stder
 	claudeDir = t.TempDir()
 	t.Setenv(userdirs.EnvConfigDir, entireDir)
 	t.Setenv("CLAUDE_CONFIG_DIR", claudeDir)
+	isolateAgentUserHomes(t)
 	t.Chdir(t.TempDir())
 	if userSettings != "" {
 		if err := os.WriteFile(filepath.Join(entireDir, usersettings.FileName), []byte(userSettings), 0o600); err != nil {
@@ -143,6 +164,7 @@ func runGlobalCmdAs(t *testing.T, withClaude bool, userSettings, agentVar string
 	testutil.InitRepo(t, repo)
 	t.Setenv(userdirs.EnvConfigDir, entireDir)
 	t.Setenv("CLAUDE_CONFIG_DIR", claudeDir)
+	isolateAgentUserHomes(t)
 	clearAgentCallerEnv(t)
 	if agentVar != "" {
 		t.Setenv(agentVar, "1")
@@ -194,9 +216,10 @@ func TestEnableGlobal_WritesTheFlagAndInstallsHooks(t *testing.T) {
 		t.Errorf("enable --global set up the current repository (stat err = %v)", statErr)
 	}
 	assert.Contains(t, out, "Accepted with --yes")
-	assert.Contains(t, out, "records your Claude Code sessions in every git repository")
-	assert.Contains(t, out, "other agents are recorded only where you ran it")
-	assert.Contains(t, out, "stay on this machine until you agree")
+	assert.Contains(t, out, "records your coding agent sessions (Claude Code, Codex, Pi and OpenCode) in every git repository")
+	assert.NotContains(t, out, "other agents are recorded only where you ran it", "global enable covers every agent")
+	assert.Contains(t, out, "possibly without a commit", "the consent does not promise sessions leave only with a push")
+	assert.Contains(t, out, "not pushed to its remote until you agree")
 }
 
 // --owner adds to the owner list, normalized and without repeats, and the
@@ -418,8 +441,8 @@ func TestEnableGlobal_PromptAnswers(t *testing.T) {
 			if err != nil {
 				t.Fatalf("enable --global: %v\n%s", err, out)
 			}
-			assert.Contains(t, terminal.String(), "records your Claude Code sessions")
-			assert.Contains(t, terminal.String(), "stay on this machine until you agree")
+			assert.Contains(t, terminal.String(), "records your coding agent sessions")
+			assert.Contains(t, terminal.String(), "not pushed to its remote until you agree")
 			if tc.want {
 				assert.JSONEq(t, `{"global_enable": true}`, readUserSettingsFile(t, entireDir))
 			} else {

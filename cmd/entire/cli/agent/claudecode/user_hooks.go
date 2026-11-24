@@ -6,16 +6,25 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 
-	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
-	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
 
 // ErrClaudeNotInUse is EnsureUserHooks finding no Claude config directory:
 // nothing was installed, and nothing needed to be.
-var ErrClaudeNotInUse = errors.New("no Claude Code config directory")
+var ErrClaudeNotInUse = agent.ErrUserHooksNotInUse
+
+var _ agent.UserHookInstaller = (*ClaudeCodeAgent)(nil)
+
+// userHooksVersion is the Entire hook version of the user-level hooks. Bump it
+// when what installUserHooks writes changes. It is recorded in an Entire-owned
+// side file, never in the hook commands: Claude Code runs a command present in
+// both its user and project settings once only when the two are identical.
+const userHooksVersion = 1
 
 // EnsureUserHooks installs Entire's hooks into the user-level Claude Code
 // settings ($CLAUDE_CONFIG_DIR/settings.json, else ~/.claude/settings.json),
@@ -47,23 +56,81 @@ func EnsureUserHooksWhile(ctx context.Context, wanted func(context.Context) bool
 		return 0, path, ErrClaudeNotInUse
 	}
 	cfg := userClaudeSettings{path: path}
-	// Every command runs this while the flag is on, so the usual case, hooks
-	// already in, is settled by a read alone: no lock, no write.
-	if _, err := installUserHooks(dryRunUserSettings{cfg}); !errors.Is(err, errWriteNeeded) {
-		return 0, path, err
+	n, err := agent.EnsureUserHookFile(ctx, path+".lock", wanted, func(write bool) (int, error) {
+		if !write {
+			return dryRunInstallCount(cfg)
+		}
+		return installUserHooks(cfg)
+	})
+	// The stamp is written after any install, and once for hooks an earlier
+	// CLI installed without one.
+	if err == nil && (n > 0 || agent.ReadUserHookStamp(agent.AgentNameClaudeCode) != userHooksVersion) {
+		if stampErr := agent.WriteUserHookStamp(agent.AgentNameClaudeCode, userHooksVersion); stampErr != nil {
+			logging.Debug(ctx, "claude: could not record the user-level hook version",
+				slog.String("error", stampErr.Error()))
+		}
 	}
-	// Entire processes run this concurrently, so the read-merge-write is
-	// serialised, and repeated under the lock.
-	release, err := flock.AcquireContext(ctx, path+".lock")
-	if err != nil {
-		return 0, path, fmt.Errorf("lock %s: %w", path, err)
-	}
-	defer release()
-	if wanted != nil && !wanted(ctx) {
-		return 0, path, nil
-	}
-	n, err := installUserHooks(cfg)
 	return n, path, err
+}
+
+// dryRunInstallCount reports 1 when the install merge would write cfg, else 0.
+func dryRunInstallCount(cfg userClaudeSettings) (int, error) {
+	_, err := installUserHooks(dryRunUserSettings{cfg})
+	if errors.Is(err, errWriteNeeded) {
+		return 1, nil
+	}
+	return 0, err
+}
+
+// EnsureUserHooks implements agent.UserHookInstaller.
+func (c *ClaudeCodeAgent) EnsureUserHooks(ctx context.Context, wanted func(context.Context) bool) (int, string, error) {
+	return EnsureUserHooksWhile(ctx, wanted)
+}
+
+// RemoveUserHooks implements agent.UserHookInstaller.
+func (c *ClaudeCodeAgent) RemoveUserHooks(ctx context.Context) (bool, string, error) {
+	return RemoveUserHooks(ctx)
+}
+
+// ProjectHooksSupersede implements agent.UserHookInstaller. Claude Code runs a
+// hook command present in both its user and project settings once, so its
+// user-level hooks never need to step aside.
+func (c *ClaudeCodeAgent) ProjectHooksSupersede(context.Context) bool { return false }
+
+// InspectUserHooks implements agent.UserHookInstaller.
+func (c *ClaudeCodeAgent) InspectUserHooks(context.Context) agent.UserHookReport {
+	path, err := userClaudeSettingsPath()
+	if err != nil {
+		return agent.UserHookReport{State: agent.UserHooksUnavailable, Err: err}
+	}
+	report := agent.UserHookReport{Path: path, Version: agent.ReadUserHookStamp(agent.AgentNameClaudeCode)}
+	if _, err := os.Stat(filepath.Dir(path)); errors.Is(err, fs.ErrNotExist) {
+		report.State = agent.UserHooksNotInUse
+		return report
+	}
+	cfg := userClaudeSettings{path: path}
+	data, err := cfg.Read()
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		report.State = agent.UserHooksAbsent
+		return report
+	case err != nil:
+		report.State, report.Err = agent.UserHooksUnavailable, err
+		return report
+	case !settingsHaveEntireHooks(data):
+		report.State = agent.UserHooksAbsent
+		return report
+	}
+	n, err := dryRunInstallCount(cfg)
+	switch {
+	case err != nil:
+		report.State, report.Err = agent.UserHooksUnavailable, err
+	case n > 0 || report.Version < userHooksVersion:
+		report.State = agent.UserHooksOutdated
+	default:
+		report.State = agent.UserHooksCurrent
+	}
+	return report
 }
 
 // RemoveUserHooks takes Entire's hooks out of the user-level Claude Code
@@ -78,11 +145,15 @@ func RemoveUserHooks(ctx context.Context) (bool, string, error) {
 	if _, err := os.Stat(filepath.Dir(path)); errors.Is(err, fs.ErrNotExist) {
 		return false, path, nil
 	}
-	release, err := flock.AcquireContext(ctx, path+".lock")
+	release, err := agent.LockUserHookFile(ctx, path+".lock")
 	if err != nil {
-		return false, path, fmt.Errorf("lock %s: %w", path, err)
+		return false, path, err //nolint:wrapcheck // names the lock file
 	}
 	defer release()
+	if err := agent.RemoveUserHookStamp(agent.AgentNameClaudeCode); err != nil {
+		logging.Debug(ctx, "claude: could not remove the user-level hook version",
+			slog.String("error", err.Error()))
+	}
 	cfg := userClaudeSettings{path: path}
 	data, err := cfg.Read()
 	if errors.Is(err, fs.ErrNotExist) {
@@ -138,37 +209,16 @@ type dryRunUserSettings struct{ userClaudeSettings }
 
 func (dryRunUserSettings) Write([]byte, os.FileMode) error { return errWriteNeeded }
 
-// userClaudeSettings is the user's own config file. Unlike a worktree file, a
-// symlink here is the user's arrangement (a dotfiles checkout), so the write
-// goes through it rather than replacing it; see "User-level Claude Code
-// settings" in docs/development/filesystem-safety.md. A link that does not
-// resolve is refused.
+// userClaudeSettings is the user's own Claude settings file; see
+// agent.UserConfigFile for how it is written.
 type userClaudeSettings struct{ path string }
 
 func (u userClaudeSettings) Path() string { return u.path }
 
 func (u userClaudeSettings) Read() ([]byte, error) {
-	return os.ReadFile(u.path) //nolint:wrapcheck // callers classify not-exist
+	return agent.UserConfigFile{Path: u.path}.Read() //nolint:wrapcheck // callers classify not-exist
 }
 
 func (u userClaudeSettings) Write(data []byte, perm os.FileMode) error {
-	target := u.path
-	if info, err := os.Lstat(u.path); err == nil && info.Mode()&fs.ModeSymlink != 0 {
-		// A link that does not resolve (a dotfiles checkout not there yet)
-		// is refused rather than replaced by a regular file.
-		resolved, err := filepath.EvalSymlinks(u.path)
-		if err != nil {
-			return fmt.Errorf("resolve symlink %s: %w", u.path, err)
-		}
-		target = resolved
-	}
-	// The user chose this file's mode; keep it rather than imposing the
-	// project file's 0o600.
-	if info, err := os.Stat(target); err == nil {
-		perm = info.Mode().Perm()
-	}
-	if err := jsonutil.WriteFileAtomic(target, data, perm); err != nil {
-		return fmt.Errorf("write %s: %w", u.path, err)
-	}
-	return nil
+	return agent.UserConfigFile{Path: u.path}.Write(data, perm) //nolint:wrapcheck // names the file
 }

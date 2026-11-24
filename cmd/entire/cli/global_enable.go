@@ -13,7 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
-	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -32,8 +32,8 @@ const (
 
 // runEnableGlobal turns Entire on in every repository: it sets
 // `global_enable: true` in the user settings file, adds any --owner to the
-// owner list, and installs Claude Code's user-level hooks now rather than on
-// the next command. It does not set up the repository it runs in; the hooks
+// owner list, and installs every in-use agent's user-level hooks now rather
+// than on the next command. It does not set up the repository it runs in; the hooks
 // do that the first time an agent runs there.
 func runEnableGlobal(cmd *cobra.Command, yes bool, ownerFlags []string) error {
 	if err := rejectFlagsWithGlobal(cmd, "yes", flagOwner); err != nil {
@@ -79,19 +79,51 @@ func runEnableGlobal(cmd *cobra.Command, yes bool, ownerFlags []string) error {
 	}
 	reportGlobalEnableOwners(w, listed)
 
-	n, hooksPath, err := claudecode.EnsureUserHooksWhile(ctx, settings.UserTierEnablesEverywhere)
-	switch {
-	case errors.Is(err, claudecode.ErrClaudeNotInUse):
-		fmt.Fprintf(w, "Claude Code is not set up here (%s not found); its hooks will be added the next time you run entire after it is.\n",
-			filepath.Dir(hooksPath))
-	case err != nil:
-		fmt.Fprintf(cmd.ErrOrStderr(), "Could not add Entire's hooks to %s: %v\nThey will be added the next time you run entire.\n", hooksPath, err)
-	case n > 0:
-		fmt.Fprintf(w, "Added Entire's hooks to Claude Code's user settings: %s\n", hooksPath)
-	default:
-		fmt.Fprintf(w, "Claude Code's user settings already have Entire's hooks: %s\n", hooksPath)
+	for _, installer := range userHookInstallers() {
+		reportUserHookInstall(cmd, installer)
 	}
 	return nil
+}
+
+// userHookInstallers returns the registered agents whose Entire hooks can
+// live in their user-level config, in registry order.
+func userHookInstallers() []agent.UserHookInstaller {
+	var installers []agent.UserHookInstaller
+	for _, name := range agent.List() {
+		ag, err := agent.Get(name)
+		if err != nil {
+			continue
+		}
+		if installer, ok := agent.AsUserHookInstaller(ag); ok {
+			installers = append(installers, installer)
+		}
+	}
+	return installers
+}
+
+// reportUserHookInstall installs one agent's user-level hooks for `entire
+// enable --global` and says what happened.
+func reportUserHookInstall(cmd *cobra.Command, installer agent.UserHookInstaller) {
+	ctx := cmd.Context()
+	w := cmd.OutOrStdout()
+	name := string(installer.Type())
+	n, hooksPath, err := installer.EnsureUserHooks(ctx, settings.UserTierEnablesEverywhere)
+	switch {
+	case errors.Is(err, agent.ErrUserHooksNotInUse):
+		fmt.Fprintf(w, "%s is not set up here (%s not found); its hooks will be added the next time you run entire after it is.\n",
+			name, filepath.Dir(hooksPath))
+		return
+	case err != nil:
+		fmt.Fprintf(cmd.ErrOrStderr(), "Could not add Entire's hooks to %s: %v\nThey will be added the next time you run entire.\n", hooksPath, err)
+		return
+	case n > 0:
+		fmt.Fprintf(w, "Added Entire's hooks to %s's user settings: %s\n", name, hooksPath)
+	default:
+		fmt.Fprintf(w, "%s's user settings already have Entire's hooks: %s\n", name, hooksPath)
+	}
+	for _, note := range installer.InspectUserHooks(ctx).Notes {
+		fmt.Fprintf(w, "  %s\n", note)
+	}
 }
 
 // validateOwners normalizes every --owner, refusing the command on the first
@@ -137,7 +169,7 @@ func runEnableGlobalOr(global, yes *bool, owners *[]string, run func(*cobra.Comm
 }
 
 // runDisableGlobal sets `global_enable: false` and then takes Entire's hooks
-// out of Claude Code's user-level settings. In that order: a command that
+// out of every agent's user-level config. In that order: a command that
 // read the flag as on re-checks it under the hooks file's lock before
 // installing, so once the flag is off the removal cannot be undone.
 // Repositories enabled with `entire enable` stay enabled, with their own
@@ -153,25 +185,28 @@ func runDisableGlobal(cmd *cobra.Command) error {
 	}
 	w := cmd.OutOrStdout()
 	fmt.Fprintf(w, "Entire is no longer enabled in every repository (global_enable in %s).\n", path)
-	removed, hooksPath, err := claudecode.RemoveUserHooks(ctx)
-	switch {
-	case err != nil:
-		fmt.Fprintf(cmd.ErrOrStderr(), "Could not remove Entire's hooks from %s: %v\nRemove them by hand, or run `entire disable --global` again.\n", hooksPath, err)
-	case removed:
-		fmt.Fprintf(w, "Removed Entire's hooks from Claude Code's user settings: %s\n", hooksPath)
+	for _, installer := range userHookInstallers() {
+		removed, hooksPath, err := installer.RemoveUserHooks(ctx)
+		switch {
+		case err != nil:
+			fmt.Fprintf(cmd.ErrOrStderr(), "Could not remove Entire's hooks from %s: %v\nRemove them by hand, or run `entire disable --global` again.\n", hooksPath, err)
+		case removed:
+			fmt.Fprintf(w, "Removed Entire's hooks from %s's user settings: %s\n", installer.Type(), hooksPath)
+		}
 	}
 	fmt.Fprintln(w, "Repositories you enabled with `entire enable` stay enabled.")
 	if settings.UserReposEnableAny(ctx) {
-		fmt.Fprintf(w, "A repository enabled only by a repos entry in %s records Claude Code sessions again once you run `entire enable` in it.\n", path)
+		fmt.Fprintf(w, "A repository enabled only by a repos entry in %s records agent sessions again once you run `entire enable` in it.\n", path)
 	}
 	return nil
 }
 
 // globalEnableDisclosure is what `entire enable --global` asks the developer
 // to agree to.
-const globalEnableDisclosure = "With global enable on, Entire records your Claude Code sessions in every git repository you work in, " +
-	"not just ones you ran `entire enable` in; other agents are recorded only where you ran it. In a repository you did not enable, " +
-	"session checkpoints stay on this machine until you agree, on a git push from a terminal, to push them to that repository's remote. " +
+const globalEnableDisclosure = "With global enable on, Entire records your coding agent sessions (Claude Code, Codex, Pi and OpenCode) " +
+	"in every git repository you work in, not just ones you ran `entire enable` in. " +
+	"Recorded sessions and checkpoints may leave this machine as your Entire settings allow, today with your git pushes and later possibly without a commit. " +
+	"In a repository you did not enable, checkpoints are not pushed to its remote until you agree, on a git push from a terminal. " +
 	"Run `entire disable` in a repository to stop it there, or `entire disable --global` to turn this off."
 
 // globalEnableDisclosureFor is the disclosure, plus what adding owners to the
@@ -287,17 +322,19 @@ func ensureGlobalEnableHooks(cmd *cobra.Command) {
 	if skipsGlobalEnableHooks(cmd) || !settings.UserTierEnablesEverywhere(ctx) {
 		return
 	}
-	n, path, err := claudecode.EnsureUserHooksWhile(ctx, settings.UserTierEnablesEverywhere)
-	if errors.Is(err, claudecode.ErrClaudeNotInUse) {
-		return
-	}
-	if err != nil {
-		logging.Debug(ctx, "global enable: could not install user-level Claude hooks",
-			slog.String("error", err.Error()))
-		return
-	}
-	if n > 0 {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Entire is enabled for all your repositories; added its Claude Code hooks to %s\n", path)
+	for _, installer := range userHookInstallers() {
+		n, path, err := installer.EnsureUserHooks(ctx, settings.UserTierEnablesEverywhere)
+		if errors.Is(err, agent.ErrUserHooksNotInUse) {
+			continue
+		}
+		if err != nil {
+			logging.Debug(ctx, "global enable: could not install user-level hooks",
+				slog.String("agent", string(installer.Name())), slog.String("error", err.Error()))
+			continue
+		}
+		if n > 0 {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Entire is enabled for all your repositories; added its %s hooks to %s\n", installer.Type(), path)
+		}
 	}
 }
 

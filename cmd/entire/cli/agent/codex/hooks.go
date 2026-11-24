@@ -111,63 +111,15 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, force bool) (int, error) 
 	if err != nil {
 		return 0, err
 	}
-	var rawHooks map[string]json.RawMessage
-	if exists {
-		var hooksFile map[string]json.RawMessage
-		if err := json.Unmarshal(existingData, &hooksFile); err != nil {
-			return 0, fmt.Errorf("failed to parse existing hooks.json: %w", err)
-		}
-		if hooksRaw, ok := hooksFile["hooks"]; ok {
-			if err := json.Unmarshal(hooksRaw, &rawHooks); err != nil {
-				return 0, fmt.Errorf("failed to parse hooks in hooks.json: %w", err)
-			}
-		}
-	}
-	if rawHooks == nil {
-		rawHooks = make(map[string]json.RawMessage)
-	}
-
-	const cmdPrefix = "entire hooks codex "
 	useWindowsProductionHooks := agent.UseWindowsProductionHooks(ctx)
-	count := 0
-	updated := make([][]MatcherGroup, len(managedHooks))
-	for i, h := range managedHooks {
-		var groups []MatcherGroup
-		if err := parseHookType(rawHooks, h.event, &groups); err != nil {
-			return 0, err
-		}
-		if force {
-			groups = removeEntireHooks(groups)
-		}
-		hookCmd := h.wrap(cmdPrefix+h.verb, useWindowsProductionHooks)
-		if synced, changed := syncHookCommand(groups, hookCmd, h.timeout); changed {
-			groups = synced
-			count++
-		}
-		updated[i] = groups
-	}
-	if count == 0 {
-		return 0, nil
-	}
-	for i, h := range managedHooks {
-		marshalHookType(rawHooks, h.event, updated[i])
-	}
-
-	topLevel := make(map[string]json.RawMessage)
-	if exists {
-		_ = json.Unmarshal(existingData, &topLevel) //nolint:errcheck // parsed above
-	}
-	hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
-	if err != nil {
-		return 0, fmt.Errorf("failed to marshal hooks: %w", err)
-	}
-	topLevel["hooks"] = hooksJSON
-	if err := validateMutableHookTarget(worktreeHooks); err != nil {
+	output, count, err := mergeEntireHooks(existingData, exists, force, func(h managedHook) string {
+		return h.wrap(projectHookCommandPrefix+h.verb, useWindowsProductionHooks)
+	})
+	if err != nil || count == 0 {
 		return 0, err
 	}
-	output, err := jsonutil.MarshalIndentWithNewline(topLevel, "", "  ")
-	if err != nil {
-		return 0, fmt.Errorf("failed to marshal hooks.json: %w", err)
+	if err := validateMutableHookTarget(worktreeHooks); err != nil {
+		return 0, err
 	}
 	// Write creates .codex with MkdirAllNoSymlink, anchored on the worktree
 	// root rather than on .codex itself.
@@ -206,38 +158,9 @@ func (c *CodexAgent) UninstallHooks(ctx context.Context) error {
 	if !exists {
 		return nil
 	}
-	var topLevel map[string]json.RawMessage
-	if err := json.Unmarshal(data, &topLevel); err != nil {
-		return fmt.Errorf("failed to parse hooks.json: %w", err)
-	}
-	var rawHooks map[string]json.RawMessage
-	if hooksRaw, ok := topLevel["hooks"]; ok {
-		if err := json.Unmarshal(hooksRaw, &rawHooks); err != nil {
-			return fmt.Errorf("failed to parse hooks: %w", err)
-		}
-	}
-	if rawHooks == nil {
-		return nil
-	}
-	for _, h := range managedHooks {
-		var groups []MatcherGroup
-		if err := parseHookType(rawHooks, h.event, &groups); err != nil {
-			return err
-		}
-		marshalHookType(rawHooks, h.event, removeEntireHooks(groups))
-	}
-	if len(rawHooks) > 0 {
-		hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
-		if err != nil {
-			return fmt.Errorf("failed to marshal hooks: %w", err)
-		}
-		topLevel["hooks"] = hooksJSON
-	} else {
-		delete(topLevel, "hooks")
-	}
-	output, err := jsonutil.MarshalIndentWithNewline(topLevel, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal hooks.json: %w", err)
+	output, changed, err := stripEntireHooks(data)
+	if err != nil || !changed {
+		return err
 	}
 	if err := validateMutableHookTarget(worktreeHooks); err != nil {
 		return err
@@ -371,7 +294,10 @@ type hooksDocument struct {
 }
 
 func managedHookSpecs(ctx context.Context) []managedHookSpec {
-	const cmdPrefix = "entire hooks codex "
+	return managedHookSpecsWithPrefix(ctx, projectHookCommandPrefix)
+}
+
+func managedHookSpecsWithPrefix(ctx context.Context, cmdPrefix string) []managedHookSpec {
 	useWindowsProductionHooks := agent.UseWindowsProductionHooks(ctx)
 	specs := make([]managedHookSpec, 0, len(managedHooks))
 	for _, hook := range managedHooks {
@@ -655,6 +581,111 @@ func managedHookIsCurrent(groups []MatcherGroup, command string, timeoutSec int)
 		}
 	}
 	return count == 1
+}
+
+// projectHookCommandPrefix starts every hook command in a project hooks.json.
+const projectHookCommandPrefix = "entire hooks codex "
+
+// mergeEntireHooks merges Entire's managed hooks, each running commandFor(h),
+// into a hooks.json document, keeping everything else in it. It returns the
+// new document and how many events changed; 0 means nothing to write.
+func mergeEntireHooks(existing []byte, exists, force bool, commandFor func(managedHook) string) ([]byte, int, error) {
+	topLevel := make(map[string]json.RawMessage)
+	var rawHooks map[string]json.RawMessage
+	if exists {
+		if err := json.Unmarshal(existing, &topLevel); err != nil {
+			return nil, 0, fmt.Errorf("failed to parse existing hooks.json: %w", err)
+		}
+		if topLevel == nil {
+			topLevel = make(map[string]json.RawMessage)
+		}
+		if hooksRaw, ok := topLevel["hooks"]; ok {
+			if err := json.Unmarshal(hooksRaw, &rawHooks); err != nil {
+				return nil, 0, fmt.Errorf("failed to parse hooks in hooks.json: %w", err)
+			}
+		}
+	}
+	if rawHooks == nil {
+		rawHooks = make(map[string]json.RawMessage)
+	}
+	count := 0
+	updated := make([][]MatcherGroup, len(managedHooks))
+	for i, h := range managedHooks {
+		var groups []MatcherGroup
+		if err := parseHookType(rawHooks, h.event, &groups); err != nil {
+			return nil, 0, err
+		}
+		if force {
+			groups = removeEntireHooks(groups)
+		}
+		if synced, changed := syncHookCommand(groups, commandFor(h), h.timeout); changed {
+			groups = synced
+			count++
+		}
+		updated[i] = groups
+	}
+	if count == 0 {
+		return nil, 0, nil
+	}
+	for i, h := range managedHooks {
+		marshalHookType(rawHooks, h.event, updated[i])
+	}
+	hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to marshal hooks: %w", err)
+	}
+	topLevel["hooks"] = hooksJSON
+	output, err := jsonutil.MarshalIndentWithNewline(topLevel, "", "  ")
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to marshal hooks.json: %w", err)
+	}
+	return output, count, nil
+}
+
+// stripEntireHooks removes Entire's managed hooks from a hooks.json
+// document, keeping everything else, and reports whether any were there.
+func stripEntireHooks(data []byte) ([]byte, bool, error) {
+	var topLevel map[string]json.RawMessage
+	if err := json.Unmarshal(data, &topLevel); err != nil {
+		return nil, false, fmt.Errorf("failed to parse hooks.json: %w", err)
+	}
+	var rawHooks map[string]json.RawMessage
+	if hooksRaw, ok := topLevel["hooks"]; ok {
+		if err := json.Unmarshal(hooksRaw, &rawHooks); err != nil {
+			return nil, false, fmt.Errorf("failed to parse hooks: %w", err)
+		}
+	}
+	if rawHooks == nil {
+		return nil, false, nil
+	}
+	changed := false
+	for _, h := range managedHooks {
+		var groups []MatcherGroup
+		if err := parseHookType(rawHooks, h.event, &groups); err != nil {
+			return nil, false, err
+		}
+		if hasEntireHook(groups) {
+			changed = true
+		}
+		marshalHookType(rawHooks, h.event, removeEntireHooks(groups))
+	}
+	if !changed {
+		return nil, false, nil
+	}
+	if len(rawHooks) > 0 {
+		hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
+		if err != nil {
+			return nil, false, fmt.Errorf("failed to marshal hooks: %w", err)
+		}
+		topLevel["hooks"] = hooksJSON
+	} else {
+		delete(topLevel, "hooks")
+	}
+	output, err := jsonutil.MarshalIndentWithNewline(topLevel, "", "  ")
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to marshal hooks.json: %w", err)
+	}
+	return output, true, nil
 }
 
 // --- Helpers ---

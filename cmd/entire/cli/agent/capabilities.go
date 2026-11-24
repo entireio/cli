@@ -57,6 +57,7 @@ type CapabilityDeclarer interface {
 //   - TranscriptSanitizer
 //   - TurnEndHookTimeouter
 //   - UsageCounterSource (refuses CapabilityDeclarer agents)
+//   - UserHookInstaller
 //
 // Their As* helpers resolve through builtinCapability, or through
 // nonDeclarerCapability for the entries marked as refusing CapabilityDeclarer
