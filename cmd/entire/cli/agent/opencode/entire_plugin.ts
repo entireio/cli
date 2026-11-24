@@ -203,7 +203,11 @@ const EntirePlugin: Plugin = async ({ directory }) => {
       const out = typeof proc.stdout === "string" ? proc.stdout : ""
       const injected = parseInjectedContext(out)
       const sessionID = typeof payload.session_id === "string" ? payload.session_id : ""
-      if (injected && sessionID) pendingInjection = { sessionID, text: injected, applied: false }
+      if (injected && sessionID) {
+        // Context no call used yet is still owed to the model; keep it.
+        const unused = pendingInjection?.sessionID === sessionID && !pendingInjection.applied ? pendingInjection.text + "\n\n" : ""
+        pendingInjection = { sessionID, text: unused + injected, applied: false }
+      }
     } catch {
       // Silently ignore — plugin failures must not crash OpenCode
     }
@@ -837,7 +841,12 @@ async function entireSetup(ctx: any) {
     }
     const out = await runHook("turn-start", { session_id: sessionID, prompt, model: models.get(sessionID) ?? "" })
     const injected = parseInjectedContext(out)
-    if (injected) pendingInjection.set(sessionID, { text: injected, applied: false })
+    if (injected) {
+      // Context no call used yet is still owed to the model; keep it.
+      const prior = pendingInjection.get(sessionID)
+      const unused = prior && !prior.applied ? prior.text + "\n\n" : ""
+      pendingInjection.set(sessionID, { text: unused + injected, applied: false })
+    }
   }
 
   function endTurn(sessionID: string) {

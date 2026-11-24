@@ -75,6 +75,43 @@ func TestPlugin_UnusedInjectionSurvivesIdle(t *testing.T) {
 	}
 }
 
+// A later turn's context joins unused context rather than replacing it:
+// Entire sends each part only once.
+func TestPlugin_UnusedInjectionJoinsTheNextTurns(t *testing.T) {
+	t.Parallel()
+	_, out := runPluginV1(t, []map[string]any{
+		userMessage("ses_a", "msg_1"),
+		idle("ses_a"),
+		userMessage("ses_a", "msg_2"),
+		transform("ses_a"),
+	}, testContext)
+	prompts := systemPrompts(t, out)
+	want := []string{"base", testContext + "\n\n" + testContext}
+	if len(prompts) != 1 || !slices.Equal(prompts[0], want) {
+		t.Fatalf("system prompts = %q, want %q", prompts, want)
+	}
+}
+
+// OpenCode 2: likewise, a later turn's context joins unused context.
+func TestPluginV2_UnusedInjectionJoinsTheNextTurns(t *testing.T) {
+	t.Parallel()
+	_, out := runPluginV2Output(t, map[string]any{
+		"parents": parentsJSON(map[string]string{"ses_a": ""}),
+		"steps": []map[string]any{
+			v2Prompt("ses_a", "go"),
+			v2Event("session.execution.started", map[string]any{"sessionID": "ses_a"}),
+			v2Execution("ses_a", "failed"),
+			v2Prompt("ses_a", "again"),
+			v2Context(),
+		},
+	}, testContext)
+	prompts := systemPrompts(t, out)
+	want := []string{testContext + "\n\n" + testContext}
+	if len(prompts) != 1 || !slices.Equal(prompts[0], want) {
+		t.Fatalf("system prompts = %q, want %q", prompts, want)
+	}
+}
+
 // v2Context is an LLM call of ses_a.
 func v2Context() map[string]any {
 	return map[string]any{"context": map[string]any{"sessionID": "ses_a", "model": map[string]any{"id": "m1", "providerID": "p"}, "system": []any{}}}
