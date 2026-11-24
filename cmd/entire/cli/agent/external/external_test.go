@@ -1366,6 +1366,9 @@ func TestWrap_TranscriptFormat(t *testing.T) {
 	}{
 		{name: "known format", declared: `"transcript_format": "codex",`, want: "codex"},
 		{name: "unknown format is ignored", declared: `"transcript_format": "from-a-newer-cli",`, want: ""},
+		{name: "opencode export is not declarable", declared: `"transcript_format": "opencode",`, want: ""},
+		{name: "gemini is not declarable", declared: `"transcript_format": "gemini",`, want: ""},
+		{name: "opencode messages is declarable", declared: `"transcript_format": "opencode-messages",`, want: "opencode-messages"},
 		{name: "not declared", declared: "", want: ""},
 	}
 	for _, tt := range tests {

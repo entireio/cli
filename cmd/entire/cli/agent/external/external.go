@@ -98,13 +98,25 @@ func (e *Agent) ProtectedFiles() []string {
 }
 
 // TranscriptFormat returns the declared native transcript format, or "" when
-// none is declared or this CLI does not know it (a binary built for a newer
-// CLI), in which case the format is detected from the transcript.
+// none is declared, this CLI does not know it (a binary built for a newer
+// CLI), or it is not declarable, in which case the format is detected from
+// the transcript.
 func (e *Agent) TranscriptFormat() string {
-	if !transcriptlib.KnownFormat(e.info.TranscriptFormat) {
+	format := e.info.TranscriptFormat
+	if !transcriptlib.KnownFormat(format) || !declarableFormat(format) {
 		return ""
 	}
-	return e.info.TranscriptFormat
+	return format
+}
+
+// declarableFormat reports whether an external agent may declare format.
+// OpenCode exports and Gemini sessions are single JSON documents whose
+// checkpoint start is a message index, but condensation counts an external
+// agent's transcript by line, so a declared one would get the wrong slice
+// from its second checkpoint on. They stay detected, as before, until the
+// count follows the declared format.
+func declarableFormat(format string) bool {
+	return format != transcriptlib.FormatOpenCode && format != transcriptlib.FormatGemini
 }
 
 // --- Agent interface: Transcript Storage ---
