@@ -1914,9 +1914,16 @@ func setupContextInjectionRepo(t *testing.T, sessionID string, withHint bool) {
 	}
 }
 
+// contextInjectionTurns numbers runContextInjectionTurn prompts; the tests
+// using it are serial (t.Chdir).
+var contextInjectionTurns int
+
 func runContextInjectionTurn(t *testing.T, ag *mockContextInjectorAgent, sessionID string) *strategy.SessionState {
 	t.Helper()
-	event := &agent.Event{Type: agent.TurnStart, SessionID: sessionID, Prompt: "hello", Timestamp: time.Now()}
+	// A distinct prompt per call: each call is a new turn, and a repeat of the
+	// running turn's prompt is skipped as a second install firing.
+	contextInjectionTurns++
+	event := &agent.Event{Type: agent.TurnStart, SessionID: sessionID, Prompt: fmt.Sprintf("hello %d", contextInjectionTurns), Timestamp: time.Now()}
 	require.NoError(t, handleLifecycleTurnStart(context.Background(), ag, event))
 	state, err := strategy.LoadSessionState(context.Background(), sessionID)
 	require.NoError(t, err)
