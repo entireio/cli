@@ -1003,7 +1003,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// Detect file changes via git status. captureDegraded tracks whether any
 	// status scan feeding this turn failed or breached its budget, so the
 	// marker persisted at turn end reflects the whole turn, not just this walk.
-	// Either failure leaves only transcript-derived files, which miss
+	// A failed walk here leaves only transcript-derived files, which miss
 	// shell-made changes and deletions.
 	captureDegraded := preState != nil && preState.UntrackedScanSkipped
 	changes, err := DetectFileChanges(ctx, preUntrackedFiles)
@@ -2908,9 +2908,9 @@ func resolveTranscriptOffset(ctx context.Context, preState *PrePromptState, sess
 
 // recordCaptureDegraded persists (or clears) the capture-degraded timestamp on
 // session state at turn end, so a failed or budget-breached status scan is
-// visible in `entire status` instead of only in .entire/logs. A healthy turn clears it —
-// the marker means "the LAST turn degraded", not "some turn once did". Skips
-// the state write when nothing changes, which is the common case.
+// visible in `entire status` instead of only in .entire/logs. A healthy turn
+// clears it — the marker means "the LAST turn degraded", not "some turn once
+// did". Skips the state write when nothing changes, which is the common case.
 func recordCaptureDegraded(ctx context.Context, sessionID string, degraded bool) {
 	mutErr := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
 		if !degraded && state.CaptureDegradedAt == nil {

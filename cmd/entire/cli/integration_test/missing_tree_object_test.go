@@ -43,6 +43,9 @@ func TestMissingSubtreeObject_HooksDoNotBlockCommit(t *testing.T) {
 	// capture degraded.
 	readOnly := env.NewSession()
 	require.NoError(t, env.SimulateUserPromptSubmit(readOnly.ID))
+	prePrompt, err := os.ReadFile(filepath.Join(env.RepoDir, ".entire", "tmp", "pre-prompt-"+readOnly.ID+".json"))
+	require.NoError(t, err)
+	require.NotContains(t, string(prePrompt), "untracked_scan_skipped", "the turn-start scan must succeed so only turn end fails")
 	deleteLooseObject()
 	readOnly.TranscriptBuilder.AddUserMessage("Summarize src")
 	readOnly.TranscriptBuilder.AddAssistantMessage("src defines A and nested.B.")
@@ -52,7 +55,7 @@ func TestMissingSubtreeObject_HooksDoNotBlockCommit(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, roState.FilesTouched, "an unreadable tree must not make a read-only turn touch files")
 	require.NotNil(t, roState.CaptureDegradedAt, "a failed turn-end status walk must mark capture degraded")
-	require.Contains(t, env.RunCLI("status"), "capture degraded just now: a git status scan failed or ran out of time")
+	require.Contains(t, env.RunCLI("status"), "a git status scan failed or ran out of time")
 
 	coding := env.NewSession()
 	require.NoError(t, env.SimulateUserPromptSubmitWithTranscriptPath(coding.ID, coding.TranscriptPath))
