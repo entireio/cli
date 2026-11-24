@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -30,6 +31,7 @@ func TestParseControlPlaneProject(t *testing.T) {
 		{"et/", controlPlaneProject{}, "use a project name, et/<name>, or a ULID"},
 		{"et/a/b", controlPlaneProject{}, "use a project name, et/<name>, or a ULID"},
 		{"gl/acme", controlPlaneProject{}, "use a project name, et/<name>, or a ULID"},
+		{"et/my_proj", controlPlaneProject{}, "project names contain only letters, digits, and hyphens"},
 	} {
 		t.Run(tt.ref, func(t *testing.T) {
 			t.Parallel()
@@ -211,4 +213,58 @@ func TestParseSAPath_ProjectReference(t *testing.T) {
 	}
 	_, _, err := parseSAPath("et/widgets")
 	require.Error(t, err)
+}
+
+func TestResolveProjectGetRef_MirrorErrors(t *testing.T) {
+	t.Parallel()
+	t.Run("forbidden", func(t *testing.T) {
+		t.Parallel()
+		c, _ := resolveTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"status":403,"title":"Forbidden"}`)) //nolint:errcheck // test server
+		})
+		_, err := resolveProjectGetRef(context.Background(), c, "gh/acme")
+		require.EqualError(t, err, "your login does not have access to project gh/acme")
+	})
+	t.Run("a different reference", func(t *testing.T) {
+		t.Parallel()
+		c, _ := resolveTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+			if err := printJSON(w, &coreapi.ResolveProjectOutputBody{
+				Project:   coreapi.Project{ID: ulidProjectWidgets, Name: "gh:mirrors:" + ulidOrgAcme, OwnerId: ulidOrgAcme, OwnerType: coreapi.ProjectOwnerTypeOrg},
+				Reference: coreapi.ProjectReference{Host: "gh", Project: "other"},
+			}); err != nil {
+				t.Errorf("encode: %v", err)
+			}
+		})
+		_, err := resolveProjectGetRef(context.Background(), c, "gh/acme")
+		require.EqualError(t, err, "core returned a different project reference")
+	})
+}
+
+// Not parallel: runCoreCmd swaps the package-level core client.
+// `entire project get gh/<owner>` resolves the mirror project, then shows it.
+func TestProjectGet_MirrorReference(t *testing.T) {
+	mirror := coreapi.Project{ID: ulidProjectWidgets, Name: "gh:mirrors:" + ulidOrgAcme, OwnerId: ulidOrgAcme, OwnerType: coreapi.ProjectOwnerTypeOrg, Region: "us"}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		var body any
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/project-resolver/gh/acme"):
+			body = &coreapi.ResolveProjectOutputBody{Project: mirror, Reference: coreapi.ProjectReference{Host: "gh", Project: "acme"}}
+		case strings.HasSuffix(r.URL.Path, "/projects/"+ulidProjectWidgets):
+			body = &mirror
+		default:
+			t.Errorf("unexpected request %s", r.URL.Path)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		if err := printJSON(w, body); err != nil {
+			t.Errorf("encode: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	out, _, err := runCoreCmd(t, newProjectCmd, srv.URL, "get", "gh/acme")
+	require.NoError(t, err)
+	assert.Regexp(t, `(?m)^ID +`+ulidProjectWidgets+`$`, out)
 }

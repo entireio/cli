@@ -296,13 +296,15 @@ func parseControlPlaneProject(ref string) (controlPlaneProject, error) {
 	if !ok {
 		return controlPlaneProject{raw: ref, value: ref}, nil
 	}
-	if _, _, err := parseTrailProjectRef(ref); err == nil {
-		switch host {
-		case nativeCloneForge:
-			return controlPlaneProject{raw: ref, value: rest, isName: true}, nil
-		case mirrorCloneForge:
-			return controlPlaneProject{}, &mirrorProjectRefError{owner: rest}
-		}
+	_, _, err := parseTrailProjectRef(ref)
+	switch {
+	case err == nil && host == nativeCloneForge:
+		return controlPlaneProject{raw: ref, value: rest, isName: true}, nil
+	case err == nil && host == mirrorCloneForge:
+		return controlPlaneProject{}, &mirrorProjectRefError{owner: rest}
+	case err != nil && host == nativeCloneForge && rest != "" && !strings.ContainsAny(rest, "/\\?#%"):
+		// One segment with a bad character: the parser's reason says which.
+		return controlPlaneProject{}, err
 	}
 	return controlPlaneProject{}, fmt.Errorf("invalid project %q: use a project name, %s/<name>, or a ULID", ref, nativeCloneForge)
 }
