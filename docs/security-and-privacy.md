@@ -472,11 +472,44 @@ selects among profiles whose instruction content is itself gated).
 ## Global enable (`entire enable --global`)
 
 `entire enable --global` sets `global_enable: true` in your user settings
-file (`~/.config/entire/settings.json`) and adds Entire's hooks to Claude
-Code's user-level settings. From then on, Entire records your Claude Code
-sessions in every git repository you work in, not only the ones you ran
-`entire enable` in. Other agents are recorded only in repositories enabled with
-`entire enable`.
+file (`~/.config/entire/settings.json`) and adds Entire's hooks to the
+user-level config of every supported agent you use: Claude Code
+(`$CLAUDE_CONFIG_DIR/settings.json`), Codex (`$CODEX_HOME/hooks.json`), Pi
+(`$PI_CODING_AGENT_DIR/extensions/entire/index.ts`) and OpenCode
+(`$XDG_CONFIG_HOME/opencode/plugin/entire.ts`). An agent whose config directory
+does not exist is skipped, and picked up by the next `entire` command after it
+does. From then on, Entire records those agents' sessions in every git
+repository you work in, not only the ones you ran `entire enable` in. Recorded
+sessions and checkpoints may leave the machine as your settings allow: today
+with your git pushes (held as below), later possibly without a commit.
+Codex runs user-level hooks only after you approve them in `/hooks`; `entire
+enable --global`, the Codex session-start notice and `entire doctor` say so.
+Outside any git repository the hooks do nothing.
+
+**Project overrides global.** Where a repository has its own Entire install for
+an agent, that install and the repository's settings decide; the user-level
+copy does nothing there. Claude Code runs a hook present in both its user and
+project settings once, since the commands are byte-identical. Codex, Pi and
+OpenCode load both copies, so the user-level one steps aside: Codex's hook
+command carries `--scope=user/v<N>` and exits when the hooks file Codex
+discovers for the checkout is Entire's and approved (unapproved project hooks
+do not run, so the user-level ones must); Pi's extension does nothing when
+`<cwd>/.pi/extensions/entire/index.ts` is Entire's; OpenCode's plugin does
+nothing when an Entire plugin is in `.opencode/plugin` or `.opencode/plugins`
+between the directory it serves and the repository root. Each check is fresh,
+per event or per load. A prompt that still reaches Entire twice (an older Claude
+Code project install whose commands differ from the user-level ones) is
+recorded once: the second turn-start for the same session, prompt and agent
+turn ID, while that turn is running and within a minute, is skipped.
+
+**Versions.** Each user-level entry point records an Entire hook version
+(Codex, Pi and OpenCode in the file itself; Claude Code in
+`user_hooks_claude-code.json` under the user config directory, so its commands
+stay identical to the project ones). Every `entire` command run with global
+enable on rewrites an outdated user-level copy. `entire doctor` reports each
+agent's user-level hooks, and `doctor` and `status` say when a repository's own
+hooks are older than the user-level ones; the project install still wins there
+until you run `entire enable` in it.
 The first prompt in such a repository installs Entire's git hooks there and
 gives `.entire/` a `.gitignore` that keeps its local files out of git, and
 Entire contacts entire.io from that repository the way it does from any enabled
@@ -517,7 +550,7 @@ a repository or a wildcard. A URL that does not normalize (a local path,
 clone that goes out because of the list prints one line naming the remote and
 how to stop. There is no removal command: edit the list in the user settings
 file. Agents that show a session banner also say, when a session is about to
-install the git hooks, that checkpoints stay local until you agree.
+install the git hooks, that checkpoints are not pushed until you agree.
 
 **Known limitation.** A push that itself names Entire's refs — `git push
 --all` or `--mirror` on the git-branch backend sends `entire/checkpoints/v1`,
@@ -533,12 +566,13 @@ checkpoints with it; the hold governs only what Entire pushes on its own.
   `"enabled": false` to that repository's `repos` entry in the user settings
   file, so every clone and worktree of it stays off. Elsewhere it writes
   `.entire/settings.local.json` as before. `entire disable --global` turns the
-  flag off everywhere and then removes Entire's hooks from Claude Code's
-  user-level settings, under the lock the install takes (the install re-checks
-  the flag under it, so a concurrent command cannot put them back).
-  Repositories you enabled yourself stay enabled through their project hooks;
-  one enabled only by a hand-written `repos` entry needs `entire enable` there
-  to record Claude Code again.
+  flag off everywhere and then removes Entire's user-level hooks from every
+  agent (Claude Code, Codex, Pi, OpenCode), under the lock each install takes
+  (the install re-checks the flag under it, so a concurrent command cannot put
+  them back). Repositories you enabled yourself stay enabled through their
+  project hooks; one enabled only by a hand-written `repos` entry needs `entire
+  enable` there to record agent sessions again. Committed project files are
+  never touched.
 - `"push_checkpoints": true` in a `repos` entry, which the push prompt writes,
   releases held pushes for that repository and nothing else; it is read only
   per repository, never from `preferences`.
