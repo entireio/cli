@@ -369,6 +369,11 @@ func printTrailReviewListHiddenNote(ctx context.Context, w io.Writer, client *ap
 	if nextCursor != "" || opts.Cursor != "" || !trailReviewStatusFilterIncludes(opts.Status, trailReviewStatusOpen) {
 		return
 	}
+	// With every freshness and severity selected, the rows already hold every
+	// open finding, so there is nothing to look up.
+	if opts.Freshness == trailReviewFreshnessAny && opts.Severity == "" {
+		return
+	}
 	summary, err := fetchAllTrailReviewComments(ctx, client, trailID, trailReviewSummaryOptions())
 	if err != nil {
 		logging.Debug(ctx, "trail finding list: skipped the hidden-findings note", "error", err.Error())
@@ -1531,10 +1536,9 @@ func printTrailReviewDashboard(w io.Writer, target trailReviewTarget, comments [
 		return err
 	}
 
-	paged := nextCursor != "" || opts.Cursor != ""
-	outside := trailReviewOpenOutsideRows(summary, comments, opts, trailReviewDashboardListsStale(opts, paged))
+	outside := trailReviewDashboardOutside(summary, comments, opts, nextCursor != "" || opts.Cursor != "")
 	hiddenNote := func() {
-		if !paged && outside.hidden > 0 {
+		if outside.hidden > 0 {
 			fmt.Fprintln(w, "  "+trailReviewHiddenOpenNote(outside))
 		}
 	}
@@ -1550,8 +1554,11 @@ func printTrailReviewDashboard(w io.Writer, target trailReviewTarget, comments [
 	}
 	if len(outside.stale) > 0 {
 		fmt.Fprintln(w)
-		fmt.Fprintf(w, "  Stale open findings (%d): %s\n", len(outside.stale), trailReviewStaleSectionNote)
+		fmt.Fprintf(w, "  Stale open findings (%d): %s\n", len(outside.stale)+outside.staleMore, trailReviewStaleSectionNote)
 		printTrailReviewCommentsTable(w, outside.stale)
+		if outside.staleMore > 0 {
+			fmt.Fprintln(w, "  "+trailReviewStaleMoreNote(outside.staleMore))
+		}
 	}
 	hiddenNote()
 

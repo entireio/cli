@@ -269,7 +269,7 @@ func (s trailReviewStyles) dashboardFindings(width int, comments []api.TrailRevi
 	if !trailReviewStatusFilterIncludes(opts.Status, trailReviewStatusOpen) {
 		return s.renderOtherAndDone(width, groups)
 	}
-	outside := trailReviewOpenOutsideRows(summary, comments, opts, trailReviewDashboardListsStale(opts, paged))
+	outside := trailReviewDashboardOutside(summary, comments, opts, paged)
 	var b strings.Builder
 	b.WriteString(s.sectionRule(openTitle, width) + "\n")
 	if len(groups.open) == 0 {
@@ -281,13 +281,16 @@ func (s trailReviewStyles) dashboardFindings(width int, comments []api.TrailRevi
 	}
 	b.WriteString(s.renderCards(width, groups.open))
 	if len(outside.stale) > 0 {
-		b.WriteString("\n" + s.sectionRule(fmt.Sprintf("Stale (%d)", len(outside.stale)), width) + "\n")
+		b.WriteString("\n" + s.sectionRule(fmt.Sprintf("Stale (%d)", len(outside.stale)+outside.staleMore), width) + "\n")
 		for _, line := range wrapTrailReviewText(trailReviewStaleSectionNote, width-2) {
 			fmt.Fprintf(&b, "  %s\n", s.render(s.dim, line))
 		}
-		b.WriteString(s.renderCards(width, groupTrailReviewComments(outside.stale).open))
+		b.WriteString(s.renderCards(width, outside.stale))
+		if outside.staleMore > 0 {
+			fmt.Fprintf(&b, "  %s\n", s.render(s.dim, trailReviewStaleMoreNote(outside.staleMore)))
+		}
 	}
-	if !paged && outside.hidden > 0 {
+	if outside.hidden > 0 {
 		fmt.Fprintf(&b, "  %s\n", s.render(s.yellow, trailReviewHiddenOpenNote(outside)))
 	}
 	b.WriteString("\n")
@@ -311,8 +314,10 @@ const trailReviewStaleSectionNote = "the code changed after these were raised, s
 // view's rows leave out: the dashboard lists stale ones in their own section,
 // and the rest are hidden by the filters.
 type trailReviewOpenOutside struct {
-	stale  []api.TrailReviewComment
-	hidden int
+	stale []api.TrailReviewComment
+	// staleMore counts stale open findings beyond the dashboard's --limit.
+	staleMore int
+	hidden    int
 	// byFreshness and bySeverity record which filters hide at least one of
 	// the hidden findings, so the note names only filters worth changing.
 	byFreshness bool
@@ -333,12 +338,31 @@ func trailReviewOpenStaleCount(summary []api.TrailReviewComment) int {
 	return n
 }
 
-// trailReviewDashboardListsStale reports whether the dashboard adds a stale
-// section: only on a full view whose rows hold open, current findings, since
-// any other freshness filter already decides what stale findings show.
-func trailReviewDashboardListsStale(opts trailReviewListOptions, paged bool) bool {
-	return !paged && opts.Freshness == trailReviewFreshnessCurrent &&
-		trailReviewStatusFilterIncludes(opts.Status, trailReviewStatusOpen)
+// trailReviewDashboardOutside is what the dashboard says about open findings
+// outside its rows. A paged view cannot tell them from later pages, and a
+// --status that excludes open findings already says they are not wanted, so
+// both say nothing. Only rows of current findings get a stale section, since
+// any other freshness filter already decides what stale findings show. That
+// section lists the most severe first, at most --limit of them.
+func trailReviewDashboardOutside(summary, rows []api.TrailReviewComment, opts trailReviewListOptions, paged bool) trailReviewOpenOutside {
+	if paged || !trailReviewStatusFilterIncludes(opts.Status, trailReviewStatusOpen) {
+		return trailReviewOpenOutside{}
+	}
+	out := trailReviewOpenOutsideRows(summary, rows, opts, opts.Freshness == trailReviewFreshnessCurrent)
+	out.stale = groupTrailReviewComments(out.stale).open
+	if opts.Limit > 0 && len(out.stale) > opts.Limit {
+		out.staleMore = len(out.stale) - opts.Limit
+		out.stale = out.stale[:opts.Limit]
+	}
+	return out
+}
+
+func trailReviewStaleMoreNote(more int) string {
+	noun := "stale open finding"
+	if more != 1 {
+		noun += "s"
+	}
+	return fmt.Sprintf("+%d more %s — list them with --freshness stale", more, noun)
 }
 
 // trailReviewOpenOutsideRows sorts the open findings in summary (every

@@ -892,3 +892,57 @@ func withOpenFindingsTotal(summary []api.TrailReviewComment, total int) []api.Tr
 	}
 	return out
 }
+
+// A --status that leaves out open findings gets no stale section and no
+// hidden-findings note: neither --freshness nor --severity could show them.
+func TestTrailReviewDashboardStatusWithoutOpenSaysNothingAboutOpen(t *testing.T) {
+	t.Parallel()
+	target, comments := trailReviewRenderFixture()
+	opts := defaultTrailReviewListOptions()
+	opts.Status = trailReviewStatusResolved
+	var plain strings.Builder
+	if err := printTrailReviewDashboard(&plain, target, comments[2:3], "", opts, comments, nil); err != nil {
+		t.Fatal(err)
+	}
+	styled := renderStyledDashboard(t, 100, comments[2:3], "", opts, comments)
+	for name, text := range map[string]string{"plain": plain.String(), "styled": styled} {
+		if strings.Contains(text, "not shown by the current filters") || strings.Contains(text, "Stale open findings") || strings.Contains(text, "── Stale") {
+			t.Fatalf("%s dashboard for --status resolved talks about open findings:\n%s", name, text)
+		}
+	}
+}
+
+// The stale section honors --limit, most severe first, and counts the rest.
+func TestTrailReviewDashboardStaleSectionHonorsLimit(t *testing.T) {
+	t.Parallel()
+	target, _ := trailReviewRenderFixture()
+	high, low := trailReviewSeverityHigh, trailReviewSeverityLow
+	var summary []api.TrailReviewComment
+	for i := range 5 {
+		sev := &low
+		if i == 4 {
+			sev = &high
+		}
+		summary = append(summary, api.TrailReviewComment{ID: fmt.Sprintf("stale-%d", i), Status: trailReviewStatusOpen,
+			StaleOutcome: trailReviewFreshnessStale, Severity: sev, Location: api.TrailReviewLocation{Granularity: "whole_change"}})
+	}
+	opts := defaultTrailReviewListOptions()
+	opts.Limit = 2
+
+	var plain strings.Builder
+	if err := printTrailReviewDashboard(&plain, target, nil, "", opts, summary, nil); err != nil {
+		t.Fatal(err)
+	}
+	text := plain.String()
+	if !strings.Contains(text, "  Stale open findings (5): ") || !strings.Contains(text, "  +3 more stale open findings — list them with --freshness stale") {
+		t.Fatalf("plain stale section ignores --limit:\n%s", text)
+	}
+	if got := strings.Count(text, "stale-"); got != 2 || !strings.Contains(text, "stale-4") {
+		t.Fatalf("plain stale section lists %d findings, want the 2 most severe (with stale-4):\n%s", got, text)
+	}
+
+	styled := renderStyledDashboard(t, 100, nil, "", opts, summary)
+	if !strings.Contains(styled, "── Stale (5) ") || !strings.Contains(styled, "+3 more stale open findings") {
+		t.Fatalf("styled stale section ignores --limit:\n%s", styled)
+	}
+}

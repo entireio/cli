@@ -1308,6 +1308,23 @@ func TestPrintTrailReviewListHiddenNote(t *testing.T) {
 		t.Fatalf("note = %q after %d requests; want none", got, *requests)
 	}
 
+	// With every freshness and severity selected nothing can be hidden, so
+	// the list makes no extra request.
+	*requests = 0
+	opts = defaultTrailReviewListOptions()
+	opts.Freshness = trailReviewFreshnessAny
+	if got := run(client, comments[:2], "", opts); got != "" || *requests != 0 {
+		t.Fatalf("--freshness any: note = %q after %d requests; want none", got, *requests)
+	}
+
+	// The only hidden finding is high and stale under --severity high: only
+	// --freshness hides it, so the note does not suggest dropping --severity.
+	opts = defaultTrailReviewListOptions()
+	opts.Severity = trailReviewSeverityHigh
+	if got, want := run(client, comments[:1], "", opts), "+1 open finding not shown by the current filters — add --freshness any\n"; got != want {
+		t.Fatalf("--severity high note = %q, want %q", got, want)
+	}
+
 	failing, _ := newServer(t, true)
 	if got := run(failing, comments[:1], "", defaultTrailReviewListOptions()); got != "" {
 		t.Fatalf("a failed summary request should drop the note, got %q", got)
