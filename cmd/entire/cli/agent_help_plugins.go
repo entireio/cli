@@ -3,10 +3,10 @@ package cli
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"slices"
 	"strings"
 	"unicode"
 
@@ -83,56 +83,36 @@ func agentHelpInstalledPlugins(rootCmd *cobra.Command) agentHelpPluginListing {
 	if err != nil {
 		return agentHelpPluginListing{}
 	}
-	installed = agentHelpDispatchOrder(installed, runtime.GOOS, os.Getenv("PATHEXT"))
+	if dir, err := PluginBinDir(); err == nil {
+		installed = agentHelpDispatched(installed, dir, exec.LookPath)
+	}
 	return agentHelpSelectPlugins(rootCmd, installed, agentHelpPluginRunnable, agentHelpManifestInfo)
 }
 
-// agentHelpDispatchOrder puts installed (sorted by name) in the order the
-// dispatcher would pick each name's entry, so the listing names, and trusts
-// the manifest of, the entry `entire <name>` runs. The dispatcher finds a
-// plugin with exec.LookPath in the managed bin dir, which main.go puts first
-// on PATH. On Unix a name has one entry, so the order is unchanged. On
-// Windows LookPath tries the extensions in PATHEXT in order (".COM;.EXE;
-// .BAT;.CMD" when unset), so the entries of one name are ordered by that, and
-// an entry whose extension isn't in PATHEXT, or that has none, is left out:
-// LookPath never finds it under the bare name.
-func agentHelpDispatchOrder(installed []*InstalledPlugin, goos, pathext string) []*InstalledPlugin {
-	if goos != windowsGOOS {
-		return installed
-	}
-	if strings.TrimSpace(pathext) == "" {
-		pathext = ".COM;.EXE;.BAT;.CMD"
-	}
-	rank := map[string]int{}
-	for _, e := range strings.Split(strings.ToLower(pathext), ";") {
-		if e = strings.TrimSpace(e); e != "" {
-			if _, dup := rank[e]; !dup {
-				rank[e] = len(rank)
-			}
-		}
-	}
-	type ranked struct {
-		p    *InstalledPlugin
-		rank int
-	}
-	var kept []ranked
+// agentHelpDispatched keeps, of each name's entries in installed, the one
+// the dispatcher runs, so the listing names, and trusts the manifest of,
+// the entry `entire <name>` execs. The dispatcher finds a plugin with
+// exec.LookPath, and the managed bin dir is first on PATH (main.go), so
+// lookPath on dir/entire-<name> gives the same file: on Windows the first
+// PATHEXT extension that exists, on Unix the one entry if executable. A name
+// lookPath finds nothing for is left out. Order is kept.
+func agentHelpDispatched(installed []*InstalledPlugin, dir string, lookPath func(string) (string, error)) []*InstalledPlugin {
+	var out []*InstalledPlugin
+	picked := map[string]string{}
 	for _, p := range installed {
-		ext := strings.ToLower(filepath.Ext(p.Path))
-		r, ok := rank[ext]
-		if !ok || ext == "" {
-			continue
+		run, done := picked[p.Name]
+		if !done {
+			found, err := lookPath(filepath.Join(dir, pluginBinaryPrefix+p.Name))
+			if err != nil {
+				found = ""
+			}
+			run, picked[p.Name] = found, found
 		}
-		kept = append(kept, ranked{p, r})
-	}
-	slices.SortStableFunc(kept, func(a, b ranked) int {
-		if c := strings.Compare(a.p.Name, b.p.Name); c != 0 {
-			return c
+		// LookPath spells the extension as PATHEXT does; Windows names
+		// ignore case.
+		if run != "" && strings.EqualFold(filepath.Clean(run), filepath.Clean(p.Path)) {
+			out = append(out, p)
 		}
-		return a.rank - b.rank
-	})
-	out := make([]*InstalledPlugin, len(kept))
-	for i, k := range kept {
-		out[i] = k.p
 	}
 	return out
 }
@@ -142,7 +122,7 @@ func agentHelpDispatchOrder(installed []*InstalledPlugin, goos, pathext string) 
 // (agentHelpPluginName), not shadowed by a built-in (built-ins win, as in the
 // dispatcher), and that runnable says can be run, each name once (on Windows
 // entire-foo.exe and entire-foo.cmd are both "foo": the first is the one
-// the dispatcher runs, see agentHelpDispatchOrder, and when it can't be run
+// the dispatcher runs, see agentHelpDispatched, and when it can't be run
 // the name is left out rather than another entry named). It keeps the first
 // agentHelpPluginsMax and counts the rest. info supplies each one's
 // description and whether it declared agent_help.

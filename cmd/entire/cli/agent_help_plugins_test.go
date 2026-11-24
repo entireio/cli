@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -291,40 +292,55 @@ func TestAgentHelpSelectPluginsListsEachNameOnce(t *testing.T) {
 	}
 }
 
-// On Windows the entries of one name are put in PATHEXT's order, the order
-// exec.LookPath tries them, whatever order they were listed in; an entry
-// whose extension isn't in PATHEXT (or has none) is dropped, since LookPath
-// never finds it under the bare name. Elsewhere nothing changes.
-func TestAgentHelpDispatchOrder(t *testing.T) {
+// Of a name's entries, only the one the dispatcher's exec.LookPath picks is
+// kept: on Windows the first PATHEXT extension that exists (a stray .cmd
+// beside a release .exe, or a .com, decides by PATHEXT, not by name
+// order), and a name LookPath finds nothing for is left out. Order is kept.
+func TestAgentHelpDispatchedKeepsTheEntryLookPathRuns(t *testing.T) {
 	t.Parallel()
-	at := func(name, file string) *InstalledPlugin {
-		return &InstalledPlugin{Name: name, Path: `C:\\bin\\` + file}
-	}
+	dir := `C:\\plugins\\bin`
+	at := func(name, file string) *InstalledPlugin { return &InstalledPlugin{Name: name, Path: dir + `\\` + file} }
 	installed := []*InstalledPlugin{
-		at("foo", "entire-foo.cmd"), at("foo", "entire-foo.EXE"), at("foo", "entire-foo.com"),
-		at("foo", "entire-foo"), at("foo.ps1", "entire-foo.ps1"), at("zed", "entire-zed.bat"),
+		at("foo", "entire-foo.cmd"), at("foo", "entire-foo.EXE"), at("gone", "entire-gone.ps1"), at("zed", "entire-zed.bat"),
 	}
-	paths := func(ps []*InstalledPlugin) []string {
-		var out []string
-		for _, p := range ps {
-			out = append(out, p.Path[len(`C:\\bin\\`):])
+	runs := map[string]string{ // what LookPath(dir\entire-<name>) finds, spelled as PATHEXT does
+		dir + `\\entire-foo`: dir + `\\entire-foo.exe`,
+		dir + `\\entire-zed`: dir + `\\entire-zed.bat`,
+	}
+	var asked []string
+	lookPath := func(p string) (string, error) {
+		asked = append(asked, p)
+		if r, ok := runs[strings.ReplaceAll(p, "/", `\\`)]; ok {
+			return r, nil
 		}
-		return out
+		return "", exec.ErrNotFound
 	}
-	for _, c := range []struct {
-		pathext string
-		want    []string
-	}{
-		{"", []string{"entire-foo.com", "entire-foo.EXE", "entire-foo.cmd", "entire-zed.bat"}},
-		{".EXE;.CMD", []string{"entire-foo.EXE", "entire-foo.cmd"}},
-		{".cmd;.exe;.bat", []string{"entire-foo.cmd", "entire-foo.EXE", "entire-zed.bat"}},
-	} {
-		if got := paths(agentHelpDispatchOrder(installed, windowsGOOS, c.pathext)); !slices.Equal(got, c.want) {
-			t.Errorf("PATHEXT %q: order %q, want %q", c.pathext, got, c.want)
+	got := agentHelpDispatched(installed, dir, lookPath)
+	if len(got) != 2 || got[0] != installed[1] || got[1] != installed[3] {
+		t.Errorf("kept %+v, want foo's .EXE (case aside) and zed's .bat", got)
+	}
+	if len(asked) != 3 {
+		t.Errorf("LookPath asked %d times (%q), want once per name", len(asked), asked)
+	}
+}
+
+// With the real exec.LookPath on Unix: an executable entry is kept, one
+// without the executable bit (which `entire <name>` can't run) is not.
+func TestAgentHelpDispatchedWithLookPath(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("Unix modes")
+	}
+	dir := t.TempDir()
+	for name, mode := range map[string]os.FileMode{"entire-foo": 0o755, "entire-bar": 0o644} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"), mode); err != nil {
+			t.Fatal(err)
 		}
 	}
-	if got := agentHelpDispatchOrder(installed, "linux", ""); len(got) != len(installed) || got[0] != installed[0] {
-		t.Errorf("linux: order changed: %q", paths(got))
+	installed := []*InstalledPlugin{{Name: "bar", Path: filepath.Join(dir, "entire-bar")}, {Name: "foo", Path: filepath.Join(dir, "entire-foo")}}
+	got := agentHelpDispatched(installed, dir, exec.LookPath)
+	if len(got) != 1 || got[0].Name != "foo" {
+		t.Errorf("kept %+v, want foo only", got)
 	}
 }
 
