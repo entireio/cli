@@ -77,7 +77,12 @@ func usePluginCommandsInRootHelp(root *cobra.Command) {
 //
 //   - its install manifest records a description (local-dev installs have no
 //     manifest; raw-$PATH binaries are never read at all);
-//   - it has a bin/ entry, i.e. dispatch can reach it;
+//   - its bin/ entry is the pkg/ binary the manifest describes
+//     (managedEntryIsPkgBinary). A bare "has a bin/ entry" is not enough: a
+//     local `plugin install ./path --force` over a release re-points bin/ and
+//     leaves the old manifest behind, which would describe a binary that no
+//     longer runs. A copy-fallback install drops out too; hashing it on every
+//     --help is not worth it;
 //   - its name is not a built-in command or alias, which would always win;
 //   - the description is printable and at most maxPluginHelpDescriptionLen
 //     runes. It comes from the plugin's author and is printed straight to the
@@ -103,9 +108,9 @@ func pluginHelpEntries(root *cobra.Command) []pluginHelpEntry {
 		logging.Debug(ctx, "root help: listing installed plugins failed", "error", err.Error())
 		return nil
 	}
-	linked := make(map[string]bool, len(installed))
+	entryPaths := make(map[string]string, len(installed))
 	for _, p := range installed {
-		linked[p.Name] = true
+		entryPaths[p.Name] = p.Path
 	}
 	var out []pluginHelpEntry
 	for _, m := range manifests { // already sorted by name
@@ -113,9 +118,10 @@ func pluginHelpEntries(root *cobra.Command) []pluginHelpEntry {
 		switch {
 		case desc == "",
 			!isPluginCandidate(m.Name),
-			!linked[m.Name],
 			hasTerminalControlChars(desc),
 			utf8.RuneCountInString(desc) > maxPluginHelpDescriptionLen,
+			entryPaths[m.Name] == "",
+			!managedEntryIsPkgBinary(entryPaths[m.Name], m.Name),
 			shadowsBuiltinCommand(root, m.Name):
 			continue
 		}

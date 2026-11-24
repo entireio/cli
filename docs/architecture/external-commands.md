@@ -58,7 +58,7 @@ After a successful dispatched run, the CLI checks whether the plugin that ran ha
 A plugin is listed only when all of these hold; otherwise it is left out of help, and its install is unaffected:
 
 - its manifest records a non-empty description, so local-dev installs (`plugin install ./path`, no manifest) and binaries dropped on `$PATH` are never listed;
-- it has a `bin/entire-<name>` entry, so dispatch can actually reach it;
+- its `bin/entire-<name>` entry **is** the `pkg/<name>/` binary the manifest describes (a hardlink or symlink to it, checked with `os.SameFile`, the same stat-only check `plugin doctor` uses). A local `plugin install ./path --force` over a release re-points `bin/` but leaves the old manifest behind, and that manifest's description no longer describes what runs. A copy-fallback install (cross-volume) also drops out: hashing the binary on every `--help` isn't worth it;
 - its name is not a built-in command or alias, which would always win;
 - the description has no terminal control or bidi characters (`hasTerminalControlChars`) and is at most 160 runes. It is author-supplied and printed straight to the terminal.
 

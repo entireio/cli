@@ -10,9 +10,19 @@ import (
 	"testing"
 )
 
-// seedHelpPlugin writes a manifest for name and, when linked, a bin/ entry the
-// dispatcher would find. The bin entry is a stub: root help must never run it.
-func seedHelpPlugin(t *testing.T, pluginDir, name, description string, linked bool) {
+// helpPluginBin is the shape of a seeded plugin's bin/ entry.
+type helpPluginBin int
+
+const (
+	binNone  helpPluginBin = iota // manifest only, nothing dispatchable
+	binPkg                        // hardlink to pkg/<name>/entire-<name>, as a release install leaves it
+	binOther                      // an unrelated file, as a local --force install over a release leaves it
+)
+
+// seedHelpPlugin writes a manifest and pkg/ binary for name, plus a bin/ entry
+// of the given shape. Binaries are stubs that fail loudly: help must never run
+// them.
+func seedHelpPlugin(t *testing.T, pluginDir, name, description string, bin helpPluginBin) {
 	t.Helper()
 	if err := SavePluginManifest(&PluginManifest{
 		Name:        name,
@@ -22,15 +32,27 @@ func seedHelpPlugin(t *testing.T, pluginDir, name, description string, linked bo
 	}); err != nil {
 		t.Fatalf("SavePluginManifest(%s): %v", name, err)
 	}
-	if !linked {
+	stub := []byte("#!/bin/sh\nexit 99\n")
+	pkgBin := filepath.Join(pluginDir, pluginManagedPkgSubdir, name, pluginBinaryName(name))
+	if err := os.WriteFile(pkgBin, stub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if bin == binNone {
 		return
 	}
 	binDir := filepath.Join(pluginDir, pluginManagedBinSubdir)
 	if err := os.MkdirAll(binDir, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	// A stub that would fail loudly if help ever executed it.
-	if err := os.WriteFile(filepath.Join(binDir, pluginBinaryName(name)), []byte("#!/bin/sh\nexit 99\n"), 0o755); err != nil {
+	entry := filepath.Join(binDir, pluginBinaryName(name))
+	if bin == binPkg {
+		if err := os.Link(pkgBin, entry); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	// Same bytes on purpose: only identity, not content, may decide.
+	if err := os.WriteFile(entry, stub, 0o755); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -50,16 +72,17 @@ func rootHelpOutput(t *testing.T, args ...string) string {
 
 func TestRootHelp_ListsOnlyDescribedLinkedPlugins(t *testing.T) { //nolint:paralleltest // mutates ENTIRE_PLUGIN_DIR
 	dir := withPluginDir(t)
-	seedHelpPlugin(t, dir, "zz-valid", "Does valid things", true)
-	seedHelpPlugin(t, dir, "aa-valid", "Comes first by name", true)
-	seedHelpPlugin(t, dir, "nodesc", "", true)
-	seedHelpPlugin(t, dir, "blank", "   ", true)
-	seedHelpPlugin(t, dir, "status", "Shadowed by the built-in", true)
-	seedHelpPlugin(t, dir, "cp", "Shadowed by a built-in alias", true)
-	seedHelpPlugin(t, dir, "ctrl", "evil\x1b[2Jrepaint", true)
-	seedHelpPlugin(t, dir, "bidi", "spoof\u202e", true)
-	seedHelpPlugin(t, dir, "long", strings.Repeat("x", maxPluginHelpDescriptionLen+1), true)
-	seedHelpPlugin(t, dir, "nolink", "Manifest without a bin entry", false)
+	seedHelpPlugin(t, dir, "zz-valid", "Does valid things", binPkg)
+	seedHelpPlugin(t, dir, "aa-valid", "Comes first by name", binPkg)
+	seedHelpPlugin(t, dir, "nodesc", "", binPkg)
+	seedHelpPlugin(t, dir, "blank", "   ", binPkg)
+	seedHelpPlugin(t, dir, "status", "Shadowed by the built-in", binPkg)
+	seedHelpPlugin(t, dir, "cp", "Shadowed by a built-in alias", binPkg)
+	seedHelpPlugin(t, dir, "ctrl", "evil\x1b[2Jrepaint", binPkg)
+	seedHelpPlugin(t, dir, "bidi", "spoof\u202e", binPkg)
+	seedHelpPlugin(t, dir, "long", strings.Repeat("x", maxPluginHelpDescriptionLen+1), binPkg)
+	seedHelpPlugin(t, dir, "nolink", "Manifest without a bin entry", binNone)
+	seedHelpPlugin(t, dir, "localdev", "Stale manifest under a local build", binOther)
 
 	for _, args := range [][]string{{"--help"}, {"help"}} {
 		out := rootHelpOutput(t, args...)
@@ -74,7 +97,7 @@ func TestRootHelp_ListsOnlyDescribedLinkedPlugins(t *testing.T) { //nolint:paral
 		if !strings.HasPrefix(strings.TrimSpace(lines[1]), "zz-valid") || !strings.HasSuffix(lines[1], " Does valid things") {
 			t.Errorf("entire %v: second plugin line = %q", args, lines[1])
 		}
-		for _, hidden := range []string{"nodesc", "blank", "Shadowed", "evil", "spoof", "xxxx", "nolink"} {
+		for _, hidden := range []string{"nodesc", "blank", "Shadowed", "evil", "spoof", "xxxx", "nolink", "Stale"} {
 			if strings.Contains(section, hidden) {
 				t.Errorf("entire %v: plugin section lists %q:\n%s", args, hidden, section)
 			}
@@ -103,7 +126,7 @@ func pluginHelpSection(t *testing.T, out string) string {
 
 func TestRootHelp_NoPluginSectionWithoutDescribedPlugins(t *testing.T) { //nolint:paralleltest // mutates ENTIRE_PLUGIN_DIR
 	dir := withPluginDir(t)
-	seedHelpPlugin(t, dir, "nodesc", "", true)
+	seedHelpPlugin(t, dir, "nodesc", "", binPkg)
 	if out := rootHelpOutput(t, "--help"); strings.Contains(out, "Plugin Commands") {
 		t.Errorf("root help shows an empty Plugin Commands section:\n%s", out)
 	}
@@ -111,7 +134,7 @@ func TestRootHelp_NoPluginSectionWithoutDescribedPlugins(t *testing.T) { //nolin
 
 func TestSubcommandHelp_OmitsPluginSection(t *testing.T) { //nolint:paralleltest // mutates ENTIRE_PLUGIN_DIR
 	dir := withPluginDir(t)
-	seedHelpPlugin(t, dir, "valid", "Does valid things", true)
+	seedHelpPlugin(t, dir, "valid", "Does valid things", binPkg)
 	for _, args := range [][]string{{"plugin", "--help"}, {"help", "status"}} {
 		out := rootHelpOutput(t, args...)
 		if strings.Contains(out, "Plugin Commands") || strings.Contains(out, "Does valid things") {
