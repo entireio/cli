@@ -296,12 +296,10 @@ func refreshTrailsEnabledCacheIfStaleForScope(ctx context.Context, scope trailEn
 // refreshTrailsEnabledCacheForScope error branch (e.g. a broken API host)
 // without a real login context. Production code always uses the repo-routed
 // entire-api cell client (newTrailAPIClient) rather than the generic
-// data-API/BFF client: the BFF does not proxy /api/v1/trails/... for bearer
-// callers (COR-666), so probing it via the generic client silently misreads a
-// supported repo as disabled.
-var trailRefreshAPIClient = func(ctx context.Context, insecureHTTP bool, forge, owner, repo string) (*api.Client, error) {
-	client, _, err := newTrailAPIClient(ctx, insecureHTTP, forge, owner, repo)
-	return client, err
+// data-API/BFF client. The resolved processing placement ID addresses the
+// Changes probe in that same cell; do not resolve it again or bind it to the client.
+var trailRefreshAPIClient = func(ctx context.Context, insecureHTTP bool, forge, owner, repo string) (*api.Client, string, error) {
+	return newTrailAPIClient(ctx, insecureHTTP, forge, owner, repo)
 }
 
 // trailsCellClient resolves the entire-api cell client for ownerRepo via
@@ -319,15 +317,15 @@ var trailRefreshAPIClient = func(ctx context.Context, insecureHTTP bool, forge, 
 // a caller can log it without having to know which of the two it got. When
 // notOnboarded is true, err is the sentinel-wrapping error, kept for logging;
 // callers must act on notOnboarded, not propagate err.
-func trailsCellClient(ctx context.Context, insecureHTTP bool, forge, owner, repo string) (client *api.Client, notOnboarded bool, err error) {
-	client, err = trailRefreshAPIClient(ctx, insecureHTTP, forge, owner, repo)
+func trailsCellClient(ctx context.Context, insecureHTTP bool, forge, owner, repo string) (client *api.Client, repoID string, notOnboarded bool, err error) {
+	client, repoID, err = trailRefreshAPIClient(ctx, insecureHTTP, forge, owner, repo)
 	switch {
 	case err == nil:
-		return client, false, nil
+		return client, repoID, false, nil
 	case errors.Is(err, errRepoNotOnboarded):
-		return nil, true, err
+		return nil, "", true, err
 	default:
-		return nil, false, err
+		return nil, "", false, err
 	}
 }
 
@@ -361,7 +359,7 @@ func runTrailEnablementRefresh(ctx context.Context) error {
 		}
 		return nil
 	}
-	client, notOnboarded, err := trailsCellClient(ctx, false, scope.Forge, scope.Owner, scope.Repo)
+	client, repoID, notOnboarded, err := trailsCellClient(ctx, false, scope.Forge, scope.Owner, scope.Repo)
 	if notOnboarded {
 		// A definitive, permanent negative: without this, every SessionStart
 		// re-forks a refresh child for this repo forever (see
@@ -382,7 +380,7 @@ func runTrailEnablementRefresh(ctx context.Context) error {
 	// process exit — there's no one watching it and no user-visible benefit,
 	// only a spurious failure signal. The failure is still diagnosable via the
 	// debug log above.
-	if _, err := refreshTrailsEnabledCacheForScope(ctx, client, scope); err != nil {
+	if _, err := refreshTrailsEnabledCacheForScope(ctx, client, repoID, scope); err != nil {
 		logging.Debug(logCtx, "trails enablement refresh failed", "error", err.Error())
 		return nil
 	}
@@ -507,22 +505,22 @@ func newRefreshTrailEnablementCmd() *cobra.Command {
 	}
 }
 
-func refreshTrailsEnabledCache(ctx context.Context, client *api.Client) (bool, error) {
+func refreshTrailsEnabledCache(ctx context.Context, client *api.Client, repoID string) (bool, error) {
 	scope, err := currentTrailEnablementScope(ctx)
 	if err != nil {
 		return false, err
 	}
-	return refreshTrailsEnabledCacheForScope(ctx, client, scope)
+	return refreshTrailsEnabledCacheForScope(ctx, client, repoID, scope)
 }
 
-func refreshTrailsEnabledCacheForScope(ctx context.Context, client *api.Client, scope trailEnablementScope) (bool, error) {
+func refreshTrailsEnabledCacheForScope(ctx context.Context, client *api.Client, repoID string, scope trailEnablementScope) (bool, error) {
 	if !scope.Supported {
 		if err := saveTrailsEnabledForScope(ctx, scope, false, time.Now()); err != nil {
 			return false, err
 		}
 		return false, nil
 	}
-	enabled, err := client.TrailsEnabled(ctx, scope.Forge, scope.Owner, scope.Repo)
+	enabled, err := client.TrailsEnabled(ctx, repoID)
 	if err != nil {
 		return false, fmt.Errorf("check trails enablement: %w", err)
 	}
@@ -538,30 +536,24 @@ func saveTrailsEnabledForRepoBestEffort(ctx context.Context, enabled bool) {
 	}
 }
 
-func saveTrailsEnabledForRemoteBestEffort(ctx context.Context, forge, owner, repo string, enabled bool) {
-	if err := saveTrailsEnabledForRemote(ctx, forge, owner, repo, enabled); err != nil {
-		logging.Debug(ctx, "failed to cache trails enablement", "error", err)
-	}
-}
-
-func refreshTrailsEnabledCacheBestEffort(ctx context.Context, client *api.Client) {
+func refreshTrailsEnabledCacheBestEffort(ctx context.Context, client *api.Client, repoID string) {
 	refreshCtx, cancel := context.WithTimeout(ctx, trailEnablementRefreshTimeout)
 	defer cancel()
-	if _, err := refreshTrailsEnabledCache(refreshCtx, client); err != nil {
+	if _, err := refreshTrailsEnabledCache(refreshCtx, client, repoID); err != nil {
 		logging.Debug(ctx, "trails enablement refresh skipped", "error", err)
 	}
 }
 
-func noteTrailCommandEnablement(ctx context.Context, client *api.Client, commandErr error) {
+func noteTrailCommandEnablement(ctx context.Context, client *api.Client, repoID string, commandErr error) {
 	if commandErr == nil {
 		saveTrailsEnabledForRepoBestEffort(ctx, true)
 		return
 	}
-	refreshTrailsEnabledCacheBestEffort(ctx, client)
+	refreshTrailsEnabledCacheBestEffort(ctx, client, repoID)
 }
 
 // runAuthenticatedTrailAPI runs fn against the entire-api cell that owns the
-// target repository and exposes the repo ID needed to address native trail
+// target repository and exposes the repo ID needed to address repository Change
 // routes. repoOverride is the raw --repo flag: when non-empty the local clone's
 // enablement cache is skipped because the result belongs to a different
 // repository.
@@ -576,7 +568,7 @@ func runAuthenticatedTrailAPI(ctx context.Context, errW io.Writer, insecureHTTP 
 	}
 	err = fn(ctx, client, repoID)
 	if repoOverride == "" {
-		noteTrailCommandEnablement(ctx, client, err)
+		noteTrailCommandEnablement(ctx, client, repoID, err)
 	}
 	return err
 }

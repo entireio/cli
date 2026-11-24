@@ -27,8 +27,8 @@ const (
 	trailReviewApplyOriginalContent = "hello\nold\n"
 	trailReviewTestCommentID        = "cmt_1"
 	trailReviewTestFilePath         = "src/auth/session.ts"
-	trailReviewTestStartPath        = "/api/v1/trails/trl_1/reviews"
-	trailReviewTestCommentsPath     = "/api/v1/trails/trl_1/reviews/rvw_1/comments"
+	trailReviewTestStartPath        = "/api/v1/repos/repo-id/changes/7/reviews"
+	trailReviewTestCommentsPath     = "/api/v1/repos/repo-id/changes/7/reviews/rvw_1/comments"
 )
 
 func TestTrailCommandSurfaceUsesFindings(t *testing.T) {
@@ -94,7 +94,7 @@ func TestResolveTrailReviewTargetRejectsUnsupportedForge(t *testing.T) {
 
 // Not parallel: uses t.Chdir() to resolve a native origin remote.
 func TestResolveTrailReviewTargetUsesNativeRepoBasePath(t *testing.T) {
-	const basePath = "/api/v1/repos/native-repo-id/trails"
+	const basePath = "/api/v1/repos/native-repo-id/changes"
 
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)
@@ -649,6 +649,7 @@ func TestCreateTrailReviewFindingStartsReviewThenPostsBatch(t *testing.T) {
 	defer srv.Close()
 	t.Setenv(api.BaseURLEnvVar, srv.URL)
 	client := api.NewClientWithBaseURL("tok", srv.URL)
+	client.SetTrailRoute("trl_1", trailTestBasePath+"/7")
 
 	created, err := createTrailReviewFinding(context.Background(), client, "trl_1", api.TrailReviewCommentInput{
 		ClientID: "agent-run-1:finding-1",
@@ -702,6 +703,7 @@ func TestCreateTrailReviewFindingsPostsOneBatch(t *testing.T) {
 	defer srv.Close()
 	t.Setenv(api.BaseURLEnvVar, srv.URL)
 	client := api.NewClientWithBaseURL("tok", srv.URL)
+	client.SetTrailRoute("trl_1", trailTestBasePath+"/7")
 
 	created, err := createTrailReviewFindings(context.Background(), client, "trl_1", []api.TrailReviewCommentInput{
 		{ClientID: "c1", Body: trailReviewStrPtr("first"), Location: api.TrailReviewLocationCreateRequest{Granularity: "whole_change"}},
@@ -746,6 +748,7 @@ func TestCreateTrailReviewFindingsHydratesLineSelectedText(t *testing.T) {
 	defer srv.Close()
 	t.Setenv(api.BaseURLEnvVar, srv.URL)
 	client := api.NewClientWithBaseURL("tok", srv.URL)
+	client.SetTrailRoute("trl_1", trailTestBasePath+"/7")
 
 	filePath := "src/app.go"
 	line := 2
@@ -836,6 +839,7 @@ func TestCreateTrailReviewFindingSurfacesBatchError(t *testing.T) {
 	defer srv.Close()
 	t.Setenv(api.BaseURLEnvVar, srv.URL)
 	client := api.NewClientWithBaseURL("tok", srv.URL)
+	client.SetTrailRoute("trl_1", trailTestBasePath+"/7")
 
 	_, err := createTrailReviewFinding(context.Background(), client, "trl_1", api.TrailReviewCommentInput{
 		ClientID: "c1",
@@ -939,14 +943,14 @@ func TestFetchTrailReviewCommentsAndPatchStatus(t *testing.T) {
 	var gotPatchBody api.TrailReviewCommentPatchRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/trails/trl_1/reviews/comments":
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/repo-id/changes/7/reviews/comments":
 			if got := r.URL.Query().Get("status[eq]"); got != "open" {
 				t.Fatalf("status query = %q, want open", got)
 			}
 			encodeTrailReviewTestJSON(t, w, api.TrailReviewCommentsResponse{Comments: []api.TrailReviewComment{
 				{ID: trailReviewTestCommentID, TrailID: "trl_1", ReviewID: "rvw_1", Status: trailReviewStatusOpen, Location: api.TrailReviewLocation{Granularity: "whole_change"}},
 			}})
-		case r.Method == http.MethodPatch && r.URL.Path == "/api/v1/trails/trl_1/reviews/rvw_1/comments/cmt_1":
+		case r.Method == http.MethodPatch && r.URL.Path == "/api/v1/repos/repo-id/changes/7/reviews/rvw_1/comments/cmt_1":
 			if err := json.NewDecoder(r.Body).Decode(&gotPatchBody); err != nil {
 				t.Fatalf("decode patch body: %v", err)
 			}
@@ -958,6 +962,7 @@ func TestFetchTrailReviewCommentsAndPatchStatus(t *testing.T) {
 	defer srv.Close()
 	t.Setenv(api.BaseURLEnvVar, srv.URL)
 	client := api.NewClientWithBaseURL("tok", srv.URL)
+	client.SetTrailRoute("trl_1", trailTestBasePath+"/7")
 
 	comments, nextCursor, err := fetchTrailReviewComments(context.Background(), client, "trl_1", defaultTrailReviewListOptions())
 	if err != nil {
@@ -994,6 +999,7 @@ func TestFetchAllTrailReviewCommentsStopsOnRepeatedCursor(t *testing.T) {
 	}))
 	defer srv.Close()
 	client := api.NewClientWithBaseURL("tok", srv.URL)
+	client.SetTrailRoute("trl_1", trailTestBasePath+"/7")
 
 	_, err := fetchAllTrailReviewComments(context.Background(), client, "trl_1", trailReviewSummaryOptions())
 	if err == nil || !strings.Contains(err.Error(), "repeated cursor") {
@@ -1007,7 +1013,7 @@ func TestFetchAllTrailReviewCommentsStopsOnRepeatedCursor(t *testing.T) {
 func TestFetchTrailReviewStateFollowsCursor(t *testing.T) {
 	requests := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/trails/trl_1/reviews/rvw_1" {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/repos/repo-id/changes/7/reviews/rvw_1" {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
 		}
 		if got := r.URL.Query().Get("include_dismissed"); requests == 0 && got != strconv.FormatBool(true) {
@@ -1035,6 +1041,7 @@ func TestFetchTrailReviewStateFollowsCursor(t *testing.T) {
 	defer srv.Close()
 	t.Setenv(api.BaseURLEnvVar, srv.URL)
 	client := api.NewClientWithBaseURL("tok", srv.URL)
+	client.SetTrailRoute("trl_1", trailTestBasePath+"/7")
 
 	state, err := fetchTrailReviewState(context.Background(), client, "trl_1", "rvw_1")
 	if err != nil {

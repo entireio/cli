@@ -214,3 +214,35 @@ func TestWorktreeRecord_FailedCheckKeepsRecord(t *testing.T) {
 	assert.Equal(t, []string{"w.go"}, work.FilesTouched)
 	assert.Equal(t, marker, work.Incarnation)
 }
+
+// The worktree ID paths.GetWorktreeID parses from a .git file can name a
+// worktrees/<id> directory that is not the checkout's Git directory: here one
+// in another folder whose commondir points at a repository with a real
+// worktree of that ID. Marking the checkout must not touch that worktree.
+func TestMarkWorktree_RefusesAnAdminDirThatIsNotTheCheckouts(t *testing.T) {
+	t.Parallel()
+	mainDir := setupGitRepo(t)
+	victimDir := filepath.Join(t.TempDir(), "victim")
+	testutil.RunGit(t, mainDir, "worktree", "add", "--detach", victimDir)
+	victimAdmin := filepath.Join(mainDir, ".git", "worktrees", "victim")
+	require.DirExists(t, victimAdmin)
+
+	fakeGitDir := filepath.Join(t.TempDir(), ".git", "worktrees", "victim")
+	require.NoError(t, os.MkdirAll(fakeGitDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(fakeGitDir, "HEAD"), []byte(testutil.GetHeadHash(t, mainDir)+"\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(fakeGitDir, "commondir"), []byte(filepath.Join(mainDir, ".git")+"\n"), 0o600))
+	fake := filepath.Join(t.TempDir(), "fake")
+	require.NoError(t, os.MkdirAll(fake, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(fake, ".git"), []byte("gitdir: "+fakeGitDir+"\n"), 0o600))
+	id, err := paths.GetWorktreeID(fake)
+	require.NoError(t, err)
+	require.Equal(t, "victim", id, "precondition: the .git file's text names the victim's ID")
+
+	_, err = MarkWorktree(t.Context(), fake, id)
+	require.Error(t, err)
+	assert.NoFileExists(t, filepath.Join(victimAdmin, worktreeIncarnationFile), "a marker was written into another worktree's admin dir")
+
+	marker, err := MarkWorktree(t.Context(), victimDir, "victim")
+	require.NoError(t, err)
+	assert.NotEmpty(t, marker)
+}

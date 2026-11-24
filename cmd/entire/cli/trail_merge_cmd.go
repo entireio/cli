@@ -217,7 +217,7 @@ func runTrailMerge(ctx context.Context, out, errW io.Writer, insecureHTTP bool, 
 		if opts.DeleteBranch != nil && forge == gitremote.ForgeGitHub {
 			return errTrailMergeDeleteBranchGitHub
 		}
-		basePath, err := trailRepoBasePath(forge, owner, repoName, repoID)
+		basePath, err := trailRepoBasePath(repoID)
 		if err != nil {
 			return err
 		}

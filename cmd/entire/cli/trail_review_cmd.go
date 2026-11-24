@@ -546,7 +546,7 @@ func resolveTrailReviewTarget(ctx context.Context, client *api.Client, repoID, s
 	if err != nil {
 		return trailReviewTarget{}, err
 	}
-	basePath, err := trailRepoBasePath(host, owner, repo, repoID)
+	basePath, err := trailRepoBasePath(repoID)
 	if err != nil {
 		return trailReviewTarget{}, err
 	}

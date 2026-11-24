@@ -67,6 +67,30 @@ func TestDecode_Blocks(t *testing.T) {
 			},
 		},
 		{
+			name:  "tool_use result with an exit code of 0 and a working directory",
+			input: `{"v":1,"type":"assistant","content":[{"type":"tool_use","id":"e1","name":"Bash","input":{"command":"ls"},"result":{"output":"a\n","status":"success","exitCode":0,"cwd":"/w"}}]}`,
+			want: Line{
+				Version: 1, Type: TypeAssistant,
+				Blocks: []Block{{
+					Type: BlockToolUse, ID: "e1", Name: "Bash", Input: json.RawMessage(`{"command":"ls"}`),
+					Result: &ToolResult{Output: "a\n", Status: ToolStatusSuccess, ExitCode: new(0), CWD: "/w"},
+					Raw:    json.RawMessage(`{"type":"tool_use","id":"e1","name":"Bash","input":{"command":"ls"},"result":{"output":"a\n","status":"success","exitCode":0,"cwd":"/w"}}`),
+				}},
+			},
+		},
+		{
+			name:  "tool_use result of a declined call, null exit code",
+			input: `{"v":1,"type":"assistant","content":[{"type":"tool_use","id":"e2","name":"Bash","input":{},"result":{"output":"","status":"error","exitCode":null,"declined":true}}]}`,
+			want: Line{
+				Version: 1, Type: TypeAssistant,
+				Blocks: []Block{{
+					Type: BlockToolUse, ID: "e2", Name: "Bash", Input: json.RawMessage(`{}`),
+					Result: &ToolResult{Status: ToolStatusError, Declined: true},
+					Raw:    json.RawMessage(`{"type":"tool_use","id":"e2","name":"Bash","input":{},"result":{"output":"","status":"error","exitCode":null,"declined":true}}`),
+				}},
+			},
+		},
+		{
 			name:  "tool_use result naming its subagent",
 			input: `{"v":1,"type":"assistant","content":[{"type":"tool_use","id":"tu-1","name":"Agent","input":{},"result":{"output":"","status":"success","agent":{"id":"a17"}}}]}`,
 			want: Line{

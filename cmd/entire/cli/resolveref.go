@@ -188,21 +188,21 @@ func resolveGranteeProvider(ctx context.Context, c *coreapi.Client, ref string) 
 	// a message that points at the form this command actually wants, rather than
 	// letting parseQualifiedHandle dangle a "(or a ULID)" hint that doesn't apply.
 	if err := ensureGranteeIsHandle(ref); err != nil {
-		return "", "", err
+		return "", "", &granteeUnresolvedError{err}
 	}
 	p, handle, err := parseGranteeHandle(ref)
 	if err != nil {
-		return "", "", err
+		return "", "", &granteeUnresolvedError{err}
 	}
 	id, err := c.ResolveHandle(ctx, coreapi.ResolveHandleParams{Provider: p, Handle: handle})
 	if err != nil {
 		if isCoreNotFound(err) {
-			return "", "", fmt.Errorf("no %s identity for handle %q", p, identityFor(p).displayHandle(handle))
+			return "", "", &granteeUnresolvedError{fmt.Errorf("no %s identity for handle %q", p, identityFor(p).displayHandle(handle))}
 		}
 		return "", "", err
 	}
 	if id.ProviderUserId == "" {
-		return "", "", fmt.Errorf("handle %q resolved to no provider user id", ref)
+		return "", "", &granteeUnresolvedError{fmt.Errorf("handle %q resolved to no provider user id", ref)}
 	}
 	// Prefer the server-normalized provider over the raw prefix, falling back to
 	// the input when the response omits it.
@@ -211,6 +211,14 @@ func resolveGranteeProvider(ctx context.Context, c *coreapi.Client, ref string) 
 	}
 	return p, id.ProviderUserId, nil
 }
+
+// granteeUnresolvedError is a grantee handle that names no usable provider
+// identity. It is a fact about that grantee, not about the request, which is
+// what lets a batch of grants move on to the next one (grantFailureIsFatal).
+type granteeUnresolvedError struct{ err error }
+
+func (e *granteeUnresolvedError) Error() string { return e.err.Error() }
+func (e *granteeUnresolvedError) Unwrap() error { return e.err }
 
 // ensureGranteeIsHandle rejects an account ULID as a grantee. A grantee is a
 // provider-qualified handle and nothing else: the by-provider routes cannot be

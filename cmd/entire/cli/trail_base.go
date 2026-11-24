@@ -81,7 +81,7 @@ func remoteDefaultBranch(ctx context.Context, remote string) (string, bool) {
 	ctx, cancel := context.WithTimeout(ctx, trailDefaultBranchTimeout)
 	defer cancel()
 	cmd := execx.NonInteractive(ctx, "git", "ls-remote", "--symref", remote, "HEAD")
-	cmd.WaitDelay = trailBranchCheckWaitDelay
+	cmd.WaitDelay = execx.KillWaitDelay
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	// Bound both streams while git writes them: the remote and its transport
 	// helper control this output, and the timeout limits time, not bytes.
