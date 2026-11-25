@@ -355,6 +355,7 @@ func TestPrePush_ForegroundNeverHandsOffWhenLockHeld(t *testing.T) {
 	st, err := coord.State()
 	require.NoError(t, err)
 	assert.Nil(t, st.Job.Request, "no request is left for a background process")
+	assert.Len(t, st.Job.UserPushes, 1, "the running worker still waits for this push")
 }
 
 // TestRunCheckpointUploadWorker_RespawnsForRequestLeftAtExit: a worker that

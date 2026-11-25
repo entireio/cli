@@ -539,6 +539,8 @@ func uploadCheckpointRefsOnPrePush(ctx context.Context, repo *git.Repository, ps
 	// upload here. One flush of the queue at a time.
 	release, locked := lockQueueForFlush(ctx, coord)
 	if !locked {
+		// The running worker must still wait for this push.
+		noteUserPush(ctx, coord)
 		fmt.Fprintln(os.Stderr, "[entire] Another checkpoint upload is in progress; checkpoints stay queued for the next push.")
 		return nil
 	}

@@ -100,8 +100,9 @@ func stopLater(stop func()) func() (time.Time, bool) {
 		time.Sleep(100 * time.Millisecond)
 		mu.Lock()
 		defer mu.Unlock()
-		stop()
+		// Before stop: the process can be seen exiting before stop returns.
 		at = time.Now()
+		stop()
 	}()
 	return func() (time.Time, bool) {
 		mu.Lock()
