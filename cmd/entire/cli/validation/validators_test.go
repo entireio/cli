@@ -151,6 +151,23 @@ func TestValidateSessionID(t *testing.T) {
 		wantErr:   true,
 		errMsg:    "control character",
 	})
+	for control := rune(0x80); control <= 0x9f; control++ {
+		tests = append(tests, testCase{
+			name:      fmt.Sprintf("C1 control U+%04X", control),
+			sessionID: "session" + string(control) + "id",
+			wantErr:   true,
+			errMsg:    "terminal control character",
+		})
+	}
+	for _, bidi := range []rune{0x061c, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069} {
+		tests = append(tests, testCase{
+			name:      fmt.Sprintf("bidi control U+%04X", bidi),
+			sessionID: "session" + string(bidi) + "id",
+			wantErr:   true,
+			errMsg:    "terminal control character",
+		})
+	}
+	tests = append(tests, testCase{name: "non-ASCII letters", sessionID: "sitzung-größe-会话", wantErr: false})
 	for _, device := range []string{
 		"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
 		"COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",

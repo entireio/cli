@@ -11,6 +11,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 	"github.com/spf13/cobra"
 )
 
@@ -554,24 +555,24 @@ func writeCheckpointTokensText(w io.Writer, report checkpointTokensReport) {
 	case report.SessionCount > 1:
 		fmt.Fprintf(w, "Sessions:   %d\n", report.SessionCount)
 		if len(report.Agents) > 0 {
-			fmt.Fprintf(w, "Agents:     %s\n", terminalField(strings.Join(report.Agents, ", ")))
+			fmt.Fprintf(w, "Agents:     %s\n", tuiutil.SanitizeTerminalField(strings.Join(report.Agents, ", ")))
 		}
 		if len(report.Models) > 0 {
-			fmt.Fprintf(w, "Models:     %s\n", terminalField(strings.Join(report.Models, ", ")))
+			fmt.Fprintf(w, "Models:     %s\n", tuiutil.SanitizeTerminalField(strings.Join(report.Models, ", ")))
 		}
 	case report.SessionID != "":
-		fmt.Fprintf(w, "Session:    %s\n", terminalField(report.SessionID))
+		fmt.Fprintf(w, "Session:    %s\n", tuiutil.SanitizeTerminalField(report.SessionID))
 		if report.Agent != "" {
-			fmt.Fprintf(w, "Agent:      %s\n", terminalField(report.Agent))
+			fmt.Fprintf(w, "Agent:      %s\n", tuiutil.SanitizeTerminalField(report.Agent))
 		}
 		if report.Model != "" {
-			fmt.Fprintf(w, "Model:      %s\n", terminalField(report.Model))
+			fmt.Fprintf(w, "Model:      %s\n", tuiutil.SanitizeTerminalField(report.Model))
 		}
 	case report.Agent != "":
-		fmt.Fprintf(w, "Agent:      %s\n", terminalField(report.Agent))
+		fmt.Fprintf(w, "Agent:      %s\n", tuiutil.SanitizeTerminalField(report.Agent))
 	}
 	if report.Branch != "" {
-		fmt.Fprintf(w, "Branch:     %s\n", terminalField(report.Branch))
+		fmt.Fprintf(w, "Branch:     %s\n", tuiutil.SanitizeTerminalField(report.Branch))
 	}
 
 	writeTokenUsageSection(w, report.Tokens)

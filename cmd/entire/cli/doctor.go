@@ -29,6 +29,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 	"github.com/entireio/cli/internal/entireclient/userconfig"
 
@@ -308,16 +309,16 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 		if force {
 			if canCondenseStuckSession(ss) {
 				if err := strat.CondenseSessionByID(ctx, ss.State.SessionID); err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to condense session %s: %v\n", ss.State.SessionID, err)
+					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to condense session %s: %v\n", tuiutil.SanitizeTerminalField(ss.State.SessionID), err)
 				} else {
-					fmt.Fprintf(cmd.OutOrStdout(), "  ✓ Condensed session %s\n\n", ss.State.SessionID)
+					fmt.Fprintf(cmd.OutOrStdout(), "  ✓ Condensed session %s\n\n", tuiutil.SanitizeTerminalField(ss.State.SessionID))
 				}
 			} else {
 				// Discard if we can't condense
 				if err := discardSession(ctx, ss, cmd.ErrOrStderr()); err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to discard session %s: %v\n", ss.State.SessionID, err)
+					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to discard session %s: %v\n", tuiutil.SanitizeTerminalField(ss.State.SessionID), err)
 				} else {
-					fmt.Fprintf(cmd.OutOrStdout(), "  ✓ Discarded session %s\n\n", ss.State.SessionID)
+					fmt.Fprintf(cmd.OutOrStdout(), "  ✓ Discarded session %s\n\n", tuiutil.SanitizeTerminalField(ss.State.SessionID))
 				}
 			}
 			continue
@@ -350,15 +351,15 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 		switch action {
 		case "condense":
 			if err := strat.CondenseSessionByID(ctx, ss.State.SessionID); err != nil {
-				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to condense session %s: %v\n", ss.State.SessionID, err)
+				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to condense session %s: %v\n", tuiutil.SanitizeTerminalField(ss.State.SessionID), err)
 			} else {
-				fmt.Fprintf(cmd.OutOrStdout(), "  ✓ Condensed session %s\n\n", ss.State.SessionID)
+				fmt.Fprintf(cmd.OutOrStdout(), "  ✓ Condensed session %s\n\n", tuiutil.SanitizeTerminalField(ss.State.SessionID))
 			}
 		case "discard":
 			if err := discardSession(ctx, ss, cmd.ErrOrStderr()); err != nil {
-				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to discard session %s: %v\n", ss.State.SessionID, err)
+				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to discard session %s: %v\n", tuiutil.SanitizeTerminalField(ss.State.SessionID), err)
 			} else {
-				fmt.Fprintf(cmd.OutOrStdout(), "  ✓ Discarded session %s\n\n", ss.State.SessionID)
+				fmt.Fprintf(cmd.OutOrStdout(), "  ✓ Discarded session %s\n\n", tuiutil.SanitizeTerminalField(ss.State.SessionID))
 			}
 		case "skip":
 			fmt.Fprintf(cmd.OutOrStdout(), "  -> Skipped\n\n")
@@ -426,12 +427,12 @@ func classifySession(state *strategy.SessionState, now time.Time) *stuckSession 
 func displayStuckSession(cmd *cobra.Command, ss stuckSession) {
 	w := cmd.OutOrStdout()
 
-	fmt.Fprintf(w, "  Session: %s\n", ss.State.SessionID)
-	fmt.Fprintf(w, "  Phase:   %s\n", ss.State.Phase)
+	fmt.Fprintf(w, "  Session: %s\n", tuiutil.SanitizeTerminalField(ss.State.SessionID))
+	fmt.Fprintf(w, "  Phase:   %s\n", tuiutil.SanitizeTerminalField(string(ss.State.Phase)))
 	fmt.Fprintf(w, "  Reason:  %s\n", ss.Reason)
 
 	if ss.State.AgentType != "" {
-		fmt.Fprintf(w, "  Agent:   %s\n", ss.State.AgentType)
+		fmt.Fprintf(w, "  Agent:   %s\n", tuiutil.SanitizeTerminalField(string(ss.State.AgentType)))
 	}
 
 	if ss.State.LastInteractionTime != nil {

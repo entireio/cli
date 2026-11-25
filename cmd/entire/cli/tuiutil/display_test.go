@@ -50,6 +50,31 @@ func TestSanitizeTerminalLabel_StripsEscapeSequences(t *testing.T) {
 	assert.Equal(t, "ared b", SanitizeTerminalLabel("a\x1b[31mred\x1b[0m b"))
 }
 
+func TestSanitizeTerminalField(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain", "claude-code", "claude-code"},
+		{"CSI", "a\x1b[2Jb", "ab"},
+		{"OSC terminated by BEL", "a\x1b]8;;http://example.invalid\ab", "ab"},
+		{"OSC terminated by ST", "a\x1b]52;c;QQ==\x1b\\b", "ab"},
+		{"C0 controls", "a\a\b\r\x00\x7fb", "ab"},
+		{"C1 controls", "a\u009b\u0085b", "ab"},
+		{"bidi controls", "a\u202egnp\u202cb", "agnpb"},
+		{"line breaks and tabs fold to spaces", "a\nforged\tb", "a forged b"},
+		{"non-ASCII text survives", "Sitzung größe 会话", "Sitzung größe 会话"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, SanitizeTerminalField(tt.in))
+		})
+	}
+}
+
 func TestSanitizeDisplayLine(t *testing.T) {
 	t.Parallel()
 	got := SanitizeDisplayLine("Intent\nforged \u202eevil\u2066x\x1b[31m")

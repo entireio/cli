@@ -108,6 +108,20 @@ func SanitizeTerminalLabel(s string) string {
 	return result.String()
 }
 
+// terminalFieldFlattener folds the line breaks and tabs SanitizeTerminalLabel
+// keeps, so a field value cannot spill onto a line of its own.
+var terminalFieldFlattener = strings.NewReplacer("\n", " ", "\t", " ")
+
+// SanitizeTerminalField is SanitizeTerminalLabel for a value printed inside
+// one line of text output: a session ID, agent, model, branch or similar
+// stored label. Newlines and tabs become spaces, so a stored value cannot
+// forge extra lines of a report. Use it at the text rendering boundary, not
+// when building a report: JSON output escapes control characters itself and
+// must keep the stored value.
+func SanitizeTerminalField(s string) string {
+	return terminalFieldFlattener.Replace(SanitizeTerminalLabel(s))
+}
+
 // PadDisplayWidth truncates or right-pads s with spaces so its display
 // width is exactly width cells (ANSI-aware).
 func PadDisplayWidth(s string, width int) string {

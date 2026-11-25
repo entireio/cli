@@ -480,15 +480,15 @@ func skillEventLabels(events []agent.SkillEvent) []string {
 func writeSessionTokensText(w io.Writer, report sessionTokensReport) {
 	fmt.Fprintln(w, "Session tokens")
 	fmt.Fprintln(w)
-	fmt.Fprintf(w, "Session: %s\n", terminalField(report.SessionID))
+	fmt.Fprintf(w, "Session: %s\n", tuiutil.SanitizeTerminalField(report.SessionID))
 	if report.Resolution != strategy.ResolutionNone {
 		fmt.Fprintf(w, "Resolved: %s\n", sessionResolutionLabel(report.Resolution))
 	}
-	fmt.Fprintf(w, "Agent:   %s\n", terminalField(report.Agent))
+	fmt.Fprintf(w, "Agent:   %s\n", tuiutil.SanitizeTerminalField(report.Agent))
 	if report.Model != "" {
-		fmt.Fprintf(w, "Model:   %s\n", terminalField(report.Model))
+		fmt.Fprintf(w, "Model:   %s\n", tuiutil.SanitizeTerminalField(report.Model))
 	}
-	fmt.Fprintf(w, "Status:  %s\n", report.Status)
+	fmt.Fprintf(w, "Status:  %s\n", tuiutil.SanitizeTerminalField(report.Status))
 
 	writeTokenUsageSection(w, report.Tokens)
 	if len(report.Recommendations) > 0 {
@@ -501,7 +501,7 @@ func writeSessionTokensText(w io.Writer, report sessionTokensReport) {
 
 func writeSessionTokensAgentBrief(w io.Writer, report sessionTokensReport) {
 	fmt.Fprintln(w, "Session token brief")
-	fmt.Fprintf(w, "Session: %s\n", terminalField(report.SessionID))
+	fmt.Fprintf(w, "Session: %s\n", tuiutil.SanitizeTerminalField(report.SessionID))
 	if report.Resolution != strategy.ResolutionNone {
 		fmt.Fprintf(w, "Resolved: %s\n", sessionResolutionLabel(report.Resolution))
 	}
@@ -659,13 +659,13 @@ func writeTokenContributors(w io.Writer, contributors []sessionTokensContributor
 		for _, contributor := range contributors {
 			switch contributor.Kind {
 			case tokensKindSubagents:
-				fmt.Fprintf(w, "- %s: %s tokens\n", terminalField(contributor.Label), formatTokenCount(contributor.Tokens))
+				fmt.Fprintf(w, "- %s: %s tokens\n", tuiutil.SanitizeTerminalField(contributor.Label), formatTokenCount(contributor.Tokens))
 			case tokensKindContextPressure:
 				if contextInfo != nil {
-					fmt.Fprintf(w, "- %s: %d%% of %s tokens\n", terminalField(contributor.Label), contextInfo.Percent, formatTokenCount(contextInfo.WindowSize))
+					fmt.Fprintf(w, "- %s: %d%% of %s tokens\n", tuiutil.SanitizeTerminalField(contributor.Label), contextInfo.Percent, formatTokenCount(contextInfo.WindowSize))
 				}
 			default:
-				fmt.Fprintf(w, "- %s\n", terminalField(contributor.Label))
+				fmt.Fprintf(w, "- %s\n", tuiutil.SanitizeTerminalField(contributor.Label))
 			}
 		}
 	}
@@ -679,19 +679,4 @@ func writeTokenLimitations(w io.Writer, limitations []string) {
 			fmt.Fprintf(w, "- %s\n", limitation)
 		}
 	}
-}
-
-// singleLineFieldFlattener folds the line breaks and tabs that
-// SanitizeTerminalLabel keeps, so a value cannot spill onto a forged line.
-var singleLineFieldFlattener = strings.NewReplacer("\n", " ", "\t", " ")
-
-// terminalField prepares a stored value (session ID, agent, model, branch,
-// skill label) for one line of a text report. These values come from
-// checkpoint metadata or session state, which agents and anyone who can push
-// the checkpoints ref influence, so escape sequences, control characters and
-// bidi controls are stripped before they reach the terminal, as `entire
-// explain` does for its body. JSON output is not routed through here: the
-// encoder already escapes control characters.
-func terminalField(s string) string {
-	return singleLineFieldFlattener.Replace(tuiutil.SanitizeTerminalLabel(s))
 }

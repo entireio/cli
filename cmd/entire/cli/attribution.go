@@ -22,6 +22,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -281,7 +282,7 @@ func runAttributionBlame(ctx context.Context, w io.Writer, file string, opts att
 	if opts.JSON {
 		return printJSON(w, result)
 	}
-	renderAttributionBlame(w, result, opts.LineFlag, opts.Long)
+	renderAttributionBlame(w, attributionForTerminal(result), opts.LineFlag, opts.Long)
 	return nil
 }
 
@@ -312,7 +313,7 @@ func runAttributionWhy(ctx context.Context, w io.Writer, target string, opts att
 		if opts.JSON {
 			return printJSON(w, result)
 		}
-		renderAttributionFileWhy(w, result)
+		renderAttributionFileWhy(w, attributionForTerminal(result))
 		return nil
 	}
 
@@ -339,7 +340,7 @@ func runAttributionWhy(ctx context.Context, w io.Writer, target string, opts att
 		}
 		return printJSON(w, payload)
 	}
-	renderAttributionLineWhy(w, result.File, *selected)
+	renderAttributionLineWhy(w, result.File, attributionLineForTerminal(*selected))
 	return nil
 }
 
@@ -1017,6 +1018,49 @@ func renderAttributionBlame(w io.Writer, result *fileAttributionResult, lineFlag
 		return
 	}
 	renderAttributionBlameCompact(w, result, lineFlag)
+}
+
+// attributionForTerminal returns a copy of result for the text renderers with
+// every stored label sanitized. Session IDs, agents and models come from
+// checkpoint metadata and authors from commits, all of which can arrive by
+// fetch, so escape sequences and control characters are stripped before they
+// reach the terminal. JSON output prints result itself, unchanged.
+func attributionForTerminal(result *fileAttributionResult) *fileAttributionResult {
+	out := *result
+	out.Lines = make([]attributionLine, len(result.Lines))
+	for i, line := range result.Lines {
+		out.Lines[i] = attributionLineForTerminal(line)
+	}
+	if result.Checkpoints != nil {
+		out.Checkpoints = make(map[string]attributionCheckpointContext, len(result.Checkpoints))
+		for key, checkpointContext := range result.Checkpoints {
+			out.Checkpoints[key] = attributionContextForTerminal(checkpointContext)
+		}
+	}
+	return &out
+}
+
+// attributionLineForTerminal is attributionForTerminal for one line.
+func attributionLineForTerminal(line attributionLine) attributionLine {
+	line.SessionID = tuiutil.SanitizeTerminalField(line.SessionID)
+	line.Agent = tuiutil.SanitizeTerminalField(line.Agent)
+	line.Model = tuiutil.SanitizeTerminalField(line.Model)
+	line.Author = tuiutil.SanitizeTerminalField(line.Author)
+	if line.Candidates != nil {
+		candidates := make([]attributionCandidate, len(line.Candidates))
+		for i, candidate := range line.Candidates {
+			candidates[i] = attributionContextForTerminal(candidate)
+		}
+		line.Candidates = candidates
+	}
+	return line
+}
+
+func attributionContextForTerminal(checkpointContext attributionCheckpointContext) attributionCheckpointContext {
+	checkpointContext.SessionID = tuiutil.SanitizeTerminalField(checkpointContext.SessionID)
+	checkpointContext.Agent = tuiutil.SanitizeTerminalField(checkpointContext.Agent)
+	checkpointContext.Model = tuiutil.SanitizeTerminalField(checkpointContext.Model)
+	return checkpointContext
 }
 
 // renderAttributionBlameTable renders the scaffolding shared by every blame

@@ -19,6 +19,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 	"github.com/spf13/cobra"
 )
@@ -126,7 +127,7 @@ func runCleanCurrentHead(ctx context.Context, cmd *cobra.Command, force, dryRun 
 		if len(activeSessions) > 0 {
 			fmt.Fprintln(errW, "Active sessions detected on current HEAD:")
 			for _, s := range activeSessions {
-				fmt.Fprintf(errW, "  %s (phase: %s)\n", s.SessionID, s.Phase)
+				fmt.Fprintf(errW, "  %s (phase: %s)\n", tuiutil.SanitizeTerminalField(s.SessionID), tuiutil.SanitizeTerminalField(string(s.Phase)))
 			}
 			fmt.Fprint(errW, "\nCleaning would delete:\n\n")
 			printCurrentHeadCleanItems(errW, sessions, legacyBranches)
@@ -221,7 +222,7 @@ func printCurrentHeadCleanItems(w io.Writer, sessions []*strategy.SessionState, 
 		fmt.Fprintf(w, "Session states (%d):\n", len(sessions))
 		pending := 0
 		for _, s := range sessions {
-			fmt.Fprintf(w, "  %s (pending turns: %d)\n", s.SessionID, s.StepCount)
+			fmt.Fprintf(w, "  %s (pending turns: %d)\n", tuiutil.SanitizeTerminalField(s.SessionID), s.StepCount)
 			if s.HasPendingWork() {
 				pending++
 			}
