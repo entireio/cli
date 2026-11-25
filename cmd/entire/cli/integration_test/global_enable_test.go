@@ -132,7 +132,8 @@ func agentFreeEnv() []string {
 
 // Checkpoints from a repository on only through global enable push on both
 // backends like an enabled repository's, with no question, and a push from
-// another worktree of the clone carries new ones.
+// another worktree of the clone carries new ones. Only the first push from the
+// clone says it went through global enable.
 func TestGlobalEnable_PushesLikeAnEnabledRepo(t *testing.T) {
 	t.Parallel()
 	for name, store := range map[string]string{"git-branch": "", "git-refs": StoreGitRefs} {
@@ -145,7 +146,10 @@ func TestGlobalEnable_PushesLikeAnEnabledRepo(t *testing.T) {
 			env.ExtraEnv = slices.Concat(extra, agentFreeEnv())
 
 			runClaudeTurn(t, env, "a.go", "package a\n")
-			gitPushWithHooksIn(t, env, env.RepoDir)
+			const notice = "This repository is on through global enable"
+			if out := gitPushWithHooksIn(t, env, env.RepoDir); !strings.Contains(out, notice) {
+				t.Errorf("first push printed no global enable notice:\n%s", out)
+			}
 			first := remoteCheckpointRefNames(t, bare)
 			if first == "" {
 				t.Fatal("push carried no checkpoint refs")
@@ -154,7 +158,9 @@ func TestGlobalEnable_PushesLikeAnEnabledRepo(t *testing.T) {
 			linked := filepath.Join(t.TempDir(), "linked")
 			testutil.RunGit(t, env.RepoDir, "worktree", "add", "-b", "linked-branch", linked)
 			runClaudeTurn(t, env, "b.go", "package b\n")
-			gitPushWithHooksIn(t, env, linked)
+			if out := gitPushWithHooksIn(t, env, linked); strings.Contains(out, notice) {
+				t.Errorf("second push repeated the global enable notice:\n%s", out)
+			}
 			if after := remoteCheckpointRefNames(t, bare); after == first && store == StoreGitRefs {
 				t.Errorf("push from another worktree carried no new checkpoint ref:\n%s", after)
 			}

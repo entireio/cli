@@ -527,7 +527,9 @@ bypasses the prompt.
 remote routing and push policy. Run `entire disable` in a repository to stop
 recording there. Agents that show a session banner say, when a session is
 about to install the git hooks there, that global enable is the reason and
-that checkpoints push with your git pushes.
+that checkpoints push with your git pushes. The first push from a clone that
+delivers checkpoints prints a one-time notice naming the remote (never a URL)
+and pointing at `entire disable`; it does not hold or prompt.
 
 **Precedence.**
 

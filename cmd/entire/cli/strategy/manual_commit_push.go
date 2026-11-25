@@ -247,6 +247,7 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	// none, and hintGatedCheckpointSync speaks for the gated case.
 	if deliveredCount > 0 {
 		warnIgnoredCheckpointRemote(ctx, ps)
+		noticeGlobalEnablePush(ctx, ps)
 	}
 	return nil
 }
@@ -498,6 +499,7 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 			commitCapturedSyncRemote(ctx, pendingCapture)
 		}
 		warnIgnoredCheckpointRemote(ctx, ps)
+		noticeGlobalEnablePush(ctx, ps)
 	}
 	return nil
 }
