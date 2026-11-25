@@ -307,7 +307,7 @@ func validateTrailFindingWaitOptions(opts trailFindingWaitOptions, timeoutChange
 	if opts.Timeout <= 0 {
 		return errors.New("--timeout must be positive")
 	}
-	if h := strings.TrimSpace(opts.Head); h != "" && (len(h) < 7 || strings.Trim(strings.ToLower(h), "0123456789abcdef") != "") {
+	if h := strings.TrimSpace(opts.Head); h != "" && !isCommitSHA(h) {
 		return fmt.Errorf("--head %q is not a commit SHA (7 or more hex characters)", tuiutil.SanitizeTerminalLabel(h))
 	}
 	return nil
