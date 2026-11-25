@@ -461,9 +461,7 @@ func warnIfShadowsBuiltin(cmd *cobra.Command, name string) {
 	if root == nil {
 		return
 	}
-	root.InitDefaultHelpCmd()
-	root.InitDefaultCompletionCmd(name)
-	if c, _, err := root.Find([]string{name}); err == nil && c != root {
+	if shadowsBuiltinCommand(root, name) {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Note: %q shadows the built-in command; the built-in will take precedence at runtime.\n", name)
 	}
 }

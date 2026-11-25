@@ -51,6 +51,19 @@ Confirmations read from the **controlling terminal**, never stdin, so a plugin's
 
 After a successful dispatched run, the CLI checks whether the plugin that ran has a newer stable tag and prints a notice on stderr (`Plugin update available! <name> x -> y`, followed by the `entire plugin upgrade <name>` command). It mirrors the CLI's own post-run version check: one remote lookup per plugin per 24 hours, with the cache (`plugin_version_check.json`, beside `version_check.json` in the global config dir) and silence on every error. One deliberate difference: the cache is stamped **before** the lookup, so a failed lookup is not retried for 24 hours, an unwritable config dir (sandboxed agents, read-only `$HOME`) costs no network at all, and concurrent plugin runs don't each start their own lookup. The latest version comes from the same stable-tag resolution `plugin upgrade` uses, but bounded to the version check's 2-second budget rather than the 2-minute git deadline, because it runs synchronously after every plugin exit. Pinned installs and manifest-less installs (local-dev symlinks, binaries dropped on `$PATH`) are never checked — the same installs `upgrade` skips.
 
+### Plugin commands in root help
+
+`entire --help` (and `entire help`) ends its command list with a **Plugin Commands:** section naming managed plugins, each with a one-line description. The description is the `description:` from the plugin's `entire-plugin.yml`, copied into `pkg/<name>/manifest.yml` at install and upgrade; plugin authors add nothing new, and the command name is the manifest's `name:`, the same name dispatch runs as `entire-<name>`. An existing install picks the description up on its next `entire plugin upgrade`, including when it is already up to date or pinned. Those branches don't reinstall, so they read `entire-plugin.yml` at the installed tag and record its description in a manifest that lacks one. That backfill is best effort: a fetch failure leaves the description empty and the upgrade's outcome unchanged.
+
+A plugin is listed only when all of these hold; otherwise it is left out of help, and its install is unaffected:
+
+- its manifest records a non-empty description, so local-dev installs (`plugin install ./path`, no manifest) and binaries dropped on `$PATH` are never listed;
+- its `bin/entire-<name>` entry **is** the `pkg/<name>/` binary the manifest describes (a hardlink or symlink to it, checked with `os.SameFile`, the same stat-only check `plugin doctor` uses). A local `plugin install ./path --force` over a release re-points `bin/` but leaves the old manifest behind, and that manifest's description no longer describes what runs. A copy-fallback install (cross-volume) also drops out: hashing the binary on every `--help` isn't worth it;
+- its name is not a built-in command or alias, which would always win;
+- the description has no terminal control or bidi characters (`hasTerminalControlChars`) and is at most 160 runes. It is author-supplied and printed straight to the terminal.
+
+Entries are sorted by name. Building the section reads manifests and the bin directory and nothing else: no plugin is executed and nothing touches the network. Only root usage pays for it — subcommand help, dispatch, and startup never read the plugin tree for this. It is rendered by a root usage func (`plugin_help.go`), deliberately **not** by registering placeholder Cobra commands: a registered `graph` command would win `rootCmd.Find` and dispatch would stop reaching `entire-graph`.
+
 ### Remote install
 
 `entire plugin install` accepts three source forms:
@@ -69,7 +82,7 @@ Remote installs are deliberately forge-agnostic:
 2. **Metadata** is read from `entire-plugin.yml` at the repo root via a blobless shallow clone (with a plain shallow-clone fallback for servers that don't allow partial-clone filters). The file is optional; without it the plugin name derives from the repo basename (`entire-run` → `run`).
 3. **Asset download** is the one forge-specific step, contained in a small URL-convention table: GitHub/Gitea-style `<repo>/releases/download/<tag>/<asset>`, GitLab-style `<repo>/-/releases/<tag>/downloads/<asset>`, unknown hosts default to GitHub-style. Authors on other hosts declare a `download_url` template in `entire-plugin.yml` (placeholders: `{name}` `{tag}` `{version}` `{os}` `{arch}` `{asset}`).
 4. **Asset selection** goes through the release's `checksums.txt`: the manifest lists what was actually published, and the download is verified against it. Candidate names follow goreleaser conventions (`entire-<name>_<version>_<os>_<arch>.tar.gz` and friends, with `x86_64`/`aarch64` aliases and a `darwin_all` universal-binary fallback (`all` occupies the *arch* slot, which is where goreleaser puts it)). A pushed tag with no published assets falls back to the next-highest tag with a warning.
-5. The binary lands in `pkg/<name>/` next to a `manifest.yml` — written atomically, and *before* the `bin/` link — recording provenance (repo URL, tag, asset, asset SHA-256, **binary SHA-256**, verification state, pin state, dependency list), and is linked into `bin/` through the same fallback ladder as local installs: symlink → hardlink → copy on Unix, hardlink → copy on Windows (`os.Root.Symlink` produces unfollowable absolute links there; see `plugin_store_windows.go`). The dispatcher never changes.
+5. The binary lands in `pkg/<name>/` next to a `manifest.yml` — written atomically, and *before* the `bin/` link — recording provenance (repo URL, tag, asset, asset SHA-256, **binary SHA-256**, verification state, pin state, dependency list, description), and is linked into `bin/` through the same fallback ladder as local installs: symlink → hardlink → copy on Unix, hardlink → copy on Windows (`os.Root.Symlink` produces unfollowable absolute links there; see `plugin_store_windows.go`). The dispatcher never changes.
 
 The manifest is written immediately after the binary swap and before the `bin/` link, which is ordering that matters rather than style. `replaceBinary` has already mutated `pkg/<name>/`; until the manifest catches up it records the *previous* tag and `binary_sha256` while the new binary is on disk, and `doctor`'s integrity check reads that as tampering — a permanent false alarm on a healthy install. Writing it first leaves only a local re-hash in that window, and if the link then fails, `doctor` reports the real problem ("has an install manifest but no entry in the managed bin dir") with a fix that works.
 
@@ -332,6 +345,7 @@ Key files:
 - `cmd/entire/cli/plugin_gitremote.go` — `git ls-remote` tag resolution, blobless metadata fetch
 - `cmd/entire/cli/plugin_fetch.go` — forge URL conventions, checksum verification, archive extraction
 - `cmd/entire/cli/plugin_install_remote.go` — remote install/upgrade orchestration
+- `cmd/entire/cli/plugin_help.go` — the root help's Plugin Commands section
 - `cmd/entire/cli/plugin_index.go` — git-synced index cache, URL precedence
 - `cmd/entire/cli/plugin_deps.go` — dependency planning, remove guard, `plugin doctor`
 - `cmd/entire/cli/agent_help_cmd.go` — `maybeDelegateAgentHelpToPlugin`, the `agent-help <plugin>` hand-off
