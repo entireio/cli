@@ -311,7 +311,7 @@ type trailStackPullRequest struct {
 
 func newTrailStackCmd(mode *trailMode) *cobra.Command {
 	return newTrailWorkingReadCmd(mode, "stack", "Show the stack a trail's Change belongs to",
-		"Shows the stack a trail's Change belongs to, bottom first.",
+		"Show the stack a trail's Change belongs to, bottom first.",
 		func(cmd *cobra.Command, selected *trailWorkingContext, jsonOut bool) error {
 			var raw json.RawMessage
 			if err := getTrailRepoIDResource(cmd.Context(), selected, "/stack", "stack", &raw); err != nil {
