@@ -221,7 +221,7 @@ Variables forwarded by default fall into a few categories:
 - **Proxies** — `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `ALL_PROXY` (and lowercase variants)
 - **SSH agent** — `SSH_AUTH_SOCK`, `SSH_CONNECTION`
 - **Windows essentials** — `SYSTEMROOT`, `WINDIR`, `APPDATA`, `LOCALAPPDATA`, `PROGRAMDATA`, `PROGRAMFILES`, `PROGRAMFILES(X86)`, `USERPROFILE`, `USERNAME`, `HOMEDRIVE`, `HOMEPATH`, `COMSPEC`, `PATHEXT`
-- **Agent session IDs** — `CODEX_THREAD_ID`, `CODEX_SESSION_ID`: Codex exports them to the commands it runs, and entire-stream uses them to recognise the agent's own live session (Codex 0.172 runs commands from a shared background server without the `ENTIRE_*` variables). Non-credential IDs; the rest of `CODEX_*` stays filtered
+- **Codex session** — `CODEX_THREAD_ID`, `CODEX_SESSION_ID`: Codex exports them to the commands it runs, and entire-stream uses them to recognise the agent's own live session (Codex 0.172 runs commands from a shared background server without the `ENTIRE_*` variables); `CODEX_HOME`, where entire-stream reads Codex's rollouts to tie a sub-agent's thread to its parent session. IDs and a path, no credentials; the rest of `CODEX_*` stays filtered
 - **Namespace prefixes** — anything starting with `ENTIRE_`, `LC_`, or `XDG_`
 
 The full list lives in `pluginEnvAllowed` and `pluginEnvPrefixes` in `cmd/entire/cli/plugin_env.go`.
