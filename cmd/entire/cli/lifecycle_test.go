@@ -1818,8 +1818,8 @@ func TestHandleLifecycleTurnStart_WritesPromptContent(t *testing.T) {
 	}
 }
 
-// Installs firing the first prompt of a new session at once start one
-// turn: they all miss the state, and the repeat check under the lock on the
+// User-level installs firing the first prompt of a new session at once start
+// one turn: they all miss the state, and the repeat check under the lock on the
 // initialize path turns the others away, so prompt.txt gets the prompt once.
 func TestHandleLifecycleTurnStart_ConcurrentFirstPromptWritesPromptOnce(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir()
@@ -1841,7 +1841,7 @@ func TestHandleLifecycleTurnStart_ConcurrentFirstPromptWritesPromptOnce(t *testi
 		go func() {
 			defer wg.Done()
 			<-start
-			errs[i] = handleLifecycleTurnStart(context.Background(), newMockAgent(), &agent.Event{
+			errs[i] = handleLifecycleTurnStart(withUserScopeHook(context.Background(), true), newMockAgent(), &agent.Event{
 				Type: agent.TurnStart, SessionID: sessionID, Prompt: prompt, Timestamp: time.Now(),
 			})
 		}()

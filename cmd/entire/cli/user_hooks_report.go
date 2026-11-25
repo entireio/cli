@@ -36,10 +36,15 @@ func userLevelHookSessionStartWarning(ctx context.Context, ag agent.Agent) strin
 // rewrites an outdated user-level copy.
 func checkUserLevelHooks(cmd *cobra.Command) {
 	ctx := cmd.Context()
+	w := cmd.OutOrStdout()
+	if err := settings.UserSettingsReadError(ctx); err != nil {
+		fmt.Fprintf(w, "Entire user settings: UNREADABLE: %v\n", err)
+		fmt.Fprintln(w, "  global_enable and repos entries there are ignored until the file is fixed.")
+		return
+	}
 	if !settings.UserTierEnablesEverywhere(ctx) {
 		return
 	}
-	w := cmd.OutOrStdout()
 	for _, installer := range userHookInstallers() {
 		report := installer.InspectUserHooks(ctx)
 		writeUserHookReport(w, installer, report)

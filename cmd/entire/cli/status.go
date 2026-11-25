@@ -88,6 +88,9 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 
 	if !projectExists && !localExists && !userTierConfiguresWorktree(ctx) {
 		fmt.Fprintln(w, "○ not set up (run `entire enable` to get started)")
+		if strategy.AnyGitHookInstalled(ctx) {
+			fmt.Fprintln(w, "  "+leftoverGitHooksHint)
+		}
 		return nil
 	}
 

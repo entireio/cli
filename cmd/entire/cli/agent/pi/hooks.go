@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -90,31 +91,51 @@ const (
 )
 
 // userLevelImports and userLevelStepAside make the user-level extension do
-// nothing where Pi also loads this project's own Entire extension. Pi 0.70
-// discovers project extensions only in <cwd>/.pi/extensions (no upward
+// nothing where Pi also loads this project's current Entire extension (see
+// agent.CurrentProjectCopyCheck: an older render may not run on this Pi). Pi
+// 0.70 discovers project extensions only in <cwd>/.pi/extensions (no upward
 // search), so that is the one place to look. Checked once per load: /reload,
 // /new and /resume build a new instance and look again.
-const userLevelImports = `import { readFileSync } from "node:fs";
+func userLevelImports(projectDigest string) string {
+	return `import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
-`
+
+` + agent.CurrentProjectCopyCheck(projectDigest)
+}
 
 func userLevelStepAside() string {
-	return agent.UserLevelHeader("  ", "extension", userHooksVersion) + `  try {
-    const project = readFileSync(join(process.cwd(), ".pi", "extensions", "entire", "index.ts"), "utf8");
-    if (project.includes("` + entireMarker + `")) return;
-  } catch {
-    // no project extension: this copy handles the session
-  }
+	return agent.UserLevelHeader("  ", "extension", userHooksVersion) +
+		`  if (isCurrentProjectCopy(join(process.cwd(), ".pi", "extensions", "entire", "index.ts"))) return;
 `
 }
 
 // renderExtensionFor renders the extension, the user-level variant when
 // userLevel.
 func renderExtensionFor(userLevel bool) string {
-	return agent.RenderUserLevel(strings.ReplaceAll(extensionTemplate, entireCmdPlaceholder, "entire"), userLevel, map[string]string{
-		userLevelImportsLine:   userLevelImports,
-		userLevelStepAsideLine: userLevelStepAside(),
+	if userLevel {
+		return userExtensionRender()
+	}
+	return projectExtensionRender()
+}
+
+// The renders never change within a process, so each is built once.
+var (
+	projectExtensionRender = sync.OnceValue(func() string {
+		return agent.RenderUserLevel(baseExtension(), false, map[string]string{
+			userLevelImportsLine: "", userLevelStepAsideLine: "",
+		})
 	})
+	userExtensionRender = sync.OnceValue(func() string {
+		return agent.RenderUserLevel(baseExtension(), true, map[string]string{
+			userLevelImportsLine:   userLevelImports(agent.ProjectRenderDigest(projectExtensionRender())),
+			userLevelStepAsideLine: userLevelStepAside(),
+		})
+	})
+)
+
+func baseExtension() string {
+	return strings.ReplaceAll(extensionTemplate, entireCmdPlaceholder, "entire")
 }
 
 // InstallHooks writes the Entire pi extension to .pi/extensions/entire/index.ts.

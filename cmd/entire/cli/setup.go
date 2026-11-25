@@ -1708,6 +1708,7 @@ func runDisable(ctx context.Context, w io.Writer, useProjectSettings bool) error
 	// A repository on only through global enable is turned off in the user
 	// settings file, so every clone and worktree of it stays off; the
 	// per-worktree local file would leave the others recording.
+	globalOnly := false
 	if s, err := LoadEntireSettings(ctx); err == nil && s.EnabledOnlyByGlobal() {
 		if !useProjectSettings {
 			key, err := setRepoEnabledHere(ctx, false)
@@ -1718,15 +1719,19 @@ func runDisable(ctx context.Context, w io.Writer, useProjectSettings bool) error
 			fmt.Fprintln(w, "global enable stays on for your other repositories.")
 			return nil
 		}
-		// The committed file is written below; keep the local files beside it
-		// out of git in a repository that may have no .entire yet.
-		if err := strategy.EnsureEntireGitignore(ctx); err != nil {
-			logging.Debug(ctx, "disable: could not update .entire/.gitignore", slog.String("error", err.Error()))
-		}
+		globalOnly = true
 	}
 
 	if err := setEnabledFlag(ctx, false, targetFile == settings.EntireSettingsFile); err != nil {
 		return err
+	}
+	if globalOnly {
+		// Keep the local files beside the committed one just written out of
+		// git, in a repository that may have no .entire/.gitignore yet. After
+		// the write, so the file no longer ignores itself and can be committed.
+		if err := strategy.EnsureEntireGitignore(ctx); err != nil {
+			logging.Debug(ctx, "disable: could not update .entire/.gitignore", slog.String("error", err.Error()))
+		}
 	}
 
 	fmt.Fprintf(w, "Entire is now disabled (%s).\n", configDisplay)

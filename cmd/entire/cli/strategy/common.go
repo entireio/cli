@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1521,30 +1522,63 @@ func EnsureEntireGitignore(ctx context.Context) error {
 		redact.RedactorsDirName + "/local/",
 	}
 
-	// Track what needs to be added
-	var toAdd []string
-	for _, entry := range requiredEntries {
-		if !strings.Contains(content, entry) {
-			toAdd = append(toAdd, entry)
-		}
-	}
-
-	// Nothing to add
-	if len(toAdd) == 0 {
-		return nil
-	}
+	original := content
+	content = withGitignoreSelfIgnore(content, !hasSettingsFile(root))
 
 	// Append missing entries to gitignore
 	var sb strings.Builder
-	for _, entry := range toAdd {
-		sb.WriteString(entry + "\n")
+	for _, entry := range requiredEntries {
+		if !strings.Contains(content, entry) {
+			sb.WriteString(entry + "\n")
+		}
 	}
 	content += sb.String()
+	if content == original {
+		return nil
+	}
 
 	if err := entiredir.WriteFile(root, gitignoreName, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("failed to write gitignore: %w", err)
 	}
 	return nil
+}
+
+// gitignoreSelfIgnore is the .entire/.gitignore line that makes the file
+// ignore itself.
+const gitignoreSelfIgnore = ".gitignore"
+
+// hasSettingsFile reports whether .entire holds either settings file: the
+// repository was enabled (or disabled) here, not only reached through global
+// enable.
+func hasSettingsFile(root *os.Root) bool {
+	for _, file := range []string{settings.EntireSettingsFile, settings.EntireSettingsLocalFile} {
+		if _, err := root.Lstat(entiredir.MustName(file)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// withGitignoreSelfIgnore adds or removes the self-ignore line. A repository
+// set up only through global enable has no settings file, and its
+// .entire/.gitignore ignores itself so the repository shows nothing
+// untracked; once a settings file exists the line goes, so the file is there
+// to commit as `entire enable` has always left it. A tracked file is
+// unaffected by ignoring itself.
+func withGitignoreSelfIgnore(content string, selfIgnore bool) string {
+	lines := strings.SplitAfter(content, "\n")
+	present := slices.ContainsFunc(lines, func(l string) bool { return strings.TrimSpace(l) == gitignoreSelfIgnore })
+	switch {
+	case selfIgnore && !present:
+		if content != "" && !strings.HasSuffix(content, "\n") {
+			content += "\n"
+		}
+		return content + gitignoreSelfIgnore + "\n"
+	case !selfIgnore && present:
+		lines = slices.DeleteFunc(lines, func(l string) bool { return strings.TrimSpace(l) == gitignoreSelfIgnore })
+		return strings.Join(lines, "")
+	}
+	return content
 }
 
 // fileExists checks if a file exists at the given path.

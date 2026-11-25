@@ -151,6 +151,7 @@ func runDisableGlobal(cmd *cobra.Command) error {
 		}
 	}
 	fmt.Fprintln(w, "Repositories you enabled with `entire enable` stay enabled.")
+	fmt.Fprintln(w, "Repositories set up only through global enable keep Entire's git hooks, which do nothing now; run `entire disable --uninstall` in one to remove them.")
 	if settings.UserReposEnableAny(ctx) {
 		fmt.Fprintf(w, "A repository enabled only by a repos entry in %s records agent sessions again once you run `entire enable` in it.\n", path)
 	}

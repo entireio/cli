@@ -23,7 +23,7 @@ func TestInitializeSessionForPrompt_SkipsARepeatOfTheRunningTurn(t *testing.T) {
 	s := &ManualCommitStrategy{}
 	const sessionID = "dedupe-session"
 	start := func(prompt, agentTurnID string) error {
-		return s.InitializeSessionForPrompt(ctx, sessionID, agent.AgentTypeClaudeCode, "", prompt, "", agentTurnID)
+		return s.InitializeSessionForPrompt(ctx, sessionID, agent.AgentTypeCodex, "", prompt, "", agentTurnID, true)
 	}
 	turnID := func() string {
 		state, err := s.loadSessionState(ctx, sessionID)
@@ -60,6 +60,18 @@ func TestInitializeSessionForPrompt_SkipsARepeatOfTheRunningTurn(t *testing.T) {
 	assert.NotEqual(t, fourth, turnID())
 }
 
+// A turn-start that cannot be a second install's repeat (mayRepeat false) is
+// always a new turn, even for the prompt the running turn started from: the
+// same short prompt sent again after a missed Stop is a real prompt.
+func TestInitializeSessionForPrompt_NeverSkipsWhenItCannotRepeat(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	ctx := context.Background()
+	s := &ManualCommitStrategy{}
+	require.NoError(t, s.InitializeSessionForPrompt(ctx, "no-repeat", agent.AgentTypeClaudeCode, "", "yes", "", "", false))
+	require.NoError(t, s.InitializeSessionForPrompt(ctx, "no-repeat", agent.AgentTypeClaudeCode, "", "yes", "", "", false))
+}
+
 // Plain InitializeSession never dedupes, and the key stores only a hash.
 func TestInitializeSession_DoesNotDedupe(t *testing.T) {
 	dir := setupGitRepo(t)
@@ -69,8 +81,8 @@ func TestInitializeSession_DoesNotDedupe(t *testing.T) {
 	require.NoError(t, s.InitializeSession(ctx, "plain", agent.AgentTypeClaudeCode, "", "same", ""))
 	require.NoError(t, s.InitializeSession(ctx, "plain", agent.AgentTypeClaudeCode, "", "same", ""))
 
-	assert.Empty(t, TurnStartKey("s", "", ""), "nothing to tell prompts apart by")
-	key := TurnStartKey("s", "secret prompt", "")
+	assert.Empty(t, turnStartKey("s", "", ""), "nothing to tell prompts apart by")
+	key := turnStartKey("s", "secret prompt", "")
 	assert.Len(t, key, 64)
 	assert.NotContains(t, key, "secret")
 }

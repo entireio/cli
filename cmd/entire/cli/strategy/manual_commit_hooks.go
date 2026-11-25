@@ -3360,8 +3360,11 @@ func explicitlyIncomplete(complete *bool) bool {
 // transcriptPath is the path to the live transcript file (for mid-session commit detection).
 // userPrompt is the user's prompt text (stored truncated as LastPrompt for display).
 // model is the LLM model identifier (e.g., "claude-sonnet-4-20250514"); empty if unknown.
+//
+// Production prompts go through InitializeSessionForPrompt; this form, which
+// never records or skips a repeat, remains for tests that start turns directly.
 func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID string, agentType types.AgentType, transcriptPath string, userPrompt string, model string) error {
-	return s.initializeTurn(ctx, sessionID, agentType, transcriptPath, userPrompt, model, "")
+	return s.initializeTurn(ctx, sessionID, agentType, transcriptPath, userPrompt, model, turnDedupe{})
 }
 
 // ErrDuplicateTurnStart is InitializeSessionForPrompt finding that this
@@ -3374,19 +3377,30 @@ var ErrDuplicateTurnStart = errors.New("turn start already handled for this prom
 // Two installs fire for one prompt within moments of each other.
 const turnStartDedupeWindow = time.Minute
 
-// InitializeSessionForPrompt is InitializeSession for a UserPromptSubmit,
-// which also skips a repeat of the prompt it handled last: the same session,
-// prompt text and agent turn ID (agentTurnID, when the agent sends one),
-// within turnStartDedupeWindow, while that turn is still active. The check
-// and the record happen under the session lock, before a turn ID is
-// generated. Returns ErrDuplicateTurnStart for a repeat.
-func (s *ManualCommitStrategy) InitializeSessionForPrompt(ctx context.Context, sessionID string, agentType types.AgentType, transcriptPath, userPrompt, model, agentTurnID string) error {
-	return s.initializeTurn(ctx, sessionID, agentType, transcriptPath, userPrompt, model, TurnStartKey(sessionID, userPrompt, agentTurnID))
+// InitializeSessionForPrompt is InitializeSession for a UserPromptSubmit. It
+// records the prompt and, when mayRepeat, skips a repeat of the prompt it
+// handled last: the same session, prompt text and agent turn ID (agentTurnID,
+// when the agent sends one), within turnStartDedupeWindow, while that turn is
+// still active. mayRepeat is the caller's word that a second Entire install
+// can fire for this prompt; without it the same short prompt sent again after
+// a missed Stop would be dropped. The check and the record happen under the
+// session lock, before a turn ID is generated. Returns ErrDuplicateTurnStart
+// for a repeat.
+func (s *ManualCommitStrategy) InitializeSessionForPrompt(ctx context.Context, sessionID string, agentType types.AgentType, transcriptPath, userPrompt, model, agentTurnID string, mayRepeat bool) error {
+	return s.initializeTurn(ctx, sessionID, agentType, transcriptPath, userPrompt, model,
+		turnDedupe{key: turnStartKey(sessionID, userPrompt, agentTurnID), mayRepeat: mayRepeat})
 }
 
-// TurnStartKey is the dedupe key of a prompt, or "" when there is nothing to
+// turnDedupe is a turn start's repeat key (empty: none) and whether it may
+// be skipped as a repeat.
+type turnDedupe struct {
+	key       string
+	mayRepeat bool
+}
+
+// turnStartKey is the dedupe key of a prompt, or "" when there is nothing to
 // tell two prompts apart by (no prompt text and no agent turn ID).
-func TurnStartKey(sessionID, userPrompt, agentTurnID string) string {
+func turnStartKey(sessionID, userPrompt, agentTurnID string) string {
 	if userPrompt == "" && agentTurnID == "" {
 		return ""
 	}
@@ -3394,24 +3408,29 @@ func TurnStartKey(sessionID, userPrompt, agentTurnID string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// isRepeatedTurnStart reports whether key repeats the prompt state handled
-// last, in a turn that is still running.
-func isRepeatedTurnStart(state *SessionState, key string, now time.Time) bool {
-	return key != "" && state.LastTurnStartKey == key &&
+// isRepeatedTurnStart reports whether a turn start that may repeat one
+// repeats the prompt state handled last, in a turn that is still running.
+func isRepeatedTurnStart(state *SessionState, dedupe turnDedupe, now time.Time) bool {
+	return dedupe.mayRepeat && dedupe.key != "" && state.LastTurnStartKey == dedupe.key &&
 		state.LastTurnStartAt != nil && now.Sub(*state.LastTurnStartAt) < turnStartDedupeWindow &&
 		state.Phase.IsActive()
 }
 
-// recordTurnStart remembers key as the prompt this session handled last.
-func recordTurnStart(state *SessionState, key string, now time.Time) {
-	if key == "" {
-		return
+// claimTurnStart refuses a repeat with ErrDuplicateTurnStart, else remembers
+// this prompt as the one the session handled last.
+func claimTurnStart(state *SessionState, dedupe turnDedupe) error {
+	now := time.Now()
+	if isRepeatedTurnStart(state, dedupe, now) {
+		return ErrDuplicateTurnStart
 	}
-	state.LastTurnStartKey = key
-	state.LastTurnStartAt = &now
+	if dedupe.key != "" {
+		state.LastTurnStartKey = dedupe.key
+		state.LastTurnStartAt = &now
+	}
+	return nil
 }
 
-func (s *ManualCommitStrategy) initializeTurn(ctx context.Context, sessionID string, agentType types.AgentType, transcriptPath, userPrompt, model, dedupeKey string) error {
+func (s *ManualCommitStrategy) initializeTurn(ctx context.Context, sessionID string, agentType types.AgentType, transcriptPath, userPrompt, model string, dedupe turnDedupe) error {
 	// Concurrent calls for the same session_id are accepted; convergence on
 	// AgentType is via correctSessionAgentType on the next turn.
 	repo, err := OpenRepository(ctx)
@@ -3437,7 +3456,7 @@ func (s *ManualCommitStrategy) initializeTurn(ctx context.Context, sessionID str
 	turnStartErr := MutateSessionStateOnSaved(ctx, sessionID, func(state *SessionState) error {
 		out, err := startTurnOnExistingState(ctx, repo, state, turnStartInput{
 			sessionID: sessionID, transcriptPath: transcriptPath, userPrompt: userPrompt,
-			model: model, dedupeKey: dedupeKey, resolvedAgentType: resolvedAgentType,
+			model: model, dedupe: dedupe, resolvedAgentType: resolvedAgentType,
 		})
 		remember, homeAgentType = out.remember, out.homeAgentType
 		return err
@@ -3446,7 +3465,7 @@ func (s *ManualCommitStrategy) initializeTurn(ctx context.Context, sessionID str
 		return nil
 	}
 	if errors.Is(turnStartErr, ErrDuplicateTurnStart) {
-		return ErrDuplicateTurnStart
+		return turnStartErr
 	}
 	if !errors.Is(turnStartErr, ErrStateNotFound) && !errors.Is(turnStartErr, errPartialState) {
 		return fmt.Errorf("failed to update session state: %w", turnStartErr)
@@ -3461,11 +3480,9 @@ func (s *ManualCommitStrategy) initializeTurn(ctx context.Context, sessionID str
 	}
 
 	mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
-		now := time.Now()
-		if isRepeatedTurnStart(state, dedupeKey, now) {
-			return ErrDuplicateTurnStart
+		if err := claimTurnStart(state, dedupe); err != nil {
+			return err
 		}
-		recordTurnStart(state, dedupeKey, now)
 		if transErr := TransitionAndLog(ctx, state, session.EventTurnStart, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
 			logging.Warn(logging.WithComponent(ctx, "hooks"), "turn start transition failed",
 				slog.String("session_id", sessionID),
@@ -3476,7 +3493,7 @@ func (s *ManualCommitStrategy) initializeTurn(ctx context.Context, sessionID str
 		return nil
 	})
 	if errors.Is(mutErr, ErrDuplicateTurnStart) {
-		return ErrDuplicateTurnStart
+		return mutErr
 	}
 	if mutErr != nil && !errors.Is(mutErr, ErrStateNotFound) {
 		return fmt.Errorf("failed to save session state: %w", mutErr)
@@ -3489,8 +3506,9 @@ func (s *ManualCommitStrategy) initializeTurn(ctx context.Context, sessionID str
 
 // turnStartInput is what startTurnOnExistingState needs from the hook.
 type turnStartInput struct {
-	sessionID, transcriptPath, userPrompt, model, dedupeKey string
-	resolvedAgentType                                       types.AgentType
+	sessionID, transcriptPath, userPrompt, model string
+	dedupe                                       turnDedupe
+	resolvedAgentType                            types.AgentType
 }
 
 // turnStartOutput carries the agent home to remember once the state is saved.
@@ -3506,8 +3524,8 @@ type turnStartOutput struct {
 // from.
 func startTurnOnExistingState(ctx context.Context, repo *git.Repository, state *SessionState, in turnStartInput) (turnStartOutput, error) {
 	var out turnStartOutput
-	sessionID, transcriptPath, userPrompt, model, dedupeKey, resolvedAgentType :=
-		in.sessionID, in.transcriptPath, in.userPrompt, in.model, in.dedupeKey, in.resolvedAgentType
+	sessionID, transcriptPath, userPrompt, model, resolvedAgentType :=
+		in.sessionID, in.transcriptPath, in.userPrompt, in.model, in.resolvedAgentType
 	if state.BaseCommit == "" {
 		return out, errPartialState
 	}
@@ -3517,11 +3535,9 @@ func startTurnOnExistingState(ctx context.Context, repo *git.Repository, state *
 			slog.String("adopted_into_worktree", state.AdoptedIntoWorktreePath))
 		return out, ErrMutationSkip
 	}
-	now := time.Now()
-	if isRepeatedTurnStart(state, dedupeKey, now) {
-		return out, ErrDuplicateTurnStart
+	if err := claimTurnStart(state, in.dedupe); err != nil {
+		return out, err
 	}
-	recordTurnStart(state, dedupeKey, now)
 	if transErr := TransitionAndLog(ctx, state, session.EventTurnStart, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
 		logging.Warn(logging.WithComponent(ctx, "hooks"), "turn start transition failed",
 			slog.String("session_id", sessionID),

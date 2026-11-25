@@ -15,6 +15,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/settings/usersettings"
@@ -148,4 +149,37 @@ func TestTurnStart_GlobalEnableDoesNotSetUpADisabledRepository(t *testing.T) {
 			assert.NoDirExists(t, filepath.Join(repo, ".entire", "metadata"))
 		})
 	}
+}
+
+// A turn-start is skipped as a second install's repeat only where a second
+// install can fire: a user-level hook (--scope=user) or an agent that sends
+// a turn ID. Never for Claude Code, which runs one identical hook command
+// once itself, so a repeat there is the developer sending the prompt again.
+func TestTurnStartMayRepeat(t *testing.T) {
+	t.Parallel()
+	userCtx := withUserScopeHook(context.Background(), true)
+	for name, tc := range map[string]struct {
+		ctx    context.Context
+		agent  agent.Agent
+		turnID string
+		want   bool
+	}{
+		"claude user-level":     {ctx: userCtx, agent: mustAgent(t, agent.AgentNameClaudeCode), turnID: "t1"},
+		"codex project":         {ctx: context.Background(), agent: mustAgent(t, agent.AgentNameCodex)},
+		"codex user-level":      {ctx: userCtx, agent: mustAgent(t, agent.AgentNameCodex), want: true},
+		"opencode with turn ID": {ctx: context.Background(), agent: mustAgent(t, agent.AgentNameOpenCode), turnID: "msg-1", want: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			got := turnStartMayRepeat(tc.ctx, tc.agent, &agent.Event{TurnID: tc.turnID})
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func mustAgent(t *testing.T, name types.AgentName) agent.Agent {
+	t.Helper()
+	ag, err := agent.Get(name)
+	require.NoError(t, err)
+	return ag
 }

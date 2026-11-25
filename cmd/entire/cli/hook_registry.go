@@ -98,6 +98,12 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 		return nil
 	}
 
+	// Before the set-up gate: an unreadable user settings file is what makes
+	// a repository on only through global enable read as not set up.
+	if hookName == hookNameSessionStart {
+		warnUnreadableUserSettings(cmd)
+	}
+
 	// Skip if Entire is not set up and enabled. This must fail closed: any
 	// settings read error (missing file, corrupted JSON, transient I/O
 	// failure) is treated as disabled so a hook never silently falls through
@@ -121,6 +127,7 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 	if stampSession {
 		cmd.SetContext(withHookSession(cmd.Context()))
 	}
+	cmd.SetContext(withUserScopeHook(cmd.Context(), hookScopeIsUser(cmd)))
 
 	// Initialize logging context with agent name
 	ctx := logging.WithAgent(logging.WithComponent(cmd.Context(), "hooks"), agentName)
@@ -240,7 +247,7 @@ func userScopeStepsAside(cmd *cobra.Command, agentName types.AgentName) bool {
 		return cached
 	}
 	stepAside := false
-	if flag := cmd.Flag(hooksScopeFlag); flag != nil && strings.HasPrefix(flag.Value.String(), "user") {
+	if hookScopeIsUser(cmd) {
 		if ag, err := agent.Get(agentName); err == nil {
 			if installer, ok := agent.AsUserHookInstaller(ag); ok {
 				stepAside = installer.ProjectHooksSupersede(ctx)
@@ -249,4 +256,40 @@ func userScopeStepsAside(cmd *cobra.Command, agentName types.AgentName) bool {
 	}
 	cmd.SetContext(context.WithValue(ctx, userScopeSteppedAsideKey{}, stepAside))
 	return stepAside
+}
+
+// hookNameSessionStart is the session-start verb every agent integration
+// registers.
+const hookNameSessionStart = "session-start"
+
+// warnUnreadableUserSettings says on stderr, once per agent session, that the
+// user settings file cannot be read: everything in it, global_enable
+// included, is then ignored, and nothing else would say so. Stderr, not the
+// banner: the repository may now read as not set up, where no banner runs.
+func warnUnreadableUserSettings(cmd *cobra.Command) {
+	if err := settings.UserSettingsReadError(cmd.Context()); err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "[entire] could not read your Entire user settings, so global_enable and repos entries there are ignored: %v\n", err)
+	}
+}
+
+// hookScopeIsUser reports whether this hook command carries --scope=user...:
+// it comes from the agent's user-level config.
+func hookScopeIsUser(cmd *cobra.Command) bool {
+	flag := cmd.Flag(hooksScopeFlag)
+	return flag != nil && strings.HasPrefix(flag.Value.String(), "user")
+}
+
+// userScopeHookKey marks a hook context whose command came from user-level
+// config.
+type userScopeHookKey struct{}
+
+func withUserScopeHook(ctx context.Context, user bool) context.Context {
+	return context.WithValue(ctx, userScopeHookKey{}, user)
+}
+
+// isUserScopeHook reports whether the hook running in ctx came from the
+// agent's user-level config.
+func isUserScopeHook(ctx context.Context) bool {
+	user, _ := ctx.Value(userScopeHookKey{}).(bool) //nolint:errcheck // absent means project scope
+	return user
 }

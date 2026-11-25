@@ -1807,3 +1807,45 @@ func TestPIIConfigFromSettings_CategoryDefaults(t *testing.T) {
 		})
 	}
 }
+
+// A repository Entire sets up only because global enable is on has neither
+// settings file; its .entire/.gitignore ignores itself so the developer sees
+// nothing untracked. Once a settings file exists, the self-ignore goes, so
+// `entire enable` leaves .entire/.gitignore to commit as before.
+func TestEnsureEntireGitignore_SelfIgnoresUntilEnabled(t *testing.T) {
+	// Cannot t.Parallel(): t.Chdir.
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+	ctx := context.Background()
+
+	if err := EnsureEntireGitignore(ctx); err != nil {
+		t.Fatalf("EnsureEntireGitignore: %v", err)
+	}
+	out, err := exec.CommandContext(ctx, "git", "--no-optional-locks", "-C", dir, "status", "--porcelain", "--untracked-files=all").Output()
+	if err != nil {
+		t.Fatalf("git status: %v", err)
+	}
+	if strings.TrimSpace(string(out)) != "" {
+		t.Fatalf("never-enabled repo shows untracked files:\n%s", out)
+	}
+
+	writeSettingsJSON(t, dir, `{"enabled":true}`)
+	if err := EnsureEntireGitignore(ctx); err != nil {
+		t.Fatalf("EnsureEntireGitignore: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(dir, ".entire", ".gitignore"))
+	if err != nil {
+		t.Fatalf("read .entire/.gitignore: %v", err)
+	}
+	for _, line := range strings.Split(string(body), "\n") {
+		if line == ".gitignore" {
+			t.Fatalf("self-ignore kept after enable:\n%s", body)
+		}
+	}
+	if !strings.Contains(string(body), "settings.local.json") {
+		t.Fatalf("required entries lost:\n%s", body)
+	}
+}

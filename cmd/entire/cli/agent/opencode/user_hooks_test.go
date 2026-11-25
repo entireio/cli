@@ -53,8 +53,8 @@ func TestRenderPlugin_ProjectRenderHasNoUserLevelCode(t *testing.T) {
 	t.Parallel()
 	assert.NotContains(t, renderPlugin(), "__ENTIRE_USER_LEVEL")
 	assert.NotContains(t, renderPlugin(), "userLevelSteppedAside")
-	assert.Contains(t, renderPluginFor(true), "userLevelSteppedAside(directory)")
-	assert.Contains(t, renderPluginFor(true), "userLevelSteppedAside(ctx.location.directory)")
+	assert.Contains(t, renderPluginFor(true), "userLevelSteppedAside(directory, false)")
+	assert.Contains(t, renderPluginFor(true), "userLevelSteppedAside(ctx.location.directory, true)")
 }
 
 // stepAsideDriver loads a plugin and reports how many hooks it registered,
@@ -81,9 +81,10 @@ process.exit(0)
 `
 
 // The user-level plugin registers nothing where OpenCode also loads the
-// project's own Entire plugin (searching up from the directory to the
-// repository root, either plugin directory, an older render too), and
-// handles the session otherwise, on both OpenCode entry points.
+// project's own current Entire plugin (searching up from the directory to
+// the repository root), and handles the session otherwise, on both OpenCode
+// entry points: an older render may not run on this OpenCode, and OpenCode 2
+// does not load the legacy plugins directory.
 func TestUserLevelPlugin_StepsAsideForTheProjectPlugin(t *testing.T) {
 	t.Parallel()
 	if _, err := exec.LookPath("node"); err != nil {
@@ -94,11 +95,14 @@ func TestUserLevelPlugin_StepsAsideForTheProjectPlugin(t *testing.T) {
 		place    string // where the project copy goes, relative to the outer dir
 		content  string
 		stepAway bool
+		// onlyOpenCode1 limits stepAway to the OpenCode 1 entry point.
+		onlyOpenCode1 bool
 	}{
 		"no project plugin":           {},
 		"project plugin at repo root": {place: "repo/.opencode/plugin/entire.ts", content: renderPlugin(), stepAway: true},
-		"older project plugin":        {place: "repo/.opencode/plugin/entire.ts", content: stale, stepAway: true},
-		"legacy plugins directory":    {place: "repo/.opencode/plugins/entire.ts", content: renderPlugin(), stepAway: true},
+		"CRLF project plugin":         {place: "repo/.opencode/plugin/entire.ts", content: strings.ReplaceAll(renderPlugin(), "\n", "\r\n"), stepAway: true},
+		"older project plugin":        {place: "repo/.opencode/plugin/entire.ts", content: stale},
+		"legacy plugins directory":    {place: "repo/.opencode/plugins/entire.ts", content: renderPlugin(), stepAway: true, onlyOpenCode1: true},
 		"someone else's entire.ts":    {place: "repo/.opencode/plugin/entire.ts", content: "export default {}\n"},
 		"above the repository root":   {place: ".opencode/plugin/entire.ts", content: renderPlugin()},
 	} {
@@ -134,7 +138,7 @@ func TestUserLevelPlugin_StepsAsideForTheProjectPlugin(t *testing.T) {
 				require.NoError(t, err, stderr)
 				registered, err := strconv.Atoi(strings.TrimSpace(string(out)))
 				require.NoError(t, err, string(out))
-				assert.Equal(t, tc.stepAway, registered == 0, "registered %d hooks", registered)
+				assert.Equal(t, tc.stepAway && (opencode1 || !tc.onlyOpenCode1), registered == 0, "registered %d hooks", registered)
 			})
 		}
 	}

@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -208,4 +210,29 @@ func UserLevelHeader(indent, kind string, version int) string {
 	return indent + "// Entire user-level " + kind + ", hook version " + strconv.Itoa(version) + ", installed by\n" +
 		indent + "// `entire enable --global`. A project with its own Entire " + kind + " decides\n" +
 		indent + "// for itself (its settings, its version), so this copy steps aside there.\n"
+}
+
+// CurrentProjectCopyCheck is the TypeScript function isCurrentProjectCopy(path)
+// for a user-level render: true when path holds exactly the project render
+// whose ProjectRenderDigest is digest, line endings aside. The user-level copy
+// steps aside only for that one: an older or partial project copy may not run
+// on the agent version in use, and stepping aside for it would record nothing.
+// The file using it imports readFileSync (node:fs) and createHash (node:crypto).
+func CurrentProjectCopyCheck(digest string) string {
+	return `function isCurrentProjectCopy(path: string): boolean {
+  try {
+    const text = readFileSync(path, "utf8").replace(/\r\n/g, "\n")
+    return createHash("sha256").update(text).digest("hex") === "` + digest + `"
+  } catch {
+    return false
+  }
+}
+`
+}
+
+// ProjectRenderDigest is the hex SHA-256 of a project render, the value
+// CurrentProjectCopyCheck compares against.
+func ProjectRenderDigest(projectRender string) string {
+	sum := sha256.Sum256([]byte(projectRender))
+	return hex.EncodeToString(sum[:])
 }

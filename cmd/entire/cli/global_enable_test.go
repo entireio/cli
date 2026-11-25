@@ -19,6 +19,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/settings/usersettings"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
@@ -638,4 +639,56 @@ func TestGlobalEnableBannerSuffix_FollowsTheUserFlag(t *testing.T) {
 			t.Errorf("global_enable %v: banner suffix %q", on, got)
 		}
 	}
+}
+
+// A repository on only through global enable gets its git hooks on the first
+// agent session; doctor says so rather than offering a repair.
+func TestCheckGitHooks_GlobalOnlyRepoBeforeFirstSession(t *testing.T) {
+	newGlobalOnlyRepo(t, true)
+	cmd, stdout := newTestCmd(t)
+	require.NoError(t, checkGitHooks(cmd, false))
+	assert.NotContains(t, stdout.String(), "NOT INSTALLED")
+	assert.Contains(t, stdout.String(), "first agent session")
+}
+
+// After `entire disable --global`, a repository set up only through global
+// enable keeps its git hooks. Status says "not set up"; doctor and status
+// both name the leftover hooks and how to remove them instead of one calling
+// them OK.
+func TestLeftoverGitHooksAfterGlobalDisable(t *testing.T) {
+	newGlobalOnlyRepo(t, false)
+	_, err := strategy.InstallGitHook(t.Context(), true, false)
+	require.NoError(t, err)
+
+	cmd, stdout := newTestCmd(t)
+	require.NoError(t, checkGitHooks(cmd, false))
+	assert.NotContains(t, stdout.String(), "✓ Git hooks: OK")
+	assert.Contains(t, stdout.String(), "entire disable --uninstall")
+
+	var buf bytes.Buffer
+	require.NoError(t, runStatus(t.Context(), &buf, false, false))
+	assert.Contains(t, buf.String(), "not set up")
+	assert.Contains(t, buf.String(), "entire disable --uninstall")
+}
+
+// disable --global says what it leaves behind in repositories global enable
+// set up: their git hooks, which do nothing until removed.
+func TestDisableGlobal_NamesLeftoverGitHooks(t *testing.T) {
+	_, _, _, out, err := runGlobalCmd(t, true, `{"global_enable": true}`, "disable", "--global")
+	require.NoError(t, err, out)
+	assert.Contains(t, out, "keep Entire's git hooks")
+	assert.Contains(t, out, "entire disable --uninstall")
+}
+
+// A user settings file Entire cannot read turns global enable off everywhere.
+// The next SessionStart says so on stderr (even in a repository that is now
+// not set up), and doctor names it.
+func TestUnreadableUserSettings_SurfacedAtSessionStartAndInDoctor(t *testing.T) {
+	_, _, _, out, err := runGlobalCmd(t, true, `{"global_enable": true`, "hooks", "claude-code", "session-start")
+	require.NoError(t, err, out)
+	assert.Contains(t, out, "could not read your Entire user settings")
+
+	cmd, stdout := newTestCmd(t)
+	checkUserLevelHooks(cmd)
+	assert.Contains(t, stdout.String(), "Entire user settings: UNREADABLE")
 }
