@@ -164,9 +164,9 @@ func userHookLabelsAndVersion(document *hooksDocument) ([]string, int) {
 // ProjectHooksSupersede implements agent.UserHookInstaller. Codex loads both
 // the user-level and the project hooks.json, so the user-level hooks step
 // aside where the hooks file Codex discovers for this checkout is Entire's,
-// the project layer exists, and Codex has approval records for every Entire
-// hook in it. Untrusted project hooks do not run, so then the user-level ones
-// must. A discovered file that is the user-level one (a home directory that
+// the project layer exists, and Codex's approval for every Entire hook in it
+// matches the hook's current definition. Unapproved or since-changed project
+// hooks do not run, so then the user-level ones must. A discovered file that is the user-level one (a home directory that
 // is itself a repository) never supersedes it.
 func (c *CodexAgent) ProjectHooksSupersede(ctx context.Context) bool {
 	discovery := ResolveHookDiscovery(ctx)
@@ -189,7 +189,7 @@ func (c *CodexAgent) ProjectHooksSupersede(ctx context.Context) bool {
 	if err != nil {
 		return false
 	}
-	entireLabels := entireHookLabels(document)
-	trust := inspectHookTrustForDeclared(projectPath, entireLabels)
-	return trust.Known && len(trust.Gaps) == 0 && len(entireLabels) > 0
+	// Codex re-asks for approval after a hook changes, so a record for the
+	// event is not enough: it must cover the hook as currently written.
+	return entireHooksApprovedAsDeclared(projectPath, document)
 }

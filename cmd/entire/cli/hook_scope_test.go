@@ -3,6 +3,9 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -60,11 +63,7 @@ func TestUserScopeStepsAside_CodexFollowsTheTrustedProjectInstall(t *testing.T) 
 	assert.False(t, userScopeStepsAside(scopedHookCmd(t, userScope), agent.AgentNameCodex), "project hooks not approved")
 
 	discovered := codex.ResolveHookDiscovery(context.Background()).DiscoveredHooks.Path()
-	var trust strings.Builder
-	for _, spec := range codex.HookEventSpecs() {
-		fmt.Fprintf(&trust, "[hooks.state.%q]\ntrusted_hash = \"x\"\n", discovered+":"+spec.Label+":0:0")
-	}
-	require.NoError(t, os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(trust.String()), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(codexApprovalRecords(t, discovered)), 0o600))
 
 	assert.True(t, userScopeStepsAside(scopedHookCmd(t, userScope), agent.AgentNameCodex), "approved project hooks take over")
 	assert.False(t, userScopeStepsAside(scopedHookCmd(t, ""), agent.AgentNameCodex), "a project hook never steps aside")
@@ -211,4 +210,48 @@ func mustAgent(t *testing.T, name types.AgentName) agent.Agent {
 	ag, err := agent.Get(name)
 	require.NoError(t, err)
 	return ag
+}
+
+// codexApprovalRecords returns the config.toml records Codex writes once the
+// developer approves every hook in the hooks file at hooksPath: each keeps the
+// hash of the approved definition (sorted-key compact JSON of the handler
+// under its event label, SHA-256). Entire's handlers carry only type, command
+// and timeout, under a null matcher.
+func codexApprovalRecords(t *testing.T, hooksPath string) string {
+	t.Helper()
+	data, err := os.ReadFile(hooksPath)
+	require.NoError(t, err)
+	var doc struct {
+		Hooks map[string][]struct {
+			Hooks []struct {
+				Command string `json:"command"`
+				Timeout uint64 `json:"timeout"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	require.NoError(t, json.Unmarshal(data, &doc))
+	type handler struct {
+		Async   bool   `json:"async"`
+		Command string `json:"command"`
+		Timeout uint64 `json:"timeout"`
+		Type    string `json:"type"`
+	}
+	var records strings.Builder
+	for _, spec := range codex.HookEventSpecs() {
+		for gi, group := range doc.Hooks[spec.Event] {
+			for hi, h := range group.Hooks {
+				var identity bytes.Buffer
+				encoder := json.NewEncoder(&identity)
+				encoder.SetEscapeHTML(false)
+				require.NoError(t, encoder.Encode(struct {
+					EventName string    `json:"event_name"`
+					Hooks     []handler `json:"hooks"`
+				}{spec.Label, []handler{{Command: h.Command, Timeout: h.Timeout, Type: "command"}}}))
+				sum := sha256.Sum256(bytes.TrimSuffix(identity.Bytes(), []byte("\n")))
+				fmt.Fprintf(&records, "[hooks.state.%q]\ntrusted_hash = \"sha256:%s\"\n",
+					fmt.Sprintf("%s:%s:%d:%d", hooksPath, spec.Label, gi, hi), hex.EncodeToString(sum[:]))
+			}
+		}
+	}
+	return records.String()
 }

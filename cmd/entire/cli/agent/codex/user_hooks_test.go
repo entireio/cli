@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -84,13 +85,26 @@ func TestRemoveUserHooks_KeepsTheUsersHooks(t *testing.T) {
 	assert.False(t, removed, "nothing left to remove")
 }
 
-// trustCodexHooks writes approval records for every Entire event in
-// hooksPath into the Codex config.
+// trustCodexHooks writes approval records, as Codex would, for every hook in
+// hooksPath's managed events into the Codex config.
 func trustCodexHooks(t *testing.T, codexHome, hooksPath string) {
 	t.Helper()
+	data, err := os.ReadFile(hooksPath)
+	require.NoError(t, err)
+	var doc struct {
+		Hooks map[string][]codexRawMatcherGroup `json:"hooks"`
+	}
+	require.NoError(t, json.Unmarshal(data, &doc))
 	var b strings.Builder
 	for _, h := range managedHooks {
-		fmt.Fprintf(&b, "[hooks.state.\"%s:%s:0:0\"]\ntrusted_hash = \"x\"\n\n", tomlBasicEscape(hooksPath), h.label)
+		for gi, group := range doc.Hooks[h.event] {
+			for hi, raw := range group.Hooks {
+				hash, ok := codexHookDeclarationHash(h.event, h.label, group.Matcher, raw)
+				require.True(t, ok, "hash for %s", h.event)
+				fmt.Fprintf(&b, "[hooks.state.\"%s:%s:%d:%d\"]\ntrusted_hash = \"%s\"\n\n",
+					tomlBasicEscape(hooksPath), h.label, gi, hi, hash)
+			}
+		}
 	}
 	require.NoError(t, os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(b.String()), 0o600))
 }
@@ -123,6 +137,35 @@ func TestProjectHooksSupersede_OnlyForTrustedEntireProjectHooks(t *testing.T) {
 
 	require.NoError(t, ag.UninstallHooks(ctx))
 	assert.False(t, ag.ProjectHooksSupersede(ctx), "no Entire hooks in the project")
+}
+
+// Codex re-asks for approval once a hook changes, so an approval recorded
+// for an earlier definition does not let the user-level hooks step aside.
+func TestProjectHooksSupersede_StaleApprovalKeepsUserHooks(t *testing.T) {
+	t.Cleanup(osroot.ResetShared)
+	home := userCodexHome(t)
+	root := filepath.Join(t.TempDir(), "repo")
+	projectWithEntireHooks(t, root)
+	hooksPath := canonicalHooksPath(t, root)
+	trustCodexHooks(t, home, hooksPath)
+	ag := &CodexAgent{}
+	ctx := context.Background()
+	require.True(t, ag.ProjectHooksSupersede(ctx))
+
+	data, err := os.ReadFile(hooksPath)
+	require.NoError(t, err)
+	changed := strings.Replace(string(data), `"timeout": 30`, `"timeout": 31`, 1)
+	require.NotEqual(t, string(data), changed)
+	require.NoError(t, os.WriteFile(hooksPath, []byte(changed), 0o600))
+	assert.False(t, ag.ProjectHooksSupersede(ctx), "hook changed after approval")
+
+	configPath := filepath.Join(home, "config.toml")
+	trustCodexHooks(t, home, hooksPath)
+	config, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	unhashed := regexp.MustCompile(`(?m)^trusted_hash = .*$`).ReplaceAllString(string(config), "enabled = true")
+	require.NoError(t, os.WriteFile(configPath, []byte(unhashed), 0o600))
+	assert.False(t, ag.ProjectHooksSupersede(ctx), "records without a trusted_hash")
 }
 
 // A linked worktree: Codex discovers the main checkout's hooks, so that

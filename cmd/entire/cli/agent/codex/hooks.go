@@ -758,7 +758,7 @@ func hookEntryCommand(e HookEntry) string { return e.Command }
 
 func addHook(groups []MatcherGroup, command string, timeoutSec int) []MatcherGroup {
 	entry := HookEntry{
-		Type:    "command",
+		Type:    codexCommandHandlerType,
 		Command: command,
 		Timeout: timeoutSec,
 	}
