@@ -291,6 +291,95 @@ func TestTargetingClusterFlagsTakeAHost(t *testing.T) {
 	}
 }
 
+// runMirrorVerb runs `entire repo mirror <args>` to its first failure. Every
+// call here is built to stop before any network: an unusable --cluster, or the
+// confirmation a non-interactive detach refuses.
+func runMirrorVerb(t *testing.T, args ...string) error {
+	t.Helper()
+	cmd := newRepoCmd()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs(append([]string{"mirror"}, args...))
+	return cmd.ExecuteContext(t.Context())
+}
+
+// An entire.com URL is the path it spells on every mirror verb: the same
+// outcome, the same message, whichever way the repo is typed.
+func TestMirrorVerbs_AcceptEntireComURLs(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name       string
+		path, url  []string
+		wantSubstr string
+	}{
+		{
+			name:       "add",
+			path:       []string{"add", "/gh/o/r", "--cluster", "bad host"},
+			url:        []string{"add", "https://entire.com/gh/o/r", "--cluster", "bad host"},
+			wantSubstr: "invalid --cluster",
+		},
+		{
+			name:       "remove",
+			path:       []string{"remove", "/gh/o/r", "--cluster", "bad host"},
+			url:        []string{"remove", "https://entire.com/gh/o/r", "--cluster", "bad host"},
+			wantSubstr: "invalid --cluster",
+		},
+		{
+			name:       "detach",
+			path:       []string{"detach", "/gh/o/r", "--into", "/et/proj/repo"},
+			url:        []string{"detach", "https://entire.com/gh/o/r", "--into", "https://entire.com/et/proj/repo"},
+			wantSubstr: "refusing to detach /gh/o/r without confirmation",
+		},
+		{
+			name:       "detach url repo only",
+			path:       []string{"detach", "/gh/o/r", "--into", "/et/proj/repo"},
+			url:        []string{"detach", "https://entire.com/gh/o/r", "--into", "/et/proj/repo"},
+			wantSubstr: "refusing to detach /gh/o/r without confirmation",
+		},
+		{
+			name:       "detach url into only",
+			path:       []string{"detach", "/gh/o/r", "--into", "/et/proj/repo"},
+			url:        []string{"detach", "/gh/o/r", "--into", "entire.com/et/proj/repo"},
+			wantSubstr: "refusing to detach /gh/o/r without confirmation",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			pathErr := runMirrorVerb(t, tc.path...)
+			urlErr := runMirrorVerb(t, tc.url...)
+			require.ErrorContains(t, pathErr, tc.wantSubstr)
+			require.ErrorContains(t, urlErr, tc.wantSubstr)
+			require.Equal(t, pathErr.Error(), urlErr.Error())
+		})
+	}
+}
+
+// A malformed URL is echoed as typed, and a credentialed one never reaches the
+// message with its secret.
+func TestMirrorVerbs_URLErrorsEchoTypedAndRedacted(t *testing.T) {
+	t.Parallel()
+
+	const cred = "https://user:secret@entire.com/gh/o/r"
+	for _, args := range [][]string{
+		{"add", cred},
+		{"remove", cred},
+		{"resync", cred},
+		{"detach", cred, "--into", "/et/proj/repo"},
+		{"detach", "/gh/o/r", "--into", "https://user:secret@entire.com/et/proj/repo"},
+	} {
+		t.Run(args[0], func(t *testing.T) {
+			t.Parallel()
+			err := runMirrorVerb(t, args...)
+			require.Error(t, err)
+			require.NotContains(t, err.Error(), "secret")
+		})
+	}
+
+	err := runMirrorVerb(t, "add", "https://entire.com/gh/o")
+	require.ErrorContains(t, err, `"https://entire.com/gh/o"`)
+}
+
 // --timeout and the cluster host is --cluster, not a positional.
 func TestRepoMirrorAdd_Flags(t *testing.T) {
 	t.Parallel()

@@ -842,11 +842,12 @@ func TestCheckpointDelete_RemovesBothShardSpellings(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newDeleteFixture(t, "git-refs")
 			testutil.RunGit(t, f.workDir, "config", "core.ignorecase", "true")
+			// With core.ignorecase=true the store writes the lowercase shard.
 			f.writeCheckpoint(t, cid, "sess-1")
-			earlier := revParse(t, f.workDir, canonical.String())
+			earlier := revParse(t, f.workDir, folded.String())
 			f.writeCheckpoint(t, cid, "sess-2")
-			later := revParse(t, f.workDir, canonical.String())
-			testutil.RunGit(t, f.workDir, "update-ref", "-d", canonical.String())
+			later := revParse(t, f.workDir, folded.String())
+			testutil.RunGit(t, f.workDir, "update-ref", "-d", folded.String())
 			tc.split(t, f.workDir, earlier, later)
 			enqueueInRepoAt(t, f.workDir, canonical, folded)
 

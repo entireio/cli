@@ -54,6 +54,77 @@ func openCountingRepo(t *testing.T, dir string) (*git.Repository, *countingRefSt
 	return repo, counting
 }
 
+// SpellingTips reports each distinct tip under the spellings that hold a ref,
+// asked by either name. It reads both even where git recorded a case-sensitive
+// filesystem: a caller that must not miss a version of the checkpoint cannot
+// rely on that setting.
+func TestSpellingTips(t *testing.T) {
+	t.Parallel()
+	canonical := mustRefName(t, foldableULID)
+	folded, ok := FoldedRefName(foldableULID)
+	require.True(t, ok)
+
+	t.Run("both spellings", func(t *testing.T) {
+		t.Parallel()
+		dir, earlier, later := shardSpellingRepo(t, "false")
+		testutil.RunGit(t, dir, "update-ref", canonical.String(), earlier)
+		testutil.RunGit(t, dir, "pack-refs", "--all")
+		testutil.RunGit(t, dir, "update-ref", folded.String(), later)
+		testutil.RunGit(t, dir, "pack-refs", "--all")
+		repo, err := git.PlainOpen(dir)
+		require.NoError(t, err)
+
+		want := []plumbing.Hash{plumbing.NewHash(earlier), plumbing.NewHash(later)}
+		assert.ElementsMatch(t, want, SpellingTips(repo, nil, canonical))
+		assert.ElementsMatch(t, want, SpellingTips(repo, nil, folded))
+	})
+
+	t.Run("other spelling only", func(t *testing.T) {
+		t.Parallel()
+		dir, earlier, _ := shardSpellingRepo(t, "false")
+		testutil.RunGit(t, dir, "update-ref", folded.String(), earlier)
+		testutil.RunGit(t, dir, "pack-refs", "--all")
+		repo, err := git.PlainOpen(dir)
+		require.NoError(t, err)
+
+		assert.Equal(t, []plumbing.Hash{plumbing.NewHash(earlier)}, SpellingTips(repo, nil, canonical))
+	})
+
+	// On a case-insensitive filesystem both names resolve to one loose ref.
+	t.Run("one loose ref", func(t *testing.T) {
+		t.Parallel()
+		dir, earlier, _ := shardSpellingRepo(t, "false")
+		testutil.RunGit(t, dir, "update-ref", canonical.String(), earlier)
+		repo, err := git.PlainOpen(dir)
+		require.NoError(t, err)
+
+		assert.Equal(t, []plumbing.Hash{plumbing.NewHash(earlier)}, SpellingTips(repo, nil, canonical))
+	})
+
+	t.Run("neither spelling", func(t *testing.T) {
+		t.Parallel()
+		dir, _, _ := shardSpellingRepo(t, "false")
+		repo, err := git.PlainOpen(dir)
+		require.NoError(t, err)
+
+		assert.Empty(t, SpellingTips(repo, nil, canonical))
+	})
+
+	t.Run("listed tips", func(t *testing.T) {
+		t.Parallel()
+		dir, earlier, _ := shardSpellingRepo(t, "false")
+		testutil.RunGit(t, dir, "update-ref", canonical.String(), earlier)
+		testutil.RunGit(t, dir, "pack-refs", "--all")
+		repo, err := git.PlainOpen(dir)
+		require.NoError(t, err)
+		listedTip := plumbing.NewHash("1111111111111111111111111111111111111111")
+
+		got := SpellingTips(repo, map[plumbing.ReferenceName]plumbing.Hash{canonical: listedTip}, canonical)
+
+		assert.Equal(t, []plumbing.Hash{listedTip}, got, "a listed tip is used as it is")
+	})
+}
+
 // Splits only form on a case-insensitive filesystem, where git sets
 // core.ignorecase. Elsewhere a lookup whose canonical name resolves reads one
 // ref, not two.
@@ -247,4 +318,53 @@ func TestStoredRef_DoesNotKeepTheRepositoryAlive(t *testing.T) {
 	runtime.GC()
 
 	assert.Nil(t, collected.Value(), "the repository must be collectable after a lookup")
+}
+
+// A write from a linked worktree whose repository uses per-worktree config,
+// the layout bare-clone workflows create, picks its shard spelling from the
+// common config's core.ignorecase.
+func TestRefsWrite_LinkedWorktreeWithWorktreeConfigUsesTheCommonSetting(t *testing.T) {
+	t.Parallel()
+	for _, ignoreCase := range []string{"true", "false"} {
+		t.Run("ignorecase="+ignoreCase, func(t *testing.T) {
+			t.Parallel()
+			main := t.TempDir()
+			testutil.InitRepo(t, main)
+			testutil.RunGit(t, main, "commit", "--allow-empty", "-m", "init")
+			testutil.RunGit(t, main, "config", "core.ignorecase", ignoreCase)
+			testutil.RunGit(t, main, "config", "extensions.worktreeConfig", "true")
+			linked := filepath.Join(t.TempDir(), "linked")
+			testutil.RunGit(t, main, "worktree", "add", "-q", "-b", "linked", linked)
+			testutil.RunGit(t, linked, "config", "--worktree", "user.name", "Worktree User")
+
+			repo, err := gitrepo.OpenPath(linked)
+			require.NoError(t, err)
+			defer repo.Close()
+
+			assert.Equal(t, ignoreCase == "true", foldsCase(repo))
+			store := newGitRefsStore(repo)
+			refsWrite(t, store, foldableULID, "sess-1", "transcript")
+			want := mustRefName(t, foldableULID).String()
+			if ignoreCase == "true" {
+				want = "refs/entire/checkpoints/6b/" + foldableULID.String()
+			}
+			assert.Equal(t, want+"\n", testutil.RunGit(t, linked, "for-each-ref", "--format=%(refname)", CheckpointRefPrefix))
+		})
+	}
+}
+
+// Reftable stores refs in tables under their exact names, never as files, so
+// nothing folds even where git recorded a case-insensitive filesystem, and refs
+// keep their canonical names.
+func TestFoldsCase_ReftableRepositoryNeverFolds(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	testutil.RunGit(t, dir, "init", "-q", "--ref-format=reftable")
+	testutil.RunGit(t, dir, "config", "core.ignorecase", "true")
+
+	repo, err := gitrepo.OpenPath(dir)
+	require.NoError(t, err)
+	defer repo.Close()
+
+	assert.False(t, foldsCase(repo))
 }

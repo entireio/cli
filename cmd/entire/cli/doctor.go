@@ -238,7 +238,7 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 	// Checkpoint refs whose shard directory case-collided. Before the
 	// destination note because it is about checkpoints already written here,
 	// not about where the next ones go.
-	checkCheckpointRefShardCase(cmd)
+	checkCheckpointRefShardCase(cmd, force)
 
 	// Where checkpoints land, when the repo's remotes make that ambiguous.
 	printCheckpointDestinationNote(ctx, cmd.OutOrStdout(), "Checkpoint destination: REVIEW")

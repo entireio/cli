@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
@@ -178,9 +180,12 @@ func checkOuterPushOfHeldCommits(ctx context.Context, lines []PrePushRef, why st
 		logging.Warn(ctx, "pre-push: cannot read the checkpoint queue to check pushed commits", slog.String("error", err.Error()))
 		return nil
 	}
+	if listed == nil {
+		listed = listWaitingSpellings(ctx, repo, waiting)
+	}
 	tips := make(map[plumbing.Hash]plumbing.ReferenceName, len(waiting))
 	for ref := range waiting {
-		if hash, err := localTip(repo, listed, ref); err == nil {
+		for _, hash := range checkpoint.SpellingTips(repo, listed, ref) {
 			tips[hash] = ref
 		}
 	}
@@ -201,6 +206,18 @@ func checkOuterPushOfHeldCommits(ctx context.Context, lines []PrePushRef, why st
 		}
 	}
 	return nil
+}
+
+// listWaitingSpellings lists both spellings of each waiting checkpoint when
+// the queue was looked up ref by ref, so a packed spelling hidden behind a
+// loose one is still guarded. A failed listing leaves the per-ref lookups.
+func listWaitingSpellings(ctx context.Context, repo *git.Repository, waiting map[plumbing.ReferenceName]struct{}) map[plumbing.ReferenceName]plumbing.Hash {
+	listed, err := checkpoint.ListShardSpellings(ctx, repo, slices.Collect(maps.Keys(waiting)))
+	if err != nil {
+		logging.Debug(ctx, "pre-push: could not list checkpoint shard spellings, looking up each ref", slog.String("error", err.Error()))
+		return nil
+	}
+	return listed
 }
 
 // maxTagPeel bounds how many tag objects peelToCommit follows, so a cycle in a

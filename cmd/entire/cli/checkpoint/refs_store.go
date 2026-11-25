@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"strconv"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -222,17 +222,7 @@ func StoredRef(
 	listed map[plumbing.ReferenceName]plumbing.Hash,
 	ref plumbing.ReferenceName,
 ) (name plumbing.ReferenceName, tip plumbing.Hash, err error) {
-	lookup := func(name plumbing.ReferenceName) (plumbing.Hash, error) {
-		if hash, ok := listed[name]; ok {
-			return hash, nil
-		}
-		r, err := repo.Reference(name, true)
-		if err != nil {
-			return plumbing.ZeroHash, err //nolint:wrapcheck // callers branch on plumbing.ErrReferenceNotFound
-		}
-		return r.Hash(), nil
-	}
-	tip, err = lookup(ref)
+	tip, err = lookupRefTip(repo, listed, ref)
 	other, hasOther := OtherShardSpelling(ref)
 	if !hasOther || (err != nil && !errors.Is(err, plumbing.ErrReferenceNotFound)) {
 		return ref, tip, err
@@ -243,7 +233,7 @@ func StoredRef(
 	if err == nil && !foldsCase(repo) {
 		return ref, tip, nil
 	}
-	otherTip, otherErr := lookup(other)
+	otherTip, otherErr := lookupRefTip(repo, listed, other)
 	switch {
 	case err == nil && otherErr != nil:
 		// The name asked for stands whatever became of the second lookup.
@@ -264,11 +254,10 @@ func StoredRef(
 	}
 }
 
-// ignoreCase caches core.ignorecase by git directory: go-git rereads and
-// parses the config file on every Config call, which would cost more than the
-// ref read it saves. Keyed by path rather than by repository, so a repository
-// is not kept in memory, and checked against the config file's size and
-// modification time, so a changed setting is read again.
+// ignoreCase caches core.ignorecase by config path: parsing the config costs
+// more than the ref read it saves. Keyed by path rather than by repository, so
+// a repository is not kept in memory, and checked against the config file's
+// size and modification time, so a changed setting is read again.
 var ignoreCase sync.Map //nolint:gochecknoglobals // per-repository config cache
 
 type ignoreCaseEntry struct {
@@ -277,10 +266,16 @@ type ignoreCaseEntry struct {
 	folds   bool
 }
 
-// foldsCase reports whether repo sits on a case-insensitive filesystem, as git
-// recorded in core.ignorecase when it created the repository. An unreadable
-// config reports true, which keeps both spellings in every lookup.
+// foldsCase reports whether repo stores refs where two spellings of a shard can
+// fold into one: on a case-insensitive filesystem, as git recorded in
+// core.ignorecase when it created the repository, and not in reftable. An
+// unreadable config reports true, which keeps both spellings in every lookup.
 func foldsCase(repo *git.Repository) bool {
+	// Reftable keeps refs in tables under their exact names, never as files,
+	// so nothing folds whatever the filesystem does.
+	if gitrepo.UsesReftable(repo) {
+		return false
+	}
 	fsStorer, ok := repo.Storer.(interface{ Filesystem() billy.Filesystem })
 	if !ok {
 		return readFoldsCase(repo)
@@ -301,10 +296,9 @@ func foldsCase(repo *git.Repository) bool {
 	return folds
 }
 
-// readFoldsCase reads core.ignorecase from the repository's shared config.
-// gitrepo.RawConfig parses the config file itself when go-git merged a
-// config.worktree in and dropped the raw sections; an override in
-// config.worktree or in global config is not seen.
+// readFoldsCase reads core.ignorecase from the repository's shared config. gitrepo.RawConfig parses the config file itself
+// when go-git merged a config.worktree in and dropped the raw sections; an
+// override in config.worktree or in global config is not seen.
 func readFoldsCase(repo *git.Repository) bool {
 	cfg, err := repo.Config()
 	if err != nil {
@@ -320,6 +314,69 @@ func readFoldsCase(repo *git.Repository) bool {
 	default:
 		return false
 	}
+}
+
+// lookupRefTip is the tip of name: its listed tip when listed has one,
+// otherwise a resolving lookup. listed may be nil.
+func lookupRefTip(repo *git.Repository, listed map[plumbing.ReferenceName]plumbing.Hash, name plumbing.ReferenceName) (plumbing.Hash, error) {
+	if hash, ok := listed[name]; ok {
+		return hash, nil
+	}
+	r, err := repo.Reference(name, true)
+	if err != nil {
+		return plumbing.ZeroHash, err //nolint:wrapcheck // callers branch on plumbing.ErrReferenceNotFound
+	}
+	return r.Hash(), nil
+}
+
+// SpellingTips is each distinct tip of the refs ref's checkpoint holds, under
+// either spelling of its shard, read the way StoredRef reads them. StoredRef picks
+// one; a checkpoint whose two refs diverged holds a version under each, so a
+// caller that must account for every version uses this instead. Unlike
+// StoredRef it reads both names whatever core.ignorecase says. A name that
+// does not resolve contributes nothing.
+func SpellingTips(repo *git.Repository, listed map[plumbing.ReferenceName]plumbing.Hash, ref plumbing.ReferenceName) []plumbing.Hash {
+	names := []plumbing.ReferenceName{ref}
+	if other, ok := OtherShardSpelling(ref); ok {
+		names = append(names, other)
+	}
+	tips := make([]plumbing.Hash, 0, len(names))
+	for _, name := range names {
+		if tip, err := lookupRefTip(repo, listed, name); err == nil && !slices.Contains(tips, tip) {
+			tips = append(tips, tip)
+		}
+	}
+	return tips
+}
+
+// ListShardSpellings lists, with git, the ref under each spelling of the shard
+// of every checkpoint refs name, for SpellingTips to read as its listing. On a
+// case-insensitive filesystem a lookup under either spelling reads the loose
+// ref first, so a packed entry under the other spelling is seen only by a
+// listing. Where the filesystem does not fold case, each name is looked up as
+// itself, and this returns an empty listing without running git.
+func ListShardSpellings(ctx context.Context, repo *git.Repository, refs []plumbing.ReferenceName) (map[plumbing.ReferenceName]plumbing.Hash, error) {
+	if !foldsCase(repo) {
+		return map[plumbing.ReferenceName]plumbing.Hash{}, nil
+	}
+	patterns := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		if cid, ok := ParseRef(ref); ok {
+			patterns = append(patterns, CheckpointRefPrefix+"*/"+cid.String())
+		}
+	}
+	if len(patterns) == 0 {
+		return map[plumbing.ReferenceName]plumbing.Hash{}, nil
+	}
+	commonDir, err := RepositoryCommonDir(repo)
+	if err != nil {
+		return nil, fmt.Errorf("resolve git common dir: %w", err)
+	}
+	listed, err := gitrepo.ListRefs(ctx, commonDir, patterns...)
+	if err != nil {
+		return nil, fmt.Errorf("list checkpoint shard spellings: %w", err)
+	}
+	return listed, nil
 }
 
 // OtherShardSpelling returns the one other name ref's checkpoint can be stored
@@ -435,7 +492,7 @@ func (s *gitRefsStore) enqueueForPush(ctx context.Context, refName plumbing.Refe
 
 // writeRefName is the ref spelling a write must target: the one an existing ref
 // already uses — which may be the case-folded shard, see resolveLocalRef — and
-// the canonical RefName for a checkpoint that has none.
+// the local name (LocalRefNameIn) for a checkpoint that has none.
 //
 // Writing through the canonical name unconditionally is what forks a folded
 // checkpoint in two once packing has taken away the filesystem's case-
@@ -444,7 +501,7 @@ func (s *gitRefsStore) enqueueForPush(ctx context.Context, refName plumbing.Refe
 // compare-and-swap cannot succeed there either, since git resolves the expected
 // old value under the name being updated and that name holds nothing.
 //
-// A resolution failure falls back to the canonical name rather than failing the
+// A resolution failure falls back to the local name rather than failing the
 // write: the checkpoint write is the operation that matters, and a real IO
 // problem resurfaces immediately in updatePersistentRef's CAS.
 //
@@ -452,15 +509,25 @@ func (s *gitRefsStore) enqueueForPush(ctx context.Context, refName plumbing.Refe
 // way: pre-push finds the stored ref from a queued name of either spelling,
 // and always sends the canonical name to the remote.
 func (s *gitRefsStore) writeRefName(cid id.CheckpointID) (plumbing.ReferenceName, error) {
-	canonical, err := RefName(cid)
+	local, err := LocalRefNameIn(s.repo, cid)
 	if err != nil {
 		return "", err
 	}
 	ref, err := s.resolveLocalRef(cid)
 	if err != nil {
-		return canonical, nil //nolint:nilerr // absent or unreadable → write the canonical name
+		return local, nil //nolint:nilerr // absent or unreadable → write the local name
 	}
 	return ref.Name(), nil
+}
+
+// LocalRefNameIn returns the name a new ref for cid is stored under in repo:
+// LocalRefName where git recorded a case-insensitive filesystem and refs are
+// files, and RefName elsewhere, where neither spelling can fold into the other.
+func LocalRefNameIn(repo *git.Repository, cid id.CheckpointID) (plumbing.ReferenceName, error) {
+	if foldsCase(repo) {
+		return LocalRefName(cid)
+	}
+	return RefName(cid)
 }
 
 func (s *gitRefsStore) updateCheckpointRef(
@@ -693,11 +760,7 @@ func (s *gitRefsStore) sessionTree(ctx context.Context, cid id.CheckpointID, ses
 	if err != nil {
 		return nil, err
 	}
-	sessionTree, err := ct.Tree(strconv.Itoa(sessionIndex))
-	if err != nil {
-		return nil, fmt.Errorf("%w: session %d not found: %w", ErrCheckpointNotFound, sessionIndex, err)
-	}
-	return sessionTree, nil
+	return sessionTreeAt(ct, sessionIndex)
 }
 
 // Read returns the checkpoint summary, or (nil, nil) when the checkpoint's ref

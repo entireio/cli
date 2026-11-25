@@ -133,12 +133,16 @@ var mirrorGrantListing = &grantListBranch{
 		cmd.SilenceUsage = true
 		// Both forges, because this verb serves both: a ref naming neither is
 		// offered both readings, and a github.com URL is named back as the
-		// `/gh/` ref it should have been. The native half never reaches here —
-		// claims sends it to the shared resolver — so the parse below is only
-		// ever a mirror's.
+		// `/gh/` ref it should have been. claims sends a native ref to the
+		// shared resolver, but this branch does not rely on that: a ref that
+		// parses as native is refused below, so a native repo's owner and name
+		// are never read as a GitHub repository's.
 		target, err := parseMirrorRepoRef(ref)
 		if err != nil {
 			return err
+		}
+		if target.forge != mirrorCloneForge {
+			return fmt.Errorf("repo %q is not a GitHub mirror: only a /%s/<owner>/<repo> ref lists upstream collaborators", ref, mirrorCloneForge)
 		}
 		return listMirrorCollaborators(cmd, target.owner, target.repo)
 	},
