@@ -30,7 +30,7 @@ func newOrgCmd() *cobra.Command {
 
 // orgColumns is the human table/field view of an org, shared by list and
 // any future `org get`.
-var orgColumns = []string{"ID", colHeaderName, colHeaderRegion, "CREATED"}
+var orgColumns = []string{"ID", colHeaderName, colHeaderRegion, colHeaderCreated}
 
 func orgRow(o coreapi.Org) []string {
 	return []string{o.ID, o.Name, o.Region, o.CreatedAt.Format("2006-01-02")}

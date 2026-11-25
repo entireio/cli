@@ -401,6 +401,10 @@ func decodeBlocks(content json.RawMessage) ([]block, int) {
 
 func cloneToolResult(r *ToolResult) *ToolResult {
 	c := *r
+	if r.ExitCode != nil {
+		code := *r.ExitCode
+		c.ExitCode = &code
+	}
 	if r.File != nil {
 		file := *r.File
 		c.File = &file

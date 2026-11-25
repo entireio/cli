@@ -434,6 +434,10 @@ func newProjectTrailUpdateCmd() *cobra.Command {
 			if etag == "" {
 				return errors.New("project trail read returned no ETag; refusing an unprotected update")
 			}
+			path, err := projectTrailUpdatePath(cmd, selector, target, current)
+			if err != nil {
+				return err
+			}
 			if assigning {
 				if patch.Assignees, err = projectTrailUpdateAssignees(cmd, current, fields.Assignees, add, remove); err != nil {
 					return err
@@ -444,8 +448,8 @@ func newProjectTrailUpdateCmd() *cobra.Command {
 				fmt.Fprintln(cmd.ErrOrStderr(), projectTrailParentUpdateNotice(current, target.Change, selector, cmd.Flags().Changed("title")))
 			}
 			var out api.ProjectTrail
-			if _, err := target.Client.ProjectTrailRequest(cmd.Context(), http.MethodPatch, target.path(), patch, http.Header{"If-Match": {etag}}, &out); err != nil {
-				return fmt.Errorf("update project trail: %w", err)
+			if _, err := target.Client.ProjectTrailRequest(cmd.Context(), http.MethodPatch, path, patch, http.Header{"If-Match": {etag}}, &out); err != nil {
+				return trailBranchRefusal(fmt.Errorf("update project trail: %w", err), selector, target, current)
 			}
 			if err := target.validateResponse(out); err != nil {
 				return err

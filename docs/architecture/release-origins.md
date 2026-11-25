@@ -30,6 +30,7 @@ both:
 | Current version | `https://install.entire.com/channels/stable.json` | `https://api.github.com/repos/entireio/cli/releases/latest` |
 | Install scripts | `https://install.entire.com/installers/install.sh` | `raw.githubusercontent.com/entireio/cli/refs/heads/main/scripts/install.sh` |
 | Scoop manifest | `https://install.entire.com/scoop/entire.json` | `github.com/entireio/scoop-bucket` (git) |
+| Latest stable file | `https://install.entire.com/latest/<file>` (302) | `…/releases/latest/download/<file>` (302) |
 
 ### The channel pointer
 
@@ -56,6 +57,27 @@ shared office or CI egress address can exhaust on its own.
 Cache headers differ by what the object is. Anything under `v<version>/` never
 changes once published and is served `immutable` for a year. The pointers change
 on every release and get `max-age=60`.
+
+### Latest-stable links
+
+`/latest/<file>` is a 302 to `/v<version>/<file>`, where the version is the
+`tag` in `channels/stable.json`. It is for integration docs that want one link
+to the current stable `git-remote-entire` (the Buildkite plugin, CI recipes):
+
+```
+curl -fsSL https://install.entire.com/latest/git-remote-entire-linux-amd64.tar.gz
+curl -fsSL https://install.entire.com/latest/checksums.txt
+```
+
+Clients must follow redirects (`curl -L`). It is a redirect, not a copy, so the
+bytes always come from an immutable versioned key. Only the redirect changes
+between releases, and it is served `max-age=60`, the pointer's TTL. For up to a
+minute after a release, the two links above can therefore name different
+releases and fail to verify; a retry fixes it. Anything that must be
+reproducible pins `v<version>/` directly.
+
+The redirect lives in the Worker, nothing is uploaded under `latest/`, and it
+moves exactly when the stable pointer does, so it needs no release step.
 
 ## Who reads what
 
@@ -225,8 +247,9 @@ bucket was served through `install.entire.com` with the right bytes.
 
 Two consequences worth keeping in mind when changing anything here.
 
-**The Worker knows nothing about the layout.** It does not parse versions, split
-channels or rewrite paths. That is what keeps this cheap to change: a new prefix
+**The Worker knows almost nothing about the layout.** It does not parse
+versions, split channels or rewrite paths, with one exception: `/latest/<file>`
+reads `channels/stable.json` and redirects (see "Latest-stable links"). That is what keeps this cheap to change: a new prefix
 needs an IAM change and nothing else, and a layout change never touches the
 Worker. The only place it may learn the layout is metrics dimensions, which have
 to parse `v<version>/<file>` — keep that a best-effort regex that degrades to

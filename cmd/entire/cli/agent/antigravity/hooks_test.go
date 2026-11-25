@@ -498,7 +498,7 @@ func TestBuildEntireHookConfig_WindowsHostUsesDirectCmdWrapper(t *testing.T) {
 		if strings.HasPrefix(cmd, "cmd.exe") {
 			t.Errorf("Windows host got the nested cmd.exe wrapper, which agy's own cmd.exe /C rejects: %s", cmd)
 		}
-		if !strings.HasPrefix(cmd, "where.exe entire >nul 2>nul & if errorlevel 1 (ver>nul) else (entire hooks antigravity ") {
+		if !strings.HasPrefix(cmd, "set NoDefaultCurrentDirectoryInExePath=1& pushd %SystemRoot%& where.exe entire >nul 2>nul & if errorlevel 1 (popd& ver>nul) else (popd& entire hooks antigravity ") {
 			t.Errorf("unexpected Windows hook command shape: %s", cmd)
 		}
 		if !agent.IsManagedHookCommand(cmd) {

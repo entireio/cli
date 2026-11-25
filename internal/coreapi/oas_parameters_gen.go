@@ -19,11 +19,6 @@ type BeginPluginInstallationDeletionParams struct {
 	ID string
 }
 
-// ConnectOrgCIBuildkiteCredentialParams is parameters of connectOrgCIBuildkiteCredential operation.
-type ConnectOrgCIBuildkiteCredentialParams struct {
-	OrgId string
-}
-
 // ConnectOrgCIDepotOrganizationParams is parameters of connectOrgCIDepotOrganization operation.
 type ConnectOrgCIDepotOrganizationParams struct {
 	OrgId string
@@ -50,9 +45,9 @@ type CreatePluginInstallationParams struct {
 	Plugin string
 }
 
-// CreateRepoCIWebhookParams is parameters of createRepoCIWebhook operation.
-type CreateRepoCIWebhookParams struct {
-	RepoId string
+// CreateServiceAccountSecretParams is parameters of createServiceAccountSecret operation.
+type CreateServiceAccountSecretParams struct {
+	AccountId string
 }
 
 // DeleteBindingParams is parameters of deleteBinding operation.
@@ -79,19 +74,6 @@ type DeleteNativeMirrorParams struct {
 // DeleteOrgParams is parameters of deleteOrg operation.
 type DeleteOrgParams struct {
 	OrgId string
-}
-
-// DeleteOrgCIBuildkiteClusterParams is parameters of deleteOrgCIBuildkiteCluster operation.
-type DeleteOrgCIBuildkiteClusterParams struct {
-	OrgId       string
-	BkOrg       string
-	BkClusterId string
-}
-
-// DeleteOrgCIBuildkiteCredentialParams is parameters of deleteOrgCIBuildkiteCredential operation.
-type DeleteOrgCIBuildkiteCredentialParams struct {
-	OrgId string
-	BkOrg string
 }
 
 // DeletePluginInstallationParams is parameters of deletePluginInstallation operation.
@@ -126,6 +108,12 @@ type DeleteRepoCIWebhookParams struct {
 // DeleteServiceAccountParams is parameters of deleteServiceAccount operation.
 type DeleteServiceAccountParams struct {
 	AccountId string
+}
+
+// DeleteServiceAccountSecretParams is parameters of deleteServiceAccountSecret operation.
+type DeleteServiceAccountSecretParams struct {
+	AccountId string
+	SecretID  string
 }
 
 // DetachMyHandleParams is parameters of detachMyHandle operation.
@@ -303,17 +291,6 @@ type ListOIDCProvidersParams struct {
 	PageToken OptString `json:",omitempty,omitzero"`
 }
 
-// ListOrgCIBuildkiteClustersParams is parameters of listOrgCIBuildkiteClusters operation.
-type ListOrgCIBuildkiteClustersParams struct {
-	OrgId          string
-	BkOrganization OptString `json:",omitempty,omitzero"`
-}
-
-// ListOrgCIBuildkiteCredentialsParams is parameters of listOrgCIBuildkiteCredentials operation.
-type ListOrgCIBuildkiteCredentialsParams struct {
-	OrgId string
-}
-
 // ListOrgCIDepotOrganizationsParams is parameters of listOrgCIDepotOrganizations operation.
 type ListOrgCIDepotOrganizationsParams struct {
 	OrgId string
@@ -423,6 +400,17 @@ type ListProjectCollaboratorsParams struct {
 	RepoId OptString `json:",omitempty,omitzero"`
 	// Case-insensitive substring of account ID, active public handle, or public display name.
 	Search OptString `json:",omitempty,omitzero"`
+}
+
+// ListProjectInvitationsParams is parameters of listProjectInvitations operation.
+type ListProjectInvitationsParams struct {
+	// Maximum entries to return; server may cap further.
+	PageSize OptInt32 `json:",omitempty,omitzero"`
+	// Opaque cursor from a previous response's nextPageToken.
+	PageToken OptString `json:",omitempty,omitzero"`
+	ProjectId string
+	// Lifecycle state to return; all returns every state.
+	Status OptListProjectInvitationsStatus `json:",omitempty,omitzero"`
 }
 
 // ListProjectMembersParams is parameters of listProjectMembers operation.
@@ -536,6 +524,17 @@ type ListRepoGrantsParams struct {
 	RepoId    string
 }
 
+// ListRepoInvitationsParams is parameters of listRepoInvitations operation.
+type ListRepoInvitationsParams struct {
+	// Maximum entries to return; server may cap further.
+	PageSize OptInt32 `json:",omitempty,omitzero"`
+	// Opaque cursor from a previous response's nextPageToken.
+	PageToken OptString `json:",omitempty,omitzero"`
+	RepoId    string
+	// Lifecycle state to return; all returns every state.
+	Status OptListRepoInvitationsStatus `json:",omitempty,omitzero"`
+}
+
 // ListRepoLanguageFacetsParams is parameters of listRepoLanguageFacets operation.
 type ListRepoLanguageFacetsParams struct {
 	// Maximum facet values to return.
@@ -634,13 +633,25 @@ type ListServiceAccountGrantsParams struct {
 	AccountId string
 }
 
+// ListServiceAccountSecretsParams is parameters of listServiceAccountSecrets operation.
+type ListServiceAccountSecretsParams struct {
+	AccountId string
+	// Opaque cursor from a previous response's next_cursor.
+	Cursor OptString `json:",omitempty,omitzero"`
+	// Secrets per page.
+	PerPage OptInt64 `json:",omitempty,omitzero"`
+}
+
 // ListServiceAccountsParams is parameters of listServiceAccounts operation.
 type ListServiceAccountsParams struct {
 	// Maximum entries to return; server may cap further.
 	PageSize OptInt32 `json:",omitempty,omitzero"`
 	// Opaque cursor from a previous response's nextPageToken.
 	PageToken OptString `json:",omitempty,omitzero"`
-	OrgId     string
+	// List the org's service accounts.
+	OrgId OptString `json:",omitempty,omitzero"`
+	// List the project's service accounts.
+	ProjectID OptString `json:",omitempty,omitzero"`
 }
 
 // LookupRepoBySlugParams is parameters of lookupRepoBySlug operation.
@@ -658,11 +669,6 @@ type MintOrgCIGitHubActionsCredentialParams struct {
 type PatchRepoCIWebhookParams struct {
 	RepoId string
 	ID     string
-}
-
-// RegisterOrgCIBuildkiteClusterParams is parameters of registerOrgCIBuildkiteCluster operation.
-type RegisterOrgCIBuildkiteClusterParams struct {
-	OrgId string
 }
 
 // RemoveOrgMemberParams is parameters of removeOrgMember operation.
@@ -707,8 +713,11 @@ type ResolveMirrorPlacementsParams struct {
 
 // ResolveProjectParams is parameters of resolveProject operation.
 type ResolveProjectParams struct {
-	Host    ResolveProjectHost
-	Project string
+	ForgePrefix ResolveProjectForgePrefix
+	Project     string
+	// Optional: live (default) checks GitHub namespace authority now. display may answer from a roster
+	// up to 70 minutes old; never use a display capability to authorize a write.
+	Capabilities OptResolveProjectCapabilities `json:",omitempty,omitzero"`
 }
 
 // RestorePluginInstallationRepositoryParams is parameters of restorePluginInstallationRepository operation.
@@ -741,6 +750,12 @@ type RevokeProjectAccessByProviderParams struct {
 	ProviderUserId string
 }
 
+// RevokeProjectInvitationParams is parameters of revokeProjectInvitation operation.
+type RevokeProjectInvitationParams struct {
+	ProjectId string
+	ID        string
+}
+
 // RevokeRepoAccessParams is parameters of revokeRepoAccess operation.
 type RevokeRepoAccessParams struct {
 	RepoId      string
@@ -755,17 +770,17 @@ type RevokeRepoAccessByProviderParams struct {
 	ProviderUserId string
 }
 
+// RevokeRepoInvitationParams is parameters of revokeRepoInvitation operation.
+type RevokeRepoInvitationParams struct {
+	RepoId string
+	ID     string
+}
+
 // RevokeServiceAccountAccessParams is parameters of revokeServiceAccountAccess operation.
 type RevokeServiceAccountAccessParams struct {
 	AccountId    string
 	ResourceType RevokeServiceAccountAccessResourceType
 	ResourceId   string
-}
-
-// RotateOrgCIBuildkiteInboundSecretParams is parameters of rotateOrgCIBuildkiteInboundSecret operation.
-type RotateOrgCIBuildkiteInboundSecretParams struct {
-	OrgId string
-	BkOrg string
 }
 
 // SetBranchProtectionParams is parameters of setBranchProtection operation.

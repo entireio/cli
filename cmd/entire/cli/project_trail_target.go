@@ -37,6 +37,8 @@ type projectTrailTarget struct {
 	// Number is the project-local trail number when the resolution path
 	// learned it (a numeric selector or a parent reference); 0 otherwise.
 	Number int
+	// Jurisdiction is the project's region when resolved through Core.
+	Jurisdiction string
 	// Change is the change the trail was reached through (a branch or a
 	// <repo>/<number> selector); nil for a project trail selector.
 	Change *projectTrailCurrentChange
@@ -162,6 +164,7 @@ func resolveProjectTrailCollectionFor(ctx context.Context, host, project string,
 	if err != nil {
 		return nil, fmt.Errorf("open project trail cell: %w", err)
 	}
+	target.Jurisdiction = cell.Jurisdiction
 	return target, nil
 }
 
@@ -224,7 +227,7 @@ func describeProjectResolveError(ctx context.Context, host, project string, err 
 }
 
 func resolveProjectTrailRoute(ctx context.Context, core projectTrailCoreClient, host, project string) (*projectTrailTarget, *auth.CellTarget, error) {
-	resolved, err := core.ResolveProject(ctx, coreapi.ResolveProjectParams{Host: coreapi.ResolveProjectHost(host), Project: project})
+	resolved, err := core.ResolveProject(ctx, coreapi.ResolveProjectParams{ForgePrefix: coreapi.ResolveProjectForgePrefix(host), Project: project})
 	if err != nil {
 		return nil, nil, describeProjectResolveError(ctx, host, project, err)
 	}
@@ -401,9 +404,9 @@ func resolveBranchProjectTrail(cmd *cobra.Command, branch string) (_ *projectTra
 		return nil, renderDataAPIAuthError(ctx, cmd.ErrOrStderr(), owner+"/"+repo, err)
 	}
 	if trailRepoFlag(cmd) == "" {
-		defer func() { noteTrailCommandEnablement(ctx, client, err) }()
+		defer func() { noteTrailCommandEnablement(ctx, client, repoID, err) }()
 	}
-	base, err := trailRepoBasePath(forge, owner, repo, repoID)
+	base, err := trailRepoBasePath(repoID)
 	if err != nil {
 		return nil, err
 	}

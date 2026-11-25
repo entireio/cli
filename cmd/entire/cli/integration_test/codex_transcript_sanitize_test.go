@@ -338,3 +338,79 @@ func TestCodexCondense_NoAssetsFromSanitizedAwayContent(t *testing.T) {
 		t.Errorf("expected exactly 1 externalized asset, got %d: %s", len(manifest.Assets), raw)
 	}
 }
+
+// Plain words, so only the sanitizer (not secret redaction) can remove them.
+const (
+	codexBaseInstructionsNote = "You are Codex. Internal note: kestrel staging rollout"
+	codexAgentsFileNote       = "client heron migration notes"
+)
+
+// codexRolloutWithInstructionText builds a Codex rollout carrying the
+// instruction text Codex attaches to its model requests: base_instructions in
+// session_meta, the developer message repeating it (blanked only because
+// session_meta came first in the same input), and an AGENTS.md dump.
+func codexRolloutWithInstructionText(sessionID, repoDir string) string {
+	agentsDump := `# AGENTS.md instructions for ` + repoDir + `\n\n<INSTRUCTIONS>\n` + codexAgentsFileNote + `\n</INSTRUCTIONS>`
+	return strings.Join([]string{
+		`{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"id":"` + sessionID + `","thread_source":"user","cwd":"` + repoDir + `","base_instructions":{"text":"` + codexBaseInstructionsNote + `"}}}`,
+		`{"timestamp":"2026-01-01T00:00:01Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"` + codexBaseInstructionsNote + `"}]}}`,
+		`{"timestamp":"2026-01-01T00:00:02Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"` + agentsDump + `"}]}}`,
+		`{"timestamp":"2026-01-01T00:00:03Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"add feature.txt"}]}}`,
+		`{"timestamp":"2026-01-01T00:00:04Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"added feature.txt"}]}}`,
+	}, "\n") + "\n"
+}
+
+// TestCodexCheckpoint_BlanksInstructionText drives the real Codex hooks and a
+// commit, and proves neither the stored turn-end copy nor the committed
+// checkpoint transcript keeps the instruction text.
+func TestCodexCheckpoint_BlanksInstructionText(t *testing.T) {
+	env := NewFeatureBranchEnv(t)
+
+	sessionID := "codex-instruction-blanking"
+	transcriptPath := filepath.Join(env.RepoDir, ".entire", "tmp", "codex-rollout.jsonl")
+	if err := os.MkdirAll(filepath.Dir(transcriptPath), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	rollout := codexRolloutWithInstructionText(sessionID, env.RepoDir)
+	if err := os.WriteFile(transcriptPath, []byte(rollout), 0o644); err != nil {
+		t.Fatalf("write rollout: %v", err)
+	}
+
+	hook := codexHooker(t, env.RepoDir, sessionID, transcriptPath)
+	hook("user-prompt-submit", map[string]any{
+		"prompt": "add feature.txt", "hook_event_name": "UserPromptSubmit",
+	})
+	env.WriteFile("feature.txt", "hi\n")
+	applyPatchHook(hook, "call_1", "*** Begin Patch\n*** Add File: feature.txt\n+hi\n*** End Patch\n")
+	hook("stop", map[string]any{"hook_event_name": "Stop"})
+
+	stored, ok := findStoredSessionTranscript(t, env.RepoDir)
+	if !ok {
+		t.Fatal("Codex stop stored no session transcript")
+	}
+
+	env.GitCommitWithHooks("add feature.txt", "feature.txt")
+	cpID := env.GetLatestCheckpointIDFromHistory()
+	if cpID == "" {
+		t.Fatal("commit produced no checkpoint")
+	}
+	committed, found := checkpointBlob(env, cpID, "0/"+paths.TranscriptFileName)
+	if !found {
+		t.Fatal("checkpoint has no stored transcript")
+	}
+
+	for name, got := range map[string]string{"stored turn-end copy": stored, "checkpoint transcript": committed} {
+		if strings.Contains(got, "kestrel staging rollout") {
+			t.Errorf("%s still holds the base instructions", name)
+		}
+		if strings.Contains(got, codexAgentsFileNote) {
+			t.Errorf("%s still holds the AGENTS.md text", name)
+		}
+		if !strings.Contains(got, "add feature.txt") || !strings.Contains(got, "added feature.txt") {
+			t.Errorf("%s lost the conversation", name)
+		}
+		if g, want := countJSONLLines(got), countJSONLLines(rollout); g != want {
+			t.Errorf("%s has %d lines, rollout has %d", name, g, want)
+		}
+	}
+}

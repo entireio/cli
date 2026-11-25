@@ -9,11 +9,13 @@ import (
 )
 
 type responseEnvelope struct {
-	Type           string  `json:"type"`
-	Subtype        string  `json:"subtype"`
-	IsError        bool    `json:"is_error"`
-	APIErrorStatus *int    `json:"api_error_status"`
-	Result         *string `json:"result"`
+	Type              string            `json:"type"`
+	Subtype           string            `json:"subtype"`
+	IsError           bool              `json:"is_error"`
+	APIErrorStatus    *int              `json:"api_error_status"`
+	Result            *string           `json:"result"`
+	StructuredOutput  json.RawMessage   `json:"structured_output"`
+	PermissionDenials []json.RawMessage `json:"permission_denials"`
 }
 
 // parseGenerateTextResponse extracts the raw text payload and envelope metadata

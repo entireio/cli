@@ -140,6 +140,19 @@ func TestParseRef(t *testing.T) {
 // other well-formed case there, RefName(gotID) recomputes the canonical
 // (non-folded) shard and would not reproduce the folded ref under test, so the
 // table's round-trip assertion does not apply here.
+// Only two spellings of a shard are ever written: the ID format's own case and
+// the other format's. A mix of the two names no ref Entire can read back.
+func TestParseRef_RejectsAMixedCaseShard(t *testing.T) {
+	t.Parallel()
+	for _, ref := range []plumbing.ReferenceName{
+		"refs/entire/checkpoints/aB/0da4f30268ab",
+		"refs/entire/checkpoints/Ab/01M2DCHJCHTR9T9MZTSB7WV7AB",
+	} {
+		_, ok := ParseRef(ref)
+		assert.False(t, ok, "ParseRef(%q)", ref)
+	}
+}
+
 func TestParseRef_ToleratesCaseFoldedShardDirectory(t *testing.T) {
 	t.Parallel()
 

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -42,7 +43,7 @@ const testInviteEmail = "dev@example.com"
 func testInvitation(role, status string) *coreapi.Invitation {
 	return &coreapi.Invitation{
 		ID:        testInvitationULID,
-		Email:     testInviteEmail,
+		Email:     coreapi.NewOptString(testInviteEmail),
 		Role:      role,
 		Status:    status,
 		InvitedBy: testDeleteULID,
@@ -195,7 +196,7 @@ func TestOrgInviteList_ListsAndFiltersByStatus(t *testing.T) {
 	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "list", testOrgULID)
 	require.NoError(t, err)
 	assert.Equal(t, "open", gotStatus, "the default listing is the open invitations")
-	assert.Contains(t, out, "EMAIL")
+	assert.Contains(t, out, "INVITEE")
 	assert.Contains(t, out, testInvitationULID, "the ID is what `invite revoke` takes")
 	assert.Contains(t, out, testInviteEmail)
 	assert.Contains(t, out, "admin")
@@ -323,7 +324,7 @@ func TestOrgInviteRevoke_IsIdempotentOnAMissingInvitation(t *testing.T) {
 
 	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "revoke", testOrgULID, "--email", testInviteEmail)
 	require.NoError(t, err)
-	assert.Contains(t, out, "no such grant; nothing to revoke")
+	assert.Contains(t, out, "no such invitation; nothing to revoke")
 }
 
 // The invite commands document the org by name only, so an unknown name must
@@ -348,14 +349,150 @@ func TestOrgInvite_UnknownOrgNameHintsAtNamesOnly(t *testing.T) {
 }
 
 // Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
-func TestOrgInvite_SendAndRevokeRequireEmail(t *testing.T) {
+func TestOrgInvite_SendAndRevokeRequireATarget(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		t.Error("a missing --email must be refused before any request")
+		t.Error("a missing --email or --id must be refused before any request")
 	}))
 	t.Cleanup(srv.Close)
 
-	for _, verb := range []string{"send", "revoke"} {
-		_, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", verb, testOrgULID)
-		require.ErrorContains(t, err, `required flag(s) "email" not set`, verb)
+	_, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "send", testOrgULID)
+	require.ErrorContains(t, err, "at least one of the flags in the group [email account] is required")
+	_, _, err = runCoreCmd(t, newOrgCmd, srv.URL, "invite", "revoke", testOrgULID)
+	require.ErrorContains(t, err, "at least one of the flags in the group [id email] is required")
+}
+
+// TestOrgInviteSend_AccountInvitesThroughTheOrgAdd: --account invites an
+// existing account with the org add and the invitation allowed — the call
+// `org grant add` makes — and reports the invitation as grant add does.
+//
+// Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
+func TestOrgInviteSend_AccountInvitesThroughTheOrgAdd(t *testing.T) {
+	core, srv := newAddCore(t, func(string) addReply { return replyJSON(http.StatusAccepted, invitedBody) })
+	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "send", testOrgULID, "--account", "github:alice", "--role", "admin")
+	require.NoError(t, err)
+	require.Equal(t, "✓ Invited github:alice to org "+testOrgULID+" as admin ("+inviteID+"). No access until they accept; the invitation expires 2026-11-20.\n", out)
+	paths, bodies := core.recorded()
+	require.Equal(t, []string{"/api/v1/orgs/" + testOrgULID + "/members"}, paths)
+	require.Equal(t, true, bodies[0]["allow_invitation"])
+	require.Equal(t, "admin", bodies[0]["role"])
+	require.Equal(t, "uid-alice", bodies[0]["providerUserId"])
+}
+
+// TestOrgInviteSend_AccountJSON: --json is the add's own body, as for grant add.
+//
+// Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
+func TestOrgInviteSend_AccountJSON(t *testing.T) {
+	_, srv := newAddCore(t, func(string) addReply { return replyJSON(http.StatusAccepted, invitedBody) })
+	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "send", testOrgULID, "--account", "github:alice", "--json")
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
+	require.Equal(t, "invited", got["status"])
+	require.Equal(t, inviteID, got["invitation_id"])
+}
+
+// TestOrgInviteSend_AccountOnACoreThatGrants: a core that does not require
+// consent yet adds the account directly, and the command says so rather than
+// calling a membership an invitation.
+//
+// Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
+func TestOrgInviteSend_AccountOnACoreThatGrants(t *testing.T) {
+	_, srv := newAddCore(t, func(string) addReply { return replyJSON(http.StatusCreated, membershipBody) })
+	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "send", testOrgULID, "--account", "github:alice")
+	require.NoError(t, err)
+	require.Equal(t, "✓ Granted github:alice member access to org "+testOrgULID+"\n", out)
+}
+
+// TestOrgInviteSend_AccountRefusals: Core's reason, and the revoke hint on a
+// role mismatch.
+//
+// Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
+func TestOrgInviteSend_AccountRefusals(t *testing.T) {
+	_, srv := newAddCore(t, func(string) addReply { return replyProblem(http.StatusConflict, "", "already a member") })
+	_, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "send", testOrgULID, "--account", "github:alice")
+	require.EqualError(t, err, "already a member")
+
+	_, srv = newAddCore(t, func(string) addReply {
+		return replyProblem(http.StatusConflict, roleMismatchType, roleMismatchDetail)
+	})
+	_, _, err = runCoreCmd(t, newOrgCmd, srv.URL, "invite", "send", testOrgULID, "--account", "github:alice")
+	require.EqualError(t, err, roleMismatchDetail+"\n"+inviteHint(cmdOrg, testOrgULID))
+}
+
+// TestOrgInviteSend_EmailAndAccountCannotBeConfused: each form is its own
+// flag; giving both, neither, or a value that belongs to the other flag is
+// refused before any request.
+//
+// Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
+func TestOrgInviteSend_EmailAndAccountCannotBeConfused(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+	t.Cleanup(srv.Close)
+	for name, tc := range map[string]struct {
+		args []string
+		want string
+	}{
+		"both":                 {[]string{"--email", "dev@example.com", "--account", "github:alice"}, "none of the others can be"},
+		"handle in --email":    {[]string{"--email", "github:alice"}, `invalid --email "github:alice": that is an account handle; invite it with --account github:alice`},
+		"address in --account": {[]string{"--account", "dev@example.com"}, `invalid --account "dev@example.com": that is an email address; invite it with --email dev@example.com`},
+		"ULID in --account":    {[]string{"--account", wiringGranteeULID}, "provider-qualified handle"},
+		"bare name":            {[]string{"--account", "alice"}, "provider-qualified handle"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _, err := runCoreCmd(t, newOrgCmd, srv.URL, append([]string{"invite", "send", testOrgULID}, tc.args...)...)
+			require.ErrorContains(t, err, tc.want)
+		})
 	}
+}
+
+// TestOrgGrantAdd_IsAHiddenSpellingOfInviteSend: `org invite send --account`
+// is the documented way to invite an existing account. `org grant add` makes
+// the same call and stays runnable for scripts, with the same arguments,
+// request and output, but is hidden from `org grant --help`, whose help points
+// at `invite send` instead. Project and repo `grant add` stay visible: they
+// grant directly to an account inside the parent scope.
+//
+// Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
+func TestOrgGrantAdd_IsAHiddenSpellingOfInviteSend(t *testing.T) {
+	group := newOrgGrantCmd()
+	add, _, err := group.Find([]string{"add"})
+	require.NoError(t, err)
+	require.True(t, add.Hidden)
+	require.Equal(t, "add <org> <grantee>", add.Use)
+	require.Contains(t, add.Long, "`entire org invite send <org> --account <provider:handle>` is the documented command")
+	require.Contains(t, group.Long, "entire org invite send <org> --account <provider:handle>")
+
+	var help strings.Builder
+	group.SetOut(&help)
+	group.SetArgs([]string{"--help"})
+	require.NoError(t, group.Execute())
+	require.NotRegexp(t, `(?m)^\s+add\s`, help.String(), "add is not listed")
+	require.Regexp(t, `(?m)^\s+list\s`, help.String())
+	require.Regexp(t, `(?m)^\s+remove\s`, help.String())
+
+	for name, newCmd := range map[string]func() *cobra.Command{"project": newProjectGrantCmd, "repo": newRepoGrantCmd} {
+		visible, _, err := newCmd().Find([]string{"add"})
+		require.NoError(t, err)
+		require.False(t, visible.Hidden, name)
+	}
+
+	// The hidden spelling makes the call `invite send --account` makes and
+	// prints the same line.
+	core, srv := newAddCore(t, func(string) addReply { return replyJSON(http.StatusAccepted, invitedBody) })
+	viaGrant, _, err := runCoreCmd(t, newOrgGrantCmd, srv.URL, "add", testOrgULID, "github:alice")
+	require.NoError(t, err)
+	viaInvite, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "send", testOrgULID, "--account", "github:alice")
+	require.NoError(t, err)
+	require.Equal(t, viaInvite, viaGrant)
+	require.Equal(t, "✓ Invited github:alice to org "+testOrgULID+" as member ("+inviteID+"). No access until they accept; the invitation expires 2026-11-20.\n", viaGrant)
+	paths, bodies := core.recorded()
+	require.Equal(t, paths[0], paths[1])
+	// Without --role, grant add leaves the role to the server's default
+	// (member) and invite send sends its flag's default, member: the same
+	// request otherwise.
+	require.NotContains(t, bodies[0], "role")
+	require.Equal(t, "member", bodies[1]["role"])
+	delete(bodies[1], "role")
+	require.Equal(t, bodies[0], bodies[1])
 }

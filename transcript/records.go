@@ -7,8 +7,9 @@ import "encoding/json"
 // emits records; it never revises a record it has emitted, so records can be
 // streamed and stored as plain appends. The fold (Fold, Folder) is
 // agent-agnostic: applying records in order produces the lines Convert writes.
-// Convert sends Claude Code, Cursor and Droid transcripts through an adapter
-// and the fold; the other converters still write lines directly. The fold is
+// Convert sends Claude Code, Cursor, Droid, Pi and OpenCode transcripts
+// through an adapter's records and the fold; the other converters still write
+// lines directly. The fold is
 // meant to be shared with a backend that folds the same records to show a
 // live session. README.md specifies the record wire format.
 
