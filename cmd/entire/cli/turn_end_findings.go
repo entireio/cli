@@ -203,6 +203,10 @@ func pushedThisTurn(ctx context.Context, up branchUpstream, turnStart time.Time)
 // costs the server check.
 var pushCommandPattern = regexp.MustCompile(`\bgit\b.{0,160}?\bpush\b|\bgh\s+pr\s+create\b`)
 
+// maxTurnTranscriptScanBytes caps how much of this turn's transcript the stop
+// reads to look for a push.
+const maxTurnTranscriptScanBytes = 32 << 20
+
 // turnTranscriptMentionsPush is the cheap local gate for the server check:
 // without a push command in this turn's part of the transcript, a tracking
 // ref behind HEAD means commits not pushed yet, the common case, and the stop
@@ -211,6 +215,11 @@ var pushCommandPattern = regexp.MustCompile(`\bgit\b.{0,160}?\bpush\b|\bgh\s+pr\
 func turnTranscriptMentionsPush(ag agent.Agent, transcriptPath string, fromBytes int64) bool {
 	if transcriptPath == "" {
 		return false
+	}
+	// A very long turn is not read on the stop path, whose budget is short
+	// (Codex's is 30s); the server check, bounded by its own timeout, decides.
+	if info, err := os.Stat(transcriptPath); err == nil && info.Size()-fromBytes > maxTurnTranscriptScanBytes {
+		return true
 	}
 	data, err := ag.ReadTranscript(transcriptPath)
 	if err != nil {
@@ -280,7 +289,9 @@ func trailHeadForBranch(ctx context.Context, scope trailEnablementScope, branch 
 		return "", false
 	}
 	// The change's detail carries its head; read it by number under the
-	// repository (an ID read through /api/v1/trails is not served here).
+	// repository. (An /api/v1/trails/<id> path only works on a client that
+	// resolved the change first and registered its route, see
+	// api.Client.SetTrailRoute; this one has not.)
 	detail, err := findTrailByNumberAtPath(ctx, client, base, change.Number)
 	if err != nil || detail == nil {
 		return "", true

@@ -374,6 +374,12 @@ func TestTurnTranscriptMentionsPush(t *testing.T) {
 	assert.True(t, read(earlier+`{"cmd":["git","push"]}`))
 	assert.True(t, read(earlier+`{"command":"gh pr create --fill"}`))
 	assert.False(t, read(earlier+`{"command":"git pull"}`))
+
+	// A turn too long to read on the stop path leaves it to the server check.
+	big := earlier + strings.Repeat("x", maxTurnTranscriptScanBytes+1)
+	require.NoError(t, os.WriteFile(path, []byte(big), 0o600))
+	ag.transcriptData = nil
+	assert.True(t, turnTranscriptMentionsPush(ag, path, int64(len(earlier))))
 }
 
 func TestTrailHeadForBranch(t *testing.T) {

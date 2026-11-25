@@ -136,6 +136,9 @@ func sameCommit(a, b string) bool {
 }
 
 // fetchTrailReviewProgress reads the change's detail for its head and agents.
+// trailID is the resolved target's: the review-target client registered its
+// repository route (api.Client.SetTrailRoute), so the ID path reaches the
+// change.
 func fetchTrailReviewProgress(ctx context.Context, client *api.Client, trailID, wantHead string, ignoreStale bool) (trailReviewProgress, error) {
 	detail, err := fetchTrailDetail(ctx, client, trailID)
 	if err != nil {
