@@ -138,6 +138,7 @@ func (f *findingsContinuation) finish(ctx context.Context, event *agent.Event) {
 	defer cancel()
 	up, ok := currentBranchUpstream(ctx)
 	if !ok || up.Default {
+		logging.Debug(logCtx, "not continuing turn for trail findings: no upstream, or the default branch")
 		return
 	}
 	// The usual case: the tracking ref's reflog shows this turn's push. A
@@ -146,13 +147,17 @@ func (f *findingsContinuation) finish(ctx context.Context, event *agent.Event) {
 	// pushed.
 	recorded := up.SHA == up.Head && pushedThisTurn(ctx, up, f.turnStart)
 	if !recorded && (up.SHA == up.Head || !turnTranscriptMentionsPush(f.continuer, event.SessionRef, f.transcriptBytes)) {
+		logging.Debug(logCtx, "not continuing turn for trail findings: the turn did not push", slog.Bool("tracking_at_head", up.SHA == up.Head))
 		return
 	}
 	if !findingsContinuationAllowedForSession(ctx, event.SessionID, up.Head) {
+		logging.Debug(logCtx, "not continuing turn for trail findings: session not eligible (Entire-run, unfinished finalize, or already continued for this commit)")
 		return
 	}
 	serverHead, hasTrail := findingsBranchTrailHead(ctx, event.SessionID, up.Branch)
 	if !hasTrail || (!recorded && !sameCommit(serverHead, up.Head)) {
+		logging.Debug(logCtx, "not continuing turn for trail findings: no trail for the branch, or the server does not have HEAD",
+			slog.Bool("has_trail", hasTrail), slog.String("server_head", serverHead))
 		return
 	}
 	payload, err := f.continuer.RenderTurnContinuation(findingsContinuationReason(up))
@@ -161,7 +166,8 @@ func (f *findingsContinuation) finish(ctx context.Context, event *agent.Event) {
 		return
 	}
 	if time.Until(deadline) < findingsReopenReserve {
-		logging.Debug(logCtx, "not continuing turn for trail findings: too little stop hook budget left to reopen the turn")
+		logging.Debug(logCtx, "not continuing turn for trail findings: too little stop hook budget left to reopen the turn",
+			slog.Duration("left", time.Until(deadline)))
 		return
 	}
 	if err := reopenTurnForContinuation(ctx, f.continuer, event, up.Head); err != nil {
