@@ -133,7 +133,7 @@ func TestWaitForUserPushes_WaitsForGitToExit(t *testing.T) {
 	assert.True(t, done, "the wait returned before the push exited")
 	st, err := coord.State()
 	require.NoError(t, err)
-	assert.Empty(t, st.UserPushes, "marks are consumed")
+	assert.Empty(t, st.Job.UserPushes, "marks are consumed")
 }
 
 // A push recorded while the worker waits — `git push && git push --tags` —

@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/entireio/cli/cmd/entire/cli/bgupload"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
@@ -25,7 +26,7 @@ import (
 // parallel-safe: it swaps package state.
 func enableBackgroundUpload(t *testing.T) *[]string {
 	t.Helper()
-	for _, name := range ciEnvVars {
+	for _, name := range bgupload.CIEnvVars {
 		t.Setenv(name, "")
 	}
 	t.Setenv(CheckpointUploadForegroundEnv, "")
@@ -77,9 +78,9 @@ func TestPrePush_HandsQueueToWorkerWithoutPushing(t *testing.T) {
 	assert.ElementsMatch(t, refs, remaining)
 	st, err := uploadCoordinator(t, repo).State()
 	require.NoError(t, err)
-	require.NotNil(t, st.Request, "the hand-off is recorded for the worker")
-	assert.Equal(t, "origin", st.Request.Remote)
-	assert.Len(t, st.UserPushes, 1, "the worker waits for this push")
+	require.NotNil(t, st.Job.Request, "the hand-off is recorded for the worker")
+	assert.Equal(t, "origin", st.Job.Request.Remote)
+	assert.Len(t, st.Job.UserPushes, 1, "the worker waits for this push")
 }
 
 // TestPrePush_RecordsUserPushWithEmptyQueue: a push with nothing queued starts
@@ -99,8 +100,8 @@ func TestPrePush_RecordsUserPushWithEmptyQueue(t *testing.T) {
 	assert.Empty(t, *spawned)
 	st, err := uploadCoordinator(t, repo).State()
 	require.NoError(t, err)
-	assert.Nil(t, st.Request)
-	assert.Len(t, st.UserPushes, 1)
+	assert.Nil(t, st.Job.Request)
+	assert.Len(t, st.Job.UserPushes, 1)
 }
 
 // TestPrePush_RunningWorkerOwnsTheQueue: while a worker holds the upload lock,
@@ -118,7 +119,7 @@ func TestPrePush_RunningWorkerOwnsTheQueue(t *testing.T) {
 	defer repo.Close()
 	queue := enqueueRefs(t, repo, refs)
 	coord := uploadCoordinator(t, repo)
-	release, err := coord.LockWorker(t.Context())
+	release, err := coord.Lock(t.Context())
 	require.NoError(t, err)
 	defer release()
 
@@ -133,7 +134,7 @@ func TestPrePush_RunningWorkerOwnsTheQueue(t *testing.T) {
 	assert.ElementsMatch(t, refs, remaining)
 	st, err := coord.State()
 	require.NoError(t, err)
-	require.NotNil(t, st.Request)
+	require.NotNil(t, st.Job.Request)
 }
 
 // TestPrePush_ForegroundEnvKeepsUploadInline: `entire trail create` and the
@@ -175,10 +176,10 @@ func TestRunCheckpointUploadWorker_DrainsQueueAndRecords(t *testing.T) {
 	assert.Empty(t, remaining)
 	st, err := coord.State()
 	require.NoError(t, err)
-	assert.Nil(t, st.Request, "the request was consumed")
+	assert.Nil(t, st.Job.Request, "the request was consumed")
 	require.NotNil(t, st.Last)
 	assert.False(t, st.Last.FinishedAt.IsZero())
-	assert.Equal(t, len(refs), st.Last.Pushed)
+	assert.Equal(t, len(refs), st.Last.Done)
 	assert.Empty(t, st.Last.Error)
 }
 
@@ -232,7 +233,7 @@ func TestRunCheckpointUploadWorker_ExitsWhenLockHeld(t *testing.T) {
 	queue := enqueueRefs(t, repo, refs)
 	coord := uploadCoordinator(t, repo)
 	require.NoError(t, coord.Request(checkpoint.UploadRequest{Remote: "origin"}))
-	release, err := coord.LockWorker(t.Context())
+	release, err := coord.Lock(t.Context())
 	require.NoError(t, err)
 	defer release()
 
@@ -243,7 +244,7 @@ func TestRunCheckpointUploadWorker_ExitsWhenLockHeld(t *testing.T) {
 	assert.ElementsMatch(t, refs, remaining, "the lock holder owns the queue")
 	st, err := coord.State()
 	require.NoError(t, err)
-	assert.NotNil(t, st.Request, "the request stays for the holder")
+	assert.NotNil(t, st.Job.Request, "the request stays for the holder")
 }
 
 // TestPushQueuedCheckpointRefs_WaitsForBackgroundWorker: the explicit
@@ -256,7 +257,7 @@ func TestPushQueuedCheckpointRefs_WaitsForBackgroundWorker(t *testing.T) {
 	require.NoError(t, err)
 	defer repo.Close()
 	enqueueRefs(t, repo, refs)
-	release, err := uploadCoordinator(t, repo).LockWorker(t.Context())
+	release, err := uploadCoordinator(t, repo).Lock(t.Context())
 	require.NoError(t, err)
 	defer release()
 
@@ -292,24 +293,24 @@ func TestReleaseUploadLock_StartsWorkerForWaitingRequest(t *testing.T) {
 	defer repo.Close()
 	coord := uploadCoordinator(t, repo)
 
-	release, err := coord.LockWorker(t.Context())
+	release, err := coord.Lock(t.Context())
 	require.NoError(t, err)
 	releaseUploadLock(t.Context(), coord, release)
 	assert.Empty(t, *spawned, "no request, no worker")
 
-	release, err = coord.LockWorker(t.Context())
+	release, err = coord.Lock(t.Context())
 	require.NoError(t, err)
 	require.NoError(t, coord.Request(checkpoint.UploadRequest{Remote: "origin"}))
 	releaseUploadLock(t.Context(), coord, release)
 	assert.Len(t, *spawned, 1)
 
-	release, err = coord.LockWorker(t.Context())
+	release, err = coord.Lock(t.Context())
 	require.NoError(t, err)
 	releaseUploadLock(withinUploadWorker(t.Context()), coord, release)
 	assert.Len(t, *spawned, 1, "the worker loops over requests itself")
 
 	t.Setenv(CheckpointUploadForegroundEnv, "1")
-	release, err = coord.LockWorker(t.Context())
+	release, err = coord.Lock(t.Context())
 	require.NoError(t, err)
 	releaseUploadLock(t.Context(), coord, release)
 	assert.Len(t, *spawned, 1, "uploads kept inline never start a background process")
@@ -357,7 +358,7 @@ func TestPrePush_ForegroundNeverHandsOffWhenLockHeld(t *testing.T) {
 	defer repo.Close()
 	enqueueRefs(t, repo, refs)
 	coord := uploadCoordinator(t, repo)
-	release, err := coord.LockWorker(t.Context())
+	release, err := coord.Lock(t.Context())
 	require.NoError(t, err)
 	defer release()
 
@@ -369,7 +370,7 @@ func TestPrePush_ForegroundNeverHandsOffWhenLockHeld(t *testing.T) {
 	assert.Contains(t, output, "stay queued for the next push")
 	st, err := coord.State()
 	require.NoError(t, err)
-	assert.Nil(t, st.Request, "no request is left for a background process")
+	assert.Nil(t, st.Job.Request, "no request is left for a background process")
 }
 
 // TestRunCheckpointUploadWorker_RespawnsForRequestLeftAtExit: a worker that
@@ -423,7 +424,7 @@ func TestPrePush_InlineRecordsUserPush(t *testing.T) {
 
 	st, err := uploadCoordinator(t, repo).State()
 	require.NoError(t, err)
-	assert.Len(t, st.UserPushes, 1)
+	assert.Len(t, st.Job.UserPushes, 1)
 }
 
 // TestRunCheckpointUploadWorker_BudgetEndsPassAsStop: the pass budget bounds

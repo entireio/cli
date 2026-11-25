@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/bgupload"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -56,7 +57,7 @@ func TestGitPushWithHooks_CheckpointsLandAfterUserPush(t *testing.T) {
 	commonDir := filepath.Join(env.RepoDir, ".git")
 	coord := checkpoint.NewUploadCoordinator(commonDir)
 	deadline := time.Now().Add(90 * time.Second)
-	var last *checkpoint.UploadResult
+	var last *bgupload.Result
 	for time.Now().Before(deadline) {
 		if st, stErr := coord.State(); stErr == nil && st.Last != nil && !st.Last.FinishedAt.IsZero() {
 			last = st.Last
@@ -70,7 +71,7 @@ func TestGitPushWithHooks_CheckpointsLandAfterUserPush(t *testing.T) {
 	// The worker still releases its lock and logs after recording the run;
 	// let it exit before the test's temp dirs are removed.
 	for time.Now().Before(deadline) {
-		release, ok, lockErr := coord.TryLockWorker(t.Context())
+		release, ok, lockErr := coord.TryLock()
 		if lockErr == nil && ok {
 			release()
 			break

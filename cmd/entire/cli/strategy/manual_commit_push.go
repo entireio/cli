@@ -538,7 +538,7 @@ func uploadCheckpointRefsOnPrePush(ctx context.Context, repo *git.Repository, ps
 	if coord != nil {
 		noteUserPush(ctx, coord)
 	}
-	release, locked := lockQueueForFlush(ctx, coord, false)
+	release, locked := lockQueueForFlush(ctx, coord)
 	if !locked {
 		fmt.Fprintln(os.Stderr, "[entire] Another checkpoint upload is in progress; checkpoints stay queued for the next push.")
 		return nil
@@ -800,12 +800,12 @@ func waitForBackgroundUpload(ctx context.Context, repo *git.Repository) (func(),
 	if coordErr != nil {
 		return func() {}, nil
 	}
-	release, ok, lockErr := coord.TryLockWorker(ctx)
+	release, ok, lockErr := coord.TryLock()
 	if lockErr == nil && !ok {
 		fmt.Fprintln(os.Stderr, "[entire] Waiting for the background checkpoint upload to finish...")
 		waitCtx, cancel := context.WithTimeout(ctx, checkpointUploadDeliveryBudget)
 		defer cancel()
-		release, lockErr = coord.LockWorker(waitCtx)
+		release, lockErr = coord.Lock(waitCtx)
 	}
 	if lockErr != nil {
 		return func() {}, fmt.Errorf("wait for background checkpoint upload: %w", lockErr)

@@ -1,23 +1,16 @@
 // Background checkpoint upload (git-refs).
 //
-// The pre-push hook does not push queued checkpoint refs itself. It hands them
-// to one detached `entire __checkpoint_upload` worker per repository, which
-// uploads once the user's `git push` has exited (waitForUserPushes): pushed from
-// the hook, they land just before git's own pack, and GitHub rejects a push that
-// arrives right after another one finishes. The user's push never waits on the
-// upload, and checkpoints reach the remote a second or two after it returns.
-//
-// The worker acts only on what the pushing hook decided in the foreground, where
-// the user can still be asked: the OPF decision and the pending sync-remote
-// capture travel in the request (checkpoint.UploadRequest). Its stdio is the
-// null device, so what it would have printed is recorded instead
-// (checkpoint.UploadResult) and shown by the next push and by `entire status`.
+// The pre-push hook records the upload and starts one detached worker per
+// repository (bgupload), which pushes the queue once the user's `git push` has
+// exited (waitForUserPushes): pushed from the hook, the refs land just before
+// git's own pack, and GitHub rejects a push arriving right after another one
+// finishes. The worker acts only on what the hook decided in the foreground
+// (checkpoint.UploadRequest).
 package strategy
 
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -26,9 +19,9 @@ import (
 
 	"github.com/go-git/go-git/v6"
 
+	"github.com/entireio/cli/cmd/entire/cli/bgupload"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	checkpointremote "github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
-	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -43,42 +36,32 @@ const checkpointUploadComponent = "checkpoint-upload"
 // test ends.
 const CheckpointUploadForegroundEnv = "ENTIRE_CHECKPOINT_UPLOAD_FOREGROUND"
 
-// foregroundUploadLockWait bounds how long a foreground flush (hand-off
-// disabled) waits for a running worker before leaving its refs queued. Var for
-// tests.
+// foregroundUploadLockWait bounds how long a foreground flush waits for a
+// running worker before leaving its refs queued. Var for tests.
 var foregroundUploadLockWait = 30 * time.Second
 
-// checkpointUploadDeliveryBudget bounds one worker pass's flush, batch
-// included. Var for tests.
+// checkpointUploadDeliveryBudget bounds one worker pass's flush. Var for tests.
 var checkpointUploadDeliveryBudget = 10 * time.Minute
 
 const (
-	// checkpointUploadWorkerDeadline bounds a worker's whole run, and is how
-	// long a run record without a finish time counts as still running.
+	// checkpointUploadWorkerDeadline bounds a worker's run, and is how long a
+	// run record without a finish time counts as running.
 	checkpointUploadWorkerDeadline = 30 * time.Minute
-	// checkpointUploadMaxPasses bounds the passes a worker makes for requests
-	// that arrive while it runs.
+	// checkpointUploadMaxPasses bounds the passes for requests that arrive
+	// while the worker runs.
 	checkpointUploadMaxPasses = 5
 )
 
-// ciEnvVars mark environments whose machine or checkout is discarded when the
-// job ends, taking a detached worker's queue with it: upload inline there.
-var ciEnvVars = []string{"CI", "GITHUB_ACTIONS", "GITLAB_CI", "BUILDKITE", "JENKINS_URL", "TF_BUILD"}
-
 // backgroundUploadInTests lets a test opt into the hand-off; in-process tests
-// otherwise upload inline, as before.
+// otherwise upload inline.
 var backgroundUploadInTests = false
 
-// checkpointUploadSpawn is the process-spawn seam, swapped in tests:
-// execx.SpawnDetached is a no-op under `go test`.
-var checkpointUploadSpawn = func(worktreeRoot string) {
-	execx.SpawnDetached(worktreeRoot, "__checkpoint_upload")
-}
+// checkpointUploadSpawn is the spawn seam, swapped in tests.
+var checkpointUploadSpawn = func(worktreeRoot string) { bgupload.Spawn(worktreeRoot, checkpoint.UploadKind) }
 
 type uploadWorkerKey struct{}
 
-// withinUploadWorker marks ctx as the background worker, which uploads inline
-// and never hands off or spawns another worker.
+// withinUploadWorker marks ctx as the worker, which never hands off or spawns.
 func withinUploadWorker(ctx context.Context) context.Context {
 	return context.WithValue(ctx, uploadWorkerKey{}, true)
 }
@@ -100,97 +83,55 @@ func carriedOPFDecision(ctx context.Context) string {
 	return v
 }
 
-// backgroundCheckpointUploadEnabled reports whether this pre-push may hand the
-// rest of its upload to the background worker.
+// backgroundCheckpointUploadEnabled reports whether this pre-push may hand its
+// upload to the worker. CI checkouts are discarded with the job, so they upload
+// inline.
 func backgroundCheckpointUploadEnabled(ctx context.Context) bool {
-	if inUploadWorker(ctx) {
+	if inUploadWorker(ctx) || (testing.Testing() && !backgroundUploadInTests) ||
+		os.Getenv(CheckpointUploadForegroundEnv) == "1" || bgupload.InCI() {
 		return false
 	}
-	if testing.Testing() && !backgroundUploadInTests {
-		return false
-	}
-	if os.Getenv(CheckpointUploadForegroundEnv) == "1" {
-		return false
-	}
-	for _, name := range ciEnvVars {
-		if os.Getenv(name) != "" {
-			return false
-		}
-	}
-	if s, err := settings.Load(ctx); err == nil && s.IsBackgroundCheckpointUploadDisabled() {
-		return false
-	}
-	return true
+	s, err := settings.Load(ctx)
+	return err != nil || !s.IsBackgroundCheckpointUploadDisabled()
 }
 
-// lockQueueForFlush takes the upload lock for a pre-push flush, so it never
-// pushes the same refs as a running worker. With hand-off enabled it only tries:
-// a running worker already owns the queue, and the caller records a request for
-// it instead. Otherwise it waits up to foregroundUploadLockWait. ok is false
-// when the lock was not taken; a coordinator that cannot be used at all must not
-// block uploads, so that returns ok with a no-op release.
-func lockQueueForFlush(ctx context.Context, coord *checkpoint.UploadCoordinator, background bool) (release func(), ok bool) {
+// lockQueueForFlush takes the upload lock for a foreground flush, waiting up to
+// foregroundUploadLockWait for a running worker. ok is false when it timed out.
+// A lock that cannot be used at all must not block uploads: that returns ok
+// with a no-op release.
+func lockQueueForFlush(ctx context.Context, coord *checkpoint.UploadCoordinator) (release func(), ok bool) {
 	if coord == nil {
 		return func() {}, true
 	}
-	if background {
-		release, ok, err := coord.TryLockWorker(ctx)
-		if err != nil {
-			logging.Debug(ctx, "checkpoint upload lock unavailable; uploading without it",
-				slog.String("error", err.Error()))
-			return func() {}, true
-		}
-		return release, ok
-	}
 	lockCtx, cancel := context.WithTimeout(ctx, foregroundUploadLockWait)
 	defer cancel()
-	release, err := coord.LockWorker(lockCtx)
+	release, err := coord.Lock(lockCtx)
 	if err != nil {
 		if lockCtx.Err() != nil && ctx.Err() == nil {
 			return nil, false
 		}
-		logging.Debug(ctx, "checkpoint upload lock unavailable; uploading without it",
-			slog.String("error", err.Error()))
+		logging.Debug(ctx, "checkpoint upload lock unavailable; uploading without it", slog.String("error", err.Error()))
 		return func() {}, true
 	}
 	return release, true
 }
 
-// reportBackgroundUpload prints, once, what the last worker run could not: a
-// failure that left refs queued, and any line it would have printed.
+// reportBackgroundUpload prints, once, what the last worker run could not.
 func reportBackgroundUpload(ctx context.Context, coord *checkpoint.UploadCoordinator) {
 	if coord == nil {
 		return
 	}
-	st, err := coord.State()
-	if err != nil || st.Last == nil || st.Last.Running(time.Now(), checkpointUploadWorkerDeadline) {
-		return
-	}
-	if st.Last.Announcement == "" && st.Last.Error == "" {
-		return
-	}
-	if st.Last.Announcement != "" {
-		fmt.Fprintln(stderrWriter, st.Last.Announcement)
-	}
-	if st.Last.Error != "" {
-		fmt.Fprintf(stderrWriter, "[entire] Last background checkpoint upload stopped: %s.\n", st.Last.Error)
-		if st.Last.Detail != "" {
-			fmt.Fprintln(stderrWriter, st.Last.Detail)
-		}
-	}
-	if clearErr := coord.ClearReported(st.Last.StartedAt); clearErr != nil {
-		logging.Debug(ctx, "clear checkpoint upload result failed", slog.String("error", clearErr.Error()))
+	if err := coord.Report(stderrWriter, "checkpoint upload", checkpointUploadWorkerDeadline); err != nil {
+		logging.Debug(ctx, "report checkpoint upload result failed", slog.String("error", err.Error()))
 	}
 }
 
-// handOffCheckpointUpload records req for the worker and starts one. The caller
-// must have released the upload lock, or the new worker exits at once — which
-// is safe: whoever holds the lock starts a worker for the request on release
+// handOffCheckpointUpload records req and starts a worker. If the lock is held,
+// the new worker exits at once and the holder starts one on release
 // (releaseUploadLock).
 func handOffCheckpointUpload(ctx context.Context, coord *checkpoint.UploadCoordinator, req checkpoint.UploadRequest) bool {
 	if err := coord.Request(req); err != nil {
-		logging.Warn(ctx, "record background checkpoint upload request failed",
-			slog.String("error", err.Error()))
+		logging.Warn(ctx, "record background checkpoint upload request failed", slog.String("error", err.Error()))
 		return false
 	}
 	if !spawnCheckpointUploadWorker(ctx) {
@@ -204,18 +145,15 @@ func handOffCheckpointUpload(ctx context.Context, coord *checkpoint.UploadCoordi
 func spawnCheckpointUploadWorker(ctx context.Context) bool {
 	root, err := paths.WorktreeRoot(ctx)
 	if err != nil {
-		logging.Debug(ctx, "skipping background checkpoint upload spawn: no worktree root",
-			slog.String("error", err.Error()))
+		logging.Debug(ctx, "skipping background checkpoint upload spawn: no worktree root", slog.String("error", err.Error()))
 		return false
 	}
 	checkpointUploadSpawn(root)
 	return true
 }
 
-// releaseUploadLock releases a flush's hold on the upload lock and, if a push
-// recorded a request while it was held, starts a worker for it. A push that
-// found the lock held relied on its holder to get the request done; a worker
-// it spawned exited at once, since the lock was taken.
+// releaseUploadLock releases a flush's lock and starts a worker for a request
+// recorded meanwhile: that push's own worker found the lock held and exited.
 func releaseUploadLock(ctx context.Context, coord *checkpoint.UploadCoordinator, release func()) {
 	release()
 	if coord != nil && !inUploadWorker(ctx) && coord.HasRequest() && backgroundCheckpointUploadEnabled(ctx) {
@@ -223,22 +161,19 @@ func releaseUploadLock(ctx context.Context, coord *checkpoint.UploadCoordinator,
 	}
 }
 
-// RunCheckpointUploadWorker is the body of the detached
-// `entire __checkpoint_upload` worker. Each pass takes the pending request and
-// uploads the queue under it; another pass runs only for a request that arrived
-// meanwhile, and none after a pass that left refs queued — the next push
-// retries those. A worker that runs out of passes or time with a request still
-// waiting starts a fresh one for it. Best-effort: failures are recorded and
-// logged, never returned, because nothing watches this process's exit code.
+// RunCheckpointUploadWorker is the detached worker's body. Each pass takes the
+// pending request and uploads the queue under it; refs left queued wait for the
+// next push. Failures are recorded and logged, never returned: nothing watches
+// this process's exit code.
 func RunCheckpointUploadWorker(ctx context.Context) {
 	ctx = logging.WithComponent(ctx, checkpointUploadComponent)
 	defer logging.Info(ctx, "checkpoint upload worker finished")
-	// Not marked as the worker, so it may start the next one.
-	spawnCtx := context.WithoutCancel(ctx)
-	// A detached child inherits the hook's environment, which may pin GIT_DIR
-	// and friends to the spawning worktree; resolve from the working directory
-	// instead, like any other CWD-based command.
-	unsetRepoOverrideEnv()
+	spawnCtx := context.WithoutCancel(ctx) // not marked as the worker, so it may spawn the next
+	// The hook's environment may pin GIT_DIR and friends to the spawning
+	// worktree; resolve from the working directory instead.
+	for _, name := range gitrepo.RepoOverrideEnvVars() {
+		os.Unsetenv(name)
+	}
 	ctx = checkpointremote.WithNonInteractiveSSH(withinUploadWorker(ctx))
 	ctx, cancel := context.WithTimeout(ctx, checkpointUploadWorkerDeadline)
 	defer cancel()
@@ -257,53 +192,26 @@ func RunCheckpointUploadWorker(ctx context.Context) {
 	if !uploadRedactionReady(ctx, coord) {
 		return
 	}
-
-	// A pass that leaves refs queued ends the run (the next push retries them)
-	// unless a push asked for more meanwhile; passes are bounded either way.
-	for range checkpointUploadMaxPasses {
-		release, ok, lockErr := coord.TryLockWorker(ctx)
-		if lockErr == nil && !ok {
-			return // The holder starts a worker for any request on release.
-		}
-		if lockErr != nil {
-			if ctx.Err() == nil {
-				return // A lock that cannot be taken would fail a fresh worker too.
-			}
-			break
-		}
-		req, takeErr := coord.TakeRequest()
-		if takeErr != nil {
-			release()
-			return
-		}
-		if req != nil {
+	leftover := coord.RunPasses(ctx, checkpointUploadMaxPasses, checkpoint.HasUploadRequest, func(ctx context.Context) {
+		if req, err := coord.TakeRequest(); err == nil && req != nil {
 			runCheckpointUploadPass(ctx, repo, coord, *req)
 		}
-		// A push that recorded a request while the lock was held left it to us:
-		// its own worker found the lock taken and exited.
-		release()
-		if !coord.HasRequest() {
-			return
-		}
-	}
-	// Out of passes or time with a push still waiting. The fresh worker has
-	// its own pass limit, and gets here only if pushes keep coming.
-	if coord.HasRequest() && backgroundCheckpointUploadEnabled(spawnCtx) {
+	})
+	if leftover && backgroundCheckpointUploadEnabled(spawnCtx) {
 		spawnCheckpointUploadWorker(spawnCtx)
 	}
 }
 
-// uploadRedactionReady configures redaction for an upload run, recording a
-// failed run when it cannot. OPFEnabled reads process-global config only this
-// sets. Without it the gate reads "OPF off" and ships unscanned content, so a
-// run that cannot configure redaction uploads nothing. EnsureRedactionConfigured
-// survives a settings read failure (the hook path must), so check that separately.
+// uploadRedactionReady configures redaction for a run, recording a failed run
+// when it cannot: without it the OPF gate reads "off" and would ship unscanned
+// content. EnsureRedactionConfigured survives a settings read failure (the hook
+// path must), so that is checked separately.
 func uploadRedactionReady(ctx context.Context, coord *checkpoint.UploadCoordinator) bool {
 	_, settingsErr := settings.Load(ctx)
 	if err := EnsureRedactionConfigured(ctx); err != nil || settingsErr != nil {
 		now := time.Now()
 		if startErr := coord.StartRun(now); startErr == nil {
-			recordUploadFinish(ctx, coord, checkpoint.UploadResult{StartedAt: now, FinishedAt: time.Now(),
+			recordUploadFinish(ctx, coord, bgupload.Result{StartedAt: now, FinishedAt: time.Now(),
 				Error: "settings could not be loaded, so nothing was uploaded"})
 		}
 		return false
@@ -311,8 +219,7 @@ func uploadRedactionReady(ctx context.Context, coord *checkpoint.UploadCoordinat
 	return true
 }
 
-// uploadPassWait and uploadPassOPFGate are runCheckpointUploadPass's wait for
-// the user's pushes and its OPF gate; vars so a test can check their order.
+// uploadPassWait and uploadPassOPFGate are vars so a test can check their order.
 var (
 	uploadPassWait    = waitForUserPushes
 	uploadPassOPFGate = opfGateForCheckpointRefs
@@ -320,7 +227,7 @@ var (
 
 // runCheckpointUploadPass uploads the queue for req and records the outcome.
 func runCheckpointUploadPass(ctx context.Context, repo *git.Repository, coord *checkpoint.UploadCoordinator, req checkpoint.UploadRequest) {
-	result := checkpoint.UploadResult{StartedAt: time.Now()}
+	result := bgupload.Result{StartedAt: time.Now()}
 	if err := coord.StartRun(result.StartedAt); err != nil {
 		logging.Warn(ctx, "record checkpoint upload start failed", slog.String("error", err.Error()))
 	}
@@ -330,9 +237,8 @@ func runCheckpointUploadPass(ctx context.Context, repo *git.Repository, coord *c
 		recordUploadFinish(ctx, coord, result)
 	}
 
-	// Lines the hook path writes to the user (the capture announcement, the
-	// ignored-checkpoint_remote warning) have no terminal here: collect them
-	// for the next push to show.
+	// What the hook path would print has no terminal here: keep it for the
+	// next push.
 	var printed bytes.Buffer
 	ctx = withNoticeWriter(ctx, &printed)
 
@@ -346,30 +252,24 @@ func runCheckpointUploadPass(ctx context.Context, repo *git.Repository, coord *c
 		finish("checkpoints no longer sync to " + ps.remote)
 		return
 	}
-	// The hook decided OPF must run, but this process sees it off (another
-	// worktree's settings, or a scanner that failed to configure): uploading
-	// now would ship exactly what the user asked to have scanned.
+	// The hook decided OPF must run but this process sees it off: uploading
+	// would ship what the user asked to have scanned.
 	if req.OPFDecision == checkpoint.UploadOPFRun && !redact.OPFEnabled() {
 		finish("the privacy filter could not run here, so nothing was uploaded")
 		return
 	}
 	uploadPassWait(ctx, coord)
 
-	// After the wait, not before: the wait can run for minutes, and a commit
-	// made meanwhile queues checkpoints the filter has not seen. The flush
-	// below drains and pins the queue straight after this, so it sends only
-	// what the gate just rewrote; refs queued during its between-chunk waits
-	// are not in this drain.
+	// After the wait: a commit made meanwhile queues checkpoints the filter
+	// has not seen, and the flush drains the queue straight after this.
 	if opfErr := uploadPassOPFGate(ctx, repo); opfErr != nil {
 		logging.Warn(ctx, "background checkpoint upload withheld", slog.String("error", opfErr.Error()))
 		finish("withheld before upload (see .entire/logs)")
 		return
 	}
 
-	// The budget bounds the batch too, so running out reads as a budget stop
-	// (the cut chunk rotated, no per-ref retries on a dead context). A push made
-	// during a long upload is waited for between chunks; that wait counts
-	// against the budget.
+	// A push made during a long upload is waited for between chunks, within
+	// the budget.
 	res, err := flushCheckpointRefsQueue(ctx, repo, ps, flushOptions{
 		budget: checkpointUploadDeliveryBudget, boundBatch: true,
 		beforeChunk: func(ctx context.Context) { waitForUserPushes(ctx, coord) }})
@@ -382,35 +282,16 @@ func runCheckpointUploadPass(ctx context.Context, repo *git.Repository, coord *c
 		}
 		warnIgnoredCheckpointRemote(ctx, ps)
 	}
-	result.Pushed, result.Remaining = res.pushed, res.remaining
+	result.Done, result.Remaining = res.pushed, res.remaining
 	if res.remaining > 0 || err != nil {
-		// Printed to the worker's null stderr; kept so the next push can
-		// show why, not only that, refs stayed queued.
 		result.Detail = res.detail
 	}
 	result.Announcement = strings.TrimSpace(printed.String())
 	finish(res.failureLine(err))
 }
 
-func recordUploadFinish(ctx context.Context, coord *checkpoint.UploadCoordinator, res checkpoint.UploadResult) {
+func recordUploadFinish(ctx context.Context, coord *checkpoint.UploadCoordinator, res bgupload.Result) {
 	if err := coord.FinishRun(res); err != nil {
 		logging.Warn(ctx, "record checkpoint upload result failed", slog.String("error", err.Error()))
-	}
-}
-
-// unsetRepoOverrideEnv removes the git repo-selector variables
-// gitrepo.EnvWithoutRepoOverrides filters, from this process's environment.
-func unsetRepoOverrideEnv() {
-	keep := make(map[string]bool)
-	for _, kv := range gitrepo.EnvWithoutRepoOverrides() {
-		keep[kv] = true
-	}
-	for _, kv := range os.Environ() {
-		if keep[kv] {
-			continue
-		}
-		if name, _, ok := strings.Cut(kv, "="); ok {
-			os.Unsetenv(name)
-		}
 	}
 }
