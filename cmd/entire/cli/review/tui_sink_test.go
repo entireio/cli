@@ -2,6 +2,7 @@ package review
 
 import (
 	"bytes"
+	"io"
 	"sync"
 	"testing"
 	"time"
@@ -464,5 +465,67 @@ func TestTUISink_WaitJoinsPump(t *testing.T) {
 	case <-sink.pumpDone:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Wait returned before the pump goroutine exited")
+	}
+}
+
+// TestTUISink_DarkBackgroundFromDashboardQuery drives the real Bubble Tea
+// program: the dashboard asks for the background colour at start, the reply
+// arrives on its input, and DarkBackground reports it. This is the answer the
+// judge's verdict renders with, so nothing else queries the terminal while the
+// dashboard reads its input.
+func TestTUISink_DarkBackgroundFromDashboardQuery(t *testing.T) {
+	t.Parallel()
+	input, reply := io.Pipe()
+	sink := NewTUISink([]string{"agent-a"}, func() {}, io.Discard, input, false)
+	sink.Start()
+	t.Cleanup(func() {
+		finishAndDismissTUI(t, sink, reviewtypes.RunSummary{})
+		reply.Close()
+	})
+
+	// OSC 11 reply for a white background; the dashboard's input reader
+	// consumes it, so the write returns once Bubble Tea has read it.
+	if _, err := reply.Write([]byte("\x1b]11;rgb:ffff/ffff/ffff\x07")); err != nil {
+		t.Fatalf("write background reply: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	// Check the recorded answer, not DarkBackground(): its no-answer fallback
+	// could already say light if the environment's COLORFGBG does.
+	for sink.background.state.Load() != backgroundLight {
+		if time.Now().After(deadline) {
+			t.Fatal("DarkBackground() never reported the light background the terminal answered")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestTerminalBackground_RecordedAnswerWins(t *testing.T) {
+	t.Parallel()
+	var b terminalBackground
+	b.record(false)
+	if b.isDark() {
+		t.Error("isDark() = true after a light answer")
+	}
+	b.record(true)
+	if !b.isDark() {
+		t.Error("isDark() = false after a dark answer")
+	}
+}
+
+// TestTerminalBackground_NoAnswerFallsBackToEnv covers terminals that never
+// answer and sinks built without a dashboard model: termenv's COLORFGBG
+// fallback, otherwise dark. Not parallel: sets COLORFGBG.
+func TestTerminalBackground_NoAnswerFallsBackToEnv(t *testing.T) {
+	t.Setenv("COLORFGBG", "0;15")
+	if (&terminalBackground{}).isDark() {
+		t.Error("unanswered isDark() = true with COLORFGBG naming a white background")
+	}
+	if newTUISinkWithProgram(nil).DarkBackground() {
+		t.Error("DarkBackground() without a dashboard model ignored COLORFGBG")
+	}
+	t.Setenv("COLORFGBG", "")
+	if !(&terminalBackground{}).isDark() {
+		t.Error("unanswered isDark() = false with no COLORFGBG; want dark")
 	}
 }

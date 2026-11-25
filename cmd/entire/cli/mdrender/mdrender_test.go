@@ -156,3 +156,41 @@ func TestRender_EmptyInputDoesNotPanic(t *testing.T) {
 		_ = out // result content irrelevant; not panicking is the assertion
 	}
 }
+
+// TestRenderForWriterWithBackground_NonTTYSkipsBackground verifies the
+// background callback only runs when the writer gets styled output, so
+// redirected output never triggers a terminal query.
+func TestRenderForWriterWithBackground_NonTTYSkipsBackground(t *testing.T) {
+	t.Parallel()
+	called := false
+	out, err := mdrender.RenderForWriterWithBackground(&bytes.Buffer{}, "# Title", func() bool {
+		called = true
+		return true
+	})
+	if err != nil {
+		t.Fatalf("RenderForWriterWithBackground: %v", err)
+	}
+	if out != "# Title" {
+		t.Errorf("out = %q, want raw markdown", out)
+	}
+	if called {
+		t.Error("background callback ran for a non-terminal writer")
+	}
+}
+
+// Not parallel: sets COLORFGBG.
+func TestDarkBackgroundFromEnv(t *testing.T) {
+	for value, want := range map[string]bool{
+		"":        true,  // unset: dark default
+		"15;0":    true,  // white on black
+		"0;15":    false, // black on white
+		"0;7":     false, // light gray background
+		"0;bogus": true,
+		"0;999":   true, // out of range
+	} {
+		t.Setenv("COLORFGBG", value)
+		if got := mdrender.DarkBackgroundFromEnv(); got != want {
+			t.Errorf("COLORFGBG=%q: DarkBackgroundFromEnv() = %v, want %v", value, got, want)
+		}
+	}
+}
