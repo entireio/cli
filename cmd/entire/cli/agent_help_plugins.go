@@ -240,6 +240,41 @@ func agentHelpDescriptionRuneRefused(r rune) bool {
 	return !unicode.In(r, unicode.L, unicode.N, unicode.P, unicode.S)
 }
 
+// agentHelpPluginsFirstHeading heads the plugins with agent guidance near the
+// top of agent-help, before the commands. A live run showed Codex run
+// `entire agent-help`, read only the start of its long output, and take it to
+// be about entire's own commands: the listing at the end, the only mention of
+// stream's guidance, went unread, and it edited a file a teammate's live
+// session was editing. Claude and OpenCode followed the listing at the end.
+const agentHelpPluginsFirstHeading = "Before you start — plugins with guidance that may bear on your task; run each first and follow it:"
+
+// renderAgentHelpPluginsFirst renders, near the top of agent-help, a command
+// line for each plugin that declared agent_help (at most agentHelpPluginsMax,
+// as the listing at the end). It is empty when none did: plugins without
+// guidance are listed only at the end, as the user's to run.
+func renderAgentHelpPluginsFirst(listing agentHelpPluginListing) string {
+	var guided []agentHelpPlugin
+	width := 0
+	for _, p := range listing.Plugins {
+		if p.Help != "" {
+			guided = append(guided, p)
+			width = max(width, len(p.Help))
+		}
+	}
+	if len(guided) == 0 {
+		return ""
+	}
+	// Names are ASCII (agentHelpPluginNameRE), so the command's length is its
+	// width; capped as the listing's name column is.
+	width = min(width, len("entire agent-help ")+agentHelpPluginColumnMax)
+	var b strings.Builder
+	b.WriteString("\n" + agentHelpPluginsFirstHeading + "\n")
+	for _, p := range guided {
+		fmt.Fprintf(&b, "  %s\n", strings.TrimRight(fmt.Sprintf("%-*s  %s", width, p.Help, p.Description), " "))
+	}
+	return b.String()
+}
+
 // renderAgentHelpPlugins renders the installed-plugins section of the
 // top-level text, or "" when there are none: first the plugins that declared
 // agent_help, whose guidance an agent should read when it may bear on its task

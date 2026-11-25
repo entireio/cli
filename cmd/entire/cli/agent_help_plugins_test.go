@@ -108,6 +108,24 @@ func TestAgentHelpTopListsInstalledPlugins(t *testing.T) { //nolint:paralleltest
 	if strings.Index(out, agentHelpPluginsHeader) > strings.Index(out, "Drill in for exact") {
 		t.Error("the plugin section should come before the drill-in footer")
 	}
+	// The plugins with guidance are also named before the commands, so an
+	// agent that reads only the start of the output (Codex cuts it) still
+	// sees them; the others only at the end.
+	first, rest, ok := strings.Cut(out, "When to use entire")
+	if !ok {
+		t.Fatalf("no commands section:\n%s", out)
+	}
+	if !strings.Contains(first, "\n"+agentHelpPluginsFirstHeading+"\n  entire agent-help stream  Check live sessions before editing\n") {
+		t.Errorf("no pointer to stream's guidance before the commands:\n%s", first)
+	}
+	for _, unwanted := range []string{"zeta", "evil", "Shadowed by the built-in"} {
+		if strings.Contains(first, unwanted) {
+			t.Errorf("the pointer before the commands names %q:\n%s", unwanted, first)
+		}
+	}
+	if strings.Contains(rest, agentHelpPluginsFirstHeading) {
+		t.Error("the pointer is repeated after the commands")
+	}
 
 	raw, err := runAgentHelpListing(NewRootCmd(), nil, agentHelpTestRepo, true, true, true)
 	if err != nil {
@@ -162,7 +180,7 @@ func TestAgentHelpTopWithoutPlugins(t *testing.T) { //nolint:paralleltest // mut
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(out, agentHelpPluginsHeader) {
+	if strings.Contains(out, agentHelpPluginsHeader) || strings.Contains(out, agentHelpPluginsFirstHeading) {
 		t.Errorf("plugin section with no plugins installed:\n%s", out)
 	}
 	raw, err := runAgentHelpListing(NewRootCmd(), nil, agentHelpTestRepo, true, true, true)
@@ -462,6 +480,9 @@ func TestAgentHelpLocalInstallListsTheNameOnly(t *testing.T) { //nolint:parallel
 			listing := agentHelpInstalledPlugins(NewRootCmd())
 			if want := []agentHelpPlugin{{Name: "stream"}}; !slices.Equal(listing.Plugins, want) {
 				t.Errorf("listing = %+v, want %+v", listing.Plugins, want)
+			}
+			if got := renderAgentHelpPluginsFirst(listing); got != "" {
+				t.Errorf("a plugin with no recorded agent_help is pointed at before the commands:\n%s", got)
 			}
 		})
 	}

@@ -926,6 +926,7 @@ func renderAgentHelpTop(rootCmd *cobra.Command, repoLine string, trailsEnabled b
 	}
 	b.WriteString("\n\n")
 	b.WriteString(agentHelpRepoBlock(repoLine))
+	b.WriteString(renderAgentHelpPluginsFirst(plugins))
 
 	var listed []*cobra.Command
 	rest := map[agentHelpAudience][]string{}
