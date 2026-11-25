@@ -573,7 +573,7 @@ func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Even
 	// Read before taking the session lock: a small local file, no network.
 	var live liveSessionsBlock
 	if cache, ok := loadLiveSessionsCache(ctx); ok {
-		live = liveSessionsBlockFor(cache, event.SessionID, time.Now())
+		live = liveSessionsBlockFor(cache, liveSessionOwnIDs(ag, event), time.Now())
 	}
 	var injectBase, injectTrails, injectLive, normalSession bool
 	mutErr := strategy.MutateSessionState(ctx, event.SessionID, func(state *strategy.SessionState) error {

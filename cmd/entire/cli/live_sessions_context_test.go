@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/pi"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -32,7 +33,7 @@ func TestLiveSessionsBlock_NamesLiveTeammatesWithoutFiles(t *testing.T) {
 	t.Parallel()
 	cache := liveTestCache(liveSessionEntry{SessionID: "s-1", Agent: "Claude Code", Login: "sleepercell"})
 
-	block := liveSessionsBlockFor(cache, "mine", liveTestNow)
+	block := liveSessionsBlockFor(cache, []string{"mine"}, liveTestNow)
 
 	require.True(t, block.Known)
 	require.NotEmpty(t, block.Fingerprint)
@@ -46,7 +47,7 @@ func TestLiveSessionsBlock_AddsOverlapsWithYourChanges(t *testing.T) {
 		liveSessionEntry{SessionID: "s-2", Agent: "Codex", Login: "bob", Overlap: []string{"src/route.ts"}, OverlapTotal: 1, LastEventAt: liveTestNow.Add(-time.Hour)},
 	)
 
-	block := liveSessionsBlockFor(cache, "mine", liveTestNow)
+	block := liveSessionsBlockFor(cache, []string{"mine"}, liveTestNow)
 
 	require.Contains(t, block.Text, "`bob` (Codex), already overlapping your changes: `src/route.ts`; `ann` (Claude Code). ",
 		"overlapping sessions first")
@@ -57,38 +58,54 @@ func TestLiveSessionsBlock_UnknownWhenCacheMissingOrStale(t *testing.T) {
 	t.Parallel()
 	entry := liveSessionEntry{SessionID: "s-1", Login: "a"}
 
-	require.False(t, liveSessionsBlockFor(nil, "mine", liveTestNow).Known, "no cache")
+	require.False(t, liveSessionsBlockFor(nil, []string{"mine"}, liveTestNow).Known, "no cache")
 
 	stale := liveTestCache(entry)
 	stale.FetchedAt = liveTestNow.Add(-liveSessionsMaxAge - time.Second)
-	require.False(t, liveSessionsBlockFor(stale, "mine", liveTestNow).Known, "older than the hard limit")
+	require.False(t, liveSessionsBlockFor(stale, []string{"mine"}, liveTestNow).Known, "older than the hard limit")
 
 	future := liveTestCache(entry)
 	future.FetchedAt = liveTestNow.Add(time.Hour)
-	require.False(t, liveSessionsBlockFor(future, "mine", liveTestNow).Known, "a fetch time in the future is not trusted")
+	require.False(t, liveSessionsBlockFor(future, []string{"mine"}, liveTestNow).Known, "a fetch time in the future is not trusted")
 
 	zero := liveTestCache(entry)
 	zero.FetchedAt = time.Time{}
-	require.False(t, liveSessionsBlockFor(zero, "mine", liveTestNow).Known)
+	require.False(t, liveSessionsBlockFor(zero, []string{"mine"}, liveTestNow).Known)
 }
 
 func TestLiveSessionsBlock_OwnSessionAloneSaysNothing(t *testing.T) {
 	t.Parallel()
 	cache := liveTestCache(liveSessionEntry{SessionID: "mine", Login: "me", You: true, Overlap: []string{"a.go"}, OverlapTotal: 1})
 
-	block := liveSessionsBlockFor(cache, "mine", liveTestNow)
+	block := liveSessionsBlockFor(cache, []string{"mine"}, liveTestNow)
 
 	require.True(t, block.Known, "a fresh cache is known even when nothing is left to say")
 	require.Empty(t, block.Text)
 	require.Empty(t, block.Fingerprint)
-	require.Empty(t, liveSessionsBlockFor(liveTestCache(), "mine", liveTestNow).Text)
+	require.Empty(t, liveSessionsBlockFor(liveTestCache(), []string{"mine"}, liveTestNow).Text)
+}
+
+func TestLiveSessionsBlock_LeavesOutEveryOwnIDAndItsSubagents(t *testing.T) {
+	t.Parallel()
+	cache := liveTestCache(
+		liveSessionEntry{SessionID: "name-id", Login: "me", You: true},
+		liveSessionEntry{SessionID: "header-id", Login: "me", You: true},
+		// Claude's subagents stream as <session>:agent:<id>.
+		liveSessionEntry{SessionID: "header-id:agent:a1", Login: "me", You: true},
+		liveSessionEntry{SessionID: "name-id-2", Login: "bob"},
+	)
+
+	block := liveSessionsBlockFor(cache, []string{"name-id", "header-id"}, liveTestNow)
+
+	require.Contains(t, block.Text, "`bob`")
+	require.NotContains(t, block.Text, "`me`")
 }
 
 func TestLiveSessionsBlock_LabelsTheCallersOtherSessions(t *testing.T) {
 	t.Parallel()
 	cache := liveTestCache(liveSessionEntry{SessionID: "other", Agent: "Codex", Login: "me", You: true})
 
-	block := liveSessionsBlockFor(cache, "mine", liveTestNow)
+	block := liveSessionsBlockFor(cache, []string{"mine"}, liveTestNow)
 
 	require.Contains(t, block.Text, "`me` (you, another session) (Codex)")
 }
@@ -105,7 +122,7 @@ func TestLiveSessionsBlock_CapsSessionsAndFiles(t *testing.T) {
 	sessions[0].Overlap = []string{"f1", "f2", "f3", "f4", "f5", "f6", "f7"}
 	sessions[0].OverlapTotal = 9
 
-	block := liveSessionsBlockFor(liveTestCache(sessions...), "mine", liveTestNow)
+	block := liveSessionsBlockFor(liveTestCache(sessions...), []string{"mine"}, liveTestNow)
 
 	require.Contains(t, block.Text, "`user0`", "newest first")
 	require.Contains(t, block.Text, "`user2`")
@@ -125,7 +142,7 @@ func TestLiveSessionsBlock_SanitisesHostileText(t *testing.T) {
 		OverlapTotal: 4,
 	})
 
-	block := liveSessionsBlockFor(cache, "mine", liveTestNow)
+	block := liveSessionsBlockFor(cache, []string{"mine"}, liveTestNow)
 
 	require.NotContains(t, block.Text, "\n")
 	require.NotContains(t, block.Text, "\x1b")
@@ -148,7 +165,7 @@ func TestLiveSessionsBlock_LongTextIsCut(t *testing.T) {
 		Overlap: []string{strings.Repeat("p/", 400) + "x.go"}, OverlapTotal: 1,
 	})
 
-	block := liveSessionsBlockFor(cache, "mine", liveTestNow)
+	block := liveSessionsBlockFor(cache, []string{"mine"}, liveTestNow)
 
 	require.Less(t, len(block.Text), 900)
 }
@@ -160,7 +177,7 @@ func TestLiveSessionsBlock_UnnamedOwnerIsATeammate(t *testing.T) {
 		liveSessionEntry{SessionID: "s-2"},
 	)
 
-	block := liveSessionsBlockFor(cache, "mine", liveTestNow)
+	block := liveSessionsBlockFor(cache, []string{"mine"}, liveTestNow)
 
 	require.Contains(t, block.Text, "`CI bot`")
 	require.Contains(t, block.Text, "a teammate")
@@ -171,23 +188,23 @@ func TestLiveSessionsBlock_FingerprintFollowsTheSet(t *testing.T) {
 	a := liveSessionEntry{SessionID: "s-a", Login: "a", Overlap: []string{"x", "y"}, OverlapTotal: 2}
 	b := liveSessionEntry{SessionID: "s-b", Login: "b"}
 
-	fp1 := liveSessionsBlockFor(liveTestCache(a, b), "mine", liveTestNow).Fingerprint
+	fp1 := liveSessionsBlockFor(liveTestCache(a, b), []string{"mine"}, liveTestNow).Fingerprint
 	reordered := a
 	reordered.Overlap = []string{"y", "x"}
-	require.Equal(t, fp1, liveSessionsBlockFor(liveTestCache(b, reordered), "mine", liveTestNow).Fingerprint,
+	require.Equal(t, fp1, liveSessionsBlockFor(liveTestCache(b, reordered), []string{"mine"}, liveTestNow).Fingerprint,
 		"order doesn't change the set")
 
 	later := a
 	later.LastEventAt = liveTestNow
-	require.Equal(t, fp1, liveSessionsBlockFor(liveTestCache(later, b), "mine", liveTestNow).Fingerprint,
+	require.Equal(t, fp1, liveSessionsBlockFor(liveTestCache(later, b), []string{"mine"}, liveTestNow).Fingerprint,
 		"activity alone doesn't change the set")
 
 	more := a
 	more.Overlap = []string{"x", "y", "w"}
-	require.NotEqual(t, fp1, liveSessionsBlockFor(liveTestCache(more, b), "mine", liveTestNow).Fingerprint, "a new overlap")
-	require.NotEqual(t, fp1, liveSessionsBlockFor(liveTestCache(a), "mine", liveTestNow).Fingerprint, "a session ended")
+	require.NotEqual(t, fp1, liveSessionsBlockFor(liveTestCache(more, b), []string{"mine"}, liveTestNow).Fingerprint, "a new overlap")
+	require.NotEqual(t, fp1, liveSessionsBlockFor(liveTestCache(a), []string{"mine"}, liveTestNow).Fingerprint, "a session ended")
 	c := liveSessionEntry{SessionID: "s-c", Login: "c"}
-	require.NotEqual(t, fp1, liveSessionsBlockFor(liveTestCache(a, b, c), "mine", liveTestNow).Fingerprint,
+	require.NotEqual(t, fp1, liveSessionsBlockFor(liveTestCache(a, b, c), []string{"mine"}, liveTestNow).Fingerprint,
 		"a teammate went live")
 }
 
@@ -555,4 +572,46 @@ func TestHandleLifecycleSessionStart_SpawnsLiveSessionsRefresh(t *testing.T) { /
 	event := &agent.Event{Type: agent.SessionStart, SessionID: "test-live-start-2", Timestamp: time.Now()}
 	require.NoError(t, handleLifecycleSessionStart(context.Background(), newMockContextInjectorAgent(), event))
 	require.Equal(t, int32(1), atomic.LoadInt32(spawns))
+}
+
+// mockPiLikeAgent is an injecting agent that, like Pi, can read its session's
+// ID from the session file's header (with Pi's own reader).
+type mockPiLikeAgent struct {
+	*mockContextInjectorAgent
+
+	pi *pi.PiAgent
+}
+
+func (m mockPiLikeAgent) HeaderSessionID(sessionFile string) string {
+	return m.pi.HeaderSessionID(sessionFile)
+}
+
+var _ liveSessionHeaderIDer = (*pi.PiAgent)(nil)
+
+// A Pi session `entire stream pi` started: the hook knows it by the file
+// name's ID, the stream by the header's. Its own live session must not be
+// listed under either.
+func TestHandleLifecycleTurnStart_LiveSessionsLeaveOutPisOwnStreamedSession(t *testing.T) { //nolint:paralleltest // t.Chdir, t.Setenv
+	const nameID = "019a0000-0000-7000-8000-000000000001"
+	const headerID = "019a0000-0000-7000-8000-0000000000ff"
+	setupContextInjectionRepo(t, nameID, false)
+	withPluginDir(t)
+	countLiveSessionsSpawns(t)
+	piStore := t.TempDir()
+	t.Setenv("PI_CODING_AGENT_SESSION_DIR", piStore)
+	t.Setenv("ENTIRE_TEST_PI_SESSION_DIR", "")
+	sessionFile := filepath.Join(piStore, "2026-11-26T12-00-00-000Z_"+nameID+".jsonl")
+	require.NoError(t, os.WriteFile(sessionFile, []byte(`{"type":"session","version":3,"id":"`+headerID+`","cwd":"/repo"}`+"\n"), 0o600))
+	saveLiveTestCache(t, time.Now(),
+		liveSessionEntry{SessionID: headerID, Agent: "Pi", Login: "me", You: true},
+		liveSessionEntry{SessionID: "s-bob", Agent: "Claude Code", Login: "bob"},
+	)
+	ag := mockPiLikeAgent{mockContextInjectorAgent: newMockContextInjectorAgent(), pi: &pi.PiAgent{}}
+
+	event := &agent.Event{Type: agent.TurnStart, SessionID: nameID, SessionRef: sessionFile, Prompt: "hello", Timestamp: time.Now()}
+	require.NoError(t, handleLifecycleTurnStart(context.Background(), ag, event))
+
+	require.Len(t, *ag.injected, 1)
+	require.Contains(t, (*ag.injected)[0], "`bob`")
+	require.NotContains(t, (*ag.injected)[0], "`me`", "the agent's own session, known to the stream by its header ID")
 }

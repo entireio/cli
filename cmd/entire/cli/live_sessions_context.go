@@ -480,11 +480,43 @@ type liveSessionsBlock struct {
 const liveSessionsCheckInstruction = "Before you edit a file, run `entire stream list --live --touching -- <file>`; " +
 	"if it lists one of these sessions, tell the user who is working on it and ask whether to go ahead."
 
-// liveSessionsBlockFor builds the block for the session ownID from cache:
+// liveSessionHeaderIDer is an agent whose stream may know a session by an ID
+// read from its session file rather than the one its hook gives (Pi: see
+// (*pi.PiAgent).HeaderSessionID).
+type liveSessionHeaderIDer interface {
+	HeaderSessionID(sessionFile string) string
+}
+
+// liveSessionOwnIDs is every ID the caller's own live session may be streamed
+// under: the hook's session ID and, for an agent whose stream reads the ID
+// from the session file (event.SessionRef), that one.
+func liveSessionOwnIDs(ag agent.Agent, event *agent.Event) []string {
+	own := []string{event.SessionID}
+	if h, ok := ag.(liveSessionHeaderIDer); ok && event.SessionRef != "" {
+		if id := h.HeaderSessionID(event.SessionRef); id != "" && id != event.SessionID {
+			own = append(own, id)
+		}
+	}
+	return own
+}
+
+// liveSessionIsOwn reports whether id is one of own or a subagent of one:
+// entire-stream streams a Claude subagent as <session>:agent:<id>.
+func liveSessionIsOwn(id string, own []string) bool {
+	for _, o := range own {
+		if o != "" && (id == o || strings.HasPrefix(id, o+":")) {
+			return true
+		}
+	}
+	return false
+}
+
+// liveSessionsBlockFor builds the block for the caller, whose own live
+// session may be streamed under any of own (liveSessionOwnIDs), from cache:
 // every other live session, those overlapping this checkout's changes first
 // and then the newest, at most liveSessionsShownMax of them with at most
 // liveSessionsShownFilesMax overlapping files each, the rest counted.
-func liveSessionsBlockFor(cache *liveSessionsCache, ownID string, now time.Time) liveSessionsBlock {
+func liveSessionsBlockFor(cache *liveSessionsCache, own []string, now time.Time) liveSessionsBlock {
 	if !liveSessionsCacheFresh(cache, now, liveSessionsMaxAge) {
 		return liveSessionsBlock{}
 	}
@@ -494,7 +526,7 @@ func liveSessionsBlockFor(cache *liveSessionsCache, ownID string, now time.Time)
 	}
 	var sessions []shown
 	for _, e := range cache.Sessions {
-		if e.SessionID == "" || e.SessionID == ownID {
+		if e.SessionID == "" || liveSessionIsOwn(e.SessionID, own) {
 			continue
 		}
 		var files []string
