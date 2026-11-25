@@ -302,6 +302,7 @@ func TestTurnEndContinuesAfterSandboxedPush(t *testing.T) {
 		commitChange(t, dir)
 		head = strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", "HEAD"))
 		findingsBranchTrailHead = func(context.Context, string, string) (string, bool) { return head, true }
+		appendTranscript(t, transcript, `{"type":"tool_use","command":"git push"}`)
 	})
 	require.Contains(t, out, `"decision":"block"`)
 	require.Contains(t, out, head)
@@ -317,11 +318,40 @@ func TestTurnEndContinuesAfterSandboxedPush(t *testing.T) {
 func TestTurnEndDoesNotContinueForUnpushedCommit(t *testing.T) {
 	// Not parallel: changes the working directory, os.Stdout and package hooks.
 	dir, transcript := setupFindingsBranch(t)
+	lookups := 0
 	findingsBranchTrailHead = func(context.Context, string, string) (string, bool) {
+		lookups++
 		return "1111111111111111111111111111111111111111", true
 	}
 	out := runFindingsTurn(t, continuingMockAgent{newMockAgent()}, "test-findings-unpushed", transcript, func() {
 		commitChange(t, dir)
 	})
+	assert.Empty(t, out)
+	assert.Zero(t, lookups, "no push in the transcript: no server check")
+
+	out = runFindingsTurn(t, continuingMockAgent{newMockAgent()}, "test-findings-unpushed", transcript, func() {
+		commitChange(t, dir)
+		appendTranscript(t, transcript, `{"type":"tool_use","command":"git push"}`)
+	})
 	assert.Empty(t, out, "the server's head is not HEAD, so HEAD was not pushed")
+	assert.Equal(t, 1, lookups)
+}
+
+func appendTranscript(t *testing.T, path, line string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	require.NoError(t, err)
+	_, err = f.WriteString(line + "\n")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+}
+
+func TestTranscriptTailMentionsPush(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "t.jsonl")
+	require.NoError(t, os.WriteFile(path, []byte(`{"command":"git push -u origin HEAD"}`+"\n"+strings.Repeat("x", transcriptTailScanBytes)), 0o600))
+	assert.False(t, transcriptTailMentionsPush(path), "only the tail is searched")
+	require.NoError(t, os.WriteFile(path, []byte(`{"command":"git push"}`), 0o600))
+	assert.True(t, transcriptTailMentionsPush(path))
+	assert.False(t, transcriptTailMentionsPush(filepath.Join(t.TempDir(), "missing")))
 }

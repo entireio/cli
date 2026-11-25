@@ -1,8 +1,11 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"slices"
@@ -143,7 +146,7 @@ func (f *findingsContinuation) finish(ctx context.Context, event *agent.Event) {
 	// leaves the tracking ref behind; the server then says whether HEAD was
 	// pushed.
 	recorded := up.SHA == up.Head && pushedThisTurn(ctx, up, f.turnStart)
-	if !recorded && up.SHA == up.Head {
+	if !recorded && (up.SHA == up.Head || !transcriptTailMentionsPush(event.SessionRef)) {
 		return
 	}
 	if !findingsContinuationAllowedForSession(ctx, event.SessionID, up.Head) {
@@ -187,6 +190,36 @@ func pushedThisTurn(ctx context.Context, up branchUpstream, turnStart time.Time)
 		return false
 	}
 	return slices.Contains(shas, up.Head)
+}
+
+// transcriptTailScanBytes is how much of the end of the turn's transcript is
+// searched for a push command. The turn just ended, so a push it ran is near
+// the end; a match from an earlier turn only costs the server check.
+const transcriptTailScanBytes = 256 << 10
+
+// transcriptTailMentionsPush is the cheap local gate for the server check:
+// without a `git push` in the transcript's tail, a tracking ref behind HEAD
+// means commits not pushed yet, the common case, and the stop makes no API
+// read. The agent recorded the transcript path in its hook payload.
+func transcriptTailMentionsPush(transcriptPath string) bool {
+	if transcriptPath == "" {
+		return false
+	}
+	f, err := os.Open(transcriptPath) //nolint:gosec // the agent's own transcript, from its hook payload
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	offset := max(info.Size()-transcriptTailScanBytes, 0)
+	buf := make([]byte, info.Size()-offset)
+	if _, err := f.ReadAt(buf, offset); err != nil && !errors.Is(err, io.EOF) {
+		return false
+	}
+	return bytes.Contains(buf, []byte("git push"))
 }
 
 // findingsContinuationAllowedForSession requires an ordinary session (not one
