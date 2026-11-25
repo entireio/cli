@@ -218,9 +218,8 @@ func TestExtension_HookStdinErrorDoesNotCrash(t *testing.T) {
 }
 
 // The user-level extension registers nothing where Pi also loads this
-// project's own current Entire extension (line endings aside), and handles
-// the session where there is none, only someone else's file, or an older
-// render that may not run on this Pi.
+// project's own Entire extension, of any CLI version, and handles the
+// session where there is none or only someone else's file.
 func TestExtension_UserLevelStepsAsideForTheProjectExtension(t *testing.T) {
 	t.Parallel()
 	stale := strings.Replace(renderExtension(), "fireHook", "fireHookOld", 1)
@@ -231,7 +230,7 @@ func TestExtension_UserLevelStepsAsideForTheProjectExtension(t *testing.T) {
 		"no project extension":    {},
 		"project extension":       {project: renderExtension(), stepAway: true},
 		"CRLF project extension":  {project: strings.ReplaceAll(renderExtension(), "\n", "\r\n"), stepAway: true},
-		"older project extension": {project: stale},
+		"older project extension": {project: stale, stepAway: true},
 		"someone else's index.ts": {project: "export default function () {}\n"},
 	} {
 		t.Run(name, func(t *testing.T) {

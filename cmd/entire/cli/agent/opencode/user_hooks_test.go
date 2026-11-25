@@ -77,17 +77,18 @@ console.log(registered)
 process.exit(0)
 `
 
-// The user-level plugin registers nothing where OpenCode also loads the
-// project's own current Entire plugin (searching up from the directory to
-// the repository root), and handles the session otherwise, on both OpenCode
-// entry points: an older render may not run on this OpenCode, and OpenCode 2
-// does not load the legacy plugins directory.
+// The user-level plugin registers nothing where OpenCode also runs a
+// project's own Entire plugin of any CLI version (searching up from the
+// directory to the repository root), and handles the session otherwise, on
+// both OpenCode entry points: OpenCode 2 neither loads the legacy plugins
+// directory nor runs a copy without setup.
 func TestUserLevelPlugin_StepsAsideForTheProjectPlugin(t *testing.T) {
 	t.Parallel()
 	if _, err := exec.LookPath("node"); err != nil {
 		t.Skip("node not installed")
 	}
 	stale := strings.Replace(renderPlugin(), "hookCmd", "hookCmdOld", 1)
+	preV2 := "// " + entireMarker + "\nexport default async () => ({ event: async () => {} })\n"
 	for name, tc := range map[string]struct {
 		place    string // where the project copy goes, relative to the outer dir
 		content  string
@@ -98,7 +99,8 @@ func TestUserLevelPlugin_StepsAsideForTheProjectPlugin(t *testing.T) {
 		"no project plugin":           {},
 		"project plugin at repo root": {place: "repo/.opencode/plugin/entire.ts", content: renderPlugin(), stepAway: true},
 		"CRLF project plugin":         {place: "repo/.opencode/plugin/entire.ts", content: strings.ReplaceAll(renderPlugin(), "\n", "\r\n"), stepAway: true},
-		"older project plugin":        {place: "repo/.opencode/plugin/entire.ts", content: stale},
+		"older project plugin":        {place: "repo/.opencode/plugin/entire.ts", content: stale, stepAway: true},
+		"pre-v2 project plugin":       {place: "repo/.opencode/plugin/entire.ts", content: preV2, stepAway: true, onlyOpenCode1: true},
 		"legacy plugins directory":    {place: "repo/.opencode/plugins/entire.ts", content: renderPlugin(), stepAway: true, onlyOpenCode1: true},
 		"someone else's entire.ts":    {place: "repo/.opencode/plugin/entire.ts", content: "export default {}\n"},
 		"above the repository root":   {place: ".opencode/plugin/entire.ts", content: renderPlugin()},

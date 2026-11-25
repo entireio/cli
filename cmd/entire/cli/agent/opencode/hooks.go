@@ -118,8 +118,8 @@ const (
 
 // renderPluginFor renders the plugin, the user-level variant when userLevel.
 //
-// The user-level variant does nothing where OpenCode also loads a project's
-// current Entire plugin: OpenCode finds .opencode directories by searching up
+// The user-level variant does nothing where OpenCode also runs a project's
+// own Entire plugin: OpenCode finds .opencode directories by searching up
 // from the directory it serves to the repository root, so the same search
 // runs here, per plugin instance (OpenCode 1) or location (OpenCode 2).
 //
@@ -143,22 +143,22 @@ var (
 	})
 	userPluginRender = sync.OnceValue(func() string {
 		return agent.RenderUserLevel(pluginTemplate, true, map[string]string{
-			userLevelImportsLine:     userLevelPluginPrelude(agent.ProjectRenderDigest(projectPluginRender())),
+			userLevelImportsLine:     userLevelPluginPrelude(),
 			userLevelStepAsideV1Line: "  if (userLevelSteppedAside(directory, false)) return {}\n",
 			userLevelStepAsideV2Line: "  if (userLevelSteppedAside(ctx.location.directory, true)) return\n",
 		})
 	})
 )
 
-// userLevelPluginPrelude is the user-level code before the plugin's own. Only
-// a current project plugin counts (see agent.CurrentProjectCopyCheck), and
-// OpenCode 2 loads only the plugin directory, not the legacy plugins one.
-func userLevelPluginPrelude(projectDigest string) string {
+// userLevelPluginPrelude is the user-level code before the plugin's own. Any
+// project Entire plugin this OpenCode runs counts (see agent.ProjectCopyCheck):
+// OpenCode 2 loads only the plugin directory, not the legacy plugins one, and
+// runs only a copy that exports setup.
+func userLevelPluginPrelude() string {
 	return `import { existsSync } from "node:fs"
-import { createHash } from "node:crypto"
 import { dirname, join } from "node:path"
 
-` + agent.UserLevelHeader("", "plugin", userHooksVersion) + agent.CurrentProjectCopyCheck(projectDigest) + `
+` + agent.UserLevelHeader("", "plugin", userHooksVersion) + agent.ProjectCopyCheck(entireMarker) + `
 function userLevelSteppedAside(start: string, openCode2: boolean): boolean {
   let self = ""
   try {
@@ -169,7 +169,7 @@ function userLevelSteppedAside(start: string, openCode2: boolean): boolean {
   for (;;) {
     for (const sub of subs) {
       const candidate = join(dir, ".opencode", sub, "entire.ts")
-      if (candidate !== self && isCurrentProjectCopy(candidate)) return true
+      if (candidate !== self && isEntireProjectCopy(candidate, openCode2)) return true
     }
     if (existsSync(join(dir, ".git"))) return false
     const parent = dirname(dir)

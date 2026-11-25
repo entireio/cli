@@ -91,22 +91,21 @@ const (
 )
 
 // userLevelImports and userLevelStepAside make the user-level extension do
-// nothing where Pi also loads this project's current Entire extension (see
-// agent.CurrentProjectCopyCheck: an older render may not run on this Pi). Pi
+// nothing where Pi also loads this project's own Entire extension, of any CLI
+// version (see agent.ProjectCopyCheck). Pi
 // 0.70 discovers project extensions only in <cwd>/.pi/extensions (no upward
 // search), so that is the one place to look. Checked once per load: /reload,
 // /new and /resume build a new instance and look again.
-func userLevelImports(projectDigest string) string {
+func userLevelImports() string {
 	return `import { readFileSync } from "node:fs";
-import { createHash } from "node:crypto";
 import { join } from "node:path";
 
-` + agent.CurrentProjectCopyCheck(projectDigest)
+` + agent.ProjectCopyCheck(entireMarker)
 }
 
 func userLevelStepAside() string {
 	return agent.UserLevelHeader("  ", "extension", userHooksVersion) +
-		`  if (isCurrentProjectCopy(join(process.cwd(), ".pi", "extensions", "entire", "index.ts"))) return;
+		`  if (isEntireProjectCopy(join(process.cwd(), ".pi", "extensions", "entire", "index.ts"), false)) return;
 `
 }
 
@@ -128,7 +127,7 @@ var (
 	})
 	userExtensionRender = sync.OnceValue(func() string {
 		return agent.RenderUserLevel(baseExtension(), true, map[string]string{
-			userLevelImportsLine:   userLevelImports(agent.ProjectRenderDigest(projectExtensionRender())),
+			userLevelImportsLine:   userLevelImports(),
 			userLevelStepAsideLine: userLevelStepAside(),
 		})
 	})

@@ -494,13 +494,13 @@ OpenCode load both copies, so the user-level one steps aside: Codex's hook
 command carries `--scope=user/v<N>` and exits when the hooks file Codex
 discovers for the checkout is Entire's and approved (unapproved project hooks
 do not run, so the user-level ones must); Pi's extension does nothing when
-`<cwd>/.pi/extensions/entire/index.ts` is this CLI's current project render;
-OpenCode's plugin does nothing when this CLI's current project plugin is in
-`.opencode/plugin` (or, under OpenCode 1, `.opencode/plugins`) between the
-directory it serves and the repository root. Pi and OpenCode compare the
-project file's SHA-256 (line endings aside) with the render the user-level copy
-was built beside, so an older or partial project copy, which may not run on
-the installed agent, never silences the user-level one. Each check is fresh,
+`<cwd>/.pi/extensions/entire/index.ts` is an Entire extension of any CLI
+version; OpenCode's plugin does nothing when an Entire plugin of any CLI
+version is in `.opencode/plugin` (or, under OpenCode 1, `.opencode/plugins`)
+between the directory it serves and the repository root. Under OpenCode 2 the
+project plugin must also export `setup`: an older copy without it does not run
+there, so the user-level plugin does. An older project copy otherwise wins, and
+`doctor` and `status` report it (see Versions). Each check is fresh,
 per event or per load. A prompt that still reaches Entire twice is recorded
 once where a second install can fire it (a user-level `--scope=user` hook, or an
 agent that sends a turn ID): the second turn-start for the same session, prompt
@@ -522,7 +522,8 @@ git (the self-ignore goes once a settings file exists, so `entire enable` still
 leaves it to commit), and Entire contacts entire.io from that repository the
 way it does from any enabled one. A user settings file Entire cannot read (it
 does not parse, or is a symlink) turns global enable off everywhere; the next
-agent session start says so on stderr, and `entire status` (`user_settings_error`
+agent session start says so in the session banner (on stderr for agents
+without one), and `entire status` (`user_settings_error`
 in `--json`) and `entire doctor` name it.
 
 **Consent.** The command explains this and asks you to confirm. `--yes` accepts

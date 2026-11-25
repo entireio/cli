@@ -2,8 +2,6 @@ package agent
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -237,27 +235,22 @@ func UserLevelHeader(indent, kind string, version int) string {
 		indent + "// for itself (its settings, its version), so this copy steps aside there.\n"
 }
 
-// CurrentProjectCopyCheck is the TypeScript function isCurrentProjectCopy(path)
-// for a user-level render: true when path holds exactly the project render
-// whose ProjectRenderDigest is digest, line endings aside. The user-level copy
-// steps aside only for that one: an older or partial project copy may not run
-// on the agent version in use, and stepping aside for it would record nothing.
-// The file using it imports readFileSync (node:fs) and createHash (node:crypto).
-func CurrentProjectCopyCheck(digest string) string {
-	return `function isCurrentProjectCopy(path: string): boolean {
+// ProjectCopyCheck is the TypeScript function isEntireProjectCopy(path,
+// requireSetup) for a user-level render: true when path holds a project copy
+// of Entire's file (one containing marker), whatever CLI version wrote it, so
+// the user-level copy steps aside for it rather than record every event a
+// second time. With requireSetup, the copy must also export OpenCode 2's
+// setup entry point: an older copy without it does not run there. The file
+// using it imports readFileSync (node:fs).
+func ProjectCopyCheck(marker string) string {
+	return `function isEntireProjectCopy(path: string, requireSetup: boolean): boolean {
   try {
-    const text = readFileSync(path, "utf8").replace(/\r\n/g, "\n")
-    return createHash("sha256").update(text).digest("hex") === "` + digest + `"
+    const text = readFileSync(path, "utf8")
+    if (!text.includes(` + strconv.Quote(marker) + `)) return false
+    return !requireSetup || /^export default[^\n]*\bsetup\b/m.test(text)
   } catch {
     return false
   }
 }
 `
-}
-
-// ProjectRenderDigest is the hex SHA-256 of a project render, the value
-// CurrentProjectCopyCheck compares against.
-func ProjectRenderDigest(projectRender string) string {
-	sum := sha256.Sum256([]byte(projectRender))
-	return hex.EncodeToString(sum[:])
 }
