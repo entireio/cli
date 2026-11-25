@@ -652,7 +652,7 @@ func runReviewListAgents(ctx context.Context, cmd *cobra.Command, profileOverrid
 				case reviewerIsolatedWithAdapter(worker, cfg, deps.ReviewerFor):
 					status = reviewIsolatedStatus
 				default:
-					status = "hooks NOT installed; run `entire configure --agent " + reviewAgentName(worker, cfg) + "`"
+					status = "hooks NOT installed; run `entire agent add " + reviewAgentName(worker, cfg) + "`"
 				}
 				fmt.Fprintf(out, "  %s: %s\n", reviewWorkerLabel(worker, cfg), status)
 			}
@@ -666,7 +666,7 @@ func runReviewListAgents(ctx context.Context, cmd *cobra.Command, profileOverrid
 	catalog := availableReviewAgents(installed, deps.ReviewerFor)
 	fmt.Fprintln(out, "No review profile configured yet. Available review agents:")
 	for _, e := range catalog {
-		status := "not installed; run `entire configure --agent " + e.Name + "`"
+		status := "not installed; run `entire agent add " + e.Name + "`"
 		if e.Installed {
 			status = reviewHooksInstalledStatus
 		}
@@ -707,10 +707,10 @@ func availableReviewAgents(installed []types.AgentName, reviewerFor func(string)
 func printReviewConfigCatalog(out io.Writer, profileName string, catalog []reviewAgentCatalogEntry, s *settings.EntireSettings) {
 	fmt.Fprintln(out, "Available review agents:")
 	if len(catalog) == 0 {
-		fmt.Fprintln(out, "  (none; install one with `entire configure --agent claude-code`)")
+		fmt.Fprintln(out, "  (none; install one with `entire agent add claude-code`)")
 	}
 	for _, e := range catalog {
-		status := "not installed; run `entire configure --agent " + e.Name + "`"
+		status := "not installed; run `entire agent add " + e.Name + "`"
 		if e.Installed {
 			status = reviewHooksInstalledStatus
 		}
@@ -1187,7 +1187,7 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOver
 
 	if missing := missingInstalledProfileAgents(profile.Agents, reviewerHooksReady(installed, deps.ReviewerFor)); len(missing) > 0 {
 		cmd.SilenceUsage = true
-		err := fmt.Errorf("hooks are not installed for review profile %q agent(s): %s; run `entire configure --agent <name>` first, or edit the profile", profileName, strings.Join(missing, ", "))
+		err := fmt.Errorf("hooks are not installed for review profile %q agent(s): %s; run `entire agent add <name>` first, or edit the profile", profileName, strings.Join(missing, ", "))
 		fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
 		return silentErr(err)
 	}
@@ -1300,7 +1300,7 @@ func runSingleAgentPath(
 	if !reviewerHooksReady(installed, deps.ReviewerFor)(workerName, cfg) {
 		cmd.SilenceUsage = true
 		fmt.Fprintf(cmd.ErrOrStderr(),
-			"Hooks are not installed for %q. Run `entire configure --agent %s` first, "+
+			"Hooks are not installed for %q. Run `entire agent add %s` first, "+
 				"or remove %q from review settings.\n",
 			agentName, agentName, displayName)
 		return silentErr(fmt.Errorf("hooks not installed for %s", agentName))
