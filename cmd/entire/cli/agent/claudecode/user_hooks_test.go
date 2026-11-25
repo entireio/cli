@@ -237,9 +237,21 @@ func TestPromptHookMayFireTwice(t *testing.T) {
 			t.Chdir(repo)
 			writeClaudeSettings(t, userDir, tc.user)
 			writeClaudeSettings(t, filepath.Join(repo, ".claude"), tc.project)
-			if got := PromptHookMayFireTwice(context.Background()); got != tc.want {
+			if got := (&ClaudeCodeAgent{}).PromptHookMayFireTwice(context.Background()); got != tc.want {
 				t.Errorf("PromptHookMayFireTwice() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// Lifecycle reaches these checks only through the agent capabilities.
+func TestClaudeCodeImplementsLifecycleHookCapabilities(t *testing.T) {
+	t.Parallel()
+	ag := &ClaudeCodeAgent{}
+	if _, ok := agent.AsPromptRepeatReporter(ag); !ok {
+		t.Error("Claude Code must implement agent.PromptRepeatReporter")
+	}
+	if _, ok := agent.AsRequiredHooksReporter(ag); !ok {
+		t.Error("Claude Code must implement agent.RequiredHooksReporter")
 	}
 }

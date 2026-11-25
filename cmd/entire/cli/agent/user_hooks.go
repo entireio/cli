@@ -111,6 +111,33 @@ func AsUserHookInstaller(ag Agent) (UserHookInstaller, bool) {
 	return builtinCapability[UserHookInstaller](ag)
 }
 
+// PromptRepeatReporter is implemented by agents that can tell for themselves
+// whether Entire's prompt hook may fire twice for one prompt (an agent that
+// runs a command present in both its user and project config once, unless
+// the two differ). Its answer replaces the generic turn-start repeat check.
+type PromptRepeatReporter interface {
+	PromptHookMayFireTwice(ctx context.Context) bool
+}
+
+// AsPromptRepeatReporter returns the agent as PromptRepeatReporter if it
+// implements it. Built-in only.
+func AsPromptRepeatReporter(ag Agent) (PromptRepeatReporter, bool) {
+	return builtinCapability[PromptRepeatReporter](ag)
+}
+
+// RequiredHooksReporter is implemented by agents that can report, without
+// misfiring across teammates' CLI versions, that the repository's Entire
+// hooks lack ones this CLI needs; the session-start banner then says so.
+type RequiredHooksReporter interface {
+	MissingRequiredHooks(ctx context.Context) bool
+}
+
+// AsRequiredHooksReporter returns the agent as RequiredHooksReporter if it
+// implements it. Built-in only.
+func AsRequiredHooksReporter(ag Agent) (RequiredHooksReporter, bool) {
+	return builtinCapability[RequiredHooksReporter](ag)
+}
+
 // UserHookInstall is one EnsureUserHooks outcome.
 type UserHookInstall struct {
 	Path string

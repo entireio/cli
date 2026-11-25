@@ -738,7 +738,7 @@ func CheckHookConfig(ctx context.Context) HookConfigState {
 	return HooksCurrent
 }
 
-// MissingRequiredHooks reports whether Entire is installed in this repo's
+// MissingRequiredHooks implements agent.RequiredHooksReporter: it reports whether Entire is installed in this repo's
 // Claude Code settings but a hook this CLI needs is missing: the half of
 // CheckHookConfig that says nothing about commands or timeouts it would
 // rewrite. A config a newer CLI wrote still has every hook this one requires,
@@ -748,7 +748,7 @@ func CheckHookConfig(ctx context.Context) HookConfigState {
 // That holds only while the required list grows. Removing or renaming a hook
 // from missingRequiredHooks would make older CLIs warn about a newer config,
 // and their `entire agent add` would rewrite it back.
-func MissingRequiredHooks(ctx context.Context) bool {
+func (c *ClaudeCodeAgent) MissingRequiredHooks(ctx context.Context) bool {
 	settings, err := loadClaudeSettings(ctx)
 	return err == nil && hasEntireHook(settings.Hooks.Stop) && missingRequiredHooks(settings)
 }

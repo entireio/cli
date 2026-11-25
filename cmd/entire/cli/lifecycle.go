@@ -23,7 +23,6 @@ import (
 	"unicode"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
-	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
@@ -158,13 +157,15 @@ const missingHooksWarning = "\n  Entire's Claude Code hooks in this repo are mis
 	"\n  so some activity isn't recorded. Run 'entire agent add claude-code' to add them."
 
 // missingHooksBannerSuffix returns missingHooksWarning when it applies to ag.
-// Only Claude Code, and only its missing-required-hook check: the rest of
+// Only agents that implement agent.RequiredHooksReporter (Claude Code), and
+// only that missing-required-hook check: the rest of
 // CheckHookConfig (commands or timeouts an install would rewrite) and the
 // exact-match checks of OpenCode, Pi and Copilot also fire when a teammate's
 // newer CLI wrote the config, and would tell them to downgrade it. Those
 // stay with `entire status` and `entire doctor`.
 func missingHooksBannerSuffix(ctx context.Context, ag agent.Agent) string {
-	if ag.Name() != agent.AgentNameClaudeCode || !claudecode.MissingRequiredHooks(ctx) {
+	reporter, ok := agent.AsRequiredHooksReporter(ag)
+	if !ok || !reporter.MissingRequiredHooks(ctx) {
 		return ""
 	}
 	return missingHooksWarning
@@ -368,13 +369,14 @@ func initializeTurnSession(ctx, logCtx context.Context, strat *strategy.ManualCo
 // turnStartMayRepeat reports whether this turn-start may be a second Entire
 // install firing for a prompt already handled, so a repeat is skipped: a
 // user-level hook, or an agent that sends a turn ID to tell prompts apart.
-// Claude Code runs one identical hook command once itself, so there only a
+// An agent.PromptRepeatReporter answers for itself: Claude Code runs one
+// identical hook command once itself, so there only a
 // project UserPromptSubmit command that differs from the user-level one (an
 // older CLI's) can fire twice; otherwise the same prompt again (say, after a
 // missed Stop) is the developer's.
 func turnStartMayRepeat(ctx context.Context, ag agent.Agent, event *agent.Event) bool {
-	if ag.Name() == agent.AgentNameClaudeCode {
-		return claudecode.PromptHookMayFireTwice(ctx)
+	if reporter, ok := agent.AsPromptRepeatReporter(ag); ok {
+		return reporter.PromptHookMayFireTwice(ctx)
 	}
 	return event.TurnID != "" || isUserScopeHook(ctx)
 }

@@ -40,7 +40,9 @@ type CapabilityDeclarer interface {
 //   - ModelLister
 //   - OutOfBandTokenSource (refuses CapabilityDeclarer agents)
 //   - PermissionConfigOwner
+//   - PromptRepeatReporter
 //   - ProtectedFilesProvider
+//   - RequiredHooksReporter
 //   - RestoredSessionPathResolver
 //   - SessionBaseDirProvider
 //   - SessionEndBudgeter

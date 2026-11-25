@@ -80,13 +80,14 @@ func (c *ClaudeCodeAgent) RemoveUserHooks(ctx context.Context) (bool, string, er
 // user-level hooks never need to step aside.
 func (c *ClaudeCodeAgent) ProjectHooksSupersede(context.Context) bool { return false }
 
-// PromptHookMayFireTwice reports whether Claude Code can run Entire's
+// PromptHookMayFireTwice implements agent.PromptRepeatReporter: it reports
+// whether Claude Code can run Entire's
 // UserPromptSubmit hook twice for one prompt: the user-level settings carry
 // Entire's hook, and this project's settings carry an Entire UserPromptSubmit
 // command that is not byte-identical to a user-level one (an older CLI's
 // unwrapped command or wrapper, say). Claude Code runs a command present in
 // both files once only when the two match. Unreadable files report false.
-func PromptHookMayFireTwice(ctx context.Context) bool {
+func (c *ClaudeCodeAgent) PromptHookMayFireTwice(ctx context.Context) bool {
 	path, err := userClaudeSettingsPath()
 	if err != nil {
 		return false
