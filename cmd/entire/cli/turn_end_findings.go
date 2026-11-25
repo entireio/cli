@@ -1,13 +1,11 @@
 package cli
 
 import (
-	"bytes"
 	"context"
-	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
+	"regexp"
 	"slices"
 	"time"
 
@@ -85,8 +83,9 @@ func currentBranchUpstream(ctx context.Context) (branchUpstream, bool) {
 // handler runs: the handler deletes the pre-prompt state, whose timestamp is
 // when the turn started.
 type findingsContinuation struct {
-	continuer agent.TurnContinuer
-	turnStart time.Time
+	continuer       agent.TurnContinuer
+	turnStart       time.Time
+	transcriptBytes int64
 }
 
 // beginFindingsContinuation decides, before the turn-end handler runs,
@@ -107,7 +106,7 @@ func beginFindingsContinuation(ctx context.Context, ag agent.Agent, event *agent
 	if err != nil {
 		return nil
 	}
-	return &findingsContinuation{continuer: continuer, turnStart: turnStart}
+	return &findingsContinuation{continuer: continuer, turnStart: turnStart, transcriptBytes: pre.TranscriptBytes}
 }
 
 // findingsContinuationSuppressedByEnv is true for agents Entire itself runs
@@ -146,7 +145,7 @@ func (f *findingsContinuation) finish(ctx context.Context, event *agent.Event) {
 	// leaves the tracking ref behind; the server then says whether HEAD was
 	// pushed.
 	recorded := up.SHA == up.Head && pushedThisTurn(ctx, up, f.turnStart)
-	if !recorded && (up.SHA == up.Head || !transcriptTailMentionsPush(event.SessionRef)) {
+	if !recorded && (up.SHA == up.Head || !turnTranscriptMentionsPush(f.continuer, event.SessionRef, f.transcriptBytes)) {
 		return
 	}
 	if !findingsContinuationAllowedForSession(ctx, event.SessionID, up.Head) {
@@ -192,34 +191,29 @@ func pushedThisTurn(ctx context.Context, up branchUpstream, turnStart time.Time)
 	return slices.Contains(shas, up.Head)
 }
 
-// transcriptTailScanBytes is how much of the end of the turn's transcript is
-// searched for a push command. The turn just ended, so a push it ran is near
-// the end; a match from an earlier turn only costs the server check.
-const transcriptTailScanBytes = 256 << 10
+// pushCommandPattern matches what a push looks like in a transcript: git with
+// any options before push (git -C dir push, git -c k=v push), or gh creating
+// a pull request, which can push the branch. A match that was not a push only
+// costs the server check.
+var pushCommandPattern = regexp.MustCompile(`\bgit\b.{0,160}?\bpush\b|\bgh\s+pr\s+create\b`)
 
-// transcriptTailMentionsPush is the cheap local gate for the server check:
-// without a `git push` in the transcript's tail, a tracking ref behind HEAD
-// means commits not pushed yet, the common case, and the stop makes no API
-// read. The agent recorded the transcript path in its hook payload.
-func transcriptTailMentionsPush(transcriptPath string) bool {
+// turnTranscriptMentionsPush is the cheap local gate for the server check:
+// without a push command in this turn's part of the transcript, a tracking
+// ref behind HEAD means commits not pushed yet, the common case, and the stop
+// makes no API read. fromBytes is the transcript's size at turn start; the
+// transcripts this applies to are append-only.
+func turnTranscriptMentionsPush(ag agent.Agent, transcriptPath string, fromBytes int64) bool {
 	if transcriptPath == "" {
 		return false
 	}
-	f, err := os.Open(transcriptPath) //nolint:gosec // the agent's own transcript, from its hook payload
+	data, err := ag.ReadTranscript(transcriptPath)
 	if err != nil {
 		return false
 	}
-	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		return false
+	if fromBytes > 0 && fromBytes <= int64(len(data)) {
+		data = data[fromBytes:]
 	}
-	offset := max(info.Size()-transcriptTailScanBytes, 0)
-	buf := make([]byte, info.Size()-offset)
-	if _, err := f.ReadAt(buf, offset); err != nil && !errors.Is(err, io.EOF) {
-		return false
-	}
-	return bytes.Contains(buf, []byte("git push"))
+	return pushCommandPattern.Match(data)
 }
 
 // findingsContinuationAllowedForSession requires an ordinary session (not one

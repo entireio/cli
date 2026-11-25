@@ -50,6 +50,10 @@ type PrePromptState struct {
 	// older versions, which then detect no such changes.
 	UntrackedFileStats map[string]UntrackedFileStat `json:"untracked_file_stats,omitempty"`
 
+	// TranscriptBytes is the transcript file's size when the turn started, so
+	// turn end can look at only this turn's part of it (a stat, not a read).
+	TranscriptBytes int64 `json:"transcript_bytes,omitempty"`
+
 	// TranscriptOffset is the unified transcript position when this state was captured.
 	// For Claude Code (JSONL), this is the line count.
 	// For Gemini CLI (JSON), this is the message count.
@@ -269,6 +273,11 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 		UntrackedScanSkipped: scanSkipped,
 		UntrackedFileStats:   statUntrackedFiles(ctx, untrackedFiles),
 		TranscriptOffset:     transcriptOffset,
+	}
+	if sessionRef != "" {
+		if info, statErr := os.Stat(sessionRef); statErr == nil {
+			state.TranscriptBytes = info.Size()
+		}
 	}
 
 	// Out-of-band token baseline: agents whose token usage lives outside the

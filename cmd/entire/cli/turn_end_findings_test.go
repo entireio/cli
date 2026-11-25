@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -157,6 +158,15 @@ type continuingMockAgent struct{ *mockLifecycleAgent }
 
 func (m continuingMockAgent) RenderTurnContinuation(reason string) ([]byte, error) {
 	return agent.RenderStopBlockHookOutput(reason)
+}
+
+// ReadTranscript reads the test's transcript file, which the turns append to.
+func (m continuingMockAgent) ReadTranscript(file string) ([]byte, error) {
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return nil, fmt.Errorf("read test transcript: %w", err)
+	}
+	return data, nil
 }
 
 // captureLifecycleStdout runs fn with os.Stdout redirected and returns what
@@ -346,12 +356,20 @@ func appendTranscript(t *testing.T, path, line string) {
 	require.NoError(t, f.Close())
 }
 
-func TestTranscriptTailMentionsPush(t *testing.T) {
+func TestTurnTranscriptMentionsPush(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "t.jsonl")
-	require.NoError(t, os.WriteFile(path, []byte(`{"command":"git push -u origin HEAD"}`+"\n"+strings.Repeat("x", transcriptTailScanBytes)), 0o600))
-	assert.False(t, transcriptTailMentionsPush(path), "only the tail is searched")
-	require.NoError(t, os.WriteFile(path, []byte(`{"command":"git push"}`), 0o600))
-	assert.True(t, transcriptTailMentionsPush(path))
-	assert.False(t, transcriptTailMentionsPush(filepath.Join(t.TempDir(), "missing")))
+	earlier := `{"command":"git push -u origin HEAD"}` + "\n"
+	require.NoError(t, os.WriteFile(path, []byte(earlier+`{"command":"go test ./..."}`), 0o600))
+	ag := newMockAgent()
+	read := func(content string) bool {
+		require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+		ag.transcriptData = []byte(content)
+		return turnTranscriptMentionsPush(ag, path, int64(len(earlier)))
+	}
+	assert.False(t, read(earlier+`{"command":"go test ./..."}`), "a push from an earlier turn does not count")
+	assert.True(t, read(earlier+`{"command":"git -C \"/repo\" push origin HEAD"}`))
+	assert.True(t, read(earlier+`{"cmd":["git","push"]}`))
+	assert.True(t, read(earlier+`{"command":"gh pr create --fill"}`))
+	assert.False(t, read(earlier+`{"command":"git pull"}`))
 }
