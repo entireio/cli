@@ -273,7 +273,7 @@ func TestDisableGlobal_RemovesTheUserLevelClaudeHooks(t *testing.T) {
 	if err := root.Execute(); err != nil {
 		t.Fatalf("disable --global: %v\n%s", err, buf.String())
 	}
-	assert.NotContains(t, readUserSettingsRaw(t, hooksPath), "entire hooks claude-code")
+	assert.NoFileExists(t, hooksPath, "enable --global created the file, and it held only Entire's hooks")
 	assert.Contains(t, buf.String(), "Removed Entire's hooks from Claude Code's user settings")
 	assert.Contains(t, buf.String(), "repos entry")
 }
@@ -303,7 +303,7 @@ func TestGlobal_InstallsAndRemovesEveryAgentsUserLevelHooks(t *testing.T) {
 	root.SetErr(&buf)
 	root.SetArgs([]string{"disable", "--global"})
 	require.NoError(t, root.Execute(), buf.String())
-	assert.NotContains(t, readUserSettingsRaw(t, codexHooks), "entire hooks codex")
+	assert.NoFileExists(t, codexHooks, "enable --global created the file, and it held only Entire's hooks")
 	assert.NoFileExists(t, piExtension)
 	assert.NoFileExists(t, openCodePlugin)
 }
@@ -691,4 +691,99 @@ func TestUnreadableUserSettings_SurfacedAtSessionStartAndInDoctor(t *testing.T) 
 	cmd, stdout := newTestCmd(t)
 	checkUserLevelHooks(cmd)
 	assert.Contains(t, stdout.String(), "Entire user settings: UNREADABLE")
+}
+
+// The "not set up" line names the directory Entire looked for: Pi's agent
+// directory and OpenCode's config directory, not the file's own directory.
+func TestEnableGlobal_NotSetUpNamesTheDirectoryChecked(t *testing.T) {
+	homes := isolateAgentUserHomes(t)
+	_, _, _, out, err := runGlobalCmd(t, true, "", "enable", "--global", "--yes")
+	require.NoError(t, err, out)
+	assert.Contains(t, out, "Pi is not set up here ("+homes.pi+" not found)")
+	assert.Contains(t, out, "("+filepath.Join(homes.xdgConfig, "opencode")+" not found)")
+}
+
+// Turning global enable on when it is on, or off when it was never on, says
+// so; turning it off when it was never on does not create the user settings
+// file.
+func TestGlobal_AlreadyOnAndNeverOn(t *testing.T) {
+	_, _, _, out, err := runGlobalCmd(t, true, `{"global_enable": true}`, "enable", "--global")
+	require.NoError(t, err, out)
+	assert.Contains(t, out, "already enabled in every repository")
+
+	entireDir, _, _, out, err := runGlobalCmd(t, true, "", "disable", "--global")
+	require.NoError(t, err, out)
+	assert.Contains(t, out, "was not enabled in every repository")
+	assert.NoFileExists(t, filepath.Join(entireDir, usersettings.FileName))
+}
+
+// A user settings file that does not parse is refused before the --yes
+// disclosure is printed: nothing was accepted.
+func TestEnableGlobal_UnreadableFileRefusedBeforeDisclosure(t *testing.T) {
+	_, _, _, out, err := runGlobalCmd(t, true, `{"global_enable": `, "enable", "--global", "--yes")
+	require.Error(t, err)
+	assert.NotContains(t, out, "Accepted with --yes")
+}
+
+// disable --global keeps a user-level settings file that held the user's own
+// keys before Entire's hooks were merged in.
+func TestDisableGlobal_KeepsAUsersOwnSettingsFile(t *testing.T) {
+	_, claudeDir, _, out, err := runGlobalCmd(t, true, `{"global_enable": true}`, "version")
+	require.NoError(t, err, out)
+	hooksPath := filepath.Join(claudeDir, "settings.json")
+	require.NoError(t, os.WriteFile(hooksPath, []byte(`{"model": "opus"}`), 0o600))
+	installUserHooks(t.Context(), func(agent.UserHookInstaller, userHookInstallResult) {})
+
+	root := NewRootCmd()
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetArgs([]string{"disable", "--global"})
+	require.NoError(t, root.Execute(), buf.String())
+	assert.JSONEq(t, `{"model": "opus"}`, readUserSettingsRaw(t, hooksPath))
+}
+
+// `entire disable` in a repository claimed in the user settings file (a repos
+// entry with enabled: true) turns that entry off, for every clone and
+// worktree, rather than writing this worktree's local file.
+func TestDisable_ClaimedRepoWritesTheReposEntry(t *testing.T) {
+	repo := newGlobalOnlyRepo(t, true)
+	testutil.RunGit(t, repo, "remote", "add", "origin", "https://github.com/acme/gadgets.git")
+	out, err := runRepoCmd(t, "enable")
+	require.NoError(t, err, out)
+	require.Equal(t, true, userReposEntry(t, "gh/acme/gadgets")["enabled"])
+
+	out, err = runRepoCmd(t, "disable")
+	require.NoError(t, err, out)
+	assert.Equal(t, false, userReposEntry(t, "gh/acme/gadgets")["enabled"])
+	assert.Contains(t, out, "every clone of gh/acme/gadgets")
+	if local, readErr := os.ReadFile(filepath.Join(repo, EntireSettingsLocalFile)); readErr == nil {
+		assert.NotContains(t, string(local), `"enabled"`)
+	}
+	settings.ClearOriginKeyCache()
+	s, err := settings.Load(t.Context())
+	require.NoError(t, err)
+	assert.False(t, s.Enabled)
+}
+
+// Replacing an existing Entire file (a user edit, or an older render) is an
+// update, and says so, in enable --global and on any later command.
+func TestGlobal_ReplacingAnEditedCopySaysUpdated(t *testing.T) {
+	homes := isolateAgentUserHomes(t)
+	require.NoError(t, os.MkdirAll(homes.pi, 0o750))
+	extension := filepath.Join(homes.pi, "extensions", "entire", "index.ts")
+	_, _, _, out, err := runGlobalCmd(t, false, "", "enable", "--global", "--yes")
+	require.NoError(t, err, out)
+	assert.Contains(t, out, "Added Entire's hooks to Pi's user settings")
+
+	edited := readUserSettingsRaw(t, extension) + "// my edit\n"
+	require.NoError(t, os.WriteFile(extension, []byte(edited), 0o644))
+	_, _, _, out, err = runGlobalCmd(t, false, `{"global_enable": true}`, "enable", "--global")
+	require.NoError(t, err, out)
+	assert.Contains(t, out, "Updated Entire's hooks in Pi's user settings")
+
+	require.NoError(t, os.WriteFile(extension, []byte(edited), 0o644))
+	_, _, _, out, err = runGlobalCmd(t, false, `{"global_enable": true}`, "version")
+	require.NoError(t, err, out)
+	assert.Contains(t, out, "updated its Pi hooks in")
 }

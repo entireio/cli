@@ -143,3 +143,16 @@ func UserReposEnableAny(ctx context.Context) bool {
 	}
 	return false
 }
+
+// UserReposEntryEnables reports whether a `repos` entry matching this
+// repository sets `enabled: true`: the developer claimed it, for every clone
+// and worktree, with `entire enable`.
+func UserReposEntryEnables(ctx context.Context, worktreeRoot string) bool {
+	overlay := loadUserOverlay(ctx)
+	for _, prefs := range overlay.repoPreferences(ctx, worktreeRoot) {
+		if prefs.Enabled != nil && *prefs.Enabled {
+			return true
+		}
+	}
+	return false
+}

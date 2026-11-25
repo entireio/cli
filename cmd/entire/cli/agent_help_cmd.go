@@ -234,11 +234,12 @@ var agentHelpGuidance = map[string]string{
 
 	// Global enable records sessions and pushes checkpoints in every repository
 	// the user works in, so agreeing to it belongs to the user.
-	"enable": "Never run `entire enable --global` on the user's behalf: it turns Entire on\n" +
-		"in every repository they work in, and their checkpoints push with git push.\n" +
-		"It refuses agent sessions; ask the user to run it. Running `entire\n" +
-		"enable` in a repository on only through global enable does not enable it\n" +
-		"for the user either; they have to run it themselves.",
+	"enable": "Global enable (--global) is the user's decision. Never run `entire enable\n" +
+		"--global` on their behalf: it turns Entire on in every repository they work\n" +
+		"in, and their checkpoints push with git push. It refuses agent sessions; ask\n" +
+		"the user to run it. Running `entire enable` in a repository on only through\n" +
+		"global enable does not enable it for the user either; they have to run it\n" +
+		"themselves.",
 
 	// Reviewing someone else's branch loads its hooks, MCP servers, and
 	// settings, so approval belongs to the user. The refusal text says the same;

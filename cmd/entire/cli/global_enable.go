@@ -44,8 +44,14 @@ func runEnableGlobal(cmd *cobra.Command, yes bool) error {
 	}
 	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
+	// Before the disclosure: a file the write would refuse means nothing is
+	// being agreed to.
+	if err := userSettingsWritable(cmd); err != nil {
+		return err
+	}
 	// Turning it on again adds nothing to agree to.
-	if !settings.UserTierEnablesEverywhere(ctx) {
+	alreadyOn := settings.UserTierEnablesEverywhere(ctx)
+	if !alreadyOn {
 		confirmed, err := confirmGlobalEnable(cmd, yes, globalEnableDisclosure)
 		if err != nil || !confirmed {
 			return err
@@ -55,20 +61,36 @@ func runEnableGlobal(cmd *cobra.Command, yes bool) error {
 	if err != nil {
 		return err //nolint:wrapcheck // usersettings names the file and the reason
 	}
-	fmt.Fprintf(w, "Entire is now enabled in every repository you work in (global_enable in %s).\n", path)
+	if alreadyOn {
+		fmt.Fprintf(w, "Entire is already enabled in every repository you work in (global_enable in %s).\n", path)
+	} else {
+		fmt.Fprintf(w, "Entire is now enabled in every repository you work in (global_enable in %s).\n", path)
+	}
 
-	installUserHooks(ctx, func(installer agent.UserHookInstaller, n int, path string, err error) {
-		reportUserHookInstall(cmd, installer, n, path, err)
+	installUserHooks(ctx, func(installer agent.UserHookInstaller, result userHookInstallResult) {
+		reportUserHookInstall(cmd, installer, result)
 	})
 	return nil
 }
 
+// userHookInstallResult is one agent's EnsureUserHooks outcome. replaced is
+// a write over an existing generated file (an older render, or one the user
+// edited) rather than a new one.
+type userHookInstallResult struct {
+	n        int
+	path     string
+	err      error
+	replaced bool
+}
+
 // installUserHooks installs every agent's user-level hooks while global
 // enable stays on, handing each result to onResult.
-func installUserHooks(ctx context.Context, onResult func(installer agent.UserHookInstaller, n int, path string, err error)) {
+func installUserHooks(ctx context.Context, onResult func(installer agent.UserHookInstaller, result userHookInstallResult)) {
 	for _, installer := range userHookInstallers() {
+		replacer, isFile := agent.AsUserHookFileReplacer(installer)
+		existed := isFile && replacer.UserHookFileExists()
 		n, path, err := installer.EnsureUserHooks(ctx, settings.UserTierEnablesEverywhere)
-		onResult(installer, n, path, err)
+		onResult(installer, userHookInstallResult{n: n, path: path, err: err, replaced: existed && n > 0})
 	}
 }
 
@@ -90,22 +112,24 @@ func userHookInstallers() []agent.UserHookInstaller {
 
 // reportUserHookInstall reports one agent's user-level hook install for `entire
 // enable --global` and says what happened.
-func reportUserHookInstall(cmd *cobra.Command, installer agent.UserHookInstaller, n int, hooksPath string, err error) {
+func reportUserHookInstall(cmd *cobra.Command, installer agent.UserHookInstaller, result userHookInstallResult) {
 	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
 	name := string(installer.Type())
 	switch {
-	case errors.Is(err, agent.ErrUserHooksNotInUse):
+	case errors.Is(result.err, agent.ErrUserHooksNotInUse):
 		fmt.Fprintf(w, "%s is not set up here (%s not found); its hooks will be added the next time you run entire after it is.\n",
-			name, filepath.Dir(hooksPath))
+			name, agent.UserHooksMissingDir(result.err))
 		return
-	case err != nil:
-		fmt.Fprintf(cmd.ErrOrStderr(), "Could not add Entire's hooks to %s: %v\nThey will be added the next time you run entire.\n", hooksPath, err)
+	case result.err != nil:
+		fmt.Fprintf(cmd.ErrOrStderr(), "Could not add Entire's hooks to %s: %v\nThey will be added the next time you run entire.\n", result.path, result.err)
 		return
-	case n > 0:
-		fmt.Fprintf(w, "Added Entire's hooks to %s's user settings: %s\n", name, hooksPath)
+	case result.replaced:
+		fmt.Fprintf(w, "Updated Entire's hooks in %s's user settings: %s\n", name, result.path)
+	case result.n > 0:
+		fmt.Fprintf(w, "Added Entire's hooks to %s's user settings: %s\n", name, result.path)
 	default:
-		fmt.Fprintf(w, "%s's user settings already have Entire's hooks: %s\n", name, hooksPath)
+		fmt.Fprintf(w, "%s's user settings already have Entire's hooks: %s\n", name, result.path)
 	}
 	for _, note := range installer.InspectUserHooks(ctx).Notes {
 		fmt.Fprintf(w, "  %s\n", note)
@@ -135,12 +159,21 @@ func runDisableGlobal(cmd *cobra.Command) error {
 		return err
 	}
 	ctx := cmd.Context()
-	path, err := usersettings.SetGlobalEnable(ctx, false)
-	if err != nil {
-		return err //nolint:wrapcheck // usersettings names the file and the reason
+	if err := userSettingsWritable(cmd); err != nil {
+		return err
 	}
 	w := cmd.OutOrStdout()
-	fmt.Fprintf(w, "Entire is no longer enabled in every repository (global_enable in %s).\n", path)
+	if settings.UserTierEnablesEverywhere(ctx) {
+		path, err := usersettings.SetGlobalEnable(ctx, false)
+		if err != nil {
+			return err //nolint:wrapcheck // usersettings names the file and the reason
+		}
+		fmt.Fprintf(w, "Entire is no longer enabled in every repository (global_enable in %s).\n", path)
+	} else {
+		// Nothing to turn off, so no file to create; hooks an earlier
+		// global enable left are still removed below.
+		fmt.Fprintf(w, "Entire was not enabled in every repository (global_enable is not set in %s).\n", usersettings.Path())
+	}
 	for _, installer := range userHookInstallers() {
 		removed, hooksPath, err := installer.RemoveUserHooks(ctx)
 		switch {
@@ -153,7 +186,17 @@ func runDisableGlobal(cmd *cobra.Command) error {
 	fmt.Fprintln(w, "Repositories you enabled with `entire enable` stay enabled.")
 	fmt.Fprintln(w, "Repositories set up only through global enable keep Entire's git hooks, which do nothing now; run `entire disable --uninstall` in one to remove them.")
 	if settings.UserReposEnableAny(ctx) {
-		fmt.Fprintf(w, "A repository enabled only by a repos entry in %s records agent sessions again once you run `entire enable` in it.\n", path)
+		fmt.Fprintf(w, "A repository enabled only by a repos entry in %s records agent sessions again once you run `entire enable` in it.\n", usersettings.Path())
+	}
+	return nil
+}
+
+// userSettingsWritable refuses a user settings file that cannot be read,
+// which the global_enable write would refuse too.
+func userSettingsWritable(cmd *cobra.Command) error {
+	if err := settings.UserSettingsReadError(cmd.Context()); err != nil {
+		cmd.SilenceUsage = true
+		return err //nolint:wrapcheck // usersettings names the file and the reason
 	}
 	return nil
 }
@@ -259,23 +302,26 @@ func rejectFlagsWithGlobal(cmd *cobra.Command, allowed ...string) error {
 // ensureGlobalEnableHooks makes `global_enable` effective in repositories that
 // were never enabled. Everything else already follows the flag once Entire is
 // called (settings resolve as enabled, and the first hook installs the git
-// hooks lazily), but Claude only calls Entire if its hooks are installed, and a
-// never-enabled repository has no project hooks. So whenever Entire runs with
-// the flag on, it makes sure its hooks are in the user-level Claude settings.
-// Best effort: this never fails a command.
+// hooks lazily), but an agent only calls Entire if its hooks are installed,
+// and a never-enabled repository has no project hooks. So whenever Entire runs
+// with the flag on, it makes sure its hooks are in every in-use agent's
+// user-level config (Claude Code, Codex, Pi, OpenCode). Best effort: this
+// never fails a command.
 func ensureGlobalEnableHooks(cmd *cobra.Command) {
 	ctx := cmd.Context()
 	if skipsGlobalEnableHooks(cmd) || !settings.UserTierEnablesEverywhere(ctx) {
 		return
 	}
-	installUserHooks(ctx, func(installer agent.UserHookInstaller, n int, path string, err error) {
+	installUserHooks(ctx, func(installer agent.UserHookInstaller, result userHookInstallResult) {
 		switch {
-		case errors.Is(err, agent.ErrUserHooksNotInUse):
-		case err != nil:
+		case errors.Is(result.err, agent.ErrUserHooksNotInUse):
+		case result.err != nil:
 			logging.Debug(ctx, "global enable: could not install user-level hooks",
-				slog.String("agent", string(installer.Name())), slog.String("error", err.Error()))
-		case n > 0:
-			fmt.Fprintf(cmd.ErrOrStderr(), "Entire is enabled for all your repositories; added its %s hooks to %s\n", installer.Type(), path)
+				slog.String("agent", string(installer.Name())), slog.String("error", result.err.Error()))
+		case result.replaced:
+			fmt.Fprintf(cmd.ErrOrStderr(), "Entire is enabled for all your repositories; updated its %s hooks in %s\n", installer.Type(), result.path)
+		case result.n > 0:
+			fmt.Fprintf(cmd.ErrOrStderr(), "Entire is enabled for all your repositories; added its %s hooks to %s\n", installer.Type(), result.path)
 		}
 	})
 }

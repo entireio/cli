@@ -4,11 +4,16 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
 
@@ -99,4 +104,45 @@ func writeOlderProjectHooks(ctx context.Context, w io.Writer) {
 			fmt.Fprintf(w, "  %s\n", line)
 		}
 	}
+}
+
+// statusAgents is what status lists: the agents with this repository's own
+// Entire hooks, and, with global enable on, those with user-level hooks.
+type statusAgents struct {
+	project, userLevel []string
+}
+
+// resolveStatusAgents finds status's agents. In a repository at the home
+// directory an agent's user-level hook file can be the very file its project
+// hooks would be in; that install is the user-level one, not the
+// repository's.
+func resolveStatusAgents(ctx context.Context) statusAgents {
+	installed := GetAgentsWithHooksInstalled(ctx)
+	var userLevel []types.AgentName
+	if settings.UserTierEnablesEverywhere(ctx) {
+		root, rootErr := paths.WorktreeRoot(ctx)
+		for _, installer := range userHookInstallers() {
+			report := installer.InspectUserHooks(ctx)
+			if report.State != agent.UserHooksCurrent && report.State != agent.UserHooksOutdated {
+				continue
+			}
+			userLevel = append(userLevel, installer.Name())
+			if locator, ok := agent.AsHookConfigLocator(installer); ok && rootErr == nil &&
+				sameFile(filepath.Join(root, locator.HookConfigRelPath()), report.Path) {
+				installed = slices.DeleteFunc(slices.Clone(installed), func(n types.AgentName) bool { return n == installer.Name() })
+			}
+		}
+	}
+	return statusAgents{project: agentDisplayNames(installed), userLevel: agentDisplayNames(userLevel)}
+}
+
+// sameFile reports whether a and b name one existing file, however spelled
+// (a symlinked temp or home directory included).
+func sameFile(a, b string) bool {
+	ai, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	bi, err := os.Stat(b)
+	return err == nil && os.SameFile(ai, bi)
 }

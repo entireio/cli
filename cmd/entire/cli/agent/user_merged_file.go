@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -61,7 +62,7 @@ func (m MergedUserFile) read() ([]byte, bool, error) {
 // ErrUserHooksNotInUse when the file's directory is absent.
 func (m MergedUserFile) Ensure(ctx context.Context, wanted func(context.Context) bool) (int, error) {
 	if configDirMissing(filepath.Dir(m.Path)) {
-		return 0, ErrUserHooksNotInUse
+		return 0, userHooksNotInUseError{dir: filepath.Dir(m.Path)}
 	}
 	return EnsureUserHookFile(ctx, m.lockPath(), wanted, func(write bool) (int, error) {
 		data, exists, err := m.read()
@@ -98,10 +99,32 @@ func (m MergedUserFile) Remove(ctx context.Context, before func()) (bool, error)
 	if err != nil || !changed {
 		return false, err
 	}
-	if err := (UserConfigFile{Path: m.Path}).Write(output, m.Perm); err != nil {
+	file := UserConfigFile{Path: m.Path}
+	if holdsNothing(output) {
+		// Entire's hooks were all it held (Entire created it, or the user
+		// had an empty one): remove it rather than leave {} behind.
+		return true, file.Remove()
+	}
+	if err := file.Write(output, m.Perm); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// holdsNothing reports JSON that is an object with no keys, or whose only
+// keys hold empty objects (Codex's {"hooks": {}}).
+func holdsNothing(data []byte) bool {
+	var doc map[string]json.RawMessage
+	if json.Unmarshal(data, &doc) != nil {
+		return false
+	}
+	for _, value := range doc {
+		var inner map[string]json.RawMessage
+		if json.Unmarshal(value, &inner) != nil || len(inner) > 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // Inspect reports the file's health without writing.

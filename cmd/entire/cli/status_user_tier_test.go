@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/settings/usersettings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -158,4 +159,64 @@ func TestStatus_NamesDroppedUserSettings(t *testing.T) {
 	require.NoError(t, json.Unmarshal(out.Bytes(), &got))
 	require.Len(t, got.UserSettingsIgnored, 1)
 	assert.Contains(t, got.UserSettingsIgnored[0], "checkpoint_remote")
+}
+
+// A repository on only through global enable says so, in text and JSON, and
+// the JSON lists the agents whose user-level hooks are installed.
+func TestStatus_NamesGlobalEnableAndUserLevelHooks(t *testing.T) {
+	newGlobalOnlyRepo(t, true)
+	claudeDir := os.Getenv("CLAUDE_CONFIG_DIR")
+	require.NoError(t, os.MkdirAll(claudeDir, 0o700))
+	isolateAgentUserHomes(t)
+	installUserHooks(t.Context(), func(agent.UserHookInstaller, userHookInstallResult) {})
+
+	var text bytes.Buffer
+	require.NoError(t, runStatus(t.Context(), &text, false, false))
+	assert.Contains(t, text.String(), "Enabled (global enable)")
+	assert.Contains(t, text.String(), "User-level hooks · Claude Code")
+
+	var out bytes.Buffer
+	require.NoError(t, runStatus(t.Context(), &out, false, true))
+	var got statusJSON
+	require.NoError(t, json.Unmarshal(out.Bytes(), &got))
+	assert.Equal(t, "global", got.EnabledBy)
+	assert.Equal(t, []string{"Claude Code"}, got.UserHooks)
+}
+
+// `status --json` carries the reason the user settings file is ignored, set
+// up or not.
+func TestStatusJSON_NamesAnUnreadableUserSettingsFile(t *testing.T) {
+	root := t.TempDir()
+	testutil.InitRepo(t, root)
+	configDir := t.TempDir()
+	t.Setenv(userdirs.EnvConfigDir, configDir)
+	t.Cleanup(settings.ClearOriginKeyCache)
+	t.Chdir(root)
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, usersettings.FileName), []byte(`{"global_enable": true`), 0o600))
+
+	var out bytes.Buffer
+	require.NoError(t, runStatus(t.Context(), &out, false, true))
+	var got statusJSON
+	require.NoError(t, json.Unmarshal(out.Bytes(), &got))
+	assert.Equal(t, "not set up", got.Error)
+	assert.Contains(t, got.UserSettingsError, "parsing user settings")
+}
+
+// In a repository at the home directory, the agents' user-level hook files
+// are also where project hooks would be; status does not count them as this
+// repository's install.
+func TestStatus_HomeRepoDoesNotCountUserLevelHooksAsProject(t *testing.T) {
+	repo := newGlobalOnlyRepo(t, true)
+	t.Setenv("HOME", repo)
+	claudeDir := filepath.Join(repo, ".claude")
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	require.NoError(t, os.MkdirAll(claudeDir, 0o700))
+	isolateAgentUserHomes(t)
+	installUserHooks(t.Context(), func(agent.UserHookInstaller, userHookInstallResult) {})
+	require.FileExists(t, filepath.Join(claudeDir, "settings.json"))
+
+	var text bytes.Buffer
+	require.NoError(t, runStatus(t.Context(), &text, false, false))
+	assert.NotContains(t, text.String(), "Agents · Claude Code")
+	assert.Contains(t, text.String(), "User-level hooks · Claude Code")
 }

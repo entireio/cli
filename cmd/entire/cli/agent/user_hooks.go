@@ -20,6 +20,23 @@ import (
 // installed, and nothing needed to be. The directory is never created for it.
 var ErrUserHooksNotInUse = errors.New("agent config directory not found")
 
+// userHooksNotInUseError is ErrUserHooksNotInUse naming the directory that
+// was looked for.
+type userHooksNotInUseError struct{ dir string }
+
+func (e userHooksNotInUseError) Error() string        { return e.dir + " not found" }
+func (e userHooksNotInUseError) Is(target error) bool { return target == ErrUserHooksNotInUse }
+
+// UserHooksMissingDir returns the agent config directory an
+// ErrUserHooksNotInUse error looked for, or "".
+func UserHooksMissingDir(err error) string {
+	var notInUse userHooksNotInUseError
+	if errors.As(err, &notInUse) {
+		return notInUse.dir
+	}
+	return ""
+}
+
 // UserHookState is what InspectUserHooks found in an agent's user-level
 // config. Report-only: nothing acts on it but doctor and status.
 type UserHookState uint8

@@ -977,7 +977,13 @@ Entire's hook.
 
 If the current directory is not a git repository, Entire can initialize one
 for you and create an initial commit. It never creates or pushes to a remote —
-publish the repository yourself when you're ready.`,
+publish the repository yourself when you're ready.
+
+With --global, Entire is enabled in every repository you work in instead: it
+sets global_enable in your Entire user settings and adds Entire's hooks to the
+user-level config of Claude Code, Codex, Pi and OpenCode. It asks you to agree
+first (--yes agrees and prints what was agreed to) and does not set up the
+current repository.`,
 		Annotations: map[string]string{skipGlobalEnableHooksAnnotation: skipGlobalEnableHooksEnabled},
 		RunE: runEnableGlobalOr(&enableGlobal, &opts.Yes, func(cmd *cobra.Command, _ []string) (runErr error) {
 			ctx := cmd.Context()
@@ -1108,7 +1114,7 @@ publish the repository yourself when you're ready.`,
 		}),
 	}
 
-	cmd.Flags().BoolVar(&enableGlobal, flagGlobal, false, "Enable Entire in every repository you work in for Claude Code, Codex, Pi and OpenCode (sets global_enable in ~/.config/entire/settings.json and installs their user-level hooks)")
+	cmd.Flags().BoolVar(&enableGlobal, flagGlobal, false, "Enable Entire in every repository you work in for Claude Code, Codex, Pi and OpenCode (sets global_enable in your Entire user settings and installs their user-level hooks)")
 	cmd.Flags().BoolVar(&ignoreUntracked, "ignore-untracked", false, "Commit all new files without tracking pre-existing untracked files")
 	cmd.Flags().StringVar(&opts.CheckpointPushRemote, flagCheckpointPushRemote, "", "Git remote for checkpoint uploads (saved to .entire/settings.local.json, even with --project)")
 	cmd.Flags().MarkHidden("ignore-untracked") //nolint:errcheck,gosec // flag is defined above
@@ -1123,7 +1129,7 @@ publish the repository yourself when you're ready.`,
 	cmd.Flags().BoolVar(&opts.AbsoluteGitHookPath, flagAbsoluteGitHookPath, false, "Embed full binary path in git hooks (for GUI git clients that don't source shell profiles)")
 	cmd.Flags().BoolVar(&opts.SearchSkill, flagSearchSkill, false, "Install the optional Entire search skill for selected agent(s)")
 	cmd.Flags().BoolVar(&opts.AgentHelpSkill, flagAgentHelpSkill, false, "Install the stable Entire agent-help skill (points agents at `entire agent-help`) for selected agent(s)")
-	cmd.Flags().BoolVarP(&opts.Yes, "yes", "y", false, "Accept all defaults without prompting (in a non-repo directory: init git and commit; then enable all agents and accept telemetry). In an existing repository it lists the configuration files to commit rather than committing them. Does not import existing agent history — see --"+flagImportHistory)
+	cmd.Flags().BoolVarP(&opts.Yes, "yes", "y", false, "Accept all defaults without prompting (in a non-repo directory: init git and commit; then enable all agents and accept telemetry). In an existing repository it lists the configuration files to commit rather than committing them. Does not import existing agent history — see --"+flagImportHistory+". With --global, accepts the global enable disclosure, which is still printed")
 	cmd.Flags().BoolVar(&opts.ImportHistory, flagImportHistory, false, importHistoryFlagUsage)
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
 
@@ -1296,7 +1302,11 @@ To completely remove Entire integrations from this repository, use --uninstall:
 An external agent's hooks live inside its plugin, so removing them means asking the
 plugin to do it. Any removal step that fails - built-in agent, external plugin, git
 hooks, or repository state - makes the uninstall exit non-zero and report that Entire
-was not fully uninstalled.`,
+was not fully uninstalled.
+
+With --global, Entire stops being enabled in every repository: global_enable is
+turned off in your Entire user settings and Entire's user-level agent hooks are
+removed. Repositories you enabled with ` + "`entire enable`" + ` stay enabled.`,
 		Annotations: map[string]string{skipGlobalEnableHooksAnnotation: skipGlobalEnableHooksEnabled},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Before --uninstall: --global with it is refused, not ignored.
@@ -1705,21 +1715,22 @@ func runDisable(ctx context.Context, w io.Writer, useProjectSettings bool) error
 		configDisplay = configDisplayProject
 	}
 
-	// A repository on only through global enable is turned off in the user
-	// settings file, so every clone and worktree of it stays off; the
-	// per-worktree local file would leave the others recording.
+	// A repository on only through global enable, or claimed in the user
+	// settings file, is turned off there, so every clone and worktree of it
+	// stays off; the per-worktree local file would leave the others recording.
 	globalOnly := false
-	if s, err := LoadEntireSettings(ctx); err == nil && s.EnabledOnlyByGlobal() {
+	if s, err := LoadEntireSettings(ctx); err == nil && (s.EnabledOnlyByGlobal() || reposEntryEnablesHere(ctx)) {
 		if !useProjectSettings {
-			key, err := setRepoEnabledHere(ctx, false)
-			if err != nil {
+			if err := disableInUserSettings(ctx, w, s.EnabledOnlyByGlobal()); err != nil {
 				return err
 			}
-			fmt.Fprintf(w, "Entire is now disabled in %s (repos in %s).\n", describeRepoKey(key), usersettings.Path())
-			fmt.Fprintln(w, "global enable stays on for your other repositories.")
-			return nil
+			// A local file still enabling this worktree outranks the
+			// entry; turn it off too, below.
+			if after, err := LoadEntireSettings(ctx); err != nil || !after.Enabled {
+				return nil //nolint:nilerr // the entry is written; a reload failure changes nothing
+			}
 		}
-		globalOnly = true
+		globalOnly = s.EnabledOnlyByGlobal()
 	}
 
 	if err := setEnabledFlag(ctx, false, targetFile == settings.EntireSettingsFile); err != nil {
@@ -1735,6 +1746,27 @@ func runDisable(ctx context.Context, w io.Writer, useProjectSettings bool) error
 	}
 
 	fmt.Fprintf(w, "Entire is now disabled (%s).\n", configDisplay)
+	return nil
+}
+
+// reposEntryEnablesHere reports whether this repository's `repos` entry in
+// the user settings file sets enabled: true.
+func reposEntryEnablesHere(ctx context.Context) bool {
+	root, err := paths.WorktreeRoot(ctx)
+	return err == nil && settings.UserReposEntryEnables(ctx, root)
+}
+
+// disableInUserSettings writes enabled: false to this repository's `repos`
+// entry, for every clone and worktree.
+func disableInUserSettings(ctx context.Context, w io.Writer, globalOnly bool) error {
+	key, err := setRepoEnabledHere(ctx, false)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "Entire is now disabled in %s (repos in %s).\n", describeRepoKey(key), usersettings.Path())
+	if globalOnly {
+		fmt.Fprintln(w, "global enable stays on for your other repositories.")
+	}
 	return nil
 }
 

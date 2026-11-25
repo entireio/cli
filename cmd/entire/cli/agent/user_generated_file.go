@@ -37,7 +37,7 @@ type GeneratedUserFile struct {
 // refused, not overwritten.
 func (g GeneratedUserFile) Ensure(ctx context.Context, wanted func(context.Context) bool) (int, error) {
 	if configDirMissing(g.Home) {
-		return 0, ErrUserHooksNotInUse
+		return 0, userHooksNotInUseError{dir: g.Home}
 	}
 	return EnsureUserHookFile(ctx, g.lockPath(), wanted, g.apply)
 }
@@ -183,6 +183,31 @@ func (GeneratedUserHooks[S]) InspectUserHooks(context.Context) UserHookReport {
 		return UserHookReport{State: UserHooksUnavailable, Err: err}
 	}
 	return file.Inspect()
+}
+
+// UserHookFileExists reports whether the generated file is already there, so
+// a write that follows replaces it (an older render, or one the user edited)
+// rather than adding it.
+func (GeneratedUserHooks[S]) UserHookFileExists() bool {
+	var source S
+	file, err := source.UserFile()
+	if err != nil {
+		return false
+	}
+	_, err = os.Lstat(file.Path)
+	return err == nil
+}
+
+// UserHookFileReplacer is implemented by agents whose user-level hooks are one
+// generated file, which an install replaces whole.
+type UserHookFileReplacer interface {
+	UserHookFileExists() bool
+}
+
+// AsUserHookFileReplacer returns the agent as UserHookFileReplacer if it
+// implements it. Built-in only, like UserHookInstaller.
+func AsUserHookFileReplacer(ag Agent) (UserHookFileReplacer, bool) {
+	return builtinCapability[UserHookFileReplacer](ag)
 }
 
 // ProjectHooksSupersede implements UserHookInstaller: the generated file
