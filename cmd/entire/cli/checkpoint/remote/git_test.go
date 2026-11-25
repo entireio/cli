@@ -1291,6 +1291,18 @@ func TestUnreachableRemoteLine(t *testing.T) {
 			name: "a helper's own connect failure is not curl's",
 			err:  pushErr("failed to connect to keyring: no such service\nfatal: Authentication failed"),
 		},
+		{
+			name: "curl connect failure without the couldn't-connect suffix",
+			err:  pushErr("fatal: unable to access 'https://github.com/o/r.git/': Failed to connect to github.com port 443: Connection refused"),
+			want: "unable to access 'https://github.com/o/r.git/': Failed to connect to github.com port 443: Connection refused",
+			ok:   true,
+		},
+		{
+			name: "a format character inside a URL does not hide its credentials",
+			err:  pushErr("fatal: unable to access 'https:/\u200b/bob:hunter2@git.example.com/x.git/': Could not resolve host: git.example.com"),
+			want: "unable to access 'https://git.example.com/x.git/': Could not resolve host: git.example.com",
+			ok:   true,
+		},
 		{name: "nil", err: nil},
 	}
 	for _, tt := range tests {

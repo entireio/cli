@@ -161,7 +161,8 @@ func UnreachableRemoteLine(err error) (string, bool) {
 // prefix, no URL credentials, no control bytes, at most maxUnreachableLineRunes.
 func displayGitLine(line string) string {
 	line = strings.TrimPrefix(line, "fatal: ")
-	line = gitremote.RedactCredentialsInText(line)
+	// Strip before redacting: a character dropped here could otherwise split a
+	// URL so redaction misses it, then rejoin it with credentials intact.
 	line = strings.Map(func(r rune) rune {
 		// Cc: terminal escapes and newlines; Cf: bidi overrides that could
 		// make the line read as something else.
@@ -170,6 +171,7 @@ func displayGitLine(line string) string {
 		}
 		return r
 	}, line)
+	line = gitremote.RedactCredentialsInText(line)
 	if r := []rune(line); len(r) > maxUnreachableLineRunes {
 		line = string(r[:maxUnreachableLineRunes]) + "…"
 	}
