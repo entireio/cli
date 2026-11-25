@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
@@ -118,11 +119,9 @@ func peekCheckpointQueue(ctx context.Context, repo *git.Repository) ([]plumbing.
 	return refs, nil
 }
 
-// countUnpushedV1Commits counts distinct checkpoint IDs on v1-branch commits
-// not on the remote-tracking ref (git-branch backend). Commits that carry no
-// checkpoint (the "Initialize metadata ref" root) are skipped, and a
-// checkpoint's "Finalize transcript" commit counts with its checkpoint. No
-// local v1 branch means nothing to push (0).
+// countUnpushedV1Commits counts v1-branch commits not on the remote-tracking
+// ref (git-branch backend), excluding the parentless "Initialize metadata ref"
+// root, which carries no checkpoint. No local v1 branch means nothing to push (0).
 func countUnpushedV1Commits(ctx context.Context, remoteName string) (int, error) {
 	local := checkpoint.ResolveRefs(ctx).Primary
 	if !gitCommitRefExists(ctx, local.String()) {
@@ -135,26 +134,15 @@ func countUnpushedV1Commits(ctx context.Context, remoteName string) (int, error)
 			rangeSpec = tracking + ".." + local.String()
 		}
 	}
-	out, err := exec.CommandContext(ctx, "git", "log", "--format=%s", rangeSpec, "--").Output()
+	out, err := exec.CommandContext(ctx, "git", "rev-list", "--count", "--min-parents=1", rangeSpec).Output()
 	if err != nil {
-		return 0, fmt.Errorf("list unpushed v1 commits: %w", err)
+		return 0, fmt.Errorf("count unpushed v1 commits: %w", err)
 	}
-	ids := make(map[string]struct{})
-	for _, subject := range strings.Split(string(out), "\n") {
-		if cpID, ok := v1SubjectCheckpointID(subject); ok {
-			ids[cpID] = struct{}{}
-		}
+	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return 0, fmt.Errorf("parse rev-list count: %w", err)
 	}
-	return len(ids), nil
-}
-
-// v1SubjectCheckpointID extracts the checkpoint ID from a v1 commit subject:
-// "Checkpoint: <id>" or "Finalize transcript for Checkpoint: <id>".
-func v1SubjectCheckpointID(subject string) (string, bool) {
-	subject = strings.TrimPrefix(strings.TrimSpace(subject), "Finalize transcript for ")
-	cpID, ok := strings.CutPrefix(subject, "Checkpoint: ")
-	cpID = strings.TrimSpace(cpID)
-	return cpID, ok && cpID != ""
+	return n, nil
 }
 
 // gitCommitRefExists reports whether ref resolves to a commit in the current

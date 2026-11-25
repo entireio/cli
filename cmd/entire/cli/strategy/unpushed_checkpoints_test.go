@@ -21,13 +21,17 @@ func initCountTestRepo(t *testing.T) (dir, first, second string) {
 	t.Helper()
 	dir = t.TempDir()
 	testutil.InitRepo(t, dir)
+	// The parentless root stands in for "Initialize metadata ref"; it is never counted.
+	testutil.WriteFile(t, dir, "root.txt", "root")
+	testutil.GitAdd(t, dir, "root.txt")
+	testutil.GitCommit(t, dir, "Initialize metadata ref")
 	testutil.WriteFile(t, dir, "f.txt", "one")
 	testutil.GitAdd(t, dir, "f.txt")
-	testutil.GitCommit(t, dir, "Checkpoint: a1b2c3d4e5f6")
+	testutil.GitCommit(t, dir, "first")
 	first = testutil.GetHeadHash(t, dir)
 	testutil.WriteFile(t, dir, "f.txt", "two")
 	testutil.GitAdd(t, dir, "f.txt")
-	testutil.GitCommit(t, dir, "Checkpoint: b1b2c3d4e5f6")
+	testutil.GitCommit(t, dir, "second")
 	second = testutil.GetHeadHash(t, dir)
 	return dir, first, second
 }
@@ -87,13 +91,14 @@ func TestCountUnpushedCheckpoints_GitBranch_TrackingRefAbsentCountsAll(t *testin
 }
 
 // Not parallel: uses t.Chdir()
-func TestCountUnpushedCheckpoints_GitBranch_SkipsNonCheckpointCommits(t *testing.T) {
+func TestCountUnpushedCheckpoints_GitBranch_ExcludesOnlyTheRoot(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
-	commit := func(subject string) {
+	commit := func(subject string) string {
 		testutil.WriteFile(t, dir, "f.txt", subject)
 		testutil.GitAdd(t, dir, "f.txt")
 		testutil.GitCommit(t, dir, subject)
+		return testutil.GetHeadHash(t, dir)
 	}
 	t.Chdir(dir)
 	count := func() int {
@@ -104,11 +109,14 @@ func TestCountUnpushedCheckpoints_GitBranch_SkipsNonCheckpointCommits(t *testing
 	}
 
 	commit("Initialize metadata ref")
-	assert.Equal(t, 0, count(), "the initialize root commit carries no checkpoint")
+	assert.Equal(t, 0, count(), "the parentless initialize root is not a checkpoint")
 
-	commit("Checkpoint: a1b2c3d4e5f6")
-	commit("Finalize transcript for Checkpoint: a1b2c3d4e5f6")
-	assert.Equal(t, 1, count(), "a checkpoint and its finalize commit count once")
+	pushed := commit("Checkpoint: a1b2c3d4e5f6")
+	assert.Equal(t, 1, count(), "root plus one checkpoint commit counts one")
+
+	testutil.GitUpdateRef(t, dir, "refs/remotes/origin/"+paths.MetadataBranchName, pushed)
+	commit("Update summary for checkpoint a1b2c3d4e5f6")
+	assert.Equal(t, 1, count(), "an unpushed summary-only commit is counted")
 }
 
 // Not parallel: uses t.Chdir()
