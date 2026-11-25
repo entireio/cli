@@ -37,6 +37,10 @@ var ErrOPFAbortedByUser = errors.New("OPF prompt aborted by user; push cancelled
 // `entire checkpoint push`, which is not the same as an empty queue.
 var ErrCheckpointPushHeldByPolicy = errors.New("checkpoint push policy is manual; refs stay queued")
 
+// ErrCheckpointRefsStayQueued is PushQueuedCheckpointRefs stopping early with
+// refs still queued. The flush has already printed why.
+var ErrCheckpointRefsStayQueued = errors.New("checkpoint refs stay queued")
+
 var opfPrePushProgressWriter io.Writer = os.Stderr
 
 // PrePush is called by the git pre-push hook before pushing to a remote.
@@ -559,8 +563,17 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 		// wrong problem. The wrapped error says which it was.
 		return 0, false, fmt.Errorf("checkpoint refs stay queued: %w", opfErr)
 	}
-	pushed, err = flushCheckpointRefsQueue(ctx, repo, ps, batchUnbounded)
-	return pushed, false, err
+	result, err := flushQueuedCheckpointRefs(ctx, repo, ps, batchUnbounded)
+	if remaining := len(result.failed); err == nil && remaining > 0 {
+		// The flush is fail-soft about an early stop, but this caller reports
+		// success on a nil error, so refs left behind must surface. A caller's
+		// cancellation stays recognisable through the wrap.
+		err = fmt.Errorf("%w (%d)", ErrCheckpointRefsStayQueued, remaining)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			err = fmt.Errorf("%w: %w", err, ctxErr)
+		}
+	}
+	return len(result.pushed), false, err
 }
 
 // checkpointRefPartition sorts drained queue entries for one upload. Only
@@ -704,15 +717,21 @@ func checkpointRefPushTokens(refs []checkpointRefPush) []checkpoint.PushQueueEnt
 // automatic. The callers check first to skip OPF; the check is repeated here so
 // a new caller cannot upload under manual by forgetting it.
 func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps pushSettings, bound checkpointBatchBound) (int, error) {
+	result, err := flushQueuedCheckpointRefs(ctx, repo, ps, bound)
+	return len(result.pushed), err
+}
+
+// flushQueuedCheckpointRefs is flushCheckpointRefsQueue with the outcome of
+// every queued ref, so a caller can tell an early stop from a drained queue.
+func flushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, ps pushSettings, bound checkpointBatchBound) (checkpointFlushResult, error) {
 	automatic, err := automaticCheckpointDelivery(repo)
 	if err != nil {
-		return 0, err
+		return checkpointFlushResult{}, err
 	}
 	if !automatic {
-		return 0, nil
+		return checkpointFlushResult{}, nil
 	}
-	result, err := flushCheckpointRefsWith(ctx, repo, ps, checkpointRefSelection{}, bound)
-	return len(result.pushed), err
+	return flushCheckpointRefsWith(ctx, repo, ps, checkpointRefSelection{}, bound)
 }
 
 // checkpointBatchBound says whether a flush's batch push shares
