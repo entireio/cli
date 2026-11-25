@@ -25,8 +25,8 @@ import (
 // hooks.state entries rather than replacing them.
 //
 // A file that can't be read is skipped with a warning: the worst case is the
-// duplicate hooks this exists to prevent. The review command tells the user
-// when CODEX_HOME itself can't be used.
+// duplicate hooks this exists to prevent. codexIsolatedWarnings tells the
+// user when CODEX_HOME itself can't be used.
 func userEntireHookStateOverride(ctx context.Context) []string {
 	dir, isOverride, err := resolveCodexHomeWithOverride()
 	if err != nil {
@@ -35,6 +35,16 @@ func userEntireHookStateOverride(ctx context.Context) []string {
 		return nil
 	}
 	return ReviewUserHookStateOverride(ctx, dir, isOverride)
+}
+
+// codexIsolatedWarnings tells the user, before an isolated run, when
+// CODEX_HOME can't be used: Entire's hooks in their own Codex config then
+// can't be located and turned off.
+func codexIsolatedWarnings(context.Context) []string {
+	if _, _, err := resolveCodexHomeWithOverride(); err != nil {
+		return []string{err.Error() + "; Entire's hooks in your own Codex config are not turned off for this run, so they may fire twice"}
+	}
+	return nil
 }
 
 // ReviewUserHookStateOverride is userEntireHookStateOverride for an explicit
