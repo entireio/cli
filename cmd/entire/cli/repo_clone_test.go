@@ -278,6 +278,54 @@ func TestCloneRefAlwaysRequiresItsForgePrefix(t *testing.T) {
 	})
 }
 
+// The entire.com URL spelling is accepted only where a user types a ref, and
+// canonicalized there (newTypedRef). The strict parsers behind it, and the ones
+// that read server text, never accept it: a URL in a server answer must not be
+// treated as a ref the user typed.
+func TestStrictParsersRejectEntireComURLs(t *testing.T) {
+	t.Parallel()
+
+	urls := []string{
+		"https://entire.com/et/proj/repo",
+		"entire.com/et/proj/repo",
+		"https://entire.com/gh/o/r",
+		"entire.com/gh/o/r",
+	}
+	for _, in := range urls {
+		_, _, nativeErr := parseNativeCloneRef(in)
+		require.Errorf(t, nativeErr, "parseNativeCloneRef(%q)", in)
+		_, _, _, mirrorErr := parseMirrorCloneRef(in)
+		require.Errorf(t, mirrorErr, "parseMirrorCloneRef(%q)", in)
+	}
+
+	t.Run("parseDetachedDetail", func(t *testing.T) {
+		t.Parallel()
+		const url = "https://entire.com/et/proj/repo"
+		for _, detail := range []string{
+			"gh/o/r was detached and moved to " + url + `. Clone using "entire repo clone /et/proj/repo" or update your remote using "git remote set-url origin entire://h.entire.io/` + url + `"`,
+			"gh/o/r moved to " + url + ". Update your remote: git remote set-url origin entire://h.entire.io/" + url,
+			"gh/o/r moved to entire.com/et/proj/repo. Update your remote: git remote set-url origin entire://h.entire.io/entire.com/et/proj/repo",
+		} {
+			_, ok := parseDetachedDetail(detail)
+			require.Falsef(t, ok, "detail %q", detail)
+		}
+		// Control: the same sentence with the path form parses.
+		_, ok := parseDetachedDetail("gh/o/r moved to et/proj/repo. Update your remote: git remote set-url origin entire://h.entire.io/et/proj/repo")
+		require.True(t, ok)
+	})
+
+	t.Run("parseEntireCloneURL", func(t *testing.T) {
+		t.Parallel()
+		for _, in := range []string{
+			"entire://h/entire.com/et/proj/repo",
+			"entire://h/https://entire.com/et/proj/repo",
+		} {
+			_, _, err := parseEntireCloneURL(in)
+			require.Errorf(t, err, "parseEntireCloneURL(%q)", in)
+		}
+	})
+}
+
 // TestCloneForgeTokensAreGitremotePathTokens ties the two ends of the forge
 // token together. gitremote.pathForges decides which refs git-remote-entire
 // SUGGESTS (`entire repo clone /<token>/…`); these constants decide which

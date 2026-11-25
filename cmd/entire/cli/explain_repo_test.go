@@ -62,6 +62,7 @@ func TestParseExplainRepoFlag(t *testing.T) {
 			forge, owner, repo, err := parseExplainRepoFlag(tc.in)
 			if tc.wantErr != "" {
 				require.ErrorContains(t, err, tc.wantErr)
+				require.NotContains(t, err.Error(), "secret", "a credentialed URL must not echo its userinfo")
 				return
 			}
 			require.NoError(t, err)
