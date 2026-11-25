@@ -2,11 +2,7 @@ package codex
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"io/fs"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -45,124 +41,79 @@ func userHooksPath() (string, error) {
 	return filepath.Join(home, HooksFileName), nil
 }
 
-// readUserHooksFile reads the user-level hooks.json with the same size bound
-// as the project file. A missing file is reported as !exists.
-func readUserHooksFile(file agent.UserConfigFile) ([]byte, bool, error) {
-	data, err := file.Read()
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, false, nil
-	}
-	if err != nil {
-		return nil, false, fmt.Errorf("read %s: %w", file.Path, err)
-	}
-	if len(data) > maxHooksFileBytes {
-		return nil, false, fmt.Errorf("codex hooks file %q exceeds %d bytes", file.Path, maxHooksFileBytes)
-	}
-	return data, true, nil
-}
-
 func userHookCommand(ctx context.Context) func(managedHook) string {
 	windows := agent.UseWindowsProductionHooks(ctx)
 	prefix := userHookCommandPrefix()
 	return func(h managedHook) string { return h.wrap(prefix+h.verb, windows) }
 }
 
+// userHooksFile is the user-level hooks.json, merged with the project
+// install's merge under user-scoped commands.
+func userHooksFile(ctx context.Context) (agent.MergedUserFile, error) {
+	path, err := userHooksPath()
+	if err != nil {
+		return agent.MergedUserFile{}, err
+	}
+	commandFor := userHookCommand(ctx)
+	return agent.MergedUserFile{
+		Path:     path,
+		MaxBytes: maxHooksFileBytes,
+		Perm:     0o600,
+		HasEntire: func(data []byte) bool {
+			document, err := decodeHooksDocument(path, data)
+			// A file that does not parse is left to the merge to report.
+			return err != nil || len(entireHookLabels(document)) > 0
+		},
+		Merge: func(data []byte, exists bool) ([]byte, int, error) {
+			return mergeEntireHooks(data, exists, false, commandFor)
+		},
+		Strip: stripEntireHooks,
+	}, nil
+}
+
 // EnsureUserHooks implements agent.UserHookInstaller. Codex runs these hooks
 // only once the user approves them in /hooks.
 func (c *CodexAgent) EnsureUserHooks(ctx context.Context, wanted func(context.Context) bool) (int, string, error) {
-	path, err := userHooksPath()
+	file, err := userHooksFile(ctx)
 	if err != nil {
 		return 0, "", err
 	}
-	if _, err := os.Stat(filepath.Dir(path)); errors.Is(err, fs.ErrNotExist) {
-		return 0, path, agent.ErrUserHooksNotInUse
-	}
-	file := agent.UserConfigFile{Path: path}
-	commandFor := userHookCommand(ctx)
-	n, err := agent.EnsureUserHookFile(ctx, path+".lock", wanted, func(write bool) (int, error) {
-		data, exists, err := readUserHooksFile(file)
-		if err != nil {
-			return 0, err
-		}
-		output, count, err := mergeEntireHooks(data, exists, false, commandFor)
-		if err != nil || count == 0 || !write {
-			return count, err
-		}
-		return count, file.Write(output, 0o600)
-	})
-	return n, path, err //nolint:wrapcheck // the error names the file or its lock
+	n, err := file.Ensure(ctx, wanted)
+	return n, file.Path, err //nolint:wrapcheck // names the file or its lock
 }
 
 // RemoveUserHooks implements agent.UserHookInstaller.
 func (c *CodexAgent) RemoveUserHooks(ctx context.Context) (bool, string, error) {
-	path, err := userHooksPath()
+	file, err := userHooksFile(ctx)
 	if err != nil {
 		return false, "", err
 	}
-	if _, err := os.Stat(filepath.Dir(path)); errors.Is(err, fs.ErrNotExist) {
-		return false, path, nil
-	}
-	release, err := agent.LockUserHookFile(ctx, path+".lock")
-	if err != nil {
-		return false, path, err //nolint:wrapcheck // names the lock file
-	}
-	defer release()
-	file := agent.UserConfigFile{Path: path}
-	data, exists, err := readUserHooksFile(file)
-	if err != nil || !exists {
-		return false, path, err
-	}
-	output, changed, err := stripEntireHooks(data)
-	if err != nil || !changed {
-		return false, path, err
-	}
-	if err := file.Write(output, 0o600); err != nil {
-		return false, path, err //nolint:wrapcheck // names the file
-	}
-	return true, path, nil
+	removed, err := file.Remove(ctx, nil)
+	return removed, file.Path, err //nolint:wrapcheck // names the file or its lock
 }
 
 // InspectUserHooks implements agent.UserHookInstaller, including whether
 // Codex has approval records for the user-level hooks.
 func (c *CodexAgent) InspectUserHooks(ctx context.Context) agent.UserHookReport {
-	path, err := userHooksPath()
+	file, err := userHooksFile(ctx)
 	if err != nil {
 		return agent.UserHookReport{State: agent.UserHooksUnavailable, Err: err}
 	}
-	report := agent.UserHookReport{Path: path}
-	if _, err := os.Stat(filepath.Dir(path)); errors.Is(err, fs.ErrNotExist) {
-		report.State = agent.UserHooksNotInUse
-		return report
-	}
-	data, exists, err := readUserHooksFile(agent.UserConfigFile{Path: path})
-	if err != nil {
-		report.State, report.Err = agent.UserHooksUnavailable, err
-		return report
-	}
-	document := &hooksDocument{rawHooks: map[string]json.RawMessage{}}
-	if exists {
-		document, err = decodeHooksDocument(path, data)
+	var installed []string
+	file.Version = func(data []byte) int {
+		document, err := decodeHooksDocument(file.Path, data)
 		if err != nil {
-			report.State, report.Err = agent.UserHooksUnavailable, err
-			return report
+			return 0
 		}
+		var version int
+		installed, version = userHookLabelsAndVersion(document)
+		return version
 	}
-	installed := entireHookLabels(document)
-	if len(installed) == 0 {
-		report.State = agent.UserHooksAbsent
+	report := file.Inspect()
+	if report.State != agent.UserHooksCurrent && report.State != agent.UserHooksOutdated {
 		return report
 	}
-	report.Version = userHooksVersionIn(document)
-	_, count, err := mergeEntireHooks(data, exists, false, userHookCommand(ctx))
-	switch {
-	case err != nil:
-		report.State, report.Err = agent.UserHooksUnavailable, err
-	case count > 0:
-		report.State = agent.UserHooksOutdated
-	default:
-		report.State = agent.UserHooksCurrent
-	}
-	trust := inspectHookTrustForDeclared(path, installed)
+	trust := inspectHookTrustForDeclared(file.Path, installed)
 	switch {
 	case !trust.Known:
 		report.Notes = append(report.Notes, "Codex runs these hooks only after you approve them: open /hooks in Codex.")
@@ -176,7 +127,17 @@ func (c *CodexAgent) InspectUserHooks(ctx context.Context) agent.UserHookReport 
 // entireHookLabels lists the trust labels of the events where the document
 // has an Entire hook.
 func entireHookLabels(document *hooksDocument) []string {
+	labels, _ := userHookLabelsAndVersion(document)
+	return labels
+}
+
+// userHookLabelsAndVersion walks the document's Entire hooks once: the trust
+// labels of the events that have one, and the version stamped in the first
+// user-scoped command (0 when none carries one).
+func userHookLabelsAndVersion(document *hooksDocument) ([]string, int) {
+	marker := "--scope=" + UserScopePrefix
 	var labels []string
+	version := 0
 	for _, h := range managedHooks {
 		var groups []MatcherGroup
 		if parseHookType(document.rawHooks, h.event, &groups) != nil {
@@ -185,33 +146,20 @@ func entireHookLabels(document *hooksDocument) []string {
 		if hasEntireHook(groups) {
 			labels = append(labels, h.label)
 		}
-	}
-	return labels
-}
-
-// userHooksVersionIn returns the version stamped in the document's Entire
-// hook commands (0 when none carries one).
-func userHooksVersionIn(document *hooksDocument) int {
-	marker := "--scope=" + UserScopePrefix
-	for _, h := range managedHooks {
-		var groups []MatcherGroup
-		if parseHookType(document.rawHooks, h.event, &groups) != nil {
-			continue
-		}
 		for _, g := range groups {
 			for _, hook := range g.Hooks {
 				_, rest, ok := strings.Cut(hook.Command, marker)
-				if !ok || !isEntireHook(hook.Command) {
+				if version != 0 || !ok || !isEntireHook(hook.Command) {
 					continue
 				}
 				digits, _, _ := strings.Cut(rest, " ")
 				if v, err := strconv.Atoi(digits); err == nil {
-					return v
+					version = v
 				}
 			}
 		}
 	}
-	return 0
+	return labels, version
 }
 
 // ProjectHooksSupersede implements agent.UserHookInstaller. Codex loads both

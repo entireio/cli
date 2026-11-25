@@ -34,7 +34,7 @@ type GeneratedUserFile struct {
 // user-level lock while wanted holds. A file there that is not Entire's is
 // refused, not overwritten.
 func (g GeneratedUserFile) Ensure(ctx context.Context, wanted func(context.Context) bool) (int, error) {
-	if _, err := os.Stat(g.Home); errors.Is(err, fs.ErrNotExist) {
+	if configDirMissing(g.Home) {
 		return 0, ErrUserHooksNotInUse
 	}
 	return EnsureUserHookFile(ctx, g.lockPath(), wanted, g.apply)
@@ -44,7 +44,9 @@ func (g GeneratedUserFile) apply(write bool) (int, error) {
 	file := UserConfigFile{Path: g.Path}
 	existing, err := file.Read()
 	switch {
-	case err == nil && string(existing) == g.Content:
+	case err == nil && generatedStateFromContent(string(existing), g.Marker, g.Content) == HooksCurrent:
+		// Equal but for line endings (a CRLF checkout of a dotfiles repo):
+		// rewriting would only be converted back.
 		return 0, nil
 	case err == nil && !strings.Contains(string(existing), g.Marker):
 		return 0, fmt.Errorf("refusing to overwrite foreign file at %s", g.Path)
@@ -69,7 +71,7 @@ func (g GeneratedUserFile) apply(write bool) (int, error) {
 // empty), leaving a file that is not Entire's alone. Reports whether it
 // removed one.
 func (g GeneratedUserFile) Remove(ctx context.Context) (bool, error) {
-	if _, err := os.Stat(g.Home); errors.Is(err, fs.ErrNotExist) {
+	if configDirMissing(g.Home) {
 		return false, nil
 	}
 	release, err := LockUserHookFile(ctx, g.lockPath())
@@ -107,7 +109,7 @@ func (g GeneratedUserFile) lockPath() string {
 // Inspect reports the file's state without writing.
 func (g GeneratedUserFile) Inspect() UserHookReport {
 	report := UserHookReport{Path: g.Path}
-	if _, err := os.Stat(g.Home); errors.Is(err, fs.ErrNotExist) {
+	if configDirMissing(g.Home) {
 		report.State = UserHooksNotInUse
 		return report
 	}
@@ -119,20 +121,91 @@ func (g GeneratedUserFile) Inspect() UserHookReport {
 	case err != nil:
 		report.State, report.Err = UserHooksUnavailable, err
 		return report
-	case !strings.Contains(string(data), g.Marker):
+	}
+	switch generatedStateFromContent(string(data), g.Marker, g.Content) {
+	case HooksAbsent:
 		report.State = UserHooksAbsent
 		report.Notes = append(report.Notes, "A file that is not Entire's is in the way: "+g.Path)
 		return report
+	case HooksCurrent:
+		report.State = UserHooksCurrent
+	case HooksOutdated, HooksForOtherHost:
+		report.State = UserHooksOutdated
 	}
 	if g.Version != nil {
 		if m := g.Version.FindSubmatch(data); m != nil {
 			report.Version, _ = strconv.Atoi(string(m[1])) //nolint:errcheck // the pattern matched digits
 		}
 	}
-	if string(data) == g.Content {
-		report.State = UserHooksCurrent
-	} else {
-		report.State = UserHooksOutdated
-	}
 	return report
+}
+
+// UserFileSource names an agent's generated user-level file. Implementations
+// are zero-size types, so GeneratedUserHooks works in a zero-value agent.
+type UserFileSource interface {
+	UserFile() (GeneratedUserFile, error)
+}
+
+// GeneratedUserHooks implements UserHookInstaller's methods for an agent
+// whose user-level hooks are one generated file (an extension or plugin)
+// that steps aside itself where a project install exists. Embed it.
+type GeneratedUserHooks[S UserFileSource] struct{}
+
+// EnsureUserHooks implements UserHookInstaller.
+func (GeneratedUserHooks[S]) EnsureUserHooks(ctx context.Context, wanted func(context.Context) bool) (int, string, error) {
+	var source S
+	file, err := source.UserFile()
+	if err != nil {
+		return 0, "", err //nolint:wrapcheck // the source names the path it could not resolve
+	}
+	n, err := file.Ensure(ctx, wanted)
+	return n, file.Path, err
+}
+
+// RemoveUserHooks implements UserHookInstaller.
+func (GeneratedUserHooks[S]) RemoveUserHooks(ctx context.Context) (bool, string, error) {
+	var source S
+	file, err := source.UserFile()
+	if err != nil {
+		return false, "", err //nolint:wrapcheck // the source names the path it could not resolve
+	}
+	removed, err := file.Remove(ctx)
+	return removed, file.Path, err
+}
+
+// InspectUserHooks implements UserHookInstaller.
+func (GeneratedUserHooks[S]) InspectUserHooks(context.Context) UserHookReport {
+	var source S
+	file, err := source.UserFile()
+	if err != nil {
+		return UserHookReport{State: UserHooksUnavailable, Err: err}
+	}
+	return file.Inspect()
+}
+
+// ProjectHooksSupersede implements UserHookInstaller: the generated file
+// steps aside itself when the agent loads it, so no hook command needs to ask.
+func (GeneratedUserHooks[S]) ProjectHooksSupersede(context.Context) bool { return false }
+
+// RenderUserLevel renders a generated file's template. Each key of lines is a
+// whole template line: the project render removes it (staying byte-identical
+// to what earlier CLIs wrote), the user-level render replaces it with its
+// value.
+func RenderUserLevel(template string, userLevel bool, lines map[string]string) string {
+	for placeholder, replacement := range lines {
+		if !userLevel {
+			replacement = ""
+		}
+		template = strings.Replace(template, placeholder, replacement, 1)
+	}
+	return template
+}
+
+// UserLevelHeader is the comment that opens a generated file's user-level
+// code: what it is, its hook version, and why it steps aside. kind names the
+// file ("extension", "plugin"); every line starts with indent.
+func UserLevelHeader(indent, kind string, version int) string {
+	return indent + "// Entire user-level " + kind + ", hook version " + strconv.Itoa(version) + ", installed by\n" +
+		indent + "// `entire enable --global`. A project with its own Entire " + kind + " decides\n" +
+		indent + "// for itself (its settings, its version), so this copy steps aside there.\n"
 }

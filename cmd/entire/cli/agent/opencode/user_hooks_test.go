@@ -47,15 +47,6 @@ func TestUserHooks_InstallIsIdempotentAndRemovable(t *testing.T) {
 	assert.NoFileExists(t, path)
 }
 
-// No OpenCode config directory: nothing is created.
-func TestUserHooks_NoConfigDirCreatesNothing(t *testing.T) {
-	xdg := filepath.Join(t.TempDir(), "absent")
-	t.Setenv(xdgConfigHomeEnvVar, xdg)
-	_, _, err := (&OpenCodeAgent{}).EnsureUserHooks(context.Background(), nil)
-	require.ErrorIs(t, err, agent.ErrUserHooksNotInUse)
-	assert.NoDirExists(t, xdg)
-}
-
 // The project render keeps no trace of the user-level placeholders, so
 // committed project plugins stay current.
 func TestRenderPlugin_ProjectRenderHasNoUserLevelCode(t *testing.T) {

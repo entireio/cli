@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path"
-	"strconv"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -128,25 +127,18 @@ const (
 // shared hook code, so both variants get it; nothing here is user-level only
 // beyond the step-aside.
 func renderPluginFor(userLevel bool) string {
-	imports, v1, v2 := "", "", ""
-	if userLevel {
-		imports = userLevelPluginPrelude()
-		v1 = "  if (userLevelSteppedAside(directory)) return {}\n"
-		v2 = "  if (userLevelSteppedAside(ctx.location.directory)) return\n"
-	}
-	out := strings.Replace(pluginTemplate, userLevelImportsLine, imports, 1)
-	out = strings.Replace(out, userLevelStepAsideV1Line, v1, 1)
-	return strings.Replace(out, userLevelStepAsideV2Line, v2, 1)
+	return agent.RenderUserLevel(pluginTemplate, userLevel, map[string]string{
+		userLevelImportsLine:     userLevelPluginPrelude(),
+		userLevelStepAsideV1Line: "  if (userLevelSteppedAside(directory)) return {}\n",
+		userLevelStepAsideV2Line: "  if (userLevelSteppedAside(ctx.location.directory)) return\n",
+	})
 }
 
 func userLevelPluginPrelude() string {
 	return `import { existsSync } from "node:fs"
 import { dirname, join } from "node:path"
 
-// Entire user-level plugin, hook version ` + strconv.Itoa(userHooksVersion) + `, installed by
-// ` + "`entire enable --global`" + `. A project with its own Entire plugin decides for
-// itself (its settings, its version), so this copy steps aside there.
-function userLevelSteppedAside(start: string): boolean {
+` + agent.UserLevelHeader("", "plugin", userHooksVersion) + `function userLevelSteppedAside(start: string): boolean {
   let self = ""
   try {
     self = fileURLToPath(import.meta.url)

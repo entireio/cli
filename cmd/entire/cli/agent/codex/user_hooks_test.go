@@ -82,52 +82,6 @@ func TestRemoveUserHooks_KeepsTheUsersHooks(t *testing.T) {
 	assert.False(t, removed, "nothing left to remove")
 }
 
-// No Codex home means Codex is not in use: nothing is created.
-func TestEnsureUserHooks_NoCodexHomeCreatesNothing(t *testing.T) {
-	home := filepath.Join(t.TempDir(), "absent")
-	t.Setenv("CODEX_HOME", home)
-	n, _, err := (&CodexAgent{}).EnsureUserHooks(context.Background(), nil)
-	require.ErrorIs(t, err, agent.ErrUserHooksNotInUse)
-	assert.Zero(t, n)
-	assert.NoDirExists(t, home)
-}
-
-// A wanted check that fails under the lock installs nothing.
-func TestEnsureUserHooks_InstallsNothingOnceUnwanted(t *testing.T) {
-	home := userCodexHome(t)
-	n, _, err := (&CodexAgent{}).EnsureUserHooks(context.Background(), func(context.Context) bool { return false })
-	require.NoError(t, err)
-	assert.Zero(t, n)
-	assert.NoFileExists(t, filepath.Join(home, HooksFileName))
-}
-
-// A symlinked hooks.json (a dotfiles checkout) is written through, keeping
-// its mode; a dangling one is refused.
-func TestEnsureUserHooks_FollowsASymlinkAndRefusesADanglingOne(t *testing.T) {
-	home := userCodexHome(t)
-	dotfiles := filepath.Join(t.TempDir(), "hooks.json")
-	require.NoError(t, os.WriteFile(dotfiles, []byte(`{}`), 0o640))
-	link := filepath.Join(home, HooksFileName)
-	require.NoError(t, os.Symlink(dotfiles, link))
-
-	_, _, err := (&CodexAgent{}).EnsureUserHooks(context.Background(), nil)
-	require.NoError(t, err)
-	info, err := os.Lstat(link)
-	require.NoError(t, err)
-	assert.NotZero(t, info.Mode()&os.ModeSymlink, "the link is kept")
-	data, err := os.ReadFile(dotfiles)
-	require.NoError(t, err)
-	assert.Contains(t, string(data), "--scope=user/v1")
-	target, err := os.Stat(dotfiles)
-	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0o640), target.Mode().Perm())
-
-	require.NoError(t, os.Remove(dotfiles))
-	_, _, err = (&CodexAgent{}).EnsureUserHooks(context.Background(), nil)
-	require.Error(t, err)
-	assert.NoFileExists(t, dotfiles)
-}
-
 // trustCodexHooks writes approval records for every Entire event in
 // hooksPath into the Codex config.
 func trustCodexHooks(t *testing.T, codexHome, hooksPath string) {

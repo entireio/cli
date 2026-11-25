@@ -1,7 +1,6 @@
 package opencode
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -38,9 +37,13 @@ func resolveUserConfigDir() (string, error) {
 	return filepath.Join(home, ".config", "opencode"), nil
 }
 
-// userPlugin is <config>/opencode/plugin/entire.ts: singular "plugin", which
-// every OpenCode loads (0.15 and 1.0.0 refuse to start beside "plugins").
-func userPlugin() (agent.GeneratedUserFile, error) {
+// userPluginSource is <config>/opencode/plugin/entire.ts: singular "plugin",
+// which every OpenCode loads (0.15 and 1.0.0 refuse to start beside
+// "plugins"). The plugin steps aside itself (see renderPluginFor).
+type userPluginSource struct{}
+
+// UserFile implements agent.UserFileSource.
+func (userPluginSource) UserFile() (agent.GeneratedUserFile, error) {
 	home, err := resolveUserConfigDir()
 	if err != nil {
 		return agent.GeneratedUserFile{}, err
@@ -53,37 +56,3 @@ func userPlugin() (agent.GeneratedUserFile, error) {
 		Version: userVersionPattern,
 	}, nil
 }
-
-// EnsureUserHooks implements agent.UserHookInstaller.
-func (a *OpenCodeAgent) EnsureUserHooks(ctx context.Context, wanted func(context.Context) bool) (int, string, error) {
-	file, err := userPlugin()
-	if err != nil {
-		return 0, "", err
-	}
-	n, err := file.Ensure(ctx, wanted)
-	return n, file.Path, err //nolint:wrapcheck // names the file
-}
-
-// RemoveUserHooks implements agent.UserHookInstaller.
-func (a *OpenCodeAgent) RemoveUserHooks(ctx context.Context) (bool, string, error) {
-	file, err := userPlugin()
-	if err != nil {
-		return false, "", err
-	}
-	removed, err := file.Remove(ctx)
-	return removed, file.Path, err //nolint:wrapcheck // names the file
-}
-
-// InspectUserHooks implements agent.UserHookInstaller.
-func (a *OpenCodeAgent) InspectUserHooks(context.Context) agent.UserHookReport {
-	file, err := userPlugin()
-	if err != nil {
-		return agent.UserHookReport{State: agent.UserHooksUnavailable, Err: err}
-	}
-	return file.Inspect()
-}
-
-// ProjectHooksSupersede implements agent.UserHookInstaller. OpenCode's
-// user-level plugin steps aside itself when it loads (see renderPluginFor),
-// so no hook command needs to ask.
-func (a *OpenCodeAgent) ProjectHooksSupersede(context.Context) bool { return false }

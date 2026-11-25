@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -100,10 +99,7 @@ import { join } from "node:path";
 `
 
 func userLevelStepAside() string {
-	return `  // Entire user-level extension, hook version ` + strconv.Itoa(userHooksVersion) + `, installed by
-  // ` + "`entire enable --global`" + `. A project with its own Entire extension decides
-  // for itself (its settings, its version), so this copy steps aside there.
-  try {
+	return agent.UserLevelHeader("  ", "extension", userHooksVersion) + `  try {
     const project = readFileSync(join(process.cwd(), ".pi", "extensions", "entire", "index.ts"), "utf8");
     if (project.includes("` + entireMarker + `")) return;
   } catch {
@@ -115,13 +111,10 @@ func userLevelStepAside() string {
 // renderExtensionFor renders the extension, the user-level variant when
 // userLevel.
 func renderExtensionFor(userLevel bool) string {
-	imports, stepAside := "", ""
-	if userLevel {
-		imports, stepAside = userLevelImports, userLevelStepAside()
-	}
-	out := strings.ReplaceAll(extensionTemplate, entireCmdPlaceholder, "entire")
-	out = strings.Replace(out, userLevelImportsLine, imports, 1)
-	return strings.Replace(out, userLevelStepAsideLine, stepAside, 1)
+	return agent.RenderUserLevel(strings.ReplaceAll(extensionTemplate, entireCmdPlaceholder, "entire"), userLevel, map[string]string{
+		userLevelImportsLine:   userLevelImports,
+		userLevelStepAsideLine: userLevelStepAside(),
+	})
 }
 
 // InstallHooks writes the Entire pi extension to .pi/extensions/entire/index.ts.

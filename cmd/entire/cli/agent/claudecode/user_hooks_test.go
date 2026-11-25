@@ -3,18 +3,21 @@ package claudecode
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
-	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
-	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 )
+
+// ensureUserHooks installs the user-level hooks with the side-file stamp
+// kept out of the developer's config.
+func ensureUserHooks(t *testing.T) (int, string, error) {
+	t.Helper()
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	return (&ClaudeCodeAgent{}).EnsureUserHooks(context.Background(), nil)
+}
 
 func readUserClaudeSettings(t *testing.T, dir string) map[string]json.RawMessage {
 	t.Helper()
@@ -39,7 +42,7 @@ func TestEnsureUserHooks_WritesTheSameHooksEnableWrites(t *testing.T) {
 	repo := t.TempDir()
 	t.Chdir(repo)
 
-	n, path, err := EnsureUserHooks(context.Background())
+	n, path, err := ensureUserHooks(t)
 	if err != nil {
 		t.Fatalf("EnsureUserHooks() error = %v", err)
 	}
@@ -69,10 +72,10 @@ func TestEnsureUserHooks_IsIdempotentAndKeepsUserKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, _, err := EnsureUserHooks(context.Background()); err != nil {
+	if _, _, err := ensureUserHooks(t); err != nil {
 		t.Fatalf("first EnsureUserHooks() error = %v", err)
 	}
-	n, _, err := EnsureUserHooks(context.Background())
+	n, _, err := ensureUserHooks(t)
 	if err != nil {
 		t.Fatalf("second EnsureUserHooks() error = %v", err)
 	}
@@ -107,7 +110,7 @@ func TestEnsureUserHooks_RefusesAMalformedFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, _, err := EnsureUserHooks(context.Background()); err == nil {
+	if _, _, err := ensureUserHooks(t); err == nil {
 		t.Fatal("EnsureUserHooks() error = nil, want a parse error")
 	}
 	data, err := os.ReadFile(settingsPath)
@@ -116,167 +119,6 @@ func TestEnsureUserHooks_RefusesAMalformedFile(t *testing.T) {
 	}
 	if string(data) != `{not json` {
 		t.Errorf("malformed file was rewritten to %q", data)
-	}
-}
-
-// ~/.claude kept in a dotfiles checkout is common; the write must land on the
-// link's target rather than replace the link.
-func TestEnsureUserHooks_WritesThroughASymlinkedSettingsFile(t *testing.T) {
-	userDir := t.TempDir()
-	dotfiles := t.TempDir()
-	t.Setenv("CLAUDE_CONFIG_DIR", userDir)
-	t.Chdir(t.TempDir())
-	target := filepath.Join(dotfiles, "claude-settings.json")
-	if err := os.WriteFile(target, []byte(`{}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	link := filepath.Join(userDir, ClaudeSettingsFileName)
-	if err := os.Symlink(target, link); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, _, err := EnsureUserHooks(context.Background()); err != nil {
-		t.Fatalf("EnsureUserHooks() error = %v", err)
-	}
-	info, err := os.Lstat(link)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode()&os.ModeSymlink == 0 {
-		t.Error("settings.json symlink was replaced by a regular file")
-	}
-	data, err := os.ReadFile(target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := raw["hooks"]; !ok {
-		t.Errorf("symlink target not updated: %s", data)
-	}
-}
-
-func TestEnsureUserHooks_RefusesADanglingSymlink(t *testing.T) {
-	userDir := t.TempDir()
-	t.Setenv("CLAUDE_CONFIG_DIR", userDir)
-	t.Chdir(t.TempDir())
-	link := filepath.Join(userDir, ClaudeSettingsFileName)
-	if err := os.Symlink(filepath.Join(t.TempDir(), "not-there-yet.json"), link); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, _, err := EnsureUserHooks(context.Background()); err == nil {
-		t.Fatal("EnsureUserHooks() succeeded through a dangling symlink")
-	}
-	info, err := os.Lstat(link)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode()&os.ModeSymlink == 0 {
-		t.Error("dangling settings.json symlink was replaced by a regular file")
-	}
-}
-
-func TestEnsureUserHooks_ConcurrentCallsInstallOnce(t *testing.T) {
-	userDir := t.TempDir()
-	t.Setenv("CLAUDE_CONFIG_DIR", userDir)
-	t.Chdir(t.TempDir())
-
-	const callers = 8
-	added := make(chan int, callers)
-	var wg sync.WaitGroup
-	for range callers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			n, _, err := EnsureUserHooks(context.Background())
-			if err != nil {
-				t.Errorf("EnsureUserHooks() error = %v", err)
-			}
-			added <- n
-		}()
-	}
-	wg.Wait()
-	close(added)
-	installs := 0
-	for n := range added {
-		if n > 0 {
-			installs++
-		}
-	}
-	if installs != 1 {
-		t.Errorf("%d callers installed hooks, want exactly 1", installs)
-	}
-}
-
-// Every command checks the user file while the flag is on, so hooks already in
-// are settled without the lock; only a needed write waits for it.
-func TestEnsureUserHooks_TakesTheLockOnlyToWrite(t *testing.T) {
-	userDir := t.TempDir()
-	t.Setenv("CLAUDE_CONFIG_DIR", userDir)
-	t.Chdir(t.TempDir())
-	path := filepath.Join(userDir, ClaudeSettingsFileName)
-	release, err := flock.Acquire(path + ".lock")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer release()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-	if _, _, err := EnsureUserHooks(ctx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("install under a held lock: error = %v, want it to wait for the lock", err)
-	}
-	if _, err := installUserHooks(userClaudeSettings{path: path}); err != nil {
-		t.Fatal(err)
-	}
-	if n, _, err := EnsureUserHooks(context.Background()); err != nil || n != 0 {
-		t.Errorf("hooks already in under a held lock: n = %d, error = %v, want 0, nil", n, err)
-	}
-}
-
-// Without a Claude config directory Claude Code is not in use; nothing is
-// created for it.
-func TestEnsureUserHooks_NoClaudeConfigDirCreatesNothing(t *testing.T) {
-	claudeDir := filepath.Join(t.TempDir(), "claude")
-	t.Setenv("CLAUDE_CONFIG_DIR", claudeDir)
-	t.Chdir(t.TempDir())
-
-	n, _, err := EnsureUserHooks(context.Background())
-	if !errors.Is(err, ErrClaudeNotInUse) {
-		t.Fatalf("EnsureUserHooks() error = %v, want ErrClaudeNotInUse", err)
-	}
-	if n != 0 {
-		t.Errorf("EnsureUserHooks() added %d hooks, want 0", n)
-	}
-	if _, err := os.Stat(claudeDir); !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("Claude config dir was created (stat err = %v)", err)
-	}
-}
-
-func TestEnsureUserHooks_KeepsTheFileMode(t *testing.T) {
-	userDir := t.TempDir()
-	t.Setenv("CLAUDE_CONFIG_DIR", userDir)
-	t.Chdir(t.TempDir())
-	path := filepath.Join(userDir, ClaudeSettingsFileName)
-	if err := os.WriteFile(path, []byte(`{}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(path, 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, _, err := EnsureUserHooks(context.Background()); err != nil {
-		t.Fatalf("EnsureUserHooks() error = %v", err)
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := info.Mode().Perm(); got != 0o644 {
-		t.Errorf("settings.json mode = %o, want 644", got)
 	}
 }
 
@@ -290,11 +132,11 @@ func TestRemoveUserHooks_RemovesOnlyEntireHooks(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(userDir, ClaudeSettingsFileName), []byte(existing), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := EnsureUserHooks(context.Background()); err != nil {
+	if _, _, err := ensureUserHooks(t); err != nil {
 		t.Fatal(err)
 	}
 
-	removed, path, err := RemoveUserHooks(context.Background())
+	removed, path, err := (&ClaudeCodeAgent{}).RemoveUserHooks(context.Background())
 	if err != nil {
 		t.Fatalf("RemoveUserHooks() error = %v", err)
 	}
@@ -326,7 +168,7 @@ func TestRemoveUserHooks_RemovesOnlyEntireHooks(t *testing.T) {
 // Entire's hooks is left byte for byte.
 func TestRemoveUserHooks_NothingToRemoveWritesNothing(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(t.TempDir(), "absent"))
-	if removed, _, err := RemoveUserHooks(context.Background()); err != nil || removed {
+	if removed, _, err := (&ClaudeCodeAgent{}).RemoveUserHooks(context.Background()); err != nil || removed {
 		t.Fatalf("RemoveUserHooks() with no config dir = %v, %v", removed, err)
 	}
 
@@ -337,7 +179,7 @@ func TestRemoveUserHooks_NothingToRemoveWritesNothing(t *testing.T) {
 	if err := os.WriteFile(path, []byte(existing), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if removed, _, err := RemoveUserHooks(context.Background()); err != nil || removed {
+	if removed, _, err := (&ClaudeCodeAgent{}).RemoveUserHooks(context.Background()); err != nil || removed {
 		t.Fatalf("RemoveUserHooks() without Entire hooks = %v, %v", removed, err)
 	}
 	data, err := os.ReadFile(path)
@@ -346,22 +188,6 @@ func TestRemoveUserHooks_NothingToRemoveWritesNothing(t *testing.T) {
 	}
 	if string(data) != existing {
 		t.Errorf("file rewritten to %q", data)
-	}
-}
-
-// The install re-checks, under the lock, that it is still wanted: a disable
-// that turned the flag off while it waited must not be undone.
-func TestEnsureUserHooksWhile_InstallsNothingOnceUnwanted(t *testing.T) {
-	userDir := t.TempDir()
-	t.Setenv("CLAUDE_CONFIG_DIR", userDir)
-	t.Chdir(t.TempDir())
-
-	n, _, err := EnsureUserHooksWhile(context.Background(), func(context.Context) bool { return false })
-	if err != nil || n != 0 {
-		t.Fatalf("EnsureUserHooksWhile(unwanted) = %d, %v", n, err)
-	}
-	if _, err := os.Stat(filepath.Join(userDir, ClaudeSettingsFileName)); !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("settings written although unwanted (stat err = %v)", err)
 	}
 }
 

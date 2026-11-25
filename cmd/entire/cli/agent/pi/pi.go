@@ -51,6 +51,8 @@ func init() {
 //
 //nolint:revive // PiAgent is clearer than Agent in this context
 type PiAgent struct {
+	agent.GeneratedUserHooks[userExtensionSource]
+
 	CommandRunner agent.TextCommandRunner
 }
 
