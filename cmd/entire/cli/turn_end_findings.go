@@ -133,7 +133,7 @@ func (f *findingsContinuation) finish(ctx context.Context, event *agent.Event) {
 	if !ok || up.Default || up.SHA == "" || up.SHA != up.Head || !pushedThisTurn(ctx, up, f.turnStart) {
 		return
 	}
-	if !findingsContinuationAllowedForSession(ctx, event.SessionID) {
+	if !findingsContinuationAllowedForSession(ctx, event.SessionID, up.Branch) {
 		return
 	}
 	payload, err := f.continuer.RenderTurnContinuation(findingsContinuationReason(up))
@@ -169,27 +169,45 @@ func pushedThisTurn(ctx context.Context, up branchUpstream, turnStart time.Time)
 }
 
 // findingsContinuationAllowedForSession requires an ordinary session (not one
-// Entire runs) whose turn finalized its checkpoints, in a repository the
-// clone-local cache says has trails. An unfinished finalize keeps the turn's
-// checkpoint IDs for the next stop to retry, which reopening would clear.
-func findingsContinuationAllowedForSession(ctx context.Context, sessionID string) bool {
+// Entire runs) whose turn finalized its checkpoints, and a branch with a
+// trail. An unfinished finalize keeps the turn's checkpoint IDs for the next
+// stop to retry, which reopening would clear.
+func findingsContinuationAllowedForSession(ctx context.Context, sessionID, branch string) bool {
 	state, err := strategy.LoadSessionState(ctx, sessionID)
 	if err != nil || state == nil || state.Kind != "" || len(state.TurnCheckpointIDs) > 0 {
 		return false
 	}
-	return findingsTrailsEnabledForSession(ctx, sessionID)
+	return findingsBranchHasTrail(ctx, sessionID, branch)
 }
 
-// findingsTrailsEnabledForSession is replaced in tests, which have no trails
-// enablement cache.
-var findingsTrailsEnabledForSession = cachedTrailsEnabledForSession
+// findingsTrailLookupTimeout bounds the one API read on the stop path. A
+// slow or failed read means no continuation: the stop ends as it would have.
+const findingsTrailLookupTimeout = 3 * time.Second
 
-func cachedTrailsEnabledForSession(ctx context.Context, sessionID string) bool {
+// findingsBranchHasTrail is replaced in tests, which have no trails API.
+var findingsBranchHasTrail = branchHasTrail
+
+// branchHasTrail reports whether the clone-local cache says the repository
+// has trails and the server has a trail for branch. Pushing a branch does
+// not by itself make one (in many repositories opening the pull request
+// does), and continuing without one would only cost the agent a wait.
+func branchHasTrail(ctx context.Context, sessionID, branch string) bool {
 	scope, ok, err := loadTrailEnablementScopeHint(ctx, sessionID)
-	if err != nil || !ok {
+	if err != nil || !ok || cachedTrailsEnablementForScope(ctx, scope, time.Now()) != trailEnablementCacheEnabled {
 		return false
 	}
-	return cachedTrailsEnablementForScope(ctx, scope, time.Now()) == trailEnablementCacheEnabled
+	ctx, cancel := context.WithTimeout(ctx, findingsTrailLookupTimeout)
+	defer cancel()
+	client, repoID, err := newTrailAPIClient(ctx, false, scope.Forge, scope.Owner, scope.Repo)
+	if err != nil {
+		return false
+	}
+	base, err := trailRepoBasePath(repoID)
+	if err != nil {
+		return false
+	}
+	change, err := findTrailByBranchAtPath(ctx, client, base, branch)
+	return err == nil && change != nil
 }
 
 // reopenTurnForContinuation starts a new turn without a prompt, as TurnStart

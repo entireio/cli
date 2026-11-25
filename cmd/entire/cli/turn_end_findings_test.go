@@ -107,9 +107,9 @@ func setupFindingsBranch(t *testing.T) (string, string) {
 	t.Helper()
 	setupStopTestRepo(t)
 	t.Setenv("CI", "")
-	old := findingsTrailsEnabledForSession
-	findingsTrailsEnabledForSession = func(context.Context, string) bool { return true }
-	t.Cleanup(func() { findingsTrailsEnabledForSession = old })
+	old := findingsBranchHasTrail
+	findingsBranchHasTrail = func(context.Context, string, string) bool { return true }
+	t.Cleanup(func() { findingsBranchHasTrail = old })
 	dir, err := os.Getwd()
 	require.NoError(t, err)
 	testutil.GitCheckoutNewBranch(t, dir, "feature/x")
@@ -260,10 +260,10 @@ func TestTurnEndDoesNotContinueOnDefaultBranch(t *testing.T) {
 	assert.Empty(t, out)
 }
 
-func TestTurnEndDoesNotContinueWithoutTrails(t *testing.T) {
+func TestTurnEndDoesNotContinueWithoutATrail(t *testing.T) {
 	// Not parallel: changes the working directory, os.Stdout and a package hook.
 	dir, transcript := setupFindingsBranch(t)
-	findingsTrailsEnabledForSession = func(context.Context, string) bool { return false }
+	findingsBranchHasTrail = func(context.Context, string, string) bool { return false }
 	out := runFindingsTurn(t, continuingMockAgent{newMockAgent()}, "test-findings-no-trails", transcript, func() {
 		commitChange(t, dir)
 		moveTracking(t, dir, "update by push")
