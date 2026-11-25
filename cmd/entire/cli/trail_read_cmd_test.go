@@ -150,8 +150,8 @@ func TestTrailStack_RendersTheStackOrItsAbsence(t *testing.T) {
 	_, out, err := readTrailChange(t, "stack", stack)
 	require.NoError(t, err)
 	assert.Contains(t, out, "Position 2 of 2 onto main:\n")
-	assert.Regexp(t, `(?m)^  -\s+open \(PR #10\)$`, out)
-	assert.Regexp(t, `(?m)^> widget/7\s+Add keys\s+open \(PR #11\)$`, out)
+	assert.Regexp(t, `(?m)^  -\s+open\s+\(PR #10\)$`, out)
+	assert.Regexp(t, `(?m)^> widget/7\s+open\s+Add keys \(PR #11\)$`, out)
 
 	_, out, err = readTrailChange(t, "stack", json.RawMessage(`{"stack":null}`))
 	require.NoError(t, err)
@@ -165,8 +165,8 @@ func TestTrailStack_NativeMembersDoNotInventPullRequests(t *testing.T) {
 	]}}`)
 	_, out, err := readTrailChange(t, "stack", body)
 	require.NoError(t, err)
-	assert.Regexp(t, `(?m)^  widget/6\s+Base change\s+open$`, out)
-	assert.Regexp(t, `(?m)^> widget/7\s+Add keys\s+open$`, out)
+	assert.Regexp(t, `(?m)^  widget/6 {13}open {7}Base change$`, out)
+	assert.Regexp(t, `(?m)^> widget/7 {13}open {7}Add keys$`, out)
 	assert.NotContains(t, out, "#0")
 	assert.NotContains(t, out, "(PR #")
 
@@ -227,7 +227,7 @@ func TestTrailStack_AnUnreadableFieldOrEntryDoesNotHideTheRest(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, out, "Position 2 of ?:\n")
 	assert.Contains(t, out, "  (unreadable item; see --json)\n")
-	assert.Regexp(t, `(?m)^> -\s+open \(PR #11\)$`, out, "the next entry still prints")
+	assert.Regexp(t, `(?m)^> -\s+open\s+\(PR #11\)$`, out, "the next entry still prints")
 	assert.Equal(t, 2, strings.Count(out, trailUnreadableNote), "a null entry is unreadable too")
 	assert.NotContains(t, out, "#0")
 }

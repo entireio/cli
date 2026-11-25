@@ -365,7 +365,8 @@ func printTrailStack(w io.Writer, selected *trailWorkingContext, stack *trailSta
 		if pr.PRNumber != nil {
 			prLabel = fmt.Sprintf(" (PR #%d)", *pr.PRNumber)
 		}
-		fmt.Fprintf(w, "%s%-20s %s %s%s\n", marker, tuiutil.SanitizeTerminalLabel(trailRef),
-			tuiutil.SanitizeTerminalLabel(stringPtrValue(pr.Title)), tuiutil.SanitizeTerminalLabel(stringPtrValue(pr.Status)), prLabel)
+		line := fmt.Sprintf("%s%-20s %-10s %s", marker, tuiutil.SanitizeTerminalLabel(trailRef),
+			tuiutil.SanitizeTerminalLabel(stringPtrValue(pr.Status)), strings.TrimSpace(tuiutil.SanitizeTerminalLabel(stringPtrValue(pr.Title))+prLabel))
+		fmt.Fprintln(w, strings.TrimRight(line, " "))
 	}
 }
