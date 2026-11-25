@@ -490,6 +490,7 @@ func newRepoViewCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cmd.SilenceUsage = true
 			var ref string
+			var tr typedRef
 			if len(args) == 0 {
 				var err error
 				ref, err = currentRepoViewRef(cmd.Context())
@@ -497,7 +498,8 @@ func newRepoViewCmd() *cobra.Command {
 					return err
 				}
 			} else {
-				ref = strings.TrimSpace(args[0])
+				tr = newTypedRef(args[0])
+				ref = tr.canon
 			}
 			// A clone URL names its own cluster, so it is looked up on the core
 			// fronting that cluster. Recognised by its scheme so a malformed one
@@ -509,7 +511,7 @@ func newRepoViewCmd() *cobra.Command {
 					return badRepoRefErr(err)
 				}
 				if target.forge == nativeCloneForge {
-					return runNativeRepoView(cmd, target.qualified(), clusterHost, authoritative)
+					return tr.wrapErr(runNativeRepoView(cmd, target.qualified(), clusterHost, authoritative))
 				}
 				warnFlagsGitHubViewIgnores(cmd, authoritative)
 				return runRepoMirrorViewByName(cmd, target.owner+"/"+target.repo, clusterHost)
@@ -524,13 +526,13 @@ func newRepoViewCmd() *cobra.Command {
 			// rather than the repo resolver the native path uses.
 			target, err := parseMirrorRepoRef(ref)
 			if err != nil {
-				return err
+				return tr.wrapErr(err)
 			}
 			if target.forge == mirrorCloneForge {
 				warnFlagsGitHubViewIgnores(cmd, authoritative)
 				return runRepoMirrorViewByName(cmd, target.owner+"/"+target.repo, "")
 			}
-			return runNativeRepoView(cmd, target.qualified(), "", authoritative)
+			return tr.wrapErr(runNativeRepoView(cmd, target.qualified(), "", authoritative))
 		},
 	}
 	cmd.Flags().BoolVar(&authoritative, "authoritative", false, "Fail if the server cannot confirm provisioning state")
@@ -614,15 +616,16 @@ func newRepoVisibilityGetCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runCoreObject(cmd, visibilityColumns, visibilityRow, func(ctx context.Context, c *coreapi.Client) (*repoVisibility, error) {
-				repoID, err := resolveRepoRef(ctx, c, args[0], project)
+				tr := newTypedRef(args[0])
+				repoID, err := resolveRepoRef(ctx, c, tr.canon, project)
 				if err != nil {
-					return nil, err
+					return nil, tr.wrapErr(err)
 				}
 				out, err := c.GetRepoVisibility(ctx, coreapi.GetRepoVisibilityParams{RepoId: repoID})
 				if err != nil {
 					return nil, err
 				}
-				return &repoVisibility{Repo: args[0], Visibility: string(out.Visibility)}, nil
+				return &repoVisibility{Repo: tr.canon, Visibility: string(out.Visibility)}, nil
 			})
 		},
 	}
@@ -652,15 +655,16 @@ func newRepoEditCmd() *cobra.Command {
 				return err
 			}
 			return runCoreObject(cmd, visibilityColumns, visibilityRow, func(ctx context.Context, c *coreapi.Client) (*repoVisibility, error) {
-				repoID, err := resolveRepoRef(ctx, c, args[0], project)
+				tr := newTypedRef(args[0])
+				repoID, err := resolveRepoRef(ctx, c, tr.canon, project)
 				if err != nil {
-					return nil, err
+					return nil, tr.wrapErr(err)
 				}
 				out, err := c.SetRepoVisibility(ctx, &coreapi.SetRepoVisibilityInputBody{Visibility: vis}, coreapi.SetRepoVisibilityParams{RepoId: repoID})
 				if err != nil {
 					return nil, err
 				}
-				return &repoVisibility{Repo: args[0], Visibility: string(out.Visibility)}, nil
+				return &repoVisibility{Repo: tr.canon, Visibility: string(out.Visibility)}, nil
 			})
 		},
 	}

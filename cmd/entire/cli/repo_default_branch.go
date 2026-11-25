@@ -29,9 +29,10 @@ func newRepoDefaultBranchCmd() *cobra.Command {
 				return errors.New("branch must not be empty")
 			}
 			return runCoreMutation(cmd, func(ctx context.Context, c *coreapi.Client) (string, any, error) {
-				repoID, err := resolveRepoRef(ctx, c, args[0], project)
+				tr := newTypedRef(args[0])
+				repoID, err := resolveRepoRef(ctx, c, tr.canon, project)
 				if err != nil {
-					return "", nil, err
+					return "", nil, tr.wrapErr(err)
 				}
 				body := &coreapi.SetDefaultBranchInputBody{Branch: branch}
 				out, err := c.SetDefaultBranch(ctx, body, coreapi.SetDefaultBranchParams{RepoId: repoID})
