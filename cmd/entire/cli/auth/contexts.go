@@ -179,6 +179,9 @@ func LocalIdentityCacheKey() (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("parse %s claims: %w", EnvTokenVar, err)
 		}
+		if key, ok := exchangedServiceAccountKey(claims); ok {
+			return key, nil
+		}
 		return strings.Join([]string{
 			"env",
 			strings.TrimRight(claims.Issuer, "/"),

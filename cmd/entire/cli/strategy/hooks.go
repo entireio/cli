@@ -1166,16 +1166,16 @@ func installHooks(ctx context.Context, lockRoot, root *os.Root, hooksDir string,
 	return installedCount, nil
 }
 
-// reclaimHookFromOtherTools takes name back from pre-commit or another hook
-// manager that moved Entire's hook aside, telling the user when it did.
+// reclaimHookFromOtherTools takes name back from pre-commit, prek or another
+// hook manager that moved Entire's hook aside, telling the user when it did.
 func reclaimHookFromOtherTools(ctx context.Context, root *os.Root, name string) error {
 	reclaimed, err := reclaimFromPreCommit(root, name)
 	if err != nil {
-		return fmt.Errorf("failed to take %s back from pre-commit: %w", name, err)
+		return fmt.Errorf("failed to take %s back from pre-commit or prek: %w", name, err)
 	}
 	if reclaimed {
-		fmt.Fprintf(stderrWriter, "[entire] pre-commit had moved Entire's %s hook to %s%s; Entire's hook is back and runs pre-commit's after it.\n", name, name, legacySuffix)
-		logging.Info(ctx, "git hook reclaimed from pre-commit", slog.String("hook", name))
+		fmt.Fprintf(stderrWriter, "[entire] pre-commit or prek had moved Entire's %s hook to %s%s; Entire's hook is back and runs that manager's hook after it.\n", name, name, legacySuffix)
+		logging.Info(ctx, "git hook reclaimed from pre-commit or prek", slog.String("hook", name))
 	}
 	wrapped, err := reclaimFromWrappers(root, name)
 	if err != nil {
@@ -1544,8 +1544,8 @@ func generateChainedContent(baseContent, hookName string) string {
 }
 
 // chainCall runs <hook>.pre-entire, with stdin as redirect gives it. When
-// pre-commit's wrapper ran this hook as <hook>.legacy and is itself the
-// backup, calling it again would trip pre-commit's migration-mode guard, so
+// pre-commit's or prek's wrapper ran this hook as <hook>.legacy and is itself
+// the backup, calling it again would trip that manager's migration-mode guard, so
 // the user's hook Entire kept for .legacy (see reclaimFromPreCommit) runs
 // instead.
 //
@@ -1563,7 +1563,8 @@ _entire_hook_dir="$(dirname "$0")"
 if [ -z "${%s:-}" ]; then
     %s=1
     export %s
-    if [ -n "${PRE_COMMIT_RUNNING_LEGACY:-}" ] && grep -q '^%s' "$_entire_hook_dir/%s" 2>/dev/null; then
+    if { [ -n "${PRE_COMMIT_RUNNING_LEGACY:-}" ] && grep -q '^%s' "$_entire_hook_dir/%s" 2>/dev/null; } ||
+        { [ -n "${PREK_RUNNING_LEGACY:-}" ] && grep -q '^%s' "$_entire_hook_dir/%s" 2>/dev/null; }; then
         if [ -x "$_entire_hook_dir/%s" ]; then
             "$_entire_hook_dir/%s" "$@"%s
         fi
@@ -1571,7 +1572,7 @@ if [ -z "${%s:-}" ]; then
         "$_entire_hook_dir/%s" "$@"%s
     fi
 fi
-`, chainComment, guard, guard, guard, preCommitSignatures[0], backup, keep, keep, redirect, backup, backup, redirect)
+`, chainComment, guard, guard, guard, preCommitHeader, backup, prekHeader, backup, keep, keep, redirect, backup, backup, redirect)
 }
 
 func generatePostRewriteChainedContent(baseContent string) string {

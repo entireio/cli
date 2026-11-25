@@ -78,7 +78,7 @@ func requireSecureDataOverride() error {
 }
 
 // newTrailAPIClient dials the entire-api cell that owns the forge-qualified
-// repository and returns its repo_id for repo-addressed trail reads. It is a
+// repository and returns its repo_id for repository Change requests. It is a
 // package seam so tests can substitute a client pointed at a stub server.
 var newTrailAPIClient = func(ctx context.Context, insecureHTTP bool, forge, owner, repo string) (*api.Client, string, error) {
 	return openTrailRepoClient(ctx, forge, owner, repo, func() (cellClientBuilder, error) {

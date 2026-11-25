@@ -686,7 +686,10 @@ func newRepoMirrorAddCmd() *cobra.Command {
 			"repo's own, so only those clusters are offered and --cluster has no " +
 			"default there: non-interactive runs must name one.\n\n" +
 			"Every cluster is attempted: one that fails does not stop the others, " +
-			"and the command exits non-zero naming the ones that did.\n\n" + mirrorRepoRefHelp,
+			"and the command exits non-zero naming the ones that did. A GitHub " +
+			"mirror whose initial clone is still running when --timeout passes " +
+			"is reported as still syncing, not as a failure: the clone carries on " +
+			"in the background, and `entire repo view <repo>` shows when it lands.\n\n" + mirrorRepoRefHelp,
 		Example: "  entire repo mirror add\n" +
 			"  entire repo mirror add /gh/octocat/hello-world\n" +
 			"  entire repo mirror add /gh/octocat/hello-world --cluster aws-us-east-2.entire.io\n" +
