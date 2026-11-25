@@ -87,6 +87,23 @@ type grantTarget[Row any] struct {
 	// or a GitHub mirror, and only the first has grants. nil for org and
 	// project, which have one kind of target each.
 	listBranch *grantListBranch
+
+	// webURLRefs reads a pasted entire.com URL as the path it spells
+	// (canonicalizeRepoRef) before anything classifies the ref. Set for the
+	// repo target alone: org and project refs are names, which no entire.com
+	// URL spells.
+	webURLRefs bool
+}
+
+// typedRef is the target ref every leaf works from, computed once from the
+// argument before claims, unwritableRef or resolve sees it: they all read
+// canon, and errors are passed through wrapErr so they echo what was typed.
+// Without webURLRefs the argument is used exactly as given.
+func (t grantTarget[Row]) typedRef(arg string) typedRef {
+	if !t.webURLRefs {
+		return typedRef{typed: arg, canon: arg}
+	}
+	return newTypedRef(arg)
 }
 
 // grantListBranch is the second answer a `list` leaf can give: claims reports
@@ -161,7 +178,10 @@ func newGrantAddCmd[Row any](t grantTarget[Row]) *cobra.Command {
 					return err
 				}
 			}
-			pt := grantPickerTarget{noun: t.noun, ref: args[0], roles: t.roles, least: t.leastRole}
+			tr := t.typedRef(args[0])
+			// The canonical path is what later output names the repo by; a
+			// ref left URL-shaped is redacted, since it is echoed unquoted.
+			pt := grantPickerTarget{noun: t.noun, ref: redactRefForError(tr.canon), roles: t.roles, least: t.leastRole}
 			grantee := ""
 			if len(args) == 2 {
 				grantee = args[1]
@@ -182,8 +202,8 @@ func newGrantAddCmd[Row any](t grantTarget[Row]) *cobra.Command {
 					return missingRoleErr(t.roles)
 				}
 			}
-			return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
-				id, err := t.resolve(ctx, c, args[0])
+			return tr.wrapErr(runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
+				id, err := t.resolve(ctx, c, tr.canon)
 				if err != nil {
 					return err
 				}
@@ -192,7 +212,7 @@ func newGrantAddCmd[Row any](t grantTarget[Row]) *cobra.Command {
 					return err
 				}
 				return grantEach(ctx, cmd, c, t, pt, id, picked, grantee != "")
-			})
+			}))
 		},
 	}
 	cmd.Flags().StringVar(&role, "role", "", roleHelp)
@@ -458,18 +478,21 @@ func newGrantListCmd[Row any](t grantTarget[Row]) *cobra.Command {
 		Short: fmt.Sprintf("List who has %s access", t.noun),
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if t.listBranch != nil && t.listBranch.claims(args[0]) {
-				return t.listBranch.list(cmd, args[0])
+			// Canonical before claims: a raw https://entire.com/et/... URL
+			// declares no forge, so the mirror branch would claim it.
+			tr := t.typedRef(args[0])
+			if t.listBranch != nil && t.listBranch.claims(tr.canon) {
+				return tr.wrapErr(t.listBranch.list(cmd, tr.canon))
 			}
-			return runCoreList(cmd, "No grants found.", t.columns, t.row, func(ctx context.Context, c *coreapi.Client) ([]Row, error) {
-				id, err := t.resolve(ctx, c, args[0])
+			return tr.wrapErr(runCoreList(cmd, "No grants found.", t.columns, t.row, func(ctx context.Context, c *coreapi.Client) ([]Row, error) {
+				id, err := t.resolve(ctx, c, tr.canon)
 				if err != nil {
 					return nil, err
 				}
 				return pagedList(ctx, func(ctx context.Context, pageToken coreapi.OptString) ([]Row, coreapi.OptString, error) {
 					return t.list(ctx, c, id, pageToken)
 				})
-			})
+			}))
 		},
 	}
 	addJSONFlag(cmd)
@@ -491,7 +514,8 @@ func newGrantRemoveCmd[Row any](t grantTarget[Row]) *cobra.Command {
 		PreRunE: refuseUnwritableRef(t),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cmd.SilenceUsage = true
-			pt := grantPickerTarget{noun: t.noun, ref: args[0], roles: t.roles, least: t.leastRole}
+			tr := t.typedRef(args[0])
+			pt := grantPickerTarget{noun: t.noun, ref: redactRefForError(tr.canon), roles: t.roles, least: t.leastRole}
 			if len(args) == 2 {
 				if err := ensureGranteeIsHandle(args[1]); err != nil {
 					return err
@@ -502,8 +526,8 @@ func newGrantRemoveCmd[Row any](t grantTarget[Row]) *cobra.Command {
 			if len(args) == 1 && !interactive.CanPromptInteractively() {
 				return granteeRequiredErr(pt)
 			}
-			return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
-				id, err := t.resolve(ctx, c, args[0])
+			return tr.wrapErr(runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
+				id, err := t.resolve(ctx, c, tr.canon)
 				if err != nil {
 					return err
 				}
@@ -553,7 +577,7 @@ func newGrantRemoveCmd[Row any](t grantTarget[Row]) *cobra.Command {
 					}
 				}
 				return nil
-			})
+			}))
 		},
 	}
 	return cmd
@@ -650,9 +674,10 @@ func refuseUnwritableRef[Row any](t grantTarget[Row]) func(*cobra.Command, []str
 		return nil
 	}
 	return func(cmd *cobra.Command, args []string) error {
-		if err := t.unwritableRef(args[0]); err != nil {
+		tr := t.typedRef(args[0])
+		if err := t.unwritableRef(tr.canon); err != nil {
 			cmd.SilenceUsage = true
-			return err
+			return tr.wrapErr(err)
 		}
 		return nil
 	}
@@ -895,6 +920,7 @@ var repoGrantTarget = grantTarget[coreapi.RepoGrant]{
 	row:           repoGrantRow,
 	listBranch:    mirrorGrantListing,
 	unwritableRef: mirrorGrantsAreUpstream,
+	webURLRefs:    true,
 	resolve: func(ctx context.Context, c *coreapi.Client, ref string) (string, error) {
 		return resolveRepoPath(ctx, c, ref)
 	},

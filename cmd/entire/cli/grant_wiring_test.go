@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -155,8 +157,9 @@ func TestGrantRemove_Idempotent(t *testing.T) {
 }
 
 // TestRepoGrant_TakesOnlyTheNativePath pins that `repo grant` addresses a repo
-// by its /et/<project>/<repo> path and nothing else: a ULID and a bare name are
-// refused before any request is made, and --project is not a flag here.
+// by its /et/<project>/<repo> path, or the entire.com URL that spells it: a
+// ULID and a bare name are refused before any request is made, and --project is
+// not a flag here.
 //
 // Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
 func TestRepoGrant_TakesOnlyTheNativePath(t *testing.T) {
@@ -320,4 +323,63 @@ func TestGranteeErrorsNeverOfferAULID(t *testing.T) {
 	_, _, err := parseQualifiedHandle("asdasdasd")
 	require.ErrorContains(t, err, "(or a ULID)")
 	require.NoError(t, ensureGranteeIsHandle("github:alice"))
+}
+
+// TestRepoGrantWrite_AcceptsEntireComURLs pins that `repo grant add` and
+// `remove` read a pasted entire.com URL as the /et/<project>/<repo> path it
+// spells: the requests are the ones the path form makes, and the success line
+// names the repo by its canonical path.
+//
+// Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
+func TestRepoGrantWrite_AcceptsEntireComURLs(t *testing.T) {
+	const url = "https://entire.com/et/acme/web"
+	verbs := map[string][]string{
+		"add":    {"github:alice", "--role", "reader"},
+		"remove": {"github:alice"},
+	}
+	for verb, rest := range verbs {
+		t.Run(verb, func(t *testing.T) {
+			run := func(ref string) (string, []string) {
+				var requests []string
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					body, err := io.ReadAll(r.Body)
+					if err != nil {
+						t.Errorf("read body: %v", err)
+					}
+					requests = append(requests, r.Method+" "+r.URL.Path+" "+string(body))
+					w.Header().Set("Content-Type", "application/json")
+					var payload any
+					switch {
+					case strings.Contains(r.URL.Path, "/identity/handles/"):
+						payload = &coreapi.ResolvedIdentity{AccountId: wiringGranteeULID, Provider: providerGitHub, Handle: "alice", ProviderUserId: "12345"}
+					case strings.HasSuffix(r.URL.Path, "/repos/resolve"):
+						payload = nativeResolution("acme/web", wiringRepoULID)
+					case r.Method == http.MethodDelete:
+						w.WriteHeader(http.StatusNoContent)
+						return
+					default:
+						w.WriteHeader(http.StatusCreated)
+						payload = map[string]string{"status": "ok"}
+					}
+					if err := printJSON(w, payload); err != nil {
+						t.Errorf("encode %s: %v", r.URL.Path, err)
+					}
+				}))
+				t.Cleanup(srv.Close)
+				out, _, err := runCoreCmd(t, newRepoGrantCmd, srv.URL, append([]string{verb, ref}, rest...)...)
+				require.NoError(t, err)
+				return out, requests
+			}
+
+			wantOut, wantRequests := run(wiringRepoPath)
+			gotOut, gotRequests := run(url)
+			require.Equal(t, wantRequests, gotRequests, "the URL form makes the path form's requests")
+			require.Equal(t, wantOut, gotOut, "success output names the canonical ref")
+			require.Contains(t, gotOut, wiringRepoPath)
+			require.NotContains(t, gotOut, "entire.com")
+			require.True(t, slices.ContainsFunc(gotRequests, func(s string) bool {
+				return strings.Contains(s, "/api/v1/repos/"+wiringRepoULID+"/grants")
+			}), "the grant request targets the resolved repo: %v", gotRequests)
+		})
+	}
 }
