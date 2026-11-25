@@ -349,9 +349,7 @@ type chunkPushResult struct {
 	landed        int                 // refs in chunks that pushed cleanly
 	failed        []checkpointRefPush // refs of chunks that failed, for the per-ref fallback
 	untried       []checkpointRefPush // refs never attempted because the phase stopped
-	stalled       []checkpointRefPush // refs of chunks cut by the per-chunk timeout
 	stopReason    string              // why untried is non-empty
-	size          int                 // chunk size at the end of the phase; a stall shrinks it
 	firstErr      error
 	sshAuthFailed bool
 	// unreachable is the line of git output showing the remote could not be
@@ -369,21 +367,14 @@ type chunkPushResult struct {
 // retries cannot reach it either, and each would wait out its own connect
 // timeout. The first chunk is always attempted, matching the per-ref fallback.
 //
-// chunkTimeout, when positive, bounds each chunk on its own: a chunk that
-// outlasts it is recorded as stalled and the phase moves on to the next, so one
-// stalled upload does not hold every chunk behind it. A stall is slowness, not
-// a refusal, so it does not count toward the consecutive-failure stop. It does
-// quarter the chunks after it (down to 2, which keep the timeout), since the
-// link just proved too slow for that size.
-//
 // beforeChunk, when set, runs before every chunk but the first, ahead of the
-// stop check, so time it spends counts against ctx like a chunk would.
+// stop check, so its time counts against ctx.
 func pushRefChunks(ctx context.Context, target string, refs []checkpointRefPush, size int,
-	chunkTimeout time.Duration, beforeChunk func(context.Context), onLanded func([]checkpointRefPush),
-) (res chunkPushResult) {
+	beforeChunk func(context.Context), onLanded func([]checkpointRefPush),
+) chunkPushResult {
+	var res chunkPushResult
 	consecutive := 0
-	defer func() { res.size = size }()
-	for start := 0; start < len(refs); {
+	for start := 0; start < len(refs); start += size {
 		if start > 0 {
 			if beforeChunk != nil {
 				beforeChunk(ctx)
@@ -397,25 +388,7 @@ func pushRefChunks(ctx context.Context, target string, refs []checkpointRefPush,
 			}
 		}
 		chunk := refs[start:min(start+size, len(refs))]
-		start += len(chunk)
-		chunkCtx, cancel := ctx, context.CancelFunc(func() {})
-		// A single ref is as small as a chunk gets: timing it out would only
-		// re-send the same partial upload on every pass, never landing it, so
-		// it gets the rest of the budget instead.
-		if chunkTimeout > 0 && len(chunk) > 1 {
-			chunkCtx, cancel = context.WithTimeout(ctx, chunkTimeout)
-		}
-		err := batchPushCheckpointRefs(chunkCtx, target, chunk)
-		stalled := err != nil && chunkTimeout > 0 && len(chunk) > 1 &&
-			errors.Is(chunkCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
-		cancel()
-		if stalled {
-			res.stalled = append(res.stalled, chunk...)
-			logging.Warn(ctx, "git-refs push: checkpoint ref chunk stalled; moving on",
-				slog.Int("refs", len(chunk)), slog.Duration("timeout", chunkTimeout))
-			size = max(2, size/4)
-			continue
-		}
+		err := batchPushCheckpointRefs(ctx, target, chunk)
 		if err == nil {
 			consecutive = 0
 			res.landed += len(chunk)
@@ -437,81 +410,19 @@ func pushRefChunks(ctx context.Context, target string, refs []checkpointRefPush,
 		res.failed = append(res.failed, chunk...)
 		if nonInteractiveSSHAuthFailure(ctx, err) {
 			res.sshAuthFailed = true
-			res.untried = refs[start:]
+			res.untried = refs[start+len(chunk):]
 			return res
 		}
 		// A remote that already answered this flush — took a chunk, or failed
 		// one any way other than a connect failure — was reachable; a later
-		// connect failure is transient,
-		// and the per-ref fallback may still land or recover those refs. Only a
-		// connect failure on the first chunk the remote saw means unreachable.
+		// connect failure is transient, and the per-ref fallback may still land
+		// or recover those refs. Only a connect failure on the first chunk the
+		// remote saw means unreachable.
 		if line, ok := remote.UnreachableRemoteLine(err); ok && res.landed == 0 && len(res.failed) == len(chunk) {
 			res.unreachable = line
-			res.untried = refs[start:]
+			res.untried = refs[start+len(chunk):]
 			return res
 		}
-	}
-	return res
-}
-
-// splitFloor is the smallest failed batch splitFailedChunks halves; smaller
-// ones go straight to the per-ref fallback, which retries each ref anyway.
-const splitFloor = 4
-
-// splitResult is what splitFailedChunks left for the per-ref fallback.
-type splitResult struct {
-	landed     int
-	unresolved []checkpointRefPush
-}
-
-// splitFailedChunks re-pushes each failed chunk of refs (chunkSize apart) in
-// halves, recursing into a half only while its sibling landed: a single bad
-// ref is then isolated in about 2·log2(chunk) pushes. When both halves fail
-// the cause is not one ref (several diverged, or the destination), so both go
-// to the per-ref fallback whole, as does everything once the budget is spent
-// or the destination refuses the key or the connection. onLanded is called
-// with each half that lands.
-func splitFailedChunks(ctx, flushCtx context.Context, target string, refs []checkpointRefPush, chunkSize int,
-	onLanded func([]checkpointRefPush),
-) splitResult {
-	var res splitResult
-	halt := false
-	var walk func([]checkpointRefPush)
-	walk = func(batch []checkpointRefPush) {
-		if halt || len(batch) <= splitFloor || flushCtx.Err() != nil {
-			res.unresolved = append(res.unresolved, batch...)
-			return
-		}
-		mid := len(batch) / 2
-		var failedHalves [][]checkpointRefPush
-		for _, half := range [][]checkpointRefPush{batch[:mid], batch[mid:]} {
-			if halt || flushCtx.Err() != nil {
-				failedHalves = append(failedHalves, half)
-				continue
-			}
-			err := batchPushCheckpointRefs(flushCtx, target, half)
-			if err == nil {
-				res.landed += len(half)
-				onLanded(half)
-				continue
-			}
-			if _, unreachable := remote.UnreachableRemoteLine(err); unreachable || nonInteractiveSSHAuthFailure(flushCtx, err) {
-				halt = true
-			}
-			logging.Debug(ctx, "git-refs push: split checkpoint ref batch failed",
-				slog.Int("refs", len(half)), slog.String("error", err.Error()))
-			failedHalves = append(failedHalves, half)
-		}
-		if len(failedHalves) == 1 && !halt {
-			walk(failedHalves[0])
-			return
-		}
-		for _, half := range failedHalves {
-			res.unresolved = append(res.unresolved, half...)
-		}
-	}
-	for start := 0; start < len(refs); start += chunkSize {
-		walk(refs[start:min(start+chunkSize, len(refs))])
 	}
 	return res
 }

@@ -77,11 +77,6 @@ var ciEnvVars = []string{"CI", "GITHUB_ACTIONS", "GITLAB_CI", "BUILDKITE", "JENK
 // otherwise upload inline, as before.
 var backgroundUploadInTests = false
 
-// checkpointUploadChunkTimeout bounds one chunk push inside a worker pass, so a
-// stalled upload is moved to the back of the queue instead of holding every
-// chunk behind it for the whole delivery budget. Var for tests.
-var checkpointUploadChunkTimeout = max(time.Minute, checkpointUploadDeliveryBudget/8)
-
 // checkpointUploadSpawn is the process-spawn seam, swapped in tests:
 // execx.SpawnDetached is a no-op under `go test`.
 var checkpointUploadSpawn = func(worktreeRoot string) {
@@ -477,11 +472,11 @@ func runCheckpointUploadPass(ctx context.Context, repo *git.Repository, coord *c
 	}
 
 	// The budget bounds the batch too, so running out reads as a budget stop
-	// (stalled refs rotated, no per-ref retries on a dead context). A push made
+	// (the cut chunk rotated, no per-ref retries on a dead context). A push made
 	// during a long upload is waited for between chunks; that wait counts
 	// against the budget.
 	res, err := flushCheckpointRefsQueue(ctx, repo, ps, flushOptions{
-		budget: checkpointUploadDeliveryBudget, boundBatch: true, chunkTimeout: checkpointUploadChunkTimeout,
+		budget: checkpointUploadDeliveryBudget, boundBatch: true,
 		beforeChunk: func(ctx context.Context) { waitForUserPushes(ctx, coord) }})
 	if err != nil {
 		logging.Warn(ctx, "background checkpoint upload: refs left queued", slog.String("error", err.Error()))

@@ -343,45 +343,6 @@ func TestRunCheckpointUploadWorker_WithholdsWhenRequiredOPFIsOff(t *testing.T) {
 	assert.Contains(t, st.Last.Error, "privacy filter")
 }
 
-// TestRunCheckpointUploadWorker_StalledChunkDoesNotHoldTheRest: a chunk that
-// outlasts the per-chunk timeout moves to the back of the queue and the pass
-// carries on, instead of one stalled upload holding every chunk behind it.
-func TestRunCheckpointUploadWorker_StalledChunkDoesNotHoldTheRest(t *testing.T) {
-	shrinkRefPushChunkSize(t, 2)
-	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 6)
-	prepareGitRefsPrePush(t, workDir, bareDir)
-	hook := "#!/bin/sh\ngrep -q '" + refs[0].String() + "' && sleep 300\nexit 0\n"
-	require.NoError(t, os.WriteFile(filepath.Join(bareDir, "hooks", "pre-receive"), []byte(hook), 0o755))
-	restoreTimeout := checkpointUploadChunkTimeout
-	checkpointUploadChunkTimeout = 2 * time.Second
-	t.Cleanup(func() { checkpointUploadChunkTimeout = restoreTimeout })
-
-	repo, err := gitrepo.OpenPath(workDir)
-	require.NoError(t, err)
-	defer repo.Close()
-	queue := enqueueRefs(t, repo, refs)
-	coord := uploadCoordinator(t, repo)
-	require.NoError(t, coord.Request(checkpoint.UploadRequest{Remote: "origin"}))
-
-	start := time.Now()
-	RunCheckpointUploadWorker(t.Context())
-	// The chunk timeout is 2s and the stall 300s, so this bound tells the two
-	// apart however loaded the machine is.
-	assert.Less(t, time.Since(start), 2*time.Minute, "the stalled chunk is cut, not waited out")
-
-	for _, ref := range refs[2:] {
-		assert.Equal(t, refHashOf(t, repo, ref), remoteRefHash(t, bareDir, ref), "chunks behind the stall still land")
-	}
-	remaining, err := queue.Drain()
-	require.NoError(t, err)
-	assert.ElementsMatch(t, refs[:2], remaining, "the stalled chunk stays queued")
-	assert.Equal(t, 2, queue.ChunkSizeHint(checkpointRefPushChunkSize), "chunks behind the stall landed, so the size stays")
-	st, err := coord.State()
-	require.NoError(t, err)
-	require.NotNil(t, st.Last)
-	assert.Contains(t, st.Last.Error, "stalled")
-}
-
 // TestPrePush_ForegroundNeverHandsOffWhenLockHeld: an inline-only push (CI,
 // trail create, the setting) that finds another upload holding the lock
 // leaves its refs queued rather than starting a background process.
@@ -412,30 +373,6 @@ func TestPrePush_ForegroundNeverHandsOffWhenLockHeld(t *testing.T) {
 	st, err := coord.State()
 	require.NoError(t, err)
 	assert.Nil(t, st.Request, "no request is left for a background process")
-}
-
-// TestRunCheckpointUploadWorker_SingleSlowRefIsNotCut: a chunk down to one ref
-// gets the pass budget, not the per-chunk timeout, or a ref slower than the
-// timeout would be cut and re-sent on every pass and never land.
-func TestRunCheckpointUploadWorker_SingleSlowRefIsNotCut(t *testing.T) {
-	shrinkRefPushChunkSize(t, 1)
-	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 1)
-	prepareGitRefsPrePush(t, workDir, bareDir)
-	hook := "#!/bin/sh\ncat >/dev/null\nsleep 3\nexit 0\n"
-	require.NoError(t, os.WriteFile(filepath.Join(bareDir, "hooks", "pre-receive"), []byte(hook), 0o755))
-	restoreTimeout := checkpointUploadChunkTimeout
-	checkpointUploadChunkTimeout = time.Second
-	t.Cleanup(func() { checkpointUploadChunkTimeout = restoreTimeout })
-
-	repo, err := gitrepo.OpenPath(workDir)
-	require.NoError(t, err)
-	defer repo.Close()
-	enqueueRefs(t, repo, refs)
-	require.NoError(t, uploadCoordinator(t, repo).Request(checkpoint.UploadRequest{Remote: "origin"}))
-
-	RunCheckpointUploadWorker(t.Context())
-
-	assert.Equal(t, refHashOf(t, repo, refs[0]), remoteRefHash(t, bareDir, refs[0]))
 }
 
 // TestCheckpointUploadStatus_KilledWorkerIsNotRunning: a killed worker leaves

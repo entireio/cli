@@ -989,7 +989,7 @@ func flushCheckpointRefsWith(
 	if opts.boundBatch {
 		chunkSize = queue.ChunkSizeHint(checkpointRefPushChunkSize)
 	}
-	batch := pushRefChunks(batchCtx, dest.target, existing, chunkSize, opts.chunkTimeout, opts.beforeChunk, onLanded)
+	batch := pushRefChunks(batchCtx, dest.target, existing, chunkSize, opts.beforeChunk, onLanded)
 	if !opts.boundBatch {
 		flushCtx, cancelFlush = context.WithTimeout(withFlushBudget(pushCtx, budget), budget)
 	}
@@ -997,18 +997,6 @@ func flushCheckpointRefsWith(
 	budgetCut := budgetExhausted()
 	if opts.boundBatch {
 		adaptChunkSize(ctx, queue, chunkSize, batch, budgetCut)
-	}
-	// Stalled chunks stay queued like refs never tried, behind the rest of the
-	// queue so the next pass starts with refs that may move.
-	if len(batch.stalled) > 0 {
-		if err := queue.Rotate(checkpointRefPushTokens(batch.stalled)); err != nil {
-			logging.Warn(ctx, "git-refs push: rotate stalled refs to queue back failed",
-				slog.String("error", err.Error()))
-		}
-		batch.untried = append(batch.untried, batch.stalled...)
-		if batch.stopReason == "" {
-			batch.stopReason = fmt.Sprintf("%d checkpoint ref(s) stalled", len(batch.stalled))
-		}
 	}
 	if bounds, done, err := settleBatchOnly(ctx, flushCtx, queue, batch, len(existing), dest, stop, budgetCut); done {
 		result.bounds = bounds
@@ -1032,12 +1020,7 @@ func flushCheckpointRefsWith(
 	// implies the remote answered — sends them after the wrong problem.
 	fmt.Fprintf(os.Stderr, "[entire] Checkpoint ref push failed; retrying %d ref(s) individually...", len(batch.failed))
 	stop = startProgressDots(os.Stderr)
-	// A forge that declines a push declines all of it (a ruleset, push
-	// protection), so one bad ref fails its whole chunk. Halving the chunk
-	// isolates it in a handful of pushes, where walking a 200-ref chunk one ref
-	// at a time would spend several budgets to reach it.
-	split := splitFailedChunks(ctx, flushCtx, dest.target, batch.failed, chunkSize, onLanded)
-	retry := retryRefsIndividually(ctx, flushCtx, repo, dest.target, split.unresolved, len(existing))
+	retry := retryRefsIndividually(ctx, flushCtx, repo, dest.target, batch.failed, len(existing))
 	return finishIndividualRetry(ctx, pushCtx, queue, existing, batch, retry, stop, budgetExhausted(), result)
 }
 
@@ -1186,9 +1169,6 @@ type flushOptions struct {
 	// set; 0 means checkpointFlushBudget.
 	budget     time.Duration
 	boundBatch bool
-	// chunkTimeout bounds each chunk push on its own (see pushRefChunks); 0
-	// leaves chunks bounded only by budget.
-	chunkTimeout time.Duration
 	// beforeChunk runs before every chunk after the first (see pushRefChunks).
 	beforeChunk func(context.Context)
 }
@@ -1296,20 +1276,15 @@ func stopOnBudgetCut(ctx, flushCtx context.Context, queue *checkpoint.PushQueue,
 // cut after chunks landed is a backlog draining as intended, not a chunk too
 // large, so the size is kept. It doubles back toward checkpointRefPushChunkSize
 // after any batch in which every chunk it attempted landed, even if the budget
-// left later chunks untried: a draining backlog may never empty the queue in
-// one flush, and one transient stall must not pin the size low. A stalled
-// chunk did not land, so it keeps the size. A batch that shrank its chunks after a stall keeps the
-// smaller size it ended with, so the next pass does not stall at the old one.
+// or a stop left later chunks untried: a draining backlog may never empty the
+// queue in one flush, and one transient stall must not pin the size low.
 func adaptChunkSize(ctx context.Context, queue *checkpoint.PushQueue, size int, batch chunkPushResult, budgetCut bool) {
 	next := size
 	switch {
-	case batch.landed == 0 && (budgetCut && len(batch.failed) > 0 || len(batch.stalled) > 0):
+	case batch.landed == 0 && budgetCut && len(batch.failed) > 0:
 		next = max(1, size/4)
-	case len(batch.failed) == 0 && len(batch.stalled) == 0 && batch.landed > 0:
+	case len(batch.failed) == 0 && batch.landed > 0:
 		next = min(checkpointRefPushChunkSize, size*2)
-	}
-	if batch.size > 0 && batch.size < size {
-		next = min(next, batch.size)
 	}
 	if next == size {
 		return
