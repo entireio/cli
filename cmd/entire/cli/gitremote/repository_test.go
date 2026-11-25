@@ -2,6 +2,8 @@ package gitremote
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -86,4 +88,77 @@ func TestResolveRepository_SSHHostAlias(t *testing.T) {
 		_, ok := ResolveRepository(ctx, "", nil, "git@github-work:acme/widgets.git")
 		assert.False(t, ok)
 	})
+}
+
+func TestResolveSSH(t *testing.T) {
+	t.Parallel()
+	// configEnv returns a hermetic env whose global gitconfig holds content.
+	configEnv := func(t *testing.T, content string, extra ...string) []string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "gitconfig")
+		require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+		env := []string{
+			"PATH=" + os.Getenv("PATH"),
+			"HOME=" + t.TempDir(),
+			"GIT_CONFIG_NOSYSTEM=1",
+			"GIT_CONFIG_GLOBAL=" + path,
+		}
+		return append(env, extra...)
+	}
+	tests := []struct {
+		name   string
+		config string
+		extra  []string
+		want   SSHInvocation
+		wantOK bool
+	}{
+		{name: "nothing set", want: SSHInvocation{Command: "ssh"}, wantOK: true},
+		{
+			name:   "GIT_SSH_COMMAND beats core.sshCommand",
+			config: "[core]\n\tsshCommand = from-config\n",
+			extra:  []string{"GIT_SSH_COMMAND=from-env"},
+			want:   SSHInvocation{Command: "from-env"},
+			wantOK: true,
+		},
+		{
+			name:   "core.sshCommand beats GIT_SSH, last value wins",
+			config: "[core]\n\tsshCommand = first\n\tsshCommand = second\n",
+			extra:  []string{"GIT_SSH=/usr/bin/plink"},
+			want:   SSHInvocation{Command: "second"},
+			wantOK: true,
+		},
+		{
+			name:   "GIT_SSH is quoted and kept as the program",
+			extra:  []string{`GIT_SSH=C:\PuTTY\plink.exe`},
+			want:   SSHInvocation{Command: `'C:\PuTTY\plink.exe'`, Program: `C:\PuTTY\plink.exe`},
+			wantOK: true,
+		},
+		{
+			name:   "GIT_SSH_VARIANT beats ssh.variant",
+			config: "[ssh]\n\tvariant = simple\n",
+			extra:  []string{"GIT_SSH_VARIANT=plink"},
+			want:   SSHInvocation{Command: "ssh", Variant: "plink", HasVariant: true},
+			wantOK: true,
+		},
+		{
+			name:   "ssh.variant from config",
+			config: "[ssh]\n\tvariant = putty\n",
+			want:   SSHInvocation{Command: "ssh", Variant: "putty", HasVariant: true},
+			wantOK: true,
+		},
+		{
+			name:   "unreadable config is not ok",
+			config: "[core\n\tsshCommand = my-ssh\n",
+			want:   SSHInvocation{Command: "ssh"},
+			wantOK: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := ResolveSSH(context.Background(), t.TempDir(), configEnv(t, tt.config, tt.extra...))
+			assert.Equal(t, tt.wantOK, ok)
+			assert.Equal(t, tt.want, got)
+		})
+	}
 }
