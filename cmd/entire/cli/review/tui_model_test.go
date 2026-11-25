@@ -573,6 +573,9 @@ func TestTUIModel_PostFinishFooterShowsFinalizing(t *testing.T) {
 	if !strings.Contains(out, "Finalizing output...") {
 		t.Errorf("post-finish footer should show finalizing output:\n%s", out)
 	}
+	if !strings.Contains(out, "Ctrl+O: drill in") {
+		t.Errorf("post-finish footer should keep the drill-in hint:\n%s", out)
+	}
 	if strings.Contains(out, "q/Esc/Enter") {
 		t.Errorf("post-finish footer should not ask for a dismissal key:\n%s", out)
 	}
@@ -1278,6 +1281,9 @@ func TestTUIModel_FinalPhaseRow(t *testing.T) {
 	}
 	if !strings.Contains(out, "Final judge is consolidating") {
 		t.Fatalf("footer should describe final judge phase:\n%s", out)
+	}
+	if !strings.Contains(out, "Ctrl+O: drill in") {
+		t.Fatalf("footer should keep the drill-in hint while the judge runs:\n%s", out)
 	}
 
 	updated, _ = m.Update(finalPhaseFinishedMsg{})
