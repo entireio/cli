@@ -26,7 +26,7 @@ type saTarget struct {
 
 // addSATargetFlags wires --repo and --project.
 func addSATargetFlags(cmd *cobra.Command, repo, project *string) {
-	cmd.Flags().StringVar(repo, "repo", "", "Repo name in the service account's project, or its /et/<project>/<repo> path")
+	cmd.Flags().StringVar(repo, "repo", "", "Repo name in the service account's project, or its /et/<project>/<repo> path or entire.com URL")
 	cmd.Flags().StringVar(project, "project", "", "The service account's own project (name or ULID)")
 	cmd.MarkFlagsOneRequired("repo", "project")
 	cmd.MarkFlagsMutuallyExclusive("repo", "project")

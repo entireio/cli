@@ -6,7 +6,8 @@ import (
 )
 
 const mirrorRepoRefHelp = "Repository references name their forge: /gh/<owner>/<repo> for a GitHub " +
-	"mirror, /et/<project>/<repo> for an Entire-native repository."
+	"mirror, /et/<project>/<repo> for an Entire-native repository. An entire.com " +
+	"URL such as https://entire.com/gh/<owner>/<repo> names the same repository."
 
 // mirrorRepoRef is a repository named the one way this subtree names one:
 // /<forge>/<a>/<b>. The pair reads owner/repo on GitHub and project/repo on

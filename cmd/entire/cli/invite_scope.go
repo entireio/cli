@@ -25,6 +25,19 @@ type inviteScope[Inv any] struct {
 	// properties the schema does not declare before --json prints the entry.
 	view  func(Inv) invitationView
 	scrub func(*Inv)
+	// webURLRefs reads a pasted entire.com URL as the path it spells before
+	// resolve sees it, as grantTarget.webURLRefs does. Set for repo alone.
+	webURLRefs bool
+}
+
+// typedRef is the scope ref every leaf works from: resolve reads canon, and the
+// messages that echo the ref use typed. Without webURLRefs the argument is used
+// exactly as given.
+func (s inviteScope[Inv]) typedRef(arg string) typedRef {
+	if !s.webURLRefs {
+		return typedRef{typed: arg, canon: arg}
+	}
+	return newTypedRef(arg)
 }
 
 // invitationView is what the verbs need of one invitation, whichever wire type
@@ -86,11 +99,12 @@ func newInviteListCmd[Inv any](s inviteScope[Inv]) *cobra.Command {
 				cmd.SilenceUsage = true
 				return err
 			}
+			tr := s.typedRef(args[0])
 			return runCoreList(cmd, "No invitations found.", invitationColumns, func(i Inv) []string { return s.view(i).row() },
 				func(ctx context.Context, c *coreapi.Client) ([]Inv, error) {
-					id, err := s.resolve(ctx, c, args[0])
+					id, err := s.resolve(ctx, c, tr.canon)
 					if err != nil {
-						return nil, err
+						return nil, tr.wrapErr(err)
 					}
 					return s.listAll(ctx, c, id, status)
 				})
@@ -127,16 +141,17 @@ func newInviteRevokeCmd[Inv any](s inviteScope[Inv]) *cobra.Command {
 			s.noun, s.exampleRef, s.noun, s.exampleRef),
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			tr := s.typedRef(args[0])
 			if invitationID != "" && !looksLikeULID(invitationID) {
 				cmd.SilenceUsage = true
-				return fmt.Errorf("invalid --id %q: an invitation ID is a ULID, as `entire %s invite list %s` prints it", invitationID, s.noun, args[0])
+				return fmt.Errorf("invalid --id %q: an invitation ID is a ULID, as `entire %s invite list %s` prints it", invitationID, s.noun, tr.typed)
 			}
 			return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
-				id, err := s.resolve(ctx, c, args[0])
+				id, err := s.resolve(ctx, c, tr.canon)
 				if err != nil {
-					return err
+					return tr.wrapErr(err)
 				}
-				target := s.noun + " " + args[0]
+				target := s.noun + " " + redactRefForError(tr.canon)
 				if invitationID != "" {
 					return revokeResource(cmd, "the invitation "+invitationID+" to "+target, "invitation", func() error {
 						return s.revoke(ctx, c, id, invitationID)
@@ -258,6 +273,9 @@ var repoInviteScope = inviteScope[coreapi.ResourceInvitation]{
 	refUsage:   repoGrantTarget.refUsage,
 	exampleRef: repoGrantTarget.exampleRef,
 	resolve:    repoGrantTarget.resolve,
+	// Read through repoGrantTarget so the two repo subtrees agree on what an
+	// entire.com URL means.
+	webURLRefs: repoGrantTarget.webURLRefs,
 	list: func(ctx context.Context, c *coreapi.Client, id, status, cursor string) ([]coreapi.ResourceInvitation, string, error) {
 		params := coreapi.ListRepoInvitationsParams{RepoId: id, Status: coreapi.NewOptListRepoInvitationsStatus(coreapi.ListRepoInvitationsStatus(status))}
 		if cursor != "" {

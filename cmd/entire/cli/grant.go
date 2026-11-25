@@ -911,7 +911,7 @@ var projectGrantTarget = grantTarget[coreapi.ProjectGrant]{
 // placement materializes — see mirrorGrantListing.
 var repoGrantTarget = grantTarget[coreapi.RepoGrant]{
 	noun:          cmdRepo,
-	refUsage:      "its /" + nativeCloneForge + "/<project>/<repo> path",
+	refUsage:      "its /" + nativeCloneForge + "/<project>/<repo> path or entire.com URL",
 	exampleRef:    "/" + nativeCloneForge + "/acme/web",
 	roles:         accessRoles,
 	leastRole:     leastAccessRole,
