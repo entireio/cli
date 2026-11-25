@@ -1281,6 +1281,16 @@ func TestUnreachableRemoteLine(t *testing.T) {
 			name: "non-fast-forward rejection",
 			err:  pushErr(" ! [rejected]        refs/x -> refs/x (non-fast-forward)\nerror: failed to push some refs"),
 		},
+		{
+			name: "bidi overrides are stripped from the printed line",
+			err:  pushErr("ssh: connect to host gith\u202eub.com port 22: Connection refused"),
+			want: "ssh: connect to host github.com port 22: Connection refused",
+			ok:   true,
+		},
+		{
+			name: "a helper's own connect failure is not curl's",
+			err:  pushErr("failed to connect to keyring: no such service\nfatal: Authentication failed"),
+		},
 		{name: "nil", err: nil},
 	}
 	for _, tt := range tests {
