@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -64,7 +65,7 @@ func newProjectTrailShowCmd() *cobra.Command {
 // was not looked up or could not be read; the result is never nil, so every
 // change carries the key in --json. Failures are summed into one
 // warning so a partial-access reader sees the trail rather than an error.
-func lookupProjectTrailGates(cmd *cobra.Command, target *projectTrailTarget, item api.ProjectTrail) map[string]*api.TrailMergeability {
+func lookupProjectTrailGates(cmd *cobra.Command, target *projectTrailTarget, item api.ProjectTrail) map[string]trailChangeState {
 	var changes []api.ChangeSummary
 	for _, c := range item.Changes {
 		if c.Number <= 0 {
@@ -84,7 +85,7 @@ func lookupProjectTrailGates(cmd *cobra.Command, target *projectTrailTarget, ite
 		changes = append(changes, c)
 	}
 	if len(changes) == 0 {
-		return map[string]*api.TrailMergeability{}
+		return map[string]trailChangeState{}
 	}
 	ctx, cancel := context.WithTimeout(cmd.Context(), trailChangeGatesTimeout)
 	defer cancel()
@@ -94,7 +95,7 @@ func lookupProjectTrailGates(cmd *cobra.Command, target *projectTrailTarget, ite
 	if target.Change != nil {
 		local = target.Change.Access
 	}
-	gates, failed := lookupTrailChangeData(ctx, newTrailRepoClientOpener(trailInsecureHTTP(cmd)), target, local, changes, readTrailChangeMergeability)
+	gates, failed := lookupTrailChangeData(ctx, newTrailRepoClientOpener(trailInsecureHTTP(cmd)), target, local, changes, readTrailChangeState)
 	if failed > 0 {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not load merge gates for %d change(s)\n", failed)
 	}
@@ -104,16 +105,33 @@ func lookupProjectTrailGates(cmd *cobra.Command, target *projectTrailTarget, ite
 	return gates
 }
 
-func readTrailChangeMergeability(ctx context.Context, access *trailRepoAccess, number int) (*api.TrailMergeability, error) {
+// trailChangeState is what `trail show` reads from a change's repository
+// trail: its merge gates snapshot and whether it is ready for review.
+type trailChangeState struct {
+	mergeability *api.TrailMergeability
+	// readyForReview is nil when the server omits it, or when the change has
+	// no approvals gate: readiness is only recorded behind that gate, so a
+	// stored false would wrongly read as a draft.
+	readyForReview *bool
+}
+
+// trailApprovalsGateKey is the merge gate readiness is recorded behind.
+const trailApprovalsGateKey = "approvals"
+
+func readTrailChangeState(ctx context.Context, access *trailRepoAccess, number int) (trailChangeState, error) {
 	detail, err := fetchTrailDetailAtPath(ctx, access.Client, access.BasePath, number)
 	if err != nil {
-		return nil, err
+		return trailChangeState{}, err
 	}
 	mg, err := detail.DecodeMergeability()
 	if err != nil {
-		return nil, fmt.Errorf("trail %d: %w", number, err)
+		return trailChangeState{}, fmt.Errorf("trail %d: %w", number, err)
 	}
-	return mg, nil
+	state := trailChangeState{mergeability: mg}
+	if mg != nil && slices.ContainsFunc(mg.Gates, func(g api.TrailGate) bool { return g.GateKey == trailApprovalsGateKey }) {
+		state.readyForReview = detail.ReadyForReview
+	}
+	return state, nil
 }
 
 // projectTrailJSON is a project trail as `--json` prints it: each change
@@ -139,6 +157,10 @@ type projectTrailChangeJSON struct {
 	// not read gates omit the key, which is why it points to a possibly nil
 	// snapshot.
 	Mergeability **trailMergeabilityJSON `json:"mergeability,omitempty"`
+	// ReadyForReview is set only by `trail show`, for a change it read that
+	// has an approvals gate: false is a draft. Absent otherwise, since
+	// readiness is not recorded without that gate.
+	ReadyForReview *bool `json:"readyForReview,omitempty"`
 
 	// gates is the snapshot for the human view; gatesLoaded tells a change
 	// whose read returned no snapshot from one that was not read.
@@ -166,7 +188,7 @@ func projectTrailChangeURL(trailURL, selector string) string {
 // was reached through, or nil when it was selected directly. gates holds the
 // changes' mergeability snapshots by change ID; nil when the command does
 // not read gates.
-func printProjectTrail(cmd *cobra.Command, item api.ProjectTrail, current *projectTrailCurrentChange, gates map[string]*api.TrailMergeability) error {
+func printProjectTrail(cmd *cobra.Command, item api.ProjectTrail, current *projectTrailCurrentChange, gates map[string]trailChangeState) error {
 	out := projectTrailJSON{ProjectTrail: item, Changes: mapSlice(item.Changes, func(c api.ChangeSummary) projectTrailChangeJSON {
 		entry := projectTrailChangeJSON{ChangeSummary: c}
 		named := c
@@ -179,7 +201,9 @@ func printProjectTrail(cmd *cobra.Command, item api.ProjectTrail, current *proje
 		entry.selector, _ = trailChangeSelectorFor(named)
 		entry.URL = projectTrailChangeURL(item.URL, entry.selector)
 		if gates != nil {
-			entry.gates, entry.gatesLoaded = gates[c.ID]
+			var state trailChangeState
+			state, entry.gatesLoaded = gates[c.ID]
+			entry.gates, entry.ReadyForReview = state.mergeability, state.readyForReview
 			snapshot := toTrailMergeabilityJSON(entry.gates)
 			entry.Mergeability = &snapshot
 		}
@@ -290,6 +314,15 @@ func printProjectTrailDetails(w io.Writer, item api.ProjectTrail, changes []proj
 			})
 		}
 	}
+	printProjectTrailChangeGates(w, styles, label, changes)
+	if item.Body != "" {
+		fmt.Fprintf(w, "\n%s\n%s\n", label("Description:"), tuiutil.SanitizeTerminalText(item.Body))
+	}
+}
+
+// printProjectTrailChangeGates prints each read change's review state and
+// merge gates, indented one level under the change.
+func printProjectTrailChangeGates(w io.Writer, styles statusStyles, label func(string) string, changes []projectTrailChangeJSON) {
 	for _, c := range changes {
 		if !c.gatesLoaded {
 			continue
@@ -301,13 +334,17 @@ func printProjectTrailDetails(w io.Writer, item api.ProjectTrail, changes []proj
 		fmt.Fprintf(w, "  %s\n", label("Gates for "+name+":"))
 		// Indent the single-trail block one level under its change.
 		var block strings.Builder
+		if c.ReadyForReview != nil {
+			review := styles.render(styles.yellow, "draft")
+			if *c.ReadyForReview {
+				review = styles.render(styles.green, "ready for review")
+			}
+			fmt.Fprintf(&block, "  %s%s\n", label("Review:    "), review)
+		}
 		printTrailMergeability(&block, styles, label, c.gates)
 		for line := range strings.Lines(block.String()) {
 			fmt.Fprint(w, "  "+line)
 		}
-	}
-	if item.Body != "" {
-		fmt.Fprintf(w, "\n%s\n%s\n", label("Description:"), tuiutil.SanitizeTerminalText(item.Body))
 	}
 }
 
