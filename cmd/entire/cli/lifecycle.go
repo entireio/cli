@@ -213,6 +213,9 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 	}
 	refreshCancel()
 
+	// Detached; feeds the context injection of the session's first turns.
+	maybeSpawnLiveSessionsRefreshFor(ctx, ag)
+
 	// Build informational message — warn early if repo has no commits yet,
 	// since checkpoints require at least one commit to work.
 	message := sessionStartMessage(ag.Name(), false)
@@ -548,8 +551,10 @@ func contextInjectionEnabledLine(scope trailEnablementScope) string {
 // when ag injects at event.Type. The base text goes out on the first normal
 // turn of every session; the trails paragraph joins it once the clone-local
 // cache says trails are enabled for the repo, which may be a later turn (the
-// SessionStart refresh is detached). Best-effort: an injection failure never
-// fails the hook.
+// SessionStart refresh is detached). Teammates' live sessions editing this
+// worktree's files (live_sessions_context.go) join any turn on which that set
+// differs from what the session was last told. Best-effort: an injection
+// failure never fails the hook.
 func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Event) {
 	injector, ok := agent.AsContextInjector(ag)
 	if !ok || injector.InjectionEvent() != event.Type || event.SessionID == "" {
@@ -565,7 +570,12 @@ func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Even
 			slog.String("error", scopeErr.Error()))
 		return
 	}
-	var injectBase, injectTrails bool
+	// Read before taking the session lock: a small local file, no network.
+	var live liveSessionsBlock
+	if cache, ok := loadLiveSessionsCache(ctx); ok {
+		live = liveSessionsBlockFor(cache, event.SessionID, time.Now())
+	}
+	var injectBase, injectTrails, injectLive, normalSession bool
 	mutErr := strategy.MutateSessionState(ctx, event.SessionID, func(state *strategy.SessionState) error {
 		// Review/investigate sessions are task-specific and don't need the
 		// pointer; skip without marking anything so normal sessions keep the
@@ -573,6 +583,7 @@ func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Even
 		if state.Kind != "" {
 			return strategy.ErrMutationSkip
 		}
+		normalSession = true
 		// A session that decided trails before the base text existed already
 		// got its one injection.
 		injectBase = !state.ContextInjectionBaseDone && !state.ContextInjectionDecided
@@ -583,24 +594,41 @@ func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Even
 				injectTrails = decision == trailEnablementCacheEnabled
 			}
 		}
-		if !injectBase && trailsDecided == state.ContextInjectionDecided {
+		// An unknown live cache changes nothing; a known one whose set
+		// differs is recorded, and injected when it names anyone. When the
+		// sessions end the record clears without a word, so the same set
+		// coming back is news again.
+		liveChanged := live.Known && live.Fingerprint != state.LiveSessionsFingerprint
+		injectLive = liveChanged && live.Text != ""
+		if !injectBase && trailsDecided == state.ContextInjectionDecided && !liveChanged {
 			return strategy.ErrMutationSkip
 		}
 		state.ContextInjectionBaseDone = true
 		state.ContextInjectionDecided = trailsDecided
+		if liveChanged {
+			state.LiveSessionsFingerprint = live.Fingerprint
+		}
 		return nil
 	})
+	// The refresh is detached and throttled; it feeds a later turn.
+	if normalSession {
+		maybeSpawnLiveSessionsRefresh(ctx)
+	}
 	if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
 		logging.Warn(logCtx, "failed to record context injection decision",
 			slog.String("error", mutErr.Error()))
 	}
 	// Only inject after the state mutation was persisted. A skipped mutation
 	// leaves both flags false; a failed save leaves a later turn free to retry.
-	if mutErr != nil || (!injectBase && !injectTrails) {
+	if mutErr != nil || (!injectBase && !injectTrails && !injectLive) {
 		return
 	}
 
-	payload, err := injector.RenderContextInjection(agent.ContextInjection{Text: entireContextInjection(scope, injectBase, injectTrails)})
+	text := entireContextInjection(scope, injectBase, injectTrails)
+	if injectLive {
+		text = strings.TrimSpace(text + "\n\n" + live.Text)
+	}
+	payload, err := injector.RenderContextInjection(agent.ContextInjection{Text: text})
 	if err != nil {
 		logging.Warn(logCtx, "failed to render context injection",
 			slog.String("error", err.Error()))
