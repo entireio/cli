@@ -681,16 +681,78 @@ func TestDisableGlobal_NamesLeftoverGitHooks(t *testing.T) {
 }
 
 // A user settings file Entire cannot read turns global enable off everywhere.
-// The next SessionStart says so on stderr (even in a repository that is now
-// not set up), and doctor names it.
+// The next SessionStart says so in the session banner, once per session, even
+// in a repository that is now not set up; agents without a banner get stderr.
+// Doctor names it too.
 func TestUnreadableUserSettings_SurfacedAtSessionStartAndInDoctor(t *testing.T) {
-	_, _, _, out, err := runGlobalCmd(t, true, `{"global_enable": true`, "hooks", "claude-code", "session-start")
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	payload := `{"session_id": "unreadable-settings-1", "transcript_path": "", "source": "startup"}`
+	stdout, out, err := runSessionStartCapturingStdout(t, payload, "hooks", "claude-code", "session-start")
 	require.NoError(t, err, out)
-	assert.Contains(t, out, "could not read your Entire user settings")
+	assert.NotContains(t, out, "could not read your user settings")
+	assert.Contains(t, stdout, `"systemMessage"`)
+	assert.Contains(t, stdout, "could not read your user settings")
 
-	cmd, stdout := newTestCmd(t)
+	stdout, out, err = runSessionStartCapturingStdout(t, payload, "hooks", "claude-code", "session-start")
+	require.NoError(t, err, out)
+	assert.Empty(t, stdout, "shown once per session")
+
+	stdout, out, err = runSessionStartCapturingStdout(t, `{"session_id": "unreadable-settings-2"}`, "hooks", "opencode", "session-start")
+	require.NoError(t, err, out)
+	assert.Empty(t, stdout)
+	assert.Contains(t, out, "could not read your user settings")
+
+	cmd, doctorOut := newTestCmd(t)
 	checkUserLevelHooks(cmd)
-	assert.Contains(t, stdout.String(), "Entire user settings: UNREADABLE")
+	assert.Contains(t, doctorOut.String(), "Entire user settings: UNREADABLE")
+}
+
+// In a set-up repository the lifecycle banner ends with the notice: one line
+// for Codex, an indented one for the others.
+func TestUnreadableUserSettingsBannerSuffix(t *testing.T) {
+	entireDir := t.TempDir()
+	t.Setenv(userdirs.EnvConfigDir, entireDir)
+	assert.Empty(t, unreadableUserSettingsBannerSuffix(t.Context(), agent.AgentNameClaudeCode))
+	require.NoError(t, os.WriteFile(filepath.Join(entireDir, usersettings.FileName), []byte(`{"global_enable": true`), 0o600))
+	assert.True(t, strings.HasPrefix(unreadableUserSettingsBannerSuffix(t.Context(), agent.AgentNameClaudeCode), "\n  Entire could not read"))
+	codex := unreadableUserSettingsBannerSuffix(t.Context(), agent.AgentNameCodex)
+	assert.True(t, strings.HasPrefix(codex, " Entire could not read"))
+	assert.NotContains(t, codex, "\n")
+}
+
+// runSessionStartCapturingStdout runs a hook with an unreadable user settings
+// file and payload on stdin, returning what the agent's hook response wrote to
+// os.Stdout and the command's own output.
+func runSessionStartCapturingStdout(t *testing.T, payload string, args ...string) (stdout, out string, err error) {
+	t.Helper()
+	entireDir := t.TempDir()
+	repo := t.TempDir()
+	testutil.InitRepo(t, repo)
+	t.Setenv(userdirs.EnvConfigDir, entireDir)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(t.TempDir(), "claude"))
+	if os.Getenv("CODEX_HOME") == "" {
+		isolateAgentUserHomes(t)
+	}
+	clearAgentCallerEnv(t)
+	t.Chdir(repo)
+	require.NoError(t, os.WriteFile(filepath.Join(entireDir, usersettings.FileName), []byte(`{"global_enable": true`), 0o600))
+
+	r, w, pipeErr := os.Pipe()
+	require.NoError(t, pipeErr)
+	saved := os.Stdout
+	os.Stdout = w
+	root := NewRootCmd()
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetIn(strings.NewReader(payload))
+	root.SetArgs(args)
+	err = root.Execute()
+	os.Stdout = saved
+	require.NoError(t, w.Close())
+	captured, readErr := io.ReadAll(r)
+	require.NoError(t, readErr)
+	return string(captured), buf.String(), err
 }
 
 // The "not set up" line names the directory Entire looked for: Pi's agent

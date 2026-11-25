@@ -98,10 +98,11 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 		return nil
 	}
 
+	setUp := settings.IsSetUpAndEnabled(cmd.Context())
 	// Before the set-up gate: an unreadable user settings file is what makes
 	// a repository on only through global enable read as not set up.
 	if hookName == hookNameSessionStart {
-		warnUnreadableUserSettings(cmd)
+		reportUnreadableUserSettings(cmd, agentName, setUp)
 	}
 
 	// Skip if Entire is not set up and enabled. This must fail closed: any
@@ -114,7 +115,7 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 	// dispatch cost instead of exiting fast (#524).
 	// settings.IsSetUpAndEnabled is the same fail-closed gate the git hooks
 	// use (see PersistentPreRun in hooks_git_cmd.go).
-	if !settings.IsSetUpAndEnabled(cmd.Context()) {
+	if !setUp {
 		return nil
 	}
 
@@ -261,16 +262,6 @@ func userScopeStepsAside(cmd *cobra.Command, agentName types.AgentName) bool {
 // hookNameSessionStart is the session-start verb every agent integration
 // registers.
 const hookNameSessionStart = "session-start"
-
-// warnUnreadableUserSettings says on stderr, once per agent session, that the
-// user settings file cannot be read: everything in it, global_enable
-// included, is then ignored, and nothing else would say so. Stderr, not the
-// banner: the repository may now read as not set up, where no banner runs.
-func warnUnreadableUserSettings(cmd *cobra.Command) {
-	if err := settings.UserSettingsReadError(cmd.Context()); err != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "[entire] could not read your Entire user settings, so global_enable and repos entries there are ignored: %v\n", err)
-	}
-}
 
 // hookScopeIsUser reports whether this hook command carries --scope=user...:
 // it comes from the agent's user-level config.

@@ -285,6 +285,7 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 			// Factory AI Droid gets, so for Claude Code it ends the banner.
 			message += globalEnableBannerSuffix(ctx, ag.Name())
 			message += missingHooksBannerSuffix(ctx, ag)
+			message += unreadableUserSettingsBannerSuffix(ctx, ag.Name())
 			if err := writer.WriteHookResponse(message); err != nil {
 				hookResponseSpan.RecordError(err)
 				hookResponseSpan.End()
