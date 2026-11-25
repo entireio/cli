@@ -46,6 +46,16 @@ func (c *CodexAgent) WriteHookResponse(message string) error {
 // the same hookSpecificOutput.additionalContext shape.
 func (c *CodexAgent) InjectionEvent() agent.EventType { return agent.TurnStart }
 
+// RenderTurnContinuation renders the Stop hook answer that keeps Codex's turn
+// going with reason as its next instruction (Codex reads the Claude shape).
+func (c *CodexAgent) RenderTurnContinuation(reason string) ([]byte, error) {
+	out, err := agent.RenderStopBlockHookOutput(reason)
+	if err != nil {
+		return nil, fmt.Errorf("render codex turn continuation: %w", err)
+	}
+	return out, nil
+}
+
 // RenderContextInjection renders the Claude-style additionalContext payload
 // Codex injects into the model context at user-prompt-submit.
 func (c *CodexAgent) RenderContextInjection(inj agent.ContextInjection) ([]byte, error) {
@@ -283,20 +293,28 @@ func (c *CodexAgent) parseTurnEnd(ctx context.Context, stdin io.Reader) (*agent.
 	if err != nil {
 		return nil, err
 	}
-	if !c.isRootTurnRollout(ctx, derefString(raw.TranscriptPath)) {
+	classification := classifyRolloutDetailed(derefString(raw.TranscriptPath), c.rolloutRoots())
+	if !c.isRootTurnRolloutClassified(ctx, derefString(raw.TranscriptPath), classification) {
 		return nil, nil //nolint:nilnil // only confirmed child rollouts are skipped
 	}
+	// A stop whose rollout is not confirmed as the root one is still recorded
+	// (isRootTurnRollout), but never continued: it may be a subagent's.
+	confirmedRoot := classification.Classification == rolloutRoot
 	return &agent.Event{
-		Type:       agent.TurnEnd,
-		SessionID:  raw.SessionID,
-		SessionRef: derefString(raw.TranscriptPath),
-		Model:      raw.Model,
-		Timestamp:  time.Now(),
+		Type:            agent.TurnEnd,
+		SessionID:       raw.SessionID,
+		SessionRef:      derefString(raw.TranscriptPath),
+		Model:           raw.Model,
+		Timestamp:       time.Now(),
+		CanContinueTurn: confirmedRoot && !raw.StopHookActive,
 	}, nil
 }
 
 func (c *CodexAgent) isRootTurnRollout(ctx context.Context, path string) bool {
-	classification := classifyRolloutDetailed(path, c.rolloutRoots())
+	return c.isRootTurnRolloutClassified(ctx, path, classifyRolloutDetailed(path, c.rolloutRoots()))
+}
+
+func (c *CodexAgent) isRootTurnRolloutClassified(ctx context.Context, path string, classification rolloutClassificationResult) bool {
 	switch classification.Classification {
 	case rolloutRoot:
 		return true

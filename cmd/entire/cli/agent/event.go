@@ -111,6 +111,12 @@ type Event struct {
 	// TurnID identifies the agent turn that produced the event.
 	TurnID string
 
+	// CanContinueTurn is set on a TurnEnd that the agent lets a hook continue:
+	// a normal stop (not one after an error) that is not already the stop of
+	// a turn a hook continued (the agents' stop_hook_active). Only then may
+	// Entire answer with a TurnContinuer continuation.
+	CanContinueTurn bool
+
 	// SubagentID identifies the subagent instance (for SubagentEnd events).
 	SubagentID string
 

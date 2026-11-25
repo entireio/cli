@@ -49,6 +49,16 @@ func (c *ClaudeCodeAgent) WriteHookResponse(message string) error {
 // (the UserPromptSubmit hook), which supports hookSpecificOutput.additionalContext.
 func (c *ClaudeCodeAgent) InjectionEvent() agent.EventType { return agent.TurnStart }
 
+// RenderTurnContinuation renders the Stop hook answer that keeps Claude Code's
+// turn going with reason as its next instruction.
+func (c *ClaudeCodeAgent) RenderTurnContinuation(reason string) ([]byte, error) {
+	out, err := agent.RenderStopBlockHookOutput(reason)
+	if err != nil {
+		return nil, fmt.Errorf("render claude-code turn continuation: %w", err)
+	}
+	return out, nil
+}
+
 // RenderContextInjection renders the UserPromptSubmit additionalContext payload
 // Claude Code injects into the model context.
 func (c *ClaudeCodeAgent) RenderContextInjection(inj agent.ContextInjection) ([]byte, error) {
@@ -85,7 +95,7 @@ func (c *ClaudeCodeAgent) ParseHookEvent(ctx context.Context, hookName string, s
 	case HookNameUserPromptSubmit:
 		return c.parseTurnStart(stdin)
 	case HookNameStop:
-		return c.parseSessionInfoEvent(stdin, agent.TurnEnd)
+		return c.parseStop(stdin)
 	case HookNameStopFailure:
 		// StopFailure fires instead of Stop when a turn ends on an API error
 		// (rate limit, overload, auth, max output tokens, ...). The turn is over
@@ -146,6 +156,23 @@ func (c *ClaudeCodeAgent) parseSessionInfoEvent(stdin io.Reader, eventType agent
 		SessionRef: raw.TranscriptPath,
 		Model:      raw.Model,
 		Timestamp:  time.Now(),
+	}, nil
+}
+
+// parseStop parses a Stop: a TurnEnd a Stop hook may continue unless one
+// already did (stop_hook_active).
+func (c *ClaudeCodeAgent) parseStop(stdin io.Reader) (*agent.Event, error) {
+	raw, err := agent.ReadAndParseHookInput[sessionInfoRaw](stdin)
+	if err != nil {
+		return nil, err
+	}
+	return &agent.Event{
+		Type:            agent.TurnEnd,
+		SessionID:       raw.SessionID,
+		SessionRef:      raw.TranscriptPath,
+		Model:           raw.Model,
+		Timestamp:       time.Now(),
+		CanContinueTurn: !raw.StopHookActive,
 	}, nil
 }
 

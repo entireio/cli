@@ -120,7 +120,12 @@ func DispatchLifecycleEvent(ctx context.Context, ag agent.Agent, event *agent.Ev
 	case agent.TurnStart:
 		return handleLifecycleTurnStart(ctx, ag, event)
 	case agent.TurnEnd:
-		return handleLifecycleTurnEnd(ctx, ag, event)
+		continuation := beginFindingsContinuation(ctx, ag, event)
+		if err := handleLifecycleTurnEnd(ctx, ag, event); err != nil {
+			return err
+		}
+		continuation.finish(ctx, event)
+		return nil
 	case agent.Compaction:
 		return handleLifecycleCompaction(ctx, ag, event)
 	case agent.SessionEnd:

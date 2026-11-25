@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
+	"time"
 	"unicode"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
@@ -108,6 +109,7 @@ branch, not the whole trail. Use 'entire trail list' to discover trails.`),
 	addTrailReviewListFlags(cmd, &opts)
 
 	cmd.AddCommand(newTrailFindingListCmd(&targetOpts))
+	cmd.AddCommand(newTrailFindingWaitCmd(&targetOpts))
 	cmd.AddCommand(newTrailFindingAddCmd(&targetOpts))
 	cmd.AddCommand(newTrailReviewShowCmd(&targetOpts))
 	cmd.AddCommand(newTrailReviewUpdateCmd(&targetOpts))
@@ -162,6 +164,74 @@ func newTrailFindingListCmd(targetOpts *trailReviewTargetOptions) *cobra.Command
 	}
 	addTrailReviewListFlags(cmd, &opts)
 	return cmd
+}
+
+// newTrailFindingWaitCmd is the step Entire's stop hook asks Claude Code and
+// Codex to run after pushing a branch with a trail (turn_end_findings.go): it
+// waits for the trail's review of the pushed commit, then lists the open
+// findings. Hidden: people and agents are not meant to reach for it otherwise.
+func newTrailFindingWaitCmd(targetOpts *trailReviewTargetOptions) *cobra.Command {
+	opts := trailFindingWaitOptions{Timeout: defaultTrailFindingWaitTimeout}
+	cmd := &cobra.Command{
+		Use:    "wait [<trail>]",
+		Short:  "Wait for a trail's review, then list its open findings",
+		Hidden: true,
+		Args:   cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			start := time.Now()
+			selector, err := parseOptionalTrailSelector(args, targetOpts.Selector)
+			if err != nil {
+				return err
+			}
+			if err := validateTrailFindingWaitOptions(opts); err != nil {
+				return err
+			}
+			return runTrailFindingWait(cmd, targetOpts.Mode, selector, opts, start)
+		},
+	}
+	cmd.Flags().StringVar(&opts.Head, "head", "", "Wait for the review of this commit (defaults to the trail's head)")
+	cmd.Flags().DurationVar(&opts.Timeout, "timeout", opts.Timeout, "The longest to wait before listing the findings so far")
+	return cmd
+}
+
+func runTrailFindingWait(cmd *cobra.Command, mode *trailMode, selector string, opts trailFindingWaitOptions, start time.Time) error {
+	list, err := normalizeTrailReviewListOptions(defaultTrailReviewListOptions())
+	if err != nil {
+		return err
+	}
+	client, target, err := mode.reviewTarget(cmd, selector, false)
+	if err != nil {
+		if strings.TrimSpace(selector) == "" && errors.Is(err, errTrailReviewDefaultTargetNotFound) {
+			fmt.Fprintln(cmd.OutOrStdout(), "No trail for this branch.")
+			return nil
+		}
+		return err
+	}
+	if err := waitForTrailFindings(cmd, client, target, opts, start); err != nil {
+		return err
+	}
+	comments, nextCursor, err := fetchTrailReviewComments(cmd.Context(), client, target.Trail.ID, list)
+	if err != nil {
+		return err
+	}
+	printTrailReviewComments(cmd.OutOrStdout(), comments, nextCursor)
+	return nil
+}
+
+// waitForTrailFindings waits for the review and reports on stderr how the
+// wait ended.
+func waitForTrailFindings(cmd *cobra.Command, client *api.Client, target trailReviewTarget, opts trailFindingWaitOptions, start time.Time) error {
+	head := strings.TrimSpace(opts.Head)
+	poll := func(ctx context.Context, ignoreStale bool) (trailReviewProgress, error) {
+		return fetchTrailReviewProgress(ctx, client, target.Trail.ID, head, ignoreStale)
+	}
+	deadline := trailFindingWaitDeadline(start, opts.Timeout)
+	progress, err := waitForTrailReview(cmd.Context(), cmd.ErrOrStderr(), poll, deadline, time.Now, trailFindingWaitSleep)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(cmd.ErrOrStderr(), trailReviewWaitResultLine(progress))
+	return nil
 }
 
 type trailReviewCommentAddOptions struct {
