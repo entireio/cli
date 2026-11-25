@@ -73,13 +73,12 @@ func userHooksFile(ctx context.Context) (agent.MergedUserFile, error) {
 
 // EnsureUserHooks implements agent.UserHookInstaller. Codex runs these hooks
 // only once the user approves them in /hooks.
-func (c *CodexAgent) EnsureUserHooks(ctx context.Context, wanted func(context.Context) bool) (int, string, error) {
+func (c *CodexAgent) EnsureUserHooks(ctx context.Context, wanted func(context.Context) bool) (agent.UserHookInstall, error) {
 	file, err := userHooksFile(ctx)
 	if err != nil {
-		return 0, "", err
+		return agent.UserHookInstall{}, err
 	}
-	n, err := file.Ensure(ctx, wanted)
-	return n, file.Path, err //nolint:wrapcheck // names the file or its lock
+	return file.Ensure(ctx, wanted) //nolint:wrapcheck // names the file or its lock
 }
 
 // RemoveUserHooks implements agent.UserHookInstaller.
@@ -88,7 +87,7 @@ func (c *CodexAgent) RemoveUserHooks(ctx context.Context) (bool, string, error) 
 	if err != nil {
 		return false, "", err
 	}
-	removed, err := file.Remove(ctx, nil)
+	removed, err := file.Remove(ctx)
 	return removed, file.Path, err //nolint:wrapcheck // names the file or its lock
 }
 

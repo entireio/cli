@@ -29,8 +29,15 @@ type MergedUserFile struct {
 	Merge func(data []byte, exists bool) ([]byte, int, error)
 	// Strip returns data without Entire's hooks and whether that changed it.
 	Strip func(data []byte) ([]byte, bool, error)
-	// Version finds the installed Entire hook version (nil: 0).
+	// Version finds the installed Entire hook version (nil: the one recorded
+	// at install, Stamp).
 	Version func(data []byte) int
+	// Stamp is the hook version recorded at install for a file whose content
+	// cannot carry one (Claude Code runs a hook in both its user and project
+	// settings once only when the commands are identical).
+	Stamp int
+
+	state userHookState
 }
 
 // configDirMissing reports an agent's user-level directory that does not
@@ -39,8 +46,6 @@ func configDirMissing(dir string) bool {
 	_, err := os.Stat(dir)
 	return errors.Is(err, fs.ErrNotExist)
 }
-
-func (m MergedUserFile) lockPath() string { return m.Path + ".lock" }
 
 // read returns the file, reporting a missing one as !exists.
 func (m MergedUserFile) read() ([]byte, bool, error) {
@@ -58,80 +63,60 @@ func (m MergedUserFile) read() ([]byte, bool, error) {
 }
 
 // Ensure merges Entire's hooks in while wanted holds (see
-// EnsureUserHookFile), returning how many entries changed, or
-// ErrUserHooksNotInUse when the file's directory is absent.
-func (m MergedUserFile) Ensure(ctx context.Context, wanted func(context.Context) bool) (int, error) {
+// userHookState.ensure), or returns ErrUserHooksNotInUse when the file's
+// directory is absent.
+func (m MergedUserFile) Ensure(ctx context.Context, wanted func(context.Context) bool) (UserHookInstall, error) {
+	result := UserHookInstall{Path: m.Path}
 	if configDirMissing(filepath.Dir(m.Path)) {
-		return 0, userHooksNotInUseError{dir: filepath.Dir(m.Path)}
+		return result, userHooksNotInUseError{dir: filepath.Dir(m.Path)}
 	}
-	return EnsureUserHookFile(ctx, m.lockPath(), wanted, func(write bool) (int, error) {
+	return m.state.ensure(ctx, m.Path, wanted, func(rec *userHookRecord) (UserHookInstall, error) {
 		data, exists, err := m.read()
 		if err != nil {
-			return 0, err
+			return result, err
 		}
 		output, count, err := m.Merge(data, exists)
-		if err != nil || count == 0 || !write {
-			return count, err
+		result.Changed, result.Updated = count, exists && m.HasEntire(data)
+		if err != nil || count == 0 || rec == nil {
+			return result, err
 		}
-		if !exists {
-			if err := m.createdRecord().Write(nil, 0o600); err != nil {
-				return 0, err
-			}
-		}
-		return count, UserConfigFile{Path: m.Path}.Write(output, m.Perm)
+		rec.CreatedFile = rec.CreatedFile || !exists
+		rec.Version = m.Stamp
+		return result, UserConfigFile{Path: m.Path}.Write(output, m.Perm)
 	})
 }
 
 // Remove strips Entire's hooks under the lock, keeping everything else, and
-// reports whether there were any. before runs under the lock first.
-func (m MergedUserFile) Remove(ctx context.Context, before func()) (bool, error) {
+// reports whether there were any. A file Entire created that holds nothing
+// else is deleted rather than left as {}.
+func (m MergedUserFile) Remove(ctx context.Context) (bool, error) {
 	if configDirMissing(filepath.Dir(m.Path)) {
 		return false, nil
 	}
-	release, err := LockUserHookFile(ctx, m.lockPath())
-	if err != nil {
-		return false, err
-	}
-	defer release()
-	if before != nil {
-		before()
-	}
-	data, exists, err := m.read()
-	if err != nil || !exists || !m.HasEntire(data) {
-		return false, err
-	}
-	output, changed, err := m.Strip(data)
-	if err != nil || !changed {
-		return false, err
-	}
-	file := UserConfigFile{Path: m.Path}
-	record := m.createdRecord()
-	if holdsNothing(output) && record.exists() {
-		// Entire created the file and its hooks were all it held: remove it
-		// rather than leave {} behind. A file the user had stays.
-		if err := file.Remove(); err != nil {
-			return false, err
+	removed := false
+	err := m.state.locked(ctx, m.Path, func(rec *userHookRecord) error {
+		data, exists, err := m.read()
+		if err != nil || !exists || !m.HasEntire(data) {
+			*rec = userHookRecord{}
+			return err
 		}
-		_ = record.Remove() //nolint:errcheck // a stale record only matters once the file is recreated, which rewrites it
-		return true, nil
-	}
-	if err := file.Write(output, m.Perm); err != nil {
-		return false, err
-	}
-	_ = record.Remove() //nolint:errcheck // see above
-	return true, nil
-}
-
-// createdRecord marks, next to the file, that Entire created it, so removal
-// deletes only a file Entire made (as GeneratedUserFile records the
-// directories it creates).
-func (m MergedUserFile) createdRecord() UserConfigFile {
-	return UserConfigFile{Path: m.Path + ".entire-created"}
-}
-
-func (u UserConfigFile) exists() bool {
-	_, err := os.Lstat(u.Path)
-	return err == nil
+		output, changed, err := m.Strip(data)
+		if err != nil || !changed {
+			return err
+		}
+		file := UserConfigFile{Path: m.Path}
+		if holdsNothing(output) && rec.CreatedFile {
+			err = file.Remove()
+		} else {
+			err = file.Write(output, m.Perm)
+		}
+		if err != nil {
+			return err
+		}
+		removed, *rec = true, userHookRecord{}
+		return nil
+	})
+	return removed, err
 }
 
 // holdsNothing reports JSON that is an object with no keys, or whose only
@@ -168,6 +153,8 @@ func (m MergedUserFile) Inspect() UserHookReport {
 	}
 	if m.Version != nil {
 		report.Version = m.Version(data)
+	} else {
+		report.Version = m.state.record(m.Path).Version
 	}
 	_, count, err := m.Merge(data, true)
 	switch {

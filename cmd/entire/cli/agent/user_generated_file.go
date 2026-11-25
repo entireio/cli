@@ -8,7 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -30,54 +30,50 @@ type GeneratedUserFile struct {
 	// RemoveDir also removes the file's directory, when empty, on removal,
 	// even one Entire did not create (directories it created always go).
 	RemoveDir bool
+
+	state userHookState
 }
 
 // Ensure writes the file when it is missing or differs, under the shared
 // user-level lock while wanted holds. A file there that is not Entire's is
 // refused, not overwritten.
-func (g GeneratedUserFile) Ensure(ctx context.Context, wanted func(context.Context) bool) (int, error) {
+func (g GeneratedUserFile) Ensure(ctx context.Context, wanted func(context.Context) bool) (UserHookInstall, error) {
 	if configDirMissing(g.Home) {
-		return 0, userHooksNotInUseError{dir: g.Home}
+		return UserHookInstall{Path: g.Path}, userHooksNotInUseError{dir: g.Home}
 	}
-	return EnsureUserHookFile(ctx, g.lockPath(), wanted, g.apply)
+	return g.state.ensure(ctx, g.Path, wanted, g.apply)
 }
 
-func (g GeneratedUserFile) apply(write bool) (int, error) {
+func (g GeneratedUserFile) apply(rec *userHookRecord) (UserHookInstall, error) {
+	result := UserHookInstall{Path: g.Path}
 	file := UserConfigFile{Path: g.Path}
 	existing, err := file.Read()
 	switch {
 	case err == nil && generatedStateFromContent(string(existing), g.Marker, g.Content) == HooksCurrent:
 		// Equal but for line endings (a CRLF checkout of a dotfiles repo):
 		// rewriting would only be converted back.
-		return 0, nil
+		return result, nil
 	case err == nil && !strings.Contains(string(existing), g.Marker):
-		return 0, fmt.Errorf("refusing to overwrite foreign file at %s", g.Path)
+		return result, fmt.Errorf("refusing to overwrite foreign file at %s", g.Path)
 	case err != nil && !errors.Is(err, fs.ErrNotExist):
-		return 0, fmt.Errorf("read %s: %w", g.Path, err)
+		return result, fmt.Errorf("read %s: %w", g.Path, err)
 	}
-	if !write {
-		return 1, nil
+	result.Changed, result.Updated = 1, err == nil
+	if rec == nil {
+		return result, nil
 	}
 	created := g.missingDirs()
 	// The user's own config directory: plain MkdirAll, which follows a
 	// symlinked dotfiles directory as the file write does.
 	if err := os.MkdirAll(filepath.Dir(g.Path), 0o755); err != nil { //nolint:gosec // the agent reads the file itself
-		return 0, fmt.Errorf("create %s: %w", filepath.Dir(g.Path), err)
+		return result, fmt.Errorf("create %s: %w", filepath.Dir(g.Path), err)
 	}
-	if err := g.recordCreatedDirs(created); err != nil {
-		return 0, err
+	for _, dir := range created {
+		if !slices.Contains(rec.CreatedDirs, dir) {
+			rec.CreatedDirs = append(rec.CreatedDirs, dir)
+		}
 	}
-	if err := file.Write([]byte(g.Content), 0o644); err != nil {
-		return 0, err
-	}
-	return 1, nil
-}
-
-// createdDirsFile records, in Home, the directories Entire created for the
-// file, one Home-relative path per line, so removal takes away only those
-// (when empty) and never a directory the user had before.
-func (g GeneratedUserFile) createdDirsFile() UserConfigFile {
-	return UserConfigFile{Path: filepath.Join(g.Home, ".entire-user-hooks-dirs")}
+	return result, file.Write([]byte(g.Content), 0o644)
 }
 
 // missingDirs returns the file's directory and its ancestors below Home that
@@ -93,91 +89,38 @@ func (g GeneratedUserFile) missingDirs() []string {
 	return missing
 }
 
-func (g GeneratedUserFile) recordCreatedDirs(created []string) error {
-	if len(created) == 0 {
-		return nil
-	}
-	recorded := g.recordedDirs()
-	for _, dir := range created {
-		rel, err := filepath.Rel(g.Home, dir)
-		if err != nil {
-			continue
-		}
-		recorded = append(recorded, filepath.ToSlash(rel))
-	}
-	return g.createdDirsFile().Write([]byte(strings.Join(recorded, "\n")+"\n"), 0o600)
-}
-
-// recordedDirs returns the Home-relative directories Entire recorded
-// creating, ignoring any entry that would leave Home.
-func (g GeneratedUserFile) recordedDirs() []string {
-	data, err := g.createdDirsFile().Read()
-	if err != nil {
-		return nil
-	}
-	var dirs []string
-	for _, line := range strings.Split(string(data), "\n") {
-		rel := filepath.Clean(filepath.FromSlash(strings.TrimSpace(line)))
-		if line == "" || rel == "." || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			continue
-		}
-		dirs = append(dirs, filepath.ToSlash(rel))
-	}
-	return dirs
-}
-
-// removeCreatedDirs removes, deepest first, the directories Entire created
-// for the file (and, with RemoveDir, the file's own), each only when empty.
-func (g GeneratedUserFile) removeCreatedDirs() {
-	var dirs []string
-	if g.RemoveDir {
-		dirs = append(dirs, filepath.Dir(g.Path))
-	}
-	for _, rel := range g.recordedDirs() {
-		dirs = append(dirs, filepath.Join(g.Home, filepath.FromSlash(rel)))
-	}
-	sort.Slice(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
-	for _, dir := range dirs {
-		// Fails, as intended, while anything else is in the directory.
-		_ = os.Remove(dir)
-	}
-	_ = g.createdDirsFile().Remove() //nolint:errcheck // a stale record only names directories to try again
-}
-
-// Remove deletes Entire's file (and, with RemoveDir, its directory when
-// empty), leaving a file that is not Entire's alone. Reports whether it
-// removed one.
+// Remove deletes Entire's file, and then, when empty, the directories Entire
+// created for it (with RemoveDir, the file's own too), leaving a file that is
+// not Entire's alone. Reports whether it removed one.
 func (g GeneratedUserFile) Remove(ctx context.Context) (bool, error) {
 	if configDirMissing(g.Home) {
 		return false, nil
 	}
-	release, err := LockUserHookFile(ctx, g.lockPath())
-	if err != nil {
-		return false, err
-	}
-	defer release()
-	file := UserConfigFile{Path: g.Path}
-	data, err := file.Read()
-	if errors.Is(err, fs.ErrNotExist) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("read %s: %w", g.Path, err)
-	}
-	if !strings.Contains(string(data), g.Marker) {
-		return false, nil
-	}
-	if err := file.Remove(); err != nil {
-		return false, err
-	}
-	g.removeCreatedDirs()
-	return true, nil
-}
-
-// lockPath is in Home, which exists whenever anything is written: the
-// file's own directory may not exist yet on a first install.
-func (g GeneratedUserFile) lockPath() string {
-	return filepath.Join(g.Home, ".entire-user-hooks.lock")
+	removed := false
+	err := g.state.locked(ctx, g.Path, func(rec *userHookRecord) error {
+		file := UserConfigFile{Path: g.Path}
+		data, err := file.Read()
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+		case err != nil:
+			return fmt.Errorf("read %s: %w", g.Path, err)
+		case !strings.Contains(string(data), g.Marker):
+			return nil
+		default:
+			if err := file.Remove(); err != nil {
+				return err
+			}
+			removed = true
+		}
+		dirs := slices.Clone(rec.CreatedDirs)
+		if g.RemoveDir {
+			dirs = append(dirs, filepath.Dir(g.Path))
+		}
+		removeDirsIfEmpty(dirs)
+		*rec = userHookRecord{}
+		return nil
+	})
+	return removed, err
 }
 
 // Inspect reports the file's state without writing.
@@ -226,14 +169,13 @@ type UserFileSource interface {
 type GeneratedUserHooks[S UserFileSource] struct{}
 
 // EnsureUserHooks implements UserHookInstaller.
-func (GeneratedUserHooks[S]) EnsureUserHooks(ctx context.Context, wanted func(context.Context) bool) (int, string, error) {
+func (GeneratedUserHooks[S]) EnsureUserHooks(ctx context.Context, wanted func(context.Context) bool) (UserHookInstall, error) {
 	var source S
 	file, err := source.UserFile()
 	if err != nil {
-		return 0, "", err //nolint:wrapcheck // the source names the path it could not resolve
+		return UserHookInstall{}, err //nolint:wrapcheck // the source names the path it could not resolve
 	}
-	n, err := file.Ensure(ctx, wanted)
-	return n, file.Path, err
+	return file.Ensure(ctx, wanted)
 }
 
 // RemoveUserHooks implements UserHookInstaller.
@@ -255,31 +197,6 @@ func (GeneratedUserHooks[S]) InspectUserHooks(context.Context) UserHookReport {
 		return UserHookReport{State: UserHooksUnavailable, Err: err}
 	}
 	return file.Inspect()
-}
-
-// UserHookFileExists reports whether the generated file is already there, so
-// a write that follows replaces it (an older render, or one the user edited)
-// rather than adding it.
-func (GeneratedUserHooks[S]) UserHookFileExists() bool {
-	var source S
-	file, err := source.UserFile()
-	if err != nil {
-		return false
-	}
-	_, err = os.Lstat(file.Path)
-	return err == nil
-}
-
-// UserHookFileReplacer is implemented by agents whose user-level hooks are one
-// generated file, which an install replaces whole.
-type UserHookFileReplacer interface {
-	UserHookFileExists() bool
-}
-
-// AsUserHookFileReplacer returns the agent as UserHookFileReplacer if it
-// implements it. Built-in only, like UserHookInstaller.
-func AsUserHookFileReplacer(ag Agent) (UserHookFileReplacer, bool) {
-	return builtinCapability[UserHookFileReplacer](ag)
 }
 
 // ProjectHooksSupersede implements UserHookInstaller: the generated file

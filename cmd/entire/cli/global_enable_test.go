@@ -849,3 +849,55 @@ func TestGlobal_ReplacingAnEditedCopySaysUpdated(t *testing.T) {
 	require.NoError(t, err, out)
 	assert.Contains(t, out, "updated its Pi hooks in")
 }
+
+// After `entire disable` in a repository on only through global enable, the
+// repos entry says enabled: false. `entire enable` must turn that same entry
+// back on, say so once, and status must then report the repository enabled.
+func TestEnable_ReenablesAfterDisableInGlobalOnlyRepo(t *testing.T) {
+	repo := newGlobalOnlyRepo(t, true)
+	testutil.RunGit(t, repo, "remote", "add", "origin", "https://github.com/acme/widgets.git")
+	out, err := runRepoCmd(t, "disable")
+	require.NoError(t, err, out)
+	require.Equal(t, false, userReposEntry(t, "gh/acme/widgets")["enabled"])
+
+	out, err = runRepoCmd(t, "enable")
+	require.NoError(t, err, out)
+	assert.Equal(t, true, userReposEntry(t, "gh/acme/widgets")["enabled"])
+	assert.NotContains(t, out, "already enabled")
+	assert.Equal(t, 1, strings.Count(out, "now enabled"), out)
+
+	settings.ClearOriginKeyCache()
+	var status bytes.Buffer
+	require.NoError(t, runStatus(t.Context(), &status, false, false))
+	assert.Contains(t, status.String(), "Enabled")
+	assert.NotContains(t, status.String(), "(global enable)")
+}
+
+// `entire enable` in a repository whose committed settings turn Entire off,
+// with global enable on, records the developer's choice in their own repos
+// entry. The team's committed file is not edited, and status does not call
+// the repository enabled through global enable.
+func TestEnable_CommittedDisabledUnderGlobalKeepsTheCommittedFile(t *testing.T) {
+	repo := newGlobalOnlyRepo(t, true)
+	testutil.RunGit(t, repo, "remote", "add", "origin", "https://github.com/acme/widgets.git")
+	writeSettings(t, `{"enabled": false}`)
+	committed := filepath.Join(repo, EntireSettingsFile)
+	before, err := os.ReadFile(committed)
+	require.NoError(t, err)
+
+	out, err := runRepoCmd(t, "enable")
+	require.NoError(t, err, out)
+	after, err := os.ReadFile(committed)
+	require.NoError(t, err)
+	assert.Equal(t, string(before), string(after), "the committed settings file was edited")
+	assert.Equal(t, true, userReposEntry(t, "gh/acme/widgets")["enabled"])
+
+	settings.ClearOriginKeyCache()
+	var status bytes.Buffer
+	require.NoError(t, runStatus(t.Context(), &status, false, false))
+	assert.Contains(t, status.String(), "Enabled")
+	assert.NotContains(t, status.String(), "global enable")
+	var js bytes.Buffer
+	require.NoError(t, runStatusJSON(t.Context(), &js))
+	assert.NotContains(t, js.String(), `"enabled_by"`)
+}

@@ -5,13 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
+	"sort"
 
-	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
@@ -84,12 +84,12 @@ type UserHookInstaller interface {
 
 	// EnsureUserHooks installs or upgrades Entire's user-level hooks, keeping
 	// everything else in the file. It installs only while wanted still holds
-	// once the file's lock is taken (nil: always), so `entire disable
-	// --global`, which turns the flag off before removing, cannot be undone
-	// by a command that read the flag just before. Returns how many entries
-	// changed (0 when already current) and the file's path, or
-	// ErrUserHooksNotInUse when the agent's config directory is absent.
-	EnsureUserHooks(ctx context.Context, wanted func(context.Context) bool) (int, string, error)
+	// once the lock is taken (nil: always), so `entire disable --global`,
+	// which turns the flag off before removing, cannot be undone by a command
+	// that read the flag just before. The result always names the file; the
+	// error is ErrUserHooksNotInUse when the agent's config directory is
+	// absent.
+	EnsureUserHooks(ctx context.Context, wanted func(context.Context) bool) (UserHookInstall, error)
 
 	// RemoveUserHooks takes Entire's user-level hooks out, keeping everything
 	// else, and reports whether there were any.
@@ -111,104 +111,141 @@ func AsUserHookInstaller(ag Agent) (UserHookInstaller, bool) {
 	return builtinCapability[UserHookInstaller](ag)
 }
 
-// EnsureUserHookFile runs the shared shape of every user-level install. apply
-// computes the change; with write false it must not write and returns how
-// many entries it would change. Every Entire command runs this while global
-// enable is on, so the usual case, hooks already current, is settled by that
-// read alone: no lock, no write. Otherwise the read-merge-write is serialized
-// on lockPath across Entire processes, and redone under the lock only while
-// wanted still holds.
-func EnsureUserHookFile(ctx context.Context, lockPath string, wanted func(context.Context) bool, apply func(write bool) (int, error)) (int, error) {
-	n, err := apply(false)
-	if err != nil || n == 0 {
-		return 0, err
+// UserHookInstall is one EnsureUserHooks outcome.
+type UserHookInstall struct {
+	Path string
+	// Changed is how many entries the install changed; 0 when already current.
+	Changed int
+	// Updated: the install replaced Entire hooks already there (an older
+	// render, or one the user edited) rather than adding them.
+	Updated bool
+}
+
+// userHookState is Entire's own record, in its user config directory, of what
+// it wrote into agents' user-level config: the file and directories it
+// created (removal deletes only those) and the hook version of a file that
+// cannot carry one. Its lock serializes every user-level write across Entire
+// processes. Nothing Entire keeps for itself goes in an agent's directory,
+// and once no record is left the state and lock files go too.
+type userHookState struct {
+	// open replaces the Entire user config directory (tests).
+	open func() (*os.Root, error)
+}
+
+const (
+	userHookStateFile = "user-hooks.json"
+	userHookLockFile  = "user-hooks.lock"
+)
+
+// userHookRecord is what Entire recorded about one user-level file, keyed by
+// the file's path.
+type userHookRecord struct {
+	CreatedFile bool     `json:"created_file,omitempty"`
+	CreatedDirs []string `json:"created_dirs,omitempty"`
+	Version     int      `json:"version,omitempty"`
+}
+
+func (s userHookState) root(create bool) (*os.Root, error) {
+	switch {
+	case s.open != nil:
+		return s.open()
+	case create:
+		return userdirs.ConfigRoot() //nolint:wrapcheck // names the directory
+	default:
+		return userdirs.ConfigRootForRead() //nolint:wrapcheck // names the directory
 	}
-	release, err := LockUserHookFile(ctx, lockPath)
+}
+
+func loadUserHookRecords(root *os.Root) map[string]userHookRecord {
+	records := map[string]userHookRecord{}
+	data, err := osroot.ReadFileNoFollow(root, userHookStateFile)
+	if err == nil && json.Unmarshal(data, &records) != nil {
+		records = map[string]userHookRecord{}
+	}
+	return records
+}
+
+// record returns path's record without locking, for reports.
+func (s userHookState) record(path string) userHookRecord {
+	root, err := s.root(false)
 	if err != nil {
-		return 0, err
+		return userHookRecord{}
+	}
+	return loadUserHookRecords(root)[path]
+}
+
+// ensure runs the shared shape of every user-level install. apply computes
+// the change; with rec nil it must not write and returns how many entries it
+// would change. Every Entire command runs this while global enable is on, so
+// the usual case, hooks already current, is settled by that read alone: no
+// lock, no write. Otherwise the write runs under the lock, only while wanted
+// still holds.
+func (s userHookState) ensure(ctx context.Context, path string, wanted func(context.Context) bool,
+	apply func(rec *userHookRecord) (UserHookInstall, error),
+) (UserHookInstall, error) {
+	result, err := apply(nil)
+	if err != nil || result.Changed == 0 {
+		result.Changed = 0
+		return result, err
+	}
+	err = s.locked(ctx, path, func(rec *userHookRecord) error {
+		if wanted != nil && !wanted(ctx) {
+			result.Changed = 0
+			return nil
+		}
+		var applyErr error
+		result, applyErr = apply(rec)
+		return applyErr
+	})
+	return result, err
+}
+
+// locked runs fn on path's record under the lock and saves what fn left: an
+// empty record is dropped, and with no record left the state and lock files
+// are deleted (a process waiting on the lock retries on a new file).
+func (s userHookState) locked(ctx context.Context, path string, fn func(rec *userHookRecord) error) error {
+	root, err := s.root(true)
+	if err != nil {
+		return fmt.Errorf("open user config directory: %w", err)
+	}
+	release, err := flock.AcquireContextIn(ctx, root, userHookLockFile)
+	if err != nil {
+		return fmt.Errorf("lock %s: %w", userHookLockFile, err)
 	}
 	defer release()
-	if wanted != nil && !wanted(ctx) {
-		return 0, nil
+	records := loadUserHookRecords(root)
+	rec := records[path]
+	fnErr := fn(&rec)
+	delete(records, path)
+	if rec.CreatedFile || len(rec.CreatedDirs) > 0 || rec.Version != 0 {
+		records[path] = rec
 	}
-	return apply(true)
+	if len(records) == 0 {
+		_ = root.Remove(userHookStateFile) //nolint:errcheck // absent is fine
+		_ = root.Remove(userHookLockFile)  //nolint:errcheck // still held; Windows keeps it
+		return fnErr
+	}
+	data, err := json.Marshal(records)
+	if err == nil {
+		err = jsonutil.WriteFileAtomicIn(root, userHookStateFile, data, 0o600)
+	}
+	if err != nil && fnErr == nil {
+		return fmt.Errorf("record user-level hooks: %w", err)
+	}
+	return fnErr
 }
 
-// LockUserHookFile takes the lock EnsureUserHookFile uses, for removal.
-func LockUserHookFile(ctx context.Context, lockPath string) (func(), error) {
-	release, err := flock.AcquireContext(ctx, lockPath)
-	if err != nil {
-		return nil, fmt.Errorf("lock %s: %w", lockPath, err)
+// removeDirsIfEmpty removes dirs, deepest first, each only while empty and
+// never a symlink: a linked directory is the user's arrangement (dotfiles),
+// and removing the link would drop it whatever it holds.
+func removeDirsIfEmpty(dirs []string) {
+	sort.Slice(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
+	for _, dir := range dirs {
+		if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
+			continue
+		}
+		_ = os.Remove(dir) // fails, as intended, while anything is in it
 	}
-	return release, nil
-}
-
-// userHookStampName is the Entire-owned side file, in the user config root,
-// recording the Entire hook version of an agent's user-level hooks. Used by
-// agents that cannot stamp their own entry point: Claude Code runs a hook
-// present in both its user and project settings once only when the two
-// commands are byte-identical, so a version in the command would make the
-// user-level copy fire beside every project copy.
-func userHookStampName(name types.AgentName) string {
-	return "user_hooks_" + string(name) + ".json"
-}
-
-type userHookStamp struct {
-	Version int `json:"version"`
-}
-
-// WriteUserHookStamp records version for name's user-level hooks.
-func WriteUserHookStamp(name types.AgentName, version int) error {
-	root, err := userdirs.ConfigRoot()
-	if err != nil {
-		return fmt.Errorf("open user config directory: %w", err)
-	}
-	data, err := jsonutil.MarshalIndentWithNewline(userHookStamp{Version: version}, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal user hook stamp: %w", err)
-	}
-	if err := jsonutil.WriteFileAtomicIn(root, userHookStampName(name), data, 0o600); err != nil {
-		return fmt.Errorf("write user hook stamp: %w", err)
-	}
-	return nil
-}
-
-// ReadUserHookStamp returns the recorded version for name's user-level hooks,
-// or 0 when there is none.
-func ReadUserHookStamp(name types.AgentName) int {
-	root, err := userdirs.ConfigRootForRead()
-	if err != nil {
-		return 0
-	}
-	f, err := root.Open(userHookStampName(name))
-	if err != nil {
-		return 0
-	}
-	defer f.Close()
-	data, err := io.ReadAll(io.LimitReader(f, 4096))
-	if err != nil {
-		return 0
-	}
-	var stamp userHookStamp
-	if json.Unmarshal(data, &stamp) != nil {
-		return 0
-	}
-	return stamp.Version
-}
-
-// RemoveUserHookStamp deletes name's stamp; a missing one is not an error.
-func RemoveUserHookStamp(name types.AgentName) error {
-	root, err := userdirs.ConfigRootForRead()
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("open user config directory: %w", err)
-	}
-	if err := root.Remove(userHookStampName(name)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("remove user hook stamp: %w", err)
-	}
-	return nil
 }
 
 // UserConfigFile is a file in an agent's user-level config. Unlike a

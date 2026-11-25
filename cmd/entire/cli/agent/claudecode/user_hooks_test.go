@@ -11,12 +11,13 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 )
 
-// ensureUserHooks installs the user-level hooks with the side-file stamp
+// ensureUserHooks installs the user-level hooks with Entire's record of them
 // kept out of the developer's config.
 func ensureUserHooks(t *testing.T) (int, string, error) {
 	t.Helper()
 	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
-	return (&ClaudeCodeAgent{}).EnsureUserHooks(context.Background(), nil)
+	install, err := (&ClaudeCodeAgent{}).EnsureUserHooks(context.Background(), nil)
+	return install.Changed, install.Path, err
 }
 
 func readUserClaudeSettings(t *testing.T, dir string) map[string]json.RawMessage {
@@ -157,21 +158,17 @@ func TestRemoveUserHooks_RemovesOnlyEntireHooks(t *testing.T) {
 	}
 }
 
-// The user-level hook version lives in Entire's side file, never in the hook
+// The user-level hook version lives in Entire's own record, never in the hook
 // commands, which stay byte-identical to the project ones (see
 // TestEnsureUserHooks_WritesTheSameHooksEnableWrites); inspect reads it back.
-func TestEnsureUserHooks_StampsTheVersionInASideFile(t *testing.T) {
+func TestEnsureUserHooks_RecordsTheVersionOutsideTheCommands(t *testing.T) {
 	userDir := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", userDir)
 	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
 	ag := &ClaudeCodeAgent{}
 
-	_, _, err := ag.EnsureUserHooks(context.Background(), nil)
-	if err != nil {
+	if _, err := ag.EnsureUserHooks(context.Background(), nil); err != nil {
 		t.Fatalf("EnsureUserHooks() error = %v", err)
-	}
-	if got := agent.ReadUserHookStamp(agent.AgentNameClaudeCode); got != userHooksVersion {
-		t.Errorf("stamp = %d, want %d", got, userHooksVersion)
 	}
 	data, err := os.ReadFile(filepath.Join(userDir, ClaudeSettingsFileName))
 	if err != nil {
@@ -188,7 +185,7 @@ func TestEnsureUserHooks_StampsTheVersionInASideFile(t *testing.T) {
 	if _, _, err := ag.RemoveUserHooks(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if got := agent.ReadUserHookStamp(agent.AgentNameClaudeCode); got != 0 {
-		t.Errorf("stamp after removal = %d, want 0", got)
+	if got := ag.InspectUserHooks(context.Background()).Version; got != 0 {
+		t.Errorf("version after removal = %d, want 0", got)
 	}
 }

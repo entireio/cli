@@ -5,18 +5,16 @@ import (
 	"context"
 	"encoding/json"
 	"io/fs"
-	"log/slog"
 	"os"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
-	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
 
 var _ agent.UserHookInstaller = (*ClaudeCodeAgent)(nil)
 
 // userHooksVersion is the Entire hook version of the user-level hooks. Bump it
 // when what the user-level install writes changes. It is recorded in an
-// Entire-owned side file, never in the hook commands: Claude Code runs a
+// Entire's own record of its user-level files, never in the hook commands: Claude Code runs a
 // command present in both its user and project settings once only when the
 // two are identical.
 const userHooksVersion = 1
@@ -34,6 +32,7 @@ func userSettingsFile() (agent.MergedUserFile, error) {
 	return agent.MergedUserFile{
 		Path:      path,
 		Perm:      0o600,
+		Stamp:     userHooksVersion,
 		HasEntire: settingsHaveEntireHooks,
 		Merge: func(data []byte, exists bool) ([]byte, int, error) {
 			f := &memSettingsFile{path: path, data: data, exists: exists}
@@ -55,22 +54,13 @@ func userSettingsFile() (agent.MergedUserFile, error) {
 	}, nil
 }
 
-// EnsureUserHooks implements agent.UserHookInstaller. It also records the
-// version side file after any install; the usual pass, hooks already
-// current, reads nothing else.
-func (c *ClaudeCodeAgent) EnsureUserHooks(ctx context.Context, wanted func(context.Context) bool) (int, string, error) {
+// EnsureUserHooks implements agent.UserHookInstaller.
+func (c *ClaudeCodeAgent) EnsureUserHooks(ctx context.Context, wanted func(context.Context) bool) (agent.UserHookInstall, error) {
 	file, err := userSettingsFile()
 	if err != nil {
-		return 0, "", err
+		return agent.UserHookInstall{}, err
 	}
-	n, err := file.Ensure(ctx, wanted)
-	if err == nil && n > 0 {
-		if stampErr := agent.WriteUserHookStamp(agent.AgentNameClaudeCode, userHooksVersion); stampErr != nil {
-			logging.Debug(ctx, "claude: could not record the user-level hook version",
-				slog.String("error", stampErr.Error()))
-		}
-	}
-	return n, file.Path, err //nolint:wrapcheck // names the file or its lock
+	return file.Ensure(ctx, wanted) //nolint:wrapcheck // names the file or its lock
 }
 
 // RemoveUserHooks implements agent.UserHookInstaller, for `entire disable
@@ -80,12 +70,7 @@ func (c *ClaudeCodeAgent) RemoveUserHooks(ctx context.Context) (bool, string, er
 	if err != nil {
 		return false, "", err
 	}
-	removed, err := file.Remove(ctx, func() {
-		if err := agent.RemoveUserHookStamp(agent.AgentNameClaudeCode); err != nil {
-			logging.Debug(ctx, "claude: could not remove the user-level hook version",
-				slog.String("error", err.Error()))
-		}
-	})
+	removed, err := file.Remove(ctx)
 	return removed, file.Path, err //nolint:wrapcheck // names the file or its lock
 }
 
@@ -94,15 +79,14 @@ func (c *ClaudeCodeAgent) RemoveUserHooks(ctx context.Context) (bool, string, er
 // user-level hooks never need to step aside.
 func (c *ClaudeCodeAgent) ProjectHooksSupersede(context.Context) bool { return false }
 
-// InspectUserHooks implements agent.UserHookInstaller. The version comes from
-// the side file; hooks older than this CLI's are outdated.
+// InspectUserHooks implements agent.UserHookInstaller. The version is the one
+// recorded at install; hooks older than this CLI's are outdated.
 func (c *ClaudeCodeAgent) InspectUserHooks(context.Context) agent.UserHookReport {
 	file, err := userSettingsFile()
 	if err != nil {
 		return agent.UserHookReport{State: agent.UserHooksUnavailable, Err: err}
 	}
 	report := file.Inspect()
-	report.Version = agent.ReadUserHookStamp(agent.AgentNameClaudeCode)
 	// No stamp (0) is not outdated: only an install writes one, and hooks
 	// already current are not reinstalled.
 	if report.State == agent.UserHooksCurrent && report.Version > 0 && report.Version < userHooksVersion {

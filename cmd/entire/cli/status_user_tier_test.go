@@ -220,3 +220,28 @@ func TestStatus_HomeRepoDoesNotCountUserLevelHooksAsProject(t *testing.T) {
 	assert.NotContains(t, text.String(), "Agents · Claude Code")
 	assert.Contains(t, text.String(), "User-level hooks · Claude Code")
 }
+
+// A home directory that is itself a repository: Codex's user-level
+// ~/.codex/hooks.json is also where this repository's project hooks would be.
+// Status and doctor must not read it as the repository's own (outdated)
+// install, nor suggest `entire enable` to fix it.
+func TestStatus_HomeRepoDoesNotReadCodexUserHooksAsProject(t *testing.T) {
+	repo := newGlobalOnlyRepo(t, true)
+	t.Setenv("HOME", repo)
+	isolateAgentUserHomes(t)
+	codexHome := filepath.Join(repo, ".codex")
+	t.Setenv("CODEX_HOME", "")
+	require.NoError(t, os.MkdirAll(codexHome, 0o700))
+	installUserHooks(t.Context(), func(agent.UserHookInstaller, userHookInstallResult) {})
+	require.FileExists(t, filepath.Join(codexHome, "hooks.json"))
+
+	var text bytes.Buffer
+	require.NoError(t, runStatus(t.Context(), &text, false, false))
+	assert.NotContains(t, text.String(), "entire enable")
+	assert.NotContains(t, text.String(), "Agents · Codex")
+	assert.NotContains(t, text.String(), "out of date")
+
+	cmd, doctor := newTestCmd(t)
+	checkUserLevelHooks(cmd)
+	assert.NotContains(t, doctor.String(), "entire enable")
+}

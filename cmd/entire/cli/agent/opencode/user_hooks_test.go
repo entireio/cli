@@ -20,6 +20,7 @@ func userOpenCodeHome(t *testing.T) string {
 	xdg := filepath.Join(t.TempDir(), "xdg")
 	require.NoError(t, os.MkdirAll(filepath.Join(xdg, "opencode"), 0o750))
 	t.Setenv(xdgConfigHomeEnvVar, xdg)
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
 	return filepath.Join(xdg, "opencode")
 }
 
@@ -30,9 +31,10 @@ func TestUserHooks_InstallInspectRemove(t *testing.T) {
 	ag := &OpenCodeAgent{}
 	ctx := context.Background()
 
-	n, path, err := ag.EnsureUserHooks(ctx, nil)
+	install, err := ag.EnsureUserHooks(ctx, nil)
 	require.NoError(t, err)
-	assert.Equal(t, 1, n)
+	assert.Equal(t, 1, install.Changed)
+	path := install.Path
 	assert.Equal(t, filepath.Join(home, "plugin", "entire.ts"), path)
 	report := ag.InspectUserHooks(ctx)
 	assert.Equal(t, agent.UserHooksCurrent, report.State)

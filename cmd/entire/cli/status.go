@@ -110,7 +110,6 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 	writeRefusedAgentHomes(w)
 	writeUserSettingsRejections(w, s)
 	writeCommittedKeysIgnoredForGlobalEnable(w, s)
-	writeOlderProjectHooks(ctx, w)
 	if s.Enabled {
 		writeActiveSessions(ctx, w, sty)
 	}

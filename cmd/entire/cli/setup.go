@@ -1333,6 +1333,20 @@ removed. Repositories you enabled with ` + "`entire enable`" + ` stay enabled.`,
 	return cmd
 }
 
+// enableUnscopedInUserSettings runs enableInUserSettings for an `entire
+// enable` that named no settings file, printing the enabled status when it
+// handled the enable.
+func enableUnscopedInUserSettings(ctx context.Context, w io.Writer, opts EnableOptions) (bool, error) {
+	if opts.UseLocalSettings || opts.UseProjectSettings {
+		return false, nil
+	}
+	handled, err := enableInUserSettings(ctx, w, true)
+	if err != nil || !handled {
+		return handled, err
+	}
+	return true, printEnabledStatus(ctx, w, opts)
+}
+
 func runEnableOnConfiguredRepoWithPreflight(ctx context.Context, cmd *cobra.Command, opts EnableOptions, preflight func() error) error {
 	w := cmd.OutOrStdout()
 	opts.snapshotCleanConfig(ctx)
@@ -1410,6 +1424,16 @@ func runEnableOnConfiguredRepoWithPreflight(ctx context.Context, cmd *cobra.Comm
 	// to the existing project settings.json but wrote the enabled flag to
 	// settings.local.json, leaving the project file the user disabled still
 	// enabled=false.
+	return finishEnableOnConfiguredRepo(ctx, w, opts, usedSetupFlow)
+}
+
+// finishEnableOnConfiguredRepo turns Entire on in an already configured
+// repository: through the user settings file while global enable is on (see
+// enableInUserSettings), else in the resolved settings file.
+func finishEnableOnConfiguredRepo(ctx context.Context, w io.Writer, opts EnableOptions, usedSetupFlow bool) error {
+	if handled, err := enableUnscopedInUserSettings(ctx, w, opts); handled || err != nil {
+		return err
+	}
 	targetFile, _ := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
 	useProject := targetFile == settings.EntireSettingsFile
 

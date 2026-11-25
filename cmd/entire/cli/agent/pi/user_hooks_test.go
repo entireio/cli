@@ -17,6 +17,7 @@ func userPiHome(t *testing.T) string {
 	home := filepath.Join(t.TempDir(), "pi", "agent")
 	require.NoError(t, os.MkdirAll(home, 0o750))
 	t.Setenv(piHomeEnvVar, home)
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
 	return home
 }
 
@@ -28,9 +29,10 @@ func TestUserHooks_InstallInspectRemove(t *testing.T) {
 	ag := &PiAgent{}
 	ctx := context.Background()
 
-	n, path, err := ag.EnsureUserHooks(ctx, nil)
+	install, err := ag.EnsureUserHooks(ctx, nil)
 	require.NoError(t, err)
-	assert.Equal(t, 1, n)
+	assert.Equal(t, 1, install.Changed)
+	path := install.Path
 	assert.Equal(t, filepath.Join(home, "extensions", "entire", "index.ts"), path)
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)

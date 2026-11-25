@@ -649,10 +649,12 @@ comments at each site say which case applies:
   follows a symlinked file to its target, keeping its mode, and refuses a link
   that does not resolve; Pi's and OpenCode's directories under the agent's
   home are created with a plain `MkdirAll`. Nothing is created when the agent's
-  home is absent. Reads and writes take the lock beside the file (Pi and
-  OpenCode: `.entire-user-hooks.lock` in the agent home). Claude Code's
-  version stamp is `user_hooks_claude-code.json` in the `userdirs` config root,
-  written through `jsonutil.WriteFileAtomicIn`. This covers those files only,
+  home is absent. Writes take one lock, `user-hooks.lock` in the `userdirs`
+  config root, and record what Entire created (files, directories) and Claude
+  Code's hook version in `user-hooks.json` there, written through
+  `jsonutil.WriteFileAtomicIn`; nothing of Entire's own goes in the agent's
+  directory. Removal deletes only directories that record names, and never a
+  symlinked directory. This covers those files only,
   not worktree agent configs, which keep the rules above; the project copies
   are never written by global enable.
 - **Agent `ReadTranscript(path)` / `ReadSession(input)`** — neither carries a

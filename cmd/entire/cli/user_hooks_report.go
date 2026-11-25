@@ -35,10 +35,8 @@ func userLevelHookSessionStartWarning(ctx context.Context, ag agent.Agent) strin
 
 // checkUserLevelHooks is doctor's report of every agent's user-level hooks,
 // which global enable installs: where they are, whether they match this CLI,
-// agent-specific findings (Codex approval in /hooks), and a repository whose
-// own Entire hooks are older than the user-level ones. Report-only: the
-// project install always wins, and the next command with global enable on
-// rewrites an outdated user-level copy.
+// and agent-specific findings (Codex approval in /hooks). Report-only: the
+// next command with global enable on rewrites an outdated user-level copy.
 func checkUserLevelHooks(cmd *cobra.Command) {
 	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
@@ -51,11 +49,7 @@ func checkUserLevelHooks(cmd *cobra.Command) {
 		return
 	}
 	for _, installer := range userHookInstallers() {
-		report := installer.InspectUserHooks(ctx)
-		writeUserHookReport(w, installer, report)
-		if line := olderProjectHooksLine(ctx, installer, report); line != "" {
-			fmt.Fprintf(w, "  %s\n", line)
-		}
+		writeUserHookReport(w, installer, installer.InspectUserHooks(ctx))
 	}
 }
 
@@ -76,33 +70,6 @@ func writeUserHookReport(w io.Writer, installer agent.UserHookInstaller, report 
 	fmt.Fprintf(w, "  %s\n", report.Path)
 	for _, note := range report.Notes {
 		fmt.Fprintf(w, "  %s\n", note)
-	}
-}
-
-// olderProjectHooksLine flags a repository whose own Entire hooks for the
-// agent are older than its current user-level ones. The project install
-// still handles the agent here; this only says how to update it.
-func olderProjectHooksLine(ctx context.Context, installer agent.UserHookInstaller, report agent.UserHookReport) string {
-	freshness, ok := agent.AsHookFreshness(installer)
-	if !ok || report.State != agent.UserHooksCurrent {
-		return ""
-	}
-	if freshness.CheckHookConfig(ctx) != agent.HooksOutdated {
-		return ""
-	}
-	return fmt.Sprintf("This repository's Entire hooks for %s are older than your user-level ones; run `entire enable` here to update them.", installer.Type())
-}
-
-// writeOlderProjectHooks is status's one line per agent whose project hooks
-// here are older than its user-level ones. Only with global enable on.
-func writeOlderProjectHooks(ctx context.Context, w io.Writer) {
-	if !settings.UserTierEnablesEverywhere(ctx) {
-		return
-	}
-	for _, installer := range userHookInstallers() {
-		if line := olderProjectHooksLine(ctx, installer, installer.InspectUserHooks(ctx)); line != "" {
-			fmt.Fprintf(w, "  %s\n", line)
-		}
 	}
 }
 

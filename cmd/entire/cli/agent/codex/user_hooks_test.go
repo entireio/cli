@@ -23,6 +23,7 @@ func userCodexHome(t *testing.T) string {
 	home := filepath.Join(t.TempDir(), "codex-home")
 	require.NoError(t, os.MkdirAll(home, 0o750))
 	t.Setenv("CODEX_HOME", home)
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
 	return home
 }
 
@@ -39,18 +40,19 @@ func TestEnsureUserHooks_InstallsScopedCommandsIdempotently(t *testing.T) {
 	home := userCodexHome(t)
 	ag := &CodexAgent{}
 
-	n, path, err := ag.EnsureUserHooks(context.Background(), nil)
+	install, err := ag.EnsureUserHooks(context.Background(), nil)
 	require.NoError(t, err)
-	assert.Equal(t, filepath.Join(home, HooksFileName), path)
-	assert.Equal(t, len(managedHooks), n)
+	assert.Equal(t, filepath.Join(home, HooksFileName), install.Path)
+	assert.Equal(t, len(managedHooks), install.Changed)
+	assert.False(t, install.Updated)
 	content := readUserHooksJSON(t, home)
 	for _, h := range managedHooks {
 		assert.Contains(t, content, "entire hooks codex --scope=user/v1 "+h.verb)
 	}
 
-	n, _, err = ag.EnsureUserHooks(context.Background(), nil)
+	install, err = ag.EnsureUserHooks(context.Background(), nil)
 	require.NoError(t, err)
-	assert.Zero(t, n, "second install")
+	assert.Zero(t, install.Changed, "second install")
 
 	report := ag.InspectUserHooks(context.Background())
 	assert.Equal(t, agent.UserHooksCurrent, report.State)
@@ -65,7 +67,7 @@ func TestRemoveUserHooks_KeepsTheUsersHooks(t *testing.T) {
 	own := `{"theme":"dark","hooks":{"Stop":[{"hooks":[{"type":"command","command":"say done"}]}]}}`
 	require.NoError(t, os.WriteFile(filepath.Join(home, HooksFileName), []byte(own), 0o600))
 	ag := &CodexAgent{}
-	_, _, err := ag.EnsureUserHooks(context.Background(), nil)
+	_, err := ag.EnsureUserHooks(context.Background(), nil)
 	require.NoError(t, err)
 	assert.Contains(t, readUserHooksJSON(t, home), "say done")
 
@@ -148,12 +150,13 @@ func TestProjectHooksSupersede_HomeThatIsARepository(t *testing.T) {
 	initCommittedRepo(t, fakeHome)
 	t.Setenv("HOME", fakeHome)
 	t.Setenv("CODEX_HOME", "")
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
 	require.NoError(t, os.MkdirAll(filepath.Join(fakeHome, ".codex"), 0o750))
 	t.Chdir(fakeHome)
 	ag := &CodexAgent{}
-	_, path, err := ag.EnsureUserHooks(context.Background(), nil)
+	install, err := ag.EnsureUserHooks(context.Background(), nil)
 	require.NoError(t, err)
-	trustCodexHooks(t, filepath.Join(fakeHome, ".codex"), path)
+	trustCodexHooks(t, filepath.Join(fakeHome, ".codex"), install.Path)
 
 	assert.False(t, ag.ProjectHooksSupersede(context.Background()))
 }
@@ -162,7 +165,7 @@ func TestProjectHooksSupersede_HomeThatIsARepository(t *testing.T) {
 // events, each a list of matcher groups.
 func TestEnsureUserHooks_WritesCodexShapedJSON(t *testing.T) {
 	home := userCodexHome(t)
-	_, _, err := (&CodexAgent{}).EnsureUserHooks(context.Background(), nil)
+	_, err := (&CodexAgent{}).EnsureUserHooks(context.Background(), nil)
 	require.NoError(t, err)
 	var doc struct {
 		Hooks map[string][]MatcherGroup `json:"hooks"`

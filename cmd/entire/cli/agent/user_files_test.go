@@ -15,13 +15,17 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 )
 
 const testEntireLine = "entire-hook\n"
 
 // testMergedFile is a MergedUserFile whose merge appends one Entire line.
+// Entire's own state for it goes in dir's parent, standing in for the Entire
+// user config directory.
 func testMergedFile(dir string) MergedUserFile {
 	return MergedUserFile{
+		state:     testState(filepath.Dir(dir)),
 		Path:      filepath.Join(dir, "settings.txt"),
 		Perm:      0o600,
 		HasEntire: func(data []byte) bool { return strings.Contains(string(data), testEntireLine) },
@@ -45,21 +49,21 @@ func TestMergedUserFile_InstallInspectRemove(t *testing.T) {
 	require.NoError(t, os.WriteFile(file.Path, []byte("user\n"), 0o600))
 	assert.Equal(t, UserHooksAbsent, file.Inspect().State)
 
-	n, err := file.Ensure(ctx, nil)
+	result, err := file.Ensure(ctx, nil)
 	require.NoError(t, err)
-	assert.Equal(t, 1, n)
+	assert.Equal(t, 1, result.Changed)
 	assert.Equal(t, UserHooksCurrent, file.Inspect().State)
-	n, err = file.Ensure(ctx, nil)
+	result, err = file.Ensure(ctx, nil)
 	require.NoError(t, err)
-	assert.Zero(t, n)
+	assert.Zero(t, result.Changed)
 
-	removed, err := file.Remove(ctx, nil)
+	removed, err := file.Remove(ctx)
 	require.NoError(t, err)
 	assert.True(t, removed)
 	data, err := os.ReadFile(file.Path)
 	require.NoError(t, err)
 	assert.Equal(t, "user\n", string(data))
-	removed, err = file.Remove(ctx, nil)
+	removed, err = file.Remove(ctx)
 	require.NoError(t, err)
 	assert.False(t, removed)
 }
@@ -71,7 +75,7 @@ func TestMergedUserFile_NoConfigDirCreatesNothing(t *testing.T) {
 	file := testMergedFile(dir)
 	_, err := file.Ensure(context.Background(), nil)
 	require.ErrorIs(t, err, ErrUserHooksNotInUse)
-	removed, err := file.Remove(context.Background(), nil)
+	removed, err := file.Remove(context.Background())
 	require.NoError(t, err)
 	assert.False(t, removed)
 	assert.Equal(t, UserHooksNotInUse, file.Inspect().State)
@@ -83,9 +87,9 @@ func TestMergedUserFile_NoConfigDirCreatesNothing(t *testing.T) {
 func TestMergedUserFile_InstallsNothingOnceUnwanted(t *testing.T) {
 	t.Parallel()
 	file := testMergedFile(t.TempDir())
-	n, err := file.Ensure(context.Background(), func(context.Context) bool { return false })
+	result, err := file.Ensure(context.Background(), func(context.Context) bool { return false })
 	require.NoError(t, err)
-	assert.Zero(t, n)
+	assert.Zero(t, result.Changed)
 	_, err = os.Stat(file.Path)
 	assert.ErrorIs(t, err, fs.ErrNotExist)
 }
@@ -137,9 +141,9 @@ func TestMergedUserFile_ConcurrentCallsInstallOnce(t *testing.T) {
 	var wg sync.WaitGroup
 	for range callers {
 		wg.Go(func() {
-			n, err := file.Ensure(context.Background(), nil)
+			result, err := file.Ensure(context.Background(), nil)
 			assert.NoError(t, err)
-			added <- n
+			added <- result.Changed
 		})
 	}
 	wg.Wait()
@@ -156,7 +160,7 @@ func TestMergedUserFile_ConcurrentCallsInstallOnce(t *testing.T) {
 func TestMergedUserFile_TakesTheLockOnlyToWrite(t *testing.T) {
 	t.Parallel()
 	file := testMergedFile(t.TempDir())
-	release, err := flock.Acquire(file.lockPath())
+	release, err := flock.Acquire(filepath.Join(filepath.Dir(filepath.Dir(file.Path)), userHookLockFile))
 	require.NoError(t, err)
 	defer release()
 
@@ -166,15 +170,16 @@ func TestMergedUserFile_TakesTheLockOnlyToWrite(t *testing.T) {
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 
 	require.NoError(t, os.WriteFile(file.Path, []byte(testEntireLine), 0o600))
-	n, err := file.Ensure(context.Background(), nil)
+	result, err := file.Ensure(context.Background(), nil)
 	require.NoError(t, err)
-	assert.Zero(t, n)
+	assert.Zero(t, result.Changed)
 }
 
 const testMarker = "ENTIRE-GENERATED"
 
 func testGeneratedFile(home string) GeneratedUserFile {
 	return GeneratedUserFile{
+		state:   testState(filepath.Dir(home)),
 		Home:    home,
 		Path:    filepath.Join(home, "ext", "entire.ts"),
 		Marker:  testMarker,
@@ -194,9 +199,9 @@ func TestGeneratedUserFile_UpgradesOursAndRefusesForeign(t *testing.T) {
 	report := file.Inspect()
 	assert.Equal(t, UserHooksOutdated, report.State)
 	assert.Equal(t, 1, report.Version)
-	n, err := file.Ensure(ctx, nil)
+	result, err := file.Ensure(ctx, nil)
 	require.NoError(t, err)
-	assert.Equal(t, 1, n)
+	assert.Equal(t, 1, result.Changed)
 	assert.Equal(t, UserHooksCurrent, file.Inspect().State)
 
 	require.NoError(t, os.WriteFile(file.Path, []byte("theirs\n"), 0o644))
@@ -218,9 +223,9 @@ func TestGeneratedUserFile_CRLFCopyIsCurrent(t *testing.T) {
 	require.NoError(t, os.WriteFile(file.Path, []byte(crlf), 0o644))
 
 	assert.Equal(t, UserHooksCurrent, file.Inspect().State)
-	n, err := file.Ensure(context.Background(), nil)
+	result, err := file.Ensure(context.Background(), nil)
 	require.NoError(t, err)
-	assert.Zero(t, n)
+	assert.Zero(t, result.Changed)
 	data, err := os.ReadFile(file.Path)
 	require.NoError(t, err)
 	assert.Equal(t, crlf, string(data))
@@ -260,7 +265,7 @@ func TestGeneratedUserFile_RemovesOnlyDirectoriesItCreated(t *testing.T) {
 			} else {
 				assert.NoDirExists(t, dir)
 			}
-			assert.NoFileExists(t, filepath.Join(home, ".entire-user-hooks-dirs"))
+			assertNoEntireFilesLeft(t, home)
 			assert.DirExists(t, home)
 		})
 	}
@@ -271,6 +276,7 @@ func TestGeneratedUserFile_RemovesOnlyDirectoriesItCreated(t *testing.T) {
 func testJSONMergedFile(dir string) MergedUserFile {
 	const entire = `{"hooks":{"entire":1}}`
 	return MergedUserFile{
+		state:     testState(filepath.Dir(dir)),
 		Path:      filepath.Join(dir, "settings.json"),
 		Perm:      0o600,
 		HasEntire: func(data []byte) bool { return string(data) == entire },
@@ -295,11 +301,11 @@ func TestMergedUserFile_RemovesAnEmptiedFileOnlyIfEntireCreatedIt(t *testing.T) 
 		file := testJSONMergedFile(t.TempDir())
 		_, err := file.Ensure(ctx, nil)
 		require.NoError(t, err)
-		removed, err := file.Remove(ctx, nil)
+		removed, err := file.Remove(ctx)
 		require.NoError(t, err)
 		assert.True(t, removed)
 		assert.NoFileExists(t, file.Path)
-		assert.NoFileExists(t, file.Path+".entire-created")
+		assertNoEntireFilesLeft(t, filepath.Dir(file.Path))
 	})
 
 	t.Run("the user's own file", func(t *testing.T) {
@@ -308,11 +314,82 @@ func TestMergedUserFile_RemovesAnEmptiedFileOnlyIfEntireCreatedIt(t *testing.T) 
 		require.NoError(t, os.WriteFile(file.Path, []byte(`{}`), 0o600))
 		_, err := file.Ensure(ctx, nil)
 		require.NoError(t, err)
-		removed, err := file.Remove(ctx, nil)
+		removed, err := file.Remove(ctx)
 		require.NoError(t, err)
 		assert.True(t, removed)
 		data, err := os.ReadFile(file.Path)
 		require.NoError(t, err)
 		assert.JSONEq(t, `{}`, string(data))
 	})
+}
+
+// assertNoEntireFilesLeft checks that removal left none of Entire's own files
+// (state, lock) in the agent's directory or in the state directory beside it.
+func assertNoEntireFilesLeft(t *testing.T, agentDir string) {
+	t.Helper()
+	entries, err := os.ReadDir(agentDir)
+	require.NoError(t, err)
+	for _, e := range entries {
+		assert.NotContains(t, e.Name(), "entire", "left in the agent's directory")
+		assert.NotContains(t, e.Name(), ".lock", "left in the agent's directory")
+	}
+	assert.NoFileExists(t, filepath.Join(filepath.Dir(agentDir), userHookLockFile))
+	assert.NoFileExists(t, filepath.Join(filepath.Dir(agentDir), userHookStateFile))
+}
+
+// Entire keeps its lock and its record of what it created outside the
+// agent's directory, and removal leaves neither behind.
+func TestUserFiles_LeaveNoLockOrRecordInTheAgentDir(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	merged := testMergedFile(t.TempDir())
+	require.NoError(t, os.WriteFile(merged.Path, []byte("user\n"), 0o600))
+	_, err := merged.Ensure(ctx, nil)
+	require.NoError(t, err)
+	_, err = merged.Remove(ctx)
+	require.NoError(t, err)
+	assertNoEntireFilesLeft(t, filepath.Dir(merged.Path))
+
+	home := t.TempDir()
+	generated := testGeneratedFile(home)
+	_, err = generated.Ensure(ctx, nil)
+	require.NoError(t, err)
+	assertNoUnexpected := func() {
+		entries, err := os.ReadDir(home)
+		require.NoError(t, err)
+		for _, e := range entries {
+			assert.Equal(t, "ext", e.Name(), "Entire wrote its own file into the agent's directory")
+		}
+	}
+	assertNoUnexpected()
+	_, err = generated.Remove(ctx)
+	require.NoError(t, err)
+	assertNoEntireFilesLeft(t, home)
+}
+
+// A directory on the file's path that is a symlink (a dotfiles checkout) is
+// the user's: removal never deletes the link, even one RemoveDir names.
+func TestGeneratedUserFile_KeepsASymlinkedDirectory(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	file := testGeneratedFile(home)
+	file.RemoveDir = true
+	dotfiles := t.TempDir()
+	require.NoError(t, os.Symlink(dotfiles, filepath.Dir(file.Path)))
+	ctx := context.Background()
+	_, err := file.Ensure(ctx, nil)
+	require.NoError(t, err)
+	removed, err := file.Remove(ctx)
+	require.NoError(t, err)
+	assert.True(t, removed)
+	info, err := os.Lstat(filepath.Dir(file.Path))
+	require.NoError(t, err, "the symlinked directory was removed")
+	assert.NotZero(t, info.Mode()&os.ModeSymlink)
+	assert.DirExists(t, dotfiles)
+}
+
+// testState keeps Entire's user-level state in dir instead of the Entire
+// user config directory.
+func testState(dir string) userHookState {
+	return userHookState{open: func() (*os.Root, error) { return osroot.Shared(dir) }}
 }

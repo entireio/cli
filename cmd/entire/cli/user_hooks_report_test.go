@@ -17,10 +17,10 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
-// Doctor reports each in-use agent's user-level hooks, and doctor and status
-// both flag a repository whose own hooks are older than the user-level ones,
-// without changing either.
-func TestUserLevelHookReport_FlagsOlderProjectHooks(t *testing.T) {
+// Doctor reports each in-use agent's user-level hooks. A repository whose own
+// hooks are older is flagged by the regular drift checks, with the command
+// that updates them, and nothing changes either file.
+func TestUserLevelHookReport_OlderProjectHooksNameTheWorkingCommand(t *testing.T) {
 	t.Cleanup(osroot.ResetShared)
 	entireDir := t.TempDir()
 	t.Setenv("ENTIRE_CONFIG_DIR", entireDir)
@@ -33,7 +33,7 @@ func TestUserLevelHookReport_FlagsOlderProjectHooks(t *testing.T) {
 	t.Chdir(repo)
 
 	ctx := context.Background()
-	_, _, err := (&pi.PiAgent{}).EnsureUserHooks(ctx, nil)
+	_, err := (&pi.PiAgent{}).EnsureUserHooks(ctx, nil)
 	require.NoError(t, err)
 	_, err = (&pi.PiAgent{}).InstallHooks(ctx, false)
 	require.NoError(t, err)
@@ -47,12 +47,14 @@ func TestUserLevelHookReport_FlagsOlderProjectHooks(t *testing.T) {
 	cmd.SetOut(&doctor)
 	checkUserLevelHooks(cmd)
 	assert.Contains(t, doctor.String(), "Pi user-level hooks: INSTALLED (version 1)")
-	assert.Contains(t, doctor.String(), "This repository's Entire hooks for Pi are older than your user-level ones")
 	assert.NotContains(t, doctor.String(), "Codex", "an agent not in use is not reported")
+	doctor.Reset()
+	checkHookDrift(cmd)
+	assert.Contains(t, doctor.String(), "Run `entire agent add pi` to update it.")
 
 	var status bytes.Buffer
-	writeOlderProjectHooks(ctx, &status)
-	assert.Contains(t, status.String(), "run `entire enable` here to update them")
+	require.NoError(t, runStatus(ctx, &status, false, false))
+	assert.NotContains(t, status.String(), "entire enable")
 
 	data, err := os.ReadFile(project)
 	require.NoError(t, err)
