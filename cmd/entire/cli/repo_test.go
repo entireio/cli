@@ -896,7 +896,8 @@ func TestRepoProjectFlagRedundancyWarning(t *testing.T) {
 }
 
 // TestRepoView_TakesForgeQualifiedRefsOnly pins the grammar `repo view` accepts:
-// a repository is named /<forge>/<a>/<b> and no other way. A ULID identifies a
+// a repository is named /<forge>/<a>/<b>, or by the entire.com URL that spells
+// that path. A ULID identifies a
 // row, not a repository, and a bare name is unique only inside a project — so
 // neither is a name this verb takes, and --project has nothing left to scope.
 func TestRepoView_TakesForgeQualifiedRefsOnly(t *testing.T) {

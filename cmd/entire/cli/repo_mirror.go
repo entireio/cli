@@ -731,9 +731,10 @@ func newRepoMirrorAddCmd() *cobra.Command {
 // is keyed by, so the two forges take one spelling from the user.
 func runMirrorAdd(cmd *cobra.Command, repoRef string, clusterHosts []string, opts mirrorAddOptions) error {
 	cmd.SilenceUsage = true
-	ref, err := parseMirrorRepoRef(repoRef)
+	tr := newTypedRef(repoRef)
+	ref, err := parseMirrorRepoRef(tr.canon)
 	if err != nil {
-		return err
+		return tr.wrapErr(err)
 	}
 	for _, host := range clusterHosts {
 		if err := validateClusterHost(host); err != nil {

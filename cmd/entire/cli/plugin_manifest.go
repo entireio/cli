@@ -108,8 +108,10 @@ type PluginManifest struct {
 	// at the installed tag.
 	Requires []PluginRequirement `yaml:"requires,omitempty"`
 	// Description is the one-line summary from the plugin's entire-plugin.yml
-	// at the installed tag, kept so `entire agent-help` can say what an
-	// installed plugin is for without running it or reading the index.
+	// at the installed tag. Root help lists a plugin only when this is set (see
+	// pluginHelpEntries), and `entire agent-help` uses it to say what an
+	// installed plugin is for; it is recorded here so both stay offline and
+	// free of plugin execution.
 	Description string `yaml:"description,omitempty"`
 	// AgentHelp records entire-plugin.yml's agent_help at the installed tag:
 	// the plugin answers `entire-<name> agent-help`, so `entire agent-help`
@@ -150,8 +152,9 @@ type PluginMetadata struct {
 	// Name is the bare plugin name. When empty, derived from the repo URL
 	// basename (entire-run → run).
 	Name string `yaml:"name,omitempty"`
-	// Description is a one-line summary shown by info/search, and by
-	// `entire agent-help` once installed.
+	// Description is a one-line summary shown by info/search, and in root
+	// help and by `entire agent-help`, once installed (copied into
+	// PluginManifest.Description).
 	Description string `yaml:"description,omitempty"`
 	// AgentHelp declares that the plugin implements the `agent-help` verb
 	// (see docs/architecture/external-commands.md), so `entire agent-help`

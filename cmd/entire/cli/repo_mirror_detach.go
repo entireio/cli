@@ -71,7 +71,7 @@ func newRepoMirrorDetachCmd() *cobra.Command {
 			return runMirrorDetach(cmd, args[0], opts)
 		},
 	}
-	cmd.Flags().StringVar(&opts.into, "into", "", "Native repository to detach into, as /et/<project>/<repo> (required)")
+	cmd.Flags().StringVar(&opts.into, "into", "", "Native repository to detach into, as /et/<project>/<repo> or an entire.com URL (required)")
 	cmd.Flags().BoolVar(&opts.dryRun, "dry-run", false, "Print the preconditions and change nothing")
 	cmd.Flags().BoolVar(&opts.noWait, "no-wait", false, "Return once the repository is native, without waiting for the rewire to complete")
 	cmd.Flags().DurationVar(&opts.timeout, "timeout", 30*time.Minute, "How long to wait for the rewire to complete (0 waits indefinitely)")
@@ -88,14 +88,16 @@ func newRepoMirrorDetachCmd() *cobra.Command {
 // preconditions on a refusal), then confirms and runs the detach.
 func runMirrorDetach(cmd *cobra.Command, repoRef string, opts mirrorDetachOptions) error {
 	cmd.SilenceUsage = true
-	ref, err := parseMirrorRepoRef(repoRef, mirrorCloneForge)
+	tr := newTypedRef(repoRef)
+	ref, err := parseMirrorRepoRef(tr.canon, mirrorCloneForge)
 	if err != nil {
-		return err
+		return tr.wrapErr(err)
 	}
 	// owner is the project and repo the native name, as for any /et/ ref.
-	into, err := parseMirrorRepoRef(opts.into, nativeCloneForge)
+	intoTyped := newTypedRef(opts.into)
+	into, err := parseMirrorRepoRef(intoTyped.canon, nativeCloneForge)
 	if err != nil {
-		return fmt.Errorf("invalid --into: %w", err)
+		return fmt.Errorf("invalid --into: %w", intoTyped.wrapErr(err))
 	}
 	yes := forceRequested(cmd)
 	// An unanswerable prompt must not cost a request.

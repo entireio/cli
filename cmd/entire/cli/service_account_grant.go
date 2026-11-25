@@ -26,7 +26,7 @@ type saTarget struct {
 
 // addSATargetFlags wires --repo and --project.
 func addSATargetFlags(cmd *cobra.Command, repo, project *string) {
-	cmd.Flags().StringVar(repo, "repo", "", "Repo name in the service account's project, or its /et/<project>/<repo> path")
+	cmd.Flags().StringVar(repo, "repo", "", "Repo name in the service account's project, or its /et/<project>/<repo> path or entire.com URL")
 	cmd.Flags().StringVar(project, "project", "", "The service account's own project (name or ULID)")
 	cmd.MarkFlagsOneRequired("repo", "project")
 	cmd.MarkFlagsMutuallyExclusive("repo", "project")
@@ -42,11 +42,15 @@ func resolveSATarget(ctx context.Context, c *coreapi.Client, sa saRef, repo, pro
 		return saTarget{kind: saResourceProject, id: p.ID, label: "project " + resolvedRefLabel(project, p)}, nil
 	}
 	var r resolvedRef
+	labelRef := repo
 	var err error
 	if strings.Contains(repo, "/") {
 		// A path names its own project. A forgeless <project>/<repo> gets the
 		// /et/ suggestion.
-		r, err = resolveRepoRefResolved(ctx, c, repo, "")
+		tr := newTypedRef(repo)
+		labelRef = redactRefForError(tr.canon)
+		r, err = resolveRepoRefResolved(ctx, c, tr.canon, "")
+		err = tr.wrapErr(err)
 	} else {
 		// Bare values are names in the account's project, never IDs: like
 		// `repo grant`, access management does not read a ULID-shaped name as
@@ -63,7 +67,7 @@ func resolveSATarget(ctx context.Context, c *coreapi.Client, sa saRef, repo, pro
 	if err != nil {
 		return saTarget{}, err
 	}
-	return saTarget{kind: saResourceRepo, id: r.ID, label: "repo " + resolvedRefLabel(repo, r)}, nil
+	return saTarget{kind: saResourceRepo, id: r.ID, label: "repo " + resolvedRefLabel(labelRef, r)}, nil
 }
 
 func newSAGrantCmd() *cobra.Command {

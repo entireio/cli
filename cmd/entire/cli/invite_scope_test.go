@@ -131,6 +131,29 @@ func TestInviteList_ShowsEveryKindOfInvitee(t *testing.T) {
 	}
 }
 
+// TestRepoInvite_EntireComURL: an entire.com URL resolves the repo the way the
+// path does, reports success canonically, and never leaks credentials.
+//
+// Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
+func TestRepoInvite_EntireComURL(t *testing.T) {
+	const url = "https://entire.com" + wiringRepoPath
+	core, srv := newInviteCore(t, invitationsFixture(true), http.StatusNoContent)
+	_, _, err := runCoreCmd(t, newRepoCmd, srv.URL, "invite", "list", url)
+	require.NoError(t, err)
+	require.Equal(t, []string{"GET /api/v1/repos/" + wiringRepoULID + "/invitations?status=open"}, core.recorded())
+
+	out, _, err := runCoreCmd(t, newRepoCmd, srv.URL, "invite", "revoke", url, "--id", accountInviteULID)
+	require.NoError(t, err)
+	require.Equal(t, "✓ Revoked the invitation "+accountInviteULID+" to repo "+wiringRepoPath+"\n", out)
+
+	_, _, err = runCoreCmd(t, newRepoCmd, srv.URL, "invite", "list", "https://user:secret@entire.com"+wiringRepoPath+"/x")
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "secret")
+	_, _, err = runCoreCmd(t, newRepoCmd, srv.URL, "invite", "revoke", "https://user:secret@entire.com"+wiringRepoPath, "--id", "bad")
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "secret")
+}
+
 // TestInviteList_JSONPassesTheInvitationsThrough: --json is the listing
 // itself, account fields included, without the properties the schema does not
 // declare.

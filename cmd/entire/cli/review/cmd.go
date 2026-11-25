@@ -32,6 +32,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/mdrender"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -1658,9 +1659,11 @@ func composeMultiAgentSinks(in multiAgentSinkInputs) []reviewtypes.Sink {
 			postRunOut := &bytes.Buffer{}
 			sinks = append(sinks, DumpSink{W: postRunOut, TrailFindingsJSON: in.trailFindingsJSON})
 			sinks = append(sinks, SynthesisSink{
-				Provider:          in.synthesisProvider,
-				Writer:            postRunOut,
-				RenderWriter:      in.out,
+				Provider: in.synthesisProvider,
+				Writer:   postRunOut,
+				Render: func(markdown string) (string, error) {
+					return mdrender.RenderForWriterWithBackground(in.out, markdown, tui.DarkBackground)
+				},
 				PerRunPrompt:      in.perRunPrompt,
 				ProfileName:       in.profileName,
 				Task:              in.task,

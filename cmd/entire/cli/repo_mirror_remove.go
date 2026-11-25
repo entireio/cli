@@ -181,9 +181,10 @@ func chooseMirrorRemoveRegions(cmd *cobra.Command, ref mirrorRepoRef, placements
 // is mirrored, choose which of those to drop, then remove them in parallel.
 func runMirrorRemove(cmd *cobra.Command, repoRef string, clusterHosts []string, timeout time.Duration) error {
 	cmd.SilenceUsage = true
-	ref, err := parseMirrorRepoRef(repoRef)
+	tr := newTypedRef(repoRef)
+	ref, err := parseMirrorRepoRef(tr.canon)
 	if err != nil {
-		return err
+		return tr.wrapErr(err)
 	}
 	for _, host := range clusterHosts {
 		if err := validateClusterHost(host); err != nil {

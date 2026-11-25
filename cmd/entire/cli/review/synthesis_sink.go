@@ -64,10 +64,11 @@ func (p AgentSynthesisProvider) Synthesize(ctx context.Context, prompt string) (
 type SynthesisSink struct {
 	Provider SynthesisProvider
 	Writer   io.Writer
-	// RenderWriter is the writer whose terminal capabilities should be used for
-	// markdown rendering. It defaults to Writer. TTY review runs use this when
-	// Writer is a post-run buffer that will later flush to the real terminal.
-	RenderWriter io.Writer
+	// Render styles the verdict markdown; nil renders for Writer. TTY runs set
+	// it because Writer is a post-run buffer, and the dashboard still owns the
+	// terminal when the verdict arrives, so the renderer must use the
+	// dashboard's background answer rather than query the terminal itself.
+	Render       func(markdown string) (string, error)
 	PerRunPrompt string // if non-empty, included in the synthesis prompt for context
 	ProfileName  string
 	Task         string
@@ -158,7 +159,11 @@ func (s SynthesisSink) RunFinished(summary reviewtypes.RunSummary) {
 	// own terminal newline from the LLM response. Adding Fprintln would double
 	// the trailing blank line.
 	display := stripTrailJSON(result, s.TrailFindingsJSON)
-	rendered, err := mdrender.RenderForWriter(s.renderWriter(), display)
+	render := s.Render
+	if render == nil {
+		render = func(markdown string) (string, error) { return mdrender.RenderForWriter(s.Writer, markdown) }
+	}
+	rendered, err := render(display)
 	if err != nil {
 		rendered = display
 	}
@@ -166,13 +171,6 @@ func (s SynthesisSink) RunFinished(summary reviewtypes.RunSummary) {
 	if s.OnComplete != nil {
 		s.OnComplete(nil)
 	}
-}
-
-func (s SynthesisSink) renderWriter() io.Writer {
-	if s.RenderWriter != nil {
-		return s.RenderWriter
-	}
-	return s.Writer
 }
 
 func (s SynthesisSink) runContext() context.Context {

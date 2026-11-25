@@ -237,6 +237,28 @@ func TestSynthesisSink_WritesFinalReport(t *testing.T) {
 	}
 }
 
+// TestSynthesisSink_UsesRender verifies a supplied Render styles the verdict:
+// TTY runs rely on it to avoid querying the terminal while the dashboard is up.
+func TestSynthesisSink_UsesRender(t *testing.T) {
+	t.Parallel()
+	w := &bytes.Buffer{}
+	var got string
+	sink := buildSink(&stubSynthesisProvider{response: "Unified verdict."}, w, "")
+	sink.Render = func(markdown string) (string, error) {
+		got = markdown
+		return "<styled>\n", nil
+	}
+
+	sink.RunFinished(makeTwoAgentSummary())
+
+	if got != "Unified verdict." {
+		t.Errorf("Render got %q, want the verdict", got)
+	}
+	if !strings.Contains(w.String(), "<styled>") {
+		t.Errorf("writer should contain Render's output, got: %q", w.String())
+	}
+}
+
 func TestSynthesisSink_OnResultReceivesSummary(t *testing.T) {
 	t.Parallel()
 	w := &bytes.Buffer{}
