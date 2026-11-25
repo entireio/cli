@@ -53,7 +53,7 @@ After a successful dispatched run, the CLI checks whether the plugin that ran ha
 
 ### Plugin commands in root help
 
-`entire --help` (and `entire help`) ends its command list with a **Plugin Commands:** section naming managed plugins, each with a one-line description. The description is the `description:` from the plugin's `entire-plugin.yml`, copied into `pkg/<name>/manifest.yml` at install and upgrade; plugin authors add nothing new, and the command name is the manifest's `name:`, the same name dispatch runs as `entire-<name>`. An existing install picks the description up on its next upgrade.
+`entire --help` (and `entire help`) ends its command list with a **Plugin Commands:** section naming managed plugins, each with a one-line description. The description is the `description:` from the plugin's `entire-plugin.yml`, copied into `pkg/<name>/manifest.yml` at install and upgrade; plugin authors add nothing new, and the command name is the manifest's `name:`, the same name dispatch runs as `entire-<name>`. An existing install picks the description up on its next `entire plugin upgrade`, including when it is already up to date or pinned. Those branches don't reinstall, so they read `entire-plugin.yml` at the installed tag and record its description in a manifest that lacks one. That backfill is best effort: a fetch failure leaves the description empty and the upgrade's outcome unchanged.
 
 A plugin is listed only when all of these hold; otherwise it is left out of help, and its install is unaffected:
 

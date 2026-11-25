@@ -190,3 +190,104 @@ func TestInstallPluginFromRepo_CopiesDescription(t *testing.T) { //nolint:parall
 		t.Errorf("saved manifest description = %q, want it copied from %s", saved.Description, pluginMetadataFileName)
 	}
 }
+
+// stripManifestDescription makes an install look like one made before
+// manifests recorded descriptions.
+func stripManifestDescription(t *testing.T, name string) {
+	t.Helper()
+	m, err := LoadPluginManifest(name)
+	if err != nil || m == nil {
+		t.Fatalf("LoadPluginManifest(%s) = %v, %v", name, m, err)
+	}
+	m.Description = ""
+	if err := SavePluginManifest(m); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func savedDescription(t *testing.T, name string) string {
+	t.Helper()
+	m, err := LoadPluginManifest(name)
+	if err != nil || m == nil {
+		t.Fatalf("LoadPluginManifest(%s) = %v, %v", name, m, err)
+	}
+	return m.Description
+}
+
+// An install made before descriptions were recorded must pick one up on its
+// next upgrade even when there is nothing to install: up to date, or pinned.
+// Those are the two branches that return before reinstalling.
+func TestUpgradeInstalledPlugin_BackfillsDescriptionWithoutReinstall(t *testing.T) { //nolint:paralleltest // mutates env
+	for _, pin := range []string{"", remoteTestTagOld} {
+		t.Run("pin="+pin, func(t *testing.T) {
+			withIsolatedPluginEnv(t)
+			ctx := context.Background()
+			srv := pluginReleaseServer(t, "0.1.0")
+			meta := fmt.Sprintf("name: demo\ndescription: Demo plugin for tests\ndownload_url: \"%s/dl/{tag}/{asset}\"\n", srv.URL)
+			repoURL := newTaggedPluginRepo(t, meta, remoteTestTagOld)
+			if _, err := InstallPluginFromRepo(ctx, repoURL, "", RemoteInstallOptions{Pin: pin}); err != nil {
+				t.Fatalf("InstallPluginFromRepo: %v", err)
+			}
+			stripManifestDescription(t, "demo")
+
+			o, err := UpgradeInstalledPlugin(ctx, "demo")
+			if err != nil {
+				t.Fatalf("UpgradeInstalledPlugin: %v", err)
+			}
+			if pin != "" && !o.Pinned {
+				t.Errorf("outcome = %+v, want Pinned", o)
+			}
+			if pin == "" && !o.UpToDate {
+				t.Errorf("outcome = %+v, want UpToDate", o)
+			}
+			if got := savedDescription(t, "demo"); got != "Demo plugin for tests" {
+				t.Errorf("description after upgrade = %q, want it backfilled from %s", got, pluginMetadataFileName)
+			}
+			if got := installedPayload(t); got != "payload-0.1.0" {
+				t.Errorf("payload = %q; backfill must not reinstall", got)
+			}
+		})
+	}
+}
+
+// Backfill is best effort: metadata without a description, or a repository
+// that can no longer be reached, leaves the description empty and the
+// upgrade outcome unchanged.
+func TestUpgradeInstalledPlugin_BackfillIsBestEffort(t *testing.T) { //nolint:paralleltest // mutates env
+	cases := map[string]struct {
+		description string
+		unreachable bool
+	}{
+		"metadata without description": {},
+		"repository gone":              {description: "Demo plugin for tests", unreachable: true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			withIsolatedPluginEnv(t)
+			ctx := context.Background()
+			srv := pluginReleaseServer(t, "0.1.0")
+			meta := fmt.Sprintf("name: demo\ndownload_url: \"%s/dl/{tag}/{asset}\"\n", srv.URL)
+			if tc.description != "" {
+				meta = "description: " + tc.description + "\n" + meta
+			}
+			repoURL := newTaggedPluginRepo(t, meta, remoteTestTagOld)
+			if _, err := InstallPluginFromRepo(ctx, repoURL, "", RemoteInstallOptions{Pin: remoteTestTagOld}); err != nil {
+				t.Fatalf("InstallPluginFromRepo: %v", err)
+			}
+			stripManifestDescription(t, "demo")
+			if tc.unreachable {
+				if err := os.RemoveAll(repoDirFromURL(repoURL)); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			o, err := UpgradeInstalledPlugin(ctx, "demo")
+			if err != nil || !o.Pinned {
+				t.Fatalf("UpgradeInstalledPlugin = %+v, %v; want a clean Pinned skip", o, err)
+			}
+			if got := savedDescription(t, "demo"); got != "" {
+				t.Errorf("description = %q, want it left empty", got)
+			}
+		})
+	}
+}

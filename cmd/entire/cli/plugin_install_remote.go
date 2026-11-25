@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"golang.org/x/mod/semver"
 )
@@ -516,6 +517,7 @@ func UpgradeInstalledPlugin(ctx context.Context, name string) (*UpgradeOutcome, 
 		return nil, noUpgradeManifestError(name)
 	}
 	if m.Pinned {
+		backfillManifestDescription(ctx, m)
 		return &UpgradeOutcome{Name: name, Pinned: true}, nil
 	}
 	tags, err := listRemoteSemverTags(ctx, m.RepoURL)
@@ -529,6 +531,7 @@ func UpgradeInstalledPlugin(ctx context.Context, name string) (*UpgradeOutcome, 
 	// same version, and a remote that re-tagged with the other spelling
 	// must not trigger a reinstall.
 	if semver.Compare(canonicalSemver(tags[0]), canonicalSemver(m.Tag)) <= 0 {
+		backfillManifestDescription(ctx, m)
 		return &UpgradeOutcome{Name: name, UpToDate: true}, nil
 	}
 	// Inherit the install-time trust decision: a plugin the user knowingly
@@ -547,6 +550,35 @@ func UpgradeInstalledPlugin(ctx context.Context, name string) (*UpgradeOutcome, 
 		return &UpgradeOutcome{Name: name, UpToDate: true}, nil
 	}
 	return &UpgradeOutcome{Name: name, FromTag: m.Tag, ToTag: res.Manifest.Tag}, nil
+}
+
+// backfillManifestDescription records the description from entire-plugin.yml
+// at the installed tag in a manifest that has none, for the upgrade branches
+// that return without reinstalling (pinned, up to date). Installs made before
+// manifests recorded descriptions would otherwise stay out of root help until
+// their author tagged a new release, and a pinned one forever.
+//
+// The tag is the installed one, not the newest, so the text describes the
+// binary that runs. Best effort: the upgrade outcome must not depend on it, so
+// failures are logged and dropped. A plugin whose metadata has no description
+// pays one metadata fetch per upgrade; upgrade is already a networked command.
+// The caller holds the plugin's lock.
+func backfillManifestDescription(ctx context.Context, m *PluginManifest) {
+	if m.Description != "" {
+		return
+	}
+	meta, err := fetchPluginMetadataAtTag(ctx, m.RepoURL, m.Tag)
+	if err != nil {
+		logging.Debug(ctx, "plugin upgrade: description backfill fetch failed", "plugin", m.Name, "error", err.Error())
+		return
+	}
+	if meta == nil || meta.Description == "" || (meta.Name != "" && meta.Name != m.Name) {
+		return
+	}
+	m.Description = meta.Description
+	if err := SavePluginManifest(m); err != nil {
+		logging.Debug(ctx, "plugin upgrade: description backfill save failed", "plugin", m.Name, "error", err.Error())
+	}
 }
 
 // noUpgradeManifestError explains why name, which has no install manifest,
