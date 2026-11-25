@@ -38,6 +38,9 @@ const (
 	defaultTermHeight = 24
 )
 
+// drillInHint is the dashboard footer's pointer to the per-agent detail view.
+const drillInHint = "Ctrl+O: drill in"
+
 // agentRow holds per-agent live state during the TUI run.
 type agentRow struct {
 	name     string
@@ -583,17 +586,19 @@ func (m reviewTUIModel) dashboardView() string {
 	}
 	b.WriteString("\n")
 
+	// Ctrl+O works until the dashboard closes, so the hint stays while the
+	// judge runs: reading the reviewers' reports is what that wait is for.
 	switch {
 	case m.finished && m.finalPhaseRunning:
 		m.writeDashboardLine(&b, m.countsLine())
-		m.writeDashboardLine(&b, m.spinner.View()+" Final judge is consolidating..."+m.finalizeElapsedSuffix())
+		m.writeDashboardLine(&b, m.spinner.View()+" Final judge is consolidating..."+m.finalizeElapsedSuffix()+" · "+drillInHint)
 	case m.finished:
 		m.writeDashboardLine(&b, m.countsLine())
-		m.writeDashboardLine(&b, m.spinner.View()+" Finalizing output..."+m.finalizeElapsedSuffix())
+		m.writeDashboardLine(&b, m.spinner.View()+" Finalizing output..."+m.finalizeElapsedSuffix()+" · "+drillInHint)
 	case m.cancelling:
 		m.writeDashboardLine(&b, "Cancelling agents... · Ctrl+C again: force quit")
 	default:
-		m.writeDashboardLine(&b, "Ctrl+O: drill in · Ctrl+C: cancel")
+		m.writeDashboardLine(&b, drillInHint+" · Ctrl+C: cancel")
 	}
 	return b.String()
 }
