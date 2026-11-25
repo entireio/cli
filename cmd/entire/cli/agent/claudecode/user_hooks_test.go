@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 // ensureUserHooks installs the user-level hooks with Entire's record of them
@@ -187,5 +188,58 @@ func TestEnsureUserHooks_RecordsTheVersionOutsideTheCommands(t *testing.T) {
 	}
 	if got := ag.InspectUserHooks(context.Background()).Version; got != 0 {
 		t.Errorf("version after removal = %d, want 0", got)
+	}
+}
+
+// writeClaudeSettings writes a Claude settings file whose UserPromptSubmit
+// runs command (none when empty).
+func writeClaudeSettings(t *testing.T, dir, command string) {
+	t.Helper()
+	content := `{}`
+	if command != "" {
+		hooks, err := json.Marshal(map[string]any{"hooks": map[string]any{"UserPromptSubmit": []map[string]any{
+			{"matcher": "", "hooks": []map[string]any{{"type": "command", "command": command}}},
+		}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		content = string(hooks)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ClaudeSettingsFileName), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Claude Code runs a command in both its user and project settings once only
+// when the two are byte-identical, so a prompt can fire Entire twice only
+// when both files carry Entire's UserPromptSubmit hook and they differ.
+func TestPromptHookMayFireTwice(t *testing.T) {
+	current := agent.WrapProductionSilentHookCommand("entire hooks claude-code user-prompt-submit")
+	const older = "entire hooks claude-code user-prompt-submit"
+	for name, tc := range map[string]struct {
+		user, project string
+		want          bool
+	}{
+		"identical commands":        {current, current, false},
+		"older project command":     {current, older, true},
+		"only the user-level copy":  {current, "", false},
+		"only the project copy":     {"", older, false},
+		"project hook not Entire's": {current, "echo hi", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			userDir := t.TempDir()
+			t.Setenv("CLAUDE_CONFIG_DIR", userDir)
+			repo := t.TempDir()
+			testutil.InitRepo(t, repo)
+			t.Chdir(repo)
+			writeClaudeSettings(t, userDir, tc.user)
+			writeClaudeSettings(t, filepath.Join(repo, ".claude"), tc.project)
+			if got := PromptHookMayFireTwice(context.Background()); got != tc.want {
+				t.Errorf("PromptHookMayFireTwice() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

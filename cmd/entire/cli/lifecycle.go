@@ -368,11 +368,13 @@ func initializeTurnSession(ctx, logCtx context.Context, strat *strategy.ManualCo
 // turnStartMayRepeat reports whether this turn-start may be a second Entire
 // install firing for a prompt already handled, so a repeat is skipped: a
 // user-level hook, or an agent that sends a turn ID to tell prompts apart.
-// Never Claude Code: it runs one identical hook command once itself, so the
-// same prompt again (say, after a missed Stop) is the developer's.
+// Claude Code runs one identical hook command once itself, so there only a
+// project UserPromptSubmit command that differs from the user-level one (an
+// older CLI's) can fire twice; otherwise the same prompt again (say, after a
+// missed Stop) is the developer's.
 func turnStartMayRepeat(ctx context.Context, ag agent.Agent, event *agent.Event) bool {
 	if ag.Name() == agent.AgentNameClaudeCode {
-		return false
+		return claudecode.PromptHookMayFireTwice(ctx)
 	}
 	return event.TurnID != "" || isUserScopeHook(ctx)
 }

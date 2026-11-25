@@ -502,11 +502,13 @@ project plugin must also export `setup`: an older copy without it does not run
 there, so the user-level plugin does. An older project copy otherwise wins, and
 `doctor` and `status` report it (see Versions). Each check is fresh,
 per event or per load. A prompt that still reaches Entire twice is recorded
-once where a second install can fire it (a user-level `--scope=user` hook, or an
-agent that sends a turn ID): the second turn-start for the same session, prompt
-and agent turn ID, while that turn is running and within a minute, is skipped.
-Claude Code is never deduplicated this way: it runs one identical command once
-itself, so the same prompt again is the developer's.
+once where a second install can fire it (a user-level `--scope=user` hook, an
+agent that sends a turn ID, or Claude Code with project prompt hooks whose
+command differs from the user-level one, as an older CLI wrote): the second
+turn-start for the same session, prompt and agent turn ID, while that turn is
+running and within a minute, is skipped. Otherwise Claude Code is not
+deduplicated this way: it runs one identical command once itself, so the same
+prompt again is the developer's.
 
 **Versions.** Each user-level entry point records an Entire hook version
 (Codex, Pi and OpenCode in the file itself; Claude Code in Entire's record of

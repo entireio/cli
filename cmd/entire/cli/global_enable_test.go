@@ -917,3 +917,40 @@ func TestGlobal_CodexUpgradeSaysUpdated(t *testing.T) {
 	require.NoError(t, err, out)
 	assert.Contains(t, out, "Updated Entire's hooks in Codex's user-level config")
 }
+
+// `entire disable --uninstall` in a global-only repository records that the
+// repository is off in the user settings file; otherwise the user-level hooks
+// would treat it as configured and reinstall its git hooks on the next prompt.
+func TestUninstall_GlobalOnlyRepoRecordsExclusion(t *testing.T) {
+	repo := newGlobalOnlyRepo(t, true)
+	testutil.RunGit(t, repo, "remote", "add", "origin", "https://github.com/acme/widgets.git")
+	writeSettings(t, testSettingsEnabled)
+
+	var stdout, stderr bytes.Buffer
+	if err := runUninstall(t.Context(), &stdout, &stderr, true); err != nil {
+		t.Fatalf("uninstall: %v\n%s%s", err, stdout.String(), stderr.String())
+	}
+	assert.Equal(t, false, userReposEntry(t, "gh/acme/widgets")["enabled"])
+	assert.Contains(t, stdout.String(), "every clone of gh/acme/widgets")
+
+	settings.ClearOriginKeyCache()
+	s, err := settings.Load(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	assert.False(t, s.Enabled)
+}
+
+// With global enable off and no repos entry, uninstall writes no user
+// settings entry.
+func TestUninstall_GlobalOffWritesNoExclusion(t *testing.T) {
+	newGlobalOnlyRepo(t, false)
+	writeSettings(t, testSettingsEnabled)
+
+	var stdout, stderr bytes.Buffer
+	if err := runUninstall(t.Context(), &stdout, &stderr, true); err != nil {
+		t.Fatalf("uninstall: %v\n%s%s", err, stdout.String(), stderr.String())
+	}
+	assert.JSONEq(t, `{"global_enable": false}`,
+		readUserSettingsFile(t, os.Getenv(userdirs.EnvConfigDir)))
+}

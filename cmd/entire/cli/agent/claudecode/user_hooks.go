@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io/fs"
 	"os"
+	"slices"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 )
@@ -13,10 +14,10 @@ import (
 var _ agent.UserHookInstaller = (*ClaudeCodeAgent)(nil)
 
 // userHooksVersion is the Entire hook version of the user-level hooks. Bump it
-// when what the user-level install writes changes. It is recorded in an
-// Entire's own record of its user-level files, never in the hook commands: Claude Code runs a
-// command present in both its user and project settings once only when the
-// two are identical.
+// when what the user-level install writes changes. It is recorded in Entire's
+// own record of its user-level files (`user-hooks.json`), never in the hook
+// commands: Claude Code runs a command present in both its user and project
+// settings once only when the two are identical.
 const userHooksVersion = 1
 
 // userSettingsFile is the user-level Claude Code settings
@@ -78,6 +79,54 @@ func (c *ClaudeCodeAgent) RemoveUserHooks(ctx context.Context) (bool, string, er
 // hook command present in both its user and project settings once, so its
 // user-level hooks never need to step aside.
 func (c *ClaudeCodeAgent) ProjectHooksSupersede(context.Context) bool { return false }
+
+// PromptHookMayFireTwice reports whether Claude Code can run Entire's
+// UserPromptSubmit hook twice for one prompt: the user-level settings carry
+// Entire's hook, and this project's settings carry an Entire UserPromptSubmit
+// command that is not byte-identical to a user-level one (an older CLI's
+// unwrapped command or wrapper, say). Claude Code runs a command present in
+// both files once only when the two match. Unreadable files report false.
+func PromptHookMayFireTwice(ctx context.Context) bool {
+	path, err := userClaudeSettingsPath()
+	if err != nil {
+		return false
+	}
+	data, err := agent.UserConfigFile{Path: path}.Read()
+	if err != nil {
+		return false
+	}
+	var user ClaudeSettings
+	if json.Unmarshal(data, &user) != nil {
+		return false
+	}
+	userCommands := entireHookCommands(user.Hooks.UserPromptSubmit)
+	if len(userCommands) == 0 {
+		return false
+	}
+	project, err := loadClaudeSettings(ctx)
+	if err != nil {
+		return false
+	}
+	for _, command := range entireHookCommands(project.Hooks.UserPromptSubmit) {
+		if !slices.Contains(userCommands, command) {
+			return true
+		}
+	}
+	return false
+}
+
+// entireHookCommands lists the Entire hook commands in matchers.
+func entireHookCommands(matchers []ClaudeHookMatcher) []string {
+	var commands []string
+	for _, matcher := range matchers {
+		for _, hook := range matcher.Hooks {
+			if isEntireHook(hook.Command) {
+				commands = append(commands, hook.Command)
+			}
+		}
+	}
+	return commands
+}
 
 // InspectUserHooks implements agent.UserHookInstaller. The version is the one
 // recorded at install; hooks older than this CLI's are outdated.

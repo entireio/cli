@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -153,8 +154,7 @@ func TestTurnStart_GlobalEnableDoesNotSetUpADisabledRepository(t *testing.T) {
 
 // A turn-start is skipped as a second install's repeat only where a second
 // install can fire: a user-level hook (--scope=user) or an agent that sends
-// a turn ID. Never for Claude Code, which runs one identical hook command
-// once itself, so a repeat there is the developer sending the prompt again.
+// a turn ID. Claude Code is covered by TestTurnStartMayRepeat_ClaudeCode.
 func TestTurnStartMayRepeat(t *testing.T) {
 	t.Parallel()
 	userCtx := withUserScopeHook(context.Background(), true)
@@ -164,7 +164,6 @@ func TestTurnStartMayRepeat(t *testing.T) {
 		turnID string
 		want   bool
 	}{
-		"claude user-level":     {ctx: userCtx, agent: mustAgent(t, agent.AgentNameClaudeCode), turnID: "t1"},
 		"codex project":         {ctx: context.Background(), agent: mustAgent(t, agent.AgentNameCodex)},
 		"codex user-level":      {ctx: userCtx, agent: mustAgent(t, agent.AgentNameCodex), want: true},
 		"opencode with turn ID": {ctx: context.Background(), agent: mustAgent(t, agent.AgentNameOpenCode), turnID: "msg-1", want: true},
@@ -175,6 +174,36 @@ func TestTurnStartMayRepeat(t *testing.T) {
 			assert.Equal(t, tc.want, got)
 		})
 	}
+}
+
+// Claude Code runs one identical hook command once itself, so a repeat there
+// is the developer sending the prompt again, even from a user-level hook with
+// a turn ID; only a differing project copy of the prompt hook can fire twice.
+func TestTurnStartMayRepeat_ClaudeCode(t *testing.T) {
+	userDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", userDir)
+	repo := t.TempDir()
+	testutil.InitRepo(t, repo)
+	t.Chdir(repo)
+	claude := mustAgent(t, agent.AgentNameClaudeCode)
+	ctx := withUserScopeHook(context.Background(), true)
+	event := &agent.Event{TurnID: "t1"}
+	current := agent.WrapProductionSilentHookCommand("entire hooks claude-code user-prompt-submit")
+	writePromptHook := func(dir, command string) {
+		t.Helper()
+		content := `{"hooks":{"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":` + strconv.Quote(command) + `}]}]}}`
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.json"), []byte(content), 0o600))
+	}
+
+	writePromptHook(userDir, current)
+	assert.False(t, turnStartMayRepeat(ctx, claude, event), "user-level copy only")
+
+	writePromptHook(filepath.Join(repo, ".claude"), current)
+	assert.False(t, turnStartMayRepeat(ctx, claude, event), "identical commands run once")
+
+	writePromptHook(filepath.Join(repo, ".claude"), "entire hooks claude-code user-prompt-submit")
+	assert.True(t, turnStartMayRepeat(ctx, claude, event), "an older project command fires too")
 }
 
 func mustAgent(t *testing.T, name types.AgentName) agent.Agent {

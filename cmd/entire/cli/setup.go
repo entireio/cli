@@ -2971,7 +2971,8 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	// successes to stdout, warnings to stderr via the printer — handles its
 	// errors, and returns only whether it succeeded. ok is the single fact
 	// tracked across the run; the steps are otherwise isolated from each other.
-	ok := uninstallAgentHooks(ctx, p, repoRoot, agHookState)
+	ok := excludeFromUserTier(ctx, p)
+	ok = uninstallAgentHooks(ctx, p, repoRoot, agHookState) && ok
 	ok = uninstallRetiredGeminiHooks(p, repoRoot) && ok
 	ok = uninstallGitHooks(ctx, p) && ok
 	ok = uninstallSessionStates(ctx, p) && ok
@@ -2986,6 +2987,23 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	p.successVerdict("Entire has been removed from this repository.")
 	p.farewell()
 	return nil
+}
+
+// excludeFromUserTier turns this repository off in the user settings file
+// when that file would otherwise keep it on: with global enable on, or a
+// `repos` entry enabling it, the user-level agent hooks would treat the
+// repository as configured, reinstall its git hooks and resume recording.
+func excludeFromUserTier(ctx context.Context, p *uninstallPrinter) bool {
+	if !settings.UserTierEnablesEverywhere(ctx) && !reposEntryEnablesHere(ctx) {
+		return true
+	}
+	key, err := setRepoEnabledHere(ctx, false)
+	if err != nil {
+		p.warn("Could not turn Entire off for this repository in %s: %v", usersettings.Path(), err)
+		return false
+	}
+	p.step("Turned Entire off for %s (repos in %s)", describeRepoKey(key), usersettings.Path())
+	return true
 }
 
 // uninstallGitHooks removes Entire's git hooks and reports what it did.
