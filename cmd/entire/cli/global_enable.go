@@ -120,11 +120,11 @@ func reportUserHookInstall(cmd *cobra.Command, installer agent.UserHookInstaller
 		fmt.Fprintf(cmd.ErrOrStderr(), "Could not add Entire's hooks to %s: %v\nThey will be added the next time you run entire.\n", result.Path, result.err)
 		return
 	case result.Changed > 0 && result.Updated:
-		fmt.Fprintf(w, "Updated Entire's hooks in %s's user settings: %s\n", name, result.Path)
+		fmt.Fprintf(w, "Updated Entire's hooks in %s's user-level config: %s\n", name, result.Path)
 	case result.Changed > 0:
-		fmt.Fprintf(w, "Added Entire's hooks to %s's user settings: %s\n", name, result.Path)
+		fmt.Fprintf(w, "Added Entire's hooks to %s's user-level config: %s\n", name, result.Path)
 	default:
-		fmt.Fprintf(w, "%s's user settings already have Entire's hooks: %s\n", name, result.Path)
+		fmt.Fprintf(w, "%s's user-level config already has Entire's hooks: %s\n", name, result.Path)
 	}
 	for _, note := range installer.InspectUserHooks(ctx).Notes {
 		fmt.Fprintf(w, "  %s\n", note)
@@ -158,7 +158,8 @@ func runDisableGlobal(cmd *cobra.Command) error {
 		return err
 	}
 	w := cmd.OutOrStdout()
-	if settings.UserTierEnablesEverywhere(ctx) {
+	wasOn := settings.UserTierEnablesEverywhere(ctx)
+	if wasOn {
 		path, err := usersettings.SetGlobalEnable(ctx, false)
 		if err != nil {
 			return err //nolint:wrapcheck // usersettings names the file and the reason
@@ -175,13 +176,16 @@ func runDisableGlobal(cmd *cobra.Command) error {
 		case err != nil:
 			fmt.Fprintf(cmd.ErrOrStderr(), "Could not remove Entire's hooks from %s: %v\nRemove them by hand, or run `entire disable --global` again.\n", hooksPath, err)
 		case removed:
-			fmt.Fprintf(w, "Removed Entire's hooks from %s's user settings: %s\n", installer.Type(), hooksPath)
+			fmt.Fprintf(w, "Removed Entire's hooks from %s's user-level config: %s\n", installer.Type(), hooksPath)
 		}
+	}
+	if !wasOn {
+		return nil
 	}
 	fmt.Fprintln(w, "Repositories you enabled with `entire enable` stay enabled.")
 	fmt.Fprintln(w, "Repositories set up only through global enable keep Entire's git hooks, which do nothing now; run `entire disable --uninstall` in one to remove them.")
 	if settings.UserReposEnableAny(ctx) {
-		fmt.Fprintf(w, "A repository enabled only by a repos entry in %s records agent sessions again once you run `entire enable` in it.\n", usersettings.Path())
+		fmt.Fprintln(w, "A repository you ran `entire enable` in while global enable was on has no agent hooks of its own; run `entire enable --agent <name>` there to keep recording sessions.")
 	}
 	return nil
 }

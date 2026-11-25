@@ -51,7 +51,7 @@ func (userPluginSource) UserFile() (agent.GeneratedUserFile, error) {
 	return agent.GeneratedUserFile{
 		Home:    home,
 		Path:    filepath.Join(home, pluginDirName, pluginFileName),
-		Marker:  entireMarker,
+		Marker:  agent.UserLevelMarker,
 		Content: renderPluginFor(true),
 		Version: userVersionPattern,
 	}, nil

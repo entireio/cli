@@ -60,3 +60,19 @@ func TestUserLevelHookReport_OlderProjectHooksNameTheWorkingCommand(t *testing.T
 	require.NoError(t, err)
 	assert.Equal(t, stale, data, "report-only: the project file is untouched")
 }
+
+// A file that is not Entire's where the OpenCode plugin goes blocks the
+// install; doctor says so once, rather than also promising the next command
+// adds the hooks.
+func TestUserLevelHookReport_ForeignPluginFileIsNotMissing(t *testing.T) {
+	newGlobalOnlyRepo(t, true)
+	homes := isolateAgentUserHomes(t)
+	plugin := filepath.Join(homes.xdgConfig, "opencode", "plugin", "entire.ts")
+	require.NoError(t, os.MkdirAll(filepath.Dir(plugin), 0o750))
+	require.NoError(t, os.WriteFile(plugin, []byte("// mine\n"), 0o644))
+
+	cmd, doctor := newTestCmd(t)
+	checkUserLevelHooks(cmd)
+	assert.Contains(t, doctor.String(), "OpenCode user-level hooks: NOT INSTALLED: a file that is not Entire's is in the way")
+	assert.NotContains(t, doctor.String(), "MISSING")
+}

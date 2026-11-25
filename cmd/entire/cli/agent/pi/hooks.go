@@ -126,10 +126,10 @@ var (
 		})
 	})
 	userExtensionRender = sync.OnceValue(func() string {
-		return agent.RenderUserLevel(baseExtension(), true, map[string]string{
+		return agent.MarkUserLevel(agent.RenderUserLevel(baseExtension(), true, map[string]string{
 			userLevelImportsLine:   userLevelImports(),
 			userLevelStepAsideLine: userLevelStepAside(),
-		})
+		}), entireMarker)
 	})
 )
 

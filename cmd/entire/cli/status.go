@@ -294,6 +294,11 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 			b.WriteString(sty.render(sty.dim, "  User-level hooks · "))
 			b.WriteString(strings.Join(agents.userLevel, ", "))
 		}
+		if len(agents.shadowed) > 0 {
+			b.WriteString("\n")
+			b.WriteString(sty.render(sty.dim, "  Project hooks take over from user-level hooks · "))
+			b.WriteString(strings.Join(agents.shadowed, ", "))
+		}
 
 		// Warn when installed hooks are out of date. Status stays read-only and
 		// points to doctor rather than `entire enable --force`: doctor repairs
@@ -1237,6 +1242,9 @@ type statusJSON struct {
 	// UserHooks lists the agents whose Entire hooks are installed in their
 	// user-level config (global enable on).
 	UserHooks []string `json:"user_hooks,omitempty"`
+	// UserHooksShadowed lists the agents among UserHooks whose project hooks
+	// in this repository take over from the user-level ones.
+	UserHooksShadowed []string `json:"user_hooks_shadowed,omitempty"`
 	// CodexHooks reports effective discovery/trust warnings separately from
 	// current-checkout installation and freshness semantics.
 	CodexHooks *codexHooksStatusJSON `json:"codex_hooks,omitempty"`
@@ -1482,6 +1490,7 @@ func fillStatusAgentsJSON(ctx context.Context, s *EntireSettings, result *status
 		result.Agents = agents.project
 	}
 	result.UserHooks = agents.userLevel
+	result.UserHooksShadowed = agents.shadowed
 	if s.EnabledOnlyByGlobal() {
 		result.EnabledBy = enabledByGlobal
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -37,7 +38,8 @@ func TestUserHooks_InstallInspectRemove(t *testing.T) {
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 	assert.Contains(t, string(data), "Entire user-level extension, hook version 1")
-	assert.Contains(t, string(data), entireMarker)
+	assert.Contains(t, string(data), entireMarker, "the project-copy check")
+	assert.Contains(t, strings.SplitN(string(data), "\n", 3)[1], agent.UserLevelMarker, "the header names enable --global")
 
 	report := ag.InspectUserHooks(ctx)
 	assert.Equal(t, agent.UserHooksCurrent, report.State)

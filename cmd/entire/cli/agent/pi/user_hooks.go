@@ -29,7 +29,7 @@ func (userExtensionSource) UserFile() (agent.GeneratedUserFile, error) {
 	return agent.GeneratedUserFile{
 		Home:    home,
 		Path:    filepath.Join(home, "extensions", "entire", extensionFileName),
-		Marker:  entireMarker,
+		Marker:  agent.UserLevelMarker,
 		Content: renderExtensionFor(true),
 		Version: userVersionPattern,
 		// Pi discovers extensions by directory; an empty one left behind is

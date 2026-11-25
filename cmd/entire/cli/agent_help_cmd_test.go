@@ -1080,3 +1080,13 @@ func TestAgentHelpGuidance_InheritedByLeafCommands(t *testing.T) {
 		t.Errorf("checkpoint delete guidance = %q, want only its own", got)
 	}
 }
+
+// `entire agent-help status` documents the JSON fields global enable added.
+func TestAgentHelpStatus_DocumentsGlobalEnableFields(t *testing.T) {
+	t.Parallel()
+	for _, field := range []string{"enabled_by", "user_hooks", "user_hooks_shadowed", "user_settings_error", "user_settings_ignored"} {
+		if !strings.Contains(agentHelpGuidance["status"], field) {
+			t.Errorf("agent-help status does not document %s", field)
+		}
+	}
+}

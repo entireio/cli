@@ -142,11 +142,11 @@ var (
 		})
 	})
 	userPluginRender = sync.OnceValue(func() string {
-		return agent.RenderUserLevel(pluginTemplate, true, map[string]string{
+		return agent.MarkUserLevel(agent.RenderUserLevel(pluginTemplate, true, map[string]string{
 			userLevelImportsLine:     userLevelPluginPrelude(),
 			userLevelStepAsideV1Line: "  if (userLevelSteppedAside(directory, false)) return {}\n",
 			userLevelStepAsideV2Line: "  if (userLevelSteppedAside(ctx.location.directory, true)) return\n",
-		})
+		}), entireMarker)
 	})
 )
 

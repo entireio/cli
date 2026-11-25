@@ -274,8 +274,8 @@ func TestDisableGlobal_RemovesTheUserLevelClaudeHooks(t *testing.T) {
 		t.Fatalf("disable --global: %v\n%s", err, buf.String())
 	}
 	assert.NoFileExists(t, hooksPath, "enable --global created the file, and it held only Entire's hooks")
-	assert.Contains(t, buf.String(), "Removed Entire's hooks from Claude Code's user settings")
-	assert.Contains(t, buf.String(), "repos entry")
+	assert.Contains(t, buf.String(), "Removed Entire's hooks from Claude Code's user-level config")
+	assert.Contains(t, buf.String(), "entire enable --agent <name>")
 }
 
 // enable --global installs every in-use agent's user-level hooks, skips the
@@ -294,7 +294,7 @@ func TestGlobal_InstallsAndRemovesEveryAgentsUserLevelHooks(t *testing.T) {
 	assert.Contains(t, readUserSettingsRaw(t, codexHooks), "--scope=user/v1")
 	assert.FileExists(t, piExtension)
 	assert.FileExists(t, openCodePlugin)
-	assert.Contains(t, out, "Added Entire's hooks to Codex's user settings")
+	assert.Contains(t, out, "Added Entire's hooks to Codex's user-level config")
 	assert.Contains(t, out, "open /hooks in Codex", "Codex needs the hooks approved")
 
 	root := NewRootCmd()
@@ -776,6 +776,8 @@ func TestGlobal_AlreadyOnAndNeverOn(t *testing.T) {
 	entireDir, _, _, out, err := runGlobalCmd(t, true, "", "disable", "--global")
 	require.NoError(t, err, out)
 	assert.Contains(t, out, "was not enabled in every repository")
+	assert.NotContains(t, out, "git hooks", "nothing global enable set up to mention")
+	assert.NotContains(t, out, "stay enabled")
 	assert.NoFileExists(t, filepath.Join(entireDir, usersettings.FileName))
 }
 
@@ -836,13 +838,13 @@ func TestGlobal_ReplacingAnEditedCopySaysUpdated(t *testing.T) {
 	extension := filepath.Join(homes.pi, "extensions", "entire", "index.ts")
 	_, _, _, out, err := runGlobalCmd(t, false, "", "enable", "--global", "--yes")
 	require.NoError(t, err, out)
-	assert.Contains(t, out, "Added Entire's hooks to Pi's user settings")
+	assert.Contains(t, out, "Added Entire's hooks to Pi's user-level config")
 
 	edited := readUserSettingsRaw(t, extension) + "// my edit\n"
 	require.NoError(t, os.WriteFile(extension, []byte(edited), 0o644))
 	_, _, _, out, err = runGlobalCmd(t, false, `{"global_enable": true}`, "enable", "--global")
 	require.NoError(t, err, out)
-	assert.Contains(t, out, "Updated Entire's hooks in Pi's user settings")
+	assert.Contains(t, out, "Updated Entire's hooks in Pi's user-level config")
 
 	require.NoError(t, os.WriteFile(extension, []byte(edited), 0o644))
 	_, _, _, out, err = runGlobalCmd(t, false, `{"global_enable": true}`, "version")
@@ -900,4 +902,18 @@ func TestEnable_CommittedDisabledUnderGlobalKeepsTheCommittedFile(t *testing.T) 
 	var js bytes.Buffer
 	require.NoError(t, runStatusJSON(t.Context(), &js))
 	assert.NotContains(t, js.String(), `"enabled_by"`)
+}
+
+// Reinstalling Codex's user-level hooks over older Entire ones is an update.
+func TestGlobal_CodexUpgradeSaysUpdated(t *testing.T) {
+	homes := isolateAgentUserHomes(t)
+	require.NoError(t, os.MkdirAll(homes.codex, 0o750))
+	hooks := filepath.Join(homes.codex, "hooks.json")
+	_, _, _, out, err := runGlobalCmd(t, false, "", "enable", "--global", "--yes")
+	require.NoError(t, err, out)
+	older := strings.ReplaceAll(readUserSettingsRaw(t, hooks), "--scope=user/v1", "--scope=user/v0")
+	require.NoError(t, os.WriteFile(hooks, []byte(older), 0o600))
+	_, _, _, out, err = runGlobalCmd(t, false, `{"global_enable": true}`, "enable", "--global")
+	require.NoError(t, err, out)
+	assert.Contains(t, out, "Updated Entire's hooks in Codex's user-level config")
 }

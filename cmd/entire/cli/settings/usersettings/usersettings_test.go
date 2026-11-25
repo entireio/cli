@@ -1,9 +1,11 @@
 package usersettings
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -224,4 +226,18 @@ func runGit(t *testing.T, dir string, args ...string) {
 	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "git %v: %s", args, out)
+}
+
+// A file that does not parse is named in the error, so the user knows which
+// file to fix.
+func TestLoad_ParseErrorNamesTheFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", dir)
+	if err := os.WriteFile(filepath.Join(dir, FileName), []byte(`{"global_enable": `), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(context.Background())
+	if err == nil || !strings.Contains(err.Error(), filepath.Join(dir, FileName)) {
+		t.Fatalf("Load() error = %v, want it to name %s", err, filepath.Join(dir, FileName))
+	}
 }

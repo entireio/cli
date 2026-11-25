@@ -65,7 +65,7 @@ func writeUserHookReport(w io.Writer, installer agent.UserHookInstaller, report 
 	case agent.UserHooksAbsent:
 		fmt.Fprintf(w, "%s user-level hooks: MISSING; the next entire command adds them\n", name)
 	case agent.UserHooksUnavailable:
-		fmt.Fprintf(w, "%s user-level hooks: UNREADABLE: %v\n", name, report.Err)
+		fmt.Fprintf(w, "%s user-level hooks: NOT INSTALLED: %v\n", name, report.Err)
 	}
 	fmt.Fprintf(w, "  %s\n", report.Path)
 	for _, note := range report.Notes {
@@ -74,9 +74,10 @@ func writeUserHookReport(w io.Writer, installer agent.UserHookInstaller, report 
 }
 
 // statusAgents is what status lists: the agents with this repository's own
-// Entire hooks, and, with global enable on, those with user-level hooks.
+// Entire hooks, and, with global enable on, those with user-level hooks and
+// those of them whose project hooks here take over (shadowed).
 type statusAgents struct {
-	project, userLevel []string
+	project, userLevel, shadowed []string
 }
 
 // resolveStatusAgents finds status's agents. In a repository at the home
@@ -100,7 +101,17 @@ func resolveStatusAgents(ctx context.Context) statusAgents {
 			}
 		}
 	}
-	return statusAgents{project: agentDisplayNames(installed), userLevel: agentDisplayNames(userLevel)}
+	var shadowed []types.AgentName
+	for _, name := range userLevel {
+		if slices.Contains(installed, name) {
+			shadowed = append(shadowed, name)
+		}
+	}
+	return statusAgents{
+		project:   agentDisplayNames(installed),
+		userLevel: agentDisplayNames(userLevel),
+		shadowed:  agentDisplayNames(shadowed),
+	}
 }
 
 // sameFile reports whether a and b name one existing file, however spelled

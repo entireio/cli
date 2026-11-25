@@ -245,3 +245,26 @@ func TestStatus_HomeRepoDoesNotReadCodexUserHooksAsProject(t *testing.T) {
 	checkUserLevelHooks(cmd)
 	assert.NotContains(t, doctor.String(), "entire enable")
 }
+
+// A repository with its own Claude Code hooks shows, in text and JSON, that
+// they take over from the user-level ones.
+func TestStatus_NamesProjectHooksShadowingUserLevel(t *testing.T) {
+	newGlobalOnlyRepo(t, true)
+	require.NoError(t, os.MkdirAll(os.Getenv("CLAUDE_CONFIG_DIR"), 0o700))
+	isolateAgentUserHomes(t)
+	installUserHooks(t.Context(), func(agent.UserHookInstaller, userHookInstallResult) {})
+	ag, err := agent.Get(agent.AgentNameClaudeCode)
+	require.NoError(t, err)
+	_, err = setupAgentHooks(t.Context(), ag, false)
+	require.NoError(t, err)
+
+	var text bytes.Buffer
+	require.NoError(t, runStatus(t.Context(), &text, false, false))
+	assert.Contains(t, text.String(), "Project hooks take over from user-level hooks · Claude Code")
+
+	var out bytes.Buffer
+	require.NoError(t, runStatus(t.Context(), &out, false, true))
+	var got statusJSON
+	require.NoError(t, json.Unmarshal(out.Bytes(), &got))
+	assert.Equal(t, []string{"Claude Code"}, got.UserHooksShadowed)
+}

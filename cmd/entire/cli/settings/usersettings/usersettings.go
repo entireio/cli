@@ -148,7 +148,11 @@ func Load(_ context.Context) (*UserSettings, error) {
 		}
 		return nil, err
 	}
-	return decode(data)
+	us, err := decode(data)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", Path(), err)
+	}
+	return us, nil
 }
 
 // decode parses the file's contents. A second value after the first means the
