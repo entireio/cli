@@ -633,9 +633,7 @@ func announceIsolatedReviewers(ctx context.Context, errOut io.Writer, running ma
 		}
 		fmt.Fprintf(errOut, "%s: using your profile's agent config; this checkout's hooks, MCP servers and extensions are not loaded.\n", worker)
 		warnAgentConfig(ctx, errOut, worker, cfg.Config)
-		if warner, ok := reviewerFor(agentName).(interface {
-			IsolatedRunWarnings(ctx context.Context) []string
-		}); ok {
+		if warner, ok := reviewerFor(agentName).(reviewtypes.IsolatedRunWarner); ok {
 			for _, msg := range warner.IsolatedRunWarnings(ctx) {
 				fmt.Fprintf(errOut, "Warning: %s: %s.\n", worker, msg)
 			}

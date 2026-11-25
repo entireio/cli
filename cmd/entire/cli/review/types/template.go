@@ -67,8 +67,17 @@ func (t *ReviewerTemplate) IsolatedRunWarnings(ctx context.Context) []string {
 	return t.IsolatedWarnings(ctx)
 }
 
-// Compile-time check.
-var _ AgentReviewer = (*ReviewerTemplate)(nil)
+// IsolatedRunWarner is an optional AgentReviewer capability: notes printed
+// before a run that uses the reviewer's own profile config.
+type IsolatedRunWarner interface {
+	IsolatedRunWarnings(ctx context.Context) []string
+}
+
+// Compile-time checks.
+var (
+	_ AgentReviewer     = (*ReviewerTemplate)(nil)
+	_ IsolatedRunWarner = (*ReviewerTemplate)(nil)
+)
 
 // Name returns the agent's stable identifier.
 func (t *ReviewerTemplate) Name() string { return t.AgentName }
