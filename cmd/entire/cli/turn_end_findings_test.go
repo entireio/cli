@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/provenance"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -372,4 +374,31 @@ func TestTurnTranscriptMentionsPush(t *testing.T) {
 	assert.True(t, read(earlier+`{"cmd":["git","push"]}`))
 	assert.True(t, read(earlier+`{"command":"gh pr create --fill"}`))
 	assert.False(t, read(earlier+`{"command":"git pull"}`))
+}
+
+func TestTrailHeadForBranch(t *testing.T) {
+	// Serial: replaces global clients.
+	const head = "0729521530000000000000000000000000000000"
+	setupWorkingRepoClient(t, func(w http.ResponseWriter, r *http.Request) {
+		item := api.TrailResource{ID: projectTrailTestChange, Number: 7, Branch: "feature/work", Status: "open"}
+		var payload any
+		switch r.Method + " " + r.URL.Path {
+		case "GET /api/v1/repos/repo-id/changes":
+			payload = api.TrailListResponse{Trails: []api.TrailResource{item}}
+		case "GET /api/v1/repos/repo-id/changes/7":
+			item.Mergeability = json.RawMessage(`{"head_sha":"` + head + `"}`)
+			payload = item
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		assert.NoError(t, json.NewEncoder(w).Encode(payload))
+	})
+	scope := trailEnablementScope{Forge: "gh", Owner: "acme", Repo: "widget"}
+	got, ok := trailHeadForBranch(context.Background(), scope, "feature/work")
+	require.True(t, ok)
+	assert.Equal(t, head, got)
+	_, ok = trailHeadForBranch(context.Background(), scope, "feature/none")
+	assert.False(t, ok)
 }

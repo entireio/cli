@@ -260,6 +260,11 @@ func branchTrailHead(ctx context.Context, sessionID, branch string) (string, boo
 	if err != nil || !ok || cachedTrailsEnablementForScope(ctx, scope, time.Now()) != trailEnablementCacheEnabled {
 		return "", false
 	}
+	return trailHeadForBranch(ctx, scope, branch)
+}
+
+// trailHeadForBranch reads the branch's change and its head from the server.
+func trailHeadForBranch(ctx context.Context, scope trailEnablementScope, branch string) (string, bool) {
 	ctx, cancel := context.WithTimeout(ctx, findingsTrailLookupTimeout)
 	defer cancel()
 	client, repoID, err := newTrailAPIClient(ctx, false, scope.Forge, scope.Owner, scope.Repo)
@@ -274,8 +279,10 @@ func branchTrailHead(ctx context.Context, sessionID, branch string) (string, boo
 	if err != nil || change == nil {
 		return "", false
 	}
-	detail, err := fetchTrailDetail(ctx, client, change.ID)
-	if err != nil {
+	// The change's detail carries its head; read it by number under the
+	// repository (an ID read through /api/v1/trails is not served here).
+	detail, err := findTrailByNumberAtPath(ctx, client, base, change.Number)
+	if err != nil || detail == nil {
 		return "", true
 	}
 	if mg, mErr := detail.DecodeMergeability(); mErr == nil && mg != nil && isCommitSHA(stringPtrValue(mg.HeadSHA)) {
