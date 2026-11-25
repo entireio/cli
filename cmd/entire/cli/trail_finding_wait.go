@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -70,6 +71,8 @@ type trailReviewProgress struct {
 	NoHead bool
 	// Read is set once the server has answered; before that nothing is known.
 	Read bool
+	// Agents is the read's agents as the server sent them, for the report.
+	Agents json.RawMessage
 }
 
 func (p trailReviewProgress) settled() bool {
@@ -155,7 +158,9 @@ func fetchTrailReviewProgress(ctx context.Context, client *api.Client, trailID, 
 	if err != nil {
 		return trailReviewProgress{}, fmt.Errorf("trail %s: %w", trailID, err)
 	}
-	return trailReviewProgressFor(agents, serverHead, wantHead, ignoreStale), nil
+	p := trailReviewProgressFor(agents, serverHead, wantHead, ignoreStale)
+	p.Agents = detail.Agents
+	return p, nil
 }
 
 // isCommitSHA reports whether s looks like a full or abbreviated commit SHA.

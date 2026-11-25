@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -322,6 +323,67 @@ func TestTrailFindingWait(t *testing.T) {
 	require.GreaterOrEqual(t, *reads, 3, "the wait polls until the run finishes")
 	require.Contains(t, errOut, "Review of 11111111 finished (1 agents).")
 	require.Contains(t, out, "finding-one")
+}
+
+// TestTrailFindingWaitReportsTrailFirst: the report names the trail, shows
+// the agents as of the wait's last read (finished, not the earlier running
+// snapshot), then the findings. A legacy trail has no project trail URL, so
+// no URL line is printed.
+func TestTrailFindingWaitReportsTrailFirst(t *testing.T) {
+	// Serial: replaces the package wait sleep and global clients.
+	serveWaitTestTrail(t, 2, waitTestAgentsJSON(t))
+	out, _ := runWaitTestCommand(t)
+	trailAt := strings.Index(out, "Trail #7")
+	agentsAt := strings.Index(out, "Risk Eval")
+	findingAt := strings.Index(out, "finding-one")
+	require.True(t, trailAt >= 0 && agentsAt > trailAt && findingAt > agentsAt, "trail, then agents, then findings:\n%s", out)
+	require.Contains(t, out, "succeeded")
+	require.NotContains(t, out, "running", "the table shows the wait's last read")
+	require.NotContains(t, out, "URL:")
+}
+
+// TestTrailFindingWaitProjectChangeURL: on a project trail the report links
+// the change page `entire trail show` prints, <trail URL>/changes/<repo>/<n>.
+func TestTrailFindingWaitProjectChangeURL(t *testing.T) {
+	// Not parallel: replaces client constructors and the wait sleep.
+	setupProjectTrailTest(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method+" "+r.URL.Path == "GET "+projectTrailTestPath {
+			w.Header().Set("ETag", `W/"parent-version"`)
+			parent := workingProjectTestResource()
+			parent.URL = "https://entire.example/gh/acme/-/trails/42"
+			assert.NoError(t, json.NewEncoder(w).Encode(parent))
+			return
+		}
+		if serveWorkingProjectRead(t, w, r) {
+			return
+		}
+		t.Errorf("unexpected project request: %s %s", r.Method, r.URL.String())
+		http.NotFound(w, r)
+	})
+	agents := waitTestAgentsJSON(t)
+	setupWorkingRepoClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/repos/repo-id/changes/7":
+			assert.NoError(t, json.NewEncoder(w).Encode(api.TrailResource{ID: projectTrailTestChange, Number: 7, Status: "open",
+				Parent: &api.TrailParentReference{ID: projectTrailTestID, Number: 42, ProjectID: projectTrailTestProject,
+					Host: "gh", Project: "acme", Path: projectTrailTestPath, Jurisdiction: "eu", PrimaryProcessingCell: "project-cell"},
+				Agents: agents("succeeded"), Mergeability: json.RawMessage(`{"head_sha":"` + waitTestHead + `"}`)}))
+		case "/api/v1/repos/repo-id/changes/7/reviews/comments":
+			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"comments": []any{}}))
+		default:
+			t.Errorf("unexpected repo request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	})
+	oldSleep := trailFindingWaitSleep
+	trailFindingWaitSleep = func(context.Context, time.Duration) error { return nil }
+	t.Cleanup(func() { trailFindingWaitSleep = oldSleep })
+	out, errOut, err := executeProjectTrailTest(t, "finding", "wait", "widget/7", "--project", "gh/acme", "--head", waitTestHead)
+	require.NoError(t, err, errOut)
+	require.Contains(t, out, "Trail #42")
+	require.Contains(t, out, "URL: https://entire.example/gh/acme/-/trails/42/changes/widget/7")
+	require.Contains(t, out, "Risk Eval")
+	require.Contains(t, out, "No findings found.")
 }
 
 func TestTrailFindingWaitWithoutAgentsDoesNotWait(t *testing.T) {

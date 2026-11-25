@@ -74,6 +74,9 @@ type trailReviewTarget struct {
 	Owner string
 	Repo  string
 	Trail api.TrailResource
+	// ChangeURL is the change's page under its project trail, as `entire
+	// trail show` prints it; empty when the trail's URL is unknown.
+	ChangeURL string
 }
 
 func newTrailFindingCmd(mode *trailMode) *cobra.Command {
@@ -207,14 +210,30 @@ func runTrailFindingWait(cmd *cobra.Command, mode *trailMode, selector string, o
 		}
 		return err
 	}
-	if err := waitForTrailFindings(cmd, client, target, opts, start); err != nil {
+	progress, err := waitForTrailFindings(cmd, client, target, opts, start)
+	if err != nil {
 		return err
 	}
 	comments, nextCursor, err := fetchTrailReviewComments(cmd.Context(), client, target.Trail.ID, list)
 	if err != nil {
 		return err
 	}
-	printTrailReviewComments(cmd.OutOrStdout(), comments, nextCursor)
+	return printTrailFindingWaitReport(cmd.OutOrStdout(), target, progress.Agents, comments, nextCursor)
+}
+
+// printTrailFindingWaitReport is what the wait prints once it ends: the
+// trail and the change's page, its agents' readings as of the wait's last
+// read, then the open findings.
+func printTrailFindingWaitReport(w io.Writer, target trailReviewTarget, agents json.RawMessage, comments []api.TrailReviewComment, nextCursor string) error {
+	printTrailReviewHeader(w, trailForDisplay(target.Trail))
+	if target.ChangeURL != "" {
+		fmt.Fprintf(w, "  URL: %s\n", tuiutil.SanitizeTerminalText(target.ChangeURL))
+	}
+	fmt.Fprintln(w)
+	if err := printTrailChangeAgents(w, agents); err != nil {
+		return err
+	}
+	printTrailReviewComments(w, comments, nextCursor)
 	return nil
 }
 
@@ -246,7 +265,7 @@ func resolveTrailFindingWaitTarget(cmd *cobra.Command, mode *trailMode, selector
 
 // waitForTrailFindings waits for the review and reports on stderr how the
 // wait ended.
-func waitForTrailFindings(cmd *cobra.Command, client *api.Client, target trailReviewTarget, opts trailFindingWaitOptions, start time.Time) error {
+func waitForTrailFindings(cmd *cobra.Command, client *api.Client, target trailReviewTarget, opts trailFindingWaitOptions, start time.Time) (trailReviewProgress, error) {
 	head := strings.TrimSpace(opts.Head)
 	poll := func(ctx context.Context, ignoreStale bool) (trailReviewProgress, error) {
 		return fetchTrailReviewProgress(ctx, client, target.Trail.ID, head, ignoreStale)
@@ -254,10 +273,10 @@ func waitForTrailFindings(cmd *cobra.Command, client *api.Client, target trailRe
 	deadline := trailFindingWaitDeadline(start, opts.Timeout)
 	progress, err := waitForTrailReview(cmd.Context(), cmd.ErrOrStderr(), poll, deadline, time.Now, trailFindingWaitSleep)
 	if err != nil {
-		return err
+		return progress, err
 	}
 	fmt.Fprintln(cmd.ErrOrStderr(), trailReviewWaitResultLine(progress))
-	return nil
+	return progress, nil
 }
 
 type trailReviewCommentAddOptions struct {
@@ -609,7 +628,9 @@ func projectTrailReviewTarget(cmd *cobra.Command, selector string, localOnly boo
 	if err != nil {
 		return nil, trailReviewTarget{}, err
 	}
-	return selected.Client, trailReviewTarget{Host: selected.Host, Owner: selected.Owner, Repo: selected.Repo, Trail: selected.Work}, nil
+	changeSelector, _ := trailChangeSelectorFor(api.ChangeSummary{Repository: selected.Repo, Number: selected.Work.Number})
+	return selected.Client, trailReviewTarget{Host: selected.Host, Owner: selected.Owner, Repo: selected.Repo, Trail: selected.Work,
+		ChangeURL: projectTrailChangeURL(selected.Parent.URL, changeSelector)}, nil
 }
 
 func resolveTrailReviewTarget(ctx context.Context, client *api.Client, repoID, selector, repoOverride, branchOverride string) (trailReviewTarget, error) {
@@ -1582,11 +1603,7 @@ func printTrailReviewDashboard(w io.Writer, target trailReviewTarget, comments [
 	}
 	trail := trailForDisplay(target.Trail)
 	clean := trailReviewCleanLine
-	if trail.Number > 0 {
-		fmt.Fprintf(w, "  Trail #%d  %s\n", trail.Number, clean(trail.Title))
-	} else {
-		fmt.Fprintf(w, "  Trail %s  %s\n", clean(trail.ID), clean(trail.Title))
-	}
+	printTrailReviewHeader(w, trail)
 	fmt.Fprintf(w, "  Status: %s · Branch: %s · Base: %s\n", clean(trail.Status), clean(trail.Branch), clean(trail.Base))
 	fmt.Fprintf(w, "  ID: %s\n\n", clean(trail.ID))
 
@@ -1616,6 +1633,16 @@ func printTrailReviewDashboard(w io.Writer, target trailReviewTarget, comments [
 	fmt.Fprintln(w, "  entire trail finding dismiss <finding-id> -m \"not applicable\"")
 	fmt.Fprintln(w, "  entire trail watch")
 	return nil
+}
+
+// printTrailReviewHeader is the "Trail #N  title" line of the plain
+// dashboard and the wait's report.
+func printTrailReviewHeader(w io.Writer, trail api.TrailResource) {
+	if trail.Number > 0 {
+		fmt.Fprintf(w, "  Trail #%d  %s\n", trail.Number, trailReviewCleanLine(trail.Title))
+	} else {
+		fmt.Fprintf(w, "  Trail %s  %s\n", trailReviewCleanLine(trail.ID), trailReviewCleanLine(trail.Title))
+	}
 }
 
 func printTrailReviewComments(w io.Writer, comments []api.TrailReviewComment, nextCursor string) {
