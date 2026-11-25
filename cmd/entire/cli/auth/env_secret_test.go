@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -230,6 +231,28 @@ func TestLocalIdentityCacheKeyForSecret(t *testing.T) {
 	}
 	if n := core.exchanges.Load(); n != 0 {
 		t.Errorf("exchanges = %d, want 0", n)
+	}
+	// A token exchanged from the secret is the same identity.
+	t.Setenv(EnvTokenVar, makeJWT(t, `{"sub":"svc_01JABCDEFGHJKMNPQRSTVWXYZ0","iss":"https://us.auth.entire.io","aud":["https://us.auth.entire.io/","entire-cli"]}`))
+	if exchanged, err := LocalIdentityCacheKey(); err != nil || exchanged != got {
+		t.Errorf("exchanged token key = %q, %v; want %q", exchanged, err, got)
+	}
+}
+
+// Only a svc_ token with exactly one URL audience shares its secret's key.
+// Not parallel: sets process-wide environment.
+func TestLocalIdentityCacheKeyForExchangedToken(t *testing.T) {
+	for _, tc := range []struct{ claims, want string }{
+		{`{"sub":"svc_01JABCDEFGHJKMNPQRSTVWXYZ1","iss":"https://us.auth.entire.io","aud":"https://us.auth.entire.io"}`, "env-sa|https://us.auth.entire.io|svc_01JABCDEFGHJKMNPQRSTVWXYZ1"},
+		{`{"sub":"svc_01JABCDEFGHJKMNPQRSTVWXYZ0","iss":"https://us.auth.entire.io","aud":"entire-cli"}`, "env|https://us.auth.entire.io|svc_01JABCDEFGHJKMNPQRSTVWXYZ0||entire-cli"},
+		{`{"sub":"svc_01JABCDEFGHJKMNPQRSTVWXYZ0","iss":"https://us.auth.entire.io","aud":["https://us.auth.entire.io","https://eu.auth.entire.io"]}`, "env|https://us.auth.entire.io|svc_01JABCDEFGHJKMNPQRSTVWXYZ0||https://us.auth.entire.io,https://eu.auth.entire.io"},
+		{`{"sub":"user_1","iss":"https://us.auth.entire.io","aud":"https://us.auth.entire.io"}`, "env|https://us.auth.entire.io|user_1||https://us.auth.entire.io"},
+	} {
+		t.Setenv(EnvTokenVar, makeJWT(t, tc.claims))
+		got, err := LocalIdentityCacheKey()
+		if err != nil || got != tc.want {
+			t.Errorf("%s: key = %q, %v; want %q", tc.claims, got, err, tc.want)
+		}
 	}
 }
 
@@ -635,5 +658,58 @@ func TestSecretExchangeFallsBackWhenLockFails(t *testing.T) {
 	}
 	if n := fake.exchanges.Load(); n != 2 {
 		t.Errorf("exchanges = %d, want 2 (unshared, uncached)", n)
+	}
+}
+
+// A Core failure or throttle is retryable; a refusal is not. Callers decide on
+// the type, so neither is told apart by its message.
+// Not parallel: sets process-wide environment.
+func TestSecretExchangeErrorRetryable(t *testing.T) {
+	for _, tc := range []struct {
+		status    int
+		retryable bool
+	}{
+		{http.StatusBadRequest, false},
+		{http.StatusUnauthorized, false},
+		{http.StatusTooManyRequests, true},
+		{http.StatusServiceUnavailable, true},
+	} {
+		t.Run(strconv.Itoa(tc.status), func(t *testing.T) {
+			useFakeSecretCore(t, &fakeSecretCore{t: t, status: tc.status})
+			_, err := ResolveEnvToken(testServiceAccountSecret)
+			var exchange *SecretExchangeError
+			if !errors.As(err, &exchange) {
+				t.Fatalf("err = %v, want *SecretExchangeError", err)
+			}
+			if exchange.StatusCode != tc.status || exchange.Retryable() != tc.retryable {
+				t.Errorf("status = %d retryable = %v, want %d %v", exchange.StatusCode, exchange.Retryable(), tc.status, tc.retryable)
+			}
+			if strings.Contains(err.Error(), testServiceAccountSecret) {
+				t.Errorf("error leaks the secret: %v", err)
+			}
+		})
+	}
+}
+
+// The message is what an operator sees: a refusal names Core's verdict (its
+// OAuth code when it sent one), an outage says the exchange was unavailable.
+func TestSecretExchangeErrorMessage(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		err  SecretExchangeError
+		want string
+	}{
+		{SecretExchangeError{Core: "https://core", StatusCode: http.StatusBadRequest, Code: "invalid_grant", Description: "secret revoked"},
+			"ENTIRE_TOKEN service account secret refused by https://core: invalid_grant: secret revoked"},
+		{SecretExchangeError{Core: "https://core", StatusCode: http.StatusUnauthorized},
+			"ENTIRE_TOKEN service account secret refused by https://core: HTTP 401"},
+		{SecretExchangeError{Core: "https://core", StatusCode: http.StatusServiceUnavailable, Code: "temporarily_unavailable"},
+			"ENTIRE_TOKEN service account secret exchange unavailable at https://core: HTTP 503"},
+		{SecretExchangeError{Core: "https://core", StatusCode: http.StatusTooManyRequests},
+			"ENTIRE_TOKEN service account secret exchange unavailable at https://core: HTTP 429"},
+	} {
+		if got := tc.err.Error(); got != tc.want {
+			t.Errorf("Error() = %q, want %q", got, tc.want)
+		}
 	}
 }

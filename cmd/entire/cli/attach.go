@@ -389,7 +389,7 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 	}
 
 	_, redactSpan := perf.Start(ctx, "redact_transcript")
-	redactedTranscript, redactErr := redact.JSONLBytes(transcriptData)
+	redactedTranscript, redactErr := redact.JSONLBytes(cpkg.DropImagesIfEnabled(ctx, transcriptData))
 	redactSpan.End()
 	if redactErr != nil {
 		return fmt.Errorf("failed to redact transcript: %w", redactErr)
@@ -1333,12 +1333,12 @@ func fetchLegacyCheckpointRef(ctx context.Context, repo *git.Repository, checkpo
 	if err != nil {
 		return repo, fmt.Errorf("resolve checkpoint ref for %s: %w", checkpointID, err)
 	}
-	_, err = repo.Reference(refName, true)
-	switch {
-	case err == nil:
-		return repo, nil
-	case !errors.Is(err, plumbing.ErrReferenceNotFound):
+	exists, err := cpkg.LocalRefExists(repo, checkpointID)
+	if err != nil {
 		return repo, fmt.Errorf("resolve checkpoint ref %s: %w", refName, err)
+	}
+	if exists {
+		return repo, nil
 	}
 	freshRepo, err := refreshCheckpoint(ctx, checkpointID, true)
 	switch {

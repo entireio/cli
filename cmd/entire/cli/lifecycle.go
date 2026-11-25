@@ -27,7 +27,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
-	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -1002,12 +1001,14 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	}
 
 	// Detect file changes via git status. captureDegraded tracks whether any
-	// status scan feeding this turn breached its budget, so the marker
-	// persisted at turn end reflects the whole turn, not just this walk.
+	// status scan feeding this turn failed or breached its budget, so the
+	// marker persisted at turn end reflects the whole turn, not just this walk.
+	// A failed walk here leaves only transcript-derived files, which miss
+	// shell-made changes and deletions.
 	captureDegraded := preState != nil && preState.UntrackedScanSkipped
 	changes, err := DetectFileChanges(ctx, preUntrackedFiles)
 	if err != nil {
-		captureDegraded = captureDegraded || errors.Is(err, gitrepo.ErrStatusBudgetExceeded)
+		captureDegraded = true
 		logStatusDegrade(logCtx, "failed to compute file changes", err)
 	}
 	if changes != nil && preState != nil && preState.UntrackedScanSkipped {
@@ -1173,26 +1174,9 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		SubagentLedgerVersion:    codexLedgerVersion,
 	}
 
-	// The hook's worktree, then each other worktree the turn edited: one
-	// step, counted once and carrying the turn's tokens once.
-	counted := false
-	if totalChanges > 0 {
-		if err := strat.SaveStep(ctx, stepCtx); err != nil {
-			return fmt.Errorf("failed to save step: %w", err)
-		}
-		counted = true
-	}
-	for _, root := range slices.Sorted(maps.Keys(elsewhere)) {
-		step := stepCtx
-		step.WorktreeRoot = root
-		step.ModifiedFiles, step.NewFiles, step.DeletedFiles = elsewhere[root], nil, nil
-		if counted {
-			step.SameTurn, step.TokenUsage = true, nil
-		}
-		if err := strat.SaveStep(ctx, step); err != nil {
-			return fmt.Errorf("failed to save step for %s: %w", root, err)
-		}
-		counted = true
+	turn, err := saveTurnSteps(ctx, strat, stepCtx, totalChanges > 0, elsewhere)
+	if err != nil {
+		return err
 	}
 	strategy.PruneRemovedWorktrees(ctx, sessionID, hookRoot)
 
@@ -1213,12 +1197,58 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		}
 	}
 	recordCaptureDegraded(ctx, sessionID, captureDegraded)
-	transitionSessionTurnEnd(ctx, sessionID, agentType, event, nil)
+	// A turn whose every step recorded nothing (its files are all gone) keeps
+	// its tokens as a turn that changed no files does.
+	var untakenUsage *checkpointlessTurnUsage
+	if !turn.TokensRecorded && tokenUsage != nil {
+		untakenUsage = &checkpointlessTurnUsage{usage: tokenUsage, ledgerVersion: codexLedgerVersion}
+	}
+	transitionSessionTurnEnd(ctx, sessionID, agentType, event, untakenUsage)
 	if cleanupErr := CleanupPrePromptState(ctx, sessionID); cleanupErr != nil {
 		logging.Warn(logCtx, "failed to cleanup pre-prompt state",
 			slog.String("error", cleanupErr.Error()))
 	}
 	return nil
+}
+
+// saveTurnSteps saves a turn's step in the hook's worktree (when it changed
+// files there), then in each other worktree the turn edited: one step, counted
+// at the first worktree that records files and carrying the turn's tokens once.
+// A worktree that gets no record of its own takes only the tokens, and one
+// whose files are all gone records nothing, so neither counts the step for the
+// worktrees after it. It returns what the turn's steps recorded between them.
+func saveTurnSteps(ctx context.Context, strat *strategy.ManualCommitStrategy, stepCtx strategy.StepContext, hookChanged bool, elsewhere map[string][]string) (strategy.StepResult, error) {
+	var turn strategy.StepResult
+	save := func(step strategy.StepContext) error {
+		step.SameTurn = turn.FilesRecorded
+		if turn.TokensRecorded {
+			step.TokenUsage = nil
+		}
+		result, err := strat.SaveTurnStep(ctx, step)
+		if err != nil {
+			if step.WorktreeRoot != "" {
+				return fmt.Errorf("failed to save step for %s: %w", step.WorktreeRoot, err)
+			}
+			return fmt.Errorf("failed to save step: %w", err)
+		}
+		turn.FilesRecorded = turn.FilesRecorded || result.FilesRecorded
+		turn.TokensRecorded = turn.TokensRecorded || result.TokensRecorded
+		return nil
+	}
+	if hookChanged {
+		if err := save(stepCtx); err != nil {
+			return turn, err
+		}
+	}
+	for _, root := range slices.Sorted(maps.Keys(elsewhere)) {
+		step := stepCtx
+		step.WorktreeRoot = root
+		step.ModifiedFiles, step.NewFiles, step.DeletedFiles = elsewhere[root], nil, nil
+		if err := save(step); err != nil {
+			return turn, err
+		}
+	}
+	return turn, nil
 }
 
 // workerTurnTokenUsage returns a detached subagent session's usage for the
@@ -2877,10 +2907,10 @@ func resolveTranscriptOffset(ctx context.Context, preState *PrePromptState, sess
 }
 
 // recordCaptureDegraded persists (or clears) the capture-degraded timestamp on
-// session state at turn end, so a status-budget breach is visible in
-// `entire status` instead of only in .entire/logs. A healthy turn clears it —
-// the marker means "the LAST turn degraded", not "some turn once did". Skips
-// the state write when nothing changes, which is the common case.
+// session state at turn end, so a failed or budget-breached status scan is
+// visible in `entire status` instead of only in .entire/logs. A healthy turn
+// clears it — the marker means "the LAST turn degraded", not "some turn once
+// did". Skips the state write when nothing changes, which is the common case.
 func recordCaptureDegraded(ctx context.Context, sessionID string, degraded bool) {
 	mutErr := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
 		if !degraded && state.CaptureDegradedAt == nil {

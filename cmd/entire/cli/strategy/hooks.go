@@ -642,13 +642,17 @@ func outdatedTrunkChain(root *os.Root, hook, content string) string {
 }
 
 // legacyTrunkChainCalls are the chain blocks earlier versions wrote for hook.
-// They differ from chainCall only in the branch that runs the backup outside
-// pre-commit's legacy pass: the one here executes the backup directly.
+// They differ from chainCall in the branch that runs the backup outside a hook
+// manager's legacy pass: the ones here execute the backup directly. Releases
+// before prek's wrapper was recognised also test only pre-commit's legacy
+// pass; later ones test both, as chainCall does.
 func legacyTrunkChainCalls(hook string) []string {
 	redirect := chainRedirect(hook)
 	backup := hook + backupSuffix
+	direct := preSourcingBackupCall(backup) + redirect + "\n"
 	return []string{
-		chainCallWith(hook, redirect, preSourcingBackupCall(backup)+redirect+"\n"),
+		chainCallWithLegacyPass(hook, redirect, preCommitOnlyLegacyPassTest(backup), direct),
+		chainCallWith(hook, redirect, direct),
 	}
 }
 
@@ -1087,11 +1091,11 @@ func installHooks(ctx context.Context, lockRoot, root *os.Root, hooksDir string,
 
 		reclaimed, err := reclaimFromPreCommit(root, spec.name)
 		if err != nil {
-			return installedCount, fmt.Errorf("failed to take %s back from pre-commit: %w", spec.name, err)
+			return installedCount, fmt.Errorf("failed to take %s back from pre-commit or prek: %w", spec.name, err)
 		}
 		if reclaimed {
-			fmt.Fprintf(stderrWriter, "[entire] pre-commit had moved Entire's %s hook to %s%s; Entire's hook is back and runs pre-commit's after it.\n", spec.name, spec.name, legacySuffix)
-			logging.Info(ctx, "git hook reclaimed from pre-commit", slog.String("hook", spec.name))
+			fmt.Fprintf(stderrWriter, "[entire] pre-commit or prek had moved Entire's %s hook to %s%s; Entire's hook is back and runs that manager's hook after it.\n", spec.name, spec.name, legacySuffix)
+			logging.Info(ctx, "git hook reclaimed from pre-commit or prek", slog.String("hook", spec.name))
 		}
 		wrapped, err := reclaimFromWrappers(root, spec.name)
 		if err != nil {
@@ -1337,8 +1341,8 @@ func generateChainedContent(baseContent, hookName string) string {
 }
 
 // chainCall runs <hook>.pre-entire, with stdin as redirect gives it. When
-// pre-commit's wrapper ran this hook as <hook>.legacy and is itself the
-// backup, calling it again would trip pre-commit's migration-mode guard, so
+// pre-commit's or prek's wrapper ran this hook as <hook>.legacy and is itself
+// the backup, calling it again would trip that manager's migration-mode guard, so
 // the user's hook Entire kept for .legacy (see reclaimFromPreCommit) runs
 // instead.
 //
@@ -1359,10 +1363,16 @@ func chainCall(hookName, redirect string) string {
 }
 
 // chainCallWith is the chain block with branch as the elif that runs the
-// backup outside pre-commit's legacy pass. Earlier versions differ from
-// chainCall only in that branch; see legacyTrunkChainCalls.
+// backup outside a hook manager's legacy pass. Earlier versions differ from
+// chainCall in that branch, and before prek's wrapper was recognised also in
+// the legacy-pass test; see legacyTrunkChainCalls.
 func chainCallWith(hookName, redirect, branch string) string {
-	backup := hookName + backupSuffix
+	return chainCallWithLegacyPass(hookName, redirect, legacyPassTest(hookName+backupSuffix), branch)
+}
+
+// chainCallWithLegacyPass is chainCallWith with pass as the test that sends
+// the chain to the hook Entire kept for .legacy.
+func chainCallWithLegacyPass(hookName, redirect, pass, branch string) string {
 	keep := hookName + keepSuffix
 	guard := "ENTIRE_CHAINING_" + strings.ToUpper(strings.ReplaceAll(hookName, "-", "_"))
 	return fmt.Sprintf(`%s
@@ -1370,13 +1380,26 @@ _entire_hook_dir="$(dirname "$0")"
 if [ -z "${%s:-}" ]; then
     %s=1
     export %s
-    if [ -n "${PRE_COMMIT_RUNNING_LEGACY:-}" ] && grep -q '^%s' "$_entire_hook_dir/%s" 2>/dev/null; then
+    if %s; then
         if [ -x "$_entire_hook_dir/%s" ]; then
             "$_entire_hook_dir/%s" "$@"%s
         fi
 %s    fi
 fi
-`, chainComment, guard, guard, guard, preCommitSignatures[0], backup, keep, keep, redirect, branch)
+`, chainComment, guard, guard, guard, pass, keep, keep, redirect, branch)
+}
+
+// legacyPassTest is true when pre-commit's or prek's wrapper is running this
+// hook as <hook>.legacy and is itself the backup.
+func legacyPassTest(backup string) string {
+	return fmt.Sprintf(`{ [ -n "${PRE_COMMIT_RUNNING_LEGACY:-}" ] && grep -q '^%s' "$_entire_hook_dir/%s" 2>/dev/null; } ||
+        { [ -n "${PREK_RUNNING_LEGACY:-}" ] && grep -q '^%s' "$_entire_hook_dir/%s" 2>/dev/null; }`, preCommitHeader, backup, prekHeader, backup)
+}
+
+// preCommitOnlyLegacyPassTest is legacyPassTest as the chain wrote it before
+// it recognised prek's wrapper, exactly as generated.
+func preCommitOnlyLegacyPassTest(backup string) string {
+	return fmt.Sprintf(`[ -n "${PRE_COMMIT_RUNNING_LEGACY:-}" ] && grep -q '^%s' "$_entire_hook_dir/%s" 2>/dev/null`, preCommitHeader, backup)
 }
 
 // regularExecutableBackup opens the branch that runs the backup, entered only

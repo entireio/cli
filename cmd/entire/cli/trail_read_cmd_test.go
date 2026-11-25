@@ -24,7 +24,7 @@ func readTrailChange(t *testing.T, suffix string, body any, args ...string) (que
 		}
 	})
 	setupWorkingRepoClient(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/repo-id/trails/7/"+suffix {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/repo-id/changes/7/"+suffix {
 			query = r.URL.RawQuery
 			assert.NoError(t, json.NewEncoder(w).Encode(body))
 			return

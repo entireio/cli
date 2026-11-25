@@ -19,7 +19,6 @@ import "strings"
 // <plugins_instructions>) never reach the prompt path — Codex's ExtractPrompts
 // filters by role — but transcript compaction sees them, so they belong here too.
 var injectedPromptPrefixes = []string{
-	"# AGENTS.md",             // instruction-file dump: bare, or "…instructions for <path>"
 	"<environment_context>",   // runtime preamble: cwd, shell, sandbox
 	"<permissions",            // "<permissions instructions>"
 	"<collaboration_mode>",    //
@@ -42,6 +41,19 @@ func IsInjectedPrompt(text string) bool {
 		if strings.HasPrefix(trimmed, prefix) {
 			return true
 		}
+	}
+	return IsInstructionFileDump(trimmed)
+}
+
+// IsInstructionFileDump reports whether text is an agent's dump of its
+// instruction files (AGENTS.md), the one kind of injected content that carries
+// text from outside the conversation. Callers that must not store that text
+// blank exactly what this matches.
+func IsInstructionFileDump(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	// Bare, or "…instructions for <path>".
+	if strings.HasPrefix(trimmed, "# AGENTS.md") {
+		return true
 	}
 	// Some instruction injections lead with the wrapper tag rather than the
 	// heading. Require the AGENTS.md marker as well, and keep the tag check
