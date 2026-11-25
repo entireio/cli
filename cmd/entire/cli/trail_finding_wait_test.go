@@ -74,6 +74,12 @@ func TestTrailReviewProgressFor(t *testing.T) {
 		{name: "agent waiting for not ready is left out", serverHead: waitTestHead, done: 1, total: 1, settled: true, agents: []api.TrailAgent{
 			waitTestAgent("risk", "succeeded", waitTestHead, ""), waitTestAgent("early", "", "", "not_ready"),
 		}},
+		{name: "after the grace an agent with no run is left out", serverHead: waitTestHead, ignoreStale: true, done: 1, total: 1, settled: true, agents: []api.TrailAgent{
+			waitTestAgent("risk", "succeeded", waitTestHead, ""), waitTestAgent("manual", "", "", "push"),
+		}},
+		{name: "no head to wait on settles at once", settled: true, agents: []api.TrailAgent{
+			waitTestAgent("risk", "running", waitTestHead, ""),
+		}},
 		{name: "agent waiting for push is pending", serverHead: waitTestHead, done: 0, total: 1, agents: []api.TrailAgent{
 			waitTestAgent("risk", "", "", "push"),
 		}},
@@ -94,6 +100,34 @@ func TestTrailReviewProgressFor(t *testing.T) {
 			assert.Equal(t, tt.settled, p.settled())
 		})
 	}
+}
+
+func TestTrailReviewProgressZeroValueIsNotFinished(t *testing.T) {
+	t.Parallel()
+	assert.False(t, trailReviewProgress{}.settled(), "no successful read must not read as a finished review")
+	assert.False(t, toTrailReviewWaitJSON(trailReviewProgress{}).Finished)
+}
+
+func TestIsCommitSHA(t *testing.T) {
+	t.Parallel()
+	assert.True(t, isCommitSHA(waitTestHead))
+	assert.True(t, isCommitSHA("abcdef1"))
+	assert.False(t, isCommitSHA("abc"))
+	assert.False(t, isCommitSHA("\x1b[31mred1234"))
+	assert.False(t, isCommitSHA("main-branch"))
+}
+
+func TestWaitForTrailReviewAllReadsFailing(t *testing.T) {
+	t.Parallel()
+	clock := &fakeWaitClock{now: time.Unix(0, 0)}
+	var errW bytes.Buffer
+	p, err := waitForTrailReview(context.Background(), &errW, func(context.Context, bool) (trailReviewProgress, error) {
+		return trailReviewProgress{}, errors.New("503 service unavailable")
+	}, clock.now.Add(time.Minute), clock.Now, clock.Sleep)
+	require.NoError(t, err)
+	require.False(t, p.settled())
+	require.Contains(t, errW.String(), "Warning: could not read the review's progress")
+	require.Contains(t, trailReviewWaitResultLine(p), "Could not read the review's progress")
 }
 
 func TestSameCommit(t *testing.T) {
@@ -138,14 +172,13 @@ func TestWaitForTrailReviewSettles(t *testing.T) {
 	poll := func(context.Context, bool) (trailReviewProgress, error) {
 		polls++
 		if polls < 6 {
-			return trailReviewProgress{Head: waitTestHead, Done: 1, Total: 2, OnHead: true}, nil
+			return trailReviewProgress{Read: true, Head: waitTestHead, Done: 1, Total: 2, OnHead: true}, nil
 		}
-		return trailReviewProgress{Head: waitTestHead, Done: 2, Total: 2, OnHead: true}, nil
+		return trailReviewProgress{Read: true, Head: waitTestHead, Done: 2, Total: 2, OnHead: true}, nil
 	}
 	var errW bytes.Buffer
-	p, timedOut, err := waitForTrailReview(context.Background(), &errW, poll, clock.now.Add(10*time.Minute), clock.Now, clock.Sleep)
+	p, err := waitForTrailReview(context.Background(), &errW, poll, clock.now.Add(10*time.Minute), clock.Now, clock.Sleep)
 	require.NoError(t, err)
-	require.False(t, timedOut)
 	require.True(t, p.settled())
 	require.Equal(t, 6, polls)
 	require.Contains(t, errW.String(), "1 of 2 agents done", "a progress line is printed right away")
@@ -157,11 +190,10 @@ func TestWaitForTrailReviewStopsAtDeadline(t *testing.T) {
 	polls := 0
 	poll := func(context.Context, bool) (trailReviewProgress, error) {
 		polls++
-		return trailReviewProgress{Head: waitTestHead, Done: 0, Total: 1}, nil
+		return trailReviewProgress{Read: true, Head: waitTestHead, Done: 0, Total: 1}, nil
 	}
-	p, timedOut, err := waitForTrailReview(context.Background(), &bytes.Buffer{}, poll, clock.now.Add(40*time.Second), clock.Now, clock.Sleep)
+	p, err := waitForTrailReview(context.Background(), &bytes.Buffer{}, poll, clock.now.Add(40*time.Second), clock.Now, clock.Sleep)
 	require.NoError(t, err)
-	require.True(t, timedOut)
 	require.False(t, p.settled())
 	require.Equal(t, 4, polls, "polls at 0s, 15s, 30s and 40s")
 	require.Equal(t, time.Unix(40, 0), clock.now, "the last sleep is cut to the deadline")
@@ -183,9 +215,8 @@ func TestWaitForTrailReviewIgnoresStaleAfterGrace(t *testing.T) {
 			waitTestAgent("risk", "succeeded", waitTestHead, ""), waitTestAgent("manual", "succeeded", waitTestOld, ""),
 		}, waitTestHead, "", ignoreStale), nil
 	}
-	p, timedOut, err := waitForTrailReview(context.Background(), &bytes.Buffer{}, poll, clock.now.Add(10*time.Minute), clock.Now, clock.Sleep)
+	p, err := waitForTrailReview(context.Background(), &bytes.Buffer{}, poll, clock.now.Add(10*time.Minute), clock.Now, clock.Sleep)
 	require.NoError(t, err)
-	require.False(t, timedOut)
 	require.True(t, p.settled())
 	require.Equal(t, time.Unix(60, 0), sawIgnore)
 }
@@ -199,10 +230,10 @@ func TestWaitForTrailReviewRetriesFailedReads(t *testing.T) {
 		if polls == 1 {
 			return trailReviewProgress{}, errors.New("503 service unavailable")
 		}
-		return trailReviewProgress{Head: waitTestHead, Done: 1, Total: 1, OnHead: true}, nil
+		return trailReviewProgress{Read: true, Head: waitTestHead, Done: 1, Total: 1, OnHead: true}, nil
 	}
 	var errW bytes.Buffer
-	p, _, err := waitForTrailReview(context.Background(), &errW, poll, clock.now.Add(time.Minute), clock.Now, clock.Sleep)
+	p, err := waitForTrailReview(context.Background(), &errW, poll, clock.now.Add(time.Minute), clock.Now, clock.Sleep)
 	require.NoError(t, err)
 	require.True(t, p.settled())
 	require.Contains(t, errW.String(), "retrying")
@@ -214,19 +245,19 @@ func TestWaitForTrailReviewCancellation(t *testing.T) {
 	clock := &fakeWaitClock{now: time.Unix(0, 0)}
 	poll := func(context.Context, bool) (trailReviewProgress, error) {
 		cancel()
-		return trailReviewProgress{Head: waitTestHead, Total: 1}, nil
+		return trailReviewProgress{Read: true, Head: waitTestHead, Total: 1}, nil
 	}
-	_, _, err := waitForTrailReview(ctx, &bytes.Buffer{}, poll, clock.now.Add(time.Minute), clock.Now, clock.Sleep)
+	_, err := waitForTrailReview(ctx, &bytes.Buffer{}, poll, clock.now.Add(time.Minute), clock.Now, clock.Sleep)
 	require.ErrorIs(t, err, context.Canceled, "main re-raises the signal on context.Canceled")
 }
 
 func TestTrailReviewWaitResultLine(t *testing.T) {
 	t.Parallel()
-	assert.Contains(t, trailReviewWaitResultLine(trailReviewProgress{NoAgents: true}), "does not report its review agents")
-	assert.Contains(t, trailReviewWaitResultLine(trailReviewProgress{Head: waitTestHead}), "No review agent runs on this commit")
-	assert.Equal(t, "Review of 11111111 finished (2 agents).", trailReviewWaitResultLine(trailReviewProgress{Head: waitTestHead, Done: 2, Total: 2}))
-	assert.Contains(t, trailReviewWaitResultLine(trailReviewProgress{Head: waitTestHead, HeadPending: true, Total: 1}), "has not reached 11111111")
-	assert.Contains(t, trailReviewWaitResultLine(trailReviewProgress{Head: waitTestHead, ServerHead: waitTestOld, HeadPending: true, Total: 1}), "trail is at 22222222, not 11111111")
+	assert.Contains(t, trailReviewWaitResultLine(trailReviewProgress{Read: true, NoAgents: true}), "does not report its review agents")
+	assert.Contains(t, trailReviewWaitResultLine(trailReviewProgress{Read: true, Head: waitTestHead}), "No review agent runs on this commit")
+	assert.Equal(t, "Review of 11111111 finished (2 agents).", trailReviewWaitResultLine(trailReviewProgress{Read: true, Head: waitTestHead, Done: 2, Total: 2}))
+	assert.Contains(t, trailReviewWaitResultLine(trailReviewProgress{Read: true, Head: waitTestHead, HeadPending: true, Total: 1}), "has not reached 11111111")
+	assert.Contains(t, trailReviewWaitResultLine(trailReviewProgress{Read: true, Head: waitTestHead, ServerHead: waitTestOld, HeadPending: true, Total: 1}), "trail is at 22222222, not 11111111")
 }
 
 // serveWaitTestTrail serves a legacy repository trail whose one agent's run

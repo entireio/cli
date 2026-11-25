@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"strings"
 	"time"
 
@@ -62,10 +61,18 @@ type trailReviewProgress struct {
 	// NoAgents is set when the server's read carried no agents at all, so
 	// there is nothing to wait for.
 	NoAgents bool
+	// NoHead is set when neither --head nor the server names the head, so
+	// there is no commit to wait on.
+	NoHead bool
+	// Read is set once the server has answered; before that nothing is known.
+	Read bool
 }
 
 func (p trailReviewProgress) settled() bool {
-	return p.NoAgents || (!p.HeadPending && p.Done == p.Total)
+	if !p.Read {
+		return false
+	}
+	return p.NoAgents || p.NoHead || (!p.HeadPending && p.Done == p.Total)
 }
 
 // trailReviewProgressFor reports how many of the change's agents have
@@ -75,16 +82,22 @@ func (p trailReviewProgress) settled() bool {
 // stop being) ready for review will not run on this head, so it is left out.
 // An agent whose latest run is on an older head counts as pending, unless
 // ignoreStale says enough time has passed since runs on this head appeared to
-// take it as one this push does not run.
+// take it as one this push does not run. The same goes for an agent with no
+// run at all once ignoreStale is set (a manual agent, say).
 func trailReviewProgressFor(agents []api.TrailAgent, serverHead, wantHead string, ignoreStale bool) trailReviewProgress {
-	p := trailReviewProgress{Head: serverHead, ServerHead: serverHead}
+	p := trailReviewProgress{Head: serverHead, ServerHead: serverHead, Read: true}
 	if wantHead != "" {
 		p.Head = wantHead
 		p.HeadPending = !sameCommit(serverHead, wantHead)
 	}
+	if p.Head == "" {
+		p.NoHead = true
+		return p
+	}
 	for _, a := range agents {
 		if a.LatestRun == nil {
-			if a.WaitingFor != nil && (*a.WaitingFor == "ready" || *a.WaitingFor == "not_ready") {
+			waitsForReadiness := a.WaitingFor != nil && (*a.WaitingFor == "ready" || *a.WaitingFor == "not_ready")
+			if waitsForReadiness || ignoreStale {
 				continue
 			}
 			p.Total++
@@ -120,30 +133,28 @@ func sameCommit(a, b string) bool {
 
 // fetchTrailReviewProgress reads the change's detail for its head and agents.
 func fetchTrailReviewProgress(ctx context.Context, client *api.Client, trailID, wantHead string, ignoreStale bool) (trailReviewProgress, error) {
-	resp, err := client.Get(ctx, "/api/v1/trails/"+url.PathEscape(trailID))
+	detail, err := fetchTrailDetail(ctx, client, trailID)
 	if err != nil {
-		return trailReviewProgress{}, fmt.Errorf("read trail: %w", err)
-	}
-	defer resp.Body.Close()
-	if err := checkTrailResponse(resp); err != nil {
 		return trailReviewProgress{}, err
 	}
-	var detail api.TrailResource
-	if err := api.DecodeJSON(resp, &detail); err != nil {
-		return trailReviewProgress{}, fmt.Errorf("decode trail: %w", err)
-	}
 	serverHead := ""
-	if mg, mErr := detail.DecodeMergeability(); mErr == nil && mg != nil {
+	if mg, mErr := detail.DecodeMergeability(); mErr == nil && mg != nil && isCommitSHA(stringPtrValue(mg.HeadSHA)) {
 		serverHead = stringPtrValue(mg.HeadSHA)
 	}
 	if api.RawJSONAbsent(detail.Agents) {
-		return trailReviewProgress{Head: firstNonEmpty(wantHead, serverHead), ServerHead: serverHead, NoAgents: true}, nil
+		return trailReviewProgress{Head: firstNonEmpty(wantHead, serverHead), ServerHead: serverHead, NoAgents: true, Read: true}, nil
 	}
 	agents, err := detail.DecodeAgents()
 	if err != nil {
 		return trailReviewProgress{}, fmt.Errorf("trail %s: %w", trailID, err)
 	}
 	return trailReviewProgressFor(agents, serverHead, wantHead, ignoreStale), nil
+}
+
+// isCommitSHA reports whether s looks like a full or abbreviated commit SHA.
+// A server value that does not is not used, nor printed.
+func isCommitSHA(s string) bool {
+	return len(s) >= 7 && len(s) <= 64 && strings.Trim(strings.ToLower(s), "0123456789abcdef") == ""
 }
 
 func firstNonEmpty(values ...string) string {
@@ -162,9 +173,9 @@ type trailReviewPoll func(ctx context.Context, ignoreStale bool) (trailReviewPro
 // waitForTrailReview polls the change until its review on the head settles
 // or the deadline passes, writing a progress line to errW now and then. A
 // failed read is retried until the deadline. It returns the last progress
-// seen and whether the wait reached the deadline first; only cancellation of
-// ctx is an error.
-func waitForTrailReview(ctx context.Context, errW io.Writer, poll trailReviewPoll, deadline time.Time, now func() time.Time, sleep func(context.Context, time.Duration) error) (trailReviewProgress, bool, error) {
+// seen (its Read is false when no read succeeded); only cancellation of ctx
+// is an error.
+func waitForTrailReview(ctx context.Context, errW io.Writer, poll trailReviewPoll, deadline time.Time, now func() time.Time, sleep func(context.Context, time.Duration) error) (trailReviewProgress, error) {
 	var (
 		last         trailReviewProgress
 		lastErr      error
@@ -178,16 +189,17 @@ func waitForTrailReview(ctx context.Context, errW io.Writer, poll trailReviewPol
 		hitDeadline := pollCtx.Err() != nil
 		cancel()
 		if ctx.Err() != nil {
-			return last, false, fmt.Errorf("wait for the review: %w", ctx.Err())
+			return last, fmt.Errorf("wait for the review: %w", ctx.Err())
 		}
 		if err != nil && hitDeadline {
 			// A read cut off by the deadline is the timeout, not a failure.
-			return last, true, nil //nolint:nilerr // reaching the deadline ends the wait; the findings so far are listed
+			warnTrailReviewUnread(errW, lastErr)
+			return last, nil //nolint:nilerr // reaching the deadline ends the wait; the findings so far are listed
 		}
 		if err == nil {
 			last, lastErr = p, nil
 			if p.settled() {
-				return p, false, nil
+				return p, nil
 			}
 			if p.OnHead && onHeadSince.IsZero() {
 				onHeadSince = now()
@@ -201,14 +213,20 @@ func waitForTrailReview(ctx context.Context, errW io.Writer, poll trailReviewPol
 		}
 		remaining := deadline.Sub(now())
 		if remaining <= 0 {
-			if lastErr != nil {
-				fmt.Fprintf(errW, "Warning: could not read the review's progress: %s\n", tuiutil.SanitizeTerminalText(lastErr.Error()))
-			}
-			return last, true, nil
+			warnTrailReviewUnread(errW, lastErr)
+			return last, nil
 		}
 		if err := sleep(ctx, min(trailFindingWaitPollInterval, remaining)); err != nil {
-			return last, false, err
+			return last, err
 		}
+	}
+}
+
+// warnTrailReviewUnread reports, when the wait ends, a read failure that was
+// still being retried.
+func warnTrailReviewUnread(errW io.Writer, lastErr error) {
+	if lastErr != nil {
+		fmt.Fprintf(errW, "Warning: could not read the review's progress: %s\n", tuiutil.SanitizeTerminalText(lastErr.Error()))
 	}
 }
 
@@ -216,7 +234,7 @@ func trailReviewProgressLine(p trailReviewProgress, err error) string {
 	switch {
 	case err != nil:
 		return "Waiting for the review (could not read its progress: " + tuiutil.SanitizeTerminalText(err.Error()) + "; retrying)…"
-	case p.Head == "":
+	case !p.Read || p.Head == "":
 		return "Waiting for the review…"
 	case p.HeadPending:
 		return fmt.Sprintf("Waiting for the trail to reach %s (it is at %s)…", shortSHA(p.Head), shortSHA(p.ServerHead))
@@ -227,8 +245,12 @@ func trailReviewProgressLine(p trailReviewProgress, err error) string {
 // trailReviewWaitResultLine is the line printed once the wait ends.
 func trailReviewWaitResultLine(p trailReviewProgress) string {
 	switch {
+	case !p.Read:
+		return "Could not read the review's progress; showing findings so far."
 	case p.NoAgents:
 		return "The trail does not report its review agents; showing its findings now."
+	case p.NoHead:
+		return "The trail does not report its head commit; showing its findings now. Pass --head to wait for a commit's review."
 	case p.settled() && p.Total == 0:
 		return "No review agent runs on this commit; showing the trail's findings."
 	case p.settled():
@@ -237,8 +259,6 @@ func trailReviewWaitResultLine(p trailReviewProgress) string {
 		return fmt.Sprintf("The trail has not reached %s yet; showing findings so far. Run the command again to keep waiting.", shortSHA(p.Head))
 	case p.HeadPending:
 		return fmt.Sprintf("The trail is at %s, not %s; showing its findings so far. Run the command again to keep waiting.", shortSHA(p.ServerHead), shortSHA(p.Head))
-	case p.Head == "":
-		return "Could not read the review's progress; showing findings so far."
 	}
 	return fmt.Sprintf("Review of %s still running (%d of %d agents done); showing findings so far. Run the command again to keep waiting.", shortSHA(p.Head), p.Done, p.Total)
 }

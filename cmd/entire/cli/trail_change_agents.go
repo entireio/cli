@@ -23,15 +23,7 @@ func fetchTrailChangeAgents(ctx context.Context, errW io.Writer, client *api.Cli
 	if work.ID == "" {
 		return nil
 	}
-	resp, err := client.Get(ctx, "/api/v1/trails/"+url.PathEscape(work.ID))
-	if err == nil {
-		defer resp.Body.Close()
-		err = checkTrailResponse(resp)
-	}
-	var detail api.TrailResource
-	if err == nil {
-		err = api.DecodeJSON(resp, &detail)
-	}
+	detail, err := fetchTrailDetail(ctx, client, work.ID)
 	if err != nil {
 		fmt.Fprintf(errW, "Warning: could not read the change's agents: %s\n", tuiutil.SanitizeTerminalText(err.Error()))
 		return nil
@@ -40,6 +32,24 @@ func fetchTrailChangeAgents(ctx context.Context, errW io.Writer, client *api.Cli
 		return nil
 	}
 	return detail.Agents
+}
+
+// fetchTrailDetail reads a trail or change's detail resource, which carries
+// the parts list reads omit (agents, mergeability).
+func fetchTrailDetail(ctx context.Context, client *api.Client, trailID string) (api.TrailResource, error) {
+	var detail api.TrailResource
+	resp, err := client.Get(ctx, "/api/v1/trails/"+url.PathEscape(trailID))
+	if err != nil {
+		return detail, fmt.Errorf("read trail: %w", err)
+	}
+	defer resp.Body.Close()
+	if err := checkTrailResponse(resp); err != nil {
+		return detail, err
+	}
+	if err := api.DecodeJSON(resp, &detail); err != nil {
+		return detail, fmt.Errorf("decode trail: %w", err)
+	}
+	return detail, nil
 }
 
 // trailAgentWaiting says why an agent has not run on the change yet.

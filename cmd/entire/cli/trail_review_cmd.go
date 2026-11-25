@@ -389,7 +389,7 @@ func waitForTrailFindings(cmd *cobra.Command, client *api.Client, target trailRe
 		return fetchTrailReviewProgress(ctx, client, target.Trail.ID, head, ignoreStale)
 	}
 	deadline := trailFindingWaitDeadline(start, waitOpts.Timeout)
-	progress, _, err := waitForTrailReview(cmd.Context(), cmd.ErrOrStderr(), poll, deadline, time.Now, trailFindingWaitSleep)
+	progress, err := waitForTrailReview(cmd.Context(), cmd.ErrOrStderr(), poll, deadline, time.Now, trailFindingWaitSleep)
 	if err != nil {
 		return nil, err
 	}
