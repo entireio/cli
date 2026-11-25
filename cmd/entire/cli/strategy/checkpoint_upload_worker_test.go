@@ -43,6 +43,15 @@ func enableBackgroundUpload(t *testing.T) *[]string {
 	return &spawned
 }
 
+// openUploadTestRepo opens workDir, closed when the test ends.
+func openUploadTestRepo(t *testing.T, workDir string) *git.Repository {
+	t.Helper()
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	t.Cleanup(func() { repo.Close() })
+	return repo
+}
+
 func uploadCoordinator(t *testing.T, repo *git.Repository) *checkpoint.UploadCoordinator {
 	t.Helper()
 	coord, err := checkpoint.UploadCoordinatorForRepo(repo)
@@ -61,9 +70,7 @@ func TestPrePush_HandsQueueToWorkerWithoutPushing(t *testing.T) {
 	installCountingHook(t, bareDir, countFile, 0)
 	spawned := enableBackgroundUpload(t)
 
-	repo, err := gitrepo.OpenPath(workDir)
-	require.NoError(t, err)
-	defer repo.Close()
+	repo := openUploadTestRepo(t, workDir)
 	queue := enqueueRefs(t, repo, refs)
 
 	restore := captureStderr(t)
@@ -91,9 +98,7 @@ func TestPrePush_RecordsUserPushWithEmptyQueue(t *testing.T) {
 	prepareGitRefsPrePush(t, workDir, bareDir)
 	spawned := enableBackgroundUpload(t)
 
-	repo, err := gitrepo.OpenPath(workDir)
-	require.NoError(t, err)
-	defer repo.Close()
+	repo := openUploadTestRepo(t, workDir)
 
 	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
 
@@ -114,9 +119,7 @@ func TestPrePush_RunningWorkerOwnsTheQueue(t *testing.T) {
 	installCountingHook(t, bareDir, countFile, 0)
 	enableBackgroundUpload(t)
 
-	repo, err := gitrepo.OpenPath(workDir)
-	require.NoError(t, err)
-	defer repo.Close()
+	repo := openUploadTestRepo(t, workDir)
 	queue := enqueueRefs(t, repo, refs)
 	coord := uploadCoordinator(t, repo)
 	release, err := coord.Lock(t.Context())
@@ -159,9 +162,7 @@ func TestRunCheckpointUploadWorker_DrainsQueueAndRecords(t *testing.T) {
 	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 5)
 	prepareGitRefsPrePush(t, workDir, bareDir)
 
-	repo, err := gitrepo.OpenPath(workDir)
-	require.NoError(t, err)
-	defer repo.Close()
+	repo := openUploadTestRepo(t, workDir)
 	queue := enqueueRefs(t, repo, refs)
 	coord := uploadCoordinator(t, repo)
 	require.NoError(t, coord.Request(checkpoint.UploadRequest{Remote: "origin"}))
@@ -192,9 +193,7 @@ func TestRunCheckpointUploadWorker_FailureReachesNextPush(t *testing.T) {
 	prepareGitRefsPrePush(t, workDir, bareDir)
 	installCheckpointRejectHook(t, bareDir, false, filepath.Join(t.TempDir(), "attempts"))
 
-	repo, err := gitrepo.OpenPath(workDir)
-	require.NoError(t, err)
-	defer repo.Close()
+	repo := openUploadTestRepo(t, workDir)
 	enqueueRefs(t, repo, refs)
 	coord := uploadCoordinator(t, repo)
 	require.NoError(t, coord.Request(checkpoint.UploadRequest{Remote: "origin"}))
@@ -227,9 +226,7 @@ func TestRunCheckpointUploadWorker_ExitsWhenLockHeld(t *testing.T) {
 	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 2)
 	prepareGitRefsPrePush(t, workDir, bareDir)
 
-	repo, err := gitrepo.OpenPath(workDir)
-	require.NoError(t, err)
-	defer repo.Close()
+	repo := openUploadTestRepo(t, workDir)
 	queue := enqueueRefs(t, repo, refs)
 	coord := uploadCoordinator(t, repo)
 	require.NoError(t, coord.Request(checkpoint.UploadRequest{Remote: "origin"}))
@@ -253,9 +250,7 @@ func TestPushQueuedCheckpointRefs_WaitsForBackgroundWorker(t *testing.T) {
 	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 2)
 	prepareGitRefsPrePush(t, workDir, bareDir)
 
-	repo, err := gitrepo.OpenPath(workDir)
-	require.NoError(t, err)
-	defer repo.Close()
+	repo := openUploadTestRepo(t, workDir)
 	enqueueRefs(t, repo, refs)
 	release, err := uploadCoordinator(t, repo).Lock(t.Context())
 	require.NoError(t, err)
@@ -288,9 +283,7 @@ func TestReleaseUploadLock_StartsWorkerForWaitingRequest(t *testing.T) {
 	prepareGitRefsPrePush(t, workDir, t.TempDir())
 	spawned := enableBackgroundUpload(t)
 
-	repo, err := gitrepo.OpenPath(workDir)
-	require.NoError(t, err)
-	defer repo.Close()
+	repo := openUploadTestRepo(t, workDir)
 	coord := uploadCoordinator(t, repo)
 
 	release, err := coord.Lock(t.Context())
@@ -322,9 +315,7 @@ func TestRunCheckpointUploadWorker_WithholdsWhenRequiredOPFIsOff(t *testing.T) {
 	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 2)
 	prepareGitRefsPrePush(t, workDir, bareDir)
 
-	repo, err := gitrepo.OpenPath(workDir)
-	require.NoError(t, err)
-	defer repo.Close()
+	repo := openUploadTestRepo(t, workDir)
 	queue := enqueueRefs(t, repo, refs)
 	coord := uploadCoordinator(t, repo)
 	require.NoError(t, coord.Request(checkpoint.UploadRequest{Remote: "origin", OPFDecision: checkpoint.UploadOPFRun}))
@@ -353,9 +344,7 @@ func TestPrePush_ForegroundNeverHandsOffWhenLockHeld(t *testing.T) {
 	foregroundUploadLockWait = 200 * time.Millisecond
 	t.Cleanup(func() { foregroundUploadLockWait = restoreWait })
 
-	repo, err := gitrepo.OpenPath(workDir)
-	require.NoError(t, err)
-	defer repo.Close()
+	repo := openUploadTestRepo(t, workDir)
 	enqueueRefs(t, repo, refs)
 	coord := uploadCoordinator(t, repo)
 	release, err := coord.Lock(t.Context())
@@ -381,9 +370,7 @@ func TestRunCheckpointUploadWorker_RespawnsForRequestLeftAtExit(t *testing.T) {
 	prepareGitRefsPrePush(t, workDir, bareDir)
 	spawned := enableBackgroundUpload(t)
 
-	repo, err := gitrepo.OpenPath(workDir)
-	require.NoError(t, err)
-	defer repo.Close()
+	repo := openUploadTestRepo(t, workDir)
 	enqueueRefs(t, repo, refs)
 	coord := uploadCoordinator(t, repo)
 	require.NoError(t, coord.Request(checkpoint.UploadRequest{Remote: "origin"}))
@@ -413,9 +400,7 @@ func TestPrePush_InlineRecordsUserPush(t *testing.T) {
 	prepareGitRefsPrePush(t, workDir, bareDir)
 	t.Setenv(CheckpointUploadForegroundEnv, "1")
 
-	repo, err := gitrepo.OpenPath(workDir)
-	require.NoError(t, err)
-	defer repo.Close()
+	repo := openUploadTestRepo(t, workDir)
 	enqueueRefs(t, repo, refs)
 
 	restore := captureStderr(t)
@@ -440,9 +425,7 @@ func TestRunCheckpointUploadWorker_BudgetEndsPassAsStop(t *testing.T) {
 	checkpointUploadDeliveryBudget = time.Second
 	t.Cleanup(func() { checkpointUploadDeliveryBudget = restoreBudget })
 
-	repo, err := gitrepo.OpenPath(workDir)
-	require.NoError(t, err)
-	defer repo.Close()
+	repo := openUploadTestRepo(t, workDir)
 	queue := enqueueRefs(t, repo, refs)
 	coord := uploadCoordinator(t, repo)
 	require.NoError(t, coord.Request(checkpoint.UploadRequest{Remote: "origin"}))
@@ -466,9 +449,7 @@ func TestRunCheckpointUploadWorker_BudgetEndsPassAsStop(t *testing.T) {
 func TestRunCheckpointUploadPass_OPFGateRunsAfterPushWait(t *testing.T) {
 	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 1)
 	prepareGitRefsPrePush(t, workDir, bareDir)
-	repo, err := gitrepo.OpenPath(workDir)
-	require.NoError(t, err)
-	defer repo.Close()
+	repo := openUploadTestRepo(t, workDir)
 	enqueueRefs(t, repo, refs)
 	coord := uploadCoordinator(t, repo)
 
@@ -515,9 +496,7 @@ func TestRunCheckpointUploadWorker_KeepsNoticesForNextPush(t *testing.T) {
 	testutil.RunGit(t, workDir, "remote", "set-url", "--add", "--push", "origin", bareDir)
 	testutil.RunGit(t, workDir, "remote", "set-url", "--add", "--push", "origin", t.TempDir())
 
-	repo, err := gitrepo.OpenPath(workDir)
-	require.NoError(t, err)
-	defer repo.Close()
+	repo := openUploadTestRepo(t, workDir)
 	enqueueRefs(t, repo, refs)
 	coord := uploadCoordinator(t, repo)
 	require.NoError(t, coord.Request(checkpoint.UploadRequest{Remote: "origin"}))
