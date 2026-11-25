@@ -397,10 +397,16 @@ func globalEnableBannerSuffix(ctx context.Context, agentName types.AgentName) st
 	if err != nil || !s.EnabledOnlyByGlobal() {
 		return ""
 	}
+	return bannerSuffix(agentName, globalEnableBannerLines...)
+}
+
+// bannerSuffix formats lines to end a SessionStart banner: indented lines,
+// or one line for Codex, which shows its banner as a single line.
+func bannerSuffix(agentName types.AgentName, lines ...string) string {
 	if agentName == agent.AgentNameCodex {
-		return " " + strings.Join(globalEnableBannerLines, " ")
+		return " " + strings.Join(lines, " ")
 	}
-	return "\n  " + strings.Join(globalEnableBannerLines, "\n  ")
+	return "\n  " + strings.Join(lines, "\n  ")
 }
 
 // reportGlobalEnableGitHookInstall says so on stderr when the git hooks this

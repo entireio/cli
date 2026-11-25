@@ -31,16 +31,12 @@ func unreadableUserSettingsText(err error) string {
 
 // unreadableUserSettingsBannerSuffix is the line the session-start banner of a
 // set-up repository ends with while the user settings file cannot be read.
-// Codex shows its banner as a single line.
 func unreadableUserSettingsBannerSuffix(ctx context.Context, agentName types.AgentName) string {
 	err := settings.UserSettingsReadError(ctx)
 	if err == nil {
 		return ""
 	}
-	if agentName == agent.AgentNameCodex {
-		return " " + unreadableUserSettingsText(err)
-	}
-	return "\n  " + unreadableUserSettingsText(err)
+	return bannerSuffix(agentName, unreadableUserSettingsText(err))
 }
 
 // reportUnreadableUserSettings runs at session start, before the set-up gate.
