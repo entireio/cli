@@ -417,6 +417,10 @@ func resolveBranchProjectTrail(cmd *cobra.Command, branch string) (_ *projectTra
 	return openTrailParentTarget(cmd, change, repo, trailRepoAccess{Client: client, BasePath: base, RepoID: repoID}, fmt.Sprintf("branch %q", branch))
 }
 
+// errNoDiscoverableProjectTrail is wrapped when work has no project trail
+// to route to, for example a branch whose trail is still being created.
+var errNoDiscoverableProjectTrail = errors.New("no discoverable project trail")
+
 // openTrailParentTarget routes to the project parent a branch's Change points
 // at. An absent parent may be inaccessible or unresolved, so this never falls
 // back to a repo-scoped read; --project, when given, must name that parent.
@@ -424,7 +428,7 @@ func resolveBranchProjectTrail(cmd *cobra.Command, branch string) (_ *projectTra
 // repo is the repository the work was found in, and access its client.
 func openTrailParentTarget(cmd *cobra.Command, change *api.TrailResource, repo string, access trailRepoAccess, subject string) (*projectTrailTarget, error) {
 	if change == nil || change.Parent == nil || !looksLikeULID(change.Parent.ID) {
-		return nil, fmt.Errorf("%s has no discoverable project trail; pass a project trail ID with --project (a missing parent may be inaccessible or unresolved)", subject)
+		return nil, fmt.Errorf("%s has %w; pass a project trail ID with --project (a missing parent may be inaccessible or unresolved)", subject, errNoDiscoverableProjectTrail)
 	}
 	parent := *change.Parent
 	if ref := projectTrailProjectFlag(cmd); ref != "" {

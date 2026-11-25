@@ -29,6 +29,10 @@ const (
 	// as not run by this push (a manual or ready-only agent, say). Runs one
 	// push starts are queued together, well inside this.
 	trailFindingWaitStaleGrace = 60 * time.Second
+	// trailFindingWaitTrailAppear is how long a branch just pushed is given
+	// for its trail to be created before the wait reports none.
+	trailFindingWaitTrailAppear = 45 * time.Second
+	trailFindingWaitTrailPoll   = 5 * time.Second
 )
 
 // trailAgentRunTerminal lists the agent-run statuses after which a run will

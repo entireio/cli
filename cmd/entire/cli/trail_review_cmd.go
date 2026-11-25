@@ -199,9 +199,9 @@ func runTrailFindingWait(cmd *cobra.Command, mode *trailMode, selector string, o
 	if err != nil {
 		return err
 	}
-	client, target, err := mode.reviewTarget(cmd, selector, false)
+	client, target, err := resolveTrailFindingWaitTarget(cmd, mode, selector, start, opts.Timeout)
 	if err != nil {
-		if strings.TrimSpace(selector) == "" && errors.Is(err, errTrailReviewDefaultTargetNotFound) {
+		if errors.Is(err, errTrailFindingWaitNoTrail) {
 			fmt.Fprintln(cmd.OutOrStdout(), "No trail for this branch.")
 			return nil
 		}
@@ -216,6 +216,32 @@ func runTrailFindingWait(cmd *cobra.Command, mode *trailMode, selector string, o
 	}
 	printTrailReviewComments(cmd.OutOrStdout(), comments, nextCursor)
 	return nil
+}
+
+var errTrailFindingWaitNoTrail = errors.New("no trail for this branch")
+
+// resolveTrailFindingWaitTarget resolves the trail to wait on. Right after
+// the push the stop hook follows, the branch's trail may still be being
+// created, so a branch without one is looked up again for a while before
+// reporting errTrailFindingWaitNoTrail.
+func resolveTrailFindingWaitTarget(cmd *cobra.Command, mode *trailMode, selector string, start time.Time, timeout time.Duration) (*api.Client, trailReviewTarget, error) {
+	giveUp := start.Add(min(trailFindingWaitTrailAppear, timeout/2))
+	for {
+		client, target, err := mode.reviewTarget(cmd, selector, false)
+		if err == nil {
+			return client, target, nil
+		}
+		missing := errors.Is(err, errTrailReviewDefaultTargetNotFound) || errors.Is(err, errNoDiscoverableProjectTrail)
+		if strings.TrimSpace(selector) != "" || !missing {
+			return nil, trailReviewTarget{}, err
+		}
+		if !time.Now().Before(giveUp) {
+			return nil, trailReviewTarget{}, errTrailFindingWaitNoTrail
+		}
+		if err := trailFindingWaitSleep(cmd.Context(), trailFindingWaitTrailPoll); err != nil {
+			return nil, trailReviewTarget{}, err
+		}
+	}
 }
 
 // waitForTrailFindings waits for the review and reports on stderr how the

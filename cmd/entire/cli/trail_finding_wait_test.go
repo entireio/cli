@@ -341,3 +341,34 @@ func TestTrailFindingWaitIsHidden(t *testing.T) {
 	require.Equal(t, "wait", wait.Name())
 	require.True(t, wait.Hidden, "only the stop-hook continuation names it")
 }
+
+// TestTrailFindingWaitNoTrail: a branch whose trail never appears is looked
+// up again for a while (here bounded by a short --timeout), then reported
+// plainly instead of as an error.
+func TestTrailFindingWaitNoTrail(t *testing.T) {
+	// Serial: replaces the package wait sleep and global clients.
+	lookups := 0
+	setupWorkingRepoClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method+" "+r.URL.Path != "GET /api/v1/repos/repo-id/changes" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		lookups++
+		assert.NoError(t, json.NewEncoder(w).Encode(api.TrailListResponse{}))
+	})
+	oldSleep := trailFindingWaitSleep
+	trailFindingWaitSleep = func(context.Context, time.Duration) error {
+		time.Sleep(50 * time.Millisecond)
+		return nil
+	}
+	t.Cleanup(func() { trailFindingWaitSleep = oldSleep })
+	cmd := newTrailCmdForMode(false)
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetArgs([]string{"finding", "wait", "--branch", "feature/new", "--timeout", "1s", "--repo", "gh/acme/widget"})
+	require.NoError(t, cmd.ExecuteContext(context.Background()), errOut.String())
+	require.Contains(t, out.String(), "No trail for this branch.")
+	require.Greater(t, lookups, 1, "the trail is looked up again while it may still be being created")
+}
