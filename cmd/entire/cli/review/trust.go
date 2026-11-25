@@ -447,7 +447,7 @@ func trustConfirmText(subject TrustSubject, inv TrustInventory, command string) 
 	switch {
 	case len(entries) == 0 && inv.Isolated:
 		title = "Review this branch?"
-		b.WriteString("The review agent uses your profile's config, so this branch's hooks, MCP servers and extensions are not loaded. It reads this branch's code and instructions. Your own hooks and MCP servers run in this checkout as you configured them.")
+		b.WriteString("The review agent uses your profile's config, so this branch's hooks, MCP servers and extensions are not loaded. It reads this branch's code and instructions. Your own hooks and MCP servers run in this checkout as you configured them; Entire's tracking hooks are added for the run, and for Codex its copies in your own Codex config are turned off so they don't fire twice.")
 		return title, b.String()
 	case len(entries) == 0:
 		title = "Review this branch?"

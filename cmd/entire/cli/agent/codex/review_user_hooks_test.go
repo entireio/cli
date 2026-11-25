@@ -28,45 +28,60 @@ hooks = [{ type = "command", command = "echo toml-mine" }, { type = "command", c
 enabled = false
 `
 
-// Only Entire's handlers are keyed, at their exact group and handler
-// positions; a drifted index would disable the user's own hook instead.
-func TestUserEntireHookKeys_PositionsInHooksJSON(t *testing.T) {
-	t.Parallel()
-	path := filepath.Join(t.TempDir(), HooksFileName)
-	if err := os.WriteFile(path, []byte(userHooksFixture), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	got, err := userEntireHookKeys(path, parseHooksJSONGroups)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{path + ":session_start:0:0", path + ":stop:1:1"}
-	slices.Sort(got)
-	if !slices.Equal(got, want) {
-		t.Errorf("keys = %v, want %v", got, want)
-	}
-}
-
 func TestUserEntireHookKeys_ConfigTOML(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "config.toml")
 	if err := os.WriteFile(path, []byte(userConfigTOMLFixture), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	got, err := userEntireHookKeys(path, parseConfigTOMLGroups)
-	if err != nil {
-		t.Fatal(err)
-	}
+	got := userEntireHookKeys(t.Context(), path, decodeTOMLDocument)
 	if want := []string{path + ":stop:0:1"}; !slices.Equal(got, want) {
 		t.Errorf("keys = %v, want %v", got, want)
 	}
 }
 
-func TestUserEntireHookKeys_MissingFile(t *testing.T) {
+// Keys match exactly, as Codex's do: a stray uppercase COMMAND must not make
+// the user's own handler look like Entire's.
+func TestUserEntireHookKeys_ExactKeyNames(t *testing.T) {
 	t.Parallel()
-	got, err := userEntireHookKeys(filepath.Join(t.TempDir(), HooksFileName), parseHooksJSONGroups)
-	if err != nil || got != nil {
-		t.Errorf("got %v, %v; want nil, nil", got, err)
+	dir := t.TempDir()
+	jsonPath := filepath.Join(dir, HooksFileName)
+	if err := os.WriteFile(jsonPath, []byte(`{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo mine","COMMAND":"entire hooks codex stop"}]}]},"HOOKS":{"Stop":[{"hooks":[{"command":"entire hooks codex stop"}]}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := userEntireHookKeys(t.Context(), jsonPath, decodeJSONDocument); got != nil {
+		t.Errorf("hooks.json keys = %v, want none", got)
+	}
+	tomlPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(tomlPath, []byte("[[hooks.Stop]]\nhooks = [{ type = \"command\", command = \"echo mine\", COMMAND = \"entire hooks codex stop\" }]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := userEntireHookKeys(t.Context(), tomlPath, decodeTOMLDocument); got != nil {
+		t.Errorf("config.toml keys = %v, want none", got)
+	}
+}
+
+func TestUserEntireHookKeys_MissingOrMalformed(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if got := userEntireHookKeys(t.Context(), filepath.Join(dir, HooksFileName), decodeJSONDocument); got != nil {
+		t.Errorf("missing file: got %v", got)
+	}
+	bad := filepath.Join(dir, "bad.json")
+	if err := os.WriteFile(bad, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := userEntireHookKeys(t.Context(), bad, decodeJSONDocument); got != nil {
+		t.Errorf("malformed file: got %v", got)
+	}
+}
+
+// DEL is valid in a path but not in a TOML basic string; left raw, Codex
+// refuses to start.
+func TestTOMLQuotedKey_EscapesDEL(t *testing.T) {
+	t.Parallel()
+	if got, want := tomlQuotedKey("/h\x7f/x\"y"), `"/h\u007f/x\"y"`; got != want {
+		t.Errorf("tomlQuotedKey = %s, want %s", got, want)
 	}
 }
 

@@ -60,19 +60,26 @@ func RelocationEnvVars() []string {
 // binary before choosing, and check where the files actually land: Cursor has a
 // variable that looks like one and its transcripts do not follow it.
 func ResolveHome(envVar, defaultRel string) (string, error) {
+	dir, _, err := ResolveHomeWithOverride(envVar, defaultRel)
+	return dir, err
+}
+
+// ResolveHomeWithOverride is ResolveHome, also reporting whether envVar set
+// the directory (true) or it is the default under $HOME (false).
+func ResolveHomeWithOverride(envVar, defaultRel string) (string, bool, error) {
 	dir, ok, err := LookupOverride(envVar)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if ok {
-		return dir, nil
+		return dir, true, nil
 	}
 	// Agent's $HOME, not Entire's; see userdirs.Home.
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
+		return "", false, fmt.Errorf("failed to get home directory: %w", err)
 	}
-	return filepath.Join(home, defaultRel), nil
+	return filepath.Join(home, defaultRel), false, nil
 }
 
 // LookupOverride returns $envVar and true when it is set, under the same policy

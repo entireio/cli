@@ -205,9 +205,12 @@ Rules:
   after the reviewer finishes with where to allow them.
 - **No checkout hooks needed.** Each isolated run registers Entire's tracking
   hooks itself, so a reviewer with its own config runs even when this
-  checkout doesn't have that agent's hooks installed. An agent without a
-  review runner adapter (manual marker fallback) applies no config and still
-  needs them.
+  checkout doesn't have that agent's hooks installed. Entire must still be
+  enabled in the repository, or the hooks would record nothing; the run is
+  refused instead. An agent without a review runner adapter (manual marker
+  fallback) applies no config, says so, and still needs the hooks. When
+  `CODEX_HOME` can't be used (e.g. relative), Entire's hooks in the user's
+  Codex config can't be turned off and the run warns that they may fire twice.
 - **Fail, don't fall back.** An agent that can't apply a field (Codex
   `settings`, Pi `mcp_servers`, …) fails the review with an explanation.
 - **Gate.** Skills and commands can run their own commands, so reviewing

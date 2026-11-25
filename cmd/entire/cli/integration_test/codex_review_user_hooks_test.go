@@ -22,9 +22,12 @@ func TestCodexAppServerHooksList_ReviewDisablesUserEntireHooks(t *testing.T) {
 	t.Parallel()
 	codexPath := requireCodexAppServer(t)
 
+	// An empty group and a non-command handler still take positions in
+	// Codex's numbering; the Entire handler's key must count them.
 	const hooksJSON = `{"hooks":{"Stop":[
+  {"hooks":[]},
   {"matcher":"x","hooks":[{"type":"command","command":"echo user-first"}]},
-  {"hooks":[{"type":"command","command":"echo user-mine"},{"type":"command","command":"entire hooks codex stop"}]}
+  {"hooks":[{"type":"prompt","prompt":"p"},{"type":"command","command":"echo user-mine"},{"type":"command","command":"entire hooks codex stop"}]}
 ]}}`
 	const configTOML = `[features]
 hooks = true

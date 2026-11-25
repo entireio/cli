@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1502,5 +1503,84 @@ func TestRunReview_CommittedConfigStillNeedsHooks(t *testing.T) {
 	}
 	if !strings.Contains(errBuf.String(), "hooks are not installed") && !strings.Contains(errBuf.String(), "Hooks are not installed") {
 		t.Errorf("expected a hooks-not-installed error, got: %s", errBuf.String())
+	}
+}
+
+// isolatedCodexReviewRepo sets up a repo with Entire enabled (optionally), no
+// Codex hooks, and a clone-local profile whose only reviewer is an isolated
+// codex. PATH holds only git, so a run that gets past the gates fails to
+// launch codex instead of making a model call.
+func isolatedCodexReviewRepo(t *testing.T, enabled bool) {
+	t.Helper()
+	setupCmdTestRepo(t)
+	if enabled {
+		testutil.WriteFile(t, ".", ".entire/settings.json", `{"enabled":true}`)
+	}
+	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+		"codex": {Config: &settings.ReviewAgentConfig{}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	if err := os.Symlink(gitPath, filepath.Join(bin, "git")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	t.Setenv("PATH", bin)
+	t.Setenv("CODEX_HOME", t.TempDir())
+}
+
+// A developer-owned isolated reviewer passes the hook check without this
+// checkout's hooks, and --agents says why.
+func TestRunReview_IsolatedReviewerSkipsHookCheck(t *testing.T) {
+	isolatedCodexReviewRepo(t, true)
+	t.Setenv("CODEX_HOME", "relative/codex")
+
+	rootCmd := cli.NewRootCmd()
+	out, errBuf := &bytes.Buffer{}, &bytes.Buffer{}
+	rootCmd.SetOut(out)
+	rootCmd.SetErr(errBuf)
+	rootCmd.SetArgs([]string{"review", "general", "--agent", "codex"})
+	_ = rootCmd.Execute() //nolint:errcheck // codex is not on PATH; only the gate is under test
+	stderr := errBuf.String()
+	if strings.Contains(stderr, "ooks are not installed") {
+		t.Fatalf("isolated reviewer hit the hook check:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "codex: using your profile's agent config") {
+		t.Errorf("missing isolated banner:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "may fire twice") {
+		t.Errorf("relative CODEX_HOME should warn that user hooks stay on:\n%s", stderr)
+	}
+
+	list := cli.NewRootCmd()
+	listOut := &bytes.Buffer{}
+	list.SetOut(listOut)
+	list.SetArgs([]string{"review", "general", "--agents"})
+	if err := list.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(listOut.String(), "codex: isolated; this checkout's hooks aren't needed") {
+		t.Errorf("--agents output:\n%s", listOut.String())
+	}
+}
+
+// Without Entire enabled the isolated reviewer's hooks would record nothing,
+// so the run is refused instead of silently losing the session.
+func TestRunReview_IsolatedReviewerNeedsEntireEnabled(t *testing.T) {
+	isolatedCodexReviewRepo(t, false)
+
+	rootCmd := cli.NewRootCmd()
+	errBuf := &bytes.Buffer{}
+	rootCmd.SetErr(errBuf)
+	rootCmd.SetArgs([]string{"review", "general"})
+	if err := rootCmd.Execute(); err == nil {
+		t.Fatal("expected an error without Entire enabled")
+	}
+	if !strings.Contains(errBuf.String(), "run `entire enable` first") {
+		t.Errorf("stderr: %s", errBuf.String())
 	}
 }
