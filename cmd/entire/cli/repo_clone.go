@@ -500,7 +500,7 @@ func suggestsForge(forges []string, forge string) bool {
 }
 
 // cloneRefShapes lists every ref shape `repo clone` accepts, for error text.
-const cloneRefShapes = "/et/<project>/<repo>, /gh/<owner>/<repo>, or a full entire:// URL"
+const cloneRefShapes = "/et/<project>/<repo>, /gh/<owner>/<repo>, an entire.com URL for either, or a full entire:// URL"
 
 // invalidCloneRefError explains why ref matched none of the clone grammars, in
 // four descending degrees of confidence about what the user meant: a ref that
@@ -570,7 +570,8 @@ func newRepoCloneCmd() *cobra.Command {
 		Short: "Clone an Entire repository",
 		Long: "Clone an Entire-native repo by its `/et/<project>/<repo>` ref, a " +
 			"GitHub mirror by its `/gh/<owner>/<repo>` ref, or a full `entire://` " +
-			"clone URL.\n\n" +
+			"clone URL. A pasted `https://entire.com/et/<project>/<repo>` (or " +
+			"`/gh/...`) URL is accepted for either ref form.\n\n" +
 			"Either ref looks up where the repo is readable — a native repo's home " +
 			"cluster and its ready native mirrors, or a GitHub repo's mirror " +
 			"clusters. On a single cluster it clones directly; on more than one, it " +
@@ -586,6 +587,7 @@ func newRepoCloneCmd() *cobra.Command {
 			"through to `git clone` with no lookup (and --cluster is ignored). The " +
 			"optional [target-dir] is passed through to `git clone` either way.",
 		Example: "  entire repo clone /et/project/example\n" +
+			"  entire repo clone https://entire.com/et/project/example\n" +
 			"  entire repo clone /gh/entirehq/entire-api\n" +
 			"  entire repo clone /gh/entirehq/entire-api ./entire-api\n" +
 			"  entire repo clone /gh/entirehq/entire-api --cluster aws-us-east-2.entire.io\n" +
@@ -625,10 +627,58 @@ func newRepoCloneCmd() *cobra.Command {
 // resolveRepoRemoteURL owns `repo clone`'s ref parsing, cluster routing and URL
 // validation. Full URLs pass through without a lookup. The wording that varies
 // with the calling verb lives in the placementPicker rather than here.
-func resolveRepoRemoteURL(cmd *cobra.Command, ref, cluster string, picker placementPicker) (string, error) {
-	// Trim once up front so the entire:// detection and the value forwarded
-	// to git clone agree (the shorthand path trims inside parseMirrorCloneRef).
-	ref = strings.TrimSpace(ref)
+func resolveRepoRemoteURL(cmd *cobra.Command, rawRef, cluster string, picker placementPicker) (string, error) {
+	// Canonicalize a pasted entire.com URL to its path form before anything
+	// classifies the ref, so the entire:// passthrough below and the grammars
+	// agree on what the ref is. It also trims, which is what keeps the value
+	// forwarded to git clone and the entire:// detection in agreement (the
+	// shorthand path trims inside parseMirrorCloneRef). Errors echo the ref as
+	// typed (redacted), not the canonical form.
+	tr := newTypedRef(rawRef)
+	cloneURL, err := resolveCanonicalCloneURL(cmd, tr, cluster, picker)
+	return cloneURL, tr.wrapErr(err)
+}
+
+// extraSegmentsError recognizes a pasted entire.com URL that failed only
+// because it continues past the repo (`/tree/main`, `?x`, `#x`) and says so,
+// instead of a shape list. It returns nil for anything else, including refs the
+// user typed in path form: only a stripped URL is a paste from a browser.
+func extraSegmentsError(tr typedRef) error {
+	if tr.typed == tr.canon {
+		return nil
+	}
+	base := tr.canon
+	cut := false
+	if i := strings.IndexAny(base, "?#"); i >= 0 {
+		base, cut = base[:i], true
+	}
+	segs := strings.Split(trimRefPrefix(base), "/")
+	if len(segs) > 3 {
+		segs, cut = segs[:3], true
+	}
+	if !cut || len(segs) != 3 {
+		return nil
+	}
+	head := strings.Join(segs, "/")
+	switch segs[0] {
+	case nativeCloneForge:
+		if _, _, err := parseNativeCloneRef(head); err == nil {
+			return fmt.Errorf("invalid <repo> %q: URL has extra path segments; use /%s/<project>/<repo>", tr.canon, nativeCloneForge)
+		}
+	case mirrorCloneForge:
+		if _, _, _, err := parseMirrorCloneRef(head); err == nil {
+			return fmt.Errorf("invalid <repo> %q: URL has extra path segments; use /%s/<owner>/<repo>", tr.canon, mirrorCloneForge)
+		}
+	}
+	return nil
+}
+
+// resolveCanonicalCloneURL turns a canonical repo ref (tr.canon) into the URL
+// handed to git: an entire:// URL passes through, a native or mirror ref is
+// resolved against the control plane. It takes a typedRef rather than a string
+// so refs are canonicalized once, by newTypedRef, before any parsing happens.
+func resolveCanonicalCloneURL(cmd *cobra.Command, tr typedRef, cluster string, picker placementPicker) (string, error) {
+	ref := tr.canon
 
 	// A full entire:// URL already embeds the cluster host (it's what --cluster
 	// would otherwise resolve to), so it needs no mirror lookup or cluster
@@ -675,6 +725,9 @@ func resolveRepoRemoteURL(cmd *cobra.Command, ref, cluster string, picker placem
 	// resolver pins the provider itself, so it's not threaded through.
 	_, owner, repo, mirrorErr := parseMirrorCloneRef(ref)
 	if mirrorErr != nil {
+		if err := extraSegmentsError(tr); err != nil {
+			return "", err
+		}
 		return "", invalidCloneRefError(ref, nativeErr, mirrorErr)
 	}
 

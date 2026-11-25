@@ -127,6 +127,21 @@ func TestTypedRefWrapErr(t *testing.T) {
 			t.Error("errors.Is lost through wrapper")
 		}
 	})
+	t.Run("redaction alone still scrubs the error", func(t *testing.T) {
+		t.Parallel()
+		tr := newTypedRef("https://u:secret@entire.com/et/a/b")
+		if tr.typed == tr.canon {
+			t.Fatalf("typed == canon (%q); credentialed ref should differ", tr.typed)
+		}
+		err := fmt.Errorf("invalid <repo> %q: %w", tr.canon, errSentinelRef)
+		got := tr.wrapErr(err)
+		if strings.Contains(got.Error(), "secret") {
+			t.Errorf("secret leaked: %q", got.Error())
+		}
+		if !errors.Is(got, errSentinelRef) {
+			t.Error("errors.Is lost through wrapper")
+		}
+	})
 	t.Run("nil", func(t *testing.T) {
 		t.Parallel()
 		if got := newTypedRef("https://entire.com/et/a/b").wrapErr(nil); got != nil {
