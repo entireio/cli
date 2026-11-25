@@ -516,8 +516,8 @@ func newRepoViewCmd() *cobra.Command {
 				warnFlagsGitHubViewIgnores(cmd, authoritative)
 				return runRepoMirrorViewByName(cmd, target.owner+"/"+target.repo, clusterHost)
 			}
-			// A repository is named /<forge>/<a>/<b> and no other way, so a
-			// bare `acme/web` is REFUSED — with both spellings suggested, since
+			// A repository is named /<forge>/<a>/<b> (or its entire.com URL,
+			// canonicalized above), so a bare `acme/web` is REFUSED — with both spellings suggested, since
 			// this verb serves both forges and naming one would send the reader
 			// to a ref the other half of the time.
 			//

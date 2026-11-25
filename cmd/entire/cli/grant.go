@@ -906,7 +906,8 @@ var projectGrantTarget = grantTarget[coreapi.ProjectGrant]{
 }
 
 // repoGrantTarget is repo access: roles reader/writer/admin, required, on a
-// repo addressed by its /et/<project>/<repo> path and nothing else. `list`
+// repo addressed by its /et/<project>/<repo> path or its entire.com URL
+// spelling. `list`
 // alone also answers a GitHub mirror ref, from the upstream collaborators the
 // placement materializes — see mirrorGrantListing.
 var repoGrantTarget = grantTarget[coreapi.RepoGrant]{

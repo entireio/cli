@@ -582,11 +582,34 @@ always runnable in every build.
   rewrite the ref as the one shape that repository can never have. The branch is one optional `listBranch` field on
   `grantTarget`, so the shared builder stays forge-unaware for `org` and
   `project`.
-  **A repository is named `/<forge>/<a>/<b>` and no other way**, across the
-  mirror subtree and `clone` alike: a bare `<a>/<b>` is refused because both
-  forges take that shape, and a GitHub URL is refused because it would be a
-  second spelling for one repo. Both are recognised only to name the ref they
-  should have been. One parser reads both grammars, `parseMirrorRepoRef`, and
+  **A repository is named `/<forge>/<a>/<b>`, or by its `entire.com` URL**,
+  across the mirror subtree and `clone` alike. `https://entire.com/et/<project>/<repo>`
+  and the scheme-less `entire.com/gh/<owner>/<repo>` are an accepted second
+  spelling of the `/et/...` and `/gh/...` paths: it is the product's own origin
+  and what a browser shows, so refusing it costs more than the extra spelling.
+  The host is exactly `entire.com`, read from `api.DefaultWebBaseURL`;
+  `ENTIRE_WEB_BASE_URL` is not honored, and `http://`, `www.` or any subdomain,
+  userinfo, a port, and extra path segments are refused. A bare `<a>/<b>` is
+  still refused because both forges take that shape, and a `https://github.com/...`
+  URL is still refused because it is another vendor's origin and `/gh/` is how
+  a mirror is named. Both are recognised only to name the ref they should have
+  been. The URL names its forge like any other ref, so `entire.com/foo/bar` is
+  refused with the usual hint (see the namesquatting guard below). The URL
+  spelling covers the typed repo refs of the commands named here only: `trail`,
+  `search` and `experts` `--repo` and the org and project grant refs do not
+  take it.
+
+  A typed ref is canonicalized **once, at the command's typed argument**
+  (`newTypedRef`, over `canonicalizeRepoRef`), before anything dispatches on its
+  forge. The strict parsers (`parseNativeCloneRef`, `parseMirrorCloneRef`) and
+  every parser of server text (detached answers, `entire://` clone URLs) never
+  accept the URL form, so a URL in a server answer is never read as a ref the
+  user typed. `TestCanonicalizeRepoRefSitesAreAudited` keeps the list of
+  canonicalizing files: add a site there with a reason, and do not
+  canonicalize deeper. Errors echo the ref as typed, with credentials
+  redacted; success output is the canonical path.
+
+  One parser reads both grammars, `parseMirrorRepoRef`, and
   it takes the forges the *calling verb* serves — the same contract
   `bareRefSuggestions` uses, so a verb can never suggest a ref it refuses on the
   next line. A ref naming a forge the verb does not serve is refused **without
@@ -605,7 +628,8 @@ always runnable in every build.
   its own change.
   `clone`
   accepts a native `/et/<project>/<repo>` ref, a mirror `/gh/<owner>/<repo>`
-  ref, or a full `entire://` URL passed through verbatim. **Every ref names its
+  ref (either also as its `entire.com` URL), or a full `entire://` URL passed
+  through verbatim. **Every ref names its
   forge**: the leading token alone decides which grammar is tried, and the bare
   `<project>/<repo>` shorthand was removed because both forges take that shape
   and nothing in it says which was meant (#2252).
@@ -622,7 +646,7 @@ always runnable in every build.
   The native `/et/<project>/<repo>` path is **not** clone-only: it is the
   `path` the API returns, and `resolveRepoRef` accepts it for every command
   that takes a repo ref — `view`, `edit`, `delete`, and the `visibility` and
-  `protection` subtrees (COR-1632). `repo grant` takes that path and nothing else — no
+  `protection` subtrees (COR-1632). `repo grant` takes that path or its `entire.com` URL spelling — no
   `--project`, no bare name, no ULID (its `list` reads a `/gh/` mirror ref from
   the mirror endpoint instead, never through this resolver) — through
   `resolveRepoPath`, which parses
