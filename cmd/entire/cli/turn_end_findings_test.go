@@ -13,6 +13,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/provenance"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -107,9 +108,11 @@ func setupFindingsBranch(t *testing.T) (string, string) {
 	t.Helper()
 	setupStopTestRepo(t)
 	t.Setenv("CI", "")
-	old := findingsBranchHasTrail
-	findingsBranchHasTrail = func(context.Context, string, string) bool { return true }
-	t.Cleanup(func() { findingsBranchHasTrail = old })
+	old := findingsBranchTrailHead
+	findingsBranchTrailHead = func(context.Context, string, string) (string, bool) { return "", true }
+	oldDeadline := findingsContinuationDeadline
+	findingsContinuationDeadline = func(types.AgentType) time.Time { return time.Now().Add(time.Minute) }
+	t.Cleanup(func() { findingsBranchTrailHead, findingsContinuationDeadline = old, oldDeadline })
 	dir, err := os.Getwd()
 	require.NoError(t, err)
 	testutil.GitCheckoutNewBranch(t, dir, "feature/x")
@@ -260,13 +263,65 @@ func TestTurnEndDoesNotContinueOnDefaultBranch(t *testing.T) {
 	assert.Empty(t, out)
 }
 
+func TestTurnEndDoesNotContinueWhenStopBudgetIsSpent(t *testing.T) {
+	// Not parallel: changes the working directory, os.Stdout and package hooks.
+	dir, transcript := setupFindingsBranch(t)
+	findingsContinuationDeadline = func(types.AgentType) time.Time { return time.Now().Add(-time.Second) }
+	out := runFindingsTurn(t, continuingMockAgent{newMockAgent()}, "test-findings-late", transcript, func() {
+		commitChange(t, dir)
+		moveTracking(t, dir, "update by push")
+	})
+	assert.Empty(t, out)
+	state, err := strategy.LoadSessionState(context.Background(), "test-findings-late")
+	require.NoError(t, err)
+	assert.Equal(t, session.PhaseIdle, state.Phase, "no reopened turn is left behind")
+}
+
 func TestTurnEndDoesNotContinueWithoutATrail(t *testing.T) {
 	// Not parallel: changes the working directory, os.Stdout and a package hook.
 	dir, transcript := setupFindingsBranch(t)
-	findingsBranchHasTrail = func(context.Context, string, string) bool { return false }
+	findingsBranchTrailHead = func(context.Context, string, string) (string, bool) { return "", false }
 	out := runFindingsTurn(t, continuingMockAgent{newMockAgent()}, "test-findings-no-trails", transcript, func() {
 		commitChange(t, dir)
 		moveTracking(t, dir, "update by push")
 	})
 	assert.Empty(t, out)
+}
+
+// TestTurnEndContinuesAfterSandboxedPush: a sandboxed agent's push reaches
+// the server but leaves the tracking ref behind. The server's head for the
+// branch then says HEAD was pushed. The continuation is made once per
+// commit, since the stale tracking ref would match on every later stop.
+func TestTurnEndContinuesAfterSandboxedPush(t *testing.T) {
+	// Not parallel: changes the working directory, os.Stdout and package hooks.
+	dir, transcript := setupFindingsBranch(t)
+	ag := continuingMockAgent{newMockAgent()}
+	const sid = "test-findings-sandboxed"
+	var head string
+	out := runFindingsTurn(t, ag, sid, transcript, func() {
+		commitChange(t, dir)
+		head = strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", "HEAD"))
+		findingsBranchTrailHead = func(context.Context, string, string) (string, bool) { return head, true }
+	})
+	require.Contains(t, out, `"decision":"block"`)
+	require.Contains(t, out, head)
+
+	// The continued turn's stop, then a later turn that pushes nothing.
+	captureLifecycleStdout(t, func() {
+		require.NoError(t, DispatchLifecycleEvent(context.Background(), ag, &agent.Event{Type: agent.TurnEnd, SessionID: sid, SessionRef: transcript, Timestamp: time.Now()}))
+	})
+	out = runFindingsTurn(t, ag, sid, transcript, func() {})
+	assert.Empty(t, out, "already continued for this commit")
+}
+
+func TestTurnEndDoesNotContinueForUnpushedCommit(t *testing.T) {
+	// Not parallel: changes the working directory, os.Stdout and package hooks.
+	dir, transcript := setupFindingsBranch(t)
+	findingsBranchTrailHead = func(context.Context, string, string) (string, bool) {
+		return "1111111111111111111111111111111111111111", true
+	}
+	out := runFindingsTurn(t, continuingMockAgent{newMockAgent()}, "test-findings-unpushed", transcript, func() {
+		commitChange(t, dir)
+	})
+	assert.Empty(t, out, "the server's head is not HEAD, so HEAD was not pushed")
 }
