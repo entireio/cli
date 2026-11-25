@@ -1485,3 +1485,22 @@ func TestRunReview_TrailQuotesOnlyFilesPresentBeforeTheReview(t *testing.T) {
 		t.Error("notes.txt is in the scope, though the reviewer wrote it during the run")
 	}
 }
+
+// TestRunReview_CommittedConfigStillNeedsHooks: a reviewer config in the
+// committed project settings is dropped (only developer-owned layers may set
+// one), so it can't be used to skip the hook check.
+func TestRunReview_CommittedConfigStillNeedsHooks(t *testing.T) {
+	setupCmdTestRepo(t)
+	testutil.WriteFile(t, ".", ".entire/settings.json", `{"enabled":true,"review_default_profile":"general","review_profiles":{"general":{"task":"t","agents":{"codex":{"config":{}}}}}}`)
+
+	rootCmd := cli.NewRootCmd()
+	errBuf := &bytes.Buffer{}
+	rootCmd.SetErr(errBuf)
+	rootCmd.SetArgs([]string{"review", "general"})
+	if err := rootCmd.Execute(); err == nil {
+		t.Fatal("expected an error: hooks are not installed and the committed config is dropped")
+	}
+	if !strings.Contains(errBuf.String(), "hooks are not installed") && !strings.Contains(errBuf.String(), "Hooks are not installed") {
+		t.Errorf("expected a hooks-not-installed error, got: %s", errBuf.String())
+	}
+}

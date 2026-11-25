@@ -56,6 +56,9 @@ func prepareCodexReviewConfig(ctx context.Context, cfg reviewtypes.RunConfig) (r
 	// session-flag hooks only with persisted trust or this bypass; it does
 	// not load the checkout's hooks, which stay untrusted.
 	cfg.ExtraArgs = append(cfg.ExtraArgs, entireHookOverrides(agent.UseWindowsProductionHooks(ctx))...)
+	// The user's own Codex config still loads; Entire hooks there would
+	// fire alongside the session-flag ones, so they are disabled for the run.
+	cfg.ExtraArgs = append(cfg.ExtraArgs, userEntireHookStateOverride(ctx)...)
 	cfg.ExtraArgs = append(cfg.ExtraArgs, "--dangerously-bypass-hook-trust")
 	cfg.WorkDir = run.CheckoutRoot
 	return cfg, nil, nil

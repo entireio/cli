@@ -172,7 +172,7 @@ own config with nothing extra, or load a JSON file) or
 | Agent | Checkout config dropped | Profile config applied | Still loaded from the checkout |
 |---|---|---|---|
 | Claude Code | `--setting-sources user`, `--strict-mcp-config` | `settings` (with Entire's tracking hooks added) via `--settings`; `mcp_servers` via `--mcp-config` | CLAUDE.md; `.claude/skills` and `.claude/commands`, copied from the committed tree as the `project` plugin (`/review` becomes `/project:review`); symlinks and submodules there are skipped, not followed (the trust gate lists them as not inspected) |
-| Codex | checkout and main repo marked untrusted for the run (project config, hooks, rules) | `mcp_servers` via `-c` (`command`, `args`, `url` and `default_tools_approval_mode`; other fields and literal `env` values are refused, and so is a server name the user's `~/.codex/config.toml` already defines, since Codex would merge the two); Entire's tracking hooks via `-c` with `--dangerously-bypass-hook-trust`, which also runs the user's own untrusted hooks (Codex keeps hooks per config layer, so these are added beside the user's `config.toml` hooks, not in place of them) | AGENTS.md; skills |
+| Codex | checkout and main repo marked untrusted for the run (project config, hooks, rules) | `mcp_servers` via `-c` (`command`, `args`, `url` and `default_tools_approval_mode`; other fields and literal `env` values are refused, and so is a server name the user's `~/.codex/config.toml` already defines, since Codex would merge the two); Entire's tracking hooks via `-c` with `--dangerously-bypass-hook-trust`, which also runs the user's own untrusted hooks (Codex keeps hooks per config layer, so these are added beside the user's `config.toml` hooks, not in place of them); Entire's own hooks in the user's `$CODEX_HOME/hooks.json` and `config.toml` are disabled for the run with one `-c hooks.state` override so events don't fire twice | AGENTS.md; skills |
 | Pi | `--no-extensions` | `extensions` via `--extension`, plus Entire's own | AGENTS.md/CLAUDE.md, skills, prompt templates, `.pi/settings.json` |
 
 Rules:
@@ -203,6 +203,11 @@ Rules:
   `"default_tools_approval_mode": "approve"` on the server for Codex, whose
   exec mode can't ask. Both report blocked calls, and the run prints them
   after the reviewer finishes with where to allow them.
+- **No checkout hooks needed.** Each isolated run registers Entire's tracking
+  hooks itself, so a reviewer with its own config runs even when this
+  checkout doesn't have that agent's hooks installed. An agent without a
+  review runner adapter (manual marker fallback) applies no config and still
+  needs them.
 - **Fail, don't fall back.** An agent that can't apply a field (Codex
   `settings`, Pi `mcp_servers`, …) fails the review with an explanation.
 - **Gate.** Skills and commands can run their own commands, so reviewing

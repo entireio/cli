@@ -1078,22 +1078,17 @@ func promptForReviewJudgeAgent(ctx context.Context, choices []AgentChoice, saved
 }
 
 // ComputeEligibleConfiguredForProfile returns the sorted list of agents in a
-// profile that are both configured and have hooks installed.
-func ComputeEligibleConfiguredForProfile(profile settings.ReviewProfileConfig, installed []types.AgentName) []AgentChoice {
-	return eligibleAgentChoices(profile.Agents, installed)
+// profile that are configured and can be tracked: hooks installed, or an
+// isolated reviewer that registers Entire's hooks itself (see
+// reviewerHooksReady).
+func ComputeEligibleConfiguredForProfile(profile settings.ReviewProfileConfig, installed []types.AgentName, reviewerFor func(string) reviewtypes.AgentReviewer) []AgentChoice {
+	return eligibleAgentChoices(profile.Agents, reviewerHooksReady(installed, reviewerFor))
 }
 
-func eligibleAgentChoices(configured map[string]settings.ReviewConfig, installed []types.AgentName) []AgentChoice {
-	installedSet := make(map[types.AgentName]struct{}, len(installed))
-	for _, name := range installed {
-		installedSet[name] = struct{}{}
-	}
+func eligibleAgentChoices(configured map[string]settings.ReviewConfig, ready func(string, settings.ReviewConfig) bool) []AgentChoice {
 	out := make([]AgentChoice, 0, len(configured))
 	for name, cfg := range configured {
-		if cfg.IsZero() {
-			continue
-		}
-		if _, ok := installedSet[types.AgentName(reviewAgentName(name, cfg))]; !ok {
+		if cfg.IsZero() || !ready(name, cfg) {
 			continue
 		}
 		out = append(out, AgentChoice{Name: name, Label: labelForAgentChoice(name, cfg)})
@@ -1128,7 +1123,7 @@ func computeLaunchableEligibleForProfile(
 	installed []types.AgentName,
 	reviewerFor func(string) reviewtypes.AgentReviewer,
 ) []AgentChoice {
-	eligible := ComputeEligibleConfiguredForProfile(profile, installed)
+	eligible := ComputeEligibleConfiguredForProfile(profile, installed, reviewerFor)
 	return filterLaunchableEligibleForProfile(profile, eligible, reviewerFor)
 }
 

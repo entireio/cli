@@ -171,8 +171,10 @@ type codexHooksListResponse struct {
 }
 
 type codexHookMetadata struct {
+	Key        string `json:"key"`
 	Command    string `json:"command"`
 	SourcePath string `json:"sourcePath"`
+	Enabled    bool   `json:"enabled"`
 }
 
 func listCodexHooks(t *testing.T, codexPath, cwd string) codexHooksListResponse {
@@ -183,9 +185,16 @@ func listCodexHooks(t *testing.T, codexPath, cwd string) codexHooksListResponse 
 	codexHome := t.TempDir()
 	config := fmt.Sprintf("[features]\nhooks = true\n\n[projects.%q]\ntrust_level = \"trusted\"\n", cwd)
 	testutil.WriteFile(t, codexHome, "config.toml", config)
-	cmd := exec.CommandContext(ctx, codexPath, "app-server")
+	return listCodexHooksWith(ctx, t, codexPath, cwd, []string{"CODEX_HOME=" + codexHome}, nil)
+}
+
+// listCodexHooksWith runs hooks/list against an app-server started with the
+// given extra environment and config arguments (-c ...).
+func listCodexHooksWith(ctx context.Context, t *testing.T, codexPath, cwd string, env, args []string) codexHooksListResponse {
+	t.Helper()
+	cmd := exec.CommandContext(ctx, codexPath, append([]string{"app-server"}, args...)...)
 	cmd.Dir = cwd
-	cmd.Env = append(testutil.GitIsolatedEnv(), "CODEX_HOME="+codexHome)
+	cmd.Env = append(testutil.GitIsolatedEnv(), env...)
 
 	stdin, err := cmd.StdinPipe()
 	require.NoError(t, err)
