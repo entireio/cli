@@ -53,6 +53,12 @@ When multiple sessions are ACTIVE in the same directory and one session's agent 
 
 **Workaround:** Use separate git worktrees for concurrent sessions. A commit condenses the sessions with pending work in its own worktree (plus any session whose agent process made the commit), so sessions in different worktrees don't interfere.
 
+## Live Sessions
+
+### Teammates' Live Sessions Name Only Overlapping Files
+
+With the stream plugin installed, each turn's context names teammates' live sessions in the repo, but names files only where a session overlaps files this checkout has already changed: entire-api returns a session's edited files only for a list filtered by paths. For any other file the agent is told to run `entire stream list --live --touching -- <file>` before editing it. A list that returned each session's edited files without a filter would let the context name them directly (see [External commands](architecture/external-commands.md#teammates-live-sessions-in-the-turn-start-context)).
+
 ## Upgrades and Downgrades
 
 ### Downgrading Discards Pending Agent Work

@@ -32,18 +32,19 @@ import (
 // Teammates' live sessions in the turn-start context.
 //
 // When the stream plugin is installed, a detached child
-// (`entire __refresh_live_sessions`) runs `entire stream list --live
-// --touching --json` in the worktree and keeps a small cache under the git
-// common dir: the repo's live sessions that edited a file changed in this
-// worktree, and which. TurnStart reads that cache (never the network) and,
-// when the set differs from what the session was last told, adds one block
-// naming those sessions and their files to the turn's context injection.
+// (`entire __refresh_live_sessions`) asks it two things and keeps the
+// answers in a small cache under the git common dir: which sessions are live
+// in this repo (`entire stream list --live --json`), and which of them
+// edited a file this worktree has changed (`... --touching --json`, which
+// without paths asks about the working tree's changes; entire-api fills a
+// session's files only for a list asked with that filter, so the cache is
+// per worktree). TurnStart reads the cache (never the network) and, when
+// the set differs from what the session was last told, adds one block
+// naming the other live sessions, their overlaps with this checkout, and
+// the command that checks a file before it is edited.
 //
-// --touching is what makes the list useful here: entire-api fills a
-// session's touching paths only for a list asked with the filter, and
-// without paths entire-stream asks about the files changed in the working
-// tree. So the cache is per worktree, and names the files where this
-// checkout and a teammate's live session overlap.
+// Follow-up: a list that gave each session's edited files without a filter
+// would let the block name the files directly, with no check per edit.
 
 const (
 	// liveSessionsPluginName is the managed plugin whose list the refresh runs.
@@ -62,7 +63,7 @@ const (
 
 	// What the cache keeps.
 	liveSessionsCacheSessionsMax = 20
-	liveSessionsCacheTouchingMax = 20
+	liveSessionsCacheOverlapMax  = 20
 
 	// What the block shows.
 	liveSessionsShownMax      = 3
@@ -76,17 +77,21 @@ const (
 	liveSessionsCacheDir = spawnMarkerDirName + "/live-sessions"
 )
 
-// liveSessionsRefreshTimeout bounds the refresh child's run of the plugin,
-// which itself runs `entire auth token`, `entire repo view` and one HTTPS
-// request. A var so tests can shorten it.
+// liveSessionsRefreshTimeout bounds the refresh child's runs of the plugin,
+// both queries together; each run itself spawns `entire auth token` and
+// `entire repo view` and makes one HTTPS request. A var so tests can shorten
+// it.
 var liveSessionsRefreshTimeout = 5 * time.Second
 
-// liveSessionsCache is the refresh child's record of the live sessions. It
-// never holds a session's first prompt: only who, which agent, and which of
-// this worktree's changed files the session edited.
+// liveSessionsCache is the refresh child's record of the repo's live
+// sessions. It never holds a session's first prompt: only who, which agent,
+// and which of this worktree's changed files the session edited.
 type liveSessionsCache struct {
-	FetchedAt time.Time          `json:"fetched_at"`
-	Sessions  []liveSessionEntry `json:"sessions"`
+	FetchedAt time.Time `json:"fetched_at"`
+	// OverlapKnown records that the overlap query succeeded; without it the
+	// sessions are known to be live but not what they overlap.
+	OverlapKnown bool               `json:"overlap_known,omitempty"`
+	Sessions     []liveSessionEntry `json:"sessions"`
 }
 
 type liveSessionEntry struct {
@@ -95,12 +100,13 @@ type liveSessionEntry struct {
 	Login     string `json:"login,omitempty"`
 	Label     string `json:"label,omitempty"`
 	// You marks a session of the caller's own account.
-	You bool `json:"you,omitempty"`
-	// Touching is at most liveSessionsCacheTouchingMax of the files it edited;
-	// TouchingTotal counts them all.
-	Touching      []string  `json:"touching"`
-	TouchingTotal int       `json:"touching_total"`
-	LastEventAt   time.Time `json:"last_event_at,omitzero"`
+	You         bool      `json:"you,omitempty"`
+	LastEventAt time.Time `json:"last_event_at,omitzero"`
+	// Overlap is at most liveSessionsCacheOverlapMax of the files this
+	// worktree has changed that the session edited; OverlapTotal counts them
+	// all.
+	Overlap      []string `json:"overlap,omitempty"`
+	OverlapTotal int      `json:"overlap_total,omitempty"`
 }
 
 // liveSessionsCacheName is the cache's name under the git common dir for the
@@ -239,9 +245,11 @@ func newRefreshLiveSessionsCmd() *cobra.Command {
 	}
 }
 
-// runLiveSessionsRefresh runs the stream plugin's live list and saves what
-// the injection needs. Best-effort: it runs detached with nobody watching, so
-// every failure is logged at debug and leaves the previous cache as it was.
+// runLiveSessionsRefresh runs the stream plugin's two live lists and saves
+// what the injection needs. Best-effort: it runs detached with nobody
+// watching, so every failure is logged at debug. A failed live list leaves
+// the previous cache as it was; a failed overlap query keeps the live list
+// without overlaps. Both share liveSessionsRefreshTimeout.
 func runLiveSessionsRefresh(ctx context.Context) error {
 	logCtx := logging.WithComponent(ctx, "live-sessions-refresh")
 	if !settings.IsSetUpAndEnabled(ctx) {
@@ -258,16 +266,18 @@ func runLiveSessionsRefresh(ctx context.Context) error {
 		logging.Debug(logCtx, "live sessions refresh skipped", "error", err.Error())
 		return nil
 	}
-	out, err := runLiveSessionsList(ctx, bin, worktreeRoot)
+	runCtx, cancel := context.WithTimeout(ctx, liveSessionsRefreshTimeout)
+	defer cancel()
+	live, err := queryLiveSessions(runCtx, bin, worktreeRoot, false)
 	if err != nil {
 		logging.Debug(logCtx, "live sessions refresh failed", "error", err.Error())
 		return nil
 	}
-	c, err := parseLiveSessionsList(out)
+	overlaps, err := queryLiveSessions(runCtx, bin, worktreeRoot, true)
 	if err != nil {
-		logging.Debug(logCtx, "live sessions refresh failed", "error", err.Error())
-		return nil
+		logging.Debug(logCtx, "live sessions overlap query failed", "error", err.Error())
 	}
+	c := mergeLiveSessions(live, overlaps, err == nil)
 	c.FetchedAt = time.Now().UTC()
 	if err := saveLiveSessionsCache(ctx, c); err != nil {
 		logging.Debug(logCtx, "live sessions refresh failed to save", "error", err.Error())
@@ -292,26 +302,29 @@ func liveSessionsPluginBinary() (string, bool) {
 	return bin, true
 }
 
-// runLiveSessionsList runs `entire-stream list --live --touching --json` in
-// worktreeRoot, with the environment a dispatched plugin gets, and returns
-// its stdout. A non-zero exit, a timeout, or more than liveSessionsOutputMax
-// of output is an error.
-func runLiveSessionsList(ctx context.Context, bin, worktreeRoot string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, liveSessionsRefreshTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, bin, "list", "--live", "--touching", "--json")
+// queryLiveSessions runs `entire-stream list --live [--touching] --json` in
+// worktreeRoot, with the environment a dispatched plugin gets, and parses
+// its output. A non-zero exit, ctx's deadline, more than
+// liveSessionsOutputMax of output, or output that isn't the list is an
+// error.
+func queryLiveSessions(ctx context.Context, bin, worktreeRoot string, touching bool) ([]liveListSession, error) {
+	args := []string{cmdList, "--live", "--json"}
+	if touching {
+		args = []string{cmdList, "--live", "--touching", "--json"}
+	}
+	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Dir = worktreeRoot
 	cmd.Env = pluginRunEnv(ctx, liveSessionsPluginName)
 	cmd.WaitDelay = time.Second
 	out := &limitedBuffer{max: liveSessionsOutputMax}
 	cmd.Stdout = out
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("run %s list --live: %w", filepath.Base(bin), err)
+		return nil, fmt.Errorf("run %s %s: %w", filepath.Base(bin), strings.Join(args, " "), err)
 	}
 	if out.overflow {
 		return nil, errors.New("live list output too large")
 	}
-	return out.Bytes(), nil
+	return parseLiveSessionsList(out.Bytes())
 }
 
 // limitedBuffer keeps at most max bytes and notes any more.
@@ -331,64 +344,94 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// liveListJSON is the part of `entire stream list --live --json` the cache
-// keeps. firstPrompt and entire-stream's "self" are deliberately not read:
-// the prompt is the teammate's text, and "self" is relative to the session
-// that spawned the refresh, while the cache serves every session of the
-// worktree (TurnStart leaves out its own session by ID).
-type liveListJSON struct {
-	Sessions *[]struct {
-		SessionID string `json:"sessionId"`
-		Agent     string `json:"agent"`
-		Owner     *struct {
-			Login *string `json:"login"`
-			Label string  `json:"label"`
-		} `json:"owner"`
-		LastEventAt string   `json:"lastEventAt"`
-		Touching    []string `json:"touching"`
-		You         bool     `json:"you"`
-	} `json:"sessions"`
+// liveListSession is the part of an item of `entire stream list --live
+// --json` the cache keeps. firstPrompt and entire-stream's "self" are
+// deliberately not read: the prompt is the teammate's text, and "self" is
+// relative to the session that spawned the refresh, while the cache serves
+// every session of the worktree (TurnStart leaves out its own session by
+// ID).
+type liveListSession struct {
+	SessionID string `json:"sessionId"`
+	Agent     string `json:"agent"`
+	Owner     *struct {
+		Login *string `json:"login"`
+		Label string  `json:"label"`
+	} `json:"owner"`
+	LastEventAt string   `json:"lastEventAt"`
+	Touching    []string `json:"touching"`
+	You         bool     `json:"you"`
 }
 
-// parseLiveSessionsList turns the plugin's JSON into a cache: the sessions
-// with touching files (at most liveSessionsCacheSessionsMax, each with at most
-// liveSessionsCacheTouchingMax files), their text already cleaned.
-func parseLiveSessionsList(data []byte) (*liveSessionsCache, error) {
-	var list liveListJSON
+// parseLiveSessionsList reads the plugin's {"sessions":[...]}.
+func parseLiveSessionsList(data []byte) ([]liveListSession, error) {
+	var list struct {
+		Sessions *[]liveListSession `json:"sessions"`
+	}
 	if err := json.Unmarshal(data, &list); err != nil {
 		return nil, fmt.Errorf("parse live list: %w", err)
 	}
 	if list.Sessions == nil {
 		return nil, errors.New("parse live list: no sessions key")
 	}
-	c := &liveSessionsCache{Sessions: []liveSessionEntry{}}
-	for _, s := range *list.Sessions {
-		if s.SessionID == "" || len(s.Touching) == 0 || len(c.Sessions) == liveSessionsCacheSessionsMax {
+	return *list.Sessions, nil
+}
+
+// mergeLiveSessions builds the cache from the live list and, when
+// overlapKnown, the overlap list: each live session once (at most
+// liveSessionsCacheSessionsMax, those with overlaps first), with the files
+// the overlap list gave it (at most liveSessionsCacheOverlapMax), its text
+// already cleaned. A session only the overlap list has is live too.
+func mergeLiveSessions(live, overlaps []liveListSession, overlapKnown bool) *liveSessionsCache {
+	files := map[string][]string{}
+	for _, s := range overlaps {
+		files[s.SessionID] = append(files[s.SessionID], s.Touching...)
+	}
+	var withOverlap, without []liveSessionEntry
+	seen := map[string]bool{}
+	for _, s := range slices.Concat(live, overlaps) {
+		if s.SessionID == "" || seen[s.SessionID] {
 			continue
 		}
-		e := liveSessionEntry{
-			SessionID:     s.SessionID,
-			Agent:         liveSessionText(s.Agent, liveSessionsAgentMax),
-			You:           s.You,
-			TouchingTotal: len(s.Touching),
+		seen[s.SessionID] = true
+		e := liveSessionEntryFrom(s, files[s.SessionID])
+		if len(e.Overlap) > 0 {
+			withOverlap = append(withOverlap, e)
+		} else {
+			without = append(without, e)
 		}
-		if s.Owner != nil {
-			if s.Owner.Login != nil {
-				e.Login = liveSessionText(*s.Owner.Login, liveSessionsLoginMax)
-			}
-			e.Label = liveSessionText(s.Owner.Label, liveSessionsLoginMax)
-		}
-		if t, err := time.Parse(time.RFC3339Nano, s.LastEventAt); err == nil {
-			e.LastEventAt = t.UTC()
-		}
-		for _, p := range s.Touching[:min(len(s.Touching), liveSessionsCacheTouchingMax)] {
-			if p = liveSessionText(p, liveSessionsPathMax); p != "" {
-				e.Touching = append(e.Touching, p)
-			}
-		}
-		c.Sessions = append(c.Sessions, e)
 	}
-	return c, nil
+	all := slices.Concat(withOverlap, without)
+	return &liveSessionsCache{
+		OverlapKnown: overlapKnown,
+		Sessions:     append([]liveSessionEntry{}, all[:min(len(all), liveSessionsCacheSessionsMax)]...),
+	}
+}
+
+// liveSessionEntryFrom is s as the cache keeps it, with overlap as its files.
+func liveSessionEntryFrom(s liveListSession, overlap []string) liveSessionEntry {
+	e := liveSessionEntry{
+		SessionID: s.SessionID,
+		Agent:     liveSessionText(s.Agent, liveSessionsAgentMax),
+		You:       s.You,
+	}
+	if s.Owner != nil {
+		if s.Owner.Login != nil {
+			e.Login = liveSessionText(*s.Owner.Login, liveSessionsLoginMax)
+		}
+		e.Label = liveSessionText(s.Owner.Label, liveSessionsLoginMax)
+	}
+	if t, err := time.Parse(time.RFC3339Nano, s.LastEventAt); err == nil {
+		e.LastEventAt = t.UTC()
+	}
+	for _, p := range overlap {
+		if p = liveSessionText(p, liveSessionsPathMax); p != "" && !slices.Contains(e.Overlap, p) {
+			e.OverlapTotal++
+			if len(e.Overlap) < liveSessionsCacheOverlapMax {
+				e.Overlap = append(e.Overlap, p)
+			}
+		}
+	}
+	return e
 }
 
 // liveSessionText makes a teammate's text safe to quote in the agent's
@@ -425,17 +468,22 @@ type liveSessionsBlock struct {
 	// or older than liveSessionsMaxAge): the session's record of what it was
 	// told stays as it is.
 	Known bool
-	// Text is the block to inject, "" when no teammate's session is editing
-	// this worktree's files.
+	// Text is the block to inject, "" when no other session is live.
 	Text string
-	// Fingerprint identifies the sessions and files Text names, "" with Text.
+	// Fingerprint identifies the sessions and overlaps Text names, "" with
+	// Text.
 	Fingerprint string
 }
 
+// liveSessionsCheckInstruction tells the agent how to check a file before an
+// edit: the cache knows only the files this checkout has already changed.
+const liveSessionsCheckInstruction = "Before you edit a file, run `entire stream list --live --touching -- <file>`; " +
+	"if it lists one of these sessions, tell the user who is working on it and ask whether to go ahead."
+
 // liveSessionsBlockFor builds the block for the session ownID from cache:
-// every session but ownID with files, newest first, at most
-// liveSessionsShownMax of them with at most liveSessionsShownFilesMax files
-// each, the rest counted.
+// every other live session, those overlapping this checkout's changes first
+// and then the newest, at most liveSessionsShownMax of them with at most
+// liveSessionsShownFilesMax overlapping files each, the rest counted.
 func liveSessionsBlockFor(cache *liveSessionsCache, ownID string, now time.Time) liveSessionsBlock {
 	if !liveSessionsCacheFresh(cache, now, liveSessionsMaxAge) {
 		return liveSessionsBlock{}
@@ -446,37 +494,38 @@ func liveSessionsBlockFor(cache *liveSessionsCache, ownID string, now time.Time)
 	}
 	var sessions []shown
 	for _, e := range cache.Sessions {
-		if e.SessionID == ownID {
+		if e.SessionID == "" || e.SessionID == ownID {
 			continue
 		}
 		var files []string
-		for _, p := range e.Touching {
+		for _, p := range e.Overlap {
 			if p = liveSessionText(p, liveSessionsPathMax); p != "" {
 				files = append(files, p)
 			}
 		}
-		if len(files) > 0 {
-			sessions = append(sessions, shown{e, files})
-		}
+		sessions = append(sessions, shown{e, files})
 	}
 	if len(sessions) == 0 {
 		return liveSessionsBlock{Known: true}
 	}
 	slices.SortFunc(sessions, func(a, b shown) int {
+		// Overlapping sessions first: their files are the ones to raise now.
+		if c := cmp.Compare(min(len(b.files), 1), min(len(a.files), 1)); c != 0 {
+			return c
+		}
 		if c := b.entry.LastEventAt.Compare(a.entry.LastEventAt); c != 0 {
 			return c
 		}
 		return cmp.Compare(a.entry.SessionID, b.entry.SessionID)
 	})
 
-	fp := sha256.New()
-	ids := make([]string, 0, len(sessions))
+	keys := make([]string, 0, len(sessions))
 	for _, s := range sessions {
 		files := slices.Sorted(slices.Values(s.files))
-		ids = append(ids, fmt.Sprintf("%s\x00%d\x00%s", s.entry.SessionID, s.entry.TouchingTotal, strings.Join(files, "\x00")))
+		keys = append(keys, fmt.Sprintf("%s\x00%d\x00%s", s.entry.SessionID, s.entry.OverlapTotal, strings.Join(files, "\x00")))
 	}
-	slices.Sort(ids)
-	fp.Write([]byte(strings.Join(ids, "\x01")))
+	slices.Sort(keys)
+	fp := sha256.Sum256([]byte(strings.Join(keys, "\x01")))
 
 	clauses := make([]string, 0, liveSessionsShownMax)
 	for _, s := range sessions[:min(len(sessions), liveSessionsShownMax)] {
@@ -491,8 +540,8 @@ func liveSessionsBlockFor(cache *liveSessionsCache, ownID string, now time.Time)
 	} else if more > 1 {
 		fmt.Fprintf(&b, " +%d more sessions.", more)
 	}
-	b.WriteString(" Before you edit one of those files, tell the user who is working on it and ask whether to go ahead.")
-	return liveSessionsBlock{Known: true, Text: b.String(), Fingerprint: hex.EncodeToString(fp.Sum(nil))}
+	b.WriteString(" " + liveSessionsCheckInstruction)
+	return liveSessionsBlock{Known: true, Text: b.String(), Fingerprint: hex.EncodeToString(fp[:])}
 }
 
 // liveSessionClause is one session's part of the block, files already clean.
@@ -509,7 +558,10 @@ func liveSessionClause(e liveSessionEntry, files []string) string {
 	if agentName := liveSessionText(e.Agent, liveSessionsAgentMax); agentName != "" {
 		b.WriteString(" (" + agentName + ")")
 	}
-	b.WriteString(" is editing ")
+	if len(files) == 0 {
+		return b.String()
+	}
+	b.WriteString(", already overlapping your changes: ")
 	shownFiles := files[:min(len(files), liveSessionsShownFilesMax)]
 	for i, f := range shownFiles {
 		if i > 0 {
@@ -517,7 +569,7 @@ func liveSessionClause(e liveSessionEntry, files []string) string {
 		}
 		b.WriteString("`" + f + "`")
 	}
-	if more := max(e.TouchingTotal, len(files)) - len(shownFiles); more > 0 {
+	if more := max(e.OverlapTotal, len(files)) - len(shownFiles); more > 0 {
 		fmt.Fprintf(&b, " (+%d more)", more)
 	}
 	return b.String()
