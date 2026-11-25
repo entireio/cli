@@ -20,9 +20,23 @@ const (
 	shardCaseFoldedRef = "refs/entire/checkpoints/6b/01M2DCHJCHTR9T9MZTSB7WV76B"
 )
 
+// shardCaseRepo is a repository on which git recorded a case-sensitive
+// filesystem, so the report covers refs some other filesystem folded. The
+// checks for a case-insensitive one use foldingShardCaseRepo.
 func shardCaseRepo(t *testing.T) (string, string) {
 	t.Helper()
+	return shardCaseRepoWithIgnoreCase(t, "false")
+}
+
+func foldingShardCaseRepo(t *testing.T) (string, string) {
+	t.Helper()
+	return shardCaseRepoWithIgnoreCase(t, "true")
+}
+
+func shardCaseRepoWithIgnoreCase(t *testing.T, ignoreCase string) (string, string) {
+	t.Helper()
 	dir := setupGitRepoForPhaseTest(t)
+	testutil.RunGit(t, dir, "config", "core.ignorecase", ignoreCase)
 	testutil.WriteFile(t, dir, "README.md", "# test")
 	testutil.GitAdd(t, dir, "README.md")
 	testutil.GitCommit(t, dir, "init")
@@ -38,7 +52,7 @@ func TestCheckCheckpointRefShardCase_ReportsFoldedRef(t *testing.T) {
 	testutil.GitUpdateRef(t, dir, shardCaseFoldedRef, head)
 
 	cmd, stdout := newTestCmd(t)
-	checkCheckpointRefShardCase(cmd)
+	checkCheckpointRefShardCase(cmd, false)
 
 	output := stdout.String()
 	assert.Contains(t, output, "FOLDED SHARD DIRECTORY")
@@ -57,7 +71,7 @@ func TestCheckCheckpointRefShardCase_ReportsSplitCheckpoint(t *testing.T) {
 	testutil.GitUpdateRef(t, dir, shardCaseULIDRef, head)
 
 	cmd, stdout := newTestCmd(t)
-	checkCheckpointRefShardCase(cmd)
+	checkCheckpointRefShardCase(cmd, false)
 
 	output := stdout.String()
 	assert.Contains(t, output, "SPLIT ACROSS SHARD SPELLINGS")
@@ -86,7 +100,7 @@ func TestCheckCheckpointRefShardCase_NamesTheEarlierRefOfASplit(t *testing.T) {
 			testutil.RunGit(t, dir, "pack-refs", "--all")
 
 			cmd, stdout := newTestCmd(t)
-			checkCheckpointRefShardCase(cmd)
+			checkCheckpointRefShardCase(cmd, false)
 
 			output := stdout.String()
 			assert.Contains(t, output, "git update-ref -d "+tc.earlier+" "+head,
@@ -110,7 +124,7 @@ func TestCheckCheckpointRefShardCase_PrintedDeleteKeepsTheLaterVersion(t *testin
 	testutil.GitUpdateRef(t, dir, shardCaseULIDRef, later)
 
 	cmd, stdout := newTestCmd(t)
-	checkCheckpointRefShardCase(cmd)
+	checkCheckpointRefShardCase(cmd, false)
 
 	var printed []string
 	for line := range strings.SplitSeq(stdout.String(), "\n") {
@@ -140,7 +154,7 @@ func TestCheckCheckpointRefShardCase_OffersNoDeleteForDivergedRefs(t *testing.T)
 	testutil.RunGit(t, dir, "pack-refs", "--all")
 
 	cmd, stdout := newTestCmd(t)
-	checkCheckpointRefShardCase(cmd)
+	checkCheckpointRefShardCase(cmd, false)
 
 	output := stdout.String()
 	assert.Contains(t, output, shardCaseFoldedRef)
@@ -154,7 +168,72 @@ func TestCheckCheckpointRefShardCase_SilentOnCanonicalRefs(t *testing.T) {
 	testutil.GitUpdateRef(t, dir, "refs/entire/checkpoints/f6/a1b2c3d4e5f6", head)
 
 	cmd, stdout := newTestCmd(t)
-	checkCheckpointRefShardCase(cmd)
+	checkCheckpointRefShardCase(cmd, false)
 
 	assert.Empty(t, stdout.String(), "a repo whose checkpoint refs all sit at their canonical spelling says nothing")
+}
+
+// On a case-insensitive filesystem the report counts every ref that is not
+// under its lowercase shard, and --force renames them.
+func TestCheckCheckpointRefShardCase_ForceRenamesUppercaseShardRefs(t *testing.T) {
+	dir, head := foldingShardCaseRepo(t)
+	testutil.GitUpdateRef(t, dir, shardCaseULIDRef, head)
+
+	cmd, stdout := newTestCmd(t)
+	checkCheckpointRefShardCase(cmd, true)
+
+	output := stdout.String()
+	assert.Contains(t, output, "UPPERCASE SHARD")
+	assert.Contains(t, output, "Renamed 1 checkpoint ref(s)")
+	assert.Equal(t, shardCaseFoldedRef+" "+head,
+		strings.TrimSpace(testutil.RunGit(t, dir, "for-each-ref", "--format=%(refname) %(objectname)", "refs/entire/checkpoints/")))
+}
+
+// Without --force and without a terminal, the report says how to rename and
+// changes nothing.
+func TestCheckCheckpointRefShardCase_ReportsUppercaseShardRefsWithoutRenaming(t *testing.T) {
+	dir, head := foldingShardCaseRepo(t)
+	testutil.GitUpdateRef(t, dir, shardCaseULIDRef, head)
+
+	cmd, stdout := newTestCmd(t)
+	checkCheckpointRefShardCase(cmd, false)
+
+	output := stdout.String()
+	assert.Contains(t, output, "UPPERCASE SHARD")
+	assert.Contains(t, output, "entire doctor --force")
+	assert.Equal(t, shardCaseULIDRef+" "+head,
+		strings.TrimSpace(testutil.RunGit(t, dir, "for-each-ref", "--format=%(refname) %(objectname)", "refs/entire/checkpoints/")))
+}
+
+func TestCheckCheckpointRefShardCase_FoldingRepoSilentOnLowercaseRefs(t *testing.T) {
+	dir, head := foldingShardCaseRepo(t)
+	testutil.GitUpdateRef(t, dir, shardCaseFoldedRef, head)
+	testutil.GitUpdateRef(t, dir, "refs/entire/checkpoints/f6/a1b2c3d4e5f6", head)
+
+	cmd, stdout := newTestCmd(t)
+	checkCheckpointRefShardCase(cmd, false)
+
+	assert.Empty(t, stdout.String())
+}
+
+// A diverged legacy checkpoint is named by both of its spellings, not by its
+// lowercase name twice: a legacy ID's canonical name is already lowercase.
+func TestCheckCheckpointRefShardCase_FoldingRepoNamesBothRefsOfADivergedLegacySplit(t *testing.T) {
+	dir, head := foldingShardCaseRepo(t)
+	upper := "refs/entire/checkpoints/F6/a1b2c3d4e5f6"
+	lower := "refs/entire/checkpoints/f6/a1b2c3d4e5f6"
+	testutil.RunGit(t, dir, "commit", "--allow-empty", "-m", "one side")
+	testutil.GitUpdateRef(t, dir, upper, "HEAD")
+	testutil.RunGit(t, dir, "pack-refs", "--all")
+	testutil.GitReset(t, dir, head)
+	testutil.RunGit(t, dir, "commit", "--allow-empty", "-m", "other side")
+	testutil.GitUpdateRef(t, dir, lower, "HEAD")
+	testutil.RunGit(t, dir, "pack-refs", "--all")
+
+	cmd, stdout := newTestCmd(t)
+	checkCheckpointRefShardCase(cmd, false)
+
+	output := stdout.String()
+	assert.Contains(t, output, "SPLIT ACROSS SHARD SPELLINGS")
+	assert.Contains(t, output, "a1b2c3d4e5f6: "+upper+" and "+lower)
 }

@@ -1556,3 +1556,109 @@ func TestCheckpointWaitingAndRefExists_FoldedShardRef(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, waiting, "its queue entry is still waiting to be pushed")
 }
+
+// Pre-push renames this clone's uppercase-shard refs to the lowercase spelling
+// once the push is done, where git recorded a case-insensitive filesystem. The
+// remote still receives, and keeps, the canonical name.
+func TestPrePush_RenamesUppercaseShardRefsAfterPushing(t *testing.T) {
+	workDir := t.TempDir()
+	testutil.InitRepo(t, workDir)
+	testutil.RunGit(t, workDir, "config", "core.ignorecase", "true")
+	testutil.RunGit(t, workDir, "commit", "--allow-empty", "-m", "checkpoint")
+	tip := revParse(t, workDir, "HEAD")
+	cid := id.MustCheckpointID("01M2DCHJCHTR9T9MZTSB7WV76B")
+	canonical := mustRefName(t, cid)
+	testutil.RunGit(t, workDir, "update-ref", canonical.String(), tip)
+	bareDir := t.TempDir()
+	testutil.RunGit(t, bareDir, "init", "--bare")
+	prepareGitRefsPrePush(t, workDir, bareDir)
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	enqueueRefs(t, repo, []plumbing.ReferenceName{canonical})
+	repo.Close()
+
+	restore := captureStderr(t)
+	err = NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin")
+	restore()
+	require.NoError(t, err)
+
+	assert.Equal(t, map[plumbing.ReferenceName]string{canonical: tip}, remoteCheckpointRefs(t, bareDir, cid),
+		"the remote keeps the canonical name")
+	local := testutil.RunGit(t, workDir, "for-each-ref", "--format=%(refname) %(objectname)", checkpoint.CheckpointRefPrefix)
+	assert.Equal(t, "refs/entire/checkpoints/6b/01M2DCHJCHTR9T9MZTSB7WV76B "+tip, strings.TrimSpace(local),
+		"this clone stores the checkpoint under the lowercase shard only")
+}
+
+// The rename is local housekeeping, so it runs on a push that sends no
+// checkpoints too, such as one held back by the manual policy.
+func TestPrePush_RenamesUppercaseShardRefsUnderTheManualPolicy(t *testing.T) {
+	workDir := t.TempDir()
+	testutil.InitRepo(t, workDir)
+	testutil.RunGit(t, workDir, "config", "core.ignorecase", "true")
+	testutil.RunGit(t, workDir, "commit", "--allow-empty", "-m", "checkpoint")
+	tip := revParse(t, workDir, "HEAD")
+	canonical := mustRefName(t, id.MustCheckpointID("01M2DCHJCHTR9T9MZTSB7WV76B"))
+	testutil.RunGit(t, workDir, "update-ref", canonical.String(), tip)
+	policyFile := filepath.Join(workDir, ".git", filepath.FromSlash(settings.CheckpointPushPolicyFile))
+	require.NoError(t, os.MkdirAll(filepath.Dir(policyFile), 0o755))
+	require.NoError(t, os.WriteFile(policyFile, []byte("manual\n"), 0o600))
+	bareDir := t.TempDir()
+	testutil.RunGit(t, bareDir, "init", "--bare")
+	prepareGitRefsPrePush(t, workDir, bareDir)
+
+	restore := captureStderr(t)
+	err := NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin")
+	restore()
+	require.NoError(t, err)
+
+	assert.Empty(t, strings.TrimSpace(testutil.RunGit(t, bareDir, "for-each-ref", "refs/entire/")), "manual must not push")
+	local := testutil.RunGit(t, workDir, "for-each-ref", "--format=%(refname) %(objectname)", checkpoint.CheckpointRefPrefix)
+	assert.Equal(t, "refs/entire/checkpoints/6b/01M2DCHJCHTR9T9MZTSB7WV76B "+tip, strings.TrimSpace(local))
+}
+
+// The rename is local housekeeping, so it also runs on a push that Entire
+// sends no checkpoints with at all: one with push_sessions off, and one to a
+// remote that is not the elected checkpoint sync remote.
+func TestPrePush_RenamesUppercaseShardRefsWhenCheckpointsAreNotPushed(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		remote string
+		setup  func(t *testing.T, workDir, bareDir string)
+	}{
+		{"push_sessions off", "origin", func(t *testing.T, workDir, _ string) {
+			t.Helper()
+			testutil.WriteFile(t, workDir, ".entire/settings.json",
+				`{"enabled": true, "strategy_options": {"push_sessions": false}}`)
+		}},
+		{"push to a remote that is not elected", "publish", func(t *testing.T, workDir, _ string) {
+			t.Helper()
+			publishDir := t.TempDir()
+			testutil.RunGit(t, publishDir, "init", "--bare")
+			testutil.AddRemote(t, workDir, "publish", publishDir)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workDir := t.TempDir()
+			testutil.InitRepo(t, workDir)
+			testutil.RunGit(t, workDir, "config", "core.ignorecase", "true")
+			testutil.RunGit(t, workDir, "commit", "--allow-empty", "-m", "checkpoint")
+			tip := revParse(t, workDir, "HEAD")
+			canonical := mustRefName(t, id.MustCheckpointID("01M2DCHJCHTR9T9MZTSB7WV76B"))
+			testutil.RunGit(t, workDir, "update-ref", canonical.String(), tip)
+			bareDir := t.TempDir()
+			testutil.RunGit(t, bareDir, "init", "--bare")
+			prepareGitRefsPrePush(t, workDir, bareDir)
+			tc.setup(t, workDir, bareDir)
+
+			restore := captureStderr(t)
+			err := NewManualCommitStrategy().PrePushFromGitHook(t.Context(), tc.remote)
+			restore()
+			require.NoError(t, err)
+
+			assert.Empty(t, strings.TrimSpace(testutil.RunGit(t, bareDir, "for-each-ref", "refs/entire/")), "no checkpoint is pushed")
+			local := testutil.RunGit(t, workDir, "for-each-ref", "--format=%(refname) %(objectname)", checkpoint.CheckpointRefPrefix)
+			assert.Equal(t, "refs/entire/checkpoints/6b/01M2DCHJCHTR9T9MZTSB7WV76B "+tip, strings.TrimSpace(local))
+		})
+	}
+}

@@ -27,7 +27,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
-	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -1002,12 +1001,14 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	}
 
 	// Detect file changes via git status. captureDegraded tracks whether any
-	// status scan feeding this turn breached its budget, so the marker
-	// persisted at turn end reflects the whole turn, not just this walk.
+	// status scan feeding this turn failed or breached its budget, so the
+	// marker persisted at turn end reflects the whole turn, not just this walk.
+	// A failed walk here leaves only transcript-derived files, which miss
+	// shell-made changes and deletions.
 	captureDegraded := preState != nil && preState.UntrackedScanSkipped
 	changes, err := DetectFileChanges(ctx, preUntrackedFiles)
 	if err != nil {
-		captureDegraded = captureDegraded || errors.Is(err, gitrepo.ErrStatusBudgetExceeded)
+		captureDegraded = true
 		logStatusDegrade(logCtx, "failed to compute file changes", err)
 	}
 	if changes != nil && preState != nil && preState.UntrackedScanSkipped {
@@ -2906,10 +2907,10 @@ func resolveTranscriptOffset(ctx context.Context, preState *PrePromptState, sess
 }
 
 // recordCaptureDegraded persists (or clears) the capture-degraded timestamp on
-// session state at turn end, so a status-budget breach is visible in
-// `entire status` instead of only in .entire/logs. A healthy turn clears it —
-// the marker means "the LAST turn degraded", not "some turn once did". Skips
-// the state write when nothing changes, which is the common case.
+// session state at turn end, so a failed or budget-breached status scan is
+// visible in `entire status` instead of only in .entire/logs. A healthy turn
+// clears it — the marker means "the LAST turn degraded", not "some turn once
+// did". Skips the state write when nothing changes, which is the common case.
 func recordCaptureDegraded(ctx context.Context, sessionID string, degraded bool) {
 	mutErr := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
 		if !degraded && state.CaptureDegradedAt == nil {

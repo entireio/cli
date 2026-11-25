@@ -1,15 +1,19 @@
 package cli
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"sort"
 
+	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/spf13/cobra"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
@@ -26,13 +30,17 @@ import (
 // checkpoint's ref can end up under the other format's spelling. See
 // checkpoint.FoldedRefName.
 //
-// Read-only, and deliberately without a fix command for the misfiled case. On
-// the filesystem that produces the condition, `git update-ref` to the canonical
-// name and `git update-ref -d` on the folded one resolve to the SAME file while
-// the refs are loose, so the pair of commands that looks like a rename is a
-// delete. Entire reads and writes the ref where it actually is, so there is
-// nothing for the user to do.
-func checkCheckpointRefShardCase(cmd *cobra.Command) {
+// Where git recorded a case-insensitive filesystem, every ref belongs under its
+// lowercase shard (checkpoint.LocalRefName), and the check offers to rename the
+// others with checkpoint.NormalizeShardSpelling, which the next push also runs
+// (see reportUppercaseShardRefs). It never prints rename commands to run by
+// hand: there, `git update-ref` to one spelling and `git update-ref -d` on the
+// other resolve to the SAME file while the refs are loose, so the pair of
+// commands that looks like a rename is a delete.
+//
+// Elsewhere the check is read-only. A ref under the other spelling there came
+// from another filesystem, and Entire reads and writes it where it is.
+func checkCheckpointRefShardCase(cmd *cobra.Command, force bool) {
 	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
 
@@ -41,6 +49,16 @@ func checkCheckpointRefShardCase(cmd *cobra.Command) {
 		return // no repository, or unreadable: other checks report that
 	}
 	defer repo.Close()
+
+	if renames, divergedIDs, folds, pendingErr := checkpoint.PendingShardRenames(ctx, repo); folds {
+		if pendingErr != nil {
+			logging.Warn(ctx, "doctor: cannot list checkpoint refs; skipping the checkpoint shard spelling check",
+				slog.String("error", pendingErr.Error()))
+			return
+		}
+		reportUppercaseShardRefs(cmd, repo, renames, divergedIDs, force)
+		return
+	}
 
 	refs, err := repo.References()
 	if err != nil {
@@ -136,4 +154,70 @@ func checkCheckpointRefShardCase(cmd *cobra.Command) {
 		fmt.Fprintln(w, "  'git log --oneline <ref>' before removing either:")
 		printCappedList(w, diverged, func(name string) string { return name })
 	}
+}
+
+// reportUppercaseShardRefs is the shard check where git recorded a
+// case-insensitive filesystem. There every checkpoint ref belongs under its
+// lowercase shard (checkpoint.LocalRefName), and doctor can rename the others
+// safely, which the next push would also do.
+func reportUppercaseShardRefs(cmd *cobra.Command, repo *git.Repository, renames []plumbing.ReferenceName, diverged []id.CheckpointID, force bool) {
+	ctx := cmd.Context()
+	w := cmd.OutOrStdout()
+
+	if len(renames) > 0 {
+		names := make([]string, 0, len(renames))
+		for _, name := range renames {
+			names = append(names, name.String())
+		}
+		fmt.Fprintln(w, "Checkpoint refs: UPPERCASE SHARD NAMES")
+		fmt.Fprintf(w, "  %d checkpoint ref(s) are stored under an uppercase shard directory. On this\n", len(renames))
+		fmt.Fprintln(w, "  filesystem a shard spelled two ways is one directory, which can split a")
+		fmt.Fprintln(w, "  checkpoint across two refs. Entire stores refs under lowercase shards and")
+		fmt.Fprintln(w, "  renames these after the next push:")
+		printCappedList(w, names, func(name string) string { return name })
+		if renameNow(ctx, w, force) {
+			result, err := checkpoint.NormalizeShardSpelling(ctx, repo)
+			if err != nil {
+				fmt.Fprintf(w, "  Renamed %d checkpoint ref(s); the rest keep their names: %v\n", result.Renamed, err)
+			} else {
+				fmt.Fprintf(w, "  Renamed %d checkpoint ref(s).\n", result.Renamed)
+			}
+		}
+	}
+
+	if len(diverged) > 0 {
+		fmt.Fprintln(w, "Checkpoint refs: SPLIT ACROSS SHARD SPELLINGS")
+		fmt.Fprintf(w, "  %d checkpoint(s) have a ref under each spelling of their shard, and the two\n", len(diverged))
+		fmt.Fprintln(w, "  histories diverged, so each holds sessions the other lacks. Compare them")
+		fmt.Fprintln(w, "  with 'git log --oneline <ref>' before removing either:")
+		pairs := make([]string, 0, len(diverged))
+		for _, cid := range diverged {
+			local, err := checkpoint.LocalRefName(cid)
+			if err != nil {
+				continue
+			}
+			if other, ok := checkpoint.OtherShardSpelling(local); ok {
+				pairs = append(pairs, fmt.Sprintf("%s: %s and %s", cid, other, local))
+			}
+		}
+		printCappedList(w, pairs, func(pair string) string { return pair })
+	}
+}
+
+// renameNow reports whether doctor should rename the refs now: with --force, or
+// when the user agrees at the prompt. Without a terminal it says how instead.
+func renameNow(ctx context.Context, w io.Writer, force bool) bool {
+	if force {
+		return true
+	}
+	if !interactive.CanPromptInteractively() {
+		fmt.Fprintln(w, "  Run `entire doctor --force` to rename them now.")
+		return false
+	}
+	proceed, err := confirmDoctorFix(ctx, w, "Rename these checkpoint refs now?")
+	if err != nil {
+		logging.Warn(ctx, "doctor: shard rename prompt failed", slog.String("error", err.Error()))
+		return false
+	}
+	return proceed
 }
