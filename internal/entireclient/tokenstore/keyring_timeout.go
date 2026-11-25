@@ -58,8 +58,13 @@ func keyringTimeout() time.Duration {
 // — this is an additional listener scoped to the keyring call.
 func callKeyringWithTimeout(op string, fn func() (string, error)) (string, error) {
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt)
-	defer signal.Stop(sigCh)
+	// Not when SIGINT was ignored at startup (a background job in a
+	// non-interactive shell): Notify would un-ignore it for this call.
+	// main's handler leaves it ignored then, so Ignored still says so here.
+	if !signal.Ignored(os.Interrupt) {
+		signal.Notify(sigCh, os.Interrupt)
+		defer signal.Stop(sigCh)
+	}
 	return recordInterruptSignal(callKeyringWithInterrupt(op, keyringTimeout(), fn, sigCh))
 }
 

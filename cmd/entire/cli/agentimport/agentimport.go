@@ -338,7 +338,7 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 				// sessions this is where the encrypted payloads would otherwise be
 				// handed to the redaction layers — which then scan megabytes of
 				// base64 ciphertext only for the store to discard it.
-				r, rerr := redact.JSONLBytes(cp.SanitizeTranscriptForAgentType(imp.AgentType(), full))
+				r, rerr := redact.JSONLBytes(cp.DropImagesIfEnabled(ctx, cp.SanitizeTranscriptForAgentType(imp.AgentType(), full)))
 				if rerr != nil {
 					return res, fmt.Errorf("redact %s transcript: %w", sf.SessionID, rerr)
 				}

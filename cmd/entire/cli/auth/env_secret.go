@@ -48,6 +48,33 @@ const (
 	maxExchangeBody = 1 << 20
 )
 
+// SecretExchangeError is a non-200 reply from the ENTIRE_TOKEN secret
+// exchange. Callers that retry use Retryable rather than the message: a refused
+// secret and an unavailable Core otherwise look alike once wrapped.
+type SecretExchangeError struct {
+	Core        string
+	StatusCode  int
+	Code        string // OAuth error code, when the reply carried one
+	Description string
+}
+
+func (e *SecretExchangeError) Error() string {
+	// The request holds the secret, so the error names only the reply.
+	if e.Retryable() {
+		return fmt.Sprintf("%s service account secret exchange unavailable at %s: HTTP %d", EnvTokenVar, e.Core, e.StatusCode)
+	}
+	if e.Code != "" {
+		return fmt.Sprintf("%s service account secret refused by %s: %s: %s", EnvTokenVar, e.Core, e.Code, e.Description)
+	}
+	return fmt.Sprintf("%s service account secret refused by %s: HTTP %d", EnvTokenVar, e.Core, e.StatusCode)
+}
+
+// Retryable reports whether Core failed or throttled the exchange without
+// judging the secret, so repeating it later can succeed.
+func (e *SecretExchangeError) Retryable() bool {
+	return e.StatusCode >= http.StatusInternalServerError || e.StatusCode == http.StatusTooManyRequests
+}
+
 // secretExchangeTransport is the test seam for the exchange round trip.
 var secretExchangeTransport http.RoundTripper
 
@@ -120,7 +147,30 @@ func serviceAccountSecretCacheKey(secret string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return strings.Join([]string{"env-sa", subj.core, subj.accountID}, "|"), nil
+	return serviceAccountIdentityKey(subj.core, subj.accountID), nil
+}
+
+func serviceAccountIdentityKey(core, accountID string) string {
+	return strings.Join([]string{"env-sa", core, accountID}, "|")
+}
+
+// exchangedServiceAccountKey is serviceAccountSecretCacheKey for a token
+// exchanged from a secret, so both forms of one account share local state.
+// It mirrors checkExchangedToken: a svc_ subject and exactly one URL audience.
+func exchangedServiceAccountKey(claims *tokens.UnverifiedClaims) (string, bool) {
+	if !strings.HasPrefix(claims.Subject, "svc_") {
+		return "", false
+	}
+	var cores []string
+	for _, aud := range claims.Audience {
+		if u, err := url.Parse(aud); err == nil && u.Scheme != "" {
+			cores = append(cores, strings.TrimRight(aud, "/"))
+		}
+	}
+	if len(cores) != 1 {
+		return "", false
+	}
+	return serviceAccountIdentityKey(cores[0], claims.Subject), true
 }
 
 // exchangeSubject is everything one service account token exchange needs. A
@@ -255,11 +305,7 @@ func postSecretExchange(ctx context.Context, subj exchangeSubject) (string, time
 	}
 	_ = json.Unmarshal(body, &out) //nolint:errcheck // a non-JSON body is reported by status below
 	if resp.StatusCode != http.StatusOK {
-		// The request holds the secret, so the error names only the reply.
-		if out.Error != "" {
-			return "", time.Time{}, fmt.Errorf("%s service account secret refused by %s: %s: %s", EnvTokenVar, subj.core, out.Error, out.ErrorDescription)
-		}
-		return "", time.Time{}, fmt.Errorf("%s service account secret refused by %s: HTTP %d", EnvTokenVar, subj.core, resp.StatusCode)
+		return "", time.Time{}, &SecretExchangeError{Core: subj.core, StatusCode: resp.StatusCode, Code: out.Error, Description: out.ErrorDescription}
 	}
 	if out.AccessToken == "" {
 		return "", time.Time{}, errors.New("service account token exchange returned no access token")

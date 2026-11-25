@@ -307,18 +307,25 @@ func TestInstallHooks_ChainedHookKeepsItsOwnPath(t *testing.T) {
 }
 
 // pre3051ChainCall is the chain Entire wrote before it sourced Trunk's
-// launcher under the hook's own name. Frozen so this test still plants that
-// text if chainCall changes again.
-func pre3051ChainCall(hookName, redirect string) string {
+// launcher under the hook's own name. Without withPrek it is the chain from
+// before Entire recognised prek's wrapper, the one released installs have;
+// with it, the chain as it was once prek's legacy pass was tested too. Frozen
+// so this test still plants that text if chainCall changes again.
+func pre3051ChainCall(hookName, redirect string, withPrek bool) string {
 	backup := hookName + backupSuffix
 	keep := hookName + keepSuffix
 	guard := "ENTIRE_CHAINING_" + strings.ToUpper(strings.ReplaceAll(hookName, "-", "_"))
+	pass := fmt.Sprintf(`[ -n "${PRE_COMMIT_RUNNING_LEGACY:-}" ] && grep -q '^%s' "$_entire_hook_dir/%s" 2>/dev/null`, preCommitHeader, backup)
+	if withPrek {
+		pass = fmt.Sprintf(`{ [ -n "${PRE_COMMIT_RUNNING_LEGACY:-}" ] && grep -q '^%s' "$_entire_hook_dir/%s" 2>/dev/null; } ||
+        { [ -n "${PREK_RUNNING_LEGACY:-}" ] && grep -q '^%s' "$_entire_hook_dir/%s" 2>/dev/null; }`, preCommitHeader, backup, prekHeader, backup)
+	}
 	return fmt.Sprintf(`%s
 _entire_hook_dir="$(dirname "$0")"
 if [ -z "${%s:-}" ]; then
     %s=1
     export %s
-    if [ -n "${PRE_COMMIT_RUNNING_LEGACY:-}" ] && grep -q '^%s' "$_entire_hook_dir/%s" 2>/dev/null; then
+    if %s; then
         if [ -x "$_entire_hook_dir/%s" ]; then
             "$_entire_hook_dir/%s" "$@"%s
         fi
@@ -326,13 +333,23 @@ if [ -z "${%s:-}" ]; then
         "$_entire_hook_dir/%s" "$@"%s
     fi
 fi
-`, chainComment, guard, guard, guard, preCommitSignatures[0], backup, keep, keep, redirect, backup, backup, redirect)
+`, chainComment, guard, guard, guard, pass, keep, keep, redirect, backup, backup, redirect)
 }
 
 // pre3051ChainedContent is today's hook body with the pre-sourcing chain, the
 // text an existing install still has until something rewrites it.
 func pre3051ChainedContent(baseContent, hookName string) string {
-	return frozenChainedContent(baseContent, hookName, pre3051ChainCall)
+	return frozenChainedContent(baseContent, hookName, func(hookName, redirect string) string {
+		return pre3051ChainCall(hookName, redirect, false)
+	})
+}
+
+// pre3051PrekChainedContent is pre3051ChainedContent with the chain as it was
+// once prek's legacy pass was tested too.
+func pre3051PrekChainedContent(baseContent, hookName string) string {
+	return frozenChainedContent(baseContent, hookName, func(hookName, redirect string) string {
+		return pre3051ChainCall(hookName, redirect, true)
+	})
 }
 
 // frozenChainedContent builds a hook body the way generateChainedContent does,
@@ -377,7 +394,8 @@ func plantChain(t *testing.T, tf *trunkFixture, chain func(baseContent, hookName
 }
 
 // grepTrunkChainCall is the chain Entire wrote when it identified Trunk's
-// launcher with grep -qxF (#3051's final form, which also tests [ -f ]).
+// launcher with grep -qxF (#3051's final form, which also tests [ -f ] and
+// prek's legacy pass).
 // Frozen so this test still plants that text if chainCall changes again.
 func grepTrunkChainCall(hookName, redirect string) string {
 	backup := hookName + backupSuffix
@@ -388,7 +406,8 @@ _entire_hook_dir="$(dirname "$0")"
 if [ -z "${%s:-}" ]; then
     %s=1
     export %s
-    if [ -n "${PRE_COMMIT_RUNNING_LEGACY:-}" ] && grep -q '^%s' "$_entire_hook_dir/%s" 2>/dev/null; then
+    if { [ -n "${PRE_COMMIT_RUNNING_LEGACY:-}" ] && grep -q '^%s' "$_entire_hook_dir/%s" 2>/dev/null; } ||
+        { [ -n "${PREK_RUNNING_LEGACY:-}" ] && grep -q '^%s' "$_entire_hook_dir/%s" 2>/dev/null; }; then
         if [ -x "$_entire_hook_dir/%s" ]; then
             "$_entire_hook_dir/%s" "$@"%s
         fi
@@ -400,7 +419,7 @@ if [ -z "${%s:-}" ]; then
         fi
     fi
 fi
-`, chainComment, guard, guard, guard, preCommitSignatures[0], backup, keep, keep, redirect,
+`, chainComment, guard, guard, guard, preCommitHeader, backup, prekHeader, backup, keep, keep, redirect,
 		backup, backup, shellQuote(trunkHookCallback), backup, hookName, backup, redirect, backup, redirect)
 }
 
@@ -513,23 +532,33 @@ func (tf *trunkFixture) useAsGitHooks(t *testing.T) {
 // Outdated so ReinstallGitHooks (and EnsureSetup) rewrites it without the
 // user running entire enable again. After the rewrite, pre-push reaches
 // Trunk as pre-push, not as pre-push.pre-entire.
+//
+// Both shapes count: the chain released installs have, and the one written
+// after Entire also recognised prek's wrapper but before it sourced Trunk.
 func TestReinstallGitHooks_Pre3051TrunkChainIsOutdated(t *testing.T) {
-	tf := newTrunkFixture(t, false, 0)
-	plantPre3051TrunkChain(t, tf)
-	tf.useAsGitHooks(t)
+	for name, chain := range map[string]func(baseContent, hookName string) string{
+		"before prek": pre3051ChainedContent,
+		"with prek":   pre3051PrekChainedContent,
+	} {
+		t.Run(name, func(t *testing.T) {
+			tf := newTrunkFixture(t, false, 0)
+			plantChain(t, tf, chain)
+			tf.useAsGitHooks(t)
 
-	if got := CheckGitHookState(t.Context()); got != GitHooksOutdated {
-		t.Fatalf("CheckGitHookState = %v, want GitHooksOutdated", got)
-	}
-	if _, err := ReinstallGitHooks(t.Context()); err != nil {
-		t.Fatalf("ReinstallGitHooks: %v", err)
-	}
-	if got := CheckGitHookState(t.Context()); got != GitHooksCurrent {
-		t.Fatalf("after ReinstallGitHooks, CheckGitHookState = %v, want GitHooksCurrent", got)
-	}
-	const refs = "refs/heads/main 1111111111111111111111111111111111111111 refs/heads/main 2222222222222222222222222222222222222222"
-	if code, got := tf.run("pre-push", refs+"\n", "origin", "url"); code != 0 || !strings.Contains(got, "trunk pre-push origin url") {
-		t.Errorf("pre-push exited %d after running:\n%s\nwant Trunk to run as pre-push", code, got)
+			if got := CheckGitHookState(t.Context()); got != GitHooksOutdated {
+				t.Fatalf("CheckGitHookState = %v, want GitHooksOutdated", got)
+			}
+			if _, err := ReinstallGitHooks(t.Context()); err != nil {
+				t.Fatalf("ReinstallGitHooks: %v", err)
+			}
+			if got := CheckGitHookState(t.Context()); got != GitHooksCurrent {
+				t.Fatalf("after ReinstallGitHooks, CheckGitHookState = %v, want GitHooksCurrent", got)
+			}
+			const refs = "refs/heads/main 1111111111111111111111111111111111111111 refs/heads/main 2222222222222222222222222222222222222222"
+			if code, got := tf.run("pre-push", refs+"\n", "origin", "url"); code != 0 || !strings.Contains(got, "trunk pre-push origin url") {
+				t.Errorf("pre-push exited %d after running:\n%s\nwant Trunk to run as pre-push", code, got)
+			}
+		})
 	}
 }
 

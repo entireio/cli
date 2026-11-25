@@ -870,8 +870,10 @@ func addGitRefsSession(t *testing.T, repo *git.Repository, cpID, sessionID strin
 		AuthorName:   "Test",
 		AuthorEmail:  "test@test.com",
 	}))
-	_, refErr := repo.Reference(mustRefName(t, cid), true)
-	require.NoError(t, refErr, "git-refs write should have created the checkpoint ref")
+	// Either spelling: a write extends a ref already stored under the folded one.
+	exists, refErr := checkpoint.LocalRefExists(repo, cid)
+	require.NoError(t, refErr)
+	require.True(t, exists, "git-refs write should have created the checkpoint ref")
 }
 
 // walkRefAncestry returns every commit on a checkpoint ref, tip-first.
@@ -1057,4 +1059,112 @@ func TestRewriteQueuedCheckpointRefsWithOPF_AncestryOverBootstrapLimit(t *testin
 	require.Equal(t, 2, tooLarge.Count)
 	require.Equal(t, 1, tooLarge.Limit)
 	require.Equal(t, before, refHashes(t, repo, refs), "an over-limit ancestry must not move any ref")
+}
+
+// foldableCheckpointID is a ULID whose shard has letters, so its ref can be
+// stored under the lowercase spelling a legacy hex checkpoint gave that shard.
+const foldableCheckpointID = "01M2DCHJCHTR9T9MZTSB7WV76B"
+
+// storeUnderFoldedShardAndPack moves cid's ref to the other spelling of its
+// shard and packs the refs: what a case-insensitive filesystem leaves once git
+// gc has run. The queue keeps the canonical name. It returns the repository
+// reopened, as the next pre-push sees it, and the stored name.
+func storeUnderFoldedShardAndPack(t *testing.T, repo *git.Repository, cid id.CheckpointID) (*git.Repository, plumbing.ReferenceName) {
+	t.Helper()
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	workDir := wt.Filesystem().Root()
+	// Where the folded spelling exists, git recorded a case-insensitive
+	// filesystem; set it so these tests read both spellings on every OS.
+	testutil.RunGit(t, workDir, "config", "core.ignorecase", "true")
+	canonical := mustRefName(t, cid)
+	folded, ok := checkpoint.FoldedRefName(cid)
+	require.True(t, ok, "the fixture needs an ID whose shard has two spellings")
+	tip := revParse(t, workDir, canonical.String())
+	testutil.RunGit(t, workDir, "update-ref", "-d", canonical.String())
+	// On a case-insensitive filesystem a leftover shard directory would take
+	// the folded write back under the canonical spelling.
+	require.NoError(t, os.RemoveAll(filepath.Join(workDir, ".git", "refs", "entire", "checkpoints", cid.ShardFor())))
+	testutil.RunGit(t, workDir, "update-ref", folded.String(), tip)
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+	reopened, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	_, err = reopened.Reference(canonical, true)
+	require.ErrorIs(t, err, plumbing.ErrReferenceNotFound, "the queued name must no longer resolve")
+	return reopened, folded
+}
+
+// A queued checkpoint stored under the other spelling of its shard is still
+// OPF-rewritten, in place: skipping it would let the push send it unscanned.
+func TestRewriteQueuedCheckpointRefsWithOPF_RewritesPackedFoldedShardRef(t *testing.T) {
+	fake := &fakeOPFForRewrite{}
+	configureFakeOPF(t, fake)
+	_, repo, refs := setupGitRefsOPFRepo(t, foldableCheckpointID)
+	repo, folded := storeUnderFoldedShardAndPack(t, repo, id.MustCheckpointID(foldableCheckpointID))
+	require.Equal(t, refs, queuedRefs(t, repo), "the queue holds the canonical name")
+	before := refHashes(t, repo, []plumbing.ReferenceName{folded})[0]
+
+	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
+
+	require.Equal(t, 1, fake.batchCallCount(), "the folded ref must be scanned")
+	after := refHashes(t, repo, []plumbing.ReferenceName{folded})[0]
+	require.NotEqual(t, before, after, "the stored ref should have been rewritten")
+	commit, err := repo.CommitObject(after)
+	require.NoError(t, err)
+	require.True(t, trailers.HasOPFApplied(commit.Message))
+	require.NotContains(t, treeContents(t, repo, after), "PERSONABC")
+	// Listed, not looked up: once the rewrite leaves the ref loose again, a
+	// case-insensitive filesystem resolves it under either spelling.
+	listed, err := listCheckpointRefsWithGit(t.Context(), repo)
+	require.NoError(t, err)
+	require.Equal(t, map[plumbing.ReferenceName]plumbing.Hash{folded: after}, listed,
+		"the rewrite must not create a second ref under the canonical name")
+}
+
+// End to end: with OPF on, pre-push must not send a folded-shard checkpoint
+// that OPF never saw.
+func TestPrePushCheckpointRefs_PackedFoldedShardRefIsOPFRewrittenBeforePush(t *testing.T) {
+	configureFakeOPF(t, &fakeOPFForRewrite{})
+	bareDir, repo, _ := setupGitRefsOPFRepo(t, foldableCheckpointID)
+	cid := id.MustCheckpointID(foldableCheckpointID)
+	repo, _ = storeUnderFoldedShardAndPack(t, repo, cid)
+
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
+
+	remote, err := git.PlainOpen(bareDir)
+	require.NoError(t, err)
+	iter, err := remote.References()
+	require.NoError(t, err)
+	var sent []plumbing.Hash
+	require.NoError(t, iter.ForEach(func(ref *plumbing.Reference) error {
+		if got, ok := checkpoint.ParseRef(ref.Name()); ok && got == cid {
+			sent = append(sent, ref.Hash())
+		}
+		return nil
+	}))
+	require.Len(t, sent, 1, "the checkpoint must reach the remote, under one name")
+	commit, err := remote.CommitObject(sent[0])
+	require.NoError(t, err)
+	require.True(t, trailers.HasOPFApplied(commit.Message), "the pushed commit must carry the OPF trailer")
+	require.NotContains(t, treeContents(t, remote, sent[0]), "PERSONABC")
+	require.Empty(t, queuedRefs(t, repo), "the pushed entry leaves the queue")
+}
+
+// A checkpoint queued under both spellings of its shard is one stored ref, so
+// it is rewritten once. Write, pack, write again queues both: the second write
+// goes through the folded name the pack left behind.
+func TestRewriteQueuedCheckpointRefsWithOPF_RewritesOnceWhenBothShardSpellingsAreQueued(t *testing.T) {
+	configureFakeOPF(t, &fakeOPFForRewrite{})
+	_, repo, refs := setupGitRefsOPFRepo(t, foldableCheckpointID)
+	repo, folded := storeUnderFoldedShardAndPack(t, repo, id.MustCheckpointID(foldableCheckpointID))
+	addGitRefsSession(t, repo, foldableCheckpointID, "sess-second")
+	require.ElementsMatch(t, append(refs, folded), queuedRefs(t, repo), "the queue holds both spellings")
+
+	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
+
+	after := refHashes(t, repo, []plumbing.ReferenceName{folded})[0]
+	commit, err := repo.CommitObject(after)
+	require.NoError(t, err)
+	require.True(t, trailers.HasOPFApplied(commit.Message))
+	require.NotContains(t, treeContents(t, repo, after), "PERSONABC")
 }
