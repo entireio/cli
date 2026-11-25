@@ -79,10 +79,19 @@ func runEnableGlobal(cmd *cobra.Command, yes bool, ownerFlags []string) error {
 	}
 	reportGlobalEnableOwners(w, listed)
 
-	for _, installer := range userHookInstallers() {
-		reportUserHookInstall(cmd, installer)
-	}
+	installUserHooks(ctx, func(installer agent.UserHookInstaller, n int, path string, err error) {
+		reportUserHookInstall(cmd, installer, n, path, err)
+	})
 	return nil
+}
+
+// installUserHooks installs every agent's user-level hooks while global
+// enable stays on, handing each result to onResult.
+func installUserHooks(ctx context.Context, onResult func(installer agent.UserHookInstaller, n int, path string, err error)) {
+	for _, installer := range userHookInstallers() {
+		n, path, err := installer.EnsureUserHooks(ctx, settings.UserTierEnablesEverywhere)
+		onResult(installer, n, path, err)
+	}
 }
 
 // userHookInstallers returns the registered agents whose Entire hooks can
@@ -101,13 +110,12 @@ func userHookInstallers() []agent.UserHookInstaller {
 	return installers
 }
 
-// reportUserHookInstall installs one agent's user-level hooks for `entire
+// reportUserHookInstall reports one agent's user-level hook install for `entire
 // enable --global` and says what happened.
-func reportUserHookInstall(cmd *cobra.Command, installer agent.UserHookInstaller) {
+func reportUserHookInstall(cmd *cobra.Command, installer agent.UserHookInstaller, n int, hooksPath string, err error) {
 	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
 	name := string(installer.Type())
-	n, hooksPath, err := installer.EnsureUserHooks(ctx, settings.UserTierEnablesEverywhere)
 	switch {
 	case errors.Is(err, agent.ErrUserHooksNotInUse):
 		fmt.Fprintf(w, "%s is not set up here (%s not found); its hooks will be added the next time you run entire after it is.\n",
@@ -322,20 +330,16 @@ func ensureGlobalEnableHooks(cmd *cobra.Command) {
 	if skipsGlobalEnableHooks(cmd) || !settings.UserTierEnablesEverywhere(ctx) {
 		return
 	}
-	for _, installer := range userHookInstallers() {
-		n, path, err := installer.EnsureUserHooks(ctx, settings.UserTierEnablesEverywhere)
-		if errors.Is(err, agent.ErrUserHooksNotInUse) {
-			continue
-		}
-		if err != nil {
+	installUserHooks(ctx, func(installer agent.UserHookInstaller, n int, path string, err error) {
+		switch {
+		case errors.Is(err, agent.ErrUserHooksNotInUse):
+		case err != nil:
 			logging.Debug(ctx, "global enable: could not install user-level hooks",
 				slog.String("agent", string(installer.Name())), slog.String("error", err.Error()))
-			continue
-		}
-		if n > 0 {
+		case n > 0:
 			fmt.Fprintf(cmd.ErrOrStderr(), "Entire is enabled for all your repositories; added its %s hooks to %s\n", installer.Type(), path)
 		}
-	}
+	})
 }
 
 // skipGlobalEnableHooksAnnotation marks a command, and everything under it,
