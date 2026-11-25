@@ -43,21 +43,29 @@ var foregroundUploadLockWait = 30 * time.Second
 // checkpointUploadDeliveryBudget bounds one worker pass's flush. Var for tests.
 var checkpointUploadDeliveryBudget = 10 * time.Minute
 
-const (
-	// checkpointUploadWorkerDeadline bounds a worker's run, and is how long a
-	// run record without a finish time counts as running.
-	checkpointUploadWorkerDeadline = 30 * time.Minute
-	// checkpointUploadMaxPasses bounds the passes for requests that arrive
-	// while the worker runs.
-	checkpointUploadMaxPasses = 5
-)
+// checkpointUploadMaxPasses bounds the passes for requests that arrive while
+// the worker runs.
+const checkpointUploadMaxPasses = 5
+
+// ciEnvVars mark environments whose checkout is discarded when the job ends,
+// taking a detached worker's queue with it: upload inline there.
+var ciEnvVars = []string{"CI", "GITHUB_ACTIONS", "GITLAB_CI", "BUILDKITE", "JENKINS_URL", "TF_BUILD"}
+
+func inCI() bool {
+	for _, name := range ciEnvVars {
+		if os.Getenv(name) != "" {
+			return true
+		}
+	}
+	return false
+}
 
 // backgroundUploadInTests lets a test opt into the hand-off; in-process tests
 // otherwise upload inline.
 var backgroundUploadInTests = false
 
 // checkpointUploadSpawn is the spawn seam, swapped in tests.
-var checkpointUploadSpawn = func(worktreeRoot string) { bgupload.Spawn(worktreeRoot, checkpoint.UploadKind) }
+var checkpointUploadSpawn = func(worktreeRoot string) bool { return bgupload.Spawn(worktreeRoot, checkpoint.UploadKind) }
 
 type uploadWorkerKey struct{}
 
@@ -88,7 +96,7 @@ func carriedOPFDecision(ctx context.Context) string {
 // inline.
 func backgroundCheckpointUploadEnabled(ctx context.Context) bool {
 	if inUploadWorker(ctx) || (testing.Testing() && !backgroundUploadInTests) ||
-		os.Getenv(CheckpointUploadForegroundEnv) == "1" || bgupload.InCI() {
+		os.Getenv(CheckpointUploadForegroundEnv) == "1" || inCI() {
 		return false
 	}
 	s, err := settings.Load(ctx)
@@ -121,7 +129,7 @@ func reportBackgroundUpload(ctx context.Context, coord *checkpoint.UploadCoordin
 	if coord == nil {
 		return
 	}
-	if err := coord.Report(stderrWriter, "checkpoint upload", checkpointUploadWorkerDeadline); err != nil {
+	if err := coord.Report(stderrWriter, "checkpoint upload"); err != nil {
 		logging.Debug(ctx, "report checkpoint upload result failed", slog.String("error", err.Error()))
 	}
 }
@@ -148,8 +156,7 @@ func spawnCheckpointUploadWorker(ctx context.Context) bool {
 		logging.Debug(ctx, "skipping background checkpoint upload spawn: no worktree root", slog.String("error", err.Error()))
 		return false
 	}
-	checkpointUploadSpawn(root)
-	return true
+	return checkpointUploadSpawn(root)
 }
 
 // releaseUploadLock releases a flush's lock and starts a worker for a request
@@ -175,7 +182,7 @@ func RunCheckpointUploadWorker(ctx context.Context) {
 		os.Unsetenv(name)
 	}
 	ctx = checkpointremote.WithNonInteractiveSSH(withinUploadWorker(ctx))
-	ctx, cancel := context.WithTimeout(ctx, checkpointUploadWorkerDeadline)
+	ctx, cancel := context.WithTimeout(ctx, checkpoint.UploadWorkerDeadline)
 	defer cancel()
 
 	repo, err := OpenRepository(ctx)
@@ -193,9 +200,7 @@ func RunCheckpointUploadWorker(ctx context.Context) {
 		return
 	}
 	leftover := coord.RunPasses(ctx, checkpointUploadMaxPasses, checkpoint.HasUploadRequest, func(ctx context.Context) {
-		if req, err := coord.TakeRequest(); err == nil && req != nil {
-			runCheckpointUploadPass(ctx, repo, coord, *req)
-		}
+		runCheckpointUploadPass(ctx, repo, coord)
 	})
 	if leftover && backgroundCheckpointUploadEnabled(spawnCtx) {
 		spawnCheckpointUploadWorker(spawnCtx)
@@ -225,8 +230,16 @@ var (
 	uploadPassOPFGate = opfGateForCheckpointRefs
 )
 
-// runCheckpointUploadPass uploads the queue for req and records the outcome.
-func runCheckpointUploadPass(ctx context.Context, repo *git.Repository, coord *checkpoint.UploadCoordinator, req checkpoint.UploadRequest) {
+// runCheckpointUploadPass waits for the user's pushes, then uploads the queue
+// under the pending request and records the outcome. The request is taken after
+// the wait, so a push recorded meanwhile merges its OPF decision into it.
+func runCheckpointUploadPass(ctx context.Context, repo *git.Repository, coord *checkpoint.UploadCoordinator) {
+	uploadPassWait(ctx, coord)
+	taken, err := coord.TakeRequest()
+	if err != nil || taken == nil {
+		return
+	}
+	req := *taken
 	result := bgupload.Result{StartedAt: time.Now()}
 	if err := coord.StartRun(result.StartedAt); err != nil {
 		logging.Warn(ctx, "record checkpoint upload start failed", slog.String("error", err.Error()))
@@ -242,7 +255,7 @@ func runCheckpointUploadPass(ctx context.Context, repo *git.Repository, coord *c
 	var printed bytes.Buffer
 	ctx = withNoticeWriter(ctx, &printed)
 
-	ctx = withCarriedOPFDecision(ctx, req.OPFDecision)
+	ctx = withCarriedOPFDecision(ctx, effectiveOPFDecision(ctx, repo, req))
 	ps := resolvePushSettings(ctx, req.Remote)
 	if ps.pushDisabled {
 		finish("")
@@ -258,8 +271,6 @@ func runCheckpointUploadPass(ctx context.Context, repo *git.Repository, coord *c
 		finish("the privacy filter could not run here, so nothing was uploaded")
 		return
 	}
-	uploadPassWait(ctx, coord)
-
 	// After the wait: a commit made meanwhile queues checkpoints the filter
 	// has not seen, and the flush drains the queue straight after this.
 	if opfErr := uploadPassOPFGate(ctx, repo); opfErr != nil {
@@ -288,6 +299,20 @@ func runCheckpointUploadPass(ctx context.Context, repo *git.Repository, coord *c
 	}
 	result.Announcement = strings.TrimSpace(printed.String())
 	finish(res.failureLine(err))
+}
+
+// effectiveOPFDecision is req's OPF decision, except that a skip covers only
+// the queue it was given for: once other checkpoints are queued, the
+// non-interactive rules decide (UploadOPFUnset).
+func effectiveOPFDecision(ctx context.Context, repo *git.Repository, req checkpoint.UploadRequest) string {
+	if req.OPFDecision != checkpoint.UploadOPFSkip {
+		return req.OPFDecision
+	}
+	entries, err := queuedEntries(ctx, repo)
+	if err != nil || checkpoint.QueueDigest(entries) != req.QueueDigest {
+		return checkpoint.UploadOPFUnset
+	}
+	return req.OPFDecision
 }
 
 func recordUploadFinish(ctx context.Context, coord *checkpoint.UploadCoordinator, res bgupload.Result) {

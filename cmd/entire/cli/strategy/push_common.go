@@ -317,10 +317,8 @@ func batchPushCheckpointRefs(ctx context.Context, target string, refs []checkpoi
 		}
 		logging.Info(ctx, "checkpoint push rejected right after another push; retrying",
 			slog.Int("attempt", attempt+1))
-		select {
-		case <-ctx.Done():
+		if sleepCtx(ctx, pushRaceRetryDelays[attempt]); ctx.Err() != nil {
 			return fmt.Errorf("push %d checkpoint refs: %w", len(refs), err)
-		case <-time.After(pushRaceRetryDelays[attempt]):
 		}
 	}
 }

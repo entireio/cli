@@ -16,7 +16,7 @@ type testJob struct {
 
 func TestCoordinator_RunRecordsAndReport(t *testing.T) {
 	t.Parallel()
-	coord := New[testJob](t.TempDir(), "test")
+	coord := New[testJob](t.TempDir(), "test", time.Hour)
 	st, err := coord.State()
 	require.NoError(t, err)
 	assert.Nil(t, st.Last, "no file is the zero state")
@@ -30,12 +30,12 @@ func TestCoordinator_RunRecordsAndReport(t *testing.T) {
 		Error: "budget exhausted", Detail: "why", Announcement: "[entire] two"}))
 
 	var out bytes.Buffer
-	require.NoError(t, coord.Report(&out, "test upload", time.Hour))
+	require.NoError(t, coord.Report(&out, "test upload"))
 	assert.Equal(t, "[entire] one\n[entire] two\n[entire] Last background test upload stopped: budget exhausted.\nwhy\n", out.String(),
 		"an unshown announcement survives the next run")
 
 	out.Reset()
-	require.NoError(t, coord.Report(&out, "test upload", time.Hour))
+	require.NoError(t, coord.Report(&out, "test upload"))
 	assert.Empty(t, out.String(), "reported once")
 	st, err = coord.State()
 	require.NoError(t, err)
@@ -54,7 +54,7 @@ func TestResult_Running(t *testing.T) {
 func TestCoordinator_TryLockPerKind(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	coord := New[testJob](dir, "a")
+	coord := New[testJob](dir, "a", time.Hour)
 	release, ok, err := coord.TryLock()
 	require.NoError(t, err)
 	require.True(t, ok)
@@ -63,7 +63,7 @@ func TestCoordinator_TryLockPerKind(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, ok, "a held lock is reported, not an error")
 
-	other, ok, err := New[testJob](dir, "b").TryLock()
+	other, ok, err := New[testJob](dir, "b", time.Hour).TryLock()
 	require.NoError(t, err)
 	assert.True(t, ok, "another kind has its own lock")
 	other()
@@ -77,7 +77,7 @@ func TestCoordinator_TryLockPerKind(t *testing.T) {
 
 func TestCoordinator_RunPasses(t *testing.T) {
 	t.Parallel()
-	coord := New[testJob](t.TempDir(), "test")
+	coord := New[testJob](t.TempDir(), "test", time.Hour)
 	require.NoError(t, coord.Update(func(st *State[testJob]) { st.Job.Pending = true }))
 	pending := func(st State[testJob]) bool { return st.Job.Pending }
 

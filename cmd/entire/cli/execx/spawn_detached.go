@@ -19,14 +19,15 @@ import (
 //
 // In-process `go test` runs are a no-op: the current executable is the test
 // binary, and re-execing it would fork the whole suite. Tests exercise the
-// call sites through their spawn seams instead.
-func SpawnDetached(dir string, args ...string) {
+// call sites through their spawn seams instead. It reports whether the child
+// started.
+func SpawnDetached(dir string, args ...string) bool {
 	if testing.Testing() {
-		return
+		return false
 	}
 	executable, err := os.Executable()
 	if err != nil {
-		return
+		return false
 	}
 
 	cmd := newDetachedCmd(executable, dir, args...)
@@ -34,11 +35,12 @@ func SpawnDetached(dir string, args ...string) {
 	// outlive it with the child (see markInheritedFDsCloseOnExec).
 	markInheritedFDsCloseOnExec()
 	if err := cmd.Start(); err != nil {
-		return
+		return false
 	}
 	// Release the process so it can run independently of the parent.
 	//nolint:errcheck // best effort — the child continues regardless
 	_ = cmd.Process.Release()
+	return true
 }
 
 // newDetachedCmd builds the detached child's command. Stdout and Stderr stay

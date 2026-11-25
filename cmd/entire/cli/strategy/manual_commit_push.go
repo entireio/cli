@@ -38,10 +38,6 @@ var ErrOPFAbortedByUser = errors.New("OPF prompt aborted by user; push cancelled
 // `entire checkpoint push`, which is not the same as an empty queue.
 var ErrCheckpointPushHeldByPolicy = errors.New("checkpoint push policy is manual; refs stay queued")
 
-// ErrCheckpointRefsStayQueued is PushQueuedCheckpointRefs stopping early with
-// refs still queued. The flush has already printed why.
-var ErrCheckpointRefsStayQueued = errors.New("checkpoint refs stay queued")
-
 var opfPrePushProgressWriter io.Writer = os.Stderr
 
 // PrePush is called by the git pre-push hook before pushing to a remote.
@@ -526,10 +522,11 @@ func uploadCheckpointRefsOnPrePush(ctx context.Context, repo *git.Repository, ps
 		// Recorded even with nothing queued: a worker still uploading an
 		// earlier push's checkpoints must wait for this push too.
 		noteUserPush(ctx, coord)
-		has, err := queueHasRefs(ctx, repo)
-		if err != nil || !has {
+		entries, err := queuedEntries(ctx, repo)
+		if err != nil || len(entries) == 0 {
 			return nil
 		}
+		req.QueueDigest = checkpoint.QueueDigest(entries)
 		if handOffCheckpointUpload(ctx, coord, req) {
 			fmt.Fprintln(os.Stderr, "[entire] Uploading checkpoints in the background.")
 		} else {
@@ -539,17 +536,18 @@ func uploadCheckpointRefsOnPrePush(ctx context.Context, repo *git.Repository, ps
 	}
 
 	// Inline (CI, the setting, harnesses): no process outlives the hook, so
-	// upload here. One flush of the queue at a time. Recorded so a worker left
-	// from an earlier push also waits for this one.
-	if coord != nil {
-		noteUserPush(ctx, coord)
-	}
+	// upload here. One flush of the queue at a time.
 	release, locked := lockQueueForFlush(ctx, coord)
 	if !locked {
 		fmt.Fprintln(os.Stderr, "[entire] Another checkpoint upload is in progress; checkpoints stay queued for the next push.")
 		return nil
 	}
 	defer releaseUploadLock(ctx, coord, release)
+	// Recorded once the lock is held, so a worker left from an earlier push
+	// waits for this push without this hook waiting on that worker.
+	if coord != nil {
+		noteUserPush(ctx, coord)
+	}
 
 	if opfErr := opfGateForCheckpointRefs(ctx, repo); opfErr != nil {
 		warnOPFCheckpointRefsWithheld(ctx, opfErr)
@@ -588,17 +586,17 @@ func uploadCheckpointRefsOnPrePush(ctx context.Context, repo *git.Repository, ps
 // push does not land right after it (see git_push_wait.go). Var for tests.
 var inlineUploadSettle = 1200 * time.Millisecond
 
-// queueHasRefs reports whether the push queue holds refs to upload.
-func queueHasRefs(ctx context.Context, repo *git.Repository) (bool, error) {
+// queuedEntries reads the push queue without draining it.
+func queuedEntries(ctx context.Context, repo *git.Repository) ([]checkpoint.PushQueueEntry, error) {
 	queue, err := checkpoint.PushQueueForRepo(ctx, repo)
 	if err != nil {
-		return false, fmt.Errorf("resolve push queue: %w", err)
+		return nil, fmt.Errorf("resolve push queue: %w", err)
 	}
-	refs, err := queue.Peek()
+	entries, err := queue.PeekEntries()
 	if err != nil {
-		return false, fmt.Errorf("read push queue: %w", err)
+		return nil, fmt.Errorf("read push queue: %w", err)
 	}
-	return len(refs) > 0, nil
+	return entries, nil
 }
 
 // opfPrePushDecisionForHandOff resolves the OPF decision for a push whose
@@ -686,15 +684,6 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 		return 0, false, fmt.Errorf("checkpoint refs stay queued: %w", opfErr)
 	}
 	res, err := flushCheckpointRefsQueue(ctx, repo, ps, flushOptions{})
-	if err == nil && res.remaining > 0 {
-		// The flush is fail-soft about an early stop, but this caller reports
-		// success on a nil error, so refs left behind must surface. A caller's
-		// cancellation stays recognisable through the wrap.
-		err = fmt.Errorf("%w (%d): %s", ErrCheckpointRefsStayQueued, res.remaining, res.failureLine(nil))
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			err = fmt.Errorf("%w: %w", err, ctxErr)
-		}
-	}
 	return res.pushed, false, err
 }
 
@@ -834,14 +823,18 @@ func waitForBackgroundUpload(ctx context.Context, repo *git.Repository) (func(),
 		return func() {}, nil
 	}
 	release, ok, lockErr := coord.TryLock()
-	if lockErr == nil && !ok {
+	if lockErr != nil {
+		// As in lockQueueForFlush: an unusable lock must not block uploads.
+		logging.Debug(ctx, "checkpoint upload lock unavailable; uploading without it", slog.String("error", lockErr.Error()))
+		return func() {}, nil
+	}
+	if !ok {
 		fmt.Fprintln(os.Stderr, "[entire] Waiting for the background checkpoint upload to finish...")
 		waitCtx, cancel := context.WithTimeout(ctx, checkpointUploadDeliveryBudget)
 		defer cancel()
-		release, lockErr = coord.Lock(waitCtx)
-	}
-	if lockErr != nil {
-		return func() {}, fmt.Errorf("wait for background checkpoint upload: %w", lockErr)
+		if release, lockErr = coord.Lock(waitCtx); lockErr != nil {
+			return func() {}, fmt.Errorf("wait for background checkpoint upload: %w", lockErr)
+		}
 	}
 	return func() { releaseUploadLock(ctx, coord, release) }, nil
 }
@@ -1042,7 +1035,7 @@ func flushCheckpointRefsWith(
 	fmt.Fprintf(os.Stderr, "[entire] Checkpoint ref push failed; retrying %d ref(s) individually...", len(batch.failed))
 	stop = startProgressDots(os.Stderr)
 	retry := retryRefsIndividually(ctx, flushCtx, repo, dest.target, batch.failed, len(existing))
-	return finishIndividualRetry(ctx, pushCtx, queue, existing, batch, retry, stop, budgetExhausted(), result)
+	return finishIndividualRetry(ctx, pushCtx, queue, existing, batch, retry, stop, result)
 }
 
 // stopOnBudgetCut reports and settles a batch the flush budget cut mid-chunk.
@@ -1112,7 +1105,7 @@ func settleBatchOnly(ctx, flushCtx context.Context, queue *checkpoint.PushQueue,
 		// failed, so this is progress rather than an error.
 		stop(fmt.Sprintf(" pushed %d of %d", batch.landed, queued))
 		res := flushResult{pushed: batch.landed, remaining: len(batch.untried),
-			budgetExhausted: budgetExhausted, stopReason: batch.stopReason}
+			stopReason: batch.stopReason}
 		fmt.Fprintf(os.Stderr, "[entire] Stopped pushing: %s; %d checkpoint ref(s) stay queued for the next push.\n",
 			batch.stopReason, len(batch.untried))
 		logging.Warn(ctx, "git-refs push: batch push stopped early; remaining refs stay queued",
@@ -1128,7 +1121,7 @@ func settleBatchOnly(ctx, flushCtx context.Context, queue *checkpoint.PushQueue,
 	if budgetExhausted && !batch.sshAuthFailed && batch.unreachable == "" {
 		detail := stopOnBudgetCut(ctx, flushCtx, queue, batch, queued, stop)
 		return flushResult{pushed: batch.landed, remaining: queued - batch.landed,
-			budgetExhausted: true, stopReason: flushAbortReason(flushCtx, 0), detail: detail}, true, nil
+			stopReason: flushAbortReason(flushCtx, 0), detail: detail}, true, nil
 	}
 	if batch.unreachable != "" {
 		stop(" failed")
@@ -1160,13 +1153,10 @@ type flushOptions struct {
 // flushResult is what one flushCheckpointRefsQueue did, for callers that act on
 // or record it rather than only print it.
 type flushResult struct {
-	pushed    int
-	remaining int // refs the flush attempted or skipped that are still queued
-	// budgetExhausted: the flush stopped because its budget ran out, not
-	// because the caller was interrupted.
-	budgetExhausted bool
-	stopReason      string // bare phrase, as printed; "" when nothing stopped it
-	unreachable     string // "couldn't reach <dest>: <git line>" when git could not connect
+	pushed      int
+	remaining   int    // refs the flush attempted or skipped that are still queued
+	stopReason  string // bare phrase, as printed; "" when nothing stopped it
+	unreachable string // "couldn't reach <dest>: <git line>" when git could not connect
 	// detail is the actionable text printed with the stop — the remote's
 	// rejection reason, or the SSH or checkpoint-remote hint — for a caller
 	// that could not show it live (the background worker).
@@ -1249,7 +1239,6 @@ func finishIndividualRetry(
 	batch chunkPushResult,
 	retry refRetryResult,
 	stop func(string),
-	budgetExhausted bool,
 	result checkpointFlushResult,
 ) (checkpointFlushResult, error) {
 	result.pushed = append(result.pushed, retry.pushed...)
@@ -1265,8 +1254,7 @@ func finishIndividualRetry(
 	// Superseded refs stay queued under their newer generation, but nothing
 	// failed to deliver them, so they are not counted as left behind.
 	remaining := len(existing) - len(result.pushed) - len(retry.changed)
-	result.bounds = flushResult{remaining: remaining,
-		budgetExhausted: remaining > 0 && budgetExhausted, stopReason: abortReason}
+	result.bounds = flushResult{remaining: remaining, stopReason: abortReason}
 	// Printed before the rejection warning so the more specific reason lands
 	// closest to the prompt.
 	if abortReason != "" {

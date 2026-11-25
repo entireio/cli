@@ -1,7 +1,10 @@
 package checkpoint
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/go-git/go-git/v6"
@@ -12,6 +15,9 @@ import (
 
 // UploadKind is the background upload kind that drains the checkpoint ref push queue.
 const UploadKind = "checkpoint-refs"
+
+// UploadWorkerDeadline bounds a checkpoint upload worker's run.
+const UploadWorkerDeadline = 30 * time.Minute
 
 // OPF decisions a pre-push carries to the background worker. Unset means the
 // pushing hook never resolved one; the worker then applies the non-interactive
@@ -30,6 +36,25 @@ type UploadRequest struct {
 	// PendingCapture is the checkpoint sync remote this push would elect,
 	// persisted only once the worker's delivery lands.
 	PendingCapture string `json:"pending_capture,omitempty"`
+	// QueueDigest identifies the queue the OPF decision was made for. A skip
+	// covers only that queue: checkpoints queued later get the non-interactive
+	// rules (see QueueDigest).
+	QueueDigest string `json:"queue_digest,omitempty"`
+}
+
+// QueueDigest identifies a set of queue entries, in any order.
+func QueueDigest(entries []PushQueueEntry) string {
+	lines := make([]string, 0, len(entries))
+	for _, e := range entries {
+		lines = append(lines, e.Ref.String()+" "+e.Hash.String())
+	}
+	slices.Sort(lines)
+	lines = slices.Compact(lines)
+	h := sha256.New()
+	for _, l := range lines {
+		h.Write([]byte(l + "\n"))
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // UserPush marks a user's `git push` the worker waits for before it pushes:
@@ -58,7 +83,7 @@ type UploadCoordinator struct {
 
 // NewUploadCoordinator returns the coordinator rooted at gitCommonDir.
 func NewUploadCoordinator(gitCommonDir string) *UploadCoordinator {
-	return &UploadCoordinator{bgupload.New[UploadJob](gitCommonDir, UploadKind)}
+	return &UploadCoordinator{bgupload.New[UploadJob](gitCommonDir, UploadKind, UploadWorkerDeadline)}
 }
 
 // UploadCoordinatorForRepo resolves the git common dir for repo.

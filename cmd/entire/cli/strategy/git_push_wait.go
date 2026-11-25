@@ -10,14 +10,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
 
-// Background checkpoint uploads must never land just before a user's push.
-// GitHub rejects a push whose pack arrives within about a second of another
-// push to the same repository finishing (the client sees "(failed)", "missing
-// necessary objects" or "fatal error in commit_refs"), and the one rejected is
-// the later of the two. The pre-push hook therefore records its git push
-// (noteUserPush) and the worker waits for every recorded push to exit, plus a
-// settle delay, before it uploads (waitForUserPushes).
-
 // gitAncestorSearchDepth is how far up the process tree the hook looks for
 // git: git → hook shell → entire, plus room for hook managers (husky,
 // lefthook) that add a layer or two.

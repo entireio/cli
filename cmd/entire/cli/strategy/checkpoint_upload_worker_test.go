@@ -12,7 +12,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/entireio/cli/cmd/entire/cli/bgupload"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
@@ -26,20 +25,16 @@ import (
 // parallel-safe: it swaps package state.
 func enableBackgroundUpload(t *testing.T) *[]string {
 	t.Helper()
-	for _, name := range bgupload.CIEnvVars {
+	for _, name := range ciEnvVars {
 		t.Setenv(name, "")
 	}
 	t.Setenv(CheckpointUploadForegroundEnv, "")
+	shortenUserPushWaits(t, 10*time.Millisecond, 10*time.Millisecond)
 	restoreAllowed, restoreSpawn := backgroundUploadInTests, checkpointUploadSpawn
-	restoreSettle, restoreUnknown := userPushSettle, unknownUserPushDelay
 	var spawned []string
 	backgroundUploadInTests = true
-	checkpointUploadSpawn = func(root string) { spawned = append(spawned, root) }
-	userPushSettle, unknownUserPushDelay = 10*time.Millisecond, 10*time.Millisecond
-	t.Cleanup(func() {
-		backgroundUploadInTests, checkpointUploadSpawn = restoreAllowed, restoreSpawn
-		userPushSettle, unknownUserPushDelay = restoreSettle, restoreUnknown
-	})
+	checkpointUploadSpawn = func(root string) bool { spawned = append(spawned, root); return true }
+	t.Cleanup(func() { backgroundUploadInTests, checkpointUploadSpawn = restoreAllowed, restoreSpawn })
 	return &spawned
 }
 
@@ -462,8 +457,9 @@ func TestRunCheckpointUploadPass_OPFGateRunsAfterPushWait(t *testing.T) {
 		return restoreGate(ctx, repo)
 	}
 
+	require.NoError(t, coord.Request(checkpoint.UploadRequest{Remote: "origin"}))
 	restore := captureStderr(t)
-	runCheckpointUploadPass(t.Context(), repo, coord, checkpoint.UploadRequest{Remote: "origin"})
+	runCheckpointUploadPass(t.Context(), repo, coord)
 	restore()
 
 	require.GreaterOrEqual(t, len(steps), 2)
@@ -516,4 +512,52 @@ func TestRunCheckpointUploadWorker_KeepsNoticesForNextPush(t *testing.T) {
 	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
 	restore()
 	assert.Contains(t, processWide.String(), "Checkpoints go to one repository", "the next push shows it")
+}
+
+// TestRunCheckpointUploadPass_TakesRequestAfterWait: a push recorded while the
+// worker waits merges its decision into the request this pass uses, so its
+// "run" is not overridden by an earlier push's "skip".
+func TestRunCheckpointUploadPass_TakesRequestAfterWait(t *testing.T) {
+	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 1)
+	prepareGitRefsPrePush(t, workDir, bareDir)
+	repo := openUploadTestRepo(t, workDir)
+	enqueueRefs(t, repo, refs)
+	coord := uploadCoordinator(t, repo)
+	require.NoError(t, coord.Request(checkpoint.UploadRequest{Remote: "origin", OPFDecision: checkpoint.UploadOPFSkip}))
+
+	restoreWait := uploadPassWait
+	t.Cleanup(func() { uploadPassWait = restoreWait })
+	uploadPassWait = func(context.Context, *checkpoint.UploadCoordinator) {
+		assert.NoError(t, coord.Request(checkpoint.UploadRequest{Remote: "origin", OPFDecision: checkpoint.UploadOPFRun}))
+	}
+
+	restore := captureStderr(t)
+	runCheckpointUploadPass(t.Context(), repo, coord)
+	restore()
+	// OPF is off in this process, so a carried "run" withholds the upload;
+	// the earlier "skip" would have pushed.
+	st, err := coord.State()
+	require.NoError(t, err)
+	require.NotNil(t, st.Last)
+	assert.Contains(t, st.Last.Error, "privacy filter could not run")
+	assertRefsAbsentFromRemote(t, bareDir, refs, "nothing ships unscanned")
+}
+
+// TestEffectiveOPFDecision_SkipCoversOnlyItsQueue: a skip answered for one
+// queue does not cover checkpoints queued after it.
+func TestEffectiveOPFDecision_SkipCoversOnlyItsQueue(t *testing.T) {
+	t.Parallel()
+	workDir, _, refs := setupRepoWithNCheckpointRefs(t, 2)
+	repo := openUploadTestRepo(t, workDir)
+	enqueueRefs(t, repo, refs[:1])
+	entries, err := queuedEntries(t.Context(), repo)
+	require.NoError(t, err)
+	req := checkpoint.UploadRequest{OPFDecision: checkpoint.UploadOPFSkip, QueueDigest: checkpoint.QueueDigest(entries)}
+
+	assert.Equal(t, checkpoint.UploadOPFSkip, effectiveOPFDecision(t.Context(), repo, req))
+	enqueueRefs(t, repo, refs[1:])
+	assert.Equal(t, checkpoint.UploadOPFUnset, effectiveOPFDecision(t.Context(), repo, req),
+		"a checkpoint queued after the answer gets the non-interactive rules")
+	run := checkpoint.UploadRequest{OPFDecision: checkpoint.UploadOPFRun}
+	assert.Equal(t, checkpoint.UploadOPFRun, effectiveOPFDecision(t.Context(), repo, run))
 }

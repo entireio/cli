@@ -54,13 +54,15 @@ type State[S any] struct {
 
 // Coordinator owns one kind's lock and state file in a git common dir.
 type Coordinator[S any] struct {
-	dir  string
-	kind string
+	dir    string
+	kind   string
+	maxRun time.Duration // a worker's run deadline; an older unfinished record is stale
 }
 
-// New returns kind's coordinator rooted at gitCommonDir.
-func New[S any](gitCommonDir, kind string) *Coordinator[S] {
-	return &Coordinator[S]{dir: gitCommonDir, kind: kind}
+// New returns kind's coordinator rooted at gitCommonDir. maxRun is how long a
+// worker of this kind may run.
+func New[S any](gitCommonDir, kind string, maxRun time.Duration) *Coordinator[S] {
+	return &Coordinator[S]{dir: gitCommonDir, kind: kind, maxRun: maxRun}
 }
 
 func (c *Coordinator[S]) root() (*os.Root, error) {
@@ -188,9 +190,9 @@ func (c *Coordinator[S]) FinishRun(res Result) error {
 
 // Report prints, once, what the last finished run could not: its announcement
 // and why it left work. label names the work, e.g. "checkpoint upload".
-func (c *Coordinator[S]) Report(w io.Writer, label string, maxRun time.Duration) error {
+func (c *Coordinator[S]) Report(w io.Writer, label string) error {
 	st, err := c.State()
-	if err != nil || st.Last == nil || st.Last.Running(time.Now(), maxRun) {
+	if err != nil || st.Last == nil || st.Last.Running(time.Now(), c.maxRun) {
 		return err
 	}
 	last := st.Last
@@ -213,23 +215,10 @@ func (c *Coordinator[S]) Report(w io.Writer, label string, maxRun time.Duration)
 	})
 }
 
-// Spawn starts a detached worker for kind in worktreeRoot. A no-op under go test.
-func Spawn(worktreeRoot, kind string) {
-	execx.SpawnDetached(worktreeRoot, WorkerCommand, kind)
-}
-
-// CIEnvVars mark environments whose checkout is discarded when the job ends,
-// taking a detached worker's work with it.
-var CIEnvVars = []string{"CI", "GITHUB_ACTIONS", "GITLAB_CI", "BUILDKITE", "JENKINS_URL", "TF_BUILD"}
-
-// InCI reports whether this process runs in a CI job.
-func InCI() bool {
-	for _, name := range CIEnvVars {
-		if os.Getenv(name) != "" {
-			return true
-		}
-	}
-	return false
+// Spawn starts a detached worker for kind in worktreeRoot and reports whether
+// it started. A no-op under go test.
+func Spawn(worktreeRoot, kind string) bool {
+	return execx.SpawnDetached(worktreeRoot, WorkerCommand, kind)
 }
 
 // RunPasses is a worker's body: while it can take the lock and has work, it

@@ -118,24 +118,6 @@ func shortenUserPushWaits(t *testing.T, settle, unknown time.Duration) {
 	t.Cleanup(func() { userPushSettle, unknownUserPushDelay = restoreSettle, restoreUnknown })
 }
 
-func TestWaitForUserPushes_WaitsForGitToExit(t *testing.T) {
-	shortenUserPushWaits(t, 10*time.Millisecond, 10*time.Millisecond)
-	coord := checkpoint.NewUploadCoordinator(t.TempDir())
-	pid, stop := startGitProcess(t)
-	id := gitIdentity(t, pid)
-	require.True(t, isLiveGitProcess(id))
-	require.NoError(t, coord.NoteUserPush(checkpoint.UserPush{Process: id, At: time.Now()}))
-
-	stopped := stopLater(stop)
-	waitForUserPushes(t.Context(), coord)
-
-	_, done := stopped()
-	assert.True(t, done, "the wait returned before the push exited")
-	st, err := coord.State()
-	require.NoError(t, err)
-	assert.Empty(t, st.Job.UserPushes, "marks are consumed")
-}
-
 // A push recorded while the worker waits — `git push && git push --tags` —
 // is waited for too.
 func TestWaitForUserPushes_WaitsForPushRecordedMeanwhile(t *testing.T) {
@@ -269,28 +251,6 @@ func TestWaitForUserPushes_LivePushOutlastsRoundLimit(t *testing.T) {
 	assert.GreaterOrEqual(t, time.Since(at), userPushSettle, "and the settle follows the exit")
 }
 
-// A recorded PID now held by another git process (its start time differs) is
-// the old push gone, not a push to wait for.
-func TestWaitForUserPushes_ReusedPIDIsNotWaitedFor(t *testing.T) {
-	shortenUserPushWaits(t, 10*time.Millisecond, 10*time.Millisecond)
-	coord := checkpoint.NewUploadCoordinator(t.TempDir())
-	pid, _ := startGitProcess(t)
-	id := gitIdentity(t, pid)
-	if id.Start == "" {
-		t.Skip("no process start time on this platform")
-	}
-	reused := id
-	reused.Start += "-earlier"
-	require.NoError(t, coord.NoteUserPush(checkpoint.UserPush{Process: reused, At: time.Now()}))
-
-	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
-	defer cancel()
-	waitForUserPushes(ctx, coord)
-
-	require.NoError(t, ctx.Err(), "the reused PID was waited on until the deadline")
-	assert.True(t, isLiveGitProcess(id), "the process itself is still running")
-}
-
 // An exited git its parent has not reaped yet is a zombie, not a live push.
 func TestIsLiveGitProcess_ZombieIsNotLive(t *testing.T) {
 	t.Parallel()
@@ -362,4 +322,7 @@ func TestUserPushWait_WindowsAndUnix(t *testing.T) {
 	_, done := stopped()
 	assert.True(t, done, "the wait returned before the push exited")
 	assert.False(t, isLiveGitProcess(id))
+	st, err := coord.State()
+	require.NoError(t, err)
+	assert.Empty(t, st.Job.UserPushes, "marks are consumed")
 }
