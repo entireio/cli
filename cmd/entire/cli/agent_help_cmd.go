@@ -340,16 +340,14 @@ var agentHelpProjectTrailGuidance = map[string]string{
 		"pull request URL only when the user asks for it.",
 	// The project tree replaces the shared entry, so it repeats the reply rules.
 	"trail finding": trailFindingReplyGuidance + "\n\n" +
-		"After a push, run `entire trail finding` (the dashboard): an agent has\n" +
-		"reviewed the pushed commit only when its HEAD is that commit and its\n" +
-		"STATUS is succeeded; a queued, running, or failed run, or an older\n" +
-		"head, means not reviewed yet, whatever the findings show. It also counts open\n" +
-		"findings the default filters hide: while any are open, the change is not\n" +
-		"ready, whatever the gates say; list them with --freshness any. For\n" +
-		"each open finding: if your pushed fix addresses it, resolve it with -m\n" +
-		"naming the fixing commit; otherwise fix it. Dismiss with -m only when the\n" +
-		"finding is wrong, and tell the user. Agent readings (e.g. Drift, Slop)\n" +
-		"are in the dashboard's Agents section; --json has each one's rationale.",
+		"`entire trail finding` (the dashboard) also counts open findings the\n" +
+		"default filters hide: while any are open, the change is not ready,\n" +
+		"whatever the gates say; list them with --freshness any. For each open\n" +
+		"finding: if your pushed fix addresses it, resolve it with -m naming the\n" +
+		"fixing commit; otherwise ask the user whether to address it, unless their\n" +
+		"instructions say how to handle trail findings. Dismiss with -m only when\n" +
+		"the finding is wrong, and tell the user. Agent readings (e.g. Drift,\n" +
+		"Slop) are in the dashboard's Agents section; --json has each one's rationale.",
 	"trail merge": "--dry-run only reports: whether the change is mergeable and which gates\n" +
 		"block it. To answer \"is it ready?\", run it and `entire trail finding`;\n" +
 		"open findings hidden by the default filters also mean not ready. Never merge\n" +

@@ -1112,8 +1112,8 @@ func TestAgentHelpProjectTrailGuidance_TrailWorkflow(t *testing.T) {
 	}{
 		{"update", []string{"keep their text", shadowPRMarker, "give a\npull request URL only when the user asks for it",
 			"A bare number is a project trail number", "If trail N is not this branch's trail, do not\nchange it"}},
-		{"finding", []string{"After a push, run `entire trail finding`", "STATUS is succeeded", "while any are open, the change is not\nready",
-			"Dismiss with -m only when the\nfinding is wrong", "Reply to a finding with `entire trail finding reply`"}},
+		{"finding", []string{"default filters hide: while any are open, the change is not ready", "ask the user whether to address it",
+			"Dismiss with -m only when\nthe finding is wrong", "Reply to a finding with `entire trail finding reply`"}},
 		{"merge", []string{"--dry-run only reports", "\"looks\ngood\" is not that", "never pass --force or --yes on your own"}},
 		{"create", []string{"so do not also\n`git push` or open a pull request", "ask the user first",
 			"If it\nfails, do not rerun it", "`git push` and then `entire trail link <P>` instead"}},
@@ -1143,7 +1143,7 @@ func TestAgentHelpProjectTrailGuidance_TrailWorkflow(t *testing.T) {
 		t.Fatal("legacy trail finding not found")
 	}
 	got := agentHelpGuidanceFor(finding)
-	if !strings.Contains(got, "Reply to a finding with `entire trail finding reply`") || strings.Contains(got, "After a push") {
+	if !strings.Contains(got, "Reply to a finding with `entire trail finding reply`") || strings.Contains(got, "default filters hide") {
 		t.Errorf("legacy trail finding should keep only the shared reply rules:\n%s", got)
 	}
 }
