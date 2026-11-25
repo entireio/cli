@@ -18,10 +18,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -44,12 +42,6 @@ const checkpointUploadComponent = "checkpoint-upload"
 // the pre-push hook. Set by test harnesses whose temp remotes vanish when the
 // test ends.
 const CheckpointUploadForegroundEnv = "ENTIRE_CHECKPOINT_UPLOAD_FOREGROUND"
-
-// CheckpointUploadAfterPushEnv, when set to 1, makes the pre-push hook record
-// the upload without starting a worker. Set by a caller that runs `git push`
-// itself and then uploads with UploadRequestedCheckpoints, so its checkpoints
-// are on the remote when it reports the push (`entire trail create`).
-const CheckpointUploadAfterPushEnv = "ENTIRE_CHECKPOINT_UPLOAD_AFTER_PUSH"
 
 // foregroundUploadLockWait bounds how long a foreground flush (hand-off
 // disabled) waits for a running worker before leaving its refs queued. Var for
@@ -196,7 +188,6 @@ func reportBackgroundUpload(ctx context.Context, coord *checkpoint.UploadCoordin
 // is safe: whoever holds the lock starts a worker for the request on release
 // (releaseUploadLock).
 func handOffCheckpointUpload(ctx context.Context, coord *checkpoint.UploadCoordinator, req checkpoint.UploadRequest) bool {
-	req.RequestedAt = time.Now()
 	if err := coord.Request(req); err != nil {
 		logging.Warn(ctx, "record background checkpoint upload request failed",
 			slog.String("error", err.Error()))
@@ -320,102 +311,6 @@ func uploadRedactionReady(ctx context.Context, coord *checkpoint.UploadCoordinat
 	return true
 }
 
-// UploadRequestedCheckpoints runs, in this process, the upload a pre-push hook
-// recorded under CheckpointUploadAfterPushEnv, and reports it on w. Call it
-// after the `git push` has returned. It waits for a running worker (bounded by
-// foregroundUploadLockWait) and returns how many refs landed.
-func UploadRequestedCheckpoints(ctx context.Context, w io.Writer) int {
-	// callerCtx releases the lock: a push that found it held left a request
-	// and relies on the holder to start a worker for it (releaseUploadLock),
-	// which a context marked as the worker would skip.
-	callerCtx := ctx
-	ctx = withinUploadWorker(logging.WithComponent(ctx, checkpointUploadComponent))
-	repo, err := OpenRepository(ctx)
-	if err != nil {
-		return 0
-	}
-	defer repo.Close()
-	coord, err := checkpoint.UploadCoordinatorForRepo(repo)
-	if err != nil || !coord.HasRequest() || !uploadRedactionReady(ctx, coord) {
-		return 0
-	}
-	lockCtx, cancel := context.WithTimeout(ctx, foregroundUploadLockWait)
-	release, err := coord.LockWorker(lockCtx)
-	cancel()
-	if err != nil {
-		fmt.Fprintln(w, "[entire] Another checkpoint upload is in progress; checkpoints will follow with it or the next push.")
-		return 0
-	}
-	defer releaseUploadLock(callerCtx, coord, release)
-	req, err := coord.TakeRequest()
-	if err != nil || req == nil {
-		return 0
-	}
-	runCheckpointUploadPass(ctx, repo, coord, *req)
-	st, err := coord.State()
-	if err != nil || st.Last == nil {
-		return 0
-	}
-	last := st.Last
-	if last.Announcement != "" {
-		fmt.Fprintln(w, last.Announcement)
-	}
-	if last.Pushed > 0 {
-		fmt.Fprintf(w, "[entire] Pushed %d checkpoint ref(s).\n", last.Pushed)
-	}
-	if last.Error != "" {
-		fmt.Fprintf(w, "[entire] %d checkpoint ref(s) stay queued for the next push: %s\n", last.Remaining, last.Error)
-	}
-	if err := coord.ClearReported(last.StartedAt); err != nil {
-		logging.Debug(ctx, "clear reported checkpoint upload failed", slog.String("error", err.Error()))
-	}
-	return last.Pushed
-}
-
-// RunPushThenUploadCheckpoints runs cmd, a `git push` to remote, with the
-// pre-push hook told to record the checkpoint upload rather than start it
-// (CheckpointUploadAfterPushEnv), then runs that upload in-process once the
-// push has returned, so the push's success also means its checkpoints went —
-// and they never land just before the branch, which GitHub would reject as the
-// later of two back-to-back pushes. A failed push uploads nothing: its request
-// is discarded and the refs stay queued for the next push. cmd.Env, when nil,
-// defaults to the process environment.
-func RunPushThenUploadCheckpoints(ctx context.Context, cmd *exec.Cmd, remote string, w io.Writer) error {
-	if cmd.Env == nil {
-		cmd.Env = os.Environ()
-	}
-	cmd.Env = append(cmd.Env, CheckpointUploadAfterPushEnv+"=1")
-	pushStart := time.Now()
-	if err := cmd.Run(); err != nil {
-		// Not under ctx: a push that timed out has spent it.
-		DiscardRequestedCheckpointUpload(context.WithoutCancel(ctx), remote, pushStart)
-		return fmt.Errorf("git push: %w", err)
-	}
-	UploadRequestedCheckpoints(ctx, w)
-	return nil
-}
-
-// DiscardRequestedCheckpointUpload drops the request a pre-push hook recorded
-// under CheckpointUploadAfterPushEnv when that push failed: nothing should
-// upload for it. Only a request for remote recorded since pushStart is taken;
-// the refs stay queued for the next push, which records its own.
-func DiscardRequestedCheckpointUpload(ctx context.Context, remote string, pushStart time.Time) {
-	repo, err := OpenRepository(ctx)
-	if err != nil {
-		return
-	}
-	defer repo.Close()
-	coord, err := checkpoint.UploadCoordinatorForRepo(repo)
-	if err != nil {
-		return
-	}
-	if _, err := coord.TakeRequestIf(func(r checkpoint.UploadRequest) bool {
-		return r.Remote == remote && !r.RequestedAt.Before(pushStart)
-	}); err != nil {
-		logging.Debug(ctx, "discard checkpoint upload request failed", slog.String("error", err.Error()))
-	}
-}
-
 // uploadPassWait and uploadPassOPFGate are runCheckpointUploadPass's wait for
 // the user's pushes and its OPF gate; vars so a test can check their order.
 var (
@@ -518,36 +413,4 @@ func unsetRepoOverrideEnv() {
 			os.Unsetenv(name)
 		}
 	}
-}
-
-// CheckpointUploadStatus reports, for `entire status`, whether a background
-// checkpoint upload is running and why the last one stopped short ("" when it
-// did not). Best-effort: any error reads as no background upload.
-func CheckpointUploadStatus(ctx context.Context) (running bool, lastError string) {
-	repo, err := OpenRepository(ctx)
-	if err != nil {
-		return false, ""
-	}
-	defer repo.Close()
-	coord, err := checkpoint.UploadCoordinatorForRepo(repo)
-	if err != nil {
-		return false, ""
-	}
-	st, err := coord.State()
-	if err != nil || st.Last == nil {
-		return false, ""
-	}
-	running = st.Last.Running(time.Now(), checkpointUploadWorkerDeadline)
-	// A worker that was killed leaves a record that still reads as running,
-	// but the kernel freed its lock: a lock we can take means nobody uploads.
-	if running {
-		if release, ok, lockErr := coord.TryLockWorker(ctx); lockErr == nil && ok {
-			release()
-			running = false
-		}
-	}
-	if running {
-		return true, ""
-	}
-	return false, st.Last.Error
 }

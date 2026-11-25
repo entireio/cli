@@ -250,34 +250,6 @@ func TestPrePush_InlineUploadSettlesAfterPushing(t *testing.T) {
 	assert.Contains(t, out, refs[0].String(), "pushed inline")
 }
 
-// `entire trail create` runs git push itself: the hook only records the upload,
-// and the command runs it once the push returns.
-func TestUploadRequestedCheckpoints_RunsWhatTheHookRecorded(t *testing.T) {
-	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 3)
-	countFile := filepath.Join(t.TempDir(), "attempts")
-	prepareGitRefsPrePush(t, workDir, bareDir)
-	installCountingHook(t, bareDir, countFile, 0)
-	spawned := enableBackgroundUpload(t)
-	t.Setenv(CheckpointUploadAfterPushEnv, "1")
-
-	repo, err := gitrepo.OpenPath(workDir)
-	require.NoError(t, err)
-	defer repo.Close()
-	queue := enqueueRefs(t, repo, refs)
-
-	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
-	assert.Equal(t, 0, countedAttempts(t, countFile), "the hook must not push")
-	assert.Empty(t, *spawned, "no worker: the caller uploads")
-
-	var out bytes.Buffer
-	assert.Equal(t, 3, UploadRequestedCheckpoints(t.Context(), &out))
-	assert.Contains(t, out.String(), "Pushed 3 checkpoint ref(s)")
-	remaining, err := queue.Drain()
-	require.NoError(t, err)
-	assert.Empty(t, remaining)
-	assert.False(t, uploadCoordinator(t, repo).HasRequest())
-}
-
 // The two-minute limit bounds taking new rounds, not a push still running: a
 // slow push is waited for to its end, and then settled.
 func TestWaitForUserPushes_LivePushOutlastsRoundLimit(t *testing.T) {

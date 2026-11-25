@@ -207,9 +207,6 @@ func TestRunCheckpointUploadWorker_FailureReachesNextPush(t *testing.T) {
 	require.NotNil(t, st.Last)
 	assert.NotEmpty(t, st.Last.Error)
 	assert.Contains(t, st.Last.Detail, checkpointUnblockURL, "the remote's reason survives the worker's null stderr")
-	running, lastErr := CheckpointUploadStatus(t.Context())
-	assert.False(t, running)
-	assert.Equal(t, st.Last.Error, lastErr)
 
 	buf := captureStderrWriter(t)
 	restore = captureStderr(t)
@@ -375,21 +372,6 @@ func TestPrePush_ForegroundNeverHandsOffWhenLockHeld(t *testing.T) {
 	assert.Nil(t, st.Request, "no request is left for a background process")
 }
 
-// TestCheckpointUploadStatus_KilledWorkerIsNotRunning: a killed worker leaves
-// a run record with no finish time, but its lock was freed; status must not
-// claim an upload is running.
-func TestCheckpointUploadStatus_KilledWorkerIsNotRunning(t *testing.T) {
-	workDir, bareDir, _ := setupRepoWithNCheckpointRefs(t, 1)
-	prepareGitRefsPrePush(t, workDir, bareDir)
-	repo, err := gitrepo.OpenPath(workDir)
-	require.NoError(t, err)
-	defer repo.Close()
-	require.NoError(t, uploadCoordinator(t, repo).StartRun(time.Now()))
-
-	running, _ := CheckpointUploadStatus(t.Context())
-	assert.False(t, running)
-}
-
 // TestRunCheckpointUploadWorker_RespawnsForRequestLeftAtExit: a worker that
 // runs out of passes while pushes keep asking for more hands the last request
 // to a fresh worker instead of leaving it for the next push.
@@ -423,63 +405,25 @@ func TestRunCheckpointUploadWorker_RespawnsForRequestLeftAtExit(t *testing.T) {
 	assert.Len(t, *spawned, 1, "a fresh worker takes the request left at exit")
 }
 
-// TestPrePush_AfterPushRecordsUserPush: trail create's own upload waits for
-// its push like a worker would, and so does a worker from an earlier push.
-func TestPrePush_AfterPushRecordsUserPush(t *testing.T) {
+// TestPrePush_InlineRecordsUserPush: an inline upload records its push, so a
+// worker left from an earlier push waits for it too.
+func TestPrePush_InlineRecordsUserPush(t *testing.T) {
 	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 1)
 	prepareGitRefsPrePush(t, workDir, bareDir)
-	enableBackgroundUpload(t)
-	t.Setenv(CheckpointUploadAfterPushEnv, "1")
+	t.Setenv(CheckpointUploadForegroundEnv, "1")
 
 	repo, err := gitrepo.OpenPath(workDir)
 	require.NoError(t, err)
 	defer repo.Close()
 	enqueueRefs(t, repo, refs)
 
-	before := time.Now()
+	restore := captureStderr(t)
 	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
+	restore()
 
 	st, err := uploadCoordinator(t, repo).State()
 	require.NoError(t, err)
 	assert.Len(t, st.UserPushes, 1)
-	require.NotNil(t, st.Request)
-	assert.False(t, st.Request.RequestedAt.Before(before), "the request is stamped")
-}
-
-// TestDiscardRequestedCheckpointUpload: a failed trail-create push drops the
-// request its hook recorded, but not an older one or one for another remote.
-func TestDiscardRequestedCheckpointUpload(t *testing.T) {
-	workDir, bareDir, _ := setupRepoWithNCheckpointRefs(t, 1)
-	prepareGitRefsPrePush(t, workDir, bareDir)
-	repo, err := gitrepo.OpenPath(workDir)
-	require.NoError(t, err)
-	defer repo.Close()
-	coord := uploadCoordinator(t, repo)
-	pushStart := time.Now()
-
-	require.NoError(t, coord.Request(checkpoint.UploadRequest{Remote: "origin", RequestedAt: pushStart.Add(-time.Second)}))
-	DiscardRequestedCheckpointUpload(t.Context(), "origin", pushStart)
-	assert.True(t, coord.HasRequest(), "recorded before this push")
-
-	require.NoError(t, coord.Request(checkpoint.UploadRequest{Remote: "fork", RequestedAt: pushStart.Add(time.Second)}))
-	DiscardRequestedCheckpointUpload(t.Context(), "origin", pushStart)
-	assert.True(t, coord.HasRequest(), "another remote's")
-
-	_, err = coord.TakeRequest()
-	require.NoError(t, err)
-	require.NoError(t, coord.Request(checkpoint.UploadRequest{Remote: "origin", RequestedAt: pushStart.Add(time.Second)}))
-	DiscardRequestedCheckpointUpload(t.Context(), "origin", pushStart)
-	assert.False(t, coord.HasRequest())
-
-	// A failed push whose request merged into one an earlier push left pending
-	// must not discard the earlier push's upload with its own.
-	require.NoError(t, coord.Request(checkpoint.UploadRequest{Remote: "origin", RequestedAt: pushStart.Add(-time.Second), PendingCapture: "origin"}))
-	require.NoError(t, coord.Request(checkpoint.UploadRequest{Remote: "origin", RequestedAt: pushStart.Add(time.Second)}))
-	DiscardRequestedCheckpointUpload(t.Context(), "origin", pushStart)
-	require.True(t, coord.HasRequest(), "the earlier push's request survives")
-	req, err := coord.TakeRequest()
-	require.NoError(t, err)
-	assert.Equal(t, "origin", req.PendingCapture)
 }
 
 // TestRunCheckpointUploadWorker_BudgetEndsPassAsStop: the pass budget bounds

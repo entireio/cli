@@ -50,8 +50,7 @@ type UploadRequest struct {
 	OPFDecision string `json:"opf_decision,omitempty"`
 	// PendingCapture is the checkpoint sync remote this push would elect. The
 	// worker persists it only once its own delivery lands, as the hook would.
-	PendingCapture string    `json:"pending_capture,omitempty"`
-	RequestedAt    time.Time `json:"requested_at"`
+	PendingCapture string `json:"pending_capture,omitempty"`
 }
 
 // UploadResult is the background worker's record of its last run.
@@ -156,10 +155,6 @@ func (c *UploadCoordinator) LockWorker(ctx context.Context) (func(), error) {
 // the latest push's destination wins, and so does a decision to run OPF. The
 // queue holds the earlier push's refs too, so a later push that resolved skip
 // or nothing must not let them upload unscanned.
-//
-// A merged request keeps the earliest RequestedAt: it stands for that push as
-// well, so a later push that fails must not discard it as its own (see
-// strategy.DiscardRequestedCheckpointUpload).
 func (c *UploadCoordinator) Request(req UploadRequest) error {
 	return c.update(func(st *UploadState) {
 		if st.Request != nil && st.Request.OPFDecision == UploadOPFRun {
@@ -167,10 +162,6 @@ func (c *UploadCoordinator) Request(req UploadRequest) error {
 		}
 		if req.PendingCapture == "" && st.Request != nil && st.Request.Remote == req.Remote {
 			req.PendingCapture = st.Request.PendingCapture
-		}
-		if st.Request != nil && !st.Request.RequestedAt.IsZero() &&
-			(req.RequestedAt.IsZero() || st.Request.RequestedAt.Before(req.RequestedAt)) {
-			req.RequestedAt = st.Request.RequestedAt
 		}
 		st.Request = &req
 	})
@@ -181,19 +172,6 @@ func (c *UploadCoordinator) TakeRequest() (*UploadRequest, error) {
 	var req *UploadRequest
 	err := c.update(func(st *UploadState) {
 		req, st.Request = st.Request, nil
-	})
-	return req, err
-}
-
-// TakeRequestIf removes and returns the pending request if match accepts it,
-// or nil. The check and the take are one update, so a request recorded in
-// between is never taken unchecked.
-func (c *UploadCoordinator) TakeRequestIf(match func(UploadRequest) bool) (*UploadRequest, error) {
-	var req *UploadRequest
-	err := c.update(func(st *UploadState) {
-		if st.Request != nil && match(*st.Request) {
-			req, st.Request = st.Request, nil
-		}
 	})
 	return req, err
 }

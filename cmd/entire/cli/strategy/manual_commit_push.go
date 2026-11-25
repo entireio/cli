@@ -516,22 +516,6 @@ func uploadCheckpointRefsOnPrePush(ctx context.Context, repo *git.Repository, ps
 	// git_push_wait.go). So the hook only records the work; the upload runs
 	// after this push has exited.
 
-	// `entire trail create` uploads the request itself once its git push
-	// returns (UploadRequestedCheckpoints).
-	if coord != nil && os.Getenv(CheckpointUploadAfterPushEnv) == "1" {
-		// So that upload waits for this push to exit and settle, and so does a
-		// worker still uploading an earlier push's checkpoints.
-		noteUserPush(ctx, coord)
-		if has, err := queueHasRefs(ctx, repo); err == nil && has {
-			req.RequestedAt = time.Now()
-			if err := coord.Request(req); err != nil {
-				logging.Warn(ctx, "git-refs pre-push: record checkpoint upload request failed; refs left queued",
-					slog.String("error", err.Error()))
-			}
-		}
-		return nil
-	}
-
 	if background {
 		// Recorded even with nothing queued: a worker still uploading an
 		// earlier push's checkpoints must wait for this push too.
@@ -549,7 +533,11 @@ func uploadCheckpointRefsOnPrePush(ctx context.Context, repo *git.Repository, ps
 	}
 
 	// Inline (CI, the setting, harnesses): no process outlives the hook, so
-	// upload here. One flush of the queue at a time.
+	// upload here. One flush of the queue at a time. Recorded so a worker left
+	// from an earlier push also waits for this one.
+	if coord != nil {
+		noteUserPush(ctx, coord)
+	}
 	release, locked := lockQueueForFlush(ctx, coord, false)
 	if !locked {
 		fmt.Fprintln(os.Stderr, "[entire] Another checkpoint upload is in progress; checkpoints stay queued for the next push.")

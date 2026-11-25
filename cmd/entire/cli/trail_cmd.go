@@ -1580,11 +1580,12 @@ func pushBranchToRemote(ctx context.Context, out, errOut io.Writer, remote, bran
 	cmd := exec.CommandContext(ctx, "git", "push", "-u", remote, branchName)
 	cmd.Stdout = out
 	cmd.Stderr = errOut
-	// The hook only records the checkpoint upload; it runs once git push has
-	// returned, so "Pushed branch" means the checkpoints went too. git's own
-	// message already reached errOut on failure, so the error names the
-	// command and carries the exit status rather than repeating the diagnostic.
-	return strategy.RunPushThenUploadCheckpoints(ctx, cmd, remote, errOut) //nolint:wrapcheck // already names git push
+	if err := cmd.Run(); err != nil {
+		// git's own message already reached errOut, so this names the command
+		// and carries the exit status rather than repeating the diagnostic.
+		return fmt.Errorf("git push: %w", err)
+	}
+	return nil
 }
 
 // remoteHasBranch reports whether remote already has a branch with the given
