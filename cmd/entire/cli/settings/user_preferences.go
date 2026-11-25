@@ -469,8 +469,20 @@ func (s *EntireSettings) UserLayerRejections() []string {
 // Entire on machine-wide (`global_enable: true`, set by `entire enable
 // --global`). That is the one flag that sets up every repository the user
 // touches.
+//
+// It reads only global_enable: every command asks, and most developers have
+// it off, so preferences and repos entries are not decoded for it.
 func UserTierEnablesEverywhere(ctx context.Context) bool {
-	return loadUserOverlay(ctx).globalEnable
+	us, err := usersettings.Load(ctx)
+	if err != nil {
+		return false
+	}
+	raw, ok := us.Block(usersettings.GlobalEnableKey)
+	if !ok {
+		return false
+	}
+	var enabled *bool
+	return json.Unmarshal(raw, &enabled) == nil && enabled != nil && *enabled
 }
 
 // EnabledOnlyByGlobal reports whether this repository is on only because of

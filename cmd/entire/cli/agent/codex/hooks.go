@@ -512,15 +512,19 @@ func decodeHooksDocument(path string, data []byte) (*hooksDocument, error) {
 		rawHooks: make(map[string]json.RawMessage),
 		exists:   true,
 	}
+	where := "hooks.json"
+	if path != "" {
+		where = fmt.Sprintf("hooks.json %q", path)
+	}
 	if err := json.Unmarshal(data, &document.topLevel); err != nil {
-		return nil, fmt.Errorf("failed to parse existing hooks.json %q: %w", path, err)
+		return nil, fmt.Errorf("failed to parse existing %s: %w", where, err)
 	}
 	if document.topLevel == nil {
 		document.topLevel = make(map[string]json.RawMessage)
 	}
 	if hooksRaw, ok := document.topLevel["hooks"]; ok {
 		if err := json.Unmarshal(hooksRaw, &document.rawHooks); err != nil {
-			return nil, fmt.Errorf("failed to parse hooks in hooks.json %q: %w", path, err)
+			return nil, fmt.Errorf("failed to parse hooks in %s: %w", where, err)
 		}
 	}
 	if document.rawHooks == nil {
@@ -599,23 +603,13 @@ const projectHookCommandPrefix = "entire hooks codex "
 // into a hooks.json document, keeping everything else in it. It returns the
 // new document and how many events changed; 0 means nothing to write.
 func mergeEntireHooks(existing []byte, exists, force bool, commandFor func(managedHook) string) ([]byte, int, error) {
-	topLevel := make(map[string]json.RawMessage)
-	var rawHooks map[string]json.RawMessage
+	topLevel, rawHooks := make(map[string]json.RawMessage), make(map[string]json.RawMessage)
 	if exists {
-		if err := json.Unmarshal(existing, &topLevel); err != nil {
-			return nil, 0, fmt.Errorf("failed to parse existing hooks.json: %w", err)
+		document, err := decodeHooksDocument("", existing)
+		if err != nil {
+			return nil, 0, err
 		}
-		if topLevel == nil {
-			topLevel = make(map[string]json.RawMessage)
-		}
-		if hooksRaw, ok := topLevel["hooks"]; ok {
-			if err := json.Unmarshal(hooksRaw, &rawHooks); err != nil {
-				return nil, 0, fmt.Errorf("failed to parse hooks in hooks.json: %w", err)
-			}
-		}
-	}
-	if rawHooks == nil {
-		rawHooks = make(map[string]json.RawMessage)
+		topLevel, rawHooks = document.topLevel, document.rawHooks
 	}
 	count := 0
 	updated := make([][]MatcherGroup, len(managedHooks))
@@ -654,19 +648,11 @@ func mergeEntireHooks(existing []byte, exists, force bool, commandFor func(manag
 // stripEntireHooks removes Entire's managed hooks from a hooks.json
 // document, keeping everything else, and reports whether any were there.
 func stripEntireHooks(data []byte) ([]byte, bool, error) {
-	var topLevel map[string]json.RawMessage
-	if err := json.Unmarshal(data, &topLevel); err != nil {
-		return nil, false, fmt.Errorf("failed to parse hooks.json: %w", err)
+	document, err := decodeHooksDocument("", data)
+	if err != nil {
+		return nil, false, err
 	}
-	var rawHooks map[string]json.RawMessage
-	if hooksRaw, ok := topLevel["hooks"]; ok {
-		if err := json.Unmarshal(hooksRaw, &rawHooks); err != nil {
-			return nil, false, fmt.Errorf("failed to parse hooks: %w", err)
-		}
-	}
-	if rawHooks == nil {
-		return nil, false, nil
-	}
+	topLevel, rawHooks := document.topLevel, document.rawHooks
 	changed := false
 	for _, h := range managedHooks {
 		var groups []MatcherGroup

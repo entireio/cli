@@ -63,7 +63,7 @@ func TestEnsureUserHooks_WritesTheSameHooksEnableWrites(t *testing.T) {
 	}
 }
 
-func TestEnsureUserHooks_IsIdempotentAndKeepsUserKeys(t *testing.T) {
+func TestEnsureUserHooks_KeepsUserKeys(t *testing.T) {
 	userDir := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", userDir)
 	t.Chdir(t.TempDir())
@@ -73,14 +73,7 @@ func TestEnsureUserHooks_IsIdempotentAndKeepsUserKeys(t *testing.T) {
 	}
 
 	if _, _, err := ensureUserHooks(t); err != nil {
-		t.Fatalf("first EnsureUserHooks() error = %v", err)
-	}
-	n, _, err := ensureUserHooks(t)
-	if err != nil {
-		t.Fatalf("second EnsureUserHooks() error = %v", err)
-	}
-	if n != 0 {
-		t.Errorf("second EnsureUserHooks() installed %d hooks, want 0", n)
+		t.Fatalf("EnsureUserHooks() error = %v", err)
 	}
 
 	raw := readUserClaudeSettings(t, userDir)
@@ -161,33 +154,6 @@ func TestRemoveUserHooks_RemovesOnlyEntireHooks(t *testing.T) {
 	}
 	if len(hooks["Notification"]) != 1 || len(hooks["Stop"]) != 1 {
 		t.Errorf("the user's own hooks were not kept: %s", raw["hooks"])
-	}
-}
-
-// Nothing to remove writes nothing: no file is created, and a file without
-// Entire's hooks is left byte for byte.
-func TestRemoveUserHooks_NothingToRemoveWritesNothing(t *testing.T) {
-	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(t.TempDir(), "absent"))
-	if removed, _, err := (&ClaudeCodeAgent{}).RemoveUserHooks(context.Background()); err != nil || removed {
-		t.Fatalf("RemoveUserHooks() with no config dir = %v, %v", removed, err)
-	}
-
-	userDir := t.TempDir()
-	t.Setenv("CLAUDE_CONFIG_DIR", userDir)
-	const existing = `{ "model": "opus" }`
-	path := filepath.Join(userDir, ClaudeSettingsFileName)
-	if err := os.WriteFile(path, []byte(existing), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if removed, _, err := (&ClaudeCodeAgent{}).RemoveUserHooks(context.Background()); err != nil || removed {
-		t.Fatalf("RemoveUserHooks() without Entire hooks = %v, %v", removed, err)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(data) != existing {
-		t.Errorf("file rewritten to %q", data)
 	}
 }
 

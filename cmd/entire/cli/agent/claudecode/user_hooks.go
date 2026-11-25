@@ -56,15 +56,15 @@ func userSettingsFile() (agent.MergedUserFile, error) {
 }
 
 // EnsureUserHooks implements agent.UserHookInstaller. It also records the
-// version side file after any install, and once for hooks an earlier CLI
-// installed without one.
+// version side file after any install; the usual pass, hooks already
+// current, reads nothing else.
 func (c *ClaudeCodeAgent) EnsureUserHooks(ctx context.Context, wanted func(context.Context) bool) (int, string, error) {
 	file, err := userSettingsFile()
 	if err != nil {
 		return 0, "", err
 	}
 	n, err := file.Ensure(ctx, wanted)
-	if err == nil && (n > 0 || agent.ReadUserHookStamp(agent.AgentNameClaudeCode) != userHooksVersion) {
+	if err == nil && n > 0 {
 		if stampErr := agent.WriteUserHookStamp(agent.AgentNameClaudeCode, userHooksVersion); stampErr != nil {
 			logging.Debug(ctx, "claude: could not record the user-level hook version",
 				slog.String("error", stampErr.Error()))
@@ -103,7 +103,9 @@ func (c *ClaudeCodeAgent) InspectUserHooks(context.Context) agent.UserHookReport
 	}
 	report := file.Inspect()
 	report.Version = agent.ReadUserHookStamp(agent.AgentNameClaudeCode)
-	if report.State == agent.UserHooksCurrent && report.Version < userHooksVersion {
+	// No stamp (0) is not outdated: only an install writes one, and hooks
+	// already current are not reinstalled.
+	if report.State == agent.UserHooksCurrent && report.Version > 0 && report.Version < userHooksVersion {
 		report.State = agent.UserHooksOutdated
 	}
 	return report

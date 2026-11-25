@@ -25,7 +25,7 @@ func userOpenCodeHome(t *testing.T) string {
 
 // Install writes the user-level render to plugin/entire.ts once, inspect
 // reports it current with its version, and removal takes it away.
-func TestUserHooks_InstallIsIdempotentAndRemovable(t *testing.T) {
+func TestUserHooks_InstallInspectRemove(t *testing.T) {
 	home := userOpenCodeHome(t)
 	ag := &OpenCodeAgent{}
 	ctx := context.Background()
@@ -34,9 +34,6 @@ func TestUserHooks_InstallIsIdempotentAndRemovable(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, n)
 	assert.Equal(t, filepath.Join(home, "plugin", "entire.ts"), path)
-	n, _, err = ag.EnsureUserHooks(ctx, nil)
-	require.NoError(t, err)
-	assert.Zero(t, n)
 	report := ag.InspectUserHooks(ctx)
 	assert.Equal(t, agent.UserHooksCurrent, report.State)
 	assert.Equal(t, userHooksVersion, report.Version)

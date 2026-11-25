@@ -20,9 +20,10 @@ func userPiHome(t *testing.T) string {
 	return home
 }
 
-// Install writes the user-level render once, inspect reports it current with
+// Install writes the user-level render (idempotence is the shared
+// GeneratedUserFile's, tested in package agent), inspect reports it current with
 // its version, and removal takes the file and its directory away.
-func TestUserHooks_InstallIsIdempotentAndRemovable(t *testing.T) {
+func TestUserHooks_InstallInspectRemove(t *testing.T) {
 	home := userPiHome(t)
 	ag := &PiAgent{}
 	ctx := context.Background()
@@ -36,9 +37,6 @@ func TestUserHooks_InstallIsIdempotentAndRemovable(t *testing.T) {
 	assert.Contains(t, string(data), "Entire user-level extension, hook version 1")
 	assert.Contains(t, string(data), entireMarker)
 
-	n, _, err = ag.EnsureUserHooks(ctx, nil)
-	require.NoError(t, err)
-	assert.Zero(t, n)
 	report := ag.InspectUserHooks(ctx)
 	assert.Equal(t, agent.UserHooksCurrent, report.State)
 	assert.Equal(t, userHooksVersion, report.Version)

@@ -123,9 +123,9 @@ func EnsureUserHookFile(ctx context.Context, lockPath string, wanted func(contex
 	if err != nil || n == 0 {
 		return 0, err
 	}
-	release, err := flock.AcquireContext(ctx, lockPath)
+	release, err := LockUserHookFile(ctx, lockPath)
 	if err != nil {
-		return 0, fmt.Errorf("lock %s: %w", lockPath, err)
+		return 0, err
 	}
 	defer release()
 	if wanted != nil && !wanted(ctx) {
