@@ -474,3 +474,13 @@ func foldForms(forms []string) {
 		forms[i] = strings.ToLower(forms[i])
 	}
 }
+
+// forgePrefix is the first segment of a `repos` key for info: the Entire
+// forge token when there is one, otherwise the canonical host.
+func forgePrefix(info *gitremote.Info) (string, bool) {
+	prefix := info.Forge
+	if !gitremote.IsForgePathToken(prefix) {
+		prefix = info.CanonicalHost()
+	}
+	return prefix, prefix != ""
+}

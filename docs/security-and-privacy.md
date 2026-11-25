@@ -481,7 +481,7 @@ does not exist is skipped, and picked up by the next `entire` command after it
 does. From then on, Entire records those agents' sessions in every git
 repository you work in, not only the ones you ran `entire enable` in. Recorded
 sessions and checkpoints may leave the machine as your settings allow: today
-with your git pushes (held as below), later possibly without a commit.
+with your git pushes, later possibly without a commit.
 Codex runs user-level hooks only after you approve them in `/hooks`; `entire
 enable --global`, the Codex session-start notice and `entire doctor` say so.
 Outside any git repository the hooks do nothing.
@@ -522,40 +522,12 @@ session (the same detection `entire trail comment` uses), `--yes` or not, and
 agents are told never to run it. Editing the user settings file by hand
 bypasses the prompt.
 
-**Pushes.** In a repository on only through global enable, session checkpoints
-are captured locally and **held**: a push sends none of them until you agree
-for that repository. A `git push` from a person at a terminal (not an agent
-session, whose shell can pass the terminal probe) asks once, naming the remote
-but never a URL; yes writes `"push_checkpoints": true` to the repository's
-`repos` entry in the user settings file, so every clone and worktree pushes from
-then on, and this push carries the held checkpoints. No, no answer within 60
-seconds, or no terminal keeps them queued and prints one line saying how many
-are held and how to release them; the git push itself never fails. `entire
-checkpoint push`, `entire session attach` and the migration push never ask: they
-report the hold. `push_checkpoints` is consent to push only; the repository
-stays on only through global enable, so the committed settings below stay
-ignored. Both checkpoint backends hold the same way, and held checkpoints go
-with the first push after you agree. `entire status` shows the state.
-
-**Owner list.** `entire enable --global --owner gh/entireio` (repeatable; it
-adds to `global_enable_owners` in the user settings file and asks for
-confirmation again) pushes checkpoints without asking from repositories whose
-checkpoint destinations ALL belong to a listed owner: every push URL of the
-remote checkpoints go to, or the `checkpoint_remote` URL when one is set. An
-entry is `<forge>/<owner>` in the form push URLs normalize to (`gh/…`, `et/…`,
-or `<host>/<owner>` for other hosts, with `github.com/…` stored as `gh/…`); a
-GitLab subgroup counts as its top-level group, and `--owner` refuses a subgroup,
-a repository or a wildcard. A URL that does not normalize (a local path,
-`file://`, a remote helper) matches no owner and is held. The first push from a
-clone that goes out because of the list prints one line naming the remote and
-how to stop. There is no removal command: edit the list in the user settings
-file. Agents that show a session banner also say, when a session is about to
-install the git hooks, that checkpoints are not pushed until you agree.
-
-**Known limitation.** A push that itself names Entire's refs — `git push
---all` or `--mirror` on the git-branch backend sends `entire/checkpoints/v1`,
-and `--mirror` sends `refs/entire/*` on the git-refs backend — carries held
-checkpoints with it; the hold governs only what Entire pushes on its own.
+**Pushes.** Once a repository is on, its session checkpoints push with your
+`git push` like any enabled repository's, following the same checkpoint
+remote routing and push policy. Run `entire disable` in a repository to stop
+recording there. Agents that show a session banner say, when a session is
+about to install the git hooks there, that global enable is the reason and
+that checkpoints push with your git pushes.
 
 **Precedence.**
 
@@ -573,9 +545,6 @@ checkpoints with it; the hold governs only what Entire pushes on its own.
   project hooks; one enabled only by a hand-written `repos` entry needs `entire
   enable` there to record agent sessions again. Committed project files are
   never touched.
-- `"push_checkpoints": true` in a `repos` entry, which the push prompt writes,
-  releases held pushes for that repository and nothing else; it is read only
-  per repository, never from `preferences`.
 - A `repos` entry for the repository in the user settings file applies to every
   worktree of the clone, and one that sets `enabled` is the clone-wide way to
   turn one repository on or off.

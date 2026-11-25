@@ -113,12 +113,15 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	// Everything in between can still stop delivery, and the election is
 	// permanent, so intent is not enough to move it. The hint below then speaks
 	// only for what capture left gated — see hintGatedCheckpointSync.
-	//
-	// The global-enable consent gate comes after it, so only a push that
-	// would carry checkpoints asks for consent to.
-	pendingCapture, allowed := checkpointSyncGate(ctx, ps)
-	if !allowed || !globalEnablePushAllowed(ctx, &ps, protectFirstUserBranch) {
-		return nil
+	var pendingCapture string
+	if !ps.hasCheckpointURL() {
+		if pendingCaptureCheckpointSyncRemote(ctx, ps.remote) {
+			pendingCapture = ps.remote
+		}
+		if !checkpointSyncAllowedForRemote(ctx, ps.remote, pendingCapture) {
+			hintGatedCheckpointSync(ctx, ps.remote)
+			return nil
+		}
 	}
 
 	// git-refs primary: push the per-checkpoint refs recorded in the push queue
@@ -244,26 +247,8 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	// none, and hintGatedCheckpointSync speaks for the gated case.
 	if deliveredCount > 0 {
 		warnIgnoredCheckpointRemote(ctx, ps)
-		noticeGlobalEnablePush(ctx, ps)
 	}
 	return nil
-}
-
-// checkpointSyncGate is prePush's single-remote gate: the remote whose
-// election this push would capture, and whether checkpoints may go to
-// ps.remote at all. A checkpoint_remote URL is exempt.
-func checkpointSyncGate(ctx context.Context, ps pushSettings) (pendingCapture string, allowed bool) {
-	if ps.hasCheckpointURL() {
-		return "", true
-	}
-	if pendingCaptureCheckpointSyncRemote(ctx, ps.remote) {
-		pendingCapture = ps.remote
-	}
-	if !checkpointSyncAllowedForRemote(ctx, ps.remote, pendingCapture) {
-		hintGatedCheckpointSync(ctx, ps.remote)
-		return pendingCapture, false
-	}
-	return pendingCapture, true
 }
 
 // opfPrePushDecision resolves the user's OPF decision for this push (env >
@@ -455,9 +440,7 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 	}
 	defer repo.Close()
 
-	// One question per push: a push that asked for global-enable consent
-	// leaves the policy question for the next one.
-	if fromGitHook && !ps.consentAsked {
+	if fromGitHook {
 		answer, saved := askCheckpointPushPolicyOnFirstPush(ctx, repo)
 		if answer == checkpointPushAnswerSuperseded {
 			// The check before the question ran while the policy was unset; the
@@ -515,7 +498,6 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 			commitCapturedSyncRemote(ctx, pendingCapture)
 		}
 		warnIgnoredCheckpointRemote(ctx, ps)
-		noticeGlobalEnablePush(ctx, ps)
 	}
 	return nil
 }
@@ -553,9 +535,8 @@ func renameUppercaseShardRefs(ctx context.Context) {
 // pushing is disabled in settings — a distinct signal from pushed==0 with
 // pushing enabled (an empty queue), so callers can report the two accurately.
 // Like the pre-push paths, an OPF rewrite that cannot run when OPF is enabled
-// errors with the refs left queued, a manual policy returns
-// ErrCheckpointPushHeldByPolicy, and a repository whose pushes wait for
-// global-enable consent returns ErrCheckpointPushHeldForConsent. Currently used by the checkpoint migration
+// errors with the refs left queued, and a manual policy returns
+// ErrCheckpointPushHeldByPolicy. Currently used by the checkpoint migration
 // command's opt-in "push now".
 func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote string) (pushed int, pushDisabled bool, err error) {
 	ps := resolvePushSettings(ctx, remote)
@@ -569,9 +550,6 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 	}
 	if ps.withheld != nil {
 		return 0, false, fmt.Errorf("checkpoint refs stay queued: %w", ps.withheld)
-	}
-	if err := heldForGlobalEnableConsent(ctx, ps); err != nil {
-		return 0, false, err
 	}
 	if opfErr := opfGateForCheckpointRefs(ctx, repo); opfErr != nil {
 		// Names no cause, matching flushCheckpointRefsQueue's retry message

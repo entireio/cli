@@ -115,12 +115,12 @@ func TestModify_RoundTripsBlocks(t *testing.T) {
 
 	path, err := Modify(t.Context(), func(blocks map[string]json.RawMessage) error {
 		assert.JSONEq(t, `{"x": 1}`, string(blocks["newer_block"]))
-		blocks["repos"] = json.RawMessage(`{"gh/acme/app": {"push_checkpoints": true}}`)
+		blocks["repos"] = json.RawMessage(`{"gh/acme/app": {"enabled": true}}`)
 		return nil
 	})
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
-	assert.JSONEq(t, `{"newer_block": {"x": 1}, "repos": {"gh/acme/app": {"push_checkpoints": true}}}`, string(data))
+	assert.JSONEq(t, `{"newer_block": {"x": 1}, "repos": {"gh/acme/app": {"enabled": true}}}`, string(data))
 }

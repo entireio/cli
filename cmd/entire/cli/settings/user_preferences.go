@@ -66,12 +66,6 @@ type UserPreferences struct {
 	// free-form map inside it is a hole in that boundary. Applied into
 	// StrategyOptions so every existing reader is unchanged.
 	CheckpointRemote *CheckpointRemoteConfig `json:"checkpoint_remote,omitempty"`
-
-	// PushCheckpoints is the developer's answer, for a repository on only
-	// through global enable, to whether its session checkpoints may be pushed.
-	// It is consent to push and nothing more: the repository stays on only
-	// through global enable. See RepoPushConsent.
-	PushCheckpoints *bool `json:"push_checkpoints,omitempty"`
 }
 
 // userOverlay is everything the user tier contributes to one settings load.
@@ -79,11 +73,9 @@ type userOverlay struct {
 	// globalEnable is the top-level `global_enable` key `entire enable
 	// --global` writes; false when absent, null, or not a boolean.
 	globalEnable bool
-	// owners is the validated `global_enable_owners` list.
-	owners      []string
-	preferences *UserPreferences
-	repos       map[string]json.RawMessage
-	rejections  []string
+	preferences  *UserPreferences
+	repos        map[string]json.RawMessage
+	rejections   []string
 }
 
 // loadUserOverlay reads the user settings file. An unreadable or invalid file
@@ -107,9 +99,6 @@ func loadUserOverlay(ctx context.Context) userOverlay {
 			overlay.globalEnable = enabled != nil && *enabled
 		}
 	}
-	if raw, ok := us.Block(usersettings.GlobalEnableOwnersKey); ok {
-		overlay.owners = overlay.decodeOwners(ctx, raw)
-	}
 	if raw, ok := us.Block(userPreferencesBlock); ok {
 		prefs, err := decodeUserPreferences(raw)
 		if err != nil {
@@ -129,32 +118,11 @@ func loadUserOverlay(ctx context.Context) userOverlay {
 	return overlay
 }
 
-// decodeOwners reads the `global_enable_owners` list, dropping each entry
-// that is not an owner on its own and the whole list when it is not one.
-func (o *userOverlay) decodeOwners(ctx context.Context, raw json.RawMessage) []string {
-	var entries []string
-	if err := json.Unmarshal(raw, &entries); err != nil {
-		o.reject(ctx, usersettings.GlobalEnableOwnersKey+": must be a list such as [\"gh/entireio\"]")
-		return nil
-	}
-	owners := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		owner, err := usersettings.ValidateOwner(entry)
-		if err != nil {
-			o.reject(ctx, fmt.Sprintf("%s: %v", usersettings.GlobalEnableOwnersKey, err))
-			continue
-		}
-		owners = append(owners, owner)
-	}
-	return owners
-}
-
 // withoutPerRepoKeys drops the keys `preferences` must not carry, each on its
 // own with a reported reason, so the rest of the block still applies. Whether
 // Entire is on would make every repository on the machine read as set up, and
 // a checkpoint_remote would route every repository's transcripts to one store;
-// both are per-repository facts and are read only from `repos`, as is
-// push_checkpoints, which answers for one repository.
+// both are per-repository facts and are read only from `repos`.
 func (o *userOverlay) withoutPerRepoKeys(ctx context.Context, prefs *UserPreferences) *UserPreferences {
 	if prefs == nil {
 		return nil
@@ -168,11 +136,6 @@ func (o *userOverlay) withoutPerRepoKeys(ctx context.Context, prefs *UserPrefere
 		o.reject(ctx, fmt.Sprintf("%s: checkpoint_remote is not read here; set it for one repository under %s",
 			userPreferencesBlock, userReposBlock))
 		prefs.CheckpointRemote = nil
-	}
-	if prefs.PushCheckpoints != nil {
-		o.reject(ctx, fmt.Sprintf("%s: push_checkpoints is not read here; it is set for one repository under %s",
-			userPreferencesBlock, userReposBlock))
-		prefs.PushCheckpoints = nil
 	}
 	return prefs
 }
@@ -450,9 +413,6 @@ func applyUserTier(settings *EntireSettings, overlay userOverlay, repoPrefs []*U
 		if prefs.CheckpointRemote != nil {
 			settings.userCheckpointRemote = prefs.CheckpointRemote
 		}
-		if prefs.PushCheckpoints != nil {
-			settings.repoPushConsent = *prefs.PushCheckpoints
-		}
 	}
 
 	apply(overlay.preferences)
@@ -461,7 +421,6 @@ func applyUserTier(settings *EntireSettings, overlay userOverlay, repoPrefs []*U
 	}
 	settings.userPromptOwnership = owned
 	settings.userLayerRejections = overlay.rejections
-	settings.globalEnableOwners = overlay.owners
 }
 
 // userPromptOwnership records which agent instruction fields came from the
@@ -527,28 +486,6 @@ func UserTierEnablesEverywhere(ctx context.Context) bool {
 // local file carrying `enabled` claims only its own worktree.
 func (s *EntireSettings) EnabledOnlyByGlobal() bool {
 	return s != nil && s.enabledOnlyByGlobal
-}
-
-// RepoPushConsent reports whether this repository's `repos` entry in the user
-// settings file says `push_checkpoints: true`: the developer agreed that
-// checkpoints captured here only through global enable may be pushed.
-func (s *EntireSettings) RepoPushConsent() bool {
-	return s != nil && s.repoPushConsent
-}
-
-// GlobalEnableOwners is the validated `global_enable_owners` list from the
-// user settings file: owners whose repositories' checkpoints global enable
-// pushes without asking.
-func (s *EntireSettings) GlobalEnableOwners() []string {
-	if s == nil {
-		return nil
-	}
-	return s.globalEnableOwners
-}
-
-// UserGlobalEnableOwners is GlobalEnableOwners without a repository.
-func UserGlobalEnableOwners(ctx context.Context) []string {
-	return loadUserOverlay(ctx).owners
 }
 
 // CommittedKeysIgnoredForGlobalEnable names the keys of the committed

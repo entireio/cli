@@ -221,53 +221,8 @@ func TestEnableGlobal_WritesTheFlagAndInstallsHooks(t *testing.T) {
 	assert.Contains(t, out, "Accepted with --yes")
 	assert.Contains(t, out, "records your coding agent sessions (Claude Code, Codex, Pi and OpenCode) in every git repository")
 	assert.NotContains(t, out, "other agents are recorded only where you ran it", "global enable covers every agent")
-	assert.Contains(t, out, "possibly without a commit", "the consent does not promise sessions leave only with a push")
-	assert.Contains(t, out, "not pushed to its remote until you agree")
-}
-
-// --owner adds to the owner list, normalized and without repeats, and the
-// output lists every owner whose checkpoints now push without asking.
-func TestEnableGlobal_OwnersAreAddedAndListed(t *testing.T) {
-	entireDir, _, _, out, err := runGlobalCmd(t, true, `{"global_enable_owners": ["gh/acme"]}`,
-		"enable", "--global", "--yes", "--owner", "GitHub.com/Other", "--owner", "gh/acme")
-	if err != nil {
-		t.Fatalf("enable --global --owner: %v\n%s", err, out)
-	}
-	assert.JSONEq(t, `{"global_enable": true, "global_enable_owners": ["gh/acme", "gh/other"]}`, readUserSettingsFile(t, entireDir))
-	assert.Contains(t, out, "pushed with your git pushes without asking, including public repositories and forks they own")
-	assert.Contains(t, out, "gh/acme, gh/other")
-}
-
-// An owner that is not one is refused before anything is written, and
-// --owner means nothing without --global.
-func TestEnableGlobal_RejectsBadOwnerUse(t *testing.T) {
-	for name, args := range map[string][]string{
-		"wildcard":       {"enable", "--global", "--yes", "--owner", "gh/*"},
-		"subgroup":       {"enable", "--global", "--yes", "--owner", "gitlab.com/grp/sub"},
-		"without global": {"enable", "--owner", "gh/acme"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			entireDir, _, _, out, err := runGlobalCmd(t, true, "", args...)
-			if err == nil {
-				t.Fatalf("%v succeeded:\n%s", args, out)
-			}
-			assert.NoFileExists(t, filepath.Join(entireDir, usersettings.FileName))
-		})
-	}
-}
-
-// Adding an owner while global enable is already on is something new to
-// agree to; naming one already listed is not.
-func TestEnableGlobal_NewOwnerNeedsConfirmation(t *testing.T) {
-	const on = `{"global_enable": true, "global_enable_owners": ["gh/acme"]}`
-	_, _, _, out, err := runGlobalCmd(t, true, on, "enable", "--global", "--owner", "gh/other")
-	if err == nil || !strings.Contains(err.Error(), "--yes") {
-		t.Fatalf("adding an owner without confirmation: err=%v\n%s", err, out)
-	}
-	_, _, _, out, err = runGlobalCmd(t, true, on, "enable", "--global", "--owner", "gh/acme")
-	if err != nil {
-		t.Fatalf("naming a listed owner: %v\n%s", err, out)
-	}
+	assert.Contains(t, out, "may later leave this machine without a commit", "the consent does not promise sessions leave only with a push")
+	assert.Contains(t, out, "pushed with your git pushes")
 }
 
 // With no Claude config directory, nothing is created and the output does
@@ -386,16 +341,15 @@ func TestGlobal_RejectsRepositoryFlags(t *testing.T) {
 	}
 }
 
-// An agent session cannot turn global enable on, add an owner, or even
+// An agent session cannot turn global enable on, or even
 // re-run it once it is on: the answer is the user's. Nothing is written.
 func TestEnableGlobal_RefusesAnAgentSession(t *testing.T) {
 	for name, tc := range map[string]struct {
 		file string
 		args []string
 	}{
-		"turn on":      {"", []string{"enable", "--global", "--yes"}},
-		"add an owner": {`{"global_enable": true}`, []string{"enable", "--global", "--yes", "--owner", "gh/acme"}},
-		"already on":   {`{"global_enable": true}`, []string{"enable", "--global"}},
+		"turn on":    {"", []string{"enable", "--global", "--yes"}},
+		"already on": {`{"global_enable": true}`, []string{"enable", "--global"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			entireDir, claudeDir, _, out, err := runGlobalCmdAs(t, true, tc.file, "CLAUDECODE", tc.args...)
@@ -458,7 +412,7 @@ func TestEnableGlobal_PromptAnswers(t *testing.T) {
 				t.Fatalf("enable --global: %v\n%s", err, out)
 			}
 			assert.Contains(t, terminal.String(), "records your coding agent sessions")
-			assert.Contains(t, terminal.String(), "not pushed to its remote until you agree")
+			assert.Contains(t, terminal.String(), "pushed with your git pushes")
 			if tc.want {
 				assert.JSONEq(t, `{"global_enable": true}`, readUserSettingsFile(t, entireDir))
 			} else {

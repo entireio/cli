@@ -40,21 +40,21 @@ func TestSetRepoEnabled_CreatesAnOriginKeyedEntry(t *testing.T) {
 // Every entry that names the repository is updated, so no lower-sorting entry
 // can keep the old value in force; their other keys, and entries for other
 // repositories, are kept.
-func TestSetRepoPushConsent_UpdatesEveryMatchingEntry(t *testing.T) {
+func TestSetRepoEnabled_UpdatesEveryMatchingEntry(t *testing.T) {
 	root := newNeverEnabledRepo(t)
 	testutil.RunGit(t, root, "remote", "add", "origin", "https://github.com/acme/widgets.git")
 	writeUserSettings(t, `{"repos": {
-	  "gh/acme/widgets": {"log_level": "debug", "push_checkpoints": false},
+	  "gh/acme/widgets": {"log_level": "debug", "enabled": true},
 	  `+jsonString(root)+`: {"enabled": true},
-	  "gh/acme/other": {"push_checkpoints": false}
+	  "gh/acme/other": {"enabled": true}
 	}}`)
 
-	_, err := SetRepoPushConsent(t.Context(), root, true)
+	_, err := SetRepoEnabled(t.Context(), root, false)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"repos": {
-	  "gh/acme/widgets": {"log_level": "debug", "push_checkpoints": true},
-	  `+jsonString(root)+`: {"enabled": true, "push_checkpoints": true},
-	  "gh/acme/other": {"push_checkpoints": false}
+	  "gh/acme/widgets": {"log_level": "debug", "enabled": false},
+	  `+jsonString(root)+`: {"enabled": false},
+	  "gh/acme/other": {"enabled": true}
 	}}`, readUserSettings(t))
 }
 
@@ -95,48 +95,4 @@ func TestSetRepoEnabled_RefusesANonObjectEntry(t *testing.T) {
 			assert.Equal(t, content, readUserSettings(t))
 		})
 	}
-}
-
-// Push consent is its own flag: it lets checkpoints push, but the repository
-// stays on only through global enable, so the committed settings set aside
-// for that stay set aside.
-func TestRepoPushConsent_DoesNotClaimTheRepository(t *testing.T) {
-	root := newNeverEnabledRepo(t)
-	testutil.RunGit(t, root, "remote", "add", "origin", "https://github.com/acme/widgets.git")
-	writeUserSettings(t, `{"global_enable": true}`)
-	_, err := SetRepoPushConsent(t.Context(), root, true)
-	require.NoError(t, err)
-
-	s, err := loadMergedSettings(t.Context(), filepath.Join(root, EntireSettingsFile), "", filepath.Join(root, EntireSettingsLocalFile))
-	require.NoError(t, err)
-	assert.True(t, s.RepoPushConsent())
-	assert.True(t, s.EnabledOnlyByGlobal())
-}
-
-// push_checkpoints is a per-repository answer, so the machine-wide block
-// cannot carry it: it is dropped with a reason and the rest still applies.
-func TestPreferencesPushCheckpoints_IsRejectedAloneAndTheBlockStillApplies(t *testing.T) {
-	root := newNeverEnabledRepo(t)
-	writeUserSettings(t, `{"preferences": {"push_checkpoints": true, "log_level": "debug"}}`)
-
-	s, err := loadMergedSettings(t.Context(), filepath.Join(root, EntireSettingsFile), "", filepath.Join(root, EntireSettingsLocalFile))
-	require.NoError(t, err)
-	assert.False(t, s.RepoPushConsent())
-	assert.Equal(t, "debug", s.LogLevel)
-	require.Len(t, s.UserLayerRejections(), 1)
-	assert.Contains(t, s.UserLayerRejections()[0], "push_checkpoints")
-}
-
-// The owner list is read normalized, and an entry that is not an owner is
-// dropped on its own with a reason.
-func TestGlobalEnableOwners_ReadsValidEntries(t *testing.T) {
-	root := newNeverEnabledRepo(t)
-	writeUserSettings(t, `{"global_enable": true, "global_enable_owners": ["GitHub.com/Acme", "gh/*", "et/acme"]}`)
-
-	s, err := loadMergedSettings(t.Context(), filepath.Join(root, EntireSettingsFile), "", filepath.Join(root, EntireSettingsLocalFile))
-	require.NoError(t, err)
-	assert.Equal(t, []string{"gh/acme", "et/acme"}, s.GlobalEnableOwners())
-	assert.Equal(t, []string{"gh/acme", "et/acme"}, UserGlobalEnableOwners(t.Context()))
-	require.Len(t, s.UserLayerRejections(), 1)
-	assert.Contains(t, s.UserLayerRejections()[0], "gh/*")
 }

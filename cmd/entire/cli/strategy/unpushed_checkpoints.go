@@ -120,8 +120,7 @@ func peekCheckpointQueue(ctx context.Context, repo *git.Repository) ([]plumbing.
 }
 
 // countUnpushedV1Commits counts v1-branch commits not on the remote-tracking
-// ref (git-branch backend), excluding the parentless "Initialize metadata ref"
-// root, which carries no checkpoint. No local v1 branch means nothing to push (0).
+// ref (git-branch backend). No local v1 branch means nothing to push (0).
 func countUnpushedV1Commits(ctx context.Context, remoteName string) (int, error) {
 	local := checkpoint.ResolveRefs(ctx).Primary
 	if !gitCommitRefExists(ctx, local.String()) {
@@ -134,7 +133,7 @@ func countUnpushedV1Commits(ctx context.Context, remoteName string) (int, error)
 			rangeSpec = tracking + ".." + local.String()
 		}
 	}
-	out, err := exec.CommandContext(ctx, "git", "rev-list", "--count", "--min-parents=1", rangeSpec).Output()
+	out, err := exec.CommandContext(ctx, "git", "rev-list", "--count", rangeSpec).Output()
 	if err != nil {
 		return 0, fmt.Errorf("count unpushed v1 commits: %w", err)
 	}

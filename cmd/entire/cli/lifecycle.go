@@ -367,7 +367,7 @@ func initializeTurnSession(ctx, logCtx context.Context, strat *strategy.ManualCo
 // install Entire's git hooks, that global enable is the only reason.
 var globalEnableBannerLines = []string{
 	"Entire is on in this repository through global enable (you have not run `entire enable` here).",
-	"It installs its git hooks here. Checkpoints are not pushed to this repository's remote until you agree, at a git push from a terminal.",
+	"It installs its git hooks here, and its session checkpoints are pushed with your git pushes.",
 	"Run `entire disable` here to stop.",
 }
 

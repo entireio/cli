@@ -21,14 +21,6 @@ func SetRepoEnabled(ctx context.Context, worktreeRoot string, enabled bool) (str
 	return setRepoFlag(ctx, worktreeRoot, "enabled", enabled)
 }
 
-// SetRepoPushConsent writes `push_checkpoints` into this repository's `repos`
-// entries: the developer's answer to whether session checkpoints captured
-// there only through global enable may be pushed. It returns the key that
-// names the repository there.
-func SetRepoPushConsent(ctx context.Context, worktreeRoot string, consent bool) (string, error) {
-	return setRepoFlag(ctx, worktreeRoot, "push_checkpoints", consent)
-}
-
 // setRepoFlag sets field on EVERY `repos` entry that names this repository —
 // several can (an origin with two URLs, an origin and a path), and leaving one
 // at the old value would keep it in force through key order. With no matching
