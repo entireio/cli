@@ -214,9 +214,10 @@ func newRepoMirrorResyncCmd() *cobra.Command {
 			"  entire repo mirror resync /gh/octocat/hello-world --json",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ref, err := parseMirrorRepoRef(args[0], mirrorCloneForge)
+			tr := newTypedRef(args[0])
+			ref, err := parseMirrorRepoRef(tr.canon, mirrorCloneForge)
 			if err != nil {
-				return err
+				return tr.wrapErr(err)
 			}
 			return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
 				out, err := c.ResyncMirror(ctx, &coreapi.ResyncMirrorInputBody{

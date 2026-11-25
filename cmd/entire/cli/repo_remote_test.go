@@ -379,6 +379,22 @@ func TestResolveRemoteRepoRef(t *testing.T) {
 	}
 }
 
+func TestResolveRemoteRepoRef_EntireComURL(t *testing.T) {
+	t.Parallel()
+	dir := applyPlanRepo(t, nil)
+	path, err := resolveRemoteRepoRef(t.Context(), dir, "origin", "/gh/OctoCat/Hello-World")
+	require.NoError(t, err)
+	for _, arg := range []string{"https://entire.com/gh/OctoCat/Hello-World", "entire.com/gh/OctoCat/Hello-World"} {
+		got, err := resolveRemoteRepoRef(t.Context(), dir, "origin", arg)
+		require.NoError(t, err, arg)
+		require.Equal(t, path, got, arg)
+	}
+
+	_, err = resolveRemoteRepoRef(t.Context(), dir, "origin", "https://user:secret@entire.com/gh/o/r")
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "secret")
+}
+
 func TestReportMirrorRemotePlan(t *testing.T) {
 	t.Parallel()
 	const mirrorURL = planTestMirrorURL

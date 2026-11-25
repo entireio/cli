@@ -312,7 +312,9 @@ func reportStrandedPushURLs(out io.Writer, plan mirrorRemotePlan) {
 // the URL path), so switching clusters never needs the repo retyped.
 func resolveRemoteRepoRef(ctx context.Context, dir, remote, arg string) (mirrorRepoRef, error) {
 	if arg != "" {
-		return parseMirrorRepoRef(arg)
+		tr := newTypedRef(arg)
+		ref, err := parseMirrorRepoRef(tr.canon)
+		return ref, tr.wrapErr(err)
 	}
 
 	candidates := []string{remote}
