@@ -2,17 +2,14 @@ package strategy
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"strconv"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
-	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 )
 
@@ -49,17 +46,13 @@ func claimGlobalEnablePushNotice(ctx context.Context) bool {
 			slog.String("error", err.Error()))
 		return true
 	}
-	f, err := osroot.OpenFileNoFollow(root, globalEnablePushNoticeName, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if errors.Is(err, os.ErrExist) {
-		return false
-	}
+	claimed, err := claimOnceMarker(root, globalEnablePushNoticeName, "")
 	if err != nil {
 		logging.Debug(ctx, "global enable: cannot create the push notice marker",
 			slog.String("error", err.Error()))
 		return true
 	}
-	_ = f.Close()
-	return true
+	return claimed
 }
 
 // globalEnablePushDestination names where checkpoints went without ever

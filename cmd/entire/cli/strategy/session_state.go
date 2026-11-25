@@ -371,19 +371,12 @@ func StoreAgentTypeHint(ctx context.Context, sessionID string, agentType types.A
 	}
 	defer root.Close()
 
-	f, oErr := root.OpenFile(sessionID+".agent", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if oErr != nil {
-		if errors.Is(oErr, os.ErrExist) {
-			// First-writer-wins: another caller already claimed this session.
-			return false, nil
-		}
-		return false, fmt.Errorf("failed to create agent hint file: %w", oErr)
+	// First-writer-wins: another caller may already have claimed this session.
+	created, err = claimOnceMarker(root, sessionID+".agent", string(agentType))
+	if err != nil {
+		return false, fmt.Errorf("failed to create agent hint file: %w", err)
 	}
-	defer f.Close()
-	if _, wErr := f.WriteString(string(agentType)); wErr != nil {
-		return false, fmt.Errorf("failed to write agent hint file: %w", wErr)
-	}
-	return true, nil
+	return created, nil
 }
 
 // ClaimSessionStartBanner records that the SessionStart banner has been emitted
@@ -409,15 +402,11 @@ func ClaimSessionStartBanner(ctx context.Context, sessionID string) (claimed boo
 	}
 	defer root.Close()
 
-	f, oErr := root.OpenFile(sessionID+".banner", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if oErr != nil {
-		if errors.Is(oErr, os.ErrExist) {
-			return false, nil
-		}
-		return false, fmt.Errorf("failed to create banner marker file: %w", oErr)
+	claimed, err = claimOnceMarker(root, sessionID+".banner", "")
+	if err != nil {
+		return false, fmt.Errorf("failed to create banner marker file: %w", err)
 	}
-	_ = f.Close()
-	return true, nil
+	return claimed, nil
 }
 
 // LoadAgentTypeHint reads the agent type hint written by SessionStart.
@@ -1040,4 +1029,24 @@ func ClearSessionState(ctx context.Context, sessionID string) error {
 // drops the child aggregate, as it does for a step. A nil delta is a no-op.
 func ApplyTurnTokenUsage(state *SessionState, delta *agent.TokenUsage, ledgerVersion *uint64) {
 	applyTurnTokenUsage(state, withoutStaleSubagentSnapshot(delta, ledgerVersion, state))
+}
+
+// claimOnceMarker creates name in root exclusively, writing content, and
+// reports whether this call created it: the first caller wins, and one that
+// finds it already there gets false and no error.
+func claimOnceMarker(root *os.Root, name, content string) (bool, error) {
+	f, err := osroot.OpenFileNoFollow(root, name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err //nolint:wrapcheck // callers name the marker
+	}
+	defer f.Close()
+	if content != "" {
+		if _, err := f.WriteString(content); err != nil {
+			return true, err //nolint:wrapcheck // callers name the marker
+		}
+	}
+	return true, nil
 }
