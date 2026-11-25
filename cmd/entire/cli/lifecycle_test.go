@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1815,6 +1816,47 @@ func TestHandleLifecycleTurnStart_WritesPromptContent(t *testing.T) {
 	if string(data) != "create a file called hello.txt" {
 		t.Errorf("expected prompt content 'create a file called hello.txt', got %q", string(data))
 	}
+}
+
+// Installs firing the first prompt of a new session at once start one
+// turn: they all miss the state, and the repeat check under the lock on the
+// initialize path turns the others away, so prompt.txt gets the prompt once.
+func TestHandleLifecycleTurnStart_ConcurrentFirstPromptWritesPromptOnce(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir()
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "init.txt", "init")
+	testutil.GitAdd(t, tmpDir, "init.txt")
+	testutil.GitCommit(t, tmpDir, "init")
+	t.Chdir(tmpDir)
+	paths.ClearWorktreeRootCache()
+
+	const sessionID = "test-concurrent-first-prompt"
+	const prompt = "create a file called hello.txt"
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	errs := make([]error, 4)
+	for i := range errs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			errs[i] = handleLifecycleTurnStart(context.Background(), newMockAgent(), &agent.Event{
+				Type: agent.TurnStart, SessionID: sessionID, Prompt: prompt, Timestamp: time.Now(),
+			})
+		}()
+	}
+	close(start)
+	wg.Wait()
+	for _, err := range errs {
+		require.NoError(t, err)
+	}
+
+	sessionDirAbs, err := paths.AbsPath(context.Background(), paths.SessionMetadataDirFromSessionID(sessionID))
+	require.NoError(t, err)
+	data, err := os.ReadFile(filepath.Join(sessionDirAbs, paths.PromptFileName))
+	require.NoError(t, err)
+	assert.Equal(t, prompt, string(data), "one turn: the prompt is written once")
 }
 
 // TestHandleLifecycleTurnEnd_PrefersEventTokenUsage verifies that when the

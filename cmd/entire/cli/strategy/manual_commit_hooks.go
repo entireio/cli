@@ -3454,13 +3454,18 @@ func (s *ManualCommitStrategy) initializeTurn(ctx context.Context, sessionID str
 
 	// Initialize new session (or repair a partial state). The MutateSessionState
 	// call below reloads the freshly-persisted state under lock and runs the
-	// turn-start mutations on top of it.
+	// turn-start mutations on top of it. A concurrent install for the same
+	// first prompt reaches here too, so the repeat check runs under the lock.
 	if err := s.initializeSession(ctx, repo, sessionID, resolvedAgentType, transcriptPath, userPrompt, model); err != nil {
 		return fmt.Errorf("failed to initialize session: %w", err)
 	}
 
 	mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
-		recordTurnStart(state, dedupeKey, time.Now())
+		now := time.Now()
+		if isRepeatedTurnStart(state, dedupeKey, now) {
+			return ErrDuplicateTurnStart
+		}
+		recordTurnStart(state, dedupeKey, now)
 		if transErr := TransitionAndLog(ctx, state, session.EventTurnStart, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
 			logging.Warn(logging.WithComponent(ctx, "hooks"), "turn start transition failed",
 				slog.String("session_id", sessionID),
@@ -3470,6 +3475,9 @@ func (s *ManualCommitStrategy) initializeTurn(ctx context.Context, sessionID str
 		captureSessionOwner(state)
 		return nil
 	})
+	if errors.Is(mutErr, ErrDuplicateTurnStart) {
+		return ErrDuplicateTurnStart
+	}
 	if mutErr != nil && !errors.Is(mutErr, ErrStateNotFound) {
 		return fmt.Errorf("failed to save session state: %w", mutErr)
 	}
