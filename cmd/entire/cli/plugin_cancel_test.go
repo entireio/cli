@@ -156,6 +156,89 @@ func TestRunPlugin_TerminalInterruptIsNotForwarded(t *testing.T) { //nolint:para
 	}
 }
 
+// shortenPluginCancelGrace sets pluginCancelGrace to d for the test.
+func shortenPluginCancelGrace(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := pluginCancelGrace
+	pluginCancelGrace = d
+	t.Cleanup(func() { pluginCancelGrace = prev })
+}
+
+// A plugin the terminal sent the Ctrl-C to is not killed after
+// pluginCancelGrace: it got the Ctrl-C itself and decides how long its
+// wind-down takes (entire-stream closes its live session, which can outlast
+// the grace). Its own exit status is what we report.
+func TestRunPlugin_TerminalInterruptIsNotKilledAfterGrace(t *testing.T) { //nolint:paralleltest // mutates env, seams and procsignal
+	pretendTerminalSentInterrupt(t)
+	storeReceivedSignal(t, os.Interrupt)
+	shortenPluginCancelGrace(t, 100*time.Millisecond)
+	code, sig := startCancelledPlugin(t, "trap 'exit 9' INT\ntouch \"$READY\"\nsleep 1\nexit 3\n")
+	if code != 3 || sig != nil {
+		t.Errorf("runPlugin = (%d, %v), want the plugin's own (3, nil) after its wind-down", code, sig)
+	}
+}
+
+// ...but a second Ctrl-C still ends it: ForceQuitPlugins kills it once
+// pluginForceQuitGrace has passed, so the CLI never exits leaving it behind.
+func TestRunPlugin_TerminalInterruptThenForceQuitKillsPlugin(t *testing.T) { //nolint:paralleltest // mutates env, seams and procsignal
+	pretendTerminalSentInterrupt(t)
+	storeReceivedSignal(t, os.Interrupt)
+	shortenPluginCancelGrace(t, 100*time.Millisecond)
+	prev := pluginForceQuitGrace
+	pluginForceQuitGrace = 200 * time.Millisecond
+	t.Cleanup(func() { pluginForceQuitGrace = prev })
+	var stillRunning bool
+	start := time.Now()
+	code, sig := startPluginUntilReady(t, "trap '' INT\ntouch \"$READY\"\nexec sleep 30\n", func(cancel context.CancelFunc) {
+		cancel()
+		time.Sleep(3 * pluginCancelGrace)
+		runningPlugins.Lock()
+		stillRunning = len(runningPlugins.procs) == 1
+		runningPlugins.Unlock()
+		ForceQuitPlugins(os.Interrupt, nil)
+	})
+	if !stillRunning {
+		t.Error("plugin was not running past pluginCancelGrace before the second Ctrl-C")
+	}
+	if code != ExitPluginSignalled || sig != syscall.SIGKILL {
+		t.Errorf("runPlugin = (%d, %v), want (%d, killed)", code, sig, ExitPluginSignalled)
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Errorf("plugin ran %v, want it killed by the force quit", elapsed)
+	}
+}
+
+// A forwarded signal still comes with the kill after pluginCancelGrace: a
+// SIGTERM (even with a terminal in the foreground), or a Ctrl-C that did not
+// come from the terminal, reached this process alone, and a plugin that
+// ignores it would otherwise outlive the CLI's shutdown.
+func TestRunPlugin_ForwardedSignalKillsPluginAfterGrace(t *testing.T) { //nolint:paralleltest // mutates env, seams and procsignal
+	for _, tc := range []struct {
+		name     string
+		received os.Signal
+		terminal bool
+	}{
+		{name: "SIGTERM with a terminal", received: syscall.SIGTERM, terminal: true},
+		{name: "Ctrl-C not from the terminal", received: os.Interrupt, terminal: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) { //nolint:paralleltest // mutates env, seams and procsignal
+			prev := pluginTerminalSentInterrupt
+			pluginTerminalSentInterrupt = func(int) bool { return tc.terminal }
+			t.Cleanup(func() { pluginTerminalSentInterrupt = prev })
+			storeReceivedSignal(t, tc.received)
+			shortenPluginCancelGrace(t, 200*time.Millisecond)
+			start := time.Now()
+			code, sig := startCancelledPlugin(t, "trap '' INT TERM\ntouch \"$READY\"\nexec sleep 30\n")
+			if code != ExitPluginSignalled || sig != syscall.SIGKILL {
+				t.Errorf("runPlugin = (%d, %v), want (%d, killed)", code, sig, ExitPluginSignalled)
+			}
+			if elapsed := time.Since(start); elapsed > 10*time.Second {
+				t.Errorf("plugin ran %v after cancel, want it killed after the grace period", elapsed)
+			}
+		})
+	}
+}
+
 // Only a Ctrl-C is the terminal's: a SIGTERM reached this process alone and
 // is still forwarded.
 func TestRunPlugin_TerminalCheckLeavesSIGTERMForwarded(t *testing.T) { //nolint:paralleltest // mutates env, seams and procsignal
@@ -249,9 +332,11 @@ func TestConfigurePluginCancel_Windows(t *testing.T) {
 		t.Errorf("Windows WaitDelay = %v, want %v", cmd.WaitDelay, pluginWindowsCancelGrace)
 	}
 
+	// Unix kills from Cancel's own timer, and only after forwarding a signal:
+	// exec's WaitDelay would also kill a plugin the terminal sent Ctrl-C to.
 	cmd = exec.CommandContext(context.Background(), "unused")
 	configurePluginCancel(cmd, "linux")
-	if cmd.WaitDelay != pluginCancelGrace {
-		t.Errorf("Unix WaitDelay = %v, want %v", cmd.WaitDelay, pluginCancelGrace)
+	if cmd.WaitDelay != 0 {
+		t.Errorf("Unix WaitDelay = %v, want 0", cmd.WaitDelay)
 	}
 }

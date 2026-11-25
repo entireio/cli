@@ -409,14 +409,15 @@ var pluginForceQuitGrace = pluginCancelGrace
 // the terminal or console delivers to the plugin as well — the plugin may be
 // running its own force-quit (entire-stream flushes its last records), so it
 // gets up to pluginForceQuitGrace to exit before it is killed. That window
-// never extends the deadline the first signal set: exec's kill after the
-// cancel grace (configurePluginCancel) still fires on time, so on Unix a
-// second Ctrl-C four seconds after the first leaves about one second. That is
-// deliberate — a second Ctrl-C asks to quit sooner, never later — and the
-// plugin has been winding down since the first. A further signal on more (a
-// third Ctrl-C) ends that window and kills at once. Any other second signal
-// (SIGTERM or SIGHUP) reached only this process, so the plugins are killed at
-// once.
+// never extends a deadline the first signal set: where configurePluginCancel
+// started a kill after the cancel grace (a forwarded signal on Unix, any
+// Ctrl-C on Windows), it still fires on time, so a second Ctrl-C four seconds
+// after a forwarded first leaves about one second. That is deliberate — a
+// second Ctrl-C asks to quit sooner, never later. After a terminal's first
+// Ctrl-C on Unix there is no such deadline, so this window is the whole of
+// it. A further signal on more (a third Ctrl-C) ends that window and kills at
+// once. Any other second signal (SIGTERM or SIGHUP) reached only this process,
+// so the plugins are killed at once.
 func ForceQuitPlugins(sig os.Signal, more <-chan os.Signal) {
 	runningPlugins.Lock()
 	pending := make(map[*os.Process]chan struct{}, len(runningPlugins.procs))
@@ -456,15 +457,17 @@ func awaitPluginExits(pending map[*os.Process]chan struct{}, grace time.Duration
 // so the Windows behaviour is exercised by real child processes everywhere.
 var pluginCancelGOOS = runtime.GOOS
 
-// pluginCancelGrace is how long a cancelled plugin may take to exit after
-// SIGINT before exec kills it, on platforms where we can send SIGINT.
-const pluginCancelGrace = 5 * time.Second
+// pluginCancelGrace is how long a cancelled plugin may take to exit after the
+// signal we forwarded to it (Unix) before it is killed. A var so tests can
+// shorten it.
+var pluginCancelGrace = 5 * time.Second
 
 // pluginWindowsCancelGrace is how long a plugin may wind down on Windows after
 // the Ctrl-C the console delivered to it, before exec kills it. Longer than
 // pluginCancelGrace because the plugin's own wind-down is under way, not
-// merely signalled (entire-stream allows itself 5s), and cutting it off loses
-// its last records. A var so tests can shorten it.
+// merely signalled (entire-stream's final export and close can take several
+// seconds), and cutting it off loses its last records. A var so tests can
+// shorten it.
 var pluginWindowsCancelGrace = 30 * time.Second
 
 // configurePluginCancel decides what cancelling the root context (our signal
@@ -474,7 +477,16 @@ var pluginWindowsCancelGrace = 30 * time.Second
 // kill after pluginCancelGrace. Forwarding the real signal matters: a
 // supervisor's SIGTERM must reach the plugin as SIGTERM, not as a Ctrl-C.
 // Except a terminal's Ctrl-C (terminalSentInterrupt): that already reached the
-// plugin, and a second copy would read as the user's second Ctrl-C.
+// plugin, and a second copy would read as the user's second Ctrl-C. Nor is
+// that plugin killed after a grace: it got the Ctrl-C itself and decides how
+// long its wind-down takes (entire-stream closes its live session, which can
+// take longer than pluginCancelGrace). The user ends it sooner with a second
+// Ctrl-C (ForceQuitPlugins).
+//
+// So the kill is Cancel's own timer, started only when it forwards a signal,
+// rather than exec's WaitDelay, which would apply to every cancellation. The
+// timer is not stopped when the plugin exits first: Kill on a process that
+// has been waited for returns os.ErrProcessDone and signals nothing.
 //
 // Windows: send nothing, then kill after pluginWindowsCancelGrace.
 // os.Process.Signal supports only Kill there, so sending os.Interrupt fails
@@ -493,12 +505,16 @@ func configurePluginCancel(cmd *exec.Cmd, goos string) {
 	cmd.Cancel = func() error {
 		received := procsignal.Load()
 		if received == os.Interrupt && pluginTerminalSentInterrupt(cmd.Process.Pid) {
-			// The terminal delivered this Ctrl-C to the plugin already.
+			// The terminal delivered this Ctrl-C to the plugin already, and
+			// the plugin decides when to exit: no kill.
 			return nil
 		}
-		return cmd.Process.Signal(pluginCancelSignal())
+		proc := cmd.Process
+		time.AfterFunc(pluginCancelGrace, func() {
+			_ = proc.Kill() //nolint:errcheck // best effort; it may have exited
+		})
+		return proc.Signal(pluginCancelSignal())
 	}
-	cmd.WaitDelay = pluginCancelGrace
 }
 
 // pluginTerminalSentInterrupt is terminalSentInterrupt, a seam so tests can
