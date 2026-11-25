@@ -52,6 +52,12 @@ func TestPluginEnv(t *testing.T) {
 			wantHave: []string{"CI", "GITHUB_ACTIONS", "BUILDKITE"},
 		},
 		{
+			name:     "Codex session IDs pass",
+			parent:   []string{"CODEX_THREAD_ID=t-1", "CODEX_SESSION_ID=s-1", "CODEX_API_KEY=k", "PATH=/bin"},
+			wantHave: []string{"CODEX_THREAD_ID", "CODEX_SESSION_ID", "PATH"},
+			wantMiss: []string{"CODEX_API_KEY"},
+		},
+		{
 			name:     "proxies pass in both cases",
 			parent:   []string{"HTTP_PROXY=p", "https_proxy=p", "NO_PROXY=localhost"},
 			wantHave: []string{"HTTP_PROXY", "https_proxy", "NO_PROXY"},

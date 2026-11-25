@@ -51,6 +51,13 @@ var pluginEnvAllowed = map[string]struct{}{
 
 	// Documented in CLAUDE.md as the toggle for accessibility mode.
 	"ACCESSIBLE": {},
+
+	// Codex exports its session/thread ID to the commands it runs.
+	// entire-stream uses it to recognise the agent's own live session,
+	// because Codex 0.172 runs commands from a shared background server
+	// that lacks the ENTIRE_* variables. Non-credential IDs; the rest of
+	// the CODEX_* namespace (CODEX_API_KEY among it) stays filtered.
+	"CODEX_THREAD_ID": {}, "CODEX_SESSION_ID": {},
 }
 
 // pluginEnvPrefixes are namespaces we either own (ENTIRE_*) or that are
