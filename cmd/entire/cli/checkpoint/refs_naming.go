@@ -36,6 +36,26 @@ func RefName(cid id.CheckpointID) (plumbing.ReferenceName, error) {
 	return plumbing.ReferenceName(CheckpointRefPrefix + cid.ShardFor() + "/" + cid.String()), nil
 }
 
+// LocalRefName returns the name cid's ref is stored under in a repository on a
+// case-insensitive filesystem: RefName with the shard lowercased.
+//
+// Legacy IDs are lowercase and ULIDs uppercase, so RefName spells one shard
+// two ways (6b and 6B). On a case-insensitive filesystem both spellings name
+// one directory, and git stores a ref under whichever spelling created it.
+// Once the ref is packed only that spelling resolves, and updating it through
+// the other leaves a ref under each. One lowercase spelling per shard gives
+// the filesystem nothing to fold.
+//
+// Only the local name changes. Pushes and fetches use RefName, which is what
+// remotes, servers and other clones know the checkpoint by. See
+// LocalRefNameIn for which repositories use this name.
+func LocalRefName(cid id.CheckpointID) (plumbing.ReferenceName, error) {
+	if cid.Kind() == id.KindUnknown {
+		return "", fmt.Errorf("cannot build checkpoint ref: invalid checkpoint ID %q", cid)
+	}
+	return plumbing.ReferenceName(CheckpointRefPrefix + strings.ToLower(cid.ShardFor()) + "/" + cid.String()), nil
+}
+
 // ParseRef extracts the checkpoint ID from a per-checkpoint ref name,
 // reporting whether name is a well-formed checkpoint ref. A ref is well-formed
 // when it has the CheckpointRefPrefix, exactly a <shard>/<id> tail, and the

@@ -74,6 +74,12 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	// non-interactive SSH helper).
 	ctx = checkpointremote.WithNonInteractiveSSH(ctx)
 
+	// Deferred so it runs after any checkpoint push, and also on every path
+	// that sends none: push_sessions off, a remote other than the elected
+	// one, a manual policy, a withheld OPF rewrite. It only renames refs in
+	// this clone.
+	defer renameUppercaseShardRefs(ctx)
+
 	// Before push_sessions and the sync-remote gate: those decide what Entire
 	// sends, while this is about what the user's own push sends, to any remote.
 	if err := CheckOuterPushHeldCheckpoints(ctx); err != nil {
@@ -494,6 +500,33 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 		warnIgnoredCheckpointRemote(ctx, ps)
 	}
 	return nil
+}
+
+// renameUppercaseShardRefs moves this clone's checkpoint refs to their
+// lowercase-shard names when pre-push finishes (see
+// checkpoint.NormalizeShardSpelling), so the rename never delays a checkpoint
+// upload. A failure is logged and never returned: the refs keep working under
+// the names they have, and the next push tries again.
+func renameUppercaseShardRefs(ctx context.Context) {
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		logging.Warn(ctx, "pre-push: open repo failed; skipping the checkpoint shard rename",
+			slog.String("error", err.Error()))
+		return
+	}
+	defer repo.Close()
+	result, err := checkpoint.NormalizeShardSpelling(ctx, repo)
+	if err != nil {
+		logging.Warn(ctx, "pre-push: could not rename checkpoint refs to lowercase shards",
+			slog.Int("renamed", result.Renamed), slog.String("error", err.Error()))
+	} else if result.Renamed > 0 {
+		logging.Info(ctx, "pre-push: renamed checkpoint refs to lowercase shards",
+			slog.Int("renamed", result.Renamed))
+	}
+	if len(result.Diverged) > 0 {
+		logging.Warn(ctx, "pre-push: checkpoints with diverged refs under both shard spellings; see entire doctor",
+			slog.Int("checkpoints", len(result.Diverged)))
+	}
 }
 
 // PushQueuedCheckpointRefs pushes any queued checkpoint refs to the configured
