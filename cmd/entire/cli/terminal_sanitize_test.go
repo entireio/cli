@@ -312,6 +312,56 @@ func TestAttributionText_SanitizesCheckpointMetadata(t *testing.T) {
 	}
 }
 
+// The attribution renderers sanitize their own input, so a caller that hands
+// them stored metadata directly cannot reach the terminal with it either.
+func TestAttributionRenderers_SanitizeMetadata(t *testing.T) {
+	t.Parallel()
+	for _, tc := range hostileMetadataPayloads {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			candidate := func(checkpointID string) attributionCandidate {
+				return attributionCandidate{
+					CheckpointID: checkpointID,
+					SessionID:    tc.payload + "candidate-session",
+					Agent:        hostileValue("candidate", tc.payload),
+					Model:        hostileValue("candidate-model", tc.payload),
+				}
+			}
+			line := attributionLine{
+				LineNumber:   2,
+				Status:       lineStatusCheckpoint,
+				Author:       hostileValue("author", tc.payload),
+				CheckpointID: "a1b2c3d4e5f6",
+				SessionID:    tc.payload + "session-visible",
+				Agent:        hostileValue("agent", tc.payload),
+				Model:        hostileValue("model", tc.payload),
+				Content:      "ai_line = 2",
+				Candidates:   []attributionCandidate{candidate("a1b2c3d4e5f6"), candidate("b1b2c3d4e5f6")},
+			}
+			result := &fileAttributionResult{
+				File:        "auth.py",
+				Lines:       []attributionLine{line},
+				Checkpoints: map[string]attributionCheckpointContext{"a1b2c3d4e5f6": candidate("a1b2c3d4e5f6")},
+				Summary:     summarizeAttributionLines([]attributionLine{line}),
+			}
+
+			var lineWhy, fileWhy, compact, long bytes.Buffer
+			renderAttributionLineWhy(&lineWhy, result.File, line)
+			for _, field := range []string{"agent", "model", "candidate"} {
+				assertSanitizedField(t, lineWhy.String(), field)
+			}
+			renderAttributionFileWhy(&fileWhy, result)
+			assertSanitizedField(t, fileWhy.String(), "candidate")
+			renderAttributionBlameCompact(&compact, result, "")
+			assertNoTerminalControls(t, compact.String())
+			renderAttributionBlameLong(&long, result, "")
+			assertNoTerminalControls(t, long.String())
+
+			assert.Equal(t, hostileValue("agent", tc.payload), result.Lines[0].Agent, "rendering must not modify the caller's result")
+		})
+	}
+}
+
 // Session state is local, but agents write it, and session list, info,
 // doctor and clean print it.
 func TestSessionStateText_SanitizesStoredLabels(t *testing.T) {

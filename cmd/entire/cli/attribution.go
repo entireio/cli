@@ -282,7 +282,7 @@ func runAttributionBlame(ctx context.Context, w io.Writer, file string, opts att
 	if opts.JSON {
 		return printJSON(w, result)
 	}
-	renderAttributionBlame(w, attributionForTerminal(result), opts.LineFlag, opts.Long)
+	renderAttributionBlame(w, result, opts.LineFlag, opts.Long)
 	return nil
 }
 
@@ -313,7 +313,7 @@ func runAttributionWhy(ctx context.Context, w io.Writer, target string, opts att
 		if opts.JSON {
 			return printJSON(w, result)
 		}
-		renderAttributionFileWhy(w, attributionForTerminal(result))
+		renderAttributionFileWhy(w, result)
 		return nil
 	}
 
@@ -340,7 +340,7 @@ func runAttributionWhy(ctx context.Context, w io.Writer, target string, opts att
 		}
 		return printJSON(w, payload)
 	}
-	renderAttributionLineWhy(w, result.File, attributionLineForTerminal(*selected))
+	renderAttributionLineWhy(w, result.File, *selected)
 	return nil
 }
 
@@ -1020,11 +1020,11 @@ func renderAttributionBlame(w io.Writer, result *fileAttributionResult, lineFlag
 	renderAttributionBlameCompact(w, result, lineFlag)
 }
 
-// attributionForTerminal returns a copy of result for the text renderers with
-// every stored label sanitized. Session IDs, agents and models come from
-// checkpoint metadata and authors from commits, all of which can arrive by
-// fetch, so escape sequences and control characters are stripped before they
-// reach the terminal. JSON output prints result itself, unchanged.
+// attributionForTerminal returns a copy of result with every stored label
+// sanitized. Session IDs, agents and models come from checkpoint metadata and
+// authors from commits, all of which can arrive by fetch, so each text renderer
+// passes its input through here before printing. JSON output prints the
+// caller's result, which stays unchanged.
 func attributionForTerminal(result *fileAttributionResult) *fileAttributionResult {
 	out := *result
 	out.Lines = make([]attributionLine, len(result.Lines))
@@ -1085,6 +1085,7 @@ func renderAttributionBlameTable(w io.Writer, result *fileAttributionResult, lin
 }
 
 func renderAttributionBlameCompact(w io.Writer, result *fileAttributionResult, lineFlag string) {
+	result = attributionForTerminal(result)
 	renderAttributionBlameTable(w, result, lineFlag, func(sty statusStyles) {
 		lineWidth := attributionLineColumnWidth(result.Lines)
 		const agentWidth = 6
@@ -1122,6 +1123,7 @@ func renderAttributionBlameCompact(w io.Writer, result *fileAttributionResult, l
 }
 
 func renderAttributionBlameLong(w io.Writer, result *fileAttributionResult, lineFlag string) {
+	result = attributionForTerminal(result)
 	renderAttributionBlameTable(w, result, lineFlag, func(sty statusStyles) {
 		lineWidth := attributionLineColumnWidth(result.Lines)
 		// Size the Checkpoint/Session column to its content so a ULID checkpoint
@@ -1205,6 +1207,7 @@ func renderAttributionContentCompact(sty statusStyles, line attributionLine, wid
 }
 
 func renderAttributionLineWhy(w io.Writer, file string, line attributionLine) {
+	line = attributionLineForTerminal(line)
 	sty := newStatusStyles(w)
 	fmt.Fprintf(w, "\n  %s %d in %s\n", sty.render(sty.bold, "Line"), line.LineNumber, sty.render(sty.bold, file))
 	if line.Content != "" {
@@ -1295,6 +1298,7 @@ func renderAttributionLineWhy(w io.Writer, file string, line attributionLine) {
 }
 
 func renderAttributionFileWhy(w io.Writer, result *fileAttributionResult) {
+	result = attributionForTerminal(result)
 	sty := newStatusStyles(w)
 	summary := result.Summary
 	fmt.Fprintf(w, "\n  %s\n", sty.render(sty.bold, result.File))
