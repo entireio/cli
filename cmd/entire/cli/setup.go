@@ -2955,6 +2955,7 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 			hookState:         agHookState,
 			geminiHooks:       geminiHooks,
 			geminiHooksErr:    geminiHooksErr,
+			userTierExclusion: userTierKeepsRepoOn(ctx),
 		})
 		if err != nil {
 			return err
@@ -2994,7 +2995,7 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 // `repos` entry enabling it, the user-level agent hooks would treat the
 // repository as configured, reinstall its git hooks and resume recording.
 func excludeFromUserTier(ctx context.Context, p *uninstallPrinter) bool {
-	if !settings.UserTierEnablesEverywhere(ctx) && !reposEntryEnablesHere(ctx) {
+	if !userTierKeepsRepoOn(ctx) {
 		return true
 	}
 	key, err := setRepoEnabledHere(ctx, false)
@@ -3004,6 +3005,12 @@ func excludeFromUserTier(ctx context.Context, p *uninstallPrinter) bool {
 	}
 	p.step("Turned Entire off for %s (repos in %s)", describeRepoKey(key), usersettings.Path())
 	return true
+}
+
+// userTierKeepsRepoOn reports whether the user settings file enables this
+// repository, so uninstall must write an exclusion for it.
+func userTierKeepsRepoOn(ctx context.Context) bool {
+	return settings.UserTierEnablesEverywhere(ctx) || reposEntryEnablesHere(ctx)
 }
 
 // uninstallGitHooks removes Entire's git hooks and reports what it did.
@@ -3116,6 +3123,9 @@ type uninstallSummary struct {
 	// checked.
 	geminiHooks    bool
 	geminiHooksErr error
+	// userTierExclusion reports that uninstall will write enabled: false to
+	// this repository's `repos` entry in the user settings file.
+	userTierExclusion bool
 }
 
 // confirmUninstall prints the removal summary and asks the user to confirm.
@@ -3125,7 +3135,7 @@ func confirmUninstall(p *uninstallPrinter, summary uninstallSummary) (bool, erro
 	p.blank()
 	p.plain("This will completely remove Entire from this repository:")
 	p.blank()
-	rows := make([]explainRow, 0, 7)
+	rows := make([]explainRow, 0, 8)
 	if len(summary.hookState.installed) > 0 {
 		rows = append(rows, explainRow{Label: "agent hooks", Value: strings.Join(agentDisplayNames(summary.hookState.installed), ", ")})
 	}
@@ -3151,6 +3161,9 @@ func confirmUninstall(p *uninstallPrinter, summary uninstallSummary) (bool, erro
 	}
 	if summary.entireDirExists {
 		rows = append(rows, explainRow{Label: ".entire/", Value: "settings, logs, metadata"})
+	}
+	if summary.userTierExclusion {
+		rows = append(rows, explainRow{Label: "user settings", Value: "turn Entire off in " + usersettings.Path() + " for every clone and worktree of this repository"})
 	}
 	fmt.Fprint(p.w, p.out.metadataRows(rows))
 	p.blank()
