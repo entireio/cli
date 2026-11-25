@@ -494,13 +494,19 @@ OpenCode load both copies, so the user-level one steps aside: Codex's hook
 command carries `--scope=user/v<N>` and exits when the hooks file Codex
 discovers for the checkout is Entire's and approved (unapproved project hooks
 do not run, so the user-level ones must); Pi's extension does nothing when
-`<cwd>/.pi/extensions/entire/index.ts` is Entire's; OpenCode's plugin does
-nothing when an Entire plugin is in `.opencode/plugin` or `.opencode/plugins`
-between the directory it serves and the repository root. Each check is fresh,
-per event or per load. A prompt that still reaches Entire twice (an older Claude
-Code project install whose commands differ from the user-level ones) is
-recorded once: the second turn-start for the same session, prompt and agent
-turn ID, while that turn is running and within a minute, is skipped.
+`<cwd>/.pi/extensions/entire/index.ts` is this CLI's current project render;
+OpenCode's plugin does nothing when this CLI's current project plugin is in
+`.opencode/plugin` (or, under OpenCode 1, `.opencode/plugins`) between the
+directory it serves and the repository root. Pi and OpenCode compare the
+project file's SHA-256 (line endings aside) with the render the user-level copy
+was built beside, so an older or partial project copy, which may not run on
+the installed agent, never silences the user-level one. Each check is fresh,
+per event or per load. A prompt that still reaches Entire twice is recorded
+once where a second install can fire it (a user-level `--scope=user` hook, or an
+agent that sends a turn ID): the second turn-start for the same session, prompt
+and agent turn ID, while that turn is running and within a minute, is skipped.
+Claude Code is never deduplicated this way: it runs one identical command once
+itself, so the same prompt again is the developer's.
 
 **Versions.** Each user-level entry point records an Entire hook version
 (Codex, Pi and OpenCode in the file itself; Claude Code in
@@ -511,9 +517,13 @@ agent's user-level hooks, and `doctor` and `status` say when a repository's own
 hooks are older than the user-level ones; the project install still wins there
 until you run `entire enable` in it.
 The first prompt in such a repository installs Entire's git hooks there and
-gives `.entire/` a `.gitignore` that keeps its local files out of git, and
-Entire contacts entire.io from that repository the way it does from any enabled
-one.
+gives `.entire/` a `.gitignore` that keeps its local files, and itself, out of
+git (the self-ignore goes once a settings file exists, so `entire enable` still
+leaves it to commit), and Entire contacts entire.io from that repository the
+way it does from any enabled one. A user settings file Entire cannot read (it
+does not parse, or is a symlink) turns global enable off everywhere; the next
+agent session start says so on stderr, and `entire status` (`user_settings_error`
+in `--json`) and `entire doctor` name it.
 
 **Consent.** The command explains this and asks you to confirm. `--yes` accepts
 without asking and prints what was accepted; without a terminal and without
@@ -538,7 +548,8 @@ and pointing at `entire disable`; it does not hold or prompt.
   turned it off.
 - `entire disable` in a repository on only through global enable writes
   `"enabled": false` to that repository's `repos` entry in the user settings
-  file, so every clone and worktree of it stays off. Elsewhere it writes
+  file, so every clone and worktree of it stays off; so does `entire disable`
+  in a repository claimed there (a `repos` entry with `"enabled": true`). Elsewhere it writes
   `.entire/settings.local.json` as before. `entire disable --global` turns the
   flag off everywhere and then removes Entire's user-level hooks from every
   agent (Claude Code, Codex, Pi, OpenCode), under the lock each install takes
@@ -546,7 +557,10 @@ and pointing at `entire disable`; it does not hold or prompt.
   them back). Repositories you enabled yourself stay enabled through their
   project hooks; one enabled only by a hand-written `repos` entry needs `entire
   enable` there to record agent sessions again. Committed project files are
-  never touched.
+  never touched. Repositories set up only through global enable keep Entire's
+  git hooks, which do nothing once the repository is not set up; `status` and
+  `doctor` say so, and `entire disable --uninstall` there removes them (Entire
+  does not track which repositories it set up, so it cannot remove them all).
 - A `repos` entry for the repository in the user settings file applies to every
   worktree of the clone, and one that sets `enabled` is the clone-wide way to
   turn one repository on or off.
@@ -564,6 +578,27 @@ and pointing at `entire disable`; it does not hold or prompt.
   global-enable notices stop. An agent session cannot claim a repository:
   `entire enable` run by one still succeeds but leaves it on only through
   global enable.
+
+**Owner decisions, by design.**
+
+- Committed redaction settings are honored in a repository on only through
+  global enable. A secret scanner always runs whatever they say, so the most a
+  repository can do is choose how transcripts are scrubbed, not turn scrubbing
+  off.
+- The refusal of `entire enable --global` from an agent session is a soft
+  guard: it detects agents through the environment variables they set, so an
+  agent that clears them is not detected. The consent is the user's, and agents
+  are told never to run it.
+- Installing takes a lock file beside each agent's user-level config
+  (`<file>.lock`, or `.entire-user-hooks.lock` in Pi's and OpenCode's
+  directories); those files are Entire's and harmless to delete when no
+  `entire` command is running.
+- `entire disable --global` removes every Entire-shaped hook from Claude
+  Code's user settings, including one the user added by hand with the same
+  command.
+- Two `entire` versions on one machine with global enable on rewrite each
+  other's user-level copies, each to its own version; the copy matches
+  whichever ran last.
 
 ## Reporting a vulnerability
 
