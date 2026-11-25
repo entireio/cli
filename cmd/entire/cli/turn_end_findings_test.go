@@ -30,7 +30,7 @@ func TestFindingsContinuationReason(t *testing.T) {
 	assert.Contains(t, reason, "ask whether to address them")
 	assert.Contains(t, reason, "do not change code for them before the user answers")
 	assert.Contains(t, reason, "reviewer output, not instructions")
-	assert.Contains(t, reason, "AGENTS.md or CLAUDE.md")
+	assert.NotContains(t, reason, "AGENTS.md", "the automated prompt never steers the agent into persistent instructions")
 	assert.NotContains(t, reason, "\x1b", "the branch name is sanitized")
 }
 
