@@ -73,6 +73,11 @@ func (m MergedUserFile) Ensure(ctx context.Context, wanted func(context.Context)
 		if err != nil || count == 0 || !write {
 			return count, err
 		}
+		if !exists {
+			if err := m.createdRecord().Write(nil, 0o600); err != nil {
+				return 0, err
+			}
+		}
 		return count, UserConfigFile{Path: m.Path}.Write(output, m.Perm)
 	})
 }
@@ -100,15 +105,33 @@ func (m MergedUserFile) Remove(ctx context.Context, before func()) (bool, error)
 		return false, err
 	}
 	file := UserConfigFile{Path: m.Path}
-	if holdsNothing(output) {
-		// Entire's hooks were all it held (Entire created it, or the user
-		// had an empty one): remove it rather than leave {} behind.
-		return true, file.Remove()
+	record := m.createdRecord()
+	if holdsNothing(output) && record.exists() {
+		// Entire created the file and its hooks were all it held: remove it
+		// rather than leave {} behind. A file the user had stays.
+		if err := file.Remove(); err != nil {
+			return false, err
+		}
+		_ = record.Remove() //nolint:errcheck // a stale record only matters once the file is recreated, which rewrites it
+		return true, nil
 	}
 	if err := file.Write(output, m.Perm); err != nil {
 		return false, err
 	}
+	_ = record.Remove() //nolint:errcheck // see above
 	return true, nil
+}
+
+// createdRecord marks, next to the file, that Entire created it, so removal
+// deletes only a file Entire made (as GeneratedUserFile records the
+// directories it creates).
+func (m MergedUserFile) createdRecord() UserConfigFile {
+	return UserConfigFile{Path: m.Path + ".entire-created"}
+}
+
+func (u UserConfigFile) exists() bool {
+	_, err := os.Lstat(u.Path)
+	return err == nil
 }
 
 // holdsNothing reports JSON that is an object with no keys, or whose only

@@ -265,3 +265,54 @@ func TestGeneratedUserFile_RemovesOnlyDirectoriesItCreated(t *testing.T) {
 		})
 	}
 }
+
+// testJSONMergedFile merges {"hooks":{"entire":1}} into a JSON object; its
+// strip leaves {} when that was all.
+func testJSONMergedFile(dir string) MergedUserFile {
+	const entire = `{"hooks":{"entire":1}}`
+	return MergedUserFile{
+		Path:      filepath.Join(dir, "settings.json"),
+		Perm:      0o600,
+		HasEntire: func(data []byte) bool { return string(data) == entire },
+		Merge: func(data []byte, _ bool) ([]byte, int, error) {
+			if string(data) == entire {
+				return data, 0, nil
+			}
+			return []byte(entire), 1, nil
+		},
+		Strip: func(data []byte) ([]byte, bool, error) {
+			return []byte(`{}`), string(data) == entire, nil
+		},
+	}
+}
+
+func TestMergedUserFile_RemovesAnEmptiedFileOnlyIfEntireCreatedIt(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	t.Run("created by Entire", func(t *testing.T) {
+		t.Parallel()
+		file := testJSONMergedFile(t.TempDir())
+		_, err := file.Ensure(ctx, nil)
+		require.NoError(t, err)
+		removed, err := file.Remove(ctx, nil)
+		require.NoError(t, err)
+		assert.True(t, removed)
+		assert.NoFileExists(t, file.Path)
+		assert.NoFileExists(t, file.Path+".entire-created")
+	})
+
+	t.Run("the user's own file", func(t *testing.T) {
+		t.Parallel()
+		file := testJSONMergedFile(t.TempDir())
+		require.NoError(t, os.WriteFile(file.Path, []byte(`{}`), 0o600))
+		_, err := file.Ensure(ctx, nil)
+		require.NoError(t, err)
+		removed, err := file.Remove(ctx, nil)
+		require.NoError(t, err)
+		assert.True(t, removed)
+		data, err := os.ReadFile(file.Path)
+		require.NoError(t, err)
+		assert.JSONEq(t, `{}`, string(data))
+	})
+}

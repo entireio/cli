@@ -10,6 +10,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 )
 
@@ -42,7 +43,7 @@ func claimGlobalEnablePushNotice(ctx context.Context) bool {
 			slog.String("error", err.Error()))
 		return true
 	}
-	claimed, err := claimOnceMarker(root, globalEnablePushNoticeName, "")
+	claimed, err := osroot.ClaimOnceMarker(root, globalEnablePushNoticeName, "")
 	if err != nil {
 		logging.Debug(ctx, "global enable: cannot create the push notice marker",
 			slog.String("error", err.Error()))

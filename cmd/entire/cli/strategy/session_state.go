@@ -372,7 +372,7 @@ func StoreAgentTypeHint(ctx context.Context, sessionID string, agentType types.A
 	defer root.Close()
 
 	// First-writer-wins: another caller may already have claimed this session.
-	created, err = claimOnceMarker(root, sessionID+".agent", string(agentType))
+	created, err = osroot.ClaimOnceMarker(root, sessionID+".agent", string(agentType))
 	if err != nil {
 		return false, fmt.Errorf("failed to create agent hint file: %w", err)
 	}
@@ -402,7 +402,7 @@ func ClaimSessionStartBanner(ctx context.Context, sessionID string) (claimed boo
 	}
 	defer root.Close()
 
-	claimed, err = claimOnceMarker(root, sessionID+".banner", "")
+	claimed, err = osroot.ClaimOnceMarker(root, sessionID+".banner", "")
 	if err != nil {
 		return false, fmt.Errorf("failed to create banner marker file: %w", err)
 	}
@@ -1029,24 +1029,4 @@ func ClearSessionState(ctx context.Context, sessionID string) error {
 // drops the child aggregate, as it does for a step. A nil delta is a no-op.
 func ApplyTurnTokenUsage(state *SessionState, delta *agent.TokenUsage, ledgerVersion *uint64) {
 	applyTurnTokenUsage(state, withoutStaleSubagentSnapshot(delta, ledgerVersion, state))
-}
-
-// claimOnceMarker creates name in root exclusively, writing content, and
-// reports whether this call created it: the first caller wins, and one that
-// finds it already there gets false and no error.
-func claimOnceMarker(root *os.Root, name, content string) (bool, error) {
-	f, err := osroot.OpenFileNoFollow(root, name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if errors.Is(err, os.ErrExist) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err //nolint:wrapcheck // callers name the marker
-	}
-	defer f.Close()
-	if content != "" {
-		if _, err := f.WriteString(content); err != nil {
-			return true, err //nolint:wrapcheck // callers name the marker
-		}
-	}
-	return true, nil
 }

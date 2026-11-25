@@ -2,10 +2,8 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 
 	"github.com/spf13/cobra"
 
@@ -90,16 +88,12 @@ func claimUnreadableUserSettingsNotice(cmd *cobra.Command, agentName types.Agent
 	if err := osroot.MkdirAllNoSymlink(root, userSettingsNoticeDir, 0o700); err != nil {
 		return true
 	}
-	f, err := osroot.OpenFileNoFollow(root, userSettingsNoticeDir+"/user-settings-"+sessionID, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if errors.Is(err, os.ErrExist) {
-		return false
-	}
+	claimed, err := osroot.ClaimOnceMarker(root, userSettingsNoticeDir+"/user-settings-"+sessionID, "")
 	if err != nil {
 		logging.Debug(ctx, "could not create the user settings notice marker", slog.String("error", err.Error()))
 		return true
 	}
-	_ = f.Close()
-	return true
+	return claimed
 }
 
 // sessionIDForNotice parses the hook payload for its session ID. The hook
