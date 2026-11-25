@@ -16,6 +16,18 @@ const (
 
 // os.Exit here keeps PASS off helper stdout.
 func TestMain(m *testing.M) {
+	if dir := os.Getenv(helperUploadPackEnv); dir != "" {
+		t := &execTransport{
+			dir:           dir,
+			stripRoundNAK: os.Getenv(helperStripNAKEnv) != "",
+			singleACK:     os.Getenv(helperSingleACKEnv) != "",
+		}
+		if err := Run(context.Background(), t, 0, os.Stdin, os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "test helper: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	serverURL := os.Getenv(helperServerEnv)
 	if serverURL == "" {
 		os.Exit(m.Run())

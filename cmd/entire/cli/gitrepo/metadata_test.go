@@ -165,6 +165,50 @@ func TestResolveWorktreeMetadata_RealGitLayouts(t *testing.T) {
 		require.Equal(t, filepath.Join(alias, gitDir), metadata.CommonDir)
 	})
 
+	t.Run("unregistered commondir checkout", func(t *testing.T) {
+		t.Parallel()
+		mainRoot, checkout := unregisteredCommonDirCheckout(t)
+		require.NoDirExists(t, filepath.Join(mainRoot, gitDir, "worktrees"))
+
+		metadata := assertMetadataMatchesGit(t, checkout, "")
+		require.Equal(t, filepath.Join(checkout, gitDir), metadata.GitDir)
+		requireSameDirectory(t, filepath.Join(mainRoot, gitDir), metadata.CommonDir)
+		requireOpensAtMainHead(t, mainRoot, checkout)
+	})
+
+	t.Run("unregistered commondir checkout beside registered worktrees", func(t *testing.T) {
+		t.Parallel()
+		mainRoot, checkout := unregisteredCommonDirCheckout(t)
+		runMetadataGit(t, mainRoot, "worktree", "add", "-b", "registered", filepath.Join(t.TempDir(), "registered"))
+		require.DirExists(t, filepath.Join(mainRoot, gitDir, "worktrees"))
+
+		assertMetadataMatchesGit(t, checkout, "")
+		requireOpensAtMainHead(t, mainRoot, checkout)
+	})
+
+	t.Run("unregistered commondir checkout with relative commondir", func(t *testing.T) {
+		t.Parallel()
+		mainRoot, checkout := unregisteredCommonDirCheckout(t)
+		writeMetadataFile(t, filepath.Join(checkout, gitDir, "commondir"), "../../main/.git\n")
+
+		metadata := assertMetadataMatchesGit(t, checkout, "")
+		requireSameDirectory(t, filepath.Join(mainRoot, gitDir), metadata.CommonDir)
+		requireOpensAtMainHead(t, mainRoot, checkout)
+	})
+
+	t.Run("gitdir file to an unregistered commondir Git directory", func(t *testing.T) {
+		t.Parallel()
+		mainRoot, checkout := unregisteredCommonDirCheckout(t)
+		storage := filepath.Join(t.TempDir(), "checkout-git")
+		require.NoError(t, os.Rename(filepath.Join(checkout, gitDir), storage))
+		writeMetadataFile(t, filepath.Join(checkout, gitDir), "gitdir: "+storage+"\n")
+
+		metadata := assertMetadataMatchesGit(t, checkout, "")
+		require.Equal(t, storage, metadata.GitDir)
+		requireSameDirectory(t, filepath.Join(mainRoot, gitDir), metadata.CommonDir)
+		requireOpensAtMainHead(t, mainRoot, checkout)
+	})
+
 	t.Run("symlinked .git directory", func(t *testing.T) {
 		t.Parallel()
 		if runtime.GOOS == windowsOS {
@@ -203,26 +247,81 @@ func TestResolveWorktreeMetadata_RejectsRegistrationSymlinkEscapingCommonDir(t *
 		t.Skip("symlink creation requires privileges on some Windows builders")
 	}
 
-	tmp := t.TempDir()
-	root := filepath.Join(tmp, "worktree")
-	commonDir := filepath.Join(tmp, "common")
-	registrationRoot := filepath.Join(commonDir, "worktrees")
-	plantedRegistration := filepath.Join(tmp, "planted-registration")
-	require.NoError(t, os.MkdirAll(root, 0o750))
-	require.NoError(t, os.MkdirAll(registrationRoot, 0o750))
-	require.NoError(t, os.MkdirAll(plantedRegistration, 0o750))
-	require.NoError(t, os.Symlink(plantedRegistration, filepath.Join(registrationRoot, "escaped")))
-	writeMetadataFile(t, filepath.Join(root, gitDir), "gitdir: "+filepath.Join(registrationRoot, "escaped")+"\n")
-	writeMetadataFile(t, filepath.Join(plantedRegistration, "commondir"), commonDir+"\n")
+	// Each layout plants <common>/worktrees/escaped -> <tmp>/planted-registration
+	// and spells the .git pointer and the planted commondir differently. An
+	// alias spelling of either side must not turn the escaping registration
+	// into an accepted unregistered checkout.
+	tests := []struct {
+		name string
+		// gitdirVia and commondirVia return the spellings, given the real
+		// common directory and a scratch directory for aliases.
+		gitdirVia    func(t *testing.T, commonDir, tmp string) string
+		commondirVia func(t *testing.T, commonDir, tmp string) string
+	}{
+		{
+			name: "real spellings",
+			gitdirVia: func(_ *testing.T, commonDir, _ string) string {
+				return filepath.Join(commonDir, "worktrees", "escaped")
+			},
+			commondirVia: func(_ *testing.T, commonDir, _ string) string { return commonDir },
+		},
+		{
+			name: "commondir through an alias of the common directory",
+			gitdirVia: func(_ *testing.T, commonDir, _ string) string {
+				return filepath.Join(commonDir, "worktrees", "escaped")
+			},
+			commondirVia: func(t *testing.T, commonDir, tmp string) string {
+				t.Helper()
+				alias := filepath.Join(tmp, "common-alias")
+				require.NoError(t, os.Symlink(commonDir, alias))
+				return alias
+			},
+		},
+		{
+			name: "gitdir through an alias of the registration tree",
+			gitdirVia: func(t *testing.T, commonDir, tmp string) string {
+				t.Helper()
+				alias := filepath.Join(tmp, "worktrees-alias")
+				require.NoError(t, os.Symlink(filepath.Join(commonDir, "worktrees"), alias))
+				return filepath.Join(alias, "escaped")
+			},
+			commondirVia: func(_ *testing.T, commonDir, _ string) string { return commonDir },
+		},
+		{
+			name: "gitdir through a case variant of the registration tree",
+			gitdirVia: func(t *testing.T, commonDir, tmp string) string {
+				t.Helper()
+				skipUnlessCaseInsensitive(t, tmp)
+				return filepath.Join(commonDir, "WORKTREES", "escaped")
+			},
+			commondirVia: func(_ *testing.T, commonDir, _ string) string { return commonDir },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tmp := t.TempDir()
+			root := filepath.Join(tmp, "worktree")
+			commonDir := filepath.Join(tmp, "common")
+			registrationRoot := filepath.Join(commonDir, "worktrees")
+			plantedRegistration := filepath.Join(tmp, "planted-registration")
+			require.NoError(t, os.MkdirAll(root, 0o750))
+			require.NoError(t, os.MkdirAll(registrationRoot, 0o750))
+			require.NoError(t, os.MkdirAll(plantedRegistration, 0o750))
+			require.NoError(t, os.Symlink(plantedRegistration, filepath.Join(registrationRoot, "escaped")))
+			writeMetadataFile(t, filepath.Join(root, gitDir), "gitdir: "+tt.gitdirVia(t, commonDir, tmp)+"\n")
+			writeMetadataFile(t, filepath.Join(plantedRegistration, "commondir"), tt.commondirVia(t, commonDir, tmp)+"\n")
 
-	metadata, err := ResolveWorktreeMetadata(root)
-	require.ErrorContains(t, err, "not an immediate child")
-	require.Equal(t, WorktreeMetadata{}, metadata)
+			metadata, err := ResolveWorktreeMetadata(root)
+			require.ErrorContains(t, err, "not an immediate child")
+			require.Equal(t, WorktreeMetadata{}, metadata)
 
-	repo, err := OpenPath(root)
-	require.ErrorContains(t, err, "resolve worktree metadata")
-	require.ErrorContains(t, err, "not an immediate child")
-	require.Nil(t, repo)
+			repo, err := OpenPath(root)
+			require.ErrorContains(t, err, "resolve worktree metadata")
+			require.ErrorContains(t, err, "not an immediate child")
+			require.Nil(t, repo)
+		})
+	}
 }
 
 func TestResolveWorktreeMetadata_RequiresExplicitRoot(t *testing.T) {
@@ -505,6 +604,20 @@ func TestResolveWorktreeMetadata_MalformedMetadata(t *testing.T) {
 			},
 			want: "not an immediate child",
 		},
+		{
+			name: "nested registration through a case variant",
+			setup: func(t *testing.T) string {
+				root := t.TempDir()
+				skipUnlessCaseInsensitive(t, root)
+				common := filepath.Join(root, "store")
+				perWorktree := filepath.Join(common, "worktrees", "nested", "id")
+				require.NoError(t, os.MkdirAll(perWorktree, 0o750))
+				writeMetadataFile(t, filepath.Join(root, gitDir), "gitdir: "+filepath.Join(common, "Worktrees", "nested", "id")+"\n")
+				writeMetadataFile(t, filepath.Join(perWorktree, "commondir"), common+"\n")
+				return root
+			},
+			want: "not an immediate child",
+		},
 	}
 
 	for _, tt := range tests {
@@ -629,6 +742,12 @@ func assertMetadataMatchesGit(t *testing.T, root, wantID string) WorktreeMetadat
 	require.True(t, filepath.IsAbs(metadata.CommonDir))
 	requireSameDirectory(t, metadata.GitDir, runMetadataGit(t, root, "rev-parse", "--absolute-git-dir"))
 	requireSameDirectory(t, metadata.CommonDir, runMetadataGit(t, root, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+	gitDirInfo, err := os.Stat(metadata.GitDir)
+	require.NoError(t, err)
+	commonDirInfo, err := os.Stat(metadata.CommonDir)
+	require.NoError(t, err)
+	wantUnregistered := wantID == "" && !os.SameFile(gitDirInfo, commonDirInfo)
+	require.Equal(t, wantUnregistered, metadata.Unregistered, "unregistered: only an ID-less Git directory other than the common directory")
 	return metadata
 }
 
@@ -640,6 +759,33 @@ func conventionalMetadataWorktree(t *testing.T, name string) (string, string) {
 	initMetadataRepo(t, mainRoot)
 	runMetadataGit(t, mainRoot, "worktree", "add", "-b", name, linkedRoot)
 	return mainRoot, linkedRoot
+}
+
+// unregisteredCommonDirCheckout builds a checkout whose .git directory holds
+// its own HEAD and index and shares another repository's objects and refs
+// through commondir, without a <common>/worktrees registration. Container
+// launchers materialize checkouts this way over mounted host metadata.
+func unregisteredCommonDirCheckout(t *testing.T) (string, string) {
+	t.Helper()
+	tmp := t.TempDir()
+	mainRoot := filepath.Join(tmp, "main")
+	checkout := filepath.Join(tmp, "workdir")
+	initMetadataRepo(t, mainRoot)
+	writeMetadataFile(t, filepath.Join(checkout, gitDir, "HEAD"), "ref: refs/heads/main\n")
+	writeMetadataFile(t, filepath.Join(checkout, gitDir, "commondir"), filepath.Join(mainRoot, gitDir)+"\n")
+	runMetadataGit(t, checkout, "read-tree", "-u", "--reset", "HEAD")
+	require.Empty(t, runMetadataGit(t, checkout, "--no-optional-locks", "status", "--porcelain"))
+	return mainRoot, checkout
+}
+
+func requireOpensAtMainHead(t *testing.T, mainRoot, checkout string) {
+	t.Helper()
+	repo, err := OpenPath(checkout)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = repo.Close() })
+	head, err := repo.Head()
+	require.NoError(t, err)
+	require.Equal(t, runMetadataGit(t, mainRoot, "rev-parse", "HEAD"), head.Hash().String())
 }
 
 func metadataSubmoduleWorktrees(t *testing.T) (string, string) {
@@ -738,4 +884,15 @@ func writeMetadataFile(t *testing.T, path, content string) {
 	t.Helper()
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o750))
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+}
+
+// skipUnlessCaseInsensitive skips t when dir's filesystem tells names apart by
+// case, where a case variant names a different (here missing) directory.
+func skipUnlessCaseInsensitive(t *testing.T, dir string) {
+	t.Helper()
+	probe := filepath.Join(dir, "case-probe")
+	require.NoError(t, os.MkdirAll(probe, 0o750))
+	if _, err := os.Stat(filepath.Join(dir, "CASE-PROBE")); err != nil {
+		t.Skip("filesystem is case-sensitive")
+	}
 }

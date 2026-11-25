@@ -48,6 +48,18 @@ func SetResolveContextForAPIForTest(t interface{ Helper() }, fn resolveContextFu
 type DataAPI struct {
 	BaseURL string
 	Token   string
+	// Source, when set, renews the bearer per request (EnvTokenSource);
+	// Token is then only its value at resolution time.
+	Source api.TokenSource
+}
+
+// Client returns an API client for d, renewing the bearer from Source when
+// one is set.
+func (d DataAPI) Client() *api.Client {
+	if d.Source != nil {
+		return api.NewClientWithTokenSource(d.Source, d.BaseURL)
+	}
+	return api.NewClientWithBaseURL(d.Token, d.BaseURL)
 }
 
 // ResolveDataAPI picks the data API and bearer for this command.
@@ -109,14 +121,15 @@ func envTokenDataAPI(raw, dataURL string, overridden bool) (DataAPI, error) {
 	if err != nil {
 		return DataAPI{}, err
 	}
+	source := EnvTokenSource(raw)
 	if overridden {
-		return DataAPI{BaseURL: dataURL, Token: token}, nil
+		return DataAPI{BaseURL: dataURL, Token: token, Source: source}, nil
 	}
 	baseURL, err := dataBaseURLForCore(core)
 	if err != nil {
 		return DataAPI{}, err
 	}
-	return DataAPI{BaseURL: baseURL, Token: token}, nil
+	return DataAPI{BaseURL: baseURL, Token: token, Source: source}, nil
 }
 
 // DataBaseURL is the web/data API origin for the acting login, without a
@@ -127,7 +140,7 @@ func DataBaseURL() (string, error) {
 		return dataURL, nil
 	}
 	if raw, ok := os.LookupEnv(EnvTokenVar); ok {
-		core, _, err := ParseEnvToken(raw)
+		core, err := EnvTokenCoreURL(raw)
 		if err != nil {
 			return "", err
 		}

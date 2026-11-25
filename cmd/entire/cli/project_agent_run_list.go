@@ -117,7 +117,7 @@ func printProjectAgentRuns(w io.Writer, t *projectAgentTarget, page api.ProjectA
 	}
 	if len(runs) == 0 {
 		fmt.Fprintf(w, "No agent runs in %s.\n", t.label())
-	} else if err := printTable(w, []string{"ID", colHeaderAgent, "STATUS", "TRIGGER", "BRANCH", "CREATED"}, runs, func(r api.ProjectAgentRun) []string {
+	} else if err := printTable(w, []string{"ID", colHeaderAgent, "STATUS", "TRIGGER", "BRANCH", colHeaderCreated}, runs, func(r api.ProjectAgentRun) []string {
 		return []string{tuiutil.SanitizeTerminalLabel(r.ID), tuiutil.SanitizeTerminalLabel(r.Agent.Name), tuiutil.SanitizeTerminalLabel(r.Status),
 			tuiutil.SanitizeTerminalLabel(r.Trigger.Kind), tuiutil.SanitizeTerminalLabel(r.Branch), r.CreatedAt.Format(time.RFC3339)}
 	}); err != nil {

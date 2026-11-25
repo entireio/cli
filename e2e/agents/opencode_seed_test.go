@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,7 +24,8 @@ func TestOpenCodeSeedRepoPlantsDeps(t *testing.T) {
 	if _, err := exec.LookPath(openCodeBinary); err != nil {
 		t.Skip("opencode not installed")
 	}
-	if _, err := exec.LookPath("npm"); err != nil {
+	// Only the OpenCode 1 path builds a dependency tree with npm.
+	if _, err := exec.LookPath("npm"); err != nil && !isOpenCode2() {
 		t.Skip("npm not installed")
 	}
 
@@ -31,6 +33,30 @@ func TestOpenCodeSeedRepoPlantsDeps(t *testing.T) {
 	agent := &openCodeAgent{model: "test"}
 	if err := agent.SeedRepo(dir); err != nil {
 		t.Fatalf("SeedRepo: %v", err)
+	}
+
+	// OpenCode 2 installs no plugin dependencies into .opencode, so SeedRepo
+	// writes only the root config, which must carry the model because the
+	// OpenCode 2 TUI has no --model flag.
+	if isOpenCode2() {
+		cfg, err := os.ReadFile(filepath.Join(dir, "opencode.json"))
+		if err != nil {
+			t.Fatalf("seeded opencode.json missing: %v", err)
+		}
+		// Report only the model: the config can carry ANTHROPIC_API_KEY.
+		var parsed struct {
+			Model string `json:"model"`
+		}
+		if err := json.Unmarshal(cfg, &parsed); err != nil {
+			t.Fatalf("seeded opencode.json is not valid JSON: %v", err)
+		}
+		if parsed.Model != "test" {
+			t.Errorf("seeded opencode.json selects model %q, want %q", parsed.Model, "test")
+		}
+		if _, err := os.Lstat(filepath.Join(dir, ".opencode")); !os.IsNotExist(err) {
+			t.Errorf("expected SeedRepo to plant nothing under .opencode for OpenCode 2, got err=%v", err)
+		}
+		return
 	}
 
 	// node_modules is the one that matters: opencode reinstalls without it.

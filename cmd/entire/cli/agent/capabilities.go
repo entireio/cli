@@ -56,6 +56,7 @@ type CapabilityDeclarer interface {
 //   - TranscriptFetcher
 //   - TranscriptSanitizer
 //   - TurnEndHookTimeouter
+//   - UsageCounterSource (refuses CapabilityDeclarer agents)
 //
 // Their As* helpers resolve through builtinCapability, or through
 // nonDeclarerCapability for the entries marked as refusing CapabilityDeclarer
@@ -250,6 +251,13 @@ func AsChildSessionSubagents(ag Agent) (ChildSessionSubagents, bool) {
 // implements the interface and (for CapabilityDeclarer agents) has declared the capability.
 func AsTokenCalculator(ag Agent) (TokenCalculator, bool) {
 	return declaredCapability[TokenCalculator](ag, func(c DeclaredCaps) bool { return c.TokenCalculator })
+}
+
+// AsUsageCounterSource returns the agent as UsageCounterSource if supported.
+// External (CapabilityDeclarer) agents are excluded: the protocol has no
+// incremental token call, so they keep the per-turn accounting.
+func AsUsageCounterSource(ag Agent) (UsageCounterSource, bool) {
+	return nonDeclarerCapability[UsageCounterSource](ag)
 }
 
 // AsLateTranscriptWriter returns the agent as LateTranscriptWriter if supported.

@@ -46,13 +46,12 @@ func publishProjectTrailBranch(cmd *cobra.Command, branch string) error {
 	if err != nil {
 		return err
 	}
-	state := trailCreateBranchState{NeedsCreation: branchNeedsCreation(repo, branch)}
-	if state.NeedsCreation {
+	if branchNeedsCreation(repo, branch) {
 		exists, err := remoteHasBranch(ctx, remote, branch)
 		if err != nil {
 			return fmt.Errorf("check branch %q on %q: %w", branch, remote, err)
 		}
-		if err := ensureTrailCreateBranchExists(ctx, cmd.ErrOrStderr(), repo, remote, branch, strategy.GetCurrentBranchName(repo), exists, &state); err != nil {
+		if err := ensureTrailCreateBranchExists(ctx, cmd.ErrOrStderr(), repo, remote, branch, exists); err != nil {
 			return err
 		}
 	}

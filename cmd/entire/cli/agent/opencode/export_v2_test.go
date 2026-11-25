@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/entireio/cli/internal/transcript/opencodev2"
 )
 
 // The testdata/opencode2 fixtures are real OpenCode 2.1.1 exports, captured
@@ -26,14 +28,14 @@ func loadOpenCode2Fixture(t *testing.T, name string) []byte {
 func normalizeFixture(t *testing.T, name string) (*ExportSession, []byte) {
 	t.Helper()
 	raw := loadOpenCode2Fixture(t, name)
-	if !isOpenCodeV2Export(raw) {
+	if !opencodev2.IsExport(raw) {
 		t.Fatalf("%s: not detected as an OpenCode 2 export", name)
 	}
-	data, err := normalizeOpenCodeExport(raw)
+	data, err := opencodev2.Normalize(raw)
 	if err != nil {
 		t.Fatalf("%s: normalize: %v", name, err)
 	}
-	if isOpenCodeV2Export(data) {
+	if opencodev2.IsExport(data) {
 		t.Fatalf("%s: normalized export still looks like OpenCode 2", name)
 	}
 	session, err := ParseExportSession(data)
@@ -249,7 +251,7 @@ func TestNormalizeOpenCodeExport_LeavesV1Unchanged(t *testing.T) {
 		`{"info":{"id":"ses_1"},"messages":[{"info":{"id":"m1","role":"user","time":{"created":1}},"parts":[{"type":"text","text":"hi"}]}]}`,
 		`{"info":{"id":"ses_1"},"messages":[]}`,
 	} {
-		got, err := normalizeOpenCodeExport([]byte(v1))
+		got, err := opencodev2.Normalize([]byte(v1))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -317,7 +319,7 @@ func TestOpenCodeV2ImportPayload_DropsChangedAttachments(t *testing.T) {
 	tool := `{"id":"msg_a","type":"assistant","time":{"created":2,"completed":3},"content":[{"type":"tool","id":"c1","name":"read","state":{"status":"completed","content":[` +
 		`{"type":"text","text":"ok"},{"type":"media","media":{"source":{"type":"base64","data":"REDACTED_x","mediaType":"image/png"}}}]}}]}`
 	export := `{"info":{"id":"ses_x","location":{"directory":"/a"}},"messages":[` + user + `,` + tool + `]}`
-	stored, err := normalizeOpenCodeExport([]byte(export))
+	stored, err := opencodev2.Normalize([]byte(export))
 	if err != nil {
 		t.Fatal(err)
 	}
