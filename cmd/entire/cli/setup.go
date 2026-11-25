@@ -1108,7 +1108,7 @@ publish the repository yourself when you're ready.`,
 		}),
 	}
 
-	cmd.Flags().BoolVar(&enableGlobal, flagGlobal, false, "Enable Entire for Claude Code sessions in every repository you work in (sets global_enable in ~/.config/entire/settings.json)")
+	cmd.Flags().BoolVar(&enableGlobal, flagGlobal, false, "Enable Entire in every repository you work in for Claude Code, Codex, Pi and OpenCode (sets global_enable in ~/.config/entire/settings.json and installs their user-level hooks)")
 	cmd.Flags().BoolVar(&ignoreUntracked, "ignore-untracked", false, "Commit all new files without tracking pre-existing untracked files")
 	cmd.Flags().StringVar(&opts.CheckpointPushRemote, flagCheckpointPushRemote, "", "Git remote for checkpoint uploads (saved to .entire/settings.local.json, even with --project)")
 	cmd.Flags().MarkHidden("ignore-untracked") //nolint:errcheck,gosec // flag is defined above
@@ -1318,7 +1318,7 @@ was not fully uninstalled.`,
 	cmd.Flags().BoolVar(&useProjectSettings, "project", false, "Update .entire/settings.json instead of .entire/settings.local.json")
 	cmd.Flags().BoolVar(&uninstall, "uninstall", false, "Completely remove Entire from this repository")
 	cmd.Flags().BoolVar(&force, "force", false, "Skip confirmation prompt (use with --uninstall)")
-	cmd.Flags().BoolVar(&disableGlobal, flagGlobal, false, "Stop enabling Entire in every repository (sets global_enable to false and removes Entire's Claude Code user-level hooks); repositories enabled with `entire enable` stay enabled")
+	cmd.Flags().BoolVar(&disableGlobal, flagGlobal, false, "Stop enabling Entire in every repository (sets global_enable to false and removes Entire's user-level hooks for every agent); repositories enabled with `entire enable` stay enabled")
 
 	return cmd
 }
