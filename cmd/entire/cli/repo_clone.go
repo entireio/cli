@@ -5,17 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/url"
 	"os/exec"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 
 	"charm.land/huh/v2"
 	"github.com/spf13/cobra"
 
-	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -321,125 +318,6 @@ func trimRefPrefix(ref string) string {
 	return strings.TrimPrefix(strings.TrimSpace(ref), "/")
 }
 
-// entireWebHost is the host of the production web origin, read once from the
-// api.DefaultWebBaseURL constant. canonicalizeRepoRef strips it from pasted
-// URLs; no environment is consulted, so an override never widens the match.
-var entireWebHost = func() string {
-	u, err := url.Parse(api.DefaultWebBaseURL)
-	if err != nil {
-		return ""
-	}
-	return u.Hostname()
-}()
-
-// hasPrefixASCIIFold reports whether s starts with prefix, comparing bytes with
-// ASCII-only case folding. strings.EqualFold is deliberately avoided: it folds
-// non-ASCII look-alikes such as "ſ" (U+017F) to "s".
-func hasPrefixASCIIFold(s, prefix string) bool {
-	if prefix == "" || len(s) < len(prefix) {
-		return false
-	}
-	for i := range len(prefix) {
-		a, b := s[i], prefix[i]
-		if 'A' <= a && a <= 'Z' {
-			a += 'a' - 'A'
-		}
-		if 'A' <= b && b <= 'Z' {
-			b += 'a' - 'A'
-		}
-		if a != b {
-			return false
-		}
-	}
-	return true
-}
-
-// canonicalizeRepoRef turns a pasted entire.com URL
-// ("https://entire.com/et/a/b", "entire.com/gh/o/r") into the path form the
-// ref grammars understand ("/et/a/b"). It only strips: the scheme (https
-// only), the production web host and at most one trailing slash. Anything that
-// is not exactly that shape, including a result that would be empty or start
-// with "//", is returned trimmed but otherwise unchanged. Pure; no env, no I/O.
-func canonicalizeRepoRef(ref string) string {
-	s := strings.TrimSpace(ref)
-	rest := s
-	if hasPrefixASCIIFold(rest, "https://") {
-		rest = rest[len("https://"):]
-	}
-	if !hasPrefixASCIIFold(rest, entireWebHost) {
-		return s
-	}
-	rest = rest[len(entireWebHost):]
-	if !strings.HasPrefix(rest, "/") {
-		return s
-	}
-	rest = strings.TrimSuffix(rest, "/")
-	if rest == "" || rest == "/" || strings.HasPrefix(rest, "//") {
-		return s
-	}
-	return rest
-}
-
-// refURLScheme matches a ref that opens with a URL scheme.
-var refURLScheme = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*://`)
-
-// redactRefForError hides credentials in a typed ref before it is echoed in an
-// error. Only a ref that opens with a URL scheme ("https://u:p@host/...") is
-// scrubbed: "://" elsewhere ("/et/a/b/https://x") is an ordinary character
-// run, and a scheme-less "u:secret@entire.com/..." is not scrubbed at all (it
-// is not a ref any grammar accepts, and the echo stays what was typed).
-//
-// The scrub is textual (gitremote.RedactCredentialsInText), not a url.Parse
-// round-trip, so the echo keeps exactly what was typed apart from userinfo:
-// query, fragment, scheme case and percent-escapes survive.
-func redactRefForError(ref string) string {
-	if !refURLScheme.MatchString(ref) {
-		return ref
-	}
-	return gitremote.RedactCredentialsInText(ref)
-}
-
-// typedRef pairs what the user typed (redacted, for error text) with the
-// canonical form used for parsing.
-type typedRef struct{ typed, canon string }
-
-// newTypedRef is the single point where a ref typed by the user becomes a
-// typedRef: it keeps the redacted text for error echoes and runs
-// canonicalizeRepoRef for parsing. Command code takes its ref through here (the
-// canonicalize guard test and the cli-conventions doc name it as such) so every
-// accepted spelling, path or entire.com URL, reaches the parsers in one form.
-func newTypedRef(s string) typedRef {
-	return typedRef{
-		typed: redactRefForError(strings.TrimSpace(s)),
-		canon: canonicalizeRepoRef(s),
-	}
-}
-
-// typedRefError is the error wrapErr returns: its message echoes the typed ref
-// while Unwrap keeps the original error, so errors.Is/As still match.
-type typedRefError struct {
-	msg string
-	err error
-}
-
-func (e *typedRefError) Error() string { return e.msg }
-func (e *typedRefError) Unwrap() error { return e.err }
-
-// wrapErr rewrites the quoted canonical ref in err's message back to what the
-// user typed. errors.Is/As keep working through Unwrap.
-//
-// It rewrites only %q echoes of the exact canonical ref. A message that echoes
-// the ref with %s, or a derived fragment of it, keeps the canonical spelling:
-// callers that print the ref unquoted must pass redactRefForError(tr.canon)
-// themselves.
-func (t typedRef) wrapErr(err error) error {
-	if err == nil || t.typed == t.canon {
-		return err
-	}
-	msg := strings.ReplaceAll(err.Error(), strconv.Quote(t.canon), strconv.Quote(t.typed))
-	return &typedRefError{msg: msg, err: err}
-}
-
 // declaresForge reports whether ref opens with a forge token (leading slash
 // optional). Declaring a token is what says the user meant that grammar, so a
 // malformed ref gets that parser's reason — the bad owner, project or repo name
@@ -721,6 +599,16 @@ func resolveCanonicalCloneURL(cmd *cobra.Command, tr typedRef, cluster string, p
 		return cloneURL, nil
 	}
 
+	return resolveMirrorCloneURL(cmd, tr, nativeErr, cluster, picker)
+}
+
+// resolveMirrorCloneURL resolves a `/gh/<owner>/<repo>` ref: it lists the
+// mirror's pullable placements, picks one and builds the entire:// clone URL.
+// nativeErr is the native grammar's verdict on the same ref, kept so a ref
+// neither grammar accepts gets the combined error.
+func resolveMirrorCloneURL(cmd *cobra.Command, tr typedRef, nativeErr error, cluster string, picker placementPicker) (string, error) {
+	ref := tr.canon
+
 	// provider is always "github" for the /gh/ shorthand; the pull-gated
 	// resolver pins the provider itself, so it's not threaded through.
 	_, owner, repo, mirrorErr := parseMirrorCloneRef(ref)
@@ -731,72 +619,8 @@ func resolveCanonicalCloneURL(cmd *cobra.Command, tr typedRef, cluster string, p
 		return "", invalidCloneRefError(ref, nativeErr, mirrorErr)
 	}
 
-	var placements []coreapi.ResolvedPlacement
-	lister := func(ctx context.Context, c *coreapi.Client) error {
-		ps, err := resolvePullablePlacements(ctx, c, owner, repo)
-		if err != nil {
-			// Only here, not in the shared resolver: the message tells the
-			// user to clone, which is advice for `repo clone` alone.
-			if detached := detachedAddressFrom(err, owner, repo); detached != nil {
-				return detached
-			}
-			return err
-		}
-		placements = ps
-		return nil
-	}
-	// An explicit --cluster may name a cluster in a different federation
-	// than the active context, whose mirrors the active-context core can't
-	// see (the original bug: cloning a royalcanin.partial.to mirror while a
-	// different context is active failed with "not mirrored on ..."). Dial
-	// the core fronting that cluster — discovered from its well-known and
-	// authenticated with the matching local context, the same path
-	// `mirror add <repo> --cluster <host>` uses — so the lookup resolves against
-	// the right federation. With no --cluster, list from the active context.
-	if cluster != "" {
-		if err := validateClusterHost(cluster); err != nil {
-			return "", fmt.Errorf("invalid --cluster: %w", err)
-		}
-		if err := runCoreForCluster(cmd, cluster, lister); err != nil {
-			var detached *detachedAddressError
-			if errors.As(err, &detached) {
-				return "", detached.answeredByOtherCore()
-			}
-			// A name that does not resolve, and nothing else. DNS answering
-			// "no such host" is the one failure that says the host is not a
-			// cluster at all, so the active context can be asked instead and
-			// selectPlacement can name the clusters the repo IS on — the
-			// answer the /et/ path gives for the same typo.
-			//
-			// Deliberately narrower than ErrUnreachable, which also covers a
-			// timeout, a refused connection and a TLS failure; its own doc
-			// says the client cannot tell a typo from a real-but-down cluster.
-			// Treating those as typos would let a momentary blip on a cluster
-			// in another federation answer "not mirrored" — or, with nothing
-			// mirrored here, tell the user to onboard a repo that is already
-			// mirrored there. That is the exact bug the cluster-addressed dial
-			// above exists to fix, so every other failure surfaces unchanged.
-			if !hostDoesNotResolve(err) {
-				return "", err
-			}
-			logging.Debug(cmd.Context(), "cluster host does not resolve; listing placements from the active context", "cluster", cluster, "error", err)
-			if fallbackErr := runCore(cmd, lister); fallbackErr != nil {
-				// A detached answer is the active context answering, not failing:
-				// the DNS error stays a debug detail, as with a placement list.
-				var detached *detachedAddressError
-				if errors.As(fallbackErr, &detached) {
-					return "", detached
-				}
-				// Both routes to a placement list are gone. Each half names a
-				// different thing the user may have to fix — a mistyped host,
-				// and whatever stopped the active context from standing in
-				// (an expired login, say) — and they would otherwise learn the
-				// second only after fixing the first. Nothing is joined on the
-				// path that matters, where the fallback answers.
-				return "", errors.Join(err, fallbackErr)
-			}
-		}
-	} else if err := runCore(cmd, lister); err != nil {
+	placements, err := listCloneMirrorPlacements(cmd, owner, repo, cluster)
+	if err != nil {
 		return "", err
 	}
 
@@ -821,6 +645,81 @@ func resolveCanonicalCloneURL(cmd *cobra.Command, tr typedRef, cluster string, p
 	}
 	cloneURL := forgeCloneURL(mirrorCloneForge, chosen.ClusterHost, owner, repo)
 	return cloneURL, nil
+}
+
+// listCloneMirrorPlacements lists the pullable placements of a mirror: from the
+// cluster named by --cluster when one is given, otherwise from the active
+// context.
+func listCloneMirrorPlacements(cmd *cobra.Command, owner, repo, cluster string) ([]coreapi.ResolvedPlacement, error) {
+	var placements []coreapi.ResolvedPlacement
+	lister := func(ctx context.Context, c *coreapi.Client) error {
+		ps, err := resolvePullablePlacements(ctx, c, owner, repo)
+		if err != nil {
+			// Only here, not in the shared resolver: the message tells the
+			// user to clone, which is advice for `repo clone` alone.
+			if detached := detachedAddressFrom(err, owner, repo); detached != nil {
+				return detached
+			}
+			return err
+		}
+		placements = ps
+		return nil
+	}
+	// An explicit --cluster may name a cluster in a different federation
+	// than the active context, whose mirrors the active-context core can't
+	// see (the original bug: cloning a royalcanin.partial.to mirror while a
+	// different context is active failed with "not mirrored on ..."). Dial
+	// the core fronting that cluster — discovered from its well-known and
+	// authenticated with the matching local context, the same path
+	// `mirror add <repo> --cluster <host>` uses — so the lookup resolves against
+	// the right federation. With no --cluster, list from the active context.
+	if cluster != "" {
+		if err := validateClusterHost(cluster); err != nil {
+			return nil, fmt.Errorf("invalid --cluster: %w", err)
+		}
+		if err := runCoreForCluster(cmd, cluster, lister); err != nil {
+			var detached *detachedAddressError
+			if errors.As(err, &detached) {
+				return nil, detached.answeredByOtherCore()
+			}
+			// A name that does not resolve, and nothing else. DNS answering
+			// "no such host" is the one failure that says the host is not a
+			// cluster at all, so the active context can be asked instead and
+			// selectPlacement can name the clusters the repo IS on — the
+			// answer the /et/ path gives for the same typo.
+			//
+			// Deliberately narrower than ErrUnreachable, which also covers a
+			// timeout, a refused connection and a TLS failure; its own doc
+			// says the client cannot tell a typo from a real-but-down cluster.
+			// Treating those as typos would let a momentary blip on a cluster
+			// in another federation answer "not mirrored" — or, with nothing
+			// mirrored here, tell the user to onboard a repo that is already
+			// mirrored there. That is the exact bug the cluster-addressed dial
+			// above exists to fix, so every other failure surfaces unchanged.
+			if !hostDoesNotResolve(err) {
+				return nil, err
+			}
+			logging.Debug(cmd.Context(), "cluster host does not resolve; listing placements from the active context", "cluster", cluster, "error", err)
+			if fallbackErr := runCore(cmd, lister); fallbackErr != nil {
+				// A detached answer is the active context answering, not failing:
+				// the DNS error stays a debug detail, as with a placement list.
+				var detached *detachedAddressError
+				if errors.As(fallbackErr, &detached) {
+					return nil, detached
+				}
+				// Both routes to a placement list are gone. Each half names a
+				// different thing the user may have to fix — a mistyped host,
+				// and whatever stopped the active context from standing in
+				// (an expired login, say) — and they would otherwise learn the
+				// second only after fixing the first. Nothing is joined on the
+				// path that matters, where the fallback answers.
+				return nil, errors.Join(err, fallbackErr)
+			}
+		}
+	} else if err := runCore(cmd, lister); err != nil {
+		return nil, err
+	}
+	return placements, nil
 }
 
 // hostDoesNotResolve reports whether err bottoms out in DNS answering "no such
