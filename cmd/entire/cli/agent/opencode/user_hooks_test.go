@@ -42,6 +42,7 @@ func TestUserHooks_InstallInspectRemove(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, removed)
 	assert.NoFileExists(t, path)
+	assert.NoDirExists(t, filepath.Dir(path), "Entire created it")
 }
 
 // The project render keeps no trace of the user-level placeholders, so

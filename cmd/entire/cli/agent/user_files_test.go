@@ -235,3 +235,33 @@ func TestGeneratedUserFile_NoHomeCreatesNothing(t *testing.T) {
 	assert.Equal(t, UserHooksNotInUse, file.Inspect().State)
 	assert.NoDirExists(t, home)
 }
+
+// Removal takes away the empty directories Entire created for the file, and
+// keeps a directory the user already had, empty or not.
+func TestGeneratedUserFile_RemovesOnlyDirectoriesItCreated(t *testing.T) {
+	t.Parallel()
+	for name, preExisting := range map[string]bool{"created by Entire": false, "the user's own": true} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			home := t.TempDir()
+			file := testGeneratedFile(home)
+			dir := filepath.Dir(file.Path)
+			if preExisting {
+				require.NoError(t, os.MkdirAll(dir, 0o750))
+			}
+			ctx := context.Background()
+			_, err := file.Ensure(ctx, nil)
+			require.NoError(t, err)
+			removed, err := file.Remove(ctx)
+			require.NoError(t, err)
+			assert.True(t, removed)
+			if preExisting {
+				assert.DirExists(t, dir)
+			} else {
+				assert.NoDirExists(t, dir)
+			}
+			assert.NoFileExists(t, filepath.Join(home, ".entire-user-hooks-dirs"))
+			assert.DirExists(t, home)
+		})
+	}
+}

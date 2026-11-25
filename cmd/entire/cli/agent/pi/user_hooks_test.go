@@ -22,7 +22,7 @@ func userPiHome(t *testing.T) string {
 
 // Install writes the user-level render (idempotence is the shared
 // GeneratedUserFile's, tested in package agent), inspect reports it current with
-// its version, and removal takes the file and its directory away.
+// its version, and removal takes the file and the directories it created away.
 func TestUserHooks_InstallInspectRemove(t *testing.T) {
 	home := userPiHome(t)
 	ag := &PiAgent{}
@@ -45,6 +45,7 @@ func TestUserHooks_InstallInspectRemove(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, removed)
 	assert.NoDirExists(t, filepath.Dir(path))
+	assert.NoDirExists(t, filepath.Join(home, "extensions"), "Entire created it")
 	assert.Equal(t, agent.UserHooksAbsent, ag.InspectUserHooks(ctx).State)
 }
 

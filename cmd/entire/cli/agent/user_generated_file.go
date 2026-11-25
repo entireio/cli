@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -26,7 +27,8 @@ type GeneratedUserFile struct {
 	Content string
 	// Version finds the stamped hook version in the file (one digit group).
 	Version *regexp.Regexp
-	// RemoveDir also removes the file's directory, when empty, on removal.
+	// RemoveDir also removes the file's directory, when empty, on removal,
+	// even one Entire did not create (directories it created always go).
 	RemoveDir bool
 }
 
@@ -56,15 +58,90 @@ func (g GeneratedUserFile) apply(write bool) (int, error) {
 	if !write {
 		return 1, nil
 	}
+	created := g.missingDirs()
 	// The user's own config directory: plain MkdirAll, which follows a
 	// symlinked dotfiles directory as the file write does.
 	if err := os.MkdirAll(filepath.Dir(g.Path), 0o755); err != nil { //nolint:gosec // the agent reads the file itself
 		return 0, fmt.Errorf("create %s: %w", filepath.Dir(g.Path), err)
 	}
+	if err := g.recordCreatedDirs(created); err != nil {
+		return 0, err
+	}
 	if err := file.Write([]byte(g.Content), 0o644); err != nil {
 		return 0, err
 	}
 	return 1, nil
+}
+
+// createdDirsFile records, in Home, the directories Entire created for the
+// file, one Home-relative path per line, so removal takes away only those
+// (when empty) and never a directory the user had before.
+func (g GeneratedUserFile) createdDirsFile() UserConfigFile {
+	return UserConfigFile{Path: filepath.Join(g.Home, ".entire-user-hooks-dirs")}
+}
+
+// missingDirs returns the file's directory and its ancestors below Home that
+// do not exist yet.
+func (g GeneratedUserFile) missingDirs() []string {
+	var missing []string
+	for dir := filepath.Dir(g.Path); dir != g.Home && strings.HasPrefix(dir, g.Home+string(filepath.Separator)); dir = filepath.Dir(dir) {
+		if _, err := os.Lstat(dir); err == nil {
+			break
+		}
+		missing = append(missing, dir)
+	}
+	return missing
+}
+
+func (g GeneratedUserFile) recordCreatedDirs(created []string) error {
+	if len(created) == 0 {
+		return nil
+	}
+	recorded := g.recordedDirs()
+	for _, dir := range created {
+		rel, err := filepath.Rel(g.Home, dir)
+		if err != nil {
+			continue
+		}
+		recorded = append(recorded, filepath.ToSlash(rel))
+	}
+	return g.createdDirsFile().Write([]byte(strings.Join(recorded, "\n")+"\n"), 0o600)
+}
+
+// recordedDirs returns the Home-relative directories Entire recorded
+// creating, ignoring any entry that would leave Home.
+func (g GeneratedUserFile) recordedDirs() []string {
+	data, err := g.createdDirsFile().Read()
+	if err != nil {
+		return nil
+	}
+	var dirs []string
+	for _, line := range strings.Split(string(data), "\n") {
+		rel := filepath.Clean(filepath.FromSlash(strings.TrimSpace(line)))
+		if line == "" || rel == "." || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue
+		}
+		dirs = append(dirs, filepath.ToSlash(rel))
+	}
+	return dirs
+}
+
+// removeCreatedDirs removes, deepest first, the directories Entire created
+// for the file (and, with RemoveDir, the file's own), each only when empty.
+func (g GeneratedUserFile) removeCreatedDirs() {
+	var dirs []string
+	if g.RemoveDir {
+		dirs = append(dirs, filepath.Dir(g.Path))
+	}
+	for _, rel := range g.recordedDirs() {
+		dirs = append(dirs, filepath.Join(g.Home, filepath.FromSlash(rel)))
+	}
+	sort.Slice(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
+	for _, dir := range dirs {
+		// Fails, as intended, while anything else is in the directory.
+		_ = os.Remove(dir)
+	}
+	_ = g.createdDirsFile().Remove() //nolint:errcheck // a stale record only names directories to try again
 }
 
 // Remove deletes Entire's file (and, with RemoveDir, its directory when
@@ -93,10 +170,7 @@ func (g GeneratedUserFile) Remove(ctx context.Context) (bool, error) {
 	if err := file.Remove(); err != nil {
 		return false, err
 	}
-	if g.RemoveDir {
-		// Fails, as intended, while anything else is in the directory.
-		_ = os.Remove(filepath.Dir(g.Path))
-	}
+	g.removeCreatedDirs()
 	return true, nil
 }
 
