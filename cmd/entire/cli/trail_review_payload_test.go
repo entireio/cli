@@ -100,7 +100,7 @@ func TestFindingJSONPreservesKeysAndReturnsNextCursor(t *testing.T) {
 		t.Run(cursor, func(t *testing.T) {
 			t.Parallel()
 			var out bytes.Buffer
-			require.NoError(t, encodeTrailReviewJSON(&out, target, []api.TrailReviewComment{comment}, cursor, trailReviewCommentCounts{Open: 2}, nil))
+			require.NoError(t, encodeTrailReviewJSON(&out, target, []api.TrailReviewComment{comment}, cursor, trailReviewCommentCounts{Open: 2}, nil, nil))
 			var got map[string]json.RawMessage
 			require.NoError(t, json.Unmarshal(out.Bytes(), &got))
 			if cursor != "" {

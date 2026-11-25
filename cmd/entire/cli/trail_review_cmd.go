@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
+	"time"
 	"unicode"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
@@ -147,20 +148,35 @@ func readTrailReviewListFlagChanges(cmd *cobra.Command, opts *trailReviewListOpt
 
 func newTrailFindingListCmd(targetOpts *trailReviewTargetOptions) *cobra.Command {
 	opts := defaultTrailReviewListOptions()
+	waitOpts := trailFindingWaitOptions{Timeout: defaultTrailFindingWaitTimeout}
 	cmd := &cobra.Command{
 		Use:   "list [<trail>]",
 		Short: "List findings for a trail",
-		Args:  cobra.MaximumNArgs(1),
+		Long: `List findings for a trail.
+
+With --wait, first wait until the trail's review agents have finished on its
+head commit (or on --head), then list the findings. Agents that wait for the
+trail to become (or stop being) ready for review, or that this push does not
+run, are not waited for. The command stops after --timeout and lists the
+findings so far; run it again to keep waiting.`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			waitStart := time.Now()
 			selector, err := parseOptionalTrailSelector(args, targetOpts.Selector)
 			if err != nil {
 				return err
 			}
+			if err := validateTrailFindingWaitOptions(waitOpts, cmd.Flags().Changed("timeout"), cmd.Flags().Changed("head")); err != nil {
+				return err
+			}
 			readTrailReviewListFlagChanges(cmd, &opts)
-			return runTrailReviewComments(cmd, targetOpts.Mode, selector, opts)
+			return runTrailReviewComments(cmd, targetOpts.Mode, selector, opts, waitOpts, waitStart)
 		},
 	}
 	addTrailReviewListFlags(cmd, &opts)
+	cmd.Flags().BoolVar(&waitOpts.Enabled, "wait", false, "Wait for the trail's review agents to finish before listing")
+	cmd.Flags().DurationVar(&waitOpts.Timeout, "timeout", waitOpts.Timeout, "With --wait, the longest to wait before listing the findings so far")
+	cmd.Flags().StringVar(&waitOpts.Head, "head", "", "With --wait, wait for the review of this commit, such as the one just pushed (defaults to the trail's current head)")
 	return cmd
 }
 
@@ -333,12 +349,12 @@ func runTrailReviewDashboard(cmd *cobra.Command, mode *trailMode, selector strin
 	counts := countTrailReviewComments(summaryComments)
 	agents := fetchTrailChangeAgents(cmd.Context(), cmd.ErrOrStderr(), client, target.Trail)
 	if opts.JSON {
-		return encodeTrailReviewJSON(cmd.OutOrStdout(), target, comments, nextCursor, counts, agents)
+		return encodeTrailReviewJSON(cmd.OutOrStdout(), target, comments, nextCursor, counts, agents, nil)
 	}
 	return printTrailReviewDashboard(cmd.OutOrStdout(), target, comments, nextCursor, opts, counts, agents)
 }
 
-func runTrailReviewComments(cmd *cobra.Command, mode *trailMode, selector string, opts trailReviewListOptions) error {
+func runTrailReviewComments(cmd *cobra.Command, mode *trailMode, selector string, opts trailReviewListOptions, waitOpts trailFindingWaitOptions, waitStart time.Time) error {
 	var err error
 	opts, err = normalizeTrailReviewListOptions(opts)
 	if err != nil {
@@ -348,15 +364,37 @@ func runTrailReviewComments(cmd *cobra.Command, mode *trailMode, selector string
 	if err != nil {
 		return err
 	}
+	var wait *trailReviewWaitJSON
+	if waitOpts.Enabled {
+		if wait, err = waitForTrailFindings(cmd, client, target, waitOpts, waitStart); err != nil {
+			return err
+		}
+	}
 	comments, nextCursor, err := fetchTrailReviewComments(cmd.Context(), client, target.Trail.ID, opts)
 	if err != nil {
 		return err
 	}
 	if opts.JSON {
-		return encodeTrailReviewJSON(cmd.OutOrStdout(), target, comments, nextCursor, countTrailReviewComments(comments), nil)
+		return encodeTrailReviewJSON(cmd.OutOrStdout(), target, comments, nextCursor, countTrailReviewComments(comments), nil, wait)
 	}
 	printTrailReviewComments(cmd.OutOrStdout(), comments, nextCursor)
 	return nil
+}
+
+// waitForTrailFindings runs the --wait part of 'finding list': it waits for
+// the review and reports on stderr how the wait ended.
+func waitForTrailFindings(cmd *cobra.Command, client *api.Client, target trailReviewTarget, waitOpts trailFindingWaitOptions, start time.Time) (*trailReviewWaitJSON, error) {
+	head := strings.TrimSpace(waitOpts.Head)
+	poll := func(ctx context.Context, ignoreStale bool) (trailReviewProgress, error) {
+		return fetchTrailReviewProgress(ctx, client, target.Trail.ID, head, ignoreStale)
+	}
+	deadline := trailFindingWaitDeadline(start, waitOpts.Timeout)
+	progress, _, err := waitForTrailReview(cmd.Context(), cmd.ErrOrStderr(), poll, deadline, time.Now, trailFindingWaitSleep)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Fprintln(cmd.ErrOrStderr(), trailReviewWaitResultLine(progress))
+	return toTrailReviewWaitJSON(progress), nil
 }
 
 func runTrailReviewCommentAdd(cmd *cobra.Command, mode *trailMode, selector string, opts trailReviewCommentAddOptions) error {
@@ -1462,7 +1500,7 @@ func resolveGitRev(ctx context.Context, ref string) (string, error) {
 
 // encodeTrailReviewJSON prints findings as JSON. agents, the change's project
 // agents as the server sent them, is included when the dashboard read them.
-func encodeTrailReviewJSON(w io.Writer, target trailReviewTarget, comments []api.TrailReviewComment, nextCursor string, counts trailReviewCommentCounts, agents json.RawMessage) error {
+func encodeTrailReviewJSON(w io.Writer, target trailReviewTarget, comments []api.TrailReviewComment, nextCursor string, counts trailReviewCommentCounts, agents json.RawMessage, wait *trailReviewWaitJSON) error {
 	return printJSON(w, struct {
 		Agents     json.RawMessage          `json:"agents,omitempty"`
 		Counts     trailReviewCommentCounts `json:"counts"`
@@ -1470,6 +1508,7 @@ func encodeTrailReviewJSON(w io.Writer, target trailReviewTarget, comments []api
 		HasMore    bool                     `json:"has_more"`
 		NextCursor string                   `json:"next_cursor,omitempty"`
 		Trail      trailResourceJSON        `json:"trail"`
+		Wait       *trailReviewWaitJSON     `json:"wait,omitempty"`
 	}{
 		Agents:     agents,
 		Counts:     counts,
@@ -1477,6 +1516,7 @@ func encodeTrailReviewJSON(w io.Writer, target trailReviewTarget, comments []api
 		HasMore:    nextCursor != "",
 		NextCursor: nextCursor,
 		Trail:      toTrailResourceJSON(trailForDisplay(target.Trail)),
+		Wait:       wait,
 	})
 }
 
