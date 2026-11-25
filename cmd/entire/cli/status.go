@@ -1354,10 +1354,7 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		return writeJSON(statusJSON{Error: presenceErr.Error()})
 	}
 
-	var userSettingsErr string
-	if err := settings.UserSettingsReadError(ctx); err != nil {
-		userSettingsErr = err.Error()
-	}
+	userSettingsErr := userSettingsErrorText(ctx)
 	if !projectExists && !localExists && !userTierConfiguresWorktree(ctx) {
 		return writeJSON(statusJSON{Error: "not set up", UserSettingsError: userSettingsErr})
 	}
@@ -1382,14 +1379,7 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 	}
 
 	if s.Enabled {
-		agents := resolveStatusAgents(ctx)
-		if len(agents.project) > 0 {
-			result.Agents = agents.project
-		}
-		result.UserHooks = agents.userLevel
-		if s.EnabledOnlyByGlobal() {
-			result.EnabledBy = enabledByGlobal
-		}
+		fillStatusAgentsJSON(ctx, s, &result)
 
 		result.SecretScanners = nonDefaultSecretScanners(s)
 
@@ -1483,4 +1473,25 @@ func legacyShadowBranchCount(ctx context.Context) int {
 		return 0
 	}
 	return len(branches)
+}
+
+// fillStatusAgentsJSON sets status --json's agents, user_hooks and
+// enabled_by.
+func fillStatusAgentsJSON(ctx context.Context, s *EntireSettings, result *statusJSON) {
+	agents := resolveStatusAgents(ctx)
+	if len(agents.project) > 0 {
+		result.Agents = agents.project
+	}
+	result.UserHooks = agents.userLevel
+	if s.EnabledOnlyByGlobal() {
+		result.EnabledBy = enabledByGlobal
+	}
+}
+
+// userSettingsErrorText is why the user settings file is ignored, or "".
+func userSettingsErrorText(ctx context.Context) string {
+	if err := settings.UserSettingsReadError(ctx); err != nil {
+		return err.Error()
+	}
+	return ""
 }
