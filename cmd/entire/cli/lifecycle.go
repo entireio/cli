@@ -524,6 +524,7 @@ func entireContextInjection(scope trailEnablementScope, base, trails bool) strin
 		b.WriteString("A Trail is a project-level work item that can contain multiple changes from different repositories and branches. ")
 		b.WriteString("Inside a checkout, `entire trail` infers the repository. Outside one, pass `--project <forge>/<owner>`, plus `--repo` and `--branch` when needed. ")
 		b.WriteString("Work is tracked as trails: the trail, not the pull request, is the record of the work. ")
+		b.WriteString("If it's unclear whether work belongs on an existing trail or a new one, ask the user. ")
 		b.WriteString("When asked to push a feature branch, first run `entire trail show`: if the branch has a trail, push as usual; if it has none, publish with `entire trail create --title … --body …` instead of `git push` and a pull request (it pushes the branch); if the user named a trail, `git push` then `entire trail link <P>`. ")
 		b.WriteString("On the default branch, ask the user before creating a trail. If `entire trail create` fails, do not rerun it; report its message. ")
 		b.WriteString("For status or links, run `entire trail show` (URL, gates, CI checks) and `entire trail finding` (findings, agent readings), and report them with the change's full URL (…/trails/<P>/changes/<repo>/<n>), not only the trail's. ")
