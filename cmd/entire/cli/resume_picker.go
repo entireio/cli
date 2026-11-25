@@ -19,6 +19,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 
 	"charm.land/huh/v2"
 	"github.com/go-git/go-git/v6"
@@ -404,12 +405,12 @@ func buildResumeOptions(items []resumableSession) ([]huh.Option[string], bool) {
 func resumeOptionLabel(item resumableSession) string {
 	s := item.state
 
-	agentLabel := string(s.AgentType)
+	agentLabel := tuiutil.SanitizeTerminalField(string(s.AgentType))
 	if agentLabel == "" {
 		agentLabel = unknownAgentLabel
 	}
 
-	prompt := strings.TrimSpace(s.LastPrompt)
+	prompt := strings.TrimSpace(tuiutil.SanitizeTerminalField(s.LastPrompt))
 	if prompt == "" {
 		prompt = "(no prompt recorded)"
 	} else {
@@ -421,7 +422,7 @@ func resumeOptionLabel(item resumableSession) string {
 	if !item.isResumable() {
 		return fmt.Sprintf("(%s) · \"%s\" · %s · last active %s — can't resume", item.unresumableReason(), prompt, agentLabel, when)
 	}
-	return fmt.Sprintf("%s · \"%s\" · %s · last active %s", item.branch, prompt, agentLabel, when)
+	return fmt.Sprintf("%s · \"%s\" · %s · last active %s", tuiutil.SanitizeTerminalField(item.branch), prompt, agentLabel, when)
 }
 
 // shellQuote wraps a string in single quotes for safe inclusion in a copy-paste

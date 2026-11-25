@@ -25,6 +25,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
@@ -922,7 +923,7 @@ func withLockWaitNotice(sessionID string, errW io.Writer, notifyAfter time.Durat
 		case <-time.After(notifyAfter):
 			if errW != nil {
 				fmt.Fprintf(errW, "Waiting for session %s to release its state lock "+
-					"(a checkpoint condensation can hold it for ~30s; Ctrl-C twice to force quit)...\n", sessionID)
+					"(a checkpoint condensation can hold it for ~30s; Ctrl-C twice to force quit)...\n", tuiutil.SanitizeTerminalField(sessionID))
 			}
 		}
 	}()

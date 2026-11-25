@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 )
 
 // Reset clears the session state of every session based on the current HEAD,
@@ -41,18 +43,18 @@ func (s *ManualCommitStrategy) Reset(ctx context.Context, w, errW io.Writer) err
 		if err := withLockWaitNotice(state.SessionID, errW, SessionLockNoticeDelay, func() error {
 			return s.clearSessionState(ctx, state.SessionID)
 		}); err != nil {
-			fmt.Fprintf(errW, "Warning: failed to clear session state for %s: %v\n", state.SessionID, err)
+			fmt.Fprintf(errW, "Warning: failed to clear session state for %s: %v\n", tuiutil.SanitizeTerminalField(state.SessionID), err)
 			continue
 		}
-		fmt.Fprintf(w, "✓ Cleared session state for %s\n", state.SessionID)
+		fmt.Fprintf(w, "✓ Cleared session state for %s\n", tuiutil.SanitizeTerminalField(state.SessionID))
 	}
 
 	deleted, failed := DeleteLegacyShadowBranches(ctx, legacyBranches)
 	for _, branch := range deleted {
-		fmt.Fprintf(w, "✓ Deleted legacy shadow branch %s\n", branch)
+		fmt.Fprintf(w, "✓ Deleted legacy shadow branch %s\n", tuiutil.SanitizeTerminalField(branch))
 	}
 	for _, branch := range failed {
-		fmt.Fprintf(errW, "Warning: failed to delete legacy shadow branch %s\n", branch)
+		fmt.Fprintf(errW, "Warning: failed to delete legacy shadow branch %s\n", tuiutil.SanitizeTerminalField(branch))
 	}
 	return nil
 }
@@ -87,6 +89,6 @@ func (s *ManualCommitStrategy) ResetSession(ctx context.Context, w, errW io.Writ
 	}); err != nil {
 		return fmt.Errorf("failed to clear session state: %w", err)
 	}
-	fmt.Fprintf(w, "✓ Cleared session state for %s\n", sessionID)
+	fmt.Fprintf(w, "✓ Cleared session state for %s\n", tuiutil.SanitizeTerminalField(sessionID))
 	return nil
 }

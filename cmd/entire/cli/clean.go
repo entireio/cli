@@ -237,7 +237,7 @@ func printCurrentHeadCleanItems(w io.Writer, sessions []*strategy.SessionState, 
 	if len(legacyBranches) > 0 {
 		fmt.Fprintf(w, "Legacy shadow branches (%d):\n", len(legacyBranches))
 		for _, branch := range legacyBranches {
-			fmt.Fprintf(w, "  %s\n", branch)
+			fmt.Fprintf(w, "  %s\n", tuiutil.SanitizeTerminalField(branch))
 		}
 		fmt.Fprintln(w, "  To delete only these branches and keep session state, run `entire doctor --force`.")
 		fmt.Fprintln(w)
@@ -266,15 +266,15 @@ func runCleanSession(ctx context.Context, cmd *cobra.Command, strat *strategy.Ma
 
 	if dryRun {
 		w := cmd.OutOrStdout()
-		fmt.Fprintf(w, "Would %s session %s (phase: %s, pending turns: %d)\n", strings.ToLower(actionVerb), sessionID, state.Phase, state.StepCount)
+		fmt.Fprintf(w, "Would %s session %s (phase: %s, pending turns: %d)\n", strings.ToLower(actionVerb), tuiutil.SanitizeTerminalField(sessionID), tuiutil.SanitizeTerminalField(string(state.Phase)), state.StepCount)
 		return nil
 	}
 
 	if !force {
 		var confirmed bool
 
-		title := fmt.Sprintf("%s session %s?", actionVerb, sessionID)
-		description := fmt.Sprintf("Phase: %s, Pending turns: %d", state.Phase, state.StepCount)
+		title := fmt.Sprintf("%s session %s?", actionVerb, tuiutil.SanitizeTerminalField(sessionID))
+		description := fmt.Sprintf("Phase: %s, Pending turns: %d", tuiutil.SanitizeTerminalField(string(state.Phase)), state.StepCount)
 
 		form := NewAccessibleForm(
 			huh.NewGroup(
@@ -301,7 +301,7 @@ func runCleanSession(ctx context.Context, cmd *cobra.Command, strat *strategy.Ma
 		return fmt.Errorf("%s session failed: %w", strings.ToLower(actionVerb), err)
 	}
 
-	fmt.Fprintf(cmd.OutOrStdout(), "Session %s has been %s. File changes remain in the working directory.\n", sessionID, pastVerb)
+	fmt.Fprintf(cmd.OutOrStdout(), "Session %s has been %s. File changes remain in the working directory.\n", tuiutil.SanitizeTerminalField(sessionID), pastVerb)
 	return nil
 }
 
@@ -359,7 +359,7 @@ func printSection(w io.Writer, title string, items []string) {
 	}
 	fmt.Fprintf(w, "%s (%d):\n", title, len(items))
 	for _, item := range items {
-		fmt.Fprintf(w, "  %s\n", item)
+		fmt.Fprintf(w, "  %s\n", tuiutil.SanitizeTerminalField(item))
 	}
 	fmt.Fprintln(w)
 }
@@ -371,7 +371,7 @@ func printResultSection(w io.Writer, title string, items []string) {
 	}
 	fmt.Fprintf(w, "\n%s (%d):\n", title, len(items))
 	for _, item := range items {
-		fmt.Fprintf(w, "  %s\n", item)
+		fmt.Fprintf(w, "  %s\n", tuiutil.SanitizeTerminalField(item))
 	}
 }
 
@@ -477,7 +477,7 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 		if len(failedTempFiles) > 0 {
 			fmt.Fprintf(errW, "\nTemp files:\n")
 			for _, fe := range failedTempFiles {
-				fmt.Fprintf(errW, "  %s: %v\n", fe.File, fe.Err)
+				fmt.Fprintf(errW, "  %s: %v\n", tuiutil.SanitizeTerminalField(fe.File), fe.Err)
 			}
 		}
 

@@ -335,11 +335,13 @@ func TestAttributionRenderers_SanitizeMetadata(t *testing.T) {
 				SessionID:    tc.payload + "session-visible",
 				Agent:        hostileValue("agent", tc.payload),
 				Model:        hostileValue("model", tc.payload),
-				Content:      "ai_line = 2",
-				Candidates:   []attributionCandidate{candidate("a1b2c3d4e5f6"), candidate("b1b2c3d4e5f6")},
+				// A source line never contains a newline, and its tabs are
+				// kept as indentation, so the content payload drops both.
+				Content:    hostileValue("content", strings.NewReplacer("\n", "", "\t", "").Replace(tc.payload)),
+				Candidates: []attributionCandidate{candidate("a1b2c3d4e5f6"), candidate("b1b2c3d4e5f6")},
 			}
 			result := &fileAttributionResult{
-				File:        "auth.py",
+				File:        hostileValue("file", tc.payload),
 				Lines:       []attributionLine{line},
 				Checkpoints: map[string]attributionCheckpointContext{"a1b2c3d4e5f6": candidate("a1b2c3d4e5f6")},
 				Summary:     summarizeAttributionLines([]attributionLine{line}),
@@ -347,17 +349,104 @@ func TestAttributionRenderers_SanitizeMetadata(t *testing.T) {
 
 			var lineWhy, fileWhy, compact, long bytes.Buffer
 			renderAttributionLineWhy(&lineWhy, result.File, line)
-			for _, field := range []string{"agent", "model", "candidate"} {
+			for _, field := range []string{"file", "content", "agent", "model", "candidate"} {
 				assertSanitizedField(t, lineWhy.String(), field)
 			}
 			renderAttributionFileWhy(&fileWhy, result)
-			assertSanitizedField(t, fileWhy.String(), "candidate")
+			for _, field := range []string{"file", "candidate"} {
+				assertSanitizedField(t, fileWhy.String(), field)
+			}
 			renderAttributionBlameCompact(&compact, result, "")
-			assertNoTerminalControls(t, compact.String())
+			assertSanitizedField(t, compact.String(), "file")
 			renderAttributionBlameLong(&long, result, "")
-			assertNoTerminalControls(t, long.String())
+			for _, field := range []string{"file", "content"} {
+				assertSanitizedField(t, long.String(), field)
+			}
 
 			assert.Equal(t, hostileValue("agent", tc.payload), result.Lines[0].Agent, "rendering must not modify the caller's result")
+		})
+	}
+}
+
+// entire status prints the agent, model and last prompt of every active
+// session from local state, which agents write.
+func TestStatusText_SanitizesActiveSessions(t *testing.T) {
+	// setupTestRepo changes the working directory, so no t.Parallel.
+	for _, tc := range hostileMetadataPayloads {
+		t.Run(tc.name, func(t *testing.T) {
+			repoRoot := setupTestRepo(t)
+			ctx := context.Background()
+			store, err := session.NewStateStore(ctx)
+			require.NoError(t, err)
+			require.NoError(t, store.Save(ctx, &session.State{
+				SessionID:    "status-session",
+				WorktreePath: repoRoot,
+				StartedAt:    time.Now(),
+				AgentType:    types.AgentType(hostileValue("agent", tc.payload)),
+				ModelName:    hostileValue("model", tc.payload),
+				LastPrompt:   hostileValue("prompt", tc.payload),
+			}))
+
+			var out bytes.Buffer
+			writeActiveSessions(ctx, &out, newStatusStyles(&out))
+			for _, field := range []string{"agent", "model", "prompt"} {
+				assertSanitizedField(t, out.String(), field)
+			}
+		})
+	}
+}
+
+// entire clean --all lists stored names before and after deleting them.
+func TestCleanAllSections_SanitizeStoredNames(t *testing.T) {
+	t.Parallel()
+	for _, tc := range hostileMetadataPayloads {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var out bytes.Buffer
+			printSection(&out, "Session states", []string{hostileValue("listed", tc.payload)})
+			printResultSection(&out, "Session states", []string{hostileValue("deleted", tc.payload)})
+			assertSanitizedField(t, out.String(), "listed")
+			assertSanitizedField(t, out.String(), "deleted")
+		})
+	}
+}
+
+// The session and checkpoint resume pickers label rows with stored agents,
+// prompts and branch names; checkpoint agents can arrive by fetch.
+func TestResumePickerLabels_SanitizeMetadata(t *testing.T) {
+	t.Parallel()
+	for _, tc := range hostileMetadataPayloads {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			state := &strategy.SessionState{
+				SessionID:  "picker-session",
+				AgentType:  types.AgentType(hostileValue("agent", tc.payload)),
+				LastPrompt: hostileValue("prompt", tc.payload),
+				StartedAt:  time.Now(),
+			}
+			cpID := id.MustCheckpointID("a1b2c3d4e5f6")
+			resumable := resumeOptionLabel(resumableSession{state: state, branch: hostileValue("branch", tc.payload), checkpointID: cpID})
+			for _, field := range []string{"branch", "prompt", "agent"} {
+				assertSanitizedField(t, resumable, field)
+			}
+			unresumable := resumeOptionLabel(resumableSession{state: state})
+			for _, field := range []string{"prompt", "agent"} {
+				assertSanitizedField(t, unresumable, field)
+			}
+
+			info := checkpoint.CheckpointInfo{
+				CheckpointID: cpID,
+				Agent:        types.AgentType(hostileValue("agent", tc.payload)),
+				CreatedAt:    time.Now(),
+			}
+			branchIndex := map[string]string{cpID.String(): hostileValue("branch", tc.payload)}
+			label := checkpointResumeOptionLabel(info, branchIndex)
+			var list bytes.Buffer
+			printCheckpointResumeList(&list, []checkpoint.CheckpointInfo{info}, branchIndex)
+			for _, field := range []string{"branch", "agent"} {
+				assertSanitizedField(t, label, field)
+				assertSanitizedField(t, list.String(), field)
+			}
 		})
 	}
 }

@@ -1027,6 +1027,7 @@ func renderAttributionBlame(w io.Writer, result *fileAttributionResult, lineFlag
 // caller's result, which stays unchanged.
 func attributionForTerminal(result *fileAttributionResult) *fileAttributionResult {
 	out := *result
+	out.File = tuiutil.SanitizeTerminalField(result.File)
 	out.Lines = make([]attributionLine, len(result.Lines))
 	for i, line := range result.Lines {
 		out.Lines[i] = attributionLineForTerminal(line)
@@ -1046,6 +1047,7 @@ func attributionLineForTerminal(line attributionLine) attributionLine {
 	line.Agent = tuiutil.SanitizeTerminalField(line.Agent)
 	line.Model = tuiutil.SanitizeTerminalField(line.Model)
 	line.Author = tuiutil.SanitizeTerminalField(line.Author)
+	line.Content = tuiutil.SanitizeTerminalText(line.Content)
 	if line.Candidates != nil {
 		candidates := make([]attributionCandidate, len(line.Candidates))
 		for i, candidate := range line.Candidates {
@@ -1208,6 +1210,7 @@ func renderAttributionContentCompact(sty statusStyles, line attributionLine, wid
 
 func renderAttributionLineWhy(w io.Writer, file string, line attributionLine) {
 	line = attributionLineForTerminal(line)
+	file = tuiutil.SanitizeTerminalField(file)
 	sty := newStatusStyles(w)
 	fmt.Fprintf(w, "\n  %s %d in %s\n", sty.render(sty.bold, "Line"), line.LineNumber, sty.render(sty.bold, file))
 	if line.Content != "" {
