@@ -983,7 +983,7 @@ URL; and pull request details are given only when the user asks for the pull
 request. They edit the trail's shared description keeping others' text. This
 workflow is stated up front because agents otherwise default to pull requests
 and rarely open agent-help at that moment; the per-command detail (shadow-PR
-marker, create failures, findings after a push, merge readiness) lives in
+marker, create failures, open findings, merge readiness) lives in
 `agent-help` for `trail show`, `trail create`, `trail update`, `trail finding`,
 and `trail merge`, which agents do open before acting. Command details come from `entire agent-help trail`; the
 injection retains auto-detected repository context without listing unrelated
