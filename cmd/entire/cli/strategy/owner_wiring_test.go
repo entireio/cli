@@ -23,7 +23,7 @@ func TestInitializeSession_CapturesOwner(t *testing.T) {
 	t.Chdir(dir)
 
 	s := &ManualCommitStrategy{}
-	err := s.InitializeSession(context.Background(), "test-session-owner", "Claude Code", "", "", "")
+	err := s.InitializeSessionForPrompt(context.Background(), "test-session-owner", "Claude Code", "", "", "", "", false)
 	require.NoError(t, err)
 
 	state, err := s.loadSessionState(context.Background(), "test-session-owner")

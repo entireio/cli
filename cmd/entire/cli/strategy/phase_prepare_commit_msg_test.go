@@ -29,7 +29,7 @@ func TestPrepareCommitMsg_AmendPreservesExistingTrailer(t *testing.T) {
 	s := &ManualCommitStrategy{}
 
 	sessionID := "test-session-amend-preserve"
-	err := s.InitializeSession(context.Background(), sessionID, agent.AgentTypeClaudeCode, "", "", "")
+	err := s.InitializeSessionForPrompt(context.Background(), sessionID, agent.AgentTypeClaudeCode, "", "", "", "", false)
 	require.NoError(t, err)
 
 	// Write a commit message file that already has the trailer
@@ -62,7 +62,7 @@ func TestPrepareCommitMsg_AmendRestoresTrailerFromLastCheckpointID(t *testing.T)
 	s := &ManualCommitStrategy{}
 
 	sessionID := "test-session-amend-restore"
-	err := s.InitializeSession(context.Background(), sessionID, agent.AgentTypeClaudeCode, "", "", "")
+	err := s.InitializeSessionForPrompt(context.Background(), sessionID, agent.AgentTypeClaudeCode, "", "", "", "", false)
 	require.NoError(t, err)
 
 	// Simulate state after condensation: LastCheckpointID is set
@@ -103,7 +103,7 @@ func TestPrepareCommitMsg_AmendNoTrailerNoLastCheckpointID(t *testing.T) {
 	s := &ManualCommitStrategy{}
 
 	sessionID := "test-session-amend-no-id"
-	err := s.InitializeSession(context.Background(), sessionID, agent.AgentTypeClaudeCode, "", "", "")
+	err := s.InitializeSessionForPrompt(context.Background(), sessionID, agent.AgentTypeClaudeCode, "", "", "", "", false)
 	require.NoError(t, err)
 
 	// Verify LastCheckpointID is empty (default)

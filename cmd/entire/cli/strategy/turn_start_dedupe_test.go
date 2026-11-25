@@ -72,15 +72,9 @@ func TestInitializeSessionForPrompt_NeverSkipsWhenItCannotRepeat(t *testing.T) {
 	require.NoError(t, s.InitializeSessionForPrompt(ctx, "no-repeat", agent.AgentTypeClaudeCode, "", "yes", "", "", false))
 }
 
-// Plain InitializeSession never dedupes, and the key stores only a hash.
-func TestInitializeSession_DoesNotDedupe(t *testing.T) {
-	dir := setupGitRepo(t)
-	t.Chdir(dir)
-	ctx := context.Background()
-	s := &ManualCommitStrategy{}
-	require.NoError(t, s.InitializeSession(ctx, "plain", agent.AgentTypeClaudeCode, "", "same", ""))
-	require.NoError(t, s.InitializeSession(ctx, "plain", agent.AgentTypeClaudeCode, "", "same", ""))
-
+// The dedupe key stores only a hash of the prompt.
+func TestTurnStartKey_HashesPrompt(t *testing.T) {
+	t.Parallel()
 	assert.Empty(t, turnStartKey("s", "", ""), "nothing to tell prompts apart by")
 	key := turnStartKey("s", "secret prompt", "")
 	assert.Len(t, key, 64)

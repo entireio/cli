@@ -86,11 +86,11 @@ func TestInitializeSession_MarksALinkedHome(t *testing.T) {
 	s := &ManualCommitStrategy{}
 
 	chdirWorktree(t, linkedDir)
-	require.NoError(t, s.InitializeSession(t.Context(), "init-linked", agent.AgentTypeClaudeCode, "", "prompt", ""))
+	require.NoError(t, s.InitializeSessionForPrompt(t.Context(), "init-linked", agent.AgentTypeClaudeCode, "", "prompt", "", "", false))
 	assert.Equal(t, mark(t, linkedDir), mustLoad(t, s, "init-linked").WorktreeIncarnation)
 
 	chdirWorktree(t, mainDir)
-	require.NoError(t, s.InitializeSession(t.Context(), "init-main", agent.AgentTypeClaudeCode, "", "prompt", ""))
+	require.NoError(t, s.InitializeSessionForPrompt(t.Context(), "init-main", agent.AgentTypeClaudeCode, "", "prompt", "", "", false))
 	assert.Empty(t, mustLoad(t, s, "init-main").WorktreeIncarnation, "the main worktree has no marker")
 }
 
@@ -104,7 +104,7 @@ func TestTurnStart_MarksALegacyLinkedHome(t *testing.T) {
 	require.NoError(t, s.saveSessionState(t.Context(), state))
 
 	chdirWorktree(t, linkedDir)
-	require.NoError(t, s.InitializeSession(t.Context(), "legacy-home", agent.AgentTypeClaudeCode, "", "prompt", ""))
+	require.NoError(t, s.InitializeSessionForPrompt(t.Context(), "legacy-home", agent.AgentTypeClaudeCode, "", "prompt", "", "", false))
 	assert.Equal(t, mark(t, linkedDir), mustLoad(t, s, "legacy-home").WorktreeIncarnation)
 }
 
@@ -214,7 +214,7 @@ func TestTurnStart_RehomesInAReaddedHome(t *testing.T) {
 	require.NotEqual(t, oldBase, testutil.GetHeadHash(t, linkedDir))
 
 	chdirWorktree(t, linkedDir)
-	require.NoError(t, s.InitializeSession(t.Context(), "rehome", agent.AgentTypeClaudeCode, transcript, "prompt", ""))
+	require.NoError(t, s.InitializeSessionForPrompt(t.Context(), "rehome", agent.AgentTypeClaudeCode, transcript, "prompt", "", "", false))
 
 	after := mustLoad(t, s, "rehome")
 	assert.Empty(t, after.FilesTouched)

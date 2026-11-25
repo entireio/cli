@@ -33,7 +33,7 @@ func TestPrepareCommitMsg_AmendStripsDeletedCheckpointTrailer(t *testing.T) {
 	recordDeleted(t, id.MustCheckpointID("abc123def456"))
 
 	s := &ManualCommitStrategy{}
-	require.NoError(t, s.InitializeSession(context.Background(), "sess-amend-deleted", agent.AgentTypeClaudeCode, "", "", ""))
+	require.NoError(t, s.InitializeSessionForPrompt(context.Background(), "sess-amend-deleted", agent.AgentTypeClaudeCode, "", "", "", "", false))
 
 	commitMsgFile := filepath.Join(t.TempDir(), "COMMIT_EDITMSG")
 	require.NoError(t, os.WriteFile(commitMsgFile, []byte("Original commit message\n\nEntire-Checkpoint: abc123def456\n"), 0o644))
@@ -161,7 +161,7 @@ func TestPrepareCommitMsg_AmendIgnoresDeletedIDWhenPreserving(t *testing.T) {
 	recordDeleted(t, dead)
 
 	s := &ManualCommitStrategy{}
-	require.NoError(t, s.InitializeSession(context.Background(), "sess-amend-live", agent.AgentTypeClaudeCode, "", "", ""))
+	require.NoError(t, s.InitializeSessionForPrompt(context.Background(), "sess-amend-live", agent.AgentTypeClaudeCode, "", "", "", "", false))
 	require.NoError(t, MutateSessionState(context.Background(), "sess-amend-live", func(state *SessionState) error {
 		state.LastCheckpointID = live
 		return nil
@@ -186,7 +186,7 @@ func TestPrepareCommitMsg_AmendDoesNotRestoreDeletedLastCheckpoint(t *testing.T)
 	recordDeleted(t, dead)
 
 	s := &ManualCommitStrategy{}
-	require.NoError(t, s.InitializeSession(context.Background(), "sess-amend-dead", agent.AgentTypeClaudeCode, "", "", ""))
+	require.NoError(t, s.InitializeSessionForPrompt(context.Background(), "sess-amend-dead", agent.AgentTypeClaudeCode, "", "", "", "", false))
 	require.NoError(t, MutateSessionState(context.Background(), "sess-amend-dead", func(state *SessionState) error {
 		state.LastCheckpointID = dead
 		return nil

@@ -121,7 +121,7 @@ func TestInitializeSession_RecordsTheAgentHome(t *testing.T) {
 
 	turn := func(transcript string) *SessionState {
 		t.Helper()
-		require.NoError(t, s.InitializeSession(ctx, sessionID, agent.AgentTypeClaudeCode, transcript, "prompt", ""))
+		require.NoError(t, s.InitializeSessionForPrompt(ctx, sessionID, agent.AgentTypeClaudeCode, transcript, "prompt", "", "", false))
 		state, err := s.loadSessionState(ctx, sessionID)
 		require.NoError(t, err)
 		require.NotNil(t, state)

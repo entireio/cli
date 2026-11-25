@@ -1212,7 +1212,7 @@ func TestPrepareCommitMsg_ReusesReservedAttemptAfterSessionResume(t *testing.T) 
 		return nil
 	}))
 
-	require.NoError(t, s.InitializeSession(context.Background(), sessionID, agent.AgentTypeClaudeCode, "", "continue", ""))
+	require.NoError(t, s.InitializeSessionForPrompt(context.Background(), sessionID, agent.AgentTypeClaudeCode, "", "continue", "", "", false))
 	resumed, err := s.loadSessionState(context.Background(), sessionID)
 	require.NoError(t, err)
 	require.Equal(t, session.PhaseActive, resumed.Phase)

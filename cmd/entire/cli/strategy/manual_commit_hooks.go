@@ -3349,24 +3349,6 @@ func explicitlyIncomplete(complete *bool) bool {
 	return complete != nil && !*complete
 }
 
-// InitializeSession creates session state for a new session or updates an existing one.
-// This implements the optional SessionInitializer interface.
-// Called during UserPromptSubmit to allow git hooks to detect active sessions.
-//
-// If the session already exists and HEAD has moved (e.g., user committed), updates
-// BaseCommit to the new HEAD.
-//
-// agentType is the human-readable name of the agent (e.g., "Claude Code").
-// transcriptPath is the path to the live transcript file (for mid-session commit detection).
-// userPrompt is the user's prompt text (stored truncated as LastPrompt for display).
-// model is the LLM model identifier (e.g., "claude-sonnet-4-20250514"); empty if unknown.
-//
-// Production prompts go through InitializeSessionForPrompt; this form, which
-// never records or skips a repeat, remains for tests that start turns directly.
-func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID string, agentType types.AgentType, transcriptPath string, userPrompt string, model string) error {
-	return s.initializeTurn(ctx, sessionID, agentType, transcriptPath, userPrompt, model, turnDedupe{})
-}
-
 // ErrDuplicateTurnStart is InitializeSessionForPrompt finding that this
 // session already handled the same prompt in the turn still running: a
 // second Entire install fired for it. The caller skips the rest of the
@@ -3377,8 +3359,15 @@ var ErrDuplicateTurnStart = errors.New("turn start already handled for this prom
 // Two installs fire for one prompt within moments of each other.
 const turnStartDedupeWindow = time.Minute
 
-// InitializeSessionForPrompt is InitializeSession for a UserPromptSubmit. It
-// records the prompt and, when mayRepeat, skips a repeat of the prompt it
+// InitializeSessionForPrompt creates session state for a new session or
+// updates an existing one at UserPromptSubmit, so git hooks can detect active
+// sessions. If the session already exists and HEAD has moved, it updates
+// BaseCommit to the new HEAD. agentType is the human-readable agent name,
+// transcriptPath the live transcript (for mid-session commit detection),
+// userPrompt the prompt (stored truncated as LastPrompt) and model the LLM
+// model identifier (empty if unknown).
+//
+// It records the prompt and, when mayRepeat, skips a repeat of the prompt it
 // handled last: the same session, prompt text and agent turn ID (agentTurnID,
 // when the agent sends one), within turnStartDedupeWindow, while that turn is
 // still active. mayRepeat is the caller's word that a second Entire install
