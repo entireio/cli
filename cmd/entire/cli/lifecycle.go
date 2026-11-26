@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"maps"
 	"os"
@@ -28,7 +27,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
-	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/provenance"
 	"github.com/entireio/cli/cmd/entire/cli/review"
@@ -679,21 +677,14 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 	// worktree, where its other prompts are (see OpenSessionEntireDir).
 	// Prompts are separated by "\n\n---\n\n" to support multiple turns.
 	if event.Prompt != "" {
-		sessionName := sessionMetadataName(sessionID)
-		if root, rootErr := strategy.OpenSessionEntireDir(ctx, sessionID); rootErr == nil {
-			if mkErr := osroot.MkdirAllNoSymlink(root, sessionName, 0o750); mkErr == nil {
-				promptName := sessionName + "/" + paths.PromptFileName
-				existing, readErr := entiredir.ReadFile(root, promptName)
-				var content string
-				if readErr == nil && len(existing) > 0 {
-					content = string(existing) + "\n\n---\n\n" + event.Prompt
-				} else {
-					content = event.Prompt
-				}
-				if writeErr := entiredir.WriteFile(root, promptName, []byte(content), 0o600); writeErr != nil {
-					logging.Warn(logCtx, "failed to write prompt.txt",
-						slog.String("error", writeErr.Error()))
-				}
+		// Keep the prompt until InitializeSession records its new turn ID.
+		releasePrompt, err := strategy.AcquireSessionMetadataPublication(ctx, sessionID)
+		if err != nil {
+			logging.Warn(logCtx, "failed to acquire prompt publication", slog.String("error", err.Error()))
+		} else {
+			defer releasePrompt()
+			if err := appendStoredPrompt(ctx, sessionID, event.Prompt); err != nil {
+				logging.Warn(logCtx, "failed to write prompt.txt", slog.String("error", err.Error()))
 			}
 		}
 	}
@@ -844,26 +835,18 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		elsewhere = uncommittedEditsElsewhere(ctx, strategy.SplitEditsByWorktree(ctx, hookRoot, turnEditedPaths(logCtx, ag, transcriptRef, sessionID)))
 	}
 
-	// Create session metadata directory
 	_, copySpan := perf.Start(ctx, "copy_transcript")
-	// sessionDir is the repo-relative path that ends up in commit trailers and
-	// in the checkpoint tree; sessionName is the same directory addressed from
-	// the .entire root, which is what every read and write below uses.
 	sessionDir := paths.SessionMetadataDirFromSessionID(sessionID)
-	sessionName := sessionMetadataName(sessionID)
-	// The session's home worktree holds its stored copy, even when this turn
-	// ended in another worktree (see strategy.OpenSessionEntireDir).
-	entireRoot, err := strategy.OpenSessionEntireDir(ctx, sessionID)
+
+	// Serialize transcript reads/publication until this Stop saves its step and
+	// lifecycle state. Cleanup never waits for this lease under a state gate.
+	releaseCopy, err := strategy.AcquireSessionMetadataPublication(ctx, sessionID)
 	if err != nil {
 		copySpan.RecordError(err)
 		copySpan.End()
-		return fmt.Errorf("failed to open %s: %w", paths.EntireDir, err)
+		return fmt.Errorf("failed to acquire transcript publication: %w", err)
 	}
-	if err := osroot.MkdirAllNoSymlink(entireRoot, sessionName, 0o750); err != nil {
-		copySpan.RecordError(err)
-		copySpan.End()
-		return fmt.Errorf("failed to create session directory: %w", err)
-	}
+	defer releaseCopy()
 
 	// Copy transcript to session directory
 	transcriptData, err := ag.ReadTranscript(transcriptRef)
@@ -877,8 +860,9 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// coordinate (strategy.storedTranscriptSize). See agent.TranscriptSanitizer
 	// for why order matters. The agent's own rollout is untouched.
 	storedTranscript := agent.SanitizeTranscriptForStorage(ag, transcriptData)
-	logFile := sessionName + "/" + paths.TranscriptFileName
-	if err := entiredir.WriteFile(entireRoot, logFile, storedTranscript, 0o600); err != nil {
+	if err := strategy.WithSessionMetadata(ctx, sessionID, func(root *os.Root) error {
+		return entiredir.WriteFile(root, sessionMetadataName(sessionID)+"/"+paths.TranscriptFileName, storedTranscript, 0o600)
+	}); err != nil {
 		copySpan.RecordError(err)
 		copySpan.End()
 		return fmt.Errorf("failed to write transcript: %w", err)
@@ -905,31 +889,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// Droid). The transcript is the source of truth — if ExtractPrompts returns nothing,
 	// there genuinely were no prompts. We track whether backfill occurred so we can
 	// update session state after SaveStep (which may reinitialize state).
-	var backfilledPrompt string
-	promptName := sessionName + "/" + paths.PromptFileName
-	existingPrompt, readPromptErr := entiredir.ReadFile(entireRoot, promptName)
-	if readPromptErr != nil && !errors.Is(readPromptErr, fs.ErrNotExist) {
-		logging.Warn(logCtx, "failed to read prompt.txt, skipping backfill",
-			slog.String("error", readPromptErr.Error()))
-	} else if len(existingPrompt) == 0 && !turnHasMidTurnCheckpoints(ctx, sessionID) {
-		if extractor, ok := agent.AsPromptExtractor(ag); ok {
-			prompts, extractErr := extractor.ExtractPrompts(transcriptRef, transcriptOffset)
-			if extractErr != nil {
-				logging.Warn(logCtx, "failed to extract prompts from transcript",
-					slog.String("error", extractErr.Error()))
-			} else if len(prompts) > 0 {
-				content := strings.Join(prompts, "\n\n---\n\n")
-				if writeErr := entiredir.WriteFile(entireRoot, promptName, []byte(content), 0o600); writeErr != nil {
-					logging.Warn(logCtx, "failed to backfill prompt.txt from transcript",
-						slog.String("error", writeErr.Error()))
-				} else {
-					logging.Debug(logCtx, "backfilled prompt.txt from transcript",
-						slog.Int("prompt_count", len(prompts)))
-					backfilledPrompt = prompts[len(prompts)-1]
-				}
-			}
-		}
-	}
+	backfilledPrompt := backfillStoredPrompt(ctx, ag, sessionID, transcriptRef, transcriptOffset)
 
 	// Compute subagents directory for agents that support subagent extraction.
 	subagentsDir := paths.SubagentsDir(filepath.Dir(transcriptRef), event.SessionID)

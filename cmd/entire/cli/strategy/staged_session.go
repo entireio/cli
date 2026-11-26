@@ -120,8 +120,8 @@ func (r *storedCopyRelease) run(ctx context.Context, sessionID string) {
 	}
 }
 
-// AcquireSessionMetadataPublication protects a Stop's staged copy until its
-// step and lifecycle updates finish. OS release on exit also handles crashes;
+// AcquireSessionMetadataPublication protects a hook's staged copy until its
+// turn initialization or step/lifecycle updates finish. OS release on exit also handles crashes;
 // no persistent flag can strand a session after a killed hook. Take this lease
 // before any state gate. Cleanup uses only TryAcquireIn under a state gate, so
 // it skips an in-flight publisher instead of introducing a lock-order cycle.
@@ -130,6 +130,13 @@ func AcquireSessionMetadataPublication(ctx context.Context, sessionID string) (f
 	lock, err := stateLockForSession(ctx, sessionID)
 	if err != nil {
 		return nil, err
+	}
+	// Bound only the wait, as acquireSessionGate does. Even an expired
+	// budget can take a free lock after resolving the repository.
+	if deadline, ok := sessionLockDeadlineFromContext(ctx); ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, deadline)
+		defer cancel()
 	}
 	release, err := flock.AcquireContextIn(ctx, lock.root, lock.name+".metadata")
 	if err != nil {
