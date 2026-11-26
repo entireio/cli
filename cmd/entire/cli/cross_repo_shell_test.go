@@ -216,3 +216,47 @@ func TestScanShellActivity_CodexExecBatchedTemplates(t *testing.T) {
 		t.Errorf("read-only: dirs %v quietCalls %d", got.dirs, got.quietCalls)
 	}
 }
+
+func TestScanShellActivity_ShellVariables(t *testing.T) {
+	t.Parallel()
+	got := scanShellActivity(jsonl(t,
+		bash(`B=/abs/base; git -C $B/D commit -qm d; echo x > ${B}/E/f && git -C "$B/E" commit -qm e`),
+		bash(`export W='/abs/w'; cd $W/G && git commit -qm g`),
+	), 0, "/home/u/c")
+	want := []string{"/abs/base/D", "/abs/base/E/f", "/abs/base/E", "/abs/w/G"}
+	if !slices.Equal(got.dirs, want) {
+		t.Errorf("dirs %v, want %v", got.dirs, want)
+	}
+}
+
+func TestScanShellActivity_UnresolvedShellVariables(t *testing.T) {
+	t.Parallel()
+	for name, line := range map[string]string{
+		"unset":         `git -C $X/D commit -qm d && echo x > $X/f`,
+		"command subst": `B=$(pwd); git -C $B/D commit -qm d`,
+		"backticks":     "B=`pwd`; git -C $B/D commit -qm d",
+		"expansion":     `B=$HOME/w; git -C ${B}/D commit -qm d`,
+		"reassigned":    `B=/abs/a; B=/abs/b; git -C $B/D commit -qm d`,
+		"read-only":     `B=/abs/base; git -C $B/E log --oneline`,
+		"cd unresolved": `cd $X && touch f && git commit -qm d`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if got := scanShellActivity(jsonl(t, bash(line)), 0, "/home/u/c"); len(got.dirs) != 0 {
+				t.Errorf("dirs %v", got.dirs)
+			}
+		})
+	}
+}
+
+func TestScanShellActivity_CodexExecShellVariables(t *testing.T) {
+	t.Parallel()
+	script := `text(await tools.exec_command({cmd:"B=/abs/base; git -C $B/D commit -m d; echo x > $B/E/f && git -C $B/E commit -m e"}))`
+	got := scanShellActivity(jsonl(t, codexExec("c1", script, "ok")...), 0, "/home/u/c")
+	if !slices.Contains(got.dirs, "/abs/base/D") || !slices.Contains(got.dirs, "/abs/base/E") {
+		t.Errorf("dirs %v", got.dirs)
+	}
+	if got.quietCalls != 0 {
+		t.Errorf("quietCalls %d", got.quietCalls)
+	}
+}
