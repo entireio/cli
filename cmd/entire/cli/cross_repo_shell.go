@@ -62,6 +62,9 @@ var (
 	toolResultRoles = strings.Fields("toolResult tool")
 )
 
+// shellCommandKeys hold a shell tool call's command.
+var shellCommandKeys = []string{"command", "cmd"}
+
 // toolNameKeys hold a tool call's tool name.
 var toolNameKeys = strings.Fields("name tool toolName")
 
@@ -79,6 +82,9 @@ var writeLastArg = []string{"cp", "mv", "ln", "install", "rsync"}
 type shellActivity struct {
 	dirs    []string // absolute paths commands wrote in
 	commits []string // abbreviated SHAs `git commit` reported
+	// quietCalls counts shell tool calls that named no directory: reads, or
+	// commands in a form the scan does not understand.
+	quietCalls int
 }
 
 // scanShellActivity reads the transcript data from entry fromEntry on (a
@@ -133,6 +139,8 @@ func (s *shellScan) walk(v any) {
 	case map[string]any:
 		if input, ok := shellToolInput(t); ok {
 			s.toolCall(input)
+		} else if script, ok := codexExecInput(t); ok {
+			s.codexExec(script)
 		}
 		result := isToolResult(t)
 		for key, val := range t {
@@ -227,8 +235,28 @@ func toolName(obj map[string]any) string {
 	return ""
 }
 
+// codexExec reads the shell commands of a Codex exec script as one call.
+func (s *shellScan) codexExec(script string) {
+	before := len(s.out.dirs)
+	for _, call := range codexExecCalls(script) {
+		s.commandsIn(call)
+	}
+	if len(s.out.dirs) == before {
+		s.out.quietCalls++
+	}
+}
+
 // toolCall reads a shell tool call's command and working directory.
 func (s *shellScan) toolCall(input map[string]any) {
+	before := len(s.out.dirs)
+	s.commandsIn(input)
+	if len(s.out.dirs) == before {
+		s.out.quietCalls++
+	}
+}
+
+// commandsIn reads a shell call input's command and working directory.
+func (s *shellScan) commandsIn(input map[string]any) {
 	workdir := ""
 	for _, key := range []string{"workdir", "cwd", "working_directory"} {
 		if dir, ok := input[key].(string); ok && dir != "" {
@@ -236,7 +264,7 @@ func (s *shellScan) toolCall(input map[string]any) {
 			break
 		}
 	}
-	for _, key := range []string{"command", "cmd"} {
+	for _, key := range shellCommandKeys {
 		if line := commandText(input[key]); line != "" {
 			s.commandLine(line, workdir)
 		}

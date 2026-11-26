@@ -148,3 +148,61 @@ func TestScanShellActivity_IgnoresProseAndRelativeArguments(t *testing.T) {
 		t.Fatalf("got %+v", got)
 	}
 }
+
+// codexExec is a Codex 0.172 exec custom tool call, with the JavaScript
+// script as its input, and its output.
+func codexExec(callID, script, output string) []any {
+	return []any{
+		map[string]any{"type": "response_item", "payload": map[string]any{
+			"type": "custom_tool_call", "status": "completed", "call_id": callID, "name": "exec", "input": script,
+		}},
+		map[string]any{"type": "response_item", "payload": map[string]any{
+			"type": "custom_tool_call_output", "call_id": callID, "output": []any{
+				map[string]any{"type": "input_text", "text": "Script completed\nOutput:\n"},
+				map[string]any{"type": "input_text", "text": `{"exit_code":0,"output":"` + output + `"}`},
+			},
+		}},
+	}
+}
+
+func TestScanShellActivity_CodexExecScript(t *testing.T) {
+	t.Parallel()
+	entries := codexExec("c1",
+		`text(await tools.exec_command({cmd:"echo x > /abs/D/f && git -C /abs/D commit -am m"}))`+"\n",
+		`[main 1a2b3c4] m\\n 1 file changed`)
+	entries = append(entries, codexExec("c2",
+		`const a = await tools.exec_command({ workdir: '/abs/E', cmd: 'cd ../F && git commit -qm "it\'s done"' });
+text(a); text(await tools.exec_command({command: "echo \"q\" > \"/abs/G/ab\"", yield_time_ms: 1000}))`,
+		`[feature/x (root-commit) 5d6e7f8] it's done`)...)
+	got := scanShellActivity(jsonl(t, entries...), 0, "/home/u/c")
+	if want := []string{"/abs/D/f", "/abs/D", "/abs/F", "/abs/G/ab"}; !slices.Equal(got.dirs, want) {
+		t.Errorf("dirs %v, want %v", got.dirs, want)
+	}
+	if want := []string{"1a2b3c4", "5d6e7f8"}; !slices.Equal(got.commits, want) {
+		t.Errorf("commits %v, want %v", got.commits, want)
+	}
+	if got.quietCalls != 0 {
+		t.Errorf("quietCalls %d", got.quietCalls)
+	}
+}
+
+func TestScanShellActivity_CodexExecReadOnlyAndDynamic(t *testing.T) {
+	t.Parallel()
+	entries := codexExec("c1", `text(await tools.exec_command({cmd:"git -C /abs/D log --oneline && cat /abs/E/x"}))`, "ok")
+	entries = append(entries, codexExec("c2", "const c = `git -C ${dir} commit -m m`; text(await tools.exec_command({cmd: c}))", "")...)
+	got := scanShellActivity(jsonl(t, entries...), 0, "/home/u/c")
+	if len(got.dirs) != 0 {
+		t.Errorf("dirs %v", got.dirs)
+	}
+	if got.quietCalls != 2 {
+		t.Errorf("quietCalls %d, want 2", got.quietCalls)
+	}
+}
+
+func TestCodexExecCalls_Literals(t *testing.T) {
+	t.Parallel()
+	got := codexExecCalls(`tools.exec_command("ls \x2fa\u{62}c") ; tools.exec_command({cmd: ` + "`echo hi > /t`" + `, workdir: "/w", other: {cmd: "no"}})`)
+	if len(got) != 2 || got[0]["cmd"] != "ls /abc" || got[1]["cmd"] != "echo hi > /t" || got[1]["workdir"] != "/w" {
+		t.Fatalf("calls %v", got)
+	}
+}

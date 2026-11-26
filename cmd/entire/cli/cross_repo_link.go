@@ -178,8 +178,20 @@ func turnCrossRepoActivity(ctx context.Context, transcriptRef, sessionID, cwd st
 		pre = nil
 	}
 	shell := scanShellActivity(data, turnStartTranscriptOffset(ctx, pre, sessionID), cwd)
+	logQuietShellCalls(ctx, shell)
 	act.dirs, act.commits = shell.dirs, shell.commits
 	return act
+}
+
+// logQuietShellCalls makes visible the shell tool calls a scan read no
+// directory from, so a transcript format it misses does not fail silently.
+// It logs counts only, never commands.
+func logQuietShellCalls(ctx context.Context, shell shellActivity) {
+	if shell.quietCalls == 0 {
+		return
+	}
+	logging.Debug(logging.WithComponent(ctx, "cross-repo"), "shell tool calls named no directory",
+		slog.Int("calls", shell.quietCalls), slog.Int("dirs", len(shell.dirs)))
 }
 
 // absolutePaths resolves relative paths against cwd, dropping them when cwd
@@ -227,6 +239,7 @@ func linkSubagentInOtherRepos(ctx context.Context, ag agent.Agent, event *agent.
 		}
 		if data, readErr := agent.ReadTranscriptFile(transcriptPath); readErr == nil {
 			shell := scanShellActivity(data, 0, cwd)
+			logQuietShellCalls(ctx, shell)
 			act.dirs, act.commits = shell.dirs, shell.commits
 		}
 	}
