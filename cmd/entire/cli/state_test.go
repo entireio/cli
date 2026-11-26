@@ -405,6 +405,9 @@ func TestPrePromptState_WithTranscriptPosition(t *testing.T) {
 	if state.TranscriptOffset != 3 {
 		t.Errorf("TranscriptOffset = %d, want 3", state.TranscriptOffset)
 	}
+	if !state.TranscriptOffsetCaptured {
+		t.Error("TranscriptOffsetCaptured = false, want true")
+	}
 
 	// Cleanup
 	if err := CleanupPrePromptState(context.Background(), sessionID); err != nil {
@@ -441,6 +444,25 @@ func TestPrePromptState_WithEmptyTranscriptPath(t *testing.T) {
 	// Cleanup
 	if err := CleanupPrePromptState(context.Background(), sessionID); err != nil {
 		t.Errorf("CleanupPrePromptState() error = %v", err)
+	}
+}
+
+// A transcript the agent has not written yet (a session's first turn) is a
+// captured zero, so turn end reads the whole turn instead of falling back to
+// a checkpoint position a same-turn commit may have advanced.
+func TestPrePromptState_MissingTranscriptIsCapturedZero(t *testing.T) {
+	setupTestRepoWithTranscript(t, "", "")
+
+	sessionID := "test-session-missing-transcript"
+	missing := filepath.Join(t.TempDir(), "not-yet.jsonl")
+	if err := CapturePrePromptState(context.Background(), claudecode.NewClaudeCodeAgent(), sessionID, missing); err != nil {
+		t.Fatalf("CapturePrePromptState() error = %v", err)
+	}
+	state, err := LoadPrePromptState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	if state.TranscriptOffset != 0 || !state.TranscriptOffsetCaptured {
+		t.Errorf("offset = %d, captured = %v; want a captured 0", state.TranscriptOffset, state.TranscriptOffsetCaptured)
 	}
 }
 

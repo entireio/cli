@@ -132,7 +132,7 @@ func turnCrossRepoActivity(ctx context.Context, transcriptRef, sessionID, cwd st
 	if err != nil {
 		pre = nil
 	}
-	shell := scanShellActivity(data, resolveTranscriptOffset(ctx, pre, sessionID), cwd)
+	shell := scanShellActivity(data, turnStartTranscriptOffset(ctx, pre, sessionID), cwd)
 	act.dirs, act.commits = shell.dirs, shell.commits
 	return act
 }

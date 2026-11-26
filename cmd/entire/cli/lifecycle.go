@@ -3054,6 +3054,17 @@ func resolveTranscriptOffset(ctx context.Context, preState *PrePromptState, sess
 	return 0
 }
 
+// turnStartTranscriptOffset is the transcript offset the current turn began
+// at. Unlike resolveTranscriptOffset, it trusts a captured zero: on a
+// session's first turn, CheckpointTranscriptStart may already have moved past
+// the turn's edits when a same-turn commit condensed.
+func turnStartTranscriptOffset(ctx context.Context, preState *PrePromptState, sessionID string) int {
+	if preState != nil && preState.TranscriptOffsetCaptured {
+		return preState.TranscriptOffset
+	}
+	return resolveTranscriptOffset(ctx, preState, sessionID)
+}
+
 // recordCaptureDegraded persists (or clears) the capture-degraded timestamp on
 // session state at turn end, so a failed or budget-breached status scan is
 // visible in `entire status` instead of only in .entire/logs. A healthy turn
@@ -3539,7 +3550,7 @@ func turnEditedPathsFrom(ctx context.Context, ag agent.Agent, transcriptRef, ses
 	if err != nil {
 		preState = nil
 	}
-	offset := resolveTranscriptOffset(ctx, preState, sessionID)
+	offset := turnStartTranscriptOffset(ctx, preState, sessionID)
 	if extractor, ok := agent.AsSubagentAwareExtractor(ag); ok && withSubagents {
 		if data, readErr := agent.ReadTranscriptFile(transcriptRef); readErr == nil {
 			subagentsDir := paths.SubagentsDir(filepath.Dir(transcriptRef), sessionID)

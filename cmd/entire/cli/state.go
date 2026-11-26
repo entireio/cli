@@ -56,6 +56,11 @@ type PrePromptState struct {
 	// Zero means not set or session just started.
 	TranscriptOffset int `json:"transcript_offset,omitempty"`
 
+	// TranscriptOffsetCaptured records that TranscriptOffset was read at turn
+	// start, so a zero is the turn's real start (an empty or missing transcript)
+	// rather than "unknown". Absent in state written by older versions.
+	TranscriptOffsetCaptured bool `json:"transcript_offset_captured,omitempty"`
+
 	// LastTranscriptIdentifier is the agent-specific identifier at the transcript position.
 	// UUID for Claude Code, message ID for Gemini CLI. Optional metadata.
 	LastTranscriptIdentifier string `json:"last_transcript_identifier,omitempty"`
@@ -251,6 +256,7 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 
 	// Get transcript position using TranscriptAnalyzer if available
 	var transcriptOffset int
+	var offsetCaptured bool
 	if analyzer, ok := agent.AsTranscriptAnalyzer(ag); ok && sessionRef != "" {
 		pos, posErr := analyzer.GetTranscriptPosition(sessionRef)
 		if posErr != nil {
@@ -258,6 +264,7 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 				slog.String("error", posErr.Error()))
 		} else {
 			transcriptOffset = pos
+			offsetCaptured = true
 		}
 	}
 
@@ -269,6 +276,8 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 		UntrackedScanSkipped: scanSkipped,
 		UntrackedFileStats:   statUntrackedFiles(ctx, untrackedFiles),
 		TranscriptOffset:     transcriptOffset,
+
+		TranscriptOffsetCaptured: offsetCaptured,
 	}
 
 	// Out-of-band token baseline: agents whose token usage lives outside the

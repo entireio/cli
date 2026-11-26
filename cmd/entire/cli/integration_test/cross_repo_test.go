@@ -572,3 +572,21 @@ func TestCrossRepo_DisableGlobalNamesTheRepositoryNotTheWorktree(t *testing.T) {
 		t.Errorf("disable --global names the worktree %s:\n%s", wt, out)
 	}
 }
+
+// On a session's first turn the transcript starts empty, and C's same-turn
+// commit condenses past the agent's edit in D: the turn-end sweep must still
+// read the turn from its start and link D's commit.
+func TestCrossRepo_FirstTurnSweepLinksAfterHomeCommit(t *testing.T) {
+	t.Parallel()
+	x := newCrossRepo(t, 0)
+	d := x.newPlainRepo(t, filepath.Join(filepath.Dir(x.c.RepoDir), "first"))
+	sess := x.c.NewSession()
+	x.startTurn(t, sess, "commit in d, then in c")
+	edit(t, sess, d, "d1.txt")
+	d1 := commitUnhooked(d, "d1.txt")
+	x.c.WriteFile("home.txt", "home work")
+	x.c.GitCommitWithHooksAsAgent("home commit", "home.txt")
+	x.endTurn(t, sess)
+
+	assertRecordedLink(t, d, sess.ID, d1)
+}
