@@ -259,17 +259,25 @@ const findingsReopenReserve = 2 * time.Second
 // findingsBranchTrailHead is replaced in tests, which have no trails API.
 var findingsBranchTrailHead = branchTrailHead
 
-// branchTrailHead reports whether the clone-local cache says the repository
-// has trails and the server has a trail for branch, and the commit the
-// server has for it (empty when it does not say). Pushing a branch does not
+// branchTrailHead reports whether the server has a trail for branch, and the
+// commit the server has for it (empty when it does not say). Only a cached
+// "trails disabled" skips the lookup: the cache expires after an hour and is
+// refreshed at session start, so an expired entry in a long session still
+// asks the server (within findingsTrailLookupTimeout). Pushing a branch does not
 // by itself make a trail (in many repositories opening the pull request
 // does), and continuing without one would only cost the agent a wait.
 func branchTrailHead(ctx context.Context, sessionID, branch string) (string, bool) {
 	scope, ok, err := loadTrailEnablementScopeHint(ctx, sessionID)
-	if err != nil || !ok || cachedTrailsEnablementForScope(ctx, scope, time.Now()) != trailEnablementCacheEnabled {
+	if err != nil || !ok || !findingsTrailsMayBeEnabled(cachedTrailsEnablementForScope(ctx, scope, time.Now())) {
 		return "", false
 	}
 	return trailHeadForBranch(ctx, scope, branch)
+}
+
+// findingsTrailsMayBeEnabled is whether the cached enablement leaves the
+// server lookup worth making: enabled, or unknown because the entry expired.
+func findingsTrailsMayBeEnabled(status trailEnablementCacheStatus) bool {
+	return status != trailEnablementCacheDisabled
 }
 
 // trailHeadForBranch reads the branch's change and its head from the server.

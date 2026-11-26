@@ -412,3 +412,12 @@ func TestTrailHeadForBranch(t *testing.T) {
 	_, ok = trailHeadForBranch(context.Background(), scope, "feature/none")
 	assert.False(t, ok)
 }
+
+// TestFindingsTrailsMayBeEnabled: an expired (unknown) cache entry in a long
+// session still asks the server; only a cached "disabled" skips it.
+func TestFindingsTrailsMayBeEnabled(t *testing.T) {
+	t.Parallel()
+	assert.True(t, findingsTrailsMayBeEnabled(trailEnablementCacheEnabled))
+	assert.True(t, findingsTrailsMayBeEnabled(trailEnablementCacheUnknown), "an expired entry is not a disabled repo")
+	assert.False(t, findingsTrailsMayBeEnabled(trailEnablementCacheDisabled))
+}
