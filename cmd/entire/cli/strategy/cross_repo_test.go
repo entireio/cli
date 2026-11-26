@@ -4,10 +4,15 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
+	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
@@ -206,5 +211,80 @@ func TestCrossRepoStatus_RecentSessionsShownAfterTheAgentExits(t *testing.T) {
 	}
 	if inbound[0].Live {
 		t.Error("a session with no pointer reported live")
+	}
+}
+
+func TestPublicRepoKey_NeverALocalPath(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dir := filepath.Join(t.TempDir(), "private-name")
+	testutil.InitRepo(t, dir)
+	if got := publicRepoKey(ctx, dir); got != "private-name" {
+		t.Errorf("no origin: got %q, want the directory name", got)
+	}
+	cmd := exec.CommandContext(ctx, "git", "-C", dir, "remote", "add", "origin", "https://github.com/acme/widgets.git")
+	cmd.Env = testutil.GitIsolatedEnv()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("add origin: %v\n%s", err, out)
+	}
+	if got := publicRepoKey(ctx, dir); strings.HasPrefix(got, "/") || !strings.Contains(got, "acme/widgets") {
+		t.Errorf("with origin: got %q, want the origin key", got)
+	}
+	if got := publicRepoKey(ctx, ""); got != "" {
+		t.Errorf("no worktree: got %q", got)
+	}
+}
+
+func TestLinkCrossRepoCommits_ConcurrentSweepsLinkOnce(t *testing.T) {
+	ctx := context.Background()
+	home, other := t.TempDir(), t.TempDir()
+	for _, dir := range []string{home, other} {
+		testutil.InitRepo(t, dir)
+		testutil.WriteFile(t, dir, "seed.txt", "seed")
+		testutil.GitAdd(t, dir, "seed.txt")
+		testutil.GitCommit(t, dir, "seed")
+	}
+	store, err := session.NewStateStoreForWorktree(ctx, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(ctx, &session.State{SessionID: "s1", WorktreePath: home, BaseCommit: "x", StartedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	since := time.Now().Add(-time.Minute)
+	testutil.WriteFile(t, other, "x.go", "package x")
+	testutil.GitAdd(t, other, "x.go")
+	testutil.GitCommit(t, other, "agent work")
+	t.Chdir(other)
+
+	const sweeps = 4
+	counts := make(chan int, sweeps)
+	var wg sync.WaitGroup
+	for range sweeps {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			n, err := (&ManualCommitStrategy{}).LinkCrossRepoCommits(ctx, "s1", home, since, []string{"x.go"}, nil)
+			if err != nil {
+				t.Error(err)
+			}
+			counts <- n
+		}()
+	}
+	wg.Wait()
+	close(counts)
+	total := 0
+	for n := range counts {
+		total += n
+	}
+	if total != 1 {
+		t.Fatalf("concurrent sweeps linked %d commits, want 1", total)
+	}
+	journal, err := os.ReadFile(filepath.Join(home, ".git", crossRepoLinksName("s1")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lines := strings.Count(string(journal), "\n"); lines != 1 {
+		t.Fatalf("home journal has %d links, want 1", lines)
 	}
 }

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -27,6 +28,13 @@ import (
 
 // crossRepoLinkTimeout bounds one repository's install and sweep.
 const crossRepoLinkTimeout = 30 * time.Second
+
+// crossRepoSyncBudget bounds the time a turn end or subagent end spends
+// linking other repositories in the foreground, well inside the shortest
+// agent hook timeout (Pi's agent_end, 10s). Repositories it leaves, and a run
+// it cuts short, are linked by a detached child instead: link-session is
+// idempotent (the install is, and the sweep dedups under its lock).
+const crossRepoSyncBudget = 4 * time.Second
 
 // crossRepoActivity is what a session did outside its repository, as its
 // hooks and transcript show: files its edit tools changed, directories its
@@ -56,8 +64,9 @@ func linkSessionInOtherRepos(ctx context.Context, sessionID, hookRoot string, ac
 	if err != nil {
 		return
 	}
-	logCtx := logging.WithComponent(ctx, "cross-repo")
 	since := turnStartTime(ctx, sessionID)
+	logCtx := logging.WithComponent(ctx, "cross-repo")
+	var targets []linkTarget
 	for root, rels := range activityByOtherRepo(ctx, hereCommon, act) {
 		if reason := crossRepoSkipReason(root, hookRoot, crossRepoProtectedDirs()); reason != "" {
 			logging.Info(logCtx, "not linking a repository the session worked in",
@@ -67,7 +76,32 @@ func linkSessionInOtherRepos(ctx context.Context, sessionID, hookRoot string, ac
 		if !sweep && strategy.IsGitHookInstalledInDir(ctx, root) {
 			continue
 		}
-		runLinkSession(ctx, root, linkSessionArgs{sessionID: sessionID, from: hookRoot, since: since, edited: rels, commits: act.commits, sweep: sweep})
+		in := linkSessionArgs{sessionID: sessionID, from: hookRoot, since: since, edited: rels, commits: act.commits, sweep: sweep}
+		targets = append(targets, linkTarget{root: root, args: in.argv()})
+	}
+	linkRepos(ctx, targets, time.Now().Add(crossRepoSyncBudget), runLinkSession, spawnLinkSession)
+}
+
+// linkTarget is one repository to run link-session in, and its arguments.
+type linkTarget struct {
+	root string
+	args []string
+}
+
+// linkRepos runs link-session in each target in the foreground until
+// deadline, and hands the rest, and any run the deadline cut short, to a
+// detached child (spawn).
+func linkRepos(ctx context.Context, targets []linkTarget, deadline time.Time,
+	run func(ctx context.Context, root string, args []string, timeout time.Duration) (timedOut bool),
+	spawn func(root string, args []string),
+) {
+	for _, target := range targets {
+		remaining := time.Until(deadline)
+		if remaining <= 0 || run(ctx, target.root, target.args, min(crossRepoLinkTimeout, remaining)) {
+			logging.Debug(logging.WithComponent(ctx, "cross-repo"), "linking a repository in the background",
+				slog.String("repo", target.root))
+			spawn(target.root, target.args)
+		}
 	}
 }
 
@@ -80,14 +114,7 @@ type linkSessionArgs struct {
 	sweep           bool
 }
 
-// runLinkSession runs `entire hooks git link-session` in root: a child
-// process, so every repository-scoped lookup (settings, hooks directory,
-// checkpoint store) resolves there rather than in the session's repository.
-func runLinkSession(ctx context.Context, root string, in linkSessionArgs) {
-	exe, err := os.Executable()
-	if err != nil {
-		return
-	}
+func (in linkSessionArgs) argv() []string {
 	args := []string{hooksCmdName, hooksGitCmdName, "link-session", "--session", in.sessionID, "--from", in.from}
 	if !in.since.IsZero() {
 		args = append(args, "--since", in.since.Format(time.RFC3339))
@@ -103,7 +130,19 @@ func runLinkSession(ctx context.Context, root string, in linkSessionArgs) {
 			args = append(args, "--commit", sha)
 		}
 	}
-	runCtx, cancel := context.WithTimeout(ctx, crossRepoLinkTimeout)
+	return args
+}
+
+// runLinkSession runs `entire hooks git link-session` in root: a child
+// process, so every repository-scoped lookup (settings, hooks directory,
+// checkpoint store) resolves there rather than in the session's repository.
+// It reports whether timeout cut the run short.
+func runLinkSession(ctx context.Context, root string, args []string, timeout time.Duration) bool {
+	exe, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := execx.NonInteractive(runCtx, exe, args...)
 	cmd.Dir = root
@@ -113,6 +152,12 @@ func runLinkSession(ctx context.Context, root string, in linkSessionArgs) {
 		logging.Debug(logging.WithComponent(ctx, "cross-repo"), "link-session failed",
 			slog.String("repo", root), slog.String("error", err.Error()))
 	}
+	return errors.Is(runCtx.Err(), context.DeadlineExceeded)
+}
+
+// spawnLinkSession runs link-session in root as a detached child.
+func spawnLinkSession(root string, args []string) {
+	execx.SpawnDetachedEnv(root, gitrepo.EnvWithoutRepoOverrides(), args...)
 }
 
 // turnCrossRepoActivity is a turn's activity outside the session's

@@ -15,6 +15,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
@@ -141,6 +142,13 @@ func (s *ManualCommitStrategy) LinkCrossRepoCommits(ctx context.Context, session
 	if err != nil {
 		return 0, fmt.Errorf("open the git directory: %w", err)
 	}
+	// Turn-end and subagent-end sweeps can run at once; the lock keeps them
+	// from linking a commit twice or dropping each other's entries.
+	release, err := flock.AcquireContextIn(ctx, gitRoot, crossRepoLinkedFile+".lock")
+	if err != nil {
+		return 0, fmt.Errorf("lock %s: %w", crossRepoLinkedFile, err)
+	}
+	defer release()
 	linked := readCrossRepoLinked(gitRoot)
 	count := 0
 	for _, sha := range commitsSince(ctx, worktreePath, since) {

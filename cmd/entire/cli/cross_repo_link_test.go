@@ -3,7 +3,9 @@ package cli
 import (
 	"context"
 	"path/filepath"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
@@ -81,5 +83,47 @@ func TestActivityByOtherRepo(t *testing.T) {
 		if !sameResolvedDir(root, d) || len(rels) != 1 || rels[0] != "pkg/gone/x.go" {
 			t.Fatalf("got %s: %v", root, rels)
 		}
+	}
+}
+
+func TestLinkRepos_BackgroundsWhatTheBudgetLeaves(t *testing.T) {
+	t.Parallel()
+	targets := []linkTarget{{root: "/a"}, {root: "/b"}, {root: "/c"}}
+	var ran, spawned []string
+	var timeouts []time.Duration
+	run := func(_ context.Context, root string, _ []string, timeout time.Duration) bool {
+		ran = append(ran, root)
+		timeouts = append(timeouts, timeout)
+		return root == "/b" // cut short
+	}
+	spawn := func(root string, _ []string) { spawned = append(spawned, root) }
+
+	linkRepos(context.Background(), targets, time.Now().Add(time.Hour), run, spawn)
+	if !slices.Equal(ran, []string{"/a", "/b", "/c"}) || !slices.Equal(spawned, []string{"/b"}) {
+		t.Fatalf("ran %v, spawned %v; want all run and the cut-short one backgrounded", ran, spawned)
+	}
+	for _, timeout := range timeouts {
+		if timeout > crossRepoLinkTimeout {
+			t.Errorf("timeout %v exceeds the per-repository bound", timeout)
+		}
+	}
+
+	ran, spawned = nil, nil
+	linkRepos(context.Background(), targets, time.Now().Add(-time.Second), run, spawn)
+	if len(ran) != 0 || !slices.Equal(spawned, []string{"/a", "/b", "/c"}) {
+		t.Fatalf("budget spent: ran %v, spawned %v; want all backgrounded", ran, spawned)
+	}
+}
+
+func TestLinkSessionArgs_Argv(t *testing.T) {
+	t.Parallel()
+	since := time.Date(2026, 11, 26, 1, 2, 3, 0, time.UTC)
+	got := linkSessionArgs{sessionID: "s", from: "/c", since: since, edited: []string{"a.go"}, commits: []string{"abc1234"}, sweep: true}.argv()
+	want := []string{"hooks", "git", "link-session", "--session", "s", "--from", "/c", "--since", "2026-11-26T01:02:03Z", "--path", "a.go", "--commit", "abc1234"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	if got := (linkSessionArgs{sessionID: "s", from: "/c", commits: []string{"abc1234"}}).argv(); !slices.Contains(got, "--no-sweep") || slices.Contains(got, "--commit") {
+		t.Fatalf("install-only: got %v", got)
 	}
 }

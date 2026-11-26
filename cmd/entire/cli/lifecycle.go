@@ -987,6 +987,8 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	if sessionID != unknownSessionID {
 		edited := turnEditedPaths(logCtx, ag, transcriptRef, sessionID)
 		elsewhere = uncommittedEditsElsewhere(ctx, strategy.SplitEditsByWorktree(ctx, hookRoot, edited))
+		// Bounded by crossRepoSyncBudget (the rest runs detached), so the
+		// home's own turn-end work below keeps well inside the hook timeout.
 		linkTurnInOtherRepos(logCtx, ag, transcriptRef, sessionID, hookRoot)
 	}
 
