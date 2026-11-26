@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
@@ -139,8 +140,8 @@ func (s *shellScan) walk(v any) {
 	case map[string]any:
 		if input, ok := shellToolInput(t); ok {
 			s.toolCall(input)
-		} else if script, ok := codexExecInput(t); ok {
-			s.codexExec(script)
+		} else if calls, ok := codex.ExecScriptShellCalls(t); ok {
+			s.codexExec(calls)
 		}
 		result := isToolResult(t)
 		for key, val := range t {
@@ -236,9 +237,9 @@ func toolName(obj map[string]any) string {
 }
 
 // codexExec reads the shell commands of a Codex exec script as one call.
-func (s *shellScan) codexExec(script string) {
+func (s *shellScan) codexExec(calls []map[string]any) {
 	before := len(s.out.dirs)
-	for _, call := range codexExecCalls(script) {
+	for _, call := range calls {
 		s.commandsIn(call)
 	}
 	if len(s.out.dirs) == before {

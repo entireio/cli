@@ -433,17 +433,18 @@ func CrossRepoLinks(ctx context.Context, sessionID string) []cpkg.LinkedRepoComm
 }
 
 // withLinkedRepos adds a session's cross-repository commits to its next
-// checkpoint: those since the previous one, and all of them, and advances the
-// state's cursor.
-func withLinkedRepos(ctx context.Context, opts *cpkg.WriteOptions, state *SessionState) {
+// checkpoint: those since the previous one, and all of them. It returns the
+// state's next cursor, which the caller applies only once the checkpoint is
+// written, so a failed write leaves those links for the next checkpoint.
+func withLinkedRepos(ctx context.Context, opts *cpkg.WriteOptions, state *SessionState) (condensed int) {
 	all := CrossRepoLinks(ctx, state.SessionID)
 	if len(all) == 0 {
-		return
+		return state.CrossRepoLinksCondensed
 	}
 	start := min(state.CrossRepoLinksCondensed, len(all))
 	opts.LinkedRepos = all[start:]
 	opts.SessionLinkedRepos = all
-	state.CrossRepoLinksCondensed = len(all)
+	return len(all)
 }
 
 // crossRepoLastLinkFile, in a repository's git common dir, names the sessions
