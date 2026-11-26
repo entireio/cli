@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -27,7 +29,7 @@ var liveTestNow = time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
 func liveSelf(own ...string) liveSessionsSelf { return liveSessionsSelf{Own: own} }
 
 func liveTestCache(sessions ...liveSessionEntry) *liveSessionsCache {
-	return &liveSessionsCache{FetchedAt: liveTestNow.Add(-time.Minute), OverlapKnown: true, Sessions: sessions}
+	return &liveSessionsCache{FetchedAt: liveTestNow.Add(-time.Minute), OverlapFetchedAt: liveTestNow.Add(-time.Minute), Sessions: sessions}
 }
 
 const liveTestInstruction = "Before you edit a file, run `entire stream list --live --touching -- <file>`; if it lists one of these sessions, tell the user who is working on it and ask whether to go ahead."
@@ -301,7 +303,7 @@ func TestLiveSessionsRefresh_CachesLiveSessionsAndOverlaps(t *testing.T) { //nol
 	cache, ok := loadLiveSessionsCache(context.Background())
 	require.True(t, ok)
 	require.WithinDuration(t, time.Now(), cache.FetchedAt, time.Minute)
-	require.True(t, cache.OverlapKnown)
+	require.WithinDuration(t, cache.FetchedAt, cache.OverlapFetchedAt, time.Second)
 	require.Equal(t, []liveSessionEntry{
 		{
 			SessionID: "s-1", Agent: "Claude Code", Login: "sleepercell",
@@ -329,7 +331,7 @@ func TestLiveSessionsRefresh_OverlapFailureKeepsTheLiveList(t *testing.T) { //no
 
 	cache, ok := loadLiveSessionsCache(context.Background())
 	require.True(t, ok)
-	require.False(t, cache.OverlapKnown)
+	require.True(t, cache.OverlapFetchedAt.IsZero(), "no overlap answer yet")
 	require.Len(t, cache.Sessions, 2)
 	require.Empty(t, cache.Sessions[0].Overlap)
 }
@@ -378,7 +380,7 @@ func TestLiveSessionsRefresh_SlowOverlapQueryStaysInTheBudget(t *testing.T) { //
 	require.Less(t, time.Since(start), 20*time.Second)
 	cache, ok := loadLiveSessionsCache(context.Background())
 	require.True(t, ok)
-	require.False(t, cache.OverlapKnown)
+	require.True(t, cache.OverlapFetchedAt.IsZero(), "no overlap answer yet")
 	require.Len(t, cache.Sessions, 2)
 }
 
@@ -443,9 +445,9 @@ func TestLiveSessionsCache_RoundTripAndTampering(t *testing.T) { //nolint:parall
 	require.False(t, ok, "no cache yet")
 
 	want := &liveSessionsCache{
-		FetchedAt:    time.Date(2026, 11, 26, 11, 0, 0, 0, time.UTC),
-		OverlapKnown: true,
-		Sessions:     []liveSessionEntry{{SessionID: "s", Login: "l", Overlap: []string{"a"}, OverlapTotal: 3, You: true}},
+		FetchedAt:        time.Date(2026, 11, 26, 11, 0, 0, 0, time.UTC),
+		OverlapFetchedAt: time.Date(2026, 11, 26, 11, 0, 0, 0, time.UTC),
+		Sessions:         []liveSessionEntry{{SessionID: "s", Login: "l", Overlap: []string{"a"}, OverlapTotal: 3, You: true}},
 	}
 	require.NoError(t, saveLiveSessionsCache(ctx, want))
 	got, ok := loadLiveSessionsCache(ctx)
@@ -459,7 +461,7 @@ func TestLiveSessionsCache_RoundTripAndTampering(t *testing.T) { //nolint:parall
 
 func saveLiveTestCache(t *testing.T, fetchedAt time.Time, sessions ...liveSessionEntry) {
 	t.Helper()
-	require.NoError(t, saveLiveSessionsCache(context.Background(), &liveSessionsCache{FetchedAt: fetchedAt, OverlapKnown: true, Sessions: sessions}))
+	require.NoError(t, saveLiveSessionsCache(context.Background(), &liveSessionsCache{FetchedAt: fetchedAt, OverlapFetchedAt: fetchedAt, Sessions: sessions}))
 }
 
 // The lifecycle: the block joins the turn's injection when the set changes,
@@ -596,7 +598,7 @@ func TestHandleLifecycleSessionStart_RefreshesAColdCacheBeforeTheFirstTurn(t *te
 
 // Young enough for a first turn but due a refresh: the refresh goes to the
 // background. A failed synchronous refresh also leaves one to the background.
-func TestHandleLifecycleSessionStart_SpawnsWhenWarmOrWhenTheRefreshFails(t *testing.T) { //nolint:paralleltest // t.Chdir, t.Setenv
+func TestHandleLifecycleSessionStart_SpawnsWhenWarm(t *testing.T) { //nolint:paralleltest // t.Chdir, t.Setenv
 	setupLiveSessionsRepo(t)
 	installFakeStreamPlugin(t, "exit 1\n")
 	spawns := countLiveSessionsSpawns(t)
@@ -605,12 +607,28 @@ func TestHandleLifecycleSessionStart_SpawnsWhenWarmOrWhenTheRefreshFails(t *test
 	saveLiveTestCache(t, time.Now().Add(-time.Minute))
 	runLiveSessionStart(t, newMockContextInjectorAgent(), "test-live-warm")
 	require.Equal(t, int32(1), atomic.LoadInt32(spawns))
+}
 
+// A hung network costs one SessionStart its refresh budget, not every one:
+// SessionStart's refresh is claimed through the spawn marker, so starts in
+// the same window (concurrent ones included) neither wait nor spawn.
+func TestHandleLifecycleSessionStart_AHungRefreshDelaysOnlyTheFirstStart(t *testing.T) { //nolint:paralleltest // t.Chdir, t.Setenv
 	setupLiveSessionsRepo(t)
-	installFakeStreamPlugin(t, "exit 1\n")
-	spawns = countLiveSessionsSpawns(t)
-	runLiveSessionStart(t, newMockContextInjectorAgent(), "test-live-failed")
-	require.Equal(t, int32(1), atomic.LoadInt32(spawns))
+	installFakeStreamPlugin(t, "exec sleep 30\n")
+	spawns := countLiveSessionsSpawns(t)
+	stubTrailRefreshSpawn(t)
+
+	for i := range 3 {
+		start := time.Now()
+		runLiveSessionStart(t, newMockContextInjectorAgent(), fmt.Sprintf("test-live-hung-%d", i))
+		took := time.Since(start)
+		if i == 0 {
+			require.Less(t, took, liveSessionsSessionStartBudget+time.Second, "the budget covers the plugin's exit")
+		} else {
+			require.Less(t, took, time.Second, "start %d waited on a refresh", i)
+		}
+	}
+	require.Equal(t, int32(0), atomic.LoadInt32(spawns))
 	_, ok := loadLiveSessionsCache(context.Background())
 	require.False(t, ok)
 }
@@ -722,7 +740,7 @@ func TestLiveSessionsBlock_CountsEverySessionNotOnlyTheCachedOnes(t *testing.T) 
 
 	block := liveSessionsBlockFor(cache, liveSelf("mine"), liveTestNow)
 
-	require.Contains(t, block.Text, "+22 more sessions.")
+	require.Contains(t, block.Text, "+22 more live sessions, which may include yours.")
 }
 
 func TestMergeLiveSessions_CountsTheTotal(t *testing.T) {
@@ -732,7 +750,7 @@ func TestMergeLiveSessions_CountsTheTotal(t *testing.T) {
 		live = append(live, liveListSession{SessionID: fmt.Sprintf("s-%d", i)})
 	}
 
-	c := mergeLiveSessions(live, nil, true, nil)
+	c := mergeLiveSessions(live, nil, true, nil, time.Now())
 
 	require.Len(t, c.Sessions, liveSessionsCacheSessionsMax)
 	require.Equal(t, 30, c.Total)
@@ -765,8 +783,110 @@ func TestLiveSessionsParents_LeaveOutTheAgentThatStartedThisOne(t *testing.T) { 
 	require.NotContains(t, block.Text, "`me`")
 	require.Contains(t, block.Text, "`other`", "another account's session under the same ID is not ours")
 
+	// Codex's hooks run in its shared daemon, whose CODEX_* environment
+	// isn't the session's; a Claude above that hook is still its parent.
 	self = liveSessionSelfFor(ctx, codexNamedAgent{newMockContextInjectorAgent()}, &agent.Event{SessionID: "mine"}, cache)
-	require.Empty(t, self.Parents, "Codex's hooks run in its shared daemon, whose environment isn't the session's")
+	require.Equal(t, []string{"claude-parent"}, self.Parents)
+}
+
+// A worker started by a Codex sub-agent: CODEX_THREAD_ID is the sub-agent's
+// thread, which doesn't stream; the root session (CODEX_SESSION_ID) does.
+func TestLiveSessionsParents_ACodexSubagentsWorkerLeavesOutTheRoot(t *testing.T) { //nolint:paralleltest // t.Setenv
+	t.Setenv("CODEX_THREAD_ID", "codex-child-thread")
+	t.Setenv("CODEX_SESSION_ID", "codex-root")
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "")
+	prev := liveSessionAgentAncestors
+	liveSessionAgentAncestors = func(context.Context, ...string) map[string]bool { return map[string]bool{"codex": true} }
+	t.Cleanup(func() { liveSessionAgentAncestors = prev })
+	cache := liveTestCache(
+		liveSessionEntry{SessionID: "codex-root", Login: "me", You: true, Agent: "Codex", Overlap: []string{"a.go"}, OverlapTotal: 1},
+		liveSessionEntry{SessionID: "s-bob", Login: "bob"},
+	)
+
+	self := liveSessionSelfFor(context.Background(), newMockContextInjectorAgent(), &agent.Event{SessionID: "mine"}, cache)
+	block := liveSessionsBlockFor(cache, self, liveTestNow)
+
+	require.NotContains(t, block.Text, "`me`")
+	require.Contains(t, block.Text, "`bob`")
+}
+
+// No ps for the session's own ID: inside Claude Code, CLAUDE_CODE_SESSION_ID
+// is the hook's own session, already left out.
+func TestLiveSessionsParents_NoProcessListingForTheSessionsOwnID(t *testing.T) { //nolint:paralleltest // t.Setenv
+	t.Setenv("CODEX_THREAD_ID", "")
+	t.Setenv("CODEX_SESSION_ID", "")
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "mine")
+	calls := 0
+	prev := liveSessionAgentAncestors
+	liveSessionAgentAncestors = func(context.Context, ...string) map[string]bool { calls++; return nil }
+	t.Cleanup(func() { liveSessionAgentAncestors = prev })
+	cache := liveTestCache(liveSessionEntry{SessionID: "mine:agent:a", Login: "me", You: true})
+
+	liveSessionSelfFor(context.Background(), newMockContextInjectorAgent(), &agent.Event{SessionID: "mine"}, cache)
+
+	require.Zero(t, calls)
+}
+
+// Resuming a teammate's session ID locally while they are live under it
+// doesn't hide theirs: once the cache knows the caller's account, an own ID
+// counts only for the caller's account's sessions.
+func TestLiveSessionsBlock_OwnIDOnlyForTheCallersAccountWhenKnown(t *testing.T) {
+	t.Parallel()
+	known := liveTestCache(
+		liveSessionEntry{SessionID: "shared-id", Login: "bob"},
+		liveSessionEntry{SessionID: "other", Login: "me", You: true},
+	)
+	require.Contains(t, liveSessionsBlockFor(known, liveSelf("shared-id"), liveTestNow).Text, "`bob`")
+
+	unknown := liveTestCache(liveSessionEntry{SessionID: "shared-id", Login: "bob"})
+	require.Empty(t, liveSessionsBlockFor(unknown, liveSelf("shared-id"), liveTestNow).Text,
+		"account unknown: the ID alone decides, as before")
+}
+
+func TestLiveSessionRunsProgram(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		argv    []string
+		program string
+		want    bool
+	}{
+		{[]string{"codex"}, "codex", true},
+		{[]string{"/opt/homebrew/bin/codex", "exec", "fix it"}, "codex", true},
+		{[]string{"codex", "app-server"}, "codex", true},
+		{[]string{"node", "/usr/local/lib/node_modules/@openai/codex/bin/codex.js"}, "codex", true},
+		{[]string{"/usr/local/lib/node_modules/@openai/codex/vendor/aarch64-apple-darwin/codex/codex-aarch64"}, "codex", true},
+		{[]string{"/home/u/.codex-cli/bin/codex-x86_64-linux"}, "codex", false},
+		{[]string{"/bin/zsh", "/Users/u/src/codex/dev.sh"}, "codex", false},
+		{[]string{"vim", "codex"}, "codex", false},
+		{[]string{"/Users/u/codex/bin/tool"}, "codex", false},
+		{[]string{"claude"}, "claude", true},
+		{[]string{"/Users/u/.local/share/claude/versions/2.1.3"}, "claude", true},
+		{[]string{"node", "/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js"}, "claude", true},
+		{[]string{"/usr/bin/node", "/usr/local/bin/claude", "-p", "hi"}, "claude", true},
+		{[]string{"bun", "/Users/u/.bun/bin/claude"}, "claude", true},
+		{[]string{"vim", "claude"}, "claude", false},
+		{[]string{"/bin/zsh", "/x/claude/run.sh"}, "claude", false},
+		{[]string{"/x/claude/tool"}, "claude", false},
+		{[]string{"node", "/x/claude/server.js"}, "claude", false},
+		{nil, "claude", false},
+	}
+	for _, c := range cases {
+		require.Equal(t, c.want, liveSessionRunsProgram(c.argv, c.program), "%v as %s", c.argv, c.program)
+	}
+}
+
+// Against the real process table: a program that isn't running is not an
+// ancestor (unless the listing can't be read, when every one is trusted).
+func TestLiveSessionAgentAncestors_RealProcessTable(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("trusted as given on Windows")
+	}
+	found := liveSessionAgentAncestors(context.Background(), "go", "no-such-program-xyzzy")
+	if found["no-such-program-xyzzy"] {
+		t.Skip("process table unreadable here: every program trusted")
+	}
+	t.Logf("go is an ancestor: %v", found["go"])
 }
 
 type codexNamedAgent struct{ *mockContextInjectorAgent }
@@ -860,4 +980,67 @@ func TestLiveSessionsRefresh_PrunesRemovedWorktrees(t *testing.T) { //nolint:par
 		require.NoFileExists(t, f)
 	}
 	require.FileExists(t, liveSessionsCacheFile(t))
+}
+
+// Variation selectors and other default-ignorable code points render as
+// nothing and can smuggle bytes past a reader (one per selector); they go.
+func TestLiveSessionText_DropsInvisibleCodePoints(t *testing.T) {
+	t.Parallel()
+	smuggled := "a" + string([]rune{0xE0100, 0xE0105, 0xE0110, 0xE0161, 0xE0162, 0xE01EF})
+	require.Equal(t, "a", liveSessionText(smuggled, 100))
+	require.Equal(t, "x y", liveSessionText("x\uFE0Fy", 100))
+	require.Equal(t, "a b c", liveSessionText("a\u034Fb\u17B4c", 100))
+	require.Equal(t, "café हिन्दी", liveSessionText("café हिन्दी", 100))
+	require.Equal(t, "cafe\u0301", liveSessionText("cafe\u0301", 100))
+}
+
+// Unknown overlaps are carried only while they are young: a refresh that
+// has failed the overlap query for two days doesn't keep two-day-old files.
+func TestMergeLiveSessions_CarriedOverlapsExpire(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	live := []liveListSession{{SessionID: "s-1"}}
+	prev := &liveSessionsCache{
+		Sessions:         []liveSessionEntry{{SessionID: "s-1", Overlap: []string{"a.go"}, OverlapTotal: 1}},
+		OverlapFetchedAt: now.Add(-48 * time.Hour),
+	}
+	c := mergeLiveSessions(live, nil, false, prev, now)
+	require.Empty(t, c.Sessions[0].Overlap)
+	require.True(t, c.OverlapFetchedAt.IsZero())
+
+	prev.OverlapFetchedAt = now.Add(-time.Minute)
+	c = mergeLiveSessions(live, nil, false, prev, now)
+	require.Equal(t, []string{"a.go"}, c.Sessions[0].Overlap)
+	require.Equal(t, prev.OverlapFetchedAt, c.OverlapFetchedAt, "carried with the time they were fetched")
+}
+
+// Which 20 sessions the cache keeps doesn't depend on the server's order.
+func TestMergeLiveSessions_KeepsTheSameSessionsWhateverTheOrder(t *testing.T) {
+	t.Parallel()
+	var live []liveListSession
+	for i := range 30 {
+		live = append(live, liveListSession{SessionID: fmt.Sprintf("s-%02d", i)})
+	}
+	reversed := slices.Clone(live)
+	slices.Reverse(reversed)
+	overlaps := []liveListSession{{SessionID: "s-29", Touching: []string{"a.go"}}}
+
+	a := mergeLiveSessions(live, overlaps, true, nil, time.Now())
+	b := mergeLiveSessions(reversed, overlaps, true, nil, time.Now())
+
+	require.Equal(t, a.Sessions, b.Sessions)
+	require.Equal(t, "s-29", a.Sessions[0].SessionID, "overlapping ones first")
+}
+
+func TestLiveSessionProcFS_ReadsThisProcess(t *testing.T) {
+	t.Parallel()
+	p, ok := liveSessionProcFS(os.Getpid())
+	if !ok {
+		t.Skip("no /proc here")
+	}
+	require.Equal(t, os.Getppid(), p.ppid)
+	require.NotEmpty(t, p.argv)
+	exe, err := os.Executable()
+	require.NoError(t, err)
+	require.Equal(t, filepath.Base(exe), filepath.Base(p.argv[0]))
 }

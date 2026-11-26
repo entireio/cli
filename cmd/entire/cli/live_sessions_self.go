@@ -1,11 +1,13 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -26,9 +28,15 @@ type liveSessionsSelf struct {
 	Parents []string
 }
 
-// owns reports whether e is one of the caller's own sessions.
-func (s liveSessionsSelf) owns(e liveSessionEntry) bool {
-	return liveSessionInFamily(e.SessionID, s.Own) || (e.You && liveSessionInFamily(e.SessionID, s.Parents))
+// owns reports whether e is one of the caller's own sessions. When the cache
+// knows the caller's account (accountKnown), an own ID counts only for that
+// account's sessions: a teammate live under an ID the caller resumed locally
+// is theirs. When it doesn't, the ID alone decides.
+func (s liveSessionsSelf) owns(e liveSessionEntry, accountKnown bool) bool {
+	if liveSessionInFamily(e.SessionID, s.Own) && (e.You || !accountKnown) {
+		return true
+	}
+	return e.You && liveSessionInFamily(e.SessionID, s.Parents)
 }
 
 // liveSessionInFamily reports whether id is one of ids or a subagent of one:
@@ -43,10 +51,11 @@ func liveSessionInFamily(id string, ids []string) bool {
 }
 
 // liveSessionSelfFor is the caller's own sessions for event's turn. cache is
-// what the block is built from: the parent check, which runs ps, runs only
-// when a session of the caller's account in it carries a parent's ID.
+// what the block is built from: the parent check, which lists processes,
+// runs only when a session of the caller's account in it carries a parent's
+// ID.
 func liveSessionSelfFor(ctx context.Context, ag agent.Agent, event *agent.Event, cache *liveSessionsCache) liveSessionsSelf {
-	return liveSessionsSelf{Own: liveSessionOwnIDs(ag, event), Parents: liveSessionParentIDs(ctx, ag, cache)}
+	return liveSessionsSelf{Own: liveSessionOwnIDs(ag, event), Parents: liveSessionParentIDs(ctx, ag, event, cache)}
 }
 
 // liveSessionHeaderIDer is an agent whose stream may know a session by an ID
@@ -69,41 +78,65 @@ func liveSessionOwnIDs(ag agent.Agent, event *agent.Event) []string {
 	return own
 }
 
-// liveSessionParentEnv is, per agent program, the variable through which it
-// passes its session ID to the processes it starts.
-var liveSessionParentEnv = map[string]string{
-	"codex":  "CODEX_THREAD_ID",
-	"claude": "CLAUDE_CODE_SESSION_ID",
+// liveSessionParentVar is a variable through which an agent program passes
+// a session ID to the processes it starts.
+type liveSessionParentVar struct{ program, env string }
+
+// liveSessionParentVars are the parent agents' variables. Codex sets both of
+// its own: CODEX_THREAD_ID names the thread that ran the command, a
+// sub-agent's when a sub-agent did, and CODEX_SESSION_ID the root session,
+// which is the one that streams (see the codex agent's
+// CallerSessionEnvVar).
+var liveSessionParentVars = []liveSessionParentVar{
+	{liveSessionProgramCodex, "CODEX_SESSION_ID"},
+	{liveSessionProgramCodex, "CODEX_THREAD_ID"},
+	{liveSessionProgramClaude, "CLAUDE_CODE_SESSION_ID"},
 }
 
+// The agent programs liveSessionRunsProgram recognises.
+const (
+	liveSessionProgramCodex  = "codex"
+	liveSessionProgramClaude = "claude"
+)
+
 // liveSessionParentIDs is the session of an agent that started the caller's
-// (`claude -p` run by Codex, say) and still runs above this hook. The
-// inherited variable alone isn't proof: a terminal multiplexer's server
-// started by Codex keeps it for whatever it starts later, so the agent must
-// be an ancestor (liveSessionAgentAncestors). Never for Codex's own hooks:
-// they run in Codex's shared background server, whose environment isn't
-// the session's.
-func liveSessionParentIDs(ctx context.Context, ag agent.Agent, cache *liveSessionsCache) []string {
-	if ag.Name() == agent.AgentNameCodex || cache == nil {
+// (`claude -p` run by Codex, `codex exec` run by Claude) and still runs above
+// this hook. The inherited variable alone isn't proof: a terminal
+// multiplexer's server started by Codex keeps it for whatever it starts
+// later, so the agent's program must be an ancestor
+// (liveSessionAgentAncestors). Codex's own hooks ignore Codex's variables:
+// they run in its shared background server, whose environment isn't the
+// session's. A Claude above that server still counts, the ancestor check
+// deciding. A variable holding the hook's own session ID (Claude Code's
+// own, inside Claude Code) needs no check.
+func liveSessionParentIDs(ctx context.Context, ag agent.Agent, event *agent.Event, cache *liveSessionsCache) []string {
+	if cache == nil {
 		return nil
 	}
-	ids := map[string]string{}
-	var programs []string
-	for program, env := range liveSessionParentEnv {
-		id := os.Getenv(env)
-		if id == "" || !liveSessionCacheHasOwn(cache, id) {
+	candidates := map[string][]string{}
+	for _, v := range liveSessionParentVars {
+		if v.program == liveSessionProgramCodex && ag.Name() == agent.AgentNameCodex {
 			continue
 		}
-		ids[program] = id
-		programs = append(programs, program)
+		id := os.Getenv(v.env)
+		if id == "" || id == event.SessionID || !liveSessionCacheHasOwn(cache, id) {
+			continue
+		}
+		candidates[v.program] = append(candidates[v.program], id)
 	}
-	if len(programs) == 0 {
+	if len(candidates) == 0 {
 		return nil
 	}
+	programs := make([]string, 0, len(candidates))
+	for program := range candidates {
+		programs = append(programs, program)
+	}
+	slices.Sort(programs)
 	var parents []string
-	for program := range liveSessionAgentAncestors(ctx, programs...) {
-		if id, ok := ids[program]; ok {
-			parents = append(parents, id)
+	ancestors := liveSessionAgentAncestors(ctx, programs...)
+	for _, program := range programs {
+		if ancestors[program] {
+			parents = append(parents, candidates[program]...)
 		}
 	}
 	return parents
@@ -123,58 +156,50 @@ func liveSessionCacheHasOwn(cache *liveSessionsCache, id string) bool {
 // liveSessionAncestorsMax bounds the walk up this process's parents.
 const liveSessionAncestorsMax = 64
 
+// liveSessionProcess is one process as the ancestor walk sees it.
+type liveSessionProcess struct {
+	ppid int
+	argv []string
+}
+
 // liveSessionAgentAncestors reports which of programs ("codex", "claude")
-// run as ancestors of this process, from one `ps` listing (about 20 ms,
+// run as ancestors of this process (liveSessionRunsProgram). Where there is a
+// /proc (Linux) it reads it along the chain; elsewhere one `ps` listing (about 20 ms,
 // bounded to a second). Where that can't be told, every one is taken as an
-// ancestor and the inherited ID trusted as given: on Windows, and when ps
-// can't run (Codex's macOS sandbox refuses /bin/ps). The same check as
-// entire-stream's per-edit one (entireio/entire-stream#70). A var for
-// tests.
+// ancestor and the inherited ID trusted as given: on Windows, and when the
+// process table can't be read (Codex's macOS sandbox refuses /bin/ps). A
+// var for tests.
 var liveSessionAgentAncestors = func(ctx context.Context, programs ...string) map[string]bool {
-	all := func() map[string]bool {
-		found := map[string]bool{}
-		for _, p := range programs {
-			found[p] = true
-		}
-		return found
+	all := map[string]bool{}
+	for _, p := range programs {
+		all[p] = true
 	}
 	if runtime.GOOS == windowsGOOS {
-		return all()
+		return all
 	}
-	ctx, cancel := context.WithTimeout(ctx, time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "ps", "-A", "-o", "pid=,ppid=,command=").Output()
-	if err != nil {
-		return all()
-	}
-	type proc struct {
-		ppid    int
-		command string
-	}
-	procs := map[int]proc{}
-	for _, line := range strings.Split(string(out), "\n") {
-		f := strings.Fields(line)
-		if len(f) < 3 {
-			continue
+	lookup := liveSessionProcFS
+	if _, ok := liveSessionProcFS(os.Getpid()); !ok { // no /proc (not Linux)
+		table, ok := liveSessionPSTable(ctx)
+		if !ok {
+			return all
 		}
-		pid, err1 := strconv.Atoi(f[0])
-		ppid, err2 := strconv.Atoi(f[1])
-		if err1 == nil && err2 == nil {
-			procs[pid] = proc{ppid, strings.Join(f[2:], " ")}
+		lookup = func(pid int) (liveSessionProcess, bool) {
+			p, ok := table[pid]
+			return p, ok
 		}
-	}
-	if len(procs) == 0 {
-		return all()
 	}
 	found := map[string]bool{}
 	pid := os.Getppid()
-	for range liveSessionAncestorsMax {
-		p, ok := procs[pid]
-		if !ok || pid <= 1 {
+	for walked := 0; walked < liveSessionAncestorsMax && pid > 1; walked++ {
+		p, ok := lookup(pid)
+		if !ok {
+			if walked == 0 {
+				return all // not even our parent: the table can't be read
+			}
 			break
 		}
 		for _, program := range programs {
-			if liveSessionRunsProgram(p.command, program) {
+			if liveSessionRunsProgram(p.argv, program) {
 				found[program] = true
 			}
 		}
@@ -183,18 +208,91 @@ var liveSessionAgentAncestors = func(ctx context.Context, programs ...string) ma
 	return found
 }
 
-// liveSessionRunsProgram reports whether a process's command line runs
-// program: its program is named so (codex, claude, node …/claude), or its
-// program's path is in a folder named so (Claude Code's
-// …/claude/versions/2.1.x).
-func liveSessionRunsProgram(command, program string) bool {
-	for i, f := range strings.Fields(command) {
-		if i > 1 {
-			break // the program, or an interpreter's script
+// liveSessionProcFS reads pid's parent and argv from /proc.
+func liveSessionProcFS(pid int) (liveSessionProcess, bool) {
+	dir := "/proc/" + strconv.Itoa(pid)
+	stat, err := os.ReadFile(dir + "/stat") //nolint:gosec // a /proc path built from a pid
+	if err != nil {
+		return liveSessionProcess{}, false
+	}
+	// pid (comm) state ppid …: comm may hold spaces and parentheses, so
+	// the fields are counted from its last ')'.
+	i := bytes.LastIndexByte(stat, ')')
+	if i < 0 {
+		return liveSessionProcess{}, false
+	}
+	fields := strings.Fields(string(stat[i+1:]))
+	if len(fields) < 2 {
+		return liveSessionProcess{}, false
+	}
+	ppid, err := strconv.Atoi(fields[1])
+	if err != nil {
+		return liveSessionProcess{}, false
+	}
+	cmdline, err := os.ReadFile(dir + "/cmdline") //nolint:gosec // a /proc path built from a pid
+	if err != nil {
+		return liveSessionProcess{}, false
+	}
+	argv := strings.Split(strings.TrimRight(string(cmdline), "\x00"), "\x00")
+	return liveSessionProcess{ppid: ppid, argv: argv}, true
+}
+
+// liveSessionPSTable lists every process with one `ps`. Its command line is
+// split on spaces, so a program path with a space in it isn't recognised.
+func liveSessionPSTable(ctx context.Context) (map[int]liveSessionProcess, bool) {
+	ctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "ps", "-A", "-o", "pid=,ppid=,command=").Output()
+	if err != nil {
+		return nil, false
+	}
+	procs := map[int]liveSessionProcess{}
+	for _, line := range strings.Split(string(out), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 3 {
+			continue
 		}
-		if filepath.Base(f) == program || strings.Contains(filepath.ToSlash(f), "/"+program+"/") {
-			return true
+		pid, err1 := strconv.Atoi(f[0])
+		ppid, err2 := strconv.Atoi(f[1])
+		if err1 == nil && err2 == nil {
+			procs[pid] = liveSessionProcess{ppid: ppid, argv: f[2:]}
 		}
+	}
+	return procs, len(procs) > 0
+}
+
+// liveSessionRunsProgram reports whether a process with argv runs program,
+// judged by the executable only, never by an argument a shell or editor was
+// given (`vim claude`, `zsh ~/src/codex/dev.sh`):
+//   - its executable is named program (`codex`, `codex app-server`,
+//     `claude`);
+//   - Claude Code's native install: …/claude/versions/<version>;
+//   - Codex's npm package's vendored binary: …/@openai/codex/…;
+//   - a script runtime (node, bun, deno) running the agent's npm package
+//     (…/@anthropic-ai/claude-code/…, …/@openai/codex/…) or a script named
+//     program (the npm bin link, `node /usr/local/bin/claude`).
+func liveSessionRunsProgram(argv []string, program string) bool {
+	if len(argv) == 0 {
+		return false
+	}
+	exe := filepath.ToSlash(argv[0])
+	if filepath.Base(exe) == program {
+		return true
+	}
+	pkg := map[string]string{liveSessionProgramClaude: "/@anthropic-ai/claude-code/", liveSessionProgramCodex: "/@openai/codex/"}[program]
+	switch {
+	case program == liveSessionProgramClaude && strings.Contains(exe, "/claude/versions/"):
+		return true
+	case program == liveSessionProgramCodex && strings.Contains(exe, pkg):
+		return true
+	}
+	switch filepath.Base(exe) {
+	case "node", "bun", "deno":
+		if len(argv) < 2 {
+			return false
+		}
+		script := filepath.ToSlash(argv[1])
+		return filepath.Base(script) == program || (pkg != "" && strings.Contains(script, pkg))
 	}
 	return false
 }

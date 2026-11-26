@@ -101,9 +101,10 @@ const (
 // and which of this worktree's changed files the session edited.
 type liveSessionsCache struct {
 	FetchedAt time.Time `json:"fetched_at"`
-	// OverlapKnown records that the overlap query succeeded; without it the
-	// sessions are known to be live but not what they overlap.
-	OverlapKnown bool `json:"overlap_known,omitempty"`
+	// OverlapFetchedAt is when the overlaps were last answered (the overlap
+	// query succeeded); zero when they never were, or when the last answer
+	// was too old to carry (mergeLiveSessions).
+	OverlapFetchedAt time.Time `json:"overlap_fetched_at,omitzero"`
 	// Sessions is at most liveSessionsCacheSessionsMax of them; Total counts
 	// them all.
 	Sessions []liveSessionEntry `json:"sessions"`
@@ -249,21 +250,28 @@ var liveSessionsSyncRefresh = refreshLiveSessionsWithin
 // turn, for agents that inject context (the only way the block reaches the
 // model). A cache too old for a first turn (liveSessionsFirstTurnMaxAge) is
 // refreshed now, within liveSessionsSessionStartBudget, so the first turn —
-// a one-shot run's only one — has it; the hook fails open, leaving a failed
-// refresh to the background. A younger cache due a refresh gets one in the
-// background.
+// a one-shot run's only one — has it. The refresh claims the worktree's
+// spawn marker first, as a background one does: starts in the same window
+// (concurrent ones, or after a refresh that hung or failed) skip it instead
+// of each waiting out the budget, and with a marker that can't be written
+// (a read-only git common dir, where no cache could be saved) none waits.
+// The hook fails open either way. A younger cache due a refresh gets one in
+// the background.
 func refreshLiveSessionsAtSessionStart(ctx context.Context, ag agent.Agent) {
 	if _, ok := agent.AsContextInjector(ag); !ok || !liveSessionsPluginInstalled() {
 		return
 	}
 	cache, _ := loadLiveSessionsCache(ctx)
-	if !liveSessionsCacheFresh(cache, time.Now(), liveSessionsFirstTurnMaxAge) {
-		if liveSessionsSyncRefresh(ctx, liveSessionsSessionStartBudget) {
-			return
-		}
-		cache = nil
+	now := time.Now()
+	if liveSessionsCacheFresh(cache, now, liveSessionsFirstTurnMaxAge) {
+		maybeSpawnLiveSessionsRefresh(ctx, cache)
+		return
 	}
-	maybeSpawnLiveSessionsRefresh(ctx, cache)
+	commonDir, worktreeRoot, err := liveSessionsLocation(ctx)
+	if err != nil || !claimSpawnMarker(commonDir, liveSessionsSpawnMarker(worktreeRoot), liveSessionsSpawnThrottle, now) {
+		return
+	}
+	liveSessionsSyncRefresh(ctx, liveSessionsSessionStartBudget)
 }
 
 // liveSessionsCacheFresh reports whether c was fetched within maxAge of now.
@@ -314,20 +322,24 @@ func refreshLiveSessionsWithin(ctx context.Context, budget time.Duration) bool {
 		logging.Debug(logCtx, "live sessions refresh skipped", "error", err.Error())
 		return false
 	}
-	runCtx, cancel := context.WithTimeout(ctx, budget)
+	// The plugin is killed at the deadline, and its output pipes are given
+	// waitDelay more: both inside budget, which is what a caller waits.
+	waitDelay := budget / 10
+	runCtx, cancel := context.WithTimeout(ctx, budget-waitDelay)
 	defer cancel()
-	live, err := queryLiveSessions(runCtx, bin, worktreeRoot, false)
+	live, err := queryLiveSessions(runCtx, bin, worktreeRoot, false, waitDelay)
 	if err != nil {
 		logging.Debug(logCtx, "live sessions refresh failed", "error", err.Error())
 		return false
 	}
-	overlaps, err := queryLiveSessions(runCtx, bin, worktreeRoot, true)
+	overlaps, err := queryLiveSessions(runCtx, bin, worktreeRoot, true, waitDelay)
 	if err != nil {
 		logging.Debug(logCtx, "live sessions overlap query failed", "error", err.Error())
 	}
 	prev, _ := loadLiveSessionsCache(ctx)
-	c := mergeLiveSessions(live, overlaps, err == nil, prev)
-	c.FetchedAt = time.Now().UTC()
+	now := time.Now().UTC()
+	c := mergeLiveSessions(live, overlaps, err == nil, prev, now)
+	c.FetchedAt = now
 	if err := saveLiveSessionsCache(ctx, c); err != nil {
 		logging.Debug(logCtx, "live sessions refresh failed to save", "error", err.Error())
 		return false
@@ -357,7 +369,7 @@ func liveSessionsPluginBinary() (string, bool) {
 // its output. A non-zero exit, ctx's deadline, more than
 // liveSessionsOutputMax of output, or output that isn't the list is an
 // error.
-func queryLiveSessions(ctx context.Context, bin, worktreeRoot string, touching bool) ([]liveListSession, error) {
+func queryLiveSessions(ctx context.Context, bin, worktreeRoot string, touching bool, waitDelay time.Duration) ([]liveListSession, error) {
 	args := []string{cmdList, "--live", "--json"}
 	if touching {
 		args = []string{cmdList, "--live", "--touching", "--json"}
@@ -365,7 +377,7 @@ func queryLiveSessions(ctx context.Context, bin, worktreeRoot string, touching b
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Dir = worktreeRoot
 	cmd.Env = pluginRunEnv(ctx, liveSessionsPluginName)
-	cmd.WaitDelay = time.Second
+	cmd.WaitDelay = waitDelay
 	out := &limitedBuffer{max: liveSessionsOutputMax}
 	cmd.Stdout = out
 	if err := cmd.Run(); err != nil {
@@ -430,19 +442,26 @@ func parseLiveSessionsList(data []byte) ([]liveListSession, error) {
 
 // mergeLiveSessions builds the cache from the live list and the overlap
 // list: each live session once (at most liveSessionsCacheSessionsMax, those
-// with overlaps first, Total counting them all), with the files the overlap
-// list gave it (at most liveSessionsCacheOverlapMax), its text already
-// cleaned. A session only the overlap list has is live too. When the overlap
-// query failed (!overlapKnown), a session keeps the overlaps prev had for it:
-// an unknown answer is not news, and dropping them would re-inject the block
-// without them and then again with them.
-func mergeLiveSessions(live, overlaps []liveListSession, overlapKnown bool, prev *liveSessionsCache) *liveSessionsCache {
+// with overlaps first and then by ID, so which are kept doesn't follow the
+// server's order; Total counting them all), with the files the overlap list
+// gave it (at most liveSessionsCacheOverlapMax), its text already cleaned. A
+// session only the overlap list has is live too. When the overlap query
+// failed (!overlapKnown), a session keeps the overlaps prev had for it, if
+// they were answered within liveSessionsMaxAge of now: an unknown answer is
+// not news, and dropping them would re-inject the block without them and
+// then again with them; but an answer that old is no longer one.
+func mergeLiveSessions(live, overlaps []liveListSession, overlapKnown bool, prev *liveSessionsCache, now time.Time) *liveSessionsCache {
 	files := map[string][]string{}
 	for _, s := range overlaps {
 		files[s.SessionID] = append(files[s.SessionID], s.Touching...)
 	}
+	c := &liveSessionsCache{}
 	carried := map[string]liveSessionEntry{}
-	if !overlapKnown && prev != nil {
+	switch {
+	case overlapKnown:
+		c.OverlapFetchedAt = now
+	case prev != nil && !prev.OverlapFetchedAt.IsZero() && !prev.OverlapFetchedAt.After(now) && now.Sub(prev.OverlapFetchedAt) <= liveSessionsMaxAge:
+		c.OverlapFetchedAt = prev.OverlapFetchedAt
 		for _, e := range prev.Sessions {
 			if len(e.Overlap) > 0 {
 				carried[e.SessionID] = e
@@ -466,12 +485,13 @@ func mergeLiveSessions(live, overlaps []liveListSession, overlapKnown bool, prev
 			without = append(without, e)
 		}
 	}
+	byID := func(a, b liveSessionEntry) int { return cmp.Compare(a.SessionID, b.SessionID) }
+	slices.SortFunc(withOverlap, byID)
+	slices.SortFunc(without, byID)
 	all := slices.Concat(withOverlap, without)
-	return &liveSessionsCache{
-		OverlapKnown: overlapKnown || (prev != nil && prev.OverlapKnown),
-		Sessions:     append([]liveSessionEntry{}, all[:min(len(all), liveSessionsCacheSessionsMax)]...),
-		Total:        len(all),
-	}
+	c.Sessions = append([]liveSessionEntry{}, all[:min(len(all), liveSessionsCacheSessionsMax)]...)
+	c.Total = len(all)
+	return c
 }
 
 // liveSessionEntryFrom is s as the cache keeps it, with overlap as its files.
@@ -503,10 +523,8 @@ func liveSessionEntryFrom(s liveListSession, overlap []string) liveSessionEntry 
 
 // liveSessionText makes a teammate's text safe to quote in the agent's
 // context: backticks dropped (the block quotes with them), every run of
-// whitespace or of a character that could change how the text reads — a
-// control or format character (bidi controls, zero-width ones, tag
-// characters), a line or paragraph separator, a private-use, surrogate or
-// unassigned code point, a Hangul filler — one space, trimmed, and cut to
+// whitespace or of a character that could change how the text reads, or hide
+// what it carries, one space (liveSessionRuneRefused), trimmed, and cut to
 // maxRunes. Combining marks stay: café, हिन्दी and ผู้ใช้ need them.
 func liveSessionText(s string, maxRunes int) string {
 	var b strings.Builder
@@ -533,13 +551,17 @@ func liveSessionText(s string, maxRunes int) string {
 }
 
 // liveSessionRuneRefused reports whether r may not appear in liveSessionText's
-// output.
+// output: anything but a letter, mark, number, punctuation or symbol (so
+// controls, format characters such as bidi controls, zero-width and tag
+// characters, separators, private-use, surrogate and unassigned code
+// points), and the marks and letters that render as nothing — variation
+// selectors (a run of them after one character can carry arbitrary bytes)
+// and the other default-ignorable code points (U+034F, U+17B4, the Hangul
+// fillers) — and invalid UTF-8.
 func liveSessionRuneRefused(r rune) bool {
-	switch r {
-	case utf8.RuneError, 'ᅟ', 'ᅠ', 'ㅤ', 'ﾠ': // and the Hangul fillers
-		return true
-	}
-	return !unicode.In(r, unicode.L, unicode.M, unicode.N, unicode.P, unicode.S, unicode.Zs)
+	return r == utf8.RuneError ||
+		unicode.In(r, unicode.Variation_Selector, unicode.Other_Default_Ignorable_Code_Point) ||
+		!unicode.In(r, unicode.L, unicode.M, unicode.N, unicode.P, unicode.S)
 }
 
 // liveSessionAgentNames are the agent names entire-stream streams under (its
@@ -654,9 +676,12 @@ func liveSessionsBlockFor(cache *liveSessionsCache, self liveSessionsSelf, now t
 		entry liveSessionEntry
 		files []string
 	}
+	// The list marks the caller's account's sessions "you" only when it knows
+	// that account; a cache with none marked may just not know it.
+	accountKnown := slices.ContainsFunc(cache.Sessions, func(e liveSessionEntry) bool { return e.You })
 	var sessions []shown
 	for _, e := range cache.Sessions {
-		if e.SessionID == "" || self.owns(e) {
+		if e.SessionID == "" || self.owns(e, accountKnown) {
 			continue
 		}
 		var files []string
@@ -698,10 +723,14 @@ func liveSessionsBlockFor(cache *liveSessionsCache, self liveSessionsSelf, now t
 	b.WriteString(strings.Join(clauses, "; "))
 	b.WriteString(".")
 	// Sessions the cache didn't keep (over liveSessionsCacheSessionsMax) are
-	// counted too.
-	if more := len(sessions) - len(clauses) + max(cache.Total-len(cache.Sessions), 0); more == 1 {
+	// counted too, but the cache can't say whether they are the caller's.
+	more, uncached := len(sessions)-len(clauses), max(cache.Total-len(cache.Sessions), 0)
+	switch {
+	case uncached > 0:
+		fmt.Fprintf(&b, " +%d more live sessions, which may include yours.", more+uncached)
+	case more == 1:
 		b.WriteString(" +1 more session.")
-	} else if more > 1 {
+	case more > 1:
 		fmt.Fprintf(&b, " +%d more sessions.", more)
 	}
 	b.WriteString(" " + liveSessionsCheckInstruction)
