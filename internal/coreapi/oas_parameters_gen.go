@@ -11,6 +11,14 @@ type AddOrgMemberParams struct {
 	OrgId string
 }
 
+// AddTeamMemberParams is parameters of addTeamMember operation.
+type AddTeamMemberParams struct {
+	OrgId  string
+	TeamID string
+	// The account's ID.
+	AccountID string
+}
+
 // BeginPluginInstallationDeletionParams is parameters of beginPluginInstallationDeletion operation.
 type BeginPluginInstallationDeletionParams struct {
 	// Plugin installation profile.
@@ -48,6 +56,11 @@ type CreatePluginInstallationParams struct {
 // CreateServiceAccountSecretParams is parameters of createServiceAccountSecret operation.
 type CreateServiceAccountSecretParams struct {
 	AccountId string
+}
+
+// CreateTeamParams is parameters of createTeam operation.
+type CreateTeamParams struct {
+	OrgId string
 }
 
 // DeleteBindingParams is parameters of deleteBinding operation.
@@ -114,6 +127,12 @@ type DeleteServiceAccountParams struct {
 type DeleteServiceAccountSecretParams struct {
 	AccountId string
 	SecretID  string
+}
+
+// DeleteTeamParams is parameters of deleteTeam operation.
+type DeleteTeamParams struct {
+	OrgId  string
+	TeamID string
 }
 
 // DetachMyHandleParams is parameters of detachMyHandle operation.
@@ -214,6 +233,12 @@ type GetRepoVisibilityParams struct {
 // GetServiceAccountParams is parameters of getServiceAccount operation.
 type GetServiceAccountParams struct {
 	AccountId string
+}
+
+// GetTeamParams is parameters of getTeam operation.
+type GetTeamParams struct {
+	OrgId  string
+	TeamID string
 }
 
 // GrantProjectAccessParams is parameters of grantProjectAccess operation.
@@ -654,6 +679,25 @@ type ListServiceAccountsParams struct {
 	ProjectID OptString `json:",omitempty,omitzero"`
 }
 
+// ListTeamMembersParams is parameters of listTeamMembers operation.
+type ListTeamMembersParams struct {
+	OrgId  string
+	TeamID string
+	// Opaque cursor from a previous response's next_cursor.
+	Cursor OptString `json:",omitempty,omitzero"`
+	// Members per page.
+	PerPage OptInt64 `json:",omitempty,omitzero"`
+}
+
+// ListTeamsParams is parameters of listTeams operation.
+type ListTeamsParams struct {
+	OrgId string
+	// Opaque cursor from a previous response's next_cursor.
+	Cursor OptString `json:",omitempty,omitzero"`
+	// Teams per page.
+	PerPage OptInt64 `json:",omitempty,omitzero"`
+}
+
 // LookupRepoBySlugParams is parameters of lookupRepoBySlug operation.
 type LookupRepoBySlugParams struct {
 	// Provider-scoped slug, e.g. gh/acme/oss-lib or et/my-project/my-repo.
@@ -692,6 +736,14 @@ type RemovePluginInstallationRepositoryParams struct {
 	ID string
 	// Public repository id.
 	RepositoryID string
+}
+
+// RemoveTeamMemberParams is parameters of removeTeamMember operation.
+type RemoveTeamMemberParams struct {
+	OrgId  string
+	TeamID string
+	// The account's ID.
+	AccountID string
 }
 
 // ResolveHandleParams is parameters of resolveHandle operation.
@@ -815,6 +867,12 @@ type UpdateBranchProtectionParams struct {
 type UpdateOrgMemberRoleParams struct {
 	OrgId        string
 	MembershipId string
+}
+
+// UpdateTeamParams is parameters of updateTeam operation.
+type UpdateTeamParams struct {
+	OrgId  string
+	TeamID string
 }
 
 // ValidatePluginInstallRedirectParams is parameters of validatePluginInstallRedirect operation.
