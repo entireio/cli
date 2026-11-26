@@ -59,6 +59,11 @@ func (r resumableSession) unresumableReason() string {
 	return "no committed checkpoint"
 }
 
+// unresumableSessionMessage explains why the picked session can't be resumed.
+func unresumableSessionMessage(item resumableSession) string {
+	return fmt.Sprintf("Session %s can't be resumed: %s.", tuiutil.SanitizeDisplayLine(item.state.SessionID), item.unresumableReason())
+}
+
 // runResumePicker lists stopped sessions across all worktrees and lets the user
 // pick one to resume. Selecting a session checks out its branch (or, when the
 // branch is already checked out in another worktree, points there), restores its
@@ -139,7 +144,7 @@ func runResumePicker(ctx context.Context, cmd *cobra.Command, force bool) error 
 	chosen := items[idx]
 
 	if !chosen.isResumable() {
-		fmt.Fprintf(w, "Session %s can't be resumed: %s.\n", chosen.state.SessionID, chosen.unresumableReason())
+		fmt.Fprintln(w, unresumableSessionMessage(chosen))
 		return nil
 	}
 

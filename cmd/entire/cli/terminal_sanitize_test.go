@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -433,6 +435,9 @@ func TestResumePickerLabels_SanitizeMetadata(t *testing.T) {
 			for _, field := range []string{"prompt", "agent"} {
 				assertSanitizedField(t, unresumable, field)
 			}
+			assertSanitizedField(t, unresumableSessionMessage(resumableSession{state: &strategy.SessionState{
+				SessionID: hostileValue("session", tc.payload),
+			}}), "session")
 
 			info := checkpoint.CheckpointInfo{
 				CheckpointID: cpID,
@@ -500,6 +505,43 @@ func TestForgedStateBodySessionID_Sanitized(t *testing.T) {
 			assertSanitizedField(t, err.Error(), "worktree")
 		})
 	}
+}
+
+// main.go and the other error render sites print returned errors through
+// RenderUserFacingError, and many errors name a stored session ID or carry a
+// server message. The rendered message drops terminal controls but keeps line
+// breaks and tabs, since some errors are multi-line, and the chain still
+// unwraps.
+func TestRenderUserFacingError_SanitizesMessage(t *testing.T) {
+	t.Parallel()
+	sentinel := errors.New("sentinel")
+	for _, tc := range hostileMetadataPayloads {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := fmt.Errorf("session %s is ended: %w", hostileValue("session", tc.payload), sentinel)
+			rendered := RenderUserFacingError(err)
+			require.ErrorIs(t, rendered, sentinel)
+			msg := rendered.Error()
+			assert.NotContains(t, msg, "\x1b", "ESC reached the output")
+			assert.NotContains(t, msg, "example.invalid", "OSC payload reached the output")
+			for _, r := range msg {
+				if r == '\n' || r == '\t' {
+					continue
+				}
+				if unicode.IsControl(r) || unicode.Is(unicode.Bidi_Control, r) {
+					t.Fatalf("rendered error carries %U: %q", r, msg)
+				}
+			}
+			assert.Contains(t, msg, "session-left")
+			assert.Contains(t, msg, "session-right")
+		})
+	}
+
+	t.Run("clean errors render unchanged", func(t *testing.T) {
+		t.Parallel()
+		err := fmt.Errorf("first line\n\tsecond line: %w", sentinel)
+		assert.Same(t, err, RenderUserFacingError(err))
+	})
 }
 
 // Session state is local, but agents write it, and session list, info,
