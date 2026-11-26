@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 
@@ -25,8 +26,8 @@ const (
 	// trailFindingWaitListReserve is kept back from the timeout for listing
 	// the findings once the wait ends.
 	trailFindingWaitListReserve = 5 * time.Second
-	// trailFindingWaitStaleGrace is how long after the first run on the head
-	// is seen that agents whose latest run is still on an older head are taken
+	// trailFindingWaitStaleGrace is how long after the first run on the head,
+	// or the server at the head, is seen that agents whose latest run is still on an older head are taken
 	// as not run by this push (a manual or ready-only agent, say). Runs one
 	// push starts are queued together, well inside this.
 	trailFindingWaitStaleGrace = 60 * time.Second
@@ -34,6 +35,10 @@ const (
 	// for its trail to be created before the wait reports none.
 	trailFindingWaitTrailAppear = 45 * time.Second
 	trailFindingWaitTrailPoll   = 5 * time.Second
+	// trailFindingWaitOverall bounds the agent's repeated waits for one push,
+	// counted from --since: past it the wait reports the findings so far and
+	// tells the agent to stop, so a stuck review agent cannot hold the turn.
+	trailFindingWaitOverall = 10 * time.Minute
 )
 
 // trailAgentRunTerminal lists the agent-run statuses after which a run will
@@ -51,6 +56,24 @@ var trailAgentRunTerminal = map[string]bool{
 type trailFindingWaitOptions struct {
 	Timeout time.Duration
 	Head    string
+	// Since is when the push's waiting began (unix seconds); zero when the
+	// caller sets no overall bound.
+	Since int64
+}
+
+// trailFindingWaitBudget is how long this call may wait: the timeout, cut to
+// what is left of the overall bound when --since is set. last reports that
+// this call ends the waiting for the push, so it must not be run again.
+func trailFindingWaitBudget(opts trailFindingWaitOptions, start time.Time) (timeout time.Duration, last bool) {
+	if opts.Since <= 0 {
+		return opts.Timeout, false
+	}
+	left := time.Unix(opts.Since, 0).Add(trailFindingWaitOverall).Sub(start)
+	if left <= opts.Timeout {
+		// Past the bound, still read once so the report is current.
+		return max(left, min(opts.Timeout, trailFindingWaitPollInterval)), true
+	}
+	return opts.Timeout, false
 }
 
 // trailReviewProgress is how far the change's agents are on one head.
@@ -86,7 +109,8 @@ func (p trailReviewProgress) settled() bool {
 // finished on the head: wantHead, or the server's head when it is empty.
 //
 // An agent with no run on the change that waits for the change to become (or
-// stop being) ready for review will not run on this head, so it is left out.
+// stop being) ready for review will not run on this head, so it is left out,
+// as is one waiting for the next push once other agents have runs on the head.
 // An agent whose latest run is on an older head counts as pending, unless
 // ignoreStale says enough time has passed since runs on this head appeared to
 // take it as one this push does not run. The same goes for an agent with no
@@ -101,10 +125,20 @@ func trailReviewProgressFor(agents []api.TrailAgent, serverHead, wantHead string
 		p.NoHead = true
 		return p
 	}
+	// Runs one push starts are queued together, so once any agent has a run
+	// on the head, an agent still waiting for "the next push" was not started
+	// by this one.
+	runsOnHead := slices.ContainsFunc(agents, func(a api.TrailAgent) bool {
+		return a.LatestRun != nil && sameCommit(stringPtrValue(a.LatestRun.HeadSHA), p.Head)
+	})
 	for _, a := range agents {
 		if a.LatestRun == nil {
-			waitsForReadiness := a.WaitingFor != nil && (*a.WaitingFor == "ready" || *a.WaitingFor == "not_ready")
-			if waitsForReadiness || ignoreStale {
+			waitingFor := ""
+			if a.WaitingFor != nil {
+				waitingFor = *a.WaitingFor
+			}
+			notThisPush := waitingFor == "ready" || waitingFor == "not_ready" || (waitingFor == "push" && runsOnHead)
+			if notThisPush || ignoreStale {
 				continue
 			}
 			p.Total++
@@ -192,10 +226,10 @@ func waitForTrailReview(ctx context.Context, errW io.Writer, poll trailReviewPol
 		last         trailReviewProgress
 		lastErr      error
 		lastProgress time.Time
-		onHeadSince  time.Time
+		atHeadSince  time.Time
 	)
 	for {
-		ignoreStale := !onHeadSince.IsZero() && now().Sub(onHeadSince) >= trailFindingWaitStaleGrace
+		ignoreStale := !atHeadSince.IsZero() && now().Sub(atHeadSince) >= trailFindingWaitStaleGrace
 		pollCtx, cancel := context.WithTimeout(ctx, deadline.Sub(now()))
 		p, err := poll(pollCtx, ignoreStale)
 		hitDeadline := pollCtx.Err() != nil
@@ -213,8 +247,11 @@ func waitForTrailReview(ctx context.Context, errW io.Writer, poll trailReviewPol
 			if p.settled() {
 				return p, nil
 			}
-			if p.OnHead && onHeadSince.IsZero() {
-				onHeadSince = now()
+			// The grace runs from the first read that shows a run on the
+			// head or the server at the head, so a push that starts no run
+			// still settles instead of waiting on older runs for ever.
+			if (p.OnHead || !p.HeadPending) && atHeadSince.IsZero() {
+				atHeadSince = now()
 			}
 		} else {
 			lastErr = err
@@ -255,7 +292,18 @@ func trailReviewProgressLine(p trailReviewProgress, err error) string {
 }
 
 // trailReviewWaitResultLine is the line printed once the wait ends.
-func trailReviewWaitResultLine(p trailReviewProgress) string {
+func trailReviewWaitResultLine(p trailReviewProgress, last bool) string {
+	line := trailReviewWaitStateLine(p)
+	if p.settled() || !p.Read || p.NoAgents || p.NoHead {
+		return line
+	}
+	if last {
+		return line + fmt.Sprintf(" The review has run for over %d minutes: do not run the command again; tell the user which agents have not finished.", int(trailFindingWaitOverall.Minutes()))
+	}
+	return line + " Run the command again to keep waiting."
+}
+
+func trailReviewWaitStateLine(p trailReviewProgress) string {
 	switch {
 	case !p.Read:
 		return "Could not read the review's progress; showing findings so far."
@@ -268,11 +316,11 @@ func trailReviewWaitResultLine(p trailReviewProgress) string {
 	case p.settled():
 		return fmt.Sprintf("Review of %s finished (%d agents).", shortSHA(p.Head), p.Total)
 	case p.HeadPending && p.ServerHead == "":
-		return fmt.Sprintf("The trail has not reached %s yet; showing findings so far. Run the command again to keep waiting.", shortSHA(p.Head))
+		return fmt.Sprintf("The trail has not reached %s yet; showing findings so far.", shortSHA(p.Head))
 	case p.HeadPending:
-		return fmt.Sprintf("The trail is at %s, not %s; showing its findings so far. Run the command again to keep waiting.", shortSHA(p.ServerHead), shortSHA(p.Head))
+		return fmt.Sprintf("The trail is at %s, not %s; showing its findings so far.", shortSHA(p.ServerHead), shortSHA(p.Head))
 	}
-	return fmt.Sprintf("Review of %s still running (%d of %d agents done); showing findings so far. Run the command again to keep waiting.", shortSHA(p.Head), p.Done, p.Total)
+	return fmt.Sprintf("Review of %s still running (%d of %d agents done); showing findings so far.", shortSHA(p.Head), p.Done, p.Total)
 }
 
 // trailFindingWaitSleep is replaced in tests so a wait does not sleep.
@@ -299,6 +347,9 @@ func trailFindingWaitDeadline(start time.Time, timeout time.Duration) time.Time 
 func validateTrailFindingWaitOptions(opts trailFindingWaitOptions) error {
 	if opts.Timeout <= 0 {
 		return errors.New("--timeout must be positive")
+	}
+	if opts.Since < 0 || (opts.Since > 0 && time.Unix(opts.Since, 0).After(time.Now().Add(time.Minute))) {
+		return errors.New("--since must be a past unix time in seconds")
 	}
 	if h := strings.TrimSpace(opts.Head); h != "" && !isCommitSHA(h) {
 		return fmt.Errorf("--head %q is not a commit SHA (7 or more hex characters)", tuiutil.SanitizeTerminalLabel(h))

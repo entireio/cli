@@ -194,6 +194,7 @@ func newTrailFindingWaitCmd(targetOpts *trailReviewTargetOptions) *cobra.Command
 	}
 	cmd.Flags().StringVar(&opts.Head, "head", "", "Wait for the review of this commit (defaults to the trail's head)")
 	cmd.Flags().DurationVar(&opts.Timeout, "timeout", opts.Timeout, "The longest to wait before listing the findings so far")
+	cmd.Flags().Int64Var(&opts.Since, "since", 0, "When waiting for this push began (unix seconds); waits stop 10 minutes after it")
 	return cmd
 }
 
@@ -202,7 +203,14 @@ func runTrailFindingWait(cmd *cobra.Command, mode *trailMode, selector string, o
 	if err != nil {
 		return err
 	}
-	client, target, err := resolveTrailFindingWaitTarget(cmd, mode, selector, start, opts.Timeout)
+	// Every request, from finding the trail to listing its findings, ends by
+	// this call's budget, so the command returns inside the agent's shell
+	// timeout; polling stops a little earlier to leave time for the list.
+	timeout, last := trailFindingWaitBudget(opts, start)
+	ctx, cancel := context.WithDeadline(cmd.Context(), start.Add(timeout))
+	defer cancel()
+	cmd.SetContext(ctx)
+	client, target, err := resolveTrailFindingWaitTarget(cmd, mode, selector, start, timeout)
 	if err != nil {
 		if errors.Is(err, errTrailFindingWaitNoTrail) {
 			fmt.Fprintln(cmd.OutOrStdout(), "No trail for this branch.")
@@ -210,7 +218,7 @@ func runTrailFindingWait(cmd *cobra.Command, mode *trailMode, selector string, o
 		}
 		return err
 	}
-	progress, err := waitForTrailFindings(cmd, client, target, opts, start)
+	progress, err := waitForTrailFindings(cmd, client, target, strings.TrimSpace(opts.Head), trailFindingWaitDeadline(start, timeout), last)
 	if err != nil {
 		return err
 	}
@@ -265,17 +273,15 @@ func resolveTrailFindingWaitTarget(cmd *cobra.Command, mode *trailMode, selector
 
 // waitForTrailFindings waits for the review and reports on stderr how the
 // wait ended.
-func waitForTrailFindings(cmd *cobra.Command, client *api.Client, target trailReviewTarget, opts trailFindingWaitOptions, start time.Time) (trailReviewProgress, error) {
-	head := strings.TrimSpace(opts.Head)
+func waitForTrailFindings(cmd *cobra.Command, client *api.Client, target trailReviewTarget, head string, deadline time.Time, last bool) (trailReviewProgress, error) {
 	poll := func(ctx context.Context, ignoreStale bool) (trailReviewProgress, error) {
 		return fetchTrailReviewProgress(ctx, client, target.Trail.ID, head, ignoreStale)
 	}
-	deadline := trailFindingWaitDeadline(start, opts.Timeout)
 	progress, err := waitForTrailReview(cmd.Context(), cmd.ErrOrStderr(), poll, deadline, time.Now, trailFindingWaitSleep)
 	if err != nil {
 		return progress, err
 	}
-	fmt.Fprintln(cmd.ErrOrStderr(), trailReviewWaitResultLine(progress))
+	fmt.Fprintln(cmd.ErrOrStderr(), trailReviewWaitResultLine(progress, last))
 	return progress, nil
 }
 

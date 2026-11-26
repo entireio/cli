@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -84,6 +86,12 @@ func TestTrailReviewProgressFor(t *testing.T) {
 		{name: "agent waiting for push is pending", serverHead: waitTestHead, done: 0, total: 1, agents: []api.TrailAgent{
 			waitTestAgent("risk", "", "", "push"),
 		}},
+		{name: "agent waiting for push is left out once others run on the head", serverHead: waitTestHead, done: 1, total: 1, settled: true, agents: []api.TrailAgent{
+			waitTestAgent("risk", "succeeded", waitTestHead, ""), waitTestAgent("code review", "", "", "push"),
+		}},
+		{name: "agent waiting for push stays pending while runs are only on an older head", serverHead: waitTestHead, done: 0, total: 2, agents: []api.TrailAgent{
+			waitTestAgent("risk", "succeeded", waitTestOld, ""), waitTestAgent("code review", "", "", "push"),
+		}},
 		{name: "server behind the requested head", serverHead: waitTestOld, want: waitTestHead[:10], done: 0, total: 1, headPending: true, agents: []api.TrailAgent{
 			waitTestAgent("risk", "succeeded", waitTestOld, ""),
 		}},
@@ -127,7 +135,7 @@ func TestWaitForTrailReviewAllReadsFailing(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, p.settled())
 	require.Contains(t, errW.String(), "Warning: could not read the review's progress")
-	require.Contains(t, trailReviewWaitResultLine(p), "Could not read the review's progress")
+	require.Contains(t, trailReviewWaitResultLine(p, false), "Could not read the review's progress")
 }
 
 func TestSameCommit(t *testing.T) {
@@ -144,6 +152,7 @@ func TestValidateTrailFindingWaitOptions(t *testing.T) {
 	t.Parallel()
 	require.NoError(t, validateTrailFindingWaitOptions(trailFindingWaitOptions{Timeout: time.Second}))
 	require.ErrorContains(t, validateTrailFindingWaitOptions(trailFindingWaitOptions{}), "positive")
+	require.ErrorContains(t, validateTrailFindingWaitOptions(trailFindingWaitOptions{Timeout: time.Second, Since: time.Now().Add(time.Hour).Unix()}), "past unix time")
 	require.ErrorContains(t, validateTrailFindingWaitOptions(trailFindingWaitOptions{Timeout: time.Second, Head: "main"}), "not a commit SHA")
 	require.NoError(t, validateTrailFindingWaitOptions(trailFindingWaitOptions{Timeout: time.Second, Head: waitTestHead[:7]}))
 }
@@ -195,12 +204,31 @@ func TestWaitForTrailReviewStopsAtDeadline(t *testing.T) {
 	require.False(t, p.settled())
 	require.Equal(t, 4, polls, "polls at 0s, 15s, 30s and 40s")
 	require.Equal(t, time.Unix(40, 0), clock.now, "the last sleep is cut to the deadline")
-	require.Contains(t, trailReviewWaitResultLine(p), "still running (0 of 1 agents done)")
+	require.Contains(t, trailReviewWaitResultLine(p, false), "still running (0 of 1 agents done)")
 }
 
 // TestWaitForTrailReviewIgnoresStaleAfterGrace: an agent this push does not
 // run keeps its finished run on the older head; once runs on the head have
 // been seen for the grace period, the wait stops counting it.
+// TestWaitForTrailReviewSettlesWhenPushStartsNoRun: the server is at the
+// pushed head but no agent ever runs on it (their runs stay on the older
+// head). The grace starts from the server reaching the head, so the wait
+// settles instead of telling the agent to run it again for ever.
+func TestWaitForTrailReviewSettlesWhenPushStartsNoRun(t *testing.T) {
+	t.Parallel()
+	clock := &fakeWaitClock{now: time.Unix(0, 0)}
+	poll := func(_ context.Context, ignoreStale bool) (trailReviewProgress, error) {
+		return trailReviewProgressFor([]api.TrailAgent{
+			waitTestAgent("early", "succeeded", waitTestOld, ""),
+		}, waitTestHead, waitTestHead, ignoreStale), nil
+	}
+	p, err := waitForTrailReview(context.Background(), &bytes.Buffer{}, poll, clock.now.Add(10*time.Minute), clock.Now, clock.Sleep)
+	require.NoError(t, err)
+	require.True(t, p.settled())
+	require.Equal(t, 0, p.Total)
+	require.Equal(t, "No review agent runs on this commit; showing the trail's findings.", trailReviewWaitResultLine(p, false))
+}
+
 func TestWaitForTrailReviewIgnoresStaleAfterGrace(t *testing.T) {
 	t.Parallel()
 	clock := &fakeWaitClock{now: time.Unix(0, 0)}
@@ -251,11 +279,57 @@ func TestWaitForTrailReviewCancellation(t *testing.T) {
 
 func TestTrailReviewWaitResultLine(t *testing.T) {
 	t.Parallel()
-	assert.Contains(t, trailReviewWaitResultLine(trailReviewProgress{Read: true, NoAgents: true}), "does not report its review agents")
-	assert.Contains(t, trailReviewWaitResultLine(trailReviewProgress{Read: true, Head: waitTestHead}), "No review agent runs on this commit")
-	assert.Equal(t, "Review of 11111111 finished (2 agents).", trailReviewWaitResultLine(trailReviewProgress{Read: true, Head: waitTestHead, Done: 2, Total: 2}))
-	assert.Contains(t, trailReviewWaitResultLine(trailReviewProgress{Read: true, Head: waitTestHead, HeadPending: true, Total: 1}), "has not reached 11111111")
-	assert.Contains(t, trailReviewWaitResultLine(trailReviewProgress{Read: true, Head: waitTestHead, ServerHead: waitTestOld, HeadPending: true, Total: 1}), "trail is at 22222222, not 11111111")
+	assert.Contains(t, trailReviewWaitResultLine(trailReviewProgress{Read: true, NoAgents: true}, false), "does not report its review agents")
+	assert.Contains(t, trailReviewWaitResultLine(trailReviewProgress{Read: true, Head: waitTestHead}, false), "No review agent runs on this commit")
+	assert.Equal(t, "Review of 11111111 finished (2 agents).", trailReviewWaitResultLine(trailReviewProgress{Read: true, Head: waitTestHead, Done: 2, Total: 2}, false))
+	assert.Contains(t, trailReviewWaitResultLine(trailReviewProgress{Read: true, Head: waitTestHead, HeadPending: true, Total: 1}, false), "has not reached 11111111")
+	assert.Contains(t, trailReviewWaitResultLine(trailReviewProgress{Read: true, Head: waitTestHead, ServerHead: waitTestOld, HeadPending: true, Total: 1}, false), "trail is at 22222222, not 11111111")
+}
+
+func TestTrailReviewWaitResultLineLastCall(t *testing.T) {
+	t.Parallel()
+	running := trailReviewProgress{Read: true, Head: waitTestHead, Done: 1, Total: 2}
+	assert.Contains(t, trailReviewWaitResultLine(running, false), "Run the command again to keep waiting.")
+	last := trailReviewWaitResultLine(running, true)
+	assert.Contains(t, last, "still running (1 of 2 agents done)")
+	assert.Contains(t, last, "do not run the command again")
+	assert.NotContains(t, last, "Run the command again")
+	finished := trailReviewProgress{Read: true, Head: waitTestHead, Done: 2, Total: 2}
+	assert.Equal(t, "Review of 11111111 finished (2 agents).", trailReviewWaitResultLine(finished, true))
+}
+
+func TestTrailFindingWaitBudget(t *testing.T) {
+	t.Parallel()
+	start := time.Unix(1_700_000_000, 0)
+	timeout, last := trailFindingWaitBudget(trailFindingWaitOptions{Timeout: 110 * time.Second}, start)
+	assert.Equal(t, 110*time.Second, timeout)
+	assert.False(t, last, "without --since there is no overall bound")
+
+	since := start.Add(-time.Minute).Unix()
+	timeout, last = trailFindingWaitBudget(trailFindingWaitOptions{Timeout: 110 * time.Second, Since: since}, start)
+	assert.Equal(t, 110*time.Second, timeout)
+	assert.False(t, last)
+
+	since = start.Add(-trailFindingWaitOverall + time.Minute).Unix()
+	timeout, last = trailFindingWaitBudget(trailFindingWaitOptions{Timeout: 110 * time.Second, Since: since}, start)
+	assert.Equal(t, time.Minute, timeout, "the call is cut to what is left")
+	assert.True(t, last)
+
+	since = start.Add(-time.Hour).Unix()
+	timeout, last = trailFindingWaitBudget(trailFindingWaitOptions{Timeout: 110 * time.Second, Since: since}, start)
+	assert.Equal(t, trailFindingWaitPollInterval, timeout, "past the bound it still reads once")
+	assert.True(t, last)
+}
+
+// TestTrailFindingWaitStopsAfterOverallBound: a review still running past
+// the overall bound is reported with an instruction to stop, not to rerun.
+func TestTrailFindingWaitStopsAfterOverallBound(t *testing.T) {
+	// Serial: replaces the package wait sleep and global clients.
+	serveWaitTestTrail(t, math.MaxInt32, waitTestAgentsJSON(t))
+	since := time.Now().Add(-trailFindingWaitOverall - time.Minute).Unix()
+	out, errOut := runWaitTestCommand(t, "--since", strconv.FormatInt(since, 10), "--timeout", "1s")
+	require.Contains(t, errOut, "do not run the command again")
+	require.Contains(t, out, "finding-one")
 }
 
 // serveWaitTestTrail serves a legacy repository trail whose one agent's run

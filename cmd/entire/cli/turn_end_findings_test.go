@@ -28,8 +28,9 @@ import (
 func TestFindingsContinuationReason(t *testing.T) {
 	t.Parallel()
 	head := "0123456789abcdef0123456789abcdef01234567"
-	reason := findingsContinuationReason(branchUpstream{Branch: "feature/x\x1b[31m", Head: head})
-	assert.Contains(t, reason, "`entire trail finding wait --head "+head+"`")
+	reason := findingsContinuationReason(branchUpstream{Branch: "feature/x\x1b[31m", Head: head}, time.Unix(1700000000, 0))
+	assert.Contains(t, reason, "`entire trail finding wait --head "+head+" --since 1700000000`")
+	assert.Contains(t, reason, "each time it says to run the command again")
 	assert.Contains(t, reason, "you are waiting for the trail's review")
 	assert.Contains(t, reason, "report the trail first")
 	assert.Contains(t, reason, "each review agent's reading")
