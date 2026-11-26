@@ -76,6 +76,31 @@ func (b *TranscriptBuilder) AddToolUse(toolName, filePath, content string) strin
 	return toolUseID
 }
 
+// AddBashToolUse adds a Bash tool use running command, and its result
+// carrying output.
+func (b *TranscriptBuilder) AddBashToolUse(command, output string) {
+	b.toolUseCounter++
+	toolUseID := fmt.Sprintf("toolu_%d", b.toolUseCounter)
+	b.messages = append(b.messages, map[string]interface{}{
+		"uuid": fmt.Sprintf("asst-%d", len(b.messages)+1),
+		"type": roleAssistant,
+		"message": map[string]interface{}{
+			"content": []interface{}{map[string]interface{}{
+				"type": blockTypeToolUse, "id": toolUseID, "name": "Bash",
+				"input": map[string]interface{}{"command": command},
+			}},
+		},
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
+	}, map[string]interface{}{
+		"uuid": fmt.Sprintf("user-%d", len(b.messages)+2),
+		"type": roleUser,
+		"message": map[string]interface{}{
+			"content": []map[string]interface{}{{"type": blockTypeToolResult, "tool_use_id": toolUseID, "content": output}},
+		},
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
+	})
+}
+
 // AddToolResult adds a tool result for a previous tool use.
 func (b *TranscriptBuilder) AddToolResult(toolUseID string) {
 	b.messages = append(b.messages, map[string]interface{}{

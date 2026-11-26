@@ -427,13 +427,26 @@ func withLinkedRepos(ctx context.Context, opts *cpkg.WriteOptions, state *Sessio
 	state.CrossRepoLinksCondensed = len(all)
 }
 
-// crossRepoLastLinkFile, in a repository's git common dir, names the session
-// homed elsewhere that its last marker checkpoint linked to (for status).
-const crossRepoLastLinkFile = "entire-cross-repo-session.json"
+// crossRepoLastLinkFile, in a repository's git common dir, names the sessions
+// homed elsewhere that its marker checkpoints most recently linked to (for
+// status), most recent first.
+const crossRepoLastLinkFile = "entire-cross-repo-sessions.json"
+
+// maxCrossRepoRecent bounds the sessions crossRepoLastLinkFile keeps.
+const maxCrossRepoRecent = 3
 
 type crossRepoLastLink struct {
 	SessionID string `json:"session_id"`
 	HomeRepo  string `json:"home_repo"`
+}
+
+func readCrossRepoLastLinks(root *os.Root) []crossRepoLastLink {
+	var links []crossRepoLastLink
+	data, err := osroot.ReadFileNoFollow(root, crossRepoLastLinkFile)
+	if err != nil || json.Unmarshal(data, &links) != nil {
+		return nil
+	}
+	return links
 }
 
 func recordCrossRepoLastLink(ctx context.Context, link crossRepoLastLink) {
@@ -441,23 +454,38 @@ func recordCrossRepoLastLink(ctx context.Context, link crossRepoLastLink) {
 	if err != nil {
 		return
 	}
-	if data, err := json.Marshal(link); err == nil {
+	links := []crossRepoLastLink{link}
+	for _, prior := range readCrossRepoLastLinks(root) {
+		if prior.SessionID != link.SessionID && len(links) < maxCrossRepoRecent {
+			links = append(links, prior)
+		}
+	}
+	if data, err := json.Marshal(links); err == nil {
 		_ = jsonutil.WriteFileAtomicIn(root, crossRepoLastLinkFile, data, 0o600) //nolint:errcheck // status only
 	}
 }
 
-// CrossRepoStatus describes cross-repository linking for `entire status`:
-// the session homed elsewhere whose live agent links commits here (empty when
-// none), and how many other repositories this repository's sessions committed
-// in.
-func CrossRepoStatus(ctx context.Context) (inboundSession, inboundHome string, outboundRepos int) {
+// CrossRepoInbound is a session homed in another repository that commits
+// here were linked to, and whether its agent is still running.
+type CrossRepoInbound struct {
+	SessionID string
+	HomeRepo  string
+	Live      bool
+}
+
+// CrossRepoStatus describes cross-repository linking for `entire status`: the
+// sessions homed elsewhere that commits here most recently linked to, from
+// this repository's own records (most recent first), and how many other
+// repositories this repository's sessions committed in.
+func CrossRepoStatus(ctx context.Context) (inbound []CrossRepoInbound, outboundRepos int) {
 	root, err := gitdir.Open(ctx)
 	if err != nil {
-		return "", "", 0
+		return nil, 0
 	}
-	var last crossRepoLastLink
-	if data, err := osroot.ReadFileNoFollow(root, crossRepoLastLinkFile); err == nil && json.Unmarshal(data, &last) == nil && liveCrossRepoSession(last.SessionID) {
-		inboundSession, inboundHome = last.SessionID, last.HomeRepo
+	for _, link := range readCrossRepoLastLinks(root) {
+		if link.SessionID != "" {
+			inbound = append(inbound, CrossRepoInbound{SessionID: link.SessionID, HomeRepo: link.HomeRepo, Live: liveCrossRepoSession(link.SessionID)})
+		}
 	}
 	repos := map[string]bool{}
 	entries, _ := osroot.ReadDirNoSymlinks(root, ".") //nolint:errcheck // none on error
@@ -470,7 +498,7 @@ func CrossRepoStatus(ctx context.Context) (inboundSession, inboundHome string, o
 			repos[link.RepoKey] = true
 		}
 	}
-	return inboundSession, inboundHome, len(repos)
+	return inbound, len(repos)
 }
 
 // liveCrossRepoSession reports whether a pointer names sessionID and its owner

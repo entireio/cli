@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
@@ -27,15 +28,28 @@ import (
 // crossRepoLinkTimeout bounds one repository's install and sweep.
 const crossRepoLinkTimeout = 30 * time.Second
 
+// crossRepoActivity is what a session did outside its repository, as its
+// hooks and transcript show: files its edit tools changed, directories its
+// shell commands worked in, and the commits `git commit` reported.
+type crossRepoActivity struct {
+	edited  []string // absolute paths
+	dirs    []string // absolute paths
+	commits []string // abbreviated SHAs
+}
+
+func (a crossRepoActivity) empty() bool {
+	return len(a.edited) == 0 && len(a.dirs) == 0
+}
+
 // linkSessionInOtherRepos is the agent-hook side of cross-repository linking
-// (global enable only): for each other git repository the session edited
-// files in (edited, absolute paths), it runs `entire hooks git link-session`
-// there, which installs Entire's git hooks so the agent's next commits link
-// to the session, and with sweep records links for commits already made this
-// turn. Without sweep (mid-turn tool events) a repository whose hooks are
-// already installed is left alone. Best effort.
-func linkSessionInOtherRepos(ctx context.Context, sessionID, hookRoot string, edited []string, sweep bool) {
-	if len(edited) == 0 || validation.ValidateSessionID(sessionID) != nil || !settings.UserTierEnablesEverywhere(ctx) {
+// (global enable only): for each other git repository the session worked in
+// (act), it runs `entire hooks git link-session` there, which installs
+// Entire's git hooks so the agent's next commits link to the session, and
+// with sweep records links for commits already made this turn. Without sweep
+// (mid-turn tool events) a repository whose hooks are already installed is
+// left alone. Best effort.
+func linkSessionInOtherRepos(ctx context.Context, sessionID, hookRoot string, act crossRepoActivity, sweep bool) {
+	if act.empty() || validation.ValidateSessionID(sessionID) != nil || !settings.UserTierEnablesEverywhere(ctx) {
 		return
 	}
 	hereCommon, err := gitdir.CommonDir(ctx)
@@ -44,36 +58,50 @@ func linkSessionInOtherRepos(ctx context.Context, sessionID, hookRoot string, ed
 	}
 	logCtx := logging.WithComponent(ctx, "cross-repo")
 	since := turnStartTime(ctx, sessionID)
-	for root, rels := range editsByOtherRepo(ctx, hereCommon, edited) {
+	for root, rels := range activityByOtherRepo(ctx, hereCommon, act) {
 		if reason := crossRepoSkipReason(root, hookRoot, crossRepoProtectedDirs()); reason != "" {
-			logging.Info(logCtx, "not linking a repository the session edited",
+			logging.Info(logCtx, "not linking a repository the session worked in",
 				slog.String("repo", root), slog.String("skipped_reason", reason))
 			continue
 		}
 		if !sweep && strategy.IsGitHookInstalledInDir(ctx, root) {
 			continue
 		}
-		runLinkSession(ctx, root, sessionID, hookRoot, since, rels, sweep)
+		runLinkSession(ctx, root, linkSessionArgs{sessionID: sessionID, from: hookRoot, since: since, edited: rels, commits: act.commits, sweep: sweep})
 	}
+}
+
+// linkSessionArgs are `entire hooks git link-session`'s inputs.
+type linkSessionArgs struct {
+	sessionID, from string
+	since           time.Time
+	edited          []string // relative to the repository
+	commits         []string
+	sweep           bool
 }
 
 // runLinkSession runs `entire hooks git link-session` in root: a child
 // process, so every repository-scoped lookup (settings, hooks directory,
 // checkpoint store) resolves there rather than in the session's repository.
-func runLinkSession(ctx context.Context, root, sessionID, hookRoot string, since time.Time, rels []string, sweep bool) {
+func runLinkSession(ctx context.Context, root string, in linkSessionArgs) {
 	exe, err := os.Executable()
 	if err != nil {
 		return
 	}
-	args := []string{hooksCmdName, "git", "link-session", "--session", sessionID, "--from", hookRoot}
-	if !since.IsZero() {
-		args = append(args, "--since", since.Format(time.RFC3339))
+	args := []string{hooksCmdName, hooksGitCmdName, "link-session", "--session", in.sessionID, "--from", in.from}
+	if !in.since.IsZero() {
+		args = append(args, "--since", in.since.Format(time.RFC3339))
 	}
-	if !sweep {
+	if !in.sweep {
 		args = append(args, "--no-sweep")
 	}
-	for _, rel := range rels {
+	for _, rel := range in.edited {
 		args = append(args, "--path", rel)
+	}
+	if in.sweep {
+		for _, sha := range in.commits {
+			args = append(args, "--commit", sha)
+		}
 	}
 	runCtx, cancel := context.WithTimeout(ctx, crossRepoLinkTimeout)
 	defer cancel()
@@ -85,6 +113,79 @@ func runLinkSession(ctx context.Context, root, sessionID, hookRoot string, since
 		logging.Debug(logging.WithComponent(ctx, "cross-repo"), "link-session failed",
 			slog.String("repo", root), slog.String("error", err.Error()))
 	}
+}
+
+// turnCrossRepoActivity is a turn's activity outside the session's
+// repository: the files it edited (edited; a relative path resolves against
+// cwd, the session's worktree) and what its shell commands show, read from
+// the transcript at transcriptRef from the turn's start on.
+func turnCrossRepoActivity(ctx context.Context, transcriptRef, sessionID, cwd string, edited []string) crossRepoActivity {
+	act := crossRepoActivity{edited: absolutePaths(cwd, edited)}
+	if !settings.UserTierEnablesEverywhere(ctx) {
+		return act
+	}
+	data, err := agent.ReadTranscriptFile(transcriptRef)
+	if err != nil {
+		return act
+	}
+	pre, err := LoadPrePromptState(ctx, sessionID)
+	if err != nil {
+		pre = nil
+	}
+	shell := scanShellActivity(data, resolveTranscriptOffset(ctx, pre, sessionID), cwd)
+	act.dirs, act.commits = shell.dirs, shell.commits
+	return act
+}
+
+// absolutePaths resolves relative paths against cwd, dropping them when cwd
+// is not absolute.
+func absolutePaths(cwd string, files []string) []string {
+	var out []string
+	for _, f := range files {
+		switch {
+		case filepath.IsAbs(f):
+			out = append(out, f)
+		case f != "" && filepath.IsAbs(cwd):
+			out = append(out, filepath.Join(cwd, f))
+		}
+	}
+	return out
+}
+
+// linkSubagentInOtherRepos is linkSessionInOtherRepos for a subagent that
+// ended: the files its own transcript shows it edited, and what its shell
+// commands show. Every subagent end runs it, before the task record is
+// completed or not (Claude Code's foreground SubagentStop completes nothing),
+// and the parent's turn end never reads a subagent's shell commands.
+func linkSubagentInOtherRepos(ctx context.Context, ag agent.Agent, event *agent.Event) {
+	if !settings.UserTierEnablesEverywhere(ctx) {
+		return
+	}
+	hookRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return
+	}
+	cwd := event.CWD
+	if !filepath.IsAbs(cwd) {
+		cwd = hookRoot
+	}
+	act := crossRepoActivity{edited: absolutePaths(cwd, event.ModifiedFiles)}
+	transcriptPath := declaredSubagentTranscript(ctx, event)
+	if transcriptPath == "" && event.SessionRef != "" {
+		transcriptPath = ResolveAgentTranscriptPath(filepath.Dir(event.SessionRef), event.SessionID, event.SubagentID)
+	}
+	if transcriptPath != "" {
+		if analyzer, ok := agent.AsTranscriptAnalyzer(ag); ok {
+			if files, _, extractErr := analyzer.ExtractModifiedFilesFromOffset(ctx, transcriptPath, 0); extractErr == nil {
+				act.edited = append(act.edited, absolutePaths(cwd, files)...)
+			}
+		}
+		if data, readErr := agent.ReadTranscriptFile(transcriptPath); readErr == nil {
+			shell := scanShellActivity(data, 0, cwd)
+			act.dirs, act.commits = shell.dirs, shell.commits
+		}
+	}
+	linkSessionInOtherRepos(ctx, event.SessionID, hookRoot, act, true)
 }
 
 // turnStartTime is when this session's current turn started, from its
@@ -101,18 +202,15 @@ func turnStartTime(ctx context.Context, sessionID string) time.Time {
 	return t
 }
 
-// editsByOtherRepo groups the absolute edited paths that lie in another git
-// repository (not one sharing hereCommon) by that repository's worktree root,
-// as paths relative to it.
-func editsByOtherRepo(ctx context.Context, hereCommon string, edited []string) map[string][]string {
+// activityByOtherRepo groups the session's work by the other git
+// repository (not one sharing hereCommon) it lies in, keyed by that
+// repository's worktree root: the edited paths there, relative to it, and an
+// entry with none for a repository only shell commands worked in.
+func activityByOtherRepo(ctx context.Context, hereCommon string, act crossRepoActivity) map[string][]string {
 	type repoDir struct{ top, common string }
 	byDir := map[string]*repoDir{}
-	out := map[string][]string{}
-	for _, path := range edited {
-		if !filepath.IsAbs(path) {
-			continue
-		}
-		dir := existingDir(filepath.Dir(path))
+	repoFor := func(path string) *repoDir {
+		dir := existingDir(path)
 		r, seen := byDir[dir]
 		if !seen {
 			if top, common, ok := repoOf(ctx, dir); ok {
@@ -121,6 +219,17 @@ func editsByOtherRepo(ctx context.Context, hereCommon string, edited []string) m
 			byDir[dir] = r
 		}
 		if r == nil || sameResolvedDir(r.common, hereCommon) {
+			return nil
+		}
+		return r
+	}
+	out := map[string][]string{}
+	for _, path := range act.edited {
+		if !filepath.IsAbs(path) {
+			continue
+		}
+		r := repoFor(filepath.Dir(path))
+		if r == nil {
 			continue
 		}
 		rel, err := filepath.Rel(resolvedPath(r.top), resolvedPath(path))
@@ -128,6 +237,16 @@ func editsByOtherRepo(ctx context.Context, hereCommon string, edited []string) m
 			continue
 		}
 		out[r.top] = append(out[r.top], filepath.ToSlash(rel))
+	}
+	for _, dir := range act.dirs {
+		if !filepath.IsAbs(dir) {
+			continue
+		}
+		if r := repoFor(dir); r != nil {
+			if _, ok := out[r.top]; !ok {
+				out[r.top] = nil
+			}
+		}
 	}
 	return out
 }
@@ -238,7 +357,7 @@ func within(dir, path string) bool {
 // linkSessionInOtherRepos in a repository other than the session's.
 func newHooksGitLinkSessionCmd() *cobra.Command {
 	var sessionID, from, since string
-	var edited []string
+	var edited, commits []string
 	var noSweep bool
 	cmd := &cobra.Command{
 		Use:   "link-session",
@@ -253,18 +372,28 @@ func newHooksGitLinkSessionCmd() *cobra.Command {
 			}
 			g := newGitHookContext(cmd.Context(), "link-session")
 			defer g.span.End()
-			return runLinkSessionHere(g, cmd, sessionID, from, since, edited, noSweep)
+			return runLinkSessionHere(g, cmd, linkSessionFlags{sessionID: sessionID, from: from, since: since, edited: edited, commits: commits, noSweep: noSweep})
 		},
 	}
 	cmd.Flags().StringVar(&sessionID, "session", "", "session ID")
 	cmd.Flags().StringVar(&from, "from", "", "the session's worktree")
 	cmd.Flags().StringVar(&since, "since", "", "turn start (RFC 3339)")
 	cmd.Flags().StringArrayVar(&edited, "path", nil, "a path the session edited here, relative to this repository")
+	cmd.Flags().StringArrayVar(&commits, "commit", nil, "an abbreviated commit SHA the agent's tool output reported")
 	cmd.Flags().BoolVar(&noSweep, "no-sweep", false, "only install the git hooks")
 	return cmd
 }
 
-func runLinkSessionHere(g *gitHookContext, cmd *cobra.Command, sessionID, from, since string, edited []string, noSweep bool) error {
+// linkSessionFlags are link-session's flags.
+type linkSessionFlags struct {
+	sessionID, from, since string
+	edited, commits        []string
+	noSweep                bool
+}
+
+// runLinkSessionHere installs the git hooks unless something blocks it, then
+// sweeps either way: a recorded link needs no hooks.
+func runLinkSessionHere(g *gitHookContext, cmd *cobra.Command, f linkSessionFlags) error {
 	ctx := g.ctx
 	errW := cmd.ErrOrStderr()
 	root, err := paths.WorktreeRoot(ctx)
@@ -276,29 +405,27 @@ func runLinkSessionHere(g *gitHookContext, cmd *cobra.Command, sessionID, from, 
 	case skipped != "":
 		logging.Info(ctx, "not installing git hooks for a session started in another repository",
 			slog.String("repo", root), slog.String("skipped_reason", skipped))
-		return nil
 	case err != nil:
 		logging.Warn(ctx, "could not install git hooks for a session started in another repository",
 			slog.String("repo", root), slog.String("error", err.Error()))
-		return nil
 	case installed:
 		fmt.Fprintf(errW, "[entire] Installed Entire's git hooks in %s so the agent's commits there link to its session (global enable is on); run 'entire disable' there to stop.\n",
 			tuiutil.SanitizeDisplayText(root))
 	}
-	if noSweep {
+	if f.noSweep {
 		return nil
 	}
-	start, err := time.Parse(time.RFC3339, since)
+	start, err := time.Parse(time.RFC3339, f.since)
 	if err != nil {
 		return nil //nolint:nilerr // no turn start, no window to sweep
 	}
-	linked, err := g.strategy.LinkCrossRepoCommits(ctx, sessionID, from, start, edited)
+	linked, err := g.strategy.LinkCrossRepoCommits(ctx, f.sessionID, f.from, start, f.edited, f.commits)
 	if err != nil {
 		logging.Warn(ctx, "could not link commits to a session started in another repository",
 			slog.String("repo", root), slog.String("error", err.Error()))
 	}
 	if linked > 0 {
-		fmt.Fprintf(errW, "[entire] Linked %d commit(s) in %s to session %s.\n", linked, tuiutil.SanitizeDisplayText(root), sessionID)
+		fmt.Fprintf(errW, "[entire] Linked %d commit(s) in %s to session %s.\n", linked, tuiutil.SanitizeDisplayText(root), f.sessionID)
 	}
 	return nil
 }

@@ -49,19 +49,31 @@ func TestAbsoluteToolUsePaths(t *testing.T) {
 	}
 }
 
-func TestEditsByOtherRepo(t *testing.T) {
+func TestActivityByOtherRepo(t *testing.T) {
 	t.Parallel()
-	c, d := t.TempDir(), t.TempDir()
+	c, d, e := t.TempDir(), t.TempDir(), t.TempDir()
 	testutil.InitRepo(t, c)
 	testutil.InitRepo(t, d)
+	testutil.InitRepo(t, e)
 	ctx := context.Background()
 	cCommon := filepath.Join(c, ".git")
-	got := editsByOtherRepo(ctx, cCommon, []string{
+	got := activityByOtherRepo(ctx, cCommon, crossRepoActivity{edited: []string{
 		filepath.Join(c, "own.go"),
 		filepath.Join(d, "pkg", "gone", "x.go"),
 		filepath.Join(d, ".git", "config"),
 		"relative.go",
-	})
+	}, dirs: []string{c, filepath.Join(d, "pkg"), filepath.Join(e, "new.txt")}})
+	if len(got) != 2 {
+		t.Fatalf("got %v, want d and e", got)
+	}
+	for root, rels := range got {
+		if sameResolvedDir(root, e) {
+			if len(rels) != 0 {
+				t.Errorf("e has edits %v; only a shell command worked there", rels)
+			}
+			delete(got, root)
+		}
+	}
 	if len(got) != 1 {
 		t.Fatalf("got %v, want only d", got)
 	}

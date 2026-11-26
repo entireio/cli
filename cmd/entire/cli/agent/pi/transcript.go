@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/internal/entireclient/userdirs"
 	"github.com/entireio/cli/internal/transcript/pijsonl"
 )
 
@@ -109,14 +112,19 @@ func (a *PiAgent) ExtractModifiedFilesFromOffset(_ context.Context, path string,
 				continue
 			}
 			var args struct {
-				Path string `json:"path"`
+				Path     string `json:"path"`
+				FilePath string `json:"file_path"`
 			}
 			if err := json.Unmarshal(item.Arguments, &args); err != nil {
 				continue
 			}
-			if args.Path != "" && !seen[args.Path] {
-				seen[args.Path] = true
-				files = append(files, args.Path)
+			p := args.Path
+			if p == "" {
+				p = args.FilePath
+			}
+			if p = toolPath(p); p != "" && !seen[p] {
+				seen[p] = true
+				files = append(files, p)
 			}
 		}
 	})
@@ -124,6 +132,21 @@ func (a *PiAgent) ExtractModifiedFilesFromOffset(_ context.Context, path string,
 		return files, totalLines, fmt.Errorf("extract modified files: %w", err)
 	}
 	return files, totalLines, nil
+}
+
+// toolPath is a write/edit tool's path as Pi resolves it (path-utils
+// expandPath): without an "@" prefix, and with "~/" as the home directory. A
+// relative path stays relative to the session's directory.
+func toolPath(p string) string {
+	p = strings.TrimPrefix(p, "@")
+	if rest, ok := strings.CutPrefix(p, "~/"); ok {
+		home, err := userdirs.Home()
+		if err != nil {
+			return p
+		}
+		return filepath.Join(home, rest)
+	}
+	return p
 }
 
 // ExtractPrompts returns user-message text from the transcript starting at

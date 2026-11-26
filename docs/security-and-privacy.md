@@ -618,9 +618,10 @@ session's log stays in its home: the other repository gets only a marker.
   another repository looks up its own process ancestors there; the nearest
   match is the committer. A human's commit has no agent ancestor and stays
   unlinked. Pointers of exited agents are removed at the next turn start.
-- **Hooks installed on demand.** When the agent edits a file in another
-  repository (seen at turn end, and on tool events for agents that send them),
-  Entire installs its git hooks there, including pre-push, and prints one line
+- **Hooks installed on demand.** When the agent or a subagent works in another
+  repository (an edit seen at turn end, at subagent end, or on tool events for
+  agents that send them; or a shell command that `cd`s there, runs `git -C`
+  there, or names an absolute path there), Entire installs its git hooks there, including pre-push, and prints one line
   on stderr. It skips repositories outside your home directory, Go's module
   cache, Homebrew, Entire's own directories, submodules or nested checkouts of
   the home, repositories whose hooks directory is outside their git directory
@@ -638,14 +639,18 @@ session's log stays in its home: the other repository gets only a marker.
   (`linked_repos`) and all of them (`session_linked_repos`); `entire checkpoint
   explain` shows them. If the home never commits again, the file still holds
   them.
-- **Commits made before the hooks were there.** At turn end, and at the start
-  of a resumed session whose last turn never ended, Entire records a link
+- **Commits made without the hooks.** At turn end, at subagent end, and at the
+  start of a resumed session whose last turn never ended, Entire records a link
   (never an amend) for commits made during the turn that carry no trailer and
-  change a file the session edited there.
-- `entire status` in the other repository names the session its commits link
-  to; in the home it counts the other repositories. `entire disable --global`
-  lists the repositories whose hooks were installed this way and removes the
-  pointers.
+  either appear by SHA in the agent's tool output (`git commit`'s
+  `[branch sha]` line) or change a file the session edited there. This also
+  runs where installing the hooks was skipped. Shell commands are read from
+  the transcript only to find directories and SHAs; they are not stored.
+- `entire status` in the other repository names the sessions its commits most
+  recently linked to, from that repository's own records, after the agent has
+  exited too; in the home it counts the other repositories. `entire disable
+  --global` lists the repositories (their main worktree) whose hooks were
+  installed this way and removes the pointers.
 
 ## Reporting a vulnerability
 

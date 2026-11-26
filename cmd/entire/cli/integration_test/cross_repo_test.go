@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
@@ -337,5 +338,237 @@ func TestCrossRepo_StatusAndDisableGlobal(t *testing.T) {
 	}
 	if _, err := os.Stat(pointers); !os.IsNotExist(err) {
 		t.Errorf("session pointers left behind: %v", err)
+	}
+}
+
+// newPlainRepo creates, at dir, a repository as `git init` makes one: a main
+// worktree with git's sample hooks and no core.hooksPath (InitRepo sets an
+// absolute one, which hides how git answers for an ordinary repository).
+func (x *crossRepo) newPlainRepo(t *testing.T, dir string) *TestEnv {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	testutil.RunGit(t, dir, "init", "-q")
+	testutil.RunGit(t, dir, "config", "user.name", testAuthorName)
+	testutil.RunGit(t, dir, "config", "user.email", testAuthorEmail)
+	testutil.RunGit(t, dir, "config", "commit.gpgsign", "false")
+	env := envAt(t, dir, x.extra)
+	env.setGitConfigBaseline()
+	env.WriteFile("README.md", "# "+filepath.Base(dir))
+	env.GitAdd("README.md")
+	env.GitCommit("Initial commit")
+	env.GitCheckoutNewBranch("feature/cross")
+	return env
+}
+
+// commitUnhooked commits file in d without running git hooks: a commit made
+// before Entire's hooks were there.
+func commitUnhooked(d *TestEnv, file string) string {
+	d.T.Helper()
+	d.WriteFile(file, "committed: "+file)
+	d.GitAdd(file)
+	d.GitCommit("commit " + file)
+	return d.GetHeadHash()
+}
+
+// assertRecordedLink checks d stores a marker of sessionID recording a link
+// to sha.
+func assertRecordedLink(t *testing.T, d *TestEnv, sessionID, sha string) {
+	t.Helper()
+	for _, info := range listStoredCheckpoints(t, d) {
+		if info.SessionID == sessionID && slices.ContainsFunc(info.LinkedCommits, func(l checkpoint.LinkedCommit) bool { return l.SHA == sha }) {
+			assertMarker(t, d, info.CheckpointID.String(), sessionID, sha)
+			return
+		}
+	}
+	t.Fatalf("%s holds no recorded link of %s to %s: %+v", d.RepoDir, sessionID, sha, listStoredCheckpoints(t, d))
+}
+
+func assertNoRecordedLink(t *testing.T, d *TestEnv, sha string) {
+	t.Helper()
+	for _, info := range listStoredCheckpoints(t, d) {
+		if slices.ContainsFunc(info.LinkedCommits, func(l checkpoint.LinkedCommit) bool { return l.SHA == sha }) {
+			t.Fatalf("%s linked %s, which the agent neither reported nor touched", d.RepoDir, sha)
+		}
+	}
+}
+
+func TestCrossRepo_MainWorktreeWithoutHooksPath(t *testing.T) {
+	t.Parallel()
+	x := newCrossRepo(t, 0)
+	d := x.newPlainRepo(t, filepath.Join(filepath.Dir(x.c.RepoDir), "plain"))
+	sess := x.c.NewSession()
+	x.startTurn(t, sess, "edit and commit in d")
+	edit(t, sess, d, "d1.txt")
+	d1 := commitUnhooked(d, "d1.txt")
+	x.endTurn(t, sess)
+
+	if !strategy.IsGitHookInstalledInDir(context.Background(), d.RepoDir) {
+		t.Fatal("turn end did not install Entire's git hooks in an ordinary repository")
+	}
+	assertRecordedLink(t, d, sess.ID, d1)
+	x.startTurn(t, sess, "commit again")
+	assertAgentCommitLinked(t, d, d, "d2.txt", sess.ID)
+}
+
+func TestCrossRepo_SweepLinksWhenTheInstallIsBlocked(t *testing.T) {
+	t.Parallel()
+	x := newCrossRepo(t, 0)
+	d := x.newPlainRepo(t, filepath.Join(filepath.Dir(x.c.RepoDir), "shared-hooks"))
+	testutil.RunGit(t, d.RepoDir, "config", "core.hooksPath", t.TempDir())
+	d.setGitConfigBaseline()
+	sess := x.c.NewSession()
+	x.startTurn(t, sess, "edit and commit in d")
+	edit(t, sess, d, "blocked.txt")
+	sha := commitUnhooked(d, "blocked.txt")
+	x.endTurn(t, sess)
+
+	if strategy.IsGitHookInstalledInDir(context.Background(), d.RepoDir) {
+		t.Fatal("Entire installed its hooks into a shared hooks directory")
+	}
+	assertRecordedLink(t, d, sess.ID, sha)
+}
+
+func TestCrossRepo_SubagentEditsAndCommitsLink(t *testing.T) {
+	t.Parallel()
+	t.Run("at subagent stop", func(t *testing.T) {
+		t.Parallel()
+		x := newCrossRepo(t, 0)
+		e := x.newPlainRepo(t, filepath.Join(filepath.Dir(x.c.RepoDir), "e"))
+		sess := x.c.NewSession()
+		x.startTurn(t, sess, "delegate")
+		e.WriteFile("sub.txt", "by the subagent")
+		sha := commitUnhooked(e, "sub.txt")
+		sub := sess.CreateSubagentTranscript("agentsub1", []FileChange{{Path: filepath.Join(e.RepoDir, "sub.txt"), Content: "by the subagent"}})
+		if err := x.c.SimulateSubagentStop(SubagentStopInput{SessionID: sess.ID, TranscriptPath: sess.TranscriptPath, AgentID: "agentsub1", AgentTranscriptPath: sub}); err != nil {
+			t.Fatalf("subagent-stop: %v", err)
+		}
+		assertRecordedLink(t, e, sess.ID, sha)
+	})
+	t.Run("at the parent's turn end", func(t *testing.T) {
+		t.Parallel()
+		x := newCrossRepo(t, 0)
+		e := x.newPlainRepo(t, filepath.Join(filepath.Dir(x.c.RepoDir), "e"))
+		sess := x.c.NewSession()
+		x.startTurn(t, sess, "delegate")
+		e.WriteFile("sub.txt", "by the subagent")
+		sha := commitUnhooked(e, "sub.txt")
+		sess.CreateSubagentTranscript("agentsub2", []FileChange{{Path: filepath.Join(e.RepoDir, "sub.txt"), Content: "by the subagent"}})
+		sess.TranscriptBuilder.AddUserMessage("delegate")
+		taskID := sess.TranscriptBuilder.AddTaskToolUse("", "edit e")
+		sess.TranscriptBuilder.AddTaskToolResult(taskID, "agentsub2")
+		if err := sess.TranscriptBuilder.WriteToFile(sess.TranscriptPath); err != nil {
+			t.Fatal(err)
+		}
+		x.endTurn(t, sess)
+		if !strategy.IsGitHookInstalledInDir(context.Background(), e.RepoDir) {
+			t.Error("turn end did not install Entire's git hooks where the subagent edited")
+		}
+		assertRecordedLink(t, e, sess.ID, sha)
+	})
+}
+
+func TestCrossRepo_ShellOnlyWorkLinks(t *testing.T) {
+	t.Parallel()
+	x := newCrossRepo(t, 0)
+	d := x.newPlainRepo(t, filepath.Join(filepath.Dir(x.c.RepoDir), "shell"))
+	sess := x.c.NewSession()
+	x.startTurn(t, sess, "work in d from the shell")
+	human := commitUnhooked(d, "human.txt")
+	agent := commitUnhooked(d, "shell.txt")
+	sess.TranscriptBuilder.AddUserMessage("work in d from the shell")
+	sess.TranscriptBuilder.AddBashToolUse(
+		"cd "+d.RepoDir+" && echo hi > "+filepath.Join(d.RepoDir, "shell.txt")+" && git add -A && git commit -m 'commit shell.txt'",
+		"[feature/cross "+agent[:7]+"] commit shell.txt\n 1 file changed, 1 insertion(+)")
+	if err := sess.TranscriptBuilder.WriteToFile(sess.TranscriptPath); err != nil {
+		t.Fatal(err)
+	}
+	x.endTurn(t, sess)
+
+	if !strategy.IsGitHookInstalledInDir(context.Background(), d.RepoDir) {
+		t.Error("turn end did not install Entire's git hooks where the shell worked")
+	}
+	assertRecordedLink(t, d, sess.ID, agent)
+	assertNoRecordedLink(t, d, human)
+}
+
+func TestCrossRepo_PiAbsolutePathWrite(t *testing.T) {
+	t.Parallel()
+	x := newCrossRepo(t, 0)
+	d := x.newPlainRepo(t, filepath.Join(filepath.Dir(x.c.RepoDir), "pi-d"))
+	const sessionID = "01a21084-8b1e-7096-adef-2b7067b61e6f"
+	sessionFile := filepath.Join(t.TempDir(), "2026-11-25T02-24-11-552Z_"+sessionID+".jsonl")
+	header := `{"type":"session","version":3,"id":"` + sessionID + `","cwd":"` + x.c.RepoDir + `"}` + "\n"
+	if err := os.WriteFile(sessionFile, []byte(header), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := x.c.newHookRunner()
+	piHook := func(hook string, payload map[string]any) {
+		t.Helper()
+		data, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out := runner.runAgentHookWithOutput("pi", hook, data); out.Err != nil {
+			t.Fatalf("pi %s: %v\n%s", hook, out.Err, out.Stderr)
+		}
+	}
+	piHook("before_agent_start", map[string]any{"type": "before_agent_start", "cwd": x.c.RepoDir, "session_file": sessionFile, "session_id": sessionID, "prompt": "write d"})
+
+	target := filepath.Join(d.RepoDir, "pi.txt")
+	d.WriteFile("pi.txt", "from pi")
+	sha := commitUnhooked(d, "pi.txt")
+	turn := `{"type":"message","id":"m1","parentId":null,"message":{"role":"user","content":[{"type":"text","text":"write d"}]}}
+{"type":"message","id":"m2","parentId":"m1","message":{"role":"assistant","content":[{"type":"toolCall","id":"t1","name":"write","arguments":{"path":"` + target + `","content":"from pi"}}]}}
+{"type":"message","id":"m3","parentId":"m2","message":{"role":"toolResult","toolCallId":"t1","toolName":"write","content":[{"type":"text","text":"ok"}]}}
+`
+	f, err := os.OpenFile(sessionFile, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(turn); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	piHook("agent_end", map[string]any{"type": "agent_end", "cwd": x.c.RepoDir, "session_file": sessionFile, "session_id": sessionID})
+
+	if !strategy.IsGitHookInstalledInDir(context.Background(), d.RepoDir) {
+		t.Error("Pi's turn end did not install Entire's git hooks where it wrote")
+	}
+	assertRecordedLink(t, d, sessionID, sha)
+}
+
+func TestCrossRepo_StatusAfterTheAgentExits(t *testing.T) {
+	t.Parallel()
+	x := newCrossRepo(t, 1)
+	d := x.others[0]
+	sess := x.installByTurn(t)
+	assertAgentCommitLinked(t, d, d, "linked.txt", sess.ID)
+	if err := os.RemoveAll(filepath.Join(x.configDir, "session-owners")); err != nil {
+		t.Fatal(err)
+	}
+	if out := d.RunCLI("status"); !strings.Contains(out, "linked to session "+sess.ID) {
+		t.Errorf("status in D forgot the session once its agent was gone:\n%s", out)
+	}
+}
+
+func TestCrossRepo_DisableGlobalNamesTheRepositoryNotTheWorktree(t *testing.T) {
+	t.Parallel()
+	x := newCrossRepo(t, 1)
+	d := x.others[0]
+	wt := filepath.Join(filepath.Dir(d.RepoDir), "dwt")
+	testutil.RunGit(t, d.RepoDir, "worktree", "add", "-q", "-b", "dwt", wt)
+	sess := x.c.NewSession()
+	x.startTurn(t, sess, "edit the worktree")
+	edit(t, sess, envAt(t, wt, x.extra), "wt.txt")
+	x.endTurn(t, sess)
+
+	out := x.c.RunCLI("disable", "--global")
+	if !strings.Contains(out, "  "+d.RepoDir+"\n") {
+		t.Errorf("disable --global does not name the repository %s:\n%s", d.RepoDir, out)
+	}
+	if strings.Contains(out, wt) {
+		t.Errorf("disable --global names the worktree %s:\n%s", wt, out)
 	}
 }

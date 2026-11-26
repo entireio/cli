@@ -137,9 +137,13 @@ func userTierConfiguresWorktree(ctx context.Context) bool {
 // another repository, and in how many other repositories this one's sessions
 // committed (global enable).
 func writeCrossRepoStatus(ctx context.Context, w io.Writer) {
-	inbound, home, outbound := strategy.CrossRepoStatus(ctx)
-	if inbound != "" {
-		fmt.Fprintf(w, "  Agent commits here link to session %s in %s\n", inbound, tuiutil.SanitizeDisplayText(home))
+	inbound, outbound := strategy.CrossRepoStatus(ctx)
+	for _, link := range inbound {
+		verb := "Commits here were linked to"
+		if link.Live {
+			verb = "Agent commits here link to"
+		}
+		fmt.Fprintf(w, "  %s session %s in %s\n", verb, tuiutil.SanitizeDisplayText(link.SessionID), tuiutil.SanitizeDisplayText(link.HomeRepo))
 	}
 	if outbound > 0 {
 		fmt.Fprintf(w, "  Sessions here committed in %d other repositories\n", outbound)

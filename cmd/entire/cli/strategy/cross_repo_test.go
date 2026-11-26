@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
@@ -132,5 +133,78 @@ func TestCrossRepoEditedOverlap(t *testing.T) {
 	}
 	if editedOverlap(committed, []string{"x.go"}) || editedOverlap(committed, nil) {
 		t.Error("overlap without a shared path")
+	}
+}
+
+// plainRepo is a repository as `git init` makes it: a main worktree with git's
+// sample hooks and no core.hooksPath.
+func plainRepo(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	testutil.RunGit(t, dir, "init", "-q")
+	return dir
+}
+
+func TestCrossRepoInstallBlocker_MainWorktreeWithoutHooksPath(t *testing.T) {
+	for name, sub := range map[string]string{"root": "", "subdirectory": "pkg"} {
+		t.Run(name, func(t *testing.T) {
+			dir := plainRepo(t)
+			cwd := filepath.Join(dir, sub)
+			if err := os.MkdirAll(cwd, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Chdir(cwd)
+			ClearHooksDirCache()
+			t.Cleanup(ClearHooksDirCache)
+			if reason := crossRepoInstallBlocker(context.Background()); reason != "" {
+				t.Fatalf("an ordinary repository blocked the install: %q", reason)
+			}
+		})
+	}
+}
+
+func TestCrossRepoInstallBlocker_SharedHooksPathBlocks(t *testing.T) {
+	dir := plainRepo(t)
+	testutil.RunGit(t, dir, "config", "core.hooksPath", t.TempDir())
+	t.Chdir(dir)
+	ClearHooksDirCache()
+	t.Cleanup(ClearHooksDirCache)
+	if reason := crossRepoInstallBlocker(context.Background()); reason == "" {
+		t.Fatal("a hooks directory outside the repository did not block the install")
+	}
+}
+
+func TestCrossRepoInstallOwner_LinkedWorktreeNamesTheRepository(t *testing.T) {
+	dir := plainRepo(t)
+	testutil.RunGit(t, dir, "-c", "user.name=t", "-c", "user.email=t@e", "commit", "-q", "--allow-empty", "-m", "init")
+	wt := filepath.Join(filepath.Dir(dir), filepath.Base(dir)+"-wt")
+	testutil.RunGit(t, dir, "worktree", "add", "-q", "-b", "wt", wt)
+	t.Chdir(wt)
+	got, err := crossRepoInstallOwner(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != dir {
+		t.Fatalf("got %s, want the repository %s", got, dir)
+	}
+}
+
+func TestCrossRepoStatus_RecentSessionsShownAfterTheAgentExits(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	dir := plainRepo(t)
+	t.Chdir(dir)
+	ctx := context.Background()
+	for _, id := range []string{"s1", "s2", "s1"} {
+		recordCrossRepoLastLink(ctx, crossRepoLastLink{SessionID: id, HomeRepo: "home"})
+	}
+	inbound, _ := CrossRepoStatus(ctx)
+	if len(inbound) != 2 || inbound[0].SessionID != "s1" || inbound[1].SessionID != "s2" {
+		t.Fatalf("got %+v, want s1 then s2", inbound)
+	}
+	if inbound[0].Live {
+		t.Error("a session with no pointer reported live")
 	}
 }

@@ -353,7 +353,8 @@ func sweepOtherReposOnResume(ctx context.Context, ag agent.Agent, event *agent.E
 	if err != nil {
 		return
 	}
-	linkSessionInOtherRepos(ctx, event.SessionID, hookRoot, turnEditedPaths(ctx, ag, event.SessionRef, event.SessionID), true)
+	edited := turnEditedPathsFrom(ctx, ag, event.SessionRef, event.SessionID, true)
+	linkSessionInOtherRepos(ctx, event.SessionID, hookRoot, turnCrossRepoActivity(ctx, event.SessionRef, event.SessionID, hookRoot, edited), true)
 }
 
 // codexSessionStartNotice is the Codex SessionStart warning: a project hook
@@ -571,7 +572,7 @@ func handleLifecycleToolUse(ctx context.Context, ag agent.Agent, event *agent.Ev
 	}
 
 	linkSessionInOtherRepos(ctx, event.SessionID, repoRoot,
-		absoluteToolUsePaths(event.CWD, event.ModifiedFiles, event.NewFiles), false)
+		crossRepoActivity{edited: absoluteToolUsePaths(event.CWD, event.ModifiedFiles, event.NewFiles)}, false)
 
 	modified := normalizeToolUsePaths(event.ModifiedFiles, event.CWD, repoRoot)
 	added := normalizeToolUsePaths(event.NewFiles, event.CWD, repoRoot)
@@ -601,18 +602,7 @@ func handleLifecycleToolUse(ctx context.Context, ag agent.Agent, event *agent.Ev
 // absoluteToolUsePaths returns the hook payload's file lists as absolute
 // paths, joining relative ones to eventCWD.
 func absoluteToolUsePaths(eventCWD string, lists ...[]string) []string {
-	var out []string
-	for _, files := range lists {
-		for _, f := range files {
-			switch {
-			case filepath.IsAbs(f):
-				out = append(out, f)
-			case f != "" && filepath.IsAbs(eventCWD):
-				out = append(out, filepath.Join(eventCWD, f))
-			}
-		}
-	}
-	return out
+	return absolutePaths(eventCWD, slices.Concat(lists...))
 }
 
 // normalizeToolUsePaths converts hook-payload paths to repo-root-relative form.
@@ -997,7 +987,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	if sessionID != unknownSessionID {
 		edited := turnEditedPaths(logCtx, ag, transcriptRef, sessionID)
 		elsewhere = uncommittedEditsElsewhere(ctx, strategy.SplitEditsByWorktree(ctx, hookRoot, edited))
-		linkSessionInOtherRepos(ctx, sessionID, hookRoot, edited, true)
+		linkTurnInOtherRepos(logCtx, ag, transcriptRef, sessionID, hookRoot)
 	}
 
 	// Create session metadata directory
@@ -1983,6 +1973,8 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 		}
 		return nil
 	}
+
+	linkSubagentInOtherRepos(logCtx, ag, event)
 
 	if event.Final {
 		return handleSubagentStopFinal(logCtx, ag, event)
@@ -3521,6 +3513,24 @@ func adoptInvestigateEnv(ctx context.Context, state *session.State, expectedAgen
 // out: a subagent's edits in its own throwaway worktree belong to its task
 // record (see strategy.SplitEditsByWorktree). Failures yield none.
 func turnEditedPaths(ctx context.Context, ag agent.Agent, transcriptRef, sessionID string) []string {
+	return turnEditedPathsFrom(ctx, ag, transcriptRef, sessionID, false)
+}
+
+// linkTurnInOtherRepos runs the turn-end cross-repository link and sweep
+// (global enable only), with the subagents' edits too.
+func linkTurnInOtherRepos(ctx context.Context, ag agent.Agent, transcriptRef, sessionID, hookRoot string) {
+	if !settings.UserTierEnablesEverywhere(ctx) {
+		return
+	}
+	edited := turnEditedPathsFrom(ctx, ag, transcriptRef, sessionID, true)
+	linkSessionInOtherRepos(ctx, sessionID, hookRoot, turnCrossRepoActivity(ctx, transcriptRef, sessionID, hookRoot, edited), true)
+}
+
+// turnEditedPathsFrom is turnEditedPaths, with withSubagents also the files
+// the turn's subagents edited, which their own transcripts hold. Worktree
+// following keeps to the main agent's edits (a subagent's other-worktree edits
+// are not recorded for that worktree); cross-repository linking takes both.
+func turnEditedPathsFrom(ctx context.Context, ag agent.Agent, transcriptRef, sessionID string, withSubagents bool) []string {
 	analyzer, ok := agent.AsTranscriptAnalyzer(ag)
 	if !ok {
 		return nil
@@ -3529,7 +3539,16 @@ func turnEditedPaths(ctx context.Context, ag agent.Agent, transcriptRef, session
 	if err != nil {
 		preState = nil
 	}
-	files, _, err := analyzer.ExtractModifiedFilesFromOffset(ctx, transcriptRef, resolveTranscriptOffset(ctx, preState, sessionID))
+	offset := resolveTranscriptOffset(ctx, preState, sessionID)
+	if extractor, ok := agent.AsSubagentAwareExtractor(ag); ok && withSubagents {
+		if data, readErr := agent.ReadTranscriptFile(transcriptRef); readErr == nil {
+			subagentsDir := paths.SubagentsDir(filepath.Dir(transcriptRef), sessionID)
+			if files, extractErr := extractor.ExtractAllModifiedFiles(data, offset, subagentsDir); extractErr == nil {
+				return files
+			}
+		}
+	}
+	files, _, err := analyzer.ExtractModifiedFilesFromOffset(ctx, transcriptRef, offset)
 	if err != nil {
 		return nil
 	}

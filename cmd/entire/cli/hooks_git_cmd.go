@@ -32,6 +32,9 @@ type gitHookContext struct {
 // The perf span ensures all perf.Start calls in strategy methods become child spans,
 // producing a single perf log line per hook with a full timing breakdown.
 // Callers must defer g.span.End() to emit the perf log.
+// hooksGitCmdName is `entire hooks git`, and git's own executable name.
+const hooksGitCmdName = "git"
+
 func newGitHookContext(ctx context.Context, hookName string) *gitHookContext {
 	ctx = logging.WithComponent(ctx, "hooks")
 	ctx, span := perf.Start(ctx, hookName,
@@ -96,7 +99,7 @@ func withHookSession(ctx context.Context) context.Context {
 
 func newHooksGitCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:    "git",
+		Use:    hooksGitCmdName,
 		Short:  "Git hook handlers",
 		Long:   "Commands called by git hooks. These delegate to the current strategy.",
 		Hidden: true, // Internal command, not for direct user use

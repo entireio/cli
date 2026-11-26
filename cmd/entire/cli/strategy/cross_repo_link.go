@@ -114,13 +114,15 @@ const maxCrossRepoSweep = 50
 // LinkCrossRepoCommits records links (a checkpoint naming the commit in
 // LinkedCommits, never an amend) in this repository for commits its hooks did
 // not stamp: made since the turn started (since), carrying no trailer, and
-// changing a path the session edited here (edited, repo-relative). It covers
-// commits made before Entire's git hooks were installed here, and platforms
-// without process ancestry. The session is read from its home repository,
-// homeWorktree. Returns how many commits it linked.
-func (s *ManualCommitStrategy) LinkCrossRepoCommits(ctx context.Context, sessionID, homeWorktree string, since time.Time, edited []string) (int, error) {
+// either named in the agent's tool output (reported, abbreviated SHAs from
+// `git commit`'s summary line) or changing a path the session edited here
+// (edited, repo-relative). A commit meeting neither is a person's, and stays
+// unlinked. It covers commits made before Entire's git hooks were installed
+// here, and platforms without process ancestry. The session is read from its
+// home repository, homeWorktree. Returns how many commits it linked.
+func (s *ManualCommitStrategy) LinkCrossRepoCommits(ctx context.Context, sessionID, homeWorktree string, since time.Time, edited, reported []string) (int, error) {
 	home, err := loadCrossRepoHome(ctx, sessionID, homeWorktree)
-	if errors.Is(err, errNotCrossRepo) || (err == nil && len(edited) == 0) {
+	if errors.Is(err, errNotCrossRepo) || (err == nil && len(edited) == 0 && len(reported) == 0) {
 		return 0, nil
 	}
 	if err != nil {
@@ -150,7 +152,7 @@ func (s *ManualCommitStrategy) LinkCrossRepoCommits(ctx context.Context, session
 			continue
 		}
 		committed := commitFiles(ctx, worktreePath, commit)
-		if !editedOverlap(committed, edited) {
+		if !reportedCommit(sha, reported) && !editedOverlap(committed, edited) {
 			continue
 		}
 		cpID, err := id.Generate()
@@ -169,6 +171,20 @@ func (s *ManualCommitStrategy) LinkCrossRepoCommits(ctx context.Context, session
 		}
 	}
 	return count, nil
+}
+
+// minReportedSHA is the shortest abbreviation a reported SHA may match by:
+// git's own default.
+const minReportedSHA = 7
+
+// reportedCommit reports whether sha is one of the agent's reported commits.
+func reportedCommit(sha string, reported []string) bool {
+	for _, r := range reported {
+		if len(r) >= minReportedSHA && strings.HasPrefix(sha, strings.ToLower(r)) {
+			return true
+		}
+	}
+	return false
 }
 
 // commitsSince lists HEAD's commits committed at or after since, newest first.
@@ -218,12 +234,41 @@ func EnsureCrossRepoSetup(ctx context.Context) (skipped string, installed bool, 
 	if err != nil || !installed {
 		return "", installed, err
 	}
-	if root, rootErr := paths.WorktreeRoot(ctx); rootErr == nil {
-		if recErr := recordCrossRepoInstall(root); recErr != nil {
+	if owner, ownerErr := crossRepoInstallOwner(ctx); ownerErr == nil {
+		if recErr := recordCrossRepoInstall(owner); recErr != nil {
 			logging.Debug(ctx, "could not record a cross-repository hook install", slog.String("error", recErr.Error()))
 		}
 	}
 	return "", true, nil
+}
+
+// worktreeHooksDir is the active hooks directory, absolute: git answers
+// relative to the directory it ran in, so it runs at this worktree's root.
+func worktreeHooksDir(ctx context.Context) (string, error) {
+	root, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return "", fmt.Errorf("resolve this worktree: %w", err)
+	}
+	hooksDir, err := getHooksDirInPath(ctx, root)
+	if err != nil {
+		return "", err
+	}
+	return absHooksDir(hooksDir)
+}
+
+// crossRepoInstallOwner names the repository an install here went into: the
+// directory holding the git common dir (the main worktree), not a linked
+// worktree, whose hooks are the repository's.
+func crossRepoInstallOwner(ctx context.Context) (string, error) {
+	commonDir, err := gitdir.CommonDir(ctx)
+	if err != nil {
+		return "", fmt.Errorf("resolve the git common dir: %w", err)
+	}
+	commonDir = resolveExisting(commonDir)
+	if filepath.Base(commonDir) == ".git" {
+		return filepath.Dir(commonDir), nil
+	}
+	return commonDir, nil
 }
 
 // crossRepoInstallBlocker reports why Entire must not install its git hooks
@@ -231,7 +276,7 @@ func EnsureCrossRepoSetup(ctx context.Context) (skipped string, installed bool, 
 // (core.hooksPath naming a shared one another tool owns), or hooks Entire did
 // not write.
 func crossRepoInstallBlocker(ctx context.Context) string {
-	hooksDir, err := GetHooksDir(ctx)
+	hooksDir, err := worktreeHooksDir(ctx)
 	if err != nil {
 		return "the hooks directory could not be resolved"
 	}
