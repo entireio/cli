@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
@@ -49,7 +50,11 @@ and use entire. Read-only; speaks newline-delimited JSON-RPC 2.0.`,
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
-			return runMCPServer(c.Context(), rootCmd, c.InOrStdin(), c.OutOrStdout())
+			in, ok := c.InOrStdin().(io.ReadCloser)
+			if !ok {
+				return errors.New("mcp input must support closing to interrupt reads")
+			}
+			return runMCPServer(c.Context(), rootCmd, in, c.OutOrStdout())
 		},
 	}
 }
@@ -82,11 +87,47 @@ type mcpError struct {
 // response, per JSON-RPC. An unparseable line — including a JSON-RPC batch array,
 // which this server does not support — yields a parse error and the server
 // recovers to the next line rather than terminating.
-func runMCPServer(ctx context.Context, rootCmd *cobra.Command, in io.Reader, out io.Writer) error {
+// It takes ownership of in and closes it before returning. Closing in must
+// unblock a pending Read when native cancellation is unavailable. Keeping the
+// scanner on this goroutine avoids abandoning a reader on cancellation.
+func runMCPServer(ctx context.Context, rootCmd *cobra.Command, in io.ReadCloser, out io.Writer) (err error) {
+	closeInput := sync.OnceFunc(func() {
+		_ = in.Close() // shutdown is best-effort; preserve the read or context error
+	})
+	defer closeInput()
+	reader, cancelRead, closeReader, err := newMCPInput(in)
+	if err != nil {
+		return fmt.Errorf("prepare mcp input: %w", err)
+	}
+	defer closeReader()
+	closed := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		if !cancelRead() {
+			closeInput()
+		}
+		close(closed)
+	})
+	defer func() {
+		if !stop() {
+			// AfterFunc's stop does not wait for an already running callback.
+			// Join it before returning ownership to the caller.
+			<-closed
+		}
+		if ctx.Err() != nil {
+			err = fmt.Errorf("mcp server cancelled: %w", ctx.Err())
+		}
+	}()
+	return serveMCPRequests(ctx, rootCmd, reader, out)
+}
+
+func serveMCPRequests(ctx context.Context, rootCmd *cobra.Command, in io.Reader, out io.Writer) error {
 	enc := json.NewEncoder(out)
 	sc := bufio.NewScanner(in)
 	sc.Buffer(make([]byte, 0, 64*1024), maxMCPMessageBytes)
-	for sc.Scan() {
+	for ctx.Err() == nil && sc.Scan() {
+		if ctx.Err() != nil {
+			break
+		}
 		line := bytes.TrimSpace(sc.Bytes())
 		if len(line) == 0 {
 			continue
@@ -137,18 +178,24 @@ func runMCPServer(ctx context.Context, rootCmd *cobra.Command, in io.Reader, out
 			return fmt.Errorf("write mcp response: %w", err)
 		}
 	}
-	if err := sc.Err(); err != nil {
-		// A single line exceeded maxMCPMessageBytes (the scanner can't resynchronize
-		// past an over-long token) or the read failed; report once and stop.
-		if errors.Is(err, bufio.ErrTooLong) {
-			if encErr := enc.Encode(mcpResponse{JSONRPC: jsonRPCVersion, ID: json.RawMessage("null"), Error: &mcpError{Code: -32600, Message: "request too large"}}); encErr != nil {
-				return fmt.Errorf("write mcp oversize response: %w", encErr)
-			}
-			return nil
-		}
-		return fmt.Errorf("read mcp request: %w", err)
+	return finishMCPRead(enc, sc.Err())
+}
+
+// finishMCPRead preserves the transport's EOF and oversized-message behavior
+// separately from request dispatch.
+func finishMCPRead(enc *json.Encoder, err error) error {
+	if err == nil {
+		return nil
 	}
-	return nil
+	// The scanner cannot resynchronize after an oversized token. Report once
+	// and stop; other input errors remain CLI errors.
+	if errors.Is(err, bufio.ErrTooLong) {
+		if encErr := enc.Encode(mcpResponse{JSONRPC: jsonRPCVersion, ID: json.RawMessage("null"), Error: &mcpError{Code: -32600, Message: "request too large"}}); encErr != nil {
+			return fmt.Errorf("write mcp oversize response: %w", encErr)
+		}
+		return nil
+	}
+	return fmt.Errorf("read mcp request: %w", err)
 }
 
 func dispatchMCP(ctx context.Context, rootCmd *cobra.Command, method string, params json.RawMessage) (any, *mcpError) {

@@ -4,8 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
+	"os"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 type mcpTestResp struct {
@@ -25,7 +30,7 @@ func driveMCP(t *testing.T, requests ...string) []mcpTestResp {
 	root := NewRootCmd()
 	in := strings.NewReader(strings.Join(requests, "\n") + "\n")
 	var out bytes.Buffer
-	if err := runMCPServer(context.Background(), root, in, &out); err != nil {
+	if err := runMCPServer(context.Background(), root, io.NopCloser(in), &out); err != nil {
 		t.Fatalf("runMCPServer: %v", err)
 	}
 	var resps []mcpTestResp
@@ -328,7 +333,7 @@ func TestMCPServer_OversizedMessageRejected(t *testing.T) {
 	big := strings.Repeat("x", maxMCPMessageBytes+1024)
 	line := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"agent_help","arguments":{"command":"` + big + `"}}}` + "\n"
 	var out bytes.Buffer
-	if err := runMCPServer(context.Background(), NewRootCmd(), strings.NewReader(line), &out); err != nil {
+	if err := runMCPServer(context.Background(), NewRootCmd(), io.NopCloser(strings.NewReader(line)), &out); err != nil {
 		t.Fatalf("runMCPServer: %v", err)
 	}
 	var resp mcpTestResp
@@ -364,7 +369,7 @@ func TestMCPServer_ParseError(t *testing.T) {
 	t.Parallel()
 	root := NewRootCmd()
 	var out bytes.Buffer
-	if err := runMCPServer(context.Background(), root, strings.NewReader("{not valid json\n"), &out); err != nil {
+	if err := runMCPServer(context.Background(), root, io.NopCloser(strings.NewReader("{not valid json\n")), &out); err != nil {
 		t.Fatalf("runMCPServer: %v", err)
 	}
 	var resp mcpTestResp
@@ -373,5 +378,215 @@ func TestMCPServer_ParseError(t *testing.T) {
 	}
 	if resp.Error == nil || resp.Error.Code != -32700 {
 		t.Errorf("expected parse error -32700, got %+v", resp.Error)
+	}
+}
+
+type mcpObservedInput struct {
+	io.ReadCloser
+
+	entered chan struct{}
+	once    sync.Once
+	closes  int
+}
+
+func (r *mcpObservedInput) Read(p []byte) (int, error) {
+	r.once.Do(func() { close(r.entered) })
+	return r.ReadCloser.Read(p)
+}
+
+func (r *mcpObservedInput) Close() error {
+	r.closes++
+	return r.ReadCloser.Close()
+}
+
+func TestMCPServer_CancelBlockedInput(t *testing.T) {
+	t.Parallel()
+	for _, filePipe := range []bool{false, true} {
+		for _, partial := range []bool{false, true} {
+			name := "memory"
+			if filePipe {
+				name = "wrapped OS pipe"
+			}
+			if partial {
+				name += "/partial"
+			} else {
+				name += "/idle"
+			}
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				var r io.ReadCloser
+				var w io.WriteCloser
+				if filePipe {
+					var err error
+					r, w, err = os.Pipe()
+					if err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					r, w = io.Pipe()
+				}
+				defer r.Close()
+				defer w.Close()
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				input := &mcpObservedInput{ReadCloser: r, entered: make(chan struct{})}
+				done := make(chan error, 1)
+				var out bytes.Buffer
+				root := NewRootCmd()
+				go func() { done <- runMCPServer(ctx, root, input, &out) }()
+				select {
+				case <-input.entered:
+				case <-time.After(5 * time.Second):
+					t.Fatal("server did not read input")
+				}
+				if partial {
+					if _, err := io.WriteString(w, `{"jsonrpc":"2.0","id":1`); err != nil {
+						t.Fatal(err)
+					}
+				}
+				cancel()
+				select {
+				case err := <-done:
+					if !errors.Is(err, context.Canceled) {
+						t.Fatalf("error = %v, want cancellation", err)
+					}
+				case <-time.After(5 * time.Second):
+					_ = w.Close()
+					if err := <-done; !errors.Is(err, context.Canceled) {
+						t.Errorf("error after releasing input = %v, want cancellation", err)
+					}
+					t.Fatal("server required writer close to stop")
+				}
+				if input.closes != 1 {
+					t.Errorf("input closed %d times, want 1", input.closes)
+				}
+				if out.Len() != 0 {
+					t.Errorf("cancellation wrote a protocol response: %s", out.String())
+				}
+			})
+		}
+	}
+}
+
+func TestMCPServer_AlreadyCancelled(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	input := &mcpObservedInput{ReadCloser: io.NopCloser(strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`)), entered: make(chan struct{})}
+	var out bytes.Buffer
+	err := runMCPServer(ctx, NewRootCmd(), input, &out)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want cancellation", err)
+	}
+	select {
+	case <-input.entered:
+		t.Error("read input after cancellation")
+	default:
+	}
+	if input.closes != 1 || out.Len() != 0 {
+		t.Fatalf("closes = %d, output = %q", input.closes, out.String())
+	}
+}
+
+func TestMCPServer_ClosesInputOnReturn(t *testing.T) {
+	t.Parallel()
+	readErr := errors.New("input failed")
+	writeErr := errors.New("output failed")
+	for _, tc := range []struct {
+		name string
+		in   io.ReadCloser
+		out  io.Writer
+		want error
+	}{
+		{"EOF", io.NopCloser(strings.NewReader("")), io.Discard, nil},
+		{"read error", io.NopCloser(mcpErrorReader{readErr}), io.Discard, readErr},
+		{"write error", io.NopCloser(strings.NewReader("{invalid}\n")), mcpErrorWriter{writeErr}, writeErr},
+		{"oversize", io.NopCloser(strings.NewReader(strings.Repeat("x", maxMCPMessageBytes+1))), io.Discard, nil},
+		{"oversize response failure", io.NopCloser(strings.NewReader(strings.Repeat("x", maxMCPMessageBytes+1))), mcpErrorWriter{writeErr}, writeErr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			input := &mcpObservedInput{ReadCloser: tc.in, entered: make(chan struct{})}
+			err := runMCPServer(ctx, NewRootCmd(), input, tc.out)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("error = %v, want %v", err, tc.want)
+			}
+			cancel()
+			if input.closes != 1 {
+				t.Fatalf("closes = %d, want 1", input.closes)
+			}
+		})
+	}
+}
+
+type mcpErrorReader struct{ err error }
+
+func (r mcpErrorReader) Read([]byte) (int, error) { return 0, r.err }
+
+type mcpErrorWriter struct{ err error }
+
+func (w mcpErrorWriter) Write([]byte) (int, error) { return 0, w.err }
+
+// Use the concrete file: wrapping it in mcpObservedInput hides the descriptor
+// and exercises cancelreader's fallback rather than its native polling path.
+func TestMCPServer_CancelNativeInput(t *testing.T) {
+	t.Parallel()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	err = runMCPServer(ctx, NewRootCmd(), r, io.Discard)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %v, want deadline", err)
+	}
+	if _, err := r.Stat(); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("input remains open: %v", err)
+	}
+}
+
+func TestMCPServer_FileInputEOF(t *testing.T) {
+	t.Parallel()
+	for _, device := range []bool{false, true} {
+		name := "regular"
+		if device {
+			name = "null device"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			var input *os.File
+			var err error
+			if device {
+				input, err = os.Open(os.DevNull)
+			} else {
+				input, err = os.CreateTemp(t.TempDir(), "requests")
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer input.Close()
+			if !device {
+				if _, err := io.WriteString(input, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n"); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := input.Seek(0, io.SeekStart); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			var out bytes.Buffer
+			if err := runMCPServer(ctx, NewRootCmd(), input, &out); err != nil {
+				t.Fatal(err)
+			}
+			if !device && !strings.Contains(out.String(), `"id":1`) {
+				t.Fatalf("missing ping response: %s", out.String())
+			}
+		})
 	}
 }
