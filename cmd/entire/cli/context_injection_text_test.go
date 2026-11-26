@@ -159,3 +159,17 @@ func TestEntireContextInjection_TrailsOnly(t *testing.T) {
 		}
 	}
 }
+
+// An Entire-native repository has no pull requests, so its injection does not
+// send agents to `gh pr` and says to give the change's URL instead.
+func TestEntireContextInjection_NativeRepoHasNoPullRequests(t *testing.T) {
+	t.Parallel()
+	native := trailEnablementScope{Forge: nativeCloneForge, Owner: "acme", Repo: "app"}
+	got := entireContextInjection(native, true, true)
+	if strings.Contains(got, "gh pr") {
+		t.Errorf("native injection should not mention gh pr:\n%s", got)
+	}
+	if !strings.Contains(got, "has no pull requests: when the user asks for one, say so and give the change's URL") {
+		t.Errorf("native injection missing the no-pull-request line:\n%s", got)
+	}
+}

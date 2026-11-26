@@ -526,8 +526,12 @@ func entireContextInjection(scope trailEnablementScope, base, trails bool) strin
 		b.WriteString("If it's unclear whether work belongs on an existing trail or a new one, ask the user. ")
 		b.WriteString("For status or links, run `entire trail show` (URL, gates, CI checks) and `entire trail finding` (findings, agent readings), and report them with the change's full URL (…/trails/<P>/changes/<repo>/<n>), not only the trail's. ")
 		b.WriteString("When the work changes, edit the trail's description with `entire trail update` (read the current body first and keep others' text). ")
-		b.WriteString("When saying what a push will open or has opened, name the trail, not only the pull request. ")
-		b.WriteString("When the user asks for a pull request (to open one, or for its link or status), answer with the pull request only, without trail links: on a branch with a trail, Entire already opened a draft pull request, so find it with `gh pr view`; otherwise open one as usual with `gh pr create`. ")
+		if scope.Forge == nativeCloneForge {
+			b.WriteString("This repository is Entire-native and has no pull requests: when the user asks for one, say so and give the change's URL. ")
+		} else {
+			b.WriteString("When saying what a push will open or has opened, name the trail, not only the pull request. ")
+			b.WriteString("When the user asks for a pull request (to open one, or for its link or status), answer with the pull request only, without trail links: on a branch with a trail, Entire already opened a draft pull request, so find it with `gh pr view`; otherwise open one as usual with `gh pr create`. ")
+		}
 		b.WriteString("When referencing a trail or change, include its full URL. ")
 		b.WriteString("Post feedback on a trail as findings (`entire trail finding`), never as trail comments; comments are for people. ")
 	}
