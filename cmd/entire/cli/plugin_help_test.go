@@ -250,6 +250,43 @@ func TestUpgradeInstalledPlugin_BackfillsDescriptionWithoutReinstall(t *testing.
 	}
 }
 
+// An install whose manifest predates agent_help picks the declaration up on
+// an upgrade with nothing to install, even when it already has a description
+// (manifests recorded descriptions before agent_help).
+func TestUpgradeInstalledPlugin_BackfillsAgentHelpWithoutReinstall(t *testing.T) { //nolint:paralleltest // mutates env
+	withIsolatedPluginEnv(t)
+	ctx := context.Background()
+	srv := pluginReleaseServer(t, "0.1.0")
+	meta := fmt.Sprintf("name: demo\ndescription: Demo plugin for tests\nagent_help: true\ndownload_url: \"%s/dl/{tag}/{asset}\"\n", srv.URL)
+	repoURL := newTaggedPluginRepo(t, meta, remoteTestTagOld)
+	if _, err := InstallPluginFromRepo(ctx, repoURL, "", RemoteInstallOptions{}); err != nil {
+		t.Fatalf("InstallPluginFromRepo: %v", err)
+	}
+	m, err := LoadPluginManifest("demo")
+	if err != nil || m == nil {
+		t.Fatalf("LoadPluginManifest = %v, %v", m, err)
+	}
+	m.AgentHelp = false
+	if err := SavePluginManifest(m); err != nil {
+		t.Fatal(err)
+	}
+
+	o, err := UpgradeInstalledPlugin(ctx, "demo")
+	if err != nil || !o.UpToDate {
+		t.Fatalf("UpgradeInstalledPlugin = %+v, %v; want UpToDate", o, err)
+	}
+	m, err = LoadPluginManifest("demo")
+	if err != nil || m == nil {
+		t.Fatalf("LoadPluginManifest = %v, %v", m, err)
+	}
+	if !m.AgentHelp || m.Description != "Demo plugin for tests" {
+		t.Errorf("manifest after upgrade = agent_help %v, description %q; want agent_help backfilled", m.AgentHelp, m.Description)
+	}
+	if got := installedPayload(t); got != "payload-0.1.0" {
+		t.Errorf("payload = %q; backfill must not reinstall", got)
+	}
+}
+
 // Backfill is best effort: metadata without a description, or a repository
 // that can no longer be reached, leaves the description empty and the
 // upgrade outcome unchanged.
