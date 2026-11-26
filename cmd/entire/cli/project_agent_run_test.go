@@ -154,6 +154,22 @@ func TestProjectAgentRunWebURL(t *testing.T) {
 		projectAgentRunWebURL("http://localhost:3000", "et", "a/b", "x&y=z"))
 }
 
+// Serial: sets ENTIRE_WEB_BASE_URL. A run URL built on the web origin passes
+// openInWeb's origin check and survives its re-serialization unchanged.
+func TestProjectAgentRunWebURL_PassesTheOriginCheckUnchanged(t *testing.T) {
+	const base = "https://web.example"
+	t.Setenv(api.WebBaseURLEnvVar, base)
+	for _, tc := range []struct{ host, project, runID string }{
+		{"gh", "acme", agentRunTestID},
+		{"et", "a/b c", "x&y=z #1"},
+	} {
+		built := projectAgentRunWebURL(base, tc.host, tc.project, tc.runID)
+		got, err := validatedWebURL(built)
+		require.NoError(t, err, built)
+		assert.Equal(t, built, got)
+	}
+}
+
 func TestProjectAgentRunShow_WebOpensTheRunsPage(t *testing.T) {
 	// Serial: sets ENTIRE_WEB_BASE_URL and replaces the project agent target
 	// and the webOpenURL seam.
