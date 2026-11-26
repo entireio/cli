@@ -98,7 +98,7 @@ func TestInstallHooks_SessionStartIsGuardedBySessionSwitch(t *testing.T) {
 
 	content := string(data)
 	guard := "if (resetSessionTracking(session.id)) {"
-	hook := `await callHook("session-start", {`
+	hook := `callHook("session-start", {`
 
 	guardIdx := strings.Index(content, guard)
 	hookIdx := strings.Index(content, hook)
