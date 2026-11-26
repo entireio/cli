@@ -3,15 +3,14 @@ package cli
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/spf13/cobra"
 
-	"github.com/entireio/cli/cmd/entire/cli/api"
-	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 )
 
 func newProjectAgentRunShowCmd() *cobra.Command {
@@ -21,8 +20,7 @@ func newProjectAgentRunShowCmd() *cobra.Command {
 		Long: `Show an agent run: the agent and change it reviewed, its status or why it failed,
 and its result. --json prints the whole run, including its findings and events.
 
---web opens the page of the trail the run belongs to, since a run has no page
-of its own yet.`,
+--web opens the run on the project's agent runs page in the Entire web app.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if webRequested(cmd) {
@@ -41,9 +39,9 @@ of its own yet.`,
 	return cmd
 }
 
-// openProjectAgentRunInWeb serves `run show --web`. A run has no page of its
-// own, so it opens the page of the trail the run belongs to: the run is read
-// as usual, then its trail for the server-supplied URL.
+// openProjectAgentRunInWeb serves `run show --web`: it reads the run as
+// usual, so an unknown run errors before anything opens, then opens the run
+// on its project's agent-runs page.
 func openProjectAgentRunInWeb(cmd *cobra.Command, args []string) error {
 	cmd.SilenceUsage = true
 	id, err := projectAgentRunArg(args)
@@ -54,45 +52,19 @@ func openProjectAgentRunInWeb(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	var run api.ProjectAgentRun
-	if err := t.client.ProjectConfigRequest(cmd.Context(), http.MethodGet, t.runPath(id), nil, nil, &run); err != nil {
+	if err := t.client.ProjectConfigRequest(cmd.Context(), http.MethodGet, t.runPath(id), nil, nil, nil); err != nil {
 		return fmt.Errorf("read run %s: %w", id, err)
 	}
-	trailURL, err := t.runTrailURL(cmd.Context(), run)
+	base, err := auth.WebBaseURL()
 	if err != nil {
-		return fmt.Errorf("run %s: %w", id, err)
+		return fmt.Errorf("resolve the Entire web app URL: %w", err)
 	}
-	if err := openInWeb(cmd, trailURL); err != nil {
-		return fmt.Errorf("run %s: its trail has no page to open: %w", id, err)
-	}
-	return nil
+	return openInWeb(cmd, projectAgentRunWebURL(base, t.host, t.project, id))
 }
 
-// runTrailURL is the web URL of the trail run belongs to, as the server
-// supplies it on the trail; empty when the trail carries none. It reads the
-// trail from the project's cell, the one the run was read from.
-func (t *projectAgentTarget) runTrailURL(ctx context.Context, run api.ProjectAgentRun) (string, error) {
-	trailID := run.TrailID
-	if run.Target != nil && run.Target.TrailID != "" {
-		trailID = run.Target.TrailID
-	}
-	if trailID == "" {
-		return "", errors.New("it belongs to no trail, and a run has no page of its own")
-	}
-	if !looksLikeULID(trailID) {
-		return "", fmt.Errorf("unexpected trail ID %q", tuiutil.SanitizeTerminalLabel(trailID))
-	}
-	trail := &projectTrailTarget{
-		Client:    t.client,
-		ProjectID: t.projectID,
-		Host:      t.host,
-		Project:   t.project,
-		BasePath:  projectTrailBasePath(t.host, t.project),
-		TrailID:   trailID,
-	}
-	out, _, err := trail.read(ctx)
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(out.URL), nil
+// projectAgentRunWebURL is a run's page in the web app: the project's agent
+// runs page, <web-origin>/<host>/<project>/-/agents/runs, selecting the run.
+func projectAgentRunWebURL(base, host, project, runID string) string {
+	return strings.TrimRight(base, "/") + "/" + url.PathEscape(host) + "/" + url.PathEscape(project) +
+		"/-/agents/runs?" + url.Values{"runId": {runID}}.Encode()
 }
