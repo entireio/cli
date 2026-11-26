@@ -454,13 +454,16 @@ func resolveWorktreeCandidates(ctx context.Context, worktreePath string, candida
 // post-commit would condense a session idle for days into every commit made
 // here. Only commit linking applies this; amend and post-rewrite still find
 // the sessions they keep the existing links of. A session prepare-commit-msg
-// already linked this commit to is kept (withLinkedSessions).
+// already linked this commit to is kept (withLinkedSessions), and so is, when
+// post-commit condenses into an existing checkpoint, the session that owns it
+// (ownsPreexistingTarget): an amend records no stamp, but its trailer already
+// links that session.
 func withoutIdleSessions(ctx context.Context, worktreePath string, states []*SessionState) []*SessionState {
 	now := time.Now()
 	linked := linkedSessions(ctx)
 	var kept []*SessionState
 	for _, state := range states {
-		if !slices.Contains(linked, state.SessionID) && idleBeyondRecentWindow(state, now) {
+		if !slices.Contains(linked, state.SessionID) && !ownsPreexistingTarget(ctx, state) && idleBeyondRecentWindow(state, now) {
 			logging.Debug(logging.WithComponent(ctx, "checkpoint"),
 				"session matching: fallback session idle beyond the recent window; not linked",
 				slog.String("commit_worktree", worktreePath),

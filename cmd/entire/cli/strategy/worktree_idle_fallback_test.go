@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
@@ -119,6 +121,125 @@ func TestCommitLinking_FallbackKeepsTheSessionsPrepareLinked(t *testing.T) {
 	sessions, err := s.findSessionsForCommitLinking(withLinkedSessions(context.Background(), []string{"linked"}), linkedDir)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"linked"}, linkedSessionIDs(sessions))
+}
+
+// When post-commit condenses into a checkpoint that already exists, the
+// session that owns it is kept by the idle check however idle it is; the
+// other fallback sessions are still judged. Prepare marks no existing target,
+// so there the owner is judged like any other session.
+func TestCommitLinking_FallbackKeepsTheOwnerOfAnExistingTarget(t *testing.T) {
+	mainDir, linkedDir := twoWorktrees(t)
+	ctx := context.Background()
+	s := &ManualCommitStrategy{}
+	dayAgo := time.Now().Add(-24 * time.Hour)
+	target := id.MustCheckpointID("a1b2c3d4e5f6")
+	saveSiblingSession(t, s, mainDir, "owner", session.PhaseIdle, &dayAgo)
+	saveSiblingSession(t, s, mainDir, "stale", session.PhaseIdle, &dayAgo)
+	owner, err := s.loadSessionState(ctx, "owner")
+	require.NoError(t, err)
+	owner.LastCheckpointID = target
+	require.NoError(t, s.saveSessionState(ctx, owner))
+
+	t.Chdir(linkedDir)
+	clearSessionMatchCaches()
+	sessions, err := s.findSessionsForCommitLinking(withPreexistingTarget(ctx, target), linkedDir)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"owner"}, linkedSessionIDs(sessions))
+
+	clearSessionMatchCaches()
+	sessions, err = s.findSessionsForCommitLinking(ctx, linkedDir)
+	require.NoError(t, err)
+	assert.Empty(t, sessions, "with no existing target, the idle owner is a new link and is dropped")
+}
+
+// An amend keeps the amended commit's trailer and stamps nothing, so
+// post-commit condenses the amended-in work into that existing checkpoint for
+// the session that owns it. From a worktree with no session of its own, the
+// owner is kept however idle it has become: the trailer already links it.
+// Judged as a new link, the owner was dropped and its work never reached the
+// checkpoint. A message reused with `commit -C` keeps the trailer the same
+// way and is treated the same, as on main: post-commit cannot tell it from an
+// amend without inferring one from HEAD's reflog.
+func TestCommitHooks_AmendFromSiblingKeepsTheIdleOwner(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		commitArgs []string
+	}{
+		{name: "amend", commitArgs: []string{"--amend"}},
+		{name: "message reused with commit -C"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			homeDir, err := filepath.EvalSymlinks(setupGitRepo(t))
+			require.NoError(t, err, "the recorded home must match git's worktree list")
+			t.Chdir(homeDir)
+			s := NewManualCommitStrategy()
+			setupSessionWithCheckpointAndFile(t, s, homeDir, "sess-sibling", "notes.txt")
+			setLastInteraction := func(last time.Time) {
+				t.Helper()
+				state, err := s.loadSessionState(ctx, "sess-sibling")
+				require.NoError(t, err)
+				state.WorktreePath = homeDir
+				state.Phase = session.PhaseIdle
+				state.LastInteractionTime = &last
+				require.NoError(t, s.saveSessionState(ctx, state))
+			}
+			setLastInteraction(time.Now().Add(-time.Minute))
+
+			siblingDir := addSiblingWorktree(t, homeDir, "commit-wt")
+			t.Chdir(siblingDir)
+			testutil.WriteFile(t, siblingDir, "notes.txt", "agent content for notes.txt")
+			testutil.GitAdd(t, siblingDir, "notes.txt")
+			msg := prepareMessage(t, "add notes\n")
+			cps := checkpointIDs(msg)
+			require.Len(t, cps, 1, "prepare links the recent sibling session: %q", msg)
+			testutil.GitCommit(t, siblingDir, msg)
+			require.NoError(t, NewManualCommitStrategy().PostCommit(ctx))
+			state, err := s.loadSessionState(ctx, "sess-sibling")
+			require.NoError(t, err)
+			require.Equal(t, cps[0], state.LastCheckpointID.String(), "sanity: the session owns the commit's checkpoint")
+
+			// The agent's next turn adds more.txt; then the session sits idle
+			// for a day before the amend takes it in.
+			t.Chdir(homeDir)
+			metadataDir := paths.EntireMetadataDir + "/sess-sibling"
+			testutil.WriteFile(t, homeDir, "more.txt", "agent content for more.txt")
+			testutil.WriteFile(t, homeDir, filepath.Join(metadataDir, paths.TranscriptFileName),
+				testTranscriptPromptResponse+`{"type":"human","message":{"content":"add more"}}`+"\n")
+			require.NoError(t, s.SaveStep(ctx, StepContext{
+				SessionID:     "sess-sibling",
+				NewFiles:      []string{"more.txt"},
+				MetadataDir:   metadataDir,
+				CommitMessage: "Checkpoint 2",
+				AuthorName:    "Test",
+				AuthorEmail:   "test@test.com",
+			}))
+			setLastInteraction(time.Now().Add(-24 * time.Hour))
+
+			t.Chdir(siblingDir)
+			testutil.WriteFile(t, siblingDir, "more.txt", "agent content for more.txt")
+			testutil.GitAdd(t, siblingDir, "more.txt")
+			// git reports source "commit" for both `--amend` and `-C <rev>`.
+			msgFile := filepath.Join(t.TempDir(), "COMMIT_EDITMSG")
+			require.NoError(t, os.WriteFile(msgFile, []byte(msg), 0o600))
+			require.NoError(t, NewManualCommitStrategy().PrepareCommitMsg(ctx, msgFile, "commit"))
+			kept, err := os.ReadFile(msgFile)
+			require.NoError(t, err)
+			require.Equal(t, cps, checkpointIDs(string(kept)), "prepare keeps the trailer")
+			testutil.RunGit(t, siblingDir, append([]string{"commit", "-q", "-F", msgFile}, tt.commitArgs...)...)
+			require.NoError(t, NewManualCommitStrategy().PostCommit(ctx))
+
+			repo, err := OpenRepository(ctx)
+			require.NoError(t, err)
+			defer repo.Close()
+			store, err := s.getPersistentStore(ctx, repo)
+			require.NoError(t, err)
+			summary, err := store.Read(ctx, id.MustCheckpointID(cps[0]))
+			require.NoError(t, err)
+			require.NotNil(t, summary)
+			assert.Contains(t, summary.FilesTouched, "more.txt", "the idle owner's new work reaches the existing checkpoint")
+		})
+	}
 }
 
 // Prepare links a sibling worktree's session that is not idle when it runs,
