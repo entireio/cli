@@ -43,18 +43,18 @@ func (s *ManualCommitStrategy) Reset(ctx context.Context, w, errW io.Writer) err
 		if err := withLockWaitNotice(state.SessionID, errW, SessionLockNoticeDelay, func() error {
 			return s.clearSessionState(ctx, state.SessionID)
 		}); err != nil {
-			fmt.Fprintf(errW, "Warning: failed to clear session state for %s: %v\n", tuiutil.SanitizeTerminalField(state.SessionID), err)
+			fmt.Fprintf(errW, "Warning: failed to clear session state for %s: %v\n", tuiutil.SanitizeDisplayLine(state.SessionID), err)
 			continue
 		}
-		fmt.Fprintf(w, "✓ Cleared session state for %s\n", tuiutil.SanitizeTerminalField(state.SessionID))
+		fmt.Fprintf(w, "✓ Cleared session state for %s\n", tuiutil.SanitizeDisplayLine(state.SessionID))
 	}
 
 	deleted, failed := DeleteLegacyShadowBranches(ctx, legacyBranches)
 	for _, branch := range deleted {
-		fmt.Fprintf(w, "✓ Deleted legacy shadow branch %s\n", tuiutil.SanitizeTerminalField(branch))
+		fmt.Fprintf(w, "✓ Deleted legacy shadow branch %s\n", tuiutil.SanitizeDisplayLine(branch))
 	}
 	for _, branch := range failed {
-		fmt.Fprintf(errW, "Warning: failed to delete legacy shadow branch %s\n", tuiutil.SanitizeTerminalField(branch))
+		fmt.Fprintf(errW, "Warning: failed to delete legacy shadow branch %s\n", tuiutil.SanitizeDisplayLine(branch))
 	}
 	return nil
 }
@@ -89,6 +89,6 @@ func (s *ManualCommitStrategy) ResetSession(ctx context.Context, w, errW io.Writ
 	}); err != nil {
 		return fmt.Errorf("failed to clear session state: %w", err)
 	}
-	fmt.Fprintf(w, "✓ Cleared session state for %s\n", tuiutil.SanitizeTerminalField(sessionID))
+	fmt.Fprintf(w, "✓ Cleared session state for %s\n", tuiutil.SanitizeDisplayLine(sessionID))
 	return nil
 }

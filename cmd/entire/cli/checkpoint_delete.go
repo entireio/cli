@@ -317,7 +317,7 @@ func printCheckpointDeletePlan(w io.Writer, plan *strategy.CheckpointDeletePlan,
 	if len(plan.Sessions) > 0 {
 		fmt.Fprintln(w, "\nSessions in this checkpoint (their token counts are removed with it):")
 		for _, s := range plan.Sessions {
-			fmt.Fprintf(w, "  %s  %s  input %d, output %d tokens\n", tuiutil.SanitizeTerminalField(s.SessionID), tuiutil.SanitizeTerminalField(s.Agent), s.InputTokens, s.OutputTokens)
+			fmt.Fprintf(w, "  %s  %s  input %d, output %d tokens\n", tuiutil.SanitizeDisplayLine(s.SessionID), tuiutil.SanitizeDisplayLine(s.Agent), s.InputTokens, s.OutputTokens)
 		}
 	}
 	if len(plan.SessionStates) > 0 {
@@ -327,14 +327,14 @@ func printCheckpointDeletePlan(w io.Writer, plan *strategy.CheckpointDeletePlan,
 			if s.Active {
 				status = " (session still active)"
 			}
-			fmt.Fprintf(w, "  %s: %s%s\n", tuiutil.SanitizeTerminalField(s.SessionID), strings.Join(s.Fields, ", "), status)
+			fmt.Fprintf(w, "  %s: %s%s\n", tuiutil.SanitizeDisplayLine(s.SessionID), strings.Join(s.Fields, ", "), status)
 		}
 	}
 	if len(plan.OtherLocalCheckpoints) > 0 {
 		fmt.Fprintln(w, "\nOther local checkpoints of these sessions (not deleted; this list is local only,")
 		fmt.Fprintln(w, "and the sessions stay visible on entire.com while these remain):")
 		for _, o := range plan.OtherLocalCheckpoints {
-			fmt.Fprintf(w, "  %s  %s\n", o.CheckpointID, tuiutil.SanitizeTerminalField(strings.Join(o.SessionIDs, ", ")))
+			fmt.Fprintf(w, "  %s  %s\n", o.CheckpointID, tuiutil.SanitizeDisplayLine(strings.Join(o.SessionIDs, ", ")))
 		}
 		if plan.OtherLocalTruncated {
 			fmt.Fprintln(w, "  (scan truncated; there may be more)")

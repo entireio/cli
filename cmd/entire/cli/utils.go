@@ -155,8 +155,8 @@ func runPromptFormThen(ctx context.Context, errOut io.Writer, form *huh.Form, pr
 // Both the command (which embeds a stored session ID) and the prompt come
 // from checkpoint metadata, so they are sanitized for the terminal here.
 func printSessionCommand(w io.Writer, resumeCmd, prompt string, isMulti, isLast bool) {
-	resumeCmd = tuiutil.SanitizeTerminalField(resumeCmd)
-	prompt = tuiutil.SanitizeTerminalField(prompt)
+	resumeCmd = tuiutil.SanitizeDisplayLine(resumeCmd)
+	prompt = tuiutil.SanitizeDisplayLine(prompt)
 	comment := ""
 	if isMulti && isLast {
 		if prompt != "" {

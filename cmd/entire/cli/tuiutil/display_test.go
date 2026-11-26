@@ -50,7 +50,7 @@ func TestSanitizeTerminalLabel_StripsEscapeSequences(t *testing.T) {
 	assert.Equal(t, "ared b", SanitizeTerminalLabel("a\x1b[31mred\x1b[0m b"))
 }
 
-func TestSanitizeTerminalField(t *testing.T) {
+func TestSanitizeDisplayLine_StoredLabels(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name string
@@ -66,11 +66,12 @@ func TestSanitizeTerminalField(t *testing.T) {
 		{"bidi controls", "a\u202egnp\u202cb", "agnpb"},
 		{"line breaks and tabs fold to spaces", "a\nforged\tb", "a forged b"},
 		{"non-ASCII text survives", "Sitzung größe 会话", "Sitzung größe 会话"},
+		{"emoji sequences survive", "fix \U0001F468\u200D\U0001F469\u200D\U0001F467 \U0001F44D\U0001F3FD", "fix \U0001F468\u200D\U0001F469\u200D\U0001F467 \U0001F44D\U0001F3FD"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tt.want, SanitizeTerminalField(tt.in))
+			assert.Equal(t, tt.want, SanitizeDisplayLine(tt.in))
 		})
 	}
 }

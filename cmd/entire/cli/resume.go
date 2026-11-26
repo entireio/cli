@@ -991,7 +991,7 @@ func displayRestoredSessions(w io.Writer, sessions []strategy.RestoredSession) e
 	if len(sessions) > 1 {
 		fmt.Fprintf(w, "\n✓ Restored %d sessions. To continue:\n", len(sessions))
 	} else if len(sessions) == 1 {
-		fmt.Fprintf(w, "✓ Restored session %s.\n", tuiutil.SanitizeTerminalField(sessions[0].SessionID))
+		fmt.Fprintf(w, "✓ Restored session %s.\n", tuiutil.SanitizeDisplayLine(sessions[0].SessionID))
 		fmt.Fprintf(w, "\nTo continue this session:\n")
 	}
 
@@ -1056,7 +1056,7 @@ func restoreSingleSession(ctx context.Context, w io.Writer, ag agent.Agent, sess
 	// on-disk transcript is the live session the user is resuming, so we keep it
 	// and just print the resume command. --force overwrites it from the checkpoint.
 	if !force && sessionLogExists(ag, repoRoot, sessionLogPath) {
-		fmt.Fprintf(w, "Keeping existing local session log for '%s' (use --force to overwrite from checkpoint).\n", tuiutil.SanitizeTerminalField(sessionID))
+		fmt.Fprintf(w, "Keeping existing local session log for '%s' (use --force to overwrite from checkpoint).\n", tuiutil.SanitizeDisplayLine(sessionID))
 		return restored, true, nil
 	}
 
@@ -1087,7 +1087,7 @@ func restoreSingleSession(ctx context.Context, w io.Writer, ag agent.Agent, sess
 	)
 
 	fmt.Fprintf(w, "✓ Session restored to: %s\n", sessionLogPath)
-	fmt.Fprintf(w, "  Session: %s\n", tuiutil.SanitizeTerminalField(sessionID))
+	fmt.Fprintf(w, "  Session: %s\n", tuiutil.SanitizeDisplayLine(sessionID))
 
 	return restored, true, nil
 }
@@ -1111,18 +1111,18 @@ func sessionLogExists(ag agent.Agent, repoRoot, sessionLogPath string) bool {
 func unavailableSessionLogResult(w io.Writer, ag agent.Agent, restored strategy.RestoredSession, sessionLogPath string, force bool) (strategy.RestoredSession, bool, error) {
 	if _, statErr := agent.StatTranscriptFile(sessionLogPath); statErr == nil {
 		if force {
-			fmt.Fprintf(w, "Checkpoint session log for '%s' not available; keeping existing local session log.\n", tuiutil.SanitizeTerminalField(restored.SessionID))
+			fmt.Fprintf(w, "Checkpoint session log for '%s' not available; keeping existing local session log.\n", tuiutil.SanitizeDisplayLine(restored.SessionID))
 		} else {
-			fmt.Fprintf(w, "Keeping existing local session log for '%s' (use --force to overwrite from checkpoint).\n", tuiutil.SanitizeTerminalField(restored.SessionID))
+			fmt.Fprintf(w, "Keeping existing local session log for '%s' (use --force to overwrite from checkpoint).\n", tuiutil.SanitizeDisplayLine(restored.SessionID))
 		}
 		return restored, true, nil
 	} else if !errors.Is(statErr, os.ErrNotExist) {
 		return strategy.RestoredSession{}, false, fmt.Errorf("failed to check existing session log: %w", statErr)
 	}
 
-	fmt.Fprintf(w, "Session '%s' found in commit trailer but session log not available\n", tuiutil.SanitizeTerminalField(restored.SessionID))
+	fmt.Fprintf(w, "Session '%s' found in commit trailer but session log not available\n", tuiutil.SanitizeDisplayLine(restored.SessionID))
 	fmt.Fprintf(w, "\nTo continue this session:\n")
-	fmt.Fprintf(w, "  %s\n", tuiutil.SanitizeTerminalField(ag.FormatResumeCommand(restored.SessionID)))
+	fmt.Fprintf(w, "  %s\n", tuiutil.SanitizeDisplayLine(ag.FormatResumeCommand(restored.SessionID)))
 	return restored, false, nil
 }
 

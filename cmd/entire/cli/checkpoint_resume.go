@@ -265,7 +265,7 @@ func printCheckpointResumeList(w io.Writer, entries []checkpoint.CheckpointInfo,
 		if branch == "" {
 			branch = "-"
 		}
-		fmt.Fprintf(w, "  %s  %s  %s  %s\n", e.CheckpointID, e.CreatedAt.Local().Format("2006-01-02 15:04"), tuiutil.SanitizeTerminalField(branch), checkpointAgentLabel(e))
+		fmt.Fprintf(w, "  %s  %s  %s  %s\n", e.CheckpointID, e.CreatedAt.Local().Format("2006-01-02 15:04"), tuiutil.SanitizeDisplayLine(branch), checkpointAgentLabel(e))
 	}
 	fmt.Fprintln(w, "\nResume one with: entire checkpoint resume <checkpoint-id>")
 }
@@ -302,11 +302,11 @@ func checkpointResumeOptionLabel(e checkpoint.CheckpointInfo, branchIndex map[st
 	if branch == "" {
 		branch = "no local branch"
 	}
-	return fmt.Sprintf("%s · %s · %s · %s", e.CheckpointID.DisplayShort(), tuiutil.SanitizeTerminalField(branch), checkpointAgentLabel(e), timeAgo(e.CreatedAt))
+	return fmt.Sprintf("%s · %s · %s · %s", e.CheckpointID.DisplayShort(), tuiutil.SanitizeDisplayLine(branch), checkpointAgentLabel(e), timeAgo(e.CreatedAt))
 }
 
 func checkpointAgentLabel(e checkpoint.CheckpointInfo) string {
-	if label := tuiutil.SanitizeTerminalField(string(e.Agent)); label != "" {
+	if label := tuiutil.SanitizeDisplayLine(string(e.Agent)); label != "" {
 		return label
 	}
 	return unknownAgentLabel

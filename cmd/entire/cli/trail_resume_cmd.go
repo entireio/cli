@@ -352,7 +352,7 @@ func printTrailRestoredSessionSummary(w io.Writer, sessions []strategy.RestoredS
 	case len(sessions) > 1:
 		fmt.Fprintf(w, "\n✓ Restored %d checkpoint sessions.\n", len(sessions))
 	case len(sessions) == 1:
-		fmt.Fprintf(w, "✓ Restored checkpoint session %s.\n", tuiutil.SanitizeTerminalField(sessions[0].SessionID))
+		fmt.Fprintf(w, "✓ Restored checkpoint session %s.\n", tuiutil.SanitizeDisplayLine(sessions[0].SessionID))
 	}
 	if len(sessions) > 0 && trailRestoredSessionsAreAllReviewOrInvestigation(sessions) {
 		fmt.Fprintln(w, "  Only review/investigation checkpoint sessions were found; these are transcript logs and may not appear as trail UI sessions.")
@@ -777,7 +777,7 @@ func printTrailResumeSessions(w io.Writer, sessions []trailResumeSessionContext,
 		if prompt == "" {
 			prompt = trailResumeNoPrompt
 		} else {
-			prompt = stringutil.TruncateRunes(stringutil.CollapseWhitespace(tuiutil.SanitizeTerminalField(prompt)), 72, "...")
+			prompt = stringutil.TruncateRunes(stringutil.CollapseWhitespace(tuiutil.SanitizeDisplayLine(prompt)), 72, "...")
 		}
 		agent := session.Agent
 		if agent == "" {
@@ -788,9 +788,9 @@ func printTrailResumeSessions(w io.Writer, sessions []trailResumeSessionContext,
 			when = timeAgo(session.LastActive)
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-			tuiutil.SanitizeTerminalField(abbreviate12(session.SessionID)),
-			tuiutil.SanitizeTerminalField(agent),
-			tuiutil.SanitizeTerminalField(session.CheckpointID),
+			tuiutil.SanitizeDisplayLine(abbreviate12(session.SessionID)),
+			tuiutil.SanitizeDisplayLine(agent),
+			tuiutil.SanitizeDisplayLine(session.CheckpointID),
 			when,
 			prompt,
 		)
@@ -949,9 +949,9 @@ func trailRestoredSessionChoiceLabel(session strategy.RestoredSession, isDefault
 	if prompt == "" {
 		prompt = trailResumeNoPrompt
 	} else {
-		prompt = stringutil.TruncateRunes(stringutil.CollapseWhitespace(tuiutil.SanitizeTerminalField(prompt)), 50, "...")
+		prompt = stringutil.TruncateRunes(stringutil.CollapseWhitespace(tuiutil.SanitizeDisplayLine(prompt)), 50, "...")
 	}
-	agentName := strings.TrimSpace(string(session.Agent))
+	agentName := strings.TrimSpace(tuiutil.SanitizeDisplayLine(string(session.Agent)))
 	if agentName == "" {
 		agentName = unknownAgentLabel
 	}
@@ -959,7 +959,7 @@ func trailRestoredSessionChoiceLabel(session strategy.RestoredSession, isDefault
 	if !session.CreatedAt.IsZero() {
 		when = timeAgo(session.CreatedAt)
 	}
-	parts := []string{session.SessionID, prompt, agentName, "last active " + when}
+	parts := []string{tuiutil.SanitizeDisplayLine(session.SessionID), prompt, agentName, "last active " + when}
 	if kindLabel := trailRestoredSessionKindLabel(session.Kind); kindLabel != "" {
 		parts = append(parts, kindLabel)
 	} else if trailRestoredSessionLooksReviewLike(session) {
@@ -968,7 +968,7 @@ func trailRestoredSessionChoiceLabel(session strategy.RestoredSession, isDefault
 	if isDefault {
 		parts = append(parts, "default")
 	}
-	return tuiutil.SanitizeTerminalField(strings.Join(parts, " · "))
+	return strings.Join(parts, " · ")
 }
 
 func trailRestoredSessionKindLabel(kind string) string {
@@ -1069,12 +1069,12 @@ func launchTrailRestoredSession(ctx context.Context, w io.Writer, session strate
 		return nil
 	}
 	if err != nil {
-		fmt.Fprintf(w, "\nCould not launch %s: %v\n", tuiutil.SanitizeTerminalField(resumeCmd), err)
+		fmt.Fprintf(w, "\nCould not launch %s: %v\n", tuiutil.SanitizeDisplayLine(resumeCmd), err)
 		fmt.Fprintf(w, "\nTo continue this session:\n")
 		printSessionCommand(w, resumeCmd, session.Prompt, false, true)
 		return nil
 	}
-	fmt.Fprintf(w, "\nLaunching: %s\n", tuiutil.SanitizeTerminalField(resumeCmd))
+	fmt.Fprintf(w, "\nLaunching: %s\n", tuiutil.SanitizeDisplayLine(resumeCmd))
 	if err := cmd.Run(); err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
@@ -1146,9 +1146,9 @@ func trailResumeSessionOptionLabel(session trailResumeSessionContext) string {
 	if prompt == "" {
 		prompt = trailResumeNoPrompt
 	} else {
-		prompt = stringutil.TruncateRunes(stringutil.CollapseWhitespace(tuiutil.SanitizeTerminalField(prompt)), 50, "...")
+		prompt = stringutil.TruncateRunes(stringutil.CollapseWhitespace(tuiutil.SanitizeDisplayLine(prompt)), 50, "...")
 	}
-	agent := session.Agent
+	agent := tuiutil.SanitizeDisplayLine(session.Agent)
 	if agent == "" {
 		agent = unknownAgentLabel
 	}
@@ -1156,5 +1156,5 @@ func trailResumeSessionOptionLabel(session trailResumeSessionContext) string {
 	if !session.LastActive.IsZero() {
 		when = timeAgo(session.LastActive)
 	}
-	return tuiutil.SanitizeTerminalField(fmt.Sprintf("%s · %s · %s · last active %s", session.SessionID, prompt, agent, when))
+	return fmt.Sprintf("%s · %s · %s · last active %s", tuiutil.SanitizeDisplayLine(session.SessionID), prompt, agent, when)
 }

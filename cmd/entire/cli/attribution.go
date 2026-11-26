@@ -1027,7 +1027,7 @@ func renderAttributionBlame(w io.Writer, result *fileAttributionResult, lineFlag
 // caller's result, which stays unchanged.
 func attributionForTerminal(result *fileAttributionResult) *fileAttributionResult {
 	out := *result
-	out.File = tuiutil.SanitizeTerminalField(result.File)
+	out.File = tuiutil.SanitizeDisplayLine(result.File)
 	out.Lines = make([]attributionLine, len(result.Lines))
 	for i, line := range result.Lines {
 		out.Lines[i] = attributionLineForTerminal(line)
@@ -1043,10 +1043,10 @@ func attributionForTerminal(result *fileAttributionResult) *fileAttributionResul
 
 // attributionLineForTerminal is attributionForTerminal for one line.
 func attributionLineForTerminal(line attributionLine) attributionLine {
-	line.SessionID = tuiutil.SanitizeTerminalField(line.SessionID)
-	line.Agent = tuiutil.SanitizeTerminalField(line.Agent)
-	line.Model = tuiutil.SanitizeTerminalField(line.Model)
-	line.Author = tuiutil.SanitizeTerminalField(line.Author)
+	line.SessionID = tuiutil.SanitizeDisplayLine(line.SessionID)
+	line.Agent = tuiutil.SanitizeDisplayLine(line.Agent)
+	line.Model = tuiutil.SanitizeDisplayLine(line.Model)
+	line.Author = tuiutil.SanitizeDisplayLine(line.Author)
 	line.Content = tuiutil.SanitizeTerminalText(line.Content)
 	if line.Candidates != nil {
 		candidates := make([]attributionCandidate, len(line.Candidates))
@@ -1059,9 +1059,9 @@ func attributionLineForTerminal(line attributionLine) attributionLine {
 }
 
 func attributionContextForTerminal(checkpointContext attributionCheckpointContext) attributionCheckpointContext {
-	checkpointContext.SessionID = tuiutil.SanitizeTerminalField(checkpointContext.SessionID)
-	checkpointContext.Agent = tuiutil.SanitizeTerminalField(checkpointContext.Agent)
-	checkpointContext.Model = tuiutil.SanitizeTerminalField(checkpointContext.Model)
+	checkpointContext.SessionID = tuiutil.SanitizeDisplayLine(checkpointContext.SessionID)
+	checkpointContext.Agent = tuiutil.SanitizeDisplayLine(checkpointContext.Agent)
+	checkpointContext.Model = tuiutil.SanitizeDisplayLine(checkpointContext.Model)
 	return checkpointContext
 }
 
@@ -1210,7 +1210,7 @@ func renderAttributionContentCompact(sty statusStyles, line attributionLine, wid
 
 func renderAttributionLineWhy(w io.Writer, file string, line attributionLine) {
 	line = attributionLineForTerminal(line)
-	file = tuiutil.SanitizeTerminalField(file)
+	file = tuiutil.SanitizeDisplayLine(file)
 	sty := newStatusStyles(w)
 	fmt.Fprintf(w, "\n  %s %d in %s\n", sty.render(sty.bold, "Line"), line.LineNumber, sty.render(sty.bold, file))
 	if line.Content != "" {

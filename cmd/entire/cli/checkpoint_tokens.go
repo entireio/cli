@@ -555,24 +555,24 @@ func writeCheckpointTokensText(w io.Writer, report checkpointTokensReport) {
 	case report.SessionCount > 1:
 		fmt.Fprintf(w, "Sessions:   %d\n", report.SessionCount)
 		if len(report.Agents) > 0 {
-			fmt.Fprintf(w, "Agents:     %s\n", tuiutil.SanitizeTerminalField(strings.Join(report.Agents, ", ")))
+			fmt.Fprintf(w, "Agents:     %s\n", tuiutil.SanitizeDisplayLine(strings.Join(report.Agents, ", ")))
 		}
 		if len(report.Models) > 0 {
-			fmt.Fprintf(w, "Models:     %s\n", tuiutil.SanitizeTerminalField(strings.Join(report.Models, ", ")))
+			fmt.Fprintf(w, "Models:     %s\n", tuiutil.SanitizeDisplayLine(strings.Join(report.Models, ", ")))
 		}
 	case report.SessionID != "":
-		fmt.Fprintf(w, "Session:    %s\n", tuiutil.SanitizeTerminalField(report.SessionID))
+		fmt.Fprintf(w, "Session:    %s\n", tuiutil.SanitizeDisplayLine(report.SessionID))
 		if report.Agent != "" {
-			fmt.Fprintf(w, "Agent:      %s\n", tuiutil.SanitizeTerminalField(report.Agent))
+			fmt.Fprintf(w, "Agent:      %s\n", tuiutil.SanitizeDisplayLine(report.Agent))
 		}
 		if report.Model != "" {
-			fmt.Fprintf(w, "Model:      %s\n", tuiutil.SanitizeTerminalField(report.Model))
+			fmt.Fprintf(w, "Model:      %s\n", tuiutil.SanitizeDisplayLine(report.Model))
 		}
 	case report.Agent != "":
-		fmt.Fprintf(w, "Agent:      %s\n", tuiutil.SanitizeTerminalField(report.Agent))
+		fmt.Fprintf(w, "Agent:      %s\n", tuiutil.SanitizeDisplayLine(report.Agent))
 	}
 	if report.Branch != "" {
-		fmt.Fprintf(w, "Branch:     %s\n", tuiutil.SanitizeTerminalField(report.Branch))
+		fmt.Fprintf(w, "Branch:     %s\n", tuiutil.SanitizeDisplayLine(report.Branch))
 	}
 
 	writeTokenUsageSection(w, report.Tokens)

@@ -923,7 +923,7 @@ func withLockWaitNotice(sessionID string, errW io.Writer, notifyAfter time.Durat
 		case <-time.After(notifyAfter):
 			if errW != nil {
 				fmt.Fprintf(errW, "Waiting for session %s to release its state lock "+
-					"(a checkpoint condensation can hold it for ~30s; Ctrl-C twice to force quit)...\n", tuiutil.SanitizeTerminalField(sessionID))
+					"(a checkpoint condensation can hold it for ~30s; Ctrl-C twice to force quit)...\n", tuiutil.SanitizeDisplayLine(sessionID))
 			}
 		}
 	}()

@@ -127,7 +127,7 @@ func runCleanCurrentHead(ctx context.Context, cmd *cobra.Command, force, dryRun 
 		if len(activeSessions) > 0 {
 			fmt.Fprintln(errW, "Active sessions detected on current HEAD:")
 			for _, s := range activeSessions {
-				fmt.Fprintf(errW, "  %s (phase: %s)\n", tuiutil.SanitizeTerminalField(s.SessionID), tuiutil.SanitizeTerminalField(string(s.Phase)))
+				fmt.Fprintf(errW, "  %s (phase: %s)\n", tuiutil.SanitizeDisplayLine(s.SessionID), tuiutil.SanitizeDisplayLine(string(s.Phase)))
 			}
 			fmt.Fprint(errW, "\nCleaning would delete:\n\n")
 			printCurrentHeadCleanItems(errW, sessions, legacyBranches)
@@ -222,7 +222,7 @@ func printCurrentHeadCleanItems(w io.Writer, sessions []*strategy.SessionState, 
 		fmt.Fprintf(w, "Session states (%d):\n", len(sessions))
 		pending := 0
 		for _, s := range sessions {
-			fmt.Fprintf(w, "  %s (pending turns: %d)\n", tuiutil.SanitizeTerminalField(s.SessionID), s.StepCount)
+			fmt.Fprintf(w, "  %s (pending turns: %d)\n", tuiutil.SanitizeDisplayLine(s.SessionID), s.StepCount)
 			if s.HasPendingWork() {
 				pending++
 			}
@@ -237,7 +237,7 @@ func printCurrentHeadCleanItems(w io.Writer, sessions []*strategy.SessionState, 
 	if len(legacyBranches) > 0 {
 		fmt.Fprintf(w, "Legacy shadow branches (%d):\n", len(legacyBranches))
 		for _, branch := range legacyBranches {
-			fmt.Fprintf(w, "  %s\n", tuiutil.SanitizeTerminalField(branch))
+			fmt.Fprintf(w, "  %s\n", tuiutil.SanitizeDisplayLine(branch))
 		}
 		fmt.Fprintln(w, "  To delete only these branches and keep session state, run `entire doctor --force`.")
 		fmt.Fprintln(w)
@@ -266,15 +266,15 @@ func runCleanSession(ctx context.Context, cmd *cobra.Command, strat *strategy.Ma
 
 	if dryRun {
 		w := cmd.OutOrStdout()
-		fmt.Fprintf(w, "Would %s session %s (phase: %s, pending turns: %d)\n", strings.ToLower(actionVerb), tuiutil.SanitizeTerminalField(sessionID), tuiutil.SanitizeTerminalField(string(state.Phase)), state.StepCount)
+		fmt.Fprintf(w, "Would %s session %s (phase: %s, pending turns: %d)\n", strings.ToLower(actionVerb), tuiutil.SanitizeDisplayLine(sessionID), tuiutil.SanitizeDisplayLine(string(state.Phase)), state.StepCount)
 		return nil
 	}
 
 	if !force {
 		var confirmed bool
 
-		title := fmt.Sprintf("%s session %s?", actionVerb, tuiutil.SanitizeTerminalField(sessionID))
-		description := fmt.Sprintf("Phase: %s, Pending turns: %d", tuiutil.SanitizeTerminalField(string(state.Phase)), state.StepCount)
+		title := fmt.Sprintf("%s session %s?", actionVerb, tuiutil.SanitizeDisplayLine(sessionID))
+		description := fmt.Sprintf("Phase: %s, Pending turns: %d", tuiutil.SanitizeDisplayLine(string(state.Phase)), state.StepCount)
 
 		form := NewAccessibleForm(
 			huh.NewGroup(
@@ -301,7 +301,7 @@ func runCleanSession(ctx context.Context, cmd *cobra.Command, strat *strategy.Ma
 		return fmt.Errorf("%s session failed: %w", strings.ToLower(actionVerb), err)
 	}
 
-	fmt.Fprintf(cmd.OutOrStdout(), "Session %s has been %s. File changes remain in the working directory.\n", tuiutil.SanitizeTerminalField(sessionID), pastVerb)
+	fmt.Fprintf(cmd.OutOrStdout(), "Session %s has been %s. File changes remain in the working directory.\n", tuiutil.SanitizeDisplayLine(sessionID), pastVerb)
 	return nil
 }
 
@@ -359,7 +359,7 @@ func printSection(w io.Writer, title string, items []string) {
 	}
 	fmt.Fprintf(w, "%s (%d):\n", title, len(items))
 	for _, item := range items {
-		fmt.Fprintf(w, "  %s\n", tuiutil.SanitizeTerminalField(item))
+		fmt.Fprintf(w, "  %s\n", tuiutil.SanitizeDisplayLine(item))
 	}
 	fmt.Fprintln(w)
 }
@@ -371,7 +371,7 @@ func printResultSection(w io.Writer, title string, items []string) {
 	}
 	fmt.Fprintf(w, "\n%s (%d):\n", title, len(items))
 	for _, item := range items {
-		fmt.Fprintf(w, "  %s\n", tuiutil.SanitizeTerminalField(item))
+		fmt.Fprintf(w, "  %s\n", tuiutil.SanitizeDisplayLine(item))
 	}
 }
 
@@ -477,7 +477,7 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 		if len(failedTempFiles) > 0 {
 			fmt.Fprintf(errW, "\nTemp files:\n")
 			for _, fe := range failedTempFiles {
-				fmt.Fprintf(errW, "  %s: %v\n", tuiutil.SanitizeTerminalField(fe.File), fe.Err)
+				fmt.Fprintf(errW, "  %s: %v\n", tuiutil.SanitizeDisplayLine(fe.File), fe.Err)
 			}
 		}
 

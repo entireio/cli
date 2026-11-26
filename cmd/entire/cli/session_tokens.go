@@ -480,15 +480,15 @@ func skillEventLabels(events []agent.SkillEvent) []string {
 func writeSessionTokensText(w io.Writer, report sessionTokensReport) {
 	fmt.Fprintln(w, "Session tokens")
 	fmt.Fprintln(w)
-	fmt.Fprintf(w, "Session: %s\n", tuiutil.SanitizeTerminalField(report.SessionID))
+	fmt.Fprintf(w, "Session: %s\n", tuiutil.SanitizeDisplayLine(report.SessionID))
 	if report.Resolution != strategy.ResolutionNone {
 		fmt.Fprintf(w, "Resolved: %s\n", sessionResolutionLabel(report.Resolution))
 	}
-	fmt.Fprintf(w, "Agent:   %s\n", tuiutil.SanitizeTerminalField(report.Agent))
+	fmt.Fprintf(w, "Agent:   %s\n", tuiutil.SanitizeDisplayLine(report.Agent))
 	if report.Model != "" {
-		fmt.Fprintf(w, "Model:   %s\n", tuiutil.SanitizeTerminalField(report.Model))
+		fmt.Fprintf(w, "Model:   %s\n", tuiutil.SanitizeDisplayLine(report.Model))
 	}
-	fmt.Fprintf(w, "Status:  %s\n", tuiutil.SanitizeTerminalField(report.Status))
+	fmt.Fprintf(w, "Status:  %s\n", tuiutil.SanitizeDisplayLine(report.Status))
 
 	writeTokenUsageSection(w, report.Tokens)
 	if len(report.Recommendations) > 0 {
@@ -501,7 +501,7 @@ func writeSessionTokensText(w io.Writer, report sessionTokensReport) {
 
 func writeSessionTokensAgentBrief(w io.Writer, report sessionTokensReport) {
 	fmt.Fprintln(w, "Session token brief")
-	fmt.Fprintf(w, "Session: %s\n", tuiutil.SanitizeTerminalField(report.SessionID))
+	fmt.Fprintf(w, "Session: %s\n", tuiutil.SanitizeDisplayLine(report.SessionID))
 	if report.Resolution != strategy.ResolutionNone {
 		fmt.Fprintf(w, "Resolved: %s\n", sessionResolutionLabel(report.Resolution))
 	}
@@ -659,13 +659,13 @@ func writeTokenContributors(w io.Writer, contributors []sessionTokensContributor
 		for _, contributor := range contributors {
 			switch contributor.Kind {
 			case tokensKindSubagents:
-				fmt.Fprintf(w, "- %s: %s tokens\n", tuiutil.SanitizeTerminalField(contributor.Label), formatTokenCount(contributor.Tokens))
+				fmt.Fprintf(w, "- %s: %s tokens\n", tuiutil.SanitizeDisplayLine(contributor.Label), formatTokenCount(contributor.Tokens))
 			case tokensKindContextPressure:
 				if contextInfo != nil {
-					fmt.Fprintf(w, "- %s: %d%% of %s tokens\n", tuiutil.SanitizeTerminalField(contributor.Label), contextInfo.Percent, formatTokenCount(contextInfo.WindowSize))
+					fmt.Fprintf(w, "- %s: %d%% of %s tokens\n", tuiutil.SanitizeDisplayLine(contributor.Label), contextInfo.Percent, formatTokenCount(contextInfo.WindowSize))
 				}
 			default:
-				fmt.Fprintf(w, "- %s\n", tuiutil.SanitizeTerminalField(contributor.Label))
+				fmt.Fprintf(w, "- %s\n", tuiutil.SanitizeDisplayLine(contributor.Label))
 			}
 		}
 	}

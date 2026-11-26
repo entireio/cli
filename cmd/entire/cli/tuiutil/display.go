@@ -37,10 +37,14 @@ func SanitizeDisplayText(s string) string {
 	}, stripped)
 }
 
-// SanitizeDisplayLine is SanitizeDisplayText for server text shown inline in
-// a one-line message: it also drops bidi controls (U+202A–U+202E,
-// U+2066–U+2069, and the other Bidi_Control runes), which are format
-// characters rather than controls and could visually reorder the line.
+// SanitizeDisplayLine is SanitizeDisplayText for server text or stored
+// metadata shown inline in a one-line message: it also drops bidi controls
+// (U+202A–U+202E, U+2066–U+2069, and the other Bidi_Control runes), which are
+// format characters rather than controls and could visually reorder the line.
+// It keeps emoji sequences intact, so it suits prompts as well as labels such
+// as session IDs, agents, models and branch names. Use it at the text
+// rendering boundary only: JSON output escapes control characters itself and
+// must keep the stored value.
 func SanitizeDisplayLine(s string) string {
 	return strings.Map(func(r rune) rune {
 		if unicode.Is(unicode.Bidi_Control, r) {
@@ -106,20 +110,6 @@ func SanitizeTerminalLabel(s string) string {
 		}
 	}
 	return result.String()
-}
-
-// terminalFieldFlattener folds the line breaks and tabs SanitizeTerminalLabel
-// keeps, so a field value cannot spill onto a line of its own.
-var terminalFieldFlattener = strings.NewReplacer("\n", " ", "\t", " ")
-
-// SanitizeTerminalField is SanitizeTerminalLabel for a value printed inside
-// one line of text output: a session ID, agent, model, branch or similar
-// stored label. Newlines and tabs become spaces, so a stored value cannot
-// forge extra lines of a report. Use it at the text rendering boundary, not
-// when building a report: JSON output escapes control characters itself and
-// must keep the stored value.
-func SanitizeTerminalField(s string) string {
-	return terminalFieldFlattener.Replace(SanitizeTerminalLabel(s))
 }
 
 // PadDisplayWidth truncates or right-pads s with spaces so its display
