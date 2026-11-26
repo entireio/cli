@@ -1114,6 +1114,7 @@ current repository.`,
 		}),
 	}
 
+	cmd.Flags().String(flagTrackOrg, "", "With --global, track only repositories in this org (e.g. github.com/entireio); see entire track")
 	cmd.Flags().BoolVar(&enableGlobal, flagGlobal, false, "Enable Entire in every repository you work in for Claude Code, Codex, Pi and OpenCode (sets global_enable in your Entire user settings and installs their user-level hooks)")
 	cmd.Flags().BoolVar(&ignoreUntracked, "ignore-untracked", false, "Commit all new files without tracking pre-existing untracked files")
 	cmd.Flags().StringVar(&opts.CheckpointPushRemote, flagCheckpointPushRemote, "", "Git remote for checkpoint uploads (saved to .entire/settings.local.json, even with --project)")

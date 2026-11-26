@@ -186,7 +186,7 @@ func (o *userOverlay) repoPreferences(ctx context.Context, worktreeRoot string) 
 	if len(o.repos) == 0 || worktreeRoot == "" {
 		return nil
 	}
-	originKeys, _, err := originKeysCached(ctx, worktreeRoot)
+	originKeys, err := originKeysCached(ctx, worktreeRoot)
 	if err != nil {
 		// Present but unnormalizable, or unreadable: fall back to matching by
 		// path. Treating this as "no origin" would silently drop an entry the
@@ -232,8 +232,7 @@ func (o *userOverlay) repoPreferences(ctx context.Context, worktreeRoot string) 
 // opf_command_trust.go: a developer who changes a remote mid-session in
 // `entire mcp` keeps the old answer until restart.
 type originKeysResult struct {
-	keys    []string
-	present bool
+	keys []string
 }
 
 var (
@@ -251,25 +250,25 @@ func ClearOriginKeyCache() {
 	usersettings.ClearCommonDirCache()
 }
 
-func originKeysCached(ctx context.Context, worktreeRoot string) ([]string, bool, error) {
+func originKeysCached(ctx context.Context, worktreeRoot string) ([]string, error) {
 	cacheKey := filepath.Clean(worktreeRoot)
 
 	originKeysMu.Lock()
 	cached, ok := originKeysByRoot[cacheKey]
 	originKeysMu.Unlock()
 	if ok {
-		return cached.keys, cached.present, nil
+		return cached.keys, nil
 	}
 
-	keys, present, err := usersettings.OriginKeys(ctx, worktreeRoot)
+	keys, _, err := usersettings.OriginKeys(ctx, worktreeRoot)
 	if err != nil {
-		return nil, false, err //nolint:wrapcheck // the caller logs and degrades to path matching
+		return nil, err //nolint:wrapcheck // the caller logs and degrades to path matching
 	}
 
 	originKeysMu.Lock()
-	originKeysByRoot[cacheKey] = originKeysResult{keys: keys, present: present}
+	originKeysByRoot[cacheKey] = originKeysResult{keys: keys}
 	originKeysMu.Unlock()
-	return keys, present, nil
+	return keys, nil
 }
 
 // repoKeyMatches decides whether one `repos` key names this worktree. A key

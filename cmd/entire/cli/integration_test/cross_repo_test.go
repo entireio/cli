@@ -22,8 +22,8 @@ import (
 
 // Cross-repository linking: with global enable on, a session started in
 // repository C links the commits its agent makes in any other repository D.
-// Every repository lives under one HOME (Entire links only repositories
-// there), and they share one user config directory. The recorded session
+// Every repository lives under one HOME, and they share one user config
+// directory. The recorded session
 // owner is the test binary, an ancestor of every hook it runs, which is what
 // an agent's own commits look like.
 

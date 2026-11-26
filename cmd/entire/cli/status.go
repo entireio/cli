@@ -110,6 +110,7 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 	writeRefusedAgentHomes(w)
 	writeUserSettingsRejections(w, s)
 	writeCommittedKeysIgnoredForGlobalEnable(w, s)
+	writeTrackStatus(ctx, w)
 	if s.Enabled {
 		writeActiveSessions(ctx, w, sty)
 		writeCrossRepoStatus(ctx, w)
@@ -204,6 +205,7 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 	writeRefusedAgentHomes(w)
 	writeUserSettingsRejections(w, effectiveSettings)
 	writeCommittedKeysIgnoredForGlobalEnable(w, effectiveSettings)
+	writeTrackStatus(ctx, w)
 	fmt.Fprintln(w) // blank line
 
 	// Show project settings if it exists
@@ -1257,6 +1259,10 @@ type statusJSON struct {
 	// EnabledBy is "global" when the repository is on only through global
 	// enable (`entire enable` was never run here).
 	EnabledBy string `json:"enabled_by,omitempty"`
+	// Tracked and TrackReason are the tracking rule's answer for this
+	// repository (`entire track`); set only while global enable is on.
+	Tracked     *bool  `json:"tracked,omitempty"`
+	TrackReason string `json:"track_reason,omitempty"`
 	// UserHooks lists the agents whose Entire hooks are installed in their
 	// user-level config (global enable on).
 	UserHooks []string `json:"user_hooks,omitempty"`
@@ -1517,6 +1523,27 @@ func fillStatusAgentsJSON(ctx context.Context, s *EntireSettings, result *status
 	result.UserHooksShadowed = agents.shadowed
 	if s.EnabledOnlyByGlobal() {
 		result.EnabledBy = enabledByGlobal
+	}
+	if state := globalTrackState(ctx); state != nil {
+		result.Tracked = &state.Tracked
+		result.TrackReason = state.Reason
+	}
+}
+
+// globalTrackState is currentTrackState while global enable is on, else nil:
+// the tracking rule only narrows global enable.
+func globalTrackState(ctx context.Context) *trackRepoState {
+	if !settings.UserTierEnablesEverywhere(ctx) {
+		return nil
+	}
+	return currentTrackState(ctx)
+}
+
+// writeTrackStatus prints which tracking rule applies here under global
+// enable.
+func writeTrackStatus(ctx context.Context, w io.Writer) {
+	if line := trackRuleSummary(globalTrackState(ctx)); line != "" {
+		fmt.Fprintln(w, tuiutil.SanitizeDisplayText(line))
 	}
 }
 

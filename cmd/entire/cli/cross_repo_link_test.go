@@ -2,35 +2,46 @@ package cli
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"slices"
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
 func TestCrossRepoSkipReason(t *testing.T) {
-	t.Parallel()
+	t.Setenv(userdirs.EnvConfigDir, t.TempDir())
+	settings.ClearTrackCache()
+	t.Cleanup(settings.ClearTrackCache)
 	home := t.TempDir()
-	protected := []string{home, filepath.Join(home, "go", "pkg", "mod"), filepath.Join(home, ".config", "entire")}
+	protected := []string{filepath.Join(home, "go", "pkg", "mod"), filepath.Join(home, ".config", "entire")}
 	session := filepath.Join(home, "c")
 	for name, tc := range map[string]struct {
 		root string
 		want bool
 	}{
 		"sibling repository":       {filepath.Join(home, "d"), false},
-		"outside home":             {t.TempDir(), true},
+		"outside home":             {t.TempDir(), false},
 		"submodule of the session": {filepath.Join(session, "vendor", "lib"), true},
 		"module cache":             {filepath.Join(home, "go", "pkg", "mod", "x"), true},
 		"entire's own directory":   {filepath.Join(home, ".config", "entire", "plugins", "p"), true},
 	} {
-		if got := crossRepoSkipReason(tc.root, session, protected) != ""; got != tc.want {
+		if got := crossRepoSkipReason(t.Context(), tc.root, session, protected) != ""; got != tc.want {
 			t.Errorf("%s: skipped = %v, want %v", name, got, tc.want)
 		}
 	}
-	if crossRepoSkipReason(filepath.Join(home, "d"), session, nil) == "" {
-		t.Error("no home directory: every repository is outside it")
+	denied := filepath.Join(home, "d")
+	data := `{"track": {"deny": ["` + filepath.ToSlash(denied) + `"]}}`
+	if err := os.WriteFile(filepath.Join(os.Getenv(userdirs.EnvConfigDir), "settings.json"), []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	settings.ClearTrackCache()
+	if crossRepoSkipReason(t.Context(), denied, session, protected) == "" {
+		t.Error("a denied repository is skipped")
 	}
 }
 

@@ -216,6 +216,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(inGroup(newEnableCmd(), groupSetup))
 	cmd.AddCommand(inGroup(newDisableCmd(), groupSetup))
 	cmd.AddCommand(inGroup(newStatusCmd(), groupSetup))
+	cmd.AddCommand(inGroup(newTrackGroupCmd(), groupSetup))
 	experimental.Register(cmd, newBlameCmd()) // 'blame' (experimental)
 	experimental.Register(cmd, newWhyCmd())   // 'why' (experimental)
 	cmd.AddCommand(exemptFromEntireDirCheck(inGroup(newLoginCmd(), groupAccount)))
