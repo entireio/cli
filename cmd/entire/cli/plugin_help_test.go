@@ -287,6 +287,36 @@ func TestUpgradeInstalledPlugin_BackfillsAgentHelpWithoutReinstall(t *testing.T)
 	}
 }
 
+// A plugin that declares no agent_help (most) would otherwise fetch its
+// metadata on every no-op upgrade (stream's selfupdate upgrades hourly): the
+// backfill fetches at most once per installed tag.
+func TestUpgradeInstalledPlugin_BackfillFetchesOncePerTag(t *testing.T) { //nolint:paralleltest // mutates env
+	withIsolatedPluginEnv(t)
+	ctx := context.Background()
+	srv := pluginReleaseServer(t, "0.1.0")
+	meta := fmt.Sprintf("name: demo\ndescription: Demo plugin for tests\ndownload_url: \"%s/dl/{tag}/{asset}\"\n", srv.URL)
+	repoURL := newTaggedPluginRepo(t, meta, remoteTestTagOld)
+	if _, err := InstallPluginFromRepo(ctx, repoURL, "", RemoteInstallOptions{Pin: remoteTestTagOld}); err != nil {
+		t.Fatalf("InstallPluginFromRepo: %v", err)
+	}
+	fetches := 0
+	prev := pluginMetadataBackfillFetch
+	pluginMetadataBackfillFetch = func(ctx context.Context, repoURL, tag string) (*PluginMetadata, error) {
+		fetches++
+		return prev(ctx, repoURL, tag)
+	}
+	t.Cleanup(func() { pluginMetadataBackfillFetch = prev })
+
+	for range 3 {
+		if o, err := UpgradeInstalledPlugin(ctx, "demo"); err != nil || !o.Pinned {
+			t.Fatalf("UpgradeInstalledPlugin = %+v, %v", o, err)
+		}
+	}
+	if fetches != 1 {
+		t.Errorf("metadata fetched %d times for one tag, want 1", fetches)
+	}
+}
+
 // Backfill is best effort: metadata without a description, or a repository
 // that can no longer be reached, leaves the description empty and the
 // upgrade outcome unchanged.

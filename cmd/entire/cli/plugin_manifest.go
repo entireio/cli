@@ -117,6 +117,10 @@ type PluginManifest struct {
 	// the plugin answers `entire-<name> agent-help`, so `entire agent-help`
 	// may point agents at it.
 	AgentHelp bool `yaml:"agent_help,omitempty"`
+	// MetadataBackfilledTag is the tag whose entire-plugin.yml an upgrade
+	// with nothing to install last read to fill in Description and AgentHelp
+	// (backfillManifestDescription), so it reads a tag's metadata once.
+	MetadataBackfilledTag string `yaml:"metadata_backfilled_tag,omitempty"`
 }
 
 // PluginRequirement declares a dependency on another plugin. Shared between

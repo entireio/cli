@@ -564,36 +564,34 @@ func UpgradeInstalledPlugin(ctx context.Context, name string) (*UpgradeOutcome, 
 //
 // The tag is the installed one, not the newest, so the text describes the
 // binary that runs. Best effort: the upgrade outcome must not depend on it, so
-// failures are logged and dropped. A plugin whose metadata lacks either
-// (most plugins don't declare agent_help) pays one metadata fetch per
-// upgrade; upgrade is already a networked command. The caller holds the
-// plugin's lock.
+// failures are logged and dropped. A tag's metadata doesn't change, so a
+// successful fetch is recorded (MetadataBackfilledTag) and not repeated for
+// that tag: most plugins declare no agent_help, and stream's selfupdate
+// upgrades hourly. The caller holds the plugin's lock.
 func backfillManifestDescription(ctx context.Context, m *PluginManifest) {
-	if m.Description != "" && m.AgentHelp {
+	if (m.Description != "" && m.AgentHelp) || m.MetadataBackfilledTag == m.Tag {
 		return
 	}
-	meta, err := fetchPluginMetadataAtTag(ctx, m.RepoURL, m.Tag)
+	meta, err := pluginMetadataBackfillFetch(ctx, m.RepoURL, m.Tag)
 	if err != nil {
 		logging.Debug(ctx, "plugin upgrade: metadata backfill fetch failed", "plugin", m.Name, "error", err.Error())
 		return
 	}
-	if meta == nil || (meta.Name != "" && meta.Name != m.Name) {
-		return
-	}
-	changed := false
-	if m.Description == "" && meta.Description != "" {
-		m.Description, changed = meta.Description, true
-	}
-	if !m.AgentHelp && meta.AgentHelp {
-		m.AgentHelp, changed = true, true
-	}
-	if !changed {
-		return
+	m.MetadataBackfilledTag = m.Tag
+	if meta != nil && (meta.Name == "" || meta.Name == m.Name) {
+		if m.Description == "" {
+			m.Description = meta.Description
+		}
+		m.AgentHelp = m.AgentHelp || meta.AgentHelp
 	}
 	if err := SavePluginManifest(m); err != nil {
 		logging.Debug(ctx, "plugin upgrade: metadata backfill save failed", "plugin", m.Name, "error", err.Error())
 	}
 }
+
+// pluginMetadataBackfillFetch is backfillManifestDescription's metadata
+// fetch, a seam for tests.
+var pluginMetadataBackfillFetch = fetchPluginMetadataAtTag
 
 // noUpgradeManifestError explains why name, which has no install manifest,
 // cannot be upgraded: it is not installed at all (perhaps removed meanwhile),
