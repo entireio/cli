@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -536,7 +537,17 @@ func (c *liveSessionsCache) callers() (mine func(liveSessionEntry) bool, known b
 // it can't tell. Local unless the token needs a refresh; called by the
 // refresh only. A var for tests.
 var liveSessionsCallerAccount = func(ctx context.Context) string {
-	target, err := resolveAuthStatusTarget(ctx, auth.Contexts, auth.RefreshedLoginToken)
+	// ENTIRE_TOKEN's service account secret is exchanged over the network:
+	// through the context-aware resolver, so ctx (SessionStart's budget)
+	// bounds the exchange.
+	if raw, ok := os.LookupEnv(auth.EnvTokenVar); ok {
+		token, err := auth.ResolveEnvTokenContext(ctx, raw)
+		if err != nil {
+			return ""
+		}
+		return liveSessionsAccountFromToken(token)
+	}
+	target, err := resolveStatusTarget(ctx, auth.Contexts, auth.RefreshedLoginToken)
 	if err != nil {
 		return ""
 	}
@@ -771,8 +782,13 @@ func liveSessionsBlockFor(cache *liveSessionsCache, self liveSessionsSelf, now t
 		sessions = append(sessions, shown{e, files})
 	}
 	// Sessions the cache didn't keep (over liveSessionsCacheSessionsMax) are
-	// counted too, but the cache can't say whether they are the caller's.
+	// counted too. With the caller's account known, the cache kept other
+	// accounts' sessions first: if it kept any of the caller's, the rest are
+	// the caller's as well, and not news. With it unknown, they may be.
 	uncached := max(cache.Total-len(cache.Sessions), 0)
+	if accountKnown && slices.ContainsFunc(cache.Sessions, mine) {
+		uncached = 0
+	}
 	if len(sessions) == 0 && uncached == 0 {
 		return liveSessionsBlock{Known: true}
 	}
@@ -811,6 +827,8 @@ func liveSessionsBlockFor(cache *liveSessionsCache, self liveSessionsSelf, now t
 	switch {
 	case uncached > 0 && len(clauses) == 0:
 		fmt.Fprintf(&b, " %d more live sessions, which may include yours.", uncached)
+	case uncached > 0 && accountKnown:
+		fmt.Fprintf(&b, " +%d more live sessions.", more+uncached)
 	case uncached > 0:
 		fmt.Fprintf(&b, " +%d more live sessions, which may include yours.", more+uncached)
 	case more == 1:

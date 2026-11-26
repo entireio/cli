@@ -3,7 +3,9 @@ package cli
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -16,6 +18,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/pi"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -755,8 +758,12 @@ func TestLiveSessionsBlock_CountsEverySessionNotOnlyTheCachedOnes(t *testing.T) 
 	cache.Total = 25
 
 	block := liveSessionsBlockFor(cache, liveSelf("mine"), liveTestNow)
+	require.Contains(t, block.Text, "+22 more live sessions, which may include yours.", "account unknown")
 
-	require.Contains(t, block.Text, "+22 more live sessions, which may include yours.")
+	cache.Account = "acc-me"
+	block = liveSessionsBlockFor(cache, liveSelf("mine"), liveTestNow)
+	require.Contains(t, block.Text, "+22 more live sessions.", "no own session kept: the rest are teammates' first")
+	require.NotContains(t, block.Text, "may include yours")
 }
 
 func TestMergeLiveSessions_CountsTheTotal(t *testing.T) {
@@ -1081,15 +1088,25 @@ func TestMergeLiveSessions_TeammatesBeforeOwnSessions(t *testing.T) {
 	require.Equal(t, 22, c.Total)
 }
 
-// When every kept session is the caller's but some weren't kept, the block
-// still says there are more.
+// When every kept session is the caller's but some weren't kept: with the
+// caller's account known, the cache kept other accounts' sessions first, so
+// the rest are the caller's too and there is nothing to say (and nothing to
+// re-inject as the caller's subagents come and go). With it unknown, the
+// block says there are more, which may be the caller's.
 func TestLiveSessionsBlock_MoreWhenEveryKeptSessionIsOwn(t *testing.T) {
 	t.Parallel()
-	cache := liveTestCache(liveSessionEntry{SessionID: "mine:agent:1", You: true, Login: "me"})
-	cache.Total = 5
+	known := liveTestCache(liveSessionEntry{SessionID: "mine:agent:1", You: true, Login: "me", OwnerAccount: "acc-me"})
+	known.Account, known.Total = "acc-me", 5
+	block := liveSessionsBlockFor(known, liveSelf("mine"), liveTestNow)
+	require.True(t, block.Known)
+	require.Empty(t, block.Text)
+	require.Empty(t, block.Fingerprint)
+	known.Total = 9
+	require.Empty(t, liveSessionsBlockFor(known, liveSelf("mine"), liveTestNow).Fingerprint, "the caller's own count is not news")
 
-	block := liveSessionsBlockFor(cache, liveSelf("mine"), liveTestNow)
-
+	unknown := liveTestCache(liveSessionEntry{SessionID: "mine:agent:1", Login: "me"})
+	unknown.Total = 5
+	block = liveSessionsBlockFor(unknown, liveSelf("mine"), liveTestNow)
 	require.Contains(t, block.Text, "4 more live sessions, which may include yours.")
 	require.NotContains(t, block.Text, "`me`")
 	require.NotEmpty(t, block.Fingerprint)
@@ -1152,3 +1169,33 @@ func TestLiveSessionPSTable_KeepsTheExecutablePathWhole(t *testing.T) {
 	require.Equal(t, 1, table[101].ppid)
 	require.True(t, liveSessionRunsProgram(table[202].argv, "codex"))
 }
+
+// SessionStart waits for the caller's account too: a service account secret
+// in ENTIRE_TOKEN is exchanged over the network, and that exchange must stay
+// inside the refresh's budget.
+func TestLiveSessionsCallerAccount_ASlowExchangeStaysInTheBudget(t *testing.T) { //nolint:paralleltest // t.Setenv
+	t.Setenv(auth.EnvTokenVar, liveTestServiceAccountSecret)
+	restore := auth.UseSecretExchangeTransportForTesting(liveRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		select {
+		case <-r.Context().Done():
+			return nil, r.Context().Err()
+		case <-time.After(20 * time.Second):
+			return nil, errors.New("exchange not cancelled")
+		}
+	}))
+	t.Cleanup(restore)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	require.Empty(t, liveSessionsCallerAccount(ctx))
+	require.Less(t, time.Since(start), 3*time.Second)
+}
+
+type liveRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f liveRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// liveTestServiceAccountSecret is a well-formed service account secret (the
+// auth package's test secret), so resolving it reaches the exchange.
+const liveTestServiceAccountSecret = "ent_svc_us_01JABCDEFGHJKMNPQRSTVWXYZ0_01JZYXWVTSRQPNMKJHGFEDCBA9_aaaqeayeaudaocajbifqydiob4ibceqtcqkrmfyydenbwha5dypq3MriFT"

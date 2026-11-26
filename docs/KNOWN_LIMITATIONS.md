@@ -59,6 +59,10 @@ When multiple sessions are ACTIVE in the same directory and one session's agent 
 
 With the stream plugin installed, each turn's context names teammates' live sessions in the repo, but names files only where a session overlaps files this checkout has already changed: entire-api returns a session's edited files only for a list filtered by paths. For any other file the agent is told to run `entire stream list --live --touching -- <file>` before editing it. A list that returned each session's edited files without a filter would let the context name them directly (see [External commands](architecture/external-commands.md#teammates-live-sessions-in-the-turn-start-context)).
 
+### Streaming Under a Non-Active Login Context Lists the Agent's Own Session
+
+The live sessions block recognises the caller's own sessions by the account of the login the CLI uses: the active context's, or `ENTIRE_TOKEN`'s. An agent started with `entire stream <agent> --context <name>` for another context streams under that context's account, so its own session is owned by an account the CLI doesn't take as the caller's, and the block lists it as a teammate's. That is deliberate: an own session wrongly listed costs one question to the user, while hiding a teammate's would be the failure the block exists to prevent. The clean fix belongs in entire-stream: pass the stream's `--context` to the agent as `ENTIRE_CONTEXT`, so the agent's hooks use the same login.
+
 ### OpenCode 1: a Cold Live Sessions Cache Reaches Only the Second Turn
 
 Entire refreshes the live sessions cache at session start so the first turn can name teammates' live sessions. OpenCode 1 doesn't wait for the plugin's session-start before the first turn, and holding turn-start for it would let OpenCode build the first model call, and `opencode run` end the turn, before turn-start ran. So on OpenCode 1, when the cache was cold, the first turn gets Entire's usual context without the live sessions block, which arrives from the second turn. OpenCode 2 runs session-start before turn-start and is not affected.
