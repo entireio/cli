@@ -19,7 +19,6 @@ const (
 	agentRunTestID      = "01ARZ3NDEKTSV4RRFFQ69G5RAA"
 	agentRunTestRetryID = "01ARZ3NDEKTSV4RRFFQ69G5RTY"
 	agentRunTestAgentID = "01ARZ3NDEKTSV4RRFFQ69G5AGT"
-	agentRunTestTrailID = "01ARZ3NDEKTSV4RRFFQ69G5TRA"
 )
 
 type agentRunRequest struct {
@@ -147,73 +146,37 @@ func TestProjectAgentRunShow_PrintsTheRun(t *testing.T) {
 	}
 }
 
-// stubProjectAgentRunWeb serves run on the run route and trail on its trail's
-// route, for `run show --web`.
-func stubProjectAgentRunWeb(t *testing.T, run, trail map[string]any) *[]agentRunRequest {
-	t.Helper()
-	return stubProjectAgentRuns(t, func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case agentTestBase + "/runs/" + agentRunTestID:
-			assert.NoError(t, json.NewEncoder(w).Encode(run))
-		case agentTestBase + "/trails/" + agentRunTestTrailID:
-			assert.NoError(t, json.NewEncoder(w).Encode(trail))
-		default:
-			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
-			http.NotFound(w, r)
-		}
-	})
+func TestProjectAgentRunWebURL(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, "https://entire.com/gh/acme/-/agents/runs?runId="+agentRunTestID,
+		projectAgentRunWebURL("https://entire.com/", "gh", "acme", agentRunTestID))
+	assert.Equal(t, "http://localhost:3000/et/a%2Fb/-/agents/runs?runId=x%26y%3Dz",
+		projectAgentRunWebURL("http://localhost:3000", "et", "a/b", "x&y=z"))
 }
 
-func agentRunTestWithTarget() map[string]any {
-	run := agentRunTestJSON(agentRunTestID, "succeeded")
-	delete(run, "trail_id")
-	run["target"] = map[string]any{"trail_id": agentRunTestTrailID, "change_id": "01ARZ3NDEKTSV4RRFFQ69G5CHG", "ref": "feature/work"}
-	return run
-}
-
-func TestProjectAgentRunShow_WebOpensTheRunsTrail(t *testing.T) {
-	// Serial: replaces the project agent target and the webOpenURL seam.
-	const trailURL = "https://web.example/gh/acme/trails/7"
+func TestProjectAgentRunShow_WebOpensTheRunsPage(t *testing.T) {
+	// Serial: sets ENTIRE_WEB_BASE_URL and replaces the project agent target
+	// and the webOpenURL seam.
+	t.Setenv(api.WebBaseURLEnvVar, "https://web.example/")
+	want := "https://web.example/gh/acme/-/agents/runs?runId=" + agentRunTestID
 	for _, flag := range []string{"--web", "-w"} {
 		opened := stubWebOpenURL(t, nil)
-		requests := stubProjectAgentRunWeb(t, agentRunTestWithTarget(), map[string]any{"id": agentRunTestTrailID, "number": 7, "url": trailURL})
+		requests := stubProjectAgentRuns(t, func(w http.ResponseWriter, _ *http.Request) {
+			assert.NoError(t, json.NewEncoder(w).Encode(agentRunTestJSON(agentRunTestID, "succeeded")))
+		})
 		out, errOut, err := executeProjectAgent(t, "run", "show", agentRunTestID, flag)
 		require.NoError(t, err)
-		assert.Equal(t, trailURL+"\n", out)
+		assert.Equal(t, want+"\n", out)
 		assert.Empty(t, errOut)
-		assert.Equal(t, []string{trailURL}, *opened)
-		assert.Equal(t, []agentRunRequest{
-			{Method: http.MethodGet, Path: agentTestBase + "/runs/" + agentRunTestID},
-			{Method: http.MethodGet, Path: agentTestBase + "/trails/" + agentRunTestTrailID},
-		}, *requests)
-	}
-}
-
-func TestProjectAgentRunShow_WebWithoutATrailPageIsAnError(t *testing.T) {
-	// Serial: replaces the project agent target and the webOpenURL seam.
-	noTrail := agentRunTestJSON(agentRunTestID, "succeeded")
-	delete(noTrail, "trail_id")
-	for name, tc := range map[string]struct {
-		run, trail map[string]any
-		want       string
-		reads      int
-	}{
-		"run without a trail": {noTrail, nil, "belongs to no trail", 1},
-		"trail without a url": {agentRunTestWithTarget(), map[string]any{"id": agentRunTestTrailID, "number": 7}, "no web page is available", 2},
-	} {
-		opened := stubWebOpenURL(t, nil)
-		requests := stubProjectAgentRunWeb(t, tc.run, tc.trail)
-		out, _, err := executeProjectAgent(t, "run", "show", agentRunTestID, "--web")
-		require.ErrorContains(t, err, tc.want, name)
-		require.ErrorContains(t, err, "run "+agentRunTestID, name)
-		assert.Empty(t, out, name)
-		assert.Empty(t, *opened, name)
-		assert.Len(t, *requests, tc.reads, name)
+		assert.Equal(t, []string{want}, *opened)
+		assert.Equal(t, []agentRunRequest{{Method: http.MethodGet, Path: agentTestBase + "/runs/" + agentRunTestID}}, *requests)
 	}
 }
 
 func TestProjectAgentRunShow_WebStillRefusesAnUnreadableRun(t *testing.T) {
-	// Serial: replaces the project agent target and the webOpenURL seam.
+	// Serial: sets ENTIRE_WEB_BASE_URL and replaces the project agent target
+	// and the webOpenURL seam.
+	t.Setenv(api.WebBaseURLEnvVar, "https://web.example")
 	opened := stubWebOpenURL(t, nil)
 	requests := stubProjectAgentRuns(t, func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) })
 	out, _, err := executeProjectAgent(t, "run", "show", agentRunTestID, "--web")
