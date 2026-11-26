@@ -9,8 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent/antigravity"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing/object"
@@ -451,7 +453,7 @@ func TestPrePromptState_WithEmptyTranscriptPath(t *testing.T) {
 // captured zero, so turn end reads the whole turn instead of falling back to
 // a checkpoint position a same-turn commit may have advanced.
 func TestPrePromptState_MissingTranscriptIsCapturedZero(t *testing.T) {
-	setupTestRepoWithTranscript(t, "", "")
+	chdirToIsolatedRepo(t)
 
 	sessionID := "test-session-missing-transcript"
 	missing := filepath.Join(t.TempDir(), "not-yet.jsonl")
@@ -463,6 +465,82 @@ func TestPrePromptState_MissingTranscriptIsCapturedZero(t *testing.T) {
 	require.NotNil(t, state)
 	if state.TranscriptOffset != 0 || !state.TranscriptOffsetCaptured {
 		t.Errorf("offset = %d, captured = %v; want a captured 0", state.TranscriptOffset, state.TranscriptOffsetCaptured)
+	}
+}
+
+// chdirToIsolatedRepo moves the test into a fresh git repository, so session
+// state reads and writes stay inside it.
+func chdirToIsolatedRepo(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "init.txt", "init")
+	testutil.GitAdd(t, dir, "init.txt")
+	testutil.GitCommit(t, dir, "init")
+	t.Chdir(dir)
+}
+
+// A later turn's zero means the transcript has not been flushed yet; trusting
+// it would make turn end read earlier turns' edits as this turn's.
+func TestPrePromptState_LaterTurnZeroIsNotTrusted(t *testing.T) {
+	chdirToIsolatedRepo(t)
+
+	ctx := context.Background()
+	sessionID := "test-session-later-turn-zero"
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID:        sessionID,
+		StartedAt:        time.Now(),
+		SessionTurnCount: 1,
+	}))
+	missing := filepath.Join(t.TempDir(), "not-yet.jsonl")
+	require.NoError(t, CapturePrePromptState(ctx, claudecode.NewClaudeCodeAgent(), sessionID, missing))
+
+	state, err := LoadPrePromptState(ctx, sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	if state.TranscriptOffsetCaptured {
+		t.Error("TranscriptOffsetCaptured = true on a later turn's zero, want false")
+	}
+}
+
+// Turn end on a later turn whose captured zero was not trusted falls back to
+// the session's checkpoint position instead of reading from the start.
+func TestTurnStartTranscriptOffset_LaterTurnZeroFallsBack(t *testing.T) {
+	chdirToIsolatedRepo(t)
+
+	ctx := context.Background()
+	sessionID := "test-session-later-turn-fallback"
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID:                 sessionID,
+		StartedAt:                 time.Now(),
+		SessionTurnCount:          2,
+		CheckpointTranscriptStart: 7,
+	}))
+	missing := filepath.Join(t.TempDir(), "not-yet.jsonl")
+	require.NoError(t, CapturePrePromptState(ctx, claudecode.NewClaudeCodeAgent(), sessionID, missing))
+	pre, err := LoadPrePromptState(ctx, sessionID)
+	require.NoError(t, err)
+
+	if got := turnStartTranscriptOffset(ctx, pre, sessionID); got != 7 {
+		t.Errorf("turnStartTranscriptOffset = %d, want the fallback 7", got)
+	}
+}
+
+// A LateTranscriptWriter flushes only after the turn, so even its first-turn
+// zero is not the turn's start.
+func TestPrePromptState_LateTranscriptWriterZeroIsNotTrusted(t *testing.T) {
+	chdirToIsolatedRepo(t)
+
+	ctx := context.Background()
+	sessionID := "test-session-late-writer-zero"
+	missing := filepath.Join(t.TempDir(), "not-yet.jsonl")
+	require.NoError(t, CapturePrePromptState(ctx, antigravity.NewAntigravityAgent(), sessionID, missing))
+
+	state, err := LoadPrePromptState(ctx, sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	if state.TranscriptOffsetCaptured {
+		t.Error("TranscriptOffsetCaptured = true for a LateTranscriptWriter's zero, want false")
 	}
 }
 
