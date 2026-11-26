@@ -211,3 +211,21 @@ func TestHookRepoTrackable_ExplicitEnableOverridesOrgRule(t *testing.T) {
 	ClearTrackCache()
 	assert.False(t, HookRepoTrackable(t.Context(), root))
 }
+
+// A committed `enabled: true` (`entire enable --project`) is the
+// repository's setting, not the developer's own choice, so under an org rule
+// it is not tracked unless the developer enables it there or allows it by
+// name. Its git hooks follow the same rule (hooks git's PersistentPreRun).
+func TestHookRepoTrackable_CommittedEnableIsNotExplicit(t *testing.T) {
+	root := newTrackRepo(t, "git@github.com:other/cli.git")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, EntireSettingsFile), []byte(`{"enabled": true}`), 0o600))
+	writeUserSettings(t, `{"global_enable": true, "track": {"orgs": ["github.com/entireio"]}}`)
+	ClearTrackCache()
+	assert.False(t, HookRepoTrackable(t.Context(), root))
+	assert.False(t, InstallPastHomeFloor(t.Context(), root))
+	writeUserSettings(t, `{"global_enable": true, "track": {"orgs": ["github.com/entireio"], "repos": ["gh/other/cli"]}}`)
+	ClearTrackCache()
+	assert.True(t, HookRepoTrackable(t.Context(), root))
+	assert.True(t, InstallPastHomeFloor(t.Context(), root), "track allow lifts the home floor")
+}

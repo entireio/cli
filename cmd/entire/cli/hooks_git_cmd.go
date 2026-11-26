@@ -107,8 +107,10 @@ func newHooksGitCmd() *cobra.Command {
 			ctx := cmd.Context()
 			// Check if Entire is set up and enabled before doing any work.
 			// This prevents global git hooks from doing anything in repos where
-			// Entire was never enabled or has been disabled.
-			if !settings.IsSetUpAndEnabled(ctx) {
+			// Entire was never enabled or has been disabled, or that the
+			// tracking rule excludes under global enable (as agent hooks are):
+			// sessions recorded before a deny are neither condensed nor pushed.
+			if !settings.IsSetUpAndEnabled(ctx) || !hookRepoTrackableHere(ctx) {
 				gitHooksDisabled = true
 				return
 			}

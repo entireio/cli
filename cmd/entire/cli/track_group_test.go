@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -28,6 +29,33 @@ func TestTrackSelect_PreselectedAndDeselectDenies(t *testing.T) {
 	// The user deselects two and re-selects the previously denied one.
 	applyTrackSelection(&rule, candidates, []string{"/src/three"})
 	assert.ElementsMatch(t, []string{"gh/other/kept", "gh/a/one", "gh/a/two"}, rule.Deny)
+}
+
+// Under an org rule the picker shows what is actually tracked: a repository
+// outside the orgs starts deselected, selecting it allows it by name, and
+// deselecting then reselecting any candidate round-trips to the same rule.
+func TestTrackSelect_OrgRulePreselectsTrackedAndRoundTrips(t *testing.T) {
+	t.Parallel()
+	inOrg, outside, named := "gh/acme/app", "gh/other/lib", "gh/other/named"
+	candidates := []string{inOrg, outside, named}
+	rule := settings.TrackRule{Orgs: []string{"gh/acme"}, Repos: []string{named}}
+
+	_, selected := trackSelectOptions(candidates, rule)
+	assert.Equal(t, []string{inOrg, named}, selected, "the repository outside the org is not tracked, so not pre-selected")
+
+	applyTrackSelection(&rule, candidates, candidates)
+	assert.Empty(t, rule.Deny)
+	assert.ElementsMatch(t, []string{named, outside}, rule.Repos, "selecting the outside repository allows it by name")
+	_, selected = trackSelectOptions(candidates, rule)
+	assert.Equal(t, candidates, selected)
+
+	before := settings.TrackRule{Orgs: slices.Clone(rule.Orgs), Repos: slices.Clone(rule.Repos)}
+	applyTrackSelection(&rule, candidates, nil)
+	_, selected = trackSelectOptions(candidates, rule)
+	assert.Empty(t, selected, "every deselected candidate is untracked")
+	applyTrackSelection(&rule, candidates, candidates)
+	assert.Empty(t, rule.Deny)
+	assert.ElementsMatch(t, before.Repos, rule.Repos)
 }
 
 func TestTrackDenyAndAllow(t *testing.T) {
@@ -123,6 +151,17 @@ func TestEnableGlobal_TrackOrg(t *testing.T) {
 	assert.JSONEq(t, `{"global_enable": true}`, readUserSettingsFile(t, entireDir))
 }
 
+// An invalid --track-org is refused before global_enable is written, so it
+// never leaves global enable on without its rule or user-level hooks.
+func TestEnableGlobal_InvalidTrackOrgChangesNothing(t *testing.T) {
+	entireDir, claudeDir, _, out, err := runGlobalCmd(t, true, `{"preferences": {"telemetry": false}}`, "enable", "--global", "--yes", "--track-org", "/")
+	require.Error(t, err, out)
+	assert.JSONEq(t, `{"preferences": {"telemetry": false}}`, readUserSettingsFile(t, entireDir))
+	if _, statErr := os.Stat(filepath.Join(claudeDir, "settings.json")); !os.IsNotExist(statErr) {
+		t.Errorf("hooks installed although nothing was enabled (stat err = %v)", statErr)
+	}
+}
+
 func TestCurrentRepoOrg(t *testing.T) {
 	_, _, repo, out, err := runGlobalCmd(t, false, "", "version")
 	require.NoError(t, err, out)
@@ -142,4 +181,27 @@ func runRootCmd(t *testing.T, args ...string) (string, error) {
 	root.SetArgs(args)
 	err := root.Execute()
 	return buf.String(), err
+}
+
+// A repository the tracking rule excludes runs no git hooks either, as its
+// agent hooks record nothing: sessions recorded before the rule changed are
+// neither condensed nor pushed there.
+func TestHooksGit_TrackingRuleExcludesRepository(t *testing.T) {
+	for name, tc := range map[string]struct {
+		rule         string
+		wantDisabled bool
+	}{
+		"outside the org rule": {`, "track": {"orgs": ["gh/acme"]}`, true},
+		"every repository":     {``, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			gitHooksDisabled = false
+			t.Cleanup(func() { gitHooksDisabled = false })
+			settings.ClearTrackCache()
+			t.Cleanup(settings.ClearTrackCache)
+			_, _, _, out, err := runGlobalCmd(t, false, `{"global_enable": true`+tc.rule+`}`, "hooks", "git", "post-commit")
+			require.NoError(t, err, out)
+			assert.Equal(t, tc.wantDisabled, gitHooksDisabled)
+		})
+	}
 }

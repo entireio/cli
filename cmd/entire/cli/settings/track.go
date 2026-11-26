@@ -273,6 +273,36 @@ func matchingOrg(orgs, originKeys []string) string {
 	return ""
 }
 
+// TracksKey reports whether the rule tracks the repository named key (a
+// repository key as RepoKey returns it) on the rule alone: not denied, and
+// either no org rule, allowed by name, or in an allowed org.
+func (r TrackRule) TracksKey(key string) bool {
+	if slices.Contains(r.Deny, key) {
+		return false
+	}
+	return len(r.Orgs) == 0 || slices.Contains(r.Repos, key) || matchingOrg(r.Orgs, []string{key}) != ""
+}
+
+// InstallPastHomeFloor reports whether the developer asked for the
+// repository at root themselves, so a lazy hook install may go there even
+// outside the home directory: they enabled it (`entire enable` there, a
+// `repos` entry or an honored settings.local.json) or allowed it by name
+// (`entire track allow`, track.repos).
+func InstallPastHomeFloor(ctx context.Context, root string) bool {
+	if enabled, _ := explicitEnablement(ctx, root); enabled {
+		return true
+	}
+	rule, err := LoadTrackRule(ctx)
+	if err != nil {
+		return false
+	}
+	originKeys, err := originKeysCached(ctx, root)
+	if err != nil {
+		originKeys = nil
+	}
+	return matchesAnyRepoKey(ctx, rule.Repos, originKeys, root)
+}
+
 // HookRepoTrackable is the agent-hook gate under global enable: with
 // global_enable off it is always true (the tracking rule only narrows global
 // enable), and otherwise it is RepoTrackable for the repository at root.

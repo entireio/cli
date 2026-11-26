@@ -620,8 +620,9 @@ With global enable on, every repository is tracked unless you exclude it. The
   this for the current repository's org; `--track-org <host/org>` sets it
   without a prompt, and `--yes` or no terminal keeps every repository.
 - `entire track select` lists known repositories (this one, those Entire
-  installed hooks in, those in `repos`), all pre-selected; a deselected one is
-  denied. `entire track list [--json]` and `entire status` show the rule that
+  installed hooks in, those in `repos`), each pre-selected when the rule tracks
+  it; a deselected one is denied, and a selected one outside the org rule is
+  allowed by name. `entire track list [--json]` and `entire status` show the rule that
   applies here; `entire track reset` tracks everything again.
 
 First match wins: a `repos` entry or an untracked
@@ -632,9 +633,22 @@ untracked local settings file with `"enabled": true`) is tracked, since a
 project install overrides global enable; an org rule the repository is
 outside and not allowed by name; otherwise tracked. So the org rule narrows
 only repositories that are on solely through global enable, while a deny
-applies to every repository. An excluded repository behaves as not enabled:
-its agent hooks record nothing, no git hooks are installed there, and
-`entire status` reports it as not tracked (`"enabled": false` in `--json`).
+applies to every repository. A committed `"enabled": true` (`entire enable
+--project`) is the repository's setting, not your own choice, so it does not
+count as enabling it yourself. An excluded repository behaves as not enabled:
+its agent hooks record nothing, its git hooks (already installed ones
+included) do nothing, so earlier sessions are neither condensed nor pushed
+there, no git hooks are installed there, and `entire status` reports it as not
+tracked (`"enabled": false` in `--json`).
+
+**Home-directory floor.** Whatever the rule says, Entire installs its git
+hooks unasked (the lazy install when a session's agent works in another
+repository) only in repositories under your home directory, never in `/tmp`,
+`/srv`, mounted volumes or other users' checkouts. `entire track allow <path>`
+lifts this for one repository, as does `entire enable` run there. Linking
+into a repository that already has Entire's hooks, or that you enabled, is
+unaffected; elsewhere the commits are still linked by the turn-end sweep
+without installing anything.
 The rule is read only from the user settings file, so nothing a repository
 commits can widen or narrow it, and an invalid `track` block tracks nothing.
 

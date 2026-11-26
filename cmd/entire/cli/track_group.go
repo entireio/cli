@@ -361,13 +361,14 @@ func knownTrackRepos(ctx context.Context, rule settings.TrackRule) []string {
 	return keys
 }
 
-// trackSelectOptions builds the picker: every candidate, pre-selected unless
-// the rule already denies it.
+// trackSelectOptions builds the picker: every candidate, pre-selected when
+// the rule tracks it (with an org rule, a repository outside the orgs and
+// not allowed by name starts deselected).
 func trackSelectOptions(candidates []string, rule settings.TrackRule) ([]huh.Option[string], []string) {
 	options := make([]huh.Option[string], 0, len(candidates))
 	var selected []string
 	for _, key := range candidates {
-		on := !slices.Contains(rule.Deny, key)
+		on := rule.TracksKey(key)
 		options = append(options, huh.NewOption(tuiutil.SanitizeDisplayText(key), key).Selected(on))
 		if on {
 			selected = append(selected, key)
@@ -376,14 +377,22 @@ func trackSelectOptions(candidates []string, rule settings.TrackRule) ([]huh.Opt
 	return options, selected
 }
 
-// applyTrackSelection writes the picker's answer: a deselected candidate is
-// denied, a selected one is no longer denied. Keys the picker did not show
-// keep their state.
+// applyTrackSelection writes the picker's answer so the rule tracks exactly
+// the selected candidates: a selected one is no longer denied and, under an
+// org rule it is not otherwise in, is allowed by name; a deselected one is
+// denied and loses any allow by name, so selecting it again restores it.
+// Keys the picker did not show keep their state.
 func applyTrackSelection(r *settings.TrackRule, candidates, selected []string) {
 	for _, key := range candidates {
 		if slices.Contains(selected, key) {
 			r.Deny = slices.DeleteFunc(r.Deny, func(k string) bool { return k == key })
-		} else if !slices.Contains(r.Deny, key) {
+			if !r.TracksKey(key) {
+				r.Repos = append(r.Repos, key)
+			}
+			continue
+		}
+		r.Repos = slices.DeleteFunc(r.Repos, func(k string) bool { return k == key })
+		if !slices.Contains(r.Deny, key) {
 			r.Deny = append(r.Deny, key)
 		}
 	}

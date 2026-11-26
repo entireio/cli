@@ -54,6 +54,12 @@ func runEnableGlobal(cmd *cobra.Command, yes bool) error {
 	if err := userSettingsWritable(cmd); err != nil {
 		return err
 	}
+	// Before global_enable is written: a bad org must not leave it on with no
+	// tracking rule and no user-level hooks.
+	if org, _ := cmd.Flags().GetString(flagTrackOrg); org != "" && settings.NormalizeTrackOrg(org) == "" { //nolint:errcheck // defined on this command
+		cmd.SilenceUsage = true
+		return fmt.Errorf("--track-org %q does not name an org; use host/org, e.g. github.com/entireio", org)
+	}
 	// Turning it on again adds nothing to agree to.
 	alreadyOn := settings.UserTierEnablesEverywhere(ctx)
 	if !alreadyOn {
@@ -72,14 +78,14 @@ func runEnableGlobal(cmd *cobra.Command, yes bool) error {
 		fmt.Fprintf(w, "Entire is now enabled in every repository you work in (global_enable in %s).\n", path)
 	}
 
-	if err := chooseGlobalTrackRule(cmd, yes || alreadyOn); err != nil {
-		return err
-	}
-
+	// The hooks go in even when the rule could not be saved: global_enable is
+	// already on, and without them it would record nothing until the next
+	// command re-checked them.
+	trackErr := chooseGlobalTrackRule(cmd, yes || alreadyOn)
 	installUserHooks(ctx, func(installer agent.UserHookInstaller, result userHookInstallResult) {
 		reportUserHookInstall(cmd, installer, result)
 	})
-	return nil
+	return trackErr
 }
 
 // Choices of the tracking prompt `entire enable --global` shows.
