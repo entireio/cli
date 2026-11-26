@@ -53,8 +53,9 @@ func newWebOpenTestCmd(target string) (cmd *cobra.Command, stdout, stderr *bytes
 	return cmd, stdout, stderr
 }
 
-// Not parallel: swaps the package-level webOpenURL seam.
+// Not parallel: sets ENTIRE_WEB_BASE_URL and swaps the webOpenURL seam.
 func TestOpenInWeb_PrintsThenOpens(t *testing.T) {
+	t.Setenv(api.WebBaseURLEnvVar, "https://web.example")
 	for _, flag := range []string{"--web", "-w"} {
 		t.Run(flag, func(t *testing.T) {
 			opened := stubWebOpenURL(t, nil)
@@ -68,8 +69,9 @@ func TestOpenInWeb_PrintsThenOpens(t *testing.T) {
 	}
 }
 
-// Not parallel: swaps the package-level webOpenURL seam.
+// Not parallel: sets ENTIRE_WEB_BASE_URL and swaps the webOpenURL seam.
 func TestOpenInWeb_OpenerFailureIsANote(t *testing.T) {
+	t.Setenv(api.WebBaseURLEnvVar, "https://web.example")
 	opened := stubWebOpenURL(t, errors.New("no browser"))
 	cmd, stdout, stderr := newWebOpenTestCmd("https://web.example/gh/acme/web")
 	cmd.SetArgs([]string{"--web"})
@@ -87,6 +89,59 @@ func TestOpenInWeb_EmptyURLErrors(t *testing.T) {
 	require.ErrorContains(t, cmd.ExecuteContext(t.Context()), "no web page is available")
 	require.Empty(t, stdout.String())
 	require.Empty(t, *opened)
+}
+
+// A server-supplied URL is checked before anything is printed or opened.
+//
+// Not parallel: sets ENTIRE_WEB_BASE_URL and swaps the webOpenURL seam.
+func TestOpenInWeb_RefusesUnsafeURLs(t *testing.T) {
+	t.Setenv(api.WebBaseURLEnvVar, "https://web.example:8443")
+	for name, tc := range map[string]struct{ target, wantErr string }{
+		"escape sequence":   {"https://web.example:8443/gh/a/b\x1b]0;owned\x07", "control characters"},
+		"newline":           {"https://web.example:8443/gh/a/b\nrm -rf", "control characters"},
+		"non-HTTP scheme":   {"file:///etc/passwd", "non-HTTP URL"},
+		"javascript scheme": {"javascript:alert(1)", "non-HTTP URL"},
+		"unparseable":       {"https://web.example:8443/%zz", "invalid URL"},
+		"empty host":        {"https:///gh/a/b", "without a plain host"},
+		"userinfo":          {"https://web.example:8443@evil.example/gh/a/b", "without a plain host"},
+		"foreign host":      {"https://evil.example/gh/a/b", "not on the Entire web app origin https://web.example:8443"},
+		"other port":        {"https://web.example/gh/a/b", "not on the Entire web app origin"},
+		"other scheme":      {"http://web.example:8443/gh/a/b", "not on the Entire web app origin"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			opened := stubWebOpenURL(t, nil)
+			cmd, stdout, stderr := newWebOpenTestCmd(tc.target)
+			cmd.SetArgs([]string{"--web"})
+			err := cmd.ExecuteContext(t.Context())
+			require.ErrorContains(t, err, tc.wantErr)
+			require.NotContains(t, err.Error(), "\x1b", "URL text in the error is sanitized")
+			require.NotContains(t, err.Error(), "\n")
+			require.Empty(t, stdout.String())
+			require.Empty(t, stderr.String())
+			require.Empty(t, *opened)
+		})
+	}
+
+	t.Run("foreign host names the override", func(t *testing.T) {
+		stubWebOpenURL(t, nil)
+		cmd, _, _ := newWebOpenTestCmd("https://evil.example/gh/a/b")
+		cmd.SetArgs([]string{"--web"})
+		require.ErrorContains(t, cmd.ExecuteContext(t.Context()), api.WebBaseURLEnvVar)
+	})
+}
+
+// Not parallel: sets ENTIRE_WEB_BASE_URL and swaps the webOpenURL seam.
+func TestOpenInWeb_AcceptsTheWebOrigin(t *testing.T) {
+	t.Setenv(api.WebBaseURLEnvVar, "https://Web.Example:8443/")
+	opened := stubWebOpenURL(t, nil)
+	// Host case differs from the origin's; the re-serialized form is what is
+	// printed and opened.
+	cmd, stdout, _ := newWebOpenTestCmd("HTTPS://WEB.example:8443/gh/acme/web/trails/7?tab=a b")
+	cmd.SetArgs([]string{"--web"})
+	require.NoError(t, cmd.ExecuteContext(t.Context()))
+	const want = "https://WEB.example:8443/gh/acme/web/trails/7?tab=a b"
+	require.Equal(t, want+"\n", stdout.String())
+	require.Equal(t, []string{want}, *opened)
 }
 
 // Not parallel: swaps the package-level webOpenURL seam.
