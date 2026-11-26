@@ -620,8 +620,10 @@ session's log stays in its home: the other repository gets only a marker.
   unlinked. Pointers of exited agents are removed at the next turn start.
 - **Hooks installed on demand.** When the agent or a subagent works in another
   repository (an edit seen at turn end, at subagent end, or on tool events for
-  agents that send them; or a shell command that `cd`s there, runs `git -C`
-  there, or names an absolute path there), Entire installs its git hooks there, including pre-push, and prints one line
+  agents that send them; or a shell command that writes there: a commit-making
+  `git` command run there or with `-C`, a redirection, or a file-writing
+  command such as `touch`, `cp` or `sed -i`. Reads such as `cat` or `git log`
+  do not count, nor does text in tool results), Entire installs its git hooks there, including pre-push, and prints one line
   on stderr. It skips repositories outside your home directory, Go's module
   cache, Homebrew, Entire's own directories, submodules or nested checkouts of
   the home, repositories whose hooks directory is outside their git directory
@@ -630,13 +632,14 @@ session's log stays in its home: the other repository gets only a marker.
   or `entire disable` there).
 - **What the other repository stores.** Its checkpoint ref gets a marker
   checkpoint: the commit SHA, the repository, the session ID, the agent and the
-  home repository (normalized origin, else path). No transcript, prompts or
-  token counts. It is pushed with that repository's pushes.
+  home repository (each its normalized origin, else its directory name; never
+  a local path). No transcript, prompts or token counts. It is pushed with that repository's pushes.
 - **What the home records.** Each link appends one JSON line to
   `entire-cross-repo-links-<session>.jsonl` in the home's git directory
   (append-only; the home's session state is never written from elsewhere). The
   home's next checkpoint lists the links since the previous one
-  (`linked_repos`) and all of them (`session_linked_repos`); `entire checkpoint
+  (`linked_repos`) and all of them (`session_linked_repos`), each naming the
+  other repository the same way and never by local path; `entire checkpoint
   explain` shows them. If the home never commits again, the file still holds
   them.
 - **Commits made without the hooks.** At turn end, at subagent end, and at the

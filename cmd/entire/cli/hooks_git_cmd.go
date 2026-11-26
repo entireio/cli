@@ -28,13 +28,13 @@ type gitHookContext struct {
 	strategy *strategy.ManualCommitStrategy
 }
 
+// hooksGitCmdName is the name of the `entire hooks git` subcommand.
+const hooksGitCmdName = "git"
+
 // newGitHookContext creates a new git hook context with logging and a root perf span.
 // The perf span ensures all perf.Start calls in strategy methods become child spans,
 // producing a single perf log line per hook with a full timing breakdown.
 // Callers must defer g.span.End() to emit the perf log.
-// hooksGitCmdName is `entire hooks git`, and git's own executable name.
-const hooksGitCmdName = "git"
-
 func newGitHookContext(ctx context.Context, hookName string) *gitHookContext {
 	ctx = logging.WithComponent(ctx, "hooks")
 	ctx, span := perf.Start(ctx, hookName,

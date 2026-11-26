@@ -511,12 +511,12 @@ type State struct {
 	// firing for the same prompt, such as a user-level hook beside a project
 	// one, is skipped while the turn it repeats is still running. Only the
 	// last key is kept.
+	LastTurnStartKey string     `json:"last_turn_start_key,omitempty"`
+	LastTurnStartAt  *time.Time `json:"last_turn_start_at,omitempty"`
+
 	// CrossRepoLinksCondensed counts the entries of the session's
 	// cross-repository link journal its checkpoints already listed.
 	CrossRepoLinksCondensed int `json:"cross_repo_links_condensed,omitempty"`
-
-	LastTurnStartKey string     `json:"last_turn_start_key,omitempty"`
-	LastTurnStartAt  *time.Time `json:"last_turn_start_at,omitempty"`
 
 	// Line attribution was removed: state files written by older CLIs may
 	// still carry attribution_base_commit, prompt_attributions,

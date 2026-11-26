@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/entireio/cli/internal/entireclient/userdirs"
@@ -13,11 +14,14 @@ import (
 // Shell discovery for cross-repository linking: an agent can work in another
 // repository through its shell alone (`cd ../d && git commit`, `echo > /abs`),
 // which no file-edit tool records. The transcript still holds the commands and
-// their output, so this reads them agent-neutrally: it walks every JSON value
-// and takes shell commands from "command"/"cmd" fields (Claude Code, Pi,
-// OpenCode, and Codex's JSON-encoded arguments), working directories from
-// "workdir", and commit SHAs from `git commit` summary lines anywhere in tool
-// output. Commands are matched against, never stored or logged.
+// their output, so this reads them: only the inputs of the agent's own shell
+// tool calls (shellToolInput), never tool results or other text, and from
+// those only evidence of writing (shellScan.commandLine): a commit-making git
+// command and the directory it ran in, a redirection's target, or a
+// file-writing command's targets. A command that only reads (`cat /x`,
+// `git -C /x log`) names no directory, so it never leads to an install. Commit
+// SHAs come from `git commit` summary lines in any string of the transcript.
+// Commands are matched against, never stored or logged.
 
 // maxShellDirs bounds the directories one scan reports; each costs a git call.
 const maxShellDirs = 32
@@ -25,8 +29,11 @@ const maxShellDirs = 32
 // maxShellCommits bounds the commit SHAs one scan reports.
 const maxShellCommits = 64
 
-// maxNestedJSON bounds the size of a string value decoded as nested JSON.
-const maxNestedJSON = 1 << 20
+// maxEncodedArguments bounds the size of a tool call's JSON-encoded arguments.
+const maxEncodedArguments = 1 << 20
+
+// gitExecutable is git's executable name, as a shell command names it.
+const gitExecutable = "git"
 
 // commitSummaryLine matches git commit's summary line, "[branch sha] subject",
 // including "[branch (root-commit) sha]" and "[detached HEAD sha]".
@@ -35,10 +42,42 @@ var commitSummaryLine = regexp.MustCompile(`(?m)^\[[^\]\n]{1,256} ([0-9a-f]{7,40
 // shellSeparators splits a command line into simple commands.
 var shellSeparators = regexp.MustCompile(`&&|\|\||[;|\n()]`)
 
+// shellToolNames are the shell tools of the supported agents, lowercased:
+// Claude Code's Bash, Pi's and OpenCode's bash, Codex's shell, exec_command
+// and shell_command, Gemini's run_shell_command, Copilot's run_in_terminal.
+var shellToolNames = []string{"bash", "shell", "exec_command", "shell_command", "local_shell", "container.exec", "run_shell_command", "run_in_terminal"}
+
+// shellToolInputKeys are where a tool call keeps its input: Claude Code's
+// "input", Pi's and Codex's "arguments" (Codex's JSON-encoded), Gemini's
+// "args", others' "parameters".
+var shellToolInputKeys = []string{"input", "arguments", "args", "parameters"}
+
+// toolResultKeys hold tool results rather than calls. They are read for
+// commit SHAs only, so a result quoting a transcript adds no directory.
+var toolResultKeys = []string{"toolUseResult", "tool_result", "output", "result"}
+
+// toolResultTypes and toolResultRoles mark a tool result object.
+var (
+	toolResultTypes = strings.Fields("tool_result function_call_output custom_tool_call_output")
+	toolResultRoles = strings.Fields("toolResult tool")
+)
+
+// toolNameKeys hold a tool call's tool name.
+var toolNameKeys = strings.Fields("name tool toolName")
+
+// gitCommitVerbs are git subcommands that make commits.
+var gitCommitVerbs = strings.Fields("commit merge rebase cherry-pick revert am pull")
+
+// writeAllArgs are commands that write every path argument.
+var writeAllArgs = []string{"touch", "mkdir", "rm", "rmdir", "tee", "truncate"}
+
+// writeLastArg are commands that write their last path argument.
+var writeLastArg = []string{"cp", "mv", "ln", "install", "rsync"}
+
 // shellActivity is what a transcript's shell commands show of the agent's work
 // in other directories.
 type shellActivity struct {
-	dirs    []string // absolute paths commands worked in or named
+	dirs    []string // absolute paths commands wrote in
 	commits []string // abbreviated SHAs `git commit` reported
 }
 
@@ -87,17 +126,19 @@ type shellScan struct {
 	seenCommits map[string]bool
 }
 
+// walk finds shell tool calls and commit summary lines in v. Tool results
+// are read for commit SHAs only.
 func (s *shellScan) walk(v any) {
 	switch t := v.(type) {
 	case map[string]any:
+		if input, ok := shellToolInput(t); ok {
+			s.toolCall(input)
+		}
+		result := isToolResult(t)
 		for key, val := range t {
-			switch key {
-			case "command", "cmd":
-				s.command(val)
-			case "workdir":
-				if dir, ok := val.(string); ok {
-					s.addDir(dir)
-				}
+			if result || slices.Contains(toolResultKeys, key) {
+				s.commitsIn(val)
+				continue
 			}
 			s.walk(val)
 		}
@@ -106,106 +147,265 @@ func (s *shellScan) walk(v any) {
 			s.walk(val)
 		}
 	case string:
-		s.text(t)
+		s.commitsIn(t)
 	}
 }
 
-// text takes commit SHAs from a string, and walks it when it holds JSON
-// (Codex encodes tool arguments and some output that way).
-func (s *shellScan) text(str string) {
-	for _, m := range commitSummaryLine.FindAllStringSubmatch(str, -1) {
-		if sha := m[1]; !s.seenCommits[sha] && len(s.out.commits) < maxShellCommits {
-			s.seenCommits[sha] = true
-			s.out.commits = append(s.out.commits, sha)
-		}
-	}
-	trimmed := strings.TrimSpace(str)
-	if len(trimmed) < 2 || len(trimmed) > maxNestedJSON || (trimmed[0] != '{' && trimmed[0] != '[') {
-		return
-	}
-	var nested any
-	if json.Unmarshal([]byte(trimmed), &nested) == nil {
-		s.walk(nested)
-	}
-}
-
-// command reads a shell command: a string, or an argv array (Codex).
-func (s *shellScan) command(v any) {
+// commitsIn takes commit SHAs from every string in v.
+func (s *shellScan) commitsIn(v any) {
 	switch t := v.(type) {
-	case string:
-		s.commandLine(t)
+	case map[string]any:
+		for _, val := range t {
+			s.commitsIn(val)
+		}
 	case []any:
-		parts := make([]string, 0, len(t))
-		for _, p := range t {
-			if str, ok := p.(string); ok {
-				parts = append(parts, str)
+		for _, val := range t {
+			s.commitsIn(val)
+		}
+	case string:
+		for _, m := range commitSummaryLine.FindAllStringSubmatch(t, -1) {
+			if sha := m[1]; !s.seenCommits[sha] && len(s.out.commits) < maxShellCommits {
+				s.seenCommits[sha] = true
+				s.out.commits = append(s.out.commits, sha)
 			}
 		}
-		s.commandLine(strings.Join(parts, " "))
-	}
-}
-
-// commandLine takes the directories a command line works in: `cd <dir>`,
-// `git -C <dir>`, and absolute paths among its arguments and redirections.
-func (s *shellScan) commandLine(line string) {
-	for _, simple := range shellSeparators.Split(line, -1) {
-		fields := strings.Fields(simple)
-		for i, raw := range fields {
-			tok := unquote(raw)
-			next := ""
-			if i+1 < len(fields) {
-				next = unquote(fields[i+1])
-			}
-			switch {
-			case tok == "cd" && next != "":
-				s.addDir(next)
-			case tok == "-C" && next != "" && slicesContainsGit(fields[:i]):
-				s.addDir(next)
-			default:
-				if path := pathArgument(tok); path != "" {
-					s.addDir(path)
-				}
+		// Codex JSON-encodes some output.
+		if trimmed := strings.TrimSpace(t); len(trimmed) > 1 && len(trimmed) <= maxEncodedArguments && trimmed[0] == '{' {
+			var nested any
+			if json.Unmarshal([]byte(trimmed), &nested) == nil {
+				s.commitsIn(nested)
 			}
 		}
 	}
 }
 
-func slicesContainsGit(fields []string) bool {
-	for _, f := range fields {
-		if filepath.Base(unquote(f)) == hooksGitCmdName {
-			return true
-		}
-	}
-	return false
+// isToolResult reports whether obj is a tool result (Claude Code's
+// tool_result, Codex's function_call_output, Pi's toolResult message).
+func isToolResult(obj map[string]any) bool {
+	typ, _ := obj["type"].(string)  //nolint:errcheck // absent is not a result
+	role, _ := obj["role"].(string) //nolint:errcheck // absent is not a result
+	return slices.Contains(toolResultTypes, typ) || slices.Contains(toolResultRoles, role)
 }
 
-// pathArgument returns the absolute (or home-relative) path a token names,
-// after a redirection operator or an `=`, or "".
-func pathArgument(tok string) string {
-	if i := strings.LastIndexAny(tok, "<>="); i >= 0 {
-		tok = tok[i+1:]
+// shellToolInput returns the input of obj when obj is a call of a shell tool:
+// a tool named in shellToolNames (by "name", "tool" or "toolName") with its
+// input under one of shellToolInputKeys (or OpenCode's "state.input"), or a
+// Codex local_shell_call's "action".
+func shellToolInput(obj map[string]any) (map[string]any, bool) {
+	if typ, _ := obj["type"].(string); typ == "local_shell_call" { //nolint:errcheck // absent is no call
+		action, ok := obj["action"].(map[string]any)
+		return action, ok
 	}
-	tok = strings.TrimRight(unquote(tok), ",:")
-	if strings.HasPrefix(tok, "/") || strings.HasPrefix(tok, "~/") {
-		return tok
+	if isToolResult(obj) || !slices.Contains(shellToolNames, strings.ToLower(toolName(obj))) {
+		return nil, false
+	}
+	if state, ok := obj["state"].(map[string]any); ok {
+		if input, ok := state["input"].(map[string]any); ok {
+			return input, true
+		}
+	}
+	for _, key := range shellToolInputKeys {
+		switch in := obj[key].(type) {
+		case map[string]any:
+			return in, true
+		case string:
+			var decoded map[string]any
+			if len(in) <= maxEncodedArguments && json.Unmarshal([]byte(in), &decoded) == nil {
+				return decoded, true
+			}
+		}
+	}
+	return nil, false
+}
+
+func toolName(obj map[string]any) string {
+	for _, key := range toolNameKeys {
+		if name, ok := obj[key].(string); ok {
+			return name
+		}
 	}
 	return ""
+}
+
+// toolCall reads a shell tool call's command and working directory.
+func (s *shellScan) toolCall(input map[string]any) {
+	workdir := ""
+	for _, key := range []string{"workdir", "cwd", "working_directory"} {
+		if dir, ok := input[key].(string); ok && dir != "" {
+			workdir = dir
+			break
+		}
+	}
+	for _, key := range []string{"command", "cmd"} {
+		if line := commandText(input[key]); line != "" {
+			s.commandLine(line, workdir)
+		}
+	}
+}
+
+// commandText is a shell command's text: a string, or an argv array (Codex),
+// whose script is the argument after a shell's -c (or -lc).
+func commandText(v any) string {
+	switch t := v.(type) {
+	case string:
+		return t
+	case []any:
+		argv := make([]string, 0, len(t))
+		for _, p := range t {
+			if str, ok := p.(string); ok {
+				argv = append(argv, str)
+			}
+		}
+		for i := 1; i+1 < len(argv); i++ {
+			if strings.HasPrefix(argv[i], "-") && strings.HasSuffix(argv[i], "c") {
+				return argv[i+1]
+			}
+		}
+		return strings.Join(argv, " ")
+	}
+	return ""
+}
+
+// commandLine takes the directories a command line wrote in, starting in
+// workdir (or the session's cwd): the directory a commit-making git command
+// ran in (after `cd`, or its -C), a redirection's target, and the targets of
+// file-writing commands. `cd` alone, and reads, name nothing.
+func (s *shellScan) commandLine(line, workdir string) {
+	dir := s.cwd
+	if workdir != "" {
+		dir = s.resolve(s.cwd, workdir)
+	}
+	for _, simple := range shellSeparators.Split(line, -1) {
+		fields := strings.Fields(simple)
+		if len(fields) == 0 {
+			continue
+		}
+		cmd := filepath.Base(unquote(fields[0]))
+		args := fields[1:]
+		if cmd == "cd" {
+			if len(args) > 0 {
+				dir = s.resolve(dir, unquote(args[0]))
+			}
+			continue
+		}
+		for _, target := range redirectTargets(fields) {
+			s.addDir(s.resolve(dir, target))
+		}
+		for _, target := range writeTargets(cmd, args) {
+			s.addDir(s.resolve(dir, target))
+		}
+	}
+}
+
+// writeTargets returns what one simple command writes, relative to the
+// directory it runs in: that directory (or its -C) for a commit-making git
+// command, or a file-writing command's path arguments.
+func writeTargets(cmd string, args []string) []string {
+	paths := pathArgs(args)
+	switch {
+	case cmd == gitExecutable:
+		gitDir, verb := gitInvocation(args)
+		if !slices.Contains(gitCommitVerbs, verb) {
+			return nil
+		}
+		if gitDir == "" {
+			gitDir = "."
+		}
+		return []string{gitDir}
+	case slices.Contains(writeAllArgs, cmd):
+		return paths
+	case slices.Contains(writeLastArg, cmd) && len(paths) > 1:
+		return paths[len(paths)-1:]
+	case (cmd == "sed" || cmd == "perl") && len(paths) > 1 && slices.ContainsFunc(args, func(a string) bool { return strings.HasPrefix(a, "-i") }):
+		return paths[1:] // the first is the script
+	}
+	return nil
+}
+
+// gitInvocation returns a git command's -C directory and its subcommand.
+func gitInvocation(args []string) (dir, verb string) {
+	for i := 0; i < len(args); i++ {
+		arg := unquote(args[i])
+		switch {
+		case arg == "-C" && i+1 < len(args):
+			i++
+			dir = unquote(args[i])
+		case arg == "-c" || arg == "--git-dir" || arg == "--work-tree" || arg == "--namespace":
+			i++
+		case strings.HasPrefix(arg, "-"):
+		default:
+			return dir, arg
+		}
+	}
+	return dir, ""
+}
+
+// redirectTargets returns the files a simple command's output redirections
+// (`>`, `>>`, `2>`, `&>`) write, attached or as the next field.
+func redirectTargets(fields []string) []string {
+	var out []string
+	for i, field := range fields {
+		j := strings.LastIndexByte(field, '>')
+		if j < 0 {
+			continue
+		}
+		target := field[j+1:]
+		if target == "" && i+1 < len(fields) {
+			target = fields[i+1]
+		}
+		if target = unquote(target); target != "" && !strings.HasPrefix(target, "&") && target != "/dev/null" {
+			out = append(out, target)
+		}
+	}
+	return out
+}
+
+// pathArgs are a command's arguments that are neither flags nor redirections.
+func pathArgs(args []string) []string {
+	var out []string
+	for i, arg := range args {
+		arg = unquote(arg)
+		redirected := i > 0 && strings.ContainsAny(args[i-1][len(args[i-1])-1:], "<>")
+		if arg == "" || redirected || strings.HasPrefix(arg, "-") || strings.ContainsAny(arg, "<>") {
+			continue
+		}
+		out = append(out, arg)
+	}
+	return out
 }
 
 func unquote(tok string) string {
 	return strings.Trim(tok, `"'`)
 }
 
+// resolve resolves path against dir, when path is relative and dir is set.
+func (s *shellScan) resolve(dir, path string) string {
+	if path == "" || filepath.IsAbs(path) || strings.HasPrefix(path, "~/") || dir == "" {
+		return path
+	}
+	return filepath.Join(expandHome(dir), path)
+}
+
+// expandHome expands a leading "~/", or returns "" when the home directory
+// is unknown.
+func expandHome(path string) string {
+	rest, ok := strings.CutPrefix(path, "~/")
+	if !ok {
+		return path
+	}
+	home, err := userdirs.Home()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, rest)
+}
+
 func (s *shellScan) addDir(dir string) {
 	if len(s.out.dirs) >= maxShellDirs || dir == "" || dir == "-" {
 		return
 	}
-	if rest, ok := strings.CutPrefix(dir, "~/"); ok {
-		home, err := userdirs.Home()
-		if err != nil {
-			return
-		}
-		dir = filepath.Join(home, rest)
+	if dir = expandHome(dir); dir == "" {
+		return
 	}
 	if !filepath.IsAbs(dir) {
 		if !filepath.IsAbs(s.cwd) {

@@ -20,36 +20,85 @@ func jsonl(t *testing.T, entries ...any) []byte {
 	return []byte(strings.Join(lines, "\n") + "\n")
 }
 
+// bash is a Claude Code Bash tool call.
+func bash(command string) map[string]any {
+	return map[string]any{"type": "assistant", "message": map[string]any{"content": []any{
+		map[string]any{"type": "tool_use", "name": "Bash", "input": map[string]any{"command": command}},
+	}}}
+}
+
 func TestScanShellActivity_ClaudeBash(t *testing.T) {
 	t.Parallel()
 	data := jsonl(t,
-		map[string]any{"type": "assistant", "message": map[string]any{"content": []any{
-			map[string]any{"type": "tool_use", "name": "Bash", "input": map[string]any{
-				"command": `cd ../d && echo hi > "/home/u/e/new.txt" && git -C /home/u/f commit -qm x`,
-			}},
-		}}},
+		bash(`cd ../d && git commit -qm x && echo hi > "/home/u/e/new.txt" && git -C /home/u/f commit -qm x`),
 		map[string]any{"type": "user", "message": map[string]any{"content": []any{
 			map[string]any{"type": "tool_result", "content": "[feature/x 1a2b3c4] add it\n 1 file changed"},
 		}}},
 	)
 	got := scanShellActivity(data, 0, "/home/u/c")
-	for _, want := range []string{"/home/u/d", "/home/u/e/new.txt", "/home/u/f"} {
-		if !slices.Contains(got.dirs, want) {
-			t.Errorf("dirs %v lack %s", got.dirs, want)
-		}
+	if want := []string{"/home/u/d", "/home/u/e/new.txt", "/home/u/f"}; !slices.Equal(got.dirs, want) {
+		t.Errorf("dirs %v, want %v", got.dirs, want)
 	}
 	if !slices.Equal(got.commits, []string{"1a2b3c4"}) {
 		t.Errorf("commits %v", got.commits)
 	}
 }
 
-func TestScanShellActivity_FromEntrySkipsEarlierTurns(t *testing.T) {
+func TestScanShellActivity_ReadsNameNoDirectory(t *testing.T) {
 	t.Parallel()
 	data := jsonl(t,
-		map[string]any{"input": map[string]any{"command": "cd /old"}},
-		map[string]any{"input": map[string]any{"command": "cd /new"}},
+		bash("cat ~/other/README && ls /home/u/src/x && grep -r foo /home/u/g"),
+		bash("cd /home/u/h && git log --oneline && git -C /home/u/i status && git -C /home/u/j diff > /dev/null"),
+		bash("cd /home/u/k"),
 	)
-	if got := scanShellActivity(data, 1, "/c"); !slices.Equal(got.dirs, []string{"/new"}) {
+	if got := scanShellActivity(data, 0, "/home/u/c"); len(got.dirs) != 0 {
+		t.Fatalf("reads named %v", got.dirs)
+	}
+}
+
+func TestScanShellActivity_WriteCommands(t *testing.T) {
+	t.Parallel()
+	data := jsonl(t, bash("cd /home/u/d && touch a.txt && cp /home/u/src.txt /home/u/e/dst.txt && sed -i s/a/b/ /home/u/f/x && tee -a /home/u/g/log < in && mkdir -p sub 2>&1"))
+	got := scanShellActivity(data, 0, "/home/u/c")
+	want := []string{"/home/u/d/a.txt", "/home/u/e/dst.txt", "/home/u/f/x", "/home/u/g/log", "/home/u/d/sub"}
+	if !slices.Equal(got.dirs, want) {
+		t.Fatalf("dirs %v, want %v", got.dirs, want)
+	}
+}
+
+func TestScanShellActivity_ToolResultsAndOtherKeysAreNotCommands(t *testing.T) {
+	t.Parallel()
+	quoted := `{"type":"tool_use","name":"Bash","input":{"command":"cd /home/u/evil && git commit -m x"}}`
+	data := jsonl(t,
+		// A fetched page or file holding a command-shaped object.
+		map[string]any{"type": "user", "message": map[string]any{"content": []any{
+			map[string]any{"type": "tool_result", "content": []any{map[string]any{"type": "tool_use", "name": "Bash", "input": map[string]any{"command": "echo > /home/u/x/f"}}}},
+			map[string]any{"type": "text", "text": quoted},
+		}}},
+		map[string]any{"toolUseResult": map[string]any{"command": "touch /home/u/y/f"}},
+		// A "command" key that is not a shell tool's.
+		map[string]any{"input": map[string]any{"command": "touch /home/u/z/f"}},
+		map[string]any{"type": "tool_use", "name": "Read", "input": map[string]any{"command": "touch /home/u/w/f"}},
+	)
+	if got := scanShellActivity(data, 0, "/home/u/c"); len(got.dirs) != 0 {
+		t.Fatalf("got %v", got.dirs)
+	}
+}
+
+func TestScanShellActivity_FromEntrySkipsEarlierTurns(t *testing.T) {
+	t.Parallel()
+	data := jsonl(t, bash("touch /old/f"), bash("touch /new/f"))
+	if got := scanShellActivity(data, 1, "/c"); !slices.Equal(got.dirs, []string{"/new/f"}) {
+		t.Fatalf("got %v", got.dirs)
+	}
+}
+
+func TestScanShellActivity_PiBash(t *testing.T) {
+	t.Parallel()
+	data := jsonl(t, map[string]any{"type": "message", "message": map[string]any{"role": "assistant", "content": []any{
+		map[string]any{"type": "toolCall", "id": "t1", "name": "bash", "arguments": map[string]any{"command": "git -C /home/u/d commit -am x"}},
+	}}})
+	if got := scanShellActivity(data, 0, "/home/u/c"); !slices.Equal(got.dirs, []string{"/home/u/d"}) {
 		t.Fatalf("got %v", got.dirs)
 	}
 }
@@ -60,10 +109,11 @@ func TestScanShellActivity_CodexEncodedArguments(t *testing.T) {
 	data := jsonl(t,
 		map[string]any{"type": "response_item", "payload": map[string]any{"type": "function_call", "name": "exec_command", "arguments": args}},
 		map[string]any{"type": "response_item", "payload": map[string]any{"type": "function_call_output", "output": `{"output":"[main (root-commit) deadbeefcafe] wip\n"}`}},
+		map[string]any{"type": "response_item", "payload": map[string]any{"type": "function_call", "name": "exec_command", "arguments": `{"cmd":"cat /home/u/e/x","workdir":"/home/u/e"}`}},
 	)
 	got := scanShellActivity(data, 0, "/home/u/c")
-	if !slices.Contains(got.dirs, "/home/u/d") {
-		t.Errorf("dirs %v lack the workdir", got.dirs)
+	if !slices.Equal(got.dirs, []string{"/home/u/d"}) {
+		t.Errorf("dirs %v, want only the workdir a commit ran in", got.dirs)
 	}
 	if !slices.Equal(got.commits, []string{"deadbeefcafe"}) {
 		t.Errorf("commits %v", got.commits)
@@ -73,7 +123,7 @@ func TestScanShellActivity_CodexEncodedArguments(t *testing.T) {
 func TestScanShellActivity_OpenCodeExportByMessage(t *testing.T) {
 	t.Parallel()
 	export := map[string]any{"info": map[string]any{"id": "s"}, "messages": []any{
-		map[string]any{"parts": []any{map[string]any{"type": "tool", "tool": "bash", "state": map[string]any{"input": map[string]any{"command": "cd /old"}}}}},
+		map[string]any{"parts": []any{map[string]any{"type": "tool", "tool": "bash", "state": map[string]any{"input": map[string]any{"command": "cd /old && git commit -m x"}}}}},
 		map[string]any{"parts": []any{map[string]any{"type": "tool", "tool": "bash", "state": map[string]any{
 			"input": map[string]any{"command": "cd /home/u/d && git commit -m x"}, "output": "[main abcdef0] x",
 		}}}},
@@ -92,7 +142,7 @@ func TestScanShellActivity_IgnoresProseAndRelativeArguments(t *testing.T) {
 	t.Parallel()
 	data := jsonl(t,
 		map[string]any{"message": map[string]any{"content": "I will look at /home/u/other later"}},
-		map[string]any{"input": map[string]any{"command": "go test ./... && cat README.md"}},
+		bash("go test ./... && cat README.md"),
 	)
 	if got := scanShellActivity(data, 0, "/home/u/c"); len(got.dirs) != 0 || len(got.commits) != 0 {
 		t.Fatalf("got %+v", got)
