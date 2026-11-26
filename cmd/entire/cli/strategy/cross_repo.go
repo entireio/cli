@@ -325,9 +325,11 @@ const (
 
 // writeCrossRepoMarker stores, on this repository's checkpoint ref, a marker
 // checkpoint saying the home session made commit sha here: no transcript,
-// prompts or tokens, which stay with the session's home. A recorded link
-// (the sweep) also names the commit in LinkedCommits, as attach does. The
-// link is then appended to the home's journal.
+// prompts or tokens, which stay with the session's home. It names the commit
+// in LinkedCommits and the home session's turn, as a home checkpoint does.
+// The link is then appended to the home's journal, the handoff the home's
+// own hooks fold into the session's CheckpointLinks (foldCrossRepoLinks):
+// this repository never writes the home's session state.
 func (s *ManualCommitStrategy) writeCrossRepoMarker(ctx context.Context, repo *git.Repository, cpID id.CheckpointID, home *crossRepoHome, sha string, committed map[string]struct{}, linkedBy string) error {
 	worktree, err := paths.WorktreeRoot(ctx)
 	if err != nil {
@@ -344,15 +346,13 @@ func (s *ManualCommitStrategy) writeCrossRepoMarker(ctx context.Context, repo *g
 		CheckpointID: cpID, SessionID: home.state.SessionID, Strategy: StrategyNameManualCommit,
 		Branch: GetCurrentBranchName(repo), FilesTouched: committedFilesExcludingMetadata(committed),
 		Agent: home.state.AgentType, AuthorName: authorName, AuthorEmail: authorEmail,
-		CrossRepo: &cpkg.CrossRepoMarker{CommitSHA: sha, Repo: repoKey, HomeRepo: homeKey},
-	}
-	if linkedBy == linkedBySweep {
-		opts.LinkedCommits = []cpkg.LinkedCommit{{SHA: sha}}
+		TurnID: home.state.TurnID, LinkedCommits: []cpkg.LinkedCommit{{SHA: sha}},
+		CrossRepo: &cpkg.CrossRepoMarker{CommitSHA: sha, Repo: repoKey, HomeRepo: homeKey, SessionIDs: []string{home.state.EntireSessionID()}},
 	}
 	if err := store.Write(ctx, condensationSessionWriteRequest(opts)); err != nil {
 		return fmt.Errorf("write the marker checkpoint: %w", err)
 	}
-	link := cpkg.LinkedRepoCommit{RepoKey: repoKey, SHA: sha, CheckpointID: cpID.String(), LinkedBy: linkedBy, At: time.Now().UTC()}
+	link := cpkg.LinkedRepoCommit{RepoKey: repoKey, SHA: sha, CheckpointID: cpID.String(), LinkedBy: linkedBy, TurnID: home.state.TurnID, At: time.Now().UTC()}
 	if err := appendCrossRepoLink(home, link); err != nil {
 		logging.Warn(logging.WithComponent(ctx, "cross-repo"), "could not record the link in the session's home repository",
 			slog.String("session_id", home.state.SessionID), slog.String("error", err.Error()))

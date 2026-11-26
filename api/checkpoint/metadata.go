@@ -708,6 +708,11 @@ type CrossRepoMarker struct {
 	Repo string `json:"repo,omitempty"`
 	// HomeRepo names the session's home repository the same way.
 	HomeRepo string `json:"home_repo"`
+	// SessionIDs link back to the sessions that made the commit, each as its
+	// Entire session ID ("<agent>:<agent session ID>"). The commit itself is
+	// also in the checkpoint's LinkedCommits, and the home session's turn in
+	// its TurnID, as for a home checkpoint. Absent on older markers.
+	SessionIDs []string `json:"session_ids,omitempty"`
 }
 
 // LinkedRepoCommit is one commit a session's agent made in another
@@ -715,11 +720,13 @@ type CrossRepoMarker struct {
 // CrossRepoMarker.Repo does; no local path is recorded, since the home's
 // checkpoints carry these and are pushed.
 type LinkedRepoCommit struct {
-	RepoKey      string    `json:"repo_key"`
-	SHA          string    `json:"sha"`
-	CheckpointID string    `json:"checkpoint_id,omitempty"`
-	LinkedBy     string    `json:"linked_by"`
-	At           time.Time `json:"at"`
+	RepoKey      string `json:"repo_key"`
+	SHA          string `json:"sha"`
+	CheckpointID string `json:"checkpoint_id,omitempty"`
+	LinkedBy     string `json:"linked_by"`
+	// TurnID is the home session's turn when the commit was made.
+	TurnID string    `json:"turn_id,omitempty"`
+	At     time.Time `json:"at"`
 }
 
 // LinkedCommit is one trailer-less link from a checkpoint to a commit; see

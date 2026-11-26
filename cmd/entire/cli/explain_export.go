@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/redact"
@@ -544,6 +545,13 @@ type checkpointSessionJSON struct {
 	LinkedRepos        []checkpoint.LinkedRepoCommit `json:"linked_repos,omitempty"`
 	SessionLinkedRepos []checkpoint.LinkedRepoCommit `json:"session_linked_repos,omitempty"`
 
+	// EntireSessionID is "<agent>:<agent session ID>", the session's
+	// identity across repositories. SessionCheckpoints is every checkpoint
+	// the session recorded, oldest first, from its local state; absent when
+	// this clone holds no state for the session.
+	EntireSessionID    string                   `json:"entire_session_id,omitempty"`
+	SessionCheckpoints []session.CheckpointLink `json:"session_checkpoints,omitempty"`
+
 	// Error is set when this session's metadata could not be read. The Index
 	// field remains valid; all other content fields are zero. Consumers can
 	// detect this by checking for a non-empty Error.
@@ -667,7 +675,9 @@ func buildCheckpointJSONEnvelope(ctx context.Context, reader checkpointExportRea
 			failedSessions = append(failedSessions, idx)
 			continue
 		}
-		envelope.Sessions = append(envelope.Sessions, sessionMetadataToJSON(idx, meta))
+		out := sessionMetadataToJSON(idx, meta)
+		withSessionCheckpoints(ctx, &out)
+		envelope.Sessions = append(envelope.Sessions, out)
 	}
 	tasksPartial := addTasksToEnvelope(ctx, reader, cpID, &envelope)
 	envelope.Partial = len(failedSessions) > 0 || tasksPartial
@@ -726,6 +736,24 @@ func taskEntryToJSON(entry checkpoint.TaskEntry) checkpointTaskJSON {
 	return out
 }
 
+// withSessionCheckpoints adds the session's checkpoint list from this
+// clone's session state, read without changing it. A missing or unreadable
+// state leaves the entry as the checkpoint metadata described it.
+func withSessionCheckpoints(ctx context.Context, out *checkpointSessionJSON) {
+	if out.SessionID == "" {
+		return
+	}
+	store, err := session.NewStateStore(ctx)
+	if err != nil {
+		return
+	}
+	state, err := store.LoadReadOnly(ctx, out.SessionID)
+	if err != nil || state == nil {
+		return
+	}
+	out.SessionCheckpoints = state.CheckpointLinks
+}
+
 // readSessionMetadataForExport reads only metadata.json for a session — no
 // transcript or prompt bytes. GitStore exposes a metadata-only reader, so this
 // never depends on transcript availability.
@@ -746,6 +774,7 @@ func sessionMetadataToJSON(idx int, meta *checkpoint.Metadata) checkpointSession
 		Kind:               meta.Kind,
 		ReviewSkills:       meta.ReviewSkills,
 		TurnID:             meta.TurnID,
+		EntireSessionID:    session.EntireSessionIDFor(meta.Agent, meta.SessionID),
 		CrossRepo:          meta.CrossRepo,
 		LinkedRepos:        meta.LinkedRepos,
 		SessionLinkedRepos: meta.SessionLinkedRepos,

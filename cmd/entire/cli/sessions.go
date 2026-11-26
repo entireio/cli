@@ -594,11 +594,16 @@ type sessionInfoJSON struct {
 	// Checkpoints is the deprecated name of PendingTurns, kept for one release
 	// so scripts reading `checkpoints` keep working. Remove it in the release
 	// after the one that introduced pending_turns.
-	Checkpoints    int            `json:"checkpoints"`
-	LastCheckpoint string         `json:"last_checkpoint_id,omitempty"`
-	Tokens         *tokenInfoJSON `json:"tokens,omitempty"`
-	LastPrompt     string         `json:"last_prompt,omitempty"`
-	FilesTouched   []string       `json:"files_touched,omitempty"`
+	Checkpoints    int    `json:"checkpoints"`
+	LastCheckpoint string `json:"last_checkpoint_id,omitempty"`
+	// EntireSessionID is "<agent>:<session_id>". CheckpointCount counts
+	// every checkpoint the session recorded (SessionState.CheckpointLinks),
+	// which, unlike last_checkpoint_id, a new prompt never clears.
+	EntireSessionID string         `json:"entire_session_id,omitempty"`
+	CheckpointCount int            `json:"checkpoint_count,omitempty"`
+	Tokens          *tokenInfoJSON `json:"tokens,omitempty"`
+	LastPrompt      string         `json:"last_prompt,omitempty"`
+	FilesTouched    []string       `json:"files_touched,omitempty"`
 
 	// Resolution says how this session was picked when the caller did not name
 	// one — see strategy.SessionResolution. Present only for `session
@@ -647,6 +652,8 @@ func buildSessionInfoJSON(state *strategy.SessionState, status string) sessionIn
 		LastPrompt:     state.LastPrompt,
 		FilesTouched:   state.PendingFiles(),
 	}
+	info.EntireSessionID = state.EntireSessionID()
+	info.CheckpointCount = len(state.CheckpointLinks)
 	if usage := state.TotalTokenUsage(); usage != nil {
 		info.Tokens = &tokenInfoJSON{
 			Total:      totalTokens(usage),
@@ -716,6 +723,9 @@ func writeSessionInfoText(w io.Writer, state *strategy.SessionState, status stri
 
 	if state.LastCheckpointID != "" {
 		fmt.Fprintf(w, "Checkpoint:  %s\n", state.LastCheckpointID)
+	}
+	if n := len(state.CheckpointLinks); n > 0 {
+		fmt.Fprintf(w, "Checkpoints: %d recorded\n", n)
 	}
 
 	usage := state.TotalTokenUsage()

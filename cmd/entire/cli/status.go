@@ -1363,6 +1363,10 @@ type sessionBriefJSON struct {
 	// CaptureDegraded reports that a session for this agent last turned with
 	// degraded capture (see SessionState.CaptureDegradedAt).
 	CaptureDegraded bool `json:"capture_degraded,omitempty"`
+	// EntireSessionID is "<agent>:<session_id>"; Checkpoints every checkpoint
+	// the session recorded, oldest first (SessionState.CheckpointLinks).
+	EntireSessionID string                   `json:"entire_session_id,omitempty"`
+	Checkpoints     []session.CheckpointLink `json:"checkpoints,omitempty"`
 }
 
 func runStatusJSON(ctx context.Context, w io.Writer) error {
@@ -1457,6 +1461,8 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 						Model:           st.ModelName,
 						Status:          sessionStatusLabel(st),
 						CaptureDegraded: st.CaptureDegradedAt != nil,
+						EntireSessionID: st.EntireSessionID(),
+						Checkpoints:     st.CheckpointLinks,
 					})
 				}
 				// Agent first so the listing stays grouped and readable;

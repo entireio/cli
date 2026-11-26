@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
+	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
@@ -649,4 +650,74 @@ func TestCrossRepo_SweepLinksLinkedWorktreeCommit(t *testing.T) {
 	x.endTurn(t, sess)
 
 	assertRecordedLink(t, d, sess.ID, sha)
+}
+
+// The session's state in C lists every checkpoint it recorded, in order and
+// with their commits, across D, a worktree of D and C itself, and keeps them
+// across turn end and a new prompt: a home commit in the same turn as D's
+// folds D's links first, and a turn with no home commit folds them at its end.
+func TestCrossRepo_SessionStateListsEveryCheckpoint(t *testing.T) {
+	t.Parallel()
+	x := newCrossRepo(t, 1)
+	d := x.others[0]
+	sess := x.installByTurn(t)
+
+	inD := assertAgentCommitLinked(t, d, d, "second.txt", sess.ID)
+	wt := filepath.Join(filepath.Dir(d.RepoDir), "d-wt")
+	testutil.RunGit(t, d.RepoDir, "worktree", "add", "-b", "d-wt", wt)
+	inWorktree := assertAgentCommitLinked(t, envAt(t, wt, x.extra), d, "wt.txt", sess.ID)
+	x.c.WriteFile("home.txt", "home work")
+	x.c.GitCommitWithHooksAsAgent("home commit", "home.txt")
+	home := x.c.GetHeadHash()
+	x.endTurn(t, sess)
+
+	x.startTurn(t, sess, "one more in d")
+	later := assertAgentCommitLinked(t, d, d, "third.txt", sess.ID)
+	x.endTurn(t, sess)
+	x.startTurn(t, sess, "a new prompt clears nothing")
+
+	state, err := x.c.GetSessionState(sess.ID)
+	if err != nil || state == nil {
+		t.Fatalf("load C's session state: %v", err)
+	}
+	want := []struct {
+		sha  string
+		kind session.CheckpointLinkKind
+		cpID string
+	}{
+		{inD, session.CheckpointLinkCrossRepo, d.GetCheckpointIDFromCommitMessage(inD)},
+		{inWorktree, session.CheckpointLinkCrossRepo, d.GetCheckpointIDFromCommitMessage(inWorktree)},
+		{home, session.CheckpointLinkHome, x.c.GetCheckpointIDFromCommitMessage(home)},
+		{later, session.CheckpointLinkCrossRepo, d.GetCheckpointIDFromCommitMessage(later)},
+	}
+	if len(state.CheckpointLinks) != len(want) {
+		t.Fatalf("C's state lists %d checkpoints, want %d: %+v", len(state.CheckpointLinks), len(want), state.CheckpointLinks)
+	}
+	for i, w := range want {
+		got := state.CheckpointLinks[i]
+		if got.CheckpointID.String() != w.cpID || got.Kind != w.kind || !slices.Equal(got.LinkedCommits, []string{w.sha}) || got.TurnID == "" {
+			t.Errorf("entry %d = %+v, want checkpoint %s (%s) for %s with a turn", i, got, w.cpID, w.kind, w.sha)
+		}
+	}
+	if prev := state.PreviousCheckpoint(state.CheckpointLinks[2].CheckpointID); prev.String() != want[1].cpID {
+		t.Errorf("home checkpoint's predecessor = %s, want %s", prev, want[1].cpID)
+	}
+
+	marker := readSessionMetadata(t, d, want[0].cpID)
+	if !slices.Contains(marker.CrossRepo.SessionIDs, state.EntireSessionID()) || marker.TurnID == "" ||
+		!slices.ContainsFunc(checkpointFor(t, d, want[0].cpID).LinkedCommits, func(l checkpoint.LinkedCommit) bool { return l.SHA == inD }) {
+		t.Errorf("marker lacks its link fields: session_ids %v turn %q", marker.CrossRepo.SessionIDs, marker.TurnID)
+	}
+	homeMeta := readSessionMetadata(t, x.c, want[2].cpID)
+	if homeMeta.TurnID == "" || !slices.ContainsFunc(checkpointFor(t, x.c, want[2].cpID).LinkedCommits, func(l checkpoint.LinkedCommit) bool { return l.SHA == home }) {
+		t.Errorf("home checkpoint lacks its link fields: turn %q", homeMeta.TurnID)
+	}
+
+	out := x.c.RunCLI("status", "--json")
+	if !strings.Contains(out, `"entire_session_id":"`+state.EntireSessionID()+`"`) || !strings.Contains(out, want[3].cpID) {
+		t.Errorf("status --json lacks the session's identity or checkpoints:\n%s", out)
+	}
+	if out := x.c.RunCLI("checkpoint", "explain", want[2].cpID, "--json"); !strings.Contains(out, `"session_checkpoints"`) || !strings.Contains(out, want[0].cpID) {
+		t.Errorf("checkpoint explain --json lacks the session's checkpoints:\n%s", out)
+	}
 }

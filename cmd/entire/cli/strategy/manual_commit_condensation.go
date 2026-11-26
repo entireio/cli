@@ -67,6 +67,11 @@ func (s *ManualCommitStrategy) listCheckpoints(ctx context.Context) ([]Checkpoin
 type condenseOpts struct {
 	repoDir string // Worktree root of the committing worktree (home-worktree check)
 
+	// commitSHA is the commit this condensation was written for, recorded in
+	// the checkpoint's LinkedCommits and the session's CheckpointLinks. Empty
+	// when no commit carries the checkpoint (session end, snapshot).
+	commitSHA string
+
 	// recordedBranch overrides HEAD for ID-based salvage, including an empty
 	// branch recorded at detached HEAD. Commit-driven condensation keeps HEAD.
 	recordedBranch *string
@@ -870,6 +875,8 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	}
 	if commitSHA, ok := recordedCommitLink(ctx); ok {
 		writeOpts.LinkedCommits = []cpkg.LinkedCommit{{SHA: commitSHA}}
+	} else if o.commitSHA != "" {
+		writeOpts.LinkedCommits = []cpkg.LinkedCommit{{SHA: o.commitSHA}}
 	}
 	withLinkedRepos(ctx, &writeOpts, state)
 
@@ -883,6 +890,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	}
 	writeCommittedSpan.End()
 	writeV1Duration := time.Since(writeV1Start)
+	recordHomeCheckpointLink(ctx, state, checkpointID, o.commitSHA)
 
 	// Deferred prompt-window reset: a checkpoint was written, so the window base
 	// must be re-anchored — but not now. We defer until the next counted turn (in

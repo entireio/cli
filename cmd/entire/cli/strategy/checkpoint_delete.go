@@ -695,6 +695,9 @@ func deleteStateFields(st *SessionState, cid id.CheckpointID) []string {
 	if slices.Contains(st.TurnCheckpointIDs, cid.String()) {
 		fields = append(fields, "turn_checkpoint_ids")
 	}
+	if slices.ContainsFunc(st.CheckpointLinks, func(l session.CheckpointLink) bool { return l.CheckpointID == cid }) {
+		fields = append(fields, "checkpoint_links")
+	}
 	return fields
 }
 
@@ -713,6 +716,10 @@ func clearDeletedCheckpointFromState(st *SessionState, cid id.CheckpointID) bool
 	if i := slices.Index(st.TurnCheckpointIDs, cid.String()); i >= 0 {
 		st.TurnCheckpointIDs = slices.DeleteFunc(st.TurnCheckpointIDs, func(s string) bool { return s == cid.String() })
 		changed = true
+	}
+	if n := len(st.CheckpointLinks); n > 0 {
+		st.RemoveCheckpointLink(cid)
+		changed = changed || len(st.CheckpointLinks) != n
 	}
 	return changed
 }
