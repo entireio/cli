@@ -1,6 +1,9 @@
 package transcript
 
-import "fmt"
+import (
+	"bytes"
+	"fmt"
+)
 
 // Native transcript formats Convert can be told to use through
 // Options.Format. Each is named after the agent whose transcript it reads.
@@ -13,17 +16,13 @@ const (
 	FormatGemini     = "gemini"          // Gemini CLI session JSON
 	FormatOpenCode   = "opencode"        // OpenCode export
 	FormatPi         = "pi"              // Pi session JSONL
-	// FormatOpenCodeMessages is one OpenCode message per line,
-	// {"info":{...},"parts":[...]}, as OpenCodeSnapshotLines splits an
-	// export. It is never detected, only declared.
-	FormatOpenCodeMessages = "opencode-messages"
 )
 
 // KnownFormat reports whether Convert accepts format as Options.Format.
 func KnownFormat(format string) bool {
 	switch format {
 	case FormatClaudeCode, FormatCursor, FormatCodex, FormatCopilot,
-		FormatDroid, FormatGemini, FormatOpenCode, FormatPi, FormatOpenCodeMessages:
+		FormatDroid, FormatGemini, FormatOpenCode, FormatPi:
 		return true
 	}
 	return false
@@ -69,6 +68,14 @@ func jsonlFormat(agent string) string {
 // convertAs converts content with the converter for format.
 func convertAs(content []byte, format string, opts Options) ([]byte, error) {
 	switch format {
+	case FormatOpenCode, FormatGemini:
+		// An empty single-object transcript is not yet written, not malformed:
+		// convert it as detection does, to nothing.
+		if len(bytes.TrimSpace(content)) == 0 {
+			return convertAs(content, jsonlFormat(opts.Agent), opts)
+		}
+	}
+	switch format {
 	case FormatOpenCode:
 		return compactOpenCode(content, opts)
 	case FormatGemini:
@@ -92,21 +99,6 @@ func convertAs(content []byte, format string, opts Options) ([]byte, error) {
 		return foldJSONL(truncated, opts, NewClaudeAdapter())
 	case FormatCursor:
 		return foldJSONL(truncated, opts, NewCursorAdapter())
-	case FormatOpenCodeMessages:
-		return foldOpenCodeMessages(truncated, opts)
 	}
 	return nil, fmt.Errorf("unknown transcript format %q", format)
-}
-
-// foldOpenCodeMessages converts one OpenCode message per line through the
-// same adapter and fold a live OpenCode stream uses. A line is a message, so
-// StartLine slices by message as the export path does.
-func foldOpenCodeMessages(content []byte, opts Options) ([]byte, error) {
-	a := NewOpenCodeAdapter()
-	records := append(a.Feed(content), a.Flush()...)
-	out, err := Fold(records, opts)
-	if err != nil {
-		return nil, fmt.Errorf("folding opencode messages: %w", err)
-	}
-	return out, nil
 }

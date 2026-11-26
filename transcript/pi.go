@@ -239,6 +239,10 @@ func piEmitAssistantContent(raw json.RawMessage, results map[string]piCompactToo
 // not cost the whole message. ok is false when raw is not an array. Tool
 // results do not use it: piDecodeResultOutput keeps such a result whole.
 func piContentItems(raw json.RawMessage) ([]pijsonl.ContentItem, bool) {
+	var whole []pijsonl.ContentItem
+	if json.Unmarshal(raw, &whole) == nil {
+		return whole, true
+	}
 	var rawItems []json.RawMessage
 	if json.Unmarshal(raw, &rawItems) != nil {
 		return nil, false

@@ -7,8 +7,8 @@ import (
 	"testing"
 )
 
-// A declared format must convert exactly as detection does for that format,
-// so an agent declaring it gets the same output as the built-in agent.
+// A named format must convert exactly as detection does for that format, so
+// an importer naming it gets the same output as the built-in agent.
 func TestConvert_FormatMatchesDetection(t *testing.T) {
 	t.Parallel()
 
@@ -73,6 +73,30 @@ func TestConvert_FormatClaudeCodeForAnotherAgent(t *testing.T) {
 	}
 }
 
+// A named single-object format converts an empty transcript, one not yet
+// written, to nothing as detection does, instead of failing to parse it.
+func TestConvert_FormatEmptyContent(t *testing.T) {
+	t.Parallel()
+
+	for _, format := range []string{FormatOpenCode, FormatGemini} {
+		for _, content := range []string{"", "\n  \n"} {
+			opts := agentOpts("x")
+			want, err := Convert([]byte(content), opts)
+			if err != nil {
+				t.Fatalf("detected %q: %v", content, err)
+			}
+			opts.Format = format
+			got, err := Convert([]byte(content), opts)
+			if err != nil {
+				t.Fatalf("%s on %q: %v", format, content, err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Errorf("%s on %q = %q, want %q", format, content, got, want)
+			}
+		}
+	}
+}
+
 func TestConvert_UnknownFormat(t *testing.T) {
 	t.Parallel()
 
@@ -86,42 +110,6 @@ func TestConvert_UnknownFormat(t *testing.T) {
 	}
 }
 
-// One OpenCode message per line (how an agent that stores the messages it
-// takes from an OpenCode-style export, such as Kilo Code, keeps them)
-// converts as the export does.
-func TestConvert_FormatOpenCodeMessagesMatchesExport(t *testing.T) {
-	t.Parallel()
-
-	export, err := os.ReadFile("testdata/opencode_full.jsonl")
-	if err != nil {
-		t.Fatal(err)
-	}
-	lines, err := OpenCodeSnapshotLines(export)
-	if err != nil {
-		t.Fatal(err)
-	}
-	messages := append(bytes.Join(lines, []byte("\n")), '\n')
-
-	for _, startLine := range []int{0, 1} {
-		opts := agentOpts("kilo")
-		opts.StartLine = startLine
-		want, err := Convert(export, opts)
-		if err != nil {
-			t.Fatal(err)
-		}
-		opts.Format = FormatOpenCodeMessages
-		got, err := Convert(messages, opts)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !bytes.Equal(got, want) {
-			t.Errorf("StartLine %d:\ngot:\n%s\nwant:\n%s", startLine, got, want)
-		}
-	}
-}
-
-// A Pi session whose header is not its first line (Oh My Pi writes a title
-// slot first) is not detected as Pi; declaring the format converts it.
 func TestConvert_FormatPiWithLeadingTitleSlot(t *testing.T) {
 	t.Parallel()
 

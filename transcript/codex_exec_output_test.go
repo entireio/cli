@@ -11,10 +11,11 @@ func TestCompact_CodexExecOutputEnvelope(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name   string
-		tool   string
-		output string
-		result string
+		name      string
+		tool      string
+		namespace string
+		output    string
+		result    string
 	}{
 		{
 			name:   "non-zero exit with empty output is an error",
@@ -44,6 +45,23 @@ func TestCompact_CodexExecOutputEnvelope(t *testing.T) {
 			result: `{"output":"{\"output\":\"\",\"metadata\":{\"exit_code\":1}}","status":"success"}`,
 		},
 		{
+			name:      "a namespaced MCP tool returning the same shape is left as is",
+			tool:      "js",
+			namespace: "mcp__cua_repl",
+			output:    `{"output":"","metadata":{"exit_code":1}}`,
+			result:    `{"output":"{\"output\":\"\",\"metadata\":{\"exit_code\":1}}","status":"success"}`,
+		},
+		{
+			name:   "keys in another case are left as is",
+			output: `{"OUTPUT":"x","Metadata":{"EXIT_CODE":2}}`,
+			result: `{"output":"{\"OUTPUT\":\"x\",\"Metadata\":{\"EXIT_CODE\":2}}","status":"success"}`,
+		},
+		{
+			name:   "a null exit code is left as is",
+			output: `{"output":"x","metadata":{"exit_code":null}}`,
+			result: `{"output":"{\"output\":\"x\",\"metadata\":{\"exit_code\":null}}","status":"success"}`,
+		},
+		{
 			name:   "an object with keys beyond output and metadata is left as is",
 			output: `{"output":"","metadata":{"exit_code":1},"job":"j1"}`,
 			result: `{"output":"{\"output\":\"\",\"metadata\":{\"exit_code\":1},\"job\":\"j1\"}","status":"success"}`,
@@ -60,6 +78,9 @@ func TestCompact_CodexExecOutputEnvelope(t *testing.T) {
 			call := cxCall("t1", "c1")
 			if tt.tool != "" {
 				call = strings.Replace(call, `"name":"exec_command"`, `"name":"`+tt.tool+`"`, 1)
+			}
+			if tt.namespace != "" {
+				call = strings.Replace(call, `"call_id":`, `"namespace":"`+tt.namespace+`","call_id":`, 1)
 			}
 			input := cxJoin(
 				`{"timestamp":"t0","type":"session_meta","payload":{"id":"s1"}}`,

@@ -76,6 +76,7 @@ type codexPayload struct {
 	Input     string          `json:"input"`
 	CallID    string          `json:"call_id"`
 	Output    string          `json:"output"`
+	Namespace string          `json:"namespace"`
 }
 
 // codexCall accumulates the items of one model call. Its usage arrives with
@@ -99,6 +100,7 @@ type codexToolSlot struct {
 	block      map[string]json.RawMessage
 	outputType string
 	name       string
+	namespace  string
 }
 
 type codexConverter struct {
@@ -242,7 +244,7 @@ func (c *codexConverter) responseItem(cl codexLine) {
 	case codexTypeFunctionCallOutput, codexTypeCustomToolCallOutput:
 		if slot, ok := c.tools[callID]; ok && slot.outputType == typ {
 			entry := toolResultEntry{output: codexToolOutputText(cl.Payload, typ), agentID: c.subagents[callID]}
-			if typ == codexTypeFunctionCallOutput && !isCodexMCPTool(slot.name) {
+			if typ == codexTypeFunctionCallOutput && isCodexBuiltinTool(slot.name, slot.namespace) {
 				unwrapCodexExecOutput(&entry)
 			}
 			slot.block["result"] = buildToolResult(entry)
@@ -291,7 +293,7 @@ func (c *codexConverter) toolCall(ts string, p codexPayload, block map[string]js
 	call := c.openCall(ts)
 	call.tools = append(call.tools, block)
 	if p.CallID != "" {
-		c.tools[p.CallID] = codexToolSlot{call: call, block: block, outputType: outputType, name: p.Name}
+		c.tools[p.CallID] = codexToolSlot{call: call, block: block, outputType: outputType, name: p.Name, namespace: p.Namespace}
 	}
 }
 
@@ -496,11 +498,14 @@ func codexToolUseBlock(p codexPayload) map[string]json.RawMessage {
 	return block
 }
 
-// isCodexMCPTool reports whether name is an MCP tool, which Codex names
-// "server__tool" (newer versions "mcp__server__tool"). MCP tools return their
-// own schemas, so their output is never read as a Codex exec envelope.
-func isCodexMCPTool(name string) bool {
-	return strings.Contains(name, "__")
+// isCodexBuiltinTool reports whether a function call is one of the agent's
+// own tools rather than an MCP or other namespaced tool. Codex names MCP tools
+// "server__tool" (later "mcp__server__tool"), and newer versions put the
+// server in a separate namespace ("mcp__server") next to a bare name. Those
+// tools return their own schemas, so their output is never read as a Codex
+// exec envelope.
+func isCodexBuiltinTool(name, namespace string) bool {
+	return namespace == "" && !strings.Contains(name, "__")
 }
 
 // unwrapCodexExecOutput reads the exit code out of the JSON envelope older
@@ -508,8 +513,9 @@ func isCodexMCPTool(name string) bool {
 // every built-in tool's result) write as a function_call_output:
 // {"output":"...","metadata":{"exit_code":N,...}}. The envelope's output
 // becomes the result's output, and a non-zero exit code marks the call failed.
-// Only an object whose keys are exactly output and metadata, with an integer
-// metadata.exit_code, is unwrapped; any other output is left as it is.
+// Only an object whose keys are exactly "output" (a string) and "metadata"
+// (an object with an integer "exit_code"), matched case-sensitively, is
+// unwrapped; any other output is left as it is.
 func unwrapCodexExecOutput(entry *toolResultEntry) {
 	if !strings.HasPrefix(entry.output, "{") {
 		return
@@ -518,19 +524,17 @@ func unwrapCodexExecOutput(entry *toolResultEntry) {
 	if json.Unmarshal([]byte(entry.output), &fields) != nil || len(fields) != 2 {
 		return
 	}
-	var envelope struct {
-		Output   *string `json:"output"`
-		Metadata *struct {
-			ExitCode *int `json:"exit_code"`
-		} `json:"metadata"`
-	}
-	if json.Unmarshal([]byte(entry.output), &envelope) != nil ||
-		envelope.Output == nil || envelope.Metadata == nil || envelope.Metadata.ExitCode == nil {
+	var output *string
+	var metadata map[string]json.RawMessage
+	var exitCode *int
+	if json.Unmarshal(fields["output"], &output) != nil || output == nil ||
+		json.Unmarshal(fields["metadata"], &metadata) != nil ||
+		json.Unmarshal(metadata["exit_code"], &exitCode) != nil || exitCode == nil {
 		return
 	}
-	entry.output = *envelope.Output
-	entry.exitCode = envelope.Metadata.ExitCode
-	entry.isError = *envelope.Metadata.ExitCode != 0
+	entry.output = *output
+	entry.exitCode = exitCode
+	entry.isError = *exitCode != 0
 }
 
 // codexToolOutputText extracts the output text from a tool call output payload.
