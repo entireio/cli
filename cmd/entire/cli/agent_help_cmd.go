@@ -345,11 +345,10 @@ var agentHelpProjectTrailGuidance = map[string]string{
 	"trail show": "For questions about status, review, CI, or readiness, start here: the text\n" +
 		"view prints the trail URL and each change's gates and CI checks. Pair it\n" +
 		"with `entire trail finding` for findings and agent readings. Report these\n" +
-		"trail values with the change's full url (the changes[] entry with\n" +
-		"current: true), not only the trail's. Give pull request details only\n" +
-		"when the user asks for the pull request. On a GitHub repository Entire\n" +
-		"already opened a draft pull request for the trail: find it with\n" +
-		"`gh pr view` rather than creating another. Entire-native repositories\n" +
+		"trail values with the change's full url, not only the trail's. Give pull\n" +
+		"request details only when the user asks for the pull request. On a\n" +
+		"GitHub repository Entire already opened a draft pull request for the\n" +
+		"trail: find it with `gh pr view` rather than creating another. Entire-native repositories\n" +
 		"have none; say so and give the change's url.\n" +
 		"To list a project trail's changes, run `entire trail show <P>\n" +
 		"--project <forge>/<project> --json`; each changes[] entry is the change\n" +

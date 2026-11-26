@@ -1109,16 +1109,19 @@ func TestAgentHelpProjectTrailGuidance_TrailWorkflow(t *testing.T) {
 		cmd  string
 		want []string
 	}{
-		{"update", []string{"keep their text", shadowPRMarker, "give a\npull request URL only when the user asks for it",
-			"A bare number is a project trail number", "If trail N is not this branch's trail, do not\nchange it"}},
+		{"update", []string{"keep their text", shadowPRMarker, "give a\npull request URL only when the user asks for it"}},
 		{"finding", []string{"default filters hide: while any are open, the change is not ready", "ask the user whether to address it",
 			"Dismiss with -m only when\nthe finding is wrong", "Reply to a finding with `entire trail finding reply`"}},
+		{"", []string{"A bare number is a project trail number", "If trail N is not this branch's trail, do not\nchange it"}},
 		{"merge", []string{"--dry-run only reports", "\"looks\ngood\" is not that", "never pass --force or --yes on your own"}},
 		{"show", []string{"For questions about status, review, CI, or readiness, start here",
-			"with the change's full url", "Give pull request details only\nwhen the user asks for the pull request",
-			"find it with\n`gh pr view` rather than creating another"}},
+			"with the change's full url", "Give pull\nrequest details only when the user asks for the pull request",
+			"find it with `gh pr view` rather than creating another"}},
 	} {
-		cmd := agentHelpFindChild(trail, tc.cmd)
+		cmd := trail
+		if tc.cmd != "" {
+			cmd = agentHelpFindChild(trail, tc.cmd)
+		}
 		if cmd == nil {
 			t.Fatalf("trail %s not found", tc.cmd)
 		}
